@@ -2030,6 +2030,10 @@ components:
         container_functions:
           type: array
           items: { $ref: "#/components/schemas/ContainerFunction" }
+        annotations:
+          type: object
+          description: 配置节点注释（FR-CFG-007，annotate 语句；键为语句路径，如 "system hostname"）
+          additionalProperties: { type: string }
 
     CommitResult:
       type: object

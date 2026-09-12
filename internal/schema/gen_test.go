@@ -81,6 +81,13 @@ func TestConfigBranchesMatchModelFields(t *testing.T) {
 	}
 
 	// 模型 → 命令树：model.Config 每个字段都必须有承载分支
+	// annotations 例外：注释由配置模式固定命令 annotate 承载（决策 #27），非语句分支
+	if _, ok := fields["annotations"]; ok {
+		if _, err := Find(ConfigRoot(), "annotate"); err != nil {
+			t.Errorf("model.Config 字段 annotations 应由 annotate 命令承载，但命令缺失")
+		}
+		delete(fields, "annotations")
+	}
 	for f := range fields {
 		branch, ok := configBranchForModelField[f]
 		if !ok {
