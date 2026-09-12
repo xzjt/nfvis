@@ -100,11 +100,11 @@ func repl(client *cliclient.Client) {
 			continue
 		}
 		if line == "?" || strings.HasSuffix(line, " ?") {
-			printCandidates(line)
+			printCandidates(client, line)
 			continue
 		}
 		if strings.HasSuffix(line, "\t") {
-			line = completeLine(strings.TrimSuffix(line, "\t"))
+			line = completeLine(client, strings.TrimSuffix(line, "\t"))
 			// 重新提示已补全的行（行级 REPL 不做光标定位）
 			fmt.Println(line)
 		}
@@ -148,12 +148,23 @@ func rootForContext(tokens []string) *schema.Node {
 	return schema.OperRoot()
 }
 
+// dynCandidates 动态候选：实时向 nfvisd 查询，失败退化为 nil（§5.3）。
+func dynCandidates(client *cliclient.Client) func(string) []string {
+	return func(kind string) []string {
+		toks, err := client.DynamicCandidates(kind)
+		if err != nil {
+			return nil
+		}
+		return toks
+	}
+}
+
 // printCandidates 处理 ?：列出当前位置候选（FR-CLI-001/002）。
-func printCandidates(line string) {
+func printCandidates(client *cliclient.Client, line string) {
 	line = strings.TrimSuffix(line, "?")
 	tokens, partial := completionTokens(line)
 	root := rootForContext(tokens)
-	cs := schema.Candidates(root, tokens, partial, nil) // 动态候选退化为占位提示（§5.3）
+	cs := schema.Candidates(root, tokens, partial, dynCandidates(client))
 	if len(cs) == 0 {
 		fmt.Println("%% 无可用候选")
 		return
@@ -171,10 +182,10 @@ func printCandidates(line string) {
 }
 
 // completeLine 处理 Tab：唯一匹配补全，多匹配补到公共前缀（FR-CLI-003/§5.2）。
-func completeLine(line string) string {
+func completeLine(client *cliclient.Client, line string) string {
 	tokens, partial := completionTokens(line)
 	root := rootForContext(tokens)
-	cs := schema.Candidates(root, tokens, partial, nil)
+	cs := schema.Candidates(root, tokens, partial, dynCandidates(client))
 	if len(cs) == 0 {
 		return line
 	}

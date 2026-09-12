@@ -76,6 +76,8 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 
 	// CLI 执行通道（cli_bridge）：逐命令权限在执行器内按 schema 节点判定
 	mux.Handle("POST "+APIPrefix+"/cli/execute", s.auth(s.handleCLIExecute, schema.ClassReadOnly, "cli"))
+	mux.Handle("GET "+APIPrefix+"/cli/candidates", s.auth(s.handleCLICandidates, schema.ClassReadOnly, "cli"))
+	mux.Handle("GET "+APIPrefix+"/audit-logs", s.auth(s.handleAuditLogs, schema.ClassReadOnly, "show log audit"))
 
 	// 资源 handlers 第一组（GET = show 等级 R；写 = configure 等级 S；FR-API-003 映射）
 	mux.Handle("GET "+APIPrefix+"/system", s.auth(s.handleGetSystem, schema.ClassReadOnly, "show system"))
