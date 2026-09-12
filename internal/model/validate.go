@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -62,6 +63,7 @@ type validator struct {
 	ctNames    map[string]bool
 	ctVnics    map[string]bool // "ct/vnic"
 	hpSizes    map[string]bool
+	macOwner   map[string]string // MAC -> 首个占用者（③：跨全部 VNF 的 MAC 命名空间）
 }
 
 func (v *validator) errf(path, format string, args ...any) {
@@ -184,6 +186,7 @@ func (v *validator) collect(c Config) {
 			v.ctVnics[ct.Name+"/"+nic.Name] = true
 		}
 	}
+	v.macOwner = map[string]string{}
 	v.hpSizes = map[string]bool{}
 	if c.ResourcePools != nil {
 		for _, hp := range c.ResourcePools.Hugepages {
@@ -344,6 +347,13 @@ func (v *validator) checkVirtualSwitches(c Config) {
 			}
 			if pt.NativeVlan != 0 && !checkVlan(pt.NativeVlan) {
 				v.errf(pp+".native", "vlan %d 必须在 1-4094", pt.NativeVlan)
+			}
+			// FR-CFG-011④：端口 VLAN 配置一致
+			if pt.NativeVlan != 0 && slices.Contains(pt.TrunkVlans, pt.NativeVlan) {
+				v.errf(pp+".native", "native VLAN %d 与 trunk 允许列表冲突（FR-CFG-011④）", pt.NativeVlan)
+			}
+			if s.VlanAccess != 0 && len(pt.TrunkVlans) > 0 && !slices.Contains(pt.TrunkVlans, s.VlanAccess) {
+				v.errf(pp, "交换机 access VLAN %d 不在端口 trunk 允许列表内（FR-CFG-011④）", s.VlanAccess)
 			}
 			v.checkACLRef(pp+".acl_in", pt.AclIn)
 			v.checkACLRef(pp+".acl_out", pt.AclOut)
@@ -672,7 +682,6 @@ func (v *validator) checkVMFunctions(c Config) {
 			}
 		}
 		dupCheck(v, m.Interfaces, p+".interfaces", func(n VnfInterface) string { return n.Name }, "vNIC")
-		macs := map[string]bool{}
 		for _, nic := range m.Interfaces {
 			np := fmt.Sprintf("%s.interfaces[%s]", p, nic.Name)
 			if !v.checkName(np, nic.Name, "vNIC") {
@@ -699,10 +708,11 @@ func (v *validator) checkVMFunctions(c Config) {
 			if nic.MAC != "" {
 				if !checkMAC(nic.MAC) {
 					v.errf(np+".mac", "MAC %q 格式不合法", nic.MAC)
-				} else if macs[nic.MAC] {
-					v.errf(np+".mac", "MAC %s 重复（FR-CFG-011③）", nic.MAC)
+				} else if owner, taken := v.macOwner[nic.MAC]; taken {
+					v.errf(np+".mac", "MAC %s 重复（FR-CFG-011③），已由 %s 占用", nic.MAC, owner)
+				} else {
+					v.macOwner[nic.MAC] = m.Name + "/" + nic.Name
 				}
-				macs[nic.MAC] = true
 			}
 			if nic.Vlan != 0 && !checkVlan(nic.Vlan) {
 				v.errf(np+".vlan", "vlan %d 必须在 1-4094", nic.Vlan)
@@ -734,6 +744,15 @@ func (v *validator) checkContainerFunctions(c Config) {
 				v.errf(np+".type", "容器 vNIC type 必须为 memif（FR-NET-022）")
 			}
 			v.checkVSwitchRef(np+".virtual_switch", nic.VirtualSwitch)
+			if nic.MAC != "" {
+				if !checkMAC(nic.MAC) {
+					v.errf(np+".mac", "MAC %q 格式不合法", nic.MAC)
+				} else if owner, taken := v.macOwner[nic.MAC]; taken {
+					v.errf(np+".mac", "MAC %s 重复（FR-CFG-011③），已由 %s 占用", nic.MAC, owner)
+				} else {
+					v.macOwner[nic.MAC] = ct.Name + "/" + nic.Name
+				}
+			}
 		}
 	}
 }

@@ -78,13 +78,32 @@ func (e *ValidationError) Error() string {
 	return fmt.Sprintf("commit 校验失败（FR-CFG-002），共 %d 条", len(e.Errors))
 }
 
+// ImageInfo 镜像仓库元数据子集（FR-CFG-011⑤ 使用；完整仓库管理属 M4）。
+type ImageInfo struct {
+	Name string
+	Type string // vm-image | container-image
+}
+
+// ImageResolver 镜像仓库查询接口（规则⑤：镜像存在性与类型匹配）。
+type ImageResolver interface {
+	Lookup(name string) (ImageInfo, bool)
+}
+
+// TopologyReader 物理 NIC NUMA 拓扑查询接口（规则⑩性能警告使用；
+// M3 接入 govpp 后由 state 模块提供真实实现）。
+type TopologyReader interface {
+	InterfaceNUMA(name string) (numa int, ok bool)
+}
+
 // Options 引擎可选项（零值取默认）。
 type Options struct {
-	LockIdleTTL time.Duration                            // candidate 空闲超时，默认 10m
-	Now         func() time.Time                         // 时钟注入（测试）
-	AfterFunc   func(d time.Duration, fn func()) func()  // 定时器注入（测试），返回 stop
-	OnEvent     func(Event)                              // 事件回调（在引擎锁内调用，须快速返回）
-	Validate    func(model.Config) []model.ValidateError // commit 校验器，默认 model.Validate
+	LockIdleTTL    time.Duration                            // candidate 空闲超时，默认 10m
+	Now            func() time.Time                         // 时钟注入（测试）
+	AfterFunc      func(d time.Duration, fn func()) func()  // 定时器注入（测试），返回 stop
+	OnEvent        func(Event)                              // 事件回调（在引擎锁内调用，须快速返回）
+	Validate       func(model.Config) []model.ValidateError // commit 校验器，默认 model.Validate + CheckResources
+	ImageResolver  ImageResolver                            // 镜像仓库（nil = 跳过规则⑤）
+	TopologyReader TopologyReader                           // NUMA 拓扑（nil = 跳过规则⑩）
 }
 
 // Engine 配置事务引擎。内部串行（单写多读，骨架 §4）。
@@ -98,6 +117,8 @@ type Engine struct {
 	afterFunc   func(d time.Duration, fn func()) func()
 	onEvent     func(Event)
 	validate    func(model.Config) []model.ValidateError
+	images      ImageResolver
+	topology    TopologyReader
 
 	confirmStop func() // 在途 confirmed 定时器的 stop
 
@@ -131,8 +152,13 @@ func NewEngine(store *Store, applier orchestrator.Applier, opts Options) (*Engin
 		}
 	}
 	if e.validate == nil {
-		e.validate = model.Validate
+		// 默认校验链：结构/语义校验（model.Validate）+ 资源账本配额（FR-CMP-002）
+		e.validate = func(c model.Config) []model.ValidateError {
+			return append(model.Validate(c), model.CheckResources(c)...)
+		}
 	}
+	e.images = opts.ImageResolver
+	e.topology = opts.TopologyReader
 
 	rev, _, err := store.LatestRevision()
 	if err != nil {
@@ -341,7 +367,8 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 	}
 
 	// FR-CFG-002：schema + 语义校验，失败逐条列出
-	if verrs := e.validate(*e.candidate); len(verrs) > 0 {
+	verrs := e.validate(*e.candidate)
+	if len(verrs) > 0 {
 		e.store.AppendAudit(AuditEntry{
 			Time: e.now(), User: sess.User, Action: "config.commit",
 			Detail: formatValidateErrors(verrs), Result: "failure",
@@ -362,6 +389,18 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 		return res, ErrConfirmRequired
 	}
 
+	// FR-CFG-011⑤：镜像存在性与类型匹配（依赖仓库，注入接口）
+	if e.images != nil {
+		verrs = append(verrs, e.checkImages(&newCfg)...)
+		if len(verrs) > 0 {
+			e.store.AppendAudit(AuditEntry{
+				Time: e.now(), User: sess.User, Action: "config.commit",
+				Detail: formatValidateErrors(verrs), Result: "failure",
+			})
+			return res, &ValidationError{Errors: verrs}
+		}
+	}
+
 	// 生效提示（FR-SYS-009 / FR-SYS-002）
 	if mgmtChanged {
 		res.Warnings = append(res.Warnings, "警告: 管理口地址/网关已变更，注意连通性（FR-CFG-012）")
@@ -372,6 +411,9 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 	if !configEq(committed.ResourcePools, newCfg.ResourcePools) {
 		res.Warnings = append(res.Warnings, "警告: resource-pools 变更需 reboot 生效（FR-SYS-002）")
 	}
+	res.Warnings = append(res.Warnings, e.numaWarnings(committed, newCfg)...)
+
+	// FR-CFG-011⑤：镜像检查需要 committed 之后的候选配置
 
 	// 下发底座（失败逆序补偿，全有或全无，骨架 §3.3）
 	if err := e.applier.Apply(ctx, committed, newCfg); err != nil {
@@ -655,6 +697,71 @@ func (e *Engine) committedLocked() (model.Config, error) {
 		return model.Config{}, fmt.Errorf("解析 committed 配置: %w", err)
 	}
 	return cfg, nil
+}
+
+// checkImages FR-CFG-011⑤：镜像必须在仓库中且类型与 VNF 形态匹配。
+func (e *Engine) checkImages(cfg *model.Config) []model.ValidateError {
+	var errs []model.ValidateError
+	check := func(vnf, image, want string, path string) {
+		info, ok := e.images.Lookup(image)
+		if !ok {
+			errs = append(errs, model.ValidateError{Path: path, Message: fmt.Sprintf("仓库中不存在镜像 %q", image)})
+			return
+		}
+		if info.Type != want {
+			errs = append(errs, model.ValidateError{Path: path,
+				Message: fmt.Sprintf("镜像类型不匹配（FR-CFG-011⑤）：需要 %s，实际 %s", want, info.Type)})
+		}
+	}
+	for _, vm := range cfg.VirtualMachineFunctions {
+		if vm.Image != "" {
+			check(vm.Name, vm.Image, "vm-image", fmt.Sprintf("virtual-machine-functions[%s].image", vm.Name))
+		}
+	}
+	for _, ct := range cfg.ContainerFunctions {
+		if ct.Image != "" {
+			check(ct.Name, ct.Image, "container-image", fmt.Sprintf("container-functions[%s].image", ct.Name))
+		}
+	}
+	return errs
+}
+
+// numaWarnings FR-CFG-011⑩：vNIC 物理 NIC 与 VM 内存 NUMA 不一致时给性能警告。
+func (e *Engine) numaWarnings(old, new model.Config) []string {
+	if e.topology == nil {
+		return nil
+	}
+	// 以 candidate 中交换机端口的第一物理口近似 vNIC 的落点（M3 精确化）
+	ifaceByVM := map[string]string{}
+	for _, vs := range new.VirtualSwitches {
+		for _, p := range vs.Ports {
+			if p.Interface != "" {
+				ifaceByVM[vs.Name] = p.Interface
+			}
+		}
+	}
+	var out []string
+	for _, vm := range new.VirtualMachineFunctions {
+		if vm.Memory.NumaNode == nil {
+			continue
+		}
+		for _, nic := range vm.Interfaces {
+			iface := ""
+			if nic.Type == "sriov-vf" && nic.Sriov != nil {
+				iface = nic.Sriov.PhysicalInterface
+			} else {
+				iface = ifaceByVM[nic.VirtualSwitch]
+			}
+			if iface == "" {
+				continue
+			}
+			if numa, ok := e.topology.InterfaceNUMA(iface); ok && numa != *vm.Memory.NumaNode {
+				out = append(out, fmt.Sprintf("警告: VM %s 的 vNIC %s 物理 NIC %s 位于 NUMA %d，与内存 NUMA %d 不一致，跨 NUMA 访存将降低性能（FR-CFG-011⑩）",
+					vm.Name, nic.Name, iface, numa, *vm.Memory.NumaNode))
+			}
+		}
+	}
+	return out
 }
 
 func (e *Engine) emit(typ, msg string) {

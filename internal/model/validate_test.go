@@ -161,6 +161,25 @@ func TestValidateFRConfig011Rules(t *testing.T) {
 		VnfInterface{Name: "eth1", Type: "vhost-user", VirtualSwitch: "vs-app", MAC: "52:54:00:aa:00:01"})
 	mustErrContaining(t, Validate(c2), "eth1", "MAC")
 
+	// ③ 跨 VNF MAC 不得重复（FR-CFG-011③：全部 VNF 共享命名空间）
+	c2b := validBase()
+	c2b.ContainerFunctions = append(c2b.ContainerFunctions, ContainerFunction{
+		Name: "sbc-ct2", Image: "alpine-ct",
+		Interfaces: []VnfInterface{{Name: "eth0", Type: "memif", VirtualSwitch: "vs-app", MAC: "52:54:00:aa:00:01"}},
+	})
+	mustErrContaining(t, Validate(c2b), "sbc-ct2", "重复")
+
+	// ④ native VLAN 与 trunk 允许列表冲突（FR-CFG-011④）
+	c2c := validBase()
+	c2c.VirtualSwitches[0].Ports[0].TrunkVlans = []int{100, 200}
+	c2c.VirtualSwitches[0].Ports[0].NativeVlan = 200
+	mustErrContaining(t, Validate(c2c), "native", "冲突")
+
+	// ④ 交换机 access VLAN 须在 trunk 允许列表内（FR-CFG-011④）
+	c2d := validBase()
+	c2d.VirtualSwitches[0].Ports[0].TrunkVlans = []int{200}
+	mustErrContaining(t, Validate(c2d), "ports[1]", "trunk 允许列表")
+
 	// ⑧ dpdk dev 覆盖必须是 DPDK 物理口（FR-CFG-011⑧）
 	c3 := validBase()
 	c3.Vpp.DPDK.PerDev = []VppDevOverride{{Interface: "bond0", RxQueues: 2}}

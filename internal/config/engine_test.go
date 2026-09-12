@@ -652,3 +652,133 @@ func TestEngineMergeCandidate(t *testing.T) {
 		t.Fatalf("merge 不应影响既有配置")
 	}
 }
+
+// ---------- FR-CFG-011⑤⑩：依赖外部状态的 commit 校验 ----------
+
+type mockImages map[string]ImageInfo
+
+func (m mockImages) Lookup(name string) (ImageInfo, bool) {
+	i, ok := m[name]
+	return i, ok
+}
+
+type mockTopo map[string]int
+
+func (m mockTopo) InterfaceNUMA(name string) (int, bool) {
+	v, ok := m[name]
+	return v, ok
+}
+
+// newEngineWithExternals 带镜像仓库与 NUMA 拓扑注入的引擎（预置基线 rev1）。
+func newEngineWithExternals(t *testing.T, images ImageResolver, topo TopologyReader) (*Engine, *Store, *fakeClock) {
+	t.Helper()
+	store := openTestStore(t)
+	clock := newFakeClock()
+	if _, err := store.AppendRevision(mustJSON(baseCommitted()), clock.Now(), "初始基线"); err != nil {
+		t.Fatalf("预置基线: %v", err)
+	}
+	e, err := NewEngine(store, &mockApplier{}, Options{
+		Now:            clock.Now,
+		AfterFunc:      newTimerSink().after,
+		ImageResolver:  images,
+		TopologyReader: topo,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	return e, store, clock
+}
+
+// poolsFor 无 VPP 的资源池（给 VM 分配用）。
+func poolsFor() *model.ResourcePool {
+	return &model.ResourcePool{
+		Hugepages: []model.HPool{{PageSize: "1G", Count: 32}},
+		CPU:       &model.CPUSetup{IsolatedCores: []int{4, 5, 6, 7}},
+	}
+}
+
+func TestEngineImageTypeRule(t *testing.T) {
+	images := mockImages{
+		"ubuntu22-vm": {Name: "ubuntu22-vm", Type: "vm-image"},
+		"alpine-ct":   {Name: "alpine-ct", Type: "container-image"},
+	}
+	e, _, _ := newEngineWithExternals(t, images, nil)
+	sess := Session{User: "admin", Source: "ssh"}
+	if err := e.Edit(sess); err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+
+	// ⑤：VM 引用 container-image 类型镜像 → 类型不匹配
+	cfg := baseCommitted()
+	cfg.ResourcePools = poolsFor()
+	cfg.VirtualMachineFunctions = []model.VMFunction{{
+		Name: "fw-vm", Image: "alpine-ct",
+		VCPU:   model.VMCpu{Count: 2},
+		Memory: model.VMMemory{SizeMB: 8192, HugepageSize: "1G"},
+	}}
+	if err := e.UpdateCandidate(sess, cfg); err != nil {
+		t.Fatalf("UpdateCandidate: %v", err)
+	}
+	_, err := e.Commit(context.Background(), sess, CommitOpts{})
+	var ve *ValidationError
+	if !errors.As(err, &ve) || !strings.Contains(fmt.Sprint(ve.Errors), "vm-image") {
+		t.Fatalf("应报镜像类型不匹配（FR-CFG-011⑤）: %v", err)
+	}
+
+	// 未知镜像 → 不存在
+	cfg.VirtualMachineFunctions[0].Image = "ghost"
+	_ = e.UpdateCandidate(sess, cfg)
+	_, err = e.Commit(context.Background(), sess, CommitOpts{})
+	if !errors.As(err, &ve) || !strings.Contains(fmt.Sprint(ve.Errors), "不存在") {
+		t.Fatalf("未知镜像应报错: %v", err)
+	}
+
+	// 正确类型 → 通过（连账本一起校验）
+	cfg.VirtualMachineFunctions[0].Image = "ubuntu22-vm"
+	_ = e.UpdateCandidate(sess, cfg)
+	if _, err := e.Commit(context.Background(), sess, CommitOpts{}); err != nil {
+		t.Fatalf("vm-image 应放行: %v", err)
+	}
+}
+
+func TestEngineNumaWarning(t *testing.T) {
+	topo := mockTopo{"ens2f0": 1}
+	e, _, _ := newEngineWithExternals(t, nil, topo)
+	sess := Session{User: "admin", Source: "console"}
+	if err := e.Edit(sess); err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+
+	// ⑩：vNIC 落点物理口 NUMA 1，VM 内存 NUMA 0 → 性能警告
+	cfg := baseCommitted()
+	cfg.ResourcePools = poolsFor()
+	cfg.VirtualMachineFunctions = []model.VMFunction{{
+		Name: "fw-vm", Image: "ubuntu22-vm",
+		VCPU:       model.VMCpu{Count: 2},
+		Memory:     model.VMMemory{SizeMB: 8192, HugepageSize: "1G", NumaNode: intPtr(0)},
+		Interfaces: []model.VnfInterface{{Name: "eth0", Type: "vhost-user", VirtualSwitch: "vs-app"}},
+	}}
+	if err := e.UpdateCandidate(sess, cfg); err != nil {
+		t.Fatalf("UpdateCandidate: %v", err)
+	}
+	res, err := e.Commit(context.Background(), sess, CommitOpts{})
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if !warningsContain(res.Warnings, "FR-CFG-011⑩") {
+		t.Fatalf("跨 NUMA 应给性能警告: %+v", res.Warnings)
+	}
+
+	// 内存 NUMA 调整为 1（与物理口一致）→ 不再警告
+	cfg.VirtualMachineFunctions[0].Memory.NumaNode = intPtr(1)
+	_ = e.UpdateCandidate(sess, cfg)
+	res2, err := e.Commit(context.Background(), sess, CommitOpts{})
+	if err != nil {
+		t.Fatalf("Commit2: %v", err)
+	}
+	if warningsContain(res2.Warnings, "FR-CFG-011⑩") {
+		t.Fatalf("NUMA 一致后不应警告: %+v", res2.Warnings)
+	}
+}
+
+func intPtr(n int) *int { return &n }

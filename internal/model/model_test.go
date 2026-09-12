@@ -53,7 +53,7 @@ func TestConfigJSONFieldNames(t *testing.T) {
 		VirtualMachineFunctions: []VMFunction{{
 			Name: "fw-vm", Image: "ubuntu22-vm",
 			VCPU:   VMCpu{Count: 4, Pin: boolPtr(true)},
-			Memory: VMMemory{SizeMB: 8192, HugepageSize: "1G", NumaNode: 0, Backing: "hugepage"},
+			Memory: VMMemory{SizeMB: 8192, HugepageSize: "1G", NumaNode: intPtr(0), Backing: "hugepage"},
 			Disks:  []VMDisk{{Name: "data1", SizeGB: 100}},
 			Interfaces: []VnfInterface{
 				{Name: "eth0", Type: "vhost-user", VirtualSwitch: "vs-app", MAC: "52:54:00:aa:00:01", Vlan: 100},
@@ -120,3 +120,5 @@ func TestConfigJSONFieldNames(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+func intPtr(n int) *int { return &n }

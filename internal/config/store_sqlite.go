@@ -64,8 +64,8 @@ func OpenStore(path string) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) migrate() error {
-	const schema = `
+// baseSchema 初始表结构（v0→1）。
+const baseSchema = `
 CREATE TABLE IF NOT EXISTS config_revisions (
     rev          INTEGER PRIMARY KEY AUTOINCREMENT,
     committed_at TEXT NOT NULL,
@@ -92,8 +92,37 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail   TEXT NOT NULL,
     result   TEXT NOT NULL
 );`
-	if _, err := s.db.Exec(schema); err != nil {
-		return fmt.Errorf("初始化表结构: %w", err)
+
+func (s *Store) migrate() error {
+	v, err := userVersion(s.db)
+	if err != nil {
+		return err
+	}
+	if v > CurrentSchemaVersion {
+		// 版本锁定语义（规格书 §2.3.4）：不认识的 schema 拒绝启动
+		return fmt.Errorf("存储 schema 版本 %d 高于当前支持版本 %d", v, CurrentSchemaVersion)
+	}
+	if v == 0 {
+		if _, err := s.db.Exec(baseSchema); err != nil {
+			return fmt.Errorf("初始化表结构: %w", err)
+		}
+		v = 1
+		if err := setVersion(s.db, v); err != nil {
+			return err
+		}
+	}
+	for v < CurrentSchemaVersion {
+		step := schemaMigrations[v]
+		if step == nil {
+			return fmt.Errorf("缺少存储迁移步骤 %d→%d", v, v+1)
+		}
+		if err := step(s.db); err != nil {
+			return fmt.Errorf("存储迁移 %d→%d: %w", v, v+1, err)
+		}
+		v++
+		if err := setVersion(s.db, v); err != nil {
+			return err
+		}
 	}
 	return nil
 }

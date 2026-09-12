@@ -317,8 +317,8 @@ type VMCpu struct {
 type VMMemory struct {
 	SizeMB       int    `json:"size_mb"`
 	HugepageSize string `json:"hugepage_size,omitempty"` // 2M|1G，缺省取资源池主池
-	NumaNode     int    `json:"numa_node,omitempty"`
-	Backing      string `json:"backing,omitempty"` // hugepage(默认)|normal；normal 禁止 vhost-user（FR-CMP-019）
+	NumaNode     *int   `json:"numa_node,omitempty"`     // 可选；未声明与 node 0 需可区分（账本 NUMA 亲和分配）
+	Backing      string `json:"backing,omitempty"`       // hugepage(默认)|normal；normal 禁止 vhost-user（FR-CMP-019）
 }
 
 type VMDisk struct {
