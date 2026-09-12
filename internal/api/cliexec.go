@@ -57,6 +57,8 @@ type cliExecutor struct {
 	authz  authorizer
 	mu     sync.Mutex
 	sess   map[string]*cliSession
+	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
+	structured any
 }
 
 type cliSession struct {
@@ -88,7 +90,16 @@ func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
 		s = &cliSession{Mode: "oper"}
 		x.sess[key] = s
 	}
-	out := x.dispatch(user, class, source, s, strings.Fields(strings.TrimSpace(line)))
+
+	cmd, pipes, perr := splitPipes(strings.TrimSpace(line))
+	x.structured = nil
+	var out string
+	if perr != nil {
+		out = "%% " + perr.Error() + "\n"
+	} else {
+		out = x.dispatch(user, class, source, s, strings.Fields(cmd))
+		out = x.applyPipes(out, pipes)
+	}
 	cur := x.sess[key]
 	if cur == nil {
 		cur = &cliSession{Mode: "oper"}
@@ -117,6 +128,10 @@ func (x *cliExecutor) execOper(user, class, source string, s *cliSession, t []st
 	case "configure":
 		if !x.allow(class, mustNode(schema.OperRoot(), "configure"), "configure") {
 			return "%% 无权限进入配置模式（需 super-user）\n"
+		}
+		// FR-CFG-001：进入配置模式即取得 candidate（副本），被占用时报错
+		if err := x.engine.Edit(config.Session{User: user, Source: source}); err != nil {
+			return "%% " + err.Error() + "\n"
 		}
 		s.Mode = "config"
 		s.Path = nil
@@ -172,7 +187,9 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 			}
 			cfg = cand
 		}
-		out := RenderConfigJSON(toJSONTree(cfg))
+		tree := toJSONTree(cfg)
+		x.structured = tree
+		out := RenderConfigJSON(tree)
 		if out == "" {
 			return "（配置为空）\n"
 		}
@@ -300,6 +317,7 @@ func (x *cliExecutor) cfgShow(user, source string, s *cliSession, args []string)
 	if err != nil {
 		return "%% " + err.Error() + "\n"
 	}
+	x.structured = sub
 	subMap, ok := sub.(map[string]any)
 	if !ok {
 		return scalarStringOf(sub) + "\n"
