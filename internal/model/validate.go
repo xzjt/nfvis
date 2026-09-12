@@ -234,6 +234,45 @@ func (v *validator) checkSystem(c Config) {
 			v.errf("system.syslog.level", "syslog level 必须为 debug|info|warn|error")
 		}
 	}
+	v.checkSystemLogin(s)
+}
+
+// checkSystemLogin 本地 AAA 配置校验：用户名语法、class 引用存在（预置类或
+// 自定义定义）、策略数值合理；口令哈希格式由 aaa 写入侧保证。
+func (v *validator) checkSystemLogin(s *SystemConfig) {
+	if s.Login == nil {
+		return
+	}
+	l := s.Login
+	preset := map[string]bool{"super-user": true, "operator": true, "read-only": true}
+	defined := map[string]bool{}
+	dupCheck(v, l.Classes, "system.login.classes", func(c ClassDef) string { return c.Name }, "class")
+	for _, c := range l.Classes {
+		if v.checkName(fmt.Sprintf("system.login.classes[%s]", c.Name), c.Name, "class") {
+			defined[c.Name] = true
+		}
+	}
+	dupCheck(v, l.Users, "system.login.users", func(u LoginUserConfig) string { return u.Name }, "用户")
+	for _, u := range l.Users {
+		up := fmt.Sprintf("system.login.users[%s]", u.Name)
+		if !v.checkName(up, u.Name, "用户") {
+			continue
+		}
+		if u.Class != "" && !preset[u.Class] && !defined[u.Class] {
+			v.errf(up+".class", "class %q 不存在（预置：super-user/operator/read-only 或自定义）", u.Class)
+		}
+	}
+	if p := l.PasswordPolicy; p != nil {
+		if p.MinLength != 0 && (p.MinLength < 4 || p.MinLength > 128) {
+			v.errf("system.login.password_policy.min_length", "min-length %d 超出合理范围 4-128", p.MinLength)
+		}
+		if p.LockoutThreshold != 0 && (p.LockoutThreshold < 1 || p.LockoutThreshold > 100) {
+			v.errf("system.login.password_policy.lockout_threshold", "lockout-threshold %d 超出合理范围 1-100", p.LockoutThreshold)
+		}
+		if p.LockoutMinutes != 0 && (p.LockoutMinutes < 1 || p.LockoutMinutes > 10080) {
+			v.errf("system.login.password_policy.lockout_minutes", "lockout-minutes %d 超出合理范围 1-10080", p.LockoutMinutes)
+		}
+	}
 }
 
 func (v *validator) checkInterfaces(c Config) {

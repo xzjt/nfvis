@@ -231,3 +231,33 @@ func TestValidateL3SwitchMapping(t *testing.T) {
 	c2.Vrfs = append(c2.Vrfs, Vrf{Name: "vs-l3"})
 	mustErrContaining(t, Validate(c2), "vs-l3", "L2")
 }
+
+func TestValidateSystemLogin(t *testing.T) {
+	c := validBase()
+	c.System.Login = &SystemLogin{
+		Users: []LoginUserConfig{
+			{Name: "admin", Class: "super-user"},
+			{Name: "netop", Class: "custom-op"},
+		},
+		Classes:        []ClassDef{{Name: "custom-op", Allow: []string{"show"}}},
+		PasswordPolicy: &PasswordPolicy{MinLength: 8, LockoutThreshold: 5, LockoutMinutes: 10},
+	}
+	mustNoErr(t, Validate(c))
+
+	// 用户引用不存在的 class
+	c2 := validBase()
+	c2.System.Login = &SystemLogin{Users: []LoginUserConfig{{Name: "x", Class: "ghost"}}}
+	mustErrContaining(t, Validate(c2), "users[x].class", "ghost")
+
+	// 非法用户名 / 重复 class / 策略越界
+	c3 := validBase()
+	c3.System.Login = &SystemLogin{
+		Users:          []LoginUserConfig{{Name: "bad name"}},
+		Classes:        []ClassDef{{Name: "c1"}, {Name: "c1"}},
+		PasswordPolicy: &PasswordPolicy{MinLength: 2},
+	}
+	errs := Validate(c3)
+	mustErrContaining(t, errs, "bad name", "名称")
+	mustErrContaining(t, errs, "c1", "重复")
+	mustErrContaining(t, errs, "min_length", "范围")
+}
