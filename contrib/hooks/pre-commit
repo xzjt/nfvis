@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# NFViS pre-commit 钩子：提交前强制格式与快速校验
+# 启用：git config core.hooksPath contrib/hooks   （克隆后执行一次）
+# 跳过：NO_VERIFY=1 git commit（紧急情况，事后必须补检）
+set -e
+cd "$(git rev-parse --show-toplevel)"
+
+fail() { echo "✗ pre-commit 失败: $*" >&2; echo "  修复后重试，或 NO_VERIFY=1 git commit 跳过" >&2; exit 1; }
+
+if [ -d prototype ] && ls prototype/*.go >/dev/null 2>&1; then
+    OUT=$(cd prototype && gofmt -l .)
+    [ -z "$OUT" ] || fail "以下文件未 gofmt：$OUT （gofmt -w 修复）"
+    (cd prototype && go vet ./...) || fail "go vet"
+    (cd prototype && go test ./... >/dev/null 2>&1) || fail "go test（详情: cd prototype && go test ./...）"
+fi
+
+if grep -rn "TODO\|FIXME\|待评审\|TBD" docs/*.md >/dev/null 2>&1; then
+    fail "docs/ 中出现未决标记（TODO/待评审/TBD），请先在规格书附录 A 定稿"
+fi
+
+echo "✓ pre-commit 通过"

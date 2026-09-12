@@ -12,9 +12,9 @@ import (
 // 真实实现中补全候选来自 internal/schema（编译期共享）；原型直接用本地树。
 
 const (
-	escCUP  = "\r\x1b[K" // 回行首并清除本行
-	bell    = "\a"
-	back10  = "\x1b[D"
+	escCUP = "\r\x1b[K" // 回行首并清除本行
+	bell   = "\a"
+	back10 = "\x1b[D"
 )
 
 type Editor struct {

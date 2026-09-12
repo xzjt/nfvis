@@ -60,6 +60,15 @@ ssh root@nfvis-vm 'PROXY=http://192.168.155.1:2333 ./provision.sh'
 3. **分支模型**：`main` 保护；开发走 feature 分支 + MR 评审；MR 必须包含单元测试，`internal/schema` 与事务引擎覆盖率门槛 ≥ 70%。
 4. **决策记录**：任何偏离规格书的实现决策，先在附录 A 追加决策行并评审，再动代码。
 
+## 监控与质量门禁（四层）
+
+| 层 | 机制 | 拦截时机 | 说明 |
+|---|---|---|---|
+| 1 | `AGENTS.md` | AI/开发会话启动时 | 项目规则持久化：契约先行、FR 追溯、历史踩坑清单，任何会话自动遵守 |
+| 2 | pre-commit 钩子 | 每次提交 | `git config core.hooksPath contrib/hooks`（克隆后执行一次）；拦截未格式化/vet/测试失败/文档未决标记 |
+| 3 | CI（`.github/workflows/ci.yml`） | 每次 push/MR | 构建 + vet + 测试覆盖率 + OpenAPI 可解析 + 无未决标记；用 GitLab/Gitee 时按此语义迁移 |
+| 4 | 每日巡检（ZCode 定时任务） | 每天 09:00 | 自动 review 新提交、契约漂移检查、跑测试；机械问题直接修复提交（`chore(巡检):`），实质问题写入 `docs/reviews/` 并报告 |
+
 ## 里程碑与分工（详见工程骨架 §5）
 
 | 里程碑 | 内容 | 前置 |

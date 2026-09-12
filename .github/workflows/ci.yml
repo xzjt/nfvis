@@ -1,0 +1,23 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: 构建与测试（prototype，工程结构建立后替换为 make check）
+        run: cd prototype && go build ./... && go vet ./... && go test -cover ./...
+      - name: 契约文件校验（OpenAPI 可解析）
+        run: |
+          pip install pyyaml --quiet
+          python3 -c "
+          import yaml, io
+          d = yaml.safe_load(io.open('docs/NFViS-openapi.yaml', encoding='utf-8'))
+          assert len(d['paths']) > 0 and 'components' in d
+          print('openapi ok:', len(d['paths']), 'paths,', len(d['components']['schemas']), 'schemas')"
+      - name: 文档无未决标记
+        run: "! grep -rn '待评审\\|TBD' docs/*.md"
