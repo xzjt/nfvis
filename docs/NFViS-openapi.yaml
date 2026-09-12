@@ -1415,6 +1415,40 @@ components:
           properties:
             address: { type: string, example: "192.168.1.10/24" }
             gateway: { type: string }
+        login:
+          type: object
+          description: 本地用户与 login class（FR-SEC-002/003；口令仅存加盐 PBKDF2 哈希，附录 A #25）
+          properties:
+            users:
+              type: array
+              items:
+                type: object
+                required: [name]
+                properties:
+                  name: { type: string }
+                  password_hash:
+                    type: string
+                    format: password
+                    description: "PBKDF2-SHA256 加盐哈希，格式 pbkdf2$sha256$<iter>$<b64salt>$<b64hash>；写入仅经 API/CLI，永不回显"
+                  class: { type: string, example: super-user }
+            classes:
+              type: array
+              description: 自定义 class（命令路径 allow/deny；预置 super-user/operator/read-only 见命令树 §4）
+              items:
+                type: object
+                required: [name]
+                properties:
+                  name: { type: string }
+                  allow: { type: array, items: { type: string }, description: 允许的命令树路径前缀 }
+                  deny: { type: array, items: { type: string }, description: 拒绝的命令树路径前缀（优先于 allow） }
+            password_policy:
+              type: object
+              properties:
+                min_length: { type: integer, default: 8 }
+                complexity: { type: boolean, description: 要求至少 3/4 类字符（大写/小写/数字/特殊） }
+                expire_days: { type: integer }
+                lockout_threshold: { type: integer, default: 5, description: 连续失败锁定阈值 }
+                lockout_minutes: { type: integer, default: 10, description: 锁定时长 }
         syslog:
           type: object
           properties:

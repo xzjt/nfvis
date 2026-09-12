@@ -504,6 +504,7 @@ tap 接口 VM 接入；动态路由协议（OSPF/BGP）；VXLAN overlay；SNMP�
 | 22 | API 事务模式确认 | 写操作默认进 candidate + 显式 commit 端点；`X-NFVIS-Auto-Commit: true` 支持单请求直提（§6.3 定稿） |
 | 23 | 交付就绪检查 | 分支定名 main；干净克隆构建/测试通过；OpenAPI 引用全部自洽；文档无未决标记；开发环境（Win10+Git Bash+WSL / nfvis-vm）与初始化脚本就绪 |
 | 24 | ConfigDocument 契约补全（M1 事务引擎建模时发现） | OpenAPI ConfigDocument 补入 `vpp`（FR-SYS-008 要求纳入事务引擎可 compare/rollback）、`bonds`（FR-NET-017）、`protocols.lldp`（FR-NET-018）三个 CLI 已有但契约漏列的层级；InterfaceUpdate 补 `name`、`sriov.vf_count`（FR-NET-004）、`ingress_policy`（QoS 绑定）；ResourcePool 大页池补配置项 `count`（total/allocated/free 为 GET 运行态视图）。L3 交换机的 l3-interface/静态路由数据按附录 B 映射存于同名 Vrf 条目。login-users 与 health-thresholds 层级随 M2 AAA/系统模块补入 |
+| 25 | 本地用户存储与 AAA 运行态（M2 AAA 开工确认） | 本地用户/login class/口令策略存于配置文档 `system.login`（与 CLI §2.2 层级一致，声明式，可 compare/rollback）；口令仅存加盐 PBKDF2-SHA256 哈希（`pbkdf2$sha256$<iter>$<salt>$<hash>`，标准库 crypto/pbkdf2，≥600k 轮），明文口令与哈希不回显于任何 show/API 输出；连续失败锁定计数与 API Token 为运行态（内存），nfvisd 重启后 token 失效需重新登录、锁定状态清零（实验室定位可接受，V2 可持久化）；首次启动无本地用户时由 nfvisd `-init-admin-password` 参数或随机口令（打印 stdout 一次）引导创建 admin（super-user），无任何用户时拒绝登录 |
 
 ## 附录 B：CLI 命令树 ⇄ API 资源映射（摘要，实施期展开为完整文档）
 
