@@ -62,6 +62,8 @@ ssh root@nfvis-vm 'PROXY=http://192.168.155.1:2333 ./provision.sh'
 
 ## 监控与质量门禁（四层）
 
+> 用 ZCode 开发的同事：无需安装任何插件。仓库已随附 workspace 配置——`AGENTS.md`（项目规则，打开仓库自动加载）、`.zcode/commands/contract-check`（契约一致性自检）与 `.zcode/commands/fr <编号>`（查需求定义与实现要点），克隆后在输入框输入 `/` 即可使用。本地一次性配置只有钩子启用：`git config core.hooksPath contrib/hooks`。
+
 | 层 | 机制 | 拦截时机 | 说明 |
 |---|---|---|---|
 | 1 | `AGENTS.md` | AI/开发会话启动时 | 项目规则持久化：契约先行、FR 追溯、历史踩坑清单，任何会话自动遵守 |
