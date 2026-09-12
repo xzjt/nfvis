@@ -208,6 +208,10 @@ func (e *Engine) Edit(sess Session) error {
 	if li != nil && li.Holder != h {
 		return fmt.Errorf("%w: 由 %s 持有", ErrLocked, li.Holder)
 	}
+	if li != nil && e.candidate != nil {
+		// 同持有者重复 configure：幂等，保留未提交变更
+		return e.store.RefreshLock(h, e.now())
+	}
 	if li == nil {
 		if err := e.store.AcquireLock(h, e.now()); err != nil {
 			return err

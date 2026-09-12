@@ -64,6 +64,7 @@ func EnsureBootstrapAdmin(eng *config.Engine, s *Service, password string) (crea
 	if _, err := eng.Commit(context.Background(), sess, config.CommitOpts{Message: "首次启动引导 admin 用户"}); err != nil {
 		return false, "", err
 	}
+	_ = eng.Release(sess) // 引导是一次性动作，释放会话锁
 	return true, oneTimePassword, nil
 }
 
