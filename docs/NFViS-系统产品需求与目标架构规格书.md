@@ -345,9 +345,9 @@ request interfaces <name> enable|disable
 | 告警/事件 | `/api/v1/alarms`、`/api/v1/events`（SSE） |
 | 指标 | `/metrics`（Prometheus 格式） |
 
-### 6.3 事务模式决策（待评审确认）
+### 6.3 事务模式（已定，见附录 A #22）
 
-推荐 API 采用 **candidate 端点显式化**：写操作默认写入 candidate，调用 `POST /configuration/commit` 生效；同时支持请求头 `X-NFVIS-Auto-Commit: true` 让单请求直接提交，便于脚本与未来 Web 的"向导式"交互。CLI 内部即消费同一组端点。
+API 采用 **candidate 端点显式化**：写操作默认写入 candidate，调用 `POST /configuration/commit` 生效；同时支持请求头 `X-NFVIS-Auto-Commit: true` 让单请求直接提交，便于脚本与未来 Web 的"向导式"交互。CLI 内部即消费同一组端点。
 
 ---
 
@@ -501,6 +501,8 @@ tap 接口 VM 接入；动态路由协议（OSPF/BGP）；VXLAN overlay；SNMP�
 | 19 | 深度检查补齐（进 V1） | L2 交换机 BVI 三层网关、VM 附加数据盘、内存 backing、TLS 证书管理、commit 校验规则集（FR-CFG-011）、LACP bond、LLDP、IPv4+IPv6 静态路由、数据面抓包、tech-support 打包、core dump 管理、硬件健康监控、zeroize、口令自助修改、nfvisd 自守护 |
 | 20 | 深度检查补齐（列 V2） | 见 §12 追加项（sFlow/IPFIX、VRRP、storm control、GPU 直通、guest-agent、容器 exec 等） |
 | 21 | 二次检查修复 | VM 大页页大小选择（hugepage-size + ⑪号校验）、管理口自锁保护（FR-CFG-012）、LLDP 定为顶级 `[edit protocols]` 层级（API `/protocols/lldp`）、日志轮转保留（FR-SYS-013）、镜像导入传输机制（/data/incoming）、system 动作族 API 端点补齐（reboot/shutdown/zeroize/software/ntp:sync）、健康阈值 API；V2 补 ECMP/自动备份/管理面防火墙 |
+| 22 | API 事务模式确认 | 写操作默认进 candidate + 显式 commit 端点；`X-NFVIS-Auto-Commit: true` 支持单请求直提（§6.3 定稿） |
+| 23 | 交付就绪检查 | 分支定名 main；干净克隆构建/测试通过；OpenAPI 引用全部自洽；文档无未决标记；开发环境（Win10+Git Bash+WSL / nfvis-vm）与初始化脚本就绪 |
 
 ## 附录 B：CLI 命令树 ⇄ API 资源映射（摘要，实施期展开为完整文档）
 
