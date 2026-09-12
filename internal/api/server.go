@@ -73,6 +73,24 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("POST "+APIPrefix+"/configuration/rollback/{n}", cfgAPI(s.handleRollback))
 	mux.Handle("GET "+APIPrefix+"/system/configuration/sessions", cfgAPI(s.handleSessions))
 
+	// 资源 handlers 第一组（GET = show 等级 R；写 = configure 等级 S；FR-API-003 映射）
+	mux.Handle("GET "+APIPrefix+"/system", s.auth(s.handleGetSystem, schema.ClassReadOnly, "show system"))
+	mux.Handle("PUT "+APIPrefix+"/system", cfgAPI(s.handlePutSystem))
+	mux.Handle("GET "+APIPrefix+"/interfaces", s.auth(s.handleGetInterfaces, schema.ClassReadOnly, "show interfaces"))
+	mux.Handle("GET "+APIPrefix+"/interfaces/{name}", s.auth(s.handleGetInterface, schema.ClassReadOnly, "show interfaces"))
+	mux.Handle("PUT "+APIPrefix+"/interfaces/{name}", cfgAPI(s.handlePutInterface))
+	mux.Handle("GET "+APIPrefix+"/virtual-switches", s.auth(s.handleGetVSwitches, schema.ClassReadOnly, "show virtual-switches"))
+	mux.Handle("GET "+APIPrefix+"/virtual-switches/{name}", s.auth(s.handleGetVSwitch, schema.ClassReadOnly, "show virtual-switches"))
+	mux.Handle("GET "+APIPrefix+"/virtual-switches/{name}/ports", s.auth(s.handleGetVSwitchPorts, schema.ClassReadOnly, "show virtual-switches"))
+	mux.Handle("POST "+APIPrefix+"/virtual-switches", cfgAPI(s.handlePostVSwitch))
+	mux.Handle("DELETE "+APIPrefix+"/virtual-switches/{name}", cfgAPI(s.handleDeleteVSwitch))
+	mux.Handle("PUT "+APIPrefix+"/virtual-switches/{name}/ports", cfgAPI(s.handlePutVSwitchPorts))
+	mux.Handle("GET "+APIPrefix+"/vrfs", s.auth(s.handleGetVrfs, schema.ClassReadOnly, "show vrfs"))
+	mux.Handle("GET "+APIPrefix+"/vrfs/{name}", s.auth(s.handleGetVrf, schema.ClassReadOnly, "show vrfs"))
+	mux.Handle("POST "+APIPrefix+"/vrfs", cfgAPI(s.handlePostVrf))
+	mux.Handle("DELETE "+APIPrefix+"/vrfs/{name}", cfgAPI(s.handleDeleteVrf))
+	mux.Handle("PUT "+APIPrefix+"/vrfs/{name}/routes", cfgAPI(s.handlePutVrfRoutes))
+
 	addr := opts.Addr
 	if addr == "" {
 		addr = ":443"
