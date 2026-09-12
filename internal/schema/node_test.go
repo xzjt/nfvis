@@ -235,3 +235,29 @@ func contains(list []string, s string) bool {
 	}
 	return false
 }
+
+// ---------- W3：命令缩写（FR-CLI-004，命令树 §5.5） ----------
+
+func TestAbbreviationExpand(t *testing.T) {
+	// 无歧义前缀即合法：conf → configure
+	n, _, err := Match(OperRoot(), []string{"conf"})
+	if err != nil || n.Name != "configure" {
+		t.Fatalf("conf 应消歧到 configure: %v %v", n, err)
+	}
+	// 多级缩写：sh vir 歧义、sh virtu... 逐级消歧
+	if _, _, err := Match(OperRoot(), []string{"sh", "vir"}); err == nil || !strings.Contains(err.Error(), "virtual-switches") {
+		t.Fatalf("歧义报错应列出候选: %v", err)
+	}
+	if _, _, err := Match(OperRoot(), []string{"sh", "vir"}); err == nil || !strings.Contains(err.Error(), "virtual-machine-functions") {
+		t.Fatalf("歧义报错应列出全部候选: %v", err)
+	}
+	// 配置语句树缩写：set vir...
+	n, _, err = Match(ConfigRoot(), []string{"set", "vir"})
+	if err == nil {
+		t.Fatalf("set vir 应歧义")
+	}
+	if !strings.Contains(err.Error(), "virtual") {
+		t.Fatalf("歧义应列出 virtual 候选: %v", err)
+	}
+	_ = n
+}

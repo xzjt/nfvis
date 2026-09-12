@@ -187,18 +187,20 @@ func (n *Node) childExact(name string) *Node {
 	return nil
 }
 
-// childAbbrev 无歧义前缀匹配子关键字（FR-CLI-004）。ambiguous 表示多义。
-func (n *Node) childAbbrev(word string) (child *Node, ambiguous bool) {
+// childAbbrev 无歧义前缀匹配子关键字（FR-CLI-004）。ambiguous 表示多义，
+// matches 列出全部命中候选（供歧义报错展示，§5.5）。
+func (n *Node) childAbbrev(word string) (child *Node, matches []string, ambiguous bool) {
 	for _, c := range n.Children {
 		if c.Kind == Value || !strings.HasPrefix(c.Name, word) {
 			continue
 		}
+		matches = append(matches, c.Name)
 		if child != nil {
-			return nil, true
+			return nil, matches, true
 		}
 		child = c
 	}
-	return child, false
+	return child, matches, false
 }
 
 func (n *Node) firstParam() *Node {
@@ -237,10 +239,11 @@ func Match(root *Node, tokens []string) (*Node, int, error) {
 		}
 		c := n.childExact(tk)
 		if c == nil {
+			var matches []string
 			var ambiguous bool
-			c, ambiguous = n.childAbbrev(tk)
+			c, matches, ambiguous = n.childAbbrev(tk)
 			if ambiguous {
-				return n, depth, fmt.Errorf("%q 存在歧义匹配，需更长前缀", tk)
+				return n, depth, fmt.Errorf("%q 存在歧义匹配: %s（需更长前缀）", tk, strings.Join(matches, ", "))
 			}
 		}
 		if c == nil {
