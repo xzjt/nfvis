@@ -828,3 +828,11 @@ func (e *Engine) CurrentRevision() (int, error) {
 	rev, _, err := e.store.LatestRevision()
 	return rev, err
 }
+
+// AuditTrail 返回最近 limit 条配置变更审计记录（show log audit / GET /audit-logs）。
+func (e *Engine) AuditTrail(limit int) ([]AuditEntry, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	return e.store.ListAudit(limit)
+}

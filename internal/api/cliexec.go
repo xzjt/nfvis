@@ -379,13 +379,45 @@ func (x *cliExecutor) cfgRollback(user, source string, args []string) string {
 // ---------- 语句 → 配置模型（JSON 树变更） ----------
 
 // applyStatement 按 schema 树驱动把 set 语句写入配置（语句→模型执行期翻译）。
-// Diff 兜底：语句必须真实落到模型（flag 等未映射语句会报错而非静默丢失）。
+// 先查语句别名表（CLI 嵌套与模型扁平不一致的语句），再走通用树遍历；
+// Diff 兜底：语句必须真实落到模型（未映射语句会报错而非静默丢失）。
 func applyStatement(cfg *model.Config, tokens []string) error {
+	if rule := matchAlias(tokens); rule != nil {
+		before := *cfg
+		tree := toJSONTree(*cfg)
+		if err := rule.apply(tree, tokens, true); err != nil {
+			return err
+		}
+		return commitTree(cfg, tree, before, tokens)
+	}
 	before := *cfg
 	tree := toJSONTree(*cfg)
 	if err := applyTokens(cfgPathRoot(), tree, tokens, true); err != nil {
 		return err
 	}
+	return commitTree(cfg, tree, before, tokens)
+}
+
+// deleteStatement 按 schema 树驱动删除语句/子树。
+func deleteStatement(cfg *model.Config, tokens []string) error {
+	if rule := matchAlias(tokens); rule != nil {
+		before := *cfg
+		tree := toJSONTree(*cfg)
+		if err := rule.apply(tree, tokens, false); err != nil {
+			return err
+		}
+		return commitTree(cfg, tree, before, tokens)
+	}
+	before := *cfg
+	tree := toJSONTree(*cfg)
+	if err := applyTokens(cfgPathRoot(), tree, tokens, false); err != nil {
+		return err
+	}
+	return commitTree(cfg, tree, before, tokens)
+}
+
+// commitTree JSON 树 → 强类型配置，并要求语句确实产生了变更。
+func commitTree(cfg *model.Config, tree map[string]any, before model.Config, tokens []string) error {
 	if err := fromJSONTree(tree, cfg); err != nil {
 		return err
 	}
@@ -395,20 +427,228 @@ func applyStatement(cfg *model.Config, tokens []string) error {
 	return nil
 }
 
-// deleteStatement 按 schema 树驱动删除语句/子树。
-func deleteStatement(cfg *model.Config, tokens []string) error {
-	before := *cfg
-	tree := toJSONTree(*cfg)
-	if err := applyTokens(cfgPathRoot(), tree, tokens, false); err != nil {
-		return err
-	}
-	if err := fromJSONTree(tree, cfg); err != nil {
-		return err
-	}
-	if model.Diff(before, *cfg) == "" {
-		return fmt.Errorf("无匹配配置或语句尚未映射到模型: %s", strings.Join(tokens, " "))
+// ---------- 语句别名表（CLI 嵌套 ⇄ 模型扁平不一致的映射） ----------
+
+// aliasRule 一条别名：pattern 中 "*" 匹配任意单 token；apply 对 JSON 树
+// 直接落模型字段（set=true 赋值 / set=false 清除）。
+type aliasRule struct {
+	pattern []string
+	apply   func(tree map[string]any, t []string, isSet bool) error
+}
+
+func matchAlias(tokens []string) *aliasRule {
+	for i := range statementAliases {
+		p := statementAliases[i].pattern
+		if len(p) != len(tokens) {
+			continue
+		}
+		ok := true
+		for j, seg := range p {
+			if seg != "*" && seg != tokens[j] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return &statementAliases[i]
+		}
 	}
 	return nil
+}
+
+// elemByID 在具名数组 tree[arrKey] 中按身份值取元素（不存在报错）。
+func elemByID(tree map[string]any, arrKey, ident string) (map[string]any, error) {
+	arr, _ := tree[arrKey].([]any)
+	fld := identityFields[arrKey]
+	if fld == "" {
+		fld = "name"
+	}
+	em, _ := selectElement(arr, fld, ident)
+	if em == nil {
+		return nil, fmt.Errorf("无匹配配置: %s", ident)
+	}
+	return em, nil
+}
+
+func numField(s string) (any, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return nil, fmt.Errorf("取值 %q 须为整数", s)
+	}
+	return float64(n), nil
+}
+
+var statementAliases = []aliasRule{
+	// set virtual-switches <n> vlan access <vlan> → VSwitch.vlan_access
+	{pattern: []string{"virtual-switches", "*", "vlan", "access", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			vs, err := elemByID(tree, "virtual_switches", t[1])
+			if err != nil {
+				return err
+			}
+			if !isSet {
+				delete(vs, "vlan_access")
+				return nil
+			}
+			v, err := numField(t[4])
+			if err != nil {
+				return err
+			}
+			vs["vlan_access"] = v
+			return nil
+		}},
+	// set virtual-machine-functions <n> memory numa node <u> → memory.numa_node
+	{pattern: []string{"virtual-machine-functions", "*", "memory", "numa", "node", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			vm, err := elemByID(tree, "virtual_machine_functions", t[1])
+			if err != nil {
+				return err
+			}
+			mem, _ := vm["memory"].(map[string]any)
+			if mem == nil {
+				if !isSet {
+					return fmt.Errorf("无匹配配置: memory")
+				}
+				mem = map[string]any{}
+				vm["memory"] = mem
+			}
+			if !isSet {
+				delete(mem, "numa_node")
+				return nil
+			}
+			v, err := numField(t[5])
+			if err != nil {
+				return err
+			}
+			mem["numa_node"] = v
+			return nil
+		}},
+	// delete virtual-switches <n> vlan access（4 token 删除形态）
+	{pattern: []string{"virtual-switches", "*", "vlan", "access"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			vs, err := elemByID(tree, "virtual_switches", t[1])
+			if err != nil {
+				return err
+			}
+			delete(vs, "vlan_access")
+			return nil
+		}},
+	// delete virtual-machine-functions <n> memory numa node（5 token 删除形态）
+	{pattern: []string{"virtual-machine-functions", "*", "memory", "numa", "node"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			vm, err := elemByID(tree, "virtual_machine_functions", t[1])
+			if err != nil {
+				return err
+			}
+			if mem, ok := vm["memory"].(map[string]any); ok {
+				delete(mem, "numa_node")
+			}
+			return nil
+		}},
+	// set virtual-machine-functions <n> serial console enable → serial_console=true
+	{pattern: []string{"virtual-machine-functions", "*", "serial", "console", "enable"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			vm, err := elemByID(tree, "virtual_machine_functions", t[1])
+			if err != nil {
+				return err
+			}
+			if !isSet {
+				vm["serial_console"] = false
+				return nil
+			}
+			vm["serial_console"] = true
+			return nil
+		}},
+	// set virtual-switches <n> ports <seq> interface <if> [trunk vlans <list>|native <vlan>]
+	{pattern: []string{"virtual-switches", "*", "ports", "*", "interface", "*", "trunk", "vlans", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return portTrunkApply(tree, t, isSet, "interface", 5)
+		}},
+	{pattern: []string{"virtual-switches", "*", "ports", "*", "interface", "*", "native", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return portNativeApply(tree, t, isSet, 5)
+		}},
+	// set virtual-switches <n> ports <seq> vnf <vm> interface <vnic> [trunk vlans <list>]
+	{pattern: []string{"virtual-switches", "*", "ports", "*", "vnf", "*", "interface", "*", "trunk", "vlans", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return portTrunkApply(tree, t, isSet, "vnf", 7)
+		}},
+}
+
+// portTrunkApply 端口成员 + trunk VLAN 列表（memberKind/interfaceIdx 按语句形态）。
+func portTrunkApply(tree map[string]any, t []string, isSet bool, memberKind string, ifIdx int) error {
+	port, err := portElem(tree, t[1], t[3])
+	if err != nil {
+		return err
+	}
+	if !isSet {
+		delete(port, "trunk")
+		return nil
+	}
+	if memberKind == "interface" {
+		port["interface"] = t[ifIdx]
+	} else {
+		port["vnf"] = t[5]
+		port["vnf_interface"] = t[7]
+	}
+	vlans, err := expandVlanList(t[len(t)-1])
+	if err != nil {
+		return err
+	}
+	port["trunk"] = vlans
+	return nil
+}
+
+// portNativeApply 端口 native VLAN。
+func portNativeApply(tree map[string]any, t []string, isSet bool, ifIdx int) error {
+	port, err := portElem(tree, t[1], t[3])
+	if err != nil {
+		return err
+	}
+	if !isSet {
+		delete(port, "native")
+		return nil
+	}
+	port["interface"] = t[ifIdx]
+	v, err := numField(t[len(t)-1])
+	if err != nil {
+		return err
+	}
+	port["native"] = v
+	return nil
+}
+
+// portElem 取（或创建）交换机的指定序号端口元素。
+func portElem(tree map[string]any, vsName, seq string) (map[string]any, error) {
+	vs, err := elemByID(tree, "virtual_switches", vsName)
+	if err != nil {
+		return nil, err
+	}
+	arr, _ := vs["ports"].([]any)
+	em, _ := selectElement(arr, "seq", seq)
+	if em == nil {
+		n, err := strconv.Atoi(seq)
+		if err != nil {
+			return nil, fmt.Errorf("端口序号 %q 须为整数", seq)
+		}
+		em = map[string]any{"seq": float64(n)}
+		arr = append(arr, em)
+		vs["ports"] = arr
+	}
+	return em, nil
+}
+
+// expandVlanList "100,200" → [100, 200]（JSON number，反序列化为 []int）。
+func expandVlanList(s string) ([]any, error) {
+	var out []any
+	for _, part := range strings.Split(s, ",") {
+		v, err := numField(strings.TrimSpace(part))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, nil
 }
 
 func cfgPathRoot() *schema.Node { return schema.ConfigPathTree() }

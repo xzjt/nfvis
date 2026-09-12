@@ -363,7 +363,7 @@ func ConfigPathTree() *Node {
 		// —— virtual-machine-functions（§2.7，FR-CMP-010~019）——
 		K("virtual-machine-functions", "VM VNF",
 			P("<name>", "VNF 名", DynVMs,
-				K("image", "镜像（vm-image）", P("<image-name>", "镜像名", DynImages)),
+				K("image", "镜像（vm-image）", SP("<image-name>", "image", "镜像名")),
 				K("vcpu", "vCPU（从隔离核池分配）",
 					K("count", "数量", V("uint", "个数")),
 					Opt(K("pin", "绑核（默认 true）", VE("bool", "开关", "true", "false"))),
@@ -381,7 +381,7 @@ func ConfigPathTree() *Node {
 				K("disks", "附加数据盘（virtio，FR-CMP-018）",
 					P("<disk-name>", "盘名", "",
 						K("size-gb", "空盘容量（与 image 二选一）", V("uint", "GB")),
-						K("image", "从 vm-image 克隆创建", P("<image-name>", "镜像名", DynImages)),
+						K("image", "从 vm-image 克隆创建", SP("<image-name>", "image", "镜像名")),
 					),
 				),
 				K("interfaces", "vNIC",
@@ -418,7 +418,7 @@ func ConfigPathTree() *Node {
 		// —— container-functions（§2.8，FR-CMP-020~022）——
 		K("container-functions", "容器 VNF（Docker + memif，FR-NET-022）",
 			P("<name>", "容器名", DynContainers,
-				K("image", "镜像（container-image）", P("<image-name>", "镜像名", DynImages)),
+				K("image", "镜像（container-image）", SP("<image-name>", "image", "镜像名")),
 				K("vcpu", "vCPU 限制（cgroup）",
 					K("count", "数量", V("uint", "个数")),
 				),

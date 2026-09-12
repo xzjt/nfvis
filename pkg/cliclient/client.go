@@ -121,3 +121,12 @@ func (c *Client) do(method, path string, body any, out any) error {
 	}
 	return nil
 }
+
+// DynamicCandidates 查询指定来源的动态候选（接口名/VNF 名/镜像名等，§5.3）。
+func (c *Client) DynamicCandidates(kind string) ([]string, error) {
+	var resp []string
+	if err := c.do(http.MethodGet, "/api/v1/cli/candidates?kind="+kind, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
