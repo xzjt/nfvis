@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/xzjt/nfvis/internal/aaa"
+	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/schema"
 )
 
@@ -33,6 +34,7 @@ type Options struct {
 // Server NFViS REST server。
 type Server struct {
 	aaa     *aaa.Service
+	engine  *config.Engine
 	log     *slog.Logger
 	mux     *http.ServeMux
 	http    *http.Server
@@ -44,12 +46,12 @@ type Server struct {
 func (s *Server) Handler() http.Handler { return s.logRequests(s.mux) }
 
 // New 构造 server 并注册路由。
-func New(a *aaa.Service, opts Options) *Server {
+func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	log := opts.Log
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, log: log}
+	s := &Server{aaa: a, engine: e, log: log}
 	mux := http.NewServeMux()
 
 	// 认证（免 token，FR-API-001）
@@ -57,6 +59,19 @@ func New(a *aaa.Service, opts Options) *Server {
 	// 认证后端点：required class + 命令树路径（自定义 class ACL 判定用）
 	mux.Handle("POST "+APIPrefix+"/logout", s.auth(s.handleLogout, schema.ClassReadOnly, "logout"))
 	mux.Handle("GET "+APIPrefix+"/system/version", s.auth(s.handleVersion, schema.ClassReadOnly, "show version"))
+
+	// 配置事务（/configuration/*，configure 为 S 级权限，命令树 §4）
+	cfgAPI := func(h http.HandlerFunc) http.Handler {
+		return s.auth(h, schema.ClassSuperUser, "configure")
+	}
+	mux.Handle("GET "+APIPrefix+"/configuration/candidate", cfgAPI(s.handleGetCandidate))
+	mux.Handle("PUT "+APIPrefix+"/configuration/candidate", cfgAPI(s.handlePutCandidate))
+	mux.Handle("DELETE "+APIPrefix+"/configuration/candidate", cfgAPI(s.handleDeleteCandidate))
+	mux.Handle("POST "+APIPrefix+"/configuration/commit", cfgAPI(s.handleCommit))
+	mux.Handle("POST "+APIPrefix+"/configuration/commit:confirm", cfgAPI(s.handleCommitConfirm))
+	mux.Handle("GET "+APIPrefix+"/configuration/diff", cfgAPI(s.handleDiff))
+	mux.Handle("POST "+APIPrefix+"/configuration/rollback/{n}", cfgAPI(s.handleRollback))
+	mux.Handle("GET "+APIPrefix+"/system/configuration/sessions", cfgAPI(s.handleSessions))
 
 	addr := opts.Addr
 	if addr == "" {

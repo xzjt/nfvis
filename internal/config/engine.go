@@ -55,11 +55,11 @@ type CommitResult struct {
 
 // SessionView 会话列表视图（show system configuration sessions，FR-CFG-009）。
 type SessionView struct {
-	Holder         string
-	AcquiredAt     time.Time
-	LastActivity   time.Time
-	Dirty          bool
-	ConfirmedUntil *time.Time
+	Holder         string     `json:"holder"`
+	AcquiredAt     time.Time  `json:"acquired_at"`
+	LastActivity   time.Time  `json:"last_activity"`
+	Dirty          bool       `json:"dirty"`
+	ConfirmedUntil *time.Time `json:"confirmed_until,omitempty"`
 }
 
 // Event 引擎上报的事件。
@@ -304,6 +304,7 @@ func (e *Engine) Committed() (model.Config, error) {
 }
 
 // Sessions 返回持锁会话与 confirmed 状态（FR-CFG-009）。
+// JSON 字段与 OpenAPI ConfigSession 契约一致。
 func (e *Engine) Sessions() ([]SessionView, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()

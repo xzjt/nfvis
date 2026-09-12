@@ -72,7 +72,7 @@ func run() error {
 		fmt.Printf("%% 首次启动已创建用户 admin (super-user)。一次性口令（仅显示一次，请立即修改）: %s\n", oneTime)
 	}
 
-	apiServer := api.New(aaaSvc, api.Options{
+	apiServer := api.New(engine, aaaSvc, api.Options{
 		Addr:    *listen,
 		TLSCert: *tlsCert,
 		TLSKey:  *tlsKey,

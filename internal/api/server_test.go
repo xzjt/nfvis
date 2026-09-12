@@ -7,11 +7,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/xzjt/nfvis/internal/aaa"
+	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 // ---------- 测试基础设施 ----------
@@ -41,7 +44,17 @@ func (f fakeSource) Committed() (model.Config, error) { return f.cfg, nil }
 
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	srv := New(testAAA(t), Options{Addr: ":0", Log: slog.New(slog.DiscardHandler)})
+	store, err := config.OpenStore(filepath.Join(t.TempDir(), "nfvis.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	engine, err := config.NewEngine(store, orchestrator.NewNoopApplier(), config.Options{})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	t.Cleanup(engine.Close)
+	srv := New(engine, testAAA(t), Options{Addr: ":0", Log: slog.New(slog.DiscardHandler)})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts
