@@ -63,6 +63,8 @@ ssh root@nfvis-vm 'PROXY=http://192.168.155.1:2333 ./provision.sh'
 ## 监控与质量门禁（四层）
 
 > 用 ZCode 开发的同事：无需安装任何插件。仓库已随附 workspace 配置——`AGENTS.md`（项目规则，打开仓库自动加载）、`.zcode/commands/contract-check`（契约一致性自检）与 `.zcode/commands/fr <编号>`（查需求定义与实现要点），克隆后在输入框输入 `/` 即可使用。本地一次性配置只有钩子启用：`git config core.hooksPath contrib/hooks`。
+>
+> **推荐个人启用插件**：`superpowers`（Settings → Plugin Management → Discover）。它提供 TDD、系统化调试、计划编写/执行、完成前验证等方法论技能，与 M1 事务引擎的开发方式直接匹配。注意：插件属于个人配置（user scope），仓库无法强制分发；仓库的契约/门禁规则不依赖它，未安装也不影响合规——但团队建议统一启用，保持会话行为一致。
 
 | 层 | 机制 | 拦截时机 | 说明 |
 |---|---|---|---|
