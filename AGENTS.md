@@ -19,12 +19,11 @@
 ## 每次改动后的自检清单
 
 ```bash
-cd prototype && go build ./... && go vet ./... && go test ./...   # 原型仍应全绿
+make check        # 产品代码 vet + 覆盖率门槛（internal/config、internal/model ≥ 70%）+ 原型全绿
+cd prototype && go build ./... && go vet ./... && go test ./...   # 原型仍应全绿（make check 已含）
 python -c "import yaml;yaml.safe_load(open('docs/NFViS-openapi.yaml'))"  # 契约可解析
 grep -rn "待评审\|TBD\|TODO" docs/   # 不允许引入未决标记
 ```
-
-工程结构建立后（M1 开工），以上命令替换为 `make check`。
 
 ## 外部文档查询（context7 MCP，个人启用）
 
