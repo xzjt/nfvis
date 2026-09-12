@@ -26,6 +26,20 @@ grep -rn "待评审\|TBD\|TODO" docs/   # 不允许引入未决标记
 
 工程结构建立后（M1 开工），以上命令替换为 `make check`。
 
+## 外部文档查询（context7 MCP，个人启用）
+
+涉及以下**版本敏感**的第三方接口时，优先用 context7 查询官方文档核对，不要凭训练记忆写调用代码：
+
+- govpp binary API 结构体/消息（VPP 26.06 的 binapi 与旧版差异大）
+- libvirt domain XML 元素与 go 绑定
+- VPP 插件（acl/nat/memif/lldp/bonding）的 startup.conf 参数与行为
+- Docker Engine API 字段
+- SQLite 驱动（modernc.org/sqlite）的 DDL/事务语义
+
+注意两点：
+1. context7 对垂直领域库（govpp/VPP）覆盖可能不全——查不到时**以官方源码和版本锁定的文档为准**，不得用"记忆中的旧版 API"替代。
+2. 底座行为的最终裁决标准是 nfvis-vm 上实际安装的版本（`vppctl show version`、`libvirtd --version`），文档与实测冲突时以实测为准并在规格书附录 A 记录差异。
+
 ## 常见错误（历史实际发生过，勿重蹈）
 
 - 只改引擎执行逻辑没改命令树（或反之）→ `?`/Tab 与实际行为漂移。命令树与执行器必须同源。

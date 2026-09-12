@@ -65,6 +65,8 @@ ssh root@nfvis-vm 'PROXY=http://192.168.155.1:2333 ./provision.sh'
 > 用 ZCode 开发的同事：无需安装任何插件。仓库已随附 workspace 配置——`AGENTS.md`（项目规则，打开仓库自动加载）、`.zcode/commands/contract-check`（契约一致性自检）与 `.zcode/commands/fr <编号>`（查需求定义与实现要点），克隆后在输入框输入 `/` 即可使用。本地一次性配置只有钩子启用：`git config core.hooksPath contrib/hooks`。
 >
 > **推荐个人启用插件**：`superpowers`（Settings → Plugin Management → Discover）。它提供 TDD、系统化调试、计划编写/执行、完成前验证等方法论技能，与 M1 事务引擎的开发方式直接匹配。注意：插件属于个人配置（user scope），仓库无法强制分发；仓库的契约/门禁规则不依赖它，未安装也不影响合规——但团队建议统一启用，保持会话行为一致。
+>
+> **推荐个人配置 MCP**：`context7`（文档实时查询）。M3/M4 对接 govpp/libvirt/VPP 插件等版本敏感 API 时，会话应先查 context7 核对官方文档再写调用代码；使用约定见 `AGENTS.md` 的「外部文档查询」一节（含垂直库查不到时的降级规则）。
 
 | 层 | 机制 | 拦截时机 | 说明 |
 |---|---|---|---|
