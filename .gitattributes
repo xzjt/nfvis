@@ -1,0 +1,8 @@
+# 统一换行符：仓库内一律 LF，禁止 Windows 端提交 CRLF 污染 diff
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
+*.tar.gz binary
+*.deb binary
+*.qcow2 binary

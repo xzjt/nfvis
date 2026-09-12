@@ -32,6 +32,27 @@ go test ./...                  # 事务与补全逻辑测试
 
 要求 Go ≥ 1.26。M1/M2 开发在任意平台进行（底座用 mock）；M3/M4 需要 Linux + VPP/libvirt 环境（统一开发虚机，待建）。
 
+## 开发与验证环境
+
+| 环境 | 配置 | 用途 |
+|---|---|---|
+| 本地 | Win10 + Git Bash + WSL | M1/M2 日常开发、单元测试（纯 Go，mock Provider） |
+| nfvis-vm | 6C / 6G / 100G / 3×vmxnet3，Ubuntu 26.04 Server，`ssh root@nfvis-vm`（密钥登录） | M3/M4 集成验证（VPP / libvirt / Docker） |
+
+**虚机初始化**（脚本幂等，失败项修复后可重跑）：
+
+```bash
+scp contrib/dev-vm/provision.sh root@nfvis-vm:
+ssh root@nfvis-vm 'PROXY=http://192.168.155.1:2333 ./provision.sh'
+```
+
+- 安装内容：基础工具链、Go 1.26（固定版本 tarball）、VPP 26.06（fd.io 仓库，codename 缺失自动回退 noble）、libvirt/QEMU、Docker、1G×4 大页、`/opt/nfvis/{src,images,incoming,backup}` 工作目录。
+- **代理 `192.168.155.1:2333`（http/socks5）按需启用**：设置 `PROXY=http://192.168.155.1:2333` 环境变量即生效（apt/go/docker 统一走它），不设置则直连。
+- 大页需 reboot 生效；VPP 安装后设为不自启（避免抢占网卡），验证时手动 `systemctl start vpp`。
+- 日志在虚机 `/var/log/nfvis-provision.log`。
+
+**换行符**：`.gitattributes` 已统一仓库内 LF，Windows 端无需额外配置；发现 diff 全脏时执行 `git add --renormalize .`。
+
 ## 协作规则
 
 1. **契约先行**：`NFViS-openapi.yaml` 与命令树文档是契约。改接口先改文档（MR 评审通过），再改代码；CLI 命令与 API 端点必须保持附录 B 的映射关系。
