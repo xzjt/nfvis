@@ -9,8 +9,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-      - name: 构建与测试（prototype，工程结构建立后替换为 make check）
-        run: cd prototype && go build ./... && go vet ./... && go test -cover ./...
+      - name: 产品代码检查（make check：vet + 覆盖率门槛 ≥70%）
+        run: make check
+      - name: 原型全绿
+        run: cd prototype && go build ./... && go vet ./... && go test ./...
       - name: 契约文件校验（OpenAPI 可解析）
         run: |
           pip install pyyaml --quiet

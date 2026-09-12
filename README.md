@@ -1,7 +1,7 @@
 # NFViS — 网络功能虚拟化基础设施一体机软件
 
 基于 Ubuntu 26.04 + VPP 26.06 + KVM/Libvirt 的 NFVi 一体机软件，Go 实现。
-JunOS 风格 CLI（`nfvis-cli`）+ REST API（OpenAPI 契约），当前处于 **V1 设计阶段**。
+JunOS 风格 CLI（`nfvis-cli`）+ REST API（OpenAPI 契约），当前处于 **M1（配置模型 + 事务引擎）开发阶段**。
 
 ## 仓库结构
 
@@ -11,6 +11,11 @@ JunOS 风格 CLI（`nfvis-cli`）+ REST API（OpenAPI 契约），当前处于 *
 │   ├── NFViS-Go工程目录骨架设计.md             # 代码结构与里程碑（M1~M5）
 │   ├── NFViS-CLI命令树完整设计.md              # CLI 契约（命令树 + 补全细则）
 │   └── NFViS-openapi.yaml                      # REST API 契约（OpenAPI 3.0）
+├── internal/                                   # 产品代码（M1 起按工程骨架布局）
+│   ├── model/                                  #   配置模型（单一数据源）+ 校验 + diff + merge
+│   ├── config/                                 #   事务引擎：candidate/commit confirmed/rollback + SQLite
+│   └── orchestrator/                           #   底座适配接口（govpp/libvirt/docker 实现于 M3/M4）
+├── Makefile                                    # make check = vet + 覆盖率门槛 + 原型全绿
 └── prototype/                                  # CLI 补全引擎交互原型（仅演示语义，非产品代码）
 ```
 
@@ -28,6 +33,13 @@ cd prototype
 go run .                       # 交互模式（? 补全 / Tab 补全 / 事务演示）
 go run . -c "show version"     # 单命令模式
 go test ./...                  # 事务与补全逻辑测试
+```
+
+产品代码（M1 事务引擎，纯 Go + SQLite，任意平台可开发验证）：
+
+```bash
+go build ./... && go vet ./...
+make check                     # vet + 覆盖率门槛（internal/config、internal/model ≥ 70%）+ 原型全绿
 ```
 
 要求 Go ≥ 1.26。M1/M2 开发在任意平台进行（底座用 mock）；M3/M4 需要 Linux + VPP/libvirt 环境（统一开发虚机，待建）。
