@@ -1,0 +1,18 @@
+# 构建产物
+*.exe
+*.test
+*.out
+/bin/
+/dist/
+
+# Go
+vendor/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+
+# 系统
+Thumbs.db
+.DS_Store

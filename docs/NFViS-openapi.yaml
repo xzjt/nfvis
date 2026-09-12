@@ -1,0 +1,2004 @@
+openapi: 3.0.3
+info:
+  title: NFViS REST API
+  version: 1.0.0
+  description: |
+    NFViS 一体机 REST API（V1）。
+    - 配置类写操作默认作用于 candidate，需 POST /configuration/commit 生效；
+      请求头 `X-NFVIS-Auto-Commit: true` 可让单请求直接提交。
+    - 错误响应统一为 Error 结构；校验错误逐条列入 detail。
+    - 事件经 SSE 推送：GET /events（text/event-stream）。
+servers:
+  - url: https://{host}/api/v1
+    variables:
+      host:
+        default: nfvis.local
+tags:
+  - name: auth
+  - name: system
+  - name: interfaces
+  - name: virtual-switches
+  - name: vrfs
+  - name: acls
+  - name: nat
+  - name: port-mirroring
+  - name: qos
+  - name: resource-pools
+  - name: virtual-machine-functions
+  - name: container-functions
+  - name: images
+  - name: configuration
+  - name: alarms-events
+  - name: audit
+
+security:
+  - bearerAuth: []
+
+paths:
+  /login:
+    post:
+      tags: [auth]
+      summary: 登录获取 Bearer Token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: token 与用户信息
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401": { $ref: "#/components/responses/Error401" }
+        "423": { $ref: "#/components/responses/Error403" }   # 连续失败锁定
+
+  /logout:
+    post:
+      tags: [auth]
+      summary: 吊销当前 token
+      responses:
+        "204": { description: 已吊销 }
+
+  /system/status:
+    get:
+      tags: [system]
+      summary: 系统状态（uptime/CPU/内存/大页/磁盘）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SystemStatus" }
+
+  /system/version:
+    get:
+      tags: [system]
+      summary: 组件版本
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VersionInfo" }
+
+  /system:
+    put:
+      tags: [system]
+      summary: 修改系统配置（hostname/ntp/dns/syslog/api/management/idle-timeout）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SystemConfig" }
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "400": { $ref: "#/components/responses/Error400" }
+    get:
+      tags: [system]
+      summary: 读取系统配置
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SystemConfig" }
+
+  /system/login-users:
+    get:
+      tags: [system]
+      summary: 本地用户与 class 列表
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/LoginUser" }
+    post:
+      tags: [system]
+      summary: 创建用户或 class
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginUser" }
+      responses:
+        "201": { $ref: "#/components/responses/ConfigAccepted" }
+        "400": { $ref: "#/components/responses/Error400" }
+
+  /interfaces:
+    get:
+      tags: [interfaces]
+      summary: 接口列表（kind=physical|management|vpp）
+      parameters:
+        - { name: kind, in: query, schema: { type: string, enum: [physical, management, vpp, all] } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Interface" }
+  /interfaces/{name}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [interfaces]
+      summary: 接口详情（含统计）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Interface" }
+        "404": { $ref: "#/components/responses/Error404" }
+    put:
+      tags: [interfaces]
+      summary: 修改接口（description/mtu/enabled）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InterfaceUpdate" }
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "404": { $ref: "#/components/responses/Error404" }
+
+  /virtual-switches:
+    get:
+      tags: [virtual-switches]
+      summary: 虚拟交换机列表
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/VirtualSwitch" }
+    post:
+      tags: [virtual-switches]
+      summary: 创建虚拟交换机
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VirtualSwitch" }
+      responses:
+        "201": { $ref: "#/components/responses/ConfigAccepted" }
+        "400": { $ref: "#/components/responses/Error400" }
+  /virtual-switches/{name}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [virtual-switches]
+      summary: 详情
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VirtualSwitch" }
+        "404": { $ref: "#/components/responses/Error404" }
+    delete:
+      tags: [virtual-switches]
+      summary: 删除（有成员引用时 409）
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "409": { $ref: "#/components/responses/Error409" }
+  /virtual-switches/{name}/ports:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [virtual-switches]
+      summary: 成员端口与实时状态
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/VSwitchPort" }
+    put:
+      tags: [virtual-switches]
+      summary: 全量替换成员端口列表
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: "#/components/schemas/VSwitchPort" }
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+  /virtual-switches/{name}/mac-table:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [virtual-switches]
+      summary: MAC 学习表（仅 L2）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    mac: { type: string }
+                    port: { type: string }
+                    vlan: { type: integer }
+
+  /vrfs:
+    get:
+      tags: [vrfs]
+      summary: VRF（L3 虚拟交换机）列表
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Vrf" }
+    post:
+      tags: [vrfs]
+      summary: 创建 VRF
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Vrf" }
+      responses:
+        "201": { $ref: "#/components/responses/ConfigAccepted" }
+  /vrfs/{name}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [vrfs]
+      summary: VRF 详情
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Vrf" }
+    delete:
+      tags: [vrfs]
+      summary: 删除 VRF
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "409": { $ref: "#/components/responses/Error409" }
+  /vrfs/{name}/routes:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [vrfs]
+      summary: FIB 路由表（运行态）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Route" }
+    put:
+      tags: [vrfs]
+      summary: 全量替换静态路由
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: "#/components/schemas/Route" }
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+
+  /acls:
+    get:
+      tags: [acls]
+      summary: ACL 列表（含命中计数）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Acl" }
+    post:
+      tags: [acls]
+      summary: 创建 ACL
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Acl" }
+      responses:
+        "201": { $ref: "#/components/responses/ConfigAccepted" }
+  /acls/{name}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [acls]
+      summary: ACL 详情
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Acl" }
+    delete:
+      tags: [acls]
+      summary: 删除 ACL
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "409": { $ref: "#/components/responses/Error409" }
+
+  /nat:
+    get:
+      tags: [nat]
+      summary: NAT 池与规则
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NatConfig" }
+    put:
+      tags: [nat]
+      summary: 全量替换 NAT 配置
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NatConfig" }
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+
+  /port-mirroring:
+    get:
+      tags: [port-mirroring]
+      summary: SPAN 会话列表
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PortMirroring" }
+    post:
+      tags: [port-mirroring]
+      summary: 创建 SPAN 会话
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PortMirroring" }
+      responses:
+        "201": { $ref: "#/components/responses/ConfigAccepted" }
+  /port-mirroring/{name}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [port-mirroring]
+      summary: 删除 SPAN 会话
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+
+  /qos/policies:
+    get:
+      tags: [qos]
+      summary: 限速策略列表
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/QosPolicy" }
+    post:
+      tags: [qos]
+      summary: 创建限速策略
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QosPolicy" }
+      responses:
+        "201": { $ref: "#/components/responses/ConfigAccepted" }
+  /qos/policies/{name}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [qos]
+      summary: 删除策略
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+
+  /resource-pools:
+    get:
+      tags: [resource-pools]
+      summary: 资源池（总量/已分配/空闲）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResourcePool" }
+    put:
+      tags: [resource-pools]
+      summary: 修改资源池（大页/隔离核变更需 reboot，响应含提示）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResourcePool" }
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "409": { $ref: "#/components/responses/Error409" }
+
+  /virtual-machine-functions:
+    get:
+      tags: [virtual-machine-functions]
+      summary: VM VNF 列表
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/VMFunction" }
+    post:
+      tags: [virtual-machine-functions]
+      summary: 创建 VM VNF（定义；不自动启动，autostart 时启动）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMFunction" }
+      responses:
+        "201": { $ref: "#/components/responses/ConfigAccepted" }
+        "400": { $ref: "#/components/responses/Error400" }
+        "409": { $ref: "#/components/responses/Error409" }   # 资源池配额不足
+  /virtual-machine-functions/{name}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [virtual-machine-functions]
+      summary: VM 详情（资源分配/vNIC/NUMA）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMFunction" }
+    put:
+      tags: [virtual-machine-functions]
+      summary: 修改 VM（关机状态生效）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMFunction" }
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+    delete:
+      tags: [virtual-machine-functions]
+      summary: 删除 VM（级联 vNIC/快照）
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+  /virtual-machine-functions/{name}:start:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [virtual-machine-functions]
+      summary: 启动
+      responses:
+        "202": { description: 已受理（异步完成，事件通知） }
+        "409": { $ref: "#/components/responses/Error409" }
+  /virtual-machine-functions/{name}:stop:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [virtual-machine-functions]
+      summary: 停止（ACPI 关机，超时强杀）
+      responses:
+        "202": { description: 已受理 }
+  /virtual-machine-functions/{name}/console:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [virtual-machine-functions]
+      summary: 申请串口 console 访问凭证（WebSocket 代理 URL，短时有效）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ws_url: { type: string, example: "wss://host/api/v1/virtual-machine-functions/fw-vm/console/ws?ticket=..." }
+                  expires_in: { type: integer }
+  /virtual-machine-functions/{name}/snapshots:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [virtual-machine-functions]
+      summary: 快照列表
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Snapshot" }
+    post:
+      tags: [virtual-machine-functions]
+      summary: 创建快照
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Snapshot" }
+      responses:
+        "202": { description: 已受理 }
+
+  /container-functions:
+    get:
+      tags: [container-functions]
+      summary: 容器 VNF 列表
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ContainerFunction" }
+    post:
+      tags: [container-functions]
+      summary: 创建容器 VNF
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ContainerFunction" }
+      responses:
+        "201": { $ref: "#/components/responses/ConfigAccepted" }
+  /container-functions/{name}:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [container-functions]
+      summary: 容器详情
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContainerFunction" }
+    delete:
+      tags: [container-functions]
+      summary: 删除容器
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+  /container-functions/{name}:start:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [container-functions]
+      summary: 启动
+      responses: { "202": { description: 已受理 } }
+  /container-functions/{name}:stop:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [container-functions]
+      summary: 停止
+      responses: { "202": { description: 已受理 } }
+  /container-functions/{name}/logs:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+      - { name: last, in: query, schema: { type: integer, default: 100 } }
+    get:
+      tags: [container-functions]
+      summary: 容器日志
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain:
+              schema: { type: string }
+
+  /images:
+    get:
+      tags: [images]
+      summary: 镜像列表
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Image" }
+    post:
+      tags: [images]
+      summary: 导入镜像（multipart 上传 或 URL 拉取，二选一）
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [name, type, file]
+              properties:
+                name: { type: string }
+                type: { type: string, enum: [vm-image, container-image] }
+                file: { type: string, format: binary }
+                description: { type: string }
+          application/json:
+            schema:
+              type: object
+              required: [name, type, url]
+              properties:
+                name: { type: string }
+                type: { type: string, enum: [vm-image, container-image] }
+                url: { type: string, format: uri }
+                sha256: { type: string }
+                description: { type: string }
+      responses:
+        "202":
+          description: 已受理（异步下载，进度经事件流）
+        "400": { $ref: "#/components/responses/Error400" }
+  /images/{name}:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [images]
+      summary: 镜像详情（含引用计数）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Image" }
+    delete:
+      tags: [images]
+      summary: 删除镜像（被引用时 409）
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "409": { $ref: "#/components/responses/Error409" }
+
+  /configuration/candidate:
+    get:
+      tags: [configuration]
+      summary: 读取当前会话 candidate
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigDocument" }
+    put:
+      tags: [configuration]
+      summary: 整体替换 candidate（load override 语义）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConfigDocument" }
+      responses:
+        "200": { description: candidate 已更新（未提交） }
+    delete:
+      tags: [configuration]
+      summary: 丢弃 candidate（discard）
+      responses:
+        "204": { description: 已丢弃 }
+  /configuration/commit:
+    post:
+      tags: [configuration]
+      summary: 提交 candidate（含校验+下发底座）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                confirmed_minutes: { type: integer, description: "大于 0 时为 commit confirmed" }
+                message: { type: string }
+      responses:
+        "200":
+          description: 提交成功
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommitResult" }
+        "400":
+          description: 校验失败（detail 列出全部错误）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409": { $ref: "#/components/responses/Error409" }
+  /configuration/commit:confirm:
+    post:
+      tags: [configuration]
+      summary: 确认 commit confirmed
+      responses:
+        "200": { description: 已确认 }
+  /configuration/diff:
+    get:
+      tags: [configuration]
+      summary: candidate ⇄ committed 差异
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain:
+              schema: { type: string }
+  /configuration/rollback/{n}:
+    parameters: [{ name: n, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 50 } }]
+    post:
+      tags: [configuration]
+      summary: 取第 n 个历史快照为 candidate（需再 commit）
+      responses:
+        "200": { description: candidate 已替换为历史快照 }
+        "404": { $ref: "#/components/responses/Error404" }
+
+  /alarms:
+    get:
+      tags: [alarms-events]
+      summary: 告警列表（state=active|resolved|all）
+      parameters: [{ name: state, in: query, schema: { type: string, enum: [active, resolved, all], default: active } }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Alarm" }
+  /events:
+    get:
+      tags: [alarms-events]
+      summary: 事件流（SSE）
+      responses:
+        "200":
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/Event" }
+
+  /audit-logs:
+    get:
+      tags: [audit]
+      summary: 审计日志（分页）
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 100 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+        - { name: user, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AuditEntry" }
+
+  /metrics:
+    get:
+      tags: [system]
+      summary: Prometheus 指标
+      security: []
+      responses:
+        "200":
+          description: text/plain; version=0.0.4
+          content:
+            text/plain:
+              schema: { type: string }
+
+  /vpp/status:
+    get:
+      tags: [system]
+      summary: VPP 数据面状态（版本、线程/worker、buffer、内存、配置版本）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VppStatus" }
+  /vpp/config:
+    get:
+      tags: [system]
+      summary: 读取 VPP 数据面配置（startup.conf 生成源）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VppConfig" }
+    put:
+      tags: [system]
+      summary: 修改 VPP 配置（cpu/memory/dpdk 变更需重启数据面生效）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VppConfig" }
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "400": { $ref: "#/components/responses/Error400" }
+  /vpp:restart:
+    post:
+      tags: [system]
+      summary: 按新配置重启 VPP 数据面（触发恢复收敛）
+      responses:
+        "202": { description: 已受理（异步完成，事件通知） }
+  /vpp/capture:
+    get:
+      tags: [system]
+      summary: 抓包会话状态与已导出 pcap 清单
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CaptureStatus" }
+    post:
+      tags: [system]
+      summary: 开始数据面抓包（达到 count 自动停止）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [interface]
+              properties:
+                interface: { type: string }
+                count: { type: integer, default: 1000 }
+                filter_acl: { type: string }
+      responses:
+        "202": { description: 已开始 }
+        "409": { $ref: "#/components/responses/Error409" }   # 已有会话进行中
+    delete:
+      tags: [system]
+      summary: 停止抓包（不导出）
+      responses:
+        "204": { description: 已停止 }
+  /vpp/capture/{file}:
+    parameters: [{ name: file, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [system]
+      summary: 下载 pcap 文件
+      responses:
+        "200":
+          description: application/octet-stream
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+
+  /bonds:
+    get:
+      tags: [interfaces]
+      summary: 链路聚合列表
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Bond" }
+    post:
+      tags: [interfaces]
+      summary: 创建 bond
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Bond" }
+      responses:
+        "201": { $ref: "#/components/responses/ConfigAccepted" }
+  /bonds/{name}:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [interfaces]
+      summary: bond 详情（含 LACP actor/partner 状态）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Bond" }
+    delete:
+      tags: [interfaces]
+      summary: 删除 bond（被引用时 409）
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "409": { $ref: "#/components/responses/Error409" }
+
+  /system:reboot:
+    post:
+      tags: [system]
+      summary: 重启系统
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                confirm: { type: boolean, description: 必须为 true }
+      responses:
+        "202": { description: 已受理 }
+        "400": { $ref: "#/components/responses/Error400" }
+  /system:shutdown:
+    post:
+      tags: [system]
+      summary: 关机（或 poweroff）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                confirm: { type: boolean, description: 必须为 true }
+      responses:
+        "202": { description: 已受理 }
+        "400": { $ref: "#/components/responses/Error400" }
+  /system:zeroize:
+    post:
+      tags: [system]
+      summary: 恢复出厂（清空数据分区配置/镜像/VNF 并重置账号，FR-OPS-007）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: boolean, description: 双重确认，必须为 true }
+      responses:
+        "202": { description: 已受理，重启后进入初始化状态 }
+        "400": { $ref: "#/components/responses/Error400" }
+  /system/software:
+    post:
+      tags: [system]
+      summary: 安装 nfvis 软件包（deb 路径或 URL，校验→升级→重启 nfvisd→报告）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [package]
+              properties:
+                package: { type: string, description: 本地路径或 https URL }
+                sha256: { type: string }
+      responses:
+        "202": { description: 已受理（异步，事件通知结果） }
+        "400": { $ref: "#/components/responses/Error400" }
+  /system/software:rollback:
+    post:
+      tags: [system]
+      summary: 回退到上一版本
+      responses:
+        "202": { description: 已受理 }
+  /system/ntp:sync:
+    post:
+      tags: [system]
+      summary: 立即触发一次 NTP 同步
+      responses:
+        "200": { description: 已触发 }
+  /system/health/thresholds:
+    get:
+      tags: [system]
+      summary: 硬件健康告警阈值
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthThresholds" }
+    put:
+      tags: [system]
+      summary: 修改硬件健康告警阈值
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HealthThresholds" }
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+
+  /protocols/lldp:
+    get:
+      tags: [interfaces]
+      summary: LLDP 全局配置
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LldpConfig" }
+    put:
+      tags: [interfaces]
+      summary: 修改 LLDP 配置
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LldpConfig" }
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+  /protocols/lldp/neighbors:
+    get:
+      tags: [interfaces]
+      summary: LLDP 邻居表（运行态）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    local_interface: { type: string }
+                    chassis_id: { type: string }
+                    port_id: { type: string }
+                    system_name: { type: string }
+                    ttl: { type: integer }
+
+  /system/hardware:
+    get:
+      tags: [system]
+      summary: 硬件健康（温度/风扇/电源/SMART）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HardwareHealth" }
+
+  /system/tls:
+    get:
+      tags: [system]
+      summary: 当前 API 证书信息（subject/issuer/有效期）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TlsInfo" }
+    put:
+      tags: [system]
+      summary: 安装外部证书（PEM 文本），立即生效
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [certificate, key]
+              properties:
+                certificate: { type: string }
+                key: { type: string, format: password }
+      responses:
+        "200": { description: 已生效 }
+        "400": { $ref: "#/components/responses/Error400" }
+  /system/tls:regenerate:
+    post:
+      tags: [system]
+      summary: 重签自签证书
+      responses:
+        "200": { description: 已重签 }
+
+  /alarms:clear:
+    post:
+      tags: [alarms-events]
+      summary: 清除已 resolved 告警（all 或指定 id）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id: { type: string }
+                all: { type: boolean }
+      responses:
+        "204": { description: 已清除 }
+
+  /system/backup:
+    get:
+      tags: [system]
+      summary: 配置备份归档列表
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/BackupArchive" }
+    post:
+      tags: [system]
+      summary: 生成配置备份归档
+      responses:
+        "202":
+          description: 已生成
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupArchive" }
+  /system/backup/{file}:
+    parameters: [{ name: file, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [system]
+      summary: 下载备份归档
+      responses:
+        "200":
+          description: application/octet-stream
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+  /system/restore:
+    post:
+      tags: [system]
+      summary: 从备份归档恢复（导入为 candidate 并提交）
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+
+  /system/tech-support:
+    get:
+      tags: [system]
+      summary: 诊断归档列表
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/BackupArchive" }
+    post:
+      tags: [system]
+      summary: 生成诊断归档（版本/配置/日志/审计/状态/core dump 清单）
+      responses:
+        "202":
+          description: 已生成
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupArchive" }
+  /system/tech-support/{file}:
+    parameters: [{ name: file, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [system]
+      summary: 下载诊断归档
+      responses:
+        "200":
+          description: application/octet-stream
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+
+  /system/core-dumps:
+    get:
+      tags: [system]
+      summary: 崩溃转储清单
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CoreDump" }
+    delete:
+      tags: [system]
+      summary: 删除转储（file 缺省为全部）
+      parameters: [{ name: file, in: query, schema: { type: string } }]
+      responses:
+        "204": { description: 已删除 }
+
+  /interfaces/{name}/sriov:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    put:
+      tags: [interfaces]
+      summary: 设置 VF 数量（创建/回收 VF）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vf_count]
+              properties:
+                vf_count: { type: integer }
+      responses:
+        "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "400": { $ref: "#/components/responses/Error400" }
+
+  /system/login-users/{name}:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    put:
+      tags: [system]
+      summary: 修改用户（class/口令，需 super-user）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                class: { type: string }
+                password: { type: string, format: password }
+      responses:
+        "200": { description: 已更新（入审计） }
+    delete:
+      tags: [system]
+      summary: 删除用户
+      responses:
+        "204": { description: 已删除 }
+        "409": { $ref: "#/components/responses/Error409" }   # 不能删除自己/最后一个 super-user
+  /system/login-users/{name}:change-password:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [auth]
+      summary: 口令自助修改（登录者本人或 super-user，需旧口令）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [old_password, new_password]
+              properties:
+                old_password: { type: string, format: password }
+                new_password: { type: string, format: password }
+      responses:
+        "200": { description: 已修改（入审计） }
+        "403": { $ref: "#/components/responses/Error403" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: nfvis-token
+
+  responses:
+    ConfigAccepted:
+      description: "已写入 candidate（无 Auto-Commit 头）或已提交生效（带 X-NFVIS-Auto-Commit: true）"
+      headers:
+        X-NFVIS-Committed:
+          schema: { type: boolean }
+          description: true 表示本次请求已直接提交
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/CommitResult" }
+    Error400: { description: 校验失败, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Error401: { description: 未认证, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Error403: { description: 无权限或账号锁定, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Error404: { description: 资源不存在, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Error409: { description: 冲突（引用存在/配额不足/会话锁占用）, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: VALIDATION_FAILED }
+        message: { type: string }
+        detail:
+          type: array
+          items:
+            type: object
+            properties:
+              path: { type: string, example: "virtual-machine-functions[fw-vm].memory.size-mb" }
+              message: { type: string, example: "资源池大页 1G 不足：需要 8，空闲 2" }
+
+    LoginResponse:
+      type: object
+      properties:
+        token: { type: string }
+        token_id: { type: string }
+        user: { $ref: "#/components/schemas/LoginUser" }
+        expires_in: { type: integer }
+
+    LoginUser:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        class: { type: string, example: super-user }
+        kind: { type: string, enum: [user, class], description: 区分用户与 class 定义 }
+
+    SystemStatus:
+      type: object
+      properties:
+        hostname: { type: string }
+        uptime_seconds: { type: integer }
+        cpu:
+          type: object
+          properties:
+            total: { type: integer }
+            isolated: { type: array, items: { type: integer } }
+            usage_percent: { type: number }
+        memory:
+          type: object
+          properties:
+            total_mb: { type: integer }
+            used_mb: { type: integer }
+        hugepages:
+          type: object
+          properties:
+            page_size_kb: { type: integer }
+            total: { type: integer }
+            free: { type: integer }
+        storage:
+          type: object
+          properties:
+            data_total_gb: { type: number }
+            data_used_gb: { type: number }
+            images_gb: { type: number }
+
+    VersionInfo:
+      type: object
+      properties:
+        nfvis: { type: string, example: "1.0.0" }
+        ubuntu: { type: string, example: "26.04 LTS" }
+        vpp: { type: string, example: "26.06" }
+        dpdk: { type: string }
+        libvirt: { type: string }
+        qemu: { type: string }
+        docker: { type: string }
+
+    SystemConfig:
+      type: object
+      properties:
+        hostname: { type: string }
+        timezone: { type: string, example: "Asia/Shanghai" }
+        ntp:
+          type: array
+          items:
+            type: object
+            properties:
+              server: { type: string }
+              prefer: { type: boolean }
+        dns_servers: { type: array, items: { type: string } }
+        management:
+          type: object
+          properties:
+            address: { type: string, example: "192.168.1.10/24" }
+            gateway: { type: string }
+        syslog:
+          type: object
+          properties:
+            remote_host: { type: string }
+            remote_port: { type: integer }
+            level: { type: string, enum: [debug, info, warn, error] }
+            retention_days: { type: integer, description: 本地日志保留天数（FR-SYS-013） }
+            max_size_mb: { type: integer, description: 本地日志容量上限，滚动覆盖 }
+        api:
+          type: object
+          properties:
+            port: { type: integer }
+            token_ttl_minutes: { type: integer }
+            max_sessions: { type: integer }
+        idle_timeout_minutes: { type: integer }
+
+    Interface:
+      type: object
+      properties:
+        name: { type: string, example: "ens2f0" }
+        kind: { type: string, enum: [physical, management, vpp-internal] }
+        driver: { type: string, example: "ice-dpdk" }
+        enabled: { type: boolean }
+        link: { type: string, enum: [up, down] }
+        speed_mbps: { type: integer }
+        mtu: { type: integer }
+        mac: { type: string }
+        numa_node: { type: integer }
+        description: { type: string }
+        sriov:
+          type: object
+          properties:
+            vf_count: { type: integer }
+            vfs:
+              type: array
+              items:
+                type: object
+                properties:
+                  vf_id: { type: integer }
+                  assigned_vnf: { type: string }
+        statistics:
+          type: object
+          properties:
+            rx_packets: { type: integer, format: int64 }
+            tx_packets: { type: integer, format: int64 }
+            rx_bytes: { type: integer, format: int64 }
+            tx_bytes: { type: integer, format: int64 }
+            rx_errors: { type: integer, format: int64 }
+            tx_errors: { type: integer, format: int64 }
+            rx_drops: { type: integer, format: int64 }
+            tx_drops: { type: integer, format: int64 }
+
+    InterfaceUpdate:
+      type: object
+      properties:
+        description: { type: string }
+        mtu: { type: integer }
+        enabled: { type: boolean }
+
+    VppStatus:
+      type: object
+      properties:
+        state: { type: string, enum: [running, restarting, failed] }
+        version: { type: string, example: "26.06" }
+        dpdk: { type: string }
+        threads:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              name: { type: string, example: vpp_wk_0 }
+              core: { type: integer }
+              type: { type: string, enum: [main, worker] }
+        buffers_per_numa: { type: integer }
+        main_heap_size: { type: string }
+        config_revision: { type: integer }
+        pending_restart: { type: boolean, description: 配置已变更但数据面未按新配置重启 }
+
+    VppConfig:
+      type: object
+      properties:
+        cpu:
+          type: object
+          properties:
+            main_core: { type: integer }
+            corelist_workers: { type: string, example: "5,7" }
+            workers_per_numa: { type: integer, description: 与 corelist_workers 互斥 }
+        memory:
+          type: object
+          properties:
+            main_heap_size: { type: string, example: "1G" }
+            buffers_per_numa: { type: integer }
+            hugepage_preference: { type: string, enum: ["2M", "1G"] }
+        dpdk:
+          type: object
+          properties:
+            dev:
+              type: object
+              description: 全局默认（作用于所有未单独配置的物理 NIC）
+              properties:
+                rx_queues: { type: integer }
+                tx_queues: { type: integer }
+                rx_descriptors: { type: integer }
+                tx_descriptors: { type: integer }
+            per_dev:
+              type: array
+              description: 单网卡覆盖（删除后回落全局默认）
+              items:
+                type: object
+                required: [interface]
+                properties:
+                  interface: { type: string }
+                  rx_queues: { type: integer }
+                  tx_queues: { type: integer }
+                  rx_descriptors: { type: integer }
+                  tx_descriptors: { type: integer }
+            uio_driver: { type: string, enum: [vfio-pci, igb-uio] }
+        plugins:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              state: { type: string, enum: [enable, disable] }
+
+    CaptureStatus:
+      type: object
+      properties:
+        active:
+          type: object
+          nullable: true
+          properties:
+            interface: { type: string }
+            captured: { type: integer }
+            started_at: { type: string, format: date-time }
+        files:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string, example: "cap-ens2f0-20260912.pcap" }
+              size_bytes: { type: integer, format: int64 }
+              created_at: { type: string, format: date-time }
+
+    Bond:
+      type: object
+      required: [name, members]
+      properties:
+        name: { type: string }
+        members: { type: array, items: { type: string } }
+        lacp:
+          type: object
+          nullable: true
+          description: null = 静态聚合
+          properties:
+            mode: { type: string, enum: [active, passive] }
+            interval: { type: string, enum: [fast, slow] }
+        mtu: { type: integer }
+        description: { type: string }
+        state:
+          type: object
+          description: 运行态
+          properties:
+            link: { type: string, enum: [up, down] }
+            active_members: { type: integer }
+
+    LldpConfig:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        advertisement_interval: { type: integer, default: 30 }
+        interfaces:
+          type: array
+          items:
+            type: object
+            properties:
+              interface: { type: string }
+              enabled: { type: boolean }
+
+    HealthThresholds:
+      type: object
+      properties:
+        cpu_temp_celsius: { type: integer, example: 85 }
+        disk_temp_celsius: { type: integer, example: 60 }
+        disk_used_percent: { type: integer, example: 90 }
+
+    HardwareHealth:
+      type: object
+      properties:
+        bmc_present: { type: boolean }
+        sensors:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string, example: CPU1 Temp }
+              type: { type: string, enum: [temperature, fan, voltage, power] }
+              value: { type: number }
+              unit: { type: string }
+              status: { type: string, enum: [ok, warning, critical] }
+        disks:
+          type: array
+          items:
+            type: object
+            properties:
+              device: { type: string }
+              smart_status: { type: string, enum: [passed, failed, unknown] }
+              temp_celsius: { type: number }
+              wear_percent: { type: number }
+
+    TlsInfo:
+      type: object
+      properties:
+        subject: { type: string }
+        issuer: { type: string }
+        not_before: { type: string, format: date-time }
+        not_after: { type: string, format: date-time }
+        self_signed: { type: boolean }
+
+    BackupArchive:
+      type: object
+      properties:
+        file: { type: string }
+        kind: { type: string, enum: [config-backup, tech-support] }
+        size_bytes: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        includes_core_dumps: { type: boolean, description: tech-support 归档时 }
+
+    CoreDump:
+      type: object
+      properties:
+        file: { type: string }
+        process: { type: string, example: vpp_main }
+        size_bytes: { type: integer, format: int64 }
+        occurred_at: { type: string, format: date-time }
+
+    VirtualSwitch:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [l2, l3] }
+        description: { type: string }
+        vlan_access: { type: integer, description: 仅 L2：默认 untag VLAN }
+        cross_connect: { type: boolean, description: 仅 L2：两端口直通模式 }
+        gateway:
+          type: object
+          description: 仅 L2：BVI 三层网关（FR-NET-014）
+          properties:
+            addresses: { type: array, items: { type: string }, description: IPv4/IPv6 网关地址 }
+            vrf: { type: string, description: 缺省为专属 VRF vr-<name> }
+            acl_in: { type: string }
+            acl_out: { type: string }
+        ports:
+          type: array
+          items: { $ref: "#/components/schemas/VSwitchPort" }
+
+    VSwitchPort:
+      type: object
+      required: [seq]
+      properties:
+        seq: { type: integer }
+        interface: { type: string, description: 物理口名（与 vnf/container 三选一） }
+        vnf: { type: string }
+        vnf_interface: { type: string }
+        container: { type: string }
+        container_interface: { type: string }
+        vlan:
+          type: object
+          properties:
+            trunk: { type: array, items: { type: integer } }
+            native: { type: integer }
+        acl_in: { type: string }
+        acl_out: { type: string }
+        state: { type: string, enum: [up, down], description: 运行态 }
+
+    Vrf:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        l3_interfaces:
+          type: array
+          items:
+            type: object
+            properties:
+              interface: { type: string, example: "ens2f0.100" }
+              vlan: { type: integer }
+              addresses: { type: array, items: { type: string } }
+              acl_in: { type: string }
+        routes:
+          type: array
+          items: { $ref: "#/components/schemas/Route" }
+
+    Route:
+      type: object
+      required: [prefix, next_hop]
+      properties:
+        prefix: { type: string, example: "0.0.0.0/0" }
+        next_hop: { type: string }
+        distance: { type: integer, default: 1 }
+
+    Acl:
+      type: object
+      required: [name, rules]
+      properties:
+        name: { type: string }
+        rules:
+          type: array
+          items:
+            type: object
+            required: [seq, action]
+            properties:
+              seq: { type: integer }
+              direction: { type: string, enum: [ingress, egress] }
+              source: { type: string, example: "10.0.0.0/8 或 any" }
+              destination: { type: string }
+              protocol: { type: string, enum: [tcp, udp, icmp, any] }
+              source_port: { type: string }
+              destination_port: { type: string }
+              action: { type: string, enum: [permit, deny] }
+              hits: { type: integer, description: 运行态命中计数 }
+
+    NatConfig:
+      type: object
+      properties:
+        source_pools:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              address_range: { type: string, example: "100.64.0.10 to 100.64.0.50" }
+        rules:
+          type: array
+          items:
+            type: object
+            properties:
+              seq: { type: integer }
+              match_source: { type: string }
+              virtual_switch: { type: string }
+              action:
+                type: object
+                properties:
+                  source_pool: { type: string }
+                  interface: { type: string }
+        static:
+          type: array
+          items:
+            type: object
+            properties:
+              inside_ip: { type: string }
+              outside_ip: { type: string }
+
+    PortMirroring:
+      type: object
+      required: [name, source, analyzer]
+      properties:
+        name: { type: string }
+        source:
+          type: object
+          properties:
+            interface: { type: string }
+            vnf: { type: string }
+            vnf_interface: { type: string }
+            direction: { type: string, enum: [ingress, egress, both] }
+        analyzer: { type: string, description: 分析端口（物理口） }
+
+    QosPolicy:
+      type: object
+      required: [name, cir]
+      properties:
+        name: { type: string }
+        cir: { type: integer, description: bps }
+        cbs: { type: integer, description: bytes }
+        bound_interfaces:
+          type: array
+          items: { type: string }
+
+    ResourcePool:
+      type: object
+      properties:
+        hugepages:
+          type: array
+          items:
+            type: object
+            properties:
+              page_size: { type: string, enum: ["2M", "1G"] }
+              total: { type: integer }
+              allocated: { type: integer }
+              free: { type: integer }
+        cpu:
+          type: object
+          properties:
+            isolated_cores:
+              type: array
+              items: { type: integer }
+            numa:
+              type: array
+              items:
+                type: object
+                properties:
+                  node: { type: integer }
+                  cores: { type: array, items: { type: integer } }
+            allocated:
+              type: array
+              items:
+                type: object
+                properties:
+                  vnf: { type: string }
+                  cores: { type: array, items: { type: integer } }
+
+    VMFunction:
+      type: object
+      required: [name, image, vcpu, memory]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        image: { type: string }
+        vcpu:
+          type: object
+          properties:
+            count: { type: integer }
+            pin: { type: boolean, default: true }
+            cores_assigned: { type: array, items: { type: integer }, description: 运行态实际绑核 }
+        memory:
+          type: object
+          properties:
+            size_mb: { type: integer }
+            hugepage_size: { type: string, enum: ["2M", "1G"] }
+            numa_node: { type: integer }
+            backing: { type: string, enum: [hugepage, normal], default: hugepage, description: normal 时禁止 vhost-user vNIC }
+        disks:
+          type: array
+          description: 附加数据盘（virtio）
+          items:
+            type: object
+            required: [name]
+            properties:
+              name: { type: string }
+              size_gb: { type: integer, description: 空盘容量（与 image 二选一） }
+              image: { type: string, description: 从 vm-image 克隆创建 }
+        interfaces:
+          type: array
+          items: { $ref: "#/components/schemas/VnfInterface" }
+        cloud_init:
+          type: object
+          properties:
+            user_data: { type: string }
+            ssh_keys: { type: array, items: { type: string } }
+            hostname: { type: string }
+        serial_console: { type: boolean, default: true }
+        autostart: { type: boolean }
+        state: { type: string, enum: [running, shutoff, crashed, paused], description: 运行态 }
+
+    VnfInterface:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [vhost-user, sriov-vf, memif] }
+        virtual_switch: { type: string, description: sriov-vf 时仅登记 }
+        mac: { type: string }
+        vlan: { type: integer }
+        sriov:
+          type: object
+          properties:
+            physical_interface: { type: string }
+            vf_id: { type: integer }
+        state: { type: string, enum: [up, down] }
+
+    ContainerFunction:
+      type: object
+      required: [name, image]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        image: { type: string }
+        vcpu: { type: integer }
+        memory_mb: { type: integer }
+        interfaces:
+          type: array
+          items: { $ref: "#/components/schemas/VnfInterface" }
+        env:
+          type: object
+          additionalProperties: { type: string }
+        command: { type: string }
+        args: { type: array, items: { type: string } }
+        restart_policy: { type: string, enum: [no, on-failure] }
+        autostart: { type: boolean }
+        state: { type: string, enum: [running, exited, dead] }
+
+    Image:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [vm-image, container-image] }
+        size_bytes: { type: integer, format: int64 }
+        sha256: { type: string }
+        format: { type: string, example: qcow2 }
+        description: { type: string }
+        imported_at: { type: string, format: date-time }
+        ref_count: { type: integer, description: 引用该镜像的 VNF 数 }
+        import_state: { type: string, enum: [ready, downloading, failed], description: 运行态 }
+
+    Snapshot:
+      type: object
+      properties:
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        size_bytes: { type: integer, format: int64 }
+        description: { type: string }
+
+    ConfigDocument:
+      type: object
+      description: 整份配置文档（JSON 形式，节点与 CLI 层级一致）
+      properties:
+        system: { $ref: "#/components/schemas/SystemConfig" }
+        interfaces:
+          type: array
+          items: { $ref: "#/components/schemas/InterfaceUpdate" }
+        virtual_switches:
+          type: array
+          items: { $ref: "#/components/schemas/VirtualSwitch" }
+        vrfs:
+          type: array
+          items: { $ref: "#/components/schemas/Vrf" }
+        acls:
+          type: array
+          items: { $ref: "#/components/schemas/Acl" }
+        nat: { $ref: "#/components/schemas/NatConfig" }
+        port_mirroring:
+          type: array
+          items: { $ref: "#/components/schemas/PortMirroring" }
+        qos_policies:
+          type: array
+          items: { $ref: "#/components/schemas/QosPolicy" }
+        resource_pools: { $ref: "#/components/schemas/ResourcePool" }
+        virtual_machine_functions:
+          type: array
+          items: { $ref: "#/components/schemas/VMFunction" }
+        container_functions:
+          type: array
+          items: { $ref: "#/components/schemas/ContainerFunction" }
+
+    CommitResult:
+      type: object
+      properties:
+        committed: { type: boolean }
+        revision: { type: integer, description: 配置快照编号 }
+        confirmed_until: { type: string, format: date-time, description: commit confirmed 截止时间 }
+        warnings:
+          type: array
+          items: { type: string, example: "resource-pools 变更需 reboot 生效" }
+
+    Alarm:
+      type: object
+      required: [id, severity, code, message, raised_at, state]
+      properties:
+        id: { type: string }
+        severity: { type: string, enum: [info, warning, error, critical] }
+        code: { type: string, example: VNF_CRASHED }
+        message: { type: string }
+        source: { type: string, example: "virtual-machine-functions/fw-vm" }
+        raised_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+        state: { type: string, enum: [active, resolved] }
+
+    Event:
+      type: object
+      properties:
+        type: { type: string, enum: [alarm-raised, alarm-resolved, vnf-state-changed, image-import-progress, config-committed] }
+        timestamp: { type: string, format: date-time }
+        payload: { type: object, additionalProperties: true }
+
+    AuditEntry:
+      type: object
+      properties:
+        timestamp: { type: string, format: date-time }
+        user: { type: string }
+        source_ip: { type: string }
+        action: { type: string, example: "config.commit / vmf.start / login" }
+        detail: { type: string, description: 配置 diff 或操作参数摘要 }
+        result: { type: string, enum: [success, failure] }
