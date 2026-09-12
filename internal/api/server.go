@@ -35,6 +35,7 @@ type Options struct {
 type Server struct {
 	aaa     *aaa.Service
 	engine  *config.Engine
+	cliExec *cliExecutor
 	log     *slog.Logger
 	mux     *http.ServeMux
 	http    *http.Server
@@ -51,7 +52,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), log: log}
 	mux := http.NewServeMux()
 
 	// 认证（免 token，FR-API-001）
@@ -72,6 +73,9 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/configuration/diff", cfgAPI(s.handleDiff))
 	mux.Handle("POST "+APIPrefix+"/configuration/rollback/{n}", cfgAPI(s.handleRollback))
 	mux.Handle("GET "+APIPrefix+"/system/configuration/sessions", cfgAPI(s.handleSessions))
+
+	// CLI 执行通道（cli_bridge）：逐命令权限在执行器内按 schema 节点判定
+	mux.Handle("POST "+APIPrefix+"/cli/execute", s.auth(s.handleCLIExecute, schema.ClassReadOnly, "cli"))
 
 	// 资源 handlers 第一组（GET = show 等级 R；写 = configure 等级 S；FR-API-003 映射）
 	mux.Handle("GET "+APIPrefix+"/system", s.auth(s.handleGetSystem, schema.ClassReadOnly, "show system"))

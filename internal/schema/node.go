@@ -92,6 +92,16 @@ type Node struct {
 	Dynamic   string   // Param 的动态候选来源 kind
 	Optional  bool     // [] 可选（如 ports [<seq>]、confirmed [minutes]）
 
+	// ScalarParam 标量参数：该参数的取值在配置模型中是标量字段（而非具名数组
+	// 元素的实例名），ScalarJSONKey 为其 JSON 键（如 ports 下 interface <ifname>
+	// → VSwitchPort.interface）。cli_bridge 执行期翻译据此区分两类参数。
+	ScalarParam   bool
+	ScalarJSONKey string
+
+	// IdentityValue 身份取值关键字：其取值是父层具名数组的元素身份
+	//（如 hugepages page-size <2M|1G> 的 1G 即 HPool 元素的 page_size 身份）。
+	IdentityValue bool
+
 	parent *Node // finalize 时回填，用于值/无子树参数消耗后的层级回退
 }
 
@@ -118,6 +128,15 @@ func VE(typ, desc string, enums ...string) *Node {
 func P(placeholder, desc, dynamic string, children ...*Node) *Node {
 	return &Node{Kind: Param, Name: placeholder, Desc: desc, Dynamic: dynamic, Children: children, ParamType: "name"}
 }
+
+// SP 标量参数节点：取值不进路径、作为父关键字下的标量字段存储
+// （如 `ports 1 interface ens2f0` 的 ens2f0 → VSwitchPort.interface）。
+func SP(placeholder, jsonKey, desc string) *Node {
+	return &Node{Kind: Param, Name: placeholder, Desc: desc, ScalarParam: true, ScalarJSONKey: jsonKey, ParamType: "name"}
+}
+
+// IV 标记身份取值关键字（其值是父层具名数组的元素身份，见 IdentityValue）。
+func IV(n *Node) *Node { n.IdentityValue = true; return n }
 
 // PT 指定类型的实例参数节点（如 <vlan>、<seq>）。
 func PT(placeholder, typ, desc string, children ...*Node) *Node {
