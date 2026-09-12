@@ -1469,10 +1469,18 @@ components:
 
     InterfaceUpdate:
       type: object
+      description: 物理网卡配置视图。在 ConfigDocument（整份配置文档）中 name 必填；PUT /interfaces/{name} 时可省略
       properties:
+        name: { type: string, description: 接口名 }
         description: { type: string }
         mtu: { type: integer }
         enabled: { type: boolean }
+        sriov:
+          type: object
+          description: SR-IOV VF 配置（FR-NET-004，命令树 §2.3）
+          properties:
+            vf_count: { type: integer }
+        ingress_policy: { type: string, description: 入向限速策略绑定（命令树 §2.5） }
 
     VppStatus:
       type: object
@@ -1805,6 +1813,7 @@ components:
             type: object
             properties:
               page_size: { type: string, enum: ["2M", "1G"] }
+              count: { type: integer, description: 配置的页数量（配置文档用）；GET 运行态视图另含 total/allocated/free }
               total: { type: integer }
               allocated: { type: integer }
               free: { type: integer }
@@ -1939,6 +1948,10 @@ components:
         interfaces:
           type: array
           items: { $ref: "#/components/schemas/InterfaceUpdate" }
+        bonds:
+          type: array
+          description: 链路聚合（FR-NET-017，纳入事务引擎可 compare/rollback）
+          items: { $ref: "#/components/schemas/Bond" }
         virtual_switches:
           type: array
           items: { $ref: "#/components/schemas/VirtualSwitch" }
@@ -1956,6 +1969,14 @@ components:
           type: array
           items: { $ref: "#/components/schemas/QosPolicy" }
         resource_pools: { $ref: "#/components/schemas/ResourcePool" }
+        vpp:
+          $ref: "#/components/schemas/VppConfig"
+          description: VPP 数据面配置（FR-SYS-008，纳入事务引擎可 compare/rollback）
+        protocols:
+          type: object
+          description: 顶级协议层级（命令树 §2.2b）
+          properties:
+            lldp: { $ref: "#/components/schemas/LldpConfig" }
         virtual_machine_functions:
           type: array
           items: { $ref: "#/components/schemas/VMFunction" }
