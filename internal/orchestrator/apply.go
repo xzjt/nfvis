@@ -336,3 +336,11 @@ func jsonKey(v any) any {
 	}
 	return out
 }
+
+// NewNoopApplier M2 阶段的空底座实现（骨架 §5：M2 可完整演示 CLI/API 事务，
+// 不含真实网络）。下发即成功、恢复收敛为空集；M3/M4 以真实 Provider 替换。
+func NewNoopApplier() Applier { return noopApplier{} }
+
+type noopApplier struct{}
+
+func (noopApplier) Apply(context.Context, model.Config, model.Config) error { return nil }

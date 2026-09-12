@@ -31,9 +31,40 @@ type SystemConfig struct {
 	Ntp                []NtpServer   `json:"ntp,omitempty"`
 	DNSServers         []string      `json:"dns_servers,omitempty"`
 	Management         *MgmtConfig   `json:"management,omitempty"`
+	Login              *SystemLogin  `json:"login,omitempty"` // 本地用户与 class（FR-SEC-002/003，附录 A #25）
 	Syslog             *SyslogConfig `json:"syslog,omitempty"`
 	API                *APIConfig    `json:"api,omitempty"`
 	IdleTimeoutMinutes int           `json:"idle_timeout_minutes,omitempty"`
+}
+
+// SystemLogin 本地 AAA 配置：用户/class/口令策略，声明式存于配置文档
+// （可 compare/rollback）；口令仅存加盐哈希，明文永不回显（附录 A #25）。
+type SystemLogin struct {
+	Users          []LoginUserConfig `json:"users,omitempty"`
+	Classes        []ClassDef        `json:"classes,omitempty"`
+	PasswordPolicy *PasswordPolicy   `json:"password_policy,omitempty"`
+}
+
+type LoginUserConfig struct {
+	Name         string `json:"name"`
+	PasswordHash string `json:"password_hash,omitempty"` // pbkdf2$sha256$<iter>$<b64salt>$<b64hash>
+	Class        string `json:"class,omitempty"`         // 缺省 read-only
+}
+
+// ClassDef 自定义 class：命令树路径前缀的 allow/deny（deny 优先）；预置类
+// super-user/operator/read-only 由 schema.Class 定义，不经此表。
+type ClassDef struct {
+	Name  string   `json:"name"`
+	Allow []string `json:"allow,omitempty"`
+	Deny  []string `json:"deny,omitempty"`
+}
+
+type PasswordPolicy struct {
+	MinLength        int  `json:"min_length,omitempty"`        // 默认 8
+	Complexity       bool `json:"complexity,omitempty"`        // ≥3/4 类字符
+	ExpireDays       int  `json:"expire_days,omitempty"`       // 0 = 不过期
+	LockoutThreshold int  `json:"lockout_threshold,omitempty"` // 默认 5
+	LockoutMinutes   int  `json:"lockout_minutes,omitempty"`   // 默认 10
 }
 
 type NtpServer struct {

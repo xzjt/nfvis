@@ -1,7 +1,7 @@
 # NFViS — 网络功能虚拟化基础设施一体机软件
 
 基于 Ubuntu 26.04 + VPP 26.06 + KVM/Libvirt 的 NFVi 一体机软件，Go 实现。
-JunOS 风格 CLI（`nfvis-cli`）+ REST API（OpenAPI 契约），当前处于 **M1（配置模型 + 事务引擎）开发阶段**。
+JunOS 风格 CLI（`nfvis-cli`）+ REST API（OpenAPI 契约），当前处于 **M2（REST API + AAA + CLI 前端）开发阶段**（M1 已合并）。
 
 ## 仓库结构
 
@@ -11,10 +11,16 @@ JunOS 风格 CLI（`nfvis-cli`）+ REST API（OpenAPI 契约），当前处于 *
 │   ├── NFViS-Go工程目录骨架设计.md             # 代码结构与里程碑（M1~M5）
 │   ├── NFViS-CLI命令树完整设计.md              # CLI 契约（命令树 + 补全细则）
 │   └── NFViS-openapi.yaml                      # REST API 契约（OpenAPI 3.0）
+├── cmd/
+│   ├── nfvisd/                                 #   守护进程入口（装配/信号/优雅退出）
+│   └── nfvis-cli/                              #   CLI 入口（M2 后续任务）
 ├── internal/                                   # 产品代码（M1 起按工程骨架布局）
-│   ├── model/                                  #   配置模型（单一数据源）+ 校验 + diff + merge
+│   ├── model/                                  #   配置模型（单一数据源）+ 校验 + diff/merge + 资源账本
+│   ├── schema/                                 #   命令树 schema（补全/缩写/权限，CLI 与 nfvisd 编译期共享）
 │   ├── config/                                 #   事务引擎：candidate/commit confirmed/rollback + SQLite
-│   └── orchestrator/                           #   底座适配接口（govpp/libvirt/docker 实现于 M3/M4）
+│   ├── orchestrator/                           #   底座适配接口（govpp/libvirt/docker 实现于 M3/M4）
+│   ├── aaa/                                    #   本地用户/class/口令策略/Token（M2）
+│   └── api/                                    #   REST server（Bearer 中间件/统一错误，M2 进行中）
 ├── Makefile                                    # make check = vet + 覆盖率门槛 + 原型全绿
 └── prototype/                                  # CLI 补全引擎交互原型（仅演示语义，非产品代码）
 ```
@@ -35,11 +41,14 @@ go run . -c "show version"     # 单命令模式
 go test ./...                  # 事务与补全逻辑测试
 ```
 
-产品代码（M1 事务引擎，纯 Go + SQLite，任意平台可开发验证）：
+产品代码（M1 事务引擎已合并；M2 API/AAA 开发中，纯 Go + SQLite，任意平台可开发验证）：
 
 ```bash
 go build ./... && go vet ./...
-make check                     # vet + 覆盖率门槛（internal/config、internal/model ≥ 70%）+ 原型全绿
+make check                     # vet + 覆盖率门槛（config/model/schema ≥ 70%）+ 原型全绿
+
+# 启动守护进程（首次启动自动引导 admin，随机口令打印一次）
+go run ./cmd/nfvisd -listen :8443 -db /tmp/nfvis.db
 ```
 
 要求 Go ≥ 1.26。M1/M2 开发在任意平台进行（底座用 mock）；M3/M4 需要 Linux + VPP/libvirt 环境（统一开发虚机，待建）。
