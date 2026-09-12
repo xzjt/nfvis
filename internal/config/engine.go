@@ -816,3 +816,11 @@ func configEq(a, b any) bool {
 	}
 	return string(ab) == string(bb)
 }
+
+// CurrentRevision 返回当前 committed 修订号（API ConfigAccepted 响应使用）。
+func (e *Engine) CurrentRevision() (int, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	rev, _, err := e.store.LatestRevision()
+	return rev, err
+}
