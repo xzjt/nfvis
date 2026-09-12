@@ -18,7 +18,7 @@ test:
 
 # 覆盖率门槛：internal/schema 与事务引擎（internal/config）≥ 70%（协作规则 3）
 # internal/schema 建立后加入 GATED_PKGS。
-GATED_PKGS := ./internal/config/ ./internal/model/
+GATED_PKGS := ./internal/config/ ./internal/model/ ./internal/schema/
 cover:
 	@fail=0; \
 	for pkg in $(GATED_PKGS); do \
