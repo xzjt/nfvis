@@ -151,3 +151,38 @@ func TestStoreAudit(t *testing.T) {
 		t.Fatalf("ListAudit 应按时间倒序返回 2 条: %+v", got)
 	}
 }
+
+func TestStoreSchemaVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nfvis.db")
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != CurrentSchemaVersion {
+		t.Fatalf("新库版本应为 %d，实际 %d err=%v", CurrentSchemaVersion, v, err)
+	}
+	if _, err := s.AppendRevision([]byte(`{}`), time.Now(), ""); err != nil {
+		t.Fatalf("AppendRevision: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// 重新打开：幂等，数据保留
+	s2, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("重开: %v", err)
+	}
+	defer s2.Close()
+	rev, _, err := s2.LatestRevision()
+	if err != nil || rev != 1 {
+		t.Fatalf("重开后数据应保留: rev=%d err=%v", rev, err)
+	}
+
+	// 过新的 schema 版本 → 拒绝打开（版本锁定，规格书 §2.3.4）
+	s2.db.Exec(`PRAGMA user_version = 99`)
+	if _, err := OpenStore(path); err == nil {
+		t.Fatalf("过新版本应拒绝启动")
+	}
+}
