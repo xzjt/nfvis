@@ -89,6 +89,19 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/VersionInfo" }
 
+  /system/configuration/sessions:
+    get:
+      tags: [configuration]
+      summary: candidate 持锁会话列表（FR-CFG-009，对应 show system configuration sessions）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ConfigSession" }
+
   /system:
     put:
       tags: [system]
@@ -2027,6 +2040,16 @@ components:
         warnings:
           type: array
           items: { type: string, example: "resource-pools 变更需 reboot 生效" }
+
+    ConfigSession:
+      type: object
+      description: candidate 会话锁持有信息（FR-CFG-009）
+      properties:
+        holder: { type: string, example: "admin@ssh" }
+        acquired_at: { type: string, format: date-time }
+        last_activity: { type: string, format: date-time }
+        dirty: { type: boolean, description: 存在未提交变更 }
+        confirmed_until: { type: string, format: date-time, description: 在途 commit confirmed 截止时间 }
 
     Alarm:
       type: object
