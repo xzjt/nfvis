@@ -2,10 +2,10 @@
 GO ?= go
 COVER_MIN ?= 70
 
-.PHONY: check build vet cover test prototype-check
+.PHONY: check build vet cover test archtest prototype-check
 
 # make check：提交前/CI 的统一自检入口（AGENTS.md「每次改动后的自检清单」）
-check: vet cover prototype-check
+check: vet cover archtest prototype-check
 
 build:
 	$(GO) build ./...
@@ -31,6 +31,12 @@ cover:
 		rm -f $$prof; \
 	done; \
 	exit $$fail
+
+# 依赖方向守护（骨架 §3.1：CLI 前端不得 import 事务引擎/API/编排/AAA）
+# -count=1 必须保留：该测试经 exec 调 go list 读取依赖，Go 构建缓存看不到
+# cmd/ 源码变化，不加会缓存命中而漏报。
+archtest:
+	$(GO) test -count=1 ./internal/archtest/
 
 # 原型演示代码仍须全绿（AGENTS.md 自检清单）
 prototype-check:
