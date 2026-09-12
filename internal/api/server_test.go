@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -19,29 +20,7 @@ import (
 
 // ---------- 测试基础设施 ----------
 
-func testAAA(t *testing.T) *aaa.Service {
-	t.Helper()
-	hash, err := aaa.HashPassword("s3cret-Passw0rd!")
-	if err != nil {
-		t.Fatalf("HashPassword: %v", err)
-	}
-	cfg := model.Config{
-		System: &model.SystemConfig{
-			Login: &model.SystemLogin{
-				Users: []model.LoginUserConfig{
-					{Name: "admin", PasswordHash: hash, Class: aaa.ClassSuperUser},
-					{Name: "viewer", PasswordHash: hash, Class: aaa.ClassReadOnly},
-				},
-			},
-		},
-	}
-	return aaa.NewService(fakeSource{cfg}, nil)
-}
-
-type fakeSource struct{ cfg model.Config }
-
-func (f fakeSource) Committed() (model.Config, error) { return f.cfg, nil }
-
+// newTestServer 真实引擎 + 引擎背书的 AAA（admin/viewer 预置进 committed 配置）。
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	store, err := config.OpenStore(filepath.Join(t.TempDir(), "nfvis.db"))
@@ -54,7 +33,34 @@ func newTestServer(t *testing.T) *httptest.Server {
 		t.Fatalf("NewEngine: %v", err)
 	}
 	t.Cleanup(engine.Close)
-	srv := New(engine, testAAA(t), Options{Addr: ":0", Log: slog.New(slog.DiscardHandler)})
+	authz := aaa.NewService(engine, nil)
+	if _, _, err := aaa.EnsureBootstrapAdmin(engine, authz, "s3cret-Passw0rd!"); err != nil {
+		t.Fatalf("引导 admin: %v", err)
+	}
+	// 预置 viewer（read-only）
+	hash, _ := aaa.HashPassword("s3cret-Passw0rd!")
+	sess := config.Session{User: "system", Source: "console"}
+	if err := engine.Edit(sess); err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	cfg, _ := engine.Committed()
+	if cfg.System == nil {
+		cfg.System = &model.SystemConfig{}
+	}
+	if cfg.System.Login == nil {
+		cfg.System.Login = &model.SystemLogin{}
+	}
+	cfg.System.Login.Users = append(cfg.System.Login.Users,
+		model.LoginUserConfig{Name: "viewer", PasswordHash: hash, Class: aaa.ClassReadOnly})
+	if err := engine.UpdateCandidate(sess, cfg); err != nil {
+		t.Fatalf("UpdateCandidate: %v", err)
+	}
+	if _, err := engine.Commit(context.Background(), sess, config.CommitOpts{Message: "预置 viewer"}); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	_ = engine.Release(sess)
+
+	srv := New(engine, authz, Options{Addr: ":0", Log: slog.New(slog.DiscardHandler)})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts

@@ -79,6 +79,17 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/cli/candidates", s.auth(s.handleCLICandidates, schema.ClassReadOnly, "cli"))
 	mux.Handle("GET "+APIPrefix+"/audit-logs", s.auth(s.handleAuditLogs, schema.ClassReadOnly, "show log audit"))
 
+	// W5：资源池 / 本地用户 / 系统状态（GET=R；写=S，§4）
+	mux.Handle("GET "+APIPrefix+"/resource-pools", s.auth(s.handleGetResourcePools, schema.ClassReadOnly, "show resource-pools"))
+	mux.Handle("PUT "+APIPrefix+"/resource-pools", cfgAPI(s.handlePutResourcePools))
+	mux.Handle("GET "+APIPrefix+"/system/login-users", cfgAPI(s.handleGetLoginUsers))
+	mux.Handle("POST "+APIPrefix+"/system/login-users", cfgAPI(s.handlePostLoginUser))
+	mux.Handle("PUT "+APIPrefix+"/system/login-users/{name}", cfgAPI(s.handlePutLoginUser))
+	mux.Handle("DELETE "+APIPrefix+"/system/login-users/{name}", cfgAPI(s.handleDeleteLoginUser))
+	// {name}:change-password 含冒号后缀，ServeMux 通配符不支持——以 {tail...} 捕获后分发
+	mux.Handle("POST "+APIPrefix+"/system/login-users/{tail...}", s.auth(s.dispatchLoginUsersPost, schema.ClassReadOnly, "request system password change"))
+	mux.Handle("GET "+APIPrefix+"/system/status", s.auth(s.handleGetSystemStatus, schema.ClassReadOnly, "show system uptime"))
+
 	// 资源 handlers 第一组（GET = show 等级 R；写 = configure 等级 S；FR-API-003 映射）
 	mux.Handle("GET "+APIPrefix+"/system", s.auth(s.handleGetSystem, schema.ClassReadOnly, "show system"))
 	mux.Handle("PUT "+APIPrefix+"/system", cfgAPI(s.handlePutSystem))

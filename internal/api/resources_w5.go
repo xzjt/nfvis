@@ -1,0 +1,338 @@
+package api
+
+// W5：无底座依赖的 API handlers（M2 收尾任务清单 W5）。
+// resource-pools（FR-CMP-001~004，FR-SYS-002/010）、login-users（FR-SEC-002/003/008，
+// 决策 #25）、system/status（§6.2）。
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/xzjt/nfvis/internal/aaa"
+	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/schema"
+)
+
+// ---------- resource-pools（FR-CMP-001~003） ----------
+
+// handleGetResourcePools GET /api/v1/resource-pools：配置 + 账本用量
+// （总量/已分配/空闲，vpp-reserved 单列，FR-CMP-003/FR-SYS-010）。
+func (s *Server) handleGetResourcePools(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.engine.Committed()
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	ledger := model.NewPoolLedger(cfg)
+	_ = ledger.Allocate(cfg) // 分配演练填充用量（缺口不影响只读展示）
+
+	var hugepages []map[string]any
+	for _, hp := range cfg.ResourcePools.Hugepages {
+		u := ledger.Hugepages[hp.PageSize]
+		hugepages = append(hugepages, map[string]any{
+			"page_size": hp.PageSize,
+			"total":     hp.Count,
+			"allocated": u.Allocated,
+			"free":      u.Free,
+		})
+	}
+	// 排序保证稳定输出
+	sort.Slice(hugepages, func(i, j int) bool {
+		return fmt.Sprint(hugepages[i]["page_size"]) < fmt.Sprint(hugepages[j]["page_size"])
+	})
+	cpu := map[string]any{
+		"isolated":     ledger.CPU.Isolated,
+		"vpp_reserved": ledger.CPU.VppReserved,
+		"free":         ledger.CPU.Free,
+		"vm_allocated": ledger.CPU.VMCores,
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"hugepages": hugepages, "cpu": cpu})
+}
+
+// handlePutResourcePools PUT /api/v1/resource-pools：修改资源池
+// （写 candidate；Auto-Commit 时 commit 返回 reboot 警告，FR-SYS-002；
+// 缩减校验由账本在 commit 阶段执行，FR-CMP-004）。
+func (s *Server) handlePutResourcePools(w http.ResponseWriter, r *http.Request) {
+	var in model.ResourcePool
+	if err := decodeBody(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	s.mutateCandidate(w, r, http.StatusOK, func(cfg *model.Config) error {
+		rp := in
+		cfg.ResourcePools = &rp
+		return nil
+	})
+}
+
+// ---------- login-users（FR-SEC-002/003/008，决策 #25） ----------
+
+// loginUsersOf 返回 committed 的 system.login（不存在则返回空结构）。
+func loginUsersOf(cfg model.Config) model.SystemLogin {
+	if cfg.System != nil && cfg.System.Login != nil {
+		return *cfg.System.Login
+	}
+	return model.SystemLogin{}
+}
+
+// handleGetLoginUsers GET /api/v1/system/login-users：用户与 class 列表
+// （口令哈希永不回显，FR-SEC-007）。
+func (s *Server) handleGetLoginUsers(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.engine.Committed()
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	l := loginUsersOf(cfg)
+	users := make([]map[string]any, 0, len(l.Users))
+	for _, u := range l.Users {
+		users = append(users, map[string]any{"name": u.Name, "class": effectiveClassOf(u)})
+	}
+	classes := make([]map[string]any, 0, len(l.Classes))
+	for _, c := range l.Classes {
+		classes = append(classes, map[string]any{"name": c.Name, "allow": c.Allow, "deny": c.Deny})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": users, "classes": classes})
+}
+
+func effectiveClassOf(u model.LoginUserConfig) string {
+	if u.Class != "" {
+		return u.Class
+	}
+	return aaa.ClassReadOnly
+}
+
+// mutateLoginUsers 在 candidate 上修改 system.login 并按需直提。
+func (s *Server) mutateLoginUsers(w http.ResponseWriter, r *http.Request, status int, mutate func(*model.SystemLogin) error) {
+	sess := sessionFromIdentity(r)
+	if err := s.engine.Edit(sess); err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	cfg, _, err := s.engine.Candidate()
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	if cfg.System == nil {
+		cfg.System = &model.SystemConfig{}
+	}
+	if cfg.System.Login == nil {
+		cfg.System.Login = &model.SystemLogin{}
+	}
+	if err := mutate(cfg.System.Login); err != nil {
+		var ce conflictError
+		if errors.As(err, &ce) {
+			writeError(w, http.StatusConflict, "CONFLICT", err.Error(), nil)
+			return
+		}
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	if err := s.engine.UpdateCandidate(sess, cfg); err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	// 用户/口令变更强制直提生效（FR-SEC-008，入审计）
+	opts := CommitOptsFrom(r)
+	opts.Message = "login-users 变更"
+	res, err := s.engine.Commit(r.Context(), sess, opts)
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	w.Header().Set("X-NFVIS-Committed", "true")
+	writeJSON(w, status, commitResponseOf(res))
+}
+
+// handlePostLoginUser POST /api/v1/system/login-users：创建用户或 class。
+func (s *Server) handlePostLoginUser(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name     string   `json:"name"`
+		Kind     string   `json:"kind"` // user | class
+		Password string   `json:"password"`
+		Class    string   `json:"class"`
+		Allow    []string `json:"allow"`
+		Deny     []string `json:"deny"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	if in.Name == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "name 必填", nil)
+		return
+	}
+	s.mutateLoginUsers(w, r, http.StatusCreated, func(l *model.SystemLogin) error {
+		if in.Kind == "class" {
+			for _, c := range l.Classes {
+				if c.Name == in.Name {
+					return conflictError("class " + in.Name + " 已存在")
+				}
+			}
+			l.Classes = append(l.Classes, model.ClassDef{Name: in.Name, Allow: in.Allow, Deny: in.Deny})
+			return nil
+		}
+		for _, u := range l.Users {
+			if u.Name == in.Name {
+				return conflictError("用户 " + in.Name + " 已存在")
+			}
+		}
+		if in.Password == "" {
+			return errors.New("新用户必须设置初始口令")
+		}
+		if bad := aaa.CheckPasswordPolicy(in.Password, l.PasswordPolicy); len(bad) > 0 {
+			return errors.New("口令不满足策略：" + strings.Join(bad, "；"))
+		}
+		hash, err := aaa.HashPassword(in.Password)
+		if err != nil {
+			return err
+		}
+		l.Users = append(l.Users, model.LoginUserConfig{Name: in.Name, PasswordHash: hash, Class: in.Class})
+		return nil
+	})
+}
+
+// handlePutLoginUser PUT /api/v1/system/login-users/{name}：改 class / 重置口令。
+func (s *Server) handlePutLoginUser(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var in struct {
+		Class    string `json:"class"`
+		Password string `json:"password"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	s.mutateLoginUsers(w, r, http.StatusOK, func(l *model.SystemLogin) error {
+		for i := range l.Users {
+			if l.Users[i].Name != name {
+				continue
+			}
+			if in.Class != "" {
+				l.Users[i].Class = in.Class
+			}
+			if in.Password != "" {
+				if bad := aaa.CheckPasswordPolicy(in.Password, l.PasswordPolicy); len(bad) > 0 {
+					return errors.New("口令不满足策略：" + strings.Join(bad, "；"))
+				}
+				hash, err := aaa.HashPassword(in.Password)
+				if err != nil {
+					return err
+				}
+				l.Users[i].PasswordHash = hash
+			}
+			return nil
+		}
+		return conflictError("用户 " + name + " 不存在")
+	})
+}
+
+// handleDeleteLoginUser DELETE /api/v1/system/login-users/{name}：
+// 不能删除自己，也不能删除最后一个 super-user（409）。
+func (s *Server) handleDeleteLoginUser(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	info, _ := Identity(r)
+	s.mutateLoginUsers(w, r, http.StatusOK, func(l *model.SystemLogin) error {
+		if name == info.User {
+			return conflictError("不能删除当前登录用户")
+		}
+		sups := 0
+		for _, u := range l.Users {
+			if effectiveClassOf(u) == aaa.ClassSuperUser {
+				sups++
+			}
+		}
+		idx := -1
+		for i := range l.Users {
+			if l.Users[i].Name == name {
+				idx = i
+			}
+		}
+		if idx < 0 {
+			return conflictError("用户 " + name + " 不存在")
+		}
+		if effectiveClassOf(l.Users[idx]) == aaa.ClassSuperUser && sups <= 1 {
+			return conflictError("不能删除最后一个 super-user 用户")
+		}
+		l.Users = append(l.Users[:idx], l.Users[idx+1:]...)
+		return nil
+	})
+}
+
+// dispatchLoginUsersPost POST /system/login-users/{tail...}：
+// 分发 {name}:change-password（冒号后缀无法表达为 ServeMux 通配符）。
+func (s *Server) dispatchLoginUsersPost(w http.ResponseWriter, r *http.Request) {
+	tail := r.PathValue("tail")
+	if name, ok := strings.CutSuffix(tail, ":change-password"); ok && name != "" {
+		req := r.WithContext(r.Context())
+		s.handleChangePassword(w, req, name)
+		return
+	}
+	writeError(w, http.StatusNotFound, "NOT_FOUND", "未知操作: "+tail, nil)
+}
+
+// handleChangePassword POST /api/v1/system/login-users/{name}:change-password：
+// 口令自助修改（FR-SEC-008，验证旧口令 + 策略；入审计）。
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, name string) {
+	info, _ := Identity(r)
+	if info.User != name {
+		// 仅本人或 super-user（FR-SEC-008）
+		if !s.aaa.Authorize(info.Class, schema.ClassSuperUser) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "只能修改本人口令", nil)
+			return
+		}
+	}
+	var in struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	if err := s.aaa.ChangePassword(name, in.OldPassword, in.NewPassword); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	hash, err := aaa.HashPassword(in.NewPassword)
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	s.mutateLoginUsers(w, r, http.StatusOK, func(l *model.SystemLogin) error {
+		for i := range l.Users {
+			if l.Users[i].Name == name {
+				l.Users[i].PasswordHash = hash
+				return nil
+			}
+		}
+		return conflictError("用户 " + name + " 不存在")
+	})
+}
+
+// ---------- system/status（§6.2，运行态字段 M3 补齐） ----------
+
+var startTime = time.Now()
+
+// handleGetSystemStatus GET /api/v1/system/status。
+func (s *Server) handleGetSystemStatus(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.engine.Committed()
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	hostname := ""
+	if cfg.System != nil {
+		hostname = cfg.System.Hostname
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hostname":       hostname,
+		"uptime_seconds": int(time.Since(startTime).Seconds()),
+		"config_ready":   true,
+	})
+}

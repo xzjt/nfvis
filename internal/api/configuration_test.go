@@ -106,7 +106,7 @@ func TestConfigurationTransactionFlow(t *testing.T) {
 		Committed bool `json:"committed"`
 		Revision  int  `json:"revision"`
 	}
-	if err := json.Unmarshal(data, &res); err != nil || !res.Committed || res.Revision != 2 {
+	if err := json.Unmarshal(data, &res); err != nil || !res.Committed || res.Revision != 4 { // rev1 初始+rev2 引导+rev3 viewer+本次
 		t.Fatalf("commit 响应不符: %s", data)
 	}
 
@@ -141,8 +141,8 @@ func TestConfigurationAutoCommit(t *testing.T) {
 		Revision int `json:"revision"`
 	}
 	_ = json.Unmarshal(data, &res)
-	if res.Revision != 2 {
-		t.Fatalf("直提 revision 应为 2: %s", data)
+	if res.Revision != 4 { // rev1+引导+viewer+本次
+		t.Fatalf("直提 revision 应为 4: %s", data)
 	}
 }
 
@@ -241,8 +241,12 @@ func TestConfigurationRollbackAndLockConflict(t *testing.T) {
 		t.Fatalf("rollback 99 应 404: %d", status)
 	}
 
-	// 会话锁互斥（FR-CFG-009）：admin@api 持锁时 viewer 登录后（升级为 super?——
-	// viewer 是 read-only，改用第二个 admin 会话模拟另一接入用户）PUT → 409
+	// 会话锁互斥（FR-CFG-009）：viewer 经 W5 端点重建后（read-only）→ 403
+	if status, _, _ := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system/login-users", adminToken,
+		map[string]any{"name": "viewer", "kind": "user", "password": "s3cret-Passw0rd!", "class": "read-only"},
+		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("重建 viewer")
+	}
 	cfg := sampleCandidate()
 	cfg.System.Hostname = "other"
 	status, data = func() (int, []byte) {
