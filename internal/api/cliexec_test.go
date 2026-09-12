@@ -1,6 +1,7 @@
 package api
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -195,5 +196,92 @@ func TestCLISessionIsolation(t *testing.T) {
 	res := x.Execute("admin", aaa.ClassSuperUser, "console", "show")
 	if strings.Contains(res.Output, "from-ssh") {
 		t.Fatalf("console 会话不应看到 ssh 会话的变更:\n%s", res.Output)
+	}
+}
+
+// ---------- W4：导入导出与注释（FR-CFG-007/008） ----------
+
+func TestCLIAnnotateAndRender(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set system hostname ann-node",
+		"annotate system hostname \"核心管理节点\"",
+	)
+
+	res := x.Execute("admin", aaaClassSU, "ssh", "show")
+	if !strings.Contains(res.Output, "ann-node") || !strings.Contains(res.Output, "/* system hostname: 核心管理节点 */") {
+		t.Fatalf("show 应渲染注释:\n%s", res.Output)
+	}
+
+	out := run(t, x, "admin", aaaClassSU, "ssh", "commit")
+	if !strings.Contains(out, "commit 成功") {
+		t.Fatalf("提交: %s", out)
+	}
+	// committed 渲染仍含注释
+	res = x.Execute("admin", aaaClassSU, "ssh", "show configuration")
+	if !strings.Contains(res.Output, "核心管理节点") {
+		t.Fatalf("committed 渲染应含注释:\n%s", res.Output)
+	}
+	// 删除注释
+	run(t, x, "admin", aaaClassSU, "ssh", "annotate delete system hostname")
+	res = x.Execute("admin", aaaClassSU, "ssh", "show")
+	if strings.Contains(res.Output, "核心管理节点") {
+		t.Fatalf("删除后注释应消失:\n%s", res.Output)
+	}
+}
+
+func TestCLILoadSaveRoundTrip(t *testing.T) {
+	x, _ := newCLIKit(t)
+	savePath := filepath.Join(t.TempDir(), "cfg.json")
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set system hostname rt-node",
+		"set interfaces ens2f0 mtu 9000",
+		"save "+savePath,
+	)
+
+	// 改掉再 load override 往返
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"set system hostname changed",
+		"set interfaces ens2f1 mtu 1500",
+	)
+	run(t, x, "admin", aaaClassSU, "ssh", "load override "+savePath)
+	res := x.Execute("admin", aaaClassSU, "ssh", "show")
+	if !strings.Contains(res.Output, "rt-node") || strings.Contains(res.Output, "changed") || strings.Contains(res.Output, "ens2f1") {
+		t.Fatalf("load override 应整体替换:\n%s", res.Output)
+	}
+	out := run(t, x, "admin", aaaClassSU, "ssh", "commit")
+
+	// load merge：增量合并
+	run(t, x, "admin", aaaClassSU, "ssh", "configure")
+	mergePath := filepath.Join(t.TempDir(), "patch.json")
+	if err := os.WriteFile(mergePath, []byte(`{"system":{"hostname":"rt-merged"}}`), 0o600); err != nil {
+		t.Fatalf("写补丁: %v", err)
+	}
+	run(t, x, "admin", aaaClassSU, "ssh", "load merge "+mergePath)
+	res = x.Execute("admin", aaaClassSU, "ssh", "show")
+	if !strings.Contains(res.Output, "rt-merged") || !strings.Contains(res.Output, "mtu 9000") {
+		t.Fatalf("merge 应保留既有配置:\n%s", res.Output)
+	}
+	out = run(t, x, "admin", aaaClassSU, "ssh", "commit")
+	if !strings.Contains(out, "commit 成功") {
+		t.Fatalf("merge 后提交: %s", out)
+	}
+}
+
+func TestCLICommitCheckNoSideEffect(t *testing.T) {
+	x, engine := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set system hostname check-node",
+	)
+	res := x.Execute("admin", aaaClassSU, "ssh", "commit check")
+	if !strings.Contains(res.Output, "校验通过") {
+		t.Fatalf("commit check 应通过:\n%s", res.Output)
+	}
+	rev, _ := engine.CurrentRevision()
+	if rev != 2 { // rev1 初始 + rev2 引导，check 不落库
+		t.Fatalf("commit check 不应产生修订: %d", rev)
 	}
 }

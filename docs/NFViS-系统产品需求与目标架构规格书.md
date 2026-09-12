@@ -506,6 +506,7 @@ tap 接口 VM 接入；动态路由协议（OSPF/BGP）；VXLAN overlay；SNMP�
 | 24 | ConfigDocument 契约补全（M1 事务引擎建模时发现） | OpenAPI ConfigDocument 补入 `vpp`（FR-SYS-008 要求纳入事务引擎可 compare/rollback）、`bonds`（FR-NET-017）、`protocols.lldp`（FR-NET-018）三个 CLI 已有但契约漏列的层级；InterfaceUpdate 补 `name`、`sriov.vf_count`（FR-NET-004）、`ingress_policy`（QoS 绑定）；ResourcePool 大页池补配置项 `count`（total/allocated/free 为 GET 运行态视图）。L3 交换机的 l3-interface/静态路由数据按附录 B 映射存于同名 Vrf 条目。login-users 与 health-thresholds 层级随 M2 AAA/系统模块补入 |
 | 25 | 本地用户存储与 AAA 运行态（M2 AAA 开工确认） | 本地用户/login class/口令策略存于配置文档 `system.login`（与 CLI §2.2 层级一致，声明式，可 compare/rollback）；口令仅存加盐 PBKDF2-SHA256 哈希（`pbkdf2$sha256$<iter>$<salt>$<hash>`，标准库 crypto/pbkdf2，≥600k 轮），明文口令与哈希不回显于任何 show/API 输出；连续失败锁定计数与 API Token 为运行态（内存），nfvisd 重启后 token 失效需重新登录、锁定状态清零（实验室定位可接受，V2 可持久化）；首次启动无本地用户时由 nfvisd `-init-admin-password` 参数或随机口令（打印 stdout 一次）引导创建 admin（super-user），无任何用户时拒绝登录 |
 | 26 | API 会话列表端点（M2 配置事务 API 开工确认） | 补 `GET /system/configuration/sessions`（FR-CFG-009 会话锁列表的 API 落点，CLI 已有 `show system configuration sessions`）；API 会话以 `user@api` 为持有者标识，与 CLI 会话（`user@ssh`/`user@console`）互相独立，同用户跨接入方式并发编辑按会话锁规则互斥 |
+| 27 | 配置节点注释存储（W4 annotate 落地确认） | annotate 语句的注释以语句路径（空格连接的 CLI token，如 "system hostname"）为键存于配置文档顶层 `annotations` 字段——注释随事务引擎可 compare/rollback，随 load/save 导入导出；show configuration 以注释行渲染；delete annotate <path> 清除 |
 
 ## 附录 B：CLI 命令树 ⇄ API 资源映射（摘要，实施期展开为完整文档）
 

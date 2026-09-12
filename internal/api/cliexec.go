@@ -97,7 +97,7 @@ func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
 	if perr != nil {
 		out = "%% " + perr.Error() + "\n"
 	} else {
-		out = x.dispatch(user, class, source, s, strings.Fields(cmd))
+		out = x.dispatch(user, class, source, s, strings.Fields(cmd), cmd)
 		out = x.applyPipes(out, pipes)
 	}
 	cur := x.sess[key]
@@ -107,14 +107,14 @@ func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
 	return CLIEResult{Output: out, Mode: cur.Mode, Path: append([]string{}, cur.Path...), Prompt: promptOf(cur)}
 }
 
-func (x *cliExecutor) dispatch(user, class, source string, s *cliSession, t []string) string {
+func (x *cliExecutor) dispatch(user, class, source string, s *cliSession, t []string, raw string) string {
 	if len(t) == 0 {
 		return ""
 	}
 	if s.Mode == "oper" {
 		return x.execOper(user, class, source, s, t)
 	}
-	return x.execConfig(user, class, source, s, t)
+	return x.execConfig(user, class, source, s, t, raw)
 }
 
 func (x *cliExecutor) allow(class string, n *schema.Node, path ...string) bool {
@@ -215,8 +215,14 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 
 // ---------- 配置模式 ----------
 
-func (x *cliExecutor) execConfig(user, class, source string, s *cliSession, t []string) string {
+func (x *cliExecutor) execConfig(user, class, source string, s *cliSession, t []string, raw string) string {
 	switch t[0] {
+	case "annotate":
+		return x.cfgAnnotate(user, source, raw)
+	case "load":
+		return x.cfgLoad(user, source, t[1:])
+	case "save":
+		return x.cfgSave(user, source, t[1:])
 	case "set", "delete":
 		return x.execSetDelete(user, source, s, t[0], t[1:])
 	case "show":
@@ -1044,6 +1050,7 @@ func navigateJSON(tree map[string]any, path []string) (any, error) {
 func RenderConfigJSON(m map[string]any) string {
 	var b strings.Builder
 	renderMap(&b, m, 0)
+	renderAnnotations(&b, m)
 	return strings.TrimRight(b.String(), "\n")
 }
 

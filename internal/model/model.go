@@ -22,6 +22,9 @@ type Config struct {
 	Protocols               *ProtocolsConfig    `json:"protocols,omitempty"`
 	VirtualMachineFunctions []VMFunction        `json:"virtual_machine_functions,omitempty"`
 	ContainerFunctions      []ContainerFunction `json:"container_functions,omitempty"`
+
+	// Annotations 配置节点注释（FR-CFG-007 annotate；键=语句路径，决策 #27）
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // SystemConfig 对应 OpenAPI SystemConfig。
