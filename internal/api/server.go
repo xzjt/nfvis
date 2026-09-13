@@ -7,6 +7,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -84,6 +85,15 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, consoleTix: newConsoleTickets(), log: log}
 	s.cliExec.setRuntime(opts.Diag, opts.State)
 	s.cliExec.setNetRuntime(opts.L2, opts.L3, opts.LLDP, opts.NAT, opts.Alarms)
+	s.cliExec.setComputeRuntime(opts.VM, opts.VMConsole, opts.VMSnapshots, opts.Containers, opts.Images)
+	// M4-12：CLI `request … console` 复用 console 端点同一 ticket 表（ws 桥接与审计同源）
+	s.cliExec.issueConsole = func(vm, user string) (string, int, error) {
+		tok, ttl, err := s.consoleTix.issue(vm, user)
+		if err != nil {
+			return "", 0, err
+		}
+		return fmt.Sprintf("%s/virtual-machine-functions/%s/console/ws?ticket=%s", APIPrefix, vm, tok), ttl, nil
+	}
 	mux := http.NewServeMux()
 
 	// 认证（免 token，FR-API-001）

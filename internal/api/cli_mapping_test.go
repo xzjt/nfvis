@@ -52,6 +52,23 @@ var contractStatements = []string{
 	// 既有 M2 语义（回归保护）
 	"set interfaces ens224 description demo-port",
 	"set resource-pools hugepages page-size 1G count 32",
+	// M4 计算/容器语句（§2.7/§2.8；M4-12 补齐映射——此前 CLI 声明但写不进模型）
+	"set virtual-machine-functions fw-vm image base.qcow2",
+	"set virtual-machine-functions fw-vm vcpu count 2 pin true",
+	"set virtual-machine-functions fw-vm memory size-mb 1024",
+	"set virtual-machine-functions fw-vm memory hugepage-size 1G",
+	"set virtual-machine-functions fw-vm memory backing hugepage",
+	"set virtual-machine-functions fw-vm interfaces eth0 type vhost-user",
+	"set virtual-machine-functions fw-vm interfaces eth0 virtual-switch vs-a",
+	"set virtual-machine-functions fw-vm serial console enable",
+	"set virtual-machine-functions fw-vm autostart true",
+	"set virtual-switches vs-a ports 1 vnf fw-vm interface eth0",
+	"set container-functions sbc-ct1 image alpine:3.20",
+	"set container-functions sbc-ct1 vcpu count 2",
+	"set container-functions sbc-ct1 memory size-mb 256",
+	"set container-functions sbc-ct1 interfaces eth0 type memif",
+	"set container-functions sbc-ct1 interfaces eth0 virtual-switch vs-a",
+	"set virtual-switches vs-a ports 2 container sbc-ct1 interface eth0",
 }
 
 func TestCLIStatementMappingGuard(t *testing.T) {
@@ -67,6 +84,22 @@ func TestCLIStatementMappingGuard(t *testing.T) {
 				pre = append(pre, "set virtual-switches vs-l3 type l3")
 			case strings.Contains(stmt, "virtual-switches vs-a") && !strings.Contains(stmt, "type l2"):
 				pre = append(pre, "set virtual-switches vs-a type l2")
+			}
+			// M4 计算/容器语句：先建实体（与 type 前置同法），否则语句无宿主元素。
+			switch {
+			case strings.Contains(stmt, "virtual-machine-functions fw-vm") &&
+				!strings.Contains(stmt, "set virtual-machine-functions fw-vm image"):
+				pre = append(pre, "set virtual-machine-functions fw-vm image base.qcow2")
+			case strings.Contains(stmt, "container-functions sbc-ct1") &&
+				!strings.Contains(stmt, "set container-functions sbc-ct1 image"):
+				pre = append(pre, "set container-functions sbc-ct1 image alpine:3.20")
+			}
+			// 端口成员语句：先建被引用的 VM/容器实体。
+			if strings.Contains(stmt, "ports 1 vnf fw-vm") {
+				pre = append(pre, "set virtual-machine-functions fw-vm image base.qcow2")
+			}
+			if strings.Contains(stmt, "ports 2 container sbc-ct1") {
+				pre = append(pre, "set container-functions sbc-ct1 image alpine:3.20")
 			}
 			for _, s := range pre {
 				if res := x.Execute("admin", aaa.ClassSuperUser, "ssh", s); strings.Contains(res.Output, "%%") {
@@ -116,6 +149,24 @@ func TestCLIStatementMappingDelete(t *testing.T) {
 			"delete interfaces ens192 ingress-policy"},
 		{[]string{"set protocols lldp enable true"},
 			"delete protocols lldp enable"},
+		// M4 计算/容器删除形态（M4-12：同样必须落模型）
+		{[]string{"set virtual-machine-functions fw-vm image base.qcow2",
+			"set virtual-machine-functions fw-vm memory size-mb 1024"},
+			"delete virtual-machine-functions fw-vm memory size-mb"},
+		{[]string{"set virtual-machine-functions fw-vm image base.qcow2",
+			"set virtual-machine-functions fw-vm interfaces eth0 type vhost-user",
+			"set virtual-machine-functions fw-vm interfaces eth0 virtual-switch vs-a"},
+			"delete virtual-machine-functions fw-vm interfaces eth0 virtual-switch"},
+		{[]string{"set container-functions sbc-ct1 image alpine:3.20",
+			"set container-functions sbc-ct1 memory size-mb 256"},
+			"delete container-functions sbc-ct1 memory size-mb"},
+		{[]string{"set container-functions sbc-ct1 image alpine:3.20",
+			"set container-functions sbc-ct1 vcpu count 2"},
+			"delete container-functions sbc-ct1 vcpu count"},
+		{[]string{"set virtual-switches vs-a type l2",
+			"set virtual-machine-functions fw-vm image base.qcow2",
+			"set virtual-switches vs-a ports 1 vnf fw-vm interface eth0"},
+			"delete virtual-switches vs-a ports 1 vnf fw-vm"},
 	}
 	for _, c := range cases {
 		c := c

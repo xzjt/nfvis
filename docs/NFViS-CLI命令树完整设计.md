@@ -141,6 +141,12 @@ request alarms clear [id <id> | all]                # 确认后清除已 resolve
 request api token revoke <token-id>                 # S
 ```
 
+> 实现说明（M4-12，附录 A #49~#51）：VNF/容器/镜像三条 `request` 族由 CLI 执行器**直连运行态接口**（与 `show` 族同源），不经自身 HTTP；动作成功/失败均入审计（FR-OPS-031），console 记打开/关闭两条（FR-OPS-032）。
+> - `… delete` 交互确认：提问 `Delete VNF '<name>'? [yes,no]`（容器/镜像同格式），应答非 `yes` 即中止；确认后仍走与 HTTP 端点同一条删除路径（级联 vNIC/VPP 端口/快照）。非交互会话拒绝执行破坏性删除。
+> - `… console`：申请一次性 ticket 后经 WebSocket 桥接串口，本地终端接管（Ctrl-] 退出）；非 TTY 环境不做终端接管并明确提示。
+> - `request images download` **异步受理**：打印"已受理"，进度经 `show images <name> detail` 的 `import_state` 查看（事件流随 M5）。
+> - `show images` / `show resource-pools` 分别读镜像仓库运行态与资源池账本视图，与对应 GET 端点输出同源。
+
 ### 1.3 其余操作命令
 
 ```

@@ -19,6 +19,15 @@ type Result struct {
 	Mode   string // oper | config
 	Path   []string
 	Prompt string
+	// Console 非空表示该命令要求前端接管终端并桥接串口（M4-12，FR-CMP-014）：
+	// 前端（internal/cli）经 DialConsole 连 WSURL，Ctrl-] 退出后恢复行编辑。
+	Console *ConsoleRequest
+}
+
+// ConsoleRequest 串口终端接管请求（守护进程 CLIEResult.Console）。
+type ConsoleRequest struct {
+	VM    string `json:"vm"`
+	WSURL string `json:"ws_url"`
 }
 
 // Client nfvisd REST 客户端。
@@ -65,10 +74,11 @@ func (c *Client) Logout() error {
 // FR-CFG-012 管理口自锁判定，ssh/console）。
 func (c *Client) Execute(line, source string) (Result, error) {
 	var resp struct {
-		Output string   `json:"output"`
-		Mode   string   `json:"mode"`
-		Path   []string `json:"path"`
-		Prompt string   `json:"prompt"`
+		Output  string          `json:"output"`
+		Mode    string          `json:"mode"`
+		Path    []string        `json:"path"`
+		Prompt  string          `json:"prompt"`
+		Console *ConsoleRequest `json:"console"`
 	}
 	err := c.do(http.MethodPost, "/api/v1/cli/execute", map[string]string{
 		"line": line, "source": source,
@@ -76,7 +86,10 @@ func (c *Client) Execute(line, source string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Output: resp.Output, Mode: resp.Mode, Path: resp.Path, Prompt: resp.Prompt}, nil
+	return Result{
+		Output: resp.Output, Mode: resp.Mode, Path: resp.Path, Prompt: resp.Prompt,
+		Console: resp.Console,
+	}, nil
 }
 
 func (c *Client) do(method, path string, body any, out any) error {

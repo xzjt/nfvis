@@ -72,14 +72,29 @@ func (r *REPL) Run() error {
 		if strings.HasSuffix(line, "\t") { // 非 raw 退化的 Tab 补全
 			line = r.session.CompleteLine(line)
 		}
-		out, next := r.session.ExecuteLine(strings.TrimSpace(line))
+		cmd := strings.TrimSpace(line)
+		out, next, console := r.session.ExecuteFull(cmd)
 		prompt = next
-		if out == "" {
-			continue
+		// 破坏性动作的交互确认（FR-CMP-013）：服务端返回问询文本（以 "[yes,no]" 结尾），
+		// 本地读取答复；yes 则以 --yes 重发同一命令（执行期确认标记），否则中止。
+		if strings.HasSuffix(strings.TrimSpace(out), "[yes,no]") {
+			fmt.Fprint(r.out, out)
+			if r.readConfirm("") {
+				out, next, console = r.session.ExecuteFull(cmd + " " + confirmFlag)
+				prompt = next
+			} else {
+				out = "已取消\n"
+			}
 		}
-		fmt.Fprint(r.out, out)
-		if !strings.HasSuffix(out, "\n") {
-			fmt.Fprintln(r.out)
+		if out != "" {
+			fmt.Fprint(r.out, out)
+			if !strings.HasSuffix(out, "\n") {
+				fmt.Fprintln(r.out)
+			}
+		}
+		if console != nil { // 串口接管（FR-CMP-014）：进入 console，Ctrl-] 退出后续打提示符
+			r.runConsole(console)
+			prompt = r.session.Prompt()
 		}
 	}
 }

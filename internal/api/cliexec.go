@@ -50,6 +50,16 @@ type CLIEResult struct {
 	Mode   string   `json:"mode"`
 	Path   []string `json:"path"`
 	Prompt string   `json:"prompt"`
+	// Console 非空表示本次命令要求 CLI 前端接管终端并桥接串口
+	// （M4-12；FR-CMP-014）。前端经 pkg/cliclient.DialConsole 连 Console.WSURL，
+	// Ctrl-] 退出后恢复行编辑。
+	Console *ConsoleRequest `json:"console,omitempty"`
+}
+
+// ConsoleRequest 串口终端接管请求（CLI 前端与守护进程间的接管约定）。
+type ConsoleRequest struct {
+	VM    string `json:"vm"`
+	WSURL string `json:"ws_url"`
 }
 
 // cliExecutor 守护进程侧 CLI 执行器。会话（模式/层级）按持有者+接入源隔离。
@@ -63,10 +73,21 @@ type cliExecutor struct {
 	lldp   LldpRuntime        // LLDP 邻居（nil = 报未接入）
 	natRT  NatSessionsRuntime // NAT 会话（nil = 报未接入）
 	alarms AlarmRuntime       // 告警表（nil = 报未接入）
-	mu     sync.Mutex
-	sess   map[string]*cliSession
+	// 计算/容器/镜像运行态（M4-12；nil = 对应命令报未接入，与 HTTP 端点 503 一致）
+	vm      VMRuntime
+	console VMConsoleRuntime
+	snaps   VMSnapshotRuntime
+	ct      ContainerRuntime
+	images  ImagesRuntime
+	mu      sync.Mutex
+	sess    map[string]*cliSession
 	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
 	structured any
+	// consolePending 本次命令要求前端接管串口时的接管请求（单命令执行期内有效）
+	consolePending *ConsoleRequest
+	// issueConsole 签发 console 一次性 ticket 并返回 ws 相对路径与有效期
+	// （M4-12；由 Server.New 注入，复用 handleConsoleWS 的同一 ticket 表与审计落点）
+	issueConsole func(vm, user string) (wsPath string, ttl int, err error)
 }
 
 type cliSession struct {
@@ -87,6 +108,12 @@ func (x *cliExecutor) setRuntime(diag DiagRuntime, st *state.State) {
 // 契约 §1.1 的运行态 show 子命令，nil = 命令报“VPP 未接入”）。
 func (x *cliExecutor) setNetRuntime(l2 L2Runtime, l3 L3Runtime, lldp LldpRuntime, nat NatSessionsRuntime, alarms AlarmRuntime) {
 	x.l2, x.l3, x.lldp, x.natRT, x.alarms = l2, l3, lldp, nat, alarms
+}
+
+// setComputeRuntime 注入计算/容器/镜像运行态（M4-12；契约 §1.1 show 与 §1.2 request
+// 的 VNF/容器/镜像命令，nil = 对应命令报“未接入”，与端点 503 语义一致）。
+func (x *cliExecutor) setComputeRuntime(vm VMRuntime, console VMConsoleRuntime, snaps VMSnapshotRuntime, ct ContainerRuntime, imgs ImagesRuntime) {
+	x.vm, x.console, x.snaps, x.ct, x.images = vm, console, snaps, ct, imgs
 }
 
 func promptOf(s *cliSession) string {
@@ -112,6 +139,7 @@ func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
 
 	cmd, pipes, perr := splitPipes(strings.TrimSpace(line))
 	x.structured = nil
+	x.consolePending = nil
 	var out string
 	if perr != nil {
 		out = "%% " + perr.Error() + "\n"
@@ -125,7 +153,7 @@ func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
 	if cur == nil {
 		cur = &cliSession{Mode: "oper"}
 	}
-	return CLIEResult{Output: out, Mode: cur.Mode, Path: append([]string{}, cur.Path...), Prompt: promptOf(cur)}
+	return CLIEResult{Output: out, Mode: cur.Mode, Path: append([]string{}, cur.Path...), Prompt: promptOf(cur), Console: x.consolePending}
 }
 
 // canonicalize 按当前模式/层级把命令 token 规整为规范关键字（FR-CLI-004：
@@ -215,7 +243,9 @@ func (x *cliExecutor) execOper(user, class, source string, s *cliSession, t []st
 		return x.execMonitor(class, t[1:])
 	case "clear":
 		return x.execClear(class, t[1:])
-	case "request", "start", "help":
+	case "request":
+		return x.execRequest(user, class, source, t[1:])
+	case "start", "help":
 		if _, _, err := schema.Match(schema.OperRoot(), t); err != nil {
 			return fmt.Sprintf("%% 无效命令: %s（输入 ? 查看可用命令）\n", strings.Join(t, " "))
 		}
@@ -282,6 +312,14 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 		return x.execShowAcls(t[1:])
 	case len(t) >= 1 && t[0] == "bonds":
 		return x.execShowBonds(t[1:])
+	case len(t) >= 1 && t[0] == "virtual-machine-functions":
+		return x.execShowVMs(t[1:])
+	case len(t) >= 1 && t[0] == "container-functions":
+		return x.execShowContainers(t[1:])
+	case len(t) >= 1 && t[0] == "images":
+		return x.execShowImages(t[1:])
+	case len(t) == 1 && t[0] == "resource-pools":
+		return x.execShowResourcePools()
 	case len(t) >= 3 && t[0] == "system" && t[1] == "configuration" && t[2] == "sessions":
 		views, err := x.engine.Sessions()
 		if err != nil {
@@ -298,7 +336,7 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 		}
 		return b.String()
 	}
-	return "%% 该 show 命令依赖底座运行态，M3/M4 接入后可用（当前可用：show version / show configuration [candidate|compare rollback n] / show system configuration sessions）\n"
+	return "%% 该 show 命令依赖底座运行态，M3/M4 接入后可用（当前可用：show version / show configuration [candidate|compare rollback n] / show system configuration sessions / show virtual-machine-functions / show container-functions / show images / show resource-pools）\n"
 }
 
 // ---------- 配置模式 ----------
@@ -562,12 +600,15 @@ func matchAlias(tokens []string) *aliasRule {
 
 // allAliasRules 汇总别名规则（顺序即匹配优先级）。
 func allAliasRules() []*aliasRule {
-	out := make([]*aliasRule, 0, len(statementAliases)+len(statementAliasesNet))
+	out := make([]*aliasRule, 0, len(statementAliases)+len(statementAliasesNet)+len(statementAliasesCompute))
 	for i := range statementAliases {
 		out = append(out, &statementAliases[i])
 	}
 	for i := range statementAliasesNet {
 		out = append(out, &statementAliasesNet[i])
+	}
+	for i := range statementAliasesCompute {
+		out = append(out, &statementAliasesCompute[i])
 	}
 	return out
 }

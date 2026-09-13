@@ -106,6 +106,17 @@ func (s *Server) dynamicValues(kind string) []string {
 			out = append(out, ct.Name)
 		}
 		return out
+	case schema.DynImages:
+		// M4-12（附录 A #51）：镜像不在配置模型中，候选取自镜像仓库运行态。
+		if s.images == nil {
+			return nil
+		}
+		metas := s.images.List()
+		out := make([]string, 0, len(metas))
+		for _, m := range metas {
+			out = append(out, m.Name)
+		}
+		return out
 	case schema.DynClasses:
 		out := []string{aaa.ClassSuperUser, aaa.ClassOperator, aaa.ClassReadOnly}
 		if cfg.System != nil && cfg.System.Login != nil {
