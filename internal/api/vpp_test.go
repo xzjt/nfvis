@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/xzjt/nfvis/internal/model"
@@ -76,6 +77,38 @@ func TestVppEndpointsUnavailable(t *testing.T) {
 	ts := newTestServer(t)
 	token := loginAdmin(t, ts)
 	status, _, _ := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/vpp/status", token, nil, nil)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("未装配应 503: %d", status)
+	}
+}
+
+// ---------- M3-3：/virtual-switches/{name}/mac-table（FR-NET-015） ----------
+
+type fakeL2Runtime struct {
+	rows []MACTableRow
+	err  error
+}
+
+func (f *fakeL2Runtime) MACTable(context.Context, string) ([]MACTableRow, error) {
+	return f.rows, f.err
+}
+
+func TestMacTableEndpoint(t *testing.T) {
+	fake := &fakeL2Runtime{rows: []MACTableRow{{MAC: "00:11:22:33:44:55", Port: "ens192", VLAN: 0}}}
+	ts := newTestServerOpts(t, Options{L2: fake})
+	token := loginAdmin(t, ts)
+	status, _, data := cfgRequest(t, http.MethodGet,
+		ts.URL+APIPrefix+"/virtual-switches/vs-app/mac-table", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), "00:11:22:33:44:55") {
+		t.Fatalf("mac-table: %d %s", status, data)
+	}
+}
+
+func TestMacTableUnavailable(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+	status, _, _ := cfgRequest(t, http.MethodGet,
+		ts.URL+APIPrefix+"/virtual-switches/vs-app/mac-table", token, nil, nil)
 	if status != http.StatusServiceUnavailable {
 		t.Fatalf("未装配应 503: %d", status)
 	}

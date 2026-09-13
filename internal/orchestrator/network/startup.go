@@ -226,6 +226,10 @@ func dpdkStanza(b *strings.Builder, dpdk *model.VppDPDK, pciOf PCIResolver) erro
 			return fmt.Errorf("解析 %q 的 PCI 地址失败: %w", o.Interface, err)
 		}
 		fmt.Fprintf(b, "  dev %s {\n", pci)
+		if o.Interface != "" {
+			// 固定 VPP 接口名与配置中的物理口名一致，便于按名解析 sw_if_index
+			fmt.Fprintf(b, "    name %s\n", o.Interface)
+		}
 		writeDevOptions(b, o.RxQueues, o.TxQueues, o.RxDescriptors, o.TxDescriptors, "    ")
 		b.WriteString("  }\n")
 	}

@@ -30,6 +30,7 @@ type Options struct {
 	TLSKey  string // TLS 私钥路径；二者为空 = 明文 HTTP（仅限开发/测试）
 	Log     *slog.Logger
 	VPP     VppController // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
+	L2      L2Runtime     // L2 运行态查询（M3-3；nil = mac-table 503）
 }
 
 // Server NFViS REST server。
@@ -38,6 +39,7 @@ type Server struct {
 	engine  *config.Engine
 	cliExec *cliExecutor
 	vpp     VppController
+	l2      L2Runtime
 	log     *slog.Logger
 	mux     *http.ServeMux
 	http    *http.Server
@@ -54,7 +56,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, log: log}
 	mux := http.NewServeMux()
 
 	// 认证（免 token，FR-API-001）
@@ -124,6 +126,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/virtual-switches", s.auth(s.handleGetVSwitches, schema.ClassReadOnly, "show virtual-switches"))
 	mux.Handle("GET "+APIPrefix+"/virtual-switches/{name}", s.auth(s.handleGetVSwitch, schema.ClassReadOnly, "show virtual-switches"))
 	mux.Handle("GET "+APIPrefix+"/virtual-switches/{name}/ports", s.auth(s.handleGetVSwitchPorts, schema.ClassReadOnly, "show virtual-switches"))
+	mux.Handle("GET "+APIPrefix+"/virtual-switches/{name}/mac-table", s.auth(s.handleGetMacTable, schema.ClassReadOnly, "show virtual-switches"))
 	mux.Handle("POST "+APIPrefix+"/virtual-switches", cfgAPI(s.handlePostVSwitch))
 	mux.Handle("DELETE "+APIPrefix+"/virtual-switches/{name}", cfgAPI(s.handleDeleteVSwitch))
 	mux.Handle("PUT "+APIPrefix+"/virtual-switches/{name}/ports", cfgAPI(s.handlePutVSwitchPorts))

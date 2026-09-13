@@ -634,6 +634,20 @@ var statementAliases = []aliasRule{
 			vm["serial_console"] = true
 			return nil
 		}},
+	// set vpp dpdk dev <ifname> [rx-queues|tx-queues|rx-descriptors|tx-descriptors <n>]
+	// per-NIC 覆盖：模型字段是 per_dev 数组（决策 #18），与 CLI 的 dev 层级名不一致
+	{pattern: []string{"vpp", "dpdk", "dev", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return dpdkPerDev(tree, t[3], "", nil, isSet)
+		}},
+	{pattern: []string{"vpp", "dpdk", "dev", "*", "*", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			n, err := numField(t[5])
+			if err != nil {
+				return err
+			}
+			return dpdkPerDev(tree, t[3], strings.ReplaceAll(t[4], "-", "_"), n, isSet)
+		}},
 	// set virtual-switches <n> ports <seq> interface <if> [trunk vlans <list>|native <vlan>]
 	{pattern: []string{"virtual-switches", "*", "ports", "*", "interface", "*", "trunk", "vlans", "*"},
 		apply: func(tree map[string]any, t []string, isSet bool) error {
@@ -1229,4 +1243,46 @@ func mustNode(root *schema.Node, names ...string) *schema.Node {
 		return root
 	}
 	return n
+}
+
+// dpdkPerDev 维护 vpp.dpdk.per_dev 数组（per-NIC 覆盖）。
+func dpdkPerDev(tree map[string]any, ifname, key string, val any, isSet bool) error {
+	vpp, _ := tree["vpp"].(map[string]any)
+	if vpp == nil {
+		if !isSet {
+			return fmt.Errorf("无匹配配置: vpp")
+		}
+		vpp = map[string]any{}
+		tree["vpp"] = vpp
+	}
+	dpdk, _ := vpp["dpdk"].(map[string]any)
+	if dpdk == nil {
+		if !isSet {
+			return fmt.Errorf("无匹配配置: vpp dpdk")
+		}
+		dpdk = map[string]any{}
+		vpp["dpdk"] = dpdk
+	}
+	arr, _ := dpdk["per_dev"].([]any)
+	elem, idx := selectElement(arr, "interface", ifname)
+	if !isSet {
+		if elem == nil {
+			return fmt.Errorf("无匹配配置: vpp dpdk dev %s", ifname)
+		}
+		if key == "" {
+			dpdk["per_dev"] = append(arr[:idx], arr[idx+1:]...)
+			return nil
+		}
+		delete(elem, key)
+		return nil
+	}
+	if elem == nil {
+		elem = map[string]any{"interface": ifname}
+		arr = append(arr, elem)
+		dpdk["per_dev"] = arr
+	}
+	if key != "" {
+		elem[key] = val
+	}
+	return nil
 }

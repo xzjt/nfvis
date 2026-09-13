@@ -390,3 +390,35 @@ func TestCLIStringTypedNumericValue(t *testing.T) {
 		t.Fatalf("main-heap-size: %+v", cfg.Vpp.Memory)
 	}
 }
+
+// M3-3：vpp dpdk per-NIC 覆盖语句（模型 per_dev 与 CLI dev 层级名不一致，走别名表）。
+func TestCLIDpdkPerDev(t *testing.T) {
+	x, engine := newCLIKit(t)
+	run(t, x, "admin", aaa.ClassSuperUser, "ssh",
+		"configure",
+		"set resource-pools cpu isolated-cores 4-5",
+		"set interfaces ens192 mtu 9000",
+		"set interfaces ens224 mtu 9000",
+		"set vpp cpu main-core 4",
+		"set vpp dpdk dev ens192",
+		"set vpp dpdk dev ens224 rx-queues 2",
+		"commit",
+	)
+	cfg, err := engine.Committed()
+	if err != nil {
+		t.Fatalf("Committed: %v", err)
+	}
+	if cfg.Vpp == nil || cfg.Vpp.DPDK == nil {
+		t.Fatalf("dpdk 未写入: %+v", cfg.Vpp)
+	}
+	byName := map[string]model.VppDevOverride{}
+	for _, d := range cfg.Vpp.DPDK.PerDev {
+		byName[d.Interface] = d
+	}
+	if _, ok := byName["ens192"]; !ok {
+		t.Fatalf("ens192 覆盖项缺失: %+v", cfg.Vpp.DPDK.PerDev)
+	}
+	if d := byName["ens224"]; d.RxQueues != 2 {
+		t.Fatalf("ens224 rx-queues 应为 2: %+v", d)
+	}
+}

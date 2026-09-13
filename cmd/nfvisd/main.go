@@ -58,7 +58,14 @@ func run() error {
 	}
 	defer store.Close()
 
-	engine, err := config.NewEngine(store, orchestrator.NewNoopApplier(), config.Options{})
+	// M3：VPP 数据面连接管理（FR-SYS-007）先于事务引擎装配（引擎需要下发编排器）。
+	vppMgr := network.NewManager(network.Config{Socket: *vppSock, Log: log}, nil)
+	defer vppMgr.Close()
+	l2Provider := network.NewL2ProviderFunc(vppMgr.L2ClientFunc())
+	netProvider := network.NewL2Network(orchestrator.NewNoopNetwork(), l2Provider)
+	applier := orchestrator.NewApplier(netProvider, orchestrator.NewNoopCompute(), orchestrator.NewNoopContainer())
+
+	engine, err := config.NewEngine(store, applier, config.Options{})
 	if err != nil {
 		return fmt.Errorf("装配事务引擎: %w", err)
 	}
@@ -78,16 +85,13 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// M3：VPP 数据面连接管理（FR-SYS-007）+ startup.conf 生成器（FR-SYS-008/009）。
 	// VPP 未运行时降级为告警并持续重连，不阻塞 nfvisd 启动。
-	vppMgr := network.NewManager(network.Config{Socket: *vppSock, Log: log}, nil)
-	defer vppMgr.Close()
 	go func() {
 		if err := vppMgr.Run(ctx); err != nil {
 			log.Error("VPP 连接管理退出", "err", err)
 		}
 	}()
-	applier := &network.Applier{Mgr: vppMgr, PCI: network.NewSysfsPCIResolver(),
+	startupApplier := &network.Applier{Mgr: vppMgr, PCI: network.NewSysfsPCIResolver(),
 		Restarter: network.NewSystemctlRestarter(), RestartOnApply: true}
 
 	apiServer := api.New(engine, aaaSvc, api.Options{
@@ -95,7 +99,8 @@ func run() error {
 		TLSCert: *tlsCert,
 		TLSKey:  *tlsKey,
 		Log:     log,
-		VPP:     &vppController{mgr: vppMgr, applier: applier, engine: engine},
+		VPP:     &vppController{mgr: vppMgr, applier: startupApplier, engine: engine},
+		L2:      &l2Controller{net: netProvider},
 	})
 
 	srvErr := make(chan error, 1)
@@ -149,4 +154,19 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// l2Controller 装配 api.L2Runtime（M3-3）：把编排器 MAC 表返回转换为 API 契约结构。
+type l2Controller struct{ net *network.L2Network }
+
+func (c *l2Controller) MACTable(ctx context.Context, swName string) ([]api.MACTableRow, error) {
+	rows, err := c.net.MACTable(ctx, swName)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]api.MACTableRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, api.MACTableRow{MAC: r.MAC, Port: r.Port, VLAN: r.VLAN})
+	}
+	return out, nil
 }
