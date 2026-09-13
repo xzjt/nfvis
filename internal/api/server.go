@@ -92,6 +92,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 
 	// W6：网络配置层第二组（GET=R；写=S）
 	mux.Handle("GET "+APIPrefix+"/acls", s.auth(s.handleGetAcls, schema.ClassReadOnly, "show acls"))
+	mux.Handle("GET "+APIPrefix+"/acls/{name}", s.auth(s.handleGetAcl, schema.ClassReadOnly, "show acls"))
 	mux.Handle("POST "+APIPrefix+"/acls", cfgAPI(s.handlePostAcl))
 	mux.Handle("DELETE "+APIPrefix+"/acls/{name}", cfgAPI(s.handleDeleteAcl))
 	mux.Handle("GET "+APIPrefix+"/nat", s.auth(s.handleGetNat, schema.ClassReadOnly, "show nat"))
@@ -103,6 +104,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("POST "+APIPrefix+"/port-mirroring", cfgAPI(s.handlePostPM))
 	mux.Handle("DELETE "+APIPrefix+"/port-mirroring/{name}", cfgAPI(s.handleDeletePM))
 	mux.Handle("GET "+APIPrefix+"/bonds", s.auth(s.handleGetBonds, schema.ClassReadOnly, "show bonds"))
+	mux.Handle("GET "+APIPrefix+"/bonds/{name}", s.auth(s.handleGetBond, schema.ClassReadOnly, "show bonds"))
 	mux.Handle("POST "+APIPrefix+"/bonds", cfgAPI(s.handlePostBond))
 	mux.Handle("DELETE "+APIPrefix+"/bonds/{name}", cfgAPI(s.handleDeleteBond))
 	mux.Handle("GET "+APIPrefix+"/protocols/lldp", s.auth(s.handleGetLldp, schema.ClassReadOnly, "show lldp"))

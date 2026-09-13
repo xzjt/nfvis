@@ -193,3 +193,39 @@ func TestW6Authorization(t *testing.T) {
 		t.Fatalf("read-only 查询 ACL 应 200: %d", status)
 	}
 }
+
+// T0-1：GET /acls/{name}、GET /bonds/{name}（契约已声明，M2 仅实现列表/创建/删除）。
+func TestAclBondDetailEndpoint(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+
+	acl := model.Acl{Name: "acl-detail", Rules: []model.AclRule{{Seq: 10, Action: "deny"}}}
+	if status, _, _ := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/acls", token, acl,
+		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("创建 ACL 应 201")
+	}
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/acls/acl-detail", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), "acl-detail") || !strings.Contains(string(data), "deny") {
+		t.Fatalf("ACL 详情: %d %s", status, data)
+	}
+	status, _, _ = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/acls/no-such", token, nil, nil)
+	if status != http.StatusNotFound {
+		t.Fatalf("未知 ACL 应 404: %d", status)
+	}
+
+	seedIface(t, ts, token, "ens2f0")
+	seedIface(t, ts, token, "ens2f1")
+	bond := model.Bond{Name: "bond0", Members: []string{"ens2f0", "ens2f1"}, Lacp: &model.Lacp{Mode: "active"}}
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/bonds", token, bond,
+		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("创建 bond 应 201: %d %s", status, data)
+	}
+	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/bonds/bond0", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), "bond0") || !strings.Contains(string(data), "active") {
+		t.Fatalf("bond 详情: %d %s", status, data)
+	}
+	status, _, _ = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/bonds/no-such", token, nil, nil)
+	if status != http.StatusNotFound {
+		t.Fatalf("未知 bond 应 404: %d", status)
+	}
+}

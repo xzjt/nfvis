@@ -241,6 +241,10 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 			return "（配置为空）\n"
 		}
 		return out + "\n"
+	case len(t) >= 1 && t[0] == "acls":
+		return x.execShowAcls(t[1:])
+	case len(t) >= 1 && t[0] == "bonds":
+		return x.execShowBonds(t[1:])
 	case len(t) >= 3 && t[0] == "system" && t[1] == "configuration" && t[2] == "sessions":
 		views, err := x.engine.Sessions()
 		if err != nil {
