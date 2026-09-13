@@ -78,6 +78,7 @@ func TestBuildDomainXML_HugepagesPinningVhostUser(t *testing.T) {
 		`<source type="unix" mode="client" path="/run/nfvis/vhost/fw-vm-eth0.sock">`,
 		`<model type="virtio">`,
 		`<driver queues="2">`,
+		`<reconnect enabled="yes" timeout="5">`, // FR-OPS-011：VPP 重启后自动重连
 	)
 }
 

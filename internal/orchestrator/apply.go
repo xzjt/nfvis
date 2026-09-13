@@ -113,27 +113,25 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 
 	var ops []op
 
-	// —— VNF vNIC 接入（FR-NET-020/023）：必须先于 bridge-domain 下发，
-	// 因为交换机端口按确定性接口名挂接 vhost-user 接口，接口需已存在。——
-	oldPorts := collectVnfPorts(old)
-	newPorts := collectVnfPorts(new)
-	for _, p := range newPorts {
-		oldP, inOld := oldPorts[p.key()]
-		if inOld && configEqual(oldP.nic, p.nic) {
+	// —— VNF vNIC 接入（FR-NET-020/022/023）：必须先于 bridge-domain 下发，
+	// 因为交换机端口按确定性接口名挂接（vhost-user / memif 接口需已存在）。——
+	oldPorts := VnfPortsOf(old, a.vhostDir, a.memifDir)
+	newPorts := VnfPortsOf(new, a.vhostDir, a.memifDir)
+	oldByKey := portMapOf(oldPorts)
+	newByKey := portMapOf(newPorts)
+	for _, np := range newPorts {
+		op, inOld := oldByKey[portKeyOf(np)]
+		if inOld && configEqual(op, np) {
 			continue
 		}
-		p := p
-		newPort := a.toVnfPort(new, p)
-		ops = append(ops, op{
-			desc: fmt.Sprintf("vnf-if[%s]", p.key()),
-			run:  func(ctx context.Context) error { return a.net.ApplyVnfInterface(ctx, newPort) },
-			undo: func(ctx context.Context) error {
-				if inOld {
-					return a.net.ApplyVnfInterface(ctx, a.toVnfPort(old, oldP))
-				}
-				return a.net.DeleteVnfInterface(ctx, p.owner, p.nic.Name)
-			},
-		})
+		np, op := np, op
+		ops = append(ops, op2(
+			fmt.Sprintf("vnf-if[%s/%s]", np.VM, np.Interface),
+			func(ctx context.Context) error { return a.net.ApplyVnfInterface(ctx, np) },
+			inOld,
+			func(ctx context.Context) error { return a.net.ApplyVnfInterface(ctx, op) },
+			func(ctx context.Context) error { return a.net.DeleteVnfInterface(ctx, np.VM, np.Interface) },
+		))
 	}
 
 	// —— 新增/变更：网络 ——
@@ -307,17 +305,16 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			})
 		}
 	}
-	// vNIC 接入删除：在 VM 删除之后（FR-NET-023）；VM 整体删除时其全部 vNIC 一并清理。
-	for _, p := range oldPorts {
-		if _, ok := newPorts[p.key()]; ok {
+	// vNIC 接入删除：在 VM/容器删除之后（FR-NET-023）；整体删除时其全部 vNIC 一并清理。
+	for _, ov := range oldPorts {
+		if _, ok := newByKey[portKeyOf(ov)]; ok {
 			continue
 		}
-		p := p
-		oldPort := a.toVnfPort(old, p)
+		ov := ov
 		ops = append(ops, op{
-			desc: fmt.Sprintf("del-vnf-if[%s]", p.key()),
-			run:  func(ctx context.Context) error { return a.net.DeleteVnfInterface(ctx, p.owner, p.nic.Name) },
-			undo: func(ctx context.Context) error { return a.net.ApplyVnfInterface(ctx, oldPort) },
+			desc: fmt.Sprintf("del-vnf-if[%s/%s]", ov.VM, ov.Interface),
+			run:  func(ctx context.Context) error { return a.net.DeleteVnfInterface(ctx, ov.VM, ov.Interface) },
+			undo: func(ctx context.Context) error { return a.net.ApplyVnfInterface(ctx, ov) },
 		})
 	}
 	for name := range oldVSs {
@@ -376,72 +373,25 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	return ops
 }
 
-// vnfPortRef 一个 VNF/容器的 vNIC 接入引用（确定性排序用）。
-type vnfPortRef struct {
-	owner     string // VM 名或容器名
-	container bool   // true = 容器 memif vNIC
-	nic       model.VnfInterface
+// portKeyOf/portMapOf VNF 端口按「属主/vNIC」索引（diff 用）。
+func portKeyOf(p VnfPort) string { return p.VM + "/" + p.Interface }
+
+func portMapOf(ports []VnfPort) map[string]VnfPort {
+	m := make(map[string]VnfPort, len(ports))
+	for _, p := range ports {
+		m[portKeyOf(p)] = p
+	}
+	return m
 }
 
-func (p vnfPortRef) key() string { return p.owner + "/" + p.nic.Name }
-
-// collectVnfPorts 收集需 VPP 侧接入的 vNIC：VM 的 vhost-user 与容器的 memif
-// （按属主名、vNIC 名确定性排序）。sriov-vf 不经 VPP，不在此列。
-func collectVnfPorts(cfg model.Config) map[string]vnfPortRef {
-	out := map[string]vnfPortRef{}
-	for _, vm := range cfg.VirtualMachineFunctions {
-		for _, nic := range vm.Interfaces {
-			if nic.Type != "vhost-user" {
-				continue
-			}
-			ref := vnfPortRef{owner: vm.Name, nic: nic}
-			out[ref.key()] = ref
+// op2 构造带「旧值恢复」补偿的操作。
+func op2(desc string, run func(context.Context) error, inOld bool, applyOld, del func(context.Context) error) op {
+	return op{desc: desc, run: run, undo: func(ctx context.Context) error {
+		if inOld {
+			return applyOld(ctx)
 		}
-	}
-	for _, ct := range cfg.ContainerFunctions {
-		for _, nic := range ct.Interfaces {
-			if nic.Type != "memif" {
-				continue
-			}
-			ref := vnfPortRef{owner: ct.Name, container: true, nic: nic}
-			out[ref.key()] = ref
-		}
-	}
-	return out
-}
-
-// toVnfPort 组装下发用的 VnfPort（socket 路径与 compute/container 侧同源派生）。
-func (a *orchApplier) toVnfPort(cfg model.Config, ref vnfPortRef) VnfPort {
-	vrf := ""
-	if isL3Switch(cfg, ref.nic.VirtualSwitch) {
-		vrf = ref.nic.VirtualSwitch // L3 交换机与同名 VRF 对应（附录 B）
-	}
-	sock := VnfSocketPath(a.vhostDir, ref.owner, ref.nic.Name)
-	if ref.nic.Type == "memif" {
-		sock = MemifSocketPath(a.memifDir, ref.owner, ref.nic.Name)
-	}
-	return VnfPort{
-		VM:            ref.owner, // 容器场景下为容器名（VnfPort.VM 语义 = 属主名）
-		Interface:     ref.nic.Name,
-		Type:          ref.nic.Type,
-		VirtualSwitch: ref.nic.VirtualSwitch,
-		MAC:           ref.nic.MAC,
-		VLAN:          ref.nic.Vlan,
-		Socket:        sock,
-		VRF:           vrf,
-	}
-}
-
-func isL3Switch(cfg model.Config, name string) bool {
-	if name == "" {
-		return false
-	}
-	for _, vs := range cfg.VirtualSwitches {
-		if vs.Name == name {
-			return vs.Type == "l3"
-		}
-	}
-	return false
+		return del(ctx)
+	}}
 }
 
 // applyOp 构造「下发 new」操作：撤销时若 old 中存在则恢复旧版本，否则删除。

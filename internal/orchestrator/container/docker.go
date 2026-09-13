@@ -74,7 +74,12 @@ type Provider struct {
 	cfg Config
 	api dockerAPI
 	mu  sync.Mutex
+
+	alarms orchestrator.AlarmSink // 恢复收敛告警落点（M4-9，可空）
 }
+
+// SetAlarms 注入恢复收敛告警落点。
+func (p *Provider) SetAlarms(a orchestrator.AlarmSink) { p.alarms = a }
 
 // NewProvider 构造容器编排 Provider。
 func NewProvider(cfg Config, api dockerAPI) *Provider {
@@ -223,7 +228,16 @@ func (p *Provider) ContainerLogs(ctx context.Context, name string, tail int) (st
 func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []error {
 	var errs []error
 	for _, ct := range cfg.ContainerFunctions {
-		if err := p.ApplyContainer(ctx, ct); err != nil {
+		err := p.ApplyContainer(ctx, ct)
+		if p.alarms != nil {
+			if err != nil {
+				p.alarms.Raise(orchestrator.RecoveryScopeContainer, "warning", orchestrator.RecoveryUnconverged,
+					fmt.Sprintf("容器 %s 未收敛：%v", ct.Name, err), ct.Name)
+			} else {
+				p.alarms.Resolve(orchestrator.RecoveryScopeContainer, orchestrator.RecoveryUnconverged, ct.Name)
+			}
+		}
+		if err != nil {
 			errs = append(errs, fmt.Errorf("容器 %s: %w", ct.Name, err))
 		}
 	}

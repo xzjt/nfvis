@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"hash/fnv"
 	"path"
+	"sort"
+
+	"github.com/xzjt/nfvis/internal/model"
 )
 
 // VNF vNIC 接入的中立描述与确定性命名（FR-NET-020~023）。
@@ -82,4 +85,60 @@ func MemifIfaceName(owner, ifaceName string) string {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte("memif/" + owner + "/" + ifaceName))
 	return fmt.Sprintf("mf-%08x", h.Sum32())
+}
+
+// VnfPortsOf 由配置派生全部需 VPP 接入的 vNIC 端口（VM vhost-user + 容器 memif），
+// 按 (属主名, vNIC 名) 升序，保证操作序列与恢复收敛重放确定。
+// socket 路径与 VRF 归属（L3 交换机同名 VRF）在此统一派生，供事务 apply 与恢复收敛共用。
+func VnfPortsOf(cfg model.Config, vhostDir, memifDir string) []VnfPort {
+	var out []VnfPort
+	for _, vm := range cfg.VirtualMachineFunctions {
+		for _, nic := range vm.Interfaces {
+			if nic.Type != "vhost-user" {
+				continue
+			}
+			out = append(out, VnfPort{
+				VM: vm.Name, Interface: nic.Name, Type: nic.Type,
+				VirtualSwitch: nic.VirtualSwitch, MAC: nic.MAC, VLAN: nic.Vlan,
+				Socket: VnfSocketPath(vhostDir, vm.Name, nic.Name),
+				VRF:    vrfForSwitch(cfg, nic.VirtualSwitch),
+			})
+		}
+	}
+	for _, ct := range cfg.ContainerFunctions {
+		for _, nic := range ct.Interfaces {
+			if nic.Type != "memif" {
+				continue
+			}
+			out = append(out, VnfPort{
+				VM: ct.Name, Interface: nic.Name, Type: nic.Type,
+				VirtualSwitch: nic.VirtualSwitch, MAC: nic.MAC, VLAN: nic.Vlan,
+				Socket: MemifSocketPath(memifDir, ct.Name, nic.Name),
+				VRF:    vrfForSwitch(cfg, nic.VirtualSwitch),
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].VM != out[j].VM {
+			return out[i].VM < out[j].VM
+		}
+		return out[i].Interface < out[j].Interface
+	})
+	return out
+}
+
+// vrfForSwitch 若虚拟交换机为 L3 类型则返回同名 VRF（附录 B），否则空。
+func vrfForSwitch(cfg model.Config, name string) string {
+	if name == "" {
+		return ""
+	}
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.Name == name {
+			if vs.Type == "l3" {
+				return name
+			}
+			return ""
+		}
+	}
+	return ""
 }

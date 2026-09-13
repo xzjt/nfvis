@@ -18,6 +18,8 @@ type libvirtAPI interface {
 	Shutdown(ctx context.Context, name string) error // ACPI 关机（优雅）
 	Destroy(ctx context.Context, name string) error  // 立即断电（超时强杀）
 	Reboot(ctx context.Context, name string) error
+	// SetAutostart 设置 libvirt 域自启标志（FR-OPS-012：整机/libvirtd 重启后自启）。
+	SetAutostart(ctx context.Context, name string, autostart bool) error
 	// OpenConsole 打开域串口双向流（FR-CMP-014）。
 	OpenConsole(ctx context.Context, name string) (io.ReadWriteCloser, error)
 	// DumpDomainXML 返回域 XML（快照需据此取磁盘 target）。

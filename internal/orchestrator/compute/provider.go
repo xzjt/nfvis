@@ -34,6 +34,9 @@ type Provider struct {
 	// vfPCI 解析 SR-IOV VF 的 PCI 地址（M4-4 注入 sysfs 实现）；nil = 明确报不支持。
 	vfPCI func(pf string, vfID int) (string, error)
 
+	// alarms 恢复收敛告警落点（可空）。
+	alarms orchestrator.AlarmSink
+
 	// 测试注入：睡眠与轮询间隔（生产用 time.Sleep / 200ms）。
 	sleep func(ctx context.Context, d time.Duration) error
 	poll  time.Duration
@@ -69,6 +72,9 @@ func NewProvider(cfg Config, api libvirtAPI, store storageAPI, seed seedBuilder)
 	}
 }
 
+// SetAlarms 注入恢复收敛告警落点（M4-9；可空）。
+func (p *Provider) SetAlarms(a orchestrator.AlarmSink) { p.alarms = a }
+
 // SetVFResolver 注入 SR-IOV VF PCI 解析（M4-4）。
 func (p *Provider) SetVFResolver(f func(pf string, vfID int) (string, error)) { p.vfPCI = f }
 
@@ -94,6 +100,9 @@ func (p *Provider) DefineVM(ctx context.Context, vm model.VMFunction, alloc mode
 	}
 	if err := p.api.Define(ctx, xml); err != nil {
 		return fmt.Errorf("定义 VM %s: %w", vm.Name, err)
+	}
+	if err := p.api.SetAutostart(ctx, vm.Name, vm.Autostart); err != nil {
+		return fmt.Errorf("设置 VM %s 自启标志: %w", vm.Name, err)
 	}
 	if vm.Autostart {
 		state, exists, err := p.api.State(ctx, vm.Name)
@@ -252,7 +261,16 @@ func (p *Provider) Console(ctx context.Context, name string) (io.ReadWriteCloser
 func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []error {
 	var errs []error
 	for _, vm := range cfg.VirtualMachineFunctions {
-		if err := p.DefineVM(ctx, vm, model.AllocationFor(cfg, vm)); err != nil {
+		err := p.DefineVM(ctx, vm, model.AllocationFor(cfg, vm))
+		if p.alarms != nil {
+			if err != nil {
+				p.alarms.Raise(orchestrator.RecoveryScopeCompute, "warning", orchestrator.RecoveryUnconverged,
+					fmt.Sprintf("VM %s 未收敛：%v", vm.Name, err), vm.Name)
+			} else {
+				p.alarms.Resolve(orchestrator.RecoveryScopeCompute, orchestrator.RecoveryUnconverged, vm.Name)
+			}
+		}
+		if err != nil {
 			errs = append(errs, fmt.Errorf("VM %s: %w", vm.Name, err))
 		}
 	}

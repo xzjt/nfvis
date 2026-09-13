@@ -212,3 +212,37 @@ func TestDockerStateToContract(t *testing.T) {
 		}
 	}
 }
+
+type fakeSink struct{ raised, resolved []string }
+
+func (f *fakeSink) Raise(_, _, _, _, source string) { f.raised = append(f.raised, source) }
+func (f *fakeSink) Resolve(_, _, source string) bool {
+	f.resolved = append(f.resolved, source)
+	return true
+}
+
+func TestEnsureConsistentAlarms(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	sink := &fakeSink{}
+	p.SetAlarms(sink)
+	cfg := model.Config{ContainerFunctions: []model.ContainerFunction{ctFixture("ct1")}}
+	if errs := p.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("收敛应成功: %v", errs)
+	}
+	if len(sink.resolved) != 1 || len(sink.raised) != 0 {
+		t.Fatalf("成功应收敛告警: raised=%v resolved=%v", sink.raised, sink.resolved)
+	}
+
+	m2 := newMockDocker()
+	m2.err = fmt.Errorf("docker down")
+	p2 := NewProvider(DefaultConfig(), m2)
+	sink2 := &fakeSink{}
+	p2.SetAlarms(sink2)
+	if errs := p2.EnsureConsistent(context.Background(), cfg); len(errs) != 1 {
+		t.Fatalf("应收集 1 个错误: %v", errs)
+	}
+	if len(sink2.raised) != 1 || sink2.raised[0] != "ct1" {
+		t.Fatalf("应上报容器未收敛告警: %v", sink2.raised)
+	}
+}

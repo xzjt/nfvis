@@ -22,6 +22,8 @@ type L2Network struct {
 	lldp                         *LldpProvider
 	vhost                        *VhostUserProvider // M4-4：VNF vNIC 接入
 	memif                        *MemifProvider     // M4-7：容器 vNIC 接入
+	vhostDir                     string             // vhost-user socket 目录（恢复收敛重放用）
+	memifDir                     string             // memif socket 目录
 	alarms                       *AlarmStore        // 恢复收敛失败项落点（M3-8，可空）
 }
 
@@ -30,7 +32,18 @@ func NewL2Network(base orchestrator.NetworkProvider, l2 *L2Provider) *L2Network 
 	if base == nil {
 		base = orchestrator.NewNoopNetwork()
 	}
-	return &L2Network{NetworkProvider: base, l2: l2}
+	return &L2Network{NetworkProvider: base, l2: l2,
+		vhostDir: orchestrator.DefaultVhostDir, memifDir: orchestrator.DefaultMemifDir}
+}
+
+// SetSocketDirs 设置 vNIC socket 目录（须与 applier/compute/container 一致，恢复收敛重放用）。
+func (n *L2Network) SetSocketDirs(vhostDir, memifDir string) {
+	if vhostDir != "" {
+		n.vhostDir = vhostDir
+	}
+	if memifDir != "" {
+		n.memifDir = memifDir
+	}
 }
 
 // SetL3 追加 L3/VRF 编排（BVI 网关随 L2 交换机一并处理）。

@@ -102,6 +102,7 @@ func run() error {
 		log.Warn("计算编排未接入（libvirt 连接失败），VM 生命周期不可用", "uri", computeCfg.URI, "err", cerr)
 	} else {
 		p.SetVFResolver(network.NewSysfsVFResolver()) // SR-IOV VF PCI 解析（FR-NET-021）
+		p.SetAlarms(alarms)                           // M4-9：计算收敛告警落点
 		computeProvider, libvirtConn, vmRuntime = p, conn, p
 		defer func() { _ = libvirtConn.Close() }()
 		log.Info("计算编排已接入", "uri", computeCfg.URI)
@@ -114,6 +115,7 @@ func run() error {
 	var ctRuntime api.ContainerRuntime
 	ctProvider := container.NewConnectedProvider(ctCfg)
 	if st, err := ctProvider.ContainerState(context.Background(), "__nfvis_probe__"); err == nil || st != "" {
+		ctProvider.SetAlarms(alarms) // M4-9：容器收敛告警落点
 		containerProvider, ctRuntime = ctProvider, ctProvider
 		log.Info("容器编排已接入", "socket", ctCfg.Socket)
 	} else {
@@ -133,6 +135,7 @@ func run() error {
 		})
 	}
 
+	netProvider.SetSocketDirs(computeCfg.VhostDir, ctCfg.MemifDir)
 	applier := orchestrator.NewApplier(netProvider, computeProvider, containerProvider,
 		orchestrator.WithVhostDir(computeCfg.VhostDir), orchestrator.WithMemifDir(ctCfg.MemifDir))
 
@@ -176,9 +179,15 @@ func run() error {
 		defer cancel()
 		if errs := netProvider.EnsureConsistent(rctx, cfg); len(errs) > 0 {
 			for _, e := range errs {
-				log.Warn("恢复收敛未收敛项", "err", e)
+				log.Warn("网络恢复收敛未收敛项", "err", e)
 			}
-			return
+		}
+		// M4-9：计算/容器收敛（FR-OPS-010/012）——补建缺失 domain/容器；失败经告警 sink 上报。
+		for _, e := range computeProvider.EnsureConsistent(rctx, cfg) {
+			log.Warn("计算恢复收敛未收敛项", "err", e)
+		}
+		for _, e := range containerProvider.EnsureConsistent(rctx, cfg) {
+			log.Warn("容器恢复收敛未收敛项", "err", e)
 		}
 		// M4-4：VNF vNIC 断连检测（FR-NET-023）——link down/缺失记为告警，恢复则消警。
 		for _, e := range netProvider.CheckVnfPorts(rctx, cfg) {

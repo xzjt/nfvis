@@ -18,6 +18,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/xzjt/nfvis/internal/orchestrator"
+
 	"github.com/xzjt/nfvis/internal/model"
 )
 
@@ -47,6 +49,14 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", source, err))
 		failures = append(failures, Alarm{Severity: sev, Code: code, Message: err.Error(), Source: source})
+	}
+
+	// VNF/容器 vNIC 接入重放（FR-NET-020/022/023）：VPP 重启后 vhost-user/memif 接口
+	// 会消失，须先于 BD 重放，交换机端口才能按名挂接。
+	for _, port := range orchestrator.VnfPortsOf(cfg, n.vhostDir, n.memifDir) {
+		if err := n.ApplyVnfInterface(ctx, port); err != nil {
+			record(fmt.Sprintf("vnf-ports/%s/%s", port.VM, port.Interface), err)
+		}
 	}
 
 	// 顺序与事务 apply 计划一致：被引用对象先建（ACL/bond → BD/VRF → NAT → SPAN/QoS
