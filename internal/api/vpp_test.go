@@ -113,3 +113,31 @@ func TestMacTableUnavailable(t *testing.T) {
 		t.Fatalf("未装配应 503: %d", status)
 	}
 }
+
+// ---------- M3-4：/vrfs/{name}/routes 运行态（FR-NET-013） ----------
+
+type fakeL3Runtime struct {
+	rows []RouteRow
+	err  error
+}
+
+func (f *fakeL3Runtime) Routes(context.Context, string) ([]RouteRow, error) { return f.rows, f.err }
+
+func TestVrfRoutesEndpoint(t *testing.T) {
+	fake := &fakeL3Runtime{rows: []RouteRow{{Prefix: "0.0.0.0/0", NextHop: "10.0.0.254"}}}
+	ts := newTestServerOpts(t, Options{L3: fake})
+	token := loginAdmin(t, ts)
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/vrfs/vs-l3/routes", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), "0.0.0.0/0") {
+		t.Fatalf("routes: %d %s", status, data)
+	}
+}
+
+func TestVrfRoutesUnavailable(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+	status, _, _ := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/vrfs/vs-l3/routes", token, nil, nil)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("未装配应 503: %d", status)
+	}
+}

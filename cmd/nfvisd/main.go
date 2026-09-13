@@ -62,7 +62,9 @@ func run() error {
 	vppMgr := network.NewManager(network.Config{Socket: *vppSock, Log: log}, nil)
 	defer vppMgr.Close()
 	l2Provider := network.NewL2ProviderFunc(vppMgr.L2ClientFunc())
+	l3Provider := network.NewL3ProviderFunc(vppMgr.L3ClientFunc())
 	netProvider := network.NewL2Network(orchestrator.NewNoopNetwork(), l2Provider)
+	netProvider.SetL3(l3Provider)
 	applier := orchestrator.NewApplier(netProvider, orchestrator.NewNoopCompute(), orchestrator.NewNoopContainer())
 
 	engine, err := config.NewEngine(store, applier, config.Options{})
@@ -101,6 +103,7 @@ func run() error {
 		Log:     log,
 		VPP:     &vppController{mgr: vppMgr, applier: startupApplier, engine: engine},
 		L2:      &l2Controller{net: netProvider},
+		L3:      &l3Controller{net: netProvider},
 	})
 
 	srvErr := make(chan error, 1)
@@ -167,6 +170,21 @@ func (c *l2Controller) MACTable(ctx context.Context, swName string) ([]api.MACTa
 	out := make([]api.MACTableRow, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, api.MACTableRow{MAC: r.MAC, Port: r.Port, VLAN: r.VLAN})
+	}
+	return out, nil
+}
+
+// l3Controller 装配 api.L3Runtime（M3-4）：VRF 运行态 FIB。
+type l3Controller struct{ net *network.L2Network }
+
+func (c *l3Controller) Routes(ctx context.Context, vrfName string) ([]api.RouteRow, error) {
+	rows, err := c.net.Routes(ctx, vrfName)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]api.RouteRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, api.RouteRow{Prefix: r.Prefix, NextHop: r.NextHop, Distance: r.Distance})
 	}
 	return out, nil
 }

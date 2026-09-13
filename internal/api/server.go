@@ -31,6 +31,7 @@ type Options struct {
 	Log     *slog.Logger
 	VPP     VppController // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
 	L2      L2Runtime     // L2 运行态查询（M3-3；nil = mac-table 503）
+	L3      L3Runtime     // L3 运行态查询（M3-4；nil = routes 503）
 }
 
 // Server NFViS REST server。
@@ -40,6 +41,7 @@ type Server struct {
 	cliExec *cliExecutor
 	vpp     VppController
 	l2      L2Runtime
+	l3      L3Runtime
 	log     *slog.Logger
 	mux     *http.ServeMux
 	http    *http.Server
@@ -56,7 +58,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, log: log}
 	mux := http.NewServeMux()
 
 	// 认证（免 token，FR-API-001）
@@ -134,6 +136,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/vrfs/{name}", s.auth(s.handleGetVrf, schema.ClassReadOnly, "show vrfs"))
 	mux.Handle("POST "+APIPrefix+"/vrfs", cfgAPI(s.handlePostVrf))
 	mux.Handle("DELETE "+APIPrefix+"/vrfs/{name}", cfgAPI(s.handleDeleteVrf))
+	mux.Handle("GET "+APIPrefix+"/vrfs/{name}/routes", s.auth(s.handleGetVrfRoutes, schema.ClassReadOnly, "show vrfs"))
 	mux.Handle("PUT "+APIPrefix+"/vrfs/{name}/routes", cfgAPI(s.handlePutVrfRoutes))
 
 	addr := opts.Addr
