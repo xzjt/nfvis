@@ -56,8 +56,13 @@ type CLIEResult struct {
 type cliExecutor struct {
 	engine *config.Engine
 	authz  authorizer
-	diag   DiagRuntime  // 诊断命令（M3-9；nil = 报不可用）
-	state  *state.State // 接口计数快照（monitor；nil = 报不可用）
+	diag   DiagRuntime        // 诊断命令（M3-9；nil = 报不可用）
+	state  *state.State       // 接口计数快照（monitor；nil = 报不可用）
+	l2     L2Runtime          // L2 运行态（mac-table；nil = 报未接入）
+	l3     L3Runtime          // L3 运行态（routes；nil = 报未接入）
+	lldp   LldpRuntime        // LLDP 邻居（nil = 报未接入）
+	natRT  NatSessionsRuntime // NAT 会话（nil = 报未接入）
+	alarms AlarmRuntime       // 告警表（nil = 报未接入）
 	mu     sync.Mutex
 	sess   map[string]*cliSession
 	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
@@ -76,6 +81,12 @@ func newCLIExecutor(e *config.Engine, a authorizer) *cliExecutor {
 // setRuntime 注入诊断与运行态数据源（M3-9；Server.New 装配，测试可省略）。
 func (x *cliExecutor) setRuntime(diag DiagRuntime, st *state.State) {
 	x.diag, x.state = diag, st
+}
+
+// setNetRuntime 注入网络运行态查询（mac-table/routes/邻居/NAT 会话；
+// 契约 §1.1 的运行态 show 子命令，nil = 命令报“VPP 未接入”）。
+func (x *cliExecutor) setNetRuntime(l2 L2Runtime, l3 L3Runtime, lldp LldpRuntime, nat NatSessionsRuntime, alarms AlarmRuntime) {
+	x.l2, x.l3, x.lldp, x.natRT, x.alarms = l2, l3, lldp, nat, alarms
 }
 
 func promptOf(s *cliSession) string {
@@ -257,6 +268,16 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 			return "（配置为空）\n"
 		}
 		return out + "\n"
+	case len(t) >= 1 && t[0] == "virtual-switches":
+		return x.execShowVSwitches(t[1:])
+	case len(t) >= 1 && t[0] == "vrfs":
+		return x.execShowVrfs(t[1:])
+	case len(t) >= 1 && t[0] == "nat":
+		return x.execShowNat(t[1:])
+	case len(t) >= 1 && t[0] == "protocols":
+		return x.execShowProtocols(t[1:])
+	case len(t) >= 1 && t[0] == "alarms":
+		return x.execShowAlarms(t[1:])
 	case len(t) >= 1 && t[0] == "acls":
 		return x.execShowAcls(t[1:])
 	case len(t) >= 1 && t[0] == "bonds":

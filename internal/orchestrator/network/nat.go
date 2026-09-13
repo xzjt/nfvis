@@ -245,7 +245,16 @@ func (p *NatProvider) desiredFeatures(c NatClient, nat model.NatConfig, pools ma
 			}
 		}
 		if r.Action.Interface == "" {
-			continue
+			// VPP NAT44 的 outside 必须是显式接口（inside 由 virtual-switch 成员解析）。
+			// 此前该情形被静默跳过：配置 commit 成功但 NAT 完全不生效（show nat44
+			// interfaces 为空、内网不通），排查成本极高。此处改为显式报错。
+			return nil, nil, fmt.Errorf(
+				"NAT 规则 %d 未指定出接口：需 action interface <ifname>（VPP NAT44 的 outside 不支持自动推断；"+
+					"source-pool 仅提供地址池）", r.Seq)
+		}
+		if r.VirtualSwitch == "" {
+			return nil, nil, fmt.Errorf(
+				"NAT 规则 %d 未指定 virtual-switch：inside 接口取自该 L3 交换机的成员接口", r.Seq)
 		}
 		idx, ok, err := c.SwInterfaceIndex(r.Action.Interface)
 		if err != nil {

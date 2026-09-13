@@ -176,6 +176,22 @@ func TestNatErrors(t *testing.T) {
 	if err := NewNatProvider(newFakeNat()).ApplyNAT(context.Background(), cfg3); err == nil {
 		t.Fatalf("外口缺失应报错")
 	}
+	// 出接口未指定：必须显式报错（此前静默跳过 → NAT 完全不生效，排查成本极高）
+	cfg4 := model.NatConfig{
+		SourcePools: []model.NatSourcePool{{Name: "pool1", AddressRange: "192.168.155.220 to 192.168.155.225"}},
+		Rules: []model.NatRule{{Seq: 1, MatchSource: "10.0.0.0/24",
+			VirtualSwitch: "vs-l3", Action: model.NatAction{SourcePool: "pool1"}}}}
+	f4 := newFakeNat()
+	if err := NewNatProvider(f4).ApplyNAT(context.Background(), cfg4); err == nil ||
+		!strings.Contains(err.Error(), "未指定出接口") {
+		t.Fatalf("source-pool 未给出接口时应报错: %v", err)
+	}
+	// virtual-switch 未指定：inside 无从解析
+	cfg5 := model.NatConfig{Rules: []model.NatRule{{Seq: 1, Action: model.NatAction{Interface: "ens224"}}}}
+	if err := NewNatProvider(newFakeNat()).ApplyNAT(context.Background(), cfg5); err == nil ||
+		!strings.Contains(err.Error(), "未指定 virtual-switch") {
+		t.Fatalf("未指定 virtual-switch 时应报错: %v", err)
+	}
 	// 客户端错误
 	fe := newFakeNat()
 	fe.err = errors.New("boom")

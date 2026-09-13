@@ -207,6 +207,29 @@ func (g *govppL3Client) BviCreate() (uint32, error) {
 	return uint32(reply.SwIfIndex), nil
 }
 
+// BviOfBD 返回 bridge domain 上既有 BVI 的 sw_if_index（无则 found=false）。
+// 全量 dump 后按 BdID 匹配：带 BdID 过滤的 dump 在 VPP 26.06 上会返回空。
+func (g *govppL3Client) BviOfBD(bdID uint32) (uint32, bool, error) {
+	reqCtx := g.ch.SendMultiRequest(&l2.BridgeDomainDump{
+		BdID:      bdID,
+		SwIfIndex: interface_types.InterfaceIndex(0xFFFFFFFF),
+	})
+	for {
+		d := &l2.BridgeDomainDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return 0, false, err
+		}
+		if stop {
+			return 0, false, nil
+		}
+		if d.BdID == bdID && d.BviSwIfIndex != 0 &&
+			d.BviSwIfIndex != interface_types.InterfaceIndex(0xFFFFFFFF) {
+			return uint32(d.BviSwIfIndex), true, nil
+		}
+	}
+}
+
 func (g *govppL3Client) BviDelete(swIfIndex uint32) error {
 	reply := &l2.BviDeleteReply{}
 	if err := g.ch.SendRequest(&l2.BviDelete{SwIfIndex: interface_types.InterfaceIndex(swIfIndex)}).ReceiveReply(reply); err != nil {

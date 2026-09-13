@@ -1,0 +1,15 @@
+===== show alarms（运行态接线）=====
+（无 active 告警）
+
+===== D3 重做：ACL 挂 L3 接口 acl-in（deny 管理口 ICMP）=====
+[ok] acls demo-acl rule 10 source 192.168.155.129/32 destination any protocol icmp action deny
+[ok] virtual-switches demo-l3 l3-interface ens192 acl-in demo-acl
+commit 成功 (revision 4)
+--- 期望：ping BVI 被拒 ---
+3 packets transmitted, 0 received, 100% packet loss, time 2087ms
+
+--- 放行 ---
+[ok] acls demo-acl rule 10 source 192.168.155.129/32 destination any protocol icmp action permit
+commit 成功 (revision 5)
+3 packets transmitted, 2 received, 33.3333% packet loss, time 2071ms
+rtt min/avg/max/mdev = 0.279/0.279/0.279/0.000 ms

@@ -266,7 +266,7 @@ func ConfigPathTree() *Node {
 						),
 					),
 					K("action", "转换动作",
-						K("source-pool", "使用地址池（出接口推断）", SP("<name>", "source_pool", "池名")),
+						K("source-pool", "使用地址池（出接口另需 action interface，必填）", SP("<name>", "source_pool", "池名")),
 						K("interface", "直接出接口", SP("<ifname>", "interface", "接口名")),
 					),
 				),

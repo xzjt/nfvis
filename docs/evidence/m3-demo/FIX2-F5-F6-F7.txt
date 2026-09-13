@@ -1,0 +1,20 @@
+===== 基础配置（L2+BVI 入 L3 VRF + L3 路由）=====
+[ok] virtual-switches demo-l3 l3-interface ens192 ip address 192.168.155.200/24
+[ok] virtual-switches demo-l3 static-routes 0.0.0.0/0 next-hop 192.168.155.2
+commit 成功 (revision 3)
+
+===== F7a: show vrfs demo-l3 routes（运行态 FIB）=====
+%% 该 show 命令依赖底座运行态，M3/M4 接入后可用（当前可用：show version / show configuration [candidate|compare rollback n] / show system configuration sessions）
+exit status 1
+===== F7b: show virtual-switches demo-l2 mac-table =====
+%% 该 show 命令依赖底座运行态，M3/M4 接入后可用（当前可用：show version / show configuration [candidate|compare rollback n] / show system configuration sessions）
+exit status 1
+===== F7c: show nat（运行态会话，应为空表而非占位提示）=====
+%% 该 show 命令依赖底座运行态，M3/M4 接入后可用（当前可用：show version / show configuration [candidate|compare rollback n] / show system configuration sessions）
+exit status 1
+
+===== F6: NAT 未给 out 接口 → 必须报错（而非静默无效）=====
+[ok] nat source-pool demo-pool address-range 192.168.155.220 to 192.168.155.225
+[ok] nat rules 10 match source 10.10.0.0/24 virtual-switch demo-l3 action source-pool demo-pool
+%% 底座下发失败（已补偿）: 下发失败 nat: NAT 规则 10 未指定出接口：需 action interface <ifname>（VPP NAT44 的 outside 不支持自动推断；source-pool 仅提供地址池）
+exit status 1

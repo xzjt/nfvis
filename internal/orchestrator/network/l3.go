@@ -35,6 +35,7 @@ type L3Client interface {
 	IPRouteAddDel(tableID uint32, prefix, nextHop string, add bool) error
 	Routes(tableID uint32) ([]RouteEntry, error)
 	BviCreate() (uint32, error)
+	BviOfBD(bdID uint32) (uint32, bool, error)
 	SetState(swIfIndex uint32, up bool) error
 	BviDelete(swIfIndex uint32) error
 	BviSetBD(swIfIndex, bdID uint32) error
@@ -243,13 +244,21 @@ func (p *L3Provider) ApplyGateway(ctx context.Context, vs model.VirtualSwitch) e
 	p.mu.Lock()
 	bvi, ok := p.bvis[vs.Name]
 	p.mu.Unlock()
+	reused := false
 	if !ok {
-		bvi, err = c.BviCreate()
-		if err != nil {
-			return fmt.Errorf("创建 BVI（%s）: %w", vs.Name, err)
-		}
-		if err := c.BviSetBD(bvi, BDID(vs.Name)); err != nil {
-			return fmt.Errorf("BVI 挂入 bridge-domain %s: %w", vs.Name, err)
+		// 恢复场景：nfvisd 重启后内存映射丢失，而 VPP 侧 BD 上已有 BVI
+		// （整机/进程重启后重放配置时命中），此时必须复用而非重建，
+		// 否则 BviSetBD 报 -152 "Bridge domain already has a BVI interface"。
+		if existing, found, derr := c.BviOfBD(BDID(vs.Name)); derr == nil && found {
+			bvi, reused = existing, true
+		} else {
+			bvi, err = c.BviCreate()
+			if err != nil {
+				return fmt.Errorf("创建 BVI（%s）: %w", vs.Name, err)
+			}
+			if err := c.BviSetBD(bvi, BDID(vs.Name)); err != nil {
+				return fmt.Errorf("BVI 挂入 bridge-domain %s: %w", vs.Name, err)
+			}
 		}
 	}
 	// 先清旧地址再置表：VPP 拒绝把仍带地址的接口移到其它 VRF（-114），
@@ -282,6 +291,7 @@ func (p *L3Provider) ApplyGateway(ctx context.Context, vs model.VirtualSwitch) e
 			return err
 		}
 	}
+	_ = reused
 	p.mu.Lock()
 	p.bvis[vs.Name] = bvi
 	p.ownTable[vs.Name] = own
