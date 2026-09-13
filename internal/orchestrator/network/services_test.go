@@ -54,7 +54,7 @@ func (f *fakeSvc) SpanSet(from, to uint32, state string, _ bool) error {
 	return nil
 }
 
-func (f *fakeSvc) SpanDisable(from uint32) error {
+func (f *fakeSvc) SpanDisable(from, to uint32) error {
 	if f.err != nil {
 		return f.err
 	}

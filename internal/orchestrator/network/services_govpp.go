@@ -71,8 +71,8 @@ func (g *govppSvcClient) SpanSet(from, to uint32, state string, isL2 bool) error
 	return nil
 }
 
-func (g *govppSvcClient) SpanDisable(from uint32) error {
-	return g.SpanSet(from, 0, "disabled", false)
+func (g *govppSvcClient) SpanDisable(from, to uint32) error {
+	return g.SpanSet(from, to, "disabled", false)
 }
 
 func (g *govppSvcClient) PolicerAddDel(name string, cirKbps uint32, cb uint64, add bool) (uint32, error) {

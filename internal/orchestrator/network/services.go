@@ -21,29 +21,32 @@ type SvcClient interface {
 	SpanSet(from, to uint32, state string, isL2 bool) error
 	PolicerAddDel(name string, cirKbps uint32, cb uint64, add bool) (uint32, error)
 	PolicerInput(swIfIndex uint32, name string, apply bool) error
-	SpanDisable(from uint32) error
+	SpanDisable(from, to uint32) error
 	Close()
 }
+
+// spanRec SPAN 会话的源/目的接口索引（关闭时需同时给出）。
+type spanRec struct{ from, to uint32 }
 
 // ServicesProvider SPAN（FR-NET-016/§4.3 端口镜像）与 QoS 限速（CIR/CBS）编排。
 type ServicesProvider struct {
 	client func() (SvcClient, error)
 
 	mu      sync.Mutex
-	spans   map[string]uint32 // 会话名 → 源 sw_if_index
-	policer map[string]bool   // 已创建的 policer 名
-	bound   map[string]string // 接口名 → 绑定的 policer 名
+	spans   map[string]spanRec // 会话名 → 源/目的 sw_if_index
+	policer map[string]bool    // 已创建的 policer 名
+	bound   map[string]string  // 接口名 → 绑定的 policer 名
 }
 
 // NewServicesProvider 以固定客户端构造（测试）。
 func NewServicesProvider(c SvcClient) *ServicesProvider {
 	return &ServicesProvider{client: func() (SvcClient, error) { return c, nil },
-		spans: map[string]uint32{}, policer: map[string]bool{}, bound: map[string]string{}}
+		spans: map[string]spanRec{}, policer: map[string]bool{}, bound: map[string]string{}}
 }
 
 // NewServicesProviderFunc 以客户端工厂构造（连接可重连）。
 func NewServicesProviderFunc(f func() (SvcClient, error)) *ServicesProvider {
-	return &ServicesProvider{client: f, spans: map[string]uint32{},
+	return &ServicesProvider{client: f, spans: map[string]spanRec{},
 		policer: map[string]bool{}, bound: map[string]string{}}
 }
 
@@ -70,7 +73,7 @@ func (p *ServicesProvider) ApplySpan(ctx context.Context, pm model.PortMirroring
 		return fmt.Errorf("SPAN %s: %w", pm.Name, err)
 	}
 	p.mu.Lock()
-	p.spans[pm.Name] = src
+	p.spans[pm.Name] = spanRec{from: src, to: dst}
 	p.mu.Unlock()
 	return nil
 }
@@ -78,7 +81,7 @@ func (p *ServicesProvider) ApplySpan(ctx context.Context, pm model.PortMirroring
 // DeleteSpan 关闭 SPAN 会话。
 func (p *ServicesProvider) DeleteSpan(ctx context.Context, name string) error {
 	p.mu.Lock()
-	src, ok := p.spans[name]
+	rec, ok := p.spans[name]
 	delete(p.spans, name)
 	p.mu.Unlock()
 	if !ok {
@@ -89,7 +92,7 @@ func (p *ServicesProvider) DeleteSpan(ctx context.Context, name string) error {
 		return err
 	}
 	defer c.Close()
-	if err := c.SpanDisable(src); err != nil {
+	if err := c.SpanDisable(rec.from, rec.to); err != nil {
 		return fmt.Errorf("关闭 SPAN %s: %w", name, err)
 	}
 	return nil
