@@ -46,6 +46,25 @@ func (g *govppSvcClient) SetMTU(swIfIndex, mtu uint32) error {
 	return nil
 }
 
+// setIfaceState 置接口管理员状态（VPP 默认 down，数据/BVI/子接口/bond 都需显式 up）。
+func setIfaceState(ch api.Channel, swIfIndex uint32, up bool) error {
+	var flags interface_types.IfStatusFlags // 0 = down；仅 ADMIN_UP 位表示 up
+	if up {
+		flags = interface_types.IF_STATUS_API_FLAG_ADMIN_UP
+	}
+	reply := &ifapi.SwInterfaceSetFlagsReply{}
+	if err := ch.SendRequest(&ifapi.SwInterfaceSetFlags{
+		SwIfIndex: interface_types.InterfaceIndex(swIfIndex),
+		Flags:     flags,
+	}).ReceiveReply(reply); err != nil {
+		return err
+	}
+	if reply.Retval != 0 {
+		return fmt.Errorf("sw_interface_set_flags(if=%d,up=%v) retval=%d", swIfIndex, up, reply.Retval)
+	}
+	return nil
+}
+
 func (g *govppSvcClient) SetState(swIfIndex uint32, up bool) error {
 	var flags interface_types.IfStatusFlags // 0 = down；仅 ADMIN_UP 位表示 up
 	if up {

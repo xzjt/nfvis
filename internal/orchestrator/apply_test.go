@@ -26,6 +26,15 @@ func (n recNet) record(op string) error {
 func (n recNet) ApplyInterface(ctx context.Context, iface model.InterfaceConfig) error {
 	return n.record("iface:" + iface.Name)
 }
+func (n recNet) ApplyBond(ctx context.Context, bond model.Bond) error {
+	return n.record("bond:" + bond.Name)
+}
+func (n recNet) DeleteBond(ctx context.Context, name string) error {
+	return n.record("del-bond:" + name)
+}
+func (n recNet) ApplyLLDP(ctx context.Context, lldp *model.LldpConfig) error {
+	return n.record("lldp")
+}
 func (n recNet) ApplyACL(ctx context.Context, acl model.Acl) error {
 	return n.record("acl:" + acl.Name)
 }
