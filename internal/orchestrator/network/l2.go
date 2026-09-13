@@ -76,6 +76,7 @@ type VlanTagRewriteReq struct {
 type L2Client interface {
 	SwInterfaceIndex(ifname string) (uint32, bool, error)
 	SwInterfaceNames() (map[uint32]SwIfInfo, error)
+	BridgeDomainExists(bdID uint32) (bool, error)
 	BridgeDomainAddDel(bdID uint32, add, learn bool, tag string) error
 	SwInterfaceSetL2Bridge(swIfIndex, bdID uint32, portType L2PortType, shg uint8, enable bool) error
 	SwInterfaceSetL2Xconnect(swIfIndex, bdID uint32, enable bool) error
@@ -133,8 +134,14 @@ func (p *L2Provider) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwit
 	}
 	defer c.Close()
 	bdID := BDID(vs.Name)
-	if err := c.BridgeDomainAddDel(bdID, true, true, vs.Name); err != nil {
-		return fmt.Errorf("建 bridge-domain %s(id=%d): %w", vs.Name, bdID, err)
+	exists, err := c.BridgeDomainExists(bdID)
+	if err != nil {
+		return fmt.Errorf("查询 bridge-domain %s(id=%d): %w", vs.Name, bdID, err)
+	}
+	if !exists { // 幂等：BD 已存在时不重复创建（VPP 返回 already exists）
+		if err := c.BridgeDomainAddDel(bdID, true, true, vs.Name); err != nil {
+			return fmt.Errorf("建 bridge-domain %s(id=%d): %w", vs.Name, bdID, err)
+		}
 	}
 
 	desired, err := p.desiredMembers(c, vs)
@@ -189,8 +196,14 @@ func (p *L2Provider) DeleteBridgeDomain(ctx context.Context, name string) error 
 			return fmt.Errorf("解除 cross-connect %d: %w", idx, err)
 		}
 	}
-	if err := c.BridgeDomainAddDel(bdID, false, false, name); err != nil {
-		return fmt.Errorf("删 bridge-domain %s(id=%d): %w", name, bdID, err)
+	exists, err := c.BridgeDomainExists(bdID)
+	if err != nil {
+		return fmt.Errorf("查询 bridge-domain %s(id=%d): %w", name, bdID, err)
+	}
+	if exists {
+		if err := c.BridgeDomainAddDel(bdID, false, false, name); err != nil {
+			return fmt.Errorf("删 bridge-domain %s(id=%d): %w", name, bdID, err)
+		}
 	}
 	return nil
 }

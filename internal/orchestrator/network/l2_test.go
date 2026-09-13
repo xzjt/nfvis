@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -21,6 +22,7 @@ type fakeL2 struct {
 	macs   map[uint32][]MACEntry
 	calls  []string
 	subifs []CreateSubifReq
+	err    error // 非 nil 时各方法返回该错误
 }
 
 func newFakeL2() *fakeL2 {
@@ -43,11 +45,21 @@ func (f *fakeL2) log(s string) { f.calls = append(f.calls, s) }
 func (f *fakeL2) Close()       {}
 
 func (f *fakeL2) SwInterfaceIndex(ifname string) (uint32, bool, error) {
+	if f.err != nil {
+		return 0, false, f.err
+	}
 	idx, ok := f.ifaces[ifname]
 	return idx, ok, nil
 }
 
 func (f *fakeL2) SwInterfaceNames() (map[uint32]SwIfInfo, error) { return f.names, nil }
+
+func (f *fakeL2) BridgeDomainExists(bdID uint32) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	return f.bds[bdID], nil
+}
 
 func (f *fakeL2) BridgeDomainAddDel(bdID uint32, add, learn bool, tag string) error {
 	f.log("bd:" + tag)
@@ -92,7 +104,12 @@ func (f *fakeL2) CreateSubif(req CreateSubifReq) (uint32, error) {
 
 func (f *fakeL2) L2InterfaceVlanTagRewrite(VlanTagRewriteReq) error { return nil }
 
-func (f *fakeL2) MACTable(bdID uint32) ([]MACEntry, error) { return f.macs[bdID], nil }
+func (f *fakeL2) MACTable(bdID uint32) ([]MACEntry, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.macs[bdID], nil
+}
 
 func l2vs(name string, ports ...model.VSwitchPort) model.VirtualSwitch {
 	return model.VirtualSwitch{Name: name, Type: "l2", Ports: ports}
@@ -301,5 +318,63 @@ func TestManagerAPIChannelUnavailable(t *testing.T) {
 	}
 	if _, err := m.L2ClientFunc()(); err == nil {
 		t.Fatalf("未连接时 L2 客户端应报错")
+	}
+}
+
+// 幂等：BD 已存在时重复 Apply 不报错；删除不存在的 BD 亦不报错（FR-OPS-010 重放友好）。
+func TestL2ApplyIdempotent(t *testing.T) {
+	f := newFakeL2()
+	p := NewL2Provider(f)
+	vs := l2vs("vs-idem", model.VSwitchPort{Seq: 0, Interface: "ens192"})
+	for i := 0; i < 2; i++ {
+		if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+			t.Fatalf("第 %d 次 Apply 应幂等: %v", i+1, err)
+		}
+	}
+	if !f.bds[BDID("vs-idem")] || f.bridge[1] != BDID("vs-idem") {
+		t.Fatalf("幂等 Apply 后状态不符: %v %v", f.bds, f.bridge)
+	}
+	if err := p.DeleteBridgeDomain(context.Background(), "vs-nonexistent"); err != nil {
+		t.Fatalf("删除不存在的 BD 应无害: %v", err)
+	}
+}
+
+func TestL2ClientErrors(t *testing.T) {
+	sentinel := errors.New("boom")
+	f := newFakeL2()
+	f.err = sentinel
+	p := NewL2Provider(f)
+	vs := l2vs("vs-err", model.VSwitchPort{Seq: 0, Interface: "ens192"})
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err == nil {
+		t.Fatalf("BD 查询错误应上抛")
+	}
+	if err := p.DeleteBridgeDomain(context.Background(), "vs-err"); err == nil {
+		t.Fatalf("删除时查询错误应上抛")
+	}
+	if _, err := p.MACTable(context.Background(), "vs-err"); err == nil {
+		t.Fatalf("MAC 表错误应上抛")
+	}
+}
+
+// cross-connect 配置缩减后应解除旧端口的 xconnect。
+func TestL2CrossConnectDetach(t *testing.T) {
+	f := newFakeL2()
+	p := NewL2Provider(f)
+	vs := l2vs("vs-xc2",
+		model.VSwitchPort{Seq: 0, Interface: "ens192"},
+		model.VSwitchPort{Seq: 1, Interface: "ens224"})
+	vs.CrossConnect = true
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("xconnect: %v", err)
+	}
+	if len(f.xconn) != 2 {
+		t.Fatalf("应两端 xconnect: %v", f.xconn)
+	}
+	vs.Ports = vs.Ports[:1]
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("缩减: %v", err)
+	}
+	if len(f.xconn) != 0 {
+		t.Fatalf("缩减后应解除 xconnect: %v", f.xconn)
 	}
 }

@@ -78,6 +78,23 @@ func (g *govppL2Client) SwInterfaceNames() (map[uint32]SwIfInfo, error) {
 	}
 }
 
+func (g *govppL2Client) BridgeDomainExists(bdID uint32) (bool, error) {
+	reqCtx := g.ch.SendMultiRequest(&l2.BridgeDomainDump{BdID: bdID})
+	for {
+		d := &l2.BridgeDomainDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return false, err
+		}
+		if stop {
+			return false, nil
+		}
+		if d.BdID == bdID {
+			return true, nil
+		}
+	}
+}
+
 func (g *govppL2Client) BridgeDomainAddDel(bdID uint32, add, learn bool, tag string) error {
 	reply := &l2.BridgeDomainAddDelReply{}
 	err := g.ch.SendRequest(&l2.BridgeDomainAddDel{
