@@ -2,10 +2,12 @@
 GO ?= go
 COVER_MIN ?= 70
 
-.PHONY: check build vet cover test archtest prototype-check integration
+.PHONY: check build vet cover test archtest docscheck prototype-check integration
 
 # make check：提交前/CI 的统一自检入口（AGENTS.md「每次改动后的自检清单」）
-check: vet cover archtest prototype-check
+# 必须含 test：CI 只跑 make check，缺此项则 internal/api（含契约↔路由守护）、aaa、
+# cli、state 的测试在 CI 完全不执行，守护形同虚设。
+check: vet test cover archtest docscheck prototype-check
 
 build:
 	$(GO) build ./...
@@ -33,6 +35,11 @@ archtest:
 # 原型演示代码仍须全绿（AGENTS.md 自检清单）
 prototype-check:
 	cd prototype && $(GO) build ./... && $(GO) vet ./... && $(GO) test ./...
+
+# 文档一致性守护：AGENTS.md 声明的决策条数须与附录 A 实际条数一致
+# （该数字曾三次滞后：24→28→34，故自动校验）
+docscheck:
+	bash contrib/scripts/check_decisions_count.sh
 
 # 真机集成测试（M3）：需 VPP 运行环境（nfvis-vm）。无环境时跳过并提示，CI 不跑。
 # 约定：build tag integration + 环境变量 NFVIS_VPP_SOCK（缺省 /run/vpp/api.sock）。
