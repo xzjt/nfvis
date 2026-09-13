@@ -26,10 +26,17 @@ type mockLibvirt struct {
 	defineErr    error
 	startErr     error
 	shutdownNoop bool // 模拟 ACPI 关机无响应（触发超时强杀）
+
+	domainXML string
+	snaps     map[string][]string
+	snapXML   map[string]string
+	reverted  []string
+	deleted   []string
 }
 
 func newMockLibvirt() *mockLibvirt {
-	return &mockLibvirt{present: map[string]bool{}, states: map[string]int{}}
+	return &mockLibvirt{present: map[string]bool{}, states: map[string]int{},
+		snaps: map[string][]string{}, snapXML: map[string]string{}}
 }
 
 func xmlName(xml string) string {
@@ -92,6 +99,45 @@ func (m *mockLibvirt) Destroy(_ context.Context, name string) error {
 func (m *mockLibvirt) Reboot(_ context.Context, name string) error {
 	m.rebooted = append(m.rebooted, name)
 	m.states[name] = domRunning
+	return nil
+}
+
+// DumpDomainXML / 快照：内存实现（单测验证 Provider 快照编排与磁盘集合）。
+func (m *mockLibvirt) DumpDomainXML(_ context.Context, name string) (string, error) {
+	if !m.present[name] {
+		return "", fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+	}
+	return m.domainXML, nil
+}
+
+func (m *mockLibvirt) SnapshotCreate(_ context.Context, domain, snapshotXML string) error {
+	if !m.present[domain] {
+		return fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, domain)
+	}
+	name := xmlName(snapshotXML)
+	m.snaps[domain] = append(m.snaps[domain], name)
+	m.snapXML[domain+"/"+name] = snapshotXML
+	return nil
+}
+
+func (m *mockLibvirt) SnapshotList(_ context.Context, domain string) ([]SnapshotInfo, error) {
+	if !m.present[domain] {
+		return nil, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, domain)
+	}
+	out := make([]SnapshotInfo, 0, len(m.snaps[domain]))
+	for _, n := range m.snaps[domain] {
+		out = append(out, SnapshotInfo{Name: n})
+	}
+	return out, nil
+}
+
+func (m *mockLibvirt) SnapshotRevert(_ context.Context, domain, snapshot string) error {
+	m.reverted = append(m.reverted, domain+"/"+snapshot)
+	return nil
+}
+
+func (m *mockLibvirt) SnapshotDelete(_ context.Context, domain, snapshot string) error {
+	m.deleted = append(m.deleted, domain+"/"+snapshot)
 	return nil
 }
 

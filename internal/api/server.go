@@ -26,21 +26,22 @@ const (
 
 // Options server 可选项。
 type Options struct {
-	Addr      string // 监听地址（默认 :443）
-	TLSCert   string // TLS 证书路径（FR-API-001，HTTPS；与 TLSKey 成对）
-	TLSKey    string // TLS 私钥路径；二者为空 = 明文 HTTP（仅限开发/测试）
-	Log       *slog.Logger
-	VPP       VppController      // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
-	L2        L2Runtime          // L2 运行态查询（M3-3；nil = mac-table 503）
-	L3        L3Runtime          // L3 运行态查询（M3-4；nil = routes 503）
-	LLDP      LldpRuntime        // LLDP 邻居（M3-6；nil = 503）
-	State     *state.State       // 运行态聚合（M3-7；nil = 省略运行态字段）
-	SRIOV     SRIOVSetter        // SR-IOV VF 数量（M3-7；nil = 503）
-	NAT       NatSessionsRuntime // NAT 会话（M3-7；nil = 503）
-	Alarms    AlarmRuntime       // 告警列表（M3-8；nil = 503）
-	Diag      DiagRuntime        // CLI 诊断命令（M3-9；nil = 命令报不可用）
-	VM        VMRuntime          // VM 生命周期（M4-3；nil = 生命周期动作 503、状态省略）
-	VMConsole VMConsoleRuntime   // VM 串口 console（M4-5；nil = console 端点 503）
+	Addr        string // 监听地址（默认 :443）
+	TLSCert     string // TLS 证书路径（FR-API-001，HTTPS；与 TLSKey 成对）
+	TLSKey      string // TLS 私钥路径；二者为空 = 明文 HTTP（仅限开发/测试）
+	Log         *slog.Logger
+	VPP         VppController      // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
+	L2          L2Runtime          // L2 运行态查询（M3-3；nil = mac-table 503）
+	L3          L3Runtime          // L3 运行态查询（M3-4；nil = routes 503）
+	LLDP        LldpRuntime        // LLDP 邻居（M3-6；nil = 503）
+	State       *state.State       // 运行态聚合（M3-7；nil = 省略运行态字段）
+	SRIOV       SRIOVSetter        // SR-IOV VF 数量（M3-7；nil = 503）
+	NAT         NatSessionsRuntime // NAT 会话（M3-7；nil = 503）
+	Alarms      AlarmRuntime       // 告警列表（M3-8；nil = 503）
+	Diag        DiagRuntime        // CLI 诊断命令（M3-9；nil = 命令报不可用）
+	VM          VMRuntime          // VM 生命周期（M4-3；nil = 生命周期动作 503、状态省略）
+	VMConsole   VMConsoleRuntime   // VM 串口 console（M4-5；nil = console 端点 503）
+	VMSnapshots VMSnapshotRuntime  // VM 快照（M4-6；nil = 快照端点 503）
 }
 
 // Server NFViS REST server。
@@ -58,6 +59,7 @@ type Server struct {
 	alarms      AlarmRuntime
 	vm          VMRuntime
 	vmConsole   VMConsoleRuntime
+	vmSnapshots VMSnapshotRuntime
 	consoleTix  *consoleTickets
 	log         *slog.Logger
 	mux         *http.ServeMux
@@ -75,7 +77,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, consoleTix: newConsoleTickets(), log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, consoleTix: newConsoleTickets(), log: log}
 	s.cliExec.setRuntime(opts.Diag, opts.State)
 	s.cliExec.setNetRuntime(opts.L2, opts.L3, opts.LLDP, opts.NAT, opts.Alarms)
 	mux := http.NewServeMux()
@@ -152,6 +154,11 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	// M4-5：串口 console（凭证端点需 Bearer；ws 端点以一次性 ticket 鉴权）
 	mux.Handle("POST "+APIPrefix+"/virtual-machine-functions/{name}/console", s.auth(s.handleConsoleTicket, schema.ClassSuperUser, "request virtual-machine-functions console"))
 	mux.Handle("GET "+APIPrefix+"/virtual-machine-functions/{name}/console/ws", http.HandlerFunc(s.handleConsoleWS))
+	// M4-6：快照（列表/创建/回滚/删除）
+	mux.Handle("GET "+APIPrefix+"/virtual-machine-functions/{name}/snapshots", s.auth(s.handleListSnapshots, schema.ClassReadOnly, "show virtual-machine-functions"))
+	mux.Handle("POST "+APIPrefix+"/virtual-machine-functions/{name}/snapshots", s.auth(s.handleCreateSnapshot, schema.ClassSuperUser, "request virtual-machine-functions snapshot create"))
+	mux.Handle("POST "+APIPrefix+"/virtual-machine-functions/{name}/snapshots/{tail...}", s.auth(s.dispatchSnapshotPost, schema.ClassSuperUser, "request virtual-machine-functions snapshot"))
+	mux.Handle("DELETE "+APIPrefix+"/virtual-machine-functions/{name}/snapshots/{snapshot}", s.auth(s.handleDeleteSnapshot, schema.ClassSuperUser, "request virtual-machine-functions snapshot delete"))
 
 	// M3-8：告警列表（恢复收敛的不可收敛项落点，FR-OPS-010）
 	mux.Handle("GET "+APIPrefix+"/alarms", s.auth(s.handleGetAlarms, schema.ClassReadOnly, "show alarms"))

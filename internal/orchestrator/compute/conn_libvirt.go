@@ -213,3 +213,101 @@ func (c *Conn) withDomain(ctx context.Context, name string, fn func(libvirt.Doma
 	}
 	return nil
 }
+
+// DumpDomainXML 返回域 XML（快照据 target dev 判定磁盘集合）。
+func (c *Conn) DumpDomainXML(ctx context.Context, name string) (string, error) {
+	return c.DumpXML(ctx, name)
+}
+
+// SnapshotCreate 创建域快照（XML 由 BuildSnapshotXML 生成，qcow2 内部快照）。
+func (c *Conn) SnapshotCreate(ctx context.Context, name, snapshotXML string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dom, err := c.l.DomainLookupByName(name)
+	if err != nil {
+		if libvirt.IsNotFound(err) {
+			return fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+		}
+		return fmt.Errorf("查找 domain %s: %w", name, err)
+	}
+	if _, err := c.l.DomainSnapshotCreateXML(dom, snapshotXML, 0); err != nil {
+		return fmt.Errorf("创建 VM %s 快照: %w", name, err)
+	}
+	return nil
+}
+
+// SnapshotList 列出域快照（名称/描述/创建时间）。
+func (c *Conn) SnapshotList(ctx context.Context, name string) ([]SnapshotInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dom, err := c.l.DomainLookupByName(name)
+	if err != nil {
+		if libvirt.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+		}
+		return nil, fmt.Errorf("查找 domain %s: %w", name, err)
+	}
+	snaps, _, err := c.l.DomainListAllSnapshots(dom, 1, 0)
+	if err != nil {
+		return nil, fmt.Errorf("列出 VM %s 快照: %w", name, err)
+	}
+	out := make([]SnapshotInfo, 0, len(snaps))
+	for _, s := range snaps {
+		doc, err := c.l.DomainSnapshotGetXMLDesc(s, 0)
+		if err != nil {
+			return nil, fmt.Errorf("读取快照 %s XML: %w", s.Name, err)
+		}
+		info, err := SnapshotInfoFromXML(doc)
+		if err != nil {
+			return nil, err
+		}
+		if info.Name == "" {
+			info.Name = s.Name
+		}
+		out = append(out, info)
+	}
+	return out, nil
+}
+
+// SnapshotRevert 回滚到指定快照。
+func (c *Conn) SnapshotRevert(ctx context.Context, name, snapshot string) error {
+	return c.withSnapshot(ctx, name, snapshot, func(s libvirt.DomainSnapshot) error {
+		return c.l.DomainRevertToSnapshot(s, 0)
+	})
+}
+
+// SnapshotDelete 删除指定快照（含其元数据）。
+func (c *Conn) SnapshotDelete(ctx context.Context, name, snapshot string) error {
+	return c.withSnapshot(ctx, name, snapshot, func(s libvirt.DomainSnapshot) error {
+		return c.l.DomainSnapshotDelete(s, 0)
+	})
+}
+
+func (c *Conn) withSnapshot(ctx context.Context, domain, snapshot string, fn func(libvirt.DomainSnapshot) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dom, err := c.l.DomainLookupByName(domain)
+	if err != nil {
+		if libvirt.IsNotFound(err) {
+			return fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, domain)
+		}
+		return fmt.Errorf("查找 domain %s: %w", domain, err)
+	}
+	snap, err := c.l.DomainSnapshotLookupByName(dom, snapshot, 0)
+	if err != nil {
+		return fmt.Errorf("查找 VM %s 快照 %s: %w", domain, snapshot, err)
+	}
+	if err := fn(snap); err != nil {
+		return fmt.Errorf("操作 VM %s 快照 %s: %w", domain, snapshot, err)
+	}
+	return nil
+}
