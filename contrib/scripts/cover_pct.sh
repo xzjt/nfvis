@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # 计算 Go coverprofile 的语句覆盖率（百分比，保留一位小数）。
-# 用法: cover_pct.sh <profile> [skip-substring]
-# skip-substring 非空时，路径包含它的文件不计入（用于排除 *_govpp.go 适配层）。
+# 用法: cover_pct.sh <profile> [skip-substring ...]
+# 任一 skip-substring 非空且出现在文件路径中即不计入（用于排除 *_govpp.go /
+# *_libvirt.go / *_docker.go 等薄适配层）。
 set -eu
 profile="$1"
-skip="${2:-}"
+shift || true
+skip="$*"
 awk -v skip="$skip" '
-NR == 1 { next }
+NR == 1 { n = split(skip, sk, " "); next }
 {
     split($1, a, ":")
-    if (skip != "" && index(a[1], skip) > 0) next
+    for (i = 1; i <= n; i++) {
+        if (sk[i] != "" && index(a[1], sk[i]) > 0) next
+    }
     tot += $2
     if ($3 > 0) cov += $2
 }
