@@ -11,6 +11,8 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -362,6 +364,34 @@ func TestCLIDynImagesCandidates(t *testing.T) {
 }
 
 // ---------- 测试辅助 ----------
+
+// TestCLIExecuteHTTPCarriesConsole 经 HTTP /cli/execute 时 console 接管请求必须回传到响应
+// （此前 cliExecuteResponse 漏了该字段，真机冒烟才发现——回归守护）。
+func TestCLIExecuteHTTPCarriesConsole(t *testing.T) {
+	ts := newTestServerOpts(t, Options{
+		VMConsole: &fakeConsoleRuntime{stream: newFakeConsoleStream("")},
+	})
+	token := loginAdmin(t, ts)
+	seedVMPool(t, ts, token)
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		vmBody("fw-vm"), map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("建 VM: %d %s", status, data)
+	}
+	status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/cli/execute", token,
+		map[string]any{"line": "request virtual-machine-functions fw-vm console", "source": "ssh"}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("cli/execute: %d %s", status, data)
+	}
+	var resp struct {
+		Console *ConsoleRequest `json:"console"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	if resp.Console == nil || resp.Console.VM != "fw-vm" || !strings.Contains(resp.Console.WSURL, "/console/ws") {
+		t.Fatalf("HTTP 响应应携带 console 接管请求: %s", data)
+	}
+}
 
 // seedVMConfig 经 CLI 语句建好资源池 + 1 个 VM 并 commit。
 func seedVMConfig(t *testing.T, x *cliExecutor) {
