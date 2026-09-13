@@ -79,7 +79,8 @@ func (g *govppL2Client) SwInterfaceNames() (map[uint32]SwIfInfo, error) {
 }
 
 func (g *govppL2Client) BridgeDomainExists(bdID uint32) (bool, error) {
-	reqCtx := g.ch.SendMultiRequest(&l2.BridgeDomainDump{BdID: bdID})
+	// 全量 dump 后匹配：带 BdID 过滤的 dump 在部分版本返回空，故不使用过滤。
+	reqCtx := g.ch.SendMultiRequest(&l2.BridgeDomainDump{})
 	for {
 		d := &l2.BridgeDomainDetails{}
 		stop, err := reqCtx.ReceiveReply(d)
