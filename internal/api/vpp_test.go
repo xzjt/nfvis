@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -229,5 +230,77 @@ func TestVppConfigEndpoint(t *testing.T) {
 	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/vpp/config", token, nil, nil)
 	if status != http.StatusOK || !strings.Contains(string(data), "{") {
 		t.Fatalf("vpp config: %d %s", status, data)
+	}
+}
+
+// ---------- M3-7（三）：sriov PUT 与 NAT 会话端点 ----------
+
+type fakeSRIOV struct {
+	gotIf string
+	gotN  int
+	err   error
+}
+
+func (f *fakeSRIOV) SetVFCount(_ context.Context, ifname string, n int) error {
+	f.gotIf, f.gotN = ifname, n
+	return f.err
+}
+
+func TestPutSRIOVEndpoint(t *testing.T) {
+	fake := &fakeSRIOV{}
+	ts := newTestServerOpts(t, Options{SRIOV: fake})
+	token := loginAdmin(t, ts)
+	status, _, data := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/interfaces/ens1f0/sriov", token,
+		map[string]any{"vf_count": 4}, nil)
+	if status != http.StatusOK || fake.gotN != 4 || fake.gotIf != "ens1f0" {
+		t.Fatalf("sriov: %d %s (%+v)", status, data, fake)
+	}
+	// 缺 vf_count → 400
+	status, _, _ = cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/interfaces/ens1f0/sriov", token,
+		map[string]any{}, nil)
+	if status != http.StatusBadRequest {
+		t.Fatalf("缺 vf_count 应 400: %d", status)
+	}
+	// 后端错误 → 400（如不支持 SR-IOV）
+	bad := &fakeSRIOV{err: errors.New("接口 ens1f0 不支持 SR-IOV")}
+	ts2 := newTestServerOpts(t, Options{SRIOV: bad})
+	token2 := loginAdmin(t, ts2)
+	status, _, data = cfgRequest(t, http.MethodPut, ts2.URL+APIPrefix+"/interfaces/ens1f0/sriov", token2,
+		map[string]any{"vf_count": 2}, nil)
+	if status != http.StatusBadRequest || !strings.Contains(string(data), "SR-IOV") {
+		t.Fatalf("不支持应 400: %d %s", status, data)
+	}
+	// 未装配 → 503
+	ts3 := newTestServer(t)
+	token3 := loginAdmin(t, ts3)
+	status, _, _ = cfgRequest(t, http.MethodPut, ts3.URL+APIPrefix+"/interfaces/ens1f0/sriov", token3,
+		map[string]any{"vf_count": 1}, nil)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("未装配应 503: %d", status)
+	}
+}
+
+type fakeNatSessions struct {
+	rows []NatSessionRow
+	err  error
+}
+
+func (f *fakeNatSessions) Sessions(context.Context) ([]NatSessionRow, error) { return f.rows, f.err }
+
+func TestNatSessionsEndpoint(t *testing.T) {
+	fake := &fakeNatSessions{rows: []NatSessionRow{{InsideIP: "10.0.0.5", InsidePort: 1234,
+		OutsideIP: "203.0.113.1", OutsidePort: 5000, Protocol: 6, Packets: 3}}}
+	ts := newTestServerOpts(t, Options{NAT: fake})
+	token := loginAdmin(t, ts)
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/nat/sessions", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), "203.0.113.1") {
+		t.Fatalf("nat sessions: %d %s", status, data)
+	}
+	// 未装配 → 503
+	ts2 := newTestServer(t)
+	token2 := loginAdmin(t, ts2)
+	status, _, _ = cfgRequest(t, http.MethodGet, ts2.URL+APIPrefix+"/nat/sessions", token2, nil, nil)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("未装配应 503: %d", status)
 	}
 }

@@ -112,6 +112,8 @@ func run() error {
 		L3:      &l3Controller{net: netProvider},
 		LLDP:    &lldpController{net: netProvider},
 		State:   state.New(vppMgr.Runtime()),
+		SRIOV:   network.NewSRIOVProvider(),
+		NAT:     &natSessionsController{net: netProvider},
 	})
 
 	srvErr := make(chan error, 1)
@@ -209,6 +211,23 @@ func (c *lldpController) Neighbors(ctx context.Context) ([]api.LldpNeighborRow, 
 	for _, r := range rows {
 		out = append(out, api.LldpNeighborRow{Interface: r.Interface, ChassisID: r.ChassisID,
 			PortID: r.PortID, TTL: r.TTL, LastHeard: r.LastHeard})
+	}
+	return out, nil
+}
+
+// natSessionsController 装配 api.NatSessionsRuntime（M3-7）。
+type natSessionsController struct{ net *network.L2Network }
+
+func (c *natSessionsController) Sessions(ctx context.Context) ([]api.NatSessionRow, error) {
+	rows, err := c.net.NATSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]api.NatSessionRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, api.NatSessionRow{InsideIP: r.InsideIP, InsidePort: r.InsidePort,
+			OutsideIP: r.OutsideIP, OutsidePort: r.OutsidePort, Protocol: r.Protocol,
+			Bytes: r.Bytes, Packets: r.Packets})
 	}
 	return out, nil
 }

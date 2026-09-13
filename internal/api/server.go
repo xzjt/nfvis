@@ -30,28 +30,32 @@ type Options struct {
 	TLSCert string // TLS 证书路径（FR-API-001，HTTPS；与 TLSKey 成对）
 	TLSKey  string // TLS 私钥路径；二者为空 = 明文 HTTP（仅限开发/测试）
 	Log     *slog.Logger
-	VPP     VppController // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
-	L2      L2Runtime     // L2 运行态查询（M3-3；nil = mac-table 503）
-	L3      L3Runtime     // L3 运行态查询（M3-4；nil = routes 503）
-	LLDP    LldpRuntime   // LLDP 邻居（M3-6；nil = 503）
-	State   *state.State  // 运行态聚合（M3-7；nil = 省略运行态字段）
+	VPP     VppController      // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
+	L2      L2Runtime          // L2 运行态查询（M3-3；nil = mac-table 503）
+	L3      L3Runtime          // L3 运行态查询（M3-4；nil = routes 503）
+	LLDP    LldpRuntime        // LLDP 邻居（M3-6；nil = 503）
+	State   *state.State       // 运行态聚合（M3-7；nil = 省略运行态字段）
+	SRIOV   SRIOVSetter        // SR-IOV VF 数量（M3-7；nil = 503）
+	NAT     NatSessionsRuntime // NAT 会话（M3-7；nil = 503）
 }
 
 // Server NFViS REST server。
 type Server struct {
-	aaa     *aaa.Service
-	engine  *config.Engine
-	cliExec *cliExecutor
-	vpp     VppController
-	l2      L2Runtime
-	l3      L3Runtime
-	lldp    LldpRuntime
-	state   *state.State
-	log     *slog.Logger
-	mux     *http.ServeMux
-	http    *http.Server
-	tlsCert string
-	tlsKey  string
+	aaa         *aaa.Service
+	engine      *config.Engine
+	cliExec     *cliExecutor
+	vpp         VppController
+	l2          L2Runtime
+	l3          L3Runtime
+	lldp        LldpRuntime
+	state       *state.State
+	sriov       SRIOVSetter
+	natSessions NatSessionsRuntime
+	log         *slog.Logger
+	mux         *http.ServeMux
+	http        *http.Server
+	tlsCert     string
+	tlsKey      string
 }
 
 // Handler 返回根 HTTP handler（测试与嵌套装配使用）。
@@ -63,7 +67,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, log: log}
 	mux := http.NewServeMux()
 
 	// 认证（免 token，FR-API-001）
@@ -111,6 +115,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("POST "+APIPrefix+"/acls", cfgAPI(s.handlePostAcl))
 	mux.Handle("DELETE "+APIPrefix+"/acls/{name}", cfgAPI(s.handleDeleteAcl))
 	mux.Handle("GET "+APIPrefix+"/nat", s.auth(s.handleGetNat, schema.ClassReadOnly, "show nat"))
+	mux.Handle("GET "+APIPrefix+"/nat/sessions", s.auth(s.handleGetNatSessions, schema.ClassReadOnly, "show nat sessions"))
 	mux.Handle("PUT "+APIPrefix+"/nat", cfgAPI(s.handlePutNat))
 	mux.Handle("GET "+APIPrefix+"/qos/policies", s.auth(s.handleGetQosPolicies, schema.ClassReadOnly, "show qos policies"))
 	mux.Handle("POST "+APIPrefix+"/qos/policies", cfgAPI(s.handlePostQosPolicy))
@@ -132,6 +137,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/interfaces", s.auth(s.handleGetInterfaces, schema.ClassReadOnly, "show interfaces"))
 	mux.Handle("GET "+APIPrefix+"/interfaces/{name}", s.auth(s.handleGetInterface, schema.ClassReadOnly, "show interfaces"))
 	mux.Handle("PUT "+APIPrefix+"/interfaces/{name}", cfgAPI(s.handlePutInterface))
+	mux.Handle("PUT "+APIPrefix+"/interfaces/{name}/sriov", s.auth(s.handlePutSRIOV, schema.ClassSuperUser, "set interfaces sriov"))
 	mux.Handle("GET "+APIPrefix+"/virtual-switches", s.auth(s.handleGetVSwitches, schema.ClassReadOnly, "show virtual-switches"))
 	mux.Handle("GET "+APIPrefix+"/virtual-switches/{name}", s.auth(s.handleGetVSwitch, schema.ClassReadOnly, "show virtual-switches"))
 	mux.Handle("GET "+APIPrefix+"/virtual-switches/{name}/ports", s.auth(s.handleGetVSwitchPorts, schema.ClassReadOnly, "show virtual-switches"))
