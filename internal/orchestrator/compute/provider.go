@@ -3,6 +3,7 @@ package compute
 import (
 	"context"
 	"fmt"
+	"io"
 	"path"
 	"sync"
 	"time"
@@ -229,6 +230,21 @@ func (p *Provider) VMState(ctx context.Context, name string) (string, error) {
 		return orchestrator.VMStateAbsent, nil
 	}
 	return VMStateFromLibvirt(state), nil
+}
+
+// Console 打开 VM 串口双向流（FR-CMP-014）：须域存在且运行中。
+func (p *Provider) Console(ctx context.Context, name string) (io.ReadWriteCloser, error) {
+	state, exists, err := p.api.State(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+	}
+	if !isActiveState(state) {
+		return nil, fmt.Errorf("VM %s 未运行，串口 console 不可用（当前 %s）", name, VMStateFromLibvirt(state))
+	}
+	return p.api.OpenConsole(ctx, name)
 }
 
 // EnsureConsistent 恢复收敛（FR-OPS-010/012）：按 committed 配置补建/修正缺失 domain。

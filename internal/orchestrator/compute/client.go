@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
@@ -17,6 +18,8 @@ type libvirtAPI interface {
 	Shutdown(ctx context.Context, name string) error // ACPI 关机（优雅）
 	Destroy(ctx context.Context, name string) error  // 立即断电（超时强杀）
 	Reboot(ctx context.Context, name string) error
+	// OpenConsole 打开域串口双向流（FR-CMP-014）。
+	OpenConsole(ctx context.Context, name string) (io.ReadWriteCloser, error)
 }
 
 // storageAPI provider 依赖的磁盘/文件能力（真实实现 = qemuStorage；单测用 mock）。

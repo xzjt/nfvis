@@ -32,11 +32,28 @@ func TestImageIsISO(t *testing.T) {
 }
 
 func TestBuildUserData(t *testing.T) {
-	// 显式 user_data 原样使用（补尾换行）。
+	// 仅显式 user_data（无 keys/hostname）原样使用（补尾换行）。
 	vm := model.VMFunction{Name: "fw-vm", CloudInit: &model.CloudInit{UserData: "#cloud-config\nruncmd:\n  - echo hi"}}
 	got := BuildUserData(vm)
 	if !strings.HasPrefix(got, "#cloud-config\nruncmd:") || !strings.HasSuffix(got, "\n") {
-		t.Fatalf("显式 user-data 应原样保留并补换行: %q", got)
+		t.Fatalf("仅 user-data 应原样保留并补换行: %q", got)
+	}
+
+	// user_data + SSH 公钥：须用 MIME multipart 同时注入两者（FR-CMP-016）。
+	vm = model.VMFunction{Name: "fw-vm", CloudInit: &model.CloudInit{
+		Hostname: "fw",
+		UserData: "#cloud-config\nruncmd:\n  - echo MARK > /dev/ttyS0\n",
+		SSHKeys:  []string{"ssh-ed25519 AAA test@host"},
+	}}
+	got = BuildUserData(vm)
+	for _, want := range []string{"multipart/mixed", "text/cloud-config", "#cloud-config", "hostname: fw",
+		"ssh-ed25519 AAA test@host", "runcmd:", "echo MARK"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("multipart user-data 应含 %q\n%s", want, got)
+		}
+	}
+	if strings.Count(got, "ssh-ed25519 AAA test@host") != 2 {
+		t.Errorf("公钥应在顶层与用户级各注入一次:\n%s", got)
 	}
 
 	// 未声明 user_data：据 hostname/ssh_keys 生成最小 #cloud-config。

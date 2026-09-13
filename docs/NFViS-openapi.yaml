@@ -612,7 +612,7 @@ paths:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
     post:
       tags: [virtual-machine-functions]
-      summary: 申请串口 console 访问凭证（WebSocket 代理 URL，短时有效）
+      summary: 申请串口 console 访问凭证（一次性 ticket，短时有效；FR-CMP-014）
       responses:
         "200":
           description: OK
@@ -621,8 +621,28 @@ paths:
               schema:
                 type: object
                 properties:
-                  ws_url: { type: string, example: "wss://host/api/v1/virtual-machine-functions/fw-vm/console/ws?ticket=..." }
-                  expires_in: { type: integer }
+                  ws_url: { type: string, example: "/api/v1/virtual-machine-functions/fw-vm/console/ws?ticket=..." }
+                  expires_in: { type: integer, description: ticket 有效期（秒） }
+        "404": { $ref: "#/components/responses/Error404" }
+        "409":
+          description: VM 未启用串口（serial_console=false）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /virtual-machine-functions/{name}/console/ws:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+      - name: ticket
+        in: query
+        required: true
+        schema: { type: string }
+        description: POST .../console 返回的一次性凭证（WebSocket 握手无法带 Bearer Token，故以 ticket 鉴权）
+    get:
+      tags: [virtual-machine-functions]
+      summary: 串口 console WebSocket（双向透传；打开/关闭入审计，FR-OPS-032）
+      responses:
+        "101": { description: 协议切换为 WebSocket }
+        "401": { $ref: "#/components/responses/Error401" }
   /virtual-machine-functions/{name}/snapshots:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
     get:
