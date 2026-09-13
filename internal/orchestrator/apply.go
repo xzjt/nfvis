@@ -305,18 +305,6 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			})
 		}
 	}
-	// vNIC 接入删除：在 VM/容器删除之后（FR-NET-023）；整体删除时其全部 vNIC 一并清理。
-	for _, ov := range oldPorts {
-		if _, ok := newByKey[portKeyOf(ov)]; ok {
-			continue
-		}
-		ov := ov
-		ops = append(ops, op{
-			desc: fmt.Sprintf("del-vnf-if[%s/%s]", ov.VM, ov.Interface),
-			run:  func(ctx context.Context) error { return a.net.DeleteVnfInterface(ctx, ov.VM, ov.Interface) },
-			undo: func(ctx context.Context) error { return a.net.ApplyVnfInterface(ctx, ov) },
-		})
-	}
 	for name := range oldVSs {
 		if oldVSs[name].Type != "l2" {
 			continue
@@ -330,6 +318,19 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			})
 		}
 	}
+	// vNIC 接入删除：在 bridge-domain 删除之后（BD 删除会摘除成员）；此时删除 vhost-user/memif 接口安全。
+	for _, ov := range oldPorts {
+		if _, ok := newByKey[portKeyOf(ov)]; ok {
+			continue
+		}
+		ov := ov
+		ops = append(ops, op{
+			desc: fmt.Sprintf("del-vnf-if[%s/%s]", ov.VM, ov.Interface),
+			run:  func(ctx context.Context) error { return a.net.DeleteVnfInterface(ctx, ov.VM, ov.Interface) },
+			undo: func(ctx context.Context) error { return a.net.ApplyVnfInterface(ctx, ov) },
+		})
+	}
+
 	for name := range oldVRFs {
 		if _, ok := newVRFNames(new)[name]; !ok {
 			vrf := oldVRFs[name]

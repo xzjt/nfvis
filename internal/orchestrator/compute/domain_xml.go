@@ -13,6 +13,7 @@
 package compute
 
 import (
+	"crypto/sha1"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -81,6 +82,17 @@ type DomainSpec struct {
 	CPUMode  string // 缺省 host-passthrough
 }
 
+// DeterministicUUID 由 VM 名派生 UUIDv5 风格标识（版本 5、RFC 4122 variant），
+// 保证同一 VM 名字恒等，重定义/收敛幂等。
+func DeterministicUUID(name string) string {
+	sum := sha1.Sum([]byte("nfvis:vm:" + name))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x50 // version 5
+	b[8] = (b[8] & 0x3f) | 0x80 // variant RFC 4122
+	return fmt.Sprintf("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+		b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15])
+}
+
 // BuildDomainXML 生成 domain XML（纯函数）。
 func BuildDomainXML(spec DomainSpec) (string, error) {
 	d, err := BuildDomain(spec)
@@ -134,8 +146,11 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 	}
 
 	d := &libvirtxml.Domain{
-		Type:          "kvm",
-		Name:          vm.Name,
+		Type: "kvm",
+		Name: vm.Name,
+		// 确定性 UUID（由 VM 名派生）：重定义/恢复收敛时 libvirt 身份稳定，
+		// 避免「同名不同 uuid」导致 DomainDefineXML 报 already exists。
+		UUID:          DeterministicUUID(vm.Name),
 		Description:   vm.Description,
 		Memory:        &libvirtxml.DomainMemory{Value: memMB, Unit: "MiB"},
 		CurrentMemory: &libvirtxml.DomainCurrentMemory{Value: memMB, Unit: "MiB"},

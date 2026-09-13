@@ -142,3 +142,16 @@ func TestVMStateFromLibvirtReason(t *testing.T) {
 		t.Fatalf("CRASHED 应保持 crashed，实际 %q", got)
 	}
 }
+
+func TestDeterministicUUID(t *testing.T) {
+	a := DeterministicUUID("fw-vm")
+	if a != DeterministicUUID("fw-vm") {
+		t.Fatal("同名应恒等")
+	}
+	if a == DeterministicUUID("other-vm") {
+		t.Fatal("不同名应不同")
+	}
+	if len(a) != 36 || a[14] != '5' || strings.Contains(a, " ") {
+		t.Fatalf("应为 uuid v5 格式: %q", a)
+	}
+}
