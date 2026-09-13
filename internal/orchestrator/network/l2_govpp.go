@@ -79,8 +79,12 @@ func (g *govppL2Client) SwInterfaceNames() (map[uint32]SwIfInfo, error) {
 }
 
 func (g *govppL2Client) BridgeDomainExists(bdID uint32) (bool, error) {
-	// 全量 dump 后匹配：带 BdID 过滤的 dump 在部分版本返回空，故不使用过滤。
-	reqCtx := g.ch.SendMultiRequest(&l2.BridgeDomainDump{})
+	// bridge_domain_dump 同时按 bd_id 与 sw_if_index 过滤；binapi 的 default=0xFFFFFFFF
+	// 不会在发送时自动填充，须显式给出，否则被当成过滤到 0 而返回空。
+	reqCtx := g.ch.SendMultiRequest(&l2.BridgeDomainDump{
+		BdID:      bdID,
+		SwIfIndex: interface_types.InterfaceIndex(0xFFFFFFFF),
+	})
 	for {
 		d := &l2.BridgeDomainDetails{}
 		stop, err := reqCtx.ReceiveReply(d)
@@ -106,7 +110,11 @@ func (g *govppL2Client) BridgeDomainAddDel(bdID uint32, add, learn bool, tag str
 		return err
 	}
 	if reply.Retval != 0 {
-		return fmt.Errorf("bridge_domain_add_del retval=%d", reply.Retval)
+		// -119 = BD already exists：幂等重放时视为成功（FR-OPS-010）
+		if add && reply.Retval == -119 {
+			return nil
+		}
+		return fmt.Errorf("bridge_domain_add_del(bd=%d,add=%v) retval=%d", bdID, add, reply.Retval)
 	}
 	return nil
 }
