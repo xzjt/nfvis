@@ -4,6 +4,7 @@ package network
 
 import (
 	"fmt"
+	"strings"
 
 	"go.fd.io/govpp/api"
 	"go.fd.io/govpp/binapi/bond"
@@ -150,7 +151,10 @@ func (g *govppLldpClient) LldpSetInterface(ifname string, enable bool) error {
 	}
 	reply := &lldp.SwInterfaceSetLldpReply{}
 	if err := g.ch.SendRequest(&lldp.SwInterfaceSetLldp{
-		SwIfIndex: interface_types.InterfaceIndex(idx), Enable: enable,
+		SwIfIndex: interface_types.InterfaceIndex(idx),
+		MgmtOid:   make([]byte, 128),
+		PortDesc:  ifname,
+		Enable:    enable,
 	}).ReceiveReply(reply); err != nil {
 		return err
 	}
@@ -165,12 +169,17 @@ func (g *govppLldpClient) LldpNeighbors() ([]LldpNeighbor, error) {
 	if err != nil {
 		return nil, err
 	}
+	// lldp_dump 是 cursor 型 RequestMessage（非 multipart）；govpp 的 MultiRequest
+	// 在「无邻居」时会把终止回复当作意外消息报错，此时按空表处理。
 	reqCtx := g.ch.SendMultiRequest(&lldp.LldpDump{})
 	var out []LldpNeighbor
 	for {
 		d := &lldp.LldpDetails{}
 		stop, err := reqCtx.ReceiveReply(d)
 		if err != nil {
+			if strings.Contains(err.Error(), "lldp_dump_reply") {
+				return out, nil
+			}
 			return nil, err
 		}
 		if stop {
