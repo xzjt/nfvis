@@ -5,6 +5,7 @@ package network
 
 import (
 	"fmt"
+	"sort"
 
 	"go.fd.io/govpp/api"
 	ifapi "go.fd.io/govpp/binapi/interface"
@@ -48,22 +49,36 @@ func (g *govppDiagClient) SwInterfaceNames() (map[uint32]string, error) {
 }
 
 func (g *govppDiagClient) InterfaceAddresses(isIPv6 bool) ([]IfaceAddr, error) {
-	// sw_if_index=~0 表示全量 dump（0 会被当作具体接口 0，不自动填充为默认值）。
-	reqCtx := g.ch.SendMultiRequest(&ip.IPAddressDump{
-		SwIfIndex: interface_types.InterfaceIndex(0xFFFFFFFF), IsIPv6: isIPv6,
-	})
-	var out []IfaceAddr
-	for {
-		d := &ip.IPAddressDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
-		if err != nil {
-			return nil, err
-		}
-		if stop {
-			return out, nil
-		}
-		out = append(out, IfaceAddr{SwIfIndex: uint32(d.SwIfIndex), Prefix: d.Prefix.String()})
+	// VPP 26.06 的 ip_address_dump 不支持 sw_if_index=~0 全量（传 ~0/0 均返回空），
+	// 故先枚举接口索引再逐口 dump（与 bridge_domain_dump 行为不同，真机实测）。
+	names, err := g.SwInterfaceNames()
+	if err != nil {
+		return nil, err
 	}
+	idxs := make([]int, 0, len(names))
+	for idx := range names {
+		idxs = append(idxs, int(idx))
+	}
+	sort.Ints(idxs)
+
+	var out []IfaceAddr
+	for _, idx := range idxs {
+		reqCtx := g.ch.SendMultiRequest(&ip.IPAddressDump{
+			SwIfIndex: interface_types.InterfaceIndex(idx), IsIPv6: isIPv6,
+		})
+		for {
+			d := &ip.IPAddressDetails{}
+			stop, err := reqCtx.ReceiveReply(d)
+			if err != nil {
+				return nil, err
+			}
+			if stop {
+				break
+			}
+			out = append(out, IfaceAddr{SwIfIndex: uint32(d.SwIfIndex), Prefix: d.Prefix.String()})
+		}
+	}
+	return out, nil
 }
 
 func (g *govppDiagClient) ClearInterfaceStats(swIfIndex uint32) error {
