@@ -63,7 +63,11 @@ type L3Provider struct {
 	subifs   map[uint32][]uint32 // tableID → 自建子接口（删除时一并移除）
 	bvis     map[string]uint32   // 交换机名 → BVI sw_if_index
 	ownTable map[string]bool     // 交换机名 → BVI 使用专属表（删除时删表）
+	acl      *AclProvider        // 可选：L3 接口/BVI 的 acl-in 绑定
 }
+
+// SetACL 注入 ACL 编排（L3 接口与 BVI 网关的 acl-in 绑定）。
+func (p *L3Provider) SetACL(a *AclProvider) { p.acl = a }
 
 // NewL3Provider 以固定客户端构造（测试）。
 func NewL3Provider(c L3Client) *L3Provider {
@@ -118,6 +122,22 @@ func (p *L3Provider) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 	for _, r := range vrf.Routes {
 		if err := c.IPRouteAddDel(tableID, r.Prefix, r.NextHop, true); err != nil {
 			return fmt.Errorf("下发路由 %s via %s: %w", r.Prefix, r.NextHop, err)
+		}
+	}
+
+	if p.acl != nil {
+		c2, err := p.acl.client()
+		if err != nil {
+			return err
+		}
+		defer c2.Close()
+		for i, li := range vrf.L3Interfaces {
+			if li.AclIn == "" {
+				continue
+			}
+			if err := p.acl.BindIndex(c2, idxs[i], li.AclIn, ""); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -212,6 +232,16 @@ func (p *L3Provider) ApplyGateway(ctx context.Context, vs model.VirtualSwitch) e
 	for _, addr := range gw.Addresses {
 		if err := c.SwInterfaceAddDelAddress(bvi, addr, true, false); err != nil {
 			return fmt.Errorf("BVI 配地址 %s: %w", addr, err)
+		}
+	}
+	if p.acl != nil && (gw.AclIn != "" || gw.AclOut != "") {
+		c2, err := p.acl.client()
+		if err != nil {
+			return err
+		}
+		defer c2.Close()
+		if err := p.acl.BindIndex(c2, bvi, gw.AclIn, gw.AclOut); err != nil {
+			return err
 		}
 	}
 	p.mu.Lock()

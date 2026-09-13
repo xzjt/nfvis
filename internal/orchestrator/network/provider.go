@@ -15,6 +15,7 @@ type L2Network struct {
 	l2                           *L2Provider
 	l3                           *L3Provider
 	svc                          *ServicesProvider
+	acl                          *AclProvider
 }
 
 // NewL2Network 以基础 Provider 与 L2 编排器构造装饰器。
@@ -30,6 +31,31 @@ func (n *L2Network) SetL3(l3 *L3Provider) { n.l3 = l3 }
 
 // SetServices 追加 SPAN/QoS/接口编排（M3-5）。
 func (n *L2Network) SetServices(svc *ServicesProvider) { n.svc = svc }
+
+// SetACL 追加 ACL 编排（M3-5 二），并把索引查询注入 L2/L3 以绑定端口/接口。
+func (n *L2Network) SetACL(a *AclProvider) {
+	n.acl = a
+	if n.l2 != nil {
+		n.l2.SetACL(a)
+	}
+	if n.l3 != nil {
+		n.l3.SetACL(a)
+	}
+}
+
+func (n *L2Network) ApplyACL(ctx context.Context, acl model.Acl) error {
+	if n.acl == nil {
+		return nil
+	}
+	return n.acl.ApplyACL(ctx, acl)
+}
+
+func (n *L2Network) DeleteACL(ctx context.Context, name string) error {
+	if n.acl == nil {
+		return nil
+	}
+	return n.acl.DeleteACL(ctx, name)
+}
 
 func (n *L2Network) ApplyInterface(ctx context.Context, iface model.InterfaceConfig) error {
 	if n.svc == nil {
