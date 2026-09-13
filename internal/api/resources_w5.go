@@ -19,38 +19,77 @@ import (
 
 // ---------- resource-pools（FR-CMP-001~003） ----------
 
-// handleGetResourcePools GET /api/v1/resource-pools：配置 + 账本用量
-// （总量/已分配/空闲，vpp-reserved 单列，FR-CMP-003/FR-SYS-010）。
+// handleGetResourcePools GET /api/v1/resource-pools：配置 + 运行态合并视图
+// （FR-CMP-001~004、FR-SYS-010，决策 #39）：
+//
+//	hugepages[].{page_size,count} 配置；{total,allocated,free} 运行态（total=count）
+//	cpu.{isolated_cores,numa} 配置；{vpp_reserved,allocated[{vnf,cores}],free} 运行态
+//
+// 运行态由 committed 配置经账本确定性重算；未配置资源池时返回空视图而非报错。
 func (s *Server) handleGetResourcePools(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.engine.Committed()
 	if err != nil {
 		mapEngineError(w, err)
 		return
 	}
-	ledger := model.NewPoolLedger(cfg)
-	_ = ledger.Allocate(cfg) // 分配演练填充用量（缺口不影响只读展示）
+	writeJSON(w, http.StatusOK, resourcePoolView(cfg))
+}
 
-	var hugepages []map[string]any
-	for _, hp := range cfg.ResourcePools.Hugepages {
-		u := ledger.Hugepages[hp.PageSize]
-		hugepages = append(hugepages, map[string]any{
-			"page_size": hp.PageSize,
-			"total":     hp.Count,
-			"allocated": u.Allocated,
-			"free":      u.Free,
+// resourcePoolView 构造资源池「配置 + 运行态」视图（纯函数，便于直接单测）。
+func resourcePoolView(cfg model.Config) map[string]any {
+	ledger := model.NewPoolLedger(cfg)
+	_ = ledger.Allocate(cfg) // 分配演练填充运行态用量（缺口不影响只读展示）
+
+	hugepages := []map[string]any{}
+	if cfg.ResourcePools != nil {
+		for _, hp := range cfg.ResourcePools.Hugepages {
+			allocated, free := 0, hp.Count
+			if u := ledger.Hugepages[hp.PageSize]; u != nil {
+				allocated, free = u.Allocated, u.Free
+			}
+			hugepages = append(hugepages, map[string]any{
+				"page_size": hp.PageSize,
+				"count":     hp.Count,
+				"total":     hp.Count,
+				"allocated": allocated,
+				"free":      free,
+			})
+		}
+		// 排序保证稳定输出
+		sort.Slice(hugepages, func(i, j int) bool {
+			return fmt.Sprint(hugepages[i]["page_size"]) < fmt.Sprint(hugepages[j]["page_size"])
 		})
 	}
-	// 排序保证稳定输出
-	sort.Slice(hugepages, func(i, j int) bool {
-		return fmt.Sprint(hugepages[i]["page_size"]) < fmt.Sprint(hugepages[j]["page_size"])
+
+	allocated := make([]map[string]any, 0, len(ledger.CPU.VMCores))
+	for name, cores := range ledger.CPU.VMCores {
+		allocated = append(allocated, map[string]any{"vnf": name, "cores": cores})
+	}
+	sort.Slice(allocated, func(i, j int) bool {
+		return fmt.Sprint(allocated[i]["vnf"]) < fmt.Sprint(allocated[j]["vnf"])
 	})
 	cpu := map[string]any{
-		"isolated":     ledger.CPU.Isolated,
-		"vpp_reserved": ledger.CPU.VppReserved,
-		"free":         ledger.CPU.Free,
-		"vm_allocated": ledger.CPU.VMCores,
+		"isolated_cores": emptyIfNil(ledger.CPU.Isolated),
+		"vpp_reserved":   emptyIfNil(ledger.CPU.VppReserved),
+		"free":           emptyIfNil(ledger.CPU.Free),
+		"allocated":      allocated,
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"hugepages": hugepages, "cpu": cpu})
+	if cfg.ResourcePools != nil && cfg.ResourcePools.CPU != nil {
+		numa := make([]map[string]any, 0, len(cfg.ResourcePools.CPU.Numa))
+		for _, n := range cfg.ResourcePools.CPU.Numa {
+			numa = append(numa, map[string]any{"node": n.Node, "cores": n.Cores})
+		}
+		cpu["numa"] = numa
+	}
+	return map[string]any{"hugepages": hugepages, "cpu": cpu}
+}
+
+// emptyIfNil 保证 JSON 输出为 [] 而非 null（契约数组字段）。
+func emptyIfNil(xs []int) []int {
+	if xs == nil {
+		return []int{}
+	}
+	return xs
 }
 
 // handlePutResourcePools PUT /api/v1/resource-pools：修改资源池

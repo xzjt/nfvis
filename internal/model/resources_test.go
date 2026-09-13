@@ -201,6 +201,71 @@ func TestCheckResourcesConvenience(t *testing.T) {
 	}
 }
 
+// FR-CMP-019/决策 #39：backing=normal 用普通内存，不占大页池。
+func TestLedgerNormalBackingSkipsHugepagePool(t *testing.T) {
+	c := ledgerBase()
+	c.ResourcePools.Hugepages = []HPool{{PageSize: "1G", Count: 4}}
+	vm := vmOf("plain-vm", 2, 4096)
+	vm.Memory.Backing = "normal"
+	vm.Memory.HugepageSize = ""
+	c.VirtualMachineFunctions = []VMFunction{vm}
+
+	l := NewPoolLedger(c)
+	if errs := l.Allocate(c); len(errs) != 0 {
+		t.Fatalf("backing=normal 不应占用大页池: %v", errs)
+	}
+	if hp := l.Hugepages["1G"]; hp.Allocated != 0 || hp.Free != 4 {
+		t.Fatalf("normal 内存不应扣减大页池，实际 %+v", hp)
+	}
+	if cores := l.CPU.VMCores["plain-vm"]; !equalInts(cores, []int{7, 8}) {
+		t.Fatalf("普通内存 VM 仍应绑核 [7 8]，实际 %v", cores)
+	}
+}
+
+// 未配置资源池时，不绑核的 backing=normal VM 仍可创建（不需大页池）。
+func TestLedgerNormalBackingNeedsNoHugepagePool(t *testing.T) {
+	c := ledgerBase()
+	c.ResourcePools = nil
+	c.Vpp = nil
+	pin := false
+	vm := vmOf("plain-vm", 2, 1024)
+	vm.Memory.Backing = "normal"
+	vm.Memory.HugepageSize = ""
+	vm.VCPU.Pin = &pin
+	c.VirtualMachineFunctions = []VMFunction{vm}
+
+	if errs := NewPoolLedger(c).Allocate(c); len(errs) != 0 {
+		t.Fatalf("backing=normal + pin=false 无需资源池: %v", errs)
+	}
+
+	// 反向：同为无池，缺省 hugepage backing 必须报错（FR-CFG-011⑪）。
+	hpVM := vmOf("hp-vm", 2, 1024)
+	hpVM.VCPU.Pin = &pin
+	c.VirtualMachineFunctions = []VMFunction{hpVM}
+	if errs := NewPoolLedger(c).Allocate(c); len(errs) == 0 {
+		t.Fatal("hugepage backing 无页池应报错")
+	}
+}
+
+// normal 与 hugepage 混合：只扣 hugepage VM 的页。
+func TestLedgerMixedBacking(t *testing.T) {
+	c := ledgerBase()
+	c.ResourcePools.Hugepages = []HPool{{PageSize: "1G", Count: 4}}
+	normal := vmOf("plain-vm", 2, 4096)
+	normal.Memory.Backing = "normal"
+	normal.Memory.HugepageSize = ""
+	hp := vmOf("fw-vm", 2, 1024)
+	c.VirtualMachineFunctions = []VMFunction{normal, hp}
+
+	l := NewPoolLedger(c)
+	if errs := l.Allocate(c); len(errs) != 0 {
+		t.Fatalf("混合 backing 应分配成功: %v", errs)
+	}
+	if got := l.Hugepages["1G"].Allocated; got != 1 {
+		t.Fatalf("仅 hugepage VM 应占 1 页，实际 %d", got)
+	}
+}
+
 func equalInts(a, b []int) bool {
 	if len(a) != len(b) {
 		return false
