@@ -25,7 +25,7 @@ func OperRoot() *Node {
 			),
 			K("interfaces", "接口",
 				K("physical", "DPDK 物理口（FR-NET-001）",
-					PT("<ifname>", "ifname", "接口名",
+					P("<ifname>", "接口名", DynIfnames,
 						K("detail", "驱动/MAC/MTU/队列/NUMA"),
 						K("statistics", "收发包/字节/错误/drop"),
 						K("sriov", "VF 列表与占用状态"),
