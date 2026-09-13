@@ -84,3 +84,32 @@ func (s *Server) handleGetMacTable(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, rows)
 }
+
+// RouteRow /vrfs/{name}/routes 一行（契约 Route）。
+type RouteRow struct {
+	Prefix   string `json:"prefix"`
+	NextHop  string `json:"next_hop"`
+	Distance int    `json:"distance,omitempty"`
+}
+
+// L3Runtime L3 运行态查询能力（编排器装配注入；nil = 503）。
+type L3Runtime interface {
+	Routes(ctx context.Context, vrfName string) ([]RouteRow, error)
+}
+
+// handleGetVrfRoutes GET /api/v1/vrfs/{name}/routes：FIB 路由表（运行态，FR-NET-013）。
+func (s *Server) handleGetVrfRoutes(w http.ResponseWriter, r *http.Request) {
+	if s.l3 == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "VPP 未接入（编排器未装配）", nil)
+		return
+	}
+	rows, err := s.l3.Routes(r.Context(), r.PathValue("name"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
+		return
+	}
+	if rows == nil {
+		rows = []RouteRow{}
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
