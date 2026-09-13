@@ -1,7 +1,7 @@
 # NFViS — 网络功能虚拟化基础设施一体机软件
 
 基于 Ubuntu 26.04 + VPP 26.06 + KVM/Libvirt 的 NFVi 一体机软件，Go 实现。
-JunOS 风格 CLI（`nfvis-cli`）+ REST API（OpenAPI 契约），当前处于 **M2（REST API + AAA + CLI 前端）开发阶段**（M1 已合并）。
+JunOS 风格 CLI（`nfvis-cli`）+ REST API（OpenAPI 契约），当前处于 **M3（网络编排 govpp）开发阶段**（M1 事务引擎、M2 REST API + AAA + CLI 前端已合并）。
 
 ## 仓库结构
 
@@ -20,25 +20,23 @@ JunOS 风格 CLI（`nfvis-cli`）+ REST API（OpenAPI 契约），当前处于 *
 │   ├── config/                                 #   事务引擎：candidate/commit confirmed/rollback + SQLite
 │   ├── orchestrator/                           #   底座适配接口（govpp/libvirt/docker 实现于 M3/M4）
 │   ├── aaa/                                    #   本地用户/class/口令策略/Token（M2）
-│   └── api/                                    #   REST server（Bearer 中间件/统一错误，M2 进行中）
+│   └── api/                                    #   REST server（Bearer 中间件/统一错误，M2 已合并）
 ├── Makefile                                    # make check = vet + 覆盖率门槛 + 原型全绿
-└── prototype/                                  # CLI 补全引擎交互原型（仅演示语义，非产品代码）
+└── prototype/                                  # CLI 补全薄演示（引用 internal/schema，非产品代码）
 ```
 
 ## 新成员阅读顺序
 
-1. **规格书** — 重点 §1.2 范围摘要与附录 A 决策记录（17+4 项已定决策，不要重新发明）
+1. **规格书** — 重点 §1.2 范围摘要与附录 A 决策记录（29 项已定决策，不要重新发明）
 2. **工程骨架** — 依赖方向规则、底座 Provider 接口、M1~M5 里程碑
 3. **命令树 + OpenAPI** — CLI 与 API 一一对应，任何一侧改动必须同步另一侧
-4. **原型** — `go run .` 跑一遍，感受事务模型（candidate/commit confirmed/rollback）与补全语义
+4. **原型** — `cd prototype && go run .` 感受补全语义（命令树引用 `internal/schema`）；事务全流程走 `nfvis-cli`
 
 ## 快速开始（原型）
 
 ```bash
 cd prototype
-go run .                       # 交互模式（? 补全 / Tab 补全 / 事务演示）
-go run . -c "show version"     # 单命令模式
-go test ./...                  # 事务与补全逻辑测试
+go run .                       # 交互：? 列候选 / Tab 补全 / 缩写消歧
 ```
 
 产品代码（M1 事务引擎已合并；M2 API/AAA 开发中，纯 Go + SQLite，任意平台可开发验证）：

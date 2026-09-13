@@ -1,51 +1,41 @@
-# nfvis-cli-proto — CLI 补全引擎交互原型
+# nfvis-cli-proto —— CLI 补全引擎薄演示
 
-模拟后端的 `nfvis-cli` 交互原型，用于验证《CLI 命令树完整设计》中的三层核心机制：
+M2 之后，CLI 的三层核心机制已全部在产品代码中落地：
 
-1. **raw 模式行编辑**：光标移动、历史（↑/↓）、Backspace/Delete/Home/End；
-2. **`?` / Tab 补全**：任意位置列出候选、唯一匹配自动补全、多匹配先补公共前缀再列候选、动态候选（接口名/VNF 名/镜像名/快照号实时生成）；
-3. **JunOS 风格事务**：candidate / commit / commit confirmed（15 秒超时自动回滚）/ rollback / compare（JunOS 风格 diff）/ discard。
+| 机制 | 产品位置 |
+|---|---|
+| 命令树 schema（补全/缩写/权限） | `internal/schema`（nfvisd 与 nfvis-cli 编译期共享） |
+| raw 模式行编辑 / `?`·Tab 补全 / 历史 | `internal/cli` |
+| JunOS 风格事务（candidate/commit/commit confirmed/rollback/compare） | `internal/config` + `internal/api`（经 `pkg/cliclient` 访问 nfvisd） |
+
+本原型（T0-2 决策）**不再自带命令树/事务/编辑器的副本**（曾与产品实现漂移），改为直接引用
+`internal/schema` 的命令树，仅演示补全语义，保留其教学价值。
 
 ## 运行
 
 ```bash
-cd nfvis-cli-proto
-go run .            # 交互模式（Windows 控制台 / Git Bash / 类 Unix 终端）
-go run . -c "show version"    # 单命令模式（脚本化验证）
-go test ./...       # 事务与补全逻辑单元测试
+cd prototype
+go run .            # 交互（非终端环境退化为行输入）
 ```
-
-注意：非终端环境（管道）自动退化为普通行输入，补全不可用但命令可执行。
 
 ## 建议体验路径
 
 ```
-nfvis> show vir<Tab>                    → 补全为 virtual-machine-functions
-nfvis> show virtual-machine-functions <Tab>   → 列出 fw-vm / probe-vm（动态候选）
-nfvis> show configuration | compare ?   
-nfvis> configure
-[edit] nfvis# set system hostname ?     → 列出 <string>
-[edit] nfvis# set virtual-machine-functions <Tab>   → 列出现有 VM
-[edit] nfvis# set virtual-machine-functions fw-vm interfaces eth1 type vhost-user
-[edit] nfvis# set virtual-machine-functions fw-vm interfaces eth1 virtual-switch <Tab>  → vs-app / vs-mgmt
-[edit] nfvis# set virtual-machine-functions fw-vm image no-such-image
-[edit] nfvis# commit                    → 模拟校验失败（镜像不存在）
-[edit] nfvis# delete virtual-machine-functions fw-vm image
-[edit] nfvis# compare                   → JunOS 风格 + / - diff
-[edit] nfvis# set system hostname nfvis-test2
-[edit] nfvis# commit confirmed          → 15 秒内未确认将自动回滚（验证回滚告警输出）
-[edit] nfvis# commit                    → 确认
-[edit] nfvis# rollback 1
-[edit] nfvis# commit
-[edit] nfvis# exit
-nfvis> request virtual-machine-functions fw-vm console
-nfvis> exit
+nfvis> show vir?                    → 列 virtual-switches / virtual-machine-functions（歧义候选）
+nfvis> sh conf<Tab>                 → 补全为 show configuration
+nfvis> conf                         → 缩写消歧为 configure
+nfvis> set sys hostn<Tab>           → 补全为 set system hostname
+nfvis> set sys hostn demo-node      → 回显规范化后的语句
 ```
 
-## 文件结构（对应工程骨架的映射）
+## 事务 / 行编辑 / 历史 / 空闲超时
 
-| 原型文件 | 真实工程位置 |
-|---|---|
-| `tree.go`（命令树 schema） | `internal/schema`（nfvisd 与 nfvis-cli 编译期共享） |
-| `editor.go`（行编辑/补全） | `internal/cli`（薄客户端本地交互） |
-| `engine.go`（事务/状态） | `internal/config`（事务引擎）+ `internal/state`（运行态），真实实现经 `pkg/cliclient` 调 nfvisd |
+这些能力请使用真实 CLI（需要 nfvisd 在跑）：
+
+```bash
+go run ./cmd/nfvisd -listen :8443 -db /tmp/nfvis.db     # 首次启动打印一次性 admin 口令
+go run ./cmd/nfvis-cli -server http://127.0.0.1:8443 -u admin
+# nfvis> configure / set ... / commit confirmed / rollback / show configuration | display json
+```
+
+原型仅为命令树语义的离线演示，非产品代码，禁止把产品逻辑写回此处（AGENTS.md 规则 3）。

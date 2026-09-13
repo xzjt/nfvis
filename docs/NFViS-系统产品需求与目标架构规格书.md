@@ -508,6 +508,7 @@ tap 接口 VM 接入；动态路由协议（OSPF/BGP）；VXLAN overlay；SNMP�
 | 26 | API 会话列表端点（M2 配置事务 API 开工确认） | 补 `GET /system/configuration/sessions`（FR-CFG-009 会话锁列表的 API 落点，CLI 已有 `show system configuration sessions`）；API 会话以 `user@api` 为持有者标识，与 CLI 会话（`user@ssh`/`user@console`）互相独立，同用户跨接入方式并发编辑按会话锁规则互斥 |
 | 27 | 配置节点注释存储（W4 annotate 落地确认） | annotate 语句的注释以语句路径（空格连接的 CLI token，如 "system hostname"）为键存于配置文档顶层 `annotations` 字段——注释随事务引擎可 compare/rollback，随 load/save 导入导出；show configuration 以注释行渲染；delete annotate <path> 清除 |
 | 28 | 内部端点入契约（W8） | `/cli/execute` 与 `/cli/candidates` 登记进 OpenAPI 并标注 `x-internal: true`——仅供 nfvis-cli 使用（CLI 专用通道，命令树契约是其真正的接口），不承诺第三方兼容；W9 一致性测试据此校验「注册路由 ⊆ 契约端点」 |
+| 29 | prototype 与 internal/schema 漂移处置（M3 T0-2） | 采用「薄演示」方案：删除 `prototype/` 自带的命令树/事务/编辑器副本（`tree.go`/`engine.go`/`editor.go` 及其独立 `go.mod`），prototype 并入主模块并直接引用 `internal/schema` 的命令树，仅演示 `?`/Tab 补全与无歧义缩写消歧；事务/历史/空闲超时等一律以 `nfvis-cli` 为准。既消除同一语义两套实现持续漂移的根因，又保留命令树的离线教学价值 |
 
 ## 附录 B：CLI 命令树 ⇄ API 资源映射（摘要，实施期展开为完整文档）
 
