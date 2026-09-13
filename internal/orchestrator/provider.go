@@ -13,6 +13,7 @@ import (
 // NetworkProvider VPP 侧编排接口。L2 虚拟交换机 → bridge domain，
 // L3 虚拟交换机 → VRF（规格书附录 B 映射）。实现需声明是否并发安全。
 type NetworkProvider interface {
+	ApplyInterface(ctx context.Context, iface model.InterfaceConfig) error
 	ApplyACL(ctx context.Context, acl model.Acl) error
 	DeleteACL(ctx context.Context, name string) error
 	ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch) error
@@ -51,6 +52,7 @@ func NewNoopNetwork() NetworkProvider { return noopNetwork{} }
 
 type noopNetwork struct{}
 
+func (noopNetwork) ApplyInterface(context.Context, model.InterfaceConfig) error  { return nil }
 func (noopNetwork) ApplyACL(context.Context, model.Acl) error                    { return nil }
 func (noopNetwork) DeleteACL(context.Context, string) error                      { return nil }
 func (noopNetwork) ApplyBridgeDomain(context.Context, model.VirtualSwitch) error { return nil }

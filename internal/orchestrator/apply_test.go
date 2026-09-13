@@ -23,6 +23,9 @@ func (n recNet) record(op string) error {
 	return nil
 }
 
+func (n recNet) ApplyInterface(ctx context.Context, iface model.InterfaceConfig) error {
+	return n.record("iface:" + iface.Name)
+}
 func (n recNet) ApplyACL(ctx context.Context, acl model.Acl) error {
 	return n.record("acl:" + acl.Name)
 }

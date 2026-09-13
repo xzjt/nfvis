@@ -65,6 +65,7 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	oldVRFs := nameMap(old.Vrfs, func(x model.Vrf) string { return x.Name })
 	oldVMs := nameMap(old.VirtualMachineFunctions, func(x model.VMFunction) string { return x.Name })
 	oldCTs := nameMap(old.ContainerFunctions, func(x model.ContainerFunction) string { return x.Name })
+	oldIfaces := nameMap(old.Interfaces, func(x model.InterfaceConfig) string { return x.Name })
 	oldPMs := nameMap(old.PortMirroring, func(x model.PortMirroring) string { return x.Name })
 	oldQoS := nameMap(old.QosPolicies, func(x model.QosPolicy) string { return x.Name })
 
@@ -143,6 +144,19 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 				q.Name, ok,
 				func(ctx context.Context) error { return a.net.ApplyQos(ctx, o) },
 				func(ctx context.Context) error { return a.net.DeleteQos(ctx, q.Name) },
+			))
+		}
+	}
+
+	// —— 新增/变更：接口层（MTU / ingress-policy 绑定；QoS 之后，保证 policer 已建）——
+	for _, iface := range new.Interfaces {
+		if o, ok := oldIfaces[iface.Name]; !ok || !configEqual(o, iface) {
+			ops = append(ops, applyOp(
+				fmt.Sprintf("interface[%s]", iface.Name),
+				func(ctx context.Context) error { return a.net.ApplyInterface(ctx, iface) },
+				iface.Name, ok,
+				func(ctx context.Context) error { return a.net.ApplyInterface(ctx, o) },
+				func(ctx context.Context) error { return nil },
 			))
 		}
 	}
