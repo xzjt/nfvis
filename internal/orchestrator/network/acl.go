@@ -55,6 +55,21 @@ type AclProvider struct {
 
 type aclPair struct{ in, out string }
 
+// ACLIndexLookup 可选的「按 tag 反查已存在 ACL 索引」能力（恢复收敛用）：
+// VPP 侧可能已有同名 ACL（nfvisd 重启/配置重放），据此走 replace 而非新建重复项。
+type ACLIndexLookup interface {
+	ACLIndexByTag(tag string) (uint32, bool, error)
+}
+
+// reset 清空进程内登记表（恢复收敛前调用，索引改由 acl_dump 按 tag 反查）。
+func (p *AclProvider) reset() {
+	p.mu.Lock()
+	p.index = map[string]uint32{}
+	p.bound = map[uint32]aclPair{}
+	p.byIface = map[string]uint32{}
+	p.mu.Unlock()
+}
+
 // NewAclProvider 以固定客户端构造（测试）。
 func NewAclProvider(c ACLClient) *AclProvider {
 	return &AclProvider{client: func() (ACLClient, error) { return c, nil },
@@ -81,6 +96,18 @@ func (p *AclProvider) ApplyACL(ctx context.Context, acl model.Acl) error {
 	p.mu.Lock()
 	idx, known := p.index[acl.Name]
 	p.mu.Unlock()
+	if !known {
+		// 恢复收敛：VPP 侧可能已存在同名 ACL，按 tag 反查后走 replace（避免重复项）
+		if lk, ok := c.(ACLIndexLookup); ok {
+			got, found, err := lk.ACLIndexByTag(acl.Name)
+			if err != nil {
+				return fmt.Errorf("查询已存在 ACL %s: %w", acl.Name, err)
+			}
+			if found {
+				idx, known = got, true
+			}
+		}
+	}
 	if !known {
 		idx = aclIndexNew // VPP：~0 表示新建（0 是合法 ACL 索引，不能当"未下发"）
 	}

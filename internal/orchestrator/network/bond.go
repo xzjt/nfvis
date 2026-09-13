@@ -50,6 +50,15 @@ func NewBondProviderFunc(f func() (BondClient, error)) *BondProvider {
 		members: map[string][]uint32{}, lacp: map[string]bool{}}
 }
 
+// reset 清空进程内登记表（恢复收敛前调用，bond 存在性改按接口名反查）。
+func (p *BondProvider) reset() {
+	p.mu.Lock()
+	p.bonds = map[string]uint32{}
+	p.members = map[string][]uint32{}
+	p.lacp = map[string]bool{}
+	p.mu.Unlock()
+}
+
 // ApplyBond 创建/收敛 bond：模式变更或不存在则重建，随后对齐成员。
 func (p *BondProvider) ApplyBond(ctx context.Context, bond model.Bond) error {
 	c, err := p.client()
@@ -70,7 +79,7 @@ func (p *BondProvider) ApplyBond(ctx context.Context, bond model.Bond) error {
 			return fmt.Errorf("解析 bond 成员 %s: %w", m, err)
 		}
 		if !ok {
-			return fmt.Errorf("bond 成员 %s 不存在于 VPP（是否未由 DPDK 接管？）", m)
+			return fmt.Errorf("%w: bond %s 成员 %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, bond.Name, m)
 		}
 		memberIdx = append(memberIdx, idx)
 	}
@@ -80,6 +89,19 @@ func (p *BondProvider) ApplyBond(ctx context.Context, bond model.Bond) error {
 	oldLacp := p.lacp[bond.Name]
 	oldMembers := p.members[bond.Name]
 	p.mu.Unlock()
+
+	if !exists {
+		// 恢复收敛：VPP 侧可能已存在同名 bond（登记表已清空）。模式无法反查，
+		// 删除后重建，保证与配置一致。
+		if stale, ok, err := c.SwInterfaceIndex(bond.Name); err != nil {
+			return fmt.Errorf("查询 bond %s: %w", bond.Name, err)
+		} else if ok {
+			if err := c.BondDelete(stale); err != nil {
+				return fmt.Errorf("清理已存在的 bond %s: %w", bond.Name, err)
+			}
+			oldMembers = nil
+		}
+	}
 
 	if exists && oldLacp != wantLacp { // 模式不可原地改，重建
 		if err := c.BondDelete(idx); err != nil {

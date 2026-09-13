@@ -27,6 +27,25 @@ type govppAclClient struct{ ch api.Channel }
 
 func (g *govppAclClient) Close() { g.ch.Close() }
 
+// ACLIndexByTag 经 acl_dump（~0 = 全量）按 tag 反查已存在 ACL 的索引。
+// 恢复收敛用：nfvisd 重启后登记表为空，但 VPP 侧可能已有同名 ACL，据此走 replace。
+func (g *govppAclClient) ACLIndexByTag(tag string) (uint32, bool, error) {
+	reqCtx := g.ch.SendMultiRequest(&acl.ACLDump{ACLIndex: ^uint32(0)})
+	for {
+		d := &acl.ACLDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return 0, false, err
+		}
+		if stop {
+			return 0, false, nil
+		}
+		if d.Tag == tag {
+			return d.ACLIndex, true, nil
+		}
+	}
+}
+
 func (g *govppAclClient) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	return (&govppL3Client{ch: g.ch}).SwInterfaceIndex(ifname)
 }

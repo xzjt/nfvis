@@ -51,6 +51,15 @@ func NewServicesProviderFunc(f func() (SvcClient, error)) *ServicesProvider {
 		policer: map[string]bool{}, bound: map[string]string{}}
 }
 
+// reset 清空进程内登记表（恢复收敛前调用，SPAN/policer/绑定全量重放）。
+func (p *ServicesProvider) reset() {
+	p.mu.Lock()
+	p.spans = map[string]spanRec{}
+	p.policer = map[string]bool{}
+	p.bound = map[string]string{}
+	p.mu.Unlock()
+}
+
 // ApplySpan 配置 SPAN：源口 → 分析口，方向 ingress|egress|both（缺省 both）。
 func (p *ServicesProvider) ApplySpan(ctx context.Context, pm model.PortMirroring) error {
 	if pm.Source.Vnf != "" {
@@ -166,7 +175,7 @@ func (p *ServicesProvider) ApplyInterface(ctx context.Context, iface model.Inter
 		return fmt.Errorf("解析接口 %s: %w", iface.Name, err)
 	}
 	if !ok {
-		return fmt.Errorf("接口 %s 不存在于 VPP（是否未由 DPDK 接管？）", iface.Name)
+		return fmt.Errorf("%w: %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, iface.Name)
 	}
 	if iface.MTU > 0 {
 		if err := c.SetMTU(idx, uint32(iface.MTU)); err != nil {
@@ -213,7 +222,7 @@ func resolveIface(c SvcClient, ifname string) (uint32, error) {
 		return 0, fmt.Errorf("解析接口 %s: %w", ifname, err)
 	}
 	if !ok {
-		return 0, fmt.Errorf("接口 %s 不存在于 VPP（是否未由 DPDK 接管？）", ifname)
+		return 0, fmt.Errorf("%w: %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, ifname)
 	}
 	return idx, nil
 }
