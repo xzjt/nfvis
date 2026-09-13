@@ -14,6 +14,7 @@ import (
 type fakeSvc struct {
 	ifaces   map[string]uint32
 	mtu      map[uint32]uint32
+	state    map[uint32]bool
 	spans    []string
 	spanOff  []uint32
 	policers map[string]uint32
@@ -25,7 +26,7 @@ type fakeSvc struct {
 
 func newFakeSvc() *fakeSvc {
 	return &fakeSvc{ifaces: map[string]uint32{"ens192": 1, "ens224": 2, "ens256": 3},
-		mtu: map[uint32]uint32{}, policers: map[string]uint32{}, nextIdx: 10}
+		mtu: map[uint32]uint32{}, state: map[uint32]bool{}, policers: map[string]uint32{}, nextIdx: 10}
 }
 
 func (f *fakeSvc) Close() { f.closed++ }
@@ -43,6 +44,14 @@ func (f *fakeSvc) SetMTU(swIfIndex, mtu uint32) error {
 		return f.err
 	}
 	f.mtu[swIfIndex] = mtu
+	return nil
+}
+
+func (f *fakeSvc) SetState(swIfIndex uint32, up bool) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.state[swIfIndex] = up
 	return nil
 }
 
@@ -132,6 +141,9 @@ func TestQosApplyBindUnbind(t *testing.T) {
 	if f.mtu[1] != 9000 {
 		t.Fatalf("应设 MTU: %v", f.mtu)
 	}
+	if !f.state[1] {
+		t.Fatalf("缺省应 up: %v", f.state)
+	}
 	if len(f.pins) != 1 || f.pins[0] != "pol1:on" {
 		t.Fatalf("应绑定策略: %v", f.pins)
 	}
@@ -142,9 +154,13 @@ func TestQosApplyBindUnbind(t *testing.T) {
 	if len(f.pins) != 1 {
 		t.Fatalf("不应重复绑定: %v", f.pins)
 	}
-	// 解绑
-	if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens192", MTU: 9000}); err != nil {
+	// 解绑（并验证 disable 映射 down）
+	disabled := false
+	if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens192", MTU: 9000, Enabled: &disabled}); err != nil {
 		t.Fatalf("解绑: %v", err)
+	}
+	if f.state[1] {
+		t.Fatalf("enabled=false 应 down: %v", f.state)
 	}
 	if len(f.pins) != 2 || f.pins[1] != "pol1:off" {
 		t.Fatalf("应解绑: %v", f.pins)
