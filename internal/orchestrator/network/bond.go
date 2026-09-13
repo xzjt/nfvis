@@ -150,8 +150,24 @@ func (p *BondProvider) DeleteBond(ctx context.Context, name string) error {
 		return err
 	}
 	defer c.Close()
+	if err := p.detachMembers(c, name, idx); err != nil {
+		return err
+	}
 	if err := c.BondDelete(idx); err != nil {
 		return fmt.Errorf("删除 bond %s: %w", name, err)
+	}
+	return nil
+}
+
+// detachMembers 删除 bond 前先摘除成员（避免残留从属状态）。
+func (p *BondProvider) detachMembers(c BondClient, name string, idx uint32) error {
+	p.mu.Lock()
+	members := append([]uint32{}, p.members[name]...)
+	p.mu.Unlock()
+	for _, m := range members {
+		if err := c.BondDetachMember(m); err != nil {
+			return fmt.Errorf("摘除 bond %s 成员 %d: %w", name, m, err)
+		}
 	}
 	return nil
 }
