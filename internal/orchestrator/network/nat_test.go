@@ -60,6 +60,13 @@ func (f *fakeNat) NATFeature(swIfIndex uint32, inside, add bool) error {
 	return nil
 }
 
+func (f *fakeNat) NATEnable(enable bool) error {
+	if f.err != nil {
+		return f.err
+	}
+	return nil
+}
+
 func (f *fakeNat) NATInterfaceAddr(add bool, swIfIndex uint32) error {
 	if f.err != nil {
 		return f.err

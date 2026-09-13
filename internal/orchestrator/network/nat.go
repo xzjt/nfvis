@@ -34,6 +34,7 @@ type NatClient interface {
 	SwInterfaceIndex(ifname string) (uint32, bool, error)
 	NATAddressRange(add bool, first, last string) error
 	NATFeature(swIfIndex uint32, inside, add bool) error
+	NATEnable(enable bool) error
 	NATInterfaceAddr(add bool, swIfIndex uint32) error
 	NATStatic(add bool, inside, outside string) error
 	NATSessions() ([]NATSession, error)
@@ -91,6 +92,12 @@ func (p *NatProvider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 	desiredFeatures, desiredIfAddr, err := p.desiredFeatures(c, nat, desiredPools)
 	if err != nil {
 		return err
+	}
+	nonEmpty := len(desiredPools) > 0 || len(desiredStatics) > 0 || len(desiredFeatures) > 0
+	if nonEmpty {
+		if err := c.NATEnable(true); err != nil {
+			return fmt.Errorf("启用 NAT44 EI: %w", err)
+		}
 	}
 
 	// 地址池：删旧/改值/新增
@@ -173,6 +180,11 @@ func (p *NatProvider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 		}
 	}
 
+	if !nonEmpty {
+		if err := c.NATEnable(false); err != nil {
+			return fmt.Errorf("关闭 NAT44 EI: %w", err)
+		}
+	}
 	p.mu.Lock()
 	p.pools, p.statics, p.features, p.ifaddr = desiredPools, desiredStatics, desiredFeatures, desiredIfAddr
 	p.mu.Unlock()

@@ -71,6 +71,20 @@ func (g *govppNatClient) NATFeature(swIfIndex uint32, inside, add bool) error {
 	return nil
 }
 
+func (g *govppNatClient) NATEnable(enable bool) error {
+	reply := &nat44_ei.Nat44EiPluginEnableDisableReply{}
+	if err := g.ch.SendRequest(&nat44_ei.Nat44EiPluginEnableDisable{Enable: enable}).ReceiveReply(reply); err != nil {
+		if vppErrIs(err, vppFeatureAlreadyEnabled, vppFeatureAlreadyDisabled) {
+			return nil
+		}
+		return err
+	}
+	if reply.Retval != 0 {
+		return fmt.Errorf("nat44_ei_plugin_enable_disable(enable=%v) retval=%d", enable, reply.Retval)
+	}
+	return nil
+}
+
 func (g *govppNatClient) NATInterfaceAddr(add bool, swIfIndex uint32) error {
 	reply := &nat44_ei.Nat44EiAddDelInterfaceAddrReply{}
 	if err := g.ch.SendRequest(&nat44_ei.Nat44EiAddDelInterfaceAddr{
