@@ -70,7 +70,7 @@ step "安装 VPP" bash -c '
     try_repo() {  # $1 = 使用的工作代号
         curl -fsSL "https://packagecloud.io/fdio/release/gpgkey" | gpg --dearmor >/etc/apt/keyrings/fdio.gpg 2>/dev/null
         echo "deb [signed-by=/etc/apt/keyrings/fdio.gpg] https://packagecloud.io/fdio/release/ubuntu ${1} main" >/etc/apt/sources.list.d/fdio.list
-        apt-get -y update && apt-get -y install vpp vpp-plugins vppctl
+        apt-get -y update && apt-get -y install vpp vpp-plugin-core vpp-plugin-dpdk
     }
     mkdir -p /etc/apt/keyrings
     try_repo "$CODENAME" || { rm -f /etc/apt/sources.list.d/fdio.list; try_repo noble; }
@@ -80,10 +80,10 @@ step "安装 VPP" bash -c '
 # ---- 4. Libvirt + QEMU/KVM ----
 step "安装 Libvirt/QEMU" bash -c '
     set -e
-    apt-get -y install qemu-kvm libvirt-daemon-system libvirt-clients virtinst
+    apt-get -y install qemu-system-x86 libvirt-daemon-system libvirt-clients virtinst
     systemctl enable --now libvirtd
-    # 开发虚机需嵌套虚拟化时，kvm 模块由内核提供；检查 /dev/kvm
-    ls -l /dev/kvm'
+    # 开发虚机需嵌套虚拟化时，kvm 模块由内核提供；缺失仅提示，不视为失败
+    ls -l /dev/kvm 2>/dev/null || echo "提示：无 /dev/kvm（嵌套虚拟化未开启），M4 需在宿主开启"'
 
 # ---- 5. Docker ----
 step "安装 Docker" bash -c '
