@@ -3,11 +3,13 @@ package compute
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 // ---------- mock 底座 ----------
@@ -92,6 +94,20 @@ func (m *mockLibvirt) Reboot(_ context.Context, name string) error {
 	m.states[name] = domRunning
 	return nil
 }
+
+// OpenConsole 返回一对内存管道（单测验证 Provider.Console 的状态前置条件）。
+func (m *mockLibvirt) OpenConsole(_ context.Context, name string) (io.ReadWriteCloser, error) {
+	if !m.present[name] {
+		return nil, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+	}
+	return nopConsole{}, nil
+}
+
+type nopConsole struct{}
+
+func (nopConsole) Read([]byte) (int, error)    { return 0, io.EOF }
+func (nopConsole) Write(p []byte) (int, error) { return len(p), nil }
+func (nopConsole) Close() error                { return nil }
 
 type mockStorage struct {
 	files   map[string]bool

@@ -7,7 +7,7 @@
 - 当前阶段：**M1/M2/M3 已完成并合并**（M3 = T0-1~T0-3、M3-P0、M3-1~M3-10，另含合并前修复的 CLI 契约可达性、BVI 可用性/恢复幂等、NAT 出接口语义、CLI 运行态 show 接线——见 `docs/reviews/2026-09-13.md` 第三~五轮）。**下一步 M4（VNF/容器/镜像）**：任务清单 `docs/M4-任务清单.md`，先读 `docs/M4-任务清单.md` 的 M4-P0 环境约束与「明确不属 M4」边界。
 - M3 验收现状（`docs/M3-人工演示记录.md`）：D1/D2/D3/D6/D8 真机通过；**D4 NAT 端到端生效待定**——出接口语义已定为必填（决策 #38），但 inside/outside 跨 VRF 的 NAT 拓扑语义需在 M4 网络增强前决策；D5 SPAN 抓包、D7 LLDP 因环境受限未验（tap 插件未启用；vmxnet3 下 VPP LLDP 报 internal error 且无对端）。
 - 验证环境 nfvis-vm 当前状态：VPP 空配置、nfvisd 未运行、ens192/ens224 已绑 vfio-pci、1G 大页配置未改动。真机前 `systemctl start vpp`；集成测试 `make integration`（CI 不跑）。设计基线在 `docs/`，**不要凭记忆重设计**。
-- 已定决策 41 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 42 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
 - `docs/NFViS-openapi.yaml` 与 `docs/NFViS-CLI命令树完整设计.md` 是**契约**。
 
 ## 不可违反的规则

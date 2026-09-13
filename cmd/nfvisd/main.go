@@ -162,26 +162,31 @@ func run() error {
 		Restarter: network.NewSystemctlRestarter(), RestartOnApply: true}
 
 	// M4-4：VM 生命周期动作后刷新 vNIC 断连告警（FR-NET-023）。
-	var vmAPI api.VMRuntime
+	var (
+		vmAPI     api.VMRuntime
+		vmConsole api.VMConsoleRuntime
+	)
 	if vmRuntime != nil && p != nil {
 		vmAPI = &vmController{Provider: p, net: netProvider, engine: engine, log: log}
+		vmConsole = p // M4-5：串口 console（libvirt 域串口 ↔ WebSocket）
 	}
 
 	apiServer := api.New(engine, aaaSvc, api.Options{
-		Addr:    *listen,
-		TLSCert: *tlsCert,
-		TLSKey:  *tlsKey,
-		Log:     log,
-		VPP:     &vppController{mgr: vppMgr, applier: startupApplier, engine: engine},
-		L2:      &l2Controller{net: netProvider},
-		L3:      &l3Controller{net: netProvider},
-		LLDP:    &lldpController{net: netProvider},
-		State:   state.New(vppMgr.Runtime()),
-		SRIOV:   network.NewSRIOVProvider(),
-		NAT:     &natSessionsController{net: netProvider},
-		Alarms:  &alarmController{store: alarms},
-		Diag:    &diagController{diag: vppMgr.Diagnostics()},
-		VM:      vmAPI,
+		Addr:      *listen,
+		TLSCert:   *tlsCert,
+		TLSKey:    *tlsKey,
+		Log:       log,
+		VPP:       &vppController{mgr: vppMgr, applier: startupApplier, engine: engine},
+		L2:        &l2Controller{net: netProvider},
+		L3:        &l3Controller{net: netProvider},
+		LLDP:      &lldpController{net: netProvider},
+		State:     state.New(vppMgr.Runtime()),
+		SRIOV:     network.NewSRIOVProvider(),
+		NAT:       &natSessionsController{net: netProvider},
+		Alarms:    &alarmController{store: alarms},
+		Diag:      &diagController{diag: vppMgr.Diagnostics()},
+		VM:        vmAPI,
+		VMConsole: vmConsole,
 	})
 
 	srvErr := make(chan error, 1)
