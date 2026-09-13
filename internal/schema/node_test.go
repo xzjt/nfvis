@@ -261,3 +261,30 @@ func TestAbbreviationExpand(t *testing.T) {
 	}
 	_ = n
 }
+
+func TestCanonicalizeAbbrev(t *testing.T) {
+	// 操作命令：无歧义前缀替换为规范关键字
+	got, err := Canonicalize(OperRoot(), []string{"conf"})
+	if err != nil || len(got) != 1 || got[0] != "configure" {
+		t.Fatalf("conf 应规整为 configure: %v %v", got, err)
+	}
+	got, err = Canonicalize(OperRoot(), []string{"sh", "conf"})
+	if err != nil || len(got) != 2 || got[0] != "show" || got[1] != "configuration" {
+		t.Fatalf("sh conf 应规整: %v %v", got, err)
+	}
+	// 参数/取值原样保留
+	got, err = Canonicalize(ConfigRoot(), []string{"set", "sys", "hostn", "demo-node"})
+	if err != nil || strings.Join(got, " ") != "set system hostname demo-node" {
+		t.Fatalf("set sys hostn 应规整且值保留: %v %v", got, err)
+	}
+	// 歧义仍报错并列出候选
+	if _, err := Canonicalize(OperRoot(), []string{"sh", "vir"}); err == nil || !strings.Contains(err.Error(), "virtual-switches") {
+		t.Fatalf("歧义应报错列候选: %v", err)
+	}
+	// 树未建模的语法原样透传（执行器自行支持）
+	toks := []string{"show", "configuration", "compare", "rollback", "2"}
+	got, err = Canonicalize(OperRoot(), toks)
+	if err != nil || strings.Join(got, " ") != strings.Join(toks, " ") {
+		t.Fatalf("未建模语法应原样保留: %v %v", got, err)
+	}
+}

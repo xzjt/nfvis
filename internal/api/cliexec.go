@@ -96,8 +96,10 @@ func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
 	var out string
 	if perr != nil {
 		out = "%% " + perr.Error() + "\n"
+	} else if canon, cerr := x.canonicalize(s, cmd); cerr != nil {
+		out = "%% " + cerr.Error() + "\n" // FR-CLI-004：歧义/未知命令在此报错并列出候选
 	} else {
-		out = x.dispatch(user, class, source, s, strings.Fields(cmd), cmd)
+		out = x.dispatch(user, class, source, s, canon, cmd)
 		out = x.applyPipes(out, pipes)
 	}
 	cur := x.sess[key]
@@ -105,6 +107,51 @@ func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
 		cur = &cliSession{Mode: "oper"}
 	}
 	return CLIEResult{Output: out, Mode: cur.Mode, Path: append([]string{}, cur.Path...), Prompt: promptOf(cur)}
+}
+
+// canonicalize 按当前模式/层级把命令 token 规整为规范关键字（FR-CLI-004：
+// 无歧义前缀即可执行，与 Tab 补全同源）。set/delete/edit/show 的路径相对当前
+// edit 层级解析；annotate 的注释文本与 load/save 文件名原样保留。
+func (x *cliExecutor) canonicalize(s *cliSession, cmd string) ([]string, error) {
+	toks := strings.Fields(cmd)
+	if len(toks) == 0 {
+		return nil, nil
+	}
+	if s.Mode != "config" {
+		return schema.Canonicalize(schema.OperRoot(), toks)
+	}
+	head, err := schema.Canonicalize(schema.ConfigRoot(), toks[:1])
+	if err != nil {
+		return nil, err
+	}
+	switch head[0] {
+	case "annotate":
+		return append(head, toks[1:]...), nil // 注释文本含空格，仅规整命令字
+	case "set", "delete", "edit", "show":
+		// 配置模式 `show configuration ...` 委托操作模式查看 committed；
+		// configuration 只在操作树建模，故先在操作树解析该前缀。
+		if head[0] == "show" && len(toks) > 1 {
+			if two, err := schema.Canonicalize(schema.OperRoot(), toks[:2]); err == nil &&
+				len(two) == 2 && two[1] == "configuration" {
+				rest, err := schema.Canonicalize(schema.OperRoot(), toks[2:])
+				if err != nil {
+					return nil, err
+				}
+				return append(two, rest...), nil
+			}
+		}
+		base, _, err := schema.Match(schema.ConfigPathTree(), s.Path) // 层级可含身份取值
+		if err != nil {
+			return nil, err
+		}
+		rest, err := schema.Canonicalize(base, toks[1:])
+		if err != nil {
+			return nil, err
+		}
+		return append(head, rest...), nil
+	default:
+		return schema.Canonicalize(schema.ConfigRoot(), toks)
+	}
 }
 
 func (x *cliExecutor) dispatch(user, class, source string, s *cliSession, t []string, raw string) string {
