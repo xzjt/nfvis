@@ -178,6 +178,17 @@ func (p *L3Provider) DeleteVRF(ctx context.Context, name string) error {
 	return nil
 }
 
+// AttachedIfaces 返回 VRF 已配置的 sw_if_index（供 NAT inside 解析）。
+func (p *L3Provider) AttachedIfaces(vrfName string) []uint32 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	rec := p.ifaces[TableID(vrfName)]
+	out := make([]uint32, len(rec))
+	copy(out, rec)
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 // Routes 返回 VRF 的运行态 FIB。
 func (p *L3Provider) Routes(ctx context.Context, name string) ([]RouteEntry, error) {
 	c, err := p.client()

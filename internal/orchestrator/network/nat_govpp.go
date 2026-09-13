@@ -71,6 +71,22 @@ func (g *govppNatClient) NATFeature(swIfIndex uint32, inside, add bool) error {
 	return nil
 }
 
+func (g *govppNatClient) NATInterfaceAddr(add bool, swIfIndex uint32) error {
+	reply := &nat44_ei.Nat44EiAddDelInterfaceAddrReply{}
+	if err := g.ch.SendRequest(&nat44_ei.Nat44EiAddDelInterfaceAddr{
+		IsAdd: add, SwIfIndex: interface_types.InterfaceIndex(swIfIndex),
+	}).ReceiveReply(reply); err != nil {
+		if !add && vppErrIs(err, vppValueExist) {
+			return nil
+		}
+		return err
+	}
+	if reply.Retval != 0 {
+		return fmt.Errorf("nat44_ei_add_del_interface_addr(if=%d,add=%v) retval=%d", swIfIndex, add, reply.Retval)
+	}
+	return nil
+}
+
 func (g *govppNatClient) NATStatic(add bool, inside, outside string) error {
 	in, err := ip_types.ParseIP4Address(inside)
 	if err != nil {

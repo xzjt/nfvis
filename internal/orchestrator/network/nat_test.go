@@ -60,6 +60,18 @@ func (f *fakeNat) NATFeature(swIfIndex uint32, inside, add bool) error {
 	return nil
 }
 
+func (f *fakeNat) NATInterfaceAddr(add bool, swIfIndex uint32) error {
+	if f.err != nil {
+		return f.err
+	}
+	op := "del"
+	if add {
+		op = "add"
+	}
+	f.feats = append(f.feats, op+":"+string(rune('0'+swIfIndex))+":ifaddr")
+	return nil
+}
+
 func (f *fakeNat) NATStatic(add bool, inside, outside string) error {
 	if f.err != nil {
 		return f.err
@@ -106,8 +118,9 @@ func TestNatApplyConvergence(t *testing.T) {
 	if len(f.static) != 1 || f.static[0] != "add:10.0.0.5->203.0.113.1" {
 		t.Fatalf("静态映射: %v", f.static)
 	}
-	if len(f.feats) != 2 || !strings.Contains(strings.Join(f.feats, ","), "add:1:inside") ||
-		!strings.Contains(strings.Join(f.feats, ","), "add:2:outside") {
+	joined := strings.Join(f.feats, ",")
+	if len(f.feats) != 3 || !strings.Contains(joined, "add:1:inside") ||
+		!strings.Contains(joined, "add:2:outside") || !strings.Contains(joined, "add:2:ifaddr") {
 		t.Fatalf("接口特性: %v", f.feats)
 	}
 
@@ -130,8 +143,8 @@ func TestNatApplyConvergence(t *testing.T) {
 	if len(f.static) != 1 || !strings.HasPrefix(f.static[0], "del:") {
 		t.Fatalf("应删除静态映射: %v", f.static)
 	}
-	if len(f.feats) != 2 {
-		t.Fatalf("应移除两个接口特性: %v", f.feats)
+	if len(f.feats) != 3 {
+		t.Fatalf("应移除全部接口特性与接口地址: %v", f.feats)
 	}
 }
 

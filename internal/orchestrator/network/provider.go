@@ -47,8 +47,8 @@ func (n *L2Network) SetACL(a *AclProvider) {
 // SetNAT 追加 NAT44 编排（M3-5 三），并把 L2 挂接表注入为 inside 接口来源。
 func (n *L2Network) SetNAT(p *NatProvider) {
 	n.nat = p
-	if p != nil && n.l2 != nil {
-		p.SetInsideResolver(n.l2.AttachedIfaces)
+	if p != nil && n.l3 != nil {
+		p.SetInsideResolver(n.l3.AttachedIfaces) // NAT 仅作用于 L3 交换机
 	}
 }
 

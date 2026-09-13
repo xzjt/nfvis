@@ -34,6 +34,7 @@ type NatClient interface {
 	SwInterfaceIndex(ifname string) (uint32, bool, error)
 	NATAddressRange(add bool, first, last string) error
 	NATFeature(swIfIndex uint32, inside, add bool) error
+	NATInterfaceAddr(add bool, swIfIndex uint32) error
 	NATStatic(add bool, inside, outside string) error
 	NATSessions() ([]NATSession, error)
 	Close()
@@ -48,21 +49,23 @@ type NatProvider struct {
 	pools    map[string][2]string // 池名 → {first,last}
 	statics  map[string]string    // insideIP → outsideIP
 	features map[uint32]string    // swIfIndex → inside|outside
+	ifaddr   map[uint32]bool      // 使用接口地址做 NAT 的外口
 }
 
 // NewNatProvider 以固定客户端构造（测试）。
 func NewNatProvider(c NatClient) *NatProvider {
 	return &NatProvider{client: func() (NatClient, error) { return c, nil },
-		pools: map[string][2]string{}, statics: map[string]string{}, features: map[uint32]string{}}
+		pools: map[string][2]string{}, statics: map[string]string{},
+		features: map[uint32]string{}, ifaddr: map[uint32]bool{}}
 }
 
 // NewNatProviderFunc 以客户端工厂构造（连接可重连）。
 func NewNatProviderFunc(f func() (NatClient, error)) *NatProvider {
 	return &NatProvider{client: f, pools: map[string][2]string{},
-		statics: map[string]string{}, features: map[uint32]string{}}
+		statics: map[string]string{}, features: map[uint32]string{}, ifaddr: map[uint32]bool{}}
 }
 
-// SetInsideResolver 注入交换机成员接口解析（inside 接口来源）。
+// SetInsideResolver 注入 L3 交换机（VRF）成员接口解析（inside 接口来源）。
 func (p *NatProvider) SetInsideResolver(fn func(vsName string) []uint32) { p.insideIfaces = fn }
 
 // ApplyNAT 声明式收敛 NAT44 配置。
@@ -85,7 +88,7 @@ func (p *NatProvider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 	for _, st := range nat.Static {
 		desiredStatics[st.InsideIP] = st.OutsideIP
 	}
-	desiredFeatures, err := p.desiredFeatures(c, nat, desiredPools)
+	desiredFeatures, desiredIfAddr, err := p.desiredFeatures(c, nat, desiredPools)
 	if err != nil {
 		return err
 	}
@@ -130,6 +133,26 @@ func (p *NatProvider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 		}
 	}
 
+	// 接口地址 NAT（action.interface：使用外口自身地址）
+	p.mu.Lock()
+	oldIfAddr := p.ifaddr
+	p.mu.Unlock()
+	for idx := range oldIfAddr {
+		if !desiredIfAddr[idx] {
+			if err := c.NATInterfaceAddr(false, idx); err != nil {
+				return fmt.Errorf("移除接口 %d 的 NAT 接口地址: %w", idx, err)
+			}
+		}
+	}
+	for idx := range desiredIfAddr {
+		if oldIfAddr[idx] {
+			continue
+		}
+		if err := c.NATInterfaceAddr(true, idx); err != nil {
+			return fmt.Errorf("配置接口 %d 使用 NAT 接口地址: %w", idx, err)
+		}
+	}
+
 	// 静态映射：删旧/新增
 	p.mu.Lock()
 	oldStatics := p.statics
@@ -151,7 +174,7 @@ func (p *NatProvider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 	}
 
 	p.mu.Lock()
-	p.pools, p.statics, p.features = desiredPools, desiredStatics, desiredFeatures
+	p.pools, p.statics, p.features, p.ifaddr = desiredPools, desiredStatics, desiredFeatures, desiredIfAddr
 	p.mu.Unlock()
 	return nil
 }
@@ -168,8 +191,9 @@ func (p *NatProvider) Sessions(ctx context.Context) ([]NATSession, error) {
 
 // desiredFeatures 汇总接口 inside/outside：rule.action.interface → outside；
 // rule.virtual_switch 成员 → inside。同一接口不可同时内外。
-func (p *NatProvider) desiredFeatures(c NatClient, nat model.NatConfig, pools map[string][2]string) (map[uint32]string, error) {
+func (p *NatProvider) desiredFeatures(c NatClient, nat model.NatConfig, pools map[string][2]string) (map[uint32]string, map[uint32]bool, error) {
 	features := map[uint32]string{}
+	ifaddr := map[uint32]bool{}
 	if p.insideIfaces != nil {
 		for _, r := range nat.Rules {
 			if r.VirtualSwitch == "" {
@@ -183,7 +207,7 @@ func (p *NatProvider) desiredFeatures(c NatClient, nat model.NatConfig, pools ma
 	for _, r := range nat.Rules {
 		if r.Action.SourcePool != "" {
 			if _, ok := pools[r.Action.SourcePool]; !ok {
-				return nil, fmt.Errorf("NAT 规则 %d 引用未定义的源池 %s", r.Seq, r.Action.SourcePool)
+				return nil, nil, fmt.Errorf("NAT 规则 %d 引用未定义的源池 %s", r.Seq, r.Action.SourcePool)
 			}
 		}
 		if r.Action.Interface == "" {
@@ -191,17 +215,18 @@ func (p *NatProvider) desiredFeatures(c NatClient, nat model.NatConfig, pools ma
 		}
 		idx, ok, err := c.SwInterfaceIndex(r.Action.Interface)
 		if err != nil {
-			return nil, fmt.Errorf("解析 NAT 外口 %s: %w", r.Action.Interface, err)
+			return nil, nil, fmt.Errorf("解析 NAT 外口 %s: %w", r.Action.Interface, err)
 		}
 		if !ok {
-			return nil, fmt.Errorf("NAT 外口 %s 不存在于 VPP（是否未由 DPDK 接管？）", r.Action.Interface)
+			return nil, nil, fmt.Errorf("NAT 外口 %s 不存在于 VPP（是否未由 DPDK 接管？）", r.Action.Interface)
 		}
 		if features[idx] == "inside" {
-			return nil, fmt.Errorf("接口 %s 同时被配置为 NAT 内外口", r.Action.Interface)
+			return nil, nil, fmt.Errorf("接口 %s 同时被配置为 NAT 内外口", r.Action.Interface)
 		}
 		features[idx] = "outside"
+		ifaddr[idx] = true
 	}
-	return features, nil
+	return features, ifaddr, nil
 }
 
 // parseAddressRange 解析 "<ip> to <ip>"。
