@@ -146,14 +146,16 @@ request api token revoke <token-id>                 # S
 ```
 configure                                           # 进入配置模式（S/O；被 class 拒绝时提示）
 exit | quit                                         # 退出 CLI
-ping <host> [source <ip>] [count <n>] [vrf <name>]  # 管理口或指定 VRF（经 VPP L3）
-traceroute <host> [vrf <name>]
-monitor interfaces <ifname> [interval <sec>]        # 实时刷新计数，Ctrl-C 退出
+ping <host> [source <ip>] [count <n>] [vrf <name>]  # 经 VPP L3（vppctl ping；source 按接口地址反查接口）
+traceroute <host> [vrf <name>]                      # 宿主侧 ICMP；vrf 经 VPP 路径不支持（明确报错）
+monitor interfaces <ifname> [interval <sec>]        # 实时刷新计数，Ctrl-C 退出（CLI 端轮询）
 monitor vnf <name>                                  # 跟踪 VNF 状态/事件
 clear interfaces statistics [<ifname>]              # S
 start shell                                         # S；仅 local console 允许（SSH 登录禁用）
 help [command]
 ```
+
+> 实现说明（M3-9，附录 A #36）：VPP 26.06 的 ping 插件仅提供 finished-event API、无发起接口，故 `ping` 经 `vppctl`（CLI socket）执行；`source <ip>` 经 VPP 接口地址反查接口名后作为 `vppctl ping source <iface>`。VPP 26.06 无 traceroute 插件/CLI/API，`traceroute` 由 nfvisd 宿主侧 raw ICMP 实现，`vrf` 参数在经 VPP 的路径上不支持并明确报错。`monitor interfaces` 服务端返回单次快照，nfvis-cli REPL 按 interval 本地轮询、Ctrl-C 退出。
 
 ---
 

@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	go.fd.io/govpp v0.13.0
+	golang.org/x/net v0.43.0
 	golang.org/x/term v0.46.0
 	modernc.org/sqlite v1.58.0
 )

@@ -141,6 +141,7 @@ func run() error {
 		SRIOV:   network.NewSRIOVProvider(),
 		NAT:     &natSessionsController{net: netProvider},
 		Alarms:  &alarmController{store: alarms},
+		Diag:    &diagController{diag: vppMgr.Diagnostics()},
 	})
 
 	srvErr := make(chan error, 1)
@@ -271,4 +272,19 @@ func (c *alarmController) List(state string) []api.AlarmRow {
 			ResolvedAt: a.ResolvedAt, State: a.State})
 	}
 	return out
+}
+
+// diagController 装配 api.DiagRuntime（M3-9）：ping/traceroute/clear 统计。
+type diagController struct{ diag *network.Diagnostics }
+
+func (c *diagController) Ping(ctx context.Context, host, source, vrf string, count int) (string, error) {
+	return c.diag.Ping(ctx, network.PingRequest{Host: host, Source: source, VRF: vrf, Count: count})
+}
+
+func (c *diagController) Traceroute(ctx context.Context, host, vrf string) (string, error) {
+	return c.diag.Traceroute(ctx, network.TracerouteRequest{Host: host, VRF: vrf})
+}
+
+func (c *diagController) ClearInterfaceStats(ctx context.Context, ifname string) error {
+	return c.diag.ClearInterfaceStats(ctx, ifname)
 }

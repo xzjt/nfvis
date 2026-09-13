@@ -38,6 +38,7 @@ type Options struct {
 	SRIOV   SRIOVSetter        // SR-IOV VF 数量（M3-7；nil = 503）
 	NAT     NatSessionsRuntime // NAT 会话（M3-7；nil = 503）
 	Alarms  AlarmRuntime       // 告警列表（M3-8；nil = 503）
+	Diag    DiagRuntime        // CLI 诊断命令（M3-9；nil = 命令报不可用）
 }
 
 // Server NFViS REST server。
@@ -70,6 +71,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 		log = slog.Default()
 	}
 	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, log: log}
+	s.cliExec.setRuntime(opts.Diag, opts.State)
 	mux := http.NewServeMux()
 
 	// 认证（免 token，FR-API-001）
