@@ -1,0 +1,21 @@
+===== 重启 nfvisd 后（会话表清空）用 CLI 可达字段建 L2 并 commit =====
+
+[ok] interfaces ens224 description demo-l2-port
+[ok] virtual-switches demo-l2 type l2
+[ok] virtual-switches demo-l2 ports 1 interface ens224
+commit 成功 (revision 3)
+
+
+===== VPP 侧实际状态（期望：BD 存在、ens224 为成员）=====
+  BD-ID   Index   BSN  Age(min)  Learning  U-Forwrd   UU-Flood   Flooding  ARP-Term  arp-ufwd Learn-co Learn-li   BVI-Intf 
+10365503    1      6     off        on        on       flood        on       off       off        2    16777216     N/A    
+--- l2fib ---
+L2FIB total/learned entries: 2/2  Last scan time: 0.0000e0sec  Learn limit: 16777216 
+
+===== 清理：CLI 删除该交换机 =====
+
+已删除 virtual-switches demo-l2（未提交）
+commit 成功 (revision 4)
+
+--- 清理后 VPP 侧 ---
+no bridge-domains in use

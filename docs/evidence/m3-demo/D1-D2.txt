@@ -1,0 +1,32 @@
+===== D1/D2：经 CLI 配置 L2+BVI 与 L3+默认路由 =====
+
+
+
+[ok] interfaces ens224 description demo-l2-port
+[ok] virtual-switches demo-l2 type l2
+[ok] virtual-switches demo-l2 ports 1 interface ens224
+%% 语句未产生配置变更（尚未映射到模型或值未变化）: virtual-switches demo-l2 gateway ip 192.168.155.201/24
+exit status 1
+
+===== 通流：管理口 ping BVI（经 VMnet8 → ens224 → BD → BVI）=====
+PING 192.168.155.201 (192.168.155.201) 56(84) bytes of data.
+From 192.168.155.129 icmp_seq=1 Destination Host Unreachable
+From 192.168.155.129 icmp_seq=2 Destination Host Unreachable
+From 192.168.155.129 icmp_seq=3 Destination Host Unreachable
+
+--- 192.168.155.201 ping statistics ---
+3 packets transmitted, 0 received, +3 errors, 100% packet loss, time 2045ms
+pipe 3
+
+===== 通流：经 VPP VRF ping 外网网关 =====
+ping: bind: Cannot assign requested address
+
+===== 证据：show（运行态）=====
+[map[name:demo-l2 ports:[map[interface:ens224 seq:1]] type:l2]]
+%% 无匹配配置: mac-table
+exit status 1
+description demo-l2-port;
+name ens224;
+--- vppctl 侧 ---
+no bridge-domains in use
+no l2fib entries

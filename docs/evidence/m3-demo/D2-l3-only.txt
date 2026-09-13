@@ -1,0 +1,11 @@
+--- 真实顺序：建 L3 交换机 + l3-interface + 静态路由（不含 BVI）---
+[ok] virtual-switches demo-l3 type l3
+%% 语句未产生配置变更（尚未映射到模型或值未变化）: virtual-switches demo-l3 l3-interface ens192 ip address 192.168.155.200/24
+exit status 1
+--- VPP 侧核对 ---
+ens192 (up):
+ens224 (up):
+local0 (dn):
+--- 清理 ---
+已删除 virtual-switches demo-l3（未提交）
+commit 成功 (revision 5)

@@ -1,0 +1,33 @@
+===== D1 前置：确认 192.168.155.201 未被占用（无响应=可用）=====
+PING 192.168.155.201 (192.168.155.201) 56(84) bytes of data.
+
+--- 192.168.155.201 ping statistics ---
+2 packets transmitted, 0 received, 100% packet loss, time 1042ms
+
+  .201 无响应，可用
+===== D1 配置 =====
+连接 http://127.0.0.1:8443 ...
+
+[ok] interfaces ens224 description demo-l2-port
+[ok] virtual-switches demo-l2 type l2
+%% 语句未产生配置变更（尚未映射到模型或值未变化）: virtual-switches demo-l2 gateway ip 192.168.155.201/24
+exit status 1
+===== D1 通流：管理口 ping BVI =====
+PING 192.168.155.201 (192.168.155.201) 56(84) bytes of data.
+From 192.168.155.129 icmp_seq=1 Destination Host Unreachable
+From 192.168.155.129 icmp_seq=2 Destination Host Unreachable
+From 192.168.155.129 icmp_seq=3 Destination Host Unreachable
+
+--- 192.168.155.201 ping statistics ---
+3 packets transmitted, 0 received, +3 errors, 100% packet loss, time 2062ms
+pipe 2
+===== D1 证据：虚拟交换机 / mac-table / 接口计数 =====
+连接 http://127.0.0.1:8443 ...
+%% 无匹配配置: detail
+exit status 1
+连接 http://127.0.0.1:8443 ...
+%% 无匹配配置: mac-table
+exit status 1
+连接 http://127.0.0.1:8443 ...
+description demo-l2-port;
+name ens224;

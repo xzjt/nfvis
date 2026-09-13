@@ -1,0 +1,23 @@
+===== 会话泄漏验证 =====
+--- A) 先进入配置模式（-c configure，不退出）---
+
+--- B) 随后一条 show version（若被当作配置路径解析=泄漏）---
+%% 无匹配配置: version
+exit status 1
+--- C) 清理会话 ---
+
+
+
+===== CLI 语句可达性（每条独立会话，先清场）=====
+virtual-switches demo type l2                                          => candidate 已丢弃，会话锁已释放
+virtual-switches demo gateway ip 10.10.0.1/24                          => candidate 已丢弃，会话锁已释放
+virtual-switches demo l3-interface ens192 ip address 192.168.155.200/24 => candidate 已丢弃，会话锁已释放
+virtual-switches demo static-routes 0.0.0.0/0 next-hop 192.168.155.2   => candidate 已丢弃，会话锁已释放
+acls demo-acl rule 10 source 192.168.155.129/32 destination any protocol icmp action deny => exit status 1
+nat source-pool demo-pool address-range 192.168.155.220 to 192.168.155.225 => exit status 1
+nat rules 10 match source 10.10.0.0/24 virtual-switch demo action source-pool demo-pool => exit status 1
+port-mirroring demo-span source interface ens224 direction both        => exit status 1
+qos policies demo-limit cir 1000000 cbs 100000                         => exit status 1
+interfaces ens224 ingress-policy demo-limit                            => exit status 1
+protocols lldp enable true                                             => exit status 1
+vpp plugins tap state enable                                           => candidate 已丢弃，会话锁已释放

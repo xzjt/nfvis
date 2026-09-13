@@ -1,0 +1,13 @@
+--- A) 元素不存在时直接配 gateway ip ---
+[ok] virtual-switches d1 gateway ip 10.10.0.1/24
+candidate 已丢弃，会话锁已释放
+--- B) 先 type l2 再配 gateway ip ---
+[ok] virtual-switches d2 type l2
+%% 语句未产生配置变更（尚未映射到模型或值未变化）: virtual-switches d2 gateway ip 10.10.0.1/24
+exit status 1
+--- C) 先 type l2 + ports 再配 gateway ip ---
+% 无效命令: configure（输入 ? 查看可用命令）
+[ok] virtual-switches d3 type l2
+[ok] virtual-switches d3 ports 1 interface ens224
+%% 语句未产生配置变更（尚未映射到模型或值未变化）: virtual-switches d3 gateway ip 10.10.0.1/24
+exit status 1
