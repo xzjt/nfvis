@@ -122,6 +122,17 @@ func (c *Client) do(method, path string, body any, out any) error {
 	return nil
 }
 
+// IdleTimeoutMinutes 读取系统配置的 CLI 空闲超时（FR-SEC-005；0 表示未配置）。
+func (c *Client) IdleTimeoutMinutes() (int, error) {
+	var out struct {
+		IdleTimeoutMinutes int `json:"idle_timeout_minutes"`
+	}
+	if err := c.do(http.MethodGet, "/api/v1/system", nil, &out); err != nil {
+		return 0, err
+	}
+	return out.IdleTimeoutMinutes, nil
+}
+
 // DynamicCandidates 查询指定来源的动态候选（接口名/VNF 名/镜像名等，§5.3）。
 func (c *Client) DynamicCandidates(kind string) ([]string, error) {
 	var resp []string

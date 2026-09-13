@@ -20,6 +20,7 @@ const Version = "1.0.0-dev"
 type Backend interface {
 	Execute(line, source string) (cliclient.Result, error)
 	DynamicCandidates(kind string) ([]string, error)
+	Logout() error
 }
 
 // Session CLI 会话：本地维护模式/层级（渲染提示符与补全上下文），
@@ -44,6 +45,14 @@ func (s *Session) ExecuteLine(line string) (string, string) {
 	}
 	s.Mode, s.Path = res.Mode, res.Path
 	return res.Output, res.Prompt
+}
+
+// Logout 吊销服务端 token（空闲超时自动登出，FR-CLI-006）。
+func (s *Session) Logout() {
+	if err := s.client.Logout(); err != nil {
+		// 已失效/断连时无需提示：本地会话随即结束。
+		_ = err
+	}
 }
 
 // Prompt 渲染当前提示符（oper: nfvis>；config: [edit path] nfvis#）。

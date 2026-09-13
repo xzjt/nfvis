@@ -24,6 +24,8 @@ func (stubClient) DynamicCandidates(kind string) ([]string, error) {
 	return nil, nil
 }
 
+func (stubClient) Logout() error { return nil }
+
 func newTestSession(mode string) *Session {
 	s := New(stubClient{}, "ssh")
 	s.Mode = mode

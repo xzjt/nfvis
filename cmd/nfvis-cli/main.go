@@ -1,13 +1,13 @@
 // nfvis-cli NFViS JunOS 风格 CLI 入口（薄客户端，骨架 §3.1）。
-// 行编辑/补全/提示符/会话逻辑在 internal/cli；本文件只做参数解析与装配。
+// 行编辑/补全/提示符/历史/空闲超时在 internal/cli；本文件只做参数解析与装配。
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/cli"
 	"github.com/xzjt/nfvis/pkg/cliclient"
@@ -40,7 +40,16 @@ func main() {
 		runScript(session, *cmdline)
 		return
 	}
-	repl(session)
+	// 空闲超时取 system idle-timeout-minutes，缺省 10 分钟（FR-SEC-005/FR-CLI-006）。
+	timeout := cli.DefaultIdleTimeout
+	if m, err := client.IdleTimeoutMinutes(); err == nil && m > 0 {
+		timeout = time.Duration(m) * time.Minute
+	}
+	repl := cli.NewREPL(session, cli.NewHistory(), cli.NewIdleGuard(timeout, nil))
+	if err := repl.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "%% %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // runScript 多行脚本模式：任一行失败即停止。
@@ -57,42 +66,6 @@ func runScript(session *cli.Session, cmdline string) {
 		}
 		if strings.Contains(out, "%%") {
 			os.Exit(1)
-		}
-	}
-}
-
-// repl 交互模式：行读取 + 本地 ?/Tab 补全 + 远端执行。
-func repl(session *cli.Session) {
-	fmt.Println("NFViS CLI（M2）——? 列出候选 / Tab 补全 / commit confirmed 演示")
-	in := bufio.NewScanner(os.Stdin)
-	prompt := session.Prompt()
-	for {
-		fmt.Print(prompt)
-		if !in.Scan() {
-			fmt.Println()
-			return
-		}
-		line := strings.TrimRight(in.Text(), "\t")
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if strings.HasSuffix(strings.TrimSpace(line), "?") {
-			for _, c := range session.Candidates(line) {
-				fmt.Printf("  %-24s%s\n", c.Token, c.Desc)
-			}
-			continue
-		}
-		if strings.HasSuffix(line, "\t") {
-			line = session.CompleteLine(line)
-			fmt.Println(line) // 行级 REPL 不做光标定位，重打补全结果
-		}
-		out, next := session.ExecuteLine(strings.TrimSpace(line))
-		prompt = next
-		if out != "" {
-			fmt.Print(out)
-			if !strings.HasSuffix(out, "\n") {
-				fmt.Println()
-			}
 		}
 	}
 }
