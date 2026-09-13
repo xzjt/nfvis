@@ -84,21 +84,17 @@ func (g *govppAclClient) ACLDel(index uint32) error {
 	return nil
 }
 
-func (g *govppAclClient) ACLInterfaceSet(swIfIndex, inAcl, outAcl uint32) error {
+func (g *govppAclClient) ACLInterfaceSet(swIfIndex, inAcl, outAcl uint32, inSet, outSet bool) error {
 	// VPP 约定：acls 向量前 n_input 个为入向，其余为出向。
+	// 索引 0 是合法 ACL，故用 inSet/outSet 而非 !=0 判断是否存在。
 	acls := make([]uint32, 0, 2)
 	nInput := uint8(0)
-	switch {
-	case inAcl != 0 && outAcl != 0:
-		acls = append(acls, inAcl, outAcl)
-		nInput = 1
-	case inAcl != 0:
+	if inSet {
 		acls = append(acls, inAcl)
 		nInput = 1
-	case outAcl != 0:
+	}
+	if outSet {
 		acls = append(acls, outAcl)
-	default:
-		// 两者皆 0：清空绑定
 	}
 	reply := &acl.ACLInterfaceSetACLListReply{}
 	if err := g.ch.SendRequest(&acl.ACLInterfaceSetACLList{

@@ -39,7 +39,7 @@ type ACLClient interface {
 	SwInterfaceIndex(ifname string) (uint32, bool, error)
 	ACLAddReplace(index uint32, tag string, rules []ACLRuleSpec) (uint32, error)
 	ACLDel(index uint32) error
-	ACLInterfaceSet(swIfIndex, inAcl, outAcl uint32) error
+	ACLInterfaceSet(swIfIndex, inAcl, outAcl uint32, inSet, outSet bool) error
 	Close()
 }
 
@@ -79,10 +79,10 @@ func (p *AclProvider) ApplyACL(ctx context.Context, acl model.Acl) error {
 		return fmt.Errorf("ACL %s 规则: %w", acl.Name, err)
 	}
 	p.mu.Lock()
-	idx := p.index[acl.Name]
+	idx, known := p.index[acl.Name]
 	p.mu.Unlock()
-	if idx == 0 {
-		idx = aclIndexNew // VPP：~0 表示新建（0 是合法 ACL 索引，非"新建"）
+	if !known {
+		idx = aclIndexNew // VPP：~0 表示新建（0 是合法 ACL 索引，不能当"未下发"）
 	}
 	newIdx, err := c.ACLAddReplace(idx, acl.Name, rules)
 	if err != nil {
@@ -123,9 +123,9 @@ func (p *AclProvider) DeleteACL(ctx context.Context, name string) error {
 	defer c.Close()
 	for _, swIf := range rebind {
 		pair := p.pairOf(swIf)
-		in := p.indexOf(pair.in)
-		out := p.indexOf(pair.out)
-		if err := c.ACLInterfaceSet(swIf, in, out); err != nil {
+		in, inSet := p.lookup(pair.in)
+		out, outSet := p.lookup(pair.out)
+		if err := c.ACLInterfaceSet(swIf, in, out, inSet && pair.in != "", outSet && pair.out != ""); err != nil {
 			return fmt.Errorf("解绑接口 %d 的 ACL %s: %w", swIf, name, err)
 		}
 	}
@@ -166,15 +166,15 @@ func (p *AclProvider) BindIndex(c ACLClient, swIfIndex uint32, aclIn, aclOut str
 	if aclIn == "" && aclOut == "" {
 		return nil
 	}
-	in := p.indexOf(aclIn)
-	out := p.indexOf(aclOut)
-	if aclIn != "" && in == 0 {
+	in, inSet := p.lookup(aclIn)
+	if aclIn != "" && !inSet {
 		return fmt.Errorf("ACL %s 尚未下发（apply 顺序应为 ACL 先于 L2/L3）", aclIn)
 	}
-	if aclOut != "" && out == 0 {
+	out, outSet := p.lookup(aclOut)
+	if aclOut != "" && !outSet {
 		return fmt.Errorf("ACL %s 尚未下发（apply 顺序应为 ACL 先于 L2/L3）", aclOut)
 	}
-	if err := c.ACLInterfaceSet(swIfIndex, in, out); err != nil {
+	if err := c.ACLInterfaceSet(swIfIndex, in, out, inSet && aclIn != "", outSet && aclOut != ""); err != nil {
 		return fmt.Errorf("绑定接口 %d 的 ACL: %w", swIfIndex, err)
 	}
 	p.mu.Lock()
@@ -183,13 +183,15 @@ func (p *AclProvider) BindIndex(c ACLClient, swIfIndex uint32, aclIn, aclOut str
 	return nil
 }
 
-func (p *AclProvider) indexOf(name string) uint32 {
+// lookup 返回 ACL 名对应的 VPP 索引与是否已下发（索引 0 合法，故需 ok 区分）。
+func (p *AclProvider) lookup(name string) (uint32, bool) {
 	if name == "" {
-		return 0
+		return 0, false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.index[name]
+	idx, ok := p.index[name]
+	return idx, ok
 }
 
 func (p *AclProvider) pairOf(swIf uint32) aclPair {

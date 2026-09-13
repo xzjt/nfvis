@@ -56,9 +56,15 @@ func (f *fakeAcl) ACLDel(index uint32) error {
 	return nil
 }
 
-func (f *fakeAcl) ACLInterfaceSet(swIfIndex, inAcl, outAcl uint32) error {
+func (f *fakeAcl) ACLInterfaceSet(swIfIndex, inAcl, outAcl uint32, inSet, outSet bool) error {
 	if f.err != nil {
 		return f.err
+	}
+	if !inSet {
+		inAcl = 0
+	}
+	if !outSet {
+		outAcl = 0
 	}
 	f.setCalls = append(f.setCalls, [3]uint32{swIfIndex, inAcl, outAcl})
 	return nil
@@ -176,5 +182,25 @@ func TestL2BindsPortACL(t *testing.T) {
 	}
 	if len(aclf.setCalls) != 1 || aclf.setCalls[0] != [3]uint32{1, 100, 0} {
 		t.Fatalf("端口 ACL 绑定不符: %v", aclf.setCalls)
+	}
+}
+
+// ACL 索引 0 合法：绑定不能被当成"未设置"。
+func TestAclIndexZero(t *testing.T) {
+	f := newFakeAcl()
+	f.nextIdx = ^uint32(0) // 首次创建返回索引 0
+	p := NewAclProvider(f)
+	if err := p.ApplyACL(context.Background(), model.Acl{Name: "acl0",
+		Rules: []model.AclRule{{Seq: 1, Action: "permit", Source: "any", Destination: "any"}}}); err != nil {
+		t.Fatalf("ApplyACL: %v", err)
+	}
+	if idx, ok := p.lookup("acl0"); !ok || idx != 0 {
+		t.Fatalf("索引 0 应登记为已下发: %d %v", idx, ok)
+	}
+	if err := p.Bind(context.Background(), "ens192", "acl0", ""); err != nil {
+		t.Fatalf("绑定索引 0 的 ACL 不应报未下发: %v", err)
+	}
+	if len(f.setCalls) != 1 || f.setCalls[0] != [3]uint32{1, 0, 0} {
+		t.Fatalf("应绑入向 ACL 索引 0: %v", f.setCalls)
 	}
 }
