@@ -86,9 +86,14 @@ func (r *vppRuntime) Buffers(ctx context.Context) (state.Buffers, bool) {
 	}
 	out := state.Buffers{}
 	for name, p := range bs.Buffer {
+		// VPP 26.06 的 buffer 统计路径与 govpp 期望的 /buffer-pools/<pool>/{used,available}
+		// 不完全一致时可能只解析出池名、计数为 0；全零视为未解析，宁缺勿错。
+		if p.Used == 0 && p.Available == 0 && p.Cached == 0 {
+			continue
+		}
 		out.Pools = append(out.Pools, state.BufferPool{Name: name, Used: p.Used, Available: p.Available, Cached: p.Cached})
 	}
-	return out, true
+	return out, len(out.Pools) > 0
 }
 
 func (r *vppRuntime) Memory(ctx context.Context) (state.Memory, bool) {
