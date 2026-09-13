@@ -52,8 +52,13 @@ func main() {
 	}
 }
 
-// runScript 多行脚本模式：任一行失败即停止。
+// runScript 多行脚本模式：任一行失败即停止；结束时清理会话。
+//
+// 收尾必须清理（会话按 user@source 在服务端保留）：否则脚本会残留配置模式、
+// 脏 candidate 与 candidate 会话锁，导致后续调用被按上一模式解释、
+// 再次以 exit 收尾时报「存在未提交变更」并失败（见 docs/reviews/2026-09-13.md）。
 func runScript(session *cli.Session, cmdline string) {
+	failed := false
 	for _, line := range strings.Split(cmdline, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -65,7 +70,26 @@ func runScript(session *cli.Session, cmdline string) {
 			fmt.Println()
 		}
 		if strings.Contains(out, "%%") {
-			os.Exit(1)
+			failed = true
+			break
 		}
 	}
+	teardownScript(session)
+	if failed {
+		os.Exit(1)
+	}
+}
+
+// teardownScript 退出配置模式（有 candidate 先丢弃）、释放会话并吊销 token。
+func teardownScript(session *cli.Session) {
+	if session.Mode == "config" {
+		// discard 释放 candidate 与会话锁（无变更时也安全）
+		if out, _ := session.ExecuteLine("discard"); strings.Contains(out, "%%") {
+			fmt.Print(out)
+		}
+		if out, _ := session.ExecuteLine("exit"); strings.Contains(out, "%%") {
+			fmt.Print(out)
+		}
+	}
+	session.Logout()
 }

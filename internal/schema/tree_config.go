@@ -217,6 +217,7 @@ func ConfigPathTree() *Node {
 						K("ip", "IP 配置",
 							K("address", "地址（IPv4/IPv6 可多条）", V("ip-prefix", "如 10.10.0.1/24")),
 						),
+						K("acl-in", "入向 ACL 绑定（§2.5）", P("<acl>", "ACL 名", DynAcls)),
 					),
 				),
 				K("static-routes", "静态路由（仅 L3，IPv4/IPv6）",

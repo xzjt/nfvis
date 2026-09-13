@@ -177,6 +177,25 @@ func (g *govppL3Client) Routes(tableID uint32) ([]RouteEntry, error) {
 	return out, nil
 }
 
+// SetState 置接口管理员状态（BVI 与数据口一致：默认 down，必须显式 up）。
+func (g *govppL3Client) SetState(swIfIndex uint32, up bool) error {
+	var flags interface_types.IfStatusFlags // 0 = down；仅 ADMIN_UP 位表示 up
+	if up {
+		flags = interface_types.IF_STATUS_API_FLAG_ADMIN_UP
+	}
+	reply := &ifapi.SwInterfaceSetFlagsReply{}
+	if err := g.ch.SendRequest(&ifapi.SwInterfaceSetFlags{
+		SwIfIndex: interface_types.InterfaceIndex(swIfIndex),
+		Flags:     flags,
+	}).ReceiveReply(reply); err != nil {
+		return err
+	}
+	if reply.Retval != 0 {
+		return fmt.Errorf("sw_interface_set_flags(if=%d,up=%v) retval=%d", swIfIndex, up, reply.Retval)
+	}
+	return nil
+}
+
 func (g *govppL3Client) BviCreate() (uint32, error) {
 	reply := &l2.BviCreateReply{}
 	if err := g.ch.SendRequest(&l2.BviCreate{UserInstance: ^uint32(0)}).ReceiveReply(reply); err != nil {

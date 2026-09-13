@@ -1,0 +1,30 @@
+===== 干净 VPP 上应用完整配置 =====
+[ok] interfaces ens224 description demo-l2-port
+[ok] interfaces ens192 description demo-l3-port
+[ok] virtual-switches demo-l2 type l2
+[ok] virtual-switches demo-l2 ports 1 interface ens224
+[ok] virtual-switches demo-l2 gateway ip 10.10.0.1/24
+[ok] virtual-switches demo-l2 gateway vrf demo-l3
+[ok] virtual-switches demo-l3 type l3
+[ok] virtual-switches demo-l3 l3-interface ens192 ip address 192.168.155.200/24
+[ok] virtual-switches demo-l3 static-routes 0.0.0.0/0 next-hop 192.168.155.2
+commit 成功 (revision 3)
+
+===== BVI 状态（期望 up，且与 ens192 同 table）=====
+              Name               Idx    State  MTU (L3/IP4/IP6/MPLS)     Counter          Count     
+bvi0                              3      up          9000/0/0/0     
+bvi0 (up):
+  L2 bridge bd-id 10365503 idx 1 shg 0 bvi
+  L3 10.10.0.1/24 ip4 table-id 10365100 fib-idx 1
+ens192 (up):
+  L3 192.168.155.200/24 ip4 table-id 10365100 fib-idx 1
+ens224 (up):
+
+===== 通流：ping BVI（跨网段，经 VPP L3→BVI）=====
+--- 10.10.0.1 ping statistics ---
+3 packets transmitted, 2 received, 33.3333% packet loss, time 2056ms
+rtt min/avg/max/mdev = 0.270/0.280/0.290/0.010 ms
+===== 通流：vppctl ping 外网（经 VRF 默认路由）=====
+116 bytes from 192.168.155.2: icmp_seq=3 ttl=128 time=1.2591 ms
+
+Statistics: 3 sent, 2 received, 33% packet loss

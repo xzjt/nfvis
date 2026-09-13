@@ -1,0 +1,31 @@
+===== 单次会话完成 D1/D2 配置（无网段重叠）=====
+[ok] interfaces ens224 description demo-l2-port
+[ok] interfaces ens192 description demo-l3-port
+[ok] virtual-switches demo-l2 type l2
+[ok] virtual-switches demo-l2 ports 1 interface ens224
+[ok] virtual-switches demo-l2 gateway ip 10.10.0.1/24
+[ok] virtual-switches demo-l3 type l3
+[ok] virtual-switches demo-l3 l3-interface ens192 ip address 192.168.155.200/24
+[ok] virtual-switches demo-l3 static-routes 0.0.0.0/0 next-hop 192.168.155.2
+commit 成功 (revision 3)
+
+===== 通流验证 =====
+--- ping BVI 10.10.0.1（跨网段，经 VPP L3→BVI）---
+--- 10.10.0.1 ping statistics ---
+3 packets transmitted, 0 received, 100% packet loss, time 2045ms
+
+--- ping 外网网关（源 192.168.155.200，经 VPP VRF）---
+ping: bind: Cannot assign requested address
+
+===== VPP 侧证据 =====
+  BD-ID   Index   BSN  Age(min)  Learning  U-Forwrd   UU-Flood   Flooding  ARP-Term  arp-ufwd Learn-co Learn-li   BVI-Intf 
+10365503    1      7     off        on        on       flood        on       off       off        3    16777216     bvi0   
+L2FIB total/learned entries: 4/3  Last scan time: 0.0000e0sec  Learn limit: 16777216 
+bvi0 (dn):
+  L2 bridge bd-id 10365503 idx 1 shg 0 bvi
+  L3 10.10.0.1/24 ip4 table-id 7131944 fib-idx 3
+ens192 (up):
+  L3 192.168.155.200/24 ip4 table-id 10365100 fib-idx 4
+ens224 (up):
+  L2 bridge bd-id 10365503 idx 1 shg 0  
+local0 (dn):

@@ -1,0 +1,24 @@
+===== 绕过 -114：先摘地址，改 VRF，再置地址 =====
+已删除 virtual-switches demo-l2 gateway ip（未提交）
+%% 底座下发失败（已补偿）: 下发失败 bridge-domain[demo-l2]: BVI 置入 VRF vr-demo-l2: VPPApiError: Address found for interface (-114)
+exit status 1
+[ok] virtual-switches demo-l2 gateway vrf demo-l3
+%% 语句未产生配置变更（尚未映射到模型或值未变化）: virtual-switches demo-l2 gateway ip 10.10.0.1/24
+exit status 1
+
+===== VPP 侧（BVI 与 ens192 应同 table）=====
+bvi0 (dn):
+  L2 bridge bd-id 10365503 idx 1 shg 0 bvi
+  L3 10.10.0.1/24 ip4 table-id 7131944 fib-idx 3
+ens192 (up):
+  L3 192.168.155.200/24 ip4 table-id 10365100 fib-idx 4
+ens224 (up):
+
+===== 通流：ping BVI + VPP 自身 ping 外网 =====
+--- 10.10.0.1 ping statistics ---
+3 packets transmitted, 0 received, 100% packet loss, time 2061ms
+
+116 bytes from 192.168.155.2: icmp_seq=2 ttl=128 time=3.4374 ms
+116 bytes from 192.168.155.2: icmp_seq=3 ttl=128 time=6.8030 ms
+
+Statistics: 3 sent, 2 received, 33% packet loss

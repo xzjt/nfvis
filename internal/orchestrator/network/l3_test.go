@@ -21,6 +21,8 @@ type fakeL3 struct {
 	routes  map[uint32][]RouteEntry
 	bviBD   map[uint32]uint32
 	bviGone []uint32
+	state   map[uint32]bool // 接口管理员状态（SetState 记录）
+	cleared []uint32        // 被清地址的接口（删除全部地址）
 	err     error
 }
 
@@ -29,10 +31,19 @@ func newFakeL3() *fakeL3 {
 		ifaces: map[string]uint32{"ens192": 1, "ens224": 2}, nextSub: 100, nextBVI: 900,
 		tables: map[uint32]bool{}, v4table: map[uint32]uint32{},
 		addrs: map[uint32][]string{}, routes: map[uint32][]RouteEntry{}, bviBD: map[uint32]uint32{},
+		state: map[uint32]bool{}, cleared: nil,
 	}
 }
 
 func (f *fakeL3) Close() {}
+
+func (f *fakeL3) SetState(swIfIndex uint32, up bool) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.state[swIfIndex] = up
+	return nil
+}
 
 func (f *fakeL3) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	if f.err != nil {
@@ -79,6 +90,7 @@ func (f *fakeL3) SwInterfaceAddDelAddress(swIfIndex uint32, prefix string, add, 
 	}
 	if delAll {
 		delete(f.addrs, swIfIndex)
+		f.cleared = append(f.cleared, swIfIndex)
 		return nil
 	}
 	if add {
@@ -198,6 +210,18 @@ func TestL3Gateway(t *testing.T) {
 		}
 		if len(f.addrs[bvi]) != 1 {
 			t.Fatalf("BVI 应配地址: %v", f.addrs[bvi])
+		}
+		if !f.state[bvi] {
+			t.Fatal("BVI 必须显式置为 up（VPP 默认 down，否则网关不可达）")
+		}
+		clearedBefore := false
+		for _, idx := range f.cleared {
+			if idx == bvi {
+				clearedBefore = true
+			}
+		}
+		if !clearedBefore {
+			t.Fatal("置 VRF 前必须清理 BVI 旧地址（否则 VPP 报 -114）")
 		}
 		if f.v4table[bvi] != TableID(GatewayVRFName("vs-app")) {
 			t.Fatalf("BVI 应置入专属 VRF: %v", f.v4table)
