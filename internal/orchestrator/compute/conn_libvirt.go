@@ -7,6 +7,8 @@ import (
 	"sync"
 
 	"github.com/digitalocean/go-libvirt"
+
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 // DefaultURI libvirt 系统域连接 URI（FR-CMP-010：qemu:///system）。
@@ -23,6 +25,9 @@ type Conn struct {
 	l   *libvirt.Libvirt
 	uri string
 }
+
+// 编译期断言：Conn 满足 Provider 的 libvirt 能力接口。
+var _ libvirtAPI = (*Conn)(nil)
 
 // Connect 连接 libvirt。uri 为空时用 DefaultURI。
 func Connect(ctx context.Context, uri string) (*Conn, error) {
@@ -41,6 +46,19 @@ func Connect(ctx context.Context, uri string) (*Conn, error) {
 		return nil, fmt.Errorf("连接 libvirt %s 失败: %w", uri, err)
 	}
 	return &Conn{l: l, uri: uri}, nil
+}
+
+// NewConnectedProvider 连接 libvirt 并装配生产 Provider（真实存储/seed 实现）。
+// 调用方负责在退出时 Close 返回的 *Conn。
+func NewConnectedProvider(ctx context.Context, cfg Config) (*Provider, *Conn, error) {
+	if cfg.URI == "" {
+		cfg.URI = DefaultURI
+	}
+	conn, err := Connect(ctx, cfg.URI)
+	if err != nil {
+		return nil, nil, err
+	}
+	return NewProvider(cfg, conn, newQemuStorage(), newCloudLocaldsSeed()), conn, nil
 }
 
 // URI 返回连接使用的 URI。
@@ -86,21 +104,20 @@ func (c *Conn) HypervisorVersion() (string, error) {
 	return FormatLibVersion(v), nil
 }
 
-// Define 定义（或按名重定义）domain，返回定义后的 domain。
-func (c *Conn) Define(ctx context.Context, xml string) (libvirt.Domain, error) {
+// Define 定义（或按名重定义）domain。
+func (c *Conn) Define(ctx context.Context, xml string) error {
 	if err := ctx.Err(); err != nil {
-		return libvirt.Domain{}, err
+		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	dom, err := c.l.DomainDefineXML(xml)
-	if err != nil {
-		return libvirt.Domain{}, fmt.Errorf("定义 domain 失败: %w", err)
+	if _, err := c.l.DomainDefineXML(xml); err != nil {
+		return fmt.Errorf("定义 domain 失败: %w", err)
 	}
-	return dom, nil
+	return nil
 }
 
-// Undefine 按名删除 domain 定义。
+// Undefine 删除 domain 定义（连带快照元数据，避免「has snapshots」错误，FR-CMP-013）。
 func (c *Conn) Undefine(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -111,10 +128,53 @@ func (c *Conn) Undefine(ctx context.Context, name string) error {
 	if err != nil {
 		return fmt.Errorf("查找 domain %s 失败: %w", name, err)
 	}
-	if err := c.l.DomainUndefine(dom); err != nil {
+	if err := c.l.DomainUndefineFlags(dom, libvirt.DomainUndefineSnapshotsMetadata); err != nil {
 		return fmt.Errorf("删除 domain %s 失败: %w", name, err)
 	}
 	return nil
+}
+
+// State 返回 libvirt 原始状态；exists=false 表示域未定义（不作为错误）。
+func (c *Conn) State(ctx context.Context, name string) (int, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dom, err := c.l.DomainLookupByName(name)
+	if err != nil {
+		if libvirt.IsNotFound(err) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("查找 domain %s 失败: %w", name, err)
+	}
+	state, _, err := c.l.DomainGetState(dom, 0)
+	if err != nil {
+		return 0, false, fmt.Errorf("读取 domain %s 状态失败: %w", name, err)
+	}
+	return int(state), true, nil
+}
+
+// Start 启动域。
+func (c *Conn) Start(ctx context.Context, name string) error {
+	return c.withDomain(ctx, name, func(dom libvirt.Domain) error { return c.l.DomainCreate(dom) })
+}
+
+// Shutdown ACPI 优雅关机。
+func (c *Conn) Shutdown(ctx context.Context, name string) error {
+	return c.withDomain(ctx, name, func(dom libvirt.Domain) error { return c.l.DomainShutdown(dom) })
+}
+
+// Destroy 立即断电（超时强杀）。
+func (c *Conn) Destroy(ctx context.Context, name string) error {
+	return c.withDomain(ctx, name, func(dom libvirt.Domain) error { return c.l.DomainDestroy(dom) })
+}
+
+// Reboot ACPI 重启。
+func (c *Conn) Reboot(ctx context.Context, name string) error {
+	return c.withDomain(ctx, name, func(dom libvirt.Domain) error {
+		return c.l.DomainReboot(dom, libvirt.DomainRebootDefault)
+	})
 }
 
 // DumpXML 返回 libvirt 规范化后的 domain XML（与配置比对用，M4-1 验收）。
@@ -133,4 +193,23 @@ func (c *Conn) DumpXML(ctx context.Context, name string) (string, error) {
 		return "", fmt.Errorf("读取 domain %s XML 失败: %w", name, err)
 	}
 	return xml, nil
+}
+
+func (c *Conn) withDomain(ctx context.Context, name string, fn func(libvirt.Domain) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dom, err := c.l.DomainLookupByName(name)
+	if err != nil {
+		if libvirt.IsNotFound(err) {
+			return fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+		}
+		return fmt.Errorf("查找 domain %s 失败: %w", name, err)
+	}
+	if err := fn(dom); err != nil {
+		return fmt.Errorf("操作 domain %s 失败: %w", name, err)
+	}
+	return nil
 }

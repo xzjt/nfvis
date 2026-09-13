@@ -23,6 +23,7 @@ import (
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
+	"github.com/xzjt/nfvis/internal/orchestrator/compute"
 	"github.com/xzjt/nfvis/internal/orchestrator/network"
 	"github.com/xzjt/nfvis/internal/state"
 )
@@ -75,7 +76,27 @@ func run() error {
 	// M3-8：恢复收敛的不可收敛项落点（GET /alarms）
 	alarms := network.NewAlarmStore()
 	netProvider.SetAlarms(alarms)
-	applier := orchestrator.NewApplier(netProvider, orchestrator.NewNoopCompute(), orchestrator.NewNoopContainer())
+	// M4-3：计算编排（libvirt）。连接失败（libvirtd 未起/无权限）降级为 NoopCompute
+	// 并告警，不阻塞 nfvisd 启动；此时 VM 生命周期动作返回不可用。
+	var (
+		computeProvider orchestrator.ComputeProvider = orchestrator.NewNoopCompute()
+		vmRuntime       api.VMRuntime
+		libvirtConn     *compute.Conn
+	)
+	computeCfg := compute.DefaultConfig()
+	computeCfg.URI = envOr("NFVIS_LIBVIRT_URI", compute.DefaultURI)
+	libvirtCtx, libvirtCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	p, conn, cerr := compute.NewConnectedProvider(libvirtCtx, computeCfg)
+	libvirtCancel()
+	if cerr != nil {
+		log.Warn("计算编排未接入（libvirt 连接失败），VM 生命周期不可用", "uri", computeCfg.URI, "err", cerr)
+	} else {
+		computeProvider, libvirtConn, vmRuntime = p, conn, p
+		defer func() { _ = libvirtConn.Close() }()
+		log.Info("计算编排已接入", "uri", computeCfg.URI)
+	}
+
+	applier := orchestrator.NewApplier(netProvider, computeProvider, orchestrator.NewNoopContainer())
 
 	engine, err := config.NewEngine(store, applier, config.Options{})
 	if err != nil {
@@ -142,6 +163,7 @@ func run() error {
 		NAT:     &natSessionsController{net: netProvider},
 		Alarms:  &alarmController{store: alarms},
 		Diag:    &diagController{diag: vppMgr.Diagnostics()},
+		VM:      vmRuntime,
 	})
 
 	srvErr := make(chan error, 1)

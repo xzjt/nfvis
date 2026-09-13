@@ -61,29 +61,27 @@ func contractRoutes(t *testing.T) map[string]bool {
 	return out
 }
 
-// normalizePath 规整实现路由到契约形态：{tail...} → 任意段（含冒号后缀）。
-func (r apiRoute) contractKeys() []string {
-	p := r.Path
-	if strings.Contains(p, "{tail...}") {
-		// {tail...} 捕获含冒号后缀的尾段：对应契约中的 {name}:action 形态
-		base := strings.TrimSuffix(p, "{tail...}")
-		return []string{r.Method + " " + base + "{name}:change-password"}
+// matches 判断实现路由是否在契约中声明。
+// {tail...} 捕获含冒号后缀的动作族：要求契约中同前缀下存在至少一个 `:action` 端点。
+func (r apiRoute) matches(contract map[string]bool) bool {
+	if strings.Contains(r.Path, "{tail...}") {
+		base := strings.TrimSuffix(r.Path, "{tail...}")
+		prefix := r.Method + " " + base
+		for k := range contract {
+			if strings.HasPrefix(k, prefix) && strings.Contains(strings.TrimPrefix(k, prefix), ":") {
+				return true
+			}
+		}
+		return false
 	}
-	return []string{r.Method + " " + p}
+	return contract[r.Method+" "+r.Path]
 }
 
 func TestRoutesRegisteredInContract(t *testing.T) {
 	contract := contractRoutes(t)
 	missing := []string{}
 	for _, r := range registeredRoutes(t) {
-		found := false
-		for _, key := range r.contractKeys() {
-			if contract[key] {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !r.matches(contract) {
 			missing = append(missing, r.Method+" "+r.Path)
 		}
 	}

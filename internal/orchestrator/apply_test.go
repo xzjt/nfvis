@@ -71,7 +71,7 @@ type recCompute struct {
 	failOn string
 }
 
-func (c recCompute) DefineVM(ctx context.Context, vm model.VMFunction) error {
+func (c recCompute) DefineVM(ctx context.Context, vm model.VMFunction, alloc model.AllocatedResources) error {
 	*c.calls = append(*c.calls, "vm:"+vm.Name)
 	if c.failOn == "vm:"+vm.Name {
 		return fmt.Errorf("模拟失败: DefineVM %s", vm.Name)
@@ -82,7 +82,11 @@ func (c recCompute) DeleteVM(ctx context.Context, name string) error {
 	*c.calls = append(*c.calls, "del-vm:"+name)
 	return nil
 }
-func (c recCompute) EnsureConsistent(ctx context.Context, cfg model.Config) []error { return nil }
+func (c recCompute) StartVM(context.Context, string) error                  { return nil }
+func (c recCompute) StopVM(context.Context, string) error                   { return nil }
+func (c recCompute) RestartVM(context.Context, string) error                { return nil }
+func (c recCompute) VMState(context.Context, string) (string, error)        { return VMStateAbsent, nil }
+func (c recCompute) EnsureConsistent(context.Context, model.Config) []error { return nil }
 
 type recContainer struct {
 	calls *[]string

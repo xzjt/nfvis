@@ -85,7 +85,7 @@ func TestDefineDomainXMLRealLibvirt(t *testing.T) {
 
 	// 遗留清理（上次失败可能留下定义）。
 	_ = c.Undefine(ctx, name)
-	if _, err := c.Define(ctx, xml); err != nil {
+	if err := c.Define(ctx, xml); err != nil {
 		t.Fatalf("定义 domain 失败: %v\n--- XML ---\n%s", err, xml)
 	}
 	t.Cleanup(func() { _ = c.Undefine(context.Background(), name) })

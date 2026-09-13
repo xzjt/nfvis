@@ -78,6 +78,30 @@ func CheckResources(cfg Config) []ValidateError {
 	return NewPoolLedger(cfg).Allocate(cfg)
 }
 
+// AllocatedResources 单台 VM 的资源分配结果（账本产出，供编排层组装 domain）。
+type AllocatedResources struct {
+	Cores        []int  // 绑核 cpuset（升序）；空 = 不绑核
+	HugepageSize string // 已解析的大页页大小（backing=hugepage 时非空）
+}
+
+// AllocationFor 从配置确定性重算某台 VM 的资源分配（FR-CMP-002）：
+// 先扣 VPP 保留核后取绑核；大页页大小缺省取资源池首个页池。
+// 配置非法（配额不足）时返回空分配，由 commit 阶段校验拦截。
+func AllocationFor(cfg Config, vm VMFunction) AllocatedResources {
+	l := NewPoolLedger(cfg)
+	if errs := l.Allocate(cfg); len(errs) > 0 {
+		return AllocatedResources{}
+	}
+	out := AllocatedResources{Cores: l.CPU.VMCores[vm.Name]}
+	if !usesNormalMemory(vm) {
+		out.HugepageSize = vm.Memory.HugepageSize
+		if out.HugepageSize == "" && cfg.ResourcePools != nil && len(cfg.ResourcePools.Hugepages) > 0 {
+			out.HugepageSize = cfg.ResourcePools.Hugepages[0].PageSize
+		}
+	}
+	return out
+}
+
 // Allocate 分配演练：按 VM 名升序为每台 VM 分配大页与绑核（pin 默认 true）。
 // 缺口以 ValidateError 逐条返回（含需要/空闲/NUMA 明细，FR-CMP-002）；
 // 通过时账本停留在分配完成状态，供 show/API 展示。
