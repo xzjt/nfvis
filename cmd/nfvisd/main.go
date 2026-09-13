@@ -24,6 +24,7 @@ import (
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
 	"github.com/xzjt/nfvis/internal/orchestrator/compute"
+	"github.com/xzjt/nfvis/internal/orchestrator/container"
 	"github.com/xzjt/nfvis/internal/orchestrator/network"
 	"github.com/xzjt/nfvis/internal/state"
 )
@@ -75,6 +76,8 @@ func run() error {
 	netProvider.SetLldp(network.NewLldpProviderFunc(vppMgr.LldpClientFunc()))
 	// M4-4：VNF vNIC（vhost-user）接入
 	netProvider.SetVhostUser(network.NewVhostUserProviderFunc(vppMgr.VhostUserClientFunc()))
+	// M4-7：容器 memif 接入
+	netProvider.SetMemif(network.NewMemifProviderFunc(vppMgr.MemifClientFunc()))
 	// M3-8：恢复收敛的不可收敛项落点（GET /alarms）
 	alarms := network.NewAlarmStore()
 	netProvider.SetAlarms(alarms)
@@ -103,8 +106,24 @@ func run() error {
 		log.Info("计算编排已接入", "uri", computeCfg.URI)
 	}
 
-	applier := orchestrator.NewApplier(netProvider, computeProvider, orchestrator.NewNoopContainer(),
-		orchestrator.WithVhostDir(computeCfg.VhostDir))
+	// M4-7：容器编排（Docker）。连接不可用（daemon 未起/权限不足）降级为 NoopContainer。
+	ctCfg := container.DefaultConfig()
+	ctCfg.Socket = envOr("NFVIS_DOCKER_HOST", ctCfg.Socket)
+	var containerProvider orchestrator.ContainerProvider = orchestrator.NewNoopContainer()
+	var ctRuntime api.ContainerRuntime
+	ctProvider := container.NewConnectedProvider(ctCfg)
+	if st, err := ctProvider.ContainerState(context.Background(), "__nfvis_probe__"); err == nil || st != "" {
+		containerProvider, ctRuntime = ctProvider, ctProvider
+		log.Info("容器编排已接入", "socket", ctCfg.Socket)
+	} else {
+		log.Warn("容器编排未接入（Docker 连接失败），容器生命周期不可用", "socket", ctCfg.Socket, "err", err)
+	}
+	if err := os.MkdirAll(ctCfg.MemifDir, 0o755); err != nil {
+		log.Warn("创建 memif socket 目录失败", "dir", ctCfg.MemifDir, "err", err)
+	}
+
+	applier := orchestrator.NewApplier(netProvider, computeProvider, containerProvider,
+		orchestrator.WithVhostDir(computeCfg.VhostDir), orchestrator.WithMemifDir(ctCfg.MemifDir))
 
 	engine, err := config.NewEngine(store, applier, config.Options{})
 	if err != nil {
@@ -190,6 +209,7 @@ func run() error {
 		VM:          vmAPI,
 		VMConsole:   vmConsole,
 		VMSnapshots: vmSnaps,
+		Containers:  ctRuntime,
 	})
 
 	srvErr := make(chan error, 1)

@@ -55,6 +55,14 @@ const (
 	VMStateAbsent  = "absent"
 )
 
+// 容器运行态（契约 ContainerFunction.state；absent = 不存在）。
+const (
+	CTStateRunning = "running"
+	CTStateExited  = "exited"
+	CTStateDead    = "dead"
+	CTStateAbsent  = "absent"
+)
+
 // ComputeProvider libvirt/KVM 侧编排接口。
 //
 // DefineVM 为声明式且幂等：按 (vm, alloc) 组装 domain XML 并 DomainDefineXML
@@ -76,9 +84,20 @@ type ComputeProvider interface {
 }
 
 // ContainerProvider Docker 侧编排接口（memif socket 挂载，FR-NET-022）。
+//
+// ApplyContainer 声明式且幂等：按 committed 配置创建/重建容器（镜像、CPU/内存限制、
+// env/command/args、重启策略、memif socket 挂载）；DeleteContainer 级联删除容器与
+// 其 VPP 侧 memif 接口由网络 Provider 负责。生命周期动作供 request 族命令直调。
 type ContainerProvider interface {
 	ApplyContainer(ctx context.Context, ct model.ContainerFunction) error
 	DeleteContainer(ctx context.Context, name string) error
+	StartContainer(ctx context.Context, name string) error
+	StopContainer(ctx context.Context, name string) error
+	RestartContainer(ctx context.Context, name string) error
+	// ContainerState 返回契约枚举 running/exited/dead（不存在返回 absent）。
+	ContainerState(ctx context.Context, name string) (string, error)
+	// ContainerLogs 返回最近 tail 行 stdout/stderr。
+	ContainerLogs(ctx context.Context, name string, tail int) (string, error)
 	EnsureConsistent(ctx context.Context, cfg model.Config) []error
 }
 
@@ -131,4 +150,11 @@ type noopContainer struct{}
 
 func (noopContainer) ApplyContainer(context.Context, model.ContainerFunction) error { return nil }
 func (noopContainer) DeleteContainer(context.Context, string) error                 { return nil }
-func (noopContainer) EnsureConsistent(context.Context, model.Config) []error        { return nil }
+func (noopContainer) StartContainer(context.Context, string) error                  { return nil }
+func (noopContainer) StopContainer(context.Context, string) error                   { return nil }
+func (noopContainer) RestartContainer(context.Context, string) error                { return nil }
+func (noopContainer) ContainerState(context.Context, string) (string, error) {
+	return CTStateAbsent, nil
+}
+func (noopContainer) ContainerLogs(context.Context, string, int) (string, error) { return "", nil }
+func (noopContainer) EnsureConsistent(context.Context, model.Config) []error     { return nil }

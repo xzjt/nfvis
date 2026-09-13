@@ -20,6 +20,15 @@ type Applier interface {
 type ApplierOption func(*orchApplier)
 
 // WithVhostDir 设置 VNF vhost-user socket 目录（须与 compute.Config.VhostDir 一致）。
+// WithMemifDir 设置容器 memif socket 目录（须与容器编排一致）。
+func WithMemifDir(dir string) ApplierOption {
+	return func(a *orchApplier) {
+		if dir != "" {
+			a.memifDir = dir
+		}
+	}
+}
+
 func WithVhostDir(dir string) ApplierOption {
 	return func(a *orchApplier) {
 		if dir != "" {
@@ -31,7 +40,7 @@ func WithVhostDir(dir string) ApplierOption {
 // NewApplier 组合三类 Provider 构造编排器。资源池（内核 cpuset/大页）由 M3
 // 内核编排接入后追加为第一阶段；M1 仅编排 网络→计算→容器。
 func NewApplier(net NetworkProvider, comp ComputeProvider, cont ContainerProvider, opts ...ApplierOption) Applier {
-	a := &orchApplier{net: net, comp: comp, cont: cont, vhostDir: DefaultVhostDir}
+	a := &orchApplier{net: net, comp: comp, cont: cont, vhostDir: DefaultVhostDir, memifDir: DefaultMemifDir}
 	for _, o := range opts {
 		o(a)
 	}
@@ -45,6 +54,8 @@ type orchApplier struct {
 
 	// vhostDir VNF vhost-user socket 目录（compute 与 network 必须一致，缺省 /run/nfvis/vhost）。
 	vhostDir string
+	// memifDir 容器 memif socket 目录（缺省 /run/nfvis/memif，FR-NET-022）。
+	memifDir string
 }
 
 // SetVhostDir 设置 vhost-user socket 目录（须与 compute.Config.VhostDir 一致）。
@@ -120,7 +131,7 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 				if inOld {
 					return a.net.ApplyVnfInterface(ctx, a.toVnfPort(old, oldP))
 				}
-				return a.net.DeleteVnfInterface(ctx, p.vm, p.nic.Name)
+				return a.net.DeleteVnfInterface(ctx, p.owner, p.nic.Name)
 			},
 		})
 	}
@@ -305,7 +316,7 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 		oldPort := a.toVnfPort(old, p)
 		ops = append(ops, op{
 			desc: fmt.Sprintf("del-vnf-if[%s]", p.key()),
-			run:  func(ctx context.Context) error { return a.net.DeleteVnfInterface(ctx, p.vm, p.nic.Name) },
+			run:  func(ctx context.Context) error { return a.net.DeleteVnfInterface(ctx, p.owner, p.nic.Name) },
 			undo: func(ctx context.Context) error { return a.net.ApplyVnfInterface(ctx, oldPort) },
 		})
 	}
@@ -365,16 +376,17 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	return ops
 }
 
-// vnfPortRef 一台 VM 的一个 vhost-user vNIC 引用（确定性排序用）。
+// vnfPortRef 一个 VNF/容器的 vNIC 接入引用（确定性排序用）。
 type vnfPortRef struct {
-	vm  string
-	nic model.VnfInterface
+	owner     string // VM 名或容器名
+	container bool   // true = 容器 memif vNIC
+	nic       model.VnfInterface
 }
 
-func (p vnfPortRef) key() string { return p.vm + "/" + p.nic.Name }
+func (p vnfPortRef) key() string { return p.owner + "/" + p.nic.Name }
 
-// collectVnfPorts 收集配置中的 vhost-user vNIC（按 VM 名、vNIC 名升序，保证操作序列确定）。
-// sriov-vf 不经 VPP、memif 由容器编排（M4-7）处理，不在此列。
+// collectVnfPorts 收集需 VPP 侧接入的 vNIC：VM 的 vhost-user 与容器的 memif
+// （按属主名、vNIC 名确定性排序）。sriov-vf 不经 VPP，不在此列。
 func collectVnfPorts(cfg model.Config) map[string]vnfPortRef {
 	out := map[string]vnfPortRef{}
 	for _, vm := range cfg.VirtualMachineFunctions {
@@ -382,27 +394,40 @@ func collectVnfPorts(cfg model.Config) map[string]vnfPortRef {
 			if nic.Type != "vhost-user" {
 				continue
 			}
-			ref := vnfPortRef{vm: vm.Name, nic: nic}
+			ref := vnfPortRef{owner: vm.Name, nic: nic}
+			out[ref.key()] = ref
+		}
+	}
+	for _, ct := range cfg.ContainerFunctions {
+		for _, nic := range ct.Interfaces {
+			if nic.Type != "memif" {
+				continue
+			}
+			ref := vnfPortRef{owner: ct.Name, container: true, nic: nic}
 			out[ref.key()] = ref
 		}
 	}
 	return out
 }
 
-// toVnfPort 组装下发用的 VnfPort（socket 路径与 compute 侧同源派生）。
+// toVnfPort 组装下发用的 VnfPort（socket 路径与 compute/container 侧同源派生）。
 func (a *orchApplier) toVnfPort(cfg model.Config, ref vnfPortRef) VnfPort {
 	vrf := ""
 	if isL3Switch(cfg, ref.nic.VirtualSwitch) {
 		vrf = ref.nic.VirtualSwitch // L3 交换机与同名 VRF 对应（附录 B）
 	}
+	sock := VnfSocketPath(a.vhostDir, ref.owner, ref.nic.Name)
+	if ref.nic.Type == "memif" {
+		sock = MemifSocketPath(a.memifDir, ref.owner, ref.nic.Name)
+	}
 	return VnfPort{
-		VM:            ref.vm,
+		VM:            ref.owner, // 容器场景下为容器名（VnfPort.VM 语义 = 属主名）
 		Interface:     ref.nic.Name,
 		Type:          ref.nic.Type,
 		VirtualSwitch: ref.nic.VirtualSwitch,
 		MAC:           ref.nic.MAC,
 		VLAN:          ref.nic.Vlan,
-		Socket:        VnfSocketPath(a.vhostDir, ref.vm, ref.nic.Name),
+		Socket:        sock,
 		VRF:           vrf,
 	}
 }

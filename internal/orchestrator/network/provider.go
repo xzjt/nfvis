@@ -21,6 +21,7 @@ type L2Network struct {
 	bond                         *BondProvider
 	lldp                         *LldpProvider
 	vhost                        *VhostUserProvider // M4-4：VNF vNIC 接入
+	memif                        *MemifProvider     // M4-7：容器 vNIC 接入
 	alarms                       *AlarmStore        // 恢复收敛失败项落点（M3-8，可空）
 }
 
@@ -66,6 +67,9 @@ func (n *L2Network) SetLldp(p *LldpProvider) { n.lldp = p }
 // SetVhostUser 追加 VNF vNIC（vhost-user）接入编排（M4-4）。
 func (n *L2Network) SetVhostUser(p *VhostUserProvider) { n.vhost = p }
 
+// SetMemif 追加容器 vNIC（memif）接入编排（M4-7）。
+func (n *L2Network) SetMemif(p *MemifProvider) { n.memif = p }
+
 // ApplyVnfInterface 建立 vNIC 接入（FR-NET-020/021/023）：
 //   - vhost-user：VPP 建 server socket 接口并命名，交换机端口随后按名挂接；
 //     若 vNIC 指向 L3 交换机（port.VRF 非空），再将该接口置入对应 VRF 表；
@@ -84,7 +88,18 @@ func (n *L2Network) ApplyVnfInterface(ctx context.Context, port orchestrator.Vnf
 			return n.l3.SetVnfTable(ctx, port.VRF, orchestrator.VnfIfaceName(port.VM, port.Interface))
 		}
 		return nil
-	case "sriov-vf", "memif":
+	case "memif":
+		if n.memif == nil {
+			return nil
+		}
+		if err := n.memif.Apply(ctx, port); err != nil {
+			return err
+		}
+		if port.VRF != "" && n.l3 != nil {
+			return n.l3.SetVnfTable(ctx, port.VRF, orchestrator.MemifIfaceName(port.VM, port.Interface))
+		}
+		return nil
+	case "sriov-vf":
 		return nil
 	default:
 		return fmt.Errorf("vNIC %s/%s 类型 %q 不受支持", port.VM, port.Interface, port.Type)
@@ -92,11 +107,19 @@ func (n *L2Network) ApplyVnfInterface(ctx context.Context, port orchestrator.Vnf
 }
 
 // DeleteVnfInterface 删除 vNIC 接入（VM 删除/vNIC 移除/迁移时同步 VPP 侧）。
-func (n *L2Network) DeleteVnfInterface(ctx context.Context, vmName, ifaceName string) error {
-	if n.vhost == nil {
-		return nil
+func (n *L2Network) DeleteVnfInterface(ctx context.Context, owner, ifaceName string) error {
+	// vhost-user 与 memif 接口按各自确定性命名删除；未接入的一侧为 nil 时跳过（幂等）。
+	if n.vhost != nil {
+		if err := n.vhost.Delete(ctx, owner, ifaceName); err != nil {
+			return err
+		}
 	}
-	return n.vhost.Delete(ctx, vmName, ifaceName)
+	if n.memif != nil {
+		if err := n.memif.Delete(ctx, owner, ifaceName); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // VnfPortLinkState 查询 vNIC 接口链路状态（FR-NET-023；供告警/运行态）。

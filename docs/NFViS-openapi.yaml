@@ -724,14 +724,27 @@ paths:
               schema: { $ref: "#/components/schemas/ContainerFunction" }
     delete:
       tags: [container-functions]
-      summary: 删除容器
+      summary: 删除容器（二次确认）
+      parameters:
+        - name: confirm
+          in: query
+          required: true
+          schema: { type: boolean }
+          description: 二次确认，必须为 true（FR-CMP-021）；缺省或 false 返回 400 CONFIRM_REQUIRED
       responses:
         "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "400": { $ref: "#/components/responses/Error400" }
   /container-functions/{name}:start:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
     post:
       tags: [container-functions]
       summary: 启动
+      responses: { "202": { description: 已受理 } }
+  /container-functions/{name}:restart:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [container-functions]
+      summary: 重启
       responses: { "202": { description: 已受理 } }
   /container-functions/{name}:stop:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
