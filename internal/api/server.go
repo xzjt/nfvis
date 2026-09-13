@@ -29,6 +29,7 @@ type Options struct {
 	TLSCert string // TLS 证书路径（FR-API-001，HTTPS；与 TLSKey 成对）
 	TLSKey  string // TLS 私钥路径；二者为空 = 明文 HTTP（仅限开发/测试）
 	Log     *slog.Logger
+	VPP     VppController // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
 }
 
 // Server NFViS REST server。
@@ -36,6 +37,7 @@ type Server struct {
 	aaa     *aaa.Service
 	engine  *config.Engine
 	cliExec *cliExecutor
+	vpp     VppController
 	log     *slog.Logger
 	mux     *http.ServeMux
 	http    *http.Server
@@ -52,7 +54,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, log: log}
 	mux := http.NewServeMux()
 
 	// 认证（免 token，FR-API-001）
@@ -89,6 +91,9 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	// {name}:change-password 含冒号后缀，ServeMux 通配符不支持——以 {tail...} 捕获后分发
 	mux.Handle("POST "+APIPrefix+"/system/login-users/{tail...}", s.auth(s.dispatchLoginUsersPost, schema.ClassReadOnly, "request system password change"))
 	mux.Handle("GET "+APIPrefix+"/system/status", s.auth(s.handleGetSystemStatus, schema.ClassReadOnly, "show system uptime"))
+	// M3-2：VPP 数据面状态与重启（FR-SYS-007/009）
+	mux.Handle("GET "+APIPrefix+"/vpp/status", s.auth(s.handleGetVppStatus, schema.ClassReadOnly, "show vpp"))
+	mux.Handle("POST "+APIPrefix+"/vpp/restart", s.auth(s.handlePostVppRestart, schema.ClassSuperUser, "request vpp restart"))
 
 	// W6：网络配置层第二组（GET=R；写=S）
 	mux.Handle("GET "+APIPrefix+"/acls", s.auth(s.handleGetAcls, schema.ClassReadOnly, "show acls"))

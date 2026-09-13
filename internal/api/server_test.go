@@ -23,6 +23,12 @@ import (
 // newTestServer 真实引擎 + 引擎背书的 AAA（admin/viewer 预置进 committed 配置）。
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	return newTestServerOpts(t, Options{})
+}
+
+// newTestServerOpts 同上，可注入 Options（如 VPP 控制器）。
+func newTestServerOpts(t *testing.T, opts Options) *httptest.Server {
+	t.Helper()
 	store, err := config.OpenStore(filepath.Join(t.TempDir(), "nfvis.db"))
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
@@ -60,7 +66,11 @@ func newTestServer(t *testing.T) *httptest.Server {
 	}
 	_ = engine.Release(sess)
 
-	srv := New(engine, authz, Options{Addr: ":0", Log: slog.New(slog.DiscardHandler)})
+	opts.Addr = ":0"
+	if opts.Log == nil {
+		opts.Log = slog.New(slog.DiscardHandler)
+	}
+	srv := New(engine, authz, opts)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts
