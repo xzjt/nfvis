@@ -1,0 +1,30 @@
+===== D3 ACL：建 ACL 并挂 BVI acl-in（deny 管理口 ICMP）=====
+[ok] acls demo-acl rule 10 source 192.168.155.129/32 destination any protocol icmp action deny
+[ok] virtual-switches demo-l2 gateway acl-in demo-acl
+commit 成功 (revision 4)
+--- 期望：ping 被拒 ---
+3 packets transmitted, 3 received, 0% packet loss, time 2038ms
+rtt min/avg/max/mdev = 0.170/0.266/0.319/0.068 ms
+acls demo-acl {
+    name demo-acl;
+    rules 10 {
+        action deny;
+
+===== 放行：删除 deny 规则 =====
+已删除 acls demo-acl rule 10（未提交）
+校验失败（candidate 保留）:
+  - acls[demo-acl].rules: ACL 至少需要一条规则
+--- 期望：恢复通 ---
+3 packets transmitted, 3 received, 0% packet loss, time 2037ms
+rtt min/avg/max/mdev = 0.227/0.270/0.354/0.059 ms
+
+===== D4 NAT：源池 + 规则（内网 10.10.0.0/24）=====
+[ok] nat source-pool demo-pool address-range 192.168.155.220 to 192.168.155.225
+[ok] nat rules 10 match source 10.10.0.0/24 virtual-switch demo-l3 action source-pool demo-pool
+commit 成功 (revision 5)
+--- 从内网侧（BVI 10.10.0.1）发起 ping 外网 ---
+
+Statistics: 3 sent, 0 received, 100% packet loss
+--- NAT 会话 ---
+%% 该 show 命令依赖底座运行态，M3/M4 接入后可用（当前可用：show version / show configuration [candidate|compare rollback n] / show system configuration sessions）
+exit status 1

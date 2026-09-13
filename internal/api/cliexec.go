@@ -527,24 +527,52 @@ type aliasRule struct {
 	apply   func(tree map[string]any, t []string, isSet bool) error
 }
 
+// matchAlias 在全部别名规则中按顺序匹配：先基础表（cliexec.go），再网络语句表
+// （cli_aliases_net.go）。pattern 末位可用 "**" 表示匹配剩余全部 token
+// （用于「一个关键字后跟不定长键值对」的语句，如 acls rule / nat rules）。
 func matchAlias(tokens []string) *aliasRule {
-	for i := range statementAliases {
-		p := statementAliases[i].pattern
-		if len(p) != len(tokens) {
-			continue
-		}
-		ok := true
-		for j, seg := range p {
-			if seg != "*" && seg != tokens[j] {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			return &statementAliases[i]
+	for _, rule := range allAliasRules() {
+		if patternMatches(rule.pattern, tokens) {
+			return rule
 		}
 	}
 	return nil
+}
+
+// allAliasRules 汇总别名规则（顺序即匹配优先级）。
+func allAliasRules() []*aliasRule {
+	out := make([]*aliasRule, 0, len(statementAliases)+len(statementAliasesNet))
+	for i := range statementAliases {
+		out = append(out, &statementAliases[i])
+	}
+	for i := range statementAliasesNet {
+		out = append(out, &statementAliasesNet[i])
+	}
+	return out
+}
+
+// patternMatches 判断 pattern 与 tokens 是否匹配；"**" 只允许出现在末位。
+func patternMatches(p, tokens []string) bool {
+	if n := len(p); n > 0 && p[n-1] == "**" {
+		if len(tokens) < n-1 {
+			return false
+		}
+		for j := 0; j < n-1; j++ {
+			if p[j] != "*" && p[j] != tokens[j] {
+				return false
+			}
+		}
+		return true
+	}
+	if len(p) != len(tokens) {
+		return false
+	}
+	for j, seg := range p {
+		if seg != "*" && seg != tokens[j] {
+			return false
+		}
+	}
+	return true
 }
 
 // elemByID 在具名数组 tree[arrKey] 中按身份值取元素（不存在报错）。

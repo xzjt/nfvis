@@ -35,6 +35,7 @@ type L3Client interface {
 	IPRouteAddDel(tableID uint32, prefix, nextHop string, add bool) error
 	Routes(tableID uint32) ([]RouteEntry, error)
 	BviCreate() (uint32, error)
+	SetState(swIfIndex uint32, up bool) error
 	BviDelete(swIfIndex uint32) error
 	BviSetBD(swIfIndex, bdID uint32) error
 	Close()
@@ -251,8 +252,20 @@ func (p *L3Provider) ApplyGateway(ctx context.Context, vs model.VirtualSwitch) e
 			return fmt.Errorf("BVI 挂入 bridge-domain %s: %w", vs.Name, err)
 		}
 	}
+	// 先清旧地址再置表：VPP 拒绝把仍带地址的接口移到其它 VRF（-114），
+	// 与 L3 接口路径同一处理（BVI 换 VRF 时命中）
+	if err := c.SwInterfaceAddDelAddress(bvi, "", false, true); err != nil {
+		return fmt.Errorf("清理 BVI（%s）旧地址: %w", vs.Name, err)
+	}
 	if err := c.SwInterfaceSetTable(bvi, false, tableID); err != nil {
 		return fmt.Errorf("BVI 置入 VRF %s: %w", vrfName, err)
+	}
+	if err := c.SwInterfaceSetTable(bvi, true, tableID); err != nil {
+		return fmt.Errorf("BVI 置入 VRF %s(IPv6): %w", vrfName, err)
+	}
+	// VPP 接口（含 BVI）默认 admin-down：不置 up 则 BVI 恒为 down，网关不可达
+	if err := c.SetState(bvi, true); err != nil {
+		return fmt.Errorf("BVI（%s）置为 up: %w", vs.Name, err)
 	}
 	for _, addr := range gw.Addresses {
 		if err := c.SwInterfaceAddDelAddress(bvi, addr, true, false); err != nil {
