@@ -101,6 +101,10 @@ func (p *L3Provider) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 		if err != nil {
 			return err
 		}
+		// 先清旧地址再置表：VPP 拒绝把仍带地址的接口移到其它 VRF（-114）
+		if err := c.SwInterfaceAddDelAddress(idx, "", false, true); err != nil {
+			return fmt.Errorf("清理接口 %s 旧地址: %w", li.Interface, err)
+		}
 		if err := c.SwInterfaceSetTable(idx, false, tableID); err != nil {
 			return fmt.Errorf("接口 %s 置入 VRF %s: %w", li.Interface, vrf.Name, err)
 		}
