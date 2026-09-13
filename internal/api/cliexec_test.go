@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/config"
+	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
@@ -313,5 +315,47 @@ func TestCLIAbbreviationExecutable(t *testing.T) {
 	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", "sh vir")
 	if !strings.Contains(res.Output, "歧义") || !strings.Contains(res.Output, "virtual-switches") {
 		t.Fatalf("sh vir 应报歧义并列出候选: %q", res.Output)
+	}
+}
+
+// T0-1：`show acls <name> detail` / `show bonds <name> detail` 经 cli_bridge 可用。
+// 经引擎直接预置 bond/ACL（CLI 建 bond 成员语句属 M3-6），聚焦 show 渲染路径。
+func TestCLIShowAclBondDetail(t *testing.T) {
+	x, engine := newCLIKit(t)
+	sess := config.Session{User: "system", Source: "console"}
+	if err := engine.Edit(sess); err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	cfg, _ := engine.Committed()
+	cfg.Interfaces = append(cfg.Interfaces,
+		model.InterfaceConfig{Name: "ens2f0"}, model.InterfaceConfig{Name: "ens2f1"})
+	cfg.Bonds = append(cfg.Bonds, model.Bond{Name: "bond0",
+		Members: []string{"ens2f0", "ens2f1"}, Lacp: &model.Lacp{Mode: "active"}})
+	cfg.Acls = append(cfg.Acls, model.Acl{Name: "acl-web", Rules: []model.AclRule{
+		{Seq: 10, Direction: "ingress", Source: "any", Destination: "any", Protocol: "any", Action: "deny"}}})
+	if err := engine.UpdateCandidate(sess, cfg); err != nil {
+		t.Fatalf("UpdateCandidate: %v", err)
+	}
+	if _, err := engine.Commit(context.Background(), sess, config.CommitOpts{}); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	_ = engine.Release(sess)
+
+	res := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show bonds bond0 detail")
+	if strings.Contains(res.Output, "%%") || !strings.Contains(res.Output, "mode active") {
+		t.Fatalf("show bonds bond0 detail: %q", res.Output)
+	}
+	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", "show acls acl-web detail")
+	if strings.Contains(res.Output, "%%") || !strings.Contains(res.Output, "deny") {
+		t.Fatalf("show acls acl-web detail: %q", res.Output)
+	}
+	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", "show acls")
+	if strings.Contains(res.Output, "%%") || !strings.Contains(res.Output, "acl-web") {
+		t.Fatalf("show acls 列表: %q", res.Output)
+	}
+	// 不存在的条目：错误但不 panic
+	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", "show acls no-such")
+	if !strings.Contains(res.Output, "不存在") {
+		t.Fatalf("未知 ACL 应报不存在: %q", res.Output)
 	}
 }

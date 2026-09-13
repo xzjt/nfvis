@@ -27,6 +27,23 @@ func (s *Server) handleGetAcls(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleGetAcl GET /api/v1/acls/{name}：ACL 详情（T0-1；契约 /acls/{name} get）。
+func (s *Server) handleGetAcl(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	cfg, err := s.engine.Committed()
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	for _, a := range cfg.Acls {
+		if a.Name == name {
+			writeJSON(w, http.StatusOK, a)
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, "NOT_FOUND", "ACL "+name+" 不存在", nil)
+}
+
 func (s *Server) handlePostAcl(w http.ResponseWriter, r *http.Request) {
 	var in model.Acl
 	if err := decodeBody(r, &in); err != nil {
@@ -224,6 +241,24 @@ func (s *Server) handleGetBonds(w http.ResponseWriter, r *http.Request) {
 		out = []model.Bond{}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleGetBond GET /api/v1/bonds/{name}：bond 详情（T0-1；契约 /bonds/{name} get）。
+// 运行态 LACP actor/partner 属 M3，此处先返回配置视图。
+func (s *Server) handleGetBond(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	cfg, err := s.engine.Committed()
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	for _, b := range cfg.Bonds {
+		if b.Name == name {
+			writeJSON(w, http.StatusOK, b)
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, "NOT_FOUND", "bond "+name+" 不存在", nil)
 }
 
 func (s *Server) handlePostBond(w http.ResponseWriter, r *http.Request) {
