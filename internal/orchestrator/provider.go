@@ -44,3 +44,42 @@ type ContainerProvider interface {
 	DeleteContainer(ctx context.Context, name string) error
 	EnsureConsistent(ctx context.Context, cfg model.Config) []error
 }
+
+// NewNoopNetwork M2/M3 过渡用空网络实现：所有下发成功、恢复收敛为空集。
+// M3 以 network.L2Network 等装饰器覆盖已实现的方法（先 noop 再逐层替换）。
+func NewNoopNetwork() NetworkProvider { return noopNetwork{} }
+
+type noopNetwork struct{}
+
+func (noopNetwork) ApplyACL(context.Context, model.Acl) error                    { return nil }
+func (noopNetwork) DeleteACL(context.Context, string) error                      { return nil }
+func (noopNetwork) ApplyBridgeDomain(context.Context, model.VirtualSwitch) error { return nil }
+func (noopNetwork) DeleteBridgeDomain(context.Context, string) error             { return nil }
+func (noopNetwork) ApplyVRF(context.Context, model.Vrf) error                    { return nil }
+func (noopNetwork) DeleteVRF(context.Context, string) error                      { return nil }
+func (noopNetwork) ApplyNAT(context.Context, model.NatConfig) error              { return nil }
+func (noopNetwork) ApplySpan(context.Context, model.PortMirroring) error         { return nil }
+func (noopNetwork) DeleteSpan(context.Context, string) error                     { return nil }
+func (noopNetwork) ApplyQos(context.Context, model.QosPolicy) error              { return nil }
+func (noopNetwork) DeleteQos(context.Context, string) error                      { return nil }
+func (noopNetwork) EnsureConsistent(context.Context, model.Config) []error       { return nil }
+
+// NewNoopCompute 空计算编排（M4 替换为 libvirt 实现）。
+func NewNoopCompute() ComputeProvider { return noopCompute{} }
+
+type noopCompute struct{}
+
+func (noopCompute) DefineVM(context.Context, model.VMFunction) error { return nil }
+func (noopCompute) DeleteVM(context.Context, string) error           { return nil }
+func (noopCompute) EnsureConsistent(context.Context, model.Config) []error {
+	return nil
+}
+
+// NewNoopContainer 空容器编排（M4 替换为 Docker 实现）。
+func NewNoopContainer() ContainerProvider { return noopContainer{} }
+
+type noopContainer struct{}
+
+func (noopContainer) ApplyContainer(context.Context, model.ContainerFunction) error { return nil }
+func (noopContainer) DeleteContainer(context.Context, string) error                 { return nil }
+func (noopContainer) EnsureConsistent(context.Context, model.Config) []error        { return nil }

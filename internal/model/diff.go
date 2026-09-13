@@ -85,7 +85,15 @@ func walkValue(v any, path []string, out *[]Statement) {
 				continue
 			}
 			if field, id := identityOf(m); id != "" {
-				walkMap(m, appendToken(path, id), field, out)
+				np := appendToken(path, id)
+				if len(m) == 1 {
+					// 仅身份字段的元素：发出「存在性」语句，否则该元素在扁平化中
+					// 不可见（如 vpp dpdk per-dev <ifname> 只声明绑定、无覆盖项），
+					// 导致 set/delete 被判为「未产生配置变更」。
+					*out = append(*out, Statement{Path: np})
+				} else {
+					walkMap(m, np, field, out)
+				}
 			} else {
 				walkMap(m, appendToken(path, strconv.Itoa(i)), "", out)
 			}

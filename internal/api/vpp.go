@@ -55,3 +55,32 @@ func (s *Server) handlePostVppRestart(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "restarting"})
 }
+
+// MACTableRow /virtual-switches/{name}/mac-table 一行（契约 mac/port/vlan）。
+type MACTableRow struct {
+	MAC  string `json:"mac"`
+	Port string `json:"port"`
+	VLAN int    `json:"vlan"`
+}
+
+// L2Runtime L2 运行态查询能力（编排器装配注入；nil = 503）。
+type L2Runtime interface {
+	MACTable(ctx context.Context, swName string) ([]MACTableRow, error)
+}
+
+// handleGetMacTable GET /api/v1/virtual-switches/{name}/mac-table（FR-NET-015）。
+func (s *Server) handleGetMacTable(w http.ResponseWriter, r *http.Request) {
+	if s.l2 == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "VPP 未接入（编排器未装配）", nil)
+		return
+	}
+	rows, err := s.l2.MACTable(r.Context(), r.PathValue("name"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
+		return
+	}
+	if rows == nil {
+		rows = []MACTableRow{}
+	}
+	writeJSON(w, http.StatusOK, rows)
+}

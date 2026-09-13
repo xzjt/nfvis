@@ -42,6 +42,8 @@ func TestGenerateStartupFull(t *testing.T) {
 		t.Fatalf("生成失败: %v", err)
 	}
 	wants := []string{
+		"dev 0000:03:00.0 {",
+		"name ens192", // VPP 接口名固定为配置中的物理口名
 		"main-core 4",
 		"corelist-workers 6,7",
 		"main-heap-size 2G",
