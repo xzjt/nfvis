@@ -189,12 +189,45 @@ func run() error {
 		for _, e := range containerProvider.EnsureConsistent(rctx, cfg) {
 			log.Warn("容器恢复收敛未收敛项", "err", e)
 		}
+		for _, e := range computeProvider.CheckVMAlarms(rctx, cfg) {
+			log.Warn("VM 异常退出巡检", "err", e)
+		}
+		for _, e := range containerProvider.CheckContainerAlarms(rctx, cfg) {
+			log.Warn("容器异常退出巡检", "err", e)
+		}
 		// M4-4：VNF vNIC 断连检测（FR-NET-023）——link down/缺失记为告警，恢复则消警。
 		for _, e := range netProvider.CheckVnfPorts(rctx, cfg) {
 			log.Warn("vNIC 状态检查", "err", e)
 		}
 		log.Info("恢复收敛完成")
 	}
+	// M4-10：运行态异常退出巡检（FR-CMP-017/022）——VM crashed / 容器异常退出 → critical 告警；
+	// 周期性（15s）检测，事件驱动实时告警随 M5 /events。与恢复收敛共用锁避免并发使用 VPP API。
+	go func() {
+		tk := time.NewTicker(15 * time.Second)
+		defer tk.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tk.C:
+				recoveryMu.Lock()
+				cfg, err := engine.Committed()
+				if err == nil {
+					for _, e := range computeProvider.CheckVMAlarms(ctx, cfg) {
+						log.Warn("VM 状态巡检", "err", e)
+					}
+					for _, e := range containerProvider.CheckContainerAlarms(ctx, cfg) {
+						log.Warn("容器状态巡检", "err", e)
+					}
+					for _, e := range netProvider.CheckVnfPorts(ctx, cfg) {
+						log.Warn("vNIC 状态巡检", "err", e)
+					}
+				}
+				recoveryMu.Unlock()
+			}
+		}
+	}()
 	vppMgr.OnConnect(func(version string) { go runRecovery() })
 	go func() {
 		if err := vppMgr.Run(ctx); err != nil {

@@ -66,6 +66,8 @@ type dockerAPI interface {
 	// RemoveImage 删除容器镜像（FR-CMP-033，经 Docker API）。
 	RemoveImage(ctx context.Context, ref string) error
 	State(ctx context.Context, name string) (state string, exists bool, err error)
+	// ExitCode 返回容器退出码（不存在 exists=false）。
+	ExitCode(ctx context.Context, name string) (code int, exists bool, err error)
 	Logs(ctx context.Context, name string, tail int) (string, error)
 }
 
@@ -240,6 +242,35 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 		if err != nil {
 			errs = append(errs, fmt.Errorf("容器 %s: %w", ct.Name, err))
 		}
+	}
+	return errs
+}
+
+// CheckContainerAlarms 检测容器异常退出并维护告警（FR-CMP-022）：
+// dead 或 exited 且退出码非零 → critical `CONTAINER_EXITED`；running/正常退出 → 消警。
+func (p *Provider) CheckContainerAlarms(ctx context.Context, cfg model.Config) []error {
+	var errs []error
+	for _, ct := range cfg.ContainerFunctions {
+		state, exists, err := p.api.State(ctx, ct.Name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("容器 %s 状态查询: %w", ct.Name, err))
+			continue
+		}
+		if !exists || p.alarms == nil {
+			continue
+		}
+		abnormal := state == orchestrator.CTStateDead
+		if state == orchestrator.CTStateExited {
+			if code, _, cerr := p.api.ExitCode(ctx, ct.Name); cerr == nil && code != 0 {
+				abnormal = true
+			}
+		}
+		if abnormal {
+			p.alarms.Raise(orchestrator.RecoveryScopeContainer, orchestrator.SeverityCritical, orchestrator.ContainerExited,
+				fmt.Sprintf("容器 %s 异常退出（状态 %s，FR-CMP-022）", ct.Name, state), ct.Name)
+			continue
+		}
+		p.alarms.Resolve(orchestrator.RecoveryScopeContainer, orchestrator.ContainerExited, ct.Name)
 	}
 	return errs
 }

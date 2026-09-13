@@ -229,16 +229,17 @@ func (p *Provider) RestartVM(ctx context.Context, name string) error {
 	return nil
 }
 
-// VMState 运行态（契约枚举；未定义返回 absent）。
+// VMState 运行态（契约枚举；未定义返回 absent）。reason 感知：被 kill 的 QEMU
+// 报 SHUTOFF+CRASHED，映射为 crashed（FR-CMP-017）。
 func (p *Provider) VMState(ctx context.Context, name string) (string, error) {
-	state, exists, err := p.api.State(ctx, name)
+	state, reason, exists, err := p.api.StateReason(ctx, name)
 	if err != nil {
 		return "", err
 	}
 	if !exists {
 		return orchestrator.VMStateAbsent, nil
 	}
-	return VMStateFromLibvirt(state), nil
+	return VMStateFromLibvirtReason(state, reason), nil
 }
 
 // Console 打开 VM 串口双向流（FR-CMP-014）：须域存在且运行中。
@@ -410,6 +411,30 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+// CheckVMAlarms 检测 VM 异常退出并维护告警（FR-CMP-017）：
+// libvirt 状态 crashed（on_crash=preserve 保留）→ critical `VM_CRASHED`；恢复 running/shutoff → 消警。
+// absent（配置存在但域未定义）由 EnsureConsistent 的收敛告警负责，不在此重复。
+func (p *Provider) CheckVMAlarms(ctx context.Context, cfg model.Config) []error {
+	var errs []error
+	for _, vm := range cfg.VirtualMachineFunctions {
+		state, err := p.VMState(ctx, vm.Name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("VM %s 状态查询: %w", vm.Name, err))
+			continue
+		}
+		if p.alarms == nil {
+			continue
+		}
+		if state == orchestrator.VMStateCrashed {
+			p.alarms.Raise(orchestrator.RecoveryScopeCompute, orchestrator.SeverityCritical, orchestrator.VMCrashed,
+				fmt.Sprintf("VM %s 异常退出（crashed，FR-CMP-017）", vm.Name), vm.Name)
+			continue
+		}
+		p.alarms.Resolve(orchestrator.RecoveryScopeCompute, orchestrator.VMCrashed, vm.Name)
+	}
+	return errs
 }
 
 // ---------- 快照（FR-CMP-015） ----------

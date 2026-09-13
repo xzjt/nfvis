@@ -29,6 +29,7 @@ type mockLibvirt struct {
 
 	domainXML string
 	autostart map[string]bool
+	reasons   map[string]int
 	snaps     map[string][]string
 	snapXML   map[string]string
 	reverted  []string
@@ -37,7 +38,7 @@ type mockLibvirt struct {
 
 func newMockLibvirt() *mockLibvirt {
 	return &mockLibvirt{present: map[string]bool{}, states: map[string]int{},
-		snaps: map[string][]string{}, snapXML: map[string]string{}, autostart: map[string]bool{}}
+		snaps: map[string][]string{}, snapXML: map[string]string{}, autostart: map[string]bool{}, reasons: map[string]int{}}
 }
 
 func xmlName(xml string) string {
@@ -72,10 +73,15 @@ func (m *mockLibvirt) Undefine(_ context.Context, name string) error {
 	return nil
 }
 func (m *mockLibvirt) State(_ context.Context, name string) (int, bool, error) {
+	state, _, exists, err := m.StateReason(context.Background(), name)
+	return state, exists, err
+}
+
+func (m *mockLibvirt) StateReason(_ context.Context, name string) (int, int, bool, error) {
 	if !m.present[name] {
-		return 0, false, nil
+		return 0, 0, false, nil
 	}
-	return m.states[name], true, nil
+	return m.states[name], m.reasons[name], true, nil
 }
 func (m *mockLibvirt) Start(_ context.Context, name string) error {
 	if m.startErr != nil {
@@ -578,5 +584,28 @@ func TestDefineVMSetsLibvirtAutostart(t *testing.T) {
 	}
 	if api.autostart["fw-vm"] {
 		t.Fatal("autostart=false 应清除自启标志")
+	}
+}
+
+// FR-CMP-017：crashed → critical 告警；恢复则消警。
+func TestCheckVMAlarms(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProvider(api, newMockStorage(), nil)
+	sink := &fakeSink{}
+	p.SetAlarms(sink)
+	cfg := model.Config{VirtualMachineFunctions: []model.VMFunction{vmFixture("fw-vm")}}
+	api.present["fw-vm"] = true
+
+	api.states["fw-vm"] = domCrashed
+	if errs := p.CheckVMAlarms(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("巡检不应报错: %v", errs)
+	}
+	if len(sink.raised) != 1 || sink.raised[0] != "fw-vm" {
+		t.Fatalf("crashed 应告警: %v", sink.raised)
+	}
+	api.states["fw-vm"] = domRunning
+	p.CheckVMAlarms(context.Background(), cfg)
+	if len(sink.resolved) != 1 {
+		t.Fatalf("恢复应消警: %v", sink.resolved)
 	}
 }

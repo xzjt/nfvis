@@ -126,3 +126,19 @@ func TestDefaultConfigAndNormalize(t *testing.T) {
 		t.Fatalf("零值配置应取默认: %+v", cfg)
 	}
 }
+
+// FR-CMP-017：外部 kill QEMU → SHUTOFF+CRASHED reason 应映射为 crashed。
+func TestVMStateFromLibvirtReason(t *testing.T) {
+	if got := VMStateFromLibvirtReason(domShutoff, shutoffReasonCrashed); got != "crashed" {
+		t.Fatalf("SHUTOFF+CRASHED 应映射 crashed，实际 %q", got)
+	}
+	if got := VMStateFromLibvirtReason(domShutoff, 2 /*destroyed*/); got != "shutoff" {
+		t.Fatalf("正常 destruction 应 shutoff，实际 %q", got)
+	}
+	if got := VMStateFromLibvirtReason(domRunning, 0); got != "running" {
+		t.Fatalf("running 应保持 running，实际 %q", got)
+	}
+	if got := VMStateFromLibvirtReason(domCrashed, 0); got != "crashed" {
+		t.Fatalf("CRASHED 应保持 crashed，实际 %q", got)
+	}
+}
