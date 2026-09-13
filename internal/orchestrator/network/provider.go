@@ -19,6 +19,7 @@ type L2Network struct {
 	nat                          *NatProvider
 	bond                         *BondProvider
 	lldp                         *LldpProvider
+	alarms                       *AlarmStore // 恢复收敛失败项落点（M3-8，可空）
 }
 
 // NewL2Network 以基础 Provider 与 L2 编排器构造装饰器。

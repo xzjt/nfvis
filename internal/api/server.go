@@ -37,6 +37,7 @@ type Options struct {
 	State   *state.State       // 运行态聚合（M3-7；nil = 省略运行态字段）
 	SRIOV   SRIOVSetter        // SR-IOV VF 数量（M3-7；nil = 503）
 	NAT     NatSessionsRuntime // NAT 会话（M3-7；nil = 503）
+	Alarms  AlarmRuntime       // 告警列表（M3-8；nil = 503）
 }
 
 // Server NFViS REST server。
@@ -51,6 +52,7 @@ type Server struct {
 	state       *state.State
 	sriov       SRIOVSetter
 	natSessions NatSessionsRuntime
+	alarms      AlarmRuntime
 	log         *slog.Logger
 	mux         *http.ServeMux
 	http        *http.Server
@@ -67,7 +69,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, log: log}
 	mux := http.NewServeMux()
 
 	// 认证（免 token，FR-API-001）
@@ -130,6 +132,9 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/protocols/lldp", s.auth(s.handleGetLldp, schema.ClassReadOnly, "show lldp"))
 	mux.Handle("PUT "+APIPrefix+"/protocols/lldp", cfgAPI(s.handlePutLldp))
 	mux.Handle("GET "+APIPrefix+"/protocols/lldp/neighbors", s.auth(s.handleGetLldpNeighbors, schema.ClassReadOnly, "show lldp"))
+
+	// M3-8：告警列表（恢复收敛的不可收敛项落点，FR-OPS-010）
+	mux.Handle("GET "+APIPrefix+"/alarms", s.auth(s.handleGetAlarms, schema.ClassReadOnly, "show alarms"))
 
 	// 资源 handlers 第一组（GET = show 等级 R；写 = configure 等级 S；FR-API-003 映射）
 	mux.Handle("GET "+APIPrefix+"/system", s.auth(s.handleGetSystem, schema.ClassReadOnly, "show system"))

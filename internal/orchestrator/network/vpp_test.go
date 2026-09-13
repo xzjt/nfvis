@@ -137,7 +137,7 @@ func TestConnectOnceSuccess(t *testing.T) {
 	}
 }
 
-// Run 在连接中断后自动重连并回调 OnReconnect（M3-8 接入点）。
+// Run 在首次连接与断线重连时都回调 OnConnect（M3-8 恢复收敛接入点）。
 func TestRunReconnects(t *testing.T) {
 	ch1 := make(chan Event, 2)
 	ch1 <- connectedEvent()
@@ -149,20 +149,22 @@ func TestRunReconnects(t *testing.T) {
 	d := &fakeDialer{sessions: []*fakeSession{s1, s2}, events: []chan Event{ch1, ch2}}
 
 	m := NewManager(testConfig(), d)
-	reconnected := make(chan string, 1)
-	m.OnReconnect(func(v string) { reconnected <- v })
+	connected := make(chan string, 2)
+	m.OnConnect(func(v string) { connected <- v })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- m.Run(ctx) }()
 
-	select {
-	case v := <-reconnected:
-		if v != "26.06-release" {
-			t.Fatalf("重连回调版本: %q", v)
+	for i := 0; i < 2; i++ { // 第一次为首连（启动收敛），第二次为重连（重放）
+		select {
+		case v := <-connected:
+			if v != "26.06-release" {
+				t.Fatalf("连接回调版本: %q", v)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("超时未触发第 %d 次连接回调", i+1)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("超时未触发重连回调")
 	}
 	if d.callCount() < 2 {
 		t.Fatalf("应至少拨号两次（断线重连），实际 %d", d.callCount())

@@ -70,6 +70,17 @@ func NewNatProviderFunc(f func() (NatClient, error)) *NatProvider {
 // SetInsideResolver 注入 L3 交换机（VRF）成员接口解析（inside 接口来源）。
 func (p *NatProvider) SetInsideResolver(fn func(vsName string) []uint32) { p.insideIfaces = fn }
 
+// reset 清空进程内登记表（恢复收敛前调用，使 ApplyNAT 全量重放）。
+func (p *NatProvider) reset() {
+	p.mu.Lock()
+	p.pools = map[string][2]string{}
+	p.statics = map[string]string{}
+	p.features = map[uint32]string{}
+	p.ifaddr = map[uint32]bool{}
+	p.enabled = false
+	p.mu.Unlock()
+}
+
 // ApplyNAT 声明式收敛 NAT44 配置。
 func (p *NatProvider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 	c, err := p.client()
@@ -241,7 +252,7 @@ func (p *NatProvider) desiredFeatures(c NatClient, nat model.NatConfig, pools ma
 			return nil, nil, fmt.Errorf("解析 NAT 外口 %s: %w", r.Action.Interface, err)
 		}
 		if !ok {
-			return nil, nil, fmt.Errorf("NAT 外口 %s 不存在于 VPP（是否未由 DPDK 接管？）", r.Action.Interface)
+			return nil, nil, fmt.Errorf("%w: NAT 外口 %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, r.Action.Interface)
 		}
 		if features[idx] == "inside" {
 			return nil, nil, fmt.Errorf("接口 %s 同时被配置为 NAT 内外口", r.Action.Interface)

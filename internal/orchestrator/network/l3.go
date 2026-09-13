@@ -69,6 +69,16 @@ type L3Provider struct {
 // SetACL 注入 ACL 编排（L3 接口与 BVI 网关的 acl-in 绑定）。
 func (p *L3Provider) SetACL(a *AclProvider) { p.acl = a }
 
+// reset 清空进程内登记表（恢复收敛前调用，避免陈旧 sw_if_index/表归属把重放带偏）。
+func (p *L3Provider) reset() {
+	p.mu.Lock()
+	p.ifaces = map[uint32][]uint32{}
+	p.subifs = map[uint32][]uint32{}
+	p.bvis = map[string]uint32{}
+	p.ownTable = map[string]bool{}
+	p.mu.Unlock()
+}
+
 // NewL3Provider 以固定客户端构造（测试）。
 func NewL3Provider(c L3Client) *L3Provider {
 	return &L3Provider{client: func() (L3Client, error) { return c, nil },
@@ -317,7 +327,7 @@ func (p *L3Provider) resolveL3Iface(c L3Client, li model.L3Interface) (idx, sub 
 			return 0, 0, fmt.Errorf("解析接口 %s: %w", base, ferr)
 		}
 		if !ok {
-			return 0, 0, fmt.Errorf("接口 %s 不存在于 VPP（是否未由 DPDK 接管？）", base)
+			return 0, 0, fmt.Errorf("%w: %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, base)
 		}
 		s, cerr := c.CreateSubif(CreateSubifReq{ParentSwIfIndex: parent, SubID: uint32(li.Vlan),
 			OuterVlanID: uint16(li.Vlan), OneTag: true})
@@ -331,7 +341,7 @@ func (p *L3Provider) resolveL3Iface(c L3Client, li model.L3Interface) (idx, sub 
 		return 0, 0, fmt.Errorf("解析接口 %s: %w", base, err)
 	}
 	if !ok {
-		return 0, 0, fmt.Errorf("接口 %s 不存在于 VPP（是否未由 DPDK 接管？）", base)
+		return 0, 0, fmt.Errorf("%w: %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, base)
 	}
 	return idx, 0, nil
 }

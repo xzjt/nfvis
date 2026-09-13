@@ -126,6 +126,13 @@ func NewL2ProviderFunc(f func() (L2Client, error)) *L2Provider {
 // SetACL 注入 ACL 编排（端口 acl-in/acl-out 绑定）。
 func (p *L2Provider) SetACL(a *AclProvider) { p.acl = a }
 
+// reset 清空挂接登记表（恢复收敛前调用，按 VPP 实况重新挂接）。
+func (p *L2Provider) reset() {
+	p.mu.Lock()
+	p.attached = map[uint32]map[uint32]attachment{}
+	p.mu.Unlock()
+}
+
 // ApplyBridgeDomain 把 L2 虚拟交换机收敛到 bridge domain：建 BD、挂接目标端口
 // （access/trunk VLAN 经子接口），并摘除不再属于该 BD 的成员。
 func (p *L2Provider) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch) error {
@@ -368,7 +375,7 @@ func (p *L2Provider) portIndex(c L2Client, vs model.VirtualSwitch, port model.VS
 		return 0, fmt.Errorf("解析接口 %s 的 sw_if_index: %w", port.Interface, err)
 	}
 	if !ok {
-		return 0, fmt.Errorf("接口 %s 不存在于 VPP（是否未由 DPDK 接管？）", port.Interface)
+		return 0, fmt.Errorf("%w: %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, port.Interface)
 	}
 	return idx, nil
 }

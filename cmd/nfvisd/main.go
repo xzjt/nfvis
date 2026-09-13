@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -71,6 +72,9 @@ func run() error {
 	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
 	netProvider.SetBond(network.NewBondProviderFunc(vppMgr.BondClientFunc()))
 	netProvider.SetLldp(network.NewLldpProviderFunc(vppMgr.LldpClientFunc()))
+	// M3-8：恢复收敛的不可收敛项落点（GET /alarms）
+	alarms := network.NewAlarmStore()
+	netProvider.SetAlarms(alarms)
 	applier := orchestrator.NewApplier(netProvider, orchestrator.NewNoopCompute(), orchestrator.NewNoopContainer())
 
 	engine, err := config.NewEngine(store, applier, config.Options{})
@@ -94,6 +98,28 @@ func run() error {
 	defer stop()
 
 	// VPP 未运行时降级为告警并持续重连，不阻塞 nfvisd 启动。
+	// M3-8：每次连接成功（首连=启动收敛，重连=VPP 重启重放）触发恢复收敛；
+	// 单个对象失败不阻塞，未收敛项进告警表（FR-OPS-010/011）。
+	var recoveryMu sync.Mutex
+	runRecovery := func() {
+		recoveryMu.Lock()
+		defer recoveryMu.Unlock()
+		cfg, err := engine.Committed()
+		if err != nil {
+			log.Error("恢复收敛：读取 committed 配置失败", "err", err)
+			return
+		}
+		rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if errs := netProvider.EnsureConsistent(rctx, cfg); len(errs) > 0 {
+			for _, e := range errs {
+				log.Warn("恢复收敛未收敛项", "err", e)
+			}
+			return
+		}
+		log.Info("恢复收敛完成")
+	}
+	vppMgr.OnConnect(func(version string) { go runRecovery() })
 	go func() {
 		if err := vppMgr.Run(ctx); err != nil {
 			log.Error("VPP 连接管理退出", "err", err)
@@ -114,6 +140,7 @@ func run() error {
 		State:   state.New(vppMgr.Runtime()),
 		SRIOV:   network.NewSRIOVProvider(),
 		NAT:     &natSessionsController{net: netProvider},
+		Alarms:  &alarmController{store: alarms},
 	})
 
 	srvErr := make(chan error, 1)
@@ -230,4 +257,18 @@ func (c *natSessionsController) Sessions(ctx context.Context) ([]api.NatSessionR
 			Bytes: r.Bytes, Packets: r.Packets})
 	}
 	return out, nil
+}
+
+// alarmController 装配 api.AlarmRuntime（M3-8）：恢复收敛告警的只读视图。
+type alarmController struct{ store *network.AlarmStore }
+
+func (c *alarmController) List(state string) []api.AlarmRow {
+	rows := c.store.List(state)
+	out := make([]api.AlarmRow, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, api.AlarmRow{ID: a.ID, Severity: a.Severity, Code: a.Code,
+			Message: a.Message, Source: a.Source, RaisedAt: a.RaisedAt,
+			ResolvedAt: a.ResolvedAt, State: a.State})
+	}
+	return out
 }

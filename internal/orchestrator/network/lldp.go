@@ -46,6 +46,13 @@ func NewLldpProviderFunc(f func() (LldpClient, error)) *LldpProvider {
 	return &LldpProvider{client: f, enabled: map[string]bool{}}
 }
 
+// reset 清空进程内登记表（恢复收敛前调用，按配置全量重放接口开关）。
+func (p *LldpProvider) reset() {
+	p.mu.Lock()
+	p.enabled = map[string]bool{}
+	p.mu.Unlock()
+}
+
 // ApplyLLDP 收敛 LLDP：全局参数 + 按接口开关；Enabled=false 或 nil 时全部关闭。
 func (p *LldpProvider) ApplyLLDP(ctx context.Context, cfg *model.LldpConfig) error {
 	c, err := p.client()

@@ -124,7 +124,7 @@ type Manager struct {
 	version     string
 	lastErr     error
 	appliedHash string // 最近一次落地/重启所依据的 vpp 配置段哈希（pending_restart 判定）
-	onReconnect func(version string)
+	onConnect   func(version string)
 
 	statsOnce sync.Once // stats segment 惰性连接（stats_govpp.go）
 	statsConn *statsConn
@@ -138,8 +138,9 @@ func NewManager(cfg Config, dialer Dialer) *Manager {
 	return &Manager{cfg: cfg.withDefaults(), dialer: dialer, state: StateDisconnected}
 }
 
-// OnReconnect 注册重连成功回调（M3-8 恢复收敛的接入点）。
-func (m *Manager) OnReconnect(fn func(version string)) { m.onReconnect = fn }
+// OnConnect 注册连接成功回调（含首次连接与断线重连，M3-8 恢复收敛接入点）。
+// 回调在连接管理协程内同步执行，重活应自行起协程，避免阻塞状态监视。
+func (m *Manager) OnConnect(fn func(version string)) { m.onConnect = fn }
 
 // State 当前连接状态。
 func (m *Manager) State() State {
@@ -264,9 +265,8 @@ func (m *Manager) ConnectOnce(ctx context.Context) (string, error) {
 }
 
 // Run 持续维护连接：连不上时按 RetryDelay 重试（VPP 未运行时降级重试而非崩溃），
-// 断开后自动重连并调用 OnReconnect；版本不匹配为致命错误，直接返回。
+// 每次连接成功（含首次）调用 OnConnect 以触发恢复收敛；版本不匹配为致命错误，直接返回。
 func (m *Manager) Run(ctx context.Context) error {
-	connectedOnce := false
 	for {
 		if ctx.Err() != nil {
 			m.Close()
@@ -285,10 +285,9 @@ func (m *Manager) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		if connectedOnce && m.onReconnect != nil {
-			m.onReconnect(ver) // 重连成功，触发恢复收敛（M3-8）
+		if m.onConnect != nil {
+			m.onConnect(ver) // 连接成功：恢复收敛（FR-OPS-010/011）
 		}
-		connectedOnce = true
 		m.cfg.Log.Info("已连接 VPP", "version", ver, "socket", m.cfg.Socket)
 
 		m.watch(ctx) // 阻塞至断开/失败或 ctx 取消
