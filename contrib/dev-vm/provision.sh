@@ -47,6 +47,9 @@ fi
 # ---- 1. 基础包 ----
 step "apt update"        bash -c 'apt-get -y update'
 step "基础工具包"        bash -c 'apt-get -y install git curl wget ca-certificates build-essential pkg-config unzip gnupg lsb-release jq socat'
+# M4 依赖：qemu-utils（qemu-img：建盘/快照/格式转换）、cloud-image-utils（cloud-localds：NoCloud seed ISO）、
+# genisoimage（seed ISO 备选路径）、tcpdump（vhost-user/memif 通流排障）
+step "虚拟化辅助工具"    bash -c 'apt-get -y install qemu-utils cloud-image-utils genisoimage tcpdump'
 
 # ---- 2. Go 工具链（固定版本 tarball，不依赖发行版包）----
 step "安装 Go ${GO_VERSION}" bash -c '
