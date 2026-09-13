@@ -247,6 +247,8 @@ func (n *L2Network) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitc
 }
 
 func (n *L2Network) DeleteBridgeDomain(ctx context.Context, name string) error {
+	// 先删 BVI 网关（其 BD 成员身份随之消失），再删 BD：BD 仍有成员时
+	// VPP 拒绝删除（-120）；l2 摘除已失效成员（BVI/vhost）按已摘除处理。
 	if n.l3 != nil {
 		if err := n.l3.DeleteGateway(ctx, name); err != nil {
 			return err

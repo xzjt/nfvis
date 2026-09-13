@@ -107,7 +107,8 @@ func TestDefineDomainXMLRealLibvirt(t *testing.T) {
 		"<locked/>",
 		"<access mode='shared'/>",
 		"<interface type='vhostuser'>",
-		"<source type='unix' path='" + sockPath + "' mode='client'/>",
+		"<source type='unix' path='" + sockPath + "' mode='client'>",
+		"<reconnect enabled='yes' timeout='5'/>", // FR-OPS-011：VPP 重启后自动重连
 		"<model type='virtio'/>",
 		"<driver queues='2'/>",
 		"<serial type='pty'>",

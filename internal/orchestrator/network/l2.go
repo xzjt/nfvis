@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/xzjt/nfvis/internal/model"
@@ -214,10 +215,16 @@ func (p *L2Provider) DeleteBridgeDomain(ctx context.Context, name string) error 
 	sort.Ints(idxs)
 	for _, idx := range idxs {
 		if err := c.SwInterfaceSetL2Bridge(uint32(idx), bdID, L2PortNormal, 0, false); err != nil {
-			return fmt.Errorf("摘除成员 %d: %w", idx, err)
+			// 成员接口已被删除（如 VNF vNIC 先于 BD 删除、BVI 网关已删）时 VPP 返回
+			// Invalid sw_if_index(-2)：视为已摘除，跳过（否则删 BD 被 -120 卡住）。
+			if !isMissingIfaceErr(err) {
+				return fmt.Errorf("摘除成员 %d: %w", idx, err)
+			}
 		}
 		if err := c.SwInterfaceSetL2Xconnect(uint32(idx), 0, false); err != nil {
-			return fmt.Errorf("解除 cross-connect %d: %w", idx, err)
+			if !isMissingIfaceErr(err) {
+				return fmt.Errorf("解除 cross-connect %d: %w", idx, err)
+			}
 		}
 	}
 	exists, err := c.BridgeDomainExists(bdID)
@@ -419,3 +426,13 @@ func portKey(port model.VSwitchPort) string {
 
 // ErrL2Unavailable 未连接 VPP 时 L2 客户端不可用。
 var ErrL2Unavailable = errors.New("VPP 未连接，L2 客户端不可用")
+
+// isMissingIfaceErr 判断 VPP 错误是否为「接口索引已失效」（VPPApiError -2
+// Invalid sw_if_index）。此类错误在删除流程中表示成员已不存在，可按已摘除处理。
+func isMissingIfaceErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Invalid sw_if_index") || strings.Contains(msg, "(-2)")
+}
