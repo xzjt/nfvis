@@ -321,9 +321,6 @@ func (p *L2Provider) desiredMembers(c L2Client, vs model.VirtualSwitch) (map[uin
 		return attached, nil
 	}
 	for _, port := range vs.Ports {
-		if port.Container != "" {
-			return nil, fmt.Errorf("端口 %s 引用容器接口，属 M4-7（容器编排）", portKey(port))
-		}
 		portIdx, err := p.portIndex(c, vs, port)
 		if err != nil {
 			return nil, err
@@ -379,6 +376,18 @@ func (p *L2Provider) portIndex(c L2Client, vs model.VirtualSwitch, port model.VS
 		if !ok {
 			return 0, fmt.Errorf("%w: VNF %s vNIC %s 的 vhost-user 接口 %s 不存在（是否未下发 vNIC 接入？）",
 				ErrIfaceUnavailable, port.Vnf, port.VnfInterface, name)
+		}
+		return idx, nil
+	}
+	if port.Container != "" {
+		name := orchestrator.MemifIfaceName(port.Container, port.ContainerInterface)
+		idx, ok, err := c.SwInterfaceIndex(name)
+		if err != nil {
+			return 0, fmt.Errorf("解析容器 %s vNIC %s 的 memif 接口 %s: %w", port.Container, port.ContainerInterface, name, err)
+		}
+		if !ok {
+			return 0, fmt.Errorf("%w: 容器 %s vNIC %s 的 memif 接口 %s 不存在（是否未下发 vNIC 接入？）",
+				ErrIfaceUnavailable, port.Container, port.ContainerInterface, name)
 		}
 		return idx, nil
 	}

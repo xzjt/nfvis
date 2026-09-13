@@ -107,6 +107,13 @@ func (c recContainer) DeleteContainer(ctx context.Context, name string) error {
 	return nil
 }
 func (c recContainer) EnsureConsistent(ctx context.Context, cfg model.Config) []error { return nil }
+func (c recContainer) StartContainer(context.Context, string) error                   { return nil }
+func (c recContainer) StopContainer(context.Context, string) error                    { return nil }
+func (c recContainer) RestartContainer(context.Context, string) error                 { return nil }
+func (c recContainer) ContainerState(context.Context, string) (string, error) {
+	return CTStateAbsent, nil
+}
+func (c recContainer) ContainerLogs(context.Context, string, int) (string, error) { return "", nil }
 
 func newRecApplier(netFail string) (Applier, *[]string) {
 	calls := &[]string{}

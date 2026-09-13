@@ -47,3 +47,39 @@ func VnfIfaceName(vmName, ifaceName string) string {
 func VnfPortTag(vmName, ifaceName string) string {
 	return "nfvis:vnf:" + vmName + ":" + ifaceName
 }
+
+// DefaultMemifDir memif socket 缺省目录（容器 vNIC，FR-NET-022）。
+const DefaultMemifDir = "/run/nfvis/memif"
+
+// MemifSocketPath 容器 vNIC 的 VPP 侧 memif socket 路径。
+func MemifSocketPath(memifDir, owner, ifaceName string) string {
+	return path.Join(memifDir, owner+"-"+ifaceName+".sock")
+}
+
+// MemifSocketID / MemifID 由 (容器名, vNIC 名) 确定性派生（FNV-1a，非零）。
+// VPP memif 的 socket-id 与 memif-id 命名空间独立，同一容器多 vNIC 需各自确定。
+func MemifSocketID(owner, ifaceName string) uint32 {
+	return deriveUint32("sock:" + owner + "/" + ifaceName)
+}
+func MemifID(owner, ifaceName string) uint32 { return deriveUint32("memif:" + owner + "/" + ifaceName) }
+
+func deriveUint32(key string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	v := h.Sum32()
+	if v == 0 {
+		v = 1
+	}
+	return v
+}
+
+// MemifIfaceName memif 接口在 VPP 中的名字（容器端口按名引用；≤63 字节，超长用哈希）。
+func MemifIfaceName(owner, ifaceName string) string {
+	full := "mf-" + owner + "-" + ifaceName
+	if len(full) <= 63 {
+		return full
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte("memif/" + owner + "/" + ifaceName))
+	return fmt.Sprintf("mf-%08x", h.Sum32())
+}

@@ -42,6 +42,7 @@ type Options struct {
 	VM          VMRuntime          // VM 生命周期（M4-3；nil = 生命周期动作 503、状态省略）
 	VMConsole   VMConsoleRuntime   // VM 串口 console（M4-5；nil = console 端点 503）
 	VMSnapshots VMSnapshotRuntime  // VM 快照（M4-6；nil = 快照端点 503）
+	Containers  ContainerRuntime   // 容器生命周期/日志（M4-7；nil = 503）
 }
 
 // Server NFViS REST server。
@@ -60,6 +61,7 @@ type Server struct {
 	vm          VMRuntime
 	vmConsole   VMConsoleRuntime
 	vmSnapshots VMSnapshotRuntime
+	containers  ContainerRuntime
 	consoleTix  *consoleTickets
 	log         *slog.Logger
 	mux         *http.ServeMux
@@ -77,7 +79,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, consoleTix: newConsoleTickets(), log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, consoleTix: newConsoleTickets(), log: log}
 	s.cliExec.setRuntime(opts.Diag, opts.State)
 	s.cliExec.setNetRuntime(opts.L2, opts.L3, opts.LLDP, opts.NAT, opts.Alarms)
 	mux := http.NewServeMux()
@@ -159,6 +161,14 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("POST "+APIPrefix+"/virtual-machine-functions/{name}/snapshots", s.auth(s.handleCreateSnapshot, schema.ClassSuperUser, "request virtual-machine-functions snapshot create"))
 	mux.Handle("POST "+APIPrefix+"/virtual-machine-functions/{name}/snapshots/{tail...}", s.auth(s.dispatchSnapshotPost, schema.ClassSuperUser, "request virtual-machine-functions snapshot"))
 	mux.Handle("DELETE "+APIPrefix+"/virtual-machine-functions/{name}/snapshots/{snapshot}", s.auth(s.handleDeleteSnapshot, schema.ClassSuperUser, "request virtual-machine-functions snapshot delete"))
+
+	// M4-7：容器 VNF（FR-CMP-020~022）
+	mux.Handle("GET "+APIPrefix+"/container-functions", s.auth(s.handleListContainers, schema.ClassReadOnly, "show container-functions"))
+	mux.Handle("GET "+APIPrefix+"/container-functions/{name}", s.auth(s.handleGetContainer, schema.ClassReadOnly, "show container-functions"))
+	mux.Handle("POST "+APIPrefix+"/container-functions", cfgAPI(s.handlePostContainer))
+	mux.Handle("DELETE "+APIPrefix+"/container-functions/{name}", cfgAPI(s.handleDeleteContainer))
+	mux.Handle("GET "+APIPrefix+"/container-functions/{name}/logs", s.auth(s.handleContainerLogs, schema.ClassReadOnly, "request container-functions log"))
+	mux.Handle("POST "+APIPrefix+"/container-functions/{tail...}", s.auth(s.dispatchContainerPost, schema.ClassSuperUser, "request container-functions"))
 
 	// M3-8：告警列表（恢复收敛的不可收敛项落点，FR-OPS-010）
 	mux.Handle("GET "+APIPrefix+"/alarms", s.auth(s.handleGetAlarms, schema.ClassReadOnly, "show alarms"))
