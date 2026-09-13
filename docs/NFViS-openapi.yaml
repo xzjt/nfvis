@@ -790,6 +790,51 @@ paths:
         "200": { description: candidate 已替换为历史快照 }
         "404": { $ref: "#/components/responses/Error404" }
 
+  /cli/execute:
+    post:
+      tags: [configuration]
+      x-internal: true
+      summary: 执行一行 CLI 命令（cli_bridge，仅 nfvis-cli 使用，不承诺第三方兼容）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [line]
+              properties:
+                line: { type: string, description: CLI 命令行（不含管道时逐字执行） }
+                source: { type: string, enum: [ssh, console], description: 接入源（影响 FR-CFG-012 自锁判定） }
+      responses:
+        "200":
+          description: 执行结果
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CLIExecuteResult" }
+        "400": { $ref: "#/components/responses/Error400" }
+
+  /cli/candidates:
+    get:
+      tags: [configuration]
+      x-internal: true
+      summary: CLI ?/Tab 补全候选（仅 nfvis-cli 使用）
+      parameters:
+        - { name: tokens, in: query, schema: { type: string }, description: 已完成 token（逗号分隔） }
+        - { name: partial, in: query, schema: { type: string }, description: 正在输入的前缀 }
+        - { name: kind, in: query, schema: { type: string }, description: 清单模式（ifnames/vmnames 等动态候选来源） }
+      responses:
+        "200":
+          description: 候选列表（token/desc 对，或 kind 模式下的字符串清单）
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    Token: { type: string }
+                    Desc: { type: string }
+
   /alarms:
     get:
       tags: [alarms-events]
@@ -2044,6 +2089,14 @@ components:
         warnings:
           type: array
           items: { type: string, example: "resource-pools 变更需 reboot 生效" }
+
+    CLIExecuteResult:
+      type: object
+      properties:
+        output: { type: string }
+        mode: { type: string, enum: [oper, config] }
+        path: { type: array, items: { type: string } }
+        prompt: { type: string }
 
     ConfigSession:
       type: object
