@@ -57,11 +57,13 @@ func (g *govppL3Client) IPTableAddDel(tableID uint32, isIP6, add bool, name stri
 		Table: ip.IPTable{TableID: tableID, IsIP6: isIP6, Name: name},
 	}).ReceiveReply(reply)
 	if err != nil {
+		if add && vppErrIs(err, vppTableExist) {
+			return nil
+		}
 		return err
 	}
 	if reply.Retval != 0 {
-		// -111 = table already exists：幂等重放视为成功
-		if add && reply.Retval == -111 {
+		if add && reply.Retval == vppTableExist {
 			return nil
 		}
 		return fmt.Errorf("ip_table_add_del(table=%d,ip6=%v,add=%v) retval=%d", tableID, isIP6, add, reply.Retval)

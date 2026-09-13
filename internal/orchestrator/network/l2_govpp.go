@@ -107,11 +107,13 @@ func (g *govppL2Client) BridgeDomainAddDel(bdID uint32, add, learn bool, tag str
 		BdTag: tag, IsAdd: add,
 	}).ReceiveReply(reply)
 	if err != nil {
+		if add && vppErrIs(err, vppBdExists) { // 幂等：BD 已存在（FR-OPS-010）
+			return nil
+		}
 		return err
 	}
 	if reply.Retval != 0 {
-		// -119 = BD already exists：幂等重放时视为成功（FR-OPS-010）
-		if add && reply.Retval == -119 {
+		if add && reply.Retval == vppBdExists {
 			return nil
 		}
 		return fmt.Errorf("bridge_domain_add_del(bd=%d,add=%v) retval=%d", bdID, add, reply.Retval)
