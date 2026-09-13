@@ -110,6 +110,7 @@ type L2Provider struct {
 
 	mu       sync.Mutex
 	attached map[uint32]map[uint32]attachment // bdID → swIfIndex → 挂接方式
+	acl      *AclProvider                     // 可选：端口 acl-in/acl-out 绑定
 }
 
 // NewL2Provider 以固定客户端构造（测试/单连接场景）。
@@ -121,6 +122,9 @@ func NewL2Provider(c L2Client) *L2Provider {
 func NewL2ProviderFunc(f func() (L2Client, error)) *L2Provider {
 	return &L2Provider{client: f, attached: map[uint32]map[uint32]attachment{}}
 }
+
+// SetACL 注入 ACL 编排（端口 acl-in/acl-out 绑定）。
+func (p *L2Provider) SetACL(a *AclProvider) { p.acl = a }
 
 // ApplyBridgeDomain 把 L2 虚拟交换机收敛到 bridge domain：建 BD、挂接目标端口
 // （access/trunk VLAN 经子接口），并摘除不再属于该 BD 的成员。
@@ -169,6 +173,18 @@ func (p *L2Provider) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwit
 	for _, idx := range idxs {
 		if err := desired[uint32(idx)](c); err != nil {
 			return err
+		}
+	}
+
+	// 端口 acl-in/acl-out 绑定（FR §4.3）
+	if p.acl != nil {
+		for _, port := range vs.Ports {
+			if port.Interface == "" || (port.AclIn == "" && port.AclOut == "") {
+				continue
+			}
+			if err := p.acl.Bind(ctx, port.Interface, port.AclIn, port.AclOut); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
