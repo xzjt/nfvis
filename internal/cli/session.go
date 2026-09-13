@@ -76,18 +76,21 @@ func (s *Session) Candidates(line string) []schema.Candidate {
 }
 
 // CompleteLine 处理 Tab：唯一匹配补全，多匹配补到公共前缀（FR-CLI-003/§5.2）。
+// 以去掉尾随空白后的文本为基准追加，避免把分隔用的空格/Tab 带进补全结果。
 func (s *Session) CompleteLine(line string) string {
+	line = strings.TrimRight(line, "\t") // Tab 是触发键，不进入补全文本
 	tokens, partial := completionTokens(line)
+	base := strings.TrimSuffix(strings.TrimRight(line, " \t"), partial)
 	root := s.rootForContext(tokens)
 	cs := schema.Candidates(root, tokens, partial, s.dynCandidates())
 	if len(cs) == 0 {
 		return line
 	}
 	if len(cs) == 1 {
-		return strings.TrimSuffix(line, partial) + cs[0].Token + " "
+		return base + cs[0].Token + " "
 	}
 	if common := commonPrefix(cs); len(common) > len(partial) {
-		return strings.TrimSuffix(line, partial) + common
+		return base + common
 	}
 	return line
 }

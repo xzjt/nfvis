@@ -123,3 +123,14 @@ import (
 	"github.com/xzjt/nfvis/pkg/cliclient"
 )
 `
+
+func TestCompleteLineTrailingTab(t *testing.T) {
+	// W2 raw 编辑器在 Tab 处保留分隔符；补全结果不得把 Tab 带进命令
+	s := newTestSession("oper")
+	if got := s.CompleteLine("conf\t"); got != "configure " {
+		t.Fatalf("尾随 Tab 应正常补全: %q", got)
+	}
+	if got := s.CompleteLine("show vir\t"); got != "show virtual-" {
+		t.Fatalf("尾随 Tab 多匹配应补公共前缀: %q", got)
+	}
+}

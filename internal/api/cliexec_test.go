@@ -285,3 +285,33 @@ func TestCLICommitCheckNoSideEffect(t *testing.T) {
 		t.Fatalf("commit check 不应产生修订: %d", rev)
 	}
 }
+
+// W3 补强：无歧义前缀可执行（FR-CLI-004）——缩写与 Tab 补全同源，服务端
+// 规整 token 后再分发，故不带 Tab 直接回车亦合法。
+func TestCLIAbbreviationExecutable(t *testing.T) {
+	x, _ := newCLIKit(t)
+
+	// 操作模式缩写：sh ver → show version
+	res := x.Execute("admin", aaa.ClassSuperUser, "ssh", "sh ver")
+	if strings.Contains(res.Output, "%%") || !strings.Contains(res.Output, "NFViS") {
+		t.Fatalf("sh ver 应执行 show version: %q", res.Output)
+	}
+	// 缩写进入配置模式并缩写配置路径
+	out := run(t, x, "admin", aaa.ClassSuperUser, "ssh",
+		"conf",
+		"set sys hostn abbrev-node",
+		"commit",
+	)
+	if !strings.Contains(out, "commit 成功") {
+		t.Fatalf("conf/set sys hostn 应可执行: %s", out)
+	}
+	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", "sh conf")
+	if !strings.Contains(res.Output, "abbrev-node") {
+		t.Fatalf("sh conf 应显示已提交配置: %q", res.Output)
+	}
+	// 歧义前缀：报错并列出候选（§5.5）
+	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", "sh vir")
+	if !strings.Contains(res.Output, "歧义") || !strings.Contains(res.Output, "virtual-switches") {
+		t.Fatalf("sh vir 应报歧义并列出候选: %q", res.Output)
+	}
+}

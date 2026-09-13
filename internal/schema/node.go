@@ -261,6 +261,46 @@ func Match(root *Node, tokens []string) (*Node, int, error) {
 	return n, depth, nil
 }
 
+// Canonicalize 将 token 序列按树规整为规范关键字名（FR-CLI-004：无歧义前缀
+// 即可执行）。关键字按 childExact/childAbbrev 解析后替换为节点名；Param/Value
+// 位置保留原 token（取值不做转换）。遍历规则与 Match 一致。
+//
+// 歧义前缀直接返回错误（列出候选，§5.5）；树未建模的 token 及之后内容原样
+// 保留（执行器 self-check 后再报错），以兼容执行器支持而树未完整建模的语法
+// （如 `show configuration compare rollback <n>`）。
+func Canonicalize(root *Node, tokens []string) ([]string, error) {
+	n := root
+	out := make([]string, 0, len(tokens))
+	for i, tk := range tokens {
+		if n.consumesToken() {
+			n = n.parent
+		}
+		c := n.childExact(tk)
+		if c == nil {
+			var matches []string
+			var ambiguous bool
+			c, matches, ambiguous = n.childAbbrev(tk)
+			if ambiguous {
+				return nil, fmt.Errorf("%q 存在歧义匹配: %s（需更长前缀）", tk, strings.Join(matches, ", "))
+			}
+		}
+		switch {
+		case c != nil:
+			out = append(out, c.Name) // 关键字规范名
+			n = c
+		case n.firstParam() != nil:
+			n = n.firstParam()
+			out = append(out, tk) // 参数取值原样
+		case n.singleValue() != nil:
+			n = n.singleValue()
+			out = append(out, tk) // 值叶子原样
+		default:
+			return append(out, tokens[i:]...), nil // 树未建模：其余原样
+		}
+	}
+	return out, nil
+}
+
 // Find 按完整关键字路径查找节点（测试与 cli_bridge 使用）。
 func Find(root *Node, names ...string) (*Node, error) {
 	n := root
