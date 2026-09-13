@@ -1977,15 +1977,16 @@ components:
             properties:
               page_size: { type: string, enum: ["2M", "1G"] }
               count: { type: integer, description: 配置的页数量（配置文档用）；GET 运行态视图另含 total/allocated/free }
-              total: { type: integer }
-              allocated: { type: integer }
-              free: { type: integer }
+              total: { type: integer, description: 运行态：池总页数=count }
+              allocated: { type: integer, description: 运行态：已分配给 VNF 的页数（backing=normal 的 VM 不占大页池） }
+              free: { type: integer, description: 运行态：空闲页数（FR-CMP-003） }
         cpu:
           type: object
           properties:
             isolated_cores:
               type: array
               items: { type: integer }
+              description: 配置：隔离核全集（可与 GET 运行态共用）
             numa:
               type: array
               items:
@@ -1993,6 +1994,7 @@ components:
                 properties:
                   node: { type: integer }
                   cores: { type: array, items: { type: integer } }
+              description: 配置：NUMA 节点与核（FR-CMP-001 NUMA 感知）
             allocated:
               type: array
               items:
@@ -2000,6 +2002,15 @@ components:
                 properties:
                   vnf: { type: string }
                   cores: { type: array, items: { type: integer } }
+              description: 运行态：各 VNF 绑核分配（按 committed 配置确定性重算，FR-CMP-002/003）
+            free:
+              type: array
+              items: { type: integer }
+              description: 运行态：未被 VPP 保留核与 VNF 绑核占用的隔离核（FR-CMP-003）
+            vpp_reserved:
+              type: array
+              items: { type: integer }
+              description: 运行态：VPP main-core + corelist-workers，账本先扣、VNF 不可用（FR-SYS-010）
 
     VMFunction:
       type: object

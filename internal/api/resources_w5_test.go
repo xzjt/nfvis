@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/xzjt/nfvis/internal/model"
 )
 
 // ---------- W5：资源池 / 本地用户 / 系统状态 ----------
@@ -44,8 +46,78 @@ func TestResourcePoolsEndpoint(t *testing.T) {
 	if hp["total"] != float64(32) || hp["allocated"] != float64(0) || hp["free"] != float64(32) {
 		t.Fatalf("大页用量不符: %v", hp)
 	}
+	if hp["count"] != float64(32) || hp["page_size"] != "1G" {
+		t.Fatalf("大页配置项应含 count/page_size: %v", hp)
+	}
 	if _, ok := got.CPU["vpp_reserved"]; !ok {
 		t.Fatalf("CPU 应含 vpp_reserved（FR-SYS-010）: %s", data)
+	}
+	if _, ok := got.CPU["isolated_cores"]; !ok {
+		t.Fatalf("CPU 应含 isolated_cores（契约 ResourcePool.cpu）: %s", data)
+	}
+	if _, ok := got.CPU["allocated"]; !ok {
+		t.Fatalf("CPU 应含 allocated（契约 ResourcePool.cpu）: %s", data)
+	}
+}
+
+// 运行态视图与契约 ResourcePool 对齐：配置项 + 运行态（vpp_reserved/allocated/free），
+// 未配置资源池时返回空视图而非 panic（FR-CMP-001~004、FR-SYS-010，决策 #39）。
+func TestResourcePoolViewShape(t *testing.T) {
+	// 未配置资源池：空视图（此前实现会 nil panic）。
+	empty := resourcePoolView(model.Config{})
+	if hps, ok := empty["hugepages"].([]map[string]any); !ok || len(hps) != 0 {
+		t.Fatalf("未配置资源池应返回空 hugepages: %v", empty["hugepages"])
+	}
+	cpu := empty["cpu"].(map[string]any)
+	for _, k := range []string{"isolated_cores", "vpp_reserved", "free", "allocated"} {
+		if _, ok := cpu[k]; !ok {
+			t.Fatalf("cpu 缺少 %s: %v", k, cpu)
+		}
+	}
+
+	// 有池 + VPP 保留核 + 两台 VM（一台 normal 不占大页）。
+	cfg := model.Config{
+		ResourcePools: &model.ResourcePool{
+			Hugepages: []model.HPool{{PageSize: "1G", Count: 8}},
+			CPU: &model.CPUSetup{
+				IsolatedCores: []int{4, 5, 6, 7, 8, 9},
+				Numa:          []model.NumaNode{{Node: 0, Cores: []int{4, 5, 6, 7, 8, 9}}},
+			},
+		},
+		Vpp: &model.VppConfig{CPU: &model.VppCPU{MainCore: 4, CorelistWorkers: "5"}},
+		VirtualMachineFunctions: []model.VMFunction{
+			{Name: "fw-vm", Image: "img", VCPU: model.VMCpu{Count: 2},
+				Memory: model.VMMemory{SizeMB: 1024, HugepageSize: "1G"}},
+			{Name: "plain-vm", Image: "img", VCPU: model.VMCpu{Count: 1},
+				Memory: model.VMMemory{SizeMB: 2048, Backing: "normal"}},
+		},
+	}
+	view := resourcePoolView(cfg)
+
+	hp := view["hugepages"].([]map[string]any)[0]
+	if hp["total"] != 8 || hp["allocated"] != 1 || hp["free"] != 7 {
+		t.Fatalf("normal VM 不应占大页：%v", hp)
+	}
+
+	cpu = view["cpu"].(map[string]any)
+	if got := cpu["isolated_cores"].([]int); len(got) != 6 {
+		t.Fatalf("isolated_cores 应为配置全集: %v", got)
+	}
+	if got := cpu["vpp_reserved"].([]int); len(got) != 2 || got[0] != 4 || got[1] != 5 {
+		t.Fatalf("vpp_reserved 应为 [4 5]: %v", got)
+	}
+	if got := cpu["free"].([]int); len(got) != 1 || got[0] != 9 {
+		t.Fatalf("free 应为 [9]（6 核扣 VPP 2 + VNF 3）: %v", got)
+	}
+	alloc := cpu["allocated"].([]map[string]any)
+	if len(alloc) != 2 || alloc[0]["vnf"] != "fw-vm" || alloc[1]["vnf"] != "plain-vm" {
+		t.Fatalf("allocated 应按 VNF 名升序: %v", alloc)
+	}
+	if cores := alloc[0]["cores"].([]int); len(cores) != 2 || cores[0] != 6 || cores[1] != 7 {
+		t.Fatalf("fw-vm 绑核应为 [6 7]: %v", cores)
+	}
+	if numa, ok := cpu["numa"].([]map[string]any); !ok || len(numa) != 1 {
+		t.Fatalf("cpu 应含配置 numa: %v", cpu["numa"])
 	}
 }
 

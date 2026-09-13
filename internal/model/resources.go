@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 )
 
 // 资源池账本（FR-CMP-002/003/004）。
@@ -94,7 +95,8 @@ func (l *PoolLedger) Allocate(cfg Config) []ValidateError {
 		vmPath := fmt.Sprintf("virtual-machine-functions[%s]", vm.Name)
 
 		// —— 大页内存（FR-CFG-011⑪：指定页池必须有足够余量）——
-		if vm.Memory.SizeMB > 0 {
+		// FR-CMP-019/决策 #39：backing=normal 用普通内存，不占用大页池。
+		if vm.Memory.SizeMB > 0 && !usesNormalMemory(vm) {
 			pageSize := vm.Memory.HugepageSize
 			if pageSize == "" && cfg.ResourcePools != nil && len(cfg.ResourcePools.Hugepages) > 0 {
 				pageSize = cfg.ResourcePools.Hugepages[0].PageSize // 缺省取资源池主池
@@ -163,6 +165,12 @@ func (l *PoolLedger) allocateCores(cfg Config, vm *VMFunction, used map[int]bool
 		used[c] = true
 	}
 	return assigned, nil
+}
+
+// usesNormalMemory 内存 backing=normal（普通内存，仅限无 vhost-user vNIC 的 VM，
+// FR-CMP-019）：不占用大页池。
+func usesNormalMemory(vm VMFunction) bool {
+	return strings.EqualFold(vm.Memory.Backing, "normal")
 }
 
 // pagesNeeded 由内存 MB 与页大小换算页数（向上取整）。
