@@ -12,10 +12,19 @@ import (
 
 // VppStatus /vpp/status 响应（契约 components/schemas/VppStatus）。
 type VppStatus struct {
-	Version        string `json:"version"`
-	Connected      bool   `json:"connected"`
-	PendingRestart bool   `json:"pending_restart"`
-	LastError      string `json:"last_error,omitempty"`
+	Version        string      `json:"version"`
+	Connected      bool        `json:"connected"`
+	PendingRestart bool        `json:"pending_restart"`
+	LastError      string      `json:"last_error,omitempty"`
+	Threads        []VppThread `json:"threads,omitempty"`
+}
+
+// VppThread /vpp/status 线程项（契约 components/schemas/VppThread）。
+type VppThread struct {
+	ID   uint32 `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+	Core uint32 `json:"core"`
 }
 
 // VppController VPP 数据面控制能力（编排器装配注入）。
@@ -35,7 +44,27 @@ func (s *Server) handleGetVppStatus(w http.ResponseWriter, r *http.Request) {
 		mapEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.vpp.Status(cfg.Vpp))
+	view := s.vpp.Status(cfg.Vpp)
+	if s.state != nil {
+		for _, t := range s.state.Threads(r.Context()) {
+			view.Threads = append(view.Threads, VppThread{ID: t.ID, Name: t.Name, Type: t.Type, Core: t.Core})
+		}
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// handleGetVppConfig GET /api/v1/vpp/config：committed vpp 段（startup.conf 生成源）。
+func (s *Server) handleGetVppConfig(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.engine.Committed()
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	if cfg.Vpp == nil {
+		writeJSON(w, http.StatusOK, map[string]any{})
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg.Vpp)
 }
 
 // handlePostVppRestart POST /api/v1/vpp/restart：按 committed 配置重建并重启（FR-SYS-009）。

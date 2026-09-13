@@ -23,6 +23,7 @@ import (
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
 	"github.com/xzjt/nfvis/internal/orchestrator/network"
+	"github.com/xzjt/nfvis/internal/state"
 )
 
 func main() {
@@ -110,6 +111,7 @@ func run() error {
 		L2:      &l2Controller{net: netProvider},
 		L3:      &l3Controller{net: netProvider},
 		LLDP:    &lldpController{net: netProvider},
+		State:   state.New(vppMgr.Runtime()),
 	})
 
 	srvErr := make(chan error, 1)
