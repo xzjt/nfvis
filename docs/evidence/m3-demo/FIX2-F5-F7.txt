@@ -1,0 +1,24 @@
+===== F7：运行态 show 接线复验 =====
+--- show vrfs demo-l3 routes（FIB）---
+Prefix               NextHop              Distance
+0.0.0.0/0            192.168.155.2        0
+0.0.0.0/32           0.0.0.0              0
+10.10.0.0/32         0.0.0.0              0
+--- show virtual-switches demo-l2 mac-table ---
+MAC                  VLAN       Port
+b0:b0:00:00:00:00    0          bvi0
+00:0c:29:a9:61:84    0          ens224
+00:50:56:c0:00:08    0          ens224
+--- show nat（空表=已接线）---
+（无 NAT 会话）
+--- show protocols lldp neighbors ---
+（无 LLDP 邻居）
+
+===== F5：nfvisd 重启后重放（此前 BVI 重建报 -152）=====
+1
+--- 重启后 VPP 侧 BVI 与状态 ---
+              Name               Idx    State  MTU (L3/IP4/IP6/MPLS)     Counter          Count     
+bvi0                              3      up          9000/0/0/0     rx packets                     1
+--- 重启后跨网段通流 ---
+3 packets transmitted, 2 received, 33.3333% packet loss, time 2057ms
+rtt min/avg/max/mdev = 0.294/0.302/0.311/0.008 ms

@@ -1,0 +1,16 @@
+===== D8：重启 VPP → nfvisd 自动重放（FR-OPS-011）=====
+--- 重放后 VPP 侧 ---
+  BD-ID   Index   BSN  Age(min)  Learning  U-Forwrd   UU-Flood   Flooding  ARP-Term  arp-ufwd Learn-co Learn-li   BVI-Intf 
+10365503    1      0     off        on        on       flood        on       off       off        1    16777216     bvi0   
+              Name               Idx    State  MTU (L3/IP4/IP6/MPLS)     Counter          Count     
+bvi0                              3      up          9000/0/0/0     
+ens192 (up):
+  L3 192.168.155.200/24 ip4 table-id 10365100 fib-idx 1
+--- 重放后跨网段通流 ---
+3 packets transmitted, 2 received, 33.3333% packet loss, time 2030ms
+rtt min/avg/max/mdev = 0.277/0.289/0.301/0.012 ms
+
+Statistics: 3 sent, 2 received, 33% packet loss
+--- 无恢复告警 ---
+%% 该 show 命令依赖底座运行态，M3/M4 接入后可用（当前可用：show version / show configuration [candidate|compare rollback n] / show system configuration sessions）
+exit status 1

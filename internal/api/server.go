@@ -72,6 +72,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	}
 	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, log: log}
 	s.cliExec.setRuntime(opts.Diag, opts.State)
+	s.cliExec.setNetRuntime(opts.L2, opts.L3, opts.LLDP, opts.NAT, opts.Alarms)
 	mux := http.NewServeMux()
 
 	// 认证（免 token，FR-API-001）

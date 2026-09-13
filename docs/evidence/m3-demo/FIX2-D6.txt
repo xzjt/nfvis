@@ -1,0 +1,26 @@
+===== D6：端口限速（policer，CIR 100kbps）=====
+[ok] interfaces ens192 ingress-policy demo-limit
+commit 成功 (revision 6)
+--- 限速下 VPP ping 20 包（期望丢包明显）---
+
+Statistics: 20 sent, 0 received, 100% packet loss
+--- policer 计数 ---
+Name "demo-limit" type 1r2c cir 100 eir 0 cb 10000 eb 0
+rate type kbps, round type up
+conform action transmit, exceed action drop, violate action drop
+ 
+Policer at index 0: single rate, not color-aware
+cir 165750 tok/period, pir 1 tok/period, scale 18
+
+===== 清理演示对象 =====
+  - interfaces[ens192].ingress_policy: 限速策略 "demo-limit" 不存在
+  - vrfs[demo-l3].l3_interfaces[ens192].acl_in: ACL "demo-acl" 不存在
+host route 已清理
+===== 顺序清理（先解引用，再删对象）=====
+exit status 1
+  - vrfs[demo-l3].l3_interfaces[ens192].acl_in: ACL "demo-acl" 不存在
+--- 清理后 VPP 侧 ---
+  BD-ID   Index   BSN  Age(min)  Learning  U-Forwrd   UU-Flood   Flooding  ARP-Term  arp-ufwd Learn-co Learn-li   BVI-Intf 
+10365503    1      0     off        on        on       flood        on       off       off        4    16777216     bvi0   
+                                                                    ip4                            1
+nfvisd 已停止

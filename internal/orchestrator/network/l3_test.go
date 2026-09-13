@@ -15,15 +15,16 @@ type fakeL3 struct {
 	nextSub uint32
 	nextBVI uint32
 
-	tables  map[uint32]bool
-	v4table map[uint32]uint32 // swIfIndex → v4 table
-	addrs   map[uint32][]string
-	routes  map[uint32][]RouteEntry
-	bviBD   map[uint32]uint32
-	bviGone []uint32
-	state   map[uint32]bool // 接口管理员状态（SetState 记录）
-	cleared []uint32        // 被清地址的接口（删除全部地址）
-	err     error
+	tables     map[uint32]bool
+	v4table    map[uint32]uint32 // swIfIndex → v4 table
+	addrs      map[uint32][]string
+	routes     map[uint32][]RouteEntry
+	bviBD      map[uint32]uint32
+	bviGone    []uint32
+	state      map[uint32]bool // 接口管理员状态（SetState 记录）
+	bviCreated int             // BviCreate 调用次数（恢复幂等断言用）
+	cleared    []uint32        // 被清地址的接口（删除全部地址）
+	err        error
 }
 
 func newFakeL3() *fakeL3 {
@@ -36,6 +37,19 @@ func newFakeL3() *fakeL3 {
 }
 
 func (f *fakeL3) Close() {}
+
+// BviOfBD 返回 BD 上既有 BVI（模拟 nfvisd 重启后 VPP 侧对象仍在）。
+func (f *fakeL3) BviOfBD(bdID uint32) (uint32, bool, error) {
+	if f.err != nil {
+		return 0, false, f.err
+	}
+	for idx, bd := range f.bviBD {
+		if bd == bdID {
+			return idx, true, nil
+		}
+	}
+	return 0, false, nil
+}
 
 func (f *fakeL3) SetState(swIfIndex uint32, up bool) error {
 	if f.err != nil {
@@ -117,6 +131,7 @@ func (f *fakeL3) Routes(tableID uint32) ([]RouteEntry, error) {
 }
 
 func (f *fakeL3) BviCreate() (uint32, error) {
+	f.bviCreated++
 	if f.err != nil {
 		return 0, f.err
 	}
@@ -305,5 +320,30 @@ func TestTableIDAndDecorator(t *testing.T) {
 	}
 	if rows == nil {
 		rows = []RouteEntry{}
+	}
+}
+
+// TestL3GatewayReuseExistingBVI nfvisd 重启后（内存映射丢失、VPP 侧 BVI 仍在）
+// 重放配置必须复用已有 BVI，不得重建挂 BD（否则 VPP 报 -152，恢复收敛失效）。
+func TestL3GatewayReuseExistingBVI(t *testing.T) {
+	f := newFakeL3()
+	// 模拟 VPP 侧既有 BVI 挂在目标 BD 上（重启后 VPP 状态仍在）
+	bd := BDID("vs-app")
+	f.bviBD[900] = bd
+
+	p := NewL3Provider(f)
+	vs := model.VirtualSwitch{Name: "vs-app", Type: "l2",
+		Gateway: &model.VSGateway{Addresses: []string{"10.10.0.1/24"}}}
+	if err := p.ApplyGateway(context.Background(), vs); err != nil {
+		t.Fatalf("重放 ApplyGateway: %v", err)
+	}
+	if f.bviCreated != 0 {
+		t.Fatalf("应复用既有 BVI，实际调用了 BviCreate %d 次", f.bviCreated)
+	}
+	if !f.state[900] {
+		t.Fatal("复用的 BVI 仍须置为 up")
+	}
+	if len(f.addrs[900]) != 1 || f.addrs[900][0] != "10.10.0.1/24" {
+		t.Fatalf("复用的 BVI 须配地址: %v", f.addrs[900])
 	}
 }
