@@ -23,6 +23,7 @@ tags:
   - name: nat
   - name: port-mirroring
   - name: qos
+  - name: vpp
   - name: resource-pools
   - name: virtual-machine-functions
   - name: container-functions
@@ -88,6 +89,25 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VersionInfo" }
+
+  /vpp/status:
+    get:
+      tags: [vpp]
+      summary: VPP 数据面状态（版本/连接/pending-restart，FR-SYS-007/009）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VppStatus" }
+
+  /vpp/restart:
+    post:
+      tags: [vpp]
+      summary: 按 committed 配置重建 startup.conf 并重启 VPP（FR-SYS-009，super-user）
+      responses:
+        "202": { $ref: "#/components/responses/ConfigAccepted" }
+        "409": { $ref: "#/components/responses/Error409" }
 
   /system/configuration/sessions:
     get:
@@ -1454,6 +1474,17 @@ components:
         libvirt: { type: string }
         qemu: { type: string }
         docker: { type: string }
+
+    VppStatus:
+      type: object
+      description: VPP 数据面状态（FR-SYS-007 版本锁定、FR-SYS-009 pending-restart）
+      properties:
+        version: { type: string, example: "26.06-release", description: 探测到的 VPP 版本 }
+        connected: { type: boolean, description: 当前是否已连接 }
+        pending_restart:
+          type: boolean
+          description: committed vpp 段与已应用 startup.conf 不一致（需 request vpp restart）
+        last_error: { type: string, description: 最近一次连接错误（无则省略） }
 
     SystemConfig:
       type: object

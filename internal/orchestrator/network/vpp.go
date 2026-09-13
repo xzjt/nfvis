@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/xzjt/nfvis/internal/model"
 )
 
 // 默认值与常量。
@@ -121,6 +123,7 @@ type Manager struct {
 	state       State
 	version     string
 	lastErr     error
+	appliedHash string // 最近一次落地/重启所依据的 vpp 配置段哈希（pending_restart 判定）
 	onReconnect func(version string)
 }
 
@@ -154,6 +157,56 @@ func (m *Manager) LastError() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lastErr
+}
+
+// StatusView VPP 状态视图（/vpp/status，M3-2/M3-7）。
+type StatusView struct {
+	Version        string `json:"version"`
+	Connected      bool   `json:"connected"`
+	PendingRestart bool   `json:"pending_restart"`
+	LastError      string `json:"last_error,omitempty"`
+}
+
+// SetApplied 记录已应用到 startup.conf 的 vpp 配置段（清除 pending_restart）。
+func (m *Manager) SetApplied(vpp *model.VppConfig) {
+	m.mu.Lock()
+	m.appliedHash = VppSectionHash(vpp)
+	m.mu.Unlock()
+}
+
+// AppliedHash 已应用的 vpp 配置段哈希（空 = 尚未应用过）。
+func (m *Manager) AppliedHash() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.appliedHash
+}
+
+// PendingRestart committed vpp 段与已应用段不一致时为 true（FR-SYS-009）。
+// 尚未应用过（appliedHash 为空）且存在 vpp 配置时也视为待重启。
+func (m *Manager) PendingRestart(vpp *model.VppConfig) bool {
+	m.mu.Lock()
+	applied := m.appliedHash
+	m.mu.Unlock()
+	current := VppSectionHash(vpp)
+	if applied == "" {
+		return vpp != nil && current != VppSectionHash(nil)
+	}
+	return applied != current
+}
+
+// StatusView 汇总连接与 pending_restart（/vpp/status 数据源）。
+func (m *Manager) StatusView(vpp *model.VppConfig) StatusView {
+	m.mu.Lock()
+	view := StatusView{
+		Version:   m.version,
+		Connected: m.state == StateConnected,
+	}
+	if m.lastErr != nil {
+		view.LastError = m.lastErr.Error()
+	}
+	m.mu.Unlock()
+	view.PendingRestart = m.PendingRestart(vpp)
+	return view
 }
 
 // ConnectOnce 尝试连接一次并校验版本，成功返回版本号。

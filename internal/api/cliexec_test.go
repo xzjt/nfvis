@@ -359,3 +359,34 @@ func TestCLIShowAclBondDetail(t *testing.T) {
 		t.Fatalf("未知 ACL 应报不存在: %q", res.Output)
 	}
 }
+
+// 字符串类型字段不应被数字字面量误判为 JSON number（M3-2 实测：corelist-workers 5）。
+func TestCLIStringTypedNumericValue(t *testing.T) {
+	x, engine := newCLIKit(t)
+	run(t, x, "admin", aaa.ClassSuperUser, "ssh",
+		"configure",
+		"set resource-pools cpu isolated-cores 4-5",
+		"set resource-pools hugepages page-size 1G count 3",
+		"set vpp cpu main-core 4",
+		"set vpp cpu corelist-workers 5",
+		"set vpp memory main-heap-size 2G",
+		"set vpp memory hugepage-preference 1G",
+		"commit",
+	)
+	cfg, err := engine.Committed()
+	if err != nil {
+		t.Fatalf("Committed: %v", err)
+	}
+	if cfg.Vpp == nil || cfg.Vpp.CPU == nil {
+		t.Fatalf("vpp cpu 未写入: %+v", cfg.Vpp)
+	}
+	if cfg.Vpp.CPU.CorelistWorkers != "5" {
+		t.Fatalf("corelist-workers 应为字符串 \"5\"，实际 %#v", cfg.Vpp.CPU.CorelistWorkers)
+	}
+	if cfg.Vpp.CPU.MainCore != 4 {
+		t.Fatalf("main-core 应为数字 4，实际 %#v", cfg.Vpp.CPU.MainCore)
+	}
+	if cfg.Vpp.Memory == nil || cfg.Vpp.Memory.MainHeapSize != "2G" {
+		t.Fatalf("main-heap-size: %+v", cfg.Vpp.Memory)
+	}
+}

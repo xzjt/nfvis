@@ -20,7 +20,9 @@ import (
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/api"
 	"github.com/xzjt/nfvis/internal/config"
+	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
+	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
 func main() {
@@ -37,6 +39,7 @@ func run() error {
 		tlsCert   = flag.String("tls-cert", "", "TLS 证书 PEM 路径（与 -tls-key 成对；缺省明文 HTTP，仅限开发）")
 		tlsKey    = flag.String("tls-key", "", "TLS 私钥 PEM 路径")
 		initAdmin = flag.String("init-admin-password", "", "首次启动引导 admin 用户的口令（缺省随机生成并打印一次）")
+		vppSock   = flag.String("vpp-sock", envOr("NFVIS_VPP_SOCK", network.DefaultSocket), "VPP binary API 套接字（FR-SYS-007）")
 		showVer   = flag.Bool("version", false, "输出版本后退出")
 	)
 	flag.Parse()
@@ -72,15 +75,28 @@ func run() error {
 		fmt.Printf("%% 首次启动已创建用户 admin (super-user)。一次性口令（仅显示一次，请立即修改）: %s\n", oneTime)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// M3：VPP 数据面连接管理（FR-SYS-007）+ startup.conf 生成器（FR-SYS-008/009）。
+	// VPP 未运行时降级为告警并持续重连，不阻塞 nfvisd 启动。
+	vppMgr := network.NewManager(network.Config{Socket: *vppSock, Log: log}, nil)
+	defer vppMgr.Close()
+	go func() {
+		if err := vppMgr.Run(ctx); err != nil {
+			log.Error("VPP 连接管理退出", "err", err)
+		}
+	}()
+	applier := &network.Applier{Mgr: vppMgr, PCI: network.NewSysfsPCIResolver(),
+		Restarter: network.NewSystemctlRestarter(), RestartOnApply: true}
+
 	apiServer := api.New(engine, aaaSvc, api.Options{
 		Addr:    *listen,
 		TLSCert: *tlsCert,
 		TLSKey:  *tlsKey,
 		Log:     log,
+		VPP:     &vppController{mgr: vppMgr, applier: applier, engine: engine},
 	})
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- apiServer.ListenAndServe() }()
@@ -102,4 +118,35 @@ func run() error {
 	}
 	log.Info("nfvisd 已停止")
 	return nil
+}
+
+// vppController 装配 api.VppController（M3-2）：状态来自连接管理器，
+// 重启按当前 committed 全量配置重新生成 startup.conf 并重启 VPP。
+type vppController struct {
+	mgr     *network.Manager
+	applier *network.Applier
+	engine  *config.Engine
+}
+
+func (c *vppController) Status(vpp *model.VppConfig) api.VppStatus {
+	v := c.mgr.StatusView(vpp)
+	return api.VppStatus{Version: v.Version, Connected: v.Connected,
+		PendingRestart: v.PendingRestart, LastError: v.LastError}
+}
+
+func (c *vppController) Restart(ctx context.Context, _ *model.VppConfig) error {
+	cfg, err := c.engine.Committed()
+	if err != nil {
+		return err
+	}
+	_, err = c.applier.Apply(ctx, &cfg)
+	return err
+}
+
+// envOr 读取环境变量，缺省返回 fallback。
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }

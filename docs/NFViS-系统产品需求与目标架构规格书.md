@@ -509,6 +509,7 @@ tap 接口 VM 接入；动态路由协议（OSPF/BGP）；VXLAN overlay；SNMP�
 | 27 | 配置节点注释存储（W4 annotate 落地确认） | annotate 语句的注释以语句路径（空格连接的 CLI token，如 "system hostname"）为键存于配置文档顶层 `annotations` 字段——注释随事务引擎可 compare/rollback，随 load/save 导入导出；show configuration 以注释行渲染；delete annotate <path> 清除 |
 | 28 | 内部端点入契约（W8） | `/cli/execute` 与 `/cli/candidates` 登记进 OpenAPI 并标注 `x-internal: true`——仅供 nfvis-cli 使用（CLI 专用通道，命令树契约是其真正的接口），不承诺第三方兼容；W9 一致性测试据此校验「注册路由 ⊆ 契约端点」 |
 | 29 | prototype 与 internal/schema 漂移处置（M3 T0-2） | 采用「薄演示」方案：删除 `prototype/` 自带的命令树/事务/编辑器副本（`tree.go`/`engine.go`/`editor.go` 及其独立 `go.mod`），prototype 并入主模块并直接引用 `internal/schema` 的命令树，仅演示 `?`/Tab 补全与无歧义缩写消歧；事务/历史/空闲超时等一律以 `nfvis-cli` 为准。既消除同一语义两套实现持续漂移的根因，又保留命令树的离线教学价值 |
+| 30 | startup.conf 生成与 pending-restart（M3-2 落地确认） | nfvisd 依据 committed `vpp` 段生成 `/etc/vpp/startup.conf`，键名以实装 VPP 26.06 的默认 startup.conf 为准：`hugepage-preference` 映射 `memory.default-hugepage-size`；`buffers-per-numa` 属独立 `buffers` 段而非 `memory`；`workers-per-numa` 映射 `cpu.workers`。`dpdk dev` 以 **PCI 地址**为键，单网卡覆盖按 `interfaces` 名配置、由编排器运行态经 sysfs 解析 PCI（PCI 地址不入 committed 配置，保持配置可移植）；覆盖项缺省回落 `dev default`。FR-SYS-010 在生成前校验 worker/main 核 ⊆ `resource-pools cpu isolated-cores`、`hugepage-preference` ∈ 资源池页大小。pending-restart 判定为**已应用 vpp 段哈希 ≠ 当前 committed vpp 段哈希**（committed 变更即置位，不依赖引擎钩子），经 `GET /vpp/status` 暴露、`POST /vpp/restart` 重建并重启后清除；两端点本次登记入 OpenAPI 并标 `vpp` tag |
 
 ## 附录 B：CLI 命令树 ⇄ API 资源映射（摘要，实施期展开为完整文档）
 

@@ -822,7 +822,7 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 				}
 				cur[pendingKey] = v
 			} else {
-				cur[pendingKey] = typedScalar(tok)
+				cur[pendingKey] = scalarForNode(node, tok)
 			}
 			pendingKey = ""
 			// node 停留在值关键字上：后续兄弟关键字（如 page-size 下的 count）是其子节点
@@ -1043,6 +1043,29 @@ func typedScalar(tok string) any {
 		return float64(n)
 	}
 	return tok
+}
+
+// scalarForNode 依 schema 取值节点类型决定 token 的 JSON 形态：数值/布尔类型按
+// 字面解析，其余类型（string/core-list/size/ip 等）即使形似数字也保持字符串——
+// 否则 `set vpp cpu corelist-workers 5` 会把字符串字段写成数字（FR-SYS-008）。
+func scalarForNode(n *schema.Node, tok string) any {
+	v := typedScalar(tok)
+	if n == nil {
+		return v
+	}
+	if n.Kind == schema.Keyword { // 取值关键字：类型在其值子节点上
+		if sv := singleValueOf(n); sv != nil {
+			n = sv
+		}
+	}
+	switch n.ParamType {
+	case "", "uint", "int", "number", "bool":
+		return v
+	}
+	if _, isNum := v.(float64); isNum {
+		return tok
+	}
+	return v
 }
 
 // navigateJSON 按 CLI 路径 token 定位 JSON 子树（show <path>）。

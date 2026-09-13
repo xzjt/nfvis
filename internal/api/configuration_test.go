@@ -22,6 +22,15 @@ func loginAdmin(t *testing.T, ts *httptest.Server) string {
 	return resp.Token
 }
 
+func loginViewer(t *testing.T, ts *httptest.Server) string {
+	t.Helper()
+	status, resp := login(t, ts, "viewer", "s3cret-Passw0rd!")
+	if status != http.StatusOK {
+		t.Fatalf("viewer 登录失败: %d", status)
+	}
+	return resp.Token
+}
+
 func cfgRequest(t *testing.T, method, url, token string, body any, header map[string]string) (int, http.Header, []byte) {
 	t.Helper()
 	var buf io.Reader
