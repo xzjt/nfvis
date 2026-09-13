@@ -1478,6 +1478,23 @@ components:
           type: array
           description: 数据面线程（VPP show_threads；未连接时省略）
           items: { $ref: "#/components/schemas/VppThread" }
+        buffers:
+          type: array
+          description: buffer 池用量（stats segment；不可用时省略）
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              used: { type: number }
+              available: { type: number }
+              cached: { type: number }
+        memory:
+          type: object
+          description: main heap 内存合计（stats segment；不可用时省略）
+          properties:
+            total: { type: integer, format: int64 }
+            used: { type: integer, format: int64 }
+            free: { type: integer, format: int64 }
 
     VppThread:
       type: object

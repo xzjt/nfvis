@@ -12,11 +12,28 @@ import (
 
 // VppStatus /vpp/status 响应（契约 components/schemas/VppStatus）。
 type VppStatus struct {
-	Version        string      `json:"version"`
-	Connected      bool        `json:"connected"`
-	PendingRestart bool        `json:"pending_restart"`
-	LastError      string      `json:"last_error,omitempty"`
-	Threads        []VppThread `json:"threads,omitempty"`
+	Version        string          `json:"version"`
+	Connected      bool            `json:"connected"`
+	PendingRestart bool            `json:"pending_restart"`
+	LastError      string          `json:"last_error,omitempty"`
+	Threads        []VppThread     `json:"threads,omitempty"`
+	Buffers        []VppBufferPool `json:"buffers,omitempty"`
+	Memory         *VppMemory      `json:"memory,omitempty"`
+}
+
+// VppBufferPool buffer 池用量（契约）。
+type VppBufferPool struct {
+	Name      string  `json:"name"`
+	Used      float64 `json:"used"`
+	Available float64 `json:"available"`
+	Cached    float64 `json:"cached,omitempty"`
+}
+
+// VppMemory 数据面内存（main heap 合计）。
+type VppMemory struct {
+	Total uint64 `json:"total"`
+	Used  uint64 `json:"used"`
+	Free  uint64 `json:"free"`
 }
 
 // VppThread /vpp/status 线程项（契约 components/schemas/VppThread）。
@@ -48,6 +65,14 @@ func (s *Server) handleGetVppStatus(w http.ResponseWriter, r *http.Request) {
 	if s.state != nil {
 		for _, t := range s.state.Threads(r.Context()) {
 			view.Threads = append(view.Threads, VppThread{ID: t.ID, Name: t.Name, Type: t.Type, Core: t.Core})
+		}
+		if bufs, ok := s.state.Buffers(r.Context()); ok {
+			for _, p := range bufs.Pools {
+				view.Buffers = append(view.Buffers, VppBufferPool{Name: p.Name, Used: p.Used, Available: p.Available, Cached: p.Cached})
+			}
+		}
+		if mem, ok := s.state.Memory(r.Context()); ok {
+			view.Memory = &VppMemory{Total: mem.Total, Used: mem.Used, Free: mem.Free}
 		}
 	}
 	writeJSON(w, http.StatusOK, view)

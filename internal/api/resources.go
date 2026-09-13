@@ -142,6 +142,18 @@ func (s *Server) handleGetInterface(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, i := range cfg.Interfaces {
 		if i.Name == name {
+			// 契约 Interface.statistics：运行态可用时附带（M3-7）
+			if s.state != nil {
+				if st, ok := s.state.InterfaceCounters(r.Context(), name); ok {
+					b, _ := json.Marshal(i)
+					var m map[string]any
+					if json.Unmarshal(b, &m) == nil {
+						m["statistics"] = st
+						writeJSON(w, http.StatusOK, m)
+						return
+					}
+				}
+			}
 			writeJSON(w, http.StatusOK, i)
 			return
 		}

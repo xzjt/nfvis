@@ -14,9 +14,44 @@ type Thread struct {
 	Core uint32 `json:"core"` // 绑核（CPU）
 }
 
+// InterfaceCounters 单接口统计（契约 Interface.statistics）。
+type InterfaceCounters struct {
+	RxPackets uint64 `json:"rx_packets"`
+	TxPackets uint64 `json:"tx_packets"`
+	RxBytes   uint64 `json:"rx_bytes"`
+	TxBytes   uint64 `json:"tx_bytes"`
+	RxErrors  uint64 `json:"rx_errors"`
+	TxErrors  uint64 `json:"tx_errors"`
+	RxDrops   uint64 `json:"rx_drops"`
+	TxDrops   uint64 `json:"tx_drops"`
+}
+
+// Buffers 数据面 buffer 池用量（每 NUMA/池）。
+type Buffers struct {
+	Pools []BufferPool `json:"pools"`
+}
+
+// BufferPool 单个 buffer 池。
+type BufferPool struct {
+	Name      string  `json:"name"`
+	Used      float64 `json:"used"`
+	Available float64 `json:"available"`
+	Cached    float64 `json:"cached"`
+}
+
+// Memory 数据面内存占用（main heap 合计）。
+type Memory struct {
+	Total uint64 `json:"total"`
+	Used  uint64 `json:"used"`
+	Free  uint64 `json:"free"`
+}
+
 // Runtime 运行态数据源。
 type Runtime interface {
 	Threads(ctx context.Context) ([]Thread, error)
+	InterfaceCounters(ctx context.Context, ifname string) (InterfaceCounters, bool)
+	Buffers(ctx context.Context) (Buffers, bool)
+	Memory(ctx context.Context) (Memory, bool)
 }
 
 // State 运行态聚合器（Runtime 可为 nil，方法安全返回空）。
@@ -35,4 +70,28 @@ func (s *State) Threads(ctx context.Context) []Thread {
 		return nil
 	}
 	return rows
+}
+
+// InterfaceCounters 返回接口统计（不可用返回 ok=false）。
+func (s *State) InterfaceCounters(ctx context.Context, ifname string) (InterfaceCounters, bool) {
+	if s == nil || s.vpp == nil {
+		return InterfaceCounters{}, false
+	}
+	return s.vpp.InterfaceCounters(ctx, ifname)
+}
+
+// Buffers 返回 buffer 池用量（不可用返回 ok=false）。
+func (s *State) Buffers(ctx context.Context) (Buffers, bool) {
+	if s == nil || s.vpp == nil {
+		return Buffers{}, false
+	}
+	return s.vpp.Buffers(ctx)
+}
+
+// Memory 返回内存占用（不可用返回 ok=false）。
+func (s *State) Memory(ctx context.Context) (Memory, bool) {
+	if s == nil || s.vpp == nil {
+		return Memory{}, false
+	}
+	return s.vpp.Memory(ctx)
 }
