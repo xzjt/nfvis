@@ -39,7 +39,7 @@ func (f *fakeAcl) ACLAddReplace(index uint32, tag string, rules []ACLRuleSpec) (
 	if f.err != nil {
 		return 0, f.err
 	}
-	if index == 0 {
+	if index == aclIndexNew {
 		f.nextIdx++
 		f.added = append(f.added, tag)
 		return f.nextIdx, nil

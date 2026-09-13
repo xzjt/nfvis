@@ -19,6 +19,9 @@ import (
 	"github.com/xzjt/nfvis/internal/model"
 )
 
+// aclIndexNew VPP acl_add_replace 的新建索引哨兵（~0）。
+const aclIndexNew = ^uint32(0)
+
 // ACLRuleSpec 与底座解耦的规则形态（便于单测转换逻辑）。
 type ACLRuleSpec struct {
 	Permit    bool
@@ -78,6 +81,9 @@ func (p *AclProvider) ApplyACL(ctx context.Context, acl model.Acl) error {
 	p.mu.Lock()
 	idx := p.index[acl.Name]
 	p.mu.Unlock()
+	if idx == 0 {
+		idx = aclIndexNew // VPP：~0 表示新建（0 是合法 ACL 索引，非"新建"）
+	}
 	newIdx, err := c.ACLAddReplace(idx, acl.Name, rules)
 	if err != nil {
 		return fmt.Errorf("下发 ACL %s: %w", acl.Name, err)
