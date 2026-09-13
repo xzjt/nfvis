@@ -93,6 +93,7 @@ func (c recCompute) StopVM(context.Context, string) error                   { re
 func (c recCompute) RestartVM(context.Context, string) error                { return nil }
 func (c recCompute) VMState(context.Context, string) (string, error)        { return VMStateAbsent, nil }
 func (c recCompute) EnsureConsistent(context.Context, model.Config) []error { return nil }
+func (c recCompute) CheckVMAlarms(context.Context, model.Config) []error    { return nil }
 
 type recContainer struct {
 	calls *[]string
@@ -114,6 +115,7 @@ func (c recContainer) ContainerState(context.Context, string) (string, error) {
 	return CTStateAbsent, nil
 }
 func (c recContainer) ContainerLogs(context.Context, string, int) (string, error) { return "", nil }
+func (c recContainer) CheckContainerAlarms(context.Context, model.Config) []error { return nil }
 
 func newRecApplier(netFail string) (Applier, *[]string) {
 	calls := &[]string{}

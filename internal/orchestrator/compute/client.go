@@ -14,6 +14,8 @@ type libvirtAPI interface {
 	Define(ctx context.Context, xml string) error
 	Undefine(ctx context.Context, name string) error
 	State(ctx context.Context, name string) (state int, exists bool, err error)
+	// StateReason 返回 libvirt 状态与 reason（外部 kill 致 SHUTOFF+CRASHED 的判定需要）。
+	StateReason(ctx context.Context, name string) (state, reason int, exists bool, err error)
 	Start(ctx context.Context, name string) error
 	Shutdown(ctx context.Context, name string) error // ACPI 关机（优雅）
 	Destroy(ctx context.Context, name string) error  // 立即断电（超时强杀）

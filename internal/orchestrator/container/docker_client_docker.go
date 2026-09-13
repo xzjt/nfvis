@@ -167,6 +167,23 @@ func (c *dockerClient) State(ctx context.Context, name string) (string, bool, er
 	return dockerStateToContract(out.State.Status), true, nil
 }
 
+// ExitCode 返回容器退出码（State.ExitCode）。
+func (c *dockerClient) ExitCode(ctx context.Context, name string) (int, bool, error) {
+	var out struct {
+		State struct {
+			ExitCode int `json:"ExitCode"`
+		} `json:"State"`
+	}
+	err := c.do(ctx, http.MethodGet, "/containers/"+url.PathEscape(name)+"/json", nil, &out)
+	if err == errDockerNotFound {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return out.State.ExitCode, true, nil
+}
+
 func (c *dockerClient) Logs(ctx context.Context, name string, tail int) (string, error) {
 	path := "/containers/" + url.PathEscape(name) + "/logs?stdout=1&stderr=1&tail=" + strconv.Itoa(tail)
 	var sb strings.Builder

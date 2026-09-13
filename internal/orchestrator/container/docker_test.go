@@ -11,15 +11,16 @@ import (
 )
 
 type mockDocker struct {
-	states map[string]string // name → 契约状态
-	specs  map[string]CreateSpec
-	calls  []string
-	err    error
-	logs   string
+	states    map[string]string // name → 契约状态
+	specs     map[string]CreateSpec
+	calls     []string
+	err       error
+	logs      string
+	exitCodes map[string]int
 }
 
 func newMockDocker() *mockDocker {
-	return &mockDocker{states: map[string]string{}, specs: map[string]CreateSpec{}}
+	return &mockDocker{states: map[string]string{}, specs: map[string]CreateSpec{}, exitCodes: map[string]int{}}
 }
 
 func (m *mockDocker) Create(_ context.Context, name string, spec CreateSpec) error {
@@ -50,6 +51,10 @@ func (m *mockDocker) Remove(_ context.Context, name string, force bool) error {
 	delete(m.states, name)
 	m.calls = append(m.calls, fmt.Sprintf("remove:%s:%v", name, force))
 	return nil
+}
+func (m *mockDocker) ExitCode(_ context.Context, name string) (int, bool, error) {
+	_, ok := m.states[name]
+	return m.exitCodes[name], ok, nil
 }
 func (m *mockDocker) RemoveImage(_ context.Context, ref string) error {
 	m.calls = append(m.calls, "rmi:"+ref)
@@ -244,5 +249,36 @@ func TestEnsureConsistentAlarms(t *testing.T) {
 	}
 	if len(sink2.raised) != 1 || sink2.raised[0] != "ct1" {
 		t.Fatalf("应上报容器未收敛告警: %v", sink2.raised)
+	}
+}
+
+// FR-CMP-022：dead / 非零退出 → critical 告警；running 消警。
+func TestCheckContainerAlarms(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	sink := &fakeSink{}
+	p.SetAlarms(sink)
+	cfg := model.Config{ContainerFunctions: []model.ContainerFunction{ctFixture("ct1")}}
+
+	m.states["ct1"] = orchestrator.CTStateDead
+	if errs := p.CheckContainerAlarms(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("巡检不应报错: %v", errs)
+	}
+	if len(sink.raised) != 1 || sink.raised[0] != "ct1" {
+		t.Fatalf("dead 应告警: %v", sink.raised)
+	}
+	// 非零退出码
+	sink.raised = nil
+	m.states["ct1"] = orchestrator.CTStateExited
+	m.exitCodes["ct1"] = 3
+	p.CheckContainerAlarms(context.Background(), cfg)
+	if len(sink.raised) != 1 {
+		t.Fatalf("非零退出应告警: %v", sink.raised)
+	}
+	// 正常退出（0）→ 消警
+	m.exitCodes["ct1"] = 0
+	p.CheckContainerAlarms(context.Background(), cfg)
+	if len(sink.resolved) != 1 {
+		t.Fatalf("正常退出应消警: %v", sink.resolved)
 	}
 }

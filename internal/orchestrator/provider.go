@@ -81,6 +81,8 @@ type ComputeProvider interface {
 	// EnsureConsistent 恢复收敛（FR-OPS-010/012）：对比 committed 配置与实际
 	// domain，补建缺失对象；无法收敛项以错误返回（调用方转告警，不阻塞启动）。
 	EnsureConsistent(ctx context.Context, cfg model.Config) []error
+	// CheckVMAlarms 异常退出巡检（FR-CMP-017）：crashed → critical 告警，恢复则消警。
+	CheckVMAlarms(ctx context.Context, cfg model.Config) []error
 }
 
 // ContainerProvider Docker 侧编排接口（memif socket 挂载，FR-NET-022）。
@@ -99,6 +101,8 @@ type ContainerProvider interface {
 	// ContainerLogs 返回最近 tail 行 stdout/stderr。
 	ContainerLogs(ctx context.Context, name string, tail int) (string, error)
 	EnsureConsistent(ctx context.Context, cfg model.Config) []error
+	// CheckContainerAlarms 异常退出巡检（FR-CMP-022）：dead/非零退出 → critical 告警。
+	CheckContainerAlarms(ctx context.Context, cfg model.Config) []error
 }
 
 // NewNoopNetwork M2/M3 过渡用空网络实现：所有下发成功、恢复收敛为空集。
@@ -142,6 +146,7 @@ func (noopCompute) VMState(context.Context, string) (string, error) { return VMS
 func (noopCompute) EnsureConsistent(context.Context, model.Config) []error {
 	return nil
 }
+func (noopCompute) CheckVMAlarms(context.Context, model.Config) []error { return nil }
 
 // NewNoopContainer 空容器编排（M4 替换为 Docker 实现）。
 func NewNoopContainer() ContainerProvider { return noopContainer{} }
@@ -158,3 +163,4 @@ func (noopContainer) ContainerState(context.Context, string) (string, error) {
 }
 func (noopContainer) ContainerLogs(context.Context, string, int) (string, error) { return "", nil }
 func (noopContainer) EnsureConsistent(context.Context, model.Config) []error     { return nil }
+func (noopContainer) CheckContainerAlarms(context.Context, model.Config) []error { return nil }

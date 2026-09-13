@@ -136,23 +136,29 @@ func (c *Conn) Undefine(ctx context.Context, name string) error {
 
 // State 返回 libvirt 原始状态；exists=false 表示域未定义（不作为错误）。
 func (c *Conn) State(ctx context.Context, name string) (int, bool, error) {
+	state, _, exists, err := c.StateReason(ctx, name)
+	return state, exists, err
+}
+
+// StateReason 返回 libvirt 状态与 reason（reason 用于区分正常关机与被杀/崩溃）。
+func (c *Conn) StateReason(ctx context.Context, name string) (int, int, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	dom, err := c.l.DomainLookupByName(name)
 	if err != nil {
 		if libvirt.IsNotFound(err) {
-			return 0, false, nil
+			return 0, 0, false, nil
 		}
-		return 0, false, fmt.Errorf("查找 domain %s 失败: %w", name, err)
+		return 0, 0, false, fmt.Errorf("查找 domain %s 失败: %w", name, err)
 	}
-	state, _, err := c.l.DomainGetState(dom, 0)
+	state, reason, err := c.l.DomainGetState(dom, 0)
 	if err != nil {
-		return 0, false, fmt.Errorf("读取 domain %s 状态失败: %w", name, err)
+		return 0, 0, false, fmt.Errorf("读取 domain %s 状态失败: %w", name, err)
 	}
-	return int(state), true, nil
+	return int(state), int(reason), true, nil
 }
 
 // Start 启动域。

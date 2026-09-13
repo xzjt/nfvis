@@ -13,4 +13,14 @@ const (
 	RecoveryScopeContainer = "recovery-container"
 	// RecoveryUnconverged 对象下发失败（可能暂时性），warning。
 	RecoveryUnconverged = "RECOVERY_UNCONVERGED"
+	// VM_Crashed VM 异常退出（QEMU crash/OOM），critical（FR-CMP-017）。
+	VMCrashed = "VM_CRASHED"
+	// ContainerExited 容器异常退出（dead 或非零退出码），critical（FR-CMP-022）。
+	ContainerExited = "CONTAINER_EXITED"
+)
+
+// 告警严重级别（与 network.AlarmStore 取值一致）。
+const (
+	SeverityWarning  = "warning"
+	SeverityCritical = "critical"
 )
