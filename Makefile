@@ -36,9 +36,11 @@ prototype-check:
 
 # 真机集成测试（M3）：需 VPP 运行环境（nfvis-vm）。无环境时跳过并提示，CI 不跑。
 # 约定：build tag integration + 环境变量 NFVIS_VPP_SOCK（缺省 /run/vpp/api.sock）。
+# 覆盖：M3-1 连接测试（internal/orchestrator）+ M3-10 主链路（test/integration：
+# 建交换机→通流→改配置→收敛）。建议先 `pkill -x nfvisd` 避免与守护进程争用同一网口。
 integration:
 	@if [ -z "$$NFVIS_VPP_SOCK" ] && [ ! -S /run/vpp/api.sock ]; then \
 		echo "跳过 integration：未找到 VPP socket（设置 NFVIS_VPP_SOCK 或在 nfvis-vm 上运行）"; \
 		exit 0; \
 	fi; \
-	$(GO) test -tags integration -count=1 -v ./internal/orchestrator/...
+	$(GO) test -tags integration -count=1 -v ./test/integration/... ./internal/orchestrator/...
