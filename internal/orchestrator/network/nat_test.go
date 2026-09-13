@@ -193,8 +193,19 @@ func TestNatErrors(t *testing.T) {
 
 func TestNatSessions(t *testing.T) {
 	p := NewNatProvider(newFakeNat())
+	if err := p.ApplyNAT(context.Background(), natFixture()); err != nil {
+		t.Fatalf("ApplyNAT: %v", err)
+	}
 	rows, err := p.Sessions(context.Background())
 	if err != nil || len(rows) != 1 || rows[0].OutsideIP != "203.0.113.1" {
 		t.Fatalf("Sessions: %v %+v", err, rows)
+	}
+}
+
+// 插件未启用时会话查询直接返回空（不应答 VPP，避免阻塞）。
+func TestNatSessionsDisabled(t *testing.T) {
+	rows, err := NewNatProvider(newFakeNat()).Sessions(context.Background())
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("未启用应返回空: %v %+v", err, rows)
 	}
 }

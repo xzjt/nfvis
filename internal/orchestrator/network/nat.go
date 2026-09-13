@@ -51,6 +51,7 @@ type NatProvider struct {
 	statics  map[string]string    // insideIP → outsideIP
 	features map[uint32]string    // swIfIndex → inside|outside
 	ifaddr   map[uint32]bool      // 使用接口地址做 NAT 的外口
+	enabled  bool                 // nat44_ex 插件特性是否已启用（会话查询前置）
 }
 
 // NewNatProvider 以固定客户端构造（测试）。
@@ -94,6 +95,9 @@ func (p *NatProvider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 		return err
 	}
 	nonEmpty := len(desiredPools) > 0 || len(desiredStatics) > 0 || len(desiredFeatures) > 0
+	p.mu.Lock()
+	p.enabled = nonEmpty
+	p.mu.Unlock()
 	if nonEmpty {
 		if err := c.NATEnable(true); err != nil {
 			return fmt.Errorf("启用 NAT44 EI: %w", err)
@@ -191,8 +195,15 @@ func (p *NatProvider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 	return nil
 }
 
-// Sessions 返回 NAT44 会话（运行态，M3-7 可用于 /nat 展示）。
+// Sessions 返回 NAT44 会话（运行态）。插件未启用时直接返回空——
+// nat44_ei_user_session_dump 在插件未启用时不应答，会阻塞请求。
 func (p *NatProvider) Sessions(ctx context.Context) ([]NATSession, error) {
+	p.mu.Lock()
+	on := p.enabled
+	p.mu.Unlock()
+	if !on {
+		return nil, nil
+	}
 	c, err := p.client()
 	if err != nil {
 		return nil, err
