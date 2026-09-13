@@ -1,0 +1,42 @@
+### M5-8 真机证据：TLS 证书管理与日志保留（FR-SYS-011/013）
+### 日期: 2026-09-14  环境: nfvis-vm
+
+### 1) 重签自签证书（写入 /var/lib/nfvis/tls/{server.crt,server.key}）
+$ request system api tls regenerate
+自签证书已重签：subject=CN=nfvis,O=NFViS，有效期至 2027-09-13，
+指纹 B1:84:EB:67:...:DE:42:40:DA
+
+### 2) 重启后自动启用 HTTPS（未给 -tls-cert 时用已装管理证书）
+日志: "使用已安装的管理证书启用 HTTPS"
+$ openssl s_client -connect 127.0.0.1:8443 </dev/null | openssl x509 -fingerprint -sha256
+served fingerprint: B1:84:EB:67:...:DE:42:40:DA
+✓ 服务端证书与已安装证书一致
+
+### 3) 不重启换证（热生效，FR-SYS-011）
+$ curl -sk -X POST -H "Authorization: Bearer <t>" https://127.0.0.1:8443/api/v1/system/tls:regenerate
+{"subject":"CN=nfvis,O=NFViS",...,"fingerprint":"234D3900D61AABF2...03EA"}
+$ openssl s_client ... -fingerprint -sha256
+指纹 A = B1:84:EB:67:...:DE:42:40:DA
+指纹 B = 23:4D:39:00:...:F7:03:EA
+✓ 未重启即换证生效（Server 用 tls.Config.GetCertificate 握手读盘；MinVersion=TLS1.2）
+
+### 4) 日志保留策略 → journald drop-in（FR-SYS-013）
+$ configure / set system syslog local retention-days 7 / set system syslog local max-size-mb 256 / commit
+commit 成功 (revision 3)
+$ cat /etc/systemd/journald.conf.d/nfvis-retention.conf
+# 由 NFViS 生成（FR-SYS-013：本地日志保留策略；请勿手工编辑）
+[Journal]
+SystemMaxUse=256M
+MaxRetentionSec=7d
+（由 OnCommitted 落实；systemctl kill -s HUP systemd-journald 热重载，journald 保持 active）
+
+### 5) SSH host key 重生成（FR-SYS-011）
+$ request system ssh host-key regenerate
+SSH host key 已重新生成（ssh-keygen -A）。
+/etc/ssh/ssh_host_ed25519_key  mtime 02:06:13 → 23:16:18
+
+### 说明
+- 配置声明式入口：`set system api tls cert-file|key-file <path>`、`set system api tls self-signed regenerate`；
+  命令式入口：`PUT /system/tls`（PEM 安装，校验配对）、`POST /system/tls:regenerate`；CLI 同上。
+- 证书临近过期（<30 天）由 60s 巡检产生 CERT_EXPIRING(warning) 告警（同 /alarms、/events）。
+- 验收后已移除测试证书与 journald drop-in（恢复原状态）；SSH host key 为重生成后的有效新键。

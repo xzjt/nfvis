@@ -1,0 +1,30 @@
+### M5-5 真机证据：硬件健康与阈值（FR-SYS-012）
+### 日期: 2026-09-14  环境: nfvis-vm（无 IPMI 设备、无 ipmitool/lm-sensors/smartctl、无 thermal_zone 温度节点）
+
+### 1) show system hardware（降级路径）
+bmc-present    false
+sensors        （无可用传感器：无 BMC/IPMI，lm-sensors 与 /sys/class/thermal 均无读数）
+Disk             SMART      Temp       Wear
+/dev/sda         unknown    -          -
+root-used      15.4%（阈值 0%）
+越限: （无）
+
+### 2) 阈值设置（配置层，commit 生效）
+$ configure / set system health thresholds disk-used-percent 1 / commit → commit 成功 (revision 3)
+
+### 3) 60s 巡检产生真实越限告警（show alarms active）
+Severity   Code                 Source    Raised               Message
+warning    HARDWARE_THRESHOLD   system    2026-09-13 23:05:12  硬件健康越限: 根文件系统使用率 15.4%（阈值 1%）
+
+### 4) GET /system/hardware（越限清单 + 生效阈值）
+{"bmc_present":false,"disks":[{"device":"/dev/sda","smart_status":"unknown"}],
+ "root_used_percent":15.36,"sensors":null,"thresholds":{"disk_used_percent":1},
+ "violations":["根文件系统使用率 15.4%（阈值 1%）"]}
+
+### 5) 阈值放宽到 99% → 自动消警
+$ show alarms active → （无 active 告警）
+$ GET /system/health/thresholds → {"disk_used_percent":99}
+
+### 说明
+- 采集优先级：BMC(ipmitool sdr -j) → lm-sensors(sensors -j) → /sys/class/thermal；磁盘 smartctl -j（缺失则 unknown）。
+- 越限经 AlarmStore（与 /alarms、/events 同源）；nfvisd 60s 巡检，恢复即消警（FR-SYS-012）。

@@ -1,0 +1,23 @@
+### T0-7 真机证据：SPAN 端口镜像抓包实证（tap 插件已启用）+ LLDP 环境回归
+### 日期: 2026-09-14  环境: nfvis-vm (VPP 26.06)
+
+### 1) 配置（nfvis-cli 事务提交）
+  set port-mirroring span1 source interface ens224 direction both
+  set port-mirroring span1 analyzer interface tap1
+  → commit 成功
+
+### 2) VPP 镜像会话（show interface span）
+Source                           Destination                       Device       L2
+ens224                           tap1                             (  both) (  none)
+
+### 3) 分析口 tap1（Linux span0）抓包实证
+$ tcpdump -i span0 -c 5 -nn   （同时 ping/arping 制造 VMnet8 流量）
+tcpdump: listening on span0, link-type EN10MB
+17:43:38.188835 ARP, Request who-has 192.168.155.129 tell 192.168.155.2, length 46
+17:43:38.357624 IP6 fe80::fe:47ff:fe04:63cc > ff02::2: ICMP6, router solicitation, length 16
+2 packets captured / 3 packets received by filter / 0 dropped
+
+### 4) LLDP：CLI 启用成功但无邻居（环境限制）
+  set protocols lldp enable true → commit 成功
+  show protocols lldp neighbors → （无 LLDP 邻居）
+  vppctl show lldp → 表头正常、无条目（vmxnet3 + VMnet8 无 LLDP 对端；M3 D7 记录的 internal error 未复现）

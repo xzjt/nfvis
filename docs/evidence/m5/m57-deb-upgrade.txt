@@ -1,0 +1,51 @@
+### M5-10/M5-7 真机证据：deb 打包/安装、自守护、软件升级与回退、NTP
+### 日期: 2026-09-14  环境: nfvis-vm (Ubuntu 26.04)
+
+### 1) 打包（make deb，Linux 上 dpkg-deb）
+$ make deb VERSION=1.0.0   → 已生成 build/nfvis_1.0.0_amd64.deb (7478936 字节)
+$ make deb VERSION=1.0.1   → 已生成 build/nfvis_1.0.1_amd64.deb (7479010 字节)
+包内容：/usr/bin/{nfvisd,nfvis-cli}、/lib/systemd/system/nfvis.service、
+        /usr/share/doc/nfvis/{NFViS-openapi.yaml,NFViS-CLI命令树完整设计.md,NFViS-系统产品需求与目标架构规格书.md,M5-验收记录.md}
+版本注入：-ldflags "-X github.com/xzjt/nfvis/internal/api.VersionStr=<ver>"
+
+### 2) 安装（首次经 request system software add，落地归档）
+$ request system software add /opt/nfvis/src/nfvis/build/nfvis_1.0.0_amd64.deb --yes
+升级完成：1.0.0-dev → 1.0.0（包 nfvis_1.0.0_amd64.deb）
+installed=1.0.0  binary=nfvisd 1.0.0
+（postinst：创建 /var/lib/nfvis/{images,backup,captures,coredumps,tech-support,vms}、/data/incoming、
+  /run/nfvis/{vhost,memif}(0777)，校验大页/isolcpus/vpp/libvirtd/dockerd 与 core_pattern 仅提示，
+  daemon-reload + enable，首次安装不自动 start）
+
+### 3) 升级与回退（FR-OPS-001/002）
+起始 installed=1.0.1
+$ request system software rollback --yes
+回退完成：1.0.1 → 1.0.0（包 nfvis_1.0.0_amd64.deb）
+installed=1.0.0  binary=nfvisd 1.0.0
+$ request system software add .../nfvis_1.0.1_amd64.deb --yes
+升级完成：1.0.0 → 1.0.1（包 nfvis_1.0.1_amd64.deb）
+installed=1.0.1  binary=nfvisd 1.0.1
+$ request system software rollback --yes
+回退完成：1.0.1 → 1.0.0（包 nfvis_1.0.0_amd64.deb）
+installed=1.0.0  binary=nfvisd 1.0.0
+（回退判定用 dpkg-query 读已安装版本；dpkg 前端锁被 apt/unattended-upgrades 占用时自动短等重试）
+
+### 4) systemd 自守护（FR-OPS-013）
+$ systemctl start nfvis && systemctl is-active nfvis
+active
+$ systemctl show nfvis -p Type -p Restart -p WatchdogUSec
+Type=notify
+Restart=always
+WatchdogUSec=30s
+$ journalctl -u nfvis -n 6 | grep 看门狗
+nfvisd: {"msg":"nfvisd 就绪","db":"/var/lib/nfvis/nfvis.db","listen":":443"}
+nfvisd: {"msg":"systemd 看门狗已启用","interval":"15s"}
+
+### 5) NTP 同步（FR-SYS-001）
+$ request system ntp sync
+NTP 同步已触发：chronyc makestep: 200 OK
+
+### 6) 审计（FR-OPS-031）
+$ show log audit last 8
+system.software.add      success  安装 nfvis_1.0.0_amd64.deb（1.0.0-dev → 1.0.0）
+system.software.add      failure  安装 .../nfvis_1.0.1_amd64.deb: 安装失败 ... dpkg frontend lock ...
+system.software.rollback success  回退 1.0.1 → 1.0.0

@@ -279,10 +279,13 @@ set rule <seq> direction <ingress|egress>
 #   set virtual-switches <n> l3-interface ... acl-in <acl>
 
 [edit nat]
-set source-pool <name> address-range <ip> to <ip>    # 出接口由 l3 交换机推断
+set source-pool <name> address-range <ip> to <ip>    # 外部地址池（可选；未用时以出接口地址作外部地址）
 set rules <seq> match source <ip-prefix> virtual-switch <name> \
-    action source-pool <name> | interface
+    action interface <ifname> [source-pool <name>]   # 出接口必填（决策 #38/#52）
 set static <inside-ip> to <outside-ip>               # 1:1 发布
+# inside 转发域由 virtual-switch（须 l3）派生；outside 转发域由出接口所属 VRF 派生
+# （出接口须为某 l3 交换机的 l3-interface 且已配地址）。两者可同表或跨 VRF，
+# 但 VPP NAT44 单实例仅一对 (inside, outside)，故多规则的 virtual-switch / 出接口 VRF 必须各自一致（决策 #52）
 
 [edit port-mirroring <name>]
 set source interface <ifname|vnf <vm> interface <vnic>> direction <ingress|egress|both>

@@ -1,0 +1,30 @@
+### T0-2 真机证据：容器镜像类目 + 容器 VNF 生命周期（经 nfvis-cli → nfvisd → Docker）
+### 日期: 2026-09-14  环境: nfvis-vm (Docker 29.x)
+
+### 1) docker save alpine:3.20 → /data/incoming/
+ls: cannot access '/data/incoming/alpine-3.20.tar': No such file or directory
+
+### 2) CLI 导入（docker image load + 元数据登记，源文件已清理）
+total 8
+drwxr-xr-x 2 root root 4096 Sep 13 17:32 .
+drwxr-xr-x 3 root root 4096 Sep 13 14:46 ..
+
+### 3) CLI 创建并启动容器
+连接 http://127.0.0.1:8443 ...
+启动容器 ct-test 已受理
+--- docker ps（容器真实运行） ---
+ct-test  alpine:3.20  Up 2 seconds
+--- CLI show container-functions ct-test detail ---
+连接 http://127.0.0.1:8443 ...
+args [ sleep 300 ];
+image alpine:3.20;
+memory-mb 64;
+name ct-test;
+state running;
+
+### 4) CLI 取日志 / 停止
+连接 http://127.0.0.1:8443 ...
+（无日志）
+停止容器 ct-test 已受理
+--- 停止后 docker ps -a ---
+ct-test  Exited (137) Less than a second ago

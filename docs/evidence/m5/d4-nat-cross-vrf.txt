@@ -1,0 +1,45 @@
+### T0-1 / D4 真机证据：NAT44 跨 VRF 端到端（经 nfvis-cli → nfvisd → VPP 26.06）
+### 日期: 2026-09-14  环境: nfvis-vm (VPP 26.06-release)
+
+### 1) 配置（nfvis-cli 事务提交）
+  内网 L3 交换机 nat-l3: l3-interface ens192 10.10.0.1/24, tap5 10.20.0.1/24
+  出接口 VRF wan:       l3-interface ens224 192.168.155.240/24
+  NAT 规则 10: match source 10.20.0.0/24 virtual-switch nat-l3 action interface ens224
+  → commit 成功 (revision 3)
+
+### 2) VPP NAT44 接口特性（inside/outside）
+NAT44 interfaces:
+ tap5 in
+ ens224 out
+ ens192 in
+
+### 3) VPP NAT44 外部地址
+NAT44 pool address interfaces:
+ ens224
+
+### 4) 内网主机 10.20.0.2 经 NAT 访问外网 192.168.155.2
+$ ping -c 3 192.168.155.2
+--- 192.168.155.2 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2046ms
+rtt min/avg/max/mdev = 0.317/0.346/0.385/0.028 ms
+
+### 5) NAT44 会话（跨 VRF：inside fib 1 = nat-l3 VRF, outside fib 2 = wan VRF）
+NAT44 sessions:
+-------- thread 0 vpp_main: 0 sessions --------
+-------- thread 1 vpp_wk_0: 3 sessions --------
+  10.20.0.2: 3 dynamic translations, 0 static translations
+    i2o 10.20.0.2 proto icmp port 56324 fib 1
+  o2i 192.168.155.240 proto icmp port 63327 fib 2
+       index 0
+       last heard 12.41
+       total pkts 5, total bytes 420
+       dynamic translation
+
+### 6) 接口所属转发域
+ens192 (up):
+  L3 10.10.0.1/24 ip4 table-id 11368986 fib-idx 1
+ens224 (up):
+  L3 192.168.155.240/24 ip4 table-id 14869249 fib-idx 2
+local0 (dn):
+tap5 (up):
+  L3 10.20.0.1/24 ip4 table-id 11368986 fib-idx 1
