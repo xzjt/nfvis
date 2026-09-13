@@ -780,7 +780,7 @@ paths:
                 items: { $ref: "#/components/schemas/Image" }
     post:
       tags: [images]
-      summary: 导入镜像（multipart 上传 或 URL 拉取，二选一）
+      summary: 导入镜像（multipart 文件上传 / JSON URL 拉取 / JSON incoming 导入，三选一）
       requestBody:
         required: true
         content:
@@ -796,16 +796,21 @@ paths:
           application/json:
             schema:
               type: object
-              required: [name, type, url]
+              required: [name, type]
               properties:
                 name: { type: string }
                 type: { type: string, enum: [vm-image, container-image] }
-                url: { type: string, format: uri }
-                sha256: { type: string }
+                url: { type: string, format: uri, description: HTTP(S) 拉取地址（与 incoming_file 二选一） }
+                sha256: { type: string, description: 期望校验和（可空；提供则强校验） }
+                incoming_file:
+                  type: string
+                  description: /data/incoming 内的文件路径（先经 scp/sftp 传入；导入成功自动清理，与 url 二选一）
                 description: { type: string }
       responses:
         "202":
-          description: 已受理（异步下载，进度经事件流）
+          description: 已受理（URL 拉取异步，进度经 GET /images/{name} 的 import_state 观察；事件流随 M5）
+        "201":
+          description: incoming 导入完成（同步返回镜像元数据）
         "400": { $ref: "#/components/responses/Error400" }
   /images/{name}:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]

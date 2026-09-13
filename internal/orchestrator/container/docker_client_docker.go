@@ -145,6 +145,11 @@ func (c *dockerClient) Remove(ctx context.Context, name string, force bool) erro
 	return c.do(ctx, http.MethodDelete, "/containers/"+url.PathEscape(name)+"?force="+strconv.FormatBool(force)+"&v=1", nil, nil)
 }
 
+// RemoveImage 删除容器镜像（DELETE /images/<ref>）。
+func (c *dockerClient) RemoveImage(ctx context.Context, ref string) error {
+	return c.do(ctx, http.MethodDelete, "/images/"+url.PathEscape(ref), nil, nil)
+}
+
 // State 返回契约枚举；不存在 exists=false。
 func (c *dockerClient) State(ctx context.Context, name string) (string, bool, error) {
 	var out struct {
