@@ -4,9 +4,9 @@
 
 ## 项目状态与基线
 
-- 当前阶段：**M1/M2/M3 已完成并合并**；**M4（VNF/容器/镜像）已开发完成（M4-P0 + M4-1~M4-12 全部交付）**。
-  M4 各任务一 PR、栈式未合并（PR #41~#53，**从 #41 起依次向下合并**）；交付与真机证据见 `docs/M4-验收记录.md`、
-  `docs/M4-11-集成测试验收记录.md`，进度/环境/技术坑见 `docs/M4-进度交接.md`。**下一步 M5**：
+- 当前阶段：**M1/M2/M3/M4 已完成并合并**（M4 = M4-P0 + M4-1~M4-12，14 个 PR #41~#54 已全部合入 main）。
+  交付与真机证据见 `docs/M4-验收记录.md`、`docs/M4-11-集成测试验收记录.md`，进度/环境/技术坑见
+  `docs/M4-进度交接.md`。**下一步 M5**：
   `/events`(SSE)、`/metrics`、`/vpp/capture`、备份/恢复、tech-support、core-dumps、hardware、tls、
   health thresholds、software/reboot/shutdown/zeroize/ntp、deb 打包、e2e（任务清单 `docs/M5-任务清单.md`）。
 - M4 验收现状（`docs/M4-验收记录.md`）：M4-1~M4-11 真机通过（`make integration` 全绿）；M4-12 CLI 侧命令真机冒烟通过
