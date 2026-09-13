@@ -21,6 +21,7 @@ import (
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/api"
 	"github.com/xzjt/nfvis/internal/config"
+	"github.com/xzjt/nfvis/internal/images"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
 	"github.com/xzjt/nfvis/internal/orchestrator/compute"
@@ -122,10 +123,24 @@ func run() error {
 		log.Warn("创建 memif socket 目录失败", "dir", ctCfg.MemifDir, "err", err)
 	}
 
+	// M4-8：镜像仓库（本地目录 + index.json；容器镜像删除经 Docker）
+	imagesStore, ierr := images.Open(images.DefaultConfig())
+	if ierr != nil {
+		log.Warn("镜像仓库初始化失败", "err", ierr)
+	} else {
+		imagesStore.SetDockerRemover(func(ref string) error {
+			return ctProvider.RemoveImage(context.Background(), ref)
+		})
+	}
+
 	applier := orchestrator.NewApplier(netProvider, computeProvider, containerProvider,
 		orchestrator.WithVhostDir(computeCfg.VhostDir), orchestrator.WithMemifDir(ctCfg.MemifDir))
 
-	engine, err := config.NewEngine(store, applier, config.Options{})
+	var engineOpts config.Options
+	if imagesStore != nil {
+		engineOpts.ImageResolver = imagesStore // FR-CFG-011⑤：镜像存在性与类型匹配
+	}
+	engine, err := config.NewEngine(store, applier, engineOpts)
 	if err != nil {
 		return fmt.Errorf("装配事务引擎: %w", err)
 	}
@@ -210,6 +225,7 @@ func run() error {
 		VMConsole:   vmConsole,
 		VMSnapshots: vmSnaps,
 		Containers:  ctRuntime,
+		Images:      imagesStore,
 	})
 
 	srvErr := make(chan error, 1)

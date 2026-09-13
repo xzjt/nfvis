@@ -22,7 +22,7 @@ test:
 # *_govpp.go / *_libvirt.go / *_docker.go 是薄底座适配层，单测无法真实驱动，
 # 由 nfvis-vm 上的集成测试（make integration）覆盖，故不计入本地单测门槛；
 # 同包内的纯函数（domain XML 组装、账本校验）仍纳入门槛。
-GATED_PKGS := ./internal/config/ ./internal/model/ ./internal/schema/ ./internal/orchestrator/network/ ./internal/orchestrator/compute/ ./internal/orchestrator/container/
+GATED_PKGS := ./internal/config/ ./internal/model/ ./internal/schema/ ./internal/orchestrator/network/ ./internal/orchestrator/compute/ ./internal/orchestrator/container/ ./internal/images/
 COVER_EXCLUDE ?= _govpp.go _libvirt.go _docker.go
 cover:
 	COVER_MIN=$(COVER_MIN) COVER_EXCLUDE="$(COVER_EXCLUDE)" GO=$(GO) bash contrib/scripts/check_coverage.sh $(GATED_PKGS)

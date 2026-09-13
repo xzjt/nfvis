@@ -63,6 +63,8 @@ type dockerAPI interface {
 	Stop(ctx context.Context, name string) error
 	Restart(ctx context.Context, name string) error
 	Remove(ctx context.Context, name string, force bool) error
+	// RemoveImage 删除容器镜像（FR-CMP-033，经 Docker API）。
+	RemoveImage(ctx context.Context, ref string) error
 	State(ctx context.Context, name string) (state string, exists bool, err error)
 	Logs(ctx context.Context, name string, tail int) (string, error)
 }
@@ -226,6 +228,14 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 		}
 	}
 	return errs
+}
+
+// RemoveImage 删除容器镜像（供镜像仓库删除容器镜像时调用）。
+func (p *Provider) RemoveImage(ctx context.Context, ref string) error {
+	if err := p.api.RemoveImage(ctx, ref); err != nil {
+		return fmt.Errorf("删除容器镜像 %s: %w", ref, err)
+	}
+	return nil
 }
 
 // BuildCreateSpec 由容器配置组装创建规格（纯函数，单测覆盖）。

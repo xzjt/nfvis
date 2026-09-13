@@ -51,6 +51,10 @@ func (m *mockDocker) Remove(_ context.Context, name string, force bool) error {
 	m.calls = append(m.calls, fmt.Sprintf("remove:%s:%v", name, force))
 	return nil
 }
+func (m *mockDocker) RemoveImage(_ context.Context, ref string) error {
+	m.calls = append(m.calls, "rmi:"+ref)
+	return nil
+}
 func (m *mockDocker) State(_ context.Context, name string) (string, bool, error) {
 	s, ok := m.states[name]
 	return s, ok, nil

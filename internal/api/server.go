@@ -43,6 +43,7 @@ type Options struct {
 	VMConsole   VMConsoleRuntime   // VM 串口 console（M4-5；nil = console 端点 503）
 	VMSnapshots VMSnapshotRuntime  // VM 快照（M4-6；nil = 快照端点 503）
 	Containers  ContainerRuntime   // 容器生命周期/日志（M4-7；nil = 503）
+	Images      ImagesRuntime      // 镜像仓库（M4-8；nil = 503）
 }
 
 // Server NFViS REST server。
@@ -62,6 +63,7 @@ type Server struct {
 	vmConsole   VMConsoleRuntime
 	vmSnapshots VMSnapshotRuntime
 	containers  ContainerRuntime
+	images      ImagesRuntime
 	consoleTix  *consoleTickets
 	log         *slog.Logger
 	mux         *http.ServeMux
@@ -79,7 +81,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, consoleTix: newConsoleTickets(), log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, consoleTix: newConsoleTickets(), log: log}
 	s.cliExec.setRuntime(opts.Diag, opts.State)
 	s.cliExec.setNetRuntime(opts.L2, opts.L3, opts.LLDP, opts.NAT, opts.Alarms)
 	mux := http.NewServeMux()
@@ -169,6 +171,12 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("DELETE "+APIPrefix+"/container-functions/{name}", cfgAPI(s.handleDeleteContainer))
 	mux.Handle("GET "+APIPrefix+"/container-functions/{name}/logs", s.auth(s.handleContainerLogs, schema.ClassReadOnly, "request container-functions log"))
 	mux.Handle("POST "+APIPrefix+"/container-functions/{tail...}", s.auth(s.dispatchContainerPost, schema.ClassSuperUser, "request container-functions"))
+
+	// M4-8：镜像仓库（FR-CMP-030~033）
+	mux.Handle("GET "+APIPrefix+"/images", s.auth(s.handleListImages, schema.ClassReadOnly, "show images"))
+	mux.Handle("GET "+APIPrefix+"/images/{name}", s.auth(s.handleGetImage, schema.ClassReadOnly, "show images"))
+	mux.Handle("POST "+APIPrefix+"/images", s.auth(s.handlePostImage, schema.ClassSuperUser, "request images"))
+	mux.Handle("DELETE "+APIPrefix+"/images/{name}", s.auth(s.handleDeleteImage, schema.ClassSuperUser, "request images delete"))
 
 	// M3-8：告警列表（恢复收敛的不可收敛项落点，FR-OPS-010）
 	mux.Handle("GET "+APIPrefix+"/alarms", s.auth(s.handleGetAlarms, schema.ClassReadOnly, "show alarms"))
