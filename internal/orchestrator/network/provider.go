@@ -14,6 +14,7 @@ type L2Network struct {
 	orchestrator.NetworkProvider // 其余方法（ACL/NAT/SPAN/QoS）沿用基础实现
 	l2                           *L2Provider
 	l3                           *L3Provider
+	svc                          *ServicesProvider
 }
 
 // NewL2Network 以基础 Provider 与 L2 编排器构造装饰器。
@@ -26,6 +27,44 @@ func NewL2Network(base orchestrator.NetworkProvider, l2 *L2Provider) *L2Network 
 
 // SetL3 追加 L3/VRF 编排（BVI 网关随 L2 交换机一并处理）。
 func (n *L2Network) SetL3(l3 *L3Provider) { n.l3 = l3 }
+
+// SetServices 追加 SPAN/QoS/接口编排（M3-5）。
+func (n *L2Network) SetServices(svc *ServicesProvider) { n.svc = svc }
+
+func (n *L2Network) ApplyInterface(ctx context.Context, iface model.InterfaceConfig) error {
+	if n.svc == nil {
+		return n.NetworkProvider.ApplyInterface(ctx, iface)
+	}
+	return n.svc.ApplyInterface(ctx, iface)
+}
+
+func (n *L2Network) ApplySpan(ctx context.Context, pm model.PortMirroring) error {
+	if n.svc == nil {
+		return nil
+	}
+	return n.svc.ApplySpan(ctx, pm)
+}
+
+func (n *L2Network) DeleteSpan(ctx context.Context, name string) error {
+	if n.svc == nil {
+		return nil
+	}
+	return n.svc.DeleteSpan(ctx, name)
+}
+
+func (n *L2Network) ApplyQos(ctx context.Context, q model.QosPolicy) error {
+	if n.svc == nil {
+		return nil
+	}
+	return n.svc.ApplyQos(ctx, q)
+}
+
+func (n *L2Network) DeleteQos(ctx context.Context, name string) error {
+	if n.svc == nil {
+		return nil
+	}
+	return n.svc.DeleteQos(ctx, name)
+}
 
 func (n *L2Network) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch) error {
 	if err := n.l2.ApplyBridgeDomain(ctx, vs); err != nil {
