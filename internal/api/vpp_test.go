@@ -141,3 +141,28 @@ func TestVrfRoutesUnavailable(t *testing.T) {
 		t.Fatalf("未装配应 503: %d", status)
 	}
 }
+
+// ---------- M3-6：/protocols/lldp/neighbors（FR-NET-018） ----------
+
+type fakeLldpRuntime struct{ rows []LldpNeighborRow }
+
+func (f *fakeLldpRuntime) Neighbors(context.Context) ([]LldpNeighborRow, error) { return f.rows, nil }
+
+func TestLldpNeighborsEndpoint(t *testing.T) {
+	fake := &fakeLldpRuntime{rows: []LldpNeighborRow{{Interface: "ens192", ChassisID: "sw1", PortID: "Gi0/1", TTL: 120}}}
+	ts := newTestServerOpts(t, Options{LLDP: fake})
+	token := loginAdmin(t, ts)
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/protocols/lldp/neighbors", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), "sw1") {
+		t.Fatalf("lldp neighbors: %d %s", status, data)
+	}
+}
+
+func TestLldpNeighborsUnavailable(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+	status, _, _ := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/protocols/lldp/neighbors", token, nil, nil)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("未装配应 503: %d", status)
+	}
+}

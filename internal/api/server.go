@@ -32,6 +32,7 @@ type Options struct {
 	VPP     VppController // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
 	L2      L2Runtime     // L2 运行态查询（M3-3；nil = mac-table 503）
 	L3      L3Runtime     // L3 运行态查询（M3-4；nil = routes 503）
+	LLDP    LldpRuntime   // LLDP 邻居（M3-6；nil = 503）
 }
 
 // Server NFViS REST server。
@@ -42,6 +43,7 @@ type Server struct {
 	vpp     VppController
 	l2      L2Runtime
 	l3      L3Runtime
+	lldp    LldpRuntime
 	log     *slog.Logger
 	mux     *http.ServeMux
 	http    *http.Server
@@ -58,7 +60,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, log: log}
 	mux := http.NewServeMux()
 
 	// 认证（免 token，FR-API-001）
@@ -118,6 +120,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("DELETE "+APIPrefix+"/bonds/{name}", cfgAPI(s.handleDeleteBond))
 	mux.Handle("GET "+APIPrefix+"/protocols/lldp", s.auth(s.handleGetLldp, schema.ClassReadOnly, "show lldp"))
 	mux.Handle("PUT "+APIPrefix+"/protocols/lldp", cfgAPI(s.handlePutLldp))
+	mux.Handle("GET "+APIPrefix+"/protocols/lldp/neighbors", s.auth(s.handleGetLldpNeighbors, schema.ClassReadOnly, "show lldp"))
 
 	// 资源 handlers 第一组（GET = show 等级 R；写 = configure 等级 S；FR-API-003 映射）
 	mux.Handle("GET "+APIPrefix+"/system", s.auth(s.handleGetSystem, schema.ClassReadOnly, "show system"))

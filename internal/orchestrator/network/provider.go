@@ -17,6 +17,8 @@ type L2Network struct {
 	svc                          *ServicesProvider
 	acl                          *AclProvider
 	nat                          *NatProvider
+	bond                         *BondProvider
+	lldp                         *LldpProvider
 }
 
 // NewL2Network 以基础 Provider 与 L2 编排器构造装饰器。
@@ -50,6 +52,41 @@ func (n *L2Network) SetNAT(p *NatProvider) {
 	if p != nil && n.l3 != nil {
 		p.SetInsideResolver(n.l3.AttachedIfaces) // NAT 仅作用于 L3 交换机
 	}
+}
+
+// SetBond 追加 bond 编排（M3-6）。
+func (n *L2Network) SetBond(p *BondProvider) { n.bond = p }
+
+// SetLldp 追加 LLDP 编排（M3-6）。
+func (n *L2Network) SetLldp(p *LldpProvider) { n.lldp = p }
+
+func (n *L2Network) ApplyBond(ctx context.Context, bond model.Bond) error {
+	if n.bond == nil {
+		return nil
+	}
+	return n.bond.ApplyBond(ctx, bond)
+}
+
+func (n *L2Network) DeleteBond(ctx context.Context, name string) error {
+	if n.bond == nil {
+		return nil
+	}
+	return n.bond.DeleteBond(ctx, name)
+}
+
+func (n *L2Network) ApplyLLDP(ctx context.Context, lldpCfg *model.LldpConfig) error {
+	if n.lldp == nil {
+		return nil
+	}
+	return n.lldp.ApplyLLDP(ctx, lldpCfg)
+}
+
+// LldpNeighbors 供 /protocols/lldp/neighbors 运行态（M3-6）。
+func (n *L2Network) LldpNeighbors(ctx context.Context) ([]LldpNeighbor, error) {
+	if n.lldp == nil {
+		return nil, nil
+	}
+	return n.lldp.Neighbors(ctx)
 }
 
 func (n *L2Network) ApplyNAT(ctx context.Context, nat model.NatConfig) error {

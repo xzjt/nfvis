@@ -68,6 +68,8 @@ func run() error {
 	netProvider.SetServices(network.NewServicesProviderFunc(vppMgr.SvcClientFunc()))
 	netProvider.SetACL(network.NewAclProviderFunc(vppMgr.AclClientFunc()))
 	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
+	netProvider.SetBond(network.NewBondProviderFunc(vppMgr.BondClientFunc()))
+	netProvider.SetLldp(network.NewLldpProviderFunc(vppMgr.LldpClientFunc()))
 	applier := orchestrator.NewApplier(netProvider, orchestrator.NewNoopCompute(), orchestrator.NewNoopContainer())
 
 	engine, err := config.NewEngine(store, applier, config.Options{})
@@ -107,6 +109,7 @@ func run() error {
 		VPP:     &vppController{mgr: vppMgr, applier: startupApplier, engine: engine},
 		L2:      &l2Controller{net: netProvider},
 		L3:      &l3Controller{net: netProvider},
+		LLDP:    &lldpController{net: netProvider},
 	})
 
 	srvErr := make(chan error, 1)
@@ -188,6 +191,22 @@ func (c *l3Controller) Routes(ctx context.Context, vrfName string) ([]api.RouteR
 	out := make([]api.RouteRow, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, api.RouteRow{Prefix: r.Prefix, NextHop: r.NextHop, Distance: r.Distance})
+	}
+	return out, nil
+}
+
+// lldpController 装配 api.LldpRuntime（M3-6）：LLDP 邻居表。
+type lldpController struct{ net *network.L2Network }
+
+func (c *lldpController) Neighbors(ctx context.Context) ([]api.LldpNeighborRow, error) {
+	rows, err := c.net.LldpNeighbors(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]api.LldpNeighborRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, api.LldpNeighborRow{Interface: r.Interface, ChassisID: r.ChassisID,
+			PortID: r.PortID, TTL: r.TTL, LastHeard: r.LastHeard})
 	}
 	return out, nil
 }

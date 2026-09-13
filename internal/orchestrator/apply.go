@@ -57,6 +57,9 @@ func (a *orchApplier) Apply(ctx context.Context, old, new model.Config) error {
 	return nil
 }
 
+// lldpEqual 判断 LLDP 配置是否变化（Protocols 指针比较已由 configEqualPtr 覆盖，此处冗余防御）。
+func lldpEqual(old, new model.Config) bool { return configEqualPtr(old.Protocols, new.Protocols) }
+
 // plan 生成操作序列：新增/变更在前（ACL→L2→L3→NAT/SPAN/QoS→VM→容器），
 // 删除在后（容器→VM→L3/L2→NAT/SPAN/QoS→ACL），保证引用先建后删。
 func (a *orchApplier) plan(old, new model.Config) []op {
@@ -66,6 +69,7 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	oldVMs := nameMap(old.VirtualMachineFunctions, func(x model.VMFunction) string { return x.Name })
 	oldCTs := nameMap(old.ContainerFunctions, func(x model.ContainerFunction) string { return x.Name })
 	oldIfaces := nameMap(old.Interfaces, func(x model.InterfaceConfig) string { return x.Name })
+	oldBonds := nameMap(old.Bonds, func(x model.Bond) string { return x.Name })
 	oldPMs := nameMap(old.PortMirroring, func(x model.PortMirroring) string { return x.Name })
 	oldQoS := nameMap(old.QosPolicies, func(x model.QosPolicy) string { return x.Name })
 
@@ -80,6 +84,18 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 				acl.Name, ok,
 				func(ctx context.Context) error { return a.net.ApplyACL(ctx, o) },
 				func(ctx context.Context) error { return a.net.DeleteACL(ctx, acl.Name) },
+			))
+		}
+	}
+	// bond 须先于引用它的 L2 端口/L3 接口创建（FR-NET-017）
+	for _, bond := range new.Bonds {
+		if o, ok := oldBonds[bond.Name]; !ok || !configEqual(o, bond) {
+			ops = append(ops, applyOp(
+				fmt.Sprintf("bond[%s]", bond.Name),
+				func(ctx context.Context) error { return a.net.ApplyBond(ctx, bond) },
+				bond.Name, ok,
+				func(ctx context.Context) error { return a.net.ApplyBond(ctx, o) },
+				func(ctx context.Context) error { return a.net.DeleteBond(ctx, bond.Name) },
 			))
 		}
 	}
@@ -146,6 +162,23 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 				func(ctx context.Context) error { return a.net.DeleteQos(ctx, q.Name) },
 			))
 		}
+	}
+
+	// —— 新增/变更：LLDP（FR-NET-018）——
+	if !configEqualPtr(old.Protocols, new.Protocols) || !lldpEqual(old, new) {
+		newL := (*model.LldpConfig)(nil)
+		if new.Protocols != nil {
+			newL = new.Protocols.LLDP
+		}
+		oldL := (*model.LldpConfig)(nil)
+		if old.Protocols != nil {
+			oldL = old.Protocols.LLDP
+		}
+		ops = append(ops, op{
+			desc: "lldp",
+			run:  func(ctx context.Context) error { return a.net.ApplyLLDP(ctx, newL) },
+			undo: func(ctx context.Context) error { return a.net.ApplyLLDP(ctx, oldL) },
+		})
 	}
 
 	// —— 新增/变更：接口层（MTU / ingress-policy 绑定；QoS 之后，保证 policer 已建）——

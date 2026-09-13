@@ -97,6 +97,37 @@ type L3Runtime interface {
 	Routes(ctx context.Context, vrfName string) ([]RouteRow, error)
 }
 
+// LldpNeighborRow /protocols/lldp/neighbors 一行。
+type LldpNeighborRow struct {
+	Interface string  `json:"interface"`
+	ChassisID string  `json:"chassis_id"`
+	PortID    string  `json:"port_id"`
+	TTL       int     `json:"ttl"`
+	LastHeard float64 `json:"last_heard,omitempty"`
+}
+
+// LldpRuntime LLDP 运行态查询能力（编排器装配注入；nil = 503）。
+type LldpRuntime interface {
+	Neighbors(ctx context.Context) ([]LldpNeighborRow, error)
+}
+
+// handleGetLldpNeighbors GET /api/v1/protocols/lldp/neighbors（FR-NET-018 运行态）。
+func (s *Server) handleGetLldpNeighbors(w http.ResponseWriter, r *http.Request) {
+	if s.lldp == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "VPP 未接入（编排器未装配）", nil)
+		return
+	}
+	rows, err := s.lldp.Neighbors(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
+		return
+	}
+	if rows == nil {
+		rows = []LldpNeighborRow{}
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
 // handleGetVrfRoutes GET /api/v1/vrfs/{name}/routes：FIB 路由表（运行态，FR-NET-013）。
 func (s *Server) handleGetVrfRoutes(w http.ResponseWriter, r *http.Request) {
 	if s.l3 == nil {

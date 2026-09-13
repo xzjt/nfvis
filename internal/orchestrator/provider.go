@@ -14,6 +14,9 @@ import (
 // L3 虚拟交换机 → VRF（规格书附录 B 映射）。实现需声明是否并发安全。
 type NetworkProvider interface {
 	ApplyInterface(ctx context.Context, iface model.InterfaceConfig) error
+	ApplyBond(ctx context.Context, bond model.Bond) error
+	DeleteBond(ctx context.Context, name string) error
+	ApplyLLDP(ctx context.Context, lldp *model.LldpConfig) error
 	ApplyACL(ctx context.Context, acl model.Acl) error
 	DeleteACL(ctx context.Context, name string) error
 	ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch) error
@@ -54,6 +57,9 @@ type noopNetwork struct{}
 
 func (noopNetwork) ApplyInterface(context.Context, model.InterfaceConfig) error  { return nil }
 func (noopNetwork) ApplyACL(context.Context, model.Acl) error                    { return nil }
+func (noopNetwork) ApplyBond(context.Context, model.Bond) error                  { return nil }
+func (noopNetwork) DeleteBond(context.Context, string) error                     { return nil }
+func (noopNetwork) ApplyLLDP(context.Context, *model.LldpConfig) error           { return nil }
 func (noopNetwork) DeleteACL(context.Context, string) error                      { return nil }
 func (noopNetwork) ApplyBridgeDomain(context.Context, model.VirtualSwitch) error { return nil }
 func (noopNetwork) DeleteBridgeDomain(context.Context, string) error             { return nil }
