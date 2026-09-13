@@ -177,6 +177,15 @@ func (c *Conn) Reboot(ctx context.Context, name string) error {
 	})
 }
 
+// SetAutostart 设置域自启标志（libvirt 层面，独立于 nfvisd 存活）。
+func (c *Conn) SetAutostart(ctx context.Context, name string, autostart bool) error {
+	v := int32(0)
+	if autostart {
+		v = 1
+	}
+	return c.withDomain(ctx, name, func(dom libvirt.Domain) error { return c.l.DomainSetAutostart(dom, v) })
+}
+
 // DumpXML 返回 libvirt 规范化后的 domain XML（与配置比对用，M4-1 验收）。
 func (c *Conn) DumpXML(ctx context.Context, name string) (string, error) {
 	if err := ctx.Err(); err != nil {

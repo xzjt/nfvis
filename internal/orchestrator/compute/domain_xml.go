@@ -310,7 +310,11 @@ func buildVhostUserIface(vmName string, is InterfaceSpec, idx int) libvirtxml.Do
 		Source: &libvirtxml.DomainInterfaceSource{
 			VHostUser: &libvirtxml.DomainInterfaceSourceVHostUser{
 				Chardev: &libvirtxml.DomainChardevSource{
-					UNIX: &libvirtxml.DomainChardevSourceUNIX{Path: is.Socket, Mode: "client"},
+					// reconnect：VPP 重启后 socket 重建，QEMU 自动重连（FR-OPS-011）。
+					UNIX: &libvirtxml.DomainChardevSourceUNIX{
+						Path: is.Socket, Mode: "client",
+						Reconnect: &libvirtxml.DomainChardevSourceReconnect{Enabled: "yes", Timeout: uintPtr(5)},
+					},
 				},
 			},
 		},

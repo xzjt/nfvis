@@ -28,6 +28,7 @@ type mockLibvirt struct {
 	shutdownNoop bool // 模拟 ACPI 关机无响应（触发超时强杀）
 
 	domainXML string
+	autostart map[string]bool
 	snaps     map[string][]string
 	snapXML   map[string]string
 	reverted  []string
@@ -36,7 +37,7 @@ type mockLibvirt struct {
 
 func newMockLibvirt() *mockLibvirt {
 	return &mockLibvirt{present: map[string]bool{}, states: map[string]int{},
-		snaps: map[string][]string{}, snapXML: map[string]string{}}
+		snaps: map[string][]string{}, snapXML: map[string]string{}, autostart: map[string]bool{}}
 }
 
 func xmlName(xml string) string {
@@ -99,6 +100,11 @@ func (m *mockLibvirt) Destroy(_ context.Context, name string) error {
 func (m *mockLibvirt) Reboot(_ context.Context, name string) error {
 	m.rebooted = append(m.rebooted, name)
 	m.states[name] = domRunning
+	return nil
+}
+
+func (m *mockLibvirt) SetAutostart(_ context.Context, name string, autostart bool) error {
+	m.autostart[name] = autostart
 	return nil
 }
 
@@ -509,5 +515,68 @@ func TestEnsureConsistent_DefinesAllAndCollectsErrors(t *testing.T) {
 	errs := p2.EnsureConsistent(context.Background(), cfg)
 	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "probe-vm") {
 		t.Fatalf("应收集 probe-vm 的不可收敛错误: %v", errs)
+	}
+}
+
+// fakeSink 记录恢复收敛告警（M4-9）。
+type fakeSink struct {
+	raised   []string
+	resolved []string
+}
+
+func (f *fakeSink) Raise(_, _, _, _, source string) { f.raised = append(f.raised, source) }
+func (f *fakeSink) Resolve(_, _, source string) bool {
+	f.resolved = append(f.resolved, source)
+	return true
+}
+
+func TestEnsureConsistentAlarms(t *testing.T) {
+	api := newMockLibvirt()
+	store := newMockStorage("/images/img.qcow2")
+	p := newTestProvider(api, store, nil)
+	sink := &fakeSink{}
+	p.SetAlarms(sink)
+
+	good := vmFixture("good-vm")
+	bad := vmFixture("bad-vm")
+	bad.Image = "missing.qcow2"
+	cfg := model.Config{
+		ResourcePools: &model.ResourcePool{
+			Hugepages: []model.HPool{{PageSize: "1G", Count: 4}},
+			CPU:       &model.CPUSetup{IsolatedCores: []int{0, 1, 2, 3}},
+		},
+		VirtualMachineFunctions: []model.VMFunction{good, bad},
+	}
+	errs := p.EnsureConsistent(context.Background(), cfg)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "bad-vm") {
+		t.Fatalf("应只报 bad-vm: %v", errs)
+	}
+	if len(sink.raised) != 1 || sink.raised[0] != "bad-vm" {
+		t.Fatalf("应上报 bad-vm 告警: %v", sink.raised)
+	}
+	if len(sink.resolved) != 1 || sink.resolved[0] != "good-vm" {
+		t.Fatalf("应收敛 good-vm 告警: %v", sink.resolved)
+	}
+}
+
+// FR-OPS-012：autostart 须落到 libvirt 域自启标志。
+func TestDefineVMSetsLibvirtAutostart(t *testing.T) {
+	api := newMockLibvirt()
+	store := newMockStorage("/images/img.qcow2")
+	p := newTestProvider(api, store, nil)
+	vm := vmFixture("fw-vm")
+	vm.Autostart = true
+	if err := p.DefineVM(context.Background(), vm, model.AllocatedResources{HugepageSize: "1G"}); err != nil {
+		t.Fatal(err)
+	}
+	if !api.autostart["fw-vm"] {
+		t.Fatal("应按 autostart 设置 libvirt 自启标志")
+	}
+	vm.Autostart = false
+	if err := p.DefineVM(context.Background(), vm, model.AllocatedResources{HugepageSize: "1G"}); err != nil {
+		t.Fatal(err)
+	}
+	if api.autostart["fw-vm"] {
+		t.Fatal("autostart=false 应清除自启标志")
 	}
 }
