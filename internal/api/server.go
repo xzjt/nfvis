@@ -15,6 +15,7 @@ import (
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/schema"
+	"github.com/xzjt/nfvis/internal/state"
 )
 
 // API 版本与产品版本（FR-API-007；组件版本经 GET /system/version 汇报）。
@@ -33,6 +34,7 @@ type Options struct {
 	L2      L2Runtime     // L2 运行态查询（M3-3；nil = mac-table 503）
 	L3      L3Runtime     // L3 运行态查询（M3-4；nil = routes 503）
 	LLDP    LldpRuntime   // LLDP 邻居（M3-6；nil = 503）
+	State   *state.State  // 运行态聚合（M3-7；nil = 省略运行态字段）
 }
 
 // Server NFViS REST server。
@@ -44,6 +46,7 @@ type Server struct {
 	l2      L2Runtime
 	l3      L3Runtime
 	lldp    LldpRuntime
+	state   *state.State
 	log     *slog.Logger
 	mux     *http.ServeMux
 	http    *http.Server
@@ -60,7 +63,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, log: log}
 	mux := http.NewServeMux()
 
 	// 认证（免 token，FR-API-001）
@@ -99,6 +102,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/system/status", s.auth(s.handleGetSystemStatus, schema.ClassReadOnly, "show system uptime"))
 	// M3-2：VPP 数据面状态与重启（FR-SYS-007/009）
 	mux.Handle("GET "+APIPrefix+"/vpp/status", s.auth(s.handleGetVppStatus, schema.ClassReadOnly, "show vpp"))
+	mux.Handle("GET "+APIPrefix+"/vpp/config", s.auth(s.handleGetVppConfig, schema.ClassReadOnly, "show vpp"))
 	mux.Handle("POST "+APIPrefix+"/vpp/restart", s.auth(s.handlePostVppRestart, schema.ClassSuperUser, "request vpp restart"))
 
 	// W6：网络配置层第二组（GET=R；写=S）

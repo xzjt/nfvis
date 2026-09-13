@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/state"
 )
 
 // ---------- M3-2：/vpp/status 与 /vpp/restart（FR-SYS-007/009） ----------
@@ -164,5 +165,40 @@ func TestLldpNeighborsUnavailable(t *testing.T) {
 	status, _, _ := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/protocols/lldp/neighbors", token, nil, nil)
 	if status != http.StatusServiceUnavailable {
 		t.Fatalf("未装配应 503: %d", status)
+	}
+}
+
+// ---------- M3-7：/vpp/status 运行态线程 + /vpp/config ----------
+
+type fakeStateRuntime struct{ rows []state.Thread }
+
+func (f *fakeStateRuntime) Threads(context.Context) ([]state.Thread, error) { return f.rows, nil }
+
+func TestVppStatusIncludesThreads(t *testing.T) {
+	fake := &fakeVppController{status: VppStatus{Version: "26.06-release", Connected: true}}
+	st := state.New(&fakeStateRuntime{rows: []state.Thread{
+		{ID: 0, Name: "vpp_main", Core: 4}, {ID: 1, Name: "vpp_wk_0", Type: "workers", Core: 5}}})
+	ts := newTestServerOpts(t, Options{VPP: fake, State: st})
+	token := loginAdmin(t, ts)
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/vpp/status", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("status: %d %s", status, data)
+	}
+	var got VppStatus
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("解析: %v", err)
+	}
+	if len(got.Threads) != 2 || got.Threads[1].Name != "vpp_wk_0" || got.Threads[1].Core != 5 {
+		t.Fatalf("线程运行态: %+v", got.Threads)
+	}
+}
+
+func TestVppConfigEndpoint(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+	// 初始无 vpp 配置 → {}
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/vpp/config", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), "{") {
+		t.Fatalf("vpp config: %d %s", status, data)
 	}
 }

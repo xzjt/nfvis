@@ -90,17 +90,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/VersionInfo" }
 
-  /vpp/status:
-    get:
-      tags: [vpp]
-      summary: VPP 数据面状态（版本/连接/pending-restart，FR-SYS-007/009）
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/VppStatus" }
-
   /vpp/restart:
     post:
       tags: [vpp]
@@ -1477,7 +1466,7 @@ components:
 
     VppStatus:
       type: object
-      description: VPP 数据面状态（FR-SYS-007 版本锁定、FR-SYS-009 pending-restart）
+      description: VPP 数据面状态（FR-SYS-007 版本锁定、FR-SYS-009 pending-restart、运行态线程）
       properties:
         version: { type: string, example: "26.06-release", description: 探测到的 VPP 版本 }
         connected: { type: boolean, description: 当前是否已连接 }
@@ -1485,6 +1474,18 @@ components:
           type: boolean
           description: committed vpp 段与已应用 startup.conf 不一致（需 request vpp restart）
         last_error: { type: string, description: 最近一次连接错误（无则省略） }
+        threads:
+          type: array
+          description: 数据面线程（VPP show_threads；未连接时省略）
+          items: { $ref: "#/components/schemas/VppThread" }
+
+    VppThread:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string, example: vpp_main }
+        type: { type: string, example: workers }
+        core: { type: integer, description: 绑核（CPU） }
 
     SystemConfig:
       type: object
