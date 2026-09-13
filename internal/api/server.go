@@ -90,6 +90,24 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("POST "+APIPrefix+"/system/login-users/{tail...}", s.auth(s.dispatchLoginUsersPost, schema.ClassReadOnly, "request system password change"))
 	mux.Handle("GET "+APIPrefix+"/system/status", s.auth(s.handleGetSystemStatus, schema.ClassReadOnly, "show system uptime"))
 
+	// W6：网络配置层第二组（GET=R；写=S）
+	mux.Handle("GET "+APIPrefix+"/acls", s.auth(s.handleGetAcls, schema.ClassReadOnly, "show acls"))
+	mux.Handle("POST "+APIPrefix+"/acls", cfgAPI(s.handlePostAcl))
+	mux.Handle("DELETE "+APIPrefix+"/acls/{name}", cfgAPI(s.handleDeleteAcl))
+	mux.Handle("GET "+APIPrefix+"/nat", s.auth(s.handleGetNat, schema.ClassReadOnly, "show nat"))
+	mux.Handle("PUT "+APIPrefix+"/nat", cfgAPI(s.handlePutNat))
+	mux.Handle("GET "+APIPrefix+"/qos/policies", s.auth(s.handleGetQosPolicies, schema.ClassReadOnly, "show qos policies"))
+	mux.Handle("POST "+APIPrefix+"/qos/policies", cfgAPI(s.handlePostQosPolicy))
+	mux.Handle("DELETE "+APIPrefix+"/qos/policies/{name}", cfgAPI(s.handleDeleteQosPolicy))
+	mux.Handle("GET "+APIPrefix+"/port-mirroring", s.auth(s.handleGetPMs, schema.ClassReadOnly, "show port-mirroring"))
+	mux.Handle("POST "+APIPrefix+"/port-mirroring", cfgAPI(s.handlePostPM))
+	mux.Handle("DELETE "+APIPrefix+"/port-mirroring/{name}", cfgAPI(s.handleDeletePM))
+	mux.Handle("GET "+APIPrefix+"/bonds", s.auth(s.handleGetBonds, schema.ClassReadOnly, "show bonds"))
+	mux.Handle("POST "+APIPrefix+"/bonds", cfgAPI(s.handlePostBond))
+	mux.Handle("DELETE "+APIPrefix+"/bonds/{name}", cfgAPI(s.handleDeleteBond))
+	mux.Handle("GET "+APIPrefix+"/protocols/lldp", s.auth(s.handleGetLldp, schema.ClassReadOnly, "show lldp"))
+	mux.Handle("PUT "+APIPrefix+"/protocols/lldp", cfgAPI(s.handlePutLldp))
+
 	// 资源 handlers 第一组（GET = show 等级 R；写 = configure 等级 S；FR-API-003 映射）
 	mux.Handle("GET "+APIPrefix+"/system", s.auth(s.handleGetSystem, schema.ClassReadOnly, "show system"))
 	mux.Handle("PUT "+APIPrefix+"/system", cfgAPI(s.handlePutSystem))
