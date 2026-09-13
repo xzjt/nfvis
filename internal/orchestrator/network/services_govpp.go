@@ -91,6 +91,10 @@ func (g *govppSvcClient) PolicerAddDel(name string, cirKbps uint32, cb uint64, a
 		return 0, err
 	}
 	if reply.Retval != 0 {
+		// -81 = value already exists（幂等重放）；-82 = 无此 policer（删除幂等）
+		if (add && reply.Retval == -81) || (!add && reply.Retval == -82) {
+			return 0, nil
+		}
 		return 0, fmt.Errorf("policer_add_del(%s,add=%v) retval=%d", name, add, reply.Retval)
 	}
 	return reply.PolicerIndex, nil
