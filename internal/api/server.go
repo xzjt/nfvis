@@ -39,6 +39,7 @@ type Options struct {
 	NAT     NatSessionsRuntime // NAT 会话（M3-7；nil = 503）
 	Alarms  AlarmRuntime       // 告警列表（M3-8；nil = 503）
 	Diag    DiagRuntime        // CLI 诊断命令（M3-9；nil = 命令报不可用）
+	VM      VMRuntime          // VM 生命周期（M4-3；nil = 生命周期动作 503、状态省略）
 }
 
 // Server NFViS REST server。
@@ -54,6 +55,7 @@ type Server struct {
 	sriov       SRIOVSetter
 	natSessions NatSessionsRuntime
 	alarms      AlarmRuntime
+	vm          VMRuntime
 	log         *slog.Logger
 	mux         *http.ServeMux
 	http        *http.Server
@@ -70,7 +72,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, log: log}
 	s.cliExec.setRuntime(opts.Diag, opts.State)
 	s.cliExec.setNetRuntime(opts.L2, opts.L3, opts.LLDP, opts.NAT, opts.Alarms)
 	mux := http.NewServeMux()
@@ -135,6 +137,15 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/protocols/lldp", s.auth(s.handleGetLldp, schema.ClassReadOnly, "show lldp"))
 	mux.Handle("PUT "+APIPrefix+"/protocols/lldp", cfgAPI(s.handlePutLldp))
 	mux.Handle("GET "+APIPrefix+"/protocols/lldp/neighbors", s.auth(s.handleGetLldpNeighbors, schema.ClassReadOnly, "show lldp"))
+
+	// M4-3：VM VNF 配置与生命周期（FR-CMP-010~013）
+	mux.Handle("GET "+APIPrefix+"/virtual-machine-functions", s.auth(s.handleListVMs, schema.ClassReadOnly, "show virtual-machine-functions"))
+	mux.Handle("GET "+APIPrefix+"/virtual-machine-functions/{name}", s.auth(s.handleGetVM, schema.ClassReadOnly, "show virtual-machine-functions"))
+	mux.Handle("POST "+APIPrefix+"/virtual-machine-functions", cfgAPI(s.handlePostVM))
+	mux.Handle("PUT "+APIPrefix+"/virtual-machine-functions/{name}", cfgAPI(s.handlePutVM))
+	mux.Handle("DELETE "+APIPrefix+"/virtual-machine-functions/{name}", cfgAPI(s.handleDeleteVM))
+	// {name}:start|stop|restart 含冒号后缀，ServeMux 通配符不支持——{tail...} 捕获后分发
+	mux.Handle("POST "+APIPrefix+"/virtual-machine-functions/{tail...}", s.auth(s.dispatchVMPost, schema.ClassSuperUser, "request virtual-machine-functions"))
 
 	// M3-8：告警列表（恢复收敛的不可收敛项落点，FR-OPS-010）
 	mux.Handle("GET "+APIPrefix+"/alarms", s.auth(s.handleGetAlarms, schema.ClassReadOnly, "show alarms"))

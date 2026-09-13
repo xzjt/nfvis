@@ -557,7 +557,7 @@ paths:
               schema: { $ref: "#/components/schemas/VMFunction" }
     put:
       tags: [virtual-machine-functions]
-      summary: 修改 VM（关机状态生效）
+      summary: 修改 VM（关机状态生效；运行中返回 409，FR-CMP-012 热调整列 V2）
       requestBody:
         required: true
         content:
@@ -565,11 +565,24 @@ paths:
             schema: { $ref: "#/components/schemas/VMFunction" }
       responses:
         "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "400": { $ref: "#/components/responses/Error400" }
+        "409":
+          description: VM 运行中，vCPU/内存/vNIC 修改需先关机（FR-CMP-012）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     delete:
       tags: [virtual-machine-functions]
-      summary: 删除 VM（级联 vNIC/快照）
+      summary: 删除 VM（级联 vNIC/VPP 端口/快照；二次确认）
+      parameters:
+        - name: confirm
+          in: query
+          required: true
+          schema: { type: boolean }
+          description: 二次确认，必须为 true（FR-CMP-013）；缺省或 false 返回 400 CONFIRM_REQUIRED
       responses:
         "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "400": { $ref: "#/components/responses/Error400" }
   /virtual-machine-functions/{name}:start:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
     post:
@@ -577,6 +590,7 @@ paths:
       summary: 启动
       responses:
         "202": { description: 已受理（异步完成，事件通知） }
+        "404": { $ref: "#/components/responses/Error404" }
         "409": { $ref: "#/components/responses/Error409" }
   /virtual-machine-functions/{name}:stop:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
@@ -585,6 +599,15 @@ paths:
       summary: 停止（ACPI 关机，超时强杀）
       responses:
         "202": { description: 已受理 }
+        "404": { $ref: "#/components/responses/Error404" }
+  /virtual-machine-functions/{name}:restart:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [virtual-machine-functions]
+      summary: 重启（运行中 ACPI 重启；已关机则启动）
+      responses:
+        "202": { description: 已受理 }
+        "404": { $ref: "#/components/responses/Error404" }
   /virtual-machine-functions/{name}/console:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
     post:

@@ -6,9 +6,13 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 
 	"github.com/xzjt/nfvis/internal/model"
 )
+
+// ErrVMNotFound 目标 VM/domain 未定义（生命周期动作返回，API 层映射 404）。
+var ErrVMNotFound = errors.New("VM 未定义")
 
 // NetworkProvider VPP 侧编排接口。L2 虚拟交换机 → bridge domain，
 // L3 虚拟交换机 → VRF（规格书附录 B 映射）。实现需声明是否并发安全。
@@ -34,11 +38,33 @@ type NetworkProvider interface {
 	EnsureConsistent(ctx context.Context, cfg model.Config) []error
 }
 
+// VM 运行态（与 OpenAPI VMFunction.state 枚举一致；absent = 未定义，用于
+// 恢复收敛与删除前判定）。libvirt 状态到本枚举的映射见 compute.VMStateFromLibvirt。
+const (
+	VMStateRunning = "running"
+	VMStateShutoff = "shutoff"
+	VMStateCrashed = "crashed"
+	VMStatePaused  = "paused"
+	VMStateAbsent  = "absent"
+)
+
 // ComputeProvider libvirt/KVM 侧编排接口。
-// 资源账本分配（FR-CMP-002）由事务引擎 commit 阶段完成后传入 M3 实现。
+//
+// DefineVM 为声明式且幂等：按 (vm, alloc) 组装 domain XML 并 DomainDefineXML
+// （已存在则重定义）；autostart=true 时定义后启动（FR-CMP-010）。
+// 生命周期动作（Start/Stop/Restart）不改变 committed 配置，供 request 族命令直调
+// （FR-CMP-011）。运行中修改 vCPU/内存/vNIC 由 API 层按 FR-CMP-012 拒绝（409）。
+// 资源分配（alloc）由 M4-2 账本从 committed 配置确定性重算后传入。
 type ComputeProvider interface {
-	DefineVM(ctx context.Context, vm model.VMFunction) error
+	DefineVM(ctx context.Context, vm model.VMFunction, alloc model.AllocatedResources) error
 	DeleteVM(ctx context.Context, name string) error
+	StartVM(ctx context.Context, name string) error
+	StopVM(ctx context.Context, name string) error
+	RestartVM(ctx context.Context, name string) error
+	VMState(ctx context.Context, name string) (string, error)
+
+	// EnsureConsistent 恢复收敛（FR-OPS-010/012）：对比 committed 配置与实际
+	// domain，补建缺失对象；无法收敛项以错误返回（调用方转告警，不阻塞启动）。
 	EnsureConsistent(ctx context.Context, cfg model.Config) []error
 }
 
@@ -72,13 +98,19 @@ func (noopNetwork) ApplyQos(context.Context, model.QosPolicy) error             
 func (noopNetwork) DeleteQos(context.Context, string) error                      { return nil }
 func (noopNetwork) EnsureConsistent(context.Context, model.Config) []error       { return nil }
 
-// NewNoopCompute 空计算编排（M4 替换为 libvirt 实现）。
+// NewNoopCompute 空计算编排（M4 替换为 libvirt 实现；M4-3 起真实实现接入 nfvisd）。
 func NewNoopCompute() ComputeProvider { return noopCompute{} }
 
 type noopCompute struct{}
 
-func (noopCompute) DefineVM(context.Context, model.VMFunction) error { return nil }
-func (noopCompute) DeleteVM(context.Context, string) error           { return nil }
+func (noopCompute) DefineVM(context.Context, model.VMFunction, model.AllocatedResources) error {
+	return nil
+}
+func (noopCompute) DeleteVM(context.Context, string) error          { return nil }
+func (noopCompute) StartVM(context.Context, string) error           { return nil }
+func (noopCompute) StopVM(context.Context, string) error            { return nil }
+func (noopCompute) RestartVM(context.Context, string) error         { return nil }
+func (noopCompute) VMState(context.Context, string) (string, error) { return VMStateAbsent, nil }
 func (noopCompute) EnsureConsistent(context.Context, model.Config) []error {
 	return nil
 }

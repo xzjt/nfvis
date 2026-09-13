@@ -836,3 +836,11 @@ func (e *Engine) AuditTrail(limit int) ([]AuditEntry, error) {
 	}
 	return e.store.ListAudit(limit)
 }
+
+// Audit 追加一条运行态操作审计（FR-OPS-031：生命周期操作入审计通道）。
+// 与配置变更审计（config.commit 等）同表，便于统一 `show log audit` 呈现。
+func (e *Engine) Audit(user, action, detail, result string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.store.AppendAudit(AuditEntry{Time: e.now(), User: user, Action: action, Detail: detail, Result: result})
+}

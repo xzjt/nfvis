@@ -196,15 +196,22 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 
 	// —— 新增/变更：计算、容器 ——
 	for _, vm := range new.VirtualMachineFunctions {
-		if o, ok := oldVMs[vm.Name]; !ok || !configEqual(o, vm) {
-			ops = append(ops, applyOp(
-				fmt.Sprintf("vm[%s]", vm.Name),
-				func(ctx context.Context) error { return a.comp.DefineVM(ctx, vm) },
-				vm.Name, ok,
-				func(ctx context.Context) error { return a.comp.DefineVM(ctx, o) },
-				func(ctx context.Context) error { return a.comp.DeleteVM(ctx, vm.Name) },
-			))
+		oldVM, inOld := oldVMs[vm.Name]
+		if inOld && configEqual(oldVM, vm) {
+			continue
 		}
+		vm := vm
+		alloc := model.AllocationFor(new, vm)
+		ops = append(ops, op{
+			desc: fmt.Sprintf("vm[%s]", vm.Name),
+			run:  func(ctx context.Context) error { return a.comp.DefineVM(ctx, vm, alloc) },
+			undo: func(ctx context.Context) error {
+				if inOld {
+					return a.comp.DefineVM(ctx, oldVM, model.AllocationFor(old, oldVM))
+				}
+				return a.comp.DeleteVM(ctx, vm.Name)
+			},
+		})
 	}
 	for _, ct := range new.ContainerFunctions {
 		if o, ok := oldCTs[ct.Name]; !ok || !configEqual(o, ct) {
@@ -235,7 +242,7 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			ops = append(ops, op{
 				desc: fmt.Sprintf("del-vm[%s]", name),
 				run:  func(ctx context.Context) error { return a.comp.DeleteVM(ctx, name) },
-				undo: func(ctx context.Context) error { return a.comp.DefineVM(ctx, vm) },
+				undo: func(ctx context.Context) error { return a.comp.DefineVM(ctx, vm, model.AllocationFor(old, vm)) },
 			})
 		}
 	}
