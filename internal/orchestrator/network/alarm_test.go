@@ -95,3 +95,36 @@ func TestAlarmSyncScoped(t *testing.T) {
 		t.Fatalf("其它作用域告警不应被 Sync 收敛，实际活动 %d", got)
 	}
 }
+
+// M5-1：告警变更通知（事件总线接入点）——新增/重新激活/消警均通知。
+func TestAlarmNotifier(t *testing.T) {
+	s := NewAlarmStore()
+	var got []string
+	s.SetNotifier(func(a Alarm) { got = append(got, a.Code+":"+a.State) })
+
+	s.Raise("scope", SeverityWarning, "VNF_PORT_DOWN", "端口 down", "vs/vnf")
+	s.Raise("scope", SeverityWarning, "VNF_PORT_DOWN", "端口 down", "vs/vnf") // 幂等：不重复通知
+	s.Resolve("scope", "VNF_PORT_DOWN", "vs/vnf")
+	s.Raise("scope", SeverityWarning, "VNF_PORT_DOWN", "端口 down", "vs/vnf") // 重新激活
+	s.Sync("recovery-compute", []Alarm{{Severity: SeverityCritical, Code: "RECOVERY_UNCONVERGED", Source: "vm1"}})
+
+	want := []string{
+		"VNF_PORT_DOWN:active",
+		"VNF_PORT_DOWN:resolved",
+		"VNF_PORT_DOWN:active",
+		"RECOVERY_UNCONVERGED:active",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("通知序列 %v，期望 %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("通知[%d] = %s，期望 %s（全部 %v）", i, got[i], want[i], got)
+		}
+	}
+	// Sync 收敛掉不再失败的活动项 → 消警通知
+	s.Sync("recovery-compute", nil)
+	if got[len(got)-1] != "RECOVERY_UNCONVERGED:resolved" {
+		t.Fatalf("Sync 消警未通知: %v", got)
+	}
+}

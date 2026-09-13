@@ -1,0 +1,8 @@
+#!/bin/sh
+# nfvis 卸载前：停止服务（remove/upgrade 均触发；upgrade 时先停再由 postinst 重新 enable）。
+set -e
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop nfvis.service >/dev/null 2>&1 || true
+    echo "nfvis prerm: 已停止 nfvis.service"
+fi
+exit 0

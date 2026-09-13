@@ -30,6 +30,7 @@ func Validate(c Config) []ValidateError {
 	v := &validator{}
 	v.collect(c)
 	v.checkSystem(c)
+	v.checkHealth(c)
 	v.checkInterfaces(c)
 	v.checkBonds(c)
 	v.checkVirtualSwitches(c)
@@ -477,6 +478,23 @@ func (v *validator) checkAcls(c Config) {
 	}
 }
 
+// checkHealth 校验硬件健康阈值范围（FR-SYS-012）。
+func (v *validator) checkHealth(c Config) {
+	if c.System == nil || c.System.Health == nil {
+		return
+	}
+	h := c.System.Health
+	if h.CPUTempCelsius < 0 || h.CPUTempCelsius > 120 {
+		v.errf("system.health.cpu_temp_celsius", "CPU 温度阈值须在 0-120 摄氏度，实际 %d", h.CPUTempCelsius)
+	}
+	if h.DiskTempCelsius < 0 || h.DiskTempCelsius > 100 {
+		v.errf("system.health.disk_temp_celsius", "磁盘温度阈值须在 0-100 摄氏度，实际 %d", h.DiskTempCelsius)
+	}
+	if h.DiskUsedPercent < 0 || h.DiskUsedPercent > 100 {
+		v.errf("system.health.disk_used_percent", "磁盘使用率阈值须在 0-100 百分比，实际 %d", h.DiskUsedPercent)
+	}
+}
+
 func (v *validator) checkNat(c Config) {
 	if c.Nat == nil {
 		return
@@ -494,6 +512,7 @@ func (v *validator) checkNat(c Config) {
 		}
 	}
 	dupCheck(v, n.Rules, "nat.rules", func(r NatRule) string { return strconv.Itoa(r.Seq) }, "NAT 规则")
+	insideVS, outsideVRF := "", ""
 	for _, r := range n.Rules {
 		rp := fmt.Sprintf("nat.rules[%d]", r.Seq)
 		if !checkCIDR(r.MatchSource) {
@@ -503,8 +522,47 @@ func (v *validator) checkNat(c Config) {
 		if !v.l3vs[r.VirtualSwitch] {
 			v.errf(rp+".virtual_switch", "virtual-switch %q 不是 L3 交换机", r.VirtualSwitch)
 		}
-		if (r.Action.SourcePool == "") == (r.Action.Interface == "") {
-			v.errf(rp+".action", "action 必须且只能指定 source-pool 或 interface 之一")
+		// inside 转发域由 virtual-switch 派生；VPP NAT44 单实例仅一对 inside/outside VRF（决策 #52）。
+		if r.VirtualSwitch != "" {
+			if insideVS == "" {
+				insideVS = r.VirtualSwitch
+			} else if r.VirtualSwitch != insideVS {
+				v.errf(rp+".virtual_switch",
+					"V1 仅支持单一 inside 转发域：%q 与前一条规则的 %q 不一致（VPP NAT44 单实例仅一对 inside/outside VRF，决策 #52）",
+					r.VirtualSwitch, insideVS)
+			}
+		}
+		// 出接口必填（决策 #38）：VPP NAT44 EI 的 outside 不支持自动推断。
+		if r.Action.Interface == "" {
+			v.errf(rp+".action.interface",
+				"必须指定出接口 interface（VPP NAT44 的 outside 不支持自动推断；source-pool 仅提供外部地址，决策 #38/#52）")
+		} else {
+			// outside 转发域 = 出接口所属 VRF（决策 #52）。V1 要求出接口作为某 Vrf 的
+			// l3-interface 且已配地址：默认表无配置地址的途径，NAT 回程不可达。
+			owner, hasAddr := "", false
+			for _, vrf := range c.Vrfs {
+				for _, li := range vrf.L3Interfaces {
+					if li.Interface == r.Action.Interface {
+						owner = vrf.Name
+						hasAddr = len(li.Addresses) > 0
+					}
+				}
+			}
+			switch {
+			case owner == "":
+				v.errf(rp+".action.interface",
+					"出接口 %q 不在任何 VRF：V1 要求出接口作为某 L3 交换机（Vrf）的 l3-interface 并配置地址（决策 #52）",
+					r.Action.Interface)
+			case !hasAddr:
+				v.errf(rp+".action.interface",
+					"出接口 %q 未配置地址：NAT 需以该地址（或源池）作外部地址并建立回程路由（决策 #52）", r.Action.Interface)
+			case outsideVRF == "":
+				outsideVRF = owner
+			case outsideVRF != owner:
+				v.errf(rp+".action.interface",
+					"出接口 %q 所属 VRF %q 与其它规则的 outside 转发域 %q 不一致：V1 仅支持单一 outside VRF（决策 #52）",
+					r.Action.Interface, owner, outsideVRF)
+			}
 		}
 		if r.Action.SourcePool != "" {
 			found := false

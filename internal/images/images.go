@@ -66,10 +66,31 @@ type Store struct {
 
 	// dockerRemove 删除容器镜像（经 Docker API）；nil = 不支持（删除容器镜像时报错）。
 	dockerRemove func(ref string) error
+	// dockerLoad 载入容器镜像归档（docker load）；nil = 不支持（导入容器镜像时报错）。
+	dockerLoad func(path string) error
+	// progress 下载进度（M5-1 image-import-progress 事件；nil = 不上报）。
+	progress func(name string, written, total int64)
+	// stateSink 导入状态变化（downloading/ready/failed；nil = 不上报）。
+	stateSink func(name, typ, state string)
+}
+
+// SetProgressSink 注入下载进度回调（M5-1）。
+func (s *Store) SetProgressSink(f func(name string, written, total int64)) { s.progress = f }
+
+// SetStateSink 注入导入状态回调（M5-1）。
+func (s *Store) SetStateSink(f func(name, typ, state string)) { s.stateSink = f }
+
+func (s *Store) emitState(name, typ, state string) {
+	if s.stateSink != nil {
+		s.stateSink(name, typ, state)
+	}
 }
 
 // SetDockerRemover 注入容器镜像删除实现（Docker API）。
 func (s *Store) SetDockerRemover(f func(ref string) error) { s.dockerRemove = f }
+
+// SetDockerLoader 注入容器镜像载入实现（Docker API `docker load`，FR-CMP-030/031）。
+func (s *Store) SetDockerLoader(f func(path string) error) { s.dockerLoad = f }
 
 // Open 打开/初始化仓库（创建目录并载入 index.json）。
 func Open(cfg Config) (*Store, error) {
@@ -227,12 +248,30 @@ func (s *Store) ImportIncoming(name, typ, incomingFile, description string) (Met
 	if !strings.HasPrefix(abs, incAbs+string(filepath.Separator)) {
 		return Meta{}, fmt.Errorf("文件 %s 必须位于 %s 内（先经 scp/sftp 传入）", incomingFile, s.cfg.IncomingDir)
 	}
-	if typ == TypeContainer {
-		return Meta{}, fmt.Errorf("容器镜像导入经 Docker（docker load/pull），不支持 incoming 文件导入")
+	// 容器镜像：归档（docker save 产物）经 Docker `image load` 入本地分层存储，
+	// 仓库只登记元数据、不留文件（FR-CMP-030）；name 须与归档内的镜像引用一致
+	// （容器 VNF 的 image 直接作为 Docker ref 使用）。
+	if typ == TypeContainer && s.dockerLoad == nil {
+		return Meta{}, fmt.Errorf("导入容器镜像 %s：未接入 Docker", name)
 	}
 	sha, size, err := fileSHA256(abs)
 	if err != nil {
 		return Meta{}, err
+	}
+	if typ == TypeContainer {
+		if err := s.dockerLoad(abs); err != nil {
+			return Meta{}, fmt.Errorf("docker load %s: %w", name, err)
+		}
+		if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+			return Meta{}, fmt.Errorf("导入后清理 %s: %w", incomingFile, err)
+		}
+		m := Meta{Name: name, Type: typ, SizeBytes: size, SHA256: sha, Format: "docker-archive",
+			Description: description, ImportedAt: s.now().UTC(), ImportState: StateReady}
+		if err := s.setMeta(m); err != nil {
+			return Meta{}, err
+		}
+		s.emitState(name, typ, StateReady)
+		return m, nil
 	}
 	dst := filepath.Join(s.cfg.Dir, name)
 	if err := os.Rename(abs, dst); err != nil {
@@ -243,6 +282,7 @@ func (s *Store) ImportIncoming(name, typ, incomingFile, description string) (Met
 	if err := s.setMeta(m); err != nil {
 		return Meta{}, err
 	}
+	s.emitState(name, typ, StateReady)
 	return m, nil
 }
 

@@ -21,6 +21,7 @@ import (
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/api"
 	"github.com/xzjt/nfvis/internal/config"
+	"github.com/xzjt/nfvis/internal/events"
 	"github.com/xzjt/nfvis/internal/images"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
@@ -28,6 +29,10 @@ import (
 	"github.com/xzjt/nfvis/internal/orchestrator/container"
 	"github.com/xzjt/nfvis/internal/orchestrator/network"
 	"github.com/xzjt/nfvis/internal/state"
+	"github.com/xzjt/nfvis/internal/system"
+	"github.com/xzjt/nfvis/internal/systemd"
+	"os/exec"
+	"strings"
 )
 
 func main() {
@@ -82,6 +87,19 @@ func run() error {
 	// M3-8：恢复收敛的不可收敛项落点（GET /alarms）
 	alarms := network.NewAlarmStore()
 	netProvider.SetAlarms(alarms)
+	// M5-1：事件总线（FR-API-006 / FR-OPS-020~022）。所有事件源经此汇聚，
+	// 由 GET /events（SSE）推送；告警变更同时进入总线。
+	bus := events.New()
+	alarms.SetNotifier(func(a network.Alarm) {
+		typ := events.TypeAlarmRaised
+		if a.State == network.AlarmResolved {
+			typ = events.TypeAlarmResolved
+		}
+		bus.Publish(typ, map[string]any{
+			"id": a.ID, "severity": a.Severity, "code": a.Code,
+			"message": a.Message, "source": a.Source, "state": a.State,
+		})
+	})
 	// M4-3：计算编排（libvirt）。连接失败（libvirtd 未起/无权限）降级为 NoopCompute
 	// 并告警，不阻塞 nfvisd 启动；此时 VM 生命周期动作返回不可用。
 	var (
@@ -133,21 +151,130 @@ func run() error {
 		imagesStore.SetDockerRemover(func(ref string) error {
 			return ctProvider.RemoveImage(context.Background(), ref)
 		})
+		// 容器镜像导入：docker save 归档经 `image load` 入 Docker 分层存储（FR-CMP-030/031）。
+		imagesStore.SetDockerLoader(func(path string) error {
+			return ctProvider.LoadImage(context.Background(), path)
+		})
+		// M5-1：镜像导入进度/状态事件
+		imagesStore.SetProgressSink(func(name string, written, total int64) {
+			bus.Publish(events.TypeImageImportProgress, map[string]any{
+				"name": name, "written": written, "total": total,
+			})
+		})
+		imagesStore.SetStateSink(func(name, typ, state string) {
+			bus.Publish(events.TypeImageImportProgress, map[string]any{
+				"name": name, "type": typ, "state": state,
+			})
+		})
 	}
 
 	netProvider.SetSocketDirs(computeCfg.VhostDir, ctCfg.MemifDir)
 	applier := orchestrator.NewApplier(netProvider, computeProvider, containerProvider,
 		orchestrator.WithVhostDir(computeCfg.VhostDir), orchestrator.WithMemifDir(ctCfg.MemifDir))
 
+	// 系统命令执行器（软件/证书/日志保留共用；与 SoftwareManager 一致带超时）
+	runCmd := func(ctx context.Context, name string, args ...string) (string, error) {
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+		out, err := exec.CommandContext(cctx, name, args...).CombinedOutput()
+		return string(out), err
+	}
+
+	// M5-8：证书管理（FR-SYS-011）。未显式给 -tls-cert 时，若已装管理证书则自动启用 HTTPS。
+	tlsMgr := system.NewTLSManager("", runCmd)
+	if *tlsCert == "" {
+		if _, ok := tlsMgr.Info(); ok {
+			*tlsCert, *tlsKey = tlsMgr.CertPath(), tlsMgr.KeyPath()
+			log.Info("使用已安装的管理证书启用 HTTPS", "cert", *tlsCert)
+		}
+	}
+
+	var eng *config.Engine // 供 OnCommitted 回调引用（NewEngine 之后赋值）
 	var engineOpts config.Options
 	if imagesStore != nil {
 		engineOpts.ImageResolver = imagesStore // FR-CFG-011⑤：镜像存在性与类型匹配
+	}
+	// M5-1：commit 成功事件（config-committed）
+	engineOpts.OnCommitted = func(revision int, user string) {
+		bus.Publish(events.TypeConfigCommitted, map[string]any{"revision": revision, "user": user})
+		// M5-8：提交后落实证书与日志保留策略（尽力而为，不阻塞 commit）
+		go func() {
+			if eng == nil {
+				return
+			}
+			cfg, err := eng.Committed()
+			if err != nil {
+				return
+			}
+			applyTLSSettings(cfg, tlsMgr, log)
+			if cfg.System != nil && cfg.System.Syslog != nil {
+				if path, err := system.ApplyLogRetention(context.Background(), runCmd,
+					cfg.System.Syslog.RetentionDays, cfg.System.Syslog.MaxSizeMB); err != nil {
+					log.Warn("应用日志保留策略失败", "err", err)
+				} else if path != "" {
+					log.Info("日志保留策略已应用", "dropin", path)
+				}
+			}
+		}()
 	}
 	engine, err := config.NewEngine(store, applier, engineOpts)
 	if err != nil {
 		return fmt.Errorf("装配事务引擎: %w", err)
 	}
+	eng = engine
 	defer engine.Close()
+
+	// M5-6：配置备份/恢复/恢复出厂（FR-OPS-004~007）
+	sysOps := system.NewManager(system.DefaultConfig(), engine, imagesStore, api.VersionStr)
+
+	// M5-3：数据面抓包（VPP pcap trace 经 CLI socket；FR-OPS-042）
+	// 注意：vppctl -s 需 CLI socket（/run/vpp/cli.sock），不是二进制 API socket；
+	// 传空由 vppctl 取缺省（同 diagController 的做法）。
+	captureProvider := network.NewCaptureProvider(network.NewVppctlShell(""),
+		func(name string) (uint32, bool, error) {
+			c, err := vppMgr.L2ClientFunc()()
+			if err != nil {
+				return 0, false, err
+			}
+			defer c.Close()
+			return c.SwInterfaceIndex(name)
+		}, network.DefaultCaptureDir)
+
+	// M5-7：软件升级/回退、电源、NTP（FR-OPS-001~003）
+	swMgr := system.NewSoftwareManager(system.DefaultSoftwareDir,
+		func(ctx context.Context, name string, args ...string) (string, error) {
+			cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+			defer cancel()
+			out, err := exec.CommandContext(cctx, name, args...).CombinedOutput()
+			return string(out), err
+		}, func() string { return api.VersionStr })
+
+	// M5-5：硬件健康采集（FR-SYS-012）——BMC/IPMI 优先，降级 lm-sensors → /sys/class/thermal；磁盘 SMART
+	hwProvider := system.NewHardwareProvider(func(ctx context.Context, name string, args ...string) (string, error) {
+		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(cctx, name, args...).CombinedOutput()
+		return string(out), err
+	})
+
+	// M5-4：诊断归档（tech-support）与 core dump 管理（FR-OPS-040/041）
+	coreDumps := system.NewCoreDumps("", 0)
+	techSupport := system.NewTechSupport("", system.TechSupportSources{
+		Version: func() any {
+			host, _ := os.Hostname()
+			view := vppMgr.StatusView(nil)
+			return map[string]any{
+				"nfvis": api.VersionStr, "hostname": host,
+				"vpp": view.Version, "vpp_connected": view.Connected,
+				"kernel": kernelRelease(),
+			}
+		},
+		Config: func() (any, error) { return engine.Committed() },
+		Audit:  func() (any, error) { return engine.AuditTrail(500) },
+		Status: func() (any, error) { return vppMgr.StatusView(nil), nil },
+		Logs:   nfvisdLogTail,
+		Cores:  coreDumps.List,
+	}, api.VersionStr)
 
 	aaaSvc := aaa.NewService(engine, nil)
 
@@ -228,6 +355,49 @@ func run() error {
 			}
 		}
 	}()
+	// M5-5：硬件阈值巡检（FR-SYS-012）——越限产生告警，恢复消警（与 /system/hardware 同源）
+	go func() {
+		interval := 60 * time.Second
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		check := func() {
+			cfg, err := engine.Committed()
+			if err != nil {
+				return
+			}
+			th := model.HealthThresholds{}
+			if cfg.System != nil && cfg.System.Health != nil {
+				th = *cfg.System.Health
+			}
+			cctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			defer cancel()
+			hh := hwProvider.Collect(cctx)
+			v := hwProvider.Evaluate(&hh, th.CPUTempCelsius, th.DiskTempCelsius, th.DiskUsedPercent)
+			if len(v) > 0 {
+				alarms.Raise("hardware", network.SeverityWarning, "HARDWARE_THRESHOLD",
+					"硬件健康越限: "+strings.Join(v, "; "), "system")
+			} else {
+				alarms.Resolve("hardware", "HARDWARE_THRESHOLD", "system")
+			}
+			// M5-8：证书临近过期告警（FR-SYS-011）
+			if days, warn := tlsMgr.ExpiryAlarm(); warn {
+				alarms.Raise("tls", network.SeverityWarning, "CERT_EXPIRING",
+					fmt.Sprintf("API 证书将在 %d 天内过期（FR-SYS-011）", days), "system")
+			} else {
+				alarms.Resolve("tls", "CERT_EXPIRING", "system")
+			}
+		}
+		check()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				check()
+			}
+		}
+	}()
+
 	vppMgr.OnConnect(func(version string) { go runRecovery() })
 	go func() {
 		if err := vppMgr.Run(ctx); err != nil {
@@ -268,11 +438,40 @@ func run() error {
 		VMSnapshots: vmSnaps,
 		Containers:  ctRuntime,
 		Images:      imagesStore,
+		Events:      bus,
+		SysOps:      sysOps,
+		DiagOps:     &diagOpsController{tech: techSupport, cores: coreDumps},
+		Capture:     &captureController{p: captureProvider},
+		Software:    &softwareController{m: swMgr},
+		Hardware:    &hardwareController{p: hwProvider},
+		TLS:         &tlsController{m: tlsMgr},
+		LogSource:   nfvisdLogTail,
 	})
 
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- apiServer.ListenAndServe() }()
 	log.Info("nfvisd 就绪", "db", *dbPath, "listen", *listen)
+	// FR-OPS-013：通知 systemd 就绪并按 WATCHDOG_USEC 喂看门狗（未由 systemd 管理时空操作）。
+	if err := systemd.Notify("READY=1"); err != nil {
+		log.Warn("sd_notify(READY=1) 失败", "err", err)
+	}
+	if iv, ok := systemd.WatchdogInterval(); ok {
+		go func() {
+			t := time.NewTicker(iv)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					if err := systemd.Notify("WATCHDOG=1"); err != nil {
+						log.Warn("sd_notify(WATCHDOG=1) 失败", "err", err)
+					}
+				}
+			}
+		}()
+		log.Info("systemd 看门狗已启用", "interval", iv.String())
+	}
 
 	select {
 	case err := <-srvErr:
@@ -400,6 +599,9 @@ func (c *alarmController) List(state string) []api.AlarmRow {
 	return out
 }
 
+// Clear 删除已 resolved 告警（M5-9，FR-OPS-022）。
+func (c *alarmController) Clear(id string, all bool) int { return c.store.Clear(id, all) }
+
 // diagController 装配 api.DiagRuntime（M3-9）：ping/traceroute/clear 统计。
 type diagController struct{ diag *network.Diagnostics }
 
@@ -485,4 +687,149 @@ func (c *snapshotController) SnapshotRevert(ctx context.Context, domain, name st
 
 func (c *snapshotController) SnapshotDelete(ctx context.Context, domain, name string) error {
 	return c.p.SnapshotDelete(ctx, domain, name)
+}
+
+// diagOpsController 诊断归档/core dump 的 API 适配器（M5-4）。
+type diagOpsController struct {
+	tech  *system.TechSupport
+	cores *system.CoreDumps
+}
+
+func (d *diagOpsController) GenerateTechSupport() (system.File, error) {
+	f, err := d.tech.Generate()
+	if err != nil {
+		return f, err
+	}
+	d.cores.Prune() // 顺带按容量滚动清理转储（FR-OPS-041）
+	return f, nil
+}
+func (d *diagOpsController) ListTechSupport() []system.File { return d.tech.List() }
+func (d *diagOpsController) TechSupportPath(name string) (string, error) {
+	return d.tech.Path(name)
+}
+func (d *diagOpsController) ListCoreDumps() []system.CoreDump { return d.cores.List() }
+func (d *diagOpsController) DeleteCoreDumps(file string) (int, error) {
+	return d.cores.Delete(file)
+}
+
+// kernelRelease 读取内核版本（诊断归档用）。
+func kernelRelease() string {
+	b, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// nfvisdLogTail 取 nfvisd 日志尾部（systemd 单元优先，其次系统日志尾部）。
+func nfvisdLogTail() ([]byte, error) {
+	if out, err := exec.Command("journalctl", "-u", "nfvisd", "--no-pager", "-n", "500").Output(); err == nil && len(out) > 0 {
+		return out, nil
+	}
+	out, err := exec.Command("journalctl", "--no-pager", "-n", "200").Output()
+	if err != nil {
+		return []byte("(journalctl unavailable: " + err.Error() + ")\n"), nil
+	}
+	return out, nil
+}
+
+// captureController 装配 api.CaptureRuntime（M5-3）。
+type captureController struct{ p *network.CaptureProvider }
+
+func (c *captureController) Status() (*api.CaptureSessionRow, []api.CaptureFileRow) {
+	active, files := c.p.Status()
+	var a *api.CaptureSessionRow
+	if active != nil {
+		a = &api.CaptureSessionRow{Interface: active.Interface, Captured: active.Captured,
+			StartedAt: active.StartedAt, MaxDepth: active.MaxDepth}
+	}
+	rows := make([]api.CaptureFileRow, 0, len(files))
+	for _, f := range files {
+		rows = append(rows, api.CaptureFileRow{Name: f.Name, SizeBytes: f.SizeBytes, CreatedAt: f.CreatedAt})
+	}
+	return a, rows
+}
+
+func (c *captureController) Start(ctx context.Context, ifname string, count int, filterACL string) error {
+	return c.p.Start(ctx, ifname, count, filterACL)
+}
+
+func (c *captureController) Stop(ctx context.Context, export bool) (api.CaptureFileRow, error) {
+	f, err := c.p.Stop(ctx, export)
+	return api.CaptureFileRow{Name: f.Name, SizeBytes: f.SizeBytes, CreatedAt: f.CreatedAt}, err
+}
+
+func (c *captureController) Path(name string) (string, error) { return c.p.Path(name) }
+
+// softwareController 装配 api.SoftwareRuntime（M5-7）。
+type softwareController struct{ m *system.SoftwareManager }
+
+func (c *softwareController) Add(ctx context.Context, pkg, sha string) (system.SoftwareResult, error) {
+	return c.m.Add(ctx, pkg, sha)
+}
+func (c *softwareController) Rollback(ctx context.Context) (system.SoftwareResult, error) {
+	return c.m.Rollback(ctx)
+}
+func (c *softwareController) Reboot(ctx context.Context) error   { return c.m.Reboot(ctx) }
+func (c *softwareController) Shutdown(ctx context.Context) error { return c.m.Shutdown(ctx) }
+func (c *softwareController) NTPSync(ctx context.Context, servers []string) (string, error) {
+	return c.m.NTPSync(ctx, servers)
+}
+
+// hardwareController 装配 api.HardwareRuntime（M5-5）。
+type hardwareController struct{ p *system.HardwareProvider }
+
+func (c *hardwareController) Collect(ctx context.Context) system.HardwareHealth {
+	return c.p.Collect(ctx)
+}
+func (c *hardwareController) Evaluate(hh *system.HardwareHealth, cpuTemp, diskTemp, diskUsed int) []string {
+	return c.p.Evaluate(hh, cpuTemp, diskTemp, diskUsed)
+}
+
+// tlsController 装配 api.TlsRuntime（M5-8）。
+type tlsController struct{ m *system.TLSManager }
+
+func (c *tlsController) Info() (system.TlsInfo, bool) { return c.m.Info() }
+func (c *tlsController) Install(certPEM, keyPEM string) (system.TlsInfo, error) {
+	return c.m.Install(certPEM, keyPEM)
+}
+func (c *tlsController) Regenerate(hostname string, ips []string) (system.TlsInfo, error) {
+	return c.m.Regenerate(hostname, ips)
+}
+func (c *tlsController) RegenerateSSHHostKeys(ctx context.Context) error {
+	return c.m.RegenerateSSHHostKeys(ctx)
+}
+
+// applyTLSSettings 按 committed 配置落实证书（FR-SYS-011）：cert-file/key-file 安装外部证书；
+// 声明 tls_self_signed 且尚无证书时生成自签证书。失败仅告警（不阻塞 commit）。
+func applyTLSSettings(cfg model.Config, m *system.TLSManager, log *slog.Logger) {
+	if cfg.System == nil || cfg.System.API == nil {
+		return
+	}
+	api := cfg.System.API
+	if api.CertFile != "" && api.KeyFile != "" {
+		certPEM, err1 := os.ReadFile(api.CertFile)
+		keyPEM, err2 := os.ReadFile(api.KeyFile)
+		if err1 != nil || err2 != nil {
+			log.Warn("读取配置的证书文件失败", "cert", api.CertFile, "key", api.KeyFile, "err", err1)
+			return
+		}
+		if _, err := m.Install(string(certPEM), string(keyPEM)); err != nil {
+			log.Warn("安装配置的证书失败", "err", err)
+		} else {
+			log.Info("已按配置安装外部证书", "cert", api.CertFile)
+		}
+		return
+	}
+	if api.TLSSelfSigned {
+		if _, ok := m.Info(); ok {
+			return // 已有证书（避免每次 commit 重签）
+		}
+		host, _ := os.Hostname()
+		if _, err := m.Regenerate(host, nil); err != nil {
+			log.Warn("生成自签证书失败", "err", err)
+		} else {
+			log.Info("已生成自签证书", "path", m.CertPath())
+		}
+	}
 }

@@ -34,7 +34,7 @@ type NatClient interface {
 	SwInterfaceIndex(ifname string) (uint32, bool, error)
 	NATAddressRange(add bool, first, last string) error
 	NATFeature(swIfIndex uint32, inside, add bool) error
-	NATEnable(enable bool) error
+	NATEnable(enable bool, insideVRF, outsideVRF uint32) error
 	NATInterfaceAddr(add bool, swIfIndex uint32) error
 	NATStatic(add bool, inside, outside string) error
 	NATSessions() ([]NATSession, error)
@@ -44,14 +44,17 @@ type NatClient interface {
 // NatProvider NAT44 编排。
 type NatProvider struct {
 	client       func() (NatClient, error)
-	insideIfaces func(vsName string) []uint32 // 注入：交换机成员 sw_if_index（可空）
+	insideIfaces func(vsName string) []uint32       // 注入：交换机成员 sw_if_index（可空）
+	outsideTable func(ifname string) (uint32, bool) // 注入：接口所属 VRF tableID（决策 #52）
 
-	mu       sync.Mutex
-	pools    map[string][2]string // 池名 → {first,last}
-	statics  map[string]string    // insideIP → outsideIP
-	features map[uint32]string    // swIfIndex → inside|outside
-	ifaddr   map[uint32]bool      // 使用接口地址做 NAT 的外口
-	enabled  bool                 // nat44_ex 插件特性是否已启用（会话查询前置）
+	mu         sync.Mutex
+	pools      map[string][2]string // 池名 → {first,last}
+	statics    map[string]string    // insideIP → outsideIP
+	features   map[uint32]string    // swIfIndex → inside|outside
+	ifaddr     map[uint32]bool      // 使用接口地址做 NAT 的外口
+	enabled    bool                 // nat44_ex 插件特性是否已启用（会话查询前置）
+	insideVRF  uint32               // 决策 #52：生效的 inside/outside 转发域
+	outsideVRF uint32
 }
 
 // NewNatProvider 以固定客户端构造（测试）。
@@ -70,6 +73,9 @@ func NewNatProviderFunc(f func() (NatClient, error)) *NatProvider {
 // SetInsideResolver 注入 L3 交换机（VRF）成员接口解析（inside 接口来源）。
 func (p *NatProvider) SetInsideResolver(fn func(vsName string) []uint32) { p.insideIfaces = fn }
 
+// SetOutsideResolver 注入「接口 → 所属 VRF tableID」解析（outside 转发域来源，决策 #52）。
+func (p *NatProvider) SetOutsideResolver(fn func(ifname string) (uint32, bool)) { p.outsideTable = fn }
+
 // reset 清空进程内登记表（恢复收敛前调用，使 ApplyNAT 全量重放）。
 func (p *NatProvider) reset() {
 	p.mu.Lock()
@@ -78,6 +84,7 @@ func (p *NatProvider) reset() {
 	p.features = map[uint32]string{}
 	p.ifaddr = map[uint32]bool{}
 	p.enabled = false
+	p.insideVRF, p.outsideVRF = 0, 0
 	p.mu.Unlock()
 }
 
@@ -101,19 +108,37 @@ func (p *NatProvider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 	for _, st := range nat.Static {
 		desiredStatics[st.InsideIP] = st.OutsideIP
 	}
-	desiredFeatures, desiredIfAddr, err := p.desiredFeatures(c, nat, desiredPools)
+	desiredFeatures, desiredIfAddr, insideVRF, outsideVRF, err := p.desiredFeatures(c, nat, desiredPools)
 	if err != nil {
 		return err
 	}
 	nonEmpty := len(desiredPools) > 0 || len(desiredStatics) > 0 || len(desiredFeatures) > 0
+
+	// 插件启用/关闭：仅在状态或 inside/outside 转发域变化时下发（幂等重放不重复请求）。
 	p.mu.Lock()
-	p.enabled = nonEmpty
+	wasEnabled, oldInside, oldOutside := p.enabled, p.insideVRF, p.outsideVRF
 	p.mu.Unlock()
 	if nonEmpty {
-		if err := c.NATEnable(true); err != nil {
-			return fmt.Errorf("启用 NAT44 EI: %w", err)
+		if wasEnabled && (oldInside != insideVRF || oldOutside != outsideVRF) {
+			// VPP 不允许在启用状态下切换转发域，先关再开。
+			if err := c.NATEnable(false, oldInside, oldOutside); err != nil {
+				return fmt.Errorf("切换 NAT44 EI 转发域前关闭失败: %w", err)
+			}
+			wasEnabled = false
+		}
+		if !wasEnabled {
+			if err := c.NATEnable(true, insideVRF, outsideVRF); err != nil {
+				return fmt.Errorf("启用 NAT44 EI（inside-vrf %d outside-vrf %d）: %w", insideVRF, outsideVRF, err)
+			}
+		}
+	} else if wasEnabled {
+		if err := c.NATEnable(false, oldInside, oldOutside); err != nil {
+			return fmt.Errorf("关闭 NAT44 EI: %w", err)
 		}
 	}
+	p.mu.Lock()
+	p.enabled, p.insideVRF, p.outsideVRF = nonEmpty, insideVRF, outsideVRF
+	p.mu.Unlock()
 
 	// 地址池：删旧/改值/新增
 	p.mu.Lock()
@@ -195,11 +220,6 @@ func (p *NatProvider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 		}
 	}
 
-	if !nonEmpty {
-		if err := c.NATEnable(false); err != nil {
-			return fmt.Errorf("关闭 NAT44 EI: %w", err)
-		}
-	}
 	p.mu.Lock()
 	p.pools, p.statics, p.features, p.ifaddr = desiredPools, desiredStatics, desiredFeatures, desiredIfAddr
 	p.mu.Unlock()
@@ -223,16 +243,32 @@ func (p *NatProvider) Sessions(ctx context.Context) ([]NATSession, error) {
 	return c.NATSessions()
 }
 
-// desiredFeatures 汇总接口 inside/outside：rule.action.interface → outside；
+// desiredFeatures 汇总接口 inside/outside 与插件转发域：rule.action.interface → outside；
 // rule.virtual_switch 成员 → inside。同一接口不可同时内外。
-func (p *NatProvider) desiredFeatures(c NatClient, nat model.NatConfig, pools map[string][2]string) (map[uint32]string, map[uint32]bool, error) {
+//
+// 返回值 insideVRF/outsideVRF 供 nat44_ei_plugin_enable_disable 使用（决策 #52）：
+// insideVRF 由 virtual-switch 确定性派生 TableID(<vs名>)（L3 交换机与同名 Vrf 条目一一对应）；
+// outsideVRF 由出接口所属 VRF 派生（未归属 → 默认表 0）。多条规则的 inside/outside 不一致时
+// 在校验层已被拒绝，此处再防御性报错。
+func (p *NatProvider) desiredFeatures(c NatClient, nat model.NatConfig, pools map[string][2]string) (map[uint32]string, map[uint32]bool, uint32, uint32, error) {
 	features := map[uint32]string{}
 	ifaddr := map[uint32]bool{}
-	if p.insideIfaces != nil {
-		for _, r := range nat.Rules {
-			if r.VirtualSwitch == "" {
-				continue
-			}
+	insideVRF := uint32(0)
+	insideSet := false
+	outsideVRF := uint32(0)
+	outsideSet := false
+	for _, r := range nat.Rules {
+		if r.VirtualSwitch == "" {
+			continue
+		}
+		if !insideSet {
+			insideVRF, insideSet = TableID(r.VirtualSwitch), true
+		} else if insideVRF != TableID(r.VirtualSwitch) {
+			return nil, nil, 0, 0, fmt.Errorf(
+				"NAT 规则 %d 的 virtual-switch %q 与前一条规则不一致：V1 仅支持单一 inside 转发域（决策 #52）",
+				r.Seq, r.VirtualSwitch)
+		}
+		if p.insideIfaces != nil {
 			for _, idx := range p.insideIfaces(r.VirtualSwitch) {
 				features[idx] = "inside"
 			}
@@ -241,35 +277,53 @@ func (p *NatProvider) desiredFeatures(c NatClient, nat model.NatConfig, pools ma
 	for _, r := range nat.Rules {
 		if r.Action.SourcePool != "" {
 			if _, ok := pools[r.Action.SourcePool]; !ok {
-				return nil, nil, fmt.Errorf("NAT 规则 %d 引用未定义的源池 %s", r.Seq, r.Action.SourcePool)
+				return nil, nil, 0, 0, fmt.Errorf("NAT 规则 %d 引用未定义的源池 %s", r.Seq, r.Action.SourcePool)
 			}
 		}
 		if r.Action.Interface == "" {
 			// VPP NAT44 的 outside 必须是显式接口（inside 由 virtual-switch 成员解析）。
 			// 此前该情形被静默跳过：配置 commit 成功但 NAT 完全不生效（show nat44
 			// interfaces 为空、内网不通），排查成本极高。此处改为显式报错。
-			return nil, nil, fmt.Errorf(
+			return nil, nil, 0, 0, fmt.Errorf(
 				"NAT 规则 %d 未指定出接口：需 action interface <ifname>（VPP NAT44 的 outside 不支持自动推断；"+
 					"source-pool 仅提供地址池）", r.Seq)
 		}
 		if r.VirtualSwitch == "" {
-			return nil, nil, fmt.Errorf(
+			return nil, nil, 0, 0, fmt.Errorf(
 				"NAT 规则 %d 未指定 virtual-switch：inside 接口取自该 L3 交换机的成员接口", r.Seq)
 		}
 		idx, ok, err := c.SwInterfaceIndex(r.Action.Interface)
 		if err != nil {
-			return nil, nil, fmt.Errorf("解析 NAT 外口 %s: %w", r.Action.Interface, err)
+			return nil, nil, 0, 0, fmt.Errorf("解析 NAT 外口 %s: %w", r.Action.Interface, err)
 		}
 		if !ok {
-			return nil, nil, fmt.Errorf("%w: NAT 外口 %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, r.Action.Interface)
+			return nil, nil, 0, 0, fmt.Errorf("%w: NAT 外口 %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, r.Action.Interface)
 		}
 		if features[idx] == "inside" {
-			return nil, nil, fmt.Errorf("接口 %s 同时被配置为 NAT 内外口", r.Action.Interface)
+			return nil, nil, 0, 0, fmt.Errorf("接口 %s 同时被配置为 NAT 内外口", r.Action.Interface)
 		}
 		features[idx] = "outside"
-		ifaddr[idx] = true
+		// outside 转发域：出接口所属 VRF（未归属任何 VRF → 默认表 0）。
+		ovrf := uint32(0)
+		if p.outsideTable != nil {
+			if t, ok := p.outsideTable(r.Action.Interface); ok {
+				ovrf = t
+			}
+		}
+		if !outsideSet {
+			outsideVRF, outsideSet = ovrf, true
+		} else if outsideVRF != ovrf {
+			return nil, nil, 0, 0, fmt.Errorf(
+				"NAT 规则 %d 的出接口 %s 与其它规则的 outside 转发域不一致：V1 仅支持单一 outside VRF（决策 #52）",
+				r.Seq, r.Action.Interface)
+		}
+		// 未提供 source-pool 的规则以出接口地址作外部地址（nat44_ei add interface address）；
+		// 提供 source-pool 时由地址池承担，避免两套外部地址语义混用。
+		if r.Action.SourcePool == "" {
+			ifaddr[idx] = true
+		}
 	}
-	return features, ifaddr, nil
+	return features, ifaddr, insideVRF, outsideVRF, nil
 }
 
 // parseAddressRange 解析 "<ip> to <ip>"。

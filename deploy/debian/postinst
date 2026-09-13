@@ -1,0 +1,63 @@
+#!/bin/sh
+# nfvis 安装后脚本（M5-10，FR-OPS-013）：目录/权限、底座优化校验、core_pattern、systemd 装载。
+# 设计原则：**校验与提示为主，不阻断安装**（底座差异不应让 dpkg 失败）；幂等，可重复执行。
+set -e
+
+log() { echo "nfvis postinst: $*"; }
+
+# 1) 数据目录（决策 #45/#56/#57/#59 的落点）
+install -d -m 0755 /var/lib/nfvis
+for d in images backup captures coredumps tech-support vms; do
+    install -d -m 0755 "/var/lib/nfvis/$d"
+done
+install -d -m 0755 /data/incoming
+install -d -m 0755 /run/nfvis
+# VPP 创建的 vhost-user/memif socket 需 QEMU/容器可访问（M4 技术坑 #4）
+install -d -m 0777 /run/nfvis/vhost /run/nfvis/memif
+
+# 2) core dump 收集（FR-OPS-041）：若当前 core_pattern 未指向 nfvis 目录且非 systemd-coredump，
+#    提示管理员（不擅自改内核参数，避免影响其它服务）；安装了 systemd-coredump 的场景由收集器落盘。
+CORE_DIR=/var/lib/nfvis/coredumps
+CURRENT_CP=$(cat /proc/sys/kernel/core_pattern 2>/dev/null || true)
+case "$CURRENT_CP" in
+    "$CORE_DIR"*) log "core_pattern 已指向 $CORE_DIR" ;;
+    *systemd-coredump*|"|"*apport*) log "提示：core_pattern 走系统收集器（$CURRENT_CP）；如需 nfvis 目录收集，可执行：echo '$CORE_DIR/core.%e.%p.%t' > /proc/sys/kernel/core_pattern" ;;
+    *) log "提示：core_pattern=$CURRENT_CP 未指向 $CORE_DIR，core dump 清单可能为空（FR-OPS-041）" ;;
+esac
+
+# 3) 底座优化校验（FR-SYS-002/003、FR-SEC-006）——仅提示
+HUGEPAGES_1G=$(grep -i '^HugePages_Total' /proc/meminfo >/dev/null 2>&1 && awk '/HugePages_Total/{print $2}' /proc/meminfo || echo 0)
+if [ "${HUGEPAGES_1G:-0}" -gt 0 ] 2>/dev/null; then
+    log "大页已预留：$(grep -i hugepages_total /proc/meminfo | tr -s ' ')"
+else
+    log "提示：未检测到大页（FR-SYS-002 建议安装期预留 default_hugepagesz=1G hugepagesz=1G hugepages=N 并 reboot）"
+fi
+if grep -q 'isolcpus' /proc/cmdline 2>/dev/null; then
+    log "isolcpus 已配置：$(tr ' ' '\n' < /proc/cmdline | grep isolcpus | tr '\n' ' ')"
+else
+    log "提示：内核命令行未见 isolcpus（FR-SYS-003 建议隔离核基线）"
+fi
+
+# 4) 运行依赖探测（仅提示）
+for comp in vpp libvirtd dockerd; do
+    if command -v "$comp" >/dev/null 2>&1 || systemctl list-unit-files 2>/dev/null | grep -q "^${comp}\.service"; then
+        log "检测到 $comp"
+    else
+        log "警告：未检测到 $comp（对应编排能力将降级，FR-OPS-010）"
+    fi
+done
+
+# 5) systemd 单元（FR-OPS-013：Restart=always + WatchdogSec）
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl enable nfvis.service >/dev/null 2>&1 || true
+    # FR-OPS-001：升级时自动重启已在运行的 nfvisd 以加载新版本（未运行则不影响，
+    # 避免安装期抢占网卡——首次安装不自动 start）。
+    if [ "$1" = "configure" ] && [ -n "$2" ]; then
+        systemctl try-restart nfvis.service >/dev/null 2>&1 && log "已重启 nfvis.service 以加载新版本（FR-OPS-001）" || true
+    fi
+    log "已装载 nfvis.service（enable；首次安装不自动 start——按需 systemctl start nfvis）"
+fi
+
+log "完成"
+exit 0

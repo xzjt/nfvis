@@ -67,6 +67,13 @@ func TestNatEndpoint(t *testing.T) {
 		t.Fatalf("创建 L3 交换机")
 	}
 
+	// 出接口须归属某 VRF 且带地址（NAT outside 转发域来源，决策 #52）
+	if status, _, _ := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/vrfs", token,
+		model.Vrf{Name: "wan", L3Interfaces: []model.L3Interface{{Interface: "ens2f0", Addresses: []string{"203.0.113.1/24"}}}},
+		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("创建 wan VRF")
+	}
+
 	nat := model.NatConfig{Rules: []model.NatRule{{
 		Seq: 1, MatchSource: "192.168.100.0/24", VirtualSwitch: "vs-l3",
 		Action: model.NatAction{Interface: "ens2f0"},

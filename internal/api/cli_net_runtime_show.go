@@ -147,17 +147,24 @@ func (x *cliExecutor) execShowNat(args []string) string {
 		return fmt.Sprintf("%% 无效命令: show nat %s（可用：show nat [sessions]）\n", strings.Join(args, " "))
 	}
 	if x.natRT == nil {
+		if head := x.natConfigLines(); head != "" {
+			return head + "（运行态未接入：会话不可用）\n"
+		}
 		return errRuntimeUnavailable
 	}
 	rows, err := x.natRT.Sessions(context.Background())
 	if err != nil {
-		return "%% " + err.Error() + "\n"
+		return x.natConfigLines() + "%% " + err.Error() + "\n"
 	}
 	if len(rows) == 0 {
-		return "（无 NAT 会话）\n"
+		if head := x.natConfigLines(); head != "" {
+			return head + "（无 NAT 会话）\n"
+		}
+		return "（无 NAT 配置与会话）\n"
 	}
 	items := make([]any, 0, len(rows))
 	var b strings.Builder
+	b.WriteString(x.natConfigLines())
 	fmt.Fprintf(&b, "%-18s %-8s %-18s %-8s %-8s %s\n", "Inside", "Port", "Outside", "Port", "Proto", "Packets")
 	for _, r := range rows {
 		items = append(items, anyToTree(r))
@@ -165,6 +172,33 @@ func (x *cliExecutor) execShowNat(args []string) string {
 			r.InsideIP, r.InsidePort, r.OutsideIP, r.OutsidePort, r.Protocol, r.Packets)
 	}
 	x.structured = map[string]any{"nat_sessions": items}
+	return b.String()
+}
+
+// natConfigLines 渲染 NAT 配置（池/规则/静态映射，来自 committed 配置，FR-NET-016）。
+func (x *cliExecutor) natConfigLines() string {
+	if x.engine == nil {
+		return ""
+	}
+	cfg, err := x.engine.Committed()
+	if err != nil || cfg.Nat == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range cfg.Nat.SourcePools {
+		fmt.Fprintf(&b, "source-pool %s address-range %s;\n", p.Name, p.AddressRange)
+	}
+	for _, r := range cfg.Nat.Rules {
+		action := "interface " + r.Action.Interface
+		if r.Action.SourcePool != "" {
+			action = "source-pool " + r.Action.SourcePool + " " + action
+		}
+		fmt.Fprintf(&b, "rules %d match source %s virtual-switch %s action %s;\n",
+			r.Seq, r.MatchSource, r.VirtualSwitch, action)
+	}
+	for _, st := range cfg.Nat.Static {
+		fmt.Fprintf(&b, "static %s to %s;\n", st.InsideIP, st.OutsideIP)
+	}
 	return b.String()
 }
 

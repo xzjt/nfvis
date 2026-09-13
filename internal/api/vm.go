@@ -194,6 +194,7 @@ func (s *Server) vmAction(w http.ResponseWriter, r *http.Request, name, action s
 		return
 	}
 	s.engine.Audit(user, "vm."+action, fmt.Sprintf("%s VM %s", action, name), "success")
+	s.publishVNFState("virtual-machine-functions", name, action+"ing") // M5-1 vnf-state-changed
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": action + "ing", "name": name})
 }
 

@@ -60,12 +60,13 @@ func GatewayVRFName(vsName string) string { return "vr-" + vsName }
 type L3Provider struct {
 	client func() (L3Client, error)
 
-	mu       sync.Mutex
-	ifaces   map[uint32][]uint32 // tableID → 配置过的 sw_if_index（删除时清地址）
-	subifs   map[uint32][]uint32 // tableID → 自建子接口（删除时一并移除）
-	bvis     map[string]uint32   // 交换机名 → BVI sw_if_index
-	ownTable map[string]bool     // 交换机名 → BVI 使用专属表（删除时删表）
-	acl      *AclProvider        // 可选：L3 接口/BVI 的 acl-in 绑定
+	mu         sync.Mutex
+	ifaces     map[uint32][]uint32 // tableID → 配置过的 sw_if_index（删除时清地址）
+	subifs     map[uint32][]uint32 // tableID → 自建子接口（删除时一并移除）
+	bvis       map[string]uint32   // 交换机名 → BVI sw_if_index
+	ownTable   map[string]bool     // 交换机名 → BVI 使用专属表（删除时删表）
+	ifaceTable map[string]uint32   // 接口名 → 所属 VRF tableID（NAT outside 转发域解析，决策 #52）
+	acl        *AclProvider        // 可选：L3 接口/BVI 的 acl-in 绑定
 }
 
 // SetACL 注入 ACL 编排（L3 接口与 BVI 网关的 acl-in 绑定）。
@@ -78,6 +79,7 @@ func (p *L3Provider) reset() {
 	p.subifs = map[uint32][]uint32{}
 	p.bvis = map[string]uint32{}
 	p.ownTable = map[string]bool{}
+	p.ifaceTable = map[string]uint32{}
 	p.mu.Unlock()
 }
 
@@ -85,13 +87,13 @@ func (p *L3Provider) reset() {
 func NewL3Provider(c L3Client) *L3Provider {
 	return &L3Provider{client: func() (L3Client, error) { return c, nil },
 		ifaces: map[uint32][]uint32{}, subifs: map[uint32][]uint32{},
-		bvis: map[string]uint32{}, ownTable: map[string]bool{}}
+		bvis: map[string]uint32{}, ownTable: map[string]bool{}, ifaceTable: map[string]uint32{}}
 }
 
 // NewL3ProviderFunc 以客户端工厂构造（连接可重连）。
 func NewL3ProviderFunc(f func() (L3Client, error)) *L3Provider {
 	return &L3Provider{client: f, ifaces: map[uint32][]uint32{}, subifs: map[uint32][]uint32{},
-		bvis: map[string]uint32{}, ownTable: map[string]bool{}}
+		bvis: map[string]uint32{}, ownTable: map[string]bool{}, ifaceTable: map[string]uint32{}}
 }
 
 // ApplyVRF 把 VRF（L3 交换机）收敛到 VPP：建 v4/v6 table、配置 L3 接口地址、
@@ -159,8 +161,20 @@ func (p *L3Provider) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 
 	p.mu.Lock()
 	p.ifaces[tableID], p.subifs[tableID] = idxs, subs
+	for _, li := range vrf.L3Interfaces {
+		p.ifaceTable[li.Interface] = tableID
+	}
 	p.mu.Unlock()
 	return nil
+}
+
+// TableOfIface 返回接口所属 VRF 的 tableID（未归属任何 VRF 时 ok=false）。
+// 供 NAT44 outside 转发域解析（决策 #52）。
+func (p *L3Provider) TableOfIface(ifname string) (uint32, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	t, ok := p.ifaceTable[ifname]
+	return t, ok
 }
 
 // DeleteVRF 删除 VRF：清接口地址、删 v4/v6 table（路由随表删除）。
@@ -175,6 +189,11 @@ func (p *L3Provider) DeleteVRF(ctx context.Context, name string) error {
 	idxs, subs := p.ifaces[tableID], p.subifs[tableID]
 	delete(p.ifaces, tableID)
 	delete(p.subifs, tableID)
+	for k, t := range p.ifaceTable {
+		if t == tableID {
+			delete(p.ifaceTable, k)
+		}
+	}
 	p.mu.Unlock()
 	for _, idx := range idxs {
 		if err := c.SwInterfaceAddDelAddress(idx, "", false, true); err != nil {

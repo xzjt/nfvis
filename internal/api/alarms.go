@@ -4,6 +4,7 @@ package api
 // 由编排器注入的 AlarmRuntime 提供；本层不 import orchestrator。
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -23,6 +24,8 @@ type AlarmRow struct {
 // AlarmRuntime 告警表读取能力（编排器装配注入；nil = 503）。
 type AlarmRuntime interface {
 	List(state string) []AlarmRow
+	// Clear 删除已 resolved 告警（M5-9，FR-OPS-022）；all=true 清全部。
+	Clear(id string, all bool) int
 }
 
 // handleGetAlarms GET /api/v1/alarms：告警列表（state=active|resolved|all，缺省 active）。
@@ -37,4 +40,31 @@ func (s *Server) handleGetAlarms(w http.ResponseWriter, r *http.Request) {
 		rows = []AlarmRow{}
 	}
 	writeJSON(w, http.StatusOK, rows)
+}
+
+// handleClearAlarms POST /api/v1/alarms:clear（清除已 resolved 告警，204）。
+func (s *Server) handleClearAlarms(w http.ResponseWriter, r *http.Request) {
+	if s.alarms == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "告警表未接入", nil)
+		return
+	}
+	var in struct {
+		ID  string `json:"id"`
+		All bool   `json:"all"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	if in.ID == "" && !in.All {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "需指定 id 或 all=true", nil)
+		return
+	}
+	n := s.alarms.Clear(in.ID, in.All)
+	user := "api"
+	if info, ok := Identity(r); ok {
+		user = info.User
+	}
+	s.engine.Audit(user, "alarms.clear", fmt.Sprintf("清除 %d 条已 resolved 告警（id=%q all=%v）", n, in.ID, in.All), "success")
+	w.WriteHeader(http.StatusNoContent)
 }

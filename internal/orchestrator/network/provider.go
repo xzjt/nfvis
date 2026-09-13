@@ -47,7 +47,13 @@ func (n *L2Network) SetSocketDirs(vhostDir, memifDir string) {
 }
 
 // SetL3 追加 L3/VRF 编排（BVI 网关随 L2 交换机一并处理）。
-func (n *L2Network) SetL3(l3 *L3Provider) { n.l3 = l3 }
+func (n *L2Network) SetL3(l3 *L3Provider) {
+	n.l3 = l3
+	// NAT outside 转发域来源（决策 #52）；SetNAT 亦会注入，二者顺序无关。
+	if n.nat != nil {
+		n.nat.SetOutsideResolver(l3.TableOfIface)
+	}
+}
 
 // SetServices 追加 SPAN/QoS/接口编排（M3-5）。
 func (n *L2Network) SetServices(svc *ServicesProvider) { n.svc = svc }
@@ -68,6 +74,7 @@ func (n *L2Network) SetNAT(p *NatProvider) {
 	n.nat = p
 	if p != nil && n.l3 != nil {
 		p.SetInsideResolver(n.l3.AttachedIfaces) // NAT 仅作用于 L3 交换机
+		p.SetOutsideResolver(n.l3.TableOfIface)  // outside 转发域来自出接口所属 VRF（决策 #52）
 	}
 }
 

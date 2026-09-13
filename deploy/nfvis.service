@@ -1,0 +1,32 @@
+[Unit]
+Description=NFViS 一体机守护进程（nfvisd）
+Documentation=file:///usr/share/doc/nfvis/NFViS-系统产品需求与目标架构规格书.md
+After=network-online.target libvirtd.service docker.service vpp.service
+Wants=network-online.target
+# VPP/libvirtd/docker 由 nfvisd 编排；任一未起时 nfvisd 降级运行（FR-OPS-010/013）
+After=vpp.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+# FR-OPS-013：崩溃自动拉起 + 看门狗
+Restart=always
+RestartSec=3
+# 连续快速崩溃退避（systemd 内置：StartLimitIntervalSec 内超过 StartLimitBurst 则进入 failed）
+StartLimitIntervalSec=60
+StartLimitBurst=5
+WatchdogSec=30
+Environment=NFVIS_DB=/var/lib/nfvis/nfvis.db
+Environment=NFVIS_LISTEN=:443
+Environment=NFVIS_VPP_SOCK=/run/vpp/api.sock
+# 未提供 TLS 证书时退化为明文（仅限开发）；生产由 set system api tls 安装后重启生效
+ExecStart=/usr/bin/nfvisd -db ${NFVIS_DB} -listen ${NFVIS_LISTEN} -vpp-sock ${NFVIS_VPP_SOCK}
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# 底座交互需要 root（VPP socket / libvirt / docker / sysfs）
+User=root
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

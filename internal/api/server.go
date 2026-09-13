@@ -7,6 +7,7 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,15 +16,16 @@ import (
 
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/config"
+	"github.com/xzjt/nfvis/internal/events"
 	"github.com/xzjt/nfvis/internal/schema"
 	"github.com/xzjt/nfvis/internal/state"
 )
 
 // API 版本与产品版本（FR-API-007；组件版本经 GET /system/version 汇报）。
-const (
-	APIPrefix  = "/api/v1"
-	VersionStr = "1.0.0-dev"
-)
+const APIPrefix = "/api/v1"
+
+// VersionStr 产品版本；可经 -ldflags "-X .../internal/api.VersionStr=x.y.z" 注入（deb 打包用）。
+var VersionStr = "1.0.0-dev"
 
 // Options server 可选项。
 type Options struct {
@@ -31,20 +33,28 @@ type Options struct {
 	TLSCert     string // TLS 证书路径（FR-API-001，HTTPS；与 TLSKey 成对）
 	TLSKey      string // TLS 私钥路径；二者为空 = 明文 HTTP（仅限开发/测试）
 	Log         *slog.Logger
-	VPP         VppController      // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
-	L2          L2Runtime          // L2 运行态查询（M3-3；nil = mac-table 503）
-	L3          L3Runtime          // L3 运行态查询（M3-4；nil = routes 503）
-	LLDP        LldpRuntime        // LLDP 邻居（M3-6；nil = 503）
-	State       *state.State       // 运行态聚合（M3-7；nil = 省略运行态字段）
-	SRIOV       SRIOVSetter        // SR-IOV VF 数量（M3-7；nil = 503）
-	NAT         NatSessionsRuntime // NAT 会话（M3-7；nil = 503）
-	Alarms      AlarmRuntime       // 告警列表（M3-8；nil = 503）
-	Diag        DiagRuntime        // CLI 诊断命令（M3-9；nil = 命令报不可用）
-	VM          VMRuntime          // VM 生命周期（M4-3；nil = 生命周期动作 503、状态省略）
-	VMConsole   VMConsoleRuntime   // VM 串口 console（M4-5；nil = console 端点 503）
-	VMSnapshots VMSnapshotRuntime  // VM 快照（M4-6；nil = 快照端点 503）
-	Containers  ContainerRuntime   // 容器生命周期/日志（M4-7；nil = 503）
-	Images      ImagesRuntime      // 镜像仓库（M4-8；nil = 503）
+	VPP         VppController          // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
+	L2          L2Runtime              // L2 运行态查询（M3-3；nil = mac-table 503）
+	L3          L3Runtime              // L3 运行态查询（M3-4；nil = routes 503）
+	LLDP        LldpRuntime            // LLDP 邻居（M3-6；nil = 503）
+	State       *state.State           // 运行态聚合（M3-7；nil = 省略运行态字段）
+	SRIOV       SRIOVSetter            // SR-IOV VF 数量（M3-7；nil = 503）
+	NAT         NatSessionsRuntime     // NAT 会话（M3-7；nil = 503）
+	Alarms      AlarmRuntime           // 告警列表（M3-8；nil = 503）
+	Diag        DiagRuntime            // CLI 诊断命令（M3-9；nil = 命令报不可用）
+	VM          VMRuntime              // VM 生命周期（M4-3；nil = 生命周期动作 503、状态省略）
+	VMConsole   VMConsoleRuntime       // VM 串口 console（M4-5；nil = console 端点 503）
+	VMSnapshots VMSnapshotRuntime      // VM 快照（M4-6；nil = 快照端点 503）
+	Containers  ContainerRuntime       // 容器生命周期/日志（M4-7；nil = 503）
+	Images      ImagesRuntime          // 镜像仓库（M4-8；nil = 503）
+	Events      *events.Bus            // 事件总线（M5-1；nil = /events 503）
+	SysOps      SystemOpsRuntime       // 备份/恢复/恢复出厂（M5-6；nil = 503）
+	DiagOps     DiagOpsRuntime         // 诊断归档/core dump（M5-4；nil = 503）
+	LogSource   func() ([]byte, error) // 系统日志来源（M5-9 show log system；nil = 报不可用）
+	Capture     CaptureRuntime         // 数据面抓包（M5-3；nil = 503）
+	Software    SoftwareRuntime        // 软件升级/电源/NTP（M5-7；nil = 503）
+	Hardware    HardwareRuntime        // 硬件健康采集（M5-5；nil = 503）
+	TLS         TlsRuntime             // 证书管理（M5-8；nil = 503）
 }
 
 // Server NFViS REST server。
@@ -65,6 +75,13 @@ type Server struct {
 	vmSnapshots VMSnapshotRuntime
 	containers  ContainerRuntime
 	images      ImagesRuntime
+	events      *events.Bus
+	sysOps      SystemOpsRuntime
+	diagOps     DiagOpsRuntime
+	capture     CaptureRuntime
+	software    SoftwareRuntime
+	hardware    HardwareRuntime
+	tlsMgr      TlsRuntime
 	consoleTix  *consoleTickets
 	log         *slog.Logger
 	mux         *http.ServeMux
@@ -82,10 +99,28 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, consoleTix: newConsoleTickets(), log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), log: log}
 	s.cliExec.setRuntime(opts.Diag, opts.State)
 	s.cliExec.setNetRuntime(opts.L2, opts.L3, opts.LLDP, opts.NAT, opts.Alarms)
 	s.cliExec.setComputeRuntime(opts.VM, opts.VMConsole, opts.VMSnapshots, opts.Containers, opts.Images)
+	s.cliExec.setEventBus(opts.Events) // M5-1：CLI 直连动作也发布 vnf-state-changed
+	s.cliExec.setSystemOps(opts.SysOps)
+	s.cliExec.setDiagOps(opts.DiagOps)
+	s.cliExec.setLogSource(opts.LogSource)
+	s.cliExec.setCapture(opts.Capture)
+	s.cliExec.setSoftware(opts.Software)
+	s.cliExec.setHardware(opts.Hardware)
+	s.cliExec.setTLS(opts.TLS)
+	s.cliExec.setVPPRestart(func(ctx context.Context) error {
+		if s.vpp == nil {
+			return fmt.Errorf("VPP 控制未接入")
+		}
+		cfg, err := e.Committed()
+		if err != nil {
+			return err
+		}
+		return s.vpp.Restart(ctx, cfg.Vpp)
+	})
 	// M4-12：CLI `request … console` 复用 console 端点同一 ticket 表（ws 桥接与审计同源）
 	s.cliExec.issueConsole = func(vm, user string) (string, int, error) {
 		tok, ttl, err := s.consoleTix.issue(vm, user)
@@ -190,6 +225,49 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 
 	// M3-8：告警列表（恢复收敛的不可收敛项落点，FR-OPS-010）
 	mux.Handle("GET "+APIPrefix+"/alarms", s.auth(s.handleGetAlarms, schema.ClassReadOnly, "show alarms"))
+	// M5-9：清除已 resolved 告警（FR-OPS-022）
+	mux.Handle("POST "+APIPrefix+"/alarms:clear", cfgAPI(s.handleClearAlarms))
+	// M5-1：事件流（SSE，FR-API-006 / FR-OPS-022）
+	mux.Handle("GET "+APIPrefix+"/events", s.auth(s.handleEvents, schema.ClassReadOnly))
+	// M5-2：Prometheus 指标（契约 security: []，无鉴权，FR-SYS-005）
+	mux.Handle("GET "+APIPrefix+"/metrics", http.HandlerFunc(s.handleMetrics))
+
+	// M5-6：配置备份/恢复/恢复出厂（FR-OPS-004~007）
+	mux.Handle("GET "+APIPrefix+"/system/backup", s.auth(s.handleListBackups, schema.ClassReadOnly, "show system backup"))
+	mux.Handle("POST "+APIPrefix+"/system/backup", cfgAPI(s.handleCreateBackup))
+	mux.Handle("GET "+APIPrefix+"/system/backup/{file}", s.auth(s.handleDownloadBackup, schema.ClassReadOnly, "show system backup"))
+	mux.Handle("POST "+APIPrefix+"/system/restore", cfgAPI(s.handleRestore))
+	mux.Handle("POST "+APIPrefix+"/system:zeroize", cfgAPI(s.handleZeroize))
+
+	// M5-3：数据面抓包（FR-OPS-042）
+	mux.Handle("GET "+APIPrefix+"/vpp/capture", s.auth(s.handleGetCapture, schema.ClassReadOnly, "show vpp capture"))
+	mux.Handle("POST "+APIPrefix+"/vpp/capture", cfgAPI(s.handlePostCapture))
+	mux.Handle("DELETE "+APIPrefix+"/vpp/capture", cfgAPI(s.handleDeleteCapture))
+	mux.Handle("GET "+APIPrefix+"/vpp/capture/{file}", s.auth(s.handleDownloadCapture, schema.ClassReadOnly, "show vpp capture"))
+
+	// M5-8：TLS 证书（FR-SYS-011）
+	mux.Handle("GET "+APIPrefix+"/system/tls", s.auth(s.handleGetTLS, schema.ClassReadOnly, "show system"))
+	mux.Handle("PUT "+APIPrefix+"/system/tls", cfgAPI(s.handlePutTLS))
+	mux.Handle("POST "+APIPrefix+"/system/tls:regenerate", cfgAPI(s.handlePostTLSRegenerate))
+
+	// M5-5：硬件健康与阈值（FR-SYS-012）
+	mux.Handle("GET "+APIPrefix+"/system/hardware", s.auth(s.handleGetHardware, schema.ClassReadOnly, "show system hardware"))
+	mux.Handle("GET "+APIPrefix+"/system/health/thresholds", s.auth(s.handleGetHealthThresholds, schema.ClassReadOnly, "show system health"))
+	mux.Handle("PUT "+APIPrefix+"/system/health/thresholds", cfgAPI(s.handlePutHealthThresholds))
+
+	// M5-7：软件升级/回退、电源、NTP（FR-OPS-001~003）
+	mux.Handle("POST "+APIPrefix+"/system/software", cfgAPI(s.handlePostSoftware))
+	mux.Handle("POST "+APIPrefix+"/system/software:rollback", cfgAPI(s.handlePostSoftwareRollback))
+	mux.Handle("POST "+APIPrefix+"/system:reboot", cfgAPI(s.handleSystemPower("reboot")))
+	mux.Handle("POST "+APIPrefix+"/system:shutdown", cfgAPI(s.handleSystemPower("shutdown")))
+	mux.Handle("POST "+APIPrefix+"/system/ntp:sync", cfgAPI(s.handlePostNTPSync))
+
+	// M5-4：诊断归档与 core dump（FR-OPS-040/041）
+	mux.Handle("GET "+APIPrefix+"/system/tech-support", s.auth(s.handleListTechSupport, schema.ClassReadOnly, "show system tech-support"))
+	mux.Handle("POST "+APIPrefix+"/system/tech-support", cfgAPI(s.handleCreateTechSupport))
+	mux.Handle("GET "+APIPrefix+"/system/tech-support/{file}", s.auth(s.handleDownloadTechSupport, schema.ClassReadOnly, "show system tech-support"))
+	mux.Handle("GET "+APIPrefix+"/system/core-dumps", s.auth(s.handleListCoreDumps, schema.ClassReadOnly, "show system core-dumps"))
+	mux.Handle("DELETE "+APIPrefix+"/system/core-dumps", cfgAPI(s.handleDeleteCoreDumps))
 
 	// 资源 handlers 第一组（GET = show 等级 R；写 = configure 等级 S；FR-API-003 映射）
 	mux.Handle("GET "+APIPrefix+"/system", s.auth(s.handleGetSystem, schema.ClassReadOnly, "show system"))
@@ -230,7 +308,26 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 func (s *Server) ListenAndServe() error {
 	if s.tlsCert != "" && s.tlsKey != "" {
 		s.log.Info("API 服务启动（HTTPS）", "addr", s.http.Addr)
-		return s.http.ListenAndServeTLS(s.tlsCert, s.tlsKey)
+		// FR-SYS-011：GetCertificate 每次握手读盘 → 换证/重签（PUT /system/tls 或
+		// request system api tls regenerate）无需重启即时生效；读盘失败回退启动时加载的证书。
+		certPath, keyPath := s.tlsCert, s.tlsKey
+		var fallback *tls.Certificate
+		if c, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
+			fallback = &c
+		}
+		s.http.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12, // FR-SEC-004：TLS 1.2+
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+				if c, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
+					return &c, nil
+				}
+				if fallback != nil {
+					return fallback, nil
+				}
+				return nil, fmt.Errorf("加载证书 %s 失败", certPath)
+			},
+		}
+		return s.http.ListenAndServeTLS("", "")
 	}
 	s.log.Info("API 服务启动（HTTP，仅限开发/测试）", "addr", s.http.Addr)
 	return s.http.ListenAndServe()

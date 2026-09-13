@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/xzjt/nfvis/internal/config"
+	"github.com/xzjt/nfvis/internal/events"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/schema"
 	"github.com/xzjt/nfvis/internal/state"
@@ -74,13 +75,22 @@ type cliExecutor struct {
 	natRT  NatSessionsRuntime // NAT 会话（nil = 报未接入）
 	alarms AlarmRuntime       // 告警表（nil = 报未接入）
 	// 计算/容器/镜像运行态（M4-12；nil = 对应命令报未接入，与 HTTP 端点 503 一致）
-	vm      VMRuntime
-	console VMConsoleRuntime
-	snaps   VMSnapshotRuntime
-	ct      ContainerRuntime
-	images  ImagesRuntime
-	mu      sync.Mutex
-	sess    map[string]*cliSession
+	vm         VMRuntime
+	console    VMConsoleRuntime
+	snaps      VMSnapshotRuntime
+	ct         ContainerRuntime
+	images     ImagesRuntime
+	sys        SystemOpsRuntime            // 备份/恢复/恢复出厂（M5-6；nil = 命令报未接入）
+	diagOps    DiagOpsRuntime              // 诊断归档/core dump（M5-4；nil = 命令报未接入）
+	logs       func() ([]byte, error)      // 系统日志来源（show log system，M5-9；nil = 报不可用）
+	capture    CaptureRuntime              // 数据面抓包（M5-3；nil = 报未接入）
+	sw         SoftwareRuntime             // 软件升级/电源/NTP（M5-7；nil = 报未接入）
+	hw         HardwareRuntime             // 硬件健康（M5-5；nil = 报未接入）
+	tlsR       TlsRuntime                  // 证书管理（M5-8；nil = 报未接入）
+	vppRestart func(context.Context) error // request vpp restart（M5-9；nil = 报未接入）
+	events     *events.Bus                 // 事件总线（M5-1；nil = 不发布）
+	mu         sync.Mutex
+	sess       map[string]*cliSession
 	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
 	structured any
 	// consolePending 本次命令要求前端接管串口时的接管请求（单命令执行期内有效）
@@ -100,6 +110,43 @@ func newCLIExecutor(e *config.Engine, a authorizer) *cliExecutor {
 }
 
 // setRuntime 注入诊断与运行态数据源（M3-9；Server.New 装配，测试可省略）。
+// setEventBus 注入事件总线（M5-1）：CLI 直连运行态的动作不经 HTTP handler，
+// 需在执行器内显式发布 vnf-state-changed（同 M4-12 的审计处理）。
+func (x *cliExecutor) setEventBus(bus *events.Bus) { x.events = bus }
+
+// setSystemOps 注入系统运维能力（M5-6 备份/恢复/恢复出厂）。
+func (x *cliExecutor) setSystemOps(sys SystemOpsRuntime) { x.sys = sys }
+
+// setDiagOps 注入诊断能力（M5-4 tech-support / core dump）。
+func (x *cliExecutor) setDiagOps(d DiagOpsRuntime) { x.diagOps = d }
+
+// setLogSource 注入系统日志来源（M5-9 show log system）。
+func (x *cliExecutor) setLogSource(f func() ([]byte, error)) { x.logs = f }
+
+// setCapture 注入抓包能力（M5-3）。
+func (x *cliExecutor) setCapture(c CaptureRuntime) { x.capture = c }
+
+// setVPPRestart 注入 VPP 重启能力（request vpp restart）。
+func (x *cliExecutor) setVPPRestart(f func(context.Context) error) { x.vppRestart = f }
+
+// setSoftware 注入软件升级/电源/NTP 能力（M5-7）。
+func (x *cliExecutor) setSoftware(s SoftwareRuntime) { x.sw = s }
+
+// setHardware 注入硬件健康采集（M5-5）。
+func (x *cliExecutor) setHardware(h HardwareRuntime) { x.hw = h }
+
+// setTLS 注入证书管理（M5-8）。
+func (x *cliExecutor) setTLS(t TlsRuntime) { x.tlsR = t }
+
+// publishState 发布 VNF 状态变化事件（nil 总线时静默）。
+func (x *cliExecutor) publishState(kind, name, state string) {
+	if x.events != nil {
+		x.events.Publish(events.TypeVNFStateChanged, map[string]any{
+			"resource": kind, "name": name, "state": state,
+		})
+	}
+}
+
 func (x *cliExecutor) setRuntime(diag DiagRuntime, st *state.State) {
 	x.diag, x.state = diag, st
 }
@@ -336,7 +383,22 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 		}
 		return b.String()
 	}
-	return "%% 该 show 命令依赖底座运行态，M3/M4 接入后可用（当前可用：show version / show configuration [candidate|compare rollback n] / show system configuration sessions / show virtual-machine-functions / show container-functions / show images / show resource-pools）\n"
+	if len(t) >= 2 && t[0] == "system" && t[1] != "configuration" {
+		return x.execShowSystemDiag(t[1:]) // M5-4/M5-9：运行态信息 / 诊断归档 / 转储
+	}
+	if len(t) == 1 && t[0] == "tech-support" {
+		return x.execShowSystemDiag(t) // show tech-support（契约 §1.1 顶层）
+	}
+	if len(t) == 1 && t[0] == "users" {
+		return x.execShowUsers() // show users（M5-9）
+	}
+	if len(t) >= 1 && t[0] == "log" {
+		return x.execShowLog(t[1:]) // show log system|audit|vnf（M5-9）
+	}
+	if len(t) >= 2 && t[0] == "vpp" && t[1] == "capture" {
+		return x.execShowVppCapture() // M5-3：抓包会话状态与已导出 pcap 清单
+	}
+	return "%% 该 show 命令依赖底座运行态，将在后续里程碑接入（当前可用：show version / show configuration [candidate|compare rollback n] / show system configuration sessions / show system uptime|cpu|memory|storage|hugepages|core-dumps|tech-support / show users / show log system|audit|vnf / show vpp capture / show virtual-machine-functions / show container-functions / show images / show resource-pools）\n"
 }
 
 // ---------- 配置模式 ----------
@@ -600,7 +662,7 @@ func matchAlias(tokens []string) *aliasRule {
 
 // allAliasRules 汇总别名规则（顺序即匹配优先级）。
 func allAliasRules() []*aliasRule {
-	out := make([]*aliasRule, 0, len(statementAliases)+len(statementAliasesNet)+len(statementAliasesCompute))
+	out := make([]*aliasRule, 0, len(statementAliases)+len(statementAliasesNet)+len(statementAliasesCompute)+len(statementAliasesSystem))
 	for i := range statementAliases {
 		out = append(out, &statementAliases[i])
 	}
@@ -609,6 +671,9 @@ func allAliasRules() []*aliasRule {
 	}
 	for i := range statementAliasesCompute {
 		out = append(out, &statementAliasesCompute[i])
+	}
+	for i := range statementAliasesSystem {
+		out = append(out, &statementAliasesSystem[i])
 	}
 	return out
 }

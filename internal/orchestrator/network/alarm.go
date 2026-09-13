@@ -57,7 +57,21 @@ type AlarmStore struct {
 	seq   int
 	byKey map[string]*Alarm // scope\x00code\x00source → 告警
 
-	now func() time.Time // 注入时钟（测试确定性）
+	now    func() time.Time // 注入时钟（测试确定性）
+	notify func(Alarm)      // 变更通知（M5-1 事件总线；锁内调用须快速返回）
+}
+
+// SetNotifier 注入告警变更通知（新增/重新激活时 state=active，消警时 state=resolved）。
+func (s *AlarmStore) SetNotifier(f func(Alarm)) {
+	s.mu.Lock()
+	s.notify = f
+	s.mu.Unlock()
+}
+
+func (s *AlarmStore) emitLocked(a *Alarm) {
+	if s.notify != nil {
+		s.notify(*a)
+	}
 }
 
 // NewAlarmStore 构造空告警表。
@@ -76,17 +90,21 @@ func (s *AlarmStore) Raise(scope, severity, code, message, source string) {
 	defer s.mu.Unlock()
 	k := alarmKey(scope, code, source)
 	if a, ok := s.byKey[k]; ok {
+		wasResolved := a.State == AlarmResolved
 		a.Severity, a.Message = severity, message
-		if a.State == AlarmResolved {
+		if wasResolved {
 			a.State, a.ResolvedAt, a.RaisedAt = AlarmActive, nil, s.now()
+			s.emitLocked(a)
 		}
 		return
 	}
 	s.seq++
-	s.byKey[k] = &Alarm{
+	a := &Alarm{
 		ID: fmt.Sprintf("alm-%05d", s.seq), Severity: severity, Code: code,
 		Message: message, Source: source, RaisedAt: s.now(), State: AlarmActive,
 	}
+	s.byKey[k] = a
+	s.emitLocked(a)
 }
 
 // Resolve 将同 scope+code+source 的活动告警置为 resolved；返回是否命中。
@@ -99,6 +117,7 @@ func (s *AlarmStore) Resolve(scope, code, source string) bool {
 	}
 	t := s.now()
 	a.State, a.ResolvedAt = AlarmResolved, &t
+	s.emitLocked(a)
 	return true
 }
 
@@ -115,22 +134,44 @@ func (s *AlarmStore) Sync(scope string, failures []Alarm) {
 			a.Severity, a.Message = f.Severity, f.Message
 			if a.State == AlarmResolved {
 				a.State, a.ResolvedAt, a.RaisedAt = AlarmActive, nil, s.now()
+				s.emitLocked(a)
 			}
 			continue
 		}
 		s.seq++
-		s.byKey[k] = &Alarm{
+		al := &Alarm{
 			ID: fmt.Sprintf("alm-%05d", s.seq), Severity: f.Severity, Code: f.Code,
 			Message: f.Message, Source: f.Source, RaisedAt: s.now(), State: AlarmActive,
 		}
+		s.byKey[k] = al
+		s.emitLocked(al)
 	}
 	prefix := scope + "\x00"
 	for k, a := range s.byKey {
 		if a.State == AlarmActive && !keep[k] && strings.HasPrefix(k, prefix) {
 			t := s.now()
 			a.State, a.ResolvedAt = AlarmResolved, &t
+			s.emitLocked(a)
 		}
 	}
+}
+
+// Clear 删除已 resolved 的告警（all=true 清全部已 resolved；否则按 id 匹配）。返回删除数量。
+// 活动告警不删除（须先恢复/消警，FR-OPS-022）。
+func (s *AlarmStore) Clear(id string, all bool) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for k, a := range s.byKey {
+		if a.State != AlarmResolved {
+			continue
+		}
+		if all || (id != "" && a.ID == id) {
+			delete(s.byKey, k)
+			n++
+		}
+	}
+	return n
 }
 
 // List 按状态过滤告警（active|resolved|all，缺省/非法值按 active），按 raised_at 升序。
