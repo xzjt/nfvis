@@ -392,6 +392,28 @@ paths:
         "200": { $ref: "#/components/responses/ConfigAccepted" }
         "409": { $ref: "#/components/responses/Error409" }
 
+  /nat/sessions:
+    get:
+      tags: [nat]
+      summary: NAT44 会话表（运行态，空表返回 []）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    inside_ip: { type: string }
+                    inside_port: { type: integer }
+                    outside_ip: { type: string }
+                    outside_port: { type: integer }
+                    protocol: { type: integer }
+                    bytes: { type: integer, format: int64 }
+                    packets: { type: integer, format: int64 }
+
   /nat:
     get:
       tags: [nat]

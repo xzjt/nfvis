@@ -78,6 +78,65 @@ func (s *Server) handleGetVppStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
+// SRIOVSetter 设置 PF 的 VF 数量（编排器装配注入）。
+type SRIOVSetter interface {
+	SetVFCount(ctx context.Context, ifname string, count int) error
+}
+
+// handlePutSRIOV PUT /api/v1/interfaces/{name}/sriov（FR-NET-004）。
+func (s *Server) handlePutSRIOV(w http.ResponseWriter, r *http.Request) {
+	if s.sriov == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "SR-IOV 未接入（编排器未装配）", nil)
+		return
+	}
+	var in struct {
+		VFCount *int `json:"vf_count"`
+	}
+	if err := decodeBody(r, &in); err != nil || in.VFCount == nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "vf_count 必填", nil)
+		return
+	}
+	name := r.PathValue("name")
+	if err := s.sriov.SetVFCount(r.Context(), name, *in.VFCount); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"interface": name, "vf_count": *in.VFCount})
+}
+
+// NatSessionRow /nat/sessions 一行。
+type NatSessionRow struct {
+	InsideIP    string `json:"inside_ip"`
+	InsidePort  int    `json:"inside_port"`
+	OutsideIP   string `json:"outside_ip"`
+	OutsidePort int    `json:"outside_port"`
+	Protocol    int    `json:"protocol"`
+	Bytes       uint64 `json:"bytes"`
+	Packets     uint32 `json:"packets"`
+}
+
+// NatSessionsRuntime NAT 会话运行态（编排器装配注入）。
+type NatSessionsRuntime interface {
+	Sessions(ctx context.Context) ([]NatSessionRow, error)
+}
+
+// handleGetNatSessions GET /api/v1/nat/sessions（FR §4.3 运行态）。
+func (s *Server) handleGetNatSessions(w http.ResponseWriter, r *http.Request) {
+	if s.natSessions == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "VPP 未接入（编排器未装配）", nil)
+		return
+	}
+	rows, err := s.natSessions.Sessions(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
+		return
+	}
+	if rows == nil {
+		rows = []NatSessionRow{}
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
 // handleGetVppConfig GET /api/v1/vpp/config：committed vpp 段（startup.conf 生成源）。
 func (s *Server) handleGetVppConfig(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.engine.Committed()
