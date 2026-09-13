@@ -18,13 +18,14 @@ vet:
 test:
 	$(GO) test ./...
 
-# 覆盖率门槛：内部核心包 ≥ 70%（协作规则 3；M3 DoD 含网络编排层）
-# *_govpp.go 是薄 binary-API 适配层，单测无法真实驱动（govpp mock adapter 的 Connect 阻塞），
-# 由 nfvis-vm 上的集成测试（make integration）覆盖，故不计入本地单测门槛。
-GATED_PKGS := ./internal/config/ ./internal/model/ ./internal/schema/ ./internal/orchestrator/network/
-COVER_EXCLUDE ?= _govpp.go
+# 覆盖率门槛：内部核心包 ≥ 70%（协作规则 3；M3 DoD 含网络编排层，M4 DoD 含计算编排）
+# *_govpp.go / *_libvirt.go / *_docker.go 是薄底座适配层，单测无法真实驱动，
+# 由 nfvis-vm 上的集成测试（make integration）覆盖，故不计入本地单测门槛；
+# 同包内的纯函数（domain XML 组装、账本校验）仍纳入门槛。
+GATED_PKGS := ./internal/config/ ./internal/model/ ./internal/schema/ ./internal/orchestrator/network/ ./internal/orchestrator/compute/
+COVER_EXCLUDE ?= _govpp.go _libvirt.go _docker.go
 cover:
-	COVER_MIN=$(COVER_MIN) COVER_EXCLUDE=$(COVER_EXCLUDE) GO=$(GO) bash contrib/scripts/check_coverage.sh $(GATED_PKGS)
+	COVER_MIN=$(COVER_MIN) COVER_EXCLUDE="$(COVER_EXCLUDE)" GO=$(GO) bash contrib/scripts/check_coverage.sh $(GATED_PKGS)
 
 # 依赖方向守护（骨架 §3.1：CLI 前端不得 import 事务引擎/API/编排/AAA）
 # -count=1 必须保留：该测试经 exec 调 go list 读取依赖，Go 构建缓存看不到

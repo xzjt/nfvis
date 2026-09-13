@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 覆盖率门槛检查（Makefile `cover` 调用）。
-# 用法: check_coverage.sh <pkg>...；COVER_MIN 门槛（默认 70），COVER_EXCLUDE 不计入的文件片段。
+# 用法: check_coverage.sh <pkg>...；COVER_MIN 门槛（默认 70），
+# COVER_EXCLUDE 不计入的文件片段（可空格分隔多个，如 "_govpp.go _libvirt.go _docker.go"）。
 set -u
 COVER_MIN="${COVER_MIN:-70}"
 COVER_EXCLUDE="${COVER_EXCLUDE:-}"
@@ -13,7 +14,7 @@ for pkg in "$@"; do
         rm -f "$prof"
         exit 1
     fi
-    pct="$(bash "$DIR/cover_pct.sh" "$prof" "$COVER_EXCLUDE")"
+    pct="$(bash "$DIR/cover_pct.sh" "$prof" $COVER_EXCLUDE)"
     if [ -n "$COVER_EXCLUDE" ]; then
         echo "$pkg 覆盖率: ${pct}%（不含 ${COVER_EXCLUDE}）"
     else
