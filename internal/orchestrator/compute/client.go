@@ -20,6 +20,13 @@ type libvirtAPI interface {
 	Reboot(ctx context.Context, name string) error
 	// OpenConsole 打开域串口双向流（FR-CMP-014）。
 	OpenConsole(ctx context.Context, name string) (io.ReadWriteCloser, error)
+	// DumpDomainXML 返回域 XML（快照需据此取磁盘 target）。
+	DumpDomainXML(ctx context.Context, name string) (string, error)
+	// 快照（FR-CMP-015）：内部 qcow2 快照，含全部磁盘。
+	SnapshotCreate(ctx context.Context, domain, snapshotXML string) error
+	SnapshotList(ctx context.Context, domain string) ([]SnapshotInfo, error)
+	SnapshotRevert(ctx context.Context, domain, snapshot string) error
+	SnapshotDelete(ctx context.Context, domain, snapshot string) error
 }
 
 // storageAPI provider 依赖的磁盘/文件能力（真实实现 = qemuStorage；单测用 mock）。

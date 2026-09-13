@@ -165,28 +165,31 @@ func run() error {
 	var (
 		vmAPI     api.VMRuntime
 		vmConsole api.VMConsoleRuntime
+		vmSnaps   api.VMSnapshotRuntime
 	)
 	if vmRuntime != nil && p != nil {
 		vmAPI = &vmController{Provider: p, net: netProvider, engine: engine, log: log}
 		vmConsole = p // M4-5：串口 console（libvirt 域串口 ↔ WebSocket）
+		vmSnaps = &snapshotController{p: p}
 	}
 
 	apiServer := api.New(engine, aaaSvc, api.Options{
-		Addr:      *listen,
-		TLSCert:   *tlsCert,
-		TLSKey:    *tlsKey,
-		Log:       log,
-		VPP:       &vppController{mgr: vppMgr, applier: startupApplier, engine: engine},
-		L2:        &l2Controller{net: netProvider},
-		L3:        &l3Controller{net: netProvider},
-		LLDP:      &lldpController{net: netProvider},
-		State:     state.New(vppMgr.Runtime()),
-		SRIOV:     network.NewSRIOVProvider(),
-		NAT:       &natSessionsController{net: netProvider},
-		Alarms:    &alarmController{store: alarms},
-		Diag:      &diagController{diag: vppMgr.Diagnostics()},
-		VM:        vmAPI,
-		VMConsole: vmConsole,
+		Addr:        *listen,
+		TLSCert:     *tlsCert,
+		TLSKey:      *tlsKey,
+		Log:         log,
+		VPP:         &vppController{mgr: vppMgr, applier: startupApplier, engine: engine},
+		L2:          &l2Controller{net: netProvider},
+		L3:          &l3Controller{net: netProvider},
+		LLDP:        &lldpController{net: netProvider},
+		State:       state.New(vppMgr.Runtime()),
+		SRIOV:       network.NewSRIOVProvider(),
+		NAT:         &natSessionsController{net: netProvider},
+		Alarms:      &alarmController{store: alarms},
+		Diag:        &diagController{diag: vppMgr.Diagnostics()},
+		VM:          vmAPI,
+		VMConsole:   vmConsole,
+		VMSnapshots: vmSnaps,
 	})
 
 	srvErr := make(chan error, 1)
@@ -372,4 +375,36 @@ func (c *vmController) refreshVnfAlarms() {
 	for _, e := range c.net.CheckVnfPorts(ctx, cfg) {
 		c.log.Warn("vNIC 状态检查", "err", e)
 	}
+}
+
+// snapshotController 装配 api.VMSnapshotRuntime（M4-6）。
+type snapshotController struct{ p *compute.Provider }
+
+func (c *snapshotController) SnapshotCreate(ctx context.Context, domain, name, desc string) error {
+	return c.p.SnapshotCreate(ctx, domain, name, desc)
+}
+
+func (c *snapshotController) Snapshots(ctx context.Context, domain string) ([]api.SnapshotRow, error) {
+	infos, err := c.p.Snapshots(ctx, domain)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]api.SnapshotRow, 0, len(infos))
+	for _, i := range infos {
+		row := api.SnapshotRow{Name: i.Name, SizeBytes: i.SizeBytes, Description: i.Description}
+		if !i.CreatedAt.IsZero() {
+			ts := i.CreatedAt
+			row.CreatedAt = &ts
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+func (c *snapshotController) SnapshotRevert(ctx context.Context, domain, name string) error {
+	return c.p.SnapshotRevert(ctx, domain, name)
+}
+
+func (c *snapshotController) SnapshotDelete(ctx context.Context, domain, name string) error {
+	return c.p.SnapshotDelete(ctx, domain, name)
 }

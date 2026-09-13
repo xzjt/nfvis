@@ -658,7 +658,7 @@ paths:
                 items: { $ref: "#/components/schemas/Snapshot" }
     post:
       tags: [virtual-machine-functions]
-      summary: 创建快照
+      summary: 创建快照（qcow2 内部快照，含全部磁盘；FR-CMP-015/018）
       requestBody:
         required: true
         content:
@@ -666,6 +666,28 @@ paths:
             schema: { $ref: "#/components/schemas/Snapshot" }
       responses:
         "202": { description: 已受理 }
+        "400": { $ref: "#/components/responses/Error400" }
+        "404": { $ref: "#/components/responses/Error404" }
+  /virtual-machine-functions/{name}/snapshots/{snapshot}:rollback:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+      - { name: snapshot, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [virtual-machine-functions]
+      summary: 回滚到快照（FR-CMP-015）
+      responses:
+        "202": { description: 已受理 }
+        "404": { $ref: "#/components/responses/Error404" }
+  /virtual-machine-functions/{name}/snapshots/{snapshot}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+      - { name: snapshot, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [virtual-machine-functions]
+      summary: 删除快照（FR-CMP-015）
+      responses:
+        "200": { description: 已删除 }
+        "404": { $ref: "#/components/responses/Error404" }
 
   /container-functions:
     get:

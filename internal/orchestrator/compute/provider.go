@@ -393,3 +393,41 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 		return nil
 	}
 }
+
+// ---------- 快照（FR-CMP-015） ----------
+
+// SnapshotCreate 创建快照（含全部磁盘；qcow2 内部快照）。
+func (p *Provider) SnapshotCreate(ctx context.Context, domain, name, description string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	xml, err := p.api.DumpDomainXML(ctx, domain)
+	if err != nil {
+		return err
+	}
+	snapXML, err := BuildSnapshotXML(name, description, DiskTargetsOf(xml))
+	if err != nil {
+		return err
+	}
+	return p.api.SnapshotCreate(ctx, domain, snapXML)
+}
+
+// Snapshots 列出快照。
+func (p *Provider) Snapshots(ctx context.Context, domain string) ([]SnapshotInfo, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.api.SnapshotList(ctx, domain)
+}
+
+// SnapshotRevert 回滚到快照。
+func (p *Provider) SnapshotRevert(ctx context.Context, domain, name string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.api.SnapshotRevert(ctx, domain, name)
+}
+
+// SnapshotDelete 删除快照。
+func (p *Provider) SnapshotDelete(ctx context.Context, domain, name string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.api.SnapshotDelete(ctx, domain, name)
+}
