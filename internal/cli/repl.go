@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -62,6 +64,11 @@ func (r *REPL) Run() error {
 			continue
 		}
 		r.history.Add(trimmed)
+		if cmd, interval, ok := monitorSpec(trimmed); ok { // monitor interfaces：本地轮询刷新（M3-9）
+			r.runMonitor(cmd, interval)
+			prompt = r.session.Prompt()
+			continue
+		}
 		if strings.HasSuffix(line, "\t") { // 非 raw 退化的 Tab 补全
 			line = r.session.CompleteLine(line)
 		}
@@ -73,6 +80,66 @@ func (r *REPL) Run() error {
 		fmt.Fprint(r.out, out)
 		if !strings.HasSuffix(out, "\n") {
 			fmt.Fprintln(r.out)
+		}
+	}
+}
+
+// monitorSpec 识别 `monitor interfaces <ifname> [interval <sec>]`（支持无歧义前缀缩写）；
+// 返回服务端快照命令行与刷新间隔。monitor vnf 不匹配（第二个 token 非 interfaces）。
+func monitorSpec(line string) (cmd string, interval time.Duration, ok bool) {
+	toks := strings.Fields(line)
+	if len(toks) < 3 || !prefixOf(toks[0], "monitor") || !prefixOf(toks[1], "interfaces") {
+		return "", 0, false
+	}
+	interval = time.Second
+	if len(toks) >= 5 && prefixOf(toks[3], "interval") {
+		n, err := strconv.Atoi(toks[4])
+		if err != nil || n <= 0 {
+			return "", 0, false
+		}
+		interval = time.Duration(n) * time.Second
+	} else if len(toks) != 3 {
+		return "", 0, false
+	}
+	return strings.Join(toks[:3], " "), interval, true
+}
+
+// prefixOf s 是 full 的非空无歧义前缀（≥3 字符）。
+func prefixOf(s, full string) bool {
+	return len(s) >= 3 && len(s) <= len(full) && strings.HasPrefix(full, s)
+}
+
+// runMonitor 按 interval 轮询服务端单次快照并整屏刷新，Ctrl-C 退出（附录 A #36）。
+// 非 TTY（管道/脚本）退化为单次快照，避免脚本挂死。
+func (r *REPL) runMonitor(cmd string, interval time.Duration) {
+	render := func() {
+		out, _ := r.session.ExecuteLine(cmd)
+		fmt.Fprint(r.out, "\x1b[2J\x1b[H") // 清屏并回原点
+		fmt.Fprint(r.out, out)
+		if !strings.HasSuffix(out, "\n") {
+			fmt.Fprintln(r.out)
+		}
+	}
+	if !r.editor.IsRaw() {
+		render()
+		return
+	}
+	wasRaw := r.editor.Suspend() // 恢复终端信号处理，使 Ctrl-C 产生 SIGINT
+	defer r.editor.Resume(wasRaw)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt)
+	defer signal.Stop(stop)
+
+	render()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			fmt.Fprintln(r.out, "^C")
+			return
+		case <-ticker.C:
+			render()
 		}
 	}
 }

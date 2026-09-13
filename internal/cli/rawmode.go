@@ -55,6 +55,28 @@ func (e *Editor) Close() {
 // IsRaw 是否处于 raw 模式。
 func (e *Editor) IsRaw() bool { return e.raw }
 
+// Suspend 临时退出 raw 模式（恢复终端默认信号处理，使 Ctrl-C 产生 SIGINT）；
+// 返回原本是否处于 raw 模式，供 Resume 还原。monitor 实时刷新用（M3-9）。
+func (e *Editor) Suspend() bool {
+	if !e.raw || e.oldState == nil {
+		return false
+	}
+	_ = term.Restore(int(e.in.Fd()), e.oldState)
+	e.raw = false
+	return true
+}
+
+// Resume 按 Suspend 的返回值重新进入 raw 模式。
+func (e *Editor) Resume(wasRaw bool) {
+	if !wasRaw {
+		return
+	}
+	if st, err := term.MakeRaw(int(e.in.Fd())); err == nil {
+		e.oldState = st
+		e.raw = true
+	}
+}
+
 // IdleExpired 空闲是否超时（每次按键刷新活动时间）。
 func (e *Editor) IdleExpired() bool { return e.idle.Expired() }
 

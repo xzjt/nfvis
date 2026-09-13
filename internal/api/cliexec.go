@@ -24,6 +24,7 @@ import (
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/schema"
+	"github.com/xzjt/nfvis/internal/state"
 )
 
 // authorizer 授权接口（aaa.Service 实现）。
@@ -55,6 +56,8 @@ type CLIEResult struct {
 type cliExecutor struct {
 	engine *config.Engine
 	authz  authorizer
+	diag   DiagRuntime  // 诊断命令（M3-9；nil = 报不可用）
+	state  *state.State // 接口计数快照（monitor；nil = 报不可用）
 	mu     sync.Mutex
 	sess   map[string]*cliSession
 	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
@@ -68,6 +71,11 @@ type cliSession struct {
 
 func newCLIExecutor(e *config.Engine, a authorizer) *cliExecutor {
 	return &cliExecutor{engine: e, authz: a, sess: map[string]*cliSession{}}
+}
+
+// setRuntime 注入诊断与运行态数据源（M3-9；Server.New 装配，测试可省略）。
+func (x *cliExecutor) setRuntime(diag DiagRuntime, st *state.State) {
+	x.diag, x.state = diag, st
 }
 
 func promptOf(s *cliSession) string {
@@ -188,7 +196,15 @@ func (x *cliExecutor) execOper(user, class, source string, s *cliSession, t []st
 		return ""
 	case "show":
 		return x.execOperShow(class, t[1:])
-	case "ping", "traceroute", "request", "monitor", "clear", "start", "help":
+	case "ping":
+		return x.execPing(class, t[1:])
+	case "traceroute":
+		return x.execTraceroute(class, t[1:])
+	case "monitor":
+		return x.execMonitor(class, t[1:])
+	case "clear":
+		return x.execClear(class, t[1:])
+	case "request", "start", "help":
 		if _, _, err := schema.Match(schema.OperRoot(), t); err != nil {
 			return fmt.Sprintf("%% 无效命令: %s（输入 ? 查看可用命令）\n", strings.Join(t, " "))
 		}
