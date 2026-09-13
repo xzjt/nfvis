@@ -67,6 +67,7 @@ func run() error {
 	netProvider.SetL3(l3Provider)
 	netProvider.SetServices(network.NewServicesProviderFunc(vppMgr.SvcClientFunc()))
 	netProvider.SetACL(network.NewAclProviderFunc(vppMgr.AclClientFunc()))
+	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
 	applier := orchestrator.NewApplier(netProvider, orchestrator.NewNoopCompute(), orchestrator.NewNoopContainer())
 
 	engine, err := config.NewEngine(store, applier, config.Options{})
