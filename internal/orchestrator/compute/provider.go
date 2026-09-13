@@ -11,6 +11,14 @@ import (
 	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
+// DefaultVhostUserQueues vhost-user vNIC 的 virtio 队列对数。
+//
+// 真机实测（libvirt 12/QEMU 10.2 + VPP 26.06，docs/M4-验收记录.md M4-4）：QEMU 未声明
+// `<driver queues>`（1 对队列）时 VPP vhost-user 握手停在 protocol features，
+// `show vhost-user` 报 `Memory regions (total 0)`、features 0x0，链路不 up；
+// 显式置 2 对队列后握手完成（Memory regions ≥1、features 非零），链路随 VM 启停 up/down。
+const DefaultVhostUserQueues = 2
+
 // Provider libvirt 计算编排实现（FR-CMP-010~013）。
 //
 // 底座调用全部经 libvirtAPI / storageAPI / seedBuilder 接口注入：生产由
@@ -330,6 +338,9 @@ func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) 
 		switch nic.Type {
 		case IfaceVhostUser:
 			is.Socket = VhostSocketPath(p.cfg.VhostDir, vm.Name, nic.Name)
+			if is.Queues == 0 {
+				is.Queues = DefaultVhostUserQueues
+			}
 		case IfaceSriovVF:
 			if nic.Sriov == nil {
 				return DomainSpec{}, fmt.Errorf("VM %s: vNIC %s（sriov-vf）缺少 sriov 绑定", vm.Name, nic.Name)

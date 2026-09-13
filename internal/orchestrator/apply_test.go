@@ -65,6 +65,12 @@ func (n recNet) DeleteQos(ctx context.Context, name string) error {
 	return n.record("del-qos:" + name)
 }
 func (n recNet) EnsureConsistent(ctx context.Context, cfg model.Config) []error { return nil }
+func (n recNet) ApplyVnfInterface(ctx context.Context, port VnfPort) error {
+	return n.record("vnf-if:" + port.VM + "/" + port.Interface)
+}
+func (n recNet) DeleteVnfInterface(ctx context.Context, vmName, ifaceName string) error {
+	return n.record("del-vnf-if:" + vmName + "/" + ifaceName)
+}
 
 type recCompute struct {
 	calls  *[]string

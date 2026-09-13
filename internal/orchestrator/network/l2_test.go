@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 // ---------- M3-3：L2 编排（FR-NET-010~016）单测（假 L2Client） ----------
@@ -199,12 +200,23 @@ func TestL2AccessVlanCreatesSubif(t *testing.T) {
 	}
 }
 
-func TestL2VnfPortUnsupported(t *testing.T) {
+// M4-4：VNF 端口在 VPP 侧按确定性接口名解析（ApplyVnfInterface 先建）；
+// 接口不存在时给出可诊断错误（ErrIfaceUnavailable），不再以「M4 未支持」拒绝。
+func TestL2VnfPortResolvesByIfaceName(t *testing.T) {
 	f := newFakeL2()
 	p := NewL2Provider(f)
 	vs := l2vs("vs-vnf", model.VSwitchPort{Seq: 0, Vnf: "fw-vm", VnfInterface: "eth1"})
-	if err := p.ApplyBridgeDomain(context.Background(), vs); err == nil || !strings.Contains(err.Error(), "M4") {
-		t.Fatalf("VNF 端口应报 M4: %v", err)
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err == nil || !errors.Is(err, ErrIfaceUnavailable) {
+		t.Fatalf("vhost 接口未下发应报 ErrIfaceUnavailable: %v", err)
+	}
+
+	// 预置 vhost-user 接口（名 = orchestrator.VnfIfaceName）后应挂接成功。
+	f.ifaces[orchestrator.VnfIfaceName("fw-vm", "eth1")] = 77
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("vhost 接口存在时应挂接: %v", err)
+	}
+	if f.bridge[77] != BDID("vs-vnf") {
+		t.Fatalf("vhost 接口应挂接 BD: %v", f.bridge)
 	}
 }
 

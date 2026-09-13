@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 // L2 端口类型（对应 VPP L2_API_PORT_TYPE_*）。
@@ -320,8 +321,8 @@ func (p *L2Provider) desiredMembers(c L2Client, vs model.VirtualSwitch) (map[uin
 		return attached, nil
 	}
 	for _, port := range vs.Ports {
-		if port.Vnf != "" || port.Container != "" {
-			return nil, fmt.Errorf("端口 %s 引用 VNF/容器接口，属 M4（当前仅支持物理口/bond）", portKey(port))
+		if port.Container != "" {
+			return nil, fmt.Errorf("端口 %s 引用容器接口，属 M4-7（容器编排）", portKey(port))
 		}
 		portIdx, err := p.portIndex(c, vs, port)
 		if err != nil {
@@ -367,6 +368,20 @@ func (p *L2Provider) desiredMembers(c L2Client, vs model.VirtualSwitch) (map[uin
 }
 
 func (p *L2Provider) portIndex(c L2Client, vs model.VirtualSwitch, port model.VSwitchPort) (uint32, error) {
+	// VNF vNIC 端口：按确定性接口名解析 VPP 侧 vhost-user 接口（FR-NET-020/023），
+	// 接口由 ApplyVnfInterface 先建，故此处应已存在。
+	if port.Vnf != "" {
+		name := orchestrator.VnfIfaceName(port.Vnf, port.VnfInterface)
+		idx, ok, err := c.SwInterfaceIndex(name)
+		if err != nil {
+			return 0, fmt.Errorf("解析 VNF %s vNIC %s 的 vhost-user 接口 %s: %w", port.Vnf, port.VnfInterface, name, err)
+		}
+		if !ok {
+			return 0, fmt.Errorf("%w: VNF %s vNIC %s 的 vhost-user 接口 %s 不存在（是否未下发 vNIC 接入？）",
+				ErrIfaceUnavailable, port.Vnf, port.VnfInterface, name)
+		}
+		return idx, nil
+	}
 	if port.Interface == "" {
 		return 0, fmt.Errorf("交换机 %s 端口 %d 未指定接口", vs.Name, port.Seq)
 	}

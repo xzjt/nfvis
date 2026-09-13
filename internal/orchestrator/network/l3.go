@@ -205,6 +205,31 @@ func (p *L3Provider) AttachedIfaces(vrfName string) []uint32 {
 	return out
 }
 
+// SetVnfTable 把 VNF vNIC 接口置入 L3 交换机（VRF）对应表（FR-NET-020 的 L3 场景；
+// vNIC 无 IP，仅入表以便经 VRF 转发）。接口按确定性名解析（由 ApplyVnfInterface 先建）。
+func (p *L3Provider) SetVnfTable(ctx context.Context, vrfName, ifname string) error {
+	c, err := p.client()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	idx, ok, err := c.SwInterfaceIndex(ifname)
+	if err != nil {
+		return fmt.Errorf("解析 VNF 接口 %s: %w", ifname, err)
+	}
+	if !ok {
+		return fmt.Errorf("%w: VNF 接口 %s 不存在", ErrIfaceUnavailable, ifname)
+	}
+	tableID := TableID(vrfName)
+	if err := c.SwInterfaceSetTable(idx, false, tableID); err != nil {
+		return fmt.Errorf("VNF 接口 %s 置入 VRF %s 的 IPv4 表: %w", ifname, vrfName, err)
+	}
+	if err := c.SwInterfaceSetTable(idx, true, tableID); err != nil {
+		return fmt.Errorf("VNF 接口 %s 置入 VRF %s 的 IPv6 表: %w", ifname, vrfName, err)
+	}
+	return nil
+}
+
 // Routes 返回 VRF 的运行态 FIB。
 func (p *L3Provider) Routes(ctx context.Context, name string) ([]RouteEntry, error) {
 	c, err := p.client()

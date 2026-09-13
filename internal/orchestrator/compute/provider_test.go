@@ -195,6 +195,12 @@ func TestDefineVM_PreparesDiskSeedAndDefines(t *testing.T) {
 	if len(seed.built) != 1 || seed.built[0] != "/vms/fw-vm/seed.iso" {
 		t.Fatalf("应生成 seed ISO: %v", seed.built)
 	}
+	// vhost-user vNIC 缺省 2 对队列（真机握手必需，见 DefaultVhostUserQueues 注释）。
+	if spec, err := p.specFor(vm, model.AllocatedResources{HugepageSize: "1G"}); err != nil {
+		t.Fatal(err)
+	} else if len(spec.Interfaces) != 1 || spec.Interfaces[0].Queues != DefaultVhostUserQueues {
+		t.Fatalf("vhost-user 应缺省 %d 对队列: %+v", DefaultVhostUserQueues, spec.Interfaces)
+	}
 }
 
 func TestDefineVM_AutostartStartsShutoffVM(t *testing.T) {
