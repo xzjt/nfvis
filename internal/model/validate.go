@@ -737,6 +737,11 @@ func (v *validator) checkVMFunctions(c Config) {
 					v.errf(np+".sriov", "sriov-vf 类型必须指定 physical-interface 与 vf")
 				} else if !v.ifaceNames[nic.Sriov.PhysicalInterface] {
 					v.errf(np+".sriov.physical_interface", "物理口 %q 不存在", nic.Sriov.PhysicalInterface)
+				} else if where := pfInDataPath(c, nic.Sriov.PhysicalInterface); where != "" {
+					// FR-NET-021：占用该 VF 时禁止其 PF 端口进 bridge domain（驱动一致性约束）
+					v.errf(np+".sriov.physical_interface",
+						"VF 直通占用物理口 %s，其 PF 端口禁止进入 bridge-domain %s（FR-NET-021）",
+						nic.Sriov.PhysicalInterface, where)
 				}
 			case "memif":
 				v.errf(np+".type", "memif 仅用于容器 vNIC")
@@ -758,6 +763,22 @@ func (v *validator) checkVMFunctions(c Config) {
 			}
 		}
 	}
+}
+
+// pfInDataPath 判断物理口是否已被 L2 交换机端口引用（FR-NET-021 用），
+// 返回 bridge-domain 名，未引用返回空串。
+func pfInDataPath(c Config, pf string) string {
+	for _, vs := range c.VirtualSwitches {
+		if vs.Type != "l2" {
+			continue
+		}
+		for _, p := range vs.Ports {
+			if p.Interface == pf {
+				return vs.Name
+			}
+		}
+	}
+	return ""
 }
 
 func (v *validator) checkContainerFunctions(c Config) {

@@ -4,6 +4,7 @@ package network
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
@@ -19,7 +20,8 @@ type L2Network struct {
 	nat                          *NatProvider
 	bond                         *BondProvider
 	lldp                         *LldpProvider
-	alarms                       *AlarmStore // 恢复收敛失败项落点（M3-8，可空）
+	vhost                        *VhostUserProvider // M4-4：VNF vNIC 接入
+	alarms                       *AlarmStore        // 恢复收敛失败项落点（M3-8，可空）
 }
 
 // NewL2Network 以基础 Provider 与 L2 编排器构造装饰器。
@@ -60,6 +62,50 @@ func (n *L2Network) SetBond(p *BondProvider) { n.bond = p }
 
 // SetLldp 追加 LLDP 编排（M3-6）。
 func (n *L2Network) SetLldp(p *LldpProvider) { n.lldp = p }
+
+// SetVhostUser 追加 VNF vNIC（vhost-user）接入编排（M4-4）。
+func (n *L2Network) SetVhostUser(p *VhostUserProvider) { n.vhost = p }
+
+// ApplyVnfInterface 建立 vNIC 接入（FR-NET-020/021/023）：
+//   - vhost-user：VPP 建 server socket 接口并命名，交换机端口随后按名挂接；
+//     若 vNIC 指向 L3 交换机（port.VRF 非空），再将该接口置入对应 VRF 表；
+//   - sriov-vf：不经 VPP（VF 直通，hostdev 由 compute 组装）；
+//   - memif：容器 vNIC，由容器编排在 M4-7 处理。
+func (n *L2Network) ApplyVnfInterface(ctx context.Context, port orchestrator.VnfPort) error {
+	switch port.Type {
+	case "vhost-user":
+		if n.vhost == nil {
+			return nil // 未接入 VPP：由 noop/基础实现决定（保持 M1 语义不报错）
+		}
+		if err := n.vhost.Apply(ctx, port); err != nil {
+			return err
+		}
+		if port.VRF != "" && n.l3 != nil {
+			return n.l3.SetVnfTable(ctx, port.VRF, orchestrator.VnfIfaceName(port.VM, port.Interface))
+		}
+		return nil
+	case "sriov-vf", "memif":
+		return nil
+	default:
+		return fmt.Errorf("vNIC %s/%s 类型 %q 不受支持", port.VM, port.Interface, port.Type)
+	}
+}
+
+// DeleteVnfInterface 删除 vNIC 接入（VM 删除/vNIC 移除/迁移时同步 VPP 侧）。
+func (n *L2Network) DeleteVnfInterface(ctx context.Context, vmName, ifaceName string) error {
+	if n.vhost == nil {
+		return nil
+	}
+	return n.vhost.Delete(ctx, vmName, ifaceName)
+}
+
+// VnfPortLinkState 查询 vNIC 接口链路状态（FR-NET-023；供告警/运行态）。
+func (n *L2Network) VnfPortLinkState(ctx context.Context, vmName, ifaceName string) (exists, up bool, err error) {
+	if n.vhost == nil {
+		return false, false, nil
+	}
+	return n.vhost.LinkState(ctx, vmName, ifaceName)
+}
 
 func (n *L2Network) ApplyBond(ctx context.Context, bond model.Bond) error {
 	if n.bond == nil {

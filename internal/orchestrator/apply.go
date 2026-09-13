@@ -16,16 +16,43 @@ type Applier interface {
 	Apply(ctx context.Context, old, new model.Config) error
 }
 
+// ApplierOption NewApplier 可选配置。
+type ApplierOption func(*orchApplier)
+
+// WithVhostDir 设置 VNF vhost-user socket 目录（须与 compute.Config.VhostDir 一致）。
+func WithVhostDir(dir string) ApplierOption {
+	return func(a *orchApplier) {
+		if dir != "" {
+			a.vhostDir = dir
+		}
+	}
+}
+
 // NewApplier 组合三类 Provider 构造编排器。资源池（内核 cpuset/大页）由 M3
 // 内核编排接入后追加为第一阶段；M1 仅编排 网络→计算→容器。
-func NewApplier(net NetworkProvider, comp ComputeProvider, cont ContainerProvider) Applier {
-	return &orchApplier{net: net, comp: comp, cont: cont}
+func NewApplier(net NetworkProvider, comp ComputeProvider, cont ContainerProvider, opts ...ApplierOption) Applier {
+	a := &orchApplier{net: net, comp: comp, cont: cont, vhostDir: DefaultVhostDir}
+	for _, o := range opts {
+		o(a)
+	}
+	return a
 }
 
 type orchApplier struct {
 	net  NetworkProvider
 	comp ComputeProvider
 	cont ContainerProvider
+
+	// vhostDir VNF vhost-user socket 目录（compute 与 network 必须一致，缺省 /run/nfvis/vhost）。
+	vhostDir string
+}
+
+// SetVhostDir 设置 vhost-user socket 目录（须与 compute.Config.VhostDir 一致）。
+// 等价于 WithVhostDir 选项，供装配期后置调整。
+func (a *orchApplier) SetVhostDir(dir string) {
+	if dir != "" {
+		a.vhostDir = dir
+	}
 }
 
 // op 一次底座操作及撤销动作。
@@ -74,6 +101,29 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	oldQoS := nameMap(old.QosPolicies, func(x model.QosPolicy) string { return x.Name })
 
 	var ops []op
+
+	// —— VNF vNIC 接入（FR-NET-020/023）：必须先于 bridge-domain 下发，
+	// 因为交换机端口按确定性接口名挂接 vhost-user 接口，接口需已存在。——
+	oldPorts := collectVnfPorts(old)
+	newPorts := collectVnfPorts(new)
+	for _, p := range newPorts {
+		oldP, inOld := oldPorts[p.key()]
+		if inOld && configEqual(oldP.nic, p.nic) {
+			continue
+		}
+		p := p
+		newPort := a.toVnfPort(new, p)
+		ops = append(ops, op{
+			desc: fmt.Sprintf("vnf-if[%s]", p.key()),
+			run:  func(ctx context.Context) error { return a.net.ApplyVnfInterface(ctx, newPort) },
+			undo: func(ctx context.Context) error {
+				if inOld {
+					return a.net.ApplyVnfInterface(ctx, a.toVnfPort(old, oldP))
+				}
+				return a.net.DeleteVnfInterface(ctx, p.vm, p.nic.Name)
+			},
+		})
+	}
 
 	// —— 新增/变更：网络 ——
 	for _, acl := range new.Acls {
@@ -246,6 +296,19 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			})
 		}
 	}
+	// vNIC 接入删除：在 VM 删除之后（FR-NET-023）；VM 整体删除时其全部 vNIC 一并清理。
+	for _, p := range oldPorts {
+		if _, ok := newPorts[p.key()]; ok {
+			continue
+		}
+		p := p
+		oldPort := a.toVnfPort(old, p)
+		ops = append(ops, op{
+			desc: fmt.Sprintf("del-vnf-if[%s]", p.key()),
+			run:  func(ctx context.Context) error { return a.net.DeleteVnfInterface(ctx, p.vm, p.nic.Name) },
+			undo: func(ctx context.Context) error { return a.net.ApplyVnfInterface(ctx, oldPort) },
+		})
+	}
 	for name := range oldVSs {
 		if oldVSs[name].Type != "l2" {
 			continue
@@ -300,6 +363,60 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 		}
 	}
 	return ops
+}
+
+// vnfPortRef 一台 VM 的一个 vhost-user vNIC 引用（确定性排序用）。
+type vnfPortRef struct {
+	vm  string
+	nic model.VnfInterface
+}
+
+func (p vnfPortRef) key() string { return p.vm + "/" + p.nic.Name }
+
+// collectVnfPorts 收集配置中的 vhost-user vNIC（按 VM 名、vNIC 名升序，保证操作序列确定）。
+// sriov-vf 不经 VPP、memif 由容器编排（M4-7）处理，不在此列。
+func collectVnfPorts(cfg model.Config) map[string]vnfPortRef {
+	out := map[string]vnfPortRef{}
+	for _, vm := range cfg.VirtualMachineFunctions {
+		for _, nic := range vm.Interfaces {
+			if nic.Type != "vhost-user" {
+				continue
+			}
+			ref := vnfPortRef{vm: vm.Name, nic: nic}
+			out[ref.key()] = ref
+		}
+	}
+	return out
+}
+
+// toVnfPort 组装下发用的 VnfPort（socket 路径与 compute 侧同源派生）。
+func (a *orchApplier) toVnfPort(cfg model.Config, ref vnfPortRef) VnfPort {
+	vrf := ""
+	if isL3Switch(cfg, ref.nic.VirtualSwitch) {
+		vrf = ref.nic.VirtualSwitch // L3 交换机与同名 VRF 对应（附录 B）
+	}
+	return VnfPort{
+		VM:            ref.vm,
+		Interface:     ref.nic.Name,
+		Type:          ref.nic.Type,
+		VirtualSwitch: ref.nic.VirtualSwitch,
+		MAC:           ref.nic.MAC,
+		VLAN:          ref.nic.Vlan,
+		Socket:        VnfSocketPath(a.vhostDir, ref.vm, ref.nic.Name),
+		VRF:           vrf,
+	}
+}
+
+func isL3Switch(cfg model.Config, name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.Name == name {
+			return vs.Type == "l3"
+		}
+	}
+	return false
 }
 
 // applyOp 构造「下发 new」操作：撤销时若 old 中存在则恢复旧版本，否则删除。

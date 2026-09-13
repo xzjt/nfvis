@@ -73,6 +73,8 @@ func run() error {
 	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
 	netProvider.SetBond(network.NewBondProviderFunc(vppMgr.BondClientFunc()))
 	netProvider.SetLldp(network.NewLldpProviderFunc(vppMgr.LldpClientFunc()))
+	// M4-4：VNF vNIC（vhost-user）接入
+	netProvider.SetVhostUser(network.NewVhostUserProviderFunc(vppMgr.VhostUserClientFunc()))
 	// M3-8：恢复收敛的不可收敛项落点（GET /alarms）
 	alarms := network.NewAlarmStore()
 	netProvider.SetAlarms(alarms)
@@ -85,18 +87,24 @@ func run() error {
 	)
 	computeCfg := compute.DefaultConfig()
 	computeCfg.URI = envOr("NFVIS_LIBVIRT_URI", compute.DefaultURI)
+	// vhost-user socket 目录须存在且可被 QEMU/VPP 访问（M4-P0 记录 §5）。
+	if err := os.MkdirAll(computeCfg.VhostDir, 0o755); err != nil {
+		log.Warn("创建 vhost-user socket 目录失败", "dir", computeCfg.VhostDir, "err", err)
+	}
 	libvirtCtx, libvirtCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	p, conn, cerr := compute.NewConnectedProvider(libvirtCtx, computeCfg)
 	libvirtCancel()
 	if cerr != nil {
 		log.Warn("计算编排未接入（libvirt 连接失败），VM 生命周期不可用", "uri", computeCfg.URI, "err", cerr)
 	} else {
+		p.SetVFResolver(network.NewSysfsVFResolver()) // SR-IOV VF PCI 解析（FR-NET-021）
 		computeProvider, libvirtConn, vmRuntime = p, conn, p
 		defer func() { _ = libvirtConn.Close() }()
 		log.Info("计算编排已接入", "uri", computeCfg.URI)
 	}
 
-	applier := orchestrator.NewApplier(netProvider, computeProvider, orchestrator.NewNoopContainer())
+	applier := orchestrator.NewApplier(netProvider, computeProvider, orchestrator.NewNoopContainer(),
+		orchestrator.WithVhostDir(computeCfg.VhostDir))
 
 	engine, err := config.NewEngine(store, applier, config.Options{})
 	if err != nil {
@@ -138,6 +146,10 @@ func run() error {
 			}
 			return
 		}
+		// M4-4：VNF vNIC 断连检测（FR-NET-023）——link down/缺失记为告警，恢复则消警。
+		for _, e := range netProvider.CheckVnfPorts(rctx, cfg) {
+			log.Warn("vNIC 状态检查", "err", e)
+		}
 		log.Info("恢复收敛完成")
 	}
 	vppMgr.OnConnect(func(version string) { go runRecovery() })
@@ -148,6 +160,12 @@ func run() error {
 	}()
 	startupApplier := &network.Applier{Mgr: vppMgr, PCI: network.NewSysfsPCIResolver(),
 		Restarter: network.NewSystemctlRestarter(), RestartOnApply: true}
+
+	// M4-4：VM 生命周期动作后刷新 vNIC 断连告警（FR-NET-023）。
+	var vmAPI api.VMRuntime
+	if vmRuntime != nil && p != nil {
+		vmAPI = &vmController{Provider: p, net: netProvider, engine: engine, log: log}
+	}
 
 	apiServer := api.New(engine, aaaSvc, api.Options{
 		Addr:    *listen,
@@ -163,7 +181,7 @@ func run() error {
 		NAT:     &natSessionsController{net: netProvider},
 		Alarms:  &alarmController{store: alarms},
 		Diag:    &diagController{diag: vppMgr.Diagnostics()},
-		VM:      vmRuntime,
+		VM:      vmAPI,
 	})
 
 	srvErr := make(chan error, 1)
@@ -309,4 +327,44 @@ func (c *diagController) Traceroute(ctx context.Context, host, vrf string) (stri
 
 func (c *diagController) ClearInterfaceStats(ctx context.Context, ifname string) error {
 	return c.diag.ClearInterfaceStats(ctx, ifname)
+}
+
+// vmController 包装计算 Provider（M4-4）：生命周期动作后刷新 VNF vNIC 断连告警
+// （FR-NET-023）。VM 关机导致 vhost-user 客户端断连 → VPP 接口 link down → warning 告警；
+// 重新启动且客户端连上后自动消警。
+type vmController struct {
+	*compute.Provider
+	net    *network.L2Network
+	engine *config.Engine
+	log    *slog.Logger
+}
+
+func (c *vmController) StartVM(ctx context.Context, name string) error {
+	err := c.Provider.StartVM(ctx, name)
+	c.refreshVnfAlarms()
+	return err
+}
+
+func (c *vmController) StopVM(ctx context.Context, name string) error {
+	err := c.Provider.StopVM(ctx, name)
+	c.refreshVnfAlarms()
+	return err
+}
+
+func (c *vmController) RestartVM(ctx context.Context, name string) error {
+	err := c.Provider.RestartVM(ctx, name)
+	c.refreshVnfAlarms()
+	return err
+}
+
+func (c *vmController) refreshVnfAlarms() {
+	cfg, err := c.engine.Committed()
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, e := range c.net.CheckVnfPorts(ctx, cfg) {
+		c.log.Warn("vNIC 状态检查", "err", e)
+	}
 }

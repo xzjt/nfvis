@@ -33,6 +33,13 @@ type NetworkProvider interface {
 	ApplyQos(ctx context.Context, q model.QosPolicy) error
 	DeleteQos(ctx context.Context, name string) error
 
+	// ApplyVnfInterface 建立 VNF vNIC 的接入（FR-NET-020/021/023）：vhost-user 时
+	// 在 VPP 侧建 socket 接口并命名（交换机端口随后按名挂接）；sriov-vf 不经 VPP。
+	// 幂等：接口已存在则仅校正属性。
+	ApplyVnfInterface(ctx context.Context, port VnfPort) error
+	// DeleteVnfInterface 删除 vNIC 接入（VM 删除/vNIC 移除/迁移时同步 VPP 侧接口）。
+	DeleteVnfInterface(ctx context.Context, vmName, ifaceName string) error
+
 	// EnsureConsistent 恢复收敛（FR-OPS-010/011）：对比 committed 配置与 VPP 实际
 	// 状态并补齐/修正，无法收敛的项以错误返回（由调用方转告警，不阻塞启动）。
 	EnsureConsistent(ctx context.Context, cfg model.Config) []error
@@ -96,6 +103,8 @@ func (noopNetwork) ApplySpan(context.Context, model.PortMirroring) error        
 func (noopNetwork) DeleteSpan(context.Context, string) error                     { return nil }
 func (noopNetwork) ApplyQos(context.Context, model.QosPolicy) error              { return nil }
 func (noopNetwork) DeleteQos(context.Context, string) error                      { return nil }
+func (noopNetwork) ApplyVnfInterface(context.Context, VnfPort) error             { return nil }
+func (noopNetwork) DeleteVnfInterface(context.Context, string, string) error     { return nil }
 func (noopNetwork) EnsureConsistent(context.Context, model.Config) []error       { return nil }
 
 // NewNoopCompute 空计算编排（M4 替换为 libvirt 实现；M4-3 起真实实现接入 nfvisd）。
