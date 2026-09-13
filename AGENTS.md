@@ -4,16 +4,22 @@
 
 ## 项目状态与基线
 
-- 当前阶段：**M1/M2/M3 已完成并合并**；**M4（VNF/容器/镜像）进行中——M4-P0、M4-1~M4-11 已完成**
-  （各任务一 PR，栈式，见 `docs/M4-进度交接.md` §1；PR #41~#52 未合并，**从 #41 起依次向下合并**）。
-  **剩余 M4-12（CLI 侧命令接入，未开工）**：续作方式、环境状态、必须知道的技术坑与实现步骤见
-  `docs/M4-进度交接.md`（新会话开工先读本文件 + 该交接文档）。任务清单 `docs/M4-任务清单.md`。
+- 当前阶段：**M1/M2/M3 已完成并合并**；**M4（VNF/容器/镜像）已开发完成（M4-P0 + M4-1~M4-12 全部交付）**。
+  M4 各任务一 PR、栈式未合并（PR #41~#53，**从 #41 起依次向下合并**）；交付与真机证据见 `docs/M4-验收记录.md`、
+  `docs/M4-11-集成测试验收记录.md`，进度/环境/技术坑见 `docs/M4-进度交接.md`。**下一步 M5**：
+  `/events`(SSE)、`/metrics`、`/vpp/capture`、备份/恢复、tech-support、core-dumps、hardware、tls、
+  health thresholds、software/reboot/shutdown/zeroize/ntp、deb 打包、e2e（任务清单 `docs/M5-任务清单.md`）。
+- M4 验收现状（`docs/M4-验收记录.md`）：M4-1~M4-11 真机通过（`make integration` 全绿）；M4-12 CLI 侧命令真机冒烟通过
+  （show/request/delete 交互确认/console ticket/审计/动态候选）。**已知环境限制**：SR-IOV 无 PF/VF 未真机验证；
+  容器侧 memif 通流未验（离线无自带 memif 的容器镜像）；M4-12 真机验证 `request images delete` 时移除了共享引导镜像
+  `/var/lib/nfvis/images/alpine.qcow2`，致 `make integration` 中 3 个用例转 SKIP——恢复命令见
+  `docs/M4-验收记录.md` M4-12 节「未验证项」第 3 条。
 - M3 验收现状（`docs/M3-人工演示记录.md`）：D1/D2/D3/D6/D8 真机通过；**D4 NAT 端到端生效待定**——出接口语义已定为必填（决策 #38），但 inside/outside 跨 VRF 的 NAT 拓扑语义需在 M4 网络增强前决策；D5 SPAN 抓包、D7 LLDP 因环境受限未验（tap 插件未启用；vmxnet3 下 VPP LLDP 报 internal error 且无对端）。
 - 验证环境 nfvis-vm 当前状态：**VPP 运行中**（main-core 4 / corelist-workers 5，ens192/ens224 绑 vfio-pci）、
-  nfvisd 未运行、**1G 大页仅 1 页空闲**（测试 VM ≤1G、串行）、已备 `alpine.qcow2` 与 `alpine:3.20` 镜像、无残留 domain/接口
-  （详见 `docs/M4-进度交接.md` §3）。真机前 `pkill -x nfvisd`；集成测试 `make integration`（CI 不跑）。
-  设计基线在 `docs/`，**不要凭记忆重设计**。
-- 已定决策 48 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+  nfvisd 未运行、**无 domain/接口残留**、**1G 大页仅 1 页空闲**（测试 VM ≤1G、串行）、
+  **引导镜像 `alpine.qcow2` 缺失待恢复**（见上）；Docker 本地有 `alpine:3.20`。真机前 `pkill -x nfvisd`；
+  集成测试 `make integration`（CI 不跑）。设计基线在 `docs/`，**不要凭记忆重设计**。
+- 已定决策 51 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
 - `docs/NFViS-openapi.yaml` 与 `docs/NFViS-CLI命令树完整设计.md` 是**契约**。
 
 ## 不可违反的规则

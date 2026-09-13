@@ -7,6 +7,7 @@
 package cli
 
 import (
+	"io"
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/schema"
@@ -21,6 +22,8 @@ type Backend interface {
 	Execute(line, source string) (cliclient.Result, error)
 	DynamicCandidates(kind string) ([]string, error)
 	Logout() error
+	// DialConsole 连接串口 WebSocket（M4-12，FR-CMP-014）；wsPath 来自 Result.Console。
+	DialConsole(wsPath string) (io.ReadWriteCloser, error)
 }
 
 // Session CLI 会话：本地维护模式/层级（渲染提示符与补全上下文），
@@ -39,12 +42,19 @@ func New(client Backend, source string) *Session {
 
 // ExecuteLine 执行一行命令，返回输出与更新后的提示符。
 func (s *Session) ExecuteLine(line string) (string, string) {
+	out, prompt, _ := s.ExecuteFull(line)
+	return out, prompt
+}
+
+// ExecuteFull 执行一行命令并返回完整结果（含更新后的提示符与可能的串口接管请求）。
+// 供 REPL 处理 `request … console`（M4-12，FR-CMP-014）与交互确认。
+func (s *Session) ExecuteFull(line string) (string, string, *cliclient.ConsoleRequest) {
 	res, err := s.client.Execute(line, s.Source)
 	if err != nil {
-		return "%% " + err.Error() + "\n", s.Prompt()
+		return "%% " + err.Error() + "\n", s.Prompt(), nil
 	}
 	s.Mode, s.Path = res.Mode, res.Path
-	return res.Output, res.Prompt
+	return res.Output, res.Prompt, res.Console
 }
 
 // Logout 吊销服务端 token（空闲超时自动登出，FR-CLI-006）。
@@ -53,6 +63,11 @@ func (s *Session) Logout() {
 		// 已失效/断连时无需提示：本地会话随即结束。
 		_ = err
 	}
+}
+
+// DialConsole 连接串口 WebSocket（M4-12，FR-CMP-014）；wsPath 来自 ExecuteFull 的接管请求。
+func (s *Session) DialConsole(wsPath string) (io.ReadWriteCloser, error) {
+	return s.client.DialConsole(wsPath)
 }
 
 // Prompt 渲染当前提示符（oper: nfvis>；config: [edit path] nfvis#）。

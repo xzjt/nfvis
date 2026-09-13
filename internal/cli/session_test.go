@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -25,6 +27,11 @@ func (stubClient) DynamicCandidates(kind string) ([]string, error) {
 }
 
 func (stubClient) Logout() error { return nil }
+
+// DialConsole 补全/会话单测不涉及串口（M4-12）；返回明确错误以免误用。
+func (stubClient) DialConsole(wsPath string) (io.ReadWriteCloser, error) {
+	return nil, errors.New("stub 不支持 console")
+}
 
 func newTestSession(mode string) *Session {
 	s := New(stubClient{}, "ssh")

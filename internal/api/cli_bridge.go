@@ -14,10 +14,11 @@ type cliExecuteRequest struct {
 }
 
 type cliExecuteResponse struct {
-	Output string   `json:"output"`
-	Mode   string   `json:"mode"`
-	Path   []string `json:"path"`
-	Prompt string   `json:"prompt"`
+	Output  string          `json:"output"`
+	Mode    string          `json:"mode"`
+	Path    []string        `json:"path"`
+	Prompt  string          `json:"prompt"`
+	Console *ConsoleRequest `json:"console,omitempty"` // M4-12：串口终端接管请求（FR-CMP-014）
 }
 
 // handleCLIExecute POST /api/v1/cli/execute：执行一行 CLI 命令。
@@ -36,5 +37,6 @@ func (s *Server) handleCLIExecute(w http.ResponseWriter, r *http.Request) {
 	res := s.cliExec.Execute(info.User, info.Class, source, req.Line)
 	writeJSON(w, http.StatusOK, cliExecuteResponse{
 		Output: res.Output, Mode: res.Mode, Path: res.Path, Prompt: res.Prompt,
+		Console: res.Console,
 	})
 }
