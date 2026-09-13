@@ -224,6 +224,19 @@ func (p *L2Provider) DeleteBridgeDomain(ctx context.Context, name string) error 
 	return nil
 }
 
+// AttachedIfaces 返回交换机当前挂接的 sw_if_index（供 NAT inside 解析等）。
+func (p *L2Provider) AttachedIfaces(vsName string) []uint32 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	rec := p.attached[BDID(vsName)]
+	out := make([]uint32, 0, len(rec))
+	for idx := range rec {
+		out = append(out, idx)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 // MACTable 返回 BD 的 MAC 学习表（FR-NET-015），已解析为接口名/VLAN。
 func (p *L2Provider) MACTable(ctx context.Context, name string) ([]MACTableEntry, error) {
 	c, err := p.client()

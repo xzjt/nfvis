@@ -18,6 +18,7 @@ import (
 type SvcClient interface {
 	SwInterfaceIndex(ifname string) (uint32, bool, error)
 	SetMTU(swIfIndex, mtu uint32) error
+	SetState(swIfIndex uint32, up bool) error
 	SpanSet(from, to uint32, state string, isL2 bool) error
 	PolicerAddDel(name string, cirKbps uint32, cb uint64, add bool) (uint32, error)
 	PolicerInput(swIfIndex uint32, name string, apply bool) error
@@ -171,6 +172,11 @@ func (p *ServicesProvider) ApplyInterface(ctx context.Context, iface model.Inter
 		if err := c.SetMTU(idx, uint32(iface.MTU)); err != nil {
 			return fmt.Errorf("设置接口 %s MTU %d: %w", iface.Name, iface.MTU, err)
 		}
+	}
+	// VPP 接口默认 admin-down：数据口必须显式 up，否则不转发（Enabled 缺省视为启用）
+	up := iface.Enabled == nil || *iface.Enabled
+	if err := c.SetState(idx, up); err != nil {
+		return fmt.Errorf("设置接口 %s 状态 %v: %w", iface.Name, up, err)
 	}
 	p.mu.Lock()
 	prev := p.bound[iface.Name]

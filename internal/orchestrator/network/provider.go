@@ -16,6 +16,7 @@ type L2Network struct {
 	l3                           *L3Provider
 	svc                          *ServicesProvider
 	acl                          *AclProvider
+	nat                          *NatProvider
 }
 
 // NewL2Network 以基础 Provider 与 L2 编排器构造装饰器。
@@ -41,6 +42,29 @@ func (n *L2Network) SetACL(a *AclProvider) {
 	if n.l3 != nil {
 		n.l3.SetACL(a)
 	}
+}
+
+// SetNAT 追加 NAT44 编排（M3-5 三），并把 L2 挂接表注入为 inside 接口来源。
+func (n *L2Network) SetNAT(p *NatProvider) {
+	n.nat = p
+	if p != nil && n.l3 != nil {
+		p.SetInsideResolver(n.l3.AttachedIfaces) // NAT 仅作用于 L3 交换机
+	}
+}
+
+func (n *L2Network) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
+	if n.nat == nil {
+		return nil
+	}
+	return n.nat.ApplyNAT(ctx, nat)
+}
+
+// NATSessions 供 /nat 运行态展示（M3-7）。
+func (n *L2Network) NATSessions(ctx context.Context) ([]NATSession, error) {
+	if n.nat == nil {
+		return nil, nil
+	}
+	return n.nat.Sessions(ctx)
 }
 
 func (n *L2Network) ApplyACL(ctx context.Context, acl model.Acl) error {

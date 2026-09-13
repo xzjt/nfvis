@@ -37,4 +37,7 @@ const (
 	vppValueExist int32 = -81 // VALUE_EXIST
 	vppBdExists   int32 = -119
 	vppTableExist int32 = -111
+	// NAT44 EI 插件特性状态（幂等启用/关闭）
+	vppFeatureAlreadyDisabled int32 = -169
+	vppFeatureAlreadyEnabled  int32 = -170
 )
