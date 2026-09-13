@@ -170,9 +170,20 @@ func TestLldpNeighborsUnavailable(t *testing.T) {
 
 // ---------- M3-7：/vpp/status 运行态线程 + /vpp/config ----------
 
-type fakeStateRuntime struct{ rows []state.Thread }
+type fakeStateRuntime struct {
+	rows []state.Thread
+}
 
 func (f *fakeStateRuntime) Threads(context.Context) ([]state.Thread, error) { return f.rows, nil }
+func (f *fakeStateRuntime) InterfaceCounters(context.Context, string) (state.InterfaceCounters, bool) {
+	return state.InterfaceCounters{RxPackets: 42, TxPackets: 11, RxBytes: 4200}, true
+}
+func (f *fakeStateRuntime) Buffers(context.Context) (state.Buffers, bool) {
+	return state.Buffers{Pools: []state.BufferPool{{Name: "default-numa-0", Used: 5, Available: 95}}}, true
+}
+func (f *fakeStateRuntime) Memory(context.Context) (state.Memory, bool) {
+	return state.Memory{Total: 2048, Used: 512, Free: 1536}, true
+}
 
 func TestVppStatusIncludesThreads(t *testing.T) {
 	fake := &fakeVppController{status: VppStatus{Version: "26.06-release", Connected: true}}
@@ -190,6 +201,24 @@ func TestVppStatusIncludesThreads(t *testing.T) {
 	}
 	if len(got.Threads) != 2 || got.Threads[1].Name != "vpp_wk_0" || got.Threads[1].Core != 5 {
 		t.Fatalf("线程运行态: %+v", got.Threads)
+	}
+	if len(got.Buffers) != 1 || got.Buffers[0].Name != "default-numa-0" || got.Memory == nil || got.Memory.Used != 512 {
+		t.Fatalf("buffer/内存运行态: %+v %+v", got.Buffers, got.Memory)
+	}
+}
+
+// GET /interfaces/{name} 附带 statistics（契约 Interface.statistics）。
+func TestInterfaceStatistics(t *testing.T) {
+	st := state.New(&fakeStateRuntime{})
+	ts := newTestServerOpts(t, Options{State: st})
+	token := loginAdmin(t, ts)
+	if status, _, _ := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/interfaces/ens192", token,
+		model.InterfaceConfig{Name: "ens192"}, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusOK {
+		t.Fatalf("预置接口失败: %d", status)
+	}
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/interfaces/ens192", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), "42") {
+		t.Fatalf("接口统计: %d %s", status, data)
 	}
 }
 

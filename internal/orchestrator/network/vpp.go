@@ -125,6 +125,9 @@ type Manager struct {
 	lastErr     error
 	appliedHash string // 最近一次落地/重启所依据的 vpp 配置段哈希（pending_restart 判定）
 	onReconnect func(version string)
+
+	statsOnce sync.Once // stats segment 惰性连接（stats_govpp.go）
+	statsConn *statsConn
 }
 
 // NewManager 构造管理器（dialer 为 nil 时使用 govpp 实现）。
