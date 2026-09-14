@@ -123,6 +123,22 @@ func (x *cliExecutor) showVrfRoutes(name string) string {
 	if x.l3 == nil {
 		return errRuntimeUnavailable
 	}
+	// 必须先校验 VRF 存在：VPP 对不存在的 VRF 返回空表，直接渲染会把「VRF 不存在」
+	// 显示成「（FIB 无路由）」，与 `show vrfs <name>` 的报错口径不一致（决策 #76）。
+	cfg, err := x.engine.Committed()
+	if err != nil {
+		return "%% " + err.Error() + "\n"
+	}
+	found := false
+	for _, v := range cfg.Vrfs {
+		if v.Name == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Sprintf("%% VRF %s 不存在\n", name)
+	}
 	rows, err := x.l3.Routes(context.Background(), name)
 	if err != nil {
 		return "%% " + err.Error() + "\n"

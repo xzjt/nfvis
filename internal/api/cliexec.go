@@ -428,7 +428,7 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 func (x *cliExecutor) execConfig(user, class, source string, s *cliSession, t []string, raw string) string {
 	switch t[0] {
 	case "annotate":
-		return x.cfgAnnotate(user, source, raw)
+		return x.cfgAnnotate(user, source, s, raw)
 	case "load":
 		return x.cfgLoad(user, source, t[1:])
 	case "save":
@@ -835,10 +835,32 @@ var statementAliases = []aliasRule{
 			return nil
 		}},
 	// set vpp dpdk dev <ifname> [rx-queues|tx-queues|rx-descriptors|tx-descriptors <n>]
-	// per-NIC 覆盖：模型字段是 per_dev 数组（决策 #18），与 CLI 的 dev 层级名不一致
+	// per-NIC 覆盖：模型字段是 per_dev 数组（决策 #18），与 CLI 的 dev 层级名不一致。
+	// 同时兜住「全局默认」的 4/5-token 形式（rx-queues 等关键字），否则通用遍历会把
+	// dev 当作数组容器（因 dev 下有 <ifname> 参数子节点），而模型 vpp.dpdk.dev 是**对象**
+	// （VppDevDefault），导致 `cannot unmarshal array into ... VppDevDefault`。
 	{pattern: []string{"vpp", "dpdk", "dev", "*"},
 		apply: func(tree map[string]any, t []string, isSet bool) error {
+			if key, ok := dpdkDevDefaultKey(t[3]); ok {
+				return dpdkDevDefault(tree, key, nil, isSet)
+			}
 			return dpdkPerDev(tree, t[3], "", nil, isSet)
+		}},
+	{pattern: []string{"vpp", "dpdk", "dev", "*", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			if key, ok := dpdkDevDefaultKey(t[3]); ok {
+				n, err := numField(t[4])
+				if err != nil {
+					return err
+				}
+				return dpdkDevDefault(tree, key, n, isSet)
+			}
+			// 非全局默认关键字 → 是「单网卡单项」形式（契约 §2.9 的
+			// `delete dpdk dev <ifname> <参数>`，与全局默认同为 5 token，故按关键字名区分）。
+			if isSet {
+				return fmt.Errorf("配置不完整，缺少取值: vpp dpdk dev %s %s", t[3], t[4])
+			}
+			return dpdkPerDev(tree, t[3], strings.ReplaceAll(t[4], "-", "_"), nil, false)
 		}},
 	{pattern: []string{"vpp", "dpdk", "dev", "*", "*", "*"},
 		apply: func(tree map[string]any, t []string, isSet bool) error {
@@ -847,6 +869,35 @@ var statementAliases = []aliasRule{
 				return err
 			}
 			return dpdkPerDev(tree, t[3], strings.ReplaceAll(t[4], "-", "_"), n, isSet)
+		}},
+	// set system ntp server <ip|host> [prefer]（契约 §2.2）
+	// 模型是对象数组 system.ntp[{server,prefer}]，CLI 多了 server 关键字层，且 prefer 是
+	// **无值 flag**；通用遍历既落不到 ntp 键、也无法以 flag 结尾（会报「缺少取值」）。
+	{pattern: []string{"system", "ntp", "server", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return ntpServer(tree, t[3], false, isSet)
+		}},
+	{pattern: []string{"system", "ntp", "server", "*", "prefer"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return ntpServer(tree, t[3], true, isSet)
+		}},
+	// set system dns server <ip> secondary <ip>（§2.2）
+	// 通用遍历在消费完第一个 IP 后会下潜到**参数节点**，导致同级关键字 secondary 不可见
+	// （报「未知语句: "secondary"」）；仅 `server <ip>` 单参形式原本可用。
+	{pattern: []string{"system", "dns", "server", "*", "secondary", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return dnsServers(tree, []string{t[3], t[5]}, isSet)
+		}},
+	// set resource-pools cpu numa node <n> cores <core-list>（§2.6）
+	// 模型是对象数组 cpu.numa[{node,cores}]，CLI 多一层 node 关键字，通用遍历会把
+	// numa 写成对象（报 cannot unmarshal object into ... []model.NumaNode）。
+	{pattern: []string{"resource-pools", "cpu", "numa", "node", "*", "cores", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return numaNode(tree, t[4], t[6], isSet)
+		}},
+	{pattern: []string{"resource-pools", "cpu", "numa", "node", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return numaNode(tree, t[4], "", isSet)
 		}},
 	// set virtual-switches <n> ports <seq> interface <if> [trunk vlans <list>|native <vlan>]
 	{pattern: []string{"virtual-switches", "*", "ports", "*", "interface", "*", "trunk", "vlans", "*"},
@@ -1445,6 +1496,186 @@ func mustNode(root *schema.Node, names ...string) *schema.Node {
 		return root
 	}
 	return n
+}
+
+// dnsServers 维护 system.dns_servers（字符串标量数组）。
+// 用于 `set system dns server <ip> secondary <ip>` 一条语句写入两个地址。
+func dnsServers(tree map[string]any, ips []string, isSet bool) error {
+	sys, _ := tree["system"].(map[string]any)
+	if sys == nil {
+		if !isSet {
+			return fmt.Errorf("无匹配配置: system dns")
+		}
+		sys = map[string]any{}
+		tree["system"] = sys
+	}
+	cur, _ := sys["dns_servers"].([]any)
+	indexOf := func(ip string) int {
+		for i, v := range cur {
+			if s, _ := v.(string); s == ip {
+				return i
+			}
+		}
+		return -1
+	}
+	if !isSet {
+		for _, ip := range ips {
+			i := indexOf(ip)
+			if i < 0 {
+				return fmt.Errorf("无匹配配置: system dns server %s", ip)
+			}
+			cur = append(cur[:i], cur[i+1:]...)
+		}
+		sys["dns_servers"] = cur
+		return nil
+	}
+	for _, ip := range ips {
+		if indexOf(ip) < 0 {
+			cur = append(cur, ip)
+		}
+	}
+	sys["dns_servers"] = cur
+	return nil
+}
+
+// numaNode 维护 resource_pools.cpu.numa 数组（元素 {node, cores}，契约 §2.6）。
+// cores 经 expandCores 展开为 int 数组（与 isolated-cores 同源）。
+func numaNode(tree map[string]any, nodeTok, coresTok string, isSet bool) error {
+	rp, _ := tree["resource_pools"].(map[string]any)
+	if rp == nil {
+		if !isSet {
+			return fmt.Errorf("无匹配配置: resource-pools")
+		}
+		rp = map[string]any{}
+		tree["resource_pools"] = rp
+	}
+	cpu, _ := rp["cpu"].(map[string]any)
+	if cpu == nil {
+		if !isSet {
+			return fmt.Errorf("无匹配配置: resource-pools cpu")
+		}
+		cpu = map[string]any{}
+		rp["cpu"] = cpu
+	}
+	arr, _ := cpu["numa"].([]any)
+	elem, idx := selectElement(arr, "node", nodeTok)
+	if !isSet {
+		if elem == nil {
+			return fmt.Errorf("无匹配配置: resource-pools cpu numa node %s", nodeTok)
+		}
+		if coresTok == "" {
+			cpu["numa"] = append(arr[:idx], arr[idx+1:]...)
+			return nil
+		}
+		if _, ok := elem["cores"]; !ok {
+			return fmt.Errorf("无匹配配置: resource-pools cpu numa node %s cores", nodeTok)
+		}
+		delete(elem, "cores")
+		return nil
+	}
+	if elem == nil {
+		n, err := numField(nodeTok)
+		if err != nil {
+			return err
+		}
+		elem = map[string]any{"node": n}
+		arr = append(arr, elem)
+		cpu["numa"] = arr
+	}
+	cores, err := expandCores(coresTok)
+	if err != nil {
+		return err
+	}
+	elem["cores"] = cores
+	return nil
+}
+
+// ntpServer 维护 system.ntp 数组（元素 {server, prefer}，契约 §2.2）。
+// prefer 为 flag：`set system ntp server <ip> prefer` 置该服务器为首选；
+// `delete system ntp server <ip> prefer` 取消首选；`delete system ntp server <ip>` 删除条目。
+func ntpServer(tree map[string]any, addr string, prefer, isSet bool) error {
+	sys, _ := tree["system"].(map[string]any)
+	if sys == nil {
+		if !isSet {
+			return fmt.Errorf("无匹配配置: system ntp")
+		}
+		sys = map[string]any{}
+		tree["system"] = sys
+	}
+	arr, _ := sys["ntp"].([]any)
+	elem, idx := selectElement(arr, "server", addr)
+	if !isSet {
+		if elem == nil {
+			return fmt.Errorf("无匹配配置: system ntp server %s", addr)
+		}
+		if !prefer {
+			sys["ntp"] = append(arr[:idx], arr[idx+1:]...)
+			return nil
+		}
+		if _, ok := elem["prefer"]; !ok {
+			return fmt.Errorf("无匹配配置: system ntp server %s prefer", addr)
+		}
+		delete(elem, "prefer")
+		return nil
+	}
+	if elem == nil {
+		elem = map[string]any{"server": addr}
+		arr = append(arr, elem)
+		sys["ntp"] = arr
+	}
+	if prefer {
+		elem["prefer"] = true
+	}
+	return nil
+}
+
+// dpdkDevDefaultKey 判断 token 是否为 vpp.dpdk.dev 的全局默认参数关键字，
+// 是则返回模型 JSON 键（per_dev 之外的对象字段）。
+func dpdkDevDefaultKey(tok string) (string, bool) {
+	switch tok {
+	case "rx-queues", "tx-queues", "rx-descriptors", "tx-descriptors":
+		return strings.ReplaceAll(tok, "-", "_"), true
+	}
+	return "", false
+}
+
+// dpdkDevDefault 维护 vpp.dpdk.dev 对象（全局默认）。
+// 模型里 vpp.dpdk.dev 是**对象**（VppDevDefault），per-NIC 覆盖在兄弟字段 per_dev（数组）——
+// 故不能套用数组容器写法（决策 #18）。
+func dpdkDevDefault(tree map[string]any, key string, val any, isSet bool) error {
+	vpp, _ := tree["vpp"].(map[string]any)
+	if vpp == nil {
+		if !isSet {
+			return fmt.Errorf("无匹配配置: vpp")
+		}
+		vpp = map[string]any{}
+		tree["vpp"] = vpp
+	}
+	dpdk, _ := vpp["dpdk"].(map[string]any)
+	if dpdk == nil {
+		if !isSet {
+			return fmt.Errorf("无匹配配置: vpp dpdk")
+		}
+		dpdk = map[string]any{}
+		vpp["dpdk"] = dpdk
+	}
+	dev, _ := dpdk["dev"].(map[string]any)
+	if dev == nil {
+		if !isSet {
+			return fmt.Errorf("无匹配配置: vpp dpdk dev %s", key)
+		}
+		dev = map[string]any{}
+		dpdk["dev"] = dev
+	}
+	if !isSet {
+		if _, ok := dev[key]; !ok {
+			return fmt.Errorf("无匹配配置: vpp dpdk dev %s", key)
+		}
+		delete(dev, key)
+		return nil
+	}
+	dev[key] = val
+	return nil
 }
 
 // dpdkPerDev 维护 vpp.dpdk.per_dev 数组（per-NIC 覆盖）。

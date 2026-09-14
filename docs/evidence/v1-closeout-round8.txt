@@ -1,0 +1,251 @@
+===== V1 收尾第八轮：全功能 CLI 测试（决策 #76）=====
+环境：nfvis-vm（Ubuntu 26.04、VPP v26.06-release、libvirt 12.0.0、Docker 本地 alpine:3.20）
+日期：2026-09-14
+nfvisd：/tmp/nfvisd -db /tmp/nfvis-cli.db -listen 127.0.0.1:18443 -init-admin-password "Admin@12345" -allow-plaintext
+背景：要求「所有功能应全部通过 CLI 实现」——故按契约 §1/§2 命令树**逐条真机测试**。
+本文件为**原始输出摘录**，命令与结果一一对应。
+
+----- 0. 测试方法 -----
+分 6 阶段，脚本化（逐条独立 CLI 会话，避免一条失败掩盖其它条）：
+  阶段 1 show 只读；阶段 2 配置语句（先提交前置对象，再逐条独立会话）；阶段 3 前置对象（镜像/VM/容器）；
+  阶段 4 request 运维动作；阶段 5 操作命令与管道；阶段 6 事务语义。
+判定：输出含行首 % / %% 或「校验失败」即失败；**预期报错**（环境受限 / 防呆守卫正确拒绝）单列。
+失败分三类并分别标注：(a) 真缺陷（§2、§2b）；(b) 环境受限（SR-IOV 无 PF/VF）；
+(c) 用例本身问题（重复设置默认值触发「语句未产生配置变更」、未带引号的多词取值、
+VRF 名写错、trace export 隐含 stop 后重复 stop、脚本模式手写 discard 与自动收尾重复）。
+**不把 (b)(c) 混入缺陷数**。
+
+脚本已整理为**可复用、可反复运行**的工具：`contrib/scripts/cli-fulltest.sh`
+（`bash contrib/scripts/cli-fulltest.sh [阶段号...]`；前置见脚本头部）。
+
+----- 1. 总览（修复后，从全新 DB 起跑）-----
+$ bash contrib/scripts/cli-fulltest.sh
+  阶段 1 show 只读      : 通过 40 / 失败 1 / 预期报错 0
+  阶段 2 配置语句        : 通过 59 / 失败 0 / 预期报错 0
+  阶段 3 前置对象        : 通过  7 / 失败 0 / 预期报错 0
+  阶段 4 request 运维动作: 通过 34 / 失败 0 / 预期报错 2
+  阶段 5 操作命令与管道  : 通过 46 / 失败 0 / 预期报错 0
+  阶段 6 事务语义        : 通过 11 / 失败 0 / 预期报错 0
+  **合计：通过 197 / 失败 1 / 预期报错 2**
+
+唯一的「失败」是**已知且已登记**的 `show vpp runtime`（govpp runtime 未接入，附录 A #34；
+CLI 输出明确提示「未接入」而非静默空值）：
+  ✗ show vpp runtime
+       %% VPP runtime 统计未接入（govpp runtime 解码，见附录 A #34 限制）
+
+2 条「预期报错」（报错即正确行为）：
+  ⊘ request virtual-machine-functions cli-vm snapshot create name should-fail
+        %% VM cli-vm 当前为 running，快照 create 需先关机（FR-CMP-015，决策 #75）
+  ⊘ request sriov create-vfs ens224 count 2
+        %% 接口 ens224 不支持 SR-IOV（无 /sys/class/net/ens224/device/sriov_numvfs）  ← 环境无 PF/VF
+
+----- 1b. 覆盖到的命令明细（修复后全部通过，摘要）-----
+阶段 1（show，40 条）：version / system uptime|cpu|memory|storage|hugepages|kernel|hardware|core-dumps|
+  tech-support|configuration sessions / interfaces [physical|management] / virtual-switches / vrfs /
+  acls / nat / port-mirroring / qos policies / vpp [threads|buffers|memory|capture] / bonds /
+  lldp neighbors / protocols lldp neighbors / virtual-machine-functions / container-functions /
+  images / resource-pools / alarms [all] / log system|audit / users / configuration / tech-support / help
+阶段 2（配置，59 条）：system（hostname/timezone/ntp[+prefer]/dns[+secondary]/api[port|token-ttl|
+  max-sessions|tls]/management/kernel/health thresholds/syslog/login password-policy/idle-timeout）、
+  protocols lldp、interfaces、bonds、vpp（cpu/memory/dpdk dev 全局默认与单网卡覆盖/uio-driver/plugins）、
+  acls、qos、port-mirroring、nat、virtual-switches、resource-pools（含 numa）
+阶段 4（request，34 条）：VM start/stop/restart、快照 create|rollback|delete、容器 start/stop/restart/log、
+  interfaces enable|disable、vpp trace start|stop|export、system tech-support generate /
+  configuration backup / ntp sync / api tls regenerate / ssh host-key regenerate / software rollback、
+  alarms clear、images delete
+阶段 5（操作与管道，46 条）：ping、traceroute、monitor interfaces|vnf、clear interfaces statistics、help、
+  start shell；管道 match/except/count/last/begin/display json；各 show 二级子命令
+  （interfaces <if> detail|statistics|sriov、virtual-switches <n> detail|ports|mac-table|statistics、
+  vrfs <n> routes、acls <n> detail、bonds <n> detail、log system level|audit|vnf、
+  configuration permissions、vmf <n> detail|interfaces|statistics、container-functions <n> interfaces、
+  images <n> detail）
+阶段 6（事务，11 条）：commit check / annotate（相对与绝对）/ save / show candidate / rollback n /
+  show configuration compare rollback n / run <oper> / commit and-quit / load merge /
+  commit confirmed + 再 commit 确认
+
+  ✗ set system description ...      ← 用例：契约无 system description
+
+----- 2. 发现并修复的 5 处真缺陷（§2b 另加 2 处，共 7 处；全部「契约已声明但经 CLI 不可用」）-----
+
+【缺陷 1】set vpp dpdk dev <全局默认> 完全不可用（契约 §2.9）
+$ nfvis-cli -c "configure\nset vpp dpdk dev rx-queues 2"
+  %% 取值类型不符: json: cannot unmarshal array into Go struct field
+     VppDPDK.vpp.dpdk.dev of type model.VppDevDefault
+根因：`dev` 关键字下有 `<ifname>` 参数子节点 → 通用遍历把它当**数组容器**写 JSON 数组，
+      而模型 `vpp.dpdk.dev` 是**对象**（VppDevDefault；per-NIC 覆盖在兄弟字段 `per_dev` 数组）。
+      4 个参数（rx-queues/tx-queues/rx-descriptors/tx-descriptors）全部如此。
+修复后：
+  rx-queues      -> [ok] vpp dpdk dev rx-queues 8
+  tx-queues      -> [ok] vpp dpdk dev tx-queues 8
+  rx-descriptors -> [ok] vpp dpdk dev rx-descriptors 8
+  tx-descriptors -> [ok] vpp dpdk dev tx-descriptors 8
+落库（commit 后 show configuration）：
+            rx-queues 8;
+
+【缺陷 2】set system ntp server <ip|host> [prefer] 不可用（契约 §2.2）
+$ nfvis-cli -c "configure\nset system ntp server 192.168.155.1"
+  %% 配置不完整，缺少取值: system ntp server 192.168.155.1
+$ nfvis-cli -c "configure\nset system ntp server 192.168.155.1 prefer"
+  %% 未知语句: "prefer"
+根因：模型为对象数组 `system.ntp[{server,prefer}]`，CLI 多一层 `server` 关键字，且 `prefer`
+      是无值 flag；通用遍历既落不到 `ntp` 键（末位实例参数不终止语句 → 报「缺少取值」），
+      也无法以 flag 结尾。
+修复后：
+  [ok] system ntp server 192.168.155.1
+  [ok] system ntp server 192.168.155.2 prefer
+落库：server 192.168.155.1;  prefer true;
+
+【缺陷 3】VM stop 成功却报「连接 nfvisd 失败」（FR-CMP-011）
+现象（客户端超时 30s，服务端 ACPI 等待上限也是 30s）：
+  $ time nfvis-cli -c "request virtual-machine-functions cli-vm stop"
+  %% 连接 nfvisd 失败: Post "http://127.0.0.1:18443/api/v1/cli/execute":
+     context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+  stop 用时: 30s
+  stop 后状态: state shutoff;      ← 实际已停成功
+根因：`pkg/cliclient` HTTP 超时 30s **等于** 服务端 `compute.StopTimeout`（默认 30s）。
+      凡走「guest 不响应 ACPI → 超时强杀」路径的 stop **必定**先触发客户端超时。
+      空白盘/无 guest agent 的 VM 100% 复现（集成测试亦记「空白盘走强杀路径」）。
+修复：RequestTimeout 提至 90s，且超时与真正连不上**分开报**。
+修复后（**空白盘**，确定性走 30s 强杀路径）：
+  $ nfvis-cli -c "request virtual-machine-functions blank-vm stop"
+  停止 VNF blank-vm 已受理
+  用时 31s
+  结果状态: state shutoff;
+
+【缺陷 4】show vrfs <不存在> routes 静默为空（FR-NET-013）
+$ nfvis-cli -c "show vrfs ghost-vrf"          → % VRF ghost-vrf 不存在
+$ nfvis-cli -c "show vrfs ghost-vrf routes"   → （FIB 无路由）      ← 误导：其实是 VRF 不存在
+根因：showVrfRoutes 未校验 VRF 是否在 committed 配置中；VPP 对不存在的 VRF 返回空表。
+修复后：show vrfs ghost-vrf routes → % VRF ghost-vrf 不存在
+        （存在者不受影响：show vrfs vs-l3 routes → ::/0 与 fe80::/10 正常渲染）
+
+【缺陷 5】annotate 只认绝对路径（FR-CFG-007）
+$ nfvis-cli -c "configure\nedit system\nannotate hostname \"注释A\""
+  %% 未知命令: "hostname"
+$ nfvis-cli -c "configure\nannotate system hostname \"注释B\""     → [ok]（仅绝对路径可用）
+根因：annotate 不走 session 层级解析（canonicalize 对 annotate 原样返回 token），
+      与同级 set/delete/show 行为不一致。
+修复后：
+  $ nfvis-cli -c "configure\nedit system\nannotate hostname \"相对路径注释\"\ntop\ncommit"
+  [ok] system hostname 注释已更新
+  commit 成功 (revision 3)
+  $ show configuration → /* system hostname: 相对路径注释 */
+绝对路径写法保留可用（向后兼容）。
+
+----- 2b. 整理成可复用脚本后又暴露的 2 处（同一类：CLI 多一层关键字）-----
+（上一轮的阶段脚本因「首条失败即中止」把这些掩盖了；改为**逐条独立会话**后暴露。
+  复用脚本：`contrib/scripts/cli-fulltest.sh`，阶段 2 逐条跑配置语句。）
+
+【缺陷 6】set system dns server <ip> secondary <ip> 不可用（契约 §2.2）
+$ nfvis-cli -c "configure\nset system dns server 8.8.8.8"                    → [ok]
+$ nfvis-cli -c "configure\nset system dns server 8.8.8.8 secondary 8.8.4.4"
+  %% 未知语句: "secondary"
+根因：通用遍历在消费完第一个 IP 后会**下潜到参数节点**（为支持「参数的子关键字」如 vnf 下的
+      interface），导致该参数的同级关键字 `secondary` 不再可见。
+修复后：$ ... server 8.8.8.8 secondary 8.8.4.4  → [ok] system dns server 8.8.8.8 secondary 8.8.4.4
+落库：dns-servers [ 8.8.8.8 8.8.4.4 ];
+
+【缺陷 7】set resource-pools cpu numa node <n> cores <list> 不可用（契约 §2.6）
+$ nfvis-cli -c "configure\nset resource-pools cpu numa node 0 cores 1-4"
+  %% 取值类型不符: json: cannot unmarshal object into Go struct field
+     CPUSetup.resource_pools.cpu.numa of type []model.NumaNode
+根因：模型是对象数组 cpu.numa[{node,cores}]，CLI 多一层 `node` 关键字，通用遍历把 numa 写成
+      **对象**（`identityFields` 虽已含 numa→node，但遍历未走到实例数组分支）。
+修复后（真机）：
+  [ok] resource-pools cpu numa node 0 cores 1-4
+  commit 成功（先配 isolated-cores 1-4，否则校验会正确拒绝「核不在隔离核池内」）
+落库：numa 0 { cores [ 1 2 3 4 ]; node 0; }
+
+----- 2c. 补测「命令全表」时又发现的 2 处 -----
+（为写全表逐条补测剩余命令，发现下面 2 处。）
+
+【缺陷 8】契约漂移：request api token revoke 的位置（§1.2）
+$ nfvis-cli -c "request api token revoke abc123"                 # 契约写法（顶级）
+  % 无效命令: request api token revoke abc123（输入 ? 查看可用命令）
+$ nfvis-cli -c "request system api token revoke abc123"          # 实现/schema 写法
+  %% token 吊销请经 API DELETE /login（当前会话）；逐 token 吊销随 V2
+契约 §1.2 把它列在**顶级 request** 下，而 schema 与实现只在 `request system api` 下
+（与 `api tls regenerate` 同级）。修：**改契约**（实现侧本就有明确的 V1 延期提示）。
+
+【缺陷 9】core dump / 诊断归档的「不存在」报错说成「备份归档不存在」
+$ nfvis-cli -c "request system core-dumps delete file nope"
+  %% 备份归档不存在: nope            ← 文案错位
+根因：`internal/system/coredump.go` 与 `techsupport.go` 复用了 `backup.go` 的
+      `ErrNotFound`（文案就是「备份归档不存在」）。
+修复后：%% core dump 不存在: nope
+单测：TestNotFoundMessagesAreContextSpecific（要求三者文案互不串味，红-绿已验证）。
+
+----- 3. 红-绿验证（撤修复必失败）-----
+$ git stash push internal/api/cliexec.go   && go test -run TestCLIStatementMappingGuard
+    --- FAIL: .../set_vpp_dpdk_dev_rx-queues_2
+        契约语句未映射到模型: %% 取值类型不符: json: cannot unmarshal array into ...
+    --- FAIL: .../set_system_ntp_server_192.168.155.1
+        契约语句未映射到模型: %% 配置不完整，缺少取值: system ntp server 192.168.155.1
+$ git stash push internal/api/cli_annotate.go internal/api/cli_net_runtime_show.go
+    --- FAIL: TestCLIAnnotateRelativePath
+        命令 "annotate hostname \"相对路径注释\"" 失败: %% 未知命令: "hostname"
+    --- FAIL: TestCLIShowVrfRoutesValidatesExistence
+        不存在的 VRF 应明确报错，实际: ...
+$ git stash push internal/api/cliexec.go internal/api/cli_annotate.go internal/api/cli_net_runtime_show.go
+    --- FAIL: TestCLIStatementMappingGuard/set_system_dns_server_8.8.8.8_secondary_8.8.4.4
+    --- FAIL: TestCLIStatementMappingGuard/set_resource-pools_cpu_numa_node_0_cores_1-4
+恢复修复后全部 PASS（含 make check 全绿）。
+
+----- 3b. 为编制《命令全表》补测时又发现 8 处（**尚未修复**，已在全表标 ❌）-----
+$ nfvis-cli -c "configure
+set system api tls cert-file /tmp/a.pem key-file /tmp/a.key"
+  %% 未知语句: "key-file"
+$ nfvis-cli -c "configure
+set system login user u1 password Abc12345!x class super-user"
+  %% 未知语句: "password"          ← 语法树把 <name> 参数置于关键字之前
+$ nfvis-cli -c "configure
+set system login class c1 allow show"
+  %% 语句未产生配置变更（尚未映射到模型或值未变化）: system login class c1 allow show
+$ nfvis-cli -c "configure
+set virtual-switches vs-l2 cross-connect 1 2"
+  %% 未知语句: "2"                  ← 另：模型仅有 cross_connect bool，语义不一致
+$ nfvis-cli -c "configure
+set virtual-machine-functions vm-t interfaces eth0 vlan 100"
+  %% 取值类型不符: json: cannot unmarshal string into ... VnfInterface...vlan of type int
+$ nfvis-cli -c "configure
+set virtual-machine-functions vm-t cloud-init ssh-key \"ssh-ed25519 AAAATEST k@h\""
+  %% 未知语句: "AAAATEST"           ← 公钥必含空格；set 无多词取值/引号机制
+$ nfvis-cli -c "configure
+set container-functions ct-t interfaces eth0 type memif virtual-switch vs-l2"
+  %% 未知语句: "virtual-switch"      ← type 取值后的同级关键字不可达
+$ nfvis-cli -c "configure
+set container-functions ct-t env K V"
+  %% 未知语句: "V"                   ← 取值节点未被消费
+
+（这 8 处在上一轮阶段脚本里被「首条失败即中止」掩盖，编制全表逐条补测才暴露。
+  其中「login user 口令哈希落地」「cross-connect 模型语义」需设计决策；
+  「ssh-key 多词取值」需 CLI 前端引号机制，影响面较广。）
+
+----- 3c. 回归：修复 ① 时一度引入的缺陷（已修 + 已加回归测试）-----
+修复 ① 时把 5-token 一律当「全局默认」，而契约 §2.9 的
+`delete vpp dpdk dev <ifname> <参数>`（单网卡单项）**同为 5 token** → 被误判报错。
+$ nfvis-cli -c "configure
+set vpp dpdk dev ens192 rx-queues 4
+delete vpp dpdk dev ens192 rx-queues"
+  %% 无匹配配置: vpp dpdk dev ens192（单网卡覆盖需 dev <ifname> <参数> <值>）
+修复：按关键字名区分（rx-queues/tx-queues/rx-descriptors/tx-descriptors 为全局默认，其余为接口名）。
+回归测试 `TestCLIDpdkDevDeleteForms` 覆盖三种 delete 形式，红-绿已验证。
+
+----- 4. 未修复（如实登记）-----
+① **容器镜像目录名须等于 Docker tag**（新建镜像经 CLI 上传后无法被 container-functions 引用）：
+   实测：docker save alpine:3.20 → 上传 name=naming-test.tar → 目录项名为 naming-test.tar，
+   但 `docker load` 落地的是 **tar 内嵌 tag `alpine:3.20`**。于是：
+     set container-functions cli-ct image naming-test.tar → 校验通过 → 下发报
+        %% 底座下发失败（已补偿）: 创建容器 cli-ct: docker: not found   （Docker API 404）
+     set container-functions cli-ct image alpine:3.20     → 被校验拒
+        - container-functions[cli-ct].image: 仓库中不存在镜像 "alpine:3.20"
+   唯一可用组合是上传时 name 恰好写 `alpine:3.20`（实测可建容器：cli-ct2 state exited）。
+   **需产品决策**（目录是否记录 tar 内嵌镜像引用、或校验时给出明确指引），登记 V2。
+② `set system login password-policy lockout-threshold <n> lockout-minutes <n>` 单行连写不支持
+   （`%% 未知语句: "lockout-minutes"`；两条独立语句均可用）→ **改契约 §2.2**（已同步）。
+③ `show vpp runtime` 未接入（govpp runtime，附录 A #34）——CLI 已明确提示，非新问题。
+
+----- 5. 环境恢复 -----
+nfvisd 已停；virsh list --all 空；/var/lib/nfvis/vms 空；探测/测试域与快照清理；
+/data/incoming 空；/var/lib/nfvis/images 恢复基线（仅 alpine.qcow2 + index.json）；
+VPP 运行中（无 bridge-domain 残留）。

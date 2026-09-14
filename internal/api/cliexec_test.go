@@ -422,3 +422,86 @@ func TestCLIDpdkPerDev(t *testing.T) {
 		t.Fatalf("ens224 rx-queues 应为 2: %+v", d)
 	}
 }
+
+// TestCLIAnnotateRelativePath 覆盖决策 #76：annotate 的路径须与同级 set/delete/show **同源**，
+// 相对当前 edit 层级解析。此前 annotate 只认绝对路径——`edit system` 后
+// `annotate hostname "x"` 报「未知命令: hostname」，与同级命令行为不一致。
+func TestCLIAnnotateRelativePath(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set system hostname rel-node",
+		"edit system",
+		"annotate hostname \"相对路径注释\"",
+		"top",
+	)
+	res := x.Execute("admin", aaaClassSU, "ssh", "show")
+	if !strings.Contains(res.Output, "/* system hostname: 相对路径注释 */") {
+		t.Fatalf("edit system 下的相对路径 annotate 应落到 system hostname:\n%s", res.Output)
+	}
+	// 绝对路径写法仍应可用（向后兼容）。
+	res = x.Execute("admin", aaaClassSU, "ssh", "annotate system timezone \"绝对路径注释\"")
+	if strings.Contains(res.Output, "%%") {
+		t.Fatalf("绝对路径 annotate 不应失败:\n%s", res.Output)
+	}
+}
+
+// TestCLIShowVrfRoutesValidatesExistence 覆盖决策 #76：`show vrfs <不存在> routes` 必须报错。
+// VPP 对不存在的 VRF 返回**空表**，原先直接渲染成「（FIB 无路由）」，把「VRF 不存在」
+// 误报成「VRF 无路由」，且与 `show vrfs <name>` 的报错口径不一致。
+func TestCLIShowVrfRoutesValidatesExistence(t *testing.T) {
+	x, _ := newCLIKit(t)
+	x.setNetRuntime(nil, &fakeL3Runtime{}, nil, nil, nil)
+
+	res := x.Execute("admin", aaaClassSU, "ssh", "show vrfs ghost-vrf routes")
+	if !strings.Contains(res.Output, "不存在") {
+		t.Fatalf("不存在的 VRF 应明确报错，实际:\n%s", res.Output)
+	}
+
+	// 存在的 VRF：不得再报「不存在」。
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-l3 type l3",
+		"commit",
+	)
+	res = x.Execute("admin", aaaClassSU, "ssh", "show vrfs vs-l3 routes")
+	if strings.Contains(res.Output, "不存在") {
+		t.Fatalf("已配置的 VRF 不应报不存在:\n%s", res.Output)
+	}
+}
+
+// TestCLIDpdkDevDeleteForms 覆盖契约 §2.9 的三种 delete 形式。
+// 回归背景（决策 #76）：5-token 的「单网卡单项」`delete vpp dpdk dev <ifname> <参数>`
+// 与「全局默认」`delete vpp dpdk dev <参数>` **同为 5 token**，我新增的别名规则
+// 曾一律按全局默认处理，导致前者报「单网卡覆盖需 dev <ifname> <参数> <值>」。
+// 现按关键字名区分（rx-queues 等 4 个为全局默认，其余视为接口名）。
+func TestCLIDpdkDevDeleteForms(t *testing.T) {
+	x, engine := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set vpp dpdk dev rx-queues 8",
+		"set vpp dpdk dev ens2f0 rx-queues 4",
+		"set vpp dpdk dev ens2f0 tx-queues 4",
+	)
+
+	for _, tc := range []struct{ name, cmd string }{
+		{"全局默认单项", "delete vpp dpdk dev rx-queues"},
+		{"单网卡单项（5 token，与全局默认同形）", "delete vpp dpdk dev ens2f0 rx-queues"},
+		{"单网卡整体", "delete vpp dpdk dev ens2f0"},
+	} {
+		if out := run(t, x, "admin", aaaClassSU, "ssh", tc.cmd); strings.Contains(out, "%%") {
+			t.Errorf("%s：应删除成功，实际:\n%s", tc.name, out)
+		}
+	}
+	// 删完后单网卡覆盖应已整体移除。
+	cfg, _, err := engine.Candidate()
+	if err != nil {
+		t.Fatalf("读取 candidate: %v", err)
+	}
+	if len(cfg.Vpp.DPDK.PerDev) != 0 {
+		t.Errorf("单网卡覆盖应已清空: %+v", cfg.Vpp.DPDK.PerDev)
+	}
+	if cfg.Vpp.DPDK.Dev.RxQueues != 0 {
+		t.Errorf("全局默认 rx-queues 应已删除: %+v", cfg.Vpp.DPDK.Dev)
+	}
+}

@@ -10,7 +10,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -41,11 +43,18 @@ type Client struct {
 	hc    *http.Client
 }
 
+// RequestTimeout 单次请求上限。
+//
+// 必须**大于**服务端同步阻塞命令的上限：VM stop 走 ACPI 等待后强杀，上限为
+// compute.StopTimeout（默认 30s）。若两者相等，任何走强杀路径的 stop 都会先触发客户端超时，
+// 用户看到「连接 nfvisd 失败」而实际已停成功（真机实测，决策 #76）。取 2 倍 + 裕量。
+const RequestTimeout = 90 * time.Second
+
 // New 构造客户端。server 形如 https://host:443 或 http://127.0.0.1:8443。
 func New(server string) *Client {
 	return &Client{
 		base: server,
-		hc:   &http.Client{Timeout: 30 * time.Second},
+		hc:   &http.Client{Timeout: RequestTimeout},
 	}
 }
 
@@ -63,7 +72,7 @@ type TLSOptions struct {
 // 故客户端必须能校验它：nfvis-cli 通常就运行在一体机上（规格 §3.1：sshd 的 shell 即 nfvis-cli），
 // 因此优先**固定守护进程自己的证书**（安全且零配置），而不是默认跳过校验。
 func NewWithTLS(server string, opts TLSOptions) (*Client, error) {
-	hc := &http.Client{Timeout: 30 * time.Second}
+	hc := &http.Client{Timeout: RequestTimeout}
 	if strings.HasPrefix(server, "https://") {
 		tc := &tls.Config{MinVersion: tls.VersionTLS12}
 		switch {
@@ -158,6 +167,14 @@ func (c *Client) do(method, path string, body any, out any) error {
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
+		// 超时与真正连不上要分开说：服务端有几条**同步阻塞**的命令（如 VM stop 等 ACPI 关机，
+		// 上限即 compute.StopTimeout=30s），若客户端超时与服务端上限相等，用户会always看到
+		// 「连接 nfvisd 失败」——而操作其实已在服务端成功（决策 #76）。
+		var nerr net.Error
+		if errors.As(err, &nerr) && nerr.Timeout() {
+			return fmt.Errorf("请求超时（%s）：操作可能已在服务端完成，请用 show 确认（如 show virtual-machine-functions <name>）: %w",
+				RequestTimeout, err)
+		}
 		return fmt.Errorf("连接 nfvisd 失败: %w", err)
 	}
 	defer resp.Body.Close()

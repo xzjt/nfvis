@@ -184,14 +184,19 @@ func (t *TechSupport) List() []File {
 	return out
 }
 
+// ErrDiagNotFound 诊断归档不存在。
+// 独立于 backup.go 的 ErrNotFound（文案「备份归档不存在」）——复用会把 tech-support
+// 的报错说成备份归档（决策 #76 §4④）。
+var ErrDiagNotFound = fmt.Errorf("诊断归档不存在")
+
 // Path 解析归档路径（限定目录内）。
 func (t *TechSupport) Path(name string) (string, error) {
 	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
-		return "", fmt.Errorf("%w: %q", ErrNotFound, name)
+		return "", fmt.Errorf("%w: %q", ErrDiagNotFound, name)
 	}
 	p := filepath.Join(t.Dir, name)
 	if _, err := os.Stat(p); err != nil {
-		return "", fmt.Errorf("%w: %s", ErrNotFound, name)
+		return "", fmt.Errorf("%w: %s", ErrDiagNotFound, name)
 	}
 	return p, nil
 }

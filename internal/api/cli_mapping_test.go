@@ -69,6 +69,26 @@ var contractStatements = []string{
 	"set container-functions sbc-ct1 interfaces eth0 type memif",
 	"set container-functions sbc-ct1 interfaces eth0 virtual-switch vs-a",
 	"set virtual-switches vs-a ports 2 container sbc-ct1 interface eth0",
+	// 2026-09-14 全功能 CLI 测试补齐（决策 #76）：以下语句**契约已声明但此前落不进模型**，
+	// 因未列入本清单而长期漏网——加进来守护。
+	// vpp dpdk dev 全局默认（§2.9）：dev 下有 <ifname> 参数子节点，通用遍历会把它当数组容器，
+	// 而模型 vpp.dpdk.dev 是对象（VppDevDefault）→ 原先报 cannot unmarshal array into ...
+	"set vpp dpdk dev rx-queues 2",
+	"set vpp dpdk dev tx-queues 2",
+	"set vpp dpdk dev rx-descriptors 1024",
+	"set vpp dpdk dev tx-descriptors 1024",
+	// vpp dpdk dev 单网卡覆盖（§2.9）
+	"set vpp dpdk dev ens224 rx-queues 4",
+	// system ntp server（§2.2）：模型是对象数组 system.ntp[{server,prefer}]，
+	// 原先既落不到 ntp 键，prefer flag 也无法结尾（报「未知语句」/「缺少取值」）
+	"set system ntp server 192.168.155.1",
+	"set system ntp server 192.168.155.1 prefer",
+	// system dns server <ip> secondary <ip>（§2.2）：通用遍历消费完首个 IP 后下潜到参数节点，
+	// 同级关键字 secondary 不可见（报「未知语句: "secondary"」）
+	"set system dns server 8.8.8.8 secondary 8.8.4.4",
+	// resource-pools cpu numa node <n> cores <list>（§2.6）：模型是对象数组 cpu.numa[{node,cores}]，
+	// CLI 多一层 node 关键字 → 原先写成对象（cannot unmarshal object into []model.NumaNode）
+	"set resource-pools cpu numa node 0 cores 1-4",
 }
 
 func TestCLIStatementMappingGuard(t *testing.T) {
