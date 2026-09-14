@@ -7,12 +7,14 @@
 | 配套文档 | 命令速查：[`NFViS-CLI命令全表.md`](NFViS-CLI命令全表.md)（256 条命令含实测状态）<br>需求真源：`NFViS-系统产品需求与目标架构规格书.md`（附录 A = 决策记录）<br>契约：`NFViS-openapi.yaml`（REST）、`NFViS-CLI命令树完整设计.md`（CLI） |
 | 证据口径 | 本手册中的命令与输出均取自 **nfvis-vm 真机实测**（`docs/evidence/v1-closeout-round7/8.txt` 等）；未实测处均显式标注 |
 
-> ⚠️ **本手册在编写时发现 3 处缺陷**，其中 1 处为安全问题（已在编写过程中修复）：
-> ① `postinst` 的**内核基线代码块不可达**（安装期并未应用基线）——见 §2.1，请按 §3.1 手工执行；
-> ② `nfvis-cli` 的 `-server` **默认值与守护进程默认不匹配**（默认参数连不上）——见 §4.3；
-> ③ **`request system configuration backup to <path>` 导出件为 0644**（自动命名的归档是 0600），
->    而归档含 `password_hash` → 本地任意用户可读口令哈希。**已修复为 0600**（决策 #77）；
-> ④ `set system login user … password …` 经 CLI 不可用（已知缺陷，建用户请走 REST）——见 §4.5。
+> 本手册在编写时逐条真机核验，撞出 4 处问题，**其中 2 处已修**：
+> ① **已修**（决策 #78）：`nfvis-cli` 的 `-server` 缺省值曾与守护进程缺省不匹配（默认参数连不上），
+>    现缺省即 `https://127.0.0.1:443`，**零参数可连**（见 §4.3）；
+> ② **已修**（决策 #77，安全）：`request system configuration backup to <path>` 导出件曾为 0644
+>    且含 `password_hash`，现为 0600；
+> ③ **未修**：`postinst` 的**内核基线代码块不可达**（安装期并未应用基线）——见 §2.1，
+>    请按 §3.1 手工执行；
+> ④ **未修**：`set system login user … password …` 经 CLI 不可用（建用户请走 REST）——见 §4.5。
 
 ---
 
@@ -276,18 +278,18 @@ CLI 参数：
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `-server` | `http://127.0.0.1:8443` | ⚠️ **与守护进程默认 `https://…:443` 不一致，见下方缺陷说明** |
+| `-server` | `https://127.0.0.1:443` | **与守护进程缺省一致**（`NFVIS_LISTEN=:443` + 自动自签 HTTPS）；<br>可用 `NFVIS_SERVER` 环境变量覆盖 |
 | `-u` / `-p` | `admin` / `$NFVIS_PASSWORD` | 用户名/口令 |
 | `-ca` | 空 | 服务端证书 PEM；**缺省固定本机 `/var/lib/nfvis/tls/server.crt`**（自签场景零配置） |
 | `-insecure` | 关 | 跳过证书校验（仅调试） |
 | `-source` | `ssh` | 接入源（`ssh`/`console`），影响 FR-CFG-012 自锁保护与 `start shell` 权限 |
 | `-c "…"` | 空 | **脚本模式**：执行多行命令后退出（换行分隔；任一行出错即停） |
 
-> ⚠️ **缺陷（本手册编写时发现）**：`nfvis-cli` 的 `-server` 默认值是无 TLS 的
-> `http://127.0.0.1:8443`，而 nfvisd 默认在 `:443` 上以 **HTTPS** 提供服务。
-> 因此**默认参数下 CLI 连不上**，必须显式给 `-server https://127.0.0.1:443`。
-> 这与「装完即用」的预期不符（e2e 测试也是显式设 `NFVIS_API` 绕过的）。
-> 已在 `docs/NFViS-CLI命令全表.md` §4 登记。
+> **零参数即可连**（决策 #78）：缺省 `https://127.0.0.1:443` 与守护进程缺省一致，
+> 且因地址为 `https://`，客户端会**自动固定本机自签证书** `/var/lib/nfvis/tls/server.crt`
+> ——即「装完即用」无需任何参数。若 nfvisd 监听在别处（如开发用的
+> `-listen 127.0.0.1:18443 -allow-plaintext`），用 `-server http://127.0.0.1:18443`
+> 或 `export NFVIS_SERVER=http://127.0.0.1:18443` 覆盖。
 
 **脚本模式**（适合自动化；注意它在配置模式下会自动收尾，**不要手写 `discard`**，否则重复释放会报
 `%% 当前会话未持有 candidate`）：

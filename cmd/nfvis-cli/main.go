@@ -3,8 +3,10 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -15,7 +17,11 @@ import (
 
 func main() {
 	var (
-		server   = flag.String("server", "http://127.0.0.1:8443", "nfvisd 地址")
+		// 缺省须与守护进程缺省一致：deploy/nfvis.service 设 NFVIS_LISTEN=:443，且 nfvisd
+		// 未提供证书时自动自签并启用 HTTPS（决策 #72）。此前缺省是明文 http://…:8443，
+		// 与守护进程默认不匹配 → 默认参数连不上（决策 #78）。
+		// 可用 NFVIS_SERVER 覆盖（与 NFVIS_PASSWORD 同风格），便于脚本/自动化。
+		server   = flag.String("server", envOr("NFVIS_SERVER", cliclient.DefaultServer), "nfvisd 地址（缺省读 NFVIS_SERVER）")
 		user     = flag.String("u", "admin", "用户名")
 		password = flag.String("p", os.Getenv("NFVIS_PASSWORD"), "口令（缺省读 NFVIS_PASSWORD）")
 		source   = flag.String("source", "ssh", "接入源（ssh|console）")
@@ -34,6 +40,13 @@ func main() {
 	fmt.Printf("连接 %s ...\n", *server)
 	if err := client.Login(*user, *password); err != nil {
 		fmt.Fprintf(os.Stderr, "%% 登录失败: %v\n", err)
+		if isConnErr(err) {
+			// 最常见的两个原因：守护进程未起 / 监听地址与端口不是缺省。
+			fmt.Fprintf(os.Stderr,
+				"%% 提示: 确认 nfvisd 已运行（systemctl status nfvis）；"+
+					"若其监听地址/端口非缺省（当前尝试 %s），用 -server 或 NFVIS_SERVER 指定，"+
+					"并注意开发用 -allow-plaintext 时须把地址写成 http://…\n", *server)
+		}
 		os.Exit(1)
 	}
 	session := cli.New(client, *source)
@@ -113,4 +126,23 @@ func mustClient(server, caFile string, insecure bool) *cliclient.Client {
 		os.Exit(1)
 	}
 	return c
+}
+
+// envOr 取环境变量，为空时用默认值。
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// isConnErr 判断是否为「连不上」类错误（网络/超时），用于给出排障提示。
+// 证书校验失败等**不**算在内——那属于配置问题，报错本身已足够明确。
+func isConnErr(err error) bool {
+	var nerr net.Error
+	if errors.As(err, &nerr) {
+		return true
+	}
+	var oerr *net.OpError
+	return errors.As(err, &oerr)
 }
