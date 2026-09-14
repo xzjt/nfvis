@@ -12,6 +12,7 @@ import (
 
 	"github.com/xzjt/nfvis/internal/metrics"
 	"github.com/xzjt/nfvis/internal/model"
+	ksys "github.com/xzjt/nfvis/internal/system"
 )
 
 func (x *cliExecutor) execShowSystemDiag(t []string) string {
@@ -26,10 +27,12 @@ func (x *cliExecutor) execShowSystemDiag(t []string) string {
 		return x.renderDiag(t)
 	case "uptime", "cpu", "memory", "storage", "hugepages":
 		return x.renderHostMetrics(t[0])
+	case "kernel":
+		return x.renderKernelBaseline()
 	case "hardware":
 		return x.renderHardware()
 	}
-	return fmt.Sprintf("%% 无效命令: show system %s（可用：uptime|cpu|memory|storage|hugepages|core-dumps|tech-support）\n", strings.Join(t, " "))
+	return fmt.Sprintf("%% 无效命令: show system %s（可用：uptime|cpu|memory|storage|hugepages|kernel|hardware|core-dumps|tech-support）\n", strings.Join(t, " "))
 }
 
 func (x *cliExecutor) renderDiag(t []string) string {
@@ -262,4 +265,77 @@ func (x *cliExecutor) renderHardware() string {
 	}
 	x.structured = map[string]any{"hardware": anyToTree(hh), "violations": violations}
 	return b.String()
+}
+
+// renderKernelBaseline：内核启动基线三方对照（FR-SYS-014 / FR-CMP-005）。
+//
+//	内核基线 = /proc/cmdline（本次启动实际带入的参数）
+//	运行实际 = /proc/meminfo、/sys（大页已分配、THP 当前策略、NMI watchdog）
+//	配置期望 = committed 的 resource-pools（唯一真源）+ system kernel
+func (x *cliExecutor) renderKernelBaseline() string {
+	actual := ksys.ReadActual("/")
+	desired, err := x.desiredKernelBaseline()
+	if err != nil {
+		return "%% " + err.Error() + "\n"
+	}
+	diffs := ksys.Compare(desired, actual)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-22s %-26s %s\n", "项", "内核基线(cmdline)", "运行实际")
+	iso := ksys.IsolatedFromCmdline(actual.Cmdline)
+	fmt.Fprintf(&b, "%-22s %-26s %s\n", "isolcpus", dash(iso), dash(iso))
+	fmt.Fprintf(&b, "%-22s %-26s %s\n", "大页 1G", dash(cmdlineHuge(actual.Cmdline)), fmt.Sprintf("%d（free %d）", actual.Hugepages1G, actual.Hugepages1GFr))
+	nmi := "-"
+	if actual.NMIWatchdog != nil {
+		nmi = fmt.Sprintf("%v", *actual.NMIWatchdog)
+	}
+	fmt.Fprintf(&b, "%-22s %-26s %s\n", "nmi_watchdog", "-", nmi)
+	fmt.Fprintf(&b, "%-22s %-26s %s\n", "transparent_hugepage", "-", dash(actual.THP))
+	b.WriteString("\n配置期望（resource-pools / system kernel 派生）：\n")
+	fmt.Fprintf(&b, "  大页 1G=%s   isolcpus=%s   nmi_watchdog=%s   thp=%s\n",
+		desiredInt(desired.Hugepages1G), dash(desired.IsolatedCores), desiredBool(desired.NMIWatchdog), dash(desired.THP))
+	if len(diffs) == 0 {
+		b.WriteString("\n一致性：内核基线与配置期望一致（无需重启）\n")
+	} else {
+		b.WriteString("\n一致性：与配置期望不一致（需写入 GRUB 基线并重启生效，FR-SYS-014）：\n")
+		for _, d := range diffs {
+			b.WriteString("  - " + d + "\n")
+		}
+	}
+	x.structured = map[string]any{
+		"cmdline": actual.Cmdline, "isolated_cores": iso,
+		"hugepages_1g": actual.Hugepages1G, "hugepages_1g_free": actual.Hugepages1GFr,
+		"thp": actual.THP, "desired": anyToTree(desired), "diffs": diffs,
+	}
+	return b.String()
+}
+
+func cmdlineHuge(cmdline []string) string {
+	for _, p := range cmdline {
+		if strings.HasPrefix(p, "hugepages=") {
+			return strings.TrimPrefix(p, "hugepages=")
+		}
+	}
+	return ""
+}
+
+func dash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+func desiredInt(v int) string {
+	if v < 0 {
+		return "不托管"
+	}
+	return fmt.Sprintf("%d", v)
+}
+
+func desiredBool(v *bool) string {
+	if v == nil {
+		return "不托管"
+	}
+	return fmt.Sprintf("%v", *v)
 }

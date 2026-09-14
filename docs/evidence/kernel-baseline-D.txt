@@ -1,0 +1,37 @@
+===== 回退（request system kernel rollback）=====
+已删除 NFViS 内核基线片段（无历史备份）；需重启生效（request system reboot）
+--- 片段应已删除: 已删除
+--- grub.cfg 仍含 isolcpus=4-7 数（应为 0，回退后）: 0
+0
+
+===== 安装器脚本 --check（产品安装器视角）=====
+nfvis-baseline: 内核基线检查：
+nfvis-baseline:   片段缺失（未托管内核基线）
+nfvis-baseline:   运行 cmdline：default_hugepagesz=1G hugepagesz=1G hugepages=4 
+nfvis-baseline:   大页实际：HugePages_Total: 3  空闲 1
+nfvis-baseline:   fstab 大页挂载：nodev /dev/hugepages hugetlbfs defaults,pagesize=1G 0 0
+
+===== 安装器 --defaults（保守默认，机器规格派生）=====
+nfvis-baseline: 按机器规格取默认：RAM 5G → 1G 大页 1 页（不设 isolcpus）
+nfvis-baseline: 找不到 /usr/bin/nfvisd（先安装 nfvis 包，或用 NFVISD=… 指定）
+--- 默认片段: grep: /etc/default/grub.d/99-nfvis.cfg: No such file or directory
+--- 再回退，恢复虚机原状 ---
+nfvis-baseline: 无备份，已删除片段（回到系统原始启动参数）
+nfvis-baseline: update-grub 成功；需重启生效
+--- 片段: 已删除（虚机恢复原状）
+===== 安装器 --defaults（经 nfvisd 生成器；产品安装路径）=====
+nfvis-baseline: 按机器规格取默认：RAM 5G → 1G 大页 1 页（不设 isolcpus）
+nfvis-baseline: 片段已写入：/etc/default/grub.d/99-nfvis.cfg
+nfvis-baseline: fstab 大页挂载已维护
+nfvis-baseline: update-grub 成功；**需重启生效**：重启后 show system kernel 应显示与配置一致
+--- 片段内容: hugepages=1
+--- grub.cfg 落地: 3
+===== 幂等性：再跑一次应跳过写入 =====
+nfvis-baseline: 按机器规格取默认：RAM 5G → 1G 大页 1 页（不设 isolcpus）
+nfvis-baseline: 片段内容未变，跳过写入与 update-grub
+nfvis-baseline: fstab 大页挂载已维护
+===== 恢复虚机原状（rollback）=====
+nfvis-baseline: 无备份，已删除片段（回到系统原始启动参数）
+nfvis-baseline: update-grub 成功；需重启生效
+--- 片段: 已删除
+nfvisd 已停止

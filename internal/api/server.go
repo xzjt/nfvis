@@ -19,6 +19,7 @@ import (
 	"github.com/xzjt/nfvis/internal/events"
 	"github.com/xzjt/nfvis/internal/schema"
 	"github.com/xzjt/nfvis/internal/state"
+	ksys "github.com/xzjt/nfvis/internal/system"
 )
 
 // API 版本与产品版本（FR-API-007；组件版本经 GET /system/version 汇报）。
@@ -39,6 +40,7 @@ type Options struct {
 	LLDP        LldpRuntime            // LLDP 邻居（M3-6；nil = 503）
 	State       *state.State           // 运行态聚合（M3-7；nil = 省略运行态字段）
 	SRIOV       SRIOVSetter            // SR-IOV VF 数量（M3-7；nil = 503）
+	Kernel      ksys.KernelApplier     // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
 	NAT         NatSessionsRuntime     // NAT 会话（M3-7；nil = 503）
 	Alarms      AlarmRuntime           // 告警列表（M3-8；nil = 503）
 	Diag        DiagRuntime            // CLI 诊断命令（M3-9；nil = 命令报不可用）
@@ -111,6 +113,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.cliExec.setSoftware(opts.Software)
 	s.cliExec.setHardware(opts.Hardware)
 	s.cliExec.setSRIOV(opts.SRIOV)
+	s.cliExec.setKernel(opts.Kernel)
 	s.cliExec.setTLS(opts.TLS)
 	s.cliExec.setVPPRestart(func(ctx context.Context) error {
 		if s.vpp == nil {

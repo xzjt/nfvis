@@ -29,6 +29,7 @@ type Config struct {
 
 // SystemConfig 对应 OpenAPI SystemConfig。
 type SystemConfig struct {
+	Kernel             *KernelConfig     `json:"kernel,omitempty"` // 内核启动基线（FR-SYS-014）
 	Hostname           string            `json:"hostname,omitempty"`
 	Timezone           string            `json:"timezone,omitempty"`
 	Ntp                []NtpServer       `json:"ntp,omitempty"`
@@ -133,6 +134,16 @@ type Bond struct {
 type Lacp struct {
 	Mode     string `json:"mode"`               // active|passive
 	Interval string `json:"interval,omitempty"` // fast|slow
+}
+
+// KernelConfig 内核启动基线托管（FR-SYS-014；决策 #66）。
+// 大页与隔离核的唯一真源是 resource-pools（本结构只管其余启动参数）。
+type KernelConfig struct {
+	NMIWatchdog          *bool    `json:"nmi_watchdog,omitempty"`          // nil = 不托管
+	TransparentHugepages string   `json:"transparent_hugepages,omitempty"` // always|madvise|never
+	IOMMU                string   `json:"iommu,omitempty"`                 // on|off|pt
+	TunedProfile         string   `json:"tuned_profile,omitempty"`         // 写入 /etc/nfvis/tuned-profile
+	Params               []string `json:"params,omitempty"`                // 附加内核参数（逃生口）
 }
 
 // VirtualSwitch 虚拟交换机（L2 = bridge domain，见附录 B 映射）。

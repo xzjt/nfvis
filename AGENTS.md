@@ -23,7 +23,7 @@
   nfvisd 未运行、**无 domain/接口残留**、**1G 大页仅 1 页空闲**（测试 VM ≤1G、串行）、
   引导镜像 `alpine.qcow2` 已恢复；Docker 本地有 `alpine:3.20`。真机前 `pkill -x nfvisd`；
   集成测试 `make integration`（CI 不跑）。设计基线在 `docs/`，**不要凭记忆重设计**。
-- 已定决策 65 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 67 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
 - `docs/NFViS-openapi.yaml` 与 `docs/NFViS-CLI命令树完整设计.md` 是**契约**。
 
 ## 不可违反的规则

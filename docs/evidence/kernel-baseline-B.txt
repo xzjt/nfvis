@@ -1,0 +1,17 @@
+===== 1) 配置（含 DNS/params 数组字段）并 commit =====
+[ok] system kernel transparent-hugepages never
+[ok] system kernel params iommu=pt
+[ok] system dns server 1.1.1.1
+[ok] system dns server 8.8.8.8
+commit 成功 (revision 3)
+警告: resource-pools 变更需 reboot 生效（FR-SYS-002）
+
+===== 2) show system kernel（应显示 3 项差异=pending）=====
+
+配置期望（resource-pools / system kernel 派生）：
+  大页 1G=4   isolcpus=4-7   nmi_watchdog=false   thp=never
+
+一致性：与配置期望不一致（需写入 GRUB 基线并重启生效，FR-SYS-014）：
+  - 大页 1G：期望 4，实际 3（cmdline 启动参数需生效并重启）
+  - isolcpus：期望 "4-7"，cmdline 为 ""
+  - transparent_hugepage：期望 never，实际 madvise

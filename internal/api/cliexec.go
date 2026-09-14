@@ -26,6 +26,7 @@ import (
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/schema"
 	"github.com/xzjt/nfvis/internal/state"
+	ksys "github.com/xzjt/nfvis/internal/system"
 )
 
 // authorizer 授权接口（aaa.Service 实现）。
@@ -87,6 +88,7 @@ type cliExecutor struct {
 	sw         SoftwareRuntime             // 软件升级/电源/NTP（M5-7；nil = 报未接入）
 	hw         HardwareRuntime             // 硬件健康（M5-5；nil = 报未接入）
 	sriov      SRIOVSetter                 // SR-IOV VF 数量（M3-7；nil = 命令报未接入）
+	kernel     ksys.KernelApplier          // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
 	tlsR       TlsRuntime                  // 证书管理（M5-8；nil = 报未接入）
 	vppRestart func(context.Context) error // request vpp restart（M5-9；nil = 报未接入）
 	events     *events.Bus                 // 事件总线（M5-1；nil = 不发布）
@@ -138,6 +140,9 @@ func (x *cliExecutor) setHardware(h HardwareRuntime) { x.hw = h }
 
 // setSRIOV 注入 SR-IOV VF 设置能力（M5-9 收尾：request sriov 命令）。
 func (x *cliExecutor) setSRIOV(s SRIOVSetter) { x.sriov = s }
+
+// setKernel 注入内核基线落地器（FR-SYS-014：request system kernel apply|rollback）。
+func (x *cliExecutor) setKernel(k ksys.KernelApplier) { x.kernel = k }
 
 // setTLS 注入证书管理（M5-8）。
 func (x *cliExecutor) setTLS(t TlsRuntime) { x.tlsR = t }
@@ -579,6 +584,10 @@ func (x *cliExecutor) cfgCommit(user, source string, s *cliSession, args []strin
 	for _, w := range res.Warnings {
 		out += "\n" + w
 	}
+	// 内核启动基线与配置不一致时给出明确指引（FR-SYS-014 / FR-CMP-005）
+	for _, w := range x.kernelBaselineWarnings() {
+		out += "\n" + w
+	}
 	return out + "\n"
 }
 
@@ -675,7 +684,7 @@ func matchAlias(tokens []string) *aliasRule {
 
 // allAliasRules 汇总别名规则（顺序即匹配优先级）。
 func allAliasRules() []*aliasRule {
-	out := make([]*aliasRule, 0, len(statementAliases)+len(statementAliasesNet)+len(statementAliasesCompute)+len(statementAliasesSystem))
+	out := make([]*aliasRule, 0, len(statementAliases)+len(statementAliasesNet)+len(statementAliasesCompute)+len(statementAliasesSystem)+len(statementAliasesArray))
 	for i := range statementAliases {
 		out = append(out, &statementAliases[i])
 	}
@@ -687,6 +696,9 @@ func allAliasRules() []*aliasRule {
 	}
 	for i := range statementAliasesSystem {
 		out = append(out, &statementAliasesSystem[i])
+	}
+	for i := range statementAliasesArray {
+		out = append(out, &statementAliasesArray[i])
 	}
 	return out
 }
@@ -1204,6 +1216,8 @@ func scalarEq(v any, s string) bool {
 var valueTransforms = map[string]func(string) (any, error){
 	"isolated_cores": expandCores,
 	"cores":          expandCores,
+	// 内核基线（FR-SYS-014）：nmi-watchdog 需写真实 bool（JSON 目标为 *bool）
+	"nmi_watchdog": func(s string) (any, error) { return boolField(s) },
 }
 
 func expandCores(s string) (any, error) {

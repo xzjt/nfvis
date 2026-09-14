@@ -1,0 +1,16 @@
+===== 写基线 =====
+内核基线已写入（GRUB 片段 /etc/default/grub.d/99-nfvis.cfg + fstab 大页挂载）
+待重启生效（pending_reboot）：
+  - 大页 1G：期望 4，实际 3（cmdline 启动参数需生效并重启）
+  - isolcpus：期望 "4-7"，cmdline 为 ""
+  - transparent_hugepage：期望 never，实际 madvise
+执行 request system reboot 应用新基线；重启后 show system kernel 应显示一致
+===== 落地核对 =====
+--- 片段 ---
+# 由 NFViS 生成（决策 #66）：请勿手工编辑；变更经 CLI set system kernel / resource-pools 后由 nfvisd 重写
+GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} default_hugepagesz=1G hugepagesz=1G hugepages=4 isolcpus=4-7 nohz_full=4-7 rcu_nocbs=4-7 nmi_watchdog=0 transparent_hugepage=never iommu=pt"
+--- 主 grub 旧参数残留数（应 0）: 0
+--- grub.cfg 含 isolcpus=4-7: 3
+--- fstab 大页行 ---
+# nfvis-hugepages
+nodev /dev/hugepages hugetlbfs defaults,pagesize=1G 0 0
