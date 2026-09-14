@@ -81,7 +81,7 @@ func fibHasRoute6(t *testing.T, mgr *network.Manager, tableID uint32, prefix str
 		t.Fatalf("L3 客户端: %v", err)
 	}
 	defer c.Close()
-	rows, err := c.Routes(tableID)
+	rows, err := c.Routes(tableID, true) // isIP6=true：v6 须显式指定协议（决策 #69）
 	if err != nil {
 		t.Fatalf("dump v6 FIB: %v", err)
 	}
