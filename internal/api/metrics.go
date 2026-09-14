@@ -45,10 +45,29 @@ func (s *Server) vppMetrics(ctx context.Context) []metrics.Sample {
 			metrics.Sample{Name: "nfvis_vpp_memory_free_bytes", Help: "VPP 主堆空闲", Type: "gauge", Value: float64(mem.Free)},
 		)
 	}
-	if bufs, ok := s.state.Buffers(ctx); ok {
+	// buffer 池：标注来源，且**始终**给出可用性序列（决策 #68，不静默省略）
+	bufs, bufsOK := s.state.Buffers(ctx)
+	bufLabels := map[string]string{"source": bufs.Source}
+	if bufs.Source == "" {
+		bufLabels["source"] = "unavailable"
+	}
+	if !bufsOK && bufs.Reason != "" {
+		bufLabels["reason"] = bufs.Reason
+	}
+	bufAvail := float64(0)
+	if bufsOK {
+		bufAvail = 1
+	}
+	out = append(out, metrics.Sample{Name: "nfvis_vpp_buffer_stats_available",
+		Help: "buffer 池统计是否可用（1=可用，0=不可用，见 source/reason 标签）", Type: "gauge",
+		Labels: bufLabels, Value: bufAvail})
+	if bufsOK {
 		for _, p := range bufs.Pools {
-			out = append(out, metrics.Sample{Name: "nfvis_vpp_buffer_pool_used", Help: "VPP buffer 池已用数量", Type: "gauge",
-				Labels: map[string]string{"pool": p.Name}, Value: p.Used})
+			l := map[string]string{"pool": p.Name, "source": bufs.Source}
+			out = append(out,
+				metrics.Sample{Name: "nfvis_vpp_buffer_pool_used", Help: "VPP buffer 池已用数量", Type: "gauge", Labels: l, Value: p.Used},
+				metrics.Sample{Name: "nfvis_vpp_buffer_pool_available", Help: "VPP buffer 池可用数量", Type: "gauge", Labels: l, Value: p.Available},
+			)
 		}
 	}
 	// 接口计数：按配置接口逐口取（契约 Interface.statistics 同源）

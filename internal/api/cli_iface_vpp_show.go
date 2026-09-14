@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/state"
 )
 
 // execShowInterfaces：契约 §1.1 的接口族。
@@ -233,12 +234,12 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 		var b strings.Builder
 		fmt.Fprintf(&b, "threads: %d\n", len(threads))
 		if hasBuf {
-			fmt.Fprintf(&b, "buffers: pools=%d\n", len(buf.Pools))
+			fmt.Fprintf(&b, "buffers: pools=%d source=%s\n", len(buf.Pools), buf.Source)
 			for _, pl := range buf.Pools {
 				fmt.Fprintf(&b, "  %-10s used=%.0f available=%.0f cached=%.0f\n", pl.Name, pl.Used, pl.Available, pl.Cached)
 			}
 		} else {
-			fmt.Fprintln(&b, "buffers: 运行态不可用")
+			fmt.Fprintf(&b, "buffers: 运行态不可用（%s）\n", bufUnavailableReason(buf))
 		}
 		if hasMem {
 			fmt.Fprintf(&b, "memory: total=%d used=%d free=%d\n", mem.Total, mem.Used, mem.Free)
@@ -249,15 +250,13 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 	case "buffers":
 		buf, ok := x.state.Buffers(ctx)
 		if !ok {
-			return "%% buffer 池运行态不可用（可能未启用 stats segment 或全零）\n"
+			return fmt.Sprintf("%% buffer 池运行态不可用：%s\n", bufUnavailableReason(buf))
 		}
 		x.structured = anyToTree(buf)
 		var b strings.Builder
+		fmt.Fprintf(&b, "source: %s\n", buf.Source)
 		for _, pl := range buf.Pools {
 			fmt.Fprintf(&b, "%-10s used=%.0f available=%.0f cached=%.0f\n", pl.Name, pl.Used, pl.Available, pl.Cached)
-		}
-		if b.Len() == 0 {
-			return "（无 buffer 池运行态）\n"
 		}
 		return b.String()
 	case "memory":
@@ -282,4 +281,13 @@ func (x *cliExecutor) execShowLldp(args []string) string {
 		return fmt.Sprintf("%% 无效命令: show lldp %s（可用：show lldp neighbors）\n", strings.Join(args, " "))
 	}
 	return x.execShowProtocols([]string{"lldp", "neighbors"})
+}
+
+// bufUnavailableReason buffer 池统计不可用的原因（决策 #68：不静默省略，
+// 无具体原因时给通用说明）。
+func bufUnavailableReason(buf state.Buffers) string {
+	if buf.Reason != "" {
+		return buf.Reason
+	}
+	return "statsclient 解码失败或 stats segment 未启用"
 }
