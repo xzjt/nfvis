@@ -1,0 +1,115 @@
+===== D-1 技术债落地真机验证（决策 #68）=====
+环境：nfvis-vm（Ubuntu 26.04、VPP v26.06-release、govpp v0.13.0）
+日期：2026-09-14
+nfvisd：/tmp/nfvisd -db /tmp/nfvis.db -listen 127.0.0.1:18443
+说明：本文件为 **原始输出摘录**，命令与结果一一对应。
+
+----- 1. 根因实测：statsclient 解码失败 vs vpp_get_stats 正确 -----
+（经 nfvisd 二进制 API 与 VPP 自带工具对比同一 stats segment）
+
+statsclient GetBufferStats：
+  pool=default-numa-0  used=0  available=0  cached=0        ← 池名解析出，三项计数全为 0
+vpp_get_stats socket-name /run/vpp/stats.sock dump machine '/buffer-pools/*'：
+  9:0.00:/buffer-pools/default-numa-0/cached
+  9:0.00:/buffer-pools/default-numa-0/used
+  9:430184.00:/buffer-pools/default-numa-0/available        ← 正确（格式 <type>:<value>:<path>）
+
+工具失败路径（socket 不存在）：
+  $ vpp_get_stats socket-name /nonexistent.sock dump machine '/buffer-pools/*'
+  exit=1
+  stdout:[]
+  stderr:[Couldn't connect to vpp, does /nonexistent.sock exist?]
+
+----- 2. 修复后：候选路径（VPP 运行中）-----
+--- GET /api/v1/vpp/status（buffers 段）---
+    "buffers": [
+        {
+            "name": "default-numa-0",
+            "used": 0,
+            "available": 430184
+        }
+    ],
+    "buffers_source": "vpp_get_stats",
+    "memory": {
+        "total": 2147483648,
+        "used": 411929968,
+        "free": 1735553680
+    }
+
+--- GET /api/v1/metrics（buffer 序列，带 source 标签）---
+# HELP nfvis_vpp_buffer_pool_available VPP buffer 池可用数量
+# TYPE nfvis_vpp_buffer_pool_available gauge
+nfvis_vpp_buffer_pool_available{pool="default-numa-0",source="vpp_get_stats"} 430184
+# HELP nfvis_vpp_buffer_pool_used VPP buffer 池已用数量
+# TYPE nfvis_vpp_buffer_pool_used gauge
+nfvis_vpp_buffer_pool_used{pool="default-numa-0",source="vpp_get_stats"} 0
+# HELP nfvis_vpp_buffer_stats_available buffer 池统计是否可用（1=可用，0=不可用，见 source/reason 标签）
+# TYPE nfvis_vpp_buffer_stats_available gauge
+nfvis_vpp_buffer_stats_available{source="vpp_get_stats"} 1
+
+--- CLI: show vpp buffers ---
+连接 http://127.0.0.1:18443 ...
+source: vpp_get_stats
+default-numa-0 used=0 available=430184 cached=0
+
+--- CLI: show vpp（概览）---
+连接 http://127.0.0.1:18443 ...
+threads: 2
+buffers: pools=1 source=vpp_get_stats
+  default-numa-0 used=0 available=430184 cached=0
+memory: total=2147483648 used=411929968 free=1735553680
+
+> 对比修复前（docs/evidence/m5-m59-cli-closeout.txt）：
+>   show vpp           => threads: 2 buffers: 运行态不可用
+>   show vpp buffers   => %% buffer 池运行态不可用（可能未启用 stats segment 或全零） exit status 1
+
+----- 3. 不可用路径：来源+原因（停 VPP 后），不静默省略 -----
+--- CLI: show vpp buffers ---
+连接 http://127.0.0.1:18443 ...
+% buffer 池运行态不可用：vpp_get_stats: Couldn't connect to vpp, does /run/vpp/stats.sock exist?
+
+--- GET /api/v1/metrics ---
+# HELP nfvis_vpp_buffer_stats_available buffer 池统计是否可用（1=可用，0=不可用，见 source/reason 标签）
+# TYPE nfvis_vpp_buffer_stats_available gauge
+nfvis_vpp_buffer_stats_available{reason="vpp_get_stats: Couldn't connect to vpp, does /run/vpp/stats.sock exist?",source="unavailable"} 0
+
+--- GET /api/v1/vpp/status ---
+    "connected": false,
+    "buffers_unavailable": "vpp_get_stats: Couldn't connect to vpp, does /run/vpp/stats.sock exist?"
+
+----- 4. 恢复：重启 VPP 后自动回到可用来源 -----
+（systemctl start vpp; sleep 10）
+连接 http://127.0.0.1:18443 ...
+source: vpp_get_stats
+default-numa-0 used=0 available=430184 cached=0
+
+----- 5. ACL 命中计数：不可落地（正式降 V2 的依据）-----
+VPP 26.06 消息表（vppctl show api message-table）：
+  107  acl_del          108  acl_del_reply
+  135  acl_stats_intf_counters_enable        136  acl_stats_intf_counters_enable_reply
+
+govpp 解析（conn.GetMessageID，均 err=nil）：
+  acl_del                            crc=ef34fea4 -> ID=107
+  acl_del_reply                      crc=e8d4e804 -> ID=108
+  acl_stats_intf_counters_enable     crc=b3e225d2 -> ID=135
+  acl_stats_intf_counters_enable_reply crc=e8d4e804 -> ID=136
+  ↑ 两个应答 CRC 相同（e8d4e804，均为仅含 retval 的应答）
+
+调用 acl_stats_intf_counters_enable(Enable=true) 的实测结果：
+  retval=0 err=received unexpected message (seqNum=1), expected
+  acl_stats_intf_counters_enable_reply (ID 136), but got acl_del_reply_e8d4e804 (ID 108)
+  （在全新通道上作为**第一条**请求即复现，非排队/陈旧应答问题）
+  → 请求被 VPP 当作 acl_del(107) 执行：**不仅无效，且可能误删 ACL**，故不接线。
+
+基础 ACL 下发本身可用（同一探针，真机）：
+  create loopback            sw_if_index=3 retval=0
+  acl_add_replace            idx=0 retval=0 err=<nil>
+  acl_interface_set_acl_list retval=0 err=<nil>
+
+绑定后 stats 段 ACL 相关路径：
+  仅 /err/acl-plugin-*（错误计数，默认存在，如 2:0:0:0:/err/acl-plugin-in-ip4-l2/ACL deny packets）
+  **无** /acl-plugin/<ACL名>/... 逐规则命中计数（共 122 行全为 /err/ 前缀）
+
+----- 6. 环境恢复 -----
+VPP 恢复运行（v26.06-release），接口仅 ens192/ens224/local0（无 vh-/mf-/tap/loopback 残留）；
+nfvisd 已停止；/tmp/nfvis.db* 与部署包已清理；探针程序已从 VM 与本地删除。
