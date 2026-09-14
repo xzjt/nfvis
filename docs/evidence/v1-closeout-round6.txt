@@ -1,0 +1,49 @@
+===== V1 收尾第六轮：列表端点分页（决策 #74，FR-API-007）=====
+环境：nfvis-vm（Ubuntu 26.04、VPP v26.06-release）
+日期：2026-09-14
+nfvisd：/tmp/nfvisd -db /tmp/nfvis.db -listen 127.0.0.1:18443 -allow-plaintext
+本文件为**原始输出摘录**，命令与结果一一对应。
+
+----- 1. 分页在真机上的行为 -----
+预备：声明 2 个物理口 + 2 个 L2 交换机（vs-a 挂 ens192、vs-b 挂 ens224）。
+
+/interfaces（默认应返回全部；limit/offset 生效；越界为空列表而非 null）：
+                     → 条数 2 | 名称: ['ens192', 'ens224']
+?limit=1             → 条数 1 | 名称: ['ens192']
+?limit=1&offset=1    → 条数 1 | 名称: ['ens224']
+?offset=99           → 条数 0 | 名称: []
+
+/virtual-switches：
+limit=1  → 1 ['vs-a']
+offset=1 → 1 ['vs-b']
+
+语义（单测 11 组 + 上表）：`limit` 缺省/≤0 = **不截断**（既有调用方行为不变，客户端显式传参才分页）；
+`offset` 缺省 0、负数按 0；越界返回 `[]` 而非 `null`；`limit` 超过剩余长度取剩余。
+契约同步：14 条路径声明 `limit`/`offset`（`/protocols/lldp` 与 `/nat` 为对象端点，**不加**）。
+
+----- 2. 回归：真机集成全量 -----
+**首次运行出现 `TestE2EFlow` 失败**（`ping 192.168.155.2 经 VRF it-vrf 未收到回包（0 received）`）。
+排查结论：**与本次改动无关，是我自己遗留的 VPP 状态所致**——
+本轮真机验证（第 1 节）经 CLI 提交过 2 个 L2 交换机（vs-a 挂 ens192、vs-b 挂 ens224），
+验证完只停了 nfvisd 而**未清理 VPP 侧对象**；运行集成测试时 VPP 中残留 3 个 bridge domain
+（`show bridge-domain` 可见 2677544 / 2678753 / 14258608），ens192 同时带 L3 地址与 L2 桥接，
+形成干扰（决策 #37 已记录过「同挂一个 BD 会致 NAT 不回 ICMP」这类拓扑陷阱）。
+分页改动只作用于**响应列表切片**（`api.paginate` 对已构造的 slice 做 limit/offset），
+不触碰任何 VPP 数据面路径，构造上不可能影响转发。
+
+**重置 VPP 后重跑**：
+$ systemctl restart vpp && make integration
+exit=0   PASS: 192
+ok  	github.com/xzjt/nfvis/test/integration	160.070s
+ok  	github.com/xzjt/nfvis/internal/orchestrator	0.013s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/compute	7.927s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/container	0.010s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/network	0.117s
+（与上一轮 192 一致，无回归）
+
+**过程教训（记录以免重蹈）**：真机验证若在 VPP 里建过对象，**跑集成测试前必须重置 VPP**
+（本轮之前几轮都做了，这次漏了，导致一次假失败与一轮排查）。
+
+----- 3. 环境恢复 -----
+VPP 运行中（v26.06-release，重置后无 bridge-domain 残留）；ens192/ens224 均 down 且在 vfio-pci；
+nfvisd 未运行；/tmp 部署包与库文件已清理；引导镜像 alpine.qcow2 未动；无游离 domain。
