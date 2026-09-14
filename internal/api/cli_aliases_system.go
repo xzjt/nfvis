@@ -7,7 +7,12 @@ package api
 //   - `system health thresholds cpu-temp-celsius <n>` → SystemConfig.Health.{CPUTempCelsius,...}
 //   - `system api tls cert-file|key-file|self-signed …` → SystemConfig.API（M5-8 使用）
 
-import "strconv"
+import (
+	"strconv"
+	"strings"
+
+	"github.com/xzjt/nfvis/internal/model"
+)
 
 var statementAliasesSystem = []aliasRule{
 	// system health thresholds <cpu-temp-celsius|disk-temp-celsius|disk-used-percent> <n>
@@ -68,31 +73,69 @@ var statementAliasesSystem = []aliasRule{
 			}
 			return nil
 		}},
-	// system syslog host <ip> [port <n>] → remote_host/remote_port
+	// system syslog host <ip> → remote_host（删除时一并清除该目标的其他参数）
 	{pattern: []string{"system", "syslog", "host", "*"},
 		apply: func(tree map[string]any, t []string, isSet bool) error {
 			syslog := ensureObj(ensureObj(tree, "system"), "syslog")
 			if !isSet {
 				delete(syslog, "remote_host")
 				delete(syslog, "remote_port")
+				delete(syslog, "facility")
+				delete(syslog, "severity")
 				return nil
 			}
 			syslog["remote_host"] = t[3]
 			return nil
 		}},
-	{pattern: []string{"system", "syslog", "host", "*", "port", "*"},
+	// system syslog host <ip> [port <n>] [facility <f>] [severity <s>]（任意顺序、可组合）
+	// → remote_host/remote_port/facility/severity（FR-SYS-004）
+	// 注：此前仅 `port` 有映射，facility/severity 虽已在命令树与 CLI 契约中声明却未被
+	// 执行器接受（契约与实现漂移），本次补齐为统一的不定长键值对解析（决策 #69）。
+	{pattern: []string{"system", "syslog", "host", "*", "**"},
 		apply: func(tree map[string]any, t []string, isSet bool) error {
 			syslog := ensureObj(ensureObj(tree, "system"), "syslog")
-			if !isSet {
-				delete(syslog, "remote_port")
-				return nil
-			}
-			n, err := strconv.Atoi(t[5])
-			if err != nil {
-				return errString("端口须为整数: " + t[5])
-			}
 			syslog["remote_host"] = t[3]
-			syslog["remote_port"] = n
+			tail := t[4:]
+			if len(tail)%2 != 0 {
+				return errString("system syslog host 参数须成对出现: " + strings.Join(tail, " "))
+			}
+			for i := 0; i < len(tail); i += 2 {
+				key, val := tail[i], tail[i+1]
+				switch key {
+				case "port":
+					if !isSet {
+						delete(syslog, "remote_port")
+						continue
+					}
+					n, err := strconv.Atoi(val)
+					if err != nil {
+						return errString("端口须为整数: " + val)
+					}
+					syslog["remote_port"] = n
+				case "facility":
+					if !isSet {
+						delete(syslog, "facility")
+						continue
+					}
+					if _, ok := model.FacilityCode(val); !ok {
+						return errString("非法 facility: " + val)
+					}
+					syslog["facility"] = val
+				case "severity":
+					if !isSet {
+						delete(syslog, "severity")
+						continue
+					}
+					switch val {
+					case "debug", "info", "warn", "error":
+					default:
+						return errString("severity 须为 debug|info|warn|error: " + val)
+					}
+					syslog["severity"] = val
+				default:
+					return errString("未知 system syslog host 参数: " + key)
+				}
+			}
 			return nil
 		}},
 	// system api tls cert-file|key-file <path>；system api tls self-signed regenerate

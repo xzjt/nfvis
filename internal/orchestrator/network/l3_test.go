@@ -19,6 +19,7 @@ type fakeL3 struct {
 	v4table    map[uint32]uint32 // swIfIndex → v4 table
 	addrs      map[uint32][]string
 	routes     map[uint32][]RouteEntry
+	routes6    map[uint32][]RouteEntry // v6 路由（与 v4 分表，镜像 VPP 语义）
 	bviBD      map[uint32]uint32
 	bviGone    []uint32
 	state      map[uint32]bool // 接口管理员状态（SetState 记录）
@@ -31,7 +32,8 @@ func newFakeL3() *fakeL3 {
 	return &fakeL3{
 		ifaces: map[string]uint32{"ens192": 1, "ens224": 2}, nextSub: 100, nextBVI: 900,
 		tables: map[uint32]bool{}, v4table: map[uint32]uint32{},
-		addrs: map[uint32][]string{}, routes: map[uint32][]RouteEntry{}, bviBD: map[uint32]uint32{},
+		addrs: map[uint32][]string{}, routes: map[uint32][]RouteEntry{},
+		routes6: map[uint32][]RouteEntry{}, bviBD: map[uint32]uint32{},
 		state: map[uint32]bool{}, cleared: nil,
 	}
 }
@@ -118,16 +120,35 @@ func (f *fakeL3) IPRouteAddDel(tableID uint32, prefix, nextHop string, add bool)
 		return f.err
 	}
 	if add {
-		f.routes[tableID] = append(f.routes[tableID], RouteEntry{Prefix: prefix, NextHop: nextHop})
+		entry := RouteEntry{Prefix: prefix, NextHop: nextHop}
+		if isV6Prefix(prefix) {
+			f.routes6[tableID] = append(f.routes6[tableID], entry)
+		} else {
+			f.routes[tableID] = append(f.routes[tableID], entry)
+		}
 	}
 	return nil
 }
 
-func (f *fakeL3) Routes(tableID uint32) ([]RouteEntry, error) {
+// Routes 按协议返回（镜像 VPP：ip_route_dump 不指定 IsIP6 时只返回 v4）。
+func (f *fakeL3) Routes(tableID uint32, isIP6 bool) ([]RouteEntry, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
+	if isIP6 {
+		return f.routes6[tableID], nil
+	}
 	return f.routes[tableID], nil
+}
+
+// isV6Prefix 判断前缀是否为 IPv6（含 ':' 即可）。
+func isV6Prefix(prefix string) bool {
+	for _, c := range prefix {
+		if c == ':' {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fakeL3) BviCreate() (uint32, error) {
@@ -345,5 +366,43 @@ func TestL3GatewayReuseExistingBVI(t *testing.T) {
 	}
 	if len(f.addrs[900]) != 1 || f.addrs[900][0] != "10.10.0.1/24" {
 		t.Fatalf("复用的 BVI 须配地址: %v", f.addrs[900])
+	}
+}
+
+// FR-NET-013（A-3，决策 #69）：VRF 运行态 FIB 必须同时包含 IPv4 与 IPv6 路由。
+// 守护点：VPP 的 ip_route_dump 不显式传 IsIP6 时只返回 v4——曾经的缺陷是
+// `show routes` / GET /vrfs/{n}/routes 看不到 v6 静态路由（v6 路由实际已下发）。
+func TestL3RoutesIncludeIPv6(t *testing.T) {
+	f := newFakeL3()
+	p := NewL3Provider(f)
+	vrf := model.Vrf{Name: "vs-v6",
+		L3Interfaces: []model.L3Interface{{Interface: "ens192", Addresses: []string{"2001:db8:155::1/64"}}},
+		Routes: []model.Route{
+			{Prefix: "0.0.0.0/0", NextHop: "10.0.0.254"},
+			{Prefix: "2001:db8:aaaa::/64", NextHop: "2001:db8:155::2"},
+			{Prefix: "::/0", NextHop: "2001:db8:155::2"},
+		}}
+	if err := p.ApplyVRF(context.Background(), vrf); err != nil {
+		t.Fatalf("ApplyVRF: %v", err)
+	}
+	rows, err := p.Routes(context.Background(), "vs-v6")
+	if err != nil {
+		t.Fatalf("Routes: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.Prefix] = r.NextHop
+	}
+	for _, want := range []string{"0.0.0.0/0", "2001:db8:aaaa::/64", "::/0"} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("运行态 FIB 缺少 %s（实际 %v）", want, got)
+		}
+	}
+	if got["2001:db8:aaaa::/64"] != "2001:db8:155::2" {
+		t.Fatalf("v6 下一跳错误: %v", got)
+	}
+	// 不得因合并 v4/v6 而产生重复项
+	if len(rows) != 3 {
+		t.Fatalf("期望 3 条路由，实际 %d: %+v", len(rows), rows)
 	}
 }

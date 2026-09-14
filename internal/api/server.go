@@ -235,6 +235,8 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/events", s.auth(s.handleEvents, schema.ClassReadOnly))
 	// M5-2：Prometheus 指标（契约 security: []，无鉴权，FR-SYS-005）
 	mux.Handle("GET "+APIPrefix+"/metrics", http.HandlerFunc(s.handleMetrics))
+	// V1 收尾：OpenAPI 规范运行时副本（契约 security: []，无鉴权，FR-API-002/决策 #69）
+	mux.Handle("GET "+APIPrefix+"/openapi.json", http.HandlerFunc(s.handleOpenAPISpec))
 
 	// M5-6：配置备份/恢复/恢复出厂（FR-OPS-004~007）
 	mux.Handle("GET "+APIPrefix+"/system/backup", s.auth(s.handleListBackups, schema.ClassReadOnly, "show system backup"))

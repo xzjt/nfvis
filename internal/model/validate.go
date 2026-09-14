@@ -235,6 +235,22 @@ func (v *validator) checkSystem(c Config) {
 			v.errf("system.syslog.level", "syslog level 必须为 debug|info|warn|error")
 		}
 	}
+	// FR-SYS-004：facility/severity 须为契约枚举内取值（失败在 commit 时逐条列出）
+	if s.Syslog != nil && s.Syslog.Severity != "" {
+		switch s.Syslog.Severity {
+		case "debug", "info", "warn", "error":
+		default:
+			v.errf("system.syslog.severity", "syslog severity 必须为 debug|info|warn|error")
+		}
+	}
+	if s.Syslog != nil && s.Syslog.Facility != "" {
+		if _, ok := FacilityCode(s.Syslog.Facility); !ok {
+			v.errf("system.syslog.facility", "syslog facility %q 不是合法的 RFC 5424 facility", s.Syslog.Facility)
+		}
+	}
+	if s.Syslog != nil && s.Syslog.RemotePort != 0 && (s.Syslog.RemotePort < 1 || s.Syslog.RemotePort > 65535) {
+		v.errf("system.syslog.remote_port", "远程 syslog 端口 %d 超出 1-65535", s.Syslog.RemotePort)
+	}
 	v.checkSystemLogin(s)
 }
 

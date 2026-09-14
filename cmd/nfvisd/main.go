@@ -89,7 +89,17 @@ func run() error {
 		return nil
 	}
 
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// FR-OPS-030 / FR-SYS-004（决策 #69）：日志级别由 committed 配置驱动（启动与每次 commit 重载）；
+	// 记录照常落本地（journald/stdout），并按配置转发远程 syslog。
+	logLevel := new(slog.LevelVar)
+	logLevel.Set(slog.LevelInfo)
+	syslogFwd := system.NewSyslogForwarder(system.SyslogConfig{})
+	defer func() { _ = syslogFwd.Close() }()
+	log := slog.New(system.SyslogHandler{
+		Inner: slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}),
+		Fwd:   syslogFwd,
+		App:   "nfvisd",
+	})
 	slog.SetDefault(log)
 
 	// 装配顺序即依赖顺序（骨架 §3.5）
@@ -130,6 +140,10 @@ func run() error {
 			"id": a.ID, "severity": a.Severity, "code": a.Code,
 			"message": a.Message, "source": a.Source, "state": a.State,
 		})
+		// FR-OPS-022（决策 #69）：告警变更同时转发远程 syslog（未配置目标时为空操作）。
+		// 转发失败不阻塞告警链路（原因经 SyslogForwarder.LastError 可查）。
+		_ = syslogFwd.Forward(alarmSyslogSeverity(a.Severity), "nfvisd", "alarm",
+			fmt.Sprintf("[%s] %s source=%s state=%s", a.Code, a.Message, a.Source, a.State))
 	})
 	// M4-3：计算编排（libvirt）。连接失败（libvirtd 未起/无权限）降级为 NoopCompute
 	// 并告警，不阻塞 nfvisd 启动；此时 VM 生命周期动作返回不可用。
@@ -238,6 +252,8 @@ func run() error {
 				return
 			}
 			applyTLSSettings(cfg, tlsMgr, log)
+			// V1 收尾（决策 #69）：日志级别与远程 syslog 转发随配置热更新
+			applySyslogSettings(cfg, logLevel, syslogFwd, log)
 			if cfg.System != nil && cfg.System.Syslog != nil {
 				if path, err := system.ApplyLogRetention(context.Background(), runCmd,
 					cfg.System.Syslog.RetentionDays, cfg.System.Syslog.MaxSizeMB); err != nil {
@@ -254,6 +270,13 @@ func run() error {
 	}
 	eng = engine
 	defer engine.Close()
+
+	// FR-OPS-030 / FR-SYS-004（决策 #69）：按 committed 配置初始化日志级别与远程转发
+	if cfg, err := engine.Committed(); err == nil {
+		applySyslogSettings(cfg, logLevel, syslogFwd, log)
+	} else {
+		log.Warn("读取 committed 配置失败，日志级别与远程转发采用缺省", "err", err)
+	}
 
 	// M5-6：配置备份/恢复/恢复出厂（FR-OPS-004~007）
 	sysOps := system.NewManager(system.DefaultConfig(), engine, imagesStore, api.VersionStr)
@@ -863,5 +886,57 @@ func applyTLSSettings(cfg model.Config, m *system.TLSManager, log *slog.Logger) 
 		} else {
 			log.Info("已生成自签证书", "path", m.CertPath())
 		}
+	}
+}
+
+// applySyslogSettings 按 committed 配置联动日志级别与远程 syslog 转发
+// （FR-OPS-030 级别可配 / FR-SYS-004 远程 syslog，决策 #69）。
+// 级别缺省 info；非法值由 commit 校验拦截，此处按 info 兜底。
+func applySyslogSettings(cfg model.Config, level *slog.LevelVar, fwd *system.SyslogForwarder, log *slog.Logger) {
+	var sc *model.SyslogConfig
+	if cfg.System != nil {
+		sc = cfg.System.Syslog
+	}
+
+	lvl := slog.LevelInfo
+	remote := system.SyslogConfig{}
+	if sc != nil {
+		switch sc.Level {
+		case "debug":
+			lvl = slog.LevelDebug
+		case "warn":
+			lvl = slog.LevelWarn
+		case "error":
+			lvl = slog.LevelError
+		}
+		remote = system.SyslogConfig{
+			Host: sc.RemoteHost, Port: sc.RemotePort,
+			Facility: sc.Facility, Severity: sc.Severity,
+		}
+	}
+	changed := level.Level() != lvl
+	level.Set(lvl)
+	fwd.Configure(remote)
+	if changed {
+		log.Info("日志级别已应用", "level", lvl.String())
+	}
+	if remote.Enabled() {
+		log.Info("远程 syslog 转发已配置",
+			"host", remote.Host, "port", remote.Port,
+			"facility", remote.Facility, "severity", remote.Severity)
+	}
+}
+
+// alarmSyslogSeverity 告警 severity → RFC 5424 severity（FR-OPS-022，决策 #69）。
+func alarmSyslogSeverity(sev string) int {
+	switch sev {
+	case "critical":
+		return 2 // crit
+	case "error":
+		return 3 // err
+	case "warning":
+		return 4 // warning
+	default:
+		return 6 // info
 	}
 }

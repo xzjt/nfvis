@@ -325,3 +325,32 @@ func TestValidateNatTopology(t *testing.T) {
 	}
 	mustErrContaining(t, Validate(c6), "action.interface", "单一 outside VRF")
 }
+
+// FR-SYS-004（决策 #69）：远程 syslog 的 facility/severity/port 须在契约枚举与范围内。
+func TestValidateSyslogRemoteFields(t *testing.T) {
+	base := validBase()
+	base.System.Syslog = &SyslogConfig{
+		RemoteHost: "10.0.0.9", RemotePort: 514, Facility: "local0", Severity: "warn", Level: "info",
+	}
+	mustNoErr(t, Validate(base))
+
+	// 非法 facility
+	bad := validBase()
+	bad.System.Syslog = &SyslogConfig{RemoteHost: "10.0.0.9", Facility: "bogus"}
+	mustErrContaining(t, Validate(bad), "system.syslog.facility", "facility")
+
+	// 非法 severity
+	bad2 := validBase()
+	bad2.System.Syslog = &SyslogConfig{RemoteHost: "10.0.0.9", Severity: "verbose"}
+	mustErrContaining(t, Validate(bad2), "system.syslog.severity", "severity")
+
+	// 端口越界
+	bad3 := validBase()
+	bad3.System.Syslog = &SyslogConfig{RemoteHost: "10.0.0.9", RemotePort: 70000}
+	mustErrContaining(t, Validate(bad3), "system.syslog.remote_port", "超出")
+
+	// facility 大小写不敏感（规范化由转发侧完成，校验须接受）
+	ok := validBase()
+	ok.System.Syslog = &SyslogConfig{RemoteHost: "10.0.0.9", Facility: "LOCAL7"}
+	mustNoErr(t, Validate(ok))
+}
