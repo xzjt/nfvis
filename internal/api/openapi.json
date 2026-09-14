@@ -3275,6 +3275,97 @@
         ]
       }
     },
+    "/interfaces/{name}/dpdk": {
+      "parameters": [
+        {
+          "description": "接口名**或 PCI 地址**（如 0000:13:00.0）。已被 DPDK 接管的网卡在内核中无 netdev，\n此时只能按 PCI 定位——而这正是解绑的常态。\n",
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "把物理网卡绑定到 DPDK 用户态驱动（缺省 vfio-pci）或解绑交还内核驱动。\n实现为 sysfs 标准流程（`driver_override` + `bind`/`unbind`）；\n绑定会**中断该网卡现有流量**，且该网卡不得正被 VPP 使用，故需 `confirm=true`。\n先前该能力在产品内完全缺失，实机需人工/安装期带外完成（决策 #72）。\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "confirm",
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "bound": {
+                    "description": "true = 绑定到 DPDK 驱动；false = 解绑交还内核",
+                    "type": "boolean"
+                  },
+                  "to_driver": {
+                    "description": "解绑语义（bound=false）下交还的内核驱动名。实测 nfvis-vm（内核 6.x + vfio-pci）：\n仅清空 driver_override 并 rescan **不足以**让内核重新探测原生驱动，\n建议显式给出（如 vmxnet3）；未给出且未自动绑定时返回可操作错误。\n",
+                    "type": "string"
+                  },
+                  "uio_driver": {
+                    "description": "绑定语义下缺省 vfio-pci",
+                    "enum": [
+                      "vfio-pci",
+                      "igb-uio"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "bound"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "driver": {
+                      "description": "操作后该网卡绑定的驱动",
+                      "type": "string"
+                    },
+                    "interface": {
+                      "type": "string"
+                    },
+                    "pci": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        },
+        "summary": "网卡 DPDK 驱动接管/解绑（FR-NET-001）",
+        "tags": [
+          "interfaces"
+        ]
+      }
+    },
     "/interfaces/{name}/sriov": {
       "parameters": [
         {

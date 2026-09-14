@@ -88,6 +88,7 @@ type cliExecutor struct {
 	sw         SoftwareRuntime             // 软件升级/电源/NTP（M5-7；nil = 报未接入）
 	hw         HardwareRuntime             // 硬件健康（M5-5；nil = 报未接入）
 	sriov      SRIOVSetter                 // SR-IOV VF 数量（M3-7；nil = 命令报未接入）
+	dpdk       DPDKSetter                  // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72）
 	kernel     ksys.KernelApplier          // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
 	tlsR       TlsRuntime                  // 证书管理（M5-8；nil = 报未接入）
 	vppRestart func(context.Context) error // request vpp restart（M5-9；nil = 报未接入）
@@ -140,6 +141,9 @@ func (x *cliExecutor) setHardware(h HardwareRuntime) { x.hw = h }
 
 // setSRIOV 注入 SR-IOV VF 设置能力（M5-9 收尾：request sriov 命令）。
 func (x *cliExecutor) setSRIOV(s SRIOVSetter) { x.sriov = s }
+
+// setDPDK 注入网卡 DPDK 驱动接管能力（FR-NET-001，决策 #72）。
+func (x *cliExecutor) setDPDK(d DPDKSetter) { x.dpdk = d }
 
 // setKernel 注入内核基线落地器（FR-SYS-014：request system kernel apply|rollback）。
 func (x *cliExecutor) setKernel(k ksys.KernelApplier) { x.kernel = k }

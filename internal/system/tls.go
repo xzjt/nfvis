@@ -292,3 +292,19 @@ func SortedIPs(ips []string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// EnsureSelfSigned 确保存在可用的服务证书：已存在则原样返回，缺失则生成自签证书。
+//
+// FR-SEC-004 / FR-API-001（决策 #72）：规格要求「REST over HTTPS（自签证书，可换）」，
+// 而原实现未配置证书时直接以明文 HTTP 提供服务。改为默认自签，明文需显式开启。
+// 返回 generated 表示本次新建了证书。
+func (m *TLSManager) EnsureSelfSigned(hostname string, ips []string) (info TlsInfo, generated bool, err error) {
+	if existing, ok := m.Info(); ok {
+		return existing, false, nil
+	}
+	info, err = m.Regenerate(hostname, ips)
+	if err != nil {
+		return TlsInfo{}, false, err
+	}
+	return info, true, nil
+}

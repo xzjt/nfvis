@@ -46,8 +46,9 @@ func run() error {
 	var (
 		dbPath    = flag.String("db", "nfvis.db", "SQLite 存储路径")
 		listen    = flag.String("listen", ":443", "API 监听地址")
-		tlsCert   = flag.String("tls-cert", "", "TLS 证书 PEM 路径（与 -tls-key 成对；缺省明文 HTTP，仅限开发）")
+		tlsCert   = flag.String("tls-cert", "", "TLS 证书 PEM 路径（与 -tls-key 成对；缺省自动生成自签证书）")
 		tlsKey    = flag.String("tls-key", "", "TLS 私钥 PEM 路径")
+		plaintext = flag.Bool("allow-plaintext", false, "允许明文 HTTP（仅限开发/测试；FR-SEC-004 默认 HTTPS）")
 		initAdmin = flag.String("init-admin-password", "", "首次启动引导 admin 用户的口令（缺省随机生成并打印一次）")
 		vppSock   = flag.String("vpp-sock", envOr("NFVIS_VPP_SOCK", network.DefaultSocket), "VPP binary API 套接字（FR-SYS-007）")
 		showVer   = flag.Bool("version", false, "输出版本后退出")
@@ -128,6 +129,8 @@ func run() error {
 	// V1 收尾（决策 #70）：声明式 interfaces[].sriov.vf_count 落地（同一实例亦供 API 命令式路径）
 	sriovProvider := network.NewSRIOVProvider()
 	netProvider.SetSRIOV(sriovProvider)
+	// FR-NET-001（决策 #72）：网卡 DPDK 驱动接管（sysfs driver_override/bind/unbind）
+	dpdkBinder := network.NewDPDKBinder()
 	// M3-8：恢复收敛的不可收敛项落点（GET /alarms）
 	alarms := network.NewAlarmStore()
 	netProvider.SetAlarms(alarms)
@@ -228,13 +231,30 @@ func run() error {
 		return string(out), err
 	}
 
-	// M5-8：证书管理（FR-SYS-011）。未显式给 -tls-cert 时，若已装管理证书则自动启用 HTTPS。
+	// M5-8 / FR-SEC-004（决策 #72）：证书管理（FR-SYS-011）。未显式给 -tls-cert 时：
+	// 已装管理证书 → 直接用；否则**自动生成自签证书**（FR-API-001「REST over HTTPS（自签证书，可换）」）。
+	// 仅显式 -allow-plaintext（开发/测试）才退化为明文——此前缺省即明文，与规格相反。
 	tlsMgr := system.NewTLSManager("", runCmd)
 	if *tlsCert == "" {
 		if _, ok := tlsMgr.Info(); ok {
 			*tlsCert, *tlsKey = tlsMgr.CertPath(), tlsMgr.KeyPath()
 			log.Info("使用已安装的管理证书启用 HTTPS", "cert", *tlsCert)
+		} else if !*plaintext {
+			info, generated, err := tlsMgr.EnsureSelfSigned(hostnameOr("nfvis"), system.ListenSANs(*listen))
+			switch {
+			case err != nil:
+				log.Error("自动生成自签证书失败——API 将以明文提供，请立即用 set system api tls 安装证书", "err", err)
+			case generated:
+				*tlsCert, *tlsKey = tlsMgr.CertPath(), tlsMgr.KeyPath()
+				log.Info("未提供证书，已自动生成自签证书并启用 HTTPS（FR-SEC-004）",
+					"cert", *tlsCert, "fingerprint", info.Fingerprint)
+			default:
+				*tlsCert, *tlsKey = tlsMgr.CertPath(), tlsMgr.KeyPath()
+			}
 		}
+	}
+	if *tlsCert == "" {
+		log.Warn("API 以明文 HTTP 提供服务（-allow-plaintext）：仅限开发/测试；生产请安装证书或用自签")
 	}
 
 	var eng *config.Engine // 供 OnCommitted 回调引用（NewEngine 之后赋值）
@@ -277,6 +297,11 @@ func run() error {
 	// FR-OPS-030 / FR-SYS-004（决策 #69）：按 committed 配置初始化日志级别与远程转发
 	if cfg, err := engine.Committed(); err == nil {
 		applySyslogSettings(cfg, logLevel, syslogFwd, log)
+		// FR-SEC-001（决策 #72）：管理面仅监听管理网卡——通配监听收敛到管理口地址
+		if addr, note := system.ResolveListenAddr(*listen, mgmtAddressOf(cfg), system.LocalAddrChecker()); note != "" {
+			log.Info(note, "listen", addr)
+			*listen = addr
+		}
 	} else {
 		log.Warn("读取 committed 配置失败，日志级别与远程转发采用缺省", "err", err)
 	}
@@ -487,6 +512,7 @@ func run() error {
 		LLDP:        &lldpController{net: netProvider},
 		State:       state.New(vppMgr.Runtime()),
 		SRIOV:       sriovProvider,
+		DPDK:        &dpdkController{b: dpdkBinder},
 		Kernel:      system.NewBaselineApplier(),
 		NAT:         &natSessionsController{net: netProvider},
 		Alarms:      &alarmController{store: alarms},
@@ -942,4 +968,48 @@ func alarmSyslogSeverity(sev string) int {
 	default:
 		return 6 // info
 	}
+}
+
+// hostnameOr 取主机名（失败时用兜底值）。
+func hostnameOr(fallback string) string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return fallback
+}
+
+// mgmtAddressOf 取 committed 的管理口地址（未配置返回 ""）。
+func mgmtAddressOf(cfg model.Config) string {
+	if cfg.System == nil || cfg.System.Management == nil {
+		return ""
+	}
+	return cfg.System.Management.Address
+}
+
+// dpdkController 把 network.DPDKBinder 适配为 api.DPDKSetter（FR-NET-001，决策 #72）。
+type dpdkController struct{ b *network.DPDKBinder }
+
+func (c *dpdkController) SetDPDKBound(ctx context.Context, ifname string, bound bool, driver string) (string, string, error) {
+	var pci string
+	var err error
+	if bound {
+		pci, err = c.b.Bind(ctx, ifname, driver)
+	} else {
+		// driver 在解绑语义下表示「交还给哪个内核驱动」（缺省由内核自动探测）
+		pci, err = c.b.Unbind(ctx, ifname, driver)
+	}
+	if err != nil {
+		return "", "", err
+	}
+	// 必须按 **PCI** 回读驱动：绑定到 DPDK 后内核网卡即消失，
+	// 按接口名解析会失败并把结果误报为「无驱动」（真机实测踩到）。
+	// 解绑后内核驱动重新探测需要一点时间，故轮询等待。
+	var cur string
+	for i := 0; i < 15; i++ {
+		if cur, _ = c.b.DriverOf(pci); cur != "" {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return pci, cur, nil
 }

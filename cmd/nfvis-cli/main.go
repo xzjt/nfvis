@@ -21,6 +21,8 @@ func main() {
 		source   = flag.String("source", "ssh", "接入源（ssh|console）")
 		cmdline  = flag.String("c", "", "执行多行命令后退出（换行分隔）")
 		showVer  = flag.Bool("version", false, "输出版本后退出")
+		caFile   = flag.String("ca", "", "服务端证书 PEM（HTTPS 校验；缺省尝试固定本机 nfvisd 证书）")
+		insecure = flag.Bool("insecure", false, "跳过 HTTPS 证书校验（仅限调试）")
 	)
 	flag.Parse()
 	if *showVer {
@@ -28,7 +30,7 @@ func main() {
 		return
 	}
 
-	client := cliclient.New(*server)
+	client := mustClient(*server, *caFile, *insecure)
 	fmt.Printf("连接 %s ...\n", *server)
 	if err := client.Login(*user, *password); err != nil {
 		fmt.Fprintf(os.Stderr, "%% 登录失败: %v\n", err)
@@ -92,4 +94,23 @@ func teardownScript(session *cli.Session) {
 		}
 	}
 	session.Logout()
+}
+
+// mustClient 构造 REST 客户端（FR-SEC-004：默认自签 HTTPS）。
+//
+// 校验策略：显式 -ca > 固定本机 nfvisd 证书（缺省，CLI 通常运行在一体机上）> 显式 -insecure。
+// 均不满足时仍按系统信任库校验（自签会失败并给出明确提示）。
+func mustClient(server, caFile string, insecure bool) *cliclient.Client {
+	opts := cliclient.TLSOptions{CAFile: caFile, Insecure: insecure}
+	if opts.CAFile == "" && !insecure && strings.HasPrefix(server, "https://") {
+		if _, err := os.Stat(cliclient.DefaultServerCertPath); err == nil {
+			opts.CAFile = cliclient.DefaultServerCertPath
+		}
+	}
+	c, err := cliclient.NewWithTLS(server, opts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "初始化客户端失败:", err)
+		os.Exit(1)
+	}
+	return c
 }
