@@ -1,0 +1,87 @@
+===== V1 收尾第四轮：网卡 DPDK 接管 / 管理面监听 / 默认 HTTPS 真机验证（决策 #72）=====
+环境：nfvis-vm（Ubuntu 26.04、内核 6.x、VPP v26.06-release、vmxnet3 网卡）
+日期：2026-09-14
+nfvisd：/tmp/nfvisd -db /tmp/nfvis.db -listen <见下>
+本文件为**原始输出摘录**，命令与结果一一对应。
+
+----- 1. FR-SEC-004：默认 HTTPS（自动自签）+ CLI 证书固定 -----
+（删除旧证书后以默认参数启动，不给 -tls-cert）
+nfvisd 日志：
+  "msg":"未提供证书，已自动生成自签证书并启用 HTTPS（FR-SEC-004）",
+    "cert":"/var/lib/nfvis/tls/server.crt",
+    "fingerprint":"2BA236DDA71D55F951E3EDBAA043D1C061D8DF17975F02D11A9DDACA9E9AA785"
+  "msg":"API 服务启动（HTTPS）","addr":"127.0.0.1:18443"
+
+证书文件：server.crt 0644 / server.key 0600
+SAN：DNS:nfvis, DNS:localhost, IP Address:127.0.0.1, IP Address:::1
+
+$ curl -sk -o /dev/null -w "%{http_code}" -X POST https://127.0.0.1:18443/api/v1/login -d '...'
+200
+$ curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18443/api/v1/metrics
+400                      # 明文请求被拒（不是明文服务）
+
+**CLI 证书固定**（未显式给 -ca/-insecure，自动固定本机守护进程证书）：
+$ nfvis-cli -server https://127.0.0.1:18443 -u admin -p ... -c "show version"
+连接 https://127.0.0.1:18443 ...
+NFViS 1.0.0-dev（M2：配置事务可用，网络底座 M3+ 接入）
+
+----- 2. FR-SEC-001：管理面仅监听管理网卡 -----
+先写入管理口地址（192.168.155.129/24，实际配在 ens160），再以**通配**监听启动：
+$ nfvisd -db /tmp/nfvis.db -listen :18443
+nfvisd 日志：
+  "msg":"监听地址 :18443 为通配，已收敛为管理口地址 192.168.155.129（FR-SEC-001：管理面仅监听管理网卡）",
+    "listen":"192.168.155.129:18443"
+  "msg":"API 服务启动（HTTPS）","addr":"192.168.155.129:18443"
+$ curl -sk -o /dev/null -w "%{http_code}" https://192.168.155.129:18443/api/v1/metrics
+200
+
+安全兜底（单测覆盖）：管理口地址**未配置在本机**时不收敛（否则 net.Listen 会因
+cannot assign requested address 直接启动失败）；显式指定其它监听地址时保留并告警。
+
+----- 3. FR-NET-001：网卡 DPDK 驱动接管（完整周期，真机）-----
+前置：ens192=0000:0b:00.0、ens224=0000:13:00.0 均绑 vfio-pci（DPDK 接管态，内核无 netdev）；
+停 VPP 释放设备后操作。
+
+**(a) 解绑 → 交还内核驱动（并重现内核网卡）**
+$ nfvis-cli -c "request interfaces 0000:13:00.0 unbind-dpdk to-driver vmxnet3 --yes"
+接口 0000:13:00.0（PCI 0000:13:00.0）已解绑并交还内核驱动，当前驱动 vmxnet3
+  sysfs: driver=vmxnet3, driver_override=(null)
+  ip link: ens224  DOWN  00:0c:29:a9:61:98        # 内核网卡回来了
+
+**(b) 绑定 → DPDK 驱动**
+$ nfvis-cli -c "request interfaces ens224 bind-dpdk --yes"
+接口 ens224（PCI 0000:13:00.0）已绑定到 DPDK 驱动，当前驱动 vfio-pci
+  sysfs: driver=vfio-pci, driver_override=vfio-pci
+  （ens224 作为内核网卡消失——符合 DPDK 接管语义）
+
+**(c) 幂等**：按 PCI 重复绑定直接返回 vfio-pci，无多余写入：
+$ nfvis-cli -c "request interfaces 0000:13:00.0 bind-dpdk --yes"
+接口 0000:13:00.0（PCI 0000:13:00.0）已绑定到 DPDK 驱动，当前驱动 vfio-pci
+
+**(d) 复位并核对 VPP**
+ens224 绑回 vfio-pci、ens192 保持 vfio-pci → 重启 VPP：
+  ens192  down / ens224  down / local0  down     # VPP 正常识别两张数据口
+
+**真机实测到的两点平台行为（实现中已处理）**：
+① **绑定后内核网卡即消失**，故已接管的网卡只能按 PCI 定位（解绑的常态）；
+   且绑定结果必须**按 PCI 回读驱动**——按接口名回读会失败并把结果误报为「无驱动」
+   （首轮真机即出现该误报，已在 `dpdkController` 改为按 PCI 轮询回读）。
+② **清空 driver_override + rescan 不足以让内核重新探测原生驱动**：实测解绑后设备停留在
+   `driver=none` 且 ens224 未出现；显式 `echo <pci> > .../vmxnet3/bind` 后立刻恢复。
+   故 `unbind-dpdk` 增 `to-driver <驱动名>`；未给出且未自动绑定时返回**可操作错误**
+   （不静默留下无驱动网卡）。
+
+----- 4. 回归：真机集成全量 -----
+$ make integration
+exit=0   PASS: 187
+ok  	github.com/xzjt/nfvis/test/integration	158.682s
+ok  	github.com/xzjt/nfvis/internal/orchestrator	0.011s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/compute	9.016s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/container	0.014s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/network	0.108s
+（较上轮 180 增 7：新增 dpdkbind 6 例 + cliclient TLS 1 例）
+
+----- 5. 环境恢复 -----
+ens192/ens224 均已在 vfio-pci、VPP 运行中（v26.06-release）且仅见 ens192/ens224/local0；
+nfvisd 未运行；/var/lib/nfvis/tls 自签证书保留（默认 HTTPS 所需，非测试残留）；
+/tmp 部署包与库文件已清理；引导镜像 alpine.qcow2 未动；无游离 domain。
