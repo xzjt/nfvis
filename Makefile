@@ -69,7 +69,7 @@ deb:
 	rm -rf build/deb
 	install -d build/deb/usr/bin build/deb/lib/systemd/system build/deb/usr/share/doc/nfvis build/deb/DEBIAN build/deb/usr/share/nfvis/installer
 	GOOS=linux GOARCH=$(ARCH) $(GO) build -trimpath -ldflags "-s -w -X github.com/xzjt/nfvis/internal/api.VersionStr=$(VERSION)" -o build/deb/usr/bin/nfvisd ./cmd/nfvisd
-	GOOS=linux GOARCH=$(ARCH) $(GO) build -trimpath -ldflags "-s -w" -o build/deb/usr/bin/nfvis-cli ./cmd/nfvis-cli
+	GOOS=linux GOARCH=$(ARCH) $(GO) build -trimpath -ldflags "-s -w -X github.com/xzjt/nfvis/internal/cli.Version=$(VERSION)" -o build/deb/usr/bin/nfvis-cli ./cmd/nfvis-cli
 	install -m 0644 deploy/nfvis.service build/deb/lib/systemd/system/nfvis.service
 	install -m 0644 docs/NFViS-openapi.yaml build/deb/usr/share/doc/nfvis/
 	install -m 0644 docs/NFViS-CLI命令树完整设计.md build/deb/usr/share/doc/nfvis/

@@ -1,105 +1,172 @@
-# NFViS — 网络功能虚拟化基础设施一体机软件
+# NFViS
 
-基于 Ubuntu 26.04 + VPP 26.06 + KVM/Libvirt 的 NFVi 一体机软件，Go 实现。
-JunOS 风格 CLI（`nfvis-cli`）+ REST API（OpenAPI 契约），当前处于 **M5（V1 收尾）已完成阶段**（M1~M4 已合并；M5 主体 M5-1~M5-11 与 T0-1/2/6/7 已完成并有真机证据，详见 `docs/M5-验收记录.md`、`docs/M5-11-端到端与基准报告.md`）。
+[![CI](https://github.com/xzjt/nfvis/actions/workflows/ci.yml/badge.svg)](https://github.com/xzjt/nfvis/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/Go-%E2%89%A5%201.26-00ADD8.svg)](go.mod)
+
+**网络功能虚拟化基础设施（NFVi）一体机软件**：基于 Ubuntu 26.04 + VPP 26.06 + KVM/libvirt + Docker，
+向前端提供 **JunOS 风格 CLI**（`nfvis-cli`）与 **REST API**（OpenAPI 契约），
+用于在一台服务器上编排 L2/L3 网络、虚拟机 VNF 与容器 VNF。
+
+> **当前状态：V1（首个发布版）**
+> 规格书 **109 条 FR**：**通过 100 / 未验 4 / 降级 3 / 移 V2 2**（口径与逐条证据见
+> [`docs/V1-验收检查表.md`](docs/V1-验收检查表.md)）；已定**决策 78 项**（规格书附录 A）；
+> `make check` 全绿。**已知限制请先读** [`docs/NFViS-CLI命令全表.md`](docs/NFViS-CLI命令全表.md) §4。
+
+---
+
+## 它能做什么
+
+| 能力域 | 内容 |
+|---|---|
+| **网络编排** | L2 虚拟交换机（VPP bridge-domain）+ BVI 网关；L3 虚拟交换机（VRF）+ 静态路由（v4/v6）；ACL；NAT44（跨 VRF）；QoS 限速（policer）；端口镜像（SPAN）；链路聚合（bond + LACP）；LLDP |
+| **计算编排** | VM VNF：vhost-user / SR-IOV vNIC、cloud-init（NoCloud seed ISO）、附加 virtio 数据盘、串口 console、快照、异常退出告警 |
+| **容器编排** | Docker 容器 VNF：cgroup CPU/内存限制、memif vNIC、env/command/args、重启策略 |
+| **镜像仓库** | 本地导入（`/data/incoming`）与 URL 拉取（**强制 sha256**）、引用计数、级联清理 |
+| **资源管理** | 大页池（2M/1G）与隔离核的**统一账本**（VPP 保留核优先扣减），VNF 按账本分配；内核启动基线（GRUB）托管 |
+| **配置事务** | candidate → `commit`（校验 + 下发 + **失败自动补偿**）→ committed；历史快照 `rollback`；`commit confirmed` 自锁保护；注释（`annotate`）；`save`/`load` JSON 往返 |
+| **运维** | 事件总线 `/events`（SSE）、Prometheus `/metrics`、告警、审计日志、日志（本地保留策略 + 远程 syslog）、tech-support 归档、core dump 收集、VPP pcap 抓包导出、备份/恢复/zeroize、软件升级/回退、TLS 热换证 |
+| **安全** | 本地用户 / class 权限矩阵 / 口令策略（PBKDF2）；Bearer Token；**默认 HTTPS**（自动自签 + 客户端证书固定）；管理口与数据面隔离强制；口令哈希全链路脱敏 |
+
+**交互示例**（配置事务 + commit 校验）：
+
+```
+nfvis> configure
+nfvis# edit virtual-switches vs-dmz
+nfvis# set type l2
+nfvis# set ports 1 interface ens224
+nfvis# set gateway ip 192.168.100.1/24
+nfvis# top
+nfvis# commit
+校验失败（candidate 保留）:
+  - virtual-switches[vs-dmz].gateway.ip: 地址与 l3-interface 冲突（FR-CFG-011）
+```
+
+---
+
+## 快速开始
+
+### 安装（deb）
+
+```bash
+git clone https://github.com/xzjt/nfvis.git && cd nfvis
+make deb VERSION=1.0.0                  # 需在 Linux 上执行（依赖 dpkg-deb）
+sudo dpkg -i build/nfvis_1.0.0_amd64.deb
+sudo systemctl start nfvis
+```
+
+### 首次登录
+
+```bash
+# 一次性 admin 口令仅打印一次
+journalctl -u nfvis --since "10 min ago" | grep 一次性口令
+
+nfvis-cli                               # 缺省即 https://127.0.0.1:443（零参数；自签证书自动固定）
+nfvis> show version
+```
+
+### 底座准备（**装完能用的前提**）
+
+```bash
+# 1) 内核基线：大页 + 隔离核（写 GRUB，需重启生效）
+sudo /usr/share/nfvis/installer/nfvis-baseline.sh --defaults && sudo reboot
+
+# 2) 业务网卡交 DPDK（管理口保持内核驱动）
+nfvis-cli -c "request interfaces ens224 bind-dpdk --yes"
+
+# 3) 起 VPP 并确认
+systemctl start vpp && vppctl show interface
+```
+
+> ⚠️ 安装器的 `postinst` **不会**自动应用内核基线（已知缺陷，见手册 §2.1），请按上面手工执行。
+> 完整流程见 **[用户手册](docs/NFViS-用户手册.md)**（安装 → 底座准备 → 首次登录 → 配置任务 → 日常运维 → 故障排查）。
+
+---
+
+## 文档
+
+| 文档 | 用途 |
+|---|---|
+| **[用户手册](docs/NFViS-用户手册.md)** | **从安装到使用的全流程**（含故障排查、已知限制） |
+| **[CLI 命令全表](docs/NFViS-CLI命令全表.md)** | 256 条命令，含权限、API 落点与**逐条真机实测状态** |
+| [系统产品需求与目标架构规格书](docs/NFViS-系统产品需求与目标架构规格书.md) | **需求真源**；附录 A = 决策记录（1~78），实现有疑问先查它 |
+| [CLI 命令树完整设计](docs/NFViS-CLI命令树完整设计.md) | CLI **契约**（命令树、补全、权限矩阵） |
+| [OpenAPI](docs/NFViS-openapi.yaml) | REST **契约**（`openapi.json` 随二进制嵌入，由 CI 守护同步） |
+| [Go 工程目录骨架设计](docs/NFViS-Go工程目录骨架设计.md) | 代码结构、依赖方向规则、里程碑 |
+| [V1 验收检查表](docs/V1-验收检查表.md) / [收尾待办](docs/V1-收尾待办.md) | 验收口径（109 条 FR 逐条）与剩余待办 |
+| [docs/evidence/](docs/evidence/) | 各轮**真机证据原始输出** |
+
+---
 
 ## 仓库结构
 
 ```
-├── docs/
-│   ├── NFViS-系统产品需求与目标架构规格书.md   # 需求基线（含决策记录附录 A）
-│   ├── NFViS-Go工程目录骨架设计.md             # 代码结构与里程碑（M1~M5）
-│   ├── NFViS-CLI命令树完整设计.md              # CLI 契约（命令树 + 补全细则）
-│   └── NFViS-openapi.yaml                      # REST API 契约（OpenAPI 3.0）
 ├── cmd/
-│   ├── nfvisd/                                 #   守护进程入口（装配/信号/优雅退出）
-│   └── nfvis-cli/                              #   CLI 入口（M2 后续任务）
-├── internal/                                   # 产品代码（M1 起按工程骨架布局）
-│   ├── model/                                  #   配置模型（单一数据源）+ 校验 + diff/merge + 资源账本
-│   ├── schema/                                 #   命令树 schema（补全/缩写/权限，CLI 与 nfvisd 编译期共享）
-│   ├── config/                                 #   事务引擎：candidate/commit confirmed/rollback + SQLite
-│   ├── orchestrator/                           #   底座适配接口（govpp/libvirt/docker 实现于 M3/M4）
-│   ├── aaa/                                    #   本地用户/class/口令策略/Token（M2）
-│   └── api/                                    #   REST server（Bearer 中间件/统一错误，M2 已合并）
-├── Makefile                                    # make check = vet + 覆盖率门槛 + 原型全绿
-└── prototype/                                  # CLI 补全薄演示（引用 internal/schema，非产品代码）
+│   ├── nfvisd/           守护进程（装配 / 信号 / 恢复收敛 / 优雅退出）
+│   └── nfvis-cli/        CLI 入口（薄客户端；行编辑/补全/提示符在 internal/cli）
+├── internal/
+│   ├── model/            配置模型（单一真源）+ 校验 + diff/merge + 资源账本
+│   ├── schema/           命令树 schema（补全/缩写/权限；CLI 与 nfvisd 编译期共享）
+│   ├── config/           事务引擎（candidate / commit confirmed / rollback + SQLite）
+│   ├── orchestrator/     底座适配（govpp / libvirt / Docker），Provider 接口隔离
+│   ├── api/              REST server + CLI 执行器 + 契约守护测试
+│   ├── aaa/              本地用户 / class / 口令策略 / Token
+│   ├── system/           宿主交互（内核基线、TLS、备份、诊断、日志）
+│   ├── cli/ events/ metrics/ images/ state/
+│   └── archtest/         依赖方向守护（CI 执行）
+├── deploy/               systemd 单元、deb 打包脚本、安装器（内核基线）
+├── contrib/
+│   ├── dev-vm/           开发/验证虚机初始化脚本
+│   ├── hooks/            pre-commit 门禁（git config core.hooksPath contrib/hooks）
+│   └── scripts/          CI 守护脚本 + CLI 全功能冒烟（cli-fulltest.sh）
+├── test/
+│   ├── integration/      真机集成（build tag integration，需 VPP/libvirt）
+│   └── e2e/              端到端验收（build tag e2e，经 HTTP API）
+├── prototype/            CLI 补全薄演示（引用 internal/schema；非产品代码）
+└── docs/                 见上表
 ```
 
-## 新成员阅读顺序
+**依赖方向**（CI 强制，`internal/archtest` 守护）：CLI 前端**不得** import 事务引擎/API/编排/AAA；
+底座交互（govpp/libvirt/Docker）必须藏在 Provider 接口后，单测用 mock。
 
-1. **规格书** — 重点 §1.2 范围摘要与附录 A 决策记录（29 项已定决策，不要重新发明）
-2. **工程骨架** — 依赖方向规则、底座 Provider 接口、M1~M5 里程碑
-3. **命令树 + OpenAPI** — CLI 与 API 一一对应，任何一侧改动必须同步另一侧
-4. **原型** — `cd prototype && go run .` 感受补全语义（命令树引用 `internal/schema`）；事务全流程走 `nfvis-cli`
+---
 
-## 快速开始（原型）
+## 开发
+
+要求 **Go ≥ 1.26**。M1/M2 相关开发可在任意平台（底座 mock）；M3/M4 需 Linux + VPP/libvirt/Docker。
 
 ```bash
-cd prototype
-go run .                       # 交互：? 列候选 / Tab 补全 / 缩写消歧
+make check          # 提交前/CI 统一入口：vet + 全量测试 + 覆盖率门槛 + 依赖方向 + 契约守护 + 原型全绿
+make integration    # 真机集成（需 VPP socket；缺省自动跳过，CI 不跑）
+make e2e            # 端到端验收（需 NFVIS_API 指向已装环境）
+make deb            # 打包 deb（需 dpkg-deb）
 ```
 
-产品代码（M1 事务引擎已合并；M2 API/AAA 开发中，纯 Go + SQLite，任意平台可开发验证）：
+一次性配置：`git config core.hooksPath contrib/hooks`（启用 pre-commit 门禁）。
 
-```bash
-go build ./... && go vet ./...
-make check                     # vet + 覆盖率门槛（config/model/schema ≥ 70%）+ 原型全绿
+**质量门禁（四层）**：`AGENTS.md`（AI/开发会话规则）→ pre-commit 钩子 → CI（每次 push/PR）→
+每日巡检（ZCode 定时任务，产出进 `docs/reviews/`）。
 
-# 启动守护进程（首次启动自动引导 admin，随机口令打印一次）
-go run ./cmd/nfvisd -listen :8443 -db /tmp/nfvis.db
-```
+> 本仓库把「契约」当作**可执行的约束**：`internal/api` 与 `internal/archtest` 里有多组守护测试
+> （OpenAPI↔路由、CLI 语句↔模型、CLI 命令覆盖、依赖方向、决策条数、`openapi.json` 同步），
+> 契约漂移会直接让 `make check` 失败。
 
-要求 Go ≥ 1.26。M1/M2 开发在任意平台进行（底座用 mock）；M3/M4 需要 Linux + VPP/libvirt 环境（统一开发虚机，待建）。
+---
 
-## 开发与验证环境
+## 已知限制
 
-| 环境 | 配置 | 用途 |
-|---|---|---|
-| 本地 | Win10 + Git Bash + WSL | M1/M2 日常开发、单元测试（纯 Go，mock Provider） |
-| nfvis-vm | 6C / 6G / 100G / 3×vmxnet3，Ubuntu 26.04 Server，`ssh root@nfvis-vm`（密钥登录） | M3/M4 集成验证（VPP / libvirt / Docker） |
+V1 的降级/未验项与**经 CLI 暂不可用的语句**统一登记在
+[`docs/NFViS-CLI命令全表.md`](docs/NFViS-CLI命令全表.md) §4 与
+[`docs/V1-验收检查表.md`](docs/V1-验收检查表.md) §5。常见几条：
 
-**虚机初始化**（脚本幂等，失败项修复后可重跑）：
+- **SR-IOV / LLDP 邻居**需对应硬件与对端（验证环境不具备；代码与单测齐备）；
+- **快照 create/rollback 需关机态**（对运行中域回滚会静默重启该 VM，故显式拒绝）；
+- **容器镜像的目录名须等于 Docker tag**，否则下发报 `docker: not found`；
+- `show vpp runtime` 未接入（govpp runtime 解码受限，CLI 明确提示而非静默空值）；
+- 8 条配置语句经 CLI 暂不可用（含 `set system login user … password …`，建用户请走 REST API）。
 
-```bash
-scp contrib/dev-vm/provision.sh root@nfvis-vm:
-ssh root@nfvis-vm 'PROXY=http://192.168.155.1:2333 ./provision.sh'
-```
+---
 
-- 安装内容：基础工具链、Go 1.26（固定版本 tarball）、VPP 26.06（fd.io 仓库，codename 缺失自动回退 noble）、libvirt/QEMU、Docker、1G×4 大页、`/opt/nfvis/{src,images,incoming,backup}` 工作目录。
-- **代理 `192.168.155.1:2333`（http/socks5）按需启用**：设置 `PROXY=http://192.168.155.1:2333` 环境变量即生效（apt/go/docker 统一走它），不设置则直连。
-- 大页需 reboot 生效；VPP 安装后设为不自启（避免抢占网卡），验证时手动 `systemctl start vpp`。
-- 日志在虚机 `/var/log/nfvis-provision.log`。
+## 许可
 
-**换行符**：`.gitattributes` 已统一仓库内 LF，Windows 端无需额外配置；发现 diff 全脏时执行 `git add --renormalize .`。
-
-## 协作规则
-
-1. **契约先行**：`NFViS-openapi.yaml` 与命令树文档是契约。改接口先改文档（MR 评审通过），再改代码；CLI 命令与 API 端点必须保持附录 B 的映射关系。
-2. **需求可追溯**：PR 描述必须引用 FR-xxx 需求编号（见规格书各章需求表）。
-3. **分支模型**：`main` 保护；开发走 feature 分支 + MR 评审；MR 必须包含单元测试，`internal/schema` 与事务引擎覆盖率门槛 ≥ 70%。
-4. **决策记录**：任何偏离规格书的实现决策，先在附录 A 追加决策行并评审，再动代码。
-
-## 监控与质量门禁（四层）
-
-> 用 ZCode 开发的同事：无需安装任何插件。仓库已随附 workspace 配置——`AGENTS.md`（项目规则，打开仓库自动加载）、`.zcode/commands/contract-check`（契约一致性自检）与 `.zcode/commands/fr <编号>`（查需求定义与实现要点），克隆后在输入框输入 `/` 即可使用。本地一次性配置只有钩子启用：`git config core.hooksPath contrib/hooks`。
->
-> **推荐个人启用插件**：`superpowers`（Settings → Plugin Management → Discover）。它提供 TDD、系统化调试、计划编写/执行、完成前验证等方法论技能，与 M1 事务引擎的开发方式直接匹配。注意：插件属于个人配置（user scope），仓库无法强制分发；仓库的契约/门禁规则不依赖它，未安装也不影响合规——但团队建议统一启用，保持会话行为一致。
->
-> **推荐个人配置 MCP**：`context7`（文档实时查询）。M3/M4 对接 govpp/libvirt/VPP 插件等版本敏感 API 时，会话应先查 context7 核对官方文档再写调用代码；使用约定见 `AGENTS.md` 的「外部文档查询」一节（含垂直库查不到时的降级规则）。
-
-| 层 | 机制 | 拦截时机 | 说明 |
-|---|---|---|---|
-| 1 | `AGENTS.md` | AI/开发会话启动时 | 项目规则持久化：契约先行、FR 追溯、历史踩坑清单，任何会话自动遵守 |
-| 2 | pre-commit 钩子 | 每次提交 | `git config core.hooksPath contrib/hooks`（克隆后执行一次）；拦截未格式化/vet/测试失败/文档未决标记 |
-| 3 | CI（`.github/workflows/ci.yml`） | 每次 push/MR | 构建 + vet + 测试覆盖率 + OpenAPI 可解析 + 无未决标记；用 GitLab/Gitee 时按此语义迁移 |
-| 4 | 每日巡检（ZCode 定时任务） | 每天 09:00 | 自动 review 新提交、契约漂移检查、跑测试；机械问题直接修复提交（`chore(巡检):`），实质问题写入 `docs/reviews/` 并报告 |
-
-## 里程碑与分工（详见工程骨架 §5）
-
-| 里程碑 | 内容 | 前置 |
-|---|---|---|
-| M1 | 配置模型 + 命令树 schema + 事务引擎（SQLite，mock Provider） | 无，可立即开工 |
-| M2 | REST API + AAA + nfvis-cli 前端（接 nfvisd） | M1 |
-| M3 | 网络编排器（govpp：BD/VRF/BVI/ACL/NAT/SPAN/QoS/bond/LLDP）+ 恢复收敛 | M1 |
-| M4 | 计算编排器（libvirt：vhost-user/SR-IOV/快照/console）+ Docker + 镜像仓库 | M1 |
-| M5 | 事件/监控/审计收尾、deb 打包、e2e 与验收基准 | M2~M4 |
+[MIT](LICENSE)
