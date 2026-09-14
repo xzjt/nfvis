@@ -108,7 +108,7 @@ request virtual-machine-functions <name>
   ├─ stop                                           # POST /vmf/{n}:stop
   ├─ restart
   ├─ console                                        # 进入串口（Ctrl-] 退出；POST /vmf/{n}/console）
-  ├─ snapshot create|rollback|delete [name <name>]
+  ├─ snapshot create|rollback|delete [name <name>]   # create/rollback 需关机态（运行中 409，决策 #75）
   └─ delete                                         # S；CLI 交互确认 "Delete VNF 'x'? [yes,no]"
 request container-functions <name>
   ├─ start | stop | restart

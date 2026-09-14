@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 type fakeSnapshots struct {
@@ -160,3 +162,50 @@ func TestSnapshotErrors(t *testing.T) {
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }
+
+// TestSnapshotRequiresPoweredOff 覆盖决策 #75：快照 create/rollback 需关机态，
+// 运行中返回 409 且**不得**触达编排器（否则真实底座会重启该 VM）。
+func TestSnapshotRequiresPoweredOff(t *testing.T) {
+	fs := &fakeSnapshots{}
+	fvm := newFakeVM()
+	ts := newTestServerOpts(t, Options{VM: fvm, VMSnapshots: fs})
+	token := loginAdmin(t, ts)
+	seedVMPool(t, ts, token)
+	cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		vmBody("fw-vm"), map[string]string{"X-NFVIS-Auto-Commit": "true"})
+
+	base := ts.URL + APIPrefix + "/virtual-machine-functions/fw-vm/snapshots"
+	for _, state := range []string{orchestrator.VMStateRunning, orchestrator.VMStatePaused, orchestrator.VMStateCrashed} {
+		fvm.states["fw-vm"] = state
+		// 创建
+		status, _, data := cfgRequest(t, http.MethodPost, base, token, map[string]any{"name": "s1"}, nil)
+		if status != http.StatusConflict {
+			t.Errorf("状态 %s 创建快照应 409: %d %s", state, status, data)
+		}
+		if !strings.Contains(string(data), "需先关机") {
+			t.Errorf("状态 %s 应提示先关机: %s", state, data)
+		}
+		// 回滚
+		status, _, data = cfgRequest(t, http.MethodPost, base+"/s1:rollback", token, nil, nil)
+		if status != http.StatusConflict {
+			t.Errorf("状态 %s 回滚应 409: %d %s", state, status, data)
+		}
+	}
+	if len(fs.created) != 0 || len(fs.revert) != 0 {
+		t.Fatalf("运行中不得触达编排器: created=%v revert=%v", fs.created, fs.revert)
+	}
+
+	// 关机态放行（回归：不得把正常路径一起拦掉）。
+	fvm.states["fw-vm"] = orchestrator.VMStateShutoff
+	status, _, data := cfgRequest(t, http.MethodPost, base, token, map[string]any{"name": "ok1"}, nil)
+	if status != http.StatusAccepted {
+		t.Fatalf("关机态创建快照应 202: %d %s", status, data)
+	}
+	status, _, data = cfgRequest(t, http.MethodPost, base+"/ok1:rollback", token, nil, nil)
+	if status != http.StatusAccepted {
+		t.Fatalf("关机态回滚应 202: %d %s", status, data)
+	}
+	if len(fs.created) != 1 || len(fs.revert) != 1 {
+		t.Fatalf("关机态应触达编排器: created=%v revert=%v", fs.created, fs.revert)
+	}
+}

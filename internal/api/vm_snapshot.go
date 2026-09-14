@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 // SnapshotRow 快照元数据（契约 Snapshot）。
@@ -26,6 +28,7 @@ type VMSnapshotRuntime interface {
 	SnapshotDelete(ctx context.Context, domain, name string) error
 }
 
+// snapshotTarget 解析目标 VM：校验编排已装配、VM 存在。ok=false 时已写响应。
 func (s *Server) snapshotTarget(w http.ResponseWriter, r *http.Request) (name string, ok bool) {
 	name = r.PathValue("name")
 	if s.vmSnapshots == nil {
@@ -42,6 +45,27 @@ func (s *Server) snapshotTarget(w http.ResponseWriter, r *http.Request) (name st
 		return "", false
 	}
 	return name, true
+}
+
+// requireSnapshotPoweredOff 快照 create/rollback 需关机态（决策 #75，FR-CMP-015）。
+// 依据：对运行中域 `DomainRevertToSnapshot(flags=0)` 实测**不报错但会替换 QEMU 进程**
+// （相当于强制重启该 VM）——静默重启生产 VNF 不可接受，故与 FR-CMP-012「关机态生效」一致地显式拒绝。
+// 状态查询失败时不阻断（与既有 handlePutVM 的保守取向一致，避免因瞬时查询失败禁用只读性差的操作）。
+func (s *Server) requireSnapshotPoweredOff(w http.ResponseWriter, r *http.Request, name, op string) bool {
+	if s.vm == nil {
+		return true
+	}
+	state, err := s.vm.VMState(r.Context(), name)
+	if err != nil {
+		return true
+	}
+	switch state {
+	case orchestrator.VMStateRunning, orchestrator.VMStatePaused, orchestrator.VMStateCrashed:
+		writeError(w, http.StatusConflict, "CONFLICT",
+			fmt.Sprintf("VM %s 当前为 %s，快照 %s 需先关机（FR-CMP-015，决策 #75）", name, state, op), nil)
+		return false
+	}
+	return true
 }
 
 // handleListSnapshots GET /virtual-machine-functions/{name}/snapshots
@@ -80,6 +104,9 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", msg, nil)
 		return
 	}
+	if !s.requireSnapshotPoweredOff(w, r, name, "create") {
+		return
+	}
 	if err := s.vmSnapshots.SnapshotCreate(r.Context(), name, in.Name, in.Description); err != nil {
 		s.auditSnapshot(r, "create", name, in.Name, err)
 		s.snapshotError(w, err)
@@ -99,6 +126,9 @@ func (s *Server) dispatchSnapshotPost(w http.ResponseWriter, r *http.Request) {
 	snap, action, cut := strings.Cut(tail, ":")
 	if !cut || snap == "" || action != "rollback" {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "未知的快照动作路径: "+tail, nil)
+		return
+	}
+	if !s.requireSnapshotPoweredOff(w, r, name, "rollback") {
 		return
 	}
 	if err := s.vmSnapshots.SnapshotRevert(r.Context(), name, snap); err != nil {
