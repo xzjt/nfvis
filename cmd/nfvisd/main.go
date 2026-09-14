@@ -408,6 +408,10 @@ func run() error {
 		for _, e := range netProvider.CheckVnfPorts(rctx, cfg) {
 			log.Warn("vNIC 状态检查", "err", e)
 		}
+		// V1 收尾（决策 #73）：物理业务口链路状态告警（FR-NET-003）
+		for _, e := range netProvider.CheckInterfaceLinks(rctx, cfg) {
+			log.Warn("物理口链路检查", "err", e)
+		}
 		log.Info("恢复收敛完成")
 	}
 	// M4-10：运行态异常退出巡检（FR-CMP-017/022）——VM crashed / 容器异常退出 → critical 告警；
@@ -431,6 +435,9 @@ func run() error {
 					}
 					for _, e := range netProvider.CheckVnfPorts(ctx, cfg) {
 						log.Warn("vNIC 状态巡检", "err", e)
+					}
+					for _, e := range netProvider.CheckInterfaceLinks(ctx, cfg) {
+						log.Warn("物理口链路巡检", "err", e)
 					}
 				}
 				recoveryMu.Unlock()
