@@ -1004,13 +1004,19 @@ func (x *cliExecutor) systemZeroize(user string, raw []string) string {
 }
 
 // copyFile 复制文件（备份导出用；目标目录须已存在）。
+// copyFile 复制文件到 dst。
+//
+// **必须以 0600 创建**：本函数当前唯一调用方是 `request system configuration backup to <path>`
+// 的导出，而归档内含 `password_hash`（决策 #70 已记录口令哈希不得外泄）。
+// 原先用 os.Create（0666&~umask → 通常 0644），使导出件**比自动命名的归档（0600）更宽松**，
+// 本地任意用户可读到口令哈希——与 FR-SEC-007 的既有例外口径（0600、仅 super-user）矛盾。
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}

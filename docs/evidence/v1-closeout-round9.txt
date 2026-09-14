@@ -1,0 +1,91 @@
+===== V1 收尾第九轮：编写《用户手册》时发现 3 处缺陷（决策 #77）=====
+环境：nfvis-vm（Ubuntu 26.04、VPP v26.06-release、libvirt 12.0.0）
+日期：2026-09-14/15
+nfvisd：/tmp/nfvisd -db /tmp/manual.db -listen 127.0.0.1:18443 -init-admin-password … -allow-plaintext
+背景：生成《NFViS 用户手册（安装→使用全流程）》，为保证手册中命令与输出**真实可用**，
+      对涉及的安装/使用步骤逐条真机验证，发现下列 3 处缺陷。
+本文件为**原始输出摘录**。
+
+----- 1.【安全，已修】备份导出件权限 0644，且归档含口令哈希（决策 #77）-----
+$ nfvis-cli -c "request system configuration backup to /var/lib/nfvis/backup/pre-change.json"
+  已导出到: /var/lib/nfvis/backup/pre-change.json
+$ ls -l /var/lib/nfvis/backup/
+  -rw------- 1 root root 682 … nfvis-backup-20260914T171353Z.json     ← 自动命名：0600
+  -rw-r--r-- 1 root root 682 … pre-change.json                        ← to <path> 导出：0644 ❌
+$ grep -o "password_hash" /var/lib/nfvis/backup/pre-change.json
+  "password_hash": "pbkdf2$sha256$600000$e9e4CZfFnfvf2lUXGYRraA$8gAkZOr9BuvI8KaT+exDVxwjL+iYULpk7OkeRdPCEJ0"
+
+判定：导出件对**本地任意用户可读**且内含口令哈希 → 越权获取口令哈希（PBKDF2）。
+与决策 #56 / FR-SEC-007 记录的既有例外口径（0600、仅 super-user）矛盾。
+
+根因：
+  internal/system/backup.go:115   os.WriteFile(path, …, 0o600)        ← 自动命名归档 0600 ✓
+  internal/api/cli_compute_oper.go copyFile()：os.Create(dst)         ← 0666&~umask → 0644 ✗
+  （copyFile 当前唯一调用方就是该导出路径）
+
+修复：copyFile 改 os.OpenFile(dst, O_WRONLY|O_CREATE|O_TRUNC, 0o600)。
+真机复验：
+$ nfvis-cli -c "request system configuration backup to /tmp/exported-backup.json"
+  已导出到: /tmp/exported-backup.json
+$ ls -l /tmp/exported-backup.json
+  -rw------- 1 root root 1278 … /tmp/exported-backup.json              ← 0600 ✓
+$ grep -c password_hash /tmp/exported-backup.json
+  1                                                                    ← 仍含哈希，故 0600 必要
+
+红-绿（Linux）：
+  撤修复 → --- FAIL: TestCopyFileExportsSecretsAs0600
+              备份导出件权限应为 0600，实际 0644（归档含口令哈希，不得对他人可读）
+  恢复后 → ok
+
+注：该测试在 **Windows 跳过**（不实现 POSIX 权限位，Go 一律报 0666），已加 runtime.GOOS 守卫。
+
+----- 2.【未修】postinst 的内核基线代码块不可达 —— 安装期并未应用内核基线 -----
+$ grep -n "exit 0\|^# [0-9])\|BASELINE_SH" deploy/debian/postinst
+  41:# 4) 运行依赖探测（仅提示）
+  50:# 5) systemd 单元（FR-OPS-013：Restart=always + WatchdogSec）
+  62:log "完成"
+  63:exit 0
+  65:# 4) 内核启动基线（FR-SYS-014 / FR-CMP-005）：无基线则按机器规格应用保守默认（安装期预置），
+  67:BASELINE_SH=/usr/share/nfvis/installer/nfvis-baseline.sh
+  …
+  （文件共 80 行）
+
+判定：`exit 0`（第 63 行）之后的内核基线块（第 65–80 行）**永远不会执行**：
+      · 未调用 `nfvis-baseline.sh --check`，也未调用 `--defaults`；
+      · 与同文件注释「安装期预置」及 Makefile 注释「postinst 做安装期底座优化校验」的表述不符；
+      · 段落编号也重复（两个 "4)"），疑为编辑/合并事故。
+影响：按文档预期「装完即有大页基线」不成立；用户须手工执行（手册 §3.1 已改为手工步骤并显式标注）。
+处置：**未修**（属安装器行为变更，且修法有两种：把基线块移到 exit 之前 / 或删掉死代码并明确文档化），
+      登记待办 + 手册显式告警。
+
+----- 3.【未修】nfvis-cli 默认连接地址与守护进程默认不匹配 -----
+$ nfvis-cli -h | grep -A0 server
+  -server string   nfvisd 地址 (default "http://127.0.0.1:8443")
+$ grep -n '"listen"' cmd/nfvisd/main.go
+  48:  listen = flag.String("listen", ":443", …)
+$ grep -n 'NFVIS_LISTEN' deploy/nfvis.service
+  Environment=NFVIS_LISTEN=:443
+
+判定：默认参数下 CLI 指向 **明文 8443**，而 nfvisd 默认在 **:443 以 HTTPS** 提供服务
+      （决策 #72：未提供证书则自动生成自签并启用 HTTPS）→ **默认参数连不上**。
+      e2e 测试亦靠显式 `NFVIS_API` 绕过，未见任何文档说明该差异。
+影响：「装完即用」的第一步（CLI 连接）默认失败，用户须显式 `-server https://127.0.0.1:443`。
+处置：**未修**（改默认值涉及明文默认策略与既有调用方，宜与 FR-SEC-001/004 一并决策）；
+      手册 §4.3 已显式标注；登记待办。
+
+----- 4. 手册其余内容的真机核验（通过）-----
+$ nfvis-cli -c "request system configuration backup to …"            → 已导出（见 §1）
+$ curl -sk https://127.0.0.1/api/v1/openapi.json                     → HTTP 200
+$ curl -sk -X POST https://127.0.0.1/api/v1/login …                  → HTTP 200（取 token 可用）
+$ curl -sk -X POST https://127.0.0.1/api/v1/system/login-users \
+        -d '{"name":"ops","password":"…","class":"operator"}'        → HTTP 201
+$ curl -sk -X POST https://127.0.0.1/api/v1/login -d '{…"ops"…}'     → HTTP 200（新用户可登录）
+$ nfvis-cli -c "show users"                                          → 列出 admin/super-user、ops/operator
+$ nfvis-cli -c "configure\nset system login user ops password … class operator"
+  %% 未知语句: "password"    ← 已知缺陷（命令全表 §4⑦），手册改为 REST 建用户
+$ nfvis-cli -c "configure\nset container-functions ct-1 args \"sleep 3600\""
+  [ok] container-functions ct-1 args "sleep 3600"     ← 引号包裹的多词取值可用（args）
+
+----- 5. 环境恢复 -----
+nfvisd 已停；测试 db 与 /tmp 临时件已清；/var/lib/nfvis/backup 已清空；
+images 恢复基线（alpine.qcow2 + index.json）；无 domain/VM；VPP 运行中且无 bridge-domain 残留。

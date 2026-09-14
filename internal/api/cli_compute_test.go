@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -462,5 +463,41 @@ func writeImageIndex(t *testing.T, s *images.Store, name string) {
 	}
 	if _, err := s.ImportIncoming(name, images.TypeVM, inc, ""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestCopyFileExportsSecretsAs0600 覆盖决策 #77（安全）：
+// copyFile 当前唯一调用方是 `request system configuration backup to <path>` 的导出，
+// 而备份归档内含 password_hash（决策 #70 已认定口令哈希不得外泄）。
+// 原先用 os.Create 落 0644，使导出件**比自动命名的归档（0600）更宽松** →
+// 本地任意用户可读到口令哈希。本测试锁定 0600。
+func TestCopyFileExportsSecretsAs0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows 不实现 POSIX 权限位（Go 一律报 0666），本断言只在类 Unix 上有意义。
+		t.Skip("跳过：Windows 无 POSIX 权限位")
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.json")
+	dst := filepath.Join(dir, "exported.json")
+	body := []byte(`{"config":{"login":{"users":[{"password_hash":"pbkdf2$sha256$..."}]}}}`)
+	if err := os.WriteFile(src, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFile(src, dst); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+	fi, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("备份导出件权限应为 0600，实际 %04o（归档含口令哈希，不得对他人可读）", perm)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(body) {
+		t.Fatalf("内容应完整复制:\n got=%q\nwant=%q", got, body)
 	}
 }
