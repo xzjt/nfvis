@@ -89,3 +89,44 @@ $ nfvis-cli -c "configure\nset container-functions ct-1 args \"sleep 3600\""
 ----- 5. 环境恢复 -----
 nfvisd 已停；测试 db 与 /tmp 临时件已清；/var/lib/nfvis/backup 已清空；
 images 恢复基线（alpine.qcow2 + index.json）；无 domain/VM；VPP 运行中且无 bridge-domain 残留。
+
+----- 6.【已修】nfvis-cli 缺省连接地址与守护进程缺省对齐（决策 #78）-----
+现象（修复前）：
+$ nfvis-cli -h | grep -A0 server
+  -server string   nfvisd 地址 (default "http://127.0.0.1:8443")     ← 明文、另一端口
+$ grep -n '"listen"' cmd/nfvisd/main.go
+  48:  listen = flag.String("listen", ":443", …)                     ← 守护进程缺省
+$ grep -n NFVIS_LISTEN deploy/nfvis.service
+  Environment=NFVIS_LISTEN=:443
+→ 默认参数连不上：「装完即用」第一步必然失败。
+
+修复后真机验证（全缺省 nfvisd：`:443` + 自动自签 HTTPS；先删 /var/lib/nfvis/tls 验证自动生成）：
+$ setsid /tmp/nfvisd -db /tmp/manual.db -init-admin-password … &   # 不给 -listen，即 :443
+  {"msg":"API 服务启动（HTTPS）","addr":":443"}
+$ ls -l /var/lib/nfvis/tls/
+  -rw-r--r-- server.crt   -rw------- server.key                    ← 自动生成
+$ nfvis-cli -c "show version"                                      ← **不带任何 -server**
+  连接 https://127.0.0.1:443 ...
+  NFViS 1.0.0-dev（M2：配置事务可用，网络底座 M3+ 接入）             ← 连通（证书自动固定）
+$ nfvis-cli -h | grep -A1 "server"
+  -server string   nfvisd 地址（缺省读 NFVIS_SERVER） (default "https://127.0.0.1:443")
+
+环境变量覆盖（开发用明文端口）：
+$ nfvisd -listen 127.0.0.1:18443 -allow-plaintext … &
+$ NFVIS_SERVER=http://127.0.0.1:18443 nfvis-cli -c "show version"
+  连接 http://127.0.0.1:18443 ...
+  NFViS 1.0.0-dev…
+
+连接失败时的排障提示：
+$ nfvis-cli -c "show version"        # 守护进程已停
+  % 登录失败: 连接 nfvisd 失败: … dial tcp 127.0.0.1:443: connect: connection refused
+  % 提示: 确认 nfvisd 已运行（systemctl status nfvis）；若其监听地址/端口非缺省
+    （当前尝试 https://127.0.0.1:443），用 -server 或 NFVIS_SERVER 指定，
+    并注意开发用 -allow-plaintext 时须把地址写成 http://…
+
+防再次漂移（守护测试，读真实 systemd 单元）：
+$ go test -run TestDefaultServerMatchesDaemonDefault ./pkg/cliclient/
+  --- PASS
+  红-绿：把 DefaultServer 改回 http://127.0.0.1:8443 →
+    --- FAIL: CLI 缺省应为 https（nfvisd 默认启用 HTTPS，决策 #72）："http://127.0.0.1:8443"
+  （端口不一致时亦会失败，报「CLI 缺省端口 … 与守护进程缺省 … 不一致」）

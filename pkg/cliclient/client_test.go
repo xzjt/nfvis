@@ -9,9 +9,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -97,5 +100,51 @@ func TestNewWithTLS(t *testing.T) {
 	}
 	if _, err := NewWithTLS("https://h:443", TLSOptions{CAFile: filepath.Join(dir, "none.pem")}); err == nil {
 		t.Fatal("文件缺失应报错")
+	}
+}
+
+// TestDefaultServerMatchesDaemonDefault 守护「CLI 缺省地址 == 守护进程缺省监听」。
+//
+// 由来（决策 #78）：CLI 缺省曾是 `http://127.0.0.1:8443`（明文、另一端口），而
+// `deploy/nfvis.service` 设 `NFVIS_LISTEN=:443` 且 nfvisd 默认自动自签启用 HTTPS
+// → **默认参数连不上**，「装完即用」第一步必然失败。本测试从 systemd 单元读取真实缺省，
+// 与 cliclient.DefaultServer 比对，防止两者再次漂移。
+func TestDefaultServerMatchesDaemonDefault(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/nfvis.service")
+	if err != nil {
+		t.Fatalf("读取 deploy/nfvis.service: %v", err)
+	}
+	listen := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, "Environment=NFVIS_LISTEN="); ok {
+			listen = strings.TrimSpace(v)
+		}
+	}
+	if listen == "" {
+		t.Fatal("deploy/nfvis.service 未声明 NFVIS_LISTEN（缺省监听），本守护测试失效")
+	}
+
+	u, err := url.Parse(DefaultServer)
+	if err != nil {
+		t.Fatalf("DefaultServer 不是合法 URL: %q: %v", DefaultServer, err)
+	}
+	if u.Scheme != "https" {
+		t.Fatalf("CLI 缺省应为 https（nfvisd 默认启用 HTTPS，决策 #72）：%q", DefaultServer)
+	}
+
+	// NFVIS_LISTEN 形如 ":443" / "0.0.0.0:443" / "127.0.0.1:443"；取其端口与 CLI 缺省比对。
+	_, daemonPort, err := net.SplitHostPort(listen)
+	if err != nil {
+		t.Fatalf("无法从 NFVIS_LISTEN=%q 解析端口: %v", listen, err)
+	}
+	_, cliPort, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatalf("无法从 DefaultServer=%q 解析端口: %v", DefaultServer, err)
+	}
+	if daemonPort != cliPort {
+		t.Fatalf("CLI 缺省端口 %s 与守护进程缺省 %s 不一致（决策 #78：默认参数会连不上）\n"+
+			"改一处须同改另一处：NFVIS_LISTEN(%s) ↔ cliclient.DefaultServer(%s)",
+			cliPort, daemonPort, listen, DefaultServer)
 	}
 }

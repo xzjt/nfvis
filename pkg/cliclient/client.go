@@ -97,6 +97,17 @@ func NewWithTLS(server string, opts TLSOptions) (*Client, error) {
 // DefaultServerCertPath 守护进程自签证书的缺省路径（与 system.DefaultTLSDir 一致）。
 const DefaultServerCertPath = "/var/lib/nfvis/tls/server.crt"
 
+// DefaultServer nfvis-cli 的缺省服务端地址。
+//
+// **必须与守护进程的缺省监听保持一致**：`deploy/nfvis.service` 设 `NFVIS_LISTEN=:443`，
+// 且 nfvisd 未提供证书时自动生成自签并启用 HTTPS（决策 #72）。
+// 此前 CLI 缺省为 `http://127.0.0.1:8443`（明文、另一端口）→ **默认参数连不上**，
+// 「装完即用」的第一步必然失败（决策 #78）。
+//
+// 用 HTTPS 缺省还顺带拿到**零配置的证书固定**：mustClient 在未给 -ca 时自动固定
+// DefaultServerCertPath（见 cmd/nfvis-cli/main.go），故本机用户无需任何参数即可连上。
+const DefaultServer = "https://127.0.0.1:443"
+
 // SetToken 注入既有 token（跳过登录）。
 func (c *Client) SetToken(tok string) { c.token = tok }
 
