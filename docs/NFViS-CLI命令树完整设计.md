@@ -63,7 +63,9 @@ show qos policies                                   # 限速策略与绑定
 show vpp                                            # VPP 数据面概览：版本、线程/worker、buffer、内存（GET /vpp/status）
 show vpp threads                                    # main/worker 线程清单与绑核（govpp threads dump）
 show vpp runtime [thread <id>]                      # 每线程向量率/指令周期/clock（govpp runtime）
-show vpp buffers                                    # buffer 池（每 NUMA）使用量
+show vpp buffers                                    # buffer 池（每 NUMA）使用量；打印统计来源
+                                                    #   （statsclient | vpp_get_stats，决策 #68），
+                                                    #   不可用时打印来源与原因（不静默省略）
 show vpp memory                                     # main-heap 与 hugepage 占用
 show vpp capture                                    # 抓包会话状态与已导出 pcap 清单
 

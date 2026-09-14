@@ -24,7 +24,7 @@ func (r *vppRuntime) InterfaceCounters(ctx context.Context, ifname string) (stat
 }
 
 func (r *vppRuntime) Buffers(ctx context.Context) (state.Buffers, bool) {
-	return state.Buffers{}, false
+	return state.Buffers{Reason: "stats segment 仅在 Linux 可用"}, false
 }
 
 func (r *vppRuntime) Memory(ctx context.Context) (state.Memory, bool) {

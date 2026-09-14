@@ -26,9 +26,20 @@ type InterfaceCounters struct {
 	TxDrops   uint64 `json:"tx_drops"`
 }
 
+// 统计来源标识（决策 #68）：statsclient 解码 / VPP 自带同版本工具回退。
+const (
+	StatsSourceClient = "statsclient"
+	StatsSourceTool   = "vpp_get_stats"
+)
+
 // Buffers 数据面 buffer 池用量（每 NUMA/池）。
+//
+// Source 标注来源（StatsSourceClient/StatsSourceTool）；不可用时 Pools 为空且
+// Reason 给出原因——调用方不得静默省略（决策 #68）。
 type Buffers struct {
-	Pools []BufferPool `json:"pools"`
+	Pools  []BufferPool `json:"pools"`
+	Source string       `json:"source,omitempty"`
+	Reason string       `json:"reason,omitempty"`
 }
 
 // BufferPool 单个 buffer 池。

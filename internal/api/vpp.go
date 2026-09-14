@@ -18,7 +18,11 @@ type VppStatus struct {
 	LastError      string          `json:"last_error,omitempty"`
 	Threads        []VppThread     `json:"threads,omitempty"`
 	Buffers        []VppBufferPool `json:"buffers,omitempty"`
-	Memory         *VppMemory      `json:"memory,omitempty"`
+	// BuffersSource buffer 池统计来源（statsclient|vpp_get_stats，决策 #68）。
+	BuffersSource string `json:"buffers_source,omitempty"`
+	// BuffersUnavailable buffer 池统计不可用的原因（有数据时省略；决策 #68）。
+	BuffersUnavailable string     `json:"buffers_unavailable,omitempty"`
+	Memory             *VppMemory `json:"memory,omitempty"`
 }
 
 // VppBufferPool buffer 池用量（契约）。
@@ -67,9 +71,13 @@ func (s *Server) handleGetVppStatus(w http.ResponseWriter, r *http.Request) {
 			view.Threads = append(view.Threads, VppThread{ID: t.ID, Name: t.Name, Type: t.Type, Core: t.Core})
 		}
 		if bufs, ok := s.state.Buffers(r.Context()); ok {
+			view.BuffersSource = bufs.Source
 			for _, p := range bufs.Pools {
 				view.Buffers = append(view.Buffers, VppBufferPool{Name: p.Name, Used: p.Used, Available: p.Available, Cached: p.Cached})
 			}
+		} else if bufs.Reason != "" {
+			// 不可用必须给原因，不静默省略（决策 #68）
+			view.BuffersUnavailable = bufs.Reason
 		}
 		if mem, ok := s.state.Memory(r.Context()); ok {
 			view.Memory = &VppMemory{Total: mem.Total, Used: mem.Used, Free: mem.Free}

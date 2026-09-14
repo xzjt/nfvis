@@ -75,7 +75,32 @@ func (r *vppRuntime) InterfaceCounters(ctx context.Context, ifname string) (stat
 	return state.InterfaceCounters{}, false
 }
 
+// Buffers 返回 buffer 池用量（决策 #68）。
+//
+// 先经 statsclient 解码；失败或全零（VPP 26.06 的值类型 v0.13.0 解码不出）时
+// 回退到同版本工具 vpp_get_stats。任一来源成功均标注 Source；
+// 全部不可用时给出 Reason，由调用方呈现（不静默省略）。
 func (r *vppRuntime) Buffers(ctx context.Context) (state.Buffers, bool) {
+	if out, ok := r.buffersViaStatsClient(); ok {
+		out.Source = state.StatsSourceClient
+		return out, true
+	}
+	tool := r.m.statsTool
+	if tool == nil {
+		return state.Buffers{Reason: "statsclient 解码失败且无同版本工具回退源"}, false
+	}
+	text, err := tool.DumpMachine(ctx, bufferPoolPattern)
+	if err != nil {
+		return state.Buffers{Reason: err.Error()}, false
+	}
+	if pools, ok := BufferPoolsFromDump(text); ok {
+		return state.Buffers{Pools: pools, Source: state.StatsSourceTool}, true
+	}
+	return state.Buffers{Reason: "vpp_get_stats 未返回 buffer 池条目"}, false
+}
+
+// buffersViaStatsClient 经 govpp statsclient 读取 buffer 池。
+func (r *vppRuntime) buffersViaStatsClient() (state.Buffers, bool) {
 	conn, err := r.m.stats()
 	if err != nil {
 		return state.Buffers{}, false

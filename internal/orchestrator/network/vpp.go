@@ -128,6 +128,7 @@ type Manager struct {
 
 	statsOnce sync.Once // stats segment 惰性连接（stats_govpp.go）
 	statsConn *statsConn
+	statsTool StatsTool // statsclient 解码失败/缺项时的同版本工具回退源（决策 #68）
 }
 
 // NewManager 构造管理器（dialer 为 nil 时使用 govpp 实现）。
@@ -135,8 +136,13 @@ func NewManager(cfg Config, dialer Dialer) *Manager {
 	if dialer == nil {
 		dialer = NewGovppDialer()
 	}
-	return &Manager{cfg: cfg.withDefaults(), dialer: dialer, state: StateDisconnected}
+	cfg = cfg.withDefaults()
+	return &Manager{cfg: cfg, dialer: dialer, state: StateDisconnected,
+		statsTool: newDefaultStatsTool(cfg.Socket)}
 }
+
+// SetStatsTool 替换 stats 回退源（测试注入；nil 表示无回退源）。
+func (m *Manager) SetStatsTool(t StatsTool) { m.statsTool = t }
 
 // OnConnect 注册连接成功回调（含首次连接与断线重连，M3-8 恢复收敛接入点）。
 // 回调在连接管理协程内同步执行，重活应自行起协程，避免阻塞状态监视。

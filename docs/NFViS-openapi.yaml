@@ -1617,7 +1617,9 @@ components:
           items: { $ref: "#/components/schemas/VppThread" }
         buffers:
           type: array
-          description: buffer 池用量（stats segment；不可用时省略）
+          description: |
+            buffer 池用量。来源见 `buffers_source`；不可用时**省略数组但须给出
+            `buffers_unavailable` 原因**（不静默省略，决策 #68）。
           items:
             type: object
             properties:
@@ -1625,6 +1627,16 @@ components:
               used: { type: number }
               available: { type: number }
               cached: { type: number }
+        buffers_source:
+          type: string
+          enum: [statsclient, vpp_get_stats]
+          description: |
+            buffer 池统计来源。`statsclient` = govpp stats segment 解码；
+            `vpp_get_stats` = statsclient 解码失败或全零时回退 VPP 自带同版本工具
+            （VPP 26.06 的 buffer 池值类型 govpp v0.13.0 无法解码，决策 #68）。无数据时省略。
+        buffers_unavailable:
+          type: string
+          description: buffer 池统计不可用的原因（有数据时省略；决策 #68）
         memory:
           type: object
           description: main heap 内存合计（stats segment；不可用时省略）
