@@ -93,7 +93,7 @@ func (x *cliExecutor) requestSRIOV(user, source string, t []string) string {
 	return fmt.Sprintf("%% 无效命令: request sriov %s（可用：create-vfs|delete-vfs）\n", strings.Join(t, " "))
 }
 
-// requestInterfacesDPDK：request interfaces <ifname> bind-dpdk [uio-driver <d>] | unbind-dpdk
+// requestInterfacesDPDK：request interfaces <ifname|pci> bind-dpdk [uio-driver <d>] | unbind-dpdk [to-driver <d>]
 // （FR-NET-001，决策 #72）。绑定/解绑会中断该网卡流量，故需确认。
 func (x *cliExecutor) requestInterfacesDPDK(user, source string, t []string) string {
 	if x.dpdk == nil {
@@ -111,8 +111,12 @@ func (x *cliExecutor) requestInterfacesDPDK(user, source string, t []string) str
 		driver = t[3]
 	case bound:
 		return "%% 语法: request interfaces <ifname> bind-dpdk [uio-driver <vfio-pci|igb-uio>]\n"
-	case len(t) != 2:
-		return "%% 语法: request interfaces <ifname> unbind-dpdk\n"
+	case len(t) == 2:
+		// 解绑：交由内核自动探测（实测常不足，见下 to-driver）
+	case len(t) == 4 && t[2] == "to-driver":
+		driver = t[3]
+	default:
+		return "%% 语法: request interfaces <ifname|pci> unbind-dpdk [to-driver <驱动名>]\n"
 	}
 	verb := "绑定到 DPDK 驱动"
 	if !bound {

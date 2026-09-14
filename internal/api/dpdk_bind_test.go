@@ -158,3 +158,23 @@ func TestCLIDPDKBindNeedsConfirm(t *testing.T) {
 		t.Fatalf("解绑后应报告内核驱动: %q", out)
 	}
 }
+
+// 解绑带 to-driver：应把「交还的内核驱动」透传给底座（否则真机实测会留下无驱动网卡）。
+func TestCLIDPDKUnbindWithToDriver(t *testing.T) {
+	x, _ := newCLIKit(t)
+	f := &fakeDPDK{}
+	x.setDPDK(f)
+	out := x.Execute("admin", "super-user", "ssh",
+		"request interfaces 0000:13:00.0 unbind-dpdk to-driver vmxnet3 --yes").Output
+	if f.calls != 1 || f.lastBound {
+		t.Fatalf("应执行解绑: %q (%+v)", out, f)
+	}
+	if f.lastDriver != "vmxnet3" {
+		t.Fatalf("to-driver 应透传为 driver: %q", f.lastDriver)
+	}
+	// 非法参数应被拒（命令树先行拒绝，故只断言"报错"而非具体措辞）
+	if got := x.Execute("admin", "super-user", "ssh",
+		"request interfaces p unknown-arg --yes").Output; !strings.Contains(got, "%") {
+		t.Fatalf("非法参数应被拒绝: %q", got)
+	}
+}
