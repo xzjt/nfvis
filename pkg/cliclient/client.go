@@ -7,9 +7,13 @@ package cliclient
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -44,6 +48,45 @@ func New(server string) *Client {
 		hc:   &http.Client{Timeout: 30 * time.Second},
 	}
 }
+
+// TLSOptions HTTPS 客户端选项（FR-SEC-004：nfvisd 默认以自签证书提供 HTTPS）。
+type TLSOptions struct {
+	// CAFile 服务端证书（PEM）。给出则按该系统信任锚校验——自签场景即**证书固定**。
+	CAFile string
+	// Insecure 跳过校验（仅限调试；显式选择，不默认开启）。
+	Insecure bool
+}
+
+// NewWithTLS 构造带 TLS 选项的客户端。
+//
+// 背景：nfvisd 默认自签 HTTPS（决策 #72），而系统信任库不含该证书，
+// 故客户端必须能校验它：nfvis-cli 通常就运行在一体机上（规格 §3.1：sshd 的 shell 即 nfvis-cli），
+// 因此优先**固定守护进程自己的证书**（安全且零配置），而不是默认跳过校验。
+func NewWithTLS(server string, opts TLSOptions) (*Client, error) {
+	hc := &http.Client{Timeout: 30 * time.Second}
+	if strings.HasPrefix(server, "https://") {
+		tc := &tls.Config{MinVersion: tls.VersionTLS12}
+		switch {
+		case opts.Insecure:
+			tc.InsecureSkipVerify = true
+		case opts.CAFile != "":
+			pem, err := os.ReadFile(opts.CAFile)
+			if err != nil {
+				return nil, fmt.Errorf("读取证书 %s: %w", opts.CAFile, err)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(pem) {
+				return nil, fmt.Errorf("证书 %s 不含可用 PEM", opts.CAFile)
+			}
+			tc.RootCAs = pool
+		}
+		hc.Transport = &http.Transport{TLSClientConfig: tc}
+	}
+	return &Client{base: server, hc: hc}, nil
+}
+
+// DefaultServerCertPath 守护进程自签证书的缺省路径（与 system.DefaultTLSDir 一致）。
+const DefaultServerCertPath = "/var/lib/nfvis/tls/server.crt"
 
 // SetToken 注入既有 token（跳过登录）。
 func (c *Client) SetToken(tok string) { c.token = tok }
