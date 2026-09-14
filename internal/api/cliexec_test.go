@@ -422,3 +422,50 @@ func TestCLIDpdkPerDev(t *testing.T) {
 		t.Fatalf("ens224 rx-queues 应为 2: %+v", d)
 	}
 }
+
+// TestCLIAnnotateRelativePath 覆盖决策 #76：annotate 的路径须与同级 set/delete/show **同源**，
+// 相对当前 edit 层级解析。此前 annotate 只认绝对路径——`edit system` 后
+// `annotate hostname "x"` 报「未知命令: hostname」，与同级命令行为不一致。
+func TestCLIAnnotateRelativePath(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set system hostname rel-node",
+		"edit system",
+		"annotate hostname \"相对路径注释\"",
+		"top",
+	)
+	res := x.Execute("admin", aaaClassSU, "ssh", "show")
+	if !strings.Contains(res.Output, "/* system hostname: 相对路径注释 */") {
+		t.Fatalf("edit system 下的相对路径 annotate 应落到 system hostname:\n%s", res.Output)
+	}
+	// 绝对路径写法仍应可用（向后兼容）。
+	res = x.Execute("admin", aaaClassSU, "ssh", "annotate system timezone \"绝对路径注释\"")
+	if strings.Contains(res.Output, "%%") {
+		t.Fatalf("绝对路径 annotate 不应失败:\n%s", res.Output)
+	}
+}
+
+// TestCLIShowVrfRoutesValidatesExistence 覆盖决策 #76：`show vrfs <不存在> routes` 必须报错。
+// VPP 对不存在的 VRF 返回**空表**，原先直接渲染成「（FIB 无路由）」，把「VRF 不存在」
+// 误报成「VRF 无路由」，且与 `show vrfs <name>` 的报错口径不一致。
+func TestCLIShowVrfRoutesValidatesExistence(t *testing.T) {
+	x, _ := newCLIKit(t)
+	x.setNetRuntime(nil, &fakeL3Runtime{}, nil, nil, nil)
+
+	res := x.Execute("admin", aaaClassSU, "ssh", "show vrfs ghost-vrf routes")
+	if !strings.Contains(res.Output, "不存在") {
+		t.Fatalf("不存在的 VRF 应明确报错，实际:\n%s", res.Output)
+	}
+
+	// 存在的 VRF：不得再报「不存在」。
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-l3 type l3",
+		"commit",
+	)
+	res = x.Execute("admin", aaaClassSU, "ssh", "show vrfs vs-l3 routes")
+	if strings.Contains(res.Output, "不存在") {
+		t.Fatalf("已配置的 VRF 不应报不存在:\n%s", res.Output)
+	}
+}

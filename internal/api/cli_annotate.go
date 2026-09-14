@@ -18,7 +18,11 @@ import (
 
 // cfgAnnotate annotate <path> "text"（FR-CFG-007）。delete annotate <path> 清除；
 // 无引号文本视为删除。
-func (x *cliExecutor) cfgAnnotate(user, source string, raw string) string {
+//
+// 路径解析与同级的 set/delete/show **同源**：先按当前 edit 层级相对解析，再退回绝对路径
+// （此前只认绝对路径——`edit system` 后 `annotate hostname "x"` 会报「未知命令: hostname」，
+// 与同级命令行为不一致，决策 #76）。
+func (x *cliExecutor) cfgAnnotate(user, source string, s *cliSession, raw string) string {
 	rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "annotate"))
 	if rest == "" {
 		return "%% 语法: annotate <path> \"text\"（delete annotate <path> 清除）\n"
@@ -38,10 +42,11 @@ func (x *cliExecutor) cfgAnnotate(user, source string, raw string) string {
 	if len(path) == 0 {
 		return "%% 语法: annotate <path> \"text\"\n"
 	}
-	if _, _, err := schema.Match(cfgPathRoot(), path); err != nil {
+	resolved, err := resolveAnnotatePath(s.Path, path)
+	if err != nil {
 		return "%% " + err.Error() + "\n"
 	}
-	key := strings.Join(path, " ")
+	key := strings.Join(resolved, " ")
 
 	sess := config.Session{User: user, Source: source}
 	if err := x.engine.Edit(sess); err != nil {
@@ -66,6 +71,21 @@ func (x *cliExecutor) cfgAnnotate(user, source string, raw string) string {
 		return "已删除注释: " + key + "\n"
 	}
 	return "[ok] " + key + " 注释已更新\n"
+}
+
+// resolveAnnotatePath 解析 annotate 的目标路径：优先相对当前 edit 层级，
+// 取不到再按绝对路径（保留既有绝对写法）。
+func resolveAnnotatePath(cur, path []string) ([]string, error) {
+	if len(cur) > 0 {
+		rel := append(append([]string{}, cur...), path...)
+		if _, _, err := schema.Match(cfgPathRoot(), rel); err == nil {
+			return rel, nil
+		}
+	}
+	if _, _, err := schema.Match(cfgPathRoot(), path); err != nil {
+		return nil, err
+	}
+	return path, nil
 }
 
 // cfgLoad load override|merge <file>（FR-CFG-008，JSON 配置导入）。

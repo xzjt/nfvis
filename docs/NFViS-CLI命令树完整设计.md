@@ -235,7 +235,8 @@ set login
   │   └─ deny <command-path>
   └─ password-policy
       ├─ min-length <uint> | complexity <bool> | expire-days <uint>
-      └─ lockout-threshold <uint> lockout-minutes <uint>
+      ├─ lockout-threshold <uint>          # 连续失败锁定阈值（两条**独立**语句，
+      └─ lockout-minutes <uint>            # 决策 #76：同一行连写不被支持）
 set idle-timeout-minutes <uint>         # CLI 会话空闲超时
 ```
 
