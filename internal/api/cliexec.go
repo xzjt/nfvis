@@ -86,6 +86,7 @@ type cliExecutor struct {
 	capture    CaptureRuntime              // 数据面抓包（M5-3；nil = 报未接入）
 	sw         SoftwareRuntime             // 软件升级/电源/NTP（M5-7；nil = 报未接入）
 	hw         HardwareRuntime             // 硬件健康（M5-5；nil = 报未接入）
+	sriov      SRIOVSetter                 // SR-IOV VF 数量（M3-7；nil = 命令报未接入）
 	tlsR       TlsRuntime                  // 证书管理（M5-8；nil = 报未接入）
 	vppRestart func(context.Context) error // request vpp restart（M5-9；nil = 报未接入）
 	events     *events.Bus                 // 事件总线（M5-1；nil = 不发布）
@@ -134,6 +135,9 @@ func (x *cliExecutor) setSoftware(s SoftwareRuntime) { x.sw = s }
 
 // setHardware 注入硬件健康采集（M5-5）。
 func (x *cliExecutor) setHardware(h HardwareRuntime) { x.hw = h }
+
+// setSRIOV 注入 SR-IOV VF 设置能力（M5-9 收尾：request sriov 命令）。
+func (x *cliExecutor) setSRIOV(s SRIOVSetter) { x.sriov = s }
 
 // setTLS 注入证书管理（M5-8）。
 func (x *cliExecutor) setTLS(t TlsRuntime) { x.tlsR = t }
@@ -292,11 +296,10 @@ func (x *cliExecutor) execOper(user, class, source string, s *cliSession, t []st
 		return x.execClear(class, t[1:])
 	case "request":
 		return x.execRequest(user, class, source, t[1:])
-	case "start", "help":
-		if _, _, err := schema.Match(schema.OperRoot(), t); err != nil {
-			return fmt.Sprintf("%% 无效命令: %s（输入 ? 查看可用命令）\n", strings.Join(t, " "))
-		}
-		return "%% 该命令依赖底座运行态，将在 M3/M4 接入后可用\n"
+	case "start":
+		return x.execStart(class, source, t[1:])
+	case "help":
+		return x.execHelp(class, s, t[1:])
 	}
 	return fmt.Sprintf("%% 无效命令: %s（输入 ? 查看可用命令）\n", strings.Join(t, " "))
 }
@@ -345,6 +348,16 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 			return "（配置为空）\n"
 		}
 		return out + "\n"
+	case len(t) >= 1 && t[0] == "interfaces":
+		return x.execShowInterfaces(t[1:])
+	case len(t) >= 1 && t[0] == "port-mirroring":
+		return x.execShowPortMirroring(t[1:])
+	case len(t) >= 1 && t[0] == "qos":
+		return x.execShowQos(t[1:])
+	case len(t) >= 1 && t[0] == "vpp":
+		return x.execShowVpp(t[1:])
+	case len(t) >= 1 && t[0] == "lldp":
+		return x.execShowLldp(t[1:])
 	case len(t) >= 1 && t[0] == "virtual-switches":
 		return x.execShowVSwitches(t[1:])
 	case len(t) >= 1 && t[0] == "vrfs":
@@ -398,7 +411,7 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 	if len(t) >= 2 && t[0] == "vpp" && t[1] == "capture" {
 		return x.execShowVppCapture() // M5-3：抓包会话状态与已导出 pcap 清单
 	}
-	return "%% 该 show 命令依赖底座运行态，将在后续里程碑接入（当前可用：show version / show configuration [candidate|compare rollback n] / show system configuration sessions / show system uptime|cpu|memory|storage|hugepages|core-dumps|tech-support / show users / show log system|audit|vnf / show vpp capture / show virtual-machine-functions / show container-functions / show images / show resource-pools）\n"
+	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|compare rollback n] | system uptime|cpu|memory|storage|hugepages|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | port-mirroring | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions\n"
 }
 
 // ---------- 配置模式 ----------

@@ -95,8 +95,11 @@ func (x *cliExecutor) execMonitor(class string, t []string) string {
 	if !x.allow(class, mustNode(schema.OperRoot(), "monitor"), "monitor") {
 		return "%% 无权限执行 monitor\n"
 	}
+	if len(t) >= 2 && t[0] == "vnf" {
+		return x.monitorVNF(t[1:])
+	}
 	if len(t) < 2 || t[0] != "interfaces" {
-		return "%% 语法: monitor interfaces <ifname> [interval <sec>]\n"
+		return "%% 语法: monitor interfaces <ifname> [interval <sec>] | monitor vnf <name>\n"
 	}
 	ifname := t[1]
 	switch {
@@ -160,4 +163,34 @@ func appendErr(out string, err error) string {
 		out += "\n"
 	}
 	return out + msg
+}
+
+// monitorVNF：`monitor vnf <name>`（契约 §1.3）——返回单次 VNF 状态 + 相关告警快照，
+// 实时刷新由 nfvis-cli REPL 轮询（与 monitor interfaces 同法，附录 A #36）。
+func (x *cliExecutor) monitorVNF(args []string) string {
+	name := args[0]
+	var lines []string
+	if x.vm != nil {
+		if st, err := x.vm.VMState(context.Background(), name); err == nil && st != "" {
+			lines = append(lines, fmt.Sprintf("vnf %s: state=%s", name, st))
+		} else if err != nil {
+			lines = append(lines, fmt.Sprintf("vnf %s: 状态不可用（%v）", name, err))
+		}
+	} else {
+		lines = append(lines, fmt.Sprintf("vnf %s: 计算运行态未接入", name))
+	}
+	if x.alarms != nil {
+		rows := x.alarms.List("active")
+		n := 0
+		for _, r := range rows {
+			if strings.Contains(r.Source, name) {
+				lines = append(lines, fmt.Sprintf("  告警 %-8s %-14s %s", r.Severity, r.Code, r.Message))
+				n++
+			}
+		}
+		if n == 0 {
+			lines = append(lines, "  活动告警: 无")
+		}
+	}
+	return strings.Join(lines, "\n") + "\n"
 }

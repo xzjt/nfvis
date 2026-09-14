@@ -1,0 +1,23 @@
+===== 新增 CLI 命令真机验证 =====
+show interfaces                    => （无已配置接口） 
+show interfaces physical           => （无已声明物理口；先 set interfaces <ifname> description … 声明） 
+show interfaces ens224             => % 接口 ens224 未在配置中声明 
+show interfaces ens224 statistics  => % 接口 ens224 未在配置中声明 
+show interfaces management         => （未配置管理口：set system management ip address <prefix>） 
+show port-mirroring                => （无端口镜像会话） 
+show qos policies                  => （无 QoS 限速策略） 
+show vpp                           => threads: 2 buffers: 运行态不可用 
+show vpp threads                   => Name       Type         Core     ID vpp_main                4        0 
+show vpp buffers                   => %% buffer 池运行态不可用（可能未启用 stats segment 或全零） exit status 1 
+show vpp memory                    => total=2147483648 used=272215280 free=1875268368 
+show lldp neighbors                => （无 LLDP 邻居） 
+show vpp runtime                   => %% VPP runtime 统计未接入（govpp runtime 解码，见附录 A #34 限制） exit status 1 
+--- help / start shell / monitor vnf ---
+可用命令（操作 模式）：
+  show                               显示系统状态与配置
+  request                            运维动作
+  configure                          进入配置模式（§4：仅 super-user）
+%% start shell 仅允许本地 console 会话（SSH 登录禁用，契约 §1.3）
+exit status 1
+vnf fw-vm: state=absent
+  活动告警: 无

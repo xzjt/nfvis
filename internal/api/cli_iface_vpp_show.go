@@ -1,0 +1,285 @@
+package api
+
+// M5-9 收尾：补齐契约 §1.1 中此前无分发分支的命令族
+//   show interfaces [physical|management|<ifname> [detail|statistics|sriov]]
+//   show port-mirroring / show qos policies / show vpp [threads|buffers|memory]
+//   show lldp neighbors（契约写法；等价于 show protocols lldp neighbors）
+// 运行态来源：state（线程/buffer/内存/接口计数）与 committed 配置；未接入时给明确提示。
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/xzjt/nfvis/internal/model"
+)
+
+// execShowInterfaces：契约 §1.1 的接口族。
+func (x *cliExecutor) execShowInterfaces(args []string) string {
+	cfg, err := x.engine.Committed()
+	if err != nil {
+		return "%% " + err.Error() + "\n"
+	}
+	// show interfaces physical|management —— 列表
+	if len(args) >= 1 && (args[0] == "physical" || args[0] == "management") {
+		if args[0] == "management" {
+			return x.showManagementInterface(cfg)
+		}
+		if len(args) == 1 {
+			return x.showPhysicalInterfaces(cfg, "")
+		}
+		return x.showPhysicalInterfaces(cfg, args[1])
+	}
+	// show interfaces <ifname> [detail|statistics|sriov]
+	if len(args) >= 1 {
+		name := args[0]
+		sub := ""
+		if len(args) >= 2 {
+			sub = args[1]
+		}
+		return x.showOneInterface(cfg, name, sub)
+	}
+	// show interfaces（摘要）
+	if len(cfg.Interfaces) == 0 {
+		return "（无已配置接口）\n"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-14s %-8s %-8s %-10s %s\n", "Interface", "Admin", "MTU", "Policy", "Description")
+	items := make([]any, 0, len(cfg.Interfaces))
+	for _, ifc := range cfg.Interfaces {
+		items = append(items, anyToTree(ifc))
+		admin := "up"
+		if ifc.Enabled != nil && !*ifc.Enabled {
+			admin = "down"
+		}
+		fmt.Fprintf(&b, "%-14s %-8s %-8d %-10s %s\n", ifc.Name, admin, ifc.MTU, ifc.IngressPolicy, ifc.Description)
+	}
+	x.structured = map[string]any{"interfaces": items}
+	return b.String()
+}
+
+// showPhysicalInterfaces：物理口（配置 + 运行态计数）。
+func (x *cliExecutor) showPhysicalInterfaces(cfg model.Config, only string) string {
+	found := false
+	var b strings.Builder
+	items := make([]any, 0)
+	fmt.Fprintf(&b, "%-14s %-8s %-12s %-12s %s\n", "Interface", "Admin", "RxPkts", "TxPkts", "Description")
+	for _, ifc := range cfg.Interfaces {
+		if only != "" && ifc.Name != only {
+			continue
+		}
+		found = true
+		entry := map[string]any{"name": ifc.Name, "description": ifc.Description}
+		admin := "up"
+		if ifc.Enabled != nil && !*ifc.Enabled {
+			admin = "down"
+		}
+		rx, tx := "-", "-"
+		if x.state != nil {
+			if c, ok := x.state.InterfaceCounters(context.Background(), ifc.Name); ok {
+				rx, tx = fmt.Sprintf("%d", c.RxPackets), fmt.Sprintf("%d", c.TxPackets)
+				entry["statistics"] = anyToTree(c)
+			}
+		}
+		items = append(items, entry)
+		fmt.Fprintf(&b, "%-14s %-8s %-12s %-12s %s\n", ifc.Name, admin, rx, tx, ifc.Description)
+	}
+	if !found {
+		if only != "" {
+			return fmt.Sprintf("%% 物理口 %s 未在配置中声明（先 set interfaces %s …）\n", only, only)
+		}
+		return "（无已声明物理口；先 set interfaces <ifname> description … 声明）\n"
+	}
+	x.structured = map[string]any{"interfaces": items}
+	return b.String()
+}
+
+// showManagementInterface：管理口（内核侧，来自 system.management 配置）。
+func (x *cliExecutor) showManagementInterface(cfg model.Config) string {
+	sys := cfg.System
+	if sys == nil || sys.Management == nil {
+		return "（未配置管理口：set system management ip address <prefix>）\n"
+	}
+	m := sys.Management
+	x.structured = anyToTree(m)
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-10s %-20s %s\n", "Interface", "Address", "Gateway")
+	fmt.Fprintf(&b, "%-10s %-20s %s\n", "mgmt0", m.Address, m.Gateway)
+	return b.String()
+}
+
+// showOneInterface：单个接口（detail|statistics|sriov）。
+func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) string {
+	for _, ifc := range cfg.Interfaces {
+		if ifc.Name != name {
+			continue
+		}
+		m, _ := anyToTree(ifc).(map[string]any)
+		if x.state != nil {
+			if c, ok := x.state.InterfaceCounters(context.Background(), name); ok {
+				m["statistics"] = anyToTree(c)
+			}
+		}
+		switch sub {
+		case "":
+			x.structured = m
+			return RenderConfigJSON(m) + "\n"
+		case "detail", "statistics":
+			if sub == "statistics" {
+				if st, ok := m["statistics"]; ok {
+					x.structured = map[string]any{"interface": name, "statistics": st}
+					return fmt.Sprintf("interface %s statistics: %v\n", name, st)
+				}
+				return fmt.Sprintf("%% 接口 %s 统计运行态不可用（stats 未接入）\n", name)
+			}
+			x.structured = m
+			return RenderConfigJSON(m) + "\n"
+		case "sriov":
+			if ifc.Sriov == nil {
+				return fmt.Sprintf("（接口 %s 未配置 SR-IOV VF）\n", name)
+			}
+			mm, _ := anyToTree(ifc.Sriov).(map[string]any)
+			x.structured = map[string]any{"interface": name, "sriov": mm}
+			return RenderConfigJSON(x.structured.(map[string]any)) + "\n"
+		default:
+			return fmt.Sprintf("%% 无效命令: show interfaces %s %s（可用：detail|statistics|sriov）\n", name, sub)
+		}
+	}
+	return fmt.Sprintf("%% 接口 %s 未在配置中声明\n", name)
+}
+
+// execShowGenericConfig：show port-mirroring / show qos policies（配置视图）。
+func (x *cliExecutor) execShowPortMirroring(args []string) string {
+	cfg, err := x.engine.Committed()
+	if err != nil {
+		return "%% " + err.Error() + "\n"
+	}
+	if len(cfg.PortMirroring) == 0 {
+		return "（无端口镜像会话）\n"
+	}
+	items := make([]any, 0, len(cfg.PortMirroring))
+	for _, pm := range cfg.PortMirroring {
+		items = append(items, anyToTree(pm))
+	}
+	tree := map[string]any{"port_mirroring": items}
+	x.structured = tree
+	return RenderConfigJSON(tree) + "\n"
+}
+
+func (x *cliExecutor) execShowQos(args []string) string {
+	if len(args) >= 1 && args[0] != "policies" {
+		return fmt.Sprintf("%% 无效命令: show qos %s（可用：show qos policies）\n", strings.Join(args, " "))
+	}
+	cfg, err := x.engine.Committed()
+	if err != nil {
+		return "%% " + err.Error() + "\n"
+	}
+	if len(cfg.QosPolicies) == 0 {
+		return "（无 QoS 限速策略）\n"
+	}
+	items := make([]any, 0, len(cfg.QosPolicies))
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-14s %-12s %s\n", "Policy", "CIR(bps)", "CBS(bytes)")
+	for _, p := range cfg.QosPolicies {
+		items = append(items, anyToTree(p))
+		fmt.Fprintf(&b, "%-14s %-12d %d\n", p.Name, p.Cir, p.Cbs)
+	}
+	x.structured = map[string]any{"qos_policies": items}
+	return b.String()
+}
+
+// execShowVpp：show vpp [threads|buffers|memory]（运行态来自 state）。
+func (x *cliExecutor) execShowVpp(args []string) string {
+	sub := ""
+	if len(args) >= 1 {
+		sub = args[0]
+	}
+	// capture 走抓包运行态（M5-3），不依赖 state
+	if sub == "capture" {
+		return x.execShowVppCapture()
+	}
+	if x.state == nil {
+		return errRuntimeUnavailable
+	}
+	ctx := context.Background()
+	switch sub {
+	case "", "threads":
+		threads := x.state.Threads(ctx)
+		if sub == "threads" {
+			if len(threads) == 0 {
+				return "（无线程运行态）\n"
+			}
+			items := make([]any, 0, len(threads))
+			var b strings.Builder
+			fmt.Fprintf(&b, "%-10s %-12s %-8s %s\n", "Name", "Type", "Core", "ID")
+			for _, th := range threads {
+				items = append(items, anyToTree(th))
+				fmt.Fprintf(&b, "%-10s %-12s %-8d %d\n", th.Name, th.Type, th.Core, th.ID)
+			}
+			x.structured = map[string]any{"threads": items}
+			return b.String()
+		}
+		// show vpp：概览（线程数 + buffer + 内存）
+		buf, hasBuf := x.state.Buffers(ctx)
+		mem, hasMem := x.state.Memory(ctx)
+		out := map[string]any{"threads": len(threads)}
+		if hasBuf {
+			out["buffers"] = anyToTree(buf)
+		}
+		if hasMem {
+			out["memory"] = anyToTree(mem)
+		}
+		x.structured = out
+		var b strings.Builder
+		fmt.Fprintf(&b, "threads: %d\n", len(threads))
+		if hasBuf {
+			fmt.Fprintf(&b, "buffers: pools=%d\n", len(buf.Pools))
+			for _, pl := range buf.Pools {
+				fmt.Fprintf(&b, "  %-10s used=%.0f available=%.0f cached=%.0f\n", pl.Name, pl.Used, pl.Available, pl.Cached)
+			}
+		} else {
+			fmt.Fprintln(&b, "buffers: 运行态不可用")
+		}
+		if hasMem {
+			fmt.Fprintf(&b, "memory: total=%d used=%d free=%d\n", mem.Total, mem.Used, mem.Free)
+		} else {
+			fmt.Fprintln(&b, "memory: 运行态不可用")
+		}
+		return b.String()
+	case "buffers":
+		buf, ok := x.state.Buffers(ctx)
+		if !ok {
+			return "%% buffer 池运行态不可用（可能未启用 stats segment 或全零）\n"
+		}
+		x.structured = anyToTree(buf)
+		var b strings.Builder
+		for _, pl := range buf.Pools {
+			fmt.Fprintf(&b, "%-10s used=%.0f available=%.0f cached=%.0f\n", pl.Name, pl.Used, pl.Available, pl.Cached)
+		}
+		if b.Len() == 0 {
+			return "（无 buffer 池运行态）\n"
+		}
+		return b.String()
+	case "memory":
+		mem, ok := x.state.Memory(ctx)
+		if !ok {
+			return "%% 内存运行态不可用\n"
+		}
+		x.structured = anyToTree(mem)
+		return fmt.Sprintf("total=%d used=%d free=%d\n", mem.Total, mem.Used, mem.Free)
+	case "runtime":
+		// 契约 §1.1：每线程指令周期/向量率；govpp runtime 未接入时为明确提示
+		return "%% VPP runtime 统计未接入（govpp runtime 解码，见附录 A #34 限制）\n"
+	case "capture":
+		return x.execShowVppCapture()
+	}
+	return fmt.Sprintf("%% 无效命令: show vpp %s（可用：threads|buffers|memory|runtime|capture）\n", sub)
+}
+
+// execShowLldp：契约 §1.1 写法 `show lldp neighbors`（等价 `show protocols lldp neighbors`）。
+func (x *cliExecutor) execShowLldp(args []string) string {
+	if len(args) >= 1 && args[0] != "neighbors" {
+		return fmt.Sprintf("%% 无效命令: show lldp %s（可用：show lldp neighbors）\n", strings.Join(args, " "))
+	}
+	return x.execShowProtocols([]string{"lldp", "neighbors"})
+}

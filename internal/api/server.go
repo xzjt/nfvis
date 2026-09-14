@@ -110,6 +110,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.cliExec.setCapture(opts.Capture)
 	s.cliExec.setSoftware(opts.Software)
 	s.cliExec.setHardware(opts.Hardware)
+	s.cliExec.setSRIOV(opts.SRIOV)
 	s.cliExec.setTLS(opts.TLS)
 	s.cliExec.setVPPRestart(func(ctx context.Context) error {
 		if s.vpp == nil {

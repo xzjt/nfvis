@@ -54,6 +54,10 @@ func (x *cliExecutor) execRequest(user, class, source string, t []string) string
 		return x.requestAlarms(user, t[1:])
 	case "vpp":
 		return x.requestVPP(user, t[1:])
+	case "interfaces":
+		return x.requestInterfaces(user, source, t[1:])
+	case "sriov":
+		return x.requestSRIOV(user, source, t[1:])
 	}
 	// 权限已在 execRequest 入口处校验过部分域；此处对未接入域报明确占位。
 	if !x.allow(class, mustNode(schema.OperRoot(), "request"), append([]string{"request"}, validated...)...) {
