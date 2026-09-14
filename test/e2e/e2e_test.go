@@ -14,6 +14,8 @@ package e2e
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,7 +41,7 @@ func newClient(t *testing.T) *client {
 	if base == "" {
 		t.Skip("跳过 e2e：未设置 NFVIS_API")
 	}
-	c := &client{base: strings.TrimRight(base, "/"), http: &http.Client{Timeout: 30 * time.Second}}
+	c := &client{base: strings.TrimRight(base, "/"), http: e2eHTTPClient(t, base)}
 	pw := os.Getenv("NFVIS_E2E_PASSWORD")
 	if pw == "" {
 		t.Skip("跳过 e2e：未设置 NFVIS_E2E_PASSWORD")
@@ -165,7 +167,7 @@ func TestE2EMainChain(t *testing.T) {
 	go func() {
 		req, _ := http.NewRequest(http.MethodGet, c.base+"/api/v1/events", nil)
 		req.Header.Set("Authorization", "Bearer "+c.token)
-		resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+		resp, err := e2eHTTPClient(t, c.base).Do(req)
 		if err != nil {
 			return
 		}
@@ -327,4 +329,32 @@ func TestE2EBenchmark(t *testing.T) {
 	})
 
 	fmt.Fprintln(os.Stderr, "基准完成（明细见 -v 输出的 BENCH 行）")
+}
+
+// e2eHTTPClient 构造 e2e 用 HTTP 客户端。
+//
+// FR-SEC-004（决策 #72）后 nfvisd 默认以**自签证书**提供 HTTPS，系统信任库不含它，
+// 故 https 基准地址需要固定守护进程证书（NFVIS_E2E_CA 可覆盖），与 nfvis-cli 同策略。
+func e2eHTTPClient(t *testing.T, base string) *http.Client {
+	t.Helper()
+	hc := &http.Client{Timeout: 30 * time.Second}
+	if !strings.HasPrefix(base, "https://") {
+		return hc
+	}
+	ca := os.Getenv("NFVIS_E2E_CA")
+	if ca == "" {
+		ca = "/var/lib/nfvis/tls/server.crt"
+	}
+	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+	pem, err := os.ReadFile(ca)
+	if err != nil {
+		t.Fatalf("https 基准地址需可读的守护进程证书（NFVIS_E2E_CA，缺省 %s）: %v", ca, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		t.Fatalf("证书 %s 不含可用 PEM", ca)
+	}
+	tc.RootCAs = pool
+	hc.Transport = &http.Transport{TLSClientConfig: tc}
+	return hc
 }
