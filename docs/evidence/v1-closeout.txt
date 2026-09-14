@@ -1,0 +1,103 @@
+===== V1 收尾验收证据（决策 #69）=====
+环境：nfvis-vm（Ubuntu 26.04、VPP v26.06-release、govpp v0.13.0）
+日期：2026-09-14
+nfvisd：/tmp/nfvisd -db /tmp/nfvis.db -listen 127.0.0.1:18443
+验收范围：FR-API-002（openapi.json）、FR-SYS-004/OPS-022（远程 syslog 转发）、
+          FR-OPS-030（日志级别）、FR-NET-013（IPv6，A-3）
+说明：本文件为**原始输出摘录**，命令与结果一一对应。
+
+----- 1. FR-API-002：GET /api/v1/openapi.json（无鉴权）-----
+$ curl -s -o /tmp/spec.json -w "http=%{http_code} type=%{content_type} size=%{size_download}\n" \
+    http://127.0.0.1:18443/api/v1/openapi.json
+http=200 type=application/json; charset=utf-8 size=140509
+
+$ python3 -c 'import json;d=json.load(open("/tmp/spec.json"));print("openapi=",d["openapi"],"paths=",len(d["paths"]))'
+openapi= 3.0.3 paths= 88
+
+（内容由 docs/NFViS-openapi.yaml 生成并编译期嵌入；`make docscheck` 守护二者一致）
+
+----- 2. FR-SYS-004：远程 syslog 转发（RFC 5424，UDP）-----
+配置（CLI，经事务引擎提交）：
+  set system syslog host 127.0.0.1 port 5514 facility local0 severity debug
+  set system syslog local level debug
+  → commit 成功 (revision 3)
+
+在 127.0.0.1:5514 以 UDP 监听捕获：
+<134>1 2026-09-14T03:41:48.106582139Z nfvis nfvisd 109747 log - ﻿日志级别已应用 level=DEBUG
+<134>1 2026-09-14T03:41:48.106790855Z nfvis nfvisd 109747 log - ﻿远程 syslog 转发已配置 host=127.0.0.1 port=5514 facility=local0 severity=debug
+<135>1 2026-09-14T03:41:48.109661294Z nfvis nfvisd 109747 log - ﻿api method=POST path=/api/v1/cli/execute elapsed=2.66249ms
+<135>1 2026-09-14T03:41:48.110246617Z nfvis nfvisd 109747 log - ﻿api method=POST path=/api/v1/logout elapsed=6.288µs
+
+报文结构核对：`<PRI>1 TIMESTAMP HOST APP PROCID MSGID SD MSG`
+  PRI 134 = facility local0(16)×8 + severity info(6)；PRI 135 = 16×8 + debug(7)
+  HOST=nfvis  APP=nfvisd  PROCID=109747  MSGID=log  SD=-（无结构化数据）
+  MSG 以 UTF-8 BOM 起头（RFC 5424 §6.4 建议）
+
+----- 3. FR-OPS-030：日志级别与 committed 配置联动 -----
+上面 `<135>`（debug）两级报文即是证据：级别此前硬编码 `slog.LevelInfo`，
+debug 记录根本不会产生、更不会转发；`level=DEBUG` 由 committed
+`system.syslog.local.level` 驱动并在启动与每次 commit 后重载。
+
+----- 4. FR-SYS-004：severity 阈值过滤 -----
+把远程 severity 收紧为 warn 后，再产生一批 info/debug 日志（登录 + show）：
+  基线条数: 5
+  再产生 info/debug 日志后条数: 5
+  ✓ severity=warn 生效：info/debug 未被转发
+
+----- 5. FR-OPS-022：告警转发远程 syslog -----
+`set system health thresholds disk-used-percent 1` → 60s 巡检越限，同一 UDP 监听捕获：
+<132>1 2026-09-14T03:45:52.138771403Z nfvis nfvisd 109747 alarm - ﻿[HARDWARE_THRESHOLD] 硬件健康越限: 根文件系统使用率 15.6%（阈值 1%） source=system state=active
+
+PRI 132 = 16×8 + warning(4)，MSGID=alarm。
+同源核对（GET /alarms）：
+[{"id":"alm-00001","severity":"warning","code":"HARDWARE_THRESHOLD",
+  "message":"硬件健康越限: 根文件系统使用率 15.6%（阈值 1%）","source":"system",
+  "raised_at":"2026-09-14T03:45:52.138763729Z","state":"active"}]
+→ 转发内容与告警存储一致。
+
+----- 6. FR-NET-013（A-3）：IPv6 静态路由 + v6 转发真机验证 -----
+$ go test -tags integration -count=1 -v -run "IPv6" ./test/integration/
+=== RUN   TestIPv6AddressAndStaticRoutes
+    a3_ipv6_test.go:106: v6 地址已下发: 2001:db8:155::1/64
+    a3_ipv6_test.go:114: v6 静态路由已下发: 2001:db8:aaaa::/64 via 2001:db8:155::2（table 10921771）
+    a3_ipv6_test.go:114: v6 静态路由已下发: ::/0 via 2001:db8:155::2（table 10921771）
+--- PASS: TestIPv6AddressAndStaticRoutes (0.02s)
+=== RUN   TestIPv6ForwardingICMPv6
+    a3_ipv6_test.go:172: v6 转发验证：VPP ping 2001:db8:7::2 收包 3 条
+        76 bytes from 2001:db8:7::2: icmp_seq=2 ttl=64 time=9.6454 ms
+        76 bytes from 2001:db8:7::2: icmp_seq=3 ttl=64 time=.1571 ms
+        76 bytes from 2001:db8:7::2: icmp_seq=4 ttl=64 time=1.3958 ms
+
+        Statistics: 4 sent, 3 received, 25% packet loss
+--- PASS: TestIPv6ForwardingICMPv6 (8.10s)
+PASS
+ok  	github.com/xzjt/nfvis/test/integration	8.121s
+
+① 配置路径经产品事务引擎下发 v6 地址与 v6 静态路由（含默认路由 ::/0），运行态 FIB 可见；
+② 数据路径建 VPP tap，VPP 侧 2001:db8:7::1/64、内核侧 2001:db8:7::2/64，
+   由 VPP ping 内核侧地址 —— 真实经过 v6 FIB 查询 + 邻居发现（NDP）+ ICMPv6 往返；
+   首包丢失为 NDP 解析（正常）。
+
+**A-3 附带发现的缺陷（已修复，决策 #69④）**：修复前本测试的「v6 静态路由」断言失败，
+但 VPP 侧 `show ip6 fib 10921771` 实际已含 `2001:db8:aaaa::/64` 与 `::/0`——
+根因是 `ip_route_dump` **未显式传 `IsIP6` 时只返回 IPv4 路由**，
+故 `GET /vrfs/{name}/routes` / `show routes` 看不到已生效的 v6 路由。
+修复后断言通过；单测 `TestL3RoutesIncludeIPv6` 守护（fakeL3 亦按协议分表以镜像 VPP 语义）。
+
+**环境限制（如实记录）**：nfvis-vm 仅有 link-local IPv6、**无 v6 缺省路由**
+（VMnet8 NAT 不提供 IPv6），故**无外部 v6 对端**；本验证不覆盖跨设备 v6 通流
+（属环境受限，与 LLDP/SR-IOV 同类）。
+
+----- 7. 回归：真机集成全量 -----
+$ make integration
+exit=0   PASS: 175
+ok  	github.com/xzjt/nfvis/test/integration	162.126s
+ok  	github.com/xzjt/nfvis/internal/orchestrator	0.019s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/compute	8.578s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/container	0.009s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/network	0.110s
+
+----- 8. 环境恢复 -----
+VPP 运行中（v26.06-release），接口仅 ens192/ens224/local0（均 down，无 vh-/mf-/tap/loop 残留），
+v6 FIB 无测试残留（重启 VPP 清除递归下一跳的陈旧 /128 条目）；nfvisd 未运行；
+/tmp 临时文件（监听脚本、捕获文件、部署包、库文件）已清理；引导镜像 alpine.qcow2 未动；无游离 domain。
