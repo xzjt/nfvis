@@ -848,15 +848,19 @@ var statementAliases = []aliasRule{
 		}},
 	{pattern: []string{"vpp", "dpdk", "dev", "*", "*"},
 		apply: func(tree map[string]any, t []string, isSet bool) error {
-			key, ok := dpdkDevDefaultKey(t[3])
-			if !ok {
-				return fmt.Errorf("无匹配配置: vpp dpdk dev %s（单网卡覆盖需 dev <ifname> <参数> <值>）", t[3])
+			if key, ok := dpdkDevDefaultKey(t[3]); ok {
+				n, err := numField(t[4])
+				if err != nil {
+					return err
+				}
+				return dpdkDevDefault(tree, key, n, isSet)
 			}
-			n, err := numField(t[4])
-			if err != nil {
-				return err
+			// 非全局默认关键字 → 是「单网卡单项」形式（契约 §2.9 的
+			// `delete dpdk dev <ifname> <参数>`，与全局默认同为 5 token，故按关键字名区分）。
+			if isSet {
+				return fmt.Errorf("配置不完整，缺少取值: vpp dpdk dev %s %s", t[3], t[4])
 			}
-			return dpdkDevDefault(tree, key, n, isSet)
+			return dpdkPerDev(tree, t[3], strings.ReplaceAll(t[4], "-", "_"), nil, false)
 		}},
 	{pattern: []string{"vpp", "dpdk", "dev", "*", "*", "*"},
 		apply: func(tree map[string]any, t []string, isSet bool) error {

@@ -156,6 +156,25 @@ $ nfvis-cli -c "configure\nset resource-pools cpu numa node 0 cores 1-4"
   commit 成功（先配 isolated-cores 1-4，否则校验会正确拒绝「核不在隔离核池内」）
 落库：numa 0 { cores [ 1 2 3 4 ]; node 0; }
 
+----- 2c. 补测「命令全表」时又发现的 2 处 -----
+（为写全表逐条补测剩余命令，发现下面 2 处。）
+
+【缺陷 8】契约漂移：request api token revoke 的位置（§1.2）
+$ nfvis-cli -c "request api token revoke abc123"                 # 契约写法（顶级）
+  % 无效命令: request api token revoke abc123（输入 ? 查看可用命令）
+$ nfvis-cli -c "request system api token revoke abc123"          # 实现/schema 写法
+  %% token 吊销请经 API DELETE /login（当前会话）；逐 token 吊销随 V2
+契约 §1.2 把它列在**顶级 request** 下，而 schema 与实现只在 `request system api` 下
+（与 `api tls regenerate` 同级）。修：**改契约**（实现侧本就有明确的 V1 延期提示）。
+
+【缺陷 9】core dump / 诊断归档的「不存在」报错说成「备份归档不存在」
+$ nfvis-cli -c "request system core-dumps delete file nope"
+  %% 备份归档不存在: nope            ← 文案错位
+根因：`internal/system/coredump.go` 与 `techsupport.go` 复用了 `backup.go` 的
+      `ErrNotFound`（文案就是「备份归档不存在」）。
+修复后：%% core dump 不存在: nope
+单测：TestNotFoundMessagesAreContextSpecific（要求三者文案互不串味，红-绿已验证）。
+
 ----- 3. 红-绿验证（撤修复必失败）-----
 $ git stash push internal/api/cliexec.go   && go test -run TestCLIStatementMappingGuard
     --- FAIL: .../set_vpp_dpdk_dev_rx-queues_2
@@ -171,6 +190,46 @@ $ git stash push internal/api/cliexec.go internal/api/cli_annotate.go internal/a
     --- FAIL: TestCLIStatementMappingGuard/set_system_dns_server_8.8.8.8_secondary_8.8.4.4
     --- FAIL: TestCLIStatementMappingGuard/set_resource-pools_cpu_numa_node_0_cores_1-4
 恢复修复后全部 PASS（含 make check 全绿）。
+
+----- 3b. 为编制《命令全表》补测时又发现 8 处（**尚未修复**，已在全表标 ❌）-----
+$ nfvis-cli -c "configure
+set system api tls cert-file /tmp/a.pem key-file /tmp/a.key"
+  %% 未知语句: "key-file"
+$ nfvis-cli -c "configure
+set system login user u1 password Abc12345!x class super-user"
+  %% 未知语句: "password"          ← 语法树把 <name> 参数置于关键字之前
+$ nfvis-cli -c "configure
+set system login class c1 allow show"
+  %% 语句未产生配置变更（尚未映射到模型或值未变化）: system login class c1 allow show
+$ nfvis-cli -c "configure
+set virtual-switches vs-l2 cross-connect 1 2"
+  %% 未知语句: "2"                  ← 另：模型仅有 cross_connect bool，语义不一致
+$ nfvis-cli -c "configure
+set virtual-machine-functions vm-t interfaces eth0 vlan 100"
+  %% 取值类型不符: json: cannot unmarshal string into ... VnfInterface...vlan of type int
+$ nfvis-cli -c "configure
+set virtual-machine-functions vm-t cloud-init ssh-key \"ssh-ed25519 AAAATEST k@h\""
+  %% 未知语句: "AAAATEST"           ← 公钥必含空格；set 无多词取值/引号机制
+$ nfvis-cli -c "configure
+set container-functions ct-t interfaces eth0 type memif virtual-switch vs-l2"
+  %% 未知语句: "virtual-switch"      ← type 取值后的同级关键字不可达
+$ nfvis-cli -c "configure
+set container-functions ct-t env K V"
+  %% 未知语句: "V"                   ← 取值节点未被消费
+
+（这 8 处在上一轮阶段脚本里被「首条失败即中止」掩盖，编制全表逐条补测才暴露。
+  其中「login user 口令哈希落地」「cross-connect 模型语义」需设计决策；
+  「ssh-key 多词取值」需 CLI 前端引号机制，影响面较广。）
+
+----- 3c. 回归：修复 ① 时一度引入的缺陷（已修 + 已加回归测试）-----
+修复 ① 时把 5-token 一律当「全局默认」，而契约 §2.9 的
+`delete vpp dpdk dev <ifname> <参数>`（单网卡单项）**同为 5 token** → 被误判报错。
+$ nfvis-cli -c "configure
+set vpp dpdk dev ens192 rx-queues 4
+delete vpp dpdk dev ens192 rx-queues"
+  %% 无匹配配置: vpp dpdk dev ens192（单网卡覆盖需 dev <ifname> <参数> <值>）
+修复：按关键字名区分（rx-queues/tx-queues/rx-descriptors/tx-descriptors 为全局默认，其余为接口名）。
+回归测试 `TestCLIDpdkDevDeleteForms` 覆盖三种 delete 形式，红-绿已验证。
 
 ----- 4. 未修复（如实登记）-----
 ① **容器镜像目录名须等于 Docker tag**（新建镜像经 CLI 上传后无法被 container-functions 引用）：

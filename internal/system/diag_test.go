@@ -160,3 +160,28 @@ func keys(m map[string]string) []string {
 	}
 	return out
 }
+
+// TestNotFoundMessagesAreContextSpecific 覆盖决策 #76 §4④：
+// core dump / 诊断归档 / 备份归档 三者各自的「不存在」报错必须能被区分——
+// 此前 coredump.go 与 techsupport.go 复用了 backup.go 的 ErrNotFound，
+// 导致 core dump 找不到时报「备份归档不存在」，误导排查（全功能 CLI 测试发现）。
+func TestNotFoundMessagesAreContextSpecific(t *testing.T) {
+	cores := NewCoreDumps(t.TempDir(), 0)
+	if _, err := cores.Path("nope"); err == nil || !strings.Contains(err.Error(), "core dump") {
+		t.Fatalf("core dump 不存在应报 core dump 相关文案，实际: %v", err)
+	} else if strings.Contains(err.Error(), "备份归档") {
+		t.Fatalf("core dump 报错不得说成备份归档: %v", err)
+	}
+
+	ts := NewTechSupport(t.TempDir(), TechSupportSources{}, "1.0.0")
+	if _, err := ts.Path("nope"); err == nil || !strings.Contains(err.Error(), "诊断归档") {
+		t.Fatalf("诊断归档不存在应报诊断相关文案，实际: %v", err)
+	} else if strings.Contains(err.Error(), "备份归档") {
+		t.Fatalf("诊断归档报错不得说成备份归档: %v", err)
+	}
+
+	m := NewManager(Config{Dir: t.TempDir()}, nil, nil, "1.0.0")
+	if _, err := m.Path("nope"); err == nil || !strings.Contains(err.Error(), "备份归档") {
+		t.Fatalf("备份归档不存在应报备份相关文案，实际: %v", err)
+	}
+}

@@ -144,13 +144,16 @@ request system
   ├─ tech-support generate                          # 生成诊断归档 tar.gz，CLI/API 下载
   ├─ core-dumps export <url> | delete [file <name>]
   ├─ zeroize                                        # S；双重确认，恢复出厂（FR-OPS-007）
-  ├─ api tls regenerate                             # 重签自签证书（或经配置安装外部证书）
+  ├─ api
+  │   ├─ tls regenerate                             # 重签自签证书（或经配置安装外部证书）
+  │   └─ token revoke <token-id>                    # S；**在 api 之下**（决策 #76：原文档误置于顶级
+  │                                                 # request 下）。V1 仅提示「经 API DELETE /login
+  │                                                 # 吊销当前会话」，逐 token 吊销随 V2
   ├─ ssh host-key regenerate                        # 重新生成 SSH host key
   ├─ password change                                # 登录者自助改密（验证旧口令）
   ├─ storage format-data                            # S；危险，双确认（V1 仅重置数据分区）
   └─ ntp sync
 request alarms clear [id <id> | all]                # 确认后清除已 resolved 告警
-request api token revoke <token-id>                 # S
 ```
 
 > 实现说明（M4-12，附录 A #49~#51）：VNF/容器/镜像三条 `request` 族由 CLI 执行器**直连运行态接口**（与 `show` 族同源），不经自身 HTTP；动作成功/失败均入审计（FR-OPS-031），console 记打开/关闭两条（FR-OPS-032）。

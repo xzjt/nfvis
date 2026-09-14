@@ -109,14 +109,19 @@ func (c *CoreDumps) List() []CoreDump {
 	return out
 }
 
+// ErrCoreNotFound 转储文件不存在。
+// 独立于 backup.go 的 ErrNotFound（其文案是「备份归档不存在」）——复用会让 core dump 的
+// 报错说成备份归档，误导排查（决策 #76 §4④，全功能 CLI 测试发现）。
+var ErrCoreNotFound = fmt.Errorf("core dump 不存在")
+
 // Path 解析转储文件路径（限定目录内，防穿越）。
 func (c *CoreDumps) Path(file string) (string, error) {
 	if file == "" || strings.ContainsAny(file, `/\`) || strings.Contains(file, "..") {
-		return "", fmt.Errorf("%w: %q", ErrNotFound, file)
+		return "", fmt.Errorf("%w: %q", ErrCoreNotFound, file)
 	}
 	p := filepath.Join(c.Dir, file)
 	if _, err := os.Stat(p); err != nil {
-		return "", fmt.Errorf("%w: %s", ErrNotFound, file)
+		return "", fmt.Errorf("%w: %s", ErrCoreNotFound, file)
 	}
 	return p, nil
 }
