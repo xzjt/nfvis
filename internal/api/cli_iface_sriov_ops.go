@@ -100,6 +100,8 @@ func (x *cliExecutor) requestInterfacesDPDK(user, source string, t []string) str
 		return "%% DPDK 接管不可用（编排器未装配）\n"
 	}
 	ifname, action := t[0], t[1]
+	// 交互确认：REPL 在用户答 yes 后追加 --yes；脚本可直接带上（与 delete/reboot 同语义）。
+	t, confirmed := splitConfirm(t)
 	bound := action == "bind-dpdk"
 	driver := ""
 	switch {
@@ -116,7 +118,7 @@ func (x *cliExecutor) requestInterfacesDPDK(user, source string, t []string) str
 	if !bound {
 		verb = "解绑并交还内核驱动"
 	}
-	if ask, ok := confirmOrAsk("将接口 "+ifname+" "+verb+"（会中断该网卡流量）", "", false); !ok {
+	if ask, ok := confirmOrAsk("将接口 "+ifname+" "+verb+"（会中断该网卡流量）", "", confirmed); !ok {
 		return ask
 	}
 	pci, cur, err := x.dpdk.SetDPDKBound(context.Background(), ifname, bound, driver)

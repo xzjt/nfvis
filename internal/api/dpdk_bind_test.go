@@ -122,3 +122,38 @@ func TestCLIDPDKCommandCoverage(t *testing.T) {
 		t.Fatalf("未装配应明确提示: %q", out)
 	}
 }
+
+// 确认语义：不带 --yes 只问不做；带 --yes 才执行（脚本/管道不得静默执行破坏性动作）。
+func TestCLIDPDKBindNeedsConfirm(t *testing.T) {
+	x, _ := newCLIKit(t)
+	f := &fakeDPDK{}
+	x.setDPDK(f)
+
+	out := x.Execute("admin", "super-user", "ssh", "request interfaces ens224 bind-dpdk").Output
+	if !strings.Contains(out, "yes,no") {
+		t.Fatalf("应先问询: %q", out)
+	}
+	if f.calls != 0 {
+		t.Fatal("未确认不应调用底座")
+	}
+	out = x.Execute("admin", "super-user", "ssh", "request interfaces ens224 bind-dpdk --yes").Output
+	if f.calls != 1 || !f.lastBound {
+		t.Fatalf("带 --yes 应执行: %q", out)
+	}
+	if !strings.Contains(out, "vfio-pci") {
+		t.Fatalf("应报告绑定结果: %q", out)
+	}
+
+	// 解绑同样需确认
+	out = x.Execute("admin", "super-user", "ssh", "request interfaces ens224 unbind-dpdk").Output
+	if !strings.Contains(out, "yes,no") || f.calls != 1 {
+		t.Fatalf("解绑应先问询: %q", out)
+	}
+	out = x.Execute("admin", "super-user", "ssh", "request interfaces ens224 unbind-dpdk --yes").Output
+	if f.calls != 2 || f.lastBound {
+		t.Fatalf("解绑应执行: %q", out)
+	}
+	if !strings.Contains(out, "vmxnet3") {
+		t.Fatalf("解绑后应报告内核驱动: %q", out)
+	}
+}
