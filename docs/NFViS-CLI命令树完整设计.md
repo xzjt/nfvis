@@ -121,6 +121,10 @@ request images
   │      # URL 拉取必填 sha256（FR-SEC-004 默认强制校验，缺省即拒绝）
   └─ delete name <name>                             # 引用检查；确认
 request interfaces <ifname> enable | disable         # PUT /interfaces/{n}
+request interfaces <ifname> bind-dpdk [uio-driver <vfio-pci|igb-uio>]
+request interfaces <ifname|pci> unbind-dpdk          # PUT /interfaces/{n}/dpdk（确认；FR-NET-001）
+                                                     # 已由 DPDK 接管的网卡在内核中无 netdev，解绑须给 PCI 地址
+                                                     # 绑定会中断该网卡现有流量，且该网卡不得正被 VPP 使用
 request sriov create-vfs <ifname> count <uint> | delete-vfs <ifname> vf <uint>
 request vpp restart                                 # S；确认。按 committed 配置重新生成 startup.conf 并重启 VPP，
                                                     # 随后 recovery 收敛重放网络配置、vhost-user 重连（影响业务转发）

@@ -19,7 +19,9 @@ WatchdogSec=30
 Environment=NFVIS_DB=/var/lib/nfvis/nfvis.db
 Environment=NFVIS_LISTEN=:443
 Environment=NFVIS_VPP_SOCK=/run/vpp/api.sock
-# 未提供 TLS 证书时退化为明文（仅限开发）；生产由 set system api tls 安装后重启生效
+# FR-SEC-004（决策 #72）：未提供证书时 nfvisd 自动生成自签证书并启用 HTTPS；
+# 明文仅由 -allow-plaintext 显式开启（开发/测试）。生产可用 set system api tls 安装正式证书。
+# FR-SEC-001：NFVIS_LISTEN 为通配时，nfvisd 按 committed 管理口地址收敛绑定地址。
 ExecStart=/usr/bin/nfvisd -db ${NFVIS_DB} -listen ${NFVIS_LISTEN} -vpp-sock ${NFVIS_VPP_SOCK}
 ExecReload=/bin/kill -HUP $MAINPID
 KillSignal=SIGTERM

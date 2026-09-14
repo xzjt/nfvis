@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/images"
 )
@@ -143,4 +144,14 @@ func TestImagesURLPullRequiresSHA256Sync(t *testing.T) {
 	if status != http.StatusAccepted {
 		t.Fatalf("带合法 sha256 应 202 受理: %d %s", status, data)
 	}
+	// 等后台拉取落定（连接失败会立刻转 failed）：否则它与 t.TempDir 清理竞争，
+	// 在 Windows 上会报 "The directory is not empty"。
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if m, ok := store.Get("t2.qcow2"); !ok || m.ImportState != images.StateDownloading {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("后台拉取未在期限内落定")
 }

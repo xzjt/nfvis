@@ -1485,6 +1485,49 @@ paths:
         "200": { $ref: "#/components/responses/ConfigAccepted" }
         "400": { $ref: "#/components/responses/Error400" }
 
+  /interfaces/{name}/dpdk:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+        description: |
+          接口名**或 PCI 地址**（如 0000:13:00.0）。已被 DPDK 接管的网卡在内核中无 netdev，
+          此时只能按 PCI 定位——而这正是解绑的常态。
+    put:
+      tags: [interfaces]
+      summary: 网卡 DPDK 驱动接管/解绑（FR-NET-001）
+      description: |
+        把物理网卡绑定到 DPDK 用户态驱动（缺省 vfio-pci）或解绑交还内核驱动。
+        实现为 sysfs 标准流程（`driver_override` + `bind`/`unbind`）；
+        绑定会**中断该网卡现有流量**，且该网卡不得正被 VPP 使用，故需 `confirm=true`。
+        先前该能力在产品内完全缺失，实机需人工/安装期带外完成（决策 #72）。
+      parameters:
+        - { name: confirm, in: query, schema: { type: boolean, default: false } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bound]
+              properties:
+                bound: { type: boolean, description: true = 绑定到 DPDK 驱动；false = 解绑交还内核 }
+                uio_driver: { type: string, enum: [vfio-pci, igb-uio], description: 缺省 vfio-pci }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  interface: { type: string }
+                  pci: { type: string }
+                  driver: { type: string, description: 操作后该网卡绑定的驱动 }
+        "400": { $ref: "#/components/responses/Error400" }
+        "404": { $ref: "#/components/responses/Error404" }
+
   /system/login-users/{name}:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
     put:

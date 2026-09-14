@@ -130,3 +130,31 @@ func TestApplyLogRetentionWritesDropIn(t *testing.T) {
 	}
 
 }
+
+// FR-SEC-004（决策 #72）：EnsureSelfSigned 缺失时生成、已存在时复用。
+func TestEnsureSelfSigned(t *testing.T) {
+	m := NewTLSManager(t.TempDir(), nil)
+
+	info, generated, err := m.EnsureSelfSigned("nfvis-test", []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatalf("EnsureSelfSigned: %v", err)
+	}
+	if !generated {
+		t.Fatal("首次调用应生成证书")
+	}
+	if !info.SelfSigned || !strings.Contains(info.Subject, "nfvis-test") {
+		t.Fatalf("证书信息不符: %+v", info)
+	}
+
+	// 第二次应复用（不重新生成）——以指纹是否变化判定
+	info2, generated2, err := m.EnsureSelfSigned("nfvis-test", []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatalf("EnsureSelfSigned(2): %v", err)
+	}
+	if generated2 {
+		t.Fatal("已存在证书不应重复生成")
+	}
+	if info2.Fingerprint != info.Fingerprint {
+		t.Fatalf("复用的证书指纹应一致: %s vs %s", info.Fingerprint, info2.Fingerprint)
+	}
+}

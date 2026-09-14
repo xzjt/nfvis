@@ -265,3 +265,40 @@ func (s *Server) handleGetVrfRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, rows)
 }
+
+// DPDKSetter 网卡 DPDK 驱动接管（FR-NET-001，决策 #72；编排器装配注入）。
+type DPDKSetter interface {
+	// SetDPDKBound 绑定（bound=true，driver 为空用 vfio-pci）或解绑（bound=false）；
+	// 返回该网卡的 PCI 地址与操作后实际绑定的驱动名。
+	SetDPDKBound(ctx context.Context, ifname string, bound bool, driver string) (pci, curDriver string, err error)
+}
+
+// handlePutDPDK PUT /api/v1/interfaces/{name}/dpdk：网卡 DPDK 驱动绑定/解绑（FR-NET-001）。
+//
+// 会中断该网卡现有流量，故要求 confirm=true（与删除类动作同口径）。
+func (s *Server) handlePutDPDK(w http.ResponseWriter, r *http.Request) {
+	if s.dpdk == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "DPDK 接管未接入（编排器未装配）", nil)
+		return
+	}
+	name := r.PathValue("name")
+	if r.URL.Query().Get("confirm") != "true" {
+		writeError(w, http.StatusBadRequest, "CONFIRM_REQUIRED",
+			"DPDK 驱动绑定会中断该网卡流量，需 confirm=true", nil)
+		return
+	}
+	var in struct {
+		Bound     *bool  `json:"bound"`
+		UIODriver string `json:"uio_driver"`
+	}
+	if err := decodeBody(r, &in); err != nil || in.Bound == nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "bound 必填", nil)
+		return
+	}
+	pci, drv, err := s.dpdk.SetDPDKBound(r.Context(), name, *in.Bound, in.UIODriver)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"interface": name, "pci": pci, "driver": drv})
+}

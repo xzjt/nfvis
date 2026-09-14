@@ -15,10 +15,13 @@ import (
 	"github.com/xzjt/nfvis/internal/model"
 )
 
-// requestInterfaces：request interfaces <ifname> enable|disable。
+// requestInterfaces：request interfaces <ifname> enable|disable | bind-dpdk | unbind-dpdk。
 func (x *cliExecutor) requestInterfaces(user, source string, t []string) string {
+	if len(t) >= 2 && (t[1] == "bind-dpdk" || t[1] == "unbind-dpdk") {
+		return x.requestInterfacesDPDK(user, source, t)
+	}
 	if len(t) < 2 || (t[1] != "enable" && t[1] != "disable") {
-		return "%% 语法: request interfaces <ifname> enable|disable\n"
+		return "%% 语法: request interfaces <ifname> enable|disable | bind-dpdk [uio-driver <d>] | unbind-dpdk\n"
 	}
 	ifname, action := t[0], t[1]
 	enable := action == "enable"
@@ -88,4 +91,42 @@ func (x *cliExecutor) requestSRIOV(user, source string, t []string) string {
 		return fmt.Sprintf("接口 %s SR-IOV VF 数量 %d → %d\n", ifname, cur, next)
 	}
 	return fmt.Sprintf("%% 无效命令: request sriov %s（可用：create-vfs|delete-vfs）\n", strings.Join(t, " "))
+}
+
+// requestInterfacesDPDK：request interfaces <ifname> bind-dpdk [uio-driver <d>] | unbind-dpdk
+// （FR-NET-001，决策 #72）。绑定/解绑会中断该网卡流量，故需确认。
+func (x *cliExecutor) requestInterfacesDPDK(user, source string, t []string) string {
+	if x.dpdk == nil {
+		return "%% DPDK 接管不可用（编排器未装配）\n"
+	}
+	ifname, action := t[0], t[1]
+	bound := action == "bind-dpdk"
+	driver := ""
+	switch {
+	case bound && len(t) == 2:
+		// 缺省驱动
+	case bound && len(t) == 4 && t[2] == "uio-driver":
+		driver = t[3]
+	case bound:
+		return "%% 语法: request interfaces <ifname> bind-dpdk [uio-driver <vfio-pci|igb-uio>]\n"
+	case len(t) != 2:
+		return "%% 语法: request interfaces <ifname> unbind-dpdk\n"
+	}
+	verb := "绑定到 DPDK 驱动"
+	if !bound {
+		verb = "解绑并交还内核驱动"
+	}
+	if ask, ok := confirmOrAsk("将接口 "+ifname+" "+verb+"（会中断该网卡流量）", "", false); !ok {
+		return ask
+	}
+	pci, cur, err := x.dpdk.SetDPDKBound(context.Background(), ifname, bound, driver)
+	if err != nil {
+		x.audit(user, "interfaces.dpdk", fmt.Sprintf("%s %s failure: %v", action, ifname, err), err)
+		return "%% " + err.Error() + "\n"
+	}
+	x.audit(user, "interfaces.dpdk", fmt.Sprintf("%s %s pci=%s driver=%s", action, ifname, pci, cur), nil)
+	if cur == "" {
+		cur = "(无驱动)"
+	}
+	return fmt.Sprintf("接口 %s（PCI %s）已%s，当前驱动 %s\n", ifname, pci, verb, cur)
 }

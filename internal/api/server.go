@@ -43,6 +43,7 @@ type Options struct {
 	LLDP        LldpRuntime            // LLDP 邻居（M3-6；nil = 503）
 	State       *state.State           // 运行态聚合（M3-7；nil = 省略运行态字段）
 	SRIOV       SRIOVSetter            // SR-IOV VF 数量（M3-7；nil = 503）
+	DPDK        DPDKSetter             // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72；nil = 503）
 	Kernel      ksys.KernelApplier     // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
 	NAT         NatSessionsRuntime     // NAT 会话（M3-7；nil = 503）
 	Alarms      AlarmRuntime           // 告警列表（M3-8；nil = 503）
@@ -73,6 +74,7 @@ type Server struct {
 	lldp        LldpRuntime
 	state       *state.State
 	sriov       SRIOVSetter
+	dpdk        DPDKSetter
 	natSessions NatSessionsRuntime
 	alarms      AlarmRuntime
 	vm          VMRuntime
@@ -104,7 +106,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, dpdk: opts.DPDK, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), log: log}
 	s.cliExec.setRuntime(opts.Diag, opts.State)
 	s.cliExec.setNetRuntime(opts.L2, opts.L3, opts.LLDP, opts.NAT, opts.Alarms)
 	s.cliExec.setComputeRuntime(opts.VM, opts.VMConsole, opts.VMSnapshots, opts.Containers, opts.Images)
@@ -116,6 +118,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.cliExec.setSoftware(opts.Software)
 	s.cliExec.setHardware(opts.Hardware)
 	s.cliExec.setSRIOV(opts.SRIOV)
+	s.cliExec.setDPDK(opts.DPDK)
 	s.cliExec.setKernel(opts.Kernel)
 	s.cliExec.setTLS(opts.TLS)
 	s.cliExec.setVPPRestart(func(ctx context.Context) error {
@@ -285,6 +288,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/interfaces/{name}", s.auth(s.handleGetInterface, schema.ClassReadOnly, "show interfaces"))
 	mux.Handle("PUT "+APIPrefix+"/interfaces/{name}", cfgAPI(s.handlePutInterface))
 	mux.Handle("PUT "+APIPrefix+"/interfaces/{name}/sriov", s.auth(s.handlePutSRIOV, schema.ClassSuperUser, "set interfaces sriov"))
+	mux.Handle("PUT "+APIPrefix+"/interfaces/{name}/dpdk", s.auth(s.handlePutDPDK, schema.ClassSuperUser, "request interfaces bind-dpdk"))
 	mux.Handle("GET "+APIPrefix+"/virtual-switches", s.auth(s.handleGetVSwitches, schema.ClassReadOnly, "show virtual-switches"))
 	mux.Handle("GET "+APIPrefix+"/virtual-switches/{name}", s.auth(s.handleGetVSwitch, schema.ClassReadOnly, "show virtual-switches"))
 	mux.Handle("GET "+APIPrefix+"/virtual-switches/{name}/ports", s.auth(s.handleGetVSwitchPorts, schema.ClassReadOnly, "show virtual-switches"))
