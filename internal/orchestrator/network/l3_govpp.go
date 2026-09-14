@@ -156,8 +156,9 @@ func fibNhString(p fib_types.FibPath) string {
 	return ""
 }
 
-func (g *govppL3Client) Routes(tableID uint32) ([]RouteEntry, error) {
-	reqCtx := g.ch.SendMultiRequest(&ip.IPRouteDump{Table: ip.IPTable{TableID: tableID}})
+func (g *govppL3Client) Routes(tableID uint32, isIP6 bool) ([]RouteEntry, error) {
+	// IsIP6 必须显式传递：否则 VPP 只 dump IPv4 路由，v6 静态路由不可见
+	reqCtx := g.ch.SendMultiRequest(&ip.IPRouteDump{Table: ip.IPTable{TableID: tableID, IsIP6: isIP6}})
 	var out []RouteEntry
 	for {
 		d := &ip.IPRouteDetails{}

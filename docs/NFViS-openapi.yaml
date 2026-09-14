@@ -330,6 +330,10 @@ paths:
     get:
       tags: [vrfs]
       summary: FIB 路由表（运行态）
+      description: |
+        返回该 VRF 的运行态 FIB，**含 IPv4 与 IPv6**（FR-NET-013）。
+        注：VPP `ip_route_dump` 不显式指定协议时只返回 IPv4，v6 须单独 dump 后合并
+        （决策 #69 修复；此前 v6 静态路由已下发但此端点不可见）。
       responses:
         "200":
           description: OK

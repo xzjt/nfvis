@@ -33,7 +33,7 @@ type L3Client interface {
 	SwInterfaceSetTable(swIfIndex uint32, isIP6 bool, tableID uint32) error
 	SwInterfaceAddDelAddress(swIfIndex uint32, prefix string, add, delAll bool) error
 	IPRouteAddDel(tableID uint32, prefix, nextHop string, add bool) error
-	Routes(tableID uint32) ([]RouteEntry, error)
+	Routes(tableID uint32, isIP6 bool) ([]RouteEntry, error)
 	BviCreate() (uint32, error)
 	BviOfBD(bdID uint32) (uint32, bool, error)
 	SetState(swIfIndex uint32, up bool) error
@@ -249,17 +249,26 @@ func (p *L3Provider) SetVnfTable(ctx context.Context, vrfName, ifname string) er
 	return nil
 }
 
-// Routes 返回 VRF 的运行态 FIB。
+// Routes 返回 VRF 的运行态 FIB（**IPv4 + IPv6 合并**）。
+//
+// 注：v6 路由须显式以 IsIP6 dump（VPP ip_route_dump 不区分协议就不返回 v6 条目），
+// 否则 `show routes` / `GET /vrfs/{name}/routes` 看不到 FR-NET-013 的 v6 静态路由。
 func (p *L3Provider) Routes(ctx context.Context, name string) ([]RouteEntry, error) {
 	c, err := p.client()
 	if err != nil {
 		return nil, err
 	}
 	defer c.Close()
-	rows, err := c.Routes(TableID(name))
+	table := TableID(name)
+	rows, err := c.Routes(table, false)
 	if err != nil {
 		return nil, err
 	}
+	v6, err := c.Routes(table, true)
+	if err != nil {
+		return nil, err
+	}
+	rows = append(rows, v6...)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Prefix < rows[j].Prefix })
 	return rows, nil
 }
