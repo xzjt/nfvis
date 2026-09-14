@@ -1001,15 +1001,15 @@ func (c *dpdkController) SetDPDKBound(ctx context.Context, ifname string, bound 
 	if err != nil {
 		return "", "", err
 	}
-	cur, err := c.b.DriverOf(ifname)
-	if err != nil || cur == "" {
-		// 解绑后交还内核需 rescan，稍等驱动重新探测
-		for i := 0; i < 10 && cur == ""; i++ {
-			time.Sleep(200 * time.Millisecond)
-			if cur, err = c.b.DriverOf(ifname); err != nil {
-				break
-			}
+	// 必须按 **PCI** 回读驱动：绑定到 DPDK 后内核网卡即消失，
+	// 按接口名解析会失败并把结果误报为「无驱动」（真机实测踩到）。
+	// 解绑后内核驱动重新探测需要一点时间，故轮询等待。
+	var cur string
+	for i := 0; i < 15; i++ {
+		if cur, _ = c.b.DriverOf(pci); cur != "" {
+			break
 		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	return pci, cur, nil
 }
