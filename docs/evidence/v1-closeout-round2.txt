@@ -1,0 +1,91 @@
+===== V1 收尾第二轮复核与修复：真机验证证据（决策 #70）=====
+环境：nfvis-vm（Ubuntu 26.04、VPP v26.06-release、govpp v0.13.0）
+日期：2026-09-14
+nfvisd：/tmp/nfvisd -db /tmp/nfvis.db -listen 127.0.0.1:18443
+范围：口令哈希泄露修复（FR-SEC-007）、声明式 vf-count（FR-NET-004）、
+      审计分页 offset（FR-API-007）、LLDP subtype（FR-NET-018，单测）
+说明：本文件为**原始输出摘录**，命令与结果一一对应。
+
+----- 1. 【安全】口令哈希泄露：修复前（复现）-----
+创建带口令用户后，以 **operator** 身份读审计日志：
+$ curl -s -X POST .../login -d '{"username":"ops2","password":"Secret@98765"...}'   # 取得 operator token
+$ curl -s ".../api/v1/audit-logs?limit=10" -H "Authorization: Bearer <ops2 token>"
+pbkdf2$sha256$600000$r6ThLpyZrB3…
+pbkdf2$sha256$600000$2l5CGaA0wNI…
+
+→ **operator（非 super-user）可取得其他用户的 PBKDF2 哈希**，违反决策 #25
+  「明文口令与哈希不回显于任何 show/API 输出」。
+  链路：口令经 commit 落库 → commit 审计详情 = `model.Diff(committed, newCfg)` 完整 diff
+  （`engine.go:456/430`）→ `model.Flatten` 遍历整棵配置树写入 `password-hash`
+  → `GET /audit-logs`（ClassReadOnly）原样返回 detail。
+
+----- 2. 【安全】修复后（同一场景）-----
+$ curl -s ".../api/v1/audit-logs?limit=10" -H "Authorization: Bearer <operator token>"
+含 pbkdf2 次数: 0
+仍记录口令变更事实: password-hash «已隐藏»;
+
+$ curl -s -X PUT .../configuration/candidate -d '{"system":{"login":{"users":[
+    {"name":"x","class":"operator","password_hash":"pbkdf2$sha256$600000$AAAA$BBBB"}]}}}'
+$ curl -s .../configuration/candidate -H "Authorization: Bearer <admin>"
+candidate 含 password_hash/pbkdf2 次数: 0
+
+→ 哈希不再回显；**审计仍如实记录「口令被变更」这一事实**（值脱敏为 «已隐藏»），
+  即脱敏只作用于渲染、不影响变更检测（仅改口令时 commit 仍判定为有变更）。
+
+守护测试（本机全绿）：
+- `TestSecretsNeverEchoed`：审计 / 候选 / diff / login-users / CLI `show configuration`
+  与 `show log audit` **全路径**断言不含 `pbkdf2`
+- `TestDiffMasksPasswordHash`：脱敏后仍能识别「仅改口令」为有变更
+- `TestRedactConfigView`、`TestIsSensitiveKey`
+
+----- 3. 【功能】声明式 `interfaces[].sriov.vf-count` ----------
+修复前（真机实测）：`set interfaces ens192 sriov vf-count 4` + commit **成功**，
+`show configuration` 也确实记下 `sriov { vf-count 4; }`，但无任何代码执行它
+（`SetVFCount` 只被命令式 CLI/API 调用）→ 配置承诺 4 个 VF、实际 0 个且无提示。
+
+修复后（同一环境，ens192 无 sriov_numvfs）：
+$ nfvis-cli -c "configure; set interfaces ens192 sriov vf-count 4; commit; exit"
+[ok] interfaces ens192 sriov vf-count 4
+%% 底座下发失败（已补偿）: 下发失败 interface[ens192]: 接口 ens192 设置 VF 数量 4:
+   接口 ens192 不支持 SR-IOV（无 /sys/class/net/ens192/device/sriov_numvfs）
+
+对照（未配置 sriov 的接口）：
+$ nfvis-cli -c "configure; set interfaces ens192 description uplink; commit; exit"
+commit 成功 (revision 3)
+
+→ 由「静默无操作」变为**明确报错且事务补偿**；不做 SR-IOV 的配置不受影响。
+守护测试：`TestApplyInterfaceAppliesDeclarativeVFCount`（含 0 = 回收全部）、
+`TestApplyInterfaceVFCountErrorNotSilent`、`TestApplyInterfaceVFCountUnwired`。
+
+----- 4. 【契约漂移】/audit-logs 的 offset ----------
+修复前：契约声明 limit/offset，实现只取 limit（offset 静默忽略，返回同一页）。
+修复后（真机，按时间戳核对两页确为不同记录）：
+offset0 ts: 2026-09-14T05:20:01.763989077Z
+offset1 ts: 2026-09-14T05:19:57.365613625Z
+
+守护测试：`TestAuditLogsOffsetEffective`（HTTP 层，两页记录不同）、
+`TestStoreListAuditOffset`（SQL 层：分页内容、超范围空页、负 offset 按 0）。
+
+----- 5. 【功能】LLDP 标识按 subtype 解码 ----------
+环境无 LLDP 对端（与 M3/M4 一致），故以单测覆盖：
+- chassis MAC（subtype 4，6 字节）→ `aa:bb:cc:dd:ee:ff`
+- port MAC（subtype 3，编号与 chassis 不同）→ `aa:bb:cc:dd:ee:ff`
+- 文本型（interface name）→ 去尾部 NUL 的字符串
+- 二进制非 MAC（network address）→ `0x0a000001`（不再输出乱码）
+
+旧实现把 MAC 型标识裸转字符串（仅去尾部 NUL），真实交换机普遍用 MAC 型
+chassis-ID，会输出不可打印内容（JSON 序列化还会变成 U+FFFD）。
+契约中无法填充的 `system_name` 已移除（govpp v0.13 的 `LldpDetails` 无该字段）。
+
+----- 6. 回归：真机集成全量 ----------
+$ make integration
+exit=0   PASS: 180
+ok  	github.com/xzjt/nfvis/test/integration	166.804s
+ok  	github.com/xzjt/nfvis/internal/orchestrator	0.015s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/compute	8.419s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/container	0.018s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/network	0.099s
+
+----- 7. 环境恢复 -----
+VPP 运行中（v26.06-release），接口仅 ens192/ens224/local0；nfvisd 未运行；
+/tmp 临时文件（部署包、库文件、监听脚本）已清理；引导镜像 alpine.qcow2 未动；无游离 domain。
