@@ -117,7 +117,8 @@ request container-functions <name>
 request images
   ├─ upload name <name> type <vm-image|container-image> file <path>
   │      # path 须位于 /data/incoming/（先经 scp/sftp 传入管理网卡），导入成功自动清理
-  ├─ download name <name> type <...> url <url> [sha256 <hex>]
+  ├─ download name <name> type <...> url <url> sha256 <hex>
+  │      # URL 拉取必填 sha256（FR-SEC-004 默认强制校验，缺省即拒绝）
   └─ delete name <name>                             # 引用检查；确认
 request interfaces <ifname> enable | disable         # PUT /interfaces/{n}
 request sriov create-vfs <ifname> count <uint> | delete-vfs <ifname> vf <uint>
@@ -200,8 +201,9 @@ set api
       ├─ cert-file <path> key-file <path>   # 安装外部证书（PEM），立即生效
       └─ self-signed regenerate             # 或重签自签证书
 set management
+  ├─ interface <ifname>                # 管理网卡（内核驱动；不得用于任何数据面，FR-NET-002/FR-SEC-001）
   ├─ ip address <ip-prefix>            # 独立管理网卡静态地址（IPv4/IPv6）
-  └─ gateway <ip>
+  └─ gateway <ip>                      # 管理口默认网关
 set kernel                                    # 内核启动基线（大页/隔离核由 resource-pools 派生，唯一真源）
   ├─ nmi-watchdog <true|false>                # NMI watchdog（VPP 场景通常 false）
   ├─ transparent-hugepages <always|madvise|never>

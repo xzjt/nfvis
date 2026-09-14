@@ -109,9 +109,16 @@ func (s *Server) handlePostImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// URL 拉取为异步（进度经 GET /images/{name} 的 import_state 观察；事件流随 M5）。
+	// 但参数校验必须**同步**先做：否则缺 sha256 会被当成"受理成功"再静默转 failed
+	// （FR-SEC-004 默认强制校验，决策 #71⑤）。
+	dlOpts := images.DownloadOptions{Name: in.Name, Type: in.Type, URL: in.URL, SHA256: in.SHA256, Description: in.Description}
+	if err := images.ValidateDownloadOptions(dlOpts); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
 	go func(opts images.DownloadOptions) {
 		_, _ = s.images.Download(context.Background(), opts)
-	}(images.DownloadOptions{Name: in.Name, Type: in.Type, URL: in.URL, SHA256: in.SHA256, Description: in.Description})
+	}(dlOpts)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "downloading", "name": in.Name})
 }
 

@@ -61,8 +61,12 @@ func appendToken(path []string, tok string) []string {
 func walkValue(v any, path []string, out *[]Statement) {
 	switch x := v.(type) {
 	case map[string]any:
-		field, _ := identityOf(x)
-		walkMap(x, path, field, out)
+		// 嵌套**对象**（非数组元素）不适用「身份字段入路径」语义——其路径已由字段名确定。
+		// 若在此沿用 identityOf 跳过身份字段，任何仅以 interface/name/prefix… 为内容的
+		// 对象都会在扁平化中整体消失，进而使 set 被判为「未产生配置变更」：
+		// 已确认受影响的有 `system.management.interface`（决策 #71 新增管理网卡）与
+		// `port-mirroring.source.interface`（既有缺陷）。身份语义只对数组元素成立。
+		walkMap(x, path, "", out)
 	case []any:
 		// 标量数组：每元素一条语句，路径止于字段名（JunOS 的可重复语句）。
 		allScalar := true

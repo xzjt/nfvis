@@ -1,0 +1,91 @@
+===== V1 收尾第三轮：管理网卡身份 / 限流 / sha256 真机验证（决策 #71）=====
+环境：nfvis-vm（Ubuntu 26.04、VPP v26.06-release、govpp v0.13.0）
+日期：2026-09-14
+nfvisd：/tmp/nfvisd -db /tmp/nfvis.db -listen 127.0.0.1:18443
+起因：用户提问「现在能否通过 CLI 把网卡绑到 VPP？将来实机能否手动指定某网卡为管理/数据面网卡？」
+说明：本文件为**原始输出摘录**，命令与结果一一对应。
+
+----- 0. 提问的核查结论（本轮起因）-----
+**能否通过 CLI 绑定网卡到 VPP？—— 不能。**
+  全仓无 `vfio-pci` / `driver_override` / `dpdk-devbind` 任何写入；`deploy/installer/nfvis-baseline.sh`
+  只做内核基线（hugepages/isolcpus/nmi-watchdog/tuned）。CLI 实际能力：
+    - `set interfaces <if> description|disable|mtu|sriov vf-count|ingress-policy`（仅配置层）
+    - `set vpp dpdk dev <if> …`（单网卡 DPDK 参数覆盖；生成 startup.conf 时经 sysfs 解析 PCI
+      写成 `dev <pci> { name <ifname> }`——**前提是该网卡已被外部步骤绑到 vfio-pci**）
+    - `request interfaces <if> enable|disable`（仅 VPP 管理态）
+  实机绑定目前是**带外人工/安装期**步骤（M3 交接文档即为手敲 `echo vfio-pci > driver_override`）。
+  → 已如实登记为 **FR-NET-001 降级**（驱动接管产品侧未实现，决策 #71⑥）。
+
+**能否手动指定管理网卡？—— 此前不能（本轮已补）。**
+  `MgmtConfig` 只有 address/gateway、无接口名字段；`show interfaces management` 硬编码显示
+  `mgmt0`（系统中并无此接口）。新增 `system.management.interface` 后已可声明（见下）。
+
+----- 1. 管理口语句此前是未映射语句（本轮修复）-----
+修复前：`set system management ip address …` 报
+  `%% 语句未产生配置变更（尚未映射到模型或值未变化）: system management ip address 192.168.1.10/24`
+根因：命令树路径为 `management ip address`，模型是 `management.address`（多出 `ip` 段），无别名映射。
+
+修复后（真机）：
+$ nfvis-cli -c "configure
+  set system management interface ens160
+  set system management ip address 192.168.155.129/24
+  set system management gateway 192.168.155.2
+  commit; exit"
+[ok] system management gateway 192.168.155.2
+commit 成功 (revision 3)
+
+$ nfvis-cli -c "show interfaces management"
+Interface    Address                Gateway            Plane
+ens160       192.168.155.129/24     192.168.155.2      management(kernel)
+（此前 Interface 列恒为硬编码 "mgmt0"）
+
+----- 2. 管理网卡与数据面隔离：commit 强制拒绝 -----
+$ nfvis-cli -c "configure
+  set interfaces ens160 description 不该成功
+  commit; exit"
+  - interfaces[0].name: 管理网卡 "ens160" 不得用于数据面（interfaces 声明为业务网卡）：
+    管理面须与业务面隔离（FR-NET-002）
+
+单测覆盖 7 类数据面引用逐项拒绝：interfaces / vpp.dpdk.per_dev / bond 成员 / 交换机端口 /
+VRF L3 接口 / 端口镜像源 / 端口镜像分析口（`model/mgmt_isolation_test.go`）。
+
+补充语义（真机亦验证）：管理口字段变更受 FR-CFG-012 自锁保护——来自 SSH 的普通 commit 被拒
+（须 `commit confirmed`），因为改管理网卡可能直接切断当前会话。
+
+----- 3. Flatten/Diff 嵌套对象语义缺陷（本轮顺带修复）-----
+现象：`system.management.interface` 写入成功却报「未产生配置变更」。
+根因：`identityKeys` 含 `interface`/`name`/`prefix` 等，而 `walkValue` 对**嵌套对象**（非数组元素）
+也套用了「身份字段入路径」的跳过逻辑 → 「仅以身份键为内容」的对象在扁平化中**整体消失**。
+受影响者除新字段外，还包括**既有缺陷** `port-mirroring.source.interface`（diff 一直看不见）。
+修正：身份语义只对数组元素成立。守护测试 `TestFlattenNestedObjectWithIdentityKey`、
+`TestDiffDetectsNestedIdentityKeyRemoval`。
+
+----- 4. FR-SYS-006 max-sessions 真正生效 -----
+$ nfvis-cli -c "configure; set system api max-sessions 2; commit; exit"   → commit 成功 (revision 3)
+（重启 nfvisd 后）nfvisd 日志：
+  "API 并发连接上限已启用","max_sessions":2,"addr":"127.0.0.1:18443"
+限流下 API 仍可用：GET /api/v1/metrics → 200
+单测：配置透传、上限=1 时第二条连接不被 accept、缺省不限（`api/max_sessions_test.go`）。
+
+----- 5. FR-SEC-004 URL 拉取默认强制 sha256（含异步受理缺陷修复）-----
+首轮验证发现：API 接受无 sha256 的 URL 拉取并返回 202（校验在后台 goroutine，失败被静默吞掉）。
+修复：抽出 `images.ValidateDownloadOptions`，**受理前同步校验**。
+
+真机复验：
+缺 sha256        → http=400 {"code":"VALIDATION_FAILED","message":"URL 拉取必须提供 sha256（FR-SEC-004：默认强制校验）"}
+非 64 位 hex     → http=400 {"message":"sha256 必须为 64 位十六进制字符串: \"deadbeef\""}
+合法 64 位 hex   → http=202 {"name":"t2.qcow2","status":"downloading"}
+契约同步：OpenAPI `sha256` 由「可空」改为「URL 拉取时必填」；CLI 文档 `sha256 <hex>` 由可选变必填。
+
+----- 6. 回归：真机集成全量 -----
+$ make integration
+exit=0   PASS: 180
+ok  	github.com/xzjt/nfvis/test/integration	161.096s
+ok  	github.com/xzjt/nfvis/internal/orchestrator	0.009s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/compute	8.185s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/container	0.007s
+ok  	github.com/xzjt/nfvis/internal/orchestrator/network	0.099s
+
+----- 7. 环境恢复 -----
+VPP 运行中（v26.06-release），接口仅 ens192/ens224/local0；nfvisd 未运行；
+临时文件（部署包、库文件、响应体）已清理；引导镜像 alpine.qcow2 未动；无游离 domain。

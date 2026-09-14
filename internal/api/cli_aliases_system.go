@@ -15,6 +15,40 @@ import (
 )
 
 var statementAliasesSystem = []aliasRule{
+	// system management {interface|ip address|gateway} …（FR-SYS-001；FR-NET-002/FR-SEC-001 管理口身份）
+	// 注：树里是 `management ip address`，模型是 `management.address`——多出的 `ip` 段
+	// 此前无别名映射，导致 `set system management ip address …` 报「语句未产生配置变更」
+	// （管理口 IP 在 CLI 上根本设不了，决策 #71）。
+	{pattern: []string{"system", "management", "interface", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			mgmt := ensureObj(ensureObj(tree, "system"), "management")
+			if !isSet {
+				delete(mgmt, "interface")
+				return nil
+			}
+			mgmt["interface"] = t[3]
+			return nil
+		}},
+	{pattern: []string{"system", "management", "ip", "address", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			mgmt := ensureObj(ensureObj(tree, "system"), "management")
+			if !isSet {
+				delete(mgmt, "address")
+				return nil
+			}
+			mgmt["address"] = t[4]
+			return nil
+		}},
+	{pattern: []string{"system", "management", "gateway", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			mgmt := ensureObj(ensureObj(tree, "system"), "management")
+			if !isSet {
+				delete(mgmt, "gateway")
+				return nil
+			}
+			mgmt["gateway"] = t[3]
+			return nil
+		}},
 	// system health thresholds <cpu-temp-celsius|disk-temp-celsius|disk-used-percent> <n>
 	{pattern: []string{"system", "health", "thresholds", "*", "*"},
 		apply: func(tree map[string]any, t []string, isSet bool) error {

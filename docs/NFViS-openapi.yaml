@@ -805,7 +805,7 @@ paths:
                 name: { type: string }
                 type: { type: string, enum: [vm-image, container-image] }
                 url: { type: string, format: uri, description: HTTP(S) 拉取地址（与 incoming_file 二选一） }
-                sha256: { type: string, description: 期望校验和（可空；提供则强校验） }
+                sha256: { type: string, description: "**URL 拉取时必填**：期望校验和（FR-SEC-004 默认强制）；incoming_file 导入时可省" }
                 incoming_file:
                   type: string
                   description: /data/incoming 内的文件路径（先经 scp/sftp 传入；导入成功自动清理，与 url 二选一）
@@ -1687,7 +1687,12 @@ components:
         dns_servers: { type: array, items: { type: string } }
         management:
           type: object
+          description: |
+            管理口（独立管理网卡，内核驱动，**不得用于数据面**，FR-NET-002/FR-SEC-001）。
+            指定 `interface` 后，commit 校验会拒绝该网卡出现在 `vpp.dpdk.dev`、
+            bond 成员、虚拟交换机端口、L3 接口等任何数据面引用中（决策 #71）。
           properties:
+            interface: { type: string, description: "管理网卡名（如 ens160）；须保留内核驱动", example: "ens160" }
             address: { type: string, example: "192.168.1.10/24" }
             gateway: { type: string }
         login:

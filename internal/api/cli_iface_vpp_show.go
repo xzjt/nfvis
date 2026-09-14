@@ -99,13 +99,22 @@ func (x *cliExecutor) showPhysicalInterfaces(cfg model.Config, only string) stri
 func (x *cliExecutor) showManagementInterface(cfg model.Config) string {
 	sys := cfg.System
 	if sys == nil || sys.Management == nil {
-		return "（未配置管理口：set system management ip address <prefix>）\n"
+		return "（未配置管理口：set system management interface <ifname> / ip address <prefix>）\n"
 	}
 	m := sys.Management
 	x.structured = anyToTree(m)
 	var b strings.Builder
-	fmt.Fprintf(&b, "%-10s %-20s %s\n", "Interface", "Address", "Gateway")
-	fmt.Fprintf(&b, "%-10s %-20s %s\n", "mgmt0", m.Address, m.Gateway)
+	fmt.Fprintf(&b, "%-12s %-22s %-18s %s\n", "Interface", "Address", "Gateway", "Plane")
+	// 管理网卡名取自配置（决策 #71）；此前硬编码显示 "mgmt0"，而系统中并无该接口。
+	name := m.Interface
+	if name == "" {
+		name = "(未指定)"
+	}
+	fmt.Fprintf(&b, "%-12s %-22s %-18s %s\n", name, m.Address, m.Gateway, "management(kernel)")
+	if m.Interface == "" {
+		fmt.Fprintln(&b, "%% 提示：未指定管理网卡（set system management interface <ifname>）；"+
+			"指定后 commit 强制校验该网卡不得被数据面引用（FR-NET-002）")
+	}
 	return b.String()
 }
 

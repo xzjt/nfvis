@@ -1467,12 +1467,18 @@
             "type": "object"
           },
           "management": {
+            "description": "管理口（独立管理网卡，内核驱动，**不得用于数据面**，FR-NET-002/FR-SEC-001）。\n指定 `interface` 后，commit 校验会拒绝该网卡出现在 `vpp.dpdk.dev`、\nbond 成员、虚拟交换机端口、L3 接口等任何数据面引用中（决策 #71）。\n",
             "properties": {
               "address": {
                 "example": "192.168.1.10/24",
                 "type": "string"
               },
               "gateway": {
+                "type": "string"
+              },
+              "interface": {
+                "description": "管理网卡名（如 ens160）；须保留内核驱动",
+                "example": "ens160",
                 "type": "string"
               }
             },
@@ -3058,7 +3064,7 @@
                     "type": "string"
                   },
                   "sha256": {
-                    "description": "期望校验和（可空；提供则强校验）",
+                    "description": "**URL 拉取时必填**：期望校验和（FR-SEC-004 默认强制）；incoming_file 导入时可省",
                     "type": "string"
                   },
                   "type": {
