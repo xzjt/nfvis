@@ -40,10 +40,12 @@ archtest:
 prototype-check:
 	cd prototype && $(GO) build ./... && $(GO) vet ./... && $(GO) test ./...
 
-# 文档一致性守护：AGENTS.md 声明的决策条数须与附录 A 实际条数一致
-# （该数字曾三次滞后：24→28→34，故自动校验）
+# 文档一致性守护：
+#  - AGENTS.md 声明的决策条数须与附录 A 实际条数一致（该数字曾三次滞后：24→28→34，故自动校验）
+#  - 嵌入二进制的 openapi.json 须与契约 docs/NFViS-openapi.yaml 一致（FR-API-002，决策 #69）
 docscheck:
 	bash contrib/scripts/check_decisions_count.sh
+	bash contrib/scripts/check_openapi_json_sync.sh
 
 # 真机集成测试（M3）：需 VPP 运行环境（nfvis-vm）。无环境时跳过并提示，CI 不跑。
 # 约定：build tag integration + 环境变量 NFVIS_VPP_SOCK（缺省 /run/vpp/api.sock）。

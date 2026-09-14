@@ -1,0 +1,5630 @@
+{
+  "components": {
+    "responses": {
+      "ConfigAccepted": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CommitResult"
+            }
+          }
+        },
+        "description": "已写入 candidate（无 Auto-Commit 头）或已提交生效（带 X-NFVIS-Auto-Commit: true）",
+        "headers": {
+          "X-NFVIS-Committed": {
+            "description": "true 表示本次请求已直接提交",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "Error400": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "校验失败"
+      },
+      "Error401": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "未认证"
+      },
+      "Error403": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "无权限或账号锁定"
+      },
+      "Error404": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "资源不存在"
+      },
+      "Error409": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "冲突（引用存在/配额不足/会话锁占用）"
+      }
+    },
+    "schemas": {
+      "Acl": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "rules": {
+            "items": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "permit",
+                    "deny"
+                  ],
+                  "type": "string"
+                },
+                "destination": {
+                  "type": "string"
+                },
+                "destination_port": {
+                  "type": "string"
+                },
+                "direction": {
+                  "enum": [
+                    "ingress",
+                    "egress"
+                  ],
+                  "type": "string"
+                },
+                "hits": {
+                  "description": "运行态命中计数",
+                  "type": "integer"
+                },
+                "protocol": {
+                  "enum": [
+                    "tcp",
+                    "udp",
+                    "icmp",
+                    "any"
+                  ],
+                  "type": "string"
+                },
+                "seq": {
+                  "type": "integer"
+                },
+                "source": {
+                  "example": "10.0.0.0/8 或 any",
+                  "type": "string"
+                },
+                "source_port": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "seq",
+                "action"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "rules"
+        ],
+        "type": "object"
+      },
+      "Alarm": {
+        "properties": {
+          "code": {
+            "example": "VNF_CRASHED",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "raised_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "resolved_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "info",
+              "warning",
+              "error",
+              "critical"
+            ],
+            "type": "string"
+          },
+          "source": {
+            "example": "virtual-machine-functions/fw-vm",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "resolved"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "severity",
+          "code",
+          "message",
+          "raised_at",
+          "state"
+        ],
+        "type": "object"
+      },
+      "AuditEntry": {
+        "properties": {
+          "action": {
+            "example": "config.commit / vmf.start / login",
+            "type": "string"
+          },
+          "detail": {
+            "description": "配置 diff 或操作参数摘要",
+            "type": "string"
+          },
+          "result": {
+            "enum": [
+              "success",
+              "failure"
+            ],
+            "type": "string"
+          },
+          "source_ip": {
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "BackupArchive": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "includes_core_dumps": {
+            "description": "tech-support 归档时",
+            "type": "boolean"
+          },
+          "kind": {
+            "enum": [
+              "config-backup",
+              "tech-support"
+            ],
+            "type": "string"
+          },
+          "size_bytes": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "Bond": {
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "lacp": {
+            "description": "null = 静态聚合",
+            "nullable": true,
+            "properties": {
+              "interval": {
+                "enum": [
+                  "fast",
+                  "slow"
+                ],
+                "type": "string"
+              },
+              "mode": {
+                "enum": [
+                  "active",
+                  "passive"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "members": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mtu": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "description": "运行态",
+            "properties": {
+              "active_members": {
+                "type": "integer"
+              },
+              "link": {
+                "enum": [
+                  "up",
+                  "down"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "name",
+          "members"
+        ],
+        "type": "object"
+      },
+      "CLIExecuteResult": {
+        "properties": {
+          "mode": {
+            "enum": [
+              "oper",
+              "config"
+            ],
+            "type": "string"
+          },
+          "output": {
+            "type": "string"
+          },
+          "path": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "prompt": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CaptureStatus": {
+        "properties": {
+          "active": {
+            "nullable": true,
+            "properties": {
+              "captured": {
+                "type": "integer"
+              },
+              "interface": {
+                "type": "string"
+              },
+              "started_at": {
+                "format": "date-time",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "files": {
+            "items": {
+              "properties": {
+                "created_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "name": {
+                  "example": "cap-ens2f0-20260912.pcap",
+                  "type": "string"
+                },
+                "size_bytes": {
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "CommitResult": {
+        "properties": {
+          "committed": {
+            "type": "boolean"
+          },
+          "confirmed_until": {
+            "description": "commit confirmed 截止时间",
+            "format": "date-time",
+            "type": "string"
+          },
+          "revision": {
+            "description": "配置快照编号",
+            "type": "integer"
+          },
+          "warnings": {
+            "items": {
+              "example": "resource-pools 变更需 reboot 生效",
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ConfigDocument": {
+        "description": "整份配置文档（JSON 形式，节点与 CLI 层级一致）",
+        "properties": {
+          "acls": {
+            "items": {
+              "$ref": "#/components/schemas/Acl"
+            },
+            "type": "array"
+          },
+          "annotations": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "配置节点注释（FR-CFG-007，annotate 语句；键为语句路径，如 \"system hostname\"）",
+            "type": "object"
+          },
+          "bonds": {
+            "description": "链路聚合（FR-NET-017，纳入事务引擎可 compare/rollback）",
+            "items": {
+              "$ref": "#/components/schemas/Bond"
+            },
+            "type": "array"
+          },
+          "container_functions": {
+            "items": {
+              "$ref": "#/components/schemas/ContainerFunction"
+            },
+            "type": "array"
+          },
+          "interfaces": {
+            "items": {
+              "$ref": "#/components/schemas/InterfaceUpdate"
+            },
+            "type": "array"
+          },
+          "nat": {
+            "$ref": "#/components/schemas/NatConfig"
+          },
+          "port_mirroring": {
+            "items": {
+              "$ref": "#/components/schemas/PortMirroring"
+            },
+            "type": "array"
+          },
+          "protocols": {
+            "description": "顶级协议层级（命令树 §2.2b）",
+            "properties": {
+              "lldp": {
+                "$ref": "#/components/schemas/LldpConfig"
+              }
+            },
+            "type": "object"
+          },
+          "qos_policies": {
+            "items": {
+              "$ref": "#/components/schemas/QosPolicy"
+            },
+            "type": "array"
+          },
+          "resource_pools": {
+            "$ref": "#/components/schemas/ResourcePool"
+          },
+          "system": {
+            "$ref": "#/components/schemas/SystemConfig"
+          },
+          "virtual_machine_functions": {
+            "items": {
+              "$ref": "#/components/schemas/VMFunction"
+            },
+            "type": "array"
+          },
+          "virtual_switches": {
+            "items": {
+              "$ref": "#/components/schemas/VirtualSwitch"
+            },
+            "type": "array"
+          },
+          "vpp": {
+            "$ref": "#/components/schemas/VppConfig",
+            "description": "VPP 数据面配置（FR-SYS-008，纳入事务引擎可 compare/rollback）"
+          },
+          "vrfs": {
+            "items": {
+              "$ref": "#/components/schemas/Vrf"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ConfigSession": {
+        "description": "candidate 会话锁持有信息（FR-CFG-009）",
+        "properties": {
+          "acquired_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "confirmed_until": {
+            "description": "在途 commit confirmed 截止时间",
+            "format": "date-time",
+            "type": "string"
+          },
+          "dirty": {
+            "description": "存在未提交变更",
+            "type": "boolean"
+          },
+          "holder": {
+            "example": "admin@ssh",
+            "type": "string"
+          },
+          "last_activity": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ContainerFunction": {
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "autostart": {
+            "type": "boolean"
+          },
+          "command": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "image": {
+            "type": "string"
+          },
+          "interfaces": {
+            "items": {
+              "$ref": "#/components/schemas/VnfInterface"
+            },
+            "type": "array"
+          },
+          "memory_mb": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "restart_policy": {
+            "enum": [
+              false,
+              "on-failure"
+            ],
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "running",
+              "exited",
+              "dead"
+            ],
+            "type": "string"
+          },
+          "vcpu": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "image"
+        ],
+        "type": "object"
+      },
+      "CoreDump": {
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "process": {
+            "example": "vpp_main",
+            "type": "string"
+          },
+          "size_bytes": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "Error": {
+        "properties": {
+          "code": {
+            "example": "VALIDATION_FAILED",
+            "type": "string"
+          },
+          "detail": {
+            "items": {
+              "properties": {
+                "message": {
+                  "example": "资源池大页 1G 不足：需要 8，空闲 2",
+                  "type": "string"
+                },
+                "path": {
+                  "example": "virtual-machine-functions[fw-vm].memory.size-mb",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "Event": {
+        "properties": {
+          "payload": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "alarm-raised",
+              "alarm-resolved",
+              "vnf-state-changed",
+              "image-import-progress",
+              "config-committed"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "HardwareHealth": {
+        "properties": {
+          "bmc_present": {
+            "type": "boolean"
+          },
+          "disks": {
+            "items": {
+              "properties": {
+                "device": {
+                  "type": "string"
+                },
+                "smart_status": {
+                  "enum": [
+                    "passed",
+                    "failed",
+                    "unknown"
+                  ],
+                  "type": "string"
+                },
+                "temp_celsius": {
+                  "type": "number"
+                },
+                "wear_percent": {
+                  "type": "number"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "sensors": {
+            "items": {
+              "properties": {
+                "name": {
+                  "example": "CPU1 Temp",
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "ok",
+                    "warning",
+                    "critical"
+                  ],
+                  "type": "string"
+                },
+                "type": {
+                  "enum": [
+                    "temperature",
+                    "fan",
+                    "voltage",
+                    "power"
+                  ],
+                  "type": "string"
+                },
+                "unit": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "number"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "HealthThresholds": {
+        "properties": {
+          "cpu_temp_celsius": {
+            "example": 85,
+            "type": "integer"
+          },
+          "disk_temp_celsius": {
+            "example": 60,
+            "type": "integer"
+          },
+          "disk_used_percent": {
+            "example": 90,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "Image": {
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "format": {
+            "example": "qcow2",
+            "type": "string"
+          },
+          "import_state": {
+            "description": "运行态",
+            "enum": [
+              "ready",
+              "downloading",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "imported_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ref_count": {
+            "description": "引用该镜像的 VNF 数",
+            "type": "integer"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": {
+            "enum": [
+              "vm-image",
+              "container-image"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ],
+        "type": "object"
+      },
+      "Interface": {
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "driver": {
+            "example": "ice-dpdk",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "kind": {
+            "enum": [
+              "physical",
+              "management",
+              "vpp-internal"
+            ],
+            "type": "string"
+          },
+          "link": {
+            "enum": [
+              "up",
+              "down"
+            ],
+            "type": "string"
+          },
+          "mac": {
+            "type": "string"
+          },
+          "mtu": {
+            "type": "integer"
+          },
+          "name": {
+            "example": "ens2f0",
+            "type": "string"
+          },
+          "numa_node": {
+            "type": "integer"
+          },
+          "speed_mbps": {
+            "type": "integer"
+          },
+          "sriov": {
+            "properties": {
+              "vf_count": {
+                "type": "integer"
+              },
+              "vfs": {
+                "items": {
+                  "properties": {
+                    "assigned_vnf": {
+                      "type": "string"
+                    },
+                    "vf_id": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "statistics": {
+            "properties": {
+              "rx_bytes": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "rx_drops": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "rx_errors": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "rx_packets": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "tx_bytes": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "tx_drops": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "tx_errors": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "tx_packets": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "InterfaceUpdate": {
+        "description": "物理网卡配置视图。在 ConfigDocument（整份配置文档）中 name 必填；PUT /interfaces/{name} 时可省略",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "ingress_policy": {
+            "description": "入向限速策略绑定（命令树 §2.5）",
+            "type": "string"
+          },
+          "mtu": {
+            "type": "integer"
+          },
+          "name": {
+            "description": "接口名",
+            "type": "string"
+          },
+          "sriov": {
+            "description": "SR-IOV VF 配置（FR-NET-004，命令树 §2.3）",
+            "properties": {
+              "vf_count": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "KernelBaseline": {
+        "properties": {
+          "cmdline": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "desired": {
+            "properties": {
+              "hugepages_1g": {
+                "description": "-1 = 不托管",
+                "type": "integer"
+              },
+              "iommu": {
+                "type": "string"
+              },
+              "isolated_cores": {
+                "type": "string"
+              },
+              "nmi_watchdog": {
+                "nullable": true,
+                "type": "boolean"
+              },
+              "params": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "transparent_hugepages": {
+                "type": "string"
+              },
+              "tuned_profile": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "diffs": {
+            "description": "差异项（空 = 一致）",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "hugepages_1g": {
+            "type": "integer"
+          },
+          "hugepages_1g_free": {
+            "type": "integer"
+          },
+          "isolated_cores": {
+            "type": "string"
+          },
+          "thp": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LldpConfig": {
+        "properties": {
+          "advertisement_interval": {
+            "default": 30,
+            "type": "integer"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "interfaces": {
+            "items": {
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "interface": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "LoginResponse": {
+        "properties": {
+          "expires_in": {
+            "type": "integer"
+          },
+          "token": {
+            "type": "string"
+          },
+          "token_id": {
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/LoginUser"
+          }
+        },
+        "type": "object"
+      },
+      "LoginUser": {
+        "properties": {
+          "class": {
+            "example": "super-user",
+            "type": "string"
+          },
+          "kind": {
+            "description": "区分用户与 class 定义",
+            "enum": [
+              "user",
+              "class"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "NatConfig": {
+        "description": "NAT44-EI 配置。V1 语义（决策 #38/#52）：action.interface 必填（VPP outside 不支持自动推断）；\ninside 转发域由 rules[].virtual_switch（须为 L3 交换机）派生，outside 转发域由出接口所属 VRF 派生\n（出接口须为某 Vrf 的 l3-interface 且已配地址）；全部规则的 virtual-switch 必须一致、出接口必须同属一个 VRF；\nVPP NAT44 单实例仅一对 inside/outside VRF（两者可同表或跨 VRF）。\n",
+        "properties": {
+          "rules": {
+            "items": {
+              "properties": {
+                "action": {
+                  "properties": {
+                    "interface": {
+                      "description": "出接口（必填，决策 #38）；V1 要求其作为某 Vrf 的 l3-interface 且已配地址（outside 转发域来源）",
+                      "type": "string"
+                    },
+                    "source_pool": {
+                      "description": "外部地址池（可选）；未提供时以 action.interface 的接口地址作外部地址",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "match_source": {
+                  "type": "string"
+                },
+                "seq": {
+                  "type": "integer"
+                },
+                "virtual_switch": {
+                  "description": "L3 交换机名（inside 转发域由 TableID(名) 派生）",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "source_pools": {
+            "items": {
+              "properties": {
+                "address_range": {
+                  "example": "100.64.0.10 to 100.64.0.50",
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "static": {
+            "items": {
+              "properties": {
+                "inside_ip": {
+                  "type": "string"
+                },
+                "outside_ip": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "PortMirroring": {
+        "properties": {
+          "analyzer": {
+            "description": "分析端口（物理口）",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "source": {
+            "properties": {
+              "direction": {
+                "enum": [
+                  "ingress",
+                  "egress",
+                  "both"
+                ],
+                "type": "string"
+              },
+              "interface": {
+                "type": "string"
+              },
+              "vnf": {
+                "type": "string"
+              },
+              "vnf_interface": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "name",
+          "source",
+          "analyzer"
+        ],
+        "type": "object"
+      },
+      "QosPolicy": {
+        "properties": {
+          "bound_interfaces": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "cbs": {
+            "description": "bytes",
+            "type": "integer"
+          },
+          "cir": {
+            "description": "bps",
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "cir"
+        ],
+        "type": "object"
+      },
+      "ResourcePool": {
+        "properties": {
+          "cpu": {
+            "properties": {
+              "allocated": {
+                "description": "运行态：各 VNF 绑核分配（按 committed 配置确定性重算，FR-CMP-002/003）",
+                "items": {
+                  "properties": {
+                    "cores": {
+                      "items": {
+                        "type": "integer"
+                      },
+                      "type": "array"
+                    },
+                    "vnf": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "free": {
+                "description": "运行态：未被 VPP 保留核与 VNF 绑核占用的隔离核（FR-CMP-003）",
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "isolated_cores": {
+                "description": "配置：隔离核全集（可与 GET 运行态共用）",
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "numa": {
+                "description": "配置：NUMA 节点与核（FR-CMP-001 NUMA 感知）",
+                "items": {
+                  "properties": {
+                    "cores": {
+                      "items": {
+                        "type": "integer"
+                      },
+                      "type": "array"
+                    },
+                    "node": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "vpp_reserved": {
+                "description": "运行态：VPP main-core + corelist-workers，账本先扣、VNF 不可用（FR-SYS-010）",
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "hugepages": {
+            "items": {
+              "properties": {
+                "allocated": {
+                  "description": "运行态：已分配给 VNF 的页数（backing=normal 的 VM 不占大页池）",
+                  "type": "integer"
+                },
+                "count": {
+                  "description": "配置的页数量（配置文档用）；GET 运行态视图另含 total/allocated/free",
+                  "type": "integer"
+                },
+                "free": {
+                  "description": "运行态：空闲页数（FR-CMP-003）",
+                  "type": "integer"
+                },
+                "page_size": {
+                  "enum": [
+                    "2M",
+                    "1G"
+                  ],
+                  "type": "string"
+                },
+                "total": {
+                  "description": "运行态：池总页数=count",
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "Route": {
+        "properties": {
+          "distance": {
+            "default": 1,
+            "type": "integer"
+          },
+          "next_hop": {
+            "type": "string"
+          },
+          "prefix": {
+            "example": "0.0.0.0/0",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prefix",
+          "next_hop"
+        ],
+        "type": "object"
+      },
+      "Snapshot": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SystemConfig": {
+        "properties": {
+          "api": {
+            "properties": {
+              "max_sessions": {
+                "type": "integer"
+              },
+              "port": {
+                "type": "integer"
+              },
+              "token_ttl_minutes": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "dns_servers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "idle_timeout_minutes": {
+            "type": "integer"
+          },
+          "kernel": {
+            "description": "内核启动基线（FR-SYS-014；大页/隔离核由 resource-pools 派生）",
+            "properties": {
+              "iommu": {
+                "enum": [
+                  true,
+                  false,
+                  "pt"
+                ],
+                "type": "string"
+              },
+              "nmi_watchdog": {
+                "type": "boolean"
+              },
+              "params": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "transparent_hugepages": {
+                "enum": [
+                  "always",
+                  "madvise",
+                  "never"
+                ],
+                "type": "string"
+              },
+              "tuned_profile": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "login": {
+            "description": "本地用户与 login class（FR-SEC-002/003；口令仅存加盐 PBKDF2 哈希，附录 A",
+            "properties": {
+              "classes": {
+                "description": "自定义 class（命令路径 allow/deny；预置 super-user/operator/read-only 见命令树 §4）",
+                "items": {
+                  "properties": {
+                    "allow": {
+                      "description": "允许的命令树路径前缀",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "deny": {
+                      "description": "拒绝的命令树路径前缀（优先于 allow）",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "password_policy": {
+                "properties": {
+                  "complexity": {
+                    "description": "要求至少 3/4 类字符（大写/小写/数字/特殊）",
+                    "type": "boolean"
+                  },
+                  "expire_days": {
+                    "type": "integer"
+                  },
+                  "lockout_minutes": {
+                    "default": 10,
+                    "description": "锁定时长",
+                    "type": "integer"
+                  },
+                  "lockout_threshold": {
+                    "default": 5,
+                    "description": "连续失败锁定阈值",
+                    "type": "integer"
+                  },
+                  "min_length": {
+                    "default": 8,
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
+              "users": {
+                "items": {
+                  "properties": {
+                    "class": {
+                      "example": "super-user",
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "password_hash": {
+                      "description": "PBKDF2-SHA256 加盐哈希，格式 pbkdf2$sha256$<iter>$<b64salt>$<b64hash>；写入仅经 API/CLI，永不回显",
+                      "format": "password",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "management": {
+            "properties": {
+              "address": {
+                "example": "192.168.1.10/24",
+                "type": "string"
+              },
+              "gateway": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "ntp": {
+            "items": {
+              "properties": {
+                "prefer": {
+                  "type": "boolean"
+                },
+                "server": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "syslog": {
+            "properties": {
+              "facility": {
+                "description": "RFC 5424 facility（缺省 user；FR-SYS-004）",
+                "enum": [
+                  "kern",
+                  "user",
+                  "mail",
+                  "daemon",
+                  "auth",
+                  "syslog",
+                  "lpr",
+                  "news",
+                  "uucp",
+                  "cron",
+                  "authpriv",
+                  "ftp",
+                  "local0",
+                  "local1",
+                  "local2",
+                  "local3",
+                  "local4",
+                  "local5",
+                  "local6",
+                  "local7"
+                ],
+                "type": "string"
+              },
+              "level": {
+                "description": "本地/守护进程日志级别（FR-OPS-030）",
+                "enum": [
+                  "debug",
+                  "info",
+                  "warn",
+                  "error"
+                ],
+                "type": "string"
+              },
+              "max_size_mb": {
+                "description": "本地日志容量上限，滚动覆盖",
+                "type": "integer"
+              },
+              "remote_host": {
+                "description": "远程 syslog 目标（FR-SYS-004）",
+                "type": "string"
+              },
+              "remote_port": {
+                "description": "远程 syslog 端口（缺省 514）",
+                "type": "integer"
+              },
+              "retention_days": {
+                "description": "本地日志保留天数（FR-SYS-013）",
+                "type": "integer"
+              },
+              "severity": {
+                "description": "远程转发的最低级别（缺省 info；FR-SYS-004）",
+                "enum": [
+                  "debug",
+                  "info",
+                  "warn",
+                  "error"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "timezone": {
+            "example": "Asia/Shanghai",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SystemStatus": {
+        "properties": {
+          "cpu": {
+            "properties": {
+              "isolated": {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "total": {
+                "type": "integer"
+              },
+              "usage_percent": {
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "hugepages": {
+            "properties": {
+              "free": {
+                "type": "integer"
+              },
+              "page_size_kb": {
+                "type": "integer"
+              },
+              "total": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "memory": {
+            "properties": {
+              "total_mb": {
+                "type": "integer"
+              },
+              "used_mb": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "storage": {
+            "properties": {
+              "data_total_gb": {
+                "type": "number"
+              },
+              "data_used_gb": {
+                "type": "number"
+              },
+              "images_gb": {
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "uptime_seconds": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "TlsInfo": {
+        "properties": {
+          "issuer": {
+            "type": "string"
+          },
+          "not_after": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "not_before": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "self_signed": {
+            "type": "boolean"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "VMFunction": {
+        "properties": {
+          "autostart": {
+            "type": "boolean"
+          },
+          "cloud_init": {
+            "properties": {
+              "hostname": {
+                "type": "string"
+              },
+              "ssh_keys": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "user_data": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "description": {
+            "type": "string"
+          },
+          "disks": {
+            "description": "附加数据盘（virtio）",
+            "items": {
+              "properties": {
+                "image": {
+                  "description": "从 vm-image 克隆创建",
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "size_gb": {
+                  "description": "空盘容量（与 image 二选一）",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "image": {
+            "type": "string"
+          },
+          "interfaces": {
+            "items": {
+              "$ref": "#/components/schemas/VnfInterface"
+            },
+            "type": "array"
+          },
+          "memory": {
+            "properties": {
+              "backing": {
+                "default": "hugepage",
+                "description": "normal 时禁止 vhost-user vNIC",
+                "enum": [
+                  "hugepage",
+                  "normal"
+                ],
+                "type": "string"
+              },
+              "hugepage_size": {
+                "enum": [
+                  "2M",
+                  "1G"
+                ],
+                "type": "string"
+              },
+              "numa_node": {
+                "type": "integer"
+              },
+              "size_mb": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "serial_console": {
+            "default": true,
+            "type": "boolean"
+          },
+          "state": {
+            "description": "运行态",
+            "enum": [
+              "running",
+              "shutoff",
+              "crashed",
+              "paused"
+            ],
+            "type": "string"
+          },
+          "vcpu": {
+            "properties": {
+              "cores_assigned": {
+                "description": "运行态实际绑核",
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "count": {
+                "type": "integer"
+              },
+              "pin": {
+                "default": true,
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "name",
+          "image",
+          "vcpu",
+          "memory"
+        ],
+        "type": "object"
+      },
+      "VSwitchPort": {
+        "properties": {
+          "acl_in": {
+            "type": "string"
+          },
+          "acl_out": {
+            "type": "string"
+          },
+          "container": {
+            "type": "string"
+          },
+          "container_interface": {
+            "type": "string"
+          },
+          "interface": {
+            "description": "物理口名（与 vnf/container 三选一）",
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer"
+          },
+          "state": {
+            "description": "运行态",
+            "enum": [
+              "up",
+              "down"
+            ],
+            "type": "string"
+          },
+          "vlan": {
+            "properties": {
+              "native": {
+                "type": "integer"
+              },
+              "trunk": {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "vnf": {
+            "type": "string"
+          },
+          "vnf_interface": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq"
+        ],
+        "type": "object"
+      },
+      "VersionInfo": {
+        "properties": {
+          "docker": {
+            "type": "string"
+          },
+          "dpdk": {
+            "type": "string"
+          },
+          "libvirt": {
+            "type": "string"
+          },
+          "nfvis": {
+            "example": "1.0.0",
+            "type": "string"
+          },
+          "qemu": {
+            "type": "string"
+          },
+          "ubuntu": {
+            "example": "26.04 LTS",
+            "type": "string"
+          },
+          "vpp": {
+            "example": "26.06",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "VirtualSwitch": {
+        "properties": {
+          "cross_connect": {
+            "description": "仅 L2：两端口直通模式",
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "gateway": {
+            "description": "仅 L2：BVI 三层网关（FR-NET-014）",
+            "properties": {
+              "acl_in": {
+                "type": "string"
+              },
+              "acl_out": {
+                "type": "string"
+              },
+              "addresses": {
+                "description": "IPv4/IPv6 网关地址",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "vrf": {
+                "description": "缺省为专属 VRF vr-<name>",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ports": {
+            "items": {
+              "$ref": "#/components/schemas/VSwitchPort"
+            },
+            "type": "array"
+          },
+          "type": {
+            "enum": [
+              "l2",
+              "l3"
+            ],
+            "type": "string"
+          },
+          "vlan_access": {
+            "description": "仅 L2：默认 untag VLAN",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ],
+        "type": "object"
+      },
+      "VnfInterface": {
+        "properties": {
+          "mac": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sriov": {
+            "properties": {
+              "physical_interface": {
+                "type": "string"
+              },
+              "vf_id": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "state": {
+            "enum": [
+              "up",
+              "down"
+            ],
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "vhost-user",
+              "sriov-vf",
+              "memif"
+            ],
+            "type": "string"
+          },
+          "virtual_switch": {
+            "description": "sriov-vf 时仅登记",
+            "type": "string"
+          },
+          "vlan": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ],
+        "type": "object"
+      },
+      "VppConfig": {
+        "properties": {
+          "cpu": {
+            "properties": {
+              "corelist_workers": {
+                "example": "5,7",
+                "type": "string"
+              },
+              "main_core": {
+                "type": "integer"
+              },
+              "workers_per_numa": {
+                "description": "与 corelist_workers 互斥",
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "dpdk": {
+            "properties": {
+              "dev": {
+                "description": "全局默认（作用于所有未单独配置的物理 NIC）",
+                "properties": {
+                  "rx_descriptors": {
+                    "type": "integer"
+                  },
+                  "rx_queues": {
+                    "type": "integer"
+                  },
+                  "tx_descriptors": {
+                    "type": "integer"
+                  },
+                  "tx_queues": {
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
+              "per_dev": {
+                "description": "单网卡覆盖（删除后回落全局默认）",
+                "items": {
+                  "properties": {
+                    "interface": {
+                      "type": "string"
+                    },
+                    "rx_descriptors": {
+                      "type": "integer"
+                    },
+                    "rx_queues": {
+                      "type": "integer"
+                    },
+                    "tx_descriptors": {
+                      "type": "integer"
+                    },
+                    "tx_queues": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "interface"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "uio_driver": {
+                "enum": [
+                  "vfio-pci",
+                  "igb-uio"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "memory": {
+            "properties": {
+              "buffers_per_numa": {
+                "type": "integer"
+              },
+              "hugepage_preference": {
+                "enum": [
+                  "2M",
+                  "1G"
+                ],
+                "type": "string"
+              },
+              "main_heap_size": {
+                "example": "1G",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "plugins": {
+            "items": {
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "state": {
+                  "enum": [
+                    "enable",
+                    "disable"
+                  ],
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "VppStatus": {
+        "properties": {
+          "buffers_per_numa": {
+            "type": "integer"
+          },
+          "config_revision": {
+            "type": "integer"
+          },
+          "dpdk": {
+            "type": "string"
+          },
+          "main_heap_size": {
+            "type": "string"
+          },
+          "pending_restart": {
+            "description": "配置已变更但数据面未按新配置重启",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "running",
+              "restarting",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "threads": {
+            "items": {
+              "properties": {
+                "core": {
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "integer"
+                },
+                "name": {
+                  "example": "vpp_wk_0",
+                  "type": "string"
+                },
+                "type": {
+                  "enum": [
+                    "main",
+                    "worker"
+                  ],
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "version": {
+            "example": "26.06",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "VppThread": {
+        "properties": {
+          "core": {
+            "description": "绑核（CPU）",
+            "type": "integer"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "example": "vpp_main",
+            "type": "string"
+          },
+          "type": {
+            "example": "workers",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Vrf": {
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "l3_interfaces": {
+            "items": {
+              "properties": {
+                "acl_in": {
+                  "type": "string"
+                },
+                "addresses": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "interface": {
+                  "example": "ens2f0.100",
+                  "type": "string"
+                },
+                "vlan": {
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "routes": {
+            "items": {
+              "$ref": "#/components/schemas/Route"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "bearerFormat": "nfvis-token",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "NFViS 一体机 REST API（V1）。\n- 配置类写操作默认作用于 candidate，需 POST /configuration/commit 生效；\n  请求头 `X-NFVIS-Auto-Commit: true` 可让单请求直接提交。\n- 错误响应统一为 Error 结构；校验错误逐条列入 detail。\n- 事件经 SSE 推送：GET /events（text/event-stream）。\n",
+    "title": "NFViS REST API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/acls": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Acl"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "ACL 列表（含命中计数）",
+        "tags": [
+          "acls"
+        ]
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Acl"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "创建 ACL",
+        "tags": [
+          "acls"
+        ]
+      }
+    },
+    "/acls/{name}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "删除 ACL",
+        "tags": [
+          "acls"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Acl"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "ACL 详情",
+        "tags": [
+          "acls"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/alarms": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "state",
+            "schema": {
+              "default": "active",
+              "enum": [
+                "active",
+                "resolved",
+                "all"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Alarm"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "告警列表（state=active|resolved|all）",
+        "tags": [
+          "alarms-events"
+        ]
+      }
+    },
+    "/alarms:clear": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "all": {
+                    "type": "boolean"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "已清除"
+          }
+        },
+        "summary": "清除已 resolved 告警（all 或指定 id）",
+        "tags": [
+          "alarms-events"
+        ]
+      }
+    },
+    "/audit-logs": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 100,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "default": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "user",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AuditEntry"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "审计日志（分页）",
+        "tags": [
+          "audit"
+        ]
+      }
+    },
+    "/bonds": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Bond"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "链路聚合列表",
+        "tags": [
+          "interfaces"
+        ]
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Bond"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "创建 bond",
+        "tags": [
+          "interfaces"
+        ]
+      }
+    },
+    "/bonds/{name}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "删除 bond（被引用时 409）",
+        "tags": [
+          "interfaces"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Bond"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "bond 详情（含 LACP actor/partner 状态）",
+        "tags": [
+          "interfaces"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/cli/candidates": {
+      "get": {
+        "parameters": [
+          {
+            "description": "已完成 token（逗号分隔）",
+            "in": "query",
+            "name": "tokens",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "正在输入的前缀",
+            "in": "query",
+            "name": "partial",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "清单模式（ifnames/vmnames 等动态候选来源）",
+            "in": "query",
+            "name": "kind",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "properties": {
+                      "Desc": {
+                        "type": "string"
+                      },
+                      "Token": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "候选列表（token/desc 对，或 kind 模式下的字符串清单）"
+          }
+        },
+        "summary": "CLI ?/Tab 补全候选（仅 nfvis-cli 使用）",
+        "tags": [
+          "configuration"
+        ],
+        "x-internal": true
+      }
+    },
+    "/cli/execute": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "line": {
+                    "description": "CLI 命令行（不含管道时逐字执行）",
+                    "type": "string"
+                  },
+                  "source": {
+                    "description": "接入源（影响 FR-CFG-012 自锁判定）",
+                    "enum": [
+                      "ssh",
+                      "console"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "line"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CLIExecuteResult"
+                }
+              }
+            },
+            "description": "执行结果"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "执行一行 CLI 命令（cli_bridge，仅 nfvis-cli 使用，不承诺第三方兼容）",
+        "tags": [
+          "configuration"
+        ],
+        "x-internal": true
+      }
+    },
+    "/configuration/candidate": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "已丢弃"
+          }
+        },
+        "summary": "丢弃 candidate（discard）",
+        "tags": [
+          "configuration"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigDocument"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "读取当前会话 candidate",
+        "tags": [
+          "configuration"
+        ]
+      },
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigDocument"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "candidate 已更新（未提交）"
+          }
+        },
+        "summary": "整体替换 candidate（load override 语义）",
+        "tags": [
+          "configuration"
+        ]
+      }
+    },
+    "/configuration/commit": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "confirmed_minutes": {
+                    "description": "大于 0 时为 commit confirmed",
+                    "type": "integer"
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitResult"
+                }
+              }
+            },
+            "description": "提交成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "校验失败（detail 列出全部错误）"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "提交 candidate（含校验+下发底座）",
+        "tags": [
+          "configuration"
+        ]
+      }
+    },
+    "/configuration/commit:confirm": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "已确认"
+          }
+        },
+        "summary": "确认 commit confirmed",
+        "tags": [
+          "configuration"
+        ]
+      }
+    },
+    "/configuration/diff": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "candidate ⇄ committed 差异",
+        "tags": [
+          "configuration"
+        ]
+      }
+    },
+    "/configuration/rollback/{n}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "n",
+          "required": true,
+          "schema": {
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          }
+        }
+      ],
+      "post": {
+        "responses": {
+          "200": {
+            "description": "candidate 已替换为历史快照"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        },
+        "summary": "取第 n 个历史快照为 candidate（需再 commit）",
+        "tags": [
+          "configuration"
+        ]
+      }
+    },
+    "/container-functions": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ContainerFunction"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "容器 VNF 列表",
+        "tags": [
+          "container-functions"
+        ]
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContainerFunction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "创建容器 VNF",
+        "tags": [
+          "container-functions"
+        ]
+      }
+    },
+    "/container-functions/{name}": {
+      "delete": {
+        "parameters": [
+          {
+            "description": "二次确认，必须为 true（FR-CMP-021）；缺省或 false 返回 400 CONFIRM_REQUIRED",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "删除容器（二次确认）",
+        "tags": [
+          "container-functions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContainerFunction"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "容器详情",
+        "tags": [
+          "container-functions"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/container-functions/{name}/logs": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "容器日志",
+        "tags": [
+          "container-functions"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "last",
+          "schema": {
+            "default": 100,
+            "type": "integer"
+          }
+        }
+      ]
+    },
+    "/container-functions/{name}:restart": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "responses": {
+          "202": {
+            "description": "已受理"
+          }
+        },
+        "summary": "重启",
+        "tags": [
+          "container-functions"
+        ]
+      }
+    },
+    "/container-functions/{name}:start": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "responses": {
+          "202": {
+            "description": "已受理"
+          }
+        },
+        "summary": "启动",
+        "tags": [
+          "container-functions"
+        ]
+      }
+    },
+    "/container-functions/{name}:stop": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "responses": {
+          "202": {
+            "description": "已受理"
+          }
+        },
+        "summary": "停止",
+        "tags": [
+          "container-functions"
+        ]
+      }
+    },
+    "/events": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
+                }
+              }
+            },
+            "description": "text/event-stream"
+          }
+        },
+        "summary": "事件流（SSE）",
+        "tags": [
+          "alarms-events"
+        ]
+      }
+    },
+    "/images": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Image"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "镜像列表",
+        "tags": [
+          "images"
+        ]
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "description": {
+                    "type": "string"
+                  },
+                  "incoming_file": {
+                    "description": "/data/incoming 内的文件路径（先经 scp/sftp 传入；导入成功自动清理，与 url 二选一）",
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "sha256": {
+                    "description": "期望校验和（可空；提供则强校验）",
+                    "type": "string"
+                  },
+                  "type": {
+                    "enum": [
+                      "vm-image",
+                      "container-image"
+                    ],
+                    "type": "string"
+                  },
+                  "url": {
+                    "description": "HTTP(S) 拉取地址（与 incoming_file 二选一）",
+                    "format": "uri",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "type"
+                ],
+                "type": "object"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "description": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "format": "binary",
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "enum": [
+                      "vm-image",
+                      "container-image"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "type",
+                  "file"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "incoming 导入完成（同步返回镜像元数据）"
+          },
+          "202": {
+            "description": "已受理（URL 拉取异步，进度经 GET /images/{name} 的 import_state 观察；事件流随 M5）"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "导入镜像（multipart 文件上传 / JSON URL 拉取 / JSON incoming 导入，三选一）",
+        "tags": [
+          "images"
+        ]
+      }
+    },
+    "/images/{name}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "删除镜像（被引用时 409）",
+        "tags": [
+          "images"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Image"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "镜像详情（含引用计数）",
+        "tags": [
+          "images"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/interfaces": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "kind",
+            "schema": {
+              "enum": [
+                "physical",
+                "management",
+                "vpp",
+                "all"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Interface"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "接口列表（kind=physical|management|vpp）",
+        "tags": [
+          "interfaces"
+        ]
+      }
+    },
+    "/interfaces/{name}": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Interface"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        },
+        "summary": "接口详情（含统计）",
+        "tags": [
+          "interfaces"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InterfaceUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        },
+        "summary": "修改接口（description/mtu/enabled）",
+        "tags": [
+          "interfaces"
+        ]
+      }
+    },
+    "/interfaces/{name}/sriov": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "vf_count": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "vf_count"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "设置 VF 数量（创建/回收 VF）",
+        "tags": [
+          "interfaces"
+        ]
+      }
+    },
+    "/login": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "password": {
+                    "format": "password",
+                    "type": "string"
+                  },
+                  "username": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "username",
+                  "password"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "token 与用户信息"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "423": {
+            "$ref": "#/components/responses/Error403"
+          }
+        },
+        "security": [],
+        "summary": "登录获取 Bearer Token",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/logout": {
+      "post": {
+        "responses": {
+          "204": {
+            "description": "已吊销"
+          }
+        },
+        "summary": "吊销当前 token",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/metrics": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "text/plain; version=0.0.4"
+          }
+        },
+        "security": [],
+        "summary": "Prometheus 指标",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/nat": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NatConfig"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "NAT 池与规则",
+        "tags": [
+          "nat"
+        ]
+      },
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NatConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "全量替换 NAT 配置",
+        "tags": [
+          "nat"
+        ]
+      }
+    },
+    "/nat/sessions": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "properties": {
+                      "bytes": {
+                        "format": "int64",
+                        "type": "integer"
+                      },
+                      "inside_ip": {
+                        "type": "string"
+                      },
+                      "inside_port": {
+                        "type": "integer"
+                      },
+                      "outside_ip": {
+                        "type": "string"
+                      },
+                      "outside_port": {
+                        "type": "integer"
+                      },
+                      "packets": {
+                        "format": "int64",
+                        "type": "integer"
+                      },
+                      "protocol": {
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "NAT44 会话表（运行态，空表返回 []）",
+        "tags": [
+          "nat"
+        ]
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "description": "FR-API-002：Web 控制面据此开发。内容为随二进制嵌入的本规范 JSON，\n与 `docs/NFViS-openapi.yaml` 同源（由 `make docscheck` 守护一致性）。\n无鉴权（与 /metrics 同）：该文档亦随 deb 安装于 `/usr/share/doc/nfvis/`，不含敏感信息。\n",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "OpenAPI 3.0 文档",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "security": [],
+        "summary": "本规范（OpenAPI 3.0 文档，随产品发布的运行时副本）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/port-mirroring": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PortMirroring"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "SPAN 会话列表",
+        "tags": [
+          "port-mirroring"
+        ]
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PortMirroring"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "创建 SPAN 会话",
+        "tags": [
+          "port-mirroring"
+        ]
+      }
+    },
+    "/port-mirroring/{name}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "删除 SPAN 会话",
+        "tags": [
+          "port-mirroring"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/protocols/lldp": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LldpConfig"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "LLDP 全局配置",
+        "tags": [
+          "interfaces"
+        ]
+      },
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LldpConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "修改 LLDP 配置",
+        "tags": [
+          "interfaces"
+        ]
+      }
+    },
+    "/protocols/lldp/neighbors": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "properties": {
+                      "chassis_id": {
+                        "type": "string"
+                      },
+                      "local_interface": {
+                        "type": "string"
+                      },
+                      "port_id": {
+                        "type": "string"
+                      },
+                      "system_name": {
+                        "type": "string"
+                      },
+                      "ttl": {
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "LLDP 邻居表（运行态）",
+        "tags": [
+          "interfaces"
+        ]
+      }
+    },
+    "/qos/policies": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/QosPolicy"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "限速策略列表",
+        "tags": [
+          "qos"
+        ]
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QosPolicy"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "创建限速策略",
+        "tags": [
+          "qos"
+        ]
+      }
+    },
+    "/qos/policies/{name}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "删除策略",
+        "tags": [
+          "qos"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/resource-pools": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourcePool"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "资源池（总量/已分配/空闲）",
+        "tags": [
+          "resource-pools"
+        ]
+      },
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResourcePool"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "修改资源池（大页/隔离核变更需 reboot，响应含提示）",
+        "tags": [
+          "resource-pools"
+        ]
+      }
+    },
+    "/system": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemConfig"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "读取系统配置",
+        "tags": [
+          "system"
+        ]
+      },
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SystemConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "修改系统配置（hostname/ntp/dns/syslog/api/management/idle-timeout）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/backup": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BackupArchive"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "配置备份归档列表",
+        "tags": [
+          "system"
+        ]
+      },
+      "post": {
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupArchive"
+                }
+              }
+            },
+            "description": "已生成"
+          }
+        },
+        "summary": "生成配置备份归档",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/backup/{file}": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "application/octet-stream"
+          }
+        },
+        "summary": "下载备份归档",
+        "tags": [
+          "system"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "file",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/system/configuration/sessions": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ConfigSession"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "candidate 持锁会话列表（FR-CFG-009，对应 show system configuration sessions）",
+        "tags": [
+          "configuration"
+        ]
+      }
+    },
+    "/system/core-dumps": {
+      "delete": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "file",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "已删除"
+          }
+        },
+        "summary": "删除转储（file 缺省为全部）",
+        "tags": [
+          "system"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CoreDump"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "崩溃转储清单",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/hardware": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HardwareHealth"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "硬件健康（温度/风扇/电源/SMART）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/health/thresholds": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthThresholds"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "硬件健康告警阈值",
+        "tags": [
+          "system"
+        ]
+      },
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HealthThresholds"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "修改硬件健康告警阈值",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/kernel": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KernelBaseline"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "内核启动基线三方对照（cmdline / 运行实际 / 配置期望 + 差异）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/kernel:apply": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "已写入（响应含 backup 路径与 pending_reboot 差异）"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "按 committed 配置写入 GRUB 基线（需重启生效，FR-SYS-014）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/kernel:rollback": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "已回退"
+          }
+        },
+        "summary": "回退上一次内核基线（需重启生效）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/login-users": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/LoginUser"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "本地用户与 class 列表",
+        "tags": [
+          "system"
+        ]
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginUser"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "创建用户或 class",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/login-users/{name}": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "已删除"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "删除用户",
+        "tags": [
+          "system"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "class": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "format": "password",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已更新（入审计）"
+          }
+        },
+        "summary": "修改用户（class/口令，需 super-user）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/login-users/{name}:change-password": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "new_password": {
+                    "format": "password",
+                    "type": "string"
+                  },
+                  "old_password": {
+                    "format": "password",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "old_password",
+                  "new_password"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已修改（入审计）"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          }
+        },
+        "summary": "口令自助修改（登录者本人或 super-user，需旧口令）",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/system/ntp:sync": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "已触发"
+          }
+        },
+        "summary": "立即触发一次 NTP 同步",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/restore": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "file": {
+                    "format": "binary",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "从备份归档恢复（导入为 candidate 并提交）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/software": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "package": {
+                    "description": "本地路径或 https URL",
+                    "type": "string"
+                  },
+                  "sha256": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "package"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "已受理（异步，事件通知结果）"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "安装 nfvis 软件包（deb 路径或 URL，校验→升级→重启 nfvisd→报告）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/software:rollback": {
+      "post": {
+        "responses": {
+          "202": {
+            "description": "已受理"
+          }
+        },
+        "summary": "回退到上一版本",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/status": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemStatus"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "系统状态（uptime/CPU/内存/大页/磁盘）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/tech-support": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BackupArchive"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "诊断归档列表",
+        "tags": [
+          "system"
+        ]
+      },
+      "post": {
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupArchive"
+                }
+              }
+            },
+            "description": "已生成"
+          }
+        },
+        "summary": "生成诊断归档（版本/配置/日志/审计/状态/core dump 清单）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/tech-support/{file}": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "application/octet-stream"
+          }
+        },
+        "summary": "下载诊断归档",
+        "tags": [
+          "system"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "file",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/system/tls": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TlsInfo"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "当前 API 证书信息（subject/issuer/有效期）",
+        "tags": [
+          "system"
+        ]
+      },
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "certificate": {
+                    "type": "string"
+                  },
+                  "key": {
+                    "format": "password",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "certificate",
+                  "key"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已生效"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "安装外部证书（PEM 文本），立即生效",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/tls:regenerate": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "已重签"
+          }
+        },
+        "summary": "重签自签证书",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/version": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionInfo"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "组件版本",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system:reboot": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "confirm": {
+                    "description": "必须为 true",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "已受理"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "重启系统",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system:shutdown": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "confirm": {
+                    "description": "必须为 true",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "已受理"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "关机（或 poweroff）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system:zeroize": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "confirm": {
+                    "description": "双重确认，必须为 true",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "confirm"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "已受理，重启后进入初始化状态"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "恢复出厂（清空数据分区配置/镜像/VNF 并重置账号，FR-OPS-007）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/virtual-machine-functions": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/VMFunction"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "VM VNF 列表",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VMFunction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "创建 VM VNF（定义；不自动启动，autostart 时启动）",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      }
+    },
+    "/virtual-machine-functions/{name}": {
+      "delete": {
+        "parameters": [
+          {
+            "description": "二次确认，必须为 true（FR-CMP-013）；缺省或 false 返回 400 CONFIRM_REQUIRED",
+            "in": "query",
+            "name": "confirm",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "删除 VM（级联 vNIC/VPP 端口/快照；二次确认）",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VMFunction"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "VM 详情（资源分配/vNIC/NUMA）",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VMFunction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "VM 运行中，vCPU/内存/vNIC 修改需先关机（FR-CMP-012）"
+          }
+        },
+        "summary": "修改 VM（关机状态生效；运行中返回 409，FR-CMP-012 热调整列 V2）",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      }
+    },
+    "/virtual-machine-functions/{name}/console": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "expires_in": {
+                      "description": "ticket 有效期（秒）",
+                      "type": "integer"
+                    },
+                    "ws_url": {
+                      "example": "/api/v1/virtual-machine-functions/fw-vm/console/ws?ticket=...",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "VM 未启用串口（serial_console=false）"
+          }
+        },
+        "summary": "申请串口 console 访问凭证（一次性 ticket，短时有效；FR-CMP-014）",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      }
+    },
+    "/virtual-machine-functions/{name}/console/ws": {
+      "get": {
+        "responses": {
+          "101": {
+            "description": "协议切换为 WebSocket"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          }
+        },
+        "summary": "串口 console WebSocket（双向透传；打开/关闭入审计，FR-OPS-032）",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "POST .../console 返回的一次性凭证（WebSocket 握手无法带 Bearer Token，故以 ticket 鉴权）",
+          "in": "query",
+          "name": "ticket",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/virtual-machine-functions/{name}/snapshots": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Snapshot"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "快照列表",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Snapshot"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "已受理"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        },
+        "summary": "创建快照（qcow2 内部快照，含全部磁盘；FR-CMP-015/018）",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      }
+    },
+    "/virtual-machine-functions/{name}/snapshots/{snapshot}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "已删除"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        },
+        "summary": "删除快照（FR-CMP-015）",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "snapshot",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/virtual-machine-functions/{name}/snapshots/{snapshot}:rollback": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "snapshot",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "responses": {
+          "202": {
+            "description": "已受理"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        },
+        "summary": "回滚到快照（FR-CMP-015）",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      }
+    },
+    "/virtual-machine-functions/{name}:restart": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "responses": {
+          "202": {
+            "description": "已受理"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        },
+        "summary": "重启（运行中 ACPI 重启；已关机则启动）",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      }
+    },
+    "/virtual-machine-functions/{name}:start": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "responses": {
+          "202": {
+            "description": "已受理（异步完成，事件通知）"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "启动",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      }
+    },
+    "/virtual-machine-functions/{name}:stop": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "responses": {
+          "202": {
+            "description": "已受理"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        },
+        "summary": "停止（ACPI 关机，超时强杀）",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      }
+    },
+    "/virtual-switches": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/VirtualSwitch"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "虚拟交换机列表",
+        "tags": [
+          "virtual-switches"
+        ]
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VirtualSwitch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "创建虚拟交换机",
+        "tags": [
+          "virtual-switches"
+        ]
+      }
+    },
+    "/virtual-switches/{name}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "删除（有成员引用时 409）",
+        "tags": [
+          "virtual-switches"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VirtualSwitch"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        },
+        "summary": "详情",
+        "tags": [
+          "virtual-switches"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/virtual-switches/{name}/mac-table": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "properties": {
+                      "mac": {
+                        "type": "string"
+                      },
+                      "port": {
+                        "type": "string"
+                      },
+                      "vlan": {
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "MAC 学习表（仅 L2）",
+        "tags": [
+          "virtual-switches"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/virtual-switches/{name}/ports": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/VSwitchPort"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "成员端口与实时状态",
+        "tags": [
+          "virtual-switches"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/VSwitchPort"
+                },
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "全量替换成员端口列表",
+        "tags": [
+          "virtual-switches"
+        ]
+      }
+    },
+    "/vpp/capture": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "已停止"
+          }
+        },
+        "summary": "停止抓包（不导出）",
+        "tags": [
+          "system"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureStatus"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "抓包会话状态与已导出 pcap 清单（单会话；导出文件落 /var/lib/nfvis/captures）",
+        "tags": [
+          "system"
+        ]
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "count": {
+                    "default": 1000,
+                    "description": "VPP 抓包缓冲深度（环形，超出丢最旧）。注意：VPP 26.06 的 pcap trace 以\nmax_packets 作为缓冲深度且无“已抓包计数”接口，故非“达到 count 自动停止”；\n需显式 stop/export（契约语义按实测调整，见附录 A #59）。\n",
+                    "type": "integer"
+                  },
+                  "filter_acl": {
+                    "description": "V1 不支持：VPP 26.06 pcap trace 无 ACL 过滤（仅支持按 error），非空返回 400",
+                    "type": "string"
+                  },
+                  "interface": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "interface"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "已开始"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "开始数据面抓包（达到 count 自动停止）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/vpp/capture/{file}": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "application/octet-stream"
+          }
+        },
+        "summary": "下载 pcap 文件",
+        "tags": [
+          "system"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "file",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/vpp/config": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VppConfig"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "读取 VPP 数据面配置（startup.conf 生成源）",
+        "tags": [
+          "system"
+        ]
+      },
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VppConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "修改 VPP 配置（cpu/memory/dpdk 变更需重启数据面生效）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/vpp/restart": {
+      "post": {
+        "responses": {
+          "202": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "按 committed 配置重建 startup.conf 并重启 VPP（FR-SYS-009，super-user）",
+        "tags": [
+          "vpp"
+        ]
+      }
+    },
+    "/vpp/status": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VppStatus"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "VPP 数据面状态（版本、线程/worker、buffer、内存、配置版本）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/vpp:restart": {
+      "post": {
+        "responses": {
+          "202": {
+            "description": "已受理（异步完成，事件通知）"
+          }
+        },
+        "summary": "按新配置重启 VPP 数据面（触发恢复收敛）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/vrfs": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Vrf"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "VRF（L3 虚拟交换机）列表",
+        "tags": [
+          "vrfs"
+        ]
+      },
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Vrf"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "创建 VRF",
+        "tags": [
+          "vrfs"
+        ]
+      }
+    },
+    "/vrfs/{name}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "删除 VRF",
+        "tags": [
+          "vrfs"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vrf"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "VRF 详情",
+        "tags": [
+          "vrfs"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/vrfs/{name}/routes": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Route"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "FIB 路由表（运行态）",
+        "tags": [
+          "vrfs"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/Route"
+                },
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigAccepted"
+          }
+        },
+        "summary": "全量替换静态路由",
+        "tags": [
+          "vrfs"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "servers": [
+    {
+      "url": "https://{host}/api/v1",
+      "variables": {
+        "host": {
+          "default": "nfvis.local"
+        }
+      }
+    }
+  ],
+  "tags": [
+    {
+      "name": "auth"
+    },
+    {
+      "name": "system"
+    },
+    {
+      "name": "interfaces"
+    },
+    {
+      "name": "virtual-switches"
+    },
+    {
+      "name": "vrfs"
+    },
+    {
+      "name": "acls"
+    },
+    {
+      "name": "nat"
+    },
+    {
+      "name": "port-mirroring"
+    },
+    {
+      "name": "qos"
+    },
+    {
+      "name": "vpp"
+    },
+    {
+      "name": "resource-pools"
+    },
+    {
+      "name": "virtual-machine-functions"
+    },
+    {
+      "name": "container-functions"
+    },
+    {
+      "name": "images"
+    },
+    {
+      "name": "configuration"
+    },
+    {
+      "name": "alarms-events"
+    },
+    {
+      "name": "audit"
+    }
+  ]
+}

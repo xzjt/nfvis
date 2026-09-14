@@ -93,7 +93,9 @@ type MgmtConfig struct {
 type SyslogConfig struct {
 	RemoteHost    string `json:"remote_host,omitempty"`
 	RemotePort    int    `json:"remote_port,omitempty"`
-	Level         string `json:"level,omitempty"` // debug|info|warn|error
+	Facility      string `json:"facility,omitempty"` // RFC 5424 facility 名（缺省 user，FR-SYS-004）
+	Severity      string `json:"severity,omitempty"` // 远程转发最低级别（缺省 info，FR-SYS-004）
+	Level         string `json:"level,omitempty"`    // debug|info|warn|error（本地/守护进程级别，FR-OPS-030）
 	RetentionDays int    `json:"retention_days,omitempty"`
 	MaxSizeMB     int    `json:"max_size_mb,omitempty"`
 }

@@ -1002,6 +1002,22 @@ paths:
             text/plain:
               schema: { type: string }
 
+  /openapi.json:
+    get:
+      tags: [system]
+      summary: 本规范（OpenAPI 3.0 文档，随产品发布的运行时副本）
+      description: |
+        FR-API-002：Web 控制面据此开发。内容为随二进制嵌入的本规范 JSON，
+        与 `docs/NFViS-openapi.yaml` 同源（由 `make docscheck` 守护一致性）。
+        无鉴权（与 /metrics 同）：该文档亦随 deb 安装于 `/usr/share/doc/nfvis/`，不含敏感信息。
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, description: OpenAPI 3.0 文档 }
+
   /vpp/status:
     get:
       tags: [system]
@@ -1708,9 +1724,17 @@ components:
         syslog:
           type: object
           properties:
-            remote_host: { type: string }
-            remote_port: { type: integer }
-            level: { type: string, enum: [debug, info, warn, error] }
+            remote_host: { type: string, description: 远程 syslog 目标（FR-SYS-004） }
+            remote_port: { type: integer, description: 远程 syslog 端口（缺省 514） }
+            facility:
+              type: string
+              enum: [kern, user, mail, daemon, auth, syslog, lpr, news, uucp, cron, authpriv, ftp, local0, local1, local2, local3, local4, local5, local6, local7]
+              description: RFC 5424 facility（缺省 user；FR-SYS-004）
+            severity:
+              type: string
+              enum: [debug, info, warn, error]
+              description: 远程转发的最低级别（缺省 info；FR-SYS-004）
+            level: { type: string, enum: [debug, info, warn, error], description: 本地/守护进程日志级别（FR-OPS-030） }
             retention_days: { type: integer, description: 本地日志保留天数（FR-SYS-013） }
             max_size_mb: { type: integer, description: 本地日志容量上限，滚动覆盖 }
         api:
