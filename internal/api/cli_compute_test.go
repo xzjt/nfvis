@@ -426,7 +426,7 @@ func seedContainerConfig(t *testing.T, x *cliExecutor) {
 // auditHas 断言审计表中存在指定动作（FR-OPS-031）。
 func auditHas(t *testing.T, engine *config.Engine, action string) bool {
 	t.Helper()
-	entries, err := engine.AuditTrail(200)
+	entries, err := engine.AuditTrail(200, 0)
 	if err != nil {
 		t.Fatalf("读取审计: %v", err)
 	}

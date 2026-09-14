@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -143,7 +144,7 @@ func TestStoreAudit(t *testing.T) {
 			t.Fatalf("AppendAudit: %v", err)
 		}
 	}
-	got, err := s.ListAudit(2)
+	got, err := s.ListAudit(2, 0)
 	if err != nil {
 		t.Fatalf("ListAudit: %v", err)
 	}
@@ -184,5 +185,51 @@ func TestStoreSchemaVersion(t *testing.T) {
 	s2.db.Exec(`PRAGMA user_version = 99`)
 	if _, err := OpenStore(path); err == nil {
 		t.Fatalf("过新版本应拒绝启动")
+	}
+}
+
+// FR-API-007（决策 #70）：审计分页必须真正支持 offset——
+// 契约早已声明 limit/offset，实现此前静默忽略 offset（返回同一页），属契约漂移。
+func TestStoreListAuditOffset(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "nfvis.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	base := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		if err := s.AppendAudit(AuditEntry{
+			Time: base.Add(time.Duration(i) * time.Minute), User: "u",
+			Action: "act", Detail: strconv.Itoa(i), Result: "success",
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	// 倒序：最新在前 → 第 0 页是 4,3，第 1 页（offset=2）是 2,1
+	page0, err := s.ListAudit(2, 0)
+	if err != nil {
+		t.Fatalf("ListAudit(2,0): %v", err)
+	}
+	page1, err := s.ListAudit(2, 2)
+	if err != nil {
+		t.Fatalf("ListAudit(2,2): %v", err)
+	}
+	if len(page0) != 2 || len(page1) != 2 {
+		t.Fatalf("页大小错误: %d %d", len(page0), len(page1))
+	}
+	if page0[0].Detail != "4" || page0[1].Detail != "3" {
+		t.Fatalf("第 0 页内容错误: %v %v", page0[0].Detail, page0[1].Detail)
+	}
+	if page1[0].Detail != "2" || page1[1].Detail != "1" {
+		t.Fatalf("offset 未生效（应跳过前 2 条）: %v %v", page1[0].Detail, page1[1].Detail)
+	}
+	// offset 超出范围 → 空页而非报错
+	if last, err := s.ListAudit(2, 99); err != nil || len(last) != 0 {
+		t.Fatalf("超范围 offset 应返回空页: %v %v", last, err)
+	}
+	// 负 offset 按 0 处理
+	if neg, err := s.ListAudit(2, -5); err != nil || len(neg) != 2 || neg[0].Detail != "4" {
+		t.Fatalf("负 offset 应按 0 处理: %+v %v", neg, err)
 	}
 }

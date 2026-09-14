@@ -178,11 +178,11 @@ func Diff(old, new Config) string {
 			lastParent = parent
 		}
 		for _, v := range removed {
-			fmt.Fprintf(&b, "-   %s %s;\n", leaf, v)
+			fmt.Fprintf(&b, "-   %s %s;\n", leaf, maskSensitive(leaf, v))
 			changed = true
 		}
 		for _, v := range added {
-			fmt.Fprintf(&b, "+   %s %s;\n", leaf, v)
+			fmt.Fprintf(&b, "+   %s %s;\n", leaf, maskSensitive(leaf, v))
 			changed = true
 		}
 	}
@@ -190,6 +190,37 @@ func Diff(old, new Config) string {
 		return ""
 	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// sensitiveLeaf 需在输出中脱敏的叶子键名（FR-SEC-007 / 决策 #25：
+// 口令哈希与令牌不得回显于任何 show/API 输出）。
+// 注意：脱敏只发生在**渲染**阶段——变更检测仍用原值比较，
+// 否则仅改口令时会判定为「无变更」（cliexec 的 commit 前置检查）。
+var sensitiveLeaf = map[string]bool{
+	"password":      true,
+	"password-hash": true,
+	"token":         true,
+	"secret":        true,
+	"private-key":   true,
+	"psk":           true,
+}
+
+// redactedPlaceholder 脱敏占位（与 CLI show 输出一致）。
+const redactedPlaceholder = "«已隐藏»"
+
+// IsSensitiveKey 判断配置叶子键名是否属敏感字段（FR-SEC-007 / 决策 #25：
+// 口令哈希与令牌不得回显于任何 show/API 输出）。
+// 入参可为 JSON 键（下划线）或 CLI 风格键（连字符），二者等价。
+func IsSensitiveKey(key string) bool {
+	return sensitiveLeaf[strings.ReplaceAll(strings.ToLower(key), "_", "-")]
+}
+
+// maskSensitive 叶子为敏感字段时以占位替换其值；非敏感字段原样返回。
+func maskSensitive(leaf, value string) string {
+	if value == "" || !IsSensitiveKey(leaf) {
+		return value
+	}
+	return redactedPlaceholder
 }
 
 func indexStatements(stmts []Statement) map[string][]string {

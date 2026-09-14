@@ -216,7 +216,7 @@ func TestEngineLifecycle(t *testing.T) {
 	}
 
 	// 审计（FR-CFG-010）
-	audit, _ := k.store.ListAudit(10)
+	audit, _ := k.store.ListAudit(10, 0)
 	if len(audit) != 1 || audit[0].User != "admin" || audit[0].Action != "config.commit" ||
 		audit[0].Result != "success" || !strings.Contains(audit[0].Detail, "hostname") {
 		t.Fatalf("审计记录不符: %+v", audit)
@@ -330,7 +330,7 @@ func TestEngineApplyFailure(t *testing.T) {
 	if rev != 1 {
 		t.Fatalf("底座失败不应落库，实际 rev=%d", rev)
 	}
-	audit, _ := k.store.ListAudit(10)
+	audit, _ := k.store.ListAudit(10, 0)
 	if len(audit) != 1 || audit[0].Result != "failure" {
 		t.Fatalf("失败 commit 应入审计: %+v", audit)
 	}
@@ -369,7 +369,7 @@ func TestEngineCommitConfirmedTimeout(t *testing.T) {
 	if len(*k.events) != 1 || (*k.events)[0].Type != EventConfirmedTimeout {
 		t.Fatalf("应产生 confirmed 超时告警事件: %+v", *k.events)
 	}
-	audit, _ := k.store.ListAudit(10)
+	audit, _ := k.store.ListAudit(10, 0)
 	if audit[0].Action != "config.rollback-auto" {
 		t.Fatalf("自动回滚应入审计: %+v", audit[0])
 	}
