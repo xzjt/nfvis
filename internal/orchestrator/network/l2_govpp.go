@@ -74,7 +74,12 @@ func (g *govppL2Client) SwInterfaceNames() (map[uint32]SwIfInfo, error) {
 		if stop {
 			return names, nil
 		}
-		names[uint32(d.SwIfIndex)] = SwIfInfo{Name: d.InterfaceName, OuterVlanID: d.SubOuterVlanID}
+		names[uint32(d.SwIfIndex)] = SwIfInfo{
+			Name:        d.InterfaceName,
+			OuterVlanID: d.SubOuterVlanID,
+			AdminUp:     d.Flags&interface_types.IF_STATUS_API_FLAG_ADMIN_UP != 0,
+			LinkUp:      d.Flags&interface_types.IF_STATUS_API_FLAG_LINK_UP != 0,
+		}
 	}
 }
 

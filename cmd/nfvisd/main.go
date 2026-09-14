@@ -48,7 +48,7 @@ func run() error {
 		listen    = flag.String("listen", ":443", "API 监听地址")
 		tlsCert   = flag.String("tls-cert", "", "TLS 证书 PEM 路径（与 -tls-key 成对；缺省自动生成自签证书）")
 		tlsKey    = flag.String("tls-key", "", "TLS 私钥 PEM 路径")
-		plaintext = flag.Bool("allow-plaintext", false, "允许明文 HTTP（仅限开发/测试；FR-SEC-004 默认 HTTPS）")
+		plaintext = flag.Bool("allow-plaintext", false, "强制明文 HTTP（开发/测试；显式给出即忽略已装/自签证书）")
 		initAdmin = flag.String("init-admin-password", "", "首次启动引导 admin 用户的口令（缺省随机生成并打印一次）")
 		vppSock   = flag.String("vpp-sock", envOr("NFVIS_VPP_SOCK", network.DefaultSocket), "VPP binary API 套接字（FR-SYS-007）")
 		showVer   = flag.Bool("version", false, "输出版本后退出")
@@ -235,11 +235,14 @@ func run() error {
 	// 已装管理证书 → 直接用；否则**自动生成自签证书**（FR-API-001「REST over HTTPS（自签证书，可换）」）。
 	// 仅显式 -allow-plaintext（开发/测试）才退化为明文——此前缺省即明文，与规格相反。
 	tlsMgr := system.NewTLSManager("", runCmd)
-	if *tlsCert == "" {
+	// -allow-plaintext 是**权威开关**：显式给出即走明文（即便磁盘上已有自签证书）。
+	// 否则「已存在证书」会让该开关看起来无效——真机验证时即踩到：带 -allow-plaintext
+	// 启动却仍以 HTTPS 服务，明文客户端全被拒。
+	if *tlsCert == "" && !*plaintext {
 		if _, ok := tlsMgr.Info(); ok {
 			*tlsCert, *tlsKey = tlsMgr.CertPath(), tlsMgr.KeyPath()
 			log.Info("使用已安装的管理证书启用 HTTPS", "cert", *tlsCert)
-		} else if !*plaintext {
+		} else {
 			info, generated, err := tlsMgr.EnsureSelfSigned(hostnameOr("nfvis"), system.ListenSANs(*listen))
 			switch {
 			case err != nil:
@@ -408,6 +411,10 @@ func run() error {
 		for _, e := range netProvider.CheckVnfPorts(rctx, cfg) {
 			log.Warn("vNIC 状态检查", "err", e)
 		}
+		// V1 收尾（决策 #73）：物理业务口链路状态告警（FR-NET-003）
+		for _, e := range netProvider.CheckInterfaceLinks(rctx, cfg) {
+			log.Warn("物理口链路检查", "err", e)
+		}
 		log.Info("恢复收敛完成")
 	}
 	// M4-10：运行态异常退出巡检（FR-CMP-017/022）——VM crashed / 容器异常退出 → critical 告警；
@@ -431,6 +438,9 @@ func run() error {
 					}
 					for _, e := range netProvider.CheckVnfPorts(ctx, cfg) {
 						log.Warn("vNIC 状态巡检", "err", e)
+					}
+					for _, e := range netProvider.CheckInterfaceLinks(ctx, cfg) {
+						log.Warn("物理口链路巡检", "err", e)
 					}
 				}
 				recoveryMu.Unlock()

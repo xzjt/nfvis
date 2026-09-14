@@ -47,6 +47,8 @@ type MACEntry struct {
 type SwIfInfo struct {
 	Name        string
 	OuterVlanID uint16
+	AdminUp     bool // ADMIN_UP 位（FR-NET-003 链路告警用）
+	LinkUp      bool // LINK_UP 位
 }
 
 // MACTableEntry MAC 学习表对外形态（契约 /virtual-switches/{name}/mac-table）。
