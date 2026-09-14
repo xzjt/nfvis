@@ -1204,6 +1204,30 @@ paths:
       summary: 立即触发一次 NTP 同步
       responses:
         "200": { description: 已触发 }
+  /system/kernel:
+    get:
+      tags: [system]
+      summary: 内核启动基线三方对照（cmdline / 运行实际 / 配置期望 + 差异）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KernelBaseline" }
+  /system/kernel:apply:
+    post:
+      tags: [system]
+      summary: 按 committed 配置写入 GRUB 基线（需重启生效，FR-SYS-014）
+      responses:
+        "200": { description: 已写入（响应含 backup 路径与 pending_reboot 差异） }
+        "400": { $ref: "#/components/responses/Error400" }
+  /system/kernel:rollback:
+    post:
+      tags: [system]
+      summary: 回退上一次内核基线（需重启生效）
+      responses:
+        "200": { description: 已回退 }
+
   /system/health/thresholds:
     get:
       tags: [system]
@@ -1684,6 +1708,15 @@ components:
             token_ttl_minutes: { type: integer }
             max_sessions: { type: integer }
         idle_timeout_minutes: { type: integer }
+        kernel:
+          type: object
+          description: 内核启动基线（FR-SYS-014；大页/隔离核由 resource-pools 派生）
+          properties:
+            nmi_watchdog: { type: boolean }
+            transparent_hugepages: { type: string, enum: [always, madvise, never] }
+            iommu: { type: string, enum: [on, off, pt] }
+            tuned_profile: { type: string }
+            params: { type: array, items: { type: string } }
 
     Interface:
       type: object
@@ -1856,6 +1889,26 @@ components:
             properties:
               interface: { type: string }
               enabled: { type: boolean }
+
+    KernelBaseline:
+      type: object
+      properties:
+        cmdline: { type: array, items: { type: string } }
+        isolated_cores: { type: string }
+        hugepages_1g: { type: integer }
+        hugepages_1g_free: { type: integer }
+        thp: { type: string }
+        desired:
+          type: object
+          properties:
+            hugepages_1g: { type: integer, description: "-1 = 不托管" }
+            isolated_cores: { type: string }
+            nmi_watchdog: { type: boolean, nullable: true }
+            transparent_hugepages: { type: string }
+            iommu: { type: string }
+            tuned_profile: { type: string }
+            params: { type: array, items: { type: string } }
+        diffs: { type: array, items: { type: string }, description: 差异项（空 = 一致） }
 
     HealthThresholds:
       type: object

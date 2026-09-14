@@ -96,25 +96,29 @@ step "安装 Docker" bash -c '
     systemctl enable --now docker'
 
 # ---- 6. 大页内存（1G 页，reboot 生效；同步 selinux=0 无关项不动）----
-step "配置大页内存" bash -c '
+step "配置大页内存（复用产品安装器脚本，与 CLI 同一生成器）" bash -c '
     set -e
-    GRUB=/etc/default/grub
-    LINE="default_hugepagesz=1G hugepagesz=1G hugepages='"${HUGEPAGES_1G}"'"
-    if ! grep -q "hugepagesz=1G" "$GRUB"; then
-        sed -i "s/^GRUB_CMDLINE_LINUX=\"\(.*\)\"/GRUB_CMDLINE_LINUX=\"\1 ${LINE}\"/" "$GRUB"
+    SRC=/opt/nfvis/src/nfvis/deploy/installer/nfvis-baseline.sh
+    NFVISD=/usr/local/go/bin/go   # 开发机上 nfvisd 由 go run 提供，改用源内生成器
+    if [ -x "$SRC" ]; then
+        # 开发虚机：直接用 go run 生成 + 落地（与安装器脚本同源逻辑）
+        cd /opt/nfvis/src/nfvis
+        OUT=$(go run ./cmd/nfvisd -print-kernel-baseline --hugepages-1g "$HUGEPAGES_1G")
+        FRAG_NEW=$(printf "%s
+" "$OUT" | sed "/^---FSTAB---$/,$d")
+        FSTAB_NEW=$(printf "%s
+" "$OUT" | sed -n "/^---FSTAB---$/,$p" | sed "1d")
+        mkdir -p /etc/default/grub.d
+        printf "%s
+" "$FRAG_NEW" > /etc/default/grub.d/99-nfvis.cfg
+        grep -v -e "# nfvis-hugepages" -e "/dev/hugepages" /etc/fstab > /etc/fstab.tmp || true
+        printf "# nfvis-hugepages
+%s
+" "$FSTAB_NEW" >> /etc/fstab.tmp
+        mv -f /etc/fstab.tmp /etc/fstab
         update-grub
+    else
+        echo "警告：未找到 $SRC，跳过内核基线"
     fi
     mkdir -p /dev/hugepages
-    grep -q "/dev/hugepages" /etc/fstab || echo "nodev /dev/hugepages hugetlbfs defaults,pagesize=1G 0 0" >>/etc/fstab
-    grep hugepages "$GRUB"'
-
-# ---- 7. 工作目录 ----
-step "创建工作目录" bash -c 'mkdir -p /opt/nfvis/{src,images,incoming,backup} && echo ok'
-
-# ---- 汇总 ----
-log "================ 汇总 ================"
-printf "%s\n" "${RESULTS[@]}" | tee -a "$LOG"
-FAILS=$(printf "%s\n" "${RESULTS[@]}" | grep -c FAIL || true)
-log "完成：$(printf "%s\n" "${RESULTS[@]}" | grep -c OK) 项成功，${FAILS} 项失败"
-[ "$FAILS" = 0 ] || log "存在失败项：处理后可重跑本脚本（幂等）"
-log "提示：大页配置需 reboot 生效；VPP 已设为不自启，验证时手动: systemctl start vpp"
+    grep -h nfvis /etc/default/grub.d/99-nfvis.cfg 2>/dev/null || true' 

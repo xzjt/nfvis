@@ -29,6 +29,7 @@ show system
   ├─ memory                                         # 内存与大页使用（池内/池外）
   ├─ storage                                        # 磁盘与镜像仓库占用
   ├─ hugepages                                      # 大页内核参数与池状态
+  ├─ kernel                                         # 内核启动基线三方对照（cmdline/运行实际/配置期望，FR-SYS-014）
   ├─ hardware                                       # 硬件健康：CPU 温度/风扇/电源（IPMI/Redfish/lm-sensors）、磁盘 SMART
   ├─ core-dumps                                     # 崩溃转储清单（VPP/QEMU/nfvisd）
   ├─ tech-support                                   # 诊断归档清单
@@ -128,6 +129,7 @@ request system
   ├─ software add <deb包/URL> [sha256 <hex>]        # S；确认。校验→升级→重启 nfvisd→报告
   ├─ software rollback [to <version>]
   ├─ reboot | shutdown | poweroff                   # S；确认
+  ├─ kernel apply | rollback                        # S；确认。按 committed 配置写 GRUB 基线/回退，需重启生效（FR-SYS-014）
   ├─ configuration backup [to <path>] | restore <path>   # S；确认
   ├─ tech-support generate                          # 生成诊断归档 tar.gz，CLI/API 下载
   ├─ core-dumps export <url> | delete [file <name>]
@@ -198,6 +200,12 @@ set api
 set management
   ├─ ip address <ip-prefix>            # 独立管理网卡静态地址（IPv4/IPv6）
   └─ gateway <ip>
+set kernel                                    # 内核启动基线（大页/隔离核由 resource-pools 派生，唯一真源）
+  ├─ nmi-watchdog <true|false>                # NMI watchdog（VPP 场景通常 false）
+  ├─ transparent-hugepages <always|madvise|never>
+  ├─ iommu <on|off|pt>
+  ├─ tuned-profile <name>
+  └─ params <param>                           # 附加内核参数（逃生口，可多条）
 set health thresholds
   ├─ cpu-temp-celsius <uint> | disk-temp-celsius <uint>   # 硬件告警阈值（FR-SYS-012）
   └─ disk-used-percent <uint>                             # API: PUT /system/health/thresholds

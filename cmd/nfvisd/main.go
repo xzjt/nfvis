@@ -51,10 +51,41 @@ func run() error {
 		initAdmin = flag.String("init-admin-password", "", "首次启动引导 admin 用户的口令（缺省随机生成并打印一次）")
 		vppSock   = flag.String("vpp-sock", envOr("NFVIS_VPP_SOCK", network.DefaultSocket), "VPP binary API 套接字（FR-SYS-007）")
 		showVer   = flag.Bool("version", false, "输出版本后退出")
+		// 安装期内核基线生成（FR-SYS-014 / 决策 #66）：安装器调用本开关生成 GRUB 片段与
+		// fstab 行，保证与 CLI（request system kernel apply）**同一生成器**，避免双源。
+		printBaseline = flag.Bool("print-kernel-baseline", false, "打印内核基线（GRUB 片段 + ---FSTAB--- + fstab 行）后退出")
+		hp1g          = flag.Int("hugepages-1g", 0, "1G 大页数量（安装期基线）")
+		hp2m          = flag.Int("hugepages-2m", 0, "2M 大页数量（安装期基线）")
+		isoCores      = flag.String("isolated-cores", "", "隔离核列表，如 4-15（安装期基线）")
+		thp           = flag.String("thp", "", "transparent_hugepages: always|madvise|never")
+		iommu         = flag.String("iommu", "", "iommu: on|off|pt")
+		tuned         = flag.String("tuned-profile", "", "tuned 性能档名")
+		extraParams   = flag.String("kernel-params", "", "附加内核参数（空格分隔）")
 	)
 	flag.Parse()
 	if *showVer {
 		fmt.Println("nfvisd", api.VersionStr)
+		return nil
+	}
+	if *printBaseline {
+		pageSize, count := "", 0
+		if *hp1g > 0 {
+			pageSize, count = "1G", *hp1g
+		} else if *hp2m > 0 {
+			pageSize, count = "2M", *hp2m
+		}
+		var extra []string
+		if strings.TrimSpace(*extraParams) != "" {
+			extra = strings.Fields(*extraParams)
+		}
+		d := system.DesiredFromConfig(pageSize, count, *isoCores, "", *thp, *iommu, *tuned, extra)
+		frag, fstab := system.GenerateBaseline(d)
+		fmt.Print(frag)
+		fmt.Println("---FSTAB---")
+		fmt.Print(fstab)
+		if fstab != "" {
+			fmt.Println()
+		}
 		return nil
 	}
 
@@ -430,6 +461,7 @@ func run() error {
 		LLDP:        &lldpController{net: netProvider},
 		State:       state.New(vppMgr.Runtime()),
 		SRIOV:       network.NewSRIOVProvider(),
+		Kernel:      system.NewBaselineApplier(),
 		NAT:         &natSessionsController{net: netProvider},
 		Alarms:      &alarmController{store: alarms},
 		Diag:        &diagController{diag: vppMgr.Diagnostics()},

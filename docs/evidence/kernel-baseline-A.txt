@@ -1,0 +1,24 @@
+===== A) show system kernel（三方对照；改配置前）=====
+项                      内核基线(cmdline)              运行实际
+isolcpus               -                          -
+大页 1G                  4                          3（free 1）
+nmi_watchdog           -                          false
+transparent_hugepage   -                          madvise
+
+配置期望（resource-pools / system kernel 派生）：
+  大页 1G=不托管   isolcpus=-   nmi_watchdog=不托管   thp=-
+
+一致性：内核基线与配置期望一致（无需重启）
+
+===== B) 安装器 --check（只读报告）=====
+nfvis-baseline: 内核基线检查：
+nfvis-baseline:   片段缺失（未托管内核基线）
+nfvis-baseline:   运行 cmdline：default_hugepagesz=1G hugepagesz=1G hugepages=4 
+nfvis-baseline:   大页实际：HugePages_Total: 3  空闲 1
+nfvis-baseline:   fstab 大页挂载：缺失
+
+===== C) 生成器输出（与 CLI 同一实现）=====
+# 由 NFViS 生成（决策 #66）：请勿手工编辑；变更经 CLI set system kernel / resource-pools 后由 nfvisd 重写
+GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} default_hugepagesz=1G hugepagesz=1G hugepages=4 isolcpus=4-7 nohz_full=4-7 rcu_nocbs=4-7"
+---FSTAB---
+nodev /dev/hugepages hugetlbfs defaults,pagesize=1G 0 0

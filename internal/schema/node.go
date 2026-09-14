@@ -97,6 +97,9 @@ type Node struct {
 	// → VSwitchPort.interface）。cli_bridge 执行期翻译据此区分两类参数。
 	ScalarParam   bool
 	ScalarJSONKey string
+	// ScalarIsArray：该标量参数在模型中是**数组**字段（如 dns_servers/params/
+	// bond members）。执行期翻译据此追加取值而非覆盖，并支持按值删除。
+	ScalarIsArray bool
 
 	// IdentityValue 身份取值关键字：其取值是父层具名数组的元素身份
 	//（如 hugepages page-size <2M|1G> 的 1G 即 HPool 元素的 page_size 身份）。
@@ -133,6 +136,14 @@ func P(placeholder, desc, dynamic string, children ...*Node) *Node {
 // （如 `ports 1 interface ens2f0` 的 ens2f0 → VSwitchPort.interface）。
 func SP(placeholder, jsonKey, desc string) *Node {
 	return &Node{Kind: Param, Name: placeholder, Desc: desc, ScalarParam: true, ScalarJSONKey: jsonKey, ParamType: "name"}
+}
+
+// SPA：标量参数，但模型字段是数组（dns_servers / params / bond members）——
+// 取值追加、按值删除；执行期翻译与 SP 区分处理。
+func SPA(placeholder, jsonKey, desc string) *Node {
+	n := SP(placeholder, jsonKey, desc)
+	n.ScalarIsArray = true
+	return n
 }
 
 // IV 标记身份取值关键字（其值是父层具名数组的元素身份，见 IdentityValue）。

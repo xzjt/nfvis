@@ -61,3 +61,20 @@ fi
 
 log "完成"
 exit 0
+
+# 4) 内核启动基线（FR-SYS-014 / FR-CMP-005）：无基线则按机器规格应用保守默认（安装期预置），
+#    已有基线则仅检查报告。**校验/应用失败不阻断安装**（底座差异不应让 dpkg 失败）。
+BASELINE_SH=/usr/share/nfvis/installer/nfvis-baseline.sh
+if [ -x "$BASELINE_SH" ]; then
+    if [ -f /etc/default/grub.d/99-nfvis.cfg ]; then
+        sh "$BASELINE_SH" --check || true
+    else
+        log "未检测到内核基线，按机器规格应用保守默认（1G 大页 = min(RAM/4, 8)，不设 isolcpus）"
+        if [ -x /usr/bin/nfvisd ]; then
+            sh "$BASELINE_SH" --defaults || log "提示：自动应用基线失败，可稍后手工执行 $BASELINE_SH --defaults"
+        else
+            log "提示：nfvisd 尚未安装，跳过基线应用；安装完成后执行 $BASELINE_SH --defaults"
+        fi
+        log "注意：内核基线需重启生效（FR-SYS-014）"
+    fi
+fi

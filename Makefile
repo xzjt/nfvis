@@ -65,7 +65,7 @@ integration:
 deb:
 	@command -v dpkg-deb >/dev/null 2>&1 || { echo "跳过 deb：需要 dpkg-deb（请在 Linux/nfvis-vm 上执行）"; exit 1; }
 	rm -rf build/deb
-	install -d build/deb/usr/bin build/deb/lib/systemd/system build/deb/usr/share/doc/nfvis build/deb/DEBIAN
+	install -d build/deb/usr/bin build/deb/lib/systemd/system build/deb/usr/share/doc/nfvis build/deb/DEBIAN build/deb/usr/share/nfvis/installer
 	GOOS=linux GOARCH=$(ARCH) $(GO) build -trimpath -ldflags "-s -w -X github.com/xzjt/nfvis/internal/api.VersionStr=$(VERSION)" -o build/deb/usr/bin/nfvisd ./cmd/nfvisd
 	GOOS=linux GOARCH=$(ARCH) $(GO) build -trimpath -ldflags "-s -w" -o build/deb/usr/bin/nfvis-cli ./cmd/nfvis-cli
 	install -m 0644 deploy/nfvis.service build/deb/lib/systemd/system/nfvis.service
@@ -73,6 +73,7 @@ deb:
 	install -m 0644 docs/NFViS-CLI命令树完整设计.md build/deb/usr/share/doc/nfvis/
 	install -m 0644 docs/NFViS-系统产品需求与目标架构规格书.md build/deb/usr/share/doc/nfvis/
 	install -m 0644 docs/M5-验收记录.md build/deb/usr/share/doc/nfvis/ 2>/dev/null || true
+	install -m 0755 deploy/installer/nfvis-baseline.sh build/deb/usr/share/nfvis/installer/
 	install -m 0755 deploy/debian/postinst build/deb/DEBIAN/postinst
 	install -m 0755 deploy/debian/prerm build/deb/DEBIAN/prerm
 	install -m 0755 deploy/debian/postrm build/deb/DEBIAN/postrm

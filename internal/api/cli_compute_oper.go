@@ -689,6 +689,8 @@ func (x *cliExecutor) requestSystem(user, class, source string, t []string) stri
 		return "%% 语法: request system <configuration|zeroize|software|reboot|shutdown|ntp|tech-support|core-dumps|api> …\n"
 	}
 	switch t[0] {
+	case "kernel":
+		return x.requestKernelBaseline(user, t[1:])
 	case "configuration":
 		if len(t) >= 2 && t[1] == "backup" {
 			return x.systemBackup(user, t[2:])
