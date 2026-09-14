@@ -24,6 +24,10 @@
   引导镜像 `alpine.qcow2` 已恢复；Docker 本地有 `alpine:3.20`。真机前 `pkill -x nfvisd`；
   集成测试 `make integration`（CI 不跑）。设计基线在 `docs/`，**不要凭记忆重设计**。
 - 已定决策 67 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- **V1 验收收口（2026-09-14）**：`docs/V1-验收检查表.md` 已把规格书 **111 条 FR** 逐条对照证据
+  （通过 89 / 未验 7 / 降级 15 / 移 V2 2），降级理由与签字建议见其 §5/§6；
+  待办与未完成项入口见 `docs/V1-收尾待办.md`。**新增登记的降级**：物理口 link 告警、告警转发 syslog、
+  日志级别联动、`GET /api/v1/openapi.json` 与列表分页、FR-SEC 若干强制力项。
 - `docs/NFViS-openapi.yaml` 与 `docs/NFViS-CLI命令树完整设计.md` 是**契约**。
 
 ## 不可违反的规则
