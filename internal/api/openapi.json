@@ -2256,6 +2256,27 @@
           "acls"
         ]
       },
+      "parameters": [
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        }
+      ],
       "post": {
         "requestBody": {
           "content": {
@@ -2358,7 +2379,28 @@
         "tags": [
           "alarms-events"
         ]
-      }
+      },
+      "parameters": [
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        }
+      ]
     },
     "/alarms:clear": {
       "post": {
@@ -2460,6 +2502,27 @@
           "interfaces"
         ]
       },
+      "parameters": [
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        }
+      ],
       "post": {
         "requestBody": {
           "content": {
@@ -2821,6 +2884,27 @@
           "container-functions"
         ]
       },
+      "parameters": [
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        }
+      ],
       "post": {
         "requestBody": {
           "content": {
@@ -3047,6 +3131,27 @@
           "images"
         ]
       },
+      "parameters": [
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        }
+      ],
       "post": {
         "requestBody": {
           "content": {
@@ -3216,7 +3321,28 @@
         "tags": [
           "interfaces"
         ]
-      }
+      },
+      "parameters": [
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        }
+      ]
     },
     "/interfaces/{name}": {
       "get": {
@@ -3628,6 +3754,27 @@
           "port-mirroring"
         ]
       },
+      "parameters": [
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        }
+      ],
       "post": {
         "requestBody": {
           "content": {
@@ -3751,7 +3898,28 @@
         "tags": [
           "interfaces"
         ]
-      }
+      },
+      "parameters": [
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        }
+      ]
     },
     "/qos/policies": {
       "get": {
@@ -3775,6 +3943,27 @@
           "qos"
         ]
       },
+      "parameters": [
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        }
+      ],
       "post": {
         "requestBody": {
           "content": {
@@ -4706,6 +4895,27 @@
           "virtual-machine-functions"
         ]
       },
+      "parameters": [
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        }
+      ],
       "post": {
         "requestBody": {
           "content": {
@@ -4941,6 +5151,25 @@
           "schema": {
             "type": "string"
           }
+        },
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
         }
       ],
       "post": {
@@ -5142,6 +5371,27 @@
           "virtual-switches"
         ]
       },
+      "parameters": [
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        }
+      ],
       "post": {
         "requestBody": {
           "content": {
@@ -5254,6 +5504,25 @@
           "required": true,
           "schema": {
             "type": "string"
+          }
+        },
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
           }
         }
       ]
@@ -5533,6 +5802,27 @@
           "vrfs"
         ]
       },
+      "parameters": [
+        {
+          "description": "返回条数上限；缺省不截断（FR-API-007）",
+          "in": "query",
+          "name": "limit",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "跳过条数（FR-API-007）",
+          "in": "query",
+          "name": "offset",
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        }
+      ],
       "post": {
         "requestBody": {
           "content": {

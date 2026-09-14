@@ -24,7 +24,7 @@ func (s *Server) handleGetAcls(w http.ResponseWriter, r *http.Request) {
 	if out == nil {
 		out = []model.Acl{}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, paginate(r, out))
 }
 
 // handleGetAcl GET /api/v1/acls/{name}：ACL 详情（T0-1；契约 /acls/{name} get）。
@@ -143,7 +143,7 @@ func (s *Server) handleGetQosPolicies(w http.ResponseWriter, r *http.Request) {
 	if out == nil {
 		out = []model.QosPolicy{}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, paginate(r, out))
 }
 
 func (s *Server) handlePostQosPolicy(w http.ResponseWriter, r *http.Request) {
@@ -194,7 +194,7 @@ func (s *Server) handleGetPMs(w http.ResponseWriter, r *http.Request) {
 	if out == nil {
 		out = []model.PortMirroring{}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, paginate(r, out))
 }
 
 func (s *Server) handlePostPM(w http.ResponseWriter, r *http.Request) {
@@ -240,7 +240,7 @@ func (s *Server) handleGetBonds(w http.ResponseWriter, r *http.Request) {
 	if out == nil {
 		out = []model.Bond{}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, paginate(r, out))
 }
 
 // handleGetBond GET /api/v1/bonds/{name}：bond 详情（T0-1；契约 /bonds/{name} get）。
@@ -319,6 +319,7 @@ func (s *Server) handleGetLldp(w http.ResponseWriter, r *http.Request) {
 	if cfg.Protocols != nil && cfg.Protocols.LLDP != nil {
 		out = *cfg.Protocols.LLDP
 	}
+	// 注意：这是 LLDP **配置对象**（非列表），不加分页；邻居列表在 handleGetLldpNeighbors。
 	writeJSON(w, http.StatusOK, out)
 }
 

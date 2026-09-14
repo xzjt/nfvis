@@ -44,7 +44,7 @@ func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 	for _, vm := range cfg.VirtualMachineFunctions {
 		out = append(out, vmResponse{VMFunction: vm, State: s.vmStateSafe(r.Context(), vm.Name)})
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, paginate(r, out))
 }
 
 // handleGetVM GET /api/v1/virtual-machine-functions/{name}。

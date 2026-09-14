@@ -39,7 +39,7 @@ func (s *Server) handleGetAlarms(w http.ResponseWriter, r *http.Request) {
 	if rows == nil {
 		rows = []AlarmRow{}
 	}
-	writeJSON(w, http.StatusOK, rows)
+	writeJSON(w, http.StatusOK, paginate(r, rows))
 }
 
 // handleClearAlarms POST /api/v1/alarms:clear（清除已 resolved 告警，204）。

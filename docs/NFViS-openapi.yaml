@@ -158,6 +158,9 @@ paths:
         "400": { $ref: "#/components/responses/Error400" }
 
   /interfaces:
+    parameters:
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [interfaces]
       summary: 接口列表（kind=physical|management|vpp）
@@ -197,6 +200,9 @@ paths:
         "404": { $ref: "#/components/responses/Error404" }
 
   /virtual-switches:
+    parameters:
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [virtual-switches]
       summary: 虚拟交换机列表
@@ -267,6 +273,8 @@ paths:
   /virtual-switches/{name}/mac-table:
     parameters:
       - { name: name, in: path, required: true, schema: { type: string } }
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [virtual-switches]
       summary: MAC 学习表（仅 L2）
@@ -285,6 +293,9 @@ paths:
                     vlan: { type: integer }
 
   /vrfs:
+    parameters:
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [vrfs]
       summary: VRF（L3 虚拟交换机）列表
@@ -356,6 +367,9 @@ paths:
         "200": { $ref: "#/components/responses/ConfigAccepted" }
 
   /acls:
+    parameters:
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [acls]
       summary: ACL 列表（含命中计数）
@@ -440,6 +454,9 @@ paths:
         "200": { $ref: "#/components/responses/ConfigAccepted" }
 
   /port-mirroring:
+    parameters:
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [port-mirroring]
       summary: SPAN 会话列表
@@ -471,6 +488,9 @@ paths:
         "200": { $ref: "#/components/responses/ConfigAccepted" }
 
   /qos/policies:
+    parameters:
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [qos]
       summary: 限速策略列表
@@ -524,6 +544,9 @@ paths:
         "409": { $ref: "#/components/responses/Error409" }
 
   /virtual-machine-functions:
+    parameters:
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [virtual-machine-functions]
       summary: VM VNF 列表
@@ -648,7 +671,10 @@ paths:
         "101": { description: 协议切换为 WebSocket }
         "401": { $ref: "#/components/responses/Error401" }
   /virtual-machine-functions/{name}/snapshots:
-    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [virtual-machine-functions]
       summary: 快照列表
@@ -694,6 +720,9 @@ paths:
         "404": { $ref: "#/components/responses/Error404" }
 
   /container-functions:
+    parameters:
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [container-functions]
       summary: 容器 VNF 列表
@@ -771,6 +800,9 @@ paths:
               schema: { type: string }
 
   /images:
+    parameters:
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [images]
       summary: 镜像列表
@@ -954,6 +986,9 @@ paths:
                     Desc: { type: string }
 
   /alarms:
+    parameters:
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [alarms-events]
       summary: 告警列表（state=active|resolved|all）
@@ -1112,6 +1147,9 @@ paths:
               schema: { type: string, format: binary }
 
   /bonds:
+    parameters:
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [interfaces]
       summary: 链路聚合列表
@@ -1290,6 +1328,9 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/ConfigAccepted" }
   /protocols/lldp/neighbors:
+    parameters:
+      - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
+      - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 }, description: 跳过条数（FR-API-007） }
     get:
       tags: [interfaces]
       summary: LLDP 邻居表（运行态）
