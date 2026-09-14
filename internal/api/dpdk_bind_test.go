@@ -110,6 +110,7 @@ func TestCLIDPDKCommandCoverage(t *testing.T) {
 		{"request", "interfaces", "ens224", "bind-dpdk"},
 		{"request", "interfaces", "ens224", "bind-dpdk", "uio-driver", "vfio-pci"},
 		{"request", "interfaces", "ens224", "unbind-dpdk"},
+		{"request", "interfaces", "ens224", "unbind-dpdk", "to-driver", "vmxnet3"},
 	} {
 		if _, _, err := schema.Match(schema.OperRoot(), stmt); err != nil {
 			t.Fatalf("命令树应可解析 %v: %v", stmt, err)
