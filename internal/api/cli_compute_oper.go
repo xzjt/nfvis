@@ -423,17 +423,24 @@ func (x *cliExecutor) imagesUpload(user string, rest []string) string {
 // （异步受理，进度经 show images <n> detail 的 import_state 观察；FR-CMP-032）。
 func (x *cliExecutor) imagesDownload(user string, rest []string) string {
 	kv, err := kvArgs(rest, "name", "type", "url", "sha256")
+	const syn = "request images download name <n> type <t> url <url> sha256 <hex>"
 	if err != nil {
-		return "%% " + err.Error() + "（语法: request images download name <n> type <t> url <url> [sha256 <hex>]）\n"
+		return "%% " + err.Error() + "（语法: " + syn + "）\n"
 	}
 	if kv["name"] == "" || kv["type"] == "" || kv["url"] == "" {
-		return "%% 语法: request images download name <n> type <t> url <url> [sha256 <hex>]\n"
+		return "%% 语法: " + syn + "\n"
+	}
+	// 受理前**同步**校验（缺 sha256 / 格式非法立即报错，FR-SEC-004，决策 #71⑤）；
+	// 通过后再异步拉取。
+	opts := images.DownloadOptions{
+		Name: kv["name"], Type: kv["type"], URL: kv["url"], SHA256: kv["sha256"],
+	}
+	if err := images.ValidateDownloadOptions(opts); err != nil {
+		return "%% " + err.Error() + "\n"
 	}
 	// 异步：与端点一致只做登记受理（进度经 import_state 观察），不在 CLI 阻塞等待。
 	go func() {
-		_, _ = x.images.Download(context.Background(), images.DownloadOptions{
-			Name: kv["name"], Type: kv["type"], URL: kv["url"], SHA256: kv["sha256"],
-		})
+		_, _ = x.images.Download(context.Background(), opts)
 	}()
 	x.audit(user, "images.download", fmt.Sprintf("download image %s from %s", kv["name"], kv["url"]), nil)
 	return fmt.Sprintf("镜像 %s 拉取已受理（进度经 show images %s detail 的 import_state 查看）\n", kv["name"], kv["name"])

@@ -107,3 +107,40 @@ func TestImagesUnavailable(t *testing.T) {
 		t.Fatalf("未装配应 503: %d", status)
 	}
 }
+
+// FR-SEC-004（决策 #71⑤）：URL 拉取缺 sha256 必须**受理前**同步拒绝（400），
+// 而非先返回 202「已受理」再在后台静默转 failed。
+func TestImagesURLPullRequiresSHA256Sync(t *testing.T) {
+	store := newImagesStore(t)
+	ts := newTestServerOpts(t, Options{VM: newFakeVM(), Images: store})
+	token := loginAdmin(t, ts)
+
+	post := func(body string) (int, string) {
+		t.Helper()
+		status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/images", token,
+			json.RawMessage(body), nil)
+		return status, string(data)
+	}
+
+	// 缺 sha256 → 400（不是 202）
+	status, data := post(`{"name":"t.qcow2","type":"vm-image","url":"http://127.0.0.1:9/x.qcow2"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("缺 sha256 应同步 400，得到 %d %s", status, data)
+	}
+	if !strings.Contains(data, "sha256") {
+		t.Fatalf("错误应提及 sha256: %s", data)
+	}
+
+	// 非 64 位十六进制 → 400
+	status, data = post(`{"name":"t.qcow2","type":"vm-image","url":"http://127.0.0.1:9/x.qcow2","sha256":"deadbeef"}`)
+	if status != http.StatusBadRequest || !strings.Contains(data, "64") {
+		t.Fatalf("非 64 位 hex 应 400: %d %s", status, data)
+	}
+
+	// 合法 sha256 → 202 受理（后台拉取会失败，但受理语义正确）
+	status, data = post(`{"name":"t2.qcow2","type":"vm-image","url":"http://127.0.0.1:9/x.qcow2","sha256":"` +
+		strings.Repeat("a", 64) + `"}`)
+	if status != http.StatusAccepted {
+		t.Fatalf("带合法 sha256 应 202 受理: %d %s", status, data)
+	}
+}

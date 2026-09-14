@@ -30,19 +30,8 @@ type DownloadOptions struct {
 // Download 拉取镜像到仓库并登记元数据。中途状态记 downloading，成功 ready、失败 failed。
 // 支持断点续传：若存在 <dest>.part 且服务端支持 Range，则从断点续传。
 func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error) {
-	if opts.Name == "" || opts.URL == "" {
-		return Meta{}, fmt.Errorf("name 与 url 必填")
-	}
-	if opts.Type != TypeVM && opts.Type != TypeContainer {
-		return Meta{}, fmt.Errorf("type 必须为 %s 或 %s", TypeVM, TypeContainer)
-	}
-	// FR-SEC-004（决策 #71）：URL 拉取默认强制 sha256，缺省即拒绝（不再静默跳过校验）。
-	// 提前失败，避免先登记 downloading 再报错。
-	if strings.TrimSpace(opts.SHA256) == "" {
-		return Meta{}, fmt.Errorf("URL 拉取必须提供 sha256（FR-SEC-004：默认强制校验）")
-	}
-	if len(strings.TrimSpace(opts.SHA256)) != 64 || !isHex(opts.SHA256) {
-		return Meta{}, fmt.Errorf("sha256 必须为 64 位十六进制字符串: %q", opts.SHA256)
+	if err := ValidateDownloadOptions(opts); err != nil {
+		return Meta{}, err
 	}
 	pending := Meta{Name: opts.Name, Type: opts.Type, SHA256: opts.SHA256,
 		Description: opts.Description, ImportState: StateDownloading}
@@ -240,4 +229,26 @@ func isHex(s string) bool {
 		}
 	}
 	return true
+}
+
+// ValidateDownloadOptions 校验 URL 拉取参数（同步可调用）。
+//
+// 抽出为独立函数的原因：URL 拉取是**异步**的（先返回 202/受理，进度经 import_state 观察），
+// 若只在 Download 内校验，缺 sha256 会被当成"受理成功"、随后静默转 failed——
+// 调用方须在受理前同步校验并立刻报错（FR-SEC-004，决策 #71⑤）。
+func ValidateDownloadOptions(opts DownloadOptions) error {
+	if strings.TrimSpace(opts.Name) == "" || strings.TrimSpace(opts.URL) == "" {
+		return fmt.Errorf("name 与 url 必填")
+	}
+	if opts.Type != TypeVM && opts.Type != TypeContainer {
+		return fmt.Errorf("type 必须为 %s 或 %s", TypeVM, TypeContainer)
+	}
+	// FR-SEC-004：URL 拉取**默认强制** sha256，缺省即拒绝（不再静默跳过校验）。
+	if strings.TrimSpace(opts.SHA256) == "" {
+		return fmt.Errorf("URL 拉取必须提供 sha256（FR-SEC-004：默认强制校验）")
+	}
+	if len(strings.TrimSpace(opts.SHA256)) != 64 || !isHex(opts.SHA256) {
+		return fmt.Errorf("sha256 必须为 64 位十六进制字符串: %q", opts.SHA256)
+	}
+	return nil
 }

@@ -313,3 +313,31 @@ func TestDownloadRequiresSHA256(t *testing.T) {
 		t.Fatalf("非 64 位 hex 应被拒绝: %v", err)
 	}
 }
+
+// FR-SEC-004（决策 #71⑤）：ValidateDownloadOptions 为同步可调用的校验入口。
+func TestValidateDownloadOptions(t *testing.T) {
+	ok := DownloadOptions{Name: "a.qcow2", Type: TypeVM, URL: "http://h/a", SHA256: strings.Repeat("a", 64)}
+	if err := ValidateDownloadOptions(ok); err != nil {
+		t.Fatalf("合法参数应通过: %v", err)
+	}
+	cases := []struct {
+		name string
+		o    DownloadOptions
+		want string
+	}{
+		{"缺 name", DownloadOptions{Type: TypeVM, URL: "http://h/a", SHA256: strings.Repeat("a", 64)}, "name"},
+		{"缺 url", DownloadOptions{Name: "a", Type: TypeVM, SHA256: strings.Repeat("a", 64)}, "url"},
+		{"类型非法", DownloadOptions{Name: "a", Type: "bad", URL: "http://h/a", SHA256: strings.Repeat("a", 64)}, "type"},
+		{"缺 sha256", DownloadOptions{Name: "a", Type: TypeVM, URL: "http://h/a"}, "sha256"},
+		{"sha256 非 hex", DownloadOptions{Name: "a", Type: TypeVM, URL: "http://h/a", SHA256: strings.Repeat("z", 64)}, "64"},
+		{"sha256 长度不足", DownloadOptions{Name: "a", Type: TypeVM, URL: "http://h/a", SHA256: "abcdef"}, "64"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := ValidateDownloadOptions(c.o)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("期望含 %q 的错误，得到 %v", c.want, err)
+			}
+		})
+	}
+}
