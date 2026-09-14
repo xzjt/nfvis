@@ -754,7 +754,31 @@ func (c *vmController) refreshVnfAlarms() {
 // snapshotController 装配 api.VMSnapshotRuntime（M4-6）。
 type snapshotController struct{ p *compute.Provider }
 
+// requirePoweredOff 快照 create/rollback 需 VM 关机态（决策 #75，FR-CMP-015）。
+//
+// **必须放在这里**：CLI（api.cliExecutor）与 HTTP handler 是两条独立执行路径
+// （前者直接调 VMSnapshotRuntime，不经 handler），把守卫只放在 handler 会漏掉 CLI——
+// 本守卫初版即犯此错（真机实测 CLI 仍能对运行中 VM 建快照/回滚，VM 被静默重启）。
+// 放在两侧共同依赖的实现处，才满足「命令树与执行器同源」。
+//
+// 依据：对运行中域 `DomainRevertToSnapshot(flags=0)` 实测**不报错但替换 QEMU 进程**
+// （相当于静默重启该 VM），静默重启生产 VNF 不可接受。
+func (c *snapshotController) requirePoweredOff(ctx context.Context, domain, op string) error {
+	state, err := c.p.VMState(ctx, domain)
+	if err != nil {
+		return nil // 状态不可知时不阻断（与既有保守取向一致）
+	}
+	switch state {
+	case orchestrator.VMStateRunning, orchestrator.VMStatePaused, orchestrator.VMStateCrashed:
+		return fmt.Errorf("VM %s 当前为 %s，快照 %s 需先关机（FR-CMP-015，决策 #75）", domain, state, op)
+	}
+	return nil
+}
+
 func (c *snapshotController) SnapshotCreate(ctx context.Context, domain, name, desc string) error {
+	if err := c.requirePoweredOff(ctx, domain, "create"); err != nil {
+		return err
+	}
 	return c.p.SnapshotCreate(ctx, domain, name, desc)
 }
 
@@ -776,6 +800,9 @@ func (c *snapshotController) Snapshots(ctx context.Context, domain string) ([]ap
 }
 
 func (c *snapshotController) SnapshotRevert(ctx context.Context, domain, name string) error {
+	if err := c.requirePoweredOff(ctx, domain, "rollback"); err != nil {
+		return err
+	}
 	return c.p.SnapshotRevert(ctx, domain, name)
 }
 

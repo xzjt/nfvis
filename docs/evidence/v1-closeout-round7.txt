@@ -1,0 +1,102 @@
+===== V1 收尾第七轮：FR-CMP-015 快照磁盘内容级回滚（T0-5，决策 #75）=====
+环境：nfvis-vm（Ubuntu 26.04、VPP v26.06-release、libvirt 12.0.0、qemu-img 10.2.1）
+日期：2026-09-14
+镜像：/var/lib/nfvis/images/alpine.qcow2（Alpine 3.20，自带 cloud-init 24.1.3，ttyS0 有 getty）
+本文件为**原始输出摘录**，命令与结果一一对应。
+
+----- 0. 为什么 M4-6 没能证到「内容级」-----
+M4-6（test/integration/m4_snapshot_test.go）在**宿主侧**用 `qemu-img dd` 直写 qcow2 打标记扇区，
+而宿主直写会破坏 qcow2 内部快照的 L1/refcount → revert 报 `Failed to load snapshot`。
+故 M4-6 只能证「回滚路径可执行」，不能证「磁盘内容真的回滚了」。本轮改在 **guest 内**写文件。
+
+----- 1. 内容级回滚（T0-5 核心结论）-----
+新增 test/integration/m5_snapshot_content_test.go：TestSnapshotContentLevelRollbackRealLibvirt
+手法：cloud-init `write_files` 写 KNOWN → 串口登录改 LATER → 关机建快照 → 启动改 CHANGED
+      → 关机回滚 → 启动后串口回读。**只有重引导后读到的才只能是磁盘内容**，从而排除
+      「内存残留」与「写入未生效」两种假阳性。
+
+$ go test -tags integration -run TestSnapshotContentLevelRollbackRealLibvirt -v ./test/integration/
+    m5_snapshot_content_test.go:230: guest 内写入 LATER 完成（cloud-init 设口令 + 串口登录链路可用）
+    m5_snapshot_content_test.go:244: 已在内容=LATER（关机态）创建快照 snap-t05
+    m5_snapshot_content_test.go:256: 快照后已将 guest 内文件改为 CHANGED
+    m5_snapshot_content_test.go:268: 关机态回滚成功
+    m5_snapshot_content_test.go:284: ✅ 内容级回滚证实：guest 内文件为 "T05-LATER"（快照点内容）；CHANGED 与 KNOWN 均未留存
+--- PASS: TestSnapshotContentLevelRollbackRealLibvirt (63.99s)
+
+判定：**FR-CMP-015 内容级回滚通过**。读到 LATER 是**非平凡**证据——CHANGED 表示「没回滚」，
+KNOWN 表示「guest 内写入没生效」，只有 LATER 才同时排除两者。
+
+----- 2. 串口交互的坑（记录以免重蹈）-----
+本轮在串口上耗了 3 轮才稳定，三个坑都在 guest 端（不涉及产品代码）：
+  ① 镜像内 root 口令为 `!*`（锁定）→ 串口 getty 无法登录；须 cloud-init `chpasswd` 设口令
+     （实测 `ssh_pwauth: true` + `chpasswd.list` 即可，串口 linux 控制台随后可 root 登录）。
+  ② guest 默认 shell 是 **ash**：`echo READ<<$(cat f)>>END` 被当重定向 → `syntax error: unexpected "("`。
+  ③ **最阴的一点**：串口会**回显命令本身**，若标记字面量出现在命令行里，「等标记出现」会**立刻命中回显**
+     并在 shell 执行前返回（实测拿到空输出）。且 pty 80 列会把长命令回显**折行**（`^M` 断开）。
+     解法：标记由 shell **运行时拼出**（`B7f=$(printf 'MARK%s' 'BEGIN7f')`），命令行回显里不存在
+     字面量 `MARKBEGIN7f`；解析时去掉 CR/折行后取「最后一个 begin 之后第一个 end」。
+
+----- 3. 运行中回滚的真实底座行为（决策 #75 依据）-----
+原交接文档记为「**未记风险**：`SnapshotRevert` 用 flags=0 且 API 不要求关机，运行中回滚**可能撞 libvirt 报错**」。
+本轮**证伪该猜测**：运行中回滚**不报错**，但会**替换 QEMU 进程**（=静默重启该 VM）。
+
+先以 virsh 手工确认（探测域）：
+  $ virsh snapshot-create-as probe2 snap1 "probe"      → Domain snapshot snap1 created
+  $ virsh snapshot-revert probe2 snap1                 → Domain snapshot snap1 reverted（rc=0，无报错）
+  $ virsh domstate probe2                              → running
+  PID_BEFORE=137327 → 回滚 → PID_AFTER=137639
+  结论：QEMU 进程已更换（137327 -> 137639，即 VM 被重启）
+
+再固化为自动化用例（不经过 API 守卫，直接打底层 libvirt 以观测底座真行为）：
+新增 test/integration/m5_snapshot_content_test.go：TestSnapshotRevertOnRunningVMRealLibvirt
+$ go test -tags integration -run TestSnapshotRevertOnRunningVMRealLibvirt -v ./test/integration/
+    m5_snapshot_content_test.go:383: ✅ 实测证实决策 #75 依据：运行中回滚返回成功且不报错，
+      但 QEMU 进程被替换（138445 → 138491），即 VM 被静默重启
+--- PASS: TestSnapshotRevertOnRunningVMRealLibvirt (5.90s)
+
+对照：**关机态**建快照/回滚/删快照均干净成功（virsh 探测域验证，rc=0）。
+处置：产品在 API/CLI 层显式拒绝运行中的 create/rollback（409/错误提示），静默重启生产 VNF 不可接受。
+
+----- 4. 守卫的落点（一次真实的「声明了但无实现」）-----
+**初版把守卫放在 HTTP handler（internal/api/vm_snapshot.go）——真机实测 CLI 仍能对运行中 VM
+建快照并回滚，VM 被静默重启。** 原因：CLI 有独立执行路径
+（`api.cliExecutor.requestVMSnapshot` 直接调 `VMSnapshotRuntime`，**不经 handler**）。
+这正是 AGENTS.md 反复强调的「命令树与执行器必须同源」类缺陷。
+
+修正：守卫移到两侧**共同依赖**的实现处 `cmd/nfvisd/main.go` 的 `snapshotController`
+（`SnapshotCreate`/`SnapshotRevert` 前置 `requirePoweredOff`），handler 层保留同样检查作纵深防御。
+
+真机复验（nfvisd + nfvis-cli 冒烟）：
+  [1] 关机态创建快照       → 快照 s-off 已创建
+  [2] 启动 VM              → state running;
+  [3] 运行中创建快照       → % VM fw-vm 当前为 running，快照 create 需先关机（FR-CMP-015，决策 #75）
+  [4] 运行中回滚           → % VM fw-vm 当前为 running，快照 rollback 需先关机（FR-CMP-015，决策 #75）
+  [5] 再查状态             → state running;（**未被静默重启**）
+  关机后：回滚 s-off → 快照 s-off 已回滚；新建 s-off2 → 快照 s-off2 已创建（正常路径未被误拦）
+
+单测：internal/api/vm_snapshot_test.go:TestSnapshotRequiresPoweredOff
+  （running/paused/crashed 三种状态 create+rollback 均 409 且**不触达编排器**；关机态放行）
+
+----- 5. 回归：真机集成全量 -----
+$ systemctl restart vpp && make integration
+--- PASS: TestIPv6AddressAndStaticRoutes (0.03s)
+--- PASS: TestIPv6ForwardingICMPv6 (8.08s)
+--- PASS: TestE2EFlow (3.02s)
+--- PASS: TestAbnormalExitCriticalAlarms (5.16s)
+--- PASS: TestCloudInitAndSerialConsoleRealLibvirt (18.80s)
+--- PASS: TestContainerLifecycleWithMemifRealDocker (20.79s)
+--- PASS: TestImageRepoDownloadImportAndReferenceRealLibvirt (0.04s)
+--- PASS: TestMainChainVMRealVPPAndLibvirt (89.71s)
+--- PASS: TestResourceLedgerMatchesHostFacts (0.00s)
+--- PASS: TestComputeRecoveryConvergenceRealLibvirt (2.13s)
+--- PASS: TestSnapshotRevertAndDataDiskRealLibvirt (0.18s)   ← 既有 M4-6，无回归
+--- PASS: TestVhostUserLifecycleRealVPP (11.46s)
+--- PASS: TestSnapshotContentLevelRollbackRealLibvirt (63.42s)   ← 本轮新增
+--- PASS: TestSnapshotRevertOnRunningVMRealLibvirt (5.98s)       ← 本轮新增
+ok  	github.com/xzjt/nfvis/test/integration	228.815s
+
+----- 6. 环境恢复 -----
+virsh list --all 为空；/var/lib/nfvis/vms/ 空；nfvisd 未运行；
+/var/lib/nfvis/images/ 仅 alpine.qcow2 + index.json（冒烟用的 reg.qcow2 已删、index.json 已还原基线）；
+/data/incoming/ 空；探测域（probe/probe2/bootprobe/pwprobe/rawprobe/liveprobe/stopprobe）全部 undefine 并清盘；
+VPP 运行中（v26.06-release，集成测试前已 restart 重置）。

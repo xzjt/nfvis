@@ -689,6 +689,9 @@ paths:
     post:
       tags: [virtual-machine-functions]
       summary: 创建快照（qcow2 内部快照，含全部磁盘；FR-CMP-015/018）
+      description: |
+        需 VM 处于关机态（running/paused/crashed 返回 409）。运行中创建内部快照会让
+        qcow2 快照与活动内存不一致，回滚语义不确定；与 FR-CMP-012「关机态生效」一致。
       requestBody:
         required: true
         content:
@@ -698,6 +701,7 @@ paths:
         "202": { description: 已受理 }
         "400": { $ref: "#/components/responses/Error400" }
         "404": { $ref: "#/components/responses/Error404" }
+        "409": { $ref: "#/components/responses/Error409" }
   /virtual-machine-functions/{name}/snapshots/{snapshot}:rollback:
     parameters:
       - { name: name, in: path, required: true, schema: { type: string } }
@@ -705,9 +709,15 @@ paths:
     post:
       tags: [virtual-machine-functions]
       summary: 回滚到快照（FR-CMP-015）
+      description: |
+        需 VM 处于关机态（running/paused/crashed 返回 409）。**实测**（决策 #75）：
+        对运行中域调用 `DomainRevertToSnapshot(flags=0)` 虽返回成功且不报 libvirt 错误，
+        但 libvirt 会**替换 QEMU 进程**（相当于强制重启该 VM），静默重启生产 VNF 不可接受，
+        故显式拒绝并提示先关机。
       responses:
         "202": { description: 已受理 }
         "404": { $ref: "#/components/responses/Error404" }
+        "409": { $ref: "#/components/responses/Error409" }
   /virtual-machine-functions/{name}/snapshots/{snapshot}:
     parameters:
       - { name: name, in: path, required: true, schema: { type: string } }
