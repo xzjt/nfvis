@@ -125,6 +125,9 @@ func run() error {
 	netProvider.SetVhostUser(network.NewVhostUserProviderFunc(vppMgr.VhostUserClientFunc()))
 	// M4-7：容器 memif 接入
 	netProvider.SetMemif(network.NewMemifProviderFunc(vppMgr.MemifClientFunc()))
+	// V1 收尾（决策 #70）：声明式 interfaces[].sriov.vf_count 落地（同一实例亦供 API 命令式路径）
+	sriovProvider := network.NewSRIOVProvider()
+	netProvider.SetSRIOV(sriovProvider)
 	// M3-8：恢复收敛的不可收敛项落点（GET /alarms）
 	alarms := network.NewAlarmStore()
 	netProvider.SetAlarms(alarms)
@@ -324,7 +327,7 @@ func run() error {
 			}
 		},
 		Config: func() (any, error) { return engine.Committed() },
-		Audit:  func() (any, error) { return engine.AuditTrail(500) },
+		Audit:  func() (any, error) { return engine.AuditTrail(500, 0) },
 		Status: func() (any, error) { return vppMgr.StatusView(nil), nil },
 		Logs:   nfvisdLogTail,
 		Cores:  coreDumps.List,
@@ -483,7 +486,7 @@ func run() error {
 		L3:          &l3Controller{net: netProvider},
 		LLDP:        &lldpController{net: netProvider},
 		State:       state.New(vppMgr.Runtime()),
-		SRIOV:       network.NewSRIOVProvider(),
+		SRIOV:       sriovProvider,
 		Kernel:      system.NewBaselineApplier(),
 		NAT:         &natSessionsController{net: netProvider},
 		Alarms:      &alarmController{store: alarms},

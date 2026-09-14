@@ -188,8 +188,9 @@ func (g *govppLldpClient) LldpNeighbors() ([]LldpNeighbor, error) {
 		info := names[uint32(d.SwIfIndex)]
 		out = append(out, LldpNeighbor{
 			Interface: info.Name,
-			ChassisID: lldpIDString(d.ChassisID[:d.ChassisIDLen]),
-			PortID:    lldpIDString(d.PortID[:d.PortIDLen]),
+			// 按 subtype 解码：MAC 型标识是二进制，直接转字符串会输出乱码（决策 #70）
+			ChassisID: lldpIDBySubtype(uint32(d.ChassisIDSubtype), uint32(lldp.CHASSIS_ID_SUBTYPE_MAC_ADDR), d.ChassisID[:d.ChassisIDLen]),
+			PortID:    lldpIDBySubtype(uint32(d.PortIDSubtype), uint32(lldp.PORT_ID_SUBTYPE_MAC_ADDR), d.PortID[:d.PortIDLen]),
 			TTL:       int(d.TTL),
 			LastHeard: d.LastHeard,
 		})

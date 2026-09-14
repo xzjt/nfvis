@@ -278,3 +278,52 @@ func TestLldpApplyAndDisable(t *testing.T) {
 		t.Fatalf("标识解码应去尾部 NUL")
 	}
 }
+
+// ---------- V1 收尾（决策 #70）：LLDP 标识须按 subtype 解码 ----------
+//
+// 此前把 ChassisID/PortID 原始字节直接当字符串（仅去尾部 NUL），忽略了 subtype。
+// 真实交换机绝大多数用 MAC 型 chassis-ID（subtype 4，6 字节二进制），
+// 旧实现会输出乱码（且 JSON 序列化会把非法 UTF-8 变成 U+FFFD）。
+
+func TestLldpIDBySubtype(t *testing.T) {
+	mac := []byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
+
+	// chassis MAC = subtype 4
+	if got := lldpIDBySubtype(4, 4, mac); got != "aa:bb:cc:dd:ee:ff" {
+		t.Fatalf("chassis MAC 型标识应格式化为 MAC，得到 %q", got)
+	}
+	// port MAC = subtype 3（编号与 chassis 不同）
+	if got := lldpIDBySubtype(3, 3, mac); got != "aa:bb:cc:dd:ee:ff" {
+		t.Fatalf("port MAC 型标识应格式化为 MAC，得到 %q", got)
+	}
+	// 文本型（interface name，subtype 6）仍按字符串输出并去尾部 NUL
+	if got := lldpIDBySubtype(6, 4, []byte("sw1\x00\x00")); got != "sw1" {
+		t.Fatalf("文本型标识解码错误: %q", got)
+	}
+	// 二进制但非 MAC（如 network address，subtype 5）→ 十六进制，不得输出乱码
+	if got := lldpIDBySubtype(5, 4, []byte{0x0a, 0x00, 0x00, 0x01}); got != "0x0a000001" {
+		t.Fatalf("非 MAC 二进制标识应为十六进制: %q", got)
+	}
+	// 空标识
+	if got := lldpIDBySubtype(4, 4, nil); got != "" {
+		t.Fatalf("空标识应为空串: %q", got)
+	}
+	// 声明为 MAC 型但长度不是 6 → 回退为十六进制（不猜测）
+	if got := lldpIDBySubtype(4, 4, []byte{0xaa, 0xbb}); got != "0xaabb" {
+		t.Fatalf("长度不符的 MAC 型应回退十六进制: %q", got)
+	}
+}
+
+// 回归：MAC 型标识绝不能按旧实现（裸转字符串）输出不可打印内容。
+func TestLldpIDMacNotRawString(t *testing.T) {
+	mac := []byte{0x02, 0xfe, 0x83, 0xb5, 0x2e, 0x5e}
+	got := lldpIDBySubtype(4, 4, mac)
+	for _, r := range got {
+		if r < 0x20 || r > 0x7e {
+			t.Fatalf("输出含不可打印字符（旧缺陷复现）: %q", got)
+		}
+	}
+	if got != "02:fe:83:b5:2e:5e" {
+		t.Fatalf("MAC 格式化错误: %q", got)
+	}
+}

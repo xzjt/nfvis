@@ -167,7 +167,7 @@ func (x *cliExecutor) execShowLog(t []string) string {
 	switch t[0] {
 	case "audit":
 		// 审计在 SQLite（FR-OPS-031），与 GET /audit-logs 同源
-		trail, err := x.engine.AuditTrail(last)
+		trail, err := x.engine.AuditTrail(last, 0)
 		if err != nil {
 			return "%% " + err.Error() + "\n"
 		}

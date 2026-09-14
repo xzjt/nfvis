@@ -12,10 +12,11 @@ import (
 )
 
 // handleAuditLogs GET /api/v1/audit-logs：审计日志查询（FR-CFG-010/FR-OPS-031，
-// limit/offset/user 过滤；offset 暂不支持分页深翻，按 limit 返回最新记录）。
+// limit/offset/user 过滤，FR-API-007 分页）。
 func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	entries, err := s.engine.AuditTrail(limit)
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	entries, err := s.engine.AuditTrail(limit, offset)
 	if err != nil {
 		mapEngineError(w, err)
 		return

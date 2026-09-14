@@ -836,11 +836,11 @@ func (e *Engine) CurrentRevision() (int, error) {
 }
 
 // AuditTrail 返回最近 limit 条配置变更审计记录（show log audit / GET /audit-logs）。
-func (e *Engine) AuditTrail(limit int) ([]AuditEntry, error) {
+func (e *Engine) AuditTrail(limit, offset int) ([]AuditEntry, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	return e.store.ListAudit(limit)
+	return e.store.ListAudit(limit, offset)
 }
 
 // Audit 追加一条运行态操作审计（FR-OPS-031：生命周期操作入审计通道）。

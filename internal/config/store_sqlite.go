@@ -321,10 +321,13 @@ func (s *Store) AppendAudit(e AuditEntry) error {
 	return nil
 }
 
-// ListAudit 按时间倒序返回至多 limit 条审计记录。
-func (s *Store) ListAudit(limit int) ([]AuditEntry, error) {
+// ListAudit 按时间倒序返回至多 limit 条审计记录，跳过前 offset 条（FR-API-007 分页）。
+func (s *Store) ListAudit(limit, offset int) ([]AuditEntry, error) {
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.Query(
-		`SELECT ts, user, action, detail, result FROM audit_log ORDER BY audit_id DESC LIMIT ?`, limit,
+		`SELECT ts, user, action, detail, result FROM audit_log ORDER BY audit_id DESC LIMIT ? OFFSET ?`, limit, offset,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("查询审计日志: %w", err)

@@ -62,7 +62,7 @@ func (s *Server) handleGetCandidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"candidate": cfg,
+		"candidate": redactConfigView(cfg), // 敏感字段不返回（FR-SEC-007 / 决策 #25）
 		"dirty":     dirty,
 	})
 }
@@ -94,7 +94,7 @@ func (s *Server) handlePutCandidate(w http.ResponseWriter, r *http.Request) {
 
 	if r.Header.Get("X-NFVIS-Auto-Commit") != "true" {
 		w.Header().Set("X-NFVIS-Committed", "false")
-		writeJSON(w, http.StatusOK, map[string]any{"candidate": cfg, "dirty": true})
+		writeJSON(w, http.StatusOK, map[string]any{"candidate": redactConfigView(cfg), "dirty": true})
 		return
 	}
 
@@ -170,7 +170,7 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 		mapEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"candidate": cand, "dirty": dirty, "message": "candidate 已替换为历史快照，需 commit 生效"})
+	writeJSON(w, http.StatusOK, map[string]any{"candidate": redactConfigView(cand), "dirty": dirty, "message": "candidate 已替换为历史快照，需 commit 生效"})
 }
 
 // handleSessions GET /system/configuration/sessions：持锁会话列表（FR-CFG-009，决策 #26）。

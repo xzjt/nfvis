@@ -1304,9 +1304,8 @@ paths:
                   type: object
                   properties:
                     local_interface: { type: string }
-                    chassis_id: { type: string }
-                    port_id: { type: string }
-                    system_name: { type: string }
+                    chassis_id: { type: string, description: "按 subtype 解码；MAC 型（chassis=4）格式化为 aa:bb:cc:dd:ee:ff（决策 #70）" }
+                    port_id: { type: string, description: "按 subtype 解码；MAC 型（port=3）格式化为 aa:bb:cc:dd:ee:ff" }
                     ttl: { type: integer }
 
   /system/hardware:
@@ -1773,8 +1772,12 @@ components:
         description: { type: string }
         sriov:
           type: object
+          description: |
+            SR-IOV VF 数量（FR-NET-004）。`vf_count` 为**声明式**配置：
+            commit 时由编排器写入 PF 的 `sriov_numvfs`（0 = 回收全部），
+            恢复收敛时重放；PF 不支持 SR-IOV 时 commit **明确失败**（不静默跳过，决策 #70）。
           properties:
-            vf_count: { type: integer }
+            vf_count: { type: integer, description: 期望 VF 数（0 = 回收全部） }
             vfs:
               type: array
               items:

@@ -25,6 +25,7 @@ type L2Network struct {
 	vhostDir                     string             // vhost-user socket 目录（恢复收敛重放用）
 	memifDir                     string             // memif socket 目录
 	alarms                       *AlarmStore        // 恢复收敛失败项落点（M3-8，可空）
+	sriov                        *SRIOVProvider     // PF 的 VF 数量（声明式 vf-count，决策 #70）
 }
 
 // NewL2Network 以基础 Provider 与 L2 编排器构造装饰器。
@@ -89,6 +90,9 @@ func (n *L2Network) SetVhostUser(p *VhostUserProvider) { n.vhost = p }
 
 // SetMemif 追加容器 vNIC（memif）接入编排（M4-7）。
 func (n *L2Network) SetMemif(p *MemifProvider) { n.memif = p }
+
+// SetSRIOV 注入 SR-IOV VF 数量编排（声明式 interfaces[].sriov.vf_count）。
+func (n *L2Network) SetSRIOV(p *SRIOVProvider) { n.sriov = p }
 
 // ApplyVnfInterface 建立 vNIC 接入（FR-NET-020/021/023）：
 //   - vhost-user：VPP 建 server socket 接口并命名，交换机端口随后按名挂接；
@@ -209,6 +213,17 @@ func (n *L2Network) DeleteACL(ctx context.Context, name string) error {
 }
 
 func (n *L2Network) ApplyInterface(ctx context.Context, iface model.InterfaceConfig) error {
+	// 声明式 VF 数量（FR-NET-004）：配置里写了就必须落实——失败即报错，
+	// 不得静默无操作（决策 #70；此前 vf_count 被持久化却无人执行）。
+	if iface.Sriov != nil {
+		if n.sriov == nil {
+			return fmt.Errorf("接口 %s 配置了 sriov.vf-count=%d 但 SR-IOV 未接入（编排器未装配）",
+				iface.Name, iface.Sriov.VFCount)
+		}
+		if err := n.sriov.SetVFCount(ctx, iface.Name, iface.Sriov.VFCount); err != nil {
+			return fmt.Errorf("接口 %s 设置 VF 数量 %d: %w", iface.Name, iface.Sriov.VFCount, err)
+		}
+	}
 	if n.svc == nil {
 		return n.NetworkProvider.ApplyInterface(ctx, iface)
 	}

@@ -88,3 +88,48 @@ func TestFlattenNamedArrays(t *testing.T) {
 		}
 	}
 }
+
+// FR-SEC-007 / 决策 #25：diff 文本必须对口令哈希脱敏；但脱敏只发生在渲染阶段，
+// 仅改口令仍须判定为「有变更」——否则 commit 的「无变更」前置检查会误判
+// （cliexec 以 Diff 是否为空判断有无变更）。
+func TestDiffMasksPasswordHash(t *testing.T) {
+	mk := func(hash string) Config {
+		return Config{System: &SystemConfig{Login: &SystemLogin{Users: []LoginUserConfig{
+			{Name: "ops", Class: "operator", PasswordHash: hash},
+		}}}}
+	}
+	oldCfg := mk("pbkdf2$sha256$600000$OLDSALT$OLDHASH")
+	newCfg := mk("pbkdf2$sha256$600000$NEWSALT$NEWHASH")
+
+	d := Diff(oldCfg, newCfg)
+	if d == "" {
+		t.Fatal("仅改口令必须判为有变更（脱敏不得影响变更检测）")
+	}
+	for _, secret := range []string{"pbkdf2", "OLDSALT", "NEWSALT", "OLDHASH", "NEWHASH"} {
+		if strings.Contains(d, secret) {
+			t.Fatalf("diff 文本泄露口令材料 %q:\n%s", secret, d)
+		}
+	}
+	if !strings.Contains(d, "password-hash") || !strings.Contains(d, "已隐藏") {
+		t.Fatalf("应输出脱敏后的 password-hash 变更行:\n%s", d)
+	}
+
+	// 口令未变（哈希相同）时不应产生该行
+	if d2 := Diff(oldCfg, mk("pbkdf2$sha256$600000$OLDSALT$OLDHASH")); d2 != "" {
+		t.Fatalf("口令未变不应产生差异:\n%s", d2)
+	}
+}
+
+// IsSensitiveKey 对 JSON 键（下划线）与 CLI 键（连字符）等价判定。
+func TestIsSensitiveKey(t *testing.T) {
+	for _, k := range []string{"password_hash", "password-hash", "PASSWORD_HASH", "token", "secret", "private_key"} {
+		if !IsSensitiveKey(k) {
+			t.Fatalf("%q 应判为敏感", k)
+		}
+	}
+	for _, k := range []string{"hostname", "name", "class", "retention_days", "public_key"} {
+		if IsSensitiveKey(k) {
+			t.Fatalf("%q 不应判为敏感", k)
+		}
+	}
+}
