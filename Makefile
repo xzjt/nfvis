@@ -62,7 +62,7 @@ integration:
 # 例如 nfvis-vm：make deb VERSION=1.0.1
 # 产物 build/nfvis_<VERSION>_<ARCH>.deb，内含：
 #   /usr/bin/{nfvisd,nfvis-cli}、/lib/systemd/system/nfvis.service、
-#   /usr/share/doc/nfvis/（契约 OpenAPI + 命令树 + 规格书 + M5 验收记录）、
+#   /usr/share/doc/nfvis/（契约 OpenAPI + 命令树 + 规格书 + 用户手册 + 命令全表 + M5 验收记录）、
 #   DEBIAN/{control,postinst,prerm,postrm}（postinst 做安装期底座优化校验，FR-OPS-013）
 deb:
 	@command -v dpkg-deb >/dev/null 2>&1 || { echo "跳过 deb：需要 dpkg-deb（请在 Linux/nfvis-vm 上执行）"; exit 1; }
@@ -74,6 +74,8 @@ deb:
 	install -m 0644 docs/NFViS-openapi.yaml build/deb/usr/share/doc/nfvis/
 	install -m 0644 docs/NFViS-CLI命令树完整设计.md build/deb/usr/share/doc/nfvis/
 	install -m 0644 docs/NFViS-系统产品需求与目标架构规格书.md build/deb/usr/share/doc/nfvis/
+	install -m 0644 docs/NFViS-用户手册.md build/deb/usr/share/doc/nfvis/
+	install -m 0644 docs/NFViS-CLI命令全表.md build/deb/usr/share/doc/nfvis/
 	install -m 0644 docs/M5-验收记录.md build/deb/usr/share/doc/nfvis/ 2>/dev/null || true
 	install -m 0755 deploy/installer/nfvis-baseline.sh build/deb/usr/share/nfvis/installer/
 	install -m 0755 deploy/debian/postinst build/deb/DEBIAN/postinst

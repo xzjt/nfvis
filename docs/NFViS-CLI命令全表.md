@@ -5,7 +5,7 @@
 | 用途 | **命令参考全表**：把 CLI 命令树逐条列出，附权限、落点与**真机实测状态** |
 | 来源 | 命令树取自实现（`internal/schema/tree_oper.go`、`tree_config.go`，即 `?` 补全的真实来源）；契约见 `docs/NFViS-CLI命令树完整设计.md` |
 | 实测状态 | 来自 **2026-09-14 全功能 CLI 测试**（决策 #76，证据 `docs/evidence/v1-closeout-round8.txt`）。测试工具：`contrib/scripts/cli-fulltest.sh` |
-| 基线 | main + PR #69/#70；决策 76 项 |
+| 基线 | main + PR #69/#70；决策 77 项 |
 
 ## 0. 阅读约定
 
