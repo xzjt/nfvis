@@ -1,0 +1,53 @@
+===== V1 收尾第五轮：物理口链路告警 + allow-plaintext 修正（决策 #73）=====
+环境：nfvis-vm（Ubuntu 26.04、VPP v26.06-release）
+日期：2026-09-14
+nfvisd：/tmp/nfvisd -db /tmp/nfvis.db -listen 127.0.0.1:18443 -allow-plaintext
+本文件为**原始输出摘录**，命令与结果一一对应。
+
+----- 0. 附带修正：-allow-plaintext 被已存在的自签证书压过 -----
+真机验证时发现：带 `-allow-plaintext` 启动，但盘上已有上一轮生成的自签证书
+（`/var/lib/nfvis/tls/server.crt`），于是仍以 HTTPS 服务——明文客户端全被拒，日志中反复出现：
+  "http: TLS handshake error ...: client sent an HTTP request to an HTTPS server"
+  $ curl -s http://127.0.0.1:18443/api/v1/metrics → 400
+该开关名义上「允许明文」却看起来无效。**修正：`-allow-plaintext` 为权威开关**——显式给出即走明文
+（忽略已装/自签证书）；仅显式 `-tls-cert` 才强制 TLS。修正后：
+  $ curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18443/api/v1/metrics → 200
+
+----- 1. FR-NET-003 物理业务口链路告警 -----
+背景：规格要求「业务网卡支持启用/禁用、MTU、描述配置；**链路状态变化产生告警事件**」，
+而此前**只有 vhost-user 的 VNF_PORT_DOWN**（决策 #71 复核确认：全仓仅 5 个告警码，无物理口链路巡检）。
+
+实现：`L2Network.CheckInterfaceLinks`（`internal/orchestrator/network/interface_alarm.go`）
+  - `SwIfInfo` 补 `AdminUp`/`LinkUp`（复用既有 `sw_interface_dump` 的 Flags，不新增客户端方法）
+  - 对 `interfaces[]` 中**启用**的口：VPP 中存在但 `!(adminUp && linkUp)` → `INTERFACE_LINK_DOWN`
+    （warning，source=接口名，scope `interface-link`），消息区分「管理态未启用」与「链路 down」
+  - 恢复 up 自动消警；**显式 disable 的口不告警**（用户意图）
+  - VPP 中缺失的口**不在此处告警**（由恢复收敛的 `RECOVERY_IFACE_MISSING` 负责，避免重复）
+  - 接入 nfvisd：恢复收敛后检查 + 15s 周期巡检
+
+**声明并启用两个物理口**（VPP 已接管 ens192/ens224）：
+$ nfvis-cli -c "configure
+  set interfaces ens192 description uplink1
+  set interfaces ens224 description uplink2
+  commit; exit"
+commit 成功
+
+**人为置 ens192 未就绪**（admin down）后等待巡检 15s：
+$ vppctl set interface state ens192 down
+$ curl -s .../api/v1/alarms
+活动告警数: 1
+  warning INTERFACE_LINK_DOWN | ens192 | 物理口 ens192 未就绪：管理态未启用且链路 down（FR-NET-003）
+（同期 up 的 ens224 无告警——无误报）
+
+**恢复正常后自动消警**：
+$ vppctl set interface state ens192 up      # 等 18s
+活动告警数: 0
+$ curl -s ".../api/v1/alarms?state=all"   # 历史中该告警已 resolved
+  resolved ens192 2026-09-14T10:40:13.311689146Z
+
+单测（`interface_alarm_test.go`，5 用例）：链路正常不告警、link down 告警且恢复消警、
+管理态未启用告警、显式 disable 不告警、VPP 中缺失不重复告警。
+
+----- 2. 环境恢复 -----
+VPP 运行中；ens192/ens224 均 up（与集成测试前一致）、均在 vfio-pci；
+nfvisd 未运行；/tmp 部署包与库文件已清理；引导镜像 alpine.qcow2 未动；无游离 domain。
