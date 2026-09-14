@@ -19,6 +19,9 @@ fi
 gen() {
     "$PY" - "$SRC" <<'PY'
 import json, sys, yaml
+# 强制 LF：仓库 .gitattributes 规定 eol=lf，而 Windows 的 Python 默认把 \n 翻译为 \r\n，
+# 否则生成结果与检出内容行尾不一致，本守护在 Windows 开发机上会恒报「不同步」。
+sys.stdout.reconfigure(newline="\n")
 spec = yaml.safe_load(open(sys.argv[1], encoding='utf-8'))
 # sort_keys 保证输出确定性，便于 diff 守护
 print(json.dumps(spec, ensure_ascii=False, indent=2, sort_keys=True))
