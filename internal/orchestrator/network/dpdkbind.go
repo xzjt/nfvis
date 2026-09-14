@@ -153,8 +153,15 @@ func (b *DPDKBinder) Bind(ctx context.Context, ifname, driver string) (string, e
 	return pci, nil
 }
 
-// Unbind 把网卡解绑出 vfio-pci 并交还内核（清空 driver_override 后触发重新探测）。
-func (b *DPDKBinder) Unbind(ctx context.Context, ifname string) (string, error) {
+// Unbind 把网卡解绑出 vfio-pci 并交还内核驱动。
+//
+// toDriver 非空时**显式绑定**到该驱动；为空则仅清空 driver_override 并触发 rescan
+// 交内核自动探测。
+//
+// 实测（nfvis-vm，内核 6.x + vfio-pci）：清空 override + rescan **不足以**让内核重新探测
+// 原生驱动（设备停留在无驱动状态），必须显式 `bind`。故提供 toDriver，并在未给定时
+// 返回可操作的错误，而不是静默留下一张无驱动的网卡。
+func (b *DPDKBinder) Unbind(ctx context.Context, ifname, toDriver string) (string, error) {
 	pci, err := b.PCIAddrOf(ifname)
 	if err != nil {
 		return "", err
@@ -172,10 +179,21 @@ func (b *DPDKBinder) Unbind(ctx context.Context, ifname string) (string, error) 
 	if err := b.write(b.path(filepath.Join("bus/pci/devices", pci, "driver_override")), "\n"); err != nil {
 		return "", fmt.Errorf("清除 driver_override: %w", err)
 	}
+	if toDriver = strings.TrimSpace(toDriver); toDriver != "" {
+		if err := b.write(b.path(filepath.Join("bus/pci/drivers", toDriver, "bind")), pci); err != nil {
+			return pci, fmt.Errorf("绑定 %s 到 %s: %w", pci, toDriver, err)
+		}
+		return pci, nil
+	}
 	if b.Rescan != nil {
 		if err := b.Rescan(); err != nil {
 			return pci, fmt.Errorf("已解绑 %s，但触发 PCI 重新探测失败（可手工 echo 1 > /sys/bus/pci/rescan）: %w", pci, err)
 		}
+	}
+	// 核实结果：未自动绑定则给出可操作提示（实测该情形常见，不静默留下无驱动网卡）
+	if after, _ := b.DriverOf(ifname); after == "" {
+		return pci, fmt.Errorf("已解绑 %s，但内核未自动重新探测原生驱动；请显式指定："+
+			"request interfaces %s unbind-dpdk to-driver <驱动名>", pci, pci)
 	}
 	return pci, nil
 }

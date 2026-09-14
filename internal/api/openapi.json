@@ -3308,8 +3308,12 @@
                     "description": "true = 绑定到 DPDK 驱动；false = 解绑交还内核",
                     "type": "boolean"
                   },
+                  "to_driver": {
+                    "description": "解绑语义（bound=false）下交还的内核驱动名。实测 nfvis-vm（内核 6.x + vfio-pci）：\n仅清空 driver_override 并 rescan **不足以**让内核重新探测原生驱动，\n建议显式给出（如 vmxnet3）；未给出且未自动绑定时返回可操作错误。\n",
+                    "type": "string"
+                  },
                   "uio_driver": {
-                    "description": "缺省 vfio-pci",
+                    "description": "绑定语义下缺省 vfio-pci",
                     "enum": [
                       "vfio-pci",
                       "igb-uio"

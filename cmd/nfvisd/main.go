@@ -995,7 +995,8 @@ func (c *dpdkController) SetDPDKBound(ctx context.Context, ifname string, bound 
 	if bound {
 		pci, err = c.b.Bind(ctx, ifname, driver)
 	} else {
-		pci, err = c.b.Unbind(ctx, ifname)
+		// driver 在解绑语义下表示「交还给哪个内核驱动」（缺省由内核自动探测）
+		pci, err = c.b.Unbind(ctx, ifname, driver)
 	}
 	if err != nil {
 		return "", "", err

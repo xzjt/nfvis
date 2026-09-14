@@ -131,7 +131,7 @@ func TestDPDKBinderUnbind(t *testing.T) {
 	root, _ := fakeSysfs(t, "ens224", "0000-13-00.0", DefaultUioDriver)
 	b, writes := newTestBinder(t, root)
 
-	pci, err := b.Unbind(context.Background(), "ens224")
+	pci, err := b.Unbind(context.Background(), "ens224", "vmxnet3")
 	if err != nil {
 		t.Fatalf("Unbind: %v", err)
 	}
@@ -144,8 +144,9 @@ func TestDPDKBinderUnbind(t *testing.T) {
 	if got := w[filepath.Join(root, "bus", "pci", "devices", pci, "driver_override")]; len(got) != 1 || strings.TrimSpace(got[0]) != "" {
 		t.Fatalf("应清空 driver_override: %v", got)
 	}
-	if _, ok := w[filepath.Join(root, "bus", "pci", "rescan")]; !ok {
-		t.Fatal("应触发 PCI rescan")
+	// 给出 to-driver → 显式 bind（实测 rescan 不足以让内核重新探测原生驱动）
+	if got := w[filepath.Join(root, "bus", "pci", "drivers", "vmxnet3", "bind")]; len(got) != 1 || got[0] != pci {
+		t.Fatalf("应显式绑定到 vmxnet3: %v", got)
 	}
 }
 
@@ -184,5 +185,17 @@ func TestDPDKBinderPCIPassthrough(t *testing.T) {
 	}
 	if IsPCIAddr("ens224") {
 		t.Fatal("接口名不应判为 PCI 地址")
+	}
+}
+
+// 解绑但内核未自动重新探测（实测常见）→ 必须报可操作错误，不得静默留下无驱动网卡。
+func TestDPDKBinderUnbindNoAutoProbe(t *testing.T) {
+	// 建一棵"解绑后无驱动"的树（无 driver 符号链接）→ 模拟内核未自动重新探测
+	root, _ := fakeSysfs(t, "ens224", "0000-13-00.0", "")
+	b, _ := newTestBinder(t, root)
+	if _, err := b.Unbind(context.Background(), "ens224", ""); err == nil {
+		t.Fatal("未自动探测时应报错（不静默留下无驱动网卡）")
+	} else if !strings.Contains(err.Error(), "to-driver") {
+		t.Fatalf("错误应给出可操作提示: %v", err)
 	}
 }
