@@ -15,7 +15,11 @@ import (
 )
 
 // Version CLI 版本（与 api.VersionStr 同步发布）。
-const Version = "1.0.0-dev"
+//
+// 用 var 而非 const，以便打包时经 ldflags 注入发布版本
+// （`make deb VERSION=x.y.z` 同时注入本变量与 api.VersionStr）——
+// 否则发布的 deb 里 `nfvis-cli -version` 会显示 1.0.0-dev 而 `nfvisd` 显示正式版本，两者不一致。
+var Version = "1.0.0-dev"
 
 // Backend 会话所需的客户端能力（pkg/cliclient.Client 实现）。
 type Backend interface {
