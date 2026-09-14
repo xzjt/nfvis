@@ -36,6 +36,14 @@ func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error
 	if opts.Type != TypeVM && opts.Type != TypeContainer {
 		return Meta{}, fmt.Errorf("type 必须为 %s 或 %s", TypeVM, TypeContainer)
 	}
+	// FR-SEC-004（决策 #71）：URL 拉取默认强制 sha256，缺省即拒绝（不再静默跳过校验）。
+	// 提前失败，避免先登记 downloading 再报错。
+	if strings.TrimSpace(opts.SHA256) == "" {
+		return Meta{}, fmt.Errorf("URL 拉取必须提供 sha256（FR-SEC-004：默认强制校验）")
+	}
+	if len(strings.TrimSpace(opts.SHA256)) != 64 || !isHex(opts.SHA256) {
+		return Meta{}, fmt.Errorf("sha256 必须为 64 位十六进制字符串: %q", opts.SHA256)
+	}
 	pending := Meta{Name: opts.Name, Type: opts.Type, SHA256: opts.SHA256,
 		Description: opts.Description, ImportState: StateDownloading}
 	if err := s.setMeta(pending); err != nil {
@@ -171,7 +179,9 @@ func (s *Store) downloadFile(ctx context.Context, opts DownloadOptions) (Meta, e
 	}
 
 	sum := hex.EncodeToString(h.Sum(nil))
-	if opts.SHA256 != "" && !equalFoldHex(sum, opts.SHA256) {
+	// FR-SEC-004：URL 拉取**默认强制** sha256 校验——不提供即拒绝，避免拿到未校验的镜像。
+	// 早期实现把 sha256 当可选项（缺省跳过校验），与规格"默认要求 sha256 校验"不符。
+	if !equalFoldHex(sum, opts.SHA256) {
 		_ = os.Remove(part)
 		return Meta{}, fmt.Errorf("sha256 校验失败：期望 %s，实际 %s", opts.SHA256, sum)
 	}
@@ -220,4 +230,14 @@ func contentRangeStart(v string) (int64, bool) {
 
 func equalFoldHex(a, b string) bool {
 	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
+// isHex 判定字符串是否全为十六进制字符。
+func isHex(s string) bool {
+	for _, c := range strings.ToLower(strings.TrimSpace(s)) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

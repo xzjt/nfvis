@@ -45,6 +45,7 @@ func Validate(c Config) []ValidateError {
 	v.checkVMFunctions(c)
 	v.checkContainerFunctions(c)
 	v.checkAddressOverlap(c)
+	v.checkManagementIsolation(c)
 	return v.errs
 }
 
@@ -221,12 +222,19 @@ func (v *validator) checkSystem(c Config) {
 		}
 	}
 	if s.Management != nil {
+		if s.Management.Interface != "" && !nameRe.MatchString(s.Management.Interface) {
+			v.errf("system.management.interface", "管理网卡名 %q 非法", s.Management.Interface)
+		}
 		if s.Management.Address != "" && !checkCIDR(s.Management.Address) {
 			v.errf("system.management.address", "管理口地址 %q 必须是 ip-prefix（CIDR）", s.Management.Address)
 		}
 		if s.Management.Gateway != "" && !checkIP(s.Management.Gateway) {
 			v.errf("system.management.gateway", "管理口网关 %q 必须是有效 ip", s.Management.Gateway)
 		}
+	}
+	// FR-SYS-006：并发连接上限须非负（0 = 不限）
+	if s.API != nil && s.API.MaxSessions < 0 {
+		v.errf("system.api.max_sessions", "并发连接上限不能为负: %d（0 表示不限）", s.API.MaxSessions)
 	}
 	if s.Syslog != nil && s.Syslog.Level != "" {
 		switch s.Syslog.Level {
@@ -929,6 +937,73 @@ func (v *validator) checkAddressOverlap(c Config) {
 			if a.ipnet.Contains(b.ipnet.IP) || b.ipnet.Contains(a.ipnet.IP) {
 				v.errf(b.path, "地址网段与 %s 重叠（FR-CFG-011②）", a.path)
 			}
+		}
+	}
+}
+
+// checkManagementIsolation 强制管理网卡与数据面隔离（FR-NET-002 / FR-SEC-001）。
+//
+// 管理网卡须保留内核驱动、专供 SSH/API/syslog/Prometheus，**不得被任何数据面引用**：
+// 一旦被 VPP 接管（vpp.dpdk.dev / interfaces）或成为交换机端口 / L3 接口 / bond 成员 /
+// 镜像端口，管理面就可能与业务面同口——这正是 FR-NET-002 禁止的拓扑。
+// 未指定 system.management.interface 时无从判定，不产生错误。
+func (v *validator) checkManagementIsolation(c Config) {
+	if c.System == nil || c.System.Management == nil {
+		return
+	}
+	mgmt := c.System.Management.Interface
+	if mgmt == "" {
+		return
+	}
+	conflict := func(path, what string) {
+		v.errf(path, "管理网卡 %q 不得用于数据面（%s）：管理面须与业务面隔离（FR-NET-002）", mgmt, what)
+	}
+
+	// 业务网卡清单（会被 VPP 接管）
+	for i, iface := range c.Interfaces {
+		if iface.Name == mgmt {
+			conflict(fmt.Sprintf("interfaces[%d].name", i), "interfaces 声明为业务网卡")
+		}
+	}
+	// VPP DPDK 单网卡覆盖
+	if c.Vpp != nil && c.Vpp.DPDK != nil {
+		for i, d := range c.Vpp.DPDK.PerDev {
+			if d.Interface == mgmt {
+				conflict(fmt.Sprintf("vpp.dpdk.per_dev[%d].interface", i), "DPDK 设备参数覆盖")
+			}
+		}
+	}
+	// bond 成员
+	for i, b := range c.Bonds {
+		for j, m := range b.Members {
+			if m == mgmt {
+				conflict(fmt.Sprintf("bonds[%d].members[%d]", i, j), "bond "+b.Name+" 成员")
+			}
+		}
+	}
+	// 虚拟交换机端口
+	for i, vs := range c.VirtualSwitches {
+		for j, p := range vs.Ports {
+			if p.Interface == mgmt {
+				conflict(fmt.Sprintf("virtual-switches[%d].ports[%d].interface", i, j), "交换机 "+vs.Name+" 端口")
+			}
+		}
+	}
+	// L3 接口
+	for i, vrf := range c.Vrfs {
+		for j, l3 := range vrf.L3Interfaces {
+			if l3.Interface == mgmt {
+				conflict(fmt.Sprintf("vrfs[%d].l3_interfaces[%d].interface", i, j), "VRF "+vrf.Name+" 的 L3 接口")
+			}
+		}
+	}
+	// 端口镜像（源/分析口）
+	for i, pm := range c.PortMirroring {
+		if pm.Source.Interface == mgmt {
+			conflict(fmt.Sprintf("port-mirroring[%d].source.interface", i), "镜像源端口")
+		}
+		if pm.Analyzer == mgmt {
+			conflict(fmt.Sprintf("port-mirroring[%d].analyzer", i), "镜像分析端口")
 		}
 	}
 }

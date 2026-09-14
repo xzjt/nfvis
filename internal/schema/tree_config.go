@@ -78,6 +78,7 @@ func ConfigPathTree() *Node {
 				),
 			),
 			K("management", "管理口（FR-SYS-001，变更受 FR-CFG-012 自锁保护）",
+				K("interface", "管理网卡（内核驱动；不得用于数据面，FR-NET-002/FR-SEC-001）", V("ifname", "如 ens160")),
 				K("ip", "管理口 IP",
 					K("address", "静态地址（IPv4/IPv6）", V("ip-prefix", "如 192.168.1.10/24")),
 				),

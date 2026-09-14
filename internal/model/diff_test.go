@@ -133,3 +133,55 @@ func TestIsSensitiveKey(t *testing.T) {
 		}
 	}
 }
+
+// 嵌套**对象**（非数组元素）不得套用「身份字段入路径」语义（决策 #71）。
+//
+// identityKeys 含 interface/name/prefix 等；若对普通嵌套对象也按身份字段跳过，
+// 任何"只以身份键为内容"的对象都会在扁平化中整体消失，set 随即被判为
+// 「未产生配置变更」。已确认受影响：`system.management.interface`（管理网卡，新增时暴露）
+// 与 `port-mirroring.source.interface`（既有缺陷，diff 一直看不见）。
+func TestFlattenNestedObjectWithIdentityKey(t *testing.T) {
+	cfg := Config{
+		System: &SystemConfig{Management: &MgmtConfig{Interface: "ens160"}},
+		PortMirroring: []PortMirroring{{
+			Name: "span1", Analyzer: "ens224",
+			Source: PMSource{Interface: "ens192", Direction: "both"},
+		}},
+	}
+	d := Diff(Config{}, cfg)
+	if d == "" {
+		t.Fatal("配置非空，diff 不应为空")
+	}
+	// 路径在 [edit …] 头里，叶子在 `+   <key> <value>;` 行里
+	for _, want := range []string{
+		"[edit system management]", "+   interface ens160;",
+		"[edit port-mirroring span1 source]", "+   interface ens192;",
+		"+   direction both;", "+   analyzer ens224;",
+	} {
+		if !strings.Contains(d, want) {
+			t.Fatalf("diff 缺少 %q（嵌套对象的身份键字段被误跳过）:\n%s", want, d)
+		}
+	}
+
+	// 数组元素的身份字段仍应入路径、不重复作为叶子
+	flat := Flatten(cfg)
+	paths := map[string]bool{}
+	for _, s := range flat {
+		paths[strings.Join(s.Path, " ")] = true
+	}
+	if !paths["port-mirroring span1 analyzer"] {
+		t.Fatalf("数组元素身份字段应入路径: %v", paths)
+	}
+	if paths["port-mirroring span1 name"] {
+		t.Fatalf("元素身份字段不应再作为叶子出现: %v", paths)
+	}
+}
+
+// 嵌套对象内身份键字段的「删除」也必须可被感知（回归：仅以 interface 为内容时曾整体消失）。
+func TestDiffDetectsNestedIdentityKeyRemoval(t *testing.T) {
+	withIf := Config{System: &SystemConfig{Management: &MgmtConfig{Interface: "ens160"}}}
+	without := Config{System: &SystemConfig{Management: &MgmtConfig{Interface: ""}}}
+	if d := Diff(withIf, without); !strings.Contains(d, "-   interface ens160;") {
+		t.Fatalf("删除管理网卡应产生删除行:\n%s", d)
+	}
+}

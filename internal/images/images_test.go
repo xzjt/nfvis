@@ -283,3 +283,33 @@ func TestHelpers(t *testing.T) {
 
 // srvTime httptest 内容服务的固定修改时间。
 func srvTime() time.Time { return time.Unix(0, 0) }
+
+// FR-SEC-004（决策 #71）：URL 拉取**默认强制** sha256——缺省即拒绝，不再静默跳过校验。
+func TestDownloadRequiresSHA256(t *testing.T) {
+	s := newStore(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("payload"))
+	}))
+	defer srv.Close()
+
+	// 缺 sha256 → 拒绝，且不得先行登记 downloading
+	if _, err := s.Download(context.Background(), DownloadOptions{Name: "x.qcow2", URL: srv.URL, Type: TypeVM}); err == nil {
+		t.Fatal("URL 拉取缺 sha256 应被拒绝")
+	} else if !strings.Contains(err.Error(), "sha256") {
+		t.Fatalf("错误信息应提及 sha256: %v", err)
+	}
+	if list := s.List(); list != nil {
+		for _, m := range list {
+			if m.Name == "x.qcow2" {
+				t.Fatalf("拒绝时不应登记镜像条目: %+v", m)
+			}
+		}
+	}
+
+	// 格式非法（非 64 位十六进制）→ 拒绝
+	if _, err := s.Download(context.Background(), DownloadOptions{
+		Name: "x.qcow2", URL: srv.URL, Type: TypeVM, SHA256: "deadbeef",
+	}); err == nil || !strings.Contains(err.Error(), "64") {
+		t.Fatalf("非 64 位 hex 应被拒绝: %v", err)
+	}
+}

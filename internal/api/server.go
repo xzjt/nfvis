@@ -10,9 +10,12 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"golang.org/x/net/netutil"
 
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/config"
@@ -311,7 +314,41 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 }
 
 // ListenAndServe 阻塞提供服务；Shutdown 优雅退出。
+// listener 创建监听套接字，并按 committed `system.api.max_sessions` 施加并发连接上限
+// （FR-SYS-006；0/未设置 = 不限）。此前 max-sessions 在命令树与契约中均有声明，
+// 但无任何代码使用它——属「声明了但无实现」（决策 #71）。
+func (s *Server) listener(addr string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	if n := s.maxSessions(); n > 0 {
+		s.log.Info("API 并发连接上限已启用", "max_sessions", n, "addr", addr)
+		return netutil.LimitListener(ln, n), nil
+	}
+	return ln, nil
+}
+
+// maxSessions 读取 committed `system.api.max_sessions`（不可读/未设置 = 0 = 不限）。
+func (s *Server) maxSessions() int {
+	if s.engine == nil {
+		return 0
+	}
+	cfg, err := s.engine.Committed()
+	if err != nil || cfg.System == nil || cfg.System.API == nil {
+		return 0
+	}
+	if cfg.System.API.MaxSessions < 0 {
+		return 0
+	}
+	return cfg.System.API.MaxSessions
+}
+
 func (s *Server) ListenAndServe() error {
+	ln, err := s.listener(s.http.Addr)
+	if err != nil {
+		return err
+	}
 	if s.tlsCert != "" && s.tlsKey != "" {
 		s.log.Info("API 服务启动（HTTPS）", "addr", s.http.Addr)
 		// FR-SYS-011：GetCertificate 每次握手读盘 → 换证/重签（PUT /system/tls 或
@@ -333,10 +370,10 @@ func (s *Server) ListenAndServe() error {
 				return nil, fmt.Errorf("加载证书 %s 失败", certPath)
 			},
 		}
-		return s.http.ListenAndServeTLS("", "")
+		return s.http.ServeTLS(ln, "", "")
 	}
 	s.log.Info("API 服务启动（HTTP，仅限开发/测试）", "addr", s.http.Addr)
-	return s.http.ListenAndServe()
+	return s.http.Serve(ln)
 }
 
 // Shutdown 优雅停机。

@@ -84,10 +84,14 @@ type NtpServer struct {
 	Prefer bool   `json:"prefer,omitempty"`
 }
 
-// MgmtConfig 管理口静态地址（FR-SYS-001；变更受 FR-CFG-012 自锁保护）。
+// MgmtConfig 管理口（FR-SYS-001；变更受 FR-CFG-012 自锁保护）。
+//
+// Interface 为管理网卡名——管理面与业务面隔离的**锚点**（FR-NET-002/FR-SEC-001）：
+// 指定后数据面（vpp.dpdk.dev / bond 成员 / 交换机端口 / L3 接口）不得引用它。
 type MgmtConfig struct {
-	Address string `json:"address,omitempty"` // ip-prefix，IPv4/IPv6
-	Gateway string `json:"gateway,omitempty"` // ip
+	Interface string `json:"interface,omitempty"` // 管理网卡名（内核驱动）
+	Address   string `json:"address,omitempty"`   // ip-prefix，IPv4/IPv6
+	Gateway   string `json:"gateway,omitempty"`   // ip
 }
 
 type SyslogConfig struct {
