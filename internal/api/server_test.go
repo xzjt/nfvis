@@ -14,8 +14,10 @@ import (
 
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/config"
+	"github.com/xzjt/nfvis/internal/events"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
+	"github.com/xzjt/nfvis/internal/system"
 )
 
 // ---------- 测试基础设施 ----------
@@ -34,7 +36,13 @@ func newTestServerOpts(t *testing.T, opts Options) *httptest.Server {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	engine, err := config.NewEngine(store, orchestrator.NewNoopApplier(), config.Options{})
+	engineOpts := config.Options{}
+	if opts.Events != nil { // M5-1：测试装配 config-committed 事件
+		engineOpts.OnCommitted = func(revision int, user string) {
+			opts.Events.Publish(events.TypeConfigCommitted, map[string]any{"revision": revision, "user": user})
+		}
+	}
+	engine, err := config.NewEngine(store, orchestrator.NewNoopApplier(), engineOpts)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
@@ -69,6 +77,10 @@ func newTestServerOpts(t *testing.T, opts Options) *httptest.Server {
 	opts.Addr = ":0"
 	if opts.Log == nil {
 		opts.Log = slog.New(slog.DiscardHandler)
+	}
+	// M5-6：默认装配备份/恢复管理器（绑定同一引擎，测试可直接打端点）
+	if opts.SysOps == nil {
+		opts.SysOps = system.NewManager(system.Config{Dir: filepath.Join(t.TempDir(), "backup")}, engine, nil, "test")
 	}
 	srv := New(engine, authz, opts)
 	ts := httptest.NewServer(srv.Handler())

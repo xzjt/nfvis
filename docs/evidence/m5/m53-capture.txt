@@ -1,0 +1,38 @@
+### M5-3 真机证据：数据面抓包（VPP pcap trace，FR-OPS-042）
+### 日期: 2026-09-14  环境: nfvis-vm (VPP 26.06-release)
+
+### 1) 开始抓包
+$ request vpp trace start interface loop0 count 50
+已开始抓包（接口 loop0，缓冲深度 50）。停止/导出：request vpp trace stop|export
+
+### 2) 产生流量（vppctl ping 10.99.0.2 repeat 5；无对端故 100% 丢包，但报文已生成）
+
+### 3) show vpp capture（会话中）
+capturing: interface loop0, started 2026-09-13 22:39:10, max-depth 50
+（无已导出 pcap）
+
+### 4) 导出 pcap
+$ request vpp trace export
+已导出 pcap: nfvis-cap-loop0-20260913T223910Z.pcap（604 B）。下载：API GET /vpp/capture/nfvis-cap-loop0-20260913T223910Z.pcap
+
+### 5) show vpp capture（含文件）
+capturing: none
+File                                     Size       Created
+nfvis-cap-loop0-20260913T223910Z.pcap    604 B      2026-09-13 22:39
+
+### 6) 下载并校验（GET /api/v1/vpp/capture/{file} → 本地 file/tcpdump 复核）
+$ file /tmp/dl.pcap
+/tmp/dl.pcap: pcap capture file, microsecond ts (little-endian) - version 2.4 (Ethernet, capture length 65536)
+
+$ tcpdump -r /tmp/dl.pcap -nn | head -4
+reading from file /tmp/dl.pcap, link-type EN10MB (Ethernet), snapshot length 65536
+22:39:10.995139 ARP, Request who-has 10.99.0.2 tell 10.99.0.1, length 28
+22:39:10.995151 ARP, Request who-has 10.99.0.2 tell 10.99.0.1, length 28
+22:39:11.995176 ARP, Request who-has 10.99.0.2 tell 10.99.0.1, length 28
+22:39:11.995182 ARP, Request who-has 10.99.0.2 tell 10.99.0.1, length 28
+
+### 说明
+- 抓包为 rx+tx，故同一 ARP 出现两份；报文来自测试网段 ping 尝试。
+- count 为 VPP max_packets 缓冲深度；VPP 26.06 无“已抓包计数”接口，故需显式 stop/export（决策 #59）。
+- 实现经 vppctl（CLI socket，同决策 #36）；VPP 固定输出 /tmp/rxtx.pcap，导出时搬入 /var/lib/nfvis/captures
+  （跨设备 rename EXDEV → 复制+删除兜底）。

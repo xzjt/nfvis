@@ -41,15 +41,37 @@ func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error
 	if err := s.setMeta(pending); err != nil {
 		return Meta{}, err
 	}
+	s.emitState(opts.Name, opts.Type, StateDownloading)
 	meta, err := s.downloadFile(ctx, opts)
 	if err != nil {
 		pending.ImportState = StateFailed
 		_ = s.setMeta(pending)
+		s.emitState(opts.Name, opts.Type, StateFailed)
 		return Meta{}, err
+	}
+	// 容器镜像：URL 拉取的是 docker save 归档 → `image load` 后删除临时文件，仅登记元数据。
+	if opts.Type == TypeContainer {
+		if s.dockerLoad == nil {
+			_ = os.Remove(filepath.Join(s.cfg.Dir, opts.Name))
+			pending.ImportState = StateFailed
+			_ = s.setMeta(pending)
+			return Meta{}, fmt.Errorf("拉取容器镜像 %s：未接入 Docker", opts.Name)
+		}
+		archive := filepath.Join(s.cfg.Dir, opts.Name)
+		if err := s.dockerLoad(archive); err != nil {
+			pending.ImportState = StateFailed
+			_ = s.setMeta(pending)
+			return Meta{}, fmt.Errorf("docker load %s: %w", opts.Name, err)
+		}
+		if err := os.Remove(archive); err != nil && !os.IsNotExist(err) {
+			return Meta{}, err
+		}
+		meta.Format = "docker-archive"
 	}
 	if err := s.setMeta(meta); err != nil {
 		return Meta{}, err
 	}
+	s.emitState(opts.Name, opts.Type, StateReady)
 	return meta, nil
 }
 
@@ -131,6 +153,9 @@ func (s *Store) downloadFile(ctx context.Context, opts DownloadOptions) (Meta, e
 			written += int64(n)
 			if opts.Progress != nil {
 				opts.Progress(written, total)
+			}
+			if s.progress != nil {
+				s.progress(opts.Name, written, total)
 			}
 		}
 		if rerr == io.EOF {

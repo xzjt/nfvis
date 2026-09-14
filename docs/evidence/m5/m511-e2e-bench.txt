@@ -1,0 +1,16 @@
+### M5-11 真机证据：端到端（装完即用主链路）与性能基准
+### 日期: 2026-09-14  环境: nfvis-vm（VPP 26.06 / Docker / libvirt 可用；nfvisd 127.0.0.1:8443）
+
+$ NFVIS_API=http://127.0.0.1:8443 make e2e
+
+--- PASS: TestE2EMainChain (0.92s)
+    e2e_test.go:300: BENCH GET /interfaces              n=30 p50=0s p95=1ms 目标=500ms PASS
+    e2e_test.go:300: BENCH GET /virtual-machine-functions n=30 p50=0s p95=1ms 目标=500ms PASS
+    e2e_test.go:300: BENCH GET /alarms                  n=30 p50=0s p95=0s 目标=500ms PASS
+    e2e_test.go:300: BENCH GET /metrics                 n=30 p50=2ms p95=4ms 目标=500ms PASS
+    e2e_test.go:300: BENCH CLI show version             n=30 p50=0s p95=1ms 目标=1s PASS
+    e2e_test.go:300: BENCH commit (1 变更)                n=30 p50=11ms p95=13ms 目标=5s PASS
+基准完成（明细见 -v 输出的 BENCH 行）
+--- PASS: TestE2EBenchmark (0.75s)
+PASS
+ok  	github.com/xzjt/nfvis/test/e2e	1.677s

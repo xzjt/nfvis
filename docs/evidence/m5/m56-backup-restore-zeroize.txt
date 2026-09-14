@@ -1,0 +1,25 @@
+### M5-6 真机证据：备份 → 恢复出厂 → 恢复（FR-OPS-004~007）
+### 日期: 2026-09-14  环境: nfvis-vm
+
+### 1) 预置配置
+  set system hostname m56-node; interfaces ens192/ens224; virtual-switches m56-l3 type l3 (l3-interface ens192 10.99.0.1/24)
+  commit 成功 (revision 3)
+
+### 2) 备份（CLI：request system configuration backup to /tmp/bk.json）
+  备份已生成: nfvis-backup-20260913T181618Z.json（987 B）
+  已导出到: /tmp/bk.json
+  归档头: {"format":"nfvis-config-backup","archive_version":1,"version":"1.0.0-dev", ... }
+
+### 3) 恢复出厂（双重确认：两次 [yes,no] 后以 --yes --yes 执行）
+  已恢复出厂（revision 4，删除镜像 0 个）。重启后进入初始化状态。
+  出厂后登录被拒：% 登录失败: 系统尚未初始化本地用户（账号已复位，FR-OPS-007）
+  重启 nfvisd 后自动重新引导 admin；show configuration 仅含 bootstrap 用户
+
+### 4) 恢复（request system configuration restore /tmp/bk.json）
+  已恢复（revision 6）。归档含镜像清单 0 项；镜像文件本体不在归档内（FR-OPS-006）
+  恢复后 show configuration 含 interfaces ens192/ens224、virtual-switches m56-l3 {type l3}、
+  vrfs m56-l3 { l3-interfaces ens192 { addresses [10.99.0.1/24] } }
+
+### 5) 端点（契约）
+  GET /system/backup（列表）、POST /system/backup（202）、GET /system/backup/{file}（octet-stream）、
+  POST /system/restore（multipart）、POST /system:zeroize（confirm=true，缺省 400）

@@ -1,0 +1,21 @@
+### T0-6 真机证据：外网真实 URL 拉取镜像 + sha256 校验（经代理 192.168.155.1:2333）
+### 日期: 2026-09-14  环境: nfvis-vm
+
+URL: https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/cloud/generic_alpine-3.20.0-x86_64-bios-cloudinit-r0.qcow2
+期望 sha256（由独立工具 curl 下载后 sha256sum 得到，非自证）:
+  900c91ed360beac704158ee99f45bab49e97858f8cb37469d0cc30e8e8e2ca60
+
+### 1) CLI 受理（异步）
+  request images download name alpine-cloud.qcow2 type vm-image url <URL> sha256 <SHA>
+
+### 2) 轮询至 ready（nfvisd 侧 HTTPS 经代理）
+  poll 22: import-state downloading
+  poll 24: import-state ready
+
+### 3) 详情（show images alpine-cloud.qcow2 detail）
+format qcow2; import-state ready; size-bytes 187695104; type vm-image;
+sha256 900c91ed360beac704158ee99f45bab49e97858f8cb37469d0cc30e8e8e2ca60;
+
+### 4) 独立工具复核落盘文件
+-rw-r--r-- 1 root root 187695104 Sep 13 17:42 /var/lib/nfvis/images/alpine-cloud.qcow2
+900c91ed360beac704158ee99f45bab49e97858f8cb37469d0cc30e8e8e2ca60  /var/lib/nfvis/images/alpine-cloud.qcow2

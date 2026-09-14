@@ -229,6 +229,13 @@ func TestVrfsEndpoint(t *testing.T) {
 		t.Fatalf("VRF 详情应含路由: %d %s", status, data)
 	}
 
+	// NAT outside 要求出接口归属某 VRF 且带地址（决策 #52）
+	if status, _, _ := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/vrfs", token,
+		model.Vrf{Name: "wan", L3Interfaces: []model.L3Interface{{Interface: "ens2f0", Addresses: []string{"203.0.113.1/24"}}}},
+		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("创建 wan VRF")
+	}
+
 	// 被 NAT 引用的 VRF：删除时 L3 映射检查优先（vs-mgmt 是 L3 交换机数据）→ 409
 	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/configuration/candidate", token, nil, nil)
 	if status != http.StatusOK {

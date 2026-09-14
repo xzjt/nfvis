@@ -71,16 +71,19 @@ func (g *govppNatClient) NATFeature(swIfIndex uint32, inside, add bool) error {
 	return nil
 }
 
-func (g *govppNatClient) NATEnable(enable bool) error {
+func (g *govppNatClient) NATEnable(enable bool, insideVRF, outsideVRF uint32) error {
 	reply := &nat44_ei.Nat44EiPluginEnableDisableReply{}
-	if err := g.ch.SendRequest(&nat44_ei.Nat44EiPluginEnableDisable{Enable: enable}).ReceiveReply(reply); err != nil {
+	if err := g.ch.SendRequest(&nat44_ei.Nat44EiPluginEnableDisable{
+		Enable: enable, InsideVrf: insideVRF, OutsideVrf: outsideVRF,
+	}).ReceiveReply(reply); err != nil {
 		if vppErrIs(err, vppFeatureAlreadyEnabled, vppFeatureAlreadyDisabled) {
 			return nil
 		}
 		return err
 	}
 	if reply.Retval != 0 {
-		return fmt.Errorf("nat44_ei_plugin_enable_disable(enable=%v) retval=%d", enable, reply.Retval)
+		return fmt.Errorf("nat44_ei_plugin_enable_disable(enable=%v,inside-vrf=%d,outside-vrf=%d) retval=%d",
+			enable, insideVRF, outsideVRF, reply.Retval)
 	}
 	return nil
 }

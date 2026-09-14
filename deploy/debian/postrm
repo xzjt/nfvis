@@ -1,0 +1,14 @@
+#!/bin/sh
+# nfvis 卸载后：purge 时清理运行态目录；配置/镜像/备份等数据**不自动删除**（避免误删，FR-OPS-007 由 zeroize 显式执行）。
+set -e
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if [ "$1" = "purge" ]; then
+        systemctl disable nfvis.service >/dev/null 2>&1 || true
+    fi
+fi
+if [ "$1" = "purge" ]; then
+    rm -rf /run/nfvis
+    echo "nfvis postrm: 已清理 /run/nfvis（/var/lib/nfvis 数据保留）"
+fi
+exit 0

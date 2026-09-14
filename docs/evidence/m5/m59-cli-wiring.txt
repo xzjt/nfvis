@@ -1,0 +1,29 @@
+### M5-9 真机证据：CLI 剩余命令接线（本轮新增部分）
+### 日期: 2026-09-14  环境: nfvis-vm
+
+$ show users
+User                 Class
+admin                super-user
+
+$ show log audit last 6
+Time                 User         Action                   Result   Detail
+2026-09-13 18:34:27  admin        config.commit            success  [edit system] +   hostname m59-node;
+
+$ show system uptime
+uptime         16h27m11s（0d 16h 27m）
+
+$ show system memory
+mem-total      5627277312 / mem-avail 1082601472 / hp-total 3072 / hp-free 1024
+
+$ show system storage
+disk-total 102971269120 / disk-free 87424483328 / disk-used 0.1510
+
+$ show system hugepages
+hp-total 3072 / hp-free 1024
+
+$ show system core-dumps        → （无 core dump）
+$ show tech-support             → （无诊断归档；生成：request system tech-support generate）
+$ request alarms clear all      → 已清除 0 条已 resolved 告警。
+
+另：show nat 现渲染 committed 的池/规则/静态映射行 + 运行态会话（单元测试覆盖；
+    真机 D4 见 d4-nat-cross-vrf.txt）。

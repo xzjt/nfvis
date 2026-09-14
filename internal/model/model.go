@@ -29,15 +29,23 @@ type Config struct {
 
 // SystemConfig 对应 OpenAPI SystemConfig。
 type SystemConfig struct {
-	Hostname           string        `json:"hostname,omitempty"`
-	Timezone           string        `json:"timezone,omitempty"`
-	Ntp                []NtpServer   `json:"ntp,omitempty"`
-	DNSServers         []string      `json:"dns_servers,omitempty"`
-	Management         *MgmtConfig   `json:"management,omitempty"`
-	Login              *SystemLogin  `json:"login,omitempty"` // 本地用户与 class（FR-SEC-002/003，附录 A #25）
-	Syslog             *SyslogConfig `json:"syslog,omitempty"`
-	API                *APIConfig    `json:"api,omitempty"`
-	IdleTimeoutMinutes int           `json:"idle_timeout_minutes,omitempty"`
+	Hostname           string            `json:"hostname,omitempty"`
+	Timezone           string            `json:"timezone,omitempty"`
+	Ntp                []NtpServer       `json:"ntp,omitempty"`
+	DNSServers         []string          `json:"dns_servers,omitempty"`
+	Management         *MgmtConfig       `json:"management,omitempty"`
+	Login              *SystemLogin      `json:"login,omitempty"` // 本地用户与 class（FR-SEC-002/003，附录 A #25）
+	Syslog             *SyslogConfig     `json:"syslog,omitempty"`
+	API                *APIConfig        `json:"api,omitempty"`
+	IdleTimeoutMinutes int               `json:"idle_timeout_minutes,omitempty"`
+	Health             *HealthThresholds `json:"health,omitempty"` // 硬件健康告警阈值（FR-SYS-012）
+}
+
+// HealthThresholds 硬件健康告警阈值（0 = 未设置该阈值，不产生告警）。
+type HealthThresholds struct {
+	CPUTempCelsius  int `json:"cpu_temp_celsius,omitempty"`
+	DiskTempCelsius int `json:"disk_temp_celsius,omitempty"`
+	DiskUsedPercent int `json:"disk_used_percent,omitempty"`
 }
 
 // SystemLogin 本地 AAA 配置：用户/class/口令策略，声明式存于配置文档
@@ -90,9 +98,12 @@ type SyslogConfig struct {
 }
 
 type APIConfig struct {
-	Port            int `json:"port,omitempty"`
-	TokenTTLMinutes int `json:"token_ttl_minutes,omitempty"`
-	MaxSessions     int `json:"max_sessions,omitempty"`
+	Port            int    `json:"port,omitempty"`
+	TokenTTLMinutes int    `json:"token_ttl_minutes,omitempty"`
+	MaxSessions     int    `json:"max_sessions,omitempty"`
+	CertFile        string `json:"cert_file,omitempty"`       // 外部证书 PEM 路径（FR-SYS-011）
+	KeyFile         string `json:"key_file,omitempty"`        // 外部私钥 PEM 路径
+	TLSSelfSigned   bool   `json:"tls_self_signed,omitempty"` // 声明使用自签证书（缺证书时由 nfvisd 生成）
 }
 
 // InterfaceConfig 物理网卡的配置视图（OpenAPI InterfaceUpdate，契约补全后含 name/sriov/ingress_policy）。

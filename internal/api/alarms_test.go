@@ -19,6 +19,8 @@ func (f *fakeAlarmRuntime) List(state string) []AlarmRow {
 	return f.rows
 }
 
+func (f *fakeAlarmRuntime) Clear(id string, all bool) int { return 0 }
+
 func TestAlarmsEndpoint(t *testing.T) {
 	raised := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	fake := &fakeAlarmRuntime{rows: []AlarmRow{{

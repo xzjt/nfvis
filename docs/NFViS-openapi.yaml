@@ -1042,7 +1042,7 @@ paths:
   /vpp/capture:
     get:
       tags: [system]
-      summary: 抓包会话状态与已导出 pcap 清单
+      summary: 抓包会话状态与已导出 pcap 清单（单会话；导出文件落 /var/lib/nfvis/captures）
       responses:
         "200":
           description: OK
@@ -1061,8 +1061,16 @@ paths:
               required: [interface]
               properties:
                 interface: { type: string }
-                count: { type: integer, default: 1000 }
-                filter_acl: { type: string }
+                count:
+                  type: integer
+                  default: 1000
+                  description: |
+                    VPP 抓包缓冲深度（环形，超出丢最旧）。注意：VPP 26.06 的 pcap trace 以
+                    max_packets 作为缓冲深度且无“已抓包计数”接口，故非“达到 count 自动停止”；
+                    需显式 stop/export（契约语义按实测调整，见附录 A #59）。
+                filter_acl:
+                  type: string
+                  description: "V1 不支持：VPP 26.06 pcap trace 无 ACL 过滤（仅支持按 error），非空返回 400"
       responses:
         "202": { description: 已开始 }
         "409": { $ref: "#/components/responses/Error409" }   # 已有会话进行中
@@ -1996,6 +2004,11 @@ components:
 
     NatConfig:
       type: object
+      description: |
+        NAT44-EI 配置。V1 语义（决策 #38/#52）：action.interface 必填（VPP outside 不支持自动推断）；
+        inside 转发域由 rules[].virtual_switch（须为 L3 交换机）派生，outside 转发域由出接口所属 VRF 派生
+        （出接口须为某 Vrf 的 l3-interface 且已配地址）；全部规则的 virtual-switch 必须一致、出接口必须同属一个 VRF；
+        VPP NAT44 单实例仅一对 inside/outside VRF（两者可同表或跨 VRF）。
       properties:
         source_pools:
           type: array
@@ -2011,12 +2024,16 @@ components:
             properties:
               seq: { type: integer }
               match_source: { type: string }
-              virtual_switch: { type: string }
+              virtual_switch: { type: string, description: "L3 交换机名（inside 转发域由 TableID(名) 派生）" }
               action:
                 type: object
                 properties:
-                  source_pool: { type: string }
-                  interface: { type: string }
+                  source_pool:
+                    type: string
+                    description: "外部地址池（可选）；未提供时以 action.interface 的接口地址作外部地址"
+                  interface:
+                    type: string
+                    description: "出接口（必填，决策 #38）；V1 要求其作为某 Vrf 的 l3-interface 且已配地址（outside 转发域来源）"
         static:
           type: array
           items:

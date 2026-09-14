@@ -1,0 +1,30 @@
+### M5-1/M5-2 真机证据：事件流（SSE）+ Prometheus 指标
+### 日期: 2026-09-14  环境: nfvis-vm (VPP 26.06, Docker 29.x)
+
+### 1) GET /api/v1/metrics（无鉴权，Prometheus text 0.0.4）关键序列
+nfvis_system_hugepages_free 1024
+nfvis_system_memory_total_bytes 5627277312
+nfvis_system_cpu_utilization_ratio 0.1669
+nfvis_vpp_threads 2
+nfvis_vpp_memory_total_bytes 2147483648
+nfvis_config_virtual_switches 0
+
+### 2) GET /api/v1/events（SSE，Bearer 鉴权）订阅期间的事件类型统计
+      1 event: alarm-raised
+      1 event: config-committed
+      1 event: vnf-state-changed
+
+### 3) 触发路径
+  - config-committed：nfvis-cli 事务 commit（revision 3）
+  - vnf-state-changed：request container-functions evt-ct start（CLI 直连运行态，执行器内发布）
+  - alarm-raised：docker kill evt-ct → 15s 巡检 CheckContainerAlarms → critical CONTAINER_EXITED（FR-CMP-022）
+
+### 4) alarm-raised 帧内容
+event: alarm-raised
+data: {"id":5,"type":"alarm-raised","timestamp":"2026-09-13T18:06:01Z","payload":{"code":"CONTAINER_EXITED","id":"alm-00001","message":"容器 evt-ct 异常退出（状态 exited，FR-CMP-022）","severity":"critical","source":"evt-ct","state":"active"}}
+
+### 5) 告警进入指标（同一存储）
+nfvis_alarms_active{severity="critical"} 1
+nfvis_alarms_active{severity="error"} 0
+nfvis_alarms_active{severity="info"} 0
+nfvis_alarms_active{severity="warning"} 0

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -148,6 +149,32 @@ func (c *dockerClient) Remove(ctx context.Context, name string, force bool) erro
 // RemoveImage 删除容器镜像（DELETE /images/<ref>）。
 func (c *dockerClient) RemoveImage(ctx context.Context, ref string) error {
 	return c.do(ctx, http.MethodDelete, "/images/"+url.PathEscape(ref), nil, nil)
+}
+
+// LoadImage 载入容器镜像归档（POST /images/load，body 为 docker save 的 tar；
+// 不复用 do()：其 body 走 JSON 序列化，无法流式传 tar）。
+func (c *dockerClient) LoadImage(ctx context.Context, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("打开镜像归档 %s: %w", path, err)
+	}
+	defer f.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/images/load?quiet=1", f)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-tar")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("docker image load: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return fmt.Errorf("docker image load: %d %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }
 
 // State 返回契约枚举；不存在 exists=false。

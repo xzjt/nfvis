@@ -1,0 +1,37 @@
+### M5-4 真机证据：tech-support 归档 + core dump 管理（FR-OPS-040/041）
+### 日期: 2026-09-14  环境: nfvis-vm
+
+### 1) 触发真实崩溃（kill -SEGV，core_pattern 临时指向 /var/lib/nfvis/coredumps）
+$ ( ulimit -c unlimited; python3 -c "import os,signal; os.kill(os.getpid(), signal.SIGSEGV)" )
+bash: Segmentation fault (core dumped)
+  /var/lib/nfvis/coredumps/core.python3.84135.1789323832  5349376 字节
+
+### 2) show system core-dumps
+File                                 Process                Size       Occurred
+core.python3.84135.1789323832        python3                5.1 MiB    2026-09-13 18:23
+
+### 3) request system tech-support generate
+诊断归档已生成: nfvis-tech-support-20260913T182355Z.tar.gz（987 B）
+
+### 4) 归档分节（tar tzf）
+version.json config.json audit.json status.json logs.txt core-dumps.json README.txt
+
+### 5) core-dumps.json 分节内容（真实转储进入归档，FR-OPS-041）
+[
+  {
+    "file": "core.python3.84135.1789323832",
+    "process": "python3",
+    "size_bytes": 5349376,
+    "occurred_at": "2026-09-13T18:23:52.658573988Z"
+  }
+]
+
+### 6) version.json 分节内容
+{
+  "hostname": "nfvis",
+  "kernel": "7.0.0-31-generic",
+  "nfvis": "1.0.0-dev",
+  "vpp": "26.06-release",
+  "vpp_connected": true
+}
+### 7) 验收后 core_pattern 已恢复 apport（原值）

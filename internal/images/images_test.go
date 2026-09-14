@@ -66,10 +66,30 @@ func TestImportIncoming(t *testing.T) {
 	if _, err := s.ImportIncoming("evil", TypeVM, outside, ""); err == nil || !strings.Contains(err.Error(), "必须位于") {
 		t.Fatalf("incoming 目录外文件应拒绝: %v", err)
 	}
-	// 容器镜像不走 incoming
-	if _, err := s.ImportIncoming("c", TypeContainer, filepath.Join(inc, "x"), ""); err == nil {
-		t.Fatal("容器镜像 incoming 导入应拒绝")
+	// 容器镜像：未接入 Docker 时拒绝
+	ctFile := filepath.Join(inc, "alpine.tar")
+	_ = os.WriteFile(ctFile, content, 0o644)
+	if _, err := s.ImportIncoming("alpine:3.20", TypeContainer, ctFile, ""); err == nil ||
+		!strings.Contains(err.Error(), "未接入 Docker") {
+		t.Fatalf("未接入 Docker 时容器镜像导入应拒绝: %v", err)
 	}
+	// 注入 docker load 后：登记元数据、源文件清理、仓库不留文件
+	loaded := ""
+	s.SetDockerLoader(func(path string) error { loaded = path; return nil })
+	m2, err := s.ImportIncoming("alpine:3.20", TypeContainer, ctFile, "")
+	if err != nil {
+		t.Fatalf("容器镜像导入: %v", err)
+	}
+	if loaded != ctFile || m2.Type != TypeContainer || m2.Format != "docker-archive" || m2.ImportState != StateReady {
+		t.Fatalf("容器镜像导入结果不符: loaded=%s meta=%+v", loaded, m2)
+	}
+	if _, err := os.Stat(ctFile); !os.IsNotExist(err) {
+		t.Errorf("容器镜像导入后应清理 incoming 源文件: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.Config().Dir, "alpine:3.20")); !os.IsNotExist(err) {
+		t.Errorf("容器镜像不应落盘仓库目录: %v", err)
+	}
+	s.SetDockerLoader(nil)
 	// 非法 type
 	if _, err := s.ImportIncoming("x", "bad", filepath.Join(inc, "upload.qcow2"), ""); err == nil {
 		t.Fatal("非法 type 应拒绝")

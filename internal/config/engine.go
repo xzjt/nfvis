@@ -101,6 +101,7 @@ type Options struct {
 	Now            func() time.Time                         // 时钟注入（测试）
 	AfterFunc      func(d time.Duration, fn func()) func()  // 定时器注入（测试），返回 stop
 	OnEvent        func(Event)                              // 事件回调（在引擎锁内调用，须快速返回）
+	OnCommitted    func(revision int, user string)          // commit 成功回调（M5-1 config-committed 事件）
 	Validate       func(model.Config) []model.ValidateError // commit 校验器，默认 model.Validate + CheckResources
 	ImageResolver  ImageResolver                            // 镜像仓库（nil = 跳过规则⑤）
 	TopologyReader TopologyReader                           // NUMA 拓扑（nil = 跳过规则⑩）
@@ -116,6 +117,7 @@ type Engine struct {
 	now         func() time.Time
 	afterFunc   func(d time.Duration, fn func()) func()
 	onEvent     func(Event)
+	onCommit    func(revision int, user string)
 	validate    func(model.Config) []model.ValidateError
 	images      ImageResolver
 	topology    TopologyReader
@@ -137,6 +139,7 @@ func NewEngine(store *Store, applier orchestrator.Applier, opts Options) (*Engin
 		now:         opts.Now,
 		afterFunc:   opts.AfterFunc,
 		onEvent:     opts.OnEvent,
+		onCommit:    opts.OnCommitted,
 		validate:    opts.Validate,
 	}
 	if e.lockIdleTTL <= 0 {
@@ -453,6 +456,9 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 		Detail: model.Diff(committed, newCfg), Result: "success",
 	})
 	e.dirty = false
+	if e.onCommit != nil { // M5-1：config-committed 事件（在锁内，回调须快速返回）
+		e.onCommit(newRev, sess.User)
+	}
 	return res, nil
 }
 

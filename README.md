@@ -1,7 +1,7 @@
 # NFViS — 网络功能虚拟化基础设施一体机软件
 
 基于 Ubuntu 26.04 + VPP 26.06 + KVM/Libvirt 的 NFVi 一体机软件，Go 实现。
-JunOS 风格 CLI（`nfvis-cli`）+ REST API（OpenAPI 契约），当前处于 **M3（网络编排 govpp）开发阶段**（M1 事务引擎、M2 REST API + AAA + CLI 前端已合并）。
+JunOS 风格 CLI（`nfvis-cli`）+ REST API（OpenAPI 契约），当前处于 **M5（V1 收尾）已完成阶段**（M1~M4 已合并；M5 主体 M5-1~M5-11 与 T0-1/2/6/7 已完成并有真机证据，详见 `docs/M5-验收记录.md`、`docs/M5-11-端到端与基准报告.md`）。
 
 ## 仓库结构
 

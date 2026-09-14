@@ -18,6 +18,27 @@ import "fmt"
 // 本表把这些语句显式映射到模型字段；每条规则同时处理 set 与 delete。
 
 var statementAliasesCompute = []aliasRule{
+	// container-functions <n> args <arg> [<arg> ...]：树为标量叶子但模型是 Args []string，
+	// 通用遍历会把整行当作一个字符串 → encoding/json 反序列化失败/静默丢字段，
+	// 故按「剩余 token 全部为参数」显式映射（set 覆盖、delete 清空）。
+	{pattern: []string{"container-functions", "*", "args", "**"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			ct, err := elemByID(tree, "container_functions", t[1])
+			if err != nil {
+				return err
+			}
+			if !isSet || len(t) == 3 {
+				delete(ct, "args")
+				return nil
+			}
+			args := make([]any, 0, len(t)-3)
+			for _, a := range t[3:] {
+				args = append(args, a)
+			}
+			ct["args"] = args
+			return nil
+		}},
+
 	// virtual-machine-functions <n> vcpu count <c> pin <bool>（§2.7 单条语句含可选 pin）：
 	// 通用遍历在 count 取值后把 pin 当兄弟关键字失败（pin 是 vcpu 容器的兄弟取值），
 	// 故整条映射到 VMCpu.{Count,Pin}。
