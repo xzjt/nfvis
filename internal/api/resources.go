@@ -129,7 +129,7 @@ func (s *Server) handleGetInterfaces(w http.ResponseWriter, r *http.Request) {
 	if out == nil {
 		out = []model.InterfaceConfig{}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, paginate(r, out))
 }
 
 // handleGetInterface GET /api/v1/interfaces/{name}。
@@ -195,7 +195,7 @@ func (s *Server) handleGetVSwitches(w http.ResponseWriter, r *http.Request) {
 	if out == nil {
 		out = []model.VirtualSwitch{}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, paginate(r, out))
 }
 
 // handleGetVSwitch GET /api/v1/virtual-switches/{name}。
@@ -320,7 +320,7 @@ func (s *Server) handleGetVrfs(w http.ResponseWriter, r *http.Request) {
 	if out == nil {
 		out = []model.Vrf{}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, paginate(r, out))
 }
 
 // handleGetVrf GET /api/v1/vrfs/{name}。

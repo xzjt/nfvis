@@ -203,7 +203,7 @@ func (s *Server) handleGetMacTable(w http.ResponseWriter, r *http.Request) {
 	if rows == nil {
 		rows = []MACTableRow{}
 	}
-	writeJSON(w, http.StatusOK, rows)
+	writeJSON(w, http.StatusOK, paginate(r, rows))
 }
 
 // RouteRow /vrfs/{name}/routes 一行（契约 Route）。
@@ -246,7 +246,7 @@ func (s *Server) handleGetLldpNeighbors(w http.ResponseWriter, r *http.Request) 
 	if rows == nil {
 		rows = []LldpNeighborRow{}
 	}
-	writeJSON(w, http.StatusOK, rows)
+	writeJSON(w, http.StatusOK, paginate(r, rows))
 }
 
 // handleGetVrfRoutes GET /api/v1/vrfs/{name}/routes：FIB 路由表（运行态，FR-NET-013）。

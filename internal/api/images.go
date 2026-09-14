@@ -52,7 +52,7 @@ func (s *Server) handleListImages(w http.ResponseWriter, r *http.Request) {
 	for _, m := range metas {
 		out = append(out, imageResponse{Meta: m, RefCount: images.RefCount(cfg, m.Name)})
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, paginate(r, out))
 }
 
 // handleGetImage GET /api/v1/images/{name}

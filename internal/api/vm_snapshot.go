@@ -58,7 +58,7 @@ func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 	if rows == nil {
 		rows = []SnapshotRow{}
 	}
-	writeJSON(w, http.StatusOK, rows)
+	writeJSON(w, http.StatusOK, paginate(r, rows))
 }
 
 // handleCreateSnapshot POST /virtual-machine-functions/{name}/snapshots

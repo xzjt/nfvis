@@ -55,7 +55,7 @@ func (s *Server) handleListContainers(w http.ResponseWriter, r *http.Request) {
 	for _, ct := range cfg.ContainerFunctions {
 		out = append(out, containerResponse{ContainerFunction: ct, State: s.ctStateSafe(r.Context(), ct.Name)})
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, paginate(r, out))
 }
 
 // handleGetContainer GET /api/v1/container-functions/{name}
