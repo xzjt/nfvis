@@ -222,3 +222,37 @@ make check：vet + 全量测试 + 覆盖率门槛 + 依赖方向 + 决策条数�
    裸 LF(0x0A) 不可能是 UTF-8 续字节，故对多字节字符与控制序列安全；
    但「guest 串口输出逐字节不变」这一强假设不再成立（FR-CMP-014 的真人 Ctrl-] 仍未验，
    本次未做串口实机回归）。
+
+==================================================================================
+§7 发布 v1.1.2：打包 / 实装 / 升级 / 卸载 / 回下载校验（nfvis-vm）
+==================================================================================
+合并：PR #81 → main 487786b。
+打包：make deb VERSION=1.1.2 → build/nfvis_1.1.2_amd64.deb（7,698,774 字节）
+
+元数据：Package nfvis / Version 1.1.2 / Architecture amd64 / Depends libc6 /
+        Recommends vpp, libvirt-daemon-system, docker.io
+内容：  /usr/bin/{nfvisd,nfvis-cli}(0755)、/lib/systemd/system/nfvis.service、
+        /usr/share/doc/nfvis/{openapi.yaml,CLI命令树,规格书,用户手册,命令全表,M5-验收记录,version}、
+        /usr/share/nfvis/installer/nfvis-baseline.sh(0755)
+解包跑版本：nfvis-cli 1.1.2 / nfvisd 1.1.2 / doc version 1.1.2
+
+升级 1.1.1 → 1.1.2（dpkg -i 覆盖安装）：
+  prerm   : "升级中，保留运行中的 nfvis.service（由 postinst try-restart 换新版本）"   ← 决策 #80④ 生效
+  postinst: "已重启 nfvis.service 以加载新版本（FR-OPS-001）"
+  结果    : 版本=1.1.2、active (running)、MainPID 更换（升级前 → 12734）、nfvis-cli 1.1.2
+  告警    : systemctl status 无告警，Docs: file:///usr/share/doc/nfvis/ 正常渲染   ← 决策 #80① 生效
+
+卸载（dpkg --purge）：
+  prerm "已停止 nfvis.service（remove）" / postrm "已清理 /run/nfvis（/var/lib/nfvis 数据保留）"
+  结果    : 包记录消失、/usr/bin/nfvis{d,cli} 不存在、is-enabled=not-found、is-active=inactive、
+            /run/nfvis 不存在、**/var/lib/nfvis 保留 ✓**（FR-OPS-007）
+重装 1.1.2 后：版本=1.1.2、enabled、active、监听 *:443 —— 环境恢复为「已装且运行」
+
+**对已安装的 deb 二进制**（/usr/bin/nfvis-cli，非本地构建产物）跑 pty 冒烟：
+  contrib/scripts/cli-pty-smoke.sh → 通过 10 / 失败 0（候选行 CRLF、长 token 不粘连、
+  `?` 即时且不入行文本、Tab 响铃并列出 21 条、非 TTY 无 CR 且仍列候选）
+
+回下载校验（GitHub Release 资产）：
+  eb455ea5e85e5c6e53689c188c85cdb079fcc791dd730e83eff8325c4c53c488  nfvis_1.1.2_amd64.deb
+  与构建端 sha256 一致，且与 GitHub API 记录的 digest 一致；大小一致（7698774）。
+  发布页：https://github.com/xzjt/nfvis/releases/tag/v1.1.2
