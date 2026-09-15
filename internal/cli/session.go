@@ -94,24 +94,35 @@ func (s *Session) Candidates(line string) []schema.Candidate {
 	return schema.Candidates(root, tokens, partial, s.dynCandidates())
 }
 
-// CompleteLine 处理 Tab：唯一匹配补全，多匹配补到公共前缀（FR-CLI-003/§5.2）。
-// 以去掉尾随空白后的文本为基准追加，避免把分隔用的空格/Tab 带进补全结果。
-func (s *Session) CompleteLine(line string) string {
+// Complete 处理 Tab：返回补全后的行与该位置候选（FR-CLI-003/§5.2）。
+// 以去掉尾随空白后的文本为基准追加，避免把分隔用的空格/Tab 带进补全结果；
+// 候选一并返回，供调用方在多匹配无进展时「响铃并列出」。
+func (s *Session) Complete(line string) (string, []schema.Candidate) {
 	line = strings.TrimRight(line, "\t") // Tab 是触发键，不进入补全文本
-	tokens, partial := completionTokens(line)
-	base := strings.TrimSuffix(strings.TrimRight(line, " \t"), partial)
-	root := s.rootForContext(tokens)
-	cs := schema.Candidates(root, tokens, partial, s.dynCandidates())
-	if len(cs) == 0 {
-		return line
-	}
-	if len(cs) == 1 {
-		return base + cs[0].Token + " "
+	base, partial, cs := s.completionContext(line)
+	switch {
+	case len(cs) == 0:
+		return line, nil
+	case len(cs) == 1:
+		return base + cs[0].Token + " ", cs
 	}
 	if common := commonPrefix(cs); len(common) > len(partial) {
-		return base + common
+		return base + common, cs
 	}
-	return line
+	return line, cs
+}
+
+// CompleteLine 仅取补全后的行（非 raw 退化路径与既有调用方用）。
+func (s *Session) CompleteLine(line string) string {
+	nl, _ := s.Complete(line)
+	return nl
+}
+
+// completionContext 解析补全上下文：已完成 token、正在输入的前缀、候选列表。
+func (s *Session) completionContext(line string) (base, partial string, cs []schema.Candidate) {
+	tokens, partial := completionTokens(line)
+	base = strings.TrimSuffix(strings.TrimRight(line, " \t"), partial)
+	return base, partial, schema.Candidates(s.rootForContext(tokens), tokens, partial, s.dynCandidates())
 }
 
 // ---------- 内部 ----------

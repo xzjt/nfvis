@@ -32,8 +32,9 @@ type REPL struct {
 // NewREPL 构造交互循环（stdin 为 TTY 时启用 raw 模式）。
 func NewREPL(session *Session, history *History, idle *IdleGuard) *REPL {
 	e := NewEditor(history, idle)
-	e.SetCompleter(session.CompleteLine)
-	return &REPL{session: session, editor: e, history: history, out: os.Stdout, poll: time.Second}
+	e.SetCompleter(session.Complete)
+	// 输出经编辑器的 raw 感知流：raw 期间裸 \n 不回车，直写 stdout 会阶梯错位（决策 #81①）。
+	return &REPL{session: session, editor: e, history: history, out: e.Out(), poll: time.Second}
 }
 
 // Run 进入交互循环，直至 EOF（Ctrl-D）或空闲超时。
@@ -57,10 +58,8 @@ func (r *REPL) Run() error {
 		if trimmed == "" {
 			continue
 		}
-		if strings.HasSuffix(trimmed, "?") { // ? 列候选，不执行
-			for _, c := range r.session.Candidates(trimmed) {
-				fmt.Fprintf(r.out, "  %-24s%s\n", c.Token, c.Desc)
-			}
+		if strings.HasSuffix(trimmed, "?") { // 非 raw（管道/脚本）的 ? 列候选；raw 下由 Editor 按键即时处理
+			printCandidates(r.out, r.session.Candidates(trimmed))
 			continue
 		}
 		r.history.Add(trimmed)

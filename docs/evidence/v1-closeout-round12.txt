@@ -1,0 +1,224 @@
+NFViS V1 收尾 第十二轮 证据（决策 #81：CLI 交互三项缺陷修复）
+================================================================================
+日期      2026-09-15
+主机      nfvis-vm（nfvis 1.1.1 已安装）
+服务端    开发态 nfvisd：/usr/bin/nfvisd -db /tmp/repro.db -listen 127.0.0.1:18443
+          -init-admin-password Admin@12345 -allow-plaintext
+CLI       「修复前」/usr/bin/nfvis-cli（1.1.1，等价于修复前源码）
+          「修复后」/tmp/nfvis-cli-fix（本分支 HEAD 在本机构建）
+报告来源  用户真机交互反馈：候选列表错位、Tab 不显示备选、`?` 需回车才显示
+
+复现方法（关键）
+--------------------------------------------------------------------------------
+交互缺陷**只能用 pty 复现**：`script -qec '<cli>' /dev/null` 给子进程一个 pty，
+`term.MakeRaw` 才能成功。此前的验收/M2 演示用 `printf … | nfvis-cli`（非 TTY），
+MakeRaw 失败后退化为 readPlain，**既不显错位、也不显「需回车」**——这正是三项
+缺陷长期漏网的原因（决策 #81）。
+行尾判读：`cat -A` 下 `^M$` = CRLF、裸 `$` = LF。
+
+§1 根因实证：raw 模式关闭 OPOST 后，裸 \n 不回车
+--------------------------------------------------------------------------------
+$ script -qec "printf 'X1\nY1\n'" /dev/null | od -c          # cooked：终端 OPOST 开
+$ script -qec "bash -c \"stty raw -echo; printf 'X2\nY2\n'\"" /dev/null | od -c   # raw：等价 MakeRaw
+### cooked（OPOST 开：\n → \r\n）
+0000000   X   1  \r  \n   Y   1  \r  \n
+0000010
+### raw（stty raw -echo，等价 MakeRaw：Oflag 清 OPOST）
+0000000   X   2  \n   Y   2  \n
+0000006
+结论：cooked 下 X1/Y1 以 \r\n 结尾，raw 下 X2/Y2 只有 \n ——裸 LF 只下移光标不回车。
+      命令输出与服务端文本都是 LF 结尾且直写 stdout，故 raw 会话中逐行右移。
+
+==================================================================================
+§2 修复前（/usr/bin/nfvis-cli 1.1.1）
+==================================================================================
+
+--- A. 输入 "show ?" + 回车 —— 候选行全部裸 LF → 阶梯错位；长 token 与描述粘连 ---
+连接 http://127.0.0.1:18443 ...^M
+nfvis> show ?^M
+  acls                    ACL（含命中计数）
+  alarms                  告警列表
+  bonds                   链路聚合列表（FR-NET-017）
+  configuration           配置显示（FR-CFG-006）
+  container-functions     容器 VNF
+  images                  镜像仓库
+  interfaces              接口
+  lldp                    LLDP（FR-NET-018）
+  log                     日志
+  nat                     NAT 池、规则与转换会话计数
+  port-mirroring          SPAN 会话状态
+  qos                     限速策略
+  resource-pools          资源池：总量/已分配/空闲（含 vpp-reserved，FR-SYS-010）
+  system                  系统信息
+  tech-support            诊断包清单预览
+  users                   本地用户与 class
+  version                 版本汇总（nfvis/ubuntu/vpp/dpdk/libvirt/qemu/docker）
+  virtual-machine-functionsVM VNF
+  virtual-switches        虚拟交换机
+  vpp                     VPP 数据面（FR-SYS-007）
+  vrfs                    L3 虚拟交换机（VRF）
+nfvis> ^C^M
+nfvis> ^M
+^M
+    行尾统计：总 26 行，其中 CRLF(^M$) 5 行、裸 LF 21 行
+
+--- B. 输入 "show " + Tab —— 只有 ^G 响铃，未列出任何候选 ---
+连接 http://127.0.0.1:18443 ...^M
+nfvis> show ^C^M
+nfvis> ^M
+^M
+    行尾统计：总 4 行，其中 CRLF(^M$) 4 行、裸 LF 0 行
+
+--- C. 输入 "show ver?" + 回车 —— 候选只在回车后才出现；? 被写进行文本 ---
+连接 http://127.0.0.1:18443 ...^M
+nfvis> show ver?^M
+  version                 版本汇总（nfvis/ubuntu/vpp/dpdk/libvirt/qemu/docker）
+nfvis> ^C^M
+nfvis> ^M
+^M
+    行尾统计：总 6 行，其中 CRLF(^M$) 5 行、裸 LF 1 行
+
+==================================================================================
+§3 修复后（/tmp/nfvis-cli-fix）
+==================================================================================
+
+--- A. "show ?" —— ? 按键即时列候选（不发回车），每行 CRLF 无阶梯，列宽对齐不粘连 ---
+连接 http://127.0.0.1:18443 ...^M
+nfvis> show ^M
+  acls                       ACL（含命中计数）^M
+  alarms                     告警列表^M
+  bonds                      链路聚合列表（FR-NET-017）^M
+  configuration              配置显示（FR-CFG-006）^M
+  container-functions        容器 VNF^M
+  images                     镜像仓库^M
+  interfaces                 接口^M
+  lldp                       LLDP（FR-NET-018）^M
+  log                        日志^M
+  nat                        NAT 池、规则与转换会话计数^M
+  port-mirroring             SPAN 会话状态^M
+  qos                        限速策略^M
+  resource-pools             资源池：总量/已分配/空闲（含 vpp-reserved，FR-SYS-010）^M
+  system                     系统信息^M
+  tech-support               诊断包清单预览^M
+  users                      本地用户与 class^M
+  version                    版本汇总（nfvis/ubuntu/vpp/dpdk/libvirt/qemu/docker）^M
+  virtual-machine-functions  VM VNF^M
+  virtual-switches           虚拟交换机^M
+  vpp                        VPP 数据面（FR-SYS-007）^M
+  vrfs                       L3 虚拟交换机（VRF）^M
+^Mnfvis> show ^M
+%% 该 show 命令形式未支持。可用：version | configuration [candidate|compare rollback n] | system uptime|cpu|memory|storage|hugepages|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | port-mirroring | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions^M
+nfvis> ^C^M
+nfvis> ^M
+^M
+    行尾统计：总 28 行，其中 CRLF(^M$) 28 行、裸 LF 0 行
+
+--- B. "show " + Tab —— 先 ^G 响铃，再列出全部候选（契约 §5.2） ---
+连接 http://127.0.0.1:18443 ...^M
+nfvis> show ^M
+  acls                       ACL（含命中计数）^M
+  alarms                     告警列表^M
+  bonds                      链路聚合列表（FR-NET-017）^M
+  configuration              配置显示（FR-CFG-006）^M
+  container-functions        容器 VNF^M
+  images                     镜像仓库^M
+  interfaces                 接口^M
+  lldp                       LLDP（FR-NET-018）^M
+  log                        日志^M
+  nat                        NAT 池、规则与转换会话计数^M
+  port-mirroring             SPAN 会话状态^M
+  qos                        限速策略^M
+  resource-pools             资源池：总量/已分配/空闲（含 vpp-reserved，FR-SYS-010）^M
+  system                     系统信息^M
+  tech-support               诊断包清单预览^M
+  users                      本地用户与 class^M
+  version                    版本汇总（nfvis/ubuntu/vpp/dpdk/libvirt/qemu/docker）^M
+  virtual-machine-functions  VM VNF^M
+  virtual-switches           虚拟交换机^M
+  vpp                        VPP 数据面（FR-SYS-007）^M
+  vrfs                       L3 虚拟交换机（VRF）^M
+^Mnfvis> show ^C^M
+nfvis> ^M
+^M
+    行尾统计：总 26 行，其中 CRLF(^M$) 26 行、裸 LF 0 行
+
+--- C. "show ver?" 且【不发回车】—— 候选立即出现；? 不在行文本中 ---
+连接 http://127.0.0.1:18443 ...^M
+nfvis> show ver^M
+  version                 版本汇总（nfvis/ubuntu/vpp/dpdk/libvirt/qemu/docker）^M
+^Mnfvis> show ver^C^M
+nfvis> ^M
+^M
+    行尾统计：总 6 行，其中 CRLF(^M$) 6 行、裸 LF 0 行
+
+--- D. "show version" —— 多行命令输出正常换行（修复前该输出同样阶梯错位） ---
+连接 http://127.0.0.1:18443 ...^M
+nfvis> show version^M
+NFViS 1.1.1（M2：配置事务可用，网络底座 M3+ 接入）^M
+nfvis> ^C^M
+nfvis> ^M
+^M
+    行尾统计：总 6 行，其中 CRLF(^M$) 6 行、裸 LF 0 行
+
+==================================================================================
+§4 非 TTY 路径回归（管道 / -c 脚本模式：不得回归，且不应变成 CRLF）
+==================================================================================
+--- E. 管道内 "show ?"（非 raw：readPlain 退化路径仍应列候选，行尾为 LF）---
+连接 http://127.0.0.1:18443 ...
+nfvis>   acls                       ACL（含命中计数）
+  alarms                     告警列表
+  bonds                      链路聚合列表（FR-NET-017）
+  configuration              配置显示（FR-CFG-006）
+  container-functions        容器 VNF
+    行尾统计：总 6 行，其中 CRLF(^M$) 0 行、裸 LF 6 行
+
+--- F. -c 脚本模式 ---
+连接 http://127.0.0.1:18443 ...
+NFViS 1.1.1（M2：配置事务可用，网络底座 M3+ 接入）
+
+==================================================================================
+§5 单测与红-绿（开发机，go test ./internal/cli/）
+==================================================================================
+新增用例：
+  output_test.go  TestCRLFWriterAddsCRForBareLFWhenRaw / ...LeavesExistingCRLFAlone /
+                  ...PassthroughWhenNotRaw / ...HandlesCRAtChunkBoundary /
+                  TestPrintCandidatesPadsToLongestToken
+  rawmode_test.go TestTabListsCandidatesOnMultiMatch / TestTabRingsWhenNoCandidates /
+                  TestTabCompletesWithoutListingWhenProgress /
+                  TestQuestionMarkListsCandidatesImmediately /
+                  TestQuestionMarkRingsWhenNoCandidates / TestREPLOutGoesThroughEditorWriter
+
+红-绿（逐条回退修复 → 对应用例必失败，已实测）：
+  ? 回退为插入字面量        → TestQuestionMarkListsCandidatesImmediately
+                              （输出仅 "nfvis> show ver?"，无任何候选）
+  Tab 列出回退为仅响铃      → TestTabListsCandidatesOnMultiMatch（输出仅 "\a"）
+  REPL 绕开 raw 感知流      → TestREPLOutGoesThroughEditorWriter
+  去掉「列候选前先换行」    → "各条自成一行" 断言失败（首条候选粘在提示符行上）
+
+可复跑的手动 pty 冒烟：contrib/scripts/cli-pty-smoke.sh（10 项断言）
+  对【修复前】/usr/bin/nfvis-cli（1.1.1）：通过 3 / 失败 7
+    ✗ 未列出候选（`?` 未按键生效）        ✗ 长 token 与描述粘连
+    ✗ `?` 进入了行文本                    ✗ Tab 未列出候选（只响铃）
+    ✗ `show ver?` 未即时列出
+  对【修复后】/tmp/nfvis-cli-fix：通过 10 / 失败 0
+    ✓ 候选已列出（21 条）                 ✓ 候选行全部以 CRLF 结尾
+    ✓ 长 token 未粘连                     ✓ `?` 未进入行文本
+    ✓ Tab 响铃并列出（21 条）             ✓ 非 TTY 输出无 CR 且仍列候选
+
+make check：vet + 全量测试 + 覆盖率门槛 + 依赖方向 + 决策条数（81 项）+ openapi 同步 + 原型 全绿。
+
+==================================================================================
+§6 已知限制与未做
+==================================================================================
+1. `?` 是帮助键，不进入行文本 → CLI **不接受把 `?` 当作字面量取值**（IOS 同构，
+   已登记于契约 §5.1 与用户手册）。若将来需要字面量，须引入转义键（Ctrl-V 之类）。
+2. 非 TTY（管道/脚本）路径的候选列表首行仍紧跟在提示符后（`nfvis>   acls …`）——
+   这是该路径的**既有通例**（所有命令输出都如此，如 `nfvis> system {`），
+   非本次引入，未改动以免影响脚本可见的输出格式。
+3. 未做（未验证项）：Windows 控制台下的 raw 换行行为未实测（本次仅在 Linux pty 复验）；
+   `crlfWriter` 对 `\r`+`\n` 跨块的处理有单测，但未做超大块压力验证。
+4. 附带影响（未单独真机复验）：**串口接管**（`request … console`）不减 `Suspend` raw 模式，
+   其字节流同样经 crlfWriter —— guest 以裸 LF 输出时现会被补 CR（修掉同一类阶梯错位）。
+   裸 LF(0x0A) 不可能是 UTF-8 续字节，故对多字节字符与控制序列安全；
+   但「guest 串口输出逐字节不变」这一强假设不再成立（FR-CMP-014 的真人 Ctrl-] 仍未验，
+   本次未做串口实机回归）。
