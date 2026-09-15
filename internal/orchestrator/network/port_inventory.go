@@ -69,6 +69,44 @@ func (n *L2Network) KernelIfnames() ([]string, error) {
 	return dedupeSorted(out), nil
 }
 
+// BridgeDomains VPP 中全部 bridge-domain 的运行态（决策 #84）。
+func (n *L2Network) BridgeDomains() ([]BDRuntime, error) {
+	if n == nil || n.l2 == nil {
+		return nil, fmt.Errorf("VPP 未接入")
+	}
+	c, err := n.l2.client()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	return c.BridgeDomains()
+}
+
+// InterfaceStates VPP 接口运行态（接口名 → 状态/速率/驱动）：`show interfaces physical`
+// 的链接状态/速率/驱动自此取值（此前该列取自配置，与实测可能不一致）。
+func (n *L2Network) InterfaceStates() (map[string]SwIfInfo, error) {
+	if n == nil || n.l2 == nil {
+		return nil, fmt.Errorf("VPP 未接入")
+	}
+	c, err := n.l2.client()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	m, err := c.SwInterfaceNames()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]SwIfInfo, len(m))
+	for _, info := range m {
+		if info.Name == "" {
+			continue
+		}
+		out[info.Name] = info
+	}
+	return out, nil
+}
+
 // dedupeSorted 去重并排序（候选顺序稳定，便于比对与测试）。
 func dedupeSorted(in []string) []string {
 	if len(in) == 0 {

@@ -79,7 +79,47 @@ func (g *govppL2Client) SwInterfaceNames() (map[uint32]SwIfInfo, error) {
 			OuterVlanID: d.SubOuterVlanID,
 			AdminUp:     d.Flags&interface_types.IF_STATUS_API_FLAG_ADMIN_UP != 0,
 			LinkUp:      d.Flags&interface_types.IF_STATUS_API_FLAG_LINK_UP != 0,
+			LinkSpeed:   d.LinkSpeed,
+			DevType:     d.InterfaceDevType,
 		}
+	}
+}
+
+// BridgeDomains 全部 bridge-domain 的运行态（决策 #84）。
+// 成员口名经 sw_interface_dump 反查（两次 dump 顺序进行、各自读完，避免 multi-request 残留）。
+func (g *govppL2Client) BridgeDomains() ([]BDRuntime, error) {
+	names, err := g.SwInterfaceNames()
+	if err != nil {
+		return nil, err
+	}
+	// 无过滤：**两个**字段都要显式给 0xFFFFFFFF——binapi 的 default 不会在发送时自动填充，
+	// 只给 BdID 会让 SwIfIndex=0 变成「按 sw_if_index 0 过滤」而返回空（实测踩过）。
+	reqCtx := g.ch.SendMultiRequest(&l2.BridgeDomainDump{
+		BdID:      ^uint32(0),
+		SwIfIndex: interface_types.InterfaceIndex(0xFFFFFFFF),
+	})
+	out := make([]BDRuntime, 0, 8)
+	for {
+		d := &l2.BridgeDomainDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return nil, err
+		}
+		if stop {
+			return out, nil
+		}
+		bd := BDRuntime{
+			ID: d.BdID, Name: d.BdTag, Learn: d.Learn, Flood: d.Flood, UuFlood: d.UuFlood,
+			Forward: d.Forward, ArpTerm: d.ArpTerm, MacAge: d.MacAge,
+		}
+		for _, p := range d.SwIfDetails {
+			bp := BDRuntimePort{SwIfIndex: uint32(p.SwIfIndex), Shg: p.Shg}
+			if info, ok := names[bp.SwIfIndex]; ok {
+				bp.Name = info.Name
+			}
+			bd.Ports = append(bd.Ports, bp)
+		}
+		out = append(out, bd)
 	}
 }
 

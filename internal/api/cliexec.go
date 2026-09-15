@@ -84,6 +84,7 @@ type cliExecutor struct {
 	ct         ContainerRuntime
 	images     ImagesRuntime
 	ports      PortInventory               // 运行态端口清单（决策 #83；nil = show 空态不列端口）
+	vppState   VppStateRuntime             // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
 	sys        SystemOpsRuntime            // 备份/恢复/恢复出厂（M5-6；nil = 命令报未接入）
 	diagOps    DiagOpsRuntime              // 诊断归档/core dump（M5-4；nil = 命令报未接入）
 	logs       func() ([]byte, error)      // 系统日志来源（show log system，M5-9；nil = 报不可用）
@@ -124,6 +125,10 @@ func (x *cliExecutor) setEventBus(bus *events.Bus) { x.events = bus }
 // setPorts 注入运行态端口清单（决策 #83）：`<ifname>` 的候选与 `show interfaces physical`
 // 的空态都取自真实端口，而不是「已写进配置的接口名」。
 func (x *cliExecutor) setPorts(p PortInventory) { x.ports = p }
+
+// setVppState 注入 VPP 运行态快照（决策 #84）：`show virtual-switches` 的列表/成员口/计数
+// 与 `show interfaces physical` 的链接状态/速率/驱动自此取运行态事实（契约 §1.1 要求）。
+func (x *cliExecutor) setVppState(v VppStateRuntime) { x.vppState = v }
 
 // setSystemOps 注入系统运维能力（M5-6 备份/恢复/恢复出厂）。
 func (x *cliExecutor) setSystemOps(sys SystemOpsRuntime) { x.sys = sys }

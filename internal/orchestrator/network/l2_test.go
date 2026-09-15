@@ -17,13 +17,14 @@ type fakeL2 struct {
 	names   map[uint32]SwIfInfo
 	nextSub uint32
 
-	bds    map[uint32]bool
-	bridge map[uint32]uint32 // swIfIndex → bdID
-	xconn  map[uint32]uint32
-	macs   map[uint32][]MACEntry
-	calls  []string
-	subifs []CreateSubifReq
-	err    error // 非 nil 时各方法返回该错误
+	bds        map[uint32]bool
+	bdRuntimes []BDRuntime       // BridgeDomains() 返回值（决策 #84）
+	bridge     map[uint32]uint32 // swIfIndex → bdID
+	xconn      map[uint32]uint32
+	macs       map[uint32][]MACEntry
+	calls      []string
+	subifs     []CreateSubifReq
+	err        error // 非 nil 时各方法返回该错误
 }
 
 func newFakeL2() *fakeL2 {
@@ -54,6 +55,14 @@ func (f *fakeL2) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 }
 
 func (f *fakeL2) SwInterfaceNames() (map[uint32]SwIfInfo, error) { return f.names, nil }
+
+// BridgeDomains 假的 BD 运行态（决策 #84）。
+func (f *fakeL2) BridgeDomains() ([]BDRuntime, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.bdRuntimes, nil
+}
 
 func (f *fakeL2) BridgeDomainExists(bdID uint32) (bool, error) {
 	if f.err != nil {

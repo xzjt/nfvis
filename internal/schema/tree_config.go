@@ -11,7 +11,7 @@ func ConfigRoot() *Node {
 	root := K("", "root",
 		Su(K("set", "设置配置语句", pathChildren()...)),
 		Su(K("delete", "删除配置语句/子树", pathChildren()...)),
-		Su(K("show", "显示 candidate（当前层级，| display set 展开语句）", pathChildren()...)),
+		Su(K("show", "显示 candidate（当前层级）", pathChildren()...)),
 		Su(K("annotate", "为配置节点添加注释（FR-CFG-007）", pathChildren()...)),
 		Su(K("edit", "进入层级", pathChildren()...)),
 		Su(K("up", "返回上一级")),

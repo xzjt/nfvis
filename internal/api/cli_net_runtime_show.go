@@ -13,36 +13,99 @@ import (
 
 const errRuntimeUnavailable = "%% VPP 未接入（编排器未装配），运行态不可用\n"
 
-// execShowVSwitches：列表 / <name> [detail|ports|mac-table]。
-// detail|ports 取 committed 配置视图；mac-table 取 VPP 运行态。
+// execShowVSwitches：列表 / <name> [detail|ports|statistics|mac-table]。
+//
+// 契约 §1.1 的语义（决策 #84）：列表 = 「全部虚拟交换机摘要」、`ports` = 「成员端口**及状态/计数**」、
+// `statistics` = 「每端口收发计数」——**都取 VPP 运行态**（BD 的 BD-Tag 即交换机名）。
+// 此前列表/ports/statistics 取自 committed 配置（后两者甚至回落到同一份配置 dump），
+// 于是「VPP 里存在但未写入配置」的 BD 不显示、也没有任何状态/计数。
 func (x *cliExecutor) execShowVSwitches(args []string) string {
 	if len(args) >= 2 && args[1] == "mac-table" {
 		return x.showMacTable(args[0])
 	}
-	cfg, err := x.engine.Committed()
+	bds, err := x.bdStates()
 	if err != nil {
-		return "%% " + err.Error() + "\n"
+		// 运行态不可用：明确说明，**不**退回配置视图（那正是缺陷来源）
+		return fmt.Sprintf("%% 虚拟交换机运行态不可用: %v\n", err)
 	}
 	if len(args) == 0 {
-		items := make([]any, 0, len(cfg.VirtualSwitches))
-		for _, vs := range cfg.VirtualSwitches {
-			items = append(items, anyToTree(vs))
+		if len(bds) == 0 {
+			return "（VPP 中无 bridge-domain）\n"
 		}
-		if len(items) == 0 {
-			return "（无虚拟交换机）\n"
+		cfgNames := x.vswitchConfigNames()
+		var b strings.Builder
+		fmt.Fprintf(&b, "%-10s %-22s %-6s %-6s %-6s %s\n", "BD-ID", "Name", "Learn", "Flood", "Ports", "Note")
+		items := make([]any, 0, len(bds))
+		for _, bd := range bds {
+			note := ""
+			if !cfgNames[bd.Name] {
+				note = "未在配置中（运行态存在）"
+			}
+			name := bd.Name
+			if name == "" {
+				name = "-"
+			}
+			fmt.Fprintf(&b, "%-10d %-22s %-6s %-6s %-6d %s\n", bd.ID, name,
+				yn(bd.Learn), yn(bd.Flood), len(bd.Ports), note)
+			items = append(items, bdView(bd))
 		}
-		tree := map[string]any{"virtual_switches": items}
-		x.structured = tree
-		return RenderConfigJSON(tree) + "\n"
+		x.structured = map[string]any{"virtual_switches": items}
+		return b.String()
 	}
 	name := args[0]
-	for _, vs := range cfg.VirtualSwitches {
-		if vs.Name != name {
-			continue
+	var bd *BridgeDomainState
+	for i := range bds {
+		if bds[i].Name == name {
+			bd = &bds[i]
+			break
 		}
-		m, _ := anyToTree(vs).(map[string]any)
-		// 运行态补充：L2 交换机的 MAC 表条数
-		if vs.Type == "l2" && x.l2 != nil {
+	}
+	if bd == nil {
+		return fmt.Sprintf("%% 虚拟交换机 %s 在 VPP 中不存在（show virtual-switches 看运行态列表）\n", name)
+	}
+	sub := ""
+	if len(args) >= 2 {
+		sub = args[1]
+	}
+	switch sub {
+	case "ports", "statistics":
+		// 契约：成员端口**及状态/计数**（statistics 侧重每端口收发计数）
+		var b strings.Builder
+		fmt.Fprintf(&b, "%-16s %-7s %-7s %-12s %-12s %s\n", "Port", "Admin", "Link", "RxPkts", "TxPkts", "Shg")
+		items := make([]any, 0, len(bd.Ports))
+		states, _ := x.ifaceStates()
+		for _, p := range bd.Ports {
+			row := map[string]any{"port": p.Name, "sw_if_index": p.SwIfIndex, "shg": p.Shg}
+			admin, link, rx, tx := "-", "-", "-", "-"
+			if st, ok := states[p.Name]; ok {
+				admin, link = yn(st.AdminUp), yn(st.LinkUp)
+				row["admin"], row["link"] = st.AdminUp, st.LinkUp
+			}
+			if x.state != nil {
+				if c, ok := x.state.InterfaceCounters(context.Background(), p.Name); ok {
+					rx, tx = fmt.Sprintf("%d", c.RxPackets), fmt.Sprintf("%d", c.TxPackets)
+					row["rx_packets"], row["tx_packets"] = c.RxPackets, c.TxPackets
+				}
+			}
+			fmt.Fprintf(&b, "%-16s %-7s %-7s %-12s %-12s %d\n", p.Name, admin, link, rx, tx, p.Shg)
+			items = append(items, row)
+		}
+		if len(bd.Ports) == 0 {
+			b.WriteString("（该 BD 无成员口）\n")
+		}
+		x.structured = map[string]any{"bd_id": bd.ID, "name": bd.Name, "ports": items}
+		return b.String()
+	default:
+		// detail 及不带子命令：运行态（状态 + 成员口）叠加配置的类型信息
+		m := bdView(*bd)
+		if cfg, err := x.engine.Committed(); err == nil {
+			for _, vs := range cfg.VirtualSwitches {
+				if vs.Name == name {
+					m["configured_type"] = vs.Type
+				}
+			}
+		}
+		if x.l2 != nil {
 			if rows, err := x.l2.MACTable(context.Background(), name); err == nil {
 				m["mac_table_entries"] = len(rows)
 			}
@@ -50,7 +113,39 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 		x.structured = m
 		return RenderConfigJSON(m) + "\n"
 	}
-	return fmt.Sprintf("%% 虚拟交换机 %s 不存在\n", name)
+}
+
+// bdView BD 运行态的对外形态（structured 快照与 detail 渲染共用）。
+func bdView(bd BridgeDomainState) map[string]any {
+	ports := make([]any, 0, len(bd.Ports))
+	for _, p := range bd.Ports {
+		ports = append(ports, map[string]any{"port": p.Name, "sw_if_index": p.SwIfIndex, "shg": p.Shg})
+	}
+	return map[string]any{
+		"bd_id": bd.ID, "name": bd.Name,
+		"learn": bd.Learn, "flood": bd.Flood, "uu_flood": bd.UuFlood,
+		"forward": bd.Forward, "arp_term": bd.ArpTerm, "mac_age": bd.MacAge,
+		"ports": ports,
+	}
+}
+
+// vswitchConfigNames committed 配置里的交换机名集合（用于标注「未在配置中」）。
+func (x *cliExecutor) vswitchConfigNames() map[string]bool {
+	out := map[string]bool{}
+	if cfg, err := x.engine.Committed(); err == nil {
+		for _, vs := range cfg.VirtualSwitches {
+			out[vs.Name] = true
+		}
+	}
+	return out
+}
+
+// yn 布尔 → up/down（运行态列）。
+func yn(b bool) string {
+	if b {
+		return "up"
+	}
+	return "down"
 }
 
 // showMacTable 渲染 MAC 学习表（VPP l2fib）。

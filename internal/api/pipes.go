@@ -49,6 +49,12 @@ func splitPipes(line string) (string, []pipeSpec, error) {
 			}
 			pipes = append(pipes, pipeSpec{kind: "last", arg: fields[1]})
 		case "display":
+			if len(fields) == 2 && fields[1] == "set" {
+				// 契约 §3 曾声明「配置模式 show | display set 以 set 语句展开」——未实现，
+				// 已按附录 A #84 更正契约（不再是承诺）。此处给出替代路径而不谎报支持。
+				return "", nil, fmt.Errorf("| display set 未实现（附录 A #84）：" +
+					"导出配置用 save <file>，查看配置用 show configuration，结构化用 | display json")
+			}
 			if len(fields) != 2 || (fields[1] != "json" && fields[1] != "xml") {
 				return "", nil, fmt.Errorf("display 仅支持 json|xml")
 			}

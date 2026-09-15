@@ -47,8 +47,33 @@ type MACEntry struct {
 type SwIfInfo struct {
 	Name        string
 	OuterVlanID uint16
-	AdminUp     bool // ADMIN_UP 位（FR-NET-003 链路告警用）
-	LinkUp      bool // LINK_UP 位
+	AdminUp     bool   // ADMIN_UP 位（FR-NET-003 链路告警用）
+	LinkUp      bool   // LINK_UP 位
+	LinkSpeed   uint32 // 速率（kbps；DPDK 口可能为 0）
+	DevType     string // 设备类型/驱动名（interface_dev_type）
+}
+
+// BDRuntime bridge-domain 运行态（决策 #84）：`show virtual-switches` 的事实来源。
+//
+// 名字取自 **BD-Tag**（产品建 BD 时以交换机名为 tag，见 BDID/L2 挂接），因此
+// 「VPP 中真实存在但未写入配置」的 BD 也能被发现——这正是视图取自配置时漏掉的部分。
+type BDRuntime struct {
+	ID      uint32
+	Name    string // BD-Tag；
+	Learn   bool
+	Flood   bool
+	UuFlood bool
+	Forward bool
+	ArpTerm bool
+	MacAge  uint8
+	Ports   []BDRuntimePort // 成员口
+}
+
+// BDRuntimePort BD 成员口（sw_if_index → 名）。
+type BDRuntimePort struct {
+	SwIfIndex uint32
+	Name      string
+	Shg       uint8
 }
 
 // MACTableEntry MAC 学习表对外形态（契约 /virtual-switches/{name}/mac-table）。
@@ -80,6 +105,9 @@ type VlanTagRewriteReq struct {
 type L2Client interface {
 	SwInterfaceIndex(ifname string) (uint32, bool, error)
 	SwInterfaceNames() (map[uint32]SwIfInfo, error)
+	// BridgeDomains 全部 bridge-domain 的运行态（含成员口）；决策 #84 起
+	// `show virtual-switches` 与候选清单的运行态事实来源。
+	BridgeDomains() ([]BDRuntime, error)
 	BridgeDomainExists(bdID uint32) (bool, error)
 	BridgeDomainAddDel(bdID uint32, add, learn bool, tag string) error
 	SwInterfaceSetL2Bridge(swIfIndex, bdID uint32, portType L2PortType, shg uint8, enable bool) error

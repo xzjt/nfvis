@@ -396,7 +396,7 @@ commit confirmed [分钟] → 超时未确认则自动回滚（改管理口等�
 | 命令 | 用途 |
 |---|---|
 | `show` | 看当前层级的 candidate |
-| `show \| display set` | 展开成 set 语句 |
+| `show \| display set` | **未支持**（附录 A #84；请用 `save <file>` 导出 JSON 或 `show configuration` 看块状） |
 | `commit check` | 只校验不下发 |
 | `compare rollback <n>`（操作模式：`show configuration compare rollback <n>`） | 与历史比对 |
 | `annotate <path> "注释"` | 给节点加注释（**路径相对当前层级**） |

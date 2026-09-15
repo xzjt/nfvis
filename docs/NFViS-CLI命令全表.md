@@ -197,7 +197,7 @@
 | `set <path> …` | 设置配置语句 | 事务引擎 | ✅ |
 | `delete <path> …` | 删除语句/子树 | 事务引擎 | ✅ |
 | `show` | 显示 candidate（当前层级） | candidate | ✅ |
-| `show \| display set` | 展开为 set 语句 | candidate | ✅ |
+| `show \| display set` | 展开为 set 语句 | candidate | ⊘ **未实现**（附录 A #84；原标 ✅ 属误标，实测 `%% display 仅支持 json|xml`） |
 | `annotate <path> "text"` | 节点注释（**路径相对当前层级**） | candidate annotations | ✅（**决策 #76⑤** 修相对路径） |
 | `commit` | 提交（FR-CFG-002/003） | 事务引擎 → Applier | ✅ |
 | `commit check` | 仅校验不下发 | 事务引擎 | ✅ |

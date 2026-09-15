@@ -540,6 +540,7 @@ func run() error {
 		Hardware:    &hardwareController{p: hwProvider},
 		TLS:         &tlsController{m: tlsMgr},
 		Ports:       &portInventoryController{net: netProvider}, // 决策 #83：运行态端口清单
+		VppState:    &vppStateController{net: netProvider},      // 决策 #84：show 的运行态事实来源
 		LogSource:   nfvisdLogTail,
 	})
 
@@ -639,6 +640,43 @@ type portInventoryController struct{ net *network.L2Network }
 func (c *portInventoryController) VPPIfnames() ([]string, error) { return c.net.VPPIfnames() }
 
 func (c *portInventoryController) KernelIfnames() ([]string, error) { return c.net.KernelIfnames() }
+
+// vppStateController 装配 api.VppStateRuntime（决策 #84）：bridge-domain 与接口的运行态，
+// 供 `show virtual-switches`（列表/成员口/计数）与 `show interfaces physical`（链接状态/速率/驱动）。
+type vppStateController struct{ net *network.L2Network }
+
+func (c *vppStateController) BridgeDomains() ([]api.BridgeDomainState, error) {
+	bds, err := c.net.BridgeDomains()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]api.BridgeDomainState, 0, len(bds))
+	for _, bd := range bds {
+		st := api.BridgeDomainState{
+			ID: bd.ID, Name: bd.Name, Learn: bd.Learn, Flood: bd.Flood, UuFlood: bd.UuFlood,
+			Forward: bd.Forward, ArpTerm: bd.ArpTerm, MacAge: bd.MacAge,
+		}
+		for _, p := range bd.Ports {
+			st.Ports = append(st.Ports, api.BridgeDomainPort{SwIfIndex: p.SwIfIndex, Name: p.Name, Shg: p.Shg})
+		}
+		out = append(out, st)
+	}
+	return out, nil
+}
+
+func (c *vppStateController) InterfaceStates() (map[string]api.InterfaceState, error) {
+	m, err := c.net.InterfaceStates()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]api.InterfaceState, len(m))
+	for name, st := range m {
+		out[name] = api.InterfaceState{
+			AdminUp: st.AdminUp, LinkUp: st.LinkUp, LinkSpeed: st.LinkSpeed, DevType: st.DevType,
+		}
+	}
+	return out, nil
+}
 
 // l3Controller 装配 api.L3Runtime（M3-4）：VRF 运行态 FIB。
 type l3Controller struct{ net *network.L2Network }
