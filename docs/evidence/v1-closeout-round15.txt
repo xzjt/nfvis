@@ -1,0 +1,151 @@
+NFViS V1 收尾 第十五轮 证据（决策 #84：show 族的运行态口径 + `| display set` 登记）
+================================================================================
+日期      2026-09-15
+主机      nfvis-vm（nfvis 1.1.4 已安装，系统服务 nfvisd 在 :443 运行，未受影响）
+服务端    开发态实例 127.0.0.1:18443（-init-admin-password Admin@12345 -allow-plaintext）
+CLI       /tmp/{nfvisd,nfvis-cli}（本分支 HEAD 在本机构建）
+oracle    VPP（vppctl / govpp）、内核 sysfs、committed 配置库、libvirt
+报告来源  用户提问：「show virtual-switches 为何显示的是配置？不是应该显示实际存在的
+          虚拟交换机的列表、状态、交换机内部接口状态吗？」
+
+方法：不是「看命令有没有报错」，而是**给每条断言配独立事实源，并用扰动判别来源**
+--------------------------------------------------------------------------------
+本次缺陷（4 类）全部由 `cli-semantic-check.sh` 这套**语义校验**找出——同一台机器上
+256 条全功能冒烟是 **197 全绿**（其判定只看行首有没有 `%`，不看输出内容对不对）。
+三种手法：
+  ① 事实源对照：CLI 输出 vs 独立 oracle（VPP / 内核 / 配置库 / libvirt）；
+  ② **扰动判别**：改动事实源（在 VPP 里直接建一个配置中没有的 BD、把接口链路翻 down），
+     看 CLI 是否跟着变——**配置驱动的实现不会变**，一测就露；
+  ③ round-trip：写→读→删→再读，验证配置通路自洽。
+
+修复前（同一套校验，v1.1.4 二进制）：**通过 4 / 失败 6 / 登记 1**
+--------------------------------------------------------------------------------
+  ✗ S3 VPP 实际有 2 个 BD，CLI 只列配置里的 1 个 —— 该视图取自配置，不是运行态
+  ✗ S4 ports  无任何计数字段（契约 §1.1 要求；实际输出为配置 dump）
+  ✗ S4 statistics 无任何计数字段（同上，且与 ports 逐字相同）
+  ✗ S5 表头无驱动/链接状态/速率列（契约 §1.1 明列这三项）
+  ✗ S5 VPP 链路状态 up→down，CLI 行完全未变 —— 该列取自配置，非链路状态
+  ✗ S6 `| display set` 未实现（契约 §3 明列，实际 %% display 仅支持 json|xml）
+  · S7 libvirt 有域 cli-vm 而 CLI 列表为空（口径未明，登记）
+  ✓ S1/S2/S6a（决策 #83 刚修的候选来源、round-trip）
+
+================================================================================
+§1 修复后的语义校验（对已装 1.1.4 之上的本分支二进制）
+================================================================================
+==================== CLI 语义校验（结果对不对）====================
+
+===== S1 接口候选（运行态）：set interfaces ? 应 = VPP 接口集
+    期望: ens192 ens224 
+    实际: ens192 ens224 
+  ✓ 候选覆盖 VPP 接口
+
+===== S2 管理口候选（运行态）：set system management interface ? 应 = 内核物理口
+    期望: ens160 
+    实际: ens160 
+  ✓ 候选覆盖内核物理口
+
+===== S3 虚拟交换机列表：**扰动判别**（运行态 vs 配置）
+    扰动前：VPP 有 3 个 BD；CLI 列出: br0 sem2 sem-vs 
+    扰动后：VPP 有 4 个 BD（新增未写入配置的 1 个）；CLI 列出: - br0 sem2 sem-vs 
+  ✓ CLI 跟随运行态（VPP 新增 BD 被列出）
+
+===== S4 契约要求「成员端口及状态/计数」：show virtual-switches <n> ports / statistics
+    对象: br0
+    --- ports
+      | Port             Admin   Link    RxPkts       TxPkts       Shg
+      | （该 BD 无成员口）
+  ✓ ports 含收发计数字段
+    --- statistics
+      | Port             Admin   Link    RxPkts       TxPkts       Shg
+      | （该 BD 无成员口）
+  ✓ statistics 含收发计数字段
+
+===== S5 接口「链接状态」：静态列名 + **扰动判别**（契约要求 驱动/链接状态/速率）
+    表头: Interface      Admin   Link    Speed      Driver       RxPkts     TxPkts       Description
+  ✓ 表头含「Driver」类字段
+    VPP 侧 ens192 = up
+    CLI 行: ens192 up up 10G dpdk 12 0 sem-iface
+    扰动 VPP→up 后: VPP = down
+    CLI 行: ens192 down down 10G dpdk 12 0 sem-iface
+  ✓ CLI 随 VPP 链路状态变化（up→down）
+
+===== S6 配置回读一致性（round-trip：写→读→删→再读）
+    （契约 §3 要求配置模式 `show | display set` 以 set 语句展开；实测：）
+      | 
+      | %% | display set 未实现（附录 A #84）：导出配置用 save <file>，查看配置用 show configuration，结构化用 | display json
+  ✓ commit 后能从配置读出 (sem-rt-203189)
+  ✓ delete 后配置里消失
+  ✓ `| display set` 未实现但**已登记**且给出替代路径（附录 A #84）
+
+===== S7 运行态对象是否被视图反映（诊断，不计失败）
+    libvirt 域: cli-vm 
+    CLI 列表  : （空）
+  · libvirt 有域而 CLI 未列出（配置驱动；契约对 VM 列表口径未明确，仅登记）
+
+==================== 合计：通过 10 / 失败 0 / 登记 1 ====================
+
+================================================================================
+§2 结果判读（逐条）
+================================================================================
+① 虚拟交换机列表＝运行态：VPP 里 3 个 BD（`br0` / `sem-vs` / `sem2`）全部列出，
+   并给出 BD-ID、Learn/Flood 状态、成员口数；**配置里没有的**标注「未在配置中（运行态存在）」。
+   扰动判别：在 VPP 里直接新建一个未写入配置的 BD 后，列表**立刻**多出一行（`-`＝无 tag）。
+② `ports` / `statistics` 现在给「Port + Admin + Link + RxPkts + TxPkts + Shg」——
+   契约 §1.1 要求的「成员端口及状态/计数」到位，且不再等于配置 dump。
+③ `show interfaces physical` 表头补齐 `Link / Speed / Driver`，且 Admin/Link 均取 VPP：
+   扰动判别中 VPP 侧 `ens192` 由 up 翻 down，CLI 行同步变为 `ens192 down down 10G dpdk …`
+   （修复前该行纹丝不动）。速率按 G/M/K 归一，驱动取 `interface_dev_type`（本例 `dpdk`）。
+④ `| display set`：不再谎报支持——报错明确标注「未实现（附录 A #84）」并给出替代路径
+   （`save <file>` / `show configuration` / `| display json`）；契约 §3、命令全表（原标 ✅
+   属**误标**，已改 ⊘）、用户手册、语句树帮助文案均已同步更正。
+
+================================================================================
+§3 回归检查：契约全量冒烟（256 条，6 阶段）
+================================================================================
+通过 197 / 失败 1 / 预期报错 2 —— 与决策 #76 基线**逐项一致**（唯一失败为已登记的
+`show vpp runtime`）。即本轮改动**未影响**任何契约命令的可用性。
+
+================================================================================
+§4 单测与红-绿（开发机）
+================================================================================
+新增 `internal/api/vpp_state_test.go`（5 例）：
+  TestShowVSwitchListIsRuntimeNotConfig        # 列表取运行态：配置有而 VPP 无的不出现、
+                                               #   VPP 有而配置无的（phantom）出现且被标注
+  TestShowVSwitchPortsHasStateAndCounters      # ports/statistics 含 Port/Admin/Link/Rx/Tx，
+                                               #   且不再回落到配置 dump
+  TestShowVSwitchRuntimeUnavailableIsExplicit  # 运行态不可用 → 明确报错，不退回配置视图
+  TestShowInterfacesPhysicalLinkStateFromVPP    # 构造「配置 enabled 而 VPP admin down」以**鉴别来源**
+  TestFmtSpeed                                 # 速率格式化
+
+红-绿（已实测）：
+  把列表退回「配置里的交换机名」 → TestShowVSwitchListIsRuntimeNotConfig 失败
+                                  （列表显示配置的 vs-cfg，而非运行态的 phantom）
+  把 Admin 退回「配置的 enabled」  → TestShowInterfacesPhysicalLinkStateFromVPP 失败
+                                  （显示 up，而 VPP 是 down）
+
+**本轮自己踩到并修掉的坑（值得记下）**：`bridge_domain_dump` 无过滤时必须**同时**把
+`BdID` 与 `SwIfIndex` 显式置 0xFFFFFFFF——我初版只置了 BdID，`SwIfIndex=0` 变成
+「按 sw_if_index 0 过滤」，真机上返回空列表，`show virtual-switches` 报「（VPP 中无 bridge-domain）」
+而 VPP 里明明有 3 个。**正是语义校验（S3 对照 VPP 计数）抓到的**；256 条冒烟对此毫无反应。
+
+make check：vet + 全量测试 + 覆盖率门槛 + 依赖方向 + 决策条数（84 项）+ openapi 同步 + 原型 全绿。
+
+================================================================================
+§5 已知影响与未做
+================================================================================
+1. **输出格式变化**：`show virtual-switches` 由 JunOS 配置块改为**运行态表格**
+   （BD-ID/Name/Learn/Flood/Ports/Note）；`show interfaces physical` 表头新增三列。
+   依赖旧文本格式做解析的脚本需同步调整。
+2. **与 REST 的分工（有意，非漂移）**：`GET /virtual-switches*` 仍返回**资源模型**
+   （配置对象，供声明式操作）；CLI `show …` 返回**运行态**。与既有
+   `show interfaces physical` 同构，已在决策 #84 明确写入。
+3. **S7 未处理（登记）**：`show virtual-machine-functions` 只列配置中的 VNF；
+   libvirt 里存在而未写入配置的域（如本次遗留的 `cli-vm`）不显示。契约对 VM 列表口径
+   未明确（与 `<ifname>` 不同：VNF 是可声明资源，孤儿域是否该列出属产品口径），
+   故仅登记，未在本轮改动。
+4. **`| display set` 未实现（登记为独立特性）**：忠实实现需要 model→CLI 的**反向映射**
+   （`save` 导出的是 JSON；`login user … password …`、`api tls cert-file … key-file …`
+   这类别名语句无法由配置树反推为合法语句）。做 lossy 版本会在「复制配置」这件事上
+   制造静默错误（比不支持更糟），故更正契约与四处宣称，留待把别名表做成**双向**后再实现。
+5. `ports`/`statistics` 的计数取自 VPP stats 段（`state.InterfaceCounters`）；未见该接口
+   统计细分（错误/drop）在本视图呈现——契约只要求「每端口收发计数」，已满足。

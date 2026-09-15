@@ -59,21 +59,30 @@ func (x *cliExecutor) execShowInterfaces(args []string) string {
 	return b.String()
 }
 
-// showPhysicalInterfaces：物理口（配置 + 运行态计数）。
+// showPhysicalInterfaces：物理口（配置 + **运行态**链接状态/速率/驱动/计数）。
+//
+// 契约 §1.1 要求「驱动、链接状态、速率、VF 数」（决策 #84）。此前表头只有
+// Interface/Admin/RxPkts/TxPkts/Description，且 Admin 取自**配置的 enabled**——
+// 实测把接口在 VPP 里置 down 后 CLI 仍显示 up。现在 Admin/Link/Speed/Driver 均取 VPP 运行态。
 func (x *cliExecutor) showPhysicalInterfaces(cfg model.Config, only string) string {
 	found := false
 	var b strings.Builder
 	items := make([]any, 0)
-	fmt.Fprintf(&b, "%-14s %-8s %-12s %-12s %s\n", "Interface", "Admin", "RxPkts", "TxPkts", "Description")
+	states, stErr := x.ifaceStates()
+	fmt.Fprintf(&b, "%-14s %-7s %-7s %-10s %-12s %-10s %-12s %s\n",
+		"Interface", "Admin", "Link", "Speed", "Driver", "RxPkts", "TxPkts", "Description")
 	for _, ifc := range cfg.Interfaces {
 		if only != "" && ifc.Name != only {
 			continue
 		}
 		found = true
 		entry := map[string]any{"name": ifc.Name, "description": ifc.Description}
-		admin := "up"
-		if ifc.Enabled != nil && !*ifc.Enabled {
-			admin = "down"
+		admin, link, speed, driver := "-", "-", "-", "-"
+		if st, ok := states[ifc.Name]; ok {
+			admin, link = yn(st.AdminUp), yn(st.LinkUp)
+			speed, driver = fmtSpeed(st.LinkSpeed), orDash(st.DevType)
+			entry["admin_up"], entry["link_up"] = st.AdminUp, st.LinkUp
+			entry["link_speed_kbps"], entry["driver"] = st.LinkSpeed, st.DevType
 		}
 		rx, tx := "-", "-"
 		if x.state != nil {
@@ -83,16 +92,46 @@ func (x *cliExecutor) showPhysicalInterfaces(cfg model.Config, only string) stri
 			}
 		}
 		items = append(items, entry)
-		fmt.Fprintf(&b, "%-14s %-8s %-12s %-12s %s\n", ifc.Name, admin, rx, tx, ifc.Description)
+		fmt.Fprintf(&b, "%-14s %-7s %-7s %-10s %-12s %-10s %-12s %s\n",
+			ifc.Name, admin, link, speed, driver, rx, tx, ifc.Description)
 	}
 	if !found {
 		if only != "" {
 			return fmt.Sprintf("%% 物理口 %s 未在配置中声明（先 set interfaces %s …）\n", only, only)
 		}
-		return x.physicalEmptyHint()
+		hint := x.physicalEmptyHint()
+		if stErr != nil && len(cfg.Interfaces) == 0 {
+			return hint
+		}
+		return hint
+	}
+	if stErr != nil {
+		// 有配置项但运行态不可用：明确说明状态列为何是 "-"
+		b.WriteString("%% 注: VPP 运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
 	}
 	x.structured = map[string]any{"interfaces": items}
 	return b.String()
+}
+
+// fmtSpeed 链路速率：kbps → 人类可读；0 表示 VPP 未上报（DPDK 口常见）。
+func fmtSpeed(kbps uint32) string {
+	switch {
+	case kbps == 0:
+		return "-"
+	case kbps >= 1_000_000:
+		return fmt.Sprintf("%dG", kbps/1_000_000)
+	case kbps >= 1000:
+		return fmt.Sprintf("%dM", kbps/1000)
+	default:
+		return fmt.Sprintf("%dK", kbps)
+	}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // physicalEmptyHint 空态提示：列出**运行态**端口（决策 #83）。
