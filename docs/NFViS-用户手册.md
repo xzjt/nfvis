@@ -7,14 +7,16 @@
 | 配套文档 | 命令速查：[`NFViS-CLI命令全表.md`](NFViS-CLI命令全表.md)（256 条命令含实测状态）<br>需求真源：`NFViS-系统产品需求与目标架构规格书.md`（附录 A = 决策记录）<br>契约：`NFViS-openapi.yaml`（REST）、`NFViS-CLI命令树完整设计.md`（CLI） |
 | 证据口径 | 本手册中的命令与输出均取自 **nfvis-vm 真机实测**（`docs/evidence/v1-closeout-round7/8.txt` 等）；未实测处均显式标注 |
 
-> 本手册在编写时逐条真机核验，撞出 4 处问题，**其中 2 处已修**：
+> 本手册在编写时逐条真机核验，撞出 4 处问题，**现已全部修复**：
 > ① **已修**（决策 #78）：`nfvis-cli` 的 `-server` 缺省值曾与守护进程缺省不匹配（默认参数连不上），
 >    现缺省即 `https://127.0.0.1:443`，**零参数可连**（见 §4.3）；
 > ② **已修**（决策 #77，安全）：`request system configuration backup to <path>` 导出件曾为 0644
 >    且含 `password_hash`，现为 0600；
 > ③ **已修**（决策 #80）：`postinst` 的内核基线块原先不可达（安装期并未应用基线），
 >    现已前置——安装时即按机器规格写 GRUB 片段与 fstab，**重启后生效**；
-> ④ **未修**：`set system login user … password …` 经 CLI 不可用（建用户请走 REST）——见 §4.5。
+> ④ **已修**（决策 #79）：`set system login user … password …` 曾因命令树与模型键名不一致而经 CLI 不可用，
+>    现可正常使用（口令加盐哈希落库、回显脱敏）——见 §4.5。注意形如
+>    `set system login user password <口令>` **漏写用户名**仍会被拒并提示正确写法（附录 A #82）。
 
 ---
 

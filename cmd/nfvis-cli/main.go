@@ -112,17 +112,14 @@ func runScript(session *cli.Session, cmdline string) {
 }
 
 // teardownScript 退出配置模式（有 candidate 先丢弃）、释放会话并吊销 token。
+// 收尾逻辑在 cli.Session.Teardown（-c 与交互 REPL 共用）；此处只回显失败步骤，
+// 保持脚本模式的输出口径不变。
 func teardownScript(session *cli.Session) {
-	if session.Mode == "config" {
-		// discard 释放 candidate 与会话锁（无变更时也安全）
-		if out, _ := session.ExecuteLine("discard"); strings.Contains(out, "%%") {
-			fmt.Print(out)
-		}
-		if out, _ := session.ExecuteLine("exit"); strings.Contains(out, "%%") {
+	for _, out := range session.Teardown() {
+		if strings.Contains(out, "%%") {
 			fmt.Print(out)
 		}
 	}
-	session.Logout()
 }
 
 // mustClient 构造 REST 客户端（FR-SEC-004：默认自签 HTTPS）。
