@@ -26,11 +26,18 @@ case "$CURRENT_CP" in
 esac
 
 # 3) 底座优化校验（FR-SYS-002/003、FR-SEC-006）——仅提示
-HUGEPAGES_1G=$(grep -i '^HugePages_Total' /proc/meminfo >/dev/null 2>&1 && awk '/HugePages_Total/{print $2}' /proc/meminfo || echo 0)
-if [ "${HUGEPAGES_1G:-0}" -gt 0 ] 2>/dev/null; then
-    log "大页已预留：$(grep -i hugepages_total /proc/meminfo | tr -s ' ')"
+# 只看 **1G 页池**：/proc/meminfo 的 HugePages_Total 是**各尺寸合计**，
+# 而 Ubuntu 默认就预留了 1024 个 2M 页 → 用它会误报「大页已预留」（实际没有 1G 池，
+# VNF 内存分配仍会失败）。1G 池以 sysfs 的 hugepages-1048576kB 为准。
+HP1G_TOTAL=$(cat /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages 2>/dev/null || echo 0)
+HP1G_FREE=$(cat /sys/kernel/mm/hugepages/hugepages-1048576kB/free_hugepages 2>/dev/null || echo 0)
+HP2M_TOTAL=$(cat /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages 2>/dev/null || echo 0)
+if [ "${HP1G_TOTAL:-0}" -gt 0 ] 2>/dev/null; then
+    log "1G 大页池已预留：total=${HP1G_TOTAL} free=${HP1G_FREE}"
 else
-    log "提示：未检测到大页（FR-SYS-002 建议安装期预留 default_hugepagesz=1G hugepagesz=1G hugepages=N 并 reboot）"
+    log "提示：未检测到 **1G** 大页池（当前 1G=${HP1G_TOTAL:-0}、2M=${HP2M_TOTAL:-0}）。"
+    log "      FR-SYS-002：VNF 内存从 1G 大页池分配，未预留则 VM 无法启动。"
+    log "      处理：运行 /usr/share/nfvis/installer/nfvis-baseline.sh --defaults 后 reboot（见用户手册 §3.1）。"
 fi
 if grep -q 'isolcpus' /proc/cmdline 2>/dev/null; then
     log "isolcpus 已配置：$(tr ' ' '\n' < /proc/cmdline | grep isolcpus | tr '\n' ' ')"
@@ -59,10 +66,7 @@ if command -v systemctl >/dev/null 2>&1; then
     log "已装载 nfvis.service（enable；首次安装不自动 start——按需 systemctl start nfvis）"
 fi
 
-log "完成"
-exit 0
-
-# 4) 内核启动基线（FR-SYS-014 / FR-CMP-005）：无基线则按机器规格应用保守默认（安装期预置），
+# 6) 内核启动基线（FR-SYS-014 / FR-CMP-005）：无基线则按机器规格应用保守默认（安装期预置），
 #    已有基线则仅检查报告。**校验/应用失败不阻断安装**（底座差异不应让 dpkg 失败）。
 BASELINE_SH=/usr/share/nfvis/installer/nfvis-baseline.sh
 if [ -x "$BASELINE_SH" ]; then
@@ -78,3 +82,4 @@ if [ -x "$BASELINE_SH" ]; then
         log "注意：内核基线需重启生效（FR-SYS-014）"
     fi
 fi
+exit 0

@@ -1,10 +1,17 @@
 [Unit]
 Description=NFViS 一体机守护进程（nfvisd）
-Documentation=file:///usr/share/doc/nfvis/NFViS-系统产品需求与目标架构规格书.md
+# 文档目录（ASCII 路径）。注意：systemd 的 Documentation= 要求**合法 URL**，
+# 而 /usr/share/doc/nfvis 下的文档文件名含中文 → 直接写文件名会被判
+# “Invalid URL, ignoring”。故指向目录本身。
+Documentation=file:///usr/share/doc/nfvis/
 After=network-online.target libvirtd.service docker.service vpp.service
 Wants=network-online.target
 # VPP/libvirtd/docker 由 nfvisd 编排；任一未起时 nfvisd 降级运行（FR-OPS-010/013）
 After=vpp.service
+# FR-OPS-013：连续快速崩溃退避（StartLimit* 属 [Unit] 段——放 [Service] 会被
+# systemd 判为 “Unknown key … in section [Service], ignoring” 而**静默失效**）
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=notify
@@ -12,9 +19,6 @@ NotifyAccess=main
 # FR-OPS-013：崩溃自动拉起 + 看门狗
 Restart=always
 RestartSec=3
-# 连续快速崩溃退避（systemd 内置：StartLimitIntervalSec 内超过 StartLimitBurst 则进入 failed）
-StartLimitIntervalSec=60
-StartLimitBurst=5
 WatchdogSec=30
 Environment=NFVIS_DB=/var/lib/nfvis/nfvis.db
 Environment=NFVIS_LISTEN=:443

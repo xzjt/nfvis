@@ -68,12 +68,17 @@ func EnsureBootstrapAdmin(eng *config.Engine, s *Service, password string) (crea
 	return true, oneTimePassword, nil
 }
 
-// randomPassword 生成满足默认策略的随机口令（16 字节 base64url + 保证
+// randomPassword 生成满足默认策略的随机口令（12 字节 base64url + 保证
 // 4 类字符齐全的后缀）。
+//
+// 后缀用 `@` 而非 `!`：`!` 在交互式 bash 下触发**历史展开**
+// （`nfvis-cli -p Xxx!Aa1` → `-bash: !Aa1: event not found`），
+// 而首启口令正是要用户从 journalctl 复制粘贴的。`@` 同样满足复杂度策略里
+// 的「特殊字符」（unicode.IsPunct），且在 shell 中无特殊含义、无需引号。
 func randomPassword() (string, error) {
 	b := make([]byte, 12)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("生成随机口令: %w", err)
 	}
-	return base64.RawURLEncoding.EncodeToString(b) + "!Aa1", nil
+	return base64.RawURLEncoding.EncodeToString(b) + "@Aa1", nil
 }
