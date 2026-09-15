@@ -29,13 +29,14 @@
   （本地连 VM 会报 REMOTE HOST IDENTIFICATION HAS CHANGED；连接仍可建立，清陈旧记录即可：
   `ssh-keygen -R nfvis-vm`）。跑集成测试前先 `systemctl restart vpp`（残留拓扑会污染用例）；
   集成测试 `make integration`（CI 不跑）。设计基线在 `docs/`，**不要凭记忆重设计**。
-- 已定决策 84 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 85 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
 - **V1 验收收口**：`docs/V1-验收检查表.md` 把规格书 **109 条 FR** 逐条对照证据
   （**通过 100 / 未验 4 / 降级 3 / 移 V2 2**），降级理由与签字建议见其 §5/§6；
   **待办与未完成项的唯一入口见 `docs/V1-收尾待办.md`**（含环境要点与踩坑记录）。
   已发布 **v1.0.0 / v1.1.0 / v1.1.1 / v1.1.2 / v1.1.3 / v1.1.4 / v1.1.5**（见 GitHub Releases）。
   **用户文档**：`docs/NFViS-用户手册.md`（安装→使用全流程）、`docs/NFViS-CLI命令全表.md`
-  （256 条命令 + 逐条真机实测状态）；CLI 全功能冒烟脚本 `contrib/scripts/cli-fulltest.sh`（手动）。
+  （256 条命令 + 逐条真机实测状态）；真机手动脚本：`contrib/scripts/cli-fulltest.sh`（问「命令能不能用」）、
+  `contrib/scripts/cli-semantic-check.sh`（问「结果对不对」）、`contrib/scripts/cli-pty-smoke.sh`（交互行为）。
 - `docs/NFViS-openapi.yaml` 与 `docs/NFViS-CLI命令树完整设计.md` 是**契约**。
 
 ## 不可违反的规则
@@ -54,6 +55,17 @@ cd prototype && go build ./... && go vet ./... && go test ./...   # 原型仍应
 python -c "import yaml;yaml.safe_load(open('docs/NFViS-openapi.yaml'))"  # 契约可解析
 grep -rn "待评审\|TBD\|TODO" docs/   # 不允许引入未决标记
 ```
+
+**改了会被"读"出去的行为后**（`show` 族、候选来源、任何"取哪份事实"的改动），除 `make check`
+外还须在真机上跑这两项（CI 跑不了，二者互补）：
+
+```bash
+bash contrib/scripts/cli-fulltest.sh        # 「命令能不能用」：256 条契约命令，见 %/%% 即失败
+bash contrib/scripts/cli-semantic-check.sh  # 「结果对不对」：与 VPP/内核/libvirt 独立事实源对照 + 扰动判别
+```
+
+后者是唯一能发现「命令成功但答非所问 / 取自配置而非运行态」的那层（决策 #84/#85）——
+2026-09-15 它一次跑出 4 类契约违反，而同期 256 条冒烟是 197 全绿。
 
 ## 外部文档查询（context7 MCP，个人启用）
 
