@@ -10,8 +10,11 @@
 
 > **当前状态：V1（首个发布版）**
 > 规格书 **109 条 FR**：**通过 100 / 未验 4 / 降级 3 / 移 V2 2**（口径与逐条证据见
-> [`docs/V1-验收检查表.md`](docs/V1-验收检查表.md)）；已定**决策 78 项**（规格书附录 A）；
+> [`docs/V1-验收检查表.md`](docs/V1-验收检查表.md)）；已定**决策 79 项**（规格书附录 A）；
 > `make check` 全绿。**已知限制请先读** [`docs/NFViS-CLI命令全表.md`](docs/NFViS-CLI命令全表.md) §4。
+>
+> **发布的二进制**见 [Releases](https://github.com/xzjt/nfvis/releases)；
+> 命令全表把 256 条 CLI 命令**逐条真机执行**并标注状态（现全部 ✅／⊘／🚫，无「不可用」项）。
 
 ---
 
@@ -89,7 +92,7 @@ systemctl start vpp && vppctl show interface
 |---|---|
 | **[用户手册](docs/NFViS-用户手册.md)** | **从安装到使用的全流程**（含故障排查、已知限制） |
 | **[CLI 命令全表](docs/NFViS-CLI命令全表.md)** | 256 条命令，含权限、API 落点与**逐条真机实测状态** |
-| [系统产品需求与目标架构规格书](docs/NFViS-系统产品需求与目标架构规格书.md) | **需求真源**；附录 A = 决策记录（1~78），实现有疑问先查它 |
+| [系统产品需求与目标架构规格书](docs/NFViS-系统产品需求与目标架构规格书.md) | **需求真源**；附录 A = 决策记录（1~79），实现有疑问先查它 |
 | [CLI 命令树完整设计](docs/NFViS-CLI命令树完整设计.md) | CLI **契约**（命令树、补全、权限矩阵） |
 | [OpenAPI](docs/NFViS-openapi.yaml) | REST **契约**（`openapi.json` 随二进制嵌入，由 CI 守护同步） |
 | [Go 工程目录骨架设计](docs/NFViS-Go工程目录骨架设计.md) | 代码结构、依赖方向规则、里程碑 |
@@ -144,6 +147,13 @@ make deb            # 打包 deb（需 dpkg-deb）
 
 一次性配置：`git config core.hooksPath contrib/hooks`（启用 pre-commit 门禁）。
 
+**CLI 冒烟（手动，不在 CI）**：`contrib/scripts/cli-fulltest.sh` 按契约命令树**逐条真机执行**，
+区分「预期报错」与真失败——`docs/NFViS-CLI命令全表.md` 的实测状态即由此产出：
+
+```bash
+bash contrib/scripts/cli-fulltest.sh        # 全部阶段；也可 `... 1 5` 只跑指定阶段
+```
+
 **质量门禁（四层）**：`AGENTS.md`（AI/开发会话规则）→ pre-commit 钩子 → CI（每次 push/PR）→
 每日巡检（ZCode 定时任务，产出进 `docs/reviews/`）。
 
@@ -155,15 +165,17 @@ make deb            # 打包 deb（需 dpkg-deb）
 
 ## 已知限制
 
-V1 的降级/未验项与**经 CLI 暂不可用的语句**统一登记在
-[`docs/NFViS-CLI命令全表.md`](docs/NFViS-CLI命令全表.md) §4 与
+V1 的降级/未验项统一登记在 [`docs/NFViS-CLI命令全表.md`](docs/NFViS-CLI命令全表.md) §4 与
 [`docs/V1-验收检查表.md`](docs/V1-验收检查表.md) §5。常见几条：
 
 - **SR-IOV / LLDP 邻居**需对应硬件与对端（验证环境不具备；代码与单测齐备）；
 - **快照 create/rollback 需关机态**（对运行中域回滚会静默重启该 VM，故显式拒绝）；
 - **容器镜像的目录名须等于 Docker tag**，否则下发报 `docker: not found`；
-- `show vpp runtime` 未接入（govpp runtime 解码受限，CLI 明确提示而非静默空值）；
-- 8 条配置语句经 CLI 暂不可用（含 `set system login user … password …`，建用户请走 REST API）。
+- `show vpp runtime` 未接入（govpp runtime 解码受限，CLI 明确提示而非静默空值）。
+
+> ⚠️ **配 cross-connect 前必读**：它是二层直通、**无 MAC 学习、无环路保护**。把**同一广播域**内的
+> 两个端口直通（如同一虚拟交换机上的两块网卡）会造成**物理二层环路 / 广播风暴**；两端须属不同广播域。
+> 见[用户手册](docs/NFViS-用户手册.md) §8。
 
 ---
 
