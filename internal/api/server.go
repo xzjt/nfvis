@@ -61,6 +61,7 @@ type Options struct {
 	Software    SoftwareRuntime        // 软件升级/电源/NTP（M5-7；nil = 503）
 	Hardware    HardwareRuntime        // 硬件健康采集（M5-5；nil = 503）
 	TLS         TlsRuntime             // 证书管理（M5-8；nil = 503）
+	Ports       PortInventory          // 运行态端口清单（决策 #83；nil = 接口名无动态候选）
 }
 
 // Server NFViS REST server。
@@ -82,6 +83,7 @@ type Server struct {
 	vmSnapshots VMSnapshotRuntime
 	containers  ContainerRuntime
 	images      ImagesRuntime
+	ports       PortInventory // 运行态端口清单（决策 #83；候选与 show 同源）
 	events      *events.Bus
 	sysOps      SystemOpsRuntime
 	diagOps     DiagOpsRuntime
@@ -106,8 +108,9 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, dpdk: opts.DPDK, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, sriov: opts.SRIOV, dpdk: opts.DPDK, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, ports: opts.Ports, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), log: log}
 	s.cliExec.setRuntime(opts.Diag, opts.State)
+	s.cliExec.setPorts(opts.Ports) // 决策 #83：show 的空态与 Tab 候选同源
 	s.cliExec.setNetRuntime(opts.L2, opts.L3, opts.LLDP, opts.NAT, opts.Alarms)
 	s.cliExec.setComputeRuntime(opts.VM, opts.VMConsole, opts.VMSnapshots, opts.Containers, opts.Images)
 	s.cliExec.setEventBus(opts.Events) // M5-1：CLI 直连动作也发布 vnf-state-changed

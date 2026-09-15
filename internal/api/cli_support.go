@@ -70,19 +70,27 @@ func rootForQuery(tokens []string) *schema.Node {
 	return schema.OperRoot()
 }
 
-// dynamicValues 动态候选来源（§5.3）：从 committed 配置实时推导。
+// dynamicValues 动态候选来源（§5.3）。接口名一族取自**运行态端口清单**（决策 #83），
+// 其余从 committed 配置实时推导。
 func (s *Server) dynamicValues(kind string) []string {
+	// 端口清单与配置无关：先处理，避免配置读取失败时连端口候选都拿不到。
+	switch kind {
+	case schema.DynVppIfnames:
+		// 数据面端口（= 已被 DPDK 接管的口）：只能从 VPP 侧枚举（内核中已无 netdev）。
+		return s.vppIfnames()
+	case schema.DynKernelIfnames:
+		// 内核网卡（未被接管）：管理口 / bind-dpdk / SR-IOV PF 的名字在内核侧才成立。
+		return s.kernelIfnames()
+	case schema.DynIfnames:
+		// 并集：`request interfaces <n> enable|bind-dpdk|unbind-dpdk` 的动作混合，
+		// 参数位置在动作之前、无法按动作区分来源，故两侧都给（决策 #83）。
+		return s.allIfnames()
+	}
 	cfg, err := s.engine.Committed()
 	if err != nil {
 		return nil
 	}
 	switch kind {
-	case schema.DynIfnames:
-		out := make([]string, 0, len(cfg.Interfaces))
-		for _, i := range cfg.Interfaces {
-			out = append(out, i.Name)
-		}
-		return out
 	case schema.DynVSwitches:
 		out := make([]string, 0, len(cfg.VirtualSwitches))
 		for _, vs := range cfg.VirtualSwitches {

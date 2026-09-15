@@ -539,6 +539,7 @@ func run() error {
 		Software:    &softwareController{m: swMgr},
 		Hardware:    &hardwareController{p: hwProvider},
 		TLS:         &tlsController{m: tlsMgr},
+		Ports:       &portInventoryController{net: netProvider}, // 决策 #83：运行态端口清单
 		LogSource:   nfvisdLogTail,
 	})
 
@@ -630,6 +631,14 @@ func (c *l2Controller) MACTable(ctx context.Context, swName string) ([]api.MACTa
 	}
 	return out, nil
 }
+
+// portInventoryController 装配 api.PortInventory（决策 #83）：运行态端口清单。
+// `<ifname>` 的候选与 `show interfaces physical` 的空态同源，取自真实端口而非已配置的接口名。
+type portInventoryController struct{ net *network.L2Network }
+
+func (c *portInventoryController) VPPIfnames() ([]string, error) { return c.net.VPPIfnames() }
+
+func (c *portInventoryController) KernelIfnames() ([]string, error) { return c.net.KernelIfnames() }
 
 // l3Controller 装配 api.L3Runtime（M3-4）：VRF 运行态 FIB。
 type l3Controller struct{ net *network.L2Network }

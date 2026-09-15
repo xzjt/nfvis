@@ -2609,7 +2609,7 @@
             }
           },
           {
-            "description": "清单模式（ifnames/vmnames 等动态候选来源）",
+            "description": "清单模式（动态候选来源）。接口名一族分三种（决策 #83，来源不同）：vpp-ifnames=VPP 中的接口/已被 DPDK 接管的数据面端口；kernel-ifnames=内核网卡/未被接管的物理口（管理口、bind-dpdk、SR-IOV PF 用）；ifnames=两者并集（动作混合的 request interfaces <n> 用）。其余：vmnames/vswitches/vrfs/ctnames/images/classes/revisions/vppplugins/acls/qos-policies",
             "in": "query",
             "name": "kind",
             "schema": {

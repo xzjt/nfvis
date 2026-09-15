@@ -89,9 +89,35 @@ func (x *cliExecutor) showPhysicalInterfaces(cfg model.Config, only string) stri
 		if only != "" {
 			return fmt.Sprintf("%% 物理口 %s 未在配置中声明（先 set interfaces %s …）\n", only, only)
 		}
-		return "（无已声明物理口；先 set interfaces <ifname> description … 声明）\n"
+		return x.physicalEmptyHint()
 	}
 	x.structured = map[string]any{"interfaces": items}
+	return b.String()
+}
+
+// physicalEmptyHint 空态提示：列出**运行态**端口（决策 #83）。
+// 此前只给一句「先 set interfaces … 声明」，用户其实无从知道该写哪个名字——
+// 已由 DPDK 接管的口在内核中不存在，而候选当时又只列「已配置」的名字。
+func (x *cliExecutor) physicalEmptyHint() string {
+	var b strings.Builder
+	b.WriteString("（无已声明物理口；先 set interfaces <ifname> description … 声明）\n")
+	if x.ports == nil {
+		return b.String()
+	}
+	names, err := x.ports.VPPIfnames()
+	if err != nil {
+		fmt.Fprintf(&b, "%% 端口清单不可用（VPP 未接入或查询失败）：%v\n", err)
+		return b.String()
+	}
+	if len(names) == 0 {
+		b.WriteString("（VPP 中暂无接口；网卡可能尚未由 DPDK 接管 —— 未接管的内核网卡见 " +
+			"`request interfaces <n> bind-dpdk`）\n")
+		return b.String()
+	}
+	b.WriteString("VPP 中的接口（已被 DPDK 接管，可直接 set interfaces <ifname> … 声明）：\n")
+	for _, n := range names {
+		fmt.Fprintf(&b, "  %s\n", n)
+	}
 	return b.String()
 }
 

@@ -51,7 +51,7 @@
 | `show system configuration sessions` | candidate 持锁会话列表（FR-CFG-009） | `GET /system/configuration/sessions` | ✅ |
 | `show configuration sessions` | 同上（等价写法） | 同上 | ✅ |
 | `show interfaces` | 全部接口摘要 | `GET /interfaces` | ✅ |
-| `show interfaces physical` | DPDK 物理口（驱动/链路/速率/VF 数） | `GET /interfaces` | ✅ |
+| `show interfaces physical` | DPDK 物理口（驱动/链路/速率/VF 数）；**空态列出运行态端口**，便于发现该声明哪个名字（决策 #83） | `GET /interfaces` | ✅ |
 | `show interfaces physical <ifname> detail` | 驱动/MAC/MTU/队列/NUMA | `GET /interfaces/{name}` | ✅ |
 | `show interfaces physical <ifname> statistics` | 收发包/字节/错误/drop | 运行态（VPP stats） | ✅ |
 | `show interfaces physical <ifname> sriov` | VF 列表与占用状态 | sysfs `sriov_numvfs` | ✅（无 PF/VF 时为空列表） |
@@ -259,7 +259,7 @@
 
 | 命令 | 说明 | 落点 | 实测 |
 |---|---|---|---|
-| `set interfaces <ifname> description <s>` | 描述 | 配置库 | ✅ |
+| `set interfaces <ifname> description <s>` | 描述（`<ifname>` 的 Tab 候选 = **VPP 中的接口**，即已被 DPDK 接管的口；决策 #83） | 配置库 | ✅ |
 | `set interfaces <ifname> disable` | 禁用接口 | VPP | ✅ |
 | `set interfaces <ifname> mtu <n>` | MTU | VPP | ✅ |
 | `set interfaces <ifname> sriov vf-count <n>` | 创建/回收 VF（FR-NET-004） | sysfs `sriov_numvfs` | ⊘ 无 PF/VF 时 commit 明确报错（不再静默无效，决策 #70） |
