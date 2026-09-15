@@ -20,15 +20,19 @@
 - M3 验收现状（`docs/M3-人工演示记录.md`）：D1/D2/D3/D6/D8 真机通过；**D4 NAT 已在本轮 M5 补齐并真机端到端通过**
   （决策 #52 跨 VRF：inside=virtual-switch 的 VRF、outside=出接口所属 VRF，VPP 单实例仅一对）；**D5 SPAN 抓包已在 T0-7 实证通过**；
   D7 LLDP 仍环境受限（无对端），启用与命令均正常、M3 的 internal error 未复现。
-- 验证环境 nfvis-vm 当前状态：**VPP 运行中**（main-core 4 / corelist-workers 5，ens192/ens224 绑 vfio-pci）、
-  nfvisd 未运行、**无 domain/接口残留**、**1G 大页仅 1 页空闲**（测试 VM ≤1G、串行）、
-  引导镜像 `alpine.qcow2` 已恢复；Docker 本地有 `alpine:3.20`。真机前 `pkill -x nfvisd`；
+- 验证环境 nfvis-vm 当前状态：**已装 nfvis 1.1.1 且 nfvisd 作为 systemd 服务在运行**
+  （开发态请先 `systemctl stop nfvis`）、VPP 运行中、2 网卡绑 vfio-pci、
+  **无 domain/接口残留**、引导镜像 `alpine.qcow2` 是集成测试依赖**勿删**；Docker 本地有 `alpine:3.20`。
+  **GRUB 大页基线已写入但未重启生效（当前 1G 池 = 0 → VM 起不来）**，需要时 `systemctl reboot`
+  （**重启后 DPDK 绑定会丢，须重绑**）。跑集成测试前先 `systemctl restart vpp`（残留拓扑会污染用例）；
   集成测试 `make integration`（CI 不跑）。设计基线在 `docs/`，**不要凭记忆重设计**。
 - 已定决策 80 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
-- **V1 验收收口（2026-09-14）**：`docs/V1-验收检查表.md` 已把规格书 **111 条 FR** 逐条对照证据
-  （通过 89 / 未验 7 / 降级 15 / 移 V2 2），降级理由与签字建议见其 §5/§6；
-  待办与未完成项入口见 `docs/V1-收尾待办.md`。**新增登记的降级**：物理口 link 告警、告警转发 syslog、
-  日志级别联动、`GET /api/v1/openapi.json` 与列表分页、FR-SEC 若干强制力项。
+- **V1 验收收口**：`docs/V1-验收检查表.md` 把规格书 **109 条 FR** 逐条对照证据
+  （**通过 100 / 未验 4 / 降级 3 / 移 V2 2**），降级理由与签字建议见其 §5/§6；
+  **待办与未完成项的唯一入口见 `docs/V1-收尾待办.md`**（含环境要点与踩坑记录）。
+  已发布 **v1.0.0 / v1.1.0 / v1.1.1**（见 GitHub Releases）。
+  **用户文档**：`docs/NFViS-用户手册.md`（安装→使用全流程）、`docs/NFViS-CLI命令全表.md`
+  （256 条命令 + 逐条真机实测状态）；CLI 全功能冒烟脚本 `contrib/scripts/cli-fulltest.sh`（手动）。
 - `docs/NFViS-openapi.yaml` 与 `docs/NFViS-CLI命令树完整设计.md` 是**契约**。
 
 ## 不可违反的规则
