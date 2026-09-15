@@ -1,0 +1,196 @@
+NFViS V1 收尾 第十三轮 证据（决策 #82：语句解析优先级 / 报错口径 / REPL 收尾）
+================================================================================
+日期      2026-09-15
+主机      nfvis-vm（nfvis 1.1.2 已安装，系统服务 nfvisd 在 :443 运行，未受影响）
+服务端    开发态实例 127.0.0.1:18443（-init-admin-password Verify@12345 -allow-plaintext）
+CLI       「修复前」/usr/bin/{nfvisd,nfvis-cli}（1.1.2 = 修复前源码）
+          「修复后」/tmp/{nfvisd-fix2,nfvis-cli-fix2}（本分支 HEAD 在本机构建）
+报告来源  用户真机反馈：
+            nfvis# set system login user password Admin@123
+            %% 语句未映射到模型（键名不匹配或类型不符）: json: unknown field "password"
+            nfvis# set system login user admin
+            %% 语句未产生配置变更（尚未映射到模型或值未变化）: system login user admin
+
+四条修复（附录 A #82）
+--------------------------------------------------------------------------------
+① 实例名位置的解析优先级（根因）：`applyTokens` 状态机里「身份取值数组」（pendingIdentity）
+   在关键字匹配**之前**消费身份，而「实例参数」（pendingArrKey：`login user`、
+   `virtual-switches`…）却在**之后**（原「2b」分支）。于是容器关键字之后的第一个 token
+   若与子关键字同名，就被短路成关键字，而 `cur` 仍停在祖先容器上 → 取值写到祖先层级。
+   修复前 dump 出的错树（临时测试）：
+     user password Admin@123 → {"system":{"login":{"password":"Admin@123","user":[]}}}
+     user class super-user    → {"login":{"class":"super-user","user":[]}}
+   → 模型收到不存在的键，报 `json: unknown field "password"`。
+   修：把实例参数的身份消费提到关键字匹配之前（与 pendingIdentity 同构）。
+② 报错口径（NFR-005）：`fromJSONTree`/`validateTreeJSON` 直接 `%v` 了 Go 的 json 报错。
+   修：`describeTreeErr` 译为中文并给出下一步。
+③ `system login user` 静默建号：4 token 的 `user <n>` 把子关键字当用户名。
+   修：别名层子关键字同名守卫（保留名取自 schema 树；仅 set）+ 5 token 形态的缺名提示。
+④ 交互 REPL 退出不收尾：EOF 直接返回、超时只吊销 token，都不释放配置模式/候选锁。
+   修：`Session.Teardown()`（discard → exit → Logout），EOF 与超时两条路径都调用。
+
+判读方法
+--------------------------------------------------------------------------------
+两侧对照使用**同一条命令、同一份脚本**（/tmp/verify82.sh），仅替换二进制作对比；
+每段先打印「修复前」，再打印「修复后」。管道/脚本模式用 `-c`；交互行为用 pty
+（`script -qec`）——交互缺陷只在 pty 下可见（决策 #81 的教训）。
+本文件已 `tr -d '\r'` 去掉终端产生的 CR（本轮主题不是换行，统一 LF；换行问题见 round12）。
+
+================================================================================
+§1 真机原始输出（前/后对照）
+================================================================================
+===============================================================================
+修复前（nfvisd/nfvis-cli 1.1.2）
+===============================================================================
+--- $ set system login user password Admin@123
+    %% 语句未映射到模型（键名不匹配或类型不符）: json: unknown field "password"
+--- $ set system login user password
+    [ok] system login user password
+--- $ commit + show system login（旧：静默建出无口令账号）
+--- $ configure
+set system login user password
+commit
+show system login
+    [ok] system login user password
+    commit 成功 (revision 3)
+    users admin {
+        class super-user;
+        name admin;
+        password-hash «已隐藏»;
+    }
+    users password {
+        name password;
+    }
+
+--- $ 管道 REPL：连续两次进入 configure（旧：第二次被残留会话状态拒绝）
+    [1st] nfvis> nfvis# 
+    [2nd] nfvis> % 无效命令: configure（输入 ? 查看可用命令）
+    [2nd] nfvis# 
+
+===============================================================================
+修复后（本分支构建）
+===============================================================================
+--- $ set system login user password Admin@123
+    %% 语句不完整: "password" 是 system login user 的下级关键字，此处应先给用户名；正确写法: set system login user <name> password <口令> [class <class>]
+--- $ set system login user password
+    %% 语句不完整: "password" 是 system login user 的下级关键字，此处应先给用户名；正确写法: set system login user <name> password <口令> [class <class>]
+--- $ set system login user class operator
+    %% 语句不完整: "class" 是 system login user 的下级关键字，此处应先给用户名；正确写法: set system login user <name> password <口令> [class <class>]
+--- $ set system login user admin bogus X
+    %% 未知语句: "bogus"
+
+--- $ 正确写法仍可用：建 bob（class operator）并回读
+--- $ configure
+set system login user bob password Bob@12345 class operator
+commit
+show system login
+    [ok] system login user bob password «已隐藏» class operator
+    commit 成功 (revision 3)
+    users admin {
+        class super-user;
+        name admin;
+        password-hash «已隐藏»;
+    }
+    users bob {
+        class operator;
+        name bob;
+        password-hash «已隐藏»;
+    }
+
+--- $ commit 后确认没有名为 password 的账号
+--- $ show system login
+    % 无效命令: show system login（可用：uptime|cpu|memory|storage|hugepages|kernel|hardware|core-dumps|tech-support）
+
+--- $ 管道 REPL：连续两次进入 configure（修复后应都成功）
+    [1st] nfvis> nfvis# candidate 已丢弃，会话锁已释放
+    [2nd] nfvis> nfvis# candidate 已丢弃，会话锁已释放
+    [3rd] nfvis> nfvis# candidate 已丢弃，会话锁已释放
+
+--- $ 交互 REPL 退出（EOF）也应收尾：configure + 未提交变更后 Ctrl-D
+    连接 http://127.0.0.1:18443 ...
+    nfvis> configure
+    nfvis# set system hostname teardown-check
+    [ok] system hostname teardown-check
+    nfvis# 
+    candidate 已丢弃，会话锁已释放
+    
+--- $ 紧接着再管道进入 configure（若收尾生效 → 成功）
+    [after-EOF] nfvis> nfvis# candidate 已丢弃，会话锁已释放
+
+（开发实例已清理）
+
+================================================================================
+§2 结果判读（逐条）
+================================================================================
+① 报错文案（用户实际撞到的那条）
+   修复前：%% 语句未映射到模型（键名不匹配或类型不符）: json: unknown field "password"
+           —— 泄露 Go json 原文，既没说明原因也没给出下一步。
+   修复后：%% 语句不完整: "password" 是 system login user 的下级关键字，此处应先给用户名；
+           正确写法: set system login user <name> password <口令> [class <class>]
+② 静默建号
+   修复前：`set system login user password` → [ok] system login user password，
+           提交后 committed 配置里真的出现 `users password { name password; }`（无口令账号）。
+   修复后：同一命令被拒（语句不完整 + 正确写法），committed 配置中**不存在**该账号；
+           `set system login user class operator` 同样被拒。
+③ 正确写法未受影响
+   `set system login user bob password Bob@12345 class operator` → [ok]，
+   提交回读 `users bob { class operator; name bob; password-hash «已隐藏»; }`（加盐哈希落库）。
+④ 管道 REPL 会话残留
+   修复前：连续两次 `printf 'configure\n' | nfvis-cli`，第二次得到
+           `%% 无效命令: configure（输入 ? 查看可用命令）` —— 服务端会话仍停在配置模式。
+   修复后：连续三次均成功，并各自打印 `candidate 已丢弃，会话锁已释放`（收尾可见）。
+⑤ 交互 REPL 退出（EOF）收尾
+   pty 内 `configure` → `set system hostname teardown-check`（未提交）→ Ctrl-D：
+   退出时打印 `candidate 已丢弃，会话锁已释放`（**避免未提交变更被静默丢弃**），
+   紧随其后的管道 `configure` 成功 —— 证明会话状态已释放。
+
+================================================================================
+§3 单测与红-绿（开发机，go test ./internal/api/ ./internal/cli/）
+================================================================================
+新增用例：
+  api/cliexec_login_test.go
+    TestInstanceNamePositionConsumesNameNotKeyword   # ①实例名优先消费、取值不落祖先层
+    TestLoginUserRejectsKeywordAsName               # ②③三种笔误均被拒且不建号、文案无 json:
+    TestLoginUserCorrectFormsStillWork              # 正确写法仍可用（口令哈希落库）
+    TestLoginUserDeleteNotBlockedByGuard            # 守卫仅限 set，delete 可清理历史误建
+    TestTreeDecodeMessagesAreChinese                # ②两处解码点消息中文化
+    TestDescribeTreeErrHidesRawJSON                 # ②口径映射单测
+    TestReservedChildKeywordComesFromSchema         # 保留名取自 schema（非硬编码）
+  cli/teardown_test.go
+    TestREPLTeardownOnEOF / TestREPLTeardownOnIdleTimeout /
+    TestREPLTeardownInOperModeOnlyLogsOut / TestSessionTeardownOrder
+
+红-绿（逐条回退修复 → 对应用例必失败，已实测）：
+  撤掉「实例名优先消费」   → TestInstanceNamePositionConsumesNameNotKeyword
+                            （报 未知语句: "ports"——取值不再落到正确层级）
+  撤掉消息中文化           → TestTreeDecodeMessagesAreChinese / TestDescribeTreeErrHidesRawJSON
+                            （输出重新出现 `json: unknown field "user"`）
+  撤掉子关键字守卫         → TestLoginUserRejectsKeywordAsName
+                            （重新出现 `[ok] system login user password` ＝静默建号）
+  撤掉 REPL 收尾           → TestREPLTeardownOnEOF / OnIdleTimeout（未执行 discard,exit）
+
+make check：vet + 全量测试 + 覆盖率门槛 + 依赖方向 + 决策条数（82 项）+ openapi 同步 + 原型 全绿。
+
+================================================================================
+§4 已知影响与未做
+================================================================================
+1. **行为变化（可能影响已有配置/脚本）**：
+   - `system login user` 的实例名**不得再与子关键字同名**（`password`/`class`）——这原本会
+     静默建出一个无口令账号，现改为拒绝并提示正确写法（仅 `set`；`delete` 不受限，
+     以便清理历史上误建的账号）。若确需以此类名字建号，只能经 REST 或 `load`。
+   - 从配置模式退出（Ctrl-D / 空闲超时 / 管道结束）时现在会**自动丢弃未提交 candidate**
+     并打印一行 `candidate 已丢弃，会话锁已释放`。此前是「静默什么都不做」——把候选锁
+     留给下一次登录（决策 #82④ 的根因）；现在改为显式收尾，代价是已提交后退出也会看到该行
+     （服务端 discard 不区分有无变更，此处选择了「宁可多提示，不可静默丢变更」）。
+   - 语句报错文案由「语句未映射到模型（键名不匹配或类型不符）: <Go json 原文>」改为中文口径；
+     依赖该原文做匹配的脚本需同步调整。
+2. 未做（如实登记）：
+   - 实例名优先消费只修了「同名 token 落在实例名位置」的情形；**通用的**「实例名与子关键字
+     同名的歧义」仍只在 `system login user` 一处显式拒绝，其余 subtree（如
+     `virtual-switches ports`）按「名字优先」解释（树正确、语义明确，但不会提示用户
+     可能想输入关键字）。是否推广为全局守卫（并因此禁止一切与子关键字同名的实例名）
+     留待后续决策。
+   - `?`/Tab 候选列表在实例名位置仍把 `<name>` 与子关键字并列展示，未标注「须先给名字」；
+     本次只改了报错，未改补全展示（补全展示改动面更大，建议单独一轮）。
+   - NFR-005 仅覆盖「树 → 模型」解码报错；其它路径（如校验错误、govpp/libvirt 底层报错）
+     的中文化未在本轮范围内。

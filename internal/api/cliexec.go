@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1018,11 +1019,24 @@ func fromJSONTree(m map[string]any, c *model.Config) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&out); err != nil {
-		return fmt.Errorf("语句未映射到模型（键名不匹配或类型不符）: %v", err)
+		return describeTreeErr(err)
 	}
 	*c = out
 	return nil
 }
+
+// describeTreeErr 把 JSON 解码报错翻译成可操作的中文口径（NFR-005 / 附录 A #82②）。
+// 直接抛 Go 的 `json: unknown field "x"` 对用户没有价值——既没说明原因，也没给出下一步；
+// 而该报错的成因几乎总是「关键字写错了位置」或「语句不完整」（如漏了实例名）。
+func describeTreeErr(err error) error {
+	const hint = "可用 ? 查看当前位置候选"
+	if m := unknownFieldRe.FindStringSubmatch(err.Error()); m != nil {
+		return fmt.Errorf("配置中不存在字段 %q（多为关键字位置有误或语句不完整；%s）", m[1], hint)
+	}
+	return fmt.Errorf("语句无法落到配置模型（请核对取值类型与位置；%s）: %v", hint, err)
+}
+
+var unknownFieldRe = regexp.MustCompile(`unknown field "([^"]+)"`)
 
 func validateTreeJSON(tree map[string]any) error {
 	var probe model.Config
@@ -1030,7 +1044,7 @@ func validateTreeJSON(tree map[string]any) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields() // 同 fromJSONTree：不匹配的键必须显式报错，不得静默丢弃
 	if err := dec.Decode(&probe); err != nil {
-		return fmt.Errorf("语句未映射到模型（键名不匹配或类型不符）: %v", err)
+		return describeTreeErr(err)
 	}
 	return nil
 }
@@ -1105,6 +1119,42 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 			// node 停留在值关键字上：后续兄弟关键字（如 page-size 下的 count）是其子节点
 			if i == len(tokens)-1 {
 				return validateTreeJSON(tree) // 语句结束
+			}
+			continue
+		}
+
+		// 0) 实例参数身份：具名数组容器关键字之后，**下一个 token 必定是实例名**，
+		// 必须先于关键字匹配消费。此前该分支排在关键字匹配之后（「2b」），
+		// 于是与子关键字同名的实例名会被短路成关键字、且因为 cur 仍停在祖先容器上，
+		// 取值被写到祖先层级（`login user password X` → `login.password`），
+		// 产出模型无法接受的树（用户只看到 `json: unknown field "password"`）。
+		// 与 pendingIdentity（身份取值数组，见上）保持同一优先级。
+		if p := firstParamOf(node); p != nil && pendingArrKey != "" {
+			arr, _ := cur[pendingArrKey].([]any)
+			ident := identityFields[pendingArrKey]
+			if ident == "" {
+				ident = "name"
+			}
+			elem, idx := selectElement(arr, ident, tok)
+			if !isSet {
+				if elem == nil {
+					return fmt.Errorf("无匹配配置: %s", tok)
+				}
+				if i == len(tokens)-1 {
+					cur[pendingArrKey] = append(arr[:idx], arr[idx+1:]...)
+					return validateTreeJSON(tree)
+				}
+			}
+			if elem == nil {
+				elem = map[string]any{ident: typedScalar(tok)}
+				arr = append(arr, elem)
+				cur[pendingArrKey] = arr
+			}
+			cur = elem
+			node = p
+			pendingArrKey = ""
+			if isSet && i == len(tokens)-1 {
+				return validateTreeJSON(tree) // 末位实例参数即语句结束（原先误报「缺少取值」）
 			}
 			continue
 		}
@@ -1221,36 +1271,7 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 			continue
 		}
 
-		// 2b) 实例参数：在 pendingArrKey 数组中按身份选/建/删元素
-		if p := firstParamOf(node); p != nil && pendingArrKey != "" {
-			arr, _ := cur[pendingArrKey].([]any)
-			ident := identityFields[pendingArrKey]
-			if ident == "" {
-				ident = "name"
-			}
-			elem, idx := selectElement(arr, ident, tok)
-			if !isSet {
-				if elem == nil {
-					return fmt.Errorf("无匹配配置: %s", tok)
-				}
-				if i == len(tokens)-1 {
-					cur[pendingArrKey] = append(arr[:idx], arr[idx+1:]...)
-					return validateTreeJSON(tree)
-				}
-			}
-			if elem == nil {
-				elem = map[string]any{ident: typedScalar(tok)}
-				arr = append(arr, elem)
-				cur[pendingArrKey] = arr
-			}
-			cur = elem
-			node = p
-			pendingArrKey = ""
-			if isSet && i == len(tokens)-1 {
-				return validateTreeJSON(tree) // 末位实例参数即语句结束（原先误报「缺少取值」）
-			}
-			continue
-		}
+		// 2b) 实例参数：身份消费已前移到「0)」（必须先于关键字匹配），此处不再处理。
 
 		return fmt.Errorf("未知语句: %q", tok)
 	}
@@ -1279,6 +1300,24 @@ func singleValueOf(n *schema.Node) *schema.Node {
 		}
 	}
 	return nil
+}
+
+// reservedChildKeyword 若 name 是 path 所指节点的**子关键字名**则返回该名，否则返回空串。
+// 用于别名层拒绝「把子关键字写在实例名位置」的笔误（如 `system login user password`：
+// 照单全收会静默建出一个名为 password 的无口令账号，见附录 A #82③）。
+// 取自 schema 树而非硬编码——子关键字增删时守卫自动跟随。
+// 注意路径树用 cfgPathRoot()（与 applyTokens 同一棵树），ConfigRoot() 是补全用的带 set 前缀版本。
+func reservedChildKeyword(path []string, name string) string {
+	n, _, err := schema.Match(cfgPathRoot(), path)
+	if err != nil || n == nil {
+		return ""
+	}
+	for _, c := range n.Children {
+		if c.Kind == schema.Keyword && c.Name == name {
+			return name
+		}
+	}
+	return ""
 }
 
 // selectElement 在具名数组中按身份值选元素（标量序列化比对，容忍数字/字符串差异）。

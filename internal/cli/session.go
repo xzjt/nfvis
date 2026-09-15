@@ -69,6 +69,28 @@ func (s *Session) Logout() {
 	}
 }
 
+// Teardown 退出前收尾：丢弃 candidate → 退出配置模式 → 吊销 token；返回各步输出。
+//
+// 服务端会话按 user@source 保留（与 token 生命周期无关），不做收尾会把
+// 「配置模式 + candidate 锁」留给下一次登录——表现为下一次 `configure` 报
+// `%% 无效命令`，且 `?` 候选与执行都按上一模式解释。`-c` 脚本与交互 REPL
+// 的两条退出路径（EOF / 空闲超时）都必须调用（附录 A #82④）。
+func (s *Session) Teardown() []string {
+	var outs []string
+	if s.Mode == "config" {
+		// discard 释放 candidate 与会话锁（无变更时也安全）；随后 exit 才能离开配置模式
+		//（存在未提交变更时 exit 会拒绝，故顺序不可颠倒）。
+		if out, _ := s.ExecuteLine("discard"); out != "" {
+			outs = append(outs, out)
+		}
+		if out, _ := s.ExecuteLine("exit"); out != "" {
+			outs = append(outs, out)
+		}
+	}
+	s.Logout()
+	return outs
+}
+
 // DialConsole 连接串口 WebSocket（M4-12，FR-CMP-014）；wsPath 来自 ExecuteFull 的接管请求。
 func (s *Session) DialConsole(wsPath string) (io.ReadWriteCloser, error) {
 	return s.client.DialConsole(wsPath)

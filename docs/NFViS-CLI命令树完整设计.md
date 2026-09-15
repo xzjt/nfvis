@@ -522,3 +522,15 @@ virtual-machine-functions {
    该转换同样作用于**串口接管**（`request … console`）：该路径不减 `Suspend` raw 模式，
    guest 以裸 LF 输出时会被补 CR（等价于终端 cooked 模式的 `ONLCR`）；裸 LF（0x0A）
    不可能是多字节字符的续字节，故对 UTF-8/控制序列安全。
+8. **实例名位置的解析优先级（附录 A #82）**：语句树里形如
+   `K("user", …, P("<name>"), K("password", …), K("class", …))` 的节点，其**首个 token 必须先按实例名消费**，
+   不得先按子关键字解释。此前解析器先做子关键字匹配，导致 `set system login user password Admin@123`
+   把 `password` 当成子关键字、把取值写到了**祖先容器**（`system.login.password`）上，
+   产出模型无法接受的树，用户看到的是 `json: unknown field "password"`。
+   规则：**实例名位置上与子关键字同名的 token 一律视为实例名**；若该名字确实与子关键字冲突，
+   语句树应改用其它名字（避免歧义）。
+9. **子语句必须成完整形**：`set system login user <name> <子关键字> <取值>` 中
+   `password`/`class` 只能出现在 **`<name>` 之后**；把子关键字直接放在名字位（如
+   `set system login user password`）会被当作**用户名**。为避免「打错字静默建出一个无口令账号」，
+   `system login user` 的别名层显式拒绝与子关键字同名的用户名（仅 `set`，`delete` 不受限，
+   以便清理历史误建账号），报错时给出正确写法（附录 A #82）。

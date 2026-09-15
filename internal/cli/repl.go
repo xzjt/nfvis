@@ -47,9 +47,10 @@ func (r *REPL) Run() error {
 		switch {
 		case errors.Is(err, ErrIdleTimeout):
 			fmt.Fprintf(r.out, "%% 会话空闲超时（%s），已自动登出。\n", r.editor.idle.Timeout)
-			r.session.Logout()
+			r.teardown() // token 尚未吊销，此时仍可释放 candidate 与配置模式
 			return nil
 		case errors.Is(err, io.EOF):
+			r.teardown()
 			return nil
 		case err != nil:
 			return err
@@ -95,6 +96,13 @@ func (r *REPL) Run() error {
 			r.runConsole(console)
 			prompt = r.session.Prompt()
 		}
+	}
+}
+
+// teardown 会话收尾并回显各步输出（丢弃 candidate 时会提示，避免「未提交变更被静默丢弃」）。
+func (r *REPL) teardown() {
+	for _, out := range r.session.Teardown() {
+		fmt.Fprint(r.out, out)
 	}
 }
 

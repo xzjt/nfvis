@@ -52,6 +52,14 @@ var statementAliasesAuth = []aliasRule{
 		apply: func(tree map[string]any, t []string, isSet bool) error {
 			return loginUserApply(tree, t[3], "", "", isSet)
 		}},
+	// system login user <x> <y>（5 token）：`login user` 没有这种元数——
+	// 合法形态只有 4（仅 <name>）、6（+password/class）、7（+password … class …）。
+	// 最常见的笔误是把子关键字写在实例名位置（`user password Admin@123`），
+	// 此处给出正确写法，而不是让通用遍历器报 `未知语句: "Admin@123"`（附录 A #82①③）。
+	{pattern: []string{"system", "login", "user", "*", "*"},
+		apply: func(_ map[string]any, t []string, isSet bool) error {
+			return loginUserArityErr(t[3], t[4], isSet)
+		}},
 
 	// system login class <n> allow|deny <command-path>
 	{pattern: []string{"system", "login", "class", "*", "allow", "*"},
@@ -76,6 +84,27 @@ var statementAliasesAuth = []aliasRule{
 		}},
 }
 
+// loginUserNameIsKeywordErr 实例名位置写成子关键字的统一报错（附录 A #82③）。
+// 给出**完整正确写法**（不把关键字代入模板——那会拼出 `… class <取值> [class <class>]`
+// 这类读不通的提示），避免用户对着静默建号或 `未知语句` 反复试。
+func loginUserNameIsKeywordErr(kw string) error {
+	return fmt.Errorf("语句不完整: %q 是 system login user 的下级关键字，此处应先给用户名；"+
+		"正确写法: set system login user <name> password <口令> [class <class>]", kw)
+}
+
+// loginUserArityErr `system login user <x> <y>`（5 token）非法元数的可操作报错。
+func loginUserArityErr(third, fourth string, isSet bool) error {
+	if kw := reservedChildKeyword([]string{"system", "login", "user"}, third); kw != "" {
+		return loginUserNameIsKeywordErr(kw)
+	}
+	verb := "set"
+	if !isSet {
+		verb = "delete"
+	}
+	return fmt.Errorf("语句不完整: %s system login user %q 之后不能直接跟 %q；"+
+		"正确写法: %s system login user <name> password <口令> [class <class>]", verb, third, fourth, verb)
+}
+
 // loginUsersArr 定位（必要时创建）system.login.users 数组。
 func loginUsersArr(tree map[string]any, create bool) (map[string]any, []any, error) {
 	sys := ensureObj(tree, "system")
@@ -97,6 +126,15 @@ func loginUsersArr(tree map[string]any, create bool) (map[string]any, []any, err
 // （也正因如此，本条不能只靠"改 JSON 键"解决）。
 // 已哈希值（以 pbkdf2$ 开头）视为直接注入，便于 load/克隆场景幂等。
 func loginUserApply(tree map[string]any, name, password, class string, isSet bool) error {
+	// 子关键字写在了实例名位置（如 `set system login user password`）→ 若照单全收会
+	// **静默建出一个名为 password 的无口令账号**（实测会落库 `users password { name password; }`）。
+	// 这是笔误而非本意，故显式拒绝并给出正确写法。仅 set 受限——delete 仍须能清理
+	// 历史上误建的账号（附录 A #82③）。
+	if isSet {
+		if kw := reservedChildKeyword([]string{"system", "login", "user"}, name); kw != "" {
+			return loginUserNameIsKeywordErr(kw)
+		}
+	}
 	login, arr, err := loginUsersArr(tree, isSet)
 	if err != nil {
 		return err

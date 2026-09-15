@@ -237,7 +237,7 @@
 | `set system syslog local level <lvl>` | 本地日志级别 | 宿主日志 | ✅ |
 | `set system syslog local retention-days <n>` | 日志保留天数（FR-SYS-013） | 宿主 logrotate | ✅ |
 | `set system syslog local max-size-mb <n>` | 日志容量上限 | 宿主 logrotate | ✅ |
-| `set system login user <n> password <s> class <c>` | 本地用户（口令**加盐哈希**落库、回显脱敏） | 配置库（PBKDF2） | ✅（决策 #79 修复） |
+| `set system login user <n> password <s> class <c>` | 本地用户（口令**加盐哈希**落库、回显脱敏） | 配置库（PBKDF2） | ✅（决策 #79 修复；**`<n>` 不可省**，把 `password`/`class` 写在名字位会被拒并提示正确写法，决策 #82） |
 | `set system login class <n> allow <path>` | 自定义 class 允许项（可多条） | 配置库 | ✅（决策 #79 修复） |
 | `set system login class <n> deny <path>` | 自定义 class 拒绝项（可多条） | 配置库 | ✅（决策 #79 修复） |
 | `set system login password-policy min-length <n>` | 口令最小长度 | 配置库 | ✅ |
