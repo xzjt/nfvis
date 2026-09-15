@@ -1,8 +1,20 @@
 #!/bin/sh
-# nfvis 卸载前：停止服务（remove/upgrade 均触发；upgrade 时先停再由 postinst 重新 enable）。
+# nfvis 卸载前脚本。
+#
+# **升级时不停止服务**：若在此停止，postinst 的 `systemctl try-restart` 会因为
+# "未在运行" 而变成空操作，升级完 nfvisd 就一直是停的（FR-OPS-001 的"升级后自动
+# 重启以加载新版本"落空）。让旧进程继续跑，由 postinst try-restart 负责换成新二进制。
+# 真正卸载（remove/deconfigure）时才停止。
 set -e
-if command -v systemctl >/dev/null 2>&1; then
-    systemctl stop nfvis.service >/dev/null 2>&1 || true
-    echo "nfvis prerm: 已停止 nfvis.service"
-fi
+case "$1" in
+    remove|deconfigure)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl stop nfvis.service >/dev/null 2>&1 || true
+            echo "nfvis prerm: 已停止 nfvis.service（$1）"
+        fi
+        ;;
+    upgrade)
+        echo "nfvis prerm: 升级中，保留运行中的 nfvis.service（由 postinst try-restart 换新版本）"
+        ;;
+esac
 exit 0

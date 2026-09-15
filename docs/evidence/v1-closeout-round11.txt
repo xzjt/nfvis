@@ -1,0 +1,107 @@
+===== V1 收尾第十一轮：首次安装/升级体验的 6 处缺陷修复（决策 #80）=====
+环境：nfvis-vm（应用机自报主机名 nfvis；Ubuntu 26.04、VPP 26.06、libvirt、Docker）
+日期：2026-09-15
+起因：**用户真机首装记录**（root@nfvis 上 `dpkg -i nfvis_1.1.0_amd64.deb` → `nfvis-cli` 全流程）
+      暴露多处「装完不能用 / 报错看不懂」。以下为该记录中的现象与修复后的复验输出。
+
+----- 0. 用户首装记录里的现象（修复前）-----
+$ dpkg -i nfvis_1.1.0_amd64.deb
+  nfvis postinst: 大页已预留：HugePages_Total: 1024          ← ② 误报：1024 是 2M 默认页，1G 池其实是 0
+  nfvis postinst: 已装载 nfvis.service（… 首次安装不自动 start）
+  nfvis postinst: 完成                                     ← ③ 此处 exit 0，其后的内核基线块永不执行
+$ cat /proc/cmdline
+  BOOT_IMAGE=… ro crashkernel=…                            ← 无 hugepages/isolcpus：基线确实没被应用
+$ systemctl status nfvis
+  nfvis.service:3: Invalid URL, ignoring: file:///usr/share/doc/nfvis/NFViS-系统产品需求与目标架构规格书.md   ← ①a
+  nfvis.service:16: Unknown key 'StartLimitIntervalSec' in section [Service], ignoring.                     ← ①b
+$ nfvis-cli
+  连接 https://127.0.0.1:443 ...
+  % 登录失败: 连接 nfvisd 失败: … connection refused
+  % 提示: 确认 nfvisd 已运行…                              ← 决策 #78 的提示，工作正常
+$ systemctl start nfvis && journalctl -u nfvis | grep 一次性口令
+  … 一次性口令（仅显示一次，请立即修改）: HyrYtLMp74w-eTCj!Aa1        ← ⑥ 含 '!'
+$ nfvis-cli
+  % 登录失败: 需要 username 与 password                     ← ⑤ 没有交互式提示，看着像语法错
+$ nfvis-cli -u admin -p HyrYtLMp74w-eTCj!Aa1
+  -bash: !Aa1: event not found                            ← ⑥ bash 历史展开：刚拿到的口令根本粘贴不了
+$ nfvis-cli -u admin -p "HyrYtLMp74w-eTCj!Aa1"
+  -bash: !Aa1: event not found                            ← 双引号也不能阻止 bash 的历史展开
+
+----- 1. ① systemd 单元两处告警 -----
+根因：systemd 的 Documentation= 要求**合法 URL**，URL 中含**非 ASCII**（中文文件名）即判 Invalid URL；
+      StartLimitIntervalSec/Burst 属 **[Unit]** 段，写在 [Service] 会被忽略 → 崩溃退避静默失效（FR-OPS-013）。
+修复：Documentation 指向**目录** `file:///usr/share/doc/nfvis/`；两条 StartLimit* 移入 [Unit]。
+$ systemd-analyze verify deploy/nfvis.service 2>&1 | grep -i nfvis
+  （无输出）
+$ systemctl status nfvis | head -6
+     Loaded: loaded (/usr/lib/systemd/system/nfvis.service; enabled; preset: enabled)
+       Docs: file:///usr/share/doc/nfvis/                        ← 正常渲染
+
+----- 2. ② 大页提示误判（1G 池为 0 却报「已预留」）-----
+根因：用 /proc/meminfo 的 `HugePages_Total` 判断，而它是**各尺寸合计**；Ubuntu 默认 1024 个 2M 页。
+      → 明明没有 1G 池（VNF 内存无从而来、VM 起不来）却打印「大页已预留」。
+修复：改读 /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages 判 1G 池，并给可操作指引。
+真机（本机 1G=0、2M=1024）修复后：
+  nfvis postinst: 提示：未检测到 **1G** 大页池（当前 1G=0、2M=1024）。
+  nfvis postinst:       FR-SYS-002：VNF 内存从 1G 大页池分配，未预留则 VM 无法启动。
+  nfvis postinst:       处理：运行 /usr/share/nfvis/installer/nfvis-baseline.sh --defaults 后 reboot（见用户手册 §3.1）。
+
+----- 3. ③ postinst 内核基线块不可达（原待办 §2.5）-----
+修前：第 63 行 `exit 0` 之后还有一段基线应用代码，**永不执行**，与注释「安装期预置」不符。
+修后（移动到 exit 0 之前）真机输出：
+  nfvis postinst: 未检测到内核基线，按机器规格应用保守默认（1G 大页 = min(RAM/4, 8)，不设 isolcpus）
+  nfvis-baseline: 按机器规格取默认：RAM 5G → 1G 大页 1 页（不设 isolcpus）
+  nfvis-baseline: 片段已写入：/etc/default/grub.d/99-nfvis.cfg
+  nfvis-baseline: fstab 大页挂载已维护
+  nfvis-baseline: update-grub 成功；**需重启生效**
+  nfvis postinst: 注意：内核基线需重启生效（FR-SYS-014）
+$ cat /etc/default/grub.d/99-nfvis.cfg
+  GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} default_hugepagesz=1G hugepagesz=1G hugepages=1"
+$ grep -A1 nfvis-hugepages /etc/fstab
+  # nfvis-hugepages
+  nodev /dev/hugepages hugetlbfs defaults,pagesize=1G 0 0
+
+----- 4. ④ 升级后 nfvisd 一直是停的（FR-OPS-001 落空）-----
+修前（升级路径实测）：
+  升级前: active  pid=7285
+  nfvis prerm: 已停止 nfvis.service            ← prerm 在**升级**时也停服务
+  Setting up nfvis (1.1.1)…
+  nfvis postinst: 已重启 nfvis.service 以加载新版本（FR-OPS-001）   ← try-restart 因「未运行」是空操作
+  升级后: inactive  pid=                        ← 服务没起来
+修后（升级路径实测）：
+  升级前: active  pid=7604
+  nfvis prerm: 升级中，保留运行中的 nfvis.service（由 postinst try-restart 换新版本）
+  nfvis postinst: 已重启 nfvis.service 以加载新版本（FR-OPS-001）
+  升级后: active  pid=7842                      ← 保持运行且已换新版本
+（注：prerm 由**已安装的旧包**执行，故修复需装一次新版后才在下次升级生效——已在 VM 上验证到。）
+
+----- 5. ⑤ nfvis-cli 交互式口令提示（FR-SEC-008）-----
+修前：不给 -p/NFVIS_PASSWORD 时直接发空口令 → 用户看到「需要 username 与 password」（像语法错），
+      只能把口令写在命令行上（**进 ps 与 shell 历史**）。
+修后（真机，未给 -p/-env）：
+  ① pty（script -qec）：
+       Password:                    ← 无回显提示
+       连接 http://127.0.0.1:18443 ...
+       NFViS 1.0.0-dev（M2：配置事务可用，网络底座 M3+ 接入）
+  ③ 非 TTY（< /dev/null，10s 内返回，不挂起）：
+       % 未提供口令：请在终端下运行以交互输入，或用 -p / NFVIS_PASSWORD 指定
+  ④ -p 仍优先（脚本/自动化不受影响）：登录成功
+
+----- 6. ⑥ 首启口令含 '!' 导致粘贴失败 -----
+修前：randomPassword 后缀 `!Aa1` → `HyrYtLMp74w-eTCj!Aa1`，交互式 bash 下 `!Aa1` 触发历史展开
+      （`-bash: !Aa1: event not found`），单双引号都拦不住（双引号内 `!` 仍展开）。
+修后：后缀改 `@Aa1`（同属 unicode.IsPunct，满足复杂度策略；shell 中无特殊含义）。
+真机生成示例：XiJrwGuFApmADuaK@Aa1
+  → 直接 `nfvis-cli -p XiJrwGuFApmADuaK@Aa1` 可用（不再需要引号）
+测试：internal/aaa/bootstrap_test.go:TestRandomPasswordIsShellSafe（200 次生成）
+  红-绿：还原 `!Aa1` → --- FAIL: 生成口令含 shell 敏感字符（复制粘贴会失败）："puZRV3ZFNpCrdB8Z!Aa1"
+        恢复 `@Aa1` → ok
+
+----- 7. 回归 -----
+make check 全绿（决策条数 80 一致）。
+deb 构建 + 实装 + 升级 + `systemd-analyze verify` 均通过（见上）。
+
+----- 8. 环境 -----
+nfvis-vm（应用机）当前装有**含本轮修复的本地构建** 1.1.1，nfvisd active；
+`/etc/default/grub.d/99-nfvis.cfg` 已由 postinst 写入（**重启后**生效 1G×1 大页）；
+VPP active、2 块网卡绑 vfio-pci；/tmp 无残留。

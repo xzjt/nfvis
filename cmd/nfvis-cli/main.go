@@ -6,10 +6,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 
 	"github.com/xzjt/nfvis/internal/cli"
 	"github.com/xzjt/nfvis/pkg/cliclient"
@@ -21,14 +24,14 @@ func main() {
 		// 未提供证书时自动自签并启用 HTTPS（决策 #72）。此前缺省是明文 http://…:8443，
 		// 与守护进程默认不匹配 → 默认参数连不上（决策 #78）。
 		// 可用 NFVIS_SERVER 覆盖（与 NFVIS_PASSWORD 同风格），便于脚本/自动化。
-		server   = flag.String("server", envOr("NFVIS_SERVER", cliclient.DefaultServer), "nfvisd 地址（缺省读 NFVIS_SERVER）")
-		user     = flag.String("u", "admin", "用户名")
-		password = flag.String("p", os.Getenv("NFVIS_PASSWORD"), "口令（缺省读 NFVIS_PASSWORD）")
-		source   = flag.String("source", "ssh", "接入源（ssh|console）")
-		cmdline  = flag.String("c", "", "执行多行命令后退出（换行分隔）")
-		showVer  = flag.Bool("version", false, "输出版本后退出")
-		caFile   = flag.String("ca", "", "服务端证书 PEM（HTTPS 校验；缺省尝试固定本机 nfvisd 证书）")
-		insecure = flag.Bool("insecure", false, "跳过 HTTPS 证书校验（仅限调试）")
+		server       = flag.String("server", envOr("NFVIS_SERVER", cliclient.DefaultServer), "nfvisd 地址（缺省读 NFVIS_SERVER）")
+		user         = flag.String("u", "admin", "用户名")
+		passwordFlag = flag.String("p", os.Getenv("NFVIS_PASSWORD"), "口令（缺省读 NFVIS_PASSWORD；均未给则在终端下交互索取）")
+		source       = flag.String("source", "ssh", "接入源（ssh|console）")
+		cmdline      = flag.String("c", "", "执行多行命令后退出（换行分隔）")
+		showVer      = flag.Bool("version", false, "输出版本后退出")
+		caFile       = flag.String("ca", "", "服务端证书 PEM（HTTPS 校验；缺省尝试固定本机 nfvisd 证书）")
+		insecure     = flag.Bool("insecure", false, "跳过 HTTPS 证书校验（仅限调试）")
 	)
 	flag.Parse()
 	if *showVer {
@@ -36,9 +39,22 @@ func main() {
 		return
 	}
 
+	password := *passwordFlag
+	if password == "" {
+		// 未给 -p / NFVIS_PASSWORD 时**交互式索取**：口令不进命令行（`ps` 与 shell 历史都看不到），
+		// 也避免口令中的 shell 特殊字符（如 `!`）被 shell 先行展开。
+		// 非 TTY（脚本/管道）不提示，直接给明确指引，以免挂起。
+		pw, err := readPassword(os.Stdin, os.Stderr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%% %v\n", err)
+			os.Exit(1)
+		}
+		password = pw
+	}
+
 	client := mustClient(*server, *caFile, *insecure)
 	fmt.Printf("连接 %s ...\n", *server)
-	if err := client.Login(*user, *password); err != nil {
+	if err := client.Login(*user, password); err != nil {
 		fmt.Fprintf(os.Stderr, "%% 登录失败: %v\n", err)
 		if isConnErr(err) {
 			// 最常见的两个原因：守护进程未起 / 监听地址与端口不是缺省。
@@ -145,4 +161,19 @@ func isConnErr(err error) bool {
 	}
 	var oerr *net.OpError
 	return errors.As(err, &oerr)
+}
+
+// readPassword 在终端下无回显地索取口令；非 TTY 时返回可操作的错误（不阻塞脚本）。
+func readPassword(in *os.File, out io.Writer) (string, error) {
+	fd := int(in.Fd())
+	if !term.IsTerminal(fd) {
+		return "", errors.New("未提供口令：请在终端下运行以交互输入，或用 -p / NFVIS_PASSWORD 指定")
+	}
+	fmt.Fprint(out, "Password: ")
+	b, err := term.ReadPassword(fd)
+	fmt.Fprintln(out)
+	if err != nil {
+		return "", fmt.Errorf("读取口令失败: %w", err)
+	}
+	return string(b), nil
 }

@@ -2,7 +2,7 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 适用版本 | V1（规格书 109 条 FR；决策 79 项） |
+| 适用版本 | V1（规格书 109 条 FR；决策 80 项） |
 | 适用对象 | 一体机部署/运维工程师（需 Linux 与网络基础） |
 | 配套文档 | 命令速查：[`NFViS-CLI命令全表.md`](NFViS-CLI命令全表.md)（256 条命令含实测状态）<br>需求真源：`NFViS-系统产品需求与目标架构规格书.md`（附录 A = 决策记录）<br>契约：`NFViS-openapi.yaml`（REST）、`NFViS-CLI命令树完整设计.md`（CLI） |
 | 证据口径 | 本手册中的命令与输出均取自 **nfvis-vm 真机实测**（`docs/evidence/v1-closeout-round7/8.txt` 等）；未实测处均显式标注 |
@@ -12,8 +12,8 @@
 >    现缺省即 `https://127.0.0.1:443`，**零参数可连**（见 §4.3）；
 > ② **已修**（决策 #77，安全）：`request system configuration backup to <path>` 导出件曾为 0644
 >    且含 `password_hash`，现为 0600；
-> ③ **未修**：`postinst` 的**内核基线代码块不可达**（安装期并未应用基线）——见 §2.1，
->    请按 §3.1 手工执行；
+> ③ **已修**（决策 #80）：`postinst` 的内核基线块原先不可达（安装期并未应用基线），
+>    现已前置——安装时即按机器规格写 GRUB 片段与 fstab，**重启后生效**；
 > ④ **未修**：`set system login user … password …` 经 CLI 不可用（建用户请走 REST）——见 §4.5。
 
 ---
@@ -95,11 +95,11 @@ sudo dpkg -i build/nfvis_1.0.0_amd64.deb
 4. 探测 `vpp` / `libvirtd` / `dockerd`，缺失时**警告**（对应编排能力降级）；
 5. `systemctl enable nfvis.service`——**首次安装不自动 start**（避免安装期抢占网卡）。
 
-> ⚠️ **缺陷（本手册编写时发现）**：`deploy/debian/postinst` 在第 63 行有 `exit 0`，
-> 其后的「内核启动基线」代码块（第 65–80 行）**永远不会执行** ——
-> 即安装期**并没有**自动应用内核基线，也没有调用 `nfvis-baseline.sh --defaults`。
-> 注释里写的「安装期预置」与实际行为不符。请**手工执行 §3.1**。已在
-> `docs/NFViS-CLI命令全表.md` §4 与验收检查表登记。
+> **安装期会应用内核基线（决策 #80 起）**：`postinst` 会在无基线时按机器规格写
+> `/etc/default/grub.d/99-nfvis.cfg` 与 fstab 大页行并执行 `update-grub`，
+> 输出形如 `按机器规格取默认：RAM 5G → 1G 大页 1 页` + `需重启生效`。
+> **重启后才生效**；若已有基线则只做一致性检查。
+> 需要自定义（更多大页/隔离核）仍按 §3.1 手工执行 `--apply`。
 
 ### 2.2 方式 B：从源码构建（开发/验证）
 
@@ -259,9 +259,12 @@ journalctl -u nfvis -f          # 观察启动日志
 首次启动（库中无本地用户）会创建 `admin`（super-user），**随机口令只打印一次**：
 
 ```bash
-journalctl -u nfvis --since "10 min ago" | grep -i "一次性口令"
-# %% 首次启动已创建用户 admin (super-user)。一次性口令（仅显示一次，请立即修改）: xxxxxxxx
+journalctl -u nfvis --since "10 min ago" | grep 一次性口令
+# % 首次启动已创建用户 admin (super-user)。一次性口令（仅显示一次，请立即修改）: XiJrwGuFApmADuaK@Aa1
 ```
+
+> 口令字符集**不含** `!` `$` 反引号 等 shell 敏感字符（决策 #80），可直接复制粘贴；
+> 直接 `nfvis-cli -p <口令>` 或用**单引号**包裹均可用。
 
 若口令已丢失：停服务、删库 `rm /var/lib/nfvis/nfvis.db` 会**清空全部配置**——生产环境不要这样做；
 正确做法是用 `-init-admin-password` 重新引导或经其他 super-user 重置（见 §6.1.6）。
@@ -269,10 +272,13 @@ journalctl -u nfvis --since "10 min ago" | grep -i "一次性口令"
 ### 4.3 用 CLI 连接
 
 ```bash
-nfvis-cli -server https://127.0.0.1:443 -u admin
-# 提示 Password:（或预先 export NFVIS_PASSWORD=...）
+nfvis-cli                       # 未给 -p 时在终端下**无回显**索取口令
+# Password: ← 粘贴上面的一次性口令
 nfvis>
 ```
+
+口令来源优先级：`-p` → 环境变量 `NFVIS_PASSWORD` → **终端交互提示**。
+非终端（脚本/管道）下未提供口令会**立即报错并给出指引**（不会挂起）。
 
 CLI 参数：
 
@@ -850,7 +856,7 @@ nfvis-cli … -c "show log system last 100"
 
 | 文档 | 用途 |
 |---|---|
-| `NFViS-系统产品需求与目标架构规格书.md` | 需求真源；**附录 A = 决策记录（1~79），实现有疑问先查它** |
+| `NFViS-系统产品需求与目标架构规格书.md` | 需求真源；**附录 A = 决策记录（1~80），实现有疑问先查它** |
 | `NFViS-CLI命令全表.md` | 命令速查 + 实测状态 |
 | `NFViS-CLI命令树完整设计.md` | CLI 契约 |
 | `NFViS-openapi.yaml` | REST 契约 |
