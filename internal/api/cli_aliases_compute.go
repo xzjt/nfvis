@@ -125,6 +125,14 @@ var statementAliasesCompute = []aliasRule{
 			return nil
 		}},
 
+	// container-functions <n> env <key> <value> → ContainerFunction.Env（**map**，非数组）
+	// 语句树里的 env 是「具名数组」形态（PT<key> + 值），与模型的 map 不符 → 原先报
+	// 「未知语句」；改由别名直接落 map（决策 #79）。
+	{pattern: []string{"container-functions", "*", "env", "*", "*"},
+		apply: containerEnvApply},
+	{pattern: []string{"container-functions", "*", "env", "*"},
+		apply: containerEnvApply},
+
 	// <vm|ct> <n> interfaces <vnic> virtual-switch <name> → VnfInterface.VirtualSwitch
 	{pattern: []string{"virtual-machine-functions", "*", "interfaces", "*", "virtual-switch", "*"},
 		apply: func(tree map[string]any, t []string, isSet bool) error {
@@ -213,5 +221,34 @@ func aliasVnicVirtualSwitch(tree map[string]any, branch string, t []string, isSe
 		return fmt.Errorf("配置不完整: interfaces %s virtual-switch 缺少交换机名", t[3])
 	}
 	nic["virtual_switch"] = t[5]
+	return nil
+}
+
+// containerEnvApply：容器环境变量（模型 ContainerFunction.Env map[string]string）。
+// t = ["container-functions", <name>, "env", <key>(, <value>)]。
+func containerEnvApply(tree map[string]any, t []string, isSet bool) error {
+	ct, err := elemByID(tree, "container_functions", t[1])
+	if err != nil {
+		return err
+	}
+	env, _ := ct["env"].(map[string]any)
+	if !isSet {
+		if env == nil {
+			return fmt.Errorf("无匹配配置: container-functions %s env %s", t[1], t[3])
+		}
+		if _, ok := env[t[3]]; !ok {
+			return fmt.Errorf("无匹配配置: container-functions %s env %s", t[1], t[3])
+		}
+		delete(env, t[3])
+		return nil
+	}
+	if len(t) < 5 {
+		return fmt.Errorf("配置不完整，缺少取值: container-functions %s env %s <value>", t[1], t[3])
+	}
+	if env == nil {
+		env = map[string]any{}
+		ct["env"] = env
+	}
+	env[t[3]] = t[4]
 	return nil
 }

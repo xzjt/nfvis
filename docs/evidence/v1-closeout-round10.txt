@@ -1,0 +1,104 @@
+===== V1 收尾第十轮：待办 §2.4 的 8 处「契约已声明但经 CLI 用不了」修复（决策 #79）=====
+环境：nfvis-vm（Ubuntu 26.04、VPP v26.06-release、libvirt 12.0.0、Docker 29.x）
+日期：2026-09-15
+nfvisd：/tmp/nfvisd -db … -listen 127.0.0.1:18443 -allow-plaintext -init-admin-password "Admin@12345"
+本文件为**原始输出摘录**，命令与结果一一对应。
+
+----- 0. 起因与方法 -----
+待办 §2.4 登记了 8 处「契约已声明但经 CLI 用不了」（决策 #76 编制命令全表时补测发现）。
+本轮逐条修复，并把**通用根因**一并处理——因为它们其实分属两类，不是 8 个孤立缺陷：
+  A. **解析器层级问题**：取值关键字消费后 node 停在消费点，其**同级**关键字不可达（① ② ⑦）；
+     以及末位实例参数未终止语句（⑦ 原报「缺少取值」）。
+  B. **模型键/形态不匹配**：CLI 键名与模型 JSON 键不一致（② 的 `user/class/password` vs
+     `users/classes/password_hash`；① 多一层 `tls`）、形态不同（③ 数组 vs 标量、⑧ map vs 数组）。
+     这类此前被 `encoding/json` **静默忽略**，表现为「语句看似成功却没生效」——比报错更难排查。
+
+----- 1. 三处通用加固（先做，价值高于单点修复）-----
+### 1.1 fromJSONTree / validateTreeJSON 启用 DisallowUnknownFields
+修前：schema 键与模型键不一致 → 该键被静默丢弃 → commitTree 的 Diff 兜底看不出变化 →
+      报「语句未产生配置变更」（第 ③ 条即如此被掩盖）。
+修后：
+$ nfvis-cli -c "configure\nset system login class c1 allow show"
+  %% 语句未映射到模型（键名不匹配或类型不符）: json: unknown field "class"
+整类「CLI 声明了但落不进模型」在**第一次执行**即显式报错。现有全部单测仍绿（无既有语句依赖该宽容行为）。
+
+### 1.2 解析器：就近向上回退 + 末位实例参数终止语句
+修前：`set system api tls cert-file /tmp/a.pem key-file /tmp/a.key`
+      → %% 未知语句: "key-file"（node 停在 cert-file，同级 key-file 不可达）
+修后：→ [ok]（`schema.Node.parent` 本即为此回填，本轮新增 `Parent()` 访问器供 api 包使用）
+
+### 1.3 SPA 首值落数组 + 口令回显脱敏
+修前：`set … cloud-init ssh-key "…"` → 首值被写成字符串 → `cannot unmarshal string into … []string`
+修后：→ 落成数组。
+另：`set … password <pw>` 的回显改为 `«已隐藏»`（配置只存哈希、展示层已脱敏，回显不应例外）。
+
+----- 2. 8 处逐条真机复验（修复前后对照）-----
+$ nfvis-cli -c "configure
+set system api tls cert-file /etc/nfvis/srv.pem key-file /etc/nfvis/srv.key"
+  修前：%% 未知语句: "key-file"        →  修后：[ok]
+$ nfvis-cli -c "configure\nset system login user ops password Abc12345!xyz class operator"
+  修前：%% 未知语句: "password"        →  修后：[ok] system login user ops password «已隐藏» class operator
+$ nfvis-cli -c "configure\nset system login class audit allow show"
+  修前：%% 语句未产生配置变更          →  修后：[ok]
+$ nfvis-cli -c "configure\nset system login class audit deny configure"
+  修前：%% 语句未产生配置变更          →  修后：[ok]
+$ nfvis-cli -c "configure\nset virtual-switches xc cross-connect 1 2"      # 未声明端口
+  修前：%% 未知语句: "2"               →  修后：%% cross-connect 引用的端口未声明，请先 set virtual-switches xc ports 1 interface <ifname>（另需端口 2）
+  （先声明 ports 1/2 后）                                                            →  [ok]，committed 可见 `cross-connect true;`
+$ nfvis-cli -c "configure\nset virtual-machine-functions vm1 interfaces eth0 vlan 100"
+  修前：%% 取值类型不符: cannot unmarshal string into … vlan of type int   →  修后：[ok]，committed 可见 `vlan 100;`
+$ nfvis-cli -c "configure\nset virtual-machine-functions vm1 cloud-init ssh-key \"ssh-ed25519 AAAA… nfvis@test\""
+  修前：%% 未知语句: "AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY"   →  修后：[ok]，committed 可见 `ssh-keys [ ssh-ed25519 … nfvis@test ];`
+$ nfvis-cli -c "configure\nset container-functions ct1 interfaces eth0 type memif virtual-switch vs-l2"
+  修前：%% 未知语句: "virtual-switch"   →  修后：[ok]，committed 可见 `type memif;`
+$ nfvis-cli -c "configure\nset container-functions c1 env TEST_KEY test_value"   # 另加 env SECOND other
+  修前：%% 未知语句: "test_value"       →  修后：[ok]，committed 可见 `env { SECOND other; TEST-KEY test_value; }`
+                                           JSON 视图：{"env":{"SECOND":"other","TEST_KEY":"test_value"}}   ← **map 形态**
+
+整体提交（12 条语句一次 commit）：
+$ nfvis-cli -c "configure\n<上述 12 条>\ncommit"
+  commit 成功 (revision 5)
+
+----- 3. 安全复核（真机）-----
+  committed 配置中出现明文口令的次数（应为 0）: 0
+  落库值： "password_hash": "pbkdf2$sha256$600000$…"
+  回显：   [ok] system login user ops password «已隐藏» class operator
+  新建用户经 REST 登录 → HTTP 200（class=operator）
+  口令策略生效：`set system login user weak password short1 …`（策略 min-length 12）→
+    %% 口令不满足策略：长度不足 12 字符
+
+----- 4. 守护与红-绿 -----
+12 条语句补入 internal/api/cli_mapping_test.go:contractStatements（该清单漏列即漏网原因）。
+新增 internal/api/cli_aliases_auth_test.go：
+  TestLoginUserPasswordIsHashedNotStoredInPlaintext / TestLoginUserPasswordPolicyEnforced /
+  TestLoginClassAllowDenyAreArrays / TestTLSCombinedCertAndKey /
+  TestCrossConnectRequiresTwoDeclaredPorts / TestContainerEnvIsMap / TestSplitFieldsQuoted
+红-绿（撤修复必失败）：
+  注入「明文落库」    → --- FAIL: 口令以明文落库——必须哈希
+  去掉回显脱敏        → --- FAIL: 回显不得包含明文口令
+  还原坏解析（撤回退）→ --- FAIL: 契约语句未映射到模型: %% 语句未映射到模型… unknown field "class" 等 8 条
+make check 全绿。
+
+----- 5. ⚠️ 验证期间的环境事件（如实登记）-----
+验证过程中 nfvis-vm 一度完全失去响应（ping 与 22/443/18443 均不通）。恢复后从内核日志定位：
+  watchdog: BUG: soft lockup - CPU#3 stuck for 26s! [kworker/3:4:181635]
+  watchdog: BUG: soft lockup - CPU#3 stuck for 52s! [kworker/3:4:181635]
+  Tainted: [L]=SOFTLOCKUP
+  Workqueue: events drain_vmap_area_work
+  RIP: smp_call_function_many_cond  ←→ __purge_vmap_area_lazy → flush_tlb_kernel_range
+即 **CPU 饱和下 vmap 回收的跨 CPU TLB flush 长时间自旋**导致的 soft lockup；另有 ksoftirqd 的栈转储。
+佐证：事故时段 load average 达 21（6 核 VM）；nfvisd 自身正常（02:05:59 收到 SIGTERM 后「优雅停机」）；
+未发现 OOM；VPP 启停 99 次系当日多次手工 `systemctl restart vpp` 之累积，非循环重启；
+重启由 `systemd-reboot.service` 正常发起。
+**如实说明**：该 VM 仅 6 核，当时同时承载 VPP 轮询线程（main-core/worker 独占核）与验证负载
+（Docker、镜像导入、容器/VM 定义），无法完全排除与本次验证配置相关。
+由此得到的**运维结论**（已写入命令全表 §4⑦ 与用户手册 §8）：
+  `cross-connect` 是二层直通、**无 MAC 学习、无环路保护**——把**同一广播域**内的两个端口直通
+  （例如同在 VMware 同一虚拟交换机上的两块网卡）会形成**物理二层环路 / 广播风暴**；
+  直通两端必须属于不同广播域。本环境 ens192/ens224 与 ens160 同处 VMnet8，正是该风险场景。
+
+----- 6. 环境恢复 -----
+重启后 ens192/ens224 回到 vmxnet3（内核网卡），已按 M3 交接文档的带外步骤重绑 **vfio-pci**；
+VPP 已启动（ens192/ens224 在 VPP 中、down、MTU 9000）；nfvisd 未运行；
+无 domain/VM；/data/incoming 与备份/诊断归档已清空；images 恢复为 alpine.qcow2 + index.json；
+/tmp 无会话残留；load average ~0.3。

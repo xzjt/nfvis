@@ -5,7 +5,7 @@
 | 用途 | **命令参考全表**：把 CLI 命令树逐条列出，附权限、落点与**真机实测状态** |
 | 来源 | 命令树取自实现（`internal/schema/tree_oper.go`、`tree_config.go`，即 `?` 补全的真实来源）；契约见 `docs/NFViS-CLI命令树完整设计.md` |
 | 实测状态 | 来自 **2026-09-14 全功能 CLI 测试**（决策 #76，证据 `docs/evidence/v1-closeout-round8.txt`）。测试工具：`contrib/scripts/cli-fulltest.sh` |
-| 基线 | main + PR #69/#70；决策 78 项 |
+| 基线 | main（PR #69~#75 已合并）；决策 79 项 |
 
 ## 0. 阅读约定
 
@@ -24,7 +24,6 @@
 | ✅ | 真机 CLI 实测通过 |
 | ⚠️ | **已知缺口**：未实现但**明确提示**（非静默空值） |
 | ⊘ | **预期报错**：环境受限或防呆守卫正确拒绝——报错即正确行为 |
-| ❌ | **确认不可用**：契约已声明、但经 CLI 用不了（缺陷，待修，见 §4⑦） |
 | 🚫 | **本轮未执行**：破坏性/需交互，测试机不宜执行（非「未实现」） |
 
 **落点**：`POST /cli/execute` 是所有 CLI 命令的统一入口；表中「落点」列给出该命令**实际作用的**
@@ -221,7 +220,7 @@
 | `set system api port <n>` | HTTPS 端口（默认 443） | nfvisd | ✅ |
 | `set system api token-ttl-minutes <n>` | Token 有效期（默认 60） | nfvisd | ✅ |
 | `set system api max-sessions <n>` | 并发会话上限（真限流） | nfvisd | ✅（决策 #71） |
-| `set system api tls cert-file <p> key-file <p>` | 安装外部证书（立即生效） | nfvisd TLS | ❌ `未知语句: "key-file"` |
+| `set system api tls cert-file <p> key-file <p>` | 安装外部证书（立即生效） | nfvisd TLS | ✅（决策 #79 修复） |
 | `set system api tls self-signed regenerate` | 重签自签证书 | nfvisd TLS | ✅ |
 | `set system management interface <ifname>` | 管理网卡（不得用于数据面） | 宿主 + 数据面隔离校验 | ✅（决策 #71/72） |
 | `set system management ip address <ip-prefix>` | 管理口静态地址 | 宿主 netplan | ✅ |
@@ -238,9 +237,9 @@
 | `set system syslog local level <lvl>` | 本地日志级别 | 宿主日志 | ✅ |
 | `set system syslog local retention-days <n>` | 日志保留天数（FR-SYS-013） | 宿主 logrotate | ✅ |
 | `set system syslog local max-size-mb <n>` | 日志容量上限 | 宿主 logrotate | ✅ |
-| `set system login user <n> password <s> class <c>` | 本地用户 | 配置库（哈希） | ❌ `未知语句: "password"`（语法树把 `<name>` 参数置于关键字之前） |
-| `set system login class <n> allow <path>` | 自定义 class 允许项 | 配置库 | ❌ `语句未产生配置变更`（未映射到 `[]string`） |
-| `set system login class <n> deny <path>` | 自定义 class 拒绝项 | 配置库 | ❌ 同上 |
+| `set system login user <n> password <s> class <c>` | 本地用户（口令**加盐哈希**落库、回显脱敏） | 配置库（PBKDF2） | ✅（决策 #79 修复） |
+| `set system login class <n> allow <path>` | 自定义 class 允许项（可多条） | 配置库 | ✅（决策 #79 修复） |
+| `set system login class <n> deny <path>` | 自定义 class 拒绝项（可多条） | 配置库 | ✅（决策 #79 修复） |
 | `set system login password-policy min-length <n>` | 口令最小长度 | 配置库 | ✅ |
 | `set system login password-policy complexity <bool>` | 复杂度要求 | 配置库 | ✅ |
 | `set system login password-policy expire-days <n>` | 口令有效期 | 配置库 | ✅ |
@@ -283,7 +282,7 @@
 | `set virtual-switches <n> ports [<seq>] interface <if> [trunk vlans <l>\|native <v>]` | 物理口成员 | VPP BD | ✅ |
 | `set virtual-switches <n> ports [<seq>] vnf <vm> interface <vnic> [trunk vlans <l>]` | vhost-user 成员 | VPP + libvirt | ✅ |
 | `set virtual-switches <n> ports [<seq>] container <ct> interface <vnic>` | 容器 memif 成员 | VPP + Docker | ✅ |
-| `set virtual-switches <n> cross-connect <a> <b>` | 两端口直通（与 ports/gateway 互斥） | VPP | ❌ `未知语句: "2"`；且模型只有 bool 字段（CLI/模型语义不一致） |
+| `set virtual-switches <n> cross-connect <a> <b>` | 两端口直通（与 ports/gateway 互斥） | VPP | ✅（决策 #79 修复：置 `cross_connect` 并校验两端口已声明） |
 | `set virtual-switches <n> l3-interface <if> ip address <p>` | L3 接口地址（v4/v6 多条） | VPP | ✅ |
 | `set virtual-switches <n> l3-interface <if> acl-in <acl>` | L3 接口 ACL 绑定 | VPP acl | ✅ |
 | `set virtual-switches <n> static-routes <prefix> next-hop <ip> [distance <n>]` | 静态路由（v4/v6） | VPP FIB | ✅ |
@@ -343,10 +342,10 @@
 | `set virtual-machine-functions <n> interfaces <vnic> type <vhost-user\|sriov-vf>` | vNIC 类型 | libvirt + VPP | ✅ |
 | `set … interfaces <vnic> sriov physical-interface <if> vf <n>` | SR-IOV 直通 | libvirt | ⊘ 无 PF/VF 环境 |
 | `set … interfaces <vnic> mac <mac>` | MAC（缺省自动生成） | libvirt | ✅ |
-| `set … interfaces <vnic> vlan <vlan>` | VLAN tag | libvirt | ❌ 类型错（写入字符串，模型为 `int`） |
+| `set … interfaces <vnic> vlan <vlan>` | VLAN tag | libvirt | ✅（决策 #79 修复：按 int 落库） |
 | `set … interfaces <vnic> virtual-switch <name>` | 所属 L2 交换机 | VPP | ✅ |
 | `set … cloud-init user-data <path\|text>` | user-data 注入（FR-CMP-016） | seed ISO | ✅ |
-| `set … cloud-init ssh-key <key>` | SSH 公钥（可多条） | seed ISO | ❌ `未知语句`：公钥含空格，而 `set` 不支持多词取值/引号 |
+| `set … cloud-init ssh-key <key>` | SSH 公钥（可多条；**用双引号包住含空格的公钥**） | seed ISO | ✅（决策 #79 修复：引号感知切分 + `ssh_keys[]`） |
 | `set … cloud-init hostname <s>` | guest 主机名 | seed ISO | ✅ |
 | `set … serial console enable` | 串口控制台（默认启用） | libvirt | ✅ |
 | `set … autostart <bool>` | 随系统自启 | libvirt | ✅ |
@@ -359,8 +358,8 @@
 | `set container-functions <n> image <img>` | 引用 container-image | Docker | ✅（**须与 Docker tag 同名**，见 §4①） |
 | `set container-functions <n> vcpu count <n>` | cgroup CPU 限制 | Docker | ✅ |
 | `set container-functions <n> memory size-mb <n>` | cgroup 内存限制 | Docker | ✅ |
-| `set container-functions <n> interfaces <vnic> type memif virtual-switch <n> [mac <m>] [vlan <v>]` | memif vNIC | VPP + Docker | ❌ `未知语句: "virtual-switch"`（`type` 取值后同级关键字不可达） |
-| `set container-functions <n> env <key> <value>` | 环境变量（可多条） | Docker | ❌ `未知语句: "<值>"`（取值节点未被消费） |
+| `set container-functions <n> interfaces <vnic> type memif virtual-switch <n> [mac <m>] [vlan <v>]` | memif vNIC | VPP + Docker | ✅（决策 #79 修复） |
+| `set container-functions <n> env <key> <value>` | 环境变量（多条，模型为 map） | Docker | ✅（决策 #79 修复） |
 | `set container-functions <n> command <s>` | 入口命令 | Docker | ✅ |
 | `set container-functions <n> args <s>` | 命令参数 | Docker | ✅ |
 | `set container-functions <n> restart-policy <no\|on-failure>` | 重启策略 | Docker | ✅ |
@@ -388,7 +387,6 @@
 | 状态 | 行数 | 说明 |
 |---|---|---|
 | ✅ 实测通过 | 227 | 真机 CLI 逐条执行通过 |
-| ❌ 确认不可用 | 9 | 契约已声明但经 CLI 用不了——**缺陷，待修**（见 §4⑦） |
 | ⚠️ 已知缺口 | 2 | `show vpp runtime` 未接入；`request system api token revoke` 为 V1 明确延期 |
 | ⊘ 预期报错 | 4 | SR-IOV 2 条 + VNF 端口/`ping source` 类环境受限项 |
 | 🚫 本轮未执行 | 12 | 破坏性（reboot/shutdown/zeroize/format-data/software add/restore/kernel apply 等）与需交互者（删除确认、改密） |
@@ -417,21 +415,29 @@
 ⑥ 环境受限（非实现问题）：SR-IOV（本机无 PF/VF）、LLDP 邻居（无对端）、
    硬件健康（无 IPMI/温度传感器/SMART）、容器侧 memif 通流（离线无自带 memif 的镜像）。
 
-⑦ **本表编制过程中补测发现的 8 处「契约已声明但经 CLI 用不了」**（同 §4①~⑤ 一类，
-   均在 `cli_mapping_test.go:contractStatements` 清单之外，故此前漏网）。**尚未修复**，
-   表中对应行标 ❌：
+⑦ **本表编制过程中补测发现的 8 处「契约已声明但经 CLI 用不了」——已全部修复**（决策 #79）。
+   这 8 处此前都在 `cli_mapping_test.go:contractStatements` 清单之外，故长期漏网；现已补入守护。
+   根因与修法（逐条）：
 
-| # | 语句 | 现象 |
+| # | 语句 | 根因 → 修法 |
 |---|---|---|
-| 1 | `set system api tls cert-file <p> key-file <p>` | `未知语句: "key-file"` |
-| 2 | `set system login user <n> password <s> class <c>` | `未知语句: "password"`（`<name>` 参数被置于关键字之前） |
-| 3 | `set system login class <n> allow <path>` | `语句未产生配置变更`（未映射到 `[]string`） |
-| 4 | `set system login class <n> deny <path>` | 同上 |
-| 5 | `set virtual-switches <n> cross-connect <a> <b>` | `未知语句: "2"`；且模型仅有 `cross_connect bool`（CLI 两端口语义与模型不一致，**需设计决策**） |
-| 6 | `set virtual-machine-functions <n> interfaces <vnic> vlan <n>` | 类型错：写入字符串，模型 `Vlan int` |
-| 7 | `set … cloud-init ssh-key <key>` | `未知语句`：**SSH 公钥必含空格**，而 `set` 不支持多词取值/引号（影响 FR-CMP-016 的 CLI 注入路径） |
-| 8 | `set container-functions <n> interfaces <vnic> type memif virtual-switch <n>` / `set container-functions <n> env <key> <value>` | 前者 `未知语句: "virtual-switch"`；后者 `未知语句: "<值>"` |
+| 1 | `set system api tls cert-file <p> key-file <p>` | CLI 多一层 `tls`、模型扁平 → 7-token 别名 |
+| 2 | `set system login user <n> password <s> class <c>` | 三层键名不一致（`user/class/password` vs `users/classes/password_hash`）且口令**必须哈希** → 别名 + `aaa.HashPassword`/`CheckPasswordPolicy`（与 REST 同源），回显脱敏为 `«已隐藏»` |
+| 3/4 | `set system login class <n> allow\|deny <path>` | 模型是 `[]string`，原先写标量 → 按值追加/删除 |
+| 5 | `set virtual-switches <n> cross-connect <a> <b>` | 模型只有 `cross_connect bool`（端口身份由 `ports` 承担）→ **保持模型不变**，置位 + 校验被引用端口已声明且恰为两个 |
+| 6 | `set virtual-machine-functions <n> interfaces <vnic> vlan <n>` | ParamType `vlan` 让值保持字符串、模型是 `int` → `valueTransforms` 转数值 |
+| 7 | `set … cloud-init ssh-key <key>` | SSH 公钥必含空格，`strings.Fields` 会拆开 → 解析入口改**引号感知切分** + `SPA(ssh_keys)` |
+| 8 | 容器 `interfaces … type memif virtual-switch …` / `env <k> <v>` | 前者：取值关键字后的同级关键字不可达 → 解析器**就近向上回退**（`Node.parent`）+ vNIC 改 `SPD`；后者：模型是 map → 别名直接落 map |
 
-其中 **2/5 需要设计决策**（口令哈希的 CLI 落地路径、cross-connect 的模型语义），
-**7 需要 CLI 前端的取值引号机制**（影响面较广）；其余 4 处为同类映射补齐。
-建议作为**独立一批**修复并补入 `contractStatements` 守护。
+同时做了三处**通用加固**（比单点修复更重要）：
+
+- **`fromJSONTree`/`validateTreeJSON` 启用 `DisallowUnknownFields`**：此前 schema 键与模型键不一致时
+  `encoding/json` **静默忽略**，语句"看似成功却没生效"（第 3 条正是这样被掩盖的）。
+  现在整类「CLI 声明了但落不进模型」第一次执行即显式报错。
+- **解析器末位实例参数即语句结束**（原先误报「缺少取值」）；**`SPA` 首值落数组**（`ssh_keys` 等以前首值被写成字符串）。
+- **口令回显脱敏**：`set … password <pw>` 回显为 `«已隐藏»`——配置只存哈希、展示层已脱敏（决策 #70），回显不该例外。
+
+⚠️ **运维告警（本批验证时踩到）**：`cross-connect` 是**二层直通、无 MAC 学习/无环路保护**。
+若把**同一广播域**内的两个端口做直通（例如同一 VMware 虚拟交换机上的两块网卡），
+会形成物理二层环路 → 广播风暴。做直通的两个端口必须属于**不同**广播域。
+

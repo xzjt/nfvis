@@ -2,7 +2,7 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 适用版本 | V1（规格书 109 条 FR；决策 77 项） |
+| 适用版本 | V1（规格书 109 条 FR；决策 79 项） |
 | 适用对象 | 一体机部署/运维工程师（需 Linux 与网络基础） |
 | 配套文档 | 命令速查：[`NFViS-CLI命令全表.md`](NFViS-CLI命令全表.md)（256 条命令含实测状态）<br>需求真源：`NFViS-系统产品需求与目标架构规格书.md`（附录 A = 决策记录）<br>契约：`NFViS-openapi.yaml`（REST）、`NFViS-CLI命令树完整设计.md`（CLI） |
 | 证据口径 | 本手册中的命令与输出均取自 **nfvis-vm 真机实测**（`docs/evidence/v1-closeout-round7/8.txt` 等）；未实测处均显式标注 |
@@ -318,10 +318,8 @@ curl -sk --cacert /var/lib/nfvis/tls/server.crt https://127.0.0.1/api/v1/system/
 
 ### 4.5 建用户与权限 class
 
-> ⚠️ **CLI 暂不可用**：`set system login user <n> password <s> class <c>` 属**已知缺陷**
-> （实测报 `%% 未知语句: "password"`；语法树把 `<name>` 参数置于关键字之前）。
-> V1 建/改用户请走 **REST API**（下表端点），已实测可用。该缺陷登记于
-> `NFViS-CLI命令全表.md` §4⑦，待修。
+> **CLI 亦可**（决策 #79 已修复）：`set system login user <n> password <s> class <c>` 会**加盐哈希**后落库
+>（先过口令策略），且语句回显脱敏为 `«已隐藏»`。下表 REST 端点等价，二者同源。
 
 ```bash
 TOKEN=$(curl -sk https://127.0.0.1/api/v1/login -H 'Content-Type: application/json' \
@@ -784,6 +782,7 @@ nfvis$ request system ssh host-key regenerate
 | `show lldp neighbors` 为空 | 无 LLDP 对端 | 正常；对端启用 LLDP 后可见 |
 | `request sriov …` 报「不支持 SR-IOV」 | 网卡无 SR-IOV 能力或未暴露 VF | 换支持 SR-IOV 的网卡；见 FR-NET-004 |
 | VPP 重启后网络不通 | startup.conf 由 committed 配置生成，配置不含端口/网卡 | 检查 `show configuration`，必要时 `request vpp restart` 重放 |
+| 配了 cross-connect 后网络风暴/整机失联 | **直通两端同处一个广播域** → 物理二层环路（cross-connect 无 MAC 学习、无环路保护） | 直通两端必须属于**不同**广播域；先断开其一再改配置 |
 | 升级后配置丢失 | 不应发生（配置在 `/var/lib/nfvis/nfvis.db`） | 检查 DB 是否存在；`purge` 卸载才清运行态，数据保留 |
 
 **取日志**：
@@ -846,13 +845,12 @@ nfvis-cli … -c "show log system last 100"
 | `show vpp runtime` 未接入 | govpp runtime 解码受限，CLI 明确提示 |
 | 硬件健康在无 BMC/传感器环境为降级路径 | `show system hardware` 仍可用，值可能为空 |
 | SR-IOV / LLDP 邻居 需对应硬件与对端 | 无 PF/VF、无 LLDP 对端时无法演示 |
-| 8 条配置语句经 CLI 暂不可用 | 见命令全表 §4⑦（含 `login user`、`cloud-init ssh-key` 等，待修） |
 
 ### 9.5 参考文档
 
 | 文档 | 用途 |
 |---|---|
-| `NFViS-系统产品需求与目标架构规格书.md` | 需求真源；**附录 A = 决策记录（1~77），实现有疑问先查它** |
+| `NFViS-系统产品需求与目标架构规格书.md` | 需求真源；**附录 A = 决策记录（1~79），实现有疑问先查它** |
 | `NFViS-CLI命令全表.md` | 命令速查 + 实测状态 |
 | `NFViS-CLI命令树完整设计.md` | CLI 契约 |
 | `NFViS-openapi.yaml` | REST 契约 |

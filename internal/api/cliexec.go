@@ -12,6 +12,7 @@ package api
 // 权限逐命令校验：schema 节点 RequiredClass × aaa.Authorize（FR-SEC-002）。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -220,7 +221,7 @@ func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
 // 无歧义前缀即可执行，与 Tab 补全同源）。set/delete/edit/show 的路径相对当前
 // edit 层级解析；annotate 的注释文本与 load/save 文件名原样保留。
 func (x *cliExecutor) canonicalize(s *cliSession, cmd string) ([]string, error) {
-	toks := strings.Fields(cmd)
+	toks := splitFieldsQuoted(cmd)
 	if len(toks) == 0 {
 		return nil, nil
 	}
@@ -513,7 +514,7 @@ func (x *cliExecutor) execSetDelete(user, source string, s *cliSession, op strin
 		return "%% " + err.Error() + "\n"
 	}
 	if op == "set" {
-		return "[ok] " + strings.Join(full, " ") + "\n"
+		return "[ok] " + strings.Join(maskStatementTokens(full), " ") + "\n"
 	}
 	return "已删除 " + strings.Join(full, " ") + "（未提交）\n"
 }
@@ -688,7 +689,7 @@ func matchAlias(tokens []string) *aliasRule {
 
 // allAliasRules 汇总别名规则（顺序即匹配优先级）。
 func allAliasRules() []*aliasRule {
-	out := make([]*aliasRule, 0, len(statementAliases)+len(statementAliasesNet)+len(statementAliasesCompute)+len(statementAliasesSystem)+len(statementAliasesArray))
+	out := make([]*aliasRule, 0, len(statementAliases)+len(statementAliasesNet)+len(statementAliasesCompute)+len(statementAliasesSystem)+len(statementAliasesArray)+len(statementAliasesAuth))
 	for i := range statementAliases {
 		out = append(out, &statementAliases[i])
 	}
@@ -703,6 +704,9 @@ func allAliasRules() []*aliasRule {
 	}
 	for i := range statementAliasesArray {
 		out = append(out, &statementAliasesArray[i])
+	}
+	for i := range statementAliasesAuth {
+		out = append(out, &statementAliasesAuth[i])
 	}
 	return out
 }
@@ -1007,8 +1011,14 @@ func fromJSONTree(m map[string]any, c *model.Config) error {
 		return err
 	}
 	var out model.Config
-	if err := json.Unmarshal(b, &out); err != nil {
-		return fmt.Errorf("取值类型不符: %v", err)
+	// DisallowUnknownFields：schema 关键字与模型 JSON 键不一致时（历史缺陷类型，如语句树
+	// `login user`/`login class`/`password` 对应模型 `users`/`classes`/`password_hash`），
+	// encoding/json 默认**静默忽略**该键 → 语句看似成功却「未产生配置变更」，比报错更难排查。
+	// 这里改为显式报错，让整类「CLI 声明了但落不进模型」在第一次执行时就暴露。
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&out); err != nil {
+		return fmt.Errorf("语句未映射到模型（键名不匹配或类型不符）: %v", err)
 	}
 	*c = out
 	return nil
@@ -1017,8 +1027,10 @@ func fromJSONTree(m map[string]any, c *model.Config) error {
 func validateTreeJSON(tree map[string]any) error {
 	var probe model.Config
 	b, _ := json.Marshal(tree)
-	if err := json.Unmarshal(b, &probe); err != nil {
-		return fmt.Errorf("取值类型不符: %v", err)
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields() // 同 fromJSONTree：不匹配的键必须显式报错，不得静默丢弃
+	if err := dec.Decode(&probe); err != nil {
+		return fmt.Errorf("语句未映射到模型（键名不匹配或类型不符）: %v", err)
 	}
 	return nil
 }
@@ -1105,6 +1117,26 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 				break
 			}
 		}
+		if child == nil {
+			// 层级回退（就近向上）：取值关键字/标量参数消费后 node 停在消费点上，而其**同级**
+			// 关键字是更上层节点的子节点——如
+			//   `api tls cert-file <p> key-file <p>`（key-file 与 cert-file 同级）
+			//   `vmf x interfaces eth0 type memif virtual-switch vs`（与 type 同级）
+			//   `vmf x interfaces eth0 virtual-switch vs mac <m> vlan <v>`（mac/vlan 再上一层）
+			// schema.Node.parent 正是为「值/无子树参数消耗后的层级回退」回填的。
+			// 就近匹配（先父、再祖父…）取语义上最近的关键字；cur 未随之变动，无需回退容器。
+			for p := node.Parent(); p != nil; p = p.Parent() {
+				for _, c := range p.Children {
+					if c.Kind == schema.Keyword && c.Name == tok {
+						child, node = c, p
+						break
+					}
+				}
+				if child != nil {
+					break
+				}
+			}
+		}
 		if child != nil {
 			k := jsonKeyOf(child)
 			// flag：disable 特例映射 enabled=false（§2.3）；其余 flag 走 Diff 兜底报错
@@ -1173,8 +1205,12 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 		// 2a) 标量参数：取值写入父容器的标量字段（成员标量数组则追加）
 		if p := firstParamOf(node); p != nil && p.ScalarParam {
 			v := typedScalar(tok)
+			// ScalarIsArray（SPA）：模型字段是数组，**首个取值也必须落成数组**——
+			// 否则 ssh_keys/dns_servers 这类字段会先被写成字符串，与 []string 类型不符。
 			if arr, ok := cur[p.ScalarJSONKey].([]any); ok {
 				cur[p.ScalarJSONKey] = append(arr, v)
+			} else if p.ScalarIsArray {
+				cur[p.ScalarJSONKey] = []any{v}
 			} else {
 				cur[p.ScalarJSONKey] = v
 			}
@@ -1210,6 +1246,9 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 			cur = elem
 			node = p
 			pendingArrKey = ""
+			if isSet && i == len(tokens)-1 {
+				return validateTreeJSON(tree) // 末位实例参数即语句结束（原先误报「缺少取值」）
+			}
 			continue
 		}
 
@@ -1273,6 +1312,10 @@ var valueTransforms = map[string]func(string) (any, error){
 	"cores":          expandCores,
 	// 内核基线（FR-SYS-014）：nmi-watchdog 需写真实 bool（JSON 目标为 *bool）
 	"nmi_watchdog": func(s string) (any, error) { return boolField(s) },
+	// VLAN ID：模型字段一律为 int（VnfInterface.Vlan / VSwitchPort.NativeVlan）；
+	// ParamType 为 "vlan" 时 scalarForNode 会保持字符串 → 类型不符（决策 #79）。
+	"vlan":   func(s string) (any, error) { return numField(s) },
+	"native": func(s string) (any, error) { return numField(s) },
 }
 
 func expandCores(s string) (any, error) {
@@ -1718,4 +1761,57 @@ func dpdkPerDev(tree map[string]any, ifname, key string, val any, isSet bool) er
 		elem[key] = val
 	}
 	return nil
+}
+
+// splitFieldsQuoted 按空白切分命令，但**尊重双引号**：引号内的空白不切分、引号不保留。
+// 反斜杠转义（" 与 \\）表示字面量。
+//
+// 由来（决策 #79）：`set … cloud-init ssh-key <key>` 的取值是 SSH 公钥，**必然含空格**，
+// 而此前用 strings.Fields 切分 → 公钥被拆成多个 token → 报「未知语句」，
+// 使 FR-CMP-016 的 CLI 注入路径实际不可用。引号是用户对「这是一整个取值」的自然表达，
+// 故在解析入口统一支持，而不是为每个多词取值单开别名。
+func splitFieldsQuoted(s string) []string {
+	var out []string
+	var b strings.Builder
+	inQuote, started := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\' && i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\\'):
+			b.WriteByte(s[i+1])
+			i++
+			started = true
+		case c == '"':
+			inQuote = !inQuote
+			started = true
+		case (c == ' ' || c == '\t') && !inQuote:
+			if started {
+				out = append(out, b.String())
+				b.Reset()
+				started = false
+			}
+		default:
+			b.WriteByte(c)
+			started = true
+		}
+	}
+	if started {
+		out = append(out, b.String()) // 未闭合引号：按到行尾为一个 token（宽容，不静默出错）
+	}
+	return out
+}
+
+// maskStatementTokens 对语句回显做脱敏：把敏感关键字（password）**紧随的取值**替换为占位符。
+//
+// 由来（决策 #79）：`set system login user <n> password <pw>` 成功后会回显整条语句，
+// 明文口令因此出现在终端输出（以及任何捕获该输出的日志/会话录制里）。
+// 配置模型只存 `password_hash`，且展示层已脱敏（决策 #70）——回显也不应例外。
+func maskStatementTokens(tokens []string) []string {
+	out := append([]string{}, tokens...)
+	for i := 0; i+1 < len(out); i++ {
+		if out[i] == "password" {
+			out[i+1] = "«已隐藏»"
+		}
+	}
+	return out
 }
