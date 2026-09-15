@@ -5,6 +5,9 @@
 *.cover
 /bin/
 /dist/
+# 打包产物（make deb 输出在 build/ 下；此处兜底，避免手工拷入的包被误提交）
+*.deb
+*.rpm
 
 # Go
 vendor/
