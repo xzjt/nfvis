@@ -20,7 +20,7 @@
 - M3 验收现状（`docs/M3-人工演示记录.md`）：D1/D2/D3/D6/D8 真机通过；**D4 NAT 已在本轮 M5 补齐并真机端到端通过**
   （决策 #52 跨 VRF：inside=virtual-switch 的 VRF、outside=出接口所属 VRF，VPP 单实例仅一对）；**D5 SPAN 抓包已在 T0-7 实证通过**；
   D7 LLDP 仍环境受限（无对端），启用与命令均正常、M3 的 internal error 未复现。
-- 验证环境 nfvis-vm 当前状态：**已装 nfvis 1.1.4 且 nfvisd 作为 systemd 服务在运行**
+- 验证环境 nfvis-vm 当前状态：**已装 nfvis 1.1.5 且 nfvisd 作为 systemd 服务在运行**
   （开发态请先 `systemctl stop nfvis`）、VPP 运行中、2 网卡绑 vfio-pci、
   **无 domain/接口残留**、引导镜像 `alpine.qcow2` 是集成测试依赖**勿删**；Docker 本地有 `alpine:3.20`。
   **1G 大页池现为 3 页（已生效，无需重启）**——由**带外操作**在 2026-09-15 05:09 设置
@@ -33,7 +33,7 @@
 - **V1 验收收口**：`docs/V1-验收检查表.md` 把规格书 **109 条 FR** 逐条对照证据
   （**通过 100 / 未验 4 / 降级 3 / 移 V2 2**），降级理由与签字建议见其 §5/§6；
   **待办与未完成项的唯一入口见 `docs/V1-收尾待办.md`**（含环境要点与踩坑记录）。
-  已发布 **v1.0.0 / v1.1.0 / v1.1.1 / v1.1.2 / v1.1.3 / v1.1.4**（见 GitHub Releases）。
+  已发布 **v1.0.0 / v1.1.0 / v1.1.1 / v1.1.2 / v1.1.3 / v1.1.4 / v1.1.5**（见 GitHub Releases）。
   **用户文档**：`docs/NFViS-用户手册.md`（安装→使用全流程）、`docs/NFViS-CLI命令全表.md`
   （256 条命令 + 逐条真机实测状态）；CLI 全功能冒烟脚本 `contrib/scripts/cli-fulltest.sh`（手动）。
 - `docs/NFViS-openapi.yaml` 与 `docs/NFViS-CLI命令树完整设计.md` 是**契约**。
