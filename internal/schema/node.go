@@ -146,6 +146,15 @@ func SPA(placeholder, jsonKey, desc string) *Node {
 	return n
 }
 
+// SPD：标量参数（同 SP），但保留动态候选来源——用于「CLI 上是一个带候选的关键字层、
+// 模型里却是标量字段」的节点（如 vNIC 的 `virtual-switch <name>` → VnfInterface.virtual_switch）。
+// 若用普通 P()，解析器会按「具名数组容器」处理，写出数组而模型是字符串 → 类型不符。
+func SPD(placeholder, jsonKey, desc, dynamic string) *Node {
+	n := SP(placeholder, jsonKey, desc)
+	n.Dynamic = dynamic
+	return n
+}
+
 // IV 标记身份取值关键字（其值是父层具名数组的元素身份，见 IdentityValue）。
 func IV(n *Node) *Node { n.IdentityValue = true; return n }
 
@@ -164,6 +173,11 @@ func Su(n *Node) *Node { n.MinClass = ClassSuperUser; return n }
 
 // Opt 标记可选 token（[]）。
 func Opt(n *Node) *Node { n.Optional = true; return n }
+
+// Parent 返回父节点（根为 nil）。parent 由 finalize 回填，供**语句解析器**做
+// 「值/无子树参数消耗后的层级回退」——例如 `tls cert-file X key-file Y`：消费完 X 后
+// 解析器停在 cert-file 上，需回退到 tls 才能匹配同级关键字 key-file。
+func (n *Node) Parent() *Node { return n.parent }
 
 // finalize 回填父指针（树构建完成后由各 Root 调用一次）。
 func finalize(n *Node, parent *Node) {

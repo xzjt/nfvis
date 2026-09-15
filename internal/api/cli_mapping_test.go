@@ -89,6 +89,20 @@ var contractStatements = []string{
 	// resource-pools cpu numa node <n> cores <list>（§2.6）：模型是对象数组 cpu.numa[{node,cores}]，
 	// CLI 多一层 node 关键字 → 原先写成对象（cannot unmarshal object into []model.NumaNode）
 	"set resource-pools cpu numa node 0 cores 1-4",
+	// 2026-09-15（决策 #79）：待办 §2.4 的 8 处「契约已声明但经 CLI 用不了」——
+	// 逐条补入本清单（此前正因为**不在清单里**而长期漏网）。
+	"set system api tls cert-file /tmp/a.pem key-file /tmp/a.key",
+	"set system login user u1 password Abc12345!x class operator",
+	"set system login class c1 allow show",
+	"set system login class c1 deny request",
+	"set virtual-switches vs-xc type l2",
+	"set virtual-switches vs-xc ports 1 interface ens224",
+	"set virtual-switches vs-xc ports 2 interface ens192",
+	"set virtual-switches vs-xc cross-connect 1 2",
+	"set virtual-machine-functions fw-vm interfaces eth0 vlan 100",
+	"set virtual-machine-functions fw-vm cloud-init ssh-key \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY nfvis@test\"",
+	"set container-functions sbc-ct1 interfaces eth0 type memif virtual-switch vs-a",
+	"set container-functions sbc-ct1 env TEST_KEY test_value",
 }
 
 func TestCLIStatementMappingGuard(t *testing.T) {
@@ -120,6 +134,15 @@ func TestCLIStatementMappingGuard(t *testing.T) {
 			}
 			if strings.Contains(stmt, "ports 2 container sbc-ct1") {
 				pre = append(pre, "set container-functions sbc-ct1 image alpine:3.20")
+			}
+			// cross-connect 引用的是**已声明的端口序号**（模型只有 cross_connect bool，
+			// 端口身份由 ports 列表承担），故须先声明两个端口。
+			if strings.Contains(stmt, "cross-connect") {
+				pre = append(pre,
+					"set virtual-switches vs-xc type l2",
+					"set virtual-switches vs-xc ports 1 interface ens224",
+					"set virtual-switches vs-xc ports 2 interface ens192",
+				)
 			}
 			for _, s := range pre {
 				if res := x.Execute("admin", aaa.ClassSuperUser, "ssh", s); strings.Contains(res.Output, "%%") {

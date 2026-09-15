@@ -1,6 +1,9 @@
 package api
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // 网络类语句别名表（cli_aliases_net.go）。
 //
@@ -42,6 +45,18 @@ var statementAliasesNet = []aliasRule{
 			}
 			delete(vs, "gateway")
 			return nil
+		}},
+
+	// virtual-switches <n> cross-connect <port-a> <port-b>（FR-NET-012，两端口直通）
+	// 模型只有 `cross_connect bool`（OpenAPI 亦为 boolean），两个端口的"身份"由该交换机的
+	// ports 列表承担（applier 取前两个端口做 sw_interface_set_l2_xconnect）。
+	// 故本语句：置位标志 + **校验**被引用端口已声明且恰为两个——避免 <2 个端口时 applier
+	// 静默什么都不做（决策 #79）。
+	{pattern: []string{"virtual-switches", "*", "cross-connect", "*", "*"},
+		apply: aliasVSCrossConnect},
+	{pattern: []string{"virtual-switches", "*", "cross-connect"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return aliasVSCrossConnect(tree, append(append([]string{}, t...), "", ""), isSet)
 		}},
 
 	// virtual-switches <n> l3-interface <if> ip address <prefix>（L3，落在同名 Vrf）
@@ -884,4 +899,41 @@ func aliasStaticRouteBothRev(tree map[string]any, t []string, isSet bool) error 
 		return err
 	}
 	return aliasStaticRoute(tree, []string{t[0], t[1], t[2], t[3], t[6], t[7]}, isSet)
+}
+
+// aliasVSCrossConnect：cross-connect 交换机（FR-NET-012）。
+// t = ["virtual-switches", <name>, "cross-connect"(, <port-a>, <port-b>)]。
+func aliasVSCrossConnect(tree map[string]any, t []string, isSet bool) error {
+	vs, err := elemByID(tree, "virtual_switches", t[1])
+	if err != nil {
+		return err
+	}
+	if !isSet {
+		delete(vs, "cross_connect")
+		return nil
+	}
+	if len(t) < 5 || t[3] == "" || t[4] == "" {
+		return fmt.Errorf("配置不完整，缺少取值: virtual-switches %s cross-connect <port-a> <port-b>", t[1])
+	}
+	a, b := t[3], t[4]
+	if a == b {
+		return fmt.Errorf("cross-connect 的两个端口不能相同（%s）", a)
+	}
+	ports, _ := vs["ports"].([]any)
+	declared := func(seq string) bool {
+		for _, p := range ports {
+			if m, ok := p.(map[string]any); ok && scalarEq(m["seq"], seq) {
+				return true
+			}
+		}
+		return false
+	}
+	if !declared(a) || !declared(b) {
+		return fmt.Errorf("cross-connect 引用的端口未声明，请先 set virtual-switches %s ports %s interface <ifname>（另需端口 %s）", t[1], a, b)
+	}
+	if len(ports) != 2 {
+		return fmt.Errorf("cross-connect 交换机仅支持两个端口，实际 %d 个（FR-NET-012）", len(ports))
+	}
+	vs["cross_connect"] = true
+	return nil
 }
