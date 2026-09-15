@@ -125,10 +125,12 @@ func TestDynamicCandidatesEndpoint(t *testing.T) {
 		t.Fatalf("准备配置")
 	}
 
-	// kind 模式：动态候选清单
-	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/cli/candidates?kind=ifnames", token, nil, nil)
-	if status != http.StatusOK || !strings.Contains(string(data), "ens2f0") {
-		t.Fatalf("ifnames 候选应含 ens2f0: %d %s", status, data)
+	// kind 模式：动态候选清单。
+	// 注意：接口名一族（ifnames/vpp-ifnames/kernel-ifnames）自决策 #83 起取自**运行态端口清单**
+	//（见 port_inventory_test.go），不再来自配置；此处用仍属配置来源的 vswitches 验证 kind 模式本身。
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/cli/candidates?kind=vswitches", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), "vs-app") {
+		t.Fatalf("vswitches 候选应含 vs-app: %d %s", status, data)
 	}
 
 	// 位置模式：show virtual-machine-functions 位置的动态候选

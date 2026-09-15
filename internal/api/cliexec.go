@@ -83,6 +83,7 @@ type cliExecutor struct {
 	snaps      VMSnapshotRuntime
 	ct         ContainerRuntime
 	images     ImagesRuntime
+	ports      PortInventory               // 运行态端口清单（决策 #83；nil = show 空态不列端口）
 	sys        SystemOpsRuntime            // 备份/恢复/恢复出厂（M5-6；nil = 命令报未接入）
 	diagOps    DiagOpsRuntime              // 诊断归档/core dump（M5-4；nil = 命令报未接入）
 	logs       func() ([]byte, error)      // 系统日志来源（show log system，M5-9；nil = 报不可用）
@@ -119,6 +120,10 @@ func newCLIExecutor(e *config.Engine, a authorizer) *cliExecutor {
 // setEventBus 注入事件总线（M5-1）：CLI 直连运行态的动作不经 HTTP handler，
 // 需在执行器内显式发布 vnf-state-changed（同 M4-12 的审计处理）。
 func (x *cliExecutor) setEventBus(bus *events.Bus) { x.events = bus }
+
+// setPorts 注入运行态端口清单（决策 #83）：`<ifname>` 的候选与 `show interfaces physical`
+// 的空态都取自真实端口，而不是「已写进配置的接口名」。
+func (x *cliExecutor) setPorts(p PortInventory) { x.ports = p }
 
 // setSystemOps 注入系统运维能力（M5-6 备份/恢复/恢复出厂）。
 func (x *cliExecutor) setSystemOps(sys SystemOpsRuntime) { x.sys = sys }

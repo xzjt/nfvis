@@ -19,8 +19,11 @@ func (stubClient) Execute(line, source string) (cliclient.Result, error) {
 	return cliclient.Result{Mode: "oper", Prompt: "nfvis> "}, nil
 }
 
+// DynamicCandidates 假的动态候选来源：接口名一族自决策 #83 起按语义分 kind
+// （show interfaces physical 等处用 vpp-ifnames）。
 func (stubClient) DynamicCandidates(kind string) ([]string, error) {
-	if kind == "ifnames" {
+	switch kind {
+	case "vpp-ifnames", "ifnames":
 		return []string{"ens2f0", "ens2f1"}, nil
 	}
 	return nil, nil

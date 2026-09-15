@@ -199,8 +199,13 @@ nfvis-cli -server https://127.0.0.1:443 -u admin -c \
   "request interfaces 0000:13:00.0 unbind-dpdk to-driver vmxnet3 --yes"
 ```
 
-**方式 B：带外手工（虚机重启后网卡会回到原生驱动，CLI 不可用时用这个）**
+> **先弄清有哪些口**（决策 #83）：`set interfaces <ifname>` 的 Tab 候选 = **VPP 中的接口**，
+> 也就是**已被 DPDK 接管**的那批，与 `show interfaces physical` 的空态同源。
+> 已被接管的口在**内核里已无网卡**（`ls /sys/class/net` / `ip link` 都看不到），
+> 所以只能这样发现；反过来，**尚未接管的内核网卡**出现在
+> `request interfaces <n> bind-dpdk` 的候选里（两侧候选来源不同，不是同一个清单）。
 
+**方式 B：带外手工（虚机重启后网卡会回到原生驱动，CLI 不可用时用这个）**
 ```bash
 modprobe vfio-pci
 echo Y > /sys/module/vfio/parameters/enable_unsafe_noiommu_mode   # 无 IOMMU 时才需要

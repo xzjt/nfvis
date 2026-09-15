@@ -511,6 +511,18 @@ virtual-machine-functions {
 2. Tab：唯一匹配→补全并附空格；唯一匹配但需更多字符（如接口名前缀）→补全到公共前缀；多匹配→响铃并列出（与 `?` 同）。
    补到公共前缀或唯一匹配时**只改写行文本、不列候选**；多匹配且公共前缀无进展时才响铃并列出。
 3. 动态候选来源（实时向 nfvisd 查询，失败则退化为仅关键字）：`<ifname>`→接口清单、`<name>`→对应资源清单、`<image-name>`→镜像清单、`<class-name>`→class 清单。
+   **接口名一族分三种来源，不是同一个清单（附录 A #83）**——此前三者共用一个「已写进配置的接口名」，
+   既漏掉未声明的 DPDK 口（已接管的口在内核中已无 netdev），又会列出根本不存在的名字：
+
+   | kind | 含义 | 用它的位置 |
+   |---|---|---|
+   | `vpp-ifnames` | VPP 中的接口 = **已被 DPDK 接管的数据面端口** | `set interfaces <ifname>`、`show interfaces physical <ifname>`、`virtual-switches … l3-interface`、`set vpp dpdk dev <ifname>`、`request vpp trace start interface <ifname>`、`monitor interfaces <ifname>`、`clear interfaces statistics [<ifname>]`、`set protocols lldp interface <ifname>`、`show lldp neighbors interface <ifname>` |
+   | `kernel-ifnames` | 内核网卡（**未被接管**的物理口；有 `/sys/class/net/<n>/device` 的才算） | `set system management interface <ifname>`、`request interfaces <ifname> bind-dpdk`、`request sriov create-vfs/delete-vfs <ifname>` |
+   | `ifnames` | 两者**并集** | `request interfaces <ifname> enable\|disable\|bind-dpdk\|unbind-dpdk`（动作混合、参数位置在动作之前，无法按动作区分来源） |
+
+   实现：`internal/orchestrator/network/port_inventory.go`（VPP 侧 `sw_interface_dump`、内核侧 sysfs），
+   经 `api.PortInventory` 接口注入，与 `show interfaces physical` 的空态同源。
+   **失败（VPP 未接入/查询失败）时退化为「仅关键字」，不退回「已配置接口名」**——那正是本决策要修的错误来源。
 4. 配置模式下 `?` 还会提示当前 `[edit]` 层级下可 `set/delete` 的直接子节点。
 5. 命令缩写：无歧义前缀即合法（`sh vi` = `show virtual-machine-functions` 前缀匹配按树节点逐级消歧）。
 6. 候选列表渲染：每条一行、行首两空格；列宽取「最长候选 token 宽度 + 2 空格」与 24 的较大者。
