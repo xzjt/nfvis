@@ -317,6 +317,10 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 		Addr:              addr,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// ReadTimeout 覆盖整个请求（含 body）：兼顾 /system/restore 的 64MB
+		// multipart 上传留出余量；不设 WriteTimeout——会掐断 /events SSE 长连接。
+		ReadTimeout: 120 * time.Second,
+		IdleTimeout: 120 * time.Second,
 	}
 	s.tlsCert, s.tlsKey = opts.TLSCert, opts.TLSKey
 	return s

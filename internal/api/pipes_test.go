@@ -101,6 +101,36 @@ func TestPipeDisplayXML(t *testing.T) {
 	}
 }
 
+// FR-SEC-007 / 决策 #25：display json/xml 管道不得外泄 password_hash——
+// 明文渲染路径已脱敏，管道旁路曾直接序列化原始配置树（高危修复的守护测试）。
+func TestPipeDisplayRedactsSensitiveFields(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set system hostname redact-node",
+		"set system login user ops password Ops@12345! class operator",
+		"commit",
+		"exit",
+	)
+	for _, pipe := range []string{"json", "xml"} {
+		res := x.Execute("admin", aaaClassSU, "ssh", "show configuration | display "+pipe)
+		if strings.Contains(res.Output, "pbkdf2") || strings.Contains(res.Output, "password_hash") || strings.Contains(res.Output, "password-hash") {
+			t.Fatalf("display %s 管道泄露口令哈希:\n%s", pipe, res.Output)
+		}
+	}
+	// 配置模式子树同样不得泄露
+	x.Execute("admin", aaaClassSU, "ssh", "configure")
+	res := x.Execute("admin", aaaClassSU, "ssh", "show system login | display json")
+	if strings.Contains(res.Output, "pbkdf2") || strings.Contains(res.Output, "password_hash") {
+		t.Fatalf("子树 display json 泄露口令哈希:\n%s", res.Output)
+	}
+	// 明文路径回归：show 已由 renderValue 打码
+	res = x.Execute("admin", aaaClassSU, "ssh", "show configuration")
+	if strings.Contains(res.Output, "pbkdf2") {
+		t.Fatalf("明文 show 泄露口令哈希:\n%s", res.Output)
+	}
+}
+
 func TestPipeErrorsAndRegression(t *testing.T) {
 	x := pipeSetup(t)
 	// 未知管道 / 非法正则

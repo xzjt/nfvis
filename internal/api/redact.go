@@ -48,3 +48,22 @@ func redactTree(v any) {
 		}
 	}
 }
+
+// redactedStructured 返回结构化快照的脱敏深拷贝（`| display json/xml` 管道用）。
+//
+// x.structured 对配置 show 族是原始配置树（toJSONTree），含
+// system.login.users[].password_hash——明文渲染路径经 renderValue 已打码，
+// 管道旁路若不脱敏则原样外泄（FR-SEC-007 / 决策 #25）。
+// 深拷贝后脱敏，不原地修改 structured（执行器共享引用）。
+func redactedStructured(v any) any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	var tree any
+	if err := json.Unmarshal(b, &tree); err != nil {
+		return v
+	}
+	redactTree(tree)
+	return tree
+}

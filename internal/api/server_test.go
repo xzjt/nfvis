@@ -233,3 +233,22 @@ func TestClassAuthorization(t *testing.T) {
 		t.Fatalf("logout 应 204: %d", status)
 	}
 }
+
+// TestUnboundedBodyEndpointsRejected login 与 cli/execute 是仅有的两个不经
+// decodeBody（4MB 上限）的 JSON 端点，必须有独立请求体上限（防未认证滥用）。
+func TestUnboundedBodyEndpointsRejected(t *testing.T) {
+	ts := newTestServer(t)
+	big := strings.Repeat("a", 1<<20+1) // 略超 1MB 上限
+
+	status, data := postJSON(t, ts.URL+APIPrefix+"/login", map[string]string{"username": big, "password": "x"}, nil)
+	if status != http.StatusBadRequest {
+		t.Fatalf("超大 login 请求体应 400: %d %s", status, data)
+	}
+
+	_, lr := login(t, ts, "admin", "s3cret-Passw0rd!")
+	status, data = postJSON(t, ts.URL+APIPrefix+"/cli/execute", cliExecuteRequest{Line: big},
+		map[string]string{"Authorization": "Bearer " + lr.Token})
+	if status != http.StatusBadRequest {
+		t.Fatalf("超大 cli/execute 请求体应 400: %d %s", status, data)
+	}
+}

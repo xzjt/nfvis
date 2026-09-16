@@ -24,6 +24,7 @@ type cliExecuteResponse struct {
 // handleCLIExecute POST /api/v1/cli/execute：执行一行 CLI 命令。
 // 逐命令权限在执行器内按 schema 节点判定（外层仅要求有效登录）。
 func (s *Server) handleCLIExecute(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 单行命令请求，限制请求体防滥用
 	var req cliExecuteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Line == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "需要 line 字段", nil)
