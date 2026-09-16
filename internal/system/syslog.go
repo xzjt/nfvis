@@ -98,7 +98,17 @@ type SyslogForwarder struct {
 	hostname string
 	lastErr  error
 	now      func() time.Time
+	// 拨号失败后的熔断时间点：之前 Forward 直接丢弃，不再反复拨号
+	retryAfter time.Time
 }
+
+const (
+	// 拨号失败后的冷却期：远端不可达时每条日志都烧一次 3s 拨号超时，
+	// 日志路径会被拖死——冷却期内丢弃转发。
+	syslogRetryCooldown = 30 * time.Second
+	// 单条写超时：TCP 对端不读时 Write 可能无限阻塞。
+	syslogWriteTimeout = 5 * time.Second
+)
 
 // NewSyslogForwarder 构造转发器（dial 为 nil 时用 net.DialTimeout）。
 func NewSyslogForwarder(cfg SyslogConfig) *SyslogForwarder {
@@ -123,6 +133,7 @@ func (f *SyslogForwarder) Configure(cfg SyslogConfig) {
 	f.cfg = cfg
 	if !same {
 		f.closeLocked()
+		f.retryAfter = time.Time{} // 换目标：立即尝试，不沿用旧目标的熔断
 	}
 }
 
@@ -157,13 +168,18 @@ func (f *SyslogForwarder) closeLocked() error {
 }
 
 // Forward 按配置转发一条消息（未配置目标或低于级别阈值时为空操作）。
+//
+// 拨号在锁外进行（上限 3s），失败后进入 30s 冷却熔断；写带 5s 超时且
+// 仅在写期间持锁——远程 syslog 不可达或对端不读时，转发不会长时间
+// 拖死日志调用方。
 func (f *SyslogForwarder) Forward(severity int, app, msgID, msg string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if !f.cfg.Enabled() {
+		f.mu.Unlock()
 		return nil
 	}
 	if severity > f.cfg.severityThreshold() {
+		f.mu.Unlock()
 		return nil // 低于阈值不转发
 	}
 	facility := 1 // user
@@ -171,27 +187,70 @@ func (f *SyslogForwarder) Forward(severity int, app, msgID, msg string) error {
 		facility = code
 	}
 	line := FormatRFC5424(f.now(), f.hostname, app, os.Getpid(), msgID, facility, severity, msg)
+	network, addr := f.cfg.Network, net.JoinHostPort(f.cfg.Host, strconv.Itoa(f.cfg.Port))
+	conn := f.conn
+	inCooldown := !f.retryAfter.IsZero() && f.now().Before(f.retryAfter)
+	f.mu.Unlock()
 
-	if f.conn == nil {
-		conn, err := f.dial(f.cfg.Network, net.JoinHostPort(f.cfg.Host, strconv.Itoa(f.cfg.Port)))
-		if err != nil {
-			f.lastErr = fmt.Errorf("连接远程 syslog %s:%d: %w", f.cfg.Host, f.cfg.Port, err)
-			return f.lastErr
+	// 拨号在锁外（可达 3s），不阻塞其他转发；并发拨号仅保留先安装的一条
+	if conn == nil {
+		if inCooldown {
+			return f.cooldownErr(addr)
 		}
-		f.conn = conn
+		c, err := f.dial(network, addr)
+		if err != nil {
+			f.mu.Lock()
+			ferr := fmt.Errorf("连接远程 syslog %s: %w", addr, err)
+			f.lastErr = ferr
+			f.retryAfter = f.now().Add(syslogRetryCooldown)
+			f.mu.Unlock()
+			return ferr
+		}
+		f.mu.Lock()
+		if f.conn == nil {
+			f.conn = c
+		} else {
+			_ = c.Close()
+		}
+		f.retryAfter = time.Time{}
+		conn = f.conn
+		f.mu.Unlock()
 	}
+
 	payload := []byte(line)
-	if f.cfg.Network == "tcp" {
-		// RFC 6587 octet-counting 分帧
+	if network == "tcp" {
+		// RFC 6587 octet-counting 分帧（多帧不得交错，写在锁内串行）
 		payload = []byte(strconv.Itoa(len(payload)) + " " + line)
 	}
-	if _, err := f.conn.Write(payload); err != nil {
-		f.lastErr = fmt.Errorf("转发远程 syslog: %w", err)
-		f.closeLocked() // 下条消息重连
+	_ = conn.SetWriteDeadline(f.now().Add(syslogWriteTimeout))
+	f.mu.Lock()
+	_, err := conn.Write(payload)
+	f.mu.Unlock()
+	if err == nil {
+		f.mu.Lock()
+		f.lastErr = nil
+		f.mu.Unlock()
+		return nil
+	}
+	_ = conn.Close()
+	f.mu.Lock()
+	if f.conn == conn {
+		f.conn = nil // 下条消息重连
+	}
+	ferr := fmt.Errorf("转发远程 syslog: %w", err)
+	f.lastErr = ferr
+	f.mu.Unlock()
+	return ferr
+}
+
+// cooldownErr 熔断冷却期内丢弃转发：返回最近一次失败原因（无则给通用说明）。
+func (f *SyslogForwarder) cooldownErr(addr string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lastErr != nil {
 		return f.lastErr
 	}
-	f.lastErr = nil
-	return nil
+	return fmt.Errorf("远程 syslog %s 熔断冷却中，转发已丢弃", addr)
 }
 
 // SeverityOfSlog slog 级别 → syslog severity。
