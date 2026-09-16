@@ -632,6 +632,12 @@ func (x *cliExecutor) cfgRollback(user, source string, args []string) string {
 // 先查语句别名表（CLI 嵌套与模型扁平不一致的语句），再走通用树遍历；
 // Diff 兜底：语句必须真实落到模型（未映射语句会报错而非静默丢失）。
 func applyStatement(cfg *model.Config, tokens []string) error {
+	// 「不能单独成句的实例参数」在**派发之前**判：这条语句既可能走下面的别名表
+	// （`system login user <n>` 就有专门的别名规则，会直接建出数组元素），也可能走通用
+	// 树遍历，故不能只在任一条路径里拦——判据取自命令树（Node.RequireSub），单一真源。
+	if err := checkRequireSub(tokens); err != nil {
+		return err
+	}
 	if rule := matchAlias(tokens); rule != nil {
 		before := *cfg
 		tree := toJSONTree(*cfg)
@@ -1171,9 +1177,10 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 
 		// 1) 关键字匹配
 		var child *schema.Node
+		direct := false
 		for _, c := range node.Children {
 			if c.Kind == schema.Keyword && c.Name == tok {
-				child = c
+				child, direct = c, true
 				break
 			}
 		}
@@ -1198,6 +1205,16 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 			}
 		}
 		if child != nil {
+			// 必需的标量取值不得被同级关键字抢位（附录 A #91）：`dns server` 的首个子节点是
+			// 必需的 <ip>，若直接把兄弟关键字 `secondary` 匹配掉，取值位就永远空着，语句最后会
+			// 以「配置中不存在字段 "dns"」这种**指错方向**的报错收场（dns 明明是合法关键字）。
+			// 只在「直接子节点命中」（非层级回退）时判，且只判 ScalarParam——实例参数的
+			// 消费位置在更上面的分支处理，值叶子不受影响。
+			if direct {
+				if err := requireScalarBeforeKeyword(node, cur, tokens[:i], tok); err != nil {
+					return err
+				}
+			}
 			k := jsonKeyOf(child)
 			// flag：disable 特例映射 enabled=false（§2.3）；其余 flag 走 Diff 兜底报错
 			if !isSet && i == len(tokens)-1 && tok == "disable" {
@@ -1293,6 +1310,64 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 }
 
 func jsonKeyOf(n *schema.Node) string { return strings.ReplaceAll(n.Name, "-", "_") }
+
+// checkRequireSub 语句若停在**标了 RequireSub 的实例参数**上，即报「语句不完整」并列出
+// 该参数可用的子关键字。判据来自命令树（单一真源），在别名派发前统一判定——因为
+// `system login user <n>` 这类语句是走别名表的，只拦通用遍历会漏（附录 A #90②）。
+//
+// 由来：`set system login user tester1` 单独成句时，CLI 回 [ok]、commit 报成功，落库却是
+// {"name":"tester1"}——一个既无 password_hash 又无 class 的账号。既有口径本就要「不静默建
+// 无口令账号」（决策 #82 只挡住了「用户名写成子关键字」那一类），这里把它堵全。
+func checkRequireSub(tokens []string) error {
+	n, _, err := schema.Match(cfgPathRoot(), tokens)
+	if err != nil || n == nil || !n.RequireSub {
+		return nil
+	}
+	// 子关键字是**该参数的兄弟**（`login user` 把 password/class 放成同级关键字，
+	// 与 `login class` 把子节点挂在参数上不同），故从父层取可用关键字。
+	var subs []string
+	if p := n.Parent(); p != nil {
+		for _, c := range p.Children {
+			if c != n && c.Kind == schema.Keyword {
+				subs = append(subs, c.Name)
+			}
+		}
+	}
+	if len(subs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("语句不完整: %s 之后还需指定 %s（可用 ? 查看当前位置候选）",
+		strings.Join(tokens, " "), strings.Join(subs, " 或 "))
+}
+
+// requireScalarBeforeKeyword 同级关键字若要被消费，其前面**必需的标量取值**必须已经给过。
+// 只判直接子节点命中且只判 ScalarParam（见调用点注释与附录 A #91）。
+func requireScalarBeforeKeyword(node *schema.Node, cur map[string]any, prefix []string, tok string) error {
+	for _, c := range node.Children {
+		if !c.ScalarParam || c.Optional {
+			continue
+		}
+		if v, ok := cur[c.ScalarJSONKey]; ok && !emptyScalar(v) {
+			continue // 已给过取值
+		}
+		return fmt.Errorf("语句不完整：%s 之后需要先给 %s 取值，再跟 %s（可用 ? 查看当前位置候选）",
+			strings.Join(prefix, " "), c.Name, tok)
+	}
+	return nil
+}
+
+// emptyScalar 判断标量取值是否算「还没给」（缺席 / 空串 / 空数组都算没给）。
+func emptyScalar(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case string:
+		return t == ""
+	case []any:
+		return len(t) == 0
+	}
+	return false
+}
 
 func firstParamOf(n *schema.Node) *schema.Node {
 	for _, c := range n.Children {

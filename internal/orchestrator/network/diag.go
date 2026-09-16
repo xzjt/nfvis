@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -90,6 +91,15 @@ func (m *Manager) Diagnostics() *Diagnostics {
 }
 
 // Ping 经 VPP L3 发 ICMP echo。返回 vppctl 原始输出（含统计行）。
+//
+// **平面口径（附录 A #89）**：ping 只覆盖 **VPP 数据面**——目标要能经 VPP 的路由/接口到达。
+// 管理口 ens160 属于**内核平面**，VPP 看不到它，于是 VPP 会打印
+// `Failed: no egress interface` 并给出 `Statistics: 0 sent, 0 received, 0% packet loss`。
+// 这句「0% 丢包」读起来像成功，而判定侧（CLI 的 `%/%%`、`cli-fulltest.sh` 的 `_is_fail`）
+// 只看错误行与退出码——**一个包都没发出去却被算作通过**（真机实测：`ping <管理口网关>`
+// 返回码 0、无 `%`，冒烟脚本判 ✓）。故此处不再原样放行：
+//   - 一个包都没发出去（sent=0）→ 返回错误，让上层给 `%%` 与非零结果；
+//   - 输出里明确点出「只覆盖 VPP 数据面」与「管理口请用宿主 ping」，把话说到能照着做。
 func (d *Diagnostics) Ping(ctx context.Context, req PingRequest) (string, error) {
 	if strings.TrimSpace(req.Host) == "" {
 		return "", errors.New("ping 目标地址不能为空")
@@ -117,7 +127,34 @@ func (d *Diagnostics) Ping(ctx context.Context, req PingRequest) (string, error)
 	if err != nil {
 		return out, fmt.Errorf("vppctl ping: %w", err)
 	}
+	if sent, ok := vppPingSent(out); ok && sent == 0 {
+		return out + pingNoEgressNote(req.Host), fmt.Errorf(
+			"ping 未发出任何报文（%s 不可经 VPP 到达）：ping 只覆盖 VPP 数据面", req.Host)
+	}
 	return out, nil
+}
+
+// vppPingSent 取 vppctl ping 汇总行里的发包数（`Statistics: N sent, ...`）。
+// 判不出（输出格式变了）时返回 ok=false——**判不出就不当作失败**，避免格式一变就误报。
+func vppPingSent(out string) (int, bool) {
+	m := vppPingSentRe.FindStringSubmatch(out)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+var vppPingSentRe = regexp.MustCompile(`Statistics:\s*(\d+)\s+sent`)
+
+// pingNoEgressNote 给操作者的补充说明（附录 A #89）：解释为什么「没发出去」以及该用什么。
+func pingNoEgressNote(host string) string {
+	return "\n（nfvis：以上是 VPP 数据面的结果。VPP 里没有能到达 " + host + " 的接口/路由——\n" +
+		" 若这是管理口网关，它属于**内核平面**，请用宿主 ping（如 `ping -c 4 " + host + "`）；\n" +
+		" 若要经 VPP 测，目标须在 VPP 侧有 L3 可达面。`traceroute` 走宿主侧 ICMP，可直接测管理口。）\n"
 }
 
 // Traceroute 宿主侧 ICMP 路径跟踪。vrf 非空明确报不支持（附录 A #36）。

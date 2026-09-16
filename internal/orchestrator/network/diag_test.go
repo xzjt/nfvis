@@ -188,3 +188,42 @@ func TestClearInterfaceStats(t *testing.T) {
 		t.Fatalf("接口缺失应标记 ErrIfaceUnavailable: %v", err)
 	}
 }
+
+// TestPingZeroSentIsFailure（附录 A #89）：VPP 一个包都没发出去时不得原样放行。
+//
+// 真机实测（2026-09-16）：`ping 192.168.155.2`（管理口网关，属内核平面）输出
+// `Failed: no egress interface` ×5 + `Statistics: 0 sent, 0 received, 0% packet loss`，
+// **返回码 0、无 `%`**——判定侧（CLI 的 %/%%、cli-fulltest.sh 的 _is_fail）只看错误行与退出码，
+// 于是「一个包没发出去」被算作**通过**（冒烟脚本里那条 ping 用例一直是假绿）。
+func TestPingZeroSentIsFailure(t *testing.T) {
+	const noEgress = "Failed: no egress interface\nFailed: no egress interface\n\nStatistics: 0 sent, 0 received, 0% packet loss\n"
+
+	out, err := diagWith(newFakeDiag(), &fakeShell{out: noEgress}, nil).
+		Ping(context.Background(), PingRequest{Host: "192.168.155.2"})
+	if err == nil {
+		t.Fatal("0 发包必须报错（否则判定侧把它算作通过）")
+	}
+	if !strings.Contains(err.Error(), "VPP 数据面") {
+		t.Errorf("报错应点明平面口径: %v", err)
+	}
+	// 输出要能照着做：说明平面归属 + 给出宿主 ping / traceroute 这条路
+	if !strings.Contains(out, "内核平面") || !strings.Contains(out, "traceroute") || !strings.Contains(out, "192.168.155.2") {
+		t.Errorf("输出应给出下一步（平面归属 + 宿主侧手段）: %q", out)
+	}
+
+	// 真发出过包就不报错——不能因为出现「0% 丢包」就误判（有发包时那是正常结果）
+	if _, err := diagWith(newFakeDiag(), &fakeShell{out: "Statistics: 2 sent, 2 received, 0% packet loss\n"}, nil).
+		Ping(context.Background(), PingRequest{Host: "10.0.0.9"}); err != nil {
+		t.Fatalf("有发包不应报错: %v", err)
+	}
+	// 有发包但全丢：VPP 自己写得明确（100% loss），不重复判失败（本决策只收「0 发包」）
+	if _, err := diagWith(newFakeDiag(), &fakeShell{out: "Statistics: 2 sent, 0 received, 100% packet loss\n"}, nil).
+		Ping(context.Background(), PingRequest{Host: "10.0.0.9"}); err != nil {
+		t.Fatalf("有发包时不得由本检查判失败: %v", err)
+	}
+	// **判不出就不判**：输出格式变化（无汇总行）时不得制造假红
+	if _, err := diagWith(newFakeDiag(), &fakeShell{out: "some other output\n"}, nil).
+		Ping(context.Background(), PingRequest{Host: "10.0.0.9"}); err != nil {
+		t.Fatalf("判不出时不得误报: %v", err)
+	}
+}

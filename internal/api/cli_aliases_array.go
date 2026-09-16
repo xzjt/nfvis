@@ -1,12 +1,17 @@
 package api
 
 // 数组型标量字段的语句别名（缺陷驱动，见 docs/reviews/2026-09-13.md 第六轮）：
-//   system dns server|secondary <ip>   → system.dns_servers[]（此前写入被类型拒绝或静默丢弃）
+//   system dns server <ip>              → system.dns_servers[]（此前写入被类型拒绝或静默丢弃）
 //   system kernel params <param>       → system.kernel.params[]
 //   bonds <name> members [<seq>] <if>  → bonds[].members[]（此前报"配置不完整，缺少取值"）
 //
 // 这些字段在模型里是 []string，而通用遍历按标量写入（首值能过、多值或类型不符时失败），
 // 故用显式别名保证追加/按值删除语义正确。
+//
+// ⚠️ 别名 pattern 必须与命令树**同时**存在，否则是死规则：曾经这里有一条
+// `system dns secondary *`，注释还写着「等价 set system dns secondary <ip>」——但树里没有
+// `dns.secondary` 节点（只有 `dns.server.secondary`），于是那个写法实测是「% 无效命令」，
+// 规则永远匹配不到（附录 A #91）。新增别名时请确认树里有对应的关键字路径。
 
 import (
 	"fmt"
@@ -17,9 +22,8 @@ import (
 
 // statementAliasesArray：数组型标量字段的语句（追加 / 按值删除）。
 var statementAliasesArray = []aliasRule{
-	// system dns server <ip>（等价 set system dns secondary <ip>）
+	// system dns server <ip>（备用地址写法：`dns server <ip> secondary <ip>`，见命令树）
 	{pattern: []string{"system", "dns", "server", "*"}, apply: dnsServerApply},
-	{pattern: []string{"system", "dns", "secondary", "*"}, apply: dnsServerApply},
 	// system kernel params <param>
 	{pattern: []string{"system", "kernel", "params", "*"}, apply: kernelParamsApply},
 	// bonds <name> members [<seq>] <ifname>

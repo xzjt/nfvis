@@ -7,10 +7,13 @@ echo "############ 阶段 5：操作命令与管道 ############"
 { echo "############ 阶段 5：操作命令与管道 ############"; } >> "$LOG"
 
 # ---- 其余操作命令（契约 §1.3）----
-run S5 "ping 192.168.155.1"
-run S5 "ping 192.168.155.1 count 2"
+# ping 只覆盖 **VPP 数据面**（附录 A #89）。这里不用 run，也不用「预测环境」分流，而是断言
+# **判定自洽**：0 发包必须报失败（修复前它把 0 发包算作 ✓，这条长期是假绿）；
+# 真发过包则是环境相关结果。理由见 lib 里 expect_ping_coherent 的注释。
+expect_ping_coherent S5 "ping 192.168.155.1"
+expect_ping_coherent S5 "ping 192.168.155.1 count 2"
 # source 须为**VPP 接口**地址（管理口 ens160 是内核口，不是 VPP 接口；用 vs-l3 的地址）
-run S5 "ping 192.168.155.1 source 192.168.155.10 count 2"
+expect_ping_coherent S5 "ping 192.168.155.1 source 192.168.155.10 count 2"
 run S5 "traceroute 192.168.155.1"
 run S5 "monitor interfaces ens224"
 run S5 "monitor vnf cli-vm"

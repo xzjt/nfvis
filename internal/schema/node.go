@@ -103,6 +103,11 @@ type Node struct {
 	Enum      []string // Value 的枚举候选（如 l2|l3；Tab 可补全）
 	Dynamic   string   // Param 的动态候选来源 kind
 	Optional  bool     // [] 可选（如 ports [<seq>]、confirmed [minutes]）
+	// RequireSub：该实例参数**不能单独成句**——必须再给一个子关键字。用于
+	// `login user <name>` 这类「只给名字等于建一个既无口令又无 class 的账号」的节点
+	// （附录 A #90）；裸声明本身有意义的节点（如 `interfaces <ifname>` 先声明端口后绑定，
+	// 决策 #72）**不得**打这个标记。
+	RequireSub bool
 
 	// ScalarParam 标量参数：该参数的取值在配置模型中是标量字段（而非具名数组
 	// 元素的实例名），ScalarJSONKey 为其 JSON 键（如 ports 下 interface <ifname>
@@ -185,6 +190,9 @@ func Su(n *Node) *Node { n.MinClass = ClassSuperUser; return n }
 
 // Opt 标记可选 token（[]）。
 func Opt(n *Node) *Node { n.Optional = true; return n }
+
+// RQ 标记「不能单独成句的实例参数」（须再给子关键字，见 Node.RequireSub）。
+func RQ(n *Node) *Node { n.RequireSub = true; return n }
 
 // Parent 返回父节点（根为 nil）。parent 由 finalize 回填，供**语句解析器**做
 // 「值/无子树参数消耗后的层级回退」——例如 `tls cert-file X key-file Y`：消费完 X 后
@@ -376,6 +384,24 @@ func Candidates(root *Node, tokens []string, partial string, dyn DynamicValues) 
 func candidatesAt(n *Node, partial string, dyn DynamicValues) []Candidate {
 	var out []Candidate
 
+	// 无子树的参数（实例名/标量取值）消耗掉一个 token 后，**下一位置的候选是父层的关键字**
+	// ——这正是包注释写明的匹配语义（「值叶子与无子树参数消耗一个 token 后回到父关键字层
+	// 继续匹配」），也是 Match 每个 token 开头做的事（`if n.consumesToken() { n = n.parent }`）。
+	//
+	// 此前这里漏了这步回退，于是下面这些位置**一个候选都列不出来**：
+	//   `set system login user admin `            （应给 password / class）
+	//   `set system management interface ens160 ` （应给 ip / gateway）
+	//   `set system ntp server 1.2.3.4 `          （应给 prefer）
+	// 而 `set system login class foo ` 恰好是对的——因为那个参数节点**把子节点挂在自己身上**。
+	// 同一形态在树里两种建模（兄弟式 / 挂载式），把这个缺陷掩了很久（附录 A #90）。
+	//
+	// 只对 Param 回退，**不对 Value 叶子**回退：值叶子之后的位置属于同一「值关键字」层
+	// （如 `api tls cert-file <path>` 之后的 key-file），oper 树（show）的同级关键字更不是
+	// 续写，一律列出会把 `?` 变成噪声。这条边界如实登记在附录 A #90 的局限里。
+	if n.Kind == Param && len(n.Children) == 0 {
+		return keywordCandidatesUpward(n, partial)
+	}
+
 	// 取值位置：枚举候选（§5.2 枚举型参数值可 Tab 补全）
 	if n.Kind == Value || (n.Kind == Keyword && n.singleValue() != nil && len(n.Children) == 1) {
 		vn := n
@@ -404,7 +430,7 @@ func candidatesAt(n *Node, partial string, dyn DynamicValues) []Candidate {
 				}
 			}
 			if !offered && strings.HasPrefix(c.Name, partial) {
-				out = append(out, Candidate{Token: c.Name, Desc: c.Desc + "（" + c.ParamType + "）"})
+				out = append(out, Candidate{Token: c.Name, Desc: labelDesc(c)})
 			}
 		case Value:
 			// 由取值位置分支处理，不与关键字混列
@@ -415,6 +441,52 @@ func candidatesAt(n *Node, partial string, dyn DynamicValues) []Candidate {
 		}
 	}
 	return sortedCandidates(out)
+}
+
+// keywordCandidatesUpward 从「已消耗 token 的无子树参数」向上找**最近的一层关键字**：
+// 层级由结构决定（先按 partial 过滤会让层级选择随输入漂移），取到该层后再按 partial 过滤。
+// 排除来路（cameFrom），否则 `management interface ens160 ` 会把 `interface` 自己再列一遍。
+// 只列关键字、不列同级参数：`cross-connect <a> <b>` 那种连续位置参数此处仍列不出 <b>
+// ——如实登记为已知局限（附录 A #90），不靠猜把它补成噪声。
+func keywordCandidatesUpward(n *Node, partial string) []Candidate {
+	var out []Candidate
+	cameFrom := n
+	for p := n.parent; p != nil; p = p.parent {
+		var lvl []*Node
+		for _, c := range p.Children {
+			if c != cameFrom && c.Kind == Keyword {
+				lvl = append(lvl, c)
+			}
+		}
+		if len(lvl) == 0 {
+			cameFrom = p
+			continue
+		}
+		for _, c := range lvl {
+			if strings.HasPrefix(c.Name, partial) {
+				out = append(out, Candidate{Token: c.Name, Desc: c.Desc})
+			}
+		}
+		return sortedCandidates(out)
+	}
+	return nil
+}
+
+// labelDesc 参数候选的描述：附上占位符里写的类型（`<ip>` → `ip`）。
+// **不能**用 Node.ParamType——P/SP/SPA/SPD 的 ParamType 统一是 "name"（那是给
+// scalarForNode 做取值类型转换用的，见 cliexec.go），拿它当标签会写出
+// `<ip>  服务器地址（name）` 这种自相矛盾的候选（附录 A #90③）。
+func labelDesc(n *Node) string {
+	t := n.ParamType
+	if s, ok := strings.CutPrefix(n.Name, "<"); ok {
+		if s, ok = strings.CutSuffix(s, ">"); ok && s != "" {
+			t = s
+		}
+	}
+	if t == "" {
+		return n.Desc
+	}
+	return n.Desc + "（" + t + "）"
 }
 
 func sortedCandidates(cs []Candidate) []Candidate {
