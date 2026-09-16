@@ -20,20 +20,20 @@
 - M3 验收现状（`docs/M3-人工演示记录.md`）：D1/D2/D3/D6/D8 真机通过；**D4 NAT 已在本轮 M5 补齐并真机端到端通过**
   （决策 #52 跨 VRF：inside=virtual-switch 的 VRF、outside=出接口所属 VRF，VPP 单实例仅一对）；**D5 SPAN 抓包已在 T0-7 实证通过**；
   D7 LLDP 仍环境受限（无对端），启用与命令均正常、M3 的 internal error 未复现。
-- 验证环境 nfvis-vm 当前状态：**已装 nfvis 1.1.5 且 nfvisd 作为 systemd 服务在运行**
-  （开发态请先 `systemctl stop nfvis`）、VPP 运行中、2 网卡绑 vfio-pci、
-  **无 domain/接口残留**、引导镜像 `alpine.qcow2` 是集成测试依赖**勿删**；Docker 本地有 `alpine:3.20`。
-  **1G 大页池现为 3 页（已生效，无需重启）**——由**带外操作**在 2026-09-15 05:09 设置
-  （`nr_hugepages` 的 mtime 即此刻；产品代码从不写该文件，只读 THP），
-  故此前"1G 池 = 0、需 reboot"的记录已作废。**同一时刻 SSH host key 也变了**
+- 验证环境 nfvis-vm 当前状态：**已装 nfvis 1.1.6（GitHub Release 装机，sha256 已核对）且 nfvisd 作为 systemd 服务在运行**
+  （开发态请先 `systemctl stop nfvis`；admin 口令已对齐开发态常规口令 `Admin@12345`；TLS 证书已用 1.1.6
+  `/system/tls:regenerate` 重签——旧 1.1.5 时代证书缺 SAN，CLI 连 `https://localhost` 即可免跳过验证）、
+  VPP 运行中、2 网卡绑 vfio-pci、**无 domain/接口残留**、引导镜像 `alpine.qcow2` 是集成测试依赖**勿删**；Docker 本地有 `alpine:3.20`。
+  **1G 大页池现为 3 页（已生效）**——运行态由 2026-09-15 05:09 的**带外操作**设置（`nr_hugepages` 的 mtime 即此刻）；
+  2026-09-16 装 1.1.6 时 postinst baseline 按保守默认把 grub 写成 1 页，**已带外对齐回 3 页**（`/etc/default/grub.d/99-nfvis.cfg` + update-grub），重启后不变。**同一时刻 SSH host key 也变了**
   （本地连 VM 会报 REMOTE HOST IDENTIFICATION HAS CHANGED；连接仍可建立，清陈旧记录即可：
   `ssh-keygen -R nfvis-vm`）。跑集成测试前先 `systemctl restart vpp`（残留拓扑会污染用例）；
   集成测试 `make integration`（CI 不跑）。设计基线在 `docs/`，**不要凭记忆重设计**。
-- 已定决策 85 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 86 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
 - **V1 验收收口**：`docs/V1-验收检查表.md` 把规格书 **109 条 FR** 逐条对照证据
   （**通过 100 / 未验 4 / 降级 3 / 移 V2 2**），降级理由与签字建议见其 §5/§6；
   **待办与未完成项的唯一入口见 `docs/V1-收尾待办.md`**（含环境要点与踩坑记录）。
-  已发布 **v1.0.0 / v1.1.0 / v1.1.1 / v1.1.2 / v1.1.3 / v1.1.4 / v1.1.5**（见 GitHub Releases）。
+  已发布 **v1.0.0 / v1.1.0 / v1.1.1 / v1.1.2 / v1.1.3 / v1.1.4 / v1.1.5 / v1.1.6**（见 GitHub Releases）。
   **用户文档**：`docs/NFViS-用户手册.md`（安装→使用全流程）、`docs/NFViS-CLI命令全表.md`
   （256 条命令 + 逐条真机实测状态）；真机手动脚本：`contrib/scripts/cli-fulltest.sh`（问「命令能不能用」）、
   `contrib/scripts/cli-semantic-check.sh`（问「结果对不对」）、`contrib/scripts/cli-pty-smoke.sh`（交互行为）。

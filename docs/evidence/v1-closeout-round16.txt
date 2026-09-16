@@ -1,0 +1,128 @@
+===== V1 收尾第十六轮：系统级安全/事务完整性审查修复 5 高危 + 7 中危（决策 #86）=====
+环境：nfvis-vm（Ubuntu 26.04、kernel 7.0.0-31-generic、VPP v26.06-release、libvirt、Docker）
+日期：2026-09-16
+被测：fix/security-review-1.1.6 分支（合并为 6c2e915，发布 v1.1.6）
+      交叉编译 GOOS=linux GOARCH=amd64（VersionStr=1.1.6-dev）→ /tmp/nfvisd + /tmp/nfvis-cli
+nfvisd：/tmp/nfvisd -db /tmp/nfvis-cli.db -listen 127.0.0.1:18443 -init-admin-password … -allow-plaintext
+背景：两个 explore 子代理对约 120 个产品文件做系统级审查，产出 5 高危 / 约 14 中危 / 约 25 低危。
+      本轮修复全部高危 + 7 中危（均为不动契约的缺陷修复），每项附守护测试（红-绿），
+      并在真机复验「命令能不能用 / 结果对不对 / 交互行为」三层。本文件为原始输出摘录。
+
+----- 1.【高危，已修】镜像名路径穿越（internal/images，FR-CMP-031/032/033）-----
+缺陷：import/delete/download 接受 ../../etc/passwd 类镜像名 → 可写/删仓库目录外任意路径。
+修复：validateName 按类型分流——VM 名 ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$；容器名允许 :（alpine:3.20
+      必须过）但拒绝 / 与前导点；index.json / index.json.tmp 保留名拒收。
+红-绿：TestImportAndDeleteRejectTraversalNames / TestValidateDownloadOptions
+  - 放开校验后用例失败（穿越名被接受）→ 恢复校验转绿。
+
+----- 2.【高危，已修】非持有者 commit 隐式取消他人回滚（internal/config，FR-CFG-003/004）-----
+缺陷：commit confirmed 等待期内，任何其他会话执行一次 commit（哪怕校验失败）都会 AppendRevision
+      平掉回滚基线 → 超时后回不到变更前配置。
+修复：Commit 中隐式确认移到 requireHolderLocked 之后。
+红-绿：TestEngineCommitByNonHolderDoesNotConfirmPending
+
+----- 3.【高危，已修】confirmed 超时回滚不下发（internal/config，FR-CFG-003/004）-----
+缺陷：超时回滚只写库不对底座 Apply → DB 说"已回滚"，VPP/libvirt/Docker 仍运行变更后配置。
+修复：doConfirmedRollback 在 AppendRevision 前取 committedLocked()，之后 Apply(ctx, cur, baseCfg)；
+      下发失败记审计 failure + 告警（committed 以 DB 为准不回退修订）。
+红-绿：TestEngineCommitConfirmedTimeout 断言回滚前后共两次下发。
+
+----- 4.【高危，已修】| display json/xml 泄露敏感字段（internal/api，FR-SEC-007）-----
+缺陷：管道直接序列化 model 树，password_hash 原样输出——REST 侧 redactConfigView 早已脱敏
+      （决策 #70），CLI 管道是旁路。真机复现（1.1.6 修复前）：
+  $ nfvis-cli -c 'show configuration | display json' | grep -o 'password_hash[^,]*'
+    "password_hash": "pbkdf2$sha256$600000$…"
+修复：redactedStructured()（深拷贝 + redactTree，键名判定与 REST 同源 IsSensitiveKey）。
+红-绿：TestPipeDisplayRedactsSensitiveFields（修复前管道输出含明文哈希 → 用例失败）。
+
+----- 5.【高危，已修】sweep 清扫 stale 锁后持有者复活（internal/config）-----
+缺陷：15s 巡检清扫 stale 锁不走 ReleaseLock（不记录 Holder），持有者下一次 Refresh 把锁刷回有效。
+修复：sweepLocked 改为锁记录 li.Holder 调 ReleaseLock，失败入审计。
+红-绿：TestEngineSweepReleasesStaleLockAfterRestart
+
+----- 6.【中危，已修】bond 并发 map 写 + 删除半状态（internal/orchestrator/network，FR-NET-017）-----
+缺陷：ApplyBond 的 delete 分支在锁外写 bonds map（与 DeleteBond 并发 → Go runtime fatal
+      "concurrent map writes"）；DeleteBond 失败路径留下半状态。
+修复：delete 分支移回锁内；DeleteBond 改为快照成员 → 逐口 detach → BondDelete →
+      成功且 p.bonds[name]==idx 才清登记（防误删并发重建实例）。
+红-绿：TestBondConcurrentApplyDelete（删除 detachMembers 后并发用例不再 fatal）。
+
+----- 7.【中危，已修】VPP stats 坏连接永久缓存（internal/orchestrator/network）-----
+缺陷：任一读取错误路径不释放连接，首个坏连接缓存到进程结束。
+修复：新增 statsReset()，三个读取错误路径调用。
+
+----- 8.【中危，已修】ParseCoreList 内存放大（FR-SYS-010）-----
+缺陷：vpp startup.conf 的 corelist 写 0-1048575 一个 token 可展开 100 万条目 → OOM。
+修复：展开前先做跨度/条目数上界检查（maxCorelistEntries=1024）。
+
+----- 9.【中危，已修】commit and-quit 失败语义（FR-CFG-002）-----
+缺陷：and-quit 提交失败也 Release + 退出配置模式 → candidate 去向错乱、锁已释放。
+修复：成功才 Release + 回 oper；失败留配置模式、candidate 保留，报
+      「校验失败（仍处于配置模式，candidate 保留）」。
+真机定向 pty 验证（build/test-deploy/andquit-pty-test.sh，6/6 断言；script -qec 真实 TTY）：
+  [成功路径 aq-a.log]
+  nfvis# commit and-quit
+  提交成功（配置已下发）        ← 修订已生成
+  nfvis> show version
+  NFViS 1.1.6-dev（M2：配置事务可用，网络底座 M3+ 接入）
+  nfvis> exit                    ← 已回 oper 提示符，锁已释放
+  [失败路径 aq-b.log]（set virtual-switches vs-aqfail gateway acl-in no-such-acl 制造悬挂引用）
+  nfvis# commit and-quit
+  %% 校验失败（仍处于配置模式，candidate 保留）
+    ACL "no-such-acl" 不存在
+  nfvis# exit
+  %% 存在未提交变更，先 commit 或 discard   ← 留在配置模式，candidate 未丢
+  nfvis# ^C
+  candidate 已丢弃，会话锁已释放              ← 丢弃后才释放锁
+守护测试：api 侧 commitMutate/cfgCommit 全量单测绿。
+
+----- 10.【中危，已修】登录面加固（FR-API-001、FR-SEC-003）-----
+修复：login 与 cli/execute（仅有的两个不经 decodeBody 4MiB 限制的 JSON 端点）加
+      http.MaxBytesReader 1MiB；用户不存在/未设口令路径执行 dummy PBKDF2 验证
+      （sync.OnceValue）抹平时间差；http.Server 补 ReadTimeout/IdleTimeout=120s
+      （不设 WriteTimeout——会杀 /events SSE）。
+红-绿：TestUnboundedBodyEndpointsRejected / TestDummyHashTimingEqualizer
+
+----- 11.【中危，已修】syslog 转发持锁拨号（FR-SYS-004）-----
+缺陷：目标不可达时 3s 拨号在互斥锁内 → 转发线程被拖住、其余日志全部排队。
+修复：拨号移出锁；拨号失败 30s 冷却熔断（syslogRetryCooldown）；写仅持锁期间加 5s
+      deadline（TCP octet-counting 帧需串行化）；写失败关闭连接下条重连（保持既有
+      TestForwardWriteErrorReconnects 语义）。
+红-绿：TestForwardDialFailureCooldown
+
+----- 12.【附带】check_openapi_json_sync.sh 在 Windows GBK 控制台打印 ⇄ 崩溃 →
+      make check 误报「YAML 与 json 未同步」（实际同步）。sys.stdout.reconfigure(encoding=utf-8)。
+
+===== 真机复验（nfvis-vm，v1.1.6-dev 部署 /tmp）=====
+[cli-fulltest.sh：256 条契约命令]
+  通过 197 / 失败 1 / 预期报错 2
+  唯一失败：show vpp runtime——附录 A #34 既有占位（cli_iface_vpp_show.go:343），非本轮回归。
+[cli-semantic-check.sh：结果对不对]
+  通过 11 / 失败 0 / 登记 1（S9 VM 列表配置驱动口径，契约未明确，仅登记）
+[cli-pty-smoke.sh：交互行为]
+  10/10
+[定向 and-quit pty 验证]
+  6/6（见上 §9）
+
+===== 自检与发布 =====
+make check 全绿：17 包测试、vet 0 告警、覆盖率 config 78.0 / model 83.7 / schema 90.0 /
+network 73.6 / compute 89.8 / container 76.3 / images 77.5（门槛 ≥70）、archtest、
+决策条数一致、OpenAPI 同步、原型全绿。
+PR #90 → main（6c2e915）→ tag v1.1.6 → GitHub Release（deb 由 nfvis-vm 上 make deb 生成）。
+sha256(nfvis_1.1.6_amd64.deb) = 88368ccb05636e7b04eb7da6aaa805e2593e9c6fdfb9b40d2b9493e3edd5440d
+
+===== 发布后装机复验（nfvis-vm 从 Release 下载安装 1.1.6 正式版）=====
+$ dpkg -i /tmp/nfvis_1.1.6_amd64.deb        # 哈希与 Release 一致
+  postinst：1G 大页池已预留 total=3；检测到 vpp/libvirtd/dockerd；已装载 nfvis.service（enable）
+$ systemctl start nfvis && systemctl is-active nfvis → active（:443 HTTPS，VPP 已连，看门狗 15s）
+$ nfvis-cli -server https://localhost -c 'show version'
+  NFViS 1.1.6（M2：配置事务可用，网络底座 M3+ 接入）
+附带环境动作（登记）：旧 1.1.5 时代证书缺 IP/localhost SAN → 用 1.1.6 的
+  /system/tls:regenerate 重签（SAN：DNS nfvis/localhost + 本机非回环 IP，决策 #63）；
+  admin 口令经 change-password 对齐开发态常规口令；postinst baseline 默认把 grub 1G 大页
+  写成 1 页（RAM/4 取整），与运行态 3 页（2026-09-15 带外设置）不一致 → 已把
+  /etc/default/grub.d/99-nfvis.cfg 对齐为 3 页并 update-grub（重启后不变）。
+
+===== 未修（涉契约语义，待先改契约再动代码；本轮登记不处理）=====
+配置模式 `run request` 可绕过 login class 授权（execConfig）；backup/tech-support 下载端点
+ClassReadOnly → 应 ClassSuperUser；VRF 静态路由 PUT 只增不删；ACL 解绑语句缺失。

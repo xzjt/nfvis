@@ -202,7 +202,7 @@
 | `commit` | 提交（FR-CFG-002/003） | 事务引擎 → Applier | ✅ |
 | `commit check` | 仅校验不下发 | 事务引擎 | ✅ |
 | `commit confirmed [min]` | 超时未确认自动回滚（默认 10 分钟） | 事务引擎 | ✅ |
-| `commit and-quit` | 提交成功后退出配置模式 | 事务引擎 | ✅ |
+| `commit and-quit` | 提交成功后退出配置模式；**失败留在配置模式、candidate 保留**（决策 #86） | 事务引擎 | ✅ |
 | `rollback [n]` | 取历史快照为 candidate（需再 commit） | 配置历史 | ✅ |
 | `load override\|merge <path>` | JSON 配置导入 | 事务引擎 | ✅ |
 | `save <path>` | candidate 导出 JSON（0600） | 本地文件 | ✅ |
