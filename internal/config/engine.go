@@ -353,6 +353,12 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 	e.sweepLocked()
 	res := CommitResult{}
 
+	// 副作用必须后于持有者检查：非持有者的 commit 虽然会拿到 ErrNotEditing，
+	// 但若把隐式确认放在检查之前，任何用户都能顺带取消他人在途 confirmed
+	// 的自动回滚计时，使未确认配置永久生效（破坏 FR-CFG-012 回滚语义）。
+	if err := e.requireHolderLocked(sess); err != nil {
+		return res, err
+	}
 	if cf, err := e.store.GetConfirmed(); err != nil {
 		return res, err
 	} else if cf != nil {
@@ -360,10 +366,6 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 			Time: e.now(), User: sess.User, Action: "config.confirm",
 			Detail: "新 commit 隐式确认在途 confirmed（FR-CFG-004）", Result: "success",
 		})
-	}
-
-	if err := e.requireHolderLocked(sess); err != nil {
-		return res, err
 	}
 	rev, _, err := e.store.LatestRevision()
 	if err != nil {
@@ -613,8 +615,22 @@ func (e *Engine) sweepLocked() {
 	}
 	li, _ := e.store.GetLock()
 	if li != nil && now.Sub(li.LastActivity) > e.lockIdleTTL {
+		// 必须以锁记录中的 holder 释放：nfvisd 重启后引擎内存态为空（e.holder == ""），
+		// 用 e.holder 去 ReleaseLock 会因 SQL 匹配不到行而静默失败，残留锁永不可清扫。
 		holder := li.Holder
-		_ = e.releaseLocked()
+		var relErr error
+		if e.candidate != nil && e.holder == holder {
+			relErr = e.releaseLocked()
+		} else {
+			relErr = e.store.ReleaseLock(holder)
+		}
+		if relErr != nil {
+			e.store.AppendAudit(AuditEntry{
+				Time: now, User: holder, Action: "config.lock-timeout",
+				Detail: "candidate 空闲超时，自动释放会话锁失败: " + relErr.Error(), Result: "failure",
+			})
+			return
+		}
 		e.store.AppendAudit(AuditEntry{
 			Time: now, User: holder, Action: "config.lock-timeout",
 			Detail: "candidate 空闲超时，自动释放会话锁", Result: "success",
@@ -638,8 +654,8 @@ func (e *Engine) onConfirmedTimer() {
 	e.doConfirmedRollback(cf)
 }
 
-// doConfirmedRollback 超时自动回滚（FR-CFG-003）：以新修订恢复基线配置并告警。
-// 调用方持引擎锁。
+// doConfirmedRollback 超时自动回滚（FR-CFG-003）：以新修订恢复基线配置、
+// 下发底座把运行态一并回退，并告警。调用方持引擎锁。
 func (e *Engine) doConfirmedRollback(cf *ConfirmedInfo) {
 	baseJSON, err := e.store.LoadRevision(cf.BaseRev)
 	if err != nil {
@@ -647,6 +663,14 @@ func (e *Engine) doConfirmedRollback(cf *ConfirmedInfo) {
 		e.emit(EventConfirmedTimeout, fmt.Sprintf("confirmed 基线快照 rev %d 缺失: %v", cf.BaseRev, err))
 		return
 	}
+	var baseCfg model.Config
+	if err := json.Unmarshal(baseJSON, &baseCfg); err != nil {
+		_ = e.store.ClearConfirmed()
+		e.emit(EventConfirmedTimeout, fmt.Sprintf("confirmed 基线快照 rev %d 解析失败: %v", cf.BaseRev, err))
+		return
+	}
+	// 追加回滚修订之前先取当前 committed（即未确认的超时配置），供底座差量回退。
+	cur, curErr := e.committedLocked()
 	now := e.now()
 	if _, err := e.store.AppendRevision(baseJSON, now,
 		fmt.Sprintf("commit confirmed 超时，自动回滚到 rev %d（FR-CFG-003）", cf.BaseRev)); err != nil {
@@ -658,19 +682,37 @@ func (e *Engine) doConfirmedRollback(cf *ConfirmedInfo) {
 		e.confirmStop()
 		e.confirmStop = nil
 	}
-	e.store.AppendAudit(AuditEntry{
-		Time: now, User: "system", Action: "config.rollback-auto",
-		Detail: fmt.Sprintf("commit confirmed 超时未确认，已自动回滚（基线 rev %d）", cf.BaseRev), Result: "success",
-	})
-	e.emit(EventConfirmedTimeout, fmt.Sprintf("commit confirmed 超时，已自动回滚到 rev %d 并产生告警", cf.BaseRev))
+
+	// 回滚必须同样下发底座：超时前的 commit 已把配置生效到 VPP/libvirt/Docker，
+	// 只落库不下发会让运行态无限期残留未确认配置（与 Commit 成功路径不对称）。
+	// 下发失败时不回退 DB 修订（committed 已指向基线，恢复收敛以 DB 为准），
+	// 但审计记 failure 并告警，等待 VPP 重连恢复/人工干预收敛。
+	applyErr := curErr
+	if applyErr == nil && e.applier != nil {
+		if err := e.applier.Apply(context.Background(), cur, baseCfg); err != nil {
+			applyErr = err
+		}
+	}
+	if applyErr != nil {
+		e.store.AppendAudit(AuditEntry{
+			Time: now, User: "system", Action: "config.rollback-auto",
+			Detail: fmt.Sprintf("commit confirmed 超时，已自动回滚（基线 rev %d），但底座回退失败: %v", cf.BaseRev, applyErr),
+			Result: "failure",
+		})
+		e.emit(EventConfirmedTimeout, fmt.Sprintf(
+			"commit confirmed 超时已回滚到 rev %d，但底座回退失败（等待恢复收敛）: %v", cf.BaseRev, applyErr))
+	} else {
+		e.store.AppendAudit(AuditEntry{
+			Time: now, User: "system", Action: "config.rollback-auto",
+			Detail: fmt.Sprintf("commit confirmed 超时未确认，已自动回滚（基线 rev %d）", cf.BaseRev), Result: "success",
+		})
+		e.emit(EventConfirmedTimeout, fmt.Sprintf("commit confirmed 超时，已自动回滚到 rev %d 并产生告警", cf.BaseRev))
+	}
 
 	// 持锁会话的 candidate 同步回滚后配置
 	if e.candidate != nil {
-		var cfg model.Config
-		if err := json.Unmarshal(baseJSON, &cfg); err == nil {
-			e.candidate = &cfg
-			e.dirty = true
-		}
+		e.candidate = &baseCfg
+		e.dirty = true
 	}
 }
 

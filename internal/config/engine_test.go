@@ -75,20 +75,28 @@ func (ts *timerSink) FireAll() {
 }
 
 type mockApplier struct {
-	mu    sync.Mutex
-	fail  bool
-	calls int
+	mu      sync.Mutex
+	fail    bool
+	calls   int
+	lastNew model.Config
 }
 
 func (m *mockApplier) Apply(ctx context.Context, old, new model.Config) error {
 	m.mu.Lock()
 	m.calls++
 	fail := m.fail
+	m.lastNew = new
 	m.mu.Unlock()
 	if fail {
 		return fmt.Errorf("模拟底座下发失败")
 	}
 	return nil
+}
+
+func (m *mockApplier) snapshot() (int, model.Config) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls, m.lastNew
 }
 
 func baseCommitted() model.Config {
@@ -366,6 +374,14 @@ func TestEngineCommitConfirmedTimeout(t *testing.T) {
 	if rev != 3 || strings.Contains(string(data), "risky") {
 		t.Fatalf("自动回滚应以新修订落库: rev=%d data=%s", rev, data)
 	}
+	// 回滚必须同样下发底座（与 Commit 成功路径对称）：第二次 Apply 的目标应为基线配置
+	calls, lastNew := k.applier.snapshot()
+	if calls != 2 {
+		t.Fatalf("超时回滚应下发底座（commit + 回滚共 2 次），实际 %d 次", calls)
+	}
+	if hostnameOf(t, lastNew) != "nfvis-node1" {
+		t.Fatalf("回滚下发目标应为基线配置，实际 %s", hostnameOf(t, lastNew))
+	}
 	if len(*k.events) != 1 || (*k.events)[0].Type != EventConfirmedTimeout {
 		t.Fatalf("应产生 confirmed 超时告警事件: %+v", *k.events)
 	}
@@ -424,6 +440,61 @@ func TestEngineNewCommitConfirmsPending(t *testing.T) {
 	k.timers.FireAll()
 	if got, _ := k.engine.Committed(); hostnameOf(t, got) != "stable" {
 		t.Fatalf("新 commit 应隐式确认旧 pending: %s", hostnameOf(t, got))
+	}
+}
+
+// 非持有者的 commit 必须被拒绝，且**不得**顺带隐式确认他人在途的 confirmed——
+// 否则任何用户都能取消他人的自动回滚计时，使未确认配置永久生效（破坏 FR-CFG-012）。
+func TestEngineCommitByNonHolderDoesNotConfirmPending(t *testing.T) {
+	k := newEngineKit(t)
+	k.edit(t, "admin", "ssh")
+	cfg := baseCommitted()
+	cfg.System.Hostname = "risky"
+	_ = k.engine.UpdateCandidate(Session{User: "admin", Source: "ssh"}, cfg)
+	if _, err := k.engine.Commit(context.Background(), Session{User: "admin", Source: "ssh"}, CommitOpts{ConfirmedMinutes: 10}); err != nil {
+		t.Fatalf("Commit confirmed: %v", err)
+	}
+
+	// 非持有者 commit：拒绝且无副作用
+	if _, err := k.engine.Commit(context.Background(), Session{User: "intruder", Source: "api"}, CommitOpts{}); err == nil {
+		t.Fatal("非持有者 commit 应被拒绝")
+	}
+	// 超时后仍应自动回滚（隐式确认未被触发）
+	k.clock.Advance(10 * time.Minute)
+	k.timers.FireAll()
+	if got, _ := k.engine.Committed(); hostnameOf(t, got) != "nfvis-node1" {
+		t.Fatalf("非持有者 commit 不应取消自动回滚，实际 %s", hostnameOf(t, got))
+	}
+}
+
+// nfvisd 异常退出后 store 残留的锁，重启后的引擎（内存态为空）应能按锁记录中的
+// holder 清扫——否则残留锁永不可释放，配置模式被永久锁死。
+func TestEngineSweepReleasesStaleLockAfterRestart(t *testing.T) {
+	store := openTestStore(t)
+	clock := newFakeClock()
+	timers := newTimerSink()
+	if _, err := store.AppendRevision(mustJSON(baseCommitted()), clock.Now(), "基线"); err != nil {
+		t.Fatalf("预置基线: %v", err)
+	}
+	// 模拟上个进程异常退出：store 残留锁，新引擎内存态为空
+	if err := store.AcquireLock("admin@ssh", clock.Now()); err != nil {
+		t.Fatalf("预置残留锁: %v", err)
+	}
+	e, err := NewEngine(store, &mockApplier{}, Options{Now: clock.Now, AfterFunc: timers.after})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	clock.Advance(DefaultLockIdleTTL + time.Minute)
+	// 新会话进入配置模式应触发清扫并成功获取锁
+	if err := e.Edit(Session{User: "alice", Source: "ssh"}); err != nil {
+		t.Fatalf("过期残留锁应被清扫: %v", err)
+	}
+	li, err := store.GetLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if li == nil || li.Holder != "alice@ssh" {
+		t.Fatalf("锁应已转移给新会话: %+v", li)
 	}
 }
 
