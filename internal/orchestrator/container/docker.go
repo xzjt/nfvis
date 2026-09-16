@@ -269,7 +269,7 @@ func (p *Provider) CheckContainerAlarms(ctx context.Context, cfg model.Config) [
 		}
 		if abnormal {
 			p.alarms.Raise(orchestrator.RecoveryScopeContainer, orchestrator.SeverityCritical, orchestrator.ContainerExited,
-				fmt.Sprintf("容器 %s 异常退出（状态 %s，FR-CMP-022）", ct.Name, state), ct.Name)
+				fmt.Sprintf("容器 %s 异常退出（状态 %s）", ct.Name, state), ct.Name)
 			continue
 		}
 		p.alarms.Resolve(orchestrator.RecoveryScopeContainer, orchestrator.ContainerExited, ct.Name)

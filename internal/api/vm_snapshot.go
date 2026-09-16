@@ -62,7 +62,7 @@ func (s *Server) requireSnapshotPoweredOff(w http.ResponseWriter, r *http.Reques
 	switch state {
 	case orchestrator.VMStateRunning, orchestrator.VMStatePaused, orchestrator.VMStateCrashed:
 		writeError(w, http.StatusConflict, "CONFLICT",
-			fmt.Sprintf("VM %s 当前为 %s，快照 %s 需先关机（FR-CMP-015，决策 #75）", name, state, op), nil)
+			fmt.Sprintf("VM %s 当前为 %s，快照 %s 需先关机", name, state, op), nil)
 		return false
 	}
 	return true

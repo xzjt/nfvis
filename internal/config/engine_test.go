@@ -765,7 +765,7 @@ func TestEngineNumaWarning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
-	if !warningsContain(res.Warnings, "FR-CFG-011⑩") {
+	if !warningsContain(res.Warnings, "跨 NUMA") {
 		t.Fatalf("跨 NUMA 应给性能警告: %+v", res.Warnings)
 	}
 

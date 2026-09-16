@@ -245,7 +245,7 @@ func ValidateDownloadOptions(opts DownloadOptions) error {
 	}
 	// FR-SEC-004：URL 拉取**默认强制** sha256，缺省即拒绝（不再静默跳过校验）。
 	if strings.TrimSpace(opts.SHA256) == "" {
-		return fmt.Errorf("URL 拉取必须提供 sha256（FR-SEC-004：默认强制校验）")
+		return fmt.Errorf("URL 拉取必须提供 sha256（默认强制校验）")
 	}
 	if len(strings.TrimSpace(opts.SHA256)) != 64 || !isHex(opts.SHA256) {
 		return fmt.Errorf("sha256 必须为 64 位十六进制字符串: %q", opts.SHA256)

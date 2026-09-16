@@ -329,7 +329,7 @@ func (p *Provider) prepare(ctx context.Context, vm model.VMFunction, spec Domain
 	}
 	if vm.CloudInit != nil {
 		if p.seed == nil {
-			return fmt.Errorf("VM %s 配置了 cloud-init，但 seed 生成未启用（FR-CMP-016）", vm.Name)
+			return fmt.Errorf("VM %s 配置了 cloud-init，但 seed 生成未启用", vm.Name)
 		}
 		if err := p.store.EnsureDir(path.Dir(spec.SeedISO)); err != nil {
 			return err
@@ -429,7 +429,7 @@ func (p *Provider) CheckVMAlarms(ctx context.Context, cfg model.Config) []error 
 		}
 		if state == orchestrator.VMStateCrashed {
 			p.alarms.Raise(orchestrator.RecoveryScopeCompute, orchestrator.SeverityCritical, orchestrator.VMCrashed,
-				fmt.Sprintf("VM %s 异常退出（crashed，FR-CMP-017）", vm.Name), vm.Name)
+				fmt.Sprintf("VM %s 异常退出（crashed）", vm.Name), vm.Name)
 			continue
 		}
 		p.alarms.Resolve(orchestrator.RecoveryScopeCompute, orchestrator.VMCrashed, vm.Name)

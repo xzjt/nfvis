@@ -120,7 +120,7 @@ func validateVPP(cfg *model.Config, vpp *model.VppConfig) error {
 	if vpp.CPU != nil {
 		if len(isolated) > 0 {
 			if vpp.CPU.MainCore > 0 && !isolated[vpp.CPU.MainCore] {
-				return fmt.Errorf("vpp cpu main-core %d 不在 resource-pools cpu isolated-cores 内（FR-SYS-010）", vpp.CPU.MainCore)
+				return fmt.Errorf("vpp cpu main-core %d 不在 resource-pools cpu isolated-cores 内", vpp.CPU.MainCore)
 			}
 			if vpp.CPU.CorelistWorkers != "" {
 				cores, err := ParseCoreList(vpp.CPU.CorelistWorkers)
@@ -129,7 +129,7 @@ func validateVPP(cfg *model.Config, vpp *model.VppConfig) error {
 				}
 				for _, c := range cores {
 					if !isolated[c] {
-						return fmt.Errorf("vpp cpu corelist-workers 核 %d 不在 resource-pools cpu isolated-cores 内（FR-SYS-010）", c)
+						return fmt.Errorf("vpp cpu corelist-workers 核 %d 不在 resource-pools cpu isolated-cores 内", c)
 					}
 				}
 			}
@@ -144,7 +144,7 @@ func validateVPP(cfg *model.Config, vpp *model.VppConfig) error {
 			}
 		}
 		if !found {
-			return fmt.Errorf("vpp memory hugepage-preference %q 与资源池页大小 %v 不一致（FR-SYS-010）", vpp.Memory.HugepagePreference, pageSizes)
+			return fmt.Errorf("vpp memory hugepage-preference %q 与资源池页大小 %v 不一致", vpp.Memory.HugepagePreference, pageSizes)
 		}
 	}
 	return nil

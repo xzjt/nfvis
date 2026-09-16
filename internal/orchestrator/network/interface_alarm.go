@@ -63,7 +63,7 @@ func (n *L2Network) CheckInterfaceLinks(ctx context.Context, cfg model.Config) [
 			reason = "管理态未启用（set interfaces " + iface.Name + " disable 或下发未生效）"
 		}
 		n.alarms.Raise(ifLinkScope, SeverityWarning, AlarmIfaceLinkDown,
-			fmt.Sprintf("物理口 %s 未就绪：%s（FR-NET-003）", iface.Name, reason), iface.Name)
+			fmt.Sprintf("物理口 %s 未就绪：%s", iface.Name, reason), iface.Name)
 	}
 	return nil
 }

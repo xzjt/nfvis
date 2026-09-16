@@ -142,7 +142,7 @@ func GenerateBaseline(d KernelDesired) (grubFragment string, fstabLine string) {
 	params = append(params, d.ExtraParams...)
 
 	var b strings.Builder
-	b.WriteString("# 由 NFViS 生成（决策 #66）：请勿手工编辑；变更经 CLI set system kernel / resource-pools 后由 nfvisd 重写\n")
+	b.WriteString("# 由 NFViS 生成：请勿手工编辑；变更经 CLI set system kernel / resource-pools 后由 nfvisd 重写\n")
 	// 必须以「追加到标准变量」的形式写：/etc/default/grub.d/*.cfg 在主文件之后被 source，
 	// 而 grub-mkconfig 只采用 GRUB_CMDLINE_LINUX(_DEFAULT)，自定义变量不会生效。
 	if len(params) > 0 {

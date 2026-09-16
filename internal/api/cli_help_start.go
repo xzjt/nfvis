@@ -64,7 +64,7 @@ func (x *cliExecutor) execStart(class, source string, args []string) string {
 		return fmt.Sprintf("%% 无效命令: start %s（可用：start shell）\n", strings.Join(args, " "))
 	}
 	if source != "console" {
-		return "%% start shell 仅允许本地 console 会话（SSH 登录禁用，契约 §1.3）\n"
+		return "%% start shell 仅允许本地 console 会话（SSH 登录禁用）\n"
 	}
 	return "%% start shell 未在 V1 提供（缺本地控制台集成，列入 V2）；请使用 CLI 命令或经 SSH 登录宿主\n"
 }

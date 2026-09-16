@@ -178,7 +178,7 @@ func (x *cliExecutor) showManagementInterface(cfg model.Config) string {
 	fmt.Fprintf(&b, "%-12s %-22s %-18s %s\n", name, m.Address, m.Gateway, "management(kernel)")
 	if m.Interface == "" {
 		fmt.Fprintln(&b, "%% 提示：未指定管理网卡（set system management interface <ifname>）；"+
-			"指定后 commit 强制校验该网卡不得被数据面引用（FR-NET-002）")
+			"指定后 commit 强制校验该网卡不得被数据面引用")
 	}
 	return b.String()
 }
@@ -342,7 +342,7 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 		return fmt.Sprintf("total=%d used=%d free=%d\n", mem.Total, mem.Used, mem.Free)
 	case "runtime":
 		// 契约 §1.1：每线程指令周期/向量率；govpp runtime 未接入时为明确提示
-		return "%% VPP runtime 统计未接入（govpp runtime 解码，见附录 A #34 限制）\n"
+		return "%% VPP runtime 统计未接入（govpp runtime 解码限制）\n"
 	case "capture":
 		return x.execShowVppCapture()
 	}

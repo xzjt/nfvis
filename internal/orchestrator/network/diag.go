@@ -126,7 +126,7 @@ func (d *Diagnostics) Traceroute(ctx context.Context, req TracerouteRequest) (st
 		return "", errors.New("traceroute 目标地址不能为空")
 	}
 	if req.VRF != "" {
-		return "", fmt.Errorf("traceroute 不支持 vrf %q：VPP 26.06 无 traceroute 能力，宿主侧 ICMP 无法经 VPP VRF 转发（附录 A #36）", req.VRF)
+		return "", fmt.Errorf("traceroute 不支持 vrf %q：VPP 26.06 无 traceroute 能力，宿主侧 ICMP 无法经 VPP VRF 转发", req.VRF)
 	}
 	if d.prober == nil {
 		return "", errors.New("traceroute 不可用（宿主侧 ICMP 未装配）")

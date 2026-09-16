@@ -402,7 +402,7 @@ func HugepageSpec(pageSize string) (uint, string, error) {
 	case "":
 		return 0, "", errors.New("未指定大页页大小（hugepage_size / 资源池主池）")
 	default:
-		return 0, "", fmt.Errorf("不支持的大页页大小 %q（仅 2M/1G，FR-CMP-019）", pageSize)
+		return 0, "", fmt.Errorf("不支持的大页页大小 %q（仅 2M/1G）", pageSize)
 	}
 }
 

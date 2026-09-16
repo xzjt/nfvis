@@ -121,7 +121,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"revision": res.Revision, "warnings": res.Warnings,
 		"images_in_archive": len(manifest),
-		"note":              "镜像文件本体不在归档内（FR-OPS-006），如被配置引用需另行导入",
+		"note":              "镜像文件本体不在归档内，如被配置引用需另行导入",
 	})
 }
 
@@ -138,7 +138,7 @@ func (s *Server) handleZeroize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !in.Confirm {
-		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "恢复出厂需 confirm=true（双重确认，FR-OPS-007）", nil)
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "恢复出厂需 confirm=true（双重确认）", nil)
 		return
 	}
 	user := "api"

@@ -50,7 +50,7 @@ func run() error {
 		tlsKey    = flag.String("tls-key", "", "TLS 私钥 PEM 路径")
 		plaintext = flag.Bool("allow-plaintext", false, "强制明文 HTTP（开发/测试；显式给出即忽略已装/自签证书）")
 		initAdmin = flag.String("init-admin-password", "", "首次启动引导 admin 用户的口令（缺省随机生成并打印一次）")
-		vppSock   = flag.String("vpp-sock", envOr("NFVIS_VPP_SOCK", network.DefaultSocket), "VPP binary API 套接字（FR-SYS-007）")
+		vppSock   = flag.String("vpp-sock", envOr("NFVIS_VPP_SOCK", network.DefaultSocket), "VPP binary API 套接字")
 		showVer   = flag.Bool("version", false, "输出版本后退出")
 		// 安装期内核基线生成（FR-SYS-014 / 决策 #66）：安装器调用本开关生成 GRUB 片段与
 		// fstab 行，保证与 CLI（request system kernel apply）**同一生成器**，避免双源。
@@ -249,7 +249,7 @@ func run() error {
 				log.Error("自动生成自签证书失败——API 将以明文提供，请立即用 set system api tls 安装证书", "err", err)
 			case generated:
 				*tlsCert, *tlsKey = tlsMgr.CertPath(), tlsMgr.KeyPath()
-				log.Info("未提供证书，已自动生成自签证书并启用 HTTPS（FR-SEC-004）",
+				log.Info("未提供证书，已自动生成自签证书并启用 HTTPS",
 					"cert", *tlsCert, "fingerprint", info.Fingerprint)
 			default:
 				*tlsCert, *tlsKey = tlsMgr.CertPath(), tlsMgr.KeyPath()
@@ -474,7 +474,7 @@ func run() error {
 			// M5-8：证书临近过期告警（FR-SYS-011）
 			if days, warn := tlsMgr.ExpiryAlarm(); warn {
 				alarms.Raise("tls", network.SeverityWarning, "CERT_EXPIRING",
-					fmt.Sprintf("API 证书将在 %d 天内过期（FR-SYS-011）", days), "system")
+					fmt.Sprintf("API 证书将在 %d 天内过期", days), "system")
 			} else {
 				alarms.Resolve("tls", "CERT_EXPIRING", "system")
 			}
@@ -817,7 +817,7 @@ func (c *snapshotController) requirePoweredOff(ctx context.Context, domain, op s
 	}
 	switch state {
 	case orchestrator.VMStateRunning, orchestrator.VMStatePaused, orchestrator.VMStateCrashed:
-		return fmt.Errorf("VM %s 当前为 %s，快照 %s 需先关机（FR-CMP-015，决策 #75）", domain, state, op)
+		return fmt.Errorf("VM %s 当前为 %s，快照 %s 需先关机", domain, state, op)
 	}
 	return nil
 }

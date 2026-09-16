@@ -414,10 +414,10 @@ func (v *validator) checkVirtualSwitches(c Config) {
 			}
 			// FR-CFG-011④：端口 VLAN 配置一致
 			if pt.NativeVlan != 0 && slices.Contains(pt.TrunkVlans, pt.NativeVlan) {
-				v.errf(pp+".native", "native VLAN %d 与 trunk 允许列表冲突（FR-CFG-011④）", pt.NativeVlan)
+				v.errf(pp+".native", "native VLAN %d 与 trunk 允许列表冲突", pt.NativeVlan)
 			}
 			if s.VlanAccess != 0 && len(pt.TrunkVlans) > 0 && !slices.Contains(pt.TrunkVlans, s.VlanAccess) {
-				v.errf(pp, "交换机 access VLAN %d 不在端口 trunk 允许列表内（FR-CFG-011④）", s.VlanAccess)
+				v.errf(pp, "交换机 access VLAN %d 不在端口 trunk 允许列表内", s.VlanAccess)
 			}
 			v.checkACLRef(pp+".acl_in", pt.AclIn)
 			v.checkACLRef(pp+".acl_out", pt.AclOut)
@@ -552,14 +552,14 @@ func (v *validator) checkNat(c Config) {
 				insideVS = r.VirtualSwitch
 			} else if r.VirtualSwitch != insideVS {
 				v.errf(rp+".virtual_switch",
-					"V1 仅支持单一 inside 转发域：%q 与前一条规则的 %q 不一致（VPP NAT44 单实例仅一对 inside/outside VRF，决策 #52）",
+					"V1 仅支持单一 inside 转发域：%q 与前一条规则的 %q 不一致（VPP NAT44 单实例仅一对 inside/outside VRF）",
 					r.VirtualSwitch, insideVS)
 			}
 		}
 		// 出接口必填（决策 #38）：VPP NAT44 EI 的 outside 不支持自动推断。
 		if r.Action.Interface == "" {
 			v.errf(rp+".action.interface",
-				"必须指定出接口 interface（VPP NAT44 的 outside 不支持自动推断；source-pool 仅提供外部地址，决策 #38/#52）")
+				"必须指定出接口 interface（VPP NAT44 的 outside 不支持自动推断；source-pool 仅提供外部地址）")
 		} else {
 			// outside 转发域 = 出接口所属 VRF（决策 #52）。V1 要求出接口作为某 Vrf 的
 			// l3-interface 且已配地址：默认表无配置地址的途径，NAT 回程不可达。
@@ -575,16 +575,16 @@ func (v *validator) checkNat(c Config) {
 			switch {
 			case owner == "":
 				v.errf(rp+".action.interface",
-					"出接口 %q 不在任何 VRF：V1 要求出接口作为某 L3 交换机（Vrf）的 l3-interface 并配置地址（决策 #52）",
+					"出接口 %q 不在任何 VRF：V1 要求出接口作为某 L3 交换机（Vrf）的 l3-interface 并配置地址",
 					r.Action.Interface)
 			case !hasAddr:
 				v.errf(rp+".action.interface",
-					"出接口 %q 未配置地址：NAT 需以该地址（或源池）作外部地址并建立回程路由（决策 #52）", r.Action.Interface)
+					"出接口 %q 未配置地址：NAT 需以该地址（或源池）作外部地址并建立回程路由", r.Action.Interface)
 			case outsideVRF == "":
 				outsideVRF = owner
 			case outsideVRF != owner:
 				v.errf(rp+".action.interface",
-					"出接口 %q 所属 VRF %q 与其它规则的 outside 转发域 %q 不一致：V1 仅支持单一 outside VRF（决策 #52）",
+					"出接口 %q 所属 VRF %q 与其它规则的 outside 转发域 %q 不一致：V1 仅支持单一 outside VRF",
 					r.Action.Interface, owner, outsideVRF)
 			}
 		}
@@ -715,7 +715,7 @@ func (v *validator) checkVpp(c Config) {
 			if !hasIso {
 				v.errf("vpp.cpu.main-core", "必须先配置 resource-pools cpu isolated-cores")
 			} else if !iso[vp.CPU.MainCore] {
-				v.errf("vpp.cpu.main-core", "核 %d 不在隔离核池内（FR-SYS-010）", vp.CPU.MainCore)
+				v.errf("vpp.cpu.main-core", "核 %d 不在隔离核池内", vp.CPU.MainCore)
 			}
 		}
 		if vp.CPU.CorelistWorkers != "" {
@@ -727,7 +727,7 @@ func (v *validator) checkVpp(c Config) {
 			} else {
 				for _, core := range cores {
 					if !iso[core] {
-						v.errf("vpp.cpu.corelist_workers", "核 %d 不在隔离核池内（FR-SYS-010）", core)
+						v.errf("vpp.cpu.corelist_workers", "核 %d 不在隔离核池内", core)
 					}
 				}
 			}
@@ -738,14 +738,14 @@ func (v *validator) checkVpp(c Config) {
 	}
 	if vp.Memory != nil && vp.Memory.HugepagePreference != "" {
 		if !v.hpSizes[vp.Memory.HugepagePreference] {
-			v.errf("vpp.memory.hugepage_preference", "大页偏好 %s 必须与 resource-pools 页大小一致（FR-SYS-010）", vp.Memory.HugepagePreference)
+			v.errf("vpp.memory.hugepage_preference", "大页偏好 %s 必须与 resource-pools 页大小一致", vp.Memory.HugepagePreference)
 		}
 	}
 	if vp.DPDK != nil {
 		for _, d := range vp.DPDK.PerDev {
 			// FR-CFG-011⑧：必须是 DPDK 接管的物理口（bond 不允许）
 			if !v.ifaceNames[d.Interface] {
-				v.errf(fmt.Sprintf("vpp.dpdk.per-dev[%s]", d.Interface), "%q 不是 DPDK 接管的物理口（FR-CFG-011⑧）", d.Interface)
+				v.errf(fmt.Sprintf("vpp.dpdk.per-dev[%s]", d.Interface), "%q 不是 DPDK 接管的物理口", d.Interface)
 			}
 		}
 		if u := vp.DPDK.UIODriver; u != "" && u != "vfio-pci" && u != "igb-uio" {
@@ -812,7 +812,7 @@ func (v *validator) checkVMFunctions(c Config) {
 			case "vhost-user":
 				// FR-CFG-011①：vhost-user 必须大页内存
 				if m.Memory.Backing == "normal" {
-					v.errf(p, "vhost-user vNIC 要求 memory backing=hugepage（FR-CFG-011①），当前为 normal")
+					v.errf(p, "vhost-user vNIC 要求 memory backing=hugepage，当前为 normal")
 				}
 			case "sriov-vf":
 				if nic.Sriov == nil {
@@ -822,7 +822,7 @@ func (v *validator) checkVMFunctions(c Config) {
 				} else if where := pfInDataPath(c, nic.Sriov.PhysicalInterface); where != "" {
 					// FR-NET-021：占用该 VF 时禁止其 PF 端口进 bridge domain（驱动一致性约束）
 					v.errf(np+".sriov.physical_interface",
-						"VF 直通占用物理口 %s，其 PF 端口禁止进入 bridge-domain %s（FR-NET-021）",
+						"VF 直通占用物理口 %s，其 PF 端口禁止进入 bridge-domain %s",
 						nic.Sriov.PhysicalInterface, where)
 				}
 			case "memif":
@@ -835,7 +835,7 @@ func (v *validator) checkVMFunctions(c Config) {
 				if !checkMAC(nic.MAC) {
 					v.errf(np+".mac", "MAC %q 格式不合法", nic.MAC)
 				} else if owner, taken := v.macOwner[nic.MAC]; taken {
-					v.errf(np+".mac", "MAC %s 重复（FR-CFG-011③），已由 %s 占用", nic.MAC, owner)
+					v.errf(np+".mac", "MAC %s 重复，已由 %s 占用", nic.MAC, owner)
 				} else {
 					v.macOwner[nic.MAC] = m.Name + "/" + nic.Name
 				}
@@ -883,14 +883,14 @@ func (v *validator) checkContainerFunctions(c Config) {
 				continue
 			}
 			if nic.Type != "memif" {
-				v.errf(np+".type", "容器 vNIC type 必须为 memif（FR-NET-022）")
+				v.errf(np+".type", "容器 vNIC type 必须为 memif")
 			}
 			v.checkVSwitchRef(np+".virtual_switch", nic.VirtualSwitch)
 			if nic.MAC != "" {
 				if !checkMAC(nic.MAC) {
 					v.errf(np+".mac", "MAC %q 格式不合法", nic.MAC)
 				} else if owner, taken := v.macOwner[nic.MAC]; taken {
-					v.errf(np+".mac", "MAC %s 重复（FR-CFG-011③），已由 %s 占用", nic.MAC, owner)
+					v.errf(np+".mac", "MAC %s 重复，已由 %s 占用", nic.MAC, owner)
 				} else {
 					v.macOwner[nic.MAC] = ct.Name + "/" + nic.Name
 				}
@@ -935,7 +935,7 @@ func (v *validator) checkAddressOverlap(c Config) {
 		for j := i + 1; j < len(all); j++ {
 			a, b := all[i], all[j]
 			if a.ipnet.Contains(b.ipnet.IP) || b.ipnet.Contains(a.ipnet.IP) {
-				v.errf(b.path, "地址网段与 %s 重叠（FR-CFG-011②）", a.path)
+				v.errf(b.path, "地址网段与 %s 重叠", a.path)
 			}
 		}
 	}
@@ -956,7 +956,7 @@ func (v *validator) checkManagementIsolation(c Config) {
 		return
 	}
 	conflict := func(path, what string) {
-		v.errf(path, "管理网卡 %q 不得用于数据面（%s）：管理面须与业务面隔离（FR-NET-002）", mgmt, what)
+		v.errf(path, "管理网卡 %q 不得用于数据面（%s）：管理面须与业务面隔离", mgmt, what)
 	}
 
 	// 业务网卡清单（会被 VPP 接管）

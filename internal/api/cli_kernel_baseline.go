@@ -87,7 +87,7 @@ func (x *cliExecutor) kernelBaselineWarnings() []string {
 	if len(diffs) == 0 {
 		return nil
 	}
-	out := []string{"警告: 内核启动基线与配置不一致，需写入 GRUB 并重启生效（FR-SYS-014）："}
+	out := []string{"警告: 内核启动基线与配置不一致，需写入 GRUB 并重启生效："}
 	for _, d := range diffs {
 		out = append(out, "  - "+d)
 	}

@@ -20,7 +20,7 @@ import (
 // 事务引擎错误。ErrLocked/ErrNoRevision 定义于 store_sqlite.go。
 var (
 	ErrNotEditing      = errors.New("当前会话未持有 candidate（需先进入配置模式）")
-	ErrConfirmRequired = errors.New("管理口地址/网关变更必须以 commit confirmed 提交（FR-CFG-012）")
+	ErrConfirmRequired = errors.New("管理口地址/网关变更必须以 commit confirmed 提交")
 )
 
 // 事件类型（经 Options.OnEvent 上报，M5 事件总线接入）。
@@ -75,7 +75,7 @@ type ValidationError struct {
 }
 
 func (e *ValidationError) Error() string {
-	return fmt.Sprintf("commit 校验失败（FR-CFG-002），共 %d 条", len(e.Errors))
+	return fmt.Sprintf("commit 校验失败，共 %d 条", len(e.Errors))
 }
 
 // ImageInfo 镜像仓库元数据子集（FR-CFG-011⑤ 使用；完整仓库管理属 M4）。
@@ -358,7 +358,7 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 	} else if cf != nil {
 		e.clearConfirmedLocked(AuditEntry{
 			Time: e.now(), User: sess.User, Action: "config.confirm",
-			Detail: "新 commit 隐式确认在途 confirmed（FR-CFG-004）", Result: "success",
+			Detail: "新 commit 隐式确认在途 confirmed", Result: "success",
 		})
 	}
 
@@ -411,13 +411,13 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 
 	// 生效提示（FR-SYS-009 / FR-SYS-002）
 	if mgmtChanged {
-		res.Warnings = append(res.Warnings, "警告: 管理口地址/网关已变更，注意连通性（FR-CFG-012）")
+		res.Warnings = append(res.Warnings, "警告: 管理口地址/网关已变更，注意连通性")
 	}
 	if !configEq(committed.Vpp, newCfg.Vpp) {
-		res.Warnings = append(res.Warnings, "警告: vpp 变更需 request vpp restart（或整机 reboot）后生效（FR-SYS-009）")
+		res.Warnings = append(res.Warnings, "警告: vpp 变更需 request vpp restart（或整机 reboot）后生效")
 	}
 	if !configEq(committed.ResourcePools, newCfg.ResourcePools) {
-		res.Warnings = append(res.Warnings, "警告: resource-pools 变更需 reboot 生效（FR-SYS-002）")
+		res.Warnings = append(res.Warnings, "警告: resource-pools 变更需 reboot 生效")
 	}
 	res.Warnings = append(res.Warnings, e.numaWarnings(committed, newCfg)...)
 
@@ -649,7 +649,7 @@ func (e *Engine) doConfirmedRollback(cf *ConfirmedInfo) {
 	}
 	now := e.now()
 	if _, err := e.store.AppendRevision(baseJSON, now,
-		fmt.Sprintf("commit confirmed 超时，自动回滚到 rev %d（FR-CFG-003）", cf.BaseRev)); err != nil {
+		fmt.Sprintf("commit confirmed 超时，自动回滚到 rev %d", cf.BaseRev)); err != nil {
 		e.emit(EventConfirmedTimeout, fmt.Sprintf("自动回滚落库失败: %v", err))
 		return
 	}
@@ -721,7 +721,7 @@ func (e *Engine) checkImages(cfg *model.Config) []model.ValidateError {
 		}
 		if info.Type != want {
 			errs = append(errs, model.ValidateError{Path: path,
-				Message: fmt.Sprintf("镜像类型不匹配（FR-CFG-011⑤）：需要 %s，实际 %s", want, info.Type)})
+				Message: fmt.Sprintf("镜像类型不匹配：需要 %s，实际 %s", want, info.Type)})
 		}
 	}
 	for _, vm := range cfg.VirtualMachineFunctions {
@@ -767,7 +767,7 @@ func (e *Engine) numaWarnings(old, new model.Config) []string {
 				continue
 			}
 			if numa, ok := e.topology.InterfaceNUMA(iface); ok && numa != *vm.Memory.NumaNode {
-				out = append(out, fmt.Sprintf("警告: VM %s 的 vNIC %s 物理 NIC %s 位于 NUMA %d，与内存 NUMA %d 不一致，跨 NUMA 访存将降低性能（FR-CFG-011⑩）",
+				out = append(out, fmt.Sprintf("警告: VM %s 的 vNIC %s 物理 NIC %s 位于 NUMA %d，与内存 NUMA %d 不一致，跨 NUMA 访存将降低性能",
 					vm.Name, nic.Name, iface, numa, *vm.Memory.NumaNode))
 			}
 		}

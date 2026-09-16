@@ -265,7 +265,7 @@ func (p *NatProvider) desiredFeatures(c NatClient, nat model.NatConfig, pools ma
 			insideVRF, insideSet = TableID(r.VirtualSwitch), true
 		} else if insideVRF != TableID(r.VirtualSwitch) {
 			return nil, nil, 0, 0, fmt.Errorf(
-				"NAT 规则 %d 的 virtual-switch %q 与前一条规则不一致：V1 仅支持单一 inside 转发域（决策 #52）",
+				"NAT 规则 %d 的 virtual-switch %q 与前一条规则不一致：V1 仅支持单一 inside 转发域",
 				r.Seq, r.VirtualSwitch)
 		}
 		if p.insideIfaces != nil {
@@ -314,7 +314,7 @@ func (p *NatProvider) desiredFeatures(c NatClient, nat model.NatConfig, pools ma
 			outsideVRF, outsideSet = ovrf, true
 		} else if outsideVRF != ovrf {
 			return nil, nil, 0, 0, fmt.Errorf(
-				"NAT 规则 %d 的出接口 %s 与其它规则的 outside 转发域不一致：V1 仅支持单一 outside VRF（决策 #52）",
+				"NAT 规则 %d 的出接口 %s 与其它规则的 outside 转发域不一致：V1 仅支持单一 outside VRF",
 				r.Seq, r.Action.Interface)
 		}
 		// 未提供 source-pool 的规则以出接口地址作外部地址（nat44_ei add interface address）；

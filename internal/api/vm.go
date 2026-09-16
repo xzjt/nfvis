@@ -101,7 +101,7 @@ func (s *Server) handlePutVM(w http.ResponseWriter, r *http.Request) {
 		switch state {
 		case orchestrator.VMStateRunning, orchestrator.VMStatePaused, orchestrator.VMStateCrashed:
 			writeError(w, http.StatusConflict, "CONFLICT",
-				fmt.Sprintf("VM %s 当前为 %s，vCPU/内存/vNIC 修改需先关机（FR-CMP-012，热调整列 V2）", name, state), nil)
+				fmt.Sprintf("VM %s 当前为 %s，vCPU/内存/vNIC 修改需先关机（热调整列 V2）", name, state), nil)
 			return
 		}
 	}

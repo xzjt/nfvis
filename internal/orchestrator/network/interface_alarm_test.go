@@ -58,7 +58,7 @@ func TestInterfaceLinkDownAlarmAndResolve(t *testing.T) {
 	if a.Code != AlarmIfaceLinkDown || a.Severity != SeverityWarning || a.Source != "ens192" {
 		t.Fatalf("告警内容不符: %+v", a)
 	}
-	if !strings.Contains(a.Message, "FR-NET-003") || !strings.Contains(a.Message, "链路 down") {
+	if !strings.Contains(a.Message, "链路 down") {
 		t.Fatalf("告警消息应说明原因: %q", a.Message)
 	}
 
