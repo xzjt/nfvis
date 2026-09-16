@@ -534,14 +534,20 @@ virtual-machine-functions {
    该转换同样作用于**串口接管**（`request … console`）：该路径不减 `Suspend` raw 模式，
    guest 以裸 LF 输出时会被补 CR（等价于终端 cooked 模式的 `ONLCR`）；裸 LF（0x0A）
    不可能是多字节字符的续字节，故对 UTF-8/控制序列安全。
-8. **实例名位置的解析优先级（附录 A #82）**：语句树里形如
+8. **说明文本口径（附录 A #86）**：命令树的 `Desc`（`?`/Tab 候选列表与 `help` 输出里的那列说明）
+   是**给操作者看的**，**不得包含内部引用**——`FR-xxx`、`§x`、`决策 #nn`、`附录 A #nn` 一律不写。
+   需求可追溯（AGENTS 规则 2）写在**代码注释与 `docs/`** 里；`docs/` 与嵌入式契约
+   （`docs/NFViS-openapi.yaml` 的 description）**保留**引用。
+   由 `internal/archtest/user_text_test.go` 守护（同时拒绝剥掉引用后留下的残渣：圈号 `①-⑳`、`/#nn`、
+   空标点括号、连续标点）。示例：`commit` 的说明是 `提交 candidate`，不是 `提交 candidate（FR-CFG-002/003）`。
+9. **实例名位置的解析优先级（附录 A #82）**：语句树里形如
    `K("user", …, P("<name>"), K("password", …), K("class", …))` 的节点，其**首个 token 必须先按实例名消费**，
    不得先按子关键字解释。此前解析器先做子关键字匹配，导致 `set system login user password Admin@123`
    把 `password` 当成子关键字、把取值写到了**祖先容器**（`system.login.password`）上，
    产出模型无法接受的树，用户看到的是 `json: unknown field "password"`。
    规则：**实例名位置上与子关键字同名的 token 一律视为实例名**；若该名字确实与子关键字冲突，
    语句树应改用其它名字（避免歧义）。
-9. **子语句必须成完整形**：`set system login user <name> <子关键字> <取值>` 中
+10. **子语句必须成完整形**：`set system login user <name> <子关键字> <取值>` 中
    `password`/`class` 只能出现在 **`<name>` 之后**；把子关键字直接放在名字位（如
    `set system login user password`）会被当作**用户名**。为避免「打错字静默建出一个无口令账号」，
    `system login user` 的别名层显式拒绝与子关键字同名的用户名（仅 `set`，`delete` 不受限，

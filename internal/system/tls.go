@@ -224,7 +224,7 @@ func ApplyLogRetention(ctx context.Context, run Runner, retentionDays, maxSizeMB
 		return "", fmt.Errorf("创建 journald drop-in 目录: %w", err)
 	}
 	var b strings.Builder
-	b.WriteString("# 由 NFViS 生成（FR-SYS-013：本地日志保留策略；请勿手工编辑）\n[Journal]\n")
+	b.WriteString("# 由 NFViS 生成（本地日志保留策略；请勿手工编辑）\n[Journal]\n")
 	if maxSizeMB > 0 {
 		fmt.Fprintf(&b, "SystemMaxUse=%dM\n", maxSizeMB)
 	}

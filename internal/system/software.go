@@ -121,7 +121,7 @@ func (m *SoftwareManager) Add(ctx context.Context, pkg, expectSHA string) (Softw
 	}
 	out, err := m.installDeb(ctx, archived)
 	if err != nil {
-		return res, fmt.Errorf("安装失败（FR-OPS-001：失败应自动回退，可执行 request system software rollback）: %w: %s", err, strings.TrimSpace(out))
+		return res, fmt.Errorf("安装失败（失败应自动回退，可执行 request system software rollback）: %w: %s", err, strings.TrimSpace(out))
 	}
 	res.Package, res.Output = filepath.Base(archived), strings.TrimSpace(out)
 	// 以包内版本为准报告（安装后版本读回由 dpkg-query 另行校验，避免时钟/缓存歧义）

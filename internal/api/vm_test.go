@@ -121,7 +121,7 @@ func TestVMLifecycleEndpoints(t *testing.T) {
 	fake.states["fw-vm"] = orchestrator.VMStateRunning
 	status, _, data = cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/virtual-machine-functions/fw-vm", token,
 		vmBody("fw-vm"), map[string]string{"X-NFVIS-Auto-Commit": "true"})
-	if status != http.StatusConflict || !strings.Contains(string(data), "FR-CMP-012") {
+	if status != http.StatusConflict || !strings.Contains(string(data), "修改需先关机") {
 		t.Fatalf("运行中修改应 409: %d %s", status, data)
 	}
 

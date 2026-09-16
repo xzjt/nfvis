@@ -12,7 +12,7 @@ import (
 
 // 事务引擎错误。ErrLocked 映射 API 409（会话锁占用），ErrNoRevision 映射 404。
 var (
-	ErrLocked     = errors.New("candidate 会话锁被占用（FR-CFG-009）")
+	ErrLocked     = errors.New("candidate 会话锁被占用")
 	ErrNoRevision = errors.New("配置快照不存在")
 )
 

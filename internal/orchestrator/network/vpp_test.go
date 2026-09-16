@@ -248,7 +248,7 @@ func TestStateAndVersionErrorStrings(t *testing.T) {
 		}
 	}
 	ve := &VersionError{Got: "25.10", Required: "26.06"}
-	if !strings.Contains(ve.Error(), "25.10") || !strings.Contains(ve.Error(), "FR-SYS-007") {
+	if !strings.Contains(ve.Error(), "25.10") || !strings.Contains(ve.Error(), "版本不匹配") {
 		t.Fatalf("VersionError.Error(): %q", ve.Error())
 	}
 }

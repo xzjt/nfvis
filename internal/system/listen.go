@@ -30,12 +30,12 @@ func ResolveListenAddr(listen, mgmtAddress string, isLocal func(ip string) bool)
 	switch {
 	case wildcard:
 		if isLocal != nil && !isLocal(mgmtIP) {
-			return listen, fmt.Sprintf("监听地址 %s 为通配，但管理口地址 %s 未配置在本机，暂不收敛（FR-SEC-001）", listen, mgmtIP)
+			return listen, fmt.Sprintf("监听地址 %s 为通配，但管理口地址 %s 未配置在本机，暂不收敛", listen, mgmtIP)
 		}
 		return net.JoinHostPort(mgmtIP, port),
-			fmt.Sprintf("监听地址 %s 为通配，已收敛为管理口地址 %s（FR-SEC-001：管理面仅监听管理网卡）", listen, mgmtIP)
+			fmt.Sprintf("监听地址 %s 为通配，已收敛为管理口地址 %s（管理面仅监听管理网卡）", listen, mgmtIP)
 	case host != mgmtIP:
-		return listen, fmt.Sprintf("警告：监听地址 %s 与管理口地址 %s 不一致（FR-SEC-001：管理面应仅监听管理网卡）", host, mgmtIP)
+		return listen, fmt.Sprintf("警告：监听地址 %s 与管理口地址 %s 不一致（管理面应仅监听管理网卡）", host, mgmtIP)
 	default:
 		return listen, ""
 	}

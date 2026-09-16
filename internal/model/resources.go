@@ -129,7 +129,7 @@ func (l *PoolLedger) Allocate(cfg Config) []ValidateError {
 			if pool == nil {
 				errs = append(errs, ValidateError{
 					Path: vmPath + ".memory.size-mb",
-					Message: fmt.Sprintf("无 %s 大页资源池，无法分配 %dMB（FR-CFG-011⑪）",
+					Message: fmt.Sprintf("无 %s 大页资源池，无法分配 %dMB",
 						pageSizeLabel(pageSize), vm.Memory.SizeMB),
 				})
 			} else {
@@ -137,7 +137,7 @@ func (l *PoolLedger) Allocate(cfg Config) []ValidateError {
 				if pool.Free < pages {
 					errs = append(errs, ValidateError{
 						Path: vmPath + ".memory.size-mb",
-						Message: fmt.Sprintf("资源池大页 %s 不足：需要 %d，空闲 %d（FR-CFG-011⑨⑪）",
+						Message: fmt.Sprintf("资源池大页 %s 不足：需要 %d，空闲 %d",
 							pool.PageSize, pages, pool.Free),
 					})
 				} else {
@@ -180,7 +180,7 @@ func (l *PoolLedger) allocateCores(cfg Config, vm *VMFunction, used map[int]bool
 	if len(candidates) < count {
 		return nil, []ValidateError{{
 			Path: vmPath + ".vcpu.count",
-			Message: fmt.Sprintf("%s隔离核不足：需要 %d，可用 %d（FR-CMP-002）",
+			Message: fmt.Sprintf("%s隔离核不足：需要 %d，可用 %d",
 				where, count, len(candidates)),
 		}}
 	}

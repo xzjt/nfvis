@@ -932,7 +932,7 @@ func aliasVSCrossConnect(tree map[string]any, t []string, isSet bool) error {
 		return fmt.Errorf("cross-connect 引用的端口未声明，请先 set virtual-switches %s ports %s interface <ifname>（另需端口 %s）", t[1], a, b)
 	}
 	if len(ports) != 2 {
-		return fmt.Errorf("cross-connect 交换机仅支持两个端口，实际 %d 个（FR-NET-012）", len(ports))
+		return fmt.Errorf("cross-connect 交换机仅支持两个端口，实际 %d 个", len(ports))
 	}
 	vs["cross_connect"] = true
 	return nil

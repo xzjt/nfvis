@@ -51,7 +51,7 @@ func (n *L2Network) CheckVnfPorts(ctx context.Context, cfg model.Config) []error
 				reason = "VPP 中不存在对应 vhost-user 接口"
 			}
 			n.alarms.Raise(vnfScope, SeverityWarning, AlarmVnfPortDown,
-				fmt.Sprintf("VNF %s 的 vNIC %s %s（FR-NET-023）", vm.Name, nic.Name, reason), source)
+				fmt.Sprintf("VNF %s 的 vNIC %s %s", vm.Name, nic.Name, reason), source)
 		}
 	}
 	return errs

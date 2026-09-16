@@ -74,7 +74,7 @@ type VersionError struct {
 }
 
 func (e *VersionError) Error() string {
-	return fmt.Sprintf("VPP 版本不匹配（FR-SYS-007）：运行 %q，要求 %q", e.Got, e.Required)
+	return fmt.Sprintf("VPP 版本不匹配：运行 %q，要求 %q", e.Got, e.Required)
 }
 
 // ErrUnavailable 无法连接 VPP（未运行、套接字缺失等，非致命：降级并重试）。

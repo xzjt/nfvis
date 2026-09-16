@@ -971,7 +971,7 @@ func (x *cliExecutor) systemRestore(user, path string) string {
 		return "%% " + err.Error() + "\n"
 	}
 	x.audit(user, "system.restore", "从 "+path+" 恢复", nil)
-	return fmt.Sprintf("已恢复（revision %d）。归档含镜像清单 %d 项；镜像文件本体不在归档内（FR-OPS-006），如被引用需另行导入。\n",
+	return fmt.Sprintf("已恢复（revision %d）。归档含镜像清单 %d 项；镜像文件本体不在归档内，如被引用需另行导入。\n",
 		res.Revision, len(manifest))
 }
 

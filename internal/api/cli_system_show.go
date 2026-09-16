@@ -297,7 +297,7 @@ func (x *cliExecutor) renderKernelBaseline() string {
 	if len(diffs) == 0 {
 		b.WriteString("\n一致性：内核基线与配置期望一致（无需重启）\n")
 	} else {
-		b.WriteString("\n一致性：与配置期望不一致（需写入 GRUB 基线并重启生效，FR-SYS-014）：\n")
+		b.WriteString("\n一致性：与配置期望不一致（需写入 GRUB 基线并重启生效）：\n")
 		for _, d := range diffs {
 			b.WriteString("  - " + d + "\n")
 		}

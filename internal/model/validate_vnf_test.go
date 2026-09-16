@@ -24,12 +24,12 @@ func TestVFSriovPFInDataPathRejected(t *testing.T) {
 	errs := Validate(c)
 	found := false
 	for _, e := range errs {
-		if strings.Contains(e.Message, "FR-NET-021") && strings.Contains(e.Path, "sriov.physical_interface") {
+		if strings.Contains(e.Message, "VF 直通占用物理口") && strings.Contains(e.Path, "sriov.physical_interface") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("PF 进 BD 时应报 FR-NET-021，实际: %v", errs)
+		t.Fatalf("PF 进 BD 时应报「VF 直通占用物理口」，实际: %v", errs)
 	}
 
 	// 移除全部 BD 端口引用后应通过。
