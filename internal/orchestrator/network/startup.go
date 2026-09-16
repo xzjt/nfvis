@@ -70,6 +70,10 @@ func VppSectionHash(vpp *model.VppConfig) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// maxCorelistEntries 核列表条目上界（防误配 OOM：corelist-workers "0-2000000000"
+// 曾在成员校验之前就分配数十亿元素切片，nfvisd 直接 OOM；物理机核数远低于此）。
+const maxCorelistEntries = 1024
+
 // ParseCoreList 解析 VPP 核列表语法（"5,7,9-11" → [5,7,9,10,11]）。
 func ParseCoreList(s string) ([]int, error) {
 	s = strings.TrimSpace(s)
@@ -93,6 +97,11 @@ func ParseCoreList(s string) ([]int, error) {
 		z, err := strconv.Atoi(hi)
 		if err != nil || z < a {
 			return nil, fmt.Errorf("非法核范围 %q（核列表 %q）", part, s)
+		}
+		// 先判跨度再分配：上界检查必须在 append 之前，否则恶意/误配区间
+		// 仍会先吃掉数 GB 内存才轮到后续的隔离核校验报错。
+		if span := z - a + 1; span > maxCorelistEntries || len(out)+span > maxCorelistEntries {
+			return nil, fmt.Errorf("核列表 %q 展开超过 %d 个核（疑似误配；物理核数远低于此）", s, maxCorelistEntries)
 		}
 		for c := a; c <= z; c++ {
 			out = append(out, c)

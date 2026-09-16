@@ -135,6 +135,18 @@ func TestParseCoreList(t *testing.T) {
 			t.Fatalf("%q 应解析失败", bad)
 		}
 	}
+	// 误配防护：超大区间必须在分配切片之前被拒绝（否则 20 亿元素 ≈ 16GB 直接 OOM）
+	if _, err := ParseCoreList("0-2000000000"); err == nil || !strings.Contains(err.Error(), "误配") {
+		t.Fatalf("超大区间应先拒绝后分配: %v", err)
+	}
+	if _, err := ParseCoreList(strings.Repeat("0-1024,", 4) + "0-1024"); err == nil { // 多段累计超限
+		t.Fatalf("累计超限应拒绝")
+	}
+	// 合法大区间（恰好上界）应通过
+	big, err := ParseCoreList("0-1023")
+	if err != nil || len(big) != maxCorelistEntries {
+		t.Fatalf("上界内区间应通过: %v len=%d", err, len(big))
+	}
 }
 
 func TestVppSectionHashAndPendingRestart(t *testing.T) {

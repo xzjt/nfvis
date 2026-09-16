@@ -49,6 +49,21 @@ func (m *Manager) stats() (*core.StatsConnection, error) {
 	return conn, nil
 }
 
+// statsReset 置空缓存的 stats 连接，下次访问惰性重连。
+//
+// 连接不能永久缓存：VPP 重启会生成新的 stats socket 与共享内存段，
+// 旧连接此后读到的是陈旧段（计数冻结/归零）或直接报错——读取失败时
+// 必须置空重建，否则接口计数与 /metrics 会长期答非所问。
+func (m *Manager) statsReset() {
+	m.statsOnce.Do(func() { m.statsConn = &statsConn{} })
+	m.statsConn.mu.Lock()
+	defer m.statsConn.mu.Unlock()
+	if m.statsConn.conn != nil {
+		m.statsConn.conn.Disconnect()
+		m.statsConn.conn = nil
+	}
+}
+
 func (r *vppRuntime) InterfaceCounters(ctx context.Context, ifname string) (state.InterfaceCounters, bool) {
 	conn, err := r.m.stats()
 	if err != nil {
@@ -56,6 +71,7 @@ func (r *vppRuntime) InterfaceCounters(ctx context.Context, ifname string) (stat
 	}
 	var all api.InterfaceStats
 	if err := conn.GetInterfaceStats(&all); err != nil {
+		r.m.statsReset() // VPP 重启后旧段失效，置空待重连
 		return state.InterfaceCounters{}, false
 	}
 	idx, ok := r.swIfIndex(ifname)
@@ -107,6 +123,7 @@ func (r *vppRuntime) buffersViaStatsClient() (state.Buffers, bool) {
 	}
 	var bs api.BufferStats
 	if err := conn.GetBufferStats(&bs); err != nil {
+		r.m.statsReset() // VPP 重启后旧段失效，置空待重连
 		return state.Buffers{}, false
 	}
 	out := state.Buffers{}
@@ -128,6 +145,7 @@ func (r *vppRuntime) Memory(ctx context.Context) (state.Memory, bool) {
 	}
 	var ms api.MemoryStats
 	if err := conn.GetMemoryStats(&ms); err != nil {
+		r.m.statsReset() // VPP 重启后旧段失效，置空待重连
 		return state.Memory{}, false
 	}
 	var out state.Memory

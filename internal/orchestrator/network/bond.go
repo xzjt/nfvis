@@ -108,7 +108,11 @@ func (p *BondProvider) ApplyBond(ctx context.Context, bond model.Bond) error {
 			return fmt.Errorf("重建 bond %s（删除旧实例）: %w", bond.Name, err)
 		}
 		exists = false
+		// map 写必须在锁内：锁外 delete 与并发的 ApplyBond/DeleteBond 构成并发 map
+		// 读写，Go 运行时直接 fatal 崩溃整个 nfvisd。
+		p.mu.Lock()
 		delete(p.bonds, bond.Name)
+		p.mu.Unlock()
 	}
 	if !exists {
 		idx, err = c.BondCreate(wantLacp)
@@ -160,9 +164,7 @@ func (p *BondProvider) ApplyBond(ctx context.Context, bond model.Bond) error {
 func (p *BondProvider) DeleteBond(ctx context.Context, name string) error {
 	p.mu.Lock()
 	idx, ok := p.bonds[name]
-	delete(p.bonds, name)
-	delete(p.members, name)
-	delete(p.lacp, name)
+	members := append([]uint32{}, p.members[name]...)
 	p.mu.Unlock()
 	if !ok {
 		return nil
@@ -172,25 +174,25 @@ func (p *BondProvider) DeleteBond(ctx context.Context, name string) error {
 		return err
 	}
 	defer c.Close()
-	if err := p.detachMembers(c, name, idx); err != nil {
-		return err
-	}
-	if err := c.BondDelete(idx); err != nil {
-		return fmt.Errorf("删除 bond %s: %w", name, err)
-	}
-	return nil
-}
-
-// detachMembers 删除 bond 前先摘除成员（避免残留从属状态）。
-func (p *BondProvider) detachMembers(c BondClient, name string, idx uint32) error {
-	p.mu.Lock()
-	members := append([]uint32{}, p.members[name]...)
-	p.mu.Unlock()
+	// 先摘成员再删 bond（避免残留从属状态）。摘除清单须在清登记**之前**取出——
+	// 否则 map 中已无该 bond，成员永远读成空列表，从属状态残留。
 	for _, m := range members {
 		if err := c.BondDetachMember(m); err != nil {
 			return fmt.Errorf("摘除 bond %s 成员 %d: %w", name, m, err)
 		}
 	}
+	if err := c.BondDelete(idx); err != nil {
+		return fmt.Errorf("删除 bond %s: %w", name, err)
+	}
+	// 底座删除成功后才清登记：失败时保留登记，重试 DeleteBond 可再次收敛；
+	// 并发 ApplyBond 可能已重建同名 bond，仅当登记仍指向本次删除的 idx 时才清。
+	p.mu.Lock()
+	if p.bonds[name] == idx {
+		delete(p.bonds, name)
+		delete(p.members, name)
+		delete(p.lacp, name)
+	}
+	p.mu.Unlock()
 	return nil
 }
 
