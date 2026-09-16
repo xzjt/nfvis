@@ -100,7 +100,7 @@ else
 fi
 
 echo
-echo "[2] \`show \` + Tab：多匹配应响铃**并**列出候选（FR-CLI-003 / §5.2）"
+echo "[2] \`show \` + Tab：多匹配应响铃**并**列出候选"
 run_pty 'show \t' "$TMP/2.raw"
 if grep -q $'\a' "$TMP/2.raw"; then ok "已响铃"; else bad "未响铃"; fi
 if [ "$(count_cand "$TMP/2.raw")" -ge 2 ]; then
@@ -140,7 +140,7 @@ fi
 echo
 echo "==================== 结果：通过 $PASS / 失败 $FAIL ===================="
 if [ "$FAIL" -gt 0 ]; then
-  echo "失败详情可参考本次输出；决策 #81 与 docs/evidence/v1-closeout-round12.txt 有前后对照。"
+  echo "失败详情可参考本次输出；docs/evidence/v1-closeout-round12.txt 有前后对照。"
   exit 1
 fi
 echo "全部通过。"

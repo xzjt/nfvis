@@ -172,7 +172,7 @@ for sub in ports statistics; do
   echo "    --- $sub"; echo "$out" | sed 's/^/      | /' | head -6
   # 契约 §1.1：ports = 成员端口**及状态/计数**；statistics = **每端口收发计数**
   if echo "$out" | grep -qiE 'rx|tx|pkts|packets|counters|bytes'; then ok "$sub 含状态/计数字段"
-  else bad "$sub 无任何状态/计数字段（契约 §1.1 要求；疑似回落到配置 dump）"; fi
+  else bad "$sub 无任何状态/计数字段（应含状态与计数；疑似回落到配置 dump）"; fi
 done
 
 hdr "S5 接口「链接状态」：静态列名 + **扰动判别**（契约要求 驱动/链接状态/速率）"
@@ -181,7 +181,7 @@ echo "    表头: $hdrrow"
 if echo "$hdrrow" | grep -qiE 'driver|link|speed|驱动|链接状态|速率'; then
   ok "表头含驱动/链接状态/速率类字段"
 else
-  bad "表头无驱动/链接状态/速率列（契约 §1.1 明列）"
+  bad "表头无驱动/链接状态/速率列"
 fi
 s_before=$(vpp_state "$IFACE"); row_before=$(cli "show interfaces physical" | grep -E "^$IFACE" | tr -s ' ')
 echo "    VPP 侧 $IFACE = $s_before"; echo "    CLI 行: ${row_before:-（无该行）}"
@@ -207,11 +207,11 @@ commit" >/dev/null 2>&1
 n2=$(cli "show configuration" | grep -c "sem-rt-$MARK" || true)
 [ "$n2" -eq 0 ] && ok "delete 后配置里消失" || bad "delete 后配置里仍在（$n2 处）"
 
-hdr "S7 管道 display 支持面（契约 §3 曾声明 | display set）"
+hdr "S7 管道 display 支持面（曾声明 | display set）"
 pipeout=$(cli "configure
 show | display set")
 if echo "$pipeout" | grep -q '未实现'; then
-  ok "| display set 未实现但**已登记**且给出替代路径（附录 A #84）"
+  ok "| display set 未实现但**已登记**且给出替代路径"
 elif echo "$pipeout" | grep -q '仅支持 json|xml'; then
   bad "| display set 仍是裸的「仅支持 json|xml」——契约未更正或未登记"
 else

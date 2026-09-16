@@ -22,7 +22,7 @@ CURRENT_CP=$(cat /proc/sys/kernel/core_pattern 2>/dev/null || true)
 case "$CURRENT_CP" in
     "$CORE_DIR"*) log "core_pattern 已指向 $CORE_DIR" ;;
     *systemd-coredump*|"|"*apport*) log "提示：core_pattern 走系统收集器（$CURRENT_CP）；如需 nfvis 目录收集，可执行：echo '$CORE_DIR/core.%e.%p.%t' > /proc/sys/kernel/core_pattern" ;;
-    *) log "提示：core_pattern=$CURRENT_CP 未指向 $CORE_DIR，core dump 清单可能为空（FR-OPS-041）" ;;
+    *) log "提示：core_pattern=$CURRENT_CP 未指向 $CORE_DIR，core dump 清单可能为空" ;;
 esac
 
 # 3) 底座优化校验（FR-SYS-002/003、FR-SEC-006）——仅提示
@@ -36,13 +36,13 @@ if [ "${HP1G_TOTAL:-0}" -gt 0 ] 2>/dev/null; then
     log "1G 大页池已预留：total=${HP1G_TOTAL} free=${HP1G_FREE}"
 else
     log "提示：未检测到 **1G** 大页池（当前 1G=${HP1G_TOTAL:-0}、2M=${HP2M_TOTAL:-0}）。"
-    log "      FR-SYS-002：VNF 内存从 1G 大页池分配，未预留则 VM 无法启动。"
-    log "      处理：运行 /usr/share/nfvis/installer/nfvis-baseline.sh --defaults 后 reboot（见用户手册 §3.1）。"
+    log "      VNF 内存从 1G 大页池分配，未预留则 VM 无法启动。"
+    log "      处理：运行 /usr/share/nfvis/installer/nfvis-baseline.sh --defaults 后 reboot（见用户手册「3.1 内核基线」）。"
 fi
 if grep -q 'isolcpus' /proc/cmdline 2>/dev/null; then
     log "isolcpus 已配置：$(tr ' ' '\n' < /proc/cmdline | grep isolcpus | tr '\n' ' ')"
 else
-    log "提示：内核命令行未见 isolcpus（FR-SYS-003 建议隔离核基线）"
+    log "提示：内核命令行未见 isolcpus（隔离核基线未应用）"
 fi
 
 # 4) 运行依赖探测（仅提示）
@@ -50,7 +50,7 @@ for comp in vpp libvirtd dockerd; do
     if command -v "$comp" >/dev/null 2>&1 || systemctl list-unit-files 2>/dev/null | grep -q "^${comp}\.service"; then
         log "检测到 $comp"
     else
-        log "警告：未检测到 $comp（对应编排能力将降级，FR-OPS-010）"
+        log "警告：未检测到 $comp（对应编排能力将降级）"
     fi
 done
 
@@ -61,7 +61,7 @@ if command -v systemctl >/dev/null 2>&1; then
     # FR-OPS-001：升级时自动重启已在运行的 nfvisd 以加载新版本（未运行则不影响，
     # 避免安装期抢占网卡——首次安装不自动 start）。
     if [ "$1" = "configure" ] && [ -n "$2" ]; then
-        systemctl try-restart nfvis.service >/dev/null 2>&1 && log "已重启 nfvis.service 以加载新版本（FR-OPS-001）" || true
+        systemctl try-restart nfvis.service >/dev/null 2>&1 && log "已重启 nfvis.service 以加载新版本" || true
     fi
     log "已装载 nfvis.service（enable；首次安装不自动 start——按需 systemctl start nfvis）"
 fi
@@ -79,7 +79,7 @@ if [ -x "$BASELINE_SH" ]; then
         else
             log "提示：nfvisd 尚未安装，跳过基线应用；安装完成后执行 $BASELINE_SH --defaults"
         fi
-        log "注意：内核基线需重启生效（FR-SYS-014）"
+        log "注意：内核基线需重启生效"
     fi
 fi
 exit 0
