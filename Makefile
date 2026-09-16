@@ -7,6 +7,16 @@ COVER_MIN ?= 70
 VERSION ?= 1.0.0
 ARCH ?= amd64
 
+# 可复现构建的时间锚（附录 A #88）：默认取 **HEAD 提交时间**（同一 commit + 同一 VERSION
+# ⇒ 同一 deb），而不是「打包那一刻」。此前两次打包哈希必然不同，成因有两处，都要治：
+#   ① tar 成员 mtime —— `install`/`go build` 刚落盘的文件带的是当前时间，随打包时刻漂移；
+#   ② gzip 头里的时间戳 —— 由 SOURCE_DATE_EPOCH 关掉（`dpkg-deb` 认这个标准变量）。
+# 不设它也能"重打包比对哈希"以外的验证方式，但设了才能用哈希判断「源码是否一致」。
+# ⚠️ 由 `git archive` 导出的工作树（交接文档 §3.3 的同步流程）**没有 .git**，会回落到 0：
+#    仍然是可复现的，但包内时间戳会是 1970——**发布请显式传真实提交时间**：
+#      make deb VERSION=1.1.8 SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
+
 # make check：提交前/CI 的统一自检入口（AGENTS.md「每次改动后的自检清单」）
 # 必须含 test：CI 只跑 make check，缺此项则 internal/api（含契约↔路由守护）、aaa、
 # cli、state 的测试在 CI 完全不执行，守护形同虚设。
@@ -60,12 +70,15 @@ integration:
 
 # deb 打包（M5-10）。**须在 Linux 上执行**（dpkg-deb；交叉编译出的二进制为 linux/amd64），
 # 例如 nfvis-vm：make deb VERSION=1.0.1
+# **可复现**（附录 A #88）：同一 commit + 同一 VERSION 连打两次，产物 sha256 一致——
+# 故哈希可用于判断「源码是否一致」（见 SOURCE_DATE_EPOCH 处的说明）。
 # 产物 build/nfvis_<VERSION>_<ARCH>.deb，内含：
 #   /usr/bin/{nfvisd,nfvis-cli}、/lib/systemd/system/nfvis.service、
 #   /usr/share/doc/nfvis/（契约 OpenAPI + 命令树 + 规格书 + 用户手册 + 命令全表 + M5 验收记录）、
 #   DEBIAN/{control,postinst,prerm,postrm}（postinst 做安装期底座优化校验，FR-OPS-013）
 deb:
 	@command -v dpkg-deb >/dev/null 2>&1 || { echo "跳过 deb：需要 dpkg-deb（请在 Linux/nfvis-vm 上执行）"; exit 1; }
+	@[ "$(SOURCE_DATE_EPOCH)" != "0" ] || echo "提示：未取到 git 提交时间（非 git 工作树），本次 SOURCE_DATE_EPOCH=0——仍可复现，但包内时间戳为 1970；发布请显式传 SOURCE_DATE_EPOCH=<unix 秒>"
 	rm -rf build/deb
 	install -d build/deb/usr/bin build/deb/lib/systemd/system build/deb/usr/share/doc/nfvis build/deb/DEBIAN build/deb/usr/share/nfvis/installer
 	GOOS=linux GOARCH=$(ARCH) $(GO) build -trimpath -ldflags "-s -w -X github.com/xzjt/nfvis/internal/api.VersionStr=$(VERSION)" -o build/deb/usr/bin/nfvisd ./cmd/nfvisd
@@ -84,8 +97,11 @@ deb:
 	printf 'Package: nfvis\nVersion: %s\nSection: net\nPriority: optional\nArchitecture: %s\nMaintainer: NFViS <nfvis@example.invalid>\nDepends: libc6\nRecommends: vpp, libvirt-daemon-system, docker.io\nDescription: NFViS NFV infrastructure appliance (nfvisd + nfvis-cli)\n JunOS-style CLI + REST API for VPP/KVM/Docker NFV orchestration.\n' "$(VERSION)" "$(ARCH)" > build/deb/DEBIAN/control
 	install -d build/deb/usr/share/doc/nfvis
 	printf 'nfvis %s\n' "$(VERSION)" > build/deb/usr/share/doc/nfvis/version
-	dpkg-deb --root-owner-group --build build/deb build/nfvis_$(VERSION)_$(ARCH).deb
-	@echo "已生成 build/nfvis_$(VERSION)_$(ARCH).deb"
+	# 归一化暂存树 mtime：`-depth` 让子项先于父目录被 touch（touch 子项会改父目录 mtime，
+	# 反过来做等于白做），`-h` 连同符号链接自身一起归一。
+	find build/deb -depth -exec touch -h -d @$(SOURCE_DATE_EPOCH) {} +
+	TZ=UTC SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) dpkg-deb --root-owner-group --build build/deb build/nfvis_$(VERSION)_$(ARCH).deb
+	@echo "已生成 build/nfvis_$(VERSION)_$(ARCH).deb（SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH)）"
 
 # 端到端验收（M5-11；build tag e2e + 需 nfvis 已安装/VPP 可用；CI 不跑）
 e2e:

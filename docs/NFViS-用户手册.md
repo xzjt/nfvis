@@ -8,15 +8,15 @@
 | 证据口径 | 本手册中的命令与输出均取自 **nfvis-vm 真机实测**（`docs/evidence/v1-closeout-round7/8.txt` 等）；未实测处均显式标注 |
 
 > 本手册在编写时逐条真机核验，撞出 4 处问题，**现已全部修复**：
-> ① **已修**（决策 #78）：`nfvis-cli` 的 `-server` 缺省值曾与守护进程缺省不匹配（默认参数连不上），
+> ① **已修**：`nfvis-cli` 的 `-server` 缺省值曾与守护进程缺省不匹配（默认参数连不上），
 >    现缺省即 `https://127.0.0.1:443`，**零参数可连**（见 §4.3）；
-> ② **已修**（决策 #77，安全）：`request system configuration backup to <path>` 导出件曾为 0644
+> ② **已修**（安全）：`request system configuration backup to <path>` 导出件曾为 0644
 >    且含 `password_hash`，现为 0600；
-> ③ **已修**（决策 #80）：`postinst` 的内核基线块原先不可达（安装期并未应用基线），
+> ③ **已修**：`postinst` 的内核基线块原先不可达（安装期并未应用基线），
 >    现已前置——安装时即按机器规格写 GRUB 片段与 fstab，**重启后生效**；
-> ④ **已修**（决策 #79）：`set system login user … password …` 曾因命令树与模型键名不一致而经 CLI 不可用，
+> ④ **已修**：`set system login user … password …` 曾因命令树与模型键名不一致而经 CLI 不可用，
 >    现可正常使用（口令加盐哈希落库、回显脱敏）——见 §4.5。注意形如
->    `set system login user password <口令>` **漏写用户名**仍会被拒并提示正确写法（附录 A #82）。
+>    `set system login user password <口令>` **漏写用户名**仍会被拒并提示正确写法。
 
 ---
 
@@ -56,7 +56,7 @@
 | Docker | 29.x | 容器 VNF（memif） |
 | Go | ≥ 1.26 | 仅**从源码构建**时需要；用 deb 包则不需要 |
 
-> 底座缺失时 nfvisd **降级运行**（对应编排能力不可用并产生告警），不会拒绝启动（FR-OPS-010）。
+> 底座缺失时 nfvisd **降级运行**（对应编排能力不可用并产生告警），不会拒绝启动。
 > 但「降级运行」意味着**装了也用不了对应的功能**，请按 §3 完成底座准备。
 
 ---
@@ -97,7 +97,7 @@ sudo dpkg -i build/nfvis_1.0.0_amd64.deb
 4. 探测 `vpp` / `libvirtd` / `dockerd`，缺失时**警告**（对应编排能力降级）；
 5. `systemctl enable nfvis.service`——**首次安装不自动 start**（避免安装期抢占网卡）。
 
-> **安装期会应用内核基线（决策 #80 起）**：`postinst` 会在无基线时按机器规格写
+> **安装期会应用内核基线**：`postinst` 会在无基线时按机器规格写
 > `/etc/default/grub.d/99-nfvis.cfg` 与 fstab 大页行并执行 `update-grub`，
 > 输出形如 `按机器规格取默认：RAM 5G → 1G 大页 1 页` + `需重启生效`。
 > **重启后才生效**；若已有基线则只做一致性检查。
@@ -199,7 +199,7 @@ nfvis-cli -server https://127.0.0.1:443 -u admin -c \
   "request interfaces 0000:13:00.0 unbind-dpdk to-driver vmxnet3 --yes"
 ```
 
-> **先弄清有哪些口**（决策 #83）：`set interfaces <ifname>` 的 Tab 候选 = **VPP 中的接口**，
+> **先弄清有哪些口**：`set interfaces <ifname>` 的 Tab 候选 = **VPP 中的接口**，
 > 也就是**已被 DPDK 接管**的那批，与 `show interfaces physical` 的空态同源。
 > 已被接管的口在**内核里已无网卡**（`ls /sys/class/net` / `ip link` 都看不到），
 > 所以只能这样发现；反过来，**尚未接管的内核网卡**出现在
@@ -216,7 +216,7 @@ for d in 0000:0b:00.0 0000:13:00.0; do
 done
 ```
 
-实测平台行为（决策 #72）：
+实测平台行为：
 
 - 绑定后**内核网卡消失**，只能按 PCI 地址定位，结果按 PCI 回读驱动；
 - 清空 `driver_override` + `rescan` **不足以**让内核重新探测原生驱动 → 解绑**必须**给 `to-driver`。
@@ -255,8 +255,8 @@ journalctl -u nfvis -f          # 观察启动日志
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `-db` | `/var/lib/nfvis/nfvis.db`（单元内） | SQLite 配置库 |
-| `-listen` | `:443` | API 监听；通配时会**按管理口地址收敛**（FR-SEC-001） |
-| `-tls-cert` / `-tls-key` | 空 | 缺省**自动生成自签证书**并启用 HTTPS（决策 #72） |
+| `-listen` | `:443` | API 监听；通配时会**按管理口地址收敛** |
+| `-tls-cert` / `-tls-key` | 空 | 缺省**自动生成自签证书**并启用 HTTPS |
 | `-allow-plaintext` | 关 | **强制明文**，仅开发/测试；给出即忽略已装/自签证书 |
 | `-init-admin-password` | 空 | 首次启动的 admin 口令；缺省随机生成 |
 | `-vpp-sock` | `/run/vpp/api.sock` | VPP binary API |
@@ -270,7 +270,7 @@ journalctl -u nfvis --since "10 min ago" | grep 一次性口令
 # % 首次启动已创建用户 admin (super-user)。一次性口令（仅显示一次，请立即修改）: XiJrwGuFApmADuaK@Aa1
 ```
 
-> 口令字符集**不含** `!` `$` 反引号 等 shell 敏感字符（决策 #80），可直接复制粘贴；
+> 口令字符集**不含** `!` `$` 反引号 等 shell 敏感字符，可直接复制粘贴；
 > 直接 `nfvis-cli -p <口令>` 或用**单引号**包裹均可用。
 
 若口令已丢失：停服务、删库 `rm /var/lib/nfvis/nfvis.db` 会**清空全部配置**——生产环境不要这样做；
@@ -295,10 +295,10 @@ CLI 参数：
 | `-u` / `-p` | `admin` / `$NFVIS_PASSWORD` | 用户名/口令 |
 | `-ca` | 空 | 服务端证书 PEM；**缺省固定本机 `/var/lib/nfvis/tls/server.crt`**（自签场景零配置） |
 | `-insecure` | 关 | 跳过证书校验（仅调试） |
-| `-source` | `ssh` | 接入源（`ssh`/`console`），影响 FR-CFG-012 自锁保护与 `start shell` 权限 |
+| `-source` | `ssh` | 接入源（`ssh`/`console`），影响自锁保护与 `start shell` 权限 |
 | `-c "…"` | 空 | **脚本模式**：执行多行命令后退出（换行分隔；任一行出错即停） |
 
-> **零参数即可连**（决策 #78）：缺省 `https://127.0.0.1:443` 与守护进程缺省一致，
+> **零参数即可连**：缺省 `https://127.0.0.1:443` 与守护进程缺省一致，
 > 且因地址为 `https://`，客户端会**自动固定本机自签证书** `/var/lib/nfvis/tls/server.crt`
 > ——即「装完即用」无需任何参数。若 nfvisd 监听在别处（如开发用的
 > `-listen 127.0.0.1:18443 -allow-plaintext`），用 `-server http://127.0.0.1:18443`
@@ -317,7 +317,7 @@ commit"
 无歧义缩写、`Ctrl-]` 退出串口、`Ctrl-C` 退出 monitor。
 
 > `?` 是帮助键而非字面量：它不会进入命令行文本。因此取值里**不能直接输入 `?`**
-> （与 Cisco IOS 同构，附录 A #81）。
+> （与 Cisco IOS 同构）。
 
 ### 4.4 用 REST API 访问
 
@@ -335,7 +335,7 @@ curl -sk --cacert /var/lib/nfvis/tls/server.crt https://127.0.0.1/api/v1/system/
 
 ### 4.5 建用户与权限 class
 
-> **CLI 亦可**（决策 #79 已修复）：`set system login user <n> password <s> class <c>` 会**加盐哈希**后落库
+> **CLI 亦可**：`set system login user <n> password <s> class <c>` 会**加盐哈希**后落库
 >（先过口令策略），且语句回显脱敏为 `«已隐藏»`。下表 REST 端点等价，二者同源。
 
 ```bash
@@ -366,7 +366,7 @@ commit"
 
 核对：`nfvis-cli … -c "show users"`。
 
-预置 class 权限矩阵（契约 §4）：
+预置 class 权限矩阵：
 
 | 命令域 | super-user | operator | read-only |
 |---|---|---|---|
@@ -396,7 +396,7 @@ commit confirmed [分钟] → 超时未确认则自动回滚（改管理口等�
 | 命令 | 用途 |
 |---|---|
 | `show` | 看当前层级的 candidate |
-| `show \| display set` | **未支持**（附录 A #84；请用 `save <file>` 导出 JSON 或 `show configuration` 看块状） |
+| `show \| display set` | **未支持**（请用 `save <file>` 导出 JSON 或 `show configuration` 看块状） |
 | `commit check` | 只校验不下发 |
 | `compare rollback <n>`（操作模式：`show configuration compare rollback <n>`） | 与历史比对 |
 | `annotate <path> "注释"` | 给节点加注释（**路径相对当前层级**） |
@@ -455,7 +455,7 @@ nfvis# commit
 ```
 
 > ⚠️ **改管理口地址/网关**：若当前会话来自 SSH，commit 会要求使用 `commit confirmed` 并输出自锁警告
-> （FR-CFG-012）——这是防止把自己关在门外的保护。
+> ——这是防止把自己关在门外的保护。
 
 ### 6.2 资源池与 VPP
 
@@ -556,7 +556,7 @@ nfvis# top
 nfvis# commit
 ```
 
-> NAT 约束（决策 #38/#52）：VPP NAT44 单实例仅一对 (inside, outside)，
+> NAT 约束：VPP NAT44 单实例仅一对 (inside, outside)，
 > 故多规则的 virtual-switch 与出接口 VRF 必须各自一致。
 
 核对：`show acls acl-web detail`、`show qos policies`、`show port-mirroring`、`show nat`。
@@ -576,7 +576,7 @@ nfvis# top
 nfvis# commit
 ```
 
-bond 名可在一切接受接口名处引用（与物理口等价，FR-NET-017）。
+bond 名可在一切接受接口名处引用（与物理口等价）。
 核对：`show bonds`、`show bonds bond0 detail`、`show lldp neighbors`。
 
 ### 6.7 VM VNF
@@ -589,7 +589,7 @@ nfvis$ request images upload name ubuntu-cloud.qcow2 type vm-image file /data/in
 nfvis$ show images                          # 状态 ready 才可引用
 ```
 
-也可从 URL 拉取（**sha256 必填**，FR-SEC-004）：
+也可从 URL 拉取（**sha256 必填**）：
 
 ```bash
 nfvis$ request images download name img.qcow2 type vm-image \
@@ -631,7 +631,7 @@ nfvis$ request virtual-machine-functions fw-vm stop
 nfvis$ request virtual-machine-functions fw-vm restart
 ```
 
-**④ 快照**（FR-CMP-015；**create/rollback 需关机态**——决策 #75）
+**④ 快照**（**create/rollback 需关机态**）
 
 ```bash
 nfvis$ request virtual-machine-functions fw-vm stop
@@ -731,7 +731,7 @@ nfvis$ request vpp trace stop                                  # 停止且不导
 ```bash
 # 生成归档（自动命名，落 /var/lib/nfvis/backup/，0600）
 nfvis$ request system configuration backup
-# 生成并额外导出到指定路径（同样 0600；导出件含口令哈希，决策 #77 已修正权限）
+# 生成并额外导出到指定路径（同样 0600；导出件含口令哈希）
 nfvis$ request system configuration backup to /var/lib/nfvis/backup/pre-change.json
 
 nfvis$ request system configuration restore /var/lib/nfvis/backup/pre-change.json
@@ -740,7 +740,7 @@ nfvis$ request system zeroize
 ```
 
 > **归档含账号信息（`password_hash`）**，自动命名与 `to <path>` 导出件**均为 0600**，仅 super-user 可读
-> （决策 #56 的既有例外口径；决策 #77 修正了 `to <path>` 原先落 0644 的缺陷）。
+> （`to <path>` 导出件原先落 0644，现与自动命名的归档同为 0600）。
 > 请勿把归档放到 /tmp 等共享目录，或复制给他人。
 
 ### 7.5 诊断与转储
@@ -781,7 +781,7 @@ nfvis$ request system api tls regenerate         # 重签自签证书
 nfvis$ request system ssh host-key regenerate
 ```
 
-安装 deb 升级时，`postinst` 会自动 `try-restart` 已在运行的 nfvisd 以加载新版本（FR-OPS-001）。
+安装 deb 升级时，`postinst` 会自动 `try-restart` 已在运行的 nfvisd 以加载新版本。
 
 ---
 
@@ -790,14 +790,14 @@ nfvis$ request system ssh host-key regenerate
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | CLI 报 `连接 nfvisd 失败` / 超时 | ① `-server` 默认值与守护进程不符（§4.3）；② nfvisd 未启动 | 显式 `-server https://127.0.0.1:443`；`systemctl status nfvis` |
-| VM `stop` 报「请求超时」但 VM 实际已停 | 老版本客户端超时 ≤ 服务端 ACPI 等待（已修，决策 #76③） | 升级到含修复的版本；用 `show … <name>` 确认实际状态 |
+| VM `stop` 报「请求超时」但 VM 实际已停 | 老版本客户端超时 ≤ 服务端 ACPI 等待（已修） | 升级到含修复的版本；用 `show … <name>` 确认实际状态 |
 | commit 报 `接口在 VPP 中不存在: ensX（是否未由 DPDK 接管？）` | 网卡未绑 vfio-pci，或 `request vpp restart` 后 startup.conf 丢了 dpdk 条目 | 按 §3.2 绑定；检查 `/etc/vpp/startup.conf` 的 `dpdk {}` 段 |
 | commit 报 `无 1G 大页资源池，无法分配 …MB` | 资源池未配或内核大页未生效 | §3.1 配 `resource-pools hugepages` 并重启生效 |
 | commit 报 `隔离核不足：需要 N，可用 0` | VPP 保留核已占满隔离核池 | 扩大 `isolated-cores`（或用 `show resource-pools` 看 `vpp-reserved`） |
 | 容器下发报 `docker: not found` | 镜像名与 Docker tag 不一致（§6.8） | 上传时的 `name` 用 Docker tag |
 | `show vpp runtime` 报「未接入」 | 该功能 V1 未实现（govpp runtime 解码受限） | 已知限制，非故障 |
 | `show lldp neighbors` 为空 | 无 LLDP 对端 | 正常；对端启用 LLDP 后可见 |
-| `request sriov …` 报「不支持 SR-IOV」 | 网卡无 SR-IOV 能力或未暴露 VF | 换支持 SR-IOV 的网卡；见 FR-NET-004 |
+| `request sriov …` 报「不支持 SR-IOV」 | 网卡无 SR-IOV 能力或未暴露 VF | 换支持 SR-IOV 的网卡 |
 | VPP 重启后网络不通 | startup.conf 由 committed 配置生成，配置不含端口/网卡 | 检查 `show configuration`，必要时 `request vpp restart` 重放 |
 | 配了 cross-connect 后网络风暴/整机失联 | **直通两端同处一个广播域** → 物理二层环路（cross-connect 无 MAC 学习、无环路保护） | 直通两端必须属于**不同**广播域；先断开其一再改配置 |
 | 升级后配置丢失 | 不应发生（配置在 `/var/lib/nfvis/nfvis.db`） | 检查 DB 是否存在；`purge` 卸载才清运行态，数据保留 |
@@ -853,7 +853,7 @@ nfvis-cli … -c "show log system last 100"
 
 ### 9.4 已知限制（使用前请阅读）
 
-完整清单见 `NFViS-CLI命令全表.md` §4 与 `V1-验收检查表.md`。高频几条：
+完整清单见 [`NFViS-CLI命令全表.md`](NFViS-CLI命令全表.md) §4。高频几条：
 
 | 限制 | 说明 |
 |---|---|
@@ -867,7 +867,7 @@ nfvis-cli … -c "show log system last 100"
 
 | 文档 | 用途 |
 |---|---|
-| `NFViS-系统产品需求与目标架构规格书.md` | 需求真源；**附录 A = 决策记录（1~80），实现有疑问先查它** |
+| `NFViS-系统产品需求与目标架构规格书.md` | 需求真源；**附录 A = 决策记录，实现有疑问先查它** |
 | `NFViS-CLI命令全表.md` | 命令速查 + 实测状态 |
 | `NFViS-CLI命令树完整设计.md` | CLI 契约 |
 | `NFViS-openapi.yaml` | REST 契约 |
