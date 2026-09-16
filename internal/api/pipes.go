@@ -110,7 +110,8 @@ func (x *cliExecutor) applyPipes(text string, pipes []pipeSpec) string {
 			if x.structured == nil {
 				return "%% 该命令不支持 display json（仅配置 show 族可用）\n"
 			}
-			b, err := json.MarshalIndent(x.structured, "", "  ")
+			// 序列化前脱敏：structured 为原始配置树，管道旁路不得外泄 password_hash（FR-SEC-007）
+			b, err := json.MarshalIndent(redactedStructured(x.structured), "", "  ")
 			if err != nil {
 				return "%% 结构化输出失败: " + err.Error() + "\n"
 			}
@@ -119,7 +120,7 @@ func (x *cliExecutor) applyPipes(text string, pipes []pipeSpec) string {
 			if x.structured == nil {
 				return "%% 该命令不支持 display xml（仅配置 show 族可用）\n"
 			}
-			text = renderXML(x.structured, "configuration", 0)
+			text = renderXML(redactedStructured(x.structured), "configuration", 0)
 		}
 	}
 	return text

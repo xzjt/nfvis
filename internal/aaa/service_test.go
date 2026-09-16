@@ -118,6 +118,21 @@ func TestLoginFailures(t *testing.T) {
 	}
 }
 
+// TestDummyHashTimingEqualizer 时间侧信道抹平依赖 dummyHash 是合法 PBKDF2
+// 哈希且能完整执行派生——用户不存在/未设口令路径与真实路径等开销。
+func TestDummyHashTimingEqualizer(t *testing.T) {
+	h := dummyHash()
+	if !strings.HasPrefix(h, "pbkdf2$sha256$600000$") {
+		t.Fatalf("dummyHash 应为合法 PBKDF2 哈希: %q", h)
+	}
+	if !VerifyPassword(h, "nfvis-timing-equalizer") {
+		t.Fatalf("dummyHash 应能完整执行 PBKDF2 校验")
+	}
+	if VerifyPassword(h, "wrong") {
+		t.Fatalf("dummyHash 不应校验通过任意口令")
+	}
+}
+
 func TestLockout(t *testing.T) {
 	now, clockPtr := fakeClock()
 	policyCfg := testConfig()

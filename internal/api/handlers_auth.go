@@ -47,6 +47,7 @@ type loginResponse struct {
 
 // handleLogin POST /api/v1/login：用户名口令换 Bearer Token。
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 未认证端点，限制请求体防滥用
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Username == "" || req.Password == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "需要 username 与 password", nil)

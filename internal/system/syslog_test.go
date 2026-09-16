@@ -183,6 +183,43 @@ func TestForwardDialError(t *testing.T) {
 	}
 }
 
+// 拨号失败进入熔断：冷却期内不再拨号（转发丢弃），冷却结束恢复，换目标立即解禁。
+func TestForwardDialFailureCooldown(t *testing.T) {
+	f := NewSyslogForwarder(SyslogConfig{Host: "10.0.0.9"})
+	base := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	f.now = func() time.Time { return base }
+	dials := 0
+	f.SetDialer(func(_, _ string) (net.Conn, error) {
+		dials++
+		return nil, errors.New("connection refused")
+	})
+
+	if err := f.Forward(3, "nfvisd", "log", "x"); err == nil {
+		t.Fatal("拨号失败应返回错误")
+	}
+	if err := f.Forward(3, "nfvisd", "log", "y"); err == nil {
+		t.Fatal("冷却期内转发丢弃仍应返回错误")
+	}
+	if dials != 1 {
+		t.Fatalf("冷却期内不应重复拨号，实际 %d 次", dials)
+	}
+
+	// 冷却结束后恢复拨号
+	f.now = func() time.Time { return base.Add(syslogRetryCooldown) }
+	_ = f.Forward(3, "nfvisd", "log", "z")
+	if dials != 2 {
+		t.Fatalf("冷却结束后应重新拨号，实际 %d 次", dials)
+	}
+
+	// 换目标：立即解禁，不沿用旧目标的熔断
+	f.now = func() time.Time { return base }
+	f.Configure(SyslogConfig{Host: "10.0.0.10"})
+	_ = f.Forward(3, "nfvisd", "log", "w")
+	if dials != 3 {
+		t.Fatalf("换目标后应立即拨号，实际 %d 次", dials)
+	}
+}
+
 // 写失败后下次重连（连接置空）。
 func TestForwardWriteErrorReconnects(t *testing.T) {
 	f, c := newTestForwarder(SyslogConfig{Host: "10.0.0.9"})

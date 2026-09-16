@@ -559,6 +559,7 @@ func (x *cliExecutor) cfgShow(user, source string, s *cliSession, args []string)
 
 func (x *cliExecutor) cfgCommit(user, source string, s *cliSession, args []string) string {
 	opts := config.CommitOpts{}
+	andQuit := false
 	switch {
 	case len(args) > 0 && args[0] == "check":
 		errs, err := x.engine.CommitCheck(config.Session{User: user, Source: source})
@@ -580,15 +581,16 @@ func (x *cliExecutor) cfgCommit(user, source string, s *cliSession, args []strin
 			opts.ConfirmedMinutes = 10 // FR-CFG-003 缺省 10 分钟
 		}
 	case len(args) > 0 && args[0] == "and-quit":
-		res := x.cfgCommit(user, source, s, nil)
-		s.Mode = "oper"
-		s.Path = nil
-		return res
+		andQuit = true
 	}
 	res, err := x.engine.Commit(context.Background(), config.Session{User: user, Source: source}, opts)
 	if err != nil {
 		var ve *config.ValidationError
 		if errors.As(err, &ve) {
+			// and-quit 提交失败：保留配置模式与 candidate 上下文（旧实现直接退出，丢上下文）
+			if andQuit {
+				return "校验失败（仍处于配置模式，candidate 保留）:\n" + formatVErrors(ve.Errors) + "\n"
+			}
 			return "校验失败（candidate 保留）:\n" + formatVErrors(ve.Errors) + "\n"
 		}
 		return "%% " + err.Error() + "\n"
@@ -603,6 +605,12 @@ func (x *cliExecutor) cfgCommit(user, source string, s *cliSession, args []strin
 	// 内核启动基线与配置不一致时给出明确指引（FR-SYS-014 / FR-CMP-005）
 	for _, w := range x.kernelBaselineWarnings() {
 		out += "\n" + w
+	}
+	if andQuit {
+		// 成功后显式释放编辑锁（旧实现不释放，锁要占到空闲超时才可用）
+		_ = x.engine.Release(config.Session{User: user, Source: source})
+		s.Mode = "oper"
+		s.Path = nil
 	}
 	return out + "\n"
 }

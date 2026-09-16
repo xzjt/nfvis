@@ -331,6 +331,11 @@ func TestValidateDownloadOptions(t *testing.T) {
 		{"缺 sha256", DownloadOptions{Name: "a", Type: TypeVM, URL: "http://h/a"}, "sha256"},
 		{"sha256 非 hex", DownloadOptions{Name: "a", Type: TypeVM, URL: "http://h/a", SHA256: strings.Repeat("z", 64)}, "64"},
 		{"sha256 长度不足", DownloadOptions{Name: "a", Type: TypeVM, URL: "http://h/a", SHA256: "abcdef"}, "64"},
+		{"name 路径穿越", DownloadOptions{Name: "../escape", Type: TypeVM, URL: "http://h/a", SHA256: strings.Repeat("a", 64)}, "路径"},
+		{"name 含分隔符", DownloadOptions{Name: "a/b.qcow2", Type: TypeVM, URL: "http://h/a", SHA256: strings.Repeat("a", 64)}, "路径"},
+		{"name 含反斜杠", DownloadOptions{Name: `..\escape`, Type: TypeVM, URL: "http://h/a", SHA256: strings.Repeat("a", 64)}, "路径"},
+		{"name 为索引保留名", DownloadOptions{Name: "index.json", Type: TypeVM, URL: "http://h/a", SHA256: strings.Repeat("a", 64)}, "保留名"},
+		{"容器 name 含斜杠", DownloadOptions{Name: "docker.io/library/alpine:3.20", Type: TypeContainer, URL: "http://h/a", SHA256: strings.Repeat("a", 64)}, "路径"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -339,5 +344,68 @@ func TestValidateDownloadOptions(t *testing.T) {
 				t.Fatalf("期望含 %q 的错误，得到 %v", c.want, err)
 			}
 		})
+	}
+	// 容器镜像允许 tag 分隔符 ":"（Docker ref 单段形式），且拒绝路径成分。
+	ctOK := DownloadOptions{Name: "alpine:3.20", Type: TypeContainer, URL: "http://h/a", SHA256: strings.Repeat("a", 64)}
+	if err := ValidateDownloadOptions(ctOK); err != nil {
+		t.Fatalf("容器镜像 tag 名应通过: %v", err)
+	}
+}
+
+// 路径穿越防护：镜像 name 参与 filepath.Join 拼接仓库路径，导入/删除/取路径
+// 三处入口必须拒绝含路径成分与保留名的 name（高危安全修复的守护测试）。
+func TestImportAndDeleteRejectTraversalNames(t *testing.T) {
+	s := newStore(t)
+	inc := s.Config().IncomingDir
+	content := []byte("evil")
+	src := filepath.Join(inc, "evil.bin")
+	if err := os.WriteFile(src, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	badNames := []string{
+		"../escape.qcow2",
+		"..\\escape.qcow2",
+		"a/b.qcow2",
+		"..",
+		".",
+		"index.json",
+		"index.json.tmp",
+	}
+	for _, n := range badNames {
+		if _, err := s.ImportIncoming(n, TypeVM, src, ""); err == nil {
+			t.Errorf("VM 镜像名 %q 应被拒绝", n)
+		}
+		if _, err := s.ImportIncoming(n, TypeContainer, src, ""); err == nil {
+			t.Errorf("容器镜像名 %q 应被拒绝", n)
+		}
+		if err := ValidateDownloadOptions(DownloadOptions{
+			Name: n, Type: TypeVM, URL: "http://h/a", SHA256: sha256Hex(content),
+		}); err == nil {
+			t.Errorf("下载参数 name %q 应被拒绝", n)
+		}
+	}
+	// 合法名不受影响（含容器 tag 名）
+	if _, err := s.ImportIncoming("good.qcow2", TypeVM, src, ""); err != nil {
+		t.Fatalf("合法 VM 名应通过: %v", err)
+	}
+	if got := s.Path("good.qcow2"); !strings.HasSuffix(got, "good.qcow2") {
+		t.Fatalf("Path: %s", got)
+	}
+	if got := s.Path("../evil"); got != "" {
+		t.Fatalf("穿越名 Path 应返回空，实际 %q", got)
+	}
+	// Delete 对索引外的穿越名报不存在，绝不拼接路径
+	if err := s.Delete("../evil", 0); err == nil || !strings.Contains(err.Error(), "不存在") {
+		t.Fatalf("索引外穿越名删除应报不存在: %v", err)
+	}
+	// 历史索引被污染（手工塞入穿越名）时 Delete 仍拒绝拼接路径
+	if err := s.setMeta(Meta{Name: "../evil", Type: TypeVM, ImportState: StateReady}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete("../evil", 0); err == nil || !strings.Contains(err.Error(), "路径") {
+		t.Fatalf("索引内穿越名删除应被校验拦截: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(s.Config().Dir), "evil")); !os.IsNotExist(err) {
+		t.Errorf("绝不允许删除仓库外文件: %v", err)
 	}
 }

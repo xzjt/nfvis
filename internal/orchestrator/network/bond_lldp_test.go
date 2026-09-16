@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/xzjt/nfvis/internal/model"
@@ -166,11 +167,16 @@ func TestBondStaticAndLacp(t *testing.T) {
 	}
 
 	// 删除
+	f.detach = nil
 	if err := p.DeleteBond(context.Background(), "bond0"); err != nil {
 		t.Fatalf("DeleteBond: %v", err)
 	}
 	if len(f.deleted) != 2 {
 		t.Fatalf("应删除 bond: %v", f.deleted)
+	}
+	// 删除前必须先摘除成员（旧实现先清登记，成员永远读成空列表）
+	if len(f.detach) != 1 || f.detach[0] != 1 {
+		t.Fatalf("删除前应摘除成员 ens192(idx 1): %v", f.detach)
 	}
 	if err := p.DeleteBond(context.Background(), "nope"); err != nil {
 		t.Fatalf("删除不存在应无害: %v", err)
@@ -326,4 +332,75 @@ func TestLldpIDMacNotRawString(t *testing.T) {
 	if got != "02:fe:83:b5:2e:5e" {
 		t.Fatalf("MAC 格式化错误: %q", got)
 	}
+}
+
+// ---------- bond 并发回归 ----------
+
+// syncFakeBond 线程安全假客户端（并发回归测试专用）。
+type syncFakeBond struct {
+	mu     sync.Mutex
+	ifaces map[string]uint32
+	next   uint32
+}
+
+func newSyncFakeBond() *syncFakeBond {
+	return &syncFakeBond{ifaces: map[string]uint32{"ens192": 1, "ens224": 2}, next: 100}
+}
+
+func (f *syncFakeBond) Close() {}
+
+func (f *syncFakeBond) SwInterfaceIndex(ifname string) (uint32, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	idx, ok := f.ifaces[ifname]
+	return idx, ok, nil
+}
+
+func (f *syncFakeBond) BondCreate(lacp bool) (uint32, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.next++
+	return f.next, nil
+}
+
+func (f *syncFakeBond) SetInterfaceName(swIfIndex uint32, name string) error { return nil }
+
+func (f *syncFakeBond) BondAddMember(bondSwIfIndex, memberSwIfIndex uint32, passive bool) error {
+	return nil
+}
+
+func (f *syncFakeBond) BondDetachMember(memberSwIfIndex uint32) error { return nil }
+
+func (f *syncFakeBond) BondDelete(swIfIndex uint32) error { return nil }
+
+func (f *syncFakeBond) SetState(swIfIndex uint32, up bool) error { return nil }
+
+func (f *syncFakeBond) SetMTU(swIfIndex, mtu uint32) error { return nil }
+
+// 并发回归：模式重建路径的 map 删除曾在锁外执行，与并发 DeleteBond 构成
+// 并发 map 读写——Go 运行时直接 fatal 崩溃整个 nfvisd（-race 必报）。
+func TestBondConcurrentApplyDelete(t *testing.T) {
+	f := newSyncFakeBond()
+	p := NewBondProvider(f)
+	lacp := model.Bond{Name: "bond0", Members: []string{"ens192"}, Lacp: &model.Lacp{Mode: "active"}}
+	if err := p.ApplyBond(context.Background(), lacp); err != nil {
+		t.Fatalf("初始 ApplyBond: %v", err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func(n int) {
+			defer wg.Done()
+			b := lacp
+			if n%2 == 0 { // 交替 静态/LACP，持续触发模式重建路径
+				b.Lacp = nil
+			}
+			_ = p.ApplyBond(context.Background(), b)
+		}(i)
+		go func() {
+			defer wg.Done()
+			_ = p.DeleteBond(context.Background(), "bond0")
+		}()
+	}
+	wg.Wait()
 }

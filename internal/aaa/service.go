@@ -94,6 +94,16 @@ func VerifyPassword(hash, pw string) bool {
 	return hmac.Equal(got, want)
 }
 
+// dummyHash 一次性生成的假口令哈希：用户不存在或未设口令时也执行一次等价的
+// PBKDF2 校验，抹平响应时间差，防止通过时间侧信道枚举有效用户名。
+var dummyHash = sync.OnceValue(func() string {
+	h, err := HashPassword("nfvis-timing-equalizer")
+	if err != nil {
+		return ""
+	}
+	return h
+})
+
 // ---------- 口令策略（FR-SEC-003） ----------
 
 // CheckPasswordPolicy 按配置策略校验新口令，返回违规项列表（空 = 合规）。
@@ -207,10 +217,12 @@ func (s *Service) Login(user, password string) (*TokenInfo, error) {
 	}
 	u := findUser(cfg, user)
 	if u == nil {
+		VerifyPassword(dummyHash(), password) // 抹平时间差：与真实用户路径等价 PBKDF2 开销
 		s.recordFailure(user, now)
 		return nil, ErrInvalidCredentials
 	}
 	if u.PasswordHash == "" {
+		VerifyPassword(dummyHash(), password) // 同上：不泄露"该用户未设口令"的时差
 		return nil, fmt.Errorf("用户 %s 未设置口令", user)
 	}
 	if !VerifyPassword(u.PasswordHash, password) {

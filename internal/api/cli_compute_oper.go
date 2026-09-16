@@ -475,28 +475,44 @@ func (x *cliExecutor) imagesDelete(user string, rest []string, confirmed bool) s
 
 // commitMutate 在 CLI 会话内完成 edit→mutate→commit 一步事务（删除类动作语义）。
 // 返回提交摘要文本（含 revision），失败返回 error。
+// 本函数新建的编辑会话负责收尾（失败 Discard、成功 Release）——编辑锁不得
+// 残留到空闲超时；配置模式 `run request ...` 复用的既有会话不替用户清理。
 func (x *cliExecutor) commitMutate(user, source string, mutate func(*model.Config) error) (string, error) {
 	sess := config.Session{User: user, Source: source}
+	_, preExisting, _ := x.engine.Candidate() // 进入前是否已有活跃编辑会话
 	if err := x.engine.Edit(sess); err != nil {
 		return "", err
 	}
+	cleanup := func() {
+		if !preExisting {
+			_ = x.engine.Discard(sess)
+		}
+	}
 	cfg, _, err := x.engine.Candidate()
 	if err != nil {
+		cleanup()
 		return "", err
 	}
 	if err := mutate(&cfg); err != nil {
+		cleanup()
 		return "", err
 	}
 	if err := x.engine.UpdateCandidate(sess, cfg); err != nil {
+		cleanup()
 		return "", err
 	}
 	res, err := x.engine.Commit(context.Background(), sess, config.CommitOpts{})
 	if err != nil {
 		var ve *config.ValidationError
 		if errors.As(err, &ve) {
-			return "", fmt.Errorf("提交校验失败（candidate 保留）:\n%s", formatVErrors(ve.Errors))
+			cleanup()
+			return "", fmt.Errorf("提交校验失败:\n%s", formatVErrors(ve.Errors))
 		}
+		cleanup()
 		return "", err
+	}
+	if !preExisting {
+		_ = x.engine.Release(sess)
 	}
 	return fmt.Sprintf("commit 成功 (revision %d)\n", res.Revision), nil
 }
