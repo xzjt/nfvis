@@ -49,10 +49,32 @@ MARK=$$                           # 本次运行的唯一后缀，便于清理
 
 cli() { "$CLI_BIN" -server "$SRV" -u admin -p "$PW" -source console -c "$1" 2>&1 | grep -v '^连接'; }
 
+# ---------- 前置自检（缺一即明确退出，**不要让断言以「空输出」形式连片假红**）----------
+if [ ! -x "$CLI_BIN" ]; then
+  echo "✗ 找不到可执行的 CLI: $CLI_BIN"
+  echo "  默认是 /tmp/nfvis-cli（开发态构建产物）。若产品已装到系统上，请显式指定："
+  echo "      CLI_BIN=/usr/bin/nfvis-cli bash $0"
+  echo "  ⚠️ 缺了它不会立刻报错，而是**所有经 CLI 的断言都退化成空输出 → 一连串假红**"
+  echo "     （2026-09-16 首次发 v1.1.7 时就踩过：3 通过 / 6 失败，实际产品完全正常）。"
+  exit 1
+fi
+if ! command -v vppctl >/dev/null 2>&1; then
+  echo "✗ 找不到 vppctl：本脚本需要 VPP 作为独立事实源（oracle）"
+  exit 1
+fi
+
 TOKEN=$(curl -s -X POST "$SRV/api/v1/login" -H 'Content-Type: application/json' \
         -d "{\"username\":\"admin\",\"password\":\"$PW\"}" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
 if [ -z "$TOKEN" ]; then
   echo "✗ 登录失败：确认开发态 nfvisd 已在 $SRV 运行、口令为 $PW（见脚本头部前置）"
+  exit 1
+fi
+
+# CLI 也必须真的能通（口令错/守护进程没起/二进制不匹配都会让后续断言假红）
+selfcheck=$("$CLI_BIN" -server "$SRV" -u admin -p "$PW" -c "show version" 2>&1 | head -3)
+if ! printf '%s' "$selfcheck" | grep -q "NFViS"; then
+  echo "✗ CLI 无法通过 $SRV 取得输出（确认守护进程已起、口令正确、CLI 与服务端版本匹配）："
+  printf '%s\n' "$selfcheck" | sed 's/^/      /'
   exit 1
 fi
 
