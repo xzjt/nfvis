@@ -20,7 +20,7 @@
 - M3 验收现状（`docs/M3-人工演示记录.md`）：D1/D2/D3/D6/D8 真机通过；**D4 NAT 已在本轮 M5 补齐并真机端到端通过**
   （决策 #52 跨 VRF：inside=virtual-switch 的 VRF、outside=出接口所属 VRF，VPP 单实例仅一对）；**D5 SPAN 抓包已在 T0-7 实证通过**；
   D7 LLDP 仍环境受限（无对端），启用与命令均正常、M3 的 internal error 未复现。
-- 验证环境 nfvis-vm 当前状态：**已装 nfvis 1.1.7 且 nfvisd 作为 systemd 服务在运行**
+- 验证环境 nfvis-vm 当前状态：**已装 nfvis 1.1.8 且 nfvisd 作为 systemd 服务在运行**
   （开发态请先 `systemctl stop nfvis`）、VPP 运行中、2 网卡绑 vfio-pci、
   **无 domain/接口残留**、引导镜像 `alpine.qcow2` 是集成测试依赖**勿删**；Docker 本地有 `alpine:3.20`。
   **1G 大页池现为 3 页（已生效，无需重启）**——由**带外操作**在 2026-09-15 05:09 设置
@@ -29,11 +29,11 @@
   （本地连 VM 会报 REMOTE HOST IDENTIFICATION HAS CHANGED；连接仍可建立，清陈旧记录即可：
   `ssh-keygen -R nfvis-vm`）。跑集成测试前先 `systemctl restart vpp`（残留拓扑会污染用例）；
   集成测试 `make integration`（CI 不跑）。设计基线在 `docs/`，**不要凭记忆重设计**。
-- 已定决策 87 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 88 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
 - **V1 验收收口**：`docs/V1-验收检查表.md` 把规格书 **109 条 FR** 逐条对照证据
   （**通过 100 / 未验 4 / 降级 3 / 移 V2 2**），降级理由与签字建议见其 §5/§6；
   **待办与未完成项的唯一入口见 `docs/V1-收尾待办.md`**（含环境要点与踩坑记录）。
-  已发布 **v1.0.0 / v1.1.0 / v1.1.1 / v1.1.2 / v1.1.3 / v1.1.4 / v1.1.5 / v1.1.7**（见 GitHub Releases；
+  已发布 **v1.0.0 / v1.1.0 / v1.1.1 / v1.1.2 / v1.1.3 / v1.1.4 / v1.1.5 / v1.1.7 / v1.1.8**（见 GitHub Releases；
   **跳过了 v1.1.6**——那次发布已撤回，其提交不在 `main`，tag/Release 已删）。
   **用户文档**：`docs/NFViS-用户手册.md`（安装→使用全流程）、`docs/NFViS-CLI命令全表.md`
   （256 条命令 + 逐条真机实测状态）；真机手动脚本：`contrib/scripts/cli-fulltest.sh`（问「命令能不能用」）、
@@ -93,7 +93,10 @@ bash contrib/scripts/cli-semantic-check.sh  # 「结果对不对」：与 VPP/�
 - 参数节点双重语义（实例名 `<name>` 入路径 vs 取值 `<ip>` 不入路径）混淆 → cfgSet 解析错误。
 - **给操作者看的文本里写需求编号**（`提交 candidate（FR-CFG-002/003）`、`%% …（FR-NET-012）`）：
   操作者读不懂，且掩盖了「这条消息到底说明了什么」。**需求可追溯（规则 2）靠注释与 `docs/`**，
-  不靠用户可见字符串——`internal/archtest/user_text_test.go` 已守护（决策 #86）。
+  不靠用户可见字符串——`internal/archtest/user_text_test.go` 已守护（决策 #86），
+  **判据是「这段文本会到达操作者吗」而非文件后缀**（决策 #87）：`.go` 字符串字面量、`.sh`/`.service`/
+  `Makefile` 的非注释行、`deploy/` 下的一切（`postinst`/`prerm`/`postrm` **没有后缀**，`dpkg -i` 会直接打印）、
+  以及随包安装的 `docs/NFViS-用户手册.md` 全文；**注释与设计类 `docs/` 里的引用照旧保留**。
   同批教训：**5 处测试断言写的是「消息里应含 FR-xxx」**，等于把泄漏固化成期望——测试别断言实现细节。
 - **交互行为只用管道（非 TTY）演示 → 交互缺陷全部漏网**。管道下 `term.MakeRaw` 失败、退化 `readPlain`，
   raw 模式关闭终端 `OPOST` 后「裸 `\n` 不回车」的错位、以及只按键不回车的行为（`?` 即时列候选、Tab 多匹配列出）
