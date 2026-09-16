@@ -240,6 +240,9 @@ func ValidateDownloadOptions(opts DownloadOptions) error {
 	if strings.TrimSpace(opts.Name) == "" || strings.TrimSpace(opts.URL) == "" {
 		return fmt.Errorf("name 与 url 必填")
 	}
+	if err := validateName(opts.Name, opts.Type); err != nil {
+		return err
+	}
 	if opts.Type != TypeVM && opts.Type != TypeContainer {
 		return fmt.Errorf("type 必须为 %s 或 %s", TypeVM, TypeContainer)
 	}

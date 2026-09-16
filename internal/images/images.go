@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -178,10 +179,13 @@ func (s *Store) Get(name string) (Meta, bool) {
 // Path 返回镜像文件路径（容器镜像无本地文件，返回空）。
 func (s *Store) Path(name string) string {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	m, ok := s.index[name]
+	s.mu.Unlock()
 	if !ok || m.Type != TypeVM {
 		return ""
+	}
+	if validateName(name, TypeVM) != nil {
+		return "" // 纵深防御：历史索引可能含非法名
 	}
 	return filepath.Join(s.cfg.Dir, name)
 }
@@ -202,6 +206,10 @@ func (s *Store) Delete(name string, refCount int) error {
 	s.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrNotFound, name)
+	}
+	// 纵深防御：历史索引可能含非法名，删除前把关（路径穿越防护）。
+	if err := validateName(name, m.Type); err != nil {
+		return err
 	}
 	if m.Type == TypeContainer {
 		if s.dockerRemove == nil {
@@ -229,10 +237,40 @@ func (s *Store) setMeta(m Meta) error {
 	return s.saveLocked()
 }
 
+// vmNameRe VM 镜像名白名单（文件名，与 model.nameRe 同口径：字母数字开头，仅限字母数字 - _ .，≤64 字符）。
+var vmNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// containerNameRe 容器镜像名白名单：name 即 Docker ref 的单段形式（允许 tag 分隔符 ":"）。
+var containerNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+
+// validateName 校验镜像名（导入/拉取/删除/取路径的统一入口，路径穿越防护）。
+//
+// name 会参与 filepath.Join 拼接仓库路径——URL 拉取的归档（含容器镜像）也先落地
+// <dir>/<name> 再经 docker load / rename，因此任何类型都绝不能含 "/"、"\\"、".."；
+// index.json（及写索引用的 .tmp）为仓库保留名，防止镜像文件与索引互相覆盖后仓库整体不可用。
+func validateName(name, typ string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("镜像 name %q 不合法：不得为空或包含路径成分", name)
+	}
+	if name == "index.json" || name == "index.json.tmp" {
+		return fmt.Errorf("镜像 name %q 为仓库保留名", name)
+	}
+	if typ == TypeContainer {
+		if !containerNameRe.MatchString(name) {
+			return fmt.Errorf("容器镜像 name %q 不合法（字母数字开头，仅限字母数字 - _ . :）", name)
+		}
+		return nil
+	}
+	if !vmNameRe.MatchString(name) {
+		return fmt.Errorf("镜像 name %q 不合法（字母数字开头，仅限字母数字 - _ .，≤64 字符）", name)
+	}
+	return nil
+}
+
 // ImportIncoming 从 incoming 目录导入镜像（源文件须位于 IncomingDir 内，成功后清理）。
 func (s *Store) ImportIncoming(name, typ, incomingFile, description string) (Meta, error) {
-	if strings.TrimSpace(name) == "" {
-		return Meta{}, fmt.Errorf("镜像名不能为空")
+	if err := validateName(name, typ); err != nil {
+		return Meta{}, err
 	}
 	if typ != TypeVM && typ != TypeContainer {
 		return Meta{}, fmt.Errorf("type 必须为 %s 或 %s", TypeVM, TypeContainer)
