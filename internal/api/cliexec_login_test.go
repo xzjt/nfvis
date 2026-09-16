@@ -197,3 +197,65 @@ func TestReservedChildKeywordComesFromSchema(t *testing.T) {
 		t.Fatalf("普通用户名不应被判为子关键字: %q", got)
 	}
 }
+
+// TestLoginUserBareNameRejected（附录 A #90②）：`set system login user <name>` 单独成句必须被拒。
+//
+// 真机实测的修复前行为**不是报错而是静默建号**：`configure` → `set system login user tester1`
+// → `commit` 回「成功」，落库出现 {"name":"tester1"}——一个既无 password_hash 又无 class 的账号。
+// 这与本项目「不静默建无口令账号」的既有口径（决策 #82）相悖：那次只挡住了「用户名写成子关键字」。
+func TestLoginUserBareNameRejected(t *testing.T) {
+	x, engine := newCLIKit(t)
+	run(t, x, "admin", aaa.ClassSuperUser, "ssh", "configure")
+
+	res := x.Execute("admin", aaa.ClassSuperUser, "ssh", "set system login user tester1")
+	if !strings.Contains(res.Output, "语句不完整") {
+		t.Fatalf("裸声明应报「语句不完整」: %q", res.Output)
+	}
+	// 报错要能照着做：列出可用子关键字（而不是只说「未产生配置变更」）
+	for _, want := range []string{"password", "class"} {
+		if !strings.Contains(res.Output, want) {
+			t.Errorf("报错应列出子关键字 %q: %q", want, res.Output)
+		}
+	}
+	// 候选为空这一个残缺语句不得落库
+	if err := x.Execute("admin", aaa.ClassSuperUser, "ssh", "commit").Output; err != "" {
+		_ = err // 仅取输出，提交与否由下一行断言
+	}
+	cfg, _, err := engine.Candidate()
+	if err != nil {
+		t.Fatalf("读 candidate: %v", err)
+	}
+	for _, u := range cfg.System.Login.Users {
+		if u.Name == "tester1" {
+			t.Fatalf("残缺语句不得落库（无口令账号）: %+v", u)
+		}
+	}
+}
+
+// TestScalarRequiredBeforeSiblingKeyword（附录 A #91）：`dns server` 的 <ip> 是必需取值，
+// 兄弟关键字不得抢在它之前——否则取值位永远空着，语句以「配置中不存在字段 "dns"」收场，
+// 而 dns 明明是合法关键字，操作者会被引向错误方向。
+func TestScalarRequiredBeforeSiblingKeyword(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaa.ClassSuperUser, "ssh", "configure")
+
+	res := x.Execute("admin", aaa.ClassSuperUser, "ssh", "set system dns server secondary 223.6.6.6")
+	if !strings.Contains(res.Output, "语句不完整") {
+		t.Fatalf("应报「语句不完整」: %q", res.Output)
+	}
+	if !strings.Contains(res.Output, "<ip>") {
+		t.Errorf("应指出缺少 <ip> 取值: %q", res.Output)
+	}
+	if strings.Contains(res.Output, "配置中不存在字段") {
+		t.Errorf("不得再给「字段 dns 不存在」这种指错方向的报错: %q", res.Output)
+	}
+
+	// 合法写法必须仍然可用（修复不得误伤）
+	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", "set system dns server 223.6.6.6 secondary 223.5.5.5")
+	if strings.Contains(res.Output, "语句不完整") || strings.Contains(res.Output, "不存在字段") {
+		t.Fatalf("合法写法被误伤: %q", res.Output)
+	}
+	if !strings.Contains(res.Output, "[ok]") {
+		t.Fatalf("合法写法应成功: %q", res.Output)
+	}
+}

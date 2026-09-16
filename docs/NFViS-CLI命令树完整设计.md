@@ -167,7 +167,7 @@ request alarms clear [id <id> | all]                # 确认后清除已 resolve
 ```
 configure                                           # 进入配置模式（S/O；被 class 拒绝时提示）
 exit | quit                                         # 退出 CLI
-ping <host> [source <ip>] [count <n>] [vrf <name>]  # 经 VPP L3（vppctl ping；source 按接口地址反查接口）
+ping <host> [source <ip>] [count <n>] [vrf <name>]  # **仅 VPP 数据面**（vppctl ping；source 按接口地址反查接口）；0 发包即报错
 traceroute <host> [vrf <name>]                      # 宿主侧 ICMP；vrf 经 VPP 路径不支持（明确报错）
 monitor interfaces <ifname> [interval <sec>]        # 实时刷新计数，Ctrl-C 退出（CLI 端轮询）
 monitor vnf <name>                                  # 跟踪 VNF 状态/事件
@@ -177,6 +177,8 @@ help [command]
 ```
 
 > 实现说明（M3-9，附录 A #36）：VPP 26.06 的 ping 插件仅提供 finished-event API、无发起接口，故 `ping` 经 `vppctl`（CLI socket）执行；`source <ip>` 经 VPP 接口地址反查接口名后作为 `vppctl ping source <iface>`。VPP 26.06 无 traceroute 插件/CLI/API，`traceroute` 由 nfvisd 宿主侧 raw ICMP 实现，`vrf` 参数在经 VPP 的路径上不支持并明确报错。`monitor interfaces` 服务端返回单次快照，nfvis-cli REPL 按 interval 本地轮询、Ctrl-C 退出。
+>
+> **`ping` 的平面口径（附录 A #89）**：`ping` **只覆盖 VPP 数据面**——目标要能经 VPP 的路由/接口到达。管理口属**内核平面**，VPP 看不到它，因此 `ping <管理口网关>` 必然失败。此前它把 vppctl 的原始输出（含 `Statistics: 0 sent, 0 received, 0% packet loss`）原样返回且**不报错**，而判定只看 `^%` 与退出码——「一个包都没发出去」被算作通过，`cli-fulltest.sh` 里那条 `ping` 长期是假绿。现规则：**一个包都没发出去（sent=0）即返回错误**（给 `%` 与非零结果），并在输出里点明平面归属与替代手段（管理口用宿主 `ping`，或 `traceroute`——它走宿主侧 ICMP）。判不出汇总行时**不**判失败（格式一变就误报比漏报更糟）。有发包但全丢（`100% packet loss`）仍是 VPP 自己写明的结果，不重复判失败。
 
 ---
 
@@ -565,3 +567,29 @@ virtual-machine-functions {
    `set system login user password`）会被当作**用户名**。为避免「打错字静默建出一个无口令账号」，
    `system login user` 的别名层显式拒绝与子关键字同名的用户名（仅 `set`，`delete` 不受限，
    以便清理历史误建账号），报错时给出正确写法（附录 A #82）。
+   同一条口径的**补全**（附录 A #90②）：`set system login user <name>` **不能单独成句**——
+   只给名字会落库出「有名字、无 `password_hash`、无 class」的账号（真机实测 CLI 回 `[ok]` 且
+   `commit` 报成功）。此约束写在**命令树**上（`Node.RequireSub`，由 `RQ()` 标记），
+   在别名派发**之前**统一判定，故 `set` 走别名表还是走通用遍历都拦得住；
+   `interfaces <ifname>` 那种「裸声明本身有意义」的节点（决策 #72：先声明端口、绑定后再提交）
+   **不得**标记。
+11. **补全的层级回退（附录 A #90①）**：无子树的参数（实例名/标量取值）消耗掉一个 token 后，
+   下一位置的候选来自**父层关键字**——这正是包注释写明的匹配语义（「值叶子与无子树参数消耗
+   一个 token 后回到父关键字层继续匹配」），也是 `Match` 每个 token 开头做的事。此前候选侧漏了
+   这步，于是 `set system login user admin `、`set system management interface ens160 `、
+   `set system ntp server 1.2.3.4 ` 这些位置**一个候选都列不出来**（操作者只能手打子关键字）；
+   而 `login class <name>` 恰好是对的，因为那个参数**把子节点挂在自己身上**——同一形态在树里
+   两种建模，把缺陷掩了很久。规则：**向上找最近的一层关键字**（层级由结构决定，不随输入前缀
+   漂移），并**排除来路**（否则 `management interface ens160 ` 会把 `interface` 再列一遍）。
+   **只对参数回退、不对值叶子回退**：值叶子之后的同级关键字（如 `api tls cert-file <p>` 之后的
+   `key-file`）与 oper 树（`show`）的同级关键字都不在此列，一律列出会把 `?` 变成噪声；
+   连续位置参数（`cross-connect <a> <b>`）的同级参数同样暂不列出——如实登记为已知局限。
+12. **必需取值不得被同级关键字抢位（附录 A #91）**：`system dns server` 的首个子节点是**必需**的
+   `<ip>`（`SPA`），若直接把兄弟关键字 `secondary` 匹配掉，取值位就永远空着，语句最后以
+   「配置中不存在字段 "dns"」收场——而 `dns` 明明是合法关键字，操作者会被引向错误方向。
+   规则：**直接命中的关键字**若其同级存在未给值的必需标量参数，则报「语句不完整：… 需要先给
+   `<ip>` 取值，再跟 `secondary`」。只用「直接命中」判（层级回退不算），故
+   `vmf x interfaces eth0 type memif …` 这类合法续写不受影响。
+13. **候选描述里的类型取自占位符**（附录 A #90③）：`<ip>` → `（ip）`，不得用 `Node.ParamType`
+   ——后者对 `P`/`SP`/`SPA`/`SPD` 统一是 `"name"`（那是给 `scalarForNode` 做取值类型转换用的），
+   拿它当标签会写出 `<ip>  服务器地址（name）` 这种自相矛盾的候选。

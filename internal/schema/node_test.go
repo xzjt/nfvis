@@ -288,3 +288,110 @@ func TestCanonicalizeAbbrev(t *testing.T) {
 		t.Fatalf("未建模语法应原样保留: %v %v", got, err)
 	}
 }
+
+// TestCandidatesAfterConsumingParam：无子树的参数（实例名/标量取值）消耗一个 token 后，
+// 候选必须来自**父层关键字**——与包注释写明的匹配语义（「值叶子与无子树参数消耗一个 token
+// 后回到父关键字层继续匹配」）以及 Match 每个 token 开头的 `consumesToken() → parent` 一致。
+//
+// 由来（附录 A #90①）：这些位置此前**一个候选都列不出来**，操作者只能手打子关键字。
+// 同一形态在树里有两种建模，掩盖了缺陷——`login user` 把子关键字放成**兄弟**（坏），
+// `login class` / `interfaces` 把子节点**挂**在参数上（好）。故此处两种建模都要断言。
+func TestCandidatesAfterConsumingParam(t *testing.T) {
+	cases := []struct {
+		name   string
+		tokens []string
+		want   []string
+		absent []string
+	}{
+		{
+			name:   "实例名之后（兄弟式建模）",
+			tokens: []string{"set", "system", "login", "user", "admin"},
+			want:   []string{"password", "class"},
+			absent: []string{"<name>"}, // 同一位置再给一个用户名没有意义
+		},
+		{
+			name:   "标量取值之后（需跨一层透明包装）",
+			tokens: []string{"set", "system", "management", "interface", "ens160"},
+			want:   []string{"ip", "gateway"},
+			absent: []string{"interface"}, // 来路不再列
+		},
+		{
+			name:   "标量取值之后（同级兄弟）",
+			tokens: []string{"set", "system", "ntp", "server", "1.2.3.4"},
+			want:   []string{"prefer"},
+		},
+		{
+			// 挂载式建模一直是对的，不能被这次改动弄坏
+			name:   "实例名之后（挂载式建模）",
+			tokens: []string{"set", "system", "login", "class", "foo"},
+			want:   []string{"allow", "deny"},
+		},
+		{
+			name:   "裸声明端口仍应列出子关键字",
+			tokens: []string{"set", "interfaces", "ens224"},
+			want:   []string{"description", "mtu", "disable"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			names := candidateNames(Candidates(ConfigRoot(), c.tokens, "", testDyn))
+			for _, w := range c.want {
+				if !contains(names, w) {
+					t.Errorf("缺少候选 %q，实得 %v", w, names)
+				}
+			}
+			for _, a := range c.absent {
+				if contains(names, a) {
+					t.Errorf("不应出现候选 %q，实得 %v", a, names)
+				}
+			}
+		})
+	}
+	// 位置前缀过滤仍生效（层级由结构定，不由输入定）
+	names := candidateNames(Candidates(ConfigRoot(), []string{"set", "system", "login", "user", "admin"}, "pa", testDyn))
+	if len(names) != 1 || names[0] != "password" {
+		t.Errorf("前缀 pa 应唯一命中 password，实得 %v", names)
+	}
+}
+
+// TestCandidateLabelUsesPlaceholderType：候选描述里的类型标签取自占位符（`<ip>` → ip），
+// 不是 Node.ParamType——后者对 P/SP/SPA/SPD 统一是 "name"（供 scalarForNode 做取值转换），
+// 拿它当标签会写出「服务器地址（name）」这种自相矛盾的候选（附录 A #90④）。
+func TestCandidateLabelUsesPlaceholderType(t *testing.T) {
+	var got string
+	for _, c := range Candidates(ConfigRoot(), []string{"set", "system", "dns", "server"}, "", testDyn) {
+		if c.Token == "<ip>" {
+			got = c.Desc
+		}
+	}
+	if got == "" {
+		t.Fatal("dns server 位置应给出 <ip> 候选")
+	}
+	if strings.Contains(got, "（name）") {
+		t.Errorf("类型标签不得写死成 name: %q", got)
+	}
+	if !strings.Contains(got, "（ip）") {
+		t.Errorf("类型标签应取自占位符 <ip>: %q", got)
+	}
+}
+
+// TestLoginUserRequiresSubKeyword：`login user <name>` 标了 RQ——单独成句会落库出
+// 「有名字、无口令、无 class」的账号（真机实测 CLI 回 [ok] 且 commit 成功），
+// 与本项目「不静默建无口令账号」的既有口径冲突（附录 A #90②）。
+func TestLoginUserRequiresSubKeyword(t *testing.T) {
+	n, _, err := Match(ConfigRoot(), []string{"set", "system", "login", "user", "someone"})
+	if err != nil {
+		t.Fatalf("Match: %v", err)
+	}
+	if !n.RequireSub {
+		t.Fatal("login user 的 <name> 参数应标记 RequireSub")
+	}
+	// 裸声明本身有意义的节点**不得**被误标（决策 #72：先声明端口、绑定后再提交）
+	n, _, err = Match(ConfigRoot(), []string{"set", "interfaces", "ens224"})
+	if err != nil {
+		t.Fatalf("Match: %v", err)
+	}
+	if n.RequireSub {
+		t.Fatal("interfaces <ifname> 裸声明是受支持流程，不应标记 RequireSub")
+	}
+}

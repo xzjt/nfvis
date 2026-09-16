@@ -7,10 +7,24 @@ echo "############ 阶段 5：操作命令与管道 ############"
 { echo "############ 阶段 5：操作命令与管道 ############"; } >> "$LOG"
 
 # ---- 其余操作命令（契约 §1.3）----
-run S5 "ping 192.168.155.1"
-run S5 "ping 192.168.155.1 count 2"
-# source 须为**VPP 接口**地址（管理口 ens160 是内核口，不是 VPP 接口；用 vs-l3 的地址）
-run S5 "ping 192.168.155.1 source 192.168.155.10 count 2"
+# ping 只覆盖 **VPP 数据面**（附录 A #89）：VPP 侧有 L3 地址时才是一条「功能用例」；
+# 没有 L3 地址时本环境必然 0 发包，此时**必须**给出明确的 %% 失败。
+#
+# 为什么不能像以前那样无条件 run：修复前 `ping` 把 vppctl 原始输出（含
+# `Statistics: 0 sent, 0 received, 0% packet loss`）原样返回且不报错，而判定只看 `^%` 与退出码
+# ——于是「一个包都没发出去」被算作 **✓ 通过**（真机实测），这条用例长期是假绿。
+# 两个分支都在验证真实行为，都不存在「盲过」。
+if vppctl show interface address 2>/dev/null | grep -qE '^\s+[0-9a-fA-F:.]+/[0-9]'; then
+  run S5 "ping 192.168.155.1"
+  run S5 "ping 192.168.155.1 count 2"
+  # source 须为**VPP 接口**地址（管理口 ens160 是内核口，不是 VPP 接口；用 vs-l3 的地址）
+  run S5 "ping 192.168.155.1 source 192.168.155.10 count 2"
+else
+  # 0 发包必须判失败，且报错要点明平面口径（否则「0% 丢包」会被读成通了）
+  expect_fail S5 "ping 192.168.155.1" "VPP 数据面"
+  expect_fail S5 "ping 192.168.155.1 count 2" "VPP 数据面"
+  expect_fail S5 "ping 192.168.155.1 source 192.168.155.10 count 2" "VPP 数据面"
+fi
 run S5 "traceroute 192.168.155.1"
 run S5 "monitor interfaces ens224"
 run S5 "monitor vnf cli-vm"

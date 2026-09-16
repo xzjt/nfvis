@@ -114,7 +114,11 @@ func ConfigPathTree() *Node {
 			),
 			K("login", "本地用户与 class",
 				K("user", "本地用户",
-					P("<name>", "用户名", ""),
+					// RQ：`set system login user <name>` 不能单独成句——只给名字会落库成
+					// 「有名字、无 password_hash、无 class」的账号（真机实测：CLI 报 [ok] 且
+					// commit 成功，配置里出现 {"name":"tester1"}），与「不静默建无口令账号」
+					// 的既有口径相悖（附录 A #90②）。
+					RQ(P("<name>", "用户名", "")),
 					K("password", "口令（加盐哈希存储）", V("string", "口令")),
 					K("class", "归属 class", SP("<class-name>", "class", "class 名")),
 				),
