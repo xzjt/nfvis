@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -330,6 +331,26 @@ func run() error {
 		log.Warn("读取 committed 配置失败，日志级别与远程转发采用缺省", "err", err)
 	}
 
+	// 管理口守卫事实（发现 #7，决策 #101）：装配层只负责给事实，判定在 network 包（可单测）。
+	// 三条事实与 model 的 checkManagementIsolation 同源（都用 system.management.interface）——
+	// 那条管的是"配置里不得把管理口用于数据面"，这里管的是"运行态动作不得动管理口"。
+	mgmtFacts := func() network.ManagementFacts {
+		f := network.ManagementFacts{DefaultRouteIface: network.DefaultRouteIfaceOf(network.DefaultRoutePath)}
+		if cfg, err := engine.Committed(); err == nil && cfg.System != nil && cfg.System.Management != nil {
+			f.DeclaredMgmtIface = cfg.System.Management.Interface
+		}
+		if host, _, err := net.SplitHostPort(*listen); err == nil && host != "" &&
+			host != "0.0.0.0" && host != "::" {
+			f.ListenIface = network.IfaceOfIP(host)
+		}
+		return f
+	}
+	{
+		f := mgmtFacts()
+		log.Info("管理口守卫事实（绑定/解绑这些口会被拒）",
+			"declared", f.DeclaredMgmtIface, "default-route", f.DefaultRouteIface, "listen", f.ListenIface)
+	}
+
 	// M5-6：配置备份/恢复/恢复出厂（FR-OPS-004~007）
 	sysOps := system.NewManager(system.DefaultConfig(), engine, imagesStore, api.VersionStr)
 
@@ -549,7 +570,7 @@ func run() error {
 		LLDP:        &lldpController{net: netProvider},
 		State:       state.New(vppMgr.Runtime()),
 		SRIOV:       sriovProvider,
-		DPDK:        &dpdkController{b: dpdkBinder, rec: dpdkBindings, logger: log},
+		DPDK:        &dpdkController{b: dpdkBinder, rec: dpdkBindings, logger: log, facts: mgmtFacts},
 		Kernel:      system.NewBaselineApplier(),
 		NAT:         &natSessionsController{net: netProvider},
 		Alarms:      &alarmController{store: alarms},
@@ -1102,9 +1123,31 @@ type dpdkController struct {
 	b      *network.DPDKBinder
 	rec    *network.Bindings
 	logger *slog.Logger
+	// facts 提供管理口守卫所需事实（发现 #7；nil = 守卫未装配，仅限测试装配）。
+	facts func() network.ManagementFacts
+}
+
+// checkManagement 判定目标是否为管理口（发现 #7，决策 #101：默认拒绝，不提供显式越过）。
+//
+// 目标可能是 PCI 地址（接管后内核已无 netdev，解绑时只能按 PCI 定位）→ 先解析成口名
+// （内核 netdev 名或绑定记录），解析不出按「未知」处理、不拦（理由见 ResolveIfaceName 注释）。
+func (c *dpdkController) checkManagement(target string) error {
+	if c.facts == nil {
+		return nil
+	}
+	name, ok := network.ResolveIfaceName(target, c.rec)
+	if !ok {
+		return nil
+	}
+	return network.CheckManagementPort(name, c.facts())
 }
 
 func (c *dpdkController) SetDPDKBound(ctx context.Context, ifname string, bound bool, driver string) (string, string, error) {
+	// 管理口守卫（发现 #7，决策 #101）：**先于任何 sysfs 动作**判定，命中即拒绝。
+	// 落点在这里是因为 CLI 执行器与 REST handler 都经本方法（决策 #75：约束要放在两侧共同依赖处）。
+	if err := c.checkManagement(ifname); err != nil {
+		return "", "", err
+	}
 	var pci string
 	var err error
 	if bound {
