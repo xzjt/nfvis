@@ -239,7 +239,7 @@ commit"
 # ② 按配置重生成 startup.conf 并重启数据面
 nfvis-cli -u admin -c "request vpp restart"
 # ③ 确认：接口出现在数据面（状态 down 属正常，尚未配 L2/L3）
-nfvis-cli -u admin -c "show vpp"              # pending_restart 应为 false
+nfvis-cli -u admin -c "show interfaces physical"   # 业务口在列，Driver 为 dpdk
 vppctl show interface
 ```
 
@@ -247,7 +247,8 @@ vppctl show interface
 
 - ① 的 commit **会成功**，即便这些口此刻还没进数据面：产品的做法是**延后收敛**
   （日志会写明「尚未进入数据面…执行 request vpp restart 后自动收敛」），
-  ② 之后由恢复收敛自动补齐 MTU/状态。
+  ② 之后由恢复收敛自动补齐 MTU/状态。**「vpp 变更待重启」由 commit 自己警告**
+  （`警告: vpp 变更需 request vpp restart … 后生效`），照它做即可。
 - 产品生成 `/etc/vpp/startup.conf` 时，把配置里的口名解析成 PCI，靠的是
   **绑定时记下的映射**（`/var/lib/nfvis/dpdk-bindings.json`）——所以务必先用
   `bind-dpdk` 接管，再声明；顺序反了会在②报「解析 … 的 PCI 地址失败」。
