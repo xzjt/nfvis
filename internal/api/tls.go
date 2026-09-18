@@ -8,7 +8,6 @@ package api
 
 import (
 	"context"
-	"net"
 	"net/http"
 	"os"
 
@@ -16,10 +15,16 @@ import (
 )
 
 // TlsRuntime 证书能力（*system.TLSManager 经适配注入；nil = 503）。
+//
+// 接口里**没有**「带 SAN 参数的重签」：自签证书的 SAN 由实现按本机监听地址统一推导
+// （`system.ServerCertSANs`）。这是有意的——历史上 REST 与 CLI 各自传 ips（CLI 传 nil），
+// 重签出的证书缺回环 IP SAN，而 nfvis-cli 缺省连 https://127.0.0.1 且做完整主机名校验
+// （决策 #78），于是「重签」当场自毁管理路径（发现 #10）。把 ips 移出接口后，
+// 调用方**没有机会**漏传或传错（同决策 #75：约束要落在两侧共同依赖处）。
 type TlsRuntime interface {
 	Info() (system.TlsInfo, bool)
 	Install(certPEM, keyPEM string) (system.TlsInfo, error)
-	Regenerate(hostname string, ips []string) (system.TlsInfo, error)
+	RegenerateSelfSigned(hostname string) (system.TlsInfo, error)
 	RegenerateSSHHostKeys(ctx context.Context) error
 }
 
@@ -80,8 +85,7 @@ func (s *Server) handlePostTLSRegenerate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	host, _ := os.Hostname()
-	ips := localIPs()
-	info, err := s.tlsMgr.Regenerate(host, ips)
+	info, err := s.tlsMgr.RegenerateSelfSigned(host)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
 		return
@@ -92,19 +96,4 @@ func (s *Server) handlePostTLSRegenerate(w http.ResponseWriter, r *http.Request)
 	}
 	s.engine.Audit(user, "system.tls.regenerate", "重签自签证书（指纹 "+info.Fingerprint+"）", "success")
 	writeJSON(w, http.StatusOK, info)
-}
-
-// localIPs 本机非回环 IP（自签证书 SAN，尽力而为）。
-func localIPs() []string {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, a := range addrs {
-		if ipn, ok := a.(*net.IPNet); ok && !ipn.IP.IsLoopback() {
-			out = append(out, ipn.IP.String())
-		}
-	}
-	return out
 }

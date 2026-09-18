@@ -235,6 +235,9 @@ func run() error {
 	// 已装管理证书 → 直接用；否则**自动生成自签证书**（FR-API-001「REST over HTTPS（自签证书，可换）」）。
 	// 仅显式 -allow-plaintext（开发/测试）才退化为明文——此前缺省即明文，与规格相反。
 	tlsMgr := system.NewTLSManager("", runCmd)
+	// 自签证书的 SAN 由管理端按本机监听地址统一推导（决策 #99）；此处先按命令行给的监听地址，
+	// 监听地址收敛后（下方 ResolveListenAddr）再更新一次。
+	tlsMgr.SetListen(*listen)
 	// -allow-plaintext 是**权威开关**：显式给出即走明文（即便磁盘上已有自签证书）。
 	// 否则「已存在证书」会让该开关看起来无效——真机验证时即踩到：带 -allow-plaintext
 	// 启动却仍以 HTTPS 服务，明文客户端全被拒。
@@ -243,7 +246,7 @@ func run() error {
 			*tlsCert, *tlsKey = tlsMgr.CertPath(), tlsMgr.KeyPath()
 			log.Info("使用已安装的管理证书启用 HTTPS", "cert", *tlsCert)
 		} else {
-			info, generated, err := tlsMgr.EnsureSelfSigned(hostnameOr("nfvis"), system.ListenSANs(*listen))
+			info, generated, err := tlsMgr.EnsureSelfSigned(hostnameOr("nfvis"))
 			switch {
 			case err != nil:
 				log.Error("自动生成自签证书失败——API 将以明文提供，请立即用 set system api tls 安装证书", "err", err)
@@ -306,6 +309,7 @@ func run() error {
 		if addr, note := system.ResolveListenAddr(*listen, mgmtAddressOf(cfg), system.LocalAddrChecker()); note != "" {
 			log.Info(note, "listen", addr)
 			*listen = addr
+			tlsMgr.SetListen(addr) // 收敛后的地址才是实际监听地址（决策 #99：证书 SAN 随之）
 		}
 	} else {
 		log.Warn("读取 committed 配置失败，日志级别与远程转发采用缺省", "err", err)
@@ -963,8 +967,8 @@ func (c *tlsController) Info() (system.TlsInfo, bool) { return c.m.Info() }
 func (c *tlsController) Install(certPEM, keyPEM string) (system.TlsInfo, error) {
 	return c.m.Install(certPEM, keyPEM)
 }
-func (c *tlsController) Regenerate(hostname string, ips []string) (system.TlsInfo, error) {
-	return c.m.Regenerate(hostname, ips)
+func (c *tlsController) RegenerateSelfSigned(hostname string) (system.TlsInfo, error) {
+	return c.m.RegenerateSelfSigned(hostname)
 }
 func (c *tlsController) RegenerateSSHHostKeys(ctx context.Context) error {
 	return c.m.RegenerateSSHHostKeys(ctx)
@@ -996,7 +1000,7 @@ func applyTLSSettings(cfg model.Config, m *system.TLSManager, log *slog.Logger) 
 			return // 已有证书（避免每次 commit 重签）
 		}
 		host, _ := os.Hostname()
-		if _, err := m.Regenerate(host, nil); err != nil {
+		if _, err := m.RegenerateSelfSigned(host); err != nil {
 			log.Warn("生成自签证书失败", "err", err)
 		} else {
 			log.Info("已生成自签证书", "path", m.CertPath())

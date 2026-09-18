@@ -100,3 +100,32 @@ func ListenSANs(listen string) []string {
 	}
 	return out
 }
+
+// ServerCertSANs 返回自签证书应写入的 SAN IP 列表（FR-SEC-004，决策 #99）。
+//
+// 组成：监听地址推导（ListenSANs，**始终含** 127.0.0.1/::1）+ 本机各接口地址。
+// 回环必须在内：nfvis-cli 的缺省连接是 https://127.0.0.1:443，且以服务端证书为信任锚
+// 做**完整主机名校验**（决策 #78），证书少了回环 IP SAN 就等于「重签即自毁管理路径」
+// （发现 #10：三处调用方各自传 ips、CLI 路径传 nil，重签后 CLI 全断）。
+func ServerCertSANs(listen string) []string {
+	return SortedIPs(append(ListenSANs(listen), LocalIPs()...))
+}
+
+// LocalIPs 本机各接口地址，尽力而为（取不到返回 nil）。
+// 注意**含回环**：回环地址也是本机地址，调用方按需自行取舍（ServerCertSANs 需要它）。
+func LocalIPs() []string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		switch v := a.(type) {
+		case *net.IPNet:
+			out = append(out, v.IP.String())
+		case *net.IPAddr:
+			out = append(out, v.IP.String())
+		}
+	}
+	return out
+}

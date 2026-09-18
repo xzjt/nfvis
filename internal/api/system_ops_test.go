@@ -165,8 +165,8 @@ type testTLS struct{ m *system.TLSManager }
 
 func (t *testTLS) Info() (system.TlsInfo, bool)                { return t.m.Info() }
 func (t *testTLS) Install(c, k string) (system.TlsInfo, error) { return t.m.Install(c, k) }
-func (t *testTLS) Regenerate(h string, ips []string) (system.TlsInfo, error) {
-	return t.m.Regenerate(h, ips)
+func (t *testTLS) RegenerateSelfSigned(h string) (system.TlsInfo, error) {
+	return t.m.RegenerateSelfSigned(h)
 }
 func (t *testTLS) RegenerateSSHHostKeys(ctx context.Context) error {
 	return nil
@@ -198,7 +198,7 @@ func TestTLSEndpoints(t *testing.T) {
 	}
 	// 安装外部证书（用另一对生成物）
 	other := system.NewTLSManager(t.TempDir(), nil)
-	if _, err := other.Regenerate("ext", nil); err != nil {
+	if _, err := other.RegenerateSelfSigned("ext"); err != nil {
 		t.Fatal(err)
 	}
 	certPEM, _ := os.ReadFile(other.CertPath())
