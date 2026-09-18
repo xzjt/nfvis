@@ -23,7 +23,7 @@
 - 验证环境 nfvis-vm 当前状态（**2026-09-18 由用户还原为全新 Ubuntu Server 26.04 后重建**）：
   底座是**按需装上的**——Go 1.26.0（apt；曾误以为只有 `/usr/local/go`）、libvirt 12.0.0、qemu 10.2.1、
   docker 29.1.3、**VPP 26.06-rc2**（FD.io 2606 源，见 §3.3；**noble 套件装在 resolute 上**）；
-  nfvis **1.1.12** 由本机源码构建后 `dpkg -i` 安装（**尚未发布**，含决策 #99/#100 两条修复），
+  nfvis **1.1.13** 由本机源码构建后 `dpkg -i` 安装（**尚未发布**，含决策 #99/#100/#101 与发现 #1/#3/#4/#9/#11/#14 的修复），
   nfvisd 作为 systemd 服务在运行
   （开发态先 `systemctl stop nfvis`）。管理口令 `Nfvis@Test2026`；源码树 `/root/src`；
   冒烟/语义校验脚本对已装实例**不必再打补丁副本**：`SRV=`/`CLI_BIN=`/`NFVIS_PASSWORD=`（冒烟另加 `API_PORT=`）覆盖即可（发现 #5 已修）；旧的补丁副本 `/root/ft` 仍可用。
