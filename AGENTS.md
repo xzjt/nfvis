@@ -23,15 +23,17 @@
 - 验证环境 nfvis-vm 当前状态（**2026-09-18 由用户还原为全新 Ubuntu Server 26.04 后重建**）：
   底座是**按需装上的**——Go 1.26.0（apt；曾误以为只有 `/usr/local/go`）、libvirt 12.0.0、qemu 10.2.1、
   docker 29.1.3、**VPP 26.06-rc2**（FD.io 2606 源，见 §3.3；**noble 套件装在 resolute 上**）；
-  nfvis **1.1.10** 由本机源码构建后 `dpkg -i` 安装，nfvisd 作为 systemd 服务在运行
+  nfvis **1.1.12** 由本机源码构建后 `dpkg -i` 安装（**尚未发布**，含决策 #99/#100 两条修复），
+  nfvisd 作为 systemd 服务在运行
   （开发态先 `systemctl stop nfvis`）。管理口令 `Nfvis@Test2026`；源码树 `/root/src`；
   冒烟脚本补丁副本 `/root/ft`（已指向已装实例）。
   **这台的版本矩阵比产品验证过的基线新**（内核 7.0 / libvirt 12 / qemu 10.2 / docker 29 / VPP 26.06-rc2），
   兼容性抽查仍在进行（2026-09-18 语义校验 11/0、pty 冒烟 10/0 通过）。
   ⚠️ **1G 大页 = 2 页**，来自 `postinst` 写入的 GRUB 基线 + 一次重启（**不再是** 2026-09-15 那次带外设置）；
   运行期写 `nr_hugepages` 对 1G **无效**，必须重启；`isolcpus` 仍未设。
-  ⚠️ **`ens160` 是管理口**（vmxnet3、承载默认路由与 SSH）；`ens192/ens224` 已交 vfio-pci 并在 VPP 中
-  ——但**是靠带外手写的 `/etc/vpp/startup.conf`**（发现 #8：产品路径目前走不通）。
+  ⚠️ **`ens160` 是管理口**（vmxnet3、承载默认路由与 SSH）；`ens192/ens224` 已交 vfio-pci 并在 VPP 中，
+  且**两口现由产品声明**（`set vpp dpdk dev` + `request vpp restart`；2026-09-18 决策 #100 修好了发现 #8，
+  此前只能带外手写 startup.conf）。口名→PCI 记在 `/var/lib/nfvis/dpdk-bindings.json`。
   跑集成测试前先 `systemctl restart vpp`（残留拓扑会污染用例）；集成测试 `make integration`（CI 不跑）。
   设计基线在 `docs/`，**不要凭记忆重设计**。
 - 已定决策 100 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
