@@ -102,15 +102,12 @@ func TestVhostUserLifecycleRealVPP(t *testing.T) {
 	}
 	// 引导镜像：vhost-user 链路 up 需 guest 加载 virtio-net 驱动并置 DRIVER_OK
 	// （QEMU 此时才发 SET_MEM_TABLE → VPP `Memory regions` 非零）。空白盘无法完成，
-	// 故优先用 NFVIS_TEST_VM_IMAGE 或仓库中的 alpine cloud 镜像；缺失则只验证接入/删除。
+	// 故优先用仓库中可用的云镜像（镜像要求见 testVMImage）；缺失则只验证接入/删除。
 	bootable := true
-	imgName := os.Getenv("NFVIS_TEST_VM_IMAGE")
-	if imgName == "" {
-		imgName = "alpine.qcow2"
-		if _, err := os.Stat(filepath.Join(imagesDir, imgName)); err != nil {
-			bootable = false
-			imgName = "it-m4-4-img.qcow2"
-		}
+	imgName, ok := usableVMImage()
+	if !ok {
+		bootable = false
+		imgName = "it-m4-4-img.qcow2"
 	}
 	img := filepath.Join(imagesDir, imgName)
 	if _, err := os.Stat(img); err != nil {
@@ -121,7 +118,7 @@ func TestVhostUserLifecycleRealVPP(t *testing.T) {
 		bootable = false
 	}
 	if !bootable {
-		t.Logf("未找到引导镜像（NFVIS_TEST_VM_IMAGE 或 %s/alpine.qcow2），跳过链路 up/down 断言", imagesDir)
+		t.Logf("未找到引导镜像（%s 里无可用云镜像，也可用 NFVIS_TEST_VM_IMAGE 指定），跳过链路 up/down 断言", imagesDir)
 	}
 
 	cfg := compute.DefaultConfig()
@@ -147,7 +144,7 @@ func TestVhostUserLifecycleRealVPP(t *testing.T) {
 	cfgModel := model.Config{
 		ResourcePools: &model.ResourcePool{
 			Hugepages: []model.HPool{{PageSize: "1G", Count: 1}},
-			CPU:       &model.CPUSetup{IsolatedCores: []int{1, 2, 3}},
+			CPU:       &model.CPUSetup{IsolatedCores: vmIsolatedCores(t)},
 		},
 		VirtualMachineFunctions: []model.VMFunction{vm},
 	}
