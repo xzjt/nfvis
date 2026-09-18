@@ -43,6 +43,50 @@ func vppSocket(t *testing.T) string {
 	return sock
 }
 
+// usableVMImage 返回仓库里一份「已确认可用于 seed 注入」的云镜像名（优先 NFVIS_TEST_VM_IMAGE）。
+// 都没有时 ok=false，调用方自行决定跳过还是退化为无引导断言。要求说明见 testVMImage。
+func usableVMImage() (string, bool) {
+	const imagesDir = "/var/lib/nfvis/images"
+	if img := os.Getenv("NFVIS_TEST_VM_IMAGE"); img != "" {
+		if _, err := os.Stat(filepath.Join(imagesDir, img)); err == nil {
+			return img, true
+		}
+		return "", false
+	}
+	for _, img := range []string{"debian-12-generic-amd64.qcow2"} {
+		if _, err := os.Stat(filepath.Join(imagesDir, img)); err == nil {
+			return img, true
+		}
+	}
+	return "", false
+}
+
+// testVMImage 选集成测试用的云镜像，并说明它对 seed 注入的前提要求。
+//
+// 产品把 NoCloud seed 以 **SATA 光盘**挂给 guest（缺省机器类型 q35 的 ich9-ahci 控制器）。
+// guest 内核没有 ahci 时 /dev/sr0 根本不出现；没有 iso9660 时挂不上。两种情况下
+// cloud-init 都按 `notfound=disabled` 策略**静默禁用自己**——user-data 被丢弃，guest 里
+// 没有任何报错，只表现为测试超时（发现 #17）。真机实测（nfvis-vm，2026-09-18）：
+//
+//	alpine.qcow2（6.6.31-0-virt）             无 iso9660、无 ahci   → 不可用
+//	debian-12-genericcloud-amd64.qcow2
+//	  （6.1.0-53-cloud-amd64）                有 isofs/sr_mod，但无 ahci → 不可用
+//	debian-12-generic-amd64.qcow2（完整内核） 有 ahci + iso9660      → 可用
+//
+// 故缺省只从「已确认可用」的镜像里挑；都没有时跳过并说明要求，而不是回落到一个
+// 注定让 cloud-init 静默失效的镜像、再报成三条看不懂的超时。
+func testVMImage(t *testing.T) string {
+	t.Helper()
+	if img, ok := usableVMImage(); ok {
+		return img
+	}
+	t.Skipf("跳过：/var/lib/nfvis/images 里没有可用的云镜像。需一份 guest 内核支持 NoCloud seed 的镜像——" +
+		"seed 以 SATA 光盘挂载，内核须有 ahci 与 iso9660（debian-12-generic-amd64.qcow2 可用；" +
+		"alpine 与 debian-12-genericcloud 的精简内核缺 ahci，cloud-init 会静默禁用自己）。" +
+		"也可用 NFVIS_TEST_VM_IMAGE 指定")
+	return ""
+}
+
 // harness 集成测试装配（store/engine/Provider/连接）。
 type harness struct {
 	mgr    *network.Manager

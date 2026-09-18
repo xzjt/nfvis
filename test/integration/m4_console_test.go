@@ -5,7 +5,7 @@
 //
 // 手法：user-data 的 cloud-init `runcmd` 向 /dev/ttyS0 写标记 → 经 libvirt 串口
 // console 读回该标记，一次性验证「seed ISO 注入 + guest 内 cloud-init 执行 + 串口双向」。
-// 需可引导云镜像（NFVIS_TEST_VM_IMAGE 或 /var/lib/nfvis/images/alpine.qcow2），否则跳过。
+// 需可引导云镜像（NFVIS_TEST_VM_IMAGE 或仓库中已确认可用的镜像，要求见 testVMImage），否则跳过。
 package integration
 
 import (
@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,20 +32,14 @@ func TestCloudInitAndSerialConsoleRealLibvirt(t *testing.T) {
 		t.Skipf("跳过：未找到 cloud-localds: %v", err)
 	}
 	imagesDir, vmsDir, vhostDir := "/var/lib/nfvis/images", "/var/lib/nfvis/vms", "/run/nfvis/vhost"
-	image := os.Getenv("NFVIS_TEST_VM_IMAGE")
-	if image == "" {
-		image = "alpine.qcow2"
-	}
-	if _, err := os.Stat(filepath.Join(imagesDir, image)); err != nil {
-		t.Skipf("跳过：无可引导镜像 %s（设置 NFVIS_TEST_VM_IMAGE）", filepath.Join(imagesDir, image))
-	}
+	image := testVMImage(t)
 	for _, d := range []string{imagesDir, vmsDir, vhostDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
 	defer cancel()
 	cfg := compute.DefaultConfig()
 	cfg.URI = os.Getenv("NFVIS_LIBVIRT_URI")
@@ -73,7 +68,7 @@ func TestCloudInitAndSerialConsoleRealLibvirt(t *testing.T) {
 	cfgModel := model.Config{
 		ResourcePools: &model.ResourcePool{
 			Hugepages: []model.HPool{{PageSize: "1G", Count: 1}},
-			CPU:       &model.CPUSetup{IsolatedCores: []int{1, 2, 3}},
+			CPU:       &model.CPUSetup{IsolatedCores: vmIsolatedCores(t)},
 		},
 		VirtualMachineFunctions: []model.VMFunction{vm},
 	}
@@ -100,21 +95,28 @@ func TestCloudInitAndSerialConsoleRealLibvirt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("打开串口 console: %v", err)
 	}
+	var mu sync.Mutex
+	var seen strings.Builder
 	outCh := make(chan string, 1)
 	go func() {
-		var b strings.Builder
 		buf := make([]byte, 4096)
 		for {
 			n, rerr := stream.Read(buf)
 			if n > 0 {
-				b.Write(buf[:n])
-				if strings.Contains(b.String(), cloudMarker) {
-					outCh <- b.String()
+				mu.Lock()
+				seen.Write(buf[:n])
+				out := seen.String()
+				mu.Unlock()
+				if strings.Contains(out, cloudMarker) {
+					outCh <- out
 					return
 				}
 			}
 			if rerr != nil {
-				outCh <- b.String()
+				mu.Lock()
+				out := seen.String()
+				mu.Unlock()
+				outCh <- out
 				return
 			}
 		}
@@ -126,8 +128,15 @@ func TestCloudInitAndSerialConsoleRealLibvirt(t *testing.T) {
 			t.Fatalf("串口未出现 cloud-init 标记（FR-CMP-016 失败）。串口输出:\n%s", tailStr(out, 2000))
 		}
 		t.Logf("串口读回 cloud-init 标记 %q（guest 内 runcmd 已执行）；输出片段:\n%s", cloudMarker, tailStr(out, 1200))
-	case <-time.After(3 * time.Minute):
-		t.Fatal("等待 cloud-init 标记超时（guest 引导/cloud-init 未完成）")
+	case <-time.After(5 * time.Minute):
+		mu.Lock()
+		out := seen.String()
+		mu.Unlock()
+		if dump := os.Getenv("NFVIS_SERIAL_DUMP"); dump != "" {
+			_ = os.WriteFile(dump, []byte(out), 0o644)
+		}
+		t.Fatalf("等待 cloud-init 标记超时（guest 引导/cloud-init 未完成）；5 分钟内共读回 %d 字节串口输出，末尾:\n%s",
+			len(out), tailStr(out, 3000))
 	}
 	if err := stream.Close(); err != nil {
 		t.Errorf("关闭 console: %v", err)

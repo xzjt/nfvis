@@ -68,12 +68,15 @@ toolcheck:
 # 约定：build tag integration + 环境变量 NFVIS_VPP_SOCK（缺省 /run/vpp/api.sock）。
 # 覆盖：M3-1 连接测试（internal/orchestrator）+ M3-10 主链路（test/integration：
 # 建交换机→通流→改配置→收敛）。建议先 `pkill -x nfvisd` 避免与守护进程争用同一网口。
+# -timeout 必须显式给：缺省 10m 会被「需要 guest 内 cloud-init 跑完」的用例顶穿——
+# 那些用例要等 guest 引导 + cloud-init（final 阶段 After=network-online，BD 上无 DHCP 时
+# 约 120s），单条就要 2~7 分钟（实测 141s / 151s / 427s），整套因此需要 25m 以上。
 integration:
 	@if [ -z "$$NFVIS_VPP_SOCK" ] && [ ! -S /run/vpp/api.sock ]; then \
 		echo "跳过 integration：未找到 VPP socket（设置 NFVIS_VPP_SOCK 或在 nfvis-vm 上运行）"; \
 		exit 0; \
 	fi; \
-	$(GO) test -tags integration -count=1 -v ./test/integration/... ./internal/orchestrator/...
+	$(GO) test -tags integration -count=1 -v -timeout 45m ./test/integration/... ./internal/orchestrator/...
 
 # deb 打包（M5-10）。**须在 Linux 上执行**（dpkg-deb；交叉编译出的二进制为 linux/amd64），
 # 例如 nfvis-vm：make deb VERSION=1.0.1

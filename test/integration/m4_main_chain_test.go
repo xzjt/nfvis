@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,15 +30,9 @@ const (
 )
 
 func TestMainChainVMRealVPPAndLibvirt(t *testing.T) {
-	image := os.Getenv("NFVIS_TEST_VM_IMAGE")
-	if image == "" {
-		image = "alpine.qcow2"
-	}
-	if _, err := os.Stat(filepath.Join("/var/lib/nfvis/images", image)); err != nil {
-		t.Skipf("跳过：无可引导镜像 /var/lib/nfvis/images/%s", image)
-	}
+	image := testVMImage(t)
 	sock := vppSocket(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	defer cancel()
 
 	// ---- VPP 网络编排 + libvirt 计算编排 ----
@@ -116,14 +111,18 @@ func TestMainChainVMRealVPPAndLibvirt(t *testing.T) {
 		}},
 		CloudInit: &model.CloudInit{
 			Hostname: "it-m4-11",
-			UserData: "#cloud-config\nruncmd:\n  - ip addr add " + itGuestIP + "/24 dev eth0\n  - ip link set eth0 up\n",
+			// guest 内的网卡名由 **guest 的命名策略**决定，不是产品模型里的逻辑名
+			// （模型写 eth0，Debian 用可预测名 enp1s0/ens3）——写死 eth0 会让 runcmd
+			// 报 `Cannot find device "eth0"`，cloud-final 随之失败、guest 没有地址。
+			// 本用例的 guest 只有一块非 lo 网卡，按实际存在的那个配。
+			UserData: "#cloud-config\nruncmd:\n  - |\n" + indentLines(guestNetSetup(itGuestIP), "    "),
 		},
 		Autostart: true,
 	}
 	cfg := model.Config{
 		ResourcePools: &model.ResourcePool{
 			Hugepages: []model.HPool{{PageSize: "1G", Count: 1}},
-			CPU:       &model.CPUSetup{IsolatedCores: []int{1, 2, 3}},
+			CPU:       &model.CPUSetup{IsolatedCores: vmIsolatedCores(t)},
 		},
 		VirtualSwitches: []model.VirtualSwitch{{
 			Name: itChainVS, Type: "l2",
@@ -158,42 +157,49 @@ func TestMainChainVMRealVPPAndLibvirt(t *testing.T) {
 	})
 	t.Log("vhost-user 链路 up")
 
-	// guest 侧诊断：cloud-init 是否配置了 eth0（经串口回读，M4-5 能力）。
+	// guest 侧诊断：串口**持续**回读（与下面的 ping 等待并行）。cloud-init 的 final 阶段
+	// 要等 network-online（本 BD 无 DHCP，约 120s）才跑，故不能在 ping 之前阻塞式读一小段；
+	// 失败时把整段串口输出带进错误信息，一眼能分清「guest 没配成地址」与「VPP 没转发」。
+	var serialMu sync.Mutex
+	var serial strings.Builder
 	if stream, err := comp.Console(ctx, itChainVM); err == nil {
-		defer stream.Close()
-		bufCh := make(chan string, 1)
+		defer func() { _ = stream.Close() }()
 		go func() {
-			var b strings.Builder
 			buf := make([]byte, 4096)
-			dl := time.Now().Add(60 * time.Second)
-			for time.Now().Before(dl) {
+			for {
 				n, rerr := stream.Read(buf)
 				if n > 0 {
-					b.Write(buf[:n])
-					if strings.Contains(b.String(), "NFVIS-GUEST-DONE") {
-						break
-					}
+					serialMu.Lock()
+					serial.Write(buf[:n])
+					serialMu.Unlock()
 				}
 				if rerr != nil {
-					break
+					return
 				}
 			}
-			bufCh <- b.String()
 		}()
-		select {
-		case out := <-bufCh:
-			t.Logf("guest 串口配置输出: %s", tailStr(out, 800))
-		case <-time.After(65 * time.Second):
-			t.Log("guest 串口读取超时")
-		}
 	} else {
 		t.Logf("串口打开失败（跳过 guest 诊断）: %v", err)
+	}
+	dumpSerial := func() string {
+		serialMu.Lock()
+		out := serial.String()
+		serialMu.Unlock()
+		if dump := os.Getenv("NFVIS_SERIAL_DUMP"); dump != "" {
+			_ = os.WriteFile(dump, []byte(out), 0o644)
+		}
+		return out
 	}
 
 	pingOK := false
 	// BVI 网关地址位于 L2 交换机专属 VRF 的表中（决策 #32），ping 需指定 table-id。
+	//
+	// 等待窗口按 guest 侧真机事实定：guest 的地址由 cloud-init 的 final 阶段（runcmd）
+	// 配置，而该阶段 After=network-online.target；本用例的 BD 上没有 DHCP，等待超时约
+	// 120s，故 guest 到 uptime ~135s 才有地址（串口实测 modules:final at Up 134.15s）。
+	// 窗口取 4 分钟给引导波动留余量；按 alpine 的启动速度定小窗口会误判为通流失败。
 	tableID := network.TableID("vr-" + itChainVS)
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(4 * time.Minute)
 	var lastOut string
 	for time.Now().Before(deadline) {
 		out, _ := exec.Command("vppctl", "ping", itGuestIP,
@@ -208,8 +214,8 @@ func TestMainChainVMRealVPPAndLibvirt(t *testing.T) {
 	}
 	if !pingOK {
 		ifs, _ := exec.Command("vppctl", "show", "interface").CombinedOutput()
-		t.Fatalf("VPP 未能 ping 通 guest %s（%s，table %d 经 vhost-user）：\n%s\n--- interfaces ---\n%s",
-			itGuestIP, itChainVS, tableID, lastOut, ifs)
+		t.Fatalf("VPP 未能 ping 通 guest %s（%s，table %d 经 vhost-user）：\n%s\n--- interfaces ---\n%s\n--- guest 串口（末尾）---\n%s",
+			itGuestIP, itChainVS, tableID, lastOut, ifs, tailStr(dumpSerial(), 3000))
 	}
 	t.Logf("通流成功（VPP → guest %s over vhost-user）：\n%s", itGuestIP, firstLines(lastOut, "received", 2))
 
@@ -257,6 +263,26 @@ func TestMainChainVMRealVPPAndLibvirt(t *testing.T) {
 		t.Fatalf("删除后绑核应归还，实际 %v", after.CPU.VMCores)
 	}
 	t.Log("删除后 domain/VPP 端口清理，资源池已归还（大页 allocated=0、无绑核）")
+}
+
+// guestNetSetup 返回给 guest 配地址的 shell 片段：按**实际存在**的非 lo 网卡配置。
+// 不能写死接口名——guest 的命名策略（systemd 可预测网名）与产品模型里的逻辑名
+// （eth0）是两回事，见调用处注释。
+func guestNetSetup(addr string) string {
+	return "for d in /sys/class/net/*; do\n" +
+		"  d=${d##*/}\n" +
+		"  [ \"$d\" = lo ] && continue\n" +
+		"  ip addr add " + addr + "/24 dev \"$d\" 2>/dev/null && ip link set \"$d\" up && break\n" +
+		"done\n"
+}
+
+// indentLines 给每行加前缀，用于把命令写进 YAML 块标量（runcmd 的 `- |`）。
+func indentLines(s, prefix string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
+		b.WriteString(prefix + line + "\n")
+	}
+	return b.String()
 }
 
 func mustCommitted(t *testing.T, e *config.Engine) model.Config {

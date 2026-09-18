@@ -19,12 +19,14 @@
 // （对运行中域回滚的真实底座行为见 TestSnapshotRevertOnRunningVMRealLibvirt。）
 //
 // 环境事实（实测所得，勿凭记忆改）：
-//   - 镜像 /var/lib/nfvis/images/alpine.qcow2：Alpine 3.20、单分区 ext、ttyS0 有 getty、
-//     自带 cloud-init 24.1.3（NoCloud）；root 口令 `!*`（锁定），须 cloud-init 设口令。
-//   - guest 默认 shell 是 **ash**：`echo READ<<$(cat f)>>END` 会被当成重定向报
-//     `syntax error: unexpected "("`；须用 `printf "READ<<%s>>END\n" "$(cat f)"`。
+//   - 镜像须是 guest 内核能读 NoCloud seed 的那种（见 testVMImage）：本环境用
+//     /var/lib/nfvis/images/debian-12-generic-amd64.qcow2（完整内核，有 ahci + iso9660）。
+//     root 口令 `!*`（锁定），须 cloud-init 设口令。
+//   - guest 默认 shell 是 **ash**（alpine）/ **bash**（debian）：`echo READ<<$(cat f)>>END`
+//     在 ash 下会被当成重定向报 `syntax error: unexpected "("`；
+//     须用 `printf "READ<<%s>>END\n" "$(cat f)"`（两种 shell 都可用）。
 //
-// 需可引导云镜像（NFVIS_TEST_VM_IMAGE 或 alpine.qcow2），否则跳过。
+// 需可引导云镜像（NFVIS_TEST_VM_IMAGE 或仓库中已确认可用的镜像），否则跳过。
 package integration
 
 import (
@@ -32,7 +34,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -163,13 +164,7 @@ func (cs *consoleSession) ReadMarker(timeout time.Duration) string {
 
 func TestSnapshotContentLevelRollbackRealLibvirt(t *testing.T) {
 	imagesDir, vmsDir, vhostDir := "/var/lib/nfvis/images", "/var/lib/nfvis/vms", "/run/nfvis/vhost"
-	image := os.Getenv("NFVIS_TEST_VM_IMAGE")
-	if image == "" {
-		image = "alpine.qcow2"
-	}
-	if _, err := os.Stat(filepath.Join(imagesDir, image)); err != nil {
-		t.Skipf("跳过：无可引导镜像 %s（设置 NFVIS_TEST_VM_IMAGE）", filepath.Join(imagesDir, image))
-	}
+	image := testVMImage(t)
 	if _, err := exec.LookPath("cloud-localds"); err != nil {
 		t.Skipf("跳过：未找到 cloud-localds: %v", err)
 	}
@@ -212,7 +207,7 @@ func TestSnapshotContentLevelRollbackRealLibvirt(t *testing.T) {
 	cfgModel := model.Config{
 		ResourcePools: &model.ResourcePool{
 			Hugepages: []model.HPool{{PageSize: "1G", Count: 1}},
-			CPU:       &model.CPUSetup{IsolatedCores: []int{1, 2, 3}},
+			CPU:       &model.CPUSetup{IsolatedCores: vmIsolatedCores(t)},
 		},
 		VirtualMachineFunctions: []model.VMFunction{vm},
 	}
@@ -302,13 +297,7 @@ func TestSnapshotContentLevelRollbackRealLibvirt(t *testing.T) {
 // 故能如实观测底座行为；断言「pid 变化」而非「报错」。
 func TestSnapshotRevertOnRunningVMRealLibvirt(t *testing.T) {
 	imagesDir, vmsDir, vhostDir := "/var/lib/nfvis/images", "/var/lib/nfvis/vms", "/run/nfvis/vhost"
-	image := os.Getenv("NFVIS_TEST_VM_IMAGE")
-	if image == "" {
-		image = "alpine.qcow2"
-	}
-	if _, err := os.Stat(filepath.Join(imagesDir, image)); err != nil {
-		t.Skipf("跳过：无可引导镜像 %s（设置 NFVIS_TEST_VM_IMAGE）", filepath.Join(imagesDir, image))
-	}
+	image := testVMImage(t)
 	if os.Geteuid() != 0 {
 		t.Skip("跳过：需 root 读取 qemu 进程信息")
 	}
@@ -348,7 +337,7 @@ func TestSnapshotRevertOnRunningVMRealLibvirt(t *testing.T) {
 	cfgModel := model.Config{
 		ResourcePools: &model.ResourcePool{
 			Hugepages: []model.HPool{{PageSize: "1G", Count: 1}},
-			CPU:       &model.CPUSetup{IsolatedCores: []int{1, 2, 3}},
+			CPU:       &model.CPUSetup{IsolatedCores: vmIsolatedCores(t)},
 		},
 		VirtualMachineFunctions: []model.VMFunction{vm},
 	}

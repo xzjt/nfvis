@@ -43,13 +43,26 @@ func hostFacts(t *testing.T) (hpTotal, hpFree int, vppReserved []int) {
 	}
 	hpTotal, hpFree = vals["HugePages_Total"], vals["HugePages_Free"]
 
-	vb, err := os.ReadFile("/etc/vpp/startup.conf")
-	if err != nil {
+	if _, err := os.Stat("/etc/vpp/startup.conf"); err != nil {
 		t.Skipf("跳过：未找到 /etc/vpp/startup.conf: %v", err)
 	}
+	vppReserved = hostVPPCores()
+	sort.Ints(vppReserved)
+	return hpTotal, hpFree, vppReserved
+}
+
+// hostVPPCores 从真机 VPP 配置（/etc/vpp/startup.conf）读 VPP 占用的核：
+// main-core 与 corelist-workers 展开后的核号。读不到时返回 nil。
+func hostVPPCores() []int {
+	vb, err := os.ReadFile("/etc/vpp/startup.conf")
+	if err != nil {
+		return nil
+	}
+	var out []int
 	if m := mainCoreRe.FindStringSubmatch(string(vb)); m != nil {
-		c, _ := strconv.Atoi(m[1])
-		vppReserved = append(vppReserved, c)
+		if c, err := strconv.Atoi(m[1]); err == nil {
+			out = append(out, c)
+		}
 	}
 	if m := corelistRe.FindStringSubmatch(string(vb)); m != nil {
 		for _, tok := range strings.Split(strings.TrimSpace(m[1]), ",") {
@@ -61,16 +74,38 @@ func hostFacts(t *testing.T) (hpTotal, hpFree int, vppReserved []int) {
 				lo, _ := strconv.Atoi(a)
 				hi, _ := strconv.Atoi(b)
 				for x := lo; x <= hi; x++ {
-					vppReserved = append(vppReserved, x)
+					out = append(out, x)
 				}
 				continue
 			}
 			n, _ := strconv.Atoi(tok)
-			vppReserved = append(vppReserved, n)
+			out = append(out, n)
 		}
 	}
-	sort.Ints(vppReserved)
-	return hpTotal, hpFree, vppReserved
+	return out
+}
+
+// vmIsolatedCores 集成测试自建配置用的绑核池：真机在线核去掉核 0 与 VPP 占用的核。
+//
+// 测试自建的 VM 会把 vCPU 钉在池中核上（domain vcpupin）。池若与 VPP 正在轮询的核重叠，
+// guest 抢不到 CPU 时间，表现是引导/cloud-init 超时，而不是一条可读的错误——故核池必须
+// 取自真机事实（/etc/vpp/startup.conf），不能硬编码。
+func vmIsolatedCores(t *testing.T) []int {
+	t.Helper()
+	skip := map[int]bool{0: true} // 核 0 留给内核中断与宿主
+	for _, c := range hostVPPCores() {
+		skip[c] = true
+	}
+	var out []int
+	for c := 1; c < runtime.NumCPU(); c++ {
+		if !skip[c] {
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("无可用绑核：本机 %d 个核已被核 0 与 VPP 占满（见 /etc/vpp/startup.conf）", runtime.NumCPU())
+	}
+	return out
 }
 
 // TestResourceLedgerMatchesHostFacts 账本视图须与真机的 1G 大页总量、VPP 保留核一致，

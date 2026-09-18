@@ -1,0 +1,134 @@
+===== V1 收尾第二十四轮：`make integration` 跑绿（3 条 guest 类用例的根因与修复）=====
+环境：nfvis-vm（Ubuntu 26.04 / 6 核 / 5.3G 内存 / VPP 26.06-rc2 在核 4/5 / libvirt 12 / qemu 10.2）
+日期：2026-09-18
+性质：**未改产品代码**（改动全在 `test/integration/` 与 `Makefile`）。产出是 3 条失败用例的**根因定位 + 测试侧修复 + 全套跑绿**。
+
+----- 0. 结果 -----
+`make integration`（Makefile 内显式 `-timeout 45m`）：
+
+    231 条断言 PASS / **0 FAIL** / 0 SKIP
+    ok  github.com/xzjt/nfvis/test/integration          781.356s
+    ok  github.com/xzjt/nfvis/internal/orchestrator       0.011s
+    ok  github.com/xzjt/nfvis/internal/orchestrator/compute    7.650s
+    ok  github.com/xzjt/nfvis/internal/orchestrator/container  0.006s
+    ok  github.com/xzjt/nfvis/internal/orchestrator/network    0.316s
+
+上一轮基线是「211 通过 / 3 失败」；本轮这 3 条：
+
+    --- PASS: TestCloudInitAndSerialConsoleRealLibvirt        (140.83s)
+    --- PASS: TestMainChainVMRealVPPAndLibvirt                (151.33s)
+    --- PASS: TestSnapshotContentLevelRollbackRealLibvirt     (426.69s)
+
+`make check` 在开发机（真 git 仓库）全绿；在 nfvis-vm 上只有 `docscheck` 失败，原因是
+`git archive` 出来的树没有 `.git`（`check_decisions_count.sh` 需要 git），与本次改动无关。
+
+----- 1. 根因（两条，都有硬证据）-----
+
+【RC1】产品把 NoCloud seed 挂成 **SATA 光盘**，而 guest 内核缺 `ahci` → seed 不可见 →
+       cloud-init **静默禁用自己**，user-data 被丢弃（不是超时，是压根没跑）
+
+链路：`DefaultMachine = "q35"`（internal/orchestrator/compute/domain_xml.go:32）→ seed 挂
+`<target dev='sda' bus='sata'/>` → q35 的 SATA 控制器是 ich9-ahci，guest 侧驱动是 `ahci`。
+
+四条独立证据（同一台 VM，宿主侧一切正常）：
+① **宿主侧 seed 是挂上的**：`virsh domblklist it-m4-5-vm` → `sda  /root/diagvm/seed.iso`
+② **guest 侧没有这个设备**：`lsblk` 只有 `vda/vda1/vda14/vda15`；`ls /dev/sr0 /dev/sda`
+   均 "No such file or directory"；`blkid` 无 cidata 卷标
+③ **guest 内核压根没加载 libata/ahci**：串口内核日志只有
+   `virtio_blk virtio0: [vda] 6291456 512-byte logical blocks`，`grep -ci 'ahci|libata'` = **0**
+④ **cloud-init 自己的判定**（`/run/cloud-init/`，经串口登录 guest 读出）：
+
+       # cloud-init-generator.log
+       checking for datasource
+       ds-identify rc=1
+       cloud-init is enabled but no datasource found, disabling
+
+       # ds-identify.log
+       FS_LABELS=
+       ISO9660_DEVS=
+       No ds found [mode=search, notfound=disabled]. Disabled cloud-init [1]
+
+   即 Debian 12 的 cloud-init 22.4.2 策略是 `notfound=disabled`：找不到数据源就**不启动**，
+   不报错、不回落。`/var/lib/cloud` 与 `/var/log/cloud-init*` 在 guest 里**完全不存在**。
+
+镜像侧对照（`/lib/modules/<kver>/modules.dep` 实测）：
+    debian-12-genericcloud-amd64.qcow2（6.1.0-53-cloud-amd64）：
+        ata_piix.ko ✓  ata_generic.ko ✓  **ahci 无（modules.dep / modules.builtin 均无）**
+        isofs.ko ✓  sr_mod.ko ✓  vfat.ko ✓
+    → 有文件系统驱动但**没有控制器驱动**，设备根本不出现，所以与 iso9660 无关。
+    alpine.qcow2（6.6.31-0-virt）：无 iso9660、亦无 ahci。
+
+【RC2】测试的 `runcmd` 把 guest 网卡写死成 `eth0`，而 guest 里的实际网卡名是 **`enp1s0`**
+
+证据（换镜像后主链路用例的 guest 串口，`NFVIS_SERIAL_DUMP` 落盘）：
+
+    [  130.823564] cloud-init[421]: Cloud-init v. 22.4.2 running 'init' ... Up 130.80 seconds.
+    [  130.904514] cloud-init[421]: ci-info: | enp1s0 | True | fe80::5054:aaff:fe4f:f605/64 | ...
+    [  134.467645] cloud-init[514]: Cannot find device "eth0"
+    [  134.479590] cloud-init[514]: Cannot find device "eth0"
+    [  134.484455] cloud-init[514]: cc_scripts_user.py[WARNING]: Failed to run module scripts-user
+    [  134.686823] cloud-init[514]: Cloud-init v. 22.4.2 finished ... Datasource DataSourceNoCloud [seed=/dev/sr0][dsmode=net].  Up 134.68 seconds
+    [FAILED] Failed to start cloud-final.service - Execute cloud user/final scripts.
+
+`Datasource DataSourceNoCloud [seed=/dev/sr0]` 证明 **RC1 已修好**（seed 生效、hostname 变成
+`it-m4-11`）；`Cannot find device "eth0"` 说明剩下的失败是测试侧写死了接口名。
+产品模型里的 `eth0` 是**逻辑名**（VPP 侧 socket 名 `vh-<vm>-eth0`），与 guest 内核名是两回事。
+
+【时间基线】guest 的地址由 cloud-init 的 **final 阶段**（runcmd）配置，而该阶段
+`After=network-online.target`（`/usr/lib/systemd/system/cloud-final.service` 实测）；本用例的
+BD 上没有 DHCP，`systemd-networkd-wait-online` 要等约 120s 才失败放行 → guest 到
+**uptime ~135s** 才有地址。上一轮按 alpine 的启动速度定的 60s/150s 窗口因此必然误判。
+
+----- 2. 改动（全在测试与 Makefile，未动产品）-----
+
+| 文件 | 改动 |
+|---|---|
+| `test/integration/e2e_test.go` | 新增 `usableVMImage()` / `testVMImage(t)`：镜像**要求**与选法。缺省不再回落到 `alpine.qcow2`（那是一份注定让 cloud-init 静默失效的镜像），改为「只从已确认可用的镜像里挑」，都没有就**跳过并说明要求**（含 ahci+iso9660 的理由） |
+| `test/integration/m4_pool_test.go` | 抽出 `hostVPPCores()`（原 `hostFacts` 内联的解析，现复用）；新增 `vmIsolatedCores(t)`：绑核池 = 在线核 − 核 0 − **VPP 实际占用的核**（读 `/etc/vpp/startup.conf`），即发现 #18 的修法 |
+| `test/integration/{m4_console,m4_main_chain,m4_vnic,m5_snapshot_content}_test.go` | 5 处硬编码 `IsolatedCores: []int{1,2,3}` → `vmIsolatedCores(t)` |
+| `test/integration/m4_main_chain_test.go` | ① `runcmd` 改为按**实际存在的非 lo 网卡**配地址（不再写死 `eth0`）；② 串口诊断改为**与 ping 等待并行持续回读**，失败时把整段 guest 串口带进错误信息（原来阻塞 60s 后只打 800 字符，看不出 cloud-init 的结论）；③ ping 窗口 60s→4min、`ctx` 6→12min |
+| `test/integration/m4_console_test.go` | 标记窗口 3→5min、`ctx` 5→9min；超时时**打印已读回的串口字节数与末尾**（原来只说"超时"，零信息） |
+| `Makefile` | `integration` 显式 `-timeout 45m`（缺省 10m 会被这些用例顶穿） |
+
+`vmIsolatedCores` 在本机解析结果 = `{1,2,3}`（6 核 − 核 0 − VPP 的 4/5），与原先硬编码值一致，
+故本机行为不变；换到 VPP 占用 1-3 的机器上则自动避开（原实现会把 vCPU 钉到 VPP 轮询核上饿死 guest）。
+
+----- 3. 新镜像（经产品路径导入，可复现）-----
+    URL:    https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2
+    sha512: 84946d6e2f55b1e8dcc114efc059f13882bd2ccdf36852126a13a0aa4a4ce0efee945406b78280e5942096639edc2a3ced20b70c12d9c7c7366ce364ba47a0ff
+            （与官方 SHA512SUMS **逐字符一致**，下载后本机 sha512sum 复核同值）
+    导入:   `request images upload name debian-12-generic-amd64.qcow2 type vm-image \
+                file /data/incoming/debian-12-generic-amd64.qcow2`
+            → 「导入完成（类型 vm-image，大小 428.5 MiB）」，index.json 有记录、state=ready
+    （Debian 的 cloud 站只发布 SHA512SUMS，没有 SHA256SUMS → 走 `upload` 本地导入而非
+      `download` 的 sha256 校验路径。）
+
+----- 4. 需要更正上一轮记录的一处结论 -----
+`docs/V1-收尾待办.md` §2.13 #17 与证据 round23 §2 记的是「**换 Debian genericcloud 后同一条用例通过 ✓**」。
+本轮实测**genericcloud 不可能通过**：它的内核缺 `ahci`（见 RC1 证据），seed 根本不可见，
+cloud-init 必然自我禁用。round23 §4 记有一次「seed 改 vfat + 以 virtio 磁盘挂载」的实验（后被回退），
+该次「通过」很可能发生在实验代码还在树里时（vfat + virtio 绕开了 SATA/ahci 依赖）。
+故 #17 的结论应改为：**可用镜像是「完整内核」的 debian-12-generic-amd64，不是 genericcloud**。
+
+----- 5. 本轮登记的发现（未改产品，需决策）-----
+- **#22（中）seed 以 SATA 光盘交付，缺 `ahci` 的 guest 内核看不到，且 cloud-init 静默自我禁用**。
+  影响面：Debian 的 cloud 内核（genericcloud）、Alpine 的 virt 内核都属此类；这两类恰是 NFV 场景
+  常用的精简镜像。操作者可见的后果是「VM 起来了，但我注入的 user-data 没生效」，且**没有任何报错**——
+  属项目最在意的「静默无效」类。产品侧可选修法（择一，需决策）：改用 virtio 交付 seed、
+  或按机器类型选 guest 普遍支持的控制器、或在 start 后探测 seed 是否被消费并告警。
+  本轮**未改产品**（改 seed 交付方式属已发布行为，round23 试过并回退过）。
+- **#23（低）产品模型的接口逻辑名与 guest 内核网卡名不一致**：模型/CLI 里是 `eth0`（VPP 侧 socket
+  名 `vh-<vm>-eth0`），而 guest 内是 `enp1s0`（systemd 可预测网名）。操作者写 user-data 时若按
+  `eth0` 配网卡会得到 `Cannot find device "eth0"`。建议手册在 VM/cloud-init 一节加一句说明
+  （本轮未改手册，避免与 §0 的文档轮次混在一起）。
+- **#24（低）`test/integration` 里 5 处硬编码核池**已随本轮修掉（原 #18 关闭）。
+
+----- 6. 环境现状（交给下一个会话）-----
+- committed 未动：仍是 rev 56（`vpp.cpu = {main_core 4, corelist_workers 5}`、1G×2 / 2M×768、
+  isolated 1-5、`vpp.memory.hugepage_preference = 2M`、无 VM 声明）
+- 镜像仓库：`alpine.qcow2`、`debian-12-genericcloud-amd64.qcow2`（**两份都不可用于 seed 注入**，
+  保留仅为其它用例/证据）、**`debian-12-generic-amd64.qcow2`（可用）**
+- 大页：1G total=2 free=1（留给 VM）；2M 由 VPP 使用
+- VPP：核 4/5；`ens192 up / ens224 down` 两口都在；无残留 BD/VRF/vhost 接口
+- nfvis 服务 active；`/var/lib/nfvis/vms` 与 `/data/incoming` 均空；无残留 domain
+- 诊断用产物已清理（/root/diag*、/root/it-*.log 保留为本轮证据）
