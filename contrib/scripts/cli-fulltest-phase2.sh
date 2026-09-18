@@ -34,6 +34,7 @@ commit"
 while IFS= read -r stmt; do
   [ -z "$stmt" ] && continue
   case "$stmt" in \#*) continue;; esac
+  stmt=${stmt//__API_PORT__/$API_PORT}   # 端口参数化（见 lib 里的 API_PORT）
   run S2 "configure
 $stmt"
 done <<'EOF'
@@ -43,7 +44,7 @@ set system timezone Asia/Shanghai
 set system ntp server 192.168.155.1
 set system ntp server 192.168.155.2 prefer
 set system dns server 8.8.8.8 secondary 8.8.4.4
-set system api port 18443
+set system api port __API_PORT__
 set system api token-ttl-minutes 60
 set system api max-sessions 8
 set system api tls self-signed regenerate

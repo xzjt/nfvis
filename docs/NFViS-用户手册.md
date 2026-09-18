@@ -68,7 +68,9 @@
 deb 包**必须在 Linux 上构建**（依赖 `dpkg-deb`），且交叉编译目标为 linux/amd64：
 
 ```bash
-# 在构建机（如 nfvis-vm 或任意 Linux + Go ≥1.26）
+# 在构建机（任意 Linux + Go ≥1.26；**还需要 make** 与 dpkg-deb）
+#   Ubuntu/Debian：sudo apt-get install -y make     # dpkg-deb 随 dpkg 已有；构建**不需要** gcc
+#   ⚠️ 全新 Ubuntu Server **不带 make**：缺了会直接 `make: command not found`（实测踩到）
 git clone <repo> && cd nfvis
 make deb VERSION=1.0.0            # 产物：build/nfvis_1.0.0_amd64.deb
 ```
@@ -192,6 +194,14 @@ nfvis-cli -server https://127.0.0.1:443 -u admin -c "request system reboot"
 
 **方式 A：经 CLI（推荐，产品内建）**
 
+**前置条件（务必先做，否则产品命令直接失败）**：把 `vfio-pci` 模块装上；无 IOMMU 的机器还要打开不安全模式
+（新装系统默认都没有，报错形如 `目标驱动 vfio-pci 不可用（模块未加载？）` / `stat /sys/bus/pci/drivers/vfio-pci: no such file`）：
+
+```bash
+modprobe vfio-pci
+echo Y > /sys/module/vfio/parameters/enable_unsafe_noiommu_mode   # 仅无 IOMMU 时才需要
+```
+
 ```bash
 nfvis-cli -server https://127.0.0.1:443 -u admin -c "request interfaces ens224 bind-dpdk --yes"
 # 解绑：接管后内核里已无该网卡，用 PCI 地址或**口名**均可
@@ -199,6 +209,10 @@ nfvis-cli -server https://127.0.0.1:443 -u admin -c "request interfaces ens224 b
 nfvis-cli -server https://127.0.0.1:443 -u admin -c \
   "request interfaces ens224 unbind-dpdk to-driver vmxnet3 --yes"
 ```
+
+> ⚠️ **解绑前先把该口移出数据面**（在配置里删掉它的 DPDK 声明与接口声明 → `request vpp restart`）。
+> 对**正在被数据面使用**的口直接 `unbind-dpdk`，会让该口悬空、命令迟迟不返回，
+> 且产品的 CLI 通道会被占住直到重启守护进程（真机实测，见 §8 故障排查）。
 
 > **先弄清有哪些口**：`set interfaces <ifname>` 的 Tab 候选 = **VPP 中的接口**，
 > 也就是**已被 DPDK 接管**的那批，与 `show interfaces physical` 的空态同源。
@@ -826,6 +840,7 @@ nfvis$ request system ssh host-key regenerate
 | VM `stop` 报「请求超时」但 VM 实际已停 | 老版本客户端超时 ≤ 服务端 ACPI 等待（已修） | 升级到含修复的版本；用 `show … <name>` 确认实际状态 |
 | commit 报 `接口在 VPP 中不存在: ensX（若该口由 DPDK 接管：重启数据面后才会出现…）` | 该口尚未进入数据面：刚声明/刚接管（正常过渡态），或网卡未绑 vfio-pci、或名称不对 | 先 `request vpp restart`；仍失败则按 §3.2 确认接管与口名（`ls /sys/class/net` 里没有 = 已被接管） |
 | 日志报 `以下已由 DPDK 接管的物理口未在配置中声明，重启数据面后将不再出现在数据面：…` | 该口没在 committed 配置里声明为 DPDK 口 | 补齐 `set vpp dpdk dev <口>`（并确保 `set interfaces <口>` 已声明）后再重启 |
+| `request interfaces <口PCI> unbind-dpdk` 命令长时间不返回 / 报「请求超时（1m30s）」 | 该口**正在被数据面使用**（VPP 持有它的 vfio group）→ 内核解绑写阻塞；此后 CLI 通道也可能被占住 | 该口先移出数据面（删声明 → `request vpp restart`）再解绑。已卡住时：`systemctl stop vpp` → `systemctl restart nfvis` → `request vpp restart`（见 §3.2 前置说明） |
 | `request interfaces <口> bind-dpdk` 报 `拒绝操作管理口：…` | 该口被判为管理路径（配置声明的管理口 / 承载默认路由 / 守护进程监听所在口）——拒绝是有意的 | 换业务口操作；确需变更该网卡驱动时按 §3.2 的方式 B 带外做 |
 | commit 报 `无 1G 大页资源池，无法分配 …MB` | 资源池未配或内核大页未生效 | §3.1 配 `resource-pools hugepages` 并重启生效 |
 | commit 报 `隔离核不足：需要 N，可用 0` | VPP 保留核已占满隔离核池 | 扩大 `isolated-cores`（或用 `show resource-pools` 看 `vpp-reserved`） |

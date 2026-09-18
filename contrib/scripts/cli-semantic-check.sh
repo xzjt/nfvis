@@ -43,6 +43,28 @@ set -u
 
 SRV=${SRV:-http://127.0.0.1:18443}
 CLI_BIN=${CLI_BIN:-/tmp/nfvis-cli}
+# HTTPS（产品缺省自签证书）：curl 必须能校验它，否则**发布前门槛在真实安装上跑不了**
+# （2026-09-18 实测：不信任自签证书 → curl exit 60 → 拿不到 token → 断言连片假红）。
+#   · 显式给证书：NFVIS_CA=/path/server.crt
+#   · 缺省自动用产品路径（已装实例即开箱可用）
+#   · 仅在实验室里可显式 NFVIS_INSECURE=1（= curl -k），**不默认开启**
+CURL_TLS=()
+case "$SRV" in
+  https://*)
+    if [ "${NFVIS_INSECURE:-0}" = "1" ]; then
+      CURL_TLS=(-k)
+    else
+      CA=${NFVIS_CA:-/var/lib/nfvis/tls/server.crt}
+      if [ ! -r "$CA" ]; then
+        echo "✗ $SRV 是 HTTPS，但读不到服务端证书（$CA）"
+        echo "  已装实例通常可直接读；否则请显式指定：NFVIS_CA=/path/to/server.crt SRV=https://… bash $0"
+        echo "  （实验室里确要跳过校验可显式 NFVIS_INSECURE=1）"
+        exit 1
+      fi
+      CURL_TLS=(--cacert "$CA")
+    fi;;
+esac
+curl_api() { curl -s "${CURL_TLS[@]}" "$@"; }
 PW=${NFVIS_PASSWORD:-Admin@12345}
 PERTURB_BD=${PERTURB_BD:-5100}   # 扰动用的 BD id（须为确定空闲；脚本用完即删）
 MARK=$$                           # 本次运行的唯一后缀，便于清理
@@ -63,7 +85,7 @@ if ! command -v vppctl >/dev/null 2>&1; then
   exit 1
 fi
 
-TOKEN=$(curl -s -X POST "$SRV/api/v1/login" -H 'Content-Type: application/json' \
+TOKEN=$(curl_api -X POST "$SRV/api/v1/login" -H 'Content-Type: application/json' \
         -d "{\"username\":\"admin\",\"password\":\"$PW\"}" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
 if [ -z "$TOKEN" ]; then
   echo "✗ 登录失败：确认开发态 nfvisd 已在 $SRV 运行、口令为 $PW（见脚本头部前置）"
@@ -80,7 +102,7 @@ fi
 
 # 候选一律走 REST（JSON 干净），避免解析终端文本——这是本脚本最容易写错的地方
 api_cands() {
-  curl -s "$SRV/api/v1/cli/candidates?tokens=$1&partial=" -H "Authorization: Bearer $TOKEN" \
+  curl_api "$SRV/api/v1/cli/candidates?tokens=$1&partial=" -H "Authorization: Bearer $TOKEN" \
     | tr ',' '\n' | sed -n 's/.*"Token":"\([^"]*\)".*/\1/p' | sort
 }
 

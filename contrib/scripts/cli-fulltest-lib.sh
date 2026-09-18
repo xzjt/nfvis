@@ -6,9 +6,15 @@
 #    而 `show log audit` 一类命令会**回显历史**——某条旧审计记录的 detail 里就可能含「校验失败: …」，
 #    不锚定就会把「命令本身成功、只是回显了历史」判成失败（同一条命令在不同审计历史下结论不同）。
 #    低置信度的做法是「按输出内容猜」，正确做法是只认产品在**行首**给出的判定。
-SRV="http://127.0.0.1:18443"
-CLI="/tmp/nfvis-cli -server $SRV -u admin"
-export NFVIS_PASSWORD="Admin@12345"
+# 目标与凭据都可经环境变量覆盖——**已装实例无需再打补丁副本**：
+#   SRV=https://127.0.0.1:443 CLI_BIN=/usr/bin/nfvis-cli NFVIS_PASSWORD='…' bash cli-fulltest.sh
+# （CLI 自身按缺省固定本机证书，故 HTTPS 下不必额外给 CA；缺省值仍是开发态实例。）
+SRV=${SRV:-http://127.0.0.1:18443}
+CLI_BIN=${CLI_BIN:-/tmp/nfvis-cli}
+CLI="$CLI_BIN -server $SRV -u admin"
+export NFVIS_PASSWORD=${NFVIS_PASSWORD:-Admin@12345}
+# 阶段 2 会声明 API 端口；对已装实例跑时不该把开发态端口写进配置，故参数化
+API_PORT=${API_PORT:-18443}
 LOG=${LOG:-/tmp/cli-test/full.log}
 mkdir -p /tmp/cli-test
 
