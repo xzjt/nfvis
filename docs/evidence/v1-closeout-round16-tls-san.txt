@@ -1,0 +1,117 @@
+===== V1 收尾第十六轮（发现 #10，发布级）：重签自签证书的 SAN 三处同源（决策 #99）=====
+环境：nfvis-vm（Ubuntu Server 26.04 / 内核 7.0 / VPP 26.06-rc2 / libvirt 12 / docker 29）
+日期：2026-09-18
+起点：裸机全流程测试批次二发现 #10 —— `request system api tls regenerate` 之后**所有** CLI 调用失败
+本文件为**原始输出摘录**，命令与结果一一对应。修复分支 `fix/tls-regenerate-san`，提交 `408488f`。
+
+----- 0. 起因（交接文档 §0 第 1 项 / §2.9 #10）-----
+报错原文（真机复现，见 §1）：
+  % 登录失败: 连接 nfvisd 失败: Post "https://127.0.0.1:443/api/v1/login":
+    tls: failed to verify certificate: x509: cannot validate certificate for 127.0.0.1
+    because it doesn't contain any IP SANs
+CLI 的缺省连接是 https://127.0.0.1:443 且以服务端证书为信任锚做**完整主机名校验**（决策 #78），
+故证书一旦少了回环 IP SAN，「重签」这个动作本身就掐断了唯一的零配置管理通道。
+
+----- 1. 真机复现（红）：旧二进制（已装 1.1.10）-----
+$ bash /tmp/tls-redgreen.sh /usr/bin/nfvisd /usr/bin/nfvis-cli red
+=== [red] 重签前：CLI 可用性 ===
+退出码=0
+连接 https://127.0.0.1:443 ...
+% 无效命令: show system version（可用：uptime|cpu|memory|…）      # 登录成功，命令名不存在（我的用例笔误）
+=== [red] 执行重签 ===
+退出码=0
+自签证书已重签：subject=CN=nfvis,O=NFViS，有效期至 2027-09-18，指纹 8CE88E99…。
+=== [red] 重签后证书 SAN ===
+    DNS:nfvis, DNS:localhost                                     # ← 一个 IP SAN 都没有
+=== [red] 重签后：CLI 可用性（#10 的验收点）===
+退出码=1
+% 登录失败: 连接 nfvisd 失败: … x509: cannot validate certificate for 127.0.0.1
+  because it doesn't contain any IP SANs
+=== [red] 重签后：REST 可用性（curl --cacert 本机证书）===
+http=000                                                          # 同一原因（证书链校验失败）
+
+----- 2. 单测红-绿（先写失败测试，再改代码）-----
+新增 internal/api/tls_san_test.go：以**重签出的证书自身**为信任锚请求 https://127.0.0.1
+（与 nfvis-cli 同一条校验路径），断言口径是契约语义「重签后 CLI 还连得上吗」，不是 SAN 列表长相。
+修前：
+--- FAIL: TestCLIRegenerateKeepsLoopbackSAN
+    [CLI] 重签后的证书应仍可用于 CLI 缺省连接（127.0.0.1），实际校验失败:
+      x509: cannot validate certificate for 127.0.0.1 because it doesn't contain any IP SANs
+--- FAIL: TestRESTRegenerateKeepsLoopbackSAN
+    [REST] … x509: certificate is valid for …, 192.168.1.7, not 127.0.0.1
+修后：ok github.com/xzjt/nfvis/internal/api / ok github.com/xzjt/nfvis/internal/system
+**顺带更正交接文档的一处表述**：REST 路径原先**也不对**——`localIPs()` 只收**非回环**地址，
+重签出的证书同样不含 127.0.0.1（上面的 REST 断言即证明），并非「REST 对、只有 CLI 错」。
+
+----- 3. 改法（决策 #99）-----
+- `system.ServerCertSANs(listen)` = ListenSANs（**始终含** 127.0.0.1/::1 与监听地址）
+  ∪ `LocalIPs()`（本机各接口地址），经 SortedIPs 去重排序；
+- `TLSManager.SetListen(addr)` 记录实际监听地址；新增 `RegenerateSelfSigned(hostname)`，
+  SAN 由**管理端自己**推导；
+- `api.TlsRuntime` 接口**不再暴露带 `ips` 的 Regenerate**（REST/CLI 调用方没有机会漏传），
+  旧的带 ips 版本收为包内 `regenerate` 只作原语；
+- 四处调用同源：启动期 EnsureSelfSigned、REST handler、CLI 执行器、applyTLSSettings。
+
+----- 4. 真机复验（绿）：新二进制 -----
+(a) 从「已被旧版弄坏」的状态出发——REST 路径（curl -k 登录）重签：
+$ bash /tmp/tls-recover.sh
+=== 当前证书 SAN（旧版弄坏的）===
+    DNS:nfvis, DNS:localhost
+登录（-k）取 token: wleQqDUnpcP3...
+=== REST 重签（新二进制）===
+http=200 {"subject":"CN=nfvis,O=NFViS",…,"fingerprint":"56DCCDFB…"}
+=== 重签后证书 SAN（应含 127.0.0.1）===
+    DNS:nfvis, DNS:localhost, IP Address:127.0.0.1, IP Address:172.17.0.1,
+    IP Address:192.168.122.1, IP Address:192.168.155.129, IP Address:0:0:0:0:0:0:0:1,
+    IP Address:FE80:0:0:0:20C:29FF:FEA9:6184
+=== CLI（零配置，缺省 https://127.0.0.1:443）===
+退出码=0
+uptime         46m18s（0d 0h 46m）
+**即：新版本可从「CLI 全断」的状态一条命令恢复，无需删证书/重启。**
+
+(b) 两条重签路径 + 重签后 CLI（`bash /tmp/tls-redgreen2.sh green`）：
+  重签前 CLI 退出码=0 → CLI 路径 `request system api tls regenerate` 退出码=0
+  → 证书 SAN 含 127.0.0.1 → **重签后 CLI 退出码=0（#10 验收点）**
+  → REST 路径 POST /system/tls:regenerate http=200 → SAN 正确 → 重签后 CLI 退出码=0
+
+(c) 装机路径（deb）+ 启动期自签路径（`bash /tmp/tls-install-check.sh`）：
+$ make deb VERSION=1.1.11 SOURCE_DATE_EPOCH=1789701900   → build/nfvis_1.1.11_amd64.deb
+$ dpkg -i nfvis_1.1.11_amd64.deb
+  nfvis-baseline: 片段存在：/etc/default/grub.d/99-nfvis.cfg …（postinst 各段正常）
+  nfvis-ssh-harden: 已是最新，跳过
+  active / nfvisd 1.1.11
+$ rm -f /var/lib/nfvis/tls/server.{crt,key}; systemctl restart nfvis     # 走启动期 EnsureSelfSigned
+    DNS:nfvis, DNS:localhost, IP Address:127.0.0.1, …192.168.155.129…    # 启动期 SAN 同样正确
+  CLI 零配置 退出码=0；再经 CLI 重签 → SAN 正确 → CLI 退出码=0
+配置库未变（§3.9 流程：动包管理前已备份 /root/nfvis-db-backup-20260918-1125）：
+  备份 config_revisions rows=14 max(rev)=14 / audit_log rows=47
+  当前 config_revisions rows=14 max(rev)=14 / audit_log rows=52（+5 = 本轮 5 次重签的审计）
+
+----- 5. 256 条冒烟复跑（阶段 1/2/4/5/6；阶段 3 需引导镜像，跳过）-----
+$ cd /root/ft && bash cli-fulltest.sh 1 2 4 5 6
+通过 39 / 失败 2 / 预期报错 0      # 阶段1
+通过 56 / 失败 3 / 预期报错 0      # 阶段2
+通过 18 / 失败 17 / 预期报错 1     # 阶段4
+通过 38 / 失败 6 / 预期报错 2      # 阶段5
+通过 11 / 失败 0 / 预期报错 0      # 阶段6
+合计 162 通过 / 28 失败 / 3 预期报错；**28 条失败全部是已知类**，无一条与 TLS 有关：
+  · 23 条 = 引导镜像缺失的级联（VM/容器 start 报「不存在」及其后续 show）——前置未满足
+  · 3 条 = 脏状态（值未变化）：resource-pools hugepages count / system timezone / interfaces ens224 disable
+           （上一轮冒烟已写过这些值，属「用例受限项」）
+  · 2 条 = 已知未接入与工具假红：show vpp runtime、show log audit（发现 #9，尚未修）
+对照组（昨日同一套件、同一机器）：87 条失败中 **50 条**是本缺陷（证书重签后 CLI 全断）的级联。
+本轮同一用例的输出（/tmp/cli-test/full.log 第 1696 行起）：
+  === [S4] request system api tls regenerate
+  自签证书已重签：subject=CN=nfvis,O=NFViS，有效期至 2027-09-18，指纹 E0790CF5…。
+  其后 S4 全部用例（ssh host-key / core-dumps / alarms / software rollback）无认证失败。
+
+----- 6. 门禁 -----
+$ GOFLAGS=-p=1 make check     # 本机内存限制，需 -p 1（AGENTS §3.8）
+go vet ./... / go test ./...（全绿）/ 覆盖率 7 个门禁包均 ≥70%（73.6~90.8%）
+✓ 决策条数一致（99 项）  ✓ openapi.json 与契约 YAML 同步  archtest / prototype 全绿
+
+----- 7. 环境收尾 -----
+- 已装 nfvis **1.1.11**（本分支构建的 deb，dpkg 记录一致；`/root/nfvisd-1.1.10.bak`、
+  `/root/nfvis-cli-1.1.10.bak` 为升级前二进制备份）
+- 配置库备份：`/root/nfvis-db-backup-20260918-1125/`（db + tls）
+- 中间产物：/tmp/nfvisd-new、/tmp/nfvis-cli-new、/tmp/tls-*.sh、/tmp/*.out（均已清理/可删）
