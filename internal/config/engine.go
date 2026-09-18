@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,8 +86,11 @@ type ImageInfo struct {
 }
 
 // ImageResolver 镜像仓库查询接口（规则⑤：镜像存在性与类型匹配）。
+// Names 用于把「镜像不存在」的报错变成**可照着排查**的话（列出仓库现有镜像）。
 type ImageResolver interface {
 	Lookup(name string) (ImageInfo, bool)
+	// Names 返回仓库现有镜像名（升序），用于把「镜像不存在」的报错变成可照着排查的话。
+	Names() []string
 }
 
 // TopologyReader 物理 NIC NUMA 拓扑查询接口（规则⑩性能警告使用；
@@ -721,7 +725,20 @@ func (e *Engine) checkImages(cfg *model.Config) []model.ValidateError {
 	check := func(vnf, image, want string, path string) {
 		info, ok := e.images.Lookup(image)
 		if !ok {
-			errs = append(errs, model.ValidateError{Path: path, Message: fmt.Sprintf("仓库中不存在镜像 %q", image)})
+			// 报错要能照着排查（附录 A #98）：只说「不存在」时，操作者最常踩的是
+			// 「容器镜像的可用名是 docker load 落地的 tar 内嵌 tag，与上传目录项名不一致
+			// 时两个名字都不可用」这个已知陷阱——故列出仓库现有镜像并点出该口径。
+			msg := fmt.Sprintf("仓库中不存在镜像 %q", image)
+			if names := e.images.Names(); len(names) > 0 {
+				msg += "；仓库现有：" + strings.Join(names, "、")
+			} else {
+				msg += "（仓库为空，先上传或拉取镜像）"
+			}
+			if want == "container-image" {
+				msg += "。注意：容器镜像的可用名是 docker load 落地的 tar 内嵌 tag；" +
+					"上传目录项名与它不一致时，两个名字都用不了"
+			}
+			errs = append(errs, model.ValidateError{Path: path, Message: msg})
 			return
 		}
 		if info.Type != want {
