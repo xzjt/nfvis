@@ -1,0 +1,77 @@
+===== V1 收尾第十八轮（发现 #7，严重）：绑定/解绑管理口一律拒绝（决策 #101，口径 A）=====
+环境：nfvis-vm（Ubuntu Server 26.04 / VPP 26.06-rc2）；ens160=管理口（vmxnet3 + 默认路由 + SSH）
+日期：2026-09-18
+起点：裸机测试发现 #7 —— `request interfaces ens160 bind-dpdk --yes` 把承载 SSH 的网卡交给 DPDK，
+      会话当场断开、只能带外重启恢复（上一轮实测）。
+口径：**用户选定 A：默认拒绝、不提供 force 出口**（管理路径不拿来做试验）。
+分支 `fix/mgmt-port-guard`，提交 `aa39369`。
+
+----- 0. 根因 -----
+`internal/orchestrator/network/dpdkbind.go` 的 `Bind/Unbind` **没有任何管理口判断**（文档只是"声明约束"），
+而 `request interfaces <ifname>` 的候选清单里**就有管理口**（候选取「数据面 ∪ 内核网卡」）。
+澄清：**已在配置里声明**管理口的那条路**本来就有校验拦**（`model.checkManagementIsolation` 禁止管理口
+出现在 interfaces/dpdk.per_dev/bond/SPAN/L3 等数据面配置里）；缺的是**运行态动作**这条路。
+两条路径的事实来源保持同源（都用 `system.management.interface`）。
+
+----- 1. 修法（决策 #101）-----
+新增 `internal/orchestrator/network/mgmtport.go`：纯函数判定 + 事实由装配层注入（可单测、不依赖真实网卡）。
+判据（**只取高置信度事实，宁漏不误**）：
+  ① 配置声明的管理口；② 承载**默认路由**的口（读 /proc/net/route，无需外部命令/权限）；
+  ③ 守护进程**监听地址所属**的口。
+**不作拒绝理由**的低置信度线索：该口有 IP、与管理地址同网段——真机 ens192/ens224 与 ens160 同在
+VMnet8 广播域（cross-connect 环路事故的成因），按网段判会把业务口全数误判。
+落点：`cmd/nfvisd/main.go` 的 `dpdkController.SetDPDKBound`（CLI 执行器与 REST handler 都经它，
+决策 #75「约束落在两侧共同依赖处」），**先于任何 sysfs 动作**判定。
+PCI 形式的目标（解绑常见）：先解析成口名（内核 /sys/bus/pci/devices/<pci>/net/ → 绑定记录），
+解析不出按未知处理**不拦**（拦了会堵住"把管理口交还内核驱动"这类唯一能救回网卡的操作）。
+契约：不涉及 CLI 语句/API 路径/资源模型（拒绝走既有错误通道：CLI 打 %、REST 返 400）。
+
+----- 2. 单测 + 变异验证 -----
+`internal/orchestrator/network/mgmtport_test.go`：三条事实各自命中、事实未知不误拒、
+同网段业务口放行、拒绝文案含后果与出路（SSH / 带外）、/proc/net/route 解析（含无默认路由、
+文件缺失）、PCI→口名三种来源、记录反查大小写不敏感。
+**变异验证**：把「命中即拒绝」改成放行 → `TestCheckManagementPortRefusesEachFact` 立刻报
+`声明的管理口应被拒: <nil>`；恢复后通过。`make check` 全绿（决策 101 项）。
+
+----- 3. 真机复验（红线：全程不对 ens160 发起绑定）-----
+A. 守卫事实来自启动日志（单测覆盖不到的部分=事实装配）：
+   `管理口守卫事实（绑定/解绑这些口会被拒）","declared":"","default-route":"ens160","listen":""}`
+   内核事实对照：`default via 192.168.155.2 dev ens160`、`ens160 192.168.155.129/24`、驱动 vmxnet3
+   → 未声明管理口时，ens160 仍被**默认路由**这条事实识别 ✓（正是发现 #7 的那个情形）
+B. 守卫在守护进程里可达且会拒绝（用与数据面无关的口名，不碰 ens160）：
+   `set system management interface ens999` + commit → `request interfaces ens999 bind-dpdk --yes`
+   → 退出码 1：`%% 拒绝操作管理口：ens999（配置中声明的管理口）。绑定或解绑都会中断 SSH 与管理 API，
+     本机随即无法远程管理；如确需变更该网卡的驱动，请按用户手册的带外步骤操作`（审计留痕）
+C. 业务口不受影响（负例）：`request interfaces ens224 bind-dpdk --yes` → 正常放行
+   `接口 ens224（PCI 0000:13:00.0）已绑定到 DPDK 驱动，当前驱动 vfio-pci`
+D. 管理口仍在内核手里：默认路由与 ens160 驱动未变，nfvisd active
+
+----- 4. ⚠️ 复验中的一次自伤与完整恢复（如实记录；由此产生发现 #13）-----
+测试 PCI 形式时我用了**业务口 ens224 的真实 PCI**（`request interfaces 0000:13:00.0 unbind-dpdk
+to-driver vmxnet3 --yes`），而 ens224 **此刻正被 VPP 使用**。后果：
+  · 请求永不返回 → 客户端报「请求超时（1m30s）：操作可能已在服务端完成，请用 show 确认
+    （如 show virtual-machine-functions <name>）」——hint 指向的是**虚拟机**命令，与场景无关；
+  · 设备停在**无驱动**状态（已从 vfio-pci 摘下，vmxnet3 绑定写阻塞）；
+  · **守护进程的 CLI 执行器被永久占用**：`cliExecutor.Execute` 全程持 `x.mu`，卡住的 goroutine
+    一直握着锁 → 此后**任何** CLI 命令都 90s 超时；而 REST 其它端点正常
+    （/vpp/status 200、/login 正常、未带 token 的 /cli/execute 立刻 401）→ 定位为「执行器被占用」而非「进程挂了」。
+恢复（三步，全部经 SSH 完成）：
+  ① `systemctl stop vpp`（释放 vfio group——阻塞的 sysfs 写随即完成，设备回到 vfio-pci）
+  ② `systemctl restart nfvis`（清掉卡住的执行器）
+  ③ `request vpp restart`（按 committed 重建数据面）
+恢复后核对：VPP `ens192 up / ens224 down`、两口 PCI 均 vfio-pci、`show interfaces physical` 两口
+Driver=dpdk、`show alarms` 无 active、ens160 仍 vmxnet3 + 默认路由未变 ✓
+
+----- 5. 环境现状与残留（如实登记）-----
+· nfvisd：**本分支构建**（`-version` 显示 1.0.0-dev；未打 deb）——下一个会话若要一致状态，重新 `dpkg -i`
+· committed rev 28：`vpp.dpdk.per_dev=[ens224, ens192]`（两口产品声明）；`interfaces` 两口 description=cli-pre
+· ⚠️ **残留：`system.management` 是空对象 `{}`**（原为不存在）。成因见发现 #12(b)：测试中
+  `delete system management interface` 删掉最后一个子键后留下空壳，而 `delete system management`
+  整段删除未映射（报「语句未产生配置变更」）。**实际影响**：本机上「首次声明管理口」会因此
+  开始要求 `commit confirmed`（见发现 #12(a)）；无其它功能影响。未用 `load replace` 回滚该空壳——
+  那会以整份配置重放 applier，风险大于收益。
+· /tmp 下的验证脚本与中间产物已清理；备份在 /root/nfvis-db-backup-*、/root/vpp-conf-bak
+
+----- 6. 本轮新增发现（已登记，未修）-----
+见 docs/V1-收尾待办.md §2.11：**#12**（首次声明管理口不触发 commit confirmed + 空壳残留）、
+**#13（高）**（解绑正在被数据面使用的口 → CLI 执行器被永久占用 + 设备留无驱动 + 超时 hint 指错方向）。
