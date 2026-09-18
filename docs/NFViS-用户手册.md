@@ -218,6 +218,12 @@ done
 ```
 > 方式 B 只解决**驱动接管**；要让口出现在数据面里，仍须按 §3.3 在配置中声明它们。
 
+> 🔒 **管理口会被产品直接拒绝**：`request interfaces <管理口> bind-dpdk` / `unbind-dpdk` 一律拒绝
+> （无论是否在 `set system management interface` 里声明过）。判据是三条内核/配置事实：**配置声明的管理口**、
+> **承载默认路由的口**、**守护进程正在监听的网卡**。拒绝是有意的——绑定管理口会**当场**失去 SSH 与管理 API，
+> 只能带外重启才能恢复（真机实测过）。若确需变更该网卡的驱动，请用上面的**方式 B**带外操作。
+> 想知道产品认哪个口，看启动日志的「管理口守卫事实」一行。
+
 实测平台行为：
 
 - 绑定后**内核网卡消失**，只能按 PCI 地址定位，结果按 PCI 回读驱动；
@@ -820,6 +826,7 @@ nfvis$ request system ssh host-key regenerate
 | VM `stop` 报「请求超时」但 VM 实际已停 | 老版本客户端超时 ≤ 服务端 ACPI 等待（已修） | 升级到含修复的版本；用 `show … <name>` 确认实际状态 |
 | commit 报 `接口在 VPP 中不存在: ensX（若该口由 DPDK 接管：重启数据面后才会出现…）` | 该口尚未进入数据面：刚声明/刚接管（正常过渡态），或网卡未绑 vfio-pci、或名称不对 | 先 `request vpp restart`；仍失败则按 §3.2 确认接管与口名（`ls /sys/class/net` 里没有 = 已被接管） |
 | 日志报 `以下已由 DPDK 接管的物理口未在配置中声明，重启数据面后将不再出现在数据面：…` | 该口没在 committed 配置里声明为 DPDK 口 | 补齐 `set vpp dpdk dev <口>`（并确保 `set interfaces <口>` 已声明）后再重启 |
+| `request interfaces <口> bind-dpdk` 报 `拒绝操作管理口：…` | 该口被判为管理路径（配置声明的管理口 / 承载默认路由 / 守护进程监听所在口）——拒绝是有意的 | 换业务口操作；确需变更该网卡驱动时按 §3.2 的方式 B 带外做 |
 | commit 报 `无 1G 大页资源池，无法分配 …MB` | 资源池未配或内核大页未生效 | §3.1 配 `resource-pools hugepages` 并重启生效 |
 | commit 报 `隔离核不足：需要 N，可用 0` | VPP 保留核已占满隔离核池 | 扩大 `isolated-cores`（或用 `show resource-pools` 看 `vpp-reserved`） |
 | 容器下发报 `docker: not found` | 镜像名与 Docker tag 不一致（§6.8） | 上传时的 `name` 用 Docker tag |
