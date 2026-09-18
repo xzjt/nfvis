@@ -106,24 +106,38 @@ func (r *REPL) teardown() {
 	}
 }
 
-// monitorSpec 识别 `monitor interfaces <ifname> [interval <sec>]`（支持无歧义前缀缩写）；
-// 返回服务端快照命令行与刷新间隔。monitor vnf 不匹配（第二个 token 非 interfaces）。
+// monitorSpec 识别 `monitor interfaces <ifname> [interval <sec>]` 与 `monitor vnf <name>`
+// （都支持无歧义前缀缩写）；返回服务端快照命令行与刷新间隔。
+//
+// 两条都是**本地轮询**：服务端只给单次快照，刷新由 REPL 负责（附录 A #36）。
+// `monitor vnf` 此前**只执行一次**——而契约 §1.3 与命令树都写的是「跟踪 VNF 状态/事件」，
+// 服务端 monitorVNF 的注释也早已写着「实时刷新由 nfvis-cli REPL 轮询（与 monitor interfaces
+// 同法）」——是 CLI 侧漏了（附录 A #92）。vnf 的树里没有 `interval` 子节点，故固定 1s。
 func monitorSpec(line string) (cmd string, interval time.Duration, ok bool) {
 	toks := strings.Fields(line)
-	if len(toks) < 3 || !prefixOf(toks[0], "monitor") || !prefixOf(toks[1], "interfaces") {
+	if len(toks) < 3 || !prefixOf(toks[0], "monitor") {
 		return "", 0, false
 	}
-	interval = time.Second
-	if len(toks) >= 5 && prefixOf(toks[3], "interval") {
-		n, err := strconv.Atoi(toks[4])
-		if err != nil || n <= 0 {
+	switch {
+	case prefixOf(toks[1], "interfaces"):
+		interval = time.Second
+		if len(toks) >= 5 && prefixOf(toks[3], "interval") {
+			n, err := strconv.Atoi(toks[4])
+			if err != nil || n <= 0 {
+				return "", 0, false
+			}
+			interval = time.Duration(n) * time.Second
+		} else if len(toks) != 3 {
 			return "", 0, false
 		}
-		interval = time.Duration(n) * time.Second
-	} else if len(toks) != 3 {
-		return "", 0, false
+		return strings.Join(toks[:3], " "), interval, true
+	case prefixOf(toks[1], "vnf"):
+		if len(toks) != 3 { // 语法就是 `monitor vnf <name>`；多给的 token 不认
+			return "", 0, false
+		}
+		return strings.Join(toks[:3], " "), time.Second, true
 	}
-	return strings.Join(toks[:3], " "), interval, true
+	return "", 0, false
 }
 
 // prefixOf s 是 full 的非空无歧义前缀（≥3 字符）。
