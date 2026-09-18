@@ -97,14 +97,17 @@ type TopologyReader interface {
 
 // Options 引擎可选项（零值取默认）。
 type Options struct {
-	LockIdleTTL    time.Duration                            // candidate 空闲超时，默认 10m
-	Now            func() time.Time                         // 时钟注入（测试）
-	AfterFunc      func(d time.Duration, fn func()) func()  // 定时器注入（测试），返回 stop
-	OnEvent        func(Event)                              // 事件回调（在引擎锁内调用，须快速返回）
-	OnCommitted    func(revision int, user string)          // commit 成功回调（M5-1 config-committed 事件）
-	Validate       func(model.Config) []model.ValidateError // commit 校验器，默认 model.Validate + CheckResources
-	ImageResolver  ImageResolver                            // 镜像仓库（nil = 跳过规则⑤）
-	TopologyReader TopologyReader                           // NUMA 拓扑（nil = 跳过规则⑩）
+	LockIdleTTL time.Duration                            // candidate 空闲超时，默认 10m
+	Now         func() time.Time                         // 时钟注入（测试）
+	AfterFunc   func(d time.Duration, fn func()) func()  // 定时器注入（测试），返回 stop
+	OnEvent     func(Event)                              // 事件回调（在引擎锁内调用，须快速返回）
+	OnCommitted func(revision int, user string)          // commit 成功回调（M5-1 config-committed 事件）
+	Validate    func(model.Config) []model.ValidateError // commit 校验器，默认 model.Validate + CheckResources
+	// TimeSynced 宿主时钟是否已与 NTP 同步的探针（NFR-006）。注入而非直接依赖 internal/system
+	// ——引擎是最内层，不该反向依赖宿主交互包（骨架 §3.5）。nil = 不记录（字段为 NULL，表示未知）。
+	TimeSynced     func() bool
+	ImageResolver  ImageResolver  // 镜像仓库（nil = 跳过规则⑤）
+	TopologyReader TopologyReader // NUMA 拓扑（nil = 跳过规则⑩）
 }
 
 // Engine 配置事务引擎。内部串行（单写多读，骨架 §4）。
@@ -115,6 +118,7 @@ type Engine struct {
 
 	lockIdleTTL time.Duration
 	now         func() time.Time
+	timeSynced  func() bool
 	afterFunc   func(d time.Duration, fn func()) func()
 	onEvent     func(Event)
 	onCommit    func(revision int, user string)
@@ -137,6 +141,7 @@ func NewEngine(store *Store, applier orchestrator.Applier, opts Options) (*Engin
 		applier:     applier,
 		lockIdleTTL: opts.LockIdleTTL,
 		now:         opts.Now,
+		timeSynced:  opts.TimeSynced,
 		afterFunc:   opts.AfterFunc,
 		onEvent:     opts.OnEvent,
 		onCommit:    opts.OnCommitted,
@@ -377,7 +382,7 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 	// FR-CFG-002：schema + 语义校验，失败逐条列出
 	verrs := e.validate(*e.candidate)
 	if len(verrs) > 0 {
-		e.store.AppendAudit(AuditEntry{
+		e.appendAudit(AuditEntry{
 			Time: e.now(), User: sess.User, Action: "config.commit",
 			Detail: formatValidateErrors(verrs), Result: "failure",
 		})
@@ -401,7 +406,7 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 	if e.images != nil {
 		verrs = append(verrs, e.checkImages(&newCfg)...)
 		if len(verrs) > 0 {
-			e.store.AppendAudit(AuditEntry{
+			e.appendAudit(AuditEntry{
 				Time: e.now(), User: sess.User, Action: "config.commit",
 				Detail: formatValidateErrors(verrs), Result: "failure",
 			})
@@ -425,7 +430,7 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 
 	// 下发底座（失败逆序补偿，全有或全无，骨架 §3.3）
 	if err := e.applier.Apply(ctx, committed, newCfg); err != nil {
-		e.store.AppendAudit(AuditEntry{
+		e.appendAudit(AuditEntry{
 			Time: e.now(), User: sess.User, Action: "config.commit",
 			Detail: fmt.Sprintf("%s\n底座错误: %v", model.Diff(committed, newCfg), err), Result: "failure",
 		})
@@ -451,7 +456,7 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 		res.ConfirmedUntil = &deadline
 	}
 
-	e.store.AppendAudit(AuditEntry{
+	e.appendAudit(AuditEntry{
 		Time: e.now(), User: sess.User, Action: "config.commit",
 		Detail: model.Diff(committed, newCfg), Result: "success",
 	})
@@ -526,7 +531,7 @@ func (e *Engine) Rollback(sess Session, n int) error {
 	cand := cfg
 	e.candidate = &cand
 	e.dirty = true
-	e.store.AppendAudit(AuditEntry{
+	e.appendAudit(AuditEntry{
 		Time: e.now(), User: sess.User, Action: "config.rollback",
 		Detail: fmt.Sprintf("rollback %d：候选配置置为 rev %d（需 commit 生效）", n, rev-n), Result: "success",
 	})
@@ -615,7 +620,7 @@ func (e *Engine) sweepLocked() {
 	if li != nil && now.Sub(li.LastActivity) > e.lockIdleTTL {
 		holder := li.Holder
 		_ = e.releaseLocked()
-		e.store.AppendAudit(AuditEntry{
+		e.appendAudit(AuditEntry{
 			Time: now, User: holder, Action: "config.lock-timeout",
 			Detail: "candidate 空闲超时，自动释放会话锁", Result: "success",
 		})
@@ -658,7 +663,7 @@ func (e *Engine) doConfirmedRollback(cf *ConfirmedInfo) {
 		e.confirmStop()
 		e.confirmStop = nil
 	}
-	e.store.AppendAudit(AuditEntry{
+	e.appendAudit(AuditEntry{
 		Time: now, User: "system", Action: "config.rollback-auto",
 		Detail: fmt.Sprintf("commit confirmed 超时未确认，已自动回滚（基线 rev %d）", cf.BaseRev), Result: "success",
 	})
@@ -695,7 +700,7 @@ func (e *Engine) clearConfirmedLocked(audit AuditEntry) {
 		e.confirmStop()
 		e.confirmStop = nil
 	}
-	e.store.AppendAudit(audit)
+	e.appendAudit(audit)
 }
 
 func (e *Engine) committedLocked() (model.Config, error) {
@@ -843,10 +848,20 @@ func (e *Engine) AuditTrail(limit, offset int) ([]AuditEntry, error) {
 	return e.store.ListAudit(limit, offset)
 }
 
+// appendAudit 统一写审计：补上**时钟是否已同步**的标记（NFR-006）。
+// 所有审计写入都必须经此，避免个别路径漏标。
+func (e *Engine) appendAudit(a AuditEntry) {
+	if e.timeSynced != nil {
+		synced := e.timeSynced()
+		a.TimeSynced = &synced
+	}
+	e.store.AppendAudit(a)
+}
+
 // Audit 追加一条运行态操作审计（FR-OPS-031：生命周期操作入审计通道）。
 // 与配置变更审计（config.commit 等）同表，便于统一 `show log audit` 呈现。
 func (e *Engine) Audit(user, action, detail, result string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.store.AppendAudit(AuditEntry{Time: e.now(), User: user, Action: action, Detail: detail, Result: result})
+	e.appendAudit(AuditEntry{Time: e.now(), User: user, Action: action, Detail: detail, Result: result})
 }

@@ -89,7 +89,8 @@ show resource-pools                                 # 大页池/隔离核：总�
 show alarms [active|all]                            # GET /alarms
 show log
   ├─ system [level <debug|info|warn|error>] [last <n>]
-  ├─ audit [last <n>]                               # GET /audit-logs
+  ├─ audit [last <n>]                               # GET /audit-logs；
+  │                                                 # 未同步记录带「[时钟未同步]」标记（NFR-006）
   └─ vnf <name> [last <n>]                          # VNF 控制台/事件日志
 show users                                          # 本地用户与 class
 show configuration [permissions <class>]            # 当前 committed 配置（下详 §3）

@@ -262,6 +262,8 @@ func run() error {
 
 	var eng *config.Engine // 供 OnCommitted 回调引用（NewEngine 之后赋值）
 	var engineOpts config.Options
+	// NFR-006：每条审计记录都带上「写入时宿主时钟是否已同步」的标记
+	engineOpts.TimeSynced = system.ClockSynced
 	if imagesStore != nil {
 		engineOpts.ImageResolver = imagesStore // FR-CFG-011⑤：镜像存在性与类型匹配
 	}

@@ -26,6 +26,10 @@ type AuditEntry struct {
 	Action string // config.commit / config.rollback / config.rollback-auto / config.confirm
 	Detail string // JunOS 风格 diff 或操作说明
 	Result string // success | failure
+	// TimeSynced：写入该条时的**宿主时钟是否已与 NTP 同步**（NFR-006：时间戳依赖 NTP，
+	// 未同步时事件要带标记）。nil = 未知——迁移前的老记录没有这个信息，
+	// **不谎称已知**（渲染层据此显示「未记录」而不是「已同步」）。
+	TimeSynced *bool
 }
 
 // LockInfo candidate 会话锁持有信息（FR-CFG-009）。
@@ -311,9 +315,17 @@ func (s *Store) ClearConfirmed() error {
 
 // AppendAudit 追加审计记录。
 func (s *Store) AppendAudit(e AuditEntry) error {
+	var synced any // nil → SQL NULL（未知）
+	if e.TimeSynced != nil {
+		if *e.TimeSynced {
+			synced = 1
+		} else {
+			synced = 0
+		}
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO audit_log (ts, user, action, detail, result) VALUES (?, ?, ?, ?, ?)`,
-		fmtTime(e.Time), e.User, e.Action, e.Detail, e.Result,
+		`INSERT INTO audit_log (ts, user, action, detail, result, time_synced) VALUES (?, ?, ?, ?, ?, ?)`,
+		fmtTime(e.Time), e.User, e.Action, e.Detail, e.Result, synced,
 	)
 	if err != nil {
 		return fmt.Errorf("写审计日志: %w", err)
@@ -327,7 +339,7 @@ func (s *Store) ListAudit(limit, offset int) ([]AuditEntry, error) {
 		offset = 0
 	}
 	rows, err := s.db.Query(
-		`SELECT ts, user, action, detail, result FROM audit_log ORDER BY audit_id DESC LIMIT ? OFFSET ?`, limit, offset,
+		`SELECT ts, user, action, detail, result, time_synced FROM audit_log ORDER BY audit_id DESC LIMIT ? OFFSET ?`, limit, offset,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("查询审计日志: %w", err)
@@ -337,8 +349,13 @@ func (s *Store) ListAudit(limit, offset int) ([]AuditEntry, error) {
 	for rows.Next() {
 		var e AuditEntry
 		var ts string
-		if err := rows.Scan(&ts, &e.User, &e.Action, &e.Detail, &e.Result); err != nil {
+		var synced sql.NullInt64
+		if err := rows.Scan(&ts, &e.User, &e.Action, &e.Detail, &e.Result, &synced); err != nil {
 			return nil, fmt.Errorf("读取审计记录: %w", err)
+		}
+		if synced.Valid {
+			b := synced.Int64 != 0
+			e.TimeSynced = &b
 		}
 		if e.Time, err = parseTime(ts); err != nil {
 			return nil, fmt.Errorf("解析审计时间: %w", err)
