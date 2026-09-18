@@ -21,10 +21,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // DefaultUioDriver DPDK 默认绑定驱动（决策 #18 的 vpp.dpdk.uio_driver 缺省值）。
 const DefaultUioDriver = "vfio-pci"
+
+// DefaultWriteTimeout 单次 sysfs 写的缺省时限（发现 #13：不能让一条命令永久占住执行器）。
+const DefaultWriteTimeout = 20 * time.Second
 
 // DPDKBinder 网卡驱动接管编排。
 type DPDKBinder struct {
@@ -35,6 +39,9 @@ type DPDKBinder struct {
 	WriteFile func(string, []byte) error
 	// Rescan 触发 PCI 重新探测（解绑后交还内核驱动；缺省写 /sys/bus/pci/rescan）。
 	Rescan func() error
+	// WriteTimeout 单次 sysfs 写的时限（<=0 取 DefaultWriteTimeout）。
+	// 由来：对正在被数据面占用的口写 sysfs 会阻塞在内核里（发现 #13）。
+	WriteTimeout time.Duration
 	// Bindings 绑定记录（决策 #100）：netdev 已消失时的口名→PCI 回退来源。
 	// 有了它，「按口名解绑」（`request interfaces ens224 unbind-dpdk`）才成立——
 	// 否则交 DPDK 后内核无 netdev，只能凭 PCI 地址操作。
@@ -65,7 +72,23 @@ func (b *DPDKBinder) write(path, data string) error {
 	if b.WriteFile == nil {
 		return fmt.Errorf("sysfs 写入未装配")
 	}
-	return b.WriteFile(path, []byte(data))
+	// 超时保护（发现 #13）：**对正在被数据面占用的口写 sysfs 会阻塞在内核里**（VPP 持着
+	// 该设备的 vfio group），实测请求永不返回、并把 CLI 执行器的锁一直占着。
+	// 此处给每次写加时限：超时即返回可读错误，至少不把整条管理通道拖死。
+	timeout := b.WriteTimeout
+	if timeout <= 0 {
+		timeout = DefaultWriteTimeout
+	}
+	done := make(chan error, 1)
+	go func() { done <- b.WriteFile(path, []byte(data)) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		// 写操作可能仍在内核里挂着（无法取消），故措辞如实说明并给出下一步
+		return fmt.Errorf("写 %s 超时（%s）：内核侧可能仍被数据面占用或设备状态异常；"+
+			"请先确认该口已离开数据面（request vpp restart），必要时重启 nfvisd", path, timeout)
+	}
 }
 
 // pciAddrRe PCI 地址形如 0000:0b:00.0（域可省）。

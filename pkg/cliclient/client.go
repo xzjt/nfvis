@@ -183,7 +183,10 @@ func (c *Client) do(method, path string, body any, out any) error {
 		// 「连接 nfvisd 失败」——而操作其实已在服务端成功（决策 #76）。
 		var nerr net.Error
 		if errors.As(err, &nerr) && nerr.Timeout() {
-			return fmt.Errorf("请求超时（%s）：操作可能已在服务端完成，请用 show 确认（如 show virtual-machine-functions <name>）: %w",
+			// 提示要**与命令无关**（发现 #13）：原文写死「如 show virtual-machine-functions <name>」，
+			// 而超时也可能发生在接口/配置/运维动作上——对不上号的例子比不给还糟。
+			return fmt.Errorf("请求超时（%s）：操作可能已在服务端完成或仍在进行；"+
+				"请先用相关 show 命令核对实际状态，必要时看 nfvisd 日志（journalctl -u nfvis）: %w",
 				RequestTimeout, err)
 		}
 		return fmt.Errorf("连接 nfvisd 失败: %w", err)

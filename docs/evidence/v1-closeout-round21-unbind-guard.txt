@@ -1,0 +1,56 @@
+===== V1 收尾第二十一轮：发现 #13（高）/ #12(b) / #15 / #16 =====
+环境：nfvis-vm（已装实例 HTTPS :443；ens160 管理口未动）
+日期：2026-09-18
+分支 `fix/unbind-guard`，提交见 PR。本文件为**原始输出摘录**。
+
+----- 1. 发现 #13（高）：解绑仍被数据面占用的口会把 CLI 通道卡死 -----
+亲历（验证 #7 时）：对**正在被 VPP 使用**的 ens224 执行
+`request interfaces 0000:13:00.0 unbind-dpdk to-driver vmxnet3 --yes` →
+① 内核 vfio 解绑/重绑写阻塞（VPP 持着该设备 vfio group），请求永不返回；
+② 设备摘出 vfio-pci 后**停在无驱动**；③ `cliExecutor.Execute` 全程持锁 → **整个 CLI 通道占死**
+（此后任何 CLI 命令超时；REST 其它端点正常）；④ 客户端超时提示写死虚拟机命令，与场景不符。
+恢复（真机验证）：`systemctl stop vpp` → `systemctl restart nfvis` → `request vpp restart`。
+
+修法（**与 #7 同口径：拒绝 + 告知正确顺序，不提供 force**，决策 #102）：
+  · `network.CheckUnbindAllowed`：解绑前判「该口此刻是否在数据面」——探测经
+    `SvcClientFunc().SwInterfaceIndex`（与产品其它按名解析同源）；命中即拒；
+    探测不到（VPP 未连接）**不拦**（数据面没跑就没有谁占着它）。
+  · 纯加固：`DPDKBinder.write` 每次 sysfs 写加时限（`DefaultWriteTimeout=20s`），
+    超时返回可读错误，不把执行器拖死；措辞如实说明"写可能仍在内核里挂着"。
+  · 客户端超时提示改成与命令无关的通用措辞（原文写死 `show virtual-machine-functions <name>`）。
+
+真机复验（**把上次卡死执行器的那条命令跑回来**）：
+$ nfvis-cli -c "request interfaces ens224 unbind-dpdk to-driver vmxnet3 --yes"
+退出码=1 耗时=**0s**
+%% 接口仍被数据面占用：ens224 当前仍在数据面中。请先在配置里删除它的 DPDK 声明与接口声明，
+   执行 request vpp restart 并确认它已不在数据面，然后再解绑——直接解绑会让该口悬空，并可能阻塞后续命令
+拒绝之后核对：`0000:13:00.0` 驱动仍为 **vfio-pci**；数据面仍有 **2** 个 ens 口；CLI 正常
+（`show system uptime` 秒回）。**PCI 形式**同样被拦（上次就是用 PCI 形式踩的）。
+单测：`TestCheckUnbindAllowed`（在数据面即拒/不在放行/空名不判）+ `TestDPDKBinderWriteTimeout`
+（写阻塞必须按时限返回）。**变异验证**：守卫放行 → 报红。
+
+----- 2. 发现 #12(b)：删掉管理口最后一个字段不该留空壳 -----
+修法：`pruneEmptySingleton` 落在 `applyStatement` / `deleteStatement` **两条路径的合流处**
+（第一版只加在别名层 → `delete system management interface`（无取值）走通用树遍历，漏网，被测试抓到）。
+真机：
+$ configure / set system management interface ens999 / commit          → commit 成功
+$ configure / delete system management interface / commit confirmed 5  → 再 commit 确认
+$ 核对 committed：rev 34 ｜ system.management = **null**   （此前是 `{}`）
+注：#12(a)（首次声明不触发 `commit confirmed`）**仍需口径**——会牵动 256 条冒烟里
+`set system management interface ens160` 那条用例与首装流程，未动。
+
+----- 3. 发现 #15：语义校验脚本的扰动恢复不彻底 -----
+修法：扰动前记下该接口原有描述，收尾**还回原值**（原本就没有才删字段），并打印做了哪种。
+真机（两步）：
+  ① 先用产品路径把被旧脚本抹掉的 `cli-pre` 写回（`set interfaces ens192 description cli-pre` → rev 38）
+  ② 再跑语义校验 → 输出「· 已恢复接口 ens192 的原有描述（cli-pre）」，合计 11/0；
+     核对 `show configuration`：`interfaces ens192 { description cli-pre; name ens192; }` ✓
+（首次运行时报「接口 ens192 原本没有描述，已清除本次写入」——那也是对的：当时它确实没有描述。）
+
+----- 4. 发现 #16：`rollback 0` 的提示 -----
+$ nfvis-cli -c "configure
+rollback 0"
+%% rollback 的快照编号从 1 起（0 不存在）；要丢弃未提交改动请用 discard
+
+----- 5. 门禁 -----
+`make check` 全绿（含 `toolcheck` 判定自校准）；决策条数 102（新增 #102）。

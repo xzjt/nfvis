@@ -154,6 +154,12 @@ echo "服务端 $SRV ｜ CLI $CLI_BIN ｜ 标记 $MARK"
 # ============ 准备：被测接口（后续多项需要配置里有对象）============
 IFACE=$(vpp_ifaces | head -1)
 if [ -z "$IFACE" ]; then echo "✗ VPP 中无接口，无法继续"; exit 1; fi
+# 记下该接口原有的 description，收尾时**还回原值**（发现 #15）：此前收尾是「删字段」，
+# 于是脚本跑完配置里少了一个原本存在的描述——那叫"改回默认"，不叫恢复原值。
+IFACE_DESC_ORIG=$(cli "show configuration" | awk -v n="$IFACE" '
+  $0 ~ ("^interfaces " n " \\{") { inb=1; next }
+  inb && /^\}/ { inb=0 }
+  inb && /description/ { sub(/^[ \t]*description[ \t]*/, ""); sub(/;.*/, ""); print; exit }' | tr -d '\r')
 cli "configure
 set interfaces $IFACE description semcheck-$MARK
 commit" >/dev/null 2>&1
@@ -265,9 +271,18 @@ echo "    Docker 容器: ${dockerps:-（无）} ｜ CLI 容器列表: ${clict:-�
 case " $clivm " in *" br0 "*) : ;; esac
 
 # ============ 清理本脚本创建的对象 ============
-cli "configure
+# 接口描述：**还回原值**（发现 #15）；原本就没有描述时才删字段。
+if [ -n "${IFACE_DESC_ORIG:-}" ] && [ "$IFACE_DESC_ORIG" != "semcheck-$MARK" ] && [ "$IFACE_DESC_ORIG" != "sem-rt-$MARK" ]; then
+  cli "configure
+set interfaces $IFACE description $IFACE_DESC_ORIG
+commit" >/dev/null 2>&1
+  echo "· 已恢复接口 $IFACE 的原有描述（$IFACE_DESC_ORIG）"
+else
+  cli "configure
 delete interfaces $IFACE description
 commit" >/dev/null 2>&1
+  echo "· 接口 $IFACE 原本没有描述，已清除本次写入"
+fi
 if [ "${vs:-}" = "semcheck-$MARK" ]; then
   cli "configure
 delete virtual-switches semcheck-$MARK
