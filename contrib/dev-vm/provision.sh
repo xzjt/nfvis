@@ -86,7 +86,7 @@ step "安装 Libvirt/QEMU" bash -c '
     apt-get -y install qemu-system-x86 libvirt-daemon-system libvirt-clients virtinst
     systemctl enable --now libvirtd
     # 开发虚机需嵌套虚拟化时，kvm 模块由内核提供；缺失仅提示，不视为失败
-    ls -l /dev/kvm 2>/dev/null || echo "提示：无 /dev/kvm（嵌套虚拟化未开启），M4 需在宿主开启"'
+    ls -l /dev/kvm 2>/dev/null || echo "提示：无 /dev/kvm（嵌套虚拟化未开启）；在本机跑虚拟机需宿主开启嵌套虚拟化"'
 
 # ---- 5. Docker ----
 step "安装 Docker" bash -c '

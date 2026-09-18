@@ -284,7 +284,7 @@ func (p *Provider) prepare(ctx context.Context, vm model.VMFunction, spec Domain
 		if !p.store.Exists(spec.DiskPath) {
 			image := p.imagePath(vm.Image)
 			if !p.store.Exists(image) {
-				return fmt.Errorf("VM %s 的镜像 %q 不在仓库中（%s；导入见 M4-8）", vm.Name, vm.Image, image)
+				return fmt.Errorf("VM %s 的镜像 %q 不在仓库中（%s；先用 request images … 取回镜像仓库）", vm.Name, vm.Image, image)
 			}
 			if err := p.store.EnsureDir(path.Dir(spec.DiskPath)); err != nil {
 				return err
@@ -381,7 +381,7 @@ func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) 
 				return DomainSpec{}, fmt.Errorf("VM %s: vNIC %s（sriov-vf）缺少 sriov 绑定", vm.Name, nic.Name)
 			}
 			if p.vfPCI == nil {
-				return DomainSpec{}, fmt.Errorf("VM %s: vNIC %s 为 sriov-vf，但当前环境未提供 VF PCI 解析（SR-IOV 接入见 M4-4）", vm.Name, nic.Name)
+				return DomainSpec{}, fmt.Errorf("VM %s: vNIC %s 为 sriov-vf，但当前环境未提供 VF PCI 解析（SR-IOV 在该环境不可用）", vm.Name, nic.Name)
 			}
 			pci, err := p.vfPCI(nic.Sriov.PhysicalInterface, nic.Sriov.VFID)
 			if err != nil {

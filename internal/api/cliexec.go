@@ -331,7 +331,7 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 	}
 	switch {
 	case len(t) == 1 && t[0] == "version":
-		return "NFViS " + VersionStr + "（M2：配置事务可用，网络底座 M3+ 接入）\n"
+		return "NFViS " + VersionStr + "\n"
 	case len(t) >= 1 && t[0] == "configuration":
 		if len(t) >= 2 && t[1] == "compare" {
 			// show configuration compare rollback <n>

@@ -45,6 +45,11 @@ var refPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`§[0-9]`),
 	regexp.MustCompile(`决策 #[0-9]+`),
 	regexp.MustCompile(`附录 A #[0-9]+`),
+	// 里程碑编号（`M2：…`、`见 M4-8`、`属 M4`）：与需求编号一样，操作者手里没有"里程碑表"，
+	// 读到 `M4-8` 无从查起（发现 #3，2026-09-18 裸机测试 —— 当时 6 处这样的字符串）。
+	regexp.MustCompile(`(^|[^A-Za-z0-9/._-])M[1-9](-[0-9]+)?($|[^A-Za-z0-9])`),
+	// 无编号的「附录 X」：指向随包规格书里的附录，而操作者拿不到"哪个附录"的索引（同上）。
+	regexp.MustCompile(`附录 [A-Z]`),
 }
 
 // docRefPatterns **操作者读物（用户手册）**的口径：只禁「操作者手里无从解析」的标识。
@@ -56,6 +61,7 @@ var docRefPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`FR-[A-Z]+-[0-9]+`),
 	regexp.MustCompile(`决策 #[0-9]+`),
 	regexp.MustCompile(`附录 A #[0-9]+`),
+	regexp.MustCompile(`(^|[^A-Za-z0-9])M[1-9](-[0-9]+)?($|[^A-Za-z0-9])`), // 里程碑编号：手册读者同样无从解析
 }
 
 // residueCommon 剥掉引用后留下的**标点残渣**（「清了引用、留下垃圾」）。所有文件类都判：

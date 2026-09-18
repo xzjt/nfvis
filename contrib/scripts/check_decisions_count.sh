@@ -13,7 +13,7 @@ if [ -z "$declared" ]; then
     exit 1
 fi
 if [ "$declared" != "$actual" ]; then
-    echo "✗ AGENTS.md 声明 $declared 项，附录 A 实际 $actual 项——请同步 AGENTS.md「项目状态与基线」"
+    echo "✗ AGENTS.md 声明 $declared 项，规格书决策记录实际 $actual 项——请同步 AGENTS.md「项目状态与基线」"
     exit 1
 fi
 echo "✓ 决策条数一致（$actual 项）"

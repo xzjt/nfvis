@@ -356,7 +356,7 @@ func (v *validator) checkVirtualSwitches(c Config) {
 		case "l3":
 			// 附录 B：L3 交换机的 l3-interface/静态路由映射为同名 VRF 条目
 			if !v.vrfNames[s.Name] {
-				v.errf(p, "type=l3 交换机需要同名 VRF 条目承载 L3 配置（附录 B 映射）")
+				v.errf(p, "type=l3 交换机需要同名 VRF 条目承载 L3 配置（L3 虚拟交换机映射为同名 VRF）")
 			}
 			if s.VlanAccess != 0 || s.CrossConnect || len(s.Ports) > 0 || s.Gateway != nil {
 				v.errf(p, "type=l3 交换机不允许 L2 专属配置（vlan_access/ports/gateway/cross-connect）")
