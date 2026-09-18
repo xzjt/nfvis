@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/state"
 )
@@ -302,5 +303,31 @@ func TestNatSessionsEndpoint(t *testing.T) {
 	status, _, _ = cfgRequest(t, http.MethodGet, ts2.URL+APIPrefix+"/nat/sessions", token2, nil, nil)
 	if status != http.StatusServiceUnavailable {
 		t.Fatalf("未装配应 503: %d", status)
+	}
+}
+
+// TestDeleteVFSExplainsCountSemantics（附录 A #94）：`delete-vfs` 收下 `vf <n>` 但**按数量**回收，
+// 回显必须说明「编号不参与定位」——否则操作者会以为删的是自己指定的那一个（交互层的
+// 「声明了但静默无效」）。真机无 PF/VF 无法走通该路径，故用注入的假 SRIOV 覆盖。
+func TestDeleteVFSExplainsCountSemantics(t *testing.T) {
+	x, _ := newCLIKit(t)
+	fake := &fakeSRIOV{}
+	x.setSRIOV(fake)
+	// 先提交一条带 VF 数量的接口，再**退出配置模式**（request 是操作模式命令）
+	run(t, x, "admin", aaa.ClassSuperUser, "ssh",
+		"configure",
+		"set interfaces ens224 sriov vf-count 3",
+		"commit",
+		"exit",
+	)
+
+	res := x.Execute("admin", aaa.ClassSuperUser, "ssh", "request sriov delete-vfs ens224 vf 1")
+	if fake.gotIf != "ens224" || fake.gotN != 2 {
+		t.Fatalf("应按数量回收（3→2）：gotIf=%q gotN=%d", fake.gotIf, fake.gotN)
+	}
+	for _, want := range []string{"按**数量**回收", "不参与定位", "vf 1"} {
+		if !strings.Contains(res.Output, want) {
+			t.Errorf("回显应说明 %q，实得: %q", want, res.Output)
+		}
 	}
 }
