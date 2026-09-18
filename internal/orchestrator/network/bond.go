@@ -79,7 +79,7 @@ func (p *BondProvider) ApplyBond(ctx context.Context, bond model.Bond) error {
 			return fmt.Errorf("解析 bond 成员 %s: %w", m, err)
 		}
 		if !ok {
-			return fmt.Errorf("%w: bond %s 成员 %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, bond.Name, m)
+			return fmt.Errorf("%w: bond %s 成员 %s"+ifaceMissingHint, ErrIfaceUnavailable, bond.Name, m)
 		}
 		memberIdx = append(memberIdx, idx)
 	}

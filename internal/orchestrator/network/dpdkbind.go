@@ -35,6 +35,10 @@ type DPDKBinder struct {
 	WriteFile func(string, []byte) error
 	// Rescan 触发 PCI 重新探测（解绑后交还内核驱动；缺省写 /sys/bus/pci/rescan）。
 	Rescan func() error
+	// Bindings 绑定记录（决策 #100）：netdev 已消失时的口名→PCI 回退来源。
+	// 有了它，「按口名解绑」（`request interfaces ens224 unbind-dpdk`）才成立——
+	// 否则交 DPDK 后内核无 netdev，只能凭 PCI 地址操作。
+	Bindings *Bindings
 }
 
 // NewDPDKBinder 构造缺省（真实 sysfs）实现。
@@ -73,7 +77,9 @@ func IsPCIAddr(s string) bool { return pciAddrRe.MatchString(strings.TrimSpace(s
 // PCIAddrOf 把「接口名或 PCI 地址」解析为 PCI 地址。
 //
 // 之所以必须接受 PCI 地址：**已被 DPDK 接管的网卡在内核里没有 netdev**
-// （/sys/class/net/<ifname> 不存在），此时只能按 PCI 定位——而这恰是 unbind 的常态。
+// （/sys/class/net/<ifname> 不存在），此时只能按 PCI 定位。
+// 若无 netdev，再回退到**绑定记录**（决策 #100）：记录里有这个口是产品自己绑的结论，
+// 于是「按口名」操作（如 unbind-dpdk ens224）在接管后依然可用。
 func (b *DPDKBinder) PCIAddrOf(ifnameOrPCI string) (string, error) {
 	arg := strings.TrimSpace(ifnameOrPCI)
 	if arg == "" {
@@ -85,6 +91,11 @@ func (b *DPDKBinder) PCIAddrOf(ifnameOrPCI string) (string, error) {
 	lnk := b.path(filepath.Join("class/net", arg, "device"))
 	target, err := os.Readlink(lnk)
 	if err != nil {
+		if b.Bindings != nil {
+			if pci, ok := b.Bindings.Get(arg); ok {
+				return pci, nil
+			}
+		}
 		return "", fmt.Errorf("接口 %s 无 PCI 设备（DPDK 已接管的网卡在内核中无 netdev，请改用 PCI 地址）: %w", arg, err)
 	}
 	return filepath.Base(target), nil

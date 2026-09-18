@@ -297,7 +297,7 @@ func (p *NatProvider) desiredFeatures(c NatClient, nat model.NatConfig, pools ma
 			return nil, nil, 0, 0, fmt.Errorf("解析 NAT 外口 %s: %w", r.Action.Interface, err)
 		}
 		if !ok {
-			return nil, nil, 0, 0, fmt.Errorf("%w: NAT 外口 %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, r.Action.Interface)
+			return nil, nil, 0, 0, fmt.Errorf("%w: NAT 外口 %s"+ifaceMissingHint, ErrIfaceUnavailable, r.Action.Interface)
 		}
 		if features[idx] == "inside" {
 			return nil, nil, 0, 0, fmt.Errorf("接口 %s 同时被配置为 NAT 内外口", r.Action.Interface)

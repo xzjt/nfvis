@@ -403,7 +403,7 @@ func (p *L3Provider) resolveL3Iface(c L3Client, li model.L3Interface) (idx, sub 
 			return 0, 0, fmt.Errorf("解析接口 %s: %w", base, ferr)
 		}
 		if !ok {
-			return 0, 0, fmt.Errorf("%w: %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, base)
+			return 0, 0, fmt.Errorf("%w: %s"+ifaceMissingHint, ErrIfaceUnavailable, base)
 		}
 		s, cerr := c.CreateSubif(CreateSubifReq{ParentSwIfIndex: parent, SubID: uint32(li.Vlan),
 			OuterVlanID: uint16(li.Vlan), OneTag: true})
@@ -417,7 +417,7 @@ func (p *L3Provider) resolveL3Iface(c L3Client, li model.L3Interface) (idx, sub 
 		return 0, 0, fmt.Errorf("解析接口 %s: %w", base, err)
 	}
 	if !ok {
-		return 0, 0, fmt.Errorf("%w: %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, base)
+		return 0, 0, fmt.Errorf("%w: %s"+ifaceMissingHint, ErrIfaceUnavailable, base)
 	}
 	return idx, 0, nil
 }

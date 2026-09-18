@@ -177,7 +177,7 @@ func (p *AclProvider) Bind(ctx context.Context, ifname, aclIn, aclOut string) er
 		return fmt.Errorf("解析接口 %s: %w", ifname, err)
 	}
 	if !ok {
-		return fmt.Errorf("接口 %s 不存在于 VPP（是否未由 DPDK 接管？）", ifname)
+		return fmt.Errorf("接口 %s 不存在于 VPP"+ifaceMissingHint, ifname)
 	}
 	if err := p.BindIndex(c, idx, aclIn, aclOut); err != nil {
 		return err

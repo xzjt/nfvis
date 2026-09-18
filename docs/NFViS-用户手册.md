@@ -194,9 +194,10 @@ nfvis-cli -server https://127.0.0.1:443 -u admin -c "request system reboot"
 
 ```bash
 nfvis-cli -server https://127.0.0.1:443 -u admin -c "request interfaces ens224 bind-dpdk --yes"
-# 解绑（接管后内核里已无该网卡，须用 PCI 地址；实测须显式给 to-driver）
+# 解绑：接管后内核里已无该网卡，用 PCI 地址或**口名**均可
+# （绑定过的那批口产品记着「口名 → PCI」，故按口名也行）；实测须显式给 to-driver
 nfvis-cli -server https://127.0.0.1:443 -u admin -c \
-  "request interfaces 0000:13:00.0 unbind-dpdk to-driver vmxnet3 --yes"
+  "request interfaces ens224 unbind-dpdk to-driver vmxnet3 --yes"
 ```
 
 > **先弄清有哪些口**：`set interfaces <ifname>` 的 Tab 候选 = **VPP 中的接口**，
@@ -215,28 +216,53 @@ for d in 0000:0b:00.0 0000:13:00.0; do
   echo $d > /sys/bus/pci/drivers/vfio-pci/bind
 done
 ```
+> 方式 B 只解决**驱动接管**；要让口出现在数据面里，仍须按 §3.3 在配置中声明它们。
 
 实测平台行为：
 
 - 绑定后**内核网卡消失**，只能按 PCI 地址定位，结果按 PCI 回读驱动；
 - 清空 `driver_override` + `rescan` **不足以**让内核重新探测原生驱动 → 解绑**必须**给 `to-driver`。
 
-### 3.3 启动 VPP 并确认
+### 3.3 把业务口交给 VPP（声明 → 重启数据面）
+
+网卡交 vfio-pci 只是第一步：**VPP 里有哪些口，由配置声明决定**。
+按下面三步走，顺序不能反（这正是「先声明端口、绑定后再提交」的用法）：
 
 ```bash
-systemctl start vpp && sleep 5
-vppctl show version          # v26.06-release
-vppctl show interface        # 应能看到业务口（状态 down 属正常，尚未配 L2/L3）
+# ① 声明**每一个**要用到的业务口 + 声明它们由 DPDK 接管（缺一不可）
+nfvis-cli -u admin -c "configure
+set interfaces ens192
+set interfaces ens224
+set vpp dpdk dev ens192
+set vpp dpdk dev ens224
+commit"
+# ② 按配置重生成 startup.conf 并重启数据面
+nfvis-cli -u admin -c "request vpp restart"
+# ③ 确认：接口出现在数据面（状态 down 属正常，尚未配 L2/L3）
+nfvis-cli -u admin -c "show vpp"              # pending_restart 应为 false
+vppctl show interface
 ```
 
-VPP 的 `startup.conf` 由 nfvisd 按 **committed 配置**生成（`/etc/vpp/startup.conf`）：
-`cpu main-core/corelist-workers`、`memory`、`buffers`、`dpdk dev <pci> { name <ifname> }`。
-因此：**改 `set vpp …` 后需 `request vpp restart`（或整机重启）才生效**。
+**要点**：
 
-> ⚠️ 陷阱（实测踩过）：`request vpp restart` 会用当前 committed 配置**重生成** `startup.conf`。
-> 若配置里没有 `vpp dpdk dev <ifname>` 条目，重启后 VPP 里**就没有那些网卡**了
-> （表现为 `接口在 VPP 中不存在: ens192（是否未由 DPDK 接管？）`）。
-> 建议先备份 `/etc/vpp/startup.conf`。
+- ① 的 commit **会成功**，即便这些口此刻还没进数据面：产品的做法是**延后收敛**
+  （日志会写明「尚未进入数据面…执行 request vpp restart 后自动收敛」），
+  ② 之后由恢复收敛自动补齐 MTU/状态。
+- 产品生成 `/etc/vpp/startup.conf` 时，把配置里的口名解析成 PCI，靠的是
+  **绑定时记下的映射**（`/var/lib/nfvis/dpdk-bindings.json`）——所以务必先用
+  `bind-dpdk` 接管，再声明；顺序反了会在②报「解析 … 的 PCI 地址失败」。
+- 覆盖安装时若原来手写过 `startup.conf`，产品启动时会把其中的端口映射读进记录里
+  （不必重新绑定），但**文件本身会被产品重生成覆盖**。
+
+> ⚠️ 陷阱（实测踩过）：`request vpp restart` 用当前 committed 配置**重生成**整个
+> `startup.conf`。**没在配置里声明的口，重启后就不在数据面里了**——即使它此刻还在
+> （比如只写进了手写的 startup.conf）。为此产品在重生成前会告警：
+> `以下已由 DPDK 接管的物理口未在配置中声明，重启数据面后将不再出现在数据面：…`。
+> 看到它请先补齐 `set vpp dpdk dev <口>` 再重启；如需回退，备份
+> `/etc/vpp/startup.conf` 是没有用的（会被覆盖），要改的是**配置**。
+>
+> 另：同一提交里把尚未进数据面的口挂进虚拟交换机/VRF/bond **仍会失败**
+> （那些对象按数据面里的接口定位）。顺序是「先让口进数据面（§3.3②），再挂交换机」。
 
 ---
 
@@ -791,7 +817,8 @@ nfvis$ request system ssh host-key regenerate
 |---|---|---|
 | CLI 报 `连接 nfvisd 失败` / 超时 | ① `-server` 默认值与守护进程不符（§4.3）；② nfvisd 未启动 | 显式 `-server https://127.0.0.1:443`；`systemctl status nfvis` |
 | VM `stop` 报「请求超时」但 VM 实际已停 | 老版本客户端超时 ≤ 服务端 ACPI 等待（已修） | 升级到含修复的版本；用 `show … <name>` 确认实际状态 |
-| commit 报 `接口在 VPP 中不存在: ensX（是否未由 DPDK 接管？）` | 网卡未绑 vfio-pci，或 `request vpp restart` 后 startup.conf 丢了 dpdk 条目 | 按 §3.2 绑定；检查 `/etc/vpp/startup.conf` 的 `dpdk {}` 段 |
+| commit 报 `接口在 VPP 中不存在: ensX（若该口由 DPDK 接管：重启数据面后才会出现…）` | 该口尚未进入数据面：刚声明/刚接管（正常过渡态），或网卡未绑 vfio-pci、或名称不对 | 先 `request vpp restart`；仍失败则按 §3.2 确认接管与口名（`ls /sys/class/net` 里没有 = 已被接管） |
+| 日志报 `以下已由 DPDK 接管的物理口未在配置中声明，重启数据面后将不再出现在数据面：…` | 该口没在 committed 配置里声明为 DPDK 口 | 补齐 `set vpp dpdk dev <口>`（并确保 `set interfaces <口>` 已声明）后再重启 |
 | commit 报 `无 1G 大页资源池，无法分配 …MB` | 资源池未配或内核大页未生效 | §3.1 配 `resource-pools hugepages` 并重启生效 |
 | commit 报 `隔离核不足：需要 N，可用 0` | VPP 保留核已占满隔离核池 | 扩大 `isolated-cores`（或用 `show resource-pools` 看 `vpp-reserved`） |
 | 容器下发报 `docker: not found` | 镜像名与 Docker tag 不一致（§6.8） | 上传时的 `name` 用 Docker tag |

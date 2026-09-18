@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -37,6 +38,15 @@ func WithVhostDir(dir string) ApplierOption {
 	}
 }
 
+// WithWarn 注入告警回调（非致命但操作者需要知道的处置，如接口延后收敛；缺省丢弃）。
+func WithWarn(warn func(string)) ApplierOption {
+	return func(a *orchApplier) {
+		if warn != nil {
+			a.warn = warn
+		}
+	}
+}
+
 // NewApplier 组合三类 Provider 构造编排器。资源池（内核 cpuset/大页）由 M3
 // 内核编排接入后追加为第一阶段；M1 仅编排 网络→计算→容器。
 func NewApplier(net NetworkProvider, comp ComputeProvider, cont ContainerProvider, opts ...ApplierOption) Applier {
@@ -52,10 +62,58 @@ type orchApplier struct {
 	comp ComputeProvider
 	cont ContainerProvider
 
+	// warn 告警回调（延后收敛等非致命情形的可见化）。
+	warn func(string)
+
 	// vhostDir VNF vhost-user socket 目录（compute 与 network 必须一致，缺省 /run/nfvis/vhost）。
 	vhostDir string
 	// memifDir 容器 memif socket 目录（缺省 /run/nfvis/memif，FR-NET-022）。
 	memifDir string
+}
+
+func (a *orchApplier) warnf(format string, args ...any) {
+	if a.warn != nil {
+		a.warn(fmt.Sprintf(format, args...))
+	}
+}
+
+// dpdkManagedIfaces 返回声明了 DPDK 单网卡覆盖项的物理口集合。
+//
+// 只有 per-dev 项会让端口进入 VPP（startup.conf 的 `dev <pci> { name <口> }` 段即由此生成），
+// 所以它同时就是「该口预期由 DPDK 接管」的判据（与 `vpp.dpdk.per-dev` 的取值校验同源）。
+func dpdkManagedIfaces(vpp *model.VppConfig) map[string]bool {
+	if vpp == nil || vpp.DPDK == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(vpp.DPDK.PerDev))
+	for _, d := range vpp.DPDK.PerDev {
+		if d.Interface != "" {
+			out[d.Interface] = true
+		}
+	}
+	return out
+}
+
+// ifaceApply 返回接口层的下发函数。该口已声明为 DPDK 端口时，「尚未进入数据面」
+// **不再整体回滚提交**，而是延后到数据面重启后由恢复收敛补齐（决策 #100）：
+// 否则「先声明端口、绑定后再提交」会死锁——提交要求端口已在 VPP，而端口进 VPP
+// 要 `request vpp restart` 重生成 startup.conf，重启又要 committed 已落库。
+//
+// 只延后「接口不在数据面」这一种失败；其余失败原样冒泡（不吞真错误）。
+func (a *orchApplier) ifaceApply(iface model.InterfaceConfig, dpdkManaged bool) func(context.Context) error {
+	run := func(ctx context.Context) error { return a.net.ApplyInterface(ctx, iface) }
+	if !dpdkManaged {
+		return run
+	}
+	return func(ctx context.Context) error {
+		err := run(ctx)
+		if err == nil || !errors.Is(err, ErrIfaceUnavailable) {
+			return err
+		}
+		a.warnf("接口 %s 尚未进入数据面（已声明为 DPDK 端口）：本次提交不阻断，"+
+			"执行 request vpp restart 后自动收敛", iface.Name)
+		return nil
+	}
 }
 
 // SetVhostDir 设置 vhost-user socket 目录（须与 compute.Config.VhostDir 一致）。
@@ -241,11 +299,12 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	}
 
 	// —— 新增/变更：接口层（MTU / ingress-policy 绑定；QoS 之后，保证 policer 已建）——
+	dpdkPorts := dpdkManagedIfaces(new.Vpp)
 	for _, iface := range new.Interfaces {
 		if o, ok := oldIfaces[iface.Name]; !ok || !configEqual(o, iface) {
 			ops = append(ops, applyOp(
 				fmt.Sprintf("interface[%s]", iface.Name),
-				func(ctx context.Context) error { return a.net.ApplyInterface(ctx, iface) },
+				a.ifaceApply(iface, dpdkPorts[iface.Name]),
 				iface.Name, ok,
 				func(ctx context.Context) error { return a.net.ApplyInterface(ctx, o) },
 				func(ctx context.Context) error { return nil },
