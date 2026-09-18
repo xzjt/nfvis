@@ -170,7 +170,7 @@ exit | quit                                         # 退出 CLI
 ping <host> [source <ip>] [count <n>] [vrf <name>]  # **仅 VPP 数据面**（vppctl ping；source 按接口地址反查接口）；0 发包即报错
 traceroute <host> [vrf <name>]                      # 宿主侧 ICMP；vrf 经 VPP 路径不支持（明确报错）
 monitor interfaces <ifname> [interval <sec>]        # 实时刷新计数，Ctrl-C 退出（CLI 端轮询）
-monitor vnf <name>                                  # 跟踪 VNF 状态/事件
+monitor vnf <name>                                  # 跟踪 VNF 状态/事件（CLI 端轮询，Ctrl-C 退出）
 clear interfaces statistics [<ifname>]              # S
 start shell                                         # S；仅 local console 允许（SSH 登录禁用）
 help [command]

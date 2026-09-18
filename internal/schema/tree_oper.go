@@ -274,7 +274,7 @@ func OperRoot() *Node {
 				P("<ifname>", "接口名", DynVppIfnames),
 				Opt(K("interval", "刷新间隔秒", PT("<sec>", "uint", "秒"))),
 			),
-			K("vnf", "跟踪 VNF 状态/事件",
+			K("vnf", "跟踪 VNF 状态/事件（Ctrl-C 退出）",
 				P("<name>", "VNF 名", DynVMs),
 			),
 		)),

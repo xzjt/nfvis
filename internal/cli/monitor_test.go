@@ -17,8 +17,16 @@ func TestMonitorSpec(t *testing.T) {
 		{"monitor interfaces ens192", "monitor interfaces ens192", time.Second, true},
 		{"monitor interfaces ens192 interval 2", "monitor interfaces ens192", 2 * time.Second, true},
 		{"mon int ens192 interval 5", "mon int ens192", 5 * time.Second, true}, // 无歧义缩写
-		{"monitor vnf fw1", "", 0, false},                                      // 第二个 token 非 interfaces
-		{"monitor interfaces", "", 0, false},                                   // 缺接口名
+		// monitor vnf 与 monitor interfaces 同为本地轮询（附录 A #92）：契约 §1.3 写的是
+		// 「跟踪 VNF 状态/事件」，此前却只执行一次。下面这条断言**曾经把缺陷锁死**
+		// （原文写 `{"monitor vnf fw1", "", 0, false}`，注释「第二个 token 非 interfaces」）。
+		{"monitor vnf fw1", "monitor vnf fw1", time.Second, true},
+		{"mon vnf fw1", "mon vnf fw1", time.Second, true}, // 无歧义缩写
+		{"monitor vnf fw1 interval 2", "", 0, false},      // 树里 vnf 无 interval 子节点
+		{"monitor vnf", "", 0, false},                     // 缺 VNF 名
+		{"monitor vnf a b", "", 0, false},                 // 多余 token
+		{"monitor vp", "", 0, false},                      // vnf/interfaces 之外的子命令
+		{"monitor interfaces", "", 0, false},              // 缺接口名
 		{"monitor interfaces ens192 interval 0", "", 0, false},
 		{"monitor interfaces ens192 interval abc", "", 0, false},
 		{"monitor interfaces ens192 x 2", "", 0, false},
