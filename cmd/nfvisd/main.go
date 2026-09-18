@@ -560,17 +560,27 @@ func run() error {
 	}
 
 	apiServer := api.New(engine, aaaSvc, api.Options{
-		Addr:        *listen,
-		TLSCert:     *tlsCert,
-		TLSKey:      *tlsKey,
-		Log:         log,
-		VPP:         &vppController{mgr: vppMgr, applier: startupApplier, engine: engine},
-		L2:          &l2Controller{net: netProvider},
-		L3:          &l3Controller{net: netProvider},
-		LLDP:        &lldpController{net: netProvider},
-		State:       state.New(vppMgr.Runtime()),
-		SRIOV:       sriovProvider,
-		DPDK:        &dpdkController{b: dpdkBinder, rec: dpdkBindings, logger: log, facts: mgmtFacts},
+		Addr:    *listen,
+		TLSCert: *tlsCert,
+		TLSKey:  *tlsKey,
+		Log:     log,
+		VPP:     &vppController{mgr: vppMgr, applier: startupApplier, engine: engine},
+		L2:      &l2Controller{net: netProvider},
+		L3:      &l3Controller{net: netProvider},
+		LLDP:    &lldpController{net: netProvider},
+		State:   state.New(vppMgr.Runtime()),
+		SRIOV:   sriovProvider,
+		DPDK: &dpdkController{b: dpdkBinder, rec: dpdkBindings, logger: log, facts: mgmtFacts,
+			// 数据面占用探测（发现 #13）：解绑前问 VPP「这个口还在你手里吗」
+			dataplane: func(ifname string) (bool, error) {
+				c, err := vppMgr.SvcClientFunc()()
+				if err != nil {
+					return false, err
+				}
+				defer c.Close()
+				_, ok, err := c.SwInterfaceIndex(ifname)
+				return ok, err
+			}},
 		Kernel:      system.NewBaselineApplier(),
 		NAT:         &natSessionsController{net: netProvider},
 		Alarms:      &alarmController{store: alarms},
@@ -1123,6 +1133,9 @@ type dpdkController struct {
 	b      *network.DPDKBinder
 	rec    *network.Bindings
 	logger *slog.Logger
+	// dataplane 探测「该口此刻是否在数据面（VPP）中」，用于解绑守卫（发现 #13）。
+	// nil = 无法探测（不拦）。
+	dataplane func(ifname string) (bool, error)
 	// facts 提供管理口守卫所需事实（发现 #7；nil = 守卫未装配，仅限测试装配）。
 	facts func() network.ManagementFacts
 }
@@ -1131,6 +1144,27 @@ type dpdkController struct {
 //
 // 目标可能是 PCI 地址（接管后内核已无 netdev，解绑时只能按 PCI 定位）→ 先解析成口名
 // （内核 netdev 名或绑定记录），解析不出按「未知」处理、不拦（理由见 ResolveIfaceName 注释）。
+// checkNotInDataplane 解绑前确认该口已离开数据面（发现 #13）。
+//
+// 探测不到（VPP 未连接等）**不拦**：数据面都没跑，就没有谁占着它，此时解绑是安全的。
+func (c *dpdkController) checkNotInDataplane(target string) error {
+	if c.dataplane == nil {
+		return nil
+	}
+	name, ok := network.ResolveIfaceName(target, c.rec)
+	if !ok {
+		return nil
+	}
+	inDP, err := c.dataplane(name)
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Warn("无法探测接口是否在数据面中，跳过解绑守卫", "ifname", name, "err", err)
+		}
+		return nil
+	}
+	return network.CheckUnbindAllowed(name, inDP)
+}
+
 func (c *dpdkController) checkManagement(target string) error {
 	if c.facts == nil {
 		return nil
@@ -1147,6 +1181,13 @@ func (c *dpdkController) SetDPDKBound(ctx context.Context, ifname string, bound 
 	// 落点在这里是因为 CLI 执行器与 REST handler 都经本方法（决策 #75：约束要放在两侧共同依赖处）。
 	if err := c.checkManagement(ifname); err != nil {
 		return "", "", err
+	}
+	// 解绑守卫（发现 #13）：仍被数据面占用的口不能直接解绑——实测会把 CLI 执行器占死、
+	// 并把网卡留在无驱动。正确顺序是「配置里删声明 → request vpp restart → 再解绑」。
+	if !bound {
+		if err := c.checkNotInDataplane(ifname); err != nil {
+			return "", "", err
+		}
 	}
 	var pci string
 	var err error

@@ -619,6 +619,11 @@ func (x *cliExecutor) cfgRollback(user, source string, args []string) string {
 		if err != nil {
 			return "%% rollback 编号须为整数\n"
 		}
+		// 发现 #16：`rollback 0` 看着像「回到当前 committed（即丢弃改动）」，实则快照编号从 1 起
+		// （引擎会报「配置快照不存在」）。误用者的第一反应就是它，故直接点明该用哪个命令。
+		if v == 0 {
+			return "%% rollback 的快照编号从 1 起（0 不存在）；要丢弃未提交改动请用 discard\n"
+		}
 		n = v
 	}
 	sess := config.Session{User: user, Source: source}
@@ -632,6 +637,22 @@ func (x *cliExecutor) cfgRollback(user, source string, args []string) string {
 }
 
 // ---------- 语句 → 配置模型（JSON 树变更） ----------
+
+// pruneEmptySingleton 把「被删空之后只剩空对象」的单例容器一并删掉（发现 #12(b)）。
+//
+// 由来：`delete system management interface` 删掉最后一个字段后留下 `system.management = {}`，
+// 而空对象**不等于"没有配置"**——`show interfaces management` 会因此走另一条分支、
+// 后续管理口变更还会开始要求 commit confirmed（真机残留过）。
+// 放在这个合流点是因为 `delete` 有两条路径（别名表 / 通用树遍历），只修一条会漏（第一版即漏）。
+func pruneEmptySingleton(tree map[string]any) {
+	sys, _ := tree["system"].(map[string]any)
+	if sys == nil {
+		return
+	}
+	if mgmt, ok := sys["management"].(map[string]any); ok && len(mgmt) == 0 {
+		delete(sys, "management")
+	}
+}
 
 // applyStatement 按 schema 树驱动把 set 语句写入配置（语句→模型执行期翻译）。
 // 先查语句别名表（CLI 嵌套与模型扁平不一致的语句），再走通用树遍历；
@@ -649,6 +670,7 @@ func applyStatement(cfg *model.Config, tokens []string) error {
 		if err := rule.apply(tree, tokens, true); err != nil {
 			return err
 		}
+		pruneEmptySingleton(tree)
 		return commitTree(cfg, tree, before, tokens)
 	}
 	before := *cfg
@@ -656,6 +678,7 @@ func applyStatement(cfg *model.Config, tokens []string) error {
 	if err := applyTokens(cfgPathRoot(), tree, tokens, true); err != nil {
 		return err
 	}
+	pruneEmptySingleton(tree)
 	return commitTree(cfg, tree, before, tokens)
 }
 
@@ -667,6 +690,7 @@ func deleteStatement(cfg *model.Config, tokens []string) error {
 		if err := rule.apply(tree, tokens, false); err != nil {
 			return err
 		}
+		pruneEmptySingleton(tree) // 发现 #12(b)：删空后不留空壳（两条路径都要走）
 		return commitTree(cfg, tree, before, tokens)
 	}
 	before := *cfg
@@ -674,6 +698,7 @@ func deleteStatement(cfg *model.Config, tokens []string) error {
 	if err := applyTokens(cfgPathRoot(), tree, tokens, false); err != nil {
 		return err
 	}
+	pruneEmptySingleton(tree)
 	return commitTree(cfg, tree, before, tokens)
 }
 
