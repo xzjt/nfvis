@@ -20,15 +20,20 @@
 - M3 验收现状（`docs/M3-人工演示记录.md`）：D1/D2/D3/D6/D8 真机通过；**D4 NAT 已在本轮 M5 补齐并真机端到端通过**
   （决策 #52 跨 VRF：inside=virtual-switch 的 VRF、outside=出接口所属 VRF，VPP 单实例仅一对）；**D5 SPAN 抓包已在 T0-7 实证通过**；
   D7 LLDP 仍环境受限（无对端），启用与命令均正常、M3 的 internal error 未复现。
-- 验证环境 nfvis-vm 当前状态：**已装 nfvis 1.1.10 且 nfvisd 作为 systemd 服务在运行**
-  （开发态请先 `systemctl stop nfvis`）、VPP 运行中、2 网卡绑 vfio-pci、
-  **无 domain/接口残留**、引导镜像 `alpine.qcow2` 是集成测试依赖**勿删**；Docker 本地有 `alpine:3.20`。
-  **1G 大页池现为 3 页（已生效，无需重启）**——由**带外操作**在 2026-09-15 05:09 设置
-  （`nr_hugepages` 的 mtime 即此刻；产品代码从不写该文件，只读 THP），
-  故此前"1G 池 = 0、需 reboot"的记录已作废。**同一时刻 SSH host key 也变了**
-  （本地连 VM 会报 REMOTE HOST IDENTIFICATION HAS CHANGED；连接仍可建立，清陈旧记录即可：
-  `ssh-keygen -R nfvis-vm`）。跑集成测试前先 `systemctl restart vpp`（残留拓扑会污染用例）；
-  集成测试 `make integration`（CI 不跑）。设计基线在 `docs/`，**不要凭记忆重设计**。
+- 验证环境 nfvis-vm 当前状态（**2026-09-18 由用户还原为全新 Ubuntu Server 26.04 后重建**）：
+  底座是**按需装上的**——Go 1.26.0（apt；曾误以为只有 `/usr/local/go`）、libvirt 12.0.0、qemu 10.2.1、
+  docker 29.1.3、**VPP 26.06-rc2**（FD.io 2606 源，见 §3.3；**noble 套件装在 resolute 上**）；
+  nfvis **1.1.10** 由本机源码构建后 `dpkg -i` 安装，nfvisd 作为 systemd 服务在运行
+  （开发态先 `systemctl stop nfvis`）。管理口令 `Nfvis@Test2026`；源码树 `/root/src`；
+  冒烟脚本补丁副本 `/root/ft`（已指向已装实例）。
+  **这台的版本矩阵比产品验证过的基线新**（内核 7.0 / libvirt 12 / qemu 10.2 / docker 29 / VPP 26.06-rc2），
+  兼容性抽查仍在进行（2026-09-18 语义校验 11/0、pty 冒烟 10/0 通过）。
+  ⚠️ **1G 大页 = 2 页**，来自 `postinst` 写入的 GRUB 基线 + 一次重启（**不再是** 2026-09-15 那次带外设置）；
+  运行期写 `nr_hugepages` 对 1G **无效**，必须重启；`isolcpus` 仍未设。
+  ⚠️ **`ens160` 是管理口**（vmxnet3、承载默认路由与 SSH）；`ens192/ens224` 已交 vfio-pci 并在 VPP 中
+  ——但**是靠带外手写的 `/etc/vpp/startup.conf`**（发现 #8：产品路径目前走不通）。
+  跑集成测试前先 `systemctl restart vpp`（残留拓扑会污染用例）；集成测试 `make integration`（CI 不跑）。
+  设计基线在 `docs/`，**不要凭记忆重设计**。
 - 已定决策 98 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
 - **V1 验收收口**：`docs/V1-验收检查表.md` 把规格书 **109 条 FR** 逐条对照证据
   （**通过 101 / 未验 4 / 降级 2 / 移 V2 2**；2026-09-18 收口：NFR-005/NFR-006 转通过、FR-SEC-006 拆两半），降级理由与签字建议见其 §5/§6；
@@ -78,6 +83,18 @@ bash contrib/scripts/cli-semantic-check.sh  # 「结果对不对」：与 VPP/�
   「新旧结果完全一样」的假对比。用 `for p in $(pgrep -f nfvisd); do readlink -f /proc/$p/exe; done` 确认。
 - **拿标题/锚点做替换，改完要 `grep` 一次锚点还在**：决策 #88 的编辑把 `## 附录 B：…` 当锚点替换掉且没带回来，
   **v1.1.8 的包内规格书因此少了该标题**——`make check` 全绿、测试全过，因为没人检查文档结构。
+
+- **防呆/守卫要验证它"真的生效"，不能因为"没触发"就假定存在**：2026-09-18 有会话要绑管理口
+  `request interfaces ens160 bind-dpdk`，**第一次因 `vfio-pci` 未加载而失败，被误当成"守卫挡住了"**，
+  于是第二次直接**把自己锁在门外**（`bind-dpdk` 把承载 SSH 的网卡交给了 DPDK，SSH 当场断，
+  只能带外重启恢复）。已查明 `internal/orchestrator/network/dpdkbind.go` 的 `Bind/Unbind`
+  **根本没有任何管理口守卫**，文档只是"声明约束"（发现 #7）。
+  **并且永远不要拿管理路径做试验**：先用非管理口验证守卫与流程，或先声明管理口再用内核事实
+  （默认路由 / SSH 源地址 / 有 IP 的口）确认哪个不能碰。
+- **裸机/新装走一遍应作为发布前门槛**：2026-09-18 从零装一遍才暴露三条既有守护**完全看不到**的缺陷
+  （#8 业务口交 VPP 的路走不通、#9 冒烟对 `show log audit` 的判定依赖环境历史、
+  #10 `set system api tls self-signed regenerate` 后 CLI 因证书缺 IP SAN 而全断），
+  而单测/守护/256 条冒烟在旧环境里全绿。**"装一遍"与"跑测试"不是同一件事。**
 
 ## 外部文档查询（context7 MCP，个人启用）
 
