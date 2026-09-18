@@ -25,7 +25,19 @@ import (
 
 // ErrIfaceUnavailable 配置引用的接口在 VPP 中不存在（未由 DPDK 接管或被移除）。
 // 属不可收敛项：恢复收敛据此转 error 级告警而非反复重试（FR-OPS-010）。
-var ErrIfaceUnavailable = errors.New("接口在 VPP 中不存在")
+//
+// 与 orchestrator.ErrIfaceUnavailable **是同一个 error 值**（决策 #100）：提交编排
+// （orchestrator/apply.go）要识别该状态以决定「延后收敛而非整体回滚」，而依赖方向
+// 不允许那里 import 本包。本包保留该名字，使既有调用方（含 API 层）的 errors.Is 判定不变。
+var ErrIfaceUnavailable = orchestrator.ErrIfaceUnavailable
+
+// ifaceMissingHint 接口不在数据面时的下一步提示（决策 #100）。
+//
+// 旧文案「（是否未由 DPDK 接管？）」在**已由 DPDK 接管、但尚未加载进数据面**时指错方向——
+// 那恰恰是「声明了 DPDK 端口、等数据面重启」的正常过渡态（发现 #8 真机实测即为此）。
+// 改为给出可照做的一步：先重启数据面，仍不行再查接管与命名。
+const ifaceMissingHint = "（若该口由 DPDK 接管：重启数据面后才会出现，执行 request vpp restart；" +
+	"否则请确认该口已由 DPDK 接管、且名称与数据面中的一致）"
 
 // SetAlarms 注入告警表（恢复收敛的失败项落点）；未注入时仅返回错误列表。
 func (n *L2Network) SetAlarms(a *AlarmStore) { n.alarms = a }

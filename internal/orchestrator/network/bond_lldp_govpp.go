@@ -147,7 +147,7 @@ func (g *govppLldpClient) LldpSetInterface(ifname string, enable bool) error {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("LLDP 接口 %s 不存在于 VPP（是否未由 DPDK 接管？）", ifname)
+		return fmt.Errorf("LLDP 接口 %s 不存在于 VPP"+ifaceMissingHint, ifname)
 	}
 	reply := &lldp.SwInterfaceSetLldpReply{}
 	if err := g.ch.SendRequest(&lldp.SwInterfaceSetLldp{

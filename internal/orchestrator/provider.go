@@ -14,6 +14,16 @@ import (
 // ErrVMNotFound 目标 VM/domain 未定义（生命周期动作返回，API 层映射 404）。
 var ErrVMNotFound = errors.New("VM 未定义")
 
+// ErrIfaceUnavailable 配置引用的接口在 VPP 中不存在（未由 DPDK 接管、或已被 DPDK
+// 接管但尚未加载进数据面、或被移除）。属**不可收敛项**：恢复收敛据此转 error 级告警
+// （FR-OPS-010），提交阶段则据此判断能否**延后收敛**（决策 #100）。
+//
+// 定义在接口所在的本包（而非 network 包）：提交编排（apply.go）需要识别该状态来决定
+// 「延后而不整体回滚」，而依赖方向不允许 orchestrator 反向 import network。
+// network 包以 `ErrIfaceUnavailable = orchestrator.ErrIfaceUnavailable` 别名复用同一实例，
+// 故各 provider 与 API 层原有的 `errors.Is` 判定不受影响（同一个 error 值）。
+var ErrIfaceUnavailable = errors.New("接口在 VPP 中不存在")
+
 // NetworkProvider VPP 侧编排接口。L2 虚拟交换机 → bridge domain，
 // L3 虚拟交换机 → VRF（规格书附录 B 映射）。实现需声明是否并发安全。
 type NetworkProvider interface {

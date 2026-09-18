@@ -131,6 +131,18 @@ func run() error {
 	netProvider.SetSRIOV(sriovProvider)
 	// FR-NET-001（决策 #72）：网卡 DPDK 驱动接管（sysfs driver_override/bind/unbind）
 	dpdkBinder := network.NewDPDKBinder()
+	// 决策 #100（发现 #8）：绑定记录（口名 → PCI）。口一旦交 DPDK，内核就没有它的 netdev 了，
+	// 而 startup.conf 的 dev 段以 PCI 为键——记录是「绑定那一刻」留下的唯一映射来源，
+	// 也是「按口名解绑」的依据。不入 committed 配置（决策 #30：PCI 不随配置走）。
+	dpdkBindings := network.NewBindings(network.DefaultBindingsPath)
+	dpdkBinder.Bindings = dpdkBindings
+	// 迁移：把当前部署的 startup.conf 里 dev <pci> { name <口> } 的映射并入记录，
+	// 使「照旧手册带外播种」的存量安装不必重绑就能转由产品维护。
+	if n, err := dpdkBindings.ImportStartupConf(network.DefaultStartupPath); err != nil {
+		log.Warn("导入现有 startup.conf 的 DPDK 端口映射失败（可在数据面重启前重试）", "err", err)
+	} else if n > 0 {
+		log.Info("已从现有 startup.conf 导入 DPDK 端口映射", "count", n, "path", dpdkBindings.Path)
+	}
 	// M3-8：恢复收敛的不可收敛项落点（GET /alarms）
 	alarms := network.NewAlarmStore()
 	netProvider.SetAlarms(alarms)
@@ -221,7 +233,10 @@ func run() error {
 
 	netProvider.SetSocketDirs(computeCfg.VhostDir, ctCfg.MemifDir)
 	applier := orchestrator.NewApplier(netProvider, computeProvider, containerProvider,
-		orchestrator.WithVhostDir(computeCfg.VhostDir), orchestrator.WithMemifDir(ctCfg.MemifDir))
+		orchestrator.WithVhostDir(computeCfg.VhostDir), orchestrator.WithMemifDir(ctCfg.MemifDir),
+		// 非致命处置（如「已声明 DPDK 口尚未进数据面，本次延后收敛」）必须让操作者看得到：
+		// 提交仍然回 [ok]，只靠 CLI 是看不出来的，故至少落日志（决策 #100）。
+		orchestrator.WithWarn(func(msg string) { log.Warn(msg) }))
 
 	// 系统命令执行器（软件/证书/日志保留共用；与 SoftwareManager 一致带超时）
 	runCmd := func(ctx context.Context, name string, args ...string) (string, error) {
@@ -502,7 +517,13 @@ func run() error {
 			log.Error("VPP 连接管理退出", "err", err)
 		}
 	}()
-	startupApplier := &network.Applier{Mgr: vppMgr, PCI: network.NewSysfsPCIResolver(),
+	startupApplier := &network.Applier{Mgr: vppMgr,
+		// 解析顺序：先系统事实（sysfs），netdev 已因 DPDK 接管而消失时再回退到绑定记录（决策 #100）
+		PCI:      network.PCIResolverWithBindings(network.NewSysfsPCIResolver(), dpdkBindings),
+		Bindings: dpdkBindings,
+		// 掉口风险等处置只落日志：告警表按「恢复收敛」语义建/消（决策 #35），
+		// 目前没有它的生命周期，硬塞进去只会留下永不消退的告警。
+		Warn:      func(msg string) { log.Warn(msg) },
 		Restarter: network.NewSystemctlRestarter(), RestartOnApply: true}
 
 	// M4-4：VM 生命周期动作后刷新 vNIC 断连告警（FR-NET-023）。
@@ -528,7 +549,7 @@ func run() error {
 		LLDP:        &lldpController{net: netProvider},
 		State:       state.New(vppMgr.Runtime()),
 		SRIOV:       sriovProvider,
-		DPDK:        &dpdkController{b: dpdkBinder},
+		DPDK:        &dpdkController{b: dpdkBinder, rec: dpdkBindings, logger: log},
 		Kernel:      system.NewBaselineApplier(),
 		NAT:         &natSessionsController{net: netProvider},
 		Alarms:      &alarmController{store: alarms},
@@ -1077,7 +1098,11 @@ func mgmtAddressOf(cfg model.Config) string {
 }
 
 // dpdkController 把 network.DPDKBinder 适配为 api.DPDKSetter（FR-NET-001，决策 #72）。
-type dpdkController struct{ b *network.DPDKBinder }
+type dpdkController struct {
+	b      *network.DPDKBinder
+	rec    *network.Bindings
+	logger *slog.Logger
+}
 
 func (c *dpdkController) SetDPDKBound(ctx context.Context, ifname string, bound bool, driver string) (string, string, error) {
 	var pci string
@@ -1090,6 +1115,20 @@ func (c *dpdkController) SetDPDKBound(ctx context.Context, ifname string, bound 
 	}
 	if err != nil {
 		return "", "", err
+	}
+	// 绑定记录（决策 #100）：接管后内核无 netdev，这是最后一次能拿到口名→PCI 的时机；
+	// 解绑则按 PCI 删除（操作者给的常是 PCI 地址）。记录失败只影响后续生成，故只告警。
+	if c.rec != nil {
+		var rerr error
+		if bound {
+			rerr = c.rec.Set(ifname, pci)
+		} else {
+			rerr = c.rec.DeleteByPCI(pci)
+		}
+		if rerr != nil && c.logger != nil {
+			c.logger.Warn("更新 DPDK 绑定记录失败（数据面重启可能需要重新解析端口）",
+				"ifname", ifname, "pci", pci, "err", rerr)
+		}
 	}
 	// 必须按 **PCI** 回读驱动：绑定到 DPDK 后内核网卡即消失，
 	// 按接口名解析会失败并把结果误报为「无驱动」（真机实测踩到）。

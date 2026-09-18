@@ -436,7 +436,7 @@ func (p *L2Provider) portIndex(c L2Client, vs model.VirtualSwitch, port model.VS
 		return 0, fmt.Errorf("解析接口 %s 的 sw_if_index: %w", port.Interface, err)
 	}
 	if !ok {
-		return 0, fmt.Errorf("%w: %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, port.Interface)
+		return 0, fmt.Errorf("%w: %s"+ifaceMissingHint, ErrIfaceUnavailable, port.Interface)
 	}
 	return idx, nil
 }

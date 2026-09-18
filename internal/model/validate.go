@@ -743,9 +743,12 @@ func (v *validator) checkVpp(c Config) {
 	}
 	if vp.DPDK != nil {
 		for _, d := range vp.DPDK.PerDev {
-			// FR-CFG-011⑧：必须是 DPDK 接管的物理口（bond 不允许）
+			// FR-CFG-011⑧：必须是 DPDK 接管的物理口（bond 不允许）。
+			// 报错要点明**下一步**：单网卡覆盖项只能引用已在 interfaces 里声明的物理口，
+			// 而操作者最常见的顺序错误正是「先写 dev 覆盖、后声明接口」（发现 #8）。
 			if !v.ifaceNames[d.Interface] {
-				v.errf(fmt.Sprintf("vpp.dpdk.per-dev[%s]", d.Interface), "%q 不是 DPDK 接管的物理口", d.Interface)
+				v.errf(fmt.Sprintf("vpp.dpdk.per-dev[%s]", d.Interface),
+					"%q 未在 interfaces 中声明：单网卡覆盖项只能引用已声明的物理口（先 set interfaces <口名>，再 set vpp dpdk dev <口名>）", d.Interface)
 			}
 		}
 		if u := vp.DPDK.UIODriver; u != "" && u != "vfio-pci" && u != "igb-uio" {

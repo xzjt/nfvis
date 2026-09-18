@@ -1,0 +1,95 @@
+===== V1 收尾第十七轮（发现 #8，高）：业务口交 VPP 的路走通（决策 #100）=====
+环境：nfvis-vm（Ubuntu Server 26.04 / VPP 26.06-rc2 / 内核 7.0）；ens160=管理口（全程未触碰）
+日期：2026-09-18
+起点：裸机全流程测试批次二发现 #8 —— 新装环境经 CLI 把业务口交给 VPP 走不通；
+      产品一旦重生成 startup.conf 就把带外播种的口弄丢。
+分支 `fix/dpdk-port-path`，提交 `620bc84`。本文件为**原始输出摘录**。
+
+----- 0. 死锁（三处约束互相打架）-----
+① `set vpp dpdk dev <X>` 的校验要求 X 已在 interfaces 里声明（model/validate.go）
+② 接口 apply 要求端口**已在 VPP**（network/services.go，硬失败 + **整体回滚**）
+③ startup.conf 生成按**名字**解析 PCI（pci_sysfs.go 读 /sys/class/net/<n>/device/uevent），
+   而绑定后 netdev 已不存在 → 端口一旦交 DPDK，任何重生成都失败
+即：提交要端口先进 VPP → 端口进 VPP 要 startup.conf 先更新 → 更新要 netdev 还在。
+
+----- 1. 修法（决策 #100，(a)(a′)(b)(c)）-----
+(a)  `network.Bindings`：绑定时把「口名 → PCI」落盘（/var/lib/nfvis/dpdk-bindings.json；
+     Bind 本就返回 PCI），解绑按 PCI 删除；startup.conf 解析器 = sysfs → 记录 回退
+     （netdev 还在时 sysfs 是活的事实；消失才说明确已交 DPDK）。
+     启动时把已部署 startup.conf 的 `dev <pci> { name <口> }` 导入记录（存量迁移，不必重绑）。
+     记录同时让「按口名解绑」成立（此前接管后只能凭 PCI 地址）。
+(a′) 重生成前若「已交 DPDK 但未声明」的口会掉出数据面，打印明确告警。
+(b)  接口 apply 对「已声明为 DPDK 单网卡覆盖项、但还没进 VPP」的口**延后收敛**而非整体回滚；
+     判据取配置意图（vpp.dpdk.per-dev），故真错的口名照旧失败。
+     ErrIfaceUnavailable 上提到 orchestrator 包，network 包别名复用（依赖方向约束）。
+(c)  9 处「（是否未由 DPDK 接管？）」改为「若该口由 DPDK 接管：重启数据面后才会出现…」；
+     per-dev 校验文案改为点明「先 set interfaces」；手册 §3.2/§3.3 改写为产品路径。
+
+----- 2. 单测（红-绿 + 变异验证）-----
+新增 internal/orchestrator/network/bindings_test.go、internal/orchestrator/apply_dpdk_test.go：
+  · 记录往返/解绑按 PCI 删/重启后读回；解析顺序（sysfs 优先，netdev 消失才回退记录）
+  · 导入两种写法（产品多行 + 手册压一行），文件缺失=0 条不算错
+  · 掉口告警只报未声明的口
+  · 延后收敛：已声明 DPDK 口缺失 → 不阻断 + 可读告警；未声明口缺失 → 照旧失败；其它错误不延后
+**变异验证**（拆掉实现即报红，防止测试是空转）：
+  去掉解析器回退 → `TestPCIResolverPrefersLiveSysfs` 报「netdev 消失时应回退到绑定记录: "" 未找到接口 ens224」
+  去掉 a.warnDroppedPorts(cfg) → `TestApplierWarnsAboutDroppedBoundPort` 报「Apply: 解析 "ens224" 的 PCI 地址失败」
+门禁：`make check` 全绿（覆盖率 network 74.2%，全部 ≥70%；决策条数 100）。
+
+----- 3. 真机复验：把 ens224 造进「已接管但不在数据面」（第 2 步）-----
+$ startup.conf 只留 ens192 → systemctl restart vpp
+VPP: ens192 up / local0（**ens224 已不在数据面**）
+绑定记录：{"ens192":"0000:0b:00.0","ens224":"0000:13:00.0"}   ← 接管未变，映射仍在
+$ nfvis-cli -c "show alarms all"
+error RECOVERY_IFACE_MISSING interfaces/ens224  接口在 VPP 中不存在: ens224（若该口由 DPDK 接管：
+      重启数据面后才会出现，执行 request vpp restart；否则请确认该口已由 DPDK 接管、且名称与数据面中的一致）
+      ← (c) 的新文案在真机可见
+
+----- 4. 真机复验：严格红→绿（第 3 步；换二进制必须先 stop 服务，否则 Text file busy）-----
+前置：ens224 不在数据面，committed 已声明 vpp dpdk dev ens224
+提交内容：configure / set interfaces ens224 description dpdk-path-test2 / commit
+
+B. **红（旧二进制 1.1.11）**：
+   [ok] interfaces ens224 description dpdk-path-test2
+   %% 底座下发失败（已补偿）: 下发失败 interface[ens224]: 接口在 VPP 中不存在: ens224（是否未由 DPDK 接管？）
+   退出码=1；committed 回滚（ens224 描述仍为 dpdk-path-test）
+   ← 与交接文档 #8 记录的症状一致，且正是那句「指错方向」的旧文案（端口其实已由 DPDK 接管）
+
+C. **绿（本分支二进制）**：
+   [ok] interfaces ens224 description dpdk-path-test2
+   commit 成功 (revision 24)
+   日志：接口 ens224 尚未进入数据面（已声明为 DPDK 端口）：本次提交不阻断，执行 request vpp restart 后自动收敛
+   ← 延后收敛在真机生效：提交成功、配置落库、并明确告知下一步
+
+----- 5. 真机复验：产品路径走通 + 掉口告警（第 4 步）-----
+D1. request vpp restart（此刻只声明了 ens224）
+    日志：以下已由 DPDK 接管的物理口未在配置中声明，重启数据面后将不再出现在数据面：ens192；
+          如需保留，请先 set vpp dpdk dev <口> 并提交          ← (a′) 防呆在真机生效
+    产品生成的 startup.conf：dpdk { dev 0000:13:00.0 { name ens224 } }
+    VPP：只剩 ens224（ens192 按预期掉出——配置里没声明它）
+D2. nfvis-cli -c "configure / set vpp dpdk dev ens192 / commit" → commit 成功 (revision 25)
+D3. request vpp restart → 产品生成的 startup.conf：
+      dpdk { dev 0000:13:00.0 { name ens224 }  dev 0000:0b:00.0 { name ens192 } }
+    ← 两个 PCI **都由绑定记录解析**（两口 netdev 均已消失），**无任何带外手写**
+    VPP：ens192 up（idx 1）、ens224 down（idx 2）——**两个业务口都回到数据面**
+D4. nfvis-cli -c "show interfaces physical"
+    ens192 up   up   10G dpdk cli-pre
+    ens224 down down 10G dpdk dpdk-path-test2
+
+----- 6. 收尾与最终状态（第 5 步）-----
+$ nfvis-cli -c "set interfaces ens224 description cli-pre"（还原测试残留）→ commit 26
+$ nfvis-cli -c "show alarms"        → （无 active 告警）    ← 缺失告警随收敛自动消解
+$ curl /api/v1/vpp/status           → {"version":"26.06-rc2…","connected":true,"pending_restart":false, …}
+$ vppctl show interface             → ens192 up / ens224 down / local0
+committed（rev 26）：interfaces [ens192 cli-pre, ens224 cli-pre enabled=false]；
+                    vpp.dpdk.per_dev [{ens224},{ens192}]     ← 两口均为产品声明（不再是带外播种）
+管理口未被触碰：ens160 192.168.155.129/24 + 默认路由 dev ens160（本草稿经它进出）
+绑定记录：{"ens192":"0000:0b:00.0","ens224":"0000:13:00.0"}
+备份：/root/nfvis-db-backup-20260918-0358-dpdk/nfvis.db、/root/vpp-conf-bak/startup.conf.0358
+旧二进制对照件：/root/nfvisd-1.1.11-pre8fix.bak（红步骤用）
+
+----- 7. 顺带发现（本轮登记，未修）-----
+`show vpp` 只打印 threads/buffers/memory：**契约（命令全表）声明它含「版本」，未打印**；
+`pending_restart` 在 CLI 侧完全不可见（仅 API /vpp/status 有）——而它正是本修复依赖的
+「下一步动作」指示。故手册 §3.3 改为按 `show interfaces physical` 确认，并说明
+「待重启」由 commit 自身警告。见 docs/V1-收尾待办.md 的新发现 #11。

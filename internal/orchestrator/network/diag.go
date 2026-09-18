@@ -229,7 +229,7 @@ func (d *Diagnostics) ClearInterfaceStats(ctx context.Context, ifname string) er
 			return fmt.Errorf("解析接口 %s: %w", ifname, err)
 		}
 		if !ok {
-			return fmt.Errorf("%w: %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, ifname)
+			return fmt.Errorf("%w: %s"+ifaceMissingHint, ErrIfaceUnavailable, ifname)
 		}
 		idx = i
 	}

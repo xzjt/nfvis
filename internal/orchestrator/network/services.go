@@ -175,7 +175,7 @@ func (p *ServicesProvider) ApplyInterface(ctx context.Context, iface model.Inter
 		return fmt.Errorf("解析接口 %s: %w", iface.Name, err)
 	}
 	if !ok {
-		return fmt.Errorf("%w: %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, iface.Name)
+		return fmt.Errorf("%w: %s"+ifaceMissingHint, ErrIfaceUnavailable, iface.Name)
 	}
 	if iface.MTU > 0 {
 		if err := c.SetMTU(idx, uint32(iface.MTU)); err != nil {
@@ -222,7 +222,7 @@ func resolveIface(c SvcClient, ifname string) (uint32, error) {
 		return 0, fmt.Errorf("解析接口 %s: %w", ifname, err)
 	}
 	if !ok {
-		return 0, fmt.Errorf("%w: %s（是否未由 DPDK 接管？）", ErrIfaceUnavailable, ifname)
+		return 0, fmt.Errorf("%w: %s"+ifaceMissingHint, ErrIfaceUnavailable, ifname)
 	}
 	return idx, nil
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/model"
@@ -29,6 +30,16 @@ type Applier struct {
 	Write          func(path string, data []byte) error // 缺省 os.WriteFile(0644)
 	Restarter      Restarter
 	RestartOnApply bool // true = 落地后立即重启（request vpp restart）
+	// Bindings DPDK 绑定记录（决策 #100）：用于在重生成前发现「已接管但未声明」的口。
+	Bindings *Bindings
+	// Warn 告警回调（掉口风险等；缺省丢弃）。
+	Warn func(string)
+}
+
+func (a *Applier) warnf(format string, args ...any) {
+	if a.Warn != nil {
+		a.Warn(fmt.Sprintf(format, args...))
+	}
 }
 
 func (a *Applier) path() string {
@@ -51,6 +62,7 @@ func (a *Applier) write(path string, data []byte) error {
 // Apply 生成 startup.conf 并写盘；RestartOnApply 时随后重启数据面。返回生成文本。
 // 重启成功后记录已应用哈希，pending_restart 随之清除（FR-SYS-009）。
 func (a *Applier) Apply(ctx context.Context, cfg *model.Config) (string, error) {
+	a.warnDroppedPorts(cfg)
 	conf, err := GenerateStartup(cfg, a.PCI)
 	if err != nil {
 		return "", err
@@ -74,6 +86,35 @@ func (a *Applier) Apply(ctx context.Context, cfg *model.Config) (string, error) 
 		a.Mgr.SetApplied(vpp)
 	}
 	return conf, nil
+}
+
+// warnDroppedPorts 在重生成前提示「已交 DPDK 但本次未声明」的口会掉出数据面。
+//
+// startup.conf 的 dpdk dev 段只由 `vpp.dpdk.per-dev` 生成，故未声明的口不会出现在新文件里，
+// 数据面重启后即从 VPP 消失——真机上「掉口」正是这么发生的（手写播种被重生成覆盖）。
+// 这是配置的应有之义（声明式），但操作者必须被告知，否则是静默的功能损失。
+func (a *Applier) warnDroppedPorts(cfg *model.Config) {
+	if a.Bindings == nil {
+		return
+	}
+	declared := map[string]bool{}
+	if cfg != nil && cfg.Vpp != nil && cfg.Vpp.DPDK != nil {
+		for _, d := range cfg.Vpp.DPDK.PerDev {
+			declared[d.Interface] = true
+		}
+	}
+	var dropped []string
+	for ifname := range a.Bindings.All() {
+		if !declared[ifname] {
+			dropped = append(dropped, ifname)
+		}
+	}
+	if len(dropped) == 0 {
+		return
+	}
+	sort.Strings(dropped)
+	a.warnf("以下已由 DPDK 接管的物理口未在配置中声明，重启数据面后将不再出现在数据面："+
+		"%s；如需保留，请先 set vpp dpdk dev <口> 并提交", strings.Join(dropped, "、"))
 }
 
 // systemctlRestarter 经 systemctl 重启 VPP（M3-P0：VPP 有意不自启，由 nfvisd/手工管理）。
