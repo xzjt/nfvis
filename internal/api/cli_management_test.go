@@ -17,14 +17,18 @@ import (
 func TestCLIManagementStatements(t *testing.T) {
 	x, eng := newCLIKit(t)
 
-	// 首次配置管理口（此前无 management 段）：SSH 普通 commit 允许（初始配置豁免）
+	// 首次配置管理口（此前无 management 段）**同样受自锁保护**：普通 commit 被拒，
+	// 须走 commit confirmed（发现 #12(a)：原先这里有一条"初始配置豁免"，但 FR-CFG-012
+	// 并未豁免首次声明——新机器上把地址写错一样会把操作者关在门外）。
 	run(t, x, "admin", "super-user", "ssh",
 		"configure",
 		"set system management interface ens160",
 		"set system management ip address 192.168.1.10/24",
-		"set system management gateway 192.168.1.1",
-		"commit",
-		"exit")
+		"set system management gateway 192.168.1.1")
+	if res := x.Execute("admin", "super-user", "ssh", "commit"); !strings.Contains(res.Output, "commit confirmed") {
+		t.Fatalf("首次声明管理口也须要求 commit confirmed: %s", res.Output)
+	}
+	run(t, x, "admin", "super-user", "ssh", "commit confirmed 10", "exit")
 
 	cfg, err := eng.Committed()
 	if err != nil {

@@ -10,8 +10,10 @@ import (
 // 后续变更还会开始要求 commit confirmed）。
 func TestDeleteManagementPrunesEmptyShell(t *testing.T) {
 	x, eng := newCLIKit(t)
+	// 首次声明管理口也须 commit confirmed（发现 #12(a)），确认后才算落地
 	run(t, x, "admin", "super-user", "ssh",
-		"configure", "set system management interface ens160", "commit")
+		"configure", "set system management interface ens160", "commit confirmed 5")
+	run(t, x, "admin", "super-user", "ssh", "configure", "commit")
 
 	cfg, err := eng.Committed()
 	if err != nil || cfg.System == nil || cfg.System.Management == nil {

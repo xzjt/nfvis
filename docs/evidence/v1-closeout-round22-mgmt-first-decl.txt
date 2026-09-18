@@ -1,0 +1,56 @@
+===== V1 收尾第二十二轮：发现 #12(a)（管理口自锁保护补齐首次声明，决策 #103）=====
+环境：nfvis-vm（已装实例 HTTPS :443；ens160 管理口未动）
+日期：2026-09-18
+分支 `fix/mgmt-first-decl`。本文件为**原始输出摘录**。
+
+----- 0. 缺口 -----
+`sysMgmtChanged` 在 `old.Management == nil` 时**直接返回 false**，于是「本机还没配过管理口」的机器上，
+第一次 `set system management ip address …` + `commit` **不需要** `commit confirmed`。
+FR-CFG-012 原文：「**管理口 IP/网关变更时**，若变更请求来自 SSH 会话，强制要求以 `commit confirmed`
+方式提交（确认期内旧配置可自动回滚恢复连通）并输出警告」——**没有豁免首次**；决策 #71 也写明该字段
+变更一律受此保护。即：这是自锁保护上的一个真缺口（不只是文案与实现不一致）。
+
+**如实记下前情（重要）**：这条豁免是**有意写的**，不是笔误——原测试注释写着
+「首次配置管理口（此前无 management 段）：SSH 普通 commit 允许（**初始配置豁免**）」。
+本轮判断应取消，理由：① FR-CFG-012 只限定"来自 SSH 会话"，未豁免首次；
+② 风险完全相同（新机器上把地址/前缀写错，同样把操作者关在门外，且没有 confirmed 的自动回滚兜底）；
+③ 与决策 #101/#102 已确立的"严格但显式"口径一致。该测试已按新规则改写。
+
+----- 1. 修法 -----
+`sysMgmtChanged` 把 nil 与"空配置"等价处理：只要最终结果与基线不同（含 nil → 有值）即算变更；
+**不扩大**到无关字段（只动 idle-timeout 之类不触发）。
+
+----- 2. 单测（含变异验证）-----
+`internal/config/mgmt_confirm_test.go` 四例：
+  · 首次声明**地址**必须 confirmed（且 confirmed + 确认后地址生效）
+  · 首次声明**网卡名**同样必须 confirmed（决策 #71：该字段受同一保护）
+  · 空库下**无关字段**不要求 confirmed
+  · 基线自带管理口且**未变**时不要求 confirmed
+  · API 会话不受约束（FR-CFG-012 只管 SSH 会话）
+变异：把管理口变更判定关掉 → `TestFirstManagement` 报红；恢复后通过。
+另：`internal/api/cli_management_test.go` 的「初始配置豁免」断言按新规则改写；
+我自己的 `TestDeleteManagementPrunesEmptyShell` 的 setup 也改为 confirmed（新规则下普通 commit 会被拒）。
+
+----- 3. 真机复验（管理口为 null 的机器上）-----
+A. 前置：rev 43 ｜ system.management = null
+B. 首次声明 + 普通 commit → **被拒**（此前放行）：
+   [ok] system management ip address 10.99.0.1/24
+   %% 管理口地址/网关变更必须以 commit confirmed 提交
+   核对：rev 43 ｜ system.management = null（未落地）
+C. commit confirmed + 确认 → 生效：
+   commit 成功 (revision 44) ｜ system.management = {"address": "10.99.0.1/24"}
+D. 无关字段（idle-timeout 13）+ 普通 commit → **正常成功**（未过度触发）：
+   commit 成功 (revision 45)
+E. 收尾（删除同受保护）：commit confirmed + 确认 → rev 46 ｜ system.management = null
+数据面与管理口未受影响：VPP 仍 2 个 ens 口、默认路由仍 `dev ens160`。
+
+----- 4. 顺带观察（未登记为发现）-----
+① 首次测试时我用了 `192.168.155.129/24`，被**既有校验**拦下：
+   `vrfs[vs-l3].l3_interfaces[ens192].addresses[0]: 地址网段与 system.management.address 重叠`
+   —— 即 FR-NET-002 的管理/数据面隔离校验在真机上确实生效（本次是它先发现我的用例不当）。
+② `delete system management ip address`（**不带取值**）不命中别名（别名要求 5 token），走通用遍历后
+   报「语句未产生配置变更」；要删得写全 `delete system management ip address <值>`。
+   报错本身是诚实的（没谎报成功），但对操作者不够友好——与 #16 同类的小文案问题，**未改**，仅记录。
+
+----- 5. 门禁 -----
+`make check` 全绿；决策条数 103（新增 #103）。
