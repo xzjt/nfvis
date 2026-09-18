@@ -826,17 +826,24 @@ func formatValidateErrors(verrs []model.ValidateError) string {
 	return out
 }
 
-// sysMgmtChanged 判定管理口是否被变更（FR-CFG-012）：
-// 基线已有管理口且新配置中地址/网关不同（含删除）时为 true。
+// sysMgmtChanged 判定管理口是否被变更（FR-CFG-012）：地址/网关/网卡名任一不同（含删除）即为 true。
+//
+// **首次声明也算变更**（发现 #12(a)）：此前在 `old.Management == nil` 时直接返回 false，于是
+// 「本机还没配过管理口」的机器上第一次 `set system management ip address …` + `commit` **不需要**
+// commit confirmed——而地址/网关正是该保护要防的那类改动（决策 #71：改管理网卡可能切断当前 SSH 会话）。
+// 修法：nil 与"空配置"等价处理，只要最终结果与基线不同（含 nil → 有值）就算变更。
 func sysMgmtChanged(old, new *model.SystemConfig) bool {
-	if old == nil || old.Management == nil {
+	var om, nm *model.MgmtConfig
+	if old != nil {
+		om = old.Management
+	}
+	if new != nil {
+		nm = new.Management
+	}
+	if om == nil && nm == nil {
 		return false
 	}
-	bm := (*model.MgmtConfig)(nil)
-	if new != nil {
-		bm = new.Management
-	}
-	return !configEq(old.Management, bm)
+	return !configEq(om, nm)
 }
 
 // configEq JSON 语义比较：typed-nil 序列化为 "null"，与未设置/已设置天然区分。

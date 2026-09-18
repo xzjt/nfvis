@@ -491,6 +491,8 @@ nfvis# set system timezone Asia/Shanghai
 nfvis# set system ntp server 192.168.1.1 prefer
 nfvis# set system dns server 8.8.8.8 secondary 1.1.1.1
 nfvis# set system management interface ens160          # 管理口（不得用于数据面）
+#   ⚠️ 管理口的任何变更（含**首次声明**地址/网关/网卡名）都必须用 `commit confirmed` 提交：
+#      改管理口可能切断当前 SSH 会话，confirmed 让它在超时未确认时自动回滚。
 nfvis# set system syslog host 192.168.1.10 port 514 facility local0 severity info
 nfvis# set system syslog local level info
 nfvis# set system syslog local retention-days 14

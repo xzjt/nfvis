@@ -203,7 +203,7 @@
 | `annotate <path> "text"` | 节点注释（**路径相对当前层级**） | candidate annotations | ✅（**决策 #76⑤** 修相对路径） |
 | `commit` | 提交（FR-CFG-002/003） | 事务引擎 → Applier | ✅ |
 | `commit check` | 仅校验不下发 | 事务引擎 | ✅ |
-| `commit confirmed [min]` | 超时未确认自动回滚（默认 10 分钟） | 事务引擎 | ✅ |
+| `commit confirmed [min]` | 超时未确认自动回滚（默认 10 分钟）；**管理口任何变更（含首次声明）必须走它** | 事务引擎 | ✅ |
 | `commit and-quit` | 提交成功后退出配置模式 | 事务引擎 | ✅ |
 | `rollback [n]` | 取历史快照为 candidate（需再 commit） | 配置历史 | ✅ |
 | `load override\|merge <path>` | JSON 配置导入 | 事务引擎 | ✅ |
@@ -224,7 +224,7 @@
 | `set system api max-sessions <n>` | 并发会话上限（真限流） | nfvisd | ✅（决策 #71） |
 | `set system api tls cert-file <p> key-file <p>` | 安装外部证书（立即生效） | nfvisd TLS | ✅（决策 #79 修复） |
 | `set system api tls self-signed regenerate` | 重签自签证书 | nfvisd TLS | ✅ |
-| `set system management interface <ifname>` | 管理网卡（不得用于数据面） | 宿主 + 数据面隔离校验 | ✅（决策 #71/72） |
+| `set system management interface <ifname>` | 管理网卡（不得用于数据面） | 宿主 + 数据面隔离校验 | ✅（决策 #71/72；**变更须 `commit confirmed`**，含首次声明） |
 | `set system management ip address <ip-prefix>` | 管理口静态地址 | 宿主 netplan | ✅ |
 | `set system management gateway <ip>` | 管理口默认网关 | 宿主 netplan | ✅ |
 | `set system kernel nmi-watchdog <bool>` | NMI watchdog | GRUB 基线 | ✅ |
