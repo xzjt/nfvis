@@ -82,4 +82,12 @@ if [ -x "$BASELINE_SH" ]; then
         log "注意：内核基线需重启生效"
     fi
 fi
+
+# 7) SSH 强化（FR-SEC-006）：禁用 root **口令**登录（root 密钥登录保留）。
+#    安全性由脚本自己把关：**只写 drop-in + sshd -t 校验，不重启 sshd**（下一次 sshd 启动才生效），
+#    且**找不到密钥登录路径时主动跳过**（否则一重启 sshd 就再也进不来）。失败不阻断安装。
+SSH_HARDEN=/usr/share/nfvis/installer/nfvis-ssh-harden.sh
+if [ -x "$SSH_HARDEN" ]; then
+    sh "$SSH_HARDEN" --apply || log "提示：SSH 强化未完成（见上方输出）；可稍后执行 $SSH_HARDEN --apply 重试"
+fi
 exit 0
