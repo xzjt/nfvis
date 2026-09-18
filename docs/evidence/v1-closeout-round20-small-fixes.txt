@@ -1,0 +1,87 @@
+===== V1 收尾第二十轮：发现 #1 / #3 / #4 / #11（四项小缺陷）=====
+环境：nfvis-vm（已装实例 HTTPS :443；ens160 管理口未动）
+日期：2026-09-18
+分支 `fix/purge-and-text`。本文件为**原始输出摘录**。
+
+----- 1. 发现 #1：`dpkg --purge` 留下三处底座副作用（卸载残留，中）-----
+现象（上一轮裸机实测）：卸载后系统仍留着
+  ① `/etc/ssh/sshd_config.d/99-nfvis.conf`（卸载后 SSH 仍被限制）
+  ② `/etc/default/grub.d/99-nfvis.cfg`  ③ `/etc/fstab` 大页挂载行
+改法：`deploy/debian/postrm` 在 `purge` 时
+  · 自动 `nfvis-ssh-harden.sh --revert`（幂等、无副作用）；
+  · GRUB 片段与 fstab 大页行**不自动改**（涉及 re-generate 启动配置与动 /etc/fstab），
+    改为打印可照做的撤销步骤（含 `nfvis-baseline.sh --rollback` 自动路径）。
+真机验证（用探针路径，避免动真实加固）：
+$ printf 'PermitRootLogin prohibit-password\n' > /tmp/probe-99-nfvis.conf
+$ NFVIS_SSH_CONF=/tmp/probe-99-nfvis.conf sh deploy/debian/postrm purge
+nfvis postrm: 已清理 /run/nfvis（/var/lib/nfvis 数据保留）
+nfvis postrm: 已撤销 SSH 强化（/etc/ssh/sshd_config.d/99-nfvis.conf）
+nfvis postrm: 以下安装期改动**仍需手工撤销**（重启后才彻底生效）：
+  · /etc/default/grub.d/99-nfvis.cfg（大页/隔离核等启动参数）
+      自动：/usr/share/nfvis/installer/nfvis-baseline.sh --rollback   （会删除/还原片段并跑 update-grub）
+      手工：rm -f /etc/default/grub.d/99-nfvis.cfg && update-grub
+  · /etc/fstab 里带 '# nfvis-hugepages' 标记的挂载行
+      手工：删掉该标记行及其下一行（hugetlbfs 挂载）后 umount /dev/hugepages
+核对：探针文件**已删除**（revert 路径确实被调用）✓；真实 drop-in **未被动** ✓；
+`/run/nfvis` 经 `systemctl restart nfvis` 后重建（memif vhost）✓；SSH 强化 `--apply` 幂等 ✓。
+
+----- 2. 发现 #3：操作者可见文本仍含里程碑编号/无编号附录（中，含守护缺口）-----
+清掉 7 处：`show version` 的（M2：…M3+ 接入）、镜像缺失报错的「导入见 M4-8」、
+SR-IOV 报错的「接入见 M4-4」、SPAN 的「属 M4」、`VRF 与交换机重名`/`l3 交换机需同名 VRF`/
+`virtual-switches` 帮助文本里的「附录 B」，以及 `contrib/dev-vm/provision.sh` 的提示。
+守护（`internal/archtest/user_text_test.go`）扩到**里程碑编号**与**无编号附录**：
+  refPatterns  += `(^|[^A-Za-z0-9/._-])M[1-9](-[0-9]+)?($|[^A-Za-z0-9])`、`附录 [A-Z]`
+  docRefPatterns += 里程碑编号（手册读者同样无从解析）；**不加** `附录 [A-Z]`——
+  手册里「附录 A = 决策记录」是指向**随包规格书**的有效导航（与 #86 保留 `§x` 同理）。
+  ⚠️ 模式里**不能用 `\b`**：本仓 heredoc 会吃掉反斜杠（交接文档 §5.10 的坑，本轮又踩一次：
+  `\b` 变成退格字节 0x08，守护静默失效——靠 `cat -A` 才看出来）。
+**变异验证**：把「属 M4」写回去 → 守护报红并指出文件行号；恢复后通过。
+门槛：`make check` 全绿（含新目标 `toolcheck` 的判定自校准 9 例）。
+
+----- 3. 发现 #4：契约 §3 的两种 compare 写法没有 CLI 入口（高，契约违反）-----
+现象：`show | compare` 与 `show configuration | compare rollback <n>` 都报「未知管道: compare」，
+而**能力早已存在**（`Engine.CompareCandidate()` / `Engine.Compare(n)`）——只差接线。
+后果：操作者在 commit 前看不到自己改了什么（事务模型的核心动作缺失）。
+改法：`internal/api/pipes.go` 认 `compare` / `compare rollback <n>`，执行时调用引擎；
+`schema.PipeKeywords` 加 `compare`（Tab 候选与解析器同源）。
+真机：
+$ nfvis-cli -c "configure / set system hostname cmp-demo / show | compare"
+[ok] system hostname cmp-demo
+[edit system]
+-   hostname cli-tx-and-quit-1789702208;
++   hostname cmp-demo;
+$ ... "show | compare | count"        → 计数: 3          （compare 之后仍可接过滤管道）
+$ "show configuration | compare rollback 1"  → [edit interfaces] … - description sem-rt-21790;   （committed ⇄ 历史快照）
+$ "show configuration | compare rollback 99" → %% compare rollback 99: 配置快照不存在
+$ "show | compare"（操作模式）        → %% 当前会话未持有 candidate（需先进入配置模式）
+测试：`internal/api/pipes_compare_test.go` 锁 4 组语义 + `TestPipeKeywordsMatchParser`
+（Tab 候选与解析器必须同源，防漂移）。**变异验证**：解析器不认 compare → 测试报红。
+
+----- 4. 发现 #11：`show vpp` 的可见性缺口（中）-----
+现象：命令全表写「数据面概览：**版本**/线程/buffer/内存」，而 CLI 只打印 threads/buffers/memory；
+更要紧的是 **`pending_restart` 在 CLI 侧完全不可见**（只有 `GET /vpp/status` 有）——
+而它正是「要不要 `request vpp restart`」的唯一指示。
+改法：`cliExecutor` 接 `VppController`（`setVppCtl`，装配于 `api.New`），`show vpp` 概览补
+`version`/`connected`/`pending_restart`（+ `last_error`）；**stats 运行态不可用时这三项仍给得出**
+（来自连接管理器，不依赖 stats 段）。
+真机：
+$ nfvis-cli -c "show vpp"
+version: 26.06-rc2~1-gc3200b88d
+connected: yes
+pending_restart: yes
+threads: 2
+buffers: pools=1 source=vpp_get_stats
+  default-numa-0 used=2558 available=427072 cached=554
+memory: total=1073741824 used=304517648 free=769224176
+（`pending_restart: yes` 正是此前看不到、却在指导下一步动作的那一项。）
+测试：`internal/api/cli_vpp_show_test.go`（含「未装配 VppController 不得凭空给版本」与经 HTTP 路径）。
+
+----- 5. 收尾时的两处观察（登记，未改）-----
+① **`rollback 0` 不是「丢弃 candidate」**：它报「配置快照不存在」（契约里 `rollback [n]` 取历史快照为
+   candidate，n≥1）。丢弃 candidate 的命令是 **`discard`**（契约 §199 `discard | exit`）。
+   真机上我用 `configure / discard` 清掉了验证过程中遗留的 candidate（回显「candidate 已丢弃，会话锁已释放」），
+   随后 `configure / show | compare` 无差异 ✓。
+② **语义校验脚本的扰动恢复不彻底**：它把 `interfaces[0].description` 改成 `semcheck-…`/`sem-rt-…` 后再清理，
+   但清理是**删掉该字段**而不是恢复原值（真机 rev 29→32 的差异即
+   `cli-pre → semcheck-21790 → sem-rt-21790 → <删除>`）。影响很小（一个描述字段），
+   已登记为发现 #15，建议：扰动前记下原值、清理时恢复原值（而不是删字段）。
