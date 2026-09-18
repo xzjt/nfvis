@@ -167,6 +167,12 @@ func (x *cliExecutor) showManagementInterface(cfg model.Config) string {
 		return "（未配置管理口：set system management interface <ifname> / ip address <prefix>）\n"
 	}
 	m := sys.Management
+	if m.Interface == "" && m.Address == "" && m.Gateway == "" {
+		// 空对象（例如曾配置过又删除）与「从未配置」是同一件事：给同一句话，
+		// 而不是退化成另一条带 %% 的提示——`show` 的「没有」是**空态**不是**错误**
+		// （同「（无 core dump）」的口径；带 %% 会被真机冒烟按失败计，发现 #14）。
+		return "（未配置管理口：set system management interface <ifname> / ip address <prefix>）\n"
+	}
 	x.structured = anyToTree(m)
 	var b strings.Builder
 	fmt.Fprintf(&b, "%-12s %-22s %-18s %s\n", "Interface", "Address", "Gateway", "Plane")
@@ -177,7 +183,7 @@ func (x *cliExecutor) showManagementInterface(cfg model.Config) string {
 	}
 	fmt.Fprintf(&b, "%-12s %-22s %-18s %s\n", name, m.Address, m.Gateway, "management(kernel)")
 	if m.Interface == "" {
-		fmt.Fprintln(&b, "%% 提示：未指定管理网卡（set system management interface <ifname>）；"+
+		fmt.Fprintln(&b, "提示：未指定管理网卡（set system management interface <ifname>）；"+
 			"指定后 commit 强制校验该网卡不得被数据面引用")
 	}
 	return b.String()

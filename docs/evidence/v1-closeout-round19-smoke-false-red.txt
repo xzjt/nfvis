@@ -1,0 +1,69 @@
+===== V1 收尾第十九轮：冒烟假红两处（发现 #9、#14）=====
+环境：nfvis-vm（已装实例，HTTPS :443；补丁副本 /root/ft 指向它）
+日期：2026-09-18
+分支 `fix/smoke-false-red`，提交 `2dfc43c`。本文件为**原始输出摘录**。
+
+----- 1. 发现 #9：判定被环境历史误判 -----
+根因：`contrib/scripts/cli-fulltest-lib.sh` 的 `_is_fail` 用**未锚定**的 `校验失败` 扫输出全文：
+  grep -qE '^%%|^%[^%]|^%$|校验失败|^%% '
+而 `show log audit` 会**回显历史**——某条旧审计记录的 detail 就是「校验失败: …」，
+于是「命令本身成功、只是回显了历史」被判成失败：**同一条命令在不同审计历史下结论不同**。
+产品只在输出**开头**给「校验失败（未提交）/（candidate 保留）」，故锚定行首语义不变。
+
+修法：两处（判定 + 失败摘要）改为 `^校验失败`；并新增
+`contrib/scripts/cli-fulltest-selftest.sh` —— **判定模式的自校准**（9 例）：
+$ bash contrib/scripts/cli-fulltest-selftest.sh
+判定模式：^%%|^%[^%]|^%$|^校验失败|^%% 
+— 应判失败（真实错误）—
+  ✓ 脚本模式 %% 错误                         → fail
+  ✓ 配置模式单 % 错误                       → fail
+  ✓ 校验失败在行首（未提交）           → fail
+  ✓ 空输出里的裸 %                           → fail
+— 应判通过（含历史回显）—
+  ✓ 审计历史里含「校验失败」（发现 #9 的假红来源） → pass
+  ✓ 普通成功输出                             → pass
+  ✓ 审计里含 100% packet loss 字样           → pass
+  ✓ 正文里引用错误文案（非行首）     → pass
+  ✓ 同一文案出现在行首（真错误）     → fail
+全部符合预期
+已纳入 `make check`（新目标 `toolcheck`）——这类"工具自身出错制造的假红"不该靠人肉发现（决策 #85 同类）。
+
+真机决定性验证（避免"历史刚好滚出窗口"这种假绿）：先**制造**一条含该字样的审计记录，
+再对同一份 `show log audit` 输出跑新旧两种模式：
+$ 制造失败提交：configure / set container-functions probe image 不存在的仓库:latest / commit
+  校验失败（candidate 保留）:
+    - container-functions[probe].image: 仓库中不存在镜像 "不存在的仓库:latest"（仓库为空，先上传或拉取镜像）…
+$ show log audit | grep -c 校验失败   → 5        （窗口内确实有该字样，验证有效）
+  旧模式：判失败（假红 ✓ 复现）
+  新模式：判通过 ✓（命令成功、只是回显历史）
+  对照：`%% 底座下发失败…` → 判失败 ✓；行首「校验失败（未提交）」→ 判失败 ✓
+验证后配置未变（rev 29、container-functions=null）。
+
+阶段 1 复跑（修复前该阶段 3 条失败）：
+  通过 40 / 失败 1 / 预期报错 0
+  失败清单：[S1] show vpp runtime :: %% VPP runtime 统计未接入（govpp runtime 解码限制）
+  → 只剩已知未接入项；`show log audit` 与 `show interfaces management` 的假红消失。
+
+----- 2. 发现 #14：同一「没有」两种口吻（顺带发现）-----
+`show interfaces management` 在 `system.management` 是**空对象**（配置过又删除的残留）时输出
+「表格 + `%% 提示：未指定管理网卡…`」，而**从未配置**时输出普通空态句「（未配置管理口：…）」。
+`%%` 会被冒烟按失败计 → 同一条命令在不同配置状态下结论不同（与 #9 同类）。
+修法：空对象与「从未配置」给同一句普通提示；只配了地址、没配口名时也去掉 `%%`
+（`show` 的「没有」是**空态**不是**错误**，同「（无 core dump）」口径）。
+测试：`internal/api/cli_iface_vpp_show_test.go` 的 `TestShowManagementInterfaceEmptyStates`
+锁三种空态（从未配置 / 空对象 / 零值管理口）+ 「只配地址」形态，并断言**不得含 %%**。
+真机：清扫残留后 `show interfaces management` → 「（未配置管理口：set system management interface <ifname> / ip address <prefix>）」。
+
+----- 3. 顺带清掉一处环境残留（发现 #12(b) 的直接后果）-----
+发现 #12(b)：`delete system management interface` 删掉最后一个子键后留下**空对象**，
+而 `delete system management` 整段删除**未映射**（报「语句未产生配置变更」）——本机因此残留
+`system.management = {}`，把 `show interfaces management` 推进了上面那条 `%%` 分支。
+清法（**产品自己的路径**，单元冒烟阶段 6 用的就是这套）：
+  configure / `save /tmp/cfg-export.json`            （save 在**配置模式**内；操作模式下报「无效命令」）
+  python 摘掉 system 的 management 键
+  configure / `load override /tmp/cfg-fixed.json` / `commit confirmed 5`
+  configure / `commit`                                （确认，否则 5 分钟自动回滚）
+结果：rev 29；改动前后 flatten 差分为**空**（唯一差异是删掉空对象，
+  注意：空对象在 flatten 后不产生键，故差异检测看不到它——**行为证据**是
+  `show interfaces management` 由 `%%` 分支回到普通空态句）。
+另注：`load` 的整份替换关键字是 **override**（`replace` 报「语法: load override|merge <file>」）。
