@@ -1,0 +1,72 @@
+===== V1 收尾第二十三轮：`make integration` 前置准备与首跑（含根因定位）=====
+环境：nfvis-vm（Ubuntu 26.04 / 6 核 / 5.3G 内存 / VPP 26.06-rc2 / libvirt 12 / qemu 10.2 / docker 29.1.3）
+日期：2026-09-18
+说明：本轮**未改产品代码**（一次 seed 格式的实验性改动已回退，见 §4）；产出是**前置就绪 + 首跑 + 根因定位 + 环境与文档登记**。
+
+----- 1. 按要求准备的前置 -----
+① **引导镜像**（产品路径 + sha256 校验，文档记录的那份）：
+   `request images download name alpine.qcow2 type vm-image url https://dl-cdn.alpinelinux.org/…/generic_alpine-3.20.0-x86_64-bios-cloudinit-r0.qcow2 sha256 900c91ed…`
+   → 首次下到 180.7MB 断流（`import_state failed`，`.part` 保留）→ **同一命令重跑即断点续传完成**（187,695,104 字节、
+   `ready`），独立 `sha256sum` 复核 = `900c91ed360beac704158ee99f45bab49e97858f8cb37469d0cc30e8e8e2ca60` ✓
+   （顺带：`dl-cdn.alpinelinux.org` 直连约 290KB/s；Debian 的 cloud 站直连/走代理都 ~11MB/s）
+② **容器镜像**：`docker pull alpine:3.20` 直连被拒（docker.io 连接失败）→ 按用户提示给 **docker 守护进程**临时加
+   `HTTP(S)_PROXY=http://192.168.155.1:2333`（drop-in）→ 拉取成功 → **随即删除 drop-in 并重启 docker**（避免给容器注入代理环境变量）
+③ **cloud-localds**：缺失 → `apt-get install -y cloud-image-utils` ✓（`m4_console_test` 没有它会**跳过**）
+④ **隔离核池**：`resource-pools cpu isolated-cores 1-4`（已在 committed）→ 本轮扩到 **1-5** 并把
+   **VPP 挪到核 4/5**（`set vpp cpu main-core 4` + `corelist-workers 5`，commit rev 48）——原因见 §3②
+⑤ **大页布局**：VPP 原先吃满 2 个 1G 页 → VM 起不来（`unable to map backing store for guest RAM: Cannot allocate memory`）。
+   改法：运行期预留 **768×2M**（1.5G）并 `set resource-pools hugepages page-size 2M count 768` +
+   `set vpp memory hugepage-preference 2M`（commit rev 47）→ VPP 改用 2M 页、**1G 页空出给 VM** ✓
+   （2M 可运行期预留，1G 必须重启生效——正是文档 §3.2 那条）
+
+----- 2. 首跑结果（`make integration`）-----
+跑前：`systemctl stop nfvis`（避免与测试进程同时驱动 VPP）+ `systemctl restart vpp`（§3.6 清残留拓扑）。
+| 轮次 | 前置状态 | 结果 |
+|---|---|---|
+| 第 1 次 | 未动核池/大页 | **6 条失败**：全部 `unable to map backing store for guest RAM: Cannot allocate memory`（1G 页被 VPP 吃满） |
+| 第 2 次 | 2M 页 + 核池 1-4 | **3 条失败**：console/cloud-init、主链路、快照内容级（另 3 条内存类已转绿 ✓） |
+| 第 3 次 | VPP 挪到 4/5 | **仍是这 3 条**（当时误读为 2 条，实际 `grep -c` 为 3） |
+| 第 4 次（**换 Debian 镜像**） | 同上 | **`TestCloudInitAndSerialConsoleRealLibvirt` 通过 ✓**（137s，串口读回 cloud-init 标记）；另两条仍失败，原因见 §3③④ |
+
+即：**211 个用例通过**，失败集中在「需要 guest 内 cloud-init/串口交互」的 3 条。
+
+----- 3. 根因（每条都有硬证据）-----
+① **alpine 镜像挂不上 NoCloud seed**（三条失败的共同根因）：串口日志显示
+   `Cloud-init v. 24.1.3 finished … Datasource **DataSourceNone**` + `cc_final_message.py[WARNING]: Used fallback datasource`
+   + 逐条回退其它数据源（OpenNebula/GCE/VMware/EC2，其中 EC2 重试 120s）→ **user-data 被静默忽略**（runcmd/chpasswd 全不生效）。
+   证据链：`util.py[WARNING]: Failed to mount /dev/sr0 when looking for data` → 把镜像转 raw 后用 debugfs 查内核模块：
+   `6.6.31-0-virt` **既无 iso9660 模块也未内建**（`modules.dep`/`modules.builtin` 均无；只有 vfat/fat/exfat），
+   而 guest 内核日志里连 FAT 报错都没有 → 该镜像在本环境**无法作 NoCloud 测试镜像**。
+   **这不是产品缺陷**：同一台机器换 **Debian genericcloud** 镜像后，同一条用例**通过** ✓（产品仍是发布版、seed 仍是 iso9660+光盘）。
+② **测试硬编码的 VM 核池与 VPP 占用的核重叠**：`test/integration/{m4_main_chain,m4_vnic,m5_snapshot_content}_test.go`
+   自建配置里 `IsolatedCores: []int{1,2,3}` 而**不含 `vpp` 段** → 账本不会扣减 VPP 保留核（`Free = Isolated − VppReserved` 为空）
+   → VM 的 vCPU 被钉到 VPP 正在轮询的核 1/2 上 → guest 饿死、引导/cloud-init 超时。
+   证据：`vppctl show threads` 显示 `vpp_main` lcore 1 / `vpp_wk_0` lcore 2；把 VPP 挪到 4/5 后同样的用例**跑得更远**（内存类 3 条转绿）。
+③ **Debian 镜像的启动时序超出测试窗口**（换镜像后的主链路失败）：guest 串口显示
+   `systemd-networkd-wait-online.service/start running (51s / no limit)` → cloud-init 的 `runcmd`（测试靠它给 guest 配 IP）
+   被网络等待拖后 → `VPP 未能 ping 通 guest 192.168.77.2`。即测试的等待窗口（150s/180s）是按 alpine 的启动速度定的。
+④ **快照内容级那条的 `vdb/raw` 报错是残留域所致，不是产品问题**：报错
+   `internal snapshot for disk vdb unsupported for storage type raw` 里的 `vdb` 与产品当前行为不符
+   （发布版把 seed 挂成 **cdrom `sda`**，`DiskTargetsOf` 只取 `device='disk'`）。
+   用发布版手工复现同一路径：域里只有 `vda(disk) + sda(cdrom)`，**建快照成功** ✓
+   → 测试那次跑的是早前（我做过 seed 实验时）定义的**旧域**（`DefineVM` 对已存在的域不重定义）。
+
+----- 4. 一次实验性改动与回退（如实记录）-----
+为让 alpine 镜像可用，我一度把产品 seed 改成 **vfat + 以 virtio 磁盘挂载**（3 个本地提交，**未推送**），
+过程中还踩到 libvirt 的 `readonly sata disks are not supported` 与 cloud-init 需读写挂载两点。
+但实测**仍未解决**（alpine 里 vfat 也挂不上，宿主侧却能挂 ✓），且它改动已发布行为、并引入 `mtools` 运行时依赖 →
+**已 `git reset --hard origin/main` 全部回退**，产品代码回到 1.1.15 的发布状态 ✓（换 Debian 镜像后同一用例通过，进一步证明产品侧无需改）。
+
+----- 5. 环境现状（交给下一个会话）-----
+- committed **rev 56**：`vpp.cpu = {main_core 4, corelist_workers 5}`、`resource_pools = {1G×2, 2M×768, isolated 1-5}`、
+  `vpp.memory.hugepage_preference = 2M`、无 VM 声明；`show alarms` 无 active
+- 镜像仓库：`alpine.qcow2`（179MB，ready）+ **`debian-12-genericcloud-amd64.qcow2`**（323MB，ready；sha512 与官方 SHA512SUMS 一致 ✓）
+- 大页：1G total=2 free=**1**（留给 VM）、2M total=768 free=747（VPP 用）
+- VPP：核 4/5；`ens192 up / ens224 down` 两口都在；nfvisd 1.1.15 active
+- 测试/探针 VM 与域已全部清理；`/data/incoming` 已清；docker 无代理残留 ✓；ens160 与默认路由未动 ✓
+- 安装的额外包：`cloud-image-utils`（必需）、`mtools`/`dosfstools`（本轮实验残留，无害，可留）
+
+----- 6. 本轮登记的发现（未修）-----
+见 `docs/V1-收尾待办.md` §2.13：#17 集成测试的镜像要求未记录（alpine 那份挂不上 NoCloud seed）、
+#18 测试硬编码核池不扣减 VPP 保留核、#19 API `POST /logout` 不释放 candidate 锁、
+#20 deb 未声明 VM 功能的运行时依赖（qemu-img/cloud-localds）、#21 大页规划需保证 VPP 之外至少留 1 个 1G 页给 VM。
