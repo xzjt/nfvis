@@ -2,7 +2,7 @@
 GO ?= go
 COVER_MIN ?= 70
 
-.PHONY: check build vet cover test archtest docscheck prototype-check integration deb e2e
+.PHONY: check build vet cover test archtest docscheck toolcheck prototype-check integration deb e2e
 
 VERSION ?= 1.0.0
 ARCH ?= amd64
@@ -20,7 +20,7 @@ SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
 # make check：提交前/CI 的统一自检入口（AGENTS.md「每次改动后的自检清单」）
 # 必须含 test：CI 只跑 make check，缺此项则 internal/api（含契约↔路由守护）、aaa、
 # cli、state 的测试在 CI 完全不执行，守护形同虚设。
-check: vet test cover archtest docscheck prototype-check
+check: vet test cover archtest docscheck toolcheck prototype-check
 
 build:
 	$(GO) build ./...
@@ -56,6 +56,13 @@ prototype-check:
 docscheck:
 	bash contrib/scripts/check_decisions_count.sh
 	bash contrib/scripts/check_openapi_json_sync.sh
+
+# 工具自校准：真机三件套的**判定模式**必须「已知正确 → PASS、已知错误 → FAIL」。
+# 由来（发现 #9）：`cli-fulltest` 的失败判定曾用未锚定的 `校验失败` 扫全文，而 `show log audit`
+# 会回显历史（某条旧审计的 detail 就含「校验失败: …」）→ 同一条命令在不同审计历史下结论不同。
+# 这类"工具自身出错制造的假红"比假绿更伤信任（决策 #85），故把判定模式的自校准纳入 make check。
+toolcheck:
+	bash contrib/scripts/cli-fulltest-selftest.sh
 
 # 真机集成测试（M3）：需 VPP 运行环境（nfvis-vm）。无环境时跳过并提示，CI 不跑。
 # 约定：build tag integration + 环境变量 NFVIS_VPP_SOCK（缺省 /run/vpp/api.sock）。
