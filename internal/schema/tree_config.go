@@ -183,7 +183,7 @@ func ConfigPathTree() *Node {
 		),
 
 		// —— virtual-switches（§2.4，FR-NET-010~015）——
-		K("virtual-switches", "虚拟交换机（L2=bridge-domain，L3=VRF，附录 B）",
+		K("virtual-switches", "虚拟交换机（L2=bridge-domain，L3=VRF）",
 			P("<name>", "虚拟交换机名", DynVSwitches,
 				K("type", "类型（创建后不可改）", VE("type", "l2|l3", "l2", "l3")),
 				K("vlan", "VLAN（仅 L2）",

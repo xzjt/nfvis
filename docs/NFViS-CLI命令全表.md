@@ -72,7 +72,7 @@
 | `show nat` | NAT 池/规则/转换会话计数 | `GET /nat` | ✅ |
 | `show port-mirroring` | SPAN 会话状态 | `GET /port-mirroring` | ✅ |
 | `show qos policies` | 限速策略与绑定 | `GET /qos/policies` | ✅ |
-| `show vpp` | 数据面概览：版本/线程/buffer/内存 | `GET /vpp/status` | ✅ |
+| `show vpp` | 数据面概览：**版本/连接/待重启**/线程/buffer/内存 | `GET /vpp/status` | ✅（发现 #11 补齐前三项） |
 | `show vpp threads` | main/worker 线程清单与绑核 | 运行态（govpp threads） | ✅ |
 | `show vpp runtime [thread <id>]` | 每线程向量率/指令周期 | 运行态（govpp runtime） | ⚠️ **未接入**（附录 A #34；CLI 明确提示） |
 | `show vpp buffers` | buffer 池（每 NUMA）用量；打印统计来源 | 运行态（statsclient ‖ `vpp_get_stats`，决策 #68） | ✅ |
@@ -115,6 +115,8 @@
 | `\| begin <regex>` | 从首个匹配行开始 | ✅ |
 | `\| display json` | JSON 渲染 | ✅ |
 | `\| display xml` | XML 渲染 | ✅（结构性输出） |
+| `\| compare` | candidate ⇄ committed 差异（配置模式 `show \| compare`） | ✅（发现 #4 接线） |
+| `\| compare rollback <n>` | committed ⇄ 第 n 个历史快照差异 | ✅（发现 #4 接线） |
 
 ### 1.2 `request`（运维动作，O；标 S 者为破坏性）
 
@@ -378,9 +380,9 @@
 | `show` | 72 | 含二级子命令 |
 | `request` | 46 | 含 VM/容器/镜像/接口/SR-IOV/VPP/系统/告警 |
 | 其余操作命令 | 9 | `configure`、`exit`/`quit`、`ping`、`traceroute`、`monitor`×2、`clear`、`start shell`、`help`（`?`/Tab 为交互行为，另计） |
-| 通用管道 | 7 | `match`/`except`/`count`/`last`/`begin`/`display json`/`display xml` |
+| 通用管道 | 9 | `match`/`except`/`count`/`last`/`begin`/`display json`/`display xml`/**`compare`**/**`compare rollback <n>`**（后两者为差异渲染，非文本过滤；发现 #4 接线） |
 | 配置模式 | 129 | 导航与事务 15、system 33、protocols 3、interfaces&bonds 10、virtual-switches 13、高级网络 9、resource-pools 3、vpp 11、vmf 20、container-functions 12 |
-| **合计** | **256** | 不含管道则为 249 |
+| **合计** | **258** | 不含管道则为 249 |
 
 **按实测状态分布**（共 256 行）：
 

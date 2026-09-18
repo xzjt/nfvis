@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/state"
 )
@@ -160,6 +161,82 @@ func (x *cliExecutor) physicalEmptyHint() string {
 	return b.String()
 }
 
+// showVppOverview `show vpp` 概览（发现 #11）：版本/连接/待重启来自**连接管理器**
+// （不需要 stats 段），线程/buffer/内存来自 stats 运行态——后者不可用时仍给出前者，
+// 而不是整条命令报「运行态不可用」。此前只打印后三者，连**版本**（命令全表声明的字段）
+// 与 **pending_restart**（"下一步要不要 request vpp restart"的唯一指示）都看不到。
+func (x *cliExecutor) showVppOverview() string {
+	var b strings.Builder
+	writeVppConnLines(&b, x.vpp, x.engine)
+	if x.state == nil {
+		if b.Len() == 0 {
+			return errRuntimeUnavailable
+		}
+		return b.String()
+	}
+	ctx := context.Background()
+	threads := x.state.Threads(ctx)
+	buf, hasBuf := x.state.Buffers(ctx)
+	mem, hasMem := x.state.Memory(ctx)
+	out, _ := x.structured.(map[string]any)
+	if out == nil {
+		out = map[string]any{}
+	}
+	out["threads"] = len(threads)
+	if hasBuf {
+		out["buffers"] = anyToTree(buf)
+	}
+	if hasMem {
+		out["memory"] = anyToTree(mem)
+	}
+	x.structured = out
+	fmt.Fprintf(&b, "threads: %d\n", len(threads))
+	if hasBuf {
+		fmt.Fprintf(&b, "buffers: pools=%d source=%s\n", len(buf.Pools), buf.Source)
+		for _, pl := range buf.Pools {
+			fmt.Fprintf(&b, "  %-10s used=%.0f available=%.0f cached=%.0f\n", pl.Name, pl.Used, pl.Available, pl.Cached)
+		}
+	} else {
+		fmt.Fprintf(&b, "buffers: 运行态不可用（%s）\n", bufUnavailableReason(buf))
+	}
+	if hasMem {
+		fmt.Fprintf(&b, "memory: total=%d used=%d free=%d\n", mem.Total, mem.Used, mem.Free)
+	} else {
+		fmt.Fprintln(&b, "memory: 运行态不可用")
+	}
+	return b.String()
+}
+
+// writeVppConnLines 写「连接/版本/待重启」三行（连接管理器提供；未装配则跳过）。
+func writeVppConnLines(b *strings.Builder, vpp VppController, eng *config.Engine) {
+	if vpp == nil || eng == nil {
+		return
+	}
+	cfg, err := eng.Committed()
+	if err != nil {
+		return
+	}
+	st := vpp.Status(cfg.Vpp)
+	version := st.Version
+	if version == "" {
+		version = "(未知)"
+	}
+	fmt.Fprintf(b, "version: %s\n", version)
+	fmt.Fprintf(b, "connected: %s\n", yesNoCn(st.Connected))
+	// 待重启是操作者的**下一步动作指示**（vpp 段变更后需 request vpp restart）
+	fmt.Fprintf(b, "pending_restart: %s\n", yesNoCn(st.PendingRestart))
+	if st.LastError != "" {
+		fmt.Fprintf(b, "last_error: %s\n", st.LastError)
+	}
+}
+
+func yesNoCn(v bool) string {
+	if v {
+		return "yes"
+	}
+	return "no"
+}
+
 // showManagementInterface：管理口（内核侧，来自 system.management 配置）。
 func (x *cliExecutor) showManagementInterface(cfg model.Config) string {
 	sys := cfg.System
@@ -279,28 +356,31 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 	if sub == "capture" {
 		return x.execShowVppCapture()
 	}
+	if sub == "" {
+		return x.showVppOverview()
+	}
 	if x.state == nil {
 		return errRuntimeUnavailable
 	}
 	ctx := context.Background()
 	switch sub {
-	case "", "threads":
+	case "threads":
 		threads := x.state.Threads(ctx)
-		if sub == "threads" {
-			if len(threads) == 0 {
-				return "（无线程运行态）\n"
-			}
-			items := make([]any, 0, len(threads))
-			var b strings.Builder
-			fmt.Fprintf(&b, "%-10s %-12s %-8s %s\n", "Name", "Type", "Core", "ID")
-			for _, th := range threads {
-				items = append(items, anyToTree(th))
-				fmt.Fprintf(&b, "%-10s %-12s %-8d %d\n", th.Name, th.Type, th.Core, th.ID)
-			}
-			x.structured = map[string]any{"threads": items}
-			return b.String()
+		if len(threads) == 0 {
+			return "（无线程运行态）\n"
 		}
-		// show vpp：概览（线程数 + buffer + 内存）
+		items := make([]any, 0, len(threads))
+		var b strings.Builder
+		fmt.Fprintf(&b, "%-10s %-12s %-8s %s\n", "Name", "Type", "Core", "ID")
+		for _, th := range threads {
+			items = append(items, anyToTree(th))
+			fmt.Fprintf(&b, "%-10s %-12s %-8d %d\n", th.Name, th.Type, th.Core, th.ID)
+		}
+		x.structured = map[string]any{"threads": items}
+		return b.String()
+	case "":
+		// show vpp：概览（连接/版本/待重启 + 线程数 + buffer + 内存）
+		threads := x.state.Threads(ctx)
 		buf, hasBuf := x.state.Buffers(ctx)
 		mem, hasMem := x.state.Memory(ctx)
 		out := map[string]any{"threads": len(threads)}
@@ -312,6 +392,7 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 		}
 		x.structured = out
 		var b strings.Builder
+		writeVppConnLines(&b, x.vpp, x.engine)
 		fmt.Fprintf(&b, "threads: %d\n", len(threads))
 		if hasBuf {
 			fmt.Fprintf(&b, "buffers: pools=%d source=%s\n", len(buf.Pools), buf.Source)

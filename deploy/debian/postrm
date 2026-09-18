@@ -1,14 +1,45 @@
 #!/bin/sh
-# nfvis 卸载后：purge 时清理运行态目录；配置/镜像/备份等数据**不自动删除**（避免误删，FR-OPS-007 由 zeroize 显式执行）。
+# nfvis 卸载后：purge 时清理运行态目录、**撤销安装期对底座做的改动**；
+# 配置/镜像/备份等数据**不自动删除**（避免误删，恢复出厂由 zeroize 显式执行）。
+#
+# 为什么要撤销底座改动（发现 #1，2026-09-18 裸机实测）：`dpkg --purge` 之后系统仍留着
+#   ① /etc/ssh/sshd_config.d/99-nfvis.conf —— 卸载后 SSH 仍被限制（安全相关的"看不见的开关"）；
+#   ② /etc/default/grub.d/99-nfvis.cfg + /etc/fstab 大页行 —— 系统仍带着为 NFViS 调过的启动参数/挂载。
+# ① 由本脚本自动撤销（幂等、无副作用）；② 涉及 re-generate 启动配置与动 /etc/fstab，
+# 卸载过程**不自动改**，只打印可照着做的撤销步骤（不留"看不见的痕迹"）。
 set -e
+
+SSH_HARDEN=/usr/share/nfvis/installer/nfvis-ssh-harden.sh
+BASELINE=/usr/share/nfvis/installer/nfvis-baseline.sh
+
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     if [ "$1" = "purge" ]; then
         systemctl disable nfvis.service >/dev/null 2>&1 || true
     fi
 fi
+
 if [ "$1" = "purge" ]; then
     rm -rf /run/nfvis
     echo "nfvis postrm: 已清理 /run/nfvis（/var/lib/nfvis 数据保留）"
+
+    # ① SSH 强化：撤销 drop-in（它会让卸载后的系统继续禁止 root 口令登录）
+    if [ -x "$SSH_HARDEN" ]; then
+        if "$SSH_HARDEN" --revert >/dev/null 2>&1; then
+            echo "nfvis postrm: 已撤销 SSH 强化（/etc/ssh/sshd_config.d/99-nfvis.conf）"
+        else
+            echo "nfvis postrm: 撤销 SSH 强化失败，请手工删除 /etc/ssh/sshd_config.d/99-nfvis.conf 并重启 sshd"
+        fi
+    fi
+
+    # ② 内核基线：不自动改，给出可照做的步骤
+    echo "nfvis postrm: 以下安装期改动**仍需手工撤销**（重启后才彻底生效）："
+    echo "  · /etc/default/grub.d/99-nfvis.cfg（大页/隔离核等启动参数）"
+    if [ -x "$BASELINE" ]; then
+        echo "      自动：$BASELINE --rollback   （会删除/还原片段并跑 update-grub）"
+    fi
+    echo "      手工：rm -f /etc/default/grub.d/99-nfvis.cfg && update-grub"
+    echo "  · /etc/fstab 里带 '# nfvis-hugepages' 标记的挂载行"
+    echo "      手工：删掉该标记行及其下一行（hugetlbfs 挂载）后 umount /dev/hugepages"
 fi
 exit 0

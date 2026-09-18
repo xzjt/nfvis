@@ -359,7 +359,7 @@ func (s *Server) handlePostVrf(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, vs := range cfg.VirtualSwitches {
 			if vs.Name == in.Name {
-				return conflict("VRF %s 与虚拟交换机重名（L3 交换机映射为同名 VRF，附录 B）", in.Name)
+				return conflict("VRF %s 与虚拟交换机重名（L3 虚拟交换机会映射为同名 VRF，请改用别的名字）", in.Name)
 			}
 		}
 		cfg.Vrfs = append(cfg.Vrfs, in)

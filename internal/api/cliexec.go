@@ -85,6 +85,7 @@ type cliExecutor struct {
 	images     ImagesRuntime
 	ports      PortInventory               // 运行态端口清单（决策 #83；nil = show 空态不列端口）
 	vppState   VppStateRuntime             // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
+	vpp        VppController               // VPP 连接管理器（show vpp 的版本/待重启；发现 #11）
 	sys        SystemOpsRuntime            // 备份/恢复/恢复出厂（M5-6；nil = 命令报未接入）
 	diagOps    DiagOpsRuntime              // 诊断归档/core dump（M5-4；nil = 命令报未接入）
 	logs       func() ([]byte, error)      // 系统日志来源（show log system，M5-9；nil = 报不可用）
@@ -125,6 +126,10 @@ func (x *cliExecutor) setEventBus(bus *events.Bus) { x.events = bus }
 // setPorts 注入运行态端口清单（决策 #83）：`<ifname>` 的候选与 `show interfaces physical`
 // 的空态都取自真实端口，而不是「已写进配置的接口名」。
 func (x *cliExecutor) setPorts(p PortInventory) { x.ports = p }
+
+// setVppCtl 注入 VPP 连接管理器（发现 #11：`show vpp` 的版本/连接/待重启来自它，
+// 而不是 stats 运行态——stats 不可用时这三项仍然给得出）。
+func (x *cliExecutor) setVppCtl(v VppController) { x.vpp = v }
 
 // setVppState 注入 VPP 运行态快照（决策 #84）：`show virtual-switches` 的列表/成员口/计数
 // 与 `show interfaces physical` 的链接状态/速率/驱动自此取运行态事实（契约 §1.1 要求）。
@@ -331,7 +336,7 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 	}
 	switch {
 	case len(t) == 1 && t[0] == "version":
-		return "NFViS " + VersionStr + "（M2：配置事务可用，网络底座 M3+ 接入）\n"
+		return "NFViS " + VersionStr + "\n"
 	case len(t) >= 1 && t[0] == "configuration":
 		if len(t) >= 2 && t[1] == "compare" {
 			// show configuration compare rollback <n>

@@ -38,6 +38,23 @@ func splitPipes(line string) (string, []pipeSpec, error) {
 				return "", nil, fmt.Errorf("正则 %q 不合法: %v", fields[1], err)
 			}
 			pipes = append(pipes, pipeSpec{kind: fields[0], arg: fields[1]})
+		case "compare":
+			// 契约 §3 的两种写法：`show | compare`（candidate ⇄ committed）与
+			// `show configuration | compare rollback <n>`（committed ⇄ 第 n 个历史快照）。
+			// 能力早在引擎里（CompareCandidate/Compare），此前只是**没接线**（发现 #4）：
+			// 操作者在 commit 前看不到自己改了什么——事务模型的核心动作缺失。
+			switch {
+			case len(fields) == 1:
+				pipes = append(pipes, pipeSpec{kind: "compare"})
+			case len(fields) == 3 && fields[1] == "rollback":
+				n, err := strconv.Atoi(fields[2])
+				if err != nil || n < 1 {
+					return "", nil, fmt.Errorf("rollback 需要一个正整数快照序号")
+				}
+				pipes = append(pipes, pipeSpec{kind: "compare", arg: fields[2]})
+			default:
+				return "", nil, fmt.Errorf("compare 的用法：| compare 或 | compare rollback <n>")
+			}
 		case "count":
 			pipes = append(pipes, pipeSpec{kind: "count"})
 		case "last":
@@ -106,6 +123,21 @@ func (x *cliExecutor) applyPipes(text string, pipes []pipeSpec) string {
 			} else {
 				text = strings.Join(lines[len(lines)-n:], "\n") + "\n"
 			}
+		case "compare":
+			var (
+				out string
+				err error
+			)
+			if p.arg == "" {
+				out, err = x.engine.CompareCandidate()
+			} else {
+				n, _ := strconv.Atoi(p.arg)
+				out, err = x.engine.Compare(n)
+			}
+			if err != nil {
+				return "%% " + err.Error() + "\n"
+			}
+			text = out
 		case "display-json":
 			if x.structured == nil {
 				return "%% 该命令不支持 display json（仅配置 show 族可用）\n"

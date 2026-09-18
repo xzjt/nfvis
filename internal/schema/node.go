@@ -90,7 +90,7 @@ const (
 
 // PipeKeywords 通用管道关键字（FR-CLI-005，对一切 show 输出可用）。
 // schema 单一来源，CLI 前端据此解析管道段。
-var PipeKeywords = []string{"match", "except", "count", "last", "begin", "display"}
+var PipeKeywords = []string{"match", "except", "count", "last", "begin", "display", "compare"}
 
 // Node 命令树节点。
 type Node struct {

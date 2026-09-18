@@ -23,7 +23,7 @@ if [ -d prototype ] && ls prototype/*.go >/dev/null 2>&1; then
 fi
 
 if grep -rn "TODO\|FIXME\|待评审\|TBD" docs/*.md >/dev/null 2>&1; then
-    fail "docs/ 中出现未决标记（TODO/待评审/TBD），请先在规格书附录 A 定稿"
+    fail "docs/ 中出现未决标记（TODO/待评审/TBD），请先在规格书的决策记录里定稿"
 fi
 
 echo "✓ pre-commit 通过"

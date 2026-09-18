@@ -63,7 +63,7 @@ func (p *ServicesProvider) reset() {
 // ApplySpan 配置 SPAN：源口 → 分析口，方向 ingress|egress|both（缺省 both）。
 func (p *ServicesProvider) ApplySpan(ctx context.Context, pm model.PortMirroring) error {
 	if pm.Source.Vnf != "" {
-		return fmt.Errorf("SPAN 源 %s 为 VNF 接口，属 M4", pm.Source.Vnf)
+		return fmt.Errorf("SPAN 源 %s 为 VNF 接口，暂不支持", pm.Source.Vnf)
 	}
 	c, err := p.client()
 	if err != nil {

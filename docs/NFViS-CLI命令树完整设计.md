@@ -492,10 +492,10 @@ virtual-machine-functions {
 |---|---|
 | 操作模式 `show configuration` | **committed** 配置 |
 | 操作模式 `show configuration candidate` | 当前持锁会话的 candidate |
-| 操作模式 `show configuration \| compare rollback <n>` | committed ⇄ 第 n 个历史快照 diff |
+| 操作模式 `show configuration \| compare rollback <n>` | committed ⇄ 第 n 个历史快照 diff（**已实现**：`Engine.Compare(n)`） |
 | 配置模式 `show` | candidate（当前层级） |
 | 配置模式 `show \| display set` | **未实现**（原声明「以 `set` 语句展开，便于复制」）——附录 A #84：需要 model→CLI 的**反向映射**（`save` 导出的是 JSON，别名语句如 `login user … password …` 无法由配置树反推为合法语句），做 lossy 版本会在「复制配置」这件事上制造静默错误，故登记为独立特性而非补丁。替代：`save <file>`（JSON）/ `show configuration`（块状）/ `\| display json` |
-| 配置模式 `show \| compare` | candidate ⇄ committed diff |
+| 配置模式 `show \| compare` | candidate ⇄ committed diff（**已实现**：`Engine.CompareCandidate`，2026-09-18 接线，发现 #4） |
 
 ## 4. class 权限矩阵（预置）
 
