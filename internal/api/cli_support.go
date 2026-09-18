@@ -27,13 +27,19 @@ func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		if user != "" && e.User != user {
 			continue
 		}
-		out = append(out, map[string]any{
+		rec := map[string]any{
 			"timestamp": e.Time,
 			"user":      e.User,
 			"action":    e.Action,
 			"detail":    e.Detail,
 			"result":    e.Result,
-		})
+		}
+		// NFR-006：只有**确实记录了**时钟状态才给出该字段；迁移前的老记录为 nil（未知），
+		// 显式省略而不是谎称已同步。
+		if e.TimeSynced != nil {
+			rec["time_synced"] = *e.TimeSynced
+		}
+		out = append(out, rec)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

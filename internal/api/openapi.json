@@ -209,6 +209,10 @@
           "source_ip": {
             "type": "string"
           },
+          "time_synced": {
+            "description": "写入该条记录时宿主时钟是否已与 NTP 同步（NFR-006）。审计时间戳依赖 NTP，\n**未同步时为 false**，据此判断时间戳是否可信。该字段缺失表示**未知**\n（schema 迁移前写入的老记录没有这个信息），不代表已同步。\n",
+            "type": "boolean"
+          },
           "timestamp": {
             "format": "date-time",
             "type": "string"

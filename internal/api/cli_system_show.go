@@ -184,7 +184,14 @@ func (x *cliExecutor) execShowLog(t []string) string {
 				detail = detail[:60] + "…"
 			}
 			detail = strings.ReplaceAll(detail, "\n", " ")
-			fmt.Fprintf(&b, "%-20s %-12s %-24s %-8s %s\n", e.Time.Format("2006-01-02 15:04:05"), e.User, e.Action, e.Result, detail)
+			// NFR-006：写入该条时宿主时钟**未与 NTP 同步**则带标记（时间戳可能不准）。
+			// TimeSynced 为 nil 表示该记录**没有这个信息**（迁移前的老记录）——不加标记，
+			// 也不谎称已同步。
+			mark := ""
+			if e.TimeSynced != nil && !*e.TimeSynced {
+				mark = "  [时钟未同步]"
+			}
+			fmt.Fprintf(&b, "%-20s %-12s %-24s %-8s %s%s\n", e.Time.Format("2006-01-02 15:04:05"), e.User, e.Action, e.Result, detail, mark)
 		}
 		x.structured = map[string]any{"audit": items}
 		return b.String()
