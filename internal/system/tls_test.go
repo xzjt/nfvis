@@ -2,6 +2,8 @@ package system
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"os"
 	"runtime"
 	"strings"
@@ -12,7 +14,7 @@ func TestTLSRegenerateAndInfo(t *testing.T) {
 	dir := t.TempDir()
 	m := NewTLSManager(dir, (&fakeRunner{}).run)
 
-	info, err := m.Regenerate("nfvis-vm", []string{"192.168.155.129"})
+	info, err := m.regenerate("nfvis-vm", []string{"192.168.155.129"})
 	if err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
@@ -37,7 +39,7 @@ func TestTLSRegenerateAndInfo(t *testing.T) {
 	}
 	// 重签后指纹应变化（换证书判定口径）
 	first := info.Fingerprint
-	info2, err := m.Regenerate("nfvis-vm", []string{"192.168.155.129"})
+	info2, err := m.regenerate("nfvis-vm", []string{"192.168.155.129"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +55,7 @@ func TestTLSRegenerateAndInfo(t *testing.T) {
 func TestTLSInstallValidatesPair(t *testing.T) {
 	dir := t.TempDir()
 	m := NewTLSManager(dir, (&fakeRunner{}).run)
-	if _, err := m.Regenerate("h", nil); err != nil {
+	if _, err := m.regenerate("h", nil); err != nil {
 		t.Fatal(err)
 	}
 	certPEM, _ := os.ReadFile(m.CertPath())
@@ -69,7 +71,7 @@ func TestTLSInstallValidatesPair(t *testing.T) {
 		t.Fatalf("安装后应可解析: %+v", info)
 	}
 	// 证书/私钥不匹配应拒绝
-	if _, err := m.Regenerate("h2", nil); err != nil {
+	if _, err := m.regenerate("h2", nil); err != nil {
 		t.Fatal(err)
 	}
 	otherKey, _ := os.ReadFile(m.KeyPath())
@@ -88,7 +90,7 @@ func TestCertExpiryAlarm(t *testing.T) {
 	if _, ok := m.ExpiryAlarm(); ok {
 		t.Fatal("未配置证书不应告警")
 	}
-	if _, err := m.Regenerate("h", nil); err != nil {
+	if _, err := m.regenerate("h", nil); err != nil {
 		t.Fatal(err)
 	}
 	days, warn := m.ExpiryAlarm()
@@ -135,7 +137,7 @@ func TestApplyLogRetentionWritesDropIn(t *testing.T) {
 func TestEnsureSelfSigned(t *testing.T) {
 	m := NewTLSManager(t.TempDir(), nil)
 
-	info, generated, err := m.EnsureSelfSigned("nfvis-test", []string{"127.0.0.1"})
+	info, generated, err := m.EnsureSelfSigned("nfvis-test")
 	if err != nil {
 		t.Fatalf("EnsureSelfSigned: %v", err)
 	}
@@ -147,7 +149,7 @@ func TestEnsureSelfSigned(t *testing.T) {
 	}
 
 	// 第二次应复用（不重新生成）——以指纹是否变化判定
-	info2, generated2, err := m.EnsureSelfSigned("nfvis-test", []string{"127.0.0.1"})
+	info2, generated2, err := m.EnsureSelfSigned("nfvis-test")
 	if err != nil {
 		t.Fatalf("EnsureSelfSigned(2): %v", err)
 	}
@@ -156,5 +158,65 @@ func TestEnsureSelfSigned(t *testing.T) {
 	}
 	if info2.Fingerprint != info.Fingerprint {
 		t.Fatalf("复用的证书指纹应一致: %s vs %s", info.Fingerprint, info2.Fingerprint)
+	}
+}
+
+// 决策 #99：自签证书的 SAN 由管理端按本机监听地址统一推导——回环必须在里面，
+// 且监听地址与本机接口地址都要覆盖；重复项去重。
+func TestServerCertSANs(t *testing.T) {
+	sans := ServerCertSANs("192.168.155.7:443")
+	got := map[string]bool{}
+	for _, ip := range sans {
+		if got[ip] {
+			t.Fatalf("SAN 应去重: %v", sans)
+		}
+		got[ip] = true
+	}
+	for _, want := range []string{"127.0.0.1", "::1", "192.168.155.7"} {
+		if !got[want] {
+			t.Fatalf("SAN 应含 %s: %v", want, sans)
+		}
+	}
+	// 通配监听（缺省 :443）：仍须含回环——CLI 缺省就靠它连
+	for _, ip := range ServerCertSANs(":443") {
+		if ip == "127.0.0.1" {
+			return
+		}
+	}
+	t.Fatal("通配监听时 SAN 仍须含 127.0.0.1")
+}
+
+// 决策 #99：重签自签证书的 SAN 取自 TLSManager 记录的监听地址（SetListen）。
+func TestRegenerateSelfSignedUsesListen(t *testing.T) {
+	m := NewTLSManager(t.TempDir(), nil)
+	m.SetListen("10.9.8.7:443")
+	if _, err := m.RegenerateSelfSigned("nfvis-vm"); err != nil {
+		t.Fatalf("RegenerateSelfSigned: %v", err)
+	}
+	raw, err := os.ReadFile(m.CertPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(raw)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var haveLoopback, haveListen bool
+	for _, ip := range cert.IPAddresses {
+		switch ip.String() {
+		case "127.0.0.1":
+			haveLoopback = true
+		case "10.9.8.7":
+			haveListen = true
+		}
+	}
+	if !haveLoopback || !haveListen {
+		t.Fatalf("证书 SAN IP 应含回环与监听地址，实际 %v", cert.IPAddresses)
+	}
+	// DNS SAN：主机名 + localhost
+	joined := strings.Join(cert.DNSNames, ",")
+	if !strings.Contains(joined, "nfvis-vm") || !strings.Contains(joined, "localhost") {
+		t.Fatalf("证书 DNS SAN 不符: %v", cert.DNSNames)
 	}
 }

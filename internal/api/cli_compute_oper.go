@@ -828,12 +828,13 @@ func (x *cliExecutor) systemPower(user, action string, raw []string) string {
 }
 
 // systemTLSRegenerate：request system api tls regenerate（FR-SYS-011）。
+// SAN 由管理端按本机地址推导（RegenerateSelfSigned），此处**不传** SAN——见决策 #99。
 func (x *cliExecutor) systemTLSRegenerate(user string) string {
 	if x.tlsR == nil {
 		return errRuntimeUnavailable
 	}
 	host, _ := os.Hostname()
-	info, err := x.tlsR.Regenerate(host, nil)
+	info, err := x.tlsR.RegenerateSelfSigned(host)
 	if err != nil {
 		x.audit(user, "system.tls.regenerate", "重签自签证书", err)
 		return "%% " + err.Error() + "\n"

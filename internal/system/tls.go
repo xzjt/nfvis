@@ -3,7 +3,10 @@
 // 证书：
 //   - Info(certPath)：解析 PEM 叶子证书（subject/issuer/有效期/是否自签），解析失败视为未配置。
 //   - Install(certPEM, keyPEM)：校验证书与私钥匹配（公钥一致）后落盘（证书 0644、私钥 0600）。
-//   - Regenerate(hostname, ips)：生成自签证书（RSA 2048、SAN 含主机名与 IP、有效期 1 年）并落盘。
+//   - RegenerateSelfSigned(hostname)：生成自签证书（RSA 2048、SAN 含主机名与 IP、有效期 1 年）并落盘。
+//     证书写哪些 IP **由本管理端按本机地址统一推导**（ServerCertSANs），调用方无从指定——
+//     决策 #99 之前三处调用方各自传 ips（CLI 路径传 nil），重签出的证书缺回环 IP SAN，
+//     而 nfvis-cli 缺省连 https://127.0.0.1（决策 #78），于是「重签」当场自毁管理路径（发现 #10）。
 //   - RegenerateSSHHostKeys()：`ssh-keygen -A` 重生成缺失的 SSH host key（FR-SYS-011）。
 //   - 临近过期（<30 天）由调用方（nfvisd 巡检）产生告警。
 //
@@ -29,6 +32,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -56,6 +60,9 @@ type TLSManager struct {
 	dir string // 材料目录
 	run Runner
 	now func() time.Time
+
+	mu     sync.Mutex
+	listen string // 实际监听地址（host:port），用于推导自签证书 SAN（决策 #99）
 }
 
 // NewTLSManager 构造（dir 空取缺省）。
@@ -64,6 +71,22 @@ func NewTLSManager(dir string, run Runner) *TLSManager {
 		dir = DefaultTLSDir
 	}
 	return &TLSManager{dir: dir, run: run, now: time.Now}
+}
+
+// SetListen 记录实际监听地址（启动期设置，监听地址收敛后更新）。
+// 仅影响**之后**生成的自签证书的 SAN（见 ServerCertSANs）。
+func (m *TLSManager) SetListen(addr string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.listen = addr
+}
+
+// SANs 当前应写入自签证书的 SAN IP 列表（按本机监听地址与本机接口地址推导）。
+func (m *TLSManager) SANs() []string {
+	m.mu.Lock()
+	listen := m.listen
+	m.mu.Unlock()
+	return ServerCertSANs(listen)
 }
 
 // CertPath / KeyPath 返回证书/私钥路径。
@@ -135,8 +158,9 @@ func (m *TLSManager) Install(certPEM, keyPEM string) (TlsInfo, error) {
 	return info, nil
 }
 
-// Regenerate 生成新的自签证书（hostname/IP SAN），返回新证书信息。
-func (m *TLSManager) Regenerate(hostname string, ips []string) (TlsInfo, error) {
+// regenerate 生成新的自签证书（hostname + 指定 IP SAN）并落盘。包内原语：
+// **生产路径一律走 RegenerateSelfSigned**，避免调用方各自决定 SAN（决策 #99）。
+func (m *TLSManager) regenerate(hostname string, ips []string) (TlsInfo, error) {
 	if hostname == "" {
 		hostname = "nfvis"
 	}
@@ -185,6 +209,13 @@ func (m *TLSManager) Regenerate(hostname string, ips []string) (TlsInfo, error) 
 		return TlsInfo{}, errors.New("安装后无法解析证书")
 	}
 	return info, nil
+}
+
+// RegenerateSelfSigned 重签自签证书：SAN 由本机监听地址统一推导（ServerCertSANs），
+// 调用方无从指定（决策 #99）。**这是重签自签证书的唯一入口**——REST 与 CLI 两条路径
+// 都经它，从而与启动期生成走同一份实现。
+func (m *TLSManager) RegenerateSelfSigned(hostname string) (TlsInfo, error) {
+	return m.regenerate(hostname, m.SANs())
 }
 
 // RegenerateSSHHostKeys 重新生成 SSH host key（删除现有 ssh_host_* 后 ssh-keygen -A）。
@@ -297,12 +328,13 @@ func SortedIPs(ips []string) []string {
 //
 // FR-SEC-004 / FR-API-001（决策 #72）：规格要求「REST over HTTPS（自签证书，可换）」，
 // 而原实现未配置证书时直接以明文 HTTP 提供服务。改为默认自签，明文需显式开启。
+// SAN 由 RegenerateSelfSigned 按本机监听地址推导（调用方不得指定，决策 #99）。
 // 返回 generated 表示本次新建了证书。
-func (m *TLSManager) EnsureSelfSigned(hostname string, ips []string) (info TlsInfo, generated bool, err error) {
+func (m *TLSManager) EnsureSelfSigned(hostname string) (info TlsInfo, generated bool, err error) {
 	if existing, ok := m.Info(); ok {
 		return existing, false, nil
 	}
-	info, err = m.Regenerate(hostname, ips)
+	info, err = m.RegenerateSelfSigned(hostname)
 	if err != nil {
 		return TlsInfo{}, false, err
 	}
