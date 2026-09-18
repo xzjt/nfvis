@@ -127,9 +127,21 @@ func (d *Diagnostics) Ping(ctx context.Context, req PingRequest) (string, error)
 	if err != nil {
 		return out, fmt.Errorf("vppctl ping: %w", err)
 	}
-	if sent, ok := vppPingSent(out); ok && sent == 0 {
-		return out + pingNoEgressNote(req.Host), fmt.Errorf(
-			"ping 未发出任何报文（%s 不可经 VPP 到达）：ping 只覆盖 VPP 数据面", req.Host)
+	// 未通即失败（附录 A #89/#93）——两条支路都要拦：
+	//   ① 一个包都没发出去（VPP 无到达目标的接口/路由）：原文的 `0% packet loss` 读起来像通了；
+	//   ② 发出了但没有一个应答（`100% packet loss`）：ping 是连通性测试，**没通就是失败**，
+	//      否则 `ping <不可达>` 返回 0 会让调用方与判定侧都以为通了（真机实测：VPP ping
+	//      自己的回环地址也是 `2 sent, 0 received`）。
+	// 判不出汇总行时**不判失败**（输出格式一变就误报，比漏报更糟）。
+	if sent, ok := vppPingSent(out); ok {
+		if sent == 0 {
+			return out + pingNoEgressNote(req.Host), fmt.Errorf(
+				"ping 未发出任何报文（%s 不可经 VPP 到达）：ping 只覆盖 VPP 数据面", req.Host)
+		}
+		if recv, ok2 := vppPingReceived(out); ok2 && recv == 0 {
+			return out + pingUnreachableNote(req.Host, sent), fmt.Errorf(
+				"ping 已发出 %d 个报文但无应答：%s 不可达", sent, req.Host)
+		}
 	}
 	return out, nil
 }
@@ -148,13 +160,37 @@ func vppPingSent(out string) (int, bool) {
 	return n, true
 }
 
-var vppPingSentRe = regexp.MustCompile(`Statistics:\s*(\d+)\s+sent`)
+// vppPingReceived 取汇总行里的收包数（`Statistics: N sent, M received, ...`）。
+func vppPingReceived(out string) (int, bool) {
+	m := vppPingReceivedRe.FindStringSubmatch(out)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
 
-// pingNoEgressNote 给操作者的补充说明（附录 A #89）：解释为什么「没发出去」以及该用什么。
+var (
+	vppPingSentRe     = regexp.MustCompile(`Statistics:\s*(\d+)\s+sent`)
+	vppPingReceivedRe = regexp.MustCompile(`Statistics:\s*\d+\s+sent,\s*(\d+)\s+received`)
+)
+
+// pingNoEgressNote 给操作者的补充说明：解释为什么「没发出去」以及该用什么（附录 A #89）。
 func pingNoEgressNote(host string) string {
 	return "\n（nfvis：以上是 VPP 数据面的结果。VPP 里没有能到达 " + host + " 的接口/路由——\n" +
 		" 若这是管理口网关，它属于**内核平面**，请用宿主 ping（如 `ping -c 4 " + host + "`）；\n" +
 		" 若要经 VPP 测，目标须在 VPP 侧有 L3 可达面。`traceroute` 走宿主侧 ICMP，可直接测管理口。）\n"
+}
+
+// pingUnreachableNote 报文发出去了但无人应答时的说明（附录 A #93）：
+// 区分「没发出去」与「发了没回」，并给出下一步。
+func pingUnreachableNote(host string, sent int) string {
+	return fmt.Sprintf("\n（nfvis：%d 个报文已从 VPP 发出但没有任何应答——%s 不可达。\n"+
+		" 请确认对端是否在线、是否放行 ICMP、以及 VPP 侧的路由/网关是否正确；\n"+
+		" 若目标在管理网（内核平面），请用宿主 ping 或 `traceroute`（宿主侧 ICMP）。）\n", sent, host)
 }
 
 // Traceroute 宿主侧 ICMP 路径跟踪。vrf 非空明确报不支持（附录 A #36）。

@@ -62,38 +62,58 @@ expect_fail() { # expect_fail <阶段> <期望错误里的关键词> <命令>   
   printf '=== [%s][expect-fail] %s\n%s\n\n' "$phase" "$cmd" "$out" >> "$LOG"
 }
 
-# expect_ping_coherent：ping 的**判定自洽**（附录 A #89）。
+# expect_ping_coherent：ping 的**判定自洽**（附录 A #89 / #93）。
 #
-# 不变量（这条才是修复的真正价值）：**0 发包绝不能被算作通过**。0 发包时必须出现 %% 错误；
-# 若 0 发包却判通过，就是修复前那种假绿（真机实测：修复前把 0 发包的 ping 算作 ✓）。
-# 真发过包时属于环境相关结果（通不通取决于 VPP 有没有到该目标的路由），不再额外要求。
+# 不变量：**未通就不能算通过**。两条支路都必须有 %% 错误——
+#   ① 0 发包（VPP 无到达目标的接口/路由）② 发了但无任何应答（100% packet loss）。
+# 反过来：真通（有应答）时不该报错。任一条不满足即单列失败项。
 #
 # 为什么不由脚本「预测」环境（例如看 VPP 有没有 L3 地址就决定 run 还是 expect_fail）：
 # 实测同一环境里 `ping <host>`（走 FIB，无路由即 0 发包）与
 # `ping <host> source <iface>`（显式出接口，照样发得出去）**结论可以不同**，
-# 预测式分流必然误判；而本函数只断言「结果与判定自洽」，与环境无关。
+# 预测式分流必然误判；本函数只断言「结果与判定自洽」，与环境无关。
 expect_ping_coherent() { # expect_ping_coherent <阶段> <命令>
   local phase="$1"; shift
-  local cmd="$*" out rc sent0=0
+  local cmd="$*" out rc nofail=0
   out=$($CLI -c "$cmd" 2>&1); rc=$?
-  out=$(printf '%s\n' "$out" | sed '1{/^连接 /d;}')
-  printf '%s\n' "$out" | grep -qE 'Statistics:[[:space:]]*0 sent' && sent0=1
-  if [ "$sent0" = 1 ]; then
-    if printf '%s\n' "$out" | _is_fail || [ "$rc" -ne 0 ]; then
-      EXPECTED=$((EXPECTED+1)); printf '  ⊘ %s（0 发包 → 正确报失败）\n' "$cmd"
+  out=$(printf '%s
+' "$out" | sed '1{/^连接 /d;}')
+  if printf '%s
+' "$out" | _is_fail || [ "$rc" -ne 0 ]; then
+    # 有错误行：必须是「没通」这一类（0 发包 / 无应答），否则是意料之外的报错
+    if printf '%s
+' "$out" | grep -qE 'Statistics:[[:space:]]*0 sent|received, 100% packet loss|未发出任何报文|无应答'; then
+      EXPECTED=$((EXPECTED+1)); printf '  ⊘ %s（未通 → 正确报失败）
+' "$cmd"
     else
       FAIL=$((FAIL+1))
-      FAILED_LIST+=("[$phase] $cmd :: 0 发包却未报失败（假绿回归）")
-      printf '  ✗ %s（0 发包却算通过）\n' "$cmd"
-      printf '%s\n' "$out" | sed 's/^/       | /' | head -5
+      FAILED_LIST+=("[$phase] $cmd :: 报错但不像「未通」（既非 0 发包也非无应答）")
+      printf '  ✗ %s（报错原因出乎意料）
+' "$cmd"
+      printf '%s
+' "$out" | sed 's/^/       | /' | head -5
     fi
-  elif printf '%s\n' "$out" | _is_fail || [ "$rc" -ne 0 ]; then
-    FAIL=$((FAIL+1))
-    FAILED_LIST+=("[$phase] $cmd :: 真发出包却报错")
-    printf '  ✗ %s\n' "$cmd"
-    printf '%s\n' "$out" | sed 's/^/       | /' | head -5
   else
-    PASS=$((PASS+1)); printf '  ✓ %s（真发包）\n' "$cmd"
+    # 没报错：那必须**真的通了**（发了且收到应答）
+    if printf '%s
+' "$out" | grep -qE 'Statistics:[[:space:]]*0 sent'; then
+      nofail=1; FAILED_LIST+=("[$phase] $cmd :: 0 发包却未报失败（假绿回归）")
+    elif printf '%s
+' "$out" | grep -qE 'received, 100% packet loss'; then
+      nofail=1; FAILED_LIST+=("[$phase] $cmd :: 无应答却未报失败（未通不算通过）")
+    fi
+    if [ "$nofail" = 1 ]; then
+      FAIL=$((FAIL+1)); printf '  ✗ %s（未通却算通过）
+' "$cmd"
+      printf '%s
+' "$out" | sed 's/^/       | /' | head -5
+    else
+      PASS=$((PASS+1)); printf '  ✓ %s（真通）
+' "$cmd"
+    fi
   fi
-  printf '=== [%s][ping-coherence] %s\n%s\n\n' "$phase" "$cmd" "$out" >> "$LOG"
+  printf '=== [%s][ping-coherence] %s
+%s
+
+' "$phase" "$cmd" "$out" >> "$LOG"
 }

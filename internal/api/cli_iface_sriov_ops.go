@@ -68,11 +68,14 @@ func (x *cliExecutor) requestSRIOV(user, source string, t []string) string {
 		if len(t) < 4 || t[2] != "vf" {
 			return "%% 语法: request sriov delete-vfs <ifname> vf <n>\n"
 		}
-		if _, err := strconv.Atoi(t[3]); err != nil {
+		vfNo, err := strconv.Atoi(t[3])
+		if err != nil {
 			return "%% vf 编号必须为整数\n"
 		}
-		// VF 回收语义：按配置中的当前 VF 数减一（删除指定编号需 PF 侧逐 VF 操作，
-		// V1 以“数量”为配置面，见决策 #10/契约 §1.2）。
+		// VF 回收语义（附录 A #94）：V1 的 VF 是**数量型**配置，本条按数量回收一个；
+		// 「删除指定编号」需 PF 侧逐 VF 操作，本版未实现。此处**不假装用了 vf <n>**——
+		// 语法上仍要求它（契约如此），但结果里明确说明编号不参与定位，避免操作者以为
+		// 删的是自己指定的那一个（此前只回「数量 %d → %d」，看不出编号被忽略）。
 		cur := 0
 		if cfg, err := x.engine.Committed(); err == nil {
 			for _, ifc := range cfg.Interfaces {
@@ -88,7 +91,9 @@ func (x *cliExecutor) requestSRIOV(user, source string, t []string) string {
 		if err := x.sriov.SetVFCount(context.Background(), ifname, next); err != nil {
 			return "%% " + err.Error() + "\n"
 		}
-		return fmt.Sprintf("接口 %s SR-IOV VF 数量 %d → %d\n", ifname, cur, next)
+		return fmt.Sprintf("接口 %s SR-IOV VF 数量 %d → %d\n"+
+			"  说明：本版按**数量**回收（回收一个）；你给的 vf %d 只用于满足语法，**不参与定位**——\n"+
+			"  从指定编号逐个删除需 PF 侧逐 VF 操作，尚未支持。\n", ifname, cur, next, vfNo)
 	}
 	return fmt.Sprintf("%% 无效命令: request sriov %s（可用：create-vfs|delete-vfs）\n", strings.Join(t, " "))
 }

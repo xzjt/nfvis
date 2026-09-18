@@ -211,15 +211,24 @@ func TestPingZeroSentIsFailure(t *testing.T) {
 		t.Errorf("输出应给出下一步（平面归属 + 宿主侧手段）: %q", out)
 	}
 
-	// 真发出过包就不报错——不能因为出现「0% 丢包」就误判（有发包时那是正常结果）
+	// 有应答 → 真通，不报错
 	if _, err := diagWith(newFakeDiag(), &fakeShell{out: "Statistics: 2 sent, 2 received, 0% packet loss\n"}, nil).
 		Ping(context.Background(), PingRequest{Host: "10.0.0.9"}); err != nil {
-		t.Fatalf("有发包不应报错: %v", err)
+		t.Fatalf("有应答不应报错: %v", err)
 	}
-	// 有发包但全丢：VPP 自己写得明确（100% loss），不重复判失败（本决策只收「0 发包」）
-	if _, err := diagWith(newFakeDiag(), &fakeShell{out: "Statistics: 2 sent, 0 received, 100% packet loss\n"}, nil).
-		Ping(context.Background(), PingRequest{Host: "10.0.0.9"}); err != nil {
-		t.Fatalf("有发包时不得由本检查判失败: %v", err)
+	// 有发包但一个应答都没有：**也要判失败**（附录 A #93）——ping 是连通性测试，没通就是失败；
+	// 否则 `ping <不可达>` 返回 0，调用方与判定侧都会以为通了。真机实测：VPP ping 自己的
+	// 回环地址也是 `2 sent, 0 received`。
+	uo, uerr := diagWith(newFakeDiag(), &fakeShell{out: "Statistics: 2 sent, 0 received, 100% packet loss\n"}, nil).
+		Ping(context.Background(), PingRequest{Host: "10.0.0.9"})
+	if uerr == nil {
+		t.Fatal("发出但无应答必须报错")
+	}
+	if !strings.Contains(uerr.Error(), "无应答") {
+		t.Errorf("应说明是「发了没回」而非「没发出去」: %v", uerr)
+	}
+	if !strings.Contains(uo, "已从 VPP 发出") || !strings.Contains(uo, "10.0.0.9") {
+		t.Errorf("输出应给出下一步（对端在线/放行 ICMP/路由）: %q", uo)
 	}
 	// **判不出就不判**：输出格式变化（无汇总行）时不得制造假红
 	if _, err := diagWith(newFakeDiag(), &fakeShell{out: "some other output\n"}, nil).
