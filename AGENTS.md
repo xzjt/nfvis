@@ -35,6 +35,11 @@
   且**两口现由产品声明**（`set vpp dpdk dev` + `request vpp restart`；2026-09-18 决策 #100 修好了发现 #8，
   此前只能带外手写 startup.conf）。口名→PCI 记在 `/var/lib/nfvis/dpdk-bindings.json`。
   跑集成测试前先 `systemctl restart vpp`（残留拓扑会污染用例）；集成测试 `make integration`（CI 不跑）。
+  ⚠️ **2026-09-18 为跑集成测试调过布局**（跑前必读 `docs/V1-收尾待办.md` §0 第 1 条）：
+  VPP 在**核 4/5**、隔离池 `1-5`、`1G×2 + 2M×768`、`vpp.memory.hugepage_preference=2M`（**1G 页留给 VM**，
+  否则 VM 报 `Cannot allocate memory`）；镜像仓库有 `alpine.qcow2` 与 `debian-12-genericcloud-amd64.qcow2`（均 ready）。
+  **`alpine` 那份挂不上 NoCloud seed**（内核无 iso9660，见待办 §2.13 #17），VM 类集成用例要用能挂 seed 的镜像；
+  跑 `make integration` 前 `systemctl stop nfvis`（避免守护进程与测试同时驱动 VPP），并确认 1G 页 `free ≥ 1`。
   设计基线在 `docs/`，**不要凭记忆重设计**。
 - 已定决策 103 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
 - **V1 验收收口**：`docs/V1-验收检查表.md` 把规格书 **109 条 FR** 逐条对照证据
