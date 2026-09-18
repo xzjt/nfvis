@@ -155,6 +155,17 @@ func (s *Store) Lookup(name string) (config.ImageInfo, bool) {
 	return config.ImageInfo{Name: m.Name, Type: m.Type}, true
 }
 
+// Names 返回仓库现有镜像名（按名升序）。实现 config.ImageResolver，
+// 供「镜像不存在」的报错列出可选项（附录 A #98）。
+func (s *Store) Names() []string {
+	metas := s.List()
+	out := make([]string, 0, len(metas))
+	for _, m := range metas {
+		out = append(out, m.Name)
+	}
+	return out
+}
+
 // List 返回全部镜像（按名升序）。
 func (s *Store) List() []Meta {
 	s.mu.Lock()

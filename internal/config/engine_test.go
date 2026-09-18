@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -657,6 +658,15 @@ func TestEngineMergeCandidate(t *testing.T) {
 
 type mockImages map[string]ImageInfo
 
+func (m mockImages) Names() []string {
+	var out []string
+	for n := range m {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (m mockImages) Lookup(name string) (ImageInfo, bool) {
 	i, ok := m[name]
 	return i, ok
@@ -782,3 +792,58 @@ func TestEngineNumaWarning(t *testing.T) {
 }
 
 func intPtr(n int) *int { return &n }
+
+// TestImageMissingMessageIsActionable（附录 A #98）：「镜像不存在」的报错要能照着排查——
+// 列出仓库现有镜像；容器镜像再点出「可用名是 tar 内嵌 tag，与上传目录项名不一致时两个名字都不可用」
+// 这个已知陷阱（真机踩过：用目录名 → Docker API 404；用 tag → 校验拒「不存在」）。
+func TestImageMissingMessageIsActionable(t *testing.T) {
+	images := mockImages{
+		"alpine-ct": {Name: "alpine-ct", Type: "container-image"},
+		"ubuntu-vm": {Name: "ubuntu-vm", Type: "vm-image"},
+	}
+	e, _, _ := newEngineWithExternals(t, images, nil)
+	sess := Session{User: "admin", Source: "ssh"}
+	if err := e.Edit(sess); err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	cfg := baseCommitted()
+	cfg.ResourcePools = poolsFor()
+	cfg.ContainerFunctions = []model.ContainerFunction{{
+		Name: "ct1", Image: "alpine:3.20", VCPU: 1, MemoryMB: 128,
+	}}
+	if err := e.UpdateCandidate(sess, cfg); err != nil {
+		t.Fatalf("UpdateCandidate: %v", err)
+	}
+
+	_, err := e.Commit(context.Background(), sess, CommitOpts{})
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("应报镜像不存在: %v", err)
+	}
+	msg := fmt.Sprint(ve.Errors)
+	if !strings.Contains(msg, "alpine-ct") || !strings.Contains(msg, "ubuntu-vm") {
+		t.Errorf("应列出仓库现有镜像: %v", msg)
+	}
+	if !strings.Contains(msg, "tar 内嵌 tag") {
+		t.Errorf("容器镜像缺失应点出入口名/tag 口径: %v", msg)
+	}
+
+	// VM 镜像缺失：列出可选项，但不套用容器的那句口径
+	cfg.ContainerFunctions = nil
+	cfg.VirtualMachineFunctions = []model.VMFunction{{
+		Name: "vm1", Image: "ghost", VCPU: model.VMCpu{Count: 1}, Memory: model.VMMemory{SizeMB: 1024},
+	}}
+	_ = e.UpdateCandidate(sess, cfg)
+	_ = e.UpdateCandidate(sess, cfg)
+	_, err = e.Commit(context.Background(), sess, CommitOpts{})
+	if !errors.As(err, &ve) {
+		t.Fatalf("应报镜像不存在: %v", err)
+	}
+	msg = fmt.Sprint(ve.Errors)
+	if !strings.Contains(msg, "ubuntu-vm") {
+		t.Errorf("应列出仓库现有镜像: %v", msg)
+	}
+	if strings.Contains(msg, "tar 内嵌 tag") {
+		t.Errorf("VM 镜像不应套用容器口径: %v", msg)
+	}
+}
