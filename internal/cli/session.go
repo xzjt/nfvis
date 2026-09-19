@@ -28,6 +28,8 @@ type Backend interface {
 	Logout() error
 	// DialConsole 连接串口 WebSocket（M4-12，FR-CMP-014）；wsPath 来自 Result.Console。
 	DialConsole(wsPath string) (io.ReadWriteCloser, error)
+	// MetricsText 拉取 /api/v1/metrics 原始文本（setup 向导读主机事实，决策 #107）。
+	MetricsText() (string, error)
 }
 
 // Session CLI 会话：本地维护模式/层级（渲染提示符与补全上下文），
@@ -94,6 +96,11 @@ func (s *Session) Teardown() []string {
 // DialConsole 连接串口 WebSocket（M4-12，FR-CMP-014）；wsPath 来自 ExecuteFull 的接管请求。
 func (s *Session) DialConsole(wsPath string) (io.ReadWriteCloser, error) {
 	return s.client.DialConsole(wsPath)
+}
+
+// MetricsText 透传主机指标原始文本（setup 向导的事实源，决策 #107）。
+func (s *Session) MetricsText() (string, error) {
+	return s.client.MetricsText()
 }
 
 // Prompt 渲染当前提示符（oper: nfvis>；config: [edit path] nfvis#）。

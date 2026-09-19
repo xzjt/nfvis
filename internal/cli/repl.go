@@ -69,6 +69,16 @@ func (r *REPL) Run() error {
 			prompt = r.session.Prompt()
 			continue
 		}
+		if isWizard(trimmed) { // 初始化向导：CLI 端交互编排（决策 #107）；须挂起 raw 才能按行读答案
+			interactive := r.editor.IsRaw() // 先取状态再挂起——Suspend 会把 raw 关掉
+			wasRaw := r.editor.Suspend()
+			if err := RunWizard(r.session, interactive, os.Stdin, r.out); err != nil {
+				fmt.Fprintf(r.out, "%% %v\n", err)
+			}
+			r.editor.Resume(wasRaw)
+			prompt = r.session.Prompt()
+			continue
+		}
 		if strings.HasSuffix(line, "\t") { // 非 raw 退化的 Tab 补全
 			line = r.session.CompleteLine(line)
 		}

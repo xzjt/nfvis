@@ -36,6 +36,9 @@ func (stubClient) DialConsole(wsPath string) (io.ReadWriteCloser, error) {
 	return nil, errors.New("stub 不支持 console")
 }
 
+// MetricsText 补全/会话单测不涉及向导事实（setup_test 用自己的 fake）。
+func (stubClient) MetricsText() (string, error) { return "", nil }
+
 func newTestSession(mode string) *Session {
 	s := New(stubClient{}, "ssh")
 	s.Mode = mode

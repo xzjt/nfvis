@@ -178,6 +178,7 @@
 | `ping <host> [source <ip>] [count <n>] [vrf <name>]` | 经 VPP L3 连通性测试 | O | `vppctl ping`（CLI socket） | ✅（`source` 须为 **VPP 接口**地址；`vrf` 经 VPP 路径） |
 | `traceroute <host> [vrf <name>]` | 路径跟踪 | O | 宿主侧 raw ICMP | ✅（`vrf` **不支持**并明确报错，附录 A #36） |
 | `monitor interfaces <ifname> [interval <sec>]` | 实时刷新计数（Ctrl-C 退出） | O | 服务端单次快照 + 前端轮询 | ✅ |
+| `wizard` | 初始化向导：问答规划资源池+内核基线并提交（CLI 端交互；非 TTY 拒绝） |
 | `monitor vnf <name>` | 跟踪 VNF 状态/事件 | O | 运行态 | ✅ |
 | `clear interfaces statistics [<ifname>]` | 清零统计计数 | S | 运行态（VPP） | ✅ |
 | `start shell` | 进入系统 shell（仅本地控制台） | S | 宿主 shell | ✅（SSH 登录禁用） |

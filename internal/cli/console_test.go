@@ -39,6 +39,8 @@ func (s *consoleStub) Execute(line, source string) (cliclient.Result, error) {
 }
 func (s *consoleStub) DynamicCandidates(string) ([]string, error) { return nil, nil }
 func (s *consoleStub) Logout() error                              { return nil }
+func (s *consoleStub) MetricsText() (string, error)               { return "", nil }
+
 func (s *consoleStub) DialConsole(wsPath string) (io.ReadWriteCloser, error) {
 	s.dialed = append(s.dialed, wsPath)
 	if s.dialErr != nil {

@@ -94,7 +94,7 @@ func (x *cliExecutor) renderHostMetrics(kind string) string {
 		d := time.Duration(v) * time.Second
 		return fmt.Sprintf("uptime         %s（%s）\n", d.Truncate(time.Second), formatUptime(d))
 	case "cpu":
-		return line("cpu-util", "nfvis_system_cpu_utilization_ratio", "%.4f")
+		return line("cpu-count", "nfvis_system_cpu_online_count", "%.0f") + line("cpu-util", "nfvis_system_cpu_utilization_ratio", "%.4f")
 	case "memory":
 		var b strings.Builder
 		b.WriteString(line("mem-total", "nfvis_system_memory_total_bytes", "%.0f"))

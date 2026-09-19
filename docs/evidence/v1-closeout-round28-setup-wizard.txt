@@ -1,0 +1,72 @@
+===== V1 收尾第二十八轮：`wizard` 初始化向导（CLI 端交互编排）=====
+日期：2026-09-19
+性质：改 internal/cli（新增 setup.go）、internal/{api,schema,metrics}、pkg/cliclient、cmd/nfvis-cli；
+决策 #107。**无新 API 端点**（与 monitor 的「CLI 端轮询」同类先例，openapi 不动）。
+
+----- 1. 交互设计（决策 #107）-----
+
+入口：交互式 nfvis-cli 顶级命令 **`wizard`**（精确匹配，无前缀缩写）。
+流程：TTY 感知 → 读事实（/metrics + committed JSON）→ 四问（Enter 取默认、q 中止）→
+展示计划与语句清单 → 确认 → 逐条执行既有语句 → 重启与后续动作提示。
+
+问题与默认值：
+  1/4 隔离核      [默认 2-末核（保留 0-1 给宿主/管理面）；3 核机=2；不足以保留 2 核则要求显式输入]
+  2/4 VPP 主/工作 [默认隔离范围最大核/次大核；须在隔离核内（提前给可读原因，不等 commit）]
+  3/4 1G 页数     [默认沿用既有池；否则 min(RAM_GB/4,8) 钳 1~8]；2M 页数 [默认既有/768，0=不配]
+  4/4 低延迟      [默认 false；代价一句话明说]
+
+事实源：/api/v1/metrics 的 `nfvis_system_cpu_online_count`（本轮新增采集）与
+`nfvis_system_memory_total_bytes`（既有）；解析 prometheus 文本而非 show 表格
+（决策 #85：工具自错制造假红的教训）。committed 现状经 `show configuration | display json`。
+**不绕过任何校验**：向导只是语句生成器，commit 校验（FR-CMP-001：VPP 线程 ⊆ 隔离核、
+preference 与池一致）与 apply 护栏（决策 #104）原样生效，并在向导阶段就提前给出同口径的
+可读错误（宿主核不足 / 线程不在隔离核内）。
+**范围外（明示）**：数据口绑定/声明、管理口；结束时打印重启后固定动作清单。
+
+----- 2. 命名改定的原因（变异发现）-----
+
+初版命名 `setup`，真机联调时被单测抓到：oper 模式的无歧义前缀规整（FR-CLI-004）把 **`set`**
+展开成 `setup`（前 3 字符即无歧义）——TestCLISyslogHostRejectsInvalid 在 oper 模式敲
+`set system syslog host …` 期望「未知命令」，实际进了向导指引。这会让 configure 前的
+`set` 笔误静默进入向导，属命令树与行为漂移。改名 **`wizard`**（与既有操作词无前缀纠葛），
+并回归验证：oper 模式 `set …` 仍报 `% 无效命令`。
+
+----- 3. 真机 pty 验证（nfvis 1.1.18；交互行为必须 pty——决策 #81）-----
+
+① **全流程**（pty 驱动 nfvis-cli 登录 → wizard → 七个问句全取默认）：
+
+    本机事实：在线核 6 个；内存 7 GB；committed 现有大页池 1G×2 2M×768。
+    1/4 隔离核 [默认 2-5] → 2/4 VPP 主 [默认 5] / 工作 [默认 4]
+    → 3/4 1G [默认 2] / 2M [默认 768] → 4/4 低延迟 [默认 false]
+    —— 将提交以下语句 ——（configure/两组大页/isolated 2-5/main 5/worker 4/preference 2M/
+                            top/commit/request system kernel apply）
+    确认提交？[yes/no] → commit 成功 (revision 8) → apply 执行 → 向导完成 + 重启提示
+
+   no-op 处理：值与 committed 相同的 set 打印「语句未产生配置变更」——向导视其为良性
+   继续（在已配置机器上重跑向导属预期场景），真实错误仍即停并提示 candidate 保留。
+② **非 TTY 拒绝**：管道输入 `wizard` → 「需要在终端（TTY）中运行…用 set/request 语句手工完成」，
+   不读输入、不挂起、不执行任何变更语句。
+③ **前缀回归**：oper 模式 `set system syslog host …` → `% 无效命令`（不再进向导）。
+④ 服务端（REST/脚本路径无法交互）：`wizard` 经操作树规整后命中指引
+   「仅可在交互式 nfvis-cli 终端执行」（真实交互 CLI 在本地拦截，不会走到这里）。
+
+----- 4. 单测（internal/cli/setup_test.go + api）-----
+
+计划推导：6 核默认（2-5/5/4/1G=1/2M=768/2M pref）、3 核（隔离 1 核、无工作线程）、
+2 核（给不出默认，要求显式输入）；护栏同口径拒绝（宿主仅剩 1 核、线程不在隔离核、越界核）；
+仅 1G 池时 preference 落 1G；parseMetricsValue；非 TTY 拒绝；全流程语句序列（fake backend
+捕获）；q 中止不执行变更语句；commit 失败即停并提示 candidate 保留。
+
+----- 5. 过程问题（如实登记）-----
+
+- 顺序 bug：REPL 里先 `Suspend()` 再 `IsRaw()`——Suspend 已把 raw 关掉，pty 里被判非交互。
+  pty 验证当场抓住（决策 #81 的要求再次生效），改为先取状态再挂起。
+- 开发机 make check 两次触发分页文件不足（Windows OOM），按 AGENTS 口径 `GOFLAGS=-p=1` 通过；
+  发现并修复 heredoc 反斜杠被吃导致的插桩损坏（红线 #4——补丁一律 Write 落文件再执行）。
+
+----- 6. 环境现状（2026-09-19 交班）-----
+
+- nfvis **1.1.18** active（admin `Nfvis@Test2026`）；committed rev 8（值与 rev 7 等价：
+  1G×2 + 2M×768、isolated 2-5、vpp 4/5、preference 2M、low-latency false）
+- cmdline 双池全参数（round27 已重启验证）；数据面两口 up；镜像齐备
+- 底座/工具不变；/root/ev-wizard-pty.txt 为本轮 pty 证据

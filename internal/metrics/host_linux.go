@@ -20,7 +20,42 @@ func HostMetrics() []Sample {
 	if up, ok := uptimeSeconds(); ok {
 		out = append(out, Sample{Name: "nfvis_system_uptime_seconds", Help: "主机运行时长（秒）", Type: "gauge", Value: up})
 	}
+	if n, ok := onlineCPUCount(); ok {
+		out = append(out, Sample{Name: "nfvis_system_cpu_online_count", Help: "在线 CPU 核数", Type: "gauge", Value: n})
+	}
 	return out
+}
+
+// onlineCPUCount 读 /sys/devices/system/cpu/online 的在线核数（"0-5" → 6）。
+// setup 向导用它与内存总量推导资源池默认值（决策 #107）。
+func onlineCPUCount() (float64, bool) {
+	b, err := os.ReadFile("/sys/devices/system/cpu/online")
+	if err != nil {
+		return 0, false
+	}
+	n := 0
+	for _, part := range strings.Split(strings.TrimSpace(string(b)), ",") {
+		if part == "" {
+			continue
+		}
+		if lo, hi, ok := strings.Cut(part, "-"); ok {
+			a, e1 := strconv.Atoi(lo)
+			z, e2 := strconv.Atoi(hi)
+			if e1 != nil || e2 != nil || a > z {
+				return 0, false
+			}
+			n += z - a + 1
+			continue
+		}
+		if _, e := strconv.Atoi(part); e != nil {
+			return 0, false
+		}
+		n++
+	}
+	if n == 0 {
+		return 0, false
+	}
+	return float64(n), true
 }
 
 // uptimeSeconds 读取 /proc/uptime 的第一列（秒）。
