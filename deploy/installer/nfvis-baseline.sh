@@ -12,6 +12,13 @@
 #   nfvis-baseline.sh --defaults                   # 保守默认：1G 页 = min(RAM_GB/4, 8)，不设 isolcpus
 #   nfvis-baseline.sh --rollback                   # 恢复上一次片段（无备份则删除片段）
 #
+# 生成器会按本机事实自动补全（补全值与显式参数同名冲突时以显式为准）：
+#   - CPU 厂商参数（intel_iommu=on intel_pstate=disable / amd_iommu=on amd_pstate=disable + iommu=pt）；
+#   - 设了隔离核时补 irqaffinity=<非隔离核>（中断亲和到非隔离核）；
+#   - 内核无 nohz_full 支持（未编入 CONFIG_NO_HZ_FULL）时省略 nohz_full/rcu_nocbs。
+# 护栏：隔离核必须落在本机在线核内，且非隔离核至少保留 2 个（内核/中断/管理面），
+#       否则生成被拒绝——isolcpus 写错要重启才会暴露，且是进不了系统级别。
+#
 # 幂等：内容不变则不重写、不跑 update-grub；写入前备份到 /var/lib/nfvis/kernel-baseline.bak；
 # update-grub 失败自动回退片段，不留下未生效的 GRUB 配置。变更需重启生效。
 set -eu
@@ -21,6 +28,9 @@ FRAG="/etc/default/grub.d/99-nfvis.cfg"
 BAK="/var/lib/nfvis/kernel-baseline.bak"
 FSTAB="/etc/fstab"
 MARK="# nfvis-hugepages"
+# 生成器 stderr 的暂存（apply 时把校验失败原因原样带给操作者，而不是一句笼统的"失败"）
+ERRFILE=$(mktemp)
+trap 'rm -f "$ERRFILE"' EXIT
 
 log() { echo "nfvis-baseline: $*"; }
 die() { echo "nfvis-baseline: $*" >&2; exit 1; }
@@ -47,6 +57,7 @@ done
 # 1) 报告当前一致性（读 /proc，不写系统）
 check() {
     log "内核基线检查："
+    log "  本机：CPU 厂商 $(awk -F': ' '/^vendor_id/{print $2; exit}' /proc/cpuinfo 2>/dev/null || echo 未知)、在线核 $(cat /sys/devices/system/cpu/online 2>/dev/null || echo 未知)、nohz_full 支持 $([ -e /sys/devices/system/cpu/nohz_full ] && echo 是 || echo 未见)"
     if [ -f "$FRAG" ]; then
         log "  片段存在：$FRAG"
         log "  期望参数：$(grep -o 'GRUB_CMDLINE_LINUX=.*' "$FRAG" | head -1)"
@@ -91,7 +102,9 @@ apply() {
     [ -n "$TUNED" ] && GEN_ARGS="$GEN_ARGS --tuned-profile $TUNED"
     [ -n "$PARAMS" ] && GEN_ARGS="$GEN_ARGS --kernel-params \"$PARAMS\""
 
-    OUT=$(eval "$NFVISD $GEN_ARGS") || die "生成基线失败"
+    OUT=$(eval "$NFVISD $GEN_ARGS" 2>"$ERRFILE") || die "$(cat "$ERRFILE")"
+    [ -s "$ERRFILE" ] && log "生成器警告：$(cat "$ERRFILE")"
+    rm -f "$ERRFILE"
     FRAG_NEW=$(printf '%s\n' "$OUT" | sed '/^---FSTAB---$/,$d')
     FSTAB_NEW=$(printf '%s\n' "$OUT" | sed -n '/^---FSTAB---$/,$p' | sed '1d')
 

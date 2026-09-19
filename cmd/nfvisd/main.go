@@ -81,6 +81,13 @@ func run() error {
 			extra = strings.Fields(*extraParams)
 		}
 		d := system.DesiredFromConfig(pageSize, count, *isoCores, "", *thp, *iommu, *tuned, extra)
+		d = system.EnrichDesired(d, "/")
+		// 护栏：隔离核配置不合法（把核全隔离/越界）直接拒绝——写进 GRUB 要重启才会暴露，
+		// 那时已进不了系统。报错走 stderr（stdout 是安装脚本要捕获的片段）。
+		if err := system.ValidateDesired(d, "/"); err != nil {
+			fmt.Fprintln(os.Stderr, "nfvisd: "+err.Error())
+			os.Exit(1)
+		}
 		frag, fstab := system.GenerateBaseline(d)
 		fmt.Print(frag)
 		fmt.Println("---FSTAB---")

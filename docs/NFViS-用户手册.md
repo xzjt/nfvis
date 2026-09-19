@@ -181,8 +181,14 @@ nfvis-cli -server https://127.0.0.1:443 -u admin -c "request system reboot"
 
 - 脚本幂等：内容不变则不重写、不跑 `update-grub`；写入前备份到 `/var/lib/nfvis/kernel-baseline.bak`，
   `update-grub` 失败会自动回退片段（不留未生效配置）。
+- 生成器按**本机事实**自动补全（补全值与显式参数同名冲突时，以显式为准）：
+  - CPU 厂商参数——Intel 补 `intel_iommu=on intel_pstate=disable`，AMD 补 `amd_iommu=on amd_pstate=disable`，两者都补 `iommu=pt`；
+  - 设了隔离核时补 `irqaffinity=<非隔离核>`（中断亲和到非隔离核上）；
+  - 内核未编入 nohz_full 支持时省略 `nohz_full=`/`rcu_nocbs=`（写了也只会被内核忽略）。
+- **隔离核护栏**：隔离核必须都在本机在线核内，且**非隔离核至少保留 2 个**（内核/中断/管理面需要），
+  否则生成被拒绝、什么都不会写——`isolcpus` 写错要重启才会暴露，且是「进不了系统」级别。
 - GRUB 片段：`/etc/default/grub.d/99-nfvis.cfg`；fstab 大页挂载行带 `# nfvis-hugepages` 标记。
-- 生效后核对：`grep -E 'hugepages|isolcpus' /proc/cmdline`；`grep HugePages_Total /proc/meminfo`。
+- 生效后核对：`grep -E 'hugepages|isolcpus|irqaffinity' /proc/cmdline`；`grep HugePages_Total /proc/meminfo`。
 - CLI 自检：`show system kernel` 给出**三方对照**（cmdline / 运行实际 / 配置期望）。
 
 > **大页数量规划**：VNF 内存从大页池分配，1 台 1G 内存的 VM 就占 1 个 1G 大页。
