@@ -51,8 +51,13 @@ func (a *BaselineApplier) path(rel string) string {
 
 // Apply 写入基线；返回备份路径（空表示此前无片段）。update-grub 失败时保留已写片段
 // 并回滚片段内容，避免半成品基线留在系统里。
+// 写入前先 ValidateDesired（护栏，两条写路径共用）再 EnrichDesired（真机补全）——
+// 保证经 CLI 写出的片段与安装器产出同源。
 func (a *BaselineApplier) Apply(d KernelDesired) (string, error) {
-	frag, fstabLine := GenerateBaseline(d)
+	if err := ValidateDesired(d, a.Root); err != nil {
+		return "", err
+	}
+	frag, fstabLine := GenerateBaseline(EnrichDesired(d, a.Root))
 	fragPath := a.path(grubFragmentRel)
 	backup := a.path(grubBackupRel)
 
@@ -194,4 +199,6 @@ func (a *BaselineApplier) stripLegacyGrubParams() error {
 }
 
 // legacyParamRe 匹配 nfvis 托管的启动参数（含前导空格）。
-var legacyParamRe = regexp.MustCompile(` ?(default_hugepagesz|hugepagesz|hugepages|isolcpus|nohz_full|rcu_nocbs|nmi_watchdog|transparent_hugepage)=[^ "]*`)
+// 覆盖 GenerateBaseline 可能产出的全部参数名：旧片段/主 grub 里若残留同名参数，
+// 不摘除会与片段重复注入（cmdline 同名参数以最后一个为准）。
+var legacyParamRe = regexp.MustCompile(` ?(default_hugepagesz|hugepagesz|hugepages|isolcpus|nohz_full|rcu_nocbs|irqaffinity|nmi_watchdog|transparent_hugepage|iommu|intel_iommu|amd_iommu|intel_pstate|amd_pstate)=[^ "]*`)

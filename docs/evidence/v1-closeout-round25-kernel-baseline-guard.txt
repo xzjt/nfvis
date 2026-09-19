@@ -1,0 +1,94 @@
+===== V1 收尾第二十五轮：内核基线的真机补全与护栏（vendor / irqaffinity / nohz_full 探测 / 隔离核下限）=====
+日期：2026-09-19
+性质：改 `internal/system`（kernel.go/kernel_apply.go + 新增 kernel_enrich.go）、`cmd/nfvisd`（print 路径）、
+`deploy/installer/nfvis-baseline.sh`。**CLI 命令面与 API 不变**（无新命令、无新参数）。
+背景：`isolcpus` 此前一直未设（postinst 只提示「内核命令行未见 isolcpus」），安装期/CLI 写基线
+均不生成 vendor 参数与 irqaffinity，且**没有任何护栏**拦「把核全隔离」这类重启后才暴露、
+且是「进不了系统」级别的配置错误。
+
+----- 1. 做了什么（设计口径见规格书附录 A 决策 #104）-----
+
+**EnrichDesired(d, root)**——以真机事实补全期望基线，**两条写路径统一调用**（安装器
+`nfvisd -print-kernel-baseline` 与 CLI `request system kernel apply → BaselineApplier.Apply`），
+保证「首次装机」与「后续调整」同源，安装器不另起一套参数来源：
+
+① 按 /proc/cpuinfo 的 vendor_id 补厂商默认参数（NFV 底座常规基线）：
+   GenuineIntel → `intel_iommu=on intel_pstate=disable iommu=pt`
+   AuthenticAMD → `amd_iommu=on amd_pstate=disable iommu=pt`
+   与显式设置（IOMMU 字段 / params 逃生口）**同名冲突时以用户为准**（按参数名去重——
+   内核对同名参数取最后一个，补全必须排在显式之后且不重复注入）；
+② 隔离核非空时补 `irqaffinity=<非隔离核>`（中断亲和到非隔离核，取在线核中隔离核的补集；
+   用户已给 irqaffinity 则不覆盖）；
+③ 探测内核是否编入 CONFIG_NO_HZ_FULL（`/sys/devices/system/cpu/nohz_full` 是否存在，
+   回退 /boot/config-$(uname -r)）：不支持则**省略** nohz_full/rcu_nocbs——写了只是被内核
+   忽略的白噪音，不给操作者「已优化」的错觉；两者都探测不到时按「支持」处理（保持既有行为）。
+
+**ValidateDesired(d, root)**——写盘前的护栏（同样两条路径共用）：核号必须都在本机在线核内；
+**非隔离核至少保留 2 个**（内核自身与不可迁移线程、中断处理、管理面 nfvisd/libvirt/docker/SSH，
+且 irqaffinity 需要非隔离核作落点）。`params` 逃生口里的 `isolcpus=` 也校验（它排在后面、实际生效）。
+在线核读不到时不下判断（非常规环境）。识别不了厂商/读不到在线核时补全**保持原样**，不猜测。
+
+**show system kernel 的三方对照不做补全**（有意）：irqaffinity 与 vendor 参数是真机派生默认，
+不是配置期望——参与对照会把主机差异误报成「配置与基线不一致」。
+
+`GenerateBaseline` 保持纯函数（新增 KernelDesired.IRQAffinity / NoHZFull 两个字段）；
+`legacyParamRe`（主 grub 一次性迁移的摘除清单）补上新参数名 iommu/irqaffinity/intel_iommu/
+amd_iommu/intel_pstate/amd_pstate——旧片段或主 grub 残留同名参数会与片段重复注入。
+脚本 `--check` 增打一行真机事实（CPU 厂商 / 在线核 / nohz_full 支持）；`--apply` 把生成器的
+校验报错**原样透传**给操作者（此前是笼统的「生成基线失败」）。
+
+----- 2. 单测（internal/system/kernel_enrich_test.go，红-绿已验）-----
+
+vendor 三分支 + 未知厂商不加参数；同名参数以用户为准（IOMMU 字段与逃生口两处）；
+irqaffinity 补集（在线 0-5 隔离 1-3 → `0,4-5`）、用户已给不覆盖、在线核未知不写；
+nohz_full 探测四分支（sysfs 有 / config 有 / config 无 / 都拿不到按支持）；
+生成器：NoHZFull=false 时省略 nohz_full/rcu_nocbs 而 isolcpus/irqaffinity 照写、未探测（nil）保持既有行为；
+护栏：隔离全部核、只留 1 个核、越界核、非法列表、**逃生口里的 isolcpus=** 全部拒绝，
+Apply 被拒时**不落任何盘、不跑 update-grub**；重叠区间按去重计数。
+**变异验证**：把护栏下限从 2 改成 0，TestValidateDesired 变红；还原后回绿。
+
+----- 3. 真机验证（nfvis-vm，Intel 6 核，未重启，结束已恢复原状）-----
+
+⚠️ 环境注：nfvis-vm 在 2026-09-19 又被还原为**全新 Ubuntu Server 26.04**（无 nfvis/无底座/无 Go；
+`/root` 只剩源码树与 vpp deb），cmdline 无大页参数、GRUB 无 99-nfvis.cfg、fstab 无大页行——
+恰好回到「装一遍」的起点，本轮验证只在裸底座上做（只需 Go 构建出 nfvisd，已按文档流程
+`apt-get install -y golang-go` 重装）。**集成测试的布局（镜像仓库、VPP 4/5、大页、DPDK 绑定）全部不在了，
+下个会话要跑任何真机用例前须按 §3.3 重装底座**。
+
+① **print 路径补全**（`-print-kernel-baseline --hugepages-1g 2 --isolated-cores 1-3`）：
+
+    GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} default_hugepagesz=1G hugepagesz=1G hugepages=2
+        isolcpus=1-3 nohz_full=1-3 rcu_nocbs=1-3 irqaffinity=0,4-5
+        intel_iommu=on intel_pstate=disable iommu=pt"
+    ---FSTAB---
+    nodev /dev/hugepages hugetlbfs defaults,pagesize=1G 0 0
+
+   真机事实：vendor_id=GenuineIntel、在线核 0-5（补集恰为 0,4-5）、nohz_full sysfs 存在（7.0 内核）→ 三项补全各自正确。
+② **护栏全部拒绝且退出码 1（不经管道量取）**：
+   `--isolated-cores 0-5` → rc=1、**stdout 0 字节**（脚本不会把拒绝当片段写盘）、
+   stderr `隔离核 0-5 会把本机 6 个核几乎全部隔离（只剩 0 个非隔离核），至少需保留 2 个给内核/中断/管理面；请缩小隔离核范围`；
+   `--isolated-cores 7` → `隔离核含本机不存在的核 7（本机在线核：0-5）`；
+   `--isolated-cores 1-5`（只留 1 个）→ 同样拒绝；
+   `--kernel-params "isolcpus=0-5"`（逃生口）→ 同样拒绝。
+③ **脚本 --check**：新真机事实行 `本机：CPU 厂商 GenuineIntel、在线核 0-5、nohz_full 支持 是`。
+④ **脚本 --apply**（NFVISD=/tmp/nfvisd-new）：片段与 fstab 落盘、update-grub 成功，片段内容与 ① 一致；
+   顺带验证了脚本自身守卫：未装 nfvisd 且未给 NFVISD 时明确报 `找不到 /usr/bin/nfvisd（先安装 nfvis 包，
+   或用 NFVISD=… 指定）`（第一次跑忘了 export 环境变量，被它挡下）。
+⑤ **脚本 --rollback**（无备份 → 删片段）+ 手工清 fstab 残留：片段消失、fstab 与 pristine 逐字节一致、
+   /proc/cmdline 与开测前相同（未重启）。
+
+----- 4. 未验与残留（如实登记）-----
+
+- **重启生效未验**：本机未被允许重启（还原后的干净状态不动），新参数进 /proc/cmdline 的实测留给
+  下一次「装一遍」门槛（写 GRUB→重启→核对 cmdline 的机制本身已由历史装机多次证实）。
+- **CLI 路径的真机未单独跑**（`request system kernel apply`）：产品未安装在还原后的机器上；
+  该路径与安装器共用同一 ValidateDesired + EnrichDesired（BaselineApplier.Apply），
+  已由 TestApplyValidatesAndEnriches 单测覆盖（含「被拒不落盘、不跑 update-grub」）。
+- 还原后的机器上本轮安装了 golang-go（构建所需，属文档「按需装底座」项）。
+
+----- 5. 交给下一个会话 -----
+- nfvis-vm 处于裸底座状态（Ubuntu 26.04 + golang-go + /root/src 本轮分支源码 + /root/vpp-v26.06-deb）。
+  要跑集成/冒烟，按 `V1-收尾待办.md` §3.3 重装底座（libvirt/qemu/docker/VPP/cloud-image-utils/modprobe vfio-pci），
+  并重下镜像——**注意 #17 的结论：guest 类用例要用完整内核的 debian-12-generic-amd64.qcow2**（round24 已验证可用，
+  sha512 见其 §3；alpine 与 genericcloud 因缺 ahci 不可用）。
+- 本轮产物未动环境：无 GRUB 片段、fstab 原样、未重启。

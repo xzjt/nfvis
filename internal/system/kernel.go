@@ -21,6 +21,8 @@ type KernelDesired struct {
 	Hugepages1G   int    // default_hugepagesz=1G hugepagesz=1G hugepages=N
 	Hugepages2M   int    // hugepages=N（2M 默认页）
 	IsolatedCores string // isolcpus=<list>
+	IRQAffinity   string // irqaffinity=<非隔离核>（EnrichDesired 按真机在线核派生；空 = 不写）
+	NoHZFull      *bool  // nil = 未探测（按支持处理）；false = 内核无 CONFIG_NO_HZ_FULL，省略 nohz_full/rcu_nocbs
 	NMIWatchdog   *bool  // nil = 不托管（保留现状）
 	THP           string // always|madvise|never；空 = 不托管
 	IOMMU         string // on|off|pt；空 = 不托管
@@ -128,7 +130,16 @@ func GenerateBaseline(d KernelDesired) (grubFragment string, fstabLine string) {
 		params = append(params, fmt.Sprintf("hugepages=%d", d.Hugepages2M))
 	}
 	if d.IsolatedCores != "" {
-		params = append(params, "isolcpus="+d.IsolatedCores, "nohz_full="+d.IsolatedCores, "rcu_nocbs="+d.IsolatedCores)
+		params = append(params, "isolcpus="+d.IsolatedCores)
+		// nohz_full/rcu_nocbs 依赖内核编入 CONFIG_NO_HZ_FULL（探测见 kernel_enrich.go）：
+		// 不支持时省略——写了也只是被内核忽略的白噪音，但不给操作者「已优化」的错觉。
+		if d.NoHZFull == nil || *d.NoHZFull {
+			params = append(params, "nohz_full="+d.IsolatedCores, "rcu_nocbs="+d.IsolatedCores)
+		}
+	}
+	if d.IRQAffinity != "" {
+		// 中断默认亲和到非隔离核（与 isolcpus 成对；补集由 EnrichDesired 按在线核算出）
+		params = append(params, "irqaffinity="+d.IRQAffinity)
 	}
 	if d.NMIWatchdog != nil && !*d.NMIWatchdog {
 		params = append(params, "nmi_watchdog=0")
