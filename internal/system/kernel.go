@@ -34,9 +34,10 @@ type KernelDesired struct {
 // KernelActual 运行实际（从 /proc、/sys 读取）。
 type KernelActual struct {
 	Cmdline       []string // /proc/cmdline 原始 token
-	Hugepages1G   int      // /proc/meminfo HugePages_Total（1G 页时即为 1G 数量）
+	Hugepages1G   int      // sysfs hugepages-1048576kB/nr_hugepages（回退时取 meminfo，仅缺省尺寸）
 	Hugepages1GFr int
-	Hugepages2M   int
+	Hugepages2M   int // sysfs hugepages-2048kB/nr_hugepages（决策 #106：双池按尺寸各读各的）
+	Hugepages2MFr int
 	NMIWatchdog   *bool
 	THP           string
 }
@@ -47,27 +48,37 @@ func ReadActual(root string) KernelActual {
 	if b, err := os.ReadFile(join(root, "/proc/cmdline")); err == nil {
 		a.Cmdline = strings.Fields(strings.TrimSpace(string(b)))
 	}
-	mem := map[string]int{}
-	if b, err := os.ReadFile(join(root, "/proc/meminfo")); err == nil {
-		for _, ln := range strings.Split(string(b), "\n") {
-			f := strings.Fields(ln)
-			if len(f) >= 2 && strings.HasSuffix(f[0], ":") {
-				if v, err := strconv.Atoi(f[1]); err == nil {
-					mem[strings.TrimSuffix(f[0], ":")] = v
-				}
-			}
-		}
-	}
 	pageSize1G := false
 	for _, p := range a.Cmdline {
 		if p == "hugepagesz=1G" || p == "default_hugepagesz=1G" {
 			pageSize1G = true
 		}
 	}
-	hp := mem["HugePages_Total"]
-	if pageSize1G {
-		a.Hugepages1G = hp
-		a.Hugepages1GFr = mem["HugePages_Free"]
+	// 大页按尺寸读 sysfs（决策 #106）：meminfo 的 HugePages_Total 只反映缺省尺寸，
+	// 双池（1G 给 VM + 2M 给 VPP）下不可用；sysfs 不在时回退 meminfo 启发式。
+	if hp1G := readHugepageSysfs(root, 1048576); hp1G != nil {
+		a.Hugepages1G, a.Hugepages1GFr = hp1G[0], hp1G[1]
+	}
+	if hp2M := readHugepageSysfs(root, 2048); hp2M != nil {
+		a.Hugepages2M, a.Hugepages2MFr = hp2M[0], hp2M[1]
+	} else if hp1G := readHugepageSysfs(root, 1048576); hp1G == nil {
+		// 两个尺寸的 sysfs 都不在（非常规环境）→ meminfo 回退，只填缺省尺寸
+		mem := map[string]int{}
+		if b, err := os.ReadFile(join(root, "/proc/meminfo")); err == nil {
+			for _, ln := range strings.Split(string(b), "\n") {
+				f := strings.Fields(ln)
+				if len(f) >= 2 && strings.HasSuffix(f[0], ":") {
+					if v, err := strconv.Atoi(f[1]); err == nil {
+						mem[strings.TrimSuffix(f[0], ":")] = v
+					}
+				}
+			}
+		}
+		if pageSize1G {
+			a.Hugepages1G, a.Hugepages1GFr = mem["HugePages_Total"], mem["HugePages_Free"]
+		} else {
+			a.Hugepages2M, a.Hugepages2MFr = mem["HugePages_Total"], mem["HugePages_Free"]
+		}
 	}
 	if b, err := os.ReadFile(join(root, "/proc/sys/kernel/nmi_watchdog")); err == nil {
 		v := strings.TrimSpace(string(b)) == "1"
@@ -83,6 +94,38 @@ func ReadActual(root string) KernelActual {
 		}
 	}
 	return a
+}
+
+// readHugepageSysfs 读某页尺寸的 nr/free（[nr, free]）；sysfs 文件不存在返回 nil。
+func readHugepageSysfs(root string, kB int) []int {
+	nr, err1 := os.ReadFile(join(root, fmt.Sprintf("/sys/kernel/mm/hugepages/hugepages-%dkB/nr_hugepages", kB)))
+	fr, err2 := os.ReadFile(join(root, fmt.Sprintf("/sys/kernel/mm/hugepages/hugepages-%dkB/free_hugepages", kB)))
+	if err1 != nil || err2 != nil {
+		return nil
+	}
+	n, e1 := strconv.Atoi(strings.TrimSpace(string(nr)))
+	f, e2 := strconv.Atoi(strings.TrimSpace(string(fr)))
+	if e1 != nil || e2 != nil {
+		return nil
+	}
+	return []int{n, f}
+}
+
+// HugepageFromCmdline 从 cmdline 按尺寸解析大页数量：hugepages= 归属其前最近的
+// hugepagesz=，此前无 hugepagesz 时归缺省尺寸（x86_64 为 2M）。
+func HugepageFromCmdline(cmdline []string, size string) string {
+	cur := "2M"
+	got := map[string]string{}
+	for _, p := range cmdline {
+		if v, ok := strings.CutPrefix(p, "hugepagesz="); ok {
+			cur = v
+			continue
+		}
+		if v, ok := strings.CutPrefix(p, "hugepages="); ok {
+			got[cur] = v
+		}
+	}
+	return got[size]
 }
 
 // IsolatedFromCmdline 从 cmdline 提取 isolcpus 值（无则空）。
@@ -112,6 +155,9 @@ func Compare(d KernelDesired, a KernelActual) []string {
 	var out []string
 	if d.Hugepages1G > 0 && a.Hugepages1G != d.Hugepages1G {
 		out = append(out, fmt.Sprintf("大页 1G：期望 %d，实际 %d（cmdline 启动参数需生效并重启）", d.Hugepages1G, a.Hugepages1G))
+	}
+	if d.Hugepages2M > 0 && a.Hugepages2M != d.Hugepages2M {
+		out = append(out, fmt.Sprintf("大页 2M：期望 %d，实际 %d（cmdline 启动参数需生效并重启）", d.Hugepages2M, a.Hugepages2M))
 	}
 	if d.IsolatedCores != "" {
 		cur := IsolatedFromCmdline(a.Cmdline)
@@ -143,7 +189,13 @@ func GenerateBaseline(d KernelDesired) (grubFragment string, fstabLine string) {
 	var params []string
 	if d.Hugepages1G > 0 {
 		params = append(params, "default_hugepagesz=1G", "hugepagesz=1G", fmt.Sprintf("hugepages=%d", d.Hugepages1G))
+		// 双池（决策 #106）：2M 池随 1G 一起进 cmdline——VPP 用 2M（hugepage-preference）、
+		// VM 用 1G；否则 2M 池只能运行期手工预留、重启即失。hugepages= 归属其前最近的 hugepagesz=。
+		if d.Hugepages2M > 0 {
+			params = append(params, "hugepagesz=2M", fmt.Sprintf("hugepages=%d", d.Hugepages2M))
+		}
 	} else if d.Hugepages2M > 0 {
+		// 单 2M 池：不写 hugepagesz/default_hugepagesz，hugepages= 归缺省页尺寸（x86_64 即 2M）
 		params = append(params, fmt.Sprintf("hugepages=%d", d.Hugepages2M))
 	}
 	if d.IsolatedCores != "" {

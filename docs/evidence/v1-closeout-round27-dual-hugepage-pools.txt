@@ -1,0 +1,65 @@
+===== V1 收尾第二十七轮：双大页池进内核基线（1G + 2M 连写、2M 池重启持久化）=====
+日期：2026-09-19
+性质：改 internal/system（kernel.go）、internal/api（cli_kernel_baseline.go/cli_system_show.go）、
+cmd/nfvisd、deploy/installer/nfvis-baseline.sh。**无新 CLI 语句/API 路径/资源模型字段**——
+committed 的 resource-pools 本就支持多池，本轮把「内核基线只托管一种页大小」的二选一打破（决策 #106）。
+
+----- 1. 动了什么 -----
+
+① GenerateBaseline：1G 与 2M 同时 >0 时产出两组连写——
+   `default_hugepagesz=1G hugepagesz=1G hugepages=2 hugepagesz=2M hugepages=768`
+   （hugepages= 归属其前最近的 hugepagesz=；仅 2M 时维持 `hugepages=N` 归缺省尺寸，与既有行为一致）。
+② 派生侧（desiredKernelBaseline + 安装器 print 路径）：遍历 committed pools 两尺寸各自填入（此前二选一）。
+③ ReadActual 改按 sysfs 每尺寸读 nr/free（/sys/kernel/mm/hugepages/hugepages-<kB>/）——
+   meminfo 的 HugePages_Total 只反映缺省尺寸，双池下不可用；sysfs 全缺时回退 meminfo 启发式（单测保留该路径）。
+④ Compare 增 2M 对照；show system kernel 增「大页 2M」行 + hugepages_2m(_free) structured 字段
+   （openapi show schema 同步）；cmdline 按尺寸解析新增 HugepageFromCmdline（替换单值 cmdlineHuge）。
+⑤ fstab 维持单行（主池 1G 优先）：hugetlbfs 挂载服务 VM/容器 mmap；VPP 走 /sys 分配不依赖挂载。
+⑥ postinst --defaults 仍只算 1G（保守默认）；需要 2M 的部署经 CLI 声明后 apply。
+
+----- 2. 真机（nfvis 1.1.17 升级装机 → 重启）-----
+
+① 升级 `dpkg -i nfvis_1.1.17_amd64.deb`：服务保持运行并换新版本（决策 #80④ 复验）、postinst 走 --check。
+② `request system kernel apply`（committed 本就含 1G×2 + 2M×768）→ 片段两组连写：
+   default_hugepagesz=1G hugepagesz=1G hugepages=2 hugepagesz=2M hugepages=768
+   isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5 irqaffinity=0-1 intel_iommu=on intel_pstate=disable iommu=pt
+③ **重启 → 2M 池开机即 768，全程无手工 echo**（round26 的 `echo 768` 步骤从流程消失）：
+   dmesg `HugeTLB: registered 2.00 MiB page size, pre-allocated 768 pages`；
+   VPP（开机自启、2M preference）占用 21 页（768-747）。
+④ **show system kernel 三方对照按尺寸工作**：1G 期望 2 / 2M 期望 768，cmdline 按尺寸解析正确。
+⑤ 无主第 3 个 1G 页（round26 观察项）：本次重启后 nr 仍上浮到 3——但**缩页试验成功**
+   （`echo 2 > nr_hugepages` 直接生效，无 EBUSY），证明没有任何进程/文件持有它，
+   属启动期瞬态（嫌疑：libvirt qemu-kvm.service 的「module, ksm, hugepages」准备步骤或 VPP 首启
+   DPDK 初始化的短暂预留）。**登记观察项 #27**：写入者未定位；不影响 VM 可用页（free=2）；
+   后续如再现可在启动后核对 nr 与 cmdline 差值。
+⑥ 重启后 DPDK 绑定丢失（已知行为）→ modprobe vfio-pci + 产品路径 bind-dpdk 两口 + `request vpp restart`
+   → ens192/ens224 up。**注意**：IOMMU 真启用后（round26 起）无需 unsafe noiommu。
+   1G/2M 终态：1G nr=2 free=1（1 页被 round27 的集成 VM 占用属预期）、2M nr=768 free=747（VPP 用 21 页）。
+
+----- 3. 集成测试（双池 + 新 cmdline 布局）-----
+
+`make integration`（-timeout 45m）：213 PASS / **1 FAIL**——TestSnapshotContentLevelRollbackRealLibvirt
+报「步骤 2 的 guest 内写入未生效」（串口登录写 LATER 未落盘）。**与双池改动无关的偶发**：
+该用例的串口交互在 4 次全集运行中 3 过 1 挂（round24/26/27-复跑均过）；单测重跑即过（422.67s，
+LATER/CHANGED/KNOWN 语义全部证到）。如实登记为**串口交互偶发抖动**，建议后续给步骤 2 加
+「写后回读、未生效则重写」的重试（未在本轮改，避免扩大串口 helper 的改动面）。
+
+跑后 `systemctl start nfvis` 恢复，终态：nfvis/vpp active、两口 up、cmdline 双池全参数、
+1G nr=2 free=1、2M nr=768 free=747（VPP 用 21 页）。
+
+----- 4. 观察项 #27（宿主/内核层，非产品行为，未定论）-----
+
+1G 池长期有 1 页「已占用但找不到持有者」：free=nr-1 跨机器、跨轮次稳定出现（round23 起即如此，
+当时被描述为「留给 VM」）；本轮排查：无进程持 hugetlb 映射（/proc/*/maps）、/dev/hugepages 无文件、
+qemu.conf 未配 hugepagepages；nr 上浮到 3 时 `echo` 缩页**直接成功**（说明内核也认为无持有者）。
+VPP 主堆实测为 4K 页非 hugetlb（`vppctl show memory`），排除。结论：不影响 VM 可用页
+（free ≥ 1 一直成立、全部 VM 类用例通过），写入者/持有机制未定位，留作宿主层观察，不再追。
+
+----- 4. 环境现状（2026-09-19 交班）-----
+
+- nfvis **1.1.17** active（admin `Nfvis@Test2026`）；committed：1G×2 + 2M×768、isolated 2-5、
+  vpp cpu 4/5、hugepage-preference 2M、interfaces ens192/ens224 + dpdk dev 两口、low-latency false
+- cmdline：hugepages=2 + hugepagesz=2M hugepages=768 + isolcpus=2-5 + nohz_full/rcu_nocbs + irqaffinity=0-1
+  + intel_iommu=on intel_pstate=disable iommu=pt（重启已验证）
+- 数据面两口 up；镜像 debian-12-generic-amd64.qcow2（ready）+ docker alpine:3.20
+- ⚠️ 重启后固定动作（已知、未自动化）：modprobe vfio-pci → bind-dpdk 两口 → request vpp restart

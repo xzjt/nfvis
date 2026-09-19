@@ -106,3 +106,77 @@ func TestDesiredFromConfig(t *testing.T) {
 		t.Fatalf("2M 基线生成异常: grub=%q fstab=%q", g, f)
 	}
 }
+
+func TestReadActualSysfsPerSize(t *testing.T) {
+	// 决策 #106：双池按尺寸各读各的 sysfs（meminfo 只反映缺省尺寸）
+	root := t.TempDir()
+	writeProc(t, root, "/proc/cmdline", "default_hugepagesz=1G hugepagesz=1G hugepages=2 hugepagesz=2M hugepages=768\n")
+	writeProc(t, root, "/proc/meminfo", "HugePages_Total:       9\nHugePages_Free:       8\n") // 干扰项，不应被采用
+	writeProc(t, root, "/sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages", "2\n")
+	writeProc(t, root, "/sys/kernel/mm/hugepages/hugepages-1048576kB/free_hugepages", "2\n")
+	writeProc(t, root, "/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages", "768\n")
+	writeProc(t, root, "/sys/kernel/mm/hugepages/hugepages-2048kB/free_hugepages", "700\n")
+
+	a := ReadActual(root)
+	if a.Hugepages1G != 2 || a.Hugepages1GFr != 2 || a.Hugepages2M != 768 || a.Hugepages2MFr != 700 {
+		t.Fatalf("双池应按 sysfs 各尺寸读取: %+v", a)
+	}
+}
+
+func TestReadActualMeminfoFallback(t *testing.T) {
+	// sysfs 目录不存在（非常规环境）→ 回退 meminfo，只填缺省尺寸
+	root := t.TempDir()
+	writeProc(t, root, "/proc/cmdline", "default_hugepagesz=1G hugepagesz=1G hugepages=4\n")
+	writeProc(t, root, "/proc/meminfo", "HugePages_Total:       4\nHugePages_Free:       2\n")
+	a := ReadActual(root)
+	if a.Hugepages1G != 4 || a.Hugepages1GFr != 2 {
+		t.Fatalf("回退路径应读 meminfo: %+v", a)
+	}
+}
+
+func TestHugepageFromCmdline(t *testing.T) {
+	dual := []string{"default_hugepagesz=1G", "hugepagesz=1G", "hugepages=2", "hugepagesz=2M", "hugepages=768"}
+	if got := HugepageFromCmdline(dual, "1G"); got != "2" {
+		t.Fatalf("双池 1G=%q", got)
+	}
+	if got := HugepageFromCmdline(dual, "2M"); got != "768" {
+		t.Fatalf("双池 2M=%q", got)
+	}
+	// 单 2M：无 hugepagesz 前缀 → 归缺省尺寸
+	single := []string{"hugepages=1024"}
+	if got := HugepageFromCmdline(single, "2M"); got != "1024" {
+		t.Fatalf("单池 2M=%q", got)
+	}
+	if got := HugepageFromCmdline(single, "1G"); got != "" {
+		t.Fatalf("单池 1G 应为空: %q", got)
+	}
+}
+
+func TestGenerateBaselineDualHugepages(t *testing.T) {
+	grub, fstab := GenerateBaseline(KernelDesired{Hugepages1G: 2, Hugepages2M: 768})
+	for _, want := range []string{"default_hugepagesz=1G", "hugepagesz=1G", "hugepages=2", "hugepagesz=2M", "hugepages=768"} {
+		if !strings.Contains(grub, want) {
+			t.Fatalf("双池片段缺少 %q:\n%s", want, grub)
+		}
+	}
+	if !strings.Contains(fstab, "pagesize=1G") {
+		t.Fatalf("双池 fstab 主池应为 1G: %q", fstab)
+	}
+	// Compare：2M 期望与实际不符 → 报「大页 2M」
+	a := KernelActual{Hugepages2M: 700}
+	diffs := Compare(KernelDesired{Hugepages1G: 2, Hugepages2M: 768}, a)
+	found := false
+	for _, d := range diffs {
+		if strings.Contains(d, "大页 2M") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("2M 不符应报差异: %v", diffs)
+	}
+	// 双池一致 → 无差异
+	a2 := KernelActual{Hugepages1G: 2, Hugepages2M: 768}
+	if diffs := Compare(KernelDesired{Hugepages1G: 2, Hugepages2M: 768}, a2); len(diffs) != 0 {
+		t.Fatalf("双池一致应无差异: %v", diffs)
+	}
+}

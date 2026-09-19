@@ -943,6 +943,10 @@
                 "description": "-1 = 不托管",
                 "type": "integer"
               },
+              "hugepages_2m": {
+                "description": "0 = 不托管；与 1G 同时 >0 时按 hugepagesz 连写进 cmdline（决策 #106）",
+                "type": "integer"
+              },
               "iommu": {
                 "type": "string"
               },
@@ -982,6 +986,12 @@
             "type": "integer"
           },
           "hugepages_1g_free": {
+            "type": "integer"
+          },
+          "hugepages_2m": {
+            "type": "integer"
+          },
+          "hugepages_2m_free": {
             "type": "integer"
           },
           "isolated_cores": {
