@@ -1859,6 +1859,7 @@ components:
             nmi_watchdog: { type: boolean }
             transparent_hugepages: { type: string, enum: [always, madvise, never] }
             iommu: { type: string, enum: [on, off, pt] }
+            low_latency: { type: boolean, description: "低延迟参数组（mitigations=off 等；显式选择，降低安全缓解与可诊断性）" }
             tuned_profile: { type: string }
             params: { type: array, items: { type: string } }
 
@@ -2054,6 +2055,7 @@ components:
             nmi_watchdog: { type: boolean, nullable: true }
             transparent_hugepages: { type: string }
             iommu: { type: string }
+            low_latency: { type: boolean }
             tuned_profile: { type: string }
             params: { type: array, items: { type: string } }
         diffs: { type: array, items: { type: string }, description: 差异项（空 = 一致） }

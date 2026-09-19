@@ -89,6 +89,7 @@ func ConfigPathTree() *Node {
 				K("nmi-watchdog", "NMI watchdog（VPP 场景通常关闭）", VE("bool", "开关", "true", "false")),
 				K("transparent-hugepages", "透明大页策略", VE("thp", "策略", "always", "madvise", "never")),
 				K("iommu", "IOMMU 模式", VE("iommu", "模式", "on", "off", "pt")),
+				K("low-latency", "低延迟参数组（mitigations=off 等；显式选择，降低安全缓解与可诊断性；VM 上自动省略 idle=poll/tsc=reliable）", VE("bool", "开关", "true", "false")),
 				K("tuned-profile", "tuned 性能档", V("name", "档位名（如 nfvis-throughput）")),
 				K("params", "附加内核参数（逃生口，可多条）", SPA("<param>", "params", "内核参数")),
 			),

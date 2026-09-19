@@ -38,15 +38,19 @@ func (x *cliExecutor) desiredKernelBaseline() (ksys.KernelDesired, error) {
 		isolated = coreListText(cfg.ResourcePools.CPU.IsolatedCores)
 	}
 	nmi, thp, iommu, tuned := "", "", "", ""
+	lowLatency := false
 	var extra []string
 	if sys := cfg.System; sys != nil && sys.Kernel != nil {
 		if sys.Kernel.NMIWatchdog != nil {
 			nmi = strconv.FormatBool(*sys.Kernel.NMIWatchdog)
 		}
 		thp, iommu, tuned = sys.Kernel.TransparentHugepages, sys.Kernel.IOMMU, sys.Kernel.TunedProfile
+		lowLatency = sys.Kernel.LowLatency
 		extra = sys.Kernel.Params
 	}
-	return ksys.DesiredFromConfig(pageSize, count, isolated, nmi, thp, iommu, tuned, extra), nil
+	d := ksys.DesiredFromConfig(pageSize, count, isolated, nmi, thp, iommu, tuned, extra)
+	d.LowLatency = lowLatency
+	return d, nil
 }
 
 // coreListText 把核号列表压成紧凑区间文本（4,5,6,7,9 → "4-7,9"）。

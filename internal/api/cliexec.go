@@ -1466,6 +1466,7 @@ var valueTransforms = map[string]func(string) (any, error){
 	"cores":          expandCores,
 	// 内核基线（FR-SYS-014）：nmi-watchdog 需写真实 bool（JSON 目标为 *bool）
 	"nmi_watchdog": func(s string) (any, error) { return boolField(s) },
+	"low_latency":  func(s string) (any, error) { return boolField(s) },
 	// VLAN ID：模型字段一律为 int（VnfInterface.Vlan / VSwitchPort.NativeVlan）；
 	// ParamType 为 "vlan" 时 scalarForNode 会保持字符串 → 类型不符（决策 #79）。
 	"vlan":   func(s string) (any, error) { return numField(s) },

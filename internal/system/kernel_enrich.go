@@ -17,6 +17,7 @@ package system
 import (
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -243,10 +244,36 @@ func ValidateDesired(d KernelDesired, root string) error {
 	return nil
 }
 
+// detectVirtualized 判断本机是否运行在虚拟机里（低延迟组的 idle=poll/tsc=reliable 与机型强相关）。
+// 以 /proc/cpuinfo 的 hypervisor CPUID 标志为准（主流 hypervisor 都会暴露），
+// 回退 /sys/class/dmi/id/sys_vendor 的常见虚拟厂商；两者都读不到按裸机处理。
+func detectVirtualized(root string) bool {
+	if b, err := os.ReadFile(join(root, "/proc/cpuinfo")); err == nil {
+		for _, ln := range strings.Split(string(b), "\n") {
+			if k, v, ok := strings.Cut(ln, ":"); ok && strings.TrimSpace(k) == "flags" {
+				if slices.Contains(strings.Fields(v), "hypervisor") {
+					return true
+				}
+			}
+		}
+	}
+	if b, err := os.ReadFile(join(root, "/sys/class/dmi/id/sys_vendor")); err == nil {
+		v := string(b)
+		for _, vendor := range []string{"QEMU", "VMware", "innotek", "Microsoft", "Xen", "KVM"} {
+			if strings.Contains(v, vendor) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // EnrichDesired 以真机事实补全期望基线（写盘前调用，保证安装器与 CLI 同源）：
 //   - 按 CPU 厂商补默认参数；与显式设置（IOMMU 字段、params 逃生口）同名冲突时**以用户为准**；
 //   - 隔离核非空时补 irqaffinity=<非隔离核>（中断落在非隔离核上；用户已给 irqaffinity 则不覆盖）；
-//   - 探测 nohz_full 支持，不支持时标记省略 nohz_full/rcu_nocbs。
+//   - 探测 nohz_full 支持，不支持时标记省略 nohz_full/rcu_nocbs；
+//   - 低延迟 profile 开启且**非虚拟机**时补 idle=poll/tsc=reliable（VM 里 idle=poll 是反作用、
+//     tsc=reliable 未必成立；机型无关的一半由 GenerateBaseline 产出）。
 //
 // 幂等：对已补全的结果重复调用，产出不变。
 func EnrichDesired(d KernelDesired, root string) KernelDesired {
@@ -258,6 +285,13 @@ func EnrichDesired(d KernelDesired, root string) KernelDesired {
 	}
 	if out.IsolatedCores != "" && out.IRQAffinity == "" && !hasParam(out, "irqaffinity") {
 		out.IRQAffinity = IRQAffinityFor(out.IsolatedCores, root)
+	}
+	if out.LowLatency && !detectVirtualized(root) {
+		for _, p := range []string{"idle=poll", "tsc=reliable"} {
+			if !paramTaken(p, out) {
+				out.ExtraParams = append(out.ExtraParams, p)
+			}
+		}
 	}
 	v := nohzFullSupported(root)
 	out.NoHZFull = &v

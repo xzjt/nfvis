@@ -103,6 +103,8 @@ var contractStatements = []string{
 	"set virtual-machine-functions fw-vm cloud-init ssh-key \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY nfvis@test\"",
 	"set container-functions sbc-ct1 interfaces eth0 type memif virtual-switch vs-a",
 	"set container-functions sbc-ct1 env TEST_KEY test_value",
+	// 内核基线（决策 #105）：低延迟参数组的显式开关（bool 叶子，落 model.System.Kernel.LowLatency）
+	"set system kernel low-latency true",
 }
 
 func TestCLIStatementMappingGuard(t *testing.T) {

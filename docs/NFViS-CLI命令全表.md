@@ -230,6 +230,7 @@
 | `set system kernel nmi-watchdog <bool>` | NMI watchdog | GRUB 基线 | ✅ |
 | `set system kernel transparent-hugepages <mode>` | THP 模式 | GRUB 基线 | ✅ |
 | `set system kernel iommu <on\|off\|pt>` | IOMMU | GRUB 基线 | ✅ |
+| `set system kernel low-latency <bool>` | 低延迟参数组（mitigations=off 等；显式选择；VM 上自动省略 idle=poll/tsc=reliable） | GRUB 基线 | ✅（2026-09-19 真机 apply/rollback） |
 | `set system kernel tuned-profile <name>` | tuned profile | 宿主 tuned | ✅ |
 | `set system kernel params <param>` | 附加内核参数（可多条） | GRUB 基线 | ✅ |
 | `set system health thresholds cpu-temp-celsius <n>` | CPU 温度阈值（FR-SYS-012） | 告警巡检 | ✅ |

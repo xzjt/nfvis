@@ -148,6 +148,7 @@ type KernelConfig struct {
 	NMIWatchdog          *bool    `json:"nmi_watchdog,omitempty"`          // nil = 不托管
 	TransparentHugepages string   `json:"transparent_hugepages,omitempty"` // always|madvise|never
 	IOMMU                string   `json:"iommu,omitempty"`                 // on|off|pt
+	LowLatency           bool     `json:"low_latency,omitempty"`           // 低延迟参数组（显式选择；机型相关项由真机补全决定）
 	TunedProfile         string   `json:"tuned_profile,omitempty"`         // 写入 /etc/nfvis/tuned-profile
 	Params               []string `json:"params,omitempty"`                // 附加内核参数（逃生口）
 }

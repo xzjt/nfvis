@@ -219,3 +219,86 @@ func contains(params []string, want string) bool {
 	}
 	return false
 }
+
+func TestGenerateBaselineLowLatency(t *testing.T) {
+	// profile 开：机型无关的一半由生成器产出；NMI 未托管时按组补 nmi_watchdog=0
+	grub, _ := GenerateBaseline(KernelDesired{LowLatency: true})
+	for _, want := range []string{"mitigations=off", "audit=0", "mce=off", "nosoftlockup", "numa_balancing=disable", "nmi_watchdog=0"} {
+		if !strings.Contains(grub, want) {
+			t.Fatalf("低延迟 profile 应含 %q:\n%s", want, grub)
+		}
+	}
+	// NMI 用户显式 true：以用户为准，组不再补 nmi_watchdog=0
+	on := true
+	grub, _ = GenerateBaseline(KernelDesired{LowLatency: true, NMIWatchdog: &on})
+	if strings.Contains(grub, "nmi_watchdog=0") {
+		t.Fatalf("用户显式开启 NMI watchdog 时组不得再写 nmi_watchdog=0:\n%s", grub)
+	}
+	// profile 关：什么都不写
+	if grub, _ = GenerateBaseline(KernelDesired{}); strings.Contains(grub, "mitigations=off") {
+		t.Fatal("未开 profile 不应写低延迟参数")
+	}
+}
+
+func TestEnrichLowLatencyMachineDependent(t *testing.T) {
+	// 裸机（flags 无 hypervisor）：补 idle=poll/tsc=reliable
+	bare := t.TempDir()
+	writeProc(t, bare, "/proc/cpuinfo", "vendor_id\t: GenuineIntel\nflags\t: fpu sse\n")
+	d := EnrichDesired(KernelDesired{LowLatency: true}, bare)
+	if !contains(d.ExtraParams, "idle=poll") || !contains(d.ExtraParams, "tsc=reliable") {
+		t.Fatalf("裸机 + 低延迟 profile 应补 idle=poll/tsc=reliable: %v", d.ExtraParams)
+	}
+	// 虚拟机（cpuinfo flags 含 hypervisor）：省略机型相关项
+	vm := t.TempDir()
+	writeProc(t, vm, "/proc/cpuinfo", "vendor_id\t: GenuineIntel\nflags\t: fpu hypervisor sse\n")
+	d = EnrichDesired(KernelDesired{LowLatency: true}, vm)
+	if contains(d.ExtraParams, "idle=poll") || contains(d.ExtraParams, "tsc=reliable") {
+		t.Fatalf("虚拟机应省略 idle=poll/tsc=reliable: %v", d.ExtraParams)
+	}
+	// DMI 回退：cpuinfo 无 flags 但 sys_vendor 是 QEMU → 视为虚拟机
+	dmi := t.TempDir()
+	writeProc(t, dmi, "/proc/cpuinfo", "vendor_id\t: GenuineIntel\n")
+	writeProc(t, dmi, "/sys/class/dmi/id/sys_vendor", "QEMU\n")
+	d = EnrichDesired(KernelDesired{LowLatency: true}, dmi)
+	if contains(d.ExtraParams, "idle=poll") {
+		t.Fatalf("DMI=QEMU 应视为虚拟机: %v", d.ExtraParams)
+	}
+	// 用户在 params 逃生口显式给了 tsc=reliable → 不重复
+	d = EnrichDesired(KernelDesired{LowLatency: true, ExtraParams: []string{"tsc=reliable"}}, bare)
+	if n := countOf(d.ExtraParams, "tsc=reliable"); n != 1 {
+		t.Fatalf("用户已给 tsc=reliable 不得重复: %v", d.ExtraParams)
+	}
+	// profile 关：不补
+	d = EnrichDesired(KernelDesired{}, bare)
+	if contains(d.ExtraParams, "idle=poll") || contains(d.ExtraParams, "tsc=reliable") {
+		t.Fatalf("未开 profile 不应补机型相关项: %v", d.ExtraParams)
+	}
+}
+
+func TestCompareLowLatencyHint(t *testing.T) {
+	cmdline := []string{"BOOT_IMAGE=/vmlinuz", "root=/dev/sda1"}
+	d := KernelDesired{LowLatency: true}
+	diffs := Compare(d, KernelActual{Cmdline: cmdline})
+	if len(diffs) != 1 || !strings.Contains(diffs[0], "低延迟参数组") {
+		t.Fatalf("开了 profile 而 cmdline 无参数应报差异: %v", diffs)
+	}
+	// 代表项已在（mitigations=off）→ 无差异
+	cmdline = append(cmdline, "mitigations=off")
+	if diffs := Compare(d, KernelActual{Cmdline: cmdline}); len(diffs) != 0 {
+		t.Fatalf("cmdline 已含代表项应无差异: %v", diffs)
+	}
+	// 未开 profile → 不比对
+	if diffs := Compare(KernelDesired{}, KernelActual{Cmdline: cmdline}); len(diffs) != 0 {
+		t.Fatalf("未开 profile 不应报低延迟差异: %v", diffs)
+	}
+}
+
+func countOf(params []string, want string) int {
+	n := 0
+	for _, p := range params {
+		if p == want {
+			n++
+		}
+	}
+	return n
+}
