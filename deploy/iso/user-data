@@ -29,11 +29,15 @@ autoinstall:
     - mkdir -p /target/opt/nfvis
     - cp -a /cdrom/nfvis/debs /target/opt/nfvis/debs
     # 离线全量安装（底座闭包 + VPP + nfvis 同一棵树，依赖排序交 dpkg）；
-    # noninteractive + confdef/confold 防 conffile 询问在无 TTY 的装机期挂死
-    - curtin in-target -- env DEBIAN_FRONTEND=noninteractive dpkg -i -R --force-confdef --force-confold /opt/nfvis/debs
+    # noninteractive + confdef/confold 防 conffile 询问在无 TTY 的装机期挂死；
+    # 输出落 target 的 /var/log/nfvis-dpkg-install.log——失败可经挂盘直接取证（round32 教训）
+    - curtin in-target -- sh -c 'env DEBIAN_FRONTEND=noninteractive dpkg -i -R --force-confdef --force-confold /opt/nfvis/debs >/var/log/nfvis-dpkg-install.log 2>&1 || { tail -60 /var/log/nfvis-dpkg-install.log >&2; exit 1; }'
     # 首次开机不自启 VPP：业务口声明（startup.conf）须由 nfvisd 掌握后经 request vpp restart 启动；
     # nfvis.service 只 After= 不 Requires=，VPP 未起时 nfvisd 降级运行
     - curtin in-target -- systemctl disable vpp.service
+    # 串口控制台（无头/气隙 appliance 的管理面）：装机期选中的就是串口可视条目，
+    # 装好的系统保持同一口径才能继续经串口登录运维；写独立 drop-in，不碰产品托管的 99-nfvis.cfg
+    - printf 'GRUB_CMDLINE_LINUX="console=tty1 console=ttyS0,115200n8"\n' > /target/etc/default/grub.d/50-nfvis-iso-console.cfg
     # nfvis postinst 的 --defaults 已写 /etc/default/grub.d/99-nfvis.cfg（1G 大页保守默认）；
-    # curtin 装引导先于 late-commands，故补一次 update-grub 让片段进入引导配置，首次开机即生效
+    # curtin 装引导先于 late-commands，故最后补一次 update-grub 把两个 drop-in 写进引导配置，首次开机即生效
     - curtin in-target -- update-grub
