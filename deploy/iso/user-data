@@ -25,13 +25,14 @@ autoinstall:
       name: direct
   shutdown: reboot
   late-commands:
-    # deb 闭包随盘落位 /opt/nfvis/debs：既是本次装机源，也留在系统里作气隙重装修复源
-    - mkdir -p /target/opt/nfvis
+    # deb 闭包随盘落位 /opt/nfvis/debs：装机源（本地 file 仓库）+ 留在系统里的气隙修复源
     - cp -a /cdrom/nfvis/debs /target/opt/nfvis/debs
-    # 离线全量安装（底座闭包 + VPP + nfvis 同一棵树，依赖排序交 dpkg）；
-    # noninteractive + confdef/confold 防 conffile 询问在无 TTY 的装机期挂死；
-    # 输出落 target 的 /var/log/nfvis-dpkg-install.log——失败可经挂盘直接取证（round32 教训）
-    - curtin in-target -- sh -c 'env DEBIAN_FRONTEND=noninteractive dpkg -i -R --force-confdef --force-confold /opt/nfvis/debs >/var/log/nfvis-dpkg-install.log 2>&1 || { tail -60 /var/log/nfvis-dpkg-install.log >&2; exit 1; }'
+    # 只认本地仓库（SourceList 覆盖 + 关闭 SourceParts，网络源在气隙下不可达也不去碰）
+    - printf 'deb [trusted=yes] file:/opt/nfvis/debs ./\n' > /target/etc/apt/sources.list.d/nfvis-local.list
+    - curtin in-target -- sh -c 'apt-get update -o Dir::Etc::sourcelist=sources.list.d/nfvis-local.list -o Dir::Etc::sourceparts=-'
+    # apt 解析安装种子集：候选组/互斥变体/已装同旧版本都由 apt 挑选跳过（dpkg 直灌已被
+    # round32 两次证伪）；闭包只含 Depends（补齐时即排除 Recommends），这里对齐口径
+    - curtin in-target -- sh -c 'env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o Dir::Etc::sourcelist=sources.list.d/nfvis-local.list -o Dir::Etc::sourceparts=- /opt/nfvis/debs/nfvis_*.deb /opt/nfvis/debs/vpp*.deb /opt/nfvis/debs/libvppinfra*.deb docker.io libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils cloud-image-utils >/var/log/nfvis-apt-install.log 2>&1 || { tail -60 /var/log/nfvis-apt-install.log >&2; exit 1; }'
     # 首次开机不自启 VPP：业务口声明（startup.conf）须由 nfvisd 掌握后经 request vpp restart 启动；
     # nfvis.service 只 After= 不 Requires=，VPP 未起时 nfvisd 降级运行
     - curtin in-target -- systemctl disable vpp.service

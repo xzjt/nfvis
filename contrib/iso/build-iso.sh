@@ -121,6 +121,17 @@ for f in "$STAGING/tree/nfvis/debs"/*.deb; do
 done
 DEB_COUNT=$(ls "$STAGING/tree/nfvis/debs"/*.deb | wc -l)
 
+# 3b) 生成本地 file 仓库索引：装机期 apt 从这个仓库解析安装（dpkg -i -R 直灌
+#     会把候选组展开出的互斥备选实现族全塞进去——cron/bcron/systemd-cron、
+#     dnsmasq-base/-lua、libvirt -hwe 双变体……round32 两次装机实证必翻车；
+#     apt 只挑每组可满足候选，与正常安装语义一致）
+(
+    cd "$STAGING/tree/nfvis/debs" || exit 1
+    dpkg-scanpackages --arch "$ARCH" . > Packages
+    gzip -9n -c Packages > Packages.gz
+    apt-ftparchive release . > Release
+) || die "本地仓库索引生成失败（需 dpkg-scanpackages / apt-ftparchive）"
+
 # 5) 引导菜单：opt-in 菜单项插到 grub_platform 之前（26.04 live-server 无 isolinux，
 #    BIOS/UEFI 共用这一份）。缺省条目/超时不改——不选中 NFViS 项就还是原 Ubuntu 行为。
 GRUB_CFG="$STAGING/tree/boot/grub/grub.cfg"

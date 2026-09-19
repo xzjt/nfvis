@@ -139,7 +139,40 @@ cat /etc/default/grub.d/99-nfvis.cfg                # 基线片段（需重启�
 ls /etc/ssh/sshd_config.d/                          # 应有 99-nfvis.conf
 ```
 
-### 2.4 方式 B：从源码运行（开发/验证）
+### 2.4 方式 C：ISO 自动安装（气隙/无人值守生产）
+
+介质是 **Ubuntu Server 26.04.1 官方 ISO 的 remaster**：注入 autoinstall 无人值守应答与离线底座闭包，
+GRUB 菜单新增一条 **「NFViS 自动安装（将清空所选磁盘）」**——**只有选中它才会清盘安装**，
+缺省条目仍是原 Ubuntu 安装器（防误装）。全程无需网络：VPP 非 Ubuntu 源、底座闭包全部随盘。
+
+**已知限制**：需**关闭 Secure Boot**（remaster 破坏签名链）；选中 NFViS 条目会把所选磁盘清空重建
+（direct 布局，装到最大盘）。
+
+构建（Linux 构建机，**不联网拉取任何东西**）：
+
+```bash
+# 构建机前置：xorriso、openssl、dpkg-deb、dpkg-scanpackages 与 apt-ftparchive（apt-utils、dpkg-dev 包）
+make iso VERSION=1.1.20 \
+    ISO_SRC=/path/ubuntu-26.04.1-live-server-amd64.iso \
+    CLOSURE_DEBS=/path/debs VPP_DEBS=/path/vpp-v26.06-deb
+# 产物：build/nfvis_1.1.20_amd64.iso；ISO_SRC 请先对官方 SHA256SUMS 校验哈希
+```
+
+写 U 盘（认准盘符）：`dd if=build/nfvis_1.1.20_amd64.iso of=/dev/sdX bs=4M oflag=sync status=progress`。
+
+装机期全自动（人工只做一件事：在 GRUB 菜单选中 NFViS 条目；全程可在串口 `ttyS0 115200n8` 观察）：
+
+1. 建 OS 用户 `nfvis` 并开启 SSH（口令构建时注入哈希；构建期可用 `NFVIS_PASSWORD` 覆盖，缺省 `Nfvis@Test2026`）；
+2. deb 树落位 `/opt/nfvis/debs` 并注册为**本地 apt 仓库**——离线解析安装，也留在系统里作修复源；
+3. 安装 nfvis、VPP 26.06 与 docker/libvirt/qemu 底座；
+4. **VPP 首次开机不自启**（业务口声明由 nfvisd 掌握后再启动，见 §5.4）；
+5. 写入与方式 A 相同的内核基线保守默认（1G 大页 = `min(RAM_GB/4, 8)`、不设隔离核，首次开机即生效）；
+   串口控制台一并写好（`console=tty1 console=ttyS0,115200n8`），装好的系统可继续从串口运维。
+
+装完后与方式 A 汇合：SSH 登录 → 取一次性 admin 口令（§3.2）→ `nfvis-cli` 登录 →
+`wizard` 规划机器相关项（§5）→ 按 §5.4 补数据面并 `request vpp restart`。
+
+### 2.5 方式 B：从源码运行（开发/验证）
 
 ```bash
 git clone <repo> && cd nfvis
@@ -161,7 +194,7 @@ ssh root@<vm> 'PROXY=http://<proxy>:2333 ./provision.sh'   # PROXY 按需，直�
 1G×N 大页（经 `-print-kernel-baseline` 生成，与 CLI 同源）、`/opt/nfvis/{src,images,incoming,backup}`。
 日志：`/var/log/nfvis-provision.log`。**大页需 reboot 生效**；VPP 装后设为不自启。
 
-### 2.5 升级与降级
+### 2.6 升级与降级
 
 ```bash
 # 升级：直接装新 deb。postinst 会 try-restart 已在运行的 nfvisd 加载新版本（服务保持运行换二进制）
@@ -172,14 +205,14 @@ systemctl is-active nfvis && /usr/bin/nfvisd -version   # 验证版本
 sudo dpkg -i nfvis_1.1.18_amd64.deb
 ```
 
-> 配置库在 `/var/lib/nfvis/nfvis.db`，**升级/降级/purge 都不会动它**（见 §2.6）。
+> 配置库在 `/var/lib/nfvis/nfvis.db`，**升级/降级/purge 都不会动它**（见 §2.7）。
 > 保险起见，动包管理前先备份（§10.7 的 `request system configuration backup`，或直接
 > `sqlite3` 在线备份 `/var/lib/nfvis/nfvis.db`）。
 
 `request system software add` 是**经 CLI/API 的在线升级**路径（校验 sha256 → 升级 → 重启
 nfvisd → 报告），见 §10.11。
 
-### 2.6 卸载（purge）与残留清理
+### 2.7 卸载（purge）与残留清理
 
 ```bash
 sudo dpkg --purge nfvis
@@ -1214,7 +1247,7 @@ nfvis$ request system shutdown
 ```
 
 - `software add` 先校验 sha256（可选但强烈建议）→ 安装 → 重启 nfvisd → 报告；
-- 升级期间配置库不受影响；`purge` 才会清运行态（配置数据仍保留，见 §2.6）。
+- 升级期间配置库不受影响；`purge` 才会清运行态（配置数据仍保留，见 §2.7）。
 
 ---
 
