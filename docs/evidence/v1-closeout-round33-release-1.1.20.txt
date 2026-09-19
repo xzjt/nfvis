@@ -1,0 +1,53 @@
+===== V1 收尾第三十三轮：v1.1.20 发布（校验记录）=====
+日期：2026-09-19
+范围：main `b138700`（= PR #135 合并；round31 决策 #109 + round32 决策 #110 的全部改动）；
+发布件 nfvis_1.1.20_amd64.deb。校验口径复刻 round29（docs/evidence/v1-closeout-round29-release-1.1.19.txt）。
+
+----- 1. 版本号说明 -----
+上一发布 v1.1.19（round29/30）。1.1.20 先被 round32 的 ISO 验证构建占用（内嵌 deb，
+内容与本次发布件一致、仅 SOURCE_DATE_EPOCH 不同），从未发布——本次以 **v1.1.20** 正式发布，
+与安装 ISO 内嵌版本号对齐。
+
+----- 2. 发布件与可复现构建 -----
+    产物:   nfvis_1.1.20_amd64.deb（7,780,948 字节）
+    sha256: 7bc77ccec3d82216ff9e0ed4be7787978497f5da7e03d549384ee7a2cd5275de
+    构建:   nfvis-vm / make deb VERSION=1.1.20 SOURCE_DATE_EPOCH=1789830771
+            （= main b138700 的 HEAD 提交时间；git archive 树无 .git，显式传值——决策 #88）
+    二进制说明：nfvisd/nfvis-cli 自 1.1.19 以来无 Go 代码变更（round31/32 均为交付件与文档轮），
+    包内容变化 = postinst 大页指引改指 wizard（#109）+ 随包手册增「方式 C」并顺延 §2.4~2.6→§2.5~2.7。
+
+----- 3. 发布校验（逐项；干净机 = 快照恢复后的全新环境，④ 为首装路径）-----
+① 元数据：Package nfvis / Version 1.1.20 / amd64；dpkg-deb -e 见 postinst+prerm+postrm 就位 ✓
+② 内容：nfvisd/nfvis-cli、nfvis.service、随包文档五件（openapi/命令树/规格书/手册/命令全表）、
+   安装器脚本（nfvis-baseline/nfvis-ssh-harden）✓；包内手册 1387 行（wc -l）✓
+③ 解包运行：/tmp 解包后 `nfvisd -version` / `nfvis-cli -version` = 1.1.20 ✓
+④ 实装（首装）：dpkg -i → 服务 active；postinst 输出「片段已写入 /etc/default/grub.d/99-nfvis.cfg +
+   fstab 已维护 + update-grub 成功（需重启生效）」+「SSH 强化 99-nfvis.conf 已写入」✓；
+   一次性口令（20 字符）取自 journal → `show version` = NFViS 1.1.20（rc=0）✓；
+   `nfvis-cli wizard </dev/null` 即返不挂起（% 未提供口令指引，rc=1）✓
+⑤ purge：postrm 输出「已撤销 SSH 强化（99-nfvis.conf 已删、sshd 已重载）」（决策 #108 内联修复
+   在真实 purge 下生效）；drop-in 消失、sshd active；GRUB 片段/fstab 保留并打印**可照做**的手工
+   撤销步骤；/var/lib/nfvis 数据保留；二进制移除 ✓
+⑥ 重装（purge 后首装路径）：SSH 强化重新落地（99-nfvis.conf 回归）✓；服务 active ✓；
+   **配置库全程未变**——purge 前 sqlite .backup 至 /root/nfvis-db-backup-20260919-rel，
+   重装后 live/backup 对比：audit_log 条数 1=1、config_revisions 最新 rev 2=2、
+   最新 config_json sha256 前缀 498e0b9f2fabc954 一致 ✓
+⑦ CLI 冒烟：show version / wizard 拒绝口径 ✓（同④）
+
+----- 4. 安装 ISO（随轮交付物，不随 Release 分发）-----
+    产物:   nfvis_1.1.20_amd64.iso（3,114,321,920 字节，3.0G）
+    sha256: 19e1c4927b2e121d7382f816eff7a7698576938f84438e5b3aaf1c2447890304
+    构建:   make iso（= make deb 同源发布件 + 官方 ISO sha cc8a95cd…（对官方 SHA256SUMS 一致）
+            + 闭包 243 + VPP 26.06×9；build-iso.sh 自检 BIOS/EFI 双引导记录、菜单双条目全过）
+    分发：超过 GitHub Release 单文件 2GiB 限制 → 不挂 asset，按手册 §2.4 方式 C 本地构建。
+    真机验证：round32（docs/evidence/v1-closeout-round32-install-iso.txt，气隙 19/19 PASS）。
+
+----- 5. 发布与回验 -----
+    Release: https://github.com/xzjt/nfvis/releases/tag/v1.1.20（tag 指向 main b138700）
+    assets:  nfvis_1.1.20_amd64.deb + nfvis_1.1.20_amd64.deb.sha256
+    回下载:  经代理自 GitHub 下载 asset，sha256 与构建端逐字节一致（7bc77cce…）✓
+
+----- 6. 遗留与登记 -----
+- AGENTS 发布清单此前漏记 v1.1.19，本轮一并补记（v1.1.16~1.1.18 为内部验证构建、跳号说明同 round29）。
+- 环境现状：nfvis-vm 装发布件 1.1.20（服务 active）；ISO 构建现场齐备（/root/isobuild）。
+- 未验/如实登记：UEFI 未在 OVMF 实机引导；裸机 U 盘引导未验；集成测试环境待重建（快照恢复清场）。
