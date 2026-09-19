@@ -31,6 +31,7 @@ cd /root/isobuild/debs || exit 1
 # 完整性预检：上次运行被中断会留下截断的 deb（dpkg-deb 读不了），删除后本循环重下，
 # 否则「已有即跳过」会让坏文件永远滞留
 for f in *.deb; do
+    [ -e "$f" ] || continue
     dpkg-deb -f "$f" >/dev/null 2>&1 || { echo "删除损坏 deb: $f"; rm -f "$f"; }
 done
 

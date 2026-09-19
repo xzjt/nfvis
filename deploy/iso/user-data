@@ -26,6 +26,8 @@ autoinstall:
   shutdown: reboot
   late-commands:
     # deb 闭包随盘落位 /opt/nfvis/debs：装机源（本地 file 仓库）+ 留在系统里的气隙修复源
+    #（cp 不建中间目录，/opt/nfvis 须先建——round32 第三次装机实测）
+    - mkdir -p /target/opt/nfvis
     - cp -a /cdrom/nfvis/debs /target/opt/nfvis/debs
     # 只认本地仓库（SourceList 覆盖 + 关闭 SourceParts，网络源在气隙下不可达也不去碰）
     - printf 'deb [trusted=yes] file:/opt/nfvis/debs ./\n' > /target/etc/apt/sources.list.d/nfvis-local.list
