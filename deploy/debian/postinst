@@ -37,7 +37,7 @@ if [ "${HP1G_TOTAL:-0}" -gt 0 ] 2>/dev/null; then
 else
     log "提示：未检测到 **1G** 大页池（当前 1G=${HP1G_TOTAL:-0}、2M=${HP2M_TOTAL:-0}）。"
     log "      VNF 内存从 1G 大页池分配，未预留则 VM 无法启动。"
-    log "      处理：运行 /usr/share/nfvis/installer/nfvis-baseline.sh --defaults 后 reboot（见用户手册「3.1 内核基线」）。"
+    log "      处理：重启生效；如需自定义，登录 CLI 执行 wizard（见用户手册「3.1 内核基线」）。"
 fi
 if grep -q 'isolcpus' /proc/cmdline 2>/dev/null; then
     log "isolcpus 已配置：$(tr ' ' '\n' < /proc/cmdline | grep isolcpus | tr '\n' ' ')"

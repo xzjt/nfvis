@@ -516,22 +516,11 @@ NFViS 初始化向导（wizard）——规划资源池与内核基线（Enter �
 > 这一步做完之前，nfvisd 能启动、能登录、能配（配置落库），但**数据面与计算面不可用**。
 > 基线写入 GRUB，**需重启生效**；运行期只有 2M 页可以追加预留，1G 页必须开机时给足。
 
-### 6.1 三条路径（向导 / 安装器脚本 / CLI）
+### 6.1 两条操作者路径（wizard / CLI）
 
 **方式 0：`wizard`**（推荐）——见 §5。
 
-**方式 A：安装器脚本**（deb 包自带；不依赖服务运行）
-
-```bash
-/usr/share/nfvis/installer/nfvis-baseline.sh --check       # 只看现状（含厂商/在线核/nohz_full 支持）
-sudo /usr/share/nfvis/installer/nfvis-baseline.sh --defaults   # 保守默认：1G 页 = min(RAM_GB/4, 8)，不设隔离核
-# 或按机器规格显式指定（可并用 1G 与 2M 双池）：
-sudo /usr/share/nfvis/installer/nfvis-baseline.sh --apply \
-     --hugepages-1g 8 --hugepages-2m 768 --isolated-cores 4-15 --thp never --iommu pt
-sudo reboot
-```
-
-**方式 B：经 CLI**（配置态 → 写 GRUB → 重启）
+**方式 A：经 CLI**（配置态 → 写 GRUB → 重启）
 
 ```bash
 nfvis$ configure
@@ -548,6 +537,12 @@ nfvis$ request system reboot
 
 `request system kernel rollback` 回退到上一次片段（写入前自动备份到
 `/var/lib/nfvis/kernel-baseline.bak`；`update-grub` 失败也会自动回退，不留未生效配置）。
+
+> **内部恢复工具**：`/usr/share/nfvis/installer/nfvis-baseline.sh` 保留在包内，但**日常调整不走它**
+> ——它的操作者用法已由 wizard 与 `request system kernel apply` 取代（同一生成器，避免两套用法漂移）。
+> 它只在两个场景直接使用：安装期基线预置（postinst 自动调用）；**守护进程不可用时的救急**
+> （不碰配置库、不需要登录）：`--check` 看现状、`--apply …` 直接写 GRUB 片段、`--rollback` 回退。
+> 卸载后的基线清理步骤见 purge 输出（手工删除片段并 `update-grub`）。
 
 ### 6.2 自动补全规则（生成器按本机事实）
 
