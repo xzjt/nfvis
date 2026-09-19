@@ -1,0 +1,70 @@
+round32 — NFViS 安装 ISO（决策 #110，Part B）：构建 + 气隙装机全链路真机验证
+日期：2026-09-19（含一次 nfvis-vm 快照误恢复后的全量现场重建）
+环境：nfvis-vm（Ubuntu 26.04.1，USTC 源，嵌套 KVM 可用）；源码分支 feat/install-iso
+
+════════════════════════════════════════════════════════
+1. 构建（nfvis-vm，/root/src @ b23da64 之后的 feat/install-iso）
+════════════════════════════════════════════════════════
+- nfvis deb：make deb VERSION=1.1.20（SOURCE_DATE_EPOCH=1789828051）
+- 离线闭包：contrib/iso/ustc-closure.sh → 243 包（USTC，全部 sha 完整性预检通过）
+  本次补下 243 个，累计 243 个；closure.done 落地
+- 官方 ISO：USTC ubuntu-releases 单流 34MB/s（~90s）；sha256 与官方 SHA256SUMS 一致
+  cc8a95cde20f6ced61a322420de00f10cc3c90ced545daa46cb9c1a117f1d927  ubuntu-26.04.1-live-server-amd64.iso: OK
+- 产物：build-iso.sh exit=0
+  build-iso: 已生成 build/nfvis_1.1.20_amd64.iso（3.0G，含 253 个 deb）
+  自检含：产物 as_mkisofs rc=0（BIOS -b + EFI -e 双引导记录）、grub.cfg 双条目、
+  /nfvis/user-data 注入在、同包多版本 dup 闸门
+
+════════════════════════════════════════════════════════
+2. 气隙装机（嵌套 KVM；-nic none = 无网络；-m 3072）
+════════════════════════════════════════════════════════
+GRUB opt-in 生效（monitor sendkey down+ret 选中第二条目后）：
+  Kernel command line: BOOT_IMAGE=/casper/vmlinuz autoinstall ds=nocloud;s=/cdrom/nfvis/
+                       console=tty1 console=ttyS0,115200n8 ---
+装机结果：late-command 返回非零计数 = 0（grep "returned non-zero" console.log）；
+autoinstall 走完自动重启，从磁盘引导，串口横幅：
+  Ubuntu 26.04.1 LTS nfvis ttyS0
+  nfvis login:                     ← 串口控制台 drop-in（50-nfvis-iso-console.cfg）生效
+
+════════════════════════════════════════════════════════
+3. 装后逐项验证（contrib/iso/verify-iso-install.sh，经 hostfwd 2222→22 SSH）
+════════════════════════════════════════════════════════
+== 结果：PASS=19 FAIL=0 ==
+  服务与版本：nfvisd active；nfvisd -version → 1.1.20；一次性口令在 journal（grep 一次性口令 命中）
+  内核基线：/etc/default/grub.d/99-nfvis.cfg 存在；50-nfvis-iso-console.cfg 存在；
+            /proc/cmdline 含 console=ttyS0、无 isolcpus（装机期保守默认）
+  底座安装：docker.io / libvirt-daemon-system / qemu-system-x86 / vpp / nfvis 均 install ok installed；
+            vpp is-enabled → disabled（首启不自启）；is-active → inactive
+  随盘物料：/opt/nfvis/debs/nfvis_1.1.20_*.deb 在；deb 总数 253（≥250）；
+            /etc/apt/sources.list.d/nfvis-local.list（本地 file 仓库）已注册；SSH nfvis 口令可登
+  wizard：timeout 10 nfvis-cli </dev/null → 即返（rc=0，无挂起）：
+            % 未提供口令：请在终端下运行以交互输入，或用 -p / NFVIS_PASSWORD 指定
+端到端触达：guest journal 取一次性口令（20 字符）→ NFVIS_PASSWORD=<口令> nfvis-cli：
+  连接 https://127.0.0.1:443 ...
+  nfvis> NFViS 1.1.20            ← 一次性口令登录 + show version 成功
+
+════════════════════════════════════════════════════════
+4. 本轮实修记录（全部落进脚本/决策 #110 补记）
+════════════════════════════════════════════════════════
+a) indev→outdev `-boot_image any keep` 无法编址 26.04 的 EFI El Torito（附加分区字节区间的
+   "隐藏映像"）→ 产物 as_mkisofs 报 SORRY。改按 `-report_el_torito as_mkisofs` 自报配方
+   全树重建（配方值含空格/引号，须经 eval 展开且先并行——两处 shell 语义坑实测踩过）。
+b) 闭包裁剪两轮根因（同为候选组展开）：
+   ① libvirt-daemon-driver-qemu Depends 的四选一候选组把 qemu-system/-hwe 元包拖进
+      模拟器全家（mips/ppc/riscv/sparc/s390x/arm…）——产品只要 x86_64，按清单剔除；
+   ② <pkg> 与 <pkg>-hwe 双变体互斥（Conflicts/Replaces）：dpkg -i -R 直灌解包一个拆另一个，
+      libvirt 全链 reinstreq half-installed → dpkg 退出 1。同名非 hwe 在闭包时剔除 hwe。
+c) dpkg -i -R 换**本地 file 仓库 + apt 解析**：候选组/互斥变体/已装同旧版本由 apt 挑选跳过，
+   与正常安装语义一致（dpkg 直灌还被 cron/bcron/systemd-cron、dnsmasq-base/-lua、
+   opensysusers/systemd-sysusers、runc 自冲突连环坑）。
+d) user-data 的 mkdir -p /target/opt/nfvis 缺失 → cp -a 中间目录报错（第三次装机才暴露）；
+   dpkg/apt 输出落 target /var/log/nfvis-*-install.log，失败可 qemu-nbd 挂盘直接取证。
+e) 运维事故：nfvis-vm 被误恢复为干净快照（现场全失）→ 凭仓库内脚本全量重建现场
+   （USTC 源、构建工具、闭包 243、官方 ISO 校验、deb、ISO），流程本身即是手册方式 C 的走查。
+f) qemu -m 4096 曾致宿主机不可达（疑 OOM 冻结）→ 降为 -m 3072；1G 页在 3G guest 上算出 0
+   （min(3/4,8)），属机器规格函数、非 ISO 逻辑，故验证脚本不对其断言。
+
+未验/如实登记：
+- UEFI 引导路径只验到产物自检（as_mkisofs rc=0 含 -e），未在 OVMF 下实机引导；
+- 真实裸机 U 盘引导未验（无裸机）；
+- 是否挂 GitHub release 由用户决定（ISO 3.0G 不随 PR 发布）。
