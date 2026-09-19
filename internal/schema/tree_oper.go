@@ -258,6 +258,7 @@ func OperRoot() *Node {
 				),
 			),
 		)),
+		Op(K("wizard", "初始化向导（CLI 端交互式：问答规划资源池与内核基线并提交；非 TTY 不可用）")),
 		Su(K("configure", "进入配置模式（仅 super-user）")),
 		Op(K("ping", "连通性测试",
 			PT("<host>", "string", "目标地址"),

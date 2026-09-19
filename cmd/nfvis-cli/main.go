@@ -95,6 +95,14 @@ func runScript(session *cli.Session, cmdline string) {
 		if line == "" {
 			continue
 		}
+		if line == "wizard" { // 初始化向导（决策 #107）：交互式编排，非 TTY 时向导自行拒绝
+			if err := cli.RunWizard(session, term.IsTerminal(int(os.Stdin.Fd())), os.Stdin, os.Stdout); err != nil {
+				fmt.Printf("%% %v\n", err)
+				failed = true
+				break
+			}
+			continue
+		}
 		out, _ := session.ExecuteLine(line)
 		fmt.Print(out)
 		if !strings.HasSuffix(out, "\n") {

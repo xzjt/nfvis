@@ -173,10 +173,13 @@ ping <host> [source <ip>] [count <n>] [vrf <name>]  # **仅 VPP 数据面**（vp
 traceroute <host> [vrf <name>]                      # 宿主侧 ICMP；vrf 经 VPP 路径不支持（明确报错）
 monitor interfaces <ifname> [interval <sec>]        # 实时刷新计数，Ctrl-C 退出（CLI 端轮询）
 monitor vnf <name>                                  # 跟踪 VNF 状态/事件（CLI 端轮询，Ctrl-C 退出）
+wizard                                              # 初始化向导（CLI 端交互式：问答规划资源池+内核基线并提交；非 TTY 拒绝）
 clear interfaces statistics [<ifname>]              # S
 start shell                                         # S；仅 local console 允许（SSH 登录禁用）
 help [command]
 ```
+
+> 实现说明（决策 #107）：`wizard` 是 **CLI 端交互编排**（与 monitor 的「CLI 端轮询」同类，无独立 API 端点）：问答推导资源池/VPP 线程/大页/低延迟计划，展示将要提交的语句清单，确认后经既有语句（configure/set/commit/request system kernel apply）执行——commit 校验与内核基线护栏（决策 #104）原样生效，向导不绕过任何校验。非 TTY（管道/脚本）打印指引即返回，不挂起。数据口的绑定/声明不在向导范围内（运行期动作，见 §3.2 手册流程），向导结束时打印重启后动作清单。
 
 > 实现说明（M3-9，附录 A #36）：VPP 26.06 的 ping 插件仅提供 finished-event API、无发起接口，故 `ping` 经 `vppctl`（CLI socket）执行；`source <ip>` 经 VPP 接口地址反查接口名后作为 `vppctl ping source <iface>`。VPP 26.06 无 traceroute 插件/CLI/API，`traceroute` 由 nfvisd 宿主侧 raw ICMP 实现，`vrf` 参数在经 VPP 的路径上不支持并明确报错。`monitor interfaces` 服务端返回单次快照，nfvis-cli REPL 按 interval 本地轮询、Ctrl-C 退出。
 >

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -207,6 +208,32 @@ func (c *Client) do(method, path string, body any, out any) error {
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
 	return nil
+}
+
+// MetricsText 拉取 /api/v1/metrics 的原始文本（无鉴权端点，M5-2）。
+// setup 向导读取主机事实（在线核数/内存总量）用：metrics 是机器可读格式，
+// 解析它不属于「解析 show 表格文本」的脆弱类（决策 #85 的教训）。
+func (c *Client) MetricsText() (string, error) {
+	req, err := http.NewRequest(http.MethodGet, c.base+"/api/v1/metrics", nil)
+	if err != nil {
+		return "", err
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GET /api/v1/metrics: %s", resp.Status)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // IdleTimeoutMinutes 读取系统配置的 CLI 空闲超时（FR-SEC-005；0 表示未配置）。

@@ -310,6 +310,11 @@ func (x *cliExecutor) execOper(user, class, source string, s *cliSession, t []st
 	case "exit", "quit":
 		delete(x.sess, user+"@"+source)
 		return ""
+	case "wizard":
+		// 初始化向导是 CLI 端交互编排（决策 #107）：REST/脚本路径无 TTY 不能问答，
+		// 这里只给指引——交互式 nfvis-cli 在本地拦截 `wizard`，不会走到这里。
+		return "%% wizard 是交互式向导，仅可在交互式 nfvis-cli 终端执行；" +
+			"脚本/REST 请改用 set/request 语句（见用户手册「3.1 内核基线」）\n"
 	case "show":
 		return x.execOperShow(class, t[1:])
 	case "ping":
