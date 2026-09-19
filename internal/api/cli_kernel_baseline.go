@@ -20,16 +20,16 @@ func (x *cliExecutor) desiredKernelBaseline() (ksys.KernelDesired, error) {
 		return ksys.KernelDesired{}, err
 	}
 	var pageSize string
-	count := 0
+	count, count2M := 0, 0
 	if cfg.ResourcePools != nil {
 		for _, hp := range cfg.ResourcePools.Hugepages {
-			// 只托管一种页大小：优先 1G（vhost-user 场景），否则 2M
-			if hp.PageSize == "1G" {
+			// 双池（决策 #106）：1G 与 2M 各自托管，不再二选一——
+			// VPP 用 2M（hugepage-preference）、VM 用 1G，两组都进 cmdline。
+			switch hp.PageSize {
+			case "1G":
 				pageSize, count = "1G", hp.Count
-				break
-			}
-			if pageSize == "" {
-				pageSize, count = hp.PageSize, hp.Count
+			case "2M":
+				count2M = hp.Count
 			}
 		}
 	}
@@ -49,6 +49,10 @@ func (x *cliExecutor) desiredKernelBaseline() (ksys.KernelDesired, error) {
 		extra = sys.Kernel.Params
 	}
 	d := ksys.DesiredFromConfig(pageSize, count, isolated, nmi, thp, iommu, tuned, extra)
+	if pageSize != "2M" && count2M > 0 {
+		// DesiredFromConfig 只收一种页大小；1G 在管时把 2M 池补进同一基线（决策 #106）
+		d.Hugepages2M = count2M
+	}
 	d.LowLatency = lowLatency
 	return d, nil
 }

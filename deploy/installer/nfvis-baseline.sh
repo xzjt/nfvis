@@ -67,6 +67,7 @@ check() {
     fi
     log "  运行 cmdline：$(tr ' ' '\n' < /proc/cmdline | grep -E 'hugepages|isolcpus|nmi_watchdog|transparent_hugepage' | tr '\n' ' ')"
     log "  大页实际：$(grep -i '^HugePages_Total' /proc/meminfo | tr -s ' ')  空闲 $(grep -i '^HugePages_Free' /proc/meminfo | awk '{print $2}')"
+    log "  分尺寸：1G=$(cat /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages 2>/dev/null || echo 未知)  2M=$(cat /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages 2>/dev/null || echo 未知)"
     if grep -q "$MARK" "$FSTAB" 2>/dev/null; then
         log "  fstab 大页挂载：$(grep -A1 "$MARK" "$FSTAB" | tail -1)"
     else

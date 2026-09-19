@@ -82,6 +82,9 @@ func run() error {
 			extra = strings.Fields(*extraParams)
 		}
 		d := system.DesiredFromConfig(pageSize, count, *isoCores, "", *thp, *iommu, *tuned, extra)
+		if pageSize == "1G" && *hp2m > 0 {
+			d.Hugepages2M = *hp2m // 双池（决策 #106）：--hugepages-1g 与 --hugepages-2m 可并用
+		}
 		d.LowLatency = *lowLatency
 		d = system.EnrichDesired(d, "/")
 		// 护栏：隔离核配置不合法（把核全隔离/越界）直接拒绝——写进 GRUB 要重启才会暴露，

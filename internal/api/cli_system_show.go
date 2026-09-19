@@ -291,7 +291,8 @@ func (x *cliExecutor) renderKernelBaseline() string {
 	fmt.Fprintf(&b, "%-22s %-26s %s\n", "项", "内核基线(cmdline)", "运行实际")
 	iso := ksys.IsolatedFromCmdline(actual.Cmdline)
 	fmt.Fprintf(&b, "%-22s %-26s %s\n", "isolcpus", dash(iso), dash(iso))
-	fmt.Fprintf(&b, "%-22s %-26s %s\n", "大页 1G", dash(cmdlineHuge(actual.Cmdline)), fmt.Sprintf("%d（free %d）", actual.Hugepages1G, actual.Hugepages1GFr))
+	fmt.Fprintf(&b, "%-22s %-26s %s\n", "大页 1G", dash(ksys.HugepageFromCmdline(actual.Cmdline, "1G")), fmt.Sprintf("%d（free %d）", actual.Hugepages1G, actual.Hugepages1GFr))
+	fmt.Fprintf(&b, "%-22s %-26s %s\n", "大页 2M", dash(ksys.HugepageFromCmdline(actual.Cmdline, "2M")), fmt.Sprintf("%d（free %d）", actual.Hugepages2M, actual.Hugepages2MFr))
 	nmi := "-"
 	if actual.NMIWatchdog != nil {
 		nmi = fmt.Sprintf("%v", *actual.NMIWatchdog)
@@ -299,8 +300,8 @@ func (x *cliExecutor) renderKernelBaseline() string {
 	fmt.Fprintf(&b, "%-22s %-26s %s\n", "nmi_watchdog", "-", nmi)
 	fmt.Fprintf(&b, "%-22s %-26s %s\n", "transparent_hugepage", "-", dash(actual.THP))
 	b.WriteString("\n配置期望（resource-pools / system kernel 派生）：\n")
-	fmt.Fprintf(&b, "  大页 1G=%s   isolcpus=%s   nmi_watchdog=%s   thp=%s\n",
-		desiredInt(desired.Hugepages1G), dash(desired.IsolatedCores), desiredBool(desired.NMIWatchdog), dash(desired.THP))
+	fmt.Fprintf(&b, "  大页 1G=%s 2M=%s   isolcpus=%s   nmi_watchdog=%s   thp=%s\n",
+		desiredInt(desired.Hugepages1G), desiredInt(desired.Hugepages2M), dash(desired.IsolatedCores), desiredBool(desired.NMIWatchdog), dash(desired.THP))
 	if len(diffs) == 0 {
 		b.WriteString("\n一致性：内核基线与配置期望一致（无需重启）\n")
 	} else {
@@ -312,18 +313,10 @@ func (x *cliExecutor) renderKernelBaseline() string {
 	x.structured = map[string]any{
 		"cmdline": actual.Cmdline, "isolated_cores": iso,
 		"hugepages_1g": actual.Hugepages1G, "hugepages_1g_free": actual.Hugepages1GFr,
+		"hugepages_2m": actual.Hugepages2M, "hugepages_2m_free": actual.Hugepages2MFr,
 		"thp": actual.THP, "desired": anyToTree(desired), "diffs": diffs,
 	}
 	return b.String()
-}
-
-func cmdlineHuge(cmdline []string) string {
-	for _, p := range cmdline {
-		if strings.HasPrefix(p, "hugepages=") {
-			return strings.TrimPrefix(p, "hugepages=")
-		}
-	}
-	return ""
 }
 
 func dash(s string) string {
