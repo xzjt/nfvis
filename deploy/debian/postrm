@@ -9,9 +9,6 @@
 # 卸载过程**不自动改**，只打印可照着做的撤销步骤（不留"看不见的痕迹"）。
 set -e
 
-SSH_HARDEN=/usr/share/nfvis/installer/nfvis-ssh-harden.sh
-BASELINE=/usr/share/nfvis/installer/nfvis-baseline.sh
-
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     if [ "$1" = "purge" ]; then
@@ -23,21 +20,27 @@ if [ "$1" = "purge" ]; then
     rm -rf /run/nfvis
     echo "nfvis postrm: 已清理 /run/nfvis（/var/lib/nfvis 数据保留）"
 
-    # ① SSH 强化：撤销 drop-in（它会让卸载后的系统继续禁止 root 口令登录）
-    if [ -x "$SSH_HARDEN" ]; then
-        if "$SSH_HARDEN" --revert >/dev/null 2>&1; then
-            echo "nfvis postrm: 已撤销 SSH 强化（/etc/ssh/sshd_config.d/99-nfvis.conf）"
+    # ① SSH 强化：撤销 drop-in（它会让卸载后的系统继续禁止 root 口令登录）。
+    # **必须内联**：postrm 运行时包文件已被删除（dpkg 先删文件再跑 postrm），
+    # 不能依赖包内脚本——发现 #28：[ -x ] 静默跳过使撤销从未生效（round20 的
+    # 验证用探针路径，未覆盖「包文件已删」的真实时序）。撤销只是移除限制
+    # （恢复 sshd 默认），无锁死风险，故无需 ssh-harden 的闸门；删后 sshd -t 校验再 reload。
+    if [ -f /etc/ssh/sshd_config.d/99-nfvis.conf ]; then
+        rm -f /etc/ssh/sshd_config.d/99-nfvis.conf
+        if command -v sshd >/dev/null 2>&1 && sshd -t 2>/dev/null; then
+            if systemctl reload sshd >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1; then
+                echo "nfvis postrm: 已撤销 SSH 强化（/etc/ssh/sshd_config.d/99-nfvis.conf 已删、sshd 已重载）"
+            else
+                echo "nfvis postrm: drop-in 已删除；sshd 重载失败，请手工执行 systemctl reload sshd"
+            fi
         else
-            echo "nfvis postrm: 撤销 SSH 强化失败，请手工删除 /etc/ssh/sshd_config.d/99-nfvis.conf 并重启 sshd"
+            echo "nfvis postrm: drop-in 已删除；sshd 不可用或校验失败，重启后按 sshd 默认配置生效"
         fi
     fi
 
     # ② 内核基线：不自动改，给出可照做的步骤
     echo "nfvis postrm: 以下安装期改动**仍需手工撤销**（重启后才彻底生效）："
     echo "  · /etc/default/grub.d/99-nfvis.cfg（大页/隔离核等启动参数）"
-    if [ -x "$BASELINE" ]; then
-        echo "      自动：$BASELINE --rollback   （会删除/还原片段并跑 update-grub）"
-    fi
     echo "      手工：rm -f /etc/default/grub.d/99-nfvis.cfg && update-grub"
     echo "  · /etc/fstab 里带 '# nfvis-hugepages' 标记的挂载行"
     echo "      手工：删掉该标记行及其下一行（hugetlbfs 挂载）后 umount /dev/hugepages"
