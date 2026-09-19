@@ -8,7 +8,7 @@
 # 用法：
 #   nfvis-baseline.sh --check                      # 只检查并报告（postinst 用），不写系统
 #   nfvis-baseline.sh --apply --hugepages-1g 8 [--isolated-cores 4-15] [--thp never] \
-#                     [--iommu pt] [--tuned-profile nfvis-throughput] [--params "intel_iommu=on"]
+#                     [--iommu pt] [--low-latency] [--tuned-profile nfvis-throughput] [--params "intel_iommu=on"]
 #   nfvis-baseline.sh --defaults                   # 保守默认：1G 页 = min(RAM_GB/4, 8)，不设 isolcpus
 #   nfvis-baseline.sh --rollback                   # 恢复上一次片段（无备份则删除片段）
 #
@@ -36,7 +36,7 @@ log() { echo "nfvis-baseline: $*"; }
 die() { echo "nfvis-baseline: $*" >&2; exit 1; }
 
 MODE=""
-HP1G=0; HP2M=0; ISO=""; THP=""; IOMMU=""; TUNED=""; PARAMS=""
+HP1G=0; HP2M=0; ISO=""; THP=""; IOMMU=""; LOWLAT="no"; TUNED=""; PARAMS=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -46,6 +46,7 @@ while [ $# -gt 0 ]; do
         --isolated-cores) ISO="$2"; shift ;;
         --thp) THP="$2"; shift ;;
         --iommu) IOMMU="$2"; shift ;;
+        --low-latency) LOWLAT="yes" ;;
         --tuned-profile) TUNED="$2"; shift ;;
         --params) PARAMS="$2"; shift ;;
         *) die "未知参数: $1" ;;
@@ -99,9 +100,11 @@ apply() {
     [ -n "$ISO" ] && GEN_ARGS="$GEN_ARGS --isolated-cores $ISO"
     [ -n "$THP" ] && GEN_ARGS="$GEN_ARGS --thp $THP"
     [ -n "$IOMMU" ] && GEN_ARGS="$GEN_ARGS --iommu $IOMMU"
+    [ "$LOWLAT" = "yes" ] && GEN_ARGS="$GEN_ARGS -low-latency"
     [ -n "$TUNED" ] && GEN_ARGS="$GEN_ARGS --tuned-profile $TUNED"
     [ -n "$PARAMS" ] && GEN_ARGS="$GEN_ARGS --kernel-params \"$PARAMS\""
 
+    [ "$LOWLAT" = "yes" ] && log "低延迟参数组已启用：mitigations=off 等会降低安全缓解与可诊断性，idle=poll 使核常驻满载（虚拟机上自动省略 idle=poll/tsc=reliable）"
     OUT=$(eval "$NFVISD $GEN_ARGS" 2>"$ERRFILE") || die "$(cat "$ERRFILE")"
     [ -s "$ERRFILE" ] && log "生成器警告：$(cat "$ERRFILE")"
     rm -f "$ERRFILE"

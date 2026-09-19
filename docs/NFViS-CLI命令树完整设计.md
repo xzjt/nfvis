@@ -222,6 +222,7 @@ set kernel                                    # 内核启动基线（大页/隔�
   ├─ nmi-watchdog <true|false>                # NMI watchdog（VPP 场景通常 false）
   ├─ transparent-hugepages <always|madvise|never>
   ├─ iommu <on|off|pt>
+  ├─ low-latency <true|false>                 # 低延迟参数组（显式选择，代价见 enable 时的输出；VM 上自动省略 idle=poll/tsc=reliable）
   ├─ tuned-profile <name>
   └─ params <param>                           # 附加内核参数（逃生口，可多条）
 set health thresholds

@@ -23,6 +23,7 @@ type KernelDesired struct {
 	IsolatedCores string // isolcpus=<list>
 	IRQAffinity   string // irqaffinity=<非隔离核>（EnrichDesired 按真机在线核派生；空 = 不写）
 	NoHZFull      *bool  // nil = 未探测（按支持处理）；false = 内核无 CONFIG_NO_HZ_FULL，省略 nohz_full/rcu_nocbs
+	LowLatency    bool   // 低延迟参数组（显式选择；idle=poll/tsc=reliable 由 EnrichDesired 按是否虚拟化决定）
 	NMIWatchdog   *bool  // nil = 不托管（保留现状）
 	THP           string // always|madvise|never；空 = 不托管
 	IOMMU         string // on|off|pt；空 = 不托管
@@ -94,6 +95,17 @@ func IsolatedFromCmdline(cmdline []string) string {
 	return ""
 }
 
+// ParamValueFromCmdline 从 cmdline 提取 name=value 参数的值（无则空）。
+func ParamValueFromCmdline(cmdline []string, name string) string {
+	prefix := name + "="
+	for _, p := range cmdline {
+		if v, ok := strings.CutPrefix(p, prefix); ok {
+			return v
+		}
+	}
+	return ""
+}
+
 // Compare 返回「配置期望 vs 运行实际」的差异项（空 = 一致）。
 // 仅比较已托管的项：大页（1G 页数）、isolcpus、NMI watchdog、THP。
 func Compare(d KernelDesired, a KernelActual) []string {
@@ -116,6 +128,11 @@ func Compare(d KernelDesired, a KernelActual) []string {
 	}
 	if d.THP != "" && a.THP != "" && a.THP != d.THP {
 		out = append(out, fmt.Sprintf("transparent_hugepage：期望 %s，实际 %s", d.THP, a.THP))
+	}
+	if d.LowLatency && ParamValueFromCmdline(a.Cmdline, "mitigations") != "off" {
+		// 低延迟组不逐项对照（与 vendor/irqaffinity 同口径），但要用代表项把
+		// 「apply/commit 时的待重启提示」撑起来——否则开了 profile 却提示"无需重启"。
+		out = append(out, "低延迟参数组：期望启用（mitigations=off 等），cmdline 未见（需写入 GRUB 并重启）")
 	}
 	return out
 }
@@ -140,6 +157,17 @@ func GenerateBaseline(d KernelDesired) (grubFragment string, fstabLine string) {
 	if d.IRQAffinity != "" {
 		// 中断默认亲和到非隔离核（与 isolcpus 成对；补集由 EnrichDesired 按在线核算出）
 		params = append(params, "irqaffinity="+d.IRQAffinity)
+	}
+	if d.LowLatency {
+		// 低延迟参数组（显式可选 profile）：机型无关的一半在这里产出；
+		// idle=poll/tsc=reliable 与机型强相关，由 EnrichDesired 按真机是否虚拟化补。
+		// 每项都有代价（mitigations=off 是安全缓解回退、mce/nosoftlockup 关掉的是排查手段），
+		// 故只随显式选择写入，不做默认。
+		params = append(params, "mitigations=off", "audit=0", "mce=off", "nosoftlockup", "numa_balancing=disable")
+		if d.NMIWatchdog == nil {
+			// nmi-watchdog 有独立字段托管；未托管且 profile 开启时按组补上（用户显式设置一律优先）
+			params = append(params, "nmi_watchdog=0")
+		}
 	}
 	if d.NMIWatchdog != nil && !*d.NMIWatchdog {
 		params = append(params, "nmi_watchdog=0")

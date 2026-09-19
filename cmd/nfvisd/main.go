@@ -61,6 +61,7 @@ func run() error {
 		isoCores      = flag.String("isolated-cores", "", "隔离核列表，如 4-15（安装期基线）")
 		thp           = flag.String("thp", "", "transparent_hugepages: always|madvise|never")
 		iommu         = flag.String("iommu", "", "iommu: on|off|pt")
+		lowLatency    = flag.Bool("low-latency", false, "低延迟参数组（mitigations=off 等；显式选择，降低安全缓解与可诊断性；VM 上自动省略 idle=poll/tsc=reliable）")
 		tuned         = flag.String("tuned-profile", "", "tuned 性能档名")
 		extraParams   = flag.String("kernel-params", "", "附加内核参数（空格分隔）")
 	)
@@ -81,6 +82,7 @@ func run() error {
 			extra = strings.Fields(*extraParams)
 		}
 		d := system.DesiredFromConfig(pageSize, count, *isoCores, "", *thp, *iommu, *tuned, extra)
+		d.LowLatency = *lowLatency
 		d = system.EnrichDesired(d, "/")
 		// 护栏：隔离核配置不合法（把核全隔离/越界）直接拒绝——写进 GRUB 要重启才会暴露，
 		// 那时已进不了系统。报错走 stderr（stdout 是安装脚本要捕获的片段）。

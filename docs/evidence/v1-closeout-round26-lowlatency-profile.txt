@@ -1,0 +1,82 @@
+===== V1 收尾第二十六轮：低延迟 profile（显式可选）+ 装机一遍补掉 round25 两项未验 =====
+日期：2026-09-19
+性质：改 internal/{model,schema,api,system}（决策 #105）+ deploy/installer/nfvis-baseline.sh；
+CLI 面新增一条语句 `set system kernel low-latency <bool>`（契约先行：命令树/openapi/附录 A 均先改）。
+
+----- 1. 低延迟参数组（决策 #105，四组里的最后一块）-----
+
+口径：**显式可选，不做默认**。每项都有代价（决策 #105 逐项列明：mitigations=off 是安全缓解回退、
+mce/nosoftlockup 关掉排查手段、idle=poll 让核常驻满载、tsc=reliable 在 guest 未必成立、audit=0 关内核 audit）。
+
+拆两半：
+- 机型无关（GenerateBaseline 随 LowLatency 产出）：mitigations=off audit=0 mce=off nosoftlockup
+  numa_balancing=disable；NMIWatchdog 未托管（nil）时补 nmi_watchdog=0（用户显式设置一律优先）。
+- 机型相关（EnrichDesired 按真机是否虚拟化补）：idle=poll、tsc=reliable——**虚拟机里自动省略**
+  （虚拟化探测：/proc/cpuinfo flags 含 hypervisor，回退 /sys/class/dmi/id/sys_vendor）。
+
+入口：CLI `set system kernel low-latency <true|false>`（bool 叶子，与 nmi-watchdog 同型；
+valueTransforms 增 low_latency→bool；contractStatements 增一条守护）、安装器脚本 `--low-latency`
+（传了即确认，输出带代价说明一行）。Compare 增代表项检查：profile 开而 cmdline 无 `mitigations=off`
+→ 报差异，使 commit/apply 的「待重启生效」提示不漏报（真机 commit 输出已验证该行出现）。
+
+----- 2. 装机一遍（全新 26.04 底座 → nfvis 1.1.16 → 重启 → 数据面恢复）-----
+
+流程：apt 装 make/libvirt/qemu/docker/cloud-image-utils（首次因 aliyun 源索引过期 404，`apt-get update` 后重装
+成功；**另踩 unattended-upgrades 占 dpkg 锁**，等锁释放再装）→ VPP 26.06 用本地 debs（/root/vpp-v26.06-deb）
+→ `make deb VERSION=1.1.16 SOURCE_DATE_EPOCH=1789792452` → `dpkg -i`。
+
+① **安装期补全（决策 #104 首次在全新机器上走 postinst 路径）**：postinst 自动跑 `--defaults`，
+写出的片段为
+    GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} default_hugepagesz=1G hugepagesz=1G hugepages=1
+        intel_iommu=on intel_pstate=disable iommu=pt"
+——vendor 组自动进入安装期基线（无 isolcpus：--defaults 有意不设；无低延迟组：opt-in）。
+② **CLI 路径**：配置 1G×2 + isolated 2-5 + vpp cpu 4/5 + low-latency true → commit（警告里出现
+「低延迟参数组：期望启用」代表项 ✓）→ `request system kernel apply` → 片段
+    hugepages=2 isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5 irqaffinity=0-1 mitigations=off audit=0
+    mce=off nosoftlockup numa_balancing=disable nmi_watchdog=0 intel_iommu=on intel_pstate=disable iommu=pt
+   **无 idle=poll/tsc=reliable**——VM 上自动省略在 CLI 路径同样生效 ✓
+③ **rollback**：`request system kernel rollback` → 片段回到 postinst 版本 ✓
+④ **护栏经 CLI**：isolated 0-5 → commit 成功（设计如此：commit 不感知主机核数）→ apply 拒绝
+   `%% 写入内核基线失败: 隔离核 0-5 会把本机 6 个核几乎全部隔离（只剩 0 个非隔离核）…`，
+   片段未被改动（grep isolcpus=0-5 = 0）✓
+⑤ **重启生效（补掉 round25 未验一）**：/proc/cmdline 实测
+    default_hugepagesz=1G hugepagesz=1G hugepages=2 isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5
+    irqaffinity=0-1 intel_iommu=on intel_pstate=disable iommu=pt crashkernel=…
+   /sys/devices/system/cpu/{isolated,nohz_full} 均为 2-5；HugeTLB 日志 `pre-allocated 2 pages` ✓
+   show system kernel 一致性检查正常工作（发现 1G 实际=3，见 ⑥）。
+⑥ **vendor 补全的意外收益**：上一轮机器没有 intel_iommu=on，vfio 只能走 unsafe noiommu 模式；
+   本轮 `intel_iommu=on iommu=pt` 进了 cmdline，VMware 的 DMAR 真正启用（10 个 iommu_groups、
+   默认域 Passthrough）——vfio-pci 绑定**无需 unsafe 模式**。`enable_unsafe_noiommu_mode=N` 下绑定成功。
+⑦ **数据面恢复（发现 #8/#100 的产品路径再验）**：modprobe vfio-pci → `request interfaces ens192/ens224
+   bind-dpdk --yes`（管理口守卫在线，ens160 未动）→ declare + hugepage-preference 2M + 2M 池 768 →
+   commit → 运行期预留 2M×768 → `request vpp restart` → ens192 up / ens224 up；
+   VPP 从包默认配置挪到 2M 后 1G 页释放（free=2，留给 VM）。
+⑧ **镜像恢复**：debian-12-generic-amd64.qcow2 重下（sha512 84946d6e… 与官方一致）经产品路径导入；
+   docker 拉取 alpine:3.20 时 dockerd 内置 TLS 握手超时经代理不稳，改用 **skopeo 经代理导出 +
+   docker load**（alpine:3.20 已入库）。
+
+----- 3. 集成测试（环境就绪后跑）-----
+
+`make integration`（-timeout 45m）在 isolcpus=2-5 的新布局下运行：
+
+    214 条断言 PASS / 0 FAIL / 0 SKIP
+    ok  github.com/xzjt/nfvis/test/integration      772.310s
+    --- PASS: TestCloudInitAndSerialConsoleRealLibvirt       (140.75s)
+    --- PASS: TestMainChainVMRealVPPAndLibvirt               (146.52s)
+    --- PASS: TestSnapshotContentLevelRollbackRealLibvirt    (423.74s)
+
+即：全参数 cmdline（含低延迟组关、#104 补全、#105 的机型相关项省略）与集成套件完全兼容；
+vmIsolatedCores（在线 0-5 − 核 0 − VPP 4/5）= {1,2,3}，行为与 round24 一致。
+跑后 `systemctl start nfvis` 恢复，终态：nfvis active、两口 up、cmdline 如 §2⑤。
+
+----- 4. 环境现状（2026-09-19 交班）-----
+
+- nfvis **1.1.16**（本机构建 deb，含决策 #104/#105），active；admin 口令 `Nfvis@Test2026`
+- committed：1G×2 + 2M×768、isolated 2-5、vpp cpu main 4 / worker 5、hugepage-preference 2M、
+  interfaces ens192/ens224 + vpp dpdk dev 两口、**low-latency false**（验证后关掉）
+- cmdline：hugepages=2 isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5 irqaffinity=0-1 intel_iommu=on
+  intel_pstate=disable iommu=pt（重启已生效）
+- 镜像仓库：debian-12-generic-amd64.qcow2（ready）；docker：alpine:3.20；2M 预留 768（运行期）
+- 注意：本机 1G 大页 total=**3**（cmdline 只写 2；包默认 VPP 开机时按默认页尺寸多占 1 页、
+  挪到 2M 后未归还）——对 VM 可用页无碍（free=2），属 VPP 包默认配置行为，未追
+- 底座版本：内核 7.0.0-31 / libvirt / qemu / docker（apt 26.04 当前版）/ VPP 26.06-release（本地 debs）

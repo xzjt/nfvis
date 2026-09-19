@@ -949,6 +949,9 @@
               "isolated_cores": {
                 "type": "string"
               },
+              "low_latency": {
+                "type": "boolean"
+              },
               "nmi_watchdog": {
                 "nullable": true,
                 "type": "boolean"
@@ -1362,6 +1365,10 @@
                   "pt"
                 ],
                 "type": "string"
+              },
+              "low_latency": {
+                "description": "低延迟参数组（mitigations=off 等；显式选择，降低安全缓解与可诊断性）",
+                "type": "boolean"
               },
               "nmi_watchdog": {
                 "type": "boolean"

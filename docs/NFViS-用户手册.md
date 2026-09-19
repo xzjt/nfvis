@@ -191,6 +191,13 @@ nfvis-cli -server https://127.0.0.1:443 -u admin -c "request system reboot"
 - 生效后核对：`grep -E 'hugepages|isolcpus|irqaffinity' /proc/cmdline`；`grep HugePages_Total /proc/meminfo`。
 - CLI 自检：`show system kernel` 给出**三方对照**（cmdline / 运行实际 / 配置期望）。
 
+> **低延迟 profile（可选，显式开启）**：`nfvis-baseline.sh --apply … --low-latency` 或
+> `set system kernel low-latency true` 后 `request system kernel apply`。写入
+> `mitigations=off audit=0 mce=off nosoftlockup numa_balancing=disable nmi_watchdog=0`，裸机再补
+> `idle=poll tsc=reliable`。**代价要知道**：`mitigations=off` 关闭 CPU 安全缓解、`mce/nosoftlockup` 关闭
+> 底层故障排查手段、`idle=poll` 让核常驻满载（功耗/发热变大）；虚拟机里产品会自动省略
+> `idle=poll/tsc=reliable`。确认接受再开启。
+
 > **大页数量规划**：VNF 内存从大页池分配，1 台 1G 内存的 VM 就占 1 个 1G 大页。
 > 池子不足时 commit 会明确报错（`无 1G 大页资源池，无法分配 …MB`）。
 
