@@ -28,3 +28,7 @@
   语义级校验依赖对象间引用（示例中的 vs-dmz/fw-vm 互指），不在本验证范围——
   其由 commit check 在真实使用时给出。
 - 验证脚本：build/verify-manual.sh（show）/ build/verify-manual-set.py（set）。
+
+----- 附：随包记录 -----
+手册重写已随 **v1.1.19 重切**进入发布件（同日；重切构建 ddbe55b + EPOCH=1789816967，
+sha256 7081c88c…；包内手册 wc -l = 1359 核对）。见 round29 §5。

@@ -37,3 +37,13 @@
   发现 #1 的三处残留——SSH drop-in 自动撤销 ✓（本轮修复后才真生效）、GRUB/fstab 打印手工指引 ✓、
   数据目录保留 ✓；#20（deb Recommends 补 qemu-utils/cloud-image-utils）**未做**（独立小改，未入本轮）。
 - 环境现状：nfvis-vm 装发布件 1.1.19、committed rev 8、数据面两口 up、cmdline 双池全参数。
+
+----- 5. 发布后重切（用户手册随包，2026-09-19 同日）-----
+首次发布的 v1.1.19（sha 0489bc1377809710f8dff02a3eb26208d4d4795a7cab6974f2669e5bbbfaa9c5、
+构建提交 74bc01e）发布后，用户手册完成重写（round30，945 → 1359 行）。手册随包安装于
+/usr/share/doc/nfvis/，发布件应自带描述自身功能的说明书，故**删除原 release/tag 重切**：
+    重切构建: main ddbe55b + SOURCE_DATE_EPOCH=1789816967
+    重切 sha: 7081c88cdf263bf37af91b6ce125fd84fb2db93e4972fd1211935f4aa9ab935e
+    包内手册: 1359 行（dpkg -x 后 wc -l 核对）；二进制无差异（仅随包文档）
+    校验: 回下载 sha256 与构建端一致 ✓；真机重装（同版本重装）服务 active ✓
+旧 artifact（0489bc13…）随之作废；本文档 §2 记录的发布件以重切后的 7081c88c… 为准。
