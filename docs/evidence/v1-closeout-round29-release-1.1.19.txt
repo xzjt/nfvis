@@ -1,0 +1,39 @@
+===== V1 收尾第二十九轮：v1.1.19 发布（校验记录 + purge 修复）=====
+日期：2026-09-19
+范围：main `f12ffcc`（决策 #104~#108，round24~28 的全部改动）；发布件 nfvis_1.1.19_amd64.deb。
+
+----- 1. 版本号说明 -----
+上一发布 v1.1.15；1.1.16/1.1.17/1.1.18 为同一 merge 线上的**内部验证构建**（每轮合并后重装、
+从未发布，round26/27/28 各一枚），沿用 1.1.11~1.1.14 的跳号处理，故本次发布 **v1.1.19**。
+
+----- 2. 发布件与可复现构建 -----
+    产物:   nfvis_1.1.19_amd64.deb（7,771,994 字节）
+    sha256: 0489bc1377809710f8dff02a3eb26208d4d4795a7cab6974f2669e5bbbfaa9c5
+    构建:   nfvis-vm / make deb VERSION=1.1.19 SOURCE_DATE_EPOCH=1789810520
+            （= main f12ffcc 的 HEAD 提交时间；git archive 树无 .git，显式传值——决策 #88）
+    ⚠️ 第一枚 1.1.19（sha 5df69916…，EPOCH=1789809553、main 74bc01e）在发布校验中因
+    发现 #28 被**废弃重构建**（postrm 修复入 main 后的 f12ffcc 才是发布件）。
+
+----- 3. 发布校验（逐项）-----
+① 元数据：Package nfvis / Version 1.1.19 / postinst+prerm+postrm 就位 ✓
+② 内容：nfvisd/nfvis-cli、systemd 单元、随包文档（openapi/命令树/规格书/手册/命令全表）、
+   安装器脚本（nfvis-baseline/nfvis-ssh-harden）✓
+③ 解包运行：/tmp 解包后 `nfvisd -version` / `nfvis-cli -version` = 1.1.19 ✓
+④ 实装：`dpkg -i`（升级装）→ 服务 active、show version=1.1.19、
+   `show system kernel` 一致（双池 1G=2/2M=768、isolcpus=2-5 全部对齐）、wizard 非 TTY 拒绝 ✓
+⑤ **purge（发现 #28 红-绿）**：
+   红：修复前 purge 后 `/etc/ssh/sshd_config.d/99-nfvis.conf` 仍在、postrm 无任何撤销输出
+       （postrm 依赖包内脚本，dpkg 先删文件再跑 postrm → [ -x ] 恒假静默跳过；决策 #108）。
+   绿：修复后 purge 输出「已撤销 SSH 强化（…已删、sshd 已重载）」、drop-in 消失、
+       sshd active；基线指引仅保留可照做的手工步骤 ✓
+⑥ 重装（purge 后首装路径）：SSH 强化重新落地 ✓；**配置库全程未变**——
+   live/backup 对比（rev=8、audit=14、最新 config_json sha256 1c95b8cbc40d9cff 三项一致）✓
+   （§3.9 流程：先 sqlite backup 到 /root/nfvis-db-backup-20260919-0926 再 purge）
+⑦ CLI 冒烟：show version / show system kernel / wizard 拒绝口径 ✓
+
+----- 4. 遗留与登记 -----
+- 决策 #108（本轮新增）：postrm 不得依赖包内脚本；SSH 撤销已内联，基线撤销保持手工指引。
+- 待办 §0 第 3 项（生命周期与卸载残留复验）随本次 purge/重装一并完成：
+  发现 #1 的三处残留——SSH drop-in 自动撤销 ✓（本轮修复后才真生效）、GRUB/fstab 打印手工指引 ✓、
+  数据目录保留 ✓；#20（deb Recommends 补 qemu-utils/cloud-image-utils）**未做**（独立小改，未入本轮）。
+- 环境现状：nfvis-vm 装发布件 1.1.19、committed rev 8、数据面两口 up、cmdline 双池全参数。
