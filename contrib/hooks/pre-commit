@@ -7,6 +7,14 @@ cd "$(git rev-parse --show-toplevel)"
 
 fail() { echo "✗ pre-commit 失败: $*" >&2; echo "  修复后重试，或 NO_VERIFY=1 git commit 跳过" >&2; exit 1; }
 
+# 应急跳过：注释与失败文案都承诺了这个开关，但此前**只写文案未实现**——
+# 操作者照做无效（round34 实测：宿主内存/页面文件压力下 go test 以 errno=1455 崩溃，
+# 想用逃生门却发现它不存在）。现在真的实现它，并且必须显式留下告警。
+if [ "${NO_VERIFY:-}" = "1" ]; then
+    echo "⚠ pre-commit 已跳过（NO_VERIFY=1）——事后必须补跑 make check" >&2
+    exit 0
+fi
+
 # 产品代码（M1 起工程结构已建立，自检入口为 make check 的快速子集）
 if [ -f go.mod ]; then
     OUT=$(gofmt -l internal cmd 2>/dev/null || true)
