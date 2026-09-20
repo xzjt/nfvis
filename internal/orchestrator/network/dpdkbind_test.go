@@ -9,6 +9,8 @@ package network
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,11 +65,119 @@ func newTestBinder(t *testing.T, root string) (*DPDKBinder, *map[string][]string
 		ReadFile:  os.ReadFile,
 		WriteFile: func(path string, data []byte) error {
 			(*writes)[path] = append((*writes)[path], string(data))
-			return nil
+			// 同时落盘：持久化 drop-in 的幂等判断要读真实文件
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(path, data, 0o644)
 		},
+		// 开机加载 drop-in 落测试临时目录——绝不碰开发机/CI 的 /etc
+		ModulesLoadDir: filepath.Join(root, "etc", "modules-load.d"),
 	}
 	b.Rescan = func() error { return b.WriteFile(b.path("bus/pci/rescan"), []byte("1")) }
 	return b, writes
+}
+
+// 模块未加载时自动补（决策 #112）：ModuleLoader 被调用且绑定成功，并持久化开机加载。
+func TestDPDKBinderBindAutoLoadsModule(t *testing.T) {
+	root, _ := fakeSysfs(t, "ens224", "0000-13-00.0", "vmxnet3")
+	// 去掉 vfio-pci 目录，模拟「模块未加载」
+	if err := os.RemoveAll(filepath.Join(root, "bus", "pci", "drivers", DefaultUioDriver)); err != nil {
+		t.Fatal(err)
+	}
+	b, writes := newTestBinder(t, root)
+	var loaded []string
+	b.ModuleLoader = func(m string) error {
+		loaded = append(loaded, m)
+		// 模拟 modprobe 生效：驱动目录出现
+		return os.MkdirAll(filepath.Join(root, "bus", "pci", "drivers", m), 0o755)
+	}
+	if _, err := b.Bind(context.Background(), "ens224", ""); err != nil {
+		t.Fatalf("自动加载后应能绑定: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0] != DefaultUioDriver {
+		t.Fatalf("应自动加载 %s: %v", DefaultUioDriver, loaded)
+	}
+	conf := filepath.Join(b.ModulesLoadDir, "nfvis-vfio-pci.conf")
+	if got := (*writes)[conf]; len(got) != 1 || got[0] != DefaultUioDriver+"\n" {
+		t.Fatalf("应持久化开机加载到 %s: %v", conf, got)
+	}
+}
+
+// 自动加载失败 → 明确报错（含加载失败原因），不做任何 sysfs 写入。
+func TestDPDKBinderBindModuleLoadFails(t *testing.T) {
+	root, _ := fakeSysfs(t, "ens224", "0000-13-00.0", "vmxnet3")
+	if err := os.RemoveAll(filepath.Join(root, "bus", "pci", "drivers", DefaultUioDriver)); err != nil {
+		t.Fatal(err)
+	}
+	b, writes := newTestBinder(t, root)
+	b.ModuleLoader = func(string) error { return errors.New("modprobe: not found") }
+	if _, err := b.Bind(context.Background(), "ens224", ""); err == nil ||
+		!strings.Contains(err.Error(), "自动加载模块失败") {
+		t.Fatalf("应报自动加载失败: %v", err)
+	}
+	if len(*writes) != 0 {
+		t.Fatalf("失败时不应有 sysfs 写入: %v", *writes)
+	}
+}
+
+// 模块已在位 → 不调用 ModuleLoader（不做无谓的 modprobe）。
+func TestDPDKBinderBindSkipsLoaderWhenModulePresent(t *testing.T) {
+	root, _ := fakeSysfs(t, "ens224", "0000-13-00.0", "vmxnet3")
+	b, _ := newTestBinder(t, root)
+	called := false
+	b.ModuleLoader = func(string) error { called = true; return nil }
+	if _, err := b.Bind(context.Background(), "ens224", ""); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if called {
+		t.Fatal("模块已在位不应调用 ModuleLoader")
+	}
+}
+
+// 持久化失败不阻断绑定（只告警；重启后需手工 modprobe 的老路仍可用）。
+func TestDPDKBinderPersistFailureNonFatal(t *testing.T) {
+	root, _ := fakeSysfs(t, "ens224", "0000-13-00.0", "vmxnet3")
+	b, _ := newTestBinder(t, root)
+	// 让 ModulesLoadDir 的父级是个文件 → MkdirAll 必失败
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b.ModulesLoadDir = filepath.Join(blocker, "modules-load.d")
+	var warned []string
+	b.Logf = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+	if _, err := b.Bind(context.Background(), "ens224", ""); err != nil {
+		t.Fatalf("持久化失败不应阻断绑定: %v", err)
+	}
+	if len(warned) == 0 || !strings.Contains(warned[0], "警告") {
+		t.Fatalf("应输出告警: %v", warned)
+	}
+}
+
+// 幂等：再次绑定不重复写 drop-in（内容一致即跳过）。
+func TestDPDKBinderPersistIdempotent(t *testing.T) {
+	root, _ := fakeSysfs(t, "ens224", "0000-13-00.0", "vmxnet3")
+	b, writes := newTestBinder(t, root)
+	if _, err := b.Bind(context.Background(), "ens224", ""); err != nil {
+		t.Fatal(err)
+	}
+	// 复位写入记录并把驱动改回内核驱动，模拟第二次真实绑定
+	*writes = map[string][]string{}
+	drv := filepath.Join(root, "bus", "pci", "drivers", DefaultUioDriver)
+	if err := os.RemoveAll(drv); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(drv, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Bind(context.Background(), "ens224", ""); err != nil {
+		t.Fatal(err)
+	}
+	conf := filepath.Join(b.ModulesLoadDir, "nfvis-vfio-pci.conf")
+	if got := (*writes)[conf]; len(got) != 0 {
+		t.Fatalf("内容已一致不应重写: %v", got)
+	}
 }
 
 func TestDPDKBinderReadsPCIDriver(t *testing.T) {

@@ -483,7 +483,8 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 		}
 	}
 	fmt.Fprintln(out, "\n向导完成。内核基线需重启生效：request system reboot。")
-	fmt.Fprintln(out, "重启后的固定动作（数据口绑定不跨重启）：modprobe vfio-pci → request interfaces <数据口> bind-dpdk --yes → request vpp restart。")
+	fmt.Fprintln(out, "重启后的固定动作（数据口绑定不跨重启）：request interfaces <数据口> bind-dpdk --yes → request vpp restart。")
+	fmt.Fprintln(out, "（vfio 模块由绑定命令自动加载并持久化开机加载，无需手工 modprobe）")
 	fmt.Fprintln(out, "数据口的声明（set interfaces / set vpp dpdk dev）不在向导范围内，见用户手册「3.2 业务网卡交 DPDK」。")
 	return nil
 }
