@@ -2,7 +2,7 @@
 GO ?= go
 COVER_MIN ?= 70
 
-.PHONY: check build vet cover test archtest docscheck toolcheck prototype-check integration deb iso e2e
+.PHONY: check build vet cover test archtest docscheck toolcheck prototype-check integration deb e2e
 
 VERSION ?= 1.0.0
 ARCH ?= amd64
@@ -114,17 +114,6 @@ deb:
 	find build/deb -depth -exec touch -h -d @$(SOURCE_DATE_EPOCH) {} +
 	TZ=UTC SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) dpkg-deb --root-owner-group --build build/deb build/nfvis_$(VERSION)_$(ARCH).deb
 	@echo "已生成 build/nfvis_$(VERSION)_$(ARCH).deb（SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH)）"
-
-# 安装 ISO（决策 #110）：需 xorriso，请在 Linux/nfvis-vm 上执行；ISO_SRC 等路径见
-# contrib/iso/build-iso.sh 头部（缺省即验证机现场路径，构建不联网）。
-iso:
-	@command -v xorriso >/dev/null 2>&1 || { echo "跳过 iso：需要 xorriso（请在 Linux/nfvis-vm 上执行）"; exit 1; }
-	@if [ -z "$(NFVIS_DEB)" ]; then \
-		$(MAKE) deb VERSION=$(VERSION) ARCH=$(ARCH); \
-	else \
-		echo "iso：使用外部 deb $(NFVIS_DEB)（跳过 deb 构建）"; \
-	fi
-	VERSION=$(VERSION) ARCH=$(ARCH) NFVIS_DEB="$(NFVIS_DEB)" bash contrib/iso/build-iso.sh
 
 # 端到端验收（M5-11；build tag e2e + 需 nfvis 已安装/VPP 可用；CI 不跑）
 e2e:

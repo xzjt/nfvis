@@ -188,8 +188,12 @@ func memoryStanza(b *strings.Builder, mem *model.VppMemory) error {
 		fmt.Fprintf(b, "  main-heap-size %s\n", mem.MainHeapSize)
 	}
 	if mem.HugepagePreference != "" {
-		// hugepage-preference 映射 VPP 的 default-hugepage-size（NFViS 命名 → VPP 键）
+		// hugepage-preference 映射 VPP 的 default-hugepage-size（NFViS 命名 → VPP 键），
+		// 并**同时钉住主堆页大小**（决策 #114）：只写 default-hugepage-size 时，VPP 26.06
+		// 的主堆仍落 4K 页（`vppctl show memory` 的 page stats 实测 4K），而 DPDK 侧照旧
+		// 抢 1G 大页——wizard 承诺的「1G 留给 VM」落空，基线比对还会长期报差异。
 		fmt.Fprintf(b, "  default-hugepage-size %s\n", mem.HugepagePreference)
+		fmt.Fprintf(b, "  main-heap-page-size %s\n", mem.HugepagePreference)
 	}
 	b.WriteString("}\n\n")
 	return nil

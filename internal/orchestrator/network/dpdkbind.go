@@ -17,7 +17,9 @@ package network
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -46,17 +48,34 @@ type DPDKBinder struct {
 	// 有了它，「按口名解绑」（`request interfaces ens224 unbind-dpdk`）才成立——
 	// 否则交 DPDK 后内核无 netdev，只能凭 PCI 地址操作。
 	Bindings *Bindings
+	// ModuleLoader 加载内核模块（缺省 exec modprobe；单测注入假实现）。
+	ModuleLoader func(module string) error
+	// ModulesLoadDir 开机自动加载模块的 drop-in 目录（缺省 /etc/modules-load.d）。
+	ModulesLoadDir string
+	// Logf 运行期提示输出（缺省 log.Printf → journald；单测注入以断言）。
+	Logf func(format string, args ...any)
 }
 
 // NewDPDKBinder 构造缺省（真实 sysfs）实现。
 func NewDPDKBinder() *DPDKBinder {
 	b := &DPDKBinder{
-		SysfsRoot: "/sys",
-		ReadFile:  os.ReadFile,
-		WriteFile: func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
+		SysfsRoot:      "/sys",
+		ReadFile:       os.ReadFile,
+		WriteFile:      func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
+		ModulesLoadDir: "/etc/modules-load.d",
+		Logf:           log.Printf,
 	}
 	b.Rescan = func() error { return b.WriteFile(b.path("bus/pci/rescan"), []byte("1")) }
+	b.ModuleLoader = func(module string) error {
+		return exec.Command("modprobe", module).Run()
+	}
 	return b
+}
+
+func (b *DPDKBinder) logf(format string, args ...any) {
+	if b.Logf != nil {
+		b.Logf(format, args...)
+	}
 }
 
 func (b *DPDKBinder) root() string {
@@ -168,9 +187,21 @@ func (b *DPDKBinder) Bind(ctx context.Context, ifname, driver string) (string, e
 	if cur == driver {
 		return pci, nil // 已就位，幂等
 	}
-	// vfio-pci 是否可用（模块未加载/未绑定任何驱动时 bind 会报 No such device）
-	if _, err := os.Stat(b.path(filepath.Join("bus/pci/drivers", driver))); err != nil {
-		return "", fmt.Errorf("目标驱动 %s 不可用（模块未加载？）: %w", driver, err)
+	// 目标驱动就位检查（决策 #112）：模块未加载时**先自动补一次**。
+	// 业务口绑定是产品自己的底座动作，modprobe 这种机械步骤不该留给操作者——
+	// 首次绑定与每次重启后都会撞上（实测首启路径最常报的错就是这条）。
+	drvDir := b.path(filepath.Join("bus/pci/drivers", driver))
+	if _, err := os.Stat(drvDir); err != nil {
+		if b.ModuleLoader == nil {
+			return "", fmt.Errorf("目标驱动 %s 不可用（模块未加载？）: %w", driver, err)
+		}
+		if lerr := b.ModuleLoader(driver); lerr != nil {
+			return "", fmt.Errorf("目标驱动 %s 不可用，自动加载模块失败（%v）: %w", driver, lerr, err)
+		}
+		if _, err2 := os.Stat(drvDir); err2 != nil {
+			return "", fmt.Errorf("目标驱动 %s 不可用（已尝试加载模块仍未见）: %w", driver, err2)
+		}
+		b.logf("已自动加载内核模块 %s", driver)
 	}
 	// 先从当前驱动解绑
 	if cur != "" {
@@ -184,7 +215,42 @@ func (b *DPDKBinder) Bind(ctx context.Context, ifname, driver string) (string, e
 	if err := b.write(b.path(filepath.Join("bus/pci/drivers", driver, "bind")), pci); err != nil {
 		return "", fmt.Errorf("绑定 %s 到 %s: %w", pci, driver, err)
 	}
+	// 绑定成功即持久化开机加载（决策 #112）：绑定不跨重启（重启后网卡回内核驱动、
+	// 操作者要重新 bind），但驱动模块必须已在位——不持久化则每次重启后都得记得手工
+	// modprobe，实测这正是首启路径反复卡住的一步。
+	b.persistModuleLoad(driver)
 	return pci, nil
+}
+
+// persistModuleLoad 把驱动模块写进开机自动加载目录（幂等；失败不阻断绑定）。
+//
+// 只写 drop-in、不动 /etc/modules——后者是操作者/发行版的地盘，产品文件单独成件便于卸载时撤销。
+func (b *DPDKBinder) persistModuleLoad(driver string) {
+	dir := b.ModulesLoadDir
+	if dir == "" {
+		dir = "/etc/modules-load.d"
+	}
+	name := "nfvis-" + strings.ReplaceAll(driver, "_", "-") + ".conf"
+	file := filepath.Join(dir, name)
+	want := driver + "\n"
+	if b.ReadFile != nil {
+		if cur, err := b.ReadFile(file); err == nil && string(cur) == want {
+			return // 幂等：内容已是目标
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		b.logf("警告：创建 %s 失败：%v（重启后需手工 modprobe %s）", dir, err, driver)
+		return
+	}
+	write := b.WriteFile
+	if write == nil {
+		write = func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) }
+	}
+	if err := write(file, []byte(want)); err != nil {
+		b.logf("警告：写入 %s 失败：%v（重启后需手工 modprobe %s）", file, err, driver)
+		return
+	}
+	b.logf("已持久化开机自动加载：%s（%s）", driver, file)
 }
 
 // Unbind 把网卡解绑出 vfio-pci 并交还内核驱动。

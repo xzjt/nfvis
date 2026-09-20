@@ -20,22 +20,22 @@
 - M3 验收现状（`docs/M3-人工演示记录.md`）：D1/D2/D3/D6/D8 真机通过；**D4 NAT 已在本轮 M5 补齐并真机端到端通过**
   （决策 #52 跨 VRF：inside=virtual-switch 的 VRF、outside=出接口所属 VRF，VPP 单实例仅一对）；**D5 SPAN 抓包已在 T0-7 实证通过**；
   D7 LLDP 仍环境受限（无对端），启用与命令均正常、M3 的 internal error 未复现。
-- 验证环境 nfvis-vm 当前状态（**2026-09-19 被误恢复为干净快照，round32 凭仓库脚本重建**；快照恢复会清掉全部现场——重建路径见 `docs/evidence/v1-closeout-round32-install-iso.txt` §4e）：
+- 验证环境 nfvis-vm 当前状态（**2026-09-19 两度被恢复为干净快照**；快照恢复会清掉全部现场，
+  重建路径见 `docs/evidence/v1-closeout-round32-install-iso.txt` §4e——该轮的 ISO 交付已按决策 #111 废除，
+  文档仅作历史记录）：
   系统 Ubuntu Server 26.04.1 + **USTC 源**（aliyun 实测几乎不可用，勿切回）；构建工具按需装齐
-  （Go 1.26.0（apt）、make、xorriso、apt-utils/dpkg-dev、qemu-system-x86、sshpass、aria2）；
-  **nfvis 本体未装**（无 nfvisd 服务；要跑冒烟/集成先 `make deb VERSION=… dpkg -i` 装上）。
-  **ISO 构建现场齐备**（决策 #110）：`/root/isobuild/`（官方 `ubuntu-26.04.1-live-server-amd64.iso`，
-  sha256 `cc8a95cd…` 与官方 SHA256SUMS 一致；`debs/` 243 包闭包 + closure.done；SHA256SUMS）、
-  `/root/vpp-v26.06-deb/`（9 个 26.06-release deb）；源码树 `/root/src`（git archive 同步，见待办 §3.3，
-  无 .git → 构建**必须显式传 SOURCE_DATE_EPOCH**）；闭包补齐 `contrib/iso/ustc-closure.sh`、
-  装后验证 `contrib/iso/verify-iso-install.sh`、构建 `make iso VERSION=…`。
-  ⚠️ 嵌套 KVM 装机验证用 **-m 3072**（-m 4096 曾疑致宿主 OOM 冻结、整机失联）。
+  （Go 1.26.0（apt）、make、sshpass 等；`dpkg -i` 装 VPP 用 `/root/vpp-v26.06-deb/` 的 9 个
+  26.06-release deb——快照基线自带）；**nfvis 本体未装**（要跑冒烟/集成先 `make deb VERSION=… dpkg -i` 装上）。
+  源码树 `/root/src`（git archive 同步，见待办 §3.3，无 .git → 构建**必须显式传 SOURCE_DATE_EPOCH**）。
+  **round34 后现状**：nfvis 1.1.24 已装（服务 active）；VPP 26.06 运行、主堆已用 2M 大页、
+  ens192/ens224 交 DPDK；cmdline 含 hugepagesz=1G/2M + isolcpus=2-5 + intel_iommu=on；
+  已建 VNF 拓扑（vs-vnf + vnf-a/vnf-b，流量已通）与可用镜像 debian-12-generic-amd64.qcow2
+  （集成测试可用）——细节见 `docs/evidence/v1-closeout-round34-manual-flow.txt` §4。
   ⚠️ 集成测试环境（VPP 运行、debian-12-generic 镜像、1G 大页布局、ens192/ens224 交 VPP）
-  **随快照清掉了**——跑 `make integration` 前需先重建（VPP deb 还在 `/root/vpp-v26.06-deb`，
-  镜像需重导；布局与流程见待办 §3.3 / §0 第 1 条）。`ens160` 是管理口（vmxnet3、承载 SSH）——
-  **永不拿管理路径做试验**的红线不变。
+  **随快照清掉了**——跑 `make integration` 前需先重建（镜像需重导；布局与流程见待办 §3.3 / §0 第 1 条）。
+  `ens160` 是管理口（vmxnet3、承载 SSH）——**永不拿管理路径做试验**的红线不变。
   设计基线在 `docs/`，**不要凭记忆重设计**。
-- 已定决策 110 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 114 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
 - **V1 验收收口**：`docs/V1-验收检查表.md` 把规格书 **109 条 FR** 逐条对照证据
   （**通过 101 / 未验 4 / 降级 2 / 移 V2 2**；2026-09-18 收口：NFR-005/NFR-006 转通过、FR-SEC-006 拆两半），降级理由与签字建议见其 §5/§6；
   **待办与未完成项的唯一入口见 `docs/V1-收尾待办.md`**（含环境要点与踩坑记录）。

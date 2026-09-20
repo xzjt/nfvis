@@ -155,8 +155,11 @@ func TestCLIRequestVMLifecycleAudits(t *testing.T) {
 			t.Fatalf("%s 应成功: %s", act, res.Output)
 		}
 	}
-	if len(vmRT.actions) != 3 {
-		t.Fatalf("应调用 3 次生命周期动作: %v", vmRT.actions)
+	// start/restart 前须重建 cloud-init seed（决策 #114：user-data 可为文件路径，
+	// 文件内容变化不改配置值——不重建则「改了文件、重启不生效」）；stop 不重建。
+	want := []string{"refresh-seed:fw-vm", "start:fw-vm", "stop:fw-vm", "refresh-seed:fw-vm", "restart:fw-vm"}
+	if strings.Join(vmRT.actions, ",") != strings.Join(want, ",") {
+		t.Fatalf("生命周期动作序列应为 %v，实际 %v", want, vmRT.actions)
 	}
 	for _, act := range []string{"vm.start", "vm.stop", "vm.restart"} {
 		if !auditHas(t, engine, act) {
@@ -406,6 +409,7 @@ func seedVMConfig(t *testing.T, x *cliExecutor) {
 		"set virtual-machine-functions fw-vm memory size-mb 512",
 		"set virtual-machine-functions fw-vm serial console enable",
 		"set virtual-machine-functions fw-vm interfaces eth0 type vhost-user",
+		"set virtual-machine-functions fw-vm cloud-init hostname fw-vm",
 		"commit",
 		"exit",
 	)

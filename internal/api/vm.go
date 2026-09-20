@@ -24,6 +24,8 @@ type VMRuntime interface {
 	StartVM(ctx context.Context, name string) error
 	StopVM(ctx context.Context, name string) error
 	RestartVM(ctx context.Context, name string) error
+	// RefreshSeed 启动/重启前按当前配置重建 cloud-init seed（决策 #114）。
+	RefreshSeed(ctx context.Context, vm model.VMFunction) error
 	VMState(ctx context.Context, name string) (string, error)
 }
 

@@ -139,40 +139,7 @@ cat /etc/default/grub.d/99-nfvis.cfg                # 基线片段（需重启�
 ls /etc/ssh/sshd_config.d/                          # 应有 99-nfvis.conf
 ```
 
-### 2.4 方式 C：ISO 自动安装（气隙/无人值守生产）
-
-介质是 **Ubuntu Server 26.04.1 官方 ISO 的 remaster**：注入 autoinstall 无人值守应答与离线底座闭包，
-GRUB 菜单新增一条 **「NFViS 自动安装（将清空所选磁盘）」**——**只有选中它才会清盘安装**，
-缺省条目仍是原 Ubuntu 安装器（防误装）。全程无需网络：VPP 非 Ubuntu 源、底座闭包全部随盘。
-
-**已知限制**：需**关闭 Secure Boot**（remaster 破坏签名链）；选中 NFViS 条目会把所选磁盘清空重建
-（direct 布局，装到最大盘）。
-
-构建（Linux 构建机，**不联网拉取任何东西**）：
-
-```bash
-# 构建机前置：xorriso、openssl、dpkg-deb、dpkg-scanpackages 与 apt-ftparchive（apt-utils、dpkg-dev 包）
-make iso VERSION=1.1.20 \
-    ISO_SRC=/path/ubuntu-26.04.1-live-server-amd64.iso \
-    CLOSURE_DEBS=/path/debs VPP_DEBS=/path/vpp-v26.06-deb
-# 产物：build/nfvis_1.1.20_amd64.iso；ISO_SRC 请先对官方 SHA256SUMS 校验哈希
-```
-
-写 U 盘（认准盘符）：`dd if=build/nfvis_1.1.20_amd64.iso of=/dev/sdX bs=4M oflag=sync status=progress`。
-
-装机期全自动（人工只做一件事：在 GRUB 菜单选中 NFViS 条目；全程可在串口 `ttyS0 115200n8` 观察）：
-
-1. 建 OS 用户 `nfvis` 并开启 SSH（口令构建时注入哈希；构建期可用 `NFVIS_PASSWORD` 覆盖，缺省 `Nfvis@Test2026`）；
-2. deb 树落位 `/opt/nfvis/debs` 并注册为**本地 apt 仓库**——离线解析安装，也留在系统里作修复源；
-3. 安装 nfvis、VPP 26.06 与 docker/libvirt/qemu 底座；
-4. **VPP 首次开机不自启**（业务口声明由 nfvisd 掌握后再启动，见 §5.4）；
-5. 写入与方式 A 相同的内核基线保守默认（1G 大页 = `min(RAM_GB/4, 8)`、不设隔离核，首次开机即生效）；
-   串口控制台一并写好（`console=tty1 console=ttyS0,115200n8`），装好的系统可继续从串口运维。
-
-装完后与方式 A 汇合：SSH 登录 → 取一次性 admin 口令（§3.2）→ `nfvis-cli` 登录 →
-`wizard` 规划机器相关项（§5）→ 按 §5.4 补数据面并 `request vpp restart`。
-
-### 2.5 方式 B：从源码运行（开发/验证）
+### 2.4 方式 B：从源码运行（开发/验证）
 
 ```bash
 git clone <repo> && cd nfvis
@@ -194,7 +161,7 @@ ssh root@<vm> 'PROXY=http://<proxy>:2333 ./provision.sh'   # PROXY 按需，直�
 1G×N 大页（经 `-print-kernel-baseline` 生成，与 CLI 同源）、`/opt/nfvis/{src,images,incoming,backup}`。
 日志：`/var/log/nfvis-provision.log`。**大页需 reboot 生效**；VPP 装后设为不自启。
 
-### 2.6 升级与降级
+### 2.5 升级与降级
 
 ```bash
 # 升级：直接装新 deb。postinst 会 try-restart 已在运行的 nfvisd 加载新版本（服务保持运行换二进制）
@@ -205,14 +172,14 @@ systemctl is-active nfvis && /usr/bin/nfvisd -version   # 验证版本
 sudo dpkg -i nfvis_1.1.18_amd64.deb
 ```
 
-> 配置库在 `/var/lib/nfvis/nfvis.db`，**升级/降级/purge 都不会动它**（见 §2.7）。
+> 配置库在 `/var/lib/nfvis/nfvis.db`，**升级/降级/purge 都不会动它**（见 §2.6）。
 > 保险起见，动包管理前先备份（§10.7 的 `request system configuration backup`，或直接
 > `sqlite3` 在线备份 `/var/lib/nfvis/nfvis.db`）。
 
 `request system software add` 是**经 CLI/API 的在线升级**路径（校验 sha256 → 升级 → 重启
 nfvisd → 报告），见 §10.11。
 
-### 2.7 卸载（purge）与残留清理
+### 2.6 卸载（purge）与残留清理
 
 ```bash
 sudo dpkg --purge nfvis
@@ -531,15 +498,16 @@ NFViS 初始化向导（wizard）——规划资源池与内核基线（Enter �
 确认提交？[yes/no]（默认 yes）：
 
 向导完成。内核基线需重启生效：request system reboot。
-重启后的固定动作（数据口绑定不跨重启）：modprobe vfio-pci → request interfaces <数据口> bind-dpdk --yes → request vpp restart。
+重启后的固定动作（数据口绑定不跨重启）：request interfaces <数据口> bind-dpdk --yes → request vpp restart。
+（vfio 模块由绑定命令自动加载并持久化开机加载，无需手工 modprobe）
 数据口的声明（set interfaces / set vpp dpdk dev）不在向导范围内，见用户手册「3.2 业务网卡交 DPDK」。
 ```
 
 ### 5.4 向导完成后还差什么
 
 1. **重启**（`request system reboot`）让内核基线生效，核对 `show system kernel` 三方一致；
-2. **数据面**：`modprobe vfio-pci` → `request interfaces <业务口> bind-dpdk --yes` →
-   配置声明（§7.3）→ `request vpp restart`；
+2. **数据面**：`request interfaces <业务口> bind-dpdk --yes` →
+   配置声明（§7.3）→ `request vpp restart`（vfio 模块由绑定命令自动加载并持久化开机加载）；
 3. 镜像导入与业务创建（§9）。
 
 ---
@@ -649,11 +617,13 @@ nfvis$ request system kernel apply
 
 ### 7.2 业务口绑定与解绑（vfio-pci）
 
-**前置条件（务必先做，否则产品命令直接失败）**：加载 `vfio-pci` 模块；无 IOMMU 的机器还要打开
-不安全模式（报错形如 `目标驱动 vfio-pci 不可用（模块未加载？）` / `stat /sys/bus/pci/drivers/vfio-pci: no such file`）：
+**前置条件**：`vfio-pci` 模块**由绑定命令自动加载**——首次绑定若模块未加载会自动 `modprobe`，
+成功后写入 `/etc/modules-load.d/nfvis-vfio-pci.conf` 持久化开机加载，操作者无需手工干预
+（重启后网卡回内核驱动、绑定要重做，但模块始终在位）。唯一仍需手工的是**无 IOMMU 的机器**：
+不开不安全模式时绑定会报 `No such device`（判据：`ls /sys/kernel/iommu_groups/` 为空 = IOMMU 未生效，
+首选重启让内核基线生效）：
 
 ```bash
-modprobe vfio-pci
 echo Y > /sys/module/vfio/parameters/enable_unsafe_noiommu_mode   # 仅无 IOMMU 时才需要
 ```
 
@@ -746,11 +716,10 @@ startup.conf）。为此产品在重生成前会告警：
 宿主重启后，DPDK 绑定与 VPP 都回到未初始化状态（vfio 绑定不跨重启）：
 
 ```bash
-modprobe vfio-pci                                              # ① 模块（可写入 /etc/modules-load.d 持久化）
-nfvis$ request interfaces ens192 bind-dpdk --yes               # ② 逐口重绑（管理口守卫照常生效）
+nfvis$ request interfaces ens192 bind-dpdk --yes               # ① 逐口重绑（管理口守卫照常生效；vfio 模块自动加载）
 nfvis$ request interfaces ens224 bind-dpdk --yes
-nfvis$ request vpp restart                                     # ③ 按 committed 重生成并重启数据面
-nfvis$ show interfaces physical                                # ④ 核对两口在列
+nfvis$ request vpp restart                                     # ② 按 committed 重生成并重启数据面
+nfvis$ show interfaces physical                                # ③ 核对两口在列
 ```
 
 > committed 配置本身是持久的（config 声明与「口名→PCI」记录都在磁盘上），所以重启后
@@ -1062,7 +1031,16 @@ nfvis$ request virtual-machine-functions fw-vm delete   # super-user；交互确
   Alpine 的精简内核缺 `ahci`，**不可用**；
 - guest 内网卡名由 guest 的命名策略决定（Debian 用可预测名如 `enp1s0`），**不是**产品模型里的
   `eth0`（那只是 VPP 侧的逻辑名）——在 user-data 里配网卡前先在 guest 里 `ip -o link` 确认；
-- 验证注入是否生效：串口里看 `Cloud-init ... finished ... Datasource DataSourceNoCloud`。
+- **user-data 的两种形式**（`set cloud-init user-data`）：`#cloud-config` 开头的 YAML，或以
+  `#!` 开头的脚本（如 `#!/bin/sh`）；**给脚本必须带 shebang**——cloud-init 对脚本段是直接
+  exec，缺 shebang 会在 guest 里失败（`Exec format error`）。两种都不是的内容会被拒绝，
+  不会静默丢弃；
+- **多行内容建议写成文件再给路径**（`set cloud-init user-data /data/incoming/ud.yaml`）：
+  CLI 的引号内不解析多行、`|` 会被当作 CLI 管道，交互里粘多行容易出错；
+- **改 user-data 后需重建 VM 或改 `cloud-init hostname`**：cloud-init 按 instance-id
+  判定「是否首次」，产品的 instance-id 含输入摘要（改了就重放），但同一输入重启不重放；
+- 验证注入是否生效：串口里看 `Cloud-init ... finished ... Datasource DataSourceNoCloud`，
+  以及自己脚本往 `/dev/ttyS0` 打的标记行。
 
 ### 9.3 VM 快照（create/rollback 需关机态）
 
@@ -1247,7 +1225,7 @@ nfvis$ request system shutdown
 ```
 
 - `software add` 先校验 sha256（可选但强烈建议）→ 安装 → 重启 nfvisd → 报告；
-- 升级期间配置库不受影响；`purge` 才会清运行态（配置数据仍保留，见 §2.7）。
+- 升级期间配置库不受影响；`purge` 才会清运行态（配置数据仍保留，见 §2.6）。
 
 ---
 
@@ -1270,7 +1248,7 @@ nfvis$ request system shutdown
 | VM 起不来报 `Cannot allocate memory` | 1G 大页不足（被 VPP 或其他 VM 占用） | `show system hugepages` 看空闲；按 §6.5 规划（VPP 用 2M 把 1G 让给 VM） |
 | `request system kernel apply` 报「隔离核 … 至少需保留 2 个」 | 护栏：隔离核把宿主挤满 | 缩小隔离核范围（报错可直接照做） |
 | `show system kernel` 报「期望 N 实际 M」 | 配置改了但没重启 | `request system reboot` 后复核 |
-| `request interfaces <口> bind-dpdk` 报 vfio-pci 不可用 | 模块未加载 / 无 IOMMU | `modprobe vfio-pci`；无 IOMMU 时 `enable_unsafe_noiommu_mode`（§7.2） |
+| `request interfaces <口> bind-dpdk` 报 vfio-pci 不可用 | 自动加载模块失败（内核/模块缺失）或 IOMMU 未生效 | 看报错里的加载失败原因；无 IOMMU 时 `enable_unsafe_noiommu_mode`（§7.2） |
 | 同上但报「拒绝操作管理口」 | 该口被判为管理路径（配置声明/默认路由/监听口）——有意拒绝 | 换业务口；确需变更用带外方式 B |
 | commit 报 `接口在 VPP 中不存在: ensX（若该口由 DPDK 接管…）` | 该口尚未进数据面（刚声明/刚接管的过渡态），或未绑 vfio、或口名不对 | `request vpp restart`；仍失败按 §7.2 核对（`ip link` 里没有 = 已被接管） |
 | 日志报 `以下已由 DPDK 接管的物理口未在配置中声明…` | 该口没在 committed 里声明为 DPDK 口 | 补 `set vpp dpdk dev <口>`（并确认 `set interfaces <口>`）再重启 |

@@ -322,7 +322,7 @@ func planStatements(p SetupPlan) []string {
 	if p.LowLatency {
 		out = append(out, "set system kernel low-latency true")
 	}
-	out = append(out, "top", "commit", "request system kernel apply")
+	out = append(out, "commit", "exit", "request system kernel apply")
 	return out
 }
 
@@ -477,15 +477,32 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 		if strings.Contains(o, "语句未产生配置变更") {
 			continue
 		}
-		if strings.Contains(o, "%%") {
+		if stepFailed(o) {
 			fmt.Fprintln(out, "向导在上述步骤失败：candidate 已保留，可修正后重新 commit，或执行 discard 放弃。")
 			return fmt.Errorf("语句执行失败: %s", st)
 		}
 	}
 	fmt.Fprintln(out, "\n向导完成。内核基线需重启生效：request system reboot。")
-	fmt.Fprintln(out, "重启后的固定动作（数据口绑定不跨重启）：modprobe vfio-pci → request interfaces <数据口> bind-dpdk --yes → request vpp restart。")
+	fmt.Fprintln(out, "重启后的固定动作（数据口绑定不跨重启）：request interfaces <数据口> bind-dpdk --yes → request vpp restart。")
+	fmt.Fprintln(out, "（vfio 模块由绑定命令自动加载并持久化开机加载，无需手工 modprobe）")
 	fmt.Fprintln(out, "数据口的声明（set interfaces / set vpp dpdk dev）不在向导范围内，见用户手册「3.2 业务网卡交 DPDK」。")
 	return nil
+}
+
+// stepFailed 判定一条语句的输出是否失败——与 contrib/scripts/cli-fulltest 的判定模式同源：
+// 行首单个或双个 %（`% 无效命令`、`%% 底座下发失败`…）与行首「校验失败」都算失败。
+//
+// 此前只查 "%%"，漏掉单 % 错误（如 `% 无效命令: request system kernel apply`），
+// 于是向导在最后一步失败的情况下照样打印「向导完成」并返回成功——典型假绿
+// （真机 round34 实测：计划里 top 未离开配置模式，apply 被判无效命令而向导报成功）。
+func stepFailed(o string) bool {
+	for _, line := range strings.Split(o, "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "%") || strings.HasPrefix(t, "校验失败") {
+			return true
+		}
+	}
+	return false
 }
 
 // ask 读一行输入（去空白）；Scanner 出错按空行处理（上层用默认值或中止）。

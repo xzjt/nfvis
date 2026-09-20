@@ -86,7 +86,7 @@ func TestCloudInitAndSerialConsoleRealLibvirt(t *testing.T) {
 		t.Errorf("user-data 应含 runcmd 标记与 SSH 公钥: err=%v\n%s", err, ud)
 	}
 	md, err := os.ReadFile(filepath.Join(vmDir, "meta-data"))
-	if err != nil || !strings.Contains(string(md), "local-hostname: it-m4-5") || !strings.Contains(string(md), "instance-id: "+itConsoleVM) {
+	if err != nil || !strings.Contains(string(md), "local-hostname: it-m4-5") || !strings.Contains(string(md), "instance-id: "+itConsoleVM+"-") {
 		t.Errorf("meta-data 应含 hostname/instance-id: err=%v\n%s", err, md)
 	}
 

@@ -229,6 +229,31 @@ func (p *Provider) RestartVM(ctx context.Context, name string) error {
 	return nil
 }
 
+// RefreshSeed 按当前配置重建 cloud-init seed（决策 #114）。
+//
+// 由来：user-data 的取值可以是**文件路径**（命令树承诺「文本或文件」），文件内容变化
+// 不改变配置值——而 seed 只在配置变更（DefineVM）时重建，于是「改了 user-data 文件、
+// 重启 VM」会静默无效（round34 真机实证：guest 里 cloud-init 报 previously ran、
+// 跑的还是旧脚本）。启动/重启前调用即幂等修正（cloud-localds 生成 ~50ms）。
+func (p *Provider) RefreshSeed(ctx context.Context, vm model.VMFunction) error {
+	if vm.CloudInit == nil {
+		return nil
+	}
+	if p.seed == nil {
+		return fmt.Errorf("VM %s 配置了 cloud-init，但 seed 生成未启用", vm.Name)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	iso := NewLayout(p.cfg.VMsDir, vm.Name).SeedISO
+	if err := p.store.EnsureDir(path.Dir(iso)); err != nil {
+		return err
+	}
+	if err := p.seed.Build(ctx, vm, iso); err != nil {
+		return fmt.Errorf("重建 VM %s cloud-init seed: %w", vm.Name, err)
+	}
+	return nil
+}
+
 // VMState 运行态（契约枚举；未定义返回 absent）。reason 感知：被 kill 的 QEMU
 // 报 SHUTOFF+CRASHED，映射为 crashed（FR-CMP-017）。
 func (p *Provider) VMState(ctx context.Context, name string) (string, error) {

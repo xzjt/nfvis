@@ -86,6 +86,9 @@ type ComputeProvider interface {
 	StartVM(ctx context.Context, name string) error
 	StopVM(ctx context.Context, name string) error
 	RestartVM(ctx context.Context, name string) error
+	// RefreshSeed 按当前配置重建 cloud-init seed（决策 #114：user-data 可为文件路径，
+	// 文件内容变化不改配置值——启动前重建才不会「改了文件、重启 VM 却不生效」）。
+	RefreshSeed(ctx context.Context, vm model.VMFunction) error
 	VMState(ctx context.Context, name string) (string, error)
 
 	// EnsureConsistent 恢复收敛（FR-OPS-010/012）：对比 committed 配置与实际
@@ -148,11 +151,12 @@ type noopCompute struct{}
 func (noopCompute) DefineVM(context.Context, model.VMFunction, model.AllocatedResources) error {
 	return nil
 }
-func (noopCompute) DeleteVM(context.Context, string) error          { return nil }
-func (noopCompute) StartVM(context.Context, string) error           { return nil }
-func (noopCompute) StopVM(context.Context, string) error            { return nil }
-func (noopCompute) RestartVM(context.Context, string) error         { return nil }
-func (noopCompute) VMState(context.Context, string) (string, error) { return VMStateAbsent, nil }
+func (noopCompute) DeleteVM(context.Context, string) error              { return nil }
+func (noopCompute) StartVM(context.Context, string) error               { return nil }
+func (noopCompute) StopVM(context.Context, string) error                { return nil }
+func (noopCompute) RestartVM(context.Context, string) error             { return nil }
+func (noopCompute) RefreshSeed(context.Context, model.VMFunction) error { return nil }
+func (noopCompute) VMState(context.Context, string) (string, error)     { return VMStateAbsent, nil }
 func (noopCompute) EnsureConsistent(context.Context, model.Config) []error {
 	return nil
 }
