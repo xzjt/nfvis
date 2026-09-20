@@ -1,0 +1,76 @@
+===== V1 收尾第三十四轮：人工模拟「从安装到 VNF 流量跑通」（deb 路径，CLI 为准）=====
+日期：2026-09-20
+目标机：nfvis-vm（VMware，D:\Virtual Machines\nfvis，6 vCPU / 8G / 3×vmxnet3 NAT / 嵌套虚拟化已开）
+起态：用户恢复「干净」快照（Ubuntu 26.04.1，仅 /root/vpp-v26.06-deb 与源码树）；终止态：全流程跑通 + 6 项修复入 main
+用户指令：「不要 iso，废除一切 iso」「模仿人工操作，从安装到 vnf 流量跑通一次，以 CLI 操作为准，
+发现问题自行修复」——故本轮 ISO 交付废除（决策 #111），全部产品操作经 nfvis-cli。
+
+----- 1. 全流程与结果 -----
+① 底座：`dpkg -i /root/vpp-v26.06-deb/*.deb`（VPP 26.06，装完 enabled+active）+ apt 装
+   docker.io/libvirt-daemon-system/libvirt-clients/qemu-system-x86/qemu-utils/cloud-image-utils ✓
+② 装 nfvis deb → postinst：底座探测 ✓、基线保守默认（RAM 7G → 1G 页 1）✓、service enable 不自动 start ✓
+③ 取一次性口令（journal，20 字符）→ `nfvis-cli` 登录 → `show version` = NFViS 1.1.2x ✓
+④ `wizard`（pty 驱动，全取默认）：4 问 → 计划 8 条语句 → commit(revision 3) → 基线写入 ✓
+   （修复前此处失败，见 §2 第 2 项）
+⑤ `request system reboot` → cmdline 生效：`default_hugepagesz=1G hugepagesz=1G hugepages=1
+   hugepagesz=2M hugepages=768 isolcpus=2-5 intel_iommu=on iommu=pt` ✓（IOMMU 组 10 个，真 IOMMU 路径）
+⑥ 数据面：`request interfaces ens192/ens224 bind-dpdk --yes` → **无手工 modprobe**（决策 #112）✓
+   → 声明 `set interfaces … / set vpp dpdk dev …` → commit → `request vpp restart` →
+   `show interfaces physical`：两口 up/up 10G driver dpdk ✓
+⑦ VNF：`request images upload`（debian-12-generic-amd64.qcow2 449MB，USTC 下载，sha256 5b842b54…）
+   → L2 虚拟交换机 vs-vnf（`set ports 1 interface ens192` + `set gateway ip 192.168.100.1/24`）
+   → 两台 VM（1 vCPU / 1024MB / 1G 大页 / vhost-user vNIC / cloud-init 文件路径 user-data）
+   → 交换机挂 vNIC（ports 2/3）→ 启动
+⑧ 流量核对（CLI 为准 + 外部视角）：
+   - `ping 192.168.100.10 source 192.168.100.1 count 3` → **3 sent, 3 received, 0% loss** ✓
+   - `ping 192.168.100.11 source 192.168.100.1 count 3` → 3 sent, 2 received（首包在收敛期）✓
+   - `show virtual-switches vs-vnf statistics`：bvi0 / ens192 / vh-vnf-a-eth0 / vh-vnf-b-eth0 全 up 且有计数 ✓
+   - **宿主 → guest（经 DPDK 物理口完整路径）**：`ping 192.168.155.240` = 0.35ms、`.241` = 0.9ms ✓✓
+     （路径：Windows vmnet8 → nfvis-vm ens192(DPDK) → VPP BD → vhost-user → guest，双向）
+   - guest 内脚本（cloud-init 执行）日志：地址 192.168.100.1x/24 + 192.168.155.24x/24 就位、
+     ping BVI/对端结果落 /var/log/vnf-setup.log 并 tee /dev/ttyS0 ✓
+
+----- 2. 本轮发现与修复（全部入 main，决策 #111~#114）-----
+1. **废除 ISO 交付**（决策 #111）：删 deploy/iso、contrib/iso、make iso target；手册删「方式 C」还原编号。
+2. **wizard 假绿 + 导航错误**（决策 #113，修前真机实测）：计划里的 `top` 只回配置层级顶层、**不离开
+   配置模式**，最后的 `request system kernel apply` 被判「无效命令」；而失败判定只查 `%%`、漏掉
+   单个 `%` 的错误输出 → 向导照样打印「向导完成」返回成功。修：计划收尾改 `commit → exit → apply`
+   （exit 必须在 commit 后，否则被未提交变更拒绝）；判定抽 `stepFailed`（行首单/双 % 或「校验失败」，
+   与 cli-fulltest 判定模式同源）。修后真机向导全流程通过、基线成功写入。
+3. **bind-dpdk 模块自理**（决策 #112）：模块未加载时命令直接失败、操作者须手工 modprobe，而绑定
+   不跨重启 → 每次重启的固定动作都含它。修：缺则自动 `modprobe`（失败报明原因），成功后写
+   `/etc/modules-load.d/nfvis-vfio-pci.conf`（幂等、失败仅告警）。真机验证：**首次绑定无需手工
+   modprobe**，drop-in 落地、模块已加载；重启后重绑同样无需手工步骤。
+4. **user-data 文件路径不生效**（决策 #114①）：`set cloud-init user-data <路径>` 把**路径字符串
+   本身**当脚本注入 seed，guest 侧 cloud-init 直接 exec 报 `Exec format error`——表现为「VM 起来了
+   但初始化啥也没发生」。修：`ResolveUserData` 读文件内容（读不到报错，不静默回退）。
+5. **user-data 内容类型静默无效**（决策 #114②）：缺 shebang 的脚本 / 既非 cloud-config 的内容在
+   guest 里静默丢弃或 exec 失败。修：`ValidateUserDataType` 在 seed 构建期拦下并给可照做提示。
+6. **改 user-data 后重启不生效**（决策 #114③⑤）：
+   - instance-id 原先只取 VM 名 → cloud-init 按 once-per-instance 跳过 user-data；
+     修：instance-id 改为「VM 名-输入摘要（hostname+user-data+SSH 公钥 sha256 前 4 字节）」；
+   - seed 原先只在配置变更（DefineVM）时重建，而 user-data 取值是**文件路径**——改文件内容不改配置值
+     → seed 不重建（真机实证：guest 报 `previously ran`、跑的还是旧脚本）；
+     修：新增 `RefreshSeed`，`request … start/restart` 前按当前配置重建（幂等，~50ms）。
+   真机验证：改文件 → restart → guest 日志出现新脚本标记、地址就位、流量通。
+7. **VPP 主堆不受 default-hugepage-size 管辖**（决策 #114④）：`vppctl show memory` 实测主堆
+   `page-size 4K`，VPP 仍占 2×1G 大页 → wizard 承诺的「1G 留给 VM」落空、每次 commit 都报
+   「大页 1G：期望 N，实际 N+k」假红。修：memory 段同时写 `main-heap-page-size`（VPP 26.06 二进制
+   确认接受该键）。真机验证：重启数据面后主堆 `page-size 2M, total 512` ✓。
+
+----- 3. 登记未修（如实）-----
+- CLI 引号内的 `|` 被当作 CLI 管道切分（`%% 未知管道: grep`）、多行引号值只取首行——多行 user-data
+  目前只能走文件路径（手册 §9.2③ 已写明）；属解析器改动，未在本轮做。
+- `request vpp restart` 返回后立即查询可能撞上 API 未就绪（broken pipe），重试即好。
+- 大页池的「无主占用」现象（1G nr 高于 cmdline 声明）仍可复现（VPP/DPDK 侧分配所致），
+  基线比对因此可能长期显示「运行实际 > 期望」；主堆转 2M 后 VPP 不再吃 1G，此现象已显著收敛，
+  但未做池回收（shrink）逻辑。
+- 本轮为跑通流程临时动过：`set resource-pools hugepages page-size 1G count 2`（1 页不够两台 VM）。
+
+----- 4. 环境现状（供后续会话）-----
+- nfvis-vm：装 1.1.24（服务 active）；VPP 26.06 运行、主堆 2M、ens192/ens224 交 DPDK（vfio-pci）；
+  cmdline 含 hugepagesz=1G/2M + isolcpus=2-5 + intel_iommu=on；`/etc/modules-load.d/nfvis-vfio-pci.conf` 在。
+- 已建拓扑：虚拟交换机 vs-vnf（L2 + BVI 192.168.100.1/24）+ vnf-a/vnf-b（各 1 vCPU/1G 大页/
+  vhost-user，cloud-init 文件路径 user-data 在 /data/incoming/vnf-{a,b}-ud.sh），流量已通。
+- 镜像：/var/lib/nfvis/images/debian-12-generic-amd64.qcow2（ready）——**集成测试可用**（guest 内核有 ahci）。
+- 注意：qemu-nbd 只读挂载 guest 盘后务必 `--disconnect`，否则 VM 再启动会报 write lock 失败。

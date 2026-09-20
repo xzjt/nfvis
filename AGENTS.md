@@ -27,6 +27,10 @@
   （Go 1.26.0（apt）、make、sshpass 等；`dpkg -i` 装 VPP 用 `/root/vpp-v26.06-deb/` 的 9 个
   26.06-release deb——快照基线自带）；**nfvis 本体未装**（要跑冒烟/集成先 `make deb VERSION=… dpkg -i` 装上）。
   源码树 `/root/src`（git archive 同步，见待办 §3.3，无 .git → 构建**必须显式传 SOURCE_DATE_EPOCH**）。
+  **round34 后现状**：nfvis 1.1.24 已装（服务 active）；VPP 26.06 运行、主堆已用 2M 大页、
+  ens192/ens224 交 DPDK；cmdline 含 hugepagesz=1G/2M + isolcpus=2-5 + intel_iommu=on；
+  已建 VNF 拓扑（vs-vnf + vnf-a/vnf-b，流量已通）与可用镜像 debian-12-generic-amd64.qcow2
+  （集成测试可用）——细节见 `docs/evidence/v1-closeout-round34-manual-flow.txt` §4。
   ⚠️ 集成测试环境（VPP 运行、debian-12-generic 镜像、1G 大页布局、ens192/ens224 交 VPP）
   **随快照清掉了**——跑 `make integration` 前需先重建（镜像需重导；布局与流程见待办 §3.3 / §0 第 1 条）。
   `ens160` 是管理口（vmxnet3、承载 SSH）——**永不拿管理路径做试验**的红线不变。
