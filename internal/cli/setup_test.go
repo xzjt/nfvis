@@ -17,7 +17,10 @@ type setupFake struct {
 	metrics   string
 	committed string
 	failOn    string // 语句含该子串时返回 %% 错误（失败即停路径）
-	cancelled bool
+	// singlePctOn 语句含该子串时返回**单个 %** 的错误输出（`% 无效命令` 一类）——
+	// 决策 #113 前向导只认 "%%"，这类失败会被漏判成成功（假绿）。
+	singlePctOn string
+	cancelled   bool
 }
 
 func (f *setupFake) Execute(line, source string) (cliclient.Result, error) {
@@ -27,6 +30,9 @@ func (f *setupFake) Execute(line, source string) (cliclient.Result, error) {
 	f.lines = append(f.lines, line)
 	if f.failOn != "" && strings.Contains(line, f.failOn) {
 		return cliclient.Result{Output: "%% 测试注入的失败\n", Mode: "config", Prompt: "[edit] nfvis# "}, nil
+	}
+	if f.singlePctOn != "" && strings.Contains(line, f.singlePctOn) {
+		return cliclient.Result{Output: "% 无效命令: " + line + "（输入 ? 查看可用命令）\n", Mode: "config", Prompt: "nfvis# "}, nil
 	}
 	return cliclient.Result{Output: "[ok] " + line + "\n", Mode: "oper", Prompt: "nfvis> "}, nil
 }
@@ -159,7 +165,7 @@ func TestRunWizardFullFlow(t *testing.T) {
 		"set vpp cpu main-core 5",
 		"set vpp cpu corelist-workers 4",
 		"set vpp memory hugepage-preference 2M",
-		"top", "commit", "request system kernel apply",
+		"commit", "exit", "request system kernel apply",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("执行序列缺少 %q:\n%s", want, joined)
@@ -196,5 +202,51 @@ func TestRunWizardCancelAndFailure(t *testing.T) {
 	}
 	if !strings.Contains(out2.String(), "candidate 已保留") {
 		t.Fatalf("失败时应提示 candidate 保留: %s", out2.String())
+	}
+}
+
+// 单 % 错误必须判失败（决策 #113）：`% 无效命令` 此前被漏判，向导会打印「向导完成」返回成功。
+func TestRunWizardDetectsSinglePercentError(t *testing.T) {
+	f := &setupFake{
+		metrics:     "nfvis_system_cpu_online_count 6\nnfvis_system_memory_total_bytes 7516192768\n",
+		committed:   committedEmpty,
+		singlePctOn: "request system kernel apply",
+	}
+	sess := New(f, "ssh")
+	var out strings.Builder
+	err := RunWizard(sess, true, strings.NewReader("\n\n\n\n\n\n\n"), &out)
+	if err == nil {
+		t.Fatalf("单 %% 错误应上抛，实际返回成功；输出：\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "request system kernel apply") {
+		t.Fatalf("错误应指向失败语句: %v", err)
+	}
+	if strings.Contains(out.String(), "向导完成") {
+		t.Fatalf("失败不应打印「向导完成」:\n%s", out.String())
+	}
+}
+
+// 语句清单的导航顺序（决策 #113）：commit 在配置模式下执行，exit 必须紧随其后
+// （top 只回配置层级顶层、不离开配置模式；exit 若在 commit 前会因未提交变更被拒）。
+func TestSetupPlanNavigationOrder(t *testing.T) {
+	p, err := deriveSetupPlan(SetupFacts{OnlineCPUs: 6, MemTotalGB: 7, Pools: map[string]int{}}, setupAnswers{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ci, ei, ai = -1, -1, -1
+	for i, st := range p.Statements {
+		switch st {
+		case "commit":
+			ci = i
+		case "exit":
+			ei = i
+		case "request system kernel apply":
+			ai = i
+		case "top":
+			t.Fatalf("计划不应含 top（它不离开配置模式）: %v", p.Statements)
+		}
+	}
+	if ci < 0 || ei < 0 || ai < 0 || !(ci < ei && ei < ai) {
+		t.Fatalf("应为 commit → exit → request system kernel apply，实际 %v", p.Statements)
 	}
 }
