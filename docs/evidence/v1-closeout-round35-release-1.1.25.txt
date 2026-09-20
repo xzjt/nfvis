@@ -1,0 +1,50 @@
+===== V1 收尾第三十五轮：v1.1.25 发布（校验记录）=====
+日期：2026-09-20
+范围：main `741801a`（= PR #137 合并；round34 的决策 #111~#114 全部改动）；
+发布件 nfvis_1.1.25_amd64.deb。校验口径复刻 round29/33。
+
+----- 1. 版本号说明 -----
+上一发布 v1.1.20（round33）。1.1.21~1.1.24 为同一 merge 线上的**内部验证构建**
+（round34 人工模拟过程中逐轮重装、从未发布），沿用跳号惯例，故本次发布 **v1.1.25**。
+
+----- 2. 发布件与可复现构建 -----
+    产物:   nfvis_1.1.25_amd64.deb（7,790,182 字节）
+    sha256: 8f6233924b23a0cdf7df9895b470005edf47f49d1e1f75813099a89596f65d6f
+    构建:   nfvis-vm / make deb VERSION=1.1.25 SOURCE_DATE_EPOCH=1789876284
+            （= main 741801a 的 HEAD 提交时间；git archive 树无 .git，显式传值——决策 #88）
+    内容变化：Go 侧 = 决策 #112（bind 模块自理）、#113（wizard 导航/判定）、
+    #114（user-data 文件/类型校验/instance-id 摘要/RefreshSeed/VPP 主堆页大小）；
+    随包文档 = 手册 §5.4/§7.2/§7.5/§9.2/§11 同步 + 删「方式 C」并还原 §2.4~2.6 编号；
+    另修 contrib/hooks/pre-commit 真正实现 NO_VERIFY=1（不随包）。
+
+----- 3. 发布校验（逐项）-----
+① 元数据：Package nfvis / Version 1.1.25 / amd64；control+postinst+prerm+postrm 就位 ✓
+② 内容：nfvisd/nfvis-cli、nfvis.service、安装器脚本、随包文档 9 件（含 1365 行用户手册）✓
+③ 解包运行：/tmp 解包后 `nfvisd -version` / `nfvis-cli -version` = 1.1.25 ✓
+④ 实装（升级 1.1.24 → 1.1.25）：postinst「已重启 nfvis.service 以加载新版本」+ 基线一致性检查 ✓；
+   服务 active；`show version` = NFViS 1.1.25 ✓；`wizard` 非 TTY 即返（rc=1，无挂起）✓；
+   **升级后既有 VNF 拓扑存活**（vnf-a/vnf-b running、BD 四口 up 有计数）✓
+⑤ purge：postrm「已撤销 SSH 强化（99-nfvis.conf 已删、sshd 已重载）」（决策 #108 内联修复
+   在真实 purge 下生效）；drop-in 消失、sshd active；GRUB 片段/fstab 保留并打印可照做的手工步骤；
+   /var/lib/nfvis 数据保留；二进制移除 ✓
+⑥ 重装：SSH 强化重新落地（99-nfvis.conf 回归）✓；服务 active ✓；
+   **配置库全程未变**——purge 前 sqlite .backup 至 /root/nfvis-db-backup-20260920-rel，
+   重装后 live/backup 对比：audit_log 74=74、config_revisions 最新 rev 35=35、
+   最新 config_json sha256 前缀 cfcfb63fc56a2734 一致 ✓
+⑦ CLI 冒烟：`show version` / `show virtual-machine-functions` / 重装后拓扑收敛并流量复通——
+   BVI ping 2 发 1 收（首包在收敛期）、宿主经 DPDK 物理口 → guest 0.47ms ✓
+
+----- 4. 发布与回验 -----
+    Release: https://github.com/xzjt/nfvis/releases/tag/v1.1.25（tag 指向 main 741801a）
+    assets:  nfvis_1.1.25_amd64.deb + nfvis_1.1.25_amd64.deb.sha256
+    回下载:  经代理自 GitHub 下载 asset，sha256 与构建端逐字节一致（8f623392…）✓
+
+----- 5. 遗留与登记 -----
+- 登记未修（同 round34）：CLI 引号内 `|` 被当管道切分、多行引号值只取首行（多行 user-data
+  须走文件路径）；`request vpp restart` 返回后立即查询偶发 broken pipe；1G 大页池「无主占用」未回收。
+- 环境：宿主 Windows 内存/页面文件紧张时 `go test ./...`（并行包）会以
+  `VirtualAlloc … errno=1455 / out of memory` 崩溃（非代码问题）。**workaround：`go test -p 1 ./...`
+  串行跑同一套用例——本轮实测 exit=0、17 包全 ok**；`make check` 因内含并行 go test，
+  在宿主内存紧张时会整体失败，判读时先看日志里是否有 errno=1455。本轮最后两笔提交据此走了
+  NO_VERIFY（该开关本轮刚修好，见 round34 #114 补记）。
+- 环境现状：nfvis-vm 装发布件 1.1.25（active）、VNF 拓扑与流量在、镜像 debian-12-generic 可用。
