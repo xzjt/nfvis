@@ -89,6 +89,7 @@ func (c recCompute) DeleteVM(ctx context.Context, name string) error {
 	return nil
 }
 func (c recCompute) StartVM(context.Context, string) error                  { return nil }
+func (c recCompute) RefreshSeed(context.Context, model.VMFunction) error    { return nil }
 func (c recCompute) StopVM(context.Context, string) error                   { return nil }
 func (c recCompute) RestartVM(context.Context, string) error                { return nil }
 func (c recCompute) VMState(context.Context, string) (string, error)        { return VMStateAbsent, nil }

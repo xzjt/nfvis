@@ -124,10 +124,22 @@ func (x *cliExecutor) requestVM(user, class, source string, t []string) string {
 		ctx := context.Background()
 		switch action {
 		case "start":
+			// 启动前按当前配置重建 cloud-init seed（决策 #114）：user-data 可为文件路径，
+			// 文件内容变化不改变配置值——不重建就会「改了文件、启动却不生效」。
+			if v, ok := findVM(cfg, name); ok && v.CloudInit != nil {
+				if err := x.vm.RefreshSeed(ctx, v); err != nil {
+					return "%% " + err.Error() + "\n"
+				}
+			}
 			err = x.vm.StartVM(ctx, name)
 		case "stop":
 			err = x.vm.StopVM(ctx, name)
 		case "restart":
+			if v, ok := findVM(cfg, name); ok && v.CloudInit != nil {
+				if err := x.vm.RefreshSeed(ctx, v); err != nil {
+					return "%% " + err.Error() + "\n"
+				}
+			}
 			err = x.vm.RestartVM(ctx, name)
 		}
 		x.audit(user, "vm."+action, fmt.Sprintf("%s VM %s", action, name), err)

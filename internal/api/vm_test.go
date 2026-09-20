@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
@@ -18,6 +19,12 @@ type fakeVM struct {
 }
 
 func newFakeVM() *fakeVM { return &fakeVM{states: map[string]string{}} }
+
+// RefreshSeed 记录调用（决策 #114：启动/重启前重建 seed）。
+func (f *fakeVM) RefreshSeed(_ context.Context, vm model.VMFunction) error {
+	f.actions = append(f.actions, "refresh-seed:"+vm.Name)
+	return nil
+}
 
 func (f *fakeVM) StartVM(_ context.Context, name string) error {
 	f.actions = append(f.actions, "start:"+name)
