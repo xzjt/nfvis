@@ -1031,7 +1031,16 @@ nfvis$ request virtual-machine-functions fw-vm delete   # super-user；交互确
   Alpine 的精简内核缺 `ahci`，**不可用**；
 - guest 内网卡名由 guest 的命名策略决定（Debian 用可预测名如 `enp1s0`），**不是**产品模型里的
   `eth0`（那只是 VPP 侧的逻辑名）——在 user-data 里配网卡前先在 guest 里 `ip -o link` 确认；
-- 验证注入是否生效：串口里看 `Cloud-init ... finished ... Datasource DataSourceNoCloud`。
+- **user-data 的两种形式**（`set cloud-init user-data`）：`#cloud-config` 开头的 YAML，或以
+  `#!` 开头的脚本（如 `#!/bin/sh`）；**给脚本必须带 shebang**——cloud-init 对脚本段是直接
+  exec，缺 shebang 会在 guest 里失败（`Exec format error`）。两种都不是的内容会被拒绝，
+  不会静默丢弃；
+- **多行内容建议写成文件再给路径**（`set cloud-init user-data /data/incoming/ud.yaml`）：
+  CLI 的引号内不解析多行、`|` 会被当作 CLI 管道，交互里粘多行容易出错；
+- **改 user-data 后需重建 VM 或改 `cloud-init hostname`**：cloud-init 按 instance-id
+  判定「是否首次」，产品的 instance-id 含输入摘要（改了就重放），但同一输入重启不重放；
+- 验证注入是否生效：串口里看 `Cloud-init ... finished ... Datasource DataSourceNoCloud`，
+  以及自己脚本往 `/dev/ttyS0` 打的标记行。
 
 ### 9.3 VM 快照（create/rollback 需关机态）
 

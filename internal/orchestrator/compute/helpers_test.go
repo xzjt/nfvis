@@ -1,6 +1,8 @@
 package compute
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -88,7 +90,7 @@ func TestBuildUserData(t *testing.T) {
 func TestBuildMetaData(t *testing.T) {
 	vm := model.VMFunction{Name: "fw-vm", CloudInit: &model.CloudInit{Hostname: "fw"}}
 	got := BuildMetaData(vm)
-	if !strings.Contains(got, "instance-id: fw-vm") || !strings.Contains(got, "local-hostname: fw") {
+	if !strings.Contains(got, "instance-id: fw-vm-") || !strings.Contains(got, "local-hostname: fw") {
 		t.Fatalf("meta-data 不符:\n%s", got)
 	}
 	vm = model.VMFunction{Name: "probe-vm"}
@@ -153,5 +155,52 @@ func TestDeterministicUUID(t *testing.T) {
 	}
 	if len(a) != 36 || a[14] != '5' || strings.Contains(a, " ") {
 		t.Fatalf("应为 uuid v5 格式: %q", a)
+	}
+}
+
+// user-data「文本或文件」归一与内容类型校验（决策 #114，round34 真机实证的坑）。
+func TestResolveUserDataFileOrText(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "ud.yaml")
+	content := "#cloud-config\nhostname: v1\n"
+	if err := os.WriteFile(f, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 绝对路径 → 读入内容
+	if got, err := ResolveUserData(f); err != nil || got != content {
+		t.Fatalf("绝对路径应读入文件内容: %q, %v", got, err)
+	}
+	// 相对路径 ./ 前缀同样识别（以临时目录为工作目录）
+	cwd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(cwd)
+	if got, err := ResolveUserData("./ud.yaml"); err != nil || got != content {
+		t.Fatalf("./ 路径应读入文件内容: %q, %v", got, err)
+	}
+	// 内联文本（不以 / 或 ./ 开头）原样返回
+	if got, err := ResolveUserData("#cloud-config\nhostname: v2"); err != nil || got != "#cloud-config\nhostname: v2" {
+		t.Fatalf("内联文本应原样返回: %q, %v", got, err)
+	}
+	// 文件不存在 → 明确报错，不静默回退成文本（用各平台都算绝对的路径）
+	missing := filepath.Join(dir, "missing.yaml")
+	if _, err := ResolveUserData(missing); err == nil {
+		t.Fatal("路径不存在应报错（此前会静默把路径当文本注入）")
+	}
+}
+
+func TestValidateUserDataType(t *testing.T) {
+	ok := []string{"", "#cloud-config\nhostname: x\n", "#!/bin/sh\necho hi\n", "  #! /bin/sh\n"}
+	for _, s := range ok {
+		if err := ValidateUserDataType(s); err != nil {
+			t.Fatalf("%q 应通过校验: %v", s, err)
+		}
+	}
+	bad := []string{"/data/incoming/ud.yaml", "hostname: x\n", "echo hi\n"}
+	for _, s := range bad {
+		if err := ValidateUserDataType(s); err == nil {
+			t.Fatalf("%q 应被拒绝（cloud-init 不会执行它）", s)
+		}
 	}
 }

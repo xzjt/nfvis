@@ -67,7 +67,26 @@ func (cloudLocaldsSeed) Build(ctx context.Context, vm model.VMFunction, isoPath 
 	}
 	userData := filepath.Join(dir, "user-data")
 	metaData := filepath.Join(dir, "meta-data")
-	if err := os.WriteFile(userData, []byte(BuildUserData(vm)), 0o600); err != nil {
+	// user-data 支持「文本或文件」（决策 #114）：文件路径在此解析；内容类型在此校验——
+	// 让「路径写错/脚本缺 shebang」在 VM 启动时就报清楚，而不是 guest 里静默无效果。
+	ud := ""
+	if vm.CloudInit != nil {
+		ud = vm.CloudInit.UserData
+	}
+	resolved, err := ResolveUserData(ud)
+	if err != nil {
+		return err
+	}
+	if err := ValidateUserDataType(resolved); err != nil {
+		return fmt.Errorf("VM %s %w", vm.Name, err)
+	}
+	vmForSeed := vm
+	if vm.CloudInit != nil {
+		ci := *vm.CloudInit
+		ci.UserData = resolved
+		vmForSeed.CloudInit = &ci
+	}
+	if err := os.WriteFile(userData, []byte(BuildUserData(vmForSeed)), 0o600); err != nil {
 		return err
 	}
 	if err := os.WriteFile(metaData, []byte(BuildMetaData(vm)), 0o600); err != nil {
