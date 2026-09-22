@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/model"
 )
 
@@ -59,8 +60,13 @@ func TestSystemEndpoint(t *testing.T) {
 
 func putLoginUser(t *testing.T, ts *httptest.Server, token string) error {
 	t.Helper()
+	// 用户必须有口令：校验会拦下无口令账号（R44-1 的兜底），故这里用真实哈希。
+	hash, err := aaa.HashPassword("Op-User-Passw0rd!")
+	if err != nil {
+		return err
+	}
 	cfg := model.Config{System: &model.SystemConfig{Login: &model.SystemLogin{
-		Users: []model.LoginUserConfig{{Name: "op-user", Class: "operator"}},
+		Users: []model.LoginUserConfig{{Name: "op-user", Class: "operator", PasswordHash: hash}},
 	}}}
 	// 经配置事务端点写入并直提（引擎校验 class 引用：operator 为预置类）
 	status, _, data := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token,

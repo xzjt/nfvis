@@ -236,8 +236,8 @@ func TestValidateSystemLogin(t *testing.T) {
 	c := validBase()
 	c.System.Login = &SystemLogin{
 		Users: []LoginUserConfig{
-			{Name: "admin", Class: "super-user"},
-			{Name: "netop", Class: "custom-op"},
+			{Name: "admin", Class: "super-user", PasswordHash: testHash},
+			{Name: "netop", Class: "custom-op", PasswordHash: testHash},
 		},
 		Classes:        []ClassDef{{Name: "custom-op", Allow: []string{"show"}}},
 		PasswordPolicy: &PasswordPolicy{MinLength: 8, LockoutThreshold: 5, LockoutMinutes: 10},
@@ -246,13 +246,13 @@ func TestValidateSystemLogin(t *testing.T) {
 
 	// 用户引用不存在的 class
 	c2 := validBase()
-	c2.System.Login = &SystemLogin{Users: []LoginUserConfig{{Name: "x", Class: "ghost"}}}
+	c2.System.Login = &SystemLogin{Users: []LoginUserConfig{{Name: "x", Class: "ghost", PasswordHash: testHash}}}
 	mustErrContaining(t, Validate(c2), "users[x].class", "ghost")
 
 	// 非法用户名 / 重复 class / 策略越界
 	c3 := validBase()
 	c3.System.Login = &SystemLogin{
-		Users:          []LoginUserConfig{{Name: "bad name"}},
+		Users:          []LoginUserConfig{{Name: "bad name", PasswordHash: testHash}},
 		Classes:        []ClassDef{{Name: "c1"}, {Name: "c1"}},
 		PasswordPolicy: &PasswordPolicy{MinLength: 2},
 	}
@@ -260,7 +260,15 @@ func TestValidateSystemLogin(t *testing.T) {
 	mustErrContaining(t, errs, "bad name", "名称")
 	mustErrContaining(t, errs, "c1", "重复")
 	mustErrContaining(t, errs, "min_length", "范围")
+
+	// R44-1 兜底：没有口令的用户不得提交（脱敏视图回写会由引擎继承哈希，新用户无从继承）
+	c4 := validBase()
+	c4.System.Login = &SystemLogin{Users: []LoginUserConfig{{Name: "nopass", Class: "super-user"}}}
+	mustErrContaining(t, Validate(c4), "users[0]", "nopass")
 }
+
+// testHash 形态合法的口令哈希（校验只查"有没有"，不验内容）。
+const testHash = "pbkdf2$sha256$600000$c2FsdA$hYXNo"
 
 // T0-1（决策 #52）：NAT44 拓扑语义校验——出接口必填且须归属某个带地址的 VRF、
 // source-pool 可选、单一 inside/outside 转发域。

@@ -107,3 +107,29 @@ ul.events { margin: 0; padding-left: 16px; max-height: 260px; overflow-y: auto; 
 ul.events li { margin-bottom: 4px; }
 
 .foot { padding: 4px 18px 20px; font-size: 12px; }
+
+/* 配置卡片（candidate → 提交） */
+pre.code {
+  margin: 8px 0; padding: 10px 12px; max-height: 320px; overflow: auto;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  font: 12px/1.5 Consolas, "Courier New", monospace; white-space: pre;
+}
+#cfg-details summary, #cfg-raw-wrap summary { cursor: pointer; }
+#cfg-edit textarea {
+  width: 100%; margin-top: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--fg); font: 12px/1.5 Consolas, "Courier New", monospace;
+  resize: vertical;
+}
+.cfg-forms { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin: 8px 0; }
+.cfg-forms fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 0; }
+.cfg-forms legend { color: var(--muted); font-size: 12px; padding: 0 6px; }
+.cfg-forms label { display: block; margin: 8px 0 3px; color: var(--muted); font-size: 12px; }
+.cfg-forms input {
+  width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--fg); font-size: 13px;
+}
+.cfg-forms input:focus { outline: none; border-color: var(--accent); }
+.cfg-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.cfg-actions button { padding: 6px 12px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: #06121c; cursor: pointer; font-size: 13px; font-weight: 600; }
+.cfg-actions button.ghost { background: transparent; color: var(--fg); border-color: var(--line); font-weight: 400; }
+.cfg-actions button.ghost:hover { border-color: var(--accent); color: var(--accent); }

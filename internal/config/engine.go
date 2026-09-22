@@ -279,9 +279,37 @@ func (e *Engine) UpdateCandidate(sess Session, cfg model.Config) error {
 		return err
 	}
 	cand := deepCopyConfig(cfg)
+	// 脱敏字段继承（R44-1）：配置视图（GET /configuration、candidate 读取）按 FR-SEC-007 /
+	// 决策 #25 **移除**口令哈希，客户端据此整文档回写（load override 语义）时会把哈希抹掉——
+	// 提交即让该账号失去口令（登录不能）。对"入参里缺失的敏感叶子"从 committed 同名用户继承：
+	// 客户端没收到过的东西，不该被它"删掉"。CLI 的 save/load 往返带哈希，不受影响。
+	if committed, err := e.committedLocked(); err == nil {
+		inheritSensitive(&cand, committed)
+	}
 	e.candidate = &cand
 	e.dirty = true
 	return e.store.RefreshLock(sess.holder(), e.now())
+}
+
+// inheritSensitive 把 committed 里的敏感叶子补进 candidate 的**同名对象**（当前仅口令哈希）。
+func inheritSensitive(cand *model.Config, committed model.Config) {
+	if cand.System == nil || cand.System.Login == nil || committed.System == nil || committed.System.Login == nil {
+		return
+	}
+	old := map[string]string{}
+	for _, u := range committed.System.Login.Users {
+		if u.PasswordHash != "" {
+			old[u.Name] = u.PasswordHash
+		}
+	}
+	for i := range cand.System.Login.Users {
+		u := &cand.System.Login.Users[i]
+		if u.PasswordHash == "" {
+			if h, ok := old[u.Name]; ok {
+				u.PasswordHash = h
+			}
+		}
+	}
 }
 
 // MergeCandidate 增量合并 candidate（load merge 语义，FR-CFG-008）。

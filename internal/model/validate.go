@@ -243,6 +243,17 @@ func (v *validator) checkSystem(c Config) {
 			v.errf("system.syslog.level", "syslog level 必须为 debug|info|warn|error")
 		}
 	}
+	// 兜底（R44-1）：口令哈希是**敏感叶子**，配置视图不返回它（决策 #25）；写路径对
+	// "缺失的哈希"会从 committed 继承（同名用户），但**新用户**无从继承——没有口令的
+	// 账号登不进去，必须在这里拦住（任何写路径都落不下无口令用户）。
+	if s.Login != nil {
+		for i, u := range s.Login.Users {
+			if u.PasswordHash == "" {
+				v.errf(fmt.Sprintf("system.login.users[%d]", i),
+					"用户 %q 没有口令：请先用设置口令的语句或端点给它设口令", u.Name)
+			}
+		}
+	}
 	// FR-SYS-004：facility/severity 须为契约枚举内取值（失败在 commit 时逐条列出）
 	if s.Syslog != nil && s.Syslog.Severity != "" {
 		switch s.Syslog.Severity {
