@@ -140,8 +140,21 @@ func TestQuestionMarkListsCandidatesImmediately(t *testing.T) {
 	if _, err := w.WriteString("show ver?"); err != nil { // 注意：不回车
 		t.Fatal(err)
 	}
+	// 等**全部**候选都落进输出再断言：只等第一条会在 CI 负载下读到
+	// "第一条已写、第二条还没写"的中间态（2026-09-22 round42 的 CI 实测抓到一次）。
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && !strings.Contains(out.String(), "version") {
+	for time.Now().Before(deadline) {
+		got := out.String()
+		all := true
+		for _, c := range cs {
+			if !strings.Contains(got, c.Token) {
+				all = false
+				break
+			}
+		}
+		if all {
+			break
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	got := out.String()
