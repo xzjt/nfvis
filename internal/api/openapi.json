@@ -1594,19 +1594,27 @@
         "type": "object"
       },
       "SystemStatus": {
+        "description": "系统状态摘要。数据源与 CLI 的 `show system uptime|cpu|memory|storage` **同源**\n（`internal/metrics.HostMetrics()`，Linux 采集），`hugepages` 与 `/resource-pools` 同源。\n",
         "properties": {
+          "config_ready": {
+            "description": "配置库可用（已建库且可读 committed）",
+            "type": "boolean"
+          },
           "cpu": {
             "properties": {
               "isolated": {
+                "description": "隔离核（取自资源池配置）",
                 "items": {
                   "type": "integer"
                 },
                 "type": "array"
               },
               "total": {
+                "description": "在线核数",
                 "type": "integer"
               },
               "usage_percent": {
+                "description": "整机使用率（0-100）",
                 "type": "number"
               }
             },
@@ -1616,18 +1624,29 @@
             "type": "string"
           },
           "hugepages": {
-            "properties": {
-              "free": {
-                "type": "integer"
+            "description": "各页大小的池用量（与 `/resource-pools.hugepages` 同源；产品有 1G/2M 两个池）",
+            "items": {
+              "properties": {
+                "allocated": {
+                  "type": "integer"
+                },
+                "free": {
+                  "type": "integer"
+                },
+                "page_size": {
+                  "enum": [
+                    "1G",
+                    "2M"
+                  ],
+                  "type": "string"
+                },
+                "total": {
+                  "type": "integer"
+                }
               },
-              "page_size_kb": {
-                "type": "integer"
-              },
-              "total": {
-                "type": "integer"
-              }
+              "type": "object"
             },
-            "type": "object"
+            "type": "array"
           },
           "memory": {
             "properties": {
@@ -1635,20 +1654,25 @@
                 "type": "integer"
               },
               "used_mb": {
+                "description": "total - available",
                 "type": "integer"
               }
             },
             "type": "object"
           },
           "storage": {
+            "description": "根文件系统（与 CLI `show system storage` 同源）",
             "properties": {
-              "data_total_gb": {
-                "type": "number"
+              "free_bytes": {
+                "format": "int64",
+                "type": "integer"
               },
-              "data_used_gb": {
-                "type": "number"
+              "total_bytes": {
+                "format": "int64",
+                "type": "integer"
               },
-              "images_gb": {
+              "used_ratio": {
+                "description": "已用比例（0-1）",
                 "type": "number"
               }
             },
@@ -2118,58 +2142,85 @@
         "type": "object"
       },
       "VppStatus": {
+        "description": "VPP 数据面状态（FR-SYS-007 版本锁定、FR-SYS-009 pending-restart、运行态线程）",
         "properties": {
-          "buffers_per_numa": {
-            "type": "integer"
-          },
-          "config_revision": {
-            "type": "integer"
-          },
-          "dpdk": {
-            "type": "string"
-          },
-          "main_heap_size": {
-            "type": "string"
-          },
-          "pending_restart": {
-            "description": "配置已变更但数据面未按新配置重启",
-            "type": "boolean"
-          },
-          "state": {
-            "enum": [
-              "running",
-              "restarting",
-              "failed"
-            ],
-            "type": "string"
-          },
-          "threads": {
+          "buffers": {
+            "description": "buffer 池用量。来源见 `buffers_source`；不可用时**省略数组但须给出\n`buffers_unavailable` 原因**（不静默省略，决策 #68）。\n",
             "items": {
               "properties": {
-                "core": {
-                  "type": "integer"
+                "available": {
+                  "type": "number"
                 },
-                "id": {
-                  "type": "integer"
+                "cached": {
+                  "type": "number"
                 },
                 "name": {
-                  "example": "vpp_wk_0",
                   "type": "string"
                 },
-                "type": {
-                  "enum": [
-                    "main",
-                    "worker"
-                  ],
-                  "type": "string"
+                "used": {
+                  "type": "number"
                 }
               },
               "type": "object"
             },
             "type": "array"
           },
+          "buffers_source": {
+            "description": "buffer 池统计来源。`statsclient` = govpp stats segment 解码；\n`vpp_get_stats` = statsclient 解码失败或全零时回退 VPP 自带同版本工具\n（VPP 26.06 的 buffer 池值类型 govpp v0.13.0 无法解码，决策 #68）。无数据时省略。\n",
+            "enum": [
+              "statsclient",
+              "vpp_get_stats"
+            ],
+            "type": "string"
+          },
+          "buffers_unavailable": {
+            "description": "buffer 池统计不可用的原因（有数据时省略；决策",
+            "type": "string"
+          },
+          "config_revision": {
+            "description": "当前 committed 配置版本（供判断数据面是否落后于配置）",
+            "type": "integer"
+          },
+          "connected": {
+            "description": "当前是否已连接",
+            "type": "boolean"
+          },
+          "last_error": {
+            "description": "最近一次连接错误（无则省略）",
+            "type": "string"
+          },
+          "memory": {
+            "description": "main heap 内存合计（stats segment；不可用时省略）",
+            "properties": {
+              "free": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "total": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "used": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "pending_restart": {
+            "description": "committed vpp 段与已应用 startup.conf 不一致（需 request vpp restart）",
+            "type": "boolean"
+          },
+          "threads": {
+            "description": "数据面线程（VPP show_threads；未连接时省略）",
+            "items": {
+              "$ref": "#/components/schemas/VppThread"
+            },
+            "type": "array"
+          },
           "version": {
-            "example": "26.06",
+            "description": "探测到的 VPP 版本",
+            "example": "26.06-release",
             "type": "string"
           }
         },

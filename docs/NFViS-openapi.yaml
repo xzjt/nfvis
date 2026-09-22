@@ -1716,32 +1716,41 @@ components:
 
     SystemStatus:
       type: object
+      description: |
+        系统状态摘要。数据源与 CLI 的 `show system uptime|cpu|memory|storage` **同源**
+        （`internal/metrics.HostMetrics()`，Linux 采集），`hugepages` 与 `/resource-pools` 同源。
       properties:
         hostname: { type: string }
         uptime_seconds: { type: integer }
+        config_ready: { type: boolean, description: 配置库可用（已建库且可读 committed） }
         cpu:
           type: object
           properties:
-            total: { type: integer }
-            isolated: { type: array, items: { type: integer } }
-            usage_percent: { type: number }
+            total: { type: integer, description: 在线核数 }
+            isolated: { type: array, items: { type: integer }, description: 隔离核（取自资源池配置） }
+            usage_percent: { type: number, description: 整机使用率（0-100） }
         memory:
           type: object
           properties:
             total_mb: { type: integer }
-            used_mb: { type: integer }
+            used_mb: { type: integer, description: total - available }
         hugepages:
-          type: object
-          properties:
-            page_size_kb: { type: integer }
-            total: { type: integer }
-            free: { type: integer }
+          type: array
+          description: 各页大小的池用量（与 `/resource-pools.hugepages` 同源；产品有 1G/2M 两个池）
+          items:
+            type: object
+            properties:
+              page_size: { type: string, enum: [1G, 2M] }
+              total: { type: integer }
+              allocated: { type: integer }
+              free: { type: integer }
         storage:
           type: object
+          description: 根文件系统（与 CLI `show system storage` 同源）
           properties:
-            data_total_gb: { type: number }
-            data_used_gb: { type: number }
-            images_gb: { type: number }
+            total_bytes: { type: integer, format: int64 }
+            free_bytes: { type: integer, format: int64 }
+            used_ratio: { type: number, description: 已用比例（0-1） }
 
     VersionInfo:
       type: object
@@ -1760,6 +1769,7 @@ components:
       properties:
         version: { type: string, example: "26.06-release", description: 探测到的 VPP 版本 }
         connected: { type: boolean, description: 当前是否已连接 }
+        config_revision: { type: integer, description: 当前 committed 配置版本（供判断数据面是否落后于配置） }
         pending_restart:
           type: boolean
           description: committed vpp 段与已应用 startup.conf 不一致（需 request vpp restart）
@@ -1951,26 +1961,6 @@ components:
           properties:
             vf_count: { type: integer }
         ingress_policy: { type: string, description: 入向限速策略绑定（命令树 §2.5） }
-
-    VppStatus:
-      type: object
-      properties:
-        state: { type: string, enum: [running, restarting, failed] }
-        version: { type: string, example: "26.06" }
-        dpdk: { type: string }
-        threads:
-          type: array
-          items:
-            type: object
-            properties:
-              id: { type: integer }
-              name: { type: string, example: vpp_wk_0 }
-              core: { type: integer }
-              type: { type: string, enum: [main, worker] }
-        buffers_per_numa: { type: integer }
-        main_heap_size: { type: string }
-        config_revision: { type: integer }
-        pending_restart: { type: boolean, description: 配置已变更但数据面未按新配置重启 }
 
     VppConfig:
       type: object
