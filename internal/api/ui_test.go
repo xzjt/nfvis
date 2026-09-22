@@ -13,8 +13,10 @@ package api
 import (
 	"encoding/json"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -151,5 +153,102 @@ func TestUIContractDeclaresUI(t *testing.T) {
 		if !contractRoutes(t)["GET "+p] {
 			t.Errorf("契约未声明 GET %s", p)
 		}
+	}
+}
+
+// UI 读的指标名必须真的存在——指标改名会让页面**静默**显示「—」，不报错、不留痕。
+// 指标名从 app.js 里抽（不在这里另写一份，否则测的不是实现）。
+func TestUIReadsOnlyExistingMetricNames(t *testing.T) {
+	js, err := fs.ReadFile(uiAssets, "ui/app.js")
+	if err != nil {
+		t.Fatalf("读取内嵌 app.js: %v", err)
+	}
+	names := map[string]bool{}
+	for _, m := range regexp.MustCompile(`nfvis_[a-z0-9_]+`).FindAllString(string(js), -1) {
+		names[m] = true
+	}
+	if len(names) < 3 {
+		t.Fatalf("从 app.js 抽到的指标名过少（%d），抽取正则可能失效", len(names))
+	}
+	ts := newTestServerOpts(t, Options{})
+	resp, err := http.Get(ts.URL + APIPrefix + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	// 宿主类指标由 internal/metrics 的 Linux 实现产出（读 /proc、statfs）；非 Linux 上
+	// 该文件是 `return nil` 的空实现。开发机是 Windows 时这几条必然缺席，**跳过**而不是报红
+	// ——否则本用例在开发机上恒红，成了"工具自身制造的假红"（CI/Linux 上照常执行）。
+	if !strings.Contains(string(body), "nfvis_system_") {
+		t.Skip("非 Linux：宿主指标（读 /proc）不产出，本用例只验 Linux 侧")
+	}
+	for n := range names {
+		if !strings.Contains(string(body), n+" ") && !strings.Contains(string(body), n+"{") {
+			t.Errorf("app.js 读了指标 %s，但 /metrics 里没有它（页面会静默显示「—」）", n)
+		}
+	}
+}
+
+// UI 依赖的 JSON 字段名必须真的在响应里。这里钉的是"字段名不会静默消失"，
+// 取的是会让整块卡片变空的那几个键。
+func TestUIFieldNamesExistInResponses(t *testing.T) {
+	ts := newTestServerOpts(t, Options{})
+	st, lr := login(t, ts, "admin", "s3cret-Passw0rd!")
+	if st != http.StatusOK {
+		t.Fatalf("登录失败：%d", st)
+	}
+	tok := lr.Token
+	get := func(p string) map[string]any {
+		req, _ := http.NewRequest("GET", ts.URL+APIPrefix+p, nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		defer resp.Body.Close()
+		var m map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		return m
+	}
+	for _, c := range []struct {
+		path string
+		keys []string
+	}{
+		{"/system/status", []string{"hostname", "uptime_seconds", "config_ready"}},
+		{"/resource-pools", []string{"hugepages", "cpu"}},
+	} {
+		m := get(c.path)
+		for _, k := range c.keys {
+			if _, ok := m[k]; !ok {
+				t.Errorf("%s 缺字段 %s（UI 对应卡片会显示为空）", c.path, k)
+			}
+		}
+	}
+	// 大页池与隔离核：UI 按这些字段名渲染表格。
+	// 池本身可以是空的（全新配置库没有池），故只要求它是数组；有元素才逐字段核。
+	pools := get("/resource-pools")
+	hp, ok := pools["hugepages"].([]any)
+	if !ok {
+		t.Fatalf("/resource-pools.hugepages 应为数组，得到 %T", pools["hugepages"])
+	}
+	if len(hp) > 0 {
+		first, _ := hp[0].(map[string]any)
+		for _, k := range []string{"page_size", "total", "allocated", "free"} {
+			if _, ok := first[k]; !ok {
+				t.Errorf("/resource-pools.hugepages[] 缺字段 %s", k)
+			}
+		}
+	}
+	if cpu, ok := pools["cpu"].(map[string]any); ok {
+		for _, k := range []string{"isolated_cores", "vpp_reserved", "free"} {
+			if _, ok := cpu[k]; !ok {
+				t.Errorf("/resource-pools.cpu 缺字段 %s", k)
+			}
+		}
+	} else {
+		t.Error("/resource-pools.cpu 应为对象")
 	}
 }

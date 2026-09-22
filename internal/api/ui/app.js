@@ -3,6 +3,17 @@
 // 无外部依赖、无构建步骤：改完直接刷新页面即可，产物随二进制内嵌。
 // 取数一律走同源 REST 接口并带 Bearer token；本文件不写任何配置。
 //
+// 数据来源（只用**对外**的 REST 端点；`/cli/execute` 在契约里标着"仅 nfvis-cli 使用、
+// 不承诺第三方兼容"，前端不去碰它，也不去解析终端文本）：
+//   /metrics                 —— CPU 使用率、内存、根文件系统（Prometheus 文本，格式稳定）
+//   /system/status           —— 主机名、运行时长、配置是否就绪
+//   /system/version          —— 各组件版本
+//   /resource-pools          —— 大页池（按页大小）与隔离核分配
+//   /vpp/status              —— 数据面版本/连接/待重启/线程/buffer/内存
+//   /interfaces(/<name>)     —— 接口配置 + 逐口收发计数
+//   /virtual-machine-functions、/container-functions、/alarms
+//   /events                  —— 事件推送（SSE）
+//
 // 关于实时刷新：浏览器的 EventSource **无法自定义请求头**，而 /events 需要
 // Authorization，故这里用 fetch + 流式读取手工解析 SSE 帧（同样走头部传 token，
 // 不把 token 放进 URL——URL 会进日志与浏览器历史）。流断了就退化为定时轮询。
@@ -12,6 +23,7 @@ const TOKEN_KEY = 'nfvis.token';
 const USER_KEY = 'nfvis.user';
 const POLL_MS = 5000;
 const MAX_EVENTS = 20;
+const MAX_IFACE_DETAIL = 12;
 
 let token = sessionStorage.getItem(TOKEN_KEY) || '';
 let pollTimer = null;
@@ -35,57 +47,82 @@ function el(tag, attrs, children) {
   return node;
 }
 
+const dash = (v) => (v === undefined || v === null || v === '' ? '—' : v);
+
 function fill(dl, pairs) {
   dl.textContent = '';
   pairs.forEach(([k, v]) => {
     dl.appendChild(el('dt', { text: k }));
-    dl.appendChild(el('dd', { text: v === undefined || v === null || v === '' ? '—' : String(v) }));
+    dl.appendChild(el('dd', { text: String(dash(v)) }));
   });
 }
 
-function table(tbody, rows) {
+function table(tbody, cols, rows) {
   tbody.textContent = '';
   if (!rows.length) {
     const tr = el('tr');
-    tr.appendChild(el('td', { colspan: '8', class: 'muted', text: '（无）' }));
+    tr.appendChild(el('td', { colspan: String(cols), class: 'muted', text: '（无）' }));
     tbody.appendChild(tr);
     return;
   }
   rows.forEach((cells) => {
     const tr = el('tr');
-    cells.forEach((c) => tr.appendChild(el('td', { text: c === undefined || c === null || c === '' ? '—' : String(c) })));
+    cells.forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
     tbody.appendChild(tr);
   });
 }
 
 function uptime(sec) {
-  if (!sec && sec !== 0) return '—';
-  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+  if (sec === undefined || sec === null) return undefined;
+  const s = Math.floor(Number(sec));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
   return (d ? d + ' 天 ' : '') + h + ' 小时 ' + m + ' 分';
 }
 
 function bytes(n) {
-  if (n === undefined || n === null) return '—';
+  if (n === undefined || n === null) return undefined;
   const u = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0, v = Number(n);
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
   return (i === 0 ? v : v.toFixed(1)) + ' ' + u[i];
 }
 
+function pct(ratio) {
+  if (ratio === undefined || ratio === null) return undefined;
+  return (Number(ratio) * 100).toFixed(1) + '%';
+}
+
 function mb(n) {
-  if (n === undefined || n === null) return '—';
+  if (n === undefined || n === null) return undefined;
   return Number(n) >= 1024 ? (Number(n) / 1024).toFixed(1) + ' GB' : n + ' MB';
 }
 
 function fmtTime(ts) {
   if (!ts) return '—';
   const d = new Date(ts);
-  return isNaN(d) ? ts : d.toLocaleString();
+  return isNaN(d) ? String(ts) : d.toLocaleString();
 }
 
 function list(v) {
-  if (!v) return '—';
+  if (v === undefined || v === null) return undefined;
   return Array.isArray(v) ? (v.length ? v.join(',') : '—') : String(v);
+}
+
+// Prometheus 文本解析：只要"指标名 → 数值"，带 label 的同一指标名相加
+// （本页用到的系统类指标都是单序列，相加只是为了让实现对多序列也成立）。
+function parseMetrics(text) {
+  const acc = {};
+  text.split('\n').forEach((raw) => {
+    const line = raw.trim();
+    if (!line || line.charAt(0) === '#') return;
+    const sp = line.lastIndexOf(' ');
+    if (sp < 0) return;
+    const name = line.slice(0, sp).split('{')[0];
+    const v = parseFloat(line.slice(sp + 1));
+    if (isNaN(v)) return;
+    acc[name] = (acc[name] || 0) + v;
+  });
+  return acc;
 }
 
 // ---------- 取数 ----------
@@ -110,32 +147,54 @@ async function api(path, opts) {
   return res.status === 204 ? null : res.json();
 }
 
-async function loadAll() {
-  // 只读端点并行取；单个失败不拖垮整页（各自的卡片显示错误行）。
-  const [sys, ver, vpp, pools, ifaces, vms, cts, alarms] = await Promise.all([
-    api('/system/status').catch((e) => ({ __err: e.message })),
-    api('/system/version').catch((e) => ({ __err: e.message })),
-    api('/vpp/status').catch((e) => ({ __err: e.message })),
-    api('/resource-pools').catch((e) => ({ __err: e.message })),
-    api('/interfaces').catch(() => []),
-    api('/virtual-machine-functions').catch(() => []),
-    api('/container-functions').catch(() => []),
-    api('/alarms').catch(() => []),
-  ]);
-  render(sys, ver, vpp, pools, ifaces, vms, cts, alarms);
+async function apiText(path) {
+  const res = await fetch(API + path, { headers: { Authorization: 'Bearer ' + token } });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.text();
 }
 
-function render(sys, ver, vpp, pools, ifaces, vms, cts, alarms) {
-  $('host-line').textContent = sys && sys.hostname ? sys.hostname : '';
-  fill($('sys-list'), [
-    ['主机名', sys && sys.hostname],
-    ['运行时长', sys && uptime(sys.uptime_seconds)],
-    ['CPU', sys && sys.cpu ? sys.cpu.total + ' 核（隔离 ' + list(sys.cpu.isolated) + '）' : undefined],
-    ['CPU 使用率', sys && sys.cpu && sys.cpu.usage_percent !== undefined ? sys.cpu.usage_percent + '%' : undefined],
-    ['内存', sys && sys.memory ? mb(sys.memory.used_mb) + ' / ' + mb(sys.memory.total_mb) : undefined],
-    ['大页', sys && sys.hugepages ? sys.hugepages.total + ' × ' + (sys.hugepages.page_size_kb / 1024) + 'G（空闲 ' + sys.hugepages.free + '）' : undefined],
-    ['数据盘', sys && sys.storage ? sys.storage.data_used_gb + ' / ' + sys.storage.data_total_gb + ' GB' : undefined],
-    ['镜像占用', sys && sys.storage ? sys.storage.images_gb + ' GB' : undefined],
+// 单个端点失败不该拖垮整页：各自降级为"读取失败"。
+const soft = (p) => p.catch((e) => ({ __err: e.message }));
+
+async function loadAll() {
+  const [st, ver, vpp, pools, ifaces, vms, cts, alarms, metrics] = await Promise.all([
+    soft(api('/system/status')),
+    soft(api('/system/version')),
+    soft(api('/vpp/status')),
+    soft(api('/resource-pools')),
+    soft(api('/interfaces')),
+    soft(api('/virtual-machine-functions')),
+    soft(api('/container-functions')),
+    soft(api('/alarms')),
+    soft(apiText('/metrics')),
+  ]);
+  const ifaceRows = Array.isArray(ifaces) ? await loadInterfaceStats(ifaces) : [];
+  render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms, metrics);
+}
+
+// 逐口取统计（列表端点只有配置字段；收发包数在 /interfaces/<name> 上）。
+async function loadInterfaceStats(ifaces) {
+  const head = ifaces.slice(0, MAX_IFACE_DETAIL);
+  const details = await Promise.all(head.map((i) => api('/interfaces/' + encodeURIComponent(i.name)).catch(() => null)));
+  return head.map((i, n) => ({ cfg: i, stat: (details[n] || {}).statistics || null }));
+}
+
+function render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms, metrics) {
+  const m = (metrics && typeof metrics === 'string') ? parseMetrics(metrics) : {};
+  $('host-line').textContent = st && st.hostname ? st.hostname : '';
+
+  fill($('sys-list'), st && st.__err ? [['读取失败', st.__err]] : [
+    ['主机名', st && st.hostname],
+    ['运行时长', uptime(st && st.uptime_seconds)],
+    ['配置就绪', st && st.config_ready === false ? '否' : '是'],
+    ['CPU', m.nfvis_system_cpu_online_count ? m.nfvis_system_cpu_online_count + ' 核' : undefined],
+    ['CPU 使用率', pct(m.nfvis_system_cpu_utilization_ratio)],
+    ['内存', m.nfvis_system_memory_total_bytes
+      ? bytes(m.nfvis_system_memory_available_bytes) + ' 可用 / ' + bytes(m.nfvis_system_memory_total_bytes)
+      : undefined],
+    ['根文件系统', m.nfvis_system_disk_total_bytes
+      ? bytes(m.nfvis_system_disk_free_bytes) + ' 可用 / ' + bytes(m.nfvis_system_disk_total_bytes) + '（已用 ' + pct(m.nfvis_system_disk_used_ratio) + '）'
+      : undefined],
   ]);
   fill($('ver-list'), ver && ver.__err ? [['读取失败', ver.__err]] : [
     ['NFViS', ver && ver.nfvis], ['VPP', ver && ver.vpp], ['DPDK', ver && ver.dpdk],
@@ -144,12 +203,14 @@ function render(sys, ver, vpp, pools, ifaces, vms, cts, alarms) {
   ]);
 
   fill($('vpp-list'), vpp && vpp.__err ? [['读取失败', vpp.__err]] : [
-    ['状态', vpp && vpp.state],
     ['版本', vpp && vpp.version],
-    ['配置版本', vpp && vpp.config_revision],
+    ['连接状态', vpp && vpp.connected === true ? '已连接' : (vpp && vpp.connected === false ? '未连接' : undefined)],
     ['待重启生效', vpp && (vpp.pending_restart ? '是' : '否')],
-    ['主堆', vpp && vpp.main_heap_size],
-    ['线程数', vpp && vpp.threads ? vpp.threads.length : undefined],
+    ['线程数', vpp && Array.isArray(vpp.threads) ? vpp.threads.length : undefined],
+    ['内存', vpp && vpp.memory ? bytes(vpp.memory.used) + ' / ' + bytes(vpp.memory.total) : undefined],
+    ['buffer 池', vpp && Array.isArray(vpp.buffers) && vpp.buffers.length
+      ? vpp.buffers.map((b) => b.name + '：用 ' + b.used + ' / 可用 ' + b.available).join('；')
+      : (vpp && vpp.buffers_source ? '不可用（' + vpp.buffers_source + '）' : undefined)],
   ]);
 
   const p = $('pools');
@@ -157,30 +218,43 @@ function render(sys, ver, vpp, pools, ifaces, vms, cts, alarms) {
   if (pools && pools.__err) {
     p.appendChild(el('p', { class: 'error', text: pools.__err }));
   } else {
-    const rows = (pools && pools.hugepages || []).map((h) => [h.page_size, h.total, h.allocated, h.free]);
-    const t = el('table', {}, [
+    const hp = (pools && pools.hugepages) || [];
+    p.appendChild(el('table', {}, [
       el('thead', {}, [el('tr', {}, ['页大小', '总数', '已分配', '空闲'].map((h) => el('th', { text: h })))]),
-      el('tbody', {}, rows.length ? rows.map((r) => el('tr', {}, r.map((c) => el('td', { text: String(c) })))) :
-        [el('tr', {}, [el('td', { colspan: '4', class: 'muted', text: '（无）' })])]),
+      el('tbody', {}, hp.length ? hp.map((h) => el('tr', {}, [
+        el('td', { text: String(dash(h.page_size)) }),
+        el('td', { text: String(dash(h.total)) }),
+        el('td', { text: String(dash(h.allocated)) }),
+        el('td', { text: String(dash(h.free)) }),
+      ])) : [el('tr', {}, [el('td', { colspan: '4', class: 'muted', text: '（无）' })])]),
+    ]));
+    const cpu = (pools && pools.cpu) || {};
+    fill(p.appendChild(el('dl', { class: 'kv' })), [
+      ['隔离核', list(cpu.isolated_cores)],
+      ['VPP 保留核', list(cpu.vpp_reserved)],
+      ['空闲核', list(cpu.free)],
+      ['已分配', Array.isArray(cpu.allocated) && cpu.allocated.length
+        ? cpu.allocated.map((a) => (a.vnf || '?') + '→' + list(a.cores)).join('；')
+        : undefined],
     ]);
-    p.appendChild(t);
-    if (pools && pools.cpu) {
-      fill(p.appendChild(el('dl', { class: 'kv' })), [
-        ['隔离核', list(pools.cpu.isolated_cores)],
-        ['VPP 保留核', list(pools.cpu.vpp_reserved)],
-        ['空闲核', list(pools.cpu.free)],
-      ]);
-    }
   }
 
-  table($('iface-table').querySelector('tbody'), (ifaces || []).map((i) => [
-    i.name, i.kind, i.driver, i.enabled === false ? 'down' : 'up', i.link, i.speed_mbps ? i.speed_mbps + ' Mb/s' : '—', i.mtu, i.description,
+  // 接口：列表端点只有配置字段（名称/说明/MTU 等），逐口统计在详情端点上。
+  const cfgOnly = (ifaces || []).length > ifaceRows.length;
+  table($('iface-table').querySelector('tbody'), 7, ifaceRows.map((r) => [
+    r.cfg.name, r.cfg.description, r.cfg.mtu,
+    r.stat ? r.stat.rx_packets : undefined, r.stat ? r.stat.tx_packets : undefined,
+    r.stat ? r.stat.rx_errors : undefined, r.stat ? r.stat.tx_drops : undefined,
   ]));
-  table($('vm-table').querySelector('tbody'), (vms || []).map((v) => [
-    v.name, v.state, v.vcpu ? v.vcpu.count : '—', v.memory ? mb(v.memory.size_mb) : '—', v.image,
+  $('iface-note').textContent = cfgOnly
+    ? '（共 ' + ifaces.length + ' 个接口，此处只列前 ' + MAX_IFACE_DETAIL + ' 个）'
+    : '';
+
+  table($('vm-table').querySelector('tbody'), 5, (vms || []).map((v) => [
+    v.name, v.state, v.vcpu ? v.vcpu.count : undefined, v.memory ? mb(v.memory.size_mb) : undefined, v.image,
   ]));
-  table($('ct-table').querySelector('tbody'), (cts || []).map((c) => [
-    c.name, c.state, c.vcpu, c.memory_mb ? mb(c.memory_mb) : '—', c.image,
+  table($('ct-table').querySelector('tbody'), 5, (cts || []).map((c) => [
+    c.name, c.state, c.vcpu, c.memory_mb ? mb(c.memory_mb) : undefined, c.image,
   ]));
 
   const al = $('alarms');
@@ -261,9 +335,9 @@ async function startStream() {
         const frame = buf.slice(0, i);
         buf = buf.slice(i + 2);
         let data = '';
-        for (const line of frame.split('\n')) {
-          if (line.startsWith('data:')) data += line.slice(5).trim();
-        }
+        frame.split('\n').forEach((line) => {
+          if (line.indexOf('data:') === 0) data += line.slice(5).trim();
+        });
         if (!data) continue;   // 心跳等注释帧
         try {
           const ev = JSON.parse(data);
@@ -274,7 +348,7 @@ async function startStream() {
         } catch (e) { /* 非 JSON 帧：忽略，不影响后续 */ }
       }
     }
-    // 流正常结束（服务端重启等）：退化为轮询并继续尝试重连。
+    // 流正常结束（服务端重启等）：退化为轮询。
     setStream('实时通道：已断开（改为轮询）', 'pill-warn');
     startPolling();
   } catch (e) {
