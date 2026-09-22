@@ -4894,6 +4894,53 @@
         ]
       }
     },
+    "/ui": {
+      "get": {
+        "description": "决策 #115：V2 Web 控制面增量 1（只读总览）内嵌进 nfvisd 并**同源**托管。\n本路径只做跳转到 `/ui/`，免得操作者少打一个斜杠拿到 404。\n无鉴权：静态资源不含敏感信息，且登录页必须先能加载。\n",
+        "responses": {
+          "302": {
+            "description": "跳转到 /ui/",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "summary": "Web 控制面入口（重定向到 /ui/）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/ui/": {
+      "get": {
+        "description": "决策 #115：内嵌进二进制的免构建前端（原生 HTML/CSS/JS，无 npm）。\n数据不从这里取——页面经既有 REST 端点 + `Authorization: Bearer` 读取，\n实时刷新用 `GET /events`（SSE）；token 存浏览器 sessionStorage，关标签页即失效。\n无鉴权（与 /metrics、/openapi.json 同例）。\n",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "静态资源（按扩展名返回 text/html、text/javascript、text/css）"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        },
+        "security": [],
+        "summary": "Web 控制面静态资源（index.html / app.js / style.css）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/virtual-machine-functions": {
       "get": {
         "responses": {

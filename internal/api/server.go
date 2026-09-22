@@ -249,6 +249,11 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/metrics", http.HandlerFunc(s.handleMetrics))
 	// V1 收尾：OpenAPI 规范运行时副本（契约 security: []，无鉴权，FR-API-002/决策 #69）
 	mux.Handle("GET "+APIPrefix+"/openapi.json", http.HandlerFunc(s.handleOpenAPISpec))
+	// 决策 #115：Web 控制面增量 1（只读总览）——免构建前端随二进制内嵌、同源托管。
+	// 无鉴权（与 /metrics、/openapi.json 同例）：静态资源不含敏感信息，且登录页必须先能加载；
+	// 数据由页面经既有 REST 端点带 Bearer 取。放在 /api/v1 下是为了落进契约守护（见 ui.go）。
+	mux.Handle("GET "+APIPrefix+"/ui", http.HandlerFunc(s.handleUIRedirect))
+	mux.Handle("GET "+APIPrefix+"/ui/", http.HandlerFunc(s.handleUIAssets))
 
 	// M5-6：配置备份/恢复/恢复出厂（FR-OPS-004~007）
 	mux.Handle("GET "+APIPrefix+"/system/backup", s.auth(s.handleListBackups, schema.ClassReadOnly, "show system backup"))

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFViS 控制台</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- 登录视图：未持有 token 时显示。口令只用于换 token，不做任何本地留存。 -->
+<section id="login-view" class="login-wrap" hidden>
+  <form id="login-form" class="login-card">
+    <h1>NFViS 控制台</h1>
+    <p class="muted">只读总览：系统、数据面、接口、计算负载与告警</p>
+    <label for="username">用户名</label>
+    <input id="username" name="username" autocomplete="username" required>
+    <label for="password">口令</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button type="submit" id="login-btn">登录</button>
+    <p id="login-error" class="error" hidden></p>
+  </form>
+</section>
+
+<!-- 总览视图 -->
+<section id="main-view" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <strong>NFViS 控制台</strong>
+      <span id="host-line" class="muted"></span>
+    </div>
+    <div class="topbar-right">
+      <span id="stream-state" class="pill pill-idle">实时通道：连接中</span>
+      <span id="user-line" class="muted"></span>
+      <button id="refresh-btn" type="button" class="ghost">刷新</button>
+      <button id="logout-btn" type="button" class="ghost">退出</button>
+    </div>
+  </header>
+
+  <p id="global-error" class="error" hidden></p>
+
+  <div class="grid">
+    <article class="card">
+      <h2>系统</h2>
+      <dl id="sys-list" class="kv"></dl>
+      <h3>组件版本</h3>
+      <dl id="ver-list" class="kv"></dl>
+    </article>
+
+    <article class="card">
+      <h2>资源池</h2>
+      <div id="pools"></div>
+    </article>
+
+    <article class="card">
+      <h2>数据面</h2>
+      <dl id="vpp-list" class="kv"></dl>
+    </article>
+
+    <article class="card wide">
+      <h2>接口</h2>
+      <table id="iface-table">
+        <thead><tr><th>名称</th><th>类型</th><th>驱动</th><th>管理</th><th>链路</th><th>速率</th><th>MTU</th><th>说明</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </article>
+
+    <article class="card">
+      <h2>虚拟机</h2>
+      <table id="vm-table">
+        <thead><tr><th>名称</th><th>状态</th><th>vCPU</th><th>内存</th><th>镜像</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </article>
+
+    <article class="card">
+      <h2>容器</h2>
+      <table id="ct-table">
+        <thead><tr><th>名称</th><th>状态</th><th>vCPU</th><th>内存</th><th>镜像</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </article>
+
+    <article class="card">
+      <h2>告警</h2>
+      <div id="alarms"></div>
+    </article>
+
+    <article class="card">
+      <h2>最近事件</h2>
+      <ul id="events" class="events"></ul>
+    </article>
+  </div>
+
+  <footer class="foot muted">
+    数据取自本机 REST 接口；页面每 5 秒兜底刷新一次，事件推送到达时立即刷新。
+    本页面为只读视图，不修改任何配置。
+  </footer>
+</section>
+
+<script src="app.js"></script>
+</body>
+</html>

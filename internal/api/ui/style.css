@@ -1,0 +1,106 @@
+/* NFViS 控制台样式（只读总览）。
+   无外部字体/图标依赖：页面在气隙环境也要能看。 */
+
+:root {
+  --bg: #0f1720;
+  --panel: #16202b;
+  --panel-2: #1c2836;
+  --line: #2a3947;
+  --fg: #e6edf3;
+  --muted: #93a4b5;
+  --accent: #4aa3df;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --err: #f85149;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 0 0 10px; color: var(--fg); }
+h3 { font-size: 13px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; }
+p { margin: 6px 0; }
+
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.error { color: var(--err); }
+.hidden { display: none; }
+
+/* 登录 */
+.login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+.login-card {
+  width: 340px; padding: 26px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--panel);
+}
+.login-card label { display: block; margin: 12px 0 4px; color: var(--muted); font-size: 13px; }
+.login-card input {
+  width: 100%; padding: 9px 10px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--bg); color: var(--fg); font-size: 14px;
+}
+.login-card input:focus { outline: none; border-color: var(--accent); }
+.login-card button {
+  width: 100%; margin-top: 18px; padding: 10px; border: 0; border-radius: 6px;
+  background: var(--accent); color: #06121c; font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.login-card button:disabled { opacity: .6; cursor: default; }
+
+/* 顶栏 */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
+  flex-wrap: wrap;
+}
+.brand { display: flex; align-items: baseline; gap: 10px; }
+.topbar-right { display: flex; align-items: center; gap: 10px; }
+button.ghost {
+  padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px;
+  background: transparent; color: var(--fg); cursor: pointer; font-size: 13px;
+}
+button.ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+.pill { padding: 3px 9px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
+.pill-ok { color: var(--ok); border-color: var(--ok); }
+.pill-warn { color: var(--warn); border-color: var(--warn); }
+.pill-idle { color: var(--muted); }
+
+/* 卡片栅格 */
+.grid {
+  display: grid; gap: 14px; padding: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+.card {
+  padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+  min-width: 0;
+}
+.card.wide { grid-column: 1 / -1; }
+
+/* 键值表 */
+dl.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; }
+dl.kv dt { color: var(--muted); white-space: nowrap; }
+dl.kv dd { margin: 0; overflow-wrap: anywhere; }
+
+/* 表格 */
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+td { font-size: 13px; overflow-wrap: anywhere; }
+tbody tr:last-child td { border-bottom: 0; }
+.card.wide table { display: block; overflow-x: auto; }
+
+/* 告警与事件 */
+.alarm { padding: 8px 10px; margin-bottom: 8px; border-left: 3px solid var(--muted); background: var(--panel-2); border-radius: 4px; }
+.alarm.sev-critical { border-left-color: var(--err); }
+.alarm.sev-major { border-left-color: var(--err); }
+.alarm.sev-warning { border-left-color: var(--warn); }
+.alarm-head { font-weight: 600; margin-bottom: 2px; }
+ul.events { margin: 0; padding-left: 16px; max-height: 260px; overflow-y: auto; }
+ul.events li { margin-bottom: 4px; }
+
+.foot { padding: 4px 18px 20px; font-size: 12px; }
