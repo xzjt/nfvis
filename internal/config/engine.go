@@ -427,10 +427,12 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 	}
 	newCfg := *e.candidate
 
-	// FR-CFG-012：SSH 会话变更管理口必须 commit confirmed（已设管理口被改动/删除才算；
-	// 从无到有的首次设置属初始化，不触发自锁保护）
+	// FR-CFG-012（决策 #121 扩围）：管理口地址/网关变更必须 commit confirmed——
+	// 判据取"**该会话是否经网络接入**"：ssh 与 api（REST / Web 控制台）都依赖管理网连通性，
+	// 改管理口可能切断自己的管理路径，故都要求确认；本地串口（console）不依赖管理网，
+	// 保持豁免。首次声明也算变更（发现 #12(a)：nil 与空配置等价处理）。
 	mgmtChanged := sysMgmtChanged(committed.System, newCfg.System)
-	if mgmtChanged && sess.Source == "ssh" && opts.ConfirmedMinutes <= 0 {
+	if mgmtChanged && sess.Source != "console" && opts.ConfirmedMinutes <= 0 {
 		return res, ErrConfirmRequired
 	}
 

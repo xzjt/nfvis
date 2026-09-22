@@ -925,6 +925,11 @@ paths:
     post:
       tags: [configuration]
       summary: 提交 candidate（含校验+下发底座）
+      description: |
+        管理口地址/网关变更须以 commit confirmed 提交（`confirmed_minutes > 0`）：
+        凡**经网络接入**的会话（SSH、REST/Web 控制台）都受此约束（FR-CFG-012，决策 #121），
+        本地串口豁免；未带 `confirmed_minutes` 时返回 400 `CONFIRM_REQUIRED`。
+        确认期内未调用 `POST /configuration/commit:confirm` 将自动回滚。
       requestBody:
         content:
           application/json:
@@ -940,7 +945,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CommitResult" }
         "400":
-          description: 校验失败（detail 列出全部错误）
+          description: |
+            校验失败（detail 列出全部错误）；或管理口变更未走 commit confirmed
+            （code=CONFIRM_REQUIRED）
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

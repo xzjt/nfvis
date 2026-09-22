@@ -176,6 +176,42 @@ func TestCommitRejectsUserWithoutPassword(t *testing.T) {
 	}
 }
 
+// 管理口变更经 REST 也须 commit confirmed（FR-CFG-012，决策 #121 扩围）——
+// 这正是控制台配置页提交管理口改动时会走的路径：被拒 → 以 confirmed 提交 → 确认。
+func TestManagementChangeRequiresConfirmedViaREST(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+
+	status, _, body := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token,
+		map[string]any{"system": map[string]any{"management": map[string]any{"address": "192.0.2.10/24"}}}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("PUT candidate: %d %s", status, body)
+	}
+	// 普通提交应被拒，且错误码可辨
+	status, _, body = cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/configuration/commit", token,
+		map[string]any{}, nil)
+	if status != http.StatusBadRequest {
+		t.Fatalf("管理口变更的普通提交应 400，得到 %d %s", status, body)
+	}
+	if !strings.Contains(string(body), "CONFIRM_REQUIRED") {
+		t.Fatalf("应返回 CONFIRM_REQUIRED：%s", body)
+	}
+	// 以 commit confirmed 提交 → 200 + 待确认截止时间
+	status, _, body = cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/configuration/commit", token,
+		map[string]any{"confirmed_minutes": 10}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("commit confirmed: %d %s", status, body)
+	}
+	if !strings.Contains(string(body), "confirmed_until") {
+		t.Fatalf("应返回 confirmed_until：%s", body)
+	}
+	// 确认 → 生效
+	status, _, body = cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/configuration/commit:confirm", token, nil, nil)
+	if status != http.StatusOK && status != http.StatusNoContent {
+		t.Fatalf("confirm: %d %s", status, body)
+	}
+}
+
 func TestLogoutReleasesCandidateLock(t *testing.T) {
 	ts := newTestServer(t)
 	token := loginAdmin(t, ts)
