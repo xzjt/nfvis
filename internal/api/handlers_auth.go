@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/xzjt/nfvis/internal/aaa"
+	"github.com/xzjt/nfvis/internal/config"
 )
 
 // ---------- 统一错误格式（FR-API-005：Error{code, message, detail[]}） ----------
@@ -82,7 +83,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLogout POST /api/v1/logout：吊销当前 token（FR-API-001 可吊销）。
+//
+// 决策 #119（已知缺陷 #19）：同时**丢弃本会话的 candidate 并释放锁**——与 CLI 的
+// Teardown（discard → exit → logout）对齐。此前只吊销 token，candidate 锁按 user@source
+// 保留到空闲超时，会把随后登录的 CLI 挡在门外（报「candidate 会话锁被占用: 由 admin@api
+// 持有」）。未在编辑（ErrNotEditing）是常态、不算失败；其它错误只记日志——登出不能因
+// 清理失败而失败（本地清掉 token 后即无凭据可用）。
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if err := s.engine.Discard(sessionFromIdentity(r)); err != nil && !errors.Is(err, config.ErrNotEditing) {
+		s.log.Warn("登出时释放 candidate 失败", "err", err)
+	}
 	if tok := bearerToken(r); tok != "" {
 		s.aaa.Logout(tok)
 	}

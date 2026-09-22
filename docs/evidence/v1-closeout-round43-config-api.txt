@@ -1,0 +1,66 @@
+===== V1 收尾第四十三轮：增量 2 的 API 侧收口（committed 全量读取 + candidate 形状 + 缺陷 #19）=====
+日期：2026-09-22
+目标机：nfvis-vm（VMware；已装实例 1.1.25 全程未动，新代码跑在 :8443 的开发态实例上）
+源码：main `518d91e` 起分支 `feat/config-api-round43`（一个提交 `69c6aca`，决策 #119）
+起态：round42 覆盖核查给出增量 2 的输入——API 侧基本齐备，唯一阻塞项是 `show configuration`
+      （committed 全量读取）没有端点
+终止态：`make check` 全绿；真机四项复验通过（新端点真值、脱敏、#19 修复、CLI 同源对照）；环境复原
+
+------ 0. 结论 -----
+本刀把增量 2（Web 控制面配置读写）的三块前置一次收口：
+
+1. **新增 `GET /configuration`**（round42 缺口 #1）：返回 `{configuration, revision}`；
+   权限 `ClassReadOnly`（与 CLI `show configuration` 同类——show 树默认读权限，同一用户经
+   CLI 能看的经 REST 也能看；且 `GET /system` 系统配置段早已是读权限）；脱敏口径与
+   candidate 读取一致（`redactConfigView`，FR-SEC-007 / 决策 #25）。
+2. **`GET /configuration/candidate` 契约按实现形状声明**：契约原写 `ConfigDocument` 本体，
+   实现回 `{candidate, dirty}` 包装——**同 R37-1 类的契约↔实现不符**，只是出在配置族、
+   形状守护没覆盖。新增 `CandidateView` schema 对齐实现，并把该端点收进形状守护覆盖清单。
+   `PUT` 的 200 响应有两个分支形状（未提交=`CandidateView`、`X-NFVIS-Auto-Commit`=
+   `CommitResult`），契约只写 description 不声明 schema——如实登记，留待写路径页面定稿时收。
+3. **缺陷 #19 收口**：`POST /logout` 除吊销 token 外**同时丢弃本会话 candidate 并释放锁**
+   （与 CLI `Teardown` 的 discard → exit → logout 对齐）。未在编辑（`ErrNotEditing`）是常态、
+   不算失败；其它错误只记日志、**登出恒 204**（清理失败不该让登出失败）。
+
+------ 1. 改动清单 -----
+| 文件 | 改动 |
+|---|---|
+| `docs/NFViS-openapi.yaml` | 新增 `/configuration`（GET，`CommittedConfig`）；`/configuration/candidate` GET 改 `CandidateView`；PUT 200 补 description（两分支）；新增两个 schema |
+| `internal/api/configuration.go` | `handleGetConfiguration`（committed + revision，脱敏） |
+| `internal/api/server.go` | 路由：`GET /configuration` 用 `s.auth(..., ClassReadOnly, "show configuration")` |
+| `internal/api/handlers_auth.go` | `handleLogout` 增 discard（best-effort，日志化非预期错误） |
+| `internal/api/configuration_committed_test.go`（新） | 四条用例：committed 真值+版本号 / 未认证 401 / candidate 形状（含未持锁不得 200）/ **登出释放锁** |
+| `internal/api/shape_contract_test.go` | 形状守护覆盖清单扩到 `GET /configuration` |
+| `internal/api/cli_rest_coverage_test.go` | `show configuration` 从缺口表移入覆盖表（→ `GET /configuration`） |
+| 规格书附录 A / AGENTS.md | 决策 #119；决策计数 118→119 |
+| `docs/CLI-REST覆盖核查.md` | 覆盖 225→226、缺口 14→13（#1 标已收口），§6 增量 2 输入更新 |
+
+------ 2. 自检与变异验证 -----
+- **make check 全绿**：vet=0；`go test -p 1 ./...`（宿主并行仍撞 errno=1455，按红线 10 串行）
+  21 包 ok；cover/archtest/docscheck/toolcheck/prototype-check 全过；决策条数 119 一致；
+  openapi.json 与契约同步；契约 YAML 无重复键。
+- **变异验证**（缺陷 #19 的用例）：把 `handleLogout` 里的 discard 改成空操作 →
+  `TestLogoutReleasesCandidateLock` 报红并打出缺陷症状本体：
+  `登出后 candidate 锁应已释放，仍见 [... holder:admin@api ...]`；改回复绿。
+- 形状守护扩到 `GET /configuration` 后核到 2 个字段（configuration/revision）；
+  覆盖守护的两道断言（端点存在性、新命令归类）继续全过。
+
+------ 3. 真机复验（:8443 开发态实例） -----
+| 项 | 结果 |
+|---|---|
+| `GET /configuration` | `revision: 3`，顶层键 `[interfaces, system]`，`interfaces: [ens192]`——与 committed 一致 |
+| 脱敏 | 响应原文中 `password_hash` 与 `pbkdf2$` **均不出现**（FR-SEC-007） |
+| 缺陷 #19 | API 会话 `PUT /configuration/candidate` 取锁（sessions 显示 `holder: admin@api`、`dirty: true`）→ `POST /logout` 204 → **CLI（admin@ssh，不同 source）立刻提交成功**（`commit 成功 (revision 4)`）。修复前这一步会报「candidate 会话锁被占用: 由 admin@api 持有」 |
+| 同源对照 | CLI `show configuration`（set 风格渲染）与 `GET /configuration` 是同一份 committed：ens192/ens224 的 description 逐项一致 |
+| 附带 | 复验脚本第一版把 `NFVIS_SERVER` 写成了带 `/api/v1` 后缀的地址（CLI 客户端自己会加），导致 ①③ 的 CLI 调用静默失败——已修正后重跑；记录在此以免再踩 |
+
+------ 4. 环境复原 -----
+- 开发态实例（:8443、/tmp/ui.db）验完已停；/tmp 中间产物已清；已装实例恢复 active（1.1.25）；
+  VPP 拓扑与 vnf-a/vnf-b 未受影响；流量复通：BVI ping 双向各 **10/10 0% 丢包**
+  （nfvis 重启后首次 5 包 4/5 是重新 apply 的瞬时抖动，round39~41 同样现象），
+  宿主经 DPDK 物理口到两台 guest 3/3 <1ms。
+
+------ 5. 下一步（增量 2 第二刀） -----
+前端配置读写页面：committed 视图（用本轮新端点）+ candidate 编辑 + commit/commit confirmed
+流程 + 高危动作显式确认（照搬 CLI 的 `--yes`/`confirm` 体系）+ 写路径完成后按惯例过一轮
+**浏览器可视验收**（决策 #117 的口径：已交付但没人眼看过 = 验收不算完）。

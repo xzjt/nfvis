@@ -9,9 +9,11 @@
 
 ## 0. 结论
 
-**258 个命令形态中：225 个已有类型化 REST 端点（可直接写页面）、14 个是真缺口（需补 API）、19 个是 CLI-only by design（交互形态差异，不需要 API）。**
+**258 个命令形态中：226 个已有类型化 REST 端点（可直接写页面）、13 个是真缺口（需补 API）、19 个是 CLI-only by design（交互形态差异，不需要 API）。**
 
-配置模式的 113 条 `set`/`delete` 语句是最大的一块，**一整轮 candidate API 全覆盖**（`GET/PUT/DELETE /configuration/candidate` + `X-NFVIS-Auto-Commit`）；show 族 65 条里 58 条有对应 GET；request 族 46 条里 42 条有对应动作端点。真正的缺口集中在三类：**整配置读取、日志、连通性诊断（ping/traceroute）**——前者是增量 2（配置读写）的直接输入，后两者决策 #115 已列入后续增量。
+> 更新记录：缺口 #1（`show configuration` committed 全量读取）已于 **round43 收口**（新增 `GET /configuration`，决策 #119）——覆盖 225→226、缺口 14→13。下表保留原始条目并标注状态，便于追溯。
+
+配置模式的 113 条 `set`/`delete` 语句是最大的一块，**一整轮 candidate API 全覆盖**（`GET/PUT/DELETE /configuration/candidate` + `X-NFVIS-Auto-Commit`）；show 族 65 条里 58 条有对应 GET；request 族 46 条里 42 条有对应动作端点。真正的缺口集中在三类：**整配置读取、日志、连通性诊断（ping/traceroute）**——前者已于 round43 收口，后两者决策 #115 已列入后续增量。
 
 ## 1. 口径与方法
 
@@ -53,6 +55,7 @@
 | `show images`（detail） | `GET /images`、`/{name}` |
 | `show resource-pools` / `show alarms` / `show users` | `GET /resource-pools` / `GET /alarms` / `GET /system/login-users` |
 | `show log audit` | `GET /audit-logs` |
+| `show configuration`（committed 全量） | `GET /configuration`（`{configuration, revision}`，round43 收口） |
 | `show configuration candidate` | `GET /configuration/candidate` |
 | `show configuration compare rollback <n>` | `GET /configuration/diff`（配合 `POST /configuration/rollback/{n}` 的两步组合） |
 | `show tech-support`（顶级等价写法） | `GET /system/tech-support` |
@@ -99,13 +102,13 @@
 | `load override <path>` | `PUT /configuration/candidate`（override 语义） |
 | `save <path>` | `GET /configuration/candidate`（取 JSON 自行落盘；配置归档另有 `POST /system/backup`） |
 
-## 3. B 缺口清单（14 个形态，需补 API）
+## 3. B 缺口清单（13 个形态，需补 API）
 
 按价值排序；**补法一律契约先行**（openapi + 附录 A 决策 + routes/shape 守护），不碰 `/cli/execute`。
 
 | # | 命令 | CLI 实测 | REST 现状 | 价值 / 建议归属 |
 |---|---|---|---|---|
-| 1 | `show configuration`（committed 全量读取） | ✅ | 无整配置 GET；只有分段（`GET /system`、`GET /vpp/config` 等配置段 + 资源端点） | **高**——增量 2 的配置总览/表单回显直接需要；建议作为增量 2 第一件事 |
+| 1 | ~~`show configuration`（committed 全量读取）~~ | ✅ | ✅ **已收口（round43，决策 #119）**：`GET /configuration` 返回 `{configuration, revision}`，`ClassReadOnly` + 脱敏 | 已解决 |
 | 2 | `show log system [level] [last]` | ✅ | 无日志端点 | **高**——决策 #115 已列入后续增量（日志视图） |
 | 3 | `ping <host> [source] [count] [vrf]` | ✅ | 无 | **高**——Web 排障刚需（CLI 经 VPP L3 执行） |
 | 4 | `traceroute <host> [vrf]` | ✅ | 无 | **高**——同上 |
@@ -151,7 +154,7 @@
 
 ## 6. 对增量 2 的输入
 
-- 增量 2（配置读写）的 API 侧**基本齐备**：candidate/commit/confirm/diff/rollback 全部在位，113 条配置语句无需新端点；**唯一阻塞项是缺口 #1（committed 全量读取）**——表单回显要么用它，要么逐段拼资源端点（后者正是增量 1 的做法，可接受但不优雅）。
-- 高危动作的 Web 确认语义照搬 CLI 的 `--yes`/`confirm`/`commit confirmed` 体系；#19（logout 不释放 candidate 锁）按决策 #115 并入写路径增量修。
+- 增量 2（配置读写）的 API 侧**已齐备**：candidate/commit/confirm/diff/rollback 全部在位，113 条配置语句无需新端点；**唯一阻塞项（缺口 #1，committed 全量读取）已于 round43 收口**（`GET /configuration`，决策 #119），表单回显与配置总览可以直接用它。
+- 高危动作的 Web 确认语义照搬 CLI 的 `--yes`/`confirm`/`commit confirmed` 体系；#19（logout 不释放 candidate 锁）**已于 round43 收口**（决策 #119）。
 - 缺口 #2/#3/#4（日志、ping、traceroute）可组成增量 3（诊断视图），与增量 2 无强依赖。
-- 建议增量顺序：**增量 2 = 配置读写（含缺口 #1）→ 增量 3 = 诊断（日志 + ping/traceroute + 统计字段）#5~#9 → 剩余小缺口随见随补**。
+- 建议增量顺序：**增量 2 = 配置读写（API 已就绪，开工写页面）→ 增量 3 = 诊断（日志 + ping/traceroute + 统计字段）#5~#9 → 剩余小缺口随见随补**。

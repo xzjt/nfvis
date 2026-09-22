@@ -67,6 +67,24 @@ func (s *Server) handleGetCandidate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleGetConfiguration GET /configuration：读取 committed 配置（全量，脱敏）。
+//
+// 决策 #119（round42 覆盖核查缺口 #1）：此前只有分段读取（GET /system、GET /vpp/config
+// 等配置段 + 资源端点），CLI `show configuration` 没有 REST 等价物；增量 2（配置读写）
+// 的表单回显与配置总览依赖它。脱敏口径与 candidate 读取一致（FR-SEC-007 / 决策 #25）。
+func (s *Server) handleGetConfiguration(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.engine.Committed()
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	out := map[string]any{"configuration": redactConfigView(cfg)}
+	if rev, err := s.engine.CurrentRevision(); err == nil {
+		out["revision"] = rev
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // handlePutCandidate PUT /configuration/candidate：整体替换 candidate
 // （load override 语义，FR-CFG-008；决策 #22 默认写 candidate，
 // X-NFVIS-Auto-Commit: true 时校验+下发+落库一次完成）。

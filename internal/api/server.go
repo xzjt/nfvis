@@ -161,6 +161,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	cfgAPI := func(h http.HandlerFunc) http.Handler {
 		return s.auth(h, schema.ClassSuperUser, "configure")
 	}
+	mux.Handle("GET "+APIPrefix+"/configuration", s.auth(s.handleGetConfiguration, schema.ClassReadOnly, "show configuration"))
 	mux.Handle("GET "+APIPrefix+"/configuration/candidate", cfgAPI(s.handleGetCandidate))
 	mux.Handle("PUT "+APIPrefix+"/configuration/candidate", cfgAPI(s.handlePutCandidate))
 	mux.Handle("DELETE "+APIPrefix+"/configuration/candidate", cfgAPI(s.handleDeleteCandidate))
