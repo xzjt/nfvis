@@ -53,6 +53,9 @@ type VppThread struct {
 type VppController interface {
 	Status(vpp *model.VppConfig) VppStatus
 	Restart(ctx context.Context, vpp *model.VppConfig) error
+	// Version 最近一次成功连接探测到的 VPP 版本（与 /vpp/status.version 同源；
+	// R37-2 收口后 /system/version 的 vpp 键也取这里——决策 #118）。
+	Version() string
 }
 
 // handleGetVppStatus GET /api/v1/vpp/status：连接状态与 pending_restart。

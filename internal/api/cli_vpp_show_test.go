@@ -22,6 +22,7 @@ func (f fakeVppCtl) Status(*model.VppConfig) VppStatus { return f.st }
 func (f fakeVppCtl) Restart(context.Context, *model.VppConfig) error {
 	return nil
 }
+func (f fakeVppCtl) Version() string { return f.st.Version }
 
 func TestShowVppShowsVersionAndPendingRestart(t *testing.T) {
 	x, _ := newCLIKit(t)

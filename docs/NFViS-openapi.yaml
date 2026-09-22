@@ -1754,6 +1754,12 @@ components:
 
     VersionInfo:
       type: object
+      description: |
+        组件版本汇总（FR-SYS-007）。探测不到的键**缺席**（不编造空串）：ubuntu 读
+        /etc/os-release（非 Linux 无该文件时缺席）；vpp 与 `/vpp/status` 同源（VPP 未接入
+        或未连接时缺席）；libvirt/qemu/docker 经底座命令探测（未安装、守护进程未运行或
+        不在 PATH 时缺席）；dpdk 没有可靠版本来源（随 VPP 静态链接、VPP binary API 的
+        show_version 不含、运行进程无独立 DPDK 库可读），有意不汇报。
       properties:
         nfvis: { type: string, example: "1.0.0" }
         ubuntu: { type: string, example: "26.04 LTS" }

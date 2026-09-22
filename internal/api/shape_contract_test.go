@@ -43,14 +43,11 @@ var shapeConditional = map[string]map[string]string{
 		"statistics":  "仅在详情端点 /interfaces/{name} 附带",
 	},
 	"GET /system/version": {
-		// 桩：7 个键都在、只有 nfvis 有值。补齐要跨 libvirt/docker/qemu 三个 provider
-		// 与宿主事实探测，属独立一批（决策 #116 登记的 R37-2），故此处显式标注而不是假装通过。
-		"ubuntu":  "R37-2：组件版本探测未实现（当前是桩，返回空串）",
-		"vpp":     "R37-2：同上",
-		"dpdk":    "R37-2：同上",
-		"libvirt": "R37-2：同上",
-		"qemu":    "R37-2：同上",
-		"docker":  "R37-2：同上",
+		// R37-2 已收口（决策 #118）：ubuntu/libvirt/qemu/docker 经 VersionProbe 探测、
+		// vpp 与 /vpp/status 同源，本用例经注入的假源核到这些键。唯独 dpdk 没有可靠
+		// 版本来源（随 VPP 静态链接进 dpdk_plugin.so、show_version 不含、运行进程也
+		// 没有独立 DPDK 库可读），有意不汇报——这是唯一"合法缺席"的键。
+		"dpdk": "无可靠版本来源（DPDK 静态链接进 VPP 插件、binary API 不含），有意不汇报",
 	},
 	"GET /vpp/status": {
 		"last_error":          "无错误时为空串",
@@ -66,7 +63,12 @@ var shapeConditional = map[string]map[string]string{
 
 // TestResponseShapeMatchesContract 契约声明的响应字段必须出现在实际响应里。
 func TestResponseShapeMatchesContract(t *testing.T) {
-	ts := newTestServer(t)
+	// /system/version 的组件版本经注入的假源供给（R37-2 收口，决策 #118）：
+	// 真机可用性由 internal/system 的单测与真机复验覆盖，这里只核"handler 把声明字段发出去"。
+	ts := newTestServerOpts(t, Options{
+		Versions: fakeVersions{},
+		VPP:      &fakeVppController{status: VppStatus{Version: "26.06-release", Connected: true}},
+	})
 	token := loginAdmin(t, ts)
 
 	// 种一台接口：否则 /interfaces 是空数组，检查会**落空**（空数组什么都验不到）。

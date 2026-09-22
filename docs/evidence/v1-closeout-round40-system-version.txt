@@ -1,0 +1,69 @@
+===== V1 收尾第四十轮：R37-2 收口——组件版本探测 + show version 七组件汇总（决策 #118） =====
+日期：2026-09-22
+目标机：nfvis-vm（VMware；已装实例 **1.1.25 全程未动**，新代码跑在 :8443 的开发态实例上）
+源码：main `af95f5d` 起分支 `feat/system-version-probe`（一个提交 `2134303`，决策 #118）
+起态：round37 登记 R37-2——`GET /system/version` 是桩（7 键只有 nfvis 有值）；CLI `show version`
+      同样只印 NFViS，而命令树契约写的就是七组件汇总
+终止态：`make check` 全绿（vet + **串行** go test -p 1 + cover + archtest + docscheck + toolcheck + 原型）；
+      真机 API/CLI/浏览器三处复验通过；冒烟阶段 1 仅剩已登记项失败；环境复原
+
+------ 0. 结论 -----
+- **数据源勘察**（真机逐条核过，不凭记忆）：
+  ubuntu ← `/etc/os-release`（VERSION_ID=26.04，退回 PRETTY_NAME）；libvirt ← `libvirtd --version`
+  （12.0.0）；qemu ← `qemu-system-x86_64 --version`（10.2.1）；docker ← `docker version --format
+  {{.Server.Version}}` 取**守护进程**版本（29.1.3）；vpp ← 既有 `network.Manager.Version()`
+  （binary API `show_version`，与 `/vpp/status` 同源，26.06-release）。
+- **DPDK 没有可靠来源**，勘察结论：本机 DPDK 静态链接进 VPP 的 `dpdk_plugin.so`
+  （`ldd`/`/proc/<pid>/maps` 无独立 DPDK 库）；govpp 的 `ShowVersionReply` 只有
+  program/version/build_date/build_directory，**不含 DPDK 版本**；`vppctl show version`（含
+  verbose）与 `strings` 里也探不到版本串；dpkg 只有 vpp-plugin-dpdk 包（版本 26.06-release，
+  那是 VPP 的版本，**不能拿来冒充**）。故**有意永不汇报 dpdk**，不伪造。
+- 口径沿用决策 #116：**只汇报探测到的键**（取不到就不给，不编造空串）；形状守护白名单
+  从 6 条**缩到 1 条**——ubuntu/vpp/libvirt/qemu/docker 改由守护经**注入的假源**真校
+  （CI 上不再恒走白名单），只留 dpdk 一条并写明"无可靠来源、有意不汇报"。
+
+------ 1. 改动清单（分支 feat/system-version-probe，提交 2134303） -----
+| 文件 | 改动 |
+|---|---|
+| `internal/system/versions.go`（新） | `VersionProbe`：ubuntu 读 os-release；libvirt/qemu/docker 经底座命令探测；runner 与 os-release 路径**可注入**（单测用桩）；每条命令 2s 上限（该探测在 Web 控制台每 5 秒的轮询路径上，不能拖响应） |
+| `internal/system/versions_test.go`（新） | 5 组单测：全底座在（4 键）/ 命令不在·解析不到·空输出（键不给）/ 全没有（空 map）/ VERSION_ID 缺失退回 PRETTY_NAME / 两个解析器 |
+| `internal/api/handlers_auth.go` | `handleVersion` 合并 NFViS + 探测键 + `VppController.Version()`；新增 `VersionsRuntime` 接口 |
+| `internal/api/server.go` | `Options.Versions` 注入 + Server/cliExecutor 装配 |
+| `internal/api/vpp.go` | `VppController` 接口新增 `Version() string`（与 /vpp/status 同源） |
+| `internal/api/cliexec.go` | `show version` 改七组件汇总：探测不到的印「（未探测到）」，不显示空值；DPDK 永远走这一支 |
+| `cmd/nfvisd/main.go` | 装配 `Versions: system.NewVersionProbe()`；`vppController.Version()` 委托连接管理器 |
+| `internal/api/versions_test.go`（新） | plumbing 测试：注入假源 → 6 键全发；无探测器 → 只回 nfvis；CLI 汇总含真实值且无内部引用 |
+| `internal/api/shape_contract_test.go` | 白名单 R37-2 六条 → dpdk 一条；守护服务器注入假源（`fakeVersions` + fake VPP） |
+| `docs/NFViS-openapi.yaml` | `VersionInfo` 补 description（探测不到的键缺席 + dpdk 理由）；重新生成 `openapi.json` |
+| 规格书附录 A / AGENTS.md / 手册 §10.12 | 决策 #118；决策计数 117→118；手册补一句组件版本口径 |
+
+**为什么守护服务器要注入假源**：真机可用性（命令在不在、os-release 在不在）由
+`internal/system` 的单测与真机复验覆盖；形状守护的职责是"handler 把契约声明的字段真的发出去"，
+用假源才能在 CI 上核到每一个键——否则又变成"CI 恒走白名单、守护空转"。
+
+------ 2. 自检与变异验证 -----
+- **make check 全绿**：注意本轮宿主 Windows 并行 `go test` 再次撞上 **errno=1455**
+  （待办 §0 红线 10 的假红），按红线改 **`go test -p 1 ./...` 串行**后全过（21 包 ok）；
+  cover/archtest/docscheck/toolcheck/prototype-check 全过；决策条数 118 一致；openapi.json 同步。
+- **变异验证**：把 `handleVersion` 的探测合并临时改成 `if false && …` →
+  `TestResponseShapeMatchesContract` 报出 `docker/libvirt/qemu/ubuntu` 四个缺失字段（红），改回复绿。
+- VM 上 `node --check internal/api/ui/app.js` OK（app.js 本轮未改，照例跑）。
+
+------ 3. 真机复验（:8443 开发态实例，新构建） -----
+| 项 | 结果 |
+|---|---|
+| `GET /system/version` | `{"docker":"29.1.3","libvirt":"12.0.0","nfvis":"1.0.0-dev","qemu":"10.2.1","ubuntu":"26.04","vpp":"26.06-release"}`——**6 键全真值**，dpdk 按设计缺席 |
+| CLI `show version` | 七行汇总：NFViS 1.0.0-dev / Ubuntu 26.04 / VPP 26.06-release / DPDK （未探测到）/ libvirt 12.0.0 / QEMU 10.2.1 / Docker 29.1.3 |
+| 浏览器「组件版本」卡 | NFViS/VPP/libvirt/QEMU/Docker/Ubuntu 全部真实值，DPDK 显示「—」；顶栏实时通道已连接、用户行 admin（super-user） |
+| 冒烟阶段 1（对开发态基线） | **40 通过 / 1 失败**——唯一失败是已登记的 `show vpp runtime`（govpp runtime 解码限制）；`show version` 通过且日志里是新汇总输出 |
+
+------ 4. 环境复原 -----
+- 开发态实例（:8443、/tmp/ui.db）验完已停；/tmp 中间产物已清；已装实例恢复 active
+  （`systemctl start nfvis`，1.1.25）；VPP 拓扑与 vnf-a/vnf-b 未受影响（本轮未 commit 任何
+  数据面对象，开发态用独立 DB）；流量复通：BVI ping 双向各 **5/5 0% 丢包**
+  （nfvis 重启后**首次** 3 包 2/3 是重新 apply 的瞬时抖动，重跑即 5/5——round39 同样现象），
+  宿主经 DPDK 物理口到 guest 3/3 <1ms。
+- 配置库未动（已装实例 rev 仍 55）。
+
+------ 5. 留档 -----
+浏览器截图（IAB artifacts）：round40 组件版本卡 1 张。VM 侧：`/root/ui-nfvisd.out`、`/tmp/cli-test/full.log`。

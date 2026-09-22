@@ -611,6 +611,7 @@ func run() error {
 		TLS:         &tlsController{m: tlsMgr},
 		Ports:       &portInventoryController{net: netProvider}, // 决策 #83：运行态端口清单
 		VppState:    &vppStateController{net: netProvider},      // 决策 #84：show 的运行态事实来源
+		Versions:    system.NewVersionProbe(),                   // R37-2 收口（决策 #118）：组件版本探测
 		LogSource:   nfvisdLogTail,
 	})
 
@@ -679,6 +680,9 @@ func (c *vppController) Restart(ctx context.Context, _ *model.VppConfig) error {
 	_, err = c.applier.Apply(ctx, &cfg)
 	return err
 }
+
+// Version 最近一次成功连接探测到的 VPP 版本（决策 #118：/system/version 的 vpp 键取这里）。
+func (c *vppController) Version() string { return c.mgr.Version() }
 
 // envOr 读取环境变量，缺省返回 fallback。
 func envOr(key, fallback string) string {
