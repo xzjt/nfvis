@@ -1721,7 +1721,7 @@ components:
         （`internal/metrics.HostMetrics()`，Linux 采集），`hugepages` 与 `/resource-pools` 同源。
       properties:
         hostname: { type: string }
-        uptime_seconds: { type: integer }
+        uptime_seconds: { type: integer, description: 主机运行时长（/proc/uptime，与 CLI `show system uptime` 同源；非 Linux 取不到时退回守护进程运行时长） }
         config_ready: { type: boolean, description: 配置库可用（已建库且可读 committed） }
         cpu:
           type: object

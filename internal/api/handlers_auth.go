@@ -38,11 +38,18 @@ type loginRequest struct {
 }
 
 type loginResponse struct {
-	Token     string `json:"token"`
-	TokenID   string `json:"token_id"`
-	User      string `json:"user"`
-	Class     string `json:"class"`
-	ExpiresIn int    `json:"expires_in"` // 秒
+	Token     string    `json:"token"`
+	TokenID   string    `json:"token_id"`
+	User      loginUser `json:"user"`
+	ExpiresIn int       `json:"expires_in"` // 秒
+}
+
+// loginUser 对应契约的 LoginUser：`user` 是**对象**（name/class）。
+// 曾经实现回的是扁平字符串 + 顶层 class——照契约（FR-API-002：Web 控制面据此开发）
+// 写的前端把 body.user 当对象用，顶栏于是显示 "undefined（undefined）"（round39 可视验收发现）。
+type loginUser struct {
+	Name  string `json:"name"`
+	Class string `json:"class"`
 }
 
 // handleLogin POST /api/v1/login：用户名口令换 Bearer Token。
@@ -68,8 +75,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, loginResponse{
 		Token:     tok.Token,
 		TokenID:   tok.Token[:8],
-		User:      tok.User,
-		Class:     tok.Class,
+		User:      loginUser{Name: tok.User, Class: tok.Class},
 		ExpiresIn: int(time.Until(tok.ExpiresAt).Seconds()),
 	})
 }

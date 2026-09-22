@@ -129,6 +129,45 @@ func TestResponseShapeMatchesContract(t *testing.T) {
 	}
 }
 
+// TestLoginResponseShapeMatchesContract POST /login 的响应形状（round39 可视验收补的覆盖）。
+// 契约 LoginResponse.user 是**对象** LoginUser（name/class），而实现曾回扁平字符串 + 顶层
+// class——照契约（FR-API-002：Web 控制面据此开发）写的前端把 body.user 当对象用，顶栏于是
+// 显示 "undefined（undefined）"。此前守护只核四个 GET 端点，这类漂移覆盖不到。
+func TestLoginResponseShapeMatchesContract(t *testing.T) {
+	ts := newTestServer(t)
+	spec := loadEmbeddedSpec(t)
+	props := declaredProps(t, spec, "/login", "POST")
+	if len(props) == 0 {
+		t.Fatal("契约里取不到 /login 的响应字段")
+	}
+	status, body := postJSON(t, ts.URL+APIPrefix+"/login",
+		loginRequest{Username: "admin", Password: "s3cret-Passw0rd!"}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("登录: %d %s", status, body)
+	}
+	got := responseObject(t, body)
+	for _, f := range props {
+		v, ok := got[f]
+		if !ok {
+			t.Errorf("POST /login：契约声明了 %s，响应里没有（照契约开发的客户端会取空）", f)
+			continue
+		}
+		if sv, isStr := v.(string); isStr && sv == "" {
+			t.Errorf("POST /login：契约声明了字符串字段 %s，但响应里是空串（形同未实现）", f)
+		}
+	}
+	// user 必须是对象且 name/class 非空（LoginUser）；退回扁平字符串正是本轮抓到的缺陷形态。
+	user, ok := got["user"].(map[string]any)
+	if !ok {
+		t.Fatalf("POST /login：user 应为对象（契约 LoginUser），得到 %T", got["user"])
+	}
+	for _, f := range []string{"name", "class"} {
+		if sv, _ := user[f].(string); sv == "" {
+			t.Errorf("POST /login：user.%s 为空（契约 LoginUser）", f)
+		}
+	}
+}
+
 // TestVppStatusStructCoversContract /vpp/status 需要数据面 Provider（测试进程里起不了），
 // 改用**静态核对**：契约声明的每个字段，响应结构体都得能发出来（json tag 覆盖）。
 // 这正是 VppStatus 漂移的形态——契约写的字段结构体里根本没有。

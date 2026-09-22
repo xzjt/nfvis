@@ -147,7 +147,7 @@ func TestLoginFlow(t *testing.T) {
 	if status != http.StatusOK || resp.Token == "" {
 		t.Fatalf("登录应成功: status=%d resp=%+v", status, resp)
 	}
-	if resp.User != "admin" || resp.Class != aaa.ClassSuperUser || resp.ExpiresIn <= 0 {
+	if resp.User.Name != "admin" || resp.User.Class != aaa.ClassSuperUser || resp.ExpiresIn <= 0 {
 		t.Fatalf("登录响应不符: %+v", resp)
 	}
 
