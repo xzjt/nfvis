@@ -126,15 +126,37 @@ func TestBaselineMgmtUnchangedDoesNotRequireConfirmed(t *testing.T) {
 	}
 }
 
-// API 会话不受该保护约束（FR-CFG-012 只管来自 SSH 会话的变更）。
-func TestAPISessionNotGated(t *testing.T) {
+// 经网络接入的会话都受约束（FR-CFG-012，决策 #121 扩围）：ssh 与 api（REST/Web 控制台）
+// 都依赖管理网连通性，改管理口可能切断自己的管理路径；本地串口不依赖管理网，保持豁免。
+func TestNetworkSessionsGatedConsoleExempt(t *testing.T) {
+	for _, src := range []string{"ssh", "api"} {
+		eng := newEmptyEngine(t)
+		sess := Session{User: "admin", Source: src}
+		if err := eng.Edit(sess); err != nil {
+			t.Fatal(err)
+		}
+		mgmtSet(t, eng, sess, &model.MgmtConfig{Interface: "ens160"})
+		if _, err := eng.Commit(context.Background(), sess, CommitOpts{}); !errors.Is(err, ErrConfirmRequired) {
+			t.Fatalf("source=%s 变更管理口应要求 commit confirmed，得到 %v", src, err)
+		}
+		// 带 confirmed_minutes 即放行（待确认状态）
+		res, err := eng.Commit(context.Background(), sess, CommitOpts{ConfirmedMinutes: 10})
+		if err != nil {
+			t.Fatalf("source=%s commit confirmed 应放行: %v", src, err)
+		}
+		if res.ConfirmedUntil == nil {
+			t.Fatalf("source=%s 应返回待确认截止时间", src)
+		}
+	}
+
+	// 本地串口豁免：不依赖管理网连通性。
 	eng := newEmptyEngine(t)
-	api := Session{User: "admin", Source: "api"}
-	if err := eng.Edit(api); err != nil {
+	con := Session{User: "admin", Source: "console"}
+	if err := eng.Edit(con); err != nil {
 		t.Fatal(err)
 	}
-	mgmtSet(t, eng, api, &model.MgmtConfig{Interface: "ens160"})
-	if _, err := eng.Commit(context.Background(), api, CommitOpts{}); err != nil {
-		t.Fatalf("api 会话不应被要求 confirmed（原行为保持）: %v", err)
+	mgmtSet(t, eng, con, &model.MgmtConfig{Interface: "ens160"})
+	if _, err := eng.Commit(context.Background(), con, CommitOpts{}); err != nil {
+		t.Fatalf("本地串口不应被要求 confirmed: %v", err)
 	}
 }
