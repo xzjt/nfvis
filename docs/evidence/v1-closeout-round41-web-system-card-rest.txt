@@ -1,0 +1,67 @@
+===== V1 收尾第四十一轮：前端简化——系统数字改读 /system/status（去掉手写 Prometheus 文本解析） =====
+日期：2026-09-22
+目标机：nfvis-vm（VMware；已装实例 1.1.25 全程未动，新代码跑在 :8443 的开发态实例上）
+源码：main `ccaf9b7` 起分支 `chore/web-system-card-rest`（一个提交 `3dda728`）
+起态：待办 §0 第 2 项——round37 的只读总览为绕开 R37-1 缺口，系统数字是自己解析
+      `/metrics`（Prometheus 文本）来的；R37-1 收口（决策 #116）后 `/system/status`
+      直接给同样（同源）的数字，可以去掉那段手写解析
+终止态：`make check` 全绿；真机 Linux 侧守卫执行确认 + 变异验证 + 浏览器事实源对照通过；环境复原
+
+------ 0. 结论 -----
+- app.js 删除 `parseMetrics`/`apiText` 与 `/metrics` 取数，系统卡片全部改读
+  `/system/status`：CPU 核数/使用率取 `cpu.total`/`cpu.usage_percent`，内存取
+  `memory.total_mb`/`used_mb`（经既有的 `mb()` 呈现），根文件系统取
+  `storage.{total,free}_bytes`/`used_ratio`。**显示口径不变**，取值逐位一致
+  （唯一可感差异：handler 把 used_ratio 四舍五入到 4 位小数，边界上已用百分比
+  可能差 0.1——同一同源摘要的正常精度，非缺陷）。
+- 每次刷新少取一个端点（页面 5 秒轮询 + 事件触发刷新都走这条路径），系统卡片的
+  数据来源收敛到一个端点。
+- 守卫迁移（覆盖转移，不是消失）：删 `TestUIReadsOnlyExistingMetricNames`——前端
+  已不读 `/metrics`，该守护失去保护对象；其要防的"字段/指标改名让页面静默变空"
+  转移到 `TestUIFieldNamesExistInResponses`：新增系统卡嵌套键检查（点分路径
+  `cpu.total` 等 7 个键），宿主指标非 Linux 不产出时**跳过而非报红**（沿用
+  round37 既有口径，否则开发机恒红 = 工具自造假红）。
+
+------ 1. 改动清单 -----
+| 文件 | 改动 |
+|---|---|
+| `internal/api/ui/app.js` | 删 `parseMetrics`/`apiText`；`loadAll` 少一个 fetch、`render` 少一个参数；系统卡片改读 `/system/status`（字段缺席时对应行「—」，不编造）；头部数据来源注释同步 |
+| `internal/api/ui_test.go` | 删 `TestUIReadsOnlyExistingMetricNames`；`TestUIFieldNamesExistInResponses` 增系统卡嵌套键检查（Linux 上执行、非 Linux 跳过并记日志）；新增 `hasNestedKey` 辅助 |
+| 净代码 | app.js -70/+55 行左右（删掉的解析器约 20 行 + 取数/参数 Plumbing） |
+
+------ 2. 自检 -----
+- **make check 全绿**：vet=0；`go test -p 1 ./...`（宿主并行仍会 errno=1455，按红线 10 串行）
+  21 包 ok；cover/archtest/docscheck/toolcheck/prototype-check 全过；决策条数 118 一致。
+- **Linux 侧守卫执行确认**（Windows 开发机上嵌套键检查会走跳过，故在 VM 上跑）：
+  `TestUIFieldNamesExistInResponses` 在 Linux **PASS 且未走跳过**（有宿主指标）。
+- **变异验证**（VM 上）：把 `handleGetSystemStatus` 的 `cpu.usage_percent` 暂时改成不发 →
+  守护报红 `/system/status 缺字段 cpu.usage_percent（UI 系统卡片会显示为「—」）`，
+  改回复绿——证明嵌套键守护在 Linux 上真的在校，不是空转。
+- VM 上 `node --check internal/api/ui/app.js` OK。
+
+------ 3. 真机复验（:8443 开发态实例，配了接口/资源池） -----
+事实源对照（同周期采样）：
+
+| 卡片行 | `/metrics` 对照 | `/system/status`（新数据源） | 浏览器显示 |
+|---|---|---|---|
+| CPU | `cpu_online_count 6` | `cpu.total=6` | **6 核** ✓ |
+| CPU 使用率 | `utilization_ratio 0.18027`（18.0%） | `usage_percent=18` | **18.0%** ✓ |
+| 内存 | total 7734935552 B / available 1318735872 B（1.2/7.2 GB） | total_mb 7376 / used 6118 | **1.2 GB 可用 / 7.2 GB** ✓ |
+| 根文件系统 | free 86545268736 / total 102971269120 / used_ratio 0.15952 | 同值（ratio 0.1595） | **80.6 GB 可用 / 95.9 GB（已用 16.0%）** ✓ |
+| 运行时长 | `uptime_seconds 44275.91` | `uptime_seconds=44275` | **12 小时 18 分** ✓ |
+
+（磁盘 free 在两次采样间自然漂移 80.7→80.6 GB，属采集时刻差，非取值错误。）
+事件推送回归：VM 侧 commit（`set interfaces ens192 description r41-check`）→ 页面
+「最近事件」实时出现 `config-committed：revision=4`、接口表「说明」列同步刷新、
+「实时通道：已连接」——loadAll 改动后 SSE 驱动刷新路径无回归。
+组件版本卡保持 round40 的真实值（NFViS/VPP/libvirt/QEMU/Docker/Ubuntu，DPDK「—」）。
+
+------ 4. 环境复原 -----
+- 开发态实例（:8443、/tmp/ui.db）验完已停；/tmp 中间产物已清；已装实例恢复 active
+  （1.1.25）；VPP 拓扑与 vnf-a/vnf-b 未受影响（开发态用独立 DB，未动数据面对象）；
+  流量复通：BVI ping 双向各 **10/10 0% 丢包**、宿主经 DPDK 物理口到两台 guest 各
+  5/5（≤2ms）——nfvis 重启后**首次** 5 包 4/5（20%）是重新 apply 的瞬时抖动
+  （round39/40 同样现象、本轮窗口略长），重跑即收敛。
+
+------ 5. 留档 -----
+浏览器截图（IAB artifacts）：round41 系统卡 1 张。VM 侧：`/root/ui-nfvisd.out`。
