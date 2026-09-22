@@ -14,6 +14,7 @@ import (
 type VppStatus struct {
 	Version        string          `json:"version"`
 	Connected      bool            `json:"connected"`
+	ConfigRevision int             `json:"config_revision,omitempty"`
 	PendingRestart bool            `json:"pending_restart"`
 	LastError      string          `json:"last_error,omitempty"`
 	Threads        []VppThread     `json:"threads,omitempty"`
@@ -66,6 +67,10 @@ func (s *Server) handleGetVppStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view := s.vpp.Status(cfg.Vpp)
+	// 决策 #116：契约声明了 config_revision（供判断数据面是否落后于配置），此前没回。
+	if rev, err := s.engine.CurrentRevision(); err == nil {
+		view.ConfigRevision = rev
+	}
 	if s.state != nil {
 		for _, t := range s.state.Threads(r.Context()) {
 			view.Threads = append(view.Threads, VppThread{ID: t.ID, Name: t.Name, Type: t.Type, Core: t.Core})

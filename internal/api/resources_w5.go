@@ -7,12 +7,14 @@ package api
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/xzjt/nfvis/internal/aaa"
+	"github.com/xzjt/nfvis/internal/metrics"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/schema"
 )
@@ -369,9 +371,53 @@ func (s *Server) handleGetSystemStatus(w http.ResponseWriter, r *http.Request) {
 	if cfg.System != nil {
 		hostname = cfg.System.Hostname
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"hostname":       hostname,
 		"uptime_seconds": int(time.Since(startTime).Seconds()),
 		"config_ready":   true,
-	})
+	}
+	// 决策 #116：契约声明了 cpu/memory/hugepages/storage，此前只回上面三项（响应形状与契约
+	// 不符，照契约开发的客户端一律取空）。这里补齐，且**数据源与 CLI 同源**：
+	//   cpu/memory/storage ← internal/metrics.HostMetrics()（与 show system cpu|memory|storage 同一来源）
+	//   hugepages          ← resourcePoolView(cfg)（与 GET /resource-pools 同一来源）
+	// 宿主指标是 Linux 采集（非 Linux 为空实现）：取不到就**不给该子对象**，不编造零值。
+	val := map[string]float64{}
+	for _, smp := range metrics.HostMetrics() {
+		if len(smp.Labels) == 0 {
+			val[smp.Name] = smp.Value
+		}
+	}
+	pools := resourcePoolView(cfg)
+	cpu := map[string]any{}
+	if n, ok := val["nfvis_system_cpu_online_count"]; ok {
+		cpu["total"] = int(n)
+	}
+	if u, ok := val["nfvis_system_cpu_utilization_ratio"]; ok {
+		cpu["usage_percent"] = math.Round(u*1000) / 10
+	}
+	if pc, ok := pools["cpu"].(map[string]any); ok {
+		cpu["isolated"] = pc["isolated_cores"]
+	}
+	if len(cpu) > 0 {
+		out["cpu"] = cpu
+	}
+	if total, ok := val["nfvis_system_memory_total_bytes"]; ok {
+		mem := map[string]any{"total_mb": int(total / (1 << 20))}
+		if avail, ok2 := val["nfvis_system_memory_available_bytes"]; ok2 {
+			mem["used_mb"] = int((total - avail) / (1 << 20))
+		}
+		out["memory"] = mem
+	}
+	if total, ok := val["nfvis_system_disk_total_bytes"]; ok {
+		st := map[string]any{"total_bytes": int64(total)}
+		if free, ok2 := val["nfvis_system_disk_free_bytes"]; ok2 {
+			st["free_bytes"] = int64(free)
+		}
+		if ratio, ok2 := val["nfvis_system_disk_used_ratio"]; ok2 {
+			st["used_ratio"] = math.Round(ratio*10000) / 10000
+		}
+		out["storage"] = st
+	}
+	out["hugepages"] = pools["hugepages"]
+	writeJSON(w, http.StatusOK, out)
 }

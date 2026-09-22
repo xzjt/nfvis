@@ -55,6 +55,7 @@ prototype-check:
 #  - 嵌入二进制的 openapi.json 须与契约 docs/NFViS-openapi.yaml 一致（FR-API-002，决策 #69）
 docscheck:
 	bash contrib/scripts/check_decisions_count.sh
+	bash contrib/scripts/check_openapi_no_duplicate_keys.sh
 	bash contrib/scripts/check_openapi_json_sync.sh
 
 # 工具自校准：真机三件套的**判定模式**必须「已知正确 → PASS、已知错误 → FAIL」。

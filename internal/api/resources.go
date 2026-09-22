@@ -118,18 +118,59 @@ func (s *Server) handlePutSystem(w http.ResponseWriter, r *http.Request) {
 
 // ---------- interfaces（FR-NET-003/004，CLI §2.3） ----------
 
-// handleGetInterfaces GET /api/v1/interfaces：接口配置视图列表（committed）。
+// handleGetInterfaces GET /api/v1/interfaces：接口视图列表（配置 + 运行态，committed）。
 func (s *Server) handleGetInterfaces(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.engine.Committed()
 	if err != nil {
 		mapEngineError(w, err)
 		return
 	}
-	out := cfg.Interfaces
-	if out == nil {
-		out = []model.InterfaceConfig{}
+	writeJSON(w, http.StatusOK, paginate(r, s.interfaceViews(cfg)))
+}
+
+// interfaceViews 接口列表视图：配置字段 + **运行态**字段（决策 #116）。
+//
+// 契约的 `Interface` 同时声明了配置字段（mtu/description/sriov）与运行态字段
+// （kind/driver/enabled/link/speed_mbps/mac/numa_node），而此前实现只回配置对象——
+// 照契约开发的客户端拿不到任何运行态。这里补运行态，**来源与 CLI `show interfaces physical`
+// 同源**（`VppStateRuntime.InterfaceStates()`，决策 #84 定的运行态事实来源）；
+// 取不到的字段（mac/numa_node 等）**不给**，不编造。
+func (s *Server) interfaceViews(cfg model.Config) []map[string]any {
+	out := make([]map[string]any, 0, len(cfg.Interfaces))
+	states := map[string]InterfaceState{}
+	if s.vppState != nil {
+		if st, err := s.vppState.InterfaceStates(); err == nil {
+			states = st
+		}
 	}
-	writeJSON(w, http.StatusOK, paginate(r, out))
+	for _, ifc := range cfg.Interfaces {
+		// 先取配置对象的 JSON 形态再加运行态字段，避免字段名两处各写一份。
+		b, _ := json.Marshal(ifc)
+		m := map[string]any{}
+		if json.Unmarshal(b, &m) != nil {
+			m = map[string]any{}
+		}
+		if m["name"] == nil {
+			m["name"] = ifc.Name
+		}
+		// cfg.Interfaces 就是产品模型里的**物理业务口**（与 `show interfaces physical` 同口径）。
+		m["kind"] = "physical"
+		if st, ok := states[ifc.Name]; ok {
+			m["enabled"] = st.AdminUp
+			m["link"] = "down"
+			if st.LinkUp {
+				m["link"] = "up"
+			}
+			if st.LinkSpeed > 0 { // kbps → Mbps；DPDK 口可能为 0，取不到就不给
+				m["speed_mbps"] = st.LinkSpeed / 1000
+			}
+			if st.DevType != "" {
+				m["driver"] = st.DevType
+			}
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // handleGetInterface GET /api/v1/interfaces/{name}。

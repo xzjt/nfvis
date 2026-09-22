@@ -1,0 +1,82 @@
+===== V1 收尾第三十八轮：R37-1 收口（契约重复定义 + 实现未落地声明字段）=====
+日期：2026-09-22
+目标机：nfvis-vm（**已装实例 1.1.25 全程未触碰**；新代码跑在 :8443 的开发态实例上）
+源码：main `d455f1d` 之后的工作树（决策 #116）
+起态：round37 登记 R37-1（REST 资源 API 的实际响应比契约声明的薄），本轮按"先落决策再动手"收口
+终止态：`make check` 全绿（决策 116）；三处端点真机复验通过；环境复原
+
+------ 0. 根因（比 round37 记的更准） -----
+round37 记的是"契约声明了、实现没回"。本轮逐条查清后发现是**两类**根因：
+
+**① 契约自身重复定义**（此前没识别出来）。`components/schemas/VppStatus` 在
+`docs/NFViS-openapi.yaml` 里被定义了**两次**：一处准确（version/connected/pending_restart/
+threads/buffers/buffers_source/memory…）、一处过时（state/dpdk/buffers_per_numa/main_heap_size/
+config_revision）。而 `check_openapi_json_sync.sh` 用 `yaml.safe_load` 生成内嵌 JSON，**静默保留
+最后一个** ⇒ **发布出去的规范带的是过时形状**，照它开发的客户端必然取错字段。
+**定位手法**：正则扫行会误报（契约里有 `{name}:start` 这类含冒号的路径、有内联 map、有列表项——
+实测按行扫报 62 处"重复"，真重复只有 1 处）；改用**真正的解析器**（PyYAML 自定义 mapping 构造器逐层查重）
+才得到唯一答案：`重复键 'VppStatus'（第 1757 行 与 第 1955 行）`。
+
+**② 实现未落地契约声明的字段**。`GET /system/status` 契约声明 `cpu`/`memory`/`hugepages`/`storage`
+而实现只回 `hostname`/`uptime_seconds`/`config_ready`（`config_ready` 还反过来没进契约）；
+`GET /interfaces` 契约声明 `kind`/`driver`/`enabled`/`link`/`speed_mbps`/`mac`/`numa_node` 而实现只回**配置**对象。
+
+**为什么长期没被发现**：`routes_contract_test.go` 只守护「路由 ⊆ 契约」（**路径**）——
+既**不守护响应形状**，也**看不见 YAML 里的重复键**。
+
+**另登记 R37-2**（同类、单独处置）：`GET /system/version` 是**桩**——7 个键都在、只有 `nfvis` 有值，
+`ubuntu`/`vpp`/`dpdk`/`libvirt`/`qemu`/`docker` **全是空串**（CLI `show version` 同样只印 NFViS 版本）。
+补齐要跨 libvirt/docker/qemu 三个 provider 与宿主事实探测，属独立一批。
+
+------ 1. 处置（决策 #116） -----
+| 项 | 处置 |
+|---|---|
+| 重复的过时 `VppStatus` | **删除**（保留与实现一致的那份）；内嵌 `openapi.json` 随之重生 |
+| `/system/status` | **补实现** `cpu{total,isolated,usage_percent}`、`memory{total_mb,used_mb}`、`storage{total_bytes,free_bytes,used_ratio}`、`hugepages[]`；**数据源与 CLI 同源**：前三者取 `internal/metrics.HostMetrics()`（与 `show system cpu\|memory\|storage` 同一来源），`hugepages` 取 `resourcePoolView(cfg)`（与 `GET /resource-pools` 同一来源）。宿主指标是 Linux 采集：**取不到就不给该子对象**，不编造零值 |
+| `/interfaces` | **补运行态** `kind`（=physical，与 `show interfaces physical` 同口径）、`enabled`/`link`/`speed_mbps`/`driver`；来源与 CLI **同源**（`VppStateRuntime.InterfaceStates()`，决策 #84 定的运行态事实来源）。取不到的（mac/numa_node）**不给** |
+| `/vpp/status` | **补** `config_revision`（`Engine.CurrentRevision()`，供判断数据面是否落后于配置） |
+| 契约形状修正 | `SystemStatus.storage` 改为实际可得的 `{total_bytes,free_bytes,used_ratio}`（原 `data_total_gb/data_used_gb/images_gb` **无数据源**）；`hugepages` 由单对象改**数组**（产品有 1G/2M 两个池，单对象表达不了）；`config_ready` 补进契约 |
+
+**为什么不取"缩契约"**：契约是产品对第三方的承诺（FR-API-002 明说"Web 控制面据此开发"），
+缩掉等于承认这些能力不做；而数据其实都在（CLI 早就读得到），只是 REST 侧没接。
+
+------ 2. 新增两道守护（防同类再发生） -----
+1. **契约 YAML 重复键查重**：`contrib/scripts/check_openapi_no_duplicate_keys.sh`，已纳入 `make docscheck`。
+   用**真正的解析器**（PyYAML 自定义 mapping 构造器）逐层查重——按行正则必出假阳性（见 §0①）。
+   **红-绿**：临时追加一个重复的 `SystemStatus` → 报 `重复键 'SystemStatus'：第 1717 行 与 第 2559 行`（退出码 1）；
+   删掉即绿。
+2. **响应形状核对**：`internal/api/shape_contract_test.go`，按**契约声明的 schema**逐字段核对实际响应
+   （字段必须出现；**字符串字段还必须非空**——"声明了却恒回空串"与"没实现"是一回事，R37-2 就是这么现形的）。
+   会合法缺席的字段进**显式白名单并写明理由**；`/vpp/status` 需要数据面 Provider（测试进程起不了），
+   改用**静态核对**：契约声明的字段，响应结构体必须发得出来（json tag 覆盖）——这正是 VppStatus 漂移的形态。
+   **红-绿两处**：① 把 `config_revision` 的 json tag 改名（能编译但不发出）→ 报"结构体发不出该字段"；
+   ② 给契约的 `SystemStatus` 加一个实现不返回的字段 → 报"契约声明了 X，响应里没有"。还原后全绿。
+   ⚠️ 过程中发现**白名单自己会变成空转**：我一度把已实现的 `config_revision` 也列进白名单，
+   于是红-绿①**静默通过**——白名单只该收"会合法缺席"的字段，已实现字段列进去等于关掉断言（已修正并加注释）。
+   守护还当场抓出一条既有事实：`/system/status.hostname` 在**未配置** `system.hostname` 时是空串
+   （真机上已配置），按"字符串非空"规则它必须显式进白名单并写明理由，不能默默放过。
+
+------ 3. 真机验证（开发态实例 :8443 / HTTPS / 真实 VPP） -----
+| 项 | 结果 |
+|---|---|
+| `/system/status` | 补齐生效：`cpu{total:6, isolated:[2,3,4,5], usage_percent:18.3}`、`memory{total_mb:7376, used_mb:6095}`、`storage{total_bytes:102971269120, free_bytes:86834892800, used_ratio:0.1567}`、`hugepages:[{1G,2,0,2},{2M,768,0,768}]` |
+| **同源核对** | `system/status.cpu.isolated` == `resource-pools.cpu.isolated_cores` == `[2,3,4,5]`；两处 `hugepages` 数组**逐字段相同** ✓ |
+| `/interfaces` | 配 `ens192/ens224` 后：`kind=physical enabled=true link=up speed_mbps=10000 driver=dpdk`；与 `show interfaces physical` 的 `up/up/10G/dpdk` **逐项一致** ✓（同源不是"看起来像"，是逐字段对上了） |
+| `/vpp/status` | `config_revision:2` 出现，其余字段（version/connected/pending_restart/threads/memory/buffers）不变 ✓ |
+| 内嵌规范 | 重生后的 `internal/api/openapi.json` 里 `VppStatus` 字段 = `buffers/buffers_source/buffers_unavailable/config_revision/connected/last_error/memory/pending_restart/threads/version`（**准确的**那份，过时的 state/dpdk/buffers_per_numa/main_heap_size 已消失） |
+
+------ 4. 环境与自检 -----
+- 开发态实例（`/tmp/nfvisd-r38`，:8443，`/tmp/r38.db`）验证完已停；`:8443` 已释放；
+  `pgrep -x nfvisd` 只剩已装实例 `/usr/bin/nfvisd`（pid 55464）；`/tmp` 与 `/root/src38` 中间产物已清。
+- **已装实例 1.1.25 全程未触碰**：`show configuration` 与 round36 基线**逐字节一致** ✓。
+- `make check` **退出码 0**：全部包 ok、覆盖率 ≥70%、依赖方向守护、**决策条数 116 一致**、
+  openapi.json 与契约同步、**契约无重复键**、两个工具自校准脚本、原型全绿。
+- ⚠️ 本轮又踩一次 `pkill -f` 的老坑（`pgrep -f "nfvisd-r38"` 匹配到**自己这条 ssh 命令**，
+  于是误报"仍在运行"）。判据要用 `pgrep -x <精确进程名>`，或看端口是否已释放（§0 红线 5）。
+
+------ 5. 留后续（如实登记） -----
+- **R37-2**：`/system/version` 的 6 个组件版本仍是空串（形状守护里已显式白名单标注"未实现"，
+  不假装通过）。补齐需跨 provider 探测，单独一批。
+- **前端可以简化**：增量 1 的只读总览当时为了绕开这些缺口，系统数字是从 `/metrics`（Prometheus 文本）
+  自己解析的；现在 `/system/status` 直接给了同样（同源）的数字，接口表也能拿到 link/driver/speed。
+  改成直接用 REST 是**净简化**（去掉一段手写文本解析），但属另一处改动，留待下一批。
