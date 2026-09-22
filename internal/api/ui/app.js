@@ -355,37 +355,155 @@ function cfgApplyForm(key, values) {
   cfgMsg('已写入 candidate（未保存）——点「保存到 candidate」提交到服务端。', false);
 }
 
+// 核列表解析/格式化（隔离核在 JSON 里是数组，表单里写成 "2-5,7" 更好用）。
+function parseCores(text) {
+  const out = [];
+  (text || '').split(',').forEach((part) => {
+    const t = part.trim();
+    if (!t) return;
+    const m = t.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (m) {
+      for (let i = Number(m[1]); i <= Number(m[2]); i++) out.push(i);
+    } else if (/^\d+$/.test(t)) {
+      out.push(Number(t));
+    }
+  });
+  return out;
+}
+
+function formatCores(list) {
+  const nums = (list || []).slice().sort((a, b) => a - b);
+  const parts = [];
+  for (let i = 0; i < nums.length; ) {
+    let j = i;
+    while (j + 1 < nums.length && nums[j + 1] === nums[j] + 1) j++;
+    parts.push(j > i ? nums[i] + '-' + nums[j] : String(nums[i]));
+    i = j + 1;
+  }
+  return parts.join(',');
+}
+
+// 表单渲染：系统节 + 接口节（描述/MTU/启用）+ 资源池节（隔离核/两个大页池）。
+// 全部走同一套"改字段 → 写回 JSON 文本 → 保存"的路径。
 function cfgRenderForms(c) {
   const box = $('cfg-forms');
   box.textContent = '';
-  const sys = el('fieldset', {});
-  sys.appendChild(el('legend', { text: '系统' }));
-
   let seq = 0;
-  const addInput = (label, value, onchange) => {
+
+  const addField = (parent, label, value, onchange, kind) => {
     const id = 'cfg-f-' + (seq++);
-    sys.appendChild(el('label', { text: label, for: id })); // 关联 label ↔ input（无障碍/可测）
-    const inp = el('input', { type: 'text', id });
-    inp.value = value || '';
+    parent.appendChild(el('label', { text: label, for: id })); // 关联 label ↔ input（无障碍/可测）
+    const inp = el(kind === 'select' ? 'select' : 'input', kind === 'select' ? { id } : { type: kind || 'text', id });
+    if (kind === 'select') {
+      [['', '（未设置）'], ['true', '启用'], ['false', '禁用']].forEach(([v, t]) => {
+        const opt = el('option', { value: v, text: t });
+        if (String(value === undefined || value === null ? '' : value) === v) opt.setAttribute('selected', 'selected');
+        inp.appendChild(opt);
+      });
+    } else {
+      inp.value = value === undefined || value === null ? '' : value;
+    }
     // 监听 input 而非 change：change 只在**用户输入导致的**失焦时触发，程序化赋值
     // （浏览器自动化、脚本回填）不置"值已改"标志、失焦也不发 change；input 两者都覆盖。
     inp.addEventListener('input', onchange);
-    sys.appendChild(inp);
+    inp.addEventListener('change', onchange); // select 用 change
+    parent.appendChild(inp);
     return inp;
   };
 
-  const hostnameVal = cfgForm.hostname.get(c);
-  addInput(cfgForm.hostname.label, hostnameVal, (e) => cfgApplyForm('hostname', e.target.value));
-
+  // ---- 系统 ----
+  const sys = el('fieldset', {});
+  sys.appendChild(el('legend', { text: '系统' }));
+  addField(sys, cfgForm.hostname.label, cfgForm.hostname.get(c), (e) => cfgApplyForm('hostname', e.target.value));
   const ntpVals = cfgForm.ntp.get(c);
-  const ntpInputs = [0, 1].map((i) => addInput(cfgForm.ntp.label + ' ' + (i + 1), ntpVals[i],
+  const ntpInputs = [0, 1].map((i) => addField(sys, cfgForm.ntp.label + ' ' + (i + 1), ntpVals[i],
     () => cfgApplyForm('ntp', ntpInputs.map((x) => x.value.trim()))));
-
   const dnsVals = cfgForm.dns.get(c);
-  const dnsInputs = [0, 1].map((i) => addInput(cfgForm.dns.label + ' ' + (i + 1), dnsVals[i],
+  const dnsInputs = [0, 1].map((i) => addField(sys, cfgForm.dns.label + ' ' + (i + 1), dnsVals[i],
     () => cfgApplyForm('dns', dnsInputs.map((x) => x.value.trim()))));
-
   box.appendChild(sys);
+
+  // ---- 接口（对每个已声明接口：描述 / MTU / 启用）----
+  const ifs = Array.isArray(c.interfaces) ? c.interfaces : [];
+  if (ifs.length) {
+    const f = el('fieldset', {});
+    f.appendChild(el('legend', { text: '接口' }));
+    ifs.forEach((it) => {
+      const sub = el('div', { class: 'cfg-sub' });
+      sub.appendChild(el('div', { class: 'cfg-subname', text: it.name || '（未命名）' }));
+      addField(sub, '描述', it.description, (e) => cfgApplyIface(it.name, 'description', e.target.value));
+      addField(sub, 'MTU', it.mtu, (e) => cfgApplyIface(it.name, 'mtu', e.target.value === '' ? '' : Number(e.target.value)));
+      addField(sub, '启用', it.enabled === undefined || it.enabled === null ? '' : String(it.enabled),
+        (e) => cfgApplyIface(it.name, 'enabled', e.target.value === '' ? '' : e.target.value === 'true'), 'select');
+      f.appendChild(sub);
+    });
+    box.appendChild(f);
+  }
+
+  // ---- 资源池（隔离核 + 1G/2M 大页数量）----
+  const pools = c.resource_pools || {};
+  const pf = el('fieldset', {});
+  pf.appendChild(el('legend', { text: '资源池' }));
+  addField(pf, '隔离核（如 2-5,7）', formatCores((pools.cpu || {}).isolated_cores),
+    (e) => cfgApplyPools('isolated_cores', parseCores(e.target.value)));
+  ['1G', '2M'].forEach((size) => {
+    const hp = (pools.hugepages || []).find((h) => h.page_size === size) || {};
+    addField(pf, '大页 ' + size + ' 数量', hp.count,
+      (e) => cfgApplyPools('hugepages', { size, count: e.target.value === '' ? '' : Number(e.target.value) }));
+  });
+  box.appendChild(pf);
+}
+
+// 接口字段改写（按名字定位；名字来自当前 candidate 文本）。
+function cfgApplyIface(name, key, value) {
+  let c;
+  try { c = cfgText(); } catch (e) { cfgMsg('原始 JSON 语法错误，请先修正：' + e.message, true); return; }
+  const it = (c.interfaces || []).find((x) => x.name === name);
+  if (!it) return;
+  if (value === '') delete it[key]; else it[key] = value;
+  cfgWriteText(c);
+  cfgMsg('已写入 candidate（未保存）——点「保存到 candidate」提交到服务端。', false);
+}
+
+// 资源池字段改写：isolated_cores 直接替换；hugepages 按页大小定位（不存在则补一条）。
+function cfgApplyPools(key, value) {
+  let c;
+  try { c = cfgText(); } catch (e) { cfgMsg('原始 JSON 语法错误，请先修正：' + e.message, true); return; }
+  if (!c.resource_pools) c.resource_pools = {};
+  if (key === 'isolated_cores') {
+    if (!c.resource_pools.cpu) c.resource_pools.cpu = {};
+    if (value.length) c.resource_pools.cpu.isolated_cores = value;
+    else delete c.resource_pools.cpu.isolated_cores;
+  } else {
+    const list = Array.isArray(c.resource_pools.hugepages) ? c.resource_pools.hugepages : (c.resource_pools.hugepages = []);
+    const found = list.find((h) => h.page_size === value.size);
+    if (value.count === '') {
+      c.resource_pools.hugepages = list.filter((h) => h.page_size !== value.size);
+      if (!c.resource_pools.hugepages.length) delete c.resource_pools.hugepages;
+    } else if (found) {
+      found.count = value.count;
+    } else {
+      list.push({ page_size: value.size, count: value.count });
+    }
+  }
+  cfgWriteText(c);
+  cfgMsg('已写入 candidate（未保存）——点「保存到 candidate」提交到服务端。', false);
+}
+
+// 预校验（POST /configuration/check）：先保存，再让服务端跑与提交相同的全部校验。
+async function cfgCheck() {
+  if (!(await cfgSave())) return;
+  try {
+    const res = await api('/configuration/check', { method: 'POST' });
+    if (res && res.ok) {
+      cfgMsg('预校验通过（服务端已跑与提交相同的全部校验）。', false);
+      return;
+    }
+    const errs = (res && res.errors) || [];
+    cfgMsg('预校验发现 ' + errs.length + ' 个问题：' + errs.map((e) => e.path + '：' + e.message).join('；'), true);
+  } catch (e) {
+    cfgMsg('预校验失败：' + e.message, true);
+  }
 }
 
 function cfgRenderRead() {
@@ -696,6 +814,7 @@ $('logout-btn').addEventListener('click', doLogout);
 $('refresh-btn').addEventListener('click', () => loadAll().catch((e) => showGlobalError(e.message)));
 $('cfg-edit-btn').addEventListener('click', cfgStartEdit);
 $('cfg-save-btn').addEventListener('click', cfgSave);
+$('cfg-check-btn').addEventListener('click', cfgCheck);
 $('cfg-diff-btn').addEventListener('click', cfgShowDiff);
 $('cfg-commit-btn').addEventListener('click', () => cfgCommit(0));
 $('cfg-commit-confirmed-btn').addEventListener('click', () => cfgCommit(10));

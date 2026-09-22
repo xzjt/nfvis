@@ -212,6 +212,63 @@ func TestManagementChangeRequiresConfirmedViaREST(t *testing.T) {
 	}
 }
 
+// 预校验（决策 #122）：合法 candidate → ok=true；非法 candidate → ok=false 且 errors 逐条；
+// 未持 candidate 会话 → 报错（与 commit 相同的会话前提）。
+func TestCheckConfigurationEndpoint(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+
+	// 未进入配置模式：应报错（不得谎报"校验通过"）
+	status, _, body := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/configuration/check", token, nil, nil)
+	if status == http.StatusOK {
+		t.Fatalf("未持 candidate 时预校验不应 200：%s", body)
+	}
+
+	// 合法 candidate
+	status, _, body = cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token,
+		map[string]any{"system": map[string]any{"hostname": "check-node"}}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("PUT candidate: %d %s", status, body)
+	}
+	status, _, body = cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/configuration/check", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("预校验: %d %s", status, body)
+	}
+	var got struct {
+		OK     bool `json:"ok"`
+		Errors []struct {
+			Path    string `json:"path"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("解析: %v", err)
+	}
+	if !got.OK || len(got.Errors) != 0 {
+		t.Fatalf("合法配置应 ok=true 且无 errors：%s", body)
+	}
+
+	// 非法 candidate：引用不存在的接口 → ok=false 且列出问题（仍 200）
+	status, _, body = cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token,
+		map[string]any{"virtual_switches": []map[string]any{{
+			"name": "vs-bad", "type": "l2", "ports": []map[string]any{{"seq": 1, "interface": "no-such-if"}},
+		}}}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("PUT candidate(非法): %d %s", status, body)
+	}
+	status, _, body = cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/configuration/check", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("预校验（非法配置）仍应 200：%d %s", status, body)
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("解析: %v", err)
+	}
+	if got.OK || len(got.Errors) == 0 {
+		t.Fatalf("非法配置应 ok=false 且列出问题：%s", body)
+	}
+	t.Logf("预校验报出 %d 条问题，首条：%s %s", len(got.Errors), got.Errors[0].Path, got.Errors[0].Message)
+}
+
 func TestLogoutReleasesCandidateLock(t *testing.T) {
 	ts := newTestServer(t)
 	token := loginAdmin(t, ts)

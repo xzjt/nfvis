@@ -168,6 +168,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("POST "+APIPrefix+"/configuration/commit", cfgAPI(s.handleCommit))
 	mux.Handle("POST "+APIPrefix+"/configuration/commit:confirm", cfgAPI(s.handleCommitConfirm))
 	mux.Handle("GET "+APIPrefix+"/configuration/diff", cfgAPI(s.handleDiff))
+	mux.Handle("POST "+APIPrefix+"/configuration/check", cfgAPI(s.handleCheck))
 	mux.Handle("POST "+APIPrefix+"/configuration/rollback/{n}", cfgAPI(s.handleRollback))
 	mux.Handle("GET "+APIPrefix+"/system/configuration/sessions", cfgAPI(s.handleSessions))
 

@@ -159,6 +159,22 @@ func (s *Server) handleCommitConfirm(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "confirmed"})
 }
 
+// handleCheck POST /configuration/check：仅校验 candidate 不下发（CLI `commit check` 的
+// REST 等价物，round42 覆盖核查缺口 #10 / 决策 #122）。校验发现问题时**仍返回 200**——
+// 检查本身是成功的，结果在 ok 与 errors 里（客户端不必把 400 当"检查失败"处理）。
+func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
+	verrs, err := s.engine.CommitCheck(sessionFromIdentity(r))
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	detail := make([]ErrorDetail, 0, len(verrs))
+	for _, e := range verrs {
+		detail = append(detail, ErrorDetail{Path: e.Path, Message: e.Message})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": len(verrs) == 0, "errors": detail})
+}
+
 // handleDiff GET /configuration/diff：candidate ⇄ committed 差异（JunOS 风格）。
 func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 	diff, err := s.engine.CompareCandidate()

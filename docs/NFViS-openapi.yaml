@@ -968,6 +968,22 @@ paths:
           content:
             text/plain:
               schema: { type: string }
+  /configuration/check:
+    post:
+      tags: [configuration]
+      summary: 仅校验 candidate 不下发（CLI `commit check` 的 REST 等价物）
+      description: |
+        运行与提交相同的全部校验（schema + 语义 + 镜像存在性等）但**不落库、不下发底座**，
+        供控制台在提交前预校验（round42 覆盖核查缺口 #10，决策 #122）。
+        需要持有 candidate 会话（与 commit 相同）；校验发现问题时仍返回 200——
+        检查本身是成功的，结果在 `ok` 与 `errors` 里。
+      responses:
+        "200":
+          description: 校验完成（ok=false 时 errors 列出全部问题）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigCheckResult" }
+        "409": { $ref: "#/components/responses/Error409" }
   /configuration/rollback/{n}:
     parameters: [{ name: n, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 50 } }]
     post:
@@ -2490,6 +2506,20 @@ components:
       properties:
         candidate: { $ref: "#/components/schemas/ConfigDocument" }
         dirty: { type: boolean, description: 相对 committed 是否有未提交变更 }
+
+    ConfigCheckResult:
+      type: object
+      description: 仅校验的结果（决策 #122：CLI `commit check` 的 REST 等价物）
+      properties:
+        ok: { type: boolean, description: 校验是否全部通过 }
+        errors:
+          type: array
+          description: 校验问题清单（ok=true 时为空数组）
+          items:
+            type: object
+            properties:
+              path: { type: string, example: "system.hostname" }
+              message: { type: string, example: "主机名不合法" }
 
     ConfigDocument:
       type: object
