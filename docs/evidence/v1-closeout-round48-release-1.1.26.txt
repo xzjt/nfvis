@@ -11,15 +11,18 @@ round45 R44-2 扩围、round46 向导化 + commit check、round47 诊断视图�
 故本次发布 **v1.1.26**（无内部验证构建跳号）。
 
 ----- 2. 发布件与可复现构建 -----
-    产物:   nfvis_1.1.26_amd64.deb（7,828,928 字节）
-    sha256: f06539d4e278c0c997eb924756c6a043a79794e54ad4ab17b0a87715df117187
-    构建:   nfvis-vm / make deb VERSION=1.1.26 SOURCE_DATE_EPOCH=1790085452
-            （= main 83a4c3a 的 HEAD 提交时间 2026-09-22T21:57:32+08:00；git archive 树无 .git，
+    产物:   nfvis_1.1.26_amd64.deb（7,829,582 字节）——**重切件**，见 §7
+    sha256: 1f8799ffbeef142a73ba9ec555afed1509204621bdead897ed661e4ed9a35022
+    构建:   nfvis-vm / make deb VERSION=1.1.26 SOURCE_DATE_EPOCH=1790088035
+            （= main 46f0180 的 HEAD 提交时间 2026-09-22T22:40:35+08:00；git archive 树无 .git，
              显式传值——决策 #88）
+    首切件（已废弃，仅作对照）：sha256 f06539d4e278c0c997eb924756c6a043a79794e54ad4ab17b0a87715df117187，
+            7,828,928 字节，main 83a4c3a + SOURCE_DATE_EPOCH=1790085452
     内容变化：Go 侧 = 决策 #115~#123（Web 控制面三刀 + 契约/行为五处收口）；
              REST 契约新增 8 个端点（/ui、/ui/、/configuration、/configuration/check、
              /system/logs、/diagnostics/ping、/diagnostics/traceroute、/interfaces:clear-statistics）；
-             随包文档 = 规格书附录 A 增 #115~#123、CLI 命令树与命令全表同步、用户手册同步。
+             随包文档 = 规格书附录 A 增 #115~#123、CLI 命令树与命令全表同步、
+             **用户手册 §10.12 重写**（R48-5，见 §7）。
 
 ----- 3. 发布校验（逐项）-----
 ① 元数据：Package nfvis / Version 1.1.26 / amd64 / Section net / Depends libc6；
@@ -70,8 +73,10 @@ round45 R44-2 扩围、round46 向导化 + commit check、round47 诊断视图�
      再制造流量后为 5/5（证明清零与再计数都真发生）✓
 ⑩ 发布与回验：
     Release: https://github.com/xzjt/nfvis/releases/tag/v1.1.26（tag 指向 main、非 draft/prerelease）
-    assets:  nfvis_1.1.26_amd64.deb（7,828,928）+ nfvis_1.1.26_amd64.deb.sha256
-    回下载:  自 GitHub 下载 asset，sha256 与构建端**逐字节一致**（f06539d4…）✓
+    assets:  nfvis_1.1.26_amd64.deb（7,829,582）+ nfvis_1.1.26_amd64.deb.sha256
+    回下载:  自 GitHub 下载 asset，sha256 与构建端**逐字节一致**（1f8799ff…）✓
+    ⚠️ 首次上传时 asset 名一度带上了本地文件名后缀（`…deb.recut`）——已删掉重传，
+       最终 asset 名就是 `nfvis_1.1.26_amd64.deb`（发布件命名要照发布口径核对，别只看标签）
 
 ----- 4. 环境（发布前后）-----
 - 配置库：**全程未变**——rev 55 / audit 103 / config_json sha 084c3a64e4cc0d43a16cbced28cb0742aaa0ef1783c75065eb7966b091eba726
@@ -96,3 +101,28 @@ round45 R44-2 扩围、round46 向导化 + commit check、round47 诊断视图�
 `request system core-dumps export <url>`、`load merge`）+ 两项已登记延期（token revoke、format-data）
 + `show vpp runtime`；机器真源见 `internal/api/cli_rest_coverage_test.go` 三张表与
 `docs/CLI-REST覆盖核查.md`。
+
+----- 7. 发布件重切（R48-5；照 round29 的先例）-----
+**为什么重切**：发布校验时顺带核对「随包文档是否为当前版本」，发现 **round43~47 只更新了契约/
+测试/证据，没有同步用户手册**——§10.12 的标题与正文都还写着「Web 界面（只读总览）」
+「**只是只读视图**：本页面不修改任何配置」，而 v1.1.26 的控制台**能改配置（candidate → 差异 →
+预校验 → 提交/丢弃）与做诊断（ping / 服务端日志）**。手册随 deb 发布 ⇒ 发布件里有一句与自身功能
+相反的错述。故：**修手册 → 合并 → 用新 main 重切发布件**（round29 对"发布当日手册变更"的先例）。
+
+**重切步骤与证据**：
+1. 修 `docs/NFViS-用户手册.md` §10.12（重写为「Web 控制台（总览 / 配置 / 诊断）」，按界面上
+   **真实存在的按钮**写，写明管理口变更须两步确认、提交/丢弃都释放编辑锁，并列出界面上还没有的
+   能力）+ 交接文档 §1.1 交付物表同步 + 登记 R48-5；`make check` 全绿（手册受 `user_text` 守护）；
+   经 PR #156 合并 → main `46f0180`。
+2. `make deb VERSION=1.1.26 SOURCE_DATE_EPOCH=1790088035` → **1f8799ff…**（7,829,582 字节）。
+3. **逐文件对照首切件**（`dpkg-deb -x` 后对每个文件算 sha256 再 diff）：
+   - 内容差异**只有一行**：`usr/share/doc/nfvis/NFViS-用户手册.md`
+   - `usr/bin/nfvisd` = `8e2178a170f7feb0…`、`usr/bin/nfvis-cli` = `8685864d6622c51c…`
+     **两次构建逐字节相同**；`nfvis.service`、两个安装器脚本、`control`/`postinst`/`prerm`/`postrm`
+     全部相同；其余随包文档（规格书/命令树/命令全表/OpenAPI/M5 验收记录）全部相同
+   ⇒ **首切件的实装 / purge / 重装 / 拓扑收敛 / 流量复通结论对重切件同样成立**（代码与控制脚本
+     一个字节都没变），故未重复跑装机链路。
+4. 删除首切 release 与 tag、用重切件重建（tag 仍指 `main`，非 draft/prerelease）；
+   回下载 sha256 与构建端一致（1f8799ff…）；期间修正过一次 asset 命名（首传带上了 `.recut` 后缀）。
+
+**结论**：v1.1.26 的发布件现在与它自己描述的功能一致；两次构建的差异可被逐文件复算复核。
