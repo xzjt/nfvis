@@ -5,8 +5,9 @@
 //
 // 数据来源（只用**对外**的 REST 端点；`/cli/execute` 在契约里标着"仅 nfvis-cli 使用、
 // 不承诺第三方兼容"，前端不去碰它，也不去解析终端文本）：
-//   /metrics                 —— CPU 使用率、内存、根文件系统（Prometheus 文本，格式稳定）
-//   /system/status           —— 主机名、运行时长、配置是否就绪
+//   /system/status           —— 主机名、运行时长、配置就绪、CPU/内存/磁盘
+//                               （R37-1 收口后这些数字与 CLI show system 同源、直接可取，
+//                                不再自己解析 /metrics 的 Prometheus 文本）
 //   /system/version          —— 各组件版本
 //   /resource-pools          —— 大页池（按页大小）与隔离核分配
 //   /vpp/status              —— 数据面版本/连接/待重启/线程/buffer/内存
@@ -108,23 +109,6 @@ function list(v) {
   return Array.isArray(v) ? (v.length ? v.join(',') : '—') : String(v);
 }
 
-// Prometheus 文本解析：只要"指标名 → 数值"，带 label 的同一指标名相加
-// （本页用到的系统类指标都是单序列，相加只是为了让实现对多序列也成立）。
-function parseMetrics(text) {
-  const acc = {};
-  text.split('\n').forEach((raw) => {
-    const line = raw.trim();
-    if (!line || line.charAt(0) === '#') return;
-    const sp = line.lastIndexOf(' ');
-    if (sp < 0) return;
-    const name = line.slice(0, sp).split('{')[0];
-    const v = parseFloat(line.slice(sp + 1));
-    if (isNaN(v)) return;
-    acc[name] = (acc[name] || 0) + v;
-  });
-  return acc;
-}
-
 // ---------- 取数 ----------
 
 async function api(path, opts) {
@@ -147,17 +131,11 @@ async function api(path, opts) {
   return res.status === 204 ? null : res.json();
 }
 
-async function apiText(path) {
-  const res = await fetch(API + path, { headers: { Authorization: 'Bearer ' + token } });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  return res.text();
-}
-
 // 单个端点失败不该拖垮整页：各自降级为"读取失败"。
 const soft = (p) => p.catch((e) => ({ __err: e.message }));
 
 async function loadAll() {
-  const [st, ver, vpp, pools, ifaces, vms, cts, alarms, metrics] = await Promise.all([
+  const [st, ver, vpp, pools, ifaces, vms, cts, alarms] = await Promise.all([
     soft(api('/system/status')),
     soft(api('/system/version')),
     soft(api('/vpp/status')),
@@ -166,10 +144,9 @@ async function loadAll() {
     soft(api('/virtual-machine-functions')),
     soft(api('/container-functions')),
     soft(api('/alarms')),
-    soft(apiText('/metrics')),
   ]);
   const ifaceRows = Array.isArray(ifaces) ? await loadInterfaceStats(ifaces) : [];
-  render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms, metrics);
+  render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms);
 }
 
 // 逐口取统计（列表端点只有配置字段；收发包数在 /interfaces/<name> 上）。
@@ -179,21 +156,26 @@ async function loadInterfaceStats(ifaces) {
   return head.map((i, n) => ({ cfg: i, stat: (details[n] || {}).statistics || null }));
 }
 
-function render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms, metrics) {
-  const m = (metrics && typeof metrics === 'string') ? parseMetrics(metrics) : {};
+function render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms) {
   $('host-line').textContent = st && st.hostname ? st.hostname : '';
 
+  // 系统卡片的数字全部取自 /system/status（R37-1 收口后与 CLI show system 同源）；
+  // 字段缺席（非 Linux 无宿主指标等）时对应行显示「—」，不编造。
+  const cpu = (st && st.cpu) || {};
+  const mem = (st && st.memory) || {};
+  const disk = (st && st.storage) || {};
   fill($('sys-list'), st && st.__err ? [['读取失败', st.__err]] : [
     ['主机名', st && st.hostname],
     ['运行时长', uptime(st && st.uptime_seconds)],
     ['配置就绪', st && st.config_ready === false ? '否' : '是'],
-    ['CPU', m.nfvis_system_cpu_online_count ? m.nfvis_system_cpu_online_count + ' 核' : undefined],
-    ['CPU 使用率', pct(m.nfvis_system_cpu_utilization_ratio)],
-    ['内存', m.nfvis_system_memory_total_bytes
-      ? bytes(m.nfvis_system_memory_available_bytes) + ' 可用 / ' + bytes(m.nfvis_system_memory_total_bytes)
+    ['CPU', cpu.total != null ? cpu.total + ' 核' : undefined],
+    ['CPU 使用率', cpu.usage_percent != null ? cpu.usage_percent.toFixed(1) + '%' : undefined],
+    ['内存', mem.total_mb != null
+      ? (mem.used_mb != null ? mb(mem.total_mb - mem.used_mb) + ' 可用 / ' : '') + mb(mem.total_mb)
       : undefined],
-    ['根文件系统', m.nfvis_system_disk_total_bytes
-      ? bytes(m.nfvis_system_disk_free_bytes) + ' 可用 / ' + bytes(m.nfvis_system_disk_total_bytes) + '（已用 ' + pct(m.nfvis_system_disk_used_ratio) + '）'
+    ['根文件系统', disk.total_bytes
+      ? bytes(disk.free_bytes) + ' 可用 / ' + bytes(disk.total_bytes) +
+        (disk.used_ratio != null ? '（已用 ' + pct(disk.used_ratio) + '）' : '')
       : undefined],
   ]);
   fill($('ver-list'), ver && ver.__err ? [['读取失败', ver.__err]] : [
