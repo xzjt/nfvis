@@ -1,0 +1,93 @@
+===== V1 收尾第三十九轮：Web 控制台可视验收（Browser Use 黑盒）+ 三处缺陷收口 =====
+日期：2026-09-22
+目标机：nfvis-vm（VMware；已装实例 **1.1.25 全程未动**，新代码跑在 :8443 的开发态实例上）
+源码：main `eb63f2e` 起分支 `fix/web-console-visual-acceptance`（一个提交 `e636605`，决策 #117）
+起态：round37 交付的只读总览只经"字段/指标名对齐 + JS 语法 + 纯函数实测"间接验证，**没人眼看过页面**
+终止态：`make check` 全绿（退出码 0）；浏览器黑盒验收**全套通过**；环境复原（nfvis active、拓扑在跑、流量复通）
+
+------ 0. 结论 -----
+- 按待办 §0 第 6 条，用本机已启用的 **Browser Use 插件**（技能 control-browser / web-gui-tester，
+  浏览器操作经 `mcp__node_repl__js`，后端 ZCode 内嵌 IAB）对 round37 的 Web 控制台做**可视验收**。
+  手法为黑盒：只点可见元素、**不注入 JS 改页面状态**、每个测试点**截图 + 只读 DOM 双向印证**。
+- **发现并修复三处缺陷**（决策 #117）：
+  ① **CSS `hidden` 属性被作者样式覆盖**——`.login-wrap { display: flex }` 优先于 UA 的
+     `[hidden] { display: none }`，**登录后登录卡片不消失、盖住总览页**（已登录会话仍显示登录表单）；
+  ② **`POST /login` 响应形状漂移**（与 R37-1 同类但出在 `/login`）——契约 `LoginResponse.user`
+     是**对象** `LoginUser`（name/class），实现回的却是扁平字符串 + 顶层 `class`（顶层 class 根本
+     不在契约里），照契约写的前端顶栏显示 **"undefined（undefined）"**；
+  ③ **`/system/status.uptime_seconds` 语义不符**——取的是守护进程运行时长，而契约描述与 CLI
+     `show system uptime` 都是**主机**运行时长（/proc/uptime），页面"运行时长"显示守护进程活了多久。
+- 为什么此前没发现：形状守护（决策 #116）只覆盖四个 GET 端点、**不含 POST /login**；CSS 行为
+  任何 Go 测试都看不到。"已交付但没人眼看过"的界面，验收不算完——本轮即是例证。
+- R37-2 的两处"空"（6 个组件版本空串、开发态实例无 VNF/容器）按既有登记**不当缺陷**；
+  `hostname` 未配置时为空串也是形状守护白名单里写明理由的有意行为（不退回内核 hostname）。
+
+------ 1. 环境与凭据（待办 §3.1 口径） -----
+- 口令核对**没有试登录**：读 `/var/lib/nfvis/nfvis.db` 最新 rev 的 `system.login.users[0].password_hash`
+  （`pbkdf2$sha256$600000$<b64salt>$<b64hash>`，base64.RawStdEncoding），本地 python 复算比对 →
+  `WBF81vOA4M8GM28f@Aa1` **匹配**；latest rev 55（与 round36 记录一致，环境未被快照重置）。
+- 管理口 `ens160` = 192.168.155.129（`ip -4 addr show ens160` 取得）；宿主 Windows 可直接访问
+  `http://192.168.155.129:8443/api/v1/ui/`（200）。
+- 已装实例 1.1.25 **不含** Web 界面代码 → 开发态实例：`systemctl stop nfvis` 后从 `/root/src`
+  （git archive 同步 HEAD）构建，`setsid /tmp/nfvisd -listen :8443 -allow-plaintext -db /tmp/ui.db
+  -init-admin-password "Admin@12345"`；`readlink /proc/<pid>/exe` 确认服务的确是 `/tmp/nfvisd`。
+- 为让卡片有真数据，用 CLI 给开发态实例配（与已装实例 committed 布局一致）：
+  `set system hostname nfvis` / `set interfaces ens192` / `set interfaces ens224` /
+  `set resource-pools hugepages page-size 1G count 2`（2M 768）/ `set resource-pools cpu isolated-cores 2-5`
+  → commit 成功（revision 3；警告是已登记的大页无主占用项）。
+- 安全性核对（动手前查了代码）：开发态旧配置里没有 virtual-switch ⇒ `plan(old,new)` 不会删
+  VPP 里在跑的 vs-vnf/vhost 对象；`ApplyInterface` 对已在 VPP 的口只设 MTU/状态（幂等）；
+  资源池无 apply 副作用 ⇒ 已装实例的拓扑与流量不受影响（事后已复核：BD/BVI/vh-vnf-a-eth0 在、
+  vnf-a/vnf-b running、BVI ping 5/5 双向、宿主经 DPDK 物理口 3/3 <1ms）。
+
+------ 2. 可视验收发现的三处缺陷（首轮，对 eb63f2e 构建） -----
+| # | 缺陷 | 证据（截图 + 只读 DOM） | 严重度 |
+|---|---|---|---|
+| 1 | 登录后登录卡片不消失、盖住总览页 | DOM：`login-view.hidden === true` 但**截图里登录卡片仍在**（`display:flex` 压过 UA `[hidden]`）；整页截图出现登录卡片重复平铺；滚到下方才能看到总览各卡 | 高（控制台登录后不可用） |
+| 2 | 顶栏用户行显示 `undefined（undefined）` | DOM：`user-line` 文本 = "undefined（undefined）"；API 实测登录响应 `"user":"admin","class":"super-user"`（扁平）而契约是 `user: {name,class}` 对象 | 高（明显破版） |
+| 3 | "运行时长"显示守护进程活了多久 | DOM：总览"运行时长 0 小时 5 分"，而 VM `uptime` 已 8h56m；API `uptime_seconds` = `time.Since(startTime)`，CLI `show system uptime` 取 `/proc/uptime` | 中（数据误导） |
+
+------ 3. 修复（分支 fix/web-console-visual-acceptance，提交 e636605） -----
+| 文件 | 改动 |
+|---|---|
+| `internal/api/ui/style.css` | 加 `[hidden] { display: none !important; }`（作者样式优先于 UA，必须显式压过） |
+| `internal/api/ui_test.go` | 新增 `TestUIHiddenAttributeWinsOverAuthorDisplay`：**先剥 CSS 注释再扫** `[hidden]` 规则行（第一版没剥注释，被自己注释里提到 `[hidden]` 的行误判报红——已修） |
+| `internal/api/handlers_auth.go` | `loginResponse.User` 改为 `loginUser{Name, Class}` 对象、**删掉非契约的顶层 `class`**（CLI/e2e/语义脚本都只取 `token`，不受影响；`server_test.go` 断言同步改） |
+| `internal/api/shape_contract_test.go` | 新增 `TestLoginResponseShapeMatchesContract`：按契约核 `POST /login` 字段，含 `user` 内层 name/class 非空 |
+| `internal/api/resources_w5.go` | `uptime_seconds` 改取 `nfvis_system_uptime_seconds`（HostMetrics，与 CLI 同源），非 Linux 取不到时退回守护进程运行时长（字段不缺席） |
+| `docs/NFViS-openapi.yaml` | `uptime_seconds` 补 description 写明语义；重新生成 `internal/api/openapi.json` |
+| 规格书附录 A | 追加**决策 #117**（含三类根因、为什么此前的守护看不见、处置、复验口径） |
+| `AGENTS.md` | 决策计数 116→117；补 round39 可视验收结论一段 |
+
+**变异验证**（确认守护真的生效，不是"没触发就假定存在"）：
+- 把 `loginUser{Name: tok.User, …}` 临时改成 `Name: ""` → `TestLoginResponseShapeMatchesContract`
+  报红 `user.name 为空`；删掉 `[hidden]` 规则行 → `TestUIHiddenAttributeWinsOverAuthorDisplay`
+  报红 `没有 [hidden] 规则`。两处都改回后复绿。
+- `make check` **退出码 0**：vet/全量测试/覆盖率门槛（config 82.0%/model 83.7%/schema 90.8%…）/
+  依赖方向/决策条数 117 一致/openapi.json 同步/工具自校准/原型全绿。
+- VM 上 `node --check internal/api/ui/app.js` 语法 OK（app.js 本轮未改；style.css 改后照样跑一遍）。
+
+------ 4. 复验（修复后重构建、重启开发态实例，浏览器重跑全套） -----
+| 验收点 | 结果 |
+|---|---|
+| 错口令登录 | 停在登录页，红色「用户名或口令错误」，口令框清空、用户名保留 |
+| 正确登录 | 进总览；**登录卡片消失**（DOM 树里登录视图不再出现）；顶栏 `实时通道：已连接` + `admin（super-user）` |
+| 六张卡片真实数据 | 系统（主机名 nfvis / **运行时长 9 小时 26 分**（主机 uptime，修复③）/ CPU 6 核 18.2% / 内存 1.2GB 可用 7.2GB / 根文件系统 80.9GB 可用 95.9GB 已用 15.7%）；资源池（1G 2/0/2、2M 768/0/768、隔离核 2,3,4,5）；数据面（VPP 26.06-release 已连接、线程 2、内存 289.7MB/1.0GB、buffer 池）；接口（ens192/ens224，Rx/Tx 为真实递增计数） |
+| 预期内的空 | 组件版本除 NFViS 1.0.0-dev 外全「—」（R37-2 已登记）；虚拟机/容器「（无）」；告警「（无未解决告警）」；事件初始「（暂无事件）」 |
+| 触发变更看事件刷新 | VM 侧 commit（set interfaces ens192 description ui-accept-r39）→ 页面「最近事件」实时出现 `config-committed：revision=4`，且接口表「说明」列同步刷新（证明事件驱动刷新真的带动了取数） |
+| 退出后回到登录页 | 只剩登录卡（无总览残留），sessionStorage token 已清 |
+| 刷新后仍保持登录 | reload 后直接回总览（token 在 sessionStorage），SSE 重连显示「已连接」 |
+
+------ 5. 环境复原 -----
+- `pkill -x nfvisd` 停开发态实例（注意：pkill 后它要几秒才退干净——首轮 check 时仍 listed，
+  最终确认 8443 已释放、无残留进程）；清 `/tmp` 中间产物（ui.db、nfvis.tgz、各脚本）。
+- `systemctl start nfvis` → **active**，`/usr/bin/nfvisd -version` = 1.1.25，:443 由 pid 66188 监听。
+- VPP 拓扑未受影响：BD 6252701（BVI bvi0）、vh-vnf-a-eth0 在，vnf-a/vnf-b running。
+- 流量复通：BVI ping 192.168.100.10/.11 **各 5/5 0% 丢包**（首次 3 包 2/3 是 nfvis 刚重启的
+  瞬时抖动，重跑即 5/5）；宿主经 DPDK 物理口 ping 192.168.155.240/.241 **3/3 <1ms**。
+- 配置库未动（开发态用独立 /tmp/ui.db；已装实例 rev 仍 55）。
+
+------ 6. 留档 -----
+浏览器截图（IAB artifacts）：登录页 / 错口令提示 / 修复前总览（登录卡片压顶）/ 修复后总览顶部 /
+事件卡 / 退出后登录页 / 刷新后总览，共 7 张。
+VM 侧：`/root/ui-nfvisd.out`（开发态实例日志）。
