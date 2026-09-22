@@ -1,0 +1,206 @@
+===== V1 收尾第三十六轮：三件套复跑（集成 / 256 条冒烟 / 语义校验）+ 工具假红修复 =====
+日期：2026-09-22
+目标机：nfvis-vm（VMware，D:\Virtual Machines\nfvis；6 vCPU / 8G / 3×vmxnet3 NAT / 嵌套虚拟化已开）
+源码：main `a218d4e`（git archive 同步到 /root/src，无 .git → 构建须显式传 SOURCE_DATE_EPOCH）
+起态：nfvis **1.1.25** active、VPP 26.06 active；committed 里 vs-vnf 拓扑完整、两台 VNF 在跑，
+      但 **VPP 里没有任何 bridge-domain**（数据面其实没被programmed）；1G 大页 nr=3/free=0
+终止态：三件套复跑完毕；环境恢复到交接文档 §3.1 描述的状态（拓扑在 VPP、两台 VNF 在跑、
+      BVI ping 双向 3/3、宿主经 DPDK 物理口 <1ms）；配置与复跑前基线**逐字节一致**
+用户指令：「读 AGENTS.md 与 docs/V1-收尾待办.md §0，按『当前下一步』从第 1 条开始：先 systemctl stop nfvis
+      并停掉 vs-vnf 的 vnf-a/vnf-b 腾出 1G 大页，然后三件套复跑（make integration → 256 条冒烟 →
+      cli-semantic-check.sh），跑完按惯例回写交接文档并 PR 合并。」
+
+------ 0. 结论摘要 -----
+| 套件 | 结果 | 说明 |
+|---|---|---|
+| `make integration` | **238 PASS（含子测试）/ 0 FAIL / 0 SKIP**（integration 包 772.404s） | 与 round24 的「0 FAIL」一致；计数含子测试，顶层 221 |
+| 256 条冒烟（已装实例） | 171 通过 / **26 失败** / 3 预期报错 | 26 条**全部**是前置级联（见 §3），无产品缺陷 |
+| 256 条冒烟（干净开发态基线） | **194 通过 / 1 失败 / 5 预期报错** | 唯一失败 = 已登记的 `show vpp runtime` 未接入；§3 的级联在此全部消失 |
+| `cli-semantic-check.sh` | **11 通过 / 0 失败 / 0 登记** | 修掉 oracle 假红后与历史基线（round10 的 11/0）一致 |
+
+本轮**未改产品代码**（唯一代码改动是 `contrib/scripts/` 下的两个工具脚本 + Makefile 的 toolcheck）。
+新增/修复的 4 项工具缺陷见 §5，两处「文档与现实不符」见 §1。
+
+------ 1. 前置：凭据与阶段 3 依赖（**两处文档与现实不符**） -----
+
+① **交接文档里的管理口令是失效的**。§3.1/§3.3 写 `Nfvis@Test2026`，实测登录失败
+   （`% 登录失败: 用户名或口令错误`）。核对方式**不经登录**、避免撞 5 次失败锁定：
+   直接读配置库里的 `password_hash` 与候选口令比对（pbkdf2-SHA256/600000 轮，与
+   `internal/aaa/service.go:HashPassword` 同格式，用 `base64.RawStdEncoding` 复算）——
+   `Nfvis@Test2026` **不匹配**；而 journal 里最后一次首启的一次性口令
+   `WBF81vOA4M8GM28f@Aa1`（2026-09-20 01:19:22，`journalctl -u nfvis | grep 一次性口令`）**匹配**。
+   成因：该口令是 rounds 26~28 的旧值，而 **round32/34 两次把 VM 恢复为干净快照**后重新首启，
+   一次性口令随之更换、文档没跟着改（§3.1 的「口令」一行是旧快照的遗留）。
+   **教训**：口令这类"外部事实"不能只写在交接表里靠人维护——恢复快照后必须重新核对并回写。
+
+② **冒烟阶段 3 的两个前置在重建后的环境里不存在**（文档 §0 第 2 条仍写「已补齐 ✓」，
+   那是 round24 的记录，round32/34 快照恢复后已丢）：
+   - 引导镜像：全盘 `find` 无 `alpine*.qcow2` → 按 round23 记录的产品路径重新拉取
+     `request images download name alpine.qcow2 type vm-image url …/generic_alpine-3.20.0-x86_64-bios-cloudinit-r0.qcow2
+     sha256 900c91ed…`；**sha256 与 size 187,695,104 字节与 round23 记录逐位一致** ✓
+   - 容器镜像：`docker images` 为空、`registry-1.docker.io` 直连不通 → 按 round23 的做法给
+     **docker 守护进程**临时加 `HTTP(S)_PROXY=http://192.168.155.1:2333`（宿主代理，实测可达：
+     `curl -x … https://registry-1.docker.io/v2/` 返回 401 = 正常的未认证应答）→ 拉取成功 →
+     **随即删除 drop-in 并重启 docker**（`systemctl show docker -p Environment` 为空 ✓，
+     不给容器注入代理变量）。
+
+------ 2. `make integration`：全绿 -----
+跑前按红线 6 执行：`systemctl stop nfvis` + 经产品路径 `request virtual-machine-functions vnf-{a,b} stop`
+（`virsh list --all` → 两台 shut off）+ `systemctl restart vpp`（清残留拓扑，`vppctl show bridge-domain`
+→ `no bridge-domains in use`）+ 确认 **1G 大页 free=2 ≥ 1**；另确认无残留 nfvisd 进程。
+
+结果（`/root/round36/integration.log`）：
+```
+ok  github.com/xzjt/nfvis/test/integration                    772.404s
+ok  github.com/xzjt/nfvis/internal/orchestrator                 0.026s
+ok  github.com/xzjt/nfvis/internal/orchestrator/compute        15.173s
+ok  github.com/xzjt/nfvis/internal/orchestrator/container       0.010s
+ok  github.com/xzjt/nfvis/internal/orchestrator/network         0.351s
+--- PASS 计数：238（含子测试；顶层 221）   FAIL 0   SKIP 0
+```
+重的 guest 类用例逐条通过（这些是本套件里唯一能证伪「seed 不可见 / 网名不一致」的）：
+`TestCloudInitAndSerialConsoleRealLibvirt` 140.83s、`TestMainChainVMRealVPPAndLibvirt` 151.37s、
+`TestSnapshotContentLevelRollbackRealLibvirt` 418.47s、`TestE2EFlow` 3.04s、
+`TestContainerLifecycleWithMemifRealDocker`、`TestImageRepoDownloadImportAndReferenceRealLibvirt`。
+
+> 计数口径：round24 记的是「231 条断言 PASS」，本轮按 `--- PASS` 计为 238（顶层 221）。
+> 差值是 rounds 25~35 新增用例带来的增长（决策 #104~#114 各自带测试），不是少跑。
+
+------ 3. 256 条冒烟（对**已装实例**跑）：26 条失败**全部**是前置级联 -----
+跑法（§3.3）：`SRV=https://127.0.0.1:443 CLI_BIN=/usr/bin/nfvis-cli NFVIS_PASSWORD=… API_PORT=443`。
+结果 **171 通过 / 26 失败 / 3 预期报错**（合计 200 条，与历史基线条数一致）。
+逐条判读后**没有一条是产品缺陷**，三条根因：
+
+**根因 A：阶段 2 预块的**第 1 条**语句是空操作 → 整块中止（1 + 6 条级联 = 7 条）**
+- `[S2-pre] configure … resource-pools hugepages page-size 1G count 2` →
+  `%% 语句未产生配置变更（尚未映射到模型或值未变化）`——已装实例的 committed 里本来就是 `count 2`，
+  所以这条是"值未变化"。
+- `-c` 脚本模式是**任一行失败即停止**（`cmd/nfvis-cli/main.go` 的 `runScript` 注释原文：
+  「多行脚本模式：任一行失败即停止」），故预块里**其后所有语句都没执行**。核对（`show configuration`）：
+  `virtual-switches vs-l2/vs-l3`、`acls acl-test`、`qos policies pol-test`、`port-mirroring pm-test`
+  全部 0 命中，`vpp cpu main-core` 仍是 5（预块要设 1）——**证实中止**，不是"设了没生效"。
+- 级联：`[S2] set virtual-switches vs-l2 vlan access 100` → `%% 无匹配配置: vs-l2`；
+  阶段 5 的 `show virtual-switches vs-l2 {detail,ports,statistics}`、`show vrfs vs-l3 [routes]`、
+  `show acls acl-test detail`（6 条）；
+  以及 `ping 192.168.155.1 source 192.168.155.10 count 2` → `%% 源地址 192.168.155.10 不属于任何 VPP 接口`
+  （那个地址正是预块里 `vs-l3 l3-interface ens192 ip address …` 要配的，没配上）——**报错本身正确且可操作**。
+
+**根因 B：1G 大页池被两台已声明 VNF 占满 → cli-vm 提交被**正确**拒绝（1 + 15 条级联 = 16 条）**
+- `[S3]` cli-vm 的 commit 失败，原文：
+  `校验失败（candidate 保留）: - virtual-machine-functions[vnf-b].memory.size-mb: 资源池大页 1G 不足：需要 1，空闲 0`
+- 即：**资源账本按"已声明的 VMF"扣减**（与运行态无关），池声明 `count 2`、vnf-a/vnf-b 各 1 页 → 空闲 0，
+  再加一台 cli-vm 就超了。产品**拒绝超额分配是对的**（决策 #21 的口径：1G 页要按「VPP + 每台 VM 至少 1 页」规划）；
+  而套件第 2 阶段会硬编码 `count 2`，在"已装实例上还驻留两台 VNF"的场景下必然撞上。
+- 级联：阶段 4 的 12 条 cli-vm 运维命令、阶段 5 的 3 条 cli-vm 视图，全部报 `% VNF cli-vm 不存在`。
+
+**根因 C（1 条，已登记项）**：`show vpp runtime` → `%% VPP runtime 统计未接入（govpp runtime 解码限制）`
+——`docs/V1-收尾待办.md` §2.3 已登记，属"明确提示而非静默空值"，不是回归。
+
+3 条「预期报错」：SR-IOV `create-vfs`（环境无 PF/VF）、`snapshot create name should-fail`（守卫正确拒绝，需先关机）、
+`ping`（未通即失败，决策 #89）——均符合预期。
+
+------ 4. 256 条冒烟（**干净开发态基线**）：1 失败，级联全部消失 -----
+依据：§1.5 第 2 条要求"脏状态/前置造成的失败须**重启到干净基线再采信**"。故按脚本头部记载的默认目标
+另跑一遍——全新开发态实例（`/tmp/nfvisd -db /tmp/nfvis.db -listen 127.0.0.1:18443
+-init-admin-password Admin@12345 -allow-plaintext`，`readlink /proc/<pid>/exe` 确认服务的确实是新二进制），
+`SRV=http://127.0.0.1:18443 CLI_BIN=/tmp/nfvis-cli`。
+
+| 阶段 | 已装实例 | 干净基线 | 差值说明 |
+|---|---|---|---|
+| 1 show 只读 | 40/1/0 | 40/1/0 | 同一条 `show vpp runtime` |
+| 2 配置语句 | 57/2/0 | **59/0/0** | 预块第 1 条在干净库上是真变更 → 整块执行 |
+| 3 前置对象 | 6/1/0 | **7/0/0** | cli-vm 建得出来（池有空闲页） |
+| 4 request 运维 | 23/12/1 | **34/0/2** | 12 条 cli-vm 命令**全部通过** |
+| 5 操作与管道 | 34/10/2 | **43/0/3** | 级联的 9 条消失 |
+| 6 事务语义 | 11/0/0 | 11/0/0 | — |
+| **合计** | 171/26/3 | **194/1/5** | 合计均 200 条 |
+
+**结论：26 条失败与"干净基线下的 1 条"之差，就是根因 A/B 的级联；产品侧没有隐藏缺陷。**
+被级联掩盖、本轮才真正跑到的 19 条命令（cli-vm 的 start/restart/stop/snapshot 系列 12 条、
+vs-l2/vs-l3/acl-test 视图 6 条、带 source 的 ping 1 条）在干净基线下**全部通过**。
+
+5 条「预期报错」逐条核对过、都合理：`snapshot create name should-fail`（含「需先关机」）、
+SR-IOV（不支持）、三条 `ping`（未通即失败）。
+
+------ 5. 语义校验：修掉 3 处**工具假红/假报**，并给 oracle 加自校准 -----
+首跑 **10 通过 / 1 失败 / 1 登记**，其中 S8 失败是**脚本自己的 oracle 错了**，不是产品错：
+
+**S8「MAC 表 ↔ VPP l2fib 条数」假红**——两处成因（都在 oracle 侧）：
+1. `vppctl show l2fib`（**非 verbose**）在 VPP 26.06 **只打印一行汇总**
+   （`L2FIB total/learned entries: 1/0 …`），条目行只有 `verbose` 才有。旧实现按非 verbose 输出的行数计，
+   **只要有表项就恒得 0** → 必然假红。实测：CLI mac-table 报 1 条（`b0:b0:00:00:00:00 bvi0`，
+   即 BVI 自身的静态表项），而 VPP 汇总行本就写着 `1/0`。
+2. `vppctl` 输出是 **CRLF** 行尾：`BD-Tag` 取成 `"vs-vnf\r"`，与 `"vs-vnf"` 精确比较恒不成立
+   （该 bug 只在 Linux 上现形——MSYS 的 `sed` 会吞掉 `\r`，本地 Windows 复现不出来，见 §7 红线）。
+3. 顺带把对照改成**按 BD 过滤**（l2fib 的 `BD-Idx` 是 `show bridge-domain` 的 **Index**，
+   不是 BD-ID：本机 vs-vnf 的 BD-ID=6252701、Index=1，两者差很大），避免多 BD 环境下再次假红。
+
+**S9「运行态对象是否被视图反映」假报**：原实现只凭"libvirt 有域"就打印「libvirt 有域而 CLI 未列出」，
+而本轮 CLI **两条都列出了**（vnf-a/vnf-b）——该句为假。改为**只登记确有差异的项**（集合差集）。
+
+**收尾残留**：连跑 5 次后，committed 里多出 `interfaces bond0 { name bond0; }`。
+审计库原文（`config.commit` 的 detail）显示每次都是 `[edit interfaces] + bond0 ;` 与
+`[edit interfaces bond0] - description sem-rt-…`——即**收尾只删了自己写的 description，
+却留下了自己顺带建出来的 `interfaces <n>` 空壳条目**（发现 #15 的同类：恢复不彻底）。
+修法：扰动前记下该接口**在配置里原本是否存在**，收尾时"原本不在"就整条删掉。
+
+**红-绿验证（两处都做了）**：
+- oracle：把实现换回旧版（`build/sem-old-oracle.sh`），自校准脚本在 Linux 上**报 5 处 ✗**
+  （l2fib 3 处得 0、CR 2 处取空/取到带 `\r`）；换回新版**全绿**。
+- 收尾还原：跑前跑后 `show configuration` **逐字节一致** ✓（修前会留下 `interfaces bond0` 空壳）。
+- 产品侧对照：向 VPP 注入一条静态 l2fib 表项（`vppctl l2fib add …`）后，CLI mac-table **跟着变成 2**
+  ——证明该视图确实读运行态，且新 oracle 会随事实源变化（随后 `l2fib del` 复原）。
+
+**新增自校准并入 `make check`**：`contrib/scripts/cli-semantic-selftest.sh`
+——把脚本里**真正在用的** oracle 函数抽出来（不另写一份），用**桩 vppctl** 喂合成输出，
+断言「1 条表项→1」「2 条→2」「别的 BD 的表项→0」「CRLF 的 tag 能精确匹配」等 9 项；
+`SEM_SCRIPT=` 可指向改了 oracle 的副本做红-绿。语义校验本身只能在真机跑，
+**只有这里的桩式自校准能在 CI 挡住 oracle 回归**（与 `cli-fulltest-selftest.sh` 同一套路，已并入 `toolcheck`）。
+
+修后复跑：**11 通过 / 0 失败 / 0 登记**（与 round10 的历史基线 11/0 一致）。
+
+------ 6. 环境恢复与终态核对 -----
+复跑会改配置（套件本身要 commit；语义校验要扰动），故先做了**配置库一致性快照**
+（`/root/round36/nfvis.db.bak`，sha256 `7a399860…`，rev 35 / audit 74）与 `show configuration` 基线留档。
+
+- **配置**：跑完与复跑前基线 **逐字节一致** ✓（`diff` 无输出）。中途曾因冒烟提交而漂移
+  （hostname/timezone/ntp/dns/api/bonds/acls…），按 §3.9 用配置库快照恢复并逐项核对。
+- **配置库计数**：rev 35 → **55**、audit 74 → **103**。**这是预期内的**——语义校验的 round-trip
+  与扰动本身就要 commit（审计里可见 `[edit interfaces bond0]`、`[edit interfaces]` 等条目），
+  跑完内容回到基线，但**版本号与审计条数会前进**。下一会话若拿 rev/audit 当指纹，请以本节数字为准。
+- **数据面**：起态 VPP 里**没有** bridge-domain（即"拓扑在配置里、但没被programmed"）；
+  恢复用产品路径 `request vpp restart`（按 committed 重生成并触发恢复收敛）→
+  `vs-vnf` BD 就位、4 个端口全 up、计数在动。
+- **两台 VNF**：`request virtual-machine-functions vnf-{a,b} start` → running；
+  资源池 `1G 2/2/0`、vhost-user 端口 up。
+- **流量**：`ping 192.168.100.10/11 source 192.168.100.1 count 3` → **3 sent, 3 received, 0% loss**（两台）；
+  宿主 → guest 经 DPDK 物理口：`ping 192.168.155.240`、`.241` 各 4 发 3 收、<1ms（首包丢在 ARP/收敛期）。
+- **清理**：开发态实例已 kill；`/tmp` 中间产物、`cli-vm` 域与磁盘、`cli-ct2` 容器、
+  `/data/incoming` 里的测试文件、测试镜像登记（`cli-test.qcow2`、`alpine:3.20`）全部清掉；
+  `/var/lib/nfvis/vms/` 只剩 vnf-a/vnf-b；`show images` 只剩 `alpine.qcow2`（本轮有意补的前置）与 debian。
+- **已知项仍在**：内核基线比对长期报「大页 1G：期望 2，实际 3」（池的「无主占用」，§2.13 #21/§0 第 3 条登记）。
+
+------ 7. 本轮新发现与登记 -----
+
+| # | 发现 | 性质 | 处置 |
+|---|---|---|---|
+| R36-1 | **交接文档的管理口令已失效**（恢复快照后换过），照文档登录必失败 | 文档/环境（中） | 已实测出正确凭据并回写 §3.1/§3.3；**口令属易变事实，恢复快照后必须重新核对** |
+| R36-2 | **冒烟阶段 3 的前置（alpine.qcow2 + docker alpine:3.20）在重建后的环境里没有**，而 §0 仍写「已补齐」 | 文档（低） | 已按 round23 记录重新补齐（sha256 逐位一致）；§0/§3.1 写明「快照恢复后需重补」 |
+| R36-3 | **停止/启动 VNF 后 guest 内的网络配置不会回来**：user-data 内容没变 → 摘要没变 → instance-id 没变 → cloud-init 按 once-per-instance **不重放**；而 guest 自己的启动网络栈只拿到 DHCP 地址，脚本用 `ip addr add` 加的静态地址是运行期的、重启即失 | 语义/操作（中） | **不是产品缺陷**（决策 #114 的既定语义）。但这是个**反向陷阱**：§0 红线 9 只写了「改内容后必须 start/restart 才重放」，没写「内容没变时 start/restart **不会**重放，而 guest 重启会丢运行期网络配置」。本轮实测：追加一行注释改内容 → `restart` → instance-id 由 `vnf-a-fa3733a4` 变 `vnf-a-f75060a3` → 地址就位、流量复通（**#114 的重放机制在 1.1.25 上复验通过**）。红线 9 已补这一面 |
+| R36-4 | 语义校验 oracle 假红 + 收尾残留（§5） | 工具（中） | 已修 + 已加自校准并入 `make check` |
+
+**登记未修（与 §0 第 2 条一致，本轮未动产品）**：CLI 引号内 `|` 被当管道切分 / 多行引号值只取首行；
+`request vpp restart` 返回后立即查询偶发 broken pipe；1G 大页池「无主占用」未做回收。
+另：`show vpp runtime` 仍未接入（govpp runtime 解码限制）。
+
+------ 8. 复跑用的原始留档（VM 上 /root/round36/） -----
+```
+00-baseline-config.txt        复跑前的 committed 基线（sha256 deeba255…）
+nfvis.db.bak                  配置库一致性快照（sha256 7a399860…，rev 35/audit 74）
+integration.log               make integration 全量输出（238 PASS / 0 FAIL / 0 SKIP）
+fulltest.log + full-cli.log   256 条冒烟（已装实例）171/26/3
+fulltest-dev.log + full-cli-dev.log  256 条冒烟（干净开发态基线）194/1/5
+semantic.log                  语义校验（修后）11/0/0
+final-check.txt               终态逐项核对（服务/配置/数据面/流量/大页）
+vnf-{a,b}-ud.sh.bak-round36   触发重放前的 user-data 备份
+```
