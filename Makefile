@@ -61,8 +61,12 @@ docscheck:
 # 由来（发现 #9）：`cli-fulltest` 的失败判定曾用未锚定的 `校验失败` 扫全文，而 `show log audit`
 # 会回显历史（某条旧审计的 detail 就含「校验失败: …」）→ 同一条命令在不同审计历史下结论不同。
 # 这类"工具自身出错制造的假红"比假绿更伤信任（决策 #85），故把判定模式的自校准纳入 make check。
+# 2026-09-22 补第二项：语义校验的 oracle 同样会错——S8 的 l2fib 条数按非 verbose 输出计
+# （VPP 26.06 只打印汇总行 → 有表项恒得 0），且 vppctl 输出是 CRLF（精确比较需剥 \r）。
+# 语义校验本身只能在真机跑，故**只有**这里的桩式自校准能在 CI 挡住 oracle 回归。
 toolcheck:
 	bash contrib/scripts/cli-fulltest-selftest.sh
+	bash contrib/scripts/cli-semantic-selftest.sh
 
 # 真机集成测试（M3）：需 VPP 运行环境（nfvis-vm）。无环境时跳过并提示，CI 不跑。
 # 约定：build tag integration + 环境变量 NFVIS_VPP_SOCK（缺省 /run/vpp/api.sock）。

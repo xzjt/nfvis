@@ -110,14 +110,28 @@ api_cands() {
 vpp_ifaces()  { vppctl show interface 2>/dev/null | awk 'NR>1 && $2 ~ /^[0-9]+$/ {print $1}' | grep -v '^local0$' | sort; }
 vpp_state()   { vppctl show interface 2>/dev/null | awk -v n="$1" '$1==n && $2 ~ /^[0-9]+$/ {print $3}'; }
 vpp_bd_ids()  { vppctl show bridge-domain 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $1}' | sort; }
-vpp_bd_tag()  { vppctl show bridge-domain "$1" detail 2>/dev/null | sed -n 's/.*BD-Tag: //p'; }
+# ⚠️ vppctl 输出是 **CRLF** 行尾：值要 `tr -d '\r'` 才能做**精确比较**
+#    （2026-09-22 实测：BD-Tag 取成 "vs-vnf\r"，`[ "$tg" = "$tag" ]` 恒不成立）。
+vpp_bd_tag()  { vppctl show bridge-domain "$1" detail 2>/dev/null | sed -n 's/.*BD-Tag: //p' | tr -d '\r'; }
 vpp_bd_tags() { for id in $(vpp_bd_ids); do vpp_bd_tag "$id"; done | grep -v '^$' | sort; }
+# <bd-index> → 该 BD 的 l2fib 条数。**必须用 `verbose`**：VPP 26.06 的 `show l2fib`
+# 只打印一行汇总（"L2FIB total/learned entries: N/M"），条目行只有 `verbose` 才有——
+# 旧实现按非 verbose 输出的行数计，只要有表项就恒得 0 → 假红（2026-09-22 实测：
+# CLI mac-table 1 条 vs 旧 oracle 0，而 VPP 汇总行本就写着 1/0）。
 vpp_l2fib_count() {
-  # 空表时 vppctl 打印 "no l2fib entries"（按行数计会得 1，造成假红）
-  local out; out=$(vppctl show l2fib 2>/dev/null)
-  case "$out" in *"no l2fib entries"*) echo 0; return;; esac
-  printf '%s
-' "$out" | awk 'NR>1 && NF>0 {n++} END {print n+0}'
+  local out; out=$(vppctl show l2fib verbose 2>/dev/null)
+  printf '%s\n' "$out" | awk -v bd="$1" 'NR>1 && $2 == bd {n++} END {print n+0}'
+}
+# <tag> → 该 BD 的 **Index**。l2fib 的 BD-Idx 列是 Index，不是 BD-ID（两者可差很大：
+# 本机 vs-vnf 的 BD-ID=6252701、Index=1），故不能拿 BD-ID 去比。
+vpp_bd_index_of_tag() {
+  local tag="$1" id d idx
+  for id in $(vpp_bd_ids); do
+    [ "$(vpp_bd_tag "$id")" = "$tag" ] || continue    # 复用 vpp_bd_tag（CR 处理只有一处）
+    d=$(vppctl show bridge-domain "$id" detail 2>/dev/null)
+    idx=$(printf '%s\n' "$d" | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $2; exit}' | tr -d '\r')
+    [ -n "$idx" ] && { echo "$idx"; return; }
+  done
 }
 kernel_phys() { for n in /sys/class/net/*; do [ -e "$n/device" ] && basename "$n"; done | sort; }
 # CLI 的交换机列表：运行态表格（BD-ID 为数字的首列）；兼容旧配置块格式。
@@ -160,6 +174,10 @@ IFACE_DESC_ORIG=$(cli "show configuration" | awk -v n="$IFACE" '
   $0 ~ ("^interfaces " n " \\{") { inb=1; next }
   inb && /^\}/ { inb=0 }
   inb && /description/ { sub(/^[ \t]*description[ \t]*/, ""); sub(/;.*/, ""); print; exit }' | tr -d '\r')
+# 该接口**在配置里原本是否存在**：不存在时，下面这条 set 会顺带建出 `interfaces <n> {}`，
+# 收尾只删 description 就会留下一个空壳条目（2026-09-22 实测：连跑 5 次后基线里多出
+# `interfaces bond0 { name bond0; }`）。故收尾要按「是否本次建出来的」决定删条目还是删字段。
+IFACE_IN_CFG=$(cli "show configuration" | awk -v n="$IFACE" '$0 == "interfaces " n " {" {c++} END {print c+0}')
 cli "configure
 set interfaces $IFACE description semcheck-$MARK
 commit" >/dev/null 2>&1
@@ -252,11 +270,12 @@ if [ -n "$l2vs" ]; then
   cliout=$(cli "show virtual-switches $l2vs mac-table")
   if echo "$cliout" | grep -q 'MAC 表为空'; then cli_n=0
   else cli_n=$(echo "$cliout" | awk 'NR>1 && $1 ~ /:/ {n++} END {print n+0}'); fi
-  fib_n=$(vpp_l2fib_count)
-  echo "    CLI mac-table 条数=$cli_n；VPP l2fib 行数=$fib_n"
+  bd_idx=$(vpp_bd_index_of_tag "$l2vs")
+  fib_n=$(vpp_l2fib_count "$bd_idx")
+  echo "    CLI mac-table 条数=$cli_n；VPP l2fib 条数=$fib_n（$l2vs index=${bd_idx:-未在 VPP 中找到}）"
   if [ "$fib_n" -eq 0 ] && [ "$cli_n" -eq 0 ]; then ok "两侧一致（均为空，本环境无流量）"
   elif [ "$cli_n" -eq "$fib_n" ]; then ok "两侧一致（$cli_n 条）"
-  else bad "条数不一致（CLI $cli_n vs VPP $fib_n）——需人工判读（可能含子接口/其他 BD 的条目）"; fi
+  else bad "条数不一致（CLI $cli_n vs VPP $fib_n）——需人工判读（该 BD 的静态/动态表项口径）"; fi
 else note "无交换机对象，本项略"; fi
 
 hdr "S9 运行态对象是否被视图反映（诊断，不计失败）"
@@ -266,13 +285,25 @@ clivm=$(cli "show virtual-machine-functions" | grep -oE '^[a-zA-Z0-9._-]+' | tr 
 clict=$(cli "show container-functions" | grep -oE '^[a-zA-Z0-9._-]+' | tr '\n' ' ')
 echo "    libvirt 域: ${libv:-（无）} ｜ CLI VM 列表: ${clivm:-（空）}"
 echo "    Docker 容器: ${dockerps:-（无）} ｜ CLI 容器列表: ${clict:-（空）}"
-[ -n "$libv" ] && note "libvirt 有域而 CLI 未列出（配置驱动；契约对 VM 列表口径未明确，仅登记）"
-[ -n "$dockerps" ] && note "Docker 有容器而 CLI 未列出（同上，仅登记）"
+# 只在**确有**差异时登记：原实现仅凭「libvirt 有域」就打印「CLI 未列出」，
+# 而 CLI 已列出时该说法不成立（2026-09-22 实测：vnf-a/vnf-b 两侧都在，仍打印了该行）。
+miss=""
+for d in $libv; do case " $clivm " in *" $d "*) ;; *) miss="$miss $d";; esac; done
+[ -n "$miss" ] && note "libvirt 有域而 CLI 未列出:$miss（配置驱动；契约对 VM 列表口径未明确，仅登记）"
+miss=""
+for d in $dockerps; do case " $clict " in *" $d "*) ;; *) miss="$miss $d";; esac; done
+[ -n "$miss" ] && note "Docker 有容器而 CLI 未列出:$miss（同上，仅登记）"
 case " $clivm " in *" br0 "*) : ;; esac
 
 # ============ 清理本脚本创建的对象 ============
-# 接口描述：**还回原值**（发现 #15）；原本就没有描述时才删字段。
-if [ -n "${IFACE_DESC_ORIG:-}" ] && [ "$IFACE_DESC_ORIG" != "semcheck-$MARK" ] && [ "$IFACE_DESC_ORIG" != "sem-rt-$MARK" ]; then
+# 接口：先看**条目本身**是不是本次建出来的——是就整条删掉（发现 #15 的同类：收尾只删字段
+# 会留下空壳条目）；否则描述**还回原值**（发现 #15），原本就没有描述才删字段。
+if [ "${IFACE_IN_CFG:-1}" = "0" ]; then
+  cli "configure
+delete interfaces $IFACE
+commit" >/dev/null 2>&1
+  echo "· 接口 $IFACE 原本不在配置中，已删除本次写入的条目"
+elif [ -n "${IFACE_DESC_ORIG:-}" ] && [ "$IFACE_DESC_ORIG" != "semcheck-$MARK" ] && [ "$IFACE_DESC_ORIG" != "sem-rt-$MARK" ]; then
   cli "configure
 set interfaces $IFACE description $IFACE_DESC_ORIG
 commit" >/dev/null 2>&1
