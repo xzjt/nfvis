@@ -32,6 +32,9 @@ p { margin: 6px 0; }
 .small { font-size: 12px; }
 .error { color: var(--err); }
 .hidden { display: none; }
+/* hidden 属性必须压过下面的 .login-wrap { display: flex }：作者样式优先于 UA 的
+   [hidden] { display: none }，不显式声明的话登录后登录卡片不消失、盖住总览页。 */
+[hidden] { display: none !important; }
 
 /* 登录 */
 .login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; }

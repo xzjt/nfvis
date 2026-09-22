@@ -1679,6 +1679,7 @@
             "type": "object"
           },
           "uptime_seconds": {
+            "description": "主机运行时长（/proc/uptime，与 CLI `show system uptime` 同源；非 Linux 取不到时退回守护进程运行时长）",
             "type": "integer"
           }
         },

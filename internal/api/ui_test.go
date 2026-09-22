@@ -156,6 +156,32 @@ func TestUIContractDeclaresUI(t *testing.T) {
 	}
 }
 
+// hidden 属性必须压过作者样式里的 display（round39 可视验收抓到：`.login-wrap` 的
+// `display: flex` 优先于 UA 的 `[hidden] { display: none }`，登录后登录卡片不消失、
+// 盖住总览页）。本用例钉住 style.css 里那条 `!important` 规则，防回归。
+func TestUIHiddenAttributeWinsOverAuthorDisplay(t *testing.T) {
+	css, err := fs.ReadFile(uiAssets, "ui/style.css")
+	if err != nil {
+		t.Fatalf("读取内嵌 style.css: %v", err)
+	}
+	// 先剥掉 /* */ 注释：否则注释里提到 [hidden] 的行会被当成规则行（本轮就误判过一次）。
+	stripped := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(string(css), "")
+	if !strings.Contains(stripped, "[hidden]") {
+		t.Fatal("style.css 没有 [hidden] 规则：作者 display 会压过 UA 的 hidden 样式")
+	}
+	for _, line := range strings.Split(stripped, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "[hidden]") {
+			continue
+		}
+		if !strings.Contains(line, "display") || !strings.Contains(line, "none") || !strings.Contains(line, "!important") {
+			t.Errorf("[hidden] 规则必须显式声明 display:none !important（否则压不过 .login-wrap 等作者样式）：%s", line)
+		}
+		return
+	}
+	t.Fatal("style.css 没有以 [hidden] 开头的规则行")
+}
+
 // UI 读的指标名必须真的存在——指标改名会让页面**静默**显示「—」，不报错、不留痕。
 // 指标名从 app.js 里抽（不在这里另写一份，否则测的不是实现）。
 func TestUIReadsOnlyExistingMetricNames(t *testing.T) {

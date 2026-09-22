@@ -371,9 +371,23 @@ func (s *Server) handleGetSystemStatus(w http.ResponseWriter, r *http.Request) {
 	if cfg.System != nil {
 		hostname = cfg.System.Hostname
 	}
+	val := map[string]float64{}
+	for _, smp := range metrics.HostMetrics() {
+		if len(smp.Labels) == 0 {
+			val[smp.Name] = smp.Value
+		}
+	}
+	// uptime_seconds 取**主机**运行时长（/proc/uptime → nfvis_system_uptime_seconds，
+	// 与 CLI `show system uptime` 同源）；非 Linux 取不到时退回守护进程运行时长
+	// （字段不缺席，但语义以契约描述为准）。此前这里是 time.Since(startTime)，
+	// 页面"运行时长"显示的是守护进程活了多久而非机器活了多久（round39 可视验收发现）。
+	uptimeSec := int(time.Since(startTime).Seconds())
+	if up, ok := val["nfvis_system_uptime_seconds"]; ok {
+		uptimeSec = int(up)
+	}
 	out := map[string]any{
 		"hostname":       hostname,
-		"uptime_seconds": int(time.Since(startTime).Seconds()),
+		"uptime_seconds": uptimeSec,
 		"config_ready":   true,
 	}
 	// 决策 #116：契约声明了 cpu/memory/hugepages/storage，此前只回上面三项（响应形状与契约
@@ -381,12 +395,6 @@ func (s *Server) handleGetSystemStatus(w http.ResponseWriter, r *http.Request) {
 	//   cpu/memory/storage ← internal/metrics.HostMetrics()（与 show system cpu|memory|storage 同一来源）
 	//   hugepages          ← resourcePoolView(cfg)（与 GET /resource-pools 同一来源）
 	// 宿主指标是 Linux 采集（非 Linux 为空实现）：取不到就**不给该子对象**，不编造零值。
-	val := map[string]float64{}
-	for _, smp := range metrics.HostMetrics() {
-		if len(smp.Labels) == 0 {
-			val[smp.Name] = smp.Value
-		}
-	}
 	pools := resourcePoolView(cfg)
 	cpu := map[string]any{}
 	if n, ok := val["nfvis_system_cpu_online_count"]; ok {
