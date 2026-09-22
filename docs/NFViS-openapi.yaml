@@ -876,6 +876,22 @@ paths:
         "200": { $ref: "#/components/responses/ConfigAccepted" }
         "409": { $ref: "#/components/responses/Error409" }
 
+  /configuration:
+    get:
+      tags: [configuration]
+      summary: 读取 committed 配置（全量，敏感字段已脱敏）
+      description: |
+        返回当前生效配置的整份文档与版本号。此前只有分段读取（`GET /system`、`GET /vpp/config`
+        等配置段），没有整配置出口——CLI 的 `show configuration` 因此没有 REST 等价物
+        （round42 覆盖核查的缺口 #1，增量 2 的阻塞项，决策 #119）。敏感字段（口令哈希等）
+        与 candidate 读取同样脱敏（FR-SEC-007）。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommittedConfig" }
+
   /configuration/candidate:
     get:
       tags: [configuration]
@@ -885,7 +901,7 @@ paths:
           description: OK
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/ConfigDocument" }
+              schema: { $ref: "#/components/schemas/CandidateView" }
     put:
       tags: [configuration]
       summary: 整体替换 candidate（load override 语义）
@@ -895,7 +911,11 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/ConfigDocument" }
       responses:
-        "200": { description: candidate 已更新（未提交） }
+        "200":
+          description: |
+            candidate 已更新（未提交）。缺省分支返回 `CandidateView`；
+            带 `X-NFVIS-Auto-Commit: true` 时走提交分支、返回 `CommitResult`（两种形状，
+            故此处不声明 schema——形状守护覆盖的是 GET 分支）。
     delete:
       tags: [configuration]
       summary: 丢弃 candidate（discard）
@@ -2449,6 +2469,20 @@ components:
         created_at: { type: string, format: date-time }
         size_bytes: { type: integer, format: int64 }
         description: { type: string }
+
+    CommittedConfig:
+      type: object
+      description: committed 配置读取的响应（决策 #119：整配置出口，敏感字段已脱敏）
+      properties:
+        configuration: { $ref: "#/components/schemas/ConfigDocument" }
+        revision: { type: integer, description: 当前 committed 配置版本号 }
+
+    CandidateView:
+      type: object
+      description: candidate 读取的响应（决策 #119：契约按实现的实际形状声明——此前误声明为 ConfigDocument 本体）
+      properties:
+        candidate: { $ref: "#/components/schemas/ConfigDocument" }
+        dirty: { type: boolean, description: 相对 committed 是否有未提交变更 }
 
     ConfigDocument:
       type: object

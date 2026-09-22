@@ -335,6 +335,19 @@
         },
         "type": "object"
       },
+      "CandidateView": {
+        "description": "candidate 读取的响应（决策",
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/ConfigDocument"
+          },
+          "dirty": {
+            "description": "相对 committed 是否有未提交变更",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "CaptureStatus": {
         "properties": {
           "active": {
@@ -396,6 +409,19 @@
               "type": "string"
             },
             "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "CommittedConfig": {
+        "description": "committed 配置读取的响应（决策",
+        "properties": {
+          "configuration": {
+            "$ref": "#/components/schemas/ConfigDocument"
+          },
+          "revision": {
+            "description": "当前 committed 配置版本号",
+            "type": "integer"
           }
         },
         "type": "object"
@@ -2772,6 +2798,27 @@
         "x-internal": true
       }
     },
+    "/configuration": {
+      "get": {
+        "description": "返回当前生效配置的整份文档与版本号。此前只有分段读取（`GET /system`、`GET /vpp/config`\n等配置段），没有整配置出口——CLI 的 `show configuration` 因此没有 REST 等价物\n（round42 覆盖核查的缺口 #1，增量 2 的阻塞项，决策 #119）。敏感字段（口令哈希等）\n与 candidate 读取同样脱敏（FR-SEC-007）。\n",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommittedConfig"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "读取 committed 配置（全量，敏感字段已脱敏）",
+        "tags": [
+          "configuration"
+        ]
+      }
+    },
     "/configuration/candidate": {
       "delete": {
         "responses": {
@@ -2790,7 +2837,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ConfigDocument"
+                  "$ref": "#/components/schemas/CandidateView"
                 }
               }
             },
@@ -2815,7 +2862,7 @@
         },
         "responses": {
           "200": {
-            "description": "candidate 已更新（未提交）"
+            "description": "candidate 已更新（未提交）。缺省分支返回 `CandidateView`；\n带 `X-NFVIS-Auto-Commit: true` 时走提交分支、返回 `CommitResult`（两种形状，\n故此处不声明 schema——形状守护覆盖的是 GET 分支）。\n"
           }
         },
         "summary": "整体替换 candidate（load override 语义）",

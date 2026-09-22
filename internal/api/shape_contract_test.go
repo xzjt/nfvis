@@ -91,6 +91,7 @@ func TestResponseShapeMatchesContract(t *testing.T) {
 		{"GET", "/system/version"},
 		{"GET", "/interfaces"},
 		{"GET", "/resource-pools"},
+		{"GET", "/configuration"}, // 决策 #119：整配置出口（committed）
 	} {
 		props := declaredProps(t, spec, ep.path, ep.method)
 		if len(props) == 0 {
