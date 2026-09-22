@@ -267,6 +267,264 @@ function renderEvents() {
   ])));
 }
 
+// ---------- 配置（candidate → 提交） ----------
+//
+// 写路径与 CLI 同一套语义：PUT /configuration/candidate 取锁并建立 candidate →
+// 可选查看差异（GET /configuration/diff）→ 提交（POST /configuration/commit；
+// 管理口地址/网关变更会返回 CONFIRM_REQUIRED，须走 commit confirmed）→
+// DELETE candidate 结束会话（**提交后也释放**，避免把会话锁留给下一次 CLI 登录）。
+//
+// 编辑态以原始 JSON 文本为准（表单改动会先写回文本），提交前都会先保存。
+
+let cfg = {
+  committed: null, // {configuration, revision}
+  editing: false,
+};
+
+const CFG_TEXT_ID = 'cfg-text';
+
+// cfgForm 表单定义：把常用字段读写到 candidate 文档上（其余字段走原始 JSON）。
+const cfgForm = {
+  hostname: {
+    label: '主机名',
+    get: (c) => (c.system || {}).hostname || '',
+    set: (c, v) => { if (!c.system) c.system = {}; if (v) c.system.hostname = v; else delete c.system.hostname; },
+  },
+  ntp: {
+    label: 'NTP 服务器',
+    get: (c) => ((c.system || {}).ntp || []).map((n) => n.server || ''),
+    set: (c, vals) => {
+      const list = vals.filter((v) => v !== '').map((v) => ({ server: v }));
+      if (!c.system) c.system = {};
+      if (list.length) c.system.ntp = list; else delete c.system.ntp;
+    },
+  },
+  dns: {
+    label: 'DNS 服务器',
+    get: (c) => ((c.system || {}).dns_servers || []).slice(),
+    set: (c, vals) => {
+      const list = vals.filter((v) => v !== '');
+      if (!c.system) c.system = {};
+      if (list.length) c.system.dns_servers = list; else delete c.system.dns_servers;
+    },
+  },
+};
+
+function cfgMsg(text, isErr) {
+  const n = $('cfg-msg');
+  n.textContent = text || '';
+  n.hidden = !text;
+  n.className = isErr ? 'error small' : 'muted small';
+}
+
+function cfgSetEditing(on) {
+  cfg.editing = on;
+  $('cfg-read').hidden = on;
+  $('cfg-edit').hidden = !on;
+  $('cfg-diff').hidden = true;
+  $('cfg-commit-confirmed-btn').hidden = true;
+  $('cfg-confirm-btn').hidden = true;
+  cfgMsg('', false);
+}
+
+function cfgCandidate() {
+  return cfg.committed ? JSON.parse(JSON.stringify(cfg.committed.configuration || {})) : {};
+}
+
+function cfgText() {
+  const t = $(CFG_TEXT_ID).value;
+  if (!t.trim()) return {};
+  return JSON.parse(t); // 语法错误由调用方提示
+}
+
+function cfgWriteText(c) {
+  $(CFG_TEXT_ID).value = JSON.stringify(c, null, 2);
+}
+
+// 表单改动：先解析文本区（保留手工编辑），应用该字段，再写回文本区。
+function cfgApplyForm(key, values) {
+  let c;
+  try {
+    c = cfgText();
+  } catch (e) {
+    cfgMsg('原始 JSON 语法错误，请先修正：' + e.message, true);
+    return;
+  }
+  cfgForm[key].set(c, values);
+  cfgWriteText(c);
+  cfgMsg('已写入 candidate（未保存）——点「保存到 candidate」提交到服务端。', false);
+}
+
+function cfgRenderForms(c) {
+  const box = $('cfg-forms');
+  box.textContent = '';
+  const sys = el('fieldset', {});
+  sys.appendChild(el('legend', { text: '系统' }));
+
+  let seq = 0;
+  const addInput = (label, value, onchange) => {
+    const id = 'cfg-f-' + (seq++);
+    sys.appendChild(el('label', { text: label, for: id })); // 关联 label ↔ input（无障碍/可测）
+    const inp = el('input', { type: 'text', id });
+    inp.value = value || '';
+    // 监听 input 而非 change：change 只在**用户输入导致的**失焦时触发，程序化赋值
+    // （浏览器自动化、脚本回填）不置"值已改"标志、失焦也不发 change；input 两者都覆盖。
+    inp.addEventListener('input', onchange);
+    sys.appendChild(inp);
+    return inp;
+  };
+
+  const hostnameVal = cfgForm.hostname.get(c);
+  addInput(cfgForm.hostname.label, hostnameVal, (e) => cfgApplyForm('hostname', e.target.value));
+
+  const ntpVals = cfgForm.ntp.get(c);
+  const ntpInputs = [0, 1].map((i) => addInput(cfgForm.ntp.label + ' ' + (i + 1), ntpVals[i],
+    () => cfgApplyForm('ntp', ntpInputs.map((x) => x.value.trim()))));
+
+  const dnsVals = cfgForm.dns.get(c);
+  const dnsInputs = [0, 1].map((i) => addInput(cfgForm.dns.label + ' ' + (i + 1), dnsVals[i],
+    () => cfgApplyForm('dns', dnsInputs.map((x) => x.value.trim()))));
+
+  box.appendChild(sys);
+}
+
+function cfgRenderRead() {
+  const rev = cfg.committed ? cfg.committed.revision : undefined;
+  fill($('cfg-summary'), [
+    ['配置版本', rev != null ? 'revision ' + rev : undefined],
+    ['状态', cfg.committed ? '已加载 committed 配置' : '未加载'],
+  ]);
+  $('cfg-json').textContent = cfg.committed
+    ? JSON.stringify(cfg.committed.configuration || {}, null, 2) : '';
+  $('cfg-note').textContent = rev != null ? '（committed revision ' + rev + '）' : '';
+}
+
+async function loadConfig() {
+  const res = await api('/configuration');
+  if (res && res.__err) {
+    cfg.committed = null;
+    $('cfg-note').textContent = '（读取失败：' + res.__err + '）';
+    return false;
+  }
+  cfg.committed = res;
+  cfgRenderRead();
+  return true;
+}
+
+// 开始编辑：以 committed 为起点建立 candidate（PUT 取锁）。
+// 读不到 committed 时**拒绝进入**——否则会把空配置当 candidate 提交（危险）。
+async function cfgStartEdit() {
+  try {
+    if (!(await loadConfig()) || !cfg.committed) {
+      cfgSetEditing(false);
+      $('cfg-note').textContent = '（无法进入编辑：读不到当前配置，请先刷新）';
+      return;
+    }
+    const base = cfgCandidate();
+    await api('/configuration/candidate', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(base),
+    });
+    cfgWriteText(base);
+    cfgRenderForms(base);
+    cfgSetEditing(true);
+    cfgMsg('已进入编辑会话（candidate = 当前 committed）。改完点「保存到 candidate」。', false);
+  } catch (e) {
+    cfgSetEditing(false);
+    $('cfg-note').textContent = '（无法进入编辑：' + e.message + '）';
+  }
+}
+
+async function cfgSave() {
+  let c;
+  try {
+    c = cfgText();
+  } catch (e) {
+    cfgMsg('原始 JSON 语法错误：' + e.message, true);
+    return false;
+  }
+  try {
+    const res = await api('/configuration/candidate', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(c),
+    });
+    cfgMsg(res && res.dirty ? '已保存到 candidate（有未提交变更）。' : '已保存到 candidate（与 committed 一致）。', false);
+    return true;
+  } catch (e) {
+    cfgMsg('保存失败：' + e.message, true);
+    return false;
+  }
+}
+
+async function cfgShowDiff() {
+  try {
+    const res = await fetch(API + '/configuration/diff', { headers: { Authorization: 'Bearer ' + token } });
+    const text = await res.text();
+    const pre = $('cfg-diff');
+    pre.textContent = res.ok ? (text.trim() || '（candidate 与 committed 无差异）') : '读取差异失败：HTTP ' + res.status;
+    pre.hidden = false;
+  } catch (e) {
+    cfgMsg('读取差异失败：' + e.message, true);
+  }
+}
+
+// 结束编辑会话：DELETE candidate（discard）并释放锁。
+async function cfgEndSession() {
+  try {
+    await api('/configuration/candidate', { method: 'DELETE' });
+  } catch (e) { /* 会话可能已因超时释放：不阻塞退出 */ }
+  cfgSetEditing(false);
+  await loadConfig();
+}
+
+async function cfgCommit(confirmedMinutes) {
+  if (!(await cfgSave())) return;
+  const body = confirmedMinutes ? { confirmed_minutes: confirmedMinutes } : {};
+  try {
+    const res = await api('/configuration/commit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const warns = (res && res.warnings) || [];
+    const parts = ['提交成功（revision ' + (res && res.revision) + '）'];
+    if (res && res.confirmed_until) {
+      parts.push('待确认：' + fmtTime(res.confirmed_until) + ' 前未点「确认在途提交」将自动回滚');
+      $('cfg-confirm-btn').hidden = false;
+      $('cfg-commit-confirmed-btn').hidden = true;
+    }
+    if (warns.length) parts.push('提示：' + warns.join('；'));
+    cfgMsg(parts.join('；'), false);
+    if (!(res && res.confirmed_until)) {
+      await cfgEndSession(); // 已生效：释放会话锁，回到只读视图
+      cfgMsg('提交成功（revision ' + (res && res.revision) + '）。' + (warns.length ? '提示：' + warns.join('；') : ''), false);
+    }
+  } catch (e) {
+    // 服务端要求 commit confirmed 时（管理口地址/网关变更）揭示确认入口。
+    // 注意：按 FR-CFG-012 原文，该强制**只约束 SSH 会话**——控制台（api 来源）改管理口
+    // 当前不会被要求 confirmed（提交成功但带"注意连通性"警告，见下面的 warnings 展示）。
+    // 这里保留处理是**纵深防御**：服务端一旦对 api 来源也要求确认，页面即已就绪。
+    if (/必须.*commit confirmed|confirm/i.test(e.message)) {
+      cfgMsg('该变更（管理口地址/网关）必须以 commit confirmed 提交：' + e.message, true);
+      $('cfg-commit-confirmed-btn').hidden = false;
+      return;
+    }
+    cfgMsg('提交失败：' + e.message, true);
+  }
+}
+
+async function cfgConfirmPending() {
+  try {
+    await api('/configuration/commit:confirm', { method: 'POST' });
+    await cfgEndSession();
+    cfgMsg('已确认，提交生效。', false);
+  } catch (e) {
+    cfgMsg('确认失败：' + e.message, true);
+  }
+}
+
 // ---------- 实时通道 ----------
 
 function setStream(text, cls) {
@@ -326,6 +584,10 @@ async function startStream() {
           events.unshift({ type: ev.type, timestamp: ev.timestamp, summary: summaryOf(ev) });
           events = events.slice(0, MAX_EVENTS);
           renderEvents();
+          // 配置提交事件：顺带刷新配置卡（编辑中不打扰——避免覆盖正在改的文本）。
+          if (ev.type === 'config-committed' && !cfg.editing) {
+            loadConfig().catch(() => {});
+          }
           scheduleReload();
         } catch (e) { /* 非 JSON 帧：忽略，不影响后续 */ }
       }
@@ -378,7 +640,8 @@ async function enterApp(user) {
   $('main-view').hidden = false;
   $('global-error').hidden = true;
   $('user-line').textContent = user ? user.name + '（' + user.class + '）' : '';
-  await loadAll();
+  cfgSetEditing(false);
+  await Promise.all([loadAll(), loadConfig().catch(() => {})]);
   startStream();
 }
 
@@ -387,6 +650,8 @@ function signOut(msg) {
   stopPolling();
   token = '';
   events = [];
+  cfg = { committed: null, editing: false };
+  cfgSetEditing(false);
   sessionStorage.removeItem(TOKEN_KEY);
   sessionStorage.removeItem(USER_KEY);
   showLogin(msg);
@@ -429,6 +694,13 @@ async function doLogout() {
 $('login-form').addEventListener('submit', doLogin);
 $('logout-btn').addEventListener('click', doLogout);
 $('refresh-btn').addEventListener('click', () => loadAll().catch((e) => showGlobalError(e.message)));
+$('cfg-edit-btn').addEventListener('click', cfgStartEdit);
+$('cfg-save-btn').addEventListener('click', cfgSave);
+$('cfg-diff-btn').addEventListener('click', cfgShowDiff);
+$('cfg-commit-btn').addEventListener('click', () => cfgCommit(0));
+$('cfg-commit-confirmed-btn').addEventListener('click', () => cfgCommit(10));
+$('cfg-confirm-btn').addEventListener('click', cfgConfirmPending);
+$('cfg-discard-btn').addEventListener('click', cfgEndSession);
 window.addEventListener('beforeunload', () => { stopStream(); stopPolling(); });
 
 (async function boot() {

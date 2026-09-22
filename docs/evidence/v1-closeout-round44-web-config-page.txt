@@ -1,0 +1,67 @@
+===== V1 收尾第四十四轮：增量 2 第二刀——控制台配置读写页 + R44-1 收口 =====
+日期：2026-09-22
+目标机：nfvis-vm（VMware；已装实例 1.1.25 全程未动，新代码跑在 :8443 的开发态实例上）
+源码：main `0e7e954` 起分支 `feat/web-config-page`（一个提交 `2803d87`，决策 #120）
+起态：round43 已把增量 2 的 API 侧收口（GET /configuration、candidate 契约、#19）；
+      本刀写页面并做浏览器可视验收
+终止态：`make check` 全绿；浏览器黑盒全流程验收通过；**验收中发现并修复 R44-1**；环境复原
+
+------ 0. 结论 -----
+控制台从"只读总览"扩到**可改配置**，语义与 CLI 同一套：
+「开始编辑」（以 committed 为底稿建立 candidate、PUT 取锁）→ 表单/原始 JSON 编辑 →
+差异预览 → 提交（成功即释放会话锁）→ 或丢弃。SSE 的 config-committed 事件顺带刷新配置卡。
+
+**R44-1（可视验收抓到、本轮修复）**：配置视图按决策 #25 **移除**口令哈希，而写路径是
+"以视图为底稿整文档回写"——回写把哈希抹掉（差异里立刻出现 `- password-hash «已隐藏»`），
+提交即让该账号**失去口令、登不进去**。修法两层：引擎 `UpdateCandidate` 对入参缺失的
+敏感叶子从 committed 同名用户**继承**；校验兜底拦下"没有口令的用户"。
+判据：API 端到端用例**提交后用原口令重新登录成功**（变异验证：去掉继承即报红）。
+
+**R44-2（登记观察项，未改行为）**：管理口地址/网关变更的 `commit confirmed` 强制按
+FR-CFG-012 原文**只约束 SSH 会话**，控制台（api 来源）改管理口不会被要求确认（提交成功
+但带"注意连通性"警告，页面已如实展示）。浏览器同样可能自锁（控制台就跑在管理地址上），
+**建议评估是否把 api/console 来源纳入**——属规格口径变更，故只登记。
+
+------ 1. 改动清单 -----
+| 文件 | 改动 |
+|---|---|
+| `internal/api/ui/{index.html,app.js,style.css}` | 配置卡：只读视图（版本+JSON 折叠预览）／编辑视图（系统节表单 + 原始 JSON + 差异 + 操作按钮）；`input` 监听（非 change）；提交成功即 DELETE candidate 释放锁；CONFIRM_REQUIRED 处理作纵深防御并注明 FR-CFG-012 口径；页脚文案同步 |
+| `internal/config/engine.go` | `UpdateCandidate` 增"敏感叶子继承"（`inheritSensitive`） |
+| `internal/model/validate.go` | 兜底：用户必须有口令哈希 |
+| `internal/api/ui_test.go` | 新增「app.js 不得调用 x-internal 端点」（剥注释后判，变异验证）；字段名守护扩到 `GET /configuration` |
+| `internal/config/redact_inherit_test.go`（新） | 引擎继承单测（含显式新值优先） |
+| `internal/api/configuration_committed_test.go` | 新增 R44-1 端到端（提交后原口令仍可登录）+ 无口令用户被拒 |
+| `internal/api/resources_test.go`、`internal/model/validate_test.go` | 测试夹具修正（原先构造了无口令用户——现实里不该存在）+ 新校验用例 |
+| 规格书附录 A / AGENTS.md | 决策 #120；决策计数 119→120 |
+
+------ 2. 自检与变异验证 -----
+- **make check 全绿**：vet=0；`go test -p 1 ./...` 21 包 ok（宿主并行仍会 errno=1455，按红线 10 串行）；
+  cover/archtest/docscheck/toolcheck/prototype-check 全过；决策条数 120 一致；openapi.json 同步。
+- **变异验证**：① 去掉引擎的 `inheritSensitive` 调用 → 继承单测报红
+  （"candidate 里口令哈希被抹掉了"）；② 在 app.js 里故意写 `/cli/execute` → x-internal 守护报红
+  （而注释里的合法提及不误报）。
+- VM 上 `node --check app.js` 通过。
+
+------ 3. 浏览器可视验收（黑盒；截图 + 只读 DOM 双向印证） -----
+| 验收点 | 结果 |
+|---|---|
+| 配置卡（只读） | `（committed revision 3）`、版本/状态、展开后是完整 committed JSON（interfaces/resource_pools/…） |
+| 开始编辑 | 表单显示当前值（主机名 nfvis）、消息"已进入编辑会话（candidate = 当前 committed）"；label↔input 已关联（`for/id`，验收时发现未关联并修） |
+| 表单改值 | 改主机名 → 消息"已写入 candidate（未保存）"、JSON 文本同步（**此处发现 `change` 不触发**：程序化赋值不置"值已改"标志 → 改监听 `input`） |
+| 保存 | "已保存到 candidate（有未提交变更）" |
+| 查看差异 | **修复前**：差异里多出 `[edit system login users admin] - password-hash «已隐藏»`（R44-1 现场）；**修复后**：只剩 `- hostname nfvis; + hostname nfvis-web;` |
+| 提交 | "提交成功（revision 4）"，回到只读视图、版本号 4、JSON 含 nfvis-web；事件卡实时出现 `config-committed：revision=4`；**会话锁已释放**（sessions 返回 null） |
+| 丢弃 | 再改主机名为 discard-me → 保存 → 丢弃 → committed 仍是 nfvis-web（discard-me 未生效） |
+| 管理口变更（R44-2 现场） | 原始 JSON 里加 `system.management.address` → 提交成功（revision 5）+ 页面显示"提示：警告: 管理口地址/网关已变更，注意连通性"；**未被要求 confirmed**（按 FR-CFG-012 只约束 SSH 会话），确认按钮保持隐藏 |
+| CLI 对照 | `show configuration` 显示 `hostname nfvis-web`、`management { address 192.168.155.129/24; }`——与 UI 提交逐项一致（同一 committed） |
+| 会话锁 | 提交/丢弃后 `GET /system/configuration/sessions` 返回 `null`（无锁） |
+
+------ 4. 环境复原 -----
+- 开发态实例（:8443、/tmp/ui.db）验完已停；/tmp 中间产物已清；已装实例恢复 active（1.1.25）；
+  VPP 拓扑与 vnf-a/vnf-b 未受影响；流量复通（BVI ping 双向 10/10 0% 丢包、宿主到 guest <1ms）。
+  管理口地址的提交只发生在**开发态实例的临时配置库**（纯配置声明，运行期不应用、不触网卡），
+  随 /tmp/ui.db 一并删除；已装实例与 ens160 全程未动。
+
+------ 5. 留档 -----
+浏览器截图（IAB artifacts）：配置卡只读态（展开 JSON）、编辑态、差异（修复后）、提交结果（含管理口警告）。
+VM 侧：`/root/ui-nfvisd.out`。

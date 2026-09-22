@@ -82,6 +82,51 @@ func TestUIAssetsHaveNoSecretsOrInlineScript(t *testing.T) {
 			t.Errorf("%s 不应含绝对外部地址", asset)
 		}
 	}
+	// 前端不得调用 x-internal 端点（决策 #115 定的边界：`/cli/execute` 与 `/cli/candidates`
+	// 契约明言"仅 nfvis-cli 使用、不承诺第三方兼容"，返回终端文本，前端解析它既越界又脆弱）。
+	// 先剥掉 JS 注释再判——注释里解释"前端不碰它"是**合法**提及，不该误报。
+	js := stripJSComments(get(APIPrefix + "/ui/app.js"))
+	for _, bad := range []string{"/cli/execute", "/cli/candidates"} {
+		if strings.Contains(js, bad) {
+			t.Errorf("app.js 不得调用 x-internal 端点 %s（前端只用对外 REST）", bad)
+		}
+	}
+}
+
+// stripJSComments 去掉 JS 的 /* */ 与 // 注释（不区分字符串内的 //——本仓库前端不含
+// 绝对地址类字符串，且"不得含外部地址"另有断言；此处的判定对象是**代码**里的端点名）。
+func stripJSComments(src string) string {
+	var b strings.Builder
+	inBlock := false
+	for _, line := range strings.Split(src, "\n") {
+		if inBlock {
+			i := strings.Index(line, "*/")
+			if i < 0 {
+				continue
+			}
+			inBlock = false
+			line = line[i+2:]
+		}
+		for {
+			i := strings.Index(line, "/*")
+			if i < 0 {
+				break
+			}
+			j := strings.Index(line[i:], "*/")
+			if j < 0 {
+				inBlock = true
+				line = line[:i]
+				break
+			}
+			line = line[:i] + line[i+j+2:]
+		}
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 func TestUIAssetsUnknownPathAndTraversal(t *testing.T) {
@@ -211,6 +256,7 @@ func TestUIFieldNamesExistInResponses(t *testing.T) {
 	}{
 		{"/system/status", []string{"hostname", "uptime_seconds", "config_ready"}},
 		{"/resource-pools", []string{"hugepages", "cpu"}},
+		{"/configuration", []string{"configuration", "revision"}}, // 配置卡（增量 2 写路径）
 	} {
 		m := get(c.path)
 		for _, k := range c.keys {

@@ -65,6 +65,45 @@
       </table>
     </article>
 
+    <article class="card wide" id="cfg-card">
+      <h2>配置 <span id="cfg-note" class="muted small"></span></h2>
+
+      <!-- 只读：committed 配置概览 -->
+      <div id="cfg-read">
+        <dl id="cfg-summary" class="kv"></dl>
+        <details id="cfg-details">
+          <summary class="muted">展开完整配置（committed）</summary>
+          <pre id="cfg-json" class="code"></pre>
+        </details>
+        <button id="cfg-edit-btn" type="button">开始编辑</button>
+      </div>
+
+      <p id="cfg-msg" class="muted small" hidden></p>
+
+      <!-- 编辑：candidate 会话（提交或丢弃后自动结束） -->
+      <div id="cfg-edit" hidden>
+        <p class="muted small">
+          编辑的是 candidate——未提交的变更不影响正在运行的配置。常用项用下面的表单，
+          其余字段在「原始 JSON」里改；两者都写进同一份 candidate。
+        </p>
+        <div id="cfg-forms" class="cfg-forms"></div>
+        <details id="cfg-raw-wrap">
+          <summary class="muted">原始 JSON（整体替换 candidate）</summary>
+          <textarea id="cfg-text" rows="12" spellcheck="false"></textarea>
+          <p class="muted small">保存时以这段 JSON 为准；表单改动会先写回这里。</p>
+        </details>
+        <div class="cfg-actions">
+          <button id="cfg-save-btn" type="button">保存到 candidate</button>
+          <button id="cfg-diff-btn" type="button" class="ghost">查看差异</button>
+          <button id="cfg-commit-btn" type="button">提交</button>
+          <button id="cfg-commit-confirmed-btn" type="button" hidden>以 commit confirmed 提交（10 分钟）</button>
+          <button id="cfg-confirm-btn" type="button" hidden>确认在途提交</button>
+          <button id="cfg-discard-btn" type="button" class="ghost">丢弃并结束编辑</button>
+        </div>
+        <pre id="cfg-diff" class="code" hidden></pre>
+      </div>
+    </article>
+
     <article class="card">
       <h2>虚拟机</h2>
       <table id="vm-table">
@@ -94,7 +133,7 @@
 
   <footer class="foot muted">
     数据取自本机 REST 接口；页面每 5 秒兜底刷新一次，事件推送到达时立即刷新。
-    本页面为只读视图，不修改任何配置。
+    配置修改在「配置」卡片里经 candidate → 提交 流程进行，未提交前不影响运行配置。
   </footer>
 </section>
 
