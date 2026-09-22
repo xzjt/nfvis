@@ -33,7 +33,8 @@
   cmdline 含 hugepagesz=1G/2M + isolcpus=2-5 + intel_iommu=on；
   **vs-vnf 拓扑与 vnf-a/vnf-b 在跑、流量已复通**（BVI ping 双向 3/3、宿主经 DPDK 物理口 <1ms）；
   镜像 `debian-12-generic-amd64.qcow2` + `alpine.qcow2`（阶段 3 前置）+ 容器镜像 `alpine:3.20`；
-  配置库 rev 55 / audit 103（内容与复跑前基线逐字节一致）。
+  配置库 rev 55 / audit 103（内容与复跑前基线逐字节一致）；**`nodejs` v22.22.1**（round37 装，
+  仅用于 `node --check internal/api/ui/app.js` 校验 Web 前端语法——前端与 CI 都**不依赖** node）。
   ⚠️ 管理口令、`alpine.qcow2`、`docker alpine:3.20`、`rev/audit` 这四项**都会随快照恢复而变/丢失**，
   每次从快照重建后要重新核对并回写（round36 就撞上其中两条）。
   ⚠️ 集成测试环境（VPP 运行、镜像、1G 大页布局、ens192/ens224 交 VPP）随快照清掉——

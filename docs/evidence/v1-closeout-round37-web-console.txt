@@ -1,0 +1,102 @@
+===== V1 收尾第三十七轮：V2 Web 控制面增量 1（只读总览）=====
+日期：2026-09-22
+目标机：nfvis-vm（VMware；已装实例仍是 **1.1.25**，本轮**未动它**——新代码跑在 :8443 的开发态实例上）
+源码：main `fdcfe89` 起分支 `feat/web-console-readonly`（两个提交：决策 #115 的实现 + 前端改按实际响应取数）
+起态：用户问「现在可以做 web 界面吗」，按建议确认先做增量 1（只读总览、内嵌同源托管、免构建前端）
+终止态：`make check` 全绿；真机（HTTPS + 真实 VPP/告警/事件）验证通过；环境复原
+
+------ 0. 结论 -----
+- 规格书 §12 本就把 Web 控制面列为 **V2 候选**（「本规格书 API 即为其数据契约」），V1 已收口且
+  109 条 FR 无一条要求图形界面 → 本轮是**开 V2 新范围**，按规则 1 先落**决策 #115** 再写代码。
+- 交付形态：内嵌进 nfvisd（`internal/api/ui/`，Go `embed`），**同源**托管于 `GET /api/v1/ui/`
+  （`/ui` 302 到 `/ui/`）。同源 ⇒ **不需要 CORS**，deb 里也**不需要任何额外部署件**。
+- 前端**免构建**（原生 HTML/CSS/JS，无 npm/node，产物入库）：`make check`/CI（纯 Go + shell）、
+  deb 可复现（`SOURCE_DATE_EPOCH`）、离线构建口径全部不变。
+- **只读**：系统/版本/资源池/数据面/接口/虚拟机/容器/告警一屏；实时刷新用既有 `GET /events`。
+  **不含任何写操作**（配置读写、console 终端留后续增量）。
+- **副产物（重要）**：本轮发现 **REST 资源 API 的实际响应比契约声明的薄**（见 §3），
+  已登记待决策；本增量把 UI 建在真实字段上，不伪造、不掩盖。
+
+------ 1. 契约先行与守护（改动清单） -----
+| 文件 | 改动 |
+|---|---|
+| 规格书附录 A | 追加**决策 #115**（范围定位/交付形态/工具链/鉴权口径/增量范围/契约同步/守护/后续增量） |
+| `docs/NFViS-openapi.yaml` | 增 `/ui`（302）与 `/ui/`（静态资源，`security: []`）→ 重新生成 `internal/api/openapi.json` |
+| `AGENTS.md` | 决策计数 114 → **115**；补 Web 控制面现状与"新增端点/读物类型必须同步三处守护" |
+| `docs/NFViS-Go工程目录骨架设计.md` | `internal/api/ui/` 一行（决策 #115 的落点） |
+| `docs/NFViS-用户手册.md` | 新增 §10.12「Web 界面（只读总览）」（访问地址、能看什么、只读、登录、自签证书、排障指引） |
+| `internal/api/ui.go` | 内嵌托管：白名单三文件、无鉴权、安全头、`/ui` 显式重定向 |
+| `internal/api/ui/{index.html,app.js,style.css}` | 免构建前端 |
+| `internal/archtest/user_text_test.go` | 操作者可见文本判据**扩到 `.html/.js/.css`** |
+
+**为什么 UI 路由放在 `/api/v1` 下而不是根路径**：`routes_contract_test.go` 按
+`mux.Handle("METHOD "+APIPrefix+"…")` 的形式解析路由并与契约比对——放根路径会**静默落在守护之外**。
+放前缀下则新路由自动受契约守护（本轮两条路由都被它判过）。
+
+**为什么扩 `user_text` 守护**：决策 #87 定的判据是「这段文本会到达操作者吗」，不是文件后缀。
+UI 渲染出的文本当然会到达操作者，不纳入就是新增了一类读物却留着缺口。口径取**操作者读物**那一套
+（`§x` 指向随包手册、圈号可作步骤编号，都是能解析的；FR-xxx / 决策 #nn / 里程碑编号一律禁），
+并新增三种按行剥注释的实现（JS 跳过引号里的 `//`、CSS 跳过引号里的 `/*`，方向都是"宁可误报不可漏判"）。
+
+------ 2. 真机验证（开发态实例 :8443，HTTPS，用已装实例的证书，不动 :443 服务） -----
+启动：`/tmp/nfvisd-ui2 -db /tmp/ui.db -listen 127.0.0.1:8443 -init-admin-password … -tls-cert/‑key /var/lib/nfvis/tls/*`
+（`readlink /proc/<pid>/exe` 确认服务的确实是新二进制——红线：换二进制前先确认谁在服务。）
+
+| 项 | 结果 |
+|---|---|
+| `GET /api/v1/ui` | **302** → `Location: /api/v1/ui/` |
+| `GET /api/v1/ui/` | **200** `text/html; charset=utf-8` 3223 B |
+| `GET /api/v1/ui/app.js` | **200** `text/javascript; charset=utf-8` 17326 B |
+| `GET /api/v1/ui/style.css` | **200** `text/css; charset=utf-8` 3889 B |
+| `GET /api/v1/ui/nope.js` | **404** `{"code":"NOT_FOUND","message":"静态资源不存在"}`（统一错误体） |
+| 安全头 | `Content-Security-Policy: default-src 'self'; connect-src 'self'; … frame-ancestors 'none'`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-cache` |
+| 鉴权边界 | 静态资源**不带 token 可取**（登录页必须先能加载）；`/system/status` 无 token → **401**、带 token → 200；`/metrics` 无鉴权（既定设计） |
+| 登录 | 正确口令 → token；**错口令 → 401**「用户名或口令错误」；**坏 token → 401**「token 无效或已过期」 |
+| **指标名对齐** | 从 `app.js` 里抽出页面真正读的 **7 个指标名**，逐个到真实 `/metrics` 输出里找 → **全部命中**（`nfvis_system_cpu_online_count`、`_cpu_utilization_ratio`、`_memory_{total,available}_bytes`、`_disk_{total,free}_bytes`、`_disk_used_ratio`） |
+| 响应字段 | `/system/status` = hostname/uptime_seconds/config_ready；`/system/version` 7 项；`/vpp/status` = version/connected/pending_restart/threads/buffers/memory；`/resource-pools` = hugepages[]+cpu{isolated_cores,vpp_reserved,free,allocated}；`/interfaces`/`/vmf`/`/containers`/`/alarms` 形状均按 UI 假设核对 |
+| **SSE 端到端** | 先连上流 → `PUT /configuration/candidate` + `commit` → 流上收到真实帧：`id: 2` / `event: config-committed` / `data: {"id":2,"type":"config-committed","timestamp":"…","payload":{"revision":3,"user":"admin"}}`（共 170 B，另含 `: keepalive` 心跳）。**前端解析的正是这个格式**（`data:` 行 → `ev.type`/`ev.timestamp`/`ev.payload.revision`） |
+| 前端语法 | VM 装 `nodejs`（v22.22.1，见 §4）→ **`node --check app.js` 语法 OK**；另做括号/引号配平粗校验通过 |
+| 前端纯函数 | 把 `parseMetrics` 从 app.js 抽出、喂**真实** `/metrics` 输出：5 个系统指标取值与原始输出逐位一致（6 核 / 27321s / 7734935552 B / 102971269120 B / 0.1832…），带 label 的同名指标正确**相加**、注释行未被误收、共解析 25 个指标 |
+
+**浏览器侧未能自动化**（环境无浏览器）：页面的渲染结果靠"字段/指标名对齐 + JS 语法 + 纯函数实测"
+三项间接钉住；真正的可视验收仍需人工打开页面。这一点如实登记。
+
+------ 3. 本轮发现 R37-1：REST 资源 API 的实际响应比契约声明的薄（**待决策**） -----
+写完第一版前端后真机一跑，页面成片「—」——逐条核对发现**契约声明的响应字段与实现返回的不是一回事**。
+`routes_contract_test.go` 只守护「路由 ⊆ 契约」（**路径**），**不守护响应形状**，故这类漂移一直没有守护。
+三处实测（已装实例 1.1.25 与新构建都一致）：
+
+| 端点 | 契约声明 | 实现实际返回（实测） |
+|---|---|---|
+| `GET /system/status` | `SystemStatus`：`hostname`/`uptime_seconds`/`cpu`/`memory`/`hugepages`/`storage` | `hostname`/`uptime_seconds`/`config_ready`（`cpu`/`memory`/`hugepages`/`storage` **都没有**；`config_ready` 契约里**没声明**） |
+| `GET /interfaces` | `Interface`：`kind`/`driver`/`enabled`/`link`/`speed_mbps`/`mtu`/`mac`/`numa_node`/`description`/`sriov`/`statistics` | **配置**对象（本机只有 `name`）；运行态链路/驱动/速率在 REST 侧**没有出口**（CLI 的 `show interfaces physical` 才有）；`/interfaces/{name}` 另附 `statistics`（收发包/错误/丢弃） |
+| `GET /vpp/status` | `VppStatus`：`state`/`dpdk`/`config_revision`/`main_heap_size`/`buffers_per_numa` | `version`/`connected`/`pending_restart`/`threads`/`buffers`/`buffers_source`/`memory` |
+
+**影响**：按 OpenAPI 规范开发第三方客户端（或 Web 控制面）会在这些字段上拿到空值。**本增量不修**——
+怎么收口是设计决策（补实现让 REST 与契约一致，还是缩契约承认不提供），按规则 1 需先落决策。
+本轮只把 UI 建在真实字段上：系统数字改用 `/metrics`（Prometheus 文本、单序列、格式稳定）、
+接口表改用"配置字段 + 逐口 `/interfaces/<name>` 统计"、数据面卡片按真实字段渲染。
+**不使用 `/cli/execute`**：契约标着 `x-internal: true`「仅 nfvis-cli 使用、不承诺第三方兼容」，
+且返回终端文本——前端解析它既越界又脆弱（正是语义校验脚本反复踩过的那类）。
+
+**新增两条"防静默变空"守护**（字段/指标改名只会让页面显示「—」，不报错）：
+`TestUIReadsOnlyExistingMetricNames`（指标名**从 app.js 里抽**，逐个到真实 `/metrics` 里找；
+宿主指标由 Linux 实现产出，非 Linux 上**跳过**而非报红，否则它在 Windows 开发机上恒红——工具自己造的假红）、
+`TestUIFieldNamesExistInResponses`（UI 依赖的 JSON 键必须在真实响应里存在）。
+
+------ 4. 环境变动与复原 -----
+- 开发态实例 `/tmp/nfvisd-ui2`（:8443，`/tmp/ui.db`）→ 验证完已 kill；`/tmp` 中间产物已清。
+- **VM 新装 `nodejs` v22.22.1**（`apt-get install -y nodejs`，USTC 源）——仅用于 `node --check` 校验前端语法。
+  前端本身**不依赖 node**（免构建是决策 #115 的口径）；CI/`make check` 也**不依赖**它。
+  后续改前端后建议手动跑一次：`node --check internal/api/ui/app.js`。
+- **已装实例（1.1.25）未被触碰**：:443 服务全程 active，配置库与 VNF 拓扑未变（验证用的是独立
+  `/tmp/ui.db` + 独立端口）。
+- ⚠️ 本轮又踩一次红线：`pkill -f nfvisd-ui` **把自己的 ssh 会话杀了**（远程 bash 的 cmdline 含该串，
+  ssh 退出 255、命令零输出）。可靠做法仍是 `pkill -x <精确进程名>` 或把脚本落文件再跑（§0 红线 5）。
+
+------ 5. 自检与留档 -----
+`make check` **全绿**（退出码 0）：全部包 ok、覆盖率全部 ≥70%、依赖方向守护、**决策条数 115 一致**、
+openapi.json 与契约同步、两个工具自校准脚本、原型全绿。
+契约 YAML 可解析；`docs/` 未引入未决标记。
+留档（VM）：`/tmp/ui-daemon.out`（启动日志）、`/tmp/sse2.out`（SSE 原始帧）、`/tmp/m.txt`（真实 metrics）、
+`/root/round37-*.sh|js`（本轮验证脚本）。
