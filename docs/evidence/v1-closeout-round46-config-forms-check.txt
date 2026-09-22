@@ -1,0 +1,45 @@
+===== V1 收尾第四十六轮：配置页向导化（接口/资源池表单）+ commit check 预校验（决策 #122） =====
+日期：2026-09-22
+目标机：nfvis-vm（VMware；已装实例 1.1.25 全程未动，新代码跑在 :8443 的开发态实例上）
+源码：main `af0d5d8` 起分支 `feat/web-config-forms-check`（一个提交 `daad234`，决策 #122）
+起态：round42 覆盖核查缺口 #10（`commit check` 仅校验不下发——CLI 有、REST 无）；
+      round44 的配置页只有系统节表单，接口/资源池仍要手写 JSON
+终止态：`make check` 全绿；浏览器可视验收通过（三节表单 + 预校验正反例 + 提交）；环境复原
+
+------ 0. 交付 -----
+1. **`POST /configuration/check`**（缺口 #10 收口）：CLI `commit check` 的 REST 等价物——
+   调用既有 `Engine.CommitCheck`（与提交同一份校验：schema + 语义 + 镜像存在性），
+   **不落库、不下发底座**；会话前提与 commit 相同（须持 candidate）。
+   **校验发现问题时仍返回 200**——检查本身是成功的，结果在 `{ok, errors[]}` 里
+   （客户端不必把 400 当"检查失败"处理）；契约新增 `ConfigCheckResult` schema。
+2. **配置页表单扩到三节**：系统（原有）+ **接口**（对每个已声明接口：描述 / MTU / 启用三态）
+   + **资源池**（隔离核 `2-5,7` 文本 ↔ 数组解析/格式化 + 1G/2M 大页数量）；三节与原始 JSON
+   共用同一份 candidate 与同一套"改字段 → 写回文本 → 保存"路径。
+3. **编辑态新增「预校验」按钮**（先保存再校验；通过给绿字，问题逐条列出）。
+
+------ 1. 自检 -----
+- `make check` 全绿：vet=0；`go test -p 1 ./...` 21 包 ok（宿主并行仍会 errno=1455，按红线 10 串行）；
+  cover/archtest/docscheck/toolcheck/prototype-check 全过；决策条数 122 一致；契约无重复键、
+  openapi.json 同步。
+- `TestCheckConfigurationEndpoint`：合法 candidate → `ok=true` 且 errors 空；引用不存在接口 →
+  `ok=false` 且逐条列出（**仍 200**）；未持 candidate → 报错、**不谎报通过**。
+- VM 上 `node --check app.js` 通过；UI 守护（x-internal 边界、字段名、无内联脚本）全过。
+
+------ 2. 浏览器可视验收（黑盒；截图 + 只读 DOM 双向印证） -----
+| 验收点 | 结果 |
+|---|---|
+| 三节表单 | `#cfg-forms` 的 legend = 系统 / 接口 / 资源池；接口节列出 ens192、ens224（描述/MTU/启用三态），资源池节列出 隔离核 / 大页 1G 数量 / 大页 2M 数量 |
+| 表单改值 | ens192 描述→`to-TOR-r46`、MTU→`9000`；ens224 启用→**禁用**；大页 2M 数量→`768`；读回 candidate 文本逐项吻合（`interfaces[0]={description,mtu,name}`、`interfaces[1].enabled=false`、`hugepages=[{1G,2},{2M,768}]`） |
+| 预校验（正例） | "预校验通过（服务端已跑与提交相同的全部校验）。" |
+| 预校验（反例） | 原始 JSON 里加 `virtual_switches:[{name:"vs-bad",ports:[{interface:"no-such-if"}]}]` → "预校验发现 1 个问题：virtual-switches[vs-bad].ports[1]：接口 \"no-such-if\" 不存在或不是物理口/bond"（红字） |
+| 撤销后提交 | "提交成功（revision 4）。提示：警告: resource-pools 变更需 reboot 生效"；回到只读视图 revision 4 |
+| CLI 对照 | `show configuration` 逐项一致：`interfaces ens192 { description to-TOR-r46; mtu 9000; }`、`interfaces ens224 { enabled false; }`、`resource-pools { cpu { isolated-cores [ 2 3 4 5 ]; } hugepages 1G { count 2; } hugepages 2M { … } }` |
+
+------ 3. 环境复原 -----
+- 开发态实例（:8443、/tmp/ui.db）验完已停；/tmp 中间产物已清；已装实例恢复 active（1.1.25）；
+  VPP 拓扑与 vnf-a/vnf-b 未受影响；流量复通（BVI ping 双向 10/10 0% 丢包、宿主到 guest <1ms）；
+  已装实例配置库未动。
+
+------ 4. 下一步（"依次进行"的剩余项） -----
+③ 增量 3 诊断视图（日志 + ping/traceroute + 两处 statistics 响应字段 + clear counters +
+   ssh host-key + core-dumps 导出）；④ 发版 v1.1.26。
