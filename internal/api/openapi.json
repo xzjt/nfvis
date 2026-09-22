@@ -426,6 +426,33 @@
         },
         "type": "object"
       },
+      "ConfigCheckResult": {
+        "description": "仅校验的结果（决策",
+        "properties": {
+          "errors": {
+            "description": "校验问题清单（ok=true 时为空数组）",
+            "items": {
+              "properties": {
+                "message": {
+                  "example": "主机名不合法",
+                  "type": "string"
+                },
+                "path": {
+                  "example": "system.hostname",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "ok": {
+            "description": "校验是否全部通过",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "ConfigDocument": {
         "description": "整份配置文档（JSON 形式，节点与 CLI 层级一致）",
         "properties": {
@@ -2866,6 +2893,30 @@
           }
         },
         "summary": "整体替换 candidate（load override 语义）",
+        "tags": [
+          "configuration"
+        ]
+      }
+    },
+    "/configuration/check": {
+      "post": {
+        "description": "运行与提交相同的全部校验（schema + 语义 + 镜像存在性等）但**不落库、不下发底座**，\n供控制台在提交前预校验（round42 覆盖核查缺口 #10，决策 #122）。\n需要持有 candidate 会话（与 commit 相同）；校验发现问题时仍返回 200——\n检查本身是成功的，结果在 `ok` 与 `errors` 里。\n",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigCheckResult"
+                }
+              }
+            },
+            "description": "校验完成（ok=false 时 errors 列出全部问题）"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "仅校验 candidate 不下发（CLI `commit check` 的 REST 等价物）",
         "tags": [
           "configuration"
         ]
