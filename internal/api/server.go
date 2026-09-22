@@ -76,8 +76,10 @@ type Server struct {
 	l3          L3Runtime
 	lldp        LldpRuntime
 	state       *state.State
-	vppState    VppStateRuntime // VPP 运行态快照（决策 #84/#116：CLI show 与 REST 同源）
-	versions    VersionsRuntime // 组件版本探测（R37-2 收口，决策 #118）
+	vppState    VppStateRuntime        // VPP 运行态快照（决策 #84/#116：CLI show 与 REST 同源）
+	versions    VersionsRuntime        // 组件版本探测（R37-2 收口，决策 #118）
+	logs        func() ([]byte, error) // 服务端日志来源（决策 #123：GET /system/logs）
+	diag        DiagRuntime            // 诊断命令（决策 #123：/diagnostics/* 与清零统计）
 	sriov       SRIOVSetter
 	dpdk        DPDKSetter
 	natSessions NatSessionsRuntime
@@ -112,7 +114,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, vppState: opts.VppState, sriov: opts.SRIOV, dpdk: opts.DPDK, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, ports: opts.Ports, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), versions: opts.Versions, log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, vppState: opts.VppState, sriov: opts.SRIOV, dpdk: opts.DPDK, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, ports: opts.Ports, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), versions: opts.Versions, logs: opts.LogSource, diag: opts.Diag, log: log}
 	s.cliExec.setRuntime(opts.Diag, opts.State)
 	s.cliExec.setPorts(opts.Ports)       // 决策 #83：show 的空态与 Tab 候选同源
 	s.cliExec.setVppCtl(opts.VPP)        // 发现 #11：show vpp 的版本/连接/待重启
@@ -293,6 +295,11 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 
 	// M5-4：诊断归档与 core dump（FR-OPS-040/041）
 	mux.Handle("GET "+APIPrefix+"/system/tech-support", s.auth(s.handleListTechSupport, schema.ClassReadOnly, "show system tech-support"))
+	// 诊断视图（决策 #123）：与 CLI 同类权限
+	mux.Handle("GET "+APIPrefix+"/system/logs", s.auth(s.handleSystemLogs, schema.ClassReadOnly, "show log system"))
+	mux.Handle("POST "+APIPrefix+"/diagnostics/ping", s.auth(s.handlePing, schema.ClassOperator, "ping"))
+	mux.Handle("POST "+APIPrefix+"/diagnostics/traceroute", s.auth(s.handleTraceroute, schema.ClassOperator, "traceroute"))
+	mux.Handle("POST "+APIPrefix+"/interfaces:clear-statistics", s.auth(s.handleClearInterfaceStats, schema.ClassSuperUser, "clear interfaces statistics"))
 	mux.Handle("POST "+APIPrefix+"/system/tech-support", cfgAPI(s.handleCreateTechSupport))
 	mux.Handle("GET "+APIPrefix+"/system/tech-support/{file}", s.auth(s.handleDownloadTechSupport, schema.ClassReadOnly, "show system tech-support"))
 	mux.Handle("GET "+APIPrefix+"/system/core-dumps", s.auth(s.handleListCoreDumps, schema.ClassReadOnly, "show system core-dumps"))

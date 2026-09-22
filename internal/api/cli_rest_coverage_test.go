@@ -109,6 +109,11 @@ var cliRESTCoverage = map[string]string{
 	"show alarms":                                      "GET /alarms",
 	"show log audit":                                   "GET /audit-logs",
 	"show users":                                       "GET /system/login-users",
+	"show log system":                                  "GET /system/logs",
+	"ping <host>":                                      "POST /diagnostics/ping",
+	"traceroute <host>":                                "POST /diagnostics/traceroute",
+	"clear interfaces statistics":                      "POST /interfaces:clear-statistics",
+	"commit check":                                     "POST /configuration/check",
 	"show configuration candidate":                     "GET /configuration/candidate",
 	"show configuration":                               "GET /configuration",
 	"show configuration compare rollback <n>":          "GET /configuration/diff + POST /configuration/rollback/{n}",
@@ -202,15 +207,10 @@ var cliRESTExceptions = map[string]string{
 // cliRESTGaps 已登记的 REST 缺口（CLI 有、REST 无）→ 理由/归属。补一个划掉一个。
 // 与 docs/CLI-REST覆盖核查.md §3 的 14 项一一对应。
 var cliRESTGaps = map[string]string{
-	"show log system":   "无日志端点；决策 #115 列入后续增量（日志视图），核查 #2",
-	"ping <host>":       "无端点（CLI 经 VPP L3）；Web 排障刚需，核查 #3",
-	"traceroute <host>": "无端点；同上，核查 #4",
 	"show virtual-switches <name> statistics":          "VirtualSwitch 响应无统计字段（数据在服务端有），核查 #5",
 	"show virtual-machine-functions <name> statistics": "VM 详情响应无统计字段，核查 #6",
-	"clear interfaces statistics":                      "无端点，核查 #7",
 	"request system ssh host-key regenerate":           "无端点（宿主 sshd 操作），核查 #8",
 	"request system core-dumps export":                 "core-dumps 只有 GET/DELETE，无导出，核查 #9",
-	"commit check":                                     "POST /configuration/commit 无 check 模式，核查 #10",
 	"load merge":                                       "PUT candidate 只有 override 语义，核查 #11",
 	"request system api token revoke":                  "V1 明确延期（决策 #76⑧）；仅 DELETE /login 吊销当前会话，核查 #12",
 	"request system storage format-data":               "V1 有意延期（破坏性操作），核查 #13",

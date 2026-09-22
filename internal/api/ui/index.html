@@ -126,6 +126,24 @@
       <div id="alarms"></div>
     </article>
 
+    <article class="card wide">
+      <h2>诊断</h2>
+      <div class="cfg-forms">
+        <fieldset>
+          <legend>连通性测试（经数据面）</legend>
+          <label for="diag-host">目标</label>
+          <input id="diag-host" type="text" placeholder="192.0.2.1">
+          <label for="diag-count">次数</label>
+          <input id="diag-count" type="text" value="5">
+          <div class="cfg-actions"><button id="diag-ping-btn" type="button">执行 ping</button></div>
+        </fieldset>
+      </div>
+      <p class="muted small">只覆盖数据面（VPP）——管理口在内核平面，请在宿主机上 ping。</p>
+      <pre id="diag-out" class="code" hidden></pre>
+      <div class="cfg-actions"><button id="diag-log-btn" type="button" class="ghost">刷新服务端日志（末 100 行）</button></div>
+      <pre id="diag-log" class="code" hidden></pre>
+    </article>
+
     <article class="card">
       <h2>最近事件</h2>
       <ul id="events" class="events"></ul>

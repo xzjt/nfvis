@@ -1,0 +1,60 @@
+===== V1 收尾第四十七轮：增量 3 第一刀——诊断视图（日志/ping/traceroute/清零统计）（决策 #123） =====
+日期：2026-09-22
+目标机：nfvis-vm（VMware；已装实例 1.1.25 全程未动，新代码跑在 :8443 的开发态实例上）
+源码：main `f3275b2` 起分支 `feat/web-diagnostics`（一个提交 `ba21274`，决策 #123）
+起态：round42 覆盖核查的缺口 #2~#4/#7（日志 / ping / traceroute / 清零统计）——能力在服务端
+      都已存在（CLI 走 DiagRuntime 与 Options.LogSource），缺的只是对外端点
+终止态：`make check` 全绿；四个端点真机验证（判定与 CLI 逐字一致）；浏览器诊断卡验收；环境复原
+
+------ 0. 交付（4 个新端点 + 诊断卡） -----
+| 端点 | 权限 | 说明 |
+|---|---|---|
+| `GET /system/logs`（text/plain，`?last=<n>`） | ClassReadOnly | 服务端日志尾部，来源即 `Options.LogSource`（与 `show log system` 同源）；未接入 → 503 不谎报空日志 |
+| `POST /diagnostics/ping`（`{host, source?, vrf?, count?}` → `{output}`） | ClassOperator | 经 VPP 数据面 ping；**未通即 502**（0 发包/0 应答都算失败），失败时把原始回显逐行放进 `detail` |
+| `POST /diagnostics/traceroute`（`{host, vrf?}`） | ClassOperator | 同形状 |
+| `POST /interfaces:clear-statistics`（`{name?}`，缺省全部） | ClassSuperUser | 成功 204 |
+
+实现：`internal/api/diagnostics.go`；`Server` 增 `logs`/`diag` 注入字段（`Options.LogSource`/`Options.Diag`，
+与 CLI 同源同装配）。前端：控制台新增「诊断」卡（ping 表单 + 刷新服务端日志末 100 行；
+日志按需拉取，不进 5 秒轮询）。守护：覆盖核查把 5 项（含 round46 的 `commit check`）从缺口表
+移入覆盖表——**缺口 13→8**（剩：两处 statistics 响应字段、ssh host-key、core-dumps 导出、
+load merge、两项已登记延期）。
+
+------ 1. 自检 -----
+- `make check` 全绿：vet=0；`go test -p 1 ./...` 21 包 ok（宿主并行仍会 errno=1455，按红线 10 串行）；
+  cover/archtest/docscheck/toolcheck/prototype-check 全过；决策条数 123 一致；契约无重复键、
+  openapi.json 同步、**无悬空 $ref**（自查脚本逐个解析确认）。
+- 四个端点各一条用例：日志原文/`last` 截取/未接入 503；ping 通 200、**未通 502 且 detail 带回显**、
+  缺 host 400；traceroute；清零 204 且接口名透传、缺省为空=全部。
+- VM 上 `node --check app.js` 通过。
+
+------ 2. 真机验证（与 CLI 逐字对照） -----
+| 项 | 结果 |
+|---|---|
+| `GET /system/logs?last=3` | `-- No entries --`；**CLI `show log system last 3` 同为空**——开发态实例不跑在 systemd 单元下，日志来源（单元日志优先）本就为空；两端同源同结果（已装实例上是真日志） |
+| `POST /diagnostics/ping`（不可达目标） | **502** + `PING_FAILED`，message 与 CLI **逐字一致**（"ping 未发出任何报文（192.168.100.1 不可经 VPP 到达）：ping 只覆盖 VPP 数据面"），detail 里是 vppctl 原始回显（`Failed: no egress interface` ×3 + `Statistics: 0 sent…`） |
+| 指定 source 后（3 发包 0 应答） | **502** "ping 已发出 3 个报文但无应答：192.168.100.1 不可达"——**未通即失败**的口径与 CLI 一致（附录 A #89/#93） |
+| `POST /interfaces:clear-statistics {name: ens192}` | **204** |
+| `POST /diagnostics/traceroute` | 200 + 原始输出（宿主侧 ICMP 路径） |
+| 浏览器「诊断」卡 | ping 表单（目标/次数）→ 失败详情完整渲染（含 VPP 原始回显与 CLI 同款指引文字）；「刷新服务端日志」→ `-- No entries --`（与 CLI 一致）；截图留档 |
+
+**如实登记（本轮未验到的）**：**ping 的成功路径**在开发态实例上验不到——该实例没有 VNF/容器，
+VPP 侧无可达目标（BVI 自身地址不回应 VPP 的 ping）；成功路径由单测覆盖（fakeDiag 返回成功回显
+→ 200 + output）。已装实例有在跑的 VNF，但它跑的是 1.1.25（无新端点）。
+
+**过程中的两条记录（都不是产品缺陷，但值得留档）**：
+- 为造成功路径，我曾试图把 vs-l2 的 L3 地址改到宿主网段——第一次用错键名（模型里 L3 口在
+  `vrfs[].l3_interfaces[].addresses`，不是 `virtual_switches[].gateway`；后者是 L2 的 BVI 网关
+  字段）。核对模型后确认**非缺陷**，是脚本用错了键。
+- 开发态实例的提交会把数据口移入它自己的 bridge domain（残留一个空 BD，宿主到 guest 的
+  连通性随之降到 1/3）——这是"两个配置驱动同一 VPP"的预期副作用；按待办 §3.6 的既定做法
+  **`systemctl restart vpp`** 清掉残留，收敛后只剩已装实例的 BD 6252701。
+
+------ 3. 环境复原 -----
+- 开发态实例已停；`/tmp` 中间产物已清；`systemctl restart vpp` 清残留拓扑；已装实例 active（1.1.25）；
+  **VPP 里只剩配置声明的 BD 6252701（BVI bvi0）**；流量复通：BVI ping 双向 10/10 0% 丢包、
+  宿主经 DPDK 物理口到两台 guest 各 5/5（<1ms）；已装实例配置库未动。
+
+------ 4. 下一步（"依次进行"剩余项） -----
+④ 发版 v1.1.26；以及增量 3 的剩余缺口（两处 statistics 响应字段、ssh host-key、core-dumps 导出、
+load merge）可另起一刀。
