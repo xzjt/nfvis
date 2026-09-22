@@ -118,6 +118,17 @@ func scopeFor(rel string, data []byte) (textScope, bool) {
 		return textScope{strip: unitCommentPart, patterns: goScriptPatterns()}, true
 	case base == "Makefile", base == "makefile", strings.HasSuffix(base, ".mk"):
 		return textScope{strip: hashCommentPart, patterns: goScriptPatterns()}, true
+	// Web 控制面的前端资源（决策 #115）：渲染出来的文本会到达操作者，按同一条判据必须纳入
+	// （否则新增的读物类型就成了守护缺口——决策 #87 的判据是「这段文本会到达操作者吗」，
+	// 不是「文件后缀像不像源码」）。口径取**操作者读物**那一套（docPatterns）而非源码那套：
+	// UI 文本与手册一样是给操作者读的话，`§x` 指向随包手册、圈号可作步骤编号，都是能解析的；
+	// 真正无从解析的是 FR-xxx / 决策 #nn / 里程碑编号，那几条一律禁。
+	case strings.HasSuffix(base, ".html"), strings.HasSuffix(base, ".htm"):
+		return textScope{strip: markupCommentPart, patterns: docPatterns()}, true
+	case strings.HasSuffix(base, ".js"):
+		return textScope{strip: jsCommentPart, patterns: docPatterns()}, true
+	case strings.HasSuffix(base, ".css"):
+		return textScope{strip: cssCommentPart, patterns: docPatterns()}, true
 	}
 	// 无后缀的文件：**`deploy/` 是随包安装的材料**（`postinst`/`prerm`/`postrm` 三个
 	// 维护者脚本按 dpkg 约定没有后缀，`dpkg -i` 时它们的输出直接打在操作者终端），
@@ -227,6 +238,82 @@ func unitCommentPart(line string) string {
 	return line
 }
 
+// jsCommentPart 返回 JS 行内注释之前的部分。
+// 必须跳过单/双/反引号字符串：`'http://x'` 里的 `//` 是字面量，不是注释
+// （否则会把后半行当注释剥掉，反而漏判真实文本）。
+func jsCommentPart(line string) string {
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case quote != 0:
+			if c == '\\' {
+				i++ // 转义：跳过下一个字符
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"' || c == '`':
+			quote = c
+		case c == '/' && i+1 < len(line) && line[i+1] == '/':
+			return line[:i]
+		}
+	}
+	return line
+}
+
+// cssCommentPart 返回 CSS 行内注释（`/* … */`）之外的部分。
+// 跳过单/双引号字符串——`content: "/* 非注释 */"` 里的 `/*` 是字面量，
+// 当成注释剥掉就会把**真实文本**吃掉（那是漏判，比误报危险）。
+// 同一行内的多处注释都剥掉；未闭合时本行剩余都算注释。
+func cssCommentPart(line string) string {
+	var out strings.Builder
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case quote != 0:
+			out.WriteByte(c)
+			if c == '\\' && i+1 < len(line) {
+				i++
+				out.WriteByte(line[i])
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+			out.WriteByte(c)
+		case c == '/' && i+1 < len(line) && line[i+1] == '*':
+			j := strings.Index(line[i+2:], "*/")
+			if j < 0 {
+				return out.String()
+			}
+			i += 2 + j + 1 // 跳过 `*/`
+		default:
+			out.WriteByte(c)
+		}
+	}
+	return out.String()
+}
+
+// markupCommentPart 返回 HTML 行内注释（`<!-- … -->`）之外的部分。
+func markupCommentPart(line string) string {
+	for {
+		i := strings.Index(line, "<!--")
+		if i < 0 {
+			return line
+		}
+		j := strings.Index(line[i+4:], "-->")
+		if j < 0 {
+			return line[:i]
+		}
+		line = line[:i] + line[i+4+j+3:]
+	}
+}
+
+// ⚠️ 上述三种剥法都是**按行**的（与本文件对 Go 的 `codePart` 同一口径）：跨行注释的中间行
+// 不会被剥掉。方向上这是**偏严**（中间行照扫，真违规一定会被报出来），不会漏判；
+// 代价是跨行注释里写内部编号会得到误报——UI 资源请用单行注释。
+
 // TestUserVisibleTextHasNoInternalRefs 操作者可见文本不得含内部引用或剥离残渣。
 func TestUserVisibleTextHasNoInternalRefs(t *testing.T) {
 	root := filepath.Join("..", "..")
@@ -302,6 +389,10 @@ func TestGuardCoversNonGoOperatorText(t *testing.T) {
 		// 无后缀但在别处的 shell 脚本：按 shebang 认出来
 		{"contrib/hooks/pre-commit", "#!/bin/sh\necho hi\n", true},
 		{"contrib/data/notes", "no shebang here\n", false},
+		// Web 控制面前端资源（决策 #115）：渲染出的文本会到达操作者，必须扫
+		{"internal/api/ui/index.html", "<!DOCTYPE html>\n", true},
+		{"internal/api/ui/app.js", "const a = 1;\n", true},
+		{"internal/api/ui/style.css", "body { margin: 0; }\n", true},
 		// 设计/契约/验收类文档有意不扫（引用即追溯落点）
 		{"docs/NFViS-系统产品需求与目标架构规格书.md", "# 规格书\n", false},
 		{"docs/NFViS-CLI命令全表.md", "# 全表\n", false},
@@ -335,6 +426,37 @@ func TestGuardCoversNonGoOperatorText(t *testing.T) {
 	}
 	if got := unitCommentPart("\t; FR-XXX-000"); got != "" {
 		t.Errorf("unitCommentPart 应豁免行首 ; 注释，得到 %q", got)
+	}
+
+	// 前端资源（决策 #115）的三条关键语义，逐条钉住：
+	//   ① JS 行内 `//` 是注释（注释里的编号豁免）——否则 `// FR-XXX-000` 会误报；
+	//   ② JS 字符串里的 `//` **不是**注释（`'http://x'` 必须整行留着）——否则真实文本被剥掉、漏判；
+	//   ③ CSS/HTML 的行内注释成对剥掉，注释外的内容原样保留。
+	for _, c := range []struct{ in, want string }{
+		{`const u = 'http://127.0.0.1/'; // FR-XXX-000`, `const u = 'http://127.0.0.1/'; `},
+		{`const u = "https://x/y";`, `const u = "https://x/y";`},
+		{`el.textContent = '提示（FR-OPS-041）';`, `el.textContent = '提示（FR-OPS-041）';`},
+		{`const re = /\/ui\/.*$/; // 剥前缀`, `const re = /\/ui\/.*$/; `},
+		{`// 整行注释里的 FR-XXX-000 不算`, ``},
+	} {
+		if got := jsCommentPart(c.in); got != c.want {
+			t.Errorf("jsCommentPart(%q) = %q，期望 %q", c.in, got, c.want)
+		}
+	}
+	if got := cssCommentPart(`.a { color: red; } /* FR-XXX-000 */`); got != `.a { color: red; } ` {
+		t.Errorf("cssCommentPart 应剥掉行内注释，得到 %q", got)
+	}
+	if got := cssCommentPart(`/* FR-XXX-000`); got != `` {
+		t.Errorf("cssCommentPart 未闭合注释应剥到行尾，得到 %q", got)
+	}
+	if got := cssCommentPart(`.b { content: "/* 非注释 */"; }`); got != `.b { content: "/* 非注释 */"; }` {
+		t.Errorf("cssCommentPart 不应把引号内的 /* 当注释（否则真实文本被吃掉），得到 %q", got)
+	}
+	if got := markupCommentPart(`<p>文本</p><!-- FR-XXX-000 -->`); got != `<p>文本</p>` {
+		t.Errorf("markupCommentPart 应剥掉行内注释，得到 %q", got)
+	}
+	if got := markupCommentPart(`<!-- FR-XXX-000`); got != `` {
+		t.Errorf("markupCommentPart 未闭合注释应剥到行尾，得到 %q", got)
 	}
 }
 

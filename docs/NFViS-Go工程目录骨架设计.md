@@ -65,6 +65,8 @@ nfvis/
 │   ├── api/                        # REST server（消费 config/orchestrator/state/events）
 │   │   ├── server.go               #   路由、TLS、Token 认证中间件、错误统一格式
 │   │   ├── handlers_*.go           #   按资源的 handler（system/vswitch/vmfn/...）
+│   │   ├── ui/                     #   Web 控制面前端（决策 #115：免构建原生 HTML/CSS/JS，
+│   │   │                           #     go:embed 进二进制、同源托管于 GET /api/v1/ui/）
 │   │   └── cli_bridge.go           #   CLI 专用端点：执行命令树节点(内部socket, 短路HTTP开销)
 │   ├── events/                     # 事件总线 + 告警表（SQLite）+ SSE 推送
 │   ├── recovery/                   # 启动收敛：committed ⇄ 运行态对比、VPP 重启重放
