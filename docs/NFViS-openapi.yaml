@@ -1543,6 +1543,93 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/ConfigAccepted" }
 
+  /system/logs:
+    get:
+      tags: [system]
+      summary: 服务端日志尾部（与 CLI `show log system` 同源）
+      description: |
+        返回服务端日志的尾部文本（systemd 单元优先，其次系统日志），与 CLI 的
+        `show log system` 取同一来源（决策 #123：round42 覆盖核查缺口 #2 的 REST 出口）。
+        文本原样返回，客户端自行按行处理（`?last=<n>` 只取末尾 n 行）。
+      parameters:
+        - { name: last, in: query, schema: { type: integer, minimum: 1 }, description: 只取末尾 N 行 }
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain:
+              schema: { type: string }
+        "503": { description: 未接入（编排器未装配对应运行时） }
+
+  /diagnostics/ping:
+    post:
+      tags: [system]
+      summary: 经数据面做连通性测试（与 CLI `ping` 同源）
+      description: |
+        经 VPP 数据面 ping（**只覆盖 VPP 平面**：管理口属内核平面，请用宿主 ping），
+        与 CLI `ping` 同一实现（决策 #123）。**未通即失败**（0 发包或 0 应答都报 502），
+        与 CLI 的判定口径一致（附录 A #89/#93）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host]
+              properties:
+                host: { type: string }
+                source: { type: string, description: 源 IP（按接口地址反查接口） }
+                vrf: { type: string, description: 经指定 VRF }
+                count: { type: integer, description: 次数（缺省 5） }
+      responses:
+        "200":
+          description: 已通（output 为原始回显）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DiagOutput" }
+        "400": { $ref: "#/components/responses/Error400" }
+        "502":
+          description: 未通或不可用（0 发包 / 0 应答 / VPP 未装配）
+
+  /diagnostics/traceroute:
+    post:
+      tags: [system]
+      summary: 路径跟踪（与 CLI `traceroute` 同源）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host]
+              properties:
+                host: { type: string }
+                vrf: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DiagOutput" }
+        "400": { $ref: "#/components/responses/Error400" }
+        "502": { description: 不可用或执行失败 }
+
+  /interfaces:clear-statistics:
+    post:
+      tags: [interfaces]
+      summary: 清零接口统计计数（与 CLI `clear interfaces statistics` 同源）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, description: 接口名；缺省为全部 } 
+      responses:
+        "204": { description: 已清零 }
+        "400": { $ref: "#/components/responses/Error400" }
+        "503": { description: 未接入（编排器未装配对应运行时） }
+
   /system/tech-support:
     get:
       tags: [system]
@@ -2506,6 +2593,12 @@ components:
       properties:
         candidate: { $ref: "#/components/schemas/ConfigDocument" }
         dirty: { type: boolean, description: 相对 committed 是否有未提交变更 }
+
+    DiagOutput:
+      type: object
+      description: 诊断命令的原始回显（决策 #123；文本原样返回，客户端自行展示）
+      properties:
+        output: { type: string }
 
     ConfigCheckResult:
       type: object

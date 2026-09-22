@@ -653,6 +653,15 @@
         },
         "type": "object"
       },
+      "DiagOutput": {
+        "description": "诊断命令的原始回显（决策",
+        "properties": {
+          "output": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "Error": {
         "properties": {
           "code": {
@@ -3262,6 +3271,110 @@
         ]
       }
     },
+    "/diagnostics/ping": {
+      "post": {
+        "description": "经 VPP 数据面 ping（**只覆盖 VPP 平面**：管理口属内核平面，请用宿主 ping），\n与 CLI `ping` 同一实现（决策 #123）。**未通即失败**（0 发包或 0 应答都报 502），\n与 CLI 的判定口径一致（附录 A #89/#93）。\n",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "count": {
+                    "description": "次数（缺省 5）",
+                    "type": "integer"
+                  },
+                  "host": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "description": "源 IP（按接口地址反查接口）",
+                    "type": "string"
+                  },
+                  "vrf": {
+                    "description": "经指定 VRF",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "host"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagOutput"
+                }
+              }
+            },
+            "description": "已通（output 为原始回显）"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "502": {
+            "description": "未通或不可用（0 发包 / 0 应答 / VPP 未装配）"
+          }
+        },
+        "summary": "经数据面做连通性测试（与 CLI `ping` 同源）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/diagnostics/traceroute": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "host": {
+                    "type": "string"
+                  },
+                  "vrf": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "host"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagOutput"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "502": {
+            "description": "不可用或执行失败"
+          }
+        },
+        "summary": "路径跟踪（与 CLI `traceroute` 同源）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/events": {
       "get": {
         "responses": {
@@ -3704,6 +3817,40 @@
           }
         },
         "summary": "设置 VF 数量（创建/回收 VF）",
+        "tags": [
+          "interfaces"
+        ]
+      }
+    },
+    "/interfaces:clear-statistics": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "name": {
+                    "description": "接口名；缺省为全部",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "已清零"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "503": {
+            "description": "未接入（编排器未装配对应运行时）"
+          }
+        },
+        "summary": "清零接口统计计数（与 CLI `clear interfaces statistics` 同源）",
         "tags": [
           "interfaces"
         ]
@@ -4668,6 +4815,41 @@
         "summary": "口令自助修改（登录者本人或 super-user，需旧口令）",
         "tags": [
           "auth"
+        ]
+      }
+    },
+    "/system/logs": {
+      "get": {
+        "description": "返回服务端日志的尾部文本（systemd 单元优先，其次系统日志），与 CLI 的\n`show log system` 取同一来源（决策 #123：round42 覆盖核查缺口 #2 的 REST 出口）。\n文本原样返回，客户端自行按行处理（`?last=<n>` 只取末尾 n 行）。\n",
+        "parameters": [
+          {
+            "description": "只取末尾 N 行",
+            "in": "query",
+            "name": "last",
+            "schema": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "503": {
+            "description": "未接入（编排器未装配对应运行时）"
+          }
+        },
+        "summary": "服务端日志尾部（与 CLI `show log system` 同源）",
+        "tags": [
+          "system"
         ]
       }
     },

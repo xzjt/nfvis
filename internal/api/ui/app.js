@@ -643,6 +643,52 @@ async function cfgConfirmPending() {
   }
 }
 
+// ---------- 诊断（日志 + 连通性测试） ----------
+//
+// 与 CLI 同源同口径：ping 只覆盖数据面（VPP），**未通即失败**（0 发包/0 应答都算失败，
+// 原始回显照原样展示以便排查）；日志取服务端尾部（与 show log system 同源）。
+// 日志不随 5 秒轮询刷新（按需点按钮），避免无谓的重复拉取。
+
+async function diagPing() {
+  const host = $('diag-host').value.trim();
+  const out = $('diag-out');
+  out.hidden = false;
+  if (!host) {
+    out.textContent = '请填写目标地址。';
+    return;
+  }
+  const count = Number($('diag-count').value) || 0;
+  out.textContent = '执行中…';
+  try {
+    const res = await fetch(API + '/diagnostics/ping', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, count }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = (body.detail || []).map((d) => d.message).join('\n');
+      out.textContent = '失败：' + (body.message || ('HTTP ' + res.status)) + (detail ? '\n' + detail : '');
+      return;
+    }
+    out.textContent = body.output || '（无输出）';
+  } catch (e) {
+    out.textContent = '失败：' + e.message;
+  }
+}
+
+async function diagLogs() {
+  const pre = $('diag-log');
+  pre.hidden = false;
+  pre.textContent = '读取中…';
+  try {
+    const res = await fetch(API + '/system/logs?last=100', { headers: { Authorization: 'Bearer ' + token } });
+    pre.textContent = res.ok ? (await res.text() || '（日志为空）') : '读取失败：HTTP ' + res.status;
+  } catch (e) {
+    pre.textContent = '读取失败：' + e.message;
+  }
+}
+
 // ---------- 实时通道 ----------
 
 function setStream(text, cls) {
@@ -815,6 +861,8 @@ $('refresh-btn').addEventListener('click', () => loadAll().catch((e) => showGlob
 $('cfg-edit-btn').addEventListener('click', cfgStartEdit);
 $('cfg-save-btn').addEventListener('click', cfgSave);
 $('cfg-check-btn').addEventListener('click', cfgCheck);
+$('diag-ping-btn').addEventListener('click', diagPing);
+$('diag-log-btn').addEventListener('click', diagLogs);
 $('cfg-diff-btn').addEventListener('click', cfgShowDiff);
 $('cfg-commit-btn').addEventListener('click', () => cfgCommit(0));
 $('cfg-commit-confirmed-btn').addEventListener('click', () => cfgCommit(10));
