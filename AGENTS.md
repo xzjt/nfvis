@@ -25,14 +25,19 @@
   文档仅作历史记录）：
   系统 Ubuntu Server 26.04.1 + **USTC 源**（aliyun 实测几乎不可用，勿切回）；构建工具按需装齐
   （Go 1.26.0（apt）、make、sshpass 等；`dpkg -i` 装 VPP 用 `/root/vpp-v26.06-deb/` 的 9 个
-  26.06-release deb——快照基线自带）；**nfvis 本体未装**（要跑冒烟/集成先 `make deb VERSION=… dpkg -i` 装上）。
+  26.06-release deb——快照基线自带）。
   源码树 `/root/src`（git archive 同步，见待办 §3.3，无 .git → 构建**必须显式传 SOURCE_DATE_EPOCH**）。
-  **round34 后现状**：nfvis 1.1.24 已装（服务 active）；VPP 26.06 运行、主堆已用 2M 大页、
-  ens192/ens224 交 DPDK；cmdline 含 hugepagesz=1G/2M + isolcpus=2-5 + intel_iommu=on；
-  已建 VNF 拓扑（vs-vnf + vnf-a/vnf-b，流量已通）与可用镜像 debian-12-generic-amd64.qcow2
-  （集成测试可用）——细节见 `docs/evidence/v1-closeout-round34-manual-flow.txt` §4。
-  ⚠️ 集成测试环境（VPP 运行、debian-12-generic 镜像、1G 大页布局、ens192/ens224 交 VPP）
-  **随快照清掉了**——跑 `make integration` 前需先重建（镜像需重导；布局与流程见待办 §3.3 / §0 第 1 条）。
+  **round36 后现状**（2026-09-22 三件套复跑，证据 `docs/evidence/v1-closeout-round36-three-suites.txt`）：
+  nfvis **1.1.25** active、管理口令 `WBF81vOA4M8GM28f@Aa1`（**随快照恢复而变**，取法见待办 §3.1）；
+  VPP 26.06 运行、主堆用 2M 大页、ens192/ens224 交 DPDK；
+  cmdline 含 hugepagesz=1G/2M + isolcpus=2-5 + intel_iommu=on；
+  **vs-vnf 拓扑与 vnf-a/vnf-b 在跑、流量已复通**（BVI ping 双向 3/3、宿主经 DPDK 物理口 <1ms）；
+  镜像 `debian-12-generic-amd64.qcow2` + `alpine.qcow2`（阶段 3 前置）+ 容器镜像 `alpine:3.20`；
+  配置库 rev 55 / audit 103（内容与复跑前基线逐字节一致）。
+  ⚠️ 管理口令、`alpine.qcow2`、`docker alpine:3.20`、`rev/audit` 这四项**都会随快照恢复而变/丢失**，
+  每次从快照重建后要重新核对并回写（round36 就撞上其中两条）。
+  ⚠️ 集成测试环境（VPP 运行、镜像、1G 大页布局、ens192/ens224 交 VPP）随快照清掉——
+  跑 `make integration` 前需先重建（布局与流程见待办 §3.3 / §0 第 1 条）。
   `ens160` 是管理口（vmxnet3、承载 SSH）——**永不拿管理路径做试验**的红线不变。
   设计基线在 `docs/`，**不要凭记忆重设计**。
 - 已定决策 114 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
@@ -100,6 +105,22 @@ bash contrib/scripts/cli-semantic-check.sh  # 「结果对不对」：与 VPP/�
   （#8 业务口交 VPP 的路走不通、#9 冒烟对 `show log audit` 的判定依赖环境历史、
   #10 `set system api tls self-signed regenerate` 后 CLI 因证书缺 IP SAN 而全断），
   而单测/守护/256 条冒烟在旧环境里全绿。**"装一遍"与"跑测试"不是同一件事。**
+- **判定"失败"前先确认判据本身是对的，且先看级联关系**（2026-09-22 round36）：
+  冒烟那 26 条失败**全是前置级联**（1G 大页池被已声明 VNF 占满 → 产品**正确地**拒绝再分配 cli-vm；
+  阶段 2 预块第 1 条是"值未变化"的空操作 → 而 `-c` 脚本模式**任一行失败即停止** → 其后语句全没执行），
+  语义校验那条失败是**脚本自己的 oracle 错了**（`vppctl show l2fib` 非 verbose 只有汇总行、
+  `vppctl` 输出是 CRLF 未剥）。**顺序：级联关系 → 独立事实源（`vppctl` 原样输出/配置库）→ 才怀疑产品。**
+  要拿"套件本身是否全绿"的结论，就跑**干净开发态基线**（round36：194 通过 / 1 失败，
+  唯一失败是已登记的 `show vpp runtime`）。
+- **工具假红也是缺陷，要修并加自校准**：语义校验的 oracle 修好后加了 `cli-semantic-selftest.sh`
+  （桩 vppctl、CI 可跑，已并入 `make check` 的 `toolcheck`）——语义校验本身只能在真机跑，
+  只有桩式自校准能在 CI 挡住 oracle 回归。
+- **口令/镜像这类"外部事实"不能只靠文档维护**：快照恢复会换掉管理口令、清掉冒烟阶段 3 的两个前置
+  （`alpine.qcow2` 与 `docker alpine:3.20`）。每次从快照重建后**重新核对并回写**，别照抄旧值；
+  核对口令**不要反复试登录**（5 次失败锁号），直接读配置库哈希比对（方法见待办 §3.1）。
+- **停/起 VNF 后 guest 内的网络配置不会自己回来**：user-data 内容没变 → instance-id 摘要没变 →
+  cloud-init 按 once-per-instance **不重放**，而 guest 启动时的网络栈只拿到 DHCP 地址。
+  复通办法是**改一次 user-data 内容**再 `restart`（待办 §0 红线 12）。
 
 ## 外部文档查询（context7 MCP，个人启用）
 
