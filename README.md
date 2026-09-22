@@ -9,11 +9,12 @@
 用于在一台服务器上编排 L2/L3 网络、虚拟机 VNF 与容器 VNF。
 
 > **当前状态：V1（首个发布版）**
-> 规格书 **109 条 FR**：**通过 100 / 未验 4 / 降级 3 / 移 V2 2**（口径与逐条证据见
-> [`docs/V1-验收检查表.md`](docs/V1-验收检查表.md)）；已定**决策 80 项**（规格书附录 A）；
+> 规格书 **109 条 FR**：**通过 101 / 未验 4 / 降级 2 / 移 V2 2**（口径与逐条证据见
+> [`docs/V1-验收检查表.md`](docs/V1-验收检查表.md)）；已定**决策 123 项**（规格书附录 A）；
 > `make check` 全绿。**已知限制请先读** [`docs/NFViS-CLI命令全表.md`](docs/NFViS-CLI命令全表.md) §4。
 >
-> **发布的二进制**见 [Releases](https://github.com/xzjt/nfvis/releases)；
+> **发布的二进制**见 [Releases](https://github.com/xzjt/nfvis/releases)（最新 **v1.1.26**：Web 控制面
+> 增量 1~3 第一刀——只读总览 / 配置读写 / 诊断视图，内嵌同源托管、前端免构建）；
 > 命令全表把 256 条 CLI 命令**逐条真机执行**并标注状态（现全部 ✅／⊘／🚫，无「不可用」项）。
 
 ---
@@ -30,6 +31,7 @@
 | **配置事务** | candidate → `commit`（校验 + 下发 + **失败自动补偿**）→ committed；历史快照 `rollback`；`commit confirmed` 自锁保护；注释（`annotate`）；`save`/`load` JSON 往返 |
 | **运维** | 事件总线 `/events`（SSE）、Prometheus `/metrics`、告警、审计日志、日志（本地保留策略 + 远程 syslog）、tech-support 归档、core dump 收集、VPP pcap 抓包导出、备份/恢复/zeroize、软件升级/回退、TLS 热换证 |
 | **安全** | 本地用户 / class 权限矩阵 / 口令策略（PBKDF2）；Bearer Token；**默认 HTTPS**（自动自签 + 客户端证书固定）；管理口与数据面隔离强制；口令哈希全链路脱敏 |
+| **Web 控制台** | `GET /api/v1/ui/`（内嵌进 nfvisd **同源托管**、前端**免构建**）：只读总览、配置读写（candidate → 差异 → 预校验 → 提交/丢弃）、诊断（日志 / ping / traceroute / 清零统计） |
 
 **交互示例**（配置事务 + commit 校验）：
 
@@ -93,7 +95,7 @@ systemctl start vpp && vppctl show interface
 |---|---|
 | **[用户手册](docs/NFViS-用户手册.md)** | **从安装到使用的全流程**（含故障排查、已知限制） |
 | **[CLI 命令全表](docs/NFViS-CLI命令全表.md)** | 256 条命令，含权限、API 落点与**逐条真机实测状态** |
-| [系统产品需求与目标架构规格书](docs/NFViS-系统产品需求与目标架构规格书.md) | **需求真源**；附录 A = 决策记录（1~80），实现有疑问先查它 |
+| [系统产品需求与目标架构规格书](docs/NFViS-系统产品需求与目标架构规格书.md) | **需求真源**；附录 A = 决策记录（1~123），实现有疑问先查它 |
 | [CLI 命令树完整设计](docs/NFViS-CLI命令树完整设计.md) | CLI **契约**（命令树、补全、权限矩阵） |
 | [OpenAPI](docs/NFViS-openapi.yaml) | REST **契约**（`openapi.json` 随二进制嵌入，由 CI 守护同步） |
 | [Go 工程目录骨架设计](docs/NFViS-Go工程目录骨架设计.md) | 代码结构、依赖方向规则、里程碑 |
@@ -172,7 +174,10 @@ V1 的降级/未验项统一登记在 [`docs/NFViS-CLI命令全表.md`](docs/NFV
 - **SR-IOV / LLDP 邻居**需对应硬件与对端（验证环境不具备；代码与单测齐备）；
 - **快照 create/rollback 需关机态**（对运行中域回滚会静默重启该 VM，故显式拒绝）；
 - **容器镜像的目录名须等于 Docker tag**，否则下发报 `docker: not found`；
-- `show vpp runtime` 未接入（govpp runtime 解码受限，CLI 明确提示而非静默空值）。
+- `show vpp runtime` 未接入（govpp runtime 解码受限，CLI 明确提示而非静默空值）；
+- **Web 控制台尚未覆盖的 CLI 能力**：console 交互终端、`ssh host-key regenerate`、
+  `core-dumps export`、`load merge` 与 VS/VM 详情的 statistics 字段（逐项见
+  [`docs/CLI-REST覆盖核查.md`](docs/CLI-REST覆盖核查.md)；配置类语句经 candidate API 已全覆盖）。
 
 > ⚠️ **配 cross-connect 前必读**：它是二层直通、**无 MAC 学习、无环路保护**。把**同一广播域**内的
 > 两个端口直通（如同一虚拟交换机上的两块网卡）会造成**物理二层环路 / 广播风暴**；两端须属不同广播域。

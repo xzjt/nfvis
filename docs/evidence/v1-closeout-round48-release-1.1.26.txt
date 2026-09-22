@@ -1,0 +1,97 @@
+===== V1 收尾第四十八轮：v1.1.26 发布（校验记录）=====
+日期：2026-09-22
+范围：main `83a4c3a`（= PR #155 合并；round37~47 的决策 #115~#123 全部改动）
+发布件 nfvis_1.1.26_amd64.deb。校验口径复刻 round29/33/35。
+
+----- 1. 版本号说明 -----
+上一发布 v1.1.25（round35）。本轮发布内容是 **V2 Web 控制面增量 1~3 第一刀 + 五处收口**，
+均为此前合并但从未进入发布件的改动（round37 只读总览、round38 R37-1、round39 可视验收、
+round40 R37-2、round41 前端简化、round42 覆盖核查、round43 增量 2 API 侧、round44 配置读写页、
+round45 R44-2 扩围、round46 向导化 + commit check、round47 诊断视图）。
+故本次发布 **v1.1.26**（无内部验证构建跳号）。
+
+----- 2. 发布件与可复现构建 -----
+    产物:   nfvis_1.1.26_amd64.deb（7,828,928 字节）
+    sha256: f06539d4e278c0c997eb924756c6a043a79794e54ad4ab17b0a87715df117187
+    构建:   nfvis-vm / make deb VERSION=1.1.26 SOURCE_DATE_EPOCH=1790085452
+            （= main 83a4c3a 的 HEAD 提交时间 2026-09-22T21:57:32+08:00；git archive 树无 .git，
+             显式传值——决策 #88）
+    内容变化：Go 侧 = 决策 #115~#123（Web 控制面三刀 + 契约/行为五处收口）；
+             REST 契约新增 8 个端点（/ui、/ui/、/configuration、/configuration/check、
+             /system/logs、/diagnostics/ping、/diagnostics/traceroute、/interfaces:clear-statistics）；
+             随包文档 = 规格书附录 A 增 #115~#123、CLI 命令树与命令全表同步、用户手册同步。
+
+----- 3. 发布校验（逐项）-----
+① 元数据：Package nfvis / Version 1.1.26 / amd64 / Section net / Depends libc6；
+   control+postinst+prerm+postrm 就位（4 件）✓
+② 内容：23 个成员——/usr/bin/{nfvisd,nfvis-cli}、nfvis.service、安装器脚本 2 件、
+   随包文档 7 件（OpenAPI + 命令树 + 规格书 + 用户手册 + 命令全表 + M5 验收记录 + version）✓
+   （规格书 **附录 B 标题仍在**——决策 #88 的历史回归已复核；用户手册 1382 行；规格书决策行 123 条）
+③ 解包运行：/tmp 解包后 `nfvisd -version` / `nfvis-cli -version` = 1.1.26 ✓
+④ **可复现**：同一 commit + 同一 VERSION 连打两次，sha256 逐字节一致（f06539d4…）✓
+⑤ 实装（升级 1.1.25 → 1.1.26）：prerm「升级中，保留运行中的 nfvis.service」→ postinst
+   「已重启 nfvis.service 以加载新版本」+ 基线一致性检查 ✓；服务 active；`show version` =
+   NFViS 1.1.26（七组件：Ubuntu 26.04 / VPP 26.06-release / libvirt 12.0.0 / QEMU 10.2.1 /
+   Docker 29.1.3；DPDK 按决策 #118 有意不汇报）；`wizard` 非 TTY 即返（有明确提示、无挂起）✓；
+   **升级后既有 VNF 拓扑存活**（vnf-a/vnf-b running；BD 6252701 四口 up、计数在动）✓；
+   **配置库未变**（rev 55 / audit 103 / config_json sha 084c3a64…，与升级前备份逐字段一致）✓
+⑥ **REST/Web 内容实测**（本轮发布内容的"装完真能用"）：
+   · `GET /api/v1/ui/` → 200（6230 字节，含 NFViS）、`/ui` → 302、未认证 `/system/status` → 401 ✓
+   · **三个静态资源与仓库源码逐字节一致**（index.html 917d26d5… / app.js 31de6804… /
+     style.css 1abbf6cf…）——即"内嵌进二进制的前端 = 已验收的那份" ✓
+   · `POST /login` → 200 且 `user` 为对象（name/class）、token_id、expires_in（决策 #117 口径）✓
+   · `/system/status` 契约字段齐全（cpu/memory/storage/hugepages/uptime_seconds；
+     uptime 68805s = 主机运行时长，非守护进程——决策 #117）；hugepages 两池（1G 2/0、2M 768/768）✓
+   · `/system/version` 六组件全真值（决策 #118）；`/vpp/status.config_revision` = 55（与配置库一致）✓
+   · `GET /configuration` 回 `{configuration, revision}`，**无 password_hash 泄露**（决策 #120 R44-1）✓
+   · `GET /system/logs?last=5` → 200 text/plain（`-- No entries --`，与 CLI 同源）✓
+   · `POST /diagnostics/ping`（guest，source=BVI）→ 200 + 回显；`POST /diagnostics/ping`（BVI 自身）
+     → **502** + `PING_FAILED` + detail 逐行原始回显（决策 #123「未通即失败」口径）✓
+   · `POST /diagnostics/traceroute` → 200 + 逐跳输出 ✓
+   · `POST /configuration/check` 未持 candidate → **409 + 明确文案**（不谎报通过，决策 #122）✓
+   · `POST /logout` → 204，且**旧 token 立即 401**（决策 #119 释放锁的同批口径）✓
+⑦ purge：postrm「已撤销 SSH 强化（99-nfvis.conf 已删、sshd 已重载）」（决策 #108 内联修复
+   在真实 purge 下再次生效）；drop-in 消失、sshd active 且 `sshd -t` 通过；GRUB 片段/fstab
+   保留并打印可照做的手工步骤；/var/lib/nfvis 数据保留（1.2G）、配置库逐字段未变；
+   二进制与 systemd 单元移除；/run/nfvis 清理 ✓
+⑧ 重装：SSH 强化重新落地（99-nfvis.conf 回归）✓；**配置库仍逐字段一致**（rev 55 / audit 103 /
+   cfgsha 084c3a64…，与发布前备份相同）✓
+   ⚠️ **首装（purge 后重装）postinst 只 enable 不 start**（原文：「已装载 nfvis.service（enable；
+   首次安装不自动 start——按需 systemctl start nfvis）」）——按 README 与手册的既定流程
+   `systemctl start nfvis` 后服务 active、443 在听；启动日志有「管理口守卫事实（绑定/解绑这些口
+   会被拒）」与「恢复收敛完成」，且 **30 分钟内无「一次性口令」记录**（= 未走首启路径、配置库未重建）✓
+⑨ 重装后拓扑收敛 + 流量复通：
+   · BD 6252701 四口（bvi0 / ens192 / vh-vnf-a-eth0 / vh-vnf-b-eth0）全 up，与 committed 声明一致
+     （ens224 已声明并进 VPP，但**不是 vs-vnf 的端口**——配置如此，非缺陷）✓
+   · `ping 192.168.100.10/.11 source 192.168.100.1 count 5` → **双向各 5/5、0% 丢包**；
+     独立事实源交叉核对 `vppctl ping 192.168.100.10 source bvi0 repeat 3` → 3/3 ✓
+   · 宿主经 DPDK 物理口 → 两台 guest 各 4/4、0.33~0.47ms（`ping 192.168.155.240/.241`）✓
+   · `POST /interfaces:clear-statistics {name:ens192}` → **204**；计数由 29576/124 清零，
+     再制造流量后为 5/5（证明清零与再计数都真发生）✓
+⑩ 发布与回验：
+    Release: https://github.com/xzjt/nfvis/releases/tag/v1.1.26（tag 指向 main、非 draft/prerelease）
+    assets:  nfvis_1.1.26_amd64.deb（7,828,928）+ nfvis_1.1.26_amd64.deb.sha256
+    回下载:  自 GitHub 下载 asset，sha256 与构建端**逐字节一致**（f06539d4…）✓
+
+----- 4. 环境（发布前后）-----
+- 配置库：**全程未变**——rev 55 / audit 103 / config_json sha 084c3a64e4cc0d43a16cbced28cb0742aaa0ef1783c75065eb7966b091eba726
+  （升级前 .backup 快照 = 升级后 = purge 后 = 重装后 = 首启后，逐字段一致；
+   快照见 `/root/nfvis-db-backup-20260922-1410-rel126/`，另有整树 tar 兜底）
+- 口令：`WBF81vOA4M8GM28f@Aa1` **按 §3.1 的哈希比对法**核对有效（PBKDF2-SHA256/600000 复算一致，
+  **全程未做登录试探**）
+- 拓扑与流量：vs-vnf（BD 6252701）+ vnf-a/vnf-b 在跑，BVI ping 5/5、宿主经 DPDK 物理口 <1ms
+- 收尾：开发态实例未起（本轮未用）；无 `/tmp` 残留；服务 active（1.1.26）；VPP 里只有配置声明的对象
+
+----- 5. 本轮登记（都是工具/文档层，均不影响发布件）-----
+| # | 发现 | 性质 | 处置 |
+|---|---|---|---|
+| R48-1 | **发布校验脚本自己制造过一次假红**：HTTPS 探针漏传 `--cacert` → curl exit 60、HTTP code 000、且**输出文件不落盘**，表现为"端点全挂"（实为脚本错）。与决策 #85「工具自身出错会制造假红」同源 | 工具（中） | 已修（显式 pin 产品证书 `/var/lib/nfvis/tls/server.crt`）并重跑；**教训：写 HTTPS 探针必须先对已知可达目标自校准**，别把 code 000 当产品故障 |
+| R48-2 | **VM 的 SSH host key 于今日 01:27 被重建**（快照重建的副产物），本机 known_hosts 三类型条目全陈旧；因 `~/.ssh/config` 里 `StrictHostKeyChecking no`，表现为"只警告不失败"，容易被误读为中间人 | 环境（低） | 按待办 §3.8 既定做法 `ssh-keygen -R 192.168.155.129` 后重取；**这不是产品行为**（与 nfvis 的 host-key 管理无关） |
+| R48-3 | **首装不自动 start 的口径在证据里没写清**：round33/35 证据都记「服务 active」，但那是按 README 手工 `systemctl start nfvis` 之后的状态；本轮 purge 后重装实测 postinst 明确只 enable | 文档（低） | 本轮证据已写明（§3⑧）；后续校验按 README 流程执行 |
+| R48-4 | `GET /configuration/candidate` 在未持 candidate 时回 **409**，而契约只声明 200 | 契约（低，**不判为缺陷**） | 契约的既有惯例是**不枚举错误码**（134 个操作里 86 个未声明 4xx/5xx，错误统一为 Error 结构）；登记备查，若要收口属"契约补错误码"整批动作，另起一刀 |
+
+----- 6. 下一步 -----
+增量 3 剩余缺口（两处 statistics 响应字段、`request system ssh host-key regenerate`、
+`request system core-dumps export <url>`、`load merge`）+ 两项已登记延期（token revoke、format-data）
++ `show vpp runtime`；机器真源见 `internal/api/cli_rest_coverage_test.go` 三张表与
+`docs/CLI-REST覆盖核查.md`。
