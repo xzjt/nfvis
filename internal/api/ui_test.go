@@ -182,40 +182,6 @@ func TestUIHiddenAttributeWinsOverAuthorDisplay(t *testing.T) {
 	t.Fatal("style.css 没有以 [hidden] 开头的规则行")
 }
 
-// UI 读的指标名必须真的存在——指标改名会让页面**静默**显示「—」，不报错、不留痕。
-// 指标名从 app.js 里抽（不在这里另写一份，否则测的不是实现）。
-func TestUIReadsOnlyExistingMetricNames(t *testing.T) {
-	js, err := fs.ReadFile(uiAssets, "ui/app.js")
-	if err != nil {
-		t.Fatalf("读取内嵌 app.js: %v", err)
-	}
-	names := map[string]bool{}
-	for _, m := range regexp.MustCompile(`nfvis_[a-z0-9_]+`).FindAllString(string(js), -1) {
-		names[m] = true
-	}
-	if len(names) < 3 {
-		t.Fatalf("从 app.js 抽到的指标名过少（%d），抽取正则可能失效", len(names))
-	}
-	ts := newTestServerOpts(t, Options{})
-	resp, err := http.Get(ts.URL + APIPrefix + "/metrics")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	// 宿主类指标由 internal/metrics 的 Linux 实现产出（读 /proc、statfs）；非 Linux 上
-	// 该文件是 `return nil` 的空实现。开发机是 Windows 时这几条必然缺席，**跳过**而不是报红
-	// ——否则本用例在开发机上恒红，成了"工具自身制造的假红"（CI/Linux 上照常执行）。
-	if !strings.Contains(string(body), "nfvis_system_") {
-		t.Skip("非 Linux：宿主指标（读 /proc）不产出，本用例只验 Linux 侧")
-	}
-	for n := range names {
-		if !strings.Contains(string(body), n+" ") && !strings.Contains(string(body), n+"{") {
-			t.Errorf("app.js 读了指标 %s，但 /metrics 里没有它（页面会静默显示「—」）", n)
-		}
-	}
-}
-
 // UI 依赖的 JSON 字段名必须真的在响应里。这里钉的是"字段名不会静默消失"，
 // 取的是会让整块卡片变空的那几个键。
 func TestUIFieldNamesExistInResponses(t *testing.T) {
@@ -253,6 +219,22 @@ func TestUIFieldNamesExistInResponses(t *testing.T) {
 			}
 		}
 	}
+	// 系统卡片的数字改读 /system/status 的嵌套字段（R37-1 收口后不再解析 /metrics 文本）：
+	// 这些键同样必须在真实响应里，否则卡片静默变空。宿主指标（cpu/memory/storage）只在
+	// Linux 产出，非 Linux 上**跳过**而不是报红——否则开发机（Windows）上恒红，
+	// 成了"工具自身制造的假红"（CI/Linux 上照常执行；原 /metrics 指标名守护的覆盖
+	// 随之转移到此处——前端不再读 /metrics，那条守护已失去保护对象）。
+	if hasHostMetrics() {
+		st := get("/system/status")
+		for _, k := range []string{"cpu.total", "cpu.usage_percent", "memory.total_mb",
+			"memory.used_mb", "storage.total_bytes", "storage.free_bytes", "storage.used_ratio"} {
+			if !hasNestedKey(st, k) {
+				t.Errorf("/system/status 缺字段 %s（UI 系统卡片会显示为「—」）", k)
+			}
+		}
+	} else {
+		t.Log("非 Linux：宿主指标不产出，/system/status 的 cpu/memory/storage 嵌套键跳过")
+	}
 	// 大页池与隔离核：UI 按这些字段名渲染表格。
 	// 池本身可以是空的（全新配置库没有池），故只要求它是数组；有元素才逐字段核。
 	pools := get("/resource-pools")
@@ -277,4 +259,25 @@ func TestUIFieldNamesExistInResponses(t *testing.T) {
 	} else {
 		t.Error("/resource-pools.cpu 应为对象")
 	}
+}
+
+// hasNestedKey 逐层取点分路径（"cpu.total"）——UI 读的嵌套字段必须真的在响应里。
+func hasNestedKey(m map[string]any, path string) bool {
+	cur := m
+	parts := strings.Split(path, ".")
+	for i, p := range parts {
+		v, ok := cur[p]
+		if !ok {
+			return false
+		}
+		if i == len(parts)-1 {
+			return true
+		}
+		next, ok := v.(map[string]any)
+		if !ok {
+			return false
+		}
+		cur = next
+	}
+	return false
 }
