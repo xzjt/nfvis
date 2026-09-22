@@ -1,0 +1,59 @@
+===== V1 收尾第四十五轮：R44-2 裁决——管理口自锁保护扩到「经网络接入的会话」（决策 #121） =====
+日期：2026-09-22
+目标机：nfvis-vm（VMware；已装实例 1.1.25 全程未动，新代码跑在 :8443 的开发态实例上）
+源码：main `2824f76` 起分支 `fix/mgmt-confirm-network-sessions`（一个提交 `efa0af3`，决策 #121）
+起态：round44 可视验收发现控制台（api 来源）改管理口不被要求 commit confirmed——按
+      FR-CFG-012 原文（"若变更请求来自 SSH 会话"）符合规格，但浏览器与 SSH 一样可能自锁；
+      登记为观察项 R44-2
+终止态：裁决落地（判据改为"会话是否经网络接入"）；单测/契约/文档同步；浏览器复验走通；环境复原
+
+------ 0. 裁决与落地 -----
+**裁决口径**：判据从"来源是不是 ssh"改为"**该会话是否经网络接入**"——
+`mgmtChanged && sess.Source != "console" && opts.ConfirmedMinutes <= 0` 即要求 commit confirmed：
+
+- **ssh / api（REST、Web 控制台）**：都依赖管理网连通性，改管理口可能切断自己的管理路径 → 要求确认；
+- **console（本地串口）**：不依赖管理网，保持豁免——这正是原文只写 SSH 的原因所在。
+
+落地清单：
+| 文件 | 改动 |
+|---|---|
+| `internal/config/engine.go` | 判据改为 `sess.Source != "console"`；注释写明口径与理由 |
+| 规格书 FR-CFG-012 | 文本同步为"来自**经网络接入的会话**（SSH 或 REST/Web 控制台）"；附录 A 追加决策 #121 |
+| `docs/NFViS-openapi.yaml` | `POST /configuration/commit` 补 description（谁受约束、400 CONFIRM_REQUIRED、未确认自动回滚）；重新生成 openapi.json |
+| `internal/config/mgmt_confirm_test.go` | 把固化旧口径的 `TestAPISessionNotGated` 改写为 `TestNetworkSessionsGatedConsoleExempt`（ssh/api 都要求、带 `confirmed_minutes` 放行且返回 `confirmed_until`、console 豁免） |
+| `internal/api/configuration_committed_test.go` | 新增 `TestManagementChangeRequiresConfirmedViaREST`（控制台实际会走的路径） |
+| `AGENTS.md` | 决策计数 120→121 |
+
+**影响面**：REST 客户端改管理口时会新增一个 400（带明确 code 与提示），属**保护性**行为变更；
+CLI（ssh）与串口行为不变。控制台配置页的 `CONFIRM_REQUIRED` 处理从"休眠的纵深防御"
+变为**实际生效路径**。
+
+------ 1. 自检与变异验证 -----
+- `go vet` 0；`internal/config`、`internal/model`、`internal/api` 三个包全绿；docscheck 全过
+  （决策条数 121 一致、契约无重复键、openapi.json 同步）。
+- **变异验证**：把判据改回 `sess.Source == "ssh"` → 两道新用例分别报红：
+  - 引擎侧：`source=api 变更管理口应要求 commit confirmed，得到 <nil>`；
+  - API 侧：`管理口变更的普通提交应 400，得到 200 {"committed":true,...}`。
+  改回复绿——证明这条口径真的由代码判据决定，而不是靠测试断言"看起来对"。
+
+------ 2. 浏览器可视复验（管理口变更的 confirmed 全流程） -----
+| 步骤 | 结果 |
+|---|---|
+| 编辑态写入 `system.management.address = 192.168.155.129/24` → 保存 → **普通提交** | **被拒**：页面显示"该变更（管理口地址/网关）必须以 commit confirmed 提交：管理口地址/网关变更必须以 commit confirmed 提交"，并揭示「以 commit confirmed 提交（10 分钟）」按钮（修复前这一步是**直接成功**） |
+| 点「以 commit confirmed 提交（10 分钟）」 | "提交成功（revision 4）；**待确认：2026/9/22 20:37:53 前未点「确认在途提交」将自动回滚**；提示：警告: 管理口地址/网关已变更，注意连通性"；按钮切换为「确认在途提交」 |
+| 点「确认在途提交」 | "已确认，提交生效。"；回到只读视图（committed revision 4），JSON 含管理口地址 |
+| CLI 对照 | `show configuration` 显示 `management { address 192.168.155.129/24; }`；会话表 `null`（锁已释放、无在途确认） |
+| 事件流 | 配置卡实时收到 `config-committed：revision=4` |
+
+截图（IAB artifacts）：被拒 + confirmed 按钮、待确认态（含自动回滚时限）、确认生效。
+
+------ 3. 环境复原 -----
+- 开发态实例（:8443、/tmp/ui.db）验完已停；/tmp 中间产物已清；已装实例恢复 active（1.1.25）；
+  VPP 拓扑与 vnf-a/vnf-b 未受影响；流量复通（BVI ping 双向 10/10 0% 丢包、宿主到 guest <1ms）。
+  管理口地址的提交只发生在开发态临时配置库（纯配置声明、运行期不应用），随 /tmp/ui.db 删除；
+  已装实例与 ens160 全程未动。
+
+------ 4. 下一步（"依次进行"的剩余项） -----
+② 配置页向导化（表单覆盖更多节 + `commit check` 预校验，缺口 #10）；
+③ 增量 3 诊断视图（日志 + ping/traceroute + 统计字段 + clear counters + ssh host-key + core-dumps 导出）；
+④ 发版 v1.1.26。
