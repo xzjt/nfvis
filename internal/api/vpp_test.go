@@ -26,6 +26,7 @@ func (f *fakeVppController) Restart(context.Context, *model.VppConfig) error {
 	f.restarted = true
 	return f.restartErr
 }
+func (f *fakeVppController) Version() string { return f.status.Version }
 
 func TestVppStatusEndpoint(t *testing.T) {
 	fake := &fakeVppController{status: VppStatus{

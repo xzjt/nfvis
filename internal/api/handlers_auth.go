@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -88,13 +89,29 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleVersion GET /api/v1/system/version（OpenAPI VersionInfo；Ubuntu/VPP
-// 等组件版本由 state 模块接入底座后补齐，FR-SYS-007）。
+// VersionsRuntime 组件版本探测（R37-2 收口，决策 #118）。nil = 只回 NFViS 版本。
+type VersionsRuntime interface {
+	Components(ctx context.Context) map[string]string
+}
+
+// handleVersion GET /api/v1/system/version（OpenAPI VersionInfo；FR-SYS-007）。
+// 决策 #118：此前是桩——7 个键都在、只有 nfvis 有值，照契约开发的客户端一律取空。
+// 现在 ubuntu/libvirt/qemu/docker 经 VersionProbe 探测（**取不到就不给该键**，不编造空串），
+// vpp 与 /vpp/status 同源（VppController）；DPDK 无可靠来源，有意不给（见 system/versions.go
+// 与契约 VersionInfo 的 description）。
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"nfvis":  VersionStr,
-		"ubuntu": "", "vpp": "", "dpdk": "", "libvirt": "", "qemu": "", "docker": "",
-	})
+	out := map[string]string{"nfvis": VersionStr}
+	if s.versions != nil {
+		for k, v := range s.versions.Components(r.Context()) {
+			out[k] = v
+		}
+	}
+	if s.vpp != nil {
+		if v := s.vpp.Version(); v != "" {
+			out["vpp"] = v
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // ---------- 通用 ----------

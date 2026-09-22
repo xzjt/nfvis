@@ -98,6 +98,7 @@ type cliExecutor struct {
 	tlsR       TlsRuntime                  // 证书管理（M5-8；nil = 报未接入）
 	vppRestart func(context.Context) error // request vpp restart（M5-9；nil = 报未接入）
 	events     *events.Bus                 // 事件总线（M5-1；nil = 不发布）
+	versions   VersionsRuntime             // 组件版本探测（R37-2 收口，决策 #118；nil = show version 只印 NFViS）
 	mu         sync.Mutex
 	sess       map[string]*cliSession
 	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
@@ -122,6 +123,9 @@ func newCLIExecutor(e *config.Engine, a authorizer) *cliExecutor {
 // setEventBus 注入事件总线（M5-1）：CLI 直连运行态的动作不经 HTTP handler，
 // 需在执行器内显式发布 vnf-state-changed（同 M4-12 的审计处理）。
 func (x *cliExecutor) setEventBus(bus *events.Bus) { x.events = bus }
+
+// setVersions 注入组件版本探测器（R37-2 收口，决策 #118：show version 七组件汇总）。
+func (x *cliExecutor) setVersions(v VersionsRuntime) { x.versions = v }
 
 // setPorts 注入运行态端口清单（决策 #83）：`<ifname>` 的候选与 `show interfaces physical`
 // 的空态都取自真实端口，而不是「已写进配置的接口名」。
@@ -335,13 +339,44 @@ func (x *cliExecutor) execOper(user, class, source string, s *cliSession, t []st
 	return fmt.Sprintf("%% 无效命令: %s（输入 ? 查看可用命令）\n", strings.Join(t, " "))
 }
 
+// versionSummary show version：七组件版本汇总（命令树契约；R37-2 收口，决策 #118）。
+// 与 GET /system/version 同源：NFViS 是构建期常量，ubuntu/libvirt/qemu/docker 经探测器，
+// vpp 与 /vpp/status 同源；探测不到的组件明说"未探测到"，不显示空值。DPDK 无可靠来源，
+// 永远走这一支（原因见 internal/system/versions.go）。
+func (x *cliExecutor) versionSummary() string {
+	comps := map[string]string{}
+	if x.versions != nil {
+		comps = x.versions.Components(context.Background())
+	}
+	if x.vpp != nil {
+		if v := x.vpp.Version(); v != "" {
+			comps["vpp"] = v
+		}
+	}
+	var b strings.Builder
+	for _, c := range []struct{ key, name string }{
+		{"nfvis", "NFViS"}, {"ubuntu", "Ubuntu"}, {"vpp", "VPP"}, {"dpdk", "DPDK"},
+		{"libvirt", "libvirt"}, {"qemu", "QEMU"}, {"docker", "Docker"},
+	} {
+		v := comps[c.key]
+		if c.key == "nfvis" {
+			v = VersionStr
+		}
+		if v == "" {
+			v = "（未探测到）"
+		}
+		fmt.Fprintf(&b, "%-15s%s\n", c.name, v)
+	}
+	return b.String()
+}
+
 func (x *cliExecutor) execOperShow(class string, t []string) string {
 	if !x.allow(class, mustNode(schema.OperRoot(), "show"), append([]string{"show"}, t...)...) {
 		return "%% 无权限执行 show\n"
 	}
 	switch {
 	case len(t) == 1 && t[0] == "version":
-		return "NFViS " + VersionStr + "\n"
+		return x.versionSummary()
 	case len(t) >= 1 && t[0] == "configuration":
 		if len(t) >= 2 && t[1] == "compare" {
 			// show configuration compare rollback <n>

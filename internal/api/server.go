@@ -63,6 +63,7 @@ type Options struct {
 	TLS         TlsRuntime             // 证书管理（M5-8；nil = 503）
 	Ports       PortInventory          // 运行态端口清单（决策 #83；nil = 接口名无动态候选）
 	VppState    VppStateRuntime        // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
+	Versions    VersionsRuntime        // 组件版本探测（R37-2 收口，决策 #118；nil = 只回 NFViS 版本）
 }
 
 // Server NFViS REST server。
@@ -76,6 +77,7 @@ type Server struct {
 	lldp        LldpRuntime
 	state       *state.State
 	vppState    VppStateRuntime // VPP 运行态快照（决策 #84/#116：CLI show 与 REST 同源）
+	versions    VersionsRuntime // 组件版本探测（R37-2 收口，决策 #118）
 	sriov       SRIOVSetter
 	dpdk        DPDKSetter
 	natSessions NatSessionsRuntime
@@ -110,7 +112,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, vppState: opts.VppState, sriov: opts.SRIOV, dpdk: opts.DPDK, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, ports: opts.Ports, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), log: log}
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, vppState: opts.VppState, sriov: opts.SRIOV, dpdk: opts.DPDK, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, ports: opts.Ports, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), versions: opts.Versions, log: log}
 	s.cliExec.setRuntime(opts.Diag, opts.State)
 	s.cliExec.setPorts(opts.Ports)       // 决策 #83：show 的空态与 Tab 候选同源
 	s.cliExec.setVppCtl(opts.VPP)        // 发现 #11：show vpp 的版本/连接/待重启
@@ -121,6 +123,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.cliExec.setSystemOps(opts.SysOps)
 	s.cliExec.setDiagOps(opts.DiagOps)
 	s.cliExec.setLogSource(opts.LogSource)
+	s.cliExec.setVersions(opts.Versions) // R37-2 收口（决策 #118）：show version 七组件汇总
 	s.cliExec.setCapture(opts.Capture)
 	s.cliExec.setSoftware(opts.Software)
 	s.cliExec.setHardware(opts.Hardware)
