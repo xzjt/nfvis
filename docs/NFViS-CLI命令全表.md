@@ -63,7 +63,7 @@
 | `show virtual-switches <name> detail` | 类型/成员端口/VLAN/VRF | `GET /virtual-switches/{name}` | ✅ |
 | `show virtual-switches <name> ports` | 成员端口及状态/计数 | `GET /virtual-switches/{name}/ports` | ✅ |
 | `show virtual-switches <name> mac-table` | MAC 学习表（仅 L2） | `GET /virtual-switches/{name}/mac-table` | ✅ |
-| `show virtual-switches <name> statistics` | 每端口收发计数 | 运行态（VPP） | ✅ |
+| `show virtual-switches <name> statistics` | 每端口收发计数 | `GET /virtual-switches/{name}`（statistics 字段） | ✅ |
 | `show vrfs` | L3 交换机（VRF）列表 | `GET /vrfs` | ✅ |
 | `show vrfs <name>` | detail：L3 接口/地址/路由 | `GET /vrfs/{name}` | ✅ |
 | `show vrfs <name> routes` | FIB 路由表 | `GET /vrfs/{name}/routes` | ✅（VRF 不存在时明确报错，决策 #76④） |
@@ -85,7 +85,7 @@
 | `show virtual-machine-functions` | VM 列表 | `GET /virtual-machine-functions` | ✅ |
 | `show virtual-machine-functions <name> detail` | 域 XML 摘要/资源分配/NUMA | `GET /virtual-machine-functions/{name}` | ✅ |
 | `show virtual-machine-functions <name> interfaces` | vNIC：类型/MAC/socket/交换机 | 同上 | ✅ |
-| `show virtual-machine-functions <name> statistics` | vhost-user 口计数（经 VPP） | 运行态（VPP） | ✅ |
+| `show virtual-machine-functions <name> statistics` | vhost-user 口计数（经 VPP） | `GET /virtual-machine-functions/{name}`（statistics 字段） | ✅ |
 | `show virtual-machine-functions <name> snapshots` | 快照列表 | `GET /virtual-machine-functions/{name}/snapshots` | ✅ |
 | `show container-functions` | 容器列表 | `GET /container-functions` | ✅ |
 | `show container-functions <name> [detail]` | 容器详情 | `GET /container-functions/{name}` | ✅ |

@@ -76,6 +76,7 @@ var cliRESTCoverage = map[string]string{
 	"show virtual-switches":                            "GET /virtual-switches",
 	"show virtual-switches <name>":                     "GET /virtual-switches/{name}",
 	"show virtual-switches <name> detail":              "GET /virtual-switches/{name}",
+	"show virtual-switches <name> statistics":          "GET /virtual-switches/{name}",
 	"show virtual-switches <name> ports":               "GET /virtual-switches/{name}/ports",
 	"show virtual-switches <name> mac-table":           "GET /virtual-switches/{name}/mac-table",
 	"show vrfs":                                        "GET /vrfs",
@@ -98,6 +99,7 @@ var cliRESTCoverage = map[string]string{
 	"show protocols lldp neighbors":                    "GET /protocols/lldp/neighbors",
 	"show virtual-machine-functions":                   "GET /virtual-machine-functions",
 	"show virtual-machine-functions <name> detail":     "GET /virtual-machine-functions/{name}",
+	"show virtual-machine-functions <name> statistics": "GET /virtual-machine-functions/{name}",
 	"show virtual-machine-functions <name> interfaces": "GET /virtual-machine-functions/{name}",
 	"show virtual-machine-functions <name> snapshots":  "GET /virtual-machine-functions/{name}/snapshots",
 	"show container-functions":                         "GET /container-functions",
@@ -207,8 +209,6 @@ var cliRESTExceptions = map[string]string{
 // cliRESTGaps 已登记的 REST 缺口（CLI 有、REST 无）→ 理由/归属。补一个划掉一个。
 // 与 docs/CLI-REST覆盖核查.md §3 的 14 项一一对应。
 var cliRESTGaps = map[string]string{
-	"show virtual-switches <name> statistics":          "VirtualSwitch 响应无统计字段（数据在服务端有），核查 #5",
-	"show virtual-machine-functions <name> statistics": "VM 详情响应无统计字段，核查 #6",
 	"request system ssh host-key regenerate":           "无端点（宿主 sshd 操作），核查 #8",
 	"request system core-dumps export":                 "core-dumps 只有 GET/DELETE，无导出，核查 #9",
 	"load merge":                                       "PUT candidate 只有 override 语义，核查 #11",

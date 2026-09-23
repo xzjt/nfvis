@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -249,11 +250,59 @@ func (s *Server) handleGetVSwitch(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, vs := range cfg.VirtualSwitches {
 		if vs.Name == name {
+			// 契约 VirtualSwitch.statistics：运行态可用且该交换机在数据面时附带（FR-NET-016）
+			if st, ok := s.vswitchStatistics(r.Context(), name); ok {
+				b, _ := json.Marshal(vs)
+				var m map[string]any
+				if json.Unmarshal(b, &m) == nil {
+					m["statistics"] = st
+					writeJSON(w, http.StatusOK, m)
+					return
+				}
+			}
 			writeJSON(w, http.StatusOK, vs)
 			return
 		}
 	}
 	writeError(w, http.StatusNotFound, "NOT_FOUND", "虚拟交换机 "+name+" 不存在", nil)
+}
+
+// vswitchStatistics 取该交换机在 VPP 中的成员口收发计数，与 CLI
+// `show virtual-switches <name> statistics` 同源（BD 取 VppStateRuntime、计数取 state）。
+// 运行态未接入、或该交换机不在数据面时返回 false——**不退回配置视图**（决策 #84 的口径）。
+func (s *Server) vswitchStatistics(ctx context.Context, name string) (map[string]any, bool) {
+	if s.vppState == nil {
+		return nil, false
+	}
+	bds, err := s.vppState.BridgeDomains()
+	if err != nil {
+		return nil, false
+	}
+	var bd *BridgeDomainState
+	for i := range bds {
+		if bds[i].Name == name {
+			bd = &bds[i]
+			break
+		}
+	}
+	if bd == nil {
+		return nil, false
+	}
+	states, _ := s.vppState.InterfaceStates()
+	ports := make([]any, 0, len(bd.Ports))
+	for _, p := range bd.Ports {
+		row := map[string]any{"port": p.Name, "sw_if_index": p.SwIfIndex}
+		if st, ok := states[p.Name]; ok {
+			row["admin"], row["link"] = st.AdminUp, st.LinkUp
+		}
+		if s.state != nil {
+			if c, ok := s.state.InterfaceCounters(ctx, p.Name); ok {
+				row["rx_packets"], row["tx_packets"] = c.RxPackets, c.TxPackets
+			}
+		}
+		ports = append(ports, row)
+	}
+	return map[string]any{"bd_id": bd.ID, "ports": ports}, true
 }
 
 // handlePostVSwitch POST /api/v1/virtual-switches：创建（重名 409）。

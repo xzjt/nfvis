@@ -2300,6 +2300,26 @@ components:
         ports:
           type: array
           items: { $ref: "#/components/schemas/VSwitchPort" }
+        statistics:
+          type: object
+          description: |
+            运行态统计（**仅详情端点 `GET /virtual-switches/{name}` 附带**；取自 VPP 运行态，
+            与 CLI `show virtual-switches <name> statistics` 同源，FR-NET-016）。
+            运行态未接入或交换机不在数据面时不返回（不编造）。
+          properties:
+            bd_id: { type: integer, description: VPP bridge-domain ID }
+            ports:
+              type: array
+              description: 成员端口的收发计数（每端口一项）
+              items:
+                type: object
+                properties:
+                  port: { type: string, description: VPP 侧接口名 }
+                  sw_if_index: { type: integer }
+                  admin: { type: boolean, description: 管理态（运行态取不到时省略） }
+                  link: { type: boolean, description: 链路态（运行态取不到时省略） }
+                  rx_packets: { type: integer, description: 收包数（计数不可用时省略） }
+                  tx_packets: { type: integer, description: 发包数（计数不可用时省略） }
 
     VSwitchPort:
       type: object
@@ -2518,6 +2538,22 @@ components:
             ssh_keys: { type: array, items: { type: string } }
             hostname: { type: string }
         serial_console: { type: boolean, default: true }
+        statistics:
+          type: array
+          description: |
+            vhost-user vNIC 的收发计数（**仅详情端点 `GET /virtual-machine-functions/{name}` 附带**；
+            取自 VPP 运行态，与 CLI `show virtual-machine-functions <name> statistics` 同源，FR-CMP-011）。
+            非 vhost-user vNIC 不在其中；运行态未接入时不返回（不编造）。
+          items:
+            type: object
+            properties:
+              vnic: { type: string, description: 模型里的 vNIC 名 }
+              interface: { type: string, description: VPP 侧接口名 vh-<vm>-<vnic> }
+              available: { type: boolean, description: 该口在 VPP 中是否取到计数 }
+              rx_packets: { type: integer }
+              tx_packets: { type: integer }
+              rx_bytes: { type: integer }
+              tx_bytes: { type: integer }
         autostart: { type: boolean }
         state: { type: string, enum: [running, shutoff, crashed, paused], description: 运行态 }
 

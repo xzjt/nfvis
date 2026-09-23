@@ -1870,6 +1870,39 @@
             ],
             "type": "string"
           },
+          "statistics": {
+            "description": "vhost-user vNIC 的收发计数（**仅详情端点 `GET /virtual-machine-functions/{name}` 附带**；\n取自 VPP 运行态，与 CLI `show virtual-machine-functions <name> statistics` 同源，FR-CMP-011）。\n非 vhost-user vNIC 不在其中；运行态未接入时不返回（不编造）。\n",
+            "items": {
+              "properties": {
+                "available": {
+                  "description": "该口在 VPP 中是否取到计数",
+                  "type": "boolean"
+                },
+                "interface": {
+                  "description": "VPP 侧接口名 vh-<vm>-<vnic>",
+                  "type": "string"
+                },
+                "rx_bytes": {
+                  "type": "integer"
+                },
+                "rx_packets": {
+                  "type": "integer"
+                },
+                "tx_bytes": {
+                  "type": "integer"
+                },
+                "tx_packets": {
+                  "type": "integer"
+                },
+                "vnic": {
+                  "description": "模型里的 vNIC 名",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
           "vcpu": {
             "properties": {
               "cores_assigned": {
@@ -2023,6 +2056,48 @@
               "$ref": "#/components/schemas/VSwitchPort"
             },
             "type": "array"
+          },
+          "statistics": {
+            "description": "运行态统计（**仅详情端点 `GET /virtual-switches/{name}` 附带**；取自 VPP 运行态，\n与 CLI `show virtual-switches <name> statistics` 同源，FR-NET-016）。\n运行态未接入或交换机不在数据面时不返回（不编造）。\n",
+            "properties": {
+              "bd_id": {
+                "description": "VPP bridge-domain ID",
+                "type": "integer"
+              },
+              "ports": {
+                "description": "成员端口的收发计数（每端口一项）",
+                "items": {
+                  "properties": {
+                    "admin": {
+                      "description": "管理态（运行态取不到时省略）",
+                      "type": "boolean"
+                    },
+                    "link": {
+                      "description": "链路态（运行态取不到时省略）",
+                      "type": "boolean"
+                    },
+                    "port": {
+                      "description": "VPP 侧接口名",
+                      "type": "string"
+                    },
+                    "rx_packets": {
+                      "description": "收包数（计数不可用时省略）",
+                      "type": "integer"
+                    },
+                    "sw_if_index": {
+                      "type": "integer"
+                    },
+                    "tx_packets": {
+                      "description": "发包数（计数不可用时省略）",
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
           },
           "type": {
             "enum": [
