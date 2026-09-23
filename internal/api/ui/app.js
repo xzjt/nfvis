@@ -143,13 +143,20 @@ const soft = (p) => p.catch((e) => ({ __err: e.message }));
 const rowsOf = (v) => (Array.isArray(v) ? v : []);
 
 // 页面级取数失败提示：把失败的端点列出来（不静默），全部成功时清掉提示。
+// 只清自己写的那条——路由的「页面不存在」提示要留着（否则一重渲染就被抹掉）。
+let pageWarnActive = false;
 function pageWarn(d) {
   const bad = Object.entries(d || {})
     .filter(([, v]) => v && v.__err)
     .map(([k, v]) => k + '（' + v.__err + '）');
   const box = $('global-error');
-  if (bad.length) { box.textContent = '以下数据读取失败：' + bad.join('、'); box.hidden = false; }
-  else { box.hidden = true; }
+  if (bad.length) {
+    box.textContent = '以下数据读取失败：' + bad.join('、');
+    box.hidden = false;
+    pageWarnActive = true;
+    return;
+  }
+  if (pageWarnActive) { box.hidden = true; box.textContent = ''; pageWarnActive = false; }
 }
 
 // 按路由声明的端点取数：返回 { 端点: 数据 }（各自降级，单个失败不拖垮整页）。
