@@ -937,6 +937,9 @@ function renderVMRows(vms) {
       cbtn.addEventListener('click', () => vmConsoleOpen(v.name));
       cell.appendChild(cbtn);
     }
+    const sbtn = el('button', { type: 'button', class: 'ghost small', text: '快照' });
+    sbtn.addEventListener('click', () => vmSnapOpen(v.name));
+    cell.appendChild(sbtn);
     VM_ACTIONS.forEach((a) => {
       const btn = el('button', { type: 'button', class: 'ghost small', text: a.label });
       btn.disabled = a.states.indexOf(String(v.state)) < 0;
@@ -976,6 +979,101 @@ function renderVMStats(vms, stats) {
   }
   pre.hidden = false;
   pre.textContent = 'vhost-user 口计数：\n' + rows.join('\n');
+}
+
+// ---------- VM 快照（列表 / 创建 / 删除 / 回滚；create+rollback 需关机态）----------
+
+let snapVM = '';
+
+function snapMsg(text, isErr) {
+  const p = $('vm-snap-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+function vmSnapOpen(name) {
+  snapVM = name;
+  $('vm-snap').hidden = false;
+  $('vm-snap-name').textContent = name;
+  $('vm-snap-new').value = '';
+  return vmSnapLoad();
+}
+
+async function vmSnapLoad() {
+  const tbody = $('vm-snap-table').querySelector('tbody');
+  tbody.textContent = '';
+  if (!snapVM) return;
+  let rows;
+  try {
+    rows = await api('/virtual-machine-functions/' + encodeURIComponent(snapVM) + '/snapshots');
+  } catch (e) {
+    snapMsg('读取快照失败：' + e.message, true);
+    return;
+  }
+  const list = Array.isArray(rows) ? rows : (rows && rows.snapshots) || [];
+  if (!list.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '3', class: 'muted', text: '（无快照）' }));
+    tbody.appendChild(tr);
+    return;
+  }
+  list.forEach((s) => {
+    const nm = s.name || s.snapshot;
+    const tr = el('tr');
+    [nm, fmtTime(s.created_at || s.created || s.creation_time)].forEach((c) => {
+      tr.appendChild(el('td', { text: String(dash(c)) }));
+    });
+    const cell = el('td', { class: 'actions' });
+    const rb = el('button', { type: 'button', class: 'ghost small', text: '回滚' });
+    rb.addEventListener('click', () => vmSnapAct(nm, 'rollback'));
+    const db = el('button', { type: 'button', class: 'danger small', text: '删除' });
+    db.addEventListener('click', () => vmSnapAct(nm, 'delete'));
+    cell.appendChild(rb);
+    cell.appendChild(db);
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
+  });
+}
+
+async function vmSnapAct(snap, kind) {
+  const isRollback = kind === 'rollback';
+  const warn = isRollback
+    ? '回滚 ' + snapVM + ' 到快照 ' + snap + '？VM 必须处于关机态，磁盘内容会被替换为该快照的内容。'
+    : '删除快照 ' + snap + '？该快照将不可恢复。';
+  if (!window.confirm(warn)) return;
+  snapMsg((isRollback ? '回滚' : '删除') + '中…', false);
+  try {
+    if (isRollback) {
+      await api('/virtual-machine-functions/' + encodeURIComponent(snapVM) +
+        '/snapshots/' + encodeURIComponent(snap) + ':rollback', { method: 'POST' });
+    } else {
+      await api('/virtual-machine-functions/' + encodeURIComponent(snapVM) +
+        '/snapshots/' + encodeURIComponent(snap), { method: 'DELETE' });
+    }
+    snapMsg((isRollback ? '回滚' : '删除') + '已完成。', false);
+  } catch (e) {
+    // 关机态约束等拒绝理由原样展示（不吞错误）
+    snapMsg((isRollback ? '回滚' : '删除') + '失败：' + e.message, true);
+  }
+  await vmSnapLoad();
+}
+
+async function vmSnapCreate() {
+  const nm = $('vm-snap-new').value.trim();
+  if (!nm) { snapMsg('请填写快照名。', true); return; }
+  if (!window.confirm('为 ' + snapVM + ' 创建快照 ' + nm + '？VM 必须处于关机态。')) return;
+  snapMsg('创建中…', false);
+  try {
+    await api('/virtual-machine-functions/' + encodeURIComponent(snapVM) + '/snapshots', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: nm }),
+    });
+    snapMsg('快照已创建。', false);
+    $('vm-snap-new').value = '';
+  } catch (e) {
+    snapMsg('创建失败：' + e.message, true);
+  }
+  await vmSnapLoad();
 }
 
 // ---------- 串口 console（一次性 ticket → WebSocket）----------
@@ -1388,6 +1486,11 @@ $('audit-refresh-btn').addEventListener('click', async () => {
     btn.disabled = false;
   }
 });
+
+// VM 快照
+$('vm-snap-refresh').addEventListener('click', vmSnapLoad);
+$('vm-snap-close').addEventListener('click', () => { $('vm-snap').hidden = true; snapVM = ''; });
+$('vm-snap-create').addEventListener('click', vmSnapCreate);
 
 // 容器日志
 $('ct-logs-refresh').addEventListener('click', ctLogsLoad);
