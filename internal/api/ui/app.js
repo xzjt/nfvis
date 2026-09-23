@@ -1325,6 +1325,56 @@ function renderNetworkObjects(nets) {
   });
 }
 
+// ---------- 大表（NAT 会话 / VRF 路由）：按需拉取 ----------
+
+function bigMsg(text, isErr) {
+  const p = $('big-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+function bigOut(text) {
+  const pre = $('big-out');
+  pre.hidden = !text;
+  pre.textContent = text || '';
+}
+
+async function bigRoutes() {
+  const name = $('big-vrf').value.trim();
+  if (!name) { bigMsg('请填写 VRF 名。', true); return; }
+  bigMsg('读取 ' + name + ' 的路由表…', false);
+  bigOut('');
+  try {
+    const rows = await api('/vrfs/' + encodeURIComponent(name) + '/routes');
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) { bigMsg(name + '：无路由。', false); return; }
+    const head = 'prefix'.padEnd(30) + ' next_hop'.padEnd(20) + ' distance';
+    const lines = list.map((r) => String(dash(r.prefix)).padEnd(30) + ' ' +
+      String(dash(r.next_hop)).padEnd(19) + ' ' + dash(r.distance));
+    bigOut(head + '\n' + lines.join('\n'));
+    bigMsg(name + '：' + list.length + ' 条路由。', false);
+  } catch (e) {
+    bigMsg('读取失败：' + e.message, true);
+  }
+}
+
+async function bigNat() {
+  bigMsg('读取 NAT 会话…', false);
+  bigOut('');
+  try {
+    const rows = await api('/nat/sessions');
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) { bigMsg('无 NAT 会话。', false); return; }
+    const lines = list.map((r) => dash(r.inside_ip) + ':' + dash(r.inside_port) +
+      '  ->  ' + dash(r.outside_ip) + ':' + dash(r.outside_port));
+    bigOut('inside -> outside' + '\n' + lines.join('\n'));
+    bigMsg('NAT 会话 ' + list.length + ' 条。', false);
+  } catch (e) {
+    bigMsg('读取失败：' + e.message, true);
+  }
+}
+
 // ---------- 审计日志 ----------
 
 function renderAudit(audit) {
@@ -1486,6 +1536,11 @@ $('audit-refresh-btn').addEventListener('click', async () => {
     btn.disabled = false;
   }
 });
+
+// 大表（按需拉取）
+$('big-routes-btn').addEventListener('click', bigRoutes);
+$('big-nat-btn').addEventListener('click', bigNat);
+$('big-clear-btn').addEventListener('click', () => { bigMsg('', false); bigOut(''); });
 
 // VM 快照
 $('vm-snap-refresh').addEventListener('click', vmSnapLoad);
