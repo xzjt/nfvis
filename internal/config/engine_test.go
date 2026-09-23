@@ -123,7 +123,7 @@ func newEngineKit(t *testing.T) *engineKit {
 	timers := newTimerSink()
 	applier := &mockApplier{}
 	// 预置基线 committed 配置为 rev 1
-	if _, err := store.AppendRevision(mustJSON(baseCommitted()), clock.Now(), "初始基线"); err != nil {
+	if _, err := store.AppendRevision(mustJSON(baseCommitted()), clock.Now(), "初始基线", "admin"); err != nil {
 		t.Fatalf("预置基线: %v", err)
 	}
 	var events []Event
@@ -433,7 +433,7 @@ func TestEngineConfirmedPersistenceAcrossRestart(t *testing.T) {
 	clock := newFakeClock()
 	timers := newTimerSink()
 	applier := &mockApplier{}
-	if _, err := store.AppendRevision(mustJSON(baseCommitted()), clock.Now(), "初始基线"); err != nil {
+	if _, err := store.AppendRevision(mustJSON(baseCommitted()), clock.Now(), "初始基线", "admin"); err != nil {
 		t.Fatalf("预置基线: %v", err)
 	}
 
@@ -684,7 +684,7 @@ func newEngineWithExternals(t *testing.T, images ImageResolver, topo TopologyRea
 	t.Helper()
 	store := openTestStore(t)
 	clock := newFakeClock()
-	if _, err := store.AppendRevision(mustJSON(baseCommitted()), clock.Now(), "初始基线"); err != nil {
+	if _, err := store.AppendRevision(mustJSON(baseCommitted()), clock.Now(), "初始基线", "admin"); err != nil {
 		t.Fatalf("预置基线: %v", err)
 	}
 	e, err := NewEngine(store, &mockApplier{}, Options{

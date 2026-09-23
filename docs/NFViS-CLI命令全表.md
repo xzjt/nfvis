@@ -24,7 +24,7 @@
 | ✅ | 真机 CLI 实测通过 |
 | ⚠️ | **已知缺口**：未实现但**明确提示**（非静默空值） |
 | ⊘ | **预期报错**：环境受限或防呆守卫正确拒绝——报错即正确行为 |
-| 🚫 | **本轮未执行**：破坏性/需交互，测试机不宜执行（非「未实现」） |
+| 🚫 | **本轮未执行**：破坏性/需交互（测试机不宜执行），或**本轮新增、真机冒烟尚未跑**（非「未实现」——真值以代码与单测为准） |
 
 **落点**：`POST /cli/execute` 是所有 CLI 命令的统一入口；表中「落点」列给出该命令**实际作用的**
 等价 REST 端点或底座子系统。说明理由：CLI 执行器对 `show`/`request` 族**直连运行态 Provider**
@@ -100,6 +100,7 @@
 | `show users` | 本地用户与 class | `GET /system/login-users` | ✅ |
 | `show configuration [permissions <class>]` | 当前 committed 配置（JunOS 风格） | `GET /configuration/candidate`（committed 视图） | ✅ |
 | `show configuration candidate` | 当前持锁会话的 candidate | `GET /configuration/candidate` | ✅ |
+| `show configuration history` | 提交历史快照列表：rev/时间/用户/注释/是否当前（**不含配置正文**） | `GET /configuration/history` | 🚫 **新命令，真机冒烟待下一轮**（非「未实现」） |
 | `show configuration compare rollback <n>` | 与历史快照比对 | `GET /configuration/diff` | ✅ |
 | `show tech-support` | 诊断包清单预览 | `GET /system/tech-support` | ✅ |
 | `help [command]` | 帮助 | 本地（命令树） | ✅ |

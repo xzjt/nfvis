@@ -85,6 +85,21 @@ func (s *Server) handleGetConfiguration(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleConfigurationHistory GET /configuration/history：配置提交历史（决策 #142）。
+//
+// 与 CLI `show configuration history` **同源**（都调 Engine.History）——列表只给元数据：
+// rev / 提交时间 / 提交者 / 提交说明 / 是否当前生效。有意**不回配置正文**
+// （FR-SEC-007：历史快照里可能有口令哈希一类敏感字段，列表不需要它们）。
+// 权限与 GET /configuration 同口径（ClassReadOnly 的 show configuration 族）。
+func (s *Server) handleConfigurationHistory(w http.ResponseWriter, r *http.Request) {
+	revs, err := s.engine.History(0)
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, revs) // 无历史时为空数组（契约声明是数组，不发 null）
+}
+
 // handlePutCandidate PUT /configuration/candidate：写 candidate（FR-CFG-008）。
 //
 // 两种语义（决策 #22/#127）：

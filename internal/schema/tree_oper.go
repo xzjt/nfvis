@@ -116,6 +116,7 @@ func OperRoot() *Node {
 			K("users", "本地用户与 class"),
 			K("configuration", "配置显示",
 				K("candidate", "当前持锁会话的 candidate"),
+				K("history", "提交历史快照：rev/时间/用户/注释/是否当前（不含配置正文）"),
 				K("permissions", "按 class 视角显示",
 					P("<class>", "class 名", DynClasses),
 				),

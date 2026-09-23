@@ -165,6 +165,8 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 		return s.auth(h, schema.ClassSuperUser, "configure")
 	}
 	mux.Handle("GET "+APIPrefix+"/configuration", s.auth(s.handleGetConfiguration, schema.ClassReadOnly, "show configuration"))
+	// 配置提交历史（决策 #142）：与 GET /configuration 同权限口径（只读查看，不涉 candidate）
+	mux.Handle("GET "+APIPrefix+"/configuration/history", s.auth(s.handleConfigurationHistory, schema.ClassReadOnly, "show configuration history"))
 	mux.Handle("GET "+APIPrefix+"/configuration/candidate", cfgAPI(s.handleGetCandidate))
 	mux.Handle("PUT "+APIPrefix+"/configuration/candidate", cfgAPI(s.handlePutCandidate))
 	mux.Handle("DELETE "+APIPrefix+"/configuration/candidate", cfgAPI(s.handleDeleteCandidate))

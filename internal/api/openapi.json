@@ -559,6 +559,33 @@
         },
         "type": "object"
       },
+      "ConfigRevision": {
+        "description": "配置提交历史条目（决策 #142；`GET /configuration/history` 的数组元素）。\n**不含配置正文**——历史快照可能含敏感字段，列表只给元数据。\n",
+        "properties": {
+          "comment": {
+            "description": "提交说明；未填时为空串",
+            "type": "string"
+          },
+          "committed_at": {
+            "description": "提交时间（UTC）",
+            "format": "date-time",
+            "type": "string"
+          },
+          "current": {
+            "description": "是否为当前生效的 committed 修订",
+            "type": "boolean"
+          },
+          "rev": {
+            "description": "修订号（单调递增，最新一份即当前 committed）",
+            "type": "integer"
+          },
+          "user": {
+            "description": "提交者；迁移前写入的历史快照未记录提交者，为空串",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "ConfigSession": {
         "description": "candidate 会话锁持有信息（FR-CFG-009）",
         "properties": {
@@ -3103,6 +3130,30 @@
           }
         },
         "summary": "candidate ⇄ committed 差异",
+        "tags": [
+          "configuration"
+        ]
+      }
+    },
+    "/configuration/history": {
+      "get": {
+        "description": "列出保留的 committed 历史快照的**元数据**（决策 #142）：CLI 有 `rollback [n]` 与\n`show configuration compare rollback <n>`，但此前没有「列出历史快照」的读物——\n控制台的配置历史页（`#/config/history`）需要「rev → 时间/用户/注释」的列表，\n操作者据此先看差异再回滚。\n权限与 `GET /configuration` 同口径（ClassReadOnly，命令树路径 `show configuration history`）。\n**只回元数据、不回配置正文**（FR-SEC-007：历史快照里可能含口令哈希等敏感字段，\n列表不需要它们，故不脱敏也不外发）；`user` 对迁移前写入的历史快照为空串——\n当时未记录提交者，宁可空着也不编造。\n",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ConfigRevision"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK（无历史时为空数组）"
+          }
+        },
+        "summary": "配置提交历史（rev/时间/用户/注释，最新在前）",
         "tags": [
           "configuration"
         ]

@@ -173,6 +173,44 @@ func TestCLIConfirmedRollbackAndCompare(t *testing.T) {
 	}
 }
 
+// show configuration history（决策 #142）：列出历史快照的**元数据**
+// （rev/时间/用户/注释/是否当前），与 REST 端点同源（都调 Engine.History）——
+// 此前只有 rollback/compare 两种「按第 n 份」的用法，看不到 rev 与提交者。
+func TestCLIConfigurationHistory(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaa.ClassSuperUser, "ssh",
+		"configure",
+		"set system hostname hist-v1",
+		"commit",
+		"set system hostname hist-v2",
+		"commit",
+	)
+
+	// 配置模式下同样可用（`show configuration ...` 委托操作模式）
+	res := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration history")
+	if !strings.Contains(res.Output, "Rev") || !strings.Contains(res.Output, "Committed-At") {
+		t.Fatalf("history 应打印表头（rev/时间/用户/注释）:\n%s", res.Output)
+	}
+	if !strings.Contains(res.Output, "admin") {
+		t.Fatalf("history 应显示提交者:\n%s", res.Output)
+	}
+	if !strings.Contains(res.Output, "yes") {
+		t.Fatalf("history 应标出当前生效的那一份:\n%s", res.Output)
+	}
+	if strings.Contains(res.Output, "hostname") {
+		t.Fatalf("history 只该回元数据，不该含配置正文:\n%s", res.Output)
+	}
+	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", "exit")
+
+	// 操作模式 + 结构化输出（与 REST 同一份形状：rev/committed_at/user/comment/current）
+	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration history | display json")
+	for _, f := range []string{"\"rev\"", "\"committed_at\"", "\"user\"", "\"comment\"", "\"current\""} {
+		if !strings.Contains(res.Output, f) {
+			t.Fatalf("display json 缺契约字段 %s:\n%s", f, res.Output)
+		}
+	}
+}
+
 func TestCLIPermissionEnforced(t *testing.T) {
 	x, _ := newCLIKit(t)
 

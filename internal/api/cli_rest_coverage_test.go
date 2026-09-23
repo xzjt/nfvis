@@ -117,6 +117,7 @@ var cliRESTCoverage = map[string]string{
 	"clear interfaces statistics":                      "POST /interfaces:clear-statistics",
 	"commit check":                                     "POST /configuration/check",
 	"show configuration candidate":                     "GET /configuration/candidate",
+	"show configuration history":                       "GET /configuration/history",
 	"show configuration":                               "GET /configuration",
 	"show configuration compare rollback <n>":          "GET /configuration/diff + POST /configuration/rollback/{n}",
 	// ---- request 族 ----

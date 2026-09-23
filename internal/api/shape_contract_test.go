@@ -132,6 +132,76 @@ func TestResponseShapeMatchesContract(t *testing.T) {
 	}
 }
 
+// TestConfigurationHistoryShapeMatchesContract GET /configuration/history 的响应形状
+// （决策 #142：契约声明的是**数组**，元素五个字段必须真的发得出来）。
+//
+// 与上面几个端点不同，这里不能用 responseObject（顶层是数组），故单独核：
+// ① 响应是数组；② 元素的每个契约字段都在；③ 布尔字段必须是布尔；
+// ④ `user`/`comment` 允许为空串——**理由**：迁移前写入的历史快照没有提交者
+// （存储 schema v3 才加该列，老记录保持 NULL，**不谎称已知**），未填 commit 说明
+// 时 comment 也是空串。这两个字段的空值是有意义的事实，不是"没实现"。
+func TestConfigurationHistoryShapeMatchesContract(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+	spec := loadEmbeddedSpec(t)
+	props := declaredProps(t, spec, "/configuration/history", "GET")
+	if len(props) == 0 {
+		t.Fatal("契约里取不到 /configuration/history 的响应字段（schema 缺 properties？）")
+	}
+
+	// 先提交两次：一条历史至少要有内容才验得到东西（空数组什么都验不到）。
+	for _, host := range []string{"hist-node-1", "hist-node-2"} {
+		status, _, body := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token,
+			map[string]any{"system": map[string]any{"hostname": host}},
+			map[string]string{"X-NFVIS-Auto-Commit": "true"})
+		if status != http.StatusOK {
+			t.Fatalf("提交 %s: %d %s", host, status, body)
+		}
+	}
+
+	status, _, body := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/configuration/history", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /configuration/history: %d %s", status, body)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(body, &items); err != nil {
+		t.Fatalf("响应不是数组（契约声明为数组）: %v %s", err, body)
+	}
+	if len(items) == 0 {
+		t.Fatal("提交后仍无历史条目（列表取自配置库，应有内容）")
+	}
+	allowedEmpty := map[string]string{
+		"user":    "迁移前写入的历史快照未记录提交者（存储 v3 才加该列），空串是如实结果",
+		"comment": "commit 未填说明时为空串",
+	}
+	currents := 0
+	for i, it := range items {
+		for _, f := range props {
+			v, ok := it[f]
+			if !ok {
+				t.Errorf("第 %d 条历史缺少契约字段 %s（照契约开发的客户端会取空）", i, f)
+				continue
+			}
+			if sv, isStr := v.(string); isStr && sv == "" {
+				if r, a := allowedEmpty[f]; a {
+					t.Logf("  第 %d 条 %s 为空串（%s）", i, f, r)
+					continue
+				}
+				t.Errorf("第 %d 条历史的字符串字段 %s 是空串（形同未实现）", i, f)
+			}
+		}
+		if cur, ok := it["current"].(bool); !ok {
+			t.Errorf("第 %d 条历史的 current 应为布尔（契约声明 boolean），得到 %T", i, it["current"])
+		} else if cur {
+			currents++
+		}
+	}
+	if currents != 1 {
+		t.Errorf("current=true 的条目应恰有 1 条（当前 committed），实得 %d", currents)
+	}
+	t.Logf("/configuration/history：核对 %d 条历史 × %d 个字段", len(items), len(props))
+}
+
 // TestLoginResponseShapeMatchesContract POST /login 的响应形状（round39 可视验收补的覆盖）。
 // 契约 LoginResponse.user 是**对象** LoginUser（name/class），而实现曾回扁平字符串 + 顶层
 // class——照契约（FR-API-002：Web 控制面据此开发）写的前端把 body.user 当对象用，顶栏于是

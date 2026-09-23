@@ -45,6 +45,7 @@ run S1 "show log system"
 run S1 "show log audit"
 run S1 "show users"
 run S1 "show configuration"
+run S1 "show configuration history"
 run S1 "show tech-support"
 run S1 "help"
 
