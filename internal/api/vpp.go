@@ -258,12 +258,29 @@ func (s *Server) handleGetLldpNeighbors(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleGetVrfRoutes GET /api/v1/vrfs/{name}/routes：FIB 路由表（运行态，FR-NET-013）。
+//
+// 先校验 VRF 在 committed 中存在：VPP 对不存在的 VRF 返回**空表**，直接回空数组会把
+// 「VRF 不存在」显示成「无路由」——与 CLI 的口径不一致（CLI 已在决策 #76④ 收口，REST 侧此处补齐）。
 func (s *Server) handleGetVrfRoutes(w http.ResponseWriter, r *http.Request) {
 	if s.l3 == nil {
 		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "VPP 未接入（编排器未装配）", nil)
 		return
 	}
-	rows, err := s.l3.Routes(r.Context(), r.PathValue("name"))
+	name := r.PathValue("name")
+	if cfg, err := s.engine.Committed(); err == nil {
+		found := false
+		for _, v := range cfg.Vrfs {
+			if v.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "VRF "+name+" 不存在", nil)
+			return
+		}
+	}
+	rows, err := s.l3.Routes(r.Context(), name)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
 		return

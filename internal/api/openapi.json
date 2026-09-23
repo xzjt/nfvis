@@ -6489,7 +6489,7 @@
     },
     "/vrfs/{name}/routes": {
       "get": {
-        "description": "返回该 VRF 的运行态 FIB，**含 IPv4 与 IPv6**（FR-NET-013）。\n注：VPP `ip_route_dump` 不显式指定协议时只返回 IPv4，v6 须单独 dump 后合并\n（决策 #69 修复；此前 v6 静态路由已下发但此端点不可见）。\n",
+        "description": "返回该 VRF 的运行态 FIB，**含 IPv4 与 IPv6**（FR-NET-013）。\n注：VPP `ip_route_dump` 不显式指定协议时只返回 IPv4，v6 须单独 dump 后合并\n（决策 #69 修复；此前 v6 静态路由已下发但此端点不可见）。\n**VRF 不在 committed 中时返回 404**（不静默回空数组——否则「VRF 不存在」会被显示成\n「无路由」；与 CLI `show vrfs <name> routes` 同口径，决策 #76④）。\n",
         "responses": {
           "200": {
             "content": {
@@ -6503,6 +6503,9 @@
               }
             },
             "description": "OK"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
           }
         },
         "summary": "FIB 路由表（运行态）",
