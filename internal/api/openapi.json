@@ -348,6 +348,22 @@
         },
         "type": "object"
       },
+      "CaptureFile": {
+        "description": "已导出的 pcap 文件",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "CaptureStatus": {
         "properties": {
           "active": {
@@ -6158,12 +6174,35 @@
     },
     "/vpp/capture": {
       "delete": {
+        "description": "缺省只停止（丢弃缓冲）；`?export=true` 表示**停止并导出**——与 CLI\n`request vpp trace export` 同义（此前只有 CLI 能导出，REST 侧无法表达，界面因此接不上）。\n",
+        "parameters": [
+          {
+            "description": "true = 停止并导出 pcap 到 /var/lib/nfvis/captures",
+            "in": "query",
+            "name": "export",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureFile"
+                }
+              }
+            },
+            "description": "已停止并导出（返回导出的文件）"
+          },
           "204": {
-            "description": "已停止"
+            "description": "已停止（未导出）"
           }
         },
-        "summary": "停止抓包（不导出）",
+        "summary": "停止抓包（`?export=true` 时同时导出 pcap）",
         "tags": [
           "system"
         ]

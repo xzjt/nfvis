@@ -4,7 +4,7 @@ package api
 //
 // GET    /vpp/capture          抓包会话状态与已导出 pcap 清单
 // POST   /vpp/capture          开始抓包（202；已有会话 409）
-// DELETE /vpp/capture          停止抓包（不导出，204）
+// DELETE /vpp/capture          停止抓包（?export=true 时同时导出 pcap，200 + 文件行）
 // GET    /vpp/capture/{file}   下载 pcap（octet-stream）
 
 import (
@@ -95,12 +95,17 @@ func (s *Server) handlePostCapture(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "capturing", "interface": in.Interface})
 }
 
-// handleDeleteCapture DELETE /api/v1/vpp/capture（停止，不导出）
+// handleDeleteCapture DELETE /api/v1/vpp/capture
+//
+// 缺省停止并丢弃缓冲（204）；`?export=true` 表示**停止并导出**（200 + 导出的文件行），
+// 与 CLI `request vpp trace export` 同义。
 func (s *Server) handleDeleteCapture(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCapture(w) {
 		return
 	}
-	if _, err := s.capture.Stop(r.Context(), false); err != nil {
+	export := r.URL.Query().Get("export") == "true"
+	f, err := s.capture.Stop(r.Context(), export)
+	if err != nil {
 		if errors.Is(err, network.ErrNoCapture) {
 			writeError(w, http.StatusConflict, "CONFLICT", err.Error(), nil)
 			return
@@ -111,6 +116,22 @@ func (s *Server) handleDeleteCapture(w http.ResponseWriter, r *http.Request) {
 	user := "api"
 	if info, ok := Identity(r); ok {
 		user = info.User
+	}
+	if export {
+		note := "停止抓包并导出 " + f.Name
+		if f.Name == "" {
+			note = "停止抓包（未捕获到报文，无文件导出）"
+		}
+		s.engine.Audit(user, "vpp.capture.export", note, "success")
+		if f.Name == "" {
+			// 未捕获到报文：如实说明，不回一个不存在的文件
+			writeJSON(w, http.StatusOK, map[string]any{"exported": false, "message": "未捕获到报文，无文件导出"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"exported": true, "name": f.Name, "size_bytes": f.SizeBytes, "created_at": f.CreatedAt,
+		})
+		return
 	}
 	s.engine.Audit(user, "vpp.capture.stop", "停止抓包（不导出）", "success")
 	w.WriteHeader(http.StatusNoContent)

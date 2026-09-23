@@ -1217,9 +1217,23 @@ paths:
         "409": { $ref: "#/components/responses/Error409" }   # 已有会话进行中
     delete:
       tags: [system]
-      summary: 停止抓包（不导出）
+      summary: 停止抓包（`?export=true` 时同时导出 pcap）
+      description: |
+        缺省只停止（丢弃缓冲）；`?export=true` 表示**停止并导出**——与 CLI
+        `request vpp trace export` 同义（此前只有 CLI 能导出，REST 侧无法表达，界面因此接不上）。
+      parameters:
+        - name: export
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: true = 停止并导出 pcap 到 /var/lib/nfvis/captures
       responses:
-        "204": { description: 已停止 }
+        "204": { description: 已停止（未导出） }
+        "200":
+          description: 已停止并导出（返回导出的文件）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CaptureFile" }
   /vpp/capture/{file}:
     parameters: [{ name: file, in: path, required: true, schema: { type: string } }]
     get:
@@ -2193,6 +2207,14 @@ components:
             properties:
               name: { type: string }
               state: { type: string, enum: [enable, disable] }
+
+    CaptureFile:
+      type: object
+      description: 已导出的 pcap 文件
+      properties:
+        name: { type: string }
+        size_bytes: { type: integer }
+        created_at: { type: string, format: date-time }
 
     CaptureStatus:
       type: object
