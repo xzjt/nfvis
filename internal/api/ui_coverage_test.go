@@ -12,6 +12,7 @@ package api
 //     要么在 `uiNotWired` 里写明理由——**新增端点忘记归类即红**，界面缺口数因此始终可见。
 
 import (
+	"encoding/json"
 	"os"
 	"regexp"
 	"sort"
@@ -68,6 +69,29 @@ func uiUsedPaths(t *testing.T) []string {
 	}
 	src := string(data)
 	seen := map[string]bool{}
+	// 并入**路由表**（ui/routes.json）的 endpoints：控制台改成"资源域一级 + 对象详情二级"后，
+	// 页面取数由路由表声明（如 /system/status 只在总览页取），字面量只剩动作类端点。
+	// 真 JSON 解析（不用正则）——与 ui_routes_test.go 同一份真源。
+	rb, err := os.ReadFile("ui/routes.json")
+	if err != nil {
+		t.Fatalf("读取 ui/routes.json: %v", err)
+	}
+	var doc struct {
+		Routes []struct {
+			Endpoints []string `json:"endpoints"`
+		} `json:"routes"`
+	}
+	if err := json.Unmarshal(rb, &doc); err != nil {
+		t.Fatalf("ui/routes.json 不是合法 JSON: %v", err)
+	}
+	for _, r := range doc.Routes {
+		for _, p := range r.Endpoints {
+			if i := strings.IndexByte(p, '?'); i >= 0 {
+				p = p[:i]
+			}
+			seen[p] = true
+		}
+	}
 	for _, re := range []*regexp.Regexp{
 		regexp.MustCompile(`api\('(/[^']*)'`),
 		regexp.MustCompile(`fetch\(API \+ '(/[^']*)'`),
@@ -227,4 +251,34 @@ func TestUICoverageClassified(t *testing.T) {
 
 	t.Logf("界面覆盖：已接 %d 条路径 / 未接 %d 条（均已写明理由）/ 契约共 %d 条",
 		wired, unwired, len(contractPaths))
+}
+
+// TestUIRoutesEndpointsExistInContract 路由表里声明的端点必须都在契约里——
+// 防止"路由表写出幽灵端点"（界面取一个服务端没有的路径，页面只会静默空掉）。
+func TestUIRoutesEndpointsExistInContract(t *testing.T) {
+	contractPaths := contractPathSet(t)
+	rb, err := os.ReadFile("ui/routes.json")
+	if err != nil {
+		t.Fatalf("读取 ui/routes.json: %v", err)
+	}
+	var doc struct {
+		Routes []struct {
+			Path      string   `json:"path"`
+			Endpoints []string `json:"endpoints"`
+		} `json:"routes"`
+	}
+	if err := json.Unmarshal(rb, &doc); err != nil {
+		t.Fatalf("ui/routes.json 不是合法 JSON: %v", err)
+	}
+	for _, r := range doc.Routes {
+		for _, p := range r.Endpoints {
+			q := p
+			if i := strings.IndexByte(q, '?'); i >= 0 {
+				q = q[:i]
+			}
+			if !contractPaths[q] {
+				t.Errorf("路由 %s 声明的端点 %s 不在契约里", r.Path, q)
+			}
+		}
+	}
 }

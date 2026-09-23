@@ -1,13 +1,15 @@
-// NFViS 控制台前端（只读总览）。
+// NFViS 控制台前端。
 //
 // 无外部依赖、无构建步骤：改完直接刷新页面即可，产物随二进制内嵌。
-// 取数一律走同源 REST 接口并带 Bearer token；本文件不写任何配置。
+// 取数一律走同源 REST 接口并带 Bearer token。
+//
+// 页面按**路由**组织：路由表在 routes.json（页面地址 `#/…`，与 Go 守护共用同一份真源），
+// 路由与切页由 router.js 负责；本文件只提供「每个 view 怎么渲染」——VIEWS 注册表按 routes.json
+// 的 view 名索引，每页只渲染自己那块 DOM、只取自己声明的端点（由 router 调 softLoad 取齐）。
 //
 // 数据来源（只用**对外**的 REST 端点；`/cli/execute` 在契约里标着"仅 nfvis-cli 使用、
 // 不承诺第三方兼容"，前端不去碰它，也不去解析终端文本）：
 //   /system/status           —— 主机名、运行时长、配置就绪、CPU/内存/磁盘
-//                               （R37-1 收口后这些数字与 CLI show system 同源、直接可取，
-//                                不再自己解析 /metrics 的 Prometheus 文本）
 //   /system/version          —— 各组件版本
 //   /resource-pools          —— 大页池（按页大小）与隔离核分配
 //   /vpp/status              —— 数据面版本/连接/待重启/线程/buffer/内存
@@ -17,17 +19,19 @@
 //
 // 关于实时刷新：浏览器的 EventSource **无法自定义请求头**，而 /events 需要
 // Authorization，故这里用 fetch + 流式读取手工解析 SSE 帧（同样走头部传 token，
-// 不把 token 放进 URL——URL 会进日志与浏览器历史）。流断了就退化为定时轮询。
+// 不把 token 放进 URL——URL 会进日志与浏览器历史）。流断了就按当前页声明的节奏轮询。
 
 const API = location.pathname.replace(/\/ui\/.*$/, '') || '/api/v1';
 const TOKEN_KEY = 'nfvis.token';
 const USER_KEY = 'nfvis.user';
-const POLL_MS = 5000;
 const MAX_EVENTS = 20;
 const MAX_IFACE_DETAIL = 12;
 
 let token = sessionStorage.getItem(TOKEN_KEY) || '';
 let pollTimer = null;
+let pollRoute = null;      // 当前路由（轮询节奏取它声明的 poll）
+let pollPath = '';         // 已武装的路由地址（同一页的重复渲染不重置计时器）
+let pollFallback = false;  // 只在实时通道断了之后才轮询
 let streamAbort = null;
 let reloadTimer = null;
 let events = [];
@@ -134,35 +138,34 @@ async function api(path, opts) {
 // 单个端点失败不该拖垮整页：各自降级为"读取失败"。
 const soft = (p) => p.catch((e) => ({ __err: e.message }));
 
-async function loadAll() {
-  const [st, ver, vpp, pools, ifaces, vms, cts, alarms, vss, imgs, nets, audit, cap, backups, techs] = await Promise.all([
-    soft(api('/system/status')),
-    soft(api('/system/version')),
-    soft(api('/vpp/status')),
-    soft(api('/resource-pools')),
-    soft(api('/interfaces')),
-    soft(api('/virtual-machine-functions')),
-    soft(api('/container-functions')),
-    soft(api('/alarms')),
-    soft(api('/virtual-switches')),
-    soft(api('/images')),
-    soft(loadNetworkObjects()),
-    soft(api('/audit-logs?limit=50')),
-    soft(api('/vpp/capture')),
-    soft(api('/system/backup')),
-    soft(api('/system/tech-support')),
-  ]);
-  const ifaceRows = Array.isArray(ifaces) ? await loadInterfaceStats(ifaces) : [];
-  const vsRows = Array.isArray(vss) ? await loadVSwitchStats(vss) : [];
-  const vmStats = Array.isArray(vms) ? await loadVMStats(vms) : {};
-  render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms);
-  renderVSwitches(vss, vsRows);
-  renderImages(imgs);
-  renderNetworkObjects(nets);
-  renderAudit(audit);
-  renderCapture(cap);
-  renderArchives(backups, techs);
-  renderVMStats(vms, vmStats);
+// soft() 失败时给的是 {__err} 而不是数组——数组类渲染一律先过 rowsOf()，否则 .filter/.map 抛错
+// （浏览器验收抓到的旧缺陷：token 失效时整页报 JS 错，而不是干净地提示）。
+const rowsOf = (v) => (Array.isArray(v) ? v : []);
+
+// 页面级取数失败提示：把失败的端点列出来（不静默），全部成功时清掉提示。
+// 只清自己写的那条——路由的「页面不存在」提示要留着（否则一重渲染就被抹掉）。
+let pageWarnActive = false;
+function pageWarn(d) {
+  const bad = Object.entries(d || {})
+    .filter(([, v]) => v && v.__err)
+    .map(([k, v]) => k + '（' + v.__err + '）');
+  const box = $('global-error');
+  if (bad.length) {
+    box.textContent = '以下数据读取失败：' + bad.join('、');
+    box.hidden = false;
+    pageWarnActive = true;
+    return;
+  }
+  if (pageWarnActive) { box.hidden = true; box.textContent = ''; pageWarnActive = false; }
+}
+
+// 按路由声明的端点取数：返回 { 端点: 数据 }（各自降级，单个失败不拖垮整页）。
+export async function softLoad(paths) {
+  const out = {};
+  await Promise.all((paths || []).map(async (p) => {
+    out[p] = await soft(api(p));
+  }));
+  return out;
 }
 
 // 虚拟交换机：列表取自运行态（/virtual-switches 是配置视图，统计在详情上）。
@@ -183,15 +186,18 @@ async function loadVMStats(vms) {
 }
 
 // 网络对象：一次拉齐只读视图（每个端点各自降级，缺一个不影响其余）。
-async function loadNetworkObjects() {
+// `pre` 是路由表声明端点的预取结果（softLoad 已取齐）：命中就直接归位，不重复请求；
+// 未预取时（别处直接调用）逐条自取。
+async function loadNetworkObjects(pre) {
+  const pick = (path, fetchIt) => (pre && pre[path] !== undefined ? pre[path] : fetchIt());
   const [vrfs, acls, nat, bonds, lldp, qos, span] = await Promise.all([
-    soft(api('/vrfs')),
-    soft(api('/acls')),
-    soft(api('/nat')),
-    soft(api('/bonds')),
-    soft(api('/protocols/lldp/neighbors')),
-    soft(api('/qos/policies')),
-    soft(api('/port-mirroring')),
+    pick('/vrfs', () => soft(api('/vrfs'))),
+    pick('/acls', () => soft(api('/acls'))),
+    pick('/nat', () => soft(api('/nat'))),
+    pick('/bonds', () => soft(api('/bonds'))),
+    pick('/protocols/lldp/neighbors', () => soft(api('/protocols/lldp/neighbors'))),
+    pick('/qos/policies', () => soft(api('/qos/policies'))),
+    pick('/port-mirroring', () => soft(api('/port-mirroring'))),
   ]);
   return { vrfs, acls, nat, bonds, lldp, qos, span };
 }
@@ -203,11 +209,13 @@ async function loadInterfaceStats(ifaces) {
   return head.map((i, n) => ({ cfg: i, stat: (details[n] || {}).statistics || null }));
 }
 
-function render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms) {
+// ---------- 各卡渲染（每页只动自己那块 DOM）----------
+
+// 系统卡（含组件版本）。数字全部取自 /system/status（与 CLI show system 同源）；
+// 字段缺席（非 Linux 无宿主指标等）时对应行显示「—」，不编造。
+function renderSystem(st, ver) {
   $('host-line').textContent = st && st.hostname ? st.hostname : '';
 
-  // 系统卡片的数字全部取自 /system/status（R37-1 收口后与 CLI show system 同源）；
-  // 字段缺席（非 Linux 无宿主指标等）时对应行显示「—」，不编造。
   const cpu = (st && st.cpu) || {};
   const mem = (st && st.memory) || {};
   const disk = (st && st.storage) || {};
@@ -230,7 +238,10 @@ function render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms) {
     ['libvirt', ver && ver.libvirt], ['QEMU', ver && ver.qemu], ['Docker', ver && ver.docker],
     ['Ubuntu', ver && ver.ubuntu],
   ]);
+}
 
+// 数据面卡。
+function renderVPP(vpp) {
   fill($('vpp-list'), vpp && vpp.__err ? [['读取失败', vpp.__err]] : [
     ['版本', vpp && vpp.version],
     ['连接状态', vpp && vpp.connected === true ? '已连接' : (vpp && vpp.connected === false ? '未连接' : undefined)],
@@ -241,7 +252,10 @@ function render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms) {
       ? vpp.buffers.map((b) => b.name + '：用 ' + b.used + ' / 可用 ' + b.available).join('；')
       : (vpp && vpp.buffers_source ? '不可用（' + vpp.buffers_source + '）' : undefined)],
   ]);
+}
 
+// 资源池卡（大页池 + 隔离核分配）。
+function renderPools(pools) {
   const p = $('pools');
   p.textContent = '';
   if (pools && pools.__err) {
@@ -267,8 +281,10 @@ function render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms) {
         : undefined],
     ]);
   }
+}
 
-  // 接口：列表端点只有配置字段（名称/说明/MTU 等），逐口统计在详情端点上。
+// 接口卡：列表端点只有配置字段（名称/说明/MTU 等），逐口统计在详情端点上（见 loadInterfaceStats）。
+function renderInterfaces(ifaces, ifaceRows) {
   const cfgOnly = (ifaces || []).length > ifaceRows.length;
   table($('iface-table').querySelector('tbody'), 7, ifaceRows.map((r) => [
     r.cfg.name, r.cfg.description, r.cfg.mtu,
@@ -278,10 +294,10 @@ function render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms) {
   $('iface-note').textContent = cfgOnly
     ? '（共 ' + ifaces.length + ' 个接口，此处只列前 ' + MAX_IFACE_DETAIL + ' 个）'
     : '';
+}
 
-  renderVMRows(vms);
-  renderContainerRows(cts);
-
+// 告警卡：只列未解决的（已恢复的由运维页的清除动作处理）。
+function renderAlarms(alarms) {
   const al = $('alarms');
   al.textContent = '';
   const active = (alarms || []).filter((a) => a.state !== 'resolved');
@@ -294,8 +310,76 @@ function render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms) {
       el('div', { class: 'muted small', text: (a.source ? a.source + ' · ' : '') + fmtTime(a.raised_at) }),
     ])));
   }
-  renderEvents();
 }
+
+// ---------- 页面视图（routes.json 的 view 名 → 渲染函数）----------
+//
+// 键名必须与 routes.json 的 view 一一对应（Go 守护按名字核对）。每页的取数范围也由路由表声明：
+// router.js 按 route.endpoints 调 softLoad 取齐后传进来（`d` 是 { 端点: 数据 }）；
+// 页面里另外要拉的**详情/动作类**端点（不在路由表的 endpoints 里，如逐口统计、VM 快照）
+// 由该页自己用 api() 拉——那些是"点了才看"的东西，不进页面取数范围。
+export const VIEWS = {
+  'overview': {
+    render(d) {
+      pageWarn(d);
+      renderSystem(d['/system/status'], d['/system/version']);
+      renderVPP(d['/vpp/status']);
+      renderAlarms(rowsOf(d['/alarms']));
+      renderEvents();
+    },
+  },
+  'vms': {
+    async render(d) {
+      pageWarn(d);
+      const rows = rowsOf(d['/virtual-machine-functions']);
+      renderVMRows(rows);
+      renderVMStats(rows, await loadVMStats(rows));
+    },
+  },
+  'containers': {
+    render(d) { pageWarn(d); renderContainerRows(rowsOf(d['/container-functions'])); },
+  },
+  'images': {
+    render(d) { pageWarn(d); renderImages(rowsOf(d['/images'])); },
+  },
+  'network': {
+    async render(d) { pageWarn(d); renderNetworkObjects(await loadNetworkObjects(d)); },
+  },
+  'switches': {
+    async render(d) {
+      pageWarn(d);
+      const vss = rowsOf(d['/virtual-switches']);
+      renderVSwitches(vss, await loadVSwitchStats(vss));
+    },
+  },
+  'pools': {
+    render(d) { pageWarn(d); renderPools(d['/resource-pools']); },
+  },
+  'interfaces': {
+    async render(d) {
+      pageWarn(d);
+      const ifaces = rowsOf(d['/interfaces']);
+      renderInterfaces(ifaces, await loadInterfaceStats(ifaces));
+    },
+  },
+  'config': {
+    render(d) { return loadConfig(d['/configuration']); },
+  },
+  'ops': {
+    render(d) { pageWarn(d); renderArchives(rowsOf(d['/system/backup']), rowsOf(d['/system/tech-support'])); },
+  },
+  'audit': {
+    render(d) { pageWarn(d); renderAudit(d['/audit-logs?limit=50']); },
+  },
+  'diagnostics': {
+    // 诊断页是动作面板：ping / traceroute / 清零 / 看服务端日志都按需执行（点按钮才拉），
+    // 进页面不自动拉日志——大段文本不该跟着页面刷新反复下载。
+    render() {},
+  },
+  'capture': {
+    render(d) { pageWarn(d); renderCapture(d['/vpp/capture']); },
+  },
+};
 
 function renderEvents() {
   const ul = $('events');
@@ -560,8 +644,10 @@ function cfgRenderRead() {
   $('cfg-note').textContent = rev != null ? '（committed revision ' + rev + '）' : '';
 }
 
-async function loadConfig() {
-  const res = await api('/configuration');
+// 读取 committed 配置。`pre` 是路由表声明端点的预取结果（配置页由 softLoad 取齐后传进来，
+// 不重复请求）；不传则自己拉（提交事件、结束编辑会话等处调用）。
+async function loadConfig(pre) {
+  const res = pre !== undefined ? pre : await api('/configuration');
   if (res && res.__err) {
     cfg.committed = null;
     $('cfg-note').textContent = '（读取失败：' + res.__err + '）';
@@ -690,7 +776,7 @@ async function cfgConfirmPending() {
 //
 // 与 CLI 同源同口径：ping 只覆盖数据面（VPP），**未通即失败**（0 发包/0 应答都算失败，
 // 原始回显照原样展示以便排查）；日志取服务端尾部（与 show log system 同源）。
-// 日志不随 5 秒轮询刷新（按需点按钮），避免无谓的重复拉取。
+// 日志不随页面轮询刷新（按需点按钮），避免无谓的重复拉取。
 
 // pingBody 组请求体：源地址留空则不传（服务端按目标自动选路）。
 function pingBody(host, count) {
@@ -741,7 +827,17 @@ async function diagLogs() {
   }
 }
 
-// ---------- 实时通道 ----------
+// ---------- 实时通道与刷新 ----------
+
+// router.js 要用本文件的 VIEWS 与取数助手，本文件要用它的 render/navigate。
+// 按需动态 import：静态互相 import 会形成环，对两边的求值顺序有隐含要求。
+const routerModule = () => import('./router.js');
+
+// 重新渲染**当前路由**：SSE 事件到达、轮询、动作完成、点顶栏「刷新」都走这里
+// （不再像以前那样一次刷新所有页面）。
+export async function reload() {
+  return (await routerModule()).render();
+}
 
 function setStream(text, cls) {
   const n = $('stream-state');
@@ -754,7 +850,7 @@ function scheduleReload() {
   if (reloadTimer) return;
   reloadTimer = setTimeout(() => {
     reloadTimer = null;
-    loadAll().catch((e) => showGlobalError(e.message));
+    reload().catch((e) => showGlobalError(e.message));
   }, 400);
 }
 
@@ -822,18 +918,36 @@ function stopStream() {
   if (streamAbort) { streamAbort.abort(); streamAbort = null; }
 }
 
-function startPolling() {
-  if (pollTimer) return;
+// 轮询是实时通道不可用时的兜底：节奏取**当前路由声明的 poll**（毫秒，0 = 该页不轮询）。
+function armPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  const ms = (pollRoute && pollRoute.poll) || 0;
+  if (!pollFallback || !ms) return;
   pollTimer = setInterval(() => {
-    loadAll().catch((e) => showGlobalError(e.message));
-  }, POLL_MS);
+    reload().catch((e) => showGlobalError(e.message));
+  }, ms);
+}
+
+// 路由切换时同步轮询节奏（由 router.js 在每次渲染时调用）。
+export function setPollRoute(route) {
+  const path = route ? route.path : '';
+  if (path === pollPath) return;
+  pollPath = path;
+  pollRoute = route;
+  armPolling();
+}
+
+function startPolling() {
+  pollFallback = true;
+  armPolling();
 }
 
 function stopPolling() {
+  pollFallback = false;
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 }
 
-function showGlobalError(msg) {
+export function showGlobalError(msg) {
   const n = $('global-error');
   n.textContent = msg;
   n.hidden = false;
@@ -857,7 +971,15 @@ async function enterApp(user) {
   $('global-error').hidden = true;
   $('user-line').textContent = user ? user.name + '（' + user.class + '）' : '';
   cfgSetEditing(false);
-  await Promise.all([loadAll(), loadConfig().catch(() => {})]);
+  try {
+    // 路由表 → 渲染当前 hash 那一页（配置页的数据由 config 视图自己拉）。
+    const router = await routerModule();
+    await router.loadRoutes();
+    await router.start();
+  } catch (e) {
+    // 拿不到路由表时如实说明，别谎报"登录失效"把人踢回登录页。
+    showGlobalError('页面加载失败：' + e.message);
+  }
   startStream();
 }
 
@@ -960,7 +1082,7 @@ async function vmAction(name, action, label) {
   } catch (e) {
     opsMsg(label + ' ' + name + ' 失败：' + e.message, true);
   }
-  await loadAll().catch(() => {});
+  await reload().catch(() => {});
 }
 
 function renderVMStats(vms, stats) {
@@ -1213,7 +1335,7 @@ async function ctAction(name, action, label) {
   } catch (e) {
     opsMsg(label + ' ' + name + ' 失败：' + e.message, true);
   }
-  await loadAll().catch(() => {});
+  await reload().catch(() => {});
 }
 
 let ctLogsName = '';
@@ -1310,7 +1432,7 @@ async function imgDelete(name, refCount) {
   } catch (e) {
     imgMsg('删除失败：' + e.message, true);
   }
-  await loadAll().catch(() => {});
+  await reload().catch(() => {});
 }
 
 function imgCommon() {
@@ -1338,7 +1460,7 @@ async function imgImportURL() {
   } catch (e) {
     imgMsg('导入失败：' + e.message, true);
   }
-  await loadAll().catch(() => {});
+  await reload().catch(() => {});
 }
 
 async function imgImportIncoming() {
@@ -1357,7 +1479,7 @@ async function imgImportIncoming() {
   } catch (e) {
     imgMsg('导入失败：' + e.message, true);
   }
-  await loadAll().catch(() => {});
+  await reload().catch(() => {});
 }
 
 async function imgImportFile() {
@@ -1384,7 +1506,7 @@ async function imgImportFile() {
   } catch (e) {
     imgMsg('导入失败：' + e.message, true);
   }
-  await loadAll().catch(() => {});
+  await reload().catch(() => {});
 }
 
 // ---------- 网络对象（只读总览）----------
@@ -1665,14 +1787,14 @@ async function opsRun(label, confirmText, fn) {
   } catch (e) {
     opsMsg(label + ' 失败：' + e.message, true);
   }
-  await loadAll().catch(() => {});
+  await reload().catch(() => {});
 }
 
 // ---------- 启动 ----------
 
 $('login-form').addEventListener('submit', doLogin);
 $('logout-btn').addEventListener('click', doLogout);
-$('refresh-btn').addEventListener('click', () => loadAll().catch((e) => showGlobalError(e.message)));
+$('refresh-btn').addEventListener('click', () => reload().catch((e) => showGlobalError(e.message)));
 $('cfg-edit-btn').addEventListener('click', cfgStartEdit);
 $('cfg-save-btn').addEventListener('click', cfgSave);
 $('cfg-check-btn').addEventListener('click', cfgCheck);
@@ -1842,6 +1964,12 @@ $('diag-clear-btn').addEventListener('click', () => {
 });
 
 window.addEventListener('beforeunload', () => { stopStream(); stopPolling(); });
+
+// 动作处理器与浏览器控制台用得上：刷新当前页 / 跳到某条路由（如 #/ops/audit）。
+window.nfvis = {
+  reload,
+  navigate: async (path) => (await routerModule()).navigate(path),
+};
 
 (async function boot() {
   if (!token) { showLogin(''); return; }
