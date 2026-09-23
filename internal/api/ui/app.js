@@ -135,7 +135,7 @@ async function api(path, opts) {
 const soft = (p) => p.catch((e) => ({ __err: e.message }));
 
 async function loadAll() {
-  const [st, ver, vpp, pools, ifaces, vms, cts, alarms] = await Promise.all([
+  const [st, ver, vpp, pools, ifaces, vms, cts, alarms, vss, imgs, nets, audit] = await Promise.all([
     soft(api('/system/status')),
     soft(api('/system/version')),
     soft(api('/vpp/status')),
@@ -144,9 +144,51 @@ async function loadAll() {
     soft(api('/virtual-machine-functions')),
     soft(api('/container-functions')),
     soft(api('/alarms')),
+    soft(api('/virtual-switches')),
+    soft(api('/images')),
+    soft(loadNetworkObjects()),
+    soft(api('/audit-logs?limit=50')),
   ]);
   const ifaceRows = Array.isArray(ifaces) ? await loadInterfaceStats(ifaces) : [];
+  const vsRows = Array.isArray(vss) ? await loadVSwitchStats(vss) : [];
+  const vmStats = Array.isArray(vms) ? await loadVMStats(vms) : {};
   render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms);
+  renderVSwitches(vss, vsRows);
+  renderImages(imgs);
+  renderNetworkObjects(nets);
+  renderAudit(audit);
+  renderVMStats(vms, vmStats);
+}
+
+// 虚拟交换机：列表取自运行态（/virtual-switches 是配置视图，统计在详情上）。
+async function loadVSwitchStats(vss) {
+  const head = vss.slice(0, MAX_IFACE_DETAIL);
+  const details = await Promise.all(head.map((v) => api('/virtual-switches/' + encodeURIComponent(v.name)).catch(() => null)));
+  return head.map((v, n) => ({ cfg: v, stat: (details[n] || {}).statistics || null }));
+}
+
+// 每台 VM 的 vhost-user 口计数（在详情端点上）。
+async function loadVMStats(vms) {
+  const out = {};
+  await Promise.all(vms.slice(0, MAX_IFACE_DETAIL).map(async (vm) => {
+    const d = await api('/virtual-machine-functions/' + encodeURIComponent(vm.name)).catch(() => null);
+    if (d && d.statistics) out[vm.name] = d.statistics;
+  }));
+  return out;
+}
+
+// 网络对象：一次拉齐只读视图（每个端点各自降级，缺一个不影响其余）。
+async function loadNetworkObjects() {
+  const [vrfs, acls, nat, bonds, lldp, qos, span] = await Promise.all([
+    soft(api('/vrfs')),
+    soft(api('/acls')),
+    soft(api('/nat')),
+    soft(api('/bonds')),
+    soft(api('/protocols/lldp/neighbors')),
+    soft(api('/qos/policies')),
+    soft(api('/port-mirroring')),
+  ]);
+  return { vrfs, acls, nat, bonds, lldp, qos, span };
 }
 
 // 逐口取统计（列表端点只有配置字段；收发包数在 /interfaces/<name> 上）。
@@ -232,9 +274,7 @@ function render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms) {
     ? '（共 ' + ifaces.length + ' 个接口，此处只列前 ' + MAX_IFACE_DETAIL + ' 个）'
     : '';
 
-  table($('vm-table').querySelector('tbody'), 5, (vms || []).map((v) => [
-    v.name, v.state, v.vcpu ? v.vcpu.count : undefined, v.memory ? mb(v.memory.size_mb) : undefined, v.image,
-  ]));
+  renderVMRows(vms);
   table($('ct-table').querySelector('tbody'), 5, (cts || []).map((c) => [
     c.name, c.state, c.vcpu, c.memory_mb ? mb(c.memory_mb) : undefined, c.image,
   ]));
@@ -649,6 +689,15 @@ async function cfgConfirmPending() {
 // 原始回显照原样展示以便排查）；日志取服务端尾部（与 show log system 同源）。
 // 日志不随 5 秒轮询刷新（按需点按钮），避免无谓的重复拉取。
 
+// pingBody 组请求体：源地址留空则不传（服务端按目标自动选路）。
+function pingBody(host, count) {
+  const body = { host };
+  if (count) body.count = count;
+  const src = $('diag-source').value.trim();
+  if (src) body.source = src;
+  return body;
+}
+
 async function diagPing() {
   const host = $('diag-host').value.trim();
   const out = $('diag-out');
@@ -663,7 +712,7 @@ async function diagPing() {
     const res = await fetch(API + '/diagnostics/ping', {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host, count }),
+      body: JSON.stringify(pingBody(host, count)),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -853,6 +902,225 @@ async function doLogout() {
   signOut('');
 }
 
+// ---------- 虚拟机：行内生命周期动作 + vhost-user 口计数 ----------
+
+// 状态 → 允许的动作（与 CLI 同口径：运行中可 stop/restart，关机态可 start）。
+const VM_ACTIONS = [
+  { key: 'start', label: '启动', states: ['shutoff', 'crashed', '-'] },
+  { key: 'stop', label: '停止', states: ['running', 'paused'] },
+  { key: 'restart', label: '重启', states: ['running', 'paused'] },
+];
+
+function renderVMRows(vms) {
+  const tbody = $('vm-table').querySelector('tbody');
+  tbody.textContent = '';
+  const rows = vms || [];
+  $('vm-note').textContent = rows.length ? '（' + rows.length + ' 台；动作按钮按当前状态启用）' : '';
+  if (!rows.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '6', class: 'muted', text: '（无）' }));
+    tbody.appendChild(tr);
+    return;
+  }
+  rows.forEach((v) => {
+    const tr = el('tr');
+    [v.name, v.state, v.vcpu ? v.vcpu.count : undefined,
+      v.memory ? mb(v.memory.size_mb) : undefined, v.image].forEach((c) => {
+      tr.appendChild(el('td', { text: String(dash(c)) }));
+    });
+    const cell = el('td', { class: 'actions' });
+    VM_ACTIONS.forEach((a) => {
+      const btn = el('button', { type: 'button', class: 'ghost small', text: a.label });
+      btn.disabled = a.states.indexOf(String(v.state)) < 0;
+      btn.addEventListener('click', () => vmAction(v.name, a.key, a.label));
+      cell.appendChild(btn);
+    });
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
+  });
+}
+
+async function vmAction(name, action, label) {
+  if (!window.confirm(label + '虚拟机 ' + name + '？运行中的业务会中断。')) return;
+  opsMsg(label + ' ' + name + '：执行中…', false);
+  try {
+    await api('/virtual-machine-functions/' + encodeURIComponent(name) + ':' + action, { method: 'POST' });
+    opsMsg(label + ' ' + name + '：已受理。', false);
+  } catch (e) {
+    opsMsg(label + ' ' + name + ' 失败：' + e.message, true);
+  }
+  await loadAll().catch(() => {});
+}
+
+function renderVMStats(vms, stats) {
+  const pre = $('vm-stat');
+  const rows = [];
+  (vms || []).forEach((v) => {
+    (stats[v.name] || []).forEach((s) => {
+      rows.push(v.name + ' ' + s.vnic + '（' + s.interface + '）: ' +
+        (s.available ? 'rx ' + dash(s.rx_packets) + ' / tx ' + dash(s.tx_packets) +
+          ' 包，' + dash(bytes(s.rx_bytes)) + ' / ' + dash(bytes(s.tx_bytes)) : '未取到计数（VM 未运行或口未建立）'));
+    });
+  });
+  if (!rows.length) {
+    pre.hidden = true;
+    return;
+  }
+  pre.hidden = false;
+  pre.textContent = 'vhost-user 口计数：\n' + rows.join('\n');
+}
+
+// ---------- 虚拟交换机（运行态 + 成员口计数）----------
+
+function renderVSwitches(vss, rows) {
+  table($('vs-table').querySelector('tbody'), 4, (rows || []).map((r) => [
+    r.cfg.name, r.cfg.type,
+    (r.cfg.ports || []).map((p) => p.interface || p.vnf || p.container || '?').join(', '),
+    r.stat ? r.stat.bd_id : undefined,
+  ]));
+  $('vs-note').textContent = (vss && vss.length) ? '' : '（未配置虚拟交换机）';
+  const pre = $('vs-stat');
+  const lines = [];
+  (rows || []).forEach((r) => {
+    (r.stat && r.stat.ports ? r.stat.ports : []).forEach((p) => {
+      lines.push(r.cfg.name + ' / ' + p.port + ': ' +
+        (p.admin === false ? 'down' : 'up') + '/' + (p.link === false ? 'down' : 'up') +
+        '  rx ' + dash(p.rx_packets) + ' / tx ' + dash(p.tx_packets) + ' 包');
+    });
+  });
+  if (!lines.length) {
+    pre.hidden = true;
+    return;
+  }
+  pre.hidden = false;
+  pre.textContent = '成员口计数（运行态）：\n' + lines.join('\n');
+}
+
+// ---------- 镜像仓库 ----------
+
+function renderImages(imgs) {
+  table($('img-table').querySelector('tbody'), 4, (imgs || []).map((i) => [
+    i.name, i.type, i.size_bytes ? bytes(i.size_bytes) : undefined, i.ref_count,
+  ]));
+}
+
+// ---------- 网络对象（只读总览）----------
+
+// 每块：[标题, 数据, 列名, 取值函数]；数据缺席（读取失败）时该块显示原因。
+const NET_OBJECT_VIEWS = [
+  ['VRF（L3 虚拟交换机）', 'vrfs', ['名称', 'L3 接口', '路由数'], (v) => [
+    v.name,
+    (v.l3_interfaces || []).map((i) => i.interface).join(', '),
+    v.routes != null ? v.routes : undefined,
+  ]],
+  ['ACL', 'acls', ['名称', '规则数'], (a) => [a.name, (a.rules || []).length]],
+  // NAT 是对象（source_pools/rules/static），按池与规则各出一行
+  ['NAT', 'nat', ['类型', '内容'], (n) => [n.kind, n.summary]],
+  ['链路聚合（bond）', 'bonds', ['名称', '模式', '成员'], (b) => [
+    b.name, b.mode, (b.members || []).join(', '),
+  ]],
+  ['LLDP 邻居', 'lldp', ['本地口', '邻居', '管理地址'], (n) => [
+    n.local_interface || n.interface, n.system_name || n.chassis_id, n.management_address,
+  ]],
+  ['QoS 策略', 'qos', ['名称', '类型', '目标'], (q) => [q.name, q.type, q.target || q.interface]],
+  ['端口镜像（SPAN）', 'span', ['名称', '源', '目的'], (s) => [
+    s.name, list(s.sources || s.source), s.destination,
+  ]],
+];
+
+// natRows 把 NAT 配置对象摊平成行（池 / 规则 / 静态映射各一行）。
+function natRows(nat) {
+  if (!nat || nat.__err) return [];
+  const rows = [];
+  (nat.source_pools || []).forEach((p) => rows.push({ kind: '地址池', summary: (p.name || '') + ' ' + (p.address_range || '') }));
+  (nat.rules || []).forEach((r) => rows.push({ kind: '规则 ' + (r.seq != null ? r.seq : ''), summary: (r.match_source || '') + ' → ' + (r.virtual_switch || '') }));
+  (nat.static || nat.static_mappings || []).forEach((m) => rows.push({ kind: '静态映射', summary: (m.external || '') + ' → ' + (m.internal || '') }));
+  return rows;
+}
+
+function renderNetworkObjects(nets) {
+  const box = $('net-objects');
+  box.textContent = '';
+  if (!nets) {
+    box.appendChild(el('p', { class: 'muted', text: '（读取失败）' }));
+    return;
+  }
+  NET_OBJECT_VIEWS.forEach(([title, key, cols, pick]) => {
+    const data = nets[key];
+    const wrap = el('div', { class: 'net-object' });
+    wrap.appendChild(el('h3', { text: title }));
+    if (data && data.__err) {
+      wrap.appendChild(el('p', { class: 'muted small', text: '读取失败：' + data.__err }));
+      box.appendChild(wrap);
+      return;
+    }
+    const rows = key === 'nat' ? natRows(data) : (Array.isArray(data) ? data : (data ? [data] : []));
+    const t = el('table');
+    const thead = el('thead');
+    const htr = el('tr');
+    cols.forEach((c) => htr.appendChild(el('th', { text: c })));
+    thead.appendChild(htr);
+    t.appendChild(thead);
+    const tbody = el('tbody');
+    if (!rows.length) {
+      const tr = el('tr');
+      tr.appendChild(el('td', { colspan: String(cols.length), class: 'muted', text: '（无）' }));
+      tbody.appendChild(tr);
+    } else {
+      rows.forEach((r) => {
+        const tr = el('tr');
+        pick(r).forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
+        tbody.appendChild(tr);
+      });
+    }
+    t.appendChild(tbody);
+    wrap.appendChild(t);
+    box.appendChild(wrap);
+  });
+}
+
+// ---------- 审计日志 ----------
+
+function renderAudit(audit) {
+  const rows = (audit && !audit.__err && Array.isArray(audit.items)) ? audit.items : (Array.isArray(audit) ? audit : []);
+  table($('audit-table').querySelector('tbody'), 5, rows.slice(0, 50).map((a) => [
+    fmtTime(a.ts || a.time || a.timestamp), a.user, a.action || a.event,
+    a.detail || a.message, a.result || a.outcome,
+  ]));
+  $('audit-note').textContent = audit && audit.__err ? '（读取失败：' + audit.__err + '）'
+    : (rows.length ? '（最近 ' + Math.min(rows.length, 50) + ' 条）' : '');
+}
+
+// ---------- 运维动作（写操作，均二次确认）----------
+
+function opsMsg(text, isErr) {
+  const p = $('ops-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+function opsOut(text) {
+  const pre = $('ops-out');
+  pre.hidden = !text;
+  pre.textContent = text || '';
+}
+
+// opsRun 统一的"确认 → 调用 → 回显"流程（写操作一律先确认，与 CLI 的 --yes 同口径）。
+async function opsRun(label, confirmText, fn) {
+  if (!window.confirm(confirmText)) return;
+  opsMsg(label + '：执行中…', false);
+  opsOut('');
+  try {
+    const out = await fn();
+    opsMsg(label + '：完成。', false);
+    if (out) opsOut(typeof out === 'string' ? out : JSON.stringify(out, null, 2));
+  } catch (e) {
+    opsMsg(label + ' 失败：' + e.message, true);
+  }
+  await loadAll().catch(() => {});
+}
+
 // ---------- 启动 ----------
 
 $('login-form').addEventListener('submit', doLogin);
@@ -868,6 +1136,85 @@ $('cfg-commit-btn').addEventListener('click', () => cfgCommit(0));
 $('cfg-commit-confirmed-btn').addEventListener('click', () => cfgCommit(10));
 $('cfg-confirm-btn').addEventListener('click', cfgConfirmPending);
 $('cfg-discard-btn').addEventListener('click', cfgEndSession);
+
+// 运维动作（写操作；confirm 文案写清影响面）
+$('ops-backup-btn').addEventListener('click', () => opsRun('生成配置备份',
+  '生成一份配置备份归档？（只读操作，不改运行配置）',
+  async () => {
+    const r = await api('/system/backup', { method: 'POST' });
+    return r && r.file ? '备份文件：' + r.file : '已生成。';
+  }));
+$('ops-tls-btn').addEventListener('click', () => opsRun('重签自签证书',
+  '重签本机自签证书？浏览器会提示证书变化（客户端需重新固定），当前页面可继续使用。',
+  () => api('/system/tls:regenerate', { method: 'POST' })));
+$('ops-sshkey-btn').addEventListener('click', () => opsRun('重新生成 SSH host key',
+  '重新生成 SSH host key？新连接的 host key 会变化，客户端需更新 known_hosts。',
+  () => api('/system/ssh-host-key:regenerate', { method: 'POST' })));
+$('ops-techsupport-btn').addEventListener('click', () => opsRun('生成 tech-support 归档',
+  '生成诊断归档？（收集配置/日志/状态，只读）',
+  () => api('/system/tech-support', { method: 'POST' })));
+$('ops-coredumps-btn').addEventListener('click', () => opsRun('列出 core dump',
+  '列出当前 core dump 文件？',
+  async () => {
+    const rows = await api('/system/core-dumps');
+    if (!rows || !rows.length) return '（无 core dump）';
+    return rows.map((r) => r.file + '  ' + r.process + '  ' + bytes(r.size_bytes) + '  ' + fmtTime(r.occurred_at)).join('\n');
+  }));
+$('ops-alarms-btn').addEventListener('click', () => opsRun('清除已恢复告警',
+  '清除已恢复（resolved）的告警？活动告警不受影响。',
+  () => api('/alarms:clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })));
+$('ops-export-btn').addEventListener('click', () => {
+  const url = $('ops-export-url').value.trim();
+  if (!url) { opsMsg('请填写导出目标地址（http/https）。', true); return; }
+  return opsRun('导出 core dump 清单', '把 core dump 清单（JSON）POST 到 ' + url + '？',
+    () => api('/system/core-dumps:export', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+    }));
+});
+$('ops-vpprestart-btn').addEventListener('click', () => opsRun('重启数据面（VPP）',
+  '重启数据面？**所有经 VPP 的业务流量会中断数秒**，VNF 的 vhost-user 口会重建。',
+  () => api('/vpp/restart', { method: 'POST' })));
+$('ops-reboot-btn').addEventListener('click', () => opsRun('重启主机',
+  '重启整台主机？所有 VNF 与容器会停止，管理面会断开数分钟。',
+  () => api('/system:reboot', { method: 'POST' })));
+$('ops-shutdown-btn').addEventListener('click', () => opsRun('关机',
+  '关闭整台主机？所有 VNF 与容器会停止，管理面断开后需带外开机。',
+  () => api('/system:shutdown', { method: 'POST' })));
+
+// 诊断卡新增：traceroute 与接口计数清零
+$('diag-trace-btn').addEventListener('click', async () => {
+  const host = $('diag-host').value.trim();
+  const out = $('diag-out');
+  out.hidden = false;
+  if (!host) { out.textContent = '请填写目标地址。'; return; }
+  out.textContent = '执行中…';
+  try {
+    const res = await fetch(API + '/diagnostics/traceroute', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(pingBody(host, 0)),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = (body.detail || []).map((d) => d.message).join('\n');
+      out.textContent = '失败：' + (body.message || ('HTTP ' + res.status)) + (detail ? '\n' + detail : '');
+      return;
+    }
+    out.textContent = body.output || '（无输出）';
+  } catch (e) {
+    out.textContent = '失败：' + e.message;
+  }
+});
+$('diag-clear-btn').addEventListener('click', () => {
+  const name = $('diag-clear-if').value.trim();
+  return opsRun('清零接口统计',
+    name ? '清零接口 ' + name + ' 的收发计数？' : '清零**所有接口**的收发计数？',
+    () => api('/interfaces:clear-statistics', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(name ? { name } : {}),
+    }));
+});
+
 window.addEventListener('beforeunload', () => { stopStream(); stopPolling(); });
 
 (async function boot() {

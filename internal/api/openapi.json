@@ -6339,19 +6339,6 @@
         ]
       }
     },
-    "/vpp:restart": {
-      "post": {
-        "responses": {
-          "202": {
-            "description": "已受理（异步完成，事件通知）"
-          }
-        },
-        "summary": "按新配置重启 VPP 数据面（触发恢复收敛）",
-        "tags": [
-          "system"
-        ]
-      }
-    },
     "/vrfs": {
       "get": {
         "responses": {

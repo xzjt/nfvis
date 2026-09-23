@@ -227,6 +227,32 @@ func TestUIHiddenAttributeWinsOverAuthorDisplay(t *testing.T) {
 	t.Fatal("style.css 没有以 [hidden] 开头的规则行")
 }
 
+// getList 取数组型端点（列表卡的响应形状）。
+func getList(t *testing.T, ts *httptest.Server, tok, path string) []any {
+	t.Helper()
+	req, _ := http.NewRequest("GET", ts.URL+APIPrefix+path, nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		// 该能力在裸测试服务里未注入（如镜像仓库/LLDP 运行态）：跳过而不是报红
+		// ——否则"没接底座"会被当成"字段名错了"（工具假红）。
+		t.Logf("%s: 503（本测试服务未注入该运行态），跳过字段核对", path)
+		return nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("%s: 状态 %d", path, resp.StatusCode)
+	}
+	var rows []any
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		t.Fatalf("%s 应为数组响应: %v", path, err)
+	}
+	return rows
+}
+
 // UI 依赖的 JSON 字段名必须真的在响应里。这里钉的是"字段名不会静默消失"，
 // 取的是会让整块卡片变空的那几个键。
 func TestUIFieldNamesExistInResponses(t *testing.T) {
@@ -265,6 +291,34 @@ func TestUIFieldNamesExistInResponses(t *testing.T) {
 			}
 		}
 	}
+	// 列表端点（虚拟交换机/镜像/审计日志/网络对象）：响应必须是**数组**；
+	// 非空时逐字段核首个元素——空数组时只断言形状（列表为空是合法状态）。
+	for _, c := range []struct {
+		path string
+		keys []string
+	}{
+		{"/virtual-switches", []string{"name", "type"}},
+		{"/images", []string{"name", "type", "size_bytes"}},
+		{"/audit-logs", []string{"user", "action", "result", "timestamp"}},
+		{"/vrfs", []string{"name"}},
+		{"/acls", []string{"name"}},
+		{"/bonds", []string{"name"}},
+		{"/protocols/lldp/neighbors", []string{"local_interface"}},
+		{"/qos/policies", []string{"name"}},
+		{"/port-mirroring", []string{"name"}},
+	} {
+		rows := getList(t, ts, tok, c.path)
+		if len(rows) == 0 {
+			continue // 空列表：形状对了即可（真机有数据时由浏览器验收覆盖渲染）
+		}
+		first, _ := rows[0].(map[string]any)
+		for _, k := range c.keys {
+			if _, ok := first[k]; !ok {
+				t.Errorf("%s[0] 缺字段 %s（UI 对应卡片会显示为空）", c.path, k)
+			}
+		}
+	}
+
 	// 系统卡片的数字改读 /system/status 的嵌套字段（R37-1 收口后不再解析 /metrics 文本）：
 	// 这些键同样必须在真实响应里，否则卡片静默变空。宿主指标（cpu/memory/storage）只在
 	// Linux 产出，非 Linux 上**跳过**而不是报红——否则开发机（Windows）上恒红，

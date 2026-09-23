@@ -136,3 +136,22 @@ pre.code {
 .cfg-actions button { padding: 6px 12px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: #06121c; cursor: pointer; font-size: 13px; font-weight: 600; }
 .cfg-actions button.ghost { background: transparent; color: var(--fg); border-color: var(--line); font-weight: 400; }
 .cfg-actions button.ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+/* 行内动作按钮（虚拟机生命周期）与危险动作（电源类） */
+td.actions { white-space: nowrap; }
+td.actions button { margin-right: 4px; }
+button.small { padding: 3px 8px; font-size: 12px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--fg); cursor: pointer; }
+button.small:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button.small:disabled { opacity: 0.45; cursor: not-allowed; }
+button.danger { background: #b3261e; border-color: #b3261e; color: #fff; }
+button.danger:hover { background: #cf3a31; border-color: #cf3a31; }
+
+/* 网络对象：多块只读小表并排 */
+.net-objects { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.net-object h3 { margin: 4px 0 6px; font-size: 13px; color: var(--accent); }
+.net-object table { width: 100%; }
+
+/* 审计日志：只让"详情"列折行，其余列保持单行（否则时间/用户/结果会被挤成竖排） */
+#audit-table th, #audit-table td { white-space: nowrap; }
+#audit-table td:nth-child(4) { white-space: normal; word-break: break-word; }
+#audit-table td:first-child { color: var(--muted); }

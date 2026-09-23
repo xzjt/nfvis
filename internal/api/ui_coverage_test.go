@@ -1,0 +1,204 @@
+package api
+
+// Web 控制台的**界面覆盖**守护（与 CLI⇄REST 的 `cli_rest_coverage_test.go` 同一套纪律）。
+//
+// 背景：`cli_rest_coverage_test.go` 盯的是「CLI 命令有没有 REST 端点」；而**界面用不用这些端点**
+// 是另一层——两者混为一谈会得出「REST 覆盖高就万事大吉」的错误结论。本文件把界面这一层也机器化：
+//
+//   - **已接**：由前端源码**机器提取**（`api('/x')` 与 `fetch(API + '/x')` 的字面量路径，
+//     以 `/` 结尾的按前缀匹配），不是人工维护的表——"界面真的调了它"由源码保证；
+//   - **未接**：契约里存在、界面**有意**不接的路径，逐条写理由（`uiNotWired`）；
+//   - 断言：① 前端调的路径必须在契约里（映射过期即红）；② 契约里每条路径要么已接、
+//     要么在 `uiNotWired` 里写明理由——**新增端点忘记归类即红**，界面缺口数因此始终可见。
+
+import (
+	"os"
+	"regexp"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// uiNotWired 契约有、界面**有意**不接的路径 → 理由（新增端点须在此归类或接入界面）。
+var uiNotWired = map[string]string{
+	// —— 已登记：后续增量的界面工作（**这一段就是界面缺口清单**）——
+	"/vpp/capture":                        "抓包视图（开始/停止/导出 pcap）——后续增量",
+	"/vpp/capture/{file}":                 "抓包文件下载——同上",
+	"/container-functions/{name}/logs":    "容器日志视图——与 console 终端同批",
+	"/container-functions/{name}:start":   "容器生命周期按钮——与 VM 动作同批做界面",
+	"/container-functions/{name}:stop":    "同上",
+	"/container-functions/{name}:restart": "同上",
+	"/system/tech-support/{file}":         "诊断归档下载（文件流）——后续增量",
+	"/system/backup/{file}":               "备份归档下载（文件流）——后续增量",
+	"/system/hardware":                    "硬件健康明细——后续增量（阈值告警已在告警卡体现）",
+	"/system/health/thresholds":           "健康阈值设置——后续增量",
+	"/vrfs/{name}":                        "VRF 详情——列表已给概览，详情后续增量",
+	"/vrfs/{name}/routes":                 "路由表——数据量大需分页，后续增量",
+	"/acls/{name}":                        "ACL 详情——列表已给规则数，详情后续增量",
+	"/bonds/{name}":                       "bond 详情——列表已给成员，详情后续增量",
+	"/qos/policies/{name}":                "QoS 详情——列表已给概览",
+	"/port-mirroring/{name}":              "SPAN 详情——列表已给概览",
+	"/nat/sessions":                       "NAT 会话表——数据量大需分页，后续增量",
+	"/images/{name}":                      "镜像详情——列表已给全部字段",
+	"/container-functions/{name}":         "容器详情——列表已给概览",
+	"/configuration/rollback/{n}":         "回滚到历史快照——需先看差异再确认，后续增量",
+	"/protocols/lldp":                     "LLDP 开关状态——邻居表已接；开关属配置编辑（走「配置」卡）",
+
+	// —— 高风险 / 需要文件选择：界面有意不提供（CLI 有二次确认与守卫）——
+	"/system/restore":                            "恢复配置属高风险，界面暂不提供",
+	"/system:zeroize":                            "恢复出厂（破坏性极强），界面暂不提供",
+	"/system/software":                           "软件升级涉及重启与回退，界面暂不提供",
+	"/system/software:rollback":                  "同上",
+	"/system/tls":                                "证书上传需文件选择与 PEM 校验（重签已提供）",
+	"/system/login-users":                        "用户管理涉及口令策略，界面暂不提供",
+	"/system/login-users/{name}":                 "同上",
+	"/system/login-users/{name}:change-password": "同上",
+	"/system/kernel":                             "内核基线查看——入口是 CLI 的向导形态，界面暂不提供",
+	"/system/kernel:apply":                       "内核基线应用需重启生效，界面暂不提供",
+	"/system/kernel:rollback":                    "同上",
+	"/system/ntp:sync":                           "NTP 立即同步——界面暂无入口",
+
+	// —— 配置类：走「配置」卡的候选 → 提交流程（不单列界面入口）——
+	"/system":     "系统配置段——走「配置」卡（candidate → 提交）",
+	"/vpp/config": "VPP 配置段——同上",
+
+	// —— by design：非界面读物 ——
+	"/metrics":                       "Prometheus 文本格式，界面改读 /system/status 的同源字段",
+	"/openapi.json":                  "契约自查用，界面不消费",
+	"/ui":                            "302 到 /ui/，由浏览器自行跟随",
+	"/ui/":                           "页面本体",
+	"/cli/execute":                   "x-internal：CLI 执行通道，界面只走类型化端点",
+	"/cli/candidates":                "x-internal：补全候选，界面用表单替代",
+	"/system/configuration/sessions": "持锁会话查询——排障用，界面暂无入口",
+}
+
+// uiUsedPaths 从**前端源码**提取路径字面量：api('/x')、fetch(API + '/x')。
+// 以 `/` 结尾的字面量（如 `/interfaces/` + name）按前缀匹配使用。
+func uiUsedPaths(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatalf("读取 ui/app.js: %v", err)
+	}
+	src := string(data)
+	seen := map[string]bool{}
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`api\('(/[^']*)'`),
+		regexp.MustCompile(`fetch\(API \+ '(/[^']*)'`),
+	} {
+		for _, m := range re.FindAllStringSubmatch(src, -1) {
+			p := m[1]
+			if i := strings.IndexByte(p, '?'); i >= 0 {
+				p = p[:i] // 去掉查询串（/audit-logs?limit=50 → /audit-logs）
+			}
+			seen[p] = true
+		}
+	}
+	if len(seen) < 15 {
+		t.Fatalf("从 ui/app.js 只提取到 %d 条路径，提取规则可能失效（前端调用形式变了？）", len(seen))
+	}
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// uiCovers 判断某契约路径是否被界面使用（含 `/x/` 前缀字面量）。
+func uiCovers(lits []string, path string) bool {
+	for _, l := range lits {
+		if l == path {
+			return true
+		}
+		if strings.HasSuffix(l, "/") && strings.HasPrefix(path, l) {
+			return true
+		}
+	}
+	return false
+}
+
+// contractPathSet 契约里的全部路径（方法无关）。
+func contractPathSet(t *testing.T) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for r := range contractRoutes(t) {
+		out[strings.TrimSpace(r[strings.IndexByte(r, ' ')+1:])] = true
+	}
+	return out
+}
+
+// TestUIWiredPathsExistInContract 前端调的路径必须在契约里（端点改名/写错即红）。
+func TestUIWiredPathsExistInContract(t *testing.T) {
+	contractPaths := contractPathSet(t)
+	for _, p := range uiUsedPaths(t) {
+		if strings.HasSuffix(p, "/") { // 前缀字面量：只要有任一路径以它为前缀即可
+			found := false
+			for cp := range contractPaths {
+				if strings.HasPrefix(cp, p) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("ui/app.js 用了前缀 %q，但契约里没有任何路径以它开头", p)
+			}
+			continue
+		}
+		if !contractPaths[p] {
+			t.Errorf("ui/app.js 调用了 %q，但契约里没有该路径（端点改名或写错了？）", p)
+		}
+	}
+}
+
+// TestUICoverageClassified 契约里每条路径要么被界面使用、要么在 uiNotWired 里写明理由
+// ——**新增端点忘记归类即红**，界面缺口数因此始终可见（与 CLI⇄REST 同一纪律）。
+func TestUICoverageClassified(t *testing.T) {
+	contractPaths := contractPathSet(t)
+	lits := uiUsedPaths(t)
+
+	unclassified := []string{}
+	wired, unwired := 0, 0
+	for p := range contractPaths {
+		switch {
+		case uiCovers(lits, p):
+			wired++
+		case uiNotWired[p] != "":
+			unwired++
+		default:
+			unclassified = append(unclassified, p)
+		}
+	}
+	if len(unclassified) > 0 {
+		sort.Strings(unclassified)
+		t.Errorf("以下契约路径既没被界面使用、也没在 uiNotWired 里归类（新增端点请归类或接入界面）：\n  %s",
+			strings.Join(unclassified, "\n  "))
+	}
+
+	// uiNotWired 里不许有"幽灵条目"（写错路径名会让断言变成空转）
+	ghosts := []string{}
+	for p := range uiNotWired {
+		if !contractPaths[p] {
+			ghosts = append(ghosts, p)
+		}
+	}
+	if len(ghosts) > 0 {
+		sort.Strings(ghosts)
+		t.Errorf("uiNotWired 里的以下路径不是契约里的真实路径（拼错或已删？）：\n  %s", strings.Join(ghosts, "\n  "))
+	}
+
+	// 已接的路径不许再出现在 uiNotWired 里（否则缺口数虚高）
+	stale := []string{}
+	for p := range uiNotWired {
+		if uiCovers(lits, p) {
+			stale = append(stale, p)
+		}
+	}
+	if len(stale) > 0 {
+		sort.Strings(stale)
+		t.Errorf("以下路径界面已接，却仍列在 uiNotWired 里（缺口数会虚高）：\n  %s", strings.Join(stale, "\n  "))
+	}
+
+	t.Logf("界面覆盖：已接 %d 条路径 / 未接 %d 条（均已写明理由）/ 契约共 %d 条",
+		wired, unwired, len(contractPaths))
+}
