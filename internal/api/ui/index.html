@@ -139,12 +139,18 @@
       <pre id="vs-stat" class="code" hidden></pre>
     </article>
 
-    <article class="card">
-      <h2>容器</h2>
+    <article class="card wide">
+      <h2>容器 <span id="ct-note" class="muted small"></span></h2>
       <table id="ct-table">
-        <thead><tr><th>名称</th><th>状态</th><th>vCPU</th><th>内存</th><th>镜像</th></tr></thead>
+        <thead><tr><th>名称</th><th>状态</th><th>vCPU</th><th>内存</th><th>镜像</th><th>操作</th></tr></thead>
         <tbody></tbody>
       </table>
+      <div id="ct-logs-wrap" hidden>
+        <h3>容器日志 <span id="ct-logs-name" class="muted small"></span>
+          <button id="ct-logs-refresh" type="button" class="ghost small">刷新</button>
+          <button id="ct-logs-close" type="button" class="ghost small">关闭</button></h3>
+        <pre id="ct-logs" class="code console-out"></pre>
+      </div>
     </article>
 
     <article class="card wide">
