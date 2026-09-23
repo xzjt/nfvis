@@ -1245,9 +1245,140 @@ async function ctLogsLoad() {
 // ---------- 镜像仓库 ----------
 
 function renderImages(imgs) {
-  table($('img-table').querySelector('tbody'), 4, (imgs || []).map((i) => [
-    i.name, i.type, i.size_bytes ? bytes(i.size_bytes) : undefined, i.ref_count,
-  ]));
+  const tbody = $('img-table').querySelector('tbody');
+  tbody.textContent = '';
+  const rows = imgs || [];
+  if (!rows.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '6', class: 'muted', text: '（无）' }));
+    tbody.appendChild(tr);
+    return;
+  }
+  rows.forEach((i) => {
+    const tr = el('tr');
+    [i.name, i.type, i.size_bytes ? bytes(i.size_bytes) : undefined, i.ref_count,
+      i.import_state || 'ready'].forEach((c) => {
+      tr.appendChild(el('td', { text: String(dash(c)) }));
+    });
+    const cell = el('td', { class: 'actions' });
+    const btn = el('button', { type: 'button', class: 'danger small', text: '删除' });
+    btn.addEventListener('click', () => imgDelete(i.name, i.ref_count));
+    cell.appendChild(btn);
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
+  });
+}
+
+// imgIsFailed / imgOutcome：**不把 2xx 当成功**——服务端可能已受理但导入失败
+// （记录会以 import_state=failed 落库，界面必须如实呈现，否则就是"假绿"）。
+function imgIsFailed(res) {
+  const st = res && res.import_state;
+  return st === 'failed';
+}
+
+function imgOutcome(res, name) {
+  const st = (res && res.import_state) || '';
+  if (st === 'failed') {
+    const why = (res && (res.error || res.message)) || '服务端未给出原因';
+    return '导入失败（' + name + '）：' + why;
+  }
+  if (st === 'ready' || st === 'imported') return '导入完成：' + name;
+  if (st) return '已受理（' + name + '）：状态 ' + st + '，可在列表中查看';
+  return '已受理：' + name + '（可在列表中查看导入状态）';
+}
+
+function imgMsg(text, isErr) {
+  const p = $('img-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+async function imgDelete(name, refCount) {
+  if (!window.confirm('删除镜像 ' + name + '？' +
+    (refCount ? '（当前被引用 ' + refCount + ' 次，服务端会拒绝）' : '（不可恢复）'))) return;
+  imgMsg('删除 ' + name + '：执行中…', false);
+  try {
+    await api('/images/' + encodeURIComponent(name), { method: 'DELETE' });
+    imgMsg('已删除 ' + name + '。', false);
+  } catch (e) {
+    imgMsg('删除失败：' + e.message, true);
+  }
+  await loadAll().catch(() => {});
+}
+
+function imgCommon() {
+  const name = $('img-name').value.trim();
+  const type = $('img-type').value.trim() || 'vm-image';
+  if (!name) { imgMsg('请填写名称。', true); return null; }
+  return { name, type };
+}
+
+async function imgImportURL() {
+  const c = imgCommon();
+  if (!c) return;
+  const url = $('img-url').value.trim();
+  const sha = $('img-sha').value.trim();
+  if (!url) { imgMsg('请填写 URL。', true); return; }
+  if (!sha) { imgMsg('URL 拉取必须提供 sha256（服务端默认强制校验）。', true); return; }
+  if (!window.confirm('从 ' + url + ' 拉取并导入为 ' + c.name + '？大镜像可能耗时较久。')) return;
+  imgMsg('拉取中…（大镜像可能耗时较久，请勿关闭页面）', false);
+  try {
+    const res = await api('/images', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: c.name, type: c.type, url, sha256: sha }),
+    });
+    imgMsg(imgOutcome(res, c.name), imgIsFailed(res));
+  } catch (e) {
+    imgMsg('导入失败：' + e.message, true);
+  }
+  await loadAll().catch(() => {});
+}
+
+async function imgImportIncoming() {
+  const c = imgCommon();
+  if (!c) return;
+  const file = $('img-incoming').value.trim();
+  if (!file) { imgMsg('请填写 incoming 文件名。', true); return; }
+  if (!window.confirm('把 /data/incoming/' + file + ' 导入为 ' + c.name + '？导入成功后该文件会被清理。')) return;
+  imgMsg('导入中…', false);
+  try {
+    const res = await api('/images', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: c.name, type: c.type, incoming_file: file }),
+    });
+    imgMsg(imgOutcome(res, c.name), imgIsFailed(res));
+  } catch (e) {
+    imgMsg('导入失败：' + e.message, true);
+  }
+  await loadAll().catch(() => {});
+}
+
+async function imgImportFile() {
+  const c = imgCommon();
+  if (!c) return;
+  const f = $('img-file').files[0];
+  if (!f) { imgMsg('请选择文件。', true); return; }
+  if (!window.confirm('上传 ' + f.name + '（' + bytes(f.size) + '）并导入为 ' + c.name + '？')) return;
+  const fd = new FormData();
+  fd.append('name', c.name);
+  fd.append('type', c.type);
+  fd.append('file', f);
+  imgMsg('上传中…（大镜像可能耗时较久，请勿关闭页面）', false);
+  try {
+    const res = await fetch(API + '/images', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd });
+    if (!res.ok) {
+      let msg = 'HTTP ' + res.status;
+      try { const b = await res.json(); if (b && b.message) msg = b.message; } catch (e) { /* 非 JSON */ }
+      imgMsg('导入失败：' + msg, true);
+    } else {
+      const body = await res.json().catch(() => ({}));
+      imgMsg(imgOutcome(body, c.name), imgIsFailed(body));
+    }
+  } catch (e) {
+    imgMsg('导入失败：' + e.message, true);
+  }
+  await loadAll().catch(() => {});
 }
 
 // ---------- 网络对象（只读总览）----------
@@ -1546,6 +1677,11 @@ $('big-clear-btn').addEventListener('click', () => { bigMsg('', false); bigOut('
 $('vm-snap-refresh').addEventListener('click', vmSnapLoad);
 $('vm-snap-close').addEventListener('click', () => { $('vm-snap').hidden = true; snapVM = ''; });
 $('vm-snap-create').addEventListener('click', vmSnapCreate);
+
+// 镜像导入
+$('img-url-btn').addEventListener('click', imgImportURL);
+$('img-incoming-btn').addEventListener('click', imgImportIncoming);
+$('img-file-btn').addEventListener('click', imgImportFile);
 
 // 容器日志
 $('ct-logs-refresh').addEventListener('click', ctLogsLoad);
