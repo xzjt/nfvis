@@ -5024,6 +5024,36 @@
         ]
       }
     },
+    "/system/ssh-host-key:regenerate": {
+      "post": {
+        "description": "与 CLI `request system ssh host-key regenerate` 同一实现（FR-SYS-011）：删除\n`/etc/ssh/ssh_host_*` 私钥后跑 `ssh-keygen -A` 重建。**影响的是新连接的 host key 校验**\n（客户端 known_hosts 会失配，需按提示更新），当前已建立的会话不受影响。\n",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "description": "操作者可见的结果说明",
+                      "type": "string"
+                    },
+                    "regenerated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "已重新生成"
+          }
+        },
+        "summary": "重新生成 SSH host key（宿主 sshd）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/system/status": {
       "get": {
         "responses": {

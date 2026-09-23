@@ -280,6 +280,8 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/system/tls", s.auth(s.handleGetTLS, schema.ClassReadOnly, "show system"))
 	mux.Handle("PUT "+APIPrefix+"/system/tls", cfgAPI(s.handlePutTLS))
 	mux.Handle("POST "+APIPrefix+"/system/tls:regenerate", cfgAPI(s.handlePostTLSRegenerate))
+	mux.Handle("POST "+APIPrefix+"/system/ssh-host-key:regenerate",
+		s.auth(s.handlePostSSHHostKeyRegenerate, schema.ClassSuperUser, "request system ssh host-key regenerate"))
 
 	// M5-5：硬件健康与阈值（FR-SYS-012）
 	mux.Handle("GET "+APIPrefix+"/system/hardware", s.auth(s.handleGetHardware, schema.ClassReadOnly, "show system hardware"))
