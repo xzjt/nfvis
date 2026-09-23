@@ -1,0 +1,40 @@
+===== V1 收尾第五十八轮：Web 控制台详情刀（对象详情页取代共享浮层）=====
+日期：2026-09-23
+范围：分支 `console-ia-detail`（决策 #141 第 2 刀）；设计 §5.3、§11.2、§12 刀 2；计划 docs/superpowers/plans/2026-09-23-web-console-detail.md
+
+----- 1. 交付 -----
+- **参数化路由**：`#/compute/vms/:name` 等 **8 条详情路由**（静态优先、decodeURIComponent、params 传给
+  VIEWS[view].render(data, params)）；导航不列详情页（`detail: true` 标记），面包屑末段可点回列表。
+- **VM 详情页 4 个 Tab**：概览（对象头 + 生命周期按钮按 VM_ACTIONS 判定 + vhost-user 计数）、接口（vNIC 与
+  逐口计数）、快照、串口——后两个把既有浮层 DOM **原样搬**进 Tab 面板，复用 vmSnap*/vmConsole*，不重写；
+  **离开详情页（换页或换对象）自动断开串口**。
+- 容器详情（概览/日志）、镜像详情（完整元数据）、网络对象详情（vrf/acl/bond/qos/span，VRF 额外给按需路由表）；
+  **共享浮层 objDetail 删除**；列表行可点进详情（行内动作按钮 stopPropagation）。
+- 顺带纠正一处**旧缺陷**：`/qos/policies/{name}`、`/port-mirroring/{name}` 契约里**只有 DELETE**——旧的「详情」
+  按钮点下去是 405；两条按实情移入 `uiNotWired` 并写明理由，并新增守护「路由表端点必须在契约里有 GET」
+  （路径存在 ≠ 能读）。覆盖数字如实变化：**已接 70→68 / 未接 28→30**。
+
+----- 2. 浏览器操作验收（决策 #141 口径）-----
+环境：明文开发态实例（`/root/src-ia` 构建 + 生产库副本 0.0.0.0:8443；生产库全程未变）。
+
+| 操作 | 断言 | 结果 |
+|---|---|---|
+| 在 `#/compute/vms` 点 `vnf-a` 行 | 跳到 `#/compute/vms/vnf-a`、只显示详情页、四个 Tab 在、面包屑「计算 › 虚拟机」 | ✓ |
+| 概览 Tab | 对象头「状态 running / 镜像 debian-12-generic-amd64.qcow2 / vCPU 1 / 内存 1.0 GB」；动作按钮 `启动(禁用) 停止 重启`（运行中 → 启动禁用） | ✓ |
+| 串口 Tab：连接 | `window.nfvis.consoleOpen()` = **true**、输出面板 62 字节（VM console 真在推） | ✓ |
+| 串口 Tab：断开 | `consoleOpen()` = false | ✓ |
+| 串口 Tab：连着串口切到总览 | 离开详情页后 `consoleOpen()` = **false**（自动断连，无 WebSocket 泄漏） | ✓ |
+| 快照 Tab：列表 | 表头 +「（无快照）」如实渲染 | ✓ |
+| 快照 Tab：对运行中的 vnf-a 点「创建」 | 回显 **「创建失败：VM vnf-a 当前为 running，快照 create 需先关机」**（与 CLI 同口径的拒绝，不是假成功） | ✓ |
+| 深链直达 | 新标签打开 `…?v=d4#/compute/vms/vnf-a` → 直接进详情页（未登录先登录再回目标） | ✓ |
+| 镜像详情 | 在 `#/compute/images` 点 `alpine.qcow2` 行 → `#/compute/images/alpine.qcow2`，页面给完整元数据（类型/大小/引用数/格式/187695104 字节/sha256…） | ✓ |
+| 容器详情（对象不存在） | 深链 `#/compute/containers/nope` → 页面**如实报错**「以下数据读取失败：/container-functions/{name}（容器 nope 不存在）」、**不静默** | ✓ |
+
+> 未覆盖项如实登记：① 本机**没有容器**，容器详情的正例（日志 Tab）未能在真机跑（只有 404 路径）；
+> ② 快照的**创建成功/删除/回滚**需要关机态 VM——本机两台 VNF 都在跑（生产拓扑，不能停），
+> 故只验到"运行中被正确拒绝"；关机态的快照全流程在 M4-11 与冒烟阶段 4 已有真机证据，
+> 但**在详情页里**的这一路（DOM 从浮层搬进 Tab）本刀只验到拒绝路径，**如实登记为未验**。
+
+----- 3. 环境（前后）-----
+配置库逐项未变（rev 55 / audit 104 / cfgsha 084c3a64…，与动服务前备份逐项一致）；收尾停开发态实例 →
+`systemctl restart vpp` → 起回已装服务，拓扑与流量复核通过；临时件已清。

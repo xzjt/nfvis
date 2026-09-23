@@ -160,12 +160,23 @@ function pageWarn(d) {
 }
 
 // 按路由声明的端点取数：返回 { 端点: 数据 }（各自降级，单个失败不拖垮整页）。
-export async function softLoad(paths) {
+// `params` 是参数化路由取出的对象名（如 `:name`）：端点里的 `{name}` 占位在**取数时**展开，
+// 返回值的键仍是路由表里声明的那一串（`'/virtual-machine-functions/{name}'`）——
+// 视图照路由表原文取值，不必自己拼路径，也不会因为对象名不同而取错键。
+export async function softLoad(paths, params) {
   const out = {};
   await Promise.all((paths || []).map(async (p) => {
-    out[p] = await soft(api(p));
+    out[p] = await soft(api(expandEndpoint(p, params)));
   }));
   return out;
+}
+
+// 端点占位展开：`{name}` → 参数值（URL 编码）。参数缺席时**保留占位原样**（请求会得到
+// 404 而不是打到某个碰巧同名的对象上），页面上会如实显示这条读取失败。
+function expandEndpoint(path, params) {
+  const p = params || {};
+  return path.replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, k) =>
+    (p[k] === undefined || p[k] === null ? m : encodeURIComponent(p[k])));
 }
 
 // 虚拟交换机：列表取自运行态（/virtual-switches 是配置视图，统计在详情上）。
@@ -173,16 +184,6 @@ async function loadVSwitchStats(vss) {
   const head = vss.slice(0, MAX_IFACE_DETAIL);
   const details = await Promise.all(head.map((v) => api('/virtual-switches/' + encodeURIComponent(v.name)).catch(() => null)));
   return head.map((v, n) => ({ cfg: v, stat: (details[n] || {}).statistics || null }));
-}
-
-// 每台 VM 的 vhost-user 口计数（在详情端点上）。
-async function loadVMStats(vms) {
-  const out = {};
-  await Promise.all(vms.slice(0, MAX_IFACE_DETAIL).map(async (vm) => {
-    const d = await api('/virtual-machine-functions/' + encodeURIComponent(vm.name)).catch(() => null);
-    if (d && d.statistics) out[vm.name] = d.statistics;
-  }));
-  return out;
 }
 
 // 网络对象：一次拉齐只读视图（每个端点各自降级，缺一个不影响其余）。
@@ -315,9 +316,12 @@ function renderAlarms(alarms) {
 // ---------- 页面视图（routes.json 的 view 名 → 渲染函数）----------
 //
 // 键名必须与 routes.json 的 view 一一对应（Go 守护按名字核对）。每页的取数范围也由路由表声明：
-// router.js 按 route.endpoints 调 softLoad 取齐后传进来（`d` 是 { 端点: 数据 }）；
-// 页面里另外要拉的**详情/动作类**端点（不在路由表的 endpoints 里，如逐口统计、VM 快照）
+// router.js 按 route.endpoints 调 softLoad 取齐后传进来（`d` 是 { 端点: 数据 }，键就是
+// routes.json 里的原文）；参数化路由（详情页）还会把 `params`（对象名）作为第二个入参传进来。
+// 页面里另外要拉的**详情/动作类**端点（不在路由表的 endpoints 里，如容器日志、抓包导出）
 // 由该页自己用 api() 拉——那些是"点了才看"的东西，不进页面取数范围。
+//
+// `leave` 可选：离开本页（换页或换对象）时由 router.js 调一次，用于收尾（详情页断开串口）。
 export const VIEWS = {
   'overview': {
     render(d) {
@@ -329,21 +333,48 @@ export const VIEWS = {
     },
   },
   'vms': {
-    async render(d) {
+    render(d) {
       pageWarn(d);
-      const rows = rowsOf(d['/virtual-machine-functions']);
-      renderVMRows(rows);
-      renderVMStats(rows, await loadVMStats(rows));
+      renderVMRows(rowsOf(d['/virtual-machine-functions']));
     },
+  },
+  'vmDetail': {
+    render(d, params) {
+      pageWarn(d);
+      renderVMDetail(d, params);
+    },
+    // 串口是有状态的（WebSocket + 一次性 ticket）：离开这一页就断开，别把连接留在后台。
+    leave() { vmConsoleClose(); },
   },
   'containers': {
     render(d) { pageWarn(d); renderContainerRows(rowsOf(d['/container-functions'])); },
   },
+  'containerDetail': {
+    render(d, params) { pageWarn(d); renderContainerDetail(d, params); },
+  },
   'images': {
     render(d) { pageWarn(d); renderImages(rowsOf(d['/images'])); },
   },
+  'imageDetail': {
+    render(d, params) { pageWarn(d); renderImageDetail(d['/images/{name}'], params); },
+  },
   'network': {
     async render(d) { pageWarn(d); renderNetworkObjects(await loadNetworkObjects(d)); },
+  },
+  'vrfDetail': {
+    render(d, params) { pageWarn(d); renderVrfDetail(d['/vrfs/{name}'], d['/vrfs/{name}/routes'], params); },
+  },
+  'aclDetail': {
+    render(d, params) { pageWarn(d); renderAclDetail(d['/acls/{name}'], params); },
+  },
+  'bondDetail': {
+    render(d, params) { pageWarn(d); renderBondDetail(d['/bonds/{name}'], params); },
+  },
+  'qosDetail': {
+    render(d, params) { pageWarn(d); renderQosDetail(d['/qos/policies'], params); },
+  },
+  'spanDetail': {
+    render(d, params) { pageWarn(d); renderSpanDetail(d['/port-mirroring'], params); },
   },
   'switches': {
     async render(d) {
@@ -986,6 +1017,8 @@ async function enterApp(user) {
 function signOut(msg) {
   stopStream();
   stopPolling();
+  // 串口是有状态的（WebSocket）：退出登录必须断开，别把连接留在后台。
+  vmConsoleClose();
   token = '';
   events = [];
   cfg = { committed: null, editing: false };
@@ -1027,20 +1060,40 @@ async function doLogout() {
   signOut('');
 }
 
-// ---------- 虚拟机：行内生命周期动作 + vhost-user 口计数 ----------
+// ---------- 虚拟机：列表行（点行进详情）+ 生命周期动作 ----------
 
 // 状态 → 允许的动作（与 CLI 同口径：运行中可 stop/restart，关机态可 start）。
+// 列表页与详情页共用这份判定，两边不会分叉。
 const VM_ACTIONS = [
   { key: 'start', label: '启动', states: ['shutoff', 'crashed', '-'] },
   { key: 'stop', label: '停止', states: ['running', 'paused'] },
   { key: 'restart', label: '重启', states: ['running', 'paused'] },
 ];
 
+// 行内按钮：拦掉冒泡——否则点动作会连带触发行点击（跳进详情页）。动作与拦截是两个监听器，
+// 都在按钮自身上，故互不影响。
+function rowButton(btn) {
+  btn.addEventListener('click', (ev) => ev.stopPropagation());
+  return btn;
+}
+
+// 列表行的行点击：进该对象的详情页（地址即 `#/…/<name>`，可分享、可刷新保持）。
+function rowClickable(tr, path) {
+  tr.className = 'row-link';
+  tr.addEventListener('click', () => goDetail(path));
+  return tr;
+}
+
+// 详情页跳转：路由模块按需动态 import（与 reload 同一路，避免静态互相 import 成环）。
+async function goDetail(path) {
+  (await routerModule()).navigate(path);
+}
+
 function renderVMRows(vms) {
   const tbody = $('vm-table').querySelector('tbody');
   tbody.textContent = '';
   const rows = vms || [];
-  $('vm-note').textContent = rows.length ? '（' + rows.length + ' 台；动作按钮按当前状态启用）' : '';
+  $('vm-note').textContent = rows.length ? '（' + rows.length + ' 台；点行进详情，动作按钮按当前状态启用）' : '';
   if (!rows.length) {
     const tr = el('tr');
     tr.appendChild(el('td', { colspan: '6', class: 'muted', text: '（无）' }));
@@ -1048,24 +1101,16 @@ function renderVMRows(vms) {
     return;
   }
   rows.forEach((v) => {
-    const tr = el('tr');
+    const tr = rowClickable(el('tr'), '#/compute/vms/' + encodeURIComponent(v.name));
     [v.name, v.state, v.vcpu ? v.vcpu.count : undefined,
       v.memory ? mb(v.memory.size_mb) : undefined, v.image].forEach((c) => {
       tr.appendChild(el('td', { text: String(dash(c)) }));
     });
     const cell = el('td', { class: 'actions' });
-    if (v.serial_console !== false) {
-      const cbtn = el('button', { type: 'button', class: 'ghost small', text: '串口' });
-      cbtn.addEventListener('click', () => vmConsoleOpen(v.name));
-      cell.appendChild(cbtn);
-    }
-    const sbtn = el('button', { type: 'button', class: 'ghost small', text: '快照' });
-    sbtn.addEventListener('click', () => vmSnapOpen(v.name));
-    cell.appendChild(sbtn);
     VM_ACTIONS.forEach((a) => {
-      const btn = el('button', { type: 'button', class: 'ghost small', text: a.label });
+      const btn = rowButton(el('button', { type: 'button', class: 'ghost small', text: a.label }));
       btn.disabled = a.states.indexOf(String(v.state)) < 0;
-      btn.addEventListener('click', () => vmAction(v.name, a.key, a.label));
+      btn.addEventListener('click', () => vmAction(v.name, a.key, a.label, opsMsg));
       cell.appendChild(btn);
     });
     tr.appendChild(cell);
@@ -1073,20 +1118,25 @@ function renderVMRows(vms) {
   });
 }
 
-async function vmAction(name, action, label) {
+// 生命周期动作。`msg` 是回显去处：列表页用运维页的提示区（历史行为），
+// 详情页用自己的提示区（vmDetailMsg）——同一套动作、同一套状态判定，只是回显位置不同。
+async function vmAction(name, action, label, msg) {
+  const say = msg || opsMsg;
   if (!window.confirm(label + '虚拟机 ' + name + '？运行中的业务会中断。')) return;
-  opsMsg(label + ' ' + name + '：执行中…', false);
+  say(label + ' ' + name + '：执行中…', false);
   try {
     await api('/virtual-machine-functions/' + encodeURIComponent(name) + ':' + action, { method: 'POST' });
-    opsMsg(label + ' ' + name + '：已受理。', false);
+    say(label + ' ' + name + '：已受理。', false);
   } catch (e) {
-    opsMsg(label + ' ' + name + ' 失败：' + e.message, true);
+    say(label + ' ' + name + ' 失败：' + e.message, true);
   }
   await reload().catch(() => {});
 }
 
-function renderVMStats(vms, stats) {
-  const pre = $('vm-stat');
+// vhost-user 口计数（详情端点附带的 statistics；运行态未接入时如实说"未取到计数"）。
+// 渲染到 `id` 指定的 pre 上（详情页的概览 Tab）。
+function renderVMStats(vms, stats, id) {
+  const pre = $(id);
   const rows = [];
   (vms || []).forEach((v) => {
     (stats[v.name] || []).forEach((s) => {
@@ -1103,7 +1153,134 @@ function renderVMStats(vms, stats) {
   pre.textContent = 'vhost-user 口计数：\n' + rows.join('\n');
 }
 
+// ---------- VM 详情页（#/compute/vms/:name）----------
+//
+// 一页一对象：对象头 + 四个 Tab（概览 / 接口 / 快照 / 串口）。Tab 是**页内状态**，不进 hash
+// （对象级深链已够用；Tab 进 URL 会把地址拖长、也让"这个链接分享出去看到什么"变模糊）。
+// 快照与串口**复用既有实现**（vmSnapLoad/vmSnapCreate/vmSnapAct、vmConsoleOpen/vmConsoleSend/
+// vmConsoleClose），只是容器从列表页的行内面板搬到这里的 Tab 面板——一套代码，行为不会分叉。
+
+const VM_TABS = ['overview', 'ifaces', 'snapshots', 'console'];
+let vmTab = 'overview';
+let vmDetailName = '';
+
+// 切 Tab：只动面板的 hidden 与 Tab 条的选中态（不碰 hash，也不重新取数）。
+// `focusBtn` 只在**用户点 Tab** 时为真——重渲染（轮询/事件）里抢焦点会把光标从正在输入的地方挪走。
+function vmTabShow(tab, focusBtn) {
+  if (VM_TABS.indexOf(tab) < 0) tab = 'overview';
+  vmTab = tab;
+  VM_TABS.forEach((t) => { $('vm-tab-' + t).hidden = t !== tab; });
+  const bar = $('vmd-tabs');
+  for (const b of bar.querySelectorAll('button')) {
+    if (b.dataset.tab === tab) b.setAttribute('aria-selected', 'true');
+    else b.removeAttribute('aria-selected');
+  }
+  if (focusBtn && tab === 'console' && !termWS) $('vm-console-connect').focus();
+}
+
+function vmDetailMsg(text, isErr) {
+  const p = $('vmd-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+function vmDetailHead(vm) {
+  return [
+    ['状态', vm.state],
+    ['镜像', vm.image],
+    ['vCPU', vm.vcpu ? vm.vcpu.count : undefined],
+    ['内存', vm.memory ? mb(vm.memory.size_mb) : undefined],
+  ];
+}
+
+function vmDetailInfo(vm) {
+  const vcpu = vm.vcpu || {};
+  const mem = vm.memory || {};
+  const disks = vm.disks || [];
+  return [
+    ['名称', vm.name],
+    ['描述', vm.description],
+    ['vCPU 绑定', vcpu.pin === undefined || vcpu.pin === null ? undefined : (vcpu.pin ? '是' : '否')],
+    ['绑定核', list(vcpu.cores_assigned)],
+    ['内存后端', mem.backing === 'normal' ? '普通内存' : (mem.backing ? '大页' : undefined)],
+    ['大页大小', mem.hugepage_size],
+    ['NUMA 节点', mem.numa_node],
+    ['附加磁盘', disks.length ? disks.map((d) => (d.name || '?') +
+      (d.size_gb ? '（' + d.size_gb + ' GB）' : '') +
+      (d.image ? '（来自 ' + d.image + '）' : '')).join('；') : undefined],
+    ['vNIC', (vm.interfaces || []).length],
+    ['串口', vm.serial_console === false ? '未启用' : '已启用'],
+    ['开机自启', vm.autostart === undefined || vm.autostart === null ? undefined : (vm.autostart ? '是' : '否')],
+  ];
+}
+
+// 概览 Tab 的生命周期按钮：与列表页同一份 VM_ACTIONS 判定，回显走本页的提示区。
+function vmDetailActions(vm) {
+  const box = $('vmd-actions');
+  box.textContent = '';
+  if (!vm) return;
+  VM_ACTIONS.forEach((a) => {
+    const btn = el('button', { type: 'button', text: a.label });
+    btn.disabled = a.states.indexOf(String(vm.state)) < 0;
+    btn.addEventListener('click', () => vmAction(vm.name, a.key, a.label, vmDetailMsg));
+    box.appendChild(btn);
+  });
+}
+
+// 接口 Tab：该 VM 的 vNIC（类型/虚拟交换机/MAC/VLAN/状态 + 逐口包计数）。
+function vmDetailIfaces(vm) {
+  const tbody = $('vmd-iface-table').querySelector('tbody');
+  tbody.textContent = '';
+  const list0 = (vm && vm.interfaces) || [];
+  const stats = (vm && vm.statistics) || [];
+  if (!list0.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '8', class: 'muted', text: '（无 vNIC）' }));
+    tbody.appendChild(tr);
+    return;
+  }
+  list0.forEach((i) => {
+    const s = stats.find((x) => x.vnic === i.name);
+    const live = s && s.available;
+    const tr = el('tr');
+    [i.name, i.type, i.virtual_switch, i.mac, i.vlan, i.state,
+      live ? s.rx_packets : undefined, live ? s.tx_packets : undefined].forEach((c) => {
+      tr.appendChild(el('td', { text: String(dash(c)) }));
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+function renderVMDetail(d, params) {
+  const name = (params && params.name) || '';
+  const vm = d['/virtual-machine-functions/{name}'];
+  const snaps = d['/virtual-machine-functions/{name}/snapshots'];
+  const ok = vm && !vm.__err;
+  // 换了对象才清本页提示——同一对象的轮询重渲染要留住动作回显（"已受理"刚写完就被抹掉
+  // 就等于没回显）。
+  const changed = vmDetailName !== name;
+  vmDetailName = name;
+  if (changed) vmDetailMsg('', false);
+
+  $('vmd-name').textContent = name;
+  fill($('vmd-head'), ok ? vmDetailHead(vm) : [['读取失败', vm ? vm.__err : '未取到数据']]);
+  fill($('vmd-info'), ok ? vmDetailInfo(vm) : []);
+  vmDetailActions(ok ? vm : null);
+  vmDetailIfaces(ok ? vm : null);
+  // 快照：名字变了才清输入框与提示（轮询重渲染不该把正在输入的快照名抹掉）；
+  // 列表数据用路由表预取的这一份，不重复请求（点「刷新」才重新拉）。
+  vmSnapOpen(name, snaps);
+  renderVMStats([{ name }], { [name]: ok ? vm.statistics : null }, 'vmd-stat');
+  // 串口 Tab 的连接按钮：未启用串口的 VM 不给连（服务端也会拒绝，这里只是别让人白点）。
+  termNoSerial = !!(vm && vm.serial_console === false);
+  vmConsoleSyncBtn();
+  vmTabShow(vmTab); // 重渲染后保持当前 Tab（默认概览）
+}
+
 // ---------- VM 快照（列表 / 创建 / 删除 / 回滚；create+rollback 需关机态）----------
+//
+// 容器在 VM 详情页的「快照」Tab 里（原来挂在列表页的行内面板上）；取数与动作逻辑没变。
 
 let snapVM = '';
 
@@ -1114,23 +1291,31 @@ function snapMsg(text, isErr) {
   p.className = isErr ? 'error small' : 'muted small';
 }
 
-function vmSnapOpen(name) {
+// 定位到某台 VM 的快照：进详情页时调用。`pre` 是路由表预取的快照列表（有就直接渲染，
+// 不再打一次请求）；不传则自己拉（「刷新」按钮、创建/删除/回滚之后）。
+// 只有**换了一台 VM** 才清输入框与提示——轮询重渲染不该抹掉正在输入的快照名。
+function vmSnapOpen(name, pre) {
+  const changed = snapVM !== name;
   snapVM = name;
-  $('vm-snap').hidden = false;
-  $('vm-snap-name').textContent = name;
-  $('vm-snap-new').value = '';
-  return vmSnapLoad();
+  if (changed) { $('vm-snap-new').value = ''; snapMsg('', false); }
+  return vmSnapLoad(pre);
 }
 
-async function vmSnapLoad() {
+async function vmSnapLoad(pre) {
   const tbody = $('vm-snap-table').querySelector('tbody');
   tbody.textContent = '';
   if (!snapVM) return;
-  let rows;
-  try {
-    rows = await api('/virtual-machine-functions/' + encodeURIComponent(snapVM) + '/snapshots');
-  } catch (e) {
-    snapMsg('读取快照失败：' + e.message, true);
+  let rows = pre;
+  if (rows === undefined) {
+    try {
+      rows = await api('/virtual-machine-functions/' + encodeURIComponent(snapVM) + '/snapshots');
+    } catch (e) {
+      snapMsg('读取快照失败：' + e.message, true);
+      return;
+    }
+  }
+  if (rows && rows.__err) {
+    snapMsg('读取快照失败：' + rows.__err, true);
     return;
   }
   const list = Array.isArray(rows) ? rows : (rows && rows.snapshots) || [];
@@ -1199,10 +1384,22 @@ async function vmSnapCreate() {
 }
 
 // ---------- 串口 console（一次性 ticket → WebSocket）----------
+//
+// 容器在 VM 详情页的「串口」Tab 里（原来挂在列表页的行内面板上）。同一时刻只连一台 VM
+// （避免误操作）；离开详情页时由路由调 vmConsoleClose 断开，WebSocket 不会留在后台。
 
 // 终端状态：WebSocket 与当前 VM 名（同一时刻只连一台，避免误操作）。
 let termWS = null;
 let termVM = '';
+// 当前 VM 是否未启用串口（模型里 serial_console=false）：连接按钮随之禁用——
+// 与列表页原来"未启用就不显示串口按钮"同一口径，只是这里说得出原因。
+let termNoSerial = false;
+
+// 连接按钮跟着真实状态走（连着、或该 VM 没启用串口，都禁用——点了只会得到一句解释）。
+function vmConsoleSyncBtn() {
+  const b = $('vm-console-connect');
+  if (b) b.disabled = !!termWS || termNoSerial;
+}
 
 // 串口输出含 ANSI 转义（颜色/光标），去掉后按纯文本渲染（不引入终端模拟器）。
 function stripANSI(s) {
@@ -1240,21 +1437,27 @@ async function vmConsoleOpen(name) {
   try {
     termWS = new WebSocket(wsURL);
   } catch (e) {
+    termWS = null;
     termMsg('打开 WebSocket 失败：' + e.message, true);
+    vmConsoleSyncBtn();
     return;
   }
   termVM = name;
+  vmConsoleSyncBtn();
   termWS.onopen = () => termMsg('已连接 ' + name + ' 的串口（回车可让 guest 重绘提示符）。', false);
   termWS.onmessage = (ev) => termAppend(ev.data);
-  termWS.onclose = () => { termMsg('连接已关闭。', false); termWS = null; termVM = ''; };
+  termWS.onclose = () => { termMsg('连接已关闭。', false); termWS = null; termVM = ''; vmConsoleSyncBtn(); };
   termWS.onerror = () => termMsg('WebSocket 出错（凭证过期或串口不可用）。', true);
   $('vm-console-in').focus();
 }
 
 function vmConsoleClose() {
   if (termWS) { termWS.close(); termWS = null; termVM = ''; }
-  $('vm-console').hidden = true;
-  $('vm-console-out').textContent = '';
+  vmConsoleSyncBtn();
+  const box = $('vm-console');
+  if (box) box.hidden = true;
+  const out = $('vm-console-out');
+  if (out) out.textContent = '';
 }
 
 function vmConsoleSend(text, enter) {
@@ -1288,14 +1491,14 @@ function renderVSwitches(vss, rows) {
   pre.textContent = '成员口计数（运行态）：\n' + lines.join('\n');
 }
 
-// ---------- 容器：生命周期 + 日志 ----------
+// ---------- 容器：列表行（点行进详情）+ 生命周期 ----------
 
 // 与 VM 同一套状态口径（容器状态来自 Docker）。
 function renderContainerRows(cts) {
   const tbody = $('ct-table').querySelector('tbody');
   tbody.textContent = '';
   const rows = cts || [];
-  $('ct-note').textContent = rows.length ? '（' + rows.length + ' 个；动作按钮按当前状态启用）' : '';
+  $('ct-note').textContent = rows.length ? '（' + rows.length + ' 个；点行进详情，动作按钮按当前状态启用）' : '';
   if (!rows.length) {
     const tr = el('tr');
     tr.appendChild(el('td', { colspan: '6', class: 'muted', text: '（无）' }));
@@ -1303,21 +1506,18 @@ function renderContainerRows(cts) {
     return;
   }
   rows.forEach((c) => {
-    const tr = el('tr');
+    const tr = rowClickable(el('tr'), '#/compute/containers/' + encodeURIComponent(c.name));
     [c.name, c.state, c.vcpu, c.memory_mb ? mb(c.memory_mb) : undefined, c.image].forEach((v) => {
       tr.appendChild(el('td', { text: String(dash(v)) }));
     });
     const cell = el('td', { class: 'actions' });
-    const detBtn = el('button', { type: 'button', class: 'ghost small', text: '详情' });
-    detBtn.addEventListener('click', () => objDetail('/container-functions/' + encodeURIComponent(c.name), '容器 ' + c.name));
+    const detBtn = rowButton(el('button', { type: 'button', class: 'ghost small', text: '详情' }));
+    detBtn.addEventListener('click', () => goDetail('#/compute/containers/' + encodeURIComponent(c.name)));
     cell.appendChild(detBtn);
-    const logBtn = el('button', { type: 'button', class: 'ghost small', text: '日志' });
-    logBtn.addEventListener('click', () => ctLogsOpen(c.name));
-    cell.appendChild(logBtn);
     VM_ACTIONS.forEach((a) => {
-      const btn = el('button', { type: 'button', class: 'ghost small', text: a.label });
+      const btn = rowButton(el('button', { type: 'button', class: 'ghost small', text: a.label }));
       btn.disabled = a.states.indexOf(String(c.state)) < 0;
-      btn.addEventListener('click', () => ctAction(c.name, a.key, a.label));
+      btn.addEventListener('click', () => ctAction(c.name, a.key, a.label, opsMsg));
       cell.appendChild(btn);
     });
     tr.appendChild(cell);
@@ -1325,25 +1525,145 @@ function renderContainerRows(cts) {
   });
 }
 
-async function ctAction(name, action, label) {
+// `msg` 是回显去处：列表页用运维页的提示区（历史行为），详情页用本页的（ctdMsg）。
+async function ctAction(name, action, label, msg) {
+  const say = msg || opsMsg;
   if (!window.confirm(label + '容器 ' + name + '？容器内的进程会被' +
     (action === 'stop' ? '停止' : '重启') + '。')) return;
-  opsMsg(label + ' ' + name + '：执行中…', false);
+  say(label + ' ' + name + '：执行中…', false);
   try {
     await api('/container-functions/' + encodeURIComponent(name) + ':' + action, { method: 'POST' });
-    opsMsg(label + ' ' + name + '：已受理。', false);
+    say(label + ' ' + name + '：已受理。', false);
   } catch (e) {
-    opsMsg(label + ' ' + name + ' 失败：' + e.message, true);
+    say(label + ' ' + name + ' 失败：' + e.message, true);
   }
   await reload().catch(() => {});
 }
 
+// ---------- 容器详情页（#/compute/containers/:name）----------
+//
+// 对象头 + 两个 Tab（概览 / 日志）。日志复用 ctLogsLoad（tail=200，与 CLI 同源），
+// 且**进 Tab 或点「刷新」才拉**——大段文本不该跟着页面轮询反复下载。
+
+const CT_TABS = ['overview', 'logs'];
+let ctTab = 'overview';
+let ctDetailName = '';
 let ctLogsName = '';
 
-async function ctLogsOpen(name) {
+function ctTabShow(tab) {
+  if (CT_TABS.indexOf(tab) < 0) tab = 'overview';
+  ctTab = tab;
+  CT_TABS.forEach((t) => { $('ct-tab-' + t).hidden = t !== tab; });
+  const bar = $('ctd-tabs');
+  for (const b of bar.querySelectorAll('button')) {
+    if (b.dataset.tab === tab) b.setAttribute('aria-selected', 'true');
+    else b.removeAttribute('aria-selected');
+  }
+}
+
+// 点 Tab：切面板；进日志 Tab 顺手拉一次（与原来点行内「日志」按钮同一行为）。
+function ctTabClick(tab) {
+  ctTabShow(tab);
+  if (tab === 'logs') ctLogsOpen(ctDetailName);
+}
+
+function ctdMsg(text, isErr) {
+  const p = $('ctd-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+function ctDetailHead(ct) {
+  return [
+    ['状态', ct.state],
+    ['镜像', ct.image],
+    ['vCPU', ct.vcpu],
+    ['内存', ct.memory_mb ? mb(ct.memory_mb) : undefined],
+  ];
+}
+
+// 环境变量：契约里是字符串字典，按 `K=V` 串起来（空字典显示「—」）。
+function envText(env) {
+  const keys = Object.keys(env || {});
+  return keys.length ? keys.map((k) => k + '=' + env[k]).join('；') : undefined;
+}
+
+function ctDetailInfo(ct) {
+  const restart = ct.restart_policy === 'on-failure' ? '失败时重启'
+    : (ct.restart_policy === 'no' ? '不自动重启' : ct.restart_policy);
+  return [
+    ['名称', ct.name],
+    ['描述', ct.description],
+    ['命令', ct.command],
+    ['参数', list(ct.args)],
+    ['环境变量', envText(ct.env)],
+    ['重启策略', restart],
+    ['开机自启', ct.autostart === undefined || ct.autostart === null ? undefined : (ct.autostart ? '是' : '否')],
+    ['vNIC', (ct.interfaces || []).length],
+  ];
+}
+
+function ctDetailActions(ct) {
+  const box = $('ctd-actions');
+  box.textContent = '';
+  if (!ct) return;
+  VM_ACTIONS.forEach((a) => {
+    const btn = el('button', { type: 'button', text: a.label });
+    btn.disabled = a.states.indexOf(String(ct.state)) < 0;
+    btn.addEventListener('click', () => ctAction(ct.name, a.key, a.label, ctdMsg));
+    box.appendChild(btn);
+  });
+}
+
+function ctDetailIfaces(ct) {
+  const tbody = $('ctd-iface-table').querySelector('tbody');
+  tbody.textContent = '';
+  const list0 = (ct && ct.interfaces) || [];
+  if (!list0.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '6', class: 'muted', text: '（无 vNIC）' }));
+    tbody.appendChild(tr);
+    return;
+  }
+  list0.forEach((i) => {
+    const tr = el('tr');
+    [i.name, i.type, i.virtual_switch, i.mac, i.vlan, i.state].forEach((c) => {
+      tr.appendChild(el('td', { text: String(dash(c)) }));
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+function renderContainerDetail(d, params) {
+  const name = (params && params.name) || '';
+  const ct = d['/container-functions/{name}'];
+  const ok = ct && !ct.__err;
+  const changed = ctDetailName !== name;
+  ctDetailName = name;
+  if (changed) { ctdMsg('', false); ctLogsPoint(name); }
+
+  $('ctd-name').textContent = name;
+  fill($('ctd-head'), ok ? ctDetailHead(ct) : [['读取失败', ct ? ct.__err : '未取到数据']]);
+  fill($('ctd-info'), ok ? ctDetailInfo(ct) : []);
+  ctDetailActions(ok ? ct : null);
+  ctDetailIfaces(ok ? ct : null);
+  ctTabShow(ctTab);
+  // 换了对象且正停在日志 Tab：把新对象的日志拉出来（同一对象的轮询重渲染不重复拉）。
+  if (changed && ctTab === 'logs') ctLogsOpen(name);
+}
+
+// 定位到某容器的日志（进详情页时调用；**不取数**——取数在进 Tab 或点「刷新」时）。
+function ctLogsPoint(name) {
+  if (ctLogsName === name) return;
   ctLogsName = name;
-  $('ct-logs-wrap').hidden = false;
   $('ct-logs-name').textContent = name;
+  $('ct-logs').textContent = '';
+}
+
+// 进日志 Tab：定位 + 拉一次。
+async function ctLogsOpen(name) {
+  ctLogsPoint(name);
   await ctLogsLoad();
 }
 
@@ -1380,21 +1700,44 @@ function renderImages(imgs) {
     return;
   }
   rows.forEach((i) => {
-    const tr = el('tr');
+    const tr = rowClickable(el('tr'), '#/compute/images/' + encodeURIComponent(i.name));
     [i.name, i.type, i.size_bytes ? bytes(i.size_bytes) : undefined, i.ref_count,
       i.import_state || 'ready'].forEach((c) => {
       tr.appendChild(el('td', { text: String(dash(c)) }));
     });
     const cell = el('td', { class: 'actions' });
-    const detBtn = el('button', { type: 'button', class: 'ghost small', text: '详情' });
-    detBtn.addEventListener('click', () => objDetail('/images/' + encodeURIComponent(i.name), '镜像 ' + i.name));
+    const detBtn = rowButton(el('button', { type: 'button', class: 'ghost small', text: '详情' }));
+    detBtn.addEventListener('click', () => goDetail('#/compute/images/' + encodeURIComponent(i.name)));
     cell.appendChild(detBtn);
-    const btn = el('button', { type: 'button', class: 'danger small', text: '删除' });
+    const btn = rowButton(el('button', { type: 'button', class: 'danger small', text: '删除' }));
     btn.addEventListener('click', () => imgDelete(i.name, i.ref_count));
     cell.appendChild(btn);
     tr.appendChild(cell);
     tbody.appendChild(tr);
   });
+}
+
+// 镜像详情页（#/compute/images/:name）：完整元数据（元数据是静态的，本页不轮询）。
+function renderImageDetail(img, params) {
+  const name = (params && params.name) || '';
+  $('imd-name').textContent = name;
+  const ok = img && !img.__err;
+  fill($('imd-head'), ok ? [
+    ['类型', img.type],
+    ['大小', img.size_bytes ? bytes(img.size_bytes) : undefined],
+    ['引用数', img.ref_count],
+  ] : [['读取失败', img ? img.__err : '未取到数据']]);
+  fill($('imd-info'), ok ? [
+    ['名称', img.name],
+    ['描述', img.description],
+    ['类型', img.type],
+    ['格式', img.format],
+    ['大小', img.size_bytes ? bytes(img.size_bytes) + '（' + img.size_bytes + ' 字节）' : undefined],
+    ['sha256', img.sha256],
+    ['引用计数', img.ref_count],
+    ['导入状态', img.import_state || 'ready'],
+    ['导入时间', img.imported_at ? fmtTime(img.imported_at) : undefined],
+  ] : []);
 }
 
 // imgIsFailed / imgOutcome：**不把 2xx 当成功**——服务端可能已受理但导入失败
@@ -1511,27 +1854,28 @@ async function imgImportFile() {
 
 // ---------- 网络对象（只读总览）----------
 
-// 每块：[标题, 数据, 列名, 取值函数]；数据缺席（读取失败）时该块显示原因。
-// 每块：[标题, 数据, 列名, 取值函数, 详情端点前缀（可选）]；有前缀时表格多一列"详情"。
+// 每块：[标题, 数据, 列名, 取值函数, 详情页路由前缀（可选）]；有前缀时表格多一列"详情"，
+// 且整行可点进详情页。NAT 与 LLDP 没有独立详情页（没有"单对象"语义：NAT 是配置对象，
+// LLDP 是邻居表），故只列在总览里。
 const NET_OBJECT_VIEWS = [
   ['VRF（L3 虚拟交换机）', 'vrfs', ['名称', 'L3 接口', '路由数'], (v) => [
     v.name,
     (v.l3_interfaces || []).map((i) => i.interface).join(', '),
     v.routes != null ? v.routes : undefined,
-  ], '/vrfs/'],
-  ['ACL', 'acls', ['名称', '规则数'], (a) => [a.name, (a.rules || []).length], '/acls/'],
+  ], '#/network/vrfs/'],
+  ['ACL', 'acls', ['名称', '规则数'], (a) => [a.name, (a.rules || []).length], '#/network/acls/'],
   // NAT 是对象（source_pools/rules/static），按池与规则各出一行
   ['NAT', 'nat', ['类型', '内容'], (n) => [n.kind, n.summary]],
   ['链路聚合（bond）', 'bonds', ['名称', '模式', '成员'], (b) => [
     b.name, b.mode, (b.members || []).join(', '),
-  ], '/bonds/'],
+  ], '#/network/bonds/'],
   ['LLDP 邻居', 'lldp', ['本地口', '邻居', '管理地址'], (n) => [
     n.local_interface || n.interface, n.system_name || n.chassis_id, n.management_address,
   ]],
-  ['QoS 策略', 'qos', ['名称', '类型', '目标'], (q) => [q.name, q.type, q.target || q.interface], '/qos/policies/'],
+  ['QoS 策略', 'qos', ['名称', '类型', '目标'], (q) => [q.name, q.type, q.target || q.interface], '#/network/qos/'],
   ['端口镜像（SPAN）', 'span', ['名称', '源', '目的'], (s) => [
     s.name, list(s.sources || s.source), s.destination,
-  ], '/port-mirroring/'],
+  ], '#/network/span/'],
 ];
 
 // natRows 把 NAT 配置对象摊平成行（池 / 规则 / 静态映射各一行）。
@@ -1551,7 +1895,7 @@ function renderNetworkObjects(nets) {
     box.appendChild(el('p', { class: 'muted', text: '（读取失败）' }));
     return;
   }
-  NET_OBJECT_VIEWS.forEach(([title, key, cols, pick, detailPrefix]) => {
+  NET_OBJECT_VIEWS.forEach(([title, key, cols, pick, routePrefix]) => {
     const data = nets[key];
     const wrap = el('div', { class: 'net-object' });
     wrap.appendChild(el('h3', { text: title }));
@@ -1565,22 +1909,23 @@ function renderNetworkObjects(nets) {
     const thead = el('thead');
     const htr = el('tr');
     cols.forEach((c) => htr.appendChild(el('th', { text: c })));
-    if (detailPrefix) htr.appendChild(el('th', { text: '详情' }));
+    if (routePrefix) htr.appendChild(el('th', { text: '详情' }));
     thead.appendChild(htr);
     t.appendChild(thead);
     const tbody = el('tbody');
     if (!rows.length) {
       const tr = el('tr');
-      tr.appendChild(el('td', { colspan: String(cols.length + (detailPrefix ? 1 : 0)), class: 'muted', text: '（无）' }));
+      tr.appendChild(el('td', { colspan: String(cols.length + (routePrefix ? 1 : 0)), class: 'muted', text: '（无）' }));
       tbody.appendChild(tr);
     } else {
       rows.forEach((r) => {
-        const tr = el('tr');
+        const path = routePrefix ? routePrefix + encodeURIComponent(r.name) : '';
+        const tr = path ? rowClickable(el('tr'), path) : el('tr');
         pick(r).forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
-        if (detailPrefix) {
+        if (path) {
           const cell = el('td', { class: 'actions' });
-          const b = el('button', { type: 'button', class: 'ghost small', text: '详情' });
-          b.addEventListener('click', () => objDetail(detailPrefix + encodeURIComponent(r.name), title + ' / ' + r.name));
+          const b = rowButton(el('button', { type: 'button', class: 'ghost small', text: '详情' }));
+          b.addEventListener('click', () => goDetail(path));
           cell.appendChild(b);
           tr.appendChild(cell);
         }
@@ -1593,22 +1938,140 @@ function renderNetworkObjects(nets) {
   });
 }
 
-// ---------- 详情面板（网络对象 / 容器 / 镜像共用；按需拉取，不进轮询）----------
+// ---------- 网络对象详情页（vrf / acl / bond / qos / span）----------
+//
+// 一页一对象，取代原来的共享浮层（浮层把 JSON 原样贴出来，既不好读、也不能分享地址）。
+// QoS 与 SPAN 的详情**从列表端点取数**：契约里 `/qos/policies/{name}` 与 `/port-mirroring/{name}`
+// 只有 DELETE（没有 GET），按单取路径请求只会得到 405——列表端点里本来就有完整的对象。
 
-async function objDetail(path, label) {
-  $('obj-detail-wrap').hidden = false;
-  $('obj-detail-name').textContent = label;
-  const pre = $('obj-detail');
+// 列表里按名字取对象（QoS / SPAN 的详情页用；列表端点缺省不截断，故能取全）。
+function pickByName(rows, name) {
+  return rowsOf(rows).find((r) => r.name === name) || null;
+}
+
+// 列表里没找到时给一句能读懂的话（而不是把空对象渲染成一片「—」）。
+function notFoundText(name, label) {
+  return '未找到' + label + ' ' + name + '（可能已被删除，或当前配置里没有它）';
+}
+
+// 路由表文本（prefix / next_hop / distance 三列对齐）：与 CLI 的 show vrfs <name> routes 同源。
+function routesText(list) {
+  const head = 'prefix'.padEnd(30) + ' next_hop'.padEnd(20) + ' distance';
+  const lines = list.map((r) => String(dash(r.prefix)).padEnd(30) + ' ' +
+    String(dash(r.next_hop)).padEnd(19) + ' ' + dash(r.distance));
+  return head + '\n' + lines.join('\n');
+}
+
+// 把一份（预取或现拉的）路由表结果画到 pre 上：读取失败与"无路由"要分得开。
+function vrfRoutesShow(res) {
+  const pre = $('vrd-routes');
+  pre.hidden = false;
+  if (res && res.__err) { pre.textContent = '读取失败：' + res.__err; return; }
+  const list = Array.isArray(res) ? res : [];
+  pre.textContent = list.length ? routesText(list) : '（无路由）';
+}
+
+// 按需重拉路由表（大表不进轮询；进页面时用路由表预取的那一份先画出来）。
+async function vrfRoutesLoad(name) {
+  const pre = $('vrd-routes');
+  pre.hidden = false;
   pre.textContent = '读取中…';
   try {
-    const d = await api(path);
-    pre.textContent = JSON.stringify(d, null, 2);
+    vrfRoutesShow(await api('/vrfs/' + encodeURIComponent(name) + '/routes'));
   } catch (e) {
     pre.textContent = '读取失败：' + e.message;
   }
 }
 
-// ---------- 大表（NAT 会话 / VRF 路由）：按需拉取 ----------
+function renderVrfDetail(vrf, routes, params) {
+  const name = (params && params.name) || '';
+  const ok = vrf && !vrf.__err;
+  $('vrd-name').textContent = name;
+  fill($('vrd-head'), ok ? [
+    ['描述', vrf.description],
+    ['L3 接口', (vrf.l3_interfaces || []).length],
+    ['静态路由', (vrf.routes || []).length],
+  ] : [['读取失败', vrf ? vrf.__err : notFoundText(name, 'VRF')]]);
+  const l3 = ok ? (vrf.l3_interfaces || []) : [];
+  table($('vrd-l3-table').querySelector('tbody'), 4, l3.map((i) => [
+    i.interface, i.vlan, list(i.addresses), i.acl_in,
+  ]));
+  vrfRoutesShow(routes);
+}
+
+function renderAclDetail(acl, params) {
+  const name = (params && params.name) || '';
+  const ok = acl && !acl.__err;
+  $('acd-name').textContent = name;
+  fill($('acd-head'), ok ? [
+    ['规则数', (acl.rules || []).length],
+  ] : [['读取失败', acl ? acl.__err : notFoundText(name, 'ACL')]]);
+  const rules = ok ? (acl.rules || []) : [];
+  table($('acd-rule-table').querySelector('tbody'), 6, rules.map((r) => [
+    r.seq, r.direction, r.source, r.destination, r.protocol, r.source_port,
+  ]));
+}
+
+function renderBondDetail(bond, params) {
+  const name = (params && params.name) || '';
+  const ok = bond && !bond.__err;
+  const st = (bond && bond.state) || {};
+  $('bnd-name').textContent = name;
+  fill($('bnd-head'), ok ? [
+    ['成员', list(bond.members)],
+    ['模式', bond.lacp ? 'LACP（' + (bond.lacp.mode || '') + '，' + (bond.lacp.interval || '') + '）' : '静态聚合'],
+  ] : [['读取失败', bond ? bond.__err : notFoundText(name, '聚合口')]]);
+  fill($('bnd-info'), ok ? [
+    ['名称', bond.name],
+    ['成员口', list(bond.members)],
+    ['LACP 模式', bond.lacp ? bond.lacp.mode : undefined],
+    ['LACP 速率', bond.lacp ? bond.lacp.interval : undefined],
+    ['MTU', bond.mtu],
+    ['描述', bond.description],
+    ['链路状态', st.link],
+    ['活动成员数', st.active_members],
+  ] : []);
+}
+
+function renderQosDetail(rows, params) {
+  const name = (params && params.name) || '';
+  const q = pickByName(rows, name);
+  const err = rows && rows.__err;
+  $('qsd-name').textContent = name;
+  fill($('qsd-head'), q ? [
+    ['CIR', q.cir != null ? q.cir + ' bps' : undefined],
+    ['CBS', q.cbs != null ? q.cbs + ' 字节' : undefined],
+  ] : [['读取失败', err ? err : notFoundText(name, 'QoS 策略')]]);
+  fill($('qsd-info'), q ? [
+    ['名称', q.name],
+    ['承诺速率（CIR）', q.cir != null ? q.cir + ' bps' : undefined],
+    ['突发（CBS）', q.cbs != null ? q.cbs + ' 字节' : undefined],
+    ['绑定接口', list(q.bound_interfaces)],
+  ] : []);
+}
+
+function renderSpanDetail(rows, params) {
+  const name = (params && params.name) || '';
+  const s = pickByName(rows, name);
+  const err = rows && rows.__err;
+  const src = (s && (s.source || {})) || {};
+  $('spd-name').textContent = name;
+  fill($('spd-head'), s ? [
+    ['源', src.interface || src.vnf_interface || src.vnf],
+    ['方向', src.direction],
+    ['分析口', s.analyzer],
+  ] : [['读取失败', err ? err : notFoundText(name, 'SPAN 会话')]]);
+  fill($('spd-info'), s ? [
+    ['名称', s.name],
+    ['源接口', src.interface],
+    ['源 VNF', src.vnf],
+    ['源 vNIC', src.vnf_interface],
+    ['方向', src.direction],
+    ['分析端口', s.analyzer],
+  ] : []);
+}
+
+// ---------- 大表（NAT 会话）：按需拉取 ----------
 
 function bigMsg(text, isErr) {
   const p = $('big-msg');
@@ -1621,25 +2084,6 @@ function bigOut(text) {
   const pre = $('big-out');
   pre.hidden = !text;
   pre.textContent = text || '';
-}
-
-async function bigRoutes() {
-  const name = $('big-vrf').value.trim();
-  if (!name) { bigMsg('请填写 VRF 名。', true); return; }
-  bigMsg('读取 ' + name + ' 的路由表…', false);
-  bigOut('');
-  try {
-    const rows = await api('/vrfs/' + encodeURIComponent(name) + '/routes');
-    const list = Array.isArray(rows) ? rows : [];
-    if (!list.length) { bigMsg(name + '：无路由。', false); return; }
-    const head = 'prefix'.padEnd(30) + ' next_hop'.padEnd(20) + ' distance';
-    const lines = list.map((r) => String(dash(r.prefix)).padEnd(30) + ' ' +
-      String(dash(r.next_hop)).padEnd(19) + ' ' + dash(r.distance));
-    bigOut(head + '\n' + lines.join('\n'));
-    bigMsg(name + '：' + list.length + ' 条路由。', false);
-  } catch (e) {
-    bigMsg('读取失败：' + e.message, true);
-  }
 }
 
 async function bigNat() {
@@ -1820,17 +2264,23 @@ $('audit-refresh-btn').addEventListener('click', async () => {
   }
 });
 
-// 详情面板
-$('obj-detail-close').addEventListener('click', () => { $('obj-detail-wrap').hidden = true; });
-
-// 大表（按需拉取）
-$('big-routes-btn').addEventListener('click', bigRoutes);
+// 大表（按需拉取；VRF 路由表已移进 VRF 详情页）
 $('big-nat-btn').addEventListener('click', bigNat);
 $('big-clear-btn').addEventListener('click', () => { bigMsg('', false); bigOut(''); });
 
+// 详情页 Tab 条（页内状态，不进 hash）
+for (const b of $('vmd-tabs').querySelectorAll('button')) {
+  b.addEventListener('click', () => vmTabShow(b.dataset.tab, true));
+}
+for (const b of $('ctd-tabs').querySelectorAll('button')) {
+  b.addEventListener('click', () => ctTabClick(b.dataset.tab));
+}
+
+// VRF 详情：路由表按需重拉
+$('vrd-routes-btn').addEventListener('click', () => vrfRoutesLoad($('vrd-name').textContent));
+
 // VM 快照
-$('vm-snap-refresh').addEventListener('click', vmSnapLoad);
-$('vm-snap-close').addEventListener('click', () => { $('vm-snap').hidden = true; snapVM = ''; });
+$('vm-snap-refresh').addEventListener('click', () => vmSnapLoad());
 $('vm-snap-create').addEventListener('click', vmSnapCreate);
 
 // 镜像导入
@@ -1840,9 +2290,9 @@ $('img-file-btn').addEventListener('click', imgImportFile);
 
 // 容器日志
 $('ct-logs-refresh').addEventListener('click', ctLogsLoad);
-$('ct-logs-close').addEventListener('click', () => { $('ct-logs-wrap').hidden = true; ctLogsName = ''; });
 
 // 串口 console
+$('vm-console-connect').addEventListener('click', () => vmConsoleOpen(vmDetailName));
 $('vm-console-close').addEventListener('click', vmConsoleClose);
 $('vm-console-send').addEventListener('click', () => {
   const inp = $('vm-console-in');
@@ -1963,12 +2413,15 @@ $('diag-clear-btn').addEventListener('click', () => {
     }));
 });
 
-window.addEventListener('beforeunload', () => { stopStream(); stopPolling(); });
+// 关页面/刷新时收尾：实时通道、轮询、以及串口 WebSocket（详情页的串口连着就要断开）。
+window.addEventListener('beforeunload', () => { stopStream(); stopPolling(); vmConsoleClose(); });
 
 // 动作处理器与浏览器控制台用得上：刷新当前页 / 跳到某条路由（如 #/ops/audit）。
 window.nfvis = {
   reload,
   navigate: async (path) => (await routerModule()).navigate(path),
+  // 串口状态（浏览器验收要断言"离开详情页后 WebSocket 已关"，这里给一个可读的判据）。
+  consoleOpen: () => !!termWS,
 };
 
 (async function boot() {

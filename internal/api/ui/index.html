@@ -133,40 +133,76 @@
         <thead><tr><th>名称</th><th>状态</th><th>vCPU</th><th>内存</th><th>镜像</th><th>操作</th></tr></thead>
         <tbody></tbody>
       </table>
-      <pre id="vm-stat" class="code" hidden></pre>
+      <p class="muted small">点行进详情页：概览 / 接口 / 快照 / 串口 都在那一页。</p>
+    </article>
+    </section>
 
-      <!-- 快照：点行内「快照」按钮打开（create/rollback 需关机态，服务端会拒绝并说明） -->
-      <div id="vm-snap" hidden>
-        <h3>快照 <span id="vm-snap-name" class="muted small"></span>
-          <button id="vm-snap-refresh" type="button" class="ghost small">刷新</button>
-          <button id="vm-snap-close" type="button" class="ghost small">关闭</button></h3>
+    <section class="page" id="page-vmDetail" hidden>
+    <article class="card wide">
+      <div class="obj-head">
+        <h2>虚拟机 <span id="vmd-name" class="muted small"></span></h2>
+        <dl id="vmd-head" class="kv"></dl>
+      </div>
+
+      <div class="tabs" id="vmd-tabs" role="tablist" aria-label="虚拟机详情分栏">
+        <button type="button" class="tab" data-tab="overview" aria-selected="true">概览</button>
+        <button type="button" class="tab" data-tab="ifaces">接口</button>
+        <button type="button" class="tab" data-tab="snapshots">快照</button>
+        <button type="button" class="tab" data-tab="console">串口</button>
+      </div>
+
+      <div class="tab-panel" id="vm-tab-overview">
+        <h3>资源</h3>
+        <dl id="vmd-info" class="kv"></dl>
+        <h3>生命周期</h3>
+        <div class="cfg-actions" id="vmd-actions"></div>
+        <p id="vmd-msg" class="muted small" hidden></p>
+        <h3>vhost-user 口计数</h3>
+        <pre id="vmd-stat" class="code" hidden></pre>
+      </div>
+
+      <div class="tab-panel" id="vm-tab-ifaces" hidden>
+        <h3>vNIC</h3>
+        <table id="vmd-iface-table">
+          <thead><tr><th>名称</th><th>类型</th><th>虚拟交换机</th><th>MAC</th><th>VLAN</th><th>状态</th><th>Rx 包</th><th>Tx 包</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p class="muted small">计数取自数据面运行态（只覆盖 vhost-user 口；VM 未运行或口未建立时为空）。</p>
+      </div>
+
+      <div class="tab-panel" id="vm-tab-snapshots" hidden>
         <div class="cfg-actions">
           <input id="vm-snap-new" type="text" placeholder="新快照名（如 before-upgrade）">
           <button id="vm-snap-create" type="button" class="ghost">创建快照</button>
+          <button id="vm-snap-refresh" type="button" class="ghost">刷新</button>
         </div>
+        <p id="vm-snap-msg" class="muted small" hidden></p>
         <table id="vm-snap-table">
           <thead><tr><th>名称</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody></tbody>
         </table>
-        <p id="vm-snap-msg" class="muted small" hidden></p>
         <p class="muted small">快照是 qcow2 内部快照（含全部磁盘）；<strong>创建与回滚要求 VM 关机</strong>，
           运行中会被服务端拒绝（回滚运行中的域会静默重启该 VM，故产品显式拒绝）。</p>
       </div>
 
-      <!-- 串口 console：点行内「串口」按钮打开（一次性 ticket 换 WebSocket） -->
-      <div id="vm-console" hidden>
-        <h3>串口 console <span id="vm-console-name" class="muted small"></span>
-          <button id="vm-console-close" type="button" class="ghost small">断开</button></h3>
-        <pre id="vm-console-out" class="code console-out"></pre>
+      <div class="tab-panel" id="vm-tab-console" hidden>
         <div class="cfg-actions">
-          <input id="vm-console-in" type="text" placeholder="输入后回车发送（串口是行缓冲，Ctrl-C 可中断）">
-          <button id="vm-console-send" type="button" class="ghost">发送</button>
-          <button id="vm-console-enter" type="button" class="ghost">只发回车</button>
+          <button id="vm-console-connect" type="button">连接串口</button>
         </div>
         <p class="muted small">
-          终端连接的是 VM 的<strong>串口</strong>（与 CLI 的 console 同一路）。输入的内容会直接进入 guest——
-          请确认这是你要操作的机器。
+          终端连接的是该 VM 的<strong>串口</strong>（与 CLI 的 console 同一路）。连接后输入的内容会直接进入 guest——
+          请确认这是你要操作的机器；离开本页会自动断开。
         </p>
+        <div id="vm-console" hidden>
+          <h3>串口 console <span id="vm-console-name" class="muted small"></span>
+            <button id="vm-console-close" type="button" class="ghost small">断开</button></h3>
+          <pre id="vm-console-out" class="code console-out"></pre>
+          <div class="cfg-actions">
+            <input id="vm-console-in" type="text" placeholder="输入后回车发送（串口是行缓冲，Ctrl-C 可中断）">
+            <button id="vm-console-send" type="button" class="ghost">发送</button>
+            <button id="vm-console-enter" type="button" class="ghost">只发回车</button>
+          </div>
+        </div>
       </div>
     </article>
     </section>
@@ -189,11 +225,40 @@
         <thead><tr><th>名称</th><th>状态</th><th>vCPU</th><th>内存</th><th>镜像</th><th>操作</th></tr></thead>
         <tbody></tbody>
       </table>
-      <div id="ct-logs-wrap" hidden>
+      <p class="muted small">点行进详情页：配置概览与容器日志都在那一页。</p>
+    </article>
+    </section>
+
+    <section class="page" id="page-containerDetail" hidden>
+    <article class="card wide">
+      <div class="obj-head">
+        <h2>容器 <span id="ctd-name" class="muted small"></span></h2>
+        <dl id="ctd-head" class="kv"></dl>
+      </div>
+
+      <div class="tabs" id="ctd-tabs" role="tablist" aria-label="容器详情分栏">
+        <button type="button" class="tab" data-tab="overview" aria-selected="true">概览</button>
+        <button type="button" class="tab" data-tab="logs">日志</button>
+      </div>
+
+      <div class="tab-panel" id="ct-tab-overview">
+        <h3>配置</h3>
+        <dl id="ctd-info" class="kv"></dl>
+        <h3>生命周期</h3>
+        <div class="cfg-actions" id="ctd-actions"></div>
+        <p id="ctd-msg" class="muted small" hidden></p>
+        <h3>vNIC</h3>
+        <table id="ctd-iface-table">
+          <thead><tr><th>名称</th><th>类型</th><th>虚拟交换机</th><th>MAC</th><th>VLAN</th><th>状态</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="tab-panel" id="ct-tab-logs" hidden>
         <h3>容器日志 <span id="ct-logs-name" class="muted small"></span>
-          <button id="ct-logs-refresh" type="button" class="ghost small">刷新</button>
-          <button id="ct-logs-close" type="button" class="ghost small">关闭</button></h3>
+          <button id="ct-logs-refresh" type="button" class="ghost small">刷新</button></h3>
         <pre id="ct-logs" class="code console-out"></pre>
+        <p class="muted small">日志取末 200 行（与 CLI 的 show container-functions logs 同源），进本页时才拉。</p>
       </div>
     </article>
     </section>
@@ -205,6 +270,7 @@
         <thead><tr><th>名称</th><th>类型</th><th>大小</th><th>引用</th><th>状态</th><th>操作</th></tr></thead>
         <tbody></tbody>
       </table>
+      <p class="muted small">点行进详情页看完整元数据（sha256 / 格式 / 导入状态与时间）。</p>
 
       <details id="img-import-wrap">
         <summary class="muted">导入镜像（URL 拉取 / incoming 文件 / 本地上传）</summary>
@@ -243,25 +309,29 @@
     </article>
     </section>
 
+    <section class="page" id="page-imageDetail" hidden>
+    <article class="card wide">
+      <div class="obj-head">
+        <h2>镜像 <span id="imd-name" class="muted small"></span></h2>
+        <dl id="imd-head" class="kv"></dl>
+      </div>
+      <h3>元数据</h3>
+      <dl id="imd-info" class="kv"></dl>
+      <p class="muted small">删除入口在镜像列表页；被 VM 或容器引用时服务端会拒绝删除。</p>
+    </article>
+    </section>
+
     <section class="page" id="page-network" hidden>
     <article class="card wide">
       <h2>网络对象 <span class="muted small">（VRF / ACL / NAT / 聚合 / LLDP / QoS / 端口镜像）</span></h2>
+      <p class="muted small">点行或「详情」进对象详情页（VRF / ACL / 聚合 / QoS / 端口镜像）。</p>
       <div id="net-objects" class="net-objects"></div>
 
-      <div id="obj-detail-wrap" hidden>
-        <h3>详情 <span id="obj-detail-name" class="muted small"></span>
-          <button id="obj-detail-close" type="button" class="ghost small">关闭</button></h3>
-        <pre id="obj-detail" class="code console-out"></pre>
-      </div>
-
-      <!-- 大表按需拉取：NAT 会话与 VRF 路由（不进 5 秒轮询） -->
+      <!-- 大表按需拉取：NAT 会话不进 5 秒轮询（VRF 路由表在 VRF 详情页里） -->
       <div class="cfg-forms">
         <fieldset>
           <legend>大表（按需拉取）</legend>
-          <label for="big-vrf">VRF 名（查路由表）</label>
-          <input id="big-vrf" type="text" placeholder="vr-vs-dmz">
           <div class="cfg-actions">
-            <button id="big-routes-btn" type="button" class="ghost">查看路由表</button>
             <button id="big-nat-btn" type="button" class="ghost">查看 NAT 会话</button>
             <button id="big-clear-btn" type="button" class="ghost">清空</button>
           </div>
@@ -269,6 +339,74 @@
       </div>
       <p id="big-msg" class="muted small" hidden></p>
       <pre id="big-out" class="code console-out" hidden></pre>
+    </article>
+    </section>
+
+    <section class="page" id="page-vrfDetail" hidden>
+    <article class="card wide">
+      <div class="obj-head">
+        <h2>VRF <span id="vrd-name" class="muted small"></span></h2>
+        <dl id="vrd-head" class="kv"></dl>
+      </div>
+      <h3>L3 接口</h3>
+      <table id="vrd-l3-table">
+        <thead><tr><th>接口</th><th>VLAN</th><th>地址</th><th>入口 ACL</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>路由表（运行态 FIB）
+        <button id="vrd-routes-btn" type="button" class="ghost small">刷新路由表</button></h3>
+      <pre id="vrd-routes" class="code console-out"></pre>
+      <p class="muted small">路由表是运行态 FIB（含 IPv4 与 IPv6），与 CLI 的 show vrfs routes 同一份数据；
+        表可能很大，故不随页面自动刷新，要最新就点「刷新路由表」。</p>
+    </article>
+    </section>
+
+    <section class="page" id="page-aclDetail" hidden>
+    <article class="card wide">
+      <div class="obj-head">
+        <h2>ACL <span id="acd-name" class="muted small"></span></h2>
+        <dl id="acd-head" class="kv"></dl>
+      </div>
+      <h3>规则</h3>
+      <table id="acd-rule-table">
+        <thead><tr><th>序号</th><th>方向</th><th>源</th><th>目的</th><th>协议</th><th>源端口</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </article>
+    </section>
+
+    <section class="page" id="page-bondDetail" hidden>
+    <article class="card wide">
+      <div class="obj-head">
+        <h2>链路聚合 <span id="bnd-name" class="muted small"></span></h2>
+        <dl id="bnd-head" class="kv"></dl>
+      </div>
+      <h3>配置与运行态</h3>
+      <dl id="bnd-info" class="kv"></dl>
+    </article>
+    </section>
+
+    <section class="page" id="page-qosDetail" hidden>
+    <article class="card wide">
+      <div class="obj-head">
+        <h2>QoS 策略 <span id="qsd-name" class="muted small"></span></h2>
+        <dl id="qsd-head" class="kv"></dl>
+      </div>
+      <h3>参数</h3>
+      <dl id="qsd-info" class="kv"></dl>
+      <p class="muted small">策略详情取自限速策略列表（该对象没有单独读取的接口）。</p>
+    </article>
+    </section>
+
+    <section class="page" id="page-spanDetail" hidden>
+    <article class="card wide">
+      <div class="obj-head">
+        <h2>端口镜像 <span id="spd-name" class="muted small"></span></h2>
+        <dl id="spd-head" class="kv"></dl>
+      </div>
+      <h3>配置</h3>
+      <dl id="spd-info" class="kv"></dl>
+      <p class="muted small">会话详情取自端口镜像列表（该对象没有单独读取的接口）。</p>
     </article>
     </section>
 
