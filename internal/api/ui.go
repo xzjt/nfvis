@@ -28,9 +28,11 @@ var uiAssets embed.FS
 // 只发这张表里的文件——既不做目录列表（内嵌 FS 里本就没有目录语义），也不接受任意路径，
 // 路径穿越（`../`）因此在查表这一步就被拒了，无需额外过滤。
 var uiFiles = map[string]string{
-	"index.html": "text/html; charset=utf-8",
-	"app.js":     "text/javascript; charset=utf-8",
-	"style.css":  "text/css; charset=utf-8",
+	"index.html":  "text/html; charset=utf-8",
+	"app.js":      "text/javascript; charset=utf-8",
+	"style.css":   "text/css; charset=utf-8",
+	"router.js":   "text/javascript; charset=utf-8",
+	"routes.json": "application/json; charset=utf-8",
 }
 
 // handleUIRedirect GET /api/v1/ui：跳到 `/ui/`。

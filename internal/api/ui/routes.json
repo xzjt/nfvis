@@ -1,0 +1,30 @@
+{
+  "routes": [
+    { "path": "#/", "title": "总览", "view": "overview", "breadcrumb": ["总览"],
+      "endpoints": ["/system/status", "/system/version", "/vpp/status", "/alarms"], "poll": 5000 },
+    { "path": "#/compute/vms", "title": "虚拟机", "view": "vms", "breadcrumb": ["计算", "虚拟机"],
+      "endpoints": ["/virtual-machine-functions"], "poll": 5000 },
+    { "path": "#/compute/containers", "title": "容器", "view": "containers", "breadcrumb": ["计算", "容器"],
+      "endpoints": ["/container-functions"], "poll": 5000 },
+    { "path": "#/compute/images", "title": "镜像", "view": "images", "breadcrumb": ["计算", "镜像"],
+      "endpoints": ["/images"], "poll": 0 },
+    { "path": "#/network", "title": "网络对象", "view": "network", "breadcrumb": ["网络", "网络对象"],
+      "endpoints": ["/vrfs", "/acls", "/nat", "/bonds", "/protocols/lldp/neighbors", "/qos/policies", "/port-mirroring"], "poll": 5000 },
+    { "path": "#/network/switches", "title": "虚拟交换机", "view": "switches", "breadcrumb": ["网络", "虚拟交换机"],
+      "endpoints": ["/virtual-switches"], "poll": 5000 },
+    { "path": "#/system/pools", "title": "资源池", "view": "pools", "breadcrumb": ["系统", "资源池"],
+      "endpoints": ["/resource-pools"], "poll": 5000 },
+    { "path": "#/system/interfaces", "title": "接口", "view": "interfaces", "breadcrumb": ["系统", "接口"],
+      "endpoints": ["/interfaces"], "poll": 5000 },
+    { "path": "#/config", "title": "配置", "view": "config", "breadcrumb": ["配置"],
+      "endpoints": ["/configuration"], "poll": 0 },
+    { "path": "#/ops/actions", "title": "运维动作", "view": "ops", "breadcrumb": ["运维", "动作"],
+      "endpoints": ["/system/backup", "/system/tech-support"], "poll": 0 },
+    { "path": "#/ops/audit", "title": "审计日志", "view": "audit", "breadcrumb": ["运维", "审计"],
+      "endpoints": ["/audit-logs?limit=50"], "poll": 5000 },
+    { "path": "#/ops/diagnostics", "title": "诊断", "view": "diagnostics", "breadcrumb": ["运维", "诊断"],
+      "endpoints": ["/system/logs"], "poll": 0 },
+    { "path": "#/ops/capture", "title": "抓包", "view": "capture", "breadcrumb": ["运维", "抓包"],
+      "endpoints": ["/vpp/capture"], "poll": 0 }
+  ]
+}

@@ -29,6 +29,8 @@
       <strong>NFViS 控制台</strong>
       <span id="host-line" class="muted"></span>
     </div>
+    <nav id="nav" class="nav" aria-label="主导航"></nav>
+    <div id="crumb" class="crumb" aria-label="面包屑"></div>
     <div class="topbar-right">
       <span id="stream-state" class="pill pill-idle">实时通道：连接中</span>
       <span id="user-line" class="muted"></span>
@@ -40,6 +42,7 @@
   <p id="global-error" class="error" hidden></p>
 
   <div class="grid">
+    <section class="page" id="page-overview" hidden>
     <article class="card">
       <h2>系统</h2>
       <dl id="sys-list" class="kv"></dl>
@@ -48,15 +51,29 @@
     </article>
 
     <article class="card">
-      <h2>资源池</h2>
-      <div id="pools"></div>
-    </article>
-
-    <article class="card">
       <h2>数据面</h2>
       <dl id="vpp-list" class="kv"></dl>
     </article>
 
+    <article class="card">
+      <h2>告警</h2>
+      <div id="alarms"></div>
+    </article>
+
+    <article class="card">
+      <h2>最近事件</h2>
+      <ul id="events" class="events"></ul>
+    </article>
+    </section>
+
+    <section class="page" id="page-pools" hidden>
+    <article class="card">
+      <h2>资源池</h2>
+      <div id="pools"></div>
+    </article>
+    </section>
+
+    <section class="page" id="page-interfaces" hidden>
     <article class="card wide">
       <h2>接口 <span id="iface-note" class="muted small"></span></h2>
       <table id="iface-table">
@@ -64,7 +81,9 @@
         <tbody></tbody>
       </table>
     </article>
+    </section>
 
+    <section class="page" id="page-config" hidden>
     <article class="card wide" id="cfg-card">
       <h2>配置 <span id="cfg-note" class="muted small"></span></h2>
 
@@ -104,7 +123,9 @@
         <pre id="cfg-diff" class="code" hidden></pre>
       </div>
     </article>
+    </section>
 
+    <section class="page" id="page-vms" hidden>
     <article class="card wide">
       <h2>虚拟机 <span id="vm-note" class="muted small"></span></h2>
       <table id="vm-table">
@@ -147,7 +168,9 @@
         </p>
       </div>
     </article>
+    </section>
 
+    <section class="page" id="page-switches" hidden>
     <article class="card wide">
       <h2>虚拟交换机 <span id="vs-note" class="muted small"></span></h2>
       <table id="vs-table">
@@ -156,7 +179,9 @@
       </table>
       <pre id="vs-stat" class="code" hidden></pre>
     </article>
+    </section>
 
+    <section class="page" id="page-containers" hidden>
     <article class="card wide">
       <h2>容器 <span id="ct-note" class="muted small"></span></h2>
       <table id="ct-table">
@@ -170,7 +195,9 @@
         <pre id="ct-logs" class="code console-out"></pre>
       </div>
     </article>
+    </section>
 
+    <section class="page" id="page-images" hidden>
     <article class="card wide">
       <h2>镜像</h2>
       <table id="img-table">
@@ -213,7 +240,9 @@
         <p id="img-msg" class="muted small" hidden></p>
       </details>
     </article>
+    </section>
 
+    <section class="page" id="page-network" hidden>
     <article class="card wide">
       <h2>网络对象 <span class="muted small">（VRF / ACL / NAT / 聚合 / LLDP / QoS / 端口镜像）</span></h2>
       <div id="net-objects" class="net-objects"></div>
@@ -240,7 +269,9 @@
       <p id="big-msg" class="muted small" hidden></p>
       <pre id="big-out" class="code console-out" hidden></pre>
     </article>
+    </section>
 
+    <section class="page" id="page-ops" hidden>
     <article class="card wide">
       <h2>运维动作 <span class="muted small">（写操作，均需二次确认）</span></h2>
       <div class="cfg-forms">
@@ -289,7 +320,9 @@
       <p id="ops-msg" class="muted small" hidden></p>
       <pre id="ops-out" class="code" hidden></pre>
     </article>
+    </section>
 
+    <section class="page" id="page-audit" hidden>
     <article class="card wide">
       <h2>审计日志 <span id="audit-note" class="muted small"></span>
         <button id="audit-refresh-btn" type="button" class="ghost small">刷新</button></h2>
@@ -298,12 +331,9 @@
         <tbody></tbody>
       </table>
     </article>
+    </section>
 
-    <article class="card">
-      <h2>告警</h2>
-      <div id="alarms"></div>
-    </article>
-
+    <section class="page" id="page-diagnostics" hidden>
     <article class="card wide">
       <h2>诊断</h2>
       <div class="cfg-forms">
@@ -332,7 +362,9 @@
       <div class="cfg-actions"><button id="diag-log-btn" type="button" class="ghost">刷新服务端日志（末 100 行）</button></div>
       <pre id="diag-log" class="code" hidden></pre>
     </article>
+    </section>
 
+    <section class="page" id="page-capture" hidden>
     <article class="card wide">
       <h2>抓包 <span id="cap-note" class="muted small"></span></h2>
       <div class="cfg-forms">
@@ -360,20 +392,20 @@
         <tbody></tbody>
       </table>
     </article>
+    </section>
 
-    <article class="card">
-      <h2>最近事件</h2>
-      <ul id="events" class="events"></ul>
-    </article>
   </div>
 
   <footer class="foot muted">
-    数据取自本机 REST 接口；页面每 5 秒兜底刷新一次，事件推送到达时立即刷新。
-    配置修改在「配置」卡片里经 candidate → 提交 流程进行，未提交前不影响运行配置；
-    写类运维动作在「运维动作」卡片里，均需二次确认。
+    数据取自本机 REST 接口；当前页按其自身节奏刷新（多数页 5 秒一次，配置与运维类页面不自动刷新），
+    事件推送到达时立即刷新。顶栏可切换页面，地址里的 # 可直接分享或收藏。
+    配置修改在「配置」页里经 candidate → 提交 流程进行，未提交前不影响运行配置；
+    写类运维动作在「运维」页里，均需二次确认。
   </footer>
 </section>
 
-<script src="app.js"></script>
+<!-- app.js 是页面逻辑（页面处理器 + 各页视图），router.js 按 hash 决定显示哪一页并取数。
+     两个都是模块：同一 URL 只求值一次，router.js 复用 app.js 的那一份实例。 -->
+<script type="module" src="app.js"></script>
 </body>
 </html>

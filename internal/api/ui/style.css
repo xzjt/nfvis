@@ -36,6 +36,21 @@ p { margin: 6px 0; }
    [hidden] { display: none }，不显式声明的话登录后登录卡片不消失、盖住总览页。 */
 [hidden] { display: none !important; }
 
+/* 页面容器（hash 路由：一次只显示一页，页内卡片沿用原来的栅格排布） */
+.page { display: grid; gap: 14px; grid-column: 1 / -1; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+/* 必须显式写 [hidden]：作者样式（display: grid）会盖掉 UA 的 [hidden] { display: none }，
+   不写的话 13 页会全部同时显示（与登录卡片同一条教训）。 */
+.page[hidden] { display: none; }
+
+/* 顶栏导航（按面包屑首段分组）与面包屑 */
+.nav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; }
+.nav a { color: var(--muted); text-decoration: none; font-size: 13px; padding: 2px 4px; border-radius: 4px; }
+.nav a:hover { color: var(--accent); }
+.nav a[aria-current="page"] { color: var(--fg); border-bottom: 2px solid var(--accent); }
+.nav-group { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.nav-title { color: var(--muted); font-size: 12px; }
+.crumb { color: var(--muted); font-size: 12px; }
+
 /* 登录 */
 .login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
 .login-card {
