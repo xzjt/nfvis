@@ -170,3 +170,12 @@ button.danger:hover { background: #cf3a31; border-color: #cf3a31; }
 #audit-table th, #audit-table td { white-space: nowrap; }
 #audit-table td:nth-child(4) { white-space: normal; word-break: break-word; }
 #audit-table td:first-child { color: var(--muted); }
+
+/* 导航：组名（计算/网络/系统/配置/运维）与可点项在视觉上分开——组名不可点、更弱、组间留白 */
+.nav { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.nav-group { display: inline-flex; align-items: center; gap: 4px 8px; padding-left: 10px; border-left: 1px solid rgba(255, 255, 255, .18); }
+.nav-title { opacity: .55; font-size: .85em; letter-spacing: .04em; }
+.nav a { text-decoration: none; padding: 2px 4px; border-radius: 4px; }
+.nav a:hover { text-decoration: underline; }
+.nav a[aria-current="page"] { font-weight: 600; text-decoration: underline; }
+.crumb { opacity: .7; font-size: .9em; }

@@ -9,6 +9,19 @@ import { VIEWS, softLoad, setPollRoute, showGlobalError } from './app.js';
 
 let routes = [];
 let started = false;
+// 未知路由的提示单独占一个元素（#route-notice）：显示在"回总览"那一次，
+// 用户下一次导航时收起——不与页面取数失败的提示（#global-error）互相抹掉。
+function showNotice(msg) {
+  const n = document.getElementById('route-notice');
+  n.textContent = msg;
+  n.hidden = false;
+}
+function clearNotice() {
+  const n = document.getElementById('route-notice');
+  if (!n) return;
+  n.textContent = '';
+  n.hidden = true;
+}
 
 // 载入路由表（真 JSON：前端 JSON.parse、守护用 Go 的解析器，两边同一份）。
 export async function loadRoutes() {
@@ -42,6 +55,7 @@ export async function render() {
     const view = VIEWS[route.view];
     if (!view) { showGlobalError('页面未实现：' + route.view); return; }
     await view.render(await softLoad(route.endpoints));
+    clearNotice();
   } catch (e) {
     showGlobalError('页面加载失败：' + e.message);
   }
@@ -107,6 +121,6 @@ function span(cls, text) {
 
 // 未知 hash：如实说一句，然后回总览（总览是登录后的落点）。
 function notFound(hash) {
-  showGlobalError('页面不存在：' + (hash || '') + '（已回到总览）');
+  showNotice('页面不存在：' + (hash || '') + '（已回到总览）');
   navigate('#/');
 }
