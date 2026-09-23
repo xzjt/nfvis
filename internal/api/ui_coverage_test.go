@@ -32,6 +32,12 @@ var uiNotWired = map[string]string{
 	"/configuration/rollback/{n}":        "回滚到历史快照——需先看差异再确认，后续增量",
 	"/protocols/lldp":                    "LLDP 开关状态——邻居表已接；开关属配置编辑（走「配置」卡）",
 
+	// —— 只有 DELETE 的端点：界面暂无删除入口（详情页从**列表端点**取数）——
+	// 这两条是"路径存在但读不到"的坑：按对象名直觉写成 `/qos/policies/{name}` / `/port-mirroring/{name}`
+	// 当详情端点，请求只会得到 405。详情页因此改从列表端点取同一个对象。
+	"/qos/policies/{name}":   "该路径只有 DELETE；QoS 详情从 /qos/policies 列表取数，界面暂无删除入口",
+	"/port-mirroring/{name}": "该路径只有 DELETE；SPAN 详情从 /port-mirroring 列表取数，界面暂无删除入口",
+
 	// —— 高风险 / 需要文件选择：界面有意不提供（CLI 有二次确认与守卫）——
 	"/system/restore":                            "恢复配置属高风险，界面暂不提供",
 	"/system:zeroize":                            "恢复出厂（破坏性极强），界面暂不提供",
@@ -132,19 +138,16 @@ func uiCovers(lits []string, path string) bool {
 
 // uiDynamicWired 由前端**动态拼接**构造、字面量提取不到、但确实调用了的路径 → 出处说明。
 // 收紧 uiCovers 之后，这类路径必须显式登记，否则会被误判成"未接"。
+//
+// 详情刀（对象详情页）之后，对象级单取路径（`/virtual-machine-functions/{name}`、`/images/{name}`、
+// `/acls/{name}`…）**不再**登记在这里：它们由 `ui/routes.json` 的 endpoints 声明（取数范围的唯一真源，
+// 已并入 uiUsedPaths），登记在这里反而与"由前端动态拼接"的定义不符。留在这里的是真正在 JS 里拼的
+// 动作/子资源路径（启停、console、快照、日志、下载…）。
 var uiDynamicWired = map[string]string{
-	"/acls/{name}":                                                    "网络对象表的详情按钮：objDetail('/acls/' + name)",
-	"/bonds/{name}":                                                   "同上（bond 详情）",
-	"/qos/policies/{name}":                                            "同上（QoS 详情）",
-	"/port-mirroring/{name}":                                          "同上（SPAN 详情）",
-	"/container-functions/{name}":                                     "容器行的详情按钮：objDetail('/container-functions/' + name)",
-	"/images/{name}":                                                  "镜像行的详情按钮：objDetail('/images/' + name)",
 	"/system/kernel":                                                  "系统卡的内核基线小节：api('/system/kernel')",
-	"/vrfs/{name}/routes":                                             "bigRoutes()：api('/vrfs/' + name + '/routes')",
-	"/vrfs/{name}":                                                    "bigRoutes() 的路由表覆盖了排障所需（VRF 详情暂无独立入口）",
-	"/nat/sessions":                                                   "bigNat()：api('/nat/sessions')",
+	"/nat/sessions":                                                   "bigNat()：api('/nat/sessions')（NAT 会话表按需拉取）",
+	"/vrfs/{name}/routes":                                             "VRF 详情页的「刷新路由表」：api('/vrfs/' + name + '/routes')（大表按需重拉）",
 	"/interfaces/{name}":                                              "loadInterfaceStats()：api('/interfaces/' + name)（逐口取计数）",
-	"/virtual-machine-functions/{name}":                               "loadVMStats()：api('/virtual-machine-functions/' + name)（取 vhost-user 计数）",
 	"/virtual-switches/{name}":                                        "loadVSwitchStats()：api('/virtual-switches/' + name)（取成员口计数）",
 	"/virtual-machine-functions/{name}:start":                         "vmAction()：POST …/{name}:start",
 	"/virtual-machine-functions/{name}:stop":                          "vmAction()：POST …/{name}:stop",
@@ -255,8 +258,16 @@ func TestUICoverageClassified(t *testing.T) {
 
 // TestUIRoutesEndpointsExistInContract 路由表里声明的端点必须都在契约里——
 // 防止"路由表写出幽灵端点"（界面取一个服务端没有的路径，页面只会静默空掉）。
+//
+// 两条判据：
+//
+//	① 路径在契约里（归一后逐字相等）；
+//	② **契约里这条路径有 GET**——路径存在不等于能读：`/qos/policies/{name}` 与
+//	   `/port-mirroring/{name}` 在契约里只有 DELETE，页面按单取路径请求只会得到 405
+//	   （本轮定详情页路由时就撞上过：按"对象名"直觉写 endpoints 会写出读不到的路径）。
 func TestUIRoutesEndpointsExistInContract(t *testing.T) {
 	contractPaths := contractPathSet(t)
+	contractMethods := contractRoutes(t)
 	rb, err := os.ReadFile("ui/routes.json")
 	if err != nil {
 		t.Fatalf("读取 ui/routes.json: %v", err)
@@ -272,13 +283,27 @@ func TestUIRoutesEndpointsExistInContract(t *testing.T) {
 	}
 	for _, r := range doc.Routes {
 		for _, p := range r.Endpoints {
-			q := p
+			q := normalizeEndpointParams(p)
 			if i := strings.IndexByte(q, '?'); i >= 0 {
 				q = q[:i]
 			}
 			if !contractPaths[q] {
 				t.Errorf("路由 %s 声明的端点 %s 不在契约里", r.Path, q)
+				continue
+			}
+			if !contractMethods["GET "+q] {
+				t.Errorf("路由 %s 声明的端点 %s 在契约里没有 GET（页面取数只能读；只有 DELETE 的路径要从列表端点取数）",
+					r.Path, q)
 			}
 		}
 	}
+}
+
+// normalizeEndpointParams 归一规则：路由表的 **path** 用 `:name`（前端按段匹配），
+// 契约的路径参数用 `{name}`（OpenAPI 风格）；**endpoints 按契约逐字书写**（`{name}`），
+// 正常情况下这里不需要改任何东西。之所以仍归一一次，是为了让"有人把 endpoints 也写成
+// `:name`"这种笔误照样能对上契约——两种写法语义相同，守护不该只在写法上较真；
+// 归一后仍必须**逐字等于契约里的某一串**才算通过（不是前缀、不是模糊匹配）。
+func normalizeEndpointParams(p string) string {
+	return uiParamSegRe.ReplaceAllString(p, "$1{$2}")
 }

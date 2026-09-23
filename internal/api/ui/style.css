@@ -171,6 +171,27 @@ button.danger:hover { background: #cf3a31; border-color: #cf3a31; }
 #audit-table td:nth-child(4) { white-space: normal; word-break: break-word; }
 #audit-table td:first-child { color: var(--muted); }
 
+/* 详情页：对象头（名称 + 关键字段）+ Tab 条 + Tab 面板。
+   Tab 是页内状态（不进 hash）：条上按钮用 aria-selected 表示选中，面板用 hidden 切换。 */
+.obj-head { display: flex; flex-direction: column; gap: 2px; }
+.obj-head h2 { margin: 0 0 4px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 12px 0 0; border-bottom: 1px solid var(--line); }
+.tabs .tab {
+  padding: 6px 12px; border: 1px solid transparent; border-bottom: 0; border-radius: 6px 6px 0 0;
+  background: transparent; color: var(--muted); cursor: pointer; font-size: 13px;
+}
+.tabs .tab:hover { color: var(--accent); }
+.tabs .tab[aria-selected="true"] { color: var(--fg); background: var(--panel-2); border-color: var(--line); }
+.tab-panel { padding-top: 10px; }
+
+/* 列表行可点进详情：整行给出手型与悬停底色（行内按钮各自 stopPropagation，不会误触） */
+tr.row-link { cursor: pointer; }
+tr.row-link:hover td { background: var(--panel-2); }
+
+/* 面包屑里能回上一级的段（详情页 → 列表页）做成链接 */
+.crumb a { color: var(--muted); text-decoration: none; border-bottom: 1px dotted var(--muted); }
+.crumb a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
 /* 导航：组名（计算/网络/系统/配置/运维）与可点项在视觉上分开——组名不可点、更弱、组间留白 */
 .nav { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .nav-group { display: inline-flex; align-items: center; gap: 4px 8px; padding-left: 10px; border-left: 1px solid rgba(255, 255, 255, .18); }
