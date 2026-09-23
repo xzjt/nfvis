@@ -22,25 +22,32 @@ import (
 // uiNotWired 契约有、界面**有意**不接的路径 → 理由（新增端点须在此归类或接入界面）。
 var uiNotWired = map[string]string{
 	// —— 已登记：后续增量的界面工作（**这一段就是界面缺口清单**）——
-	"/container-functions/{name}/logs":    "容器日志视图——与 console 终端同批",
-	"/container-functions/{name}:start":   "容器生命周期按钮——与 VM 动作同批做界面",
-	"/container-functions/{name}:stop":    "同上",
-	"/container-functions/{name}:restart": "同上",
-	"/system/tech-support/{file}":         "诊断归档下载（文件流）——后续增量",
-	"/system/backup/{file}":               "备份归档下载（文件流）——后续增量",
-	"/system/hardware":                    "硬件健康明细——后续增量（阈值告警已在告警卡体现）",
-	"/system/health/thresholds":           "健康阈值设置——后续增量",
-	"/vrfs/{name}":                        "VRF 详情——列表已给概览，详情后续增量",
-	"/vrfs/{name}/routes":                 "路由表——数据量大需分页，后续增量",
-	"/acls/{name}":                        "ACL 详情——列表已给规则数，详情后续增量",
-	"/bonds/{name}":                       "bond 详情——列表已给成员，详情后续增量",
-	"/qos/policies/{name}":                "QoS 详情——列表已给概览",
-	"/port-mirroring/{name}":              "SPAN 详情——列表已给概览",
-	"/nat/sessions":                       "NAT 会话表——数据量大需分页，后续增量",
-	"/images/{name}":                      "镜像详情——列表已给全部字段",
-	"/container-functions/{name}":         "容器详情——列表已给概览",
-	"/configuration/rollback/{n}":         "回滚到历史快照——需先看差异再确认，后续增量",
-	"/protocols/lldp":                     "LLDP 开关状态——邻居表已接；开关属配置编辑（走「配置」卡）",
+	"/container-functions/{name}/logs":                                "容器日志视图——后续增量",
+	"/interfaces/{name}/dpdk":                                         "DPDK 绑定/解绑涉及管理口红线，界面暂不提供（CLI 有守卫）",
+	"/interfaces/{name}/sriov":                                        "SR-IOV 无硬件环境验证，界面暂不提供",
+	"/virtual-machine-functions/{name}/snapshots":                     "VM 快照列表——后续增量（需与关机态约束一起做）",
+	"/virtual-machine-functions/{name}/snapshots/{snapshot}":          "快照删除——同上",
+	"/virtual-machine-functions/{name}/snapshots/{snapshot}:rollback": "快照回滚需关机态，界面暂不提供（CLI 有显式拒绝）",
+	"/virtual-switches/{name}/mac-table":                              "MAC 表数据量大需分页，后续增量",
+	"/virtual-switches/{name}/ports":                                  "成员端口全量替换属配置编辑，走「配置」卡",
+	"/container-functions/{name}:start":                               "容器生命周期按钮——与 VM 动作同批做界面",
+	"/container-functions/{name}:stop":                                "同上",
+	"/container-functions/{name}:restart":                             "同上",
+	"/system/tech-support/{file}":                                     "诊断归档下载（文件流）——后续增量",
+	"/system/backup/{file}":                                           "备份归档下载（文件流）——后续增量",
+	"/system/hardware":                                                "硬件健康明细——后续增量（阈值告警已在告警卡体现）",
+	"/system/health/thresholds":                                       "健康阈值设置——后续增量",
+	"/vrfs/{name}":                                                    "VRF 详情——列表已给概览，详情后续增量",
+	"/vrfs/{name}/routes":                                             "路由表——数据量大需分页，后续增量",
+	"/acls/{name}":                                                    "ACL 详情——列表已给规则数，详情后续增量",
+	"/bonds/{name}":                                                   "bond 详情——列表已给成员，详情后续增量",
+	"/qos/policies/{name}":                                            "QoS 详情——列表已给概览",
+	"/port-mirroring/{name}":                                          "SPAN 详情——列表已给概览",
+	"/nat/sessions":                                                   "NAT 会话表——数据量大需分页，后续增量",
+	"/images/{name}":                                                  "镜像详情——列表已给全部字段",
+	"/container-functions/{name}":                                     "容器详情——列表已给概览",
+	"/configuration/rollback/{n}":                                     "回滚到历史快照——需先看差异再确认，后续增量",
+	"/protocols/lldp":                                                 "LLDP 开关状态——邻居表已接；开关属配置编辑（走「配置」卡）",
 
 	// —— 高风险 / 需要文件选择：界面有意不提供（CLI 有二次确认与守卫）——
 	"/system/restore":                            "恢复配置属高风险，界面暂不提供",
@@ -103,17 +110,32 @@ func uiUsedPaths(t *testing.T) []string {
 	return out
 }
 
-// uiCovers 判断某契约路径是否被界面使用（含 `/x/` 前缀字面量）。
+// uiCovers 判断某契约路径是否被界面使用。
+//
+// 规则：① 字面量完全相等；② 以 `/` 结尾的字面量（动态拼接，如 `api('/interfaces/' + name)`）
+// **只覆盖"恰好多一段"的路径**（`/interfaces/{name}`）——不覆盖更深的子路径
+// （`/interfaces/{name}/dpdk`、`/virtual-machine-functions/{name}/console`）。
+// 更深的动态路径必须在 uiDynamicWired 里显式登记（见下）——否则"前缀把一切都算已接"会**虚报覆盖**。
 func uiCovers(lits []string, path string) bool {
 	for _, l := range lits {
 		if l == path {
 			return true
 		}
 		if strings.HasSuffix(l, "/") && strings.HasPrefix(path, l) {
-			return true
+			rest := strings.TrimPrefix(path, l)
+			if rest != "" && !strings.Contains(rest, "/") {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// uiDynamicWired 由前端**动态拼接**构造、字面量提取不到、但确实调用了的路径 → 出处说明。
+// 收紧 uiCovers 之后，这类路径必须显式登记，否则会被误判成"未接"。
+var uiDynamicWired = map[string]string{
+	"/virtual-machine-functions/{name}/console":    "ui/app.js 的 vmConsoleOpen()：api('/virtual-machine-functions/' + name + '/console')",
+	"/virtual-machine-functions/{name}/console/ws": "同上的 WebSocket：new WebSocket(… + res.ws_url)（ws_url 由该端点返回）",
 }
 
 // contractPathSet 契约里的全部路径（方法无关）。
@@ -159,7 +181,7 @@ func TestUICoverageClassified(t *testing.T) {
 	wired, unwired := 0, 0
 	for p := range contractPaths {
 		switch {
-		case uiCovers(lits, p):
+		case uiCovers(lits, p) || uiDynamicWired[p] != "":
 			wired++
 		case uiNotWired[p] != "":
 			unwired++
@@ -180,6 +202,11 @@ func TestUICoverageClassified(t *testing.T) {
 			ghosts = append(ghosts, p)
 		}
 	}
+	for p := range uiDynamicWired {
+		if !contractPaths[p] {
+			ghosts = append(ghosts, p)
+		}
+	}
 	if len(ghosts) > 0 {
 		sort.Strings(ghosts)
 		t.Errorf("uiNotWired 里的以下路径不是契约里的真实路径（拼错或已删？）：\n  %s", strings.Join(ghosts, "\n  "))
@@ -188,7 +215,7 @@ func TestUICoverageClassified(t *testing.T) {
 	// 已接的路径不许再出现在 uiNotWired 里（否则缺口数虚高）
 	stale := []string{}
 	for p := range uiNotWired {
-		if uiCovers(lits, p) {
+		if uiCovers(lits, p) || uiDynamicWired[p] != "" {
 			stale = append(stale, p)
 		}
 	}
