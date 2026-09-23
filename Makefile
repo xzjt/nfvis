@@ -68,10 +68,13 @@ docscheck:
 # 2026-09-24 补第三项：控制台配置页的口令路径——桩必须把「能力更弱的环境」（明文 HTTP 下
 # 没有 crypto.subtle）显式跑一遍，否则验证环境比目标环境强，路径根本没走到（round61 §5）。
 # 该项用 node 跑 DOM 桩；没有 node 的环境会如实说"没跑"（产品构建与其余检查都不依赖 node）。
+# 2026-09-24 补第四项：控制台的分级确认（低/中/高危）——高危的确认词与倒计时必须**真的**
+# 让「执行」按钮点不动，且确认前/取消后一条请求都不许发；档位归位也由同一张表守护。
 toolcheck:
 	bash contrib/scripts/cli-fulltest-selftest.sh
 	bash contrib/scripts/cli-semantic-selftest.sh
 	bash contrib/scripts/web-console-config-selftest.sh
+	bash contrib/scripts/web-console-confirm-selftest.sh
 
 # 真机集成测试（M3）：需 VPP 运行环境（nfvis-vm）。无环境时跳过并提示，CI 不跑。
 # 约定：build tag integration + 环境变量 NFVIS_VPP_SOCK（缺省 /run/vpp/api.sock）。
