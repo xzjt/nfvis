@@ -1,0 +1,155 @@
+===== V1 收尾第五十六轮：cloud-init seed 端到端取证（#22 / 决策 #139）=====
+日期：2026-09-23
+范围：main `94a3a20`（= 决策 #139 合并之后；本轮分支 `round56-seed-e2e`，未改产品代码）
+目的：补上 round55 未取到的「cloud-init 真的消费了 seed」这一步证据（#22 收口的最后一步）。
+现场脚本（都在 nfvis-vm `/root/` 下，本轮新写）：`seed-setup.sh` / `seed-boot.sh` /
+`seed-inspect2.sh` / `seed-fsmatrix.sh` / `seed-inject-test.sh` / `seed-debian-control.sh` / `seed-teardown.sh`。
+
+----- 1. 结论（先说）-----
+① **#139 的域 XML 改动生效且正确**：seed 现以 `device=disk / bus=virtio` 挂在 `vdb`——
+   宿主 `virsh domblklist` 与 guest 内核日志（`virtio_blk virtio1: [vdb] 732 512-byte logical blocks`）
+   双向印证；virtio_blk 在 Alpine 的 virt 内核里存在，**设备确实可见**。
+② **但 #22 未收口**：`alpine.qcow2` 上 cloud-init **仍然没有**消费 seed（hostname 未变、user-data 未生效、
+   `/var/lib/cloud` 无实例记录）。**根因不是总线**，而是 **guest 侧的挂载步骤失败**（见 §4）。
+③ **#22 记录的「Alpine virt 内核缺 `ahci`」与实测矛盾**：本机 `alpine.qcow2` 的 6.6.31-0-virt 内核
+   **`ahci` 是 builtin**（`modules.builtin` 命中 `kernel/drivers/ata/ahci.ko`），启动日志里 ahci 正常初始化；
+   **旧 SATA 光盘也并非不可见**——用 1.1.28 建的域里 guest 看到 `/dev/sr0`（`sr 0:0:0:0: [sr0]`）并去挂它，
+   只是**挂载失败**。round24 的四条证据（`lsblk` 无 sr0、`grep -ci 'ahci|libata'` = 0、`ds-identify` 无
+   数据源）**是在 `debian-12-genericcloud` 上取的、对那个镜像成立**；把结论外推到 alpine 是错的。
+④ **alpine 类（busybox `mount`）guest 的失败在 guest 侧，宿主侧无解**：产品只控制域 XML，
+   guest 的引导参数与镜像内容都不在产品手里（§4/§5）。
+
+----- 2. 方法（含阳性对照自校准）-----
+取证链：开发态实例（**全新 DB**，不碰生产配置库）→ 产品 REST 建域 → `virsh dumpxml` 取 XML 事实 →
+`virsh start` → 串口 console 采样 → `virsh shutdown`（超时才 destroy）→
+**把 guest 盘转成副本**（`qemu-img convert`）→ `qemu-nbd` 挂副本，离线读
+`/etc/hostname`、`/var/lib/cloud/**`、`/var/log/cloud-init.log`、`/var/log/dmesg`；用完 `--disconnect`（红线 7）。
+> 用副本而不是原盘：原盘不动（只读），且副本可以 `e2fsck -fy` 让日志落盘，避免"关机不干净 → 读到旧状态"的假红。
+
+**阳性对照（先证明这套取证能测出"成功"，再拿它判"失败"）**：同一份 seed ISO、同一种 virtio 交付，
+**给 Debian 12 guest**（`debian-12-generic-amd64.qcow2`）：
+
+    [hostname]     probe-debian
+    [debian marker] iso seed consumed by debian guest
+    46: ... DataSourceNoCloud.py[DEBUG]: Using data from /dev/vdb
+    --- status.json datasource ---
+    "datasource": "DataSourceNoCloud [seed=/dev/vdb][dsmode=net]"
+    --- instance dirs ---  probe-debian-0001
+
+⇒ 方法与判据自校准通过：**同一交付方式在 Debian 上确实被消费**。
+
+----- 3. 产品路径两次运行（同镜像、同 user-data，只差产品版本）-----
+两次都用产品 API 建域（`alpine.qcow2`、1 vCPU、memory backing=normal、无 vNIC、`serial_console`），
+user-data 由产品默认生成（hostname = VM 名），探针名 `seedprobe-{old,new}`。
+
+| 运行 | 二进制 | 域 XML 里的 seed | guest 侧设备 | cloud-init 结果 |
+|---|---|---|---|---|
+| old | `/usr/bin/nfvisd` **1.1.28**（已发布版） | `device=cdrom / bus=sata / dev=sda` | `/dev/sr0` ✓ 可见 | **失败**：`Failed to mount /dev/sr0 when looking for data` → `Datasource DataSourceNone` |
+| new | `/root/src`（main `94a3a20`）构建 | `device=disk / bus=virtio / dev=vdb` | `/dev/vdb` ✓ 可见 | **失败**：`Failed to mount /dev/vdb … Invalid argument` → `Datasource DataSourceNone` |
+
+    old（1.1.28）domblklist / XML：
+      sda      /var/lib/nfvis/vms/seedprobe-old/seed.iso
+      <disk type='file' device='cdrom'> … <target dev='sda' bus='sata'/> <readonly/>
+    old guest 串口：
+      [    2.555960] ata1.00: ATAPI: QEMU DVD-ROM, 2.5+, max UDMA/100
+      [    2.930010] sr 0:0:0:0: [sr0] scsi3-mmc drive: 4x/4x cd/rw xa/form2 tray
+      2026-09-23 09:34:13,868 - DataSourceNoCloud.py[DEBUG]: Attempting to use data from /dev/sr0
+      2026-09-23 09:34:13,878 - util.py[WARNING]: Failed to mount /dev/sr0 when looking for data
+      Cloud-init v. 24.1.3 finished at Wed, 23 Sep 2026 09:36:41 +0000. Datasource DataSourceNone.
+      2026-09-23 09:36:41,272 - cc_final_message.py[WARNING]: Used fallback datasource
+      [result] hostname=localhost marker=absent        （guest 盘离线读取）
+
+    new（main）domblklist / XML：
+      vdb      /var/lib/nfvis/vms/seedprobe-new/seed.iso
+      <disk type='file' device='disk'> … <target dev='vdb' bus='virtio'/> <readonly/>
+    new guest 串口 + cloud-init.log：
+      [    3.034721] virtio_blk virtio0: 1/0/0 default/read/poll queues
+      [    3.054490] virtio_blk virtio1: [vdb] 732 512-byte logical blocks (375 kB/366 KiB)
+      2026-09-23 09:23:08,984 - DataSourceNoCloud.py[DEBUG]: Attempting to use data from /dev/vdb
+      2026-09-23 09:23:08,985 - subp.py[DEBUG]: Running command
+        ['mount', '-o', 'ro', '-t', 'auto', '/dev/vdb', '/run/cloud-init/tmp/tmpp_q8xu7n']
+      Stderr: mount: mounting /dev/vdb on /run/cloud-init/tmp/tmpp_q8xu7n failed: Invalid argument
+      2026-09-23 09:23:08,988 - util.py[WARNING]: Failed to mount /dev/vdb when looking for data
+      [result] hostname=localhost marker=absent
+
+> 宿主侧一切正常：两次的 seed.iso 都是 `cloud-localds` 产出的合法 NoCloud 卷
+> （`blkid` → `LABEL="cidata" TYPE="iso9660"`；loop 挂载可见 `user-data` / `meta-data`），
+> 域 XML、设备、启动、串口都正常——**失败只发生在 guest 里**。
+
+----- 4. 根因（guest 侧；源码 + guest 内实测矩阵）-----
+**(a) cloud-init 只认两种文件系统类型**（`/usr/lib/python3.12/site-packages/cloudinit/sources/DataSourceNoCloud.py`）：
+
+    def _get_devices(self, label):
+        fslist = util.find_devs_with("TYPE=vfat")
+        fslist.extend(util.find_devs_with("TYPE=iso9660"))
+        label_list = util.find_devs_with("LABEL=%s" % label.upper())
+        label_list.extend(util.find_devs_with("LABEL=%s" % label.lower()))
+        label_list.extend(util.find_devs_with("LABEL_FATBOOT=%s" % label))
+        devlist = list(set(fslist) & set(label_list))
+
+⇒ 设备必须**同时**满足「TYPE ∈ {vfat, iso9660}」与「带 cidata 卷标」。ext4 等其他类型**连发现都过不了**
+（实测：挂一个 ext4 seed 到 vdb，cloud-init 日志里**没有任何** `Attempting to use data from`）。
+
+**(b) 挂载命令是固定的 `mount -o ro -t auto`**（`cloudinit/util.py: mount_cb` → `mtypes = ["auto"]`，
+日志逐条可见）——产品无法影响这一步。
+
+**(c) guest 的 `mount` 是 busybox**（`/bin/mount -> /bin/bbsuid`），它的 `-t auto` **只解析
+`/proc/filesystems` 里已加载的类型**；cloud-init 那一刻该文件里只有：
+
+        ext3
+        ext4            ← 根盘是 ext4，驱动已加载
+
+`isofs` / `vfat` 都是**未加载的模块**（`/lib/modules/6.6.31-0-virt/kernel/fs/isofs/isofs.ko.gz` 在，
+但没 load），于是 `-t auto` 无解 → `Invalid argument`。
+
+**(d) guest 内实测矩阵**（用 openrc `local` 服务把自检脚本注入**盘副本**，开机后逐项试挂；root 身份）：
+
+| 设备 | 内容 | `-t auto` | 不带 `-t` | `-t iso9660` | `-t vfat` | `-t ext4` |
+|---|---|---|---|---|---|---|
+| `/dev/vdb` | iso9660 (cidata) | ✗ Invalid argument | ✗ | **✓** | ✗ | ✗ |
+| `/dev/vdc` | vfat (CIDATA) | ✗ | ✗ | ✗ | **✓** | ✗ |
+| `/dev/vdd` | ext4 (cidata) | **✓** | **✓** | ✗ | ✗ | **✓** |
+
+（vfat 那一行是"前面 `-t vfat` 试挂已经把 vfat 模块带进来了"之后的观测——见下条）
+
+**(e) 决定性一步：先 `modprobe isofs`，再 `-t auto` 就成功**：
+
+    modprobe vfat rc=0 / modprobe isofs rc=0 / modprobe ext4 rc=0
+    --- mount -o ro -t auto /dev/vdc /mnt/t ---   rc=0  MOUNT OK: contents = meta-data user-data
+    --- mount -o ro -t auto /dev/vdb /mnt/t ---   rc=0  MOUNT OK: contents = meta-data user-data
+    --- mount -o ro -t auto /dev/vdd /mnt/t ---   rc=0  MOUNT OK: contents = lost+found meta-data user-data
+    --- loaded fs types now ---  … ext3 ext4 iso9660 vfat
+
+⇒ **唯一原因就是「seed 的文件系统驱动在 cloud-init 跑的那一刻没被加载」**。
+`mount -t auto` 由 busybox 实现，它不会为候选类型去 `request_module`；而 util-linux 的 `mount`
+用 libblkid 先判类型再挂——这正是 Debian/Ubuntu 类 guest 能成功、Alpine 类失败的分界。
+
+----- 5. 处置 -----
+1. **#139 保留**（不改回）：virtio 交付对 `debian-12-genericcloud` 那一类（内核确实无 ahci、
+   但用 util-linux mount）是**真修复**——本轮的 Debian 阳性对照正是这条链路的端到端证明；
+   且 virtio_blk 比 ATAPI 更普适。**但要更正它的说明**：不能写成"缺 ahci 的 Alpine virt 内核也能用了"。
+2. **#22 状态改为「部分收口」**：alpine 类（busybox mount）的失败是 **guest 侧限制**，
+   宿主侧（产品可控的域 XML）无法修复——除非 guest 镜像自带 util-linux 的 mount，
+   或内核在 cloud-init 前已加载 `isofs`/`vfat`（例如镜像把 `isofs` 写进 `/etc/modules`、
+   或换用较新的 cloud-init）。**如实登记，不追**。
+3. **决策 #140**（规格书附录 A）：记录上述更正 + 「不追加产品侧修复」的理由。
+4. **随包文档更正**（操作者可见）：用户手册 §9.2③（镜像选择）、故障排查表、已知限制表；
+   交接文档 §0/§2 同步（含"alpine 不可用于集成测试"的理由更正：不是缺 ahci，是 busybox mount）。
+
+----- 6. 环境（本轮前后）-----
+- 配置库：**逐项未变**——`rev=55 / audit=104 / cfgsha=084c3a64e4cc0d43a16cbced28cb0742aaa0ef1783c75065eb7966b091eba726`
+  （两次开发态实例各用**全新 DB**，未碰 `/var/lib/nfvis/nfvis.db`）
+- 服务：`systemctl start nfvis` 后 active、`nfvisd 1.1.28`、`:443` 在听
+- 拓扑：`vnf-a` / `vnf-b` running；VPP 里只剩配置声明的 BD `6252701`（BVI `bvi0`，四口 up）
+- 流量：产品 CLI `ping 192.168.100.10|.11 source 192.168.100.1 count 3` → 各 3 发 2 收
+  （首包丢，属重启后收敛期首包）；**独立事实源 `vppctl ping … source bvi0` 3/3、0% 丢包** ✓
+- 探针清理：`seedprobe-*` 域已 destroy+undefine、盘目录与 `/data/incoming/seedprobe-*` 已删、
+  开发态实例按**端口反查 PID** 停掉（18443 已释放）、临时 qcow2/seed 镜像已删
+
+----- 7. 本轮登记 -----
+| # | 发现 | 性质 | 处置 |
+|---|---|---|---|
+| R56-1 | **REST 请求体里的未知字段被静默忽略**：round55 用 `cloud_init.user_data_file` 建 VM（契约里是 `user_data`），服务端 201 接受、字段被丢掉、user-data 退回产品默认——**那轮"user-data 没生效"有一半是这个原因**（另一半是下面的 R56-3） | 产品（低-中） | 本轮只登记不改（改 REST 解码严格性属新行为，需契约先行）；**教训：验证脚本的字段名必须对着契约写** |
+| R56-2 | **#22 的「Alpine 缺 ahci」归因是把 genericcloud 的结论外推到 alpine**（实测 alpine 内核 ahci 是 builtin、SATA 光盘可见） | 文档/结论（中） | 已在 §1③ 更正；手册/待办同步 |
+| R56-3 | **busybox mount 的 guest（Alpine 类）无法消费 NoCloud seed**：cloud-init 只接受 vfat/iso9660 且用 `-t auto`，而这两种驱动在那一刻都没加载 | 产品限制（中） | 登记 + 文档；宿主侧无解，理由见 §5 |
+| R56-4 | 开发态实例复用时**上一轮的实例仍占着 18443**（"旧二进制"那组一开始打到了新实例上，dumpxml 拿到的是新代码的 XML）——正是 AGENTS 红线 2 记过的坑 | 流程（低） | 已改成「按端口反查 PID 杀 + 断言在服务的 exe 就是被测二进制」并重跑，两组数据均已复核 |
