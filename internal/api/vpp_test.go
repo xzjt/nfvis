@@ -131,6 +131,11 @@ func TestVrfRoutesEndpoint(t *testing.T) {
 	fake := &fakeL3Runtime{rows: []RouteRow{{Prefix: "0.0.0.0/0", NextHop: "10.0.0.254"}}}
 	ts := newTestServerOpts(t, Options{L3: fake})
 	token := loginAdmin(t, ts)
+	// R51-1 收口后该端点先校验 VRF 存在（决策 #135），故先声明同名 VRF
+	if st, _, d := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/vrfs", token,
+		model.Vrf{Name: "vs-l3"}, map[string]string{"X-NFVIS-Auto-Commit": "true"}); st != http.StatusCreated {
+		t.Fatalf("声明 VRF: %d %s", st, d)
+	}
 	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/vrfs/vs-l3/routes", token, nil, nil)
 	if status != http.StatusOK || !strings.Contains(string(data), "0.0.0.0/0") {
 		t.Fatalf("routes: %d %s", status, data)
