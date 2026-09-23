@@ -138,6 +138,20 @@ async function api(path, opts) {
 // 单个端点失败不该拖垮整页：各自降级为"读取失败"。
 const soft = (p) => p.catch((e) => ({ __err: e.message }));
 
+// soft() 失败时给的是 {__err} 而不是数组——数组类渲染一律先过 rowsOf()，否则 .filter/.map 抛错
+// （浏览器验收抓到的旧缺陷：token 失效时整页报 JS 错，而不是干净地提示）。
+const rowsOf = (v) => (Array.isArray(v) ? v : []);
+
+// 页面级取数失败提示：把失败的端点列出来（不静默），全部成功时清掉提示。
+function pageWarn(d) {
+  const bad = Object.entries(d || {})
+    .filter(([, v]) => v && v.__err)
+    .map(([k, v]) => k + '（' + v.__err + '）');
+  const box = $('global-error');
+  if (bad.length) { box.textContent = '以下数据读取失败：' + bad.join('、'); box.hidden = false; }
+  else { box.hidden = true; }
+}
+
 // 按路由声明的端点取数：返回 { 端点: 数据 }（各自降级，单个失败不拖垮整页）。
 export async function softLoad(paths) {
   const out = {};
@@ -300,52 +314,55 @@ function renderAlarms(alarms) {
 export const VIEWS = {
   'overview': {
     render(d) {
+      pageWarn(d);
       renderSystem(d['/system/status'], d['/system/version']);
       renderVPP(d['/vpp/status']);
-      renderAlarms(d['/alarms']);
+      renderAlarms(rowsOf(d['/alarms']));
       renderEvents();
     },
   },
   'vms': {
     async render(d) {
-      const vms = d['/virtual-machine-functions'];
-      const rows = Array.isArray(vms) ? vms : [];
-      renderVMRows(vms);
+      pageWarn(d);
+      const rows = rowsOf(d['/virtual-machine-functions']);
+      renderVMRows(rows);
       renderVMStats(rows, await loadVMStats(rows));
     },
   },
   'containers': {
-    render(d) { renderContainerRows(d['/container-functions']); },
+    render(d) { pageWarn(d); renderContainerRows(rowsOf(d['/container-functions'])); },
   },
   'images': {
-    render(d) { renderImages(d['/images']); },
+    render(d) { pageWarn(d); renderImages(rowsOf(d['/images'])); },
   },
   'network': {
-    async render(d) { renderNetworkObjects(await loadNetworkObjects(d)); },
+    async render(d) { pageWarn(d); renderNetworkObjects(await loadNetworkObjects(d)); },
   },
   'switches': {
     async render(d) {
-      const vss = d['/virtual-switches'];
-      renderVSwitches(vss, await loadVSwitchStats(Array.isArray(vss) ? vss : []));
+      pageWarn(d);
+      const vss = rowsOf(d['/virtual-switches']);
+      renderVSwitches(vss, await loadVSwitchStats(vss));
     },
   },
   'pools': {
-    render(d) { renderPools(d['/resource-pools']); },
+    render(d) { pageWarn(d); renderPools(d['/resource-pools']); },
   },
   'interfaces': {
     async render(d) {
-      const ifaces = d['/interfaces'];
-      renderInterfaces(ifaces, Array.isArray(ifaces) ? await loadInterfaceStats(ifaces) : []);
+      pageWarn(d);
+      const ifaces = rowsOf(d['/interfaces']);
+      renderInterfaces(ifaces, await loadInterfaceStats(ifaces));
     },
   },
   'config': {
     render(d) { return loadConfig(d['/configuration']); },
   },
   'ops': {
-    render(d) { renderArchives(d['/system/backup'], d['/system/tech-support']); },
+    render(d) { pageWarn(d); renderArchives(rowsOf(d['/system/backup']), rowsOf(d['/system/tech-support'])); },
   },
   'audit': {
-    render(d) { renderAudit(d['/audit-logs?limit=50']); },
+    render(d) { pageWarn(d); renderAudit(d['/audit-logs?limit=50']); },
   },
   'diagnostics': {
     // 诊断页是动作面板：ping / traceroute / 清零 / 看服务端日志都按需执行（点按钮才拉），
@@ -353,7 +370,7 @@ export const VIEWS = {
     render() {},
   },
   'capture': {
-    render(d) { renderCapture(d['/vpp/capture']); },
+    render(d) { pageWarn(d); renderCapture(d['/vpp/capture']); },
   },
 };
 
