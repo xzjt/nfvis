@@ -44,7 +44,7 @@ var uiNotWired = map[string]string{
 	"/system/login-users":                        "用户管理涉及口令策略，界面暂不提供",
 	"/system/login-users/{name}":                 "同上",
 	"/system/login-users/{name}:change-password": "同上",
-	"/system/kernel":                             "内核基线查看——入口是 CLI 的向导形态，界面暂不提供",
+	"/system/kernel":                             "内核基线查看——**契约已声明但服务端未注册该路由**（R51-2：与已删的 /vpp:restart 相反的幽灵路径；需实现或删声明，另起一刀）",
 	"/system/kernel:apply":                       "内核基线应用需重启生效，界面暂不提供",
 	"/system/kernel:rollback":                    "同上",
 	"/system/ntp:sync":                           "NTP 立即同步——界面暂无入口",
