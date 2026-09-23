@@ -23,6 +23,11 @@ function clearNotice() {
   n.hidden = true;
 }
 
+// 提示的生命周期：notFound 先记下（pendingNotice）→ 回总览那一次渲染里显示并置 clearOnNextRender
+// → 用户下一次导航时才收起。这样它既不会被"回总览"这次渲染立刻抹掉，也不会常驻。
+let pendingNotice = '';
+let clearOnNextRender = false;
+
 // 载入路由表（真 JSON：前端 JSON.parse、守护用 Go 的解析器，两边同一份）。
 export async function loadRoutes() {
   const res = await fetch('routes.json', { cache: 'no-store' });
@@ -55,7 +60,8 @@ export async function render() {
     const view = VIEWS[route.view];
     if (!view) { showGlobalError('页面未实现：' + route.view); return; }
     await view.render(await softLoad(route.endpoints));
-    clearNotice();
+    if (pendingNotice) { showNotice(pendingNotice); pendingNotice = ''; clearOnNextRender = true; }
+    else if (clearOnNextRender) { clearNotice(); clearOnNextRender = false; }
   } catch (e) {
     showGlobalError('页面加载失败：' + e.message);
   }
@@ -121,6 +127,6 @@ function span(cls, text) {
 
 // 未知 hash：如实说一句，然后回总览（总览是登录后的落点）。
 function notFound(hash) {
-  showNotice('页面不存在：' + (hash || '') + '（已回到总览）');
+  pendingNotice = '页面不存在：' + (hash || '') + '（已回到总览）';
   navigate('#/');
 }
