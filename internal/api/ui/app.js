@@ -498,6 +498,44 @@ let cfg = {
 
 const CFG_TEXT_ID = 'cfg-text';
 
+// —— 口令派生失败的登记 + 保存前的闸门 ——
+//
+// 口令控件填明文时，明文在浏览器内就地派生成加盐哈希才写进 candidate。派生可能失败
+// （控制台不是安全上下文、没有 Web Crypto；或口令不合策略、原始 JSON 有语法错），此时
+// **这次保存必须整体失败**：若只是不写这个字段而照常保存，服务端收到的就是一个没有
+// password_hash 的用户条目，界面还报「已保存到 candidate」——操作者以为改了口令，实际
+// 什么也没改（假绿）。故派生失败的控件登记在这里，保存前统一拦下，原因照实说。
+const cfgPwBlocked = new Map();  // 控件 id → { text: 原因（给操作者看）, secure: 是否因非安全上下文 }
+const cfgPwInflight = new Set(); // 正在派生的任务：保存前先等它们落地（免得刚点保存、派生才失败）
+const cfgPwFields = new Map();   // 控件 id → { inp, derive }：表单里的口令控件（保存前统一收口）
+const CFG_PW_SECURE_HINT = '请用 HTTPS（或 localhost）打开控制台后重试。';
+
+// cfgPwResetAll 表单重画 / 结束编辑时清账：旧控件都没了，失败登记与控件表一起作废——
+// 否则一个已不存在的控件会永远拦住保存。
+function cfgPwResetAll() {
+  cfgPwFields.clear();
+  cfgPwBlocked.clear();
+}
+
+// cfgPwGate 保存前的闸门。先等正在派生的落地，再把「填了口令却没派生出哈希」的控件拦下；
+// 控件里还留着明文的（程序化填值、或打完没离开控件）就地派生并清空——保存的语义就是
+// 「这份口令要写进去」，不能因为没失焦就把它丢掉。任一步失败即返回 false，
+// 调用方据此**整次保存失败**，不写 candidate。
+async function cfgPwGate() {
+  while (cfgPwInflight.size) await Promise.allSettled(Array.from(cfgPwInflight));
+  for (const f of Array.from(cfgPwFields.values())) {
+    if (f.inp.value.trim() === '') continue;
+    await f.derive(true);
+  }
+  if (!cfgPwBlocked.size) return true;
+  const items = Array.from(cfgPwBlocked.values());
+  const why = items.map((x) => x.text).join('；');
+  const hint = items.some((x) => x.secure) ? CFG_PW_SECURE_HINT : '请修正后重试。';
+  cfgMsg('保存失败（未写入 candidate）：' + why + '——' + hint +
+    '（这次不需要改口令的话，把口令控件清空即可保存。）', true);
+  return false;
+}
+
 // 说明：系统段的字段全部由下面的 CFG_SYS_SECTIONS 声明（与网络域/计算域同一套表单引擎，
 // 见「各节定义」）。此处只留事务级的公共函数。
 
@@ -515,6 +553,7 @@ function cfgSetEditing(on) {
   $('cfg-diff').hidden = true;
   $('cfg-commit-confirmed-btn').hidden = true;
   $('cfg-confirm-btn').hidden = true;
+  if (!on) cfgPwResetAll(); // 离开编辑态：口令控件的登记一并作废
   cfgMsg('', false);
 }
 
@@ -568,6 +607,7 @@ function formatCores(list) {
 function cfgRenderForms(c) {
   const box = $('cfg-forms');
   box.textContent = '';
+  cfgPwResetAll(); // 表单重画：口令控件的登记随之作废
   let seq = 0;
 
   const addField = (parent, label, value, onchange, kind) => {
@@ -741,10 +781,12 @@ function cfgB64Raw(bytes) {
 async function cfgHashPassword(pw) {
   const c = globalThis.crypto || {};
   // Web Crypto 只在安全上下文可用（HTTPS 或 localhost）：明文 HTTP 打开的页面里没有它，
-  // 此时**拒绝**而不是退化成明文写入。
+  // 此时**拒绝**而不是退化成明文写入。这个错要能被保存前的闸门认出来（区别于口令不合策略）。
   if (!c.subtle || !c.getRandomValues) {
-    throw new Error('本页面不能派生口令哈希（浏览器只在 HTTPS 或 localhost 下提供该能力）——' +
+    const err = new Error('本页面不能派生口令哈希（浏览器只在 HTTPS 或 localhost 下提供该能力）——' +
       '口令请改用命令行或用户管理入口设置');
+    err.cfgSecureContext = true;
+    throw err;
   }
   const salt = new Uint8Array(16);
   c.getRandomValues(salt);
@@ -781,6 +823,29 @@ async function cfgPreparePassword(text) {
   const bad = cfgPasswordPolicyIssues(c, text);
   if (bad.length) throw new Error('口令不满足策略：' + bad.join('；'));
   return await cfgHashPassword(text);
+}
+
+// cfgPwDerive 派生一次口令（控件的 prepare）：成功返回哈希（clear 为真时顺带清空控件，
+// 明文不留在页面上）并解除登记；失败登记原因并返回 null（登记后这次保存会被 cfgPwGate 拦下）。
+// 只认「控件里的值仍是这次派生用的那份」的结果——操作者边打边改时，先完成的那次派生
+// 既不会清掉后来输入的内容，也不会覆盖它的结果。
+async function cfgPwDerive(id, inp, spec, pw, prepare, clear) {
+  let hash;
+  try {
+    hash = await prepare(pw);
+  } catch (e) {
+    if (inp.value === pw) {
+      cfgPwBlocked.set(id, { text: spec.label + '：' + e.message, secure: !!e.cfgSecureContext });
+      // 立刻说明，别等到点保存才知道；保存那次还会再拦一次（见 cfgPwGate）
+      cfgMsg(spec.label + '：' + e.message + '——未写入 candidate，保存会被拒绝。' +
+        (e.cfgSecureContext ? CFG_PW_SECURE_HINT : ''), true);
+    }
+    return null;
+  }
+  if (inp.value !== pw) return null; // 期间又改了：这次结果作废，等最后一次派生的结果
+  cfgPwBlocked.delete(id);
+  if (clear) inp.value = '';
+  return hash;
 }
 
 // 字段类型：控件形态 + 文本 ↔ 配置值的转换。空串一律表示「删除该字段」（与上面三节同口径）。
@@ -1191,30 +1256,43 @@ function cfgRenderField(parent, c, loc, spec) {
     inp.value = kind.fmt(cfgRead(c, loc, spec.path));
   }
   if (spec.hint) inp.setAttribute('placeholder', spec.hint);
-  // 与上面三节同口径：监听 input（程序化赋值也会触发）与 change（下拉框用它）
+  // 与上面三节同口径：监听 input（程序化赋值也会触发）与 change（失焦/回车，下拉框也用它）
   //
-  // kind.prepare（口令）：控件值先就地转换成要写入的值（明文 → 哈希），**异步**——
-  // 派生期间给一行提示；派生失败（策略不合规、页面非安全上下文）则不写入并说明原因。
-  // 派生成功后清空控件，明文不留在页面上；随后那次失焦的 change 事件不再覆盖提示。
+  // kind.prepare（口令）：控件里的**明文**要就地派生成加盐哈希才写进 candidate，而派生是
+  // **异步**的（几十~几百毫秒），input 却是每个键一次。三条口径：
+  //   ① 输入过程中派生成功后**不清空**控件——清了会把还没打完的口令吃掉（后面敲的键落进空
+  //      控件，最后写进 candidate 的会是半截口令的哈希，界面还报成功，操作者无从发现）；
+  //   ② 离开控件（change）或点保存（见 cfgPwGate）时才清空——明文不留在页面上；
+  //   ③ 派生失败（非安全上下文、口令不合策略）**保留明文**并登记，让这次保存整体失败。
   let prepared = false;
-  const onEdit = async () => {
-    let text = inp.value;
-    if (kind.prepare && text.trim() !== '') {
-      cfgMsg(spec.label + '：正在本机派生根哈希…', false);
-      try {
-        text = await kind.prepare(text);
-      } catch (e) {
-        inp.className = 'invalid';
-        cfgMsg(spec.label + '：' + e.message + '——未写入 candidate。', true);
-        return;
-      }
-      inp.value = '';
-      prepared = true;
-    } else if (prepared) {
+  const runPrepare = async (clear) => {
+    const pw = inp.value;
+    if (pw.trim() === '') return;
+    cfgMsg(spec.label + '：正在本机派生根哈希…', false);
+    const job = cfgPwDerive(id, inp, spec, pw, kind.prepare, clear);
+    cfgPwInflight.add(job);
+    let hash;
+    try { hash = await job; } finally { cfgPwInflight.delete(job); }
+    if (hash === null) {
+      // 失败（或这次派生已被后来的输入作废）：明文仍在控件里，便于切到 HTTPS 后重试
+      if (inp.value === pw) inp.className = 'invalid';
+      return;
+    }
+    prepared = true;
+    inp.className = cfgApplyField(loc, spec, hash) ? '' : 'invalid';
+  };
+  if (kind.prepare) cfgPwFields.set(id, { inp, derive: runPrepare });
+  const onEdit = (ev) => {
+    if (kind.prepare && inp.value.trim() !== '') {
+      runPrepare(!!ev && ev.type === 'change'); // 失焦/回车 = 这个字段改完了，派生成功后清空
+      return;
+    }
+    if (prepared) {
       prepared = false; // 清空引起的重复事件：保留上一次的结果提示
       return;
     }
-    inp.className = cfgApplyField(loc, spec, text) ? '' : 'invalid';
+    if (kind.prepare) cfgPwBlocked.delete(id); // 控件已空 = 这次保存不带口令，不必再拦
+    inp.className = cfgApplyField(loc, spec, inp.value) ? '' : 'invalid';
   };
   inp.addEventListener('input', onEdit);
   inp.addEventListener('change', onEdit);
@@ -1428,7 +1506,9 @@ const CFG_SYS_SECTIONS = [
     loc: [{ obj: 'system' }, { obj: 'login' }],
     clearPath: ['system', 'login'],
     note: '本地用户、自定义 class 与口令策略。口令在本页就地派生成加盐哈希后才写入 candidate——' +
-      '明文不进配置、也不留在页面上；已有用户不填口令即保持原口令不变。',
+      '明文不进配置；离开口令控件（或点保存）时完成派生并清空控件，派生失败（例如控制台不是用 ' +
+      'HTTPS 打开的）则保留输入，并让这次保存整体失败（不会写入没有口令的用户条目）。' +
+      '已有用户不填口令即保持原口令不变。',
     fields: [
       { label: '口令最小长度', path: ['password_policy', 'min_length'], kind: 'int', min: 4, max: 128 },
       { label: '口令复杂度（≥3/4 类字符）', path: ['password_policy', 'complexity'], kind: 'bool' },
@@ -1445,7 +1525,8 @@ const CFG_SYS_SECTIONS = [
           { label: '归属 class', path: ['class'], kind: 'text',
             hint: 'super-user / operator / read-only 或自定义 class 名' },
           { label: '设置口令（留空 = 不改）', path: ['password_hash'], kind: 'password',
-            note: '填明文口令即在本机派生成加盐哈希写入；也可粘贴 pbkdf2$ 哈希（与配置导入同一口径）。' },
+            note: '填明文口令即在本机派生成加盐哈希写入；也可粘贴 pbkdf2$ 哈希（与配置导入同一口径）。' +
+              '派生要用浏览器只在 HTTPS 或 localhost 下提供的能力——不满足时保存会被拒绝，输入会保留。' },
         ],
       },
       {
@@ -1921,6 +2002,8 @@ async function cfgStartEdit() {
 }
 
 async function cfgSave() {
+  // 口令没派生出哈希（明文还留在控件里）时**整次保存失败**：不写 candidate，也不报成功。
+  if (!(await cfgPwGate())) return false;
   let c;
   try {
     c = cfgText();

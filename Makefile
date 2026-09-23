@@ -65,9 +65,13 @@ docscheck:
 # 2026-09-22 补第二项：语义校验的 oracle 同样会错——S8 的 l2fib 条数按非 verbose 输出计
 # （VPP 26.06 只打印汇总行 → 有表项恒得 0），且 vppctl 输出是 CRLF（精确比较需剥 \r）。
 # 语义校验本身只能在真机跑，故**只有**这里的桩式自校准能在 CI 挡住 oracle 回归。
+# 2026-09-24 补第三项：控制台配置页的口令路径——桩必须把「能力更弱的环境」（明文 HTTP 下
+# 没有 crypto.subtle）显式跑一遍，否则验证环境比目标环境强，路径根本没走到（round61 §5）。
+# 该项用 node 跑 DOM 桩；没有 node 的环境会如实说"没跑"（产品构建与其余检查都不依赖 node）。
 toolcheck:
 	bash contrib/scripts/cli-fulltest-selftest.sh
 	bash contrib/scripts/cli-semantic-selftest.sh
+	bash contrib/scripts/web-console-config-selftest.sh
 
 # 真机集成测试（M3）：需 VPP 运行环境（nfvis-vm）。无环境时跳过并提示，CI 不跑。
 # 约定：build tag integration + 环境变量 NFVIS_VPP_SOCK（缺省 /run/vpp/api.sock）。
