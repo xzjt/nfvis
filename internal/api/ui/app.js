@@ -1186,6 +1186,9 @@ function renderContainerRows(cts) {
       tr.appendChild(el('td', { text: String(dash(v)) }));
     });
     const cell = el('td', { class: 'actions' });
+    const detBtn = el('button', { type: 'button', class: 'ghost small', text: '详情' });
+    detBtn.addEventListener('click', () => objDetail('/container-functions/' + encodeURIComponent(c.name), '容器 ' + c.name));
+    cell.appendChild(detBtn);
     const logBtn = el('button', { type: 'button', class: 'ghost small', text: '日志' });
     logBtn.addEventListener('click', () => ctLogsOpen(c.name));
     cell.appendChild(logBtn);
@@ -1261,6 +1264,9 @@ function renderImages(imgs) {
       tr.appendChild(el('td', { text: String(dash(c)) }));
     });
     const cell = el('td', { class: 'actions' });
+    const detBtn = el('button', { type: 'button', class: 'ghost small', text: '详情' });
+    detBtn.addEventListener('click', () => objDetail('/images/' + encodeURIComponent(i.name), '镜像 ' + i.name));
+    cell.appendChild(detBtn);
     const btn = el('button', { type: 'button', class: 'danger small', text: '删除' });
     btn.addEventListener('click', () => imgDelete(i.name, i.ref_count));
     cell.appendChild(btn);
@@ -1384,25 +1390,26 @@ async function imgImportFile() {
 // ---------- 网络对象（只读总览）----------
 
 // 每块：[标题, 数据, 列名, 取值函数]；数据缺席（读取失败）时该块显示原因。
+// 每块：[标题, 数据, 列名, 取值函数, 详情端点前缀（可选）]；有前缀时表格多一列"详情"。
 const NET_OBJECT_VIEWS = [
   ['VRF（L3 虚拟交换机）', 'vrfs', ['名称', 'L3 接口', '路由数'], (v) => [
     v.name,
     (v.l3_interfaces || []).map((i) => i.interface).join(', '),
     v.routes != null ? v.routes : undefined,
-  ]],
-  ['ACL', 'acls', ['名称', '规则数'], (a) => [a.name, (a.rules || []).length]],
+  ], '/vrfs/'],
+  ['ACL', 'acls', ['名称', '规则数'], (a) => [a.name, (a.rules || []).length], '/acls/'],
   // NAT 是对象（source_pools/rules/static），按池与规则各出一行
   ['NAT', 'nat', ['类型', '内容'], (n) => [n.kind, n.summary]],
   ['链路聚合（bond）', 'bonds', ['名称', '模式', '成员'], (b) => [
     b.name, b.mode, (b.members || []).join(', '),
-  ]],
+  ], '/bonds/'],
   ['LLDP 邻居', 'lldp', ['本地口', '邻居', '管理地址'], (n) => [
     n.local_interface || n.interface, n.system_name || n.chassis_id, n.management_address,
   ]],
-  ['QoS 策略', 'qos', ['名称', '类型', '目标'], (q) => [q.name, q.type, q.target || q.interface]],
+  ['QoS 策略', 'qos', ['名称', '类型', '目标'], (q) => [q.name, q.type, q.target || q.interface], '/qos/policies/'],
   ['端口镜像（SPAN）', 'span', ['名称', '源', '目的'], (s) => [
     s.name, list(s.sources || s.source), s.destination,
-  ]],
+  ], '/port-mirroring/'],
 ];
 
 // natRows 把 NAT 配置对象摊平成行（池 / 规则 / 静态映射各一行）。
@@ -1422,7 +1429,7 @@ function renderNetworkObjects(nets) {
     box.appendChild(el('p', { class: 'muted', text: '（读取失败）' }));
     return;
   }
-  NET_OBJECT_VIEWS.forEach(([title, key, cols, pick]) => {
+  NET_OBJECT_VIEWS.forEach(([title, key, cols, pick, detailPrefix]) => {
     const data = nets[key];
     const wrap = el('div', { class: 'net-object' });
     wrap.appendChild(el('h3', { text: title }));
@@ -1436,17 +1443,25 @@ function renderNetworkObjects(nets) {
     const thead = el('thead');
     const htr = el('tr');
     cols.forEach((c) => htr.appendChild(el('th', { text: c })));
+    if (detailPrefix) htr.appendChild(el('th', { text: '详情' }));
     thead.appendChild(htr);
     t.appendChild(thead);
     const tbody = el('tbody');
     if (!rows.length) {
       const tr = el('tr');
-      tr.appendChild(el('td', { colspan: String(cols.length), class: 'muted', text: '（无）' }));
+      tr.appendChild(el('td', { colspan: String(cols.length + (detailPrefix ? 1 : 0)), class: 'muted', text: '（无）' }));
       tbody.appendChild(tr);
     } else {
       rows.forEach((r) => {
         const tr = el('tr');
         pick(r).forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
+        if (detailPrefix) {
+          const cell = el('td', { class: 'actions' });
+          const b = el('button', { type: 'button', class: 'ghost small', text: '详情' });
+          b.addEventListener('click', () => objDetail(detailPrefix + encodeURIComponent(r.name), title + ' / ' + r.name));
+          cell.appendChild(b);
+          tr.appendChild(cell);
+        }
         tbody.appendChild(tr);
       });
     }
@@ -1454,6 +1469,21 @@ function renderNetworkObjects(nets) {
     wrap.appendChild(t);
     box.appendChild(wrap);
   });
+}
+
+// ---------- 详情面板（网络对象 / 容器 / 镜像共用；按需拉取，不进轮询）----------
+
+async function objDetail(path, label) {
+  $('obj-detail-wrap').hidden = false;
+  $('obj-detail-name').textContent = label;
+  const pre = $('obj-detail');
+  pre.textContent = '读取中…';
+  try {
+    const d = await api(path);
+    pre.textContent = JSON.stringify(d, null, 2);
+  } catch (e) {
+    pre.textContent = '读取失败：' + e.message;
+  }
 }
 
 // ---------- 大表（NAT 会话 / VRF 路由）：按需拉取 ----------
@@ -1667,6 +1697,9 @@ $('audit-refresh-btn').addEventListener('click', async () => {
     btn.disabled = false;
   }
 });
+
+// 详情面板
+$('obj-detail-close').addEventListener('click', () => { $('obj-detail-wrap').hidden = true; });
 
 // 大表（按需拉取）
 $('big-routes-btn').addEventListener('click', bigRoutes);

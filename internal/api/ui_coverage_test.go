@@ -28,10 +28,6 @@ var uiNotWired = map[string]string{
 	"/virtual-switches/{name}/ports":     "成员端口全量替换属配置编辑，走「配置」卡",
 	"/system/hardware":                   "硬件健康明细——后续增量（阈值告警已在告警卡体现）",
 	"/system/health/thresholds":          "健康阈值设置——后续增量",
-	"/acls/{name}":                       "ACL 详情——列表已给规则数，详情后续增量",
-	"/bonds/{name}":                      "bond 详情——列表已给成员，详情后续增量",
-	"/qos/policies/{name}":               "QoS 详情——列表已给概览",
-	"/port-mirroring/{name}":             "SPAN 详情——列表已给概览",
 	"/configuration/rollback/{n}":        "回滚到历史快照——需先看差异再确认，后续增量",
 	"/protocols/lldp":                    "LLDP 开关状态——邻居表已接；开关属配置编辑（走「配置」卡）",
 
@@ -113,8 +109,13 @@ func uiCovers(lits []string, path string) bool {
 // uiDynamicWired 由前端**动态拼接**构造、字面量提取不到、但确实调用了的路径 → 出处说明。
 // 收紧 uiCovers 之后，这类路径必须显式登记，否则会被误判成"未接"。
 var uiDynamicWired = map[string]string{
+	"/acls/{name}":                                                    "网络对象表的详情按钮：objDetail('/acls/' + name)",
+	"/bonds/{name}":                                                   "同上（bond 详情）",
+	"/qos/policies/{name}":                                            "同上（QoS 详情）",
+	"/port-mirroring/{name}":                                          "同上（SPAN 详情）",
+	"/container-functions/{name}":                                     "容器行的详情按钮：objDetail('/container-functions/' + name)",
+	"/images/{name}":                                                  "镜像行的详情按钮：objDetail('/images/' + name)",
 	"/system/kernel":                                                  "系统卡的内核基线小节：api('/system/kernel')",
-	"/images/{name}":                                                  "imgDelete()：DELETE '/images/' + name",
 	"/vrfs/{name}/routes":                                             "bigRoutes()：api('/vrfs/' + name + '/routes')",
 	"/vrfs/{name}":                                                    "bigRoutes() 的路由表覆盖了排障所需（VRF 详情暂无独立入口）",
 	"/nat/sessions":                                                   "bigNat()：api('/nat/sessions')",
@@ -128,7 +129,6 @@ var uiDynamicWired = map[string]string{
 	"/container-functions/{name}:stop":                                "ctAction()：POST …/{name}:stop",
 	"/container-functions/{name}:restart":                             "ctAction()：POST …/{name}:restart",
 	"/container-functions/{name}/logs":                                "ctLogsLoad()：fetch('/container-functions/' + name + '/logs?tail=200')",
-	"/container-functions/{name}":                                     "容器详情——列表已给概览（界面只列与操作）",
 	"/virtual-machine-functions/{name}/console":                       "vmConsoleOpen()：api('/virtual-machine-functions/' + name + '/console')",
 	"/virtual-machine-functions/{name}/snapshots":                     "vmSnapLoad()/vmSnapCreate()：api(… + '/snapshots')",
 	"/virtual-machine-functions/{name}/snapshots/{snapshot}":          "vmSnapAct()：DELETE …/snapshots/{snapshot}",
