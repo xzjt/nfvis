@@ -113,6 +113,24 @@
       </table>
       <pre id="vm-stat" class="code" hidden></pre>
 
+      <!-- 快照：点行内「快照」按钮打开（create/rollback 需关机态，服务端会拒绝并说明） -->
+      <div id="vm-snap" hidden>
+        <h3>快照 <span id="vm-snap-name" class="muted small"></span>
+          <button id="vm-snap-refresh" type="button" class="ghost small">刷新</button>
+          <button id="vm-snap-close" type="button" class="ghost small">关闭</button></h3>
+        <div class="cfg-actions">
+          <input id="vm-snap-new" type="text" placeholder="新快照名（如 before-upgrade）">
+          <button id="vm-snap-create" type="button" class="ghost">创建快照</button>
+        </div>
+        <table id="vm-snap-table">
+          <thead><tr><th>名称</th><th>创建时间</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p id="vm-snap-msg" class="muted small" hidden></p>
+        <p class="muted small">快照是 qcow2 内部快照（含全部磁盘）；<strong>创建与回滚要求 VM 关机</strong>，
+          运行中会被服务端拒绝（回滚运行中的域会静默重启该 VM，故产品显式拒绝）。</p>
+      </div>
+
       <!-- 串口 console：点行内「串口」按钮打开（一次性 ticket 换 WebSocket） -->
       <div id="vm-console" hidden>
         <h3>串口 console <span id="vm-console-name" class="muted small"></span>
