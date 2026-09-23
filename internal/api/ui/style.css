@@ -147,6 +147,26 @@ pre.code {
 .cfg-sub { border-top: 1px dashed var(--line); padding-top: 6px; margin-top: 8px; }
 .cfg-sub:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
 .cfg-subname { color: var(--fg); font-size: 12px; font-weight: 600; margin-top: 6px; }
+
+/* 网络域 / 计算域各节：条目与字段都多，整行铺开，按「条目 → 子表 → 行」三级缩进 */
+.cfg-forms .cfg-wide { grid-column: 1 / -1; }
+.cfg-forms select, .cfg-forms textarea {
+  width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--fg); font-size: 13px;
+}
+.cfg-forms textarea { font: 12px/1.5 Consolas, "Courier New", monospace; resize: vertical; }
+.cfg-forms select:focus, .cfg-forms textarea:focus { outline: none; border-color: var(--accent); }
+/* 本地校验没过的字段标红：值**没有**写进 candidate（提示里会说明原因） */
+.cfg-forms input.invalid, .cfg-forms select.invalid, .cfg-forms textarea.invalid { border-color: var(--err); }
+.cfg-fields { display: grid; gap: 8px 12px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); margin-top: 4px; }
+.cfg-field { display: flex; flex-direction: column; }
+.cfg-field label { margin: 0 0 3px; }
+.cfg-rowhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cfg-sub2 { border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 6px; }
+.cfg-sub3 { border-left: 2px solid var(--line); margin: 6px 0 0 2px; padding-left: 8px; }
+.cfg-add { display: flex; align-items: flex-end; gap: 8px; margin-top: 8px; }
+.cfg-add label { margin: 0 0 3px; }
+.cfg-add input { max-width: 240px; }
 .cfg-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .cfg-actions button { padding: 6px 12px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: #06121c; cursor: pointer; font-size: 13px; font-weight: 600; }
 .cfg-actions button.ghost { background: transparent; color: var(--fg); border-color: var(--line); font-weight: 400; }
