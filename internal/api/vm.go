@@ -30,9 +30,11 @@ type VMRuntime interface {
 }
 
 // vmResponse VMFunction + 运行态 state（契约 GET 视图；state 为运行态字段）。
+// statistics 只在详情端点附带（契约 VMFunction.statistics；列表不带，避免每台 VM 都去查计数）。
 type vmResponse struct {
 	model.VMFunction
-	State string `json:"state,omitempty"`
+	State      string `json:"state,omitempty"`
+	Statistics []any  `json:"statistics,omitempty"`
 }
 
 // handleListVMs GET /api/v1/virtual-machine-functions（FR-CMP-011 状态实时查询）。
@@ -62,7 +64,46 @@ func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("VM %s 不存在", name), nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, vmResponse{VMFunction: vm, State: s.vmStateSafe(r.Context(), name)})
+	writeJSON(w, http.StatusOK, vmResponse{
+		VMFunction: vm,
+		State:      s.vmStateSafe(r.Context(), name),
+		Statistics: s.vmStatistics(r.Context(), name),
+	})
+}
+
+// vmStatistics 取该 VM 各 vhost-user vNIC 在 VPP 中的收发计数，与 CLI
+// `show virtual-machine-functions <name> statistics` 同源（FR-CMP-011）。
+// 运行态未接入、或该 VM 没有 vhost-user vNIC 时返回 nil——契约声明"非 vhost-user vNIC
+// 不在其中"，故不发空数组占位（不编造）。
+func (s *Server) vmStatistics(ctx context.Context, name string) []any {
+	if s.state == nil {
+		return nil
+	}
+	cfg, err := s.engine.Committed()
+	if err != nil {
+		return nil
+	}
+	vm, ok := findVM(cfg, name)
+	if !ok {
+		return nil
+	}
+	var out []any
+	for _, nic := range vm.Interfaces {
+		if nic.Type != "vhost-user" {
+			continue
+		}
+		ifname := orchestrator.VnfIfaceName(name, nic.Name)
+		row := map[string]any{"vnic": nic.Name, "interface": ifname}
+		if c, ok := s.state.InterfaceCounters(ctx, ifname); ok {
+			row["available"] = true
+			row["rx_packets"], row["tx_packets"] = c.RxPackets, c.TxPackets
+			row["rx_bytes"], row["tx_bytes"] = c.RxBytes, c.TxBytes
+		} else {
+			row["available"] = false
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 // handlePostVM POST /api/v1/virtual-machine-functions（FR-CMP-010：定义；autostart 时启动）。
