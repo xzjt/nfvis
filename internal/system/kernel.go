@@ -17,18 +17,21 @@ import (
 
 // KernelDesired 期望的内核基线（由 committed 配置派生）。
 // 数值项的语义：< 0 = 不托管该项（保留现状）；0 = 托管且为 0；> 0 = 期望值。
+// JSON tag 与契约 `KernelBaseline.desired` 的 snake_case 一致（决策 #137）：
+// 此前无 tag → 序列化出 Go 字段名（Hugepages1G/IsolatedCores…），与契约不符（R37-1 类）。
+// 该结构体不落盘为 JSON（GRUB 片段备份是文本），故加 tag 无兼容性影响。
 type KernelDesired struct {
-	Hugepages1G   int    // default_hugepagesz=1G hugepagesz=1G hugepages=N
-	Hugepages2M   int    // hugepages=N（2M 默认页）
-	IsolatedCores string // isolcpus=<list>
-	IRQAffinity   string // irqaffinity=<非隔离核>（EnrichDesired 按真机在线核派生；空 = 不写）
-	NoHZFull      *bool  // nil = 未探测（按支持处理）；false = 内核无 CONFIG_NO_HZ_FULL，省略 nohz_full/rcu_nocbs
-	LowLatency    bool   // 低延迟参数组（显式选择；idle=poll/tsc=reliable 由 EnrichDesired 按是否虚拟化决定）
-	NMIWatchdog   *bool  // nil = 不托管（保留现状）
-	THP           string // always|madvise|never；空 = 不托管
-	IOMMU         string // on|off|pt；空 = 不托管
-	TunedProfile  string // 非 cmdline：写入 /etc/nfvis/tuned-profile
-	ExtraParams   []string
+	Hugepages1G   int      `json:"hugepages_1g"`           // default_hugepagesz=1G hugepagesz=1G hugepages=N
+	Hugepages2M   int      `json:"hugepages_2m"`           // hugepages=N（2M 默认页）
+	IsolatedCores string   `json:"isolated_cores"`         // isolcpus=<list>
+	IRQAffinity   string   `json:"irq_affinity,omitempty"` // irqaffinity=<非隔离核>（EnrichDesired 按真机在线核派生；空 = 不写）
+	NoHZFull      *bool    `json:"nohz_full,omitempty"`    // nil = 未探测（按支持处理）；false = 内核无 CONFIG_NO_HZ_FULL，省略 nohz_full/rcu_nocbs
+	LowLatency    bool     `json:"low_latency"`            // 低延迟参数组（显式选择；idle=poll/tsc=reliable 由 EnrichDesired 按是否虚拟化决定）
+	NMIWatchdog   *bool    `json:"nmi_watchdog"`           // nil = 不托管（保留现状）
+	THP           string   `json:"transparent_hugepages"`  // always|madvise|never；空 = 不托管
+	IOMMU         string   `json:"iommu"`                  // on|off|pt；空 = 不托管
+	TunedProfile  string   `json:"tuned_profile"`          // 非 cmdline：写入 /etc/nfvis/tuned-profile
+	ExtraParams   []string `json:"params,omitempty"`
 }
 
 // KernelActual 运行实际（从 /proc、/sys 读取）。

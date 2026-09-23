@@ -7,18 +7,68 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/xzjt/nfvis/internal/model"
 	ksys "github.com/xzjt/nfvis/internal/system"
 )
+
+// jsonTree 把结构体转成**按 json tag 命名**的树（与契约的 snake_case 一致）。
+//
+// 不能用 anyToTree：它按 Go 字段名（Hugepages1G / IsolatedCores …）出键，
+// 与契约声明的 snake_case 不符——正是 R37-1 那类「契约↔实现形状不一致」。
+func jsonTree(v any) map[string]any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return map[string]any{}
+	}
+	var out map[string]any
+	if json.Unmarshal(b, &out) != nil {
+		return map[string]any{}
+	}
+	return out
+}
+
+// kernelBaselineView 内核基线的**结构化视图**（cmdline / 运行实际 / 配置期望 / 差异）。
+// CLI 的 `show system kernel` 与 REST 的 `GET /system/kernel` 共用它——两侧同源，
+// 避免"同一份事实两处实现"（决策 #137 收口 R51-2：该端点契约早已声明但服务端从未注册）。
+func kernelBaselineView(cfg model.Config) (map[string]any, error) {
+	desired, err := deriveKernelDesired(cfg)
+	if err != nil {
+		return nil, err
+	}
+	actual := ksys.ReadActual("/")
+	iso := ksys.IsolatedFromCmdline(actual.Cmdline)
+	// 空值归一成空数组（契约声明 cmdline/diffs 是 array；发 null 会让按契约写的客户端踩空）
+	cmdline := actual.Cmdline
+	if cmdline == nil {
+		cmdline = []string{}
+	}
+	diffs := ksys.Compare(desired, actual)
+	if diffs == nil {
+		diffs = []string{}
+	}
+	return map[string]any{
+		"cmdline": cmdline, "isolated_cores": iso,
+		"hugepages_1g": actual.Hugepages1G, "hugepages_1g_free": actual.Hugepages1GFr,
+		"hugepages_2m": actual.Hugepages2M, "hugepages_2m_free": actual.Hugepages2MFr,
+		"thp": actual.THP, "desired": jsonTree(desired), "diffs": diffs,
+	}, nil
+}
 
 func (x *cliExecutor) desiredKernelBaseline() (ksys.KernelDesired, error) {
 	cfg, err := x.engine.Committed()
 	if err != nil {
 		return ksys.KernelDesired{}, err
 	}
+	return deriveKernelDesired(cfg)
+}
+
+// deriveKernelDesired 由**给定配置**派生内核基线期望（包级：CLI 与 REST 同源）。
+func deriveKernelDesired(cfg model.Config) (ksys.KernelDesired, error) {
 	var pageSize string
 	count, count2M := 0, 0
 	if cfg.ResourcePools != nil {
