@@ -1,0 +1,69 @@
+===== V1 收尾第五十二轮：v1.1.28 发布（校验记录）=====
+日期：2026-09-23
+范围：main `5d88c1e`（= PR #176 合并；round51 的决策 #128~#136 全部改动）
+发布件 nfvis_1.1.28_amd64.deb。校验口径复刻 round29/33/35/48/50。
+
+----- 1. 版本号说明 -----
+上一发布 v1.1.27（round50）。本轮内容是 **Web 控制面补齐**（10 个 PR：界面广度、抓包视图、
+串口 console、归档下载、容器生命周期、VM 快照、大表按需拉取、镜像导入，以及三处口径/缺陷收口），
+此前合并但从未进入发布件。故本次发布 **v1.1.28**（紧接 v1.1.27，无跳号）。
+
+----- 2. 发布件与可复现构建 -----
+    产物:   nfvis_1.1.28_amd64.deb（7,854,578 字节）
+    sha256: 75f17cdbb521fa8facd888fb1d211efdb4e8952dfc4c548f03d6ddac3d7c1ab6
+    构建:   nfvis-vm / make deb VERSION=1.1.28 SOURCE_DATE_EPOCH=1790147895
+            （= main 5d88c1e 的 HEAD 提交时间；git archive 树无 .git，显式传值——决策 #88）
+    内容变化：Go 侧 = 决策 #128~#136（界面广度、界面覆盖守护、抓包导出参数、VRF 路由 404、
+             镜像导入按 import_state 如实呈现）；随包前端（index.html/app.js/style.css）
+             与仓库源码**逐字节一致**（见 §3⑤）；契约删幽灵路径 `/vpp:restart`。
+
+----- 3. 发布校验（逐项）-----
+① 元数据：Package nfvis / Version 1.1.28 / amd64；control+postinst+prerm+postrm 就位 ✓
+② 内容：23 个成员（/usr/bin/{nfvisd,nfvis-cli}、nfvis.service、安装器 2 件、随包文档 7 件）✓
+③ 解包运行：`nfvisd -version` / `nfvis-cli -version` = 1.1.28 ✓
+④ **可复现**：同一 commit + 同一 VERSION 连打两次，sha256 逐字节一致（75f17cdb…）✓
+⑤ **随包文档/前端是当前版本**（R48-5 教训已纳入常规口径）：
+   · 规格书 **136 条**决策（含 #128~#136）；附录 B 标题仍在；用户手册 1404 行、§10.12 为
+     「Web 控制台（总览 / 配置 / 诊断）」新版标题；
+   · 契约含 `/system/ssh-host-key:regenerate`、`/system/core-dumps:export` 与 `X-NFVIS-Merge`；
+   · **随包前端三件与仓库源码逐字节一致**：index.html `6d802c6a…`、app.js `7d77789a…`、
+     style.css `ceeff3db…`（即"deb 里的控制台就是本轮验收过的那份"）✓
+⑥ **升级实装**（1.1.27 → 1.1.28）：prerm「升级中，保留运行中的 nfvis.service」→ postinst
+   「已重启 nfvis.service 以加载新版本」；服务 active；`show version` = NFViS 1.1.28；
+   **升级后既有 VNF 拓扑存活**（vnf-a/vnf-b running；BD 6252701 四口 up）✓；
+   **config_json 逐字段未变**（rev 55 / cfgsha 084c3a64…）——audit 103→104 是校验动作自身的
+   审计（core-dumps 导出），如实登记 ✓
+⑦ **本版新内容实测**：VS 详情 statistics（bd_id 6252701 + 四口计数）、VM 详情 statistics
+   （eth0/vh-vnf-a-eth0 available=true）与 CLI 同源；`POST /system/core-dumps:export` 200 且
+   **接收端真的收到清单**；`PUT /configuration/candidate` + `X-NFVIS-Merge: true` 保留未提及字段、
+   随后丢弃不留痕 ✓
+⑧ purge：postrm「已撤销 SSH 强化（99-nfvis.conf 已删、sshd 已重载）」；drop-in 消失、sshd active
+   且 `sshd -t` 通过；GRUB 片段/fstab 保留；二进制与 systemd 单元移除；数据保留；配置库未变 ✓
+⑨ 重装：SSH 强化回归；**首装只 enable 不 start**（postinst 明示），按 README `systemctl start nfvis`
+   后服务 active；**配置库仍逐字段一致** ✓
+⑩ 重装后拓扑收敛 + 流量复通：BD 6252701 四口全 up；BVI ping 双向 5/5（首轮 4/5 属收敛期首包）；
+   独立事实源 `vppctl ping … source bvi0` **3/3**；宿主经 DPDK 物理口 → 两台 guest 各 4/4 ✓
+⑪ 发布与回验：
+   Release: https://github.com/xzjt/nfvis/releases/tag/v1.1.28（tag 指向 main、非 draft）
+   assets:  nfvis_1.1.28_amd64.deb（7,854,578）+ nfvis_1.1.28_amd64.deb.sha256
+   回下载:  自 GitHub 下载 asset，sha256 与构建端**逐字节一致**（75f17cdb…）✓
+
+----- 4. 环境（发布前后）-----
+- 配置库：**config_json 全程未变**（rev 55 / cfgsha 084c3a64e4cc0d43a16cbced28cb0742aaa0ef1783c75065eb7966b091eba726）；
+  audit 103→104（校验动作自身入审计，如实登记）
+- 口令：`WBF81vOA4M8GM28f@Aa1` 按 §3.1 哈希比对法核对有效（**未做登录试探**）
+- 拓扑与流量：vs-vnf（BD 6252701）+ vnf-a/vnf-b 在跑；BVI ping 双向 5/5；宿主经 DPDK 物理口 <1ms
+- 收尾：开发态实例已停（无 18443/8443 监听）；已装 **1.1.28** active；VPP 里只有配置声明的对象；
+  本轮测试产物（容器/备份/pcap/镜像记录）在各自的刀里已清
+
+----- 5. 本轮登记 -----
+| # | 发现 | 性质 | 处置 |
+|---|---|---|---|
+| R52-1 | 校验脚本 A 段的期望标签仍是「应 127」（沿用 round50 脚本，只 sed 了版本号） | 工具（低） | 只影响打印文字、不影响判定（实际 136 条已核对）；**教训：复用上一轮脚本要连"期望值文字"一起核** |
+| R52-2 | 沿用 round50 的 check-b 时会带上「用 Auto-Commit 建 read-only 用户」那段——**正是 R50-1 改过生产库的那段** | 流程（中） | 本轮**主动删掉该段**再跑（权限边界已在 round50 验证过），并在脚本里写明为何跳过 |
+
+----- 6. 下一步 -----
+- **R51-2**：`/system/kernel` 契约已声明但服务端未注册（幽灵路径）——需决策「实现」或「删声明」；
+- 界面未接的 33 条（多为有意排除：用户管理、内核 apply、恢复出厂、软件升级、DPDK 绑定等）；
+- 既存登记：CLI 引号内 `|`/多行值、`request vpp restart` 后立即查询竞态、1G 大页池「无主占用」未回收、
+  deb `Recommends` 未含 `qemu-utils`/`cloud-image-utils`、seed 以 SATA 交付致缺 `ahci` 的 guest 静默失效（需产品决策）。
