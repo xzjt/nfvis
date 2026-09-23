@@ -79,6 +79,32 @@ func (s *Server) handlePutTLS(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, info)
 }
 
+// handlePostSSHHostKeyRegenerate POST /api/v1/system/ssh-host-key:regenerate
+// （FR-SYS-011；与 CLI `request system ssh host-key regenerate` 同一实现）
+func (s *Server) handlePostSSHHostKeyRegenerate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTLS(w) {
+		return
+	}
+	if err := s.tlsMgr.RegenerateSSHHostKeys(r.Context()); err != nil {
+		user := "api"
+		if id, ok := Identity(r); ok {
+			user = id.User
+		}
+		s.engine.Audit(user, "system.ssh.hostkey.regenerate", "重生成 SSH host key", err.Error())
+		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
+		return
+	}
+	user := "api"
+	if id, ok := Identity(r); ok {
+		user = id.User
+	}
+	s.engine.Audit(user, "system.ssh.hostkey.regenerate", "重生成 SSH host key", "success")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"regenerated": true,
+		"message":     "SSH host key 已重新生成（ssh-keygen -A）；新连接的 host key 会变化，客户端需更新 known_hosts。",
+	})
+}
+
 // handlePostTLSRegenerate POST /api/v1/system/tls:regenerate
 func (s *Server) handlePostTLSRegenerate(w http.ResponseWriter, r *http.Request) {
 	if !s.requireTLS(w) {

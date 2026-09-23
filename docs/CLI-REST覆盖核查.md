@@ -9,9 +9,9 @@
 
 ## 0. 结论
 
-**258 个命令形态中：233 个已有类型化 REST 端点（可直接写页面）、6 个是真缺口（需补 API）、19 个是 CLI-only by design（交互形态差异，不需要 API）。**
+**258 个命令形态中：234 个已有类型化 REST 端点（可直接写页面）、5 个是真缺口（需补 API）、19 个是 CLI-only by design（交互形态差异，不需要 API）。**
 
-> 更新记录：缺口 #1（`show configuration` committed 全量读取）已于 **round43 收口**（新增 `GET /configuration`，决策 #119）——覆盖 225→226、缺口 14→13；缺口 #2/#3/#4/#7（日志 / ping / traceroute / 清零统计）已于 **round47 收口**（决策 #123），缺口 #10（`commit check` 预校验）已于 **round46 收口**（决策 #122）——覆盖 226→**231**、缺口 13→**8**；缺口 #5/#6（VS/VM 详情的 statistics 响应字段）已于 **round49 收口**（决策 #124）——覆盖 **231→233**、缺口 **8→6**。下表保留原始条目并标注状态，便于追溯。
+> 更新记录：缺口 #1（`show configuration` committed 全量读取）已于 **round43 收口**（新增 `GET /configuration`，决策 #119）——覆盖 225→226、缺口 14→13；缺口 #2/#3/#4/#7（日志 / ping / traceroute / 清零统计）已于 **round47 收口**（决策 #123），缺口 #10（`commit check` 预校验）已于 **round46 收口**（决策 #122）——覆盖 226→**231**、缺口 13→**8**；缺口 #5/#6（VS/VM 详情的 statistics 响应字段）已于 **round49 收口**（决策 #124）——覆盖 **231→233**、缺口 **8→6**；缺口 #8（`ssh host-key regenerate`）已于 **round49 收口**（决策 #125）——覆盖 **233→234**、缺口 **6→5**。下表保留原始条目并标注状态，便于追溯。
 
 配置模式的 113 条 `set`/`delete` 语句是最大的一块，**一整轮 candidate API 全覆盖**（`GET/PUT/DELETE /configuration/candidate` + `X-NFVIS-Auto-Commit`）；show 族 65 条里 58 条有对应 GET；request 族 46 条里 42 条有对应动作端点。真正的缺口集中在三类：**整配置读取、日志、连通性诊断（ping/traceroute）**——前者已于 round43 收口，后两者决策 #115 已列入后续增量。
 
@@ -25,7 +25,7 @@
   - **C 例外**：CLI-only by design——REPL 交互形态（导航/补全/持续跟踪/问答向导）或 CLI 侧渲染（管道），Web 的等价物是表单、定时刷新、原生 JSON，不需要 API。
 - **方法**：逐族对照命令全表与 openapi.yaml 的路径/方法/响应 schema；响应缺字段的（如 VS 统计）以契约 schema 为准绳核实。
 
-## 2. A 覆盖矩阵（233 个形态）
+## 2. A 覆盖矩阵（234 个形态）
 
 ### 2.1 show 族（61/65）
 
@@ -61,7 +61,7 @@
 | `show configuration compare rollback <n>` | `GET /configuration/diff`（配合 `POST /configuration/rollback/{n}` 的两步组合） |
 | `show tech-support`（顶级等价写法） | `GET /system/tech-support` |
 
-### 2.2 request 族（42/46）
+### 2.2 request 族（43/46）
 
 | 命令族 | REST 端点 |
 |---|---|
@@ -81,6 +81,7 @@
 | `request system configuration backup\|restore` | `POST /system/backup`、`POST /system/restore`（+ `GET /system/backup/{file}`） |
 | `request system tech-support generate` / `core-dumps delete` | `POST /system/tech-support` / `DELETE /system/core-dumps` |
 | `request system zeroize` / `api tls regenerate` | `POST /system:zeroize` / `POST /system/tls:regenerate` |
+| `request system ssh host-key regenerate` | `POST /system/ssh-host-key:regenerate`（round49 收口，决策 #125） |
 | `request system password change` | `POST /system/login-users/{name}:change-password` |
 | `request system ntp sync` / `alarms clear` | `POST /system/ntp:sync` / `POST /alarms:clear` |
 
@@ -108,7 +109,7 @@
 | `load override <path>` | `PUT /configuration/candidate`（override 语义） |
 | `save <path>` | `GET /configuration/candidate`（取 JSON 自行落盘；配置归档另有 `POST /system/backup`） |
 
-## 3. B 缺口清单（**6 个形态**，需补 API；另 7 个已于 round46/47/49 收口，保留原行便于追溯）
+## 3. B 缺口清单（**5 个形态**，需补 API；另 8 个已于 round46/47/49 收口，保留原行便于追溯）
 
 按价值排序；**补法一律契约先行**（openapi + 附录 A 决策 + routes/shape 守护），不碰 `/cli/execute`。
 
@@ -121,7 +122,7 @@
 | 5 | ~~`show virtual-switches <name> statistics`~~ | ✅ | ✅ **已收口（round49，决策 #124）**：`GET /virtual-switches/{name}` 附带 `statistics`（`{bd_id, ports:[…]}`，与 CLI 同源） | 已解决 |
 | 6 | ~~`show virtual-machine-functions <name> statistics`~~ | ✅ | ✅ **已收口（round49，决策 #124）**：`GET /virtual-machine-functions/{name}` 附带 `statistics`（只含 vhost-user vNIC） | 已解决 |
 | 7 | ~~`clear interfaces statistics [<ifname>]`~~ | ✅ | ✅ **已收口（round47，决策 #123）**：`POST /interfaces:clear-statistics`（204） | 已解决 |
-| 8 | `request system ssh host-key regenerate` | ✅ | 无 | 中——安全运维（宿主 sshd 操作，注意红线：不动管理路径） |
+| 8 | ~~`request system ssh host-key regenerate`~~ | ✅ | ✅ **已收口（round49，决策 #125）**：`POST /system/ssh-host-key:regenerate`（与 CLI 同一实现、审计同码、失败 500 不谎报） | 已解决 |
 | 9 | `request system core-dumps export <url>` | ✅ | `GET/DELETE /system/core-dumps` 之外无导出 | 中 |
 | 10 | ~~`commit check`（仅校验不下发）~~ | ✅ | ✅ **已收口（round46，决策 #122）**：`POST /configuration/check`（同一份校验、不落库不下发） | 已解决 |
 | 11 | `load merge <path>`（增量合并） | ✅ | `PUT candidate` 只有 override 语义 | 中 |
@@ -162,5 +163,5 @@
 
 - 增量 2（配置读写）的 API 侧**已齐备**：candidate/commit/confirm/diff/rollback 全部在位，113 条配置语句无需新端点；**唯一阻塞项（缺口 #1，committed 全量读取）已于 round43 收口**（`GET /configuration`，决策 #119），表单回显与配置总览可以直接用它。
 - 高危动作的 Web 确认语义照搬 CLI 的 `--yes`/`confirm`/`commit confirmed` 体系；#19（logout 不释放 candidate 锁）**已于 round43 收口**（决策 #119）。
-- 缺口 #2/#3/#4（日志、ping、traceroute）**已作为增量 3 第一刀收口**（round47，决策 #123）；VS/VM 统计字段**已收口**（round49，决策 #124）；剩余 3 项可做功能补（ssh host-key、core-dumps 导出、`load merge`），另 2 项已登记延期（token revoke、format-data），1 项两边都未接（`show vpp runtime`）。
+- 缺口 #2/#3/#4（日志、ping、traceroute）**已作为增量 3 第一刀收口**（round47，决策 #123）；VS/VM 统计字段**已收口**（round49，决策 #124）；剩余 2 项可做功能补（core-dumps 导出、`load merge`），另 2 项已登记延期（token revoke、format-data），1 项两边都未接（`show vpp runtime`）。
 - 增量顺序（**已完成**）：增量 2 = 配置读写（round43~46）→ 增量 3 第一刀 = 诊断（round47）→ 剩余缺口（两处统计字段、ssh host-key、core-dumps 导出、`load merge`）随见随补。

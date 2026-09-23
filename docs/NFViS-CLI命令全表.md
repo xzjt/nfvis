@@ -163,7 +163,7 @@
 | `request system zeroize` | 恢复出厂（双重确认） | S | `POST /system:zeroize` | 🚫 破坏性 |
 | `request system api tls regenerate` | 重签自签证书 | S | `POST /system/tls:regenerate` | ✅ |
 | `request system api token revoke <token-id>` | 吊销 token | S | `DELETE /login` 等价 | ⚠️ V1 仅提示「经 API DELETE /login 吊销当前会话，逐 token 随 V2」（**决策 #76⑧** 修正契约位置） |
-| `request system ssh host-key regenerate` | 重新生成 SSH host key | S | 宿主 sshd | ✅ |
+| `request system ssh host-key regenerate` | 重新生成 SSH host key | S | `POST /system/ssh-host-key:regenerate` | ✅ |
 | `request system password change` | 登录者自助改密（验证旧口令） | S | `PUT /system/login-users/{n}` | 🚫 需交互输入（契约已登记延期） |
 | `request system storage format-data` | 重置数据分区（危险，双确认） | S | 宿主 | 🚫 破坏性（契约已登记延期） |
 | `request system ntp sync` | 立即触发一次 NTP 同步 | O | 宿主 chrony/ntpd | ✅ |

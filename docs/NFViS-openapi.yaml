@@ -1480,6 +1480,25 @@ paths:
       responses:
         "200": { description: 已重签 }
 
+  /system/ssh-host-key:regenerate:
+    post:
+      tags: [system]
+      summary: 重新生成 SSH host key（宿主 sshd）
+      description: |
+        与 CLI `request system ssh host-key regenerate` 同一实现（FR-SYS-011）：删除
+        `/etc/ssh/ssh_host_*` 私钥后跑 `ssh-keygen -A` 重建。**影响的是新连接的 host key 校验**
+        （客户端 known_hosts 会失配，需按提示更新），当前已建立的会话不受影响。
+      responses:
+        "200":
+          description: 已重新生成
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  regenerated: { type: boolean }
+                  message: { type: string, description: 操作者可见的结果说明 }
+
   /alarms:clear:
     post:
       tags: [alarms-events]
