@@ -1025,10 +1025,17 @@ nfvis$ request virtual-machine-functions fw-vm delete   # super-user；交互确
 
 **③ cloud-init 注意事项**：
 
-- seed 以 **SATA 光盘**挂载（`cloud-localds` 生成、卷标 `cidata`）——guest 内核须有
-  `ahci` 与 `iso9660` 支持，否则 cloud-init 找不到数据源会**静默自禁**（user-data 被丢弃、无报错）。
-  实测：Debian 完整内核版（`debian-12-generic-amd64`）可用；Debian **genericcloud** 与
-  Alpine 的精简内核缺 `ahci`，**不可用**；
+- seed 以 **virtio 磁盘**交付（`cloud-localds` 生成、卷标 `cidata` 的 ISO 镜像文件，挂成 `vdb`）。
+  能否被消费取决于 **guest 的 cloud-init 怎么挂它**：cloud-init 只接受 `TYPE` 为 `vfat`/`iso9660`
+  且带 `cidata` 卷标的设备，并用 `mount -o ro -t auto` 挂载。用 **util-linux 的 `mount`**（Debian/Ubuntu
+  一类）时 `auto` 由 libblkid 判类型，**任何云镜像都能用**；而用 **busybox 的 `mount`**（Alpine 一类）
+  时 `auto` 只认**内核已加载**的文件系统类型——cloud-init 跑的时刻只有根盘驱动（通常 ext4）在，
+  `isofs`/`vfat` 都还是未加载模块 → 挂载失败 → cloud-init 回落 `DataSourceNone`：
+  **user-data 被丢弃、hostname 与 SSH 公钥都不生效，且全程无报错**（属"静默失效"）。
+  实测：`debian-12-generic-amd64`（完整内核）与 `debian-12-genericcloud`（缺 `ahci`，virtio 交付后可用）
+  **可用**；**`alpine.qcow2` 不可用**——不是缺 `ahci`（它的 6.6.31-0-virt 内核 `ahci` 是 builtin），
+  而是上面这条 busybox `mount` 的限制，**产品侧无法绕过**（改镜像：装 util-linux 或把 `isofs`
+  加进 `/etc/modules`）。排查方法见 §11「cloud-init 未生效」一行；
 - guest 内网卡名由 guest 的命名策略决定（Debian 用可预测名如 `enp1s0`），**不是**产品模型里的
   `eth0`（那只是 VPP 侧的逻辑名）——在 user-data 里配网卡前先在 guest 里 `ip -o link` 确认；
 - **user-data 的两种形式**（`set cloud-init user-data`）：`#cloud-config` 开头的 YAML，或以
@@ -1303,7 +1310,7 @@ DPDK 没有独立版本来源（随 VPP 一起编译），同样显示「—」�
 | commit 报 `无 1G 大页资源池，无法分配 …MB` | 资源池未配或内核大页未生效 | §6 配池并重启生效 |
 | commit 报 `隔离核不足：需要 N，可用 0` | VPP 保留核占满隔离核池 | 扩大 `isolated-cores`（`show resource-pools` 看 `vpp-reserved`） |
 | VM 有 console 无输出 | guest 未开串口 getty | 云镜像确认 `console=ttyS0`；见 §9.2 |
-| VM 引导慢 / cloud-init 未生效 | guest 内核读不到 seed（缺 ahci/iso9660）→ cloud-init 静默自禁 | 换完整内核的云镜像（§9.2③ 实测清单）；guest 内 `dmesg \| grep -i cloud` 定位 |
+| VM 引导慢 / cloud-init 未生效 | guest 的 cloud-init 挂不上 seed（§9.2③：只认 `vfat`/`iso9660` + 用 `-t auto` 挂；busybox 的 `mount` 只认已加载的文件系统类型）→ 回落 `DataSourceNone`、**无报错** | 换用 util-linux `mount` 的云镜像（§9.2③ 实测清单）；在 guest 内 `grep -i "Failed to mount\|Datasource" /var/log/cloud-init.log`、`ls /var/lib/cloud/instances/` 定位 |
 | user-data 里 `ip addr add … dev eth0` 报 `Cannot find device` | guest 网卡名不是 eth0（可预测网名） | guest 内 `ip -o link` 确认实际名；脚本按非 lo 网卡遍历（§9.2③） |
 | 容器下发报 `docker: not found` | 镜像名与 Docker tag 不一致 | 上传时 `name` 用 Docker tag（§9.1） |
 | `show lldp neighbors` 为空 | 无 LLDP 对端 | 正常；对端启用后可见 |
@@ -1390,7 +1397,7 @@ show log audit last 20                   # 审计（§10）
 | 硬件健康在无 BMC/传感器环境为降级路径 | 值可能为空，非故障 |
 | SR-IOV / LLDP 邻居需对应硬件与对端 | 无 PF/VF、无对端时无法演示 |
 | 管理口 IP 运行期不热改 | 声明后下次启动收敛监听；变更须 commit confirmed |
-| guest 读 seed 依赖内核驱动 | 云镜像需含 ahci + iso9660（§9.2③ 实测清单） |
+| guest 读 seed 取决于其 cloud-init 的挂载方式 | busybox `mount` 的镜像（Alpine 类）挂不上 seed → user-data 静默失效（§9.2③ 实测清单） |
 
 ### 12.5 参考文档
 
