@@ -29,8 +29,6 @@ var uiNotWired = map[string]string{
 	"/virtual-switches/{name}/ports":     "成员端口全量替换属配置编辑，走「配置」卡",
 	"/system/hardware":                   "硬件健康明细——后续增量（阈值告警已在告警卡体现）",
 	"/system/health/thresholds":          "健康阈值设置——后续增量",
-	"/configuration/rollback/{n}":        "回滚到历史快照——需先看差异再确认，后续增量",
-	"/configuration/history":             "配置提交历史（rev/时间/用户/注释）——刀 3 接入（控制台的配置页历史与回滚）",
 	"/protocols/lldp":                    "LLDP 开关状态——邻居表已接；开关属配置编辑（走「配置」卡）",
 
 	// —— 只有 DELETE 的端点：界面暂无删除入口（详情页从**列表端点**取数）——
@@ -57,13 +55,12 @@ var uiNotWired = map[string]string{
 	"/vpp/config": "VPP 配置段——同上",
 
 	// —— by design：非界面读物 ——
-	"/metrics":                       "Prometheus 文本格式，界面改读 /system/status 的同源字段",
-	"/openapi.json":                  "契约自查用，界面不消费",
-	"/ui":                            "302 到 /ui/，由浏览器自行跟随",
-	"/ui/":                           "页面本体",
-	"/cli/execute":                   "x-internal：CLI 执行通道，界面只走类型化端点",
-	"/cli/candidates":                "x-internal：补全候选，界面用表单替代",
-	"/system/configuration/sessions": "持锁会话查询——排障用，界面暂无入口",
+	"/metrics":        "Prometheus 文本格式，界面改读 /system/status 的同源字段",
+	"/openapi.json":   "契约自查用，界面不消费",
+	"/ui":             "302 到 /ui/，由浏览器自行跟随",
+	"/ui/":            "页面本体",
+	"/cli/execute":    "x-internal：CLI 执行通道，界面只走类型化端点",
+	"/cli/candidates": "x-internal：补全候选，界面用表单替代",
 }
 
 // uiUsedPaths 从**前端源码**提取路径字面量：api('/x')、fetch(API + '/x')。
@@ -165,6 +162,7 @@ var uiDynamicWired = map[string]string{
 	"/vpp/capture/{file}":                                             "renderCapture()：downloadFile('/vpp/capture/' + name, …)",
 	"/system/backup/{file}":                                           "renderArchives()：downloadFile('/system/backup/' + name, …)",
 	"/system/tech-support/{file}":                                     "renderArchives()：downloadFile('/system/tech-support/' + name, …)",
+	"/configuration/rollback/{n}":                                     "cfghTakeCandidate()：POST '/configuration/rollback/' + n（提交历史页的两段式回滚第一步，偏移由 Rev 相减算出）",
 }
 
 // contractPathSet 契约里的全部路径（方法无关）。

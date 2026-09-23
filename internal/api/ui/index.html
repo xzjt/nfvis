@@ -87,6 +87,11 @@
     <section class="page" id="page-config" hidden>
     <article class="card wide" id="cfg-card">
       <h2>配置 <span id="cfg-note" class="muted small"></span></h2>
+      <p class="muted small">
+        相关页面：<a href="#/config/history">提交历史</a>（看每一版、把某一版取为候选）·
+        <a href="#/config/sessions">编辑锁会话</a>（看谁正持有编辑锁）。
+      </p>
+      <p id="cfg-lock-note" class="muted small" hidden></p>
 
       <!-- 只读：committed 配置概览 -->
       <div id="cfg-read">
@@ -410,6 +415,41 @@
     </article>
     </section>
 
+    <section class="page" id="page-configHistory" hidden>
+    <article class="card wide">
+      <h2>提交历史 <span id="cfgh-note" class="muted small"></span></h2>
+      <p class="muted small">
+        列出保留的配置提交版本（最新在前）。<strong>回滚是两段式</strong>：先把某一版取为候选，
+        候选<strong>不会自己生效</strong>——要到「配置」页点「提交」才改变运行配置；
+        提交之前随时可以「丢弃并结束编辑」，运行配置不受影响。
+      </p>
+      <table id="cfgh-table">
+        <thead><tr><th>Rev</th><th>提交时间</th><th>用户</th><th>注释</th><th>当前</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p id="cfgh-msg" class="muted small" hidden></p>
+      <p class="muted small">
+        取为候选需要持有编辑锁：若本页提示未持有，到「配置」页点「开始编辑」即可（本页也会自动先取锁）。
+        锁被别的会话持有时，到「编辑锁会话」页看是谁持有。
+      </p>
+    </article>
+    </section>
+
+    <section class="page" id="page-configSessions" hidden>
+    <article class="card wide">
+      <h2>编辑锁会话 <span id="cfgs-note" class="muted small"></span></h2>
+      <p class="muted small">
+        本页<strong>只读</strong>：只显示谁正持有候选配置的编辑锁，用于排查「改配置时提示锁被占用」。
+        释放编辑锁请在「配置」页点「丢弃并结束编辑」（与命令行退出编辑会话是同一个动作）；
+        界面不提供强制夺锁。
+      </p>
+      <table id="cfgs-table">
+        <thead><tr><th>持有者</th><th>来源</th><th>取锁时间</th><th>最近活动</th><th>未提交变更</th><th>待确认截止</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </article>
+    </section>
+
     <section class="page" id="page-ops" hidden>
     <article class="card wide">
       <h2>运维动作 <span class="muted small">（写操作，均需二次确认）</span></h2>
@@ -541,6 +581,17 @@
     配置修改在「配置」页里经 candidate → 提交 流程进行，未提交前不影响运行配置；
     写类运维动作在「运维」页里，均需二次确认。
   </footer>
+
+  <!-- 确认对话框（中危动作：列出影响面 + 只读回显对应命令 + 主按钮标红）。
+       内容由 app.js 的 uiDialog 填充；这里只放骨架，页面本身不含内联脚本与内联样式。 -->
+  <div id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" hidden>
+    <div class="modal-box">
+      <h3 id="modal-title"></h3>
+      <div id="modal-body"></div>
+      <p id="modal-cli" class="muted small" hidden></p>
+      <div class="cfg-actions" id="modal-actions"></div>
+    </div>
+  </div>
 </section>
 
 <!-- app.js 是页面逻辑（页面处理器 + 各页视图），router.js 按 hash 决定显示哪一页并取数。

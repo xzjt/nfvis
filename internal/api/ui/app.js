@@ -28,6 +28,8 @@ const MAX_EVENTS = 20;
 const MAX_IFACE_DETAIL = 12;
 
 let token = sessionStorage.getItem(TOKEN_KEY) || '';
+// 当前登录用户名（接口来源的会话持有者记作 `用户@api`，配置页据此判断候选是不是本会话的）。
+let currentUser = '';
 let pollTimer = null;
 let pollRoute = null;      // 当前路由（轮询节奏取它声明的 poll）
 let pollPath = '';         // 已武装的路由地址（同一页的重复渲染不重置计时器）
@@ -111,6 +113,52 @@ function fmtTime(ts) {
 function list(v) {
   if (v === undefined || v === null) return undefined;
   return Array.isArray(v) ? (v.length ? v.join(',') : '—') : String(v);
+}
+
+// ---------- 确认对话框（分级确认里的中危档） ----------
+//
+// 中危动作（如配置回滚）不用浏览器自带的 confirm：要**逐条列出影响面**、只读回显对应的
+// 命令行语句（便于工单与审计对照），并把主按钮标红。内容一律经 textContent 落值。
+// 返回 Promise<boolean>：确认 true / 取消（点取消、点遮罩、按 Esc）false。
+let dialogResolve = null;
+
+function uiDialog(opts) {
+  $('modal-title').textContent = opts.title || '';
+  const body = $('modal-body');
+  body.textContent = '';
+  (opts.paragraphs || []).forEach((t) => body.appendChild(el('p', { text: t })));
+  if ((opts.bullets || []).length) {
+    const ul = el('ul');
+    opts.bullets.forEach((t) => ul.appendChild(el('li', { text: t })));
+    body.appendChild(ul);
+  }
+  const cli = $('modal-cli');
+  cli.hidden = !opts.cli;
+  cli.textContent = opts.cli ? '对应命令（只读回显，便于工单对照）：' + opts.cli : '';
+
+  const acts = $('modal-actions');
+  acts.textContent = '';
+  const ok = el('button', { type: 'button', class: opts.danger ? 'danger' : '', text: opts.confirmLabel || '确定' });
+  ok.addEventListener('click', () => closeDialog(true));
+  // 焦点落在「取消」上（没有取消按钮时落在主按钮）：破坏性动作不该被一个回车键直接执行。
+  let focusTarget = ok;
+  if (opts.cancelLabel !== '') {
+    const cancel = el('button', { type: 'button', class: 'ghost', text: opts.cancelLabel || '取消' });
+    cancel.addEventListener('click', () => closeDialog(false));
+    acts.appendChild(cancel);
+    focusTarget = cancel;
+  }
+  acts.appendChild(ok);
+  $('modal').hidden = false;
+  focusTarget.focus();
+  return new Promise((resolve) => { dialogResolve = resolve; });
+}
+
+function closeDialog(value) {
+  $('modal').hidden = true;
+  const resolve = dialogResolve;
+  dialogResolve = null;
+  if (resolve) resolve(value);
 }
 
 // ---------- 取数 ----------
@@ -394,7 +442,14 @@ export const VIEWS = {
     },
   },
   'config': {
-    render(d) { return loadConfig(d['/configuration']); },
+    // 取数后对齐一次服务端的编辑会话（本会话已有候选就直接进编辑态，见 cfgSyncSession）。
+    async render(d) { pageWarn(d); await loadConfig(d['/configuration']); await cfgSyncSession(); },
+  },
+  'configHistory': {
+    render(d) { pageWarn(d); renderHistory(rowsOf(d['/configuration/history'])); },
+  },
+  'configSessions': {
+    render(d) { pageWarn(d); renderSessions(rowsOf(d['/system/configuration/sessions'])); },
   },
   'ops': {
     render(d) { pageWarn(d); renderArchives(rowsOf(d['/system/backup']), rowsOf(d['/system/tech-support'])); },
@@ -437,6 +492,8 @@ function renderEvents() {
 let cfg = {
   committed: null, // {configuration, revision}
   editing: false,
+  // 由「提交历史」页取候选后落回本页时记下偏移（> 0 时本页载入候选并直接展示差异）。
+  landedFromRollback: 0,
 };
 
 const CFG_TEXT_ID = 'cfg-text';
@@ -689,6 +746,62 @@ async function loadConfig(pre) {
   return true;
 }
 
+function cfgLockNote(text) {
+  const n = $('cfg-lock-note');
+  n.textContent = text || '';
+  n.hidden = !text;
+}
+
+// 进本页时对齐服务端的编辑会话：本会话已经有候选（例如刚从「提交历史」页取的历史快照，
+// 或刷新页面后仍在编辑）就直接进编辑态并展示差异——否则操作者再点一次「开始编辑」会把
+// 刚取到的候选覆盖成当前配置，白做一次回滚。锁在别的会话手里时如实说明是谁持有
+// （本页保持只读；写操作由服务端按会话锁规则拒绝，界面不做第二个判定）。
+async function cfgSyncSession() {
+  const landed = cfg.landedFromRollback; // 刚从「提交历史」页取过候选（值是偏移）
+  cfg.landedFromRollback = 0;
+  // 已在编辑态且不是刚取过候选：不动（别覆盖操作者正在改的文本）。
+  // 刚取过候选时**要**刷新编辑区——服务端的候选已经被那一版替换，留旧文本会让人改错底稿。
+  if (cfg.editing && !landed) return;
+  if (!cfg.committed) return; // 读不到当前配置：不进编辑态（与「开始编辑」同一条纪律）
+  let cand = null;
+  try {
+    cand = await api('/configuration/candidate');
+  } catch (e) {
+    cfgLockNote(''); // 服务端没有候选：只读视图（点「开始编辑」才建立会话）
+    return;
+  }
+  const holder = await cfgLockHolder();
+  if (holder !== currentUser + '@api') {
+    cfgLockNote('当前候选配置由 ' + (holder || '未知会话') + ' 持有编辑锁——本页只读，' +
+      '可在「编辑锁会话」页查看；要自己改配置请等对方结束编辑。');
+    return;
+  }
+  const doc = (cand && cand.candidate) || {};
+  cfgWriteText(doc);
+  cfgRenderForms(doc);
+  cfgSetEditing(true);
+  cfgLockNote('');
+  if (landed) {
+    cfgMsg('已把第 ' + landed + ' 版取为候选（未提交）——先看差异、预校验，确认后点「提交」；' +
+      '不提交就点「丢弃并结束编辑」。', false);
+    await cfgShowDiff();
+  } else {
+    cfgMsg('本会话已有未提交的候选配置（刷新页面后仍在编辑会话里）。', false);
+  }
+}
+
+// 当前编辑锁的持有者：取自持锁会话列表里**有取锁时间**的那一条（只有一条会话锁，
+// 另有在途 commit confirmed 时它不带取锁时间，不能当成持锁者）；查不到时返回空串。
+async function cfgLockHolder() {
+  try {
+    const list = await api('/system/configuration/sessions');
+    const lock = (Array.isArray(list) ? list : []).find((s) => s && s.acquired_at);
+    return (lock && lock.holder) || '';
+  } catch (e) {
+    return '';
+  }
+}
+
 // 开始编辑：以 committed 为起点建立 candidate（PUT 取锁）。
 // 读不到 committed 时**拒绝进入**——否则会把空配置当 candidate 提交（危险）。
 async function cfgStartEdit() {
@@ -801,6 +914,197 @@ async function cfgConfirmPending() {
   } catch (e) {
     cfgMsg('确认失败：' + e.message, true);
   }
+}
+
+// ---------- 配置提交历史（#/config/history）与编辑锁会话（#/config/sessions） ----------
+//
+// 历史页 = 只读列表 + **两段式回滚**的入口：回滚沿用命令行的语义——把某一版取为 candidate
+// （POST /configuration/rollback/{n}），**不直接生效**；要改变运行配置仍得到「配置」页提交。
+//
+// 两个容易搞错的地方，这里按契约与引擎的实际语义钉住：
+//   ① 端点里的 n 是**相对最新 committed 的偏移**（n=1 = 最新版的前一版），不是 Rev 本身；
+//      故由列表里的 Rev 与最新 Rev 相减算出，Rev 相同（当前生效那一版）没有可回滚的偏移。
+//   ② 服务端只有「候选 ⇄ 当前生效配置」的差异读取（GET /configuration/diff），**没有**
+//      「直接与某个历史版本比对」的读取接口；故「看差异」给的是引导（先把该版取为候选，
+//      再到「配置」页看差异），而不是就地显示差异——不臆造端点，也不假装拿到了差异。
+
+function cfghMsg(text, isErr) {
+  const n = $('cfgh-msg');
+  n.textContent = text || '';
+  n.hidden = !text;
+  n.className = isErr ? 'error small' : 'muted small';
+}
+
+function renderHistory(revs) {
+  const tbody = $('cfgh-table').querySelector('tbody');
+  tbody.textContent = '';
+  cfghMsg('', false); // 上一次操作的回显不跨轮次残留
+  const list = revs || [];
+  const latest = list.reduce((m, r) => Math.max(m, Number(r.rev) || 0), 0);
+  $('cfgh-note').textContent = list.length ? '（保留 ' + list.length + ' 版，最新在前）' : '';
+  if (!list.length) {
+    tbody.appendChild(el('tr', {}, [
+      el('td', { colspan: '6', class: 'muted', text: '（暂无历史版本）' }),
+    ]));
+    return;
+  }
+  list.forEach((r) => {
+    const rev = Number(r.rev) || 0;
+    const n = latest - rev; // 相对最新的偏移：0 = 当前生效那一版
+    const tr = el('tr');
+    [rev, fmtTime(r.committed_at), r.user ? r.user : '（未记录）', r.comment, r.current ? '当前生效' : '']
+      .forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
+    const cell = el('td', { class: 'actions' });
+    if (n < 1) {
+      cell.appendChild(el('span', { class: 'muted small', text: '（当前生效，无需回滚）' }));
+    } else {
+      const diff = el('button', { type: 'button', class: 'ghost small', text: '看差异' });
+      diff.addEventListener('click', () => cfghDiffGuide(rev, n));
+      const rb = el('button', { type: 'button', class: 'small danger', text: '回滚到这一版' });
+      rb.addEventListener('click', () => cfghRollback(rev, n, r));
+      cell.appendChild(diff);
+      cell.appendChild(rb);
+    }
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
+  });
+}
+
+// 「看差异」：服务端没有按历史版本比对的读取接口，故这里只给**引导**（不取数、不改任何东西）。
+async function cfghDiffGuide(rev, n) {
+  await uiDialog({
+    title: '看差异：第 ' + n + ' 版（revision ' + rev + '）与当前配置',
+    paragraphs: [
+      '服务端只提供「候选配置与当前生效配置」的差异读取，没有「直接与某个历史版本比对」的读取接口，' +
+        '因此本页无法就地显示这一版与当前配置的差异。',
+      '要看差异：先在本页点「回滚到这一版」（第一步只把它取为候选，不会生效），' +
+        '随后在「配置」页点「查看差异」——那里显示的是「当前生效配置与这一版」的差异' +
+        '（命令行里 compare rollback 的方向相反：那一侧是「这一版 → 当前生效配置」，改动内容是同一份）；' +
+        '确认不需要这一版，就点「丢弃并结束编辑」，运行配置不受影响。',
+    ],
+    cli: 'show configuration | compare rollback ' + n,
+    confirmLabel: '知道了',
+    cancelLabel: '',
+  });
+}
+
+// 回滚第一步：把第 n 版取为候选（不提交）。中危确认——影响面逐条列出、主按钮标红。
+async function cfghRollback(rev, n, row) {
+  const dirty = await cfghCandidateDirty();
+  const bullets = [
+    '会以第 ' + n + ' 版（revision ' + rev + '，提交于 ' + fmtTime(row && row.committed_at) +
+      '）为底稿建立候选配置；正在运行的配置此刻不受影响。',
+    '候选不会自己生效：要到「配置」页点「提交」才改变运行配置；提交之前可以随时「丢弃并结束编辑」。',
+    '提交前请在「配置」页用「查看差异」「预校验」确认这次变更。',
+  ];
+  if (dirty) bullets.push('当前已有候选配置（含未提交的变更），会被这一版覆盖。');
+  bullets.push('取为候选会占用编辑锁（本会话还没有编辑会话时，本页先按当前配置取锁）；' +
+    '锁被别的会话持有时会失败并说明是谁持有。');
+  const ok = await uiDialog({
+    title: '回滚到第 ' + n + ' 版（取为候选，不立即生效）',
+    bullets,
+    cli: 'rollback ' + n,
+    confirmLabel: '取为候选（不提交）',
+    danger: true,
+  });
+  if (!ok) return;
+  await cfghTakeCandidate(n);
+}
+
+// 当前是否已有未提交的候选（影响面里要如实说「会被覆盖」）。没有候选（未进入编辑会话）按「无」。
+async function cfghCandidateDirty() {
+  try {
+    const c = await api('/configuration/candidate');
+    return !!(c && c.dirty);
+  } catch (e) {
+    return false;
+  }
+}
+
+// 取为候选：先直接试一次；报「未持有 candidate」说明本会话还没有编辑会话（或锁在别人手里），
+// 此时按当前配置取一次编辑锁再重试——锁真被别人持有时这一步会失败并报出持有者，
+// 不会覆盖别人的候选（服务端在写候选之前就先判锁）。
+async function cfghTakeCandidate(n) {
+  cfghMsg('正在把第 ' + n + ' 版取为候选…', false);
+  try {
+    await api('/configuration/rollback/' + n, { method: 'POST' });
+  } catch (e) {
+    if (!/未持有/.test(e.message)) {
+      cfghMsg('取为候选失败：' + e.message, true);
+      return;
+    }
+    if (!(await cfghAcquireLock())) return;
+    try {
+      await api('/configuration/rollback/' + n, { method: 'POST' });
+    } catch (e2) {
+      cfghMsg('取为候选失败：' + e2.message, true);
+      return;
+    }
+  }
+  // 落到「配置」页：那一页会载入这份候选并直接展示差异（提交或丢弃都在那一页）。
+  cfg.landedFromRollback = n;
+  await goDetail('#/config');
+}
+
+// 取编辑锁：以当前生效配置为底稿写一次候选（与「配置」页的「开始编辑」是同一个动作）。
+async function cfghAcquireLock() {
+  try {
+    const cur = await api('/configuration');
+    const base = (cur && cur.configuration) || {};
+    await api('/configuration/candidate', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(base),
+    });
+    return true;
+  } catch (e) {
+    cfghMsg('无法取得编辑锁：' + e.message + '——锁可能正被别的会话持有，可在「编辑锁会话」页查看。', true);
+    return false;
+  }
+}
+
+// 编辑锁会话（只读）：按端点返回的字段渲染（谁 / 来源 / 时间 / 未提交变更 / 待确认截止），
+// 字段缺席时显示「—」，不编造。
+function renderSessions(list) {
+  const tbody = $('cfgs-table').querySelector('tbody');
+  tbody.textContent = '';
+  const rows = list || [];
+  $('cfgs-note').textContent = rows.length ? '（' + rows.length + ' 个持锁条目）' : '';
+  if (!rows.length) {
+    tbody.appendChild(el('tr', {}, [
+      el('td', { colspan: '6', class: 'muted', text: '（当前没有会话持有编辑锁）' }),
+    ]));
+    return;
+  }
+  rows.forEach((s) => {
+    const holder = s.holder || '';
+    const tr = el('tr');
+    [
+      holder,
+      sessionSource(holder),
+      fmtTimeOpt(s.acquired_at),
+      fmtTimeOpt(s.last_activity),
+      s.dirty === undefined || s.dirty === null ? undefined : (s.dirty ? '有' : '无'),
+      fmtTimeOpt(s.confirmed_until),
+    ].forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
+    tbody.appendChild(tr);
+  });
+}
+
+// 来源取自持有者标识的后缀：引擎把持有者记作 `用户@来源`（命令行/串口/接口分别记作
+// ssh / console / api）；没有 @ 时如实显示「—」，不猜。
+function sessionSource(holder) {
+  const i = (holder || '').indexOf('@');
+  return i > 0 && i < holder.length - 1 ? holder.slice(i + 1) : undefined;
+}
+
+// 会话条目在没有取锁时间时给的是零值时间（例如只有在途的待确认提交、没有持锁会话）：
+// 那不是真实时间，显示「—」而不是 0001 年。
+function fmtTimeOpt(ts) {
+  if (!ts) return undefined;
+  const d = new Date(ts);
+  if (isNaN(d) || d.getFullYear() < 1970) return undefined;
+  return fmtTime(ts);
 }
 
 // ---------- 诊断（日志 + 连通性测试） ----------
@@ -1000,6 +1304,7 @@ async function enterApp(user) {
   $('login-view').hidden = true;
   $('main-view').hidden = false;
   $('global-error').hidden = true;
+  currentUser = (user && user.name) || '';
   $('user-line').textContent = user ? user.name + '（' + user.class + '）' : '';
   cfgSetEditing(false);
   try {
@@ -1021,6 +1326,7 @@ function signOut(msg) {
   vmConsoleClose();
   token = '';
   events = [];
+  currentUser = '';
   cfg = { committed: null, editing: false };
   cfgSetEditing(false);
   sessionStorage.removeItem(TOKEN_KEY);
@@ -2249,6 +2555,12 @@ $('cfg-commit-btn').addEventListener('click', () => cfgCommit(0));
 $('cfg-commit-confirmed-btn').addEventListener('click', () => cfgCommit(10));
 $('cfg-confirm-btn').addEventListener('click', cfgConfirmPending);
 $('cfg-discard-btn').addEventListener('click', cfgEndSession);
+
+// 确认对话框：点遮罩或按 Esc 都算取消（不执行动作）。
+$('modal').addEventListener('click', (ev) => { if (ev.target === $('modal')) closeDialog(false); });
+window.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && !$('modal').hidden) closeDialog(false);
+});
 
 // 审计卡：写入不发事件，故给一个显式刷新（否则 SSE 连着时卡片会停在旧内容上）
 $('audit-refresh-btn').addEventListener('click', async () => {

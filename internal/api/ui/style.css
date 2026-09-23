@@ -160,6 +160,9 @@ button.small:hover:not(:disabled) { border-color: var(--accent); color: var(--ac
 button.small:disabled { opacity: 0.45; cursor: not-allowed; }
 button.danger { background: #b3261e; border-color: #b3261e; color: #fff; }
 button.danger:hover { background: #cf3a31; border-color: #cf3a31; }
+/* 行内危险动作（如「回滚到这一版」）：悬停时保持红底——否则 button.small:hover 的
+   「透明底 + 主题色文字」会盖掉红色，标红的意义就没了。 */
+button.small.danger, button.small.danger:hover:not(:disabled) { background: #b3261e; border-color: #b3261e; color: #fff; }
 
 /* 网络对象：多块只读小表并排 */
 .net-objects { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
@@ -191,6 +194,31 @@ tr.row-link:hover td { background: var(--panel-2); }
 /* 面包屑里能回上一级的段（详情页 → 列表页）做成链接 */
 .crumb a { color: var(--muted); text-decoration: none; border-bottom: 1px dotted var(--muted); }
 .crumb a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* 正文里的页间链接（如「配置」页顶部的「提交历史」「编辑锁会话」） */
+.card a { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); }
+.card a:hover { border-bottom-style: solid; }
+
+/* 提交历史 / 编辑锁会话：除注释与长文本列外保持单行（否则时间与 Rev 会被挤成竖排） */
+#cfgh-table th, #cfgh-table td, #cfgs-table th, #cfgs-table td { white-space: nowrap; }
+#cfgh-table td:nth-child(4) { white-space: normal; word-break: break-word; }
+#cfgh-table td:first-child { color: var(--muted); }
+
+/* 分级确认对话框：遮罩 + 面板；主按钮标红由 button.danger 给出（中危动作）。 */
+.modal {
+  position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
+  padding: 20px; background: rgba(6, 12, 18, .68);
+}
+.modal-box {
+  width: min(620px, 100%); max-height: 86vh; overflow: auto;
+  padding: 16px 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+}
+.modal-box h3 { margin: 0 0 8px; color: var(--fg); font-size: 15px; }
+.modal-box p { margin: 6px 0; }
+.modal-box ul { margin: 8px 0; padding-left: 20px; }
+.modal-box li { margin-bottom: 4px; font-size: 13px; }
+.modal-box #modal-cli { font: 12px/1.5 Consolas, "Courier New", monospace; overflow-wrap: anywhere; }
+.modal-box .cfg-actions { justify-content: flex-end; }
 
 /* 导航：组名（计算/网络/系统/配置/运维）与可点项在视觉上分开——组名不可点、更弱、组间留白 */
 .nav { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
