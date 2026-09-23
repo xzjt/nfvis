@@ -22,6 +22,9 @@ func (d *testDiagOps) ListTechSupport() []system.File            { return d.tech
 func (d *testDiagOps) TechSupportPath(n string) (string, error)  { return d.tech.Path(n) }
 func (d *testDiagOps) ListCoreDumps() []system.CoreDump          { return d.cores.List() }
 func (d *testDiagOps) DeleteCoreDumps(f string) (int, error)     { return d.cores.Delete(f) }
+func (d *testDiagOps) ExportCoreDumps(ctx context.Context, url string) (int, int, error) {
+	return d.cores.ExportManifest(ctx, url)
+}
 
 func newTestDiagOps(t *testing.T) (*testDiagOps, string) {
 	t.Helper()

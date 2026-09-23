@@ -4630,6 +4630,62 @@
         ]
       }
     },
+    "/system/core-dumps:export": {
+      "post": {
+        "description": "与 CLI `request system core-dumps export <url>` 同一实现：把转储**清单**（JSON：\nhostname / exported_at / core_dumps[]）POST 到目标 URL。**只导出清单**——转储本体\n动辄数 GB，经 `GET /system/core-dumps/{file}` 另取。目标须为 http/https；\n**目标不可达或非 2xx 即失败**（不谎报成功）。\n",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "url": {
+                    "description": "目标地址（http/https）",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "url"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "exported": {
+                      "description": "导出的转储条数",
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "description": "目标端返回的 HTTP 状态",
+                      "type": "integer"
+                    },
+                    "url": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "已导出"
+          }
+        },
+        "summary": "导出 core dump 清单到 URL（宿主操作）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/system/hardware": {
       "get": {
         "responses": {

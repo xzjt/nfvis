@@ -158,7 +158,7 @@
 | `request system configuration backup [to <path>]` | 导出 committed 配置归档 | S | `GET /system/backup` | ✅ |
 | `request system configuration restore <path>` | 导入归档为 candidate 并提交 | S | `PUT /configuration/candidate` | 🚫 会覆盖现网配置 |
 | `request system tech-support generate` | 生成诊断归档 tar.gz | O | `POST /system/tech-support` | ✅ |
-| `request system core-dumps export <url>` | 导出转储到 URL | O | 运行态 | ✅ |
+| `request system core-dumps export <url>` | 导出转储清单到 URL（POST JSON） | O | `POST /system/core-dumps:export` | ✅（决策 #126 修掉此前的假成功） |
 | `request system core-dumps delete [file <n>]` | 删除转储 | O | `DELETE /system/core-dumps` | ✅（**决策 #76⑨** 修错误文案） |
 | `request system zeroize` | 恢复出厂（双重确认） | S | `POST /system:zeroize` | 🚫 破坏性 |
 | `request system api tls regenerate` | 重签自签证书 | S | `POST /system/tls:regenerate` | ✅ |

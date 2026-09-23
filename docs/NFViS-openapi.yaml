@@ -1480,6 +1480,37 @@ paths:
       responses:
         "200": { description: 已重签 }
 
+  /system/core-dumps:export:
+    post:
+      tags: [system]
+      summary: 导出 core dump 清单到 URL（宿主操作）
+      description: |
+        与 CLI `request system core-dumps export <url>` 同一实现：把转储**清单**（JSON：
+        hostname / exported_at / core_dumps[]）POST 到目标 URL。**只导出清单**——转储本体
+        动辄数 GB，经 `GET /system/core-dumps/{file}` 另取。目标须为 http/https；
+        **目标不可达或非 2xx 即失败**（不谎报成功）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, description: 目标地址（http/https） }
+      responses:
+        "200":
+          description: 已导出
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  exported: { type: integer, description: 导出的转储条数 }
+                  url: { type: string }
+                  status: { type: integer, description: 目标端返回的 HTTP 状态 }
+                  message: { type: string }
+
   /system/ssh-host-key:regenerate:
     post:
       tags: [system]

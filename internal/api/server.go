@@ -306,6 +306,8 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/system/tech-support/{file}", s.auth(s.handleDownloadTechSupport, schema.ClassReadOnly, "show system tech-support"))
 	mux.Handle("GET "+APIPrefix+"/system/core-dumps", s.auth(s.handleListCoreDumps, schema.ClassReadOnly, "show system core-dumps"))
 	mux.Handle("DELETE "+APIPrefix+"/system/core-dumps", cfgAPI(s.handleDeleteCoreDumps))
+	mux.Handle("POST "+APIPrefix+"/system/core-dumps:export",
+		s.auth(s.handleExportCoreDumps, schema.ClassOperator, "request system core-dumps export"))
 
 	// 资源 handlers 第一组（GET = show 等级 R；写 = configure 等级 S；FR-API-003 映射）
 	mux.Handle("GET "+APIPrefix+"/system", s.auth(s.handleGetSystem, schema.ClassReadOnly, "show system"))
