@@ -498,32 +498,8 @@ let cfg = {
 
 const CFG_TEXT_ID = 'cfg-text';
 
-// cfgForm 表单定义：把常用字段读写到 candidate 文档上（其余字段走原始 JSON）。
-const cfgForm = {
-  hostname: {
-    label: '主机名',
-    get: (c) => (c.system || {}).hostname || '',
-    set: (c, v) => { if (!c.system) c.system = {}; if (v) c.system.hostname = v; else delete c.system.hostname; },
-  },
-  ntp: {
-    label: 'NTP 服务器',
-    get: (c) => ((c.system || {}).ntp || []).map((n) => n.server || ''),
-    set: (c, vals) => {
-      const list = vals.filter((v) => v !== '').map((v) => ({ server: v }));
-      if (!c.system) c.system = {};
-      if (list.length) c.system.ntp = list; else delete c.system.ntp;
-    },
-  },
-  dns: {
-    label: 'DNS 服务器',
-    get: (c) => ((c.system || {}).dns_servers || []).slice(),
-    set: (c, vals) => {
-      const list = vals.filter((v) => v !== '');
-      if (!c.system) c.system = {};
-      if (list.length) c.system.dns_servers = list; else delete c.system.dns_servers;
-    },
-  },
-};
+// 说明：系统段的字段全部由下面的 CFG_SYS_SECTIONS 声明（与网络域/计算域同一套表单引擎，
+// 见「各节定义」）。此处只留事务级的公共函数。
 
 function cfgMsg(text, isErr) {
   const n = $('cfg-msg');
@@ -556,20 +532,6 @@ function cfgWriteText(c) {
   $(CFG_TEXT_ID).value = JSON.stringify(c, null, 2);
 }
 
-// 表单改动：先解析文本区（保留手工编辑），应用该字段，再写回文本区。
-function cfgApplyForm(key, values) {
-  let c;
-  try {
-    c = cfgText();
-  } catch (e) {
-    cfgMsg('原始 JSON 语法错误，请先修正：' + e.message, true);
-    return;
-  }
-  cfgForm[key].set(c, values);
-  cfgWriteText(c);
-  cfgMsg('已写入 candidate（未保存）——点「保存到 candidate」提交到服务端。', false);
-}
-
 // 核列表解析/格式化（隔离核在 JSON 里是数组，表单里写成 "2-5,7" 更好用）。
 function parseCores(text) {
   const out = [];
@@ -598,9 +560,11 @@ function formatCores(list) {
   return parts.join(',');
 }
 
-// 表单渲染：系统节 + 接口节（描述/MTU/启用/限速绑定）+ 资源池节（隔离核/两个大页池），
-// 然后是网络域与计算域各节（见下面的 CFG_SECTIONS）。
-// 全部走同一套"改字段 → 写回 JSON 文本 → 保存"的路径。
+// 表单渲染（顺序即界面顺序）：系统段（基础 / API 与 TLS / 管理口 / 内核启动参数 / 日志 /
+// 健康阈值 / 登录与口令策略）→ 接口 → 资源池 → VPP 段 → 网络域与计算域各节。
+// 系统段、VPP 段与网络域/计算域**共用同一套节定义与写路径**（见 CFG_SYS_SECTIONS /
+// CFG_VPP_SECTIONS / CFG_SECTIONS）；接口与资源池是更早的两节，走下面的 addField。
+// 全部都是"改字段 → 写回 JSON 文本 → 保存到 candidate"，提交才生效。
 function cfgRenderForms(c) {
   const box = $('cfg-forms');
   box.textContent = '';
@@ -627,17 +591,8 @@ function cfgRenderForms(c) {
     return inp;
   };
 
-  // ---- 系统 ----
-  const sys = el('fieldset', {});
-  sys.appendChild(el('legend', { text: '系统' }));
-  addField(sys, cfgForm.hostname.label, cfgForm.hostname.get(c), (e) => cfgApplyForm('hostname', e.target.value));
-  const ntpVals = cfgForm.ntp.get(c);
-  const ntpInputs = [0, 1].map((i) => addField(sys, cfgForm.ntp.label + ' ' + (i + 1), ntpVals[i],
-    () => cfgApplyForm('ntp', ntpInputs.map((x) => x.value.trim()))));
-  const dnsVals = cfgForm.dns.get(c);
-  const dnsInputs = [0, 1].map((i) => addField(sys, cfgForm.dns.label + ' ' + (i + 1), dnsVals[i],
-    () => cfgApplyForm('dns', dnsInputs.map((x) => x.value.trim()))));
-  box.appendChild(sys);
+  // ---- 系统段 ----
+  cfgRenderList(box, CFG_SYS_SECTIONS, c);
 
   // ---- 接口（对每个已声明接口：描述 / MTU / 启用）----
   const ifs = Array.isArray(c.interfaces) ? c.interfaces : [];
@@ -671,8 +626,11 @@ function cfgRenderForms(c) {
   });
   box.appendChild(pf);
 
+  // ---- VPP 段 ----
+  cfgRenderList(box, CFG_VPP_SECTIONS, c);
+
   // ---- 网络域与计算域（虚拟交换机 / VRF 与路由 / ACL / NAT / QoS / 端口镜像 / 聚合 / LLDP /
-  //      虚拟机 / 容器）：节定义见下面的 CFG_SECTIONS，写路径与上面三节完全相同 ----
+  //      虚拟机 / 容器）：节定义见下面的 CFG_SECTIONS，写路径与上面各节完全相同 ----
   cfgRenderDomainForms(box, c);
 }
 
@@ -762,6 +720,68 @@ function cfgIsPortSpec(s) {
 }
 
 const cfgTextFmt = (v) => (v === undefined || v === null ? '' : String(v));
+
+// —— 口令派生（用户口令字段）——
+//
+// 模型只存 `password_hash`（命令行语句也是先哈希再落库），所以表单**绝不能把明文写进
+// password_hash**——那会变成明文口令落进配置库与审计。故：明文在浏览器里就地派生成
+// 与命令行同一格式的加盐哈希，再写进 candidate；明文既不进 candidate，也不留在页面上。
+//
+// 格式与服务端一致：pbkdf2$sha256$<迭代数>$<b64盐>$<b64哈希>（盐 16 字节、密钥 32 字节、
+// 无填充 base64）。迭代数与密钥长度取服务端同一组值，哈希里自带迭代数，故服务端能校验。
+const CFG_PBKDF2_ITERATIONS = 600000;
+const CFG_PW_HASH_RE = /^pbkdf2\$sha256\$\d+\$[A-Za-z0-9+/]+\$[A-Za-z0-9+/]+$/;
+
+function cfgB64Raw(bytes) {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/=+$/, '');
+}
+
+async function cfgHashPassword(pw) {
+  const c = globalThis.crypto || {};
+  // Web Crypto 只在安全上下文可用（HTTPS 或 localhost）：明文 HTTP 打开的页面里没有它，
+  // 此时**拒绝**而不是退化成明文写入。
+  if (!c.subtle || !c.getRandomValues) {
+    throw new Error('本页面不能派生口令哈希（浏览器只在 HTTPS 或 localhost 下提供该能力）——' +
+      '口令请改用命令行或用户管理入口设置');
+  }
+  const salt = new Uint8Array(16);
+  c.getRandomValues(salt);
+  const key = await c.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveBits']);
+  const bits = await c.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: CFG_PBKDF2_ITERATIONS }, key, 256);
+  return 'pbkdf2$sha256$' + CFG_PBKDF2_ITERATIONS + '$' +
+    cfgB64Raw(salt) + '$' + cfgB64Raw(new Uint8Array(bits));
+}
+
+// cfgPasswordPolicyIssues 本地复刻服务端口令策略判据（长度按**字节**、复杂度 ≥3/4 类字符）：
+// 明文只在这里出现，等服务端看到时已是哈希，服务端无从再判——所以策略必须在派生**之前**判。
+function cfgPasswordPolicyIssues(c, pw) {
+  const pol = (((c || {}).system || {}).login || {}).password_policy || {};
+  const minLen = pol.min_length > 0 ? pol.min_length : 8;
+  const bad = [];
+  if (new TextEncoder().encode(pw).length < minLen) bad.push('长度不足 ' + minLen + ' 字符');
+  if (pol.complexity) {
+    const kinds = [/\p{Lu}/u, /\p{Ll}/u, /\p{Nd}/u, /[\p{P}\p{S}]/u].filter((re) => re.test(pw)).length;
+    if (kinds < 3) bad.push('复杂度不足（需至少 3/4 类：大写/小写/数字/特殊字符）');
+  }
+  return bad;
+}
+
+// cfgPreparePassword 控件值 → 可写入的值：已是哈希则原样接受（load/克隆语义，与命令行一致）。
+async function cfgPreparePassword(text) {
+  if (text.startsWith('pbkdf2$')) return text;
+  let c;
+  try {
+    c = cfgText();
+  } catch (e) {
+    throw new Error('原始 JSON 语法错误，请先修正：' + e.message);
+  }
+  const bad = cfgPasswordPolicyIssues(c, text);
+  if (bad.length) throw new Error('口令不满足策略：' + bad.join('；'));
+  return await cfgHashPassword(text);
+}
 
 // 字段类型：控件形态 + 文本 ↔ 配置值的转换。空串一律表示「删除该字段」（与上面三节同口径）。
 // parse 返回 { value } 或 { error }（error 时调用方**不写入** candidate）。
@@ -862,6 +882,60 @@ const CFG_KINDS = {
       return { value: parts[0].trim() + ' to ' + parts[1].trim() };
     },
   },
+  // 逗号分隔的 IP 列表（DNS 服务器这类）
+  iplist: {
+    fmt: (v) => (Array.isArray(v) ? v.join(', ') : ''),
+    parse: (t) => {
+      const out = [];
+      for (const part of t.split(',')) {
+        const p = part.trim();
+        if (!p) continue;
+        if (!cfgIsIP(p)) return { error: p + ' 不是 IP 地址（多条用逗号分隔，如 8.8.8.8, 1.1.1.1）' };
+        out.push(p);
+      }
+      return { value: out.length ? out : '' };
+    },
+  },
+  // 每行一条的字符串列表（内核参数：值里可能自带逗号，故不按逗号拆）
+  lines: {
+    fmt: (v) => (Array.isArray(v) ? v.join('\n') : ''),
+    multiline: true,
+    parse: (t) => {
+      const out = t.split('\n').map((x) => x.trim()).filter((x) => x !== '');
+      return { value: out.length ? out : '' };
+    },
+  },
+  // VPP 的 worker 核列表（如 5,7,9-11）：形态与区间方向本地判，是否落在隔离核池由服务端判
+  corelist: {
+    fmt: cfgTextFmt,
+    parse: (t) => {
+      const s = t.replace(/\s+/g, '');
+      if (!/^\d+(-\d+)?(,\d+(-\d+)?)*$/.test(s)) return { error: '形如 5,7,9-11（逗号分隔的核号或核号区间）' };
+      for (const part of s.split(',')) {
+        const [lo, hi] = part.split('-');
+        if (hi !== undefined && Number(lo) > Number(hi)) {
+          return { error: '核区间 ' + part + ' 不合法（起始核号应不大于结束核号）' };
+        }
+      }
+      return { value: s };
+    },
+  },
+  // VPP 主堆大小（如 1G / 512M）
+  heapSize: {
+    fmt: cfgTextFmt,
+    parse: (t) => (/^\d+\s*[KMG]$/i.test(t.trim())
+      ? { value: t.trim().toUpperCase() }
+      : { error: '形如 1G 或 512M' }),
+  },
+  // 口令（写 password_hash）：留空 = 不改动；填明文 → 浏览器就地派生成加盐哈希再写入；
+  // 填 pbkdf2$… 哈希 → 直接写入（与命令行 load/克隆的口径一致）。明文永不进 candidate。
+  password: {
+    fmt: () => '', // 口令哈希是敏感叶子，配置视图本就不返回——表单也不回显
+    emptyNoop: true,
+    prepare: cfgPreparePassword,
+    parse: (t) => (CFG_PW_HASH_RE.test(t) ? { value: t }
+      : { error: '口令哈希格式不合法（应为 pbkdf2$sha256$…）' }),
+  },
   // 键值对（容器的环境变量）：每行 KEY=VALUE
   kvmap: {
     fmt: (v) => {
@@ -896,6 +970,11 @@ const CFG_GROUPS = {
   pmSource: [
     { path: ['source', 'interface'], label: '源：物理口 / bond' },
     { path: ['source', 'vnf'], label: '源：VNF' },
+  ],
+  // VPP 的 worker 分配方式二选一：显式核列表，或按 NUMA 自动分配（服务端也这么判）
+  vppWorkers: [
+    { path: ['cpu', 'corelist_workers'], label: 'worker 核列表' },
+    { path: ['cpu', 'workers_per_numa'], label: '每 NUMA worker 数' },
   ],
 };
 
@@ -993,6 +1072,11 @@ function cfgApplyMsg(ok, text) {
 
 // 表单改动 → candidate：解析文本区（保留手工编辑）→ 本地判 → 写一个字段 → 写回文本区。
 function cfgApplyField(loc, spec, text) {
+  const kind = CFG_KINDS[spec.kind];
+  // 少数控件「留空 = 不改动」而非「删除」（口令：删掉哈希会让账号失去口令，服务端也会拒）
+  if (text.trim() === '' && kind.emptyNoop) {
+    return cfgApplyMsg(true, spec.label + '：留空表示不改动（未写入 candidate）。');
+  }
   let c;
   try {
     c = cfgText();
@@ -1000,7 +1084,7 @@ function cfgApplyField(loc, spec, text) {
     return cfgApplyMsg(false, '原始 JSON 语法错误，请先修正：' + e.message);
   }
   // 空（含只有空白）一律表示「删除该字段」——清空即删除，与上面三节同口径
-  const r = text.trim() === '' ? { value: '' } : CFG_KINDS[spec.kind].parse(text, spec);
+  const r = text.trim() === '' ? { value: '' } : kind.parse(text, spec);
   if (r.error) return cfgApplyMsg(false, spec.label + '：' + r.error + '——未写入 candidate，请修正后重试。');
   if (spec.group && r.value !== '') {
     const clash = (CFG_GROUPS[spec.group] || []).find((g) =>
@@ -1095,7 +1179,8 @@ function cfgRenderField(parent, c, loc, spec) {
   const options = spec.options || kind.options;
   const inp = kind.multiline
     ? el('textarea', { id, rows: '3', spellcheck: 'false' })
-    : (options ? el('select', { id }) : el('input', { type: 'text', id }));
+    : (options ? el('select', { id }) : el('input', { type: spec.kind === 'password' ? 'password' : 'text', id }));
+  if (spec.kind === 'password') inp.setAttribute('autocomplete', 'new-password');
   if (options) {
     [['', '（未设置）']].concat(options).forEach(([v, t]) => {
       const opt = el('option', { value: v, text: t });
@@ -1107,12 +1192,34 @@ function cfgRenderField(parent, c, loc, spec) {
   }
   if (spec.hint) inp.setAttribute('placeholder', spec.hint);
   // 与上面三节同口径：监听 input（程序化赋值也会触发）与 change（下拉框用它）
-  const onEdit = () => {
-    inp.className = cfgApplyField(loc, spec, inp.value) ? '' : 'invalid';
+  //
+  // kind.prepare（口令）：控件值先就地转换成要写入的值（明文 → 哈希），**异步**——
+  // 派生期间给一行提示；派生失败（策略不合规、页面非安全上下文）则不写入并说明原因。
+  // 派生成功后清空控件，明文不留在页面上；随后那次失焦的 change 事件不再覆盖提示。
+  let prepared = false;
+  const onEdit = async () => {
+    let text = inp.value;
+    if (kind.prepare && text.trim() !== '') {
+      cfgMsg(spec.label + '：正在本机派生根哈希…', false);
+      try {
+        text = await kind.prepare(text);
+      } catch (e) {
+        inp.className = 'invalid';
+        cfgMsg(spec.label + '：' + e.message + '——未写入 candidate。', true);
+        return;
+      }
+      inp.value = '';
+      prepared = true;
+    } else if (prepared) {
+      prepared = false; // 清空引起的重复事件：保留上一次的结果提示
+      return;
+    }
+    inp.className = cfgApplyField(loc, spec, text) ? '' : 'invalid';
   };
   inp.addEventListener('input', onEdit);
   inp.addEventListener('change', onEdit);
   cell.appendChild(inp);
+  if (spec.note) cell.appendChild(el('p', { class: 'muted small', text: spec.note }));
   parent.appendChild(cell);
   return inp;
 }
@@ -1214,6 +1321,199 @@ function cfgRenderSection(box, sec, c) {
 //
 // 每条语句 ↔ 一个控件：`path` 就是模型里的字段路径（与 JSON 里看到的一致）。
 // 只有标识字段（名字 / seq / 网段 / 接口名）不进 `fields`——它在标题上，靠「新增 / 删除」维护。
+//
+// 系统段与 VPP 段（CFG_SYS_SECTIONS / CFG_VPP_SECTIONS）用**同一套**声明：单对象节
+// （loc 指向文档里的那个对象）+ 字段 + 子表 + 可选「清空本节」，与下面的网络域/计算域完全一致。
+
+// RFC 5424 facility 取值（与服务端同一份名单）
+const CFG_FACILITIES = ['kern', 'user', 'mail', 'daemon', 'auth', 'syslog', 'lpr', 'news', 'uucp',
+  'cron', 'authpriv', 'ftp', 'local0', 'local1', 'local2', 'local3', 'local4', 'local5', 'local6', 'local7']
+  .map((f) => [f, f]);
+
+// 系统段（命令行 `set system …`）。危险/高影响项（证书路径、管理口地址、用户与口令策略）
+// 与普通项一样只写 candidate——提交才生效，界面不提供任何绕过服务端校验与守卫的捷径。
+const CFG_SYS_SECTIONS = [
+  {
+    legend: '系统（基础）',
+    loc: [{ obj: 'system' }],
+    note: '主机名 / 时区 / DNS / NTP / 命令行会话空闲超时。',
+    fields: [
+      { label: '主机名', path: ['hostname'], kind: 'text' },
+      { label: '时区', path: ['timezone'], kind: 'text', hint: '如 Asia/Shanghai' },
+      { label: 'DNS 服务器（逗号分隔）', path: ['dns_servers'], kind: 'iplist', hint: '如 8.8.8.8, 1.1.1.1' },
+      { label: '会话空闲超时（分钟）', path: ['idle_timeout_minutes'], kind: 'int', min: 1 },
+    ],
+    sublists: [{
+      list: 'ntp', key: 'server', keyKind: 'text', title: 'NTP 服务器', what: 'NTP 服务器',
+      keyLabel: '服务器', placeholder: '如 10.0.0.1 或 ntp.example.com',
+      note: '服务器地址可写 IP 或主机名；「首选」标记该服务器为首选源。',
+      fields: [{ label: '首选', path: ['prefer'], kind: 'bool' }],
+    }],
+  },
+  {
+    legend: '系统 · API 与 TLS',
+    loc: [{ obj: 'system' }, { obj: 'api' }],
+    clearPath: ['system', 'api'],
+    note: '控制面 API 的端口、令牌有效期、并发上限与证书/私钥的**文件路径**（证书内容由运维侧放到该路径，' +
+      '本页只声明路径，不上传文件）。改完提交才生效。',
+    fields: [
+      { label: 'HTTPS 端口', path: ['port'], kind: 'int', min: 1, max: 65535 },
+      { label: '令牌有效期（分钟）', path: ['token_ttl_minutes'], kind: 'int', min: 1 },
+      { label: '并发会话上限', path: ['max_sessions'], kind: 'int', min: 1 },
+      { label: '证书文件（PEM 路径）', path: ['cert_file'], kind: 'text', hint: '如 /etc/nfvis/tls/server.crt' },
+      { label: '私钥文件（PEM 路径）', path: ['key_file'], kind: 'text', hint: '如 /etc/nfvis/tls/server.key' },
+      { label: '使用自签证书', path: ['tls_self_signed'], kind: 'bool',
+        note: '声明用自签证书（缺证书时由守护进程生成）。重签自签证书是运维动作，不在这里。' },
+    ],
+  },
+  {
+    legend: '系统 · 管理口',
+    loc: [{ obj: 'system' }, { obj: 'management' }],
+    clearPath: ['system', 'management'],
+    note: '管理网卡与它的静态地址/网关。管理口不得用于数据面（服务端会拒绝）；' +
+      '改地址或网关后提交时，服务端会要求以「commit confirmed」方式提交（避免把自己锁在门外），界面不做替代。',
+    fields: [
+      { label: '管理网卡', path: ['interface'], kind: 'text', hint: '如 ens160' },
+      { label: '管理口地址（CIDR）', path: ['address'], kind: 'cidr', hint: '如 192.168.1.10/24' },
+      { label: '管理口网关', path: ['gateway'], kind: 'ip', hint: '如 192.168.1.1' },
+    ],
+  },
+  {
+    legend: '系统 · 内核启动参数',
+    loc: [{ obj: 'system' }, { obj: 'kernel' }],
+    clearPath: ['system', 'kernel'],
+    note: '内核启动基线（大页与隔离核的唯一真源是「资源池」节）。改动写入配置后需重启主机才生效。',
+    fields: [
+      { label: 'NMI watchdog', path: ['nmi_watchdog'], kind: 'bool' },
+      { label: '透明大页', path: ['transparent_hugepages'], kind: 'select',
+        options: [['always', 'always'], ['madvise', 'madvise'], ['never', 'never']] },
+      { label: 'IOMMU', path: ['iommu'], kind: 'select',
+        options: [['on', 'on'], ['off', 'off'], ['pt', 'pt（直通）']] },
+      { label: '低延迟参数组', path: ['low_latency'], kind: 'bool' },
+      { label: 'tuned 性能档', path: ['tuned_profile'], kind: 'text', hint: '如 nfvis-throughput' },
+      { label: '附加内核参数（每行一条）', path: ['params'], kind: 'lines', hint: '如 mitigations=off' },
+    ],
+  },
+  {
+    legend: '系统 · 日志（syslog）',
+    loc: [{ obj: 'system' }, { obj: 'syslog' }],
+    clearPath: ['system', 'syslog'],
+    note: '远程 syslog 目标与本地日志的级别、保留天数、容量上限（超上限滚动覆盖）。',
+    fields: [
+      { label: '远程主机', path: ['remote_host'], kind: 'ip', hint: '如 10.0.0.9' },
+      { label: '远程端口', path: ['remote_port'], kind: 'int', min: 1, max: 65535 },
+      { label: 'facility', path: ['facility'], kind: 'select', options: CFG_FACILITIES },
+      { label: '远程转发级别', path: ['severity'], kind: 'select',
+        options: [['debug', 'debug'], ['info', 'info'], ['warn', 'warn'], ['error', 'error']] },
+      { label: '本地日志级别', path: ['level'], kind: 'select',
+        options: [['debug', 'debug'], ['info', 'info'], ['warn', 'warn'], ['error', 'error']] },
+      { label: '本地保留天数', path: ['retention_days'], kind: 'int', min: 0 },
+      { label: '本地容量上限（MB）', path: ['max_size_mb'], kind: 'int', min: 1 },
+    ],
+  },
+  {
+    legend: '系统 · 健康阈值',
+    loc: [{ obj: 'system' }, { obj: 'health' }, { obj: 'thresholds' }],
+    clearPath: ['system', 'health'],
+    note: '超过阈值即产生告警。留空 = 不设该阈值（不产生对应告警）。',
+    fields: [
+      { label: 'CPU 温度（℃）', path: ['cpu_temp_celsius'], kind: 'int', min: 1, max: 200 },
+      { label: '磁盘温度（℃）', path: ['disk_temp_celsius'], kind: 'int', min: 1, max: 200 },
+      { label: '磁盘使用率（%）', path: ['disk_used_percent'], kind: 'int', min: 1, max: 100 },
+    ],
+  },
+  {
+    legend: '系统 · 登录与口令策略',
+    wide: true,
+    loc: [{ obj: 'system' }, { obj: 'login' }],
+    clearPath: ['system', 'login'],
+    note: '本地用户、自定义 class 与口令策略。口令在本页就地派生成加盐哈希后才写入 candidate——' +
+      '明文不进配置、也不留在页面上；已有用户不填口令即保持原口令不变。',
+    fields: [
+      { label: '口令最小长度', path: ['password_policy', 'min_length'], kind: 'int', min: 4, max: 128 },
+      { label: '口令复杂度（≥3/4 类字符）', path: ['password_policy', 'complexity'], kind: 'bool' },
+      { label: '口令有效期（天，0 = 不过期）', path: ['password_policy', 'expire_days'], kind: 'int', min: 0 },
+      { label: '连续失败锁定阈值', path: ['password_policy', 'lockout_threshold'], kind: 'int', min: 1, max: 100 },
+      { label: '锁定时长（分钟）', path: ['password_policy', 'lockout_minutes'], kind: 'int', min: 1, max: 10080 },
+    ],
+    sublists: [
+      {
+        list: 'users', key: 'name', keyKind: 'text', title: '本地用户', what: '用户',
+        keyLabel: '用户名', placeholder: '如 ops',
+        note: '新增用户后**必须立刻设置口令**——服务端不接受无口令账号（预校验/提交会拒）。',
+        fields: [
+          { label: '归属 class', path: ['class'], kind: 'text',
+            hint: 'super-user / operator / read-only 或自定义 class 名' },
+          { label: '设置口令（留空 = 不改）', path: ['password_hash'], kind: 'password',
+            note: '填明文口令即在本机派生成加盐哈希写入；也可粘贴 pbkdf2$ 哈希（与配置导入同一口径）。' },
+        ],
+      },
+      {
+        list: 'classes', key: 'name', keyKind: 'text', title: '自定义 class', what: 'class',
+        keyLabel: 'class 名', placeholder: '如 netops',
+        note: 'allow / deny 是命令树节点前缀（逗号分隔，deny 优先）；预置 class 不必在此定义。',
+        fields: [
+          { label: '允许的节点', path: ['allow'], kind: 'strlist', hint: '如 show,configure' },
+          { label: '拒绝的节点', path: ['deny'], kind: 'strlist' },
+        ],
+      },
+    ],
+  },
+];
+
+// VPP 段（命令行 `set vpp …`）：生成数据面启动配置的运行时参数。
+const CFG_VPP_SECTIONS = [
+  {
+    legend: 'VPP（数据面）',
+    wide: true,
+    loc: [{ obj: 'vpp' }],
+    clearPath: ['vpp'],
+    note: '数据面运行时配置。主核与 worker 核必须取自「资源池」的隔离核池，大页偏好须与资源池的页大小一致' +
+      '（服务端在提交时校验）；CPU / 内存 / DPDK 的改动提交后需重启数据面才生效。逐字段清空即回落默认值。',
+    fields: [
+      { label: 'CPU 主核', path: ['cpu', 'main_core'], kind: 'int', min: 0 },
+      { label: 'worker 核列表', path: ['cpu', 'corelist_workers'], kind: 'corelist', hint: '如 5,7,9-11',
+        group: 'vppWorkers' },
+      { label: '每 NUMA worker 数', path: ['cpu', 'workers_per_numa'], kind: 'int', min: 1,
+        group: 'vppWorkers' },
+      { label: '内存主堆大小', path: ['memory', 'main_heap_size'], kind: 'heapSize', hint: '如 1G、512M' },
+      { label: '每 NUMA buffer 数', path: ['memory', 'buffers_per_numa'], kind: 'int', min: 1 },
+      { label: '大页偏好', path: ['memory', 'hugepage_preference'], kind: 'select',
+        options: [['2M', '2M'], ['1G', '1G']] },
+      { label: 'DPDK 全局收队列', path: ['dpdk', 'dev', 'rx_queues'], kind: 'int', min: 1 },
+      { label: 'DPDK 全局发队列', path: ['dpdk', 'dev', 'tx_queues'], kind: 'int', min: 1 },
+      { label: 'DPDK 全局收描述符', path: ['dpdk', 'dev', 'rx_descriptors'], kind: 'int', min: 1 },
+      { label: 'DPDK 全局发描述符', path: ['dpdk', 'dev', 'tx_descriptors'], kind: 'int', min: 1 },
+      { label: 'UIO 驱动', path: ['dpdk', 'uio_driver'], kind: 'select',
+        options: [['vfio-pci', 'vfio-pci'], ['igb-uio', 'igb-uio']] },
+    ],
+    sublists: [
+      {
+        list: 'per_dev', key: 'interface', keyKind: 'text', title: '单网卡覆盖', what: '单网卡覆盖',
+        loc: [{ obj: 'dpdk' }], // per_dev 挂在 vpp.dpdk 下（不是 vpp 下）
+        keyLabel: '接口名', placeholder: '如 ens192',
+        note: '只对已声明的物理口生效（服务端会校验）；未覆盖的参数继承上面的全局默认。' +
+          '删除整行 = 该网卡全部参数回落全局默认。',
+        fields: [
+          { label: '收队列', path: ['rx_queues'], kind: 'int', min: 1 },
+          { label: '发队列', path: ['tx_queues'], kind: 'int', min: 1 },
+          { label: '收描述符', path: ['rx_descriptors'], kind: 'int', min: 1 },
+          { label: '发描述符', path: ['tx_descriptors'], kind: 'int', min: 1 },
+        ],
+      },
+      {
+        list: 'plugins', key: 'name', keyKind: 'text', title: '插件开关', what: '插件',
+        keyLabel: '插件名', placeholder: '如 acl / nat / span',
+        note: '删除该行 = 恢复默认（启用）。',
+        fields: [{
+          label: '状态', path: ['state'], kind: 'select',
+          options: [['enable', '启用'], ['disable', '禁用']],
+        }],
+      },
+    ],
+  },
+];
+
 const CFG_SECTIONS = [
   {
     legend: '虚拟交换机',
@@ -1229,7 +1529,9 @@ const CFG_SECTIONS = [
       { label: '类型', path: ['type'], kind: 'select', options: [['l2', 'L2（桥域）'], ['l3', 'L3（VRF）']] },
       { label: '描述', path: ['description'], kind: 'text' },
       { label: 'access VLAN', path: ['vlan_access'], kind: 'int', min: 1, max: 4094 },
-      { label: '端口直通（cross-connect）', path: ['cross_connect'], kind: 'bool' },
+      { label: '端口直通（cross-connect）', path: ['cross_connect'], kind: 'bool',
+        note: '配对＝该交换机的**两个成员端口**（恰好两个，按成员端口顺序直通）——打开前先把这两条成员端口配好。' +
+          '直通是二层透传、无环路保护：两端必须属于不同广播域，同一广播域内直通会成环。' },
       { label: '网关地址（CIDR，逗号分隔）', path: ['gateway', 'addresses'], kind: 'cidrlist' },
       { label: '网关所属 VRF', path: ['gateway', 'vrf'], kind: 'text' },
       { label: '网关入向 ACL', path: ['gateway', 'acl_in'], kind: 'text' },
@@ -1486,9 +1788,14 @@ const CFG_SECTIONS = [
   },
 ];
 
-// 把网络域与计算域各节画进表单容器（与上面三节同一个容器、同一套写路径）。
+// 把一组节定义画进表单容器（系统段 / VPP 段 / 网络域与计算域共用）。
+function cfgRenderList(box, list, c) {
+  list.forEach((sec) => cfgRenderSection(box, sec, c));
+}
+
+// 把网络域与计算域各节画进表单容器（与上面各节同一个容器、同一套写路径）。
 function cfgRenderDomainForms(box, c) {
-  CFG_SECTIONS.forEach((sec) => cfgRenderSection(box, sec, c));
+  cfgRenderList(box, CFG_SECTIONS, c);
 }
 
 // 预校验（POST /configuration/check）：先保存，再让服务端跑与提交相同的全部校验。
