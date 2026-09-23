@@ -333,3 +333,22 @@ func (s *Server) handlePutDPDK(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"interface": name, "pci": pci, "driver": drv})
 }
+
+// handleGetKernel GET /api/v1/system/kernel：内核启动基线三方对照（cmdline / 运行实际 /
+// 配置期望 + 差异）。与 CLI `show system kernel` **同源**（共用 kernelBaselineView）。
+//
+// R51-2 收口：该端点此前**契约已声明但服务端从未注册**（幽灵路径，与已删的 /vpp:restart
+// 相反方向——routes_contract 只查"注册的都在契约里"）。
+func (s *Server) handleGetKernel(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.engine.Committed()
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	view, err := kernelBaselineView(cfg)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}

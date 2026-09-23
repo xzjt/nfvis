@@ -158,6 +158,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	// 认证后端点：required class + 命令树路径（自定义 class ACL 判定用）
 	mux.Handle("POST "+APIPrefix+"/logout", s.auth(s.handleLogout, schema.ClassReadOnly, "logout"))
 	mux.Handle("GET "+APIPrefix+"/system/version", s.auth(s.handleVersion, schema.ClassReadOnly, "show version"))
+	mux.Handle("GET "+APIPrefix+"/system/kernel", s.auth(s.handleGetKernel, schema.ClassReadOnly, "show system kernel"))
 
 	// 配置事务（/configuration/*，configure 为 S 级权限，命令树 §4）
 	cfgAPI := func(h http.HandlerFunc) http.Handler {

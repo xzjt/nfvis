@@ -44,7 +44,6 @@ var uiNotWired = map[string]string{
 	"/system/login-users":                        "用户管理涉及口令策略，界面暂不提供",
 	"/system/login-users/{name}":                 "同上",
 	"/system/login-users/{name}:change-password": "同上",
-	"/system/kernel":                             "内核基线查看——**契约已声明但服务端未注册该路由**（R51-2：与已删的 /vpp:restart 相反的幽灵路径；需实现或删声明，另起一刀）",
 	"/system/kernel:apply":                       "内核基线应用需重启生效，界面暂不提供",
 	"/system/kernel:rollback":                    "同上",
 	"/system/ntp:sync":                           "NTP 立即同步——界面暂无入口",
@@ -114,6 +113,7 @@ func uiCovers(lits []string, path string) bool {
 // uiDynamicWired 由前端**动态拼接**构造、字面量提取不到、但确实调用了的路径 → 出处说明。
 // 收紧 uiCovers 之后，这类路径必须显式登记，否则会被误判成"未接"。
 var uiDynamicWired = map[string]string{
+	"/system/kernel":                                                  "系统卡的内核基线小节：api('/system/kernel')",
 	"/images/{name}":                                                  "imgDelete()：DELETE '/images/' + name",
 	"/vrfs/{name}/routes":                                             "bigRoutes()：api('/vrfs/' + name + '/routes')",
 	"/vrfs/{name}":                                                    "bigRoutes() 的路由表覆盖了排障所需（VRF 详情暂无独立入口）",
