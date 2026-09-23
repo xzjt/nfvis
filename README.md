@@ -13,8 +13,8 @@
 > [`docs/V1-验收检查表.md`](docs/V1-验收检查表.md)）；已定**决策 127 项**（规格书附录 A）；
 > `make check` 全绿。**已知限制请先读** [`docs/NFViS-CLI命令全表.md`](docs/NFViS-CLI命令全表.md) §4。
 >
-> **发布的二进制**见 [Releases](https://github.com/xzjt/nfvis/releases)（最新 **v1.1.26**：Web 控制面
-> 增量 1~3 第一刀——只读总览 / 配置读写 / 诊断视图，内嵌同源托管、前端免构建）；
+> **发布的二进制**见 [Releases](https://github.com/xzjt/nfvis/releases)（最新 **v1.1.27**：CLI⇄REST 覆盖收口——
+> VS/VM 详情统计字段、ssh host-key 重生成、core-dumps 导出、`load merge`；覆盖 236 / 缺口 3 / 例外 19）；
 > 命令全表把 256 条 CLI 命令**逐条真机执行**并标注状态（现全部 ✅／⊘／🚫，无「不可用」项）。
 
 ---
