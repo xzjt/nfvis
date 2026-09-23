@@ -162,9 +162,10 @@ func TestBuildDomainXML_DataDisksAndSeedISO(t *testing.T) {
 		`<source file="/var/lib/nfvis/vms/fw-vm/data1.qcow2">`,
 		`<target dev="vdc" bus="virtio">`,
 		`<driver name="qemu" type="raw">`,
-		`<disk type="file" device="cdrom">`,
+		// seed 走 **virtio 磁盘**（决策 #139，收口 #22）：此前是 sata 光盘，缺 ahci 的 guest
+		// 内核看不到 → cloud-init 静默自禁。设备名接在数据盘之后（vdb/vdc → vdd）。
 		`<source file="/var/lib/nfvis/vms/fw-vm/seed.iso">`,
-		`<target dev="sda" bus="sata">`,
+		`<target dev="vdd" bus="virtio">`,
 		`<readonly>`,
 	)
 }
@@ -180,8 +181,8 @@ func TestBuildDomainXML_ISOImageBootsFromCdrom(t *testing.T) {
 	assertContains(t, xml,
 		`<boot dev="cd">`,
 		`<disk type="file" device="cdrom">`,
-		`<target dev="sda" bus="sata">`,
-		`<target dev="sdb" bus="sata">`, // seed 顺延
+		`<target dev="vdb" bus="virtio">`, // seed 走 virtio（决策 #139）
+		`<target dev="vdb" bus="virtio">`, // seed 走 virtio（决策 #139）
 	)
 }
 

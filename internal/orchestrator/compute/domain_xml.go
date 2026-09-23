@@ -244,7 +244,7 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 }
 
 // buildDisks 主盘 + 附加数据盘 + cloud-init seed ISO。
-// 设备命名确定：主盘 vda，数据盘 vdb/vdc…（virtio）；seed ISO 为 sda（sata cdrom）。
+// 设备命名确定：主盘 vda，数据盘 vdb/vdc…，seed 接在数据盘之后（**均为 virtio**，决策 #139）。
 func buildDisks(vmName string, spec DomainSpec, diskFormat string, isoDisk bool) ([]libvirtxml.DomainDisk, error) {
 	var out []libvirtxml.DomainDisk
 
@@ -280,16 +280,17 @@ func buildDisks(vmName string, spec DomainSpec, diskFormat string, isoDisk bool)
 	}
 
 	if spec.SeedISO != "" {
-		// ISO 主盘时已占 sda，seed 顺延 sdb。
-		seedDev := "sda"
-		if isoDisk {
-			seedDev = "sdb"
-		}
+		// seed 以 **virtio 磁盘**交付（决策 #139，收口 #22）：
+		// 此前挂 SATA 光盘（q35 → ich9-ahci），而 Debian cloud / Alpine virt 这类常用精简内核
+		// **不含 ahci 驱动** → guest 看不到该盘 → cloud-init 按 notfound=disabled **静默自我禁用**
+		// （VM 起来了、user-data 没生效、全程无报错）。NoCloud 数据源扫的是「任何带 CIDSA/CIDATA
+		// 文件系统的块设备」，不要求是光盘，故以 virtio 磁盘交付即可，而 virtio_blk 在这些内核里都有。
+		seedDev := diskDevName(len(spec.DataDisks) + 1) // 接在数据盘之后，不与之撞名
 		out = append(out, libvirtxml.DomainDisk{
-			Device:   "cdrom",
+			Device:   "disk",
 			Driver:   &libvirtxml.DomainDiskDriver{Name: "qemu", Type: "raw"},
 			Source:   &libvirtxml.DomainDiskSource{File: &libvirtxml.DomainDiskSourceFile{File: spec.SeedISO}},
-			Target:   &libvirtxml.DomainDiskTarget{Dev: seedDev, Bus: "sata"},
+			Target:   &libvirtxml.DomainDiskTarget{Dev: seedDev, Bus: "virtio"},
 			ReadOnly: &libvirtxml.DomainDiskReadOnly{},
 		})
 	}
