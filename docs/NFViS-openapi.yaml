@@ -992,6 +992,27 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ConfigCheckResult" }
         "409": { $ref: "#/components/responses/Error409" }
+  /configuration/history:
+    get:
+      tags: [configuration]
+      summary: 配置提交历史（rev/时间/用户/注释，最新在前）
+      description: |
+        列出保留的 committed 历史快照的**元数据**（决策 #142）：CLI 有 `rollback [n]` 与
+        `show configuration compare rollback <n>`，但此前没有「列出历史快照」的读物——
+        控制台的配置历史页（`#/config/history`）需要「rev → 时间/用户/注释」的列表，
+        操作者据此先看差异再回滚。
+        权限与 `GET /configuration` 同口径（ClassReadOnly，命令树路径 `show configuration history`）。
+        **只回元数据、不回配置正文**（FR-SEC-007：历史快照里可能含口令哈希等敏感字段，
+        列表不需要它们，故不脱敏也不外发）；`user` 对迁移前写入的历史快照为空串——
+        当时未记录提交者，宁可空着也不编造。
+      responses:
+        "200":
+          description: OK（无历史时为空数组）
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ConfigRevision" }
   /configuration/rollback/{n}:
     parameters: [{ name: n, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 50 } }]
     post:
@@ -2703,6 +2724,18 @@ components:
       properties:
         candidate: { $ref: "#/components/schemas/ConfigDocument" }
         dirty: { type: boolean, description: 相对 committed 是否有未提交变更 }
+
+    ConfigRevision:
+      type: object
+      description: |
+        配置提交历史条目（决策 #142；`GET /configuration/history` 的数组元素）。
+        **不含配置正文**——历史快照可能含敏感字段，列表只给元数据。
+      properties:
+        rev: { type: integer, description: 修订号（单调递增，最新一份即当前 committed） }
+        committed_at: { type: string, format: date-time, description: 提交时间（UTC） }
+        user: { type: string, description: 提交者；迁移前写入的历史快照未记录提交者，为空串 }
+        comment: { type: string, description: 提交说明；未填时为空串 }
+        current: { type: boolean, description: 是否为当前生效的 committed 修订 }
 
     DiagOutput:
       type: object

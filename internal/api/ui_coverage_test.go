@@ -30,6 +30,7 @@ var uiNotWired = map[string]string{
 	"/system/hardware":                   "硬件健康明细——后续增量（阈值告警已在告警卡体现）",
 	"/system/health/thresholds":          "健康阈值设置——后续增量",
 	"/configuration/rollback/{n}":        "回滚到历史快照——需先看差异再确认，后续增量",
+	"/configuration/history":             "配置提交历史（rev/时间/用户/注释）——刀 3 接入（控制台的配置页历史与回滚）",
 	"/protocols/lldp":                    "LLDP 开关状态——邻居表已接；开关属配置编辑（走「配置」卡）",
 
 	// —— 只有 DELETE 的端点：界面暂无删除入口（详情页从**列表端点**取数）——

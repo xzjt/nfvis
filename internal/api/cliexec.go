@@ -396,6 +396,9 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 			}
 			return diff + "\n"
 		}
+		if len(t) >= 2 && t[1] == "history" {
+			return x.cfgHistory() // show configuration history（与 GET /configuration/history 同源）
+		}
 		cfg, err := x.engine.Committed()
 		if err != nil {
 			return "%% 读取配置失败: " + err.Error() + "\n"
@@ -573,6 +576,34 @@ func (x *cliExecutor) execSetDelete(user, source string, s *cliSession, op strin
 		return "[ok] " + strings.Join(maskStatementTokens(full), " ") + "\n"
 	}
 	return "已删除 " + strings.Join(full, " ") + "（未提交）\n"
+}
+
+// cfgHistory 渲染配置提交历史（show configuration history）。
+// 与 REST 端点 GET /configuration/history **同源**：同一个 Engine.History，
+// 不存在第二份取数逻辑（决策 #142）。只显示元数据——不含配置正文。
+func (x *cliExecutor) cfgHistory() string {
+	revs, err := x.engine.History(0)
+	if err != nil {
+		return "%% 读取配置历史失败: " + err.Error() + "\n"
+	}
+	x.structured = revs // `| display json` 直接用引擎的响应结构
+	if len(revs) == 0 {
+		return "（无历史快照）\n"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-6s %-20s %-14s %-8s %s\n", "Rev", "Committed-At", "User", "Current", "Comment")
+	for _, r := range revs {
+		user, cur := r.User, ""
+		if user == "" {
+			user = "（未记录）" // 迁移前写入的快照没有提交者，如实显示
+		}
+		if r.Current {
+			cur = "yes"
+		}
+		fmt.Fprintf(&b, "%-6d %-20s %-14s %-8s %s\n",
+			r.Rev, r.CommittedAt.UTC().Format("2006-01-02 15:04:05"), user, cur, r.Comment)
+	}
+	return b.String()
 }
 
 func (x *cliExecutor) cfgShow(user, source string, s *cliSession, args []string) string {

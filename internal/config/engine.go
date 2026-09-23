@@ -181,7 +181,7 @@ func NewEngine(store *Store, applier orchestrator.Applier, opts Options) (*Engin
 		if err != nil {
 			return nil, err
 		}
-		if _, err := store.AppendRevision(b, e.now(), "初始化空配置"); err != nil {
+		if _, err := store.AppendRevision(b, e.now(), "初始化空配置", "system"); err != nil {
 			return nil, err
 		}
 	}
@@ -471,8 +471,8 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 		return res, fmt.Errorf("底座下发失败（已补偿）: %w", err)
 	}
 
-	// 落库：追加式快照，历史修订天然保留（覆盖前快照不丢失）
-	newRev, err := e.store.AppendRevision(mustJSON(newCfg), e.now(), opts.Message)
+	// 落库：追加式快照，历史修订天然保留（覆盖前快照不丢失）；记提交者（决策 #142）
+	newRev, err := e.store.AppendRevision(mustJSON(newCfg), e.now(), opts.Message, sess.User)
 	if err != nil {
 		return res, err
 	}
@@ -688,7 +688,7 @@ func (e *Engine) doConfirmedRollback(cf *ConfirmedInfo) {
 	}
 	now := e.now()
 	if _, err := e.store.AppendRevision(baseJSON, now,
-		fmt.Sprintf("commit confirmed 超时，自动回滚到 rev %d", cf.BaseRev)); err != nil {
+		fmt.Sprintf("commit confirmed 超时，自动回滚到 rev %d", cf.BaseRev), "system"); err != nil {
 		e.emit(EventConfirmedTimeout, fmt.Sprintf("自动回滚落库失败: %v", err))
 		return
 	}
@@ -892,6 +892,44 @@ func (e *Engine) CurrentRevision() (int, error) {
 	defer e.mu.Unlock()
 	rev, _, err := e.store.LatestRevision()
 	return rev, err
+}
+
+// Revision 配置提交历史条目（决策 #142：`GET /configuration/history` 与 CLI
+// `show configuration history` 的**同一份**视图；CLI 与 REST 都调 Engine.History，
+// 不存在第二份取数逻辑）。有意不含配置正文（FR-SEC-007）。
+type Revision struct {
+	Rev         int       `json:"rev"`
+	CommittedAt time.Time `json:"committed_at"`
+	User        string    `json:"user"`
+	Comment     string    `json:"comment"`
+	Current     bool      `json:"current"`
+}
+
+// History 返回最近 limit 份 committed 修订的元数据，**最新在前**，
+// 并以 current 标记当前生效的那一份（无历史时返回空切片，不是 nil——契约声明是数组，
+// 发 null 会让按契约写的客户端踩空）。limit <= 0 取默认（保留窗口内的全部）。
+func (e *Engine) History(limit int) ([]Revision, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	revs, err := e.store.ListRevisions(limit)
+	if err != nil {
+		return nil, err
+	}
+	latest := 0
+	if len(revs) > 0 {
+		latest = revs[0].Rev // 降序，首条即最新
+	}
+	out := make([]Revision, 0, len(revs))
+	for _, r := range revs {
+		out = append(out, Revision{
+			Rev:         r.Rev,
+			CommittedAt: r.CommittedAt,
+			User:        r.User,
+			Comment:     r.Message,
+			Current:     r.Rev == latest,
+		})
+	}
+	return out, nil
 }
 
 // AuditTrail 返回最近 limit 条配置变更审计记录（show log audit / GET /audit-logs）。

@@ -45,6 +45,7 @@ var contractCLICommands = []string{
 	"show alarms", "show users", "show images", "show resource-pools",
 	"show log system", "show log audit", "show log vnf vm1",
 	"show virtual-machine-functions", "show container-functions", "show configuration",
+	"show configuration history",
 	// §1.2 request 族
 	"request virtual-machine-functions vm1 start", "request virtual-machine-functions vm1 stop",
 	"request virtual-machine-functions vm1 console",

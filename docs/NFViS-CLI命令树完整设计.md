@@ -94,6 +94,8 @@ show log
   └─ vnf <name> [last <n>]                          # VNF 控制台/事件日志
 show users                                          # 本地用户与 class
 show configuration [permissions <class>]            # 当前 committed 配置（下详 §3）
+show configuration history                          # 提交历史快照列表：rev/时间/用户/注释/是否当前
+                                                    #   （GET /configuration/history；**不含配置正文**）
 show tech-support                                   # 诊断包清单预览（日志+版本+配置+状态）
 
 # 通用管道（所有 show 输出可用）：
@@ -196,6 +198,7 @@ configure 后：  edit <path> | up | top | exit          # 层级导航，提示
 set / delete / show / annotate <path> "text"
 commit [confirmed [minutes]] | commit check | commit and-quit
 rollback [n]           # n 缺省=1；取历史快照为 candidate（需再 commit）
+                       # 历史清单见操作模式 `show configuration history`（rev ←→ n 的对应关系看 rev 差）
 load override|merge <path>        # JSON 配置导入
 save <path>                       # candidate 导出 JSON
 run <oper-command>                # 配置模式内执行操作命令
@@ -496,6 +499,7 @@ virtual-machine-functions {
 |---|---|
 | 操作模式 `show configuration` | **committed** 配置 |
 | 操作模式 `show configuration candidate` | 当前持锁会话的 candidate |
+| 操作模式 `show configuration history` | 保留的历史提交快照**列表**（rev/时间/用户/注释/是否当前；**不含配置正文**。`Engine.History`，与 `GET /configuration/history` 同源，决策 #142） |
 | 操作模式 `show configuration \| compare rollback <n>` | committed ⇄ 第 n 个历史快照 diff（**已实现**：`Engine.Compare(n)`） |
 | 配置模式 `show` | candidate（当前层级） |
 | 配置模式 `show \| display set` | **未实现**（原声明「以 `set` 语句展开，便于复制」）——附录 A #84：需要 model→CLI 的**反向映射**（`save` 导出的是 JSON，别名语句如 `login user … password …` 无法由配置树反推为合法语句），做 lossy 版本会在「复制配置」这件事上制造静默错误，故登记为独立特性而非补丁。替代：`save <file>`（JSON）/ `show configuration`（块状）/ `\| display json` |

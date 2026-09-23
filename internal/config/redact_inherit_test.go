@@ -21,7 +21,7 @@ func TestUpdateCandidateInheritsRedactedPasswordHash(t *testing.T) {
 	base.System.Login = &model.SystemLogin{Users: []model.LoginUserConfig{
 		{Name: "admin", Class: "super-user", PasswordHash: "pbkdf2$sha256$600000$c2FsdA$aGFzaA"},
 	}}
-	if _, err := store.AppendRevision(mustJSON(base), clock.Now(), "基线"); err != nil {
+	if _, err := store.AppendRevision(mustJSON(base), clock.Now(), "基线", "admin"); err != nil {
 		t.Fatalf("预置基线: %v", err)
 	}
 	e, err := NewEngine(store, &mockApplier{}, Options{Now: clock.Now})

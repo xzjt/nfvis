@@ -46,6 +46,21 @@ type ConfirmedInfo struct {
 	Holder   string
 }
 
+// RevisionInfo 一份 committed 快照的**元数据**（决策 #142：配置提交历史列表）。
+//
+// 有意**不含配置正文**（config_json）：历史列表只回答「第几版、什么时候、谁提交的、
+// 说明了什么」，配置内容要看差异（Engine.Compare）或回滚为 candidate 再看——
+// 这样历史出口天然不带敏感字段（FR-SEC-007：快照里可能有口令哈希）。
+type RevisionInfo struct {
+	Rev         int
+	CommittedAt time.Time
+	// User 提交者。迁移前（存储 schema v3 之前）写入的快照没有这个信息 → 空串
+	// （**不谎称已知**，渲染层据此显示「未记录」）。
+	User string
+	// Message 提交说明（commit 的 message），未填时为空串。
+	Message string
+}
+
 // Store SQLite 持久化：committed 快照、candidate 会话锁、confirmed 待确认、审计日志。
 type Store struct {
 	db *sql.DB
@@ -170,10 +185,12 @@ func (s *Store) LoadRevision(rev int) ([]byte, error) {
 
 // AppendRevision 追加一份 committed 快照（追加式，天然满足
 // 「快照必须在覆盖 committed 之前拍」，见 AGENTS.md 常见错误）。
-func (s *Store) AppendRevision(configJSON []byte, at time.Time, message string) (int, error) {
+// user 为提交者（决策 #142：历史列表要给出「谁提交的」）；由守护进程自动产生的
+// 快照（初始化、confirmed 超时回滚）写 "system"。
+func (s *Store) AppendRevision(configJSON []byte, at time.Time, message, user string) (int, error) {
 	res, err := s.db.Exec(
-		`INSERT INTO config_revisions (committed_at, message, config_json) VALUES (?, ?, ?)`,
-		fmtTime(at), message, configJSON,
+		`INSERT INTO config_revisions (committed_at, message, user, config_json) VALUES (?, ?, ?, ?)`,
+		fmtTime(at), message, user, configJSON,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("追加修订: %w", err)
@@ -183,6 +200,34 @@ func (s *Store) AppendRevision(configJSON []byte, at time.Time, message string) 
 		return 0, fmt.Errorf("获取修订号: %w", err)
 	}
 	return int(rev), nil
+}
+
+// ListRevisions 返回最近 limit 份修订的元数据，**最新在前**（决策 #142：
+// 配置提交历史；不读 config_json，故不带配置正文）。limit <= 0 时取全部。
+func (s *Store) ListRevisions(limit int) ([]RevisionInfo, error) {
+	if limit <= 0 {
+		limit = storeKeepRevisions
+	}
+	rows, err := s.db.Query(
+		`SELECT rev, committed_at, COALESCE(user, ''), message FROM config_revisions ORDER BY rev DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("查询修订历史: %w", err)
+	}
+	defer rows.Close()
+	var out []RevisionInfo
+	for rows.Next() {
+		var ri RevisionInfo
+		var at string
+		if err := rows.Scan(&ri.Rev, &at, &ri.User, &ri.Message); err != nil {
+			return nil, fmt.Errorf("读取修订记录: %w", err)
+		}
+		if ri.CommittedAt, err = parseTime(at); err != nil {
+			return nil, fmt.Errorf("解析提交时间: %w", err)
+		}
+		out = append(out, ri)
+	}
+	return out, rows.Err()
 }
 
 // PruneRevisions 只保留最近 keep 份快照。

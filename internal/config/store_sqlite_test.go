@@ -27,11 +27,11 @@ func TestStoreRevisions(t *testing.T) {
 	}
 
 	now := time.Now()
-	r1, err := s.AppendRevision([]byte(`{"system":{"hostname":"a"}}`), now, "init")
+	r1, err := s.AppendRevision([]byte(`{"system":{"hostname":"a"}}`), now, "init", "admin")
 	if err != nil || r1 != 1 {
 		t.Fatalf("AppendRevision: rev=%d err=%v", r1, err)
 	}
-	r2, err := s.AppendRevision([]byte(`{"system":{"hostname":"b"}}`), now, "second")
+	r2, err := s.AppendRevision([]byte(`{"system":{"hostname":"b"}}`), now, "second", "admin")
 	if err != nil || r2 != 2 {
 		t.Fatalf("AppendRevision: rev=%d err=%v", r2, err)
 	}
@@ -54,7 +54,7 @@ func TestStorePruneRevisions(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
 	for i := 0; i < 60; i++ {
-		if _, err := s.AppendRevision([]byte(`{}`), now, ""); err != nil {
+		if _, err := s.AppendRevision([]byte(`{}`), now, "", "admin"); err != nil {
 			t.Fatalf("AppendRevision #%d: %v", i, err)
 		}
 	}
@@ -163,7 +163,7 @@ func TestStoreSchemaVersion(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != CurrentSchemaVersion {
 		t.Fatalf("新库版本应为 %d，实际 %d err=%v", CurrentSchemaVersion, v, err)
 	}
-	if _, err := s.AppendRevision([]byte(`{}`), time.Now(), ""); err != nil {
+	if _, err := s.AppendRevision([]byte(`{}`), time.Now(), "", "admin"); err != nil {
 		t.Fatalf("AppendRevision: %v", err)
 	}
 	if err := s.Close(); err != nil {
