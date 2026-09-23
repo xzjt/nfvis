@@ -85,9 +85,14 @@ func (s *Server) handleGetConfiguration(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handlePutCandidate PUT /configuration/candidate：整体替换 candidate
-// （load override 语义，FR-CFG-008；决策 #22 默认写 candidate，
-// X-NFVIS-Auto-Commit: true 时校验+下发+落库一次完成）。
+// handlePutCandidate PUT /configuration/candidate：写 candidate（FR-CFG-008）。
+//
+// 两种语义（决策 #22/#127）：
+//   - 缺省 = **override**（整体替换，`load override`）；
+//   - `X-NFVIS-Merge: true` = **merge**（按 model.Merge 与现有 candidate 合并，`load merge`）
+//     ——只覆盖文档里出现的字段，未出现的保持不动。
+//
+// X-NFVIS-Auto-Commit: true 时校验+下发+落库一次完成（决策 #22）。
 func (s *Server) handlePutCandidate(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFromIdentity(r)
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
@@ -105,14 +110,27 @@ func (s *Server) handlePutCandidate(w http.ResponseWriter, r *http.Request) {
 		mapEngineError(w, err)
 		return
 	}
-	if err := s.engine.UpdateCandidate(sess, cfg); err != nil {
+	merge := r.Header.Get("X-NFVIS-Merge") == "true"
+	if merge {
+		if err := s.engine.MergeCandidate(sess, cfg); err != nil {
+			mapEngineError(w, err)
+			return
+		}
+	} else if err := s.engine.UpdateCandidate(sess, cfg); err != nil {
 		mapEngineError(w, err)
 		return
 	}
 
 	if r.Header.Get("X-NFVIS-Auto-Commit") != "true" {
 		w.Header().Set("X-NFVIS-Committed", "false")
-		writeJSON(w, http.StatusOK, map[string]any{"candidate": redactConfigView(cfg), "dirty": true})
+		// merge 时入参与结果不同：回显**合并后的 candidate**（override 时二者相同）
+		view := cfg
+		if merge {
+			if cur, _, err := s.engine.Candidate(); err == nil {
+				view = cur
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"candidate": redactConfigView(view), "dirty": true})
 		return
 	}
 
