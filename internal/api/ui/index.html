@@ -12,7 +12,7 @@
 <section id="login-view" class="login-wrap" hidden>
   <form id="login-form" class="login-card">
     <h1>NFViS 控制台</h1>
-    <p class="muted">只读总览：系统、数据面、接口、计算负载与告警</p>
+    <p class="muted">总览 / 配置 / 诊断：数据取自本机 REST 接口</p>
     <label for="username">用户名</label>
     <input id="username" name="username" autocomplete="username" required>
     <label for="password">口令</label>
@@ -105,18 +105,84 @@
       </div>
     </article>
 
-    <article class="card">
-      <h2>虚拟机</h2>
+    <article class="card wide">
+      <h2>虚拟机 <span id="vm-note" class="muted small"></span></h2>
       <table id="vm-table">
-        <thead><tr><th>名称</th><th>状态</th><th>vCPU</th><th>内存</th><th>镜像</th></tr></thead>
+        <thead><tr><th>名称</th><th>状态</th><th>vCPU</th><th>内存</th><th>镜像</th><th>操作</th></tr></thead>
         <tbody></tbody>
       </table>
+      <pre id="vm-stat" class="code" hidden></pre>
+    </article>
+
+    <article class="card wide">
+      <h2>虚拟交换机 <span id="vs-note" class="muted small"></span></h2>
+      <table id="vs-table">
+        <thead><tr><th>名称</th><th>类型</th><th>成员端口</th><th>BD</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <pre id="vs-stat" class="code" hidden></pre>
     </article>
 
     <article class="card">
       <h2>容器</h2>
       <table id="ct-table">
         <thead><tr><th>名称</th><th>状态</th><th>vCPU</th><th>内存</th><th>镜像</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </article>
+
+    <article class="card wide">
+      <h2>镜像</h2>
+      <table id="img-table">
+        <thead><tr><th>名称</th><th>类型</th><th>大小</th><th>引用</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </article>
+
+    <article class="card wide">
+      <h2>网络对象 <span class="muted small">（VRF / ACL / NAT / 聚合 / LLDP / QoS / 端口镜像）</span></h2>
+      <div id="net-objects" class="net-objects"></div>
+    </article>
+
+    <article class="card wide">
+      <h2>运维动作 <span class="muted small">（写操作，均需二次确认）</span></h2>
+      <div class="cfg-forms">
+        <fieldset>
+          <legend>配置与备份</legend>
+          <div class="cfg-actions">
+            <button id="ops-backup-btn" type="button" class="ghost">生成配置备份</button>
+            <button id="ops-tls-btn" type="button" class="ghost">重签自签证书</button>
+            <button id="ops-sshkey-btn" type="button" class="ghost">重新生成 SSH host key</button>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>诊断归档</legend>
+          <div class="cfg-actions">
+            <button id="ops-techsupport-btn" type="button" class="ghost">生成 tech-support 归档</button>
+            <button id="ops-coredumps-btn" type="button" class="ghost">列出 core dump</button>
+            <button id="ops-alarms-btn" type="button" class="ghost">清除已恢复告警</button>
+          </div>
+          <label for="ops-export-url">core dump 清单导出到</label>
+          <input id="ops-export-url" type="text" placeholder="http://192.0.2.10:8080/collect">
+          <div class="cfg-actions"><button id="ops-export-btn" type="button" class="ghost">导出清单</button></div>
+        </fieldset>
+        <fieldset>
+          <legend>电源（影响业务，请先确认）</legend>
+          <div class="cfg-actions">
+            <button id="ops-vpprestart-btn" type="button" class="ghost">重启数据面（VPP）</button>
+            <button id="ops-reboot-btn" type="button" class="danger">重启主机</button>
+            <button id="ops-shutdown-btn" type="button" class="danger">关机</button>
+          </div>
+        </fieldset>
+      </div>
+      <p id="ops-msg" class="muted small" hidden></p>
+      <pre id="ops-out" class="code" hidden></pre>
+    </article>
+
+    <article class="card wide">
+      <h2>审计日志 <span id="audit-note" class="muted small"></span></h2>
+      <table id="audit-table">
+        <thead><tr><th>时间</th><th>用户</th><th>动作</th><th>详情</th><th>结果</th></tr></thead>
         <tbody></tbody>
       </table>
     </article>
@@ -135,7 +201,18 @@
           <input id="diag-host" type="text" placeholder="192.0.2.1">
           <label for="diag-count">次数</label>
           <input id="diag-count" type="text" value="5">
-          <div class="cfg-actions"><button id="diag-ping-btn" type="button">执行 ping</button></div>
+          <label for="diag-source">源地址（可选，如 192.168.100.1）</label>
+          <input id="diag-source" type="text" placeholder="留空则按目标自动选路">
+          <div class="cfg-actions">
+            <button id="diag-ping-btn" type="button">执行 ping</button>
+            <button id="diag-trace-btn" type="button" class="ghost">执行 traceroute</button>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>接口计数</legend>
+          <label for="diag-clear-if">接口名（留空 = 全部）</label>
+          <input id="diag-clear-if" type="text" placeholder="ens192">
+          <div class="cfg-actions"><button id="diag-clear-btn" type="button" class="ghost">清零统计</button></div>
         </fieldset>
       </div>
       <p class="muted small">只覆盖数据面（VPP）——管理口在内核平面，请在宿主机上 ping。</p>
@@ -152,7 +229,8 @@
 
   <footer class="foot muted">
     数据取自本机 REST 接口；页面每 5 秒兜底刷新一次，事件推送到达时立即刷新。
-    配置修改在「配置」卡片里经 candidate → 提交 流程进行，未提交前不影响运行配置。
+    配置修改在「配置」卡片里经 candidate → 提交 流程进行，未提交前不影响运行配置；
+    写类运维动作在「运维动作」卡片里，均需二次确认。
   </footer>
 </section>
 

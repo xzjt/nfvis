@@ -1180,12 +1180,6 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/ConfigAccepted" }
         "400": { $ref: "#/components/responses/Error400" }
-  /vpp:restart:
-    post:
-      tags: [system]
-      summary: 按新配置重启 VPP 数据面（触发恢复收敛）
-      responses:
-        "202": { description: 已受理（异步完成，事件通知） }
   /vpp/capture:
     get:
       tags: [system]
