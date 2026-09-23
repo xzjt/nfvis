@@ -2961,6 +2961,7 @@
         ]
       },
       "put": {
+        "description": "两种语义：缺省 = **override**（整体替换，等价 CLI `load override`）；\n请求头 `X-NFVIS-Merge: true` = **merge**（按字段合并，等价 CLI `load merge`）——\n只覆盖文档里出现的字段，未出现的保持不动（`model.Merge` 语义）。\n200 响应的 `candidate` 是**合并后**的结果（merge 时与请求体不同）。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2973,10 +2974,10 @@
         },
         "responses": {
           "200": {
-            "description": "candidate 已更新（未提交）。缺省分支返回 `CandidateView`；\n带 `X-NFVIS-Auto-Commit: true` 时走提交分支、返回 `CommitResult`（两种形状，\n故此处不声明 schema——形状守护覆盖的是 GET 分支）。\n"
+            "description": "candidate 已更新（未提交）。缺省分支返回 `CandidateView`（`candidate` 为替换/合并后的文档）；\n带 `X-NFVIS-Auto-Commit: true` 时走提交分支、返回 `CommitResult`（两种形状，\n故此处不声明 schema——形状守护覆盖的是 GET 分支）。\n"
           }
         },
-        "summary": "整体替换 candidate（load override 语义）",
+        "summary": "写 candidate（override 或 merge）",
         "tags": [
           "configuration"
         ]

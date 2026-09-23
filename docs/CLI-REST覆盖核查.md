@@ -9,9 +9,9 @@
 
 ## 0. 结论
 
-**258 个命令形态中：235 个已有类型化 REST 端点（可直接写页面）、4 个是真缺口（需补 API）、19 个是 CLI-only by design（交互形态差异，不需要 API）。**
+**258 个命令形态中：236 个已有类型化 REST 端点（可直接写页面）、3 个是真缺口（需补 API）、19 个是 CLI-only by design（交互形态差异，不需要 API）。**
 
-> 更新记录：缺口 #1（`show configuration` committed 全量读取）已于 **round43 收口**（新增 `GET /configuration`，决策 #119）——覆盖 225→226、缺口 14→13；缺口 #2/#3/#4/#7（日志 / ping / traceroute / 清零统计）已于 **round47 收口**（决策 #123），缺口 #10（`commit check` 预校验）已于 **round46 收口**（决策 #122）——覆盖 226→**231**、缺口 13→**8**；缺口 #5/#6（VS/VM 详情的 statistics 响应字段）已于 **round49 收口**（决策 #124）——覆盖 **231→233**、缺口 **8→6**；缺口 #8（`ssh host-key regenerate`）已于 **round49 收口**（决策 #125）——覆盖 **233→234**、缺口 **6→5**；缺口 #9（`core-dumps export`）已于 **round49 收口**（决策 #126，**并修掉 CLI 侧的假成功**）——覆盖 **234→235**、缺口 **5→4**。下表保留原始条目并标注状态，便于追溯。
+> 更新记录：缺口 #1（`show configuration` committed 全量读取）已于 **round43 收口**（新增 `GET /configuration`，决策 #119）——覆盖 225→226、缺口 14→13；缺口 #2/#3/#4/#7（日志 / ping / traceroute / 清零统计）已于 **round47 收口**（决策 #123），缺口 #10（`commit check` 预校验）已于 **round46 收口**（决策 #122）——覆盖 226→**231**、缺口 13→**8**；缺口 #5/#6（VS/VM 详情的 statistics 响应字段）已于 **round49 收口**（决策 #124）——覆盖 **231→233**、缺口 **8→6**；缺口 #8（`ssh host-key regenerate`）已于 **round49 收口**（决策 #125）——覆盖 **233→234**、缺口 **6→5**；缺口 #9（`core-dumps export`）已于 **round49 收口**（决策 #126，**并修掉 CLI 侧的假成功**）——覆盖 **234→235**、缺口 **5→4**；缺口 #11（`load merge`）已于 **round49 收口**（决策 #127，`X-NFVIS-Merge: true`）——覆盖 **235→236**、缺口 **4→3**。下表保留原始条目并标注状态，便于追溯。
 
 配置模式的 113 条 `set`/`delete` 语句是最大的一块，**一整轮 candidate API 全覆盖**（`GET/PUT/DELETE /configuration/candidate` + `X-NFVIS-Auto-Commit`）；show 族 65 条里 58 条有对应 GET；request 族 46 条里 42 条有对应动作端点。真正的缺口集中在三类：**整配置读取、日志、连通性诊断（ping/traceroute）**——前者已于 round43 收口，后两者决策 #115 已列入后续增量。
 
@@ -25,7 +25,7 @@
   - **C 例外**：CLI-only by design——REPL 交互形态（导航/补全/持续跟踪/问答向导）或 CLI 侧渲染（管道），Web 的等价物是表单、定时刷新、原生 JSON，不需要 API。
 - **方法**：逐族对照命令全表与 openapi.yaml 的路径/方法/响应 schema；响应缺字段的（如 VS 统计）以契约 schema 为准绳核实。
 
-## 2. A 覆盖矩阵（235 个形态）
+## 2. A 覆盖矩阵（236 个形态）
 
 ### 2.1 show 族（61/65）
 
@@ -97,7 +97,7 @@
 | `clear interfaces statistics [<ifname>]` | `POST /interfaces:clear-statistics`（204；round47 收口） |
 | `commit check` | `POST /configuration/check`（不落库不下发；round46 收口） |
 
-### 2.4 配置模式（123/128）
+### 2.4 配置模式（124/128）
 
 | 命令族 | REST 落点 |
 |---|---|
@@ -107,10 +107,11 @@
 | `commit` / `commit confirmed [min]` / `commit and-quit` | `POST /configuration/commit`（`confirmed_minutes>0` 即 confirmed）/ `POST /configuration/commit:confirm` |
 | `rollback [n]` | `POST /configuration/rollback/{n}` |
 | `discard` | `DELETE /configuration/candidate` |
-| `load override <path>` | `PUT /configuration/candidate`（override 语义） |
+| `load override <path>` | `PUT /configuration/candidate`（override 语义，缺省） |
+| `load merge <path>` | `PUT /configuration/candidate` + `X-NFVIS-Merge: true`（round49 收口，决策 #127） |
 | `save <path>` | `GET /configuration/candidate`（取 JSON 自行落盘；配置归档另有 `POST /system/backup`） |
 
-## 3. B 缺口清单（**4 个形态**，需补 API；另 9 个已于 round46/47/49 收口，保留原行便于追溯）
+## 3. B 缺口清单（**3 个形态**，需补 API；另 10 个已于 round46/47/49 收口，保留原行便于追溯）
 
 按价值排序；**补法一律契约先行**（openapi + 附录 A 决策 + routes/shape 守护），不碰 `/cli/execute`。
 
@@ -126,7 +127,7 @@
 | 8 | ~~`request system ssh host-key regenerate`~~ | ✅ | ✅ **已收口（round49，决策 #125）**：`POST /system/ssh-host-key:regenerate`（与 CLI 同一实现、审计同码、失败 500 不谎报） | 已解决 |
 | 9 | ~~`request system core-dumps export <url>`~~ | ✅ | ✅ **已收口（round49，决策 #126）**：`POST /system/core-dumps:export`（清单 JSON POST；**同时修掉 CLI 侧只打印「已受理」的假成功**） | 已解决 |
 | 10 | ~~`commit check`（仅校验不下发）~~ | ✅ | ✅ **已收口（round46，决策 #122）**：`POST /configuration/check`（同一份校验、不落库不下发） | 已解决 |
-| 11 | `load merge <path>`（增量合并） | ✅ | `PUT candidate` 只有 override 语义 | 中 |
+| 11 | ~~`load merge <path>`（增量合并）~~ | ✅ | ✅ **已收口（round49，决策 #127）**：`PUT /configuration/candidate` + `X-NFVIS-Merge: true`（回显为合并后的 candidate） | 已解决 |
 | 12 | `request system api token revoke <token-id>` | ⚠️ V1 明确延期（决策 #76⑧） | 仅 `DELETE /login`（当前会话） | 低——已登记；逐 token 吊销随 V2 |
 | 13 | `request system storage format-data` | 🚫 V1 有意延期（破坏性） | 无 | 低——已登记 |
 | 14 | `show vpp runtime [thread <id>]` | ⚠️ 两边都未接入（附录 A #34） | 无 | 低——补它等于补 CLI 自己也没做的能力 |
@@ -165,4 +166,4 @@
 - 增量 2（配置读写）的 API 侧**已齐备**：candidate/commit/confirm/diff/rollback 全部在位，113 条配置语句无需新端点；**唯一阻塞项（缺口 #1，committed 全量读取）已于 round43 收口**（`GET /configuration`，决策 #119），表单回显与配置总览可以直接用它。
 - 高危动作的 Web 确认语义照搬 CLI 的 `--yes`/`confirm`/`commit confirmed` 体系；#19（logout 不释放 candidate 锁）**已于 round43 收口**（决策 #119）。
 - 缺口 #2/#3/#4（日志、ping、traceroute）**已作为增量 3 第一刀收口**（round47，决策 #123）；VS/VM 统计字段**已收口**（round49，决策 #124）；剩余 1 项可做功能补（`load merge`），另 2 项已登记延期（token revoke、format-data），1 项两边都未接（`show vpp runtime`）。
-- 增量顺序（**已完成**）：增量 2 = 配置读写（round43~46）→ 增量 3 第一刀 = 诊断（round47）→ 剩余缺口（两处统计字段、ssh host-key、core-dumps 导出、`load merge`）随见随补。
+- 增量顺序（**已完成**）：增量 2 = 配置读写（round43~46）→ 增量 3 第一刀 = 诊断（round47）→ 剩余缺口里 **4 项可做功能补已全部收口**（统计字段 #5/#6、ssh host-key #8、core-dumps 导出 #9、`load merge` #11，round49）；**余 3 项**：token revoke（延期 V2）、format-data（有意延期）、`show vpp runtime`（两边都未接）。
