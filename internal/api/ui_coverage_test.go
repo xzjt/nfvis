@@ -33,8 +33,6 @@ var uiNotWired = map[string]string{
 	"/container-functions/{name}:start":                               "容器生命周期按钮——与 VM 动作同批做界面",
 	"/container-functions/{name}:stop":                                "同上",
 	"/container-functions/{name}:restart":                             "同上",
-	"/system/tech-support/{file}":                                     "诊断归档下载（文件流）——后续增量",
-	"/system/backup/{file}":                                           "备份归档下载（文件流）——后续增量",
 	"/system/hardware":                                                "硬件健康明细——后续增量（阈值告警已在告警卡体现）",
 	"/system/health/thresholds":                                       "健康阈值设置——后续增量",
 	"/vrfs/{name}":                                                    "VRF 详情——列表已给概览，详情后续增量",
@@ -136,6 +134,9 @@ func uiCovers(lits []string, path string) bool {
 var uiDynamicWired = map[string]string{
 	"/virtual-machine-functions/{name}/console":    "ui/app.js 的 vmConsoleOpen()：api('/virtual-machine-functions/' + name + '/console')",
 	"/virtual-machine-functions/{name}/console/ws": "同上的 WebSocket：new WebSocket(… + res.ws_url)（ws_url 由该端点返回）",
+	"/vpp/capture/{file}":                          "ui/app.js 的 renderCapture()：downloadFile('/vpp/capture/' + name, …)",
+	"/system/backup/{file}":                        "ui/app.js 的 renderArchives()：downloadFile('/system/backup/' + name, …)",
+	"/system/tech-support/{file}":                  "ui/app.js 的 renderArchives()：downloadFile('/system/tech-support/' + name, …)",
 }
 
 // contractPathSet 契约里的全部路径（方法无关）。

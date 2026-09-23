@@ -183,6 +183,20 @@
           <div class="cfg-actions"><button id="ops-export-btn" type="button" class="ghost">导出清单</button></div>
         </fieldset>
         <fieldset>
+          <legend>归档下载</legend>
+          <p class="muted small">备份与诊断归档生成后可从这里下载（生成按钮见「配置与备份」「诊断归档」）。</p>
+          <h3 class="muted small">配置备份</h3>
+          <table id="ops-backup-table">
+            <thead><tr><th>文件</th><th>大小</th><th>时间</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <h3 class="muted small">诊断归档（tech-support）</h3>
+          <table id="ops-tech-table">
+            <thead><tr><th>文件</th><th>大小</th><th>时间</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </fieldset>
+        <fieldset>
           <legend>电源（影响业务，请先确认）</legend>
           <div class="cfg-actions">
             <button id="ops-vpprestart-btn" type="button" class="ghost">重启数据面（VPP）</button>
