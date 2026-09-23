@@ -221,6 +221,34 @@
       <pre id="diag-log" class="code" hidden></pre>
     </article>
 
+    <article class="card wide">
+      <h2>抓包 <span id="cap-note" class="muted small"></span></h2>
+      <div class="cfg-forms">
+        <fieldset>
+          <legend>开始抓包（数据面 pcap trace）</legend>
+          <label for="cap-iface">接口</label>
+          <input id="cap-iface" type="text" placeholder="ens192">
+          <label for="cap-count">缓冲深度（包）</label>
+          <input id="cap-count" type="text" value="1000">
+          <div class="cfg-actions">
+            <button id="cap-start-btn" type="button">开始抓包</button>
+            <button id="cap-stop-btn" type="button" class="ghost">停止（丢弃）</button>
+            <button id="cap-export-btn" type="button">停止并导出 pcap</button>
+          </div>
+        </fieldset>
+      </div>
+      <p class="muted small">
+        抓包是<strong>环形缓冲</strong>：超出深度丢最旧；停止并导出后文件落在服务端，可从下面下载。
+        抓包会占用少量数据面开销，用完请停止。
+      </p>
+      <p id="cap-msg" class="muted small" hidden></p>
+      <div id="cap-active"></div>
+      <table id="cap-table">
+        <thead><tr><th>文件</th><th>大小</th><th>导出时间</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </article>
+
     <article class="card">
       <h2>最近事件</h2>
       <ul id="events" class="events"></ul>

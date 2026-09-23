@@ -22,8 +22,6 @@ import (
 // uiNotWired 契约有、界面**有意**不接的路径 → 理由（新增端点须在此归类或接入界面）。
 var uiNotWired = map[string]string{
 	// —— 已登记：后续增量的界面工作（**这一段就是界面缺口清单**）——
-	"/vpp/capture":                        "抓包视图（开始/停止/导出 pcap）——后续增量",
-	"/vpp/capture/{file}":                 "抓包文件下载——同上",
 	"/container-functions/{name}/logs":    "容器日志视图——与 console 终端同批",
 	"/container-functions/{name}:start":   "容器生命周期按钮——与 VM 动作同批做界面",
 	"/container-functions/{name}:stop":    "同上",

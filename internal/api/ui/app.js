@@ -135,7 +135,7 @@ async function api(path, opts) {
 const soft = (p) => p.catch((e) => ({ __err: e.message }));
 
 async function loadAll() {
-  const [st, ver, vpp, pools, ifaces, vms, cts, alarms, vss, imgs, nets, audit] = await Promise.all([
+  const [st, ver, vpp, pools, ifaces, vms, cts, alarms, vss, imgs, nets, audit, cap] = await Promise.all([
     soft(api('/system/status')),
     soft(api('/system/version')),
     soft(api('/vpp/status')),
@@ -148,6 +148,7 @@ async function loadAll() {
     soft(api('/images')),
     soft(loadNetworkObjects()),
     soft(api('/audit-logs?limit=50')),
+    soft(api('/vpp/capture')),
   ]);
   const ifaceRows = Array.isArray(ifaces) ? await loadInterfaceStats(ifaces) : [];
   const vsRows = Array.isArray(vss) ? await loadVSwitchStats(vss) : [];
@@ -157,6 +158,7 @@ async function loadAll() {
   renderImages(imgs);
   renderNetworkObjects(nets);
   renderAudit(audit);
+  renderCapture(cap);
   renderVMStats(vms, vmStats);
 }
 
@@ -1091,6 +1093,68 @@ function renderAudit(audit) {
     : (rows.length ? '（最近 ' + Math.min(rows.length, 50) + ' 条）' : '');
 }
 
+// ---------- 抓包（数据面 pcap trace）----------
+
+function capMsg(text, isErr) {
+  const p = $('cap-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+function renderCapture(cap) {
+  const active = cap && !cap.__err ? cap.active : null;
+  const files = (cap && !cap.__err && cap.files) || [];
+  $('cap-note').textContent = cap && cap.__err ? '（读取失败：' + cap.__err + '）' : '';
+  $('cap-active').textContent = active
+    ? '进行中：接口 ' + active.interface + '，已抓 ' + dash(active.captured) + ' 包，深度 ' +
+      dash(active.max_depth) + '，开始于 ' + fmtTime(active.started_at)
+    : '（无进行中的抓包）';
+  $('cap-active').className = active ? 'muted small' : 'muted small';
+
+  const tbody = $('cap-table').querySelector('tbody');
+  tbody.textContent = '';
+  if (!files.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '4', class: 'muted', text: '（无已导出 pcap）' }));
+    tbody.appendChild(tr);
+    return;
+  }
+  files.forEach((f) => {
+    const tr = el('tr');
+    [f.name, bytes(f.size_bytes), fmtTime(f.created_at)].forEach((c) => {
+      tr.appendChild(el('td', { text: String(dash(c)) }));
+    });
+    const cell = el('td', { class: 'actions' });
+    const btn = el('button', { type: 'button', class: 'ghost small', text: '下载' });
+    btn.addEventListener('click', () => downloadCapture(f.name));
+    cell.appendChild(btn);
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
+  });
+}
+
+// downloadCapture 带 Authorization 取文件再触发浏览器下载（<a href> 带不了请求头）。
+async function downloadCapture(name) {
+  capMsg('下载 ' + name + '：准备中…', false);
+  try {
+    const res = await fetch(API + '/vpp/capture/' + encodeURIComponent(name), {
+      headers: { Authorization: 'Bearer ' + token },
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = el('a', { href: url, download: name });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    capMsg('已触发下载：' + name + '（' + bytes(blob.size) + '）', false);
+  } catch (e) {
+    capMsg('下载失败：' + e.message, true);
+  }
+}
+
 // ---------- 运维动作（写操作，均二次确认）----------
 
 function opsMsg(text, isErr) {
@@ -1137,6 +1201,33 @@ $('cfg-commit-confirmed-btn').addEventListener('click', () => cfgCommit(10));
 $('cfg-confirm-btn').addEventListener('click', cfgConfirmPending);
 $('cfg-discard-btn').addEventListener('click', cfgEndSession);
 
+// 抓包动作
+$('cap-start-btn').addEventListener('click', () => {
+  const ifname = $('cap-iface').value.trim();
+  if (!ifname) { capMsg('请填写接口名（如 ens192）。', true); return; }
+  const count = Number($('cap-count').value) || 0;
+  return opsRun('开始抓包', '在接口 ' + ifname + ' 上开始抓包？（占用少量数据面开销，用完请停止）',
+    () => api('/vpp/capture', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(count ? { interface: ifname, count } : { interface: ifname }),
+    })).then(() => capMsg('抓包已开始：' + ifname, false));
+});
+$('cap-stop-btn').addEventListener('click', () => opsRun('停止抓包（丢弃）',
+  '停止抓包并丢弃缓冲？（不导出文件）',
+  async () => {
+    await api('/vpp/capture', { method: 'DELETE' });
+    capMsg('已停止（未导出）。', false);
+    return '';
+  }));
+$('cap-export-btn').addEventListener('click', () => opsRun('停止并导出 pcap',
+  '停止抓包并导出 pcap 文件？',
+  async () => {
+    const r = await api('/vpp/capture?export=true', { method: 'DELETE' });
+    capMsg(r && r.exported ? '已导出：' + r.name + '（' + bytes(r.size_bytes) + '）'
+      : (r && r.message) || '未捕获到报文，无文件导出', false);
+    return '';
+  }));
+
 // 运维动作（写操作；confirm 文案写清影响面）
 $('ops-backup-btn').addEventListener('click', () => opsRun('生成配置备份',
   '生成一份配置备份归档？（只读操作，不改运行配置）',
@@ -1172,7 +1263,7 @@ $('ops-export-btn').addEventListener('click', () => {
     }));
 });
 $('ops-vpprestart-btn').addEventListener('click', () => opsRun('重启数据面（VPP）',
-  '重启数据面？**所有经 VPP 的业务流量会中断数秒**，VNF 的 vhost-user 口会重建。',
+  '重启数据面？所有经 VPP 的业务流量会中断数秒，VNF 的 vhost-user 口会重建。',
   () => api('/vpp/restart', { method: 'POST' })));
 $('ops-reboot-btn').addEventListener('click', () => opsRun('重启主机',
   '重启整台主机？所有 VNF 与容器会停止，管理面会断开数分钟。',
@@ -1208,7 +1299,7 @@ $('diag-trace-btn').addEventListener('click', async () => {
 $('diag-clear-btn').addEventListener('click', () => {
   const name = $('diag-clear-if').value.trim();
   return opsRun('清零接口统计',
-    name ? '清零接口 ' + name + ' 的收发计数？' : '清零**所有接口**的收发计数？',
+    name ? '清零接口 ' + name + ' 的收发计数？' : '清零所有接口的收发计数？',
     () => api('/interfaces:clear-statistics', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(name ? { name } : {}),
