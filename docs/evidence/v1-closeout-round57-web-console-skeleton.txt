@@ -1,0 +1,78 @@
+===== V1 收尾第五十七轮：Web 控制台 IA 骨架刀（单页 → 资源域一级 + 对象详情二级）=====
+日期：2026-09-23
+范围：main `a18a56c`（设计文档已合并）+ 本轮分支 `console-ia-skeleton`
+设计：`docs/superpowers/specs/2026-09-23-web-console-ia-design.md`（决策 #141）
+计划：`docs/superpowers/plans/2026-09-23-web-console-skeleton.md`
+
+----- 1. 本刀交付 -----
+- **路由表成为数据**：`internal/api/ui/routes.json`（13 条路由，每条声明 path/title/view/breadcrumb/
+  endpoints/poll）。前端 `JSON.parse`、Go 守护 `encoding/json` 真解析（决策 #116 的教训：结构化数据别用正则）。
+- **页面骨架**：`index.html` 把 16 张卡按域切成 **13 个 `.page` 容器** + 顶栏导航（按资源域分组）+
+  面包屑；**破坏性动作随「运维动作」卡落到运维页，总览页不再出现**（本刀的"总览瘦身"）。
+- **hash 路由**：`router.js`（未知地址提示并回总览）；地址即页面：可分享/收藏/刷新保持/前进后退。
+- **每页按需取数**：`app.js` 拆出 `softLoad(paths)` + `VIEWS` 注册表 + `reload()`；
+  轮询按路由的 `poll`（0 = 不轮询），SSE 事件只重渲染当前页。
+- **守护**：`ui_routes_test.go`（形状/唯一性/每条路由至少一个端点/view 必须在 VIEWS 里）+
+  `TestUIRoutesEndpointsExistInContract`（路由表端点必须在契约里）；覆盖守护的"已接"来源改为
+  **路由表 endpoints ∪ JS 的 `api('/x')` 字面量**（字面量现在只剩动作类端点）。
+- **静态资源白名单**：`internal/api/ui.go` 补 `router.js` / `routes.json`（白名单是硬门：不在表里就 404）。
+
+----- 2. 浏览器操作验收（决策 #141 口径：每个功能都要在浏览器里真的操作一遍）-----
+环境：明文开发态实例（`/root/src-ia` 构建 + 生产库副本，`0.0.0.0:8443`；生产库全程未变）。
+
+**13 条路由逐条操作**（每条：设 hash → 等渲染 → 读"可见页面 / 面包屑 / 数据 / 该页实际请求的 API / JS 错误"）：
+
+| 路由 | 可见页（恰好一个） | 面包屑 | 该页请求的端点 | JS 错误 |
+|---|---|---|---|---|
+| `#/` | page-overview | 总览 | `/system/status`、`/system/version`、`/vpp/status`、`/alarms` | 无 |
+| `#/compute/vms` | page-vms | 计算 › 虚拟机 | `/virtual-machine-functions` + 两台详情 | 无 |
+| `#/compute/containers` | page-containers | 计算 › 容器 | `/container-functions` | 无 |
+| `#/compute/images` | page-images | 计算 › 镜像 | `/images` | 无 |
+| `#/network` | page-network | 网络 › 网络对象 | 七个网络对象端点 | 无 |
+| `#/network/switches` | page-switches | 网络 › 虚拟交换机 | `/virtual-switches` + `vs-vnf` 详情 | 无 |
+| `#/system/pools` | page-pools | 系统 › 资源池 | `/resource-pools` | 无 |
+| `#/system/interfaces` | page-interfaces | 系统 › 接口 | `/interfaces` + ens192/ens224 详情 | 无 |
+| `#/config` | page-config | 配置 | `/configuration` | 无 |
+| `#/ops/actions` | page-ops | 运维 › 动作 | `/system/backup`、`/system/tech-support` | 无 |
+| `#/ops/audit` | page-audit | 运维 › 审计 | `/audit-logs?limit=50` | 无 |
+| `#/ops/diagnostics` | page-diagnostics | 运维 › 诊断 | `/system/logs` | 无 |
+| `#/ops/capture` | page-capture | 运维 › 抓包 | `/vpp/capture` | 无 |
+
+**逐项断言（全部通过）**：
+- **每页只拉自己的端点**：`#/` 只出现上面四条（**没有** VM/审计/抓包）；`#/compute/vms` 只出现 VM 与两台
+  详情（**没有** `/audit-logs`、`/vpp/capture`）；`#/ops/audit` 只出现 `/audit-logs?limit=50`。
+  （证据取自页面内的 `performance.getEntriesByType('resource')`——浏览器侧的独立事实，不靠看服务端日志。）
+- **总览页无破坏性动作**：`#/` 内按钮文本里匹配「重启主机|关机|重启数据面|重签|host key|导出清单」= **0 条**。
+- **深链直达**：直接打开 `…/api/v1/ui/?v=ia4#/system/interfaces` → 该页可见、面包屑「系统 › 接口」、数据在
+  （首格 `ens192`）。
+- **刷新保持**：`reload()` 后仍在 `#/system/interfaces`（hash 与可见页都不变）。
+- **前进/后退**：`#/system/interfaces` → `#/compute/images` → back → 回接口页；forward → 回镜像页。
+- **未知地址**：`#/nope/xyz` → 提示「页面不存在：#/nope/xyz（已回到总览）」+ 总览页；
+  **下一次导航提示自动收起**（`#/network/switches` 时 `#route-notice` 已隐藏）。
+- **静态资源白名单仍然拦得住野路径**：`/ui/nope.js` → 404；`/ui/router.js`、`/ui/routes.json` → 200。
+
+**截图**（会话内已过目）：总览页（新导航 + 无破坏性动作）、虚拟机页（行内动作按钮 + vhost-user 计数）、
+配置页（committed revision 55）、未知地址提示态。
+
+----- 3. 浏览器验收抓到的缺陷（本刀内修掉，全部是"没人眼看就发现不了"类）-----
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| R57-1 | token 失效/任一端点失败时整页抛 JS 错（`(alarms \|\| []).filter is not a function`） | `soft()` 失败给的是 `{__err}` 而非数组，渲染函数直接 `.filter/.map`（**旧代码同处也这样**，只是没人碰过失败路径） | 视图分发处统一 `rowsOf()` 归一 + `pageWarn(d)` 把失败端点列出来（不静默） |
+| R57-2 | 未知地址的提示被"回总览"那次渲染立刻抹掉 | 提示与取数失败共用 `#global-error`，且清理时机在同一次渲染里 | 提示独立成 `#route-notice`；生命周期＝回总览那次显示、下次导航收起 |
+| R57-3 | 导航里组名（计算/网络/系统/配置/运维）与可点项长得一样，读不出层级 | 只有 `.nav-title` 一个弱化样式，且组间无分隔 | 组名更弱 + 组间左侧分隔线；可点项 hover/当前页下划线 |
+
+另记一条**工具假绿**（子代理实测）：`node --check` 对**含 `export` 的 ES module 直接假绿**（括号不匹配也 exit 0）——
+必须用 `node --check --input-type=module < 文件` 或真跑一次模块加载。计划里那句"`node --check` 语法自检"
+对 module 已失效，已在计划文档里更正。
+
+----- 4. 环境（前后）-----
+- 配置库：**逐项未变**（rev 55 / audit 104 / cfgsha 084c3a64…，与动服务前的一致性备份逐项一致）；
+  开发态实例用的是**生产库副本**（`/tmp/nfvis-ia.db`），生产库未碰。
+- 收尾：停开发态实例（按端口反查 PID）→ `systemctl restart vpp` 清残留 → 起回已装服务；
+  `nfvis 1.1.28` active；拓扑 `vnf-a`/`vnf-b` running、BD 6252701 在；产品 CLI ping 3/3（首轮含收敛期首包丢）、
+  独立源 `vppctl ping` 5/5；临时件与 `/root/src-ia` 已清。
+
+----- 5. 下一步（本刀之后的刀）-----
+刀 2（对象详情页取代共享浮层）→ 刀 3（配置域表单覆盖 128 条语句 + 历史/回滚，含新增 `GET /configuration/history`）
+→ 刀 4（分级确认组件 + 22 条"有意不接"接入）→ 刀 5（`uiNotWired` 收到 6 条、手册收尾、全套操作验收）。
+本刀**不动** `uiNotWired`（仍 28 条，收口在刀 4）。
