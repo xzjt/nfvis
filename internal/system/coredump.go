@@ -7,7 +7,13 @@
 package system
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,6 +39,8 @@ type CoreDump struct {
 type CoreDumps struct {
 	Dir      string
 	MaxBytes int64
+	// Client 导出用的 HTTP 客户端（可空，缺省 30s 超时）。
+	Client *http.Client
 }
 
 // NewCoreDumps 构造（dir 空取缺省；maxBytes<=0 取缺省）。
@@ -163,4 +171,48 @@ func (c *CoreDumps) Prune() int {
 		}
 	}
 	return removed
+}
+
+// ExportManifest 把转储**清单**（JSON）POST 到目标 URL，返回导出条数与目标端 HTTP 状态。
+//
+// 只导出清单、不导出转储本体：本体动辄数 GB，经 `GET /system/core-dumps/{file}` 另取
+// （附录 A #126 的定案）。**失败必须报错**——不做"已受理"式的假成功（决策 #89 的口径）。
+func (c *CoreDumps) ExportManifest(ctx context.Context, target string) (int, int, error) {
+	u, err := url.Parse(strings.TrimSpace(target))
+	if err != nil {
+		return 0, 0, fmt.Errorf("导出地址不合法: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return 0, 0, fmt.Errorf("导出地址必须是 http/https（当前 %q）", u.Scheme)
+	}
+	rows := c.List()
+	host, _ := os.Hostname()
+	body, err := json.Marshal(map[string]any{
+		"hostname":    host,
+		"exported_at": time.Now().UTC().Format(time.RFC3339),
+		"core_dumps":  rows,
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	client := c.Client
+	if client == nil {
+		// 有界超时：导出在请求路径上执行，不能把执行器挂住（发现 #13 的同类教训）
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return 0, 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, 0, fmt.Errorf("POST %s 失败: %w", u.Redacted(), err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10)) // 读掉回显便于连接复用
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return len(rows), resp.StatusCode, fmt.Errorf("目标返回 HTTP %d（期望 2xx）", resp.StatusCode)
+	}
+	return len(rows), resp.StatusCode, nil
 }

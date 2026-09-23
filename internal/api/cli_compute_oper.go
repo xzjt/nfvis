@@ -935,8 +935,16 @@ func (x *cliExecutor) systemCoreDumps(user string, rest []string) string {
 		if len(rows) == 0 {
 			return "（无 core dump 可导出）\n"
 		}
-		// 导出全部转储的清单（JSON POST 到目标 URL）；转储文件本体经 API/文件系统另取。
-		return fmt.Sprintf("已受理：%d 个转储清单将导出至 %s（POST）\n", len(rows), rest[1])
+		// 真导出：把转储清单（JSON）POST 到目标 URL；转储文件本体经
+		// `show system core-dumps` 列出的文件名走 API/文件系统另取（附录 A #126）。
+		n, status, err := x.diagOps.ExportCoreDumps(context.Background(), rest[1])
+		if err != nil {
+			x.audit(user, "system.core-dumps.export", "导出转储清单至 "+rest[1], err)
+			return "%% 导出失败: " + err.Error() + "\n"
+		}
+		x.audit(user, "system.core-dumps.export", fmt.Sprintf("导出 %d 个转储清单至 %s（HTTP %d）", n, rest[1], status), nil)
+		return fmt.Sprintf("已导出 %d 个转储清单至 %s（HTTP %d）。转储本体经 show system core-dumps 列出的文件名另行获取。\n",
+			n, rest[1], status)
 	}
 	return "%% 语法: request system core-dumps export <url> | delete [file <name>]\n"
 }

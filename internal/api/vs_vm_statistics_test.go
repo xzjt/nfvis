@@ -131,8 +131,8 @@ func TestVMDetailIncludesStatistics(t *testing.T) {
 	}
 	vm := model.VMFunction{
 		Name: "vm1", Image: "img.qcow2",
-		VCPU:     model.VMCpu{Count: 1},
-		Memory:   model.VMMemory{SizeMB: 512, HugepageSize: "1G"},
+		VCPU:   model.VMCpu{Count: 1},
+		Memory: model.VMMemory{SizeMB: 512, HugepageSize: "1G"},
 		Interfaces: []model.VnfInterface{
 			{Name: "eth0", Type: "vhost-user", VirtualSwitch: "vs-dmz"},
 			{Name: "eth1", Type: "sriov-vf", Sriov: &model.SriovBind{PhysicalInterface: "ens2f0", VFID: 0}}, // 非 vhost-user：不进 statistics

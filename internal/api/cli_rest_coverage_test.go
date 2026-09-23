@@ -157,9 +157,10 @@ var cliRESTCoverage = map[string]string{
 	"request system configuration restore":                    "POST /system/restore",
 	"request system tech-support generate":                    "POST /system/tech-support",
 	"request system core-dumps delete":                        "DELETE /system/core-dumps",
+	"request system core-dumps export":                        "POST /system/core-dumps:export",
 	"request system zeroize":                                  "POST /system:zeroize",
 	"request system api tls regenerate":                       "POST /system/tls:regenerate",
-	"request system ssh host-key regenerate":                "POST /system/ssh-host-key:regenerate",
+	"request system ssh host-key regenerate":                  "POST /system/ssh-host-key:regenerate",
 	"request system password change":                          "POST /system/login-users/{name}:change-password",
 	"request system ntp sync":                                 "POST /system/ntp:sync",
 	"request alarms clear":                                    "POST /alarms:clear",
@@ -210,11 +211,10 @@ var cliRESTExceptions = map[string]string{
 // cliRESTGaps 已登记的 REST 缺口（CLI 有、REST 无）→ 理由/归属。补一个划掉一个。
 // 与 docs/CLI-REST覆盖核查.md §3 的 14 项一一对应。
 var cliRESTGaps = map[string]string{
-	"request system core-dumps export":                 "core-dumps 只有 GET/DELETE，无导出，核查 #9",
-	"load merge":                                       "PUT candidate 只有 override 语义，核查 #11",
-	"request system api token revoke":                  "V1 明确延期（决策 #76⑧）；仅 DELETE /login 吊销当前会话，核查 #12",
-	"request system storage format-data":               "V1 有意延期（破坏性操作），核查 #13",
-	"show vpp runtime":                                 "两边都未接入（附录 A #34），核查 #14",
+	"load merge":                         "PUT candidate 只有 override 语义，核查 #11",
+	"request system api token revoke":    "V1 明确延期（决策 #76⑧）；仅 DELETE /login 吊销当前会话，核查 #12",
+	"request system storage format-data": "V1 有意延期（破坏性操作），核查 #13",
+	"show vpp runtime":                   "两边都未接入（附录 A #34），核查 #14",
 }
 
 // classify 返回命令的归属：A=覆盖（端点）、C=例外、B=缺口、""=未归类。

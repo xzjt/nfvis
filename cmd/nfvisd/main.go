@@ -953,6 +953,9 @@ func (d *diagOpsController) ListCoreDumps() []system.CoreDump { return d.cores.L
 func (d *diagOpsController) DeleteCoreDumps(file string) (int, error) {
 	return d.cores.Delete(file)
 }
+func (d *diagOpsController) ExportCoreDumps(ctx context.Context, url string) (int, int, error) {
+	return d.cores.ExportManifest(ctx, url)
+}
 
 // kernelRelease 读取内核版本（诊断归档用）。
 func kernelRelease() string {
