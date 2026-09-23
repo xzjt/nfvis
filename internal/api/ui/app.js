@@ -598,7 +598,8 @@ function formatCores(list) {
   return parts.join(',');
 }
 
-// 表单渲染：系统节 + 接口节（描述/MTU/启用）+ 资源池节（隔离核/两个大页池）。
+// 表单渲染：系统节 + 接口节（描述/MTU/启用/限速绑定）+ 资源池节（隔离核/两个大页池），
+// 然后是网络域与计算域各节（见下面的 CFG_SECTIONS）。
 // 全部走同一套"改字段 → 写回 JSON 文本 → 保存"的路径。
 function cfgRenderForms(c) {
   const box = $('cfg-forms');
@@ -650,6 +651,8 @@ function cfgRenderForms(c) {
       addField(sub, 'MTU', it.mtu, (e) => cfgApplyIface(it.name, 'mtu', e.target.value === '' ? '' : Number(e.target.value)));
       addField(sub, '启用', it.enabled === undefined || it.enabled === null ? '' : String(it.enabled),
         (e) => cfgApplyIface(it.name, 'enabled', e.target.value === '' ? '' : e.target.value === 'true'), 'select');
+      addField(sub, '入向限速策略', it.ingress_policy,
+        (e) => cfgApplyIface(it.name, 'ingress_policy', e.target.value));
       f.appendChild(sub);
     });
     box.appendChild(f);
@@ -667,6 +670,10 @@ function cfgRenderForms(c) {
       (e) => cfgApplyPools('hugepages', { size, count: e.target.value === '' ? '' : Number(e.target.value) }));
   });
   box.appendChild(pf);
+
+  // ---- 网络域与计算域（虚拟交换机 / VRF 与路由 / ACL / NAT / QoS / 端口镜像 / 聚合 / LLDP /
+  //      虚拟机 / 容器）：节定义见下面的 CFG_SECTIONS，写路径与上面三节完全相同 ----
+  cfgRenderDomainForms(box, c);
 }
 
 // 接口字段改写（按名字定位；名字来自当前 candidate 文本）。
@@ -703,6 +710,785 @@ function cfgApplyPools(key, value) {
   }
   cfgWriteText(c);
   cfgMsg('已写入 candidate（未保存）——点「保存到 candidate」提交到服务端。', false);
+}
+
+// ---------- 配置表单：网络域与计算域 ----------
+//
+// 上面三节（系统 / 接口 / 资源池）之外的配置都落在这里：网络域的虚拟交换机、VRF 与路由、ACL、
+// NAT、QoS、端口镜像、链路聚合、LLDP，计算域的虚拟机与容器。写路径与那三节**完全同一套**：
+// 改字段 → 写回「原始 JSON」文本区 → 「保存到 candidate」→ 预校验 / 差异 / 提交，
+// 不另开通道，也不直接生效（提交才生效）。
+//
+// 三条口径：
+//   ① 定位数组元素用**标识字段**（名字 / seq / 网段），不用数组下标——文本区可被手工编辑，下标会漂；
+//   ② 条目标识等同命令行的路径参数，表单里**不可改**（改标识 = 删除后重建）：否则这一行在改完
+//      标识后就找不到自己，而"定位失败"是静默的，那才是最坏的形态；
+//   ③ 本地判得了的先判——IP/CIDR、端口与端口范围、VLAN 与整数上下限、三选一互斥、
+//      新增时标识非空且不重名；判不过**不写入** candidate 并说明。引用关系（交换机/ACL/镜像/
+//      策略是否存在）、必填项与容量余量交给服务端预校验（与提交用的是同一套校验）。
+
+// 控件 id 计数器：前缀与上面三节（`cfg-f-`）**分开**——同一份 DOM 里 id 不能重名，
+// 否则 label 的 for 会指到别人的输入框（点标签跳错字段、自动化也取错元素）。
+let cfgSeq = 0;
+
+// —— 本地格式判据（与服务端同口径的形态检查；语义合法性最终仍由服务端裁决）——
+
+function cfgIsIPv4(s) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+  return !!m && m.slice(1, 5).every((x) => Number(x) <= 255);
+}
+
+function cfgIsIPv6(s) {
+  return s.indexOf(':') > 0 && /^[0-9a-fA-F:.]+$/.test(s);
+}
+
+function cfgIsIP(s) { return cfgIsIPv4(s) || cfgIsIPv6(s); }
+
+function cfgIsCIDR(s) {
+  const i = s.lastIndexOf('/');
+  if (i <= 0) return false;
+  const ip = s.slice(0, i), bits = s.slice(i + 1);
+  if (!/^\d+$/.test(bits) || !cfgIsIP(ip)) return false;
+  return Number(bits) <= (cfgIsIPv6(ip) ? 128 : 32);
+}
+
+function cfgIsMAC(s) { return /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/.test(s); }
+
+function cfgIsPortSpec(s) {
+  const m = /^(\d+)(?:-(\d+))?$/.exec(s);
+  if (!m) return false;
+  const lo = Number(m[1]), hi = m[2] === undefined ? lo : Number(m[2]);
+  return lo >= 1 && lo <= 65535 && hi >= lo && hi <= 65535;
+}
+
+const cfgTextFmt = (v) => (v === undefined || v === null ? '' : String(v));
+
+// 字段类型：控件形态 + 文本 ↔ 配置值的转换。空串一律表示「删除该字段」（与上面三节同口径）。
+// parse 返回 { value } 或 { error }（error 时调用方**不写入** candidate）。
+const CFG_KINDS = {
+  text: { fmt: cfgTextFmt, parse: (t) => ({ value: t.trim() }) },
+  // 多行文本（user-data / 环境变量）：不 trim——缩进与换行是内容的一部分
+  raw: { fmt: cfgTextFmt, multiline: true, parse: (t) => ({ value: t.replace(/\s+$/, '') }) },
+  int: {
+    fmt: cfgTextFmt,
+    parse: (t, spec) => {
+      const s = t.trim();
+      if (!/^\d+$/.test(s)) return { error: '必须是整数' };
+      const n = Number(s);
+      if (spec.min !== undefined && n < spec.min) return { error: '不得小于 ' + spec.min };
+      if (spec.max !== undefined && n > spec.max) return { error: '不得大于 ' + spec.max };
+      return { value: n };
+    },
+  },
+  bool: {
+    fmt: (v) => (v === true ? 'true' : (v === false ? 'false' : '')),
+    parse: (t) => ({ value: t === '' ? '' : t === 'true' }),
+    options: [['true', '启用'], ['false', '禁用']],
+  },
+  select: { fmt: cfgTextFmt, parse: (t) => ({ value: t }) },
+  ip: {
+    fmt: cfgTextFmt,
+    parse: (t) => (cfgIsIP(t.trim()) ? { value: t.trim() } : { error: '必须是 IP 地址（如 192.168.1.1）' }),
+  },
+  cidr: {
+    fmt: cfgTextFmt,
+    parse: (t) => (cfgIsCIDR(t.trim()) ? { value: t.trim() } : { error: '必须是 ip-prefix（如 10.0.0.0/8）' }),
+  },
+  // ACL 的源/目的：ip-prefix 或 any
+  ipAny: {
+    fmt: cfgTextFmt,
+    parse: (t) => {
+      const s = t.trim();
+      if (s === 'any') return { value: s };
+      return cfgIsCIDR(s) ? { value: s } : { error: '必须是 ip-prefix（如 10.0.0.0/8）或 any' };
+    },
+  },
+  mac: {
+    fmt: cfgTextFmt,
+    parse: (t) => (cfgIsMAC(t.trim()) ? { value: t.trim() } : { error: 'MAC 形如 52:54:00:aa:bb:cc' }),
+  },
+  port: {
+    fmt: cfgTextFmt,
+    parse: (t) => (cfgIsPortSpec(t.trim()) ? { value: t.trim() }
+      : { error: '必须是端口或端口范围（如 80 或 1024-65535）' }),
+  },
+  intlist: {
+    fmt: (v) => (Array.isArray(v) ? v.join(',') : ''),
+    parse: (t, spec) => {
+      const s = t.trim();
+      if (!s) return { value: '' };
+      const out = [];
+      for (const part of s.split(',')) {
+        const p = part.trim();
+        if (!/^\d+$/.test(p)) return { error: '只能是整数，用逗号分隔（如 100,200）' };
+        const n = Number(p);
+        if (spec.min !== undefined && n < spec.min) return { error: p + ' 小于 ' + spec.min };
+        if (spec.max !== undefined && n > spec.max) return { error: p + ' 大于 ' + spec.max };
+        out.push(n);
+      }
+      return { value: out };
+    },
+  },
+  strlist: {
+    fmt: (v) => (Array.isArray(v) ? v.join(',') : ''),
+    parse: (t) => {
+      const out = t.split(',').map((x) => x.trim()).filter((x) => x !== '');
+      return { value: out.length ? out : '' };
+    },
+  },
+  cidrlist: {
+    fmt: (v) => (Array.isArray(v) ? v.join(', ') : ''),
+    parse: (t) => {
+      if (!t.trim()) return { value: '' };
+      const out = [];
+      for (const part of t.split(',')) {
+        const p = part.trim();
+        if (!p) continue;
+        if (!cfgIsCIDR(p)) return { error: p + ' 不是合法的 ip-prefix（如 192.168.100.1/24）' };
+        out.push(p);
+      }
+      return { value: out.length ? out : '' };
+    },
+  },
+  // NAT 源地址池的范围写法（模型是 "<ip> to <ip>" 一个字符串）
+  addrRange: {
+    fmt: cfgTextFmt,
+    parse: (t) => {
+      const s = t.trim();
+      const parts = s.split(/\s+to\s+/i);
+      if (parts.length !== 2 || !cfgIsIP(parts[0].trim()) || !cfgIsIP(parts[1].trim())) {
+        return { error: '写成 "<起始 IP> to <结束 IP>"（如 192.168.155.220 to 192.168.155.225）' };
+      }
+      return { value: parts[0].trim() + ' to ' + parts[1].trim() };
+    },
+  },
+  // 键值对（容器的环境变量）：每行 KEY=VALUE
+  kvmap: {
+    fmt: (v) => {
+      const m = v || {};
+      return Object.keys(m).map((k) => k + '=' + m[k]).join('\n');
+    },
+    multiline: true,
+    parse: (t) => {
+      const out = {};
+      for (const line of t.split('\n')) {
+        const s = line.trim();
+        if (!s) continue;
+        const i = s.indexOf('=');
+        if (i <= 0) return { error: '每行写成 KEY=VALUE（如 TEST_KEY=1）' };
+        const k = s.slice(0, i).trim();
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) return { error: '变量名 ' + k + ' 不合法（字母或下划线开头）' };
+        out[k] = s.slice(i + 1).trim();
+      }
+      return { value: Object.keys(out).length ? out : '' };
+    },
+  },
+};
+
+// 互斥字段组：模型里"三选一 / 二选一"的字段。写其中一个之前先确认同组其余为空——
+// 本地判得了的规则不留给服务端（提交时才报错就白改一轮）。
+const CFG_GROUPS = {
+  portKind: [
+    { path: ['interface'], label: '物理口 / bond' },
+    { path: ['vnf'], label: 'VNF' },
+    { path: ['container'], label: '容器' },
+  ],
+  pmSource: [
+    { path: ['source', 'interface'], label: '源：物理口 / bond' },
+    { path: ['source', 'vnf'], label: '源：VNF' },
+  ],
+};
+
+// —— 定位器：从文档根逐级下潜到要改的对象 ——
+// 每级两种形态之一：{ list, key, val } 取数组里标识字段相符的元素；{ obj } 取对象字段。
+// 空数组 = 文档根本身（单对象节，如 NAT）。
+function cfgLocate(c, loc, create) {
+  let cur = c;
+  for (const step of loc || []) {
+    if (!cur) return null;
+    if (step.obj) {
+      if (!cur[step.obj] || typeof cur[step.obj] !== 'object') {
+        if (!create) return null;
+        cur[step.obj] = {};
+      }
+      cur = cur[step.obj];
+      continue;
+    }
+    const arr = cur[step.list];
+    if (!Array.isArray(arr)) return null;
+    const found = arr.find((x) => x && x[step.key] === step.val);
+    if (!found) return null;
+    cur = found;
+  }
+  return cur || null;
+}
+
+function cfgRead(c, loc, path) {
+  let cur = cfgLocate(c, loc, false);
+  for (const k of path) {
+    if (cur === null || cur === undefined) return undefined;
+    cur = cur[k];
+  }
+  return cur;
+}
+
+function cfgEmptyVal(v) {
+  if (v === null || v === undefined || v === '') return true;
+  if (Array.isArray(v)) return v.length === 0;
+  return typeof v === 'object' && Object.keys(v).length === 0;
+}
+
+// 写一个字段（'' = 删除），并把写空后残留的空容器一并清掉——否则差异里会多出
+// `"gateway": {}`、`"lacp": {}` 这类噪声，看着像改了其实什么都没配。
+function cfgWrite(c, loc, path, value) {
+  const obj = cfgLocate(c, loc, true);
+  if (!obj) return false;
+  const chain = [obj];
+  let cur = obj;
+  for (let i = 0; i < path.length - 1; i++) {
+    const k = path[i];
+    if (cur[k] === null || typeof cur[k] !== 'object') cur[k] = {};
+    cur = cur[k];
+    chain.push(cur);
+  }
+  const last = path[path.length - 1];
+  if (value === '' || value === undefined || value === null) delete cur[last];
+  else cur[last] = value;
+  for (let i = chain.length - 1; i > 0; i--) {
+    const parent = chain[i - 1], key = path[i - 1];
+    if (cfgEmptyVal(parent[key])) delete parent[key];
+  }
+  return true;
+}
+
+// 容器 = 「某个对象上的某个数组字段」：{ loc, list }（loc 为空 = 文档根）。
+// 返回**持有该数组的对象**（create=true 时按需补出中间对象与空数组）。
+function cfgHolder(c, cont, create) {
+  let base = c;
+  for (const step of cont.loc || []) {
+    if (step.obj) {
+      if (!base[step.obj] || typeof base[step.obj] !== 'object') {
+        if (!create) return null;
+        base[step.obj] = {};
+      }
+      base = base[step.obj];
+      continue;
+    }
+    const arr = base[step.list];
+    if (!Array.isArray(arr)) return null;
+    base = arr.find((x) => x && x[step.key] === step.val);
+    if (!base) return null;
+  }
+  if (!Array.isArray(base[cont.list])) {
+    if (!create) return null;
+    base[cont.list] = [];
+  }
+  return base;
+}
+
+function cfgApplyMsg(ok, text) {
+  cfgMsg(text, !ok);
+  return ok;
+}
+
+// 表单改动 → candidate：解析文本区（保留手工编辑）→ 本地判 → 写一个字段 → 写回文本区。
+function cfgApplyField(loc, spec, text) {
+  let c;
+  try {
+    c = cfgText();
+  } catch (e) {
+    return cfgApplyMsg(false, '原始 JSON 语法错误，请先修正：' + e.message);
+  }
+  // 空（含只有空白）一律表示「删除该字段」——清空即删除，与上面三节同口径
+  const r = text.trim() === '' ? { value: '' } : CFG_KINDS[spec.kind].parse(text, spec);
+  if (r.error) return cfgApplyMsg(false, spec.label + '：' + r.error + '——未写入 candidate，请修正后重试。');
+  if (spec.group && r.value !== '') {
+    const clash = (CFG_GROUPS[spec.group] || []).find((g) =>
+      g.path.join('.') !== spec.path.join('.') && !cfgEmptyVal(cfgRead(c, loc, g.path)));
+    if (clash) {
+      return cfgApplyMsg(false, spec.label + '与「' + clash.label +
+        '」互斥（模型里只能指定一个）——请先清空后者，未写入 candidate。');
+    }
+  }
+  if (!cfgWrite(c, loc, spec.path, r.value)) {
+    return cfgApplyMsg(false, '定位不到要改的对象（配置可能已被改动）——请刷新后重试。');
+  }
+  // 伴生字段：清掉主字段时一并清掉它的从属字段（如清了 VNF 名，它的 vNIC 名也不该留着）
+  if (r.value === '' && spec.clears) spec.clears.forEach((p) => cfgWrite(c, loc, p, ''));
+  cfgWriteText(c);
+  return cfgApplyMsg(true, '已写入 candidate（未保存）——点「保存到 candidate」提交到服务端。');
+}
+
+// 新增条目（= 对应的 set 语句，只改 candidate）：标识先本地判（非空、不重名）。
+function cfgAdd(cont, spec, rawVal) {
+  const kind = CFG_KINDS[spec.keyKind || 'text'];
+  const r = rawVal.trim() === '' ? { value: '' } : kind.parse(rawVal, spec);
+  if (r.error) return cfgApplyMsg(false, spec.keyLabel + '：' + r.error + '——未新增。');
+  if (r.value === '') return cfgApplyMsg(false, '请先填写' + spec.keyLabel + '。');
+  let c;
+  try {
+    c = cfgText();
+  } catch (e) {
+    return cfgApplyMsg(false, '原始 JSON 语法错误，请先修正：' + e.message);
+  }
+  const holder = cfgHolder(c, cont, true);
+  if (!holder) return cfgApplyMsg(false, '定位不到要新增到的位置——请刷新后重试。');
+  if (holder[cont.list].some((x) => x && x[cont.key] === r.value)) {
+    return cfgApplyMsg(false, spec.keyLabel + ' ' + r.value + ' 已存在——未新增。');
+  }
+  holder[cont.list].push(Object.assign({ [cont.key]: r.value }, spec.extra ? spec.extra() : {}));
+  cfgWriteText(c);
+  cfgRenderForms(c); // 结构变了：表单按新的 candidate 重画（已改的字段都在文本区里，不会丢）
+  return cfgApplyMsg(true, '已在 candidate 中新增' + spec.what + ' ' + r.value +
+    '（未保存）——提交后才生效。');
+}
+
+// 删除条目（= 对应的 delete 语句，只改 candidate）。
+function cfgRemove(cont, val, what) {
+  let c;
+  try {
+    c = cfgText();
+  } catch (e) {
+    cfgMsg('原始 JSON 语法错误，请先修正：' + e.message, true);
+    return;
+  }
+  const holder = cfgHolder(c, cont, false);
+  const i = holder ? holder[cont.list].findIndex((x) => x && x[cont.key] === val) : -1;
+  if (i < 0) {
+    cfgMsg('要删除的' + what + ' ' + val + '已不在 candidate 里——请刷新后重试。', true);
+    return;
+  }
+  holder[cont.list].splice(i, 1);
+  if (!holder[cont.list].length) delete holder[cont.list]; // 空数组是噪声，整段删掉
+  cfgWriteText(c);
+  cfgRenderForms(c);
+  cfgMsg('已从 candidate 中删除' + what + ' ' + val + '（未保存）——提交后才生效。', false);
+}
+
+// 清空整节（单对象节：NAT / LLDP），= `delete nat` 一类语句。
+function cfgClearSection(path, what) {
+  let c;
+  try {
+    c = cfgText();
+  } catch (e) {
+    cfgMsg('原始 JSON 语法错误，请先修正：' + e.message, true);
+    return;
+  }
+  let cur = c;
+  for (let i = 0; i < path.length - 1; i++) cur = cur ? cur[path[i]] : undefined;
+  if (!cur) {
+    cfgMsg('candidate 里本来就没有' + what + '。', false);
+    return;
+  }
+  delete cur[path[path.length - 1]];
+  cfgWriteText(c);
+  cfgRenderForms(c);
+  cfgMsg('已从 candidate 中删除' + what + '（未保存）——提交后才生效。', false);
+}
+
+// 一个字段：label + 控件；改动即写回 candidate（本地判不过则不写并标红）。
+function cfgRenderField(parent, c, loc, spec) {
+  const cell = el('div', { class: 'cfg-field' });
+  const id = 'cfg-df-' + (cfgSeq++);
+  cell.appendChild(el('label', { text: spec.label, for: id }));
+  const kind = CFG_KINDS[spec.kind];
+  const options = spec.options || kind.options;
+  const inp = kind.multiline
+    ? el('textarea', { id, rows: '3', spellcheck: 'false' })
+    : (options ? el('select', { id }) : el('input', { type: 'text', id }));
+  if (options) {
+    [['', '（未设置）']].concat(options).forEach(([v, t]) => {
+      const opt = el('option', { value: v, text: t });
+      if (kind.fmt(cfgRead(c, loc, spec.path)) === v) opt.setAttribute('selected', 'selected');
+      inp.appendChild(opt);
+    });
+  } else {
+    inp.value = kind.fmt(cfgRead(c, loc, spec.path));
+  }
+  if (spec.hint) inp.setAttribute('placeholder', spec.hint);
+  // 与上面三节同口径：监听 input（程序化赋值也会触发）与 change（下拉框用它）
+  const onEdit = () => {
+    inp.className = cfgApplyField(loc, spec, inp.value) ? '' : 'invalid';
+  };
+  inp.addEventListener('input', onEdit);
+  inp.addEventListener('change', onEdit);
+  cell.appendChild(inp);
+  parent.appendChild(cell);
+  return inp;
+}
+
+function cfgRowHead(text, onDelete, deleteLabel) {
+  const head = el('div', { class: 'cfg-rowhead' });
+  head.appendChild(el('span', { class: 'cfg-subname', text }));
+  if (onDelete) {
+    const btn = el('button', { type: 'button', class: 'small danger', text: deleteLabel || '删除' });
+    btn.addEventListener('click', onDelete);
+    head.appendChild(btn);
+  }
+  return head;
+}
+
+// 新增行：标识输入 + 按钮（回车等同点按钮）。
+function cfgRenderAdd(cont, spec) {
+  const box = el('div', { class: 'cfg-add' });
+  const id = 'cfg-df-' + (cfgSeq++);
+  box.appendChild(el('label', { text: spec.keyLabel, for: id }));
+  const inp = el('input', { type: 'text', id });
+  if (spec.placeholder) inp.setAttribute('placeholder', spec.placeholder);
+  box.appendChild(inp);
+  const btn = el('button', { type: 'button', class: 'small', text: spec.button || '新增' });
+  btn.addEventListener('click', () => cfgAdd(cont, spec, inp.value));
+  inp.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); cfgAdd(cont, spec, inp.value); }
+  });
+  box.appendChild(btn);
+  return box;
+}
+
+// 条目内的子表（成员端口 / 规则 / 路由 / vNIC / 数据盘…）：每条一块（标题 + 字段 + 删除），
+// 底部一行新增。子表的数组字段挂在**条目**上（NAT 这类挂在对象上，见 sub.loc）。
+function cfgRenderSub(sub, loc, c) {
+  const wrap = el('div', { class: 'cfg-sub2' });
+  const cont = { loc: loc.concat(sub.loc || []), list: sub.list, key: sub.key };
+  wrap.appendChild(el('div', { class: 'cfg-subname', text: sub.title }));
+  if (sub.note) wrap.appendChild(el('p', { class: 'muted small', text: sub.note }));
+  // 子表挂在**持有它的对象**上：列表节里是条目本身，单对象节（NAT）里是那个对象
+  const parent = cfgLocate(c, cont.loc, false);
+  const rows = parent && Array.isArray(parent[sub.list]) ? parent[sub.list] : [];
+  if (!rows.length) wrap.appendChild(el('p', { class: 'muted small', text: sub.empty || '（无）' }));
+  rows.forEach((row) => {
+    const rloc = cont.loc.concat([{ list: sub.list, key: sub.key, val: row[sub.key] }]);
+    const box = el('div', { class: 'cfg-sub3' });
+    box.appendChild(cfgRowHead(String(dash(row[sub.key])),
+      () => cfgRemove(cont, row[sub.key], sub.what || sub.title)));
+    const grid = el('div', { class: 'cfg-fields' });
+    (sub.fields || []).forEach((spec) => cfgRenderField(grid, c, rloc, spec));
+    box.appendChild(grid);
+    wrap.appendChild(box);
+  });
+  wrap.appendChild(cfgRenderAdd(cont, sub));
+  return wrap;
+}
+
+// 一个条目：标题（标识字段的值，不可改——等同命令行的路径参数）+ 字段 + 子表 + 删除。
+function cfgRenderItem(sec, loc, it, c) {
+  const wrap = el('div', { class: 'cfg-sub' });
+  const cont = { loc: [], list: sec.list, key: sec.key };
+  wrap.appendChild(cfgRowHead(sec.title(it), () => cfgRemove(cont, it[sec.key], sec.what)));
+  const grid = el('div', { class: 'cfg-fields' });
+  (sec.fields || []).forEach((spec) => cfgRenderField(grid, c, loc, spec));
+  wrap.appendChild(grid);
+  (sec.sublists || []).forEach((sub) => wrap.appendChild(cfgRenderSub(sub, loc, c)));
+  return wrap;
+}
+
+// 渲染一节：fieldset（标题 + 说明）+ 条目 + 新增行（单对象节则直接是字段 + 子表 + 清空）。
+function cfgRenderSection(box, sec, c) {
+  const fs = el('fieldset', { class: sec.wide ? 'cfg-wide' : '' });
+  fs.appendChild(el('legend', { text: sec.legend }));
+  if (sec.note) fs.appendChild(el('p', { class: 'muted small', text: sec.note }));
+  if (sec.list) {
+    const items = Array.isArray(c[sec.list]) ? c[sec.list] : [];
+    if (!items.length) fs.appendChild(el('p', { class: 'muted small', text: '（未配置）' }));
+    items.forEach((it) => fs.appendChild(cfgRenderItem(sec, [{ list: sec.list, key: sec.key, val: it[sec.key] }], it, c)));
+    fs.appendChild(cfgRenderAdd({ loc: [], list: sec.list, key: sec.key },
+      Object.assign({ what: sec.what }, sec.add)));
+  } else {
+    // 单对象节（NAT / LLDP）：没有"条目"这层，字段与子表直接挂在节里
+    const grid = el('div', { class: 'cfg-fields' });
+    (sec.fields || []).forEach((spec) => cfgRenderField(grid, c, sec.loc || [], spec));
+    if ((sec.fields || []).length) fs.appendChild(grid);
+    (sec.sublists || []).forEach((sub) => fs.appendChild(cfgRenderSub(sub, sec.loc || [], c)));
+    if (sec.clearPath) {
+      const btn = el('button', { type: 'button', class: 'small danger', text: '清空本节（' + sec.legend + '）' });
+      btn.addEventListener('click', () => cfgClearSection(sec.clearPath, sec.legend + '配置'));
+      const row = el('div', { class: 'cfg-add' });
+      row.appendChild(btn);
+      fs.appendChild(row);
+    }
+  }
+  box.appendChild(fs);
+}
+
+// —— 各节定义（顺序即界面顺序）——
+//
+// 每条语句 ↔ 一个控件：`path` 就是模型里的字段路径（与 JSON 里看到的一致）。
+// 只有标识字段（名字 / seq / 网段 / 接口名）不进 `fields`——它在标题上，靠「新增 / 删除」维护。
+const CFG_SECTIONS = [
+  {
+    legend: '虚拟交换机',
+    wide: true,
+    list: 'virtual_switches',
+    key: 'name',
+    what: '虚拟交换机',
+    title: (it) => (it.name || '（未命名）') + (it.type ? '（' + it.type + '）' : ''),
+    note: 'L2 = 桥域（access VLAN / 网关 / 成员端口），L3 = VRF（三层接口与静态路由在「VRF / 路由」节的同名条目里）。' +
+      '类型创建后不可改；新增按 L2 建立，要 L3 请在新增后把类型改为 L3。',
+    add: { keyLabel: '名称', keyKind: 'text', placeholder: '如 vs-a', extra: () => ({ type: 'l2' }) },
+    fields: [
+      { label: '类型', path: ['type'], kind: 'select', options: [['l2', 'L2（桥域）'], ['l3', 'L3（VRF）']] },
+      { label: '描述', path: ['description'], kind: 'text' },
+      { label: 'access VLAN', path: ['vlan_access'], kind: 'int', min: 1, max: 4094 },
+      { label: '端口直通（cross-connect）', path: ['cross_connect'], kind: 'bool' },
+      { label: '网关地址（CIDR，逗号分隔）', path: ['gateway', 'addresses'], kind: 'cidrlist' },
+      { label: '网关所属 VRF', path: ['gateway', 'vrf'], kind: 'text' },
+      { label: '网关入向 ACL', path: ['gateway', 'acl_in'], kind: 'text' },
+      { label: '网关出向 ACL', path: ['gateway', 'acl_out'], kind: 'text' },
+    ],
+    sublists: [{
+      list: 'ports', key: 'seq', keyKind: 'int', title: '成员端口', what: '端口',
+      keyLabel: '序号', placeholder: '如 1',
+      note: '物理口 / VNF / 容器三选一（本地就会拦下同时填两个的情况）；trunk VLAN 用逗号分隔。',
+      fields: [
+        { label: '物理口 / bond', path: ['interface'], kind: 'text', group: 'portKind' },
+        { label: 'VNF（VM 名）', path: ['vnf'], kind: 'text', group: 'portKind',
+          clears: [['vnf_interface']] },
+        { label: 'VNF 的 vNIC', path: ['vnf_interface'], kind: 'text' },
+        { label: '容器名', path: ['container'], kind: 'text', group: 'portKind',
+          clears: [['container_interface']] },
+        { label: '容器的 vNIC', path: ['container_interface'], kind: 'text' },
+        { label: 'trunk VLAN 列表', path: ['trunk'], kind: 'intlist', min: 1, max: 4094 },
+        { label: 'native VLAN', path: ['native'], kind: 'int', min: 1, max: 4094 },
+        { label: '入向 ACL', path: ['acl_in'], kind: 'text' },
+        { label: '出向 ACL', path: ['acl_out'], kind: 'text' },
+      ],
+    }],
+  },
+  {
+    legend: 'VRF / 路由',
+    wide: true,
+    list: 'vrfs',
+    key: 'name',
+    what: 'VRF',
+    title: (it) => it.name || '（未命名）',
+    note: 'L3 虚拟交换机的三层接口与静态路由就存在与交换机同名的条目里——在「虚拟交换机」节把类型改为 L3 后，' +
+      '这里会出现同名条目（反过来：这里新建的条目若没有同名 L3 交换机，只是独立的 VRF 配置）。',
+    add: { keyLabel: '名称', keyKind: 'text', placeholder: '如 vs-l3' },
+    fields: [{ label: '描述', path: ['description'], kind: 'text' }],
+    sublists: [
+      {
+        list: 'l3_interfaces', key: 'interface', keyKind: 'text', title: '三层接口', what: '三层接口',
+        keyLabel: '接口名', placeholder: '如 ens192 或 ens192.100',
+        note: '接口名与「接口」节里的物理口一致；VLAN 子接口写成 ens192.100。',
+        fields: [
+          { label: 'VLAN', path: ['vlan'], kind: 'int', min: 1, max: 4094 },
+          { label: '地址（CIDR，逗号分隔）', path: ['addresses'], kind: 'cidrlist' },
+          { label: '入向 ACL', path: ['acl_in'], kind: 'text' },
+        ],
+      },
+      {
+        list: 'routes', key: 'prefix', keyKind: 'cidr', title: '静态路由', what: '静态路由',
+        keyLabel: '目的网段', placeholder: '如 10.0.0.0/8 或 0.0.0.0/0',
+        fields: [
+          { label: '下一跳', path: ['next_hop'], kind: 'ip' },
+          { label: '管理距离', path: ['distance'], kind: 'int', min: 0, max: 255 },
+        ],
+      },
+    ],
+  },
+  {
+    legend: 'ACL',
+    wide: true,
+    list: 'acls',
+    key: 'name',
+    what: 'ACL',
+    title: (it) => (it.name || '（未命名）') + '（' + ((it.rules || []).length) + ' 条规则）',
+    note: '规则按 seq 从小到大生效；源/目的可写 ip-prefix 或 any。绑定在交换机端口 / L3 接口 / 网关的 ACL 字段上。',
+    add: { keyLabel: '名称', keyKind: 'text', placeholder: '如 acl-a' },
+    fields: [{ label: '描述', path: ['description'], kind: 'text' }],
+    sublists: [{
+      list: 'rules', key: 'seq', keyKind: 'int', title: '规则', what: '规则',
+      keyLabel: '序号', placeholder: '如 10',
+      fields: [
+        { label: '方向', path: ['direction'], kind: 'select', options: [['ingress', 'ingress'], ['egress', 'egress']] },
+        { label: '源', path: ['source'], kind: 'ipAny', hint: 'ip-prefix 或 any' },
+        { label: '目的', path: ['destination'], kind: 'ipAny', hint: 'ip-prefix 或 any' },
+        { label: '协议', path: ['protocol'], kind: 'select', options: [['tcp', 'tcp'], ['udp', 'udp'], ['icmp', 'icmp'], ['any', 'any']] },
+        { label: '源端口', path: ['source_port'], kind: 'port', hint: '如 80 或 1024-65535' },
+        { label: '目的端口', path: ['destination_port'], kind: 'port' },
+        { label: '动作', path: ['action'], kind: 'select', options: [['permit', 'permit'], ['deny', 'deny']] },
+      ],
+    }],
+  },
+  {
+    legend: 'NAT',
+    wide: true,
+    loc: [{ obj: 'nat' }],
+    clearPath: ['nat'],
+    note: 'NAT44 仅作用于 L3 交换机；规则的出接口必填（不填提交会被拒），且出接口须是某 L3 交换机的三层接口并配了地址。',
+    sublists: [
+      {
+        list: 'source_pools', key: 'name', keyKind: 'text', title: '源地址池', what: '地址池',
+        keyLabel: '池名', placeholder: '如 pool-a',
+        fields: [{ label: '地址范围', path: ['address_range'], kind: 'addrRange', hint: '192.168.155.220 to 192.168.155.225' }],
+      },
+      {
+        list: 'rules', key: 'seq', keyKind: 'int', title: '转换规则', what: 'NAT 规则',
+        keyLabel: '序号', placeholder: '如 10',
+        fields: [
+          { label: '匹配源（CIDR）', path: ['match_source'], kind: 'cidr' },
+          { label: 'L3 交换机', path: ['virtual_switch'], kind: 'text' },
+          { label: '出接口', path: ['action', 'interface'], kind: 'text' },
+          { label: '源地址池', path: ['action', 'source_pool'], kind: 'text' },
+        ],
+      },
+      {
+        list: 'static', key: 'inside_ip', keyKind: 'ip', title: '静态 1:1 映射', what: '静态映射',
+        keyLabel: '内部 IP', placeholder: '如 10.10.0.10',
+        fields: [{ label: '外部 IP', path: ['outside_ip'], kind: 'ip' }],
+      },
+    ],
+  },
+  {
+    legend: 'QoS（限速）',
+    list: 'qos_policies',
+    key: 'name',
+    what: 'QoS 策略',
+    title: (it) => (it.name || '（未命名）') +
+      (it.cir ? '（' + it.cir + ' bps）' : ''),
+    note: '绑定到接口用「接口」节的「入向限速策略」。',
+    add: { keyLabel: '策略名', keyKind: 'text', placeholder: '如 lim-a' },
+    fields: [
+      { label: 'CIR（bps）', path: ['cir'], kind: 'int', min: 1 },
+      { label: 'CBS（字节）', path: ['cbs'], kind: 'int', min: 1 },
+    ],
+  },
+  {
+    legend: '端口镜像（SPAN）',
+    wide: true,
+    list: 'port_mirroring',
+    key: 'name',
+    what: '镜像会话',
+    title: (it) => it.name || '（未命名）',
+    note: '源二选一：物理口，或某台 VM 的 vNIC（本地会拦下同时填两个的情况）。分析口必须是物理口。',
+    add: { keyLabel: '会话名', keyKind: 'text', placeholder: '如 span-a' },
+    fields: [
+      { label: '源：物理口 / bond', path: ['source', 'interface'], kind: 'text', group: 'pmSource',
+        clears: [['source', 'vnf'], ['source', 'vnf_interface']] },
+      { label: '源：VNF（VM 名）', path: ['source', 'vnf'], kind: 'text', group: 'pmSource',
+        clears: [['source', 'interface']] },
+      { label: '源：VNF 的 vNIC', path: ['source', 'vnf_interface'], kind: 'text' },
+      { label: '方向', path: ['source', 'direction'], kind: 'select', options: [['ingress', 'ingress'], ['egress', 'egress'], ['both', 'both']] },
+      { label: '分析端口', path: ['analyzer'], kind: 'text' },
+    ],
+  },
+  {
+    legend: '链路聚合（bond）',
+    list: 'bonds',
+    key: 'name',
+    what: 'bond',
+    title: (it) => (it.name || '（未命名）') + (it.lacp ? '（LACP）' : '（静态聚合）'),
+    note: '成员口须是未被虚拟交换机引用的物理口；清空 LACP 模式与速率即回到静态聚合。',
+    add: { keyLabel: 'bond 名', keyKind: 'text', placeholder: '如 bond0' },
+    fields: [
+      { label: '成员口（逗号分隔）', path: ['members'], kind: 'strlist', hint: '如 ens224,ens256' },
+      { label: 'LACP 模式', path: ['lacp', 'mode'], kind: 'select', options: [['active', 'active'], ['passive', 'passive']] },
+      { label: 'LACP 速率', path: ['lacp', 'interval'], kind: 'select', options: [['fast', 'fast'], ['slow', 'slow']] },
+      { label: 'MTU', path: ['mtu'], kind: 'int', min: 68, max: 9216 },
+      { label: '描述', path: ['description'], kind: 'text' },
+    ],
+  },
+  {
+    legend: 'LLDP',
+    loc: [{ obj: 'protocols' }, { obj: 'lldp' }],
+    clearPath: ['protocols', 'lldp'],
+    note: '全局开关 + 按接口覆盖（基于 VPP lldp 插件）。邻居表在「网络对象」页。',
+    fields: [
+      { label: '全局启用', path: ['enabled'], kind: 'bool' },
+      { label: '通告间隔（秒）', path: ['advertisement_interval'], kind: 'int', min: 1, max: 3600 },
+    ],
+    sublists: [{
+      list: 'interfaces', key: 'interface', keyKind: 'text', title: '按接口覆盖', what: '接口覆盖',
+      keyLabel: '接口名', placeholder: '如 ens224',
+      fields: [{ label: '启用', path: ['enabled'], kind: 'bool' }],
+    }],
+  },
+  {
+    legend: '虚拟机（VM VNF）',
+    wide: true,
+    list: 'virtual_machine_functions',
+    key: 'name',
+    what: '虚拟机',
+    title: (it) => (it.name || '（未命名）') + (it.image ? '（' + it.image + '）' : ''),
+    note: '镜像须是仓库里的 vm-image；vCPU 从隔离核池分配，内存从大页池分配。' +
+      '内存后端选「普通内存」时不允许 vhost-user 口（提交会被拒）。',
+    add: { keyLabel: '名称', keyKind: 'text', placeholder: '如 vnf-a' },
+    fields: [
+      { label: '镜像', path: ['image'], kind: 'text', hint: '如 base.qcow2' },
+      { label: '描述', path: ['description'], kind: 'text' },
+      { label: 'vCPU 数量', path: ['vcpu', 'count'], kind: 'int', min: 1, max: 256 },
+      { label: 'vCPU 绑核', path: ['vcpu', 'pin'], kind: 'bool' },
+      { label: '内存（MB）', path: ['memory', 'size_mb'], kind: 'int', min: 1 },
+      { label: '大页大小', path: ['memory', 'hugepage_size'], kind: 'select', options: [['2M', '2M'], ['1G', '1G']] },
+      { label: 'NUMA 节点', path: ['memory', 'numa_node'], kind: 'int', min: 0, max: 63 },
+      { label: '内存后端', path: ['memory', 'backing'], kind: 'select', options: [['hugepage', '大页'], ['normal', '普通内存（禁止 vhost-user 口）']] },
+      { label: '串口控制台', path: ['serial_console'], kind: 'bool' },
+      { label: '开机自启', path: ['autostart'], kind: 'bool' },
+      { label: 'guest 主机名', path: ['cloud_init', 'hostname'], kind: 'text' },
+      { label: 'SSH 公钥（逗号分隔）', path: ['cloud_init', 'ssh_keys'], kind: 'strlist' },
+      { label: 'user-data（YAML 文本）', path: ['cloud_init', 'user_data'], kind: 'raw' },
+    ],
+    sublists: [
+      {
+        list: 'disks', key: 'name', keyKind: 'text', title: '附加数据盘', what: '数据盘',
+        keyLabel: '盘名', placeholder: '如 data0',
+        note: '容量与来源镜像二选一（都填或都不填提交会被拒）。',
+        fields: [
+          { label: '容量（GB，空盘）', path: ['size_gb'], kind: 'int', min: 1 },
+          { label: '来源镜像', path: ['image'], kind: 'text' },
+        ],
+      },
+      {
+        list: 'interfaces', key: 'name', keyKind: 'text', title: 'vNIC', what: 'vNIC',
+        keyLabel: 'vNIC 名', placeholder: '如 eth0',
+        note: 'vhost-user 接虚拟交换机；sriov-vf 还需物理口与 VF 号。',
+        fields: [
+          { label: '类型', path: ['type'], kind: 'select', options: [['vhost-user', 'vhost-user'], ['sriov-vf', 'sriov-vf（SR-IOV 直通）']] },
+          { label: '虚拟交换机', path: ['virtual_switch'], kind: 'text' },
+          { label: 'MAC', path: ['mac'], kind: 'mac', hint: '留空自动生成' },
+          { label: 'VLAN', path: ['vlan'], kind: 'int', min: 1, max: 4094 },
+          { label: 'SR-IOV 物理口', path: ['sriov', 'physical_interface'], kind: 'text' },
+          { label: 'SR-IOV VF 号', path: ['sriov', 'vf_id'], kind: 'int', min: 0, max: 255 },
+        ],
+      },
+    ],
+  },
+  {
+    legend: '容器（container VNF）',
+    wide: true,
+    list: 'container_functions',
+    key: 'name',
+    what: '容器',
+    title: (it) => (it.name || '（未命名）') + (it.image ? '（' + it.image + '）' : ''),
+    note: '镜像须是仓库里的 container-image；vNIC 固定为 memif。',
+    add: { keyLabel: '名称', keyKind: 'text', placeholder: '如 sbc-ct1' },
+    fields: [
+      { label: '镜像', path: ['image'], kind: 'text', hint: '如 alpine:3.20' },
+      { label: '描述', path: ['description'], kind: 'text' },
+      { label: 'vCPU 限制', path: ['vcpu'], kind: 'int', min: 1 },
+      { label: '内存限制（MB）', path: ['memory_mb'], kind: 'int', min: 1 },
+      { label: '入口命令', path: ['command'], kind: 'text' },
+      { label: '命令参数（逗号分隔）', path: ['args'], kind: 'strlist' },
+      { label: '重启策略', path: ['restart_policy'], kind: 'select', options: [['no', '不自动重启'], ['on-failure', '失败时重启']] },
+      { label: '开机自启', path: ['autostart'], kind: 'bool' },
+      { label: '环境变量（每行 KEY=VALUE）', path: ['env'], kind: 'kvmap' },
+    ],
+    sublists: [{
+      list: 'interfaces', key: 'name', keyKind: 'text', title: 'memif vNIC', what: 'vNIC',
+      keyLabel: 'vNIC 名', placeholder: '如 eth0',
+      fields: [
+        { label: '类型', path: ['type'], kind: 'select', options: [['memif', 'memif']] },
+        { label: '虚拟交换机', path: ['virtual_switch'], kind: 'text' },
+        { label: 'MAC', path: ['mac'], kind: 'mac', hint: '留空自动生成' },
+        { label: 'VLAN', path: ['vlan'], kind: 'int', min: 1, max: 4094 },
+      ],
+    }],
+  },
+];
+
+// 把网络域与计算域各节画进表单容器（与上面三节同一个容器、同一套写路径）。
+function cfgRenderDomainForms(box, c) {
+  CFG_SECTIONS.forEach((sec) => cfgRenderSection(box, sec, c));
 }
 
 // 预校验（POST /configuration/check）：先保存，再让服务端跑与提交相同的全部校验。
