@@ -10,7 +10,7 @@
 
 > **当前状态：V1（首个发布版）**
 > 规格书 **109 条 FR**：**通过 101 / 未验 4 / 降级 2 / 移 V2 2**（口径与逐条证据见
-> [`docs/V1-验收检查表.md`](docs/V1-验收检查表.md)）；已定**决策 138 项**（规格书附录 A）；
+> [`docs/V1-验收检查表.md`](docs/V1-验收检查表.md)）；已定**决策 139 项**（规格书附录 A）；
 > `make check` 全绿。**已知限制请先读** [`docs/NFViS-CLI命令全表.md`](docs/NFViS-CLI命令全表.md) §4。
 >
 > **发布的二进制**见 [Releases](https://github.com/xzjt/nfvis/releases)（最新 **v1.1.28**：Web 控制面补齐——
@@ -95,7 +95,7 @@ systemctl start vpp && vppctl show interface
 |---|---|
 | **[用户手册](docs/NFViS-用户手册.md)** | **从安装到使用的全流程**（含故障排查、已知限制） |
 | **[CLI 命令全表](docs/NFViS-CLI命令全表.md)** | 256 条命令，含权限、API 落点与**逐条真机实测状态** |
-| [系统产品需求与目标架构规格书](docs/NFViS-系统产品需求与目标架构规格书.md) | **需求真源**；附录 A = 决策记录（1~138），实现有疑问先查它 |
+| [系统产品需求与目标架构规格书](docs/NFViS-系统产品需求与目标架构规格书.md) | **需求真源**；附录 A = 决策记录（1~139），实现有疑问先查它 |
 | [CLI 命令树完整设计](docs/NFViS-CLI命令树完整设计.md) | CLI **契约**（命令树、补全、权限矩阵） |
 | [OpenAPI](docs/NFViS-openapi.yaml) | REST **契约**（`openapi.json` 随二进制嵌入，由 CI 守护同步） |
 | [Go 工程目录骨架设计](docs/NFViS-Go工程目录骨架设计.md) | 代码结构、依赖方向规则、里程碑 |
