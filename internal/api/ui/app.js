@@ -135,7 +135,7 @@ async function api(path, opts) {
 const soft = (p) => p.catch((e) => ({ __err: e.message }));
 
 async function loadAll() {
-  const [st, ver, vpp, pools, ifaces, vms, cts, alarms, vss, imgs, nets, audit, cap] = await Promise.all([
+  const [st, ver, vpp, pools, ifaces, vms, cts, alarms, vss, imgs, nets, audit, cap, backups, techs] = await Promise.all([
     soft(api('/system/status')),
     soft(api('/system/version')),
     soft(api('/vpp/status')),
@@ -149,6 +149,8 @@ async function loadAll() {
     soft(loadNetworkObjects()),
     soft(api('/audit-logs?limit=50')),
     soft(api('/vpp/capture')),
+    soft(api('/system/backup')),
+    soft(api('/system/tech-support')),
   ]);
   const ifaceRows = Array.isArray(ifaces) ? await loadInterfaceStats(ifaces) : [];
   const vsRows = Array.isArray(vss) ? await loadVSwitchStats(vss) : [];
@@ -159,6 +161,7 @@ async function loadAll() {
   renderNetworkObjects(nets);
   renderAudit(audit);
   renderCapture(cap);
+  renderArchives(backups, techs);
   renderVMStats(vms, vmStats);
 }
 
@@ -1196,20 +1199,18 @@ function renderCapture(cap) {
     });
     const cell = el('td', { class: 'actions' });
     const btn = el('button', { type: 'button', class: 'ghost small', text: '下载' });
-    btn.addEventListener('click', () => downloadCapture(f.name));
+    btn.addEventListener('click', () => downloadFile('/vpp/capture/' + encodeURIComponent(f.name), f.name, capMsg));
     cell.appendChild(btn);
     tr.appendChild(cell);
     tbody.appendChild(tr);
   });
 }
 
-// downloadCapture 带 Authorization 取文件再触发浏览器下载（<a href> 带不了请求头）。
-async function downloadCapture(name) {
-  capMsg('下载 ' + name + '：准备中…', false);
+// downloadFile 带 Authorization 取文件再触发浏览器下载（<a href> 带不了请求头）。
+async function downloadFile(path, name, note) {
+  if (note) note('下载 ' + name + '：准备中…', false);
   try {
-    const res = await fetch(API + '/vpp/capture/' + encodeURIComponent(name), {
-      headers: { Authorization: 'Bearer ' + token },
-    });
+    const res = await fetch(API + path, { headers: { Authorization: 'Bearer ' + token } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -1218,10 +1219,40 @@ async function downloadCapture(name) {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
-    capMsg('已触发下载：' + name + '（' + bytes(blob.size) + '）', false);
+    if (note) note('已触发下载：' + name + '（' + bytes(blob.size) + '）', false);
   } catch (e) {
-    capMsg('下载失败：' + e.message, true);
+    if (note) note('下载失败：' + e.message, true);
   }
+}
+
+// 归档（配置备份 / 诊断归档）：列表 + 下载
+function renderArchives(backups, techs) {
+  archiveTable($('ops-backup-table').querySelector('tbody'), backups, '/system/backup/');
+  archiveTable($('ops-tech-table').querySelector('tbody'), techs, '/system/tech-support/');
+}
+
+function archiveTable(tbody, rows, prefix) {
+  tbody.textContent = '';
+  const list = (rows && !rows.__err && Array.isArray(rows)) ? rows : [];
+  if (!list.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '4', class: 'muted', text: rows && rows.__err ? '读取失败：' + rows.__err : '（无）' }));
+    tbody.appendChild(tr);
+    return;
+  }
+  list.forEach((f) => {
+    const name = f.file || f.name;
+    const tr = el('tr');
+    [name, bytes(f.size_bytes), fmtTime(f.created_at || f.created)].forEach((c) => {
+      tr.appendChild(el('td', { text: String(dash(c)) }));
+    });
+    const cell = el('td', { class: 'actions' });
+    const btn = el('button', { type: 'button', class: 'ghost small', text: '下载' });
+    btn.addEventListener('click', () => downloadFile(prefix + encodeURIComponent(name), name, opsMsg));
+    cell.appendChild(btn);
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
+  });
 }
 
 // ---------- 运维动作（写操作，均二次确认）----------
