@@ -224,7 +224,7 @@ tr.row-link:hover td { background: var(--panel-2); }
 #cfgh-table td:nth-child(4) { white-space: normal; word-break: break-word; }
 #cfgh-table td:first-child { color: var(--muted); }
 
-/* 分级确认对话框：遮罩 + 面板；主按钮标红由 button.danger 给出（中危动作）。 */
+/* 分级确认对话框：遮罩 + 面板；主按钮标红由 button.danger 给出（中危与高危动作）。 */
 .modal {
   position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
   padding: 20px; background: rgba(6, 12, 18, .68);
@@ -239,6 +239,16 @@ tr.row-link:hover td { background: var(--panel-2); }
 .modal-box li { margin-bottom: 4px; font-size: 13px; }
 .modal-box #modal-cli { font: 12px/1.5 Consolas, "Courier New", monospace; overflow-wrap: anywhere; }
 .modal-box .cfg-actions { justify-content: flex-end; }
+
+/* 高危档的闸门区：确认词输入框 + 倒计时提示。整块内容由 app.js 现建，这里只管样式。 */
+.modal-box #modal-guard {
+  margin: 10px 0 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+  background: rgba(255, 255, 255, .04);
+}
+.modal-box #modal-word { width: 100%; margin: 6px 0 2px; font: 13px/1.4 Consolas, "Courier New", monospace; }
+.modal-box #modal-count { margin: 6px 0 0; }
+/* 闸门没放行时主按钮必须看起来就是点不动的（禁用态）。 */
+.modal-box button:disabled { opacity: .5; cursor: not-allowed; }
 
 /* 导航：组名（计算/网络/系统/配置/运维）与可点项在视觉上分开——组名不可点、更弱、组间留白 */
 .nav { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }

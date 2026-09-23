@@ -115,50 +115,164 @@ function list(v) {
   return Array.isArray(v) ? (v.length ? v.join(',') : '—') : String(v);
 }
 
-// ---------- 确认对话框（分级确认里的中危档） ----------
+// ---------- 确认对话框（分级确认：低 / 中 / 高，三档共用一个组件） ----------
 //
-// 中危动作（如配置回滚）不用浏览器自带的 confirm：要**逐条列出影响面**、只读回显对应的
-// 命令行语句（便于工单与审计对照），并把主按钮标红。内容一律经 textContent 落值。
+// 三档的差别只看「要不要把人拦一下」，不是三套实现：
+//   低危（tier 'low'）：一次确认。文案用 paragraphs 说清要做什么，不列影响面、不要求输入。
+//     用于可回退、影响单对象、坏了也能马上再点回去的动作（单台 VM/容器启停、清计数、
+//     清告警、删快照、取消抓包…）。
+//   中危（tier 'mid'）：逐条列出**影响面**（bullets：谁会断、是否需重启生效、能不能回退）
+//     + 主按钮标红。用于重启数据面/主机、删对象、重签证书、重生成 SSH host key、配置提交/
+//     回滚这类「影响面跨对象或跨会话」的动作。
+//   高危（tier 'high'）：中危的全部，再加两道闸门——
+//     ① 输入确认词（调用方给 requireWord：对象名或固定词；输入不匹配则「执行」保持禁用）；
+//     ② 倒计时（默认 10 秒，走完之前「执行」保持禁用，期间随时可取消）。
+//     用于恢复出厂、软件升级/回退、恢复配置、删用户/改口令策略、证书上传这类不可逆动作。
+//
+// 三档共同点：内容一律经 textContent 落值（服务端字符串不会变成标记）；点遮罩、按 Esc 都算取消；
+// 每个框都**只读回显**这条动作对应的命令行语句（工单与审计对照用——操作者不需要输入语句）。
+// 审计由服务端记；界面只负责把「意图」说清楚。
+//
 // 返回 Promise<boolean>：确认 true / 取消（点取消、点遮罩、按 Esc）false。
 let dialogResolve = null;
+let dialogTimer = null;    // 高危档的倒计时（取消/关闭时必须清掉，否则它会继续跑并动到下一个框）
+const CONFIRM_COUNTDOWN = 10;  // 高危档倒计时秒数（调用方可用 countdown 覆盖，自校准用短值）
 
 function uiDialog(opts) {
-  $('modal-title').textContent = opts.title || '';
+  const o = opts || {};
+  const tier = o.tier === 'high' ? 'high' : (o.tier === 'mid' ? 'mid' : 'low');
+  const high = tier === 'high';
+  const mid = tier !== 'low';
+  const countdown = high
+    ? Math.max(0, Math.floor(Number(o.countdown === undefined ? CONFIRM_COUNTDOWN : o.countdown) || 0))
+    : 0;
+  // 高危必须有确认词：调用方没给就**失败关闭**（宁可这个动作点不动，也不能放过一道闸门）。
+  const word = high ? String(o.requireWord === undefined ? '' : o.requireWord) : '';
+  const wordMissing = high && !word;
+  const label = o.confirmLabel || (high ? '执行' : '确定');
+
+  $('modal-title').textContent = o.title || '';
   const body = $('modal-body');
   body.textContent = '';
-  (opts.paragraphs || []).forEach((t) => body.appendChild(el('p', { text: t })));
-  if ((opts.bullets || []).length) {
+  (o.paragraphs || []).forEach((t) => body.appendChild(el('p', { text: t })));
+  // 影响面逐条列（低危不列：单击确认不该被一屏字挡住）。
+  if (mid && (o.bullets || []).length) {
     const ul = el('ul');
-    opts.bullets.forEach((t) => ul.appendChild(el('li', { text: t })));
+    o.bullets.forEach((t) => ul.appendChild(el('li', { text: t })));
     body.appendChild(ul);
   }
   const cli = $('modal-cli');
-  cli.hidden = !opts.cli;
-  cli.textContent = opts.cli ? '对应命令（只读回显，便于工单对照）：' + opts.cli : '';
+  cli.hidden = !o.cli;
+  cli.textContent = o.cli ? '对应命令（只读回显，便于工单对照）：' + o.cli : '';
+
+  // 高危档的两道闸门。两个状态变量是唯一的判据，`syncOk()` 只读它们——
+  // 「执行」按钮的可用性完全由它决定（自校准就是拆这两个变量）。
+  let wordOK = !high;
+  let timeOK = countdown <= 0;
+  const gatesOK = () => wordOK && timeOK;
+
+  // 闸门控件整块由这里现建（见 index.html 的骨架只有容器）：每次打开框都重建，
+  // 不会把上一次的输入或状态带进来。
+  const guard = $('modal-guard');
+  guard.hidden = !high;
+  guard.textContent = '';
+  let wordInput = null;
+  if (high) {
+    const hint = el('p', {
+      class: wordMissing ? 'small error' : 'small',
+      text: wordMissing
+        ? '这一步没有拿到确认词，无法执行（请报告这一处缺陷）。'
+        : '这一步要求手工输入确认词：' + word + '（区分大小写）。输入不匹配时「执行」保持不可点。',
+    });
+    wordInput = el('input', {
+      type: 'text', id: 'modal-word', autocomplete: 'off', spellcheck: 'false',
+      placeholder: wordMissing ? '' : word,
+    });
+    wordInput.disabled = wordMissing;
+    wordInput.addEventListener('input', () => {
+      wordOK = !wordMissing && wordInput.value.trim() === word;
+      syncOk();
+    });
+    // 回车 = 点「执行」，只在闸门都放行时生效（禁用状态下回车什么也不做）。
+    wordInput.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter') return;
+      if (ev.preventDefault) ev.preventDefault();
+      if (gatesOK()) closeDialog(true);
+    });
+    guard.appendChild(hint);
+    guard.appendChild(wordInput);
+    guard.appendChild(el('p', {
+      class: 'muted small', id: 'modal-count',
+      text: wordMissing ? ''
+        : (countdown > 0
+          ? '还有 ' + countdown + ' 秒倒计时结束；倒计时期间可以随时取消。'
+          : '本次没有倒计时（可立即执行）。'),
+    }));
+  }
 
   const acts = $('modal-actions');
   acts.textContent = '';
-  const ok = el('button', { type: 'button', class: opts.danger ? 'danger' : '', text: opts.confirmLabel || '确定' });
-  ok.addEventListener('click', () => closeDialog(true));
+  const ok = el('button', { type: 'button', id: 'modal-ok', class: mid || o.danger ? 'danger' : '' });
+  ok.addEventListener('click', () => { if (!ok.disabled) closeDialog(true); });
+  // 倒计时与闸门状态都要如实显示在按钮上：禁用时按钮上写着还要等几秒。
+  let left = countdown;
+  function syncOk() {
+    if (!high) {
+      ok.disabled = false;
+      ok.textContent = label;
+      return;
+    }
+    ok.disabled = !gatesOK();
+    ok.textContent = timeOK ? label : (label + '（' + left + ' 秒后可点）');
+  }
   // 焦点落在「取消」上（没有取消按钮时落在主按钮）：破坏性动作不该被一个回车键直接执行。
-  let focusTarget = ok;
-  if (opts.cancelLabel !== '') {
-    const cancel = el('button', { type: 'button', class: 'ghost', text: opts.cancelLabel || '取消' });
+  // 高危档焦点在确认词输入框上（本来就要打字，且它在闸门放行前不触发任何动作）。
+  let focusTarget = wordInput || ok;
+  if (o.cancelLabel !== '') {
+    const cancel = el('button', { type: 'button', id: 'modal-cancel', class: 'ghost', text: o.cancelLabel || '取消' });
     cancel.addEventListener('click', () => closeDialog(false));
     acts.appendChild(cancel);
-    focusTarget = cancel;
+    focusTarget = wordInput || cancel;
   }
   acts.appendChild(ok);
+
+  // 倒计时：每秒一格，走完即放行（此刻确认词还得对）。
+  if (high && left > 0) {
+    dialogTimer = setInterval(() => {
+      left -= 1;
+      const count = $('modal-count');
+      if (left <= 0) {
+        left = 0;
+        timeOK = true;
+        if (dialogTimer) { clearInterval(dialogTimer); dialogTimer = null; }
+        if (count) count.textContent = '倒计时已结束，现在可以执行（确认词仍需匹配）。';
+      } else if (count) {
+        count.textContent = '还有 ' + left + ' 秒倒计时结束；倒计时期间可以随时取消。';
+      }
+      syncOk();
+    }, 1000);
+  }
+  syncOk();
+
   $('modal').hidden = false;
-  focusTarget.focus();
+  if (focusTarget.focus) focusTarget.focus();
   return new Promise((resolve) => { dialogResolve = resolve; });
 }
 
 function closeDialog(value) {
+  if (dialogTimer) { clearInterval(dialogTimer); dialogTimer = null; }
   $('modal').hidden = true;
   const resolve = dialogResolve;
   dialogResolve = null;
   if (resolve) resolve(value);
+}
+
+// uiConfirm：给动作调用点用的薄封装——标题统一是动作名，其余按档位传
+// （tier / paragraphs / bullets / cli / confirmLabel / requireWord）。
+function uiConfirm(label, opts) {
+  const o = Object.assign({}, opts || {});
+  o.title = o.title || label;
+  return uiDialog(o);
 }
 
 // ---------- 取数 ----------
@@ -2046,6 +2160,49 @@ async function cfgEndSession() {
   await loadConfig();
 }
 
+// 丢弃并结束编辑：低危确认（只丢自己这份候选草稿，运行配置不变）。没有进入编辑态时
+// 没有草稿可丢，就不打扰——直接收尾（可能只是把超时残留的锁收掉）。
+async function cfgDiscardAsk() {
+  if (cfg.editing) {
+    const ok = await uiConfirm('丢弃并结束编辑', {
+      tier: 'low',
+      paragraphs: ['丢弃候选配置并释放编辑锁？运行中的配置不受影响；' +
+        '未提交的改动会丢掉，拿不准就先点「查看差异」看一眼。'],
+      cli: 'discard',
+    });
+    if (!ok) return;
+  }
+  await cfgEndSession();
+}
+
+// 提交（含以 commit confirmed 提交）：中危确认——提交是把差异**立即下发到运行配置**，
+// 不是保存草稿；改到管理路径（管理口地址/网关）时还可能把自己关在门外，故逐条列影响面。
+// 注意：确认框只加在按钮这一层，cfgCommit 本身保持原样（结束会话/失败补偿等内部路径
+// 不该被二次确认挡住）。
+async function cfgCommitAsk(confirmedMinutes) {
+  const ok = await uiConfirm(confirmedMinutes ? '以 commit confirmed 提交' : '提交配置', {
+    tier: 'mid',
+    paragraphs: [confirmedMinutes
+      ? '把候选配置提交为运行配置，并设 ' + confirmedMinutes + ' 分钟的确认窗口。'
+      : '把候选配置提交为运行配置（revision 加一，立即生效）。'],
+    bullets: confirmedMinutes ? [
+      '提交立即生效；窗口期内不点「确认在途提交」就自动回滚到提交前那一版。',
+      '这是防止改坏管理路径把自己锁在门外的自锁保护：确认管理面仍然连得上，再点「确认在途提交」。',
+      '变更会立即下发给各子系统，相关业务可能随变更中断（接口、交换机、ACL、NAT 这类）。',
+      '提交失败会自动补偿（事务引擎），失败原因按页面提示看。',
+    ] : [
+      '候选与运行配置的差异会立即下发给各子系统，相关业务可能随变更中断（接口、交换机、ACL、NAT 这类）。',
+      '这不是保存草稿：要撤销得回滚到上一版再提交一次。',
+      '管理口地址、网关这类会改变管理路径的字段，请改用「以 commit confirmed 提交」——超时未确认会自动回滚。',
+      '拿不准就先点「预校验」「查看差异」，提交前确认变更内容。',
+    ],
+    cli: confirmedMinutes ? 'commit confirmed ' + confirmedMinutes : 'commit',
+    confirmLabel: '提交',
+  });
+  if (!ok) return;
+  await cfgCommit(confirmedMinutes);
+}
+
 async function cfgCommit(confirmedMinutes) {
   if (!(await cfgSave())) return;
   const body = confirmedMinutes ? { confirmed_minutes: confirmedMinutes } : {};
@@ -2082,6 +2239,8 @@ async function cfgCommit(confirmedMinutes) {
   }
 }
 
+// 确认在途提交：**有意不做确认框**——它的语义就是「保住刚才那次提交」，
+// 而窗口正在倒计时（超时自动回滚）；在这里再拦一次反而是害人。审计仍由服务端记。
 async function cfgConfirmPending() {
   try {
     await api('/configuration/commit:confirm', { method: 'POST' });
@@ -2150,6 +2309,7 @@ function renderHistory(revs) {
 async function cfghDiffGuide(rev, n) {
   await uiDialog({
     title: '看差异：第 ' + n + ' 版（revision ' + rev + '）与当前配置',
+    tier: 'low',
     paragraphs: [
       '服务端只提供「候选配置与当前生效配置」的差异读取，没有「直接与某个历史版本比对」的读取接口，' +
         '因此本页无法就地显示这一版与当前配置的差异。',
@@ -2178,10 +2338,10 @@ async function cfghRollback(rev, n, row) {
     '锁被别的会话持有时会失败并说明是谁持有。');
   const ok = await uiDialog({
     title: '回滚到第 ' + n + ' 版（取为候选，不立即生效）',
+    tier: 'mid',
     bullets,
     cli: 'rollback ' + n,
     confirmLabel: '取为候选（不提交）',
-    danger: true,
   });
   if (!ok) return;
   await cfghTakeCandidate(n);
@@ -2602,9 +2762,21 @@ function renderVMRows(vms) {
 
 // 生命周期动作。`msg` 是回显去处：列表页用运维页的提示区（历史行为），
 // 详情页用自己的提示区（vmDetailMsg）——同一套动作、同一套状态判定，只是回显位置不同。
+// 确认档位：低危（单台 VM 的启停/重启，坏了再点回去即可）。
+const VM_ACTION_IMPACT = {
+  start: '虚拟机按自身配置启动，启动期间不占用其他对象。',
+  stop: '运行中的业务会中断；停止是正常关机（超时会强杀），配置与磁盘保留。',
+  restart: '重启期间业务中断数秒到数十秒。',
+};
 async function vmAction(name, action, label, msg) {
   const say = msg || opsMsg;
-  if (!window.confirm(label + '虚拟机 ' + name + '？运行中的业务会中断。')) return;
+  const ok = await uiConfirm(label + '虚拟机', {
+    tier: 'low',
+    paragraphs: ['对虚拟机 ' + name + ' 执行「' + label + '」？' +
+      (VM_ACTION_IMPACT[action] || '')],
+    cli: 'request virtual-machine-functions ' + name + ' ' + action,
+  });
+  if (!ok) return;
   say(label + ' ' + name + '：执行中…', false);
   try {
     await api('/virtual-machine-functions/' + encodeURIComponent(name) + ':' + action, { method: 'POST' });
@@ -2827,10 +2999,26 @@ async function vmSnapLoad(pre) {
 
 async function vmSnapAct(snap, kind) {
   const isRollback = kind === 'rollback';
-  const warn = isRollback
-    ? '回滚 ' + snapVM + ' 到快照 ' + snap + '？VM 必须处于关机态，磁盘内容会被替换为该快照的内容。'
-    : '删除快照 ' + snap + '？该快照将不可恢复。';
-  if (!window.confirm(warn)) return;
+  // 档位：回滚磁盘内容 = 中危（列影响面 + 标红）；删快照 = 低危（只丢这一份快照）。
+  const ok = isRollback
+    ? await uiConfirm('回滚虚拟机到快照', {
+      tier: 'mid',
+      paragraphs: ['把虚拟机 ' + snapVM + ' 的磁盘内容回滚到快照 ' + snap + '。'],
+      bullets: [
+        '虚拟机必须处于关机态；运行中回滚会被服务端拒绝（运行中回滚会替换 QEMU 进程）。',
+        '磁盘内容会被替换成拍这份快照那一刻的内容：之后写入的数据不在磁盘上。',
+        '回滚不改配置，只换磁盘内容；要留后路就先对当前状态建一份快照（同样需关机态）。',
+        '回滚不可撤销：回滚后要回到当前状态，只能靠另一份快照。',
+      ],
+      cli: 'request virtual-machine-functions ' + snapVM + ' snapshot rollback name ' + snap,
+    })
+    : await uiConfirm('删除快照', {
+      tier: 'low',
+      paragraphs: ['删除虚拟机 ' + snapVM + ' 的快照 ' + snap + '？这份快照将不可恢复' +
+        '（虚拟机的当前状态不受影响）。'],
+      cli: 'request virtual-machine-functions ' + snapVM + ' snapshot delete name ' + snap,
+    });
+  if (!ok) return;
   snapMsg((isRollback ? '回滚' : '删除') + '中…', false);
   try {
     if (isRollback) {
@@ -2851,7 +3039,13 @@ async function vmSnapAct(snap, kind) {
 async function vmSnapCreate() {
   const nm = $('vm-snap-new').value.trim();
   if (!nm) { snapMsg('请填写快照名。', true); return; }
-  if (!window.confirm('为 ' + snapVM + ' 创建快照 ' + nm + '？VM 必须处于关机态。')) return;
+  const ok = await uiConfirm('创建快照', {
+    tier: 'low',
+    paragraphs: ['为虚拟机 ' + snapVM + ' 创建快照 ' + nm + '？虚拟机必须处于关机态' +
+      '（运行中创建会被服务端拒绝），快照会占用磁盘空间。'],
+    cli: 'request virtual-machine-functions ' + snapVM + ' snapshot create name ' + nm,
+  });
+  if (!ok) return;
   snapMsg('创建中…', false);
   try {
     await api('/virtual-machine-functions/' + encodeURIComponent(snapVM) + '/snapshots', {
@@ -3008,10 +3202,20 @@ function renderContainerRows(cts) {
 }
 
 // `msg` 是回显去处：列表页用运维页的提示区（历史行为），详情页用本页的（ctdMsg）。
+// 确认档位：低危（单个容器的启停/重启）。
+const CT_ACTION_IMPACT = {
+  start: '容器按其配置启动。',
+  stop: '容器内的进程会被停止；容器与镜像保留，可以再启动。',
+  restart: '容器内的进程会被重启，服务短暂中断。',
+};
 async function ctAction(name, action, label, msg) {
   const say = msg || opsMsg;
-  if (!window.confirm(label + '容器 ' + name + '？容器内的进程会被' +
-    (action === 'stop' ? '停止' : '重启') + '。')) return;
+  const ok = await uiConfirm(label + '容器', {
+    tier: 'low',
+    paragraphs: ['对容器 ' + name + ' 执行「' + label + '」？' + (CT_ACTION_IMPACT[action] || '')],
+    cli: 'request container-functions ' + name + ' ' + action,
+  });
+  if (!ok) return;
   say(label + ' ' + name + '：执行中…', false);
   try {
     await api('/container-functions/' + encodeURIComponent(name) + ':' + action, { method: 'POST' });
@@ -3247,9 +3451,21 @@ function imgMsg(text, isErr) {
   p.className = isErr ? 'error small' : 'muted small';
 }
 
+// 删除镜像：中危（删仓库对象，且可能正被虚拟机/容器引用）。
 async function imgDelete(name, refCount) {
-  if (!window.confirm('删除镜像 ' + name + '？' +
-    (refCount ? '（当前被引用 ' + refCount + ' 次，服务端会拒绝）' : '（不可恢复）'))) return;
+  const ok = await uiConfirm('删除镜像', {
+    tier: 'mid',
+    paragraphs: ['从镜像仓库删除 ' + name + '。'],
+    bullets: [
+      refCount
+        ? '该镜像当前被引用 ' + refCount + ' 次：服务端会拒绝删除（先把引用它的虚拟机/容器改掉或删掉）。'
+        : '当前没有对象引用它，服务端会真的删掉仓库里的文件。',
+      '删除不可恢复：镜像文件从仓库移除后只能重新导入（本地文件不在仓库里）。',
+      '已经用该镜像建好的虚拟机磁盘不受影响（它们是克隆出来的），但重新创建/重建时就不能再用这个名字。',
+    ],
+    cli: 'request images delete name ' + name,
+  });
+  if (!ok) return;
   imgMsg('删除 ' + name + '：执行中…', false);
   try {
     await api('/images/' + encodeURIComponent(name), { method: 'DELETE' });
@@ -3274,7 +3490,13 @@ async function imgImportURL() {
   const sha = $('img-sha').value.trim();
   if (!url) { imgMsg('请填写 URL。', true); return; }
   if (!sha) { imgMsg('URL 拉取必须提供 sha256（服务端默认强制校验）。', true); return; }
-  if (!window.confirm('从 ' + url + ' 拉取并导入为 ' + c.name + '？大镜像可能耗时较久。')) return;
+  const ok = await uiConfirm('拉取并导入镜像', {
+    tier: 'low',
+    paragraphs: ['从 ' + url + ' 拉取并导入为 ' + c.name + '？' +
+      '只往仓库里新增一份镜像，不改现有对象；大镜像可能耗时较久（期间请勿关闭页面）。'],
+    cli: 'request images download name ' + c.name + ' type ' + c.type + ' url ' + url + ' sha256 ' + sha,
+  });
+  if (!ok) return;
   imgMsg('拉取中…（大镜像可能耗时较久，请勿关闭页面）', false);
   try {
     const res = await api('/images', {
@@ -3293,7 +3515,13 @@ async function imgImportIncoming() {
   if (!c) return;
   const file = $('img-incoming').value.trim();
   if (!file) { imgMsg('请填写 incoming 文件名。', true); return; }
-  if (!window.confirm('把 /data/incoming/' + file + ' 导入为 ' + c.name + '？导入成功后该文件会被清理。')) return;
+  const ok = await uiConfirm('从 incoming 导入镜像', {
+    tier: 'low',
+    paragraphs: ['把 incoming 目录里的 ' + file + ' 导入为 ' + c.name + '？' +
+      '只往仓库里新增一份镜像；导入成功后该源文件会被清理。'],
+    cli: 'request images upload name ' + c.name + ' type ' + c.type + ' file ' + file,
+  });
+  if (!ok) return;
   imgMsg('导入中…', false);
   try {
     const res = await api('/images', {
@@ -3312,7 +3540,13 @@ async function imgImportFile() {
   if (!c) return;
   const f = $('img-file').files[0];
   if (!f) { imgMsg('请选择文件。', true); return; }
-  if (!window.confirm('上传 ' + f.name + '（' + bytes(f.size) + '）并导入为 ' + c.name + '？')) return;
+  const ok = await uiConfirm('上传并导入镜像', {
+    tier: 'low',
+    paragraphs: ['上传 ' + f.name + '（' + bytes(f.size) + '）并导入为 ' + c.name + '？' +
+      '只往仓库里新增一份镜像，不改现有对象；上传期间请勿关闭页面。'],
+    cli: 'request images upload name ' + c.name + ' type ' + c.type + ' file ' + f.name,
+  });
+  if (!ok) return;
   const fd = new FormData();
   fd.append('name', c.name);
   fd.append('type', c.type);
@@ -3702,8 +3936,10 @@ function opsOut(text) {
 }
 
 // opsRun 统一的"确认 → 调用 → 回显"流程（写操作一律先确认，与 CLI 的 --yes 同口径）。
-async function opsRun(label, confirmText, fn) {
-  if (!window.confirm(confirmText)) return;
+// `ask` 是这次动作的档位与影响面（tier / paragraphs / bullets / cli / confirmLabel），
+// 交 uiDialog 渲染——低危一句话，中危逐条列影响面并标红，高危再加确认词与倒计时。
+async function opsRun(label, ask, fn) {
+  if (!(await uiConfirm(label, ask))) return;
   opsMsg(label + '：执行中…', false);
   opsOut('');
   try {
@@ -3727,10 +3963,10 @@ $('cfg-check-btn').addEventListener('click', cfgCheck);
 $('diag-ping-btn').addEventListener('click', diagPing);
 $('diag-log-btn').addEventListener('click', diagLogs);
 $('cfg-diff-btn').addEventListener('click', cfgShowDiff);
-$('cfg-commit-btn').addEventListener('click', () => cfgCommit(0));
-$('cfg-commit-confirmed-btn').addEventListener('click', () => cfgCommit(10));
+$('cfg-commit-btn').addEventListener('click', () => cfgCommitAsk(0));
+$('cfg-commit-confirmed-btn').addEventListener('click', () => cfgCommitAsk(10));
 $('cfg-confirm-btn').addEventListener('click', cfgConfirmPending);
-$('cfg-discard-btn').addEventListener('click', cfgEndSession);
+$('cfg-discard-btn').addEventListener('click', cfgDiscardAsk);
 
 // 确认对话框：点遮罩或按 Esc 都算取消（不执行动作）。
 $('modal').addEventListener('click', (ev) => { if (ev.target === $('modal')) closeDialog(false); });
@@ -3796,76 +4032,131 @@ $('vm-console-in').addEventListener('keydown', (ev) => {
   }
 });
 
-// 抓包动作
+// 抓包动作（低危：只影响抓包缓冲，随时可停）
 $('cap-start-btn').addEventListener('click', () => {
   const ifname = $('cap-iface').value.trim();
   if (!ifname) { capMsg('请填写接口名（如 ens192）。', true); return; }
   const count = Number($('cap-count').value) || 0;
-  return opsRun('开始抓包', '在接口 ' + ifname + ' 上开始抓包？（占用少量数据面开销，用完请停止）',
-    () => api('/vpp/capture', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(count ? { interface: ifname, count } : { interface: ifname }),
-    })).then(() => capMsg('抓包已开始：' + ifname, false));
+  return opsRun('开始抓包', {
+    tier: 'low',
+    paragraphs: ['在接口 ' + ifname + ' 上开始数据面抓包' + (count ? '（缓冲深度 ' + count + ' 包）' : '') +
+      '？抓包会占用少量数据面开销，用完请停止或导出。'],
+    cli: 'request vpp trace start interface ' + ifname + (count ? ' count ' + count : ''),
+  }, () => api('/vpp/capture', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(count ? { interface: ifname, count } : { interface: ifname }),
+  })).then(() => capMsg('抓包已开始：' + ifname, false));
 });
-$('cap-stop-btn').addEventListener('click', () => opsRun('停止抓包（丢弃）',
-  '停止抓包并丢弃缓冲？（不导出文件）',
-  async () => {
-    await api('/vpp/capture', { method: 'DELETE' });
-    capMsg('已停止（未导出）。', false);
-    return '';
-  }));
-$('cap-export-btn').addEventListener('click', () => opsRun('停止并导出 pcap',
-  '停止抓包并导出 pcap 文件？',
-  async () => {
-    const r = await api('/vpp/capture?export=true', { method: 'DELETE' });
-    capMsg(r && r.exported ? '已导出：' + r.name + '（' + bytes(r.size_bytes) + '）'
-      : (r && r.message) || '未捕获到报文，无文件导出', false);
-    return '';
-  }));
+$('cap-stop-btn').addEventListener('click', () => opsRun('停止抓包（丢弃）', {
+  tier: 'low',
+  paragraphs: ['停止抓包并丢弃已捕获的报文？不导出文件，缓冲区内容不会留下。'],
+  cli: 'request vpp trace stop',
+}, async () => {
+  await api('/vpp/capture', { method: 'DELETE' });
+  capMsg('已停止（未导出）。', false);
+  return '';
+}));
+$('cap-export-btn').addEventListener('click', () => opsRun('停止并导出 pcap', {
+  tier: 'low',
+  paragraphs: ['停止抓包并把缓冲区导出为 pcap 文件？导出后可在本页下载。'],
+  cli: 'request vpp trace export',
+}, async () => {
+  const r = await api('/vpp/capture?export=true', { method: 'DELETE' });
+  capMsg(r && r.exported ? '已导出：' + r.name + '（' + bytes(r.size_bytes) + '）'
+    : (r && r.message) || '未捕获到报文，无文件导出', false);
+  return '';
+}));
 
-// 运维动作（写操作；confirm 文案写清影响面）
-$('ops-backup-btn').addEventListener('click', () => opsRun('生成配置备份',
-  '生成一份配置备份归档？（只读操作，不改运行配置）',
-  async () => {
-    const r = await api('/system/backup', { method: 'POST' });
-    return r && r.file ? '备份文件：' + r.file : '已生成。';
-  }));
-$('ops-tls-btn').addEventListener('click', () => opsRun('重签自签证书',
-  '重签本机自签证书？浏览器会提示证书变化（客户端需重新固定），当前页面可继续使用。',
-  () => api('/system/tls:regenerate', { method: 'POST' })));
-$('ops-sshkey-btn').addEventListener('click', () => opsRun('重新生成 SSH host key',
-  '重新生成 SSH host key？新连接的 host key 会变化，客户端需更新 known_hosts。',
-  () => api('/system/ssh-host-key:regenerate', { method: 'POST' })));
-$('ops-techsupport-btn').addEventListener('click', () => opsRun('生成 tech-support 归档',
-  '生成诊断归档？（收集配置/日志/状态，只读）',
-  () => api('/system/tech-support', { method: 'POST' })));
-$('ops-coredumps-btn').addEventListener('click', () => opsRun('列出 core dump',
-  '列出当前 core dump 文件？',
-  async () => {
-    const rows = await api('/system/core-dumps');
-    if (!rows || !rows.length) return '（无 core dump）';
-    return rows.map((r) => r.file + '  ' + r.process + '  ' + bytes(r.size_bytes) + '  ' + fmtTime(r.occurred_at)).join('\n');
-  }));
-$('ops-alarms-btn').addEventListener('click', () => opsRun('清除已恢复告警',
-  '清除已恢复（resolved）的告警？活动告警不受影响。',
-  () => api('/alarms:clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })));
+// 运维动作（写操作；按影响面分档：中危逐条列影响面并标红主按钮）
+$('ops-backup-btn').addEventListener('click', () => opsRun('生成配置备份', {
+  tier: 'low',
+  paragraphs: ['生成一份配置备份归档？只读操作：只读当前生效配置，不改运行配置；生成后可在本页下载。'],
+  cli: 'request system configuration backup',
+}, async () => {
+  const r = await api('/system/backup', { method: 'POST' });
+  return r && r.file ? '备份文件：' + r.file : '已生成。';
+}));
+$('ops-tls-btn').addEventListener('click', () => opsRun('重签自签证书', {
+  tier: 'mid',
+  bullets: [
+    '本机管理面自签证书会被重签：证书指纹改变，固定过旧证书的客户端与浏览器需要重新固定新证书。',
+    '新证书的地址条目（SAN）按本机地址自动生成，重签后命令行与浏览器都可继续访问管理面。',
+    '换证是热生效的，不重启服务；当前这个页面不会掉线。',
+    '改坏了的回退办法：用上传的证书重新声明并提交（本页不提供证书上传）。',
+  ],
+  cli: 'request system api tls regenerate',
+}, () => api('/system/tls:regenerate', { method: 'POST' })));
+$('ops-sshkey-btn').addEventListener('click', () => opsRun('重新生成 SSH host key', {
+  tier: 'mid',
+  bullets: [
+    '本机 SSH host key 会被换掉：新连接会看到新的主机指纹。',
+    '客户端需要更新 known_hosts，否则会报主机密钥不一致并拒绝连接。',
+    '已经建立的 SSH 会话不受影响；不重启 sshd 之外的服务。',
+  ],
+  cli: 'request system ssh host-key regenerate',
+}, () => api('/system/ssh-host-key:regenerate', { method: 'POST' })));
+$('ops-techsupport-btn').addEventListener('click', () => opsRun('生成 tech-support 归档', {
+  tier: 'low',
+  paragraphs: ['生成诊断归档？只读操作：收集配置、日志与状态，不改运行配置；生成后可在本页下载。'],
+  cli: 'request system tech-support generate',
+}, () => api('/system/tech-support', { method: 'POST' })));
+$('ops-coredumps-btn').addEventListener('click', () => opsRun('列出 core dump', {
+  tier: 'low',
+  paragraphs: ['列出本机 core dump 文件清单？只读操作，不改任何状态。'],
+  cli: 'show system core-dumps',
+}, async () => {
+  const rows = await api('/system/core-dumps');
+  if (!rows || !rows.length) return '（无 core dump）';
+  return rows.map((r) => r.file + '  ' + r.process + '  ' + bytes(r.size_bytes) + '  ' + fmtTime(r.occurred_at)).join('\n');
+}));
+$('ops-alarms-btn').addEventListener('click', () => opsRun('清除已恢复告警', {
+  tier: 'low',
+  paragraphs: ['清除已恢复（resolved）的告警记录？活动中的告警不受影响，清除后不可恢复（只是丢掉历史记录）。'],
+  cli: 'request alarms clear all',
+}, () => api('/alarms:clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })));
 $('ops-export-btn').addEventListener('click', () => {
   const url = $('ops-export-url').value.trim();
   if (!url) { opsMsg('请填写导出目标地址（http/https）。', true); return; }
-  return opsRun('导出 core dump 清单', '把 core dump 清单（JSON）POST 到 ' + url + '？',
-    () => api('/system/core-dumps:export', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
-    }));
+  return opsRun('导出 core dump 清单', {
+    tier: 'low',
+    paragraphs: ['把 core dump 清单（JSON）POST 到下面这个地址？' + url +
+      '——本机的配置与状态不变，但这意味着这份清单会离开本机，请确认地址可信。'],
+    cli: 'request system core-dumps export ' + url,
+  }, () => api('/system/core-dumps:export', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+  }));
 });
-$('ops-vpprestart-btn').addEventListener('click', () => opsRun('重启数据面（VPP）',
-  '重启数据面？所有经 VPP 的业务流量会中断数秒，VNF 的 vhost-user 口会重建。',
-  () => api('/vpp/restart', { method: 'POST' })));
-$('ops-reboot-btn').addEventListener('click', () => opsRun('重启主机',
-  '重启整台主机？所有 VNF 与容器会停止，管理面会断开数分钟。',
-  () => api('/system:reboot', { method: 'POST' })));
-$('ops-shutdown-btn').addEventListener('click', () => opsRun('关机',
-  '关闭整台主机？所有 VNF 与容器会停止，管理面断开后需带外开机。',
-  () => api('/system:shutdown', { method: 'POST' })));
+$('ops-vpprestart-btn').addEventListener('click', () => opsRun('重启数据面（VPP）', {
+  tier: 'mid',
+  bullets: [
+    '所有经数据面的流量会中断数秒（虚拟机之间、虚拟机对外）。',
+    '虚拟机与容器的数据口（vhost-user 口、成员口）按当前生效的配置重建。',
+    '配置里没声明过的物理口不会回到数据面——把业务口交给数据面请先在配置里声明。',
+    '配置改动里标着「需重启数据面」的部分，会随这次重启生效。',
+    '可回退：配置改坏了就回滚配置并再重启一次数据面。',
+  ],
+  cli: 'request vpp restart',
+}, () => api('/vpp/restart', { method: 'POST' })));
+$('ops-reboot-btn').addEventListener('click', () => opsRun('重启主机', {
+  tier: 'mid',
+  bullets: [
+    '整台主机重启：所有虚拟机与容器随之停止，业务全部中断。',
+    '管理面（本页面与命令行连接）会断开数分钟，重启期间无法操作，请等主机起来后重新登录。',
+    '除配了开机自启的虚拟机外，虚拟机不会自己回来，需要在重启后逐台启动。',
+    '可回退：没有「取消重启」——本机重启完成后就是新的运行态（配置仍在）。',
+  ],
+  cli: 'request system reboot',
+}, () => api('/system:reboot', { method: 'POST' })));
+$('ops-shutdown-btn').addEventListener('click', () => opsRun('关机', {
+  tier: 'mid',
+  bullets: [
+    '整台主机关机：所有虚拟机与容器随之停止，业务全部中断。',
+    '管理面断开后本机不会自己起来，需要带外（控制台/IPMI 之类）或按电源键开机。',
+    '关机前请确认还有别的路径能把这台机器开起来。',
+    '可回退：开机后配置与数据都在，不丢配置。',
+  ],
+  cli: 'request system shutdown',
+}, () => api('/system:shutdown', { method: 'POST' })));
 
 // 诊断卡新增：traceroute 与接口计数清零
 $('diag-trace-btn').addEventListener('click', async () => {
@@ -3893,12 +4184,15 @@ $('diag-trace-btn').addEventListener('click', async () => {
 });
 $('diag-clear-btn').addEventListener('click', () => {
   const name = $('diag-clear-if').value.trim();
-  return opsRun('清零接口统计',
-    name ? '清零接口 ' + name + ' 的收发计数？' : '清零所有接口的收发计数？',
-    () => api('/interfaces:clear-statistics', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(name ? { name } : {}),
-    }));
+  return opsRun('清零接口统计', {
+    tier: 'low',
+    paragraphs: [(name ? '清零接口 ' + name + ' 的收发计数？' : '清零「所有接口」的收发计数？') +
+      '只影响统计数字（业务流量不受影响），清零后计数从 0 重新开始。'],
+    cli: 'clear interfaces statistics' + (name ? ' ' + name : ''),
+  }, () => api('/interfaces:clear-statistics', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(name ? { name } : {}),
+  }));
 });
 
 // 关页面/刷新时收尾：实时通道、轮询、以及串口 WebSocket（详情页的串口连着就要断开）。

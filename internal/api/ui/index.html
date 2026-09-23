@@ -455,7 +455,7 @@
 
     <section class="page" id="page-ops" hidden>
     <article class="card wide">
-      <h2>运维动作 <span class="muted small">（写操作，均需二次确认）</span></h2>
+      <h2>运维动作 <span class="muted small">（写操作，按影响面分级确认）</span></h2>
       <div class="cfg-forms">
         <fieldset>
           <legend>配置与备份</legend>
@@ -582,16 +582,18 @@
     数据取自本机 REST 接口；当前页按其自身节奏刷新（多数页 5 秒一次，配置与运维类页面不自动刷新），
     事件推送到达时立即刷新。顶栏可切换页面，地址里的 # 可直接分享或收藏。
     配置修改在「配置」页里经 candidate → 提交 流程进行，未提交前不影响运行配置；
-    写类运维动作在「运维」页里，均需二次确认。
+    写类动作按影响面分级确认：低危点一次即可，中危先列出影响面，高危还要手工输入确认词并等倒计时走完。
   </footer>
 
-  <!-- 确认对话框（中危动作：列出影响面 + 只读回显对应命令 + 主按钮标红）。
-       内容由 app.js 的 uiDialog 填充；这里只放骨架，页面本身不含内联脚本与内联样式。 -->
+  <!-- 确认对话框（分级确认，三档共用这一个框：低危单击确认 / 中危列出影响面并标红主按钮 /
+       高危再要求输入确认词并等倒计时走完）。内容由 app.js 的 uiDialog 填充；这里只放骨架，
+       页面本身不含内联脚本与内联样式。 -->
   <div id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" hidden>
     <div class="modal-box">
       <h3 id="modal-title"></h3>
       <div id="modal-body"></div>
       <p id="modal-cli" class="muted small" hidden></p>
+      <div id="modal-guard" hidden></div>
       <div class="cfg-actions" id="modal-actions"></div>
     </div>
   </div>
