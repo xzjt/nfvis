@@ -280,9 +280,7 @@ function render(st, ver, vpp, pools, ifaces, ifaceRows, vms, cts, alarms) {
     : '';
 
   renderVMRows(vms);
-  table($('ct-table').querySelector('tbody'), 5, (cts || []).map((c) => [
-    c.name, c.state, c.vcpu, c.memory_mb ? mb(c.memory_mb) : undefined, c.image,
-  ]));
+  renderContainerRows(cts);
 
   const al = $('alarms');
   al.textContent = '';
@@ -1070,6 +1068,82 @@ function renderVSwitches(vss, rows) {
   pre.textContent = '成员口计数（运行态）：\n' + lines.join('\n');
 }
 
+// ---------- 容器：生命周期 + 日志 ----------
+
+// 与 VM 同一套状态口径（容器状态来自 Docker）。
+function renderContainerRows(cts) {
+  const tbody = $('ct-table').querySelector('tbody');
+  tbody.textContent = '';
+  const rows = cts || [];
+  $('ct-note').textContent = rows.length ? '（' + rows.length + ' 个；动作按钮按当前状态启用）' : '';
+  if (!rows.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '6', class: 'muted', text: '（无）' }));
+    tbody.appendChild(tr);
+    return;
+  }
+  rows.forEach((c) => {
+    const tr = el('tr');
+    [c.name, c.state, c.vcpu, c.memory_mb ? mb(c.memory_mb) : undefined, c.image].forEach((v) => {
+      tr.appendChild(el('td', { text: String(dash(v)) }));
+    });
+    const cell = el('td', { class: 'actions' });
+    const logBtn = el('button', { type: 'button', class: 'ghost small', text: '日志' });
+    logBtn.addEventListener('click', () => ctLogsOpen(c.name));
+    cell.appendChild(logBtn);
+    VM_ACTIONS.forEach((a) => {
+      const btn = el('button', { type: 'button', class: 'ghost small', text: a.label });
+      btn.disabled = a.states.indexOf(String(c.state)) < 0;
+      btn.addEventListener('click', () => ctAction(c.name, a.key, a.label));
+      cell.appendChild(btn);
+    });
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
+  });
+}
+
+async function ctAction(name, action, label) {
+  if (!window.confirm(label + '容器 ' + name + '？容器内的进程会被' +
+    (action === 'stop' ? '停止' : '重启') + '。')) return;
+  opsMsg(label + ' ' + name + '：执行中…', false);
+  try {
+    await api('/container-functions/' + encodeURIComponent(name) + ':' + action, { method: 'POST' });
+    opsMsg(label + ' ' + name + '：已受理。', false);
+  } catch (e) {
+    opsMsg(label + ' ' + name + ' 失败：' + e.message, true);
+  }
+  await loadAll().catch(() => {});
+}
+
+let ctLogsName = '';
+
+async function ctLogsOpen(name) {
+  ctLogsName = name;
+  $('ct-logs-wrap').hidden = false;
+  $('ct-logs-name').textContent = name;
+  await ctLogsLoad();
+}
+
+async function ctLogsLoad() {
+  const pre = $('ct-logs');
+  if (!ctLogsName) return;
+  pre.textContent = '读取中…';
+  try {
+    const res = await fetch(API + '/container-functions/' + encodeURIComponent(ctLogsName) + '/logs?tail=200', {
+      headers: { Authorization: 'Bearer ' + token },
+    });
+    if (!res.ok) {
+      let msg = 'HTTP ' + res.status;
+      try { const b = await res.json(); if (b && b.message) msg = b.message; } catch (e) { /* 纯文本错误体 */ }
+      pre.textContent = '读取失败：' + msg;
+      return;
+    }
+    pre.textContent = (await res.text()) || '（无输出）';
+  } catch (e) {
+    pre.textContent = '读取失败：' + e.message;
+  }
+}
+
 // ---------- 镜像仓库 ----------
 
 function renderImages(imgs) {
@@ -1314,6 +1388,10 @@ $('audit-refresh-btn').addEventListener('click', async () => {
     btn.disabled = false;
   }
 });
+
+// 容器日志
+$('ct-logs-refresh').addEventListener('click', ctLogsLoad);
+$('ct-logs-close').addEventListener('click', () => { $('ct-logs-wrap').hidden = true; ctLogsName = ''; });
 
 // 串口 console
 $('vm-console-close').addEventListener('click', vmConsoleClose);
