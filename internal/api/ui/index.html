@@ -174,9 +174,44 @@
     <article class="card wide">
       <h2>镜像</h2>
       <table id="img-table">
-        <thead><tr><th>名称</th><th>类型</th><th>大小</th><th>引用</th></tr></thead>
+        <thead><tr><th>名称</th><th>类型</th><th>大小</th><th>引用</th><th>状态</th><th>操作</th></tr></thead>
         <tbody></tbody>
       </table>
+
+      <details id="img-import-wrap">
+        <summary class="muted">导入镜像（URL 拉取 / incoming 文件 / 本地上传）</summary>
+        <div class="cfg-forms">
+          <fieldset>
+            <legend>公共字段</legend>
+            <label for="img-name">名称（须与 Docker tag 一致，容器镜像尤其）</label>
+            <input id="img-name" type="text" placeholder="alpine:3.20">
+            <label for="img-type">类型</label>
+            <input id="img-type" type="text" value="vm-image" placeholder="vm-image 或 container-image">
+          </fieldset>
+          <fieldset>
+            <legend>方式 A：URL 拉取（sha256 必填）</legend>
+            <label for="img-url">URL</label>
+            <input id="img-url" type="text" placeholder="https://example.invalid/img.qcow2">
+            <label for="img-sha">sha256</label>
+            <input id="img-sha" type="text" placeholder="64 位十六进制">
+            <div class="cfg-actions"><button id="img-url-btn" type="button" class="ghost">拉取并导入</button></div>
+          </fieldset>
+          <fieldset>
+            <legend>方式 B：incoming 文件（先 scp 到 /data/incoming）</legend>
+            <label for="img-incoming">文件名</label>
+            <input id="img-incoming" type="text" placeholder="my.qcow2">
+            <div class="cfg-actions"><button id="img-incoming-btn" type="button" class="ghost">从 incoming 导入</button></div>
+          </fieldset>
+          <fieldset>
+            <legend>方式 C：本地上传（multipart）</legend>
+            <label for="img-file">文件</label>
+            <input id="img-file" type="file">
+            <div class="cfg-actions"><button id="img-file-btn" type="button" class="ghost">上传并导入</button></div>
+            <p class="muted small">大镜像上传期间请勿关闭页面。</p>
+          </fieldset>
+        </div>
+        <p id="img-msg" class="muted small" hidden></p>
+      </details>
     </article>
 
     <article class="card wide">

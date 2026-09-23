@@ -32,7 +32,6 @@ var uiNotWired = map[string]string{
 	"/bonds/{name}":                      "bond 详情——列表已给成员，详情后续增量",
 	"/qos/policies/{name}":               "QoS 详情——列表已给概览",
 	"/port-mirroring/{name}":             "SPAN 详情——列表已给概览",
-	"/images/{name}":                     "镜像详情——列表已给全部字段",
 	"/configuration/rollback/{n}":        "回滚到历史快照——需先看差异再确认，后续增量",
 	"/protocols/lldp":                    "LLDP 开关状态——邻居表已接；开关属配置编辑（走「配置」卡）",
 
@@ -115,6 +114,7 @@ func uiCovers(lits []string, path string) bool {
 // uiDynamicWired 由前端**动态拼接**构造、字面量提取不到、但确实调用了的路径 → 出处说明。
 // 收紧 uiCovers 之后，这类路径必须显式登记，否则会被误判成"未接"。
 var uiDynamicWired = map[string]string{
+	"/images/{name}":                                                  "imgDelete()：DELETE '/images/' + name",
 	"/vrfs/{name}/routes":                                             "bigRoutes()：api('/vrfs/' + name + '/routes')",
 	"/vrfs/{name}":                                                    "bigRoutes() 的路由表覆盖了排障所需（VRF 详情暂无独立入口）",
 	"/nat/sessions":                                                   "bigNat()：api('/nat/sessions')",
