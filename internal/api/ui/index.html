@@ -112,6 +112,22 @@
         <tbody></tbody>
       </table>
       <pre id="vm-stat" class="code" hidden></pre>
+
+      <!-- 串口 console：点行内「串口」按钮打开（一次性 ticket 换 WebSocket） -->
+      <div id="vm-console" hidden>
+        <h3>串口 console <span id="vm-console-name" class="muted small"></span>
+          <button id="vm-console-close" type="button" class="ghost small">断开</button></h3>
+        <pre id="vm-console-out" class="code console-out"></pre>
+        <div class="cfg-actions">
+          <input id="vm-console-in" type="text" placeholder="输入后回车发送（串口是行缓冲，Ctrl-C 可中断）">
+          <button id="vm-console-send" type="button" class="ghost">发送</button>
+          <button id="vm-console-enter" type="button" class="ghost">只发回车</button>
+        </div>
+        <p class="muted small">
+          终端连接的是 VM 的<strong>串口</strong>（与 CLI 的 console 同一路）。输入的内容会直接进入 guest——
+          请确认这是你要操作的机器。
+        </p>
+      </div>
     </article>
 
     <article class="card wide">
@@ -180,7 +196,8 @@
     </article>
 
     <article class="card wide">
-      <h2>审计日志 <span id="audit-note" class="muted small"></span></h2>
+      <h2>审计日志 <span id="audit-note" class="muted small"></span>
+        <button id="audit-refresh-btn" type="button" class="ghost small">刷新</button></h2>
       <table id="audit-table">
         <thead><tr><th>时间</th><th>用户</th><th>动作</th><th>详情</th><th>结果</th></tr></thead>
         <tbody></tbody>

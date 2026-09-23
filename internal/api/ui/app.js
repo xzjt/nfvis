@@ -931,6 +931,11 @@ function renderVMRows(vms) {
       tr.appendChild(el('td', { text: String(dash(c)) }));
     });
     const cell = el('td', { class: 'actions' });
+    if (v.serial_console !== false) {
+      const cbtn = el('button', { type: 'button', class: 'ghost small', text: '串口' });
+      cbtn.addEventListener('click', () => vmConsoleOpen(v.name));
+      cell.appendChild(cbtn);
+    }
     VM_ACTIONS.forEach((a) => {
       const btn = el('button', { type: 'button', class: 'ghost small', text: a.label });
       btn.disabled = a.states.indexOf(String(v.state)) < 0;
@@ -970,6 +975,70 @@ function renderVMStats(vms, stats) {
   }
   pre.hidden = false;
   pre.textContent = 'vhost-user 口计数：\n' + rows.join('\n');
+}
+
+// ---------- 串口 console（一次性 ticket → WebSocket）----------
+
+// 终端状态：WebSocket 与当前 VM 名（同一时刻只连一台，避免误操作）。
+let termWS = null;
+let termVM = '';
+
+// 串口输出含 ANSI 转义（颜色/光标），去掉后按纯文本渲染（不引入终端模拟器）。
+function stripANSI(s) {
+  return s.replace(/\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/[\]\][^]*/g, '');
+}
+
+function termAppend(text) {
+  const out = $('vm-console-out');
+  const atBottom = out.scrollTop + out.clientHeight >= out.scrollHeight - 8;
+  out.textContent += stripANSI(text);
+  if (out.textContent.length > 200000) out.textContent = out.textContent.slice(-150000);
+  if (atBottom) out.scrollTop = out.scrollHeight;
+}
+
+function termMsg(text, isErr) {
+  const out = $('vm-console-out');
+  out.textContent += (isErr ? '\n[错误] ' : '\n[信息] ') + text + '\n';
+  out.scrollTop = out.scrollHeight;
+}
+
+async function vmConsoleOpen(name) {
+  if (termWS) { termMsg('先断开当前 console（' + termVM + '）。', true); return; }
+  $('vm-console').hidden = false;
+  $('vm-console-name').textContent = name;
+  $('vm-console-out').textContent = '';
+  termMsg('正在申请 console 凭证…', false);
+  let res;
+  try {
+    res = await api('/virtual-machine-functions/' + encodeURIComponent(name) + '/console', { method: 'POST' });
+  } catch (e) {
+    termMsg('申请凭证失败：' + e.message, true);
+    return;
+  }
+  const wsURL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + res.ws_url;
+  try {
+    termWS = new WebSocket(wsURL);
+  } catch (e) {
+    termMsg('打开 WebSocket 失败：' + e.message, true);
+    return;
+  }
+  termVM = name;
+  termWS.onopen = () => termMsg('已连接 ' + name + ' 的串口（回车可让 guest 重绘提示符）。', false);
+  termWS.onmessage = (ev) => termAppend(ev.data);
+  termWS.onclose = () => { termMsg('连接已关闭。', false); termWS = null; termVM = ''; };
+  termWS.onerror = () => termMsg('WebSocket 出错（凭证过期或串口不可用）。', true);
+  $('vm-console-in').focus();
+}
+
+function vmConsoleClose() {
+  if (termWS) { termWS.close(); termWS = null; termVM = ''; }
+  $('vm-console').hidden = true;
+  $('vm-console-out').textContent = '';
+}
+
+function vmConsoleSend(text, enter) {
+  if (!termWS || termWS.readyState !== 1) { termMsg('尚未连接。', true); return; }
+  termWS.send(text + (enter ? '\r' : ''));
 }
 
 // ---------- 虚拟交换机（运行态 + 成员口计数）----------
@@ -1200,6 +1269,36 @@ $('cfg-commit-btn').addEventListener('click', () => cfgCommit(0));
 $('cfg-commit-confirmed-btn').addEventListener('click', () => cfgCommit(10));
 $('cfg-confirm-btn').addEventListener('click', cfgConfirmPending);
 $('cfg-discard-btn').addEventListener('click', cfgEndSession);
+
+// 审计卡：写入不发事件，故给一个显式刷新（否则 SSE 连着时卡片会停在旧内容上）
+$('audit-refresh-btn').addEventListener('click', async () => {
+  const btn = $('audit-refresh-btn');
+  btn.disabled = true;
+  try {
+    renderAudit(await api('/audit-logs?limit=50'));
+    $('audit-note').textContent = '（已刷新 ' + new Date().toLocaleTimeString() + '）';
+  } catch (e) {
+    $('audit-note').textContent = '（刷新失败：' + e.message + '）';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// 串口 console
+$('vm-console-close').addEventListener('click', vmConsoleClose);
+$('vm-console-send').addEventListener('click', () => {
+  const inp = $('vm-console-in');
+  vmConsoleSend(inp.value, true);
+  inp.value = '';
+});
+$('vm-console-enter').addEventListener('click', () => vmConsoleSend('', true));
+$('vm-console-in').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') {
+    ev.preventDefault();
+    vmConsoleSend($('vm-console-in').value, true);
+    $('vm-console-in').value = '';
+  }
+});
 
 // 抓包动作
 $('cap-start-btn').addEventListener('click', () => {
