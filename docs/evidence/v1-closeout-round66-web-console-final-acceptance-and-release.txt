@@ -1,0 +1,113 @@
+===== V1 收尾第六十六轮：控制台刀 5 收尾（全套浏览器操作验收）+ 发布 v1.1.29 =====
+日期：2026-09-24；main `dccd007`（本轮发布点）；决策 #141 第 5 刀 + 决策 #143 随版发布
+
+----- 1. 本轮交付 -----
+1. **控制台刀 5 收尾的"全套浏览器操作验收"**（决策 #141 口径）：**用随包二进制**（`/usr/bin/nfvisd` 1.1.29）
+   + 生产库副本起明文实例，逐页巡检 + 真执行抽查 + 只读角色实测（§3）。
+2. **发布 v1.1.29**：`nfvis_1.1.29_amd64.deb`
+   sha256 `080269540f64a3750d91b349c87d9b7074d433c2f68a1486249beda8d97a4536`，7,918,732 字节，
+   main `dccd007` + `SOURCE_DATE_EPOCH=1790219512`；**连打两次哈希逐字节一致**（§4④）。
+   Release: https://github.com/xzjt/nfvis/releases/tag/v1.1.29（tag 指向 main、非 draft/prerelease）。
+3. 随版的两处收口（各自 PR）：**决策 #143**（`GET /system/backup/{file}` 提到 super-user，PR #200）与
+   **控制台直连 fetch 的失败文案带上服务端原话**（PR #202）。
+
+----- 2. 验收环境（与 round48 口径一致）-----
+- 实例：**随包二进制** `/usr/bin/nfvisd`（1.1.29）+ **生产库副本** `/tmp/nfvis-rel.db`，明文 `0.0.0.0:8443`；
+  宿主经 SSH 隧道 `localhost:18443` 用 **ZCode 内置浏览器（Browser Use）**黑盒操作。
+- 全程**不写生产库**：所有写动作只落副本；收尾后生产库指纹与本轮开始前**逐字段一致**（§6）。
+- 账号：`admin`（口令按 §3.1 哈希比对法核对后使用，未试登录）。
+
+----- 3. 全套浏览器操作验收（决策 #141：每个功能都要在浏览器里真的操作一遍）-----
+**3.1 路由巡检（25 条具体路由，逐条断言：可见页恰好一个 / 面包屑 / 该页只拉自己声明的端点 / 无 JS 错误）**
+
+| 路由 | 可见页 | 面包屑 | 该页实际请求的端点 | JS 错误 |
+|---|---|---|---|---|
+| `#/` | page-overview | 总览 | `/system/status`、`/system/version`、`/vpp/status`、`/alarms` | 无 |
+| `#/compute/vms` | page-vms | 计算 › 虚拟机 | `/virtual-machine-functions` | 无 |
+| `#/compute/vms/vnf-a` | page-vmDetail | 计算 › 虚拟机 | `…/vnf-a`、`…/vnf-a/snapshots` | 无 |
+| `#/compute/containers` | page-containers | 计算 › 容器 | `/container-functions` | 无 |
+| `#/compute/images` | page-images | 计算 › 镜像 | `/images` | 无 |
+| `#/compute/images/debian-12-generic-amd64.qcow2` | page-imageDetail | 计算 › 镜像 | `/images/debian-12-generic-amd64.qcow2` | 无 |
+| `#/network` | page-network | 网络 › 网络对象 | `/vrfs`、`/acls`、`/nat`、`/bonds`、`/qos/policies`、`/port-mirroring` | 无 |
+| `#/network/switches` | page-switches | 网络 › 虚拟交换机 | `/virtual-switches` + `vs-vnf` 详情 | 无 |
+| `#/network/switches/vs-vnf` | page-switchDetail | 网络 › 虚拟交换机 | `/virtual-switches/vs-vnf`、`…/ports` | 无 |
+| `#/network/lldp` | page-lldp | 网络 › LLDP | `/protocols/lldp`、`/protocols/lldp/neighbors` | 无 |
+| `#/system` | page-system | 系统 | `/system`、`/system/status`、`/system/version` | 无 |
+| `#/system/hardware` | page-hardware | 系统 › 硬件健康 | `/system/hardware`、`/system/health/thresholds` | 无 |
+| `#/system/pools` | page-pools | 系统 › 资源池 | `/resource-pools` | 无 |
+| `#/system/interfaces` | page-interfaces | 系统 › 接口 | `/interfaces` + ens192/ens224 详情 | 无 |
+| `#/system/interfaces/ens192` | page-ifaceDetail | 系统 › 接口 | `/interfaces`、`/interfaces/ens192` | 无 |
+| `#/system/kernel` | page-kernel | 系统 › 内核基线 | `/system/kernel` | 无 |
+| `#/system/users` | page-users | 系统 › 用户与权限 | `/system/login-users` | 无 |
+| `#/system/tls` | page-tls | 系统 › 证书 | `/system/tls` | 无 |
+| `#/config` | page-config | 配置 | `/configuration`、`/configuration/candidate`（锁归属）、`/vpp/config` | 无 |
+| `#/config/history` | page-configHistory | 配置 › 提交历史 | `/configuration/history`（**51 条**） | 无 |
+| `#/config/sessions` | page-configSessions | 配置 › 编辑锁会话 | `/system/configuration/sessions` | 无 |
+| `#/ops/actions` | page-ops | 运维 › 动作 | `/system/backup`、`/system/tech-support` | 无 |
+| `#/ops/audit` | page-audit | 运维 › 审计 | `/audit-logs`（50 行） | 无 |
+| `#/ops/diagnostics` | page-diagnostics | 运维 › 诊断 | `/system/logs` | 无 |
+| `#/ops/capture` | page-capture | 运维 › 抓包 | `/vpp/capture` | 无 |
+
+**负例**（如实报错、不谎报、不抛 JS 错）：
+- `#/network/vrfs/nope` → 页内「以下数据读取失败：/vrfs/{name}/routes（VRF nope 不存在）、/vrfs/{name}（VRF nope 不存在）」；
+- `#/compute/containers/nope`、`#/network/acls/nope`、`#/network/bonds/nope`、`#/network/qos/nope`、`#/network/span/nope`
+  → 各自「读取失败 / 不存在 / 未找到」文案（qos/span 还写明"该对象没有单独读取的接口"）；
+- `#/nope/xyz` → 「页面不存在：#/nope/xyz（已回到总览）」。
+
+**3.2 地址即页面**：深链直达 `…/ui/#/system/interfaces`（整页加载）→ 该页可见、面包屑「系统 › 接口」、首格 `ens192`；
+`reload()` 后仍在原页；`#/system/interfaces` → `#/compute/images` → 后退 → 接口页 → 前进 → 镜像页（全部符合）。
+
+**3.3 真执行抽查（低危档，并对照独立事实源）**：`#/ops/actions` 点「生成配置备份」→ 确认框
+（**无确认词、按钮为「确定」**，符合低危档）→ 执行后界面「生成配置备份：完成。」、归档表 **7 → 8 行**；
+独立事实源：配置库新增审计行 `system.backup 生成配置备份 nfvis-backup-20260924T032414Z.json success`，
+且 `/var/lib/nfvis/backup/` 下**真的落了 0600 的归档文件**（3800 字节）。
+
+**3.4 归档下载（super-user 正例，决策 #143 的对照面）**：归档行点「下载」→ 界面「已触发下载：…（3.7 KB）」。
+
+**3.5 只读角色实测**：read-only 账号登入后——**服务端 class 判定是真边界**（点「开始编辑」→「配置（无法进入编辑：
+当前 class 无权执行该操作）」；`#/system/users` 整页「…（当前 class 无权执行该操作）」；配置库无变化；
+归档下载 → 界面「下载失败：当前 class 无权执行该操作」，与 REST 原文一致）；
+**但界面未按角色隐藏写入口**（21 个导航项与各页写按钮全部可见）——设计 §8 该项未实现，见 §5。
+
+**3.6 高危动作真执行**：见 `docs/evidence/v1-closeout-round65-web-console-highrisk-exec.txt`
+（建/删用户经闸门真改到底座 + 独立事实源 + 409 原文）。
+
+**3.7 分级确认的桩式自校准**：`make check` 的 `web-console-confirm-selftest` 全绿（含 7 个变异体：
+gates/word/timer/reboot/zeroize/dpdk/**rawhttp**——每个拆掉都必须报 ✗），`window.confirm` 归零。
+
+----- 4. 发布校验（round48 口径，逐项）-----
+| # | 项 | 结果 |
+|---|---|---|
+| ① | 元数据 | `Package nfvis / Version 1.1.29 / amd64 / Section net / Depends libc6`；control 成员 4 件齐 |
+| ② | 内容 | **23 个成员**：二进制 2、systemd 单元 1、安装器脚本 2、随包文档 7（OpenAPI + 命令树 + 规格书 + 手册 + 命令全表 + M5 验收记录 + version）、其余目录项 |
+| ③ | 解包运行 | `/tmp` 解包后 `nfvisd -version` / `nfvis-cli -version` = **1.1.29** |
+| ④ | **可复现** | 同 commit + 同 VERSION **连打两次 sha256 逐字节一致**（`080269540f64a3750d91b349c87d9b7074d433c2f68a1486249beda8d97a4536`） |
+| ⑤ | 随包文档是当前版本 | 手册 1467 行、含新 IA 章节与 §10.7「经 REST 下载同一归档同样只允许 super-user」；规格书 **143 条决策**（含 #143）；附录 B 标题仍在；OpenAPI 含新 summary/description |
+| ⑥ | **随包前端 = 仓库源码** | `/api/v1/ui/{index.html,app.js,style.css,router.js,routes.json}` 与仓库源码**逐字节一致**（`cmp` 全过） |
+| ⑦ | 升级实装 1.1.28 → 1.1.29 | prerm/postinst 正常；服务 active；`show version` = 1.1.29；**既有 VNF 拓扑存活**（vnf-a/vnf-b running、BD 6252701）；**配置库未变**（rev 55 / audit 104 / cfgsha `084c3a64…`） |
+| ⑧ | REST/Web 内容实测 | `/ui/` 200（45254 字节）、`/ui` 302、未认证 `/system/status` 401；`POST /login` 回 `user={name,class}` + `token_id` + `expires_in=3599`；`/system/status` 契约字段齐全（uptime = **主机**运行时长 168452s；大页两池 1G 2/0、2M 768/768）；`/system/version` = 1.1.29 + 5 组件；`/configuration` **0 处 `password_hash`**；`/configuration/history` 51 条（含 rev/时间/提交者/注释/current）；`POST /configuration/check` 未持锁 **409** 且文案明确；`/system/logs?last=5` 200；`POST /diagnostics/ping`（BVI 自身）**502** `PING_FAILED`；`POST /logout` **204** 且旧 token 立即 **401** |
+| ⑨ | 本版新内容实测 | 用**已装二进制 + 生产库副本**验证决策 #143：read-only 下载 **403**（原文 `{"code":"FORBIDDEN","message":"当前 class 无权执行该操作"}`）、read-only 列归档 **200**、operator 下载 **403**、super-user **200 且归档含 `password_hash`**（3 处） |
+| ⑩ | purge | postrm 自动撤销 SSH 强化（drop-in 消失、`sshd -t` 通过）；GRUB 片段/fstab 保留并打印手工步骤；`/var/lib/nfvis` 保留（1.5G）；二进制与单元移除；`/run/nfvis` 清理；配置库未变 |
+| ⑪ | 重装 | SSH 强化重新落地；**配置库逐字段一致**；启动日志有「管理口守卫事实（default-route=ens160）」「恢复收敛完成」、**30 分钟内无「一次性口令」**（未走首启路径） |
+| ⑫ | 重装后拓扑 + 流量 | BD 6252701 四口、vnf-a/vnf-b running；`vppctl ping` 双向 **10/10 0% 丢包**（首发 5 发时各 4/5 是首包 ARP 预热）；宿主经 DPDK 物理口 **4/4、0.37~0.48ms** |
+| ⑬ | 发布与回验 | tag `v1.1.29` 指向 main、非 draft/prerelease；assets = `nfvis_1.1.29_amd64.deb`（7,918,732）+ `.sha256`（**asset 名无本地后缀**）；**自 GitHub 回下载 sha256 与构建端逐字节一致**（`cmp` 通过） |
+
+----- 5. 如实登记（本版未修，均已在交接文档/决策 #143 记录）-----
+1. `POST /system/kernel:apply|:rollback` **契约声明但服务端从未注册（404）**——控制台如实报错不谎报（待办 §2.3）。
+2. §7 要求的「高危审计记意图 + 结果两条」**服务端未实现**（只写一条结果行；round65 实测）。
+3. **控制台未按角色隐藏写入口**（设计 §8 / 骨架计划 Step 2 的验收项未实现）——服务端判定是真边界，
+   影响面是体验与误导（点下去才被拒），不是越权。修它要跨 ~20 个页面做入口分类 + 浏览器复验，属独立一刀。
+4. **`request system …` 的运行期 class 判定比命令树声明松**（执行器取 `request system` 域节点 = O 级 ⇒
+   operator 能过 `zeroize`/`reboot`/`software`/`configuration backup` 等**声明为 S** 的命令），
+   且 `… backup to <path>` 的目标路径**无校验**（nfvisd 以 root 运行 ⇒ 可把任意文件覆盖成归档 JSON）。
+   两条已登记（决策 #143 文末、交接 §2.3），**需单独裁决**。
+5. `GET /system/tech-support/{file}` 同为 read-only，而诊断归档内含 `config.json`（同样含口令哈希）——
+   同类口径不一致，待裁决。
+
+----- 6. 环境（本轮前后逐项核对）-----
+- 生产库：**rev 55 / audit 104 / cfgsha `084c3a64e4cc0d43a16cbced28cb0742aaa0ef1783c75065eb7966b091eba726`**
+  ——本轮开始前 = 升级后 = purge 后 = 重装后 = 浏览器验收后 = 收尾，**逐字段一致**（动服务前已按 §3.9 备份）
+- 已装服务：**nfvis 1.1.29 active**（443 在听）；临时明文实例已停（8443 无监听）、开发态库副本已删
+- VPP：`show bridge-domain` 只剩配置声明的 **BD 6252701（bvi0）**；`vnf-a`/`vnf-b` running
+- 流量：`vppctl ping` 双向 10/10 0%；宿主经 DPDK 物理口 4/4（<0.5ms）
+- 口令：`WBF81vOA4M8GM28f@Aa1` **按 §3.1 哈希比对法**核对有效（全程未做登录试探）
