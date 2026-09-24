@@ -6,6 +6,10 @@ info:
     NFViS 一体机 REST API（V1）。
     - 配置类写操作默认作用于 candidate，需 POST /configuration/commit 生效；
       请求头 `X-NFVIS-Auto-Commit: true` 可让单请求直接提交。
+    - 编辑锁（会话锁，FR-CFG-009）：写入 candidate 的请求会取得全局编辑锁（持有者 = 用户 + 接入源）。
+      一次性事务（带 `X-NFVIS-Auto-Commit: true` 的写、以及 /system/login-users 一族——它们提交即生效）
+      在收尾时交还锁；纯候选写入（无该头）与 POST /configuration/commit 之后锁仍在，
+      由客户端显式收尾（`DELETE /configuration/candidate`）或 POST /logout 释放。
     - 错误响应统一为 Error 结构；校验错误逐条列入 detail。
     - 事件经 SSE 推送：GET /events（text/event-stream）。
 servers:
@@ -148,6 +152,10 @@ paths:
     post:
       tags: [system]
       summary: 创建用户或 class
+      description: |
+        一次性事务：用户/口令变更**必须生效**（FR-SEC-008），本族端点提交即生效、
+        无需（也不该）由调用方再 commit；收尾时交还全局编辑锁（决策 #151）——
+        提交后本会话不再持锁，其它会话可立即写入 candidate。
       requestBody:
         required: true
         content:
@@ -924,6 +932,9 @@ paths:
             candidate 已更新（未提交）。缺省分支返回 `CandidateView`（`candidate` 为替换/合并后的文档）；
             带 `X-NFVIS-Auto-Commit: true` 时走提交分支、返回 `CommitResult`（两种形状，
             故此处不声明 schema——形状守护覆盖的是 GET 分支）。
+            **编辑锁**：缺省分支持有编辑锁（操作者继续编辑）；Auto-Commit 分支是一次性事务，
+            提交后交还锁（候选干净时），因此后续读 candidate 会得到 409——
+            要基于生效配置继续写，请读 `GET /configuration`。
     delete:
       tags: [configuration]
       summary: 丢弃 candidate（discard）
@@ -1878,6 +1889,7 @@ paths:
     put:
       tags: [system]
       summary: 修改用户（class/口令，需 super-user）
+      description: 一次性事务：提交即生效、收尾交还编辑锁（决策 #151，同 `POST /system/login-users`）。
       requestBody:
         required: true
         content:
@@ -1892,6 +1904,7 @@ paths:
     delete:
       tags: [system]
       summary: 删除用户
+      description: 一次性事务：提交即生效、收尾交还编辑锁（决策 #151，同 `POST /system/login-users`）。
       responses:
         "204": { description: 已删除 }
         "409": { $ref: "#/components/responses/Error409" }   # 不能删除自己/最后一个 super-user
@@ -1900,6 +1913,9 @@ paths:
     post:
       tags: [auth]
       summary: 口令自助修改（登录者本人或 super-user，需旧口令）
+      description: |
+        一次性事务：校验旧口令 + 策略后提交生效（FR-SEC-008），收尾交还编辑锁（决策 #151）——
+        改完口令的会话不再持有全局编辑锁，其它会话的配置写不会被挡（也无需为此登出）。
       requestBody:
         required: true
         content:

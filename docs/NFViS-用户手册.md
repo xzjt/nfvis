@@ -385,6 +385,12 @@ VPP 线程核不在隔离核内）。
 会话锁：一个会话持 candidate 时，其他会话不能取得写锁（报 `candidate 会话锁被占用: 由 … 持有`，
 直到对方 commit/discard 或空闲超时）。查看谁持锁：`show system configuration sessions`。
 
+**「提交即生效」的写操作不会占着锁**：`system login-users` 一族（建/删用户、改权限类、重置口令、
+自助改密）与带 `X-NFVIS-Auto-Commit: true` 的直提写都是**一次性事务**——提交生效后立刻交还会话锁，
+不必（也不该）为了放锁而登出；提交**因校验失败**时锁与候选都留着，让你接着改。
+REST 客户端注意：直提之后再读 `GET /configuration/candidate` 会得到 409（本会话已不在编辑态），
+要基于生效配置继续写请读 `GET /configuration`。
+
 ### 4.3 compare / rollback / load / save / annotate
 
 | 命令（配置模式内） | 用途 |
@@ -1318,7 +1324,8 @@ DPDK 没有独立版本来源（随 VPP 一起编译），同样显示「—」�
 
 **用户与权限（「用户与权限」页）**：改权限类、重置口令、新建与删除用户、修改自己的口令。
 这些写操作走的是与命令行同一套实现：**取用配置编辑锁、写入候选、立即提交生效**（不是「候选 → 稍后提交」
-两段式），并都记入审计。两条注意事项：① 若你正在「配置」页编辑候选（有未提交改动），本页的写操作会
+两段式），提交生效后**立刻交还编辑锁**（不会占着锁等你登出，别的会话可立即写配置），并都记入审计。
+两条注意事项：① 若你正在「配置」页编辑候选（有未提交改动），本页的写操作会
 **先被拒绝**——避免把你的候选改动一并提交，请先在配置页提交或丢弃；② 不能删当前登录用户，
 也不能删最后一个 super-user（服务端拒绝，界面照实显示）。
 
@@ -1362,7 +1369,7 @@ DPDK 没有独立版本来源（随 VPP 一起编译），同样显示「—」�
 | CLI 报 `连接 nfvisd 失败` / 超时 | ① nfvisd 未启动；② 监听地址非缺省 | `systemctl status nfvis`；显式 `-server` 或 `NFVIS_SERVER` |
 | CLI 报 `x509: …` 证书错误 | 自签证书轮换后本地固定失效 | 重签后重启 CLI 即重新固定；或 `-ca /var/lib/nfvis/tls/server.crt` |
 | 一次性口令丢了 | 只打印一次 | 见 §3.2（勿直接删库；用 `-init-admin-password` 或其他 super-user 重置） |
-| `candidate 会话锁被占用: 由 … 持有` | 另一会话持锁未释放 | 让其 commit/discard；或 `show system configuration sessions` 看谁持锁，等空闲超时 |
+| `candidate 会话锁被占用: 由 … 持有` | 另一会话正在编辑候选（或持锁未释放） | 让其 commit/discard；或 `show system configuration sessions` 看谁持锁，等空闲超时。「提交即生效」的写（用户与权限、直提写）提交后会自动放锁，不占锁 |
 
 ### 11.2 内核基线与数据面
 

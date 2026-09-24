@@ -242,21 +242,23 @@ func TestVrfsEndpoint(t *testing.T) {
 		t.Fatalf("创建 wan VRF")
 	}
 
-	// 被 NAT 引用的 VRF：删除时 L3 映射检查优先（vs-mgmt 是 L3 交换机数据）→ 409
-	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/configuration/candidate", token, nil, nil)
+	// 被 NAT 引用的 VRF：删除时 L3 映射检查优先（vs-mgmt 是 L3 交换机数据）→ 409。
+	// 底稿取**生效配置**（GET /configuration）：前面的直提都是一次性事务、提交后不再持锁
+	// （决策 #151），会话里没有 candidate 可读。
+	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/configuration", token, nil, nil)
 	if status != http.StatusOK {
-		t.Fatalf("GET candidate: %d", status)
+		t.Fatalf("GET /configuration: %d", status)
 	}
 	var cur struct {
-		Candidate model.Config `json:"candidate"`
+		Configuration model.Config `json:"configuration"`
 	}
 	if err := json.Unmarshal(data, &cur); err != nil {
-		t.Fatalf("解析 candidate: %v", err)
+		t.Fatalf("解析 configuration: %v", err)
 	}
-	cur.Candidate.Nat = &model.NatConfig{Rules: []model.NatRule{{
+	cur.Configuration.Nat = &model.NatConfig{Rules: []model.NatRule{{
 		Seq: 1, MatchSource: "192.168.100.0/24", VirtualSwitch: "vs-mgmt", Action: model.NatAction{Interface: "ens2f0"},
 	}}}
-	status, _, _ = cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token, cur.Candidate,
+	status, _, _ = cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token, cur.Configuration,
 		map[string]string{"X-NFVIS-Auto-Commit": "true"})
 	if status != http.StatusOK {
 		t.Fatalf("准备 NAT 配置: %d", status)
