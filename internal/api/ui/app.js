@@ -296,6 +296,14 @@ async function api(path, opts) {
     try {
       const body = await res.json();
       if (body && body.message) msg = body.message;
+      // 校验类失败会带 `detail[]`（逐条说明"哪里不对、该怎么办"）——那正是操作者最需要的一行，
+      // 不能只把 summary（如「commit 校验失败」）摆出来：含糊的失败和谎报成功一样不可接受。
+      if (body && Array.isArray(body.detail) && body.detail.length) {
+        const lines = body.detail
+          .map((d) => (d && d.message ? ((d.path ? d.path + '：' : '') + d.message) : ''))
+          .filter(Boolean);
+        if (lines.length) msg += '——' + lines.join('；');
+      }
     } catch (e) { /* 非 JSON 错误体：保留状态码 */ }
     throw new Error(msg);
   }

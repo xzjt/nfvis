@@ -39,7 +39,8 @@ func getHistory(t *testing.T, ts *httptest.Server, token string) (int, []byte) {
 func commitWithMessage(t *testing.T, ts *httptest.Server, token, hostname, message string) int {
 	t.Helper()
 	status, _, body := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token,
-		map[string]any{"system": map[string]any{"hostname": hostname}}, nil)
+		map[string]any{"system": map[string]any{"hostname": hostname,
+			"login": map[string]any{"users": []map[string]any{superUserDoc()}}}}, nil)
 	if status != http.StatusOK {
 		t.Fatalf("写 candidate: %d %s", status, body)
 	}

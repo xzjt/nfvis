@@ -27,7 +27,7 @@
             }
           }
         },
-        "description": "校验失败"
+        "description": "校验失败（含提交后一个 super-user 都不剩的自锁拒绝）"
       },
       "Error401": {
         "content": {
@@ -3038,7 +3038,7 @@
         ]
       },
       "put": {
-        "description": "两种语义：缺省 = **override**（整体替换，等价 CLI `load override`）；\n请求头 `X-NFVIS-Merge: true` = **merge**（按字段合并，等价 CLI `load merge`）——\n只覆盖文档里出现的字段，未出现的保持不动（`model.Merge` 语义）。\n200 响应的 `candidate` 是**合并后**的结果（merge 时与请求体不同）。\n",
+        "description": "两种语义：缺省 = **override**（整体替换，等价 CLI `load override`）；\n请求头 `X-NFVIS-Merge: true` = **merge**（按字段合并，等价 CLI `load merge`）——\n只覆盖文档里出现的字段，未出现的保持不动（`model.Merge` 语义）。\n200 响应的 `candidate` 是**合并后**的结果（merge 时与请求体不同）。\n整文档替换意味着\"文档里没写的账号就没了\"：若替换/合并后的文档一个 super-user\n（class 为 `super-user`）都不剩，则**带 Auto-Commit 的提交分支**返回 400\n`VALIDATION_FAILED`（本机不能提交成无人可登录，详见 POST /configuration/commit）。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -3086,7 +3086,7 @@
     },
     "/configuration/commit": {
       "post": {
-        "description": "管理口地址/网关变更须以 commit confirmed 提交（`confirmed_minutes > 0`）：\n凡**经网络接入**的会话（SSH、REST/Web 控制台）都受此约束（FR-CFG-012，决策 #121），\n本地串口豁免；未带 `confirmed_minutes` 时返回 400 `CONFIRM_REQUIRED`。\n确认期内未调用 `POST /configuration/commit:confirm` 将自动回滚。\n",
+        "description": "管理口地址/网关变更须以 commit confirmed 提交（`confirmed_minutes > 0`）：\n凡**经网络接入**的会话（SSH、REST/Web 控制台）都受此约束（FR-CFG-012，决策 #121），\n本地串口豁免；未带 `confirmed_minutes` 时返回 400 `CONFIRM_REQUIRED`。\n确认期内未调用 `POST /configuration/commit:confirm` 将自动回滚。\n提交的文档还必须**至少保留一个 super-user 账号**（class 为 `super-user`；class 缺省\n按 `read-only` 算），否则本机将无人可登录（只能带外恢复）——这类提交被拒（400\n`VALIDATION_FAILED`，候选与编辑锁保留，改完可重提）；要复位账号请用恢复出厂。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -3124,7 +3124,7 @@
                 }
               }
             },
-            "description": "校验失败（detail 列出全部错误）；或管理口变更未走 commit confirmed\n（code=CONFIRM_REQUIRED）\n"
+            "description": "校验失败（detail 列出全部错误）；或管理口变更未走 commit confirmed\n（code=CONFIRM_REQUIRED）；或提交后一个 super-user 都不剩（自锁，见上）\n"
           },
           "409": {
             "$ref": "#/components/responses/Error409"

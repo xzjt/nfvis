@@ -92,12 +92,21 @@ func (m *mockApplier) Apply(ctx context.Context, old, new model.Config) error {
 	return nil
 }
 
+// fixtureUserHash 测试用口令哈希（与 aaa 写入的格式一致，内容无意义）。
+const fixtureUserHash = "pbkdf2$sha256$600000$c2FsdA$aGFzaA"
+
 func baseCommitted() model.Config {
 	t := true
 	return model.Config{
 		System: &model.SystemConfig{
 			Hostname:   "nfvis-node1",
 			Management: &model.MgmtConfig{Address: "192.168.1.10/24", Gateway: "192.168.1.1"},
+			// 基线自带一个 super-user：真机的 committed 配置总有首启引导建的 admin，
+			// 而整文档提交必须至少留一个 super-user（决策 #152）——基线缺了它，
+			// 那些跟本守卫无关的用例会整片被拒。
+			Login: &model.SystemLogin{Users: []model.LoginUserConfig{
+				{Name: "admin", Class: model.ClassSuperUser, PasswordHash: fixtureUserHash},
+			}},
 		},
 		Interfaces: []model.InterfaceConfig{{Name: "ens2f0", Enabled: &t}},
 		VirtualSwitches: []model.VirtualSwitch{{

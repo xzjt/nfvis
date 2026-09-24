@@ -45,6 +45,12 @@ func (s Session) holder() string { return s.User + "@" + s.Source }
 type CommitOpts struct {
 	ConfirmedMinutes int    // >0 时为 commit confirmed（FR-CFG-003）
 	Message          string // 提交说明，入修订记录
+	// AllowNoSuperUser 豁免「配置里至少要保留一个 super-user 账号」的兜底（决策 #152）。
+	//
+	// **仅 request system zeroize（恢复出厂，FR-OPS-007）使用**：该动作的目的就是复位
+	// 账号，提交空配置后账号表为空，由下次启动的引导重建 admin。其余任何路径（REST
+	// commit、CLI commit / load override、配置恢复）都不得置位——置位等于关掉自锁防护。
+	AllowNoSuperUser bool
 }
 
 // CommitResult commit 结果（对应 OpenAPI CommitResult）。
@@ -415,6 +421,14 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 
 	// FR-CFG-002：schema + 语义校验，失败逐条列出
 	verrs := e.validate(*e.candidate)
+	// 决策 #152：自锁兜底——整文档提交不能把本机提交成「无人可登录」。
+	// 挂在这里（e.validate 之后、下面的失败分支之前）有两个理由：①自定义校验链
+	// （Options.Validate）可能把它整条漏掉，故不走那条链；②与既有校验共用同一个
+	// 失败分支 ⇒ 同样返回 ErrValidation 形态的 ValidationError、candidate 与编辑锁
+	// 都保留，操作者改完可以直接重提。
+	if !opts.AllowNoSuperUser {
+		verrs = append(verrs, model.CheckSuperUserPresent(*e.candidate)...)
+	}
 	if len(verrs) > 0 {
 		e.appendAudit(AuditEntry{
 			Time: e.now(), User: sess.User, Action: "config.commit",

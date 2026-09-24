@@ -152,7 +152,8 @@ func TestConfigurationHistoryShapeMatchesContract(t *testing.T) {
 	// 先提交两次：一条历史至少要有内容才验得到东西（空数组什么都验不到）。
 	for _, host := range []string{"hist-node-1", "hist-node-2"} {
 		status, _, body := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token,
-			map[string]any{"system": map[string]any{"hostname": host}},
+			map[string]any{"system": map[string]any{"hostname": host,
+				"login": map[string]any{"users": []map[string]any{superUserDoc()}}}},
 			map[string]string{"X-NFVIS-Auto-Commit": "true"})
 		if status != http.StatusOK {
 			t.Fatalf("提交 %s: %d %s", host, status, body)

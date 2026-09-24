@@ -65,9 +65,11 @@ func putLoginUser(t *testing.T, ts *httptest.Server, token string) error {
 	if err != nil {
 		return err
 	}
-	cfg := model.Config{System: &model.SystemConfig{Login: &model.SystemLogin{
+	// 整文档写入：保留 super-user（决策 #152），再补一个操作员账号——
+	// 文档里一个 super-user 都没有会被自锁兜底拒掉。
+	cfg := withSuperUser(model.Config{System: &model.SystemConfig{Login: &model.SystemLogin{
 		Users: []model.LoginUserConfig{{Name: "op-user", Class: "operator", PasswordHash: hash}},
-	}}}
+	}}})
 	// 经配置事务端点写入并直提（引擎校验 class 引用：operator 为预置类）
 	status, _, data := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token,
 		cfg, map[string]string{"X-NFVIS-Auto-Commit": "true"})

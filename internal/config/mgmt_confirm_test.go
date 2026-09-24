@@ -13,6 +13,9 @@ import (
 )
 
 // mgmtSet 在候选里设置管理口配置（保持其它字段不动）。
+//
+// 顺带补一个 super-user 账号：本文件的基线刻意**不含 system 段**（模拟还没配过的本机），
+// 而提交的文档至少要留一个 super-user（决策 #152）；真机上这个账号来自首启引导。
 func mgmtSet(t *testing.T, eng *Engine, sess Session, mgmt *model.MgmtConfig) {
 	t.Helper()
 	cfg, _, err := eng.Candidate()
@@ -21,6 +24,11 @@ func mgmtSet(t *testing.T, eng *Engine, sess Session, mgmt *model.MgmtConfig) {
 	}
 	if cfg.System == nil {
 		cfg.System = &model.SystemConfig{}
+	}
+	if cfg.System.Login == nil {
+		cfg.System.Login = &model.SystemLogin{Users: []model.LoginUserConfig{
+			{Name: "admin", Class: model.ClassSuperUser, PasswordHash: fixtureUserHash},
+		}}
 	}
 	cfg.System.Management = mgmt
 	if err := eng.UpdateCandidate(sess, cfg); err != nil {
@@ -96,6 +104,12 @@ func TestUnrelatedCommitDoesNotRequireConfirmed(t *testing.T) {
 	}
 	if cfg.System == nil {
 		cfg.System = &model.SystemConfig{}
+	}
+	// 同 mgmtSet：提交的文档要留一个 super-user（决策 #152）
+	if cfg.System.Login == nil {
+		cfg.System.Login = &model.SystemLogin{Users: []model.LoginUserConfig{
+			{Name: "admin", Class: model.ClassSuperUser, PasswordHash: fixtureUserHash},
+		}}
 	}
 	cfg.System.IdleTimeoutMinutes = 25
 	if err := eng.UpdateCandidate(sess, cfg); err != nil {

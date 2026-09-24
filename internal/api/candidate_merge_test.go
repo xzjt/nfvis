@@ -21,6 +21,8 @@ func TestCandidatePutMergeKeepsUnmentionedFields(t *testing.T) {
 			"hostname":             "base-1",
 			"idle_timeout_minutes": 15,
 			"dns_servers":          []string{"192.0.2.53"},
+			// 整文档提交至少要留一个 super-user（决策 #152）
+			"login": map[string]any{"users": []map[string]any{superUserDoc()}},
 		},
 	}
 	status, _, data := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token, base, nil)
@@ -78,7 +80,8 @@ func TestCandidatePutMergeWithAutoCommit(t *testing.T) {
 	ts := newTestServer(t)
 	token := loginAdmin(t, ts)
 
-	base := map[string]any{"system": map[string]any{"hostname": "base-1", "idle_timeout_minutes": 15}}
+	base := map[string]any{"system": map[string]any{"hostname": "base-1", "idle_timeout_minutes": 15,
+		"login": map[string]any{"users": []map[string]any{superUserDoc()}}}}
 	if status, _, data := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token, base, nil); status != http.StatusOK {
 		t.Fatalf("写基线: %d %s", status, data)
 	}
