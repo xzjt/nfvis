@@ -31,7 +31,7 @@ node "$STUB" || RC=1
 TMPD=$(mktemp -d) || exit 1
 trap 'rm -rf "$TMPD"' EXIT
 MUT=$TMPD/app.js
-for m in gates word timer reboot zeroize dpdk rawhttp; do
+for m in gates word timer reboot zeroize dpdk rawhttp acctgate; do
   if ! node "$STUB" --mutate "$m" "$MUT"; then
     echo "✗ 生成变异体 $m 失败（锚点对不上）——本自校准自身要修"
     RC=1

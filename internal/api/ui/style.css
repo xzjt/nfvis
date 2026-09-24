@@ -252,6 +252,8 @@ td.st-crit { color: var(--err); }
 }
 .modal-box #modal-word { width: 100%; margin: 6px 0 2px; font: 13px/1.4 Consolas, "Courier New", monospace; }
 .modal-box #modal-count { margin: 6px 0 0; }
+/* 「我的账号」框（决策 #147）：两个口令字段竖排单列（复用 .cfg-forms 的控件外观）。 */
+.modal-box .acct-forms { grid-template-columns: 1fr; }
 /* 闸门没放行时主按钮必须看起来就是点不动的（禁用态）。 */
 .modal-box button:disabled { opacity: .5; cursor: not-allowed; }
 

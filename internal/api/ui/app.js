@@ -1019,8 +1019,11 @@ async function usrCandidateBlock() {
 
 // usrPrecheck：写操作前的两道闸门（本会话的候选脏数据 / 该动作的确认框）。
 // 返回 true 表示可以继续执行。`word` 是确认词（对象名）。
-async function usrPrecheck(blockMsg, title, word, bullets, cli) {
-  if (blockMsg) { usrMsg(blockMsg, true); return false; }
+// `say` 是消息去处（缺省＝用户页的 #usr-msg）：顶栏「我的账号」入口不在用户页上，
+// 它的提示必须落在自己的对话框里，否则操作者看不到（决策 #147）。
+async function usrPrecheck(blockMsg, title, word, bullets, cli, say) {
+  const emit = say || usrMsg;
+  if (blockMsg) { emit(blockMsg, true); return false; }
   return uiConfirm(title, { tier: 'high', requireWord: word, bullets: bullets, cli: cli });
 }
 
@@ -1111,30 +1114,72 @@ async function usrDelete(name) {
 }
 
 // 改我自己的口令（POST /system/login-users/{me}:change-password）：要验旧口令。
-async function usrMyPassword(oldPw, newPw) {
+// `say` 是消息去处（缺省＝用户页的 #usr-msg）——顶栏「我的账号」入口复用这条处理器，
+// 但它的提示要落在自己的对话框里（决策 #147）。**一条处理器，两个入口**（不复制第二份实现）。
+async function usrMyPassword(oldPw, newPw, say) {
+  const emit = say || usrMsg;
   const me = currentUser;
-  if (!me) { usrMsg('拿不到当前登录用户名，请刷新页面后重试。', true); return; }
-  if (!(oldPw || '').trim()) { usrMsg('请先填当前口令。', true); return; }
-  if (!(newPw || '').trim()) { usrMsg('请先填新口令。', true); return; }
+  if (!me) { emit('拿不到当前登录用户名，请刷新页面后重试。', true); return; }
+  if (!(oldPw || '').trim()) { emit('请先填当前口令。', true); return; }
+  if (!(newPw || '').trim()) { emit('请先填新口令。', true); return; }
   const block = await usrCandidateBlock();
   const ok = await usrPrecheck(block, '修改我的口令', me, [
     '把当前登录账号 ' + me + ' 的口令改成新口令，**立即生效**（取配置编辑锁后直接提交）。',
     '要先给出当前口令：服务端会校验它（校验不过一律拒绝，界面不预判）。',
-    '新口令按本机口令策略校验；改完请用新口令重新登录（本页不会自动登出）。',
+    '新口令按本机口令策略校验；改完请用新口令重新登录（不会自动登出）。',
     '可回退：再改一次（旧口令已失效，请先确认新口令记得住）。',
-  ], 'request system password change');
+  ], 'request system password change', emit);
   if (!ok) return;
-  usrMsg('提交中…', false);
+  emit('提交中…', false);
   try {
     await api('/system/login-users/' + encodeURIComponent(me) + ':change-password', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ old_password: oldPw, new_password: newPw }),
     });
-    usrMsg('口令已修改——请用新口令重新登录。', false);
+    emit('口令已修改——请用新口令重新登录。', false);
   } catch (e) {
-    usrMsg('修改口令失败：' + e.message, true);
+    emit('修改口令失败：' + e.message, true);
   }
   await reload().catch(() => {});
+}
+
+// ---------- 我的账号（顶栏入口，**所有角色可见**）----------
+//
+// 自助改口令：POST /system/login-users/{me}:change-password。服务端把它注册为**只读级**
+// （本人 + 验旧口令），故界面不该把它藏在写页里——这正是这个入口存在的理由：改口令的表单原先只在
+// 「用户与权限」页，而该页自决策 #145 起对 read-only 角色隐藏（导航不列、页内写入口隐藏），
+// 于是只读用户在界面上无处改自己的口令。
+//
+// 口径（与用户页那条表单**同一份处理器** usrMyPassword，只是消息落在这个框里）：
+//   ① 顶栏入口与这个框都**不带 data-write**（带了就会被 body.role-readonly 隐藏，入口也就没了）；
+//   ② 口令控件只在提交那一刻读值，随后立即清空（不留在别处，也不进 sessionStorage）；
+//   ③ 分级确认按**高危**档（确认词＝当前登录用户名、10 秒倒计时、只读回显对应命令）；
+//   ④ 改完**不自动登出**，只提示用新口令重新登录；框随时可取消（点「取消」、点遮罩、按 Esc）。
+function acctMsg(text, isErr) {
+  const p = $('acct-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+function openAcct() {
+  // 每次打开都从空开始：上一次的口令（哪怕是成功改过的）不留在控件里。
+  $('acct-old').value = '';
+  $('acct-new').value = '';
+  $('acct-who').textContent = currentUser
+    ? '当前登录账号：' + currentUser
+    : '拿不到当前登录用户名，请刷新页面后重试。';
+  acctMsg('', false);
+  $('acct').hidden = false;
+  const first = $('acct-old');
+  if (first.focus) first.focus();
+}
+
+function closeAcct() {
+  $('acct-old').value = '';
+  $('acct-new').value = '';
+  acctMsg('', false);
+  $('acct').hidden = true;
 }
 
 // ---------- 证书（#/system/tls）----------
@@ -3314,6 +3359,8 @@ function signOut(msg) {
   stopPolling();
   // 串口是有状态的（WebSocket）：退出登录必须断开，别把连接留在后台。
   vmConsoleClose();
+  // 「我的账号」框里可能有刚填的口令：退出登录时连值一起清掉，别留在 DOM 里。
+  closeAcct();
   token = '';
   events = [];
   currentUser = '';
@@ -4876,8 +4923,13 @@ $('cfg-discard-btn').addEventListener('click', cfgDiscardAsk);
 
 // 确认对话框：点遮罩或按 Esc 都算取消（不执行动作）。
 $('modal').addEventListener('click', (ev) => { if (ev.target === $('modal')) closeDialog(false); });
+// 「我的账号」框（决策 #147）：同一口径——点遮罩或按 Esc 都算取消。
+// Esc 先给确认框（它叠在账号框上面）：确认框开着时按 Esc 只收起它，账号框还在。
+$('acct').addEventListener('click', (ev) => { if (ev.target === $('acct')) closeAcct(); });
 window.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape' && !$('modal').hidden) closeDialog(false);
+  if (ev.key !== 'Escape') return;
+  if (!$('modal').hidden) { closeDialog(false); return; }
+  if (!$('acct').hidden) closeAcct();
 });
 
 // 审计卡：写入不发事件，故给一个显式刷新（否则 SSE 连着时卡片会停在旧内容上）
@@ -5238,6 +5290,19 @@ $('usr-mypw-btn').addEventListener('click', () => {
   const oldPw = $('usr-my-old').value;
   const newPw = $('usr-my-new').value;
   return usrMyPassword(oldPw, newPw).then(() => { $('usr-my-old').value = ''; $('usr-my-new').value = ''; });
+});
+
+// 顶栏「我的账号」（决策 #147）：**所有角色**都看得见（不带 data-write），
+// 走的是同一条处理器 usrMyPassword，提示落在这个框里（用户页那条仍落在 #usr-msg）。
+$('account-btn').addEventListener('click', openAcct);
+$('acct-close').addEventListener('click', closeAcct);
+$('acct-submit').addEventListener('click', () => {
+  const oldPw = $('acct-old').value;
+  const newPw = $('acct-new').value;
+  return usrMyPassword(oldPw, newPw, acctMsg).then(() => {
+    $('acct-old').value = '';
+    $('acct-new').value = '';
+  });
 });
 
 // 证书：安装外部证书（高危）与重签自签证书（中危）。

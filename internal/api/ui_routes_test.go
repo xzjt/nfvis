@@ -36,6 +36,9 @@ var uiParamSegRe = regexp.MustCompile(`^:[A-Za-z_][A-Za-z0-9_]*$`)
 // uiEndpointParamRe 端点里的 `{name}` 占位（契约写法）。
 var uiEndpointParamRe = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
+// uiAccountBtnTagRe 取顶栏「我的账号」入口**所在的整个标签**（决策 #147 的守护用它断言没打 data-write）。
+var uiAccountBtnTagRe = regexp.MustCompile(`<[^>]*id="account-btn"[^>]*>`)
+
 func loadUIRoutes(t *testing.T) []uiRoute {
 	t.Helper()
 	b, err := os.ReadFile("ui/routes.json")
@@ -169,7 +172,8 @@ func TestUIRoutesAreConsistent(t *testing.T) {
 //
 // 本守护查**形状与存在性**（真行为由浏览器验收负责，见证据）：① 写页标记必须与"期望集合"逐条一致
 // （改动必须是有意的，而不是顺手漏标/多标）；② 三件套的每个环节在源码里真的存在；
-// ③ `data-write` 标记数量不低于下限（防止整块被删掉却没人发现）。
+// ③ `data-write` 标记数量不低于下限（防止整块被删掉却没人发现）；
+// ④ 「我的账号」（顶栏自助改密，决策 #147）**没有**被打上 `data-write`——它是给只读账号用的。
 func TestUIConsoleRoleGating(t *testing.T) {
 	routes := loadUIRoutes(t)
 
@@ -236,5 +240,30 @@ func TestUIConsoleRoleGating(t *testing.T) {
 	}
 	if !strings.Contains(string(router), "function renderRoleNotice(") {
 		t.Error("router.js 缺少 renderRoleNotice（写页上的角色说明）")
+	}
+
+	// ④ 「我的账号」（顶栏自助改密，决策 #147）：入口必须**没有** `data-write`。
+	//    判据是"这个入口所在的标签里不许出现 data-write"，不是"整份 HTML 里没有"——别处的写入口照旧要标。
+	//    为什么这条重要：改口令的表单原先只在「用户与权限」页，而该页自决策 #145 起对只读角色隐藏
+	//    （导航不列、页内写入口隐藏），于是只读用户在界面上无处改自己的口令；服务端本来就允许
+	//    （`POST /system/login-users/{name}:change-password` 注册为只读级，本人 + 验旧口令）。
+	//    一旦这个入口被打上 data-write，`body.role-readonly [data-write]` 就会把它藏起来——本入口白加。
+	btn := uiAccountBtnTagRe.FindString(string(html))
+	if btn == "" {
+		t.Error("index.html 缺少 #account-btn（顶栏「我的账号」入口，决策 #147）")
+	} else if strings.Contains(btn, "data-write") {
+		t.Errorf("顶栏「我的账号」入口被打上了 data-write：%s——只读账号会看不到它，自助改密入口就没了", btn)
+	}
+	//    两步（表单 + 高危确认）缺一个就点不通：处理器、开/关函数与对话框骨架都要在源码里。
+	if !strings.Contains(string(app), "$('account-btn').addEventListener('click', openAcct)") {
+		t.Error("app.js 里顶栏「我的账号」入口没有接到 openAcct（点了不会有反应）")
+	}
+	if !strings.Contains(string(app), "function openAcct(") || !strings.Contains(string(app), "function closeAcct(") {
+		t.Error("app.js 缺少 openAcct / closeAcct（「我的账号」框的开与关）")
+	}
+	for _, id := range []string{`id="acct"`, `id="acct-old"`, `id="acct-new"`, `id="acct-submit"`} {
+		if !strings.Contains(string(html), id) {
+			t.Errorf("index.html 缺少「我的账号」框的 %s", id)
+		}
 	}
 }

@@ -34,6 +34,10 @@
     <div class="topbar-right">
       <span id="stream-state" class="pill pill-idle">实时通道：连接中</span>
       <span id="user-line" class="muted"></span>
+      <!-- 「我的账号」：自助改口令（决策 #147；改口令的表单原先只在「用户与权限」页，而该页自决策 #145 起对只读角色隐藏）。
+           **故意不带 data-write**——本入口对**所有角色**可见，只读账号正是要在这里改自己的口令；
+           服务端把这条端点注册为只读级（本人 + 验旧口令），故界面不该把它藏起来。 -->
+      <button id="account-btn" type="button" class="ghost">我的账号</button>
       <button id="refresh-btn" type="button" class="ghost">刷新</button>
       <button id="logout-btn" type="button" class="ghost">退出</button>
     </div>
@@ -897,6 +901,34 @@
     配置修改在「配置」页里经 candidate → 提交 流程进行，未提交前不影响运行配置；
     写类动作按影响面分级确认：低危点一次即可，中危先列出影响面，高危还要手工输入确认词并等倒计时走完。
   </footer>
+
+  <!-- 「我的账号」：顶栏入口打开的自助改口令小对话框（决策 #147）。
+       与确认框（下面那个 #modal）是两件事：这里是**表单**（填当前口令与新口令），
+       点「修改口令」后再走 #modal 的高危档确认（确认词＝当前登录用户名 + 倒计时）。
+       整块**不带 data-write**——它要能在只读账号下用。口令控件只在提交那一刻读值，随后清空。 -->
+  <div id="acct" class="modal" role="dialog" aria-modal="true" aria-labelledby="acct-title" hidden>
+    <div class="modal-box">
+      <h3 id="acct-title">我的账号</h3>
+      <p id="acct-who" class="muted small"></p>
+      <div class="cfg-forms acct-forms">
+        <div>
+          <label for="acct-old">当前口令</label>
+          <input id="acct-old" type="password" autocomplete="current-password">
+          <label for="acct-new">新口令</label>
+          <input id="acct-new" type="password" autocomplete="new-password">
+        </div>
+      </div>
+      <p class="muted small">
+        改的是当前登录账号的口令：服务端会校验当前口令，新口令按本机口令策略校验（不满足时如实说明原因）。
+        改完请用新口令重新登录——这里不会自动登出。
+      </p>
+      <p id="acct-msg" class="muted small" hidden></p>
+      <div class="cfg-actions">
+        <button id="acct-close" type="button" class="ghost">取消</button>
+        <button id="acct-submit" type="button" class="danger">修改口令</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 确认对话框（分级确认，三档共用这一个框：低危单击确认 / 中危列出影响面并标红主按钮 /
        高危再要求输入确认词并等倒计时走完）。内容由 app.js 的 uiDialog 填充；这里只放骨架，
