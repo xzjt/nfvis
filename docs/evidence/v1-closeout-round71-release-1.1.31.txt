@@ -1,0 +1,49 @@
+===== V1 收尾第七十一轮：发布 v1.1.31（控制台按角色渲染 + 内核基线端点）=====
+日期：2026-09-24；main `c65d1e1`（发布点）；发布件 `nfvis_1.1.31_amd64.deb`
+
+----- 1. 本版内容 -----
+① **决策 #145**：控制台按角色渲染（read-only 只见只读页、写/运维入口隐藏）——实现设计 §8（round69 交付）。
+② **决策 #146**：`POST /system/kernel:apply|:rollback` 幽灵端点落地（class = super-user，CLI/REST 同源）
+   + 命令树补 `Su(kernel)`（此前 operator 能改写 GRUB 启动参数）+ 《命令全表》class 列守护（round70 交付）。
+
+----- 2. 发布校验（round48 口径，逐项）-----
+| # | 项 | 结果 |
+|---|---|---|
+| ① | 元数据 | `Package nfvis / Version 1.1.31 / amd64 / Section net / Depends libc6`；control 4 件齐 |
+| ② | 内容 | **23 个成员**（二进制 2 + 单元 1 + 安装器 2 + 随包文档 7 + 目录项） |
+| ③ | 解包运行 | `nfvisd -version` / `nfvis-cli -version` = **1.1.31** |
+| ④ | **可复现** | 同 commit + 同 VERSION **连打两次 sha256 逐字节一致**（`5cd772f7bdc74137b74daa0a293bb624176b6adad3f661fa5a2f297e7c3c379b`，7,926,108 字节） |
+| ⑤ | 随包文档是当前版本 | 规格书 **146 条决策**（含 #145/#146）；**命令全表里 kernel 两行已指向新 REST 端点、`password change` 已按命令树改为 O**；用户手册含新 IA 与 §10.7 口径；附录 B 标题仍在；OpenAPI 含 `KernelBaselineAction` 与两条端点的 403/503 |
+| ⑥ | **随包前端 = 仓库源码** | `/api/v1/ui/{index.html,app.js,style.css,router.js,routes.json}` 与仓库源码**逐字节一致**（`cmp` 全过）——即"内嵌进二进制的前端 = round69 浏览器验收过的那份" |
+| ⑦ | 升级实装 1.1.30 → 1.1.31 | prerm/postinst 正常；服务 **active**；`show version` = 1.1.31；**既有 VNF 拓扑存活**（vnf-a/vnf-b running、BD 6252701）；**配置库未变**（rev 55 / audit 104 / cfgsha `084c3a64…`）；`wizard` 非 TTY 明确返提示 |
+| ⑧ | REST/Web 内容实测 | `/ui/` 200（46342 字节）、`/ui` 302、未认证 401；`POST /login` 回 `user={name,class}` + token_id + expires_in；`/system/status` 契约字段齐全；`/system/version` = 1.1.31 + 5 组件；`/configuration` **0 处 `password_hash`**；`/configuration/history` 51 条；`/configuration/check` 未持锁 **409**；`/system/logs?last=5` 200；`POST /logout` **204** 且旧 token 立即 **401** |
+| ⑨ | **本版新内容实测**（已装二进制 + 生产库副本） | **内核端点**：read-only/operator 调 apply/rollback **403**、super-user **200**（`action=apply`、`backup=/var/lib/nfvis/kernel-baseline.bak`、`pending_reboot=[大页 1G：期望 2，实际 3…]`）；**独立事实源**：GRUB 片段 sha256 apply 前后**不变**（幂等）、配置库留 `system.kernel.apply/rollback` 审计两行。**CLI class**：operator 跑 `request system kernel apply`/`reboot`/`vpp restart` 全 `%% 无权限`、read-only 跑 `request alarms clear` 被拒、operator 的 `ping`(O) 与 `show version`(R) 仍可用 |
+| ⑩ | 决策 #143 口径未回退 | read-only 下载归档 **403**、列表 **200**；super-user **200 且归档含 `password_hash`** |
+| ⑪ | purge | postrm 自动撤销 SSH 强化（drop-in 消失、`sshd -t` 通过）；GRUB 片段/fstab 保留并打印手工步骤；`/var/lib/nfvis` 保留（1.6G）；二进制与单元移除；`/run/nfvis` 清理；配置库未变 |
+| ⑫ | 重装 | SSH 强化重新落地；**配置库逐字段一致**；启动日志有「管理口守卫事实（default-route=ens160）」「恢复收敛完成」、**30 分钟内无「一次性口令」** |
+| ⑬ | 重装后拓扑 + 流量 | BD 6252701 四口、vnf-a/vnf-b running；`vppctl ping` 双向 **10/10 0% 丢包**（首发 5 发各 4/5 是首包 ARP 预热）；宿主经 DPDK 物理口 **4/4、0.29~0.50ms** |
+| ⑭ | 发布与回验 | tag `v1.1.31` 指向 main、非 draft/prerelease；assets = `nfvis_1.1.31_amd64.deb`（7,926,108）+ `.sha256`；**自 GitHub 回下载 sha256 与构建端逐字节一致**（`cmp` 通过） |
+
+----- 3. 浏览器验收的归属（诚实说明）-----
+本版两处功能的**浏览器操作验收**在各自分支构建上完成，证据在对应轮次：
+- 角色渲染（决策 #145）：`docs/evidence/v1-closeout-round69-console-role-rendering.txt` §5
+  （只读账号 18 条路由逐页 + super-user 对照，验收中抓到并修掉两处漏标）；
+- 内核端点（决策 #146）：`docs/evidence/v1-closeout-round70-kernel-endpoints.txt` §5
+  （控制台「写入基线 / 回退上一次基线」从**如实报 404** 变为**真执行**）。
+本轮发布校验用 ⑥「**随包前端与仓库源码逐字节一致**」把"验收过的那份"与"发出去的那份"钉在一起
+（round48 的既有口径），并另用**已装二进制**复验了两处功能的**服务端行为**（⑨）。
+
+----- 4. 环境（本轮前后逐项核对）-----
+- 生产库：**rev 55 / audit 104 / cfgsha `084c3a64e4cc0d43a16cbced28cb0742aaa0ef1783c75065eb7966b091eba726`**
+  ——本轮开始前 = 升级后 = 本版内容实测后 = purge 后 = 重装后 = 收尾，**逐字段一致**
+- 已装服务：**nfvis 1.1.31 active**（443 在听）；无开发态实例（8443 无监听）；临时件已清
+- VPP：只剩配置声明的 **BD 6252701（bvi0）**；`vnf-a`/`vnf-b` running
+- 宿主 GRUB 片段 `/etc/default/grub.d/99-nfvis.cfg`：指纹与轮次开始时一致（`a3b576a7…`，幂等）
+- 口令：`WBF81vOA4M8GM28f@Aa1` **按 §3.1 哈希比对法**核对有效（全程未做登录试探）
+
+----- 5. 如实登记（未改项）-----
+1. §7 要求的「高危审计记意图 + 结果两条」**服务端未实现**（只写一条结果行）。
+2. 控制台**没有 read-only 可用的自助改密入口**（该表单在「用户与权限」页，决策 #145 起对只读隐藏；
+   REST 允许 R 自助）——建议下一步给顶栏加"我的账号"入口。
+3. `request system configuration backup to <path>` 的目标路径仍无校验（该命令现仅 super-user 可用）。
+4. `GET /system/tech-support/{file}` 同类口径不一致（待裁决）。
