@@ -144,7 +144,9 @@ request system
   ├─ software rollback [to <version>]
   ├─ reboot | shutdown | poweroff                   # S；确认
   ├─ kernel apply | rollback                        # S；确认。按 committed 配置写 GRUB 基线/回退，需重启生效（FR-SYS-014）
-  ├─ configuration backup [to <path>] | restore <path>   # S；确认
+  ├─ configuration backup [to <path>] | restore <path>   # S；确认。to <path> 另存一份归档（0600）：
+  │                                                 #   须绝对路径、目标不得已存在、父目录须已存在；
+  │                                                 #   目标已存在即如实拒绝，不覆盖既有文件
   ├─ tech-support generate                          # 生成诊断归档 tar.gz，CLI/API 下载
   ├─ core-dumps export <url> | delete [file <name>]
   ├─ zeroize                                        # S；双重确认，恢复出厂（FR-OPS-007）

@@ -1,0 +1,186 @@
+===== V1 收尾第七十三轮：配置归档导出的目标路径加校验（决策 #148）=====
+日期：2026-09-24；分支 `fix/backup-export-path`（main `8c7b8e2` 之上）
+范围：`request system configuration backup to <path>` 的导出目标路径 —— 交接文档「仍未裁」第 ② 条。
+
+----- 1. 起因与交付 -----
+起因：该命令的目标路径由操作者直接给出，**源侧**有 `sys.Path()` 把归档限定在备份目录内，
+**目标侧原本什么都不校验**，直接交给 `copyFile` 的 `os.OpenFile(dst, O_WRONLY|O_CREATE|O_TRUNC, 0o600)`，
+而 nfvisd 以 **root** 运行（`deploy/nfvis.service` 的 `User=root`）⇒ 一次手误
+（`to /etc/fstab`、`to /usr/bin/nfvisd`）就把系统文件**截断成归档 JSON**。
+决策 #143 已把该命令收回到 super-user（故**不是提权路径**），但仍是「手误即毁系统」的脚枪。
+
+| 文件 | 改了什么 |
+|---|---|
+| `internal/api/cli_compute_oper.go` | 新增 `checkBackupExportDst`（路径形态三条判据：非空 / 绝对路径 / 父目录须存在且是目录；目标是目录也拒）与 `openNewFileExclusive`（`O_CREATE\|O_EXCL` 打开、0600；失败时补「是目录」「已存在」两种操作者能读懂的原因）；`copyFile` 改为「先校验形态 → `os.Open(src)` → 独占打开目标」，即拒绝时**不落盘、不留半写文件**。调用方 `systemBackup` 的既有文案与审计**未改**（`%% 导出到 <路径> 失败: <原因>`） |
+| `internal/api/cli_compute_test.go` | 新增 9 条用例（见 §2.1） |
+| `docs/NFViS-CLI命令树完整设计.md` | §4 `configuration backup [to <path>]` 行补口径（两条续行） |
+| `docs/NFViS-CLI命令全表.md` | 该行说明列补口径（class/API 落点/实测状态不动） |
+| `docs/NFViS-用户手册.md` | §10.7 补一段「`to <path>` 是另存一份」的操作者说明（绝对路径 / 父目录须存在 / 目标不得已存在） |
+| `docs/NFViS-系统产品需求与目标架构规格书.md` | 附录 A 追加决策 #148（单行，`\|` 收尾） |
+| `AGENTS.md` | 「已定决策 147 项」→「148 项」 |
+| `docs/V1-收尾待办.md` | §2.3 那条「目标路径仍无校验」改为 ✅ 已完成（其余段落未动） |
+
+判据（三条 + 两条同源，**全部是「拒绝」而非「改写」**）：
+1. **必须绝对路径** —— 相对路径会随工作目录漂移，操作者以为写到了 A 实际落在 B。
+2. **目标不得已存在** —— 判定的权威点是打开时的 `O_CREATE|O_EXCL`：唯一判据、原子生效，且堵住
+   「检查与打开之间目标刚被建出来」的竞态。「已存在」**故意不写进前置检查**——否则 O_EXCL
+   只是一道永不生效的第二防线（本轮的变异验证正是要给这一条上锁，见 §2.2）。
+3. **父目录必须已存在且是目录** —— 把「目录写错」如实报清楚，不留给打开文件时的 ENOENT/EACCES 去猜。
+4. （同源）目标**是目录**即拒：目录永远不是合法导出件目标。
+5. （同源）目标**是符号链接**按「已存在」拒：`Lstat` 不跟随链接、`O_EXCL` 也不跟随，
+   不借链接去写它指向的文件（实测见 §2.1 的 `TestBackupExportRejectsSymlinkDst`）。
+
+**有意不做**：**不**维护「哪些目录敏感」的名单（如「只许写备份目录」）——那会连带挡住把归档导出到
+`/data/incoming/`、`/root/` 一类**合法**用法（导出件的用途正是交给操作者取走），而第 2 条已足以
+挡住「手误毁掉系统文件」。理由与口径写进决策 #148。
+
+----- 2. 测试与变异验证 -----
+环境：宿主 Windows 10（win32 10.0.19044），Git Bash；`go version` 见 `make check` 段（Go 1.26）。
+为避免宿主内存紧张导致的 `errno=1455`，Go 测试一律 `-p 1` 串行跑。
+
+2.1 新用例（`go test -p 1 -count=1 -run 'TestBackupExport|TestCheckBackupExportDst|TestOpenNewFileExclusive|TestCopyFile' ./internal/api/ -v`）
+
+```
+=== RUN   TestCopyFileExportsSecretsAs0600
+--- SKIP: TestCopyFileExportsSecretsAs0600 (0.00s)      （决策 #77 的既有用例：Windows 无 POSIX 权限位，按既有口径跳过）
+=== RUN   TestBackupExportRejectsRelativeDst
+--- PASS: TestBackupExportRejectsRelativeDst (0.43s)    ① 相对路径被拒（原因含「绝对路径」）；归档本身仍生成
+=== RUN   TestBackupExportRejectsExistingDst
+--- PASS: TestBackupExportRejectsExistingDst (0.41s)    ② 目标已存在被拒，且原文件内容一字未动
+=== RUN   TestBackupExportRejectsDirDst
+--- PASS: TestBackupExportRejectsDirDst (0.41s)         ②b 目标是目录被拒（原因含「目录」）
+=== RUN   TestBackupExportRejectsSymlinkDst
+--- PASS: TestBackupExportRejectsSymlinkDst (0.43s)     ②c 目标是符号链接被拒，其指向的原文件未被改写
+=== RUN   TestBackupExportRejectsMissingParentDir
+--- PASS: TestBackupExportRejectsMissingParentDir (0.41s) ③ 父目录不存在被拒（原因含「父目录…不存在」）
+=== RUN   TestBackupExportAcceptsNewAbsoluteDst
+--- PASS: TestBackupExportAcceptsNewAbsoluteDst (0.45s) ④ 合法绝对路径 + 新文件 → 成功；逐字节等于源归档、含归档格式头
+=== RUN   TestBackupExportRejectedKeepsSourceArchive
+--- PASS: TestBackupExportRejectedKeepsSourceArchive (0.44s) ⑤ 三次拒绝后源归档仍完好；以既有归档为目标被拒且内容不变；源==目标亦拒
+=== RUN   TestCheckBackupExportDst
+--- PASS: TestCheckBackupExportDst (0.01s)              判据表（空/相对/目录/父缺失/父是文件/合法新生/已存在文件交 O_EXCL）
+=== RUN   TestOpenNewFileExclusiveCoversExistingAndDir
+--- PASS: TestOpenNewFileExclusiveCoversExistingAndDir (0.01s) 「只新建不覆盖」的权威判定点（既有文件+目录+二次打开）
+ok  	github.com/xzjt/nfvis/internal/api	3.038s
+```
+
+关键断言（原文）：
+- ④ 导出件与源归档**逐字节相等**、内容含 `nfvis-config-backup`，权限 0600（POSIX 平台；Windows 跳过该断言，
+  沿用既有决策 #77 用例的口径）；
+- ② 与 ⑤ 断言「被拒后原文件内容一字未动」，⑤ 另断言「被拒的导出不得改写既有归档」；
+- ⑤ 的一个观察（**既有行为，非本轮引入**）：同一秒内两次 `Backup()` 会落到**同名归档**并覆盖之
+  （文件名含秒级时间戳）。故「归档自身是否被改写」这一条改用**另存的一份归档**作目标来验，避免被这个
+  同名覆盖干扰；真机脚本不必碰这一条。
+
+2.2 变异验证（**去掉 `O_EXCL`**，`os.O_WRONLY|os.O_CREATE|os.O_EXCL` → `os.O_WRONLY|os.O_CREATE`）
+
+（把前置检查里的「已存在」判据去掉之后，O_EXCL 是唯一的执行点，这个变异正好打在判据上。）
+
+```
+--- FAIL: TestBackupExportRejectsExistingDst (0.40s)
+    cli_compute_test.go:554: 目标已存在应被拒（输出应含 %）: 备份已生成: nfvis-backup-20260924T091515Z.json（449 B）
+        已导出到: C:\Users\ADMINI~1\AppData\Local\Temp\TestBackupExportRejectsExistingDst4029678528\003\existing.json
+--- FAIL: TestBackupExportRejectsSymlinkDst (0.40s)
+    cli_compute_test.go:594: 符号链接目标应被拒: 备份已生成: nfvis-backup-20260924T091515Z.json（449 B）
+        已导出到: C:\Users\ADMINI~1\AppData\Local\Temp\TestBackupExportRejectsSymlinkDst1412464615\003\link-to-real.json
+--- FAIL: TestBackupExportRejectedKeepsSourceArchive (0.42s)
+    cli_compute_test.go:679: 目标 "…\existing.json" 应被拒: 备份已生成: nfvis-backup-20260924T091517Z.json（449 B）
+        已导出到: …\existing.json
+--- FAIL: TestOpenNewFileExclusiveCoversExistingAndDir (0.01s)
+    cli_compute_test.go:787: 已存在的文件应打不开（O_EXCL）
+FAIL
+FAIL	github.com/xzjt/nfvis/internal/api	2.898s
+```
+
+即：**4 个用例报 ✗**，且报出的正是最坏形态——目标已存在时命令**静默成功**（`已导出到 …` 照报，
+退出码/文案都不提异常）。另用一个临时探针（跑完即删）量了实际损坏：
+
+```
+    zz_mutation_probe_test.go:22: copyFile err=<nil>
+    zz_mutation_probe_test.go:23: 目标文件：31 字节 → 44 字节；内容="{\"format\":\"nfvis-config-backup\",\"config\":{}}"
+```
+
+⇒ 既有 31 字节文件被**替换成归档 JSON**、`copyFile` 返回 `err=<nil>`（正是「手误即毁系统文件」的形态）。
+已还原（`git status` 只剩本轮应有的 9 个改动文件）。
+
+2.3 决策条数与自检
+
+```
+$ bash contrib/scripts/check_decisions_count.sh
+✓ 决策条数一致（148 项）且决策记录表格结构完整
+
+$ python -c "import yaml;yaml.safe_load(open('docs/NFViS-openapi.yaml'))"
+（无输出即解析通过；本轮不动契约端点/形状）
+```
+
+注：编辑附录 A 时一度用 `## 附录 B：…` 标题行当锚点替换，**把该标题吃掉了**（决策 #88 的同一类事故）——
+已按 AGENTS.md 的提醒 `grep` 锚点发现并补回（并用 `git diff --numstat` 核对：该文件**只多 2 行**= #148 行 +
+标题前的空行，无删改）。
+
+2.4 `make check`
+
+（贴在 §4）
+
+----- 3. 真机复验（**由主会话填**）-----
+占位：本节的步骤与断言已按「不碰管理路径、不碰真系统文件」的口径写好，由主会话在 nfvis-vm 上执行后填写结果。
+该命令声明为 **super-user**（决策 #144 起运行期判定也按声明执行），故须以 super-user 账号执行。
+
+| 步骤 | 命令（真机） | 断言 |
+|---|---|---|
+| 1 相对路径被拒 | `request system configuration backup to /tmp/nonexist-rel.json` 的**相对写法**：`request system configuration backup to rel-export.json` | 输出含 `%%` 且原因含「绝对路径」；**不产生** `rel-export.json`；同一次输出仍含「备份已生成」 |
+| 2 已存在目标被拒且内容不变 | 先 `touch /root/keep-me.txt`（写入一行已知内容并记下 `sha256sum`），再 `request system configuration backup to /root/keep-me.txt` | 输出含 `%%` 且原因含「已存在」；`sha256sum /root/keep-me.txt` **与执行前一致**（原文件未被改写） |
+| 3 合法路径成功且 0600 | `request system configuration backup to /root/export-<时间戳>.json`（**新文件名**、父目录 `/root` 存在） | 输出含「已导出到」；`ls -l` 该文件为 `-rw-------`（0600）；文件头含 `nfvis-config-backup`；`show system backup` 仍列出自动命名的归档 |
+| 4 源归档与既有归档均完好 | 步骤 1~3 之后：`ls -l /var/lib/nfvis/backup/`、`python3 -c 'import json;json.load(open("…"))'`（对自动命名归档） | 备份目录内归档仍在且可解析为 JSON；既有归档未被任何一次被拒的导出改写 |
+| 5（可选，**只读探测式负例**——不要真的写系统文件） | 以**已存在的系统文件**为目标：`request system configuration backup to /etc/fstab` | 输出含 `%%` 且原因含「已存在」；`sha256sum /etc/fstab` **与执行前一致**。⚠️ 该路径已存在 ⇒ 只可能被「已存在」挡住，**不会**被写；**绝不要**为了试 `O_EXCL` 去删/改名 `/etc/fstab` 或 `/usr/bin/nfvisd` |
+
+----- 4. `make check` -----
+命令：`GOFLAGS=-p=1 make check`（宿主内存紧张时按 AGENTS.md 的口径串行跑）——**rc=0，全绿**。
+
+```
+?   	github.com/xzjt/nfvis/cmd/nfvis-cli	[no test files]
+?   	github.com/xzjt/nfvis/cmd/nfvisd	[no test files]
+ok  	github.com/xzjt/nfvis/internal/aaa	(cached)
+ok  	github.com/xzjt/nfvis/internal/api	(cached)
+ok  	github.com/xzjt/nfvis/internal/archtest	1.851s
+ok  	github.com/xzjt/nfvis/internal/cli	(cached)
+ok  	github.com/xzjt/nfvis/internal/config	(cached)
+ok  	github.com/xzjt/nfvis/internal/events	(cached)
+ok  	github.com/xzjt/nfvis/internal/images	(cached)
+ok  	github.com/xzjt/nfvis/internal/metrics	(cached)
+ok  	github.com/xzjt/nfvis/internal/model	(cached)
+ok  	github.com/xzjt/nfvis/internal/orchestrator	(cached)
+ok  	github.com/xzjt/nfvis/internal/orchestrator/compute	(cached)
+ok  	github.com/xzjt/nfvis/internal/orchestrator/container	(cached)
+ok  	github.com/xzjt/nfvis/internal/orchestrator/network	(cached)
+ok  	github.com/xzjt/nfvis/internal/schema	(cached)
+ok  	github.com/xzjt/nfvis/internal/state	(cached)
+ok  	github.com/xzjt/nfvis/internal/system	(cached)
+?   	github.com/xzjt/nfvis/internal/systemd	[no test files]
+ok  	github.com/xzjt/nfvis/pkg/cliclient	(cached)
+?   	github.com/xzjt/nfvis/prototype	[no test files]
+
+./internal/config/ 覆盖率: 82.5%（不含 _govpp.go _libvirt.go _docker.go）
+./internal/model/ 覆盖率: 83.8%
+./internal/schema/ 覆盖率: 90.8%
+./internal/orchestrator/network/ 覆盖率: 74.7%
+./internal/orchestrator/compute/ 覆盖率: 87.8%
+./internal/orchestrator/container/ 覆盖率: 76.3%
+./internal/images/ 覆盖率: 75.1%
+
+✓ 决策条数一致（148 项）且决策记录表格结构完整
+✓ 契约 YAML 无重复键
+✓ openapi.json 与契约 YAML 同步
+bash contrib/scripts/cli-fulltest-selftest.sh        → 全部符合预期（含 8 个变异体）
+bash contrib/scripts/cli-semantic-selftest.sh        → 全部符合预期
+bash contrib/scripts/web-console-config-selftest.sh  → 全部符合预期
+bash contrib/scripts/web-console-confirm-selftest.sh → 全部符合预期（含 acctgate 变异体）
+cd prototype && go build ./... && go vet ./... && go test ./...   → 原型仍全绿（no test files）
+rc=0
+```
+
+其中 `internal/api` 那次是 `(cached)`（源码未再变），另用 `go test -p 1 -count=1 ./internal/api/` 强制重跑过一遍
+（§2.1 的用例就在其中），结果见下：
+
+```
+ok  	github.com/xzjt/nfvis/internal/api	250.933s
+```
