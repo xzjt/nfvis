@@ -4577,7 +4577,7 @@
             "description": "OK"
           }
         },
-        "summary": "配置备份归档列表",
+        "summary": "配置备份归档列表（只回文件名/大小/时间元数据，read-only 可读）",
         "tags": [
           "system"
         ]
@@ -4595,7 +4595,7 @@
             "description": "已生成"
           }
         },
-        "summary": "生成配置备份归档",
+        "summary": "生成配置备份归档（FR-OPS-004，super-user）",
         "tags": [
           "system"
         ]
@@ -4603,6 +4603,7 @@
     },
     "/system/backup/{file}": {
       "get": {
+        "description": "归档是**完整 committed 配置**（含本地用户口令哈希），恢复账号所必需——故**不脱敏**\n（脱敏即无法恢复），属**权限**问题不是脱敏问题。按 FR-SEC-007 的既有例外口径\n（0600、仅 super-user，见附录 A #70）与生成端 `POST /system/backup` 同级，\n本端点自决策 #143 起要求 super-user（此前为 read-only）。\n",
         "responses": {
           "200": {
             "content": {
@@ -4614,9 +4615,12 @@
               }
             },
             "description": "application/octet-stream"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
           }
         },
-        "summary": "下载备份归档",
+        "summary": "下载备份归档（FR-OPS-004，super-user）",
         "tags": [
           "system"
         ]

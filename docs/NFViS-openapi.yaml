@@ -1585,7 +1585,7 @@ paths:
   /system/backup:
     get:
       tags: [system]
-      summary: 配置备份归档列表
+      summary: 配置备份归档列表（只回文件名/大小/时间元数据，read-only 可读）
       responses:
         "200":
           description: OK
@@ -1596,7 +1596,7 @@ paths:
                 items: { $ref: "#/components/schemas/BackupArchive" }
     post:
       tags: [system]
-      summary: 生成配置备份归档
+      summary: 生成配置备份归档（FR-OPS-004，super-user）
       responses:
         "202":
           description: 已生成
@@ -1607,13 +1607,19 @@ paths:
     parameters: [{ name: file, in: path, required: true, schema: { type: string } }]
     get:
       tags: [system]
-      summary: 下载备份归档
+      summary: 下载备份归档（FR-OPS-004，super-user）
+      description: |
+        归档是**完整 committed 配置**（含本地用户口令哈希），恢复账号所必需——故**不脱敏**
+        （脱敏即无法恢复），属**权限**问题不是脱敏问题。按 FR-SEC-007 的既有例外口径
+        （0600、仅 super-user，见附录 A #70）与生成端 `POST /system/backup` 同级，
+        本端点自决策 #143 起要求 super-user（此前为 read-only）。
       responses:
         "200":
           description: application/octet-stream
           content:
             application/octet-stream:
               schema: { type: string, format: binary }
+        "403": { $ref: "#/components/responses/Error403" }
   /system/restore:
     post:
       tags: [system]
