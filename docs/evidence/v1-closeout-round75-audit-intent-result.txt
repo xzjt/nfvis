@@ -176,20 +176,23 @@ ok  	github.com/xzjt/nfvis/internal/{aaa,api,archtest,cli,config,events,images,m
 ```
 
 ----- 3. 真机复验（**由主会话执行**：nfvis-vm 上的开发态实例 + 生产库副本）-----
-环境：本分支构建的实例（明文 + `-allow-plaintext`，或 HTTPS 带 `--cacert` 的既有探针口径）+ 生产库副本，
-操作者 = super-user（admin）。**独立事实源**：配置库 `audit_log` 表原文 + CLI `show log audit last 20`
-（两者同源：`Engine.AuditTrail` ↔ `GET /audit-logs`）。
+环境：本分支构建的明文实例（`/tmp/nfvisd-ia`，分支 `feat/audit-intent-result`）+ 生产库副本，操作者 = **super-user**（admin）。
+**独立事实源**：开发态库 `audit_log` 表原文（`sqlite3` 只读查） + REST `GET /audit-logs`。
 
-| 步骤 | 命令（真机） | 断言 | 独立事实源 |
-|---|---|---|---|
-| ① 高危**成功**路径两条 | `request system configuration restore <归档路径>`（或界面「恢复配置」） | 该 action 出现两条：`Result=intent`（detail「从备份归档恢复配置（<路径>）：归档里的配置将替换当前配置」）在前、`Result=success`（「已恢复配置（revision N…）」）在后 | `show log audit last 20` 原文 + `sqlite3 /var/lib/nfvis/nfvis.db "select result,action,substr(detail,1,40) from audit_log order by audit_id desc limit 4"` |
-| ② 高危**失败**路径两条 | `request system configuration restore /no/such.json`（**前置拒绝**：0 条）→ 再喂一个**坏归档**（合法路径、内容非归档） | 前者审计**0 条**；后者两条、结果行 `Result=failure` 且 detail 带原因 | 同上（`audit_log` 行数前后差 = 0 / 2） |
-| ③ 配置事务型（删用户） | CLI `delete system login user <临时账号>` + `commit`（先 `set … password … class operator` 建一个临时账号） | 建/删各两条：intent 行 detail「创建本地用户 X（权限类 operator）」/「删除本地用户 X（原权限类 operator）」，结果行 detail 仍是既有 diff | `show log audit last 20` + 配置库 `config_json`（临时账号真的没了）；**审计里不得出现 `pbkdf2$`** |
-| ④ 非高危仍是一条 | `set system hostname <新名>` + `commit` | 该提交**只有一条** `config.commit`（`Result=success`，detail 是 diff） | `audit_log` 行数前后差 = 1 |
-| ⑤ 界面侧对照（可选） | 控制台「审计日志」页刷新 | 高危动作那两条在页面「结果」列显示 `intent` / `success`；`#/system/users` 删用户后同样两条 | 页面 DOM 快照 + ①~③ 的库侧原文（决策 #141：界面显示对了不算完） |
+| 步骤 | 实测（行数差 + 原文） | 结果 |
+|---|---|---|
+| ① 恢复配置（高危，成功） | 行数 **105 → 108（+3）**，原文：`system.restore … 从备份归档恢复配置（/var/lib/nfvis/backup/…）：归档里的配置将替换当前配置` = **intent** → `system.restore … 已恢复配置（revision 56，归档含镜像清单 4 项）` = **success** → `config.commit` = success（恢复内部那次提交，属另一个 action） | ✓（高危动作自己的**两条**齐；+3 里的第三条是内部的 `config.commit`） |
+| ② 坏归档（高危，失败） | 行数 **108 → 110（+2）**：intent 行 → `… 失败: 归档格式不符（非 nfvis 配置备份）…` = **failure**（带原因） | ✓ |
+| ②′ 文件不存在（**前置拒绝**） | 行数 **110 → 110（+0）**：`%% 读取归档 … 失败: no such file or directory`——校验在读文件之前就失败，**不留意图行** | ✓（与设计口径一致：意图落点在"校验与确认守卫之后、下发底座之前"） |
+| ③ 建/删用户（高危，走配置事务） | 建：**110 → 112（+2）**，`config.commit` 的 intent 行 detail「创建本地用户 audit-tmp（权限类 operator）」→ success 行仍是既有 diff；删：**112 → 114（+2）**，intent「删除本地用户 audit-tmp（原权限类 operator）」→ success（diff `- class operator…`）。**独立事实源**：配置库 `config_json` 里用户只剩 `['admin']`（账号真的没了）；**审计全文里 `pbkdf2$` 出现 0 次** | ✓ |
+| ④ 非高危动作（防"顺手全改"） | `set system idle-timeout-minutes 11` + `commit`：行数 **114 → 115（+1）**，只有一条 `config.commit` success | ✓ |
+| ⑤ 出口（控制台审计页据此渲染） | `GET /audit-logs?limit=6` 依次返回 `system.restore failure` / `system.restore **intent**` / `system.restore success` / `config.commit success` / `system.restore **intent**` / `system.backup success`——**`result` 字段原样下发**，界面无需改动即可显示 | ✓ |
 
-**收尾**：临时账号、临时归档与开发态库副本用完即删；生产库除本轮动作外不得有其它改动
-（核对 `rev`/`audit` 计数与 `config_json` 指纹）。
+**收尾**：临时账号与临时文件已清；开发态实例已停（8443 无监听）、临时库副本已删；已装服务 **1.1.31 active**；
+生产库指纹与动作前**逐字段一致**（rev 55 / audit 104 / cfgsha `084c3a64…`；开发态副本的 rev/audit 因本轮动作增长，内容指纹不变）。
+
+> 判读要点：③ 的"账号真的没了"与"审计里没有口令哈希"分别用了**配置库**与**审计表原文**两个独立事实源；
+> ④ 是**反向对照**（非高危仍是一条），防的是"为了满足 §7 把审计全改成两条"这类过度实现。
 
 ----- 4. 存疑 / 未做（如实登记）-----
 - **CLI 的「证书上传」与 REST 的证书上传机制不同**：REST 是 `PUT /system/tls` 直传 PEM（操作级助手记两条，
