@@ -41,6 +41,9 @@
 
   <p id="global-error" class="error" hidden></p>
   <p id="route-notice" class="error" hidden></p>
+  <!-- 角色说明（决策 #145）：read-only 账号落在"写页"上时讲清为什么这页没有动作入口。
+       显示/隐藏由 style.css 的 body.role-readonly 规则决定，文案由 router.js 按页填。 -->
+  <p id="role-notice" class="muted small"></p>
 
   <div class="grid">
     <section class="page" id="page-overview" hidden>
@@ -162,24 +165,24 @@
         <fieldset>
           <legend>绑定到 DPDK（该口会离开内核平面）</legend>
           <label for="ifd-uio">DPDK 驱动</label>
-          <select id="ifd-uio">
+          <select id="ifd-uio" data-write>
             <option value="">vfio-pci（缺省）</option>
             <option value="igb-uio">igb-uio</option>
           </select>
-          <div class="cfg-actions"><button id="ifd-dpdk-bind" type="button" class="danger">绑定到 DPDK</button></div>
+          <div class="cfg-actions"><button id="ifd-dpdk-bind" data-write type="button" class="danger">绑定到 DPDK</button></div>
         </fieldset>
         <fieldset>
           <legend>解绑交还内核</legend>
           <label for="ifd-todrv">交还的内核驱动名（建议显式给出）</label>
-          <input id="ifd-todrv" type="text" placeholder="如 vmxnet3">
-          <div class="cfg-actions"><button id="ifd-dpdk-unbind" type="button" class="ghost">解绑交还内核</button></div>
+          <input id="ifd-todrv" data-write type="text" placeholder="如 vmxnet3">
+          <div class="cfg-actions"><button id="ifd-dpdk-unbind" data-write type="button" class="ghost">解绑交还内核</button></div>
           <p class="muted small">不给驱动名时由服务端尝试自动绑定；自动绑定不了会明确报错，届时填上驱动名重试。</p>
         </fieldset>
         <fieldset>
           <legend>SR-IOV（VF 数量）</legend>
           <label for="ifd-vfs">VF 数量（0 = 回收全部 VF）</label>
-          <input id="ifd-vfs" type="text" placeholder="如 4">
-          <div class="cfg-actions"><button id="ifd-sriov-btn" type="button" class="ghost">设置 VF 数量</button></div>
+          <input id="ifd-vfs" data-write type="text" placeholder="如 4">
+          <div class="cfg-actions"><button id="ifd-sriov-btn" data-write type="button" class="ghost">设置 VF 数量</button></div>
           <p class="muted small">本机物理口不支持 SR-IOV 时服务端会明确报错，本页如实显示该报错。</p>
         </fieldset>
       </div>
@@ -203,8 +206,8 @@
       <pre id="knl-diffs" class="code"></pre>
       <h3>写入引导基线</h3>
       <div class="cfg-actions">
-        <button id="knl-apply-btn" type="button" class="danger">写入基线（按配置期望）</button>
-        <button id="knl-rollback-btn" type="button" class="ghost">回退上一次基线</button>
+        <button id="knl-apply-btn" data-write type="button" class="danger">写入基线（按配置期望）</button>
+        <button id="knl-rollback-btn" data-write type="button" class="ghost">回退上一次基线</button>
       </div>
       <p id="knl-msg" class="muted small" hidden></p>
       <pre id="knl-out" class="code console-out" hidden></pre>
@@ -234,21 +237,21 @@
         <fieldset>
           <legend>新建用户</legend>
           <label for="usr-new-name">用户名</label>
-          <input id="usr-new-name" type="text" autocomplete="off">
+          <input id="usr-new-name" data-write type="text" autocomplete="off">
           <label for="usr-new-class">权限类</label>
-          <select id="usr-new-class"></select>
+          <select id="usr-new-class" data-write></select>
           <label for="usr-new-pw">初始口令</label>
-          <input id="usr-new-pw" type="password" autocomplete="new-password">
-          <div class="cfg-actions"><button id="usr-create-btn" type="button" class="danger">创建用户</button></div>
+          <input id="usr-new-pw" data-write type="password" autocomplete="new-password">
+          <div class="cfg-actions"><button id="usr-create-btn" data-write type="button" class="danger">创建用户</button></div>
           <p class="muted small">口令按本机口令策略校验（不满足策略时服务端拒绝并说明原因），存的是加盐哈希。</p>
         </fieldset>
         <fieldset>
           <legend>修改我的口令</legend>
           <label for="usr-my-old">当前口令</label>
-          <input id="usr-my-old" type="password" autocomplete="current-password">
+          <input id="usr-my-old" data-write type="password" autocomplete="current-password">
           <label for="usr-my-new">新口令</label>
-          <input id="usr-my-new" type="password" autocomplete="new-password">
-          <div class="cfg-actions"><button id="usr-mypw-btn" type="button" class="danger">修改我的口令</button></div>
+          <input id="usr-my-new" data-write type="password" autocomplete="new-password">
+          <div class="cfg-actions"><button id="usr-mypw-btn" data-write type="button" class="danger">修改我的口令</button></div>
           <p class="muted small">改的是当前登录账号的口令，需要先给出当前口令；改完请用新口令重新登录。</p>
         </fieldset>
       </div>
@@ -265,10 +268,10 @@
         <fieldset>
           <legend>安装外部证书（PEM 文本，立即生效）</legend>
           <label for="tls-cert">证书（PEM，含中间证书就按链的顺序整段粘贴）</label>
-          <textarea id="tls-cert" rows="6" spellcheck="false"></textarea>
+          <textarea id="tls-cert" data-write rows="6" spellcheck="false"></textarea>
           <label for="tls-key">私钥（PEM）</label>
-          <textarea id="tls-key" rows="6" spellcheck="false"></textarea>
-          <div class="cfg-actions"><button id="tls-install-btn" type="button" class="danger">安装并立即生效</button></div>
+          <textarea id="tls-key" data-write rows="6" spellcheck="false"></textarea>
+          <div class="cfg-actions"><button id="tls-install-btn" data-write type="button" class="danger">安装并立即生效</button></div>
           <p class="muted small">
             证书与私钥不配对、链不完整、缺地址条目时服务端会拒绝并说明原因（拒绝时不改变当前证书）。
             换成你手里的客户端<strong>不信任</strong>的证书会让管理面连不上——请先确认这份证书能被你要用的
@@ -281,7 +284,7 @@
             由本机按监听地址重新生成自签证书（地址条目自动包含本机地址），热生效、不重启服务。
             重签后证书指纹变化，固定过旧证书的客户端需要重新固定。
           </p>
-          <div class="cfg-actions"><button id="tls-regen-btn" type="button" class="ghost">重签自签证书</button></div>
+          <div class="cfg-actions"><button id="tls-regen-btn" data-write type="button" class="ghost">重签自签证书</button></div>
         </fieldset>
       </div>
       <p id="tls-msg" class="muted small" hidden></p>
@@ -308,7 +311,7 @@
           <summary class="muted">数据面配置段（已生效；生成启动配置的源）</summary>
           <pre id="cfg-vpp" class="code"></pre>
         </details>
-        <button id="cfg-edit-btn" type="button">开始编辑</button>
+        <button id="cfg-edit-btn" data-write type="button">开始编辑</button>
       </div>
 
       <p id="cfg-msg" class="muted small" hidden></p>
@@ -325,17 +328,17 @@
         <div id="cfg-forms" class="cfg-forms"></div>
         <details id="cfg-raw-wrap">
           <summary class="muted">原始 JSON（整体替换 candidate）</summary>
-          <textarea id="cfg-text" rows="12" spellcheck="false"></textarea>
+          <textarea id="cfg-text" data-write rows="12" spellcheck="false"></textarea>
           <p class="muted small">保存时以这段 JSON 为准；表单改动会先写回这里。</p>
         </details>
         <div class="cfg-actions">
-          <button id="cfg-save-btn" type="button">保存到 candidate</button>
-          <button id="cfg-check-btn" type="button" class="ghost">预校验</button>
+          <button id="cfg-save-btn" data-write type="button">保存到 candidate</button>
+          <button id="cfg-check-btn" data-write type="button" class="ghost">预校验</button>
           <button id="cfg-diff-btn" type="button" class="ghost">查看差异</button>
-          <button id="cfg-commit-btn" type="button">提交</button>
-          <button id="cfg-commit-confirmed-btn" type="button" hidden>以 commit confirmed 提交（10 分钟）</button>
-          <button id="cfg-confirm-btn" type="button" hidden>确认在途提交</button>
-          <button id="cfg-discard-btn" type="button" class="ghost">丢弃并结束编辑</button>
+          <button id="cfg-commit-btn" data-write type="button">提交</button>
+          <button id="cfg-commit-confirmed-btn" data-write type="button" hidden>以 commit confirmed 提交（10 分钟）</button>
+          <button id="cfg-confirm-btn" data-write type="button" hidden>确认在途提交</button>
+          <button id="cfg-discard-btn" data-write type="button" class="ghost">丢弃并结束编辑</button>
         </div>
         <pre id="cfg-diff" class="code" hidden></pre>
       </div>
@@ -388,8 +391,8 @@
 
       <div class="tab-panel" id="vm-tab-snapshots" hidden>
         <div class="cfg-actions">
-          <input id="vm-snap-new" type="text" placeholder="新快照名（如 before-upgrade）">
-          <button id="vm-snap-create" type="button" class="ghost">创建快照</button>
+          <input id="vm-snap-new" data-write type="text" placeholder="新快照名（如 before-upgrade）">
+          <button id="vm-snap-create" data-write type="button" class="ghost">创建快照</button>
           <button id="vm-snap-refresh" type="button" class="ghost">刷新</button>
         </div>
         <p id="vm-snap-msg" class="muted small" hidden></p>
@@ -403,7 +406,7 @@
 
       <div class="tab-panel" id="vm-tab-console" hidden>
         <div class="cfg-actions">
-          <button id="vm-console-connect" type="button">连接串口</button>
+          <button id="vm-console-connect" data-write type="button">连接串口</button>
         </div>
         <p class="muted small">
           终端连接的是该 VM 的<strong>串口</strong>（与 CLI 的 console 同一路）。连接后输入的内容会直接进入 guest——
@@ -411,12 +414,12 @@
         </p>
         <div id="vm-console" hidden>
           <h3>串口 console <span id="vm-console-name" class="muted small"></span>
-            <button id="vm-console-close" type="button" class="ghost small">断开</button></h3>
+            <button id="vm-console-close" data-write type="button" class="ghost small">断开</button></h3>
           <pre id="vm-console-out" class="code console-out"></pre>
           <div class="cfg-actions">
-            <input id="vm-console-in" type="text" placeholder="输入后回车发送（串口是行缓冲，Ctrl-C 可中断）">
-            <button id="vm-console-send" type="button" class="ghost">发送</button>
-            <button id="vm-console-enter" type="button" class="ghost">只发回车</button>
+            <input id="vm-console-in" data-write type="text" placeholder="输入后回车发送（串口是行缓冲，Ctrl-C 可中断）">
+            <button id="vm-console-send" data-write type="button" class="ghost">发送</button>
+            <button id="vm-console-enter" data-write type="button" class="ghost">只发回车</button>
           </div>
         </div>
       </div>
@@ -548,29 +551,29 @@
           <fieldset>
             <legend>公共字段</legend>
             <label for="img-name">名称（须与 Docker tag 一致，容器镜像尤其）</label>
-            <input id="img-name" type="text" placeholder="alpine:3.20">
+            <input id="img-name" data-write type="text" placeholder="alpine:3.20">
             <label for="img-type">类型</label>
-            <input id="img-type" type="text" value="vm-image" placeholder="vm-image 或 container-image">
+            <input id="img-type" data-write type="text" value="vm-image" placeholder="vm-image 或 container-image">
           </fieldset>
           <fieldset>
             <legend>方式 A：URL 拉取（sha256 必填）</legend>
             <label for="img-url">URL</label>
-            <input id="img-url" type="text" placeholder="https://example.invalid/img.qcow2">
+            <input id="img-url" data-write type="text" placeholder="https://example.invalid/img.qcow2">
             <label for="img-sha">sha256</label>
-            <input id="img-sha" type="text" placeholder="64 位十六进制">
-            <div class="cfg-actions"><button id="img-url-btn" type="button" class="ghost">拉取并导入</button></div>
+            <input id="img-sha" data-write type="text" placeholder="64 位十六进制">
+            <div class="cfg-actions"><button id="img-url-btn" data-write type="button" class="ghost">拉取并导入</button></div>
           </fieldset>
           <fieldset>
             <legend>方式 B：incoming 文件（先 scp 到 /data/incoming）</legend>
             <label for="img-incoming">文件名</label>
-            <input id="img-incoming" type="text" placeholder="my.qcow2">
-            <div class="cfg-actions"><button id="img-incoming-btn" type="button" class="ghost">从 incoming 导入</button></div>
+            <input id="img-incoming" data-write type="text" placeholder="my.qcow2">
+            <div class="cfg-actions"><button id="img-incoming-btn" data-write type="button" class="ghost">从 incoming 导入</button></div>
           </fieldset>
           <fieldset>
             <legend>方式 C：本地上传（multipart）</legend>
             <label for="img-file">文件</label>
-            <input id="img-file" type="file">
-            <div class="cfg-actions"><button id="img-file-btn" type="button" class="ghost">上传并导入</button></div>
+            <input id="img-file" data-write type="file">
+            <div class="cfg-actions"><button id="img-file-btn" data-write type="button" class="ghost">上传并导入</button></div>
             <p class="muted small">大镜像上传期间请勿关闭页面。</p>
           </fieldset>
         </div>
@@ -666,7 +669,7 @@
       <h3>参数</h3>
       <dl id="qsd-info" class="kv"></dl>
       <p class="muted small">策略详情取自限速策略列表（该对象没有单独读取的接口）。</p>
-      <div class="cfg-actions"><button id="qsd-del-btn" type="button" class="danger">删除该策略</button></div>
+      <div class="cfg-actions"><button id="qsd-del-btn" data-write type="button" class="danger">删除该策略</button></div>
       <p id="qsd-msg" class="muted small" hidden></p>
       <p class="muted small">删除只写候选：到<a href="#/config">配置</a>页提交后才生效（被接口绑定的策略由服务端拒绝删除）。</p>
     </article>
@@ -681,7 +684,7 @@
       <h3>配置</h3>
       <dl id="spd-info" class="kv"></dl>
       <p class="muted small">会话详情取自端口镜像列表（该对象没有单独读取的接口）。</p>
-      <div class="cfg-actions"><button id="spd-del-btn" type="button" class="danger">删除该镜像会话</button></div>
+      <div class="cfg-actions"><button id="spd-del-btn" data-write type="button" class="danger">删除该镜像会话</button></div>
       <p id="spd-msg" class="muted small" hidden></p>
       <p class="muted small">删除只写候选：到<a href="#/config">配置</a>页提交后才生效。</p>
     </article>
@@ -729,26 +732,26 @@
         <fieldset>
           <legend>配置与备份</legend>
           <div class="cfg-actions">
-            <button id="ops-backup-btn" type="button" class="ghost">生成配置备份</button>
-            <button id="ops-sshkey-btn" type="button" class="ghost">重新生成 SSH host key</button>
+            <button id="ops-backup-btn" data-write type="button" class="ghost">生成配置备份</button>
+            <button id="ops-sshkey-btn" data-write type="button" class="ghost">重新生成 SSH host key</button>
           </div>
           <p class="muted small">管理面证书（安装外部证书 / 重签自签证书）在<a href="#/system/tls">证书</a>页。</p>
         </fieldset>
         <fieldset>
           <legend>时间（NTP）</legend>
           <p class="muted small">同步源取自已提交的配置；服务器地址在<a href="#/config">配置</a>页的系统（基础）表单里声明。</p>
-          <div class="cfg-actions"><button id="ops-ntp-btn" type="button" class="ghost">立即同步时间</button></div>
+          <div class="cfg-actions"><button id="ops-ntp-btn" data-write type="button" class="ghost">立即同步时间</button></div>
         </fieldset>
         <fieldset>
           <legend>诊断归档</legend>
           <div class="cfg-actions">
-            <button id="ops-techsupport-btn" type="button" class="ghost">生成 tech-support 归档</button>
+            <button id="ops-techsupport-btn" data-write type="button" class="ghost">生成 tech-support 归档</button>
             <button id="ops-coredumps-btn" type="button" class="ghost">列出 core dump</button>
-            <button id="ops-alarms-btn" type="button" class="ghost">清除已恢复告警</button>
+            <button id="ops-alarms-btn" data-write type="button" class="ghost">清除已恢复告警</button>
           </div>
           <label for="ops-export-url">core dump 清单导出到</label>
-          <input id="ops-export-url" type="text" placeholder="http://192.0.2.10:8080/collect">
-          <div class="cfg-actions"><button id="ops-export-btn" type="button" class="ghost">导出清单</button></div>
+          <input id="ops-export-url" data-write type="text" placeholder="http://192.0.2.10:8080/collect">
+          <div class="cfg-actions"><button id="ops-export-btn" data-write type="button" class="ghost">导出清单</button></div>
         </fieldset>
         <fieldset>
           <legend>归档下载</legend>
@@ -767,12 +770,12 @@
         <fieldset>
           <legend>软件版本（升级期间管理面会中断）</legend>
           <label for="ops-sw-pkg">软件包（本机路径或下载地址）</label>
-          <input id="ops-sw-pkg" type="text" placeholder="/root/nfvis_1.1.29_amd64.deb">
+          <input id="ops-sw-pkg" data-write type="text" placeholder="/root/nfvis_1.1.29_amd64.deb">
           <label for="ops-sw-sha">sha256（可选，给出即校验）</label>
-          <input id="ops-sw-sha" type="text" placeholder="64 位十六进制">
+          <input id="ops-sw-sha" data-write type="text" placeholder="64 位十六进制">
           <div class="cfg-actions">
-            <button id="ops-sw-add-btn" type="button" class="danger">安装升级包</button>
-            <button id="ops-sw-rollback-btn" type="button" class="danger">回退到上一版本</button>
+            <button id="ops-sw-add-btn" data-write type="button" class="danger">安装升级包</button>
+            <button id="ops-sw-rollback-btn" data-write type="button" class="danger">回退到上一版本</button>
           </div>
           <p class="muted small">
             升级会校验包名与版本、归档软件包后安装，安装过程会重启管理服务——本页面会掉线，需要重新登录。
@@ -782,10 +785,10 @@
         <fieldset>
           <legend>恢复与出厂（覆盖生效配置，不可撤销）</legend>
           <label for="ops-restore-file">从本机备份归档恢复（备份列表见下方「归档下载」）</label>
-          <select id="ops-restore-file"></select>
+          <select id="ops-restore-file" data-write></select>
           <div class="cfg-actions">
             <button id="ops-restore-refresh" type="button" class="ghost">刷新备份列表</button>
-            <button id="ops-restore-btn" type="button" class="danger">从所选归档恢复配置</button>
+            <button id="ops-restore-btn" data-write type="button" class="danger">从所选归档恢复配置</button>
           </div>
           <p class="muted small">
             恢复会把归档里的配置导入为候选并<strong>立即提交生效</strong>（覆盖当前生效配置）；
@@ -793,7 +796,7 @@
           </p>
           <h3 class="muted small">恢复出厂</h3>
           <div class="cfg-actions">
-            <button id="ops-zeroize-btn" type="button" class="danger">恢复出厂（清空配置与镜像）</button>
+            <button id="ops-zeroize-btn" data-write type="button" class="danger">恢复出厂（清空配置与镜像）</button>
           </div>
           <p class="muted small">
             清空数据分区的配置与镜像、级联删除虚拟机与容器、账号随空配置复位；<strong>本机不会自动重启</strong>，
@@ -803,9 +806,9 @@
         <fieldset>
           <legend>电源（影响业务，请先确认）</legend>
           <div class="cfg-actions">
-            <button id="ops-vpprestart-btn" type="button" class="ghost">重启数据面（VPP）</button>
-            <button id="ops-reboot-btn" type="button" class="danger">重启主机</button>
-            <button id="ops-shutdown-btn" type="button" class="danger">关机</button>
+            <button id="ops-vpprestart-btn" data-write type="button" class="ghost">重启数据面（VPP）</button>
+            <button id="ops-reboot-btn" data-write type="button" class="danger">重启主机</button>
+            <button id="ops-shutdown-btn" data-write type="button" class="danger">关机</button>
           </div>
         </fieldset>
       </div>
@@ -832,21 +835,21 @@
         <fieldset>
           <legend>连通性测试（经数据面）</legend>
           <label for="diag-host">目标</label>
-          <input id="diag-host" type="text" placeholder="192.0.2.1">
+          <input id="diag-host" data-write type="text" placeholder="192.0.2.1">
           <label for="diag-count">次数</label>
-          <input id="diag-count" type="text" value="5">
+          <input id="diag-count" data-write type="text" value="5">
           <label for="diag-source">源地址（可选，如 192.168.100.1）</label>
-          <input id="diag-source" type="text" placeholder="留空则按目标自动选路">
+          <input id="diag-source" data-write type="text" placeholder="留空则按目标自动选路">
           <div class="cfg-actions">
-            <button id="diag-ping-btn" type="button">执行 ping</button>
-            <button id="diag-trace-btn" type="button" class="ghost">执行 traceroute</button>
+            <button id="diag-ping-btn" data-write type="button">执行 ping</button>
+            <button id="diag-trace-btn" data-write type="button" class="ghost">执行 traceroute</button>
           </div>
         </fieldset>
         <fieldset>
           <legend>接口计数</legend>
           <label for="diag-clear-if">接口名（留空 = 全部）</label>
-          <input id="diag-clear-if" type="text" placeholder="ens192">
-          <div class="cfg-actions"><button id="diag-clear-btn" type="button" class="ghost">清零统计</button></div>
+          <input id="diag-clear-if" data-write type="text" placeholder="ens192">
+          <div class="cfg-actions"><button id="diag-clear-btn" data-write type="button" class="ghost">清零统计</button></div>
         </fieldset>
       </div>
       <p class="muted small">只覆盖数据面（VPP）——管理口在内核平面，请在宿主机上 ping。</p>
@@ -863,13 +866,13 @@
         <fieldset>
           <legend>开始抓包（数据面 pcap trace）</legend>
           <label for="cap-iface">接口</label>
-          <input id="cap-iface" type="text" placeholder="ens192">
+          <input id="cap-iface" data-write type="text" placeholder="ens192">
           <label for="cap-count">缓冲深度（包）</label>
-          <input id="cap-count" type="text" value="1000">
+          <input id="cap-count" data-write type="text" value="1000">
           <div class="cfg-actions">
-            <button id="cap-start-btn" type="button">开始抓包</button>
-            <button id="cap-stop-btn" type="button" class="ghost">停止（丢弃）</button>
-            <button id="cap-export-btn" type="button">停止并导出 pcap</button>
+            <button id="cap-start-btn" data-write type="button">开始抓包</button>
+            <button id="cap-stop-btn" data-write type="button" class="ghost">停止（丢弃）</button>
+            <button id="cap-export-btn" data-write type="button">停止并导出 pcap</button>
           </div>
         </fieldset>
       </div>

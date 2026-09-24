@@ -263,3 +263,13 @@ td.st-crit { color: var(--err); }
 .nav a:hover { text-decoration: underline; }
 .nav a[aria-current="page"] { font-weight: 600; text-decoration: underline; }
 .crumb { opacity: .7; font-size: .9em; }
+
+/* 角色渲染（决策 #145，设计 §8）：read-only 账号只看到只读部分。
+   写/运维入口一律带 data-write（静态的在 index.html 上打标、动态的经 wbtn 生成），
+   这里整类隐藏——**不是禁用**（禁用会留下"看得见点不动"的困惑，且仍暴露了动作的存在）。
+   隐藏不是安全边界：服务端按 class 判定，界面只是不把"点下去必被拒"的入口摆出来。 */
+body.role-readonly [data-write] { display: none !important; }
+
+/* read-only 落在写页上（深链/收藏）时的说明条：讲清"为什么这页是空的、该找谁"。 */
+#role-notice { display: none; }
+body.role-readonly.role-notice-on #role-notice { display: block; }

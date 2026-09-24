@@ -27,6 +27,7 @@ type uiRoute struct {
 	Breadcrumb []string `json:"breadcrumb"`
 	Endpoints  []string `json:"endpoints"`
 	Poll       int      `json:"poll"`
+	Write      bool     `json:"write"`
 }
 
 // uiParamSegRe 参数段：`:` 开头 + 标识符（前端按段匹配时用 `seg[0] === ':'`，名字要能当键用）。
@@ -158,5 +159,82 @@ func TestUIRoutesAreConsistent(t *testing.T) {
 		if !strings.Contains(string(app), "'"+r.View+"':") {
 			t.Errorf("路由 %q 的 view %q 在 app.js 的 VIEWS 注册表里找不到（键名要写成带引号的形式）", r.Path, r.View)
 		}
+	}
+}
+
+// 控制台的**角色渲染**守护（决策 #145，设计 §8：read-only 只见只读页、写按钮隐藏）。
+//
+// 机制是三件套：`body.role-readonly`（app.js 按登录响应的 class 切）→ CSS 隐藏 `[data-write]`
+// （静态入口在 index.html 打标、动态入口经 app.js 的 `wbtn` 生成）→ 导航过滤路由表里 `write: true` 的"写页"。
+//
+// 本守护查**形状与存在性**（真行为由浏览器验收负责，见证据）：① 写页标记必须与"期望集合"逐条一致
+// （改动必须是有意的，而不是顺手漏标/多标）；② 三件套的每个环节在源码里真的存在；
+// ③ `data-write` 标记数量不低于下限（防止整块被删掉却没人发现）。
+func TestUIConsoleRoleGating(t *testing.T) {
+	routes := loadUIRoutes(t)
+
+	// ① 期望的"写页"：这些页面的**主要用途**就是写（配置事务 / 用户 / 证书 / 内核基线 / 运维动作 / 抓包），
+	//    read-only 账号在导航里看不到它们；落到页面上时有 #role-notice 说明。
+	//    其余页面（总览、各类列表与详情、审计、诊断）是只读页，但页内的写入口仍逐个打 data-write 隐藏。
+	want := map[string]string{
+		"#/config":        "配置事务（取锁→保存→提交/丢弃）",
+		"#/system/users":  "用户与口令管理",
+		"#/system/tls":    "证书上传/重签",
+		"#/system/kernel": "内核基线写入/回退",
+		"#/ops/actions":   "运维动作（备份/升级/恢复/重启/关机/恢复出厂）",
+		"#/ops/capture":   "抓包（request vpp trace 为 super-user 级）",
+	}
+	got := map[string]bool{}
+	for _, r := range routes {
+		if r.Write {
+			got[r.Path] = true
+			if _, ok := want[r.Path]; !ok {
+				t.Errorf("路由 %q 被标成写页，但不在期望集合里——若确实该标，请连同理由一起更新本用例", r.Path)
+			}
+		}
+	}
+	for p, why := range want {
+		if !got[p] {
+			t.Errorf("写页 %q（%s）没有标 write: true——read-only 账号会在导航里看到它", p, why)
+		}
+	}
+
+	// ② 三件套的每个环节都必须在源码里存在（缺一个，隐藏就整条失效）。
+	html, err := os.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatalf("读取 ui/index.html: %v", err)
+	}
+	css, err := os.ReadFile("ui/style.css")
+	if err != nil {
+		t.Fatalf("读取 ui/style.css: %v", err)
+	}
+	app, err := os.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatalf("读取 ui/app.js: %v", err)
+	}
+	router, err := os.ReadFile("ui/router.js")
+	if err != nil {
+		t.Fatalf("读取 ui/router.js: %v", err)
+	}
+	if n := strings.Count(string(html), "data-write"); n < 60 {
+		t.Errorf("index.html 里 data-write 只有 %d 处（下限 60）——写入口被漏标或整块被删", n)
+	}
+	if !strings.Contains(string(html), `id="role-notice"`) {
+		t.Error("index.html 缺少 #role-notice（read-only 落在写页上时的说明条）")
+	}
+	if !strings.Contains(string(css), "body.role-readonly [data-write]") {
+		t.Error("style.css 缺少 body.role-readonly [data-write] 的隐藏规则")
+	}
+	if !strings.Contains(string(app), "role-readonly") || !strings.Contains(string(app), "function applyRole(") {
+		t.Error("app.js 缺少 applyRole（按登录响应的 class 切 body.role-readonly）")
+	}
+	if !strings.Contains(string(app), "const wbtn = ") {
+		t.Error("app.js 缺少 wbtn（动态写入口的标记助手）")
+	}
+	if !strings.Contains(string(router), "r.write && isReadOnlyRole()") {
+		t.Error("router.js 没有按 write 标记过滤导航（read-only 仍会看到写页）")
+	}
+	if !strings.Contains(string(router), "function renderRoleNotice(") {
+		t.Error("router.js 缺少 renderRoleNotice（写页上的角色说明）")
 	}
 }
