@@ -121,17 +121,22 @@ $ python -c "import yaml;yaml.safe_load(open('docs/NFViS-openapi.yaml'))"
 
 （贴在 §4）
 
------ 3. 真机复验（**由主会话填**）-----
-占位：本节的步骤与断言已按「不碰管理路径、不碰真系统文件」的口径写好，由主会话在 nfvis-vm 上执行后填写结果。
-该命令声明为 **super-user**（决策 #144 起运行期判定也按声明执行），故须以 super-user 账号执行。
+----- 3. 真机复验（**由主会话执行**：nfvis-vm 上的开发态实例 + 生产库副本）-----
+环境：本分支构建的明文实例（`/tmp/nfvisd-ia`，分支 `fix/backup-export-path`）+ 生产库副本，操作者 = **super-user**（admin）。
 
-| 步骤 | 命令（真机） | 断言 |
-|---|---|---|
-| 1 相对路径被拒 | `request system configuration backup to /tmp/nonexist-rel.json` 的**相对写法**：`request system configuration backup to rel-export.json` | 输出含 `%%` 且原因含「绝对路径」；**不产生** `rel-export.json`；同一次输出仍含「备份已生成」 |
-| 2 已存在目标被拒且内容不变 | 先 `touch /root/keep-me.txt`（写入一行已知内容并记下 `sha256sum`），再 `request system configuration backup to /root/keep-me.txt` | 输出含 `%%` 且原因含「已存在」；`sha256sum /root/keep-me.txt` **与执行前一致**（原文件未被改写） |
-| 3 合法路径成功且 0600 | `request system configuration backup to /root/export-<时间戳>.json`（**新文件名**、父目录 `/root` 存在） | 输出含「已导出到」；`ls -l` 该文件为 `-rw-------`（0600）；文件头含 `nfvis-config-backup`；`show system backup` 仍列出自动命名的归档 |
-| 4 源归档与既有归档均完好 | 步骤 1~3 之后：`ls -l /var/lib/nfvis/backup/`、`python3 -c 'import json;json.load(open("…"))'`（对自动命名归档） | 备份目录内归档仍在且可解析为 JSON；既有归档未被任何一次被拒的导出改写 |
-| 5（可选，**只读探测式负例**——不要真的写系统文件） | 以**已存在的系统文件**为目标：`request system configuration backup to /etc/fstab` | 输出含 `%%` 且原因含「已存在」；`sha256sum /etc/fstab` **与执行前一致**。⚠️ 该路径已存在 ⇒ 只可能被「已存在」挡住，**不会**被写；**绝不要**为了试 `O_EXCL` 去删/改名 `/etc/fstab` 或 `/usr/bin/nfvisd` |
+| 步骤 | 命令（真机） | 实测输出（摘要） | 结果 |
+|---|---|---|---|
+| ① 相对路径被拒 | `… backup to rel.json` | `%% 导出到 rel.json 失败: 目标必须是绝对路径（相对路径会随工作目录漂移）`；`rel.json` **未产生** | ✓ |
+| ② 已存在目标被拒且内容不变 | 先写 `/root/keep-me-<ts>.txt`（已知内容、记 sha256）→ `… to /root/keep-me-<ts>.txt` | `%% 导出到 … 失败: 目标已存在；导出件是另存一份、不改写既有文件——请换一个文件名，或先自行删除它`；**哈希前后一致**（`0a444e32…`），内容仍是 `keep-me-content-…` | ✓ |
+| ③ 合法绝对路径成功且 0600 | `… to /root/export-<ts>.json`（新文件名、父目录存在） | `已导出到: /root/export-<ts>.json`；`-rw------- root root`（**0600**）；文件头 `{"format": "nfvis-config-backup", "archive_version": 1,` | ✓ |
+| ④ **系统文件被挡住（本决策的目的）** | `… to /etc/fstab`（该路径**已存在**） | `%% 导出到 /etc/fstab 失败: 目标已存在；…`；`/etc/fstab` 的 sha256 **前后一致**（`9eebf9ed…`） | ✓ |
+| ⑤ 父目录不存在被拒 | `… to /nonexistent-dir-<ts>/x.json` | `%% 导出到 … 失败: 父目录 /nonexistent-dir-<ts> 不存在或不可访问（请先创建）` | ✓ |
+
+**收尾**：本轮的临时件（`/root/keep-me-*.txt`、`/root/export-*.json`）已删；开发态库副本已删；
+生产库内容指纹 `cfgsha 084c3a64…` **与动作前逐字节一致**（users 仍只有 admin）。
+
+> 说明：⑤ 与 ①~④ 的每一次拒绝都**只**影响导出这一步——同一次输出里「备份已生成: nfvis-backup-…json」
+> 仍照常出现（自动命名的归档在备份目录里，与导出目标无关），符合"拒绝即如实报错、不落盘、不留半写"的口径。
 
 ----- 4. `make check` -----
 命令：`GOFLAGS=-p=1 make check`（宿主内存紧张时按 AGENTS.md 的口径串行跑）——**rc=0，全绿**。
