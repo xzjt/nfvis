@@ -3278,8 +3278,8 @@ function renderLldp(cfg, neighbors) {
   table($('lldp-iface-table').querySelector('tbody'), 2, rowsOf(cfg && cfg.interfaces).map((i) => [
     i.interface, i.enabled === false ? '关闭' : '启用',
   ]));
-  // 邻居字段名以契约声明为准（local_interface）；本机实现在运行态行里用的是 interface，
-  // 两个名字都认——取不到就是「—」，不猜。
+  // 邻居字段名以契约声明为准（local_interface）；服务端现在发的就是这个名字，
+  // 仍留 interface 作兜底（连到更早的守护进程时这一列不该整列变空）——取不到就是「—」，不猜。
   table($('lldp-nbr-table').querySelector('tbody'), 4, rowsOf(neighbors).map((n) => [
     n.local_interface || n.interface, n.chassis_id, n.port_id, n.ttl,
   ]));

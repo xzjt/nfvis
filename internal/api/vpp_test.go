@@ -165,6 +165,11 @@ func TestLldpNeighborsEndpoint(t *testing.T) {
 	if status != http.StatusOK || !strings.Contains(string(data), "sw1") {
 		t.Fatalf("lldp neighbors: %d %s", status, data)
 	}
+	// 字段名以契约为准（`local_interface` = 本端接口）：实现此前发的是 `interface`，
+	// 与契约差一个名字，而字段守护当时因运行态未注入而恒跳过（故在此钉住）。
+	if !strings.Contains(string(data), `"local_interface":"ens192"`) {
+		t.Fatalf("邻居行应发契约声明的 local_interface:\n%s", data)
+	}
 }
 
 func TestLldpNeighborsUnavailable(t *testing.T) {

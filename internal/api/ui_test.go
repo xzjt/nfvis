@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -228,7 +229,13 @@ func TestUIHiddenAttributeWinsOverAuthorDisplay(t *testing.T) {
 }
 
 // getList 取数组型端点（列表卡的响应形状）。
-func getList(t *testing.T, ts *httptest.Server, tok, path string) []any {
+//
+// 第二个返回值为 false 表示**本次未断言**：该能力在裸测试服务里未注入（503）。
+// 这里**不静默 pass**——调用方要把"没验到"的端点显式登记出来（见 TestUIFieldNamesExistInResponses）。
+// 起因：本函数的早期版本在 503 时 `return nil`，而调用方见 `len(rows)==0` 就 continue，
+// 于是 `/protocols/lldp/neighbors` 的字段名守护**从未真正执行过**，契约（local_interface）
+// 与实现（interface）差一个字段名长期无人发现——守护"看着在，实际不在"。
+func getList(t *testing.T, ts *httptest.Server, tok, path string) ([]any, bool) {
 	t.Helper()
 	req, _ := http.NewRequest("GET", ts.URL+APIPrefix+path, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
@@ -238,10 +245,10 @@ func getList(t *testing.T, ts *httptest.Server, tok, path string) []any {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusServiceUnavailable {
-		// 该能力在裸测试服务里未注入（如镜像仓库/LLDP 运行态）：跳过而不是报红
-		// ——否则"没接底座"会被当成"字段名错了"（工具假红）。
-		t.Logf("%s: 503（本测试服务未注入该运行态），跳过字段核对", path)
-		return nil
+		// 该能力在裸测试服务里未注入（如镜像仓库）：跳过字段核对，但如实登记
+		// ——否则"没接底座"会被当成"字段名对了"（工具假绿）。
+		t.Logf("%s: 503（本测试服务未注入该运行态），本次未断言字段名", path)
+		return nil, false
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("%s: 状态 %d", path, resp.StatusCode)
@@ -250,13 +257,19 @@ func getList(t *testing.T, ts *httptest.Server, tok, path string) []any {
 	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
 		t.Fatalf("%s 应为数组响应: %v", path, err)
 	}
-	return rows
+	return rows, true
 }
 
 // UI 依赖的 JSON 字段名必须真的在响应里。这里钉的是"字段名不会静默消失"，
 // 取的是会让整块卡片变空的那几个键。
+//
+// **运行态要注入**（否则守护恒跳过）：LLDP 邻居表是最典型的例子——它在裸测试服务里 503，
+// 于是「字段名对不对」永远验不到（契约写 local_interface、实现发 interface，两边长期不一致）。
+// 这里注入最小运行态（一个邻居），让这条断言真的跑起来。
 func TestUIFieldNamesExistInResponses(t *testing.T) {
-	ts := newTestServerOpts(t, Options{})
+	ts := newTestServerOpts(t, Options{LLDP: &fakeLldpRuntime{rows: []LldpNeighborRow{
+		{Interface: "ens192", ChassisID: "sw1", PortID: "Gi0/1", TTL: 120},
+	}}})
 	st, lr := login(t, ts, "admin", "s3cret-Passw0rd!")
 	if st != http.StatusOK {
 		t.Fatalf("登录失败：%d", st)
@@ -293,6 +306,10 @@ func TestUIFieldNamesExistInResponses(t *testing.T) {
 	}
 	// 列表端点（虚拟交换机/镜像/审计日志/网络对象）：响应必须是**数组**；
 	// 非空时逐字段核首个元素——空数组时只断言形状（列表为空是合法状态）。
+	//
+	// 未断言（503 未注入 / 列表为空）的端点**如实登记**，不静默 pass：这份清单是
+	// 「守护到底验到了什么」的凭据，也是"下一次该补哪条注入"的入口。
+	asserted, unasserted := []string{}, []string{}
 	for _, c := range []struct {
 		path string
 		keys []string
@@ -307,9 +324,14 @@ func TestUIFieldNamesExistInResponses(t *testing.T) {
 		{"/qos/policies", []string{"name"}},
 		{"/port-mirroring", []string{"name"}},
 	} {
-		rows := getList(t, ts, tok, c.path)
+		rows, ran := getList(t, ts, tok, c.path)
+		if !ran {
+			unasserted = append(unasserted, c.path+"（503：运行态未注入）")
+			continue
+		}
 		if len(rows) == 0 {
-			continue // 空列表：形状对了即可（真机有数据时由浏览器验收覆盖渲染）
+			unasserted = append(unasserted, c.path+"（空列表：只验了形状）")
+			continue
 		}
 		first, _ := rows[0].(map[string]any)
 		for _, k := range c.keys {
@@ -317,6 +339,18 @@ func TestUIFieldNamesExistInResponses(t *testing.T) {
 				t.Errorf("%s[0] 缺字段 %s（UI 对应卡片会显示为空）", c.path, k)
 			}
 		}
+		asserted = append(asserted, c.path)
+	}
+	// 不许整段空转：一条都没断言成功，说明这组守护已经失效（曾经的 503 恒跳过就是这么发生的）。
+	if len(asserted) == 0 {
+		t.Fatalf("列表端点字段名一条都没断言到（未断言：%s）——守护已空转", strings.Join(unasserted, "、"))
+	}
+	// LLDP 邻居表是**必须**断言到的那一条：它的字段名曾与契约不一致而无人发现。
+	if !slices.Contains(asserted, "/protocols/lldp/neighbors") {
+		t.Fatalf("/protocols/lldp/neighbors 未被断言（%s）——注入 fakeLldpRuntime 就是为它", strings.Join(unasserted, "、"))
+	}
+	if len(unasserted) > 0 {
+		t.Logf("本次未断言的端点（如实登记，不算通过）：%s", strings.Join(unasserted, "、"))
 	}
 
 	// 系统卡片的数字改读 /system/status 的嵌套字段（R37-1 收口后不再解析 /metrics 文本）：

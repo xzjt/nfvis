@@ -227,8 +227,15 @@ type L3Runtime interface {
 }
 
 // LldpNeighborRow /protocols/lldp/neighbors 一行。
+//
+// 字段名以契约为准：`local_interface`（docs/NFViS-openapi.yaml 的邻居表 items）。
+// 此前这里发的是 `interface`，与契约差一个名字——前端只能 `local_interface || interface`
+// 两个名字都认（ui/app.js），字段守护又因运行态未注入而恒跳过，于是长期没人发现。
+// 选**改实现**而不是改契约的理由：契约名更精确（LLDP 邻居同时有"本端接口"与"对端端口"，
+// 裸 `interface` 有歧义）、前端与字段守护都按契约名写、改契约要动决策记录与随包规范，
+// 而本端接口的语义没有任何变化。
 type LldpNeighborRow struct {
-	Interface string  `json:"interface"`
+	Interface string  `json:"local_interface"`
 	ChassisID string  `json:"chassis_id"`
 	PortID    string  `json:"port_id"`
 	TTL       int     `json:"ttl"`

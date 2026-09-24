@@ -18,14 +18,22 @@ import (
 // 移除而非打码：客户端若把占位符回写，会写成非法哈希导致该账号无法登录；
 // 字段缺失至少是可察觉的。口令的新增/修改请走专用端点
 // （PUT /system/login-users/{name}、request system password change）。
-func redactConfigView(cfg model.Config) any {
-	b, err := json.Marshal(cfg)
+func redactConfigView(cfg model.Config) any { return redactView(cfg) }
+
+// redactView 返回**任意配置视图**（整配置或单个配置段）的脱敏副本。
+//
+// 分段端点（如 GET /system 返回 model.SystemConfig）与整配置端点（GET /configuration）
+// 必须同口径——否则同一个 `system.login.users[].password_hash` 从一个端点被摘掉、
+// 从另一个端点原样回显（该缺陷 2026-09-23 由真机实测发现，见 redact_test.go 的全路径守护）。
+// 脱敏规则只有一处：redactTree + model.IsSensitiveKey，本函数不新增任何规则。
+func redactView(v any) any {
+	b, err := json.Marshal(v)
 	if err != nil {
-		return cfg // 结构恒可序列化；兜底返回原值
+		return v // 结构恒可序列化；兜底返回原值
 	}
 	var tree any
 	if err := json.Unmarshal(b, &tree); err != nil {
-		return cfg
+		return v
 	}
 	redactTree(tree)
 	return tree
