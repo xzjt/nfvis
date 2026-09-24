@@ -17,7 +17,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -1028,6 +1030,71 @@ func (x *cliExecutor) systemZeroize(user string, raw []string) string {
 	return fmt.Sprintf("已恢复出厂（revision %d，删除镜像 %d 个）。重启后进入初始化状态。\n", res.Revision, res.RemovedImages)
 }
 
+// checkBackupExportDst 校验配置归档的导出目标路径（决策 #148）。
+//
+// 目标路径由操作者直接给出，而 nfvisd 以 root 运行：源侧有 sys.Path() 把归档限定在备份目录内，
+// 目标侧原本什么都不校验 ⇒ 一次手误（`to /etc/fstab`、`to /usr/bin/nfvisd`）就把系统文件
+// **截断成归档 JSON**。本函数只看**路径形态**，判定三条：
+//
+//  1. **必须绝对路径**——相对路径会随工作目录漂移，操作者以为写到了 A 实际落在 B；
+//  2. **目标不得是目录**（目录永远不是合法的导出件目标）；
+//  3. **父目录必须已存在且是目录**——把「目录写错」如实报清楚，不留给打开文件时的
+//     ENOENT/EACCES 去猜。
+//
+// **「目标已存在」不在这里判**：那一层的权威判定是打开时的 `O_EXCL`（见 openNewFileExclusive），
+// 一处判定、原子生效，且堵住「检查与打开之间目标被建出来」的竞态——于是
+// 「导出件是另存一份，不改写既有文件」这条口径不再依赖两次调用之间的一致状态。
+//
+// 全部判定都在打开目标**之前**完成：拒绝即不落盘，不留半写文件。
+func checkBackupExportDst(dst string) error {
+	if dst == "" {
+		return fmt.Errorf("目标路径为空")
+	}
+	if !filepath.IsAbs(dst) {
+		return fmt.Errorf("目标必须是绝对路径（相对路径会随工作目录漂移）")
+	}
+	if fi, err := os.Lstat(dst); err == nil {
+		if fi.IsDir() {
+			return fmt.Errorf("目标是一个目录，请给出要写的文件名")
+		}
+		// 已存在的文件/符号链接交给 openNewFileExclusive 的 O_EXCL 判（含目录符号链接）。
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("无法检查目标: %v", err)
+	}
+	parent := filepath.Dir(dst)
+	pfi, err := os.Stat(parent)
+	if err != nil {
+		return fmt.Errorf("父目录 %s 不存在或不可访问（请先创建）", parent)
+	}
+	if !pfi.IsDir() {
+		return fmt.Errorf("父目录 %s 不是目录", parent)
+	}
+	return nil
+}
+
+// openNewFileExclusive 以 0600 **只新建、不覆盖**地打开 dst（决策 #148 的权威判定点）。
+//
+// `O_CREATE|O_EXCL` 是唯一判据：目标（含符号链接、含检查与打开之间刚被建出来的）已存在即失败，
+// 既不截断也不改写既有文件——「导出件是另存一份」这条口径因此不需要维护「哪些路径敏感」的
+// 名单（那样会连带挡住把归档导出到 /data/incoming/ 一类合法用法），也不靠两次系统调用的
+// 一致状态。失败时补一条操作者能读懂的原因（目录 / 已存在），其余错误原样上报。
+func openNewFileExclusive(dst string) (*os.File, error) {
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		return out, nil
+	}
+	// 打开失败的原因按平台而异（目标已存在：类 Unix 报 EEXIST、Windows 亦映射到 fs.ErrExist；
+	// 目录：有的平台报 EEXIST、有的报 EISDIR），故先按事实判「是不是目录」，再判「已存在」，
+	// 两种都换上操作者能读懂的原因；其余错误原样上报。
+	if fi, lerr := os.Lstat(dst); lerr == nil && fi.IsDir() {
+		return nil, fmt.Errorf("目标是一个目录，请给出要写的文件名")
+	}
+	if errors.Is(err, fs.ErrExist) {
+		return nil, fmt.Errorf("目标已存在；导出件是另存一份、不改写既有文件——请换一个文件名，或先自行删除它")
+	}
+	return nil, err
+}
+
 // copyFile 复制文件（备份导出用；目标目录须已存在）。
 // copyFile 复制文件到 dst。
 //
@@ -1035,13 +1102,19 @@ func (x *cliExecutor) systemZeroize(user string, raw []string) string {
 // 的导出，而归档内含 `password_hash`（决策 #70 已记录口令哈希不得外泄）。
 // 原先用 os.Create（0666&~umask → 通常 0644），使导出件**比自动命名的归档（0600）更宽松**，
 // 本地任意用户可读到口令哈希——与 FR-SEC-007 的既有例外口径（0600、仅 super-user）矛盾。
+//
+// 目标路径由操作者给出且本进程以 root 运行，故**先校验路径形态、再以 O_EXCL 打开**（决策 #148）：
+// 顺手一次 `to <系统文件>` 不再能改写既有文件；拒绝即不落盘、不留半写文件。
 func copyFile(src, dst string) error {
+	if err := checkBackupExportDst(dst); err != nil {
+		return err
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	out, err := openNewFileExclusive(dst)
 	if err != nil {
 		return err
 	}

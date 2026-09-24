@@ -22,6 +22,7 @@ import (
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/images"
+	"github.com/xzjt/nfvis/internal/system"
 )
 
 // ---------- 运行态 fake ----------
@@ -503,5 +504,321 @@ func TestCopyFileExportsSecretsAs0600(t *testing.T) {
 	}
 	if string(got) != string(body) {
 		t.Fatalf("内容应完整复制:\n got=%q\nwant=%q", got, body)
+	}
+}
+
+// ---------- 决策 #148：配置归档导出目标路径的前置校验 ----------
+//
+// 该命令的目标路径由操作者直接给出、而 nfvisd 以 root 运行：源侧有 sys.Path() 限定在备份
+// 目录内，目标侧原先什么都不校验 ⇒ 一次手误（如指向系统文件）就把该文件截断成归档 JSON。
+// 下列用例逐条锁定三条判据（绝对路径 / 不覆盖既有文件 / 父目录必须存在），并锁定
+// 「拒绝时不落盘、不半写、源归档完好」。
+
+// newBackupExportKit 建 CLI 执行器 + 真实备份管理器（归档落临时目录）。
+func newBackupExportKit(t *testing.T) (*cliExecutor, *system.Manager) {
+	t.Helper()
+	x, eng := newCLIKit(t)
+	mgr := system.NewManager(system.Config{Dir: t.TempDir()}, eng, nil, "test")
+	x.setSystemOps(mgr)
+	return x, mgr
+}
+
+// ① 相对路径被拒（相对路径会随工作目录漂移，操作者以为写到了 A 实际落在 B）。
+func TestBackupExportRejectsRelativeDst(t *testing.T) {
+	x, mgr := newBackupExportKit(t)
+	rel := filepath.Join("relative-export-dir", "arch.json")
+	out := x.Execute("admin", "super-user", "ssh", "request system configuration backup to "+rel).Output
+	if !strings.Contains(out, "%%") {
+		t.Fatalf("相对路径应被拒（输出应含 %%）: %s", out)
+	}
+	if !strings.Contains(out, "绝对路径") {
+		t.Fatalf("拒绝原因应说明必须绝对路径: %s", out)
+	}
+	if !strings.Contains(out, "备份已生成") {
+		t.Fatalf("归档本身仍应生成（拒绝只针对导出目标）: %s", out)
+	}
+	// 源归档仍在（拒绝导出不得影响刚生成的归档）。
+	assertBackupArchiveIntact(t, mgr)
+}
+
+// ② 目标已存在被拒，且原文件内容一字未动（这一条挡住「误伤系统文件」）。
+func TestBackupExportRejectsExistingDst(t *testing.T) {
+	x, mgr := newBackupExportKit(t)
+	dst := filepath.Join(t.TempDir(), "existing.json")
+	original := []byte("原有内容，不得被归档改写\n")
+	if err := os.WriteFile(dst, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := x.Execute("admin", "super-user", "ssh", "request system configuration backup to "+dst).Output
+	if !strings.Contains(out, "%%") {
+		t.Fatalf("目标已存在应被拒（输出应含 %%）: %s", out)
+	}
+	if !strings.Contains(out, "已存在") {
+		t.Fatalf("拒绝原因应说明目标已存在: %s", out)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("被拒的导出不得改写原文件:\n got=%q\nwant=%q", got, original)
+	}
+	assertBackupArchiveIntact(t, mgr)
+}
+
+// ②b 目标是一个目录：如实拒绝，不得试图往目录里写。
+func TestBackupExportRejectsDirDst(t *testing.T) {
+	x, _ := newBackupExportKit(t)
+	dst := t.TempDir()
+	out := x.Execute("admin", "super-user", "ssh", "request system configuration backup to "+dst).Output
+	if !strings.Contains(out, "%%") || !strings.Contains(out, "目录") {
+		t.Fatalf("目录目标应被如实拒绝: %s", out)
+	}
+}
+
+// ②c 目标是符号链接：按「已存在」拒绝，不跟随链接去写链接指向的文件。
+func TestBackupExportRejectsSymlinkDst(t *testing.T) {
+	x, _ := newBackupExportKit(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real-file.json")
+	original := []byte("链接指向的原文件内容\n")
+	if err := os.WriteFile(target, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link-to-real.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("跳过：本环境无法创建符号链接（%v）", err)
+	}
+	out := x.Execute("admin", "super-user", "ssh", "request system configuration backup to "+link).Output
+	if !strings.Contains(out, "%%") {
+		t.Fatalf("符号链接目标应被拒: %s", out)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("链接指向的原文件不得被改写:\n got=%q\nwant=%q", got, original)
+	}
+}
+
+// ③ 父目录不存在被拒，原因须讲清楚（而不是笼统的打开失败）。
+func TestBackupExportRejectsMissingParentDir(t *testing.T) {
+	x, _ := newBackupExportKit(t)
+	dst := filepath.Join(t.TempDir(), "no-such-dir", "arch.json")
+	out := x.Execute("admin", "super-user", "ssh", "request system configuration backup to "+dst).Output
+	if !strings.Contains(out, "%%") {
+		t.Fatalf("父目录不存在应被拒: %s", out)
+	}
+	if !strings.Contains(out, "父目录") || !strings.Contains(out, "不存在") {
+		t.Fatalf("拒绝原因应指出父目录不存在: %s", out)
+	}
+}
+
+// ④ 合法用例不被破坏：绝对路径 + 新文件落在普通目录（便于操作者取走）→ 成功、0600、内容是归档。
+func TestBackupExportAcceptsNewAbsoluteDst(t *testing.T) {
+	x, mgr := newBackupExportKit(t)
+	dst := filepath.Join(t.TempDir(), "incoming", "arch.json")
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out := x.Execute("admin", "super-user", "ssh", "request system configuration backup to "+dst).Output
+	if strings.Contains(out, "%%") {
+		t.Fatalf("合法导出不应失败: %s", out)
+	}
+	if !strings.Contains(out, "已导出到: "+dst) {
+		t.Fatalf("成功路径应报出目标: %s", out)
+	}
+	// 内容是归档：与源归档逐字节相同，且带归档格式头。
+	body, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := mgr.List()
+	if len(files) != 1 {
+		t.Fatalf("应有 1 个归档: %+v", files)
+	}
+	src, err := mgr.Path(files[0].File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcBody, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != string(srcBody) {
+		t.Fatalf("导出件应逐字节等于源归档（导出件 %d 字节 / 源 %d 字节）", len(body), len(srcBody))
+	}
+	if !strings.Contains(string(body), system.Format) {
+		t.Fatalf("导出件应是配置归档: %s", string(body[:min(len(body), 120)]))
+	}
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("导出件权限应为 0600（归档含口令哈希），实际 %04o", perm)
+		}
+	}
+}
+
+// ⑤ 拒绝路径下源归档仍在：导出失败不得动到刚生成的归档（不半写、不删除），
+// 并且**把归档本身当作导出目标**（旧行为会把自己的归档截断/重写）也必须被拒。
+func TestBackupExportRejectedKeepsSourceArchive(t *testing.T) {
+	x, mgr := newBackupExportKit(t)
+	// 一个已存在的目标（拒绝）与一个父目录缺失的目标（拒绝），两次之后归档都必须完好。
+	existing := filepath.Join(t.TempDir(), "existing.json")
+	if err := os.WriteFile(existing, []byte("keep me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var archivePath string
+	for _, dst := range []string{existing, filepath.Join(t.TempDir(), "gone", "a.json"), "relative.json"} {
+		out := x.Execute("admin", "super-user", "ssh", "request system configuration backup to "+dst).Output
+		if !strings.Contains(out, "%%") {
+			t.Fatalf("目标 %q 应被拒: %s", dst, out)
+		}
+		files := mgr.List()
+		if len(files) == 0 {
+			t.Fatalf("目标 %q 被拒后应有归档生成: %s", dst, out)
+		}
+		p, err := mgr.Path(files[0].File)
+		if err != nil {
+			t.Fatalf("归档 %s 应仍可解析: %v", files[0].File, err)
+		}
+		archivePath = p
+		assertBackupArchiveIntact(t, mgr)
+	}
+	// 以**既有归档**为导出目标：同样被拒，且该归档内容不变。
+	// （用另存的一份做目标——直接指向刚生成的归档会被 Backup() 的同秒同名重写干扰，
+	//   那是「同秒两次备份同名覆盖」的既有行为，不是导出造成的。）
+	existingArchive := filepath.Join(t.TempDir(), "old-archive.json")
+	before, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(existingArchive, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := x.Execute("admin", "super-user", "ssh", "request system configuration backup to "+existingArchive).Output
+	if !strings.Contains(out, "%%") || !strings.Contains(out, "已存在") {
+		t.Fatalf("以既有归档为导出目标应被拒: %s", out)
+	}
+	after, err := os.ReadFile(existingArchive)
+	if err != nil {
+		t.Fatalf("既有归档应仍可读: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("既有归档不得被改写（%d → %d 字节）", len(before), len(after))
+	}
+	// 单元级：源 == 目标（就地导出）也必须拒，不得把归档截断成自己。
+	if err := copyFile(archivePath, archivePath); err == nil {
+		t.Fatal("源与目标相同应被拒")
+	}
+	assertBackupArchiveIntact(t, mgr)
+}
+
+// assertBackupArchiveIntact 断言备份目录里的归档仍在且内容完好。
+func assertBackupArchiveIntact(t *testing.T, mgr *system.Manager) {
+	t.Helper()
+	files := mgr.List()
+	if len(files) == 0 {
+		t.Fatal("应至少有一个归档")
+	}
+	for _, f := range files {
+		p, err := mgr.Path(f.File)
+		if err != nil {
+			t.Fatalf("归档 %s 应仍可解析: %v", f.File, err)
+		}
+		body, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("归档 %s 应仍可读: %v", f.File, err)
+		}
+		if !strings.Contains(string(body), system.Format) {
+			t.Fatalf("归档 %s 内容应完好: %s", f.File, string(body[:min(len(body), 120)]))
+		}
+	}
+}
+
+// TestCheckBackupExportDst 直接锁定校验函数的判据（不经 CLI），含空路径。
+// 注意「目标已存在」**不在**本函数判定（那层的权威判定是打开时的 O_EXCL，见下个用例）——
+// 本函数只看路径形态，故这里对已存在的文件必须**放行**。
+func TestCheckBackupExportDst(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "taken.json"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		dst  string
+		ok   bool
+	}{
+		{"空路径", "", false},
+		{"相对路径", "arch.json", false},
+		{"上游相对写法", filepath.Join("sub", "arch.json"), false},
+		{"已存在的目录", dir, false},
+		{"父目录不存在", filepath.Join(dir, "nope", "arch.json"), false},
+		{"父是文件", filepath.Join(dir, "taken.json", "arch.json"), false},
+		{"合法新文件", filepath.Join(dir, "new.json"), true},
+		{"已存在的文件（形态合法，存在性交给 O_EXCL 判）", filepath.Join(dir, "taken.json"), true},
+	}
+	for _, c := range cases {
+		err := checkBackupExportDst(c.dst)
+		if c.ok && err != nil {
+			t.Fatalf("%s: 应放行 %q，实际 %v", c.name, c.dst, err)
+		}
+		if !c.ok && err == nil {
+			t.Fatalf("%s: 应拒绝 %q，实际放行", c.name, c.dst)
+		}
+	}
+}
+
+// TestOpenNewFileExclusiveCoversExistingAndDir 锁定「只新建、不覆盖」的权威判定点：
+// 已存在的文件/目录一律打不开，且**不留下任何改写痕迹**（原内容一字未动）。
+func TestOpenNewFileExclusiveCoversExistingAndDir(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "taken.json")
+	original := []byte("原有内容，不得被改写\n")
+	if err := os.WriteFile(existing, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := openNewFileExclusive(existing); err == nil {
+		_ = f.Close()
+		t.Fatal("已存在的文件应打不开（O_EXCL）")
+	} else if !strings.Contains(err.Error(), "已存在") {
+		t.Fatalf("拒绝原因应说明目标已存在: %v", err)
+	}
+	if got, err := os.ReadFile(existing); err != nil || string(got) != string(original) {
+		t.Fatalf("打开失败不得改动原文件（err=%v got=%q）", err, got)
+	}
+	if _, err := openNewFileExclusive(dir); err == nil {
+		t.Fatal("目录应打不开")
+	} else if !strings.Contains(err.Error(), "目录") {
+		t.Fatalf("目录应给出「是目录」的原因: %v", err)
+	}
+	fresh := filepath.Join(dir, "fresh.json")
+	f, err := openNewFileExclusive(fresh)
+	if err != nil {
+		t.Fatalf("新文件应打开成功: %v", err)
+	}
+	if _, err := f.WriteString("{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(fresh)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("导出件权限应为 0600，实际 %04o", perm)
+		}
+	}
+	// 再开同一个路径仍必须失败（不会顺手改写刚写好的导出件）。
+	if f, err := openNewFileExclusive(fresh); err == nil {
+		_ = f.Close()
+		t.Fatal("同一路径第二次应打不开")
 	}
 }

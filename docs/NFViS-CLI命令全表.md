@@ -156,7 +156,7 @@
 | `request system poweroff` | 断电 | S | `POST /system:shutdown` | 🚫 破坏性 |
 | `request system kernel apply` | 写入 GRUB 内核基线（需重启生效） | S | `POST /system/kernel:apply` | 🚫 会改启动项，本轮不执行 |
 | `request system kernel rollback` | 回退内核基线 | S | `POST /system/kernel:rollback` | 🚫 同上 |
-| `request system configuration backup [to <path>]` | 导出 committed 配置归档 | S | `GET /system/backup` | ✅ |
+| `request system configuration backup [to <path>]` | 导出 committed 配置归档（`to <path>` 是另存一份：须绝对路径、目标不得已存在、父目录须已存在；已存在即如实拒绝） | S | `GET /system/backup` | ✅ |
 | `request system configuration restore <path>` | 导入归档为 candidate 并提交 | S | `PUT /configuration/candidate` | 🚫 会覆盖现网配置 |
 | `request system tech-support generate` | 生成诊断归档 tar.gz | O | `POST /system/tech-support` | ✅ |
 | `request system core-dumps export <url>` | 导出转储清单到 URL（POST JSON） | O | `POST /system/core-dumps:export` | ✅（决策 #126 修掉此前的假成功） |

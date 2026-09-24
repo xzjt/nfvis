@@ -1179,6 +1179,11 @@ nfvis$ request system configuration restore /var/lib/nfvis/backup/pre-change.jso
 nfvis$ request system zeroize
 ```
 
+> **`to <path>` 是「另存一份」**——导出不会改写既有文件。因此该命令要求：
+> 路径必须是**绝对路径**（相对路径会随工作目录漂移，故一律拒绝）、父目录**必须已存在**、
+> 目标**必须不存在**——目标已存在时如实报错（不覆盖），请换一个文件名（例如带时间戳）
+> 或先自行删除它。这样一次手误（把路径指到系统文件上）不会毁掉系统文件。
+>
 > **归档含账号信息（`password_hash`）**，所有导出件均 0600、仅 super-user 可读；
 > 经 REST 下载同一归档（`GET /api/v1/system/backup/<文件>`）同样只允许 super-user
 > （归档要能恢复就不能脱敏，故收紧的是权限）。**归档列表**（`GET /api/v1/system/backup`）只回
