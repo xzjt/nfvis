@@ -56,6 +56,11 @@ function el(tag, attrs, children) {
 
 const dash = (v) => (v === undefined || v === null || v === '' ? '—' : v);
 
+// wbtn：**动态生成的写/运维入口**（决策 #145，设计 §8）——带 `data-write` 标记，
+// read-only 账号下由 CSS 隐藏（见 style.css 的 body.role-readonly 规则）。
+// 只用于"会改状态或需要 O 级以上"的动作；读类（详情/刷新/下载/看差异）仍用 el()。
+const wbtn = (opts) => el('button', Object.assign({ 'data-write': '' }, opts));
+
 function fill(dl, pairs) {
   dl.textContent = '';
   pairs.forEach(([k, v]) => {
@@ -968,9 +973,9 @@ function renderUsers(lu) {
     pwCell.appendChild(pw);
     tr.appendChild(pwCell);
     const cell = el('td', { class: 'actions' });
-    const applyBtn = el('button', { type: 'button', class: 'ghost small', text: '应用修改' });
+    const applyBtn = wbtn({ type: 'button', class: 'ghost small', text: '应用修改' });
     applyBtn.addEventListener('click', () => usrApply(u.name, sel.value, pw.value));
-    const delBtn = el('button', { type: 'button', class: 'danger small', text: '删除' });
+    const delBtn = wbtn({ type: 'button', class: 'danger small', text: '删除' });
     delBtn.addEventListener('click', () => usrDelete(u.name));
     cell.appendChild(applyBtn);
     cell.appendChild(delBtn);
@@ -2047,7 +2052,7 @@ function cfgRowHead(text, onDelete, deleteLabel) {
   const head = el('div', { class: 'cfg-rowhead' });
   head.appendChild(el('span', { class: 'cfg-subname', text }));
   if (onDelete) {
-    const btn = el('button', { type: 'button', class: 'small danger', text: deleteLabel || '删除' });
+    const btn = wbtn({ type: 'button', class: 'small danger', text: deleteLabel || '删除' });
     btn.addEventListener('click', onDelete);
     head.appendChild(btn);
   }
@@ -2062,7 +2067,7 @@ function cfgRenderAdd(cont, spec) {
   const inp = el('input', { type: 'text', id });
   if (spec.placeholder) inp.setAttribute('placeholder', spec.placeholder);
   box.appendChild(inp);
-  const btn = el('button', { type: 'button', class: 'small', text: spec.button || '新增' });
+  const btn = wbtn({ type: 'button', class: 'small', text: spec.button || '新增' });
   btn.addEventListener('click', () => cfgAdd(cont, spec, inp.value));
   inp.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') { ev.preventDefault(); cfgAdd(cont, spec, inp.value); }
@@ -2126,7 +2131,7 @@ function cfgRenderSection(box, sec, c) {
     if ((sec.fields || []).length) fs.appendChild(grid);
     (sec.sublists || []).forEach((sub) => fs.appendChild(cfgRenderSub(sub, sec.loc || [], c)));
     if (sec.clearPath) {
-      const btn = el('button', { type: 'button', class: 'small danger', text: '清空本节（' + sec.legend + '）' });
+      const btn = wbtn({ type: 'button', class: 'small danger', text: '清空本节（' + sec.legend + '）' });
       btn.addEventListener('click', () => cfgClearSection(sec.clearPath, sec.legend + '配置'));
       const row = el('div', { class: 'cfg-add' });
       row.appendChild(btn);
@@ -2930,7 +2935,7 @@ function renderHistory(revs) {
     } else {
       const diff = el('button', { type: 'button', class: 'ghost small', text: '看差异' });
       diff.addEventListener('click', () => cfghDiffGuide(rev, n));
-      const rb = el('button', { type: 'button', class: 'small danger', text: '回滚到这一版' });
+      const rb = wbtn({ type: 'button', class: 'small danger', text: '回滚到这一版' });
       rb.addEventListener('click', () => cfghRollback(rev, n, r));
       cell.appendChild(diff);
       cell.appendChild(rb);
@@ -3272,12 +3277,25 @@ function showLogin(msg) {
   $('username').focus();
 }
 
+// applyRole：按账号 class 切角色渲染（决策 #145，设计 §8：`read-only` 只见只读页、写按钮**隐藏**）。
+// 机制：给 <body> 挂 role-readonly 类，由 style.css 隐藏所有 [data-write]（含动态生成的，见 wbtn）；
+// 导航里去掉"写页"（routes.json 里 write: true 的那几条，由 router.js 过滤）。
+//
+// **隐藏不是安全边界**：服务端按 class 判定（决策 #141 前提⑥），界面只是不把"点下去必被拒"的入口摆出来。
+// class 取不到时按"全量"渲染（fail-open）——界面是呈现层，服务端才是边界；这样也不会因为登录响应缺字段
+// 把 super-user 自己的入口藏掉。
+function applyRole(user) {
+  const cls = (user && user.class) || '';
+  document.body.classList.toggle('role-readonly', cls === 'read-only');
+}
+
 async function enterApp(user) {
   $('login-view').hidden = true;
   $('main-view').hidden = false;
   $('global-error').hidden = true;
   currentUser = (user && user.name) || '';
   $('user-line').textContent = user ? user.name + '（' + user.class + '）' : '';
+  applyRole(user);
   cfgSetEditing(false);
   try {
     // 路由表 → 渲染当前 hash 那一页（配置页的数据由 config 视图自己拉）。
@@ -3299,6 +3317,7 @@ function signOut(msg) {
   token = '';
   events = [];
   currentUser = '';
+  applyRole(null);
   cfg = { committed: null, editing: false };
   cfgSetEditing(false);
   sessionStorage.removeItem(TOKEN_KEY);
@@ -3386,7 +3405,7 @@ function renderVMRows(vms) {
     });
     const cell = el('td', { class: 'actions' });
     VM_ACTIONS.forEach((a) => {
-      const btn = rowButton(el('button', { type: 'button', class: 'ghost small', text: a.label }));
+      const btn = rowButton(wbtn({ type: 'button', class: 'ghost small', text: a.label }));
       btn.disabled = a.states.indexOf(String(v.state)) < 0;
       btn.addEventListener('click', () => vmAction(v.name, a.key, a.label, opsMsg));
       cell.appendChild(btn);
@@ -3511,7 +3530,7 @@ function vmDetailActions(vm) {
   box.textContent = '';
   if (!vm) return;
   VM_ACTIONS.forEach((a) => {
-    const btn = el('button', { type: 'button', text: a.label });
+    const btn = wbtn({ type: 'button', text: a.label });
     btn.disabled = a.states.indexOf(String(vm.state)) < 0;
     btn.addEventListener('click', () => vmAction(vm.name, a.key, a.label, vmDetailMsg));
     box.appendChild(btn);
@@ -3622,9 +3641,9 @@ async function vmSnapLoad(pre) {
       tr.appendChild(el('td', { text: String(dash(c)) }));
     });
     const cell = el('td', { class: 'actions' });
-    const rb = el('button', { type: 'button', class: 'ghost small', text: '回滚' });
+    const rb = wbtn({ type: 'button', class: 'ghost small', text: '回滚' });
     rb.addEventListener('click', () => vmSnapAct(nm, 'rollback'));
-    const db = el('button', { type: 'button', class: 'danger small', text: '删除' });
+    const db = wbtn({ type: 'button', class: 'danger small', text: '删除' });
     db.addEventListener('click', () => vmSnapAct(nm, 'delete'));
     cell.appendChild(rb);
     cell.appendChild(db);
@@ -4000,7 +4019,7 @@ function renderContainerRows(cts) {
     detBtn.addEventListener('click', () => goDetail('#/compute/containers/' + encodeURIComponent(c.name)));
     cell.appendChild(detBtn);
     VM_ACTIONS.forEach((a) => {
-      const btn = rowButton(el('button', { type: 'button', class: 'ghost small', text: a.label }));
+      const btn = rowButton(wbtn({ type: 'button', class: 'ghost small', text: a.label }));
       btn.disabled = a.states.indexOf(String(c.state)) < 0;
       btn.addEventListener('click', () => ctAction(c.name, a.key, a.label, opsMsg));
       cell.appendChild(btn);
@@ -4104,7 +4123,7 @@ function ctDetailActions(ct) {
   box.textContent = '';
   if (!ct) return;
   VM_ACTIONS.forEach((a) => {
-    const btn = el('button', { type: 'button', text: a.label });
+    const btn = wbtn({ type: 'button', text: a.label });
     btn.disabled = a.states.indexOf(String(ct.state)) < 0;
     btn.addEventListener('click', () => ctAction(ct.name, a.key, a.label, ctdMsg));
     box.appendChild(btn);
@@ -4735,7 +4754,7 @@ function renderCapture(cap) {
       tr.appendChild(el('td', { text: String(dash(c)) }));
     });
     const cell = el('td', { class: 'actions' });
-    const btn = el('button', { type: 'button', class: 'ghost small', text: '下载' });
+    const btn = wbtn({ type: 'button', class: 'ghost small', text: '下载' });
     btn.addEventListener('click', () => downloadFile('/vpp/capture/' + encodeURIComponent(f.name), f.name, capMsg));
     cell.appendChild(btn);
     tr.appendChild(cell);
@@ -4799,7 +4818,7 @@ function archiveTable(tbody, rows, prefix) {
       tr.appendChild(el('td', { text: String(dash(c)) }));
     });
     const cell = el('td', { class: 'actions' });
-    const btn = el('button', { type: 'button', class: 'ghost small', text: '下载' });
+    const btn = wbtn({ type: 'button', class: 'ghost small', text: '下载' });
     btn.addEventListener('click', () => downloadFile(prefix + encodeURIComponent(name), name, opsMsg));
     cell.appendChild(btn);
     tr.appendChild(cell);

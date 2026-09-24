@@ -91,6 +91,7 @@ export async function render() {
     for (const s of document.querySelectorAll('.page')) s.hidden = s.id !== 'page-' + route.view;
     renderNav(route);
     renderCrumb(route);
+    renderRoleNotice(route);
     setPollRoute(route);
     const view = VIEWS[route.view];
     if (!view) { showGlobalError('页面未实现：' + route.view); return; }
@@ -140,6 +141,29 @@ export function start() {
 // 导航只列路由表里已有的**页面**：一级项（面包屑只有一段）直接列，其余按面包屑首段分组。
 // 对象详情页（detail: true）不进导航——它是对象级页面，逐个对象列出来会把导航撑爆；
 // 它高亮的是自己的列表页（见 navBasePath）。
+//
+// 角色渲染（决策 #145，设计 §8）：read-only 账号**不列"写页"**（路由表里 write: true 的那几条），
+// 导航里只剩只读页；深链落到写页时的说明由 renderRoleNotice 负责。
+function isReadOnlyRole() {
+  return document.body.classList.contains('role-readonly');
+}
+
+// 角色说明条（决策 #145）：read-only 账号落到"写页"上（深链/收藏/被导航过滤后手敲地址）时，
+// 页面里的写入口已被 CSS 隐藏——这里讲清**为什么这页是空的、该找谁**，而不是让人以为界面坏了。
+// 非写页/非只读角色时清空（元素本身的显示由 style.css 的 body.role-readonly 规则控制）。
+function renderRoleNotice(route) {
+  const n = document.getElementById('role-notice');
+  if (!n) return;
+  const on = !!route.write && isReadOnlyRole();
+  // 元素本身的显示由 style.css 的 body.role-readonly.role-notice-on 规则决定：
+  // 只有"只读角色 + 当前页是写页"两条同时成立才出现（只读页上不该出现这条说明）。
+  document.body.classList.toggle('role-notice-on', on);
+  n.textContent = on
+    ? '当前账号是 read-only：本页（' + route.title +
+      '）的动作入口已隐藏，页面内容按你的权限只读呈现。需要执行这些动作请用 operator / super-user 账号。'
+    : '';
+}
+
 function renderNav(route) {
   const nav = document.getElementById('nav');
   nav.textContent = '';
@@ -147,6 +171,7 @@ function renderNav(route) {
   const groups = new Map(); // 组名 → 该组的容器（顺序即路由表里的出现顺序）
   for (const r of routes) {
     if (r.detail) continue;
+    if (r.write && isReadOnlyRole()) continue;
     const g = r.breadcrumb.length > 1 ? r.breadcrumb[0] : '';
     let box = nav;
     if (g) {
