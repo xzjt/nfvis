@@ -86,8 +86,9 @@ Release：https://github.com/xzjt/nfvis/releases/tag/v1.1.33（tag `v1.1.33` →
   - 首轮 `vppctl ping 192.168.100.10/.11 source bvi0 repeat 5` → **5 sent, 4 received, 20% packet loss**（各一条）；
   - **复跑两轮**（共 4 条断言）→ **5 sent, 5 received, 0% packet loss**；
   - 宿主经 DPDK 物理口 `ping 192.168.155.240/.241` → **4/4、0% 丢包**，RTT `0.425/0.695/1.372ms` 与 `0.382/0.669/1.495ms`。
-  - 判读：首轮丢的那 1 个包是**重装恢复收敛后首个 ICMP**（ARP/邻居重解析）的瞬态，**不是功能回归**（同一秒起的
-    后续包全通；独立事实源 `vppctl` 与宿主侧双向印证）。已如实登记（见 §7-②）。
+  - 判读：首轮丢的那 1 个包是**空闲（含重装恢复收敛）后首个 ICMP** 的瞬态，**不是功能回归**（同一秒起的
+    后续包全通；独立事实源 `vppctl` 与宿主侧双向印证；**本轮共复现 3 次、热态 9 轮 45 包 0 丢**）。
+    具体层次**未定位**——如实登记见 §7-②。
 - **D6 CLI 对照（装好的二进制，HTTPS）**：`show version` → `NFViS 1.1.33 / Ubuntu 26.04 / VPP 26.06-release / libvirt 12.0.0 / QEMU 10.2.1 / Docker 29.1.3`（DPDK 未探测到，按契约**不给该键**）；
   `show virtual-switches` → `6252701 vs-vnf up up 4`。
 
@@ -120,7 +121,14 @@ token2 POST /logout        -> 204
 影响＝**未提交的编辑被静默丢弃**（不动已生效配置）。判据错在"会话"被表示成了 `user@source` 身份键：所有 REST
 流量（控制台、脚本、CLI 的收尾登出）共用 `user@api`。修法需要契约先行（`sessions` 目前只按 `user@source` 列出），
 故本轮**只登记不改**：非本版引入、且改动会触及会话模型。
-**② 重装后首个 BVI ping 丢 1 包**（4/5 = 20%），复跑两轮均 5/5 0%——瞬态，非回归（§5 D5 已给双向证据）。
+**② 空闲后首个 BVI ping 丢 1 包**（**复现 3 次**：重装恢复收敛后一次、两次长时间空闲后各一次；均为 4/5 = 20%），
+**热态连打全通**（本轮共 9 轮 `repeat 5` = 45 包 **0 丢**），宿主经 DPDK 物理口 4/4 双向正常。
+**判读：不是功能回归**——本版两刀**完全没碰数据面**，同一链路在热态、宿主侧、独立事实源（`vppctl` ↔ `virsh`）三处都正常；
+丢的**总是**"长时间空闲后的第一个 ICMP"，符合 L2/L3 邻居表在空闲后首次发包需要重新解析的形态
+（现场旁证：BVI 上 `show ip neighbor` 表项的 Age 随空闲增长到 400s+，一发包即归零）。
+**未定位到具体层**（VPP 侧还是 guest 侧）：本轮为此写过一个"用接口 rx/tx 计数做差"的探针，
+但脚本取错了列（见下 ③④），**没拿到决定性证据** ⇒ 如实登记为**环境侧待查**，不作产品结论。
+**教训**：这类"空闲态瞬态"若要有结论，探针必须先对**已知正确**的读数自校准（本轮的反面例子就是计数器列号取错还照打结论）。
 **③ 校验脚本自身三处错（都已改正后重跑，记下来防重蹈）**：
 - ①`PUT /configuration/candidate` 收的是**裸配置文档**，首轮脚本按 `GET /configuration` 的响应形状把
   `{"configuration":{…}}` **包裹体**PUT 上去 → 候选成了**空文档** → 提交 400（看着像"合法文档也被拒"，
@@ -129,6 +137,9 @@ token2 POST /logout        -> 204
   改成 admin token 看（这本身是**正确**行为，不是缺陷）。
 - ③H5 段 `echo` 里出现反引号 → 被 bash 当命令替换（日志里冒出 `user@api: command not found`）→ 改用「」重跑；
   另 `code -o /tmp/dl-b.json` 与函数内建的 `-o /dev/null` 冲突 → 下载体没落盘（该断言改用 HTTPS 直连重做）。
+- ④**上传脚本时一条 ssh 喂了两个 `tr`**（`ssh host 'tr -d "\r" > a; tr -d "\r" > b' < file`）：stdin 全被第一条
+  `tr` 吃掉，第二条写出**空文件**，而 `bash -n 空文件` 照样通过（**又一处假绿**）⇒ 后台上跑的探针其实是空脚本、
+  日志 0 字节。**教训**：一次 ssh 只喂一个文件，上传后 `wc -l` 复核行数（不能只信 `bash -n`）。
 
 ----- 8. 终态环境事实（供下一轮接手核对）-----
 - 目标机 **nfvis 1.1.33 active**（`/usr/bin/nfvisd -version` = 1.1.33），443 监听 1；
@@ -136,6 +147,11 @@ token2 POST /logout        -> 204
   本轮动作前后逐字段一致（另有备份 `/root/nfvis-db-backup-20260924-2218-round79/nfvis.db`，指纹同）；
 - 拓扑：BD `6252701`（vs-vnf）四口在，`vnf-a`/`vnf-b` running，BVI `192.168.100.1/24`，流量通（§5）；
 - 目录权限：`/var/lib/nfvis/tech-support` 经本轮生成已收紧为 **0700**（归档 0600）；`/var/lib/nfvis/backup` 下备份 0600；
+- **目标机源码树 `/root/src` = 发布树（c74cd02）**：`docs/evidence/` 里只到 round78（无 round79）、
+  `docs/V1-收尾待办.md` 里没有 round79 交接块——即"打包用的那棵树"，与本轮发布后的 docs 提交**有意不同**；
+- 冒烟/集成前置**仍在**（下一轮跑三件套需要）：`/var/lib/nfvis/images/` 有 `alpine.qcow2`(187MB)、
+  `debian-12-generic-amd64.qcow2`、`cli-test.qcow2`；`docker images` 有 `alpine:3.20`；
+  `contrib/scripts/cli-*.sh` 三件套脚本在 `/root/src` 内；
 - 8443 无残留监听；探针账号与临时库副本（`/tmp/nfvis-rel133*.db`）已删；
 - 发布件副本仍在 `/root/src/build/nfvis_1.1.33_amd64.deb`（= 已发布件）。
 
