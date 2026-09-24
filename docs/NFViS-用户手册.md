@@ -1179,7 +1179,10 @@ nfvis$ request system configuration restore /var/lib/nfvis/backup/pre-change.jso
 nfvis$ request system zeroize
 ```
 
-> **归档含账号信息（`password_hash`）**，所有导出件均 0600、仅 super-user 可读。
+> **归档含账号信息（`password_hash`）**，所有导出件均 0600、仅 super-user 可读；
+> 经 REST 下载同一归档（`GET /api/v1/system/backup/<文件>`）同样只允许 super-user
+> （归档要能恢复就不能脱敏，故收紧的是权限）。**归档列表**（`GET /api/v1/system/backup`）只回
+> 文件名/大小/时间，read-only 账号也能看，但看得到不等于拿得走。
 > 请勿放到 /tmp 等共享目录。**动包管理（升级/purge）前也建议先做一份备份。**
 
 ### 10.8 诊断与转储

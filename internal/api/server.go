@@ -269,7 +269,9 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	// M5-6：配置备份/恢复/恢复出厂（FR-OPS-004~007）
 	mux.Handle("GET "+APIPrefix+"/system/backup", s.auth(s.handleListBackups, schema.ClassReadOnly, "show system backup"))
 	mux.Handle("POST "+APIPrefix+"/system/backup", cfgAPI(s.handleCreateBackup))
-	mux.Handle("GET "+APIPrefix+"/system/backup/{file}", s.auth(s.handleDownloadBackup, schema.ClassReadOnly, "show system backup"))
+	// 决策 #143：下载件是完整 committed 配置（含口令哈希，恢复所必需故不脱敏），
+	// 按 FR-SEC-007 的既有例外口径（0600、仅 super-user）与生成端同为 S。
+	mux.Handle("GET "+APIPrefix+"/system/backup/{file}", s.auth(s.handleDownloadBackup, schema.ClassSuperUser, "show system backup"))
 	mux.Handle("POST "+APIPrefix+"/system/restore", cfgAPI(s.handleRestore))
 	mux.Handle("POST "+APIPrefix+"/system:zeroize", cfgAPI(s.handleZeroize))
 

@@ -104,6 +104,70 @@ func TestBackupRestoreZeroizeEndpoints(t *testing.T) {
 	}
 }
 
+// 决策 #143（FR-SEC-007、FR-OPS-004）：下载件是**完整** committed 配置（含全部本地用户的
+// 口令哈希），故该端点最低 class 为 super-user——read-only 与 operator 一律 403，
+// super-user 真拿到归档字节。**不脱敏**是有意的：脱敏会破坏恢复能力，这是权限问题不是脱敏问题。
+// 变异验证：把 server.go 该路由改回 ClassReadOnly，本用例即报「read-only 下载应 403」。
+func TestBackupDownloadRequiresSuperUser(t *testing.T) {
+	ts := newTestServer(t)
+	admin := loginAdmin(t, ts)
+
+	// 先生成一份归档（生成端本就是 super-user）
+	status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system/backup", admin, nil,
+		map[string]string{"X-NFVIS-Auto-Commit": "true"})
+	if status != http.StatusAccepted {
+		t.Fatalf("生成备份: %d %s", status, data)
+	}
+	var f struct {
+		File string `json:"file"`
+	}
+	if err := json.Unmarshal(data, &f); err != nil || f.File == "" {
+		t.Fatalf("备份元数据: %s (%v)", data, err)
+	}
+	dl := ts.URL + APIPrefix + "/system/backup/" + f.File
+
+	// ① super-user：200，且归档确实是完整配置——**含口令哈希**
+	//    （这正是它必须 super-user 的原因；若哪天归档被脱敏，这里会红，恢复能力也就没了）
+	status, _, data = cfgRequest(t, http.MethodGet, dl, admin, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("super-user 下载应 200: %d %s", status, data)
+	}
+	if !bytes.Contains(data, []byte("nfvis-config-backup")) {
+		t.Fatalf("归档头缺失（回的不是备份归档？）")
+	}
+	if !bytes.Contains(data, []byte("password_hash")) || !realHashRe.Match(data) {
+		t.Fatalf("归档应含完整配置（含口令哈希），否则恢复不成立")
+	}
+
+	// ② read-only：下载 403（本决策关掉的那条路）；**列表仍可读**（只回元数据，不含配置正文）
+	_, viewer := login(t, ts, "viewer", "s3cret-Passw0rd!")
+	status, _, data = cfgRequest(t, http.MethodGet, dl, viewer.Token, nil, nil)
+	if status != http.StatusForbidden {
+		t.Fatalf("read-only 下载应 403（归档含口令哈希）: %d %s", status, data)
+	}
+	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/system/backup", viewer.Token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), f.File) {
+		t.Fatalf("read-only 读归档列表应 200（列表只回元数据）: %d %s", status, data)
+	}
+
+	// ③ operator：同样 403——REST 比 CLI 运行期更严是**有意**的（REST 直接交字节，
+	//    没有「写得出、读不回」那层间接保护；CLI 侧声明/运行期口径见决策 #143 的核实段）
+	status, _, data = cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system/login-users", admin,
+		map[string]any{"name": "opsdl", "class": "operator", "password": "Op@12345678"},
+		map[string]string{"X-NFVIS-Auto-Commit": "true"})
+	if status != http.StatusCreated && status != http.StatusOK {
+		t.Fatalf("建 operator 用户: %d %s", status, data)
+	}
+	status, op := login(t, ts, "opsdl", "Op@12345678")
+	if status != http.StatusOK {
+		t.Fatalf("operator 登录: %d", status)
+	}
+	status, _, data = cfgRequest(t, http.MethodGet, dl, op.Token, nil, nil)
+	if status != http.StatusForbidden {
+		t.Fatalf("operator 下载应 403: %d %s", status, data)
+	}
+}
+
 // M5-6：CLI 侧 backup / restore / zeroize（双重确认）。
 func TestCLISystemBackupRestoreZeroize(t *testing.T) {
 	x, eng := newCLIKit(t)
