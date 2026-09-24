@@ -67,6 +67,30 @@
     </article>
     </section>
 
+    <section class="page" id="page-system" hidden>
+    <article class="card wide">
+      <h2>系统 <span id="sysp-note" class="muted small"></span></h2>
+      <p class="muted small">
+        系统域入口：状态与组件版本取自运行态，下面的「系统配置段」取自<strong>已生效配置</strong>
+        （口令哈希等敏感叶子不回显）。子页面：
+        <a href="#/system/hardware">硬件健康</a> · <a href="#/system/pools">资源池</a> ·
+        <a href="#/system/interfaces">接口</a> · <a href="#/system/kernel">内核基线</a> ·
+        <a href="#/system/users">用户与权限</a> · <a href="#/system/tls">证书</a>；
+        破坏性动作（重启数据面/主机、软件升级、恢复配置、恢复出厂）在
+        <a href="#/ops/actions">运维动作</a>页。
+      </p>
+      <h3>状态</h3>
+      <dl id="sysp-list" class="kv"></dl>
+      <h3>组件版本</h3>
+      <dl id="sysp-ver" class="kv"></dl>
+      <h3>系统配置段（已生效）</h3>
+      <pre id="sysp-cfg" class="code console-out"></pre>
+      <p class="muted small">
+        改这些字段在<a href="#/config">配置</a>页的系统段表单里做（只写候选，提交后生效）。
+      </p>
+    </article>
+    </section>
+
     <section class="page" id="page-hardware" hidden>
     <article class="card wide">
       <h2>硬件健康 <span id="hw-note" class="muted small"></span></h2>
@@ -112,6 +136,155 @@
         <thead><tr><th>名称</th><th>说明</th><th>MTU</th><th>Rx 包</th><th>Tx 包</th><th>Rx 错误</th><th>Tx 丢弃</th></tr></thead>
         <tbody></tbody>
       </table>
+      <p class="muted small">点行进详情页：驱动（含 DPDK 接管）与 SR-IOV 的 VF 数量都在那一页。</p>
+    </article>
+    </section>
+
+    <section class="page" id="page-ifaceDetail" hidden>
+    <article class="card wide">
+      <div class="obj-head">
+        <h2>接口 <span id="ifd-name" class="muted small"></span></h2>
+        <dl id="ifd-head" class="kv"></dl>
+      </div>
+
+      <h3>配置与运行态</h3>
+      <dl id="ifd-info" class="kv"></dl>
+
+      <h3>收发计数</h3>
+      <dl id="ifd-stat" class="kv"></dl>
+
+      <h3>驱动接管（DPDK）</h3>
+      <p class="muted small">
+        绑定后该口<strong>离开内核平面</strong>：内核侧的地址、路由与统计都不再属于它，数据面要用这个口
+        需要按 PCI 地址声明。管理口由服务端守卫拒绝（不提供强制绕过的入口）。
+      </p>
+      <div class="cfg-forms">
+        <fieldset>
+          <legend>绑定到 DPDK（该口会离开内核平面）</legend>
+          <label for="ifd-uio">DPDK 驱动</label>
+          <select id="ifd-uio">
+            <option value="">vfio-pci（缺省）</option>
+            <option value="igb-uio">igb-uio</option>
+          </select>
+          <div class="cfg-actions"><button id="ifd-dpdk-bind" type="button" class="danger">绑定到 DPDK</button></div>
+        </fieldset>
+        <fieldset>
+          <legend>解绑交还内核</legend>
+          <label for="ifd-todrv">交还的内核驱动名（建议显式给出）</label>
+          <input id="ifd-todrv" type="text" placeholder="如 vmxnet3">
+          <div class="cfg-actions"><button id="ifd-dpdk-unbind" type="button" class="ghost">解绑交还内核</button></div>
+          <p class="muted small">不给驱动名时由服务端尝试自动绑定；自动绑定不了会明确报错，届时填上驱动名重试。</p>
+        </fieldset>
+        <fieldset>
+          <legend>SR-IOV（VF 数量）</legend>
+          <label for="ifd-vfs">VF 数量（0 = 回收全部 VF）</label>
+          <input id="ifd-vfs" type="text" placeholder="如 4">
+          <div class="cfg-actions"><button id="ifd-sriov-btn" type="button" class="ghost">设置 VF 数量</button></div>
+          <p class="muted small">本机物理口不支持 SR-IOV 时服务端会明确报错，本页如实显示该报错。</p>
+        </fieldset>
+      </div>
+      <p id="ifd-msg" class="muted small" hidden></p>
+    </article>
+    </section>
+
+    <section class="page" id="page-kernel" hidden>
+    <article class="card wide">
+      <h2>内核基线 <span id="knl-note" class="muted small"></span></h2>
+      <p class="muted small">
+        三方对照：<strong>运行实际</strong>（内核命令行与 /proc 读数）、<strong>配置期望</strong>（由已生效配置派生）、
+        <strong>差异</strong>（空 = 一致）。写入基线会把期望写进引导配置（引导加载器片段与 fstab），
+        <strong>重启后才生效</strong>——本页不重启主机，重启入口在<a href="#/ops/actions">运维动作</a>页。
+      </p>
+      <h3>运行实际</h3>
+      <dl id="knl-actual" class="kv"></dl>
+      <h3>配置期望</h3>
+      <dl id="knl-desired" class="kv"></dl>
+      <h3>差异 <span id="knl-diff-note" class="muted small"></span></h3>
+      <pre id="knl-diffs" class="code"></pre>
+      <h3>写入引导基线</h3>
+      <div class="cfg-actions">
+        <button id="knl-apply-btn" type="button" class="danger">写入基线（按配置期望）</button>
+        <button id="knl-rollback-btn" type="button" class="ghost">回退上一次基线</button>
+      </div>
+      <p id="knl-msg" class="muted small" hidden></p>
+      <pre id="knl-out" class="code console-out" hidden></pre>
+    </article>
+    </section>
+
+    <section class="page" id="page-users" hidden>
+    <article class="card wide">
+      <h2>用户与权限 <span id="usr-note" class="muted small"></span></h2>
+      <p class="muted small">
+        用户与权限类取自<strong>已生效配置</strong>。这里的写操作走命令行同一套实现：取用配置编辑锁、写入候选、
+        <strong>立即提交生效</strong>（不是「候选 → 稍后提交」两段式），并且都会记入审计。
+        若你正在<a href="#/config">配置</a>页编辑候选（有未提交改动），本页的写操作会先被拒绝——
+        避免把你的候选改动一并提交；请先在配置页提交或丢弃。
+      </p>
+      <h3>用户</h3>
+      <table id="usr-table">
+        <thead><tr><th>用户名</th><th>权限类</th><th>新口令（留空 = 不改）</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>权限类（class）</h3>
+      <table id="usr-class-table">
+        <thead><tr><th>名称</th><th>允许</th><th>拒绝</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="cfg-forms">
+        <fieldset>
+          <legend>新建用户</legend>
+          <label for="usr-new-name">用户名</label>
+          <input id="usr-new-name" type="text" autocomplete="off">
+          <label for="usr-new-class">权限类</label>
+          <select id="usr-new-class"></select>
+          <label for="usr-new-pw">初始口令</label>
+          <input id="usr-new-pw" type="password" autocomplete="new-password">
+          <div class="cfg-actions"><button id="usr-create-btn" type="button" class="danger">创建用户</button></div>
+          <p class="muted small">口令按本机口令策略校验（不满足策略时服务端拒绝并说明原因），存的是加盐哈希。</p>
+        </fieldset>
+        <fieldset>
+          <legend>修改我的口令</legend>
+          <label for="usr-my-old">当前口令</label>
+          <input id="usr-my-old" type="password" autocomplete="current-password">
+          <label for="usr-my-new">新口令</label>
+          <input id="usr-my-new" type="password" autocomplete="new-password">
+          <div class="cfg-actions"><button id="usr-mypw-btn" type="button" class="danger">修改我的口令</button></div>
+          <p class="muted small">改的是当前登录账号的口令，需要先给出当前口令；改完请用新口令重新登录。</p>
+        </fieldset>
+      </div>
+      <p id="usr-msg" class="muted small" hidden></p>
+    </article>
+    </section>
+
+    <section class="page" id="page-tls" hidden>
+    <article class="card wide">
+      <h2>证书 <span id="tls-note" class="muted small"></span></h2>
+      <h3>当前管理面证书</h3>
+      <dl id="tls-list" class="kv"></dl>
+      <div class="cfg-forms">
+        <fieldset>
+          <legend>安装外部证书（PEM 文本，立即生效）</legend>
+          <label for="tls-cert">证书（PEM，含中间证书就按链的顺序整段粘贴）</label>
+          <textarea id="tls-cert" rows="6" spellcheck="false"></textarea>
+          <label for="tls-key">私钥（PEM）</label>
+          <textarea id="tls-key" rows="6" spellcheck="false"></textarea>
+          <div class="cfg-actions"><button id="tls-install-btn" type="button" class="danger">安装并立即生效</button></div>
+          <p class="muted small">
+            证书与私钥不配对、链不完整、缺地址条目时服务端会拒绝并说明原因（拒绝时不改变当前证书）。
+            换成你手里的客户端<strong>不信任</strong>的证书会让管理面连不上——请先确认这份证书能被你要用的
+            浏览器与命令行信任，并保留带外/控制台通道。
+          </p>
+        </fieldset>
+        <fieldset>
+          <legend>重签自签证书</legend>
+          <p class="muted small">
+            由本机按监听地址重新生成自签证书（地址条目自动包含本机地址），热生效、不重启服务。
+            重签后证书指纹变化，固定过旧证书的客户端需要重新固定。
+          </p>
+          <div class="cfg-actions"><button id="tls-regen-btn" type="button" class="ghost">重签自签证书</button></div>
+        </fieldset>
+      </div>
+      <p id="tls-msg" class="muted small" hidden></p>
     </article>
     </section>
 
@@ -130,6 +303,10 @@
         <details id="cfg-details">
           <summary class="muted">展开完整配置（committed）</summary>
           <pre id="cfg-json" class="code"></pre>
+        </details>
+        <details id="cfg-vpp-wrap">
+          <summary class="muted">数据面配置段（已生效；生成启动配置的源）</summary>
+          <pre id="cfg-vpp" class="code"></pre>
         </details>
         <button id="cfg-edit-btn" type="button">开始编辑</button>
       </div>
@@ -489,6 +666,9 @@
       <h3>参数</h3>
       <dl id="qsd-info" class="kv"></dl>
       <p class="muted small">策略详情取自限速策略列表（该对象没有单独读取的接口）。</p>
+      <div class="cfg-actions"><button id="qsd-del-btn" type="button" class="danger">删除该策略</button></div>
+      <p id="qsd-msg" class="muted small" hidden></p>
+      <p class="muted small">删除只写候选：到<a href="#/config">配置</a>页提交后才生效（被接口绑定的策略由服务端拒绝删除）。</p>
     </article>
     </section>
 
@@ -501,6 +681,9 @@
       <h3>配置</h3>
       <dl id="spd-info" class="kv"></dl>
       <p class="muted small">会话详情取自端口镜像列表（该对象没有单独读取的接口）。</p>
+      <div class="cfg-actions"><button id="spd-del-btn" type="button" class="danger">删除该镜像会话</button></div>
+      <p id="spd-msg" class="muted small" hidden></p>
+      <p class="muted small">删除只写候选：到<a href="#/config">配置</a>页提交后才生效。</p>
     </article>
     </section>
 
@@ -547,9 +730,9 @@
           <legend>配置与备份</legend>
           <div class="cfg-actions">
             <button id="ops-backup-btn" type="button" class="ghost">生成配置备份</button>
-            <button id="ops-tls-btn" type="button" class="ghost">重签自签证书</button>
             <button id="ops-sshkey-btn" type="button" class="ghost">重新生成 SSH host key</button>
           </div>
+          <p class="muted small">管理面证书（安装外部证书 / 重签自签证书）在<a href="#/system/tls">证书</a>页。</p>
         </fieldset>
         <fieldset>
           <legend>时间（NTP）</legend>
@@ -580,6 +763,42 @@
             <thead><tr><th>文件</th><th>大小</th><th>时间</th><th>操作</th></tr></thead>
             <tbody></tbody>
           </table>
+        </fieldset>
+        <fieldset>
+          <legend>软件版本（升级期间管理面会中断）</legend>
+          <label for="ops-sw-pkg">软件包（本机路径或下载地址）</label>
+          <input id="ops-sw-pkg" type="text" placeholder="/root/nfvis_1.1.29_amd64.deb">
+          <label for="ops-sw-sha">sha256（可选，给出即校验）</label>
+          <input id="ops-sw-sha" type="text" placeholder="64 位十六进制">
+          <div class="cfg-actions">
+            <button id="ops-sw-add-btn" type="button" class="danger">安装升级包</button>
+            <button id="ops-sw-rollback-btn" type="button" class="danger">回退到上一版本</button>
+          </div>
+          <p class="muted small">
+            升级会校验包名与版本、归档软件包后安装，安装过程会重启管理服务——本页面会掉线，需要重新登录。
+            回退用的是本机归档里安装过的版本（归档里没有可回退版本时服务端会明确拒绝）。
+          </p>
+        </fieldset>
+        <fieldset>
+          <legend>恢复与出厂（覆盖生效配置，不可撤销）</legend>
+          <label for="ops-restore-file">从本机备份归档恢复（备份列表见下方「归档下载」）</label>
+          <select id="ops-restore-file"></select>
+          <div class="cfg-actions">
+            <button id="ops-restore-refresh" type="button" class="ghost">刷新备份列表</button>
+            <button id="ops-restore-btn" type="button" class="danger">从所选归档恢复配置</button>
+          </div>
+          <p class="muted small">
+            恢复会把归档里的配置导入为候选并<strong>立即提交生效</strong>（覆盖当前生效配置）；
+            归档里不含镜像文件本体——配置引用了镜像时，镜像需要另行导入。
+          </p>
+          <h3 class="muted small">恢复出厂</h3>
+          <div class="cfg-actions">
+            <button id="ops-zeroize-btn" type="button" class="danger">恢复出厂（清空配置与镜像）</button>
+          </div>
+          <p class="muted small">
+            清空数据分区的配置与镜像、级联删除虚拟机与容器、账号随空配置复位；<strong>本机不会自动重启</strong>，
+            重启后进入初始化状态，届时需要带外/控制台重新初始化——本机没有「撤销恢复出厂」。
+          </p>
         </fieldset>
         <fieldset>
           <legend>电源（影响业务，请先确认）</legend>

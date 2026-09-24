@@ -55,6 +55,16 @@ const MUTATIONS = {
     find: "$('ops-reboot-btn').addEventListener('click', () => opsRun('重启主机', {\n  tier: 'mid',",
     replace: "$('ops-reboot-btn').addEventListener('click', () => opsRun('重启主机', {\n  tier: 'low',",
   },
+  // 把「恢复出厂」从高危档降级——本段新增高危动作的档位回归（拆掉即报 ✗）
+  zeroize: {
+    find: "tier: 'high',\n    requireWord: 'zeroize',",
+    replace: "tier: 'mid',\n    requireWord: 'zeroize',",
+  },
+  // 去掉 DPDK 绑定请求里的 confirm=true（服务端要求它）——"界面不得绕过服务端要求"的回归
+  dpdk: {
+    find: "'/dpdk?confirm=true'",
+    replace: "'/dpdk'",
+  },
 };
 
 if (process.argv[2] === '--mutate') {
@@ -152,7 +162,9 @@ function makeDom() {
 }
 
 // 桩 fetch：记录每一次服务端调用（判「确认之前有没有偷偷发请求」的唯一事实源）。
-function makeFetch(calls) {
+// `blob`：恢复配置那条路径要把归档从服务端取回来、再作为 multipart 上传，故桩要给 blob()。
+// `state.dirty`：模拟"本会话在配置页还有未提交的候选"（用户页的写操作应先被拦下）。
+function makeFetch(calls, state) {
   return async (url, opts) => {
     const o = opts || {};
     const method = (o.method || 'GET').toUpperCase();
@@ -161,9 +173,38 @@ function makeFetch(calls) {
     let body = {};
     if (/\/configuration\/commit$/.test(u)) body = { revision: 8 };
     else if (/\/configuration\/candidate$/.test(u)) {
-      body = { candidate: o.body ? JSON.parse(String(o.body)) : {}, dirty: true };
+      body = { candidate: o.body ? JSON.parse(String(o.body)) : {}, dirty: state.dirty };
+    } else if (/\/system\/configuration\/sessions$/.test(u)) {
+      // 编辑锁会话列表：脏候选时把锁挂在当前用户（admin@api）名下，供用户页的前置检查读。
+      body = state.dirty ? [{ holder: 'admin@api', acquired_at: '2026-09-24T00:00:00Z' }] : [];
     }
-    return { ok: true, status: 200, json: async () => body, text: async () => '' };
+    return {
+      ok: true, status: 200, json: async () => body, text: async () => '',
+      // 真 Blob（不是普通对象）：恢复配置那条路径要把归档塞进 FormData，
+      // 而 FormData.append 只接受 Blob/File——用假对象会让这条路径**静默走不通**。
+      blob: async () => new Blob(['{"format":"nfvis-config-backup"}'], { type: 'application/json' }),
+    };
+  };
+}
+
+// 假时钟：只接管 setInterval（app.js 的高危倒计时用它）——setTimeout 仍是真的，
+// 因为桩的 tick() 靠它让事件循环转起来。这样「等 10 秒倒计时」在测试里是瞬时的，
+// 而且能**确定地**断言"差 1 秒也不能点"（真等待会变成碰运气）。
+function makeClock() {
+  let seq = 0;
+  const timers = new Map(); // id → { fn }
+  return {
+    setInterval(fn) { const id = ++seq; timers.set(id, { fn }); return id; },
+    clearInterval(id) { timers.delete(id); },
+    live: () => timers.size,
+    advance(seconds) {
+      for (let s = 0; s < seconds; s++) {
+        for (const [id, t] of Array.from(timers)) {
+          if (!timers.has(id)) continue; // 回调里可能把自己清掉（倒计时走完就是）
+          t.fn();
+        }
+      }
+    },
   };
 }
 
@@ -171,6 +212,8 @@ function makeContext() {
   const { doc, created, has } = makeDom();
   const calls = [];
   const confirms = []; // 浏览器自带 confirm 的调用记录：整轮下来必须是 0 次
+  const clock = makeClock();
+  const state = { dirty: false }; // 「本会话在配置页有未提交候选」——由用例按需打开
   const win = {
     addEventListener() {}, removeEventListener() {},
     confirm(msg) { confirms.push(String(msg)); return true; },
@@ -187,21 +230,26 @@ function makeContext() {
     navigator: { userAgent: 'stub' },
     // 本桩不驱动配置页的口令路径（那是另一支自校准的事），给一个最小实现即可
     crypto: { getRandomValues(a) { for (let i = 0; i < a.length; i++) a[i] = (i * 7 + 1) & 0xff; return a; } },
-    fetch: makeFetch(calls),
+    fetch: makeFetch(calls, state),
     btoa: (s) => Buffer.from(String(s), 'binary').toString('base64'),
     atob: (s) => Buffer.from(String(s), 'base64').toString('binary'),
-    console, setTimeout, clearTimeout, setInterval, clearInterval,
-    TextEncoder, TextDecoder,
+    console, setTimeout, clearTimeout, setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+    TextEncoder, TextDecoder, FormData,
     URL: { createObjectURL: () => 'blob:stub', revokeObjectURL() {} },
     WebSocket: function WebSocket() { this.close = () => {}; },
     EventSource: function EventSource() { this.close = () => {}; },
-    __stub: { doc, calls, confirms, created, has },
+    __stub: { doc, calls, confirms, created, has, advance: clock.advance, clockLive: clock.live, setDirty: (v) => { state.dirty = !!v; } },
   };
   sandbox.globalThis = sandbox;
   const ctx = vm.createContext(sandbox);
   vm.runInContext(APP_SRC, ctx, { filename: 'internal/api/ui/app.js' });
   return ctx;
 }
+
+// 写请求（方法不是 GET）：判「确认之前有没有偷偷动手」的唯一事实源。
+// 只读预检（如用户页在确认前先看本会话有没有未提交的候选）不算"动手"，故按方法过滤。
+const writes = (ctx) => ctx.__stub.calls.filter((c) => c.method !== 'GET');
+
 
 // ---- 驱动 ----
 
@@ -306,8 +354,6 @@ const ACTIONS = [
     req: { method: 'DELETE', url: /\/configuration\/candidate$/ },
     pre: (ctx) => { vm.runInContext('cfg.editing = true', ctx); } },
   // —— 中危：跨对象 / 跨会话，逐条列影响面 ——
-  { id: 'ops-tls-btn', title: '重签自签证书', tier: 'mid', cli: /request system api tls regenerate$/,
-    req: { method: 'POST', url: /\/system\/tls:regenerate$/ } },
   { id: 'ops-sshkey-btn', title: '重新生成 SSH host key', tier: 'mid', cli: /request system ssh host-key regenerate$/,
     req: { method: 'POST', url: /\/system\/ssh-host-key:regenerate$/ } },
   { id: 'ops-vpprestart-btn', title: '重启数据面（VPP）', tier: 'mid', cli: /request vpp restart$/,
@@ -320,6 +366,31 @@ const ACTIONS = [
     req: { method: 'POST', url: /\/configuration\/commit$/ } },
   { id: 'cfg-commit-confirmed-btn', title: '以 commit confirmed 提交', tier: 'mid', cli: /commit confirmed 10$/,
     req: { method: 'POST', url: /\/configuration\/commit$/ } },
+  // —— 中危：本段新增的危险动作（内核基线 / 驱动接管 / VF 数量 / 删策略与会话）——
+  { id: 'knl-apply-btn', title: '写入内核基线', tier: 'mid', cli: /request system kernel apply$/,
+    req: { method: 'POST', url: /\/system\/kernel:apply$/ } },
+  { id: 'knl-rollback-btn', title: '回退内核基线', tier: 'mid', cli: /request system kernel rollback$/,
+    req: { method: 'POST', url: /\/system\/kernel:rollback$/ } },
+  { id: 'ifd-dpdk-bind', title: '绑定到 DPDK 驱动', tier: 'mid',
+    cli: /request interfaces ens192 bind-dpdk uio-driver vfio-pci$/,
+    req: { method: 'PUT', url: /\/interfaces\/ens192\/dpdk\?confirm=true$/ },
+    pre: (ctx) => { nodeOf(ctx, 'ifd-name').textContent = 'ens192'; nodeOf(ctx, 'ifd-uio').value = 'vfio-pci'; } },
+  { id: 'ifd-dpdk-unbind', title: '解绑交还内核驱动', tier: 'mid',
+    cli: /request interfaces ens192 unbind-dpdk to-driver vmxnet3$/,
+    req: { method: 'PUT', url: /\/interfaces\/ens192\/dpdk\?confirm=true$/ },
+    pre: (ctx) => { nodeOf(ctx, 'ifd-name').textContent = 'ens192'; nodeOf(ctx, 'ifd-todrv').value = 'vmxnet3'; } },
+  { id: 'ifd-sriov-btn', title: '设置 SR-IOV VF 数量', tier: 'mid',
+    cli: /request sriov create-vfs ens192 count 4$/,
+    req: { method: 'PUT', url: /\/interfaces\/ens192\/sriov$/ },
+    pre: (ctx) => { nodeOf(ctx, 'ifd-name').textContent = 'ens192'; nodeOf(ctx, 'ifd-vfs').value = '4'; } },
+  { id: 'tls-regen-btn', title: '重签自签证书', tier: 'mid', cli: /request system api tls regenerate$/,
+    req: { method: 'POST', url: /\/system\/tls:regenerate$/ } },
+  { id: 'qsd-del-btn', title: '删除 QoS 策略', tier: 'mid', cli: /delete qos policy name q1$/,
+    req: { method: 'DELETE', url: /\/qos\/policies\/q1$/ },
+    pre: (ctx) => { nodeOf(ctx, 'qsd-name').textContent = 'q1'; } },
+  { id: 'spd-del-btn', title: '删除端口镜像会话', tier: 'mid', cli: /delete port-mirroring name sp1$/,
+    req: { method: 'DELETE', url: /\/port-mirroring\/sp1$/ },
+    pre: (ctx) => { nodeOf(ctx, 'spd-name').textContent = 'sp1'; } },
 ];
 
 // 函数驱动的动作（列表行/详情页/镜像页的按钮是渲染出来的，直接调处理器等价于点它）
@@ -346,6 +417,64 @@ const FN_ACTIONS = [
     cli: /request images delete name img1$/,
     req: { method: 'DELETE', url: /\/images\/img1$/ } },
 ];
+
+// 高危动作 → 档位表（**分级表的"高危"档**：不可撤销 / 会覆盖全局状态 / 动的是登录凭据）。
+// 判据（与低/中危的差别就在这两道闸门）：
+//   · 必须出现**确认词输入框**，且确认词**不匹配就不放行**（空、多打一个字符都不行）；
+//   · 倒计时**没走完不放行**（差 1 秒也不行），走完且确认词正确才可点「执行」；
+//   · 确认之前**一条写请求都不许发**（只读预检不算），取消之后同样不许发。
+const HIGH_ACTIONS = [
+  { id: 'tls-install-btn', title: '安装外部证书（管理面证书）', word: 'install-cert',
+    cli: /set system api tls cert-file/, req: { method: 'PUT', url: /\/system\/tls$/ },
+    pre: (ctx) => {
+      nodeOf(ctx, 'tls-cert').value = '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----';
+      nodeOf(ctx, 'tls-key').value = '-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----';
+    } },
+  { id: 'ops-sw-add-btn', title: '安装升级包（软件升级）', word: 'upgrade',
+    cli: /request system software add \/root\/nfvis_1\.1\.29_amd64\.deb$/,
+    req: { method: 'POST', url: /\/system\/software$/ },
+    pre: (ctx) => { nodeOf(ctx, 'ops-sw-pkg').value = '/root/nfvis_1.1.29_amd64.deb'; } },
+  { id: 'ops-sw-rollback-btn', title: '回退软件版本', word: 'rollback',
+    cli: /request system software rollback$/, req: { method: 'POST', url: /\/system\/software:rollback$/ } },
+  { id: 'ops-restore-btn', title: '从备份归档恢复配置', word: 'cfg-20260924.json',
+    cli: /request system configuration restore/, req: { method: 'POST', url: /\/system\/restore$/ },
+    pre: (ctx) => { nodeOf(ctx, 'ops-restore-file').value = 'cfg-20260924.json'; } },
+  { id: 'ops-zeroize-btn', title: '恢复出厂（清空配置与镜像）', word: 'zeroize',
+    cli: /request system zeroize$/, req: { method: 'POST', url: /\/system:zeroize$/ } },
+  { id: 'usr-create-btn', title: '创建本地用户', word: 'netop2',
+    cli: /set system login user netop2 password/, req: { method: 'POST', url: /\/system\/login-users$/ },
+    pre: (ctx) => {
+      vm.runInContext('currentUser = "admin"', ctx);
+      nodeOf(ctx, 'usr-new-name').value = 'netop2';
+      nodeOf(ctx, 'usr-new-class').value = 'operator';
+      nodeOf(ctx, 'usr-new-pw').value = 'S3cret-Passw0rd!';
+    } },
+  { id: 'usr-mypw-btn', title: '修改我的口令', word: 'admin',
+    cli: /request system password change$/,
+    req: { method: 'POST', url: /\/system\/login-users\/admin:change-password$/ },
+    pre: (ctx) => {
+      vm.runInContext('currentUser = "admin"', ctx);
+      nodeOf(ctx, 'usr-my-old').value = 's3cret-Passw0rd!';
+      nodeOf(ctx, 'usr-my-new').value = 'S3cret-Passw0rd!2';
+    } },
+];
+
+// 高危的动作类函数（用户页的行内按钮）：直接调处理器，等价于点那一行上的按钮。
+const HIGH_FN_ACTIONS = [
+  { expr: 'usrApply("netop", "operator", "")', title: '修改用户权限类', word: 'netop',
+    cli: /set system login user netop class operator$/,
+    req: { method: 'PUT', url: /\/system\/login-users\/netop$/ },
+    pre: (ctx) => { vm.runInContext('currentUser = "admin"', ctx); } },
+  { expr: 'usrApply("netop", "read-only", "S3cret-Passw0rd!9")', title: '重置用户口令', word: 'netop',
+    cli: /set system login user netop password/,
+    req: { method: 'PUT', url: /\/system\/login-users\/netop$/ },
+    pre: (ctx) => { vm.runInContext('currentUser = "admin"', ctx); } },
+  { expr: 'usrDelete("netop")', title: '删除本地用户', word: 'netop',
+    cli: /delete system login user netop$/,
+    req: { method: 'DELETE', url: /\/system\/login-users\/netop$/ },
+    pre: (ctx) => { vm.runInContext('currentUser = "admin"', ctx); } },
+];
+
 
 function reqText(r) { return r.method + ' ' + String(r.url); }
 
@@ -389,6 +518,62 @@ async function runAction(ctx, act, start) {
   ok(label + '：执行完框已收起', dialog(ctx).visible === false);
 }
 
+// runHighAction：高危档的完整一遍——两道闸门**逐条**验（不是"提示了一句"就算数），
+// 再验"闸门满足后确实发了那一条请求"。
+async function runHighAction(ctx, act, start) {
+  const label = act.title + '（高危）';
+
+  // —— 第一遍：闸门全程关着，最后取消 ——
+  if (act.pre) act.pre(ctx);
+  const first = await open(ctx, start);
+  const d = first.d;
+  ok(label + '：确认框弹出且标题是动作名', d.visible && d.title === act.title,
+    'visible=' + d.visible + ' title=' + JSON.stringify(d.title));
+  ok(label + '：逐条列出影响面（≥ 2 条）', d.bullets >= 2, '条目数=' + d.bullets);
+  ok(label + '：主按钮标红', d.okDanger, 'class=' + JSON.stringify(nodeOf(ctx, 'modal-ok').className));
+  ok(label + '：出现确认词闸门（输入框真的在）', !d.guardHidden && d.hasWord,
+    'guardHidden=' + d.guardHidden + ' hasWord=' + d.hasWord);
+  ok(label + '：闸门里写明确认词是 ' + JSON.stringify(act.word), d.guardText.indexOf(act.word) >= 0,
+    JSON.stringify(d.guardText));
+  ok(label + '：初始「执行」不可点', d.okDisabled);
+  ok(label + '：默认倒计时 10 秒（提示里写明）', /10 秒/.test(d.count), JSON.stringify(d.count));
+  ok(label + '：按钮上标注还要等几秒', /10 秒后可点/.test(d.okLabel), JSON.stringify(d.okLabel));
+  ok(label + '：只读回显对应命令', act.cli.test(d.cli), JSON.stringify(d.cli));
+  ok(label + '：确认之前一条写请求都没发', writes(ctx).length === 0,
+    '已发写请求：' + JSON.stringify(writes(ctx).map((c) => c.method + ' ' + c.url)));
+  await typeWord(ctx, '');
+  ok(label + '：确认词为空：仍不可点', dialog(ctx).okDisabled);
+  await typeWord(ctx, act.word + 'x');
+  ok(label + '：确认词不匹配（多打一个字符）：仍不可点', dialog(ctx).okDisabled);
+  await typeWord(ctx, act.word);
+  ok(label + '：确认词正确但倒计时没走完：仍不可点', dialog(ctx).okDisabled,
+    'label=' + JSON.stringify(dialog(ctx).okLabel));
+  ctx.__stub.advance(9);
+  ok(label + '：倒计时差 1 秒（9/10）：仍不可点', dialog(ctx).okDisabled,
+    'label=' + JSON.stringify(dialog(ctx).okLabel));
+  ctx.__stub.advance(1);
+  ok(label + '：倒计时走完（10 秒）：按钮才可点', !dialog(ctx).okDisabled,
+    'label=' + JSON.stringify(dialog(ctx).okLabel));
+  await fire(ctx, 'modal-cancel', 'click');
+  await first.pending;
+  ok(label + '：取消之后仍然没有写请求（取消 = 什么都没做）', writes(ctx).length === 0,
+    '已发写请求：' + JSON.stringify(writes(ctx).map((c) => c.method + ' ' + c.url)));
+  ok(label + '：取消之后框收起、倒计时没有留在后台', dialog(ctx).visible === false &&
+    vm.runInContext('dialogTimer', ctx) === null && ctx.__stub.clockLive() === 0);
+
+  // —— 第二遍：两道闸门都满足，必须真的发出那一条请求 ——
+  if (act.pre) act.pre(ctx);
+  const second = await open(ctx, start);
+  await typeWord(ctx, act.word);
+  ctx.__stub.advance(10);
+  await fire(ctx, 'modal-ok', 'click');
+  await second.pending;
+  const hit = ctx.__stub.calls.some((c) => c.method === act.req.method && act.req.url.test(c.url));
+  ok(label + '：确认后发出 ' + reqText(act.req), hit,
+    '已发：' + JSON.stringify(ctx.__stub.calls.map((c) => c.method + ' ' + c.url)));
+  ok(label + '：执行完框已收起', dialog(ctx).visible === false);
+}
+
 (async () => {
   const ctx = makeContext();
 
@@ -412,7 +597,15 @@ async function runAction(ctx, act, start) {
     await runAction(ctx, act, () => vm.runInContext('(' + act.expr + ')', ctx));
   }
 
-  console.log('— ② 高危档：确认词 + 倒计时真的拦得住（默认 10 秒） —');
+  console.log('— ①b 高危动作逐个走一遍：确认词 + 倒计时两道闸门 + 确认后才发请求 —');
+  for (const act of HIGH_ACTIONS) {
+    await runHighAction(ctx, act, () => fire(ctx, act.id, 'click'));
+  }
+  for (const act of HIGH_FN_ACTIONS) {
+    await runHighAction(ctx, act, () => vm.runInContext('(' + act.expr + ')', ctx));
+  }
+
+  console.log('— ② 高危档：确认词 + 倒计时真的拦得住（默认 10 秒；用假时钟推进，不真等） —');
   const hi = await open(ctx, () => vm.runInContext(
     'uiConfirm("恢复出厂", { tier: "high", requireWord: "zeroize", cli: "request system zeroize",' +
     ' bullets: ["配置库与数据会被清空，不可逆", "重启后按初始状态引导，需要带外或控制台"] })', ctx));
@@ -433,20 +626,22 @@ async function runAction(ctx, act, start) {
   await fire(ctx, 'modal-cancel', 'click');
   await hi.pending;
   ok('倒计时期间取消：框收起、定时器被清掉（不会在后台继续跑）',
-    dialog(ctx).visible === false && vm.runInContext('dialogTimer', ctx) === null);
+    dialog(ctx).visible === false && vm.runInContext('dialogTimer', ctx) === null && ctx.__stub.clockLive() === 0);
 
-  console.log('— ③ 高危档：倒计时走完 + 确认词正确，才放行（这里用 2 秒的短倒计时跑真时间） —');
+  console.log('— ③ 高危档：倒计时走完 + 确认词正确，才放行（假时钟推进，不真等） —');
   const short = await open(ctx, () => vm.runInContext(
-    'uiConfirm("恢复出厂", { tier: "high", countdown: 2, requireWord: "zeroize",' +
+    'uiConfirm("恢复出厂", { tier: "high", requireWord: "zeroize",' +
     ' cli: "request system zeroize" })', ctx));
   await typeWord(ctx, 'zeroize');
   ok('倒计时进行中：确认词已正确但按钮仍不可点', dialog(ctx).okDisabled,
     'label=' + JSON.stringify(dialog(ctx).okLabel));
-  await tick(1200);
-  ok('倒计时走到一半：仍不可点', dialog(ctx).okDisabled, 'label=' + JSON.stringify(dialog(ctx).okLabel));
-  await tick(1400);
+  ctx.__stub.advance(5);
+  ok('倒计时走到一半（5 秒）：仍不可点', dialog(ctx).okDisabled, 'label=' + JSON.stringify(dialog(ctx).okLabel));
+  ctx.__stub.advance(4);
+  ok('差 1 秒（9 秒）：仍不可点', dialog(ctx).okDisabled, 'label=' + JSON.stringify(dialog(ctx).okLabel));
+  ctx.__stub.advance(1);
   const after = dialog(ctx);
-  ok('倒计时走完：按钮可点', !after.okDisabled, 'label=' + JSON.stringify(after.okLabel));
+  ok('倒计时走完（10 秒）：按钮可点', !after.okDisabled, 'label=' + JSON.stringify(after.okLabel));
   ok('倒计时走完：提示如实说明（确认词仍需匹配）', /倒计时已结束/.test(after.count), JSON.stringify(after.count));
   // 回车等价于点「执行」（键盘路径也要能走通）
   await fire(ctx, 'modal-word', 'keydown', { key: 'Enter' });
@@ -470,17 +665,36 @@ async function runAction(ctx, act, start) {
 
   console.log('— ⑤ 高危档：调用方没给确认词时**失败关闭**（宁可点不动，也不放过闸门） —');
   const noWord = await open(ctx, () => vm.runInContext(
-    'uiConfirm("恢复出厂", { tier: "high", countdown: 1, cli: "request system zeroize" })', ctx));
+    'uiConfirm("恢复出厂", { tier: "high", cli: "request system zeroize" })', ctx));
   ok('没给确认词：输入框直接禁用', noWord.d.hasWord && noWord.d.wordDisabled);
   ok('没给确认词：框里写明无法执行（不许静默放行）', /无法执行/.test(noWord.d.guardText),
     JSON.stringify(noWord.d.guardText));
-  await tick(1300);
+  ctx.__stub.advance(10);
   ok('没给确认词：倒计时走完也不放行', dialog(ctx).okDisabled);
   await fire(ctx, 'modal-cancel', 'click');
   await noWord.pending;
 
-  console.log('— ⑥ 不许退回浏览器自带的 confirm（没有影响面、没有只读回显、没有闸门） —');
-  ok('整轮下来 window.confirm 一次都没被调用', ctx.__stub.confirms.length === 0,
+  console.log('— ⑥ 用户与权限：本会话有未提交候选时，写操作**先被拒绝**（不发写请求、不弹确认框） —');
+  // 为什么必须拦：服务端的用户写路径是"取配置编辑锁 → 写候选 → 立即提交"，而同一持有者的候选
+  // 就是同一份——不拦就会把操作者在「配置」页改了半天的候选一并提交上去。
+  vm.runInContext('currentUser = "admin"', ctx);
+  ctx.__stub.setDirty(true);
+  ctx.__stub.calls.length = 0;
+  await vm.runInContext('(usrDelete("netop"))', ctx);
+  ok('有未提交候选时：不弹确认框（先说明原因，而不是让人白确认一次）', dialog(ctx).visible === false);
+  ok('有未提交候选时：一条写请求都没发', writes(ctx).length === 0,
+    '已发写请求：' + JSON.stringify(writes(ctx).map((c) => c.method + ' ' + c.url)));
+  ok('有未提交候选时：提示写明要先提交或丢弃',
+    /未提交的候选配置/.test(nodeOf(ctx, 'usr-msg').textContent), JSON.stringify(nodeOf(ctx, 'usr-msg').textContent));
+  // 关掉"脏候选"：同一个动作应当照常走确认框（证明拦截来自那个前置检查，而不是动作本身坏了）
+  ctx.__stub.setDirty(false);
+  const okCase = await open(ctx, () => vm.runInContext('(usrDelete("netop"))', ctx));
+  ok('候选干净时：同一个动作照常弹确认框（拦截来自前置检查，不是动作坏了）',
+    okCase.d.visible && okCase.d.title === '删除本地用户', 'visible=' + okCase.d.visible);
+  await fire(ctx, 'modal-cancel', 'click');
+  await okCase.pending;
+
+  console.log('— ⑦ 不许退回浏览器自带的 confirm（没有影响面、没有只读回显、没有闸门） —');  ok('整轮下来 window.confirm 一次都没被调用', ctx.__stub.confirms.length === 0,
     '被调用 ' + ctx.__stub.confirms.length + ' 次：' + JSON.stringify(ctx.__stub.confirms.slice(0, 3)));
   ok('app.js 里已经没有 window.confirm(', !/window\.confirm\s*\(/.test(APP_SRC_RAW));
   ok('高危档的倒计时不许被调用点缩短（app.js 里不该出现 countdown 覆盖）',
