@@ -154,8 +154,8 @@
 | `request system reboot` | 重启系统 | S | `POST /system:reboot` | 🚫 破坏性 |
 | `request system shutdown` | 关机 | S | `POST /system:shutdown` | 🚫 破坏性 |
 | `request system poweroff` | 断电 | S | `POST /system:shutdown` | 🚫 破坏性 |
-| `request system kernel apply` | 写入 GRUB 内核基线（需重启生效） | S | 宿主 `/etc/default/grub` | 🚫 会改启动项，本轮不执行 |
-| `request system kernel rollback` | 回退内核基线 | S | 同上 | 🚫 同上 |
+| `request system kernel apply` | 写入 GRUB 内核基线（需重启生效） | S | `POST /system/kernel:apply` | 🚫 会改启动项，本轮不执行 |
+| `request system kernel rollback` | 回退内核基线 | S | `POST /system/kernel:rollback` | 🚫 同上 |
 | `request system configuration backup [to <path>]` | 导出 committed 配置归档 | S | `GET /system/backup` | ✅ |
 | `request system configuration restore <path>` | 导入归档为 candidate 并提交 | S | `PUT /configuration/candidate` | 🚫 会覆盖现网配置 |
 | `request system tech-support generate` | 生成诊断归档 tar.gz | O | `POST /system/tech-support` | ✅ |
@@ -165,7 +165,7 @@
 | `request system api tls regenerate` | 重签自签证书 | S | `POST /system/tls:regenerate` | ✅ |
 | `request system api token revoke <token-id>` | 吊销 token | S | `DELETE /login` 等价 | ⚠️ V1 仅提示「经 API DELETE /login 吊销当前会话，逐 token 随 V2」（**决策 #76⑧** 修正契约位置） |
 | `request system ssh host-key regenerate` | 重新生成 SSH host key | S | `POST /system/ssh-host-key:regenerate` | ✅ |
-| `request system password change` | 登录者自助改密（验证旧口令） | S | `PUT /system/login-users/{n}` | 🚫 需交互输入（契约已登记延期） |
+| `request system password change` | 登录者自助改密（验证旧口令） | O | `PUT /system/login-users/{n}` | 🚫 需交互输入（契约已登记延期） |
 | `request system storage format-data` | 重置数据分区（危险，双确认） | S | 宿主 | 🚫 破坏性（契约已登记延期） |
 | `request system ntp sync` | 立即触发一次 NTP 同步 | O | 宿主 chrony/ntpd | ✅ |
 | `request alarms clear [id <id> \| all]` | 清除已 resolved 告警 | O | `POST /alarms:clear` | ✅ |

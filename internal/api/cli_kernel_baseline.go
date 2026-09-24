@@ -156,6 +156,47 @@ func (x *cliExecutor) kernelBaselineWarnings() []string {
 // 编译期保持 context 引用（后续 apply/rollback 使用），避免未使用导入。
 var _ = context.Background
 
+// kernelBaselineOutcome：apply/rollback 的**结构化结果**（FR-SYS-014）。
+// CLI（`request system kernel apply|rollback`）与 REST（`POST /system/kernel:apply|:rollback`）
+// 共用下面两个函数产出它——两侧同源，CLI 只负责把结果渲染成文本，REST 直接回 JSON。
+type kernelBaselineOutcome struct {
+	Action        string   `json:"action"`            // apply | rollback
+	Backup        string   `json:"backup,omitempty"`  // 上一版本备份路径（apply 时，可能为空）
+	PendingReboot []string `json:"pending_reboot"`    // 需重启才生效的差异（apply 时）
+	Message       string   `json:"message,omitempty"` // 落地器给的一句话（rollback 时）
+}
+
+// applyKernelBaseline：由 committed 配置派生期望基线并写入 GRUB 片段/fstab/tuned（需重启生效）。
+func applyKernelBaseline(k ksys.KernelApplier, cfg model.Config) (kernelBaselineOutcome, error) {
+	desired, err := deriveKernelDesired(cfg)
+	if err != nil {
+		return kernelBaselineOutcome{}, err
+	}
+	actual := ksys.ReadActual("/")
+	backup, err := k.Apply(desired)
+	if err != nil {
+		return kernelBaselineOutcome{}, err
+	}
+	// pending_reboot 恒为数组（无差异时空数组）——契约声明的是 array，发 null 会让"字段没发出来"
+	// 与"没有差异"分不清（形状守护的既有口径：声明的字段必须真的发得出来）。
+	pending := ksys.Compare(desired, actual)
+	if pending == nil {
+		pending = []string{}
+	}
+	return kernelBaselineOutcome{Action: "apply", Backup: backup, PendingReboot: pending}, nil
+}
+
+// rollbackKernelBaseline：回退上一次内核基线（同样需重启生效）。
+func rollbackKernelBaseline(k ksys.KernelApplier) (kernelBaselineOutcome, error) {
+	msg, err := k.Rollback()
+	if err != nil {
+		return kernelBaselineOutcome{}, err
+	}
+	// 同 apply：pending_reboot 恒为数组（回退没有"派生差异"可比，故空数组；"需重启生效"由 message 说明）。
+	// 发 null 会让按契约写的客户端踩空（契约声明的是 array）。
+	return kernelBaselineOutcome{Action: "rollback", Message: msg, PendingReboot: []string{}}, nil
+}
+
 // requestKernelBaseline：request system kernel apply|rollback（FR-SYS-014）。
 //
 // apply：由 committed 配置派生期望基线 → 写 GRUB 片段/fstab/tuned → update-grub；
@@ -172,23 +213,22 @@ func (x *cliExecutor) requestKernelBaseline(user string, args []string) string {
 	}
 	switch args[0] {
 	case "apply":
-		desired, err := x.desiredKernelBaseline()
+		cfg, err := x.engine.Committed()
 		if err != nil {
 			return "%% " + err.Error() + "\n"
 		}
-		actual := ksys.ReadActual("/")
-		backup, err := x.kernel.Apply(desired)
+		out, err := applyKernelBaseline(x.kernel, cfg)
 		if err != nil {
 			return "%% 写入内核基线失败: " + err.Error() + "\n"
 		}
 		var b strings.Builder
 		b.WriteString("内核基线已写入（GRUB 片段 /etc/default/grub.d/99-nfvis.cfg + fstab 大页挂载）\n")
-		if backup != "" {
-			b.WriteString("上一版本已备份：" + backup + "（request system kernel rollback 可回退）\n")
+		if out.Backup != "" {
+			b.WriteString("上一版本已备份：" + out.Backup + "（request system kernel rollback 可回退）\n")
 		}
-		if diffs := ksys.Compare(desired, actual); len(diffs) > 0 {
+		if len(out.PendingReboot) > 0 {
 			b.WriteString("待重启生效（pending_reboot）：\n")
-			for _, d := range diffs {
+			for _, d := range out.PendingReboot {
 				b.WriteString("  - " + d + "\n")
 			}
 			b.WriteString("执行 request system reboot 应用新基线；重启后 show system kernel 应显示一致\n")
@@ -197,11 +237,11 @@ func (x *cliExecutor) requestKernelBaseline(user string, args []string) string {
 		}
 		return b.String()
 	case "rollback":
-		msg, err := x.kernel.Rollback()
+		out, err := rollbackKernelBaseline(x.kernel)
 		if err != nil {
 			return "%% 回退内核基线失败: " + err.Error() + "\n"
 		}
-		return msg + "；需重启生效（request system reboot）\n"
+		return out.Message + "；需重启生效（request system reboot）\n"
 	}
 	return fmt.Sprintf("%% 无效命令: request system kernel %s（可用：apply|rollback）\n", strings.Join(args, " "))
 }
