@@ -182,19 +182,23 @@ ok  	github.com/xzjt/nfvis/internal/archtest	1.820s
 ```
 
 ----- 5. 真机复验（**由主会话执行**：nfvis-vm 上的开发态实例 + 生产库副本）-----
-环境：本分支构建的实例 + 生产库副本；操作者分别用 **super-user（admin）** 与 **read-only（viewer 类账号）**。
-要点：**不要**动管理路径（`ens160`）与 `make integration` 之外的东西；归档目录先记下改前的权限。
+环境：本分支构建的明文实例（`/tmp/nfvisd-ia`，分支 `fix/tech-support-redaction`）+ 生产库副本；
+操作者：super-user（admin）生成、**read-only 探针账号 `ro-ts`** 下载。
 
-| 步骤 | 命令（真机） | 期望 | 独立事实源 |
-|---|---|---|---|
-| ① 生成并看权限 | `request system tech-support generate` → `ls -l /var/lib/nfvis/tech-support/`；`stat -c '%a %U' /var/lib/nfvis/tech-support` | 归档 `-rw-------`（0600）、目录 `700`（**旧安装上若为 755，生成一次后应变 700**） | `stat -c '%a'` 直接读，不经管道量退出码 |
-| ② 解包看成员 | 复制一份到 /root 下解开：`tar tzf` 列成员（7 个），`grep -c 'password_hash\|pbkdf2\$' config.json` | `0`（**脱敏视图**）；`grep -n hostname config.json` 仍能看到非敏感配置 | 与 `GET /api/v1/configuration` 的脱敏视图对照（同口径）；与配置库 `sqlite3 nfvis.db` 里的 committed 对照——库里**有**哈希、归档里**没有** |
-| ③ 日志分节 | `grep -n '一次性口令' logs.txt`（解开后） | 该行**在**，值已是 `«已隐藏»`；同文件其余行与 `journalctl -u nfvisd -n 500` 一致 | `journalctl -u nfvisd \| grep 一次性口令` 看原始行（root）；两边行数/其余行一致 |
-| ④ read-only 仍能下载 | 用 read-only 账号 `curl -H "Authorization: Bearer <token>" -o /tmp/ts.tar.gz https://<host>:443/api/v1/system/tech-support/<file>`；`echo $?`（**不经管道**） | HTTP 200；本地文件与源归档 sha256 一致 | `sha256sum` 两端对照 + `curl -w '%{http_code}'` 单独量 |
-| ⑤ 反面（可选，验证没被过度收紧） | 同一 read-only 账号下载**配置备份**归档 | **403**（决策 #143 的口径未受影响） | `curl -w '%{http_code}'` |
+| 步骤 | 实测输出（摘要） | 结果 |
+|---|---|---|
+| ① 生成 + 落盘权限 | `诊断归档已生成: nfvis-tech-support-20260924T101415Z.tar.gz（5.1 KiB）…`；归档 `stat` = **`600 root:root`**；**目录 `/var/lib/nfvis/tech-support` = `700 root:root`** | ✓（旧口径 0644/0755 已收紧） |
+| ② 归档内 `config.json` 已脱敏，非敏感项仍在 | 归档成员 `version.json config.json audit.json status.json logs.txt core-dumps.json README.txt`；归档内 `grep -c 'password_hash\|pbkdf2$' config.json` = **0**；**对照**：同一时刻配置库里的 `config_json` 含 `password_hash` **1** 次；`hostname` 在归档里出现 **2** 次（配置结构仍在，诊断可用） | ✓ |
+| ③ `logs.txt` 里的**引导一次性口令**已剥（本轮新查出的第二处泄露） | 归档内 `grep -c '一次性口令' logs.txt` = **0**（该行被剥）；**对照** `journalctl -u nfvis` 原行仍在且含真值：`% 首次启动已创建用户 admin (super-user)。一次性口令（仅显示一次，请立即修改）: WBF81vOA4M8GM28f@Aa1` | ✓（归档脱敏、journal 本身不动） |
+| ④ **read-only 账号仍能下载诊断归档**（现场流程未破） | `ro-ts`（read-only）`GET /system/tech-support/<file>` → **200**；两端 `sha256` **一致**（`4e4854fb95dbb737…`） | ✓ |
+| ⑤ 同一账号下载**配置备份**仍 **403**（决策 #143 口径未受影响） | `GET /system/backup/nfvis-backup-…json` → **403** | ✓ |
 
-收尾：真机上产生的临时解包目录与复制的归档删掉；确认配置库指纹（`cfgsha`）与动作前一致
-（本轮只读操作，不该变）。
+**收尾**：探针账号 `ro-ts` 已删；临时解包目录已清；开发态实例已停（8443 无监听）、临时库副本已删；
+已装服务 **1.1.31 active**；生产库指纹与动作前**逐字段一致**
+（rev 55 / audit 104 / cfgsha `084c3a64…`；开发态副本上 rev/audit 因本轮多次 `Backup()` 而增长，cfgsha 不变）。
+
+> 判读要点：②③ 的"0 命中"都用**同一次动作的独立事实源**（配置库 / journal）做了阳性对照——
+> 证明不是"脱敏把内容整段删掉"，而是**定点剥掉秘密、保留结构**。
 
 ----- 6. 存疑 / 未做 -----
 - **`user_data` 不脱敏**（自由文本，与配置视图同口径）：操作者若把私钥/口令写进 cloud-init，
