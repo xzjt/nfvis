@@ -148,6 +148,8 @@ request system
   │                                                 #   须绝对路径、目标不得已存在、父目录须已存在；
   │                                                 #   目标已存在即如实拒绝，不覆盖既有文件
   ├─ tech-support generate                          # 生成诊断归档 tar.gz，CLI/API 下载
+  │                                                 #   （归档里的配置是脱敏视图：口令哈希等已隐藏，
+  │                                                 #    不能用于恢复；要可恢复的完整配置用 configuration backup）
   ├─ core-dumps export <url> | delete [file <name>]
   ├─ zeroize                                        # S；双重确认，恢复出厂（FR-OPS-007）
   ├─ api

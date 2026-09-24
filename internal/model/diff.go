@@ -209,8 +209,10 @@ var sensitiveLeaf = map[string]bool{
 	"psk":           true,
 }
 
-// redactedPlaceholder 脱敏占位（与 CLI show 输出一致）。
-const redactedPlaceholder = "«已隐藏»"
+// RedactedPlaceholder 脱敏占位（与 CLI show 输出一致）。
+// 导出：诊断归档的日志分节剥掉产品自己打印的一次性凭据时也用同一个占位（决策 #149），
+// 免得同一件事有两个写法。
+const RedactedPlaceholder = "«已隐藏»"
 
 // IsSensitiveKey 判断配置叶子键名是否属敏感字段（FR-SEC-007 / 决策 #25：
 // 口令哈希与令牌不得回显于任何 show/API 输出）。
@@ -224,7 +226,7 @@ func maskSensitive(leaf, value string) string {
 	if value == "" || !IsSensitiveKey(leaf) {
 		return value
 	}
-	return redactedPlaceholder
+	return RedactedPlaceholder
 }
 
 func indexStatements(stmts []Statement) map[string][]string {

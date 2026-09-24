@@ -88,7 +88,7 @@ func decodeBody(r *http.Request, v any) error {
 
 // handleGetSystem GET /api/v1/system：读取系统配置（committed）。
 //
-// 与其它配置视图同口径脱敏（redactView，实现与规则都在 redact.go）：
+// 与其它配置视图同口径脱敏（redactView；实现与规则自决策 #149 起在 internal/model）：
 // `system.login.users[].password_hash` 永不回显（决策 #25）。此前这里直接序列化
 // model.SystemConfig，成为**唯一**绕过脱敏的配置出口——2026-09-23 真机实测该响应
 // 只有 166 字节却含 `"password_hash": "pbkdf2$…"`（全路径守护没覆盖这条路径，故长期未红）。

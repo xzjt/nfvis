@@ -5299,7 +5299,7 @@
             "description": "已生成"
           }
         },
-        "summary": "生成诊断归档（版本/配置/日志/审计/状态/core dump 清单）",
+        "summary": "生成诊断归档（版本/配置/日志/审计/状态/core dump 清单；配置节为脱敏视图）",
         "tags": [
           "system"
         ]
@@ -5307,6 +5307,7 @@
     },
     "/system/tech-support/{file}": {
       "get": {
+        "description": "归档里的配置是**脱敏视图**：`config.json` 按配置视图同口径摘掉 `password_hash` 等\n敏感叶子，`logs.txt` 剥掉首次启动引导打印的一次性口令（FR-SEC-007），\n故本端点**保持 read-only**——现场流程「operator 生成诊断包\n（`request system tech-support generate` 声明为 O）→ 自己下载送给支持」不被权限挡住。\n需要**可恢复**的完整配置时请用配置备份导出（`GET /system/backup/{file}`，super-user，\n且**有意**不脱敏：脱敏即无法恢复，见附录 A #143）。归档以 0600 落盘、目录 0700。\n",
         "responses": {
           "200": {
             "content": {
@@ -5320,7 +5321,7 @@
             "description": "application/octet-stream"
           }
         },
-        "summary": "下载诊断归档",
+        "summary": "下载诊断归档（FR-OPS-040，read-only 可读）",
         "tags": [
           "system"
         ]

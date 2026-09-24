@@ -1,0 +1,205 @@
+===== V1 收尾第七十四轮：诊断归档（tech-support）脱敏收口（决策 #149）=====
+日期：2026-09-24；分支 `fix/tech-support-redaction`（main `a96299a` 之上）
+范围：`GET /api/v1/system/tech-support/{file}`（下载诊断归档）的 class 口径与归档落盘权限
+——交接文档「仍未裁」第 ③ 条（round63 登记，随决策 #143 的未改项一并留下）。
+
+----- 1. 先查证：归档里到底有什么、哪些成员含秘密 -----
+
+生成实现 `internal/system/techsupport.go:Generate`（tar.gz，逐节写入），数据来源在
+`cmd/nfvisd/main.go` 的装配处注入。逐成员判定（**裁决的依据**）：
+
+| 成员 | 内容（来源） | 含秘密？ |
+|---|---|---|
+| `version.json` | nfvis 版本、hostname、VPP 版本/连接态、内核 release | 无 |
+| `config.json` | `engine.Committed()` —— **完整 committed 配置** | **有：`system.login.users[].password_hash`（PBKDF2 原文）**；另有 cloud-init 的 `user_data`（自由文本）与 `ssh_keys`（公钥，非秘密）；`system.api.tls.cert_file/key_file` 是**路径**不是密钥正文 |
+| `audit.json` | `engine.AuditTrail(500,0)`；提交 diff 由 `model.Diff` 渲染层打码（敏感叶子 → `«已隐藏»`），其余是操作者消息（文件名/URL） | 无（已复核渲染层） |
+| `status.json` | `vppMgr.StatusView(nil)`：版本/连接态/末次错误/待重启 | 无 |
+| `logs.txt` | `journalctl -u nfvisd -n 500`（取不到时退回 `journalctl -n 200`）**原文** | **有：首次启动引导打印的一次性口令**——`cmd/nfvisd/main.go:426` 的 `fmt.Printf` 打在 stdout，systemd 单元未改 StandardOutput ⇒ 进 journal；单元由 root 运行，故只有 root 能读 journal，但归档会被交给支持人员 |
+| `core-dumps.json` | 转储清单（文件/进程/大小/时间） | 无 |
+| `README.txt` | 生成时间/版本/分节清单 | 无 |
+
+**落盘权限（改前现状）**：`os.Create(path)` → 0666&~umask ⇒ **0644**；目录 `MkdirAll(t.Dir, 0o755)`
+⇒ `/var/lib/nfvis/tech-support` 0755 ⇒ **同机任意用户可读到口令哈希**（与决策 #70/#77 的「导出件 0600」
+口径不一致；配置备份归档是 0600、其目录 0755）。
+
+----- 2. 裁决：脱敏 + 保持 read-only（不提到 super-user）-----
+
+两条路的取舍（判据按交接文档给的规则）：
+- 含秘密的成员**只有「顺带放进去的配置快照」这一类**（`config.json`；日志那一处是产品自己打印的
+  一次性口令，可定点剥掉）；
+- **脱敏不破坏诊断用途**：复现问题要的是配置结构与运行态，不是哈希；真要**可恢复**的完整配置，
+  本就有配置备份导出（决策 #143：super-user、**有意**不脱敏）；
+- 提到 super-user 会挡掉「operator 生成诊断包（`request system tech-support generate` 声明 **O**）
+  → 自己下载送支持」的现场流程，且**并不减少**暴露面——支持人员手里的包同样不该有哈希。
+
+⇒ **在归档里脱敏，下载保持 ClassReadOnly**；生成端 class 不变（仍 O）。需要完整配置的现场口径写进
+契约与手册：诊断包里的配置是**脱敏视图**，不能用于恢复。
+
+| 文件 | 改了什么 |
+|---|---|
+| `internal/model/redact.go`（新） | `RedactSensitive`/`RedactTree`：脱敏实现从 `internal/api` **下移**到 model（规则仍是唯一的 `model.IsSensitiveKey`）。理由：`internal/system` 是 `internal/api` 的**下游**（反向 import 成环），而两条路径（配置视图回显、诊断归档）必须共用同一份实现 |
+| `internal/model/diff.go` | `redactedPlaceholder` → 导出 `RedactedPlaceholder`（归档的日志分节用同一个占位，免得同一件事两个写法） |
+| `internal/api/redact.go` | `redactView` 改为转发 `model.RedactSensitive`（行为不变；其全路径守护原样通过） |
+| `internal/api/redact_test.go` | 直测改调 `model.RedactSensitive` |
+| `internal/api/resources.go` | 注释指向新实现位置（口径不变） |
+| `internal/system/techsupport.go` | ① `config.json` 走新的 `sectionRedacted`；② 新增 `scrubBootstrapCredential`（只把带 `bootstrapCredentialMarker` 的那一行值换成 `«已隐藏»`，行保留）；③ 落盘 `os.OpenFile(…, 0o600)`（**不再 `os.Create`**）、目录 `MkdirAll(0o700)` + **显式 `Chmod(0o700)`**（`MkdirAll` 不改已存在目录）；④ `README.txt` 写明「配置是脱敏视图、不能用于恢复」 |
+| `internal/api/server.go` | 该路由**class 不动**（仍 read-only），只补注释说明口径 |
+| `internal/system/diag_test.go`、`internal/model/redact_test.go`、`internal/api/diag_ops_test.go` | 用例（见 §3） |
+| `docs/NFViS-openapi.yaml` + `internal/api/openapi.json` | 下载端 summary/description（脱敏视图、保持 read-only、要恢复用配置备份）+ 生成端 summary；`--write` 重新生成内嵌件 |
+| `docs/NFViS-CLI命令树完整设计.md`、`docs/NFViS-CLI命令全表.md`、`docs/NFViS-用户手册.md`（§10.8/§12.1） | 操作者读物三处补口径 |
+| `docs/NFViS-系统产品需求与目标架构规格书.md` | 附录 A 追加决策 #149 |
+| `AGENTS.md` | 「已定决策 148 项」→「149 项」 |
+| `docs/V1-收尾待办.md` | §2.3 那条改为 ✅ 已完成（round74，决策 #149） |
+
+**如实登记的残留**：① `user_data` 是自由文本，与配置视图**同口径不脱敏**（操作者若把私钥/口令写进
+cloud-init，它会随配置快照出去）；② 日志分节除引导口令外**不脱敏**（日志是原文才有诊断价值；
+产品自己往日志里写凭据才是缺陷）；③ 自定义 class 的路径 ACL 仍按 `show system tech-support` 路径放行
+（与决策 #143 登记的同一口径，未动）。
+
+----- 3. 测试与变异验证 -----
+环境：宿主 Windows 10（win32 10.0.19044），Git Bash；Go 1.26（见 §4）。Go 测试一律 `-p 1` 串行。
+
+3.1 新增/扩展用例
+
+```
+$ go test -p 1 -count=1 -run 'TestTechSupport|TestBootstrapCredential|TestRedact' ./internal/system/ ./internal/model/ -v
+=== RUN   TestTechSupportArchiveHasNoSecrets
+--- PASS: TestTechSupportArchiveHasNoSecrets (0.01s)    整包逐成员不含 password_hash/pbkdf2$/哨兵哈希/引导口令；脱敏≠掏空；README 口径
+=== RUN   TestTechSupportLogsScrubOnlyCredentialLine
+--- PASS: TestTechSupportLogsScrubOnlyCredentialLine (0.00s) 只动带凭据那一行；无标记则原样返回
+=== RUN   TestTechSupportArchivePermissions
+    diag_test.go:296: 跳过：Windows 无 POSIX 权限位
+--- SKIP: TestTechSupportArchivePermissions (0.00s)     0600/0700 + 旧 0755 目录被收紧（类 Unix 上跑）
+=== RUN   TestTechSupportArchiveModeIsExplicit0600
+--- PASS: TestTechSupportArchiveModeIsExplicit0600 (0.00s) 跨平台：不得 os.Create、开档语句必须显式 0o600
+=== RUN   TestBootstrapCredentialMarkerMatchesStartupMessage
+--- PASS: TestBootstrapCredentialMarkerMatchesStartupMessage (0.00s) 启动提示与脱敏标识同源（防静默失效）
+=== RUN   TestRedactSensitiveRemovesOnlySensitiveLeaves
+--- PASS: TestRedactSensitiveRemovesOnlySensitiveLeaves (0.00s)
+=== RUN   TestRedactSensitiveKeyEquivalence
+--- PASS: TestRedactSensitiveKeyEquivalence (0.00s)
+ok  	github.com/xzjt/nfvis/internal/system	0.107s
+ok  	github.com/xzjt/nfvis/internal/model	1.760s
+
+$ go test -p 1 -count=1 -run 'TestTechSupportDownloadReadOnlyButRedacted' ./internal/api/ -v
+=== RUN   TestTechSupportDownloadReadOnlyButRedacted
+--- PASS: TestTechSupportDownloadReadOnlyButRedacted (1.41s)  ① read-only 下载 200；② 归档无哈希；③ 脱敏≠掏空
+ok  	github.com/xzjt/nfvis/internal/api	1.467s
+```
+
+关键断言（原文）：① 整包断言覆盖**全部 7 个成员**（`for name, body := range got`），任一分节含
+`tsSentinelHash`/`password_hash`/`pbkdf2$`/`tsBootstrapPassword` 即失败；② 「脱敏 ≠ 掏空」同时断言
+`ts-node`（hostname）与 `admin` 仍在、`audit/status` 分节内容不变；③ REST 侧以 **read-only（viewer）**
+账号下载拿到 200 —— 这正是「现场流程不破」的证据；④ 归档目录**预置为 0755**（模拟旧安装）后仍须变 0700。
+
+3.2 变异验证（三处，各自报 ✗ 后已还原）
+
+① 配置分节改回不脱敏（`t.sectionRedacted(t.Src.Config)` → `t.sectionJSON(t.Src.Config)`）：
+
+```
+--- FAIL: TestTechSupportArchiveHasNoSecrets (0.01s)
+    diag_test.go:242: 分节 config.json 含秘密 "pbkdf2$sha256$600000$TSSALT$TSHASH":
+--- FAIL: TestTechSupportDownloadReadOnlyButRedacted (1.47s)
+    diag_ops_test.go:166: 诊断归档泄露口令哈希:
+FAIL	github.com/xzjt/nfvis/internal/system	0.104s
+FAIL	github.com/xzjt/nfvis/internal/api	1.511s
+```
+
+② 落盘改回 `os.Create(path)`：
+
+```
+    diag_test.go:296: 跳过：Windows 无 POSIX 权限位
+--- SKIP: TestTechSupportArchivePermissions (0.00s)
+    diag_test.go:330: 诊断归档不得用 os.Create 落盘（0666&~umask → 通常 0644）：必须显式 0600
+--- FAIL: TestTechSupportArchiveModeIsExplicit0600 (0.00s)
+FAIL	github.com/xzjt/nfvis/internal/system	0.085s
+```
+
+> **为什么权限要两条用例**（本机实测，不是推断）：Windows 上 POSIX 权限位不存在，
+> `os.OpenFile(…,0o600)` 与 `os.Create` 的 `Stat().Mode().Perm()` **都是 0666**（探针实测：
+> `OpenFile 0600 -> perm=0666` / `os.Create -> perm=0666`；目录 0700 读回 0777）⇒ 只留 POSIX 断言的话，
+> 「把 0600 改回 0644」在本机**无人报错**。故补一条**跨平台**守护核对开档语句本身（不得 `os.Create`、
+> 必须显式 `0o600`），真实权限行为那一层仍由 `TestTechSupportArchivePermissions` 在类 Unix 上验
+> （沿用决策 #77 的既有口径）。
+
+③ 日志脱敏去掉（`return scrubBootstrapCredential(b), nil` → `return b, nil`）：
+
+```
+--- FAIL: TestTechSupportArchiveHasNoSecrets (0.01s)
+    diag_test.go:242: 分节 logs.txt 含秘密 "Boot-OneTime@2026":
+        systemd[1]: Started nfvisd.service.
+        %% 首次启动已创建用户 admin (super-user)。一次性口令（仅显示一次，请立即修改）: Boot-OneTime@2026
+        nfvisd 就绪
+--- PASS: TestTechSupportLogsScrubOnlyCredentialLine (0.00s)
+FAIL	github.com/xzjt/nfvis/internal/system	0.096s
+```
+
+3.3 契约与自检
+
+```
+$ python -c "import yaml;yaml.safe_load(open('docs/NFViS-openapi.yaml',encoding='utf-8'))"   → parse ok
+$ bash contrib/scripts/check_openapi_no_duplicate_keys.sh   → ✓ 契约 YAML 无重复键
+$ bash contrib/scripts/check_openapi_json_sync.sh --write && check_openapi_json_sync.sh → ✓ 同步
+$ bash contrib/scripts/check_decisions_count.sh             → ✓ 决策条数一致（149 项）且决策记录表格结构完整
+```
+
+附录 A 的编辑按决策 #88 的教训做了一次核对：#148 行与 `HEAD` 版本**逐字节相同**（编辑时曾把该行
+前缀当锚点吃掉、已当场修回），`## 附录 B：…` 标题仍在（`grep -c` = 1），`git diff --numstat` 显示
+该文件**只多 1 行**（= #149 行）。
+
+----- 4. `make check` -----
+命令：`GOFLAGS=-p=1 make check`（宿主内存紧张时按 AGENTS.md 的口径串行跑）——**rc=0，全绿**。
+
+```
+ok  	github.com/xzjt/nfvis/internal/api	(cached)
+ok  	github.com/xzjt/nfvis/internal/archtest	1.822s
+ok  	github.com/xzjt/nfvis/internal/model	(cached)
+ok  	github.com/xzjt/nfvis/internal/system	(cached)
+（其余包全 ok；cmd/*、internal/systemd、prototype 无测试文件）
+./internal/config/ 覆盖率: 82.5%   ./internal/model/ 覆盖率: 84.0%   ./internal/schema/ 覆盖率: 90.8%
+./internal/orchestrator/network/ 74.7%   .../compute/ 87.8%   .../container/ 76.3%   ./internal/images/ 75.1%
+✓ 决策条数一致（149 项）且决策记录表格结构完整
+✓ 契约 YAML 无重复键
+✓ openapi.json 与契约 YAML 同步
+bash contrib/scripts/cli-fulltest-selftest.sh        → 全部符合预期（含 8 个变异体）
+bash contrib/scripts/cli-semantic-selftest.sh        → 全部符合预期
+bash contrib/scripts/web-console-config-selftest.sh  → 全部符合预期
+bash contrib/scripts/web-console-confirm-selftest.sh → 全部符合预期（含 acctgate 变异体）
+cd prototype && go build ./... && go vet ./... && go test ./...   → 原型仍全绿（no test files）
+rc=0
+```
+
+上表里 `internal/api`/`internal/system` 标 `(cached)`（第二次跑 make check 时源码未再变），
+另用 `go test -p 1 -count=1 ./internal/api/ ./internal/system/ ./internal/model/ ./internal/archtest/`
+强制重跑过一遍：
+
+```
+rc=0
+ok  	github.com/xzjt/nfvis/internal/api	248.999s
+ok  	github.com/xzjt/nfvis/internal/system	1.614s
+ok  	github.com/xzjt/nfvis/internal/model	0.058s
+ok  	github.com/xzjt/nfvis/internal/archtest	1.820s
+```
+
+----- 5. 真机复验（**由主会话执行**：nfvis-vm 上的开发态实例 + 生产库副本）-----
+环境：本分支构建的实例 + 生产库副本；操作者分别用 **super-user（admin）** 与 **read-only（viewer 类账号）**。
+要点：**不要**动管理路径（`ens160`）与 `make integration` 之外的东西；归档目录先记下改前的权限。
+
+| 步骤 | 命令（真机） | 期望 | 独立事实源 |
+|---|---|---|---|
+| ① 生成并看权限 | `request system tech-support generate` → `ls -l /var/lib/nfvis/tech-support/`；`stat -c '%a %U' /var/lib/nfvis/tech-support` | 归档 `-rw-------`（0600）、目录 `700`（**旧安装上若为 755，生成一次后应变 700**） | `stat -c '%a'` 直接读，不经管道量退出码 |
+| ② 解包看成员 | 复制一份到 /root 下解开：`tar tzf` 列成员（7 个），`grep -c 'password_hash\|pbkdf2\$' config.json` | `0`（**脱敏视图**）；`grep -n hostname config.json` 仍能看到非敏感配置 | 与 `GET /api/v1/configuration` 的脱敏视图对照（同口径）；与配置库 `sqlite3 nfvis.db` 里的 committed 对照——库里**有**哈希、归档里**没有** |
+| ③ 日志分节 | `grep -n '一次性口令' logs.txt`（解开后） | 该行**在**，值已是 `«已隐藏»`；同文件其余行与 `journalctl -u nfvisd -n 500` 一致 | `journalctl -u nfvisd \| grep 一次性口令` 看原始行（root）；两边行数/其余行一致 |
+| ④ read-only 仍能下载 | 用 read-only 账号 `curl -H "Authorization: Bearer <token>" -o /tmp/ts.tar.gz https://<host>:443/api/v1/system/tech-support/<file>`；`echo $?`（**不经管道**） | HTTP 200；本地文件与源归档 sha256 一致 | `sha256sum` 两端对照 + `curl -w '%{http_code}'` 单独量 |
+| ⑤ 反面（可选，验证没被过度收紧） | 同一 read-only 账号下载**配置备份**归档 | **403**（决策 #143 的口径未受影响） | `curl -w '%{http_code}'` |
+
+收尾：真机上产生的临时解包目录与复制的归档删掉；确认配置库指纹（`cfgsha`）与动作前一致
+（本轮只读操作，不该变）。
+
+----- 6. 存疑 / 未做 -----
+- **`user_data` 不脱敏**（自由文本，与配置视图同口径）：操作者若把私钥/口令写进 cloud-init，
+  它会随诊断包出去。已写进决策 #149 的残留项，建议在 V2 评估「user_data 是否该整体打码」。
+- 日志分节除引导口令外**不脱敏**（有意）：日志原文才有诊断价值。
+- 自定义 class 的路径 ACL 未动（与决策 #143 登记的同一口径）。
+- POSIX 权限行为（0600/0700）在本机（Windows）**无法实测**，只有跨平台的语句守护；
+  真实权限位请按 §5 步骤 ① 在真机核一遍。
