@@ -200,7 +200,9 @@
             "type": "string"
           },
           "result": {
+            "description": "`intent` = 高危档动作执行**之前**落库的意图记录；`success` / `failure` =\n动作结束后的结果记录（决策 #150）。高危档动作两条成对（同 action、intent 在前），\n其余动作只有一条结果记录。\n",
             "enum": [
+              "intent",
               "success",
               "failure"
             ],
@@ -2719,6 +2721,7 @@
     },
     "/audit-logs": {
       "get": {
+        "description": "审计记录（FR-CFG-010/FR-OPS-031）。**高危档动作记两条**（决策 #150，设计 §7）：\n动作开始执行之前一条「意图」（`result: intent`，detail 写明要做什么、含关键参数），\n动作结束后一条「结果」（`result: success|failure`，失败带原因）。两条的 `action`\n相同，据此配对；其余动作仍只有一条结果记录（不产生额外审计噪音）。\n口令、口令哈希与证书/私钥正文**一律不入审计**（FR-SEC-007）。\n",
         "parameters": [
           {
             "in": "query",

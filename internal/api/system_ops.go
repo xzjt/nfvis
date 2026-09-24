@@ -11,6 +11,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -100,7 +101,18 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	if info, ok := Identity(r); ok {
 		user = info.User
 	}
-	res, manifest, err := s.sysOps.Restore(r.Context(), data, user)
+	// 决策 #150：恢复配置是高危档动作——执行前写意图、执行后写结果（成功/失败都写）。
+	// CLI `request system configuration restore <path>` 走同一助手（同一 action 与意图文案）。
+	var res config.CommitResult
+	var manifest []images.Meta
+	err = runHighRisk(s.engine, user, highRiskRestore("上传的归档"), func() (string, error) {
+		var rerr error
+		res, manifest, rerr = s.sysOps.Restore(r.Context(), data, user)
+		if rerr != nil {
+			return "", rerr
+		}
+		return fmt.Sprintf("已恢复配置（revision %d，归档含镜像清单 %d 项）", res.Revision, len(manifest)), nil
+	})
 	if err != nil {
 		switch {
 		case errors.Is(err, system.ErrBadFormat), errors.Is(err, system.ErrUnsupported):
@@ -117,7 +129,6 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.engine.Audit(user, "system.restore", "从备份归档恢复配置", "success")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"revision": res.Revision, "warnings": res.Warnings,
 		"images_in_archive": len(manifest),
@@ -145,12 +156,22 @@ func (s *Server) handleZeroize(w http.ResponseWriter, r *http.Request) {
 	if info, ok := Identity(r); ok {
 		user = info.User
 	}
-	res, err := s.sysOps.Zeroize(r.Context(), user)
+	// 决策 #150：恢复出厂是高危档动作——执行前写意图、执行后写结果（成功/失败都写）。
+	// CLI `request system zeroize` 走同一助手（同一 action 与意图文案）。
+	var res system.ZeroizeResult
+	err := runHighRisk(s.engine, user, highRiskZeroize(), func() (string, error) {
+		var rerr error
+		res, rerr = s.sysOps.Zeroize(r.Context(), user)
+		if rerr != nil {
+			return "", rerr
+		}
+		return fmt.Sprintf("已恢复出厂（revision %d，删除镜像 %d 个）；重启后进入初始化状态",
+			res.Revision, res.RemovedImages), nil
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
 		return
 	}
-	s.engine.Audit(user, "system.zeroize", "恢复出厂（清空配置/镜像/VNF，重置账号）", "success")
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status": "zeroized", "revision": res.Revision, "removed_images": res.RemovedImages,
 		"note": strings.TrimSpace("配置/镜像/VNF 已清空，账号复位；重启后进入初始化状态"),

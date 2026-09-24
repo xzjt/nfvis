@@ -1,0 +1,204 @@
+===== V1 收尾第七十五轮：高危档动作的审计记「意图 + 结果」两条（决策 #150）=====
+日期：2026-09-24；分支 `feat/audit-intent-result`（main `f7c441b` 之上）
+范围：设计文档 §7 的高危档审计口径 —— 交接文档「仍未裁」第 ④ 条（round64/65/67/70/71 五次登记）。
+
+----- 1. 起因与交付 -----
+起因：设计 §7 要求高危档动作「审计记『意图』与『结果』两条」，而服务端**只写一条结果行**：
+round65 的浏览器验收（建/删用户）实测审计里只落一条 `config.commit`（detail 是 diff），
+界面侧无从补——「动作已开始」这件事服务端根本没记；**中途崩溃/被杀**的破坏性动作更是什么都不留。
+
+1.1 先查证：高危动作 × 现在写几条 × 写在哪（**裁决与实现的依据**）
+
+| 设计 §7 高危档动作 | 服务端入口（CLI / REST） | 现在写几条（改前） | 写在哪个实现里 |
+|---|---|---|---|
+| 恢复出厂 | `request system zeroize` / `POST /system:zeroize` | **1**（仅成功；失败**不写**） | `cli_compute_oper.go` `systemZeroize` / `system_ops.go` `handleZeroize` |
+| 软件升级 | `request system software add` / `POST /system/software` | 1（成功/失败各一） | `cli_compute_oper.go` `systemSoftware` / `system_sw.go` `handlePostSoftware` |
+| 软件回退 | `request system software rollback` / `POST /system/software:rollback` | 1 | 同上 |
+| 恢复配置 | `request system configuration restore <path>` / `POST /system/restore` | CLI 1；**REST 仅成功 1、失败 0** | `cli_compute_oper.go` `systemRestore` / `system_ops.go` `handleRestore` |
+| 证书上传 | （CLI 无 PEM 直传：`set system api tls cert-file …` + `commit`）/ `PUT /system/tls` | REST 仅成功 1、失败 0；CLI 走配置提交 → 1 条 `config.commit` | `tls.go` `handlePutTLS` / `cmd/nfvisd/main.go` `applyTLSSettings`（提交时按配置安装） |
+| 删用户 / 建用户 / 改权限类 / 重置口令 / 改口令策略 | CLI `set\|delete system login user …` + `commit`；REST `POST\|PUT\|DELETE /system/login-users`；控制台表单 | **1 条 `config.commit`**（CLI 与 REST 都汇到 `Engine.Commit`） | `internal/config/engine.go` `Commit`（`internal/api/resources_w5.go` `mutateLoginUsers` 直提） |
+
+⇒ 结论：**没有一条高危动作写两条**；其中 REST 侧的恢复出厂/恢复配置/证书上传**连失败行都没有**。
+
+1.2 交付（改后：每个被覆盖的高危动作恰好两条）
+
+| 高危动作 | 改前 | 改后 | 落点（同源） |
+|---|---|---|---|
+| 恢复出厂 | 1（仅成功） | **2**：intent + success/failure | 操作级助手 `runHighRisk`（REST 与 CLI 同一份） |
+| 软件升级 | 1 | **2**：intent + success/failure | 同上 |
+| 软件回退 | 1 | **2**：intent + success/failure | 同上 |
+| 恢复配置 | CLI 1 / REST 仅成功 1 | **2**：intent + success/failure | 同上 |
+| 证书上传（REST 直传 PEM） | 仅成功 1 | **2**：intent + success/failure | 同上 |
+| 证书文件引用（CLI `cert-file` + commit） | 1 条 `config.commit` | **2**：`config.commit` 的 intent + 结果 | 引擎差异判定 `highRiskConfigIntent` |
+| 建/删用户、改权限类、重置口令 | 1 条 `config.commit` | **2**：同上 | 同上（CLI 与 REST 都汇到 `Engine.Commit`） |
+| 改口令策略 | 1 条 `config.commit` | **2**：同上 | 同上 |
+| （对照）非高危动作：主机名/接口/ACL… | 1 | **1（不变）** | 用例 `TestNonHighRiskAuditStaysSingleRow` 守护 |
+
+| 文件 | 改了什么 |
+|---|---|
+| `internal/config/audit_highrisk.go`（新增） | 高危档变更的**差异判定**（`highRiskConfigIntent`）：本地用户增删改（含 class/口令）、自定义 class 的 allow/deny、口令策略逐字段、外部证书文件引用；`AuditResultIntent = "intent"` 与 `SourceZeroize`/`SourceRestore` 两个会话来源常量（供 `internal/system` 复用，免得同一动作记两组） |
+| `internal/config/engine.go` | `Commit` 在**下发底座之前**（校验与 confirm 守卫之后）落意图行，结果行沿用既有那条；`defer` 兜底保证「意图必有结果」（落库失败一类中途返回补一条 failure）；返回值改具名以读最终错误 |
+| `internal/api/audit_highrisk.go`（新增） | 操作级**共用助手** `runHighRisk`（写意图 → 执行 → 写结果）+ 五个动作的口径构造器（`highRiskZeroize`/`highRiskSoftwareAdd`/`highRiskSoftwareRollback`/`highRiskRestore`/`highRiskTLSInstall`）——CLI 与 REST 用同一份，意图文案因此**逐字相同** |
+| `internal/api/system_ops.go` | 恢复出厂 / 恢复配置接助手（失败也写结果行——改前 REST 失败不写） |
+| `internal/api/system_sw.go` | 软件升级 / 回退接助手 |
+| `internal/api/tls.go` | 证书上传接助手（意图里**没有** PEM 正文） |
+| `internal/api/cli_compute_oper.go` | CLI 侧 zeroize / restore / software 接**同一个**助手 |
+| `internal/system/backup.go` | 会话来源改用 `config.SourceRestore`/`config.SourceZeroize` 常量（不再写字面量） |
+| `internal/api/audit_highrisk_test.go`（新增） | 12 个用例（见 §2.1） |
+| `internal/config/audit_highrisk_test.go`（新增） | 4 个用例（引擎侧） |
+| `docs/NFViS-openapi.yaml` + `internal/api/openapi.json` | `/audit-logs` 补两条口径说明；`AuditEntry.result` 枚举加 `intent`（由 YAML 重新生成 JSON） |
+| `docs/NFViS-用户手册.md` | §10.5 补「高危动作记两条」；§10.12 恢复配置/恢复出厂段加一句指向 |
+| `docs/NFViS-系统产品需求与目标架构规格书.md` | 附录 A 追加决策 #150（单行，`|` 收尾） |
+| `AGENTS.md` | 「已定决策 149 项」→「150 项」 |
+| `docs/V1-收尾待办.md` | §2.3 新增 ✅ 条目（§0 入口块与顶部表未动） |
+
+1.3 口径（决策 #150 的正文，摘要）
+
+- **`action` 不变**（不新增动作分类：界面审计页与 `show log audit` 都逐字打印 Result 列，无需新映射），
+  用 `result` 区分三态：**`intent`**（动作开始执行**之前**落库）/ `success` / `failure`（动作结束后落库，失败写原因）。
+  两条 `action` 相同、按时间配对；`show log audit` 里只看得到 `intent` 而无结果 ⇒ 该动作没走完。
+- 意图行位置：**下发底座之前**，但在**校验与 confirm 守卫之后**——那些是「没开始动作」的拒绝，不该留意图。
+- **同源**：直接动作用 `internal/api` 的 `runHighRisk`（REST handler 与 CLI 执行器都调它，意图文案同一份构造器）；
+  配置事务型变更没有独立动作入口（CLI 的 `delete system login user x` 只改 candidate，动作发生在 `commit`），
+  故由 `internal/config` 在 `Engine.Commit` 按**差异**判定——CLI 与 REST 都汇到它，不存在两个入口各写一遍。
+- **只覆盖高危档**（＝控制台 `tier:'high'` 那批），其余动作仍是一条（防审计噪音）；
+  恢复出厂/恢复配置**各只记一对**（它们提交的空配置/归档配置会连带改掉本地用户，引擎按会话来源跳过二次判定）；
+  被前置拒绝的请求（`confirm=false`、没给确认词、参数不全、读不到归档）**不落审计**（动作没开始，与既有口径一致）。
+- **脱敏沿用既有口径**：意图 detail 只写人话 + 关键参数；重置口令写「值 «已隐藏»」（`model.RedactedPlaceholder`）、
+  sha256 只取前 12 位、PEM 正文与私钥一律不进审计（FR-SEC-007）。
+
+----- 2. 测试与变异验证 -----
+环境：宿主 Windows 10（win32 10.0.19044）、Git Bash、`go version go1.26.3 windows/amd64`；
+Go 测试一律 `GOFLAGS=-p=1`（宿主内存紧张，避免 `errno=1455`）。
+
+2.1 新用例（`GOFLAGS=-p=1 go test -count=1 ./internal/config/ ./internal/api/ -run 'TestHighRisk|TestNonHighRisk' -v`）
+
+```
+--- PASS: TestHighRiskCommitTwoRows (0.07s)              引擎：高危提交恰好两条，intent 在前、success 在后
+--- PASS: TestHighRiskCommitFailureTwoRows (0.07s)       引擎：底座下发失败 → intent + failure（带「底座错误」）
+--- PASS: TestHighRiskCommitNoFalsePositive (0.07s)      语义没变的写法不产生意图行（策略 nil⇄全零 / 普通提交）
+--- PASS: TestHighRiskIntentDescription (0.00s)          判定表：改口令（含 «已隐藏»）/改 class/改策略/改 class 清单/
+                                                         删 class/zeroize 与 restore 来源不判定/证书安装与移除
+--- PASS: TestHighRiskAuditTwoRowsREST (1.15s)           REST：恢复出厂、软件升级、软件回退、证书上传（各两条；PEM 不进审计）
+--- PASS: TestHighRiskAuditTwoRowsRESTFailures (1.14s)    REST 失败路径：安装失败、证书不配对 → 两条、结果行 failure 带原因
+--- PASS: TestHighRiskAuditNotWrittenWhenRefused (1.11s)  confirm=false 被拒 → 该动作 0 条（动作没开始）
+--- PASS: TestHighRiskAuditZeroizeFailureTwoRows (1.07s)  恢复出厂失败（REST + CLI）→ 两条、failure 带原因
+--- PASS: TestHighRiskAuditRestoreTwoRows (1.21s)         恢复配置：真归档成功 + 坏归档失败，各两条
+--- PASS: TestHighRiskAuditIntentSameTextAcrossEntries (1.61s)  CLI 与 REST 的 zeroize 意图文案**逐字相同**（同源助手）
+--- PASS: TestHighRiskAuditTwoRowsCLI (0.40s)             CLI：软件升级两条、回退失败两条
+--- PASS: TestHighRiskAuditRestoreTwoRowsCLI (0.47s)      CLI：读不到归档 → 前置拒绝，0 条
+--- PASS: TestHighRiskAuditUserDeleteTwoRows (2.26s)      REST 建/删用户 + CLI 建/删用户 → 各两条（口令哈希不进审计）
+--- PASS: TestHighRiskAuditPasswordPolicyTwoRows (0.41s)  口令策略：两条，逐字段（「口令最小长度 未设置 → 14」）
+--- PASS: TestHighRiskAuditCertFileTwoRows (0.41s)        证书文件引用（CLI 路径）：两条，含文件路径
+--- PASS: TestNonHighRiskAuditStaysSingleRow (0.41s)      **非高危仍是一条**（主机名 + 接口描述提交）
+ok  	github.com/xzjt/nfvis/internal/config	0.266s
+ok  	github.com/xzjt/nfvis/internal/api	10.632s
+```
+
+断言方式：按「动作前后的**增量**」取记录（测试装配本身——引导 admin、预置 viewer——也会产生高危记录，
+那属于别的动作）；`assertPair` 断言恰好两条、第一条 `result=intent` 且 detail 含关键事实、第二条 `result=期望值`。
+
+2.2 变异验证 ①：**去掉意图行写入**（助手首行的 `eng.Audit(...intent)` 去掉；引擎侧 `if hrIntent != ""` → `if false &&`）
+
+```
+--- FAIL: TestHighRiskCommitTwoRows (0.06s)
+    audit_highrisk_test.go:59: 建用户应恰好两条，实得 1: [{… Action:config.commit Detail:[edit system login users bob] … Result:success …}]
+--- FAIL: TestHighRiskCommitFailureTwoRows (0.05s)
+    audit_highrisk_test.go:100: 失败路径也应两条，实得 1: [{… Result:failure …}]
+FAIL	github.com/xzjt/nfvis/internal/config	0.239s
+--- FAIL: TestHighRiskAuditTwoRowsREST (1.12s)
+    audit_highrisk_test.go:188: system.zeroize 应有两条审计（意图 + 结果），实得 1 条: [{Action:system.zeroize Detail:已恢复出厂（revision 4，删除镜像 0 个）；重启后进入初始化状态 Result:success User:admin}]
+--- FAIL: TestHighRiskAuditTwoRowsRESTFailures (1.08s)
+    audit_highrisk_test.go:238: system.software.add 应有两条审计（意图 + 结果），实得 1 条: [{… Detail:安装软件包 /tmp/bad.deb 失败: 包校验和不匹配 Result:failure User:admin}]
+--- FAIL: TestHighRiskAuditZeroizeFailureTwoRows (1.07s)
+--- FAIL: TestHighRiskAuditRestoreTwoRows (1.16s)
+--- FAIL: TestHighRiskAuditIntentSameTextAcrossEntries (1.16s)
+--- FAIL: TestHighRiskAuditTwoRowsCLI (0.39s)
+--- FAIL: TestHighRiskAuditUserDeleteTwoRows (1.45s)
+--- FAIL: TestHighRiskAuditPasswordPolicyTwoRows (0.41s)
+--- FAIL: TestHighRiskAuditCertFileTwoRows (0.41s)
+FAIL	github.com/xzjt/nfvis/internal/api	8.308s
+```
+
+即 **10 个用例报 ✗**（`internal/config` 2 + `internal/api` 8；报出的正是「只剩结果行」这一形态）。
+
+2.3 变异验证 ②：**把意图行挪到动作之后**（助手把 `eng.Audit(intent)` 挪到结果行之后；引擎侧挪到成功行之后）
+
+```
+--- FAIL: TestHighRiskCommitTwoRows (0.06s)
+    audit_highrisk_test.go:62: 顺序应为 intent（早）→ success（晚），实得 [{… Result:intent …} {… Result:success …}]   ← 表里 intent 在后
+--- FAIL: TestHighRiskCommitFailureTwoRows (0.06s)
+    audit_highrisk_test.go:100: 失败路径也应两条，实得 1: […]      ← 失败路径干脆没写意图行
+FAIL	github.com/xzjt/nfvis/internal/config	0.304s
+--- FAIL: TestHighRiskAuditTwoRowsREST (1.13s)
+    audit_highrisk_test.go:188: system.zeroize 第一条应是意图行（result=intent），实得 {… Result:success …}
+    audit_highrisk_test.go:188: system.zeroize 第二条应是结果行（result=success），实得 {… Result:intent …}
+    audit_highrisk_test.go:196: system.software.add 第一条应是意图行（result=intent），实得 {… 升级完成：1.1.31 → 9.9.9 … Result:success …}
+    audit_highrisk_test.go:196: system.software.rollback 第一条应是意图行（result=intent），实得 {… 回退完成：1.1.31 → 1.1.30 Result:success …}
+    audit_highrisk_test.go:216: system.tls.install 第一条应是意图行（result=intent），实得 {… 已安装外部证书（指纹 AA:BB:CC）… Result:success …}
+--- FAIL: TestHighRiskAuditTwoRowsRESTFailures (1.09s)
+    audit_highrisk_test.go:238: system.software.add 第一条应是意图行（result=intent），实得 {… 失败: 包校验和不匹配 Result:failure …}
+    audit_highrisk_test.go:238: system.software.add 第二条应是结果行（result=failure），实得 {… Result:intent …}
+FAIL	github.com/xzjt/nfvis/internal/api	…
+```
+
+即**顺序断言报 ✗**（intent 落到结果行之后）。两条变异均已还原（`git status` 只剩本轮应有的 17 个改动文件，
+`grep -c 变异` 在两个实现文件里均为 0）。
+
+2.4 决策条数与契约自检
+
+```
+$ bash contrib/scripts/check_decisions_count.sh
+✓ 决策条数一致（150 项）且决策记录表格结构完整
+
+$ bash contrib/scripts/check_openapi_no_duplicate_keys.sh
+✓ 契约 YAML 无重复键
+$ bash contrib/scripts/check_openapi_json_sync.sh --write && bash contrib/scripts/check_openapi_json_sync.sh
+✓ openapi.json 与契约 YAML 同步
+$ python -c "import yaml;yaml.safe_load(open('docs/NFViS-openapi.yaml',encoding='utf-8'))"
+（无输出即解析通过）
+```
+
+2.5 `make check`（`GOFLAGS=-p=1 make check`，退出码 0）
+
+```
+ok  	github.com/xzjt/nfvis/internal/{aaa,api,archtest,cli,config,events,images,metrics,model,
+        orchestrator,orchestrator/compute,orchestrator/container,orchestrator/network,
+        schema,state,system} / pkg/cliclient
+./internal/config/ 覆盖率: 84.4%   ./internal/model/ 84.0%   ./internal/schema/ 90.8%
+./internal/orchestrator/network/ 74.7%   compute 87.8%   container 76.3%   ./internal/images/ 75.1%
+✓ 决策条数一致（150 项）且决策记录表格结构完整
+✓ 契约 YAML 无重复键
+✓ openapi.json 与契约 YAML 同步
+（toolcheck：三件套判定自校准 + 控制台分级确认/角色/口令路径桩 + 变异体 gates/word/timer/reboot/
+  zeroize/dpdk/rawhttp/acctgate 全部「全部符合预期」）
+?   	github.com/xzjt/nfvis/prototype	[no test files]
+```
+
+----- 3. 真机复验（**由主会话执行**：nfvis-vm 上的开发态实例 + 生产库副本）-----
+环境：本分支构建的实例（明文 + `-allow-plaintext`，或 HTTPS 带 `--cacert` 的既有探针口径）+ 生产库副本，
+操作者 = super-user（admin）。**独立事实源**：配置库 `audit_log` 表原文 + CLI `show log audit last 20`
+（两者同源：`Engine.AuditTrail` ↔ `GET /audit-logs`）。
+
+| 步骤 | 命令（真机） | 断言 | 独立事实源 |
+|---|---|---|---|
+| ① 高危**成功**路径两条 | `request system configuration restore <归档路径>`（或界面「恢复配置」） | 该 action 出现两条：`Result=intent`（detail「从备份归档恢复配置（<路径>）：归档里的配置将替换当前配置」）在前、`Result=success`（「已恢复配置（revision N…）」）在后 | `show log audit last 20` 原文 + `sqlite3 /var/lib/nfvis/nfvis.db "select result,action,substr(detail,1,40) from audit_log order by audit_id desc limit 4"` |
+| ② 高危**失败**路径两条 | `request system configuration restore /no/such.json`（**前置拒绝**：0 条）→ 再喂一个**坏归档**（合法路径、内容非归档） | 前者审计**0 条**；后者两条、结果行 `Result=failure` 且 detail 带原因 | 同上（`audit_log` 行数前后差 = 0 / 2） |
+| ③ 配置事务型（删用户） | CLI `delete system login user <临时账号>` + `commit`（先 `set … password … class operator` 建一个临时账号） | 建/删各两条：intent 行 detail「创建本地用户 X（权限类 operator）」/「删除本地用户 X（原权限类 operator）」，结果行 detail 仍是既有 diff | `show log audit last 20` + 配置库 `config_json`（临时账号真的没了）；**审计里不得出现 `pbkdf2$`** |
+| ④ 非高危仍是一条 | `set system hostname <新名>` + `commit` | 该提交**只有一条** `config.commit`（`Result=success`，detail 是 diff） | `audit_log` 行数前后差 = 1 |
+| ⑤ 界面侧对照（可选） | 控制台「审计日志」页刷新 | 高危动作那两条在页面「结果」列显示 `intent` / `success`；`#/system/users` 删用户后同样两条 | 页面 DOM 快照 + ①~③ 的库侧原文（决策 #141：界面显示对了不算完） |
+
+**收尾**：临时账号、临时归档与开发态库副本用完即删；生产库除本轮动作外不得有其它改动
+（核对 `rev`/`audit` 计数与 `config_json` 指纹）。
+
+----- 4. 存疑 / 未做（如实登记）-----
+- **CLI 的「证书上传」与 REST 的证书上传机制不同**：REST 是 `PUT /system/tls` 直传 PEM（操作级助手记两条，
+  action=`system.tls.install`）；CLI 只有 `set system api tls cert-file … key-file …`（配置引用，提交时由
+  nfvisd 按配置安装），它记的是 `config.commit` 的两条。**两条路径的 action 名因此不同**——机制本就不同
+  （一个是上传正文、一个是声明文件路径），已在决策 #150 与 `internal/api/audit_highrisk.go` 的注释里写明。
+- **意图行与动作之间不是事务**：意图先落库、动作后执行（这是设计要求的顺序）；若动作**崩溃**在中间，
+  审计里会留下一条 `intent` 而**没有**结果行——这正是「只看得到 intent 即说明没走完」的读法，
+  不额外补偿（补偿会把「崩溃」这一事实掩盖掉）。
+- 未做：**审计页/`show log audit` 的界面级配色或过滤**（本轮只保证服务端口径；界面把 `intent` 当普通取值渲染）。
+- 未做：`GET /audit-logs` 的**按 result 过滤**参数（契约未声明，未擅自新增）。
+- 真机复验（§3）**未执行**——按任务边界不碰 VM，留给主会话。

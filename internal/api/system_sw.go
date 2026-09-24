@@ -10,6 +10,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/xzjt/nfvis/internal/system"
@@ -53,13 +54,21 @@ func (s *Server) handlePostSoftware(w http.ResponseWriter, r *http.Request) {
 	if info, ok := Identity(r); ok {
 		user = info.User
 	}
-	res, err := s.software.Add(r.Context(), in.Package, in.SHA256)
+	// 决策 #150：软件升级是高危档动作——执行前写意图、执行后写结果（成功/失败都写）。
+	// CLI `request system software add …` 走同一助手（同一 action 与意图文案）。
+	var res system.SoftwareResult
+	err := runHighRisk(s.engine, user, highRiskSoftwareAdd(in.Package, in.SHA256), func() (string, error) {
+		var rerr error
+		res, rerr = s.software.Add(r.Context(), in.Package, in.SHA256)
+		if rerr != nil {
+			return "", rerr
+		}
+		return fmt.Sprintf("升级完成：%s → %s（包 %s）", res.Previous, res.Version, res.Package), nil
+	})
 	if err != nil {
-		s.engine.Audit(user, "system.software.add", "安装 "+in.Package+" 失败: "+err.Error(), "failure")
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
 		return
 	}
-	s.engine.Audit(user, "system.software.add", "安装 "+res.Package+"（"+res.Previous+" → "+res.Version+"）", "success")
 	writeJSON(w, http.StatusAccepted, res)
 }
 
@@ -72,13 +81,20 @@ func (s *Server) handlePostSoftwareRollback(w http.ResponseWriter, r *http.Reque
 	if info, ok := Identity(r); ok {
 		user = info.User
 	}
-	res, err := s.software.Rollback(r.Context())
+	// 决策 #150：软件回退同升级（两条记录；CLI `request system software rollback` 走同一助手）。
+	var res system.SoftwareResult
+	err := runHighRisk(s.engine, user, highRiskSoftwareRollback(), func() (string, error) {
+		var rerr error
+		res, rerr = s.software.Rollback(r.Context())
+		if rerr != nil {
+			return "", rerr
+		}
+		return fmt.Sprintf("回退完成：%s → %s", res.Previous, res.Version), nil
+	})
 	if err != nil {
-		s.engine.Audit(user, "system.software.rollback", "回退失败: "+err.Error(), "failure")
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
 		return
 	}
-	s.engine.Audit(user, "system.software.rollback", "回退 "+res.Previous+" → "+res.Version, "success")
 	writeJSON(w, http.StatusAccepted, res)
 }
 
