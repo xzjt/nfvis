@@ -41,6 +41,13 @@ func (x *cliExecutor) execRequest(user, class, source string, t []string) string
 	if _, _, err := schema.Match(schema.OperRoot(), append([]string{"request"}, validated...)); err != nil {
 		return fmt.Sprintf("%% 无效命令: request %s（输入 ? 查看可用命令）\n", strings.Join(validated, " "))
 	}
+	// 权限在**入口处按匹配到的最深节点**判定一次（决策 #144）：命令树把 Su()/Op() 标在子节点上，
+	// 只看域节点会让这些标记失效；而只在各子域里各判一次则会**漏域**（vpp / interfaces / sriov /
+	// alarms 此前完全没有判定 ⇒ read-only 也能 `request vpp restart`、`request interfaces … bind-dpdk`）。
+	// 各子域里保留的同款判定是纵深防御（直接调用子域函数时仍生效）。
+	if !x.allowTokens(class, mustNode(schema.OperRoot(), "request"), append([]string{"request"}, validated...)...) {
+		return "%% 无权限执行该命令\n"
+	}
 	switch t[0] {
 	case "virtual-machine-functions":
 		return x.requestVM(user, class, source, t[1:])
@@ -59,10 +66,7 @@ func (x *cliExecutor) execRequest(user, class, source string, t []string) string
 	case "sriov":
 		return x.requestSRIOV(user, source, t[1:])
 	}
-	// 权限已在 execRequest 入口处校验过部分域；此处对未接入域报明确占位。
-	if !x.allow(class, mustNode(schema.OperRoot(), "request"), append([]string{"request"}, validated...)...) {
-		return "%% 无权限执行该 request 命令\n"
-	}
+	// 未接入域的占位提示（权限已在入口处判定过，这里不必再判）。
 	return "%% 该命令依赖底座运行态，将在后续里程碑接入后可用\n"
 }
 
@@ -99,7 +103,7 @@ func confirmOrAsk(what, name string, confirmed bool) (ask string, ok bool) {
 // ---------- request virtual-machine-functions ----------
 
 func (x *cliExecutor) requestVM(user, class, source string, t []string) string {
-	if !x.allow(class, mustNode(schema.OperRoot(), "request", "virtual-machine-functions"),
+	if !x.allowTokens(class, mustNode(schema.OperRoot(), "request", "virtual-machine-functions"),
 		append([]string{"request", "virtual-machine-functions"}, t...)...) {
 		return "%% 无权限执行该命令\n"
 	}
@@ -263,7 +267,7 @@ func (x *cliExecutor) requestVMConsole(user, name string, confirmed bool) string
 // ---------- request container-functions ----------
 
 func (x *cliExecutor) requestContainer(user, class, source string, t []string) string {
-	if !x.allow(class, mustNode(schema.OperRoot(), "request", "container-functions"),
+	if !x.allowTokens(class, mustNode(schema.OperRoot(), "request", "container-functions"),
 		append([]string{"request", "container-functions"}, t...)...) {
 		return "%% 无权限执行该命令\n"
 	}
@@ -368,7 +372,7 @@ func (x *cliExecutor) deleteContainer(user, source, name string) string {
 // ---------- request images ----------
 
 func (x *cliExecutor) requestImages(user, class string, t []string) string {
-	if !x.allow(class, mustNode(schema.OperRoot(), "request", "images"),
+	if !x.allowTokens(class, mustNode(schema.OperRoot(), "request", "images"),
 		append([]string{"request", "images"}, t...)...) {
 		return "%% 无权限执行该命令\n"
 	}
@@ -698,7 +702,7 @@ func (x *cliExecutor) execShowVppCapture() string {
 // software add|rollback、reboot|shutdown|poweroff、tech-support generate、
 // core-dumps export|delete、api tls regenerate、ntp sync。
 func (x *cliExecutor) requestSystem(user, class, source string, t []string) string {
-	if !x.allow(class, mustNode(schema.OperRoot(), "request", "system"),
+	if !x.allowTokens(class, mustNode(schema.OperRoot(), "request", "system"),
 		append([]string{"request", "system"}, t...)...) {
 		return "%% 无权限执行该命令\n"
 	}

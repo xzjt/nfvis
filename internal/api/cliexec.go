@@ -296,6 +296,26 @@ func (x *cliExecutor) allow(class string, n *schema.Node, path ...string) bool {
 	return x.authz.Authorize(class, n.RequiredClass(), path...)
 }
 
+// allowTokens 按**规范 token 路径**判定权限：取**匹配到的最深节点**的 RequiredClass()，
+// 而不是调用方手里那个域节点。
+//
+// 为什么必须这样：命令树把 Su()/Op() 标在**子节点**上（如 request system reboot、request vpp、
+// request images delete），而 RequiredClass() 取的是"自身与祖先的最大值"——只看域节点
+// （request system 只继承到 O）会让整棵子树上的 Su 标记在运行期形同虚设：operator 能过
+// zeroize / reboot / software / configuration backup 这些**声明为 super-user** 的命令。
+// 域节点因此只应作为"匹配不到时的兜底"（未建模的写法仍先给语法提示，而不是变成权限错误）。
+//
+// 路径 ACL（自定义 class 的 allow/deny）仍按同一条路径判定，语义不变。
+func (x *cliExecutor) allowTokens(class string, domain *schema.Node, path ...string) bool {
+	if n, _, err := schema.Match(schema.OperRoot(), path); err == nil && n != nil {
+		return x.allow(class, n, path...)
+	}
+	// Match 在遇到未建模的 token 时会返回"已匹配到的最深节点 + 错误"——那种情况回落到
+	// 域节点即可（它的 RequiredClass 必不大于该最深节点，见上）；真正的未知命令由各
+	// 分发器给出语法提示。
+	return x.allow(class, domain, path...)
+}
+
 // ---------- 操作模式 ----------
 
 func (x *cliExecutor) execOper(user, class, source string, s *cliSession, t []string) string {
@@ -371,7 +391,10 @@ func (x *cliExecutor) versionSummary() string {
 }
 
 func (x *cliExecutor) execOperShow(class string, t []string) string {
-	if !x.allow(class, mustNode(schema.OperRoot(), "show"), append([]string{"show"}, t...)...) {
+	// 与 request 域同口径（决策 #144）：取匹配到的最深节点的 RequiredClass()。
+	// show 子树当前全是只读，故行为与只看 show 域节点一致；但若将来给某个 show 子命令
+	// 标了 Op()/Su()，这里会立刻生效，而不是被域节点吃掉。
+	if !x.allowTokens(class, mustNode(schema.OperRoot(), "show"), append([]string{"show"}, t...)...) {
 		return "%% 无权限执行 show\n"
 	}
 	switch {
