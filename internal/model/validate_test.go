@@ -270,6 +270,55 @@ func TestValidateSystemLogin(t *testing.T) {
 // testHash 形态合法的口令哈希（校验只查"有没有"，不验内容）。
 const testHash = "pbkdf2$sha256$600000$c2FsdA$hYXNo"
 
+// 决策 #152：整文档提交的「至少留一个 super-user」兜底（判定函数本身）。
+func TestCheckSuperUserPresent(t *testing.T) {
+	withUsers := func(us ...LoginUserConfig) Config {
+		c := validBase()
+		c.System.Login = &SystemLogin{Users: us}
+		return c
+	}
+	// 有一个 super-user 即通过（不管还有多少别的账号）
+	if errs := CheckSuperUserPresent(withUsers(
+		LoginUserConfig{Name: "admin", Class: "super-user", PasswordHash: testHash},
+		LoginUserConfig{Name: "netop", Class: "operator", PasswordHash: testHash},
+	)); len(errs) != 0 {
+		t.Fatalf("有 super-user 应通过，实得 %+v", errs)
+	}
+	// 只有 operator / read-only：拒
+	for _, cls := range []string{"operator", "read-only"} {
+		errs := CheckSuperUserPresent(withUsers(LoginUserConfig{Name: "u", Class: cls, PasswordHash: testHash}))
+		if len(errs) != 1 || errs[0].Path != "system.login.users" {
+			t.Fatalf("class=%s 应恰好一条 system.login.users 错误，实得 %+v", cls, errs)
+		}
+		if !strings.Contains(errs[0].Message, "super-user") {
+			t.Fatalf("报错要说明缺什么: %q", errs[0].Message)
+		}
+	}
+	// class 为空按 read-only 算（与 aaa/api 的有效 class 判据一致）⇒ 不算 super-user
+	u := LoginUserConfig{Name: "u", PasswordHash: testHash}
+	if EffectiveClass(u) != "read-only" {
+		t.Fatalf("class 为空的有效 class 应为 read-only，实得 %q", EffectiveClass(u))
+	}
+	if errs := CheckSuperUserPresent(withUsers(u)); len(errs) != 1 {
+		t.Fatalf("class 为空的账号不算 super-user，应被拒，实得 %+v", errs)
+	}
+	// 空用户表 / 无 system 段 / 无 login 段：都拒（这正是"空配置提交"的形态）
+	for name, c := range map[string]Config{
+		"空用户表":     withUsers(),
+		"无 login":  {System: &SystemConfig{Hostname: "n1"}},
+		"无 system": {},
+	} {
+		if errs := CheckSuperUserPresent(c); len(errs) != 1 {
+			t.Fatalf("%s 应被拒，实得 %+v", name, errs)
+		}
+	}
+	// 消息里不得出现需求编号（决策 #86/#87：给操作者看的文本不写编号）
+	errs := CheckSuperUserPresent(Config{})
+	if len(errs) != 1 || strings.Contains(errs[0].Error(), "FR-") {
+		t.Fatalf("报错文本不得含需求编号: %+v", errs)
+	}
+}
+
 // T0-1（决策 #52）：NAT44 拓扑语义校验——出接口必填且须归属某个带地址的 VRF、
 // source-pool 可选、单一 inside/outside 转发域。
 func TestValidateNatTopology(t *testing.T) {

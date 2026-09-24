@@ -46,6 +46,8 @@ func commitMaxSessions(t *testing.T, eng *config.Engine, n int) {
 	if cfg.System == nil {
 		cfg.System = &model.SystemConfig{}
 	}
+	// 本文件的引擎是空库基线（没有账号）：提交的文档要自带一个 super-user（决策 #152）
+	cfg = withSuperUser(cfg)
 	cfg.System.API = &model.APIConfig{MaxSessions: n}
 	if err := eng.UpdateCandidate(sess, cfg); err != nil {
 		t.Fatalf("UpdateCandidate: %v", err)

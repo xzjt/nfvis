@@ -273,6 +273,47 @@ func (v *validator) checkSystem(c Config) {
 	v.checkSystemLogin(s)
 }
 
+// ClassSuperUser 预置最高权限 class（与 aaa.ClassSuperUser 同值；model 是最内层，
+// 不能反向 import aaa，故在此声明字面量）。
+const ClassSuperUser = "super-user"
+
+// EffectiveClass 解析用户的**有效 class**：Class 为空按 read-only 算。
+//
+// 与 service 侧同一判据（aaa.effectiveClass / api.effectiveClassOf）：缺省只读，
+// 于是「没写 class 的账号」不算 super-user——守卫与授权判定必须同源，否则会出现
+// 「守卫认为还有 super-user，实际没人有权限」的假通过。
+func EffectiveClass(u LoginUserConfig) string {
+	if u.Class != "" {
+		return u.Class
+	}
+	return "read-only"
+}
+
+// CheckSuperUserPresent 检出「提交后本机将无人可登录」的整文档提交（自锁兜底）。
+//
+// 本地用户是唯一登录途径，一个 super-user 都不剩就只能带外恢复。单用户删除那条路
+// 已有等价守卫（api.handleDeleteLoginUser），但整文档提交（PUT /configuration/candidate
+// + commit、load override、配置恢复）能一次把用户表清空，故在**事务引擎的 commit**上
+// 再兜一层。
+//
+// 判据：candidate 里**至少一个**有效 class 为 super-user 的用户即通过（有效 class 见
+// EffectiveClass）。本函数**不在 Validate 的默认链里**——引擎的 Commit 直接调用它
+// （决策 #152），自定义校验链（Options.Validate）漏不掉它。
+func CheckSuperUserPresent(c Config) []ValidateError {
+	if c.System != nil && c.System.Login != nil {
+		for _, u := range c.System.Login.Users {
+			if EffectiveClass(u) == ClassSuperUser {
+				return nil
+			}
+		}
+	}
+	return []ValidateError{{
+		Path: "system.login.users",
+		Message: "提交被拒：配置里至少要保留一个 super-user 账号，否则本机将无人可登录——" +
+			"请先建一个 super-user 账号；若要复位账号，请用 request system zeroize（恢复出厂）",
+	}}
+}
+
 // checkSystemLogin 本地 AAA 配置校验：用户名语法、class 引用存在（预置类或
 // 自定义定义）、策略数值合理；口令哈希格式由 aaa 写入侧保证。
 func (v *validator) checkSystemLogin(s *SystemConfig) {

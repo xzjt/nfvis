@@ -68,9 +68,11 @@ func TestHighRiskCommitTwoRows(t *testing.T) {
 		t.Errorf("口令哈希不得进审计: %q", rows[1].Detail)
 	}
 
-	// 删用户 + 改口令：两条，意图说明要做什么
+	// 删用户 + 改口令：两条，意图说明要做什么。
+	// 只删 bob（操作员）：**保留 admin**——提交后一个 super-user 都不剩会被引擎的
+	// 自锁兜底拒掉（决策 #152），而本用例考的是删除动作的审计形状。
 	if err := commitLogin(t, k, "ssh", func(l *model.SystemLogin) {
-		l.Users = nil
+		l.Users = []model.LoginUserConfig{{Name: "admin", Class: model.ClassSuperUser, PasswordHash: fixtureUserHash}}
 	}); err != nil {
 		t.Fatalf("删用户: %v", err)
 	}

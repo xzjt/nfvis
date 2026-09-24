@@ -208,7 +208,13 @@ func (m *Manager) Zeroize(ctx context.Context, user string) (ZeroizeResult, erro
 	if err := m.engine.UpdateCandidate(sess, model.Config{}); err != nil {
 		return res, fmt.Errorf("置空 candidate: %w", err)
 	}
-	commitRes, err := m.engine.Commit(ctx, sess, config.CommitOpts{Message: "zeroize（恢复出厂）"})
+	// AllowNoSuperUser：恢复出厂**就是要**把账号随空配置复位，否则本动作无法完成
+	// （引擎的「至少留一个 super-user」兜底会拒掉空配置）——这是全仓库唯一允许置位的地方，
+	// 由 internal/archtest 的赋值点唯一性守护盯着；复位后的 admin 由下次启动的引导重建。
+	commitRes, err := m.engine.Commit(ctx, sess, config.CommitOpts{
+		Message:          "zeroize（恢复出厂）",
+		AllowNoSuperUser: true,
+	})
 	if err != nil {
 		return res, fmt.Errorf("下发空配置: %w", err)
 	}

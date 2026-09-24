@@ -61,14 +61,41 @@ func cfgRequest(t *testing.T, method, url, token string, body any, header map[st
 	return resp.StatusCode, resp.Header, data
 }
 
+// testUserHash 测试文档里的口令哈希（格式与 aaa 写入的一致，内容无意义）。
+const testUserHash = "pbkdf2$sha256$1$AAAA$BBBB"
+
+// superUserDoc 整文档提交用的 super-user 账号（map 形态）。
+//
+// PUT /configuration/candidate 是**整文档替换**（CLI 的 load override、配置恢复同理）：
+// 文档里一个 super-user 都没有的提交会被引擎拒掉——提交后本机不能无人可登录
+// （决策 #152）。真机的文档里总有首启引导建的 admin，故测试文档也要带一个。
+// 带 password_hash 是因为 merge 路径不做哈希继承（override 路径会从 committed 同名用户继承）。
+func superUserDoc() map[string]any {
+	return map[string]any{"name": "admin", "class": "super-user", "password_hash": testUserHash}
+}
+
+// withSuperUser 同 superUserDoc，给 model.Config 形态的测试文档补一个 super-user。
+func withSuperUser(cfg model.Config) model.Config {
+	if cfg.System == nil {
+		cfg.System = &model.SystemConfig{}
+	}
+	if cfg.System.Login == nil {
+		cfg.System.Login = &model.SystemLogin{}
+	}
+	cfg.System.Login.Users = append(cfg.System.Login.Users, model.LoginUserConfig{
+		Name: "admin", Class: model.ClassSuperUser, PasswordHash: testUserHash,
+	})
+	return cfg
+}
+
 func sampleCandidate() model.Config {
-	return model.Config{
+	return withSuperUser(model.Config{
 		System: &model.SystemConfig{Hostname: "api-node"},
 		ResourcePools: &model.ResourcePool{
 			Hugepages: []model.HPool{{PageSize: "1G", Count: 32}},
 			CPU:       &model.CPUSetup{IsolatedCores: []int{4, 5, 6, 7}},
 		},
-	}
+	})
 }
 
 func TestConfigurationTransactionFlow(t *testing.T) {

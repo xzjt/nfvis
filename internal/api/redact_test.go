@@ -223,6 +223,8 @@ func candidateWithUser() map[string]any {
 			"hostname": "sec-node",
 			"login": map[string]any{
 				"users": []map[string]any{
+					// 整文档提交至少要留一个 super-user（决策 #152）
+					superUserDoc(),
 					{"name": "opssec", "class": "operator",
 						"password_hash": sentinelHash},
 				},

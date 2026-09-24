@@ -1,0 +1,152 @@
+===== V1 收尾第七十八轮：整文档提交的「至少留一个 super-user」自锁兜底（决策 #152）=====
+日期：2026-09-24；分支 `fix/commit-require-superuser`（main `6a91dd3` 之上）
+范围：交接文档 §2.3 登记项「整文档提交缺少『至少留一个 super-user』的兜底」
+（round77 真机复验捅出，见 `docs/evidence/v1-closeout-round77-one-shot-lock-release.txt` §4b）。
+
+----- 1. 起因与交付 -----
+起因（round77 §4b 原症状）：`login-users` 的 **DELETE** 路径早有「不能删最后一个 super-user」守卫
+（`internal/api/resources_w5.go` 的 `handleDeleteLoginUser`），但**整文档提交**这条路
+（`PUT /configuration/candidate` + `POST /configuration/commit`、CLI `load override`、
+`request system configuration restore` 一类）**没有等价兜底** ⇒ 一次提交就能把本机提交成
+「无人可登录」（自锁，只能带外恢复）。round77 复验时探针用空配置提交，**开发态副本的账号真被清空**。
+`internal/model/validate.go` 只拦了「用户存在但 PasswordHash 为空」，**空用户表**这一形态没拦。
+
+1.1 先摸清落点（复核结论，与交接给的线索一致）
+| 事实 | 结论 |
+|---|---|
+| 引擎默认校验链 | `NewEngine` 里 `e.validate = model.Validate(c) + model.CheckResources(c)`，**且可注入**（`Options.Validate`） |
+| 守卫该放哪 | **不能**放进 `e.validate` 链（装配方换链即静默失效）⇒ 直接放 `Engine.Commit`，在 `e.validate` 之后 |
+| 判定函数放哪 | `internal/model`——`internal/config` **不能**反向 import `internal/aaa`（aaa 依赖 config，会成环，archtest 会拦） |
+| 有效 class 判据 | 与 service 侧同源：`Class` 为空按 **read-only** 算（`aaa.effectiveClass` / `api.effectiveClassOf`）⇒「没写 class 的账号」不算 super-user |
+| 首启引导 | `aaa.EnsureBootstrapAdmin` 走「Edit → 写含 admin 的候选 → Commit」⇒ 新守卫**不挡**它（`internal/aaa` 全包测试已复跑通过） |
+| 唯一例外 | `internal/system/backup.go` 的 `Zeroize` 提交 `model.Config{}`（恢复出厂的**目的**就是复位账号） |
+
+1.2 交付
+
+| 文件 | 改了什么 |
+|---|---|
+| `internal/model/validate.go` | 新增 `ClassSuperUser` 常量、`EffectiveClass(u)`（缺省 read-only）、`CheckSuperUserPresent(c) []ValidateError`（消息可操作、不含需求编号；**不在** `Validate` 默认链里） |
+| `internal/config/engine.go` | `CommitOpts` 新增 `AllowNoSuperUser bool`（注释写明仅 zeroize 使用）；`Commit` 里 `e.validate` 之后、既有失败分支之前挂 `if !opts.AllowNoSuperUser { verrs = append(verrs, model.CheckSuperUserPresent(*e.candidate)...) }` |
+| `internal/system/backup.go` | `Zeroize` 提交时带 `AllowNoSuperUser: true`（含「为什么这里必须放行」注释） |
+| `internal/config/superuser_guard_test.go`（新增） | 5 个用例（其中 1 个含 3 个子用例；见 §3.1） |
+| `internal/api/commit_superuser_test.go`（新增） | REST 端到端用例（见 §3.1 ⑥） |
+| `internal/model/validate_test.go` | `TestCheckSuperUserPresent`（判定函数本身：混排/只有 operator/只有 read-only/class 为空/空表/无 login/无 system/消息无编号） |
+| `internal/archtest/superuser_guard_test.go`（新增） | 结构守护：豁免开关的赋值点唯一（见 §3.3） |
+| `internal/config/engine_test.go`、`mgmt_confirm_test.go`、`audit_highrisk_test.go`、`internal/system/backup_test.go`、`internal/api/{configuration,configuration_committed,configuration_history,candidate_merge,shape_contract,redact,resources,max_sessions}_test.go` | **既有用例 fixture 改成真机形态**（见 §3.4）——这是行为变更的必然连带，如实登记 |
+| `docs/NFViS-openapi.yaml` + `internal/api/openapi.json` | `POST /configuration/commit` 的 description 与 400 说明、`PUT /configuration/candidate` 的 description、`ConfigAccepted`/`Error400` 描述（JSON 由 YAML 再生成） |
+| `docs/NFViS-CLI命令树完整设计.md` | §2.1 事务命令块后补「commit 的校验」段（判据、落点、例外） |
+| `docs/NFViS-用户手册.md` | §4.2（提交的文档必须至少保留一个 super-user）、§10.12（配置页整文档提交同一条约束） |
+| `docs/NFViS-系统产品需求与目标架构规格书.md` | 附录 A 追加决策 #152 |
+| `AGENTS.md` | 决策条数 151 → 152（`check_decisions_count.sh` 通过） |
+| `docs/V1-收尾待办.md` | §2.3 该条改为 ✅ 已完成（round78，决策 #152）；§0 入口块与顶部表**未动**（主会话维护） |
+
+----- 2. 守卫语义 -----
+- **判据**：candidate 里**至少一个**有效 class 为 `super-user` 的用户即通过；有效 class ＝ `Class` 为空按
+  `read-only` 算 ⇒「没写 class 的账号」不算 super-user（与授权判定同源，否则会出现
+  「守卫认为还有 super-user，实际没人有权限」的假通过）。
+- **失败语义与既有校验完全一致**（挂在同一个失败分支上）：返回 `ValidationError`（逐条 `ValidateError`，
+  `path=system.login.users`）、**候选保留**、**编辑锁保留**、审计留一条 `config.commit … failure`——
+  操作者补一个 super-user 后可直接重提（用例 ① 钉住了"不是卡死，是改完再提"）。
+- **例外**：`CommitOpts.AllowNoSuperUser`（唯一赋值点在 `internal/system/backup.go` 的 `Zeroize`）。
+  恢复出厂提交空配置后账号表为空，由**下次启动的引导**重建 admin（既有行为，未改）。
+- 报错原文（可操作、不含需求编号）：
+  `提交被拒：配置里至少要保留一个 super-user 账号，否则本机将无人可登录——请先建一个 super-user 账号；若要复位账号，请用 request system zeroize（恢复出厂）`
+
+----- 3. 用例、变异验证与结构守护 -----
+3.1 用例
+- `internal/config/superuser_guard_test.go`：
+  ① `TestCommitRejectsEmptyConfigWithoutSuperUser`：空配置提交 → `ValidationError`、**候选保留且仍脏**、
+     锁保留（他人 `Edit` 得 `ErrLocked`）、committed 与 rev 不动、报错含 `super-user`/`无人可登录`/`zeroize` 且无 `FR-`；
+     补回 super-user 后**同一候选**即可提交（rev 2）。
+  ② `TestCommitRejectsNonSuperUserOnlyConfig`：只有 operator / 只有 read-only / **class 为空** 三种都被拒。
+  ③ `TestCommitWithSuperUserStillPasses`：含 super-user（+ 一个 operator 混排）照常提交（rev 2）。
+  ④ `TestCommitAllowNoSuperUserExemptsZeroize`：不带豁免的空配置被拒；带豁免则提交成功，committed 变空配置。
+  ⑤ `TestSuperUserGuardSurvivesCustomValidateChain`：把 `Options.Validate` 换成「什么都不校验」的自定义链后，
+     **兜底仍然生效**（证明它没走那条可注入的链）。
+- `internal/api/commit_superuser_test.go`：
+  ⑥ `TestCommitWithoutSuperUserRejectedAndLoginSurvives`（端到端）：`PUT /configuration/candidate`（空文档）→ 200；
+     `POST /configuration/commit` → **400 `VALIDATION_FAILED`**；随后 ① `GET /system/login-users` 仍列出 `admin`、
+     ② **`POST /login` 用 admin 口令仍 200 且发 token**（独立事实源：走完整认证路径，不看接口自述）、
+     ③ `GET /configuration/candidate` 仍是编辑态（`"dirty":true`）、④ 补回 super-user 后同一会话提交 200。
+- `internal/model`：`TestCheckSuperUserPresent`（判定函数边界 + 消息无需求编号）。
+
+3.2 变异验证（两条，均已还原；实测输出）
+① 删掉守卫整块（`internal/config/engine.go`）：
+```
+--- FAIL: TestCommitRejectsEmptyConfigWithoutSuperUser (0.06s)
+    superuser_guard_test.go:62: 空配置提交应返回 ValidationError，实得 <nil>
+--- FAIL: TestCommitRejectsNonSuperUserOnlyConfig/只有_operator|只有_read-only|class_为空（缺省只读） (0.06s)
+    superuser_guard_test.go:129: 没有 super-user 的配置应被拒，实得 <nil>
+--- FAIL: TestCommitWithoutSuperUserRejectedAndLoginSurvives (1.07s)
+    commit_superuser_test.go:30: 清空账号表的提交应 400: 200 {"committed":true,"revision":4}
+FAIL	github.com/xzjt/nfvis/internal/api	1.101s
+```
+（最后一行即 **round77 §4b 的原症状**：空账号表的提交真的成功了。）
+② `if !opts.AllowNoSuperUser` → `if false`（等价「无条件把 AllowNoSuperUser 当 true」）：
+```
+--- FAIL: TestCommitRejectsEmptyConfigWithoutSuperUser (0.06s)
+    superuser_guard_test.go:62: 空配置提交应返回 ValidationError，实得 <nil>
+--- FAIL: TestCommitWithoutSuperUserRejectedAndLoginSurvives (1.07s)
+    commit_superuser_test.go:30: 清空账号表的提交应 400: 200 {"committed":true,"revision":4}
+```
+两条变异下结构守护同时报 ✗（`!opts.AllowNoSuperUser` 读取点实得 0 处），说明"只加字段不接线"也会被挡住。
+
+3.3 结构守护（`internal/archtest/superuser_guard_test.go`，读源码断言，与 `TestUIConsoleRoleGating` 同款）
+- 产品代码（非 `_test.go`）里 `AllowNoSuperUser: true` **恰好 1 处**，且必须在 `internal/system/backup.go`；
+- `internal/config/engine.go` 里 `!opts.AllowNoSuperUser` **恰好 1 处**（兜底真的接了线）。
+红-绿验证（两条都实测）：
+```
+（在 backup.go 里再加一处 →） superuser_guard_test.go:87: internal/system/backup.go 里的赋值应恰好 1 处，实得 2
+（在 internal/api/configuration.go 里加一处 →）
+    superuser_guard_test.go:78: internal/api/configuration.go 里置了 AllowNoSuperUser——该开关只允许恢复出厂使用…
+    superuser_guard_test.go:84: AllowNoSuperUser 的赋值点应恰好 1 处（internal/system/backup.go），实得 2: [...]
+```
+用例（`_test.go`）不受限：正反两面都要验（豁免能过、不豁免被拒）。
+
+3.4 既有用例 fixture 的同步（**如实登记**：这是行为变更，十余处整文档 fixture 此前都在"提交一份没有账号的文档"）
+- `internal/config/engine_test.go` 的 `baseCommitted()`：基线补一个 `admin`（super-user）——真机的 committed
+  配置总有首启引导建的 admin；否则与该守卫无关的 14 个用例会整片被拒。
+- `internal/config/mgmt_confirm_test.go`（`mgmtSet`、`TestUnrelatedCommitDoesNotRequireConfirmed`）：这两个用例的基线
+  刻意**不含 system 段**（模拟"本机还没配过"），故在**候选**里补 super-user（真机上它来自引导）。
+- `internal/config/audit_highrisk_test.go` 的「删用户」步骤：原来 `l.Users = nil`（把账号删光）——正是本守卫要拦的自锁；
+  改成**只删 bob、保留 admin**（该用例考的是删除动作的审计形状）。
+- `internal/system/backup_test.go`：新增 `withSuperUser(...)`，seed 配置与**归档配置**都带上 super-user
+  （真机的备份归档里就有账号，恢复的文档自然带着它）。
+- `internal/api`：`sampleCandidate()` 补 super-user；新增 `superUserDoc()`（map 形态）/`withSuperUser(cfg)` 两个
+  测试助手；`candidate_merge`（base 文档）、`configuration_committed`（管理口变更文档）、`configuration_history`、
+  `shape_contract`、`redact`（`candidateWithUser`）、`resources`（`putLoginUser` 改为"保留 super-user + 加一个操作员"）、
+  `max_sessions` 各处同步。
+
+----- 4. 真机复验（**由主会话执行**；本节为占位，未在本会话执行）-----
+> ⚠️ **真机上不要跑 `request system zeroize` / 恢复出厂**：它会删 `/var/lib/nfvis/images` 等**共享路径**，
+> 破坏冒烟阶段 3 的前置（`alpine.qcow2`、`docker alpine:3.20`）。例外点（`AllowNoSuperUser`）已由单测覆盖
+> （用例 ④），真机不必也不该验它。
+
+环境：本分支构建的开发态实例（明文，`/tmp/nfvisd-csu`）+ **生产库副本**；操作者 = super-user（admin）；
+`ens160` 是管理口——**全程不碰**。
+
+| 步骤 | 命令/请求 | 断言与**独立事实源** |
+|---|---|---|
+| ① 记录基线 | `GET /system/login-users`；`curl -s .../configuration/history \| jq length`；`show configuration \| display set` | 账号表含 `admin`（super-user）；记下 rev 与 cfgsha（配置库指纹） |
+| ② 空配置整文档提交 | `PUT /configuration/candidate` body `{}` → `POST /configuration/commit` | 期望 **400 `VALIDATION_FAILED`**，detail 里 `system.login.users` 一条、文案含「super-user」；**rev 不变**（历史长度与①一致） |
+| ③ 自锁未发生（关键） | 用 admin 口令 `POST /login`；`GET /system/login-users`；`CLI show system login-users` | 期望 **200 + token**；账号表仍含 admin；三条路径口径一致（REST/CLI 与配置库**逐字段**相同） |
+| ④ 候选/锁保留 | `GET /configuration/candidate`；`GET /system/configuration/sessions` | 期望候选仍在（`dirty:true`，内容为①的替换稿）、锁仍由该会话持有（决策 #151 的收尾**不适用于校验失败**） |
+| ⑤ 改完再提（闭环） | `PUT /configuration/candidate`（含 admin 的文档）→ `POST /configuration/commit` → `DELETE /configuration/candidate` | 期望 **200**、rev +1；`virsh`/`vppctl` 无关故只对配置库取指纹，确认与提交内容一致 |
+| ⑥ 只读/操作员文档同样被拒 | `PUT candidate`（只有 operator 的文档）→ `commit` | 期望 400 且点明缺 super-user（与 DELETE 守卫同源） |
+
+**收尾**：删掉探针产生的修订（或整库副本删除）、停开发态实例、核对生产库指纹与动作前一致（**逐字段**）。
+
+----- 5. 环境与范围 -----
+- 本会话**未碰真机/VM**、未跑 `make integration`、未 push、未开 PR；只提交到分支 `fix/commit-require-superuser`。
+- 宿主侧 `GOFLAGS=-p=1 make check` **全绿（EXIT=0）**：全量测试（`internal/api` 265s）+ vet + 覆盖率门槛
+  （config 84.5% / model 84.2% / schema 90.8% / network 74.7% / compute 87.8% / container 76.3% / images 75.1%）+
+  archtest（含本轮的赋值点唯一性守护）+ docscheck（决策条数 **152**、YAML 无重复键、openapi.json 同步）+
+  toolcheck（两套桩式自校准）+ prototype 全绿。
+- 存疑/未做：
+  ① **行为变更的边界**：本守卫是"提交的文档必须**始终**至少有一个 super-user"（不只是"不许减少"）。
+     真机上 committed 总有引导建的 admin，故与"不许减少"等价；**唯一的空账号态**是恢复出厂之后、下次启动引导之前
+     （那条路已豁免）。若将来有"合法地跑一台没有本地账号的机器"的需求，需要重开这条口径。
+  ② 未做：`request system zeroize` 的真机验证（见 §4 顶部警告，按口径只能靠单测）；
+  ③ 未做：控制台（Web）侧的**可视**复验——控制台配置页提交走的是同一个 `POST /configuration/commit`，
+     被拒时按既有 `httpErrText` 显示服务端原话，理论上无需前端改动，但按决策 #141 的口径"界面交付要在浏览器里
+     真的操作一遍"，建议主会话在真机复验时顺带在控制台配置页提交一次空账号文档，确认错误提示如实显示。

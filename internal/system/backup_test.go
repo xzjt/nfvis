@@ -40,6 +40,22 @@ func newTestManager(t *testing.T, imgs ImageStore) (*Manager, *config.Engine) {
 	return m, eng
 }
 
+// withSuperUser 给配置补一个 super-user 账号：整文档提交（含配置恢复）必须至少留一个
+// super-user，否则本机将无人可登录（决策 #152）。真机上这道账号来自首启引导，
+// 备份归档里也带着它——故测试的 seed 配置与归档配置都要有。
+func withSuperUser(cfg model.Config) model.Config {
+	if cfg.System == nil {
+		cfg.System = &model.SystemConfig{}
+	}
+	if cfg.System.Login == nil {
+		cfg.System.Login = &model.SystemLogin{}
+	}
+	cfg.System.Login.Users = append(cfg.System.Login.Users, model.LoginUserConfig{
+		Name: "admin", Class: "super-user", PasswordHash: "pbkdf2$sha256$600000$c2FsdA$aGFzaA",
+	})
+	return cfg
+}
+
 func seedConfig(t *testing.T, eng *config.Engine, cfg model.Config) {
 	t.Helper()
 	sess := config.Session{User: "admin", Source: "test"}
@@ -65,10 +81,10 @@ func seedConfig(t *testing.T, eng *config.Engine, cfg model.Config) {
 func TestBackupAndList(t *testing.T) {
 	imgs := &fakeImages{metas: []images.Meta{{Name: "alpine.qcow2", Type: images.TypeVM, SizeBytes: 10}}}
 	m, eng := newTestManager(t, imgs)
-	seedConfig(t, eng, model.Config{
+	seedConfig(t, eng, withSuperUser(model.Config{
 		System:     &model.SystemConfig{Hostname: "node1"},
 		Interfaces: []model.InterfaceConfig{{Name: "ens2f0", Description: "to-tor"}},
-	})
+	}))
 
 	f, err := m.Backup()
 	if err != nil {
@@ -115,10 +131,11 @@ func TestPathTraversalRejected(t *testing.T) {
 
 func TestRestoreAppliesConfigAndReturnsImageManifest(t *testing.T) {
 	m, eng := newTestManager(t, nil)
-	seedConfig(t, eng, model.Config{System: &model.SystemConfig{Hostname: "before"}})
+	seedConfig(t, eng, withSuperUser(model.Config{System: &model.SystemConfig{Hostname: "before"}}))
 	arch := Archive{
 		Format: Format, ArchiveVer: ArchiveVersion, Version: "test-1.0",
-		Config: model.Config{System: &model.SystemConfig{Hostname: "restored"}},
+		// 归档配置自带 super-user（真机的备份就是这么来的）
+		Config: withSuperUser(model.Config{System: &model.SystemConfig{Hostname: "restored"}}),
 		Images: []images.Meta{{Name: "img.qcow2", Type: images.TypeVM}},
 	}
 	data, _ := json.Marshal(arch)
@@ -160,10 +177,10 @@ func TestZeroizeClearsConfigAndImages(t *testing.T) {
 		{Name: "alpine:3.20", Type: images.TypeContainer},
 	}}
 	m, eng := newTestManager(t, imgs)
-	seedConfig(t, eng, model.Config{
+	seedConfig(t, eng, withSuperUser(model.Config{
 		System:     &model.SystemConfig{Hostname: "node1"},
 		Interfaces: []model.InterfaceConfig{{Name: "ens2f0"}},
-	})
+	}))
 
 	res, err := m.Zeroize(context.Background(), "admin")
 	if err != nil {

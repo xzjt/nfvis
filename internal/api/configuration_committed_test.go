@@ -183,7 +183,11 @@ func TestManagementChangeRequiresConfirmedViaREST(t *testing.T) {
 	token := loginAdmin(t, ts)
 
 	status, _, body := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token,
-		map[string]any{"system": map[string]any{"management": map[string]any{"address": "192.0.2.10/24"}}}, nil)
+		map[string]any{"system": map[string]any{
+			"management": map[string]any{"address": "192.0.2.10/24"},
+			// 整文档提交至少要留一个 super-user（决策 #152）
+			"login": map[string]any{"users": []map[string]any{superUserDoc()}},
+		}}, nil)
 	if status != http.StatusOK {
 		t.Fatalf("PUT candidate: %d %s", status, body)
 	}

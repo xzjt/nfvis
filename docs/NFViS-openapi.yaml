@@ -921,6 +921,9 @@ paths:
         请求头 `X-NFVIS-Merge: true` = **merge**（按字段合并，等价 CLI `load merge`）——
         只覆盖文档里出现的字段，未出现的保持不动（`model.Merge` 语义）。
         200 响应的 `candidate` 是**合并后**的结果（merge 时与请求体不同）。
+        整文档替换意味着"文档里没写的账号就没了"：若替换/合并后的文档一个 super-user
+        （class 为 `super-user`）都不剩，则**带 Auto-Commit 的提交分支**返回 400
+        `VALIDATION_FAILED`（本机不能提交成无人可登录，详见 POST /configuration/commit）。
       requestBody:
         required: true
         content:
@@ -949,6 +952,9 @@ paths:
         凡**经网络接入**的会话（SSH、REST/Web 控制台）都受此约束（FR-CFG-012，决策 #121），
         本地串口豁免；未带 `confirmed_minutes` 时返回 400 `CONFIRM_REQUIRED`。
         确认期内未调用 `POST /configuration/commit:confirm` 将自动回滚。
+        提交的文档还必须**至少保留一个 super-user 账号**（class 为 `super-user`；class 缺省
+        按 `read-only` 算），否则本机将无人可登录（只能带外恢复）——这类提交被拒（400
+        `VALIDATION_FAILED`，候选与编辑锁保留，改完可重提）；要复位账号请用恢复出厂。
       requestBody:
         content:
           application/json:
@@ -966,7 +972,7 @@ paths:
         "400":
           description: |
             校验失败（detail 列出全部错误）；或管理口变更未走 commit confirmed
-            （code=CONFIRM_REQUIRED）
+            （code=CONFIRM_REQUIRED）；或提交后一个 super-user 都不剩（自锁，见上）
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1947,7 +1953,7 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/CommitResult" }
-    Error400: { description: 校验失败, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Error400: { description: "校验失败（含提交后一个 super-user 都不剩的自锁拒绝）", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     Error401: { description: 未认证, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     Error403: { description: 无权限或账号锁定, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     Error404: { description: 资源不存在, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }

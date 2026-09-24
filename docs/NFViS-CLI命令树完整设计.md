@@ -209,6 +209,15 @@ run <oper-command>                # 配置模式内执行操作命令
 discard | exit                    # discard 丢弃 candidate；exit 有未提交变更时提示确认
 ```
 
+**commit 的校验（决策 #152 补一条自锁兜底）**：schema/语义/资源配额/镜像存在性之外，提交的文档
+必须**至少保留一个 super-user 账号**（class 为 `super-user`；**class 缺省按 read-only 算**）。
+本地账号是唯一登录途径，一个 super-user 都不剩就等于把本机提交成「无人可登录」，只能带外恢复；
+守卫落在事务引擎的 `Commit` 上（不在可注入的校验链里，装配方换校验器也漏不掉），失败语义与
+既有校验一致：返回校验失败、**候选与编辑锁保留**，操作者补一个 super-user 后可直接重提。
+这条对整文档替换的几条路一视同仁：`commit`、`load override`（= REST `PUT /configuration/candidate`）
+与 `request system configuration restore`。唯一例外是恢复出厂 `request system zeroize`——
+它的目的就是复位账号（提交空配置后由下次启动的引导重建 admin）。
+
 ### 2.2 `system`
 
 ```
