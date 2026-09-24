@@ -170,7 +170,9 @@ func (m *Manager) Restore(ctx context.Context, data []byte, user string) (config
 	if arch.ArchiveVer > ArchiveVersion {
 		return config.CommitResult{}, nil, fmt.Errorf("%w: archive_version=%d（本机支持 ≤%d）", ErrUnsupported, arch.ArchiveVer, ArchiveVersion)
 	}
-	sess := config.Session{User: user, Source: "system-restore"}
+	// 会话来源用 config.SourceRestore：恢复本身是高危动作（决策 #150），
+	// 由操作级助手记「意图 + 结果」两条；引擎据此不再对归档里的用户变更重复记一组。
+	sess := config.Session{User: user, Source: config.SourceRestore}
 	if err := m.engine.Edit(sess); err != nil {
 		return config.CommitResult{}, nil, fmt.Errorf("进入配置模式: %w", err)
 	}
@@ -196,7 +198,8 @@ type ZeroizeResult struct {
 // 调用方须已完成双重确认（本方法不再询问）。
 func (m *Manager) Zeroize(ctx context.Context, user string) (ZeroizeResult, error) {
 	res := ZeroizeResult{}
-	sess := config.Session{User: user, Source: "system-zeroize"}
+	// 会话来源用 config.SourceZeroize：同上（高危动作由操作级助手记两条，引擎不重复判定）。
+	sess := config.Session{User: user, Source: config.SourceZeroize}
 	if err := m.engine.Edit(sess); err != nil {
 		return res, fmt.Errorf("进入配置模式: %w", err)
 	}

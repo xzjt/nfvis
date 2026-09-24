@@ -384,11 +384,13 @@ func (e *Engine) Sessions() ([]SessionView, error) {
 
 // Commit 校验 + 下发底座 + 落库（FR-CFG-002/003/012）。失败时 candidate 保留。
 // 在途 confirmed 的隐式确认：任意新 commit 即确认（FR-CFG-004）。
-func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (CommitResult, error) {
+//
+// 返回值取具名（决策 #150）：高危档变更的意图行落库后，需要一个 defer 兜住
+// 「意图与结果必须成对」——它要读最终的错误值。
+func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res CommitResult, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.sweepLocked()
-	res := CommitResult{}
 
 	if cf, err := e.store.GetConfirmed(); err != nil {
 		return res, err
@@ -462,8 +464,34 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 
 	// FR-CFG-011⑤：镜像检查需要 committed 之后的候选配置
 
+	// 决策 #150：高危档变更（本地用户/权限类/口令策略、外部证书文件引用）在**下发底座之前**
+	// 留一条「意图」行——中途崩溃或失败时，读审计的人仍看得出这次动作要做什么。结果行沿用
+	// 下面既有的那条（成功/失败都写）⇒ 一次高危提交恰好两条记录，非高危提交仍是一条。
+	// 判定放在这里（而不是更早）：前面的校验/confirm 守卫都是**没开始动作**的拒绝，
+	// 不该留下意图；意图落在这里，恰好是「动作即将执行」的那条线。
+	hrIntent := highRiskConfigIntent(committed, newCfg, sess.Source)
+	resultWritten := false
+	if hrIntent != "" {
+		e.appendAudit(AuditEntry{
+			Time: e.now(), User: sess.User, Action: "config.commit",
+			Detail: hrIntent, Result: AuditResultIntent,
+		})
+		// 兜底：意图行之后任何一条「没走到结果行」的返回（如落库失败）都要补一条 failure，
+		// 否则审计里只剩一条「要做什么」，读的人无法判断动作到底做没做。
+		defer func() {
+			if resultWritten {
+				return
+			}
+			e.appendAudit(AuditEntry{
+				Time: e.now(), User: sess.User, Action: "config.commit",
+				Detail: hrIntent + " 未完成: " + commitResultMissing(err), Result: "failure",
+			})
+		}()
+	}
+
 	// 下发底座（失败逆序补偿，全有或全无，骨架 §3.3）
 	if err := e.applier.Apply(ctx, committed, newCfg); err != nil {
+		resultWritten = true
 		e.appendAudit(AuditEntry{
 			Time: e.now(), User: sess.User, Action: "config.commit",
 			Detail: fmt.Sprintf("%s\n底座错误: %v", model.Diff(committed, newCfg), err), Result: "failure",
@@ -490,6 +518,7 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (Com
 		res.ConfirmedUntil = &deadline
 	}
 
+	resultWritten = true
 	e.appendAudit(AuditEntry{
 		Time: e.now(), User: sess.User, Action: "config.commit",
 		Detail: model.Diff(committed, newCfg), Result: "success",

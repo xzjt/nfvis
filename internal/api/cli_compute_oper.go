@@ -789,25 +789,37 @@ func (x *cliExecutor) systemSoftware(user string, t []string, raw []string) stri
 		} else if len(t) == 3 {
 			sha = t[2] // 容错：直接跟 sha256 值
 		}
-		res, err := x.sw.Add(context.Background(), pkg, sha)
+		// 决策 #150：高危档动作——审计两条（意图 + 结果），与 REST `POST /system/software` 同源。
+		var prev, ver, pkgName string
+		err := runHighRisk(x.engine, user, highRiskSoftwareAdd(pkg, sha), func() (string, error) {
+			res, rerr := x.sw.Add(context.Background(), pkg, sha)
+			if rerr != nil {
+				return "", rerr
+			}
+			prev, ver, pkgName = res.Previous, res.Version, res.Package
+			return fmt.Sprintf("升级完成：%s → %s（包 %s）", prev, ver, pkgName), nil
+		})
 		if err != nil {
-			x.audit(user, "system.software.add", "安装 "+pkg, err)
 			return "%% " + err.Error() + "\n"
 		}
-		x.audit(user, "system.software.add", fmt.Sprintf("安装 %s（%s → %s）", res.Package, res.Previous, res.Version), nil)
-		return fmt.Sprintf("升级完成：%s → %s（包 %s）。nfvisd 由 postinst 重启后版本生效。\n",
-			res.Previous, res.Version, res.Package)
+		return fmt.Sprintf("升级完成：%s → %s（包 %s）。nfvisd 由 postinst 重启后版本生效。\n", prev, ver, pkgName)
 	case "rollback":
 		if confirmed == 0 {
 			return "回退到上一版本将替换 nfvis 并重启 nfvisd。Continue? [yes,no] "
 		}
-		res, err := x.sw.Rollback(context.Background())
+		var prev, ver, pkgName string
+		err := runHighRisk(x.engine, user, highRiskSoftwareRollback(), func() (string, error) {
+			res, rerr := x.sw.Rollback(context.Background())
+			if rerr != nil {
+				return "", rerr
+			}
+			prev, ver, pkgName = res.Previous, res.Version, res.Package
+			return fmt.Sprintf("回退完成：%s → %s", prev, ver), nil
+		})
 		if err != nil {
-			x.audit(user, "system.software.rollback", "回退", err)
 			return "%% " + err.Error() + "\n"
 		}
-		x.audit(user, "system.software.rollback", fmt.Sprintf("回退 %s → %s", res.Previous, res.Version), nil)
-		return fmt.Sprintf("回退完成：%s → %s（包 %s）。\n", res.Previous, res.Version, res.Package)
+		return fmt.Sprintf("回退完成：%s → %s（包 %s）。\n", prev, ver, pkgName)
 	}
 	return "%% 语法: request system software add <deb路径|URL> [sha256 <hex>] | rollback\n"
 }
@@ -990,16 +1002,24 @@ func (x *cliExecutor) systemRestore(user, path string) string {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
+		// 读不到归档 = 动作没开始，不落审计（与 REST 侧读 multipart 失败同口径）
 		return "%% 读取归档 " + path + " 失败: " + err.Error() + "\n"
 	}
-	res, manifest, err := x.sys.Restore(context.Background(), data, user)
+	// 决策 #150：高危档动作——审计两条（意图 + 结果），与 REST `POST /system/restore` 同源。
+	var rev, imgN int
+	err = runHighRisk(x.engine, user, highRiskRestore(path), func() (string, error) {
+		res, manifest, rerr := x.sys.Restore(context.Background(), data, user)
+		if rerr != nil {
+			return "", rerr
+		}
+		rev, imgN = res.Revision, len(manifest)
+		return fmt.Sprintf("已恢复配置（revision %d，归档含镜像清单 %d 项）", rev, imgN), nil
+	})
 	if err != nil {
-		x.audit(user, "system.restore", "从 "+path+" 恢复", err)
 		return "%% " + err.Error() + "\n"
 	}
-	x.audit(user, "system.restore", "从 "+path+" 恢复", nil)
 	return fmt.Sprintf("已恢复（revision %d）。归档含镜像清单 %d 项；镜像文件本体不在归档内，如被引用需另行导入。\n",
-		res.Revision, len(manifest))
+		rev, imgN)
 }
 
 // systemZeroize：request system zeroize（双重确认，FR-OPS-007）。
@@ -1021,13 +1041,20 @@ func (x *cliExecutor) systemZeroize(user string, raw []string) string {
 	case 1:
 		return "再次确认：此操作不可撤销。" + warn + " Proceed? [yes,no] "
 	}
-	res, err := x.sys.Zeroize(context.Background(), user)
+	// 决策 #150：高危档动作——审计两条（意图 + 结果），与 REST `POST /system:zeroize` 同源。
+	var rev, removed int
+	err := runHighRisk(x.engine, user, highRiskZeroize(), func() (string, error) {
+		res, rerr := x.sys.Zeroize(context.Background(), user)
+		if rerr != nil {
+			return "", rerr
+		}
+		rev, removed = res.Revision, res.RemovedImages
+		return fmt.Sprintf("已恢复出厂（revision %d，删除镜像 %d 个）", rev, removed), nil
+	})
 	if err != nil {
-		x.audit(user, "system.zeroize", "恢复出厂", err)
 		return "%% " + err.Error() + "\n"
 	}
-	x.audit(user, "system.zeroize", "恢复出厂（清空配置/镜像/VNF，重置账号）", nil)
-	return fmt.Sprintf("已恢复出厂（revision %d，删除镜像 %d 个）。重启后进入初始化状态。\n", res.Revision, res.RemovedImages)
+	return fmt.Sprintf("已恢复出厂（revision %d，删除镜像 %d 个）。重启后进入初始化状态。\n", rev, removed)
 }
 
 // checkBackupExportDst 校验配置归档的导出目标路径（决策 #148）。

@@ -66,16 +66,26 @@ func (s *Server) handlePutTLS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "certificate 与 key 必填（PEM 文本）", nil)
 		return
 	}
-	info, err := s.tlsMgr.Install(in.Certificate, in.Key)
+	// 决策 #150：证书上传是高危档动作——执行前写意图、执行后写结果（成功/失败都写）。
+	// 意图里**没有** PEM 正文（秘密不进审计）；CLI 侧 `set system api tls cert-file …` 的
+	// 证书安装走配置事务（由引擎记同一档的两条），两条路径的机制不同但口径一致。
+	user := "api"
+	if id, ok := Identity(r); ok {
+		user = id.User
+	}
+	var info system.TlsInfo
+	err := runHighRisk(s.engine, user, highRiskTLSInstall(), func() (string, error) {
+		var rerr error
+		info, rerr = s.tlsMgr.Install(in.Certificate, in.Key)
+		if rerr != nil {
+			return "", rerr
+		}
+		return "已安装外部证书（指纹 " + info.Fingerprint + "），管理面证书已替换", nil
+	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
 		return
 	}
-	user := "api"
-	if info2, ok := Identity(r); ok {
-		user = info2.User
-	}
-	s.engine.Audit(user, "system.tls.install", "安装外部证书（指纹 "+info.Fingerprint+"）", "success")
 	writeJSON(w, http.StatusOK, info)
 }
 
