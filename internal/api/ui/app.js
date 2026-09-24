@@ -312,6 +312,21 @@ function apiErrText(e, hint) {
 // （浏览器验收抓到的旧缺陷：token 失效时整页报 JS 错，而不是干净地提示）。
 const rowsOf = (v) => (Array.isArray(v) ? v : []);
 
+// httpErrText：**直连 fetch**（下载/上传/日志这类不走 api() 的路径）失败时的文案。
+// 与 api() 同口径——错误体里的原话优先，取不到才回落到状态码：服务端讲了原因
+// （如「当前 class 无权执行该操作」），就要让操作者看到，而不是只剩一个 HTTP 403。
+async function httpErrText(res) {
+  let msg = 'HTTP ' + res.status;
+  try { const b = await res.json(); if (b && b.message) msg = b.message; } catch (e) { /* 非 JSON 错误体：保留状态码 */ }
+  return msg;
+}
+
+// 同上，但给**已经把响应体读成文本**的调用方用（文本类端点：差异 / 日志）。
+function errTextOf(text, status) {
+  try { const b = JSON.parse(text); if (b && b.message) return b.message; } catch (e) { /* 非 JSON 错误体：保留状态码 */ }
+  return 'HTTP ' + status;
+}
+
 // 页面级取数失败提示：把失败的端点列出来（不静默），全部成功时清掉提示。
 // 只清自己写的那条——路由的「页面不存在」提示要留着（否则一重渲染就被抹掉）。
 let pageWarnActive = false;
@@ -2764,7 +2779,7 @@ async function cfgShowDiff() {
     const res = await fetch(API + '/configuration/diff', { headers: { Authorization: 'Bearer ' + token } });
     const text = await res.text();
     const pre = $('cfg-diff');
-    pre.textContent = res.ok ? (text.trim() || '（candidate 与 committed 无差异）') : '读取差异失败：HTTP ' + res.status;
+    pre.textContent = res.ok ? (text.trim() || '（candidate 与 committed 无差异）') : '读取差异失败：' + errTextOf(text, res.status);
     pre.hidden = false;
   } catch (e) {
     cfgMsg('读取差异失败：' + e.message, true);
@@ -3112,7 +3127,8 @@ async function diagLogs() {
   pre.textContent = '读取中…';
   try {
     const res = await fetch(API + '/system/logs?last=100', { headers: { Authorization: 'Bearer ' + token } });
-    pre.textContent = res.ok ? (await res.text() || '（日志为空）') : '读取失败：HTTP ' + res.status;
+    const text = await res.text();
+    pre.textContent = res.ok ? (text || '（日志为空）') : '读取失败：' + errTextOf(text, res.status);
   } catch (e) {
     pre.textContent = '读取失败：' + e.message;
   }
@@ -4155,9 +4171,7 @@ async function ctLogsLoad() {
       headers: { Authorization: 'Bearer ' + token },
     });
     if (!res.ok) {
-      let msg = 'HTTP ' + res.status;
-      try { const b = await res.json(); if (b && b.message) msg = b.message; } catch (e) { /* 纯文本错误体 */ }
-      pre.textContent = '读取失败：' + msg;
+      pre.textContent = '读取失败：' + await httpErrText(res);
       return;
     }
     pre.textContent = (await res.text()) || '（无输出）';
@@ -4348,9 +4362,7 @@ async function imgImportFile() {
   try {
     const res = await fetch(API + '/images', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd });
     if (!res.ok) {
-      let msg = 'HTTP ' + res.status;
-      try { const b = await res.json(); if (b && b.message) msg = b.message; } catch (e) { /* 非 JSON */ }
-      imgMsg('导入失败：' + msg, true);
+      imgMsg('导入失败：' + await httpErrText(res), true);
     } else {
       const body = await res.json().catch(() => ({}));
       imgMsg(imgOutcome(body, c.name), imgIsFailed(body));
@@ -4736,7 +4748,7 @@ async function downloadFile(path, name, note) {
   if (note) note('下载 ' + name + '：准备中…', false);
   try {
     const res = await fetch(API + path, { headers: { Authorization: 'Bearer ' + token } });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (!res.ok) throw new Error(await httpErrText(res));
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = el('a', { href: url, download: name });
@@ -5129,7 +5141,7 @@ async function restoreRun(name) {
     const res = await fetch(API + '/system/backup/' + encodeURIComponent(file), {
       headers: { Authorization: 'Bearer ' + token },
     });
-    if (!res.ok) throw new Error('读取归档失败（HTTP ' + res.status + '）');
+    if (!res.ok) throw new Error('读取归档失败（' + await httpErrText(res) + '）');
     const blob = await res.blob();
     const fd = new FormData();
     fd.append('file', blob, file);

@@ -65,6 +65,11 @@ const MUTATIONS = {
     find: "'/dpdk?confirm=true'",
     replace: "'/dpdk'",
   },
+  // 把下载路径的错误文案退回裸状态码——"服务端的原话要到达操作者"的回归（⑧ 应报 ✗）
+  rawhttp: {
+    find: 'if (!res.ok) throw new Error(await httpErrText(res));',
+    replace: "if (!res.ok) throw new Error('HTTP ' + res.status);",
+  },
 };
 
 if (process.argv[2] === '--mutate') {
@@ -699,6 +704,19 @@ async function runHighAction(ctx, act, start) {
   ok('app.js 里已经没有 window.confirm(', !/window\.confirm\s*\(/.test(APP_SRC_RAW));
   ok('高危档的倒计时不许被调用点缩短（app.js 里不该出现 countdown 覆盖）',
     !/\bcountdown:\s*[0-9]/.test(APP_SRC_RAW));
+
+  // 直连 fetch（下载/上传/日志这类不走 api() 的路径）失败时，**服务端的原话要到达操作者**：
+  // 服务端会说明原因（如「当前 class 无权执行该操作」），界面只剩一个 HTTP 403 就是把原因丢了。
+  // 判据是结构性的：裸状态码只允许出现在两个取文案的助手函数里，其余调用点都必须经它们。
+  console.log('— ⑧ 直连 fetch 的失败文案：服务端原话优先（不许只剩 HTTP 状态码） —');
+  const viaHelper = (APP_SRC_RAW.match(/await httpErrText\(res\)/g) || []).length;
+  ok('下载/归档读取/容器日志/镜像上传都经 httpErrText（4 处调用）', viaHelper === 4, '出现 ' + viaHelper + ' 处');
+  const viaTextHelper = (APP_SRC_RAW.match(/errTextOf\(text, res\.status\)/g) || []).length;
+  ok('文本类端点（差异/日志）经 errTextOf（2 处调用）', viaTextHelper === 2, '出现 ' + viaTextHelper + ' 处');
+  // 回归判据：被修掉的那几处**裸状态码文案**不许再出现（各自写明端点的读失败）。
+  for (const bad of ['读取失败：HTTP ', '读取差异失败：HTTP ', '读取归档失败（HTTP ']) {
+    ok('不再出现「' + bad + '」这种丢了服务端原因的文案', APP_SRC_RAW.indexOf(bad) < 0);
+  }
 
   if (RC === 0) console.log('全部符合预期');
   else console.log('有不符合预期的用例');
