@@ -23,13 +23,9 @@ import (
 // uiNotWired 契约有、界面**有意**不接的路径 → 理由（新增端点须在此归类或接入界面）。
 var uiNotWired = map[string]string{
 	// —— 已登记：后续增量的界面工作（**这一段就是界面缺口清单**）——
-	"/interfaces/{name}/dpdk":            "DPDK 绑定/解绑涉及管理口红线，界面暂不提供（CLI 有守卫）",
-	"/interfaces/{name}/sriov":           "SR-IOV 无硬件环境验证，界面暂不提供",
-	"/virtual-switches/{name}/mac-table": "MAC 表数据量大需分页，后续增量",
-	"/virtual-switches/{name}/ports":     "成员端口全量替换属配置编辑，走「配置」卡",
-	"/system/hardware":                   "硬件健康明细——后续增量（阈值告警已在告警卡体现）",
-	"/system/health/thresholds":          "健康阈值设置——后续增量",
-	"/protocols/lldp":                    "LLDP 开关状态——邻居表已接；开关属配置编辑（走「配置」卡）",
+	"/interfaces/{name}/dpdk":        "DPDK 绑定/解绑涉及管理口红线，界面暂不提供（CLI 有守卫）",
+	"/interfaces/{name}/sriov":       "SR-IOV 无硬件环境验证，界面暂不提供",
+	"/virtual-switches/{name}/ports": "该路径是**整体替换**成员端口的写入口；界面读成员端口走 /virtual-switches/{name}（详情页），改成员端口走「配置」页的虚拟交换机表单",
 
 	// —— 只有 DELETE 的端点：界面暂无删除入口（详情页从**列表端点**取数）——
 	// 这两条是"路径存在但读不到"的坑：按对象名直觉写成 `/qos/policies/{name}` / `/port-mirroring/{name}`
@@ -48,7 +44,6 @@ var uiNotWired = map[string]string{
 	"/system/login-users/{name}:change-password": "同上",
 	"/system/kernel:apply":                       "内核基线应用需重启生效，界面暂不提供",
 	"/system/kernel:rollback":                    "同上",
-	"/system/ntp:sync":                           "NTP 立即同步——界面暂无入口",
 
 	// —— 配置类：走「配置」卡的候选 → 提交流程（不单列界面入口）——
 	"/system":     "系统配置段——走「配置」卡（candidate → 提交）",
@@ -163,6 +158,7 @@ var uiDynamicWired = map[string]string{
 	"/system/backup/{file}":                                           "renderArchives()：downloadFile('/system/backup/' + name, …)",
 	"/system/tech-support/{file}":                                     "renderArchives()：downloadFile('/system/tech-support/' + name, …)",
 	"/configuration/rollback/{n}":                                     "cfghTakeCandidate()：POST '/configuration/rollback/' + n（提交历史页的两段式回滚第一步，偏移由 Rev 相减算出）",
+	"/virtual-switches/{name}/mac-table":                              "vsdMacLoad()：api('/virtual-switches/' + name + '/mac-table?limit=' + n)——交换机详情页按需拉取，**不**进路由表 endpoints（大表不该随页面刷新反复下载）",
 }
 
 // contractPathSet 契约里的全部路径（方法无关）。

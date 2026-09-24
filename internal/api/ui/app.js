@@ -351,18 +351,18 @@ async function loadVSwitchStats(vss) {
 // 网络对象：一次拉齐只读视图（每个端点各自降级，缺一个不影响其余）。
 // `pre` 是路由表声明端点的预取结果（softLoad 已取齐）：命中就直接归位，不重复请求；
 // 未预取时（别处直接调用）逐条自取。
+// LLDP 不在这一页：它的开关状态与邻居表有自己的页面（#/network/lldp）——本页只取路由表声明的端点。
 async function loadNetworkObjects(pre) {
   const pick = (path, fetchIt) => (pre && pre[path] !== undefined ? pre[path] : fetchIt());
-  const [vrfs, acls, nat, bonds, lldp, qos, span] = await Promise.all([
+  const [vrfs, acls, nat, bonds, qos, span] = await Promise.all([
     pick('/vrfs', () => soft(api('/vrfs'))),
     pick('/acls', () => soft(api('/acls'))),
     pick('/nat', () => soft(api('/nat'))),
     pick('/bonds', () => soft(api('/bonds'))),
-    pick('/protocols/lldp/neighbors', () => soft(api('/protocols/lldp/neighbors'))),
     pick('/qos/policies', () => soft(api('/qos/policies'))),
     pick('/port-mirroring', () => soft(api('/port-mirroring'))),
   ]);
-  return { vrfs, acls, nat, bonds, lldp, qos, span };
+  return { vrfs, acls, nat, bonds, qos, span };
 }
 
 // 逐口取统计（列表端点只有配置字段；收发包数在 /interfaces/<name> 上）。
@@ -544,6 +544,15 @@ export const VIEWS = {
       const vss = rowsOf(d['/virtual-switches']);
       renderVSwitches(vss, await loadVSwitchStats(vss));
     },
+  },
+  'switchDetail': {
+    render(d, params) { pageWarn(d); renderSwitchDetail(d['/virtual-switches/{name}'], params); },
+  },
+  'lldp': {
+    render(d) { pageWarn(d); renderLldp(d['/protocols/lldp'], d['/protocols/lldp/neighbors']); },
+  },
+  'hardware': {
+    render(d) { pageWarn(d); renderHardware(d['/system/hardware'], d['/system/health/thresholds']); },
   },
   'pools': {
     render(d) { pageWarn(d); renderPools(d['/resource-pools']); },
@@ -3141,18 +3150,40 @@ function vmConsoleSend(text, enter) {
   termWS.send(text + (enter ? '\r' : ''));
 }
 
-// ---------- 虚拟交换机（运行态 + 成员口计数）----------
+// ---------- 虚拟交换机（列表 + 详情）----------
 
+// 列表：点行（或「详情」按钮）进该交换机的详情页——成员口运行态与 MAC 学习表都在详情页，
+// 列表本身不再贴一屏文本。
 function renderVSwitches(vss, rows) {
-  table($('vs-table').querySelector('tbody'), 4, (rows || []).map((r) => [
-    r.cfg.name, r.cfg.type,
-    (r.cfg.ports || []).map((p) => p.interface || p.vnf || p.container || '?').join(', '),
-    r.stat ? r.stat.bd_id : undefined,
-  ]));
-  $('vs-note').textContent = (vss && vss.length) ? '' : '（未配置虚拟交换机）';
+  const tbody = $('vs-table').querySelector('tbody');
+  tbody.textContent = '';
+  const list = rows || [];
+  if (!list.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '5', class: 'muted', text: '（无）' }));
+    tbody.appendChild(tr);
+  } else {
+    list.forEach((r) => {
+      const path = '#/network/switches/' + encodeURIComponent(r.cfg.name);
+      const tr = rowClickable(el('tr'), path);
+      [r.cfg.name, r.cfg.type,
+        (r.cfg.ports || []).map((p) => p.interface || p.vnf || p.container || '?').join(', '),
+        r.stat ? r.stat.bd_id : undefined].forEach((c) => {
+        tr.appendChild(el('td', { text: String(dash(c)) }));
+      });
+      const cell = el('td', { class: 'actions' });
+      const btn = rowButton(el('button', { type: 'button', class: 'ghost small', text: '详情' }));
+      btn.addEventListener('click', () => goDetail(path));
+      cell.appendChild(btn);
+      tr.appendChild(cell);
+      tbody.appendChild(tr);
+    });
+  }
+  $('vs-note').textContent = (vss && vss.length) ? '（' + vss.length + ' 个；点行进详情）' : '（未配置虚拟交换机）';
+
   const pre = $('vs-stat');
   const lines = [];
-  (rows || []).forEach((r) => {
+  list.forEach((r) => {
     (r.stat && r.stat.ports ? r.stat.ports : []).forEach((p) => {
       lines.push(r.cfg.name + ' / ' + p.port + ': ' +
         (p.admin === false ? 'down' : 'up') + '/' + (p.link === false ? 'down' : 'up') +
@@ -3165,6 +3196,153 @@ function renderVSwitches(vss, rows) {
   }
   pre.hidden = false;
   pre.textContent = '成员口计数（运行态）：\n' + lines.join('\n');
+}
+
+// 详情页（#/network/switches/:name）：对象头 + 成员口运行态 + MAC 学习表（按需拉取）。
+// 数据都来自路由表声明的 /virtual-switches/{name}（配置对象 + statistics）；**MAC 表不在声明里**——
+// 它可能很大，只在点「拉取 MAC 表」时才请求，不随页面刷新反复下载。
+let vsdMacFor = '';   // 当前 MAC 表属于哪台交换机（换对象必须清掉，免得把 A 的表挂在 B 名下）
+const VSD_MAC_LIMIT = 200;
+
+function vsdMsg(text, isErr) {
+  const p = $('vsd-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+function vsdMacClear(text, isErr) {
+  table($('vsd-mac-table').querySelector('tbody'), 3, []);
+  $('vsd-mac-note').textContent = '';
+  vsdMsg(text || '', isErr === true);
+}
+
+function renderSwitchDetail(vs, params) {
+  const name = (params && params.name) || '';
+  const ok = vs && !vs.__err;
+  const st = (vs && vs.statistics) || null;
+  $('vsd-name').textContent = name;
+  fill($('vsd-head'), ok ? [
+    ['类型', vs.type],
+    ['成员端口', (vs.ports || []).length],
+    ['数据面 BD', st ? st.bd_id : undefined],
+  ] : [['读取失败', vs ? vs.__err : notFoundText(name, '虚拟交换机')]]);
+  const ports = (st && Array.isArray(st.ports)) ? st.ports : [];
+  table($('vsd-port-table').querySelector('tbody'), 5, ports.map((p) => [
+    p.port, p.admin === false ? 'down' : (p.admin === true ? 'up' : undefined),
+    p.link === false ? 'down' : (p.link === true ? 'up' : undefined),
+    p.rx_packets, p.tx_packets,
+  ]));
+  $('vsd-stat-note').textContent = !ok ? ''
+    : (st ? '' : '（无运行态：该交换机当前不在数据面，或数据面未连接）');
+  // 换了对象：上一台的 MAC 表必须清掉（否则显示的是一台交换机的表、标题却是另一台）。
+  if (vsdMacFor !== name) {
+    vsdMacFor = '';
+    vsdMacClear('');
+  }
+}
+
+// 按需拉取 MAC 表：limit 由操作者给（默认 200 条），服务端按上限截断。
+async function vsdMacLoad() {
+  const name = $('vsd-name').textContent;
+  if (!name) { vsdMsg('没有选中虚拟交换机。', true); return; }
+  const limit = Math.max(1, Math.floor(Number($('vsd-mac-limit').value) || VSD_MAC_LIMIT));
+  vsdMsg('读取 MAC 表…', false);
+  try {
+    const rows = rowsOf(await api('/virtual-switches/' + encodeURIComponent(name) +
+      '/mac-table?limit=' + limit));
+    vsdMacFor = name;
+    table($('vsd-mac-table').querySelector('tbody'), 3, rows.map((r) => [r.mac, r.port, r.vlan]));
+    $('vsd-mac-note').textContent = '（' + rows.length + ' 条' +
+      (rows.length >= limit ? '，已达上限——可能还有更多，把条数调大再拉' : '') + '）';
+    vsdMsg('', false);
+  } catch (e) {
+    vsdMacFor = '';
+    vsdMacClear('读取失败：' + e.message, true);
+  }
+}
+
+// ---------- LLDP（#/network/lldp）----------
+
+// 只读页：全局开关状态 + 接口开关 + 邻居表（运行态）。
+// **开关本身是配置**（改它要写候选配置并提交），故本页不提供开关按钮，只如实显示当前状态，
+// 并指到「配置」页的表单——避免界面上出现"改了运行态、配置里却没有"的双份事实。
+function renderLldp(cfg, neighbors) {
+  const ok = cfg && !cfg.__err;
+  $('lldp-note').textContent = ok ? '' : '（读取失败：' + (cfg ? cfg.__err : '未取到数据') + '）';
+  fill($('lldp-list'), ok ? [
+    ['全局开关', cfg.enabled === true ? '已启用' : (cfg.enabled === false ? '已关闭' : '未声明（按关闭处理）')],
+    ['通告间隔', cfg.advertisement_interval != null ? cfg.advertisement_interval + ' 秒' : '未声明（用默认值）'],
+    ['接口条目', Array.isArray(cfg.interfaces) ? cfg.interfaces.length : 0],
+  ] : []);
+  table($('lldp-iface-table').querySelector('tbody'), 2, rowsOf(cfg && cfg.interfaces).map((i) => [
+    i.interface, i.enabled === false ? '关闭' : '启用',
+  ]));
+  // 邻居字段名以契约声明为准（local_interface）；服务端现在发的就是这个名字，
+  // 仍留 interface 作兜底（连到更早的守护进程时这一列不该整列变空）——取不到就是「—」，不猜。
+  table($('lldp-nbr-table').querySelector('tbody'), 4, rowsOf(neighbors).map((n) => [
+    n.local_interface || n.interface, n.chassis_id, n.port_id, n.ttl,
+  ]));
+}
+
+// ---------- 硬件健康（#/system/hardware）----------
+
+// 只读页：传感器 / 磁盘 SMART / 阈值。字段全部取契约声明的那几个——传感器的 status 就是
+// 服务端按阈值判出的越限状态（正常 / 越限告警 / 越限严重），界面不自己算阈值。
+//
+// **阈值写入有意不在这里直连**：`PUT /system/health/thresholds` 写的是候选配置（并会占用编辑锁），
+// 直写要么绕过「配置」页的候选 → 预校验 → 差异 → 提交流程、要么与「配置」页的整体写候选相互覆盖。
+// 界面上改阈值的入口是「配置」页的「系统 · 健康阈值」表单（提交后生效），本页只读回显。
+const HW_SENSOR_TYPE = { temperature: '温度', fan: '风扇', voltage: '电压', power: '电源' };
+const HW_STATUS_TEXT = { ok: '正常', warning: '越限（告警）', critical: '越限（严重）' };
+const HW_STATUS_CLS = { ok: 'st-ok', warning: 'st-warn', critical: 'st-crit' };
+const HW_SMART_TEXT = { passed: '通过', failed: '异常', unknown: '未知' };
+
+// 硬件健康的两张表：末列是状态，按状态上色；空表如实显示「（无）」。
+function hwTable(tbody, rows) {
+  tbody.textContent = '';
+  if (!rows.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '4', class: 'muted', text: '（无）' }));
+    tbody.appendChild(tr);
+    return;
+  }
+  rows.forEach((r) => {
+    const tr = el('tr');
+    r.cells.forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
+    tr.appendChild(el('td', { class: r.cls || '', text: String(dash(r.status)) }));
+    tbody.appendChild(tr);
+  });
+}
+
+function renderHardware(hw, th) {
+  const ok = hw && !hw.__err;
+  $('hw-note').textContent = ok ? '' : '（读取失败：' + (hw ? hw.__err : '未取到数据') + '）';
+  fill($('hw-list'), ok ? [
+    ['带外管理（BMC）', hw.bmc_present === true ? '存在' : '不存在（改用本机传感器与内核热区）'],
+    ['传感器', Array.isArray(hw.sensors) ? hw.sensors.length + ' 个' : undefined],
+    ['磁盘', Array.isArray(hw.disks) ? hw.disks.length + ' 块' : undefined],
+  ] : []);
+  hwTable($('hw-sensor-table').querySelector('tbody'), rowsOf(hw && hw.sensors).map((s) => ({
+    cells: [s.name, HW_SENSOR_TYPE[s.type] || s.type,
+      s.value != null ? s.value + (s.unit ? ' ' + s.unit : '') : undefined],
+    status: HW_STATUS_TEXT[s.status] || s.status,
+    cls: HW_STATUS_CLS[s.status] || '',
+  })));
+  hwTable($('hw-disk-table').querySelector('tbody'), rowsOf(hw && hw.disks).map((d) => ({
+    cells: [d.device,
+      d.temp_celsius != null ? d.temp_celsius + ' ℃' : undefined,
+      d.wear_percent != null ? d.wear_percent + ' %' : undefined],
+    status: HW_SMART_TEXT[d.smart_status] || d.smart_status,
+    cls: d.smart_status === 'failed' ? 'st-crit' : (d.smart_status === 'passed' ? 'st-ok' : ''),
+  })));
+  const tok = th && !th.__err;
+  $('hw-th-note').textContent = tok ? '' : '（读取失败：' + (th ? th.__err : '未取到数据') + '）';
+  fill($('hw-th-list'), tok ? [
+    ['CPU 温度', th.cpu_temp_celsius ? '≥ ' + th.cpu_temp_celsius + ' ℃ 告警' : '未设置'],
+    ['磁盘温度', th.disk_temp_celsius ? '≥ ' + th.disk_temp_celsius + ' ℃ 告警' : '未设置'],
+    ['磁盘使用率', th.disk_used_percent ? '≥ ' + th.disk_used_percent + ' % 告警' : '未设置'],
+  ] : []);
 }
 
 // ---------- 容器：列表行（点行进详情）+ 生命周期 ----------
@@ -3571,8 +3749,8 @@ async function imgImportFile() {
 // ---------- 网络对象（只读总览）----------
 
 // 每块：[标题, 数据, 列名, 取值函数, 详情页路由前缀（可选）]；有前缀时表格多一列"详情"，
-// 且整行可点进详情页。NAT 与 LLDP 没有独立详情页（没有"单对象"语义：NAT 是配置对象，
-// LLDP 是邻居表），故只列在总览里。
+// 且整行可点进详情页。NAT 没有独立详情页（没有"单对象"语义：NAT 是配置对象），故只列在总览里；
+// LLDP 也有自己的页面（#/network/lldp），不在这里重复列一遍。
 const NET_OBJECT_VIEWS = [
   ['VRF（L3 虚拟交换机）', 'vrfs', ['名称', 'L3 接口', '路由数'], (v) => [
     v.name,
@@ -3585,9 +3763,6 @@ const NET_OBJECT_VIEWS = [
   ['链路聚合（bond）', 'bonds', ['名称', '模式', '成员'], (b) => [
     b.name, b.mode, (b.members || []).join(', '),
   ], '#/network/bonds/'],
-  ['LLDP 邻居', 'lldp', ['本地口', '邻居', '管理地址'], (n) => [
-    n.local_interface || n.interface, n.system_name || n.chassis_id, n.management_address,
-  ]],
   ['QoS 策略', 'qos', ['名称', '类型', '目标'], (q) => [q.name, q.type, q.target || q.interface], '#/network/qos/'],
   ['端口镜像（SPAN）', 'span', ['名称', '源', '目的'], (s) => [
     s.name, list(s.sources || s.source), s.destination,
@@ -4003,6 +4178,10 @@ for (const b of $('ctd-tabs').querySelectorAll('button')) {
 // VRF 详情：路由表按需重拉
 $('vrd-routes-btn').addEventListener('click', () => vrfRoutesLoad($('vrd-name').textContent));
 
+// 虚拟交换机详情：MAC 学习表按需拉取（大表不进页面刷新）
+$('vsd-mac-btn').addEventListener('click', vsdMacLoad);
+$('vsd-mac-clear-btn').addEventListener('click', () => { vsdMacFor = ''; vsdMacClear(''); });
+
 // VM 快照
 $('vm-snap-refresh').addEventListener('click', () => vmSnapLoad());
 $('vm-snap-create').addEventListener('click', vmSnapCreate);
@@ -4068,6 +4247,17 @@ $('cap-export-btn').addEventListener('click', () => opsRun('停止并导出 pcap
 }));
 
 // 运维动作（写操作；按影响面分档：中危逐条列影响面并标红主按钮）
+// 立即同步时间：只调整本机时钟，不改配置（同步源取自已提交配置里声明的 NTP 服务器）。
+$('ops-ntp-btn').addEventListener('click', () => opsRun('立即同步时间', {
+  tier: 'low',
+  paragraphs: ['立刻触发一次 NTP 时间同步？只调整本机时钟（可能有一次时间跳变，通常很小），' +
+    '不改任何配置；同步源取自已提交配置里声明的 NTP 服务器，没声明时用系统默认时间源。'],
+  cli: 'request system ntp sync',
+}, async () => {
+  const r = await api('/system/ntp:sync', { method: 'POST' });
+  // 如实回显服务端给的同步结果（不把"请求成功"当成"时间已同步"）。
+  return '结果：' + ((r && r.status) || '已触发') + (r && r.detail ? '\n' + r.detail : '');
+}));
 $('ops-backup-btn').addEventListener('click', () => opsRun('生成配置备份', {
   tier: 'low',
   paragraphs: ['生成一份配置备份归档？只读操作：只读当前生效配置，不改运行配置；生成后可在本页下载。'],

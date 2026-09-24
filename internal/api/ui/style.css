@@ -211,6 +211,11 @@ button.small.danger, button.small.danger:hover:not(:disabled) { background: #b32
 tr.row-link { cursor: pointer; }
 tr.row-link:hover td { background: var(--panel-2); }
 
+/* 硬件健康：状态列上色（正常 / 越限告警 / 越限严重），与告警卡片同一套色 */
+td.st-ok { color: var(--ok); }
+td.st-warn { color: var(--warn); }
+td.st-crit { color: var(--err); }
+
 /* 面包屑里能回上一级的段（详情页 → 列表页）做成链接 */
 .crumb a { color: var(--muted); text-decoration: none; border-bottom: 1px dotted var(--muted); }
 .crumb a:hover { color: var(--accent); border-bottom-color: var(--accent); }

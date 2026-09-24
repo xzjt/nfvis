@@ -67,6 +67,37 @@
     </article>
     </section>
 
+    <section class="page" id="page-hardware" hidden>
+    <article class="card wide">
+      <h2>硬件健康 <span id="hw-note" class="muted small"></span></h2>
+      <dl id="hw-list" class="kv"></dl>
+      <h3>传感器</h3>
+      <table id="hw-sensor-table">
+        <thead><tr><th>名称</th><th>类型</th><th>读数</th><th>状态</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>磁盘（SMART）</h3>
+      <table id="hw-disk-table">
+        <thead><tr><th>设备</th><th>温度</th><th>寿命消耗</th><th>SMART</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="muted small">
+        读数取自本机硬件采集（带外管理 / 主板传感器 / 内核热区 / 磁盘 SMART），与命令行的硬件健康查看是同一份数据；
+        采集不到的项如实显示「—」，不编造。「状态」列由本机按下面那组阈值判定：正常、越限（告警）、越限（严重）。
+      </p>
+    </article>
+
+    <article class="card">
+      <h2>健康阈值 <span id="hw-th-note" class="muted small"></span></h2>
+      <dl id="hw-th-list" class="kv"></dl>
+      <p class="muted small">
+        阈值属于配置：到<a href="#/config">配置</a>页的「系统 · 健康阈值」表单里改，
+        提交后生效——提交前不影响正在使用的阈值（改的是候选配置，随时可丢弃）。
+        留空表示不设该阈值，也就不产生对应告警。
+      </p>
+    </article>
+    </section>
+
     <section class="page" id="page-pools" hidden>
     <article class="card">
       <h2>资源池</h2>
@@ -219,10 +250,64 @@
     <article class="card wide">
       <h2>虚拟交换机 <span id="vs-note" class="muted small"></span></h2>
       <table id="vs-table">
-        <thead><tr><th>名称</th><th>类型</th><th>成员端口</th><th>BD</th></tr></thead>
+        <thead><tr><th>名称</th><th>类型</th><th>成员端口</th><th>BD</th><th>操作</th></tr></thead>
         <tbody></tbody>
       </table>
+      <p class="muted small">点行进详情页：成员端口运行态与 MAC 学习表都在那一页。</p>
       <pre id="vs-stat" class="code" hidden></pre>
+    </article>
+    </section>
+
+    <section class="page" id="page-switchDetail" hidden>
+    <article class="card wide">
+      <div class="obj-head">
+        <h2>虚拟交换机 <span id="vsd-name" class="muted small"></span></h2>
+        <dl id="vsd-head" class="kv"></dl>
+      </div>
+
+      <h3>成员端口 <span id="vsd-stat-note" class="muted small"></span></h3>
+      <table id="vsd-port-table">
+        <thead><tr><th>端口</th><th>管理状态</th><th>链路</th><th>Rx 包</th><th>Tx 包</th></tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <h3>MAC 学习表 <span id="vsd-mac-note" class="muted small"></span></h3>
+      <div class="cfg-actions">
+        <label for="vsd-mac-limit">最多显示条数</label>
+        <input id="vsd-mac-limit" type="text" value="200">
+        <button id="vsd-mac-btn" type="button" class="ghost">拉取 MAC 表</button>
+        <button id="vsd-mac-clear-btn" type="button" class="ghost">清空</button>
+      </div>
+      <p id="vsd-msg" class="muted small" hidden></p>
+      <table id="vsd-mac-table">
+        <thead><tr><th>MAC</th><th>端口</th><th>VLAN</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="muted small">
+        MAC 表是运行态（数据面实际学到的表项），可能很大，故不随页面自动刷新——
+        要看最新就点「拉取 MAC 表」，只取前若干条；要按端口/名称查更细的表项，用命令行的 MAC 表查询。
+      </p>
+    </article>
+    </section>
+
+    <section class="page" id="page-lldp" hidden>
+    <article class="card wide">
+      <h2>LLDP <span id="lldp-note" class="muted small"></span></h2>
+      <dl id="lldp-list" class="kv"></dl>
+      <h3>接口开关</h3>
+      <table id="lldp-iface-table">
+        <thead><tr><th>接口</th><th>启用</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>邻居（运行态）</h3>
+      <table id="lldp-nbr-table">
+        <thead><tr><th>本地接口</th><th>对端标识</th><th>对端端口</th><th>TTL（秒）</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="muted small">
+        LLDP 的全局开关与接口开关属于配置：到<a href="#/config">配置</a>页的网络域（LLDP）表单里改，
+        提交后生效。邻居表是运行态——数据面实际收到的通告，对端没发或没接对端时为空。
+      </p>
     </article>
     </section>
 
@@ -331,8 +416,9 @@
 
     <section class="page" id="page-network" hidden>
     <article class="card wide">
-      <h2>网络对象 <span class="muted small">（VRF / ACL / NAT / 聚合 / LLDP / QoS / 端口镜像）</span></h2>
-      <p class="muted small">点行或「详情」进对象详情页（VRF / ACL / 聚合 / QoS / 端口镜像）。</p>
+      <h2>网络对象 <span class="muted small">（VRF / ACL / NAT / 聚合 / QoS / 端口镜像）</span></h2>
+      <p class="muted small">点行或「详情」进对象详情页（VRF / ACL / 聚合 / QoS / 端口镜像）。
+        LLDP 的开关状态与邻居表在<a href="#/network/lldp">LLDP</a>页。</p>
       <div id="net-objects" class="net-objects"></div>
 
       <!-- 大表按需拉取：NAT 会话不进 5 秒轮询（VRF 路由表在 VRF 详情页里） -->
@@ -464,6 +550,11 @@
             <button id="ops-tls-btn" type="button" class="ghost">重签自签证书</button>
             <button id="ops-sshkey-btn" type="button" class="ghost">重新生成 SSH host key</button>
           </div>
+        </fieldset>
+        <fieldset>
+          <legend>时间（NTP）</legend>
+          <p class="muted small">同步源取自已提交的配置；服务器地址在<a href="#/config">配置</a>页的系统（基础）表单里声明。</p>
+          <div class="cfg-actions"><button id="ops-ntp-btn" type="button" class="ghost">立即同步时间</button></div>
         </fieldset>
         <fieldset>
           <legend>诊断归档</legend>

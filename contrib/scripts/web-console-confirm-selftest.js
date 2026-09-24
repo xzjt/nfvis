@@ -295,6 +295,8 @@ const ACTIONS = [
     req: { method: 'GET', url: /\/system\/core-dumps$/ } },
   { id: 'ops-alarms-btn', title: '清除已恢复告警', tier: 'low', cli: /request alarms clear all$/,
     req: { method: 'POST', url: /\/alarms:clear$/ } },
+  { id: 'ops-ntp-btn', title: '立即同步时间', tier: 'low', cli: /request system ntp sync$/,
+    req: { method: 'POST', url: /\/system\/ntp:sync$/ } },
   { id: 'ops-export-btn', title: '导出 core dump 清单', tier: 'low', cli: /request system core-dumps export /,
     req: { method: 'POST', url: /\/system\/core-dumps:export$/ },
     pre: (ctx) => { nodeOf(ctx, 'ops-export-url').value = 'http://192.0.2.10:8080/collect'; } },
