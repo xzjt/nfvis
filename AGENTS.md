@@ -29,9 +29,9 @@
   （Go 1.26.0（apt）、make、sshpass 等；`dpkg -i` 装 VPP 用 `/root/vpp-v26.06-deb/` 的 9 个
   26.06-release deb——快照基线自带）。
   源码树 `/root/src`（git archive 同步，见待办 §3.3，无 .git → 构建**必须显式传 SOURCE_DATE_EPOCH**）。
-  **round66 后现状**（2026-09-24 发布 v1.1.29，证据 `docs/evidence/v1-closeout-round66-web-console-final-acceptance-and-release.txt`；
+  **round68 后现状**（2026-09-24 发布 v1.1.30，证据 `docs/evidence/v1-closeout-round68-release-1.1.30.txt`；
   三件套复跑仍以 `docs/evidence/v1-closeout-round36-three-suites.txt` 为准）：
-  nfvis **1.1.29** active、管理口令 `WBF81vOA4M8GM28f@Aa1`（**随快照恢复而变**，取法见待办 §3.1）；
+  nfvis **1.1.30** active、管理口令 `WBF81vOA4M8GM28f@Aa1`（**随快照恢复而变**，取法见待办 §3.1）；
   VPP 26.06 运行、主堆用 2M 大页、ens192/ens224 交 DPDK；
   cmdline 含 hugepagesz=1G/2M + isolcpus=2-5 + intel_iommu=on；
   **vs-vnf 拓扑与 vnf-a/vnf-b 在跑、流量已复通**（BVI ping 双向 10/10、宿主经 DPDK 物理口 0.37~0.48ms）；
@@ -64,9 +64,9 @@
   （**通过 101 / 未验 4 / 降级 2 / 移 V2 2**；2026-09-18 收口：NFR-005/NFR-006 转通过、FR-SEC-006 拆两半），降级理由与签字建议见其 §5/§6；
   **待办与未完成项的唯一入口见 `docs/V1-收尾待办.md`**（含环境要点与踩坑记录）。
   已发布 **v1.0.0 / v1.1.0 / v1.1.1 / v1.1.2 / v1.1.3 / v1.1.4 / v1.1.5 / v1.1.7 / v1.1.8 / v1.1.9 / v1.1.10 /
-  v1.1.15 / v1.1.19 / v1.1.20 / v1.1.25 / v1.1.26 / v1.1.27 / v1.1.28 / v1.1.29**（见 GitHub Releases；**跳过 v1.1.6**——那次发布已撤回、其提交不在 `main`，
+  v1.1.15 / v1.1.19 / v1.1.20 / v1.1.25 / v1.1.26 / v1.1.27 / v1.1.28 / v1.1.29 / v1.1.30**（见 GitHub Releases；**跳过 v1.1.6**——那次发布已撤回、其提交不在 `main`，
   以及 **1.1.11~1.1.14、1.1.16~1.1.18、1.1.21~1.1.24**——同一 merge 线上的内部验证构建、从未发布，
-  故由 v1.1.10 跳到 v1.1.15、v1.1.15 跳到 v1.1.19、v1.1.20 跳到 v1.1.25；v1.1.26 紧接 v1.1.25、v1.1.27 紧接 v1.1.26、v1.1.28 紧接 v1.1.27、v1.1.29 紧接 v1.1.28，无跳号）。
+  故由 v1.1.10 跳到 v1.1.15、v1.1.15 跳到 v1.1.19、v1.1.20 跳到 v1.1.25；v1.1.26 紧接 v1.1.25、v1.1.27 紧接 v1.1.26、v1.1.28 紧接 v1.1.27、v1.1.29 紧接 v1.1.28、v1.1.30 紧接 v1.1.29，无跳号）。
   **用户文档**：`docs/NFViS-用户手册.md`（安装→使用全流程）、`docs/NFViS-CLI命令全表.md`
   （256 条命令 + 逐条真机实测状态）；真机手动脚本：`contrib/scripts/cli-fulltest.sh`（问「命令能不能用」）、
   `contrib/scripts/cli-semantic-check.sh`（问「结果对不对」）、`contrib/scripts/cli-pty-smoke.sh`（交互行为）。

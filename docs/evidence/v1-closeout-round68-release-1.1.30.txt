@@ -1,0 +1,62 @@
+===== V1 收尾第六十八轮：发布 v1.1.30（决策 #144 的权限判定修复随版发布）=====
+日期：2026-09-24；main `b84ded4`（发布点）；发布件 `nfvis_1.1.30_amd64.deb`
+
+----- 1. 本版内容 -----
+决策 #144：CLI 运行期 class 判定与命令树声明对齐（详见
+`docs/evidence/v1-closeout-round67-cli-class-gate.txt`）。**这是安全相关修复**——修前 operator 能执行
+声明为 super-user 的 `zeroize`/`reboot`/`software add`/`configuration backup`，read-only 能执行
+`request vpp restart`（数据面重启）与 `bind-dpdk`；v1.1.29 已按原样发布，故本版把修复交付出去。
+
+----- 2. 发布校验（round48 口径，逐项）-----
+| # | 项 | 结果 |
+|---|---|---|
+| ① | 元数据 | `Package nfvis / Version 1.1.30 / amd64 / Section net / Depends libc6`；control 4 件齐 |
+| ② | 内容 | **23 个成员**（二进制 2 + 单元 1 + 安装器 2 + 随包文档 7 + 目录项） |
+| ③ | 解包运行 | `nfvisd -version` / `nfvis-cli -version` = **1.1.30** |
+| ④ | **可复现** | 同 commit + 同 VERSION **连打两次 sha256 逐字节一致**（`87fde5d4d8b86ad8b796dab0d1b24e30ce83a84020b0028ab831fac8f98e7ab4`，7,916,806 字节） |
+| ⑤ | 随包文档是当前版本 | 规格书 **144 条决策**（含 #144 行）、附录 B 标题仍在、用户手册（新 IA + §10.7 super-user 口径）、OpenAPI（含 #143 的 summary/description/403）、命令全表 448 行 |
+| ⑥ | **随包前端 = 仓库源码** | `/api/v1/ui/{index.html,app.js,style.css,router.js,routes.json}` 与仓库源码**逐字节一致**（`cmp` 全过） |
+| ⑦ | 升级实装 1.1.29 → 1.1.30 | prerm「升级中，保留运行中的 nfvis.service」→ postinst「已重启 nfvis.service 以加载新版本」；服务 **active**；`show version` = 1.1.30；**既有 VNF 拓扑存活**（vnf-a/vnf-b running、BD 6252701）；**配置库未变**（rev 55 / audit 104 / cfgsha `084c3a64…`）；`wizard` 非 TTY 明确返提示 |
+| ⑧ | REST/Web 内容实测 | `/ui/` 200（45254 字节）、`/ui` 302、未认证 `/system/status` 401；`POST /login` 回 `user={name,class}` + `token_id` + `expires_in=3599`；`/system/status` 契约字段齐全（uptime = 主机运行时长 172220s；大页两池 1G 2/0、2M 768/768）；`/system/version` = 1.1.30 + 5 组件；`/configuration` **0 处 `password_hash`**；`/configuration/history` 51 条；`/configuration/check` 未持锁 **409**；`/system/logs?last=5` 200；`POST /logout` **204** 且旧 token 立即 **401** |
+| ⑨ | **本版新内容实测**（已装二进制 + 生产库副本） | 见 §3（operator/read-only 被拒 + 三个正例 + super-user 正例） |
+| ⑩ | 备份归档下载口径未回退（决策 #143） | read-only 下载 **403**、列表 **200**；operator 下载 **403**；super-user **200 且归档含 `password_hash`**（3 处）；403 原文 `{"code":"FORBIDDEN","message":"当前 class 无权执行该操作"}` |
+| ⑪ | purge | postrm 自动撤销 SSH 强化（drop-in 消失、`sshd -t` 通过）；GRUB 片段/fstab 保留并打印手工步骤；`/var/lib/nfvis` 保留（1.6G）；二进制与单元移除；`/run/nfvis` 清理；配置库未变 |
+| ⑫ | 重装 | SSH 强化重新落地；**配置库逐字段一致**；启动日志有「管理口守卫事实（default-route=ens160）」「恢复收敛完成」、**30 分钟内无「一次性口令」**（未走首启路径） |
+| ⑬ | 重装后拓扑 + 流量 | BD 6252701 四口、vnf-a/vnf-b running；`vppctl ping` 双向 **10/10 0% 丢包**（首发 5 发时各 4/5 是首包 ARP 预热）；宿主经 DPDK 物理口 **4/4、0.34~1.35ms** |
+| ⑭ | 发布与回验 | tag `v1.1.30` 指向 main、非 draft/prerelease；assets = `nfvis_1.1.30_amd64.deb`（7,916,806）+ `.sha256`（**asset 名无本地后缀**）；**自 GitHub 回下载 sha256 与构建端逐字节一致**（`cmp` 通过） |
+
+----- 3. 本版新内容实测：CLI class 判定（**已装 1.1.30 二进制** + 生产库副本，不动生产库）-----
+| 账号 | 命令 | 声明 | 实测 |
+|---|---|---|---|
+| operator | `request system reboot` | S | `%% 无权限执行该命令` ✓ |
+| operator | `request system configuration backup` | S | `%% 无权限执行该命令` ✓（修前会**真的写出归档**） |
+| operator | `request vpp restart` | S | `%% 无权限执行该命令` ✓（修前**无判定**） |
+| operator | `request virtual-machine-functions vnf-a delete` | S | `%% 无权限执行该命令` ✓ |
+| read-only | `request alarms clear` | O | `%% 无权限执行该命令` ✓（修前**无判定**） |
+| read-only | `request vpp restart` | S | `%% 无权限执行该命令` ✓ |
+| operator | `ping 192.168.100.10 source 192.168.100.1 count 2` | O | **仍可用**（收到回显）✓ |
+| operator / read-only | `show version` | R | **仍可用**（NFViS 1.1.30）✓ |
+| super-user | `request system configuration backup` | S | **仍可用**（生成归档）✓ |
+
+探针账号已删；临时库副本已删；生产库指纹不变。
+
+----- 4. 环境（本轮前后逐项核对）-----
+- 生产库：**rev 55 / audit 104 / cfgsha `084c3a64e4cc0d43a16cbced28cb0742aaa0ef1783c75065eb7966b091eba726`**
+  ——本轮开始前 = 升级后 = 权限复验后 = purge 后 = 重装后 = 收尾，**逐字段一致**
+- 已装服务：**nfvis 1.1.30 active**（443 在听）；无开发态实例（8443 无监听）；临时件已清
+- VPP：只剩配置声明的 **BD 6252701（bvi0）**；`vnf-a`/`vnf-b` running
+- 流量：`vppctl ping` 双向 10/10；宿主经 DPDK 物理口 4/4
+- **环境说明（不是产品缺陷）**：本轮 256 条冒烟（round67）执行到 `request system ssh host-key regenerate`
+  （该命令在契约里、套件会真跑），**把本机三把 host key 重生成了一次** ⇒ 宿主的 `known_hosts` 变陈旧，
+  出现 `REMOTE HOST IDENTIFICATION HAS CHANGED` 警告。已按 §3.8 的既定做法 `ssh-keygen -R` 后重取
+  （与 round49 验证 `ssh host-key regenerate` 端点时同一现象；`~/.ssh/config` 里 `StrictHostKeyChecking no`，
+  表现为"只警告不失败"）。
+- 口令：`WBF81vOA4M8GM28f@Aa1` **按 §3.1 哈希比对法**核对有效（全程未做登录试探）
+
+----- 5. 如实登记（未改项，与 round66/67 一致）-----
+1. `POST /system/kernel:apply|:rollback` **契约声明但服务端从未注册（404）**——控制台如实报错不谎报。
+2. §7 要求的「高危审计记意图 + 结果两条」**服务端未实现**（只写一条结果行）。
+3. **控制台未按角色隐藏写入口**（设计 §8 未实现）——服务端判定是真边界，影响面是体验与误导。
+4. `request system configuration backup to <path>` 的**目标路径仍无校验**（本版后该命令仅 super-user 可执行，
+   已不是低权限提权路径）。
+5. `GET /system/tech-support/{file}` 同为 read-only 而诊断归档内含 `config.json`（含口令哈希）——待裁决。
