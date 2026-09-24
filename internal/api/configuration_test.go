@@ -234,6 +234,12 @@ func TestConfigurationRollbackAndLockConflict(t *testing.T) {
 		}
 	}
 
+	// rollback 需要编辑会话：直提是一次性事务、提交后不再持锁（决策 #151），
+	// 故先按客户端流程取锁（控制台 cfghTakeCandidate 同款：以当前生效配置为底稿写一次候选）。
+	if status, _, _ := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", adminToken, sampleCandidate(), nil); status != http.StatusOK {
+		t.Fatalf("取编辑锁: %d", status)
+	}
+
 	// rollback 1 → candidate 回到 v2，需再 commit 生效（FR-CFG-005）
 	status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/configuration/rollback/1", adminToken, nil, nil)
 	if status != http.StatusOK || !strings.Contains(string(data), "v2") {

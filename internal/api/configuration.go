@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -24,6 +25,34 @@ func sessionFromIdentity(r *http.Request) config.Session {
 		return config.Session{User: "anonymous", Source: "api"}
 	}
 	return config.Session{User: info.User, Source: "api"}
+}
+
+// endOneShot 一次性事务的收尾：候选干净时交还全局编辑锁（决策 #151）。
+//
+// 「取锁 → 写候选 → 立即提交」这类入口提交后不再需要继续编辑——REST 的 login-users 一族
+// （建/删用户、改 class、重置口令、自助改密）、带 `X-NFVIS-Auto-Commit: true` 的直提写、
+// CLI 操作模式下的 delete 型 request 命令。但 `Engine.Commit` **不释放**锁（只有
+// `Release`/`Discard`/空闲超时释放），于是锁一直留到登出（决策 #119）或 `lockIdleTTL`：
+// 其它会话随后的配置写会被 409「candidate 会话锁被占用: 由 X 持有」挡住（round76 校验
+// 三次复现）。控制台配置页是**客户端**显式收尾（`app.js` 的 `cfgEndSession()`），
+// 服务端的一次性事务此前没有对应收尾。
+//
+// 判据只有一条：**只在候选不脏时释放**（与配置页同款语义）——
+//   - 提交成功（候选已清空）→ 释放；
+//   - 写候选之前就失败（校验 400/409、UpdateCandidate 失败）→ 候选没动过 → 释放
+//     （留着锁只会挡住别人）；
+//   - 候选脏（有未提交改动）→ **不释放**：那是操作者的改动，不能替它丢掉；
+//   - 提交因校验失败（`ErrValidation`，候选保留）→ **不释放**：操作者要接着改。
+//
+// 调用方须已成功 `Edit`（本会话持锁）；未持锁时 `Candidate` 返回 `ErrNotEditing`，
+// 本函数静默返回——不替别的会话、也不替已交还的会话做收尾。
+func endOneShot(engine *config.Engine, sess config.Session, log *slog.Logger) {
+	if _, dirty, err := engine.Candidate(); err != nil || dirty {
+		return
+	}
+	if err := engine.Release(sess); err != nil && log != nil {
+		log.Warn("一次性事务交还会话锁失败", "err", err)
+	}
 }
 
 // mapEngineError 引擎错误 → 统一错误响应。
@@ -124,6 +153,11 @@ func (s *Server) handlePutCandidate(w http.ResponseWriter, r *http.Request) {
 	if err := s.engine.Edit(sess); err != nil {
 		mapEngineError(w, err)
 		return
+	}
+	// X-NFVIS-Auto-Commit: true 是「写候选 + 提交」一个请求内完成的一次性事务，
+	// 收尾交还会话锁（决策 #151）；无该头时操作者正在编辑，锁必须留着。
+	if r.Header.Get("X-NFVIS-Auto-Commit") == "true" {
+		defer endOneShot(s.engine, sess, s.log)
 	}
 	merge := r.Header.Get("X-NFVIS-Merge") == "true"
 	if merge {

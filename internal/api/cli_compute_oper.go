@@ -493,11 +493,16 @@ func (x *cliExecutor) imagesDelete(user string, rest []string, confirmed bool) s
 
 // commitMutate 在 CLI 会话内完成 edit→mutate→commit 一步事务（删除类动作语义）。
 // 返回提交摘要文本（含 revision），失败返回 error。
+//
+// 收尾交还会话锁（决策 #151）：操作模式下的 `request … delete|enable|disable` 提交后
+// 不再需要继续编辑，锁留着只会挡住别的会话；**配置模式除外**——`run request …` 是从
+// 配置模式里发起的，操作者还要接着 set/commit（与 CLI 的 configure/commit 同口径）。
 func (x *cliExecutor) commitMutate(user, source string, mutate func(*model.Config) error) (string, error) {
 	sess := config.Session{User: user, Source: source}
 	if err := x.engine.Edit(sess); err != nil {
 		return "", err
 	}
+	defer x.endOneShotOper(user, source, sess)
 	cfg, _, err := x.engine.Candidate()
 	if err != nil {
 		return "", err
@@ -517,6 +522,15 @@ func (x *cliExecutor) commitMutate(user, source string, mutate func(*model.Confi
 		return "", err
 	}
 	return fmt.Sprintf("commit 成功 (revision %d)\n", res.Revision), nil
+}
+
+// endOneShotOper 操作模式下一次性事务的收尾（决策 #151）。
+// 会话处于配置模式时不动锁——那是操作者正在编辑的会话（`run request …` 即此情形）。
+func (x *cliExecutor) endOneShotOper(user, source string, sess config.Session) {
+	if s := x.sess[user+"@"+source]; s != nil && s.Mode == "config" {
+		return
+	}
+	endOneShot(x.engine, sess, nil)
 }
 
 // removeVnfPortRefs 从交换机端口中移除引用指定 VM/容器的成员条目

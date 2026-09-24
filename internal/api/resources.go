@@ -30,11 +30,18 @@ func sprintf(format string, args ...any) string { return fmt.Sprintf(format, arg
 
 // mutateCandidate 在调用者会话的 candidate 上执行变更并按需直提。
 // status 为写入成功状态码（POST 201 / PUT·DELETE 200）。
+//
+// 带 `X-NFVIS-Auto-Commit: true` 时是**一次性事务**（写候选 + 提交一个请求内完成）：
+// 无论成功、还是写候选之前就失败，收尾都交还会话锁（决策 #151，见 endOneShot）；
+// 不带该头时是纯候选写入（操作者正在编辑），锁必须留着。
 func (s *Server) mutateCandidate(w http.ResponseWriter, r *http.Request, status int, mutate func(*model.Config) error) {
 	sess := sessionFromIdentity(r)
 	if err := s.engine.Edit(sess); err != nil {
 		mapEngineError(w, err)
 		return
+	}
+	if r.Header.Get("X-NFVIS-Auto-Commit") == "true" {
+		defer endOneShot(s.engine, sess, s.log)
 	}
 	cfg, _, err := s.engine.Candidate()
 	if err != nil {

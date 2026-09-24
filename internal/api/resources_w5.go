@@ -147,13 +147,18 @@ func effectiveClassOf(u model.LoginUserConfig) string {
 	return aaa.ClassReadOnly
 }
 
-// mutateLoginUsers 在 candidate 上修改 system.login 并按需直提。
+// mutateLoginUsers 在 candidate 上修改 system.login 并直提。
+//
+// 用户/口令变更**必须**生效（FR-SEC-008），故本族每个入口都是「取锁 → 写候选 → 立即提交」
+// 的一次性事务：收尾时按 endOneShot 的判据交还会话锁（决策 #151）——此前提交后仍持有
+// 全局编辑锁，其它会话随后的配置写被 409 挡住（round76 三次复现）。
 func (s *Server) mutateLoginUsers(w http.ResponseWriter, r *http.Request, status int, mutate func(*model.SystemLogin) error) {
 	sess := sessionFromIdentity(r)
 	if err := s.engine.Edit(sess); err != nil {
 		mapEngineError(w, err)
 		return
 	}
+	defer endOneShot(s.engine, sess, s.log)
 	cfg, _, err := s.engine.Candidate()
 	if err != nil {
 		mapEngineError(w, err)

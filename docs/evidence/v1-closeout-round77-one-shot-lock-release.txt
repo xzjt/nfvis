@@ -1,0 +1,125 @@
+===== V1 收尾第七十七轮：一次性事务提交后交还全局编辑锁（决策 #151）=====
+日期：2026-09-24；分支 `fix/one-shot-lock-release`（main `adcb83e` 之上）
+范围：交接文档 §2.3 登记项「`login-users` 写路径提交后仍持有全局编辑锁」
+（round72 验收首次查出、round76 校验**三次复现**、round76 证据 §5「仍未裁」第 1 条）。
+
+----- 1. 起因与交付 -----
+起因：用 REST（如 `POST /system/login-users` 带 `X-NFVIS-Auto-Commit: true`）建完账号的会话**没登出**，
+随后任何其它会话的配置写（CLI `configure`、删账号、**自助改密**）都被
+`409 CONFLICT candidate 会话锁被占用: 由 X 持有` 挡住，直到该会话 `POST /logout`（决策 #119）
+或空闲超时（`lockIdleTTL`）。round76 的发布校验脚本为此**三次**改道（补跑 G3/G4 只能先登出）。
+
+根因：`Engine.Commit` **不释放**锁（只有 `Release`/`Discard`/空闲超时释放）；控制台**配置页**是
+**客户端**显式收尾（`internal/api/ui/app.js` 的 `cfgEndSession()`），而「取锁 → 写候选 → **立即提交**」
+这类**一次性事务**服务端没有收尾。
+
+1.1 先枚举再动手（逐入口定性；**这是本条的验收核心**）
+
+| # | 服务端入口 | 一次性事务？ | 改前 | 改后 | 处置与理由 |
+|---|---|---|---|---|---|
+| ① | `internal/api/resources_w5.go` `mutateLoginUsers`（`POST/PUT/DELETE /system/login-users*`、`POST …/{name}:change-password` 自助改密） | **是**（用户/口令变更**必须**生效，FR-SEC-008 ⇒ 恒提交） | 提交后**持锁** | **释放** | 接入 `endOneShot`；写候选之前失败（400/409）也释放 |
+| ② | `internal/api/resources.go` `mutateCandidate` 的 `X-NFVIS-Auto-Commit: true` 分支（`/vrfs`、`/interfaces`、`/system`、`/container-functions` 等全部资源写端点共用） | **是**（决策 #22 单请求直提） | 提交后**持锁** | **释放** | 同上；**无该头**的分支不释放（操作者正在编辑） |
+| ③ | `internal/api/configuration.go` `handlePutCandidate` 的 Auto-Commit 分支（写候选 + 提交一个请求内完成，含 `X-NFVIS-Merge` 组合） | **是** | 提交后**持锁** | **释放** | 同上 |
+| ④ | `internal/api/cli_compute_oper.go` `commitMutate`（CLI 操作模式 `request … delete\|enable\|disable`：`deleteVM`、容器删除、`request interfaces <n> enable\|disable`） | **是**（操作模式下） | 提交后**持锁** | **释放**（会话在**配置模式**时不释放） | `run request …` 是从配置模式里发起的，操作者还要接着 `set`/`commit`；释放会让随后的配置模式 `show` 报「无活跃 candidate 会话」⇒ `endOneShotOper` 按 `x.sess[user@source].Mode` 判定 |
+| ⑤ | `PUT /configuration/candidate` **无** Auto-Commit 头（纯候选写入） | 否（操作者正在编辑） | 持锁 | **持锁（不变）** | 有意：改了会破坏「编辑 → 提交」两段式 |
+| ⑥ | `POST /configuration/commit`（REST） | 否 | 持锁 | **持锁（不变）** | 有意：按决策 #120 由客户端收尾（控制台 `cfgEndSession`、CLI `exit`/`discard`） |
+| ⑦ | CLI `configure`/`set`/`commit`/`rollback`/`annotate`/`load`/`save`（`cliexec.go`、`cli_annotate.go`） | 否 | 持锁 | **持锁（不变）** | 有意：CLI 要继续在配置模式里编辑（本轮新增反向用例钉住） |
+| ⑧ | `internal/system/backup.go` `Restore`/`Zeroize`（`POST /system/restore`、`POST /system:zeroize`、对应 CLI 命令） | 是 | **已释放**（`defer Release`） | **不变** | 已收尾；且会话来源是合成的 `user@system-restore`/`user@system-zeroize`——别人持锁时 `Edit` 先报 409 退出，不存在"接手别人的脏候选" |
+| ⑨ | `internal/aaa/bootstrap.go` 首启引导 admin | 是 | **已释放**（`Release` + 注释「引导是一次性动作」） | **不变** | 已收尾（本轮助手的语义与之同款） |
+
+1.2 交付
+
+| 文件 | 改了什么 |
+|---|---|
+| `internal/api/configuration.go` | 新增共用收尾助手 `endOneShot(engine, sess, log)`（语义见 §2）+ `handlePutCandidate` 的 Auto-Commit 分支接入 |
+| `internal/api/resources.go` | `mutateCandidate`：带 Auto-Commit 头时安装收尾（无该头不装） |
+| `internal/api/resources_w5.go` | `mutateLoginUsers`：安装收尾（恒为一次性事务） |
+| `internal/api/cli_compute_oper.go` | `commitMutate` 收尾 + `endOneShotOper`（配置模式不动锁） |
+| `internal/api/one_shot_lock_test.go`（新增） | 7 个用例（4 正面 / 3 反向，含 1 条配置模式边界） |
+| `internal/api/configuration_test.go`、`redact_test.go`、`resources_test.go` | 3 处既有用例的**前置按客户端流程同步**（见 §3.3） |
+| `docs/NFViS-openapi.yaml` + `internal/api/openapi.json` | info.description 增「编辑锁」段；`PUT /configuration/candidate` 两分支的锁口径；login-users 三处 + 自助改密补「一次性事务收尾交还锁」（JSON 由 YAML 再生成） |
+| `docs/NFViS-用户手册.md` | §4.2 会话锁段、§10.12 用户与权限页、§11.1 故障表「candidate 会话锁被占用」行 |
+| `docs/NFViS-系统产品需求与目标架构规格书.md` | 附录 A 追加决策 #151 |
+| `AGENTS.md` | 决策条数 150 → 151（`check_decisions_count.sh` 通过） |
+
+----- 2. 助手语义（`endOneShot`，判据只有一条：**候选不脏才释放**）-----
+- 提交成功（候选已清空）→ **释放**；
+- 写候选**之前**就失败（校验 400/409、`UpdateCandidate` 失败）→ 候选没动过 → **也释放**（留着锁只会挡住别人）；
+- **候选脏 → 不释放**：那是操作者的未提交改动，不能替它丢掉（与配置页同款语义）；
+- **提交因校验失败（`ErrValidation`，候选保留）→ 不释放**：操作者要接着改。
+调用方须已成功 `Edit`（本会话持锁）；未持锁时 `Candidate` 返回 `ErrNotEditing`，助手静默返回——
+不替别的会话、也不替已交还的会话收尾。释放失败只记一条日志（REST 侧 `s.log`；CLI 侧无 logger 传 nil）。
+
+----- 3. 用例与变异验证 -----
+3.1 用例（`internal/api/one_shot_lock_test.go`，7 个）
+正面（**每个都断言两件事**：① 本会话不再持锁——读独立事实源 `GET /system/configuration/sessions`；
+② **别的会话**（CLI/ssh 来源，正是 round76 被挡的那一侧）随后能**立刻**取锁——经 `POST /cli/execute` 发 `configure`）：
+- `TestOneShotLockReleasedLoginUsersFamily`：建用户 / 改 class 与重置口令 / **自助改密** / 删用户（4 步逐条断言）；
+- `TestOneShotLockReleasedAutoCommitWrites`：`PUT /configuration/candidate` 直提、`POST /vrfs` 直提、
+  **直提在写候选之前失败（重名 409）**；
+- `TestOneShotLockReleasedCLIOperAction`：`request interfaces ens2f0 enable`（操作模式）。
+反向（钉住"有意持锁"）：
+- `TestCandidateWriteWithoutAutoCommitKeepsLock`：纯候选写入后锁**仍在**（`holder=admin@api`）且别的会话取不到锁；
+- `TestFailedCommitKeepsLockAndDirtyCandidate`：提交校验失败（400）后锁**仍在**、候选**仍脏**（未被替它丢掉）；
+- `TestExplicitCommitPathsKeepLock`：CLI `configure`→`commit` 后锁仍在（`admin@ssh`、`mode=config`）、
+  REST `POST /configuration/commit` 后锁仍在（`admin@api`）；
+- `TestCLIConfigModeRunRequestKeepsLock`：配置模式内 `run request interfaces ens2f0 enable` 后锁仍在且仍在配置模式。
+
+3.2 变异验证（两条，均已还原）
+① 助手改成「**无条件释放**」（忽略 dirty）：
+```
+--- FAIL: TestFailedCommitKeepsLockAndDirtyCandidate (0.96s)
+    one_shot_lock_test.go:224: 提交校验失败之后：锁应仍由 admin@api 持有，实得 ""
+    one_shot_lock_test.go:224: 提交校验失败之后：别的会话此时不该能取锁，实得：
+    one_shot_lock_test.go:226: 提交校验失败后候选应保留且为脏（操作者的改动不能被替它丢掉）
+    one_shot_lock_test.go:230: discard 应 204：409
+FAIL	github.com/xzjt/nfvis/internal/api	8.848s
+```
+（三个正面用例仍 PASS——无条件释放不影响"该释放"的路径；**反向用例② 报 ✗ 即命中**。）
+② 去掉四处收尾（恢复原状）：
+```
+--- FAIL: TestOneShotLockReleasedLoginUsersFamily (2.25s)
+    one_shot_lock_test.go:142: 建用户：一次性事务结束后不该还持锁，会话表仍见 holder="admin@api"
+    one_shot_lock_test.go:142: 建用户：其它会话（CLI/ssh）应能立刻取锁，实得：%% candidate 会话锁被占用: 由 admin@api 持有
+    （改 class 与重置口令 / 自助改密 / 删用户 三条同）
+--- FAIL: TestOneShotLockReleasedAutoCommitWrites (1.00s)
+    one_shot_lock_test.go:158: PUT candidate 直提：… 实得：%% candidate 会话锁被占用: 由 admin@api 持有
+    one_shot_lock_test.go:165: POST /vrfs 直提：…
+    one_shot_lock_test.go:172: 直提在写候选前失败（409）：…
+--- FAIL: TestOneShotLockReleasedCLIOperAction (1.14s)
+    one_shot_lock_test.go:191: CLI request interfaces enable：… 仍见 holder="admin@ssh"
+FAIL	github.com/xzjt/nfvis/internal/api	8.930s
+```
+（报错文本即 **round76 的原症状**；三个反向用例仍 PASS。）
+还原后：7 个用例全 PASS；`go test -p 1 ./internal/api/...` **全绿**（261s）；
+`make check` **全绿**（EXIT=0，含 vet/全量测试/覆盖率门槛/archtest/决策条数 151/openapi.json 同步/工具自校准/原型）。
+注：本机首次**并行**跑 `make check` 时 Go 在编译期撞了运行时致命错误（多包 build failed、栈转储）——
+宿主内存紧张的已知情形（交接文档 §3.3 同款提示），按 AGENTS.md 口径改 `GOFLAGS=-p=1` 复跑即全绿，与代码无关。
+
+3.3 既有用例的同步（**如实登记**：这是行为变更，3 处前置依赖了"锁还在"）
+| 用例 | 原来 | 现在 | 为什么 |
+|---|---|---|---|
+| `TestConfigurationRollbackAndLockConflict` | 两次直提后直接 `POST /configuration/rollback/1` | 直提后按客户端流程取一次编辑锁再 rollback | rollback 要求本会话处于编辑态；控制台 `cfghTakeCandidate` 早已按「先取锁再重试」处理（对话框原文写明"取为候选会占用编辑锁"） |
+| `TestSecretsNeverEchoed` | 直提哨兵配置后即遍历含 `/configuration/candidate`、`/configuration/diff` 的出口清单 | 直提后再写一次候选（不带 Auto-Commit 头 = 编辑态） | 两条出口要求编辑态；脱敏断言本身不变 |
+| `TestVrfsEndpoint` | 直提后读 `GET /configuration/candidate` 当底稿 | 改读 `GET /configuration`（生效配置） | 直提后本会话已不在编辑态；底稿本就该取生效配置 |
+
+----- 4. 真机复验（**留给主会话**，本会话未碰真机/VM）-----
+建议步骤（nfvis 1.1.33 待发布件或开发态实例；独立事实源＝`GET /system/configuration/sessions`）：
+1. 取 admin token：`POST /api/v1/login`（口令按交接 §3.1 哈希比对法核对后再用）。
+2. `POST /api/v1/system/login-users`（body `{"name":"lock77","kind":"user","password":"…","class":"operator"}`，
+   不带 Auto-Commit 头——该族恒提交）→ 断言 **201**；随后 `GET /system/configuration/sessions`
+   **不含 `admin@api`**（改前：含）。
+3. 同一 token 直接 `POST /api/v1/system/login-users` 再建一个 / 或 `DELETE` 掉 lock77 → 断言成功（不被自己的锁挡）；
+   再换 **CLI/ssh 会话**执行 `configure` → 断言**不报**「candidate 会话锁被占用」（改前必报，round76 三次复现即此）。
+4. 反向复验（语义未被改坏）：`PUT /configuration/candidate`（**不带** Auto-Commit 头）→ `sessions` **仍含**
+   `admin@api` 且 `dirty=true`；再 `POST /configuration/commit` → 锁**仍在**，`DELETE /configuration/candidate` 后消失。
+5. 控制台回归（浏览器黑盒）：配置页「保存到 candidate → 提交」照旧生效并在提交后释放锁（页面提示「提交成功」，
+   `sessions` 空）；「用户与权限」页建/删用户后 `sessions` 立即为空。
+6. 收尾：删掉复验用的账号、`show log audit last 20` 确认审计成对（决策 #150 口径未被破坏）。
+
+----- 5. 环境与范围 -----
+- 本会话**未碰真机/VM**、未跑 `make integration`、未 push；宿主侧 `make check` 全绿（结果见 §3.2 末与交接回执）。
+- 存疑/未做：① 控制台「我的账号」自助改密**恰好发生在配置页有未提交候选时**，该候选会被这次改密一并提交
+  （既有行为，非本轮引入），随后本会话锁按新口径交还——页面再点「保存/提交」会先重新取锁（`cfgSave` 先 PUT），
+  不影响正确性但值得真机看一眼；② `POST /configuration/rollback/{n}` 仍要求先有编辑会话（见 §3.3），
+  未改为"自动取锁"（保持既有契约，控制台已自行处理）。

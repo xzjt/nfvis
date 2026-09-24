@@ -115,6 +115,12 @@ func TestSecretsNeverEchoed(t *testing.T) {
 		candidateWithUser(), map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusOK {
 		t.Fatalf("提交含口令哈希的配置（哨兵）: %d %s", status, data)
 	}
+	// candidate / diff 两条出口要求本会话处于编辑态：直提是一次性事务、提交后不再持锁
+	// （决策 #151），故按客户端流程再写一次候选（不带 Auto-Commit 头 = 纯候选写入）。
+	if status, _, data := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token,
+		candidateWithUser(), nil); status != http.StatusOK {
+		t.Fatalf("写候选（编辑态）: %d %s", status, data)
+	}
 	// 每条出口都注明「它回的是哪一段配置」——新增配置出口时必须在此补一行；
 	// 第 7 步的全路由扫描是兜底，不能替代这份清单（清单能发现"漏了哪一段"，
 	// 扫描只能发现"这次回了哈希"）。
