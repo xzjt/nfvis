@@ -103,19 +103,31 @@ FAIL	github.com/xzjt/nfvis/internal/api	8.930s
 | `TestSecretsNeverEchoed` | 直提哨兵配置后即遍历含 `/configuration/candidate`、`/configuration/diff` 的出口清单 | 直提后再写一次候选（不带 Auto-Commit 头 = 编辑态） | 两条出口要求编辑态；脱敏断言本身不变 |
 | `TestVrfsEndpoint` | 直提后读 `GET /configuration/candidate` 当底稿 | 改读 `GET /configuration`（生效配置） | 直提后本会话已不在编辑态；底稿本就该取生效配置 |
 
------ 4. 真机复验（**留给主会话**，本会话未碰真机/VM）-----
-建议步骤（nfvis 1.1.33 待发布件或开发态实例；独立事实源＝`GET /system/configuration/sessions`）：
-1. 取 admin token：`POST /api/v1/login`（口令按交接 §3.1 哈希比对法核对后再用）。
-2. `POST /api/v1/system/login-users`（body `{"name":"lock77","kind":"user","password":"…","class":"operator"}`，
-   不带 Auto-Commit 头——该族恒提交）→ 断言 **201**；随后 `GET /system/configuration/sessions`
-   **不含 `admin@api`**（改前：含）。
-3. 同一 token 直接 `POST /api/v1/system/login-users` 再建一个 / 或 `DELETE` 掉 lock77 → 断言成功（不被自己的锁挡）；
-   再换 **CLI/ssh 会话**执行 `configure` → 断言**不报**「candidate 会话锁被占用」（改前必报，round76 三次复现即此）。
-4. 反向复验（语义未被改坏）：`PUT /configuration/candidate`（**不带** Auto-Commit 头）→ `sessions` **仍含**
-   `admin@api` 且 `dirty=true`；再 `POST /configuration/commit` → 锁**仍在**，`DELETE /configuration/candidate` 后消失。
-5. 控制台回归（浏览器黑盒）：配置页「保存到 candidate → 提交」照旧生效并在提交后释放锁（页面提示「提交成功」，
-   `sessions` 空）；「用户与权限」页建/删用户后 `sessions` 立即为空。
-6. 收尾：删掉复验用的账号、`show log audit last 20` 确认审计成对（决策 #150 口径未被破坏）。
+----- 4. 真机复验（**由主会话执行**：nfvis-vm 上的开发态实例 + 生产库副本）-----
+环境：本分支构建的明文实例（`/tmp/nfvisd-ia`，分支 `fix/one-shot-lock-release`）+ 生产库副本，操作者 = **super-user**（admin）。
+独立事实源：`GET /system/configuration/sessions`（返回持锁会话与 dirty 标记）。
+
+| 步骤 | 实测 | 结果 |
+|---|---|---|
+| ① REST 建账号（该族恒提交） | `POST /system/login-users` → **201**；`sessions` → **`null`（不持锁）** | ✓（改前：`[{"holder":"admin@api",…}]`） |
+| ② 同一 token 继续写 + CLI 立刻取锁 | 再建一个 → **201**、删掉 → **200**；随后 **CLI** `configure` + 真改动 + `commit` **成功**（输出只有内核基线提示，无「锁被占用」） | ✓（改前必报 `%% candidate 会话锁被占用: 由 admin@api 持有`——round76 三次复现即此） |
+| ③ 反向：纯候选写入仍**持锁** | `PUT /configuration/candidate`（**不带** Auto-Commit）→ `sessions` = `[{holder:"admin@api", dirty:true}]`；`POST /configuration/commit` → 仍持锁（`dirty:false`，**提交端点本身不释放**——控制台配置页由客户端 `cfgEndSession()` 收尾，决策 #120 口径不变）；`DELETE /configuration/candidate` → `sessions` 空 | ✓（语义未被改坏） |
+| ④ 自助改密（login-users 族） | 建 `acct-lock` → `sessions` **null**；以**该账号**本人改口令 → **200**；再看 `sessions` **null**；新口令登录 **200**；删除 → **200**，`sessions` 仍 **null** | ✓（只读账号改口令不再长期占全局锁） |
+| ⑤ 决策 #150 未被本刀破坏 | 审计仍是成对行：`config.commit 创建本地用户 acct-lock（权限类 read-only） intent` → `… success`；`config.commit 重置本地用户 acct-lock 的口令（值 «已隐藏»） intent` → `… success` | ✓ |
+
+**收尾**：探针账号已删（用户表回到只有 `admin`）、开发态实例已停（8443 无监听）、临时库副本已删、
+已装服务 **1.1.32 active**；生产库指纹与动作前**逐字段一致**（rev 55 / audit 104 / cfgsha `084c3a64…`）。
+
+----- 4b. 复验中**我自己的探测脚本**捅出的一条新缺口（如实记录，已登记未修）-----
+为验证"纯候选写入仍持锁"，我的探针执行了 `PUT /configuration/candidate` 且 body 是 **`{"configuration":{}}`（空配置）**，
+随后 `POST /configuration/commit` —— **提交成功**，于是那份**开发态副本**的配置被清空（用户表变空、cfgsha 变了；
+生产库未受影响，副本随后已删）。
+**这暴露出产品侧一条真缺口（不是脚本独有的问题）**：`login-users` 的 **DELETE** 路径有「不能删最后一个 super-user」
+守卫（`handleDeleteLoginUser`），但**整文档提交**这条路（`PUT /configuration/candidate` + `commit`、`load override`、
+`request system configuration restore` 一类）**没有等价兜底** ⇒ **一次提交就能把本机提交成"无人可登录"**（自锁；
+恢复只能靠带外手段）。round44 的守卫只拦了"用户存在但口令为空"，**空用户表**这一形态没拦。
+已登记在 `docs/V1-收尾待办.md` §2.3（修法：在 `Engine.Commit` 的校验链里加"提交后至少有一个 super-user"的兜底，
+与 DELETE 路径同源；需契约先行——它会改变 `commit` 的失败语义）。
 
 ----- 5. 环境与范围 -----
 - 本会话**未碰真机/VM**、未跑 `make integration`、未 push；宿主侧 `make check` 全绿（结果见 §3.2 末与交接回执）。
