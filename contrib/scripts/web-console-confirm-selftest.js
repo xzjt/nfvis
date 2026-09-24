@@ -755,6 +755,14 @@ async function runHighAction(ctx, act, start) {
     ok('不再出现「' + bad + '」这种丢了服务端原因的文案', APP_SRC_RAW.indexOf(bad) < 0);
   }
 
+
+  // 校验类失败（如 commit）服务端会带 `detail[]`——那是操作者最需要的一行（哪里不对、该怎么办）。
+  // 判据是结构性的：api() 必须把 detail 逐条并入错误文案（只摆 summary 等于把原因丢掉）。
+  console.log('— ⑨ 校验类失败的 detail 必须到达操作者 —');
+  ok('api() 把 detail[] 逐条并入错误文案',
+    /Array\.isArray\(body\.detail\)/.test(APP_SRC_RAW) && /msg \+= '——/.test(APP_SRC_RAW));
+  ok('错误文案不再只有 summary（提交失败时能看到「为什么」）',
+    APP_SRC_RAW.indexOf('detail') >= 0 && APP_SRC_RAW.indexOf('校验类失败会带') >= 0);
   if (RC === 0) console.log('全部符合预期');
   else console.log('有不符合预期的用例');
   process.exit(RC);

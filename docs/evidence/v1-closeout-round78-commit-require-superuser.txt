@@ -117,24 +117,36 @@ FAIL	github.com/xzjt/nfvis/internal/api	1.101s
   `shape_contract`、`redact`（`candidateWithUser`）、`resources`（`putLoginUser` 改为"保留 super-user + 加一个操作员"）、
   `max_sessions` 各处同步。
 
------ 4. 真机复验（**由主会话执行**；本节为占位，未在本会话执行）-----
-> ⚠️ **真机上不要跑 `request system zeroize` / 恢复出厂**：它会删 `/var/lib/nfvis/images` 等**共享路径**，
-> 破坏冒烟阶段 3 的前置（`alpine.qcow2`、`docker alpine:3.20`）。例外点（`AllowNoSuperUser`）已由单测覆盖
-> （用例 ④），真机不必也不该验它。
+----- 4. 真机复验（**由主会话执行**：nfvis-vm 上的开发态实例 + 生产库副本）-----
+环境：本分支构建的明文实例（`/tmp/nfvisd-ia`，分支 `fix/commit-require-superuser`）+ 生产库副本，操作者 = **super-user**（admin）。
+**独立事实源**：REST `GET /system/login-users`、CLI `show users`、开发态库 `config_json`（三者互相印证）。
+⚠️ 按本节要求：**没有跑 zeroize**（它会删 `/var/lib/nfvis/images` 等**共享**路径，破坏冒烟阶段 3 的前置）；
+豁免点靠 `internal/config` 与 `internal/system` 的单测覆盖。
 
-环境：本分支构建的开发态实例（明文，`/tmp/nfvisd-csu`）+ **生产库副本**；操作者 = super-user（admin）；
-`ens160` 是管理口——**全程不碰**。
-
-| 步骤 | 命令/请求 | 断言与**独立事实源** |
+| 步骤 | 实测 | 结果 |
 |---|---|---|
-| ① 记录基线 | `GET /system/login-users`；`curl -s .../configuration/history \| jq length`；`show configuration \| display set` | 账号表含 `admin`（super-user）；记下 rev 与 cfgsha（配置库指纹） |
-| ② 空配置整文档提交 | `PUT /configuration/candidate` body `{}` → `POST /configuration/commit` | 期望 **400 `VALIDATION_FAILED`**，detail 里 `system.login.users` 一条、文案含「super-user」；**rev 不变**（历史长度与①一致） |
-| ③ 自锁未发生（关键） | 用 admin 口令 `POST /login`；`GET /system/login-users`；`CLI show system login-users` | 期望 **200 + token**；账号表仍含 admin；三条路径口径一致（REST/CLI 与配置库**逐字段**相同） |
-| ④ 候选/锁保留 | `GET /configuration/candidate`；`GET /system/configuration/sessions` | 期望候选仍在（`dirty:true`，内容为①的替换稿）、锁仍由该会话持有（决策 #151 的收尾**不适用于校验失败**） |
-| ⑤ 改完再提（闭环） | `PUT /configuration/candidate`（含 admin 的文档）→ `POST /configuration/commit` → `DELETE /configuration/candidate` | 期望 **200**、rev +1；`virsh`/`vppctl` 无关故只对配置库取指纹，确认与提交内容一致 |
-| ⑥ 只读/操作员文档同样被拒 | `PUT candidate`（只有 operator 的文档）→ `commit` | 期望 400 且点明缺 super-user（与 DELETE 守卫同源） |
+| ① 复验前基线 | `rev=55`，`cfgsha 084c3a64…`，用户 `[{super-user, admin}]`，历史 51 条 | — |
+| ② `PUT /configuration/candidate`（**空账号文档** `{"configuration":{}}`） | **200**，`dirty=true`，锁由 `admin@api` 持有 | ✓ |
+| ②′ `POST /configuration/commit` | **400 VALIDATION_FAILED**，`detail[0]` = `path: system.login.users`，`message` = 「提交被拒：配置里至少要保留一个 super-user 账号，否则本机将无人可登录——请先建一个 super-user 账号；若要复位账号，请用 request system zeroize（恢复出厂）」 | ✓（消息可操作、不含需求编号） |
+| ③ **没自锁**（三条独立路径） | REST `POST /login` → **200**；`GET /system/login-users` → `[{super-user, admin}]`；CLI `show users` → `admin super-user`；开发态库 `config_json` → `['admin']` | ✓ |
+| ④ 失败后候选与锁**都保留**（与配置页语义一致） | `candidate.dirty=true`；`sessions` = `[{holder:"admin@api", dirty:true}]`；`DELETE /configuration/candidate` → **204** 后 `sessions` 空 | ✓（决策 #151 的"校验失败不释放"在此得到现场印证） |
+| ⑤ 配置库内容未变 | `cfgsha` 与 ① 相同（`084c3a64…`）、`rev` 仍 55——**拒绝是"什么都没发生"，不是"改了一半"** | ✓ |
+| ⑥ **控制台（决策 #141 口径）** | 配置页：开始编辑 → JSON 编辑器填 `{}` → 保存到 candidate（「已保存到 candidate（有未提交变更）。」）→ 提交（中危确认框「提交配置」）→ 页面提示 **「提交失败：commit 校验失败——system.login.users：提交被拒：配置里至少要保留一个 super-user 账号…」**（**含服务端原话**） | ✓ |
 
-**收尾**：删掉探针产生的修订（或整库副本删除）、停开发态实例、核对生产库指纹与动作前一致（**逐字段**）。
+**收尾**：开发态实例已停（8443 无监听）、临时库副本已删、已装服务 **1.1.32 active**；
+生产库指纹与动作前**逐字段一致**（rev 55 / audit 104 / cfgsha `084c3a64…`）。
+
+----- 4b. 复验中抓到并**当场修掉**的一处界面缺陷（同一 PR 内）-----
+**现象**：控制台提交被拒时，页面只显示 **「提交失败：commit 校验失败」**——服务端在 `detail[]` 里逐条写明的
+「哪里不对、该怎么办」（本轮正是那条"至少要保留一个 super-user"）**被丢掉了**。
+**根因**：`internal/api/ui/app.js` 的 `api()` 只取错误体的 `message`（summary），不取 `detail[]`；
+而 `detail` 恰恰是校验类失败里唯一有用的部分。这与决策 #117 起的一贯口径冲突
+（"含糊的失败和谎报成功一样不可接受"；round66 已为**直连 fetch** 路径做过同款收口）。
+**修法**：`api()` 把 `detail[]` 逐条（`path：message`）并入抛出的错误文案——**一处改动覆盖所有页面**。
+**验证**：浏览器里重跑同一路径，页面提示变为
+「提交失败：commit 校验失败——**system.login.users：提交被拒：配置里至少要保留一个 super-user 账号…**」。
+**守护**：分级确认自校准新增 **⑨**（结构判据：`api()` 必须把 `detail[]` 并入错误文案），
+`bash contrib/scripts/web-console-confirm-selftest.sh` 全绿。
 
 ----- 5. 环境与范围 -----
 - 本会话**未碰真机/VM**、未跑 `make integration`、未 push、未开 PR；只提交到分支 `fix/commit-require-superuser`。
