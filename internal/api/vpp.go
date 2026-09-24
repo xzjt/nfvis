@@ -359,3 +359,56 @@ func (s *Server) handleGetKernel(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, view)
 }
+
+// handleKernelApply POST /system/kernel:apply（FR-SYS-014，决策 #146）。
+//
+// 契约里早就声明、服务端一直没注册（幽灵端点：控制台「内核基线」页的写入按钮点了得到 404）。
+// 实现与 CLI `request system kernel apply` **共用** applyKernelBaseline——同一份派生 + 同一份落地器，
+// 不存在"两条路径两套行为"。生效需重启，故响应里带 pending_reboot 差异（界面据此提示）。
+func (s *Server) handleKernelApply(w http.ResponseWriter, r *http.Request) {
+	if s.kernel == nil {
+		writeError(w, http.StatusServiceUnavailable, "RUNTIME_UNAVAILABLE", errRuntimeUnavailable, nil)
+		return
+	}
+	cfg, err := s.engine.Committed()
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	out, err := applyKernelBaseline(s.kernel, cfg)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	s.auditKernel(r, "apply", "按 committed 配置写入内核基线", nil)
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleKernelRollback POST /system/kernel:rollback（FR-SYS-014，决策 #146）：与 CLI 同源。
+func (s *Server) handleKernelRollback(w http.ResponseWriter, r *http.Request) {
+	if s.kernel == nil {
+		writeError(w, http.StatusServiceUnavailable, "RUNTIME_UNAVAILABLE", errRuntimeUnavailable, nil)
+		return
+	}
+	out, err := rollbackKernelBaseline(s.kernel)
+	if err != nil {
+		s.auditKernel(r, "rollback", "回退内核基线", err)
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	s.auditKernel(r, "rollback", "回退内核基线", nil)
+	writeJSON(w, http.StatusOK, out)
+}
+
+// auditKernel 记录内核基线动作（与 CLI 的 x.audit 同形：user/action/detail/result）。
+func (s *Server) auditKernel(r *http.Request, action, detail string, err error) {
+	user := "api"
+	if info, ok := Identity(r); ok {
+		user = info.User
+	}
+	result := "success"
+	if err != nil {
+		result, detail = "failure", detail+": "+err.Error()
+	}
+	s.engine.Audit(user, "system.kernel."+action, detail, result)
+}

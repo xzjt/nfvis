@@ -97,6 +97,7 @@ type Server struct {
 	software    SoftwareRuntime
 	hardware    HardwareRuntime
 	tlsMgr      TlsRuntime
+	kernel      ksys.KernelApplier // 内核启动基线落地（决策 #146：REST 侧与 CLI 共用同一实现）
 	consoleTix  *consoleTickets
 	log         *slog.Logger
 	mux         *http.ServeMux
@@ -132,6 +133,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.cliExec.setSRIOV(opts.SRIOV)
 	s.cliExec.setDPDK(opts.DPDK)
 	s.cliExec.setKernel(opts.Kernel)
+	s.kernel = opts.Kernel
 	s.cliExec.setTLS(opts.TLS)
 	s.cliExec.setVPPRestart(func(ctx context.Context) error {
 		if s.vpp == nil {
@@ -159,6 +161,10 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("POST "+APIPrefix+"/logout", s.auth(s.handleLogout, schema.ClassReadOnly, "logout"))
 	mux.Handle("GET "+APIPrefix+"/system/version", s.auth(s.handleVersion, schema.ClassReadOnly, "show version"))
 	mux.Handle("GET "+APIPrefix+"/system/kernel", s.auth(s.handleGetKernel, schema.ClassReadOnly, "show system kernel"))
+	// 决策 #146：这两条**契约里早就声明、服务端一直没注册**（幽灵端点，控制台点了如实报 404）。
+	// class 与命令树/《命令全表》一致 = S（写 GRUB 启动参数、需重启生效）。
+	mux.Handle("POST "+APIPrefix+"/system/kernel:apply", s.auth(s.handleKernelApply, schema.ClassSuperUser, "request system kernel apply"))
+	mux.Handle("POST "+APIPrefix+"/system/kernel:rollback", s.auth(s.handleKernelRollback, schema.ClassSuperUser, "request system kernel rollback"))
 
 	// 配置事务（/configuration/*，configure 为 S 级权限，命令树 §4）
 	cfgAPI := func(h http.HandlerFunc) http.Handler {

@@ -1108,6 +1108,37 @@
         },
         "type": "object"
       },
+      "KernelBaselineAction": {
+        "description": "内核基线 apply/rollback 的结果（决策",
+        "properties": {
+          "action": {
+            "enum": [
+              "apply",
+              "rollback"
+            ],
+            "type": "string"
+          },
+          "backup": {
+            "description": "上一版本备份路径（apply 时；无备份为空串，条件出现）",
+            "type": "string"
+          },
+          "message": {
+            "description": "落地器给的一句话（rollback 时，条件出现）",
+            "type": "string"
+          },
+          "pending_reboot": {
+            "description": "需重启才生效的差异（apply 时列出；**恒为数组**——apply 无差异或 rollback 时为空数组，不会发 null）",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
       "LldpConfig": {
         "properties": {
           "advertisement_interval": {
@@ -4841,15 +4872,29 @@
     },
     "/system/kernel:apply": {
       "post": {
+        "description": "与 CLI `request system kernel apply` **同一实现**（同一份派生 + 同一份落地器）。\n写入 GRUB 片段 / fstab 大页挂载并 update-grub；**需重启生效**，故响应里给出 pending_reboot 差异。\nclass 为 super-user（决策 #146：命令树 §3 与《命令全表》都写 S，此前代码树漏了 Su() 标记）。\n",
         "responses": {
           "200": {
-            "description": "已写入（响应含 backup 路径与 pending_reboot 差异）"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KernelBaselineAction"
+                }
+              }
+            },
+            "description": "已写入（含 backup 路径与 pending_reboot 差异）"
           },
           "400": {
             "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "503": {
+            "description": "内核基线落地未接入（未装配落地器）"
           }
         },
-        "summary": "按 committed 配置写入 GRUB 基线（需重启生效，FR-SYS-014）",
+        "summary": "按 committed 配置写入 GRUB 基线（需重启生效，FR-SYS-014，super-user）",
         "tags": [
           "system"
         ]
@@ -4857,12 +4902,29 @@
     },
     "/system/kernel:rollback": {
       "post": {
+        "description": "与 CLI `request system kernel rollback` 同一实现；class 同 apply。",
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KernelBaselineAction"
+                }
+              }
+            },
             "description": "已回退"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "503": {
+            "description": "内核基线落地未接入（未装配落地器）"
           }
         },
-        "summary": "回退上一次内核基线（需重启生效）",
+        "summary": "回退上一次内核基线（需重启生效，FR-SYS-014，super-user）",
         "tags": [
           "system"
         ]

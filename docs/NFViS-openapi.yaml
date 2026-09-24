@@ -1399,16 +1399,34 @@ paths:
   /system/kernel:apply:
     post:
       tags: [system]
-      summary: 按 committed 配置写入 GRUB 基线（需重启生效，FR-SYS-014）
+      summary: 按 committed 配置写入 GRUB 基线（需重启生效，FR-SYS-014，super-user）
+      description: |
+        与 CLI `request system kernel apply` **同一实现**（同一份派生 + 同一份落地器）。
+        写入 GRUB 片段 / fstab 大页挂载并 update-grub；**需重启生效**，故响应里给出 pending_reboot 差异。
+        class 为 super-user（决策 #146：命令树 §3 与《命令全表》都写 S，此前代码树漏了 Su() 标记）。
       responses:
-        "200": { description: 已写入（响应含 backup 路径与 pending_reboot 差异） }
+        "200":
+          description: 已写入（含 backup 路径与 pending_reboot 差异）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KernelBaselineAction" }
         "400": { $ref: "#/components/responses/Error400" }
+        "403": { $ref: "#/components/responses/Error403" }
+        "503": { description: 内核基线落地未接入（未装配落地器） }
   /system/kernel:rollback:
     post:
       tags: [system]
-      summary: 回退上一次内核基线（需重启生效）
+      summary: 回退上一次内核基线（需重启生效，FR-SYS-014，super-user）
+      description: 与 CLI `request system kernel rollback` 同一实现；class 同 apply。
       responses:
-        "200": { description: 已回退 }
+        "200":
+          description: 已回退
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KernelBaselineAction" }
+        "400": { $ref: "#/components/responses/Error400" }
+        "403": { $ref: "#/components/responses/Error403" }
+        "503": { description: 内核基线落地未接入（未装配落地器） }
 
   /system/health/thresholds:
     get:
@@ -2323,6 +2341,19 @@ components:
             tuned_profile: { type: string }
             params: { type: array, items: { type: string } }
         diffs: { type: array, items: { type: string }, description: 差异项（空 = 一致） }
+
+    KernelBaselineAction:
+      type: object
+      description: 内核基线 apply/rollback 的结果（决策 #146；与 CLI 同源，CLI 把同一结果渲染成文本）
+      required: [action]
+      properties:
+        action: { type: string, enum: [apply, rollback] }
+        backup: { type: string, description: "上一版本备份路径（apply 时；无备份为空串，条件出现）" }
+        pending_reboot:
+          type: array
+          items: { type: string }
+          description: "需重启才生效的差异（apply 时列出；**恒为数组**——apply 无差异或 rollback 时为空数组，不会发 null）"
+        message: { type: string, description: "落地器给的一句话（rollback 时，条件出现）" }
 
     HealthThresholds:
       type: object

@@ -203,10 +203,13 @@ func OperRoot() *Node {
 				),
 			)),
 			K("system", "系统操作",
-				K("kernel", "内核启动基线",
+				// 决策 #146：kernel apply/rollback 会改写 GRUB 启动参数（需重启生效）——命令树契约
+				// （§3 该行注 S）与《命令全表》都写 S，此前代码树漏了 Su() 标记，运行期按 request 域
+				// 的 O 级放行（operator 能写启动项）。此处补上，与契约一致。
+				Su(K("kernel", "内核启动基线",
 					K("apply", "按 committed 配置写入 GRUB 基线（需重启生效）"),
 					K("rollback", "回退上一次内核基线（需重启生效）"),
-				),
+				)),
 				Su(K("software", "软件升级",
 					K("add", "安装 deb 包/URL",
 						PT("<deb>", "path", "deb 包路径或 URL"),
