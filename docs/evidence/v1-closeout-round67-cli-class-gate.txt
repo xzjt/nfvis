@@ -1,0 +1,93 @@
+===== V1 收尾第六十七轮：CLI 运行期 class 判定与命令树声明对齐（决策 #144）=====
+日期：2026-09-24；分支 `fix/cli-class-gate`（main `8c80ba3` 之上）；**契约文档未改**（命令树/命令全表/矩阵本来就写 S/O）
+
+----- 1. 起因 -----
+round65 核实 `GET /system/backup/{file}` 权限口径时**顺带证伪出一条更严重的缺陷**（登记在决策 #143 文末③④与交接 §2.3）：
+命令树的 class 标记与执行器的运行期判定**不同源**。本轮处置它。
+
+----- 2. 缺陷（两层，都在 CLI 侧）-----
+**第一层：判定取的是"域节点"，把子节点上的 Su() 标记吃掉。**
+命令树把 `Su()`/`Op()` 标在**子节点**上（`request system reboot`/`shutdown`/`poweroff`/`zeroize`/`software`/
+`configuration`/`api`/`ssh`/`storage`、`request images delete`、`request virtual-machine-functions <n> delete`、
+`request container-functions <n> delete`），而 `Node.RequiredClass()` 取的是「自身与祖先的最大值」；
+分发器却把 `mustNode(OperRoot(), "request", "system")`（只继承到 **O**）交给 `Authorize` ⇒
+**这些 Su 标记在运行期形同虚设**。round65 实测：operator 能跑 `request system configuration backup`
+（并**真的写出了归档**）、`request system reboot`（到确认问询）、`request vpp restart`、VM 删除。
+
+**第二层（本轮新查）：四个子域连判定都没有。**
+`requestVPP` / `requestInterfaces` / `requestSRIOV` / `requestAlarms` 的分发器里**根本没有 `allow` 调用**
+⇒ **read-only 也能** `request vpp restart`（重启数据面）、`request interfaces <n> bind-dpdk`、
+`request alarms clear`（后者是 O 级、前者是 S 级）。
+
+----- 3. 处置 -----
+1. 新增 `cliExecutor.allowTokens(class, domain, path...)`（`internal/api/cliexec.go`）：用 `schema.Match`
+   取**匹配到的最深节点**的 `RequiredClass()` 判定；匹配不到（命令树未建模的写法）时回落到调用方给的域节点
+   ——保持「未知写法先给语法提示」的既有行为，且**域节点的 RequiredClass 必不大于该最深节点**，回落不会放松判定。
+2. `request` 域改为在**入口处判定一次**（`execRequest`，位置在「无效命令」检查**之后**）——一处覆盖全部子域，
+   不再可能"漏域"；各子域内保留同款判定作**纵深防御**（直接调用子域函数时仍生效）。
+3. `show` 域一并换成同口径（子树当前无 Op/Su 节点，行为不变；将来给 show 子命令标了标记会立刻生效）。
+4. **契约文档未改**：命令树 §4 / 命令全表 / class 矩阵本来就写 S/O——本次是让**运行期与声明一致**
+   （本仓库「命令树与执行器必须同源」的既有规矩）。
+
+----- 4. 测试与变异验证 -----
+新增 `internal/api/cli_class_gate_test.go`，两层守护：
+- **① 穷举操作树**：遍历操作树每个可执行节点（关键字层 + 实例参数层），断言「按该路径判定的 class == 该节点声明的
+  `RequiredClass()`」——实测覆盖 **200+ 个节点**（断言节点数 ≥50，防止遍历本身失效）；将来任何子命令加标记都自动纳入。
+- **② 端到端**：13 条代表性 S 命令对 operator/read-only **一律被拒**、对 super-user **不被权限挡住**；
+  另 4 条 O 命令（tech-support generate / ntp sync / core-dumps export / password change）对 operator **仍可用**
+  ——防「收紧过头」（把 operator 该有的能力一起挡掉同样是缺陷）。
+
+**变异验证（两条，都真跑过）**：
+| 变异体 | 改法 | 结果 |
+|---|---|---|
+| A：判定退回域节点 | 入口判定 `allowTokens` → `allow`（`request` 域节点） | `TestDeclaredSuperUserCommandsRejectOperator` **报 ✗**：`request vpp restart：operator 应被拒…实际输出 "%% VPP 未接入…"` |
+| B：入口不判权限 | 入口判定整块置为 `if false` | 同用例 **报 ✗**（并额外暴露 read-only 也能过 `request vpp restart`） |
+
+----- 5. 真机复验（dev 实例 + 生产库副本；`/tmp/nfvis-cli-ia` = 本分支构建）-----
+| 账号 | 命令 | 声明 | 修复前 | **修复后实测** |
+|---|---|---|---|---|
+| operator | `request system reboot` | S | 到确认问询（放行） | `%% 无权限执行该命令` ✓ |
+| operator | `request system configuration backup` | S | **真生成归档** | `%% 无权限执行该命令` ✓ |
+| operator | `request vpp restart` | S | 无判定（直通） | `%% 无权限执行该命令` ✓ |
+| operator | `request system software rollback` | S | 无判定/放行 | `%% 无权限执行该命令` ✓ |
+| operator | `request virtual-machine-functions vnf-a delete` | S | 到确认问询 | `%% 无权限执行该命令` ✓ |
+| read-only | `request alarms clear` | O | 无判定（直通） | `%% 无权限执行该命令` ✓ |
+| read-only | `request vpp restart` | S | 无判定（直通） | `%% 无权限执行该命令` ✓ |
+| operator | `ping 192.168.100.10 source 192.168.100.1 count 2` | O | 可用 | **仍可用**（收到回显）✓ |
+| operator | `show version` | R | 可用 | **仍可用** ✓ |
+| read-only | `show version` | R | 可用 | **仍可用** ✓ |
+| super-user | `request system configuration backup` | S | 可用 | **仍可用**（生成归档）✓ |
+
+收尾：探针账号已删；开发态库内容指纹 `cfgsha 084c3a64…`（与动作前逐字节一致）。
+
+----- 6. 影响面（行为变更，全部是"收紧到与声明一致"）-----
+- **operator 失去**：`request system {reboot,shutdown,poweroff,zeroize,software,configuration,api,ssh,storage}`、
+  `request vpp *`（restart / trace 抓包）、`request images delete`、`request virtual-machine-functions <n> delete`、
+  `request container-functions <n> delete`。
+- **read-only 另外失去**：`request interfaces|sriov|alarms`（O 级）与上述全部。
+- **不影响的**：`show` 族（只读）、`ping`/`traceroute`/`monitor`（O 级，operator 仍可用）、
+  `request system {tech-support,core-dumps,ntp,password,kernel}`（O 级，operator 仍可用）、
+  `configure`/`clear`/`start shell`（本来就是 S 且判定一直正确）、REST/控制台（各端点用自己的 class，未受影响）。
+- 控制台侧：只读/operator 账号点这些按钮会被服务端**如实拒绝**（界面把服务端的原话显示出来，见 round66 的文案收口）。
+
+----- 7. 未改/如实登记 -----
+- `request system configuration backup to <path>` 的**目标路径仍无校验**（`copyFile` 直接 `os.OpenFile(dst, …)`，
+  nfvisd 以 root 运行）。本决策把该命令收回到 super-user（与声明一致）后，它**不再是低权限提权路径**
+  （super-user 本就有 `start shell`），但"导出目标路径不校验"本身仍是可改进项。
+- 自定义 class 的路径 ACL 语义未动（仍是纯路径 ACL、与 required 等级正交，见 `internal/aaa/service.go` 注释）。
+
+----- 8. 环境（本轮前后）-----
+- 生产库：**rev 55 / audit 104 / cfgsha `084c3a64e4cc0d43a16cbced28cb0742aaa0ef1783c75065eb7966b091eba726`**（全程未变）
+- 已装服务：**nfvis 1.1.29 active**；开发态实例用本分支构建（`/tmp/nfvisd-ia`）+ 生产库副本，收尾已停
+
+----- 9. 回归：256 条冒烟（对本轮构建的 dev 实例，admin 身份）-----
+`SRV=http://127.0.0.1:8443 CLI_BIN=/tmp/nfvis-cli-ia API_PORT=8443` → **通过 172 / 失败 26 / 预期报错 3**
+（逐阶段：41/1、57/2、6/1、23/12/1、34/10/2、11/0/0）。
+
+**判读（与 round36 登记的基线逐类对照）**：
+- 26 条失败**全部**落在已登记的三类前置级联里（本实例用的是**生产库副本**，故与"对已装实例跑"的
+  171/26/3 基线同类）：① 阶段预块首条"值未变化"→ `-c` 脚本任一行失败即停止（`configure` ×3 与
+  `vs-l2/vs-l3/acl-test` 的 6 条视图、`ping 192.168.155.10`）；② 1G 大页池被两台已声明 VNF 占满 →
+  cli-vm 提交被**正确**拒绝（阶段 4 的 12 条 + 阶段 5 的 3 条视图）；③ 已登记的 `show vpp runtime` 未接入。
+- **关键回归判据：整轮日志里 `无权限` 出现 0 次**——本次收紧没有误伤任何 admin 命令；
+  通过数 172 比"已装实例"基线多 1（本实例的阶段 3 前置 `alpine.qcow2` + `docker alpine:3.20` 齐备）。
