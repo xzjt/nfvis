@@ -300,6 +300,14 @@ async function api(path, opts) {
 // 单个端点失败不该拖垮整页：各自降级为"读取失败"。
 const soft = (p) => p.catch((e) => ({ __err: e.message }));
 
+// apiErrText：把"服务端没有这个接口"（Go 的路由表对未注册路径直接 404，错误体是纯文本，
+// 界面只能看到 HTTP 404）说成可操作的说明。**不改变判定**——404 仍然是失败，只是把
+// "为什么失败、接下来怎么办"讲清楚（含糊的"失败"和谎报成功一样不可接受）。
+function apiErrText(e, hint) {
+  const m = (e && e.message) || '未知错误';
+  return /^HTTP 404$/.test(m) ? m + '（本机服务端没有提供这个接口；' + hint + '）' : m;
+}
+
 // soft() 失败时给的是 {__err} 而不是数组——数组类渲染一律先过 rowsOf()，否则 .filter/.map 抛错
 // （浏览器验收抓到的旧缺陷：token 失效时整页报 JS 错，而不是干净地提示）。
 const rowsOf = (v) => (Array.isArray(v) ? v : []);
@@ -376,13 +384,14 @@ async function loadInterfaceStats(ifaces) {
 
 // 系统卡（含组件版本）。数字全部取自 /system/status（与 CLI show system 同源）；
 // 字段缺席（非 Linux 无宿主指标等）时对应行显示「—」，不编造。
-function renderSystem(st, ver) {
-  $('host-line').textContent = st && st.hostname ? st.hostname : '';
-
+//
+// 两处用到同一份字段表（总览页的系统卡、系统域页 #/system）：抽成 systemPairs/versionPairs，
+// 免得两页各写一份、加字段时漏改一处（同一份事实两处实现）。
+function systemPairs(st) {
   const cpu = (st && st.cpu) || {};
   const mem = (st && st.memory) || {};
   const disk = (st && st.storage) || {};
-  fill($('sys-list'), st && st.__err ? [['读取失败', st.__err]] : [
+  return [
     ['主机名', st && st.hostname],
     ['运行时长', uptime(st && st.uptime_seconds)],
     ['配置就绪', st && st.config_ready === false ? '否' : '是'],
@@ -395,13 +404,35 @@ function renderSystem(st, ver) {
       ? bytes(disk.free_bytes) + ' 可用 / ' + bytes(disk.total_bytes) +
         (disk.used_ratio != null ? '（已用 ' + pct(disk.used_ratio) + '）' : '')
       : undefined],
-  ]);
-  fill($('ver-list'), ver && ver.__err ? [['读取失败', ver.__err]] : [
+  ];
+}
+
+function versionPairs(ver) {
+  return [
     ['NFViS', ver && ver.nfvis], ['VPP', ver && ver.vpp], ['DPDK', ver && ver.dpdk],
     ['libvirt', ver && ver.libvirt], ['QEMU', ver && ver.qemu], ['Docker', ver && ver.docker],
     ['Ubuntu', ver && ver.ubuntu],
-  ]);
+  ];
 }
+
+function renderSystem(st, ver) {
+  $('host-line').textContent = st && st.hostname ? st.hostname : '';
+  fill($('sys-list'), st && st.__err ? [['读取失败', st.__err]] : systemPairs(st));
+  fill($('ver-list'), ver && ver.__err ? [['读取失败', ver.__err]] : versionPairs(ver));
+}
+
+// 系统域一级页（#/system）：状态与版本（与总览同源）+ **已生效配置**的系统段只读回显。
+// 系统段里口令哈希这类敏感叶子由服务端脱敏后才发出来（界面拿不到原文，也不回显）。
+// 改字段仍在「配置」页的系统段表单里做（只写候选、提交后生效）——本页不提供第二个写入口。
+function renderSystemPage(st, ver, sysCfg) {
+  $('sysp-note').textContent = st && st.hostname ? '（' + st.hostname + '）' : '';
+  fill($('sysp-list'), st && st.__err ? [['读取失败', st.__err]] : systemPairs(st));
+  fill($('sysp-ver'), ver && ver.__err ? [['读取失败', ver.__err]] : versionPairs(ver));
+  $('sysp-cfg').textContent = sysCfg && sysCfg.__err
+    ? '读取失败：' + sysCfg.__err
+    : JSON.stringify(sysCfg || {}, null, 2);
+}
+
 
 // 数据面卡。
 function renderVPP(vpp) {
@@ -447,17 +478,154 @@ function renderPools(pools) {
 }
 
 // 接口卡：列表端点只有配置字段（名称/说明/MTU 等），逐口统计在详情端点上（见 loadInterfaceStats）。
+// 行可点进详情页（#/system/interfaces/:name）——驱动接管（DPDK）与 VF 数量都在那一页。
 function renderInterfaces(ifaces, ifaceRows) {
+  const tbody = $('iface-table').querySelector('tbody');
+  tbody.textContent = '';
+  if (!ifaceRows.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '7', class: 'muted', text: '（无）' }));
+    tbody.appendChild(tr);
+  }
+  ifaceRows.forEach((r) => {
+    const tr = rowClickable(el('tr'), '#/system/interfaces/' + encodeURIComponent(r.cfg.name));
+    [r.cfg.name, r.cfg.description, r.cfg.mtu,
+      r.stat ? r.stat.rx_packets : undefined, r.stat ? r.stat.tx_packets : undefined,
+      r.stat ? r.stat.rx_errors : undefined, r.stat ? r.stat.tx_drops : undefined,
+    ].forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
+    tbody.appendChild(tr);
+  });
   const cfgOnly = (ifaces || []).length > ifaceRows.length;
-  table($('iface-table').querySelector('tbody'), 7, ifaceRows.map((r) => [
-    r.cfg.name, r.cfg.description, r.cfg.mtu,
-    r.stat ? r.stat.rx_packets : undefined, r.stat ? r.stat.tx_packets : undefined,
-    r.stat ? r.stat.rx_errors : undefined, r.stat ? r.stat.tx_drops : undefined,
-  ]));
   $('iface-note').textContent = cfgOnly
     ? '（共 ' + ifaces.length + ' 个接口，此处只列前 ' + MAX_IFACE_DETAIL + ' 个）'
     : '';
 }
+
+// ---------- 接口详情页（#/system/interfaces/:name）：驱动接管与 SR-IOV ----------
+//
+// 两条写路径都作用在**本机网卡**上，都留在服务端实现里，界面只做入口与确认：
+//   · DPDK 绑定/解绑（PUT /interfaces/{name}/dpdk，需 confirm=true）——管理口守卫在
+//     dpdkController.SetDPDKBound 里（配置声明的管理口 / 承载默认路由的口 / 守护进程监听地址
+//     所属的口三条事实，命中即拒绝且不提供强制出口）。界面**不绕过**：守卫拒绝时如实显示服务端原文。
+//   · SR-IOV VF 数量（PUT /interfaces/{name}/sriov）——无 PF/VF 的机器上由底座明确报错，同样如实显示。
+//
+// 档位（§7 的"影响面跨对象/跨会话、可回退"一条）：两条都定**中危**——逐条列影响面 + 主按钮标红。
+// 理由：都作用在单个对象上、都能点回去（解绑 / vf_count 归零），且真正的红线（管理口）由服务端守卫兜住；
+// 高危档留给"不可撤销 / 会覆盖全局状态"的动作（恢复出厂、软件升级、恢复配置、证书上传、用户与权限）。
+function ifdMsg(text, isErr) {
+  const p = $('ifd-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+// 详情页取两个端点：`/interfaces/{name}`（配置字段 + 该口计数）与 `/interfaces`（**运行态**字段：
+// 驱动 / 链路 / 速率——单取端点不回运行态，只回配置对象；"现在挂的是哪个驱动"正是本页要看的东西，
+// 故两个都声明、都在路由表的 endpoints 里）。运行态缺席时如实显示「—」，不编造。
+function renderIfaceDetail(iface, ifaces, params) {
+  const name = (params && params.name) || '';
+  const ok = iface && !iface.__err;
+  const st = (iface && iface.statistics) || null;
+  const rt = pickByName(rowsOf(ifaces), name) || {};
+  $('ifd-name').textContent = name;
+  fill($('ifd-head'), ok ? [
+    ['驱动', rt.driver],
+    ['链路', rt.link],
+    ['速率', rt.speed_mbps != null ? rt.speed_mbps + ' Mbps' : undefined],
+    ['管理状态', rt.enabled === true ? '启用' : (rt.enabled === false ? '禁用' : undefined)],
+  ] : [['读取失败', iface ? iface.__err : notFoundText(name, '接口')]]);
+  fill($('ifd-info'), ok ? [
+    ['说明', iface.description],
+    ['MTU', iface.mtu],
+    ['启用（配置）', iface.enabled === true ? '是' : (iface.enabled === false ? '否' : undefined)],
+    ['入向限速策略', iface.ingress_policy],
+    ['SR-IOV VF 数（配置）', iface.sriov ? iface.sriov.vf_count : undefined],
+    ['VF 占用', iface.sriov && Array.isArray(iface.sriov.vfs) && iface.sriov.vfs.length
+      ? iface.sriov.vfs.map((v) => v.vf_id + (v.assigned_vnf ? '→' + v.assigned_vnf : '（空闲）')).join('；')
+      : undefined],
+  ] : [['读取失败', iface ? iface.__err : notFoundText(name, '接口')]]);
+  fill($('ifd-stat'), st ? [
+    ['Rx / Tx 包', dash(st.rx_packets) + ' / ' + dash(st.tx_packets)],
+    ['Rx / Tx 字节', dash(bytes(st.rx_bytes)) + ' / ' + dash(bytes(st.tx_bytes))],
+    ['Rx / Tx 错误', dash(st.rx_errors) + ' / ' + dash(st.tx_errors)],
+    ['Rx / Tx 丢弃', dash(st.rx_drops) + ' / ' + dash(st.tx_drops)],
+  ] : [['读取失败', ok ? '该口当前取不到计数（数据面未连接或口不在数据面）' : '未取到数据']]);
+}
+
+// dpdkAct 绑定/解绑：confirm=true 由界面带上（服务端要求，缺了会 400——这不是界面在放水，
+// 而是服务端对"会中断该口流量"的显式要求）。
+async function dpdkAct(bound) {
+  const name = $('ifd-name').textContent;
+  if (!name) { ifdMsg('没有选中接口。', true); return; }
+  const uio = $('ifd-uio').value;
+  const to = $('ifd-todrv').value.trim();
+  const cli = 'request interfaces ' + name + (bound ? ' bind-dpdk' : ' unbind-dpdk') +
+    (bound ? (uio ? ' uio-driver ' + uio : '') : (to ? ' to-driver ' + to : ''));
+  const ok = await uiConfirm(bound ? '绑定到 DPDK 驱动' : '解绑交还内核驱动', {
+    tier: 'mid',
+    bullets: bound ? [
+      '该口会离开内核平面：内核侧的地址、路由、统计都不再属于它，内核里也看不到这块网卡。',
+      '经该口的现有流量立即中断；若该口承载业务或管理路径，路径会断。',
+      '交给数据面使用需要按 PCI 地址声明该口，并按需重启数据面才认。',
+      '管理口（配置声明的管理口 / 承载默认路由的口 / 守护进程监听地址所属的口）由服务端守卫直接拒绝。',
+      '可回退：在同一页「解绑交还内核」把它交还给内核驱动。',
+    ] : [
+      '该口回到内核平面：内核驱动重新接管，内核侧地址/路由/统计重新可见。',
+      '若该口仍被数据面按 PCI 声明占用，数据面侧的路径会断（先确认数据面不再需要它）。',
+      '交还的内核驱动名建议显式给出（本机常需显式给出才能重新探测原生驱动）。',
+      '可回退：再点一次「绑定到 DPDK」即可重新交给数据面。',
+    ],
+    cli: cli,
+  });
+  if (!ok) return;
+  ifdMsg((bound ? '绑定' : '解绑') + ' ' + name + '：执行中…', false);
+  try {
+    const r = await api('/interfaces/' + encodeURIComponent(name) + '/dpdk?confirm=true', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bound ? { bound: true, uio_driver: uio } : { bound: false, to_driver: to }),
+    });
+    // 如实回显服务端给的"操作后实际绑定的驱动"——不把"请求成功"当成"驱动已换"。
+    ifdMsg((bound ? '已绑定' : '已解绑') + ' ' + name + '：PCI ' + dash(r && r.pci) +
+      '，当前驱动 ' + dash(r && r.driver), false);
+  } catch (e) {
+    ifdMsg((bound ? '绑定' : '解绑') + ' ' + name + ' 失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+async function sriovSet() {
+  const name = $('ifd-name').textContent;
+  if (!name) { ifdMsg('没有选中接口。', true); return; }
+  const raw = $('ifd-vfs').value.trim();
+  if (!/^\d+$/.test(raw)) { ifdMsg('VF 数量必须是非负整数（0 = 回收全部 VF）。', true); return; }
+  const n = Number(raw);
+  const ok = await uiConfirm('设置 SR-IOV VF 数量', {
+    tier: 'mid',
+    bullets: [
+      '在物理口 ' + name + ' 上创建 / 回收 VF：写的是该口的 VF 数量（0 = 回收全部）。',
+      n === 0 ? '回收全部 VF：正在用该口 VF 直通的虚拟机数据口会断。'
+        : '新建 ' + n + ' 个 VF：新建/回收瞬间该 PF 上的 VF 直通流量会短暂中断。',
+      '该口不支持 SR-IOV 时服务端明确报错（不静默跳过）——界面会把报错原文显示出来。',
+      '可回退：把数量改回原值即可（VF 数量是声明式配置，重启后按它收敛）。',
+    ],
+    cli: n > 0 ? 'request sriov create-vfs ' + name + ' count ' + n
+      : 'request sriov delete-vfs ' + name + ' vf 0',
+  });
+  if (!ok) return;
+  ifdMsg('设置 ' + name + ' 的 VF 数量：执行中…', false);
+  try {
+    const r = await api('/interfaces/' + encodeURIComponent(name) + '/sriov', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vf_count: n }),
+    });
+    ifdMsg('已设置 ' + name + ' 的 VF 数量：' + dash(r && r.vf_count), false);
+  } catch (e) {
+    // 无 PF/VF 的机器上这条必然失败——如实显示服务端原文（含"不支持 SR-IOV"一类原因）。
+    ifdMsg('设置 ' + name + ' 的 VF 数量失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
 
 // 告警卡：只列未解决的（已恢复的由运维页的清除动作处理）。
 function renderAlarms(alarms) {
@@ -546,7 +714,12 @@ export const VIEWS = {
     },
   },
   'switchDetail': {
-    render(d, params) { pageWarn(d); renderSwitchDetail(d['/virtual-switches/{name}'], params); },
+    // 成员端口取 `/virtual-switches/{name}/ports`（该路径的 GET 就是**配置里的成员端口列表**），
+    // 运行态计数仍取对象详情里的 statistics——两个端点各管一段事实，不混着猜。
+    render(d, params) {
+      pageWarn(d);
+      renderSwitchDetail(d['/virtual-switches/{name}'], d['/virtual-switches/{name}/ports'], params);
+    },
   },
   'lldp': {
     render(d) { pageWarn(d); renderLldp(d['/protocols/lldp'], d['/protocols/lldp/neighbors']); },
@@ -564,9 +737,29 @@ export const VIEWS = {
       renderInterfaces(ifaces, await loadInterfaceStats(ifaces));
     },
   },
+  'ifaceDetail': {
+    render(d, params) { pageWarn(d); renderIfaceDetail(d['/interfaces/{name}'], d['/interfaces'], params); },
+  },
+  'system': {
+    render(d) { pageWarn(d); renderSystemPage(d['/system/status'], d['/system/version'], d['/system']); },
+  },
+  'kernel': {
+    render(d) { pageWarn(d); renderKernel(d['/system/kernel']); },
+  },
+  'users': {
+    render(d) { pageWarn(d); renderUsers(d['/system/login-users']); },
+  },
+  'tls': {
+    render(d) { pageWarn(d); renderTLS(d['/system/tls']); },
+  },
   'config': {
     // 取数后对齐一次服务端的编辑会话（本会话已有候选就直接进编辑态，见 cfgSyncSession）。
-    async render(d) { pageWarn(d); await loadConfig(d['/configuration']); await cfgSyncSession(); },
+    async render(d) {
+      pageWarn(d);
+      await loadConfig(d['/configuration']);
+      renderCfgVpp(d['/vpp/config']);
+      await cfgSyncSession();
+    },
   },
   'configHistory': {
     render(d) { pageWarn(d); renderHistory(rowsOf(d['/configuration/history'])); },
@@ -603,6 +796,416 @@ function renderEvents() {
   ])));
 }
 
+// ---------- 内核基线（#/system/kernel）----------
+//
+// 三方对照：**运行实际**（内核命令行与 /proc 读数）、**配置期望**（由已生效配置派生）、
+// **差异**（空 = 一致）。写入与回退都是服务端动作：界面只做入口与确认——不改配置、不重启主机、
+// 不绕过任何护栏（写入前的备份与"期望值从哪来"都由服务端实现决定）。
+// 档位：中危——逐条列影响面（写引导配置、重启才生效、可回退），主按钮标红。
+function knlMsg(text, isErr) {
+  const p = $('knl-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+function renderKernel(k) {
+  const ok = k && !k.__err;
+  const d = (k && k.desired) || {};
+  $('knl-note').textContent = ok ? '' : '（读取失败：' + (k ? k.__err : '未取到数据') + '）';
+  fill($('knl-actual'), ok ? [
+    ['内核命令行', Array.isArray(k.cmdline) && k.cmdline.length ? k.cmdline.join(' ') : undefined],
+    ['隔离核（isolcpus）', k.isolated_cores],
+    ['1G 大页（总数 / 空闲）', k.hugepages_1g != null ? k.hugepages_1g + ' / ' + dash(k.hugepages_1g_free) : undefined],
+    ['2M 大页（总数 / 空闲）', k.hugepages_2m != null ? k.hugepages_2m + ' / ' + dash(k.hugepages_2m_free) : undefined],
+    ['透明大页（THP）', k.thp],
+  ] : [['读取失败', k ? k.__err : '未取到数据']]);
+  fill($('knl-desired'), ok ? [
+    ['1G 大页', d.hugepages_1g != null ? d.hugepages_1g + (d.hugepages_1g < 0 ? '（不托管）' : '') : undefined],
+    ['2M 大页', d.hugepages_2m != null ? d.hugepages_2m + (d.hugepages_2m === 0 ? '（不托管）' : '') : undefined],
+    ['隔离核', d.isolated_cores],
+    ['NMI watchdog', d.nmi_watchdog === true ? '启用' : (d.nmi_watchdog === false ? '关闭' : undefined)],
+    ['透明大页', d.transparent_hugepages],
+    ['IOMMU', d.iommu],
+    ['低延迟参数组', d.low_latency === true ? '启用' : (d.low_latency === false ? '关闭' : undefined)],
+    ['调优 profile', d.tuned_profile],
+    ['附加参数', Array.isArray(d.params) && d.params.length ? d.params.join(' ') : undefined],
+  ] : [['读取失败', k ? k.__err : '未取到数据']]);
+  const diffs = ok ? rowsOf(k.diffs) : [];
+  $('knl-diff-note').textContent = ok ? (diffs.length ? '（' + diffs.length + ' 项不一致）' : '（一致）') : '';
+  $('knl-diffs').textContent = !ok ? '' : (diffs.length ? diffs.join('\n')
+    : '运行实际与配置期望一致——无需写入基线。');
+}
+
+async function knlAct(action) {
+  const apply = action === 'apply';
+  const ok = await uiConfirm(apply ? '写入内核基线' : '回退内核基线', {
+    tier: 'mid',
+    bullets: apply ? [
+      '把配置期望的内核启动参数写进引导配置（引导加载器片段、fstab 与相关调优文件），并重建引导菜单。',
+      '写完**要重启主机才生效**：本页不重启，重启入口在「运维动作」页。',
+      '写入前会留一份上一版基线，可用「回退上一次基线」还原。',
+      '大页与隔离核的唯一真源是「资源池」配置——写错会让重启后的大页/隔离核与预期不符，请先核对本页的「配置期望」。',
+      '可回退：回退基线（同样要重启生效）。',
+    ] : [
+      '把引导配置还原成上一次写入前的版本（或删掉本产品写入的那部分）。',
+      '同样**要重启主机才生效**。',
+      '只动本产品写入的那部分引导配置，不改其它来源的引导项。',
+      '可回退：再点一次「写入基线」按当前配置期望重新写入。',
+    ],
+    cli: 'request system kernel ' + action,
+  });
+  if (!ok) return;
+  knlMsg((apply ? '写入' : '回退') + '内核基线：执行中…', false);
+  $('knl-out').hidden = true;
+  try {
+    // 两条路径各写一遍字面量（不拼字符串）：前端调的端点必须是**看得见的**具体路径，
+    // 界面覆盖守护就是从这些字面量里认"这一页接了哪些端点"的。
+    const r = apply ? await api('/system/kernel:apply', { method: 'POST' })
+      : await api('/system/kernel:rollback', { method: 'POST' });
+    knlMsg((apply ? '已写入内核基线' : '已回退内核基线') + '（重启后生效）。', false);
+    if (r) {
+      $('knl-out').hidden = false;
+      $('knl-out').textContent = typeof r === 'string' ? r : JSON.stringify(r, null, 2);
+    }
+  } catch (e) {
+    // 服务端没提供该接口（Go 路由表对未注册路径直接 404）时给出可操作的说明，
+    // 不把它含糊成"失败"，也不谎报成功。
+    knlMsg((apply ? '写入' : '回退') + '内核基线失败：' + apiErrText(e,
+      '这台机器的服务端没有提供该动作的接口，请在命令行执行 request system kernel ' + action), true);
+  }
+  await reload().catch(() => {});
+}
+
+// ---------- 用户与权限（#/system/users）----------
+//
+// **写这条代码前逐条核实过的端点语义**（服务端实现见 resources_w5.go）：
+//   GET    /system/login-users                     读**已生效配置**里的本地用户与 class（口令哈希永不回显）
+//   POST   /system/login-users                     建用户 / 建 class
+//   PUT    /system/login-users/{name}              改 class / 重置口令
+//   DELETE /system/login-users/{name}              删用户（不能删自己、不能删最后一个 super-user）
+//   POST   /system/login-users/{name}:change-password  本人改口令（要验旧口令）
+// 写操作**既不是**"纯候选两段式"、**也不是**"无锁直连"：服务端先取**配置编辑锁**（engine.Edit），
+// 把改动写进候选，然后**立即提交**（响应头 X-NFVIS-Committed: true）——即"取锁 + 直提"。
+// 界面因此按三条口径处理：
+//   ① 确认框里写明"立即生效、会取用配置编辑锁"；
+//   ② 动手前先看**本会话**在配置页有没有未提交的候选：有就先拒绝并指路——同一持有者的候选是同一份，
+//      服务端的提交会把那份改动一并带上去（操作者没打算提交它）；
+//   ③ 服务端的一切拒绝（锁被别处持有 / 口令不合策略 / 删自己 / 删最后一个 super-user）如实显示。
+//
+// 档位：全部**高危**（删用户与改口令策略在分级表里就是高危档）。确认词取**对象名**（用户名）——
+// 删错人、改错口令的机会成本最大，手打一遍名字是最有效的拦阻；只有"改我自己的口令"用本人用户名。
+const USR_BUILTIN_CLASSES = ['read-only', 'operator', 'super-user'];
+let usrSeq = 0;
+
+function usrMsg(text, isErr) {
+  const p = $('usr-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+// class 下拉的选项：内置三类 + 配置里已定义的 class（去重）。
+function usrClassNames(classes) {
+  const out = USR_BUILTIN_CLASSES.slice();
+  rowsOf(classes).forEach((c) => {
+    if (c && c.name && out.indexOf(c.name) < 0) out.push(c.name);
+  });
+  return out;
+}
+
+function usrClassSelect(id, names, selected) {
+  const sel = el('select', { id });
+  names.forEach((n) => {
+    const opt = el('option', { value: n, text: n });
+    if (n === selected) opt.setAttribute('selected', 'selected');
+    sel.appendChild(opt);
+  });
+  return sel;
+}
+
+function renderUsers(lu) {
+  const ok = lu && !lu.__err;
+  const users = ok ? rowsOf(lu.users) : [];
+  const classes = ok ? rowsOf(lu.classes) : [];
+  const names = usrClassNames(classes);
+  $('usr-note').textContent = ok ? '（' + users.length + ' 个用户、' + classes.length + ' 个自定义权限类）'
+    : '（读取失败：' + (lu ? lu.__err : '未取到数据') + '）';
+
+  const tbody = $('usr-table').querySelector('tbody');
+  tbody.textContent = '';
+  if (!users.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '4', class: 'muted', text: ok ? '（无用户）' : '读取失败' }));
+    tbody.appendChild(tr);
+  }
+  users.forEach((u) => {
+    const idx = usrSeq++;
+    const tr = el('tr');
+    tr.appendChild(el('td', { text: String(dash(u.name)) }));
+    const clsCell = el('td');
+    const sel = usrClassSelect('usr-cls-' + idx, names, u.class);
+    clsCell.appendChild(sel);
+    tr.appendChild(clsCell);
+    const pwCell = el('td');
+    const pw = el('input', { type: 'password', id: 'usr-pw-' + idx, autocomplete: 'new-password' });
+    pw.setAttribute('placeholder', '留空 = 不改');
+    pwCell.appendChild(pw);
+    tr.appendChild(pwCell);
+    const cell = el('td', { class: 'actions' });
+    const applyBtn = el('button', { type: 'button', class: 'ghost small', text: '应用修改' });
+    applyBtn.addEventListener('click', () => usrApply(u.name, sel.value, pw.value));
+    const delBtn = el('button', { type: 'button', class: 'danger small', text: '删除' });
+    delBtn.addEventListener('click', () => usrDelete(u.name));
+    cell.appendChild(applyBtn);
+    cell.appendChild(delBtn);
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
+  });
+
+  table($('usr-class-table').querySelector('tbody'), 3,
+    classes.map((c) => [c.name, list(c.allow), list(c.deny)]));
+
+  // 新建用户的 class 下拉（重画时按当前 class 列表重建）。
+  const ns = $('usr-new-class');
+  const keep = ns.value;
+  ns.textContent = '';
+  usrClassNames(classes).forEach((n) => {
+    const opt = el('option', { value: n, text: n });
+    if (n === keep) opt.setAttribute('selected', 'selected');
+    ns.appendChild(opt);
+  });
+}
+
+// 本会话是否正持有**有未提交改动**的候选：有就返回一句说明（调用方据此拒绝这次写操作）。
+// 锁不在本会话手里时返回空串——那种情况服务端自己会拒绝（如实显示它的报错即可），
+// 界面不替服务端做第二个判定。
+async function usrCandidateBlock() {
+  if (!currentUser) return '';
+  const holder = await cfgLockHolder();
+  if (holder !== currentUser + '@api') return '';
+  let cand = null;
+  try {
+    cand = await api('/configuration/candidate');
+  } catch (e) {
+    return '';
+  }
+  if (cand && cand.dirty) {
+    return '本会话在「配置」页还有**未提交的候选配置**：先提交或丢弃它再来改用户/口令——' +
+      '否则这次改动会把那份候选一并提交生效（本页的操作是取锁后立即提交）。';
+  }
+  return '';
+}
+
+// usrPrecheck：写操作前的两道闸门（本会话的候选脏数据 / 该动作的确认框）。
+// 返回 true 表示可以继续执行。`word` 是确认词（对象名）。
+async function usrPrecheck(blockMsg, title, word, bullets, cli) {
+  if (blockMsg) { usrMsg(blockMsg, true); return false; }
+  return uiConfirm(title, { tier: 'high', requireWord: word, bullets: bullets, cli: cli });
+}
+
+// 改 class / 重置口令（PUT /system/login-users/{name}）：只提交**有内容**的那部分。
+async function usrApply(name, cls, pw) {
+  const block = await usrCandidateBlock();
+  const pwText = (pw || '').trim();
+  if (!pwText) {
+    const ok = await usrPrecheck(block, '修改用户权限类', name, [
+      '把用户 ' + name + ' 的权限类改成 ' + (cls || '（未选）') + '，**立即生效**（取配置编辑锁后直接提交）。',
+      '权限类决定这个账号能做什么：改错会让对方多出或少掉操作权限。',
+      '对方已登录的会话不会因此失效，但下一次请求就按新的权限判定。',
+      '可回退：把权限类改回原值即可。',
+    ], 'set system login user ' + name + ' class ' + (cls || '<class>'));
+    if (!ok) return;
+    await usrPut(name, { class: cls }, '已把用户 ' + name + ' 的权限类改为 ' + cls);
+    return;
+  }
+  const ok = await usrPrecheck(block, '重置用户口令', name, [
+    '把用户 ' + name + ' 的口令重置为这次填的新口令，**立即生效**（取配置编辑锁后直接提交）。',
+    '口令按本机口令策略校验：不满足策略时服务端拒绝并说明原因（界面不预判）。',
+    '旧口令立即失效：对方正在用的会话不受影响，但重新登录要用新口令。',
+    '可回退：再设一次原口令即可（本机不保留旧口令，请自行确认已记下新口令）。',
+  ], 'set system login user ' + name + ' password <新口令>');
+  if (!ok) return;
+  const body = { password: pwText };
+  if (cls) body.class = cls;
+  await usrPut(name, body, '已重置用户 ' + name + ' 的口令');
+}
+
+async function usrPut(name, body, okText) {
+  usrMsg('提交中…', false);
+  try {
+    await api('/system/login-users/' + encodeURIComponent(name), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    usrMsg(okText + '（已提交生效）。', false);
+  } catch (e) {
+    usrMsg('失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+// 建用户（POST /system/login-users）：确认词是**这次要建的用户名**。
+async function usrCreate(name, cls, pw) {
+  const n = (name || '').trim();
+  if (!n) { usrMsg('请先填用户名。', true); return; }
+  if (!(pw || '').trim()) { usrMsg('新用户必须设置初始口令（服务端也要求非空）。', true); return; }
+  const block = await usrCandidateBlock();
+  const ok = await usrPrecheck(block, '创建本地用户', n, [
+    '新建本地用户 ' + n + '，权限类 ' + (cls || '（未选）') + '，**立即生效**（取配置编辑锁后直接提交）。',
+    '初始口令按本机口令策略校验，存的是加盐哈希（明文不落库、不回显）。',
+    '建出来的账号可以立刻登录本机命令行与控制台，请把口令交付给对的人。',
+    '可回退：在本页删除该用户（不能删最后一个 super-user）。',
+  ], 'set system login user ' + n + ' password <初始口令> class ' + (cls || '<class>'));
+  if (!ok) return;
+  usrMsg('提交中…', false);
+  try {
+    await api('/system/login-users', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: n, kind: 'user', class: cls, password: pw }),
+    });
+    usrMsg('已创建用户 ' + n + '（已提交生效）。', false);
+  } catch (e) {
+    usrMsg('创建用户失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+// 删用户（DELETE）：确认词是**用户名**——删错人的机会成本最大。
+async function usrDelete(name) {
+  const block = await usrCandidateBlock();
+  const ok = await usrPrecheck(block, '删除本地用户', name, [
+    '删除本地用户 ' + name + '，**立即生效**（取配置编辑锁后直接提交）。',
+    '该账号立刻不能再登录（命令行与控制台都包括）；它已建立的会话会在令牌到期后失效。',
+    '服务端会拒绝两种情况：删当前登录用户、删最后一个 super-user。',
+    '不可回退：删掉后只能重新建一个同名账号（口令与权限类都要重新给）。',
+  ], 'delete system login user ' + name);
+  if (!ok) return;
+  usrMsg('提交中…', false);
+  try {
+    await api('/system/login-users/' + encodeURIComponent(name), { method: 'DELETE' });
+    usrMsg('已删除用户 ' + name + '。', false);
+  } catch (e) {
+    usrMsg('删除用户失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+// 改我自己的口令（POST /system/login-users/{me}:change-password）：要验旧口令。
+async function usrMyPassword(oldPw, newPw) {
+  const me = currentUser;
+  if (!me) { usrMsg('拿不到当前登录用户名，请刷新页面后重试。', true); return; }
+  if (!(oldPw || '').trim()) { usrMsg('请先填当前口令。', true); return; }
+  if (!(newPw || '').trim()) { usrMsg('请先填新口令。', true); return; }
+  const block = await usrCandidateBlock();
+  const ok = await usrPrecheck(block, '修改我的口令', me, [
+    '把当前登录账号 ' + me + ' 的口令改成新口令，**立即生效**（取配置编辑锁后直接提交）。',
+    '要先给出当前口令：服务端会校验它（校验不过一律拒绝，界面不预判）。',
+    '新口令按本机口令策略校验；改完请用新口令重新登录（本页不会自动登出）。',
+    '可回退：再改一次（旧口令已失效，请先确认新口令记得住）。',
+  ], 'request system password change');
+  if (!ok) return;
+  usrMsg('提交中…', false);
+  try {
+    await api('/system/login-users/' + encodeURIComponent(me) + ':change-password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_password: oldPw, new_password: newPw }),
+    });
+    usrMsg('口令已修改——请用新口令重新登录。', false);
+  } catch (e) {
+    usrMsg('修改口令失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+// ---------- 证书（#/system/tls）----------
+//
+// GET /system/tls 读当前证书信息；PUT /system/tls 安装外部证书（**PEM 文本**，立即生效）。
+// 界面用"粘贴 PEM 文本"而不是文件选择器：契约收的就是 PEM 文本（不是 multipart），
+// 而文件选择器在自动化里也填不进去——文本粘贴两边都能走通，且与契约同形。
+// 档位：**高危**（证书上传在分级表里就是高危档）——影响面是管理面本身：换成客户端不信任的
+// 证书会让管理面连不上，确认词取固定词 install-cert（这个动作没有"对象名"可打）。
+function tlsMsg(text, isErr) {
+  const p = $('tls-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+function renderTLS(info) {
+  const ok = info && !info.__err;
+  const configured = ok && info.configured !== false;
+  $('tls-note').textContent = ok ? '' : '（读取失败：' + (info ? info.__err : '未取到数据') + '）';
+  fill($('tls-list'), !ok ? [['读取失败', info.__err]] : (configured ? [
+    ['主体（subject）', info.subject],
+    ['签发者（issuer）', info.issuer],
+    ['有效期起', fmtTime(info.not_before)],
+    ['有效期止', fmtTime(info.not_after)],
+    ['自签', info.self_signed === true ? '是' : (info.self_signed === false ? '否' : undefined)],
+    ['指纹（SHA-256）', info.fingerprint],
+  ] : [['状态', '当前没有可用证书信息（服务端会在缺证书时生成自签证书）']]));
+}
+
+const TLS_PEM_CERT_RE = /-----BEGIN CERTIFICATE-----/;
+const TLS_PEM_KEY_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+
+async function tlsInstall(cert, key) {
+  const c = (cert || '').trim();
+  const k = (key || '').trim();
+  if (!TLS_PEM_CERT_RE.test(c)) { tlsMsg('证书那一栏不是 PEM 文本（应以 -----BEGIN CERTIFICATE----- 开头）。', true); return; }
+  if (!TLS_PEM_KEY_RE.test(k)) { tlsMsg('私钥那一栏不是 PEM 文本（应以 -----BEGIN … PRIVATE KEY----- 开头）。', true); return; }
+  const ok = await uiConfirm('安装外部证书（管理面证书）', {
+    tier: 'high',
+    requireWord: 'install-cert',
+    bullets: [
+      '用粘贴的这份证书与私钥替换管理面证书，**立即生效**（热换证，不重启服务，本页面不会掉线）。',
+      '换成你手里的浏览器/命令行**不信任**的证书后，管理面就连不上了——请先确认这份证书的链与地址条目能被你要用的客户端信任，并保留带外/控制台通道。',
+      '证书与私钥不配对、链不完整、缺地址条目时服务端拒绝，且**不改变**当前证书（拒绝时本页会显示原因）。',
+      '可回退：再装一份可用的证书（或到本页「重签自签证书」按本机地址重新生成自签证书）。',
+    ],
+    cli: 'set system api tls cert-file <证书文件> key-file <私钥文件>',
+  });
+  if (!ok) return;
+  tlsMsg('安装证书：执行中…', false);
+  try {
+    const info = await api('/system/tls', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ certificate: c, key: k }),
+    });
+    tlsMsg('证书已安装并生效（指纹 ' + dash(info && info.fingerprint) + '）。', false);
+    // 明文私钥不留在页面上：安装成功后清掉两个文本框。
+    $('tls-cert').value = '';
+    $('tls-key').value = '';
+  } catch (e) {
+    tlsMsg('安装证书失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+// 重签自签证书（原在「运维动作」页，随证书相关入口一并落到本页）。
+async function tlsRegenerate() {
+  const ok = await uiConfirm('重签自签证书', {
+    tier: 'mid',
+    bullets: [
+      '本机管理面自签证书会被重签：证书指纹改变，固定过旧证书的客户端与浏览器需要重新固定新证书。',
+      '新证书的地址条目（SAN）按本机地址自动生成，重签后命令行与浏览器都可继续访问管理面。',
+      '换证是热生效的，不重启服务；当前这个页面不会掉线。',
+      '可回退：安装一份外部证书（本页上方），或用命令行按配置声明证书路径。',
+    ],
+    cli: 'request system api tls regenerate',
+  });
+  if (!ok) return;
+  tlsMsg('重签自签证书：执行中…', false);
+  try {
+    const info = await api('/system/tls:regenerate', { method: 'POST' });
+    tlsMsg('已重签自签证书（指纹 ' + dash(info && info.fingerprint) + '）。', false);
+  } catch (e) {
+    tlsMsg('重签失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+
+//
 // ---------- 配置（candidate → 提交） ----------
 //
 // 写路径与 CLI 同一套语义：PUT /configuration/candidate 取锁并建立 candidate →
@@ -2029,6 +2632,14 @@ function cfgRenderRead() {
   $('cfg-note').textContent = rev != null ? '（committed revision ' + rev + '）' : '';
 }
 
+// 数据面配置段（GET /vpp/config，committed 的 vpp 段）：它是生成启动配置的源，
+// 与「完整配置」里的 vpp 段是同一份事实——单列出来是因为排障时常要单独看它（与命令行
+// 的 `show vpp` 同源），省得在大 JSON 里翻。只读回显，改它仍在下面的表单里。
+function renderCfgVpp(vpp) {
+  $('cfg-vpp').textContent = !vpp ? ''
+    : (vpp.__err ? '读取失败：' + vpp.__err : JSON.stringify(vpp, null, 2));
+}
+
 // 读取 committed 配置。`pre` 是路由表声明端点的预取结果（配置页由 softLoad 取齐后传进来，
 // 不重复请求）；不传则自己拉（提交事件、结束编辑会话等处调用）。
 async function loadConfig(pre) {
@@ -3217,18 +3828,22 @@ function vsdMacClear(text, isErr) {
   vsdMsg(text || '', isErr === true);
 }
 
-function renderSwitchDetail(vs, params) {
+function renderSwitchDetail(vs, ports, params) {
   const name = (params && params.name) || '';
   const ok = vs && !vs.__err;
   const st = (vs && vs.statistics) || null;
+  // 成员端口取**该路径自己的 GET**（配置里的成员端口列表）；取不到时退回对象里带的 ports
+  // （对象详情同样含 ports——两处同源，前者是独立读法，后者是兜底）。
+  const cfgPorts = (ports && !ports.__err && Array.isArray(ports)) ? ports
+    : ((vs && Array.isArray(vs.ports)) ? vs.ports : []);
   $('vsd-name').textContent = name;
   fill($('vsd-head'), ok ? [
     ['类型', vs.type],
-    ['成员端口', (vs.ports || []).length],
+    ['成员端口', cfgPorts.length],
     ['数据面 BD', st ? st.bd_id : undefined],
   ] : [['读取失败', vs ? vs.__err : notFoundText(name, '虚拟交换机')]]);
-  const ports = (st && Array.isArray(st.ports)) ? st.ports : [];
-  table($('vsd-port-table').querySelector('tbody'), 5, ports.map((p) => [
+  const rt = (st && Array.isArray(st.ports)) ? st.ports : [];
+  table($('vsd-port-table').querySelector('tbody'), 5, rt.map((p) => [
     p.port, p.admin === false ? 'down' : (p.admin === true ? 'up' : undefined),
     p.link === false ? 'down' : (p.link === true ? 'up' : undefined),
     p.rx_packets, p.tx_packets,
@@ -3941,6 +4556,43 @@ function renderQosDetail(rows, params) {
   ] : []);
 }
 
+// 删 QoS 策略（DELETE /qos/policies/{name}，该路径**只有 DELETE**——所以详情取自列表端点）。
+//
+// 语义核实：服务端走 mutateCandidate —— 取配置编辑锁、把删除写进**候选**，**不自动提交**
+// （响应体 {committed:false, revision:N}）。故这里按「配置」页口径做：删的是候选，
+// 到「配置」页点「提交」才生效；界面**不**用 auto-commit 绕过那条流程。
+// 档位：中危（删对象一类）——逐条列影响面 + 主按钮标红。
+function qsdMsg(text, isErr) {
+  const p = $('qsd-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+async function qsdDelete() {
+  const name = $('qsd-name').textContent;
+  if (!name) { qsdMsg('没有选中策略。', true); return; }
+  const ok = await uiConfirm('删除 QoS 策略', {
+    tier: 'mid',
+    bullets: [
+      '从候选配置里删除限速策略 ' + name + '：**只写候选，不立即生效**——到「配置」页提交后才生效。',
+      '被接口绑定的策略由服务端拒绝删除（要先把接口上的引用解掉），界面会把它的报错原文显示出来。',
+      '提交前随时可以在「配置」页点「丢弃并结束编辑」撤销这次删除。',
+      '可回退：丢弃候选，或提交后再把策略配回来。',
+    ],
+    cli: 'delete qos policy name ' + name,
+  });
+  if (!ok) return;
+  qsdMsg('写入候选：执行中…', false);
+  try {
+    await api('/qos/policies/' + encodeURIComponent(name), { method: 'DELETE' });
+    qsdMsg('已把「删除 ' + name + '」写入候选（未生效）——到「配置」页提交后才生效。', false);
+  } catch (e) {
+    qsdMsg('删除失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
 function renderSpanDetail(rows, params) {
   const name = (params && params.name) || '';
   const s = pickByName(rows, name);
@@ -3960,6 +4612,39 @@ function renderSpanDetail(rows, params) {
     ['方向', src.direction],
     ['分析端口', s.analyzer],
   ] : []);
+}
+
+// 删端口镜像会话（DELETE /port-mirroring/{name}，同样只有 DELETE）。语义与 QoS 删除一致：
+// 只写候选、不自动提交，故同样按「配置」页口径做，并指路到提交。
+function spdMsg(text, isErr) {
+  const p = $('spd-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+async function spdDelete() {
+  const name = $('spd-name').textContent;
+  if (!name) { spdMsg('没有选中镜像会话。', true); return; }
+  const ok = await uiConfirm('删除端口镜像会话', {
+    tier: 'mid',
+    bullets: [
+      '从候选配置里删除镜像会话 ' + name + '：**只写候选，不立即生效**——到「配置」页提交后才生效。',
+      '提交生效后该会话的镜像流量停止（分析口不再收到复制流量）。',
+      '提交前随时可以在「配置」页点「丢弃并结束编辑」撤销这次删除。',
+      '可回退：丢弃候选，或提交后再把会话配回来。',
+    ],
+    cli: 'delete port-mirroring name ' + name,
+  });
+  if (!ok) return;
+  spdMsg('写入候选：执行中…', false);
+  try {
+    await api('/port-mirroring/' + encodeURIComponent(name), { method: 'DELETE' });
+    spdMsg('已把「删除 ' + name + '」写入候选（未生效）——到「配置」页提交后才生效。', false);
+  } catch (e) {
+    spdMsg('删除失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
 }
 
 // ---------- 大表（NAT 会话）：按需拉取 ----------
@@ -4069,6 +4754,21 @@ async function downloadFile(path, name, note) {
 function renderArchives(backups, techs) {
   archiveTable($('ops-backup-table').querySelector('tbody'), backups, '/system/backup/');
   archiveTable($('ops-tech-table').querySelector('tbody'), techs, '/system/tech-support/');
+  // 恢复用的备份选择框取自同一份列表（不再第二次请求）：列表刷新时选项跟着刷新，
+  // 但**保留当前选中项**（免得操作者选好文件后被一次刷新清掉选择）。
+  const sel = $('ops-restore-file');
+  const keep = sel.value;
+  sel.textContent = '';
+  const rows = (backups && !backups.__err && Array.isArray(backups)) ? backups : [];
+  if (!rows.length) {
+    sel.appendChild(el('option', { value: '', text: '（本机没有配置备份——先点「生成配置备份」）' }));
+    return;
+  }
+  rows.forEach((f) => {
+    const name = f.file || f.name;
+    sel.appendChild(el('option', { value: name, text: name + '（' + fmtTime(f.created_at || f.created) + '）' }));
+  });
+  if (keep) sel.value = keep;
 }
 
 function archiveTable(tbody, rows, prefix) {
@@ -4266,16 +4966,6 @@ $('ops-backup-btn').addEventListener('click', () => opsRun('生成配置备份',
   const r = await api('/system/backup', { method: 'POST' });
   return r && r.file ? '备份文件：' + r.file : '已生成。';
 }));
-$('ops-tls-btn').addEventListener('click', () => opsRun('重签自签证书', {
-  tier: 'mid',
-  bullets: [
-    '本机管理面自签证书会被重签：证书指纹改变，固定过旧证书的客户端与浏览器需要重新固定新证书。',
-    '新证书的地址条目（SAN）按本机地址自动生成，重签后命令行与浏览器都可继续访问管理面。',
-    '换证是热生效的，不重启服务；当前这个页面不会掉线。',
-    '改坏了的回退办法：用上传的证书重新声明并提交（本页不提供证书上传）。',
-  ],
-  cli: 'request system api tls regenerate',
-}, () => api('/system/tls:regenerate', { method: 'POST' })));
 $('ops-sshkey-btn').addEventListener('click', () => opsRun('重新生成 SSH host key', {
   tier: 'mid',
   bullets: [
@@ -4347,6 +5037,185 @@ $('ops-shutdown-btn').addEventListener('click', () => opsRun('关机', {
   ],
   cli: 'request system shutdown',
 }, () => api('/system:shutdown', { method: 'POST' })));
+
+// ---------- 运维动作：软件版本（高危档）----------
+//
+// 两条都是**高危**：软件升级会安装 deb 并在维护脚本里重启管理服务（本页面掉线、需要重新登录），
+// 回退同样是替换整机软件版本。确认词用固定词（这两个动作没有"对象名"可打）：upgrade / rollback。
+// 界面不做任何"代替确认"的捷径——不自动重试、不预判成功，只如实显示服务端的结果或报错。
+async function swAdd(pkg, sha) {
+  const p = (pkg || '').trim();
+  if (!p) { opsMsg('请先填软件包路径或下载地址。', true); return; }
+  const s = (sha || '').trim();
+  const ok = await uiConfirm('安装升级包（软件升级）', {
+    tier: 'high',
+    requireWord: 'upgrade',
+    bullets: [
+      '安装 ' + p + '：校验包名（必须是 nfvis 包）与版本 → 归档到本机（供回退）→ 安装。',
+      '安装过程会重启管理服务：本页面会掉线，需要重新登录；期间命令行与接口都不可用。',
+      '虚拟机与数据面进程不随这次重启停止；数据面配置里标着「需重启数据面」的部分仍要另行重启数据面。',
+      '安装失败时按服务端提示处理（可点「回退到上一版本」，或命令行执行软件回退）。',
+      '可回退：本页的「回退到上一版本」（用的是本机归档里安装过的版本）。',
+    ],
+    cli: 'request system software add ' + p + (s ? ' sha256 ' + s : ''),
+  });
+  if (!ok) return;
+  opsMsg('安装 ' + p + '：执行中（安装期间管理面会短暂中断）…', false);
+  opsOut('');
+  try {
+    const r = await api('/system/software', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(s ? { package: p, sha256: s } : { package: p }),
+    });
+    opsMsg('安装已受理：' + dash(r && r.previous) + ' → ' + dash(r && r.version) +
+      '（安装过程会重启管理服务，本页面稍后需要重新登录）。', false);
+    if (r) opsOut(JSON.stringify(r, null, 2));
+  } catch (e) {
+    opsMsg('安装失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+async function swRollback() {
+  const ok = await uiConfirm('回退软件版本', {
+    tier: 'high',
+    requireWord: 'rollback',
+    bullets: [
+      '把整机软件版本回退到本机归档里安装过的上一个版本（没有归档时服务端明确拒绝）。',
+      '回退同样会重启管理服务：本页面会掉线，需要重新登录。',
+      '回退不改配置：配置库与数据都在，回退后仍按当前生效配置运行。',
+      '可回退：再装一次要用的版本（本页「安装升级包」）。',
+    ],
+    cli: 'request system software rollback',
+  });
+  if (!ok) return;
+  opsMsg('回退软件版本：执行中（回退期间管理面会短暂中断）…', false);
+  opsOut('');
+  try {
+    const r = await api('/system/software:rollback', { method: 'POST' });
+    opsMsg('回退已受理：' + dash(r && r.previous) + ' → ' + dash(r && r.version) + '。', false);
+    if (r) opsOut(JSON.stringify(r, null, 2));
+  } catch (e) {
+    opsMsg('回退失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+// ---------- 运维动作：恢复配置（高危档）----------
+//
+// 从**本机已有的备份归档**恢复（列表见「归档下载」）：界面不弹文件选择器，而是把选中的归档
+// 从服务端取回来、再作为 multipart 上传（契约收的就是 multipart file）——这样真人与自动化
+// 都走得通，也不会出现"文件在操作者本机、服务端要的是上传件"的错配。
+// 确认词取**归档文件名**（对象名）：恢复覆盖的是当前生效配置，打一遍文件名最有效的拦阻。
+async function restoreRun(name) {
+  const file = (name || '').trim();
+  if (!file) { opsMsg('请先选择要恢复的备份归档（没有备份就先点「生成配置备份」）。', true); return; }
+  const ok = await uiConfirm('从备份归档恢复配置', {
+    tier: 'high',
+    requireWord: file,
+    bullets: [
+      '用归档 ' + file + ' 里的配置**覆盖当前生效配置**（导入为候选后立即提交），现有生效配置被替换。',
+      '归档里不含镜像文件本体：配置引用了镜像时，镜像需要另行导入（服务端会在结果里说明归档内的镜像条目数）。',
+      '本机已有候选编辑（本会话或别的会话在「配置」页编辑中）会让这次恢复被拒绝（编辑锁被占用）——界面如实显示该拒绝。',
+      '配置里标着「需重启生效」的部分，要重启数据面/主机后才完全生效。',
+      '可回退：恢复前先生成一份当前配置的备份，要退回来就再用它恢复一次。',
+    ],
+    cli: 'request system configuration restore <备份归档文件>',
+  });
+  if (!ok) return;
+  opsMsg('读取归档 ' + file + '…', false);
+  opsOut('');
+  try {
+    const res = await fetch(API + '/system/backup/' + encodeURIComponent(file), {
+      headers: { Authorization: 'Bearer ' + token },
+    });
+    if (!res.ok) throw new Error('读取归档失败（HTTP ' + res.status + '）');
+    const blob = await res.blob();
+    const fd = new FormData();
+    fd.append('file', blob, file);
+    opsMsg('恢复中…', false);
+    const r = await api('/system/restore', { method: 'POST', body: fd });
+    opsMsg('已从 ' + file + ' 恢复：生效配置 revision ' + dash(r && r.revision) +
+      (r && r.images_in_archive ? '；归档含 ' + r.images_in_archive + ' 个镜像条目（文件本体不在归档内）' : ''), false);
+    if (r) opsOut(JSON.stringify(r, null, 2));
+  } catch (e) {
+    opsMsg('恢复失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+// ---------- 运维动作：恢复出厂（高危档，不可撤销）----------
+//
+// 契约要求请求体 confirm=true（服务端的双重确认）；界面这一层是确认词 zeroize + 10 秒倒计时。
+// 两者都不是"多余的仪式"：这一步会清空数据分区的配置与镜像、级联删除虚拟机与容器、账号复位，
+// 且**本机不会自动重启**——重启后进入初始化状态，需要带外/控制台重新初始化。没有撤销入口。
+async function zeroizeRun() {
+  const ok = await uiConfirm('恢复出厂（清空配置与镜像）', {
+    tier: 'high',
+    requireWord: 'zeroize',
+    bullets: [
+      '清空数据分区的配置与镜像，级联删除虚拟机与容器，账号随空配置复位（本机没有「撤销恢复出厂」）。',
+      '**本机不会自动重启**：重启后进入初始化状态，届时需要带外/控制台重新初始化，本页与命令行都帮不上忙。',
+      '正在运行的虚拟机与容器会被级联删除（业务中断）；镜像文件从本机仓库移除，需要重新导入。',
+      '重启前先确认你还有带外通道，并已把需要的配置备份取到本机之外。',
+      '不可撤销：这一步之后本机不再保留任何原有配置与账号。',
+    ],
+    cli: 'request system zeroize',
+  });
+  if (!ok) return;
+  opsMsg('恢复出厂：执行中…', false);
+  opsOut('');
+  try {
+    const r = await api('/system:zeroize', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true }),
+    });
+    opsMsg('已恢复出厂：配置/镜像/VNF 已清空、账号复位（revision ' + dash(r && r.revision) +
+      '，移除镜像 ' + dash(r && r.removed_images) + ' 个）。**本机不会自动重启**——重启后进入初始化状态。', false);
+    if (r) opsOut(JSON.stringify(r, null, 2));
+  } catch (e) {
+    opsMsg('恢复出厂失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+// 运维动作：软件版本 / 恢复配置 / 恢复出厂（三个高危入口，处理器见上面的 swAdd/swRollback/
+// restoreRun/zeroizeRun；按钮本身不做事，值都从控件现取）。
+$('ops-sw-add-btn').addEventListener('click', () => swAdd($('ops-sw-pkg').value, $('ops-sw-sha').value));
+$('ops-sw-rollback-btn').addEventListener('click', () => swRollback());
+$('ops-restore-refresh').addEventListener('click', () => reload().catch((e) => opsMsg('刷新失败：' + e.message, true)));
+$('ops-restore-btn').addEventListener('click', () => restoreRun($('ops-restore-file').value));
+$('ops-zeroize-btn').addEventListener('click', () => zeroizeRun());
+
+// 接口详情页：驱动接管（DPDK 绑定/解绑）与 SR-IOV VF 数量。
+$('ifd-dpdk-bind').addEventListener('click', () => dpdkAct(true));
+$('ifd-dpdk-unbind').addEventListener('click', () => dpdkAct(false));
+$('ifd-sriov-btn').addEventListener('click', sriovSet);
+
+// 内核基线：写入 / 回退（都需重启生效，故按中危档确认）。
+$('knl-apply-btn').addEventListener('click', () => knlAct('apply'));
+$('knl-rollback-btn').addEventListener('click', () => knlAct('rollback'));
+
+// 用户与权限（写操作全是高危档；口令控件只在提交那一刻读值，不留在别处）。
+$('usr-create-btn').addEventListener('click', () => {
+  const n = $('usr-new-name').value;
+  const cls = $('usr-new-class').value;
+  const pw = $('usr-new-pw').value;
+  return usrCreate(n, cls, pw).then(() => { $('usr-new-pw').value = ''; });
+});
+$('usr-mypw-btn').addEventListener('click', () => {
+  const oldPw = $('usr-my-old').value;
+  const newPw = $('usr-my-new').value;
+  return usrMyPassword(oldPw, newPw).then(() => { $('usr-my-old').value = ''; $('usr-my-new').value = ''; });
+});
+
+// 证书：安装外部证书（高危）与重签自签证书（中危）。
+$('tls-install-btn').addEventListener('click', () => tlsInstall($('tls-cert').value, $('tls-key').value));
+$('tls-regen-btn').addEventListener('click', tlsRegenerate);
+
+// 网络对象详情页：删除策略 / 删除镜像会话（都只写候选，提交后才生效）。
+$('qsd-del-btn').addEventListener('click', qsdDelete);
+$('spd-del-btn').addEventListener('click', spdDelete);
 
 // 诊断卡新增：traceroute 与接口计数清零
 $('diag-trace-btn').addEventListener('click', async () => {

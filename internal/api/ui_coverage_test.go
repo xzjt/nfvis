@@ -21,34 +21,14 @@ import (
 )
 
 // uiNotWired 契约有、界面**有意**不接的路径 → 理由（新增端点须在此归类或接入界面）。
+//
+// 刀 4b 第二段（危险动作接入 + 缺口收口）之后，这里只剩**6 条非界面读物**：
+// 前四条是页面本体/契约自查/监控文本（界面没有消费它们的理由），后两条是 `x-internal`
+// 的 CLI 通道（纯图形方案下界面不碰——操作者不需要输入语句）。其余全部已接：
+// 危险动作（内核基线 apply/rollback、软件升级/回退、恢复配置、恢复出厂、证书安装、
+// 用户与权限、DPDK 绑定/解绑、SR-IOV、QoS/SPAN 删除）都走分级确认进了界面，
+// 但**都只是入口**——守卫（管理口守卫、会话锁、口令策略、引用计数）仍在服务端实现处。
 var uiNotWired = map[string]string{
-	// —— 已登记：后续增量的界面工作（**这一段就是界面缺口清单**）——
-	"/interfaces/{name}/dpdk":        "DPDK 绑定/解绑涉及管理口红线，界面暂不提供（CLI 有守卫）",
-	"/interfaces/{name}/sriov":       "SR-IOV 无硬件环境验证，界面暂不提供",
-	"/virtual-switches/{name}/ports": "该路径是**整体替换**成员端口的写入口；界面读成员端口走 /virtual-switches/{name}（详情页），改成员端口走「配置」页的虚拟交换机表单",
-
-	// —— 只有 DELETE 的端点：界面暂无删除入口（详情页从**列表端点**取数）——
-	// 这两条是"路径存在但读不到"的坑：按对象名直觉写成 `/qos/policies/{name}` / `/port-mirroring/{name}`
-	// 当详情端点，请求只会得到 405。详情页因此改从列表端点取同一个对象。
-	"/qos/policies/{name}":   "该路径只有 DELETE；QoS 详情从 /qos/policies 列表取数，界面暂无删除入口",
-	"/port-mirroring/{name}": "该路径只有 DELETE；SPAN 详情从 /port-mirroring 列表取数，界面暂无删除入口",
-
-	// —— 高风险 / 需要文件选择：界面有意不提供（CLI 有二次确认与守卫）——
-	"/system/restore":                            "恢复配置属高风险，界面暂不提供",
-	"/system:zeroize":                            "恢复出厂（破坏性极强），界面暂不提供",
-	"/system/software":                           "软件升级涉及重启与回退，界面暂不提供",
-	"/system/software:rollback":                  "同上",
-	"/system/tls":                                "证书上传需文件选择与 PEM 校验（重签已提供）",
-	"/system/login-users":                        "用户管理涉及口令策略，界面暂不提供",
-	"/system/login-users/{name}":                 "同上",
-	"/system/login-users/{name}:change-password": "同上",
-	"/system/kernel:apply":                       "内核基线应用需重启生效，界面暂不提供",
-	"/system/kernel:rollback":                    "同上",
-
-	// —— 配置类：走「配置」卡的候选 → 提交流程（不单列界面入口）——
-	"/system":     "系统配置段——走「配置」卡（candidate → 提交）",
-	"/vpp/config": "VPP 配置段——同上",
-
 	// —— by design：非界面读物 ——
 	"/metrics":        "Prometheus 文本格式，界面改读 /system/status 的同源字段",
 	"/openapi.json":   "契约自查用，界面不消费",
@@ -159,6 +139,16 @@ var uiDynamicWired = map[string]string{
 	"/system/tech-support/{file}":                                     "renderArchives()：downloadFile('/system/tech-support/' + name, …)",
 	"/configuration/rollback/{n}":                                     "cfghTakeCandidate()：POST '/configuration/rollback/' + n（提交历史页的两段式回滚第一步，偏移由 Rev 相减算出）",
 	"/virtual-switches/{name}/mac-table":                              "vsdMacLoad()：api('/virtual-switches/' + name + '/mac-table?limit=' + n)——交换机详情页按需拉取，**不**进路由表 endpoints（大表不该随页面刷新反复下载）",
+
+	// —— 刀 4b 第二段：危险动作（逐个走分级确认；守卫留在服务端实现处，界面不绕过）——
+	"/interfaces/{name}/dpdk":                    "dpdkAct()：api('/interfaces/' + name + '/dpdk?confirm=true')（接口详情页的绑定/解绑；confirm 由界面带上，是服务端对「会中断该口流量」的显式要求，管理口守卫在服务端）",
+	"/interfaces/{name}/sriov":                   "sriovSet()：api('/interfaces/' + name + '/sriov')（接口详情页设 VF 数量；不支持 SR-IOV 的口由底座明确报错，界面如实显示）",
+	"/qos/policies/{name}":                       "qsdDelete()：api('/qos/policies/' + name, {method:'DELETE'})——**只有 DELETE**，故详情仍从 /qos/policies 列表取；删除只写候选（不 auto-commit），提交后才生效",
+	"/port-mirroring/{name}":                     "spdDelete()：api('/port-mirroring/' + name, {method:'DELETE'})——同上（只有 DELETE、只写候选）",
+	"/system/kernel:apply":                       "knlAct()：api('/system/kernel:apply', {method:'POST'})（内核基线页写入引导基线，中危档）",
+	"/system/kernel:rollback":                    "knlAct()：api('/system/kernel:rollback', {method:'POST'})（同上）",
+	"/system/login-users/{name}":                 "usrPut()/usrDelete()：PUT / DELETE '/system/login-users/' + name（用户页改权限类/重置口令/删用户，高危档）",
+	"/system/login-users/{name}:change-password": "usrMyPassword()：api('/system/login-users/' + me + ':change-password')（改我自己的口令，要验旧口令）",
 }
 
 // contractPathSet 契约里的全部路径（方法无关）。
