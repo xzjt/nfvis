@@ -70,6 +70,12 @@ const MUTATIONS = {
     find: 'if (!res.ok) throw new Error(await httpErrText(res));',
     replace: "if (!res.ok) throw new Error('HTTP ' + res.status);",
   },
+  // 顶栏「我的账号」那条路径的确认闸门被拆掉（只对"消息落在账号框里"的调用放行，即只放行顶栏入口）——
+  // 本段新增入口的闸门回归（拆掉即报 ✗：那个确认框根本不会弹出来，写请求会直接发出去）
+  acctgate: {
+    find: '  const emit = say || usrMsg;\n  if (blockMsg) { emit(blockMsg, true); return false; }',
+    replace: '  const emit = say || usrMsg;\n  if (say === acctMsg) return true;\n  if (blockMsg) { emit(blockMsg, true); return false; }',
+  },
 };
 
 if (process.argv[2] === '--mutate') {
@@ -462,6 +468,20 @@ const HIGH_ACTIONS = [
       nodeOf(ctx, 'usr-my-old').value = 's3cret-Passw0rd!';
       nodeOf(ctx, 'usr-my-new').value = 'S3cret-Passw0rd!2';
     } },
+  // 顶栏「我的账号」（决策 #147）：**同一件事的第二个入口**——两个入口共用同一条处理器，
+  // 但这一条走的是**顶栏**那条路径（先开表单框、填好再点「修改口令」才弹确认框），故单列一条：
+  // 若哪天顶栏入口被接成"点了就发请求"（或它被标成写入口而对只读账号隐藏），这里立刻报 ✗。
+  { id: 'account-btn', title: '修改我的口令', via: '顶栏「我的账号」', word: 'admin',
+    cli: /request system password change$/,
+    req: { method: 'POST', url: /\/system\/login-users\/admin:change-password$/ },
+    // 起点是两步（与真人操作同序）：开表单框会清空口令控件，故口令值在**开框之后**才填。
+    start: (ctx) => {
+      fire(ctx, 'account-btn', 'click');
+      nodeOf(ctx, 'acct-old').value = 's3cret-Passw0rd!';
+      nodeOf(ctx, 'acct-new').value = 'S3cret-Passw0rd!2';
+      return fire(ctx, 'acct-submit', 'click');
+    },
+    pre: (ctx) => { vm.runInContext('currentUser = "admin"', ctx); } },
 ];
 
 // 高危的动作类函数（用户页的行内按钮）：直接调处理器，等价于点那一行上的按钮。
@@ -526,7 +546,7 @@ async function runAction(ctx, act, start) {
 // runHighAction：高危档的完整一遍——两道闸门**逐条**验（不是"提示了一句"就算数），
 // 再验"闸门满足后确实发了那一条请求"。
 async function runHighAction(ctx, act, start) {
-  const label = act.title + '（高危）';
+  const label = act.title + '（高危' + (act.via ? '，' + act.via : '') + '）';
 
   // —— 第一遍：闸门全程关着，最后取消 ——
   if (act.pre) act.pre(ctx);
@@ -594,6 +614,22 @@ async function runHighAction(ctx, act, start) {
     ok('#' + id + ' 由脚本现建（骨架里没有，避免重复 id）', !new RegExp('id="' + id + '"').test(html));
   }
 
+  console.log('— ⓪b 顶栏「我的账号」：骨架在不在 + 入口有没有被标成写入口 —');
+  // 取某个 id 所在的**整个标签**（`<… id="x" …>`）：用来断言这个控件没被打上 data-write。
+  const tagOf = (id) => (html.match(new RegExp('<[^>]*id="' + id + '"[^>]*>')) || [''])[0];
+  for (const id of ['acct', 'acct-old', 'acct-new', 'acct-msg', 'acct-close', 'acct-submit']) {
+    ok('骨架 index.html 里有 #' + id + '（「我的账号」框）', new RegExp('id="' + id + '"').test(html));
+  }
+  ok('骨架 index.html 里有 #account-btn（顶栏入口）', tagOf('account-btn') !== '', 'tag=' + tagOf('account-btn'));
+  // 这条是**本入口的存在理由**：只读账号也要看得见它——一旦被打上 data-write，就会被
+  // body.role-readonly 的 CSS 规则隐藏，只读用户在界面上又无处改自己的口令了。
+  for (const id of ['account-btn', 'acct-old', 'acct-new', 'acct-close', 'acct-submit']) {
+    const tag = tagOf(id);
+    ok('#' + id + ' 没有 data-write（只读账号也要能看见/能用）', tag !== '' && tag.indexOf('data-write') < 0, tag);
+  }
+  ok('app.js 里顶栏入口接的是 openAcct（不是直接发请求）',
+    /\$\('account-btn'\)\.addEventListener\('click', openAcct\)/.test(APP_SRC_RAW));
+
   console.log('— ① 逐个动作走一遍：档位特征 + 确认前/取消后都不许发请求 —');
   for (const act of ACTIONS) {
     await runAction(ctx, act, () => fire(ctx, act.id, 'click'));
@@ -604,7 +640,8 @@ async function runHighAction(ctx, act, start) {
 
   console.log('— ①b 高危动作逐个走一遍：确认词 + 倒计时两道闸门 + 确认后才发请求 —');
   for (const act of HIGH_ACTIONS) {
-    await runHighAction(ctx, act, () => fire(ctx, act.id, 'click'));
+    // 大多数动作一个按钮就开框；顶栏「我的账号」是两步（先开表单、再点提交），由 act.start 描述。
+    await runHighAction(ctx, act, act.start ? () => act.start(ctx) : () => fire(ctx, act.id, 'click'));
   }
   for (const act of HIGH_FN_ACTIONS) {
     await runHighAction(ctx, act, () => vm.runInContext('(' + act.expr + ')', ctx));
