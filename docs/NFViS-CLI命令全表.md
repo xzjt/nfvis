@@ -158,7 +158,7 @@
 | `request system kernel rollback` | 回退内核基线 | S | `POST /system/kernel:rollback` | 🚫 同上 |
 | `request system configuration backup [to <path>]` | 导出 committed 配置归档（`to <path>` 是另存一份：须绝对路径、目标不得已存在、父目录须已存在；已存在即如实拒绝） | S | `GET /system/backup` | ✅ |
 | `request system configuration restore <path>` | 导入归档为 candidate 并提交 | S | `PUT /configuration/candidate` | 🚫 会覆盖现网配置 |
-| `request system tech-support generate` | 生成诊断归档 tar.gz | O | `POST /system/tech-support` | ✅ |
+| `request system tech-support generate` | 生成诊断归档 tar.gz（归档里的配置是**脱敏视图**：口令哈希等已隐藏，不能用于恢复；要可恢复的完整配置用 `configuration backup`） | O | `POST /system/tech-support` | ✅ |
 | `request system core-dumps export <url>` | 导出转储清单到 URL（POST JSON） | O | `POST /system/core-dumps:export` | ✅（决策 #126 修掉此前的假成功） |
 | `request system core-dumps delete [file <n>]` | 删除转储 | O | `DELETE /system/core-dumps` | ✅（**决策 #76⑨** 修错误文案） |
 | `request system zeroize` | 恢复出厂（双重确认） | S | `POST /system:zeroize` | 🚫 破坏性 |

@@ -260,12 +260,9 @@ func seedCLIUserWithHash(t *testing.T, x *cliExecutor, eng *config.Engine) {
 }
 
 // 脱敏助手本身的直接单测：敏感键整个移除，非敏感键保留。
+// 实现自决策 #149 起在 internal/model（api 的 redactView 只是它的转发），此处直接调实现。
 func TestRedactConfigView(t *testing.T) {
-	b, _ := json.Marshal(candidateWithUser())
-	var tree any
-	_ = json.Unmarshal(b, &tree)
-	redactTree(tree)
-	out, _ := json.Marshal(tree)
+	out, _ := json.Marshal(model.RedactSensitive(candidateWithUser()))
 	s := string(out)
 	if strings.Contains(s, "pbkdf2") || strings.Contains(s, "password_hash") {
 		t.Fatalf("敏感字段未移除: %s", s)

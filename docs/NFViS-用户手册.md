@@ -1200,6 +1200,12 @@ nfvis$ request system core-dumps export https://<server>/upload
 nfvis$ request system core-dumps delete file <name>
 ```
 
+> **诊断包里的配置是脱敏视图**：`config.json` 里的 `password_hash` 等敏感字段已被隐藏
+> （与页面上看配置同一口径），`logs.txt` 里首次启动打印的一次性口令也已打码——诊断包是
+> **要交给支持人员**的件，故任何账号都能下载（含 read-only）。因此它**不能**用来恢复配置：
+> 需要可恢复的完整配置请用配置备份导出（见 §10.7，仅 super-user）。
+> 归档落盘在 `/var/lib/nfvis/tech-support/`（文件 0600、目录 0700），同机其他用户读不到。
+
 core dump 目录：`/var/lib/nfvis/coredumps`（容量上限 + 滚动清理）。
 清单为空时按安装期提示设置 `core_pattern`：
 
@@ -1408,7 +1414,7 @@ tail -n 100 /var/log/nfvis-provision.log     # 环境初始化（若用过 provi
 | `/var/lib/nfvis/backup/` | 配置备份归档（0600） |
 | `/var/lib/nfvis/captures/` | 导出的 pcap |
 | `/var/lib/nfvis/coredumps/` | 崩溃转储 |
-| `/var/lib/nfvis/tech-support/` | 诊断归档 tar.gz |
+| `/var/lib/nfvis/tech-support/` | 诊断归档 tar.gz（0600，目录 0700） |
 | `/var/lib/nfvis/vms/` | VM 磁盘与定义（seed.iso/user-data/meta-data 在各 VM 子目录） |
 | `/var/lib/nfvis/tls/` | `server.crt`/`server.key`（自签；CLI 默认固定此证书） |
 | `/var/lib/nfvis/kernel-baseline.bak` | 内核基线上一次片段备份 |

@@ -314,6 +314,10 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("POST "+APIPrefix+"/diagnostics/traceroute", s.auth(s.handleTraceroute, schema.ClassOperator, "traceroute"))
 	mux.Handle("POST "+APIPrefix+"/interfaces:clear-statistics", s.auth(s.handleClearInterfaceStats, schema.ClassSuperUser, "clear interfaces statistics"))
 	mux.Handle("POST "+APIPrefix+"/system/tech-support", cfgAPI(s.handleCreateTechSupport))
+	// 下载保持 read-only（决策 #149）：诊断归档是**脱敏视图**（配置分节摘掉口令哈希、
+	// 日志分节剥掉产品自己打印的一次性口令），故不必按秘密收紧 class——现场流程
+	// 「operator 生成诊断包 → 自己下载送支持」因此不破。要**可恢复**的完整配置走配置备份
+	// 导出（那条按决策 #143 是 super-user，且有意不脱敏：脱敏即无法恢复）。
 	mux.Handle("GET "+APIPrefix+"/system/tech-support/{file}", s.auth(s.handleDownloadTechSupport, schema.ClassReadOnly, "show system tech-support"))
 	mux.Handle("GET "+APIPrefix+"/system/core-dumps", s.auth(s.handleListCoreDumps, schema.ClassReadOnly, "show system core-dumps"))
 	mux.Handle("DELETE "+APIPrefix+"/system/core-dumps", cfgAPI(s.handleDeleteCoreDumps))

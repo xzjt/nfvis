@@ -2,13 +2,16 @@ package api
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/system"
 )
 
@@ -102,6 +105,90 @@ func TestDiagOpsEndpoints(t *testing.T) {
 	if len(d.cores.List()) != 0 {
 		t.Fatal("删除后应为空")
 	}
+}
+
+// 决策 #149：诊断归档下载**保持 read-only 可下载**（现场流程：operator 生成诊断包 →
+// 自己下载送支持），代价是归档里的配置必须是**脱敏视图**——本用例同时锁定这两条：
+// ① read-only 拿到 200（class 未收紧）；② 归档整包里没有口令哈希（含 config.json）。
+// 变异验证：把 config 分节改回不脱敏的 sectionJSON → ② 立刻报「归档泄露口令哈希」。
+func TestTechSupportDownloadReadOnlyButRedacted(t *testing.T) {
+	const sentinel = "pbkdf2$sha256$600000$APITSALT$APITSHASH"
+	coreDir := t.TempDir()
+	cores := system.NewCoreDumps(coreDir, 0)
+	tech := system.NewTechSupport(t.TempDir(), system.TechSupportSources{
+		Version: func() any { return map[string]string{"nfvis": "test"} },
+		// 真机形态：config 来源就是 engine.Committed()，必然含本地用户的口令哈希
+		Config: func() (any, error) {
+			return model.Config{System: &model.SystemConfig{
+				Hostname: "ts-node",
+				Login: &model.SystemLogin{Users: []model.LoginUserConfig{
+					{Name: "admin", Class: "super-user", PasswordHash: sentinel},
+				}},
+			}}, nil
+		},
+		Audit:  func() (any, error) { return []string{"config.commit"}, nil },
+		Status: func() (any, error) { return map[string]bool{"vpp_connected": true}, nil },
+		Logs:   func() ([]byte, error) { return []byte("nfvisd 就绪\n"), nil },
+		Cores:  cores.List,
+	}, "test")
+	ts := newTestServerOpts(t, Options{DiagOps: &testDiagOps{tech: tech, cores: cores}})
+	admin := loginAdmin(t, ts)
+
+	status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system/tech-support", admin, nil,
+		map[string]string{"X-NFVIS-Auto-Commit": "true"})
+	if status != http.StatusAccepted {
+		t.Fatalf("生成诊断归档: %d %s", status, data)
+	}
+	files := tech.List()
+	if len(files) != 1 {
+		t.Fatalf("应有 1 份归档: %+v", files)
+	}
+	dl := ts.URL + APIPrefix + "/system/tech-support/" + files[0].File
+
+	// ① read-only（viewer）下载 200 —— 收紧 class 会破掉现场流程，故这里必须可下
+	_, viewer := login(t, ts, "viewer", "s3cret-Passw0rd!")
+	req, _ := http.NewRequest(http.MethodGet, dl, nil)
+	req.Header.Set("Authorization", "Bearer "+viewer.Token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := new(bytes.Buffer)
+	_, _ = raw.ReadFrom(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("read-only 下载诊断归档应 200（现场流程不破），实际 %d %s", resp.StatusCode, raw.String())
+	}
+
+	// ② 整包（逐成员）不得含口令哈希；哨兵 + 真哈希形态两条判据互补
+	body := gunzipAll(t, raw.Bytes())
+	if bytes.Contains(body, []byte(sentinel)) || realHashRe.Match(body) {
+		t.Fatalf("诊断归档泄露口令哈希:\n%s", body)
+	}
+	if bytes.Contains(body, []byte("password_hash")) {
+		t.Fatalf("诊断归档回了 password_hash 键:\n%s", body)
+	}
+	// ③ 脱敏 ≠ 掏空 + 确实打到了归档（避免断言落在空包/错误体上）
+	for _, want := range []string{"config.json", "ts-node", "admin", "logs.txt"} {
+		if !bytes.Contains(body, []byte(want)) {
+			t.Fatalf("归档应含 %q（否则上面的断言等于没跑）:\n%s", want, body)
+		}
+	}
+}
+
+// gunzipAll 解开 tar.gz 归档的**全部字节**（含成员名与正文），供「整包不含秘密」断言用。
+func gunzipAll(t *testing.T, b []byte) []byte {
+	t.Helper()
+	gz, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("归档应为 gzip: %v", err)
+	}
+	defer gz.Close()
+	out, err := io.ReadAll(gz)
+	if err != nil {
+		t.Fatalf("解压归档: %v", err)
+	}
+	return out
 }
 
 // M5-4：CLI `request system tech-support generate` / `show system tech-support|core-dumps`。
