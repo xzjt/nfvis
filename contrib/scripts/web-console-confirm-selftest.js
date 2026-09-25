@@ -76,6 +76,11 @@ const MUTATIONS = {
     find: '  const emit = say || usrMsg;\n  if (blockMsg) { emit(blockMsg, true); return false; }',
     replace: '  const emit = say || usrMsg;\n  if (say === acctMsg) return true;\n  if (blockMsg) { emit(blockMsg, true); return false; }',
   },
+  // 记录类时间退回浏览器本地时区（round80 缺陷的成因，见 ⑩）：同一套用例必须报 ✗
+  utctime: {
+    find: "  return isNaN(d) ? String(ts) : d.toISOString().slice(0, 19).replace('T', ' ') + ' UTC';",
+    replace: '  return isNaN(d) ? String(ts) : d.toLocaleString();',
+  },
 };
 
 if (process.argv[2] === '--mutate') {
@@ -763,6 +768,63 @@ async function runHighAction(ctx, act, start) {
     /Array\.isArray\(body\.detail\)/.test(APP_SRC_RAW) && /msg \+= '——/.test(APP_SRC_RAW));
   ok('错误文案不再只有 summary（提交失败时能看到「为什么」）',
     APP_SRC_RAW.indexOf('detail') >= 0 && APP_SRC_RAW.indexOf('校验类失败会带') >= 0);
+
+  // —— ⑩ 记录类时间的口径：一律 UTC + 显式标记（round80 真机验收的缺陷）——
+  //
+  // 缺陷：控制台里同一条审计记录比 CLI `show log audit` 早/晚一个时区偏移，且控制台那侧
+  // **不带任何标记**（浏览器本地时区渲染）——而控制台会回显等价 CLI 命令，工单对不上账，
+  // 与 journalctl（UTC）也核不起来。本段的判据是**算出来的字符串**：给定已知瞬间，
+  // 无论本机/浏览器时区偏移是多少（.sh 会另换一个时区复跑整份用例），结果都必须是那个 UTC 时刻。
+  console.log('— ⑩ 记录类时间一律按 UTC 渲染并带标记（与 CLI / journalctl 同口径） —');
+  const fmtOf = (v) => vm.runInContext('fmtTime(' + JSON.stringify(v) + ')', ctx);
+  const optOf = (v) => vm.runInContext('fmtTimeOpt(' + JSON.stringify(v) + ')', ctx);
+  const WANT = '2026-09-25 01:24:22 UTC';
+  ok('RFC3339（Z）：渲染成 `YYYY-MM-DD HH:MM:SS UTC`（形状与 CLI 的命令输出对齐）',
+    fmtOf('2026-09-25T01:24:22Z') === WANT, JSON.stringify(fmtOf('2026-09-25T01:24:22Z')));
+  // 同一瞬间换个写法（带偏移）必须落到同一个 UTC 字符串上——这条与时区无关，是转化逻辑的判据
+  ok('带 +08:00 偏移：换算成同一瞬间（09:24:22+08:00 = 01:24:22Z）',
+    fmtOf('2026-09-25T09:24:22+08:00') === WANT, JSON.stringify(fmtOf('2026-09-25T09:24:22+08:00')));
+  ok('带 -05:00 偏移：同样换算成 UTC',
+    fmtOf('2026-09-24T20:24:22-05:00') === WANT, JSON.stringify(fmtOf('2026-09-24T20:24:22-05:00')));
+  // 无时区标记的服务端时间戳：按 UTC 字面量渲染。交给 Date 解析会按**浏览器本地时区**
+  // 理解（UTC+8 上会把它当成 09:24:22Z）——那正是本缺陷的第二种进入方式。
+  ok('无时区标记的 "YYYY-MM-DD HH:MM:SS"：按 UTC 字面量渲染（不被浏览器时区改写）',
+    fmtOf('2026-09-25 01:24:22') === WANT, JSON.stringify(fmtOf('2026-09-25 01:24:22')));
+  ok('已是 UTC 标记的字符串：幂等（不会叠成「UTC UTC」）',
+    fmtOf(WANT) === WANT, JSON.stringify(fmtOf(WANT)));
+  ok('带小数秒：仍按秒渲染、不丢秒', fmtOf('2026-09-25T01:24:22.987Z') === WANT,
+    JSON.stringify(fmtOf('2026-09-25T01:24:22.987Z')));
+  ok('本地时区渲染的产物与它不同（不带标记的本地时间过不了这一关）',
+    fmtOf('2026-09-25T01:24:22Z') !== new Date('2026-09-25T01:24:22Z').toLocaleString(),
+    JSON.stringify(new Date('2026-09-25T01:24:22Z').toLocaleString()));
+  // 非时间/解析失败：原样返回（保持既有容错，不抛异常）。注意 V8 的宽松解析会认下一些
+  // 看着不像时间的串（如 "HTTP 503" 被当成"503 年"），故判据是"解析失败才原样返回"——
+  // 与改动前的行为一致，本次只改时区口径、不改容错边界。
+  ok('非时间/解析失败：原样返回（保持既有容错）',
+    fmtOf('还没生成') === '还没生成' && fmtOf('2026-13-45') === '2026-13-45' &&
+    fmtOf('N/A') === 'N/A',
+    JSON.stringify([fmtOf('还没生成'), fmtOf('2026-13-45'), fmtOf('N/A')]));
+  ok('空值：仍显示「—」', fmtOf('') === '—' && fmtOf(null) === '—' && fmtOf(undefined) === '—');
+  // 数字（epoch 毫秒）与非字符串输入仍走 Date 的原有语义（本次只改字符串的时区口径，不改输入边界）
+  ok('数字（epoch 毫秒）：仍按 Date 原有语义换算成 UTC',
+    fmtOf(Date.parse('2026-09-25T01:24:22Z')) === WANT,
+    JSON.stringify(fmtOf(Date.parse('2026-09-25T01:24:22Z'))));
+  // 证书有效期（X.509 时间）走同一条路：运维要拿它与 openssl 的输出对照；零值时间仍显示「—」
+  ok('证书有效期：正常值按 UTC 渲染、零值（0001 年）显示「—」',
+    optOf('2026-10-24T12:00:00Z') === '2026-10-24 12:00:00 UTC' && optOf('0001-01-01T00:00:00Z') === undefined,
+    JSON.stringify([optOf('2026-10-24T12:00:00Z'), optOf('0001-01-01T00:00:00Z')]));
+  // 结构性判据（与上面的行为判据互补）：fmtTime 的实现里不许再出现本地时区格式化。
+  const fmtBody = (APP_SRC_RAW.match(/function fmtTime\(ts\)[\s\S]*?\n\}/) || [''])[0];
+  ok('fmtTime 的实现经 toISOString 取 UTC 分量', /toISOString/.test(fmtBody));
+  ok("fmtTime 的产物带 ' UTC' 标记", /' UTC'/.test(fmtBody));
+  ok('fmtTime 的实现里没有 toLocale*（记录类时间不随浏览器时区变）', !/toLocale/.test(fmtBody));
+  // 唯一的本地时间出口是纯 UI 提示（「已刷新 时刻」，与任何记录无关）；它的理由写在注释里。
+  ok('本地时区格式化只留在 fmtClockHint 一处（纯 UI 提示），且注释写明理由',
+    /function fmtClockHint\(date\)/.test(APP_SRC_RAW) &&
+    /纯 UI 提示/.test(APP_SRC_RAW.slice(Math.max(0, APP_SRC_RAW.indexOf('function fmtClockHint(') - 400),
+      APP_SRC_RAW.indexOf('function fmtClockHint('))) &&
+    !/new Date\(\)\.toLocaleTimeString\(\)/.test(APP_SRC_RAW));
+
   if (RC === 0) console.log('全部符合预期');
   else console.log('有不符合预期的用例');
   process.exit(RC);

@@ -190,7 +190,7 @@ request system
   ├─ api
   │   ├─ tls regenerate                             # 重签自签证书（或经配置安装外部证书）
   │   └─ token revoke <token-id>                    # S；**在 api 之下**（决策 #76：原文档误置于顶级
-  │                                                 # request 下）。V1 仅提示「经 API DELETE /login
+  │                                                 # request 下）。V1 仅提示「经 API POST /logout
   │                                                 # 吊销当前会话」，逐 token 吊销随 V2
   ├─ ssh host-key regenerate                        # 重新生成 SSH host key
   ├─ password change                                # 登录者自助改密（验证旧口令）

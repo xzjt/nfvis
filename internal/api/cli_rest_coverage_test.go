@@ -2,8 +2,10 @@ package api
 
 // cli_rest_coverage_test.go —— CLI 命令 ⇄ REST 端点覆盖守护（round42 核查的固化）。
 //
-// 由来：用户问"Web 控制台能否实现 CLI 的全部功能"。核查（docs/CLI-REST覆盖核查.md）的
-// 结论是 258 个命令形态中 225 个已有类型化端点、14 个是真缺口、19 个是 CLI-only by design。
+// 由来：用户问"Web 控制台能否实现 CLI 的全部功能"。核查（docs/CLI-REST覆盖核查.md）在
+// round80 的**行口径 259 行**上重算（《NFViS-CLI命令全表》按实际行数：show 67 / request 46 /
+// 其余操作 11 / 通用管道 9 / 配置模式 126）结论是：**236 行已有类型化端点、4 行是真缺口、
+// 19 行是 CLI-only by design**（236+4+19=259）。
 // 本测试把该核查变成机器可维护的三张表，使两类漂移自动现形：
 //   ① 映射过期——覆盖表声明的端点被改名/删除（routes_contract 只判"路由 ⊆ 契约"的反方向，
 //      判不出"CLI 还在指向一个已不存在的端点"）；
@@ -13,7 +15,9 @@ package api
 //   - 新增 CLI 命令须同步补：命令全表、contractCLICommands、以及本文件三张表之一；
 //   - `/cli/execute` 与 `/cli/candidates` 是 x-internal（契约明言"仅 nfvis-cli 使用"），
 //     按 round37 口径**不计入**覆盖——前端不碰它；
-//   - 完整 258 形态的策展清单以 docs/NFViS-CLI命令全表.md 为准，这里的是机器可维护子集；
+//   - 覆盖表引用的端点必须是契约里**存在**的操作：`PUT /vpp/config` 是 round80 删掉的幽灵
+//     声明（决策 #153，从未注册；VPP 配置的写路径是配置模式 = candidate + commit），不得引用；
+//   - 完整 259 行（形态）的策展清单以 docs/NFViS-CLI命令全表.md 为准，这里的是机器可维护子集；
 //   - 表 key 是**形态模式**：`<...>` 匹配任意单个 token（具体实例名如 ens224/vm1 因此
 //     天然匹配 `<ifname>`/`<n>`），`[...]` 可选组已在匹配时剥除。
 
@@ -96,6 +100,7 @@ var cliRESTCoverage = map[string]string{
 	"show bonds":                                       "GET /bonds",
 	"show bonds <name> detail":                         "GET /bonds/{name}",
 	"show lldp neighbors":                              "GET /protocols/lldp/neighbors",
+	"show lldp neighbors interface <ifname>":           "GET /protocols/lldp/neighbors",
 	"show protocols lldp neighbors":                    "GET /protocols/lldp/neighbors",
 	"show virtual-machine-functions":                   "GET /virtual-machine-functions",
 	"show virtual-machine-functions <name> detail":     "GET /virtual-machine-functions/{name}",
@@ -146,7 +151,7 @@ var cliRESTCoverage = map[string]string{
 	"request vpp restart":                                     "POST /vpp/restart",
 	"request vpp trace start":                                 "POST /vpp/capture",
 	"request vpp trace stop":                                  "DELETE /vpp/capture",
-	"request vpp trace export":                                "GET /vpp/capture/{file}",
+	"request vpp trace export":                                "DELETE /vpp/capture + GET /vpp/capture/{file}",
 	"request system software add":                             "POST /system/software",
 	"request system software rollback":                        "POST /system/software:rollback",
 	"request system reboot":                                   "POST /system:reboot",
@@ -211,11 +216,14 @@ var cliRESTExceptions = map[string]string{
 }
 
 // cliRESTGaps 已登记的 REST 缺口（CLI 有、REST 无）→ 理由/归属。补一个划掉一个。
-// 与 docs/CLI-REST覆盖核查.md §3 的 14 项一一对应。
+// 与 docs/CLI-REST覆盖核查.md §3 的 4 项一一对应；其中 `show configuration [permissions <class>]`
+// 是**整行计入缺口**的（《命令全表》该行实测列即标 ⚠️ 已知缺口：`permissions` 分支本轮改为明确提示
+// 未实现，裸写法 `show configuration` 仍由覆盖表的 `GET /configuration` 承载）。
 var cliRESTGaps = map[string]string{
-	"request system api token revoke":    "V1 明确延期（决策 #76⑧）；仅 DELETE /login 吊销当前会话，核查 #12",
-	"request system storage format-data": "V1 有意延期（破坏性操作），核查 #13",
-	"show vpp runtime":                   "两边都未接入（附录 A #34），核查 #14",
+	"request system api token revoke":        "V1 明确延期（决策 #76⑧）；服务端仅会话级吊销（POST /logout；CLI 提示文案已与注册端点一致），核查 #3",
+	"request system storage format-data":     "V1 有意延期（破坏性；决策 #65：待数据分区定义），核查 #4",
+	"show vpp runtime":                       "两边都未接入（附录 A #34），核查 #1",
+	"show configuration permissions <class>": "子形态无 REST 端点：class 视角语义从未定义，本轮改为明确提示未实现（附录 A #153 /《命令全表》§4⑧）；裸写法由 GET /configuration 承载，核查 #2",
 }
 
 // classify 返回命令的归属：A=覆盖（端点）、C=例外、B=缺口、""=未归类。

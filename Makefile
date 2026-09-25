@@ -113,6 +113,10 @@ deb:
 	install -m 0644 docs/NFViS-用户手册.md build/deb/usr/share/doc/nfvis/
 	install -m 0644 docs/NFViS-CLI命令全表.md build/deb/usr/share/doc/nfvis/
 	install -m 0644 docs/M5-验收记录.md build/deb/usr/share/doc/nfvis/ 2>/dev/null || true
+	# 用户手册里的控制台截图（markdown 相对路径 images/console/*.jpg）随包一起装，
+	# 否则包内手册的图会指向不存在的文件（发布校验要核对「随包文档 vs 实现」）。
+	install -d build/deb/usr/share/doc/nfvis/images/console
+	install -m 0644 docs/images/console/*.jpg build/deb/usr/share/doc/nfvis/images/console/
 	install -m 0755 deploy/installer/nfvis-baseline.sh build/deb/usr/share/nfvis/installer/
 	install -m 0755 deploy/installer/nfvis-ssh-harden.sh build/deb/usr/share/nfvis/installer/
 	install -m 0755 deploy/debian/postinst build/deb/DEBIAN/postinst

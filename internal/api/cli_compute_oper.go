@@ -762,7 +762,7 @@ func (x *cliExecutor) requestSystem(user, class, source string, t []string) stri
 			return x.systemTLSRegenerate(user)
 		}
 		if len(t) >= 3 && t[1] == "token" && t[2] == "revoke" {
-			return "%% token 吊销请经 API DELETE /login（当前会话）；逐 token 吊销随 V2\n"
+			return "%% token 吊销请经 API POST /logout（吊销当前会话的令牌；逐 token 吊销随 V2）\n"
 		}
 		return "%% 语法: request system api tls regenerate\n"
 	case "ssh":
