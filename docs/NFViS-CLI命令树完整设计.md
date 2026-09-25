@@ -33,7 +33,10 @@ show system
   ├─ hardware                                       # 硬件健康：CPU 温度/风扇/电源（IPMI/Redfish/lm-sensors）、磁盘 SMART
   ├─ core-dumps                                     # 崩溃转储清单（VPP/QEMU/nfvisd）
   ├─ tech-support                                   # 诊断归档清单
-  └─ configuration sessions                        # candidate 持锁会话列表
+  └─ configuration sessions                        # candidate 持锁会话列表（**此处只有 sessions**：
+                                                    #   `candidate` 的写法是顶层 `show configuration candidate`，
+                                                    #   唯一的实现也在那里；`show system configuration candidate`
+                                                    #   不存在，别在树里再加一份重复且无实现的形态——决策 #153）
 
 show interfaces                                     # 全部接口摘要（API: GET /interfaces）
 show interfaces physical                            # DPDK 物理口（驱动、链接状态、速率、VF 数）
@@ -148,8 +151,13 @@ request images
   ├─ upload name <name> type <vm-image|container-image> file <path>
   │      # path 须位于 /data/incoming/（先经 scp/sftp 传入管理网卡），导入成功自动清理
   ├─ download name <name> type <...> url <url> sha256 <hex>
-  │      # URL 拉取必填 sha256（FR-SEC-004 默认强制校验，缺省即拒绝）
-  └─ delete name <name>                             # 引用检查；确认
+  │      # URL 拉取必填 sha256（FR-SEC-004 默认强制校验，缺省即拒绝）；
+  │      #   树里 **不得** 把 sha256 标成可选（`[...]`）——`?`/Tab 会据此告诉操作者「可以不给」，
+  │      #   照敲却被校验层拒（树、执行器、校验三方同源，决策 #153）
+  └─ delete name <name>                             # 引用检查；确认。
+                                                    #   `name` 是**关键字**（键值形态 `delete name <n>`，
+                                                    #   执行器按 key/value 解析）：不得写成位置参数
+                                                    #   `delete <name>`（决策 #153）
 request interfaces <ifname> enable | disable         # PUT /interfaces/{n}
 request interfaces <ifname> bind-dpdk [uio-driver <vfio-pci|igb-uio>]
 request interfaces <ifname|pci> unbind-dpdk [to-driver <驱动名>]
@@ -541,6 +549,7 @@ virtual-machine-functions {
 | 操作模式 `show configuration candidate` | 当前持锁会话的 candidate |
 | 操作模式 `show configuration history` | 保留的历史提交快照**列表**（rev/时间/用户/注释/是否当前；**不含配置正文**。`Engine.History`，与 `GET /configuration/history` 同源，决策 #142） |
 | 操作模式 `show configuration sessions` | 与 `show system configuration sessions` **同一读物**（`Engine.Sessions`，与 `GET /system/configuration/sessions` 同源）——等价写法，不复制渲染逻辑（决策 #153） |
+| 操作模式 `show system configuration candidate` | **不存在该形态**（不是「等价写法」）：`show system` 下只挂 `configuration sessions`，`candidate` 的唯一写法是上表 `show configuration candidate` 那一行。真敲该形态，执行器回 `% 该 show 命令形式未支持…`，**不会**静默当「读配置」作答（决策 #153） |
 | 操作模式 `show configuration \| compare rollback <n>` | committed ⇄ 第 n 个历史快照 diff（**已实现**：`Engine.Compare(n)`） |
 | 操作模式 `show configuration compare rollback <n>` | 与上一行的**管道形态等价**（同一 `Engine.Compare(n)`；两种写法都在命令树里，`?`/Tab 均可补出） |
 | 操作模式 `show configuration <未知子命令>` | **报错**（`% 无效命令: show configuration <x>（可用：…）`），**不显示配置正文**——`show configuration` 省略子命令才是"读 committed"（决策 #153） |

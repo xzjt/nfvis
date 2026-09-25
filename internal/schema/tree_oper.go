@@ -19,9 +19,11 @@ func OperRoot() *Node {
 				K("hardware", "硬件健康：温度/风扇/电源/SMART"),
 				K("core-dumps", "崩溃转储清单（VPP/QEMU/nfvisd）"),
 				K("tech-support", "诊断归档清单"),
+				// 只挂 `sessions`（契约 §1.1）：此处**没有** `candidate`——「当前持锁会话的
+				// candidate」的写法是顶层 `show configuration candidate`（唯一实现），
+				// 这里再挂一份既重复又无实现（执行器只认前者；决策 #153 收口）。
 				K("configuration", "配置查看",
 					K("sessions", "candidate 持锁会话列表"),
-					K("candidate", "当前持锁会话的 candidate"),
 				),
 			),
 			K("interfaces", "接口",
@@ -187,10 +189,15 @@ func OperRoot() *Node {
 					K("name", "镜像名", PT("<name>", "name", "名称")),
 					K("type", "镜像类型", VE("type", "vm-image|container-image", "vm-image", "container-image")),
 					K("url", "下载地址", V("url", "URL")),
-					Opt(K("sha256", "校验和", V("hex", "十六进制"))),
+					// sha256 **必填**（决策 #153 收口）：`images.ValidateDownloadOptions` 在受理前
+					// 同步强制要求（默认强制校验，缺省即拒），契约 §1.2 与《命令全表》也写必填——
+					// 树里标 `Opt` 会让 `?`/Tab 告诉操作者「可以不给」，照敲却被拒。
+					K("sha256", "校验和", V("hex", "十六进制")),
 				),
 				Su(K("delete", "删除镜像（引用检查后）",
-					P("<name>", "镜像名", DynImages),
+					// 键值形态 `delete name <n>`（非位置参数）：执行器 `imagesDelete` 按
+					// `kvArgs(rest, "name")` 解析，契约 §1.2 与《命令全表》同写 `delete name <n>`。
+					K("name", "镜像名", P("<name>", "镜像名", DynImages)),
 				)),
 			),
 			K("interfaces", "接口启停与驱动接管",
