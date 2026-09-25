@@ -1210,23 +1210,17 @@ paths:
     get:
       tags: [system]
       summary: 读取 VPP 数据面配置（startup.conf 生成源）
+      description: |
+        只读端点。**VPP 配置没有写端点**：数据面的 cpu/memory/dpdk 变更走配置模式
+        （`PUT /configuration/candidate` + `POST /configuration/commit`，CLI 侧是
+        `set vpp …` + `commit`），由配置事务统一校验与审计；此前这里声明的 `put:`
+        是**死声明**——服务端从未注册该路由（决策 #153）。
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VppConfig" }
-    put:
-      tags: [system]
-      summary: 修改 VPP 配置（cpu/memory/dpdk 变更需重启数据面生效）
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/VppConfig" }
-      responses:
-        "200": { $ref: "#/components/responses/ConfigAccepted" }
-        "400": { $ref: "#/components/responses/Error400" }
   /vpp/capture:
     get:
       tags: [system]

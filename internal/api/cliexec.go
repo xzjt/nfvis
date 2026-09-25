@@ -401,26 +401,66 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 	case len(t) == 1 && t[0] == "version":
 		return x.versionSummary()
 	case len(t) >= 1 && t[0] == "configuration":
-		if len(t) >= 2 && t[1] == "compare" {
-			// show configuration compare rollback <n>
-			if len(t) < 4 || t[2] != "rollback" {
-				return "%% 语法: show configuration compare rollback <n>\n"
+		// 契约 §1.1/§3（决策 #153）：子命令只有 candidate|history|permissions|sessions|
+		// compare rollback <n>，**省略子命令才是「读 committed」**。未知子命令必须报错并列出
+		// 可用子命令——此前除 compare/history 外一律落到「读 committed」，于是
+		// `show configuration sessions` / `show configuration bogus` 都静默打印配置正文
+		// （round80 真机实测；同族缺陷还有 `show virtual-switches … ports` 静默回落，见决策 #84）。
+		if len(t) >= 2 {
+			switch t[1] {
+			case "compare":
+				// show configuration compare rollback <n>（等价于管道形态 | compare rollback <n>）
+				if len(t) != 4 || t[2] != "rollback" {
+					return "%% 语法: show configuration compare rollback <n>\n"
+				}
+				n, err := strconv.Atoi(t[3])
+				if err != nil {
+					return "%% rollback 编号须为整数\n"
+				}
+				diff, err := x.engine.Compare(n)
+				if err != nil {
+					return "%% " + err.Error() + "\n"
+				}
+				if diff == "" {
+					return "（无差异）\n"
+				}
+				return diff + "\n"
+			case "history":
+				if len(t) != 2 {
+					return invalidShowConfiguration(t[1:])
+				}
+				return x.cfgHistory() // show configuration history（与 GET /configuration/history 同源）
+			case "sessions":
+				if len(t) != 2 {
+					return invalidShowConfiguration(t[1:])
+				}
+				// 与 `show system configuration sessions` **同一实现**（同一读物，
+				// 不复制渲染逻辑——两处各写一份必然漂移）。
+				return x.showConfigSessions()
+			case "candidate":
+				if len(t) != 2 {
+					return invalidShowConfiguration(t[1:])
+				}
+				// 落到下面的配置渲染（取候选）
+			case "permissions":
+				// `permissions <class>`：契约 §1.1 声明「按 class 视角显示」，但**语义没有权威定义**：
+				// §3「配置显示语义」对照表里没有这一行，产品也没有按 class 渲染配置的机制——
+				// 脱敏按**敏感字段**（口令哈希，与 class 无关），class 只决定**命令节点**能不能执行。
+				// 因此本轮**不发明**一种「class 视角」渲染（那会是 lossy 且无从校验的假承诺，
+				// 同 §3 里 `| display set` 的处理），而是**明说未实现**：此前它静默回 committed 正文，
+				// 操作者会以为拿到的是「read-only 视角的那份配置」——最忌讳的一类静默误答。
+				// 需要看配置正文时用 `show configuration`（省略子命令 = 读 committed，语义不变）。
+				if len(t) > 3 {
+					return invalidShowConfiguration(t[1:])
+				}
+				if len(t) == 2 {
+					return "%% 语法: show configuration permissions <class>\n"
+				}
+				return fmt.Sprintf("%% show configuration permissions %s：按 class 视角显示暂未实现"+
+					"（committed 原样配置见 show configuration）\n", t[2])
+			default:
+				return invalidShowConfiguration(t[1:])
 			}
-			n, err := strconv.Atoi(t[3])
-			if err != nil {
-				return "%% rollback 编号须为整数\n"
-			}
-			diff, err := x.engine.Compare(n)
-			if err != nil {
-				return "%% " + err.Error() + "\n"
-			}
-			if diff == "" {
-				return "（无差异）\n"
-			}
-			return diff + "\n"
-		}
-		if len(t) >= 2 && t[1] == "history" {
-			return x.cfgHistory() // show configuration history（与 GET /configuration/history 同源）
 		}
 		cfg, err := x.engine.Committed()
 		if err != nil {
@@ -473,20 +513,7 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 	case len(t) == 1 && t[0] == "resource-pools":
 		return x.execShowResourcePools()
 	case len(t) >= 3 && t[0] == "system" && t[1] == "configuration" && t[2] == "sessions":
-		views, err := x.engine.Sessions()
-		if err != nil {
-			return "%% 查询失败: " + err.Error() + "\n"
-		}
-		if len(views) == 0 {
-			return "（无持锁会话）\n"
-		}
-		var b strings.Builder
-		fmt.Fprintf(&b, "Holder       Acquired            Last-Activity       Dirty\n")
-		for _, v := range views {
-			fmt.Fprintf(&b, "%-12s %-19s %-19s %v\n", v.Holder,
-				v.AcquiredAt.Format("2006-01-02 15:04"), v.LastActivity.Format("2006-01-02 15:04"), v.Dirty)
-		}
-		return b.String()
+		return x.showConfigSessions()
 	}
 	if len(t) >= 2 && t[0] == "system" && t[1] != "configuration" {
 		return x.execShowSystemDiag(t[1:]) // M5-4/M5-9：运行态信息 / 诊断归档 / 转储
@@ -503,7 +530,35 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 	if len(t) >= 2 && t[0] == "vpp" && t[1] == "capture" {
 		return x.execShowVppCapture() // M5-3：抓包会话状态与已导出 pcap 清单
 	}
-	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|compare rollback n] | system uptime|cpu|memory|storage|hugepages|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | port-mirroring | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions\n"
+	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class>|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | port-mirroring | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions\n"
+}
+
+// invalidShowConfiguration：`show configuration <未知/多余 token>` 的统一报错
+// （契约 §1.1/§3，决策 #153）。**必须报错而不是静默返回配置正文**——静默误答会让
+// 操作者以为「命令成功了、这就是我要的那份事实」。措辞与既有 `% 无效命令` 一致：
+// 给出可用的子命令，便于直接照着敲。
+func invalidShowConfiguration(rest []string) string {
+	return fmt.Sprintf("%% 无效命令: show configuration %s（可用：candidate|history|permissions <class>|sessions|compare rollback <n>）\n",
+		strings.Join(rest, " "))
+}
+
+// showConfigSessions：candidate 持锁会话列表（`show system configuration sessions` 与
+// 等价写法 `show configuration sessions` 的**唯一**实现，与 GET /system/configuration/sessions 同源）。
+func (x *cliExecutor) showConfigSessions() string {
+	views, err := x.engine.Sessions()
+	if err != nil {
+		return "%% 查询失败: " + err.Error() + "\n"
+	}
+	if len(views) == 0 {
+		return "（无持锁会话）\n"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Holder       Acquired            Last-Activity       Dirty\n")
+	for _, v := range views {
+		fmt.Fprintf(&b, "%-12s %-19s %-19s %v\n", v.Holder,
+			v.AcquiredAt.Format("2006-01-02 15:04"), v.LastActivity.Format("2006-01-02 15:04"), v.Dirty)
+	}
+	return b.String()
 }
 
 // ---------- 配置模式 ----------

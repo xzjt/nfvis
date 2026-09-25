@@ -30,7 +30,15 @@ func (x *cliExecutor) execShowInterfaces(args []string) string {
 		if len(args) == 1 {
 			return x.showPhysicalInterfaces(cfg, "")
 		}
-		return x.showPhysicalInterfaces(cfg, args[1])
+		if len(args) == 2 {
+			// 单口运行态视图（链接/速率/驱动/计数，决策 #84 的运行态口径）
+			return x.showPhysicalInterfaces(cfg, args[1])
+		}
+		// `physical` 可省（契约 §1.1，决策 #153）：带子命令时两种写法必须走**同一实现**。
+		// 此前这里把 args[2] 整段丢掉、只按单口列表渲染——`show interfaces physical ens224
+		// statistics` 打的是同一张表（无任何计数），与 `show interfaces ens224 statistics`
+		// 不同源，属静默误答（契约「physical 可省」因此不成立）。
+		return x.showOneInterface(cfg, args[1], args[2])
 	}
 	// show interfaces <ifname> [detail|statistics|sriov]
 	if len(args) >= 1 {
@@ -436,12 +444,117 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 	return fmt.Sprintf("%% 无效命令: show vpp %s（可用：threads|buffers|memory|runtime|capture）\n", sub)
 }
 
-// execShowLldp：契约 §1.1 写法 `show lldp neighbors`（等价 `show protocols lldp neighbors`）。
+// filterLLDPNeighbors 按接口名过滤 LLDP 邻居表（ifname 为空 = 不过滤）。
+//
+// 纯函数：不碰底座、不碰执行器状态。抽出来的理由是**真机验不了**——nfvis-vm 无 LLDP 对端，
+// 邻居表恒为空（`docs/evidence/m5/t07-span-lldp.txt`），而空表上「过滤生效」与「过滤被丢」
+// 输出完全相同，故过滤规则只能靠桩数据单测（见 `cli_declared_arg_drop_test.go`）。
+// 接口名按**原样精确匹配**（VPP 接口名大小写敏感，不做大小写折叠——折叠会把两个真实存在的口混成一个）。
+func filterLLDPNeighbors(rows []LldpNeighborRow, ifname string) []LldpNeighborRow {
+	out := make([]LldpNeighborRow, 0, len(rows))
+	for _, r := range rows {
+		if ifname == "" || r.Interface == ifname {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// showLLDPNeighbors LLDP 邻居表的**唯一渲染实现**：契约 §1.1 的 `show lldp neighbors
+// [interface <ifname>]` 与等价写法 `show protocols lldp neighbors` 都走这里（同一读物
+// `GET /protocols/lldp/neighbors`，两处各写一份必然漂移）。
+//
+// ifname 非空 = 只保留该口的邻居；**无匹配时给明确文案**：既回不到全量、也不是一句空话。
+// 此前 `execShowLldp` 把过滤参数整段丢掉，于是操作者问「某个口有没有邻居」拿到的是全量表
+// （决策 #84/#85 同族的静默误答）。
+func (x *cliExecutor) showLLDPNeighbors(ifname string) string {
+	if x.lldp == nil {
+		return errRuntimeUnavailable
+	}
+	rows, err := x.lldp.Neighbors(context.Background())
+	if err != nil {
+		return "%% " + err.Error() + "\n"
+	}
+	rows = filterLLDPNeighbors(rows, ifname)
+	if len(rows) == 0 {
+		if ifname == "" {
+			return "（无 LLDP 邻居）\n"
+		}
+		if !x.interfaceKnown(ifname) {
+			// 名字本身不存在（配置里没声明、也不在 VPP 接口清单中）——不能与「该口无邻居」混为一谈：
+			// 前者是敲错了名字，后者是这个口就是没有对端。
+			return fmt.Sprintf("%% 接口 %s 未在配置中声明、也不在 VPP 接口清单中（show interfaces physical 看运行态清单）\n", ifname)
+		}
+		return fmt.Sprintf("（接口 %s 无 LLDP 邻居）\n", ifname)
+	}
+	items := make([]any, 0, len(rows))
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-12s %-20s %-16s %s\n", "Interface", "Chassis", "Port", "TTL")
+	for _, r := range rows {
+		items = append(items, anyToTree(r))
+		fmt.Fprintf(&b, "%-12s %-20s %-16s %d\n", r.Interface, r.ChassisID, r.PortID, r.TTL)
+	}
+	x.structured = map[string]any{"neighbors": items}
+	return b.String()
+}
+
+// interfaceKnown 接口名是否为本机已知接口：committed 里声明过（与 `show interfaces <ifname>`
+// 同一判据），或 VPP 运行态接口清单里有（与 `<ifname>` 动态候选同源，决策 #83）。
+//
+// 两侧都认，是因为邻居表来自 VPP（键是 VPP 接口名）、而操作者也常按配置里的名字提问。
+// 端口清单未接入（nil）时只按配置判定；清单**查询失败**时按「已知」处理——
+// 宁可少报一次错，也不冤枉一个真实存在的口（判「未知」必须有高置信度依据）。
+func (x *cliExecutor) interfaceKnown(name string) bool {
+	if name == "" {
+		return false
+	}
+	if cfg, err := x.engine.Committed(); err == nil {
+		for _, ifc := range cfg.Interfaces {
+			if ifc.Name == name {
+				return true
+			}
+		}
+	}
+	if x.ports == nil {
+		return false
+	}
+	names, err := x.ports.VPPIfnames()
+	if err != nil {
+		return true
+	}
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// execShowLldp：契约 §1.1 写法 `show lldp neighbors [interface <ifname>]`
+// （等价 `show protocols lldp neighbors`）。
+//
+// token 校验走**显式白名单**（决策 #153 的口径：多余的 token 必须报错，不得静默忽略）：
+// 此前只判 `args[0] != "neighbors"`，其余 token 一律透传丢掉——`interface <ifname>` 与
+// 更难察觉的 `… interface <ifname> bogus` 都被静默吃掉。
 func (x *cliExecutor) execShowLldp(args []string) string {
 	if len(args) >= 1 && args[0] != "neighbors" {
-		return fmt.Sprintf("%% 无效命令: show lldp %s（可用：show lldp neighbors）\n", strings.Join(args, " "))
+		return invalidShowLldp(strings.Join(args, " "))
 	}
-	return x.execShowProtocols([]string{"lldp", "neighbors"})
+	switch {
+	case len(args) <= 1:
+		// `show lldp`（域节点）/ `show lldp neighbors`：不按口过滤（lldp 下只有邻居表这一种读物）
+		return x.showLLDPNeighbors("")
+	case len(args) == 3 && args[1] == "interface":
+		return x.showLLDPNeighbors(args[2])
+	default:
+		return invalidShowLldp(strings.Join(args, " "))
+	}
+}
+
+// invalidShowLldp：`show lldp <未知/多余 token>` 的统一报错。
+// 措辞与既有 `% 无效命令` 一致：给出可用写法（含按接口过滤的形态），便于直接照着敲。
+func invalidShowLldp(rest string) string {
+	return fmt.Sprintf("%% 无效命令: show lldp %s（可用：show lldp neighbors [interface <ifname>]）\n", rest)
 }
 
 // bufUnavailableReason buffer 池统计不可用的原因（决策 #68：不静默省略，

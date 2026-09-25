@@ -314,27 +314,18 @@ func (x *cliExecutor) natConfigLines() string {
 }
 
 // execShowProtocols：show protocols lldp neighbors（运行态；FR-NET-018）。
+//
+// 与 `show lldp neighbors [interface <ifname>]` 是**同一读物的等价写法**（契约 §1.1）：
+// 渲染走唯一实现 `showLLDPNeighbors`，不在这里复制一份。过滤参数只声明在
+// `show lldp neighbors` 一侧（树里 `show protocols lldp neighbors` 没有 `interface` 子节点），
+// 故这里的多余 token 必须报错并指向等价写法——此前同样被静默丢掉、回全量邻居表。
 func (x *cliExecutor) execShowProtocols(args []string) string {
 	if len(args) >= 2 && args[0] == "lldp" && args[1] == "neighbors" {
-		if x.lldp == nil {
-			return errRuntimeUnavailable
+		if len(args) != 2 {
+			return fmt.Sprintf("%% 无效命令: show protocols %s（可用：show protocols lldp neighbors；"+
+				"按接口过滤：show lldp neighbors interface <ifname>）\n", strings.Join(args, " "))
 		}
-		rows, err := x.lldp.Neighbors(context.Background())
-		if err != nil {
-			return "%% " + err.Error() + "\n"
-		}
-		if len(rows) == 0 {
-			return "（无 LLDP 邻居）\n"
-		}
-		items := make([]any, 0, len(rows))
-		var b strings.Builder
-		fmt.Fprintf(&b, "%-12s %-20s %-16s %s\n", "Interface", "Chassis", "Port", "TTL")
-		for _, r := range rows {
-			items = append(items, anyToTree(r))
-			fmt.Fprintf(&b, "%-12s %-20s %-16s %d\n", r.Interface, r.ChassisID, r.PortID, r.TTL)
-		}
-		x.structured = map[string]any{"neighbors": items}
-		return b.String()
+		return x.showLLDPNeighbors("")
 	}
 	return fmt.Sprintf("%% 无效命令: show protocols %s（可用：show protocols lldp neighbors）\n", strings.Join(args, " "))
 }

@@ -33,6 +33,14 @@ func OperRoot() *Node {
 					),
 				),
 				K("management", "管理口（内核侧，IP/链路）"),
+				// `physical` 可省（契约 §1.1，决策 #153）：`show interfaces <ifname> [detail|statistics|sriov]`
+				// 与 `show interfaces physical <ifname> …` 等价。执行器一直支持这种写法、树里却没有，
+				// 于是 `?`/Tab 补不出来（补全漂移）——两种写法必须同源。
+				P("<ifname>", "接口名", DynVppIfnames,
+					K("detail", "驱动/MAC/MTU/队列/NUMA"),
+					K("statistics", "收发包/字节/错误/drop"),
+					K("sriov", "VF 列表与占用状态"),
+				),
 			),
 			K("virtual-switches", "虚拟交换机",
 				P("<name>", "虚拟交换机名", DynVSwitches,
@@ -76,6 +84,13 @@ func OperRoot() *Node {
 					Opt(K("interface", "按接口过滤", P("<ifname>", "接口名", DynVppIfnames))),
 				),
 			),
+			// `show protocols lldp neighbors` 与 `show lldp neighbors` 是同一读物的两种写法
+			// （契约 §1.1，决策 #153）：执行器早有该分支、树里没有 → `?`/Tab 补不出 `protocols`。
+			K("protocols", "协议运行态",
+				K("lldp", "LLDP",
+					K("neighbors", "邻居表（等价于 show lldp neighbors；同一读物）"),
+				),
+			),
 			K("virtual-machine-functions", "VM VNF",
 				P("<name>", "VNF 名", DynVMs,
 					K("detail", "域 XML 摘要、资源分配、NUMA"),
@@ -117,8 +132,21 @@ func OperRoot() *Node {
 			K("configuration", "配置显示",
 				K("candidate", "当前持锁会话的 candidate"),
 				K("history", "提交历史快照：rev/时间/用户/注释/是否当前（不含配置正文）"),
-				K("permissions", "按 class 视角显示",
+				// 「按 class 视角显示」**未实现**（决策 #153 处置：语义无权威定义——契约 §3 对照表里
+				// 没有这一行，脱敏按敏感字段、与 class 无关）。`?` 这里必须如实标注：补全菜单也是
+				// 面向操作者的承诺，写着「按 class 视角显示」而执行器回「暂未实现」同样是不同源。
+				K("permissions", "按 class 视角显示（暂未实现；committed 原样配置见 show configuration）",
 					P("<class>", "class 名", DynClasses),
+				),
+				// 契约 §1.1/§3（决策 #153）：`show configuration sessions` 等价于
+				// `show system configuration sessions`（同一读物）；`show configuration compare
+				// rollback <n>` 等价于管道形态 `| compare rollback <n>`。两者执行器都支持，
+				// 此前树里没有 → `?`/Tab 补不出来。
+				K("sessions", "candidate 持锁会话列表（等价于 show system configuration sessions）"),
+				K("compare", "与历史快照比对（等价于管道形态 | compare rollback <n>）",
+					K("rollback", "回滚点比对",
+						PT("<n>", "uint", "历史快照编号"),
+					),
 				),
 			),
 			K("tech-support", "诊断包清单预览"),

@@ -41,6 +41,12 @@ show interfaces physical <ifname>
   ├─ detail                                         # 驱动、MAC、MTU、队列、NUMA
   ├─ statistics                                     # 收发包/字节/错误/drop（实时 stats）
   └─ sriov                                          # VF 列表与占用状态
+show interfaces <ifname> [detail|statistics|sriov]   # **`physical` 可省**：`show interfaces <ifname> <子命令>` 与
+                                                    #   `show interfaces physical <ifname> <子命令>` **等价**
+                                                    #   （同一读物、同一实现——`physical` 只是作用域选择器）；
+                                                    #   不带子命令时两种写法各有其义：`show interfaces <ifname>` 是
+                                                    #   配置视图，`show interfaces physical <ifname>` 是运行态单口视图
+                                                    #   （链接/速率/驱动/计数）。`?`/Tab 在此位置补 `<ifname>`（vpp-ifnames）
 show interfaces management                          # 管理口（内核侧，IP/链路）
 
 show virtual-switches                               # 全部虚拟交换机摘要（GET /virtual-switches）
@@ -72,6 +78,14 @@ show vpp capture                                    # 抓包会话状态与已�
 show bonds                                          # 链路聚合列表（成员口、LACP 状态、聚合口聚合状态）
 show bonds <name> detail                            # 成员口各自 link/LACP actor-partner 信息
 show lldp neighbors [interface <ifname>]            # LLDP 邻居表（chassis/port/系统名/TTL）
+                                                    #   `interface <ifname>` **真的按口过滤**（无匹配时
+                                                    #   `（接口 X 无 LLDP 邻居）`；接口名不在配置/VPP 清单中时
+                                                    #   按既有风格报「未在配置中声明」，不回全量）
+show protocols lldp neighbors                       # **等价写法**（同一读物：`GET /protocols/lldp/neighbors`，
+                                                    #   即 `show lldp neighbors` 的输出；两种写法都在树里，
+                                                    #   执行器同源——`show protocols lldp neighbors` 直接委托前者）
+                                                    #   注意：**过滤参数只声明在前者**，故这里写
+                                                    #   `… neighbors interface <ifname>` 会报错并指向等价写法
 
 show virtual-machine-functions                      # VM 列表（名称/状态/vCPU/内存/镜像）（GET /virtual-machine-functions）
 show virtual-machine-functions <name>
@@ -94,8 +108,21 @@ show log
   └─ vnf <name> [last <n>]                          # VNF 控制台/事件日志
 show users                                          # 本地用户与 class
 show configuration [permissions <class>]            # 当前 committed 配置（下详 §3）
+                                                    #   ⚠️ `permissions <class>`（「按 class 视角显示」）**未实现**：
+                                                    #   语义在 §3 里没有定义（脱敏按敏感字段、class 只决定命令节点能否执行），
+                                                    #   故执行器回 `% …暂未实现（committed 原样配置见 show configuration）`
+                                                    #   ——**不再静默渲染 committed 正文**冒充「class 视角」（决策 #153 处置）
+show configuration candidate                        # 当前持锁会话的 candidate
+show configuration sessions                         # candidate 持锁会话列表；**等价于 `show system configuration sessions`**
+                                                    #   （同一读物：`Engine.Sessions`，与 `GET /system/configuration/sessions` 同源）
 show configuration history                          # 提交历史快照列表：rev/时间/用户/注释/是否当前
                                                     #   （GET /configuration/history；**不含配置正文**）
+show configuration compare rollback <n>             # committed ⇄ 第 n 个历史快照 diff；**等价于管道形态
+                                                    #   `show configuration | compare rollback <n>`**（同一 `Engine.Compare(n)`）
+show configuration <其它 token>                     # **必须报错**：`show configuration` 的子命令只有
+                                                    #   `candidate|history|permissions|sessions|compare rollback <n>`
+                                                    #   （省略 = 读 committed）。**未知子命令不得静默返回 committed 配置正文**，
+                                                    #   须回 `% 无效命令: show configuration <x>（可用：…）`（可操作提示，同 §1.1 其它族）
 show tech-support                                   # 诊断包清单预览（日志+版本+配置+状态）
 
 # 通用管道（所有 show 输出可用）：
@@ -513,7 +540,11 @@ virtual-machine-functions {
 | 操作模式 `show configuration` | **committed** 配置 |
 | 操作模式 `show configuration candidate` | 当前持锁会话的 candidate |
 | 操作模式 `show configuration history` | 保留的历史提交快照**列表**（rev/时间/用户/注释/是否当前；**不含配置正文**。`Engine.History`，与 `GET /configuration/history` 同源，决策 #142） |
+| 操作模式 `show configuration sessions` | 与 `show system configuration sessions` **同一读物**（`Engine.Sessions`，与 `GET /system/configuration/sessions` 同源）——等价写法，不复制渲染逻辑（决策 #153） |
 | 操作模式 `show configuration \| compare rollback <n>` | committed ⇄ 第 n 个历史快照 diff（**已实现**：`Engine.Compare(n)`） |
+| 操作模式 `show configuration compare rollback <n>` | 与上一行的**管道形态等价**（同一 `Engine.Compare(n)`；两种写法都在命令树里，`?`/Tab 均可补出） |
+| 操作模式 `show configuration <未知子命令>` | **报错**（`% 无效命令: show configuration <x>（可用：…）`），**不显示配置正文**——`show configuration` 省略子命令才是"读 committed"（决策 #153） |
+| 操作模式 `show configuration permissions <class>` | **未实现**（原声明「按 class 视角显示」）——本表**从未定义**该「视角」过滤哪些字段（脱敏按敏感字段、与 class 无关；class 只决定命令节点能否执行），产品也没有按 class 渲染配置的机制，做出来就是一份无从校验的 lossy 视图（同下一行的处理）。故执行器**明说未实现**：`% show configuration permissions <class>：按 class 视角显示暂未实现（committed 原样配置见 show configuration）`，**不再静默渲染 committed 正文**（决策 #153 处置）。替代：`show configuration`（committed 原样） |
 | 配置模式 `show` | candidate（当前层级） |
 | 配置模式 `show \| display set` | **未实现**（原声明「以 `set` 语句展开，便于复制」）——附录 A #84：需要 model→CLI 的**反向映射**（`save` 导出的是 JSON，别名语句如 `login user … password …` 无法由配置树反推为合法语句），做 lossy 版本会在「复制配置」这件事上制造静默错误，故登记为独立特性而非补丁。替代：`save <file>`（JSON）/ `show configuration`（块状）/ `\| display json` |
 | 配置模式 `show \| compare` | candidate ⇄ committed diff（**已实现**：`Engine.CompareCandidate`，2026-09-18 接线，发现 #4） |
@@ -541,7 +572,7 @@ virtual-machine-functions {
 
    | kind | 含义 | 用它的位置 |
    |---|---|---|
-   | `vpp-ifnames` | VPP 中的接口 = **已被 DPDK 接管的数据面端口** | `set interfaces <ifname>`、`show interfaces physical <ifname>`、`virtual-switches … l3-interface`、`set vpp dpdk dev <ifname>`、`request vpp trace start interface <ifname>`、`monitor interfaces <ifname>`、`clear interfaces statistics [<ifname>]`、`set protocols lldp interface <ifname>`、`show lldp neighbors interface <ifname>` |
+   | `vpp-ifnames` | VPP 中的接口 = **已被 DPDK 接管的数据面端口** | `set interfaces <ifname>`、`show interfaces physical <ifname>`、`show interfaces <ifname>`（`physical` 可省的等价写法）、`virtual-switches … l3-interface`、`set vpp dpdk dev <ifname>`、`request vpp trace start interface <ifname>`、`monitor interfaces <ifname>`、`clear interfaces statistics [<ifname>]`、`set protocols lldp interface <ifname>`、`show lldp neighbors interface <ifname>` |
    | `kernel-ifnames` | 内核网卡（**未被接管**的物理口；有 `/sys/class/net/<n>/device` 的才算） | `set system management interface <ifname>`、`request interfaces <ifname> bind-dpdk`、`request sriov create-vfs/delete-vfs <ifname>` |
    | `ifnames` | 两者**并集** | `request interfaces <ifname> enable\|disable\|bind-dpdk\|unbind-dpdk`（动作混合、参数位置在动作之前，无法按动作区分来源） |
 
