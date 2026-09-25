@@ -1,0 +1,98 @@
+===== V1 收尾第八十轮：按代码重生成 CLI 文档 + 真机全量 CLI/Web 测试 + 缺陷修复 + 发布 v1.1.34 =====
+日期：2026-09-25；发布点 main `fd6fdae`（+ `SOURCE_DATE_EPOCH=1790306789`）；
+Release：https://github.com/xzjt/nfvis/releases/tag/v1.1.34（tag → `fd6fdaeb56867a102e0da4070f49f99785481c35`）
+范围：① 通读代码重新生成《CLI 命令全表》与《CLI ⇄ REST 覆盖核查》；② 在 nfvis-vm 上做**全量 CLI 测试**（拟人化：
+pty 交互 + 全部 6 阶段套件 + 语义校验）与 **Web 全功能测试**（Browser Use 打开 `192.168.155.129` 上的控制台，
+逐页 + 截图 + 与独立事实源对照）；③ 发现即修的缺陷（决策 #153 等）；④ 重生成用户手册（控制台章节含 28 张截图）
+与相关文档；⑤ 发布 v1.1.34。
+
+----- 1. 两份文档重新生成（代码为准 + 机器守护）-----
+| 文档 | 做法 | 结果 |
+|---|---|---|
+| `docs/NFViS-CLI命令全表.md` | 从 `internal/schema/{tree_oper,tree_config,node}.go` 导出全部形态与 class，与文档逐行对拍；新增**双向守护**（表→树、树→表） | **259 行**（show 67 / request 46 / 其余操作 11 / 通用管道 9 / 配置模式 126；`/` 并列拆开 263 条）；§3 统计按实际行数重算并写明复核方法；实测列改用本轮真机结果 |
+| `docs/CLI-REST覆盖核查.md` | 命令形态 × `internal/api/server.go` 注册表 × `docs/NFViS-openapi.yaml` | **259 行 = 覆盖 236 / 缺口 4 / 例外 19**；REST 侧 **135 端点**（免鉴权 6、x-internal 2 不计覆盖）、**契约零漂移** |
+新增守护：`TestCommandTableMatchesCommandTree`（表→树：可解析 + class 一致）、`TestCommandTableCoversOperTree`（树→表：操作族叶子形态必须被收录）。
+
+导出过程**顺带查出**（见 §3）：① 守护第一版就把「执行器能跑、树里没有」的 6 行揪出来；
+② 反向守护又查出 3 条「树里 advertise、执行器不认」；③ 覆盖守护查出 `/vpp/config` 的 `put:` 是**幽灵声明**。
+
+----- 2. 真机全量测试（CLI + Web）-----
+**CLI**（干净开发态基线 + 修复后回归，两轮同结果）：
+- 全量套件 `contrib/scripts/cli-fulltest.sh`（6 阶段）：**通过 195 / 失败 1 / 预期报错 5**
+  （唯一失败 = 已登记的 `show vpp runtime`；阶段小结 41/1、59/0、7/0、34/2、43/3、11/0）；
+- 交互行为 pty 冒烟 `cli-pty-smoke.sh`：**10/10**（`?` 即时列候选、Tab 响铃并列出、CRLF、长 token 不粘连、非 TTY 仍 LF）；
+- 语义校验 `cli-semantic-check.sh`（与 VPP/内核/libvirt 独立事实源对照 + 扰动判别）：**11 通过 / 0 失败 / 1 登记**
+  （登记项：libvirt 有域而 CLI 未列出 cli-vm，属配置驱动口径，非缺陷）。
+
+**Web**（Browser Use 黑盒，`http://192.168.155.129:8443`——VM 真实 IP 上的明文实例，**不是 localhost 隧道**；
+实例 = 已装二进制 + 生产库副本，生产库全程未动）：
+- **31 条路由逐页走查**并截图；每页都与独立事实源对照（CLI/配置库/`virsh`/`vppctl`/`journalctl`）；
+- 写入路径实测：**启停虚拟机**（界面显示 running 之后 `virsh list` 确为 running——"界面显示对了不算完，
+  要证明它真的改到了底座"）、**建/删用户**（CLI `show users` + 配置库 `config_json` + 审计 intent/success +
+  用新口令真登录 **200** 四路印证；删除后回到 1 个用户）、**抓包开始→停止并导出 pcap**
+  （`/var/lib/nfvis/captures/` 下确有 370 B 的 pcap，与界面显示的大小一致）、
+  **低危/中危/高危三档闸门**（高危 = 逐条影响面 + 手工输入确认词 + 10 秒倒计时，输入不匹配时「执行」不可点）；
+- **发现并当场修掉 1 处缺陷**（§3-④ 控制台时间口径），修后在浏览器里复验并与 CLI 逐字比对；
+- 排查掉 3 处"看着像 bug 其实正确"的现象（记录以免下一轮重复怀疑）：`show vrfs` 为空（vs-vnf 是 **l2** 交换机，
+  无 l3-interface ⇒ 无 VRF；CLI/REST/界面三处一致）、资源池"已分配 2 / 空闲 0"（口径=**配置声明**，
+  内核 `free=1` 是既有的 1G 页「无主占用」现象）、LLDP 空表（无对端）。
+
+----- 3. 本轮发现并修掉的缺陷（决策 #153，5 个提交）-----
+| # | 缺陷（真机/代码对拍发现） | 修法 | 守护 |
+|---|---|---|---|
+| ① | `show configuration <未知子命令>` **静默返回配置正文**（`sessions`/`bogus-token` 都是） | 白名单判定 + 未知 token 报 `% 无效命令（可用：…）` | `cli_show_sync_test.go` |
+| ② | 三条形态「执行器能跑、树里没有」⇒ `?`/Tab 列不出来（`show interfaces <ifname> detail\|statistics\|sriov`、`show protocols lldp neighbors`、`show configuration compare rollback <n>`） | 补进树 + 契约声明等价写法 | `cli_table_cover_test.go` |
+| ③ | `show interfaces physical <ifname> <子命令>` **丢子命令** | 与省略 `physical` 走同一实现 | `TestShowInterfacesPhysicalSubNotDropped` |
+| ④ | 控制台时间 = 浏览器本地时区、**无标记**（与 CLI/journalctl 差 8 小时） | 一律 UTC + `UTC` 标记，形状与 CLI 一致 | `ui_time_test.go` + 前端自校准 ⑩ 组 + 双时区复跑 |
+| ⑤ | `show lldp neighbors interface <ifname>` 的过滤参数**静默丢弃** | 按口过滤 + 无匹配/未知接口分别给文案 | `cli_declared_arg_drop_test.go` |
+| ⑥ | `show configuration permissions <class>` 参数被忽略（三档都回正文） | 语义从未定义 ⇒ 明确提示**暂未实现**（回显所问 class、不回正文） | 同上 |
+| ⑦ | 契约 `/vpp/config` 的 `put:` 是**幽灵声明**（server.go 从未注册） | 删除 `put:`（VPP 配置写入路径本就是 candidate → commit），同步 `openapi.json` | `check_openapi_json_sync.sh` |
+| ⑧ | 树漂移 3 条：`show system configuration candidate`（树 advertise、执行器不认）、`request images delete <name>`（执行器要 `delete name <n>`）、`request images download` 的 `sha256` 树标可选而校验强制必填 | 按"与执行器/文档一致"逐条改树 | `cli_tree_drift_test.go` |
+| ⑨ | CLI 提示文案指向不存在的 `DELETE /login`（注册端点只有 `POST /logout`） | 改文案并同步三份文档与覆盖守护 | — |
+
+自检：`GOFLAGS=-p=1 make check` **EXIT=0**（多轮复跑）；`web-console-confirm-selftest.sh` 全绿。
+
+----- 4. 发布 v1.1.34 -----
+| 项 | 值 |
+|---|---|
+| 文件 | `nfvis_1.1.34_amd64.deb` |
+| sha256 | `6dc6e11de6e2717f9f07a00237d0078effe527c41c28bc784d866766672a7842` |
+| 字节数 | 9,054,142 |
+| 可复现 | 同 commit 同 VERSION **连打两次逐字节一致** |
+| 成员 | 53（含 `usr/share/doc/nfvis/images/console/` 28 张手册截图） |
+| Check A | 元数据/内容/解包全过；两二进制 `-version` = 1.1.34；规格书 **153 条决策**、附录 B 标题在；手册 **1631 行 / 28 处图片引用**，**包内图片零缺失** |
+| 升级实装（1.1.33→1.1.34） | dpkg 正常、服务 active、既有 VNF 拓扑存活、**配置库未变**（rev 55 / cfgsha `084c3a64…`）；**随包前端与仓库源码逐字节一致**（5 个资源 `cmp`） |
+| 本版新内容实测（已装二进制） | §3 的 ①~⑨ 逐条在装好的二进制上复验（`show configuration sessions` 与 `show system configuration sessions` 输出一致；未知子命令报错且不吐正文；三条等价写法可用；`permissions` 明确提示；token 提示=`POST /logout`；随包前端含 UTC 渲染；包内 28 张截图；契约 `/vpp/config` 只剩 `get`） |
+| purge | postrm 自动撤销 SSH 强化、GRUB/fstab 打印手工步骤、`/var/lib/nfvis` 保留 830M、二进制与单元移除、`/run/nfvis` 清理、**配置库指纹未变** |
+| 重装 | SSH 强化重新落地；**配置库逐字段一致**；启动日志有「管理口守卫事实」「恢复收敛完成」、**无一次性口令** |
+| 重装后拓扑与流量 | BD 6252701 四口在、vnf-a/vnf-b 均 running；`vppctl ping` 经 BVI 双向 **5/5 0% 丢包**（热态 2 轮）；宿主经 DPDK 物理口 **4/4** 双向 |
+| 回下载比对 | asset 名 `nfvis_1.1.34_amd64.deb` + `.sha256`；回下载件 sha256 与构建端一致且 `cmp` **逐字节一致**（构建端/上传件/回下载件三处一致） |
+
+----- 5. 本轮登记的两条（未改，如实记录）-----
+1. **VM 启动在 vhost-user 初始化失败时的可诊断性缺口**：现场 `request virtual-machine-functions vnf-b start`
+   返回「已受理」，而域落在 libvirt 的 `paused (starting up)`——失败原因只在 libvirt 层可见
+   （`journalctl -u libvirtd` 可见 `qemu-system-x86_64: -netdev {…vhost-user…}` 启动即退；VPP 侧该口 `tx-error` 增长）。
+   **产品路径的恢复办法（已验证）**：`request vpp restart`（按 committed 重生成 startup.conf、重建 vhost 口）
+   之后再 `start` → 域 `running (booted)`、BVI 与宿主侧流量均恢复。
+   建议后续：`start` 的受理语义区分"已下发"与"已启动"，或把 libvirt 的失败原因带出来。
+2. **SSH 主机密钥被产品自身动作换过**：`/etc/ssh/ssh_host_*_key` 时间戳 = 2026-09-25 00:46:19，
+   同一分钟还有一份配置备份（00:46:17）——两者正是控制台「运维动作」页相邻的两个按钮，属**正常运维动作**，
+   **不是打包行为**（purge/postrm 不碰密钥）；`known_hosts` 按 §3.8 刷新即可。
+
+----- 6. 终态环境事实 -----
+- 目标机 **nfvis 1.1.34 active**（`/usr/bin/nfvisd -version` = 1.1.34，CLI 同版本）；443 监听 1；
+- 配置库 `/var/lib/nfvis/nfvis.db`：**rev 55 / audit 112 / cfgsha `084c3a64…` / users=admin(super-user)**
+  （audit 106→112 = 本轮经产品路径做的 VNF stop/start/restart 与 `request vpp restart` 各入一条；
+  **内容指纹未变**）；备份 `/root/nfvis-db-backup-20260924-2218-round79/nfvis.db` 仍在；
+- 拓扑：BD 6252701 四口在、**vnf-a/vnf-b 均 running**、BVI `192.168.100.1/24`、BVI 与宿主侧流量均已复通；
+- 目标机 `/root/src` = **发布树**（`docs/evidence/` 有 round78、无 round80）；
+- 8443/临时库副本（`/tmp/nfvis-web.db`、`/tmp/nfvis-shot.db`、`/tmp/nfvis-wip*.db`）已删；
+  明文档实例已停（脚本收尾）；`/data/incoming/vnf-{a,b}-ud.sh` 末尾各多一行 `# round80 复通标记 …`（复通用，无害）；
+- 冒烟/集成前置仍在（`alpine.qcow2`、`debian-12-generic-amd64.qcow2`、`cli-test.qcow2`、`docker alpine:3.20`）。
+
+----- 7. 仍未裁（交接下一轮）-----
+1. **`POST /logout` 按 `user@api` 身份键丢弃候选**（round79 登记）：同一用户跑一条 CLI 命令会清掉控制台/脚本的
+   未提交候选；需契约先行（会话模型）。
+2. **VM 启动失败的受理语义/失败原因透出**（本轮 §5-①）。
+3. operator 级角色粒度（界面仍会显示声明为 super-user 的入口，点下去被服务端如实拒）。
+4. 「秘密出口」全量复查；`login-users` 自助改密会连带提交配置页候选（均沿用）。

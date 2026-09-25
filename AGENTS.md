@@ -29,16 +29,18 @@
   （Go 1.26.0（apt）、make、sshpass 等；`dpkg -i` 装 VPP 用 `/root/vpp-v26.06-deb/` 的 9 个
   26.06-release deb——快照基线自带）。
   源码树 `/root/src`（git archive 同步，见待办 §3.3，无 .git → 构建**必须显式传 SOURCE_DATE_EPOCH**）。
-  **round79 后现状**（2026-09-24 发布 v1.1.33，证据 `docs/evidence/v1-closeout-round79-release-1.1.33.txt`；
+  **round80 后现状**（2026-09-25 发布 v1.1.34：命令树⇄执行器同源收口（决策 #153）+ 控制台时间统一 UTC +
+  两份 CLI 文档按代码重新生成 + 手册控制台章节含 28 张截图，证据
+  `docs/evidence/v1-closeout-round80-cli-web-fulltest-and-release-1.1.34.txt`；
   三件套复跑仍以 `docs/evidence/v1-closeout-round36-three-suites.txt` 为准）：
-  nfvis **1.1.33** active、管理口令 `WBF81vOA4M8GM28f@Aa1`（**随快照恢复而变**，取法见待办 §3.1；
-  round79 已按哈希比对法核对**匹配**）；
+  nfvis **1.1.34** active、管理口令 `WBF81vOA4M8GM28f@Aa1`（**随快照恢复而变**，取法见待办 §3.1；
+  round80 已按哈希比对法核对**匹配**）；
   VPP 26.06 运行、主堆用 2M 大页、ens192/ens224 交 DPDK；
   cmdline 含 hugepagesz=1G/2M + isolcpus=2-5 + intel_iommu=on；
   **vs-vnf 拓扑与 vnf-a/vnf-b 在跑、流量已复通**（BVI ping 双向 5/5 0%、宿主经 DPDK 物理口 0.38~1.50ms；
   重装恢复收敛后的**首个** ICMP 曾丢 1 包，复跑两轮全通）；
   镜像 `debian-12-generic-amd64.qcow2` + `alpine.qcow2`（阶段 3 前置）+ 容器镜像 `alpine:3.20`；
-  配置库 rev 55 / audit 106（audit 104→106 是 round79 用产品路径 `start` VNF 两次，内容指纹 `084c3a64…` 未变）；
+  配置库 rev 55 / audit 112（audit 106→112 是 round80 用产品路径做 VNF stop/start/restart 与 `request vpp restart`，**内容指纹 `084c3a64…` 未变**）；
   `/var/lib/nfvis/tech-support` 0700 + 归档 0600、`/var/lib/nfvis/backup` 0600（决策 #149 口径在既有安装上也生效）；
   **`nodejs` v22.22.1**（round37 装，
   仅用于 `node --check internal/api/ui/app.js` 校验 Web 前端语法——前端与 CI 都**不依赖** node）。
@@ -68,7 +70,7 @@
   （**通过 101 / 未验 4 / 降级 2 / 移 V2 2**；2026-09-18 收口：NFR-005/NFR-006 转通过、FR-SEC-006 拆两半），降级理由与签字建议见其 §5/§6；
   **待办与未完成项的唯一入口见 `docs/V1-收尾待办.md`**（含环境要点与踩坑记录）。
   已发布 **v1.0.0 / v1.1.0 / v1.1.1 / v1.1.2 / v1.1.3 / v1.1.4 / v1.1.5 / v1.1.7 / v1.1.8 / v1.1.9 / v1.1.10 /
-  v1.1.15 / v1.1.19 / v1.1.20 / v1.1.25 / v1.1.26 / v1.1.27 / v1.1.28 / v1.1.29 / v1.1.30 / v1.1.31 / v1.1.32 / v1.1.33**（见 GitHub Releases；**跳过 v1.1.6**——那次发布已撤回、其提交不在 `main`，
+  v1.1.15 / v1.1.19 / v1.1.20 / v1.1.25 / v1.1.26 / v1.1.27 / v1.1.28 / v1.1.29 / v1.1.30 / v1.1.31 / v1.1.32 / v1.1.33 / v1.1.34**（见 GitHub Releases；**跳过 v1.1.6**——那次发布已撤回、其提交不在 `main`，
   以及 **1.1.11~1.1.14、1.1.16~1.1.18、1.1.21~1.1.24**——同一 merge 线上的内部验证构建、从未发布，
   故由 v1.1.10 跳到 v1.1.15、v1.1.15 跳到 v1.1.19、v1.1.20 跳到 v1.1.25；v1.1.26 紧接 v1.1.25、v1.1.27 紧接 v1.1.26、v1.1.28 紧接 v1.1.27、v1.1.29 紧接 v1.1.28、v1.1.30 紧接 v1.1.29、v1.1.31 紧接 v1.1.30、v1.1.32 紧接 v1.1.31、v1.1.33 紧接 v1.1.32，无跳号）。
   **用户文档**：`docs/NFViS-用户手册.md`（安装→使用全流程）、`docs/NFViS-CLI命令全表.md`
