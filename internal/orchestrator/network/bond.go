@@ -15,9 +15,17 @@ import (
 	"github.com/xzjt/nfvis/internal/model"
 )
 
+// BondRuntime 数据面现存的 bond（撤销收敛用）。
+type BondRuntime struct {
+	SwIfIndex uint32
+	Name      string
+}
+
 // BondClient VPP bond binary API 的最小能力集。
 type BondClient interface {
 	SwInterfaceIndex(ifname string) (uint32, bool, error)
+	Bonds() ([]BondRuntime, error)                      // 数据面现存全部 bond
+	BondMembers(bondSwIfIndex uint32) ([]uint32, error) // 某 bond 的成员 sw_if_index
 	BondCreate(lacp bool) (uint32, error)
 	SetInterfaceName(swIfIndex uint32, name string) error
 	BondAddMember(bondSwIfIndex, memberSwIfIndex uint32, passive bool) error
@@ -156,42 +164,128 @@ func (p *BondProvider) ApplyBond(ctx context.Context, bond model.Bond) error {
 	return nil
 }
 
-// DeleteBond 删除 bond（成员随 bond 一并释放）。
+// DeleteBond 删除 bond：先摘除成员（成员退回普通口，其在 bridge-domain/L3 的归属由 VPP
+// 保留），再删除 bond 接口本身。登记表未命中时按接口名反查数据面，使删除不依赖
+// 「本进程创建过该 bond」（nfvisd 重启后登记表为空，配置删除仍须落到数据面）。
 func (p *BondProvider) DeleteBond(ctx context.Context, name string) error {
 	p.mu.Lock()
 	idx, ok := p.bonds[name]
-	delete(p.bonds, name)
-	delete(p.members, name)
-	delete(p.lacp, name)
+	members := append([]uint32{}, p.members[name]...)
 	p.mu.Unlock()
-	if !ok {
-		return nil
-	}
+
 	c, err := p.client()
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	if err := p.detachMembers(c, name, idx); err != nil {
-		return err
-	}
-	if err := c.BondDelete(idx); err != nil {
-		return fmt.Errorf("删除 bond %s: %w", name, err)
-	}
-	return nil
-}
 
-// detachMembers 删除 bond 前先摘除成员（避免残留从属状态）。
-func (p *BondProvider) detachMembers(c BondClient, name string, idx uint32) error {
-	p.mu.Lock()
-	members := append([]uint32{}, p.members[name]...)
-	p.mu.Unlock()
+	if !ok {
+		found, exists, err := c.SwInterfaceIndex(name)
+		if err != nil {
+			return fmt.Errorf("查询 bond %s: %w", name, err)
+		}
+		if !exists {
+			return nil
+		}
+		idx = found
+	}
+	// 成员一律以数据面为准（登记表可能陈旧或缺项），登记表命中的成员并入以防漏摘。
+	if live, err := c.BondMembers(idx); err != nil {
+		return fmt.Errorf("枚举 bond %s 成员: %w", name, err)
+	} else {
+		members = unionU32(members, live)
+	}
 	for _, m := range members {
 		if err := c.BondDetachMember(m); err != nil {
 			return fmt.Errorf("摘除 bond %s 成员 %d: %w", name, m, err)
 		}
 	}
+	if err := c.BondDelete(idx); err != nil {
+		return fmt.Errorf("删除 bond %s: %w", name, err)
+	}
+	p.forget(name)
 	return nil
+}
+
+// PruneBonds 拆除**声明集之外**的 bond（apply 撤销缺口：配置已不再声明，数据面仍在）。
+//
+// 只创建不删除曾是本编排的缺口：`delete bonds <名>` 提交后数据面仍留 BondEthernetX 与
+// 成员关系，该物理口处于「既是 bond 成员又是 bridge-domain 成员」的混淆态，且无法在原
+// 位置重新声明为普通口，必须重启数据面才消失。本方法把这类残留对象一并拆掉。
+//
+// 每个待拆 bond 的处置顺序：
+//  1. 按数据面枚举出的成员 sw_if_index 逐个 bond_detach_member——成员退回普通口，
+//     其在 bridge-domain/L3 的归属由 VPP 保留，无需重放接口配置；
+//  2. 再 bond_delete 删除 bond 接口本身。
+//
+// 声明仍在的 bond 一律跳过（其存在性与参数由 ApplyBond 对齐，不得误删）。
+// 成员枚举失败时不冒进删除（状态未知），该项按未收敛上报；单对象失败不阻塞其余。
+// 返回未拆除项，调用方转告警。
+func (p *BondProvider) PruneBonds(ctx context.Context, declared []model.Bond) []error {
+	keep := make(map[string]bool, len(declared))
+	for _, b := range declared {
+		keep[b.Name] = true
+	}
+
+	c, err := p.client()
+	if err != nil {
+		return []error{err}
+	}
+	defer c.Close()
+
+	bonds, err := c.Bonds()
+	if err != nil {
+		return []error{fmt.Errorf("查询数据面现存 bond: %w", err)}
+	}
+
+	var errs []error
+	for _, b := range bonds {
+		if keep[b.Name] {
+			continue
+		}
+		if err := removeUndeclaredBond(c, b); err != nil {
+			errs = append(errs, fmt.Errorf("拆除未声明的 bond %s: %w", b.Name, err))
+			continue
+		}
+		p.forget(b.Name)
+	}
+	return errs
+}
+
+// removeUndeclaredBond 拆除一个未声明的 bond：先摘成员，再删接口。
+func removeUndeclaredBond(c BondClient, b BondRuntime) error {
+	members, err := c.BondMembers(b.SwIfIndex)
+	if err != nil {
+		return fmt.Errorf("枚举成员: %w", err)
+	}
+	for _, m := range members {
+		if err := c.BondDetachMember(m); err != nil {
+			return fmt.Errorf("摘除成员 %d: %w", m, err)
+		}
+	}
+	if err := c.BondDelete(b.SwIfIndex); err != nil {
+		return fmt.Errorf("删除接口: %w", err)
+	}
+	return nil
+}
+
+// forget 清掉进程内登记（bond 在数据面已不存在）。
+func (p *BondProvider) forget(name string) {
+	p.mu.Lock()
+	delete(p.bonds, name)
+	delete(p.members, name)
+	delete(p.lacp, name)
+	p.mu.Unlock()
+}
+
+func unionU32(a, b []uint32) []uint32 {
+	out := append([]uint32{}, a...)
+	for _, v := range b {
+		if !containsU32(out, v) {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func containsU32(s []uint32, v uint32) bool {

@@ -83,7 +83,22 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 			record("bonds/"+b.Name, err)
 		}
 	}
-	for _, vs := range cfg.VirtualSwitches {
+	// 声明集之外的 bond 必须拆除（否则残留 BondEthernetX 与成员关系，该物理口既是从属口
+	// 又可能是 bridge-domain 成员，且无法原位重新声明为普通口）。
+	if n.bond != nil {
+		for _, err := range n.bond.PruneBonds(ctx, cfg.Bonds) {
+			record("bonds", err)
+		}
+	}
+	// bridge-domain 的成员口 = 交换机侧声明 ∪ VNF/容器侧 vNIC 声明（FR-NET-020~023，决策 #170）：
+	// 合流后重放，VNF 侧声明的 vhost-user 口同样会被挂进 BD（否则进程重启后
+	// VPP 里那个口就再也回不到 BD 里，guest 静默失去 L2 连通）。
+	// 无法归位的声明进未收敛清单，不静默跳过。
+	switches, refErrs := orchestrator.SwitchMembersOf(cfg, n.vhostDir, n.memifDir)
+	for _, err := range refErrs {
+		record("virtual-switches", err)
+	}
+	for _, vs := range switches {
 		if vs.Type != "l2" { // L3 交换机经同名 Vrf 条目编排（附录 B）
 			continue
 		}

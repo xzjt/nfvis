@@ -229,6 +229,45 @@ func TestL2VnfPortResolvesByIfaceName(t *testing.T) {
 	}
 }
 
+// 决策 #170 回归：VNF 侧声明 `interfaces <nic> virtual-switch <vs>`（手册 §9.2 的写法）
+// 经 SwitchMembersOf 合流后，其 vhost-user 口必须真的出现在该 BD 的成员里——
+// 成员口接口名即确定性接口名 vh-<vm>-<nic>（此前该口从不进 BD，guest 帧被 100% 丢弃）。
+func TestL2VnfNicDeclarationJoinsBridgeDomain(t *testing.T) {
+	f := newFakeL2()
+	p := NewL2Provider(f)
+	cfg := model.Config{
+		VirtualSwitches: []model.VirtualSwitch{l2vs("vs-vnf", model.VSwitchPort{Seq: 1, Interface: "ens192"})},
+		VirtualMachineFunctions: []model.VMFunction{{Name: "vm-a", Image: "img",
+			Interfaces: []model.VnfInterface{{Name: "eth0", Type: "vhost-user", VirtualSwitch: "vs-vnf"}}}},
+		ContainerFunctions: []model.ContainerFunction{{Name: "ct-a", Image: "img",
+			Interfaces: []model.VnfInterface{{Name: "eth0", Type: "memif", VirtualSwitch: "vs-vnf"}}}},
+	}
+	// vNIC 接口由 ApplyVnfInterface 先行建立（此处预置为 VPP 侧已存在）
+	vh := orchestrator.VnfIfaceName("vm-a", "eth0")
+	mf := orchestrator.MemifIfaceName("ct-a", "eth0")
+	f.ifaces[vh], f.ifaces[mf] = 77, 78
+	f.names[77], f.names[78] = SwIfInfo{Name: vh}, SwIfInfo{Name: mf}
+
+	switches, errs := orchestrator.SwitchMembersOf(cfg, orchestrator.DefaultVhostDir, orchestrator.DefaultMemifDir)
+	if len(errs) != 0 {
+		t.Fatalf("声明应全部归位: %v", errs)
+	}
+	for _, vs := range switches {
+		if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+			t.Fatalf("ApplyBridgeDomain(%s): %v", vs.Name, err)
+		}
+	}
+	if f.bridge[77] != BDID("vs-vnf") {
+		t.Fatalf("vhost 口 %s 应为 BD 成员: %v", vh, f.bridge)
+	}
+	if f.bridge[78] != BDID("vs-vnf") {
+		t.Fatalf("memif 口 %s 应为 BD 成员: %v", mf, f.bridge)
+	}
+	if f.bridge[1] != BDID("vs-vnf") {
+		t.Fatalf("交换机侧端口应仍挂接: %v", f.bridge)
+	}
+}
+
 func TestL2MissingInterface(t *testing.T) {
 	f := newFakeL2()
 	p := NewL2Provider(f)

@@ -13,6 +13,7 @@ import (
 type recNet struct {
 	calls  *[]string
 	failOn string
+	bds    *[]model.VirtualSwitch // 非 nil 时记录每次 ApplyBridgeDomain 收到的交换机（含端口集合）
 }
 
 func (n recNet) record(op string) error {
@@ -40,6 +41,9 @@ func (n recNet) ApplyACL(ctx context.Context, acl model.Acl) error {
 }
 func (n recNet) DeleteACL(ctx context.Context, name string) error { return n.record("del-acl:" + name) }
 func (n recNet) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch) error {
+	if n.bds != nil {
+		*n.bds = append(*n.bds, vs)
+	}
 	return n.record("bd:" + vs.Name)
 }
 func (n recNet) DeleteBridgeDomain(ctx context.Context, name string) error {
@@ -171,6 +175,7 @@ func TestApplyRemovalsAfterAdds(t *testing.T) {
 	old := model.Config{
 		VirtualSwitches:         []model.VirtualSwitch{{Name: "vs-old", Type: "l2"}},
 		Acls:                    []model.Acl{{Name: "acl-old", Rules: []model.AclRule{{Seq: 10, Action: "permit"}}}},
+		Bonds:                   []model.Bond{{Name: "bond-old", Members: []string{"ens192"}}},
 		VirtualMachineFunctions: []model.VMFunction{vmOf("vm-old")},
 	}
 	newCfg := model.Config{}
@@ -180,18 +185,27 @@ func TestApplyRemovalsAfterAdds(t *testing.T) {
 	if !hasCall(*calls, "del-bd:vs-old") || !hasCall(*calls, "del-acl:acl-old") || !hasCall(*calls, "del-vm:vm-old") {
 		t.Fatalf("删除操作缺失: %v", *calls)
 	}
-	// 交换机/VNF 删除先于 ACL 删除（绑定解挂后再删 ACL）
-	bdIdx, aclIdx := -1, -1
+	// bond 删除必须下发到数据面（只从配置移除会留下 BondEthernetX 与成员关系）
+	if !hasCall(*calls, "del-bond:bond-old") {
+		t.Fatalf("bond 删除操作缺失: %v", *calls)
+	}
+	// 交换机/VNF 删除先于 ACL 删除（绑定解挂后再删 ACL），bond 删除先于其成员口相关的解挂
+	bdIdx, aclIdx, bondIdx := -1, -1, -1
 	for i, c := range *calls {
-		if c == "del-bd:vs-old" {
+		switch c {
+		case "del-bd:vs-old":
 			bdIdx = i
-		}
-		if c == "del-acl:acl-old" {
+		case "del-acl:acl-old":
 			aclIdx = i
+		case "del-bond:bond-old":
+			bondIdx = i
 		}
 	}
 	if bdIdx > aclIdx {
 		t.Fatalf("删除顺序错误：bd 应先于 acl: %v", *calls)
+	}
+	if bondIdx < bdIdx {
+		t.Fatalf("删除顺序错误：引用 bond 的交换机应先解除引用: %v", *calls)
 	}
 }
 
@@ -242,5 +256,154 @@ func TestApplyNoChangesNoCalls(t *testing.T) {
 	}
 	if len(*calls) != 0 {
 		t.Fatalf("无差异不应产生调用: %v", *calls)
+	}
+}
+
+// ---------- 决策 #170：VNF 侧 vNIC 声明与 bridge-domain 成员集必须合流 ----------
+
+// lastBD 取记录中最后一次下发的指定交换机。
+func lastBD(bds []model.VirtualSwitch, name string) (model.VirtualSwitch, bool) {
+	for i := len(bds) - 1; i >= 0; i-- {
+		if bds[i].Name == name {
+			return bds[i], true
+		}
+	}
+	return model.VirtualSwitch{}, false
+}
+
+// bdMemberIface 返回交换机成员集中该 vNIC 的 VPP 接口名（不在成员集则 ok=false）。
+func bdMemberIface(vs model.VirtualSwitch, owner, nic string) (string, bool) {
+	for _, p := range vs.Ports {
+		switch {
+		case p.Vnf == owner && p.VnfInterface == nic:
+			return VnfIfaceName(p.Vnf, p.VnfInterface), true
+		case p.Container == owner && p.ContainerInterface == nic:
+			return MemifIfaceName(p.Container, p.ContainerInterface), true
+		}
+	}
+	return "", false
+}
+
+// vmWithNic 构造一台只声明 vNIC 交换机归属的 VNF（不写交换机侧端口）。
+func vmWithNic(vm, nic, vs string) model.VMFunction {
+	return model.VMFunction{Name: vm, Image: "img",
+		Interfaces: []model.VnfInterface{{Name: nic, Type: "vhost-user", VirtualSwitch: vs}}}
+}
+
+// newRecApplierCfg 记录 BD 下发的 applier。
+func newRecApplierCfg() (Applier, *[]string, *[]model.VirtualSwitch) {
+	calls := &[]string{}
+	bds := &[]model.VirtualSwitch{}
+	ap := NewApplier(recNet{calls: calls, bds: bds}, recCompute{calls: calls}, recContainer{calls: calls})
+	return ap, calls, bds
+}
+
+// VNF 侧声明 virtual-switch 的 vNIC，其 vhost-user 口必须进入该交换机的 BD 成员集。
+func TestApplyVnfNicDeclarationJoinsBridgeDomain(t *testing.T) {
+	ap, _, bds := newRecApplierCfg()
+	newCfg := model.Config{
+		VirtualSwitches:         []model.VirtualSwitch{{Name: "vs-vnf", Type: "l2"}},
+		VirtualMachineFunctions: []model.VMFunction{vmWithNic("vm-a", "eth0", "vs-vnf")},
+	}
+	if err := ap.Apply(context.Background(), model.Config{}, newCfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	vs, ok := lastBD(*bds, "vs-vnf")
+	if !ok {
+		t.Fatal("交换机未下发")
+	}
+	iface, ok := bdMemberIface(vs, "vm-a", "eth0")
+	if !ok {
+		t.Fatalf("vNIC 声明的 vhost 口应进入 BD 成员集: %+v", vs.Ports)
+	}
+	if iface != "vh-vm-a-eth0" {
+		t.Fatalf("成员口接口名应为 vh-<vm>-<vnic>，实际 %s", iface)
+	}
+}
+
+// vNIC 改挂另一台交换机：两台交换机都必须重新下发，旧成员集中不再含该口。
+func TestApplyVnicReswitchDropsOldMember(t *testing.T) {
+	ap, calls, bds := newRecApplierCfg()
+	old := model.Config{
+		VirtualSwitches: []model.VirtualSwitch{
+			{Name: "vs-a", Type: "l2", Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens192"}}},
+			{Name: "vs-b", Type: "l2", Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens224"}}},
+		},
+		VirtualMachineFunctions: []model.VMFunction{vmWithNic("vm-a", "eth0", "vs-a")},
+	}
+	newCfg := model.Config{
+		VirtualSwitches: []model.VirtualSwitch{
+			{Name: "vs-a", Type: "l2", Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens192"}}},
+			{Name: "vs-b", Type: "l2", Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens224"}}},
+		},
+		VirtualMachineFunctions: []model.VMFunction{vmWithNic("vm-a", "eth0", "vs-b")},
+	}
+	if err := ap.Apply(context.Background(), old, newCfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !hasCall(*calls, "bd:vs-a") || !hasCall(*calls, "bd:vs-b") {
+		t.Fatalf("两端交换机都应重新下发: %v", *calls)
+	}
+	if vsA, ok := lastBD(*bds, "vs-a"); !ok {
+		t.Fatal("vs-a 未下发")
+	} else if iface, still := bdMemberIface(vsA, "vm-a", "eth0"); still {
+		t.Fatalf("原交换机成员集不应含该口（否则残留成员）: %s", iface)
+	}
+	if vsB, ok := lastBD(*bds, "vs-b"); !ok {
+		t.Fatal("vs-b 未下发")
+	} else if _, ok := bdMemberIface(vsB, "vm-a", "eth0"); !ok {
+		t.Fatalf("新交换机成员集应含该口: %+v", vsB.Ports)
+	}
+}
+
+// 删除 VNF：交换机本身没变也必须重新下发，成员集里不再含该 vhost 口。
+func TestApplyVmDeleteDropsVnfMember(t *testing.T) {
+	ap, calls, bds := newRecApplierCfg()
+	old := model.Config{
+		VirtualSwitches:         []model.VirtualSwitch{{Name: "vs-vnf", Type: "l2"}},
+		VirtualMachineFunctions: []model.VMFunction{vmWithNic("vm-a", "eth0", "vs-vnf")},
+	}
+	newCfg := model.Config{VirtualSwitches: []model.VirtualSwitch{{Name: "vs-vnf", Type: "l2"}}}
+	if err := ap.Apply(context.Background(), old, newCfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !hasCall(*calls, "bd:vs-vnf") {
+		t.Fatalf("VNF 删除后交换机应重新下发以摘除成员: %v", *calls)
+	}
+	vs, ok := lastBD(*bds, "vs-vnf")
+	if !ok {
+		t.Fatal("交换机未下发")
+	}
+	if iface, still := bdMemberIface(vs, "vm-a", "eth0"); still {
+		t.Fatalf("已删除 VNF 的 vhost 口不应留在成员集: %s", iface)
+	}
+	// vNIC 接口删除须在 BD 摘除之后（此时接口仍在，摘除才能成功）
+	bdIdx, delIdx := -1, -1
+	for i, c := range *calls {
+		switch c {
+		case "bd:vs-vnf":
+			bdIdx = i
+		case "del-vnf-if:vm-a/eth0":
+			delIdx = i
+		}
+	}
+	if bdIdx < 0 || delIdx < 0 || delIdx < bdIdx {
+		t.Fatalf("顺序应为 摘除 BD 成员 → 删 vNIC 接口: %v", *calls)
+	}
+}
+
+// 声明的交换机不存在：提交必须失败并点名，不得静默成功（也不得先做任何下发）。
+func TestApplyUnresolvableVnicSwitchRefFailsLoud(t *testing.T) {
+	ap, calls, _ := newRecApplierCfg()
+	newCfg := model.Config{
+		VirtualSwitches:         []model.VirtualSwitch{{Name: "vs-a", Type: "l2"}},
+		VirtualMachineFunctions: []model.VMFunction{vmWithNic("vm-a", "eth0", "vs-ghost")},
+	}
+	err := ap.Apply(context.Background(), model.Config{}, newCfg)
+	if err == nil || !strings.Contains(err.Error(), "vs-ghost") {
+		t.Fatalf("应报虚拟交换机无法归位: %v", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("归位失败时不应先下发其它对象: %v", *calls)
 	}
 }
