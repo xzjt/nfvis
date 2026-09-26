@@ -475,6 +475,9 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 			}
 		}
 		if strings.Contains(o, "语句未产生配置变更") {
+			// 重跑向导时值已配置属预期（上面的例外注释），但 %% 错误样式会让操作者
+			// 以为失败（round83 走查实测）——改写为跳过说明再落盘。
+			fmt.Fprintln(out, "  [跳过] "+st+"（值已是期望值）")
 			continue
 		}
 		if stepFailed(o) {
