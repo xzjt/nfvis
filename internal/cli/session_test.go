@@ -147,3 +147,65 @@ func TestCompleteLineTrailingTab(t *testing.T) {
 		t.Fatalf("尾随 Tab 多匹配应补公共前缀: %q", got)
 	}
 }
+
+// TestPipePositionCompletion（决策 #155 补充三，FR-CLI-002）：未引用 `|` 之后
+// 的补全上下文切到管道段——段首列管道关键字、display 补出取值；双引号内的 `|`
+// 不视为管道分隔；无管道的行回归命令树补全。
+func TestPipePositionCompletion(t *testing.T) {
+	s := newTestSession("oper")
+
+	cs := s.Candidates("show configuration | ")
+	if len(cs) == 0 {
+		t.Fatalf("管道段首应列出管道关键字")
+	}
+	tokens := map[string]bool{}
+	for _, c := range cs {
+		tokens[c.Token] = true
+		if c.Desc == "" {
+			t.Fatalf("管道关键字候选应带描述: %+v", c)
+		}
+	}
+	for _, want := range []string{"match", "except", "count", "last", "begin", "display", "compare"} {
+		if !tokens[want] {
+			t.Fatalf("管道段首候选应含 %q: %v", want, tokens)
+		}
+	}
+
+	// Tab：唯一前缀补全到关键字并附空格（base 保留 | 之前全部文本）
+	nl, cs := s.Complete("show configuration | disp")
+	if len(cs) != 1 || cs[0].Token != "display" {
+		t.Fatalf("disp 应唯一补出 display: %v", cs)
+	}
+	if nl != "show configuration | display " {
+		t.Fatalf("Tab 补全结果不对: %q", nl)
+	}
+
+	// display 的取值位：json/xml/set
+	cs = s.Candidates("show configuration | display ")
+	got := map[string]bool{}
+	for _, c := range cs {
+		got[c.Token] = true
+	}
+	for _, want := range []string{"json", "xml", "set"} {
+		if !got[want] {
+			t.Fatalf("display 取值位应含 %q: %v", want, got)
+		}
+	}
+
+	// 双引号内的 | 不是管道分隔：仍走命令树补全（description 取值位无候选 → 空）
+	if cs := s.Candidates("set interfaces ens192 description \"a|b\" "); len(cs) != 0 {
+		t.Fatalf("引号内的 | 不得当管道分隔（该位置本就无候选）: %v", cs)
+	}
+
+	// 无管道的行回归命令树补全
+	cs = s.Candidates("show ")
+	found := false
+	for _, c := range cs {
+		if c.Token == "interfaces" || c.Token == "version" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("无管道行应回归命令树补全: %v", cs)
+	}
+}

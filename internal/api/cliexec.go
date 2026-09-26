@@ -103,6 +103,9 @@ type cliExecutor struct {
 	sess       map[string]*cliSession
 	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
 	structured any
+	// structuredPath structured 在整配置中的绝对路径（display set 反推语句时作前缀，
+	// 决策 #155；配置模式层级 show 非空、顶层配置为空；单命令执行期内有效）
+	structuredPath []string
 	// consolePending 本次命令要求前端接管串口时的接管请求（单命令执行期内有效）
 	consolePending *ConsoleRequest
 	// issueConsole 签发 console 一次性 ticket 并返回 ws 相对路径与有效期
@@ -220,6 +223,7 @@ func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
 
 	cmd, pipes, perr := splitPipes(strings.TrimSpace(line))
 	x.structured = nil
+	x.structuredPath = nil
 	x.consolePending = nil
 	var out string
 	if perr != nil {
@@ -700,6 +704,8 @@ func (x *cliExecutor) cfgShow(user, source string, s *cliSession, args []string)
 		return "%% " + err.Error() + "\n"
 	}
 	x.structured = sub
+	// display set 反推语句需要绝对路径前缀（决策 #155）
+	x.structuredPath = append(append([]string{}, s.Path...), args...)
 	subMap, ok := sub.(map[string]any)
 	if !ok {
 		return scalarStringOf(sub) + "\n"

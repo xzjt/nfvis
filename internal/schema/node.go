@@ -92,6 +92,47 @@ const (
 // schema 单一来源，CLI 前端据此解析管道段。
 var PipeKeywords = []string{"match", "except", "count", "last", "begin", "display", "compare"}
 
+// pipeArgEnum 管道关键字的取值枚举：枚举型取值可 ?/Tab 补全；
+// match/except/begin（正则）与 last（行数）为自由取值，无候选。
+var pipeArgEnum = map[string][]string{
+	"display": {"json", "xml", "set"},
+	"compare": {"rollback"},
+}
+
+// pipeKeywordDesc 管道关键字描述（? 候选列表用；与契约 §1.1 通用管道注释同源维护）。
+var pipeKeywordDesc = map[string]string{
+	"begin":   "从首个匹配行开始显示（正则）",
+	"compare": "candidate 或历史快照差异",
+	"count":   "统计非空行数",
+	"display": "以其它格式渲染（json/xml/set）",
+	"except":  "剔除匹配行（正则）",
+	"last":    "只留末 N 行",
+	"match":   "只留匹配行（正则）",
+}
+
+// PipeCandidates 管道段内的补全候选（FR-CLI-002「任意位置」：`|` 之后同样列出可用项）。
+// tokens 为当前管道段内已完成的 token（行内最后一个未引用 `|` 之后），partial 为正在
+// 输入的前缀。段首列全部管道关键字；关键字之后列其取值枚举（若有）；自由取值位与
+// 取值给全后本段无候选——下一个 `|` 开新段、再次列关键字。输出按 token 排序（确定）。
+func PipeCandidates(tokens []string, partial string) []Candidate {
+	var out []Candidate
+	switch {
+	case len(tokens) == 0:
+		for _, k := range PipeKeywords {
+			if strings.HasPrefix(k, partial) {
+				out = append(out, Candidate{Token: k, Desc: pipeKeywordDesc[k]})
+			}
+		}
+	case len(tokens) == 1:
+		for _, e := range pipeArgEnum[tokens[0]] {
+			if strings.HasPrefix(e, partial) {
+				out = append(out, Candidate{Token: e, Desc: pipeKeywordDesc[tokens[0]]})
+			}
+		}
+	}
+	return sortedCandidates(out)
+}
+
 // Node 命令树节点。
 type Node struct {
 	Kind      Kind
@@ -344,6 +385,43 @@ func Canonicalize(root *Node, tokens []string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// MatchKeywordPath 按语句语法走 prefix：返回终节点与**纯关键字路径**
+// （身份取值位置不进关键字路径——与 Match 的 Param 消费语义一致）。
+// 供执行器把「语句前缀」翻译为关键字路径（display set 的家族发射器注册键，
+// 决策 #155）；遍历规则与 Match 逐字一致（含缩写与歧义报错）。
+func MatchKeywordPath(root *Node, prefix []string) (*Node, []string, error) {
+	node := root
+	kp := make([]string, 0, len(prefix))
+	for _, tok := range prefix {
+		if node.consumesToken() {
+			node = node.parent
+		}
+		c := node.childExact(tok)
+		if c == nil {
+			var matches []string
+			var ambiguous bool
+			c, matches, ambiguous = node.childAbbrev(tok)
+			if ambiguous {
+				return nil, nil, fmt.Errorf("%q 存在歧义匹配: %s（需更长前缀）", tok, strings.Join(matches, ", "))
+			}
+		}
+		if c == nil {
+			c = node.firstParam()
+		}
+		if c == nil {
+			c = node.singleValue()
+		}
+		if c == nil {
+			return nil, nil, fmt.Errorf("未知命令: %q", tok)
+		}
+		if c.Kind == Keyword {
+			kp = append(kp, c.Name)
+		}
+		node = c
+	}
+	return node, kp, nil
 }
 
 // Find 按完整关键字路径查找节点（测试与 cli_bridge 使用）。

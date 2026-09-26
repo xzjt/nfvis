@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -393,5 +394,54 @@ func TestLoginUserRequiresSubKeyword(t *testing.T) {
 	}
 	if n.RequireSub {
 		t.Fatal("interfaces <ifname> 裸声明是受支持流程，不应标记 RequireSub")
+	}
+}
+
+// TestPipeCandidates（决策 #155 补充三，FR-CLI-002）：管道段内的 ?/Tab 候选——
+// 段首列管道关键字、display/compare 列取值枚举、自由取值位无候选、前缀过滤生效。
+func TestPipeCandidates(t *testing.T) {
+	tokens := func(cs []Candidate) []string {
+		out := make([]string, 0, len(cs))
+		for _, c := range cs {
+			out = append(out, c.Token)
+		}
+		return out
+	}
+	// 段首：全部管道关键字（含描述）
+	cs := PipeCandidates(nil, "")
+	got := tokens(cs)
+	want := []string{"begin", "compare", "count", "display", "except", "last", "match"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("段首候选应为全部管道关键字（排序）: %v", got)
+	}
+	for _, c := range cs {
+		if c.Desc == "" {
+			t.Fatalf("管道关键字候选应带描述: %v", c)
+		}
+	}
+	// 前缀过滤
+	if got := tokens(PipeCandidates(nil, "dis")); len(got) != 1 || got[0] != "display" {
+		t.Fatalf("前缀 dis 应只列 display: %v", got)
+	}
+	// display 取值枚举
+	if got := tokens(PipeCandidates([]string{"display"}, "")); !reflect.DeepEqual(got, []string{"json", "set", "xml"}) &&
+		!reflect.DeepEqual(got, []string{"json", "xml", "set"}) {
+		t.Fatalf("display 取值应列 json/xml/set: %v", got)
+	}
+	// compare 取值枚举
+	if got := tokens(PipeCandidates([]string{"compare"}, "r")); len(got) != 1 || got[0] != "rollback" {
+		t.Fatalf("compare 取值应列 rollback: %v", got)
+	}
+	// 自由取值位（正则/行数）无候选
+	if got := PipeCandidates([]string{"match"}, ""); len(got) != 0 {
+		t.Fatalf("match 取值位为自由正则、应无候选: %v", got)
+	}
+	// 取值给全后本段无候选
+	if got := PipeCandidates([]string{"display", "json"}, ""); len(got) != 0 {
+		t.Fatalf("display json 之后本段应无候选: %v", got)
+	}
+	// 未知关键字段无候选
+	if got := PipeCandidates([]string{"bogus"}, ""); len(got) != 0 {
+		t.Fatalf("未知管道关键字段应无候选: %v", got)
 	}
 }

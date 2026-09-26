@@ -144,26 +144,26 @@ func TestIfnameCandidatesWithoutInventory(t *testing.T) {
 	}
 }
 
-// 决策 #83 附带修：`show interfaces physical` 空态应列出运行态端口，
-// 否则用户无从得知该写哪个名字（已接管的口在内核中不存在）。
+// 决策 #155：无参/physical 聚合本身就是运行态清单——配置为空时运行态口以行的形式
+// 出现（来源列「未声明」），不再是空态提示文本（#83 时代的提示口径废止）。
 func TestShowPhysicalEmptyStateListsRuntimePorts(t *testing.T) {
 	x, _ := newCLIKit(t)
 	x.setPorts(fakePorts{vpp: []string{"ens224", "ens192"}})
 
 	out := x.Execute("admin", "super-user", "ssh", "show interfaces physical").Output
-	for _, want := range []string{"ens224", "ens192", "已被 DPDK 接管"} {
+	for _, want := range []string{"ens224", "ens192", "未声明"} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("空态应列出运行态端口（含 %q）: %q", want, out)
+			t.Fatalf("运行态清单应以行形式列出运行态端口（含 %q）: %q", want, out)
 		}
 	}
 }
 
-// 清单不可用时 show 也要说明，而不是静默给一句老提示。
+// 清单不可用时清单仍要说明，而不是静默给一句老提示。
 func TestShowPhysicalEmptyStateWhenInventoryUnavailable(t *testing.T) {
 	x, _ := newCLIKit(t)
 	x.setPorts(fakePorts{vppErr: errors.New("VPP 未接入")})
 	out := x.Execute("admin", "super-user", "ssh", "show interfaces physical").Output
-	if !strings.Contains(out, "端口清单不可用") {
-		t.Fatalf("应说明清单不可用: %q", out)
+	if !strings.Contains(out, "VPP 运行态不可用") {
+		t.Fatalf("应说明运行态不可用: %q", out)
 	}
 }

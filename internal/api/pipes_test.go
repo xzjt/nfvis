@@ -123,3 +123,53 @@ func TestPipeErrorsAndRegression(t *testing.T) {
 		t.Fatalf("version 无结构化快照应报错:\n%s", res.Output)
 	}
 }
+
+// TestDisplaySetPipeEndToEnd（决策 #155）：配置模式 edit 层级起步的
+// `show | display set` 走真实 Execute 路径——语句带绝对路径前缀，可直接回放。
+func TestDisplaySetPipeEndToEnd(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set interfaces ens2f0 mtu 9000",
+		"set interfaces ens2f0 description to-TOR",
+		"commit", "exit",
+	)
+	// 操作模式：show configuration | display set
+	res := x.Execute("admin", aaaClassSU, "ssh", "show configuration | display set")
+	if strings.Contains(res.Output, "%%") {
+		t.Fatalf("display set 不应报错:\n%s", res.Output)
+	}
+	if !strings.Contains(res.Output, "set interfaces ens2f0 mtu 9000") {
+		t.Fatalf("应反推出 mtu 语句:\n%s", res.Output)
+	}
+	// 配置模式：edit 层级起步，语句仍带绝对路径
+	run(t, x, "admin", aaaClassSU, "ssh", "configure", "edit interfaces ens2f0")
+	res = x.Execute("admin", aaaClassSU, "ssh", "show | display set")
+	if strings.Contains(res.Output, "%%") {
+		t.Fatalf("层级 display set 不应报错:\n%s", res.Output)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(res.Output), "set interfaces ens2f0") {
+		t.Fatalf("层级反推的语句应带绝对路径前缀:\n%s", res.Output)
+	}
+	if !strings.Contains(res.Output, "description to-TOR") {
+		t.Fatalf("层级反推应含描述语句:\n%s", res.Output)
+	}
+	// 运行态 show 无配置快照：display set 如实报错
+	res = x.Execute("admin", aaaClassSU, "ssh", "show version | display set")
+	if !strings.Contains(res.Output, "%%") {
+		t.Fatalf("运行态命令的 display set 应报错:\n%s", res.Output)
+	}
+}
+
+// TestDisplaySetPassthroughBaseError（round81 真机实测回归）：命令本身已报错时，
+// display 管道不得用「该命令不支持」盖住真因。
+func TestDisplaySetPassthroughBaseError(t *testing.T) {
+	x, _ := newCLIKit(t)
+	res := x.Execute("admin", aaaClassSU, "ssh", "show configuration / | display set")
+	if !strings.Contains(res.Output, "无效命令: show configuration /") {
+		t.Fatalf("应透传命令自身的无效命令错误:\n%s", res.Output)
+	}
+	if strings.Contains(res.Output, "该命令不支持 display set") {
+		t.Fatalf("管道提示不得掩盖命令真因:\n%s", res.Output)
+	}
+}

@@ -1,0 +1,172 @@
+================================================================================
+NFViS V1 收尾 · round81 交接证据
+日期：2026-09-26（本文件为「真机验证轮」证据，发布另走打包/实装/回下载比对流程）
+范围：决策 #155 的真机验证——
+  ① `show` 族 JunOS 化第一步：接口族全运行态（无参清单 = 声明 ∪ VPP 运行态、
+     裸/physical/detail 全形态同源回运行态单口视图、`physical` 选择器退役为等价写法）；
+  ② `show configuration | display set`（推翻 #84 搁置）：配置（子）树反推为逐行 set 语句，
+     12 个别名家族发射器 + vrfs/qos_policies 根级回落 + 回放自校验 + 敏感值省略；
+  ③ Web 是否受影响的核查（结论：不涉及，REST/前端零改动，见 §6）。
+环境：nfvis-vm（192.168.155.129，SSH 密钥免密）；基线 = main ed53e5a（round80/v1.1.34），
+  /root/src 已用 #155 工作树全量 tar 同步（md5 抽查 setstmt.go/setstmt_families.go 一致）。
+生产口令按待办 §3.1 哈希比对法核对：HASH-MATCH（未试登录）。
+================================================================================
+
+§1 构建与实装
+--------------------------------------------------------------------------------
+- go build ./... （Linux）通过；TestDisplaySet* 在 VM 上同样全绿（同代码跨平台）。
+- make deb VERSION='1.1.35~dev1' SOURCE_DATE_EPOCH=1790309261（本地 HEAD 提交时间；
+  VM 无 .git，显式传入）→ nfvis_1.1.35~dev1_amd64.deb（9,103,526 字节）。
+- dpkg -i 实装：postinst 正常、nfvis.service active；
+  `show version` → NFViS 1.1.35~dev1 / Ubuntu 26.04 / VPP 26.06-release。
+- 拓扑存活：bvi0 up（计数在走）、vnf-a/vnf-b 均 running。
+
+§2 新特性真机实测（生产 443 实例，新二进制）
+--------------------------------------------------------------------------------
+[2.1] `show interfaces`（运行态清单，决策 #155）
+Interface      Admin   Link    Speed      Driver       RxPkts     TxPkts       Description          备注
+bvi0           up      up      -          BVI          293        46                                未声明
+ens192         up      up      10G        dpdk         102954     6674                              -
+ens224         up      up      10G        dpdk         249        0                                 -
+vh-vnf-a-eth0  up      up      -          vhost-user   6533       22485                             未声明
+vh-vnf-b-eth0  up      up      -          vhost-user   192        342                               未声明
+※ 原始问题场景（用户真机报告）：照 `?`/Tab 候选敲 bvi0/vh-* 三条全报
+  「未在配置中声明」——本轮修复后均回运行态视图。ens192/ens224 已声明故无标注。
+
+[2.2] `show interfaces bvi0` / `show interfaces vh-vnf-a-eth0`
+（接口 bvi0 未在配置中声明，以下为运行态视图）
+Interface      Admin   Link    Speed      Driver       RxPkts     TxPkts       Description
+bvi0           up      up      -          BVI          293        46
+（vh-vnf-a-eth0 同构：up/up、vhost-user、计数在走）
+
+[2.3] 全形态同源：`show interfaces ens224` 与 `show interfaces physical ens224`
+  输出逐字节 diff 为空（BARE-EQ-PHYSICAL）。
+
+[2.4] `show configuration | display set`（真实生产配置，守护进程内回放自校验通过）
+共 42 条语句，逐字摘录：
+set interfaces ens192
+set interfaces ens224
+set resource-pools cpu isolated-cores 2,3,4,5
+set resource-pools hugepages page-size 1G count 2
+set resource-pools hugepages page-size 2M count 768
+set system login user admin class super-user
+set virtual-machine-functions vnf-b
+set virtual-machine-functions vnf-b cloud-init hostname vnf-b
+set virtual-machine-functions vnf-b cloud-init user-data /data/incoming/vnf-b-ud.sh
+set virtual-machine-functions vnf-b image debian-12-generic-amd64.qcow2
+set virtual-machine-functions vnf-b interfaces eth0
+set virtual-machine-functions vnf-b interfaces eth0 type vhost-user
+set virtual-machine-functions vnf-b interfaces eth0 virtual-switch vs-vnf
+set virtual-machine-functions vnf-b memory backing hugepage
+set virtual-machine-functions vnf-b memory hugepage-size 1G
+set virtual-machine-functions vnf-b memory size-mb 1024
+set virtual-machine-functions vnf-b vcpu count 1
+set virtual-machine-functions vnf-a
+（vnf-a 与 vnf-b 同构，略）
+set virtual-switches vs-vnf
+set virtual-switches vs-vnf type l2
+set virtual-switches vs-vnf ports 1
+set virtual-switches vs-vnf ports 1 interface ens192
+set virtual-switches vs-vnf ports 3
+set virtual-switches vs-vnf ports 3 vnf vnf-b interface eth0
+set virtual-switches vs-vnf ports 2
+set virtual-switches vs-vnf ports 2 vnf vnf-a interface eth0
+set virtual-switches vs-vnf gateway ip 192.168.100.1/24
+set vpp cpu corelist-workers 4
+set vpp cpu main-core 5
+set vpp dpdk dev ens192
+set vpp dpdk dev ens224
+set vpp memory hugepage-preference 2M
+# system login user admin：口令哈希不入 display set（复制配置后需重新 set system login user admin password <口令>）
+※ 回放自校验在真实配置上通过（不等即报错），这是「语句可完整还原真实部署」的机器判定。
+
+[2.5] 配置模式层级起步：configure → edit virtual-switches vs-vnf → show | display set
+  语句仍带绝对路径（set virtual-switches vs-vnf ports 1 … 等 7 条），top/discard 干净退出。
+
+§3 真机三件套
+--------------------------------------------------------------------------------
+[3.1] cli-fulltest.sh（6 阶段，对开发态 18443 实例 + 真实底座）：
+  通过 191 / 失败 5 / 预期报错 5（round80 为 195/1/5，差 4 条 = cli-vm 级联，见下）。
+  失败清单与判读：
+  - show vpp runtime（S1，×1）：%% VPP runtime 统计未接入——**已登记的已知缺口**（round80 同）。
+  - request virtual-machine-functions cli-vm start/restart（S4，×3）：
+    QEMU "unable to map backing store for guest RAM: Cannot allocate memory"——
+    1G 大页池（2 页）被在跑的 vnf-a/vnf-b 占满，产品**正确拒绝**再分配；
+    属 round36 登记的「前置级联」模式（套件前提 = cli-vm 可启动），非本轮改动
+    （VM 生命周期代码 round81 未触碰；round80 跑套件时拓扑未在跑，故无此级联）。
+  - request virtual-machine-functions cli-vm snapshot create name should-fail（S4，×1）：
+    套件预期「运行中 VM 快照须被拒」，但 cli-vm 因上述级联处于 shutoff → 快照合法创建。
+    同为级联（断言前提破掉），非快照守卫回归（守卫语义：仅拒运行中域）。
+[3.2] cli-semantic-check.sh（含本轮新口径的 S7）：**通过 11 / 失败 0 / 登记 1**。
+  S7 翻转为「| display set 反推出 set 语句行（N 行）」PASS——#84 时代的旧断言已同步更新。
+[3.3] cli-pty-smoke.sh（对生产 443 新二进制）：通过 10 / 失败 0。
+
+§4 真机抓到并修复的缺陷（1 处）
+--------------------------------------------------------------------------------
+- R81-1：真实配置的 `vpp.dpdk.per_dev` 条目**只有身份字段**（{interface: ens192}，由
+  4-token 裸语句 `set vpp dpdk dev ens192` 创建）——发射器只发了可选字段、漏发创建语句，
+  回放自校验如实报错（`%% display set 内部错误…`），display set 在真实配置上不可用。
+  修复：per_dev 每元素先发创建语句再发可选字段；CI fixture 补
+  {"set vpp dpdk dev ens192", "set vpp dpdk dev ens224"} 钉住。
+  ※ 该缺陷由回放自校验在真机首次运行时拦截——机制按设计工作（宁可报错，不吐还原不了的语句）。
+
+§5 副作用清理与环境复原
+--------------------------------------------------------------------------------
+- 语义脚本的 VPP 扰动按其自身建议收尾：systemctl restart vpp + restart nfvis。
+- 复原后：vpp/nfvis active；bvi0/ens192/ens224/vh-* 全部 up（ens224 重启后曾 down，
+  `request interfaces ens224 enable` 一次性事务修复，rev 55→56 / audit 112→113）；
+  BVI→vnf-a ping **5/5 0%**（首个 ICMP 丢 1 包 = round79 登记过的收敛模式，复跑全通）。
+- 套件在开发态实例上留的 cli-vm 残留已清：快照 should-fail 删除、cli-vm 域 undefine。
+- 开发态实例（18443）与 UI 检查实例（8443）已停，/tmp 临时库与文件已清。
+
+§6 Web 是否受影响（结论：不涉及，无需同步修改）
+--------------------------------------------------------------------------------
+- 今天全部改动在 CLI 执行器/CLI 管道/文档；**REST 路由、响应形状、OpenAPI 契约零改动**
+  （决策 #155 明确 REST 不动：GET /interfaces/{name} 仍返回配置对象 + 计数）。
+- 前端 internal/api/ui/*（.html/.js/.css）零改动（git status 佐证）；
+  守护层面 routes_contract / shape_contract / ui_coverage / user_text（.html/.js/.css）
+  与 web-console 两项自校准全部在 make check 通过。
+- 真机回归：新二进制实装后控制台（明文实例 ：8443 + 静态资源同源）登录、总览、
+  系统›接口页 DOM 逐一核对正常（接口页为空表 = 该检查实例空库下的正确空态；
+  总览 SSE「实时通道：已连接」）。
+- 口径说明：CLI 无参接口清单现为「声明 ∪ 运行态」，控制台接口列表页仍走 REST
+  （配置声明清单 + 详情页另行合并运行态字段）——两侧口径差异已在决策 #155 登记，
+  属有意为之；如需控制台也展示运行态口（bvi0/vh-*），属后续产品决策而非本轮缺陷。
+
+§7 R81-2（真机复现、当场修复）：enabled=true 落库后 display set 被自校验拦下
+--------------------------------------------------------------------------------
+- 用户真机报告：`show configuration | display set` 报 %% 内部错误（上午同命令曾出 42 条语句）。
+- 根因：round81 验证中 `request interfaces ens224 enable` 走一次性事务把
+  `interfaces[].enabled=true` 显式落库（rev 56）——语句语法只有 disable，enabled=true
+  无 set 形态，回放自校验如实拦截（机制按设计工作）。
+- 语义判定：Enabled 未显式置 false 即启用（interface_alarm 同口径），enabled=true 与
+  缺席**语义相同** → 回放校验两侧精确剥离 `interfaces[].enabled==true`
+  （LLDP 等有真语句的 enabled 不受影响），输出与 JunOS 同口径：up 为缺省不落语句。
+- 附带修复：display 管道在命令本身已报错时透传原错误——真机实测
+  `show configuration / | display set` 的「无效命令」真因曾被「该命令不支持」盖住。
+- 修复后真机复验（1.1.35~dev2）：三条命令逐一验证——
+  ① show configuration | display set → 42 条语句照常（含 ens224）；
+  ② show configuration / | display set → % 无效命令: show configuration /（可用：…）；
+  ③ show / | display set → % 该 show 命令形式未支持。可用：…
+- 环境终态：nfvis 1.1.35~dev2 active、vpp active、BVI→vnf-a ping 5/5 0%（复跑）。
+
+§8 R81-3（真机验证轮）：管道位置补全缺口修复（FR-CLI-002，决策 #155 补充三）
+--------------------------------------------------------------------------------
+- 用户真机报告：`show configuration | ` 后 Tab/? 无任何提示——补全引擎把整行进命令树
+  匹配、`|` 不是树节点 → 候选恒空。FR-CLI-002 承诺「任意位置输入 ?」，管道位置是其覆盖缺口。
+- 修复：schema.PipeCandidates（与 PipeKeywords 单一来源；段首列 7 个管道关键字含描述；
+  display 取值列 json/xml/set、compare 列 rollback；正则/行数自由取值无候选），
+  CLI 会话把含未引用 `|` 的行的补全上下文切到管道段（双引号内 `|` 不算分隔）。
+  契约 §5 补第 9 条。
+- 真机复验（1.1.35~dev3，非 raw 与 raw 同一 Session 补全路径）：
+  `show configuration |?` 列出 begin/compare/count/display/except/last/match 七项（含描述）；
+  `| disp<Tab>` 补全为 display；`| display ?` 列出 json/set/xml；
+  `| display s<Tab>` 补全后命令直接执行、输出 set 语句（正向闭环）。
+
+§9 遗留与后续
+--------------------------------------------------------------------------------
+- 未发布：1.1.35~dev1 为验证构建；发布需走 round48/80 口径（文档核对 → 重打包 →
+  升级实装 → 回下载比对 → Release）。手册 28 张控制台截图与接口示例输出有轻微口径漂移
+  （清单多「备注」列），随发布轮重拍。
+- 源码未 commit（16+ 文件在工作树），按项目惯例待主会话确认后提交。
+================================================================================

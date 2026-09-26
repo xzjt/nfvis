@@ -63,13 +63,13 @@
 | `show system tech-support` | 诊断归档清单 | `GET /system/tech-support` | ✅ |
 | `show system configuration sessions` | candidate 持锁会话列表（FR-CFG-009） | `GET /system/configuration/sessions` | ✅ |
 | `show configuration sessions` | **等价写法**（与上一条**同一实现**、输出逐字相同；本轮起多余 token 会报错，不再静默回配置正文） | 同上 | ✅（round80 真机复验：与上一条输出一致） |
-| `show interfaces` | 全部接口摘要 | `GET /interfaces` | ✅ |
-| `show interfaces physical` | DPDK 物理口（驱动/链路/速率/VF 数）；**空态列出运行态端口**，便于发现该声明哪个名字（决策 #83） | `GET /interfaces` | ✅ |
-| `show interfaces physical <ifname> detail` | 驱动/MAC/MTU/队列/NUMA | 配置视图（`GET /interfaces/{name}`） | ✅ |
+| `show interfaces` | 接口运行态清单：行 = 配置声明 ∪ VPP 运行态口，Admin/Link/Speed/Driver/计数全取运行态（决策 #155；仅声明未生效的行状态列 - 并标注，纯运行态口标注「未声明」） | `GET /interfaces` | ✅ |
+| `show interfaces physical` | **与上一条完全等价**（决策 #155：`physical` 选择器退役为等价写法；原「仅声明口聚合+空态提示」口径废止） | `GET /interfaces` | ✅ |
+| `show interfaces physical <ifname> detail` | 运行态单口视图（与裸写法同一实现，决策 #155） | 运行态（VPP） | ✅ |
 | `show interfaces physical <ifname> statistics` | 收发包/字节/错误/drop | VPP 运行态统计 | ✅ |
 | `show interfaces physical <ifname> sriov` | VF 列表与占用状态 | sysfs SR-IOV | ✅（无 PF/VF 时为空列表） |
 | `show interfaces management` | 管理口（内核侧，IP/链路） | 运行态（内核） | ✅ |
-| `show interfaces <ifname> detail` | 与 `show interfaces physical <ifname> detail` **等价**（`physical` 可省；两种写法同一实现，子命令不再被丢掉） | 配置视图（`GET /interfaces/{name}`） | ✅ |
+| `show interfaces <ifname> detail` | **≡ `show interfaces physical <ifname> detail`（全形态等价、同一实现）**；回**运行态单口视图**——已声明与未声明但在 VPP 清单里的口（派生口 bvi0/vh-* 等）都答，候选 advertise 的名字必须答得上来（决策 #154/#155）；接口配置视图在配置模式 `edit interfaces <ifname>` + `show` | 运行态（VPP）；配置视图走配置模式层级 show | ✅ |
 | `show interfaces <ifname> statistics` | 同上（等价写法） | VPP 运行态统计 | ✅（round80 逐条比对：两侧输出逐字相同） |
 | `show interfaces <ifname> sriov` | 同上（等价写法） | sysfs SR-IOV | ✅ |
 | `show virtual-switches` | 全部虚拟交换机摘要 | `GET /virtual-switches` | ✅ |
@@ -214,7 +214,7 @@
 | `set <path> …` | 设置配置语句 | 事务引擎 | ✅ |
 | `delete <path> …` | 删除语句/子树 | 事务引擎 | ✅ |
 | `show` | 显示 candidate（当前层级） | candidate | ✅ |
-| `show \| display set` | 展开为 set 语句 | candidate | ⚠️ **已知缺口（明确提示）**：未实现（附录 A #84，需 model→CLI 反向映射）；实测 `%% display 仅支持 json\|xml`。替代：`save <file>`（JSON）/ `show configuration`（块状）/ `\| display json` |
+| `show \| display set` | 展开为 `set` 语句（**已实现**，决策 #155：语句带绝对路径、敏感值不输出（注释说明）、生成后回放自校验；`show configuration \| display set` 同管道同实现） | candidate | ✅ |
 | `annotate <path> "text"` | 节点注释（**路径相对当前层级**） | candidate annotations | ✅（**决策 #76⑤** 修相对路径） |
 | `commit` | 提交（FR-CFG-002/003） | 事务引擎 → Applier | ✅ |
 | `commit check` | 仅校验不下发 | 事务引擎 | ✅ |
@@ -428,7 +428,7 @@
 | 状态 | 行数 | 逐条 |
 |---|---|---|
 | ✅ 实测通过 | 239 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归） |
-| ⚠️ 已知缺口 | 4 | `show vpp runtime`（未接入）、`show configuration [permissions <class>]`（按 class 视角未实现，明确提示）、`request system api token revoke`（V1 仅提示，逐 token 随 V2）、`show \| display set`（未实现但明确提示——本轮由 ⊘ 改标 ⚠️，更早一轮曾误标 ✅） |
+| ⚠️ 已知缺口 | 3 | `show vpp runtime`（未接入）、`show configuration [permissions <class>]`（按 class 视角未实现，明确提示）、`request system api token revoke`（V1 仅提示，逐 token 随 V2）；`show \| display set` 已由决策 #155 实现、移出缺口 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
 | 🚫 本轮未执行 | 12 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`format-data`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`）与需交互者（VM/容器删除确认、改密） |
 

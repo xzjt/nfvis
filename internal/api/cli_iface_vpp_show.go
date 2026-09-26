@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/config"
@@ -22,23 +23,21 @@ func (x *cliExecutor) execShowInterfaces(args []string) string {
 	if err != nil {
 		return "%% " + err.Error() + "\n"
 	}
-	// show interfaces physical|management —— 列表
+	// show interfaces physical|management
 	if len(args) >= 1 && (args[0] == "physical" || args[0] == "management") {
 		if args[0] == "management" {
 			return x.showManagementInterface(cfg)
 		}
 		if len(args) == 1 {
-			return x.showPhysicalInterfaces(cfg, "")
+			// 决策 #155：`physical` 选择器退役为等价写法——聚合表与裸摘要同为运行态清单
+			return x.showInterfaceList(cfg)
 		}
-		if len(args) == 2 {
-			// 单口运行态视图（链接/速率/驱动/计数，决策 #84 的运行态口径）
-			return x.showPhysicalInterfaces(cfg, args[1])
+		// `physical` 可省（契约 §1.1，决策 #153/#155）：一切形态与裸写法同一实现
+		sub := ""
+		if len(args) >= 3 {
+			sub = args[2]
 		}
-		// `physical` 可省（契约 §1.1，决策 #153）：带子命令时两种写法必须走**同一实现**。
-		// 此前这里把 args[2] 整段丢掉、只按单口列表渲染——`show interfaces physical ens224
-		// statistics` 打的是同一张表（无任何计数），与 `show interfaces ens224 statistics`
-		// 不同源，属静默误答（契约「physical 可省」因此不成立）。
-		return x.showOneInterface(cfg, args[1], args[2])
+		return x.showOneInterface(cfg, args[1], sub)
 	}
 	// show interfaces <ifname> [detail|statistics|sriov]
 	if len(args) >= 1 {
@@ -49,74 +48,72 @@ func (x *cliExecutor) execShowInterfaces(args []string) string {
 		}
 		return x.showOneInterface(cfg, name, sub)
 	}
-	// show interfaces（摘要）
-	if len(cfg.Interfaces) == 0 {
-		return "（无已配置接口）\n"
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "%-14s %-8s %-8s %-10s %s\n", "Interface", "Admin", "MTU", "Policy", "Description")
-	items := make([]any, 0, len(cfg.Interfaces))
-	for _, ifc := range cfg.Interfaces {
-		items = append(items, anyToTree(ifc))
-		admin := "up"
-		if ifc.Enabled != nil && !*ifc.Enabled {
-			admin = "down"
-		}
-		fmt.Fprintf(&b, "%-14s %-8s %-8d %-10s %s\n", ifc.Name, admin, ifc.MTU, ifc.IngressPolicy, ifc.Description)
-	}
-	x.structured = map[string]any{"interfaces": items}
-	return b.String()
+	// show interfaces（决策 #155：运行态清单 = 配置声明 ∪ VPP 运行态口）
+	return x.showInterfaceList(cfg)
 }
 
-// showPhysicalInterfaces：物理口（配置 + **运行态**链接状态/速率/驱动/计数）。
-//
-// 契约 §1.1 要求「驱动、链接状态、速率、VF 数」（决策 #84）。此前表头只有
-// Interface/Admin/RxPkts/TxPkts/Description，且 Admin 取自**配置的 enabled**——
-// 实测把接口在 VPP 里置 down 后 CLI 仍显示 up。现在 Admin/Link/Speed/Driver 均取 VPP 运行态。
-func (x *cliExecutor) showPhysicalInterfaces(cfg model.Config, only string) string {
-	found := false
-	var b strings.Builder
-	items := make([]any, 0)
+// showInterfaceList 接口运行态清单（决策 #155）：行 = 配置声明 ∪ VPP 运行态口，
+// Admin/Link/Speed/Driver/计数全取运行态。旧摘要的 Admin 取自配置的 enabled、
+// 旧聚合表只列声明口——两处都是 #84「字段取配置而非运行态」的残留，本轮收口。
+// 来源列标注两类特殊情况：仅声明未生效（VPP 运行态里没有）、纯运行态口
+// （派生口 bvi0/vh-* 或外部接管，未声明）。
+func (x *cliExecutor) showInterfaceList(cfg model.Config) string {
 	states, stErr := x.ifaceStates()
-	fmt.Fprintf(&b, "%-14s %-7s %-7s %-10s %-12s %-10s %-12s %s\n",
-		"Interface", "Admin", "Link", "Speed", "Driver", "RxPkts", "TxPkts", "Description")
-	for _, ifc := range cfg.Interfaces {
-		if only != "" && ifc.Name != only {
-			continue
-		}
-		found = true
-		entry := map[string]any{"name": ifc.Name, "description": ifc.Description}
-		admin, link, speed, driver := "-", "-", "-", "-"
-		if st, ok := states[ifc.Name]; ok {
-			admin, link = yn(st.AdminUp), yn(st.LinkUp)
-			speed, driver = fmtSpeed(st.LinkSpeed), orDash(st.DevType)
-			entry["admin_up"], entry["link_up"] = st.AdminUp, st.LinkUp
-			entry["link_speed_kbps"], entry["driver"] = st.LinkSpeed, st.DevType
-		}
-		rx, tx := "-", "-"
-		if x.state != nil {
-			if c, ok := x.state.InterfaceCounters(context.Background(), ifc.Name); ok {
-				rx, tx = fmt.Sprintf("%d", c.RxPackets), fmt.Sprintf("%d", c.TxPackets)
-				entry["statistics"] = anyToTree(c)
-			}
-		}
-		items = append(items, entry)
-		fmt.Fprintf(&b, "%-14s %-7s %-7s %-10s %-12s %-10s %-12s %s\n",
-			ifc.Name, admin, link, speed, driver, rx, tx, ifc.Description)
+	inv, invOK := x.vppIfaceNamesSafe()
+	inInv := map[string]bool{}
+	for _, n := range inv {
+		inInv[n] = true
 	}
-	if !found {
-		if only != "" {
-			return fmt.Sprintf("%% 物理口 %s 未在配置中声明（先 set interfaces %s …）\n", only, only)
+	declared := map[string]string{} // name → description
+	names := make([]string, 0, len(cfg.Interfaces)+len(inv))
+	seen := map[string]bool{}
+	for _, ifc := range cfg.Interfaces {
+		declared[ifc.Name] = ifc.Description
+		if !seen[ifc.Name] {
+			seen[ifc.Name] = true
+			names = append(names, ifc.Name)
 		}
-		hint := x.physicalEmptyHint()
-		if stErr != nil && len(cfg.Interfaces) == 0 {
-			return hint
+	}
+	for _, n := range inv {
+		if !seen[n] {
+			seen[n] = true
+			names = append(names, n)
 		}
-		return hint
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		if stErr != nil || !invOK {
+			return "（无接口；VPP 运行态不可用，清单可能不完整）\n"
+		}
+		return "（无接口）\n"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, ifaceListRowFmt,
+		"Interface", "Admin", "Link", "Speed", "Driver", "RxPkts", "TxPkts", "Description", "备注")
+	items := make([]any, 0, len(names))
+	for _, name := range names {
+		desc, decl := declared[name]
+		entry, admin, link, speed, driver, rx, tx := x.ifaceRuntimeRow(name, desc, states)
+		inVPP := inInv[name]
+		if _, ok := states[name]; ok {
+			inVPP = true
+		}
+		source := "-"
+		switch {
+		case decl && !inVPP:
+			source = "已声明未生效"
+		case !decl:
+			source = "未声明"
+		}
+		entry["source"] = source
+		items = append(items, entry)
+		fmt.Fprintf(&b, ifaceListRowFmt, name, admin, link, speed, driver, rx, tx, desc, source)
 	}
 	if stErr != nil {
-		// 有配置项但运行态不可用：明确说明状态列为何是 "-"
+		// 运行态不可用：明确说明状态列为何是 "-"
 		b.WriteString("%% 注: VPP 运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
+	} else if !invOK {
+		b.WriteString("%% 注: VPP 端口清单不可用，清单仅含配置声明的接口\n")
 	}
 	x.structured = map[string]any{"interfaces": items}
 	return b.String()
@@ -141,32 +138,6 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
-}
-
-// physicalEmptyHint 空态提示：列出**运行态**端口（决策 #83）。
-// 此前只给一句「先 set interfaces … 声明」，用户其实无从知道该写哪个名字——
-// 已由 DPDK 接管的口在内核中不存在，而候选当时又只列「已配置」的名字。
-func (x *cliExecutor) physicalEmptyHint() string {
-	var b strings.Builder
-	b.WriteString("（无已声明物理口；先 set interfaces <ifname> description … 声明）\n")
-	if x.ports == nil {
-		return b.String()
-	}
-	names, err := x.ports.VPPIfnames()
-	if err != nil {
-		fmt.Fprintf(&b, "%% 端口清单不可用（VPP 未接入或查询失败）：%v\n", err)
-		return b.String()
-	}
-	if len(names) == 0 {
-		b.WriteString("（VPP 中暂无接口；网卡可能尚未由 DPDK 接管 —— 未接管的内核网卡见 " +
-			"`request interfaces <n> bind-dpdk`）\n")
-		return b.String()
-	}
-	b.WriteString("VPP 中的接口（已被 DPDK 接管，可直接 set interfaces <ifname> … 声明）：\n")
-	for _, n := range names {
-		fmt.Fprintf(&b, "  %s\n", n)
-	}
-	return b.String()
 }
 
 // showVppOverview `show vpp` 概览（发现 #11）：版本/连接/待重启来自**连接管理器**
@@ -274,44 +245,136 @@ func (x *cliExecutor) showManagementInterface(cfg model.Config) string {
 	return b.String()
 }
 
-// showOneInterface：单个接口（detail|statistics|sriov）。
+// showOneInterface 单接口视图：裸写法 / physical <ifname> / detail / statistics / sriov
+// 的**唯一实现**（决策 #153 收口「physical 可省」，#155 收口全形态同源）。
+// 决策 #155：接口族全运行态——裸/physical/detail 全部回运行态单口视图（声明口与
+// 派生口同一实现）；接口的**配置视图**退役到配置模式（edit interfaces <name> + show，
+// 或 show configuration | display set）。statistics 一律回计数单行；sriov 仍读声明
+// （VF 配置只在声明口存在；未声明口回空态）。
 func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) string {
-	for _, ifc := range cfg.Interfaces {
-		if ifc.Name != name {
-			continue
-		}
-		m, _ := anyToTree(ifc).(map[string]any)
-		if x.state != nil {
-			if c, ok := x.state.InterfaceCounters(context.Background(), name); ok {
-				m["statistics"] = anyToTree(c)
-			}
-		}
-		switch sub {
-		case "":
-			x.structured = m
-			return RenderConfigJSON(m) + "\n"
-		case "detail", "statistics":
-			if sub == "statistics" {
-				if st, ok := m["statistics"]; ok {
-					x.structured = map[string]any{"interface": name, "statistics": st}
-					return fmt.Sprintf("interface %s statistics: %v\n", name, st)
-				}
-				return fmt.Sprintf("%% 接口 %s 统计运行态不可用（stats 未接入）\n", name)
-			}
-			x.structured = m
-			return RenderConfigJSON(m) + "\n"
-		case "sriov":
-			if ifc.Sriov == nil {
-				return fmt.Sprintf("（接口 %s 未配置 SR-IOV VF）\n", name)
-			}
-			mm, _ := anyToTree(ifc.Sriov).(map[string]any)
-			x.structured = map[string]any{"interface": name, "sriov": mm}
-			return RenderConfigJSON(x.structured.(map[string]any)) + "\n"
-		default:
-			return fmt.Sprintf("%% 无效命令: show interfaces %s %s（可用：detail|statistics|sriov）\n", name, sub)
+	desc, declared := "", false
+	var ifc model.InterfaceConfig
+	for _, i := range cfg.Interfaces {
+		if i.Name == name {
+			desc, declared, ifc = i.Description, true, i
+			break
 		}
 	}
-	return fmt.Sprintf("%% 接口 %s 未在配置中声明\n", name)
+	switch sub {
+	case "", "detail":
+		if out, ok := x.ifaceRuntimeView(name, desc, declared); ok {
+			return out
+		}
+		// 未声明且不在 VPP 清单（决策 #154：清单查询成功才可判「不在」）
+		names, ok := x.vppIfaceNamesSafe()
+		if ok && !ifaceInList(names, name) {
+			return errIfaceUnknown(name)
+		}
+		// 清单未接入或查询失败：无从核对运行态，维持既有文案（只陈述「未声明」，不否认存在）
+		return fmt.Sprintf("%% 接口 %s 未在配置中声明\n", name)
+	case "statistics":
+		if x.state != nil {
+			if c, ok := x.state.InterfaceCounters(context.Background(), name); ok {
+				x.structured = map[string]any{"interface": name, "statistics": anyToTree(c)}
+				return fmt.Sprintf("interface %s statistics: %v\n", name, c)
+			}
+		}
+		return fmt.Sprintf("%% 接口 %s 统计运行态不可用（stats 未接入）\n", name)
+	case "sriov":
+		if !declared {
+			return fmt.Sprintf("（接口 %s 未在配置中声明，无 SR-IOV 配置）\n", name)
+		}
+		if ifc.Sriov == nil {
+			return fmt.Sprintf("（接口 %s 未配置 SR-IOV VF）\n", name)
+		}
+		mm, _ := anyToTree(ifc.Sriov).(map[string]any)
+		x.structured = map[string]any{"interface": name, "sriov": mm}
+		return RenderConfigJSON(x.structured.(map[string]any)) + "\n"
+	default:
+		return fmt.Sprintf("%% 无效命令: show interfaces %s %s（可用：detail|statistics|sriov）\n", name, sub)
+	}
+}
+
+// ifaceRuntimeView 单口运行态视图（决策 #154/#155）：行格式与数据源同一实现
+// （ifaceRuntimeRow/ifaceRowFmt）。declared=该口在配置中声明（描述列取声明值）；
+// 未声明口仅在 VPP 清单可核时作答（ok=false → 调用方按 #154 口径报错）。
+// 注记三态：未声明（说明口径）、已声明但运行态未出现（状态列为 -）、运行态不可用。
+func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool) (string, bool) {
+	names, invOK := x.vppIfaceNamesSafe()
+	inInv := invOK && ifaceInList(names, name)
+	if !declared && !inInv {
+		return "", false
+	}
+	states, stErr := x.ifaceStates()
+	entry, admin, link, speed, driver, rx, tx := x.ifaceRuntimeRow(name, desc, states)
+	_, inStates := states[name]
+	var b strings.Builder
+	switch {
+	case !declared:
+		fmt.Fprintf(&b, "（接口 %s 未在配置中声明，以下为运行态视图）\n", name)
+	case !inStates && !inInv:
+		fmt.Fprintf(&b, "（接口 %s 已声明，未在 VPP 运行态出现，状态列显示 -）\n", name)
+	}
+	fmt.Fprintf(&b, ifaceRowFmt, "Interface", "Admin", "Link", "Speed", "Driver", "RxPkts", "TxPkts", "Description")
+	fmt.Fprintf(&b, ifaceRowFmt, name, admin, link, speed, driver, rx, tx, desc)
+	if stErr != nil {
+		b.WriteString("%% 注: VPP 运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
+	}
+	x.structured = map[string]any{"interfaces": []any{entry}}
+	return b.String(), true
+}
+
+// vppIfaceNamesSafe VPP 运行态接口清单：未接入或查询失败一律 ok=false
+// （判「不在清单」必须有成功的查询——宁可少报错，与 interfaceKnown 同取向）。
+func (x *cliExecutor) vppIfaceNamesSafe() ([]string, bool) {
+	if x.ports == nil {
+		return nil, false
+	}
+	names, err := x.ports.VPPIfnames()
+	if err != nil {
+		return nil, false
+	}
+	return names, true
+}
+
+func ifaceInList(names []string, name string) bool {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// errIfaceUnknown 接口名既不在配置、也不在 VPP 运行态清单（清单查询成功才可判）的
+// 统一文案——LLDP 过滤与 show interfaces 共用，防两处漂移（决策 #154）。
+func errIfaceUnknown(name string) string {
+	return fmt.Sprintf("%% 接口 %s 未在配置中声明、也不在 VPP 接口清单中（show interfaces physical 看运行态清单）\n", name)
+}
+
+// ifaceRowFmt 接口运行态表的行格式（表头与数据行共用）。
+const ifaceRowFmt = "%-14s %-7s %-7s %-10s %-12s %-10s %-12s %s\n"
+
+// ifaceRuntimeRow 单口运行态数据与展示值（决策 #84 口径：Admin/Link/Speed/Driver 取
+// VPP 运行态，收发计数取 state 快照）。物理口表与未声明运行态口视图共用（同一实现，
+// 防两处渲染漂移）。
+func (x *cliExecutor) ifaceRuntimeRow(name, description string, states map[string]InterfaceState) (entry map[string]any, admin, link, speed, driver, rx, tx string) {
+	entry = map[string]any{"name": name, "description": description}
+	admin, link, speed, driver = "-", "-", "-", "-"
+	if st, ok := states[name]; ok {
+		admin, link = yn(st.AdminUp), yn(st.LinkUp)
+		speed, driver = fmtSpeed(st.LinkSpeed), orDash(st.DevType)
+		entry["admin_up"], entry["link_up"] = st.AdminUp, st.LinkUp
+		entry["link_speed_kbps"], entry["driver"] = st.LinkSpeed, st.DevType
+	}
+	rx, tx = "-", "-"
+	if x.state != nil {
+		if c, ok := x.state.InterfaceCounters(context.Background(), name); ok {
+			rx, tx = fmt.Sprintf("%d", c.RxPackets), fmt.Sprintf("%d", c.TxPackets)
+			entry["statistics"] = anyToTree(c)
+		}
+	}
+	return
 }
 
 // execShowGenericConfig：show port-mirroring / show qos policies（配置视图）。
@@ -483,7 +546,7 @@ func (x *cliExecutor) showLLDPNeighbors(ifname string) string {
 		if !x.interfaceKnown(ifname) {
 			// 名字本身不存在（配置里没声明、也不在 VPP 接口清单中）——不能与「该口无邻居」混为一谈：
 			// 前者是敲错了名字，后者是这个口就是没有对端。
-			return fmt.Sprintf("%% 接口 %s 未在配置中声明、也不在 VPP 接口清单中（show interfaces physical 看运行态清单）\n", ifname)
+			return errIfaceUnknown(ifname)
 		}
 		return fmt.Sprintf("（接口 %s 无 LLDP 邻居）\n", ifname)
 	}
@@ -498,8 +561,9 @@ func (x *cliExecutor) showLLDPNeighbors(ifname string) string {
 	return b.String()
 }
 
-// interfaceKnown 接口名是否为本机已知接口：committed 里声明过（与 `show interfaces <ifname>`
-// 同一判据），或 VPP 运行态接口清单里有（与 `<ifname>` 动态候选同源，决策 #83）。
+// interfaceKnown 接口名是否为本机已知接口：committed 里声明过，或 VPP 运行态接口清单
+// 里有（与 `<ifname>` 动态候选同源，决策 #83；`show interfaces <ifname>` 对两侧都作答，
+// 决策 #154）。
 //
 // 两侧都认，是因为邻居表来自 VPP（键是 VPP 接口名）、而操作者也常按配置里的名字提问。
 // 端口清单未接入（nil）时只按配置判定；清单**查询失败**时按「已知」处理——
