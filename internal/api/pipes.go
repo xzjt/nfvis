@@ -67,13 +67,13 @@ func splitPipes(line string) (string, []pipeSpec, error) {
 			pipes = append(pipes, pipeSpec{kind: "last", arg: fields[1]})
 		case "display":
 			if len(fields) == 2 && fields[1] == "set" {
-				// 契约 §3 曾声明「配置模式 show | display set 以 set 语句展开」——未实现，
-				// 已按附录 A #84 更正契约（不再是承诺）。此处给出替代路径而不谎报支持。
-				return "", nil, fmt.Errorf("| display set 未实现：" +
-					"导出配置用 save <file>，查看配置用 show configuration，结构化用 | display json")
+				// 决策 #155：把配置（子）树反推为逐行 set 语句（#84 曾搁置，本轮实现）。
+				// 仅配置类输出可用（structured 为配置 JSON 树）；生成后回放自校验。
+				pipes = append(pipes, pipeSpec{kind: "display-set"})
+				continue
 			}
 			if len(fields) != 2 || (fields[1] != "json" && fields[1] != "xml") {
-				return "", nil, fmt.Errorf("display 仅支持 json|xml")
+				return "", nil, fmt.Errorf("display 仅支持 json|xml|set")
 			}
 			pipes = append(pipes, pipeSpec{kind: "display-" + fields[1]})
 		default:
@@ -140,7 +140,11 @@ func (x *cliExecutor) applyPipes(text string, pipes []pipeSpec) string {
 			text = out
 		case "display-json":
 			if x.structured == nil {
-				return "%% 该命令不支持 display json（仅配置 show 族可用）\n"
+				// 命令本身已报错时保留原错误（管道提示只会掩盖真因，round81 真机实测）
+				if !strings.HasPrefix(text, "%") {
+					return "%% 该命令不支持 display json（仅配置 show 族可用）\n"
+				}
+				continue
 			}
 			b, err := json.MarshalIndent(x.structured, "", "  ")
 			if err != nil {
@@ -149,9 +153,33 @@ func (x *cliExecutor) applyPipes(text string, pipes []pipeSpec) string {
 			text = string(b) + "\n"
 		case "display-xml":
 			if x.structured == nil {
-				return "%% 该命令不支持 display xml（仅配置 show 族可用）\n"
+				if !strings.HasPrefix(text, "%") {
+					return "%% 该命令不支持 display xml（仅配置 show 族可用）\n"
+				}
+				continue
 			}
 			text = renderXML(x.structured, "configuration", 0)
+		case "display-set":
+			// 决策 #155：配置（子）树 → set 语句。structured 必须是配置 JSON 树，
+			// structuredPath 为其在整配置中的绝对路径（配置模式层级 show 时非空）。
+			tree, ok := x.structured.(map[string]any)
+			if !ok {
+				// 命令本身已报错时保留原错误（round81 真机实测：`show configuration /`
+				// 的无效命令错误被管道提示盖住，操作者看不到真因）
+				if !strings.HasPrefix(text, "%") {
+					return "%% 该命令不支持 display set（仅配置 show 族可用）\n"
+				}
+				continue
+			}
+			lines, err := renderSetStatements(tree, x.structuredPath)
+			if err != nil {
+				return "%% " + err.Error() + "\n"
+			}
+			if len(lines) == 0 {
+				text = "（配置为空）\n"
+			} else {
+				text = strings.Join(lines, "\n") + "\n"
+			}
 		}
 	}
 	return text

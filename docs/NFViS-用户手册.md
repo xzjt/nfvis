@@ -411,7 +411,7 @@ REST 客户端注意：直提之后再读 `GET /configuration/candidate` 会得�
 | `save <file>` | candidate 导出 JSON（落盘 0600） |
 | `load override \| merge <file>` | JSON 导入（override 整体替换 / merge 合并） |
 | `discard` | 丢弃 candidate 并释放会话锁 |
-| `show \| display set` | **未支持**（需 model→语句的反向映射）；替代：`save`/`show configuration`/`\| display json` |
+| `show \| display set` | **已支持**：把当前层级（含顶层）配置反推为逐行 `set` 语句，语句带绝对路径、敏感值不输出（注释说明），可直接复制回放；`show configuration \| display set` 同管道同实现 |
 
 > `show configuration \| compare rollback <n>` 与配置模式 `\| compare` 均已实现；
 > `rollback 0` 不存在（快照编号从 1 起）。
@@ -425,6 +425,8 @@ nfvis$ show interfaces | count              # 行数
 nfvis$ show log system | last 20            # 末 N 行
 nfvis$ show log system | begin alarm        # 从首个匹配行开始显示
 nfvis$ show configuration | display json    # JSON 输出（配置 show 族）
+nfvis$ show configuration | display set     # 反推为逐行 set 语句（可复制回放）
+nfvis(config)# edit interfaces ens192       # 进层级后 show | display set 语句带绝对路径
 ```
 
 ### 4.5 配置层次总览
@@ -1611,7 +1613,7 @@ show log audit last 20                   # 审计（§10）
 |---|---|
 | 容器镜像目录名须等于 Docker tag | §9.1 |
 | 快照 create/rollback 需关机态 | §9.3（运行中回滚会静默重启 VM） |
-| `show \| display set` 未实现 | 用 `save`（JSON）/`show configuration`/`\| display json` 替代 |
+| `show \| display set` 已实现；`show vpp runtime` 未接入 | `show vpp threads`/`show vpp buffers` 替代；display set 支持 `show configuration` 与配置模式各层级 |
 | `show vpp runtime` 未接入 | govpp runtime 解码受限，CLI 明确提示 |
 | `?` 不能作为取值字面量 | 它是即时帮助键（§3.3） |
 | 硬件健康在无 BMC/传感器环境为降级路径 | 值可能为空，非故障 |

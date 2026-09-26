@@ -253,15 +253,17 @@ commit" >/dev/null 2>&1
 n2=$(cli "show configuration" | grep -c "sem-rt-$MARK" || true)
 [ "$n2" -eq 0 ] && ok "delete 后配置里消失" || bad "delete 后配置里仍在（$n2 处）"
 
-hdr "S7 管道 display 支持面（曾声明 | display set）"
+hdr "S7 管道 display set（反推 set 语句）"
 pipeout=$(cli "configure
 show | display set")
 if echo "$pipeout" | grep -q '未实现'; then
-  ok "| display set 未实现但**已登记**且给出替代路径"
+  bad "| display set 回「未实现」——该管道已实现，脚本口径过期"
+elif echo "$pipeout" | grep -q '^set '; then
+  ok "| display set 反推出 set 语句（$(echo "$pipeout" | grep -c '^set ') 行）"
 elif echo "$pipeout" | grep -q '仅支持 json|xml'; then
-  bad "| display set 仍是裸的「仅支持 json|xml」——契约未更正或未登记"
+  bad "| display set 仍是裸的「仅支持 json|xml」——管道未接线"
 else
-  note "| display set 行为未知：$(echo "$pipeout" | head -1)"
+  note "| display set 输出为空或未知：$(echo "$pipeout" | head -1)"
 fi
 
 hdr "S8 MAC 表 ↔ VPP l2fib 条数（对照，两者都空也算一致）"

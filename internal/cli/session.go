@@ -116,11 +116,11 @@ func (s *Session) Prompt() string {
 
 // Candidates 返回当前位置（line 已含正在输入的前缀）的补全候选。
 // 以 "？" 结尾的行视为 ? 查询；动态候选查询失败退化为占位提示（§5.3）。
+// 行内含未引用 `|` 时切到管道段补全（§5 第 9 条，决策 #155 补充三）。
 func (s *Session) Candidates(line string) []schema.Candidate {
 	line = strings.TrimSuffix(line, "?")
-	tokens, partial := completionTokens(line)
-	root := s.rootForContext(tokens)
-	return schema.Candidates(root, tokens, partial, s.dynCandidates())
+	_, _, cs := s.completionContext(line)
+	return cs
 }
 
 // Complete 处理 Tab：返回补全后的行与该位置候选（FR-CLI-003/§5.2）。
@@ -148,10 +148,40 @@ func (s *Session) CompleteLine(line string) string {
 }
 
 // completionContext 解析补全上下文：已完成 token、正在输入的前缀、候选列表。
+// 行内含未引用 `|` 时补全上下文切到**管道段**（§5 第 9 条）：候选来自
+// schema.PipeCandidates，base 保留 `|` 及其前的全部文本。
 func (s *Session) completionContext(line string) (base, partial string, cs []schema.Candidate) {
+	if seg, ok := pipeSegment(line); ok {
+		tokens, partial := completionTokens(seg)
+		base = strings.TrimSuffix(strings.TrimRight(line, " \t"), partial)
+		if strings.HasSuffix(base, "|") {
+			base += " " // `|match` 与 `| match` 都合法，补全统一带空格更好读
+		}
+		return base, partial, schema.PipeCandidates(tokens, partial)
+	}
 	tokens, partial := completionTokens(line)
 	base = strings.TrimSuffix(strings.TrimRight(line, " \t"), partial)
 	return base, partial, schema.Candidates(s.rootForContext(tokens), tokens, partial, s.dynCandidates())
+}
+
+// pipeSegment 返回行内最后一个未引用 `|` 之后的片段与是否存在。
+// 引用语义与守护进程 splitPipes 一致：双引号内的 `|` 不是管道分隔。
+func pipeSegment(line string) (string, bool) {
+	inQuote, last := false, -1
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '"':
+			inQuote = !inQuote
+		case '|':
+			if !inQuote {
+				last = i
+			}
+		}
+	}
+	if last < 0 {
+		return "", false
+	}
+	return line[last+1:], true
 }
 
 // ---------- 内部 ----------

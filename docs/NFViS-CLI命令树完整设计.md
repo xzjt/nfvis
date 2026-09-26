@@ -38,19 +38,27 @@ show system
                                                     #   唯一的实现也在那里；`show system configuration candidate`
                                                     #   不存在，别在树里再加一份重复且无实现的形态——决策 #153）
 
-show interfaces                                     # 全部接口摘要（API: GET /interfaces）
-show interfaces physical                            # DPDK 物理口（驱动、链接状态、速率、VF 数）
+show interfaces                                     # 接口运行态清单：行 = 配置声明 ∪ VPP 运行态口（决策 #155；
+                                                    #   Admin/Link/Speed/Driver/计数全取运行态——#84 字段级残留收口；
+                                                    #   仅声明未生效的行状态列 - 并标注，纯运行态口标注「未声明」）
+show interfaces physical                            # **与上一条完全等价**（决策 #155：`physical` 选择器退役为等价写法）
 show interfaces physical <ifname>
-  ├─ detail                                         # 驱动、MAC、MTU、队列、NUMA
+  ├─ detail                                         # 运行态单口视图（与裸写法同一实现）
   ├─ statistics                                     # 收发包/字节/错误/drop（实时 stats）
   └─ sriov                                          # VF 列表与占用状态
-show interfaces <ifname> [detail|statistics|sriov]   # **`physical` 可省**：`show interfaces <ifname> <子命令>` 与
-                                                    #   `show interfaces physical <ifname> <子命令>` **等价**
-                                                    #   （同一读物、同一实现——`physical` 只是作用域选择器）；
-                                                    #   不带子命令时两种写法各有其义：`show interfaces <ifname>` 是
-                                                    #   配置视图，`show interfaces physical <ifname>` 是运行态单口视图
-                                                    #   （链接/速率/驱动/计数）。`?`/Tab 在此位置补 `<ifname>`（vpp-ifnames）
+show interfaces <ifname> [detail|statistics|sriov]   # **≡ `show interfaces physical <ifname> …`（全形态等价、同一实现）**
+                                                    #   运行态单口视图（Admin/Link/Speed/Driver/计数）。`?`/Tab 在此位置补
+                                                    #   `<ifname>`（vpp-ifnames，决策 #83）：**候选里的名字必须答得上来**
+                                                    #   （决策 #154/#155）——已声明的口回运行态视图（声明但运行态不可得 →
+                                                    #   状态列 - 并注明），未声明但在清单里的口（派生口 bvi0/vh-*、未声明的
+                                                    #   DPDK 口）同回运行态视图并注明；两侧都不在（清单查询成功才可判）→
+                                                    #   `% 接口 … 未在配置中声明、也不在 VPP 接口清单中`。
+                                                    #   接口的**配置视图**在配置模式：`configure` → `edit interfaces <ifname>`
+                                                    #   → `show`（层级子树），或 `show configuration | display set`（#155）
 show interfaces management                          # 管理口（内核侧，IP/链路）
+                                                    #   ※ VM/容器家族例外（决策 #155 登记）：`show virtual-machine-functions
+                                                    #   <name>` 保留「声明 + state 增补」合并视图——其运行态贫乏（仅 state），
+                                                    #   拆分后信息净损失；配置子树同样可用配置模式层级 show 查看
 
 show virtual-switches                               # 全部虚拟交换机摘要（GET /virtual-switches）
 show virtual-switches <name>
@@ -130,7 +138,11 @@ show tech-support                                   # 诊断包清单预览（�
 
 # 通用管道（所有 show 输出可用）：
 #   | match <regex> | except <regex> | count | last <n> | begin <regex>
-#   | display xml | display json
+#   | display xml | display json | display set
+#     display set：把配置（整树或 edit 层级子树）反推为逐行 `set` 语句——
+#     语句带**绝对路径**、敏感值不输出（# 注释说明）、每行可独立回放；生成后经回放自校验
+#     （语句回放进空配置必须还原原配置，不等即报内部错误，决策 #155）。
+#     仅配置类输出可用（show configuration / 配置模式 show）；运行态 show 无配置可反推。
 ```
 
 ### 1.2 `request`（运维动作，O；破坏性动作为 S）
@@ -555,7 +567,7 @@ virtual-machine-functions {
 | 操作模式 `show configuration <未知子命令>` | **报错**（`% 无效命令: show configuration <x>（可用：…）`），**不显示配置正文**——`show configuration` 省略子命令才是"读 committed"（决策 #153） |
 | 操作模式 `show configuration permissions <class>` | **未实现**（原声明「按 class 视角显示」）——本表**从未定义**该「视角」过滤哪些字段（脱敏按敏感字段、与 class 无关；class 只决定命令节点能否执行），产品也没有按 class 渲染配置的机制，做出来就是一份无从校验的 lossy 视图（同下一行的处理）。故执行器**明说未实现**：`% show configuration permissions <class>：按 class 视角显示暂未实现（committed 原样配置见 show configuration）`，**不再静默渲染 committed 正文**（决策 #153 处置）。替代：`show configuration`（committed 原样） |
 | 配置模式 `show` | candidate（当前层级） |
-| 配置模式 `show \| display set` | **未实现**（原声明「以 `set` 语句展开，便于复制」）——附录 A #84：需要 model→CLI 的**反向映射**（`save` 导出的是 JSON，别名语句如 `login user … password …` 无法由配置树反推为合法语句），做 lossy 版本会在「复制配置」这件事上制造静默错误，故登记为独立特性而非补丁。替代：`save <file>`（JSON）/ `show configuration`（块状）/ `\| display json` |
+| 配置模式 `show \| display set` | **已实现**（决策 #155，推翻 #84 的搁置）：把当前层级（含顶层）配置反推为逐行 `set` 语句，语句带**绝对路径**、敏感值**不输出**并以 `#` 注释说明（`model.IsSensitiveKey` 单一真源；掩码占位符回放会静默替换凭据，故省略）、含空格取值按语句分词器同规则加引号；**生成后回放自校验**（语句经真实 `applyStatement` 回放进空配置必须还原原配置，不等即报内部错误——#84 担心的「复制配置静默错误」在结构上被排除）。实现 = 通用逆走器（`jsonKeyOf` 机械双射 + `identityFields` + IVK + ScalarParam）+ 13 个别名家族的逆映射发射器（与别名 apply 同源对照维护）。`show configuration \| display set`（操作模式）同管道同实现 |
 | 配置模式 `show \| compare` | candidate ⇄ committed diff（**已实现**：`Engine.CompareCandidate`，2026-09-18 接线，发现 #4） |
 
 ## 4. class 权限矩阵（预置）
@@ -599,6 +611,18 @@ virtual-machine-functions {
    该转换同样作用于**串口接管**（`request … console`）：该路径不减 `Suspend` raw 模式，
    guest 以裸 LF 输出时会被补 CR（等价于终端 cooked 模式的 `ONLCR`）；裸 LF（0x0A）
    不可能是多字节字符的续字节，故对 UTF-8/控制序列安全。
+8. **说明文本口径（附录 A #86、#87）**：命令树的 `Desc`（`?`/Tab 候选列表与 `help` 输出里的那列说明）
+   是**给操作者看的**，**不得包含内部引用**——`FR-xxx`、`§x`、`决策 #nn`、`附录 A #nn` 一律不写。
+   需求可追溯（AGENTS 规则 2）写在**代码注释与设计类 `docs/`** 里。
+   由 `internal/archtest/user_text_test.go` 守护（同时拒绝剥掉引用后留下的残渣：圈号 `①-⑳`、`/#nn`、
+   空标点括号、连续标点）。示例：`commit` 的说明是 `提交 candidate`，不是 `提交 candidate（FR-CFG-002/003）`。
+9. 管道位置同样可补全（FR-CLI-002「任意位置」，决策 #155 补充三）：行内最后一个未引用 `|`
+   之后，`?`/Tab 列出**管道关键字**（match/except/count/last/begin/display/compare，含描述）；
+   `display` 的取值位列 json/xml/set，`compare` 的取值位列 rollback；match/except/begin（正则）
+   与 last（行数）为自由取值、无候选；取值给全后本段无候选（下一个 `|` 开新段、再次列关键字）。
+   双引号内的 `|` 不视为管道分隔（与守护进程 splitPipes 同语义）。
+   实现：`schema.PipeCandidates`（与 `PipeKeywords` 同一单一来源），CLI 会话把含未引用 `|`
+   的行的补全上下文切到管道段。
 8. **说明文本口径（附录 A #86、#87）**：命令树的 `Desc`（`?`/Tab 候选列表与 `help` 输出里的那列说明）
    是**给操作者看的**，**不得包含内部引用**——`FR-xxx`、`§x`、`决策 #nn`、`附录 A #nn` 一律不写。
    需求可追溯（AGENTS 规则 2）写在**代码注释与设计类 `docs/`** 里。

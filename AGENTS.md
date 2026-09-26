@@ -29,18 +29,20 @@
   （Go 1.26.0（apt）、make、sshpass 等；`dpkg -i` 装 VPP 用 `/root/vpp-v26.06-deb/` 的 9 个
   26.06-release deb——快照基线自带）。
   源码树 `/root/src`（git archive 同步，见待办 §3.3，无 .git → 构建**必须显式传 SOURCE_DATE_EPOCH**）。
-  **round80 后现状**（2026-09-25 发布 v1.1.34：命令树⇄执行器同源收口（决策 #153）+ 控制台时间统一 UTC +
-  两份 CLI 文档按代码重新生成 + 手册控制台章节含 28 张截图，证据
-  `docs/evidence/v1-closeout-round80-cli-web-fulltest-and-release-1.1.34.txt`；
+  **round81 后现状**（2026-09-26：决策 #155 `show` 族 JunOS 化第一步——接口族全运行态 + `show configuration | display set`
+  全家族反推（回放自校验），已真机验证未发布，证据 `docs/evidence/v1-closeout-round81-cli-junos-runtime-displayset.txt`；
+  round80 基线见 `docs/evidence/v1-closeout-round80-cli-web-fulltest-and-release-1.1.34.txt`，
   三件套复跑仍以 `docs/evidence/v1-closeout-round36-three-suites.txt` 为准）：
-  nfvis **1.1.34** active、管理口令 `WBF81vOA4M8GM28f@Aa1`（**随快照恢复而变**，取法见待办 §3.1；
-  round80 已按哈希比对法核对**匹配**）；
+  nfvis **1.1.35~dev3** active（round81 验证版、未发布，含 R81-1/R81-2 display set 真机修复与 R81-3 管道位置补全；`/root/src` 已同步 #155 工作树）；
+  管理口令 `WBF81vOA4M8GM28f@Aa1`（**随快照恢复而变**，取法见待办 §3.1；
+  round81 已按哈希比对法核对**匹配**）；
   VPP 26.06 运行、主堆用 2M 大页、ens192/ens224 交 DPDK；
   cmdline 含 hugepagesz=1G/2M + isolcpus=2-5 + intel_iommu=on；
-  **vs-vnf 拓扑与 vnf-a/vnf-b 在跑、流量已复通**（BVI ping 双向 5/5 0%、宿主经 DPDK 物理口 0.38~1.50ms；
-  重装恢复收敛后的**首个** ICMP 曾丢 1 包，复跑两轮全通）；
+  **vs-vnf 拓扑与 vnf-a/vnf-b 在跑、流量已复通**（BVI→vnf-a ping 5/5 0%；
+  vnf-b 的 user-data 与 vnf-a 同址 .11，BVI↔vnf-b 无独立流量口径——历史如此，非本轮引入）；
   镜像 `debian-12-generic-amd64.qcow2` + `alpine.qcow2`（阶段 3 前置）+ 容器镜像 `alpine:3.20`；
-  配置库 rev 55 / audit 112（audit 106→112 是 round80 用产品路径做 VNF stop/start/restart 与 `request vpp restart`，**内容指纹 `084c3a64…` 未变**）；
+  配置库 rev 56 / audit 113（round81：真机套件级联在 cli-vm 上留过一次快照/域，已清理；
+  `request interfaces ens224 enable` 走一次性事务 +1 rev/audit，**内容指纹未变**）；
   `/var/lib/nfvis/tech-support` 0700 + 归档 0600、`/var/lib/nfvis/backup` 0600（决策 #149 口径在既有安装上也生效）；
   **`nodejs` v22.22.1**（round37 装，
   仅用于 `node --check internal/api/ui/app.js` 校验 Web 前端语法——前端与 CI 都**不依赖** node）。
@@ -50,7 +52,7 @@
   跑 `make integration` 前需先重建（布局与流程见待办 §3.3 / §0 第 1 条）。
   `ens160` 是管理口（vmxnet3、承载 SSH）——**永不拿管理路径做试验**的红线不变。
   设计基线在 `docs/`，**不要凭记忆重设计**。
-- 已定决策 153 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 155 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。
