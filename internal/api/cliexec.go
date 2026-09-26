@@ -546,6 +546,121 @@ func invalidShowConfiguration(rest []string) string {
 		strings.Join(rest, " "))
 }
 
+// ---------- 「已知前缀但形态不合法」的语法指引 ----------
+
+// knownPrefixSyntaxHint 输入形态不合法时的语法指引：token 序列的**前缀**若在命令树里
+// 真实存在，就按树给出该前缀下的可用形态；前缀根本不存在时返回空串，调用方维持
+// 既有的「无效命令」文案。
+//
+// 由来（round84 R84-11②）：`request images delete foo`（漏了 name 关键字）此前回
+// 「无效命令: request images delete foo（输入 ? 查看可用命令）」——操作者敲的是一个**已知
+// 命令的错误形态**，产品明明知道正确写法（`request images delete name <n>`）却只回一句
+// 「无效命令」，等于把最有用的信息丢掉。判别只看一件事：前缀在树里存不存在。
+// 命令已经敲完整、只是多了 token 时（如 `request vpp restart extra`）前缀已是叶子、
+// 无子形态可列，仍按原口径报「无效命令」——那是另一种错，不该伪装成语法提示。
+func knownPrefixSyntaxHint(root *schema.Node, tokens []string) string {
+	node, prefix := deepestKnownPrefix(root, tokens)
+	if node == nil {
+		return ""
+	}
+	forms := syntaxFormsOf(node)
+	if len(forms) == 0 {
+		return ""
+	}
+	// 用拼接而非 fmt.Sprintf：`%%` 在 Sprintf 里会被折成**单个** `%`，那样就与交互路径
+	// 同一句话（`%% 语法: request images delete name <n>`）逐字不同了。
+	return "%% 语法: " + strings.Join(prefix, " ") + " " +
+		strings.Join(forms, " | ") + "（输入 ? 查看可用命令）\n"
+}
+
+// deepestKnownPrefix 取 tokens 的**最长已建模前缀**及其末节点；整串都合法（或连第一个
+// token 都不在树里）时返回 nil。逐级试 Match 即可——命令最长不过十来个 token，
+// 代价可忽略，且判据与 `?`/Tab 补全同源（同一棵树）。
+func deepestKnownPrefix(root *schema.Node, tokens []string) (*schema.Node, []string) {
+	for i := len(tokens) - 1; i >= 1; i-- {
+		if n, _, err := schema.Match(root, tokens[:i]); err == nil && n != nil {
+			return n, tokens[:i]
+		}
+	}
+	return nil, nil
+}
+
+// maxSyntaxForms 语法指引里最多列出的形态数：报错行要能读下去，其余交给 `?` 补全。
+const maxSyntaxForms = 6
+
+// maxFormDepth 单个形态最多下探的关键字层数：`delete name <name>` 是 3 层，
+// 再深就该让 `?` 补全接手了。
+const maxFormDepth = 4
+
+// syntaxFormsOf 渲染节点下可用的**直接子形态**（供操作者照着敲）。
+func syntaxFormsOf(n *schema.Node) []string {
+	out := make([]string, 0, len(n.Children))
+	for i, c := range n.Children {
+		if i == maxSyntaxForms {
+			out = append(out, "…")
+			break
+		}
+		out = append(out, syntaxFormOf(c))
+	}
+	return out
+}
+
+// syntaxFormOf 单个子节点的形态：关键字名（或参数/取值占位符），并沿**单支关键字链**
+// 下探到首个取值占位符——`request images delete` 的形态要写成 `delete name <name>`
+// 才是能照敲的（只写 `delete …` 等于把「还差 name 关键字」这条关键信息又藏起来）。
+// 分叉（后继有多个关键字可走）以 `…` 收尾，细节由 `?` 补全给出。
+func syntaxFormOf(c *schema.Node) string {
+	if c.Kind != schema.Keyword {
+		return c.Name // 参数/取值占位符（<name>/<url> 一类）
+	}
+	parts := []string{c.Name}
+	cur := c
+	for len(cur.Children) > 0 {
+		if ph := firstPlaceholderOf(cur); ph != "" {
+			parts = append(parts, ph)
+			return strings.Join(parts, " ")
+		}
+		next := soleKeywordChild(cur)
+		if next == nil || len(parts) >= maxFormDepth {
+			return strings.Join(parts, " ") + " …"
+		}
+		parts = append(parts, next.Name)
+		cur = next
+	}
+	return strings.Join(parts, " ")
+}
+
+// firstPlaceholderOf 子节点里首个「取值占位」的直接子节点名（参数优先于取值，
+// 与树的匹配顺序一致）；没有则空串。
+func firstPlaceholderOf(n *schema.Node) string {
+	for _, c := range n.Children {
+		if c.Kind == schema.Param {
+			return c.Name
+		}
+	}
+	for _, c := range n.Children {
+		if c.Kind == schema.Value {
+			return c.Name
+		}
+	}
+	return ""
+}
+
+// soleKeywordChild 只有一个关键字子节点时返回它，其余（分叉/无子节点）返回 nil。
+func soleKeywordChild(n *schema.Node) *schema.Node {
+	var only *schema.Node
+	for _, c := range n.Children {
+		if c.Kind != schema.Keyword {
+			continue
+		}
+		if only != nil {
+			return nil
+		}
+		only = c
+	}
+	return only
+}
+
 // showConfigSessions：candidate 持锁会话列表（`show system configuration sessions` 与
 // 等价写法 `show configuration sessions` 的**唯一**实现，与 GET /system/configuration/sessions 同源）。
 func (x *cliExecutor) showConfigSessions() string {
@@ -839,21 +954,21 @@ func applyStatement(cfg *model.Config, tokens []string) error {
 
 // deleteStatement 按 schema 树驱动删除语句/子树。
 func deleteStatement(cfg *model.Config, tokens []string) error {
+	before := *cfg
+	tree := toJSONTree(*cfg)
+	// 删除前的交换机名单：收尾时据此判别哪些交换机被本条语句移除（见 pruneVSwitchVrf）。
+	vswitches := vswitchNamesOf(tree)
 	if rule := matchAlias(tokens); rule != nil {
-		before := *cfg
-		tree := toJSONTree(*cfg)
 		if err := rule.apply(tree, tokens, false); err != nil {
 			return err
 		}
-		pruneEmptySingleton(tree) // 发现 #12(b)：删空后不留空壳（两条路径都要走）
-		return commitTree(cfg, tree, before, tokens)
-	}
-	before := *cfg
-	tree := toJSONTree(*cfg)
-	if err := applyTokens(cfgPathRoot(), tree, tokens, false); err != nil {
+	} else if err := applyTokens(cfgPathRoot(), tree, tokens, false); err != nil {
 		return err
 	}
-	pruneEmptySingleton(tree)
+	// 收尾与 pruneEmptySingleton 同属「别名表/通用树遍历两条路径共用的合流点」：
+	// 整节点删除虚拟交换机须一并删同名 Vrf（与 REST 一致；只修一条路径会漏）。
+	pruneVSwitchVrf(vswitches, tree)
+	pruneEmptySingleton(tree) // 发现 #12(b)：删空后不留空壳（两条路径都要走）
 	return commitTree(cfg, tree, before, tokens)
 }
 

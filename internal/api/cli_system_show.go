@@ -264,7 +264,7 @@ func (x *cliExecutor) renderHardware() string {
 			fmt.Fprintf(&b, "%-16s %-10s %-10s %s\n", d.Device, d.SmartStatus, temp, wear)
 		}
 	}
-	fmt.Fprintf(&b, "root-used      %.1f%%（阈值 %d%%）\n", hh.RootUsedPercent, th.DiskUsedPercent)
+	fmt.Fprintf(&b, "root-used      %.1f%%（阈值 %s）\n", hh.RootUsedPercent, thresholdText(th.DiskUsedPercent, "%"))
 	if len(violations) > 0 {
 		b.WriteString("越限: " + strings.Join(violations, "; ") + "\n")
 	} else {
@@ -304,8 +304,15 @@ func (x *cliExecutor) renderKernelBaseline() string {
 		desiredInt(desired.Hugepages1G), desiredInt(desired.Hugepages2M), dash(desired.IsolatedCores), desiredBool(desired.NMIWatchdog), dash(desired.THP))
 	if len(diffs) == 0 {
 		b.WriteString("\n一致性：内核基线与配置期望一致（无需重启）\n")
+		// 运行实际高于声明属运行期占用（内核不回收），不判不一致，但要说明清楚，
+		// 否则操作者看到「实际 2（free 1）」与「一致」并存会以为漏判或想去重启。
+		if notes := ksys.HugepageRuntimeNotes(desired, actual); len(notes) > 0 {
+			b.WriteString("说明：" + strings.Join(notes, "；") + "\n")
+		}
 	} else {
-		b.WriteString("\n一致性：与配置期望不一致（需写入 GRUB 基线并重启生效）：\n")
+		// 不一致项各自带处理口径（写 GRUB 基线重启 / 分配不足），不再统一断言「需写入 GRUB 并重启」——
+		// 分配不足时 cmdline 基线本来就是对，照「写基线再重启」做永远不一致。
+		b.WriteString("\n一致性：与配置期望不一致：\n")
 		for _, d := range diffs {
 			b.WriteString("  - " + d + "\n")
 		}
@@ -324,6 +331,15 @@ func dash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// thresholdText 阈值文本：未设置（<=0，判定侧按「不产生告警」处理）时显示「未设置」而非 0，
+// 否则显示数值 + 单位（如 90% / 85C）——避免同屏出现「阈值 0%」与「越限:（无）」的自相矛盾。
+func thresholdText(limit int, unit string) string {
+	if limit <= 0 {
+		return "未设置"
+	}
+	return fmt.Sprintf("%d%s", limit, unit)
 }
 
 func desiredInt(v int) string {

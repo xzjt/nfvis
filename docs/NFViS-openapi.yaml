@@ -2768,6 +2768,9 @@ components:
         imported_at: { type: string, format: date-time }
         ref_count: { type: integer, description: 引用该镜像的 VNF 数 }
         import_state: { type: string, enum: [ready, downloading, failed], description: 运行态 }
+        downloaded_bytes: { type: integer, format: int64, description: 下载进度：已落盘字节（仅 URL 拉取的镜像在下载中或失败时出现） }
+        total_bytes: { type: integer, format: int64, description: 下载总量；服务端未给 Content-Length 时缺省 }
+        last_error: { type: string, description: 最近一次失败原因（import_state=failed 时出现，含可照做的续传指引） }
 
     Snapshot:
       type: object

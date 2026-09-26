@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -576,12 +577,14 @@ func run() error {
 		TLSCert: *tlsCert,
 		TLSKey:  *tlsKey,
 		Log:     log,
-		VPP:     &vppController{mgr: vppMgr, applier: startupApplier, engine: engine},
-		L2:      &l2Controller{net: netProvider},
-		L3:      &l3Controller{net: netProvider},
-		LLDP:    &lldpController{net: netProvider},
-		State:   state.New(vppMgr.Runtime()),
-		SRIOV:   sriovProvider,
+		VPP: &vppController{mgr: vppMgr, applier: startupApplier, engine: engine,
+			// socket 供起后健康探测用（与连接管理器同一套接字）
+			socket: *vppSock},
+		L2:    &l2Controller{net: netProvider},
+		L3:    &l3Controller{net: netProvider},
+		LLDP:  &lldpController{net: netProvider},
+		State: state.New(vppMgr.Runtime()),
+		SRIOV: sriovProvider,
 		DPDK: &dpdkController{b: dpdkBinder, rec: dpdkBindings, logger: log, facts: mgmtFacts,
 			// 数据面占用探测（发现 #13）：解绑前问 VPP「这个口还在你手里吗」
 			dataplane: func(ifname string) (bool, error) {
@@ -664,6 +667,15 @@ type vppController struct {
 	mgr     *network.Manager
 	applier *network.Applier
 	engine  *config.Engine
+	// socket binary API 套接字（起后健康探测用；与连接管理器同源）
+	socket string
+	// probe 起后健康探针（可注入；缺省 vppBinaryProbe = binary API 能连上）
+	probe vppProbeFunc
+	// poolPages 读某页尺寸的运行期大页池（可注入；缺省读 sysfs；ok=false = 读不到不判定）
+	poolPages func(size string) (int, bool)
+	// healthTimeout/healthInterval 起后健康等待的有界参数（<=0 取缺省；测试可缩短）
+	healthTimeout  time.Duration
+	healthInterval time.Duration
 }
 
 func (c *vppController) Status(vpp *model.VppConfig) api.VppStatus {
@@ -672,13 +684,177 @@ func (c *vppController) Status(vpp *model.VppConfig) api.VppStatus {
 		PendingRestart: v.PendingRestart, LastError: v.LastError}
 }
 
+// Restart 按 committed 配置重生成 startup.conf 并重启 VPP（FR-SYS-009）。
+//
+// `systemctl restart` 返回 0 只说明「重启动作被接受」：VPP 起不来时（如大页池被清空）
+// 进程会立刻 SEGV 退出，而 CLI/REST 都会把它当成功报给操作者——操作者看到成功、
+// 数据面其实全挂（R84-4/R83-6）。故这里在返回成功前做两件事：
+// 重启前按配置预检大页池，重启后有界等待 binary API 可连。
 func (c *vppController) Restart(ctx context.Context, _ *model.VppConfig) error {
 	cfg, err := c.engine.Committed()
 	if err != nil {
 		return err
 	}
-	_, err = c.applier.Apply(ctx, &cfg)
-	return err
+	if err := c.precheckHugepages(cfg.Vpp); err != nil {
+		return err
+	}
+	if _, err := c.applier.Apply(ctx, &cfg); err != nil {
+		return err
+	}
+	return c.waitHealthy(ctx)
+}
+
+// 起后健康校验参数：VPP 正常起约 1~2 秒，给足 15 秒（含 systemctl 停/起与 DPDK 初始化），
+// 每 500ms 探一次；超时即如实报错，不把「没起来」报成成功。
+const (
+	vppHealthTimeout  = 15 * time.Second
+	vppHealthInterval = 500 * time.Millisecond
+)
+
+// vppProbeFunc 一次起后健康探测：返回 nil 表示 binary API 可连（VPP 真的起来了）。
+type vppProbeFunc func(ctx context.Context) error
+
+// waitHealthy 有界轮询确认 VPP 真的起来了（binary API 可连）。
+func (c *vppController) waitHealthy(ctx context.Context) error {
+	timeout, interval := c.healthTimeout, c.healthInterval
+	if timeout <= 0 {
+		timeout = vppHealthTimeout
+	}
+	if interval <= 0 {
+		interval = vppHealthInterval
+	}
+	probe := c.probe
+	if probe == nil {
+		probe = func(ctx context.Context) error { return vppBinaryProbe(ctx, c.socket) }
+	}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		limit := time.Until(deadline)
+		if limit <= 0 {
+			break
+		}
+		if lastErr = probeWithin(ctx, probe, limit); lastErr == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			// 等待被取消（如 REST 请求中断）：如实说「没等到」，不当作成功
+			return fmt.Errorf("VPP 重启后未起来（等待被取消）: %v", ctx.Err())
+		}
+		// 剩余时间不够再等一轮：结束等待，如实报错
+		if !time.Now().Add(interval).Before(deadline) {
+			break
+		}
+		t := time.NewTimer(interval)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+		}
+	}
+	return fmt.Errorf("VPP 重启后未起来：%s 内 binary API 未连上（%v）；"+
+		"请查 systemctl status vpp 与 journalctl -u vpp 的启动日志，数据面当前不可用", timeout, lastErr)
+}
+
+// probeWithin 执行一次探测，最多等 limit：探测本身是不可取消的阻塞调用
+// （govpp 连接路径自带超时，最坏约 7 秒），用协程兜底，保证整体等待不超过上限。
+// 超时后探测协程自行结束（其内部路径有界），不会泄漏。
+func probeWithin(ctx context.Context, probe vppProbeFunc, limit time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- probe(ctx) }()
+	t := time.NewTimer(limit)
+	defer t.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-t.C:
+		return fmt.Errorf("探测未在 %s 内返回", limit.Round(10*time.Millisecond))
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// vppBinaryProbe 探一次 VPP binary API：能建连（govpp 连接建立时会与 VPP 完成
+// socket 注册与消息表握手）即视为健康。用**独立连接**探测，不碰连接管理器的会话，
+// 故 VPP 未起来时只回报错误，不干扰重连状态机。
+// 注意：连接建立路径自带超时（socket 等待与握手各 3 秒），不会无限阻塞。
+func vppBinaryProbe(ctx context.Context, socket string) error {
+	sess, events, err := network.NewGovppDialer().Dial(socket, 1, 0)
+	if err != nil {
+		return fmt.Errorf("连接 %s: %w", socket, err)
+	}
+	defer sess.Disconnect()
+	select {
+	case ev, ok := <-events:
+		if !ok {
+			return fmt.Errorf("连接 %s: 未返回连接结果", socket)
+		}
+		if ev.State != network.StateConnected {
+			if ev.Err != nil {
+				return fmt.Errorf("连接 %s: %v", socket, ev.Err)
+			}
+			return fmt.Errorf("连接 %s: 状态 %s", socket, ev.State)
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("连接 %s: %v", socket, ctx.Err())
+	}
+}
+
+// precheckHugepages 重启前按配置需求预检大页池（R84-4 的失败面）：
+// 配置声明 hugepage-preference 时 startup.conf 会把它同时钉成 default-hugepage-size
+// 与 main-heap-page-size（决策 #114），该尺寸的运行期池为 0 时 VPP 必然起不来
+// （实测：池被运行期置 0 后 VPP 直接 SEGV）。此处明确拒绝，别让数据面白挂一次。
+func (c *vppController) precheckHugepages(vpp *model.VppConfig) error {
+	if vpp == nil || vpp.Memory == nil || vpp.Memory.HugepagePreference == "" {
+		return nil
+	}
+	size := vpp.Memory.HugepagePreference
+	pages, ok := c.poolPagesOf(size)
+	if !ok || pages > 0 {
+		return nil // 读不到池（非 sysfs 环境）或池非空：不做判定，交给起后健康校验
+	}
+	return fmt.Errorf("VPP 未重启：配置的大页偏好为 %s，但内核 %s 大页池当前为 0（%s）；"+
+		"请先恢复该池（内核基线用 request system kernel apply + request system reboot，"+
+		"或运行期写入该文件），再重启数据面",
+		size, size, hugepageSysfsPath(size))
+}
+
+// poolPagesOf 读运行期大页池（可注入；缺省读 sysfs）。
+func (c *vppController) poolPagesOf(size string) (int, bool) {
+	if c.poolPages != nil {
+		return c.poolPages(size)
+	}
+	return readHugepagePool(size)
+}
+
+// hugepageSysfsPath 某页尺寸的池大小文件路径（与 internal/system/kernel.go 的读取同源）。
+func hugepageSysfsPath(size string) string {
+	switch size {
+	case "2M":
+		return "/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages"
+	case "1G":
+		return "/sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages"
+	}
+	return ""
+}
+
+// readHugepagePool 读某页尺寸的运行期池大小；ok=false 表示该尺寸不识别或读不到
+// （非 Linux/无 sysfs 的环境不做判定，避免拿「读不到」当「池为 0」误拒）。
+func readHugepagePool(size string) (int, bool) {
+	path := hugepageSysfsPath(size)
+	if path == "" {
+		return 0, false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // Version 最近一次成功连接探测到的 VPP 版本（决策 #118：/system/version 的 vpp 键取这里）。

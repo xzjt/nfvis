@@ -41,6 +41,11 @@ func (x *cliExecutor) execRequest(user, class, source string, t []string) string
 	// 恢复出厂为双重确认，可能连续出现多个 --yes，故全部剥离。
 	validated := stripAllConfirm(t)
 	if _, _, err := schema.Match(schema.OperRoot(), append([]string{"request"}, validated...)); err != nil {
+		// 已知前缀 + 形态不合法（如 `request images delete foo` 漏了 name 关键字）：
+		// 按树给出正确写法，与交互路径同款——而不是笼统的「无效命令」（round84 R84-11②）。
+		if hint := knownPrefixSyntaxHint(schema.OperRoot(), append([]string{"request"}, validated...)); hint != "" {
+			return hint
+		}
 		return fmt.Sprintf("%% 无效命令: request %s（输入 ? 查看可用命令）\n", strings.Join(validated, " "))
 	}
 	// 权限在**入口处按匹配到的最深节点**判定一次（决策 #144）：命令树把 Su()/Op() 标在子节点上，
@@ -620,12 +625,15 @@ func (x *cliExecutor) requestVPP(user string, t []string) string {
 		if x.vppRestart == nil {
 			return errRuntimeUnavailable
 		}
+		// 注入的 restart 实现负责「重启 + 起后健康校验」：只有确认 binary API 可连才返回 nil。
+		// 起不来（如大页池不足致 VPP 立刻退出）必须让操作者看到 `%%`，不能报成功——
+		// 否则界面显示成功而数据面全挂（R84-4）。
 		if err := x.vppRestart(context.Background()); err != nil {
 			x.audit(user, "vpp.restart", "重启数据面", err)
 			return "%% " + err.Error() + "\n"
 		}
-		x.audit(user, "vpp.restart", "重启数据面（按 committed 配置）", nil)
-		return "已按 committed 配置重启 VPP 并触发恢复收敛。\n"
+		x.audit(user, "vpp.restart", "重启数据面（按 committed 配置，binary API 已连通）", nil)
+		return "已按 committed 配置重启 VPP（binary API 已连通）并触发恢复收敛。\n"
 	case "trace":
 		return x.requestVppTrace(user, t[1:])
 	}

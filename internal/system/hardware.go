@@ -92,6 +92,8 @@ func (h *HardwareProvider) Collect(ctx context.Context) HardwareHealth {
 }
 
 // Evaluate 按阈值标注传感器状态（ok/warning/critical）。
+// 阈值 <= 0 表示该项**未设置**：判定为 ok、不产生告警；显示侧（show system hardware）
+// 同样以「未设置」呈现，两侧口径一致。
 func (h *HardwareProvider) Evaluate(hh *HardwareHealth, cpuTemp, diskTemp, diskUsed int) []string {
 	var violations []string
 	statusOf := func(v, limit float64) string {

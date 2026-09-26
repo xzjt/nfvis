@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -27,6 +28,15 @@ type DownloadOptions struct {
 	Progress    func(done, total int64)
 }
 
+const (
+	// defaultDownloadTimeout 未注入 Client 时的超时。注意它是**整体**上限（连接+读 body），
+	// 不是空闲超时：服务端停发数据时只有到这个点才会失败——故中断原因与已下载字节必须落盘，
+	// 否则这段时间里操作者只能看着 downloading（R84-6）。
+	defaultDownloadTimeout = 10 * time.Minute
+	// progressSaveStep 进度落盘的字节节流（每下载这么多更新一次元数据，避免每 256KB 写索引）。
+	progressSaveStep = 1 << 20
+)
+
 // Download 拉取镜像到仓库并登记元数据。中途状态记 downloading，成功 ready、失败 failed。
 // 支持断点续传：若存在 <dest>.part 且服务端支持 Range，则从断点续传。
 func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error) {
@@ -39,29 +49,65 @@ func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error
 		return Meta{}, err
 	}
 	s.emitState(opts.Name, opts.Type, StateDownloading)
+
+	// 进度落盘（R84-6）：异步拉取期间操作者只能经 `show images <名> detail` 观察，
+	// 故把已下载/总字节写进元数据——复用既有进度回调（opts.Progress / s.progress），不另造机制。
+	var done, total int64
+	prevProgress := opts.Progress
+	lastSaved := int64(0)
+	var progressErr error
+	opts.Progress = func(d, t int64) {
+		done, total = d, t
+		if prevProgress != nil {
+			prevProgress(d, t)
+		}
+		if d-lastSaved < progressSaveStep {
+			return
+		}
+		lastSaved = d
+		m := pending
+		m.DownloadedBytes, m.TotalBytes = d, t
+		if err := s.setMeta(m); err != nil && progressErr == nil {
+			// 进度落盘失败不中断拉取：最终状态还会再写一次（成功时那次写失败会直接报错），
+			// 失败时把这里的首个错误随结果一并上报——不静默丢弃。
+			progressErr = err
+		}
+	}
+	// failedMeta 失败时登记的元数据：带上已下载字节/总字节，让 failed 也能说明「断在哪」。
+	failedMeta := func() Meta {
+		m := pending
+		m.DownloadedBytes, m.TotalBytes = done, total
+		if m.DownloadedBytes == 0 {
+			// 一个字节都没读到就失败（连接/HTTP 层）：断点仍可能留在 .part（续传场景）。
+			if st, err := os.Stat(filepath.Join(s.cfg.Dir, opts.Name) + ".part"); err == nil {
+				m.DownloadedBytes = st.Size()
+			}
+		}
+		return m
+	}
+
 	meta, err := s.downloadFile(ctx, opts)
 	if err != nil {
-		pending.ImportState = StateFailed
-		_ = s.setMeta(pending)
-		s.emitState(opts.Name, opts.Type, StateFailed)
-		return Meta{}, err
+		if progressErr != nil {
+			err = fmt.Errorf("%w（进度落盘失败：%v）", err, progressErr)
+		}
+		return Meta{}, s.fail(failedMeta(), err)
 	}
 	// 容器镜像：URL 拉取的是 docker save 归档 → `image load` 后删除临时文件，仅登记元数据。
 	if opts.Type == TypeContainer {
 		if s.dockerLoad == nil {
 			_ = os.Remove(filepath.Join(s.cfg.Dir, opts.Name))
-			pending.ImportState = StateFailed
-			_ = s.setMeta(pending)
-			return Meta{}, fmt.Errorf("拉取容器镜像 %s：未接入 Docker", opts.Name)
+			return Meta{}, s.fail(failedMeta(), fmt.Errorf("拉取容器镜像 %s：未接入 Docker", opts.Name))
 		}
 		archive := filepath.Join(s.cfg.Dir, opts.Name)
 		if err := s.dockerLoad(archive, opts.Name); err != nil {
-			pending.ImportState = StateFailed
-			_ = s.setMeta(pending)
-			return Meta{}, fmt.Errorf("docker load %s: %w", opts.Name, err)
+			return Meta{}, s.fail(failedMeta(), fmt.Errorf("docker load %s: %w", opts.Name, err))
 		}
 		if err := os.Remove(archive); err != nil && !os.IsNotExist(err) {
-			return Meta{}, err
+			// 镜像已 load 进 Docker（可用），只是临时归档没清掉：不能因此把可用镜像判 failed
+			// （failed 会被 Lookup 挡掉），也不能让状态停在 downloading——登记 ready 并把残留
+			// 文件记进说明，操作者至少能看到该手工清哪个文件。
+			meta.LastError = fmt.Sprintf("容器镜像已入库，但临时归档 %s 未能清理：%v", archive, err)
 		}
 		meta.Format = "docker-archive"
 	}
@@ -72,10 +118,24 @@ func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error
 	return meta, nil
 }
 
+// fail 统一收口失败：状态落 failed、失败原因写进元数据（`show images <名> detail` 可见）、
+// 发布状态事件，并把「状态落盘失败」与原始错误一并返回。
+// 此前失败分支用 `_ = s.setMeta(pending)` 丢弃了错误——落盘一旦失败，操作者只会看到
+// 永远停在 downloading，连失败都看不到（R84-6）。
+func (s *Store) fail(m Meta, cause error) error {
+	m.ImportState = StateFailed
+	m.LastError = cause.Error()
+	if err := s.setMeta(m); err != nil {
+		return fmt.Errorf("%w（失败状态落盘失败：%v）", cause, err)
+	}
+	s.emitState(m.Name, m.Type, StateFailed)
+	return cause
+}
+
 func (s *Store) downloadFile(ctx context.Context, opts DownloadOptions) (Meta, error) {
 	client := opts.Client
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Minute}
+		client = &http.Client{Timeout: defaultDownloadTimeout}
 	}
 	dest := filepath.Join(s.cfg.Dir, opts.Name)
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
@@ -160,7 +220,14 @@ func (s *Store) downloadFile(ctx context.Context, opts DownloadOptions) (Meta, e
 		}
 		if rerr != nil {
 			_ = f.Close()
-			return Meta{}, fmt.Errorf("拉取中断（已下载 %d 字节，可重试续传）: %w", written, rerr)
+			// 中断原因要能照着做（R84-6）：说清断在哪、断点还在、怎么续——服务端限速/停发
+			// 时最常见的失败是「等到客户端整体超时」，与网络断开区分开。
+			if isTimeoutErr(rerr) {
+				return Meta{}, fmt.Errorf("拉取中断（已下载 %d 字节，可重试续传）：等待服务端数据超时（HTTP 客户端整体超时触发）；"+
+					"已下载部分保留在 .part，重跑同一命令即从断点续传: %w", written, rerr)
+			}
+			return Meta{}, fmt.Errorf("拉取中断（已下载 %d 字节，可重试续传）：连接中断；"+
+				"已下载部分保留在 .part，重跑同一命令即从断点续传: %w", written, rerr)
 		}
 	}
 	if err := f.Close(); err != nil {
@@ -177,8 +244,10 @@ func (s *Store) downloadFile(ctx context.Context, opts DownloadOptions) (Meta, e
 	if err := os.Rename(part, dest); err != nil {
 		return Meta{}, err
 	}
-	return Meta{Name: opts.Name, Type: opts.Type, SizeBytes: written, SHA256: sum,
-		Format: formatOf(opts.Name), Description: opts.Description,
+	// 进度字段在完成时等于镜像大小（`show images <名> detail` 与 REST 同一视图）。
+	return Meta{Name: opts.Name, Type: opts.Type, SizeBytes: written,
+		DownloadedBytes: written, TotalBytes: written,
+		SHA256: sum, Format: formatOf(opts.Name), Description: opts.Description,
 		ImportedAt: s.now().UTC(), ImportState: StateReady}, nil
 }
 
@@ -219,6 +288,13 @@ func contentRangeStart(v string) (int64, bool) {
 
 func equalFoldHex(a, b string) bool {
 	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
+// isTimeoutErr 判定「超时」类错误。注意 http.Client 的整体超时错误实现了 net.Error 的
+// Timeout()（os.IsTimeout 据此判定），但**不** Unwrap 到 context.DeadlineExceeded，
+// 故两条判据都要看。
+func isTimeoutErr(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err)
 }
 
 // isHex 判定字符串是否全为十六进制字符。

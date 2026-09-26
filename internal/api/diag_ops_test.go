@@ -291,4 +291,26 @@ func TestCLIHardwareAndThresholds(t *testing.T) {
 	if !strings.Contains(out, "bmc-present    false") || !strings.Contains(out, "root-used") {
 		t.Fatalf("show system hardware: %s", out)
 	}
+	if !strings.Contains(out, "阈值 90%") {
+		t.Fatalf("已设阈值应显示数值: %s", out)
+	}
+}
+
+// R84-10：未配置阈值时不得显示「阈值 0%」——判定侧把 limit<=0 当「未设置 → 不告警」，
+// 显示侧也要说「未设置」，否则同屏的「阈值 0%」与「越限:（无）」自相矛盾（读起来像任何占用都越限）。
+func TestCLIHardwareUnsetThresholdDisplay(t *testing.T) {
+	fh := &fakeHardware{hh: system.HardwareHealth{BMCPresent: false, RootUsedPercent: 15.6}}
+	x, _ := newCLIKit(t)
+	x.setHardware(fh)
+
+	out := run(t, x, "admin", "super-user", "ssh", "show system hardware")
+	if !strings.Contains(out, "root-used      15.6%（阈值 未设置）") {
+		t.Fatalf("未配置阈值应显示「未设置」: %s", out)
+	}
+	if strings.Contains(out, "阈值 0%") {
+		t.Fatalf("未配置阈值不得显示 0%%: %s", out)
+	}
+	if !strings.Contains(out, "越限: （无）") {
+		t.Fatalf("未设置阈值不应产生越限: %s", out)
+	}
 }

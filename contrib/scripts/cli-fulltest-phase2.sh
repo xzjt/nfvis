@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 阶段 2：配置模式语句（契约 §2）逐条隔离测试。
 #
-# 手法：① 先用 run() 提交一批**前置对象**（资源池/物理口/交换机/ACL/QoS/SPAN/NAT），
-#       使后续「实例内语句」有宿主元素；② 再把每条契约语句放进**独立会话**
+# 手法：① 先用 run() 提交一批**前置对象**（资源池/物理口/交换机/ACL/QoS），
+#       使后续「实例内语句」有宿主元素（SPAN 语句见下方独立会话，不提交）；
+#       ② 再把每条契约语句放进**独立会话**
 #       `configure → <语句>`（不 commit、不手写 discard——脚本模式会自动收尾）逐条执行。
 # 为什么独立会话：配置模式内任一行失败会输出 %% 并中止后续行，同会话串跑会**一条失败掩盖其余**。
 # 判定：该语句自身报 % / %% 即失败。注意「语句未产生配置变更」也算失败输出——
@@ -14,6 +15,12 @@ echo "############ 阶段 2：配置语句 ############"
 { echo "############ 阶段 2：配置模式语句 ############"; } >> "$LOG"
 
 # ---------- 前置对象（一次提交，使实例语句有宿主） ----------
+# 端口角色互斥（commit 校验）：一个业务口在 {bond 成员 / 交换机端口 / L3 接口 / 镜像源或分析口}
+# 中只能出现一次。本机业务口只有 ens192/ens224 两个，而阶段 3 把 ens192 收进 bond0、
+# 阶段 5 要用 vs-l3 的地址（192.168.155.10）做 ping source，故这里把 L3 接口放在 ens224。
+# **不提交镜像会话**：镜像的源口与分析口必占两个物理口，与上述二者相撞（此前本块用
+# ens192 同时当 vs-l3 的 l3-interface 与镜像源口，提交必被新校验拒绝）；镜像语句本身的
+# 覆盖由下方 pm-test2 两条独立会话承担（不 commit，故不落进配置）。
 run S2-pre "configure
 set resource-pools hugepages page-size 1G count 2
 set resource-pools cpu isolated-cores 1-4
@@ -21,11 +28,9 @@ set interfaces ens192 description cli-pre
 set interfaces ens224 description cli-pre
 set acls acl-test rule 10 source any destination any protocol tcp destination-port 443 action permit
 set qos policies pol-test cir 1000000000 cbs 1000000
-set port-mirroring pm-test source interface ens192 direction both
-set port-mirroring pm-test analyzer interface ens224
 set virtual-switches vs-l2 type l2
 set virtual-switches vs-l3 type l3
-set virtual-switches vs-l3 l3-interface ens192 ip address 192.168.155.10/24
+set virtual-switches vs-l3 l3-interface ens224 ip address 192.168.155.10/24
 set vpp cpu main-core 1
 set vpp cpu corelist-workers 2
 commit"

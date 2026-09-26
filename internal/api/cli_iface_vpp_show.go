@@ -279,7 +279,9 @@ func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) strin
 				return fmt.Sprintf("interface %s statistics: %v\n", name, c)
 			}
 		}
-		return fmt.Sprintf("%% 接口 %s 统计运行态不可用（stats 未接入）\n", name)
+		// 如实描述：stats 是接入了的，取不到数是**这一刻连接没就绪/读取失败**
+		// （VPP 重启后连接陈旧即属此列，取数路径会自行重连重试）。
+		return fmt.Sprintf("%% 接口 %s 统计暂不可用（stats 连接未就绪）\n", name)
 	case "sriov":
 		if !declared {
 			return fmt.Sprintf("（接口 %s 未在配置中声明，无 SR-IOV 配置）\n", name)
@@ -377,8 +379,17 @@ func (x *cliExecutor) ifaceRuntimeRow(name, description string, states map[strin
 	return
 }
 
-// execShowGenericConfig：show port-mirroring / show qos policies（配置视图）。
+// execShowPortMirroring：show port-mirroring（配置视图；契约 §1.1 只声明无参形态）。
+//
+// 多余/未知 token 必须报错：此前 args 被**完全忽略**，`show port-mirroring bogus extra`
+// 照样打印全部会话——操作者会以为「过滤生效了、这就是我要的那条」，与决策 #153
+// （`show configuration` 的未知子命令）同族的静默误答。本命令的渲染不分形态，故明确
+// 报「未支持」并列出可用写法，同族的 `show qos policies` 亦同口径。
 func (x *cliExecutor) execShowPortMirroring(args []string) string {
+	if len(args) != 0 {
+		return fmt.Sprintf("%% 该 show 命令形式未支持: show port-mirroring %s（可用：show port-mirroring）\n",
+			strings.Join(args, " "))
+	}
 	cfg, err := x.engine.Committed()
 	if err != nil {
 		return "%% " + err.Error() + "\n"

@@ -278,6 +278,42 @@ func removeVrf(tree map[string]any, vsName string) {
 	tree["vrfs"] = out
 }
 
+// vswitchNamesOf 取 JSON 树里全部虚拟交换机的名字（身份字段与建元素口径一致）。
+func vswitchNamesOf(tree map[string]any) map[string]bool {
+	arr, _ := tree["virtual_switches"].([]any)
+	out := make(map[string]bool, len(arr))
+	ident := identityFields["virtual_switches"]
+	if ident == "" {
+		ident = "name"
+	}
+	for _, e := range arr {
+		em, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		if n, _ := em[ident].(string); n != "" {
+			out[n] = true
+		}
+	}
+	return out
+}
+
+// pruneVSwitchVrf 本次 delete 移除掉的虚拟交换机，其同名 Vrf 条目一并删除。
+//
+// L3 交换机与同名 VRF 条目互为映射（附录 B）：REST `DELETE /virtual-switches/{name}`
+// 即一并删除（resources.go handleDeleteVSwitch），CLI 侧此前只有 `type` 一类别名规则
+// 会调 removeVrf，**整节点**删除留下的空 VRF 条目操作者看不见（display set 反推不出）、
+// 数据面 VRF 表跨重启滞留，且没有任何命令能清掉（round84 走查 R84-2）。
+// before 是删除前的交换机名单（名字集合），after 是删除后的 JSON 树。
+func pruneVSwitchVrf(before map[string]bool, after map[string]any) {
+	kept := vswitchNamesOf(after)
+	for name := range before {
+		if !kept[name] {
+			removeVrf(after, name)
+		}
+	}
+}
+
 // lldpObj 取 protocols.lldp 对象；create=false 且不存在时返回 nil。
 func lldpObj(tree map[string]any, create bool) map[string]any {
 	p := objOrNil(tree, "protocols")

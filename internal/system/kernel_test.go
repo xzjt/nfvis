@@ -174,9 +174,78 @@ func TestGenerateBaselineDualHugepages(t *testing.T) {
 	if !found {
 		t.Fatalf("2M 不符应报差异: %v", diffs)
 	}
-	// 双池一致 → 无差异
-	a2 := KernelActual{Hugepages1G: 2, Hugepages2M: 768}
+	// 双池一致 → 无差异（大页按 cmdline 基线比对，故 cmdline 必须同时给出）
+	a2 := KernelActual{
+		Cmdline:     []string{"default_hugepagesz=1G", "hugepagesz=1G", "hugepages=2", "hugepagesz=2M", "hugepages=768"},
+		Hugepages1G: 2, Hugepages2M: 768,
+	}
 	if diffs := Compare(KernelDesired{Hugepages1G: 2, Hugepages2M: 768}, a2); len(diffs) != 0 {
 		t.Fatalf("双池一致应无差异: %v", diffs)
+	}
+}
+
+// TestCompareHugepageRuntimePoolGrowth R84-5：大页一致性按 cmdline 基线判定。
+// 运行期被顶大的池（VPP 早期用 1G 页）在 cmdline 与期望一致时不得报「需重启」，否则指引不可达。
+func TestCompareHugepageRuntimePoolGrowth(t *testing.T) {
+	off := false
+	// ① cmdline=期望、运行实际更大 → 无差异（运行期占用），仅中性说明
+	d := KernelDesired{Hugepages1G: 1, NMIWatchdog: &off}
+	a := KernelActual{
+		Cmdline:     []string{"default_hugepagesz=1G", "hugepagesz=1G", "hugepages=1", "isolcpus=2-5"},
+		Hugepages1G: 2, NMIWatchdog: &off,
+	}
+	if diffs := Compare(d, a); len(diffs) != 0 {
+		t.Fatalf("cmdline 与期望一致时运行期池增长不应报差异: %v", diffs)
+	}
+	notes := HugepageRuntimeNotes(d, a)
+	if len(notes) != 1 || !strings.Contains(notes[0], "运行期占用") || !strings.Contains(notes[0], "不需要重启") {
+		t.Fatalf("应给出「运行期占用、不需要重启」的中性说明: %v", notes)
+	}
+	// 基线未生效（cmdline 与期望不符）时不给中性说明——偏差由 Compare 报，别掩盖
+	aBase := a
+	aBase.Cmdline = []string{"default_hugepagesz=1G", "hugepagesz=1G", "hugepages=4"}
+	if notes := HugepageRuntimeNotes(d, aBase); len(notes) != 0 {
+		t.Fatalf("cmdline 基线未生效时不应给运行期占用说明: %v", notes)
+	}
+
+	// ② cmdline=期望、运行实际更小（内核没按 cmdline 分配够）→ 告警且指向「分配不足」
+	aShort := a
+	aShort.Hugepages1G = 0
+	diffs := Compare(d, aShort)
+	if len(diffs) != 1 || !strings.Contains(diffs[0], "大页 1G") || !strings.Contains(diffs[0], "分配不足") {
+		t.Fatalf("运行实际少于声明应报「分配不足」: %v", diffs)
+	}
+	if !strings.Contains(diffs[0], "期望 1") || !strings.Contains(diffs[0], "实际 0") {
+		t.Fatalf("分配不足文案应带期望/实际数值: %v", diffs)
+	}
+	if strings.Contains(diffs[0], "需写入 GRUB 基线") {
+		t.Fatalf("cmdline 已一致时不应再引导写 GRUB 基线: %v", diffs)
+	}
+	if notes := HugepageRuntimeNotes(d, aShort); len(notes) != 0 {
+		t.Fatalf("分配不足不应降级成中性说明: %v", notes)
+	}
+
+	// ③ cmdline 与期望不符（含未声明）→ 仍报「需写入 GRUB 基线并重启生效」
+	for name, cmdline := range map[string][]string{
+		"值不符":  {"default_hugepagesz=1G", "hugepagesz=1G", "hugepages=4"},
+		"未声明":  {"default_hugepagesz=2M", "hugepages=768"},
+		"基线为空": {},
+	} {
+		diffs := Compare(d, KernelActual{Cmdline: cmdline, Hugepages1G: 1, NMIWatchdog: &off})
+		if len(diffs) != 1 || !strings.Contains(diffs[0], "需写入 GRUB 基线并重启生效") {
+			t.Fatalf("%s：应报「需写入 GRUB 基线并重启生效」: %v", name, diffs)
+		}
+	}
+
+	// 双池各按各的尺寸判定：2M 运行实际更大不报，1G 未声明照报
+	aDual := KernelActual{
+		Cmdline:     []string{"default_hugepagesz=1G", "hugepagesz=1G", "hugepages=1", "hugepagesz=2M", "hugepages=768"},
+		Hugepages1G: 2, Hugepages2M: 800,
+	}
+	if diffs := Compare(KernelDesired{Hugepages1G: 1, Hugepages2M: 768}, aDual); len(diffs) != 0 {
+		t.Fatalf("双池运行实际均高于声明且 cmdline 一致时不应报差异: %v", diffs)
+	}
+	if notes := HugepageRuntimeNotes(KernelDesired{Hugepages1G: 1, Hugepages2M: 768}, aDual); len(notes) != 2 {
+		t.Fatalf("双池各给一条运行期占用说明: %v", notes)
 	}
 }

@@ -152,20 +152,49 @@ func ParamValueFromCmdline(cmdline []string, name string) string {
 	return ""
 }
 
-// Compare 返回「配置期望 vs 运行实际」的差异项（空 = 一致）。
-// 仅比较已托管的项：大页（1G 页数）、isolcpus、NMI watchdog、THP。
+// Compare 返回「配置期望 vs 内核基线（cmdline）」的差异项（空 = 一致）。
+// 仅比较已托管的项：大页（1G/2M 页数）、isolcpus、NMI watchdog、THP。
+//
+// 大页按 **cmdline 基线**比对（R84-5）：运行实际池大小会被运行期占用顶大
+// （例如 VPP 早期用 1G 页把池顶大后内核不回收），拿它与期望比会得出
+// 「基线未生效、需重启」的**不可达指引**——重启也不会变小。故分三种情形：
+//   - cmdline 与期望一致 → 不判不一致；运行实际高于声明属运行期占用，
+//     由 HugepageRuntimeNotes 给出中性说明（不需要重启）；
+//   - cmdline 与期望一致但运行实际少于声明 → 告警（内核未按 cmdline 分配够）；
+//   - cmdline 与期望不符或未声明 → 报差异（需写入 GRUB 基线并重启生效）。
 func Compare(d KernelDesired, a KernelActual) []string {
 	var out []string
-	if d.Hugepages1G > 0 && a.Hugepages1G != d.Hugepages1G {
-		out = append(out, fmt.Sprintf("大页 1G：期望 %d，实际 %d（cmdline 启动参数需生效并重启）", d.Hugepages1G, a.Hugepages1G))
-	}
-	if d.Hugepages2M > 0 && a.Hugepages2M != d.Hugepages2M {
-		out = append(out, fmt.Sprintf("大页 2M：期望 %d，实际 %d（cmdline 启动参数需生效并重启）", d.Hugepages2M, a.Hugepages2M))
+	for _, hp := range []struct {
+		size     string // "1G" / "2M"
+		declared int
+		actual   int
+	}{
+		{"1G", d.Hugepages1G, a.Hugepages1G},
+		{"2M", d.Hugepages2M, a.Hugepages2M},
+	} {
+		if hp.declared <= 0 { // < 0 = 不托管；0 与现状同口径（不比对）
+			continue
+		}
+		base := HugepageFromCmdline(a.Cmdline, hp.size)
+		if n, err := strconv.Atoi(base); err == nil && n == hp.declared {
+			if hp.actual < hp.declared {
+				out = append(out, fmt.Sprintf("大页 %s：运行实际少于声明：期望 %d，实际 %d（分配不足）",
+					hp.size, hp.declared, hp.actual))
+			}
+			continue
+		}
+		if base == "" {
+			out = append(out, fmt.Sprintf("大页 %s：期望 %d，cmdline 基线未声明该项（需写入 GRUB 基线并重启生效）",
+				hp.size, hp.declared))
+			continue
+		}
+		out = append(out, fmt.Sprintf("大页 %s：期望 %d，cmdline 基线为 %s（需写入 GRUB 基线并重启生效）",
+			hp.size, hp.declared, base))
 	}
 	if d.IsolatedCores != "" {
 		cur := IsolatedFromCmdline(a.Cmdline)
 		if cur != d.IsolatedCores {
-			out = append(out, fmt.Sprintf("isolcpus：期望 %q，cmdline 为 %q", d.IsolatedCores, cur))
+			out = append(out, fmt.Sprintf("isolcpus：期望 %q，cmdline 为 %q（需写入 GRUB 基线并重启生效）", d.IsolatedCores, cur))
 		}
 	}
 	if d.NMIWatchdog != nil {
@@ -182,6 +211,31 @@ func Compare(d KernelDesired, a KernelActual) []string {
 		// 低延迟组不逐项对照（与 vendor/irqaffinity 同口径），但要用代表项把
 		// 「apply/commit 时的待重启提示」撑起来——否则开了 profile 却提示"无需重启"。
 		out = append(out, "低延迟参数组：期望启用（mitigations=off 等），cmdline 未见（需写入 GRUB 并重启）")
+	}
+	return out
+}
+
+// HugepageRuntimeNotes 返回大页「运行实际高于声明」的中性说明（不判不一致、不需要重启）：
+// 多出的部分是运行期占用（如 VPP 早期把池顶大后内核不回收），与 cmdline 基线无关。
+// 仅在 cmdline 基线与声明一致（即一致性判定通过）时给出——基线未生效的偏差由 Compare 负责报。
+func HugepageRuntimeNotes(d KernelDesired, a KernelActual) []string {
+	var out []string
+	for _, hp := range []struct {
+		size     string
+		declared int
+		actual   int
+	}{
+		{"1G", d.Hugepages1G, a.Hugepages1G},
+		{"2M", d.Hugepages2M, a.Hugepages2M},
+	} {
+		if hp.declared <= 0 || hp.actual <= hp.declared {
+			continue
+		}
+		if n, err := strconv.Atoi(HugepageFromCmdline(a.Cmdline, hp.size)); err != nil || n != hp.declared {
+			continue // 基线未与声明一致：交由 Compare 报差异，这里不掩盖
+		}
+		out = append(out, fmt.Sprintf("大页 %s 运行实际 %d 高于声明 %d（多出的是运行期占用，不需要重启）",
+			hp.size, hp.actual, hp.declared))
 	}
 	return out
 }

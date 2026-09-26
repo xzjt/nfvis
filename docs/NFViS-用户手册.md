@@ -272,6 +272,18 @@ set system hostname fw-01
 commit"
 ```
 
+> **脚本模式不代答确认**：删除 VNF/容器/镜像、软件升级/回退、重启/关机、恢复出厂、
+> 接口交 DPDK 等破坏性动作，服务端会先问 `… ? [yes,no]`。交互模式下由 CLI 读你的答复；
+> **非交互模式（`-c`）没有答复来源**，命令**不会执行**——CLI 会报错并停止脚本
+> （既不静默跳过，也不替你答 yes）。确实要在脚本里执行时，**显式**在命令尾追加 `--yes`：
+>
+> ```bash
+> nfvis-cli -c "request images delete name old.qcow2 --yes"
+> ```
+>
+> 恢复出厂一类需**双重确认**的动作要连写两个 `--yes`（CLI 会在需要时提示）。
+> 破坏性命令请勿习惯性加 `--yes`——它会真的重启/回退/清库。
+
 **交互模式**：`?` 列候选（**按键即时，不用回车**）、Tab 补全（唯一匹配自动补全、多匹配响铃并列出）、
 无歧义缩写、`Ctrl-]` 退出串口、`Ctrl-C` 退出 monitor。详见 §4。
 
@@ -507,10 +519,28 @@ NFViS 初始化向导（wizard）——规划资源池与内核基线（Enter �
   set vpp cpu main-core 5
   set vpp cpu corelist-workers 4
   set vpp memory hugepage-preference 2M
-  top
   commit
+  exit
   request system kernel apply
 确认提交？[yes/no]（默认 yes）：
+[ok] resource-pools hugepages page-size 1G count 1
+…
+commit 成功 (revision 3)
+警告: vpp 变更需 request vpp restart（或整机 reboot）后生效
+警告: resource-pools 变更需 reboot 生效
+警告: 内核启动基线与配置不一致，需写入 GRUB 并重启生效：
+  - 大页 1G：期望 1，实际 0（cmdline 启动参数需生效并重启）
+  - 大页 2M：期望 768，实际 0（cmdline 启动参数需生效并重启）
+  - isolcpus：期望 "2-5"，cmdline 为 ""
+  处理：request system kernel apply（写入基线）→ request system reboot
+
+内核基线已写入（GRUB 片段 /etc/default/grub.d/99-nfvis.cfg + fstab 大页挂载）
+上一版本已备份：/var/lib/nfvis/kernel-baseline.bak（request system kernel rollback 可回退）
+待重启生效（pending_reboot）：
+  - 大页 1G：期望 1，实际 0（cmdline 启动参数需生效并重启）
+  - 大页 2M：期望 768，实际 0（cmdline 启动参数需生效并重启）
+  - isolcpus：期望 "2-5"，cmdline 为 ""
+执行 request system reboot 应用新基线；重启后 show system kernel 应显示一致
 
 向导完成。内核基线需重启生效：request system reboot。
 重启后的固定动作（数据口绑定不跨重启）：request interfaces <数据口> bind-dpdk --yes → request vpp restart。

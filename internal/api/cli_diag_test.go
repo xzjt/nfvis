@@ -125,10 +125,11 @@ func TestCLIMonitorSnapshot(t *testing.T) {
 			t.Fatalf("快照缺少 %q:\n%s", want, out)
 		}
 	}
-	// 接口统计不可用
+	// 接口统计取不到：文案须如实说「这一刻连接没就绪 / 口不在数据面」，
+	// 不得说成「stats 未接入」（stats 是接入了的；与 `show interfaces <n> statistics` 同口径）
 	x.setRuntime(nil, state.New(fakeCounters{ok: false}))
-	if out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "monitor interfaces ensX").Output; !strings.Contains(out, "统计不可用") {
-		t.Fatalf("应提示统计不可用: %q", out)
+	if out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "monitor interfaces ensX").Output; !strings.Contains(out, "统计暂不可用（不存在或 stats 连接未就绪）") {
+		t.Fatalf("应提示统计暂不可用（stats 连接未就绪）: %q", out)
 	}
 	// 语法错误
 	if out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "monitor interfaces").Output; !strings.Contains(out, "语法") {
