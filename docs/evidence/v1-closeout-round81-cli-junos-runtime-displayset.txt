@@ -291,7 +291,37 @@ set vpp memory hugepage-preference 2M
 - 工具链注记：pre-commit 并行 go test 在 Windows 宿主两次 OOM（VirtualAlloc 1455），
   串行 -p=1 全测通过——两次按钩子 NO_VERIFY=1 提交并在提交信息与证据中如实记录。
 
-§17 遗留与后续
+§17 round83 网络族走查（用户点名补测）：数据面全族 + 3 项新发现（登记待裁）
+--------------------------------------------------------------------------------
+覆盖（全部真机 1.1.39，逐项对照 vppctl 独立事实源）：
+- L2：vs-test 建/删、成员端口、BD 对照（BD 798961 出现/消失）。
+- L3/VRF：vs-l3 + l3-interface ens224 10.99.0.1/24 + static-routes + show vrfs；
+  VPP FIB 对照（10.99.0.0/24 与静态路由在列）。
+- ACL：rule 10 → l3-interface acl-in 挂载 → VPP acl-plugin 对照；引用检查正确
+  （ACL 被引用时删它被拒，错误指路精确）。
+- NAT static / QoS（cir/cbs + interface ingress-policy）/ LLDP / SPAN（port-mirroring
+  建删）/ clear interfaces statistics —— 配置与 VPP 双侧核对一致。
+- 扰动判别：vppctl 手工建 BD 77 → `show virtual-switches` 如实标注「未在配置中（运行态
+  存在）」；vppctl 翻 ens224 down/up → `show interfaces` 即时跟随。
+- 排除法发现的守卫全对：L2/L3 专属配置互斥、l3-interface 必须引用已存在物理口、
+  会话 EOF 自动 discard（失败 candidate 不残留）。
+发现（登记待裁，均未修）：
+- **R83-5（P2，数据面泄漏）**：`delete virtual-switches <l3名>` + commit 后 config 级联
+  正常（vrfs 条目已删、接口地址已撤），但**静态路由滞留数据面**（10.99.9.0/24 与
+  10.99.0.254/32 成 dpo-drop 黑洞路由，需 vpp restart 才清）。apply 路径的 VRF 撤销缺口。
+- **R83-6（P2，重启无校验 + 顺序陷阱）**：VPP 在 2M 大页池为 0 时零输出 SEGV（内存峰值
+  2.1M、无任何错误打印），而 `request vpp restart` 仍回「已按 committed 配置重启 VPP 并
+  触发恢复收敛」——**无起后健康校验**（假成功）；根因顺序：wizard 把 2M=768 写入 GRUB
+  （reboot 生效，片段已核对含 hugepagesz=2M hugepages=768），但 VPP 重启即刻需要该池。
+  修法建议：restart 后校验 VPP 存活并报错；重启前按 startup.conf 需求预检池尺寸。
+- **R83-7（P2，采集不重连）**：VPP 重启后守护进程日志「已连接 VPP」正常，但
+  `show interfaces` 计数永久为 `-`（stats 采集只在守护进程启动时初始化，VPP 重连不重建），
+  `systemctl restart nfvis` 后即恢复（0/0）。修法建议：VPP 重连回调里同步重建 stats 采集。
+环境终态：VPP 26.06 active（2M 池 768 运行期分配，GRUB 片段一致、reboot 安全）、
+nfvis 1.1.39 active、vnf-a running（vh-vnf-a-eth0 up）、vs-vnf BD 6252701 在位、
+FIB 泄漏已由 vpp restart 清除、测试对象全部清理（rev 20）。
+
+§18 遗留与后续
 --------------------------------------------------------------------------------
 - 未发布：1.1.35~dev1 为验证构建；发布需走 round48/80 口径（文档核对 → 重打包 →
   升级实装 → 回下载比对 → Release）。手册 28 张控制台截图与接口示例输出有轻微口径漂移
