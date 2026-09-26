@@ -266,7 +266,32 @@ set vpp memory hugepage-preference 2M
 - 环境终态：1.1.38 active（rev 8：rev 3 接管 → 4 向导 → 5/6/7/8 走查往返）、
   ens192/ens224 DPDK 接管在位、libvirt/docker 运行、无 VM（走查未建 VNF）。
 
-§16 遗留与后续
+§16 round83 终：VNF/容器生命周期走查 + 决策 #159/#160 + 发布 v1.1.39
+--------------------------------------------------------------------------------
+- 补完"全 CLI"要求：VNF/容器生命周期在干净快照装机上从零走通。
+- 镜像获取：download 缺 sha256 正确拒绝（FR-SEC-004）；发行方只发 SHA512SUMS，
+  操作者自行换算 sha256；upload incoming 导入（0600 权限经 libvirt 动态属主正常）。
+- VNF：declare → dpdk dev → bind-dpdk → restart → create（vs/vnf/vhost/内存/vcpu/
+  cloud-init）→ start → running（vhost 口入 VPP）→ 运行中快照守卫拒绝 → stop →
+  快照 create/rollback → 再启动 → 全部通过。
+- **R83-1（#159①，P1）**：首装 VNF 无法启动——virt-aa-helper AppArmor 拒读
+  /var/lib/nfvis/images（dmesg DENIED 实证）；postinst 补 local override。
+- **R83-2（#159②，P2）**：快照被 raw seed 盘卡死（#139 起回归，被套件级联掩盖）；
+  DiskTargetsOf 排除 type='raw'。
+- **R83-3（#160，P1）**：容器镜像命名闭环断裂（内嵌 tag 含冒号 vs 目录名禁冒号，
+  错误文案自认「两个名字都用不了」）；load 后按目录项名重打 <名>:latest。
+  真机闭环：upload（产品重打 alpine:latest，docker images 双 tag 同 ID）→
+  容器 create/start **running**（docker 侧确认）→ stop/delete 清理。
+- 发布 v1.1.39：PR #220 → main `043cea2` + SOURCE_DATE_EPOCH=1790423225 →
+  nfvis_1.1.39_amd64.deb sha256 61e4159ce96dd6e70cbd6c61f32dfb86239492f8a2a5730c03b5c88db02c39e9，
+  Release + 回下载比对一致；升级实装后 vnf-a running 存续、alpine:latest 在位。
+- 环境终态：1.1.39 active、rev 11、vnf-a running（1G 大页 1 页在位）、
+  镜像 debian-12 + alpine 双就绪、alpine.tar 残留已入仓清理、
+  /etc/docker/daemon.json 代理 192.168.155.1:2333（用户提供的拉取代理，如实登记）。
+- 工具链注记：pre-commit 并行 go test 在 Windows 宿主两次 OOM（VirtualAlloc 1455），
+  串行 -p=1 全测通过——两次按钩子 NO_VERIFY=1 提交并在提交信息与证据中如实记录。
+
+§17 遗留与后续
 --------------------------------------------------------------------------------
 - 未发布：1.1.35~dev1 为验证构建；发布需走 round48/80 口径（文档核对 → 重打包 →
   升级实装 → 回下载比对 → Release）。手册 28 张控制台截图与接口示例输出有轻微口径漂移
