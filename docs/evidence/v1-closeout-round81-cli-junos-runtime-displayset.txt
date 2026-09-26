@@ -253,7 +253,20 @@ set vpp memory hugepage-preference 2M
   USTC 源已恢复、make/golang-1.26/cloud-image-utils 已装、**alpine.qcow2 与
   docker alpine:3.20 未重建**（走查未触及容器/阶段 3）、无 isolcpus（默认基线不设）。
 
-§15 遗留与后续
+§15 round83 续：决策 #158（delete 带取值反向写入）修复与发布 v1.1.38
+--------------------------------------------------------------------------------
+- 拟人化走查续查配置模式时发现：`delete interfaces ens224 description orig` + commit
+  后描述**仍在**——applyTokens 的 pendingKey 与标量参数（2a）分支缺 isSet 判定，
+  delete 带取值被反向写入（数据完整性缺陷，P1）。真机坐实后修复：两分支补 isSet
+  （数组按值移除/标量删叶，取值 token 容忍）。附带：向导重跑 no-op 的 %% 错误样式
+  改 [跳过] 说明。测试 cli_delete_value_test.go 三用例红-绿。
+- 发布 v1.1.38：PR #219 → main `2471f62` + SOURCE_DATE_EPOCH=1790420197 →
+  nfvis_1.1.38_amd64.deb sha256 63e86e1d7cae844a590dfeb644ba73396d1b6ca5f3d8e1aa770cada8615ddccf，
+  Release + 回下载比对一致；升级实装后 set→delete 同值往返 **0 残留**、服务 active。
+- 环境终态：1.1.38 active（rev 8：rev 3 接管 → 4 向导 → 5/6/7/8 走查往返）、
+  ens192/ens224 DPDK 接管在位、libvirt/docker 运行、无 VM（走查未建 VNF）。
+
+§16 遗留与后续
 --------------------------------------------------------------------------------
 - 未发布：1.1.35~dev1 为验证构建；发布需走 round48/80 口径（文档核对 → 重打包 →
   升级实装 → 回下载比对 → Release）。手册 28 张控制台截图与接口示例输出有轻微口径漂移

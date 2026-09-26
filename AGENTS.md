@@ -33,7 +33,8 @@
   全家族反推（回放自校验），已发布，证据 `docs/evidence/v1-closeout-round81-cli-junos-runtime-displayset.txt`；
   round80 基线见 `docs/evidence/v1-closeout-round80-cli-web-fulltest-and-release-1.1.34.txt`，
   三件套复跑仍以 `docs/evidence/v1-closeout-round36-three-suites.txt` 为准）：
-  nfvis **1.1.37** active（**2026-09-26 快照恢复后从安装重建**：main `3ac5200` git archive 同步、VM 源码构建（与 Release asset 逐字节一致）；round83 从安装拟人化走查完成，证据 round81 文件 §14；**口令已变：`yaEBXZGjd_5ARJDf@Aa1`**；rev 3；v1.1.36＝#156 console TLS、v1.1.35＝#155 JunOS 化第一批）；
+  nfvis **1.1.38** active（**已发布 v1.1.38**＝决策 #158 delete 带取值反向写入修复——round83 拟人化走查发现；v1.1.37＝#157 多字节输入、v1.1.36＝#156 console TLS、v1.1.35＝#155 JunOS 化第一批；均回下载 sha256 一致）；
+  **2026-09-26 快照恢复后从安装重建**：main `3ac5200` git archive 同步、VM 源码构建（与 Release asset 逐字节一致）；round83 从安装拟人化走查完成，证据 round81 文件 §14；**口令已变：`yaEBXZGjd_5ARJDf@Aa1`**；rev 3；v1.1.36＝#156 console TLS、v1.1.35＝#155 JunOS 化第一批）；
   ⚠️ 快照恢复后须重做：apt 源换回 USTC（aliyun 不可用）、make/golang-1.26/cloud-image-utils/qemu-utils 重装、
   libvirt/docker 按 provision.sh 清单安装（qemu-kvm 在 26.04 无候选）、**alpine.qcow2 与 docker alpine:3.20 未重建**；
   管理口令 `WBF81vOA4M8GM28f@Aa1`（**随快照恢复而变**，取法见待办 §3.1；
