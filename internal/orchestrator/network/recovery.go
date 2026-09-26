@@ -65,7 +65,10 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 
 	// VNF/容器 vNIC 接入重放（FR-NET-020/022/023）：VPP 重启后 vhost-user/memif 接口
 	// 会消失，须先于 BD 重放，交换机端口才能按名挂接。
-	for _, port := range orchestrator.VnfPortsOf(cfg, n.vhostDir, n.memifDir) {
+	// 此处的 L3 置表登记可能失败（同名 Vrf 条目尚未重放、接口带地址不让换表 -114），
+	// 故 VRF 落地之后还有一次专门的登记重建（见下方「vNIC 置表登记重建」）。
+	ports := orchestrator.VnfPortsOf(cfg, n.vhostDir, n.memifDir)
+	for _, port := range ports {
 		if err := n.ApplyVnfInterface(ctx, port); err != nil {
 			record(fmt.Sprintf("vnf-ports/%s/%s", port.VM, port.Interface), err)
 		}
@@ -111,6 +114,35 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 			record("vrfs/"+vrf.Name, err)
 		}
 	}
+	// L3 侧登记重建：恢复收敛开头已失效全部进程内登记，而 NAT 的 inside/outside 解析只读 L3 侧
+	// 三张表（ifaces / ifaceTable / vnfs）——登记缺项会让 NAT 认为「该口不该有特性」而下发删除，
+	// 登记整体为空时更会把插件当作「没有 NAT 配置」直接关掉：真机实测 `systemctl restart vpp`
+	// 加 `systemctl restart nfvis` 后 `show nat44 ei interfaces` / `show nat44 ei addresses` 全空，
+	// 而配置里规则/交换机/地址都在、日志无未收敛项。登记因此必须按**配置**重建，且落在
+	// VRF 落地之后（两类登记都要表已存在、接口已解析）、ApplyNAT 之前。
+	//
+	// 两条来源都要走，缺一都会让 NAT 少一个转发域：
+	//   - L3 交换机的 l3_interfaces（含 vlan 子接口）：按名与运行态核对 sw_if_index 后登记，
+	//     解析不到按未收敛上报（不静默丢）；
+	//   - 声明了 L3 交换机的 vNIC（VNF vhost-user / 容器 memif）：查运行态 → 置表 → 登记，
+	//     该口同时进所属 VRF 的 inside 集合（它就是 guest 侧的发包口，见 AttachedIfaces）。
+	// 幂等：登记是并集写入（重复收敛不产生重复项），vNIC 已登记且索引未变时为空操作；
+	// 只补齐不摘除（附录 A #35）——配置里没有的登记不删，也不做任何运行态对象的摘除。
+	if n.l3 != nil {
+		for _, vrf := range cfg.Vrfs {
+			for _, f := range n.l3.RegisterL3Interfaces(ctx, vrf) {
+				record(f.Source, f.Err)
+			}
+		}
+		for _, port := range ports {
+			if port.VRF == "" || !n.vnfPortProviderReady(port.Type) {
+				continue
+			}
+			if err := n.l3.SetVnfTable(ctx, port.VRF, VnfPortIfaceName(port)); err != nil {
+				record(fmt.Sprintf("vnf-ports/%s/%s", port.VM, port.Interface), err)
+			}
+		}
+	}
 	if cfg.Nat != nil {
 		if err := n.ApplyNAT(ctx, *cfg.Nat); err != nil {
 			record("nat", err)
@@ -145,7 +177,18 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 
 // resetProviders 清空各 Provider 的进程内登记表，使本次收敛按 VPP 实况重新判定
 // 对象存在性（避免跨进程/跨 VPP 重启后的陈旧登记表把重放带偏）。
+//
+// 两点顺序/互斥上的讲究（round84 收尾）：
+//   - 全程持 runtimeMu：失效不得与一次 ApplyNAT 交错，否则那次下发会按「inside 解析已空」
+//     算期望集（少下发特性，甚至把既有特性当成配置里已删的项删掉）。
+//   - **先清消费方（NAT）再清来源方（L3/L2）**：NAT 的特性/池登记是派生结果的影子，
+//     先摘影子后摘来源，中间状态只会是「影子全无、来源尚在」，不会反过来。
 func (n *L2Network) resetProviders() {
+	n.runtimeMu.Lock()
+	defer n.runtimeMu.Unlock()
+	if n.nat != nil {
+		n.nat.reset()
+	}
 	if n.acl != nil {
 		n.acl.reset()
 	}
@@ -157,9 +200,6 @@ func (n *L2Network) resetProviders() {
 	}
 	if n.l3 != nil {
 		n.l3.reset()
-	}
-	if n.nat != nil {
-		n.nat.reset()
 	}
 	if n.svc != nil {
 		n.svc.reset()

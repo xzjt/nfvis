@@ -40,4 +40,24 @@ const (
 	// NAT44 EI 插件特性状态（幂等启用/关闭）
 	vppFeatureAlreadyDisabled int32 = -169
 	vppFeatureAlreadyEnabled  int32 = -170
+	// 对象本就不在位（重复删除、接口/会话已消失）
+	vppNoSuchEntry int32 = -6
 )
+
+// natRemovalBenignCode 判断 NAT44 系列**移除方向**的返回码是否表示「已是目标状态」，
+// 是则按成功处理：
+//   - -6   对象本就不在位（重复删除；接口被重建后旧索引上的特性已随之消失）；
+//   - -81  该对象的形式此前已存在（历史实现即以此为 del 幂等判定）；
+//   - -169 插件未启用（地址池/接口特性随插件关闭已无实体，删除无事可做）。
+//
+// 不容忍的后果是：一次无害的重复删除会把整个 ApplyNAT 中止、整批 apply 打回滚
+// （round84 实测：`移除接口 3 的 NAT inside 特性: No such entry (-6)` → 整批补偿回滚）。
+func natRemovalBenignCode(code int32) bool {
+	return code == vppNoSuchEntry || code == vppValueExist || code == vppFeatureAlreadyDisabled
+}
+
+// natRemovalBenign 判断移除方向收到的错误是否表示「已是目标状态」（错误形式，
+// govpp 通常把非零 retval 转成 api.VPPApiError 返回；Reply.Retval 形式见上）。
+func natRemovalBenign(err error) bool {
+	return vppErrIs(err, vppNoSuchEntry, vppValueExist, vppFeatureAlreadyDisabled)
+}

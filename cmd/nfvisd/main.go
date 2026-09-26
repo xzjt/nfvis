@@ -435,6 +435,18 @@ func run() error {
 	// 单个对象失败不阻塞，未收敛项进告警表（FR-OPS-010/011）。
 	var recoveryMu sync.Mutex
 	runRecovery := func() {
+		// VPP 连接（重）建立：先让状态型编排器的进程内登记失效，再做恢复收敛。
+		// 带外 `systemctl restart vpp` 会清空 VPP 侧配置，而进程内登记仍在 → ApplyNAT 认为
+		// 「已下发」跳过重放，NAT 静默失效（show nat44 空），须重启 nfvisd 才恢复
+		// （round84 R84-21）。放在加锁之前：周期巡检占着锁时失效也已生效，随后到来的一次
+		// 收敛必然全量重放。重放只发 add、不摘除（附录 A #35），且 add 方向幂等
+		// （nat_govpp.go 把「已存在」按成功处理），可安全重复执行。
+		//
+		// 失效的**安全边界**由网络侧保证（network.InvalidateRuntimeState 的注释写明）：
+		// 失效与 NAT 下发互斥、且恢复收敛会在 ApplyNAT 之前按配置重建 L3 侧登记——
+		// 否则「inside/outside 解析暂时为空」会被 NAT 当成「配置里没有 inside/outside」，
+		// 把插件特性删掉/关掉（真机实测：restart 后 show nat44 ei interfaces 与 addresses 全空）。
+		netProvider.InvalidateRuntimeState()
 		recoveryMu.Lock()
 		defer recoveryMu.Unlock()
 		cfg, err := engine.Committed()

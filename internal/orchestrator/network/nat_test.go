@@ -8,13 +8,14 @@ import (
 	"testing"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 // ---------- M3-5（三）：NAT44 收敛（假 NatClient） ----------
 
 type fakeNat struct {
 	ifaces  map[string]uint32
-	ranges  []string // "add/del first-last"
+	ranges  []string // "add/del first-last@vrf"
 	feats   []string // "add/del idx inside|outside"
 	static  []string
 	enables []string // "enable/disable insideVRF/outsideVRF"
@@ -35,7 +36,7 @@ func (f *fakeNat) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	return idx, ok, nil
 }
 
-func (f *fakeNat) NATAddressRange(add bool, first, last string) error {
+func (f *fakeNat) NATAddressRange(add bool, first, last string, vrfID uint32) error {
 	if f.err != nil {
 		return f.err
 	}
@@ -43,7 +44,7 @@ func (f *fakeNat) NATAddressRange(add bool, first, last string) error {
 	if add {
 		op = "add"
 	}
-	f.ranges = append(f.ranges, op+":"+first+"-"+last)
+	f.ranges = append(f.ranges, fmt.Sprintf("%s:%s-%s@%d", op, first, last, vrfID))
 	return nil
 }
 
@@ -126,7 +127,7 @@ func TestNatApplyConvergence(t *testing.T) {
 	if err := p.ApplyNAT(context.Background(), natFixture()); err != nil {
 		t.Fatalf("ApplyNAT: %v", err)
 	}
-	if len(f.ranges) != 1 || f.ranges[0] != "add:203.0.113.10-203.0.113.20" {
+	if len(f.ranges) != 1 || f.ranges[0] != "add:203.0.113.10-203.0.113.20@0" {
 		t.Fatalf("地址池: %v", f.ranges)
 	}
 	if len(f.static) != 1 || f.static[0] != "add:10.0.0.5->203.0.113.1" {
@@ -227,6 +228,54 @@ func TestNatOutsideVRF(t *testing.T) {
 	}
 }
 
+// 地址池必须落在 outside 转发域里（vrf_id），且删除方向用**登记时**的那个 VRF——
+// 池进了默认表就跟 outside 不在同一张表：包进了 NAT 却分配不出端口，全程无报错（round84 缺陷 A）。
+func TestNatPoolUsesOutsideVRF(t *testing.T) {
+	natf := newFakeNat()
+	p := NewNatProvider(natf)
+	p.SetInsideResolver(func(string) []uint32 { return []uint32{1} })
+	wanTable := TableID("vs-wan")
+	p.SetOutsideResolver(func(ifname string) (uint32, bool) {
+		if ifname == "ens224" {
+			return wanTable, true
+		}
+		return 0, false
+	})
+	cfg := model.NatConfig{
+		SourcePools: []model.NatSourcePool{{Name: "pool-a", AddressRange: "192.168.155.62"}},
+		Rules: []model.NatRule{{Seq: 10, MatchSource: "192.168.200.0/24", VirtualSwitch: "vs-nat",
+			Action: model.NatAction{SourcePool: "pool-a", Interface: "ens224"}}},
+	}
+	ctx := context.Background()
+	if err := p.ApplyNAT(ctx, cfg); err != nil {
+		t.Fatalf("ApplyNAT: %v", err)
+	}
+	wantAdd := fmt.Sprintf("add:192.168.155.62-192.168.155.62@%d", wanTable)
+	if len(natf.ranges) != 1 || natf.ranges[0] != wantAdd {
+		t.Fatalf("地址池应带 outside 的 VRF %d: %v", wanTable, natf.ranges)
+	}
+
+	// 出接口换到另一张表：旧池必须用**旧 VRF** 删（用新 VRF 删不掉，VPP 里会残留）
+	otherTable := TableID("vs-other")
+	p.SetOutsideResolver(func(ifname string) (uint32, bool) {
+		if ifname == "ens224" {
+			return otherTable, true
+		}
+		return 0, false
+	})
+	natf.ranges = nil
+	if err := p.ApplyNAT(ctx, cfg); err != nil {
+		t.Fatalf("换转发域 ApplyNAT: %v", err)
+	}
+	wantOps := []string{
+		fmt.Sprintf("del:192.168.155.62-192.168.155.62@%d", wanTable),
+		fmt.Sprintf("add:192.168.155.62-192.168.155.62@%d", otherTable),
+	}
+	if len(natf.ranges) != 2 || natf.ranges[0] != wantOps[0] || natf.ranges[1] != wantOps[1] {
+		t.Fatalf("删除须用登记时的 VRF、下发用新 VRF，实际 %v（期望 %v）", natf.ranges, wantOps)
+	}
+}
+
 // 多条规则的 inside 转发域不一致必须报错（VPP NAT44 单实例，决策 #52）。
 func TestNatRejectsMultipleInsideVRF(t *testing.T) {
 	f := newFakeNat()
@@ -310,5 +359,125 @@ func TestNatSessionsDisabled(t *testing.T) {
 	rows, err := NewNatProvider(newFakeNat()).Sessions(context.Background())
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("未启用应返回空: %v %+v", err, rows)
+	}
+}
+
+// round84 目标终态回归：VNF 侧声明 virtual-switch（L3 交换机）的 vNIC 置入该 VRF 后，
+// NAT inside 必须包含该 vNIC——否则其流量拿不到 nat44-ei-in2out 特性，
+// 而配置、show nat 全都正常（实测 inside 只有物理口，guest 100% 不通）。
+func TestNatInsideIncludesVnfNic(t *testing.T) {
+	l3f := newFakeL3()
+	vh := orchestrator.VnfIfaceName("vnf-a", "eth0")
+	l3f.ifaces[vh] = 5 // vhost-user 口已由 vhost 编排建出（VPP 侧同名可见）
+	natf := newFakeNat()
+
+	net := NewL2Network(orchestrator.NewNoopNetwork(), NewL2Provider(newFakeL2()))
+	net.SetL3(NewL3Provider(l3f))
+	net.SetVhostUser(vhostProvider(newFakeVhost()))
+	net.SetNAT(NewNatProvider(natf))
+
+	ctx := context.Background()
+	if err := net.ApplyVnfInterface(ctx, orchestrator.VnfPort{VM: "vnf-a", Interface: "eth0",
+		Type: "vhost-user", VirtualSwitch: "vs-nat", VRF: "vs-nat",
+		Socket: "/run/nfvis/vhost/vnf-a-eth0.sock"}); err != nil {
+		t.Fatalf("ApplyVnfInterface: %v", err)
+	}
+	cfg := model.NatConfig{Rules: []model.NatRule{{Seq: 10, MatchSource: "192.168.200.0/24",
+		VirtualSwitch: "vs-nat", Action: model.NatAction{Interface: "ens224"}}}}
+	if err := net.ApplyNAT(ctx, cfg); err != nil {
+		t.Fatalf("ApplyNAT: %v", err)
+	}
+	joined := strings.Join(natf.feats, ",")
+	if !strings.Contains(joined, "add:5:inside") || !strings.Contains(joined, "add:2:outside") {
+		t.Fatalf("vNIC 必须作为 NAT inside 下发: %v", natf.feats)
+	}
+
+	// vNIC 删除后摘除登记：不得让 inside 指向已消失的接口
+	if err := net.DeleteVnfInterface(ctx, "vnf-a", "eth0"); err != nil {
+		t.Fatalf("DeleteVnfInterface: %v", err)
+	}
+	if got := net.l3.AttachedIfaces("vs-nat"); len(got) != 0 {
+		t.Fatalf("删除 vNIC 后不得残留 inside 登记: %v", got)
+	}
+	// NAT 侧的同一索引登记也随接口一并摘除：否则下一次 ApplyNAT 会去删一个已消失的接口
+	// （VPP 报 -6 No such entry），而一次无害的重复删除会把整批 apply 打回滚。
+	natf.feats = nil
+	if err := net.ApplyNAT(ctx, cfg); err != nil {
+		t.Fatalf("vNIC 删除后 ApplyNAT: %v", err)
+	}
+	for _, op := range natf.feats {
+		if strings.Contains(op, ":5:") {
+			t.Fatalf("不得再对该 vNIC 的旧索引下发任何 NAT 操作: %v", natf.feats)
+		}
+	}
+}
+
+// round84 收尾回归：派生查询（inside/outside 解析）在登记失效后可能返回空集，
+// 此时**不得**把「解析不出来」当成「配置里没有 inside」：
+//   - 插件不能被关掉（配置声明了 NAT）；
+//   - VPP 侧既有 inside 特性不能被删（删掉就是真机实测的「NAT 被整体关掉」形态）；
+//   - 等解析恢复健康，登记里保留的 inside 特性照常比对（不重复下发、也不遗留）。
+//
+// 反向也要守住：操作者真的清空了 NAT 配置时，插件必须关闭（不能因为怕关错就永不关）。
+func TestApplyNATKeepsInsideWhenResolutionLost(t *testing.T) {
+	f := newFakeNat()
+	p := NewNatProvider(f)
+	ctx := context.Background()
+	inside := []uint32{1, 5}
+	p.SetInsideResolver(func(string) []uint32 { return inside })
+	p.SetOutsideResolver(func(string) (uint32, bool) { return TableID("vs-wan"), true })
+	cfg := model.NatConfig{
+		SourcePools: []model.NatSourcePool{{Name: "pool-a", AddressRange: "192.168.155.62"}},
+		Rules: []model.NatRule{{Seq: 10, MatchSource: "192.168.200.0/24", VirtualSwitch: "vs-nat",
+			Action: model.NatAction{SourcePool: "pool-a", Interface: "ens224"}}},
+	}
+
+	// 前置：正常运行态，inside 特性已下发
+	if err := p.ApplyNAT(ctx, cfg); err != nil {
+		t.Fatalf("前置 ApplyNAT: %v", err)
+	}
+	if joined := strings.Join(f.feats, ","); !strings.Contains(joined, "add:1:inside") ||
+		!strings.Contains(joined, "add:5:inside") {
+		t.Fatalf("前置应下发 inside 特性: %v", f.feats)
+	}
+
+	// 登记失效/尚未重建：解析突然答不出 inside（配置一个字没改）
+	f.feats, f.enables, f.ranges = nil, nil, nil
+	inside = nil
+	if err := p.ApplyNAT(ctx, cfg); err != nil {
+		t.Fatalf("解析为空时 ApplyNAT 不应失败: %v", err)
+	}
+	for _, op := range f.feats {
+		if strings.HasPrefix(op, "del:") {
+			t.Fatalf("空解析不得删掉既有 inside 特性: %v", f.feats)
+		}
+	}
+	for _, op := range f.enables {
+		if strings.HasPrefix(op, "disable") {
+			t.Fatalf("有 NAT 配置时不得关闭插件: %v", f.enables)
+		}
+	}
+	if got, err := p.Sessions(ctx); err != nil || len(got) == 0 {
+		t.Fatalf("插件应仍处于启用态: %v %v", got, err)
+	}
+
+	// 解析恢复健康：登记里保留的 inside 特性被正确比对——既不重复下发
+	inside = []uint32{1, 5}
+	f.feats, f.enables, f.ranges = nil, nil, nil
+	if err := p.ApplyNAT(ctx, cfg); err != nil {
+		t.Fatalf("解析恢复后 ApplyNAT: %v", err)
+	}
+	if len(f.feats) != 0 || len(f.enables) != 0 || len(f.ranges) != 0 {
+		t.Fatalf("解析恢复后应认定全部在位、无任何下发: feats=%v enables=%v ranges=%v",
+			f.feats, f.enables, f.ranges)
+	}
+
+	// 反向：配置真的清空（操作者删掉全部规则/池/静态映射）→ 插件必须关闭
+	f.enables = nil
+	if err := p.ApplyNAT(ctx, model.NatConfig{}); err != nil {
+		t.Fatalf("清空配置的 ApplyNAT: %v", err)
+	}
+	if len(f.enables) != 1 || !strings.HasPrefix(f.enables[0], "disable") {
+		t.Fatalf("配置清空后必须关闭插件: %v", f.enables)
 	}
 }

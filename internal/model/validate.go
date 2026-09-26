@@ -66,6 +66,7 @@ type validator struct {
 	vmVnics    map[string]bool // "vm/vnic"
 	ctNames    map[string]bool
 	ctVnics    map[string]bool // "ct/vnic"
+	vnicNames  map[string]bool // 配置已声明 vNIC 的 VPP 侧确定性名（vh-/mf-，见 ifacename.go）
 	hpSizes    map[string]bool
 	macOwner   map[string]string // MAC -> 首个占用者（③：跨全部 VNF 的 MAC 命名空间）
 }
@@ -96,9 +97,18 @@ func checkVlan(n int) bool    { return n >= 1 && n <= 4094 }
 
 func (v *validator) anyIface(n string) bool { return v.ifaceNames[n] || v.bondNames[n] }
 
-// l3IfaceExists 判断 L3 接口引用：物理口/bond，或物理口上的 VLAN 子接口（如 ens2f0.100）。
+// l3IfaceExists 判断 L3 接口引用：物理口/bond、物理口上的 VLAN 子接口（如 ens2f0.100），
+// 或**配置里已声明的 vNIC**（vhost-user 的 vh-<vm>-<vnic>、容器 memif 的 mf-<ct>-<vnic>，
+// 名字由 ifacename.go 的规则派生，与编排层同源）。
+//
+// vNIC 可承载 L3 地址的由来（round84 证据 §14）：guest 的网关必须落在 guest 自己的口上——
+// VPP 只为「接收接口自己拥有的地址」作答 ARP，同 VRF 但配在别的接口上的地址不代答。
+// 网关配在物理口时 guest 100% Destination Host Unreachable。
+//
+// 判据只认「配置里确实声明过的 vNIC 名」：任意 vh-/mf- 前缀的随机名字、tap、以及一切
+// 未声明的接口仍旧拒绝；物理口/bond/VLAN 子接口的既有行为不变。
 func (v *validator) l3IfaceExists(n string) bool {
-	if v.anyIface(n) {
+	if v.anyIface(n) || v.vnicNames[n] {
 		return true
 	}
 	if parent, _, ok := strings.Cut(n, "."); ok {
@@ -176,11 +186,16 @@ func (v *validator) collect(c Config) {
 	for _, q := range c.QosPolicies {
 		v.qosNames[q.Name] = true
 	}
-	v.vmNames, v.vmVnics = map[string]bool{}, map[string]bool{}
+	v.vmNames, v.vmVnics, v.vnicNames = map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, m := range c.VirtualMachineFunctions {
 		v.vmNames[m.Name] = true
 		for _, nic := range m.Interfaces {
 			v.vmVnics[m.Name+"/"+nic.Name] = true
+			// VPP 侧接口名只对 vhost-user 类型的 vNIC 存在（与 orchestrator.VnfPortsOf
+			// 的过滤口径一致：type 必须显式为 vhost-user，sriov-vf 不进 VPP）。
+			if nic.Type == "vhost-user" {
+				v.vnicNames[VnfIfaceName(m.Name, nic.Name)] = true
+			}
 		}
 	}
 	v.ctNames, v.ctVnics = map[string]bool{}, map[string]bool{}
@@ -188,6 +203,9 @@ func (v *validator) collect(c Config) {
 		v.ctNames[ct.Name] = true
 		for _, nic := range ct.Interfaces {
 			v.ctVnics[ct.Name+"/"+nic.Name] = true
+			if nic.Type == "memif" {
+				v.vnicNames[MemifIfaceName(ct.Name, nic.Name)] = true
+			}
 		}
 	}
 	v.macOwner = map[string]string{}
@@ -490,7 +508,7 @@ func (v *validator) checkVrfs(c Config) {
 		for _, li := range r.L3Interfaces {
 			lp := fmt.Sprintf("%s.l3_interfaces[%s]", p, li.Interface)
 			if !v.l3IfaceExists(li.Interface) {
-				v.errf(lp, "L3 接口 %q 不存在或不是物理口/bond/vlan 子接口", li.Interface)
+				v.errf(lp, "L3 接口 %q 不存在或不是物理口/bond/vlan 子接口/已声明的 vNIC", li.Interface)
 			}
 			for i, a := range li.Addresses {
 				if !checkCIDR(a) {

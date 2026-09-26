@@ -71,6 +71,22 @@ func (g *govppL3Client) IPTableAddDel(tableID uint32, isIP6, add bool, name stri
 	return nil
 }
 
+// SwInterfaceTable 查接口运行态当前所属表（供 SetVnfTable 判断是否需要下发置表：
+// VPP 只允许无地址的接口换表，带了地址的口重复下发会报 -114）。
+func (g *govppL3Client) SwInterfaceTable(swIfIndex uint32, isIP6 bool) (uint32, bool, error) {
+	reply := &ifapi.SwInterfaceGetTableReply{}
+	err := g.ch.SendRequest(&ifapi.SwInterfaceGetTable{
+		SwIfIndex: interface_types.InterfaceIndex(swIfIndex), IsIPv6: isIP6,
+	}).ReceiveReply(reply)
+	if err != nil {
+		return 0, false, err
+	}
+	if reply.Retval != 0 {
+		return 0, false, fmt.Errorf("sw_interface_get_table(if=%d,ip6=%v) retval=%d", swIfIndex, isIP6, reply.Retval)
+	}
+	return reply.VrfID, true, nil
+}
+
 func (g *govppL3Client) SwInterfaceSetTable(swIfIndex uint32, isIP6 bool, tableID uint32) error {
 	reply := &ifapi.SwInterfaceSetTableReply{}
 	err := g.ch.SendRequest(&ifapi.SwInterfaceSetTable{
