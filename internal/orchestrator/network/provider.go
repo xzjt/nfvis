@@ -5,6 +5,7 @@ package network
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
@@ -26,6 +27,10 @@ type L2Network struct {
 	memifDir                     string             // memif socket 目录
 	alarms                       *AlarmStore        // 恢复收敛失败项落点（M3-8，可空）
 	sriov                        *SRIOVProvider     // PF 的 VF 数量（声明式 vf-count，决策 #70）
+	// runtimeMu 串行化「进程内登记失效」与「NAT 下发」：失效清的是 NAT inside/outside 的解析
+	// 来源（L3 侧登记），若与一次 ApplyNAT 交错，那次下发会按「空 inside」算期望集——
+	// 少下发特性，甚至把既有 inside 特性当成配置里已删的项删掉。
+	runtimeMu sync.Mutex
 }
 
 // NewL2Network 以基础 Provider 与 L2 编排器构造装饰器。
@@ -94,6 +99,61 @@ func (n *L2Network) SetMemif(p *MemifProvider) { n.memif = p }
 // SetSRIOV 注入 SR-IOV VF 数量编排（声明式 interfaces[].sriov.vf_count）。
 func (n *L2Network) SetSRIOV(p *SRIOVProvider) { n.sriov = p }
 
+// InvalidateRuntimeState 让状态型子编排器的进程内登记失效（VPP 连接（重）建立时调用）。
+//
+// 语义（round84 收尾后固化，只此一条）：**它只让下一次收敛做全量重放**，不触碰 VPP、不改配置。
+// 带外 `systemctl restart vpp` 会清空 VPP 侧配置，而进程内登记仍在：ApplyNAT 会认为
+// 「已下发」而跳过重放（inside 特性、地址池、接口地址全都不在下发的 VPP 里），NAT 静默
+// 失效，必须重启 nfvisd 才恢复（round84 R84-21）。失效后随后的恢复收敛做一次全量重放。
+//
+// 「失效后派生查询（AttachedIfaces/TableOfIface）可能返回空集」这件事必须安全，靠两条不变式：
+//  1. 失效与 ApplyNAT 由 runtimeMu 互斥，且先清消费方（NAT）再清来源方（L3）：任何一次
+//     ApplyNAT 要么看到完整的旧登记、要么看到完整的空登记，不会拿到「inside 空、特性却在」
+//     的中间态；
+//  2. ApplyNAT 的插件开关按**配置声明**判定（nat.go），空解析只会少下发几条特性，绝不关闭插件；
+//     恢复收敛还会在 VRF 落地之后、ApplyNAT 之前按配置重建这三张表（l3.go RegisterL3Interfaces
+//     + SetVnfTable），故一次完整收敛之后派生查询必然答得出配置声明的接口。
+//
+// 为何是「清空 + 重建」而不是「保留这些登记、只清 NAT 特性/池缓存」：登记里的 sw_if_index 在
+// VPP 重启后会变（接口重新枚举），保留旧索引会让 NAT 去操作已不存在的口（VPP 报 -6 No such
+// entry）、把整批 apply 打回滚——那正是本轮在修的 round84 缺陷 B 的形态。清空后按配置重建，
+// 拿到的一定是当前运行态的索引。
+//
+// 与「只补齐不摘除」（附录 A #35）不冲突：失效只清进程内登记，重放只发 add、不发 del；
+// 重放里 add 方向的「已存在」按成功处理（见 nat_govpp.go），故失效 + 重放可安全重复执行。
+func (n *L2Network) InvalidateRuntimeState() {
+	if n == nil {
+		return
+	}
+	n.resetProviders()
+}
+
+// VnfPortIfaceName 由 vNIC 端口派生其在 VPP 中的确定性接口名（vhost-user 与 memif 各自
+// 规则在 orchestrator/model 侧唯一真源，此处只做选择，供接入/删除/恢复收敛共用）。
+func VnfPortIfaceName(port orchestrator.VnfPort) string {
+	if port.Type == "memif" {
+		return orchestrator.MemifIfaceName(port.VM, port.Interface)
+	}
+	return orchestrator.VnfIfaceName(port.VM, port.Interface)
+}
+
+// vnfPortProviderReady 该类型的 vNIC 接入编排是否已装配。未装配 = 本部署不管这类 vNIC
+// （如未接入 VPP 的部署：该类型的接口也不会存在），与 ApplyVnfInterface 的早退口径一致——
+// 恢复收敛的登记重建对这类端口同样跳过，不制造无意义的接口缺失告警。
+//
+// sriov-vf 恒为 false：VF 直通不过 VPP，VPP 侧没有该 vNIC 的接口，把它的确定性名拿去
+// 解析/置表只会得到一条永不收敛的告警（配置上它仍可声明 virtual-switch，仅作登记）。
+func (n *L2Network) vnfPortProviderReady(portType string) bool {
+	switch portType {
+	case "memif":
+		return n.memif != nil
+	case "vhost-user":
+		return n.vhost != nil
+	default:
+		return false
+	}
+}
+
 // ApplyVnfInterface 建立 vNIC 接入（FR-NET-020/021/023）：
 //   - vhost-user：VPP 建 server socket 接口并命名，交换机端口随后按名挂接；
 //     若 vNIC 指向 L3 交换机（port.VRF 非空），再将该接口置入对应 VRF 表；
@@ -109,7 +169,7 @@ func (n *L2Network) ApplyVnfInterface(ctx context.Context, port orchestrator.Vnf
 			return err
 		}
 		if port.VRF != "" && n.l3 != nil {
-			return n.l3.SetVnfTable(ctx, port.VRF, orchestrator.VnfIfaceName(port.VM, port.Interface))
+			return n.l3.SetVnfTable(ctx, port.VRF, VnfPortIfaceName(port))
 		}
 		return nil
 	case "memif":
@@ -120,7 +180,7 @@ func (n *L2Network) ApplyVnfInterface(ctx context.Context, port orchestrator.Vnf
 			return err
 		}
 		if port.VRF != "" && n.l3 != nil {
-			return n.l3.SetVnfTable(ctx, port.VRF, orchestrator.MemifIfaceName(port.VM, port.Interface))
+			return n.l3.SetVnfTable(ctx, port.VRF, VnfPortIfaceName(port))
 		}
 		return nil
 	case "sriov-vf":
@@ -141,6 +201,19 @@ func (n *L2Network) DeleteVnfInterface(ctx context.Context, owner, ifaceName str
 	if n.memif != nil {
 		if err := n.memif.Delete(ctx, owner, ifaceName); err != nil {
 			return err
+		}
+	}
+	// VRF/NAT inside 登记随接口一并摘除：接口已从数据面消失，残留的 sw_if_index 会让
+	// NAT inside 指向不存在的口（下一次 ApplyNAT 直接失败，且会去删一个已消失的接口）。
+	// 两个确定性名都试，与删除同样幂等；NAT 侧同一索引的登记一并摘掉。
+	if n.l3 != nil {
+		for _, name := range []string{
+			orchestrator.VnfIfaceName(owner, ifaceName),
+			orchestrator.MemifIfaceName(owner, ifaceName),
+		} {
+			if idx, ok := n.l3.ForgetVnfIface(name); ok && n.nat != nil {
+				n.nat.ForgetIface(idx)
+			}
 		}
 	}
 	return nil
@@ -187,6 +260,10 @@ func (n *L2Network) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 	if n.nat == nil {
 		return nil
 	}
+	// 与登记失效互斥（见 runtimeMu 与 InvalidateRuntimeState）：失效清的是本次下发要读的
+	// inside/outside 解析来源，交错会让本次按「空转发域」算期望集。
+	n.runtimeMu.Lock()
+	defer n.runtimeMu.Unlock()
 	return n.nat.ApplyNAT(ctx, nat)
 }
 

@@ -13,6 +13,8 @@ import (
 //
 // 命名/路径确定性派生（同 BD ID/VRF TableID 思路，决策 #31/#40）：compute（domain XML）
 // 与 network（VPP 侧 vhost-user 接口）必须算出同一路径与接口名，不得各写一份。
+// **接口名规则的真源在 model（internal/model/ifacename.go）**——校验层也要按同一份规则
+// 判定「配置声明的 vNIC 能否作 l3-interface」，故本文件的 VnfIfaceName/MemifIfaceName 只作转发。
 
 // VnfPort 一台 VNF 的一个虚拟网卡接入点。
 type VnfPort struct {
@@ -34,17 +36,9 @@ func VnfSocketPath(vhostDir, vmName, ifaceName string) string {
 // DefaultVhostDir vhost-user socket 缺省目录（nfvisd 启动期确保存在）。
 const DefaultVhostDir = "/run/nfvis/vhost"
 
-// VnfIfaceName vhost-user 接口在 VPP 中的名字（交换机端口按名引用；≤63 字节，
-// 超长时用 FNV-1a 哈希后缀保证确定且不截断碰撞）。
-func VnfIfaceName(vmName, ifaceName string) string {
-	full := "vh-" + vmName + "-" + ifaceName
-	if len(full) <= 63 {
-		return full
-	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(vmName + "/" + ifaceName))
-	return fmt.Sprintf("vh-%08x", h.Sum32())
-}
+// VnfIfaceName vhost-user 接口在 VPP 中的名字（交换机端口按名引用）。
+// 规则已下沉到 model（校验层要按同一份规则解析 vNIC 名），此处只作转发，签名不变。
+func VnfIfaceName(vmName, ifaceName string) string { return model.VnfIfaceName(vmName, ifaceName) }
 
 // VnfPortTag VPP 接口 tag：用于跨进程反查该接口归属（恢复收敛用，附录 A #35 思路）。
 func VnfPortTag(vmName, ifaceName string) string {
@@ -76,16 +70,8 @@ func deriveUint32(key string) uint32 {
 	return v
 }
 
-// MemifIfaceName memif 接口在 VPP 中的名字（容器端口按名引用；≤63 字节，超长用哈希）。
-func MemifIfaceName(owner, ifaceName string) string {
-	full := "mf-" + owner + "-" + ifaceName
-	if len(full) <= 63 {
-		return full
-	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte("memif/" + owner + "/" + ifaceName))
-	return fmt.Sprintf("mf-%08x", h.Sum32())
-}
+// MemifIfaceName memif 接口在 VPP 中的名字（容器端口按名引用）。同样转发 model。
+func MemifIfaceName(owner, ifaceName string) string { return model.MemifIfaceName(owner, ifaceName) }
 
 // VnfPortsOf 由配置派生全部需 VPP 接入的 vNIC 端口（VM vhost-user + 容器 memif），
 // 按 (属主名, vNIC 名) 升序，保证操作序列与恢复收敛重放确定。

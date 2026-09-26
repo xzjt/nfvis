@@ -515,4 +515,74 @@ guest: 192.168.200.10/24 gw 192.168.200.1（cloud-init 静态，无 DHCP 服务�
   **经 NFViS NAT 的路径要等上面两条根因修掉**（建议：把 vNIC 登记进 inside 解析集合 + 允许 vNIC 承载
   L3 地址，或为 L3 交换机提供自动的 vNIC 网关）。
 
+
+§15 round84 终章之二：VNF 的 eth0 走 NFViS NAT 打通（决策 #172~#174）
+--------------------------------------------------------------------------------
+承接 §14 的两条根因，本轮把「VNF 的 eth0 经 NFViS NAT 拿地址并 ping 通 Windows 宿主」跑通了。
+终态配置（全部产品路径）：
+```
+vs-nat (L3): l3-interface vh-vnf-dhcp-eth0 ip address 192.168.200.1/24   # vNIC 自己当有地址的 L3 接口
+vnf-dhcp:    interfaces eth0 type vhost-user virtual-switch vs-nat
+vs-wan (L3): l3-interface ens224 ip address 192.168.155.61/24
+nat rules 10: match source 192.168.200.0/24 virtual-switch vs-nat action interface ens224
+guest:       192.168.200.10/24 gw 192.168.200.1
+```
+**guest 侧（串口，1.1.42~dev3 实机）**：
+```
+PING 192.168.155.1 (192.168.155.1) 56(84) bytes of data.
+64 bytes from 192.168.155.1: icmp_seq=1 ttl=127 time=1.99 ms
+64 bytes from 192.168.155.1: icmp_seq=2 ttl=127 time=0.294 ms
+64 bytes from 192.168.155.1: icmp_seq=3 ttl=127 time=0.325 ms
+```
+**VPP 侧（`show nat44 ei sessions detail`，跨 VRF 会话）**：
+```
+i2o 192.168.200.10 proto icmp port 516 fib 1
+o2i 192.168.155.61 proto icmp port 11570 fib 2
+     total pkts 6, total bytes 504      dynamic translation
+（同一时刻 3 条动态转换，thread vpp_wk_0）
+```
+* 副作用：`show nat44 ei interfaces` = `vh-vnf-dhcp-eth0 in` / `ens224 out`；`show interface address` 里
+  `vh-vnf-dhcp-eth0` 持有 `192.168.200.1/24`（table = vs-nat），guest 的网关 ARP 由该口自己作答
+  （修前是 100% `Destination Host Unreachable`）。
+
+**本轮修的三件事（决策 #172~#174）**
+- **#172 允许「已声明的 vNIC 口」作 L3 接口**：口名规则（`vh-<vm>-<nic>`、>63 字节回退 FNV-1a、
+  容器 `mf-…`）从 `internal/orchestrator` **下沉到 `internal/model`**（避免两处漂移；
+  `orchestrator.VnfIfaceName/MemifIfaceName` 变薄封装、签名不变），校验层按**同一份配置**枚举
+  已声明的 vNIC 并放行其确定性口名（随机名字/tap/未声明口仍拒）。
+  这解决了 §14 根因二：guest 的网关终于落在它自己的口上。
+- **#173 NAT inside 覆盖 vNIC + VPP 重连后按配置重建登记**：`SetVnfTable` 现在把 vNIC 计入该 VRF 的
+  inside 集合（`AttachedIfaces` 合并 `ifaces` ∪ `vnfs`，按 idx 去重）；恢复收敛在 **VRF 落地之后、
+  ApplyNAT 之前**按 committed 配置重建三类登记（`ifaces`/`ifaceTable`/`vnfs`），使
+  `InvalidateRuntimeState()`（VPP 重连时清进程内缓存）之后 NAT 仍能算出 inside/outside；
+  另加守卫：规则声明了 virtual-switch 却解析不出 inside 时**不删**既有 inside 特性（避免「算不出就关插件」）。
+  **真机复验**：`systemctl restart vpp` + `systemctl restart nfvis` 后
+  `show nat44 ei interfaces` 仍是 `vh-vnf-dhcp-eth0 in` / `ens224 out`、池地址在、无未收敛项。
+- **#174 NAT 下发幂等 + 地址池带 VRF**：地址池/接口地址/静态映射的 add 方向容忍
+  `-81 Value already exists`、移除方向容忍 `-6 No such entry`/`-81`/`-169 Feature already disabled`
+  （此前一次重放就会让整个 `ApplyNAT` 中止，只留一条 WARN + 未收敛项，而 `show nat` 看着正常）；
+  地址池下发改带上 outside 转发域的 VRF（`nat44_ei_add_del_address_range` 的 `VrfID`，此前恒为 0），
+  删除时用登记里的旧 VRF（换域要先删旧表）。
+
+**仍未解决（新登记，供下轮裁）**
+- **R84-24（P2）显式 `source-pool` 在跨 VRF 场景下分配不出端口**：带 `action source-pool` 时
+  guest 的包**进了 NAT**（`nat44-ei-in2out-slowpath` 计数在涨）但会话建不起来：
+  `vppctl show errors` → `nat44-ei-in2out-slowpath  out of ports`，`show nat44 ei sessions` = 0。
+  实测把池地址的 tenant VRF 从 0 改成 outside VRF 后**仍然**如此；**去掉池、只留 `action interface`
+  （由出接口地址承担外部地址）则立刻通了**（即上面那组成功证据）。
+  怀疑池的 tenant VRF 语义与 inside/outside 的对应关系还需与 VPP 源码核对（可能与 inside VRF 或
+  会话租户绑定，而不是 outside VRF）。**现状给操作者的口径：跨 VRF NAT 请用 `action interface`
+  （不带 source-pool）**；这条已在手册 §8.8 写明。
+- **R84-25（P3）`delete nat rules <seq> action source-pool <name>` 会连带删掉整条规则**（本轮两次
+  踩到：只想摘掉池引用，结果 `show nat` 里规则整条消失）。我未逐句隔离验证其语义（是循环删除还是叶子删除），
+  但两次现象一致，建议下轮用最小用例确认并给出「只删叶子」的写法或明确文档。
+- **R84-26（P3）`show configuration | display set` 在「空 `nat;` 节点」上反推失败**：
+  输出 `%% display set 内部错误：生成语句未能完整还原配置——请改用 show configuration / | display json 并报告缺陷`
+  （自校验诚实报错是好的，但操作者拿不到 display set；触发场景：删光 NAT 规则后配置里留下空 `nat` 节点）。
+- 另：本轮为验证在 VNF 上用了「运行期脚本设 IP」（不走 netplan），避免 §14 那类持久化 netplan 残留；
+  该脚本每次改 user-data 文件名触发 cloud-init 重放，属既有机制（§0 红线 12）。
+- **机器终态**：拓扑停在 §15 这套 NAT 配置（guest 在 192.168.200.0/24、经 NAT 出 ens224），
+  VNF `vnf-dhcp` running；如需回到「guest 直接桥到上游网段」，把 VNF 的 eth0 指回一个 L2 交换机
+  （端口含 ens192）并让 guest 走 DHCP 即可（§13 的形态）。
+
 ================================================================================
