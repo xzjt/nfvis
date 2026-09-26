@@ -67,7 +67,7 @@ type Store struct {
 	// dockerRemove 删除容器镜像（经 Docker API）；nil = 不支持（删除容器镜像时报错）。
 	dockerRemove func(ref string) error
 	// dockerLoad 载入容器镜像归档（docker load）；nil = 不支持（导入容器镜像时报错）。
-	dockerLoad func(path string) error
+	dockerLoad func(path, name string) error
 	// progress 下载进度（M5-1 image-import-progress 事件；nil = 不上报）。
 	progress func(name string, written, total int64)
 	// stateSink 导入状态变化（downloading/ready/failed；nil = 不上报）。
@@ -90,7 +90,10 @@ func (s *Store) emitState(name, typ, state string) {
 func (s *Store) SetDockerRemover(f func(ref string) error) { s.dockerRemove = f }
 
 // SetDockerLoader 注入容器镜像载入实现（Docker API `docker load`，FR-CMP-030/031）。
-func (s *Store) SetDockerLoader(f func(path string) error) { s.dockerLoad = f }
+// name 为仓库目录项名：load 后按它重打标签 `<名>:latest`，使容器引用（=目录项名）
+// 与 Docker 运行名闭环——tar 内嵌 tag 必含冒号而目录项名白名单禁冒号，两者天然不等，
+// 不重打标签则容器镜像端到端不可用（决策 #160）。
+func (s *Store) SetDockerLoader(f func(path, name string) error) { s.dockerLoad = f }
 
 // Open 打开/初始化仓库（创建目录并载入 index.json）。
 func Open(cfg Config) (*Store, error) {
@@ -270,7 +273,7 @@ func (s *Store) ImportIncoming(name, typ, incomingFile, description string) (Met
 		return Meta{}, err
 	}
 	if typ == TypeContainer {
-		if err := s.dockerLoad(abs); err != nil {
+		if err := s.dockerLoad(abs, name); err != nil {
 			return Meta{}, fmt.Errorf("docker load %s: %w", name, err)
 		}
 		if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {

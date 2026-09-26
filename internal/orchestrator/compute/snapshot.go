@@ -73,6 +73,12 @@ func DiskTargetsOf(domainXML string) []string {
 		if !strings.Contains(block, `device='disk'`) {
 			continue
 		}
+		if strings.Contains(block, `type='raw'`) {
+			// raw 盘不支持内部快照（libvirt 拒绝整个快照——round83 真机实测）：
+			// 如 #139 的 cloud-init seed（readonly virtio 盘，静态内容本就不随快照回滚）。
+			// 只收 qcow2 等可内部快照的盘（决策 #159）。
+			continue
+		}
 		if j := strings.Index(block, `<target dev='`); j >= 0 {
 			v := block[j+len(`<target dev='`):]
 			if k := strings.Index(v, "'"); k > 0 {

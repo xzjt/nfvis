@@ -228,8 +228,8 @@ func run() error {
 			return ctProvider.RemoveImage(context.Background(), ref)
 		})
 		// 容器镜像导入：docker save 归档经 `image load` 入 Docker 分层存储（FR-CMP-030/031）。
-		imagesStore.SetDockerLoader(func(path string) error {
-			return ctProvider.LoadImage(context.Background(), path)
+		imagesStore.SetDockerLoader(func(path, name string) error {
+			return ctProvider.LoadImage(context.Background(), path, name)
 		})
 		// M5-1：镜像导入进度/状态事件
 		imagesStore.SetProgressSink(func(name string, written, total int64) {

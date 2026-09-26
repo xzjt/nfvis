@@ -75,7 +75,7 @@ func TestImportIncoming(t *testing.T) {
 	}
 	// 注入 docker load 后：登记元数据、源文件清理、仓库不留文件
 	loaded := ""
-	s.SetDockerLoader(func(path string) error { loaded = path; return nil })
+	s.SetDockerLoader(func(path, name string) error { loaded = path; return nil })
 	m2, err := s.ImportIncoming("alpine:3.20", TypeContainer, ctFile, "")
 	if err != nil {
 		t.Fatalf("容器镜像导入: %v", err)

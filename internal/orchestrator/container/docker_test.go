@@ -56,7 +56,7 @@ func (m *mockDocker) ExitCode(_ context.Context, name string) (int, bool, error)
 	_, ok := m.states[name]
 	return m.exitCodes[name], ok, nil
 }
-func (m *mockDocker) LoadImage(_ context.Context, _ string) error { return nil }
+func (m *mockDocker) LoadImage(_ context.Context, _, _ string) error { return nil }
 
 func (m *mockDocker) RemoveImage(_ context.Context, ref string) error {
 	m.calls = append(m.calls, "rmi:"+ref)

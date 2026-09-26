@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -116,3 +117,19 @@ func TestProviderConsoleRequiresRunning(t *testing.T) {
 }
 
 var _ = model.VMFunction{}
+
+// TestDiskTargetsOfExcludesRaw（决策 #159）：内部快照只支持 qcow2 盘——raw 盘
+// （如 #139 的 cloud-init seed，readonly virtio 盘）必须排除，否则 libvirt 拒绝
+// 整个快照（round83 真机实测：internal snapshot for disk vdb unsupported for
+// storage type raw）。
+func TestDiskTargetsOfExcludesRaw(t *testing.T) {
+	xml := `<domain><devices>
+<disk type='file' device='disk'><driver name='qemu' type='qcow2'/><source file='/vms/x/disk.qcow2'/><target dev='vda' bus='virtio'/></disk>
+<disk type='file' device='disk'><driver name='qemu' type='raw'/><source file='/vms/x/seed.iso'/><readonly/><target dev='vdb' bus='virtio'/></disk>
+</devices></domain>`
+	got := DiskTargetsOf(xml)
+	want := []string{"vda"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("raw 盘应被排除: got %v want %v", got, want)
+	}
+}
