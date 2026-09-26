@@ -1,0 +1,378 @@
+================================================================================
+NFViS V1 收尾 · round84 证据：干净快照 → 从零装机 → 拟人化全功能走查
+日期：2026-09-26
+范围：用户把 nfvis-vm 恢复为「干净」快照，要求从安装开始、模拟真人操作验证全部功能，
+      找出遗漏缺陷。本轮只做**验证与登记**，未改产品代码（修复建议见 §7 各条）。
+环境：nfvis-vm（192.168.155.129，SSH 密钥免密）；快照态实测：nfvis 未装、/root/src 无、
+      go/make 未装、/var/lib/nfvis 无、VPP 本地 debs 9 个在位；apt 源已是 USTC（可直连）。
+基线：main 0f33655（v1.1.39 之后两个 docs 提交）；构建 1.1.40~dev1（SOURCE_DATE_EPOCH=1790425455）。
+构建期网络：VM 直连 proxy.golang.org/goproxy.cn 下载大文件会被重置 → 全程走用户提供的代理
+      http://192.168.155.1:2333（GOPROXY/curl/docker 守护进程均经它）。
+================================================================================
+
+§1 环境重建 → 实装 → 首启
+--------------------------------------------------------------------------------
+- apt（USTC 直连）装齐：make、golang-1.26、cloud-image-utils、qemu-utils、libvirt-daemon-system、
+  libvirt-clients、qemu-system-x86、docker.io；VPP 由 /root/vpp-v26.06-deb 的 9 个 deb 装齐（active）。
+- git archive(main 0f33655) → /root/src → go build 全绿 → make deb VERSION=1.1.40~dev1
+  → nfvis_1.1.40~dev1_amd64.deb（9,114,132 字节，sha256 be11dbb9396364eb…）。
+- dpkg -i 实装输出与手册 §2.2 逐条吻合：core_pattern 提示、**未检测到 1G 大页池**提示、
+  isolcpus 提示、底座三探测（vpp/libvirtd/dockerd 均在）、enable 不自动 start、
+  基线片段 /etc/default/grub.d/99-nfvis.cfg 写入 + fstab 大页行 + update-grub、
+  SSH 强化（root 口令登录禁用、密钥保留、不重启 sshd）。
+- 重启后 cmdline 生效：default_hugepagesz=1G hugepagesz=1G hugepages=1 intel_iommu=on
+  intel_pstate=disable iommu=pt（**此轮无 2M 池**——向导还没跑）。
+- 首启（systemctl start nfvis）：`% 首次启动已创建用户 admin (super-user)。一次性口令…`，
+  口令 P40naQreiCztht2Z@Aa1（本文件按需引用，**随快照恢复而变**）；
+  启动日志含「管理口守卫事实（declared="" default-route=ens160 listen=""）」、自签证书指纹、
+  「已连接 VPP 26.06-release」、「恢复收敛完成」。`show version` → NFViS 1.1.40~dev1。
+
+§2 内核基线与 wizard（拟人化：真 pty 交互，全取默认）
+--------------------------------------------------------------------------------
+- 用具 pty 的驱动脚本跑 `wizard`，8 个问题全回车取默认，末次确认默认 yes。
+  实际打印的计划是：
+    configure / set resource-pools hugepages page-size 1G count 1 / … 2M count 768 /
+    set resource-pools cpu isolated-cores 2-5 / set vpp cpu main-core 5 /
+    set vpp cpu corelist-workers 4 / set vpp memory hugepage-preference 2M /
+    commit / exit / request system kernel apply
+  → commit 成功（revision 3）+ 三条待重启警告 → 内核基线写入 + pending_reboot 清单。
+  ※ 手册 §5.3 的样例把这一步写成 `top`（实际是 `exit`，且位置在 commit 之前）——见 R84-9。
+- 走产品路径 `request system reboot`：**非交互（-c）下只打印确认问句、不重启**（rc=0）——见 R84-1。
+  改用真 pty 输入 yes 后正常重启；重启后 cmdline：
+    … hugepagesz=2M hugepages=768 isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5 irqaffinity=0-1 …
+  1G 池运行实际 2（cmdline 声明 1）、2M 池 768。
+- `show system kernel` 三方对照表正常，但「一致性」判定给出**不可达的修复指引**——见 R84-5。
+
+§3 数据面接管（手册 §7 顺序）
+--------------------------------------------------------------------------------
+- `request interfaces ens192 bind-dpdk --yes` / ens224 同：自动加载 vfio-pci，回显 PCI 与驱动。
+- 声明 + `set vpp dpdk dev` + commit（revision 4，含「vpp 变更需 request vpp restart」警告）。
+- `request vpp restart` → 生成的 /etc/vpp/startup.conf 含 cpu{main-core 5 corelist-workers 4}、
+  memory{default-hugepage-size 2M main-heap-page-size 2M}、dpdk{dev 0000:0b:00.0 name ens192…}。
+- 独立事实源对照：`vppctl show interface` = ens192/ens224 up（driver dpdk）；
+  CLI `show interfaces physical` 同刻同值（Interface/Admin/Link/Speed/Driver/RxPkts/TxPkts）。
+- L2：`edit virtual-switches vs-vnf type l2 + ports 1 interface ens192 + gateway ip 192.168.100.1/24`
+  → `vppctl show bridge-domain` 出现 BD 6252701、BVI-Intf=bvi0、bvi0 有 192.168.100.1/24。
+- L3：vs-l3 + l3-interface ens224 10.99.0.1/24 + static-routes 10.99.9.0/24 next-hop 10.99.0.254
+  → `vppctl show ip fib` 出现 10.99.0.0/24、10.99.9.0/24 → 10.99.0.254（与 `show vrfs … routes` 一致）。
+- ACL/QoS 引用检查正确：`delete acls acl-x` 前先建、删净；镜像删除被引用时被拒（见 §5）。
+
+§4 三件套（真机，已装实例）
+--------------------------------------------------------------------------------
+- 256 条冒烟（contrib/scripts/cli-fulltest.sh）：**通过 194 / 失败 1 / 预期报错 6**，
+  唯一失败 = 已登记的 `show vpp runtime`（「govpp runtime 解码限制」）。
+  ⚠️ 该结果与 round36 的干净基线一致，但**含两处假绿**（R84-1 的套件侧）：
+  `✓ request system software rollback`、`✓ request images delete name naming-test.tar`
+  实际只回确认问句、未执行（详见 R84-1）。
+- 语义校验（cli-semantic-check.sh）：**通过 11 / 失败 0 / 登记 0**（跑两遍同结果，无回归）。
+- pty 冒烟（cli-pty-smoke.sh）：**10/10**（`?` 即时候选 + CRLF、Tab 多匹配响铃列出、
+  前缀过滤、非 TTY 仍列候选且无 CR）。
+
+§5 计算：镜像 / VNF / 容器 / 快照
+--------------------------------------------------------------------------------
+- `request images download`：缺 sha256 被拒（FR-SEC-004，round83 已验）；本轮**实测到下载中断**：
+  VM 直连 CDN 约 1.7MB/min，8.5MB 后停滞，状态长期停在 `downloading`（.part 不再增长，
+  无进度、无错误、无重试入口），11 分钟后仍为 downloading —— 见 R84-6。
+  最终改用 curl 经代理下载 + `request images upload`（**绝对路径**，见 R84-8）导入。
+- 引用检查：VNF 还在引用镜像时 `request images delete name debian-… --yes`
+  → `%% 镜像被引用，不可删除（1 个引用）`（FR-CMP-033 正确）。
+- 容器镜像闭环（#160）：`docker save alpine:3.20 -o /data/incoming/alpine.tar` → upload
+  → 仓库登记 `alpine.tar`（container-image 3.6MiB ready），docker 侧出现
+  `alpine:3.20` 与 `alpine.tar:latest` **同 ID d9e853e87e55**（重打 tag 生效）。
+  但配置里可用的名字只有仓库项名 `alpine.tar`——见 R84-7。
+- 容器生命周期：commit（rev 25/26）→ start → `docker ps` Up（`/bin/sh -c 'sleep 3600'`）
+  → 产品 `show container-functions ct-85` state=running（与 docker 一致）→ stop → delete
+  （「运行态 memif/VPP 端口级联清理」）。手册 §9.4 的示例 recipe 可用。
+- VNF 生命周期：commit（rev 21/22）→ start → 产品 state=running + `virsh list` running（独立事实源）
+  + `vppctl` 出现 vh-vnf-lc-eth0 up；guest 真的在启动（覆盖盘 196KiB → 15~18MiB 写入、
+  vhost 口 rx 计数在走）。运行中 `snapshot create` 被正确拒绝（「当前为 running，需先关机」）；
+  关机后 create/list/rollback/delete 全通过；stop 入审计（vm.stop success）；
+  delete 级联清理（域消失、vms/ 目录清空）。**start 仍只回「已受理」**（round80 已登记）。
+- guest 连通性未达：guest 只在 VMware NAT 网段拿到 DHCP 地址（vs-vnf 桥到 ens192 的既有环境事实），
+  VPP 侧报 `arp-reply: IP4 source address not local to sub`（源地址不在 192.168.100.0/24）。
+  改 user-data 内容 + restart 后（seed 已在 host 侧核对为新内容）仍未取到静态地址，
+  与待办 §0 红线 12 记载的 once-per-instance 现象同族，**本轮未定位到 guest 内原因**，如实登记。
+  ⇒ 本轮**未取得 VNF 数据面端到端 ping 证据**（round79/80 曾有 5/5，本轮环境未复现）。
+
+§6 Web 控制台（Browser Use 黑盒，真实 IP https://192.168.155.129/api/v1/ui/）
+--------------------------------------------------------------------------------
+- 登录（admin/一次性口令）成功；主导航 21 条 hash 路由可见；总览页数据与 REST 一致
+  （NFViS 1.1.40~dev1、VPP 26.06-release、libvirt/QEMU/Docker 版本、运行时长 0 小时 16 分）。
+  「DPDK —」是**设计如此**（cliexec.go 注释 + versions_test.go 断言「无可靠来源→未探测到」）。
+- 内核基线页：与 CLI 同源，同样给出「差异（1 项不一致）：大页 1G 期望 1 实际 2」——见 R84-5。
+- 接口列表页：MTU/Rx/Tx/Rx 错误/Tx 丢弃 **整列恒为「—」**（列表端点不返回这些字段）——见 R84-3。
+- 接口详情页（ens192，driver=dpdk/link=up）：「收发计数 → 读取失败：该口当前取不到计数
+  （数据面未连接或口不在数据面）」；而**同一时刻 CLI 能读到计数**（`show interfaces ens192`
+  RxPkts=62、vppctl rx packets=174418）——见 R84-3 根因。
+
+§7 发现（登记待裁；按严重度排序）
+--------------------------------------------------------------------------------
+- **R84-1（P1，假成功 + 套件假绿）非交互脚本模式对「需确认」命令静默无操作且退出码 0**
+  现象：`nfvis-cli -c "request system reboot"` 只打印
+  「重启 nfvis 将中断全部业务。Restart the system? [yes,no]」→ rc=0，什么都没做；
+  `request system software rollback`、`request images delete name …`、`request system zeroize`、
+  `request interfaces <口> bind-dpdk|unbind-dpdk`、`delete virtual-machine-functions|containers|images`
+  同理（凡服务端以 `[yes,no]` 结尾问询的都在内）。
+  根因：确认流程只在交互 REPL 里实现（internal/cli/repl.go 的 `strings.HasSuffix(out,"[yes,no]")`
+  分支读一行并追加 `--yes` 重发）；`runScript`（cmd/nfvis-cli/main.go）**完全不处理**问询文本，
+  既不报错也不置 failed。
+  连带：`contrib/scripts/cli-fulltest.sh` 的判定只看行首 `%`/`校验失败` 与 rc，
+  于是把「问了没做」判成 ✓（本轮日志实见 `✓ request system software rollback`、
+  `✓ request images delete name naming-test.tar`）——**套件覆盖是假的**。
+  建议：runScript 检测到 `[yes,no]` 时按错误处理（`%% 需交互确认：非交互模式请显式追加 --yes`）
+  并置 failed；套件对这些行显式加 `--yes` 或改判为「预期报错」。
+  手工规避：命令尾加 `--yes`（本轮实测可用）。
+
+- **R84-2（P1，配置完整性 + 数据面残留）CLI 删 L3 交换机不清同名 VRF（CLI⇄REST 不一致）**
+  现象：`delete virtual-switches vs-l3` + commit 后，`show configuration` 里仍留
+  `vrfs vs-l3 { name vs-l3; }`；`display set` 反推不出它（空 VRF 无语句形态，操作者看不见）；
+  `vppctl show ip table` 里 `vs-l3` 表**跨 VPP 重启与 nfvisd 重启持久存在**，`show vrfs` 一直列出；
+  CLI **无任何命令可清除**（`delete vrfs` = 无效命令；再 `delete virtual-switches vs-l3` = 「无匹配配置」）。
+  根因：REST `DELETE /virtual-switches/{name}` 明确连同名 Vrf 一并删
+  （resources.go，注释「L3 交换机与同名 VRF 条目互为映射（附录 B），一并删除」）；
+  而 CLI 走 `applyTokens` 通用删除路径，只有 `delete virtual-switches <n> type` 这类别名规则
+  才调 `removeVrf`（cli_aliases_net.go），整节点删除没有对应清理。
+  建议：把「删虚拟交换机 → 同时删同名 Vrf」落到两侧共同依赖处（CLI 侧补等价清理），并补守护用例。
+  规避：先 `set virtual-switches <名> type l2`（触发 removeVrf）再删对象。
+
+- **R84-3（P2，假成功 + 误诊）接口统计在 VPP 重启后永久不可用（= R83-7 复现 + 根因）**
+  现象：`show interfaces ens192 detail` 的 RxPkts/TxPkts 为 `-`；
+  `show interfaces ens192 statistics` → `%% 接口 ens192 统计运行态不可用（stats 未接入）`；
+  REST `GET /interfaces/{name}` 只回 `{"name":"ens192"}`（契约声明含 statistics）；
+  控制台接口详情页据此显示「读取失败：该口当前取不到计数（数据面未连接或口不在数据面）」。
+  同刻独立事实源有值：`vppctl show interface ens192` rx packets=174418、CLI 列表视图 RxPkts=62。
+  根因：internal/orchestrator/network/stats_linux.go 的 `statsConn.conn` 进程内**只建一次**，
+  VPP 重启后 stats segment 换了，`GetInterfaceStats` 失败 → `InterfaceCounters` 永久返回 false，
+  且不重连；恢复只能 `systemctl restart nfvis`。
+  **决定性证据（本轮实测）**：`systemctl restart nfvis` 后同一请求立刻恢复——
+  `GET /interfaces/ens192` → `{"description":"cli-pre","name":"ens192","statistics":{"rx_packets":1,…}}`，
+  `show interfaces ens192 statistics` → `interface ens192 statistics: {1 0 60 0 0 0 0 0}`；
+  重启前同一请求只有 `{"name":"ens192"}`。⇒ 不是「stats 未接入」，是连接陈旧。
+  建议：取数失败时重连一次并重建连接（或与 VPP 重连回调联动）；文案别再说「stats 未接入」。
+
+- **R84-4（P2，假成功）`request vpp restart` 无起后健康校验（= R83-6 复现）**
+  现象：把 2M 池运行期置 0（`echo 0 > …/hugepages-2048kB/nr_hugepages`）后走产品路径
+  `request vpp restart` → 回「已按 committed 配置重启 VPP 并触发恢复收敛。」，
+  而 VPP 实际 `failed (Result: core-dump)`、`code=dumped, signal=SEGV`、Mem peak 2.1M、
+  `vppctl` Connection refused；`show interfaces` 会如实标注「VPP 未连接」。
+  根因：requestVPP 的 restart 分支在 `vppRestart(ctx)` 返回 nil 即报成功（cli_compute_oper.go），
+  不等起后健康校验。
+  建议：restart 后短轮询校验 VPP 存活（binary API 可连），失败即 `%%` 报错并指出「VPP 未起来」；
+  另可重启前按 startup.conf 需求预检大页池尺寸。
+
+- **R84-5（P2，不可达指引）`show system kernel` 的「一致性」把运行期池增长判成基线未生效**
+  现象：cmdline 已是 `hugepages=1`、配置期望也是 1，但运行实际 2 →
+  输出「一致性：与配置期望不一致（需写入 GRUB 基线并重启生效）：大页 1G：期望 1，实际 2
+  （cmdline 启动参数需生效并重启）」，并引导 `request system kernel apply` → `request system reboot`。
+  实测重启 + `request vpp restart` 后 1G 仍是 2/1（VPP 运行期把池顶大后内核不回收），
+  **照提示做永远不一致**；向导结尾与手册 §5.4 第 1 步「重启后应显示一致」因此不可达。
+  根因：internal/system/kernel.go 的 `Compare` 用运行实际池大小与期望比对（不是 cmdline 与期望），
+  而提示文案说的是 cmdline 未生效。
+  建议：大页一致性按 cmdline（基线）比对；运行实际大于声明时另作说明（不判不一致），
+  仅当运行实际小于声明（分配失败）才告警。控制台同源显示一并受益。
+
+- **R84-6（P2，可诊断性）镜像下载中断后状态长期停在 downloading**
+  现象：`request images download …` 直连 CDN 约 1.7MB/min，8.5MB 后停滞；`show images` 一直
+  `downloading`，`detail` 无进度字段，journal 无任何相关日志，`index.json` 里 `.part` 留在原地；
+  超过 client 的 10 分钟超时后仍显示 downloading（未验证到 failed 状态），操作者无进度/无错误/无重试指引。
+  建议：进度写进 meta（`show images <名> detail` 可见）、超时/中断即落 `failed` 并在 CLI 报错、
+  重试走断点续传（.part 已在，机制已有）。注：本轮最终用代理 curl + upload 绕过。
+
+- **R84-7（P2，提示与实现不一致）容器镜像可用名：文案指错方向（#160 收口不完整）**
+  现象：`set image alpine:3.20`（tar 内嵌 tag）与 `set image alpine.tar:latest`（产品重打的 tag）
+  都被拒：`仓库中不存在镜像 "…"；仓库现有：alpine.qcow2、alpine.tar、debian-…。
+  注意：容器镜像的可用名是 docker load 落地的 tar 内嵌 tag；上传目录项名与它不一致时，两个名字都用不了`；
+  实际**只有仓库项名 `alpine.tar` 能通过**（commit 成功 rev 23/25）。
+  建议：要么让校验同时接受 docker 里真实存在的引用（`alpine:3.20`），要么把文案改成
+  「配置里请写上传的目录项名 <名>」，并让 `?`/Tab 候选直接列出仓库项名（现在候选是自由文本）。
+
+- **R84-8（P3，易错点）`request images upload` 的 file 只认绝对路径**
+  现象：`request images upload name alpine.qcow2 type vm-image file alpine.qcow2`（候选描述是
+  「incoming 内的文件路径」）→ `%% 文件 alpine.qcow2 必须位于 /data/incoming 内（先经 scp/sftp 传入）`；
+  根因是相对路径按**守护进程 CWD** 解析成 `/alpine.qcow2`。写 `/data/incoming/alpine.qcow2` 才成功。
+  建议：相对路径按 IncomingDir 解析，或错误文案点明「请给绝对路径」。
+
+- **R84-9（P3，文档漂移）手册 §5.3 的 wizard 输出样例与实现不符**
+  样例写 `top`，实现打印 `exit`，且顺序在 commit 之前；另样例未含「内核基线已写入/pending_reboot」
+  两段实际输出。建议随发布轮重拍该样例。
+
+- **R84-10（P3，显示与判定口径不一致）新装无阈值时 `show system hardware` 显示「阈值 0%」**
+  现象：`root-used 15.6%（阈值 0%）` 同时 `越限:（无）`。判定侧 `Evaluate` 把 `limit<=0`
+  当「未设置→ok」（internal/system/hardware.go），显示侧直接把 0 打出来，读起来像「任何占用都越限」。
+  建议：未设置时显示「未设置」而不是 0%。
+
+- **R84-11（P3，日志噪音 + 文案不一致）**
+  ① VPP 重连时 govpp 告警把**整个二进制结构体 dump** 进 journal（数十行/次，
+  正常重连路径上刷屏，本轮多次重启 VPP 现场明显）；建议降级/截断。
+  ② 同一处语法错误在两条路径文案不同：`-c` 下 `request images delete <名>` 回
+  `% 无效命令: …（输入 ? 查看可用命令）`，交互下回 `%% 语法: request images delete name <n>`
+  （后者更有用）——建议非交互路径也走同一套「语法」提示。
+
+§8 未复现 / 环境侧观察（如实登记，不作为缺陷）
+--------------------------------------------------------------------------------
+- **守护进程静默退出一次（未复现）**：13:35:13 一次 `request virtual-machine-functions vnf-84 stop`
+  期间 nfvisd 以**退出码 0** 自行结束（systemd `Deactivated successfully` 后自动重启，NRestarts=1），
+  同刻该域被停止、libvirtd 报 `End of file while reading data: Input/output error`、
+  我的 SSH 会话也被断开（`disconnected by user`），审计缺该次 `vm.stop`。
+  同命令重跑不复现，且随后 stop 正常入审计（`vm.stop success`）。**层次未定位**，建议后续专项复现
+  （怀疑与同时段的多个 pty/console 会话被强杀有关，本轮现场不干净）。
+- **upload incoming 不校验来源哈希**：本轮我第一版 curl 下载的 debian 镜像被 CDN 截断
+  （75MB vs 官方 447MB，sha512 不符），`request images upload` 照单接收并登记；
+  该镜像起的 VNF 域 `running`、CLI 回「已受理」，但 guest 永不启动（覆盖盘零写入、串口零输出、
+  GRUB `invalid arch-independent ELF magic`）。产品自身的 `download` 路径有 sha256 强制校验，
+  `upload` 只记录哈希——属「操作者自带文件」的边界，**建议在手册 §9.1 加一句「导入前自行核对哈希」**。
+- **DPDK 版本显示「（未探测到）」**：设计如此（cliexec.go 注释 + versions_test.go 断言），
+  但 DPDK 口确在工作——操作者视角易困惑，建议后续给出来源（如 vpp-plugin-dpdk 包版本）。
+- **guest 只拿到 VMware NAT 网段 DHCP**：见 §5 末；与待办 §0 红线 12 同族，非本轮引入。
+
+§9 环境终态
+--------------------------------------------------------------------------------
+- nfvis 1.1.40~dev1 active（**源码构建，未发布**）；配置库 rev 26 / audit 见库；
+  ens192/ens224 DPDK 接管在位、VPP 26.06 active（2M 池 768、1G 池 2/1）；
+  vs-vnf（BD 6252701 + BVI 192.168.100.1/24）在位；
+  镜像仓库：alpine.qcow2(179MiB) / debian-12-generic-amd64.qcow2(427MiB) / alpine.tar(container)；
+  **测试对象已清理**（无 VM 域、无容器、acl-x/qos pol-x 已删）。
+- ⚠️ 256 条冒烟**会 commit 配置并留下自己的测试对象**（本轮实见：`vs-l3`(type l3 +
+  `l3-interface ens192 ip address 192.168.155.10/24`)、`interfaces ens192 description cli-pre`、
+  `virtual-switches vs-test` 等）。**R84-2 的现场已被套件对象覆盖**：套件重建 vs-l3 时
+  `l3VrfOf(create=true)` 按名字复用了残留的 `vrfs vs-l3` 条目——这本身也说明残留条目
+  **对后续同名对象是「静默复用」**（不会报冲突、也不会自愈）。R84-2 的最小复现步骤见 §7 该条，
+  可随时重做：建 l3 交换机 → commit → `delete virtual-switches <名>` → commit →
+  `show configuration`（留 `vrfs <名> { name <名>; }`）+ `vppctl show ip table`（表持久）。
+- 代理 http://192.168.155.1:2333 已在构建与镜像拉取中使用；docker 守护进程代理 drop-in 已删
+  （`systemctl show docker -p Environment` 为空）。
+- 走查辅助脚本留在 VM 上（`/root/w.sh` 内含一次性口令、`/root/drive.py` 为 pty 驱动、
+  `/root/*.cli` 为各步脚本）——**仅测试机、root 可读**；下次从快照重建会一并消失。
+
+§10 round84 续：缺陷修复与真机复验（决策 #161~#166）
+--------------------------------------------------------------------------------
+本轮按 §7 的登记逐条修复（实现工作分工执行，最终由本会话统一集成与真机复验）。
+代码改动未提交、未发布；**发布口径（打正式版本 / Release）仍需另行决定**。
+改动清单（按决策号）：
+- **#161 / R84-1**：`cmd/nfvis-cli/main.go` 的 `runScript` 增加确认问询检测（输出以 `[yes,no]`
+  收尾即按失败处理：行首 `%%` 可行动文案 + 置 failed + 中止 + 退出码非 0）；交互 REPL 不变；
+  `contrib/scripts/cli-fulltest-phase3/4.sh` 改判——真破坏性命令（reboot/shutdown/zeroize/
+  software rollback）断言「必须被明确拒绝」（**不加 `--yes`**），无害测试对象改带 `--yes` 真执行；
+  手册 §3.3 补「非交互模式破坏性命令需显式追加 `--yes`」。新增 `cmd/nfvis-cli/main_test.go`（19 例）。
+- **#162 / R84-2**：CLI 删除合流点（`internal/api/cliexec.go` 的 `deleteStatement`）统一收尾，
+  新增 `pruneVSwitchVrf`（`internal/api/cli_aliases_net.go`，与 `removeVrf` 同处）：整节点/整表删除
+  都清同名 `vrfs` 条目；`type`/`l3-interface`/`static-routes` 等形态不变。
+  新增 `internal/api/cli_vswitch_vrf_test.go`（先红后绿）。
+- **#163 / R84-3 + R84-11①**：`internal/orchestrator/network/stats_linux.go` 改为「失败即视为连接陈旧
+  → 丢弃缓存 → 重连一次 → 原地重试」（统计/buffer/内存三路同一入口）；`vpp_govpp.go` 加泛型
+  `connCache[T]` 并把 govpp 日志在**建连之前**装好（按句过滤重连期的结构体 dump，真错误透传、
+  `DEBUG_GOVPP` 下不干预）；`internal/api/cli_iface_vpp_show.go` 文案改「统计暂不可用（stats 连接未就绪）」。
+  测试：`vpp_govpp_test.go`（跨平台，假 connect/close）+ `stats_linux_test.go`（linux）。
+- **#164 / R84-4**：`cmd/nfvisd/main.go` 的 `vppController.Restart` 改为「**预检** → systemctl restart →
+  **起后健康校验**」：声明 `hugepage-preference` 而该尺寸池为 0 时**重启前直接拒绝**；起后每 500ms
+  探一次 binary API、上限 15s，起不来即返回可行动错误（CLI `%%`、REST 500），成功文案注明
+  「binary API 已连通」。新增 `cmd/nfvisd/vpp_restart_health_test.go` + `internal/api/cli_vpp_restart_test.go`（11 例）。
+- **#165 / R84-5 + R84-10**：`internal/system/kernel.go` 的 `Compare` 大页项改按 **cmdline 基线**与期望
+  比对，新增运行实际高于声明时的中性说明；`internal/api/cli_system_show.go` 一致性块按新口径渲染、
+  阈值未设置显示「未设置」。测试 `internal/system/kernel_test.go`、`internal/api/diag_ops_test.go`。
+- **#166 / R84-6 + R84-7 + R84-8**：`internal/images/download.go` 失败统一落 `failed` 并把原因写进
+  `last_error`、进度按 1MiB 节流写进新增元数据字段 `downloaded_bytes`/`total_bytes`，`Open` 时把残留
+  `downloading` 改判 `failed`；`internal/config/engine.go` 镜像名校验文案改为「请写仓库中的镜像名，
+  当前可用：…」（删掉「tar 内嵌 tag」误导表述）；`internal/images/images.go` 的 `ImportIncoming`
+  相对路径改按 IncomingDir 解析（`../` 逃逸仍拒）。契约 `Image` 新增三字段，`openapi.json` 已重生成。
+
+本机守护（`make check` 全量）：**20/20 包 ok**；覆盖率门槛全过（config 84.5% / model 84.2% /
+schema 82.8% / network 74.7% / compute 87.9% / container 76.3% / images 80.7%）；
+`archtest`（含用户可见文本守护）、`docscheck`（决策 166 项一致、契约无重复键、openapi.json 同步）、
+`toolcheck`、`prototype-check` 全过。
+
+真机复验（1.1.41~dev1 实装，逐条对照 §7 的原现象）：
+- **R84-1 ✅**：`nfvis-cli -c "request system reboot"` → **rc=1** +
+  `%% 该命令需交互确认（破坏性动作），非交互模式不会执行；确认要执行时请在命令尾追加 --yes 后重试`；
+  普通命令仍 rc=0；`request images delete name … --yes` 仍真删。
+- **R84-2 ✅**：建 `vs-fix`（l3 + l3-interface ens224 10.98.0.1/24 + 静态路由）→ commit(rev 45) →
+  `delete virtual-switches vs-fix` → commit(rev 46) → `show configuration` 里 **vs-fix 出现 0 次**
+  （旧版会留 `vrfs vs-fix { … }`）。
+- **R84-3 ✅**：`request vpp restart` 后**立刻**读统计即有值：`show interfaces ens192 statistics` →
+  `{4 0 492 0 0 0 0 0}`、`show interfaces ens224 detail` → 数值计数、
+  `GET /interfaces/ens224` → 完整对象含 `statistics`（旧版需 `systemctl restart nfvis` 才恢复）。
+- **R84-4 ✅**：2M 池置 0 后 `request vpp restart` → **rc=1** +
+  `%% VPP 未重启：配置的大页偏好为 2M，但内核 2M 大页池当前为 0（…sysfs 路径）；请先恢复该池…`
+  （预检在重启前拦下，VPP 未被重启）；池恢复后重启成功且文案含「binary API 已连通」。
+- **R84-5 ✅**：配置与 cmdline 对齐后输出
+  `一致性：内核基线与配置期望一致（无需重启）` +
+  `说明：大页 1G 运行实际 2 高于声明 1（多出的是运行期占用，不需要重启）`——不再是不可达的
+  「需写入 GRUB 基线并重启生效」。
+- **R84-6 ✅**：慢速下载中 `show images slow.qcow2 detail` 给出
+  `downloaded-bytes 1048576; total-bytes 8388608; import-state downloading`；
+  失败路径落 `failed` 且 `last-error` 带原因（实测 `bad.qcow2` 证书错与被我中断的 `slow.qcow2` 都是
+  failed 而非旧版的永久 downloading）。
+- **R84-7 ✅**：`set image nope:9.9` →
+  `仓库中不存在镜像 "nope:9.9"；请写仓库中的镜像名，当前可用：…。容器镜像的可用名就是仓库中的镜像名
+  （导入时已按该名重打标签）`（不再出现「tar 内嵌 tag」误导句）。
+- **R84-8 ✅**：`request images upload name rel-test.qcow2 type vm-image file rel-test.qcow2`
+  （相对名）→ `镜像 rel-test.qcow2 导入完成`。
+- **R84-10 ✅**：`show system hardware` → `root-used 15.7%（阈值 未设置）`。
+- 三件套回归见 §11。
+
+遗留（本轮**未修**，如实登记）：R84-9（手册 §5.3 的 wizard 样例 `top`→`exit`）属文档漂移，
+应随发布轮重拍；R84-11②（同一语法错误在 `-c` 与交互下文案不一致）经实现侧核查**不是同一错误**：
+`request images delete <名>`（漏 `name`）在两条路径都是 `% 无效命令`，而 `%% 语法: …name <n>`
+只在树校验通过、由子处理器报语法时出现——故按「改动不大才做」的边界跳过，登记待裁。
+另：`internal/api/cli_diag.go` 仍有一处「stats 未接入」字样未收口（不在本轮改动范围）。
+
+- **三件套回归（1.1.41~dev1，干净基线）**：
+  256 条冒烟 **194 通过 / 1 失败 / 12 预期报错**——失败仍是已登记的 `show vpp runtime`；
+  **通过数与修复前完全一致（194）**，预期报错 6→12 正是本轮把 6 条"点了确认才会做"的破坏性命令
+  从**假绿**改成"必须被明确拒绝"的断言（reboot/shutdown/zeroize/software rollback/unbind-dpdk/
+  被引用镜像删除）。语义校验 **11/0/0**（两遍同结果）；pty 冒烟 **10/10**。
+  ⚠️ **判读要点（本轮踩到，值得登记）**：中途三次跑出 189/6/12，六条失败**全是前置级联**——
+  套件阶段 2 预块的首条语句在"值已等于目标"时是**空操作**，而 `-c` 模式任一行失败即停 →
+  预块整体不生效；更隐蔽的是**我的清理脚本也在同一会话里先删后失败，导致 candidate 被整体丢弃**
+  （deleting 的 [ok] 只是落到 candidate，没 commit），于是残留照旧、下一轮继续级联。
+  正确做法：清理脚本必须**每条都是真实变更并 commit**；判定"是否回归"必须先把状态清干净再跑一次
+  （清干净后即 194/1/12）。这条与待办 §0 第 2 条同源，但"candidate 丢弃"这一层此前没写明。
+
+
+§11 round84 收尾：三条遗留的修复与真机复验（决策 #167~#169）+ 新登记
+--------------------------------------------------------------------------------
+按用户要求把 §10 末「仍未修」项一并处理，并在复验过程中又查出两条**新缺陷**（均已修）：
+- **#167 / R84-11②**：「已知命令前缀 + 形态不合法」原本回「无效命令」——最该指路的时刻最没帮助。
+  现由执行入口按 `?` 同源的树给语法指引：`request images delete foo` →
+  `%% 语法: request images delete name <name>（输入 ? 查看可用命令）`；真正未知的命令仍回「无效命令」
+  （真机两条都实测过）。同批把 `internal/api/cli_diag.go` 的「stats 未接入」改成与 #163 同口径的
+  「stats 连接未就绪」。
+- **#168 / R84-12（新发现，P2）**：**同一物理口可同时被声明为 bond 成员 / 交换机端口 / L3 接口**
+  （多角色并存），产品静默接受；VPP 侧该口入向被 bond-input 吃掉、不进 bridge-domain
+  （`bond0 rx` 与 `drops` 同步涨而 `bvi0` 计数不动、`l2fib learned=0`），连锁后果是
+  **guest 拿不到 DHCP → cloud-init 卡在 `systemd-networkd-wait-online` → user-data 脚本从未执行
+  → BVI ping 100% 丢包**，全程零报错。**这正是 §5 末「VNF guest 连通性未达」的真因**
+  （由 §10 之后的两次根因调查定位，含 `isoinfo` 逐字节核对 seed、`virsh console` 真串口、
+  vhost 口 pcap 只见 `BOOTP/DHCP Request` 从无 offer、`bond del ens192` 后数秒 L2FIB 立刻学到 MAC）。
+  手册 §8.9 早就写着「成员口须未被虚拟交换机引用」——**约束已声明、产品未强制**（契约违反）。
+  现新增 `checkPortRoleExclusivity`（模型校验层，紧邻 `checkManagementIsolation`）：同一接口名在
+  {bond 成员, 交换机端口, L3 接口, 镜像源/分析口} 中出现第二次即 commit 失败并点名冲突双方。
+  **真机复验**：装 1.1.41~dev2 后，对现场那份**真实非法配置**（ens192 同时是 bond0 成员、
+  vs-l3 的 L3 接口、pm-test 的源口、vs-vnf 的端口）commit → 逐条拒绝：
+  `接口 "ens192" 的角色冲突：已作为bond bond0 的成员口（bonds[bond0].members[0]），不能再作为VRF vs-l3 的 L3 接口——…只能出现一次`
+  （镜像那条同款）。删掉冲突声明后 commit 通过，`vppctl show l2fib` 立刻在 ens192 上学到 3 条 MAC
+  （此前 learned=0）——**桥接恢复的因果闭环在真机上成立**。
+  配套修正 `contrib/scripts/cli-fulltest-phase2.sh`：它此前正是用 ens192 同时当 bond 成员与
+  vs-l3 的 L3 接口（**套件自己在造非法配置**，也是本轮走查环境污染的来源）。
+- **#169 / R84-13（新发现，P2/P3）**：`show port-mirroring bogus extra` 静默忽略参数照常作答。
+  现多参数即报错并列出可用形态（真机实测）。同族未改、登记待裁：`show qos policies …`、
+  `show nat sessions …`、`show vpp threads|buffers|memory|capture …`、`show interfaces <if> <sub> …`、
+  `show acls|bonds <name> …` 的多余 token 同样被丢；`show virtual-switches|vrfs <name> <未支持子命令>`
+  静默回落 detail。
+
+**本机守护**：`make check` 20/20 包 ok；覆盖率门槛全过（model 84.6%、config 84.5%、network 74.7%、
+images 80.7% 等）；`archtest`/`docscheck`（决策 169 项一致）/`toolcheck`/`prototype-check` 全过。
+
+**§11 新登记（未修，供下轮裁）**：
+- **R84-14（P2，apply 撤销缺口，与 R83-5/R84-2 同族）**：`delete bonds bond0` + commit 后
+  **VPP 里 `BondEthernet0` 与成员关系仍在**（`vppctl show bond details` 仍列 ens192），
+  要 `request vpp restart` 才消失；期间 BD 处于「该口同时是 bond 成员又是 BD 成员」的混淆态。
+- **R84-15（P2，未收敛）**：即使配置合法（端口角色唯一）、桥接已恢复，本轮**仍未让 guest 拿到 IP**：
+  vhost 口只见 guest 发 `BOOTP/DHCP Request`（无 offer），`systemd-networkd-wait-online` 卡住 →
+  user-data 脚本不执行。已排除：seed 内容（`isoinfo` 逐字节一致）、instance-id 摘要（含 user-data 内容）、
+  guest 网卡命名、ens192 物理收发。剩余假设：guest 的 DISCOVER 未真正出到 NAT 网段（或 NAT 侧 DHCP
+  在本轮 churn 后不再应答）。**下一步最该做**：在端口角色唯一 + VPP 重启后的干净态上，用
+  `pcap trace` 同时抓 vhost 与 ens192 两个方向，确认 DISCOVER 的走向。
+  故本轮**仍未取得「VNF 数据面端到端 ping」证据**（历史 round79/80 曾有 5/5）。
+
+================================================================================
