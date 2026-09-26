@@ -32,6 +32,43 @@ func (g *govppBondClient) SwInterfaceIndex(ifname string) (uint32, bool, error) 
 	return (&govppL3Client{ch: g.ch}).SwInterfaceIndex(ifname)
 }
 
+// Bonds 数据面现存全部 bond（sw_interface_bond_dump，撤销收敛的对象来源）。
+func (g *govppBondClient) Bonds() ([]BondRuntime, error) {
+	reqCtx := g.ch.SendMultiRequest(&bond.SwInterfaceBondDump{})
+	out := make([]BondRuntime, 0, 4)
+	for {
+		d := &bond.SwInterfaceBondDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return nil, err
+		}
+		if stop {
+			return out, nil
+		}
+		out = append(out, BondRuntime{SwIfIndex: uint32(d.SwIfIndex), Name: d.InterfaceName})
+	}
+}
+
+// BondMembers 某 bond 的成员 sw_if_index（sw_member_interface_dump）。成员以数据面为准，
+// 故未登记的残留成员（跨进程、手工下发）同样能被摘除。
+func (g *govppBondClient) BondMembers(bondSwIfIndex uint32) ([]uint32, error) {
+	reqCtx := g.ch.SendMultiRequest(&bond.SwMemberInterfaceDump{
+		SwIfIndex: interface_types.InterfaceIndex(bondSwIfIndex),
+	})
+	var out []uint32
+	for {
+		d := &bond.SwMemberInterfaceDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return nil, err
+		}
+		if stop {
+			return out, nil
+		}
+		out = append(out, uint32(d.SwIfIndex))
+	}
+}
+
 func (g *govppBondClient) BondCreate(lacp bool) (uint32, error) {
 	mode := bond.BOND_API_MODE_XOR // 静态聚合：哈希分发（附录 A #33）
 	if lacp {

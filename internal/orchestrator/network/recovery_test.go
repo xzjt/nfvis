@@ -77,6 +77,71 @@ func TestEnsureConsistentRecreatesDeletedBD(t *testing.T) {
 	}
 }
 
+// 决策 #170：恢复收敛同样要把 VNF 侧声明的 vNIC 挂进 BD——否则 nfvisd 重启/VPP 重启后，
+// vhost-user 口回不到 bridge-domain 里，guest 静默失去 L2 连通。
+func TestEnsureConsistentAttachesVnfNicMember(t *testing.T) {
+	f := newRecoveryFixture()
+	vh := orchestrator.VnfIfaceName("vm-a", "eth0")
+	f.l2.ifaces[vh] = 77 // vNIC 接口由 ApplyVnfInterface 重放后存在
+	f.l2.names[77] = SwIfInfo{Name: vh}
+	cfg := model.Config{
+		VirtualSwitches: []model.VirtualSwitch{l2Switch("vs-vnf", "ens192")},
+		VirtualMachineFunctions: []model.VMFunction{{Name: "vm-a", Image: "img",
+			Interfaces: []model.VnfInterface{{Name: "eth0", Type: "vhost-user", VirtualSwitch: "vs-vnf"}}}},
+	}
+
+	if errs := f.net.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("应收敛成功: %v", errs)
+	}
+	if f.l2.bridge[77] != BDID("vs-vnf") {
+		t.Fatalf("VNF 声明的 vhost 口应为 BD 成员: %v", f.l2.bridge)
+	}
+	if got := len(f.alarms.List(AlarmActive)); got != 0 {
+		t.Fatalf("成功收敛不应产生告警，实际 %d", got)
+	}
+}
+
+// 声明的交换机不存在时进未收敛清单（warning 告警），不静默跳过。
+func TestEnsureConsistentReportsUnresolvableVnicSwitch(t *testing.T) {
+	f := newRecoveryFixture()
+	cfg := model.Config{VirtualMachineFunctions: []model.VMFunction{{Name: "vm-a", Image: "img",
+		Interfaces: []model.VnfInterface{{Name: "eth0", Type: "vhost-user", VirtualSwitch: "vs-ghost"}}}}}
+
+	errs := f.net.EnsureConsistent(context.Background(), cfg)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "vs-ghost") {
+		t.Fatalf("应恰有 1 条无法归位的声明: %v", errs)
+	}
+	active := f.alarms.List(AlarmActive)
+	if len(active) != 1 || active[0].Code != AlarmUnconverged {
+		t.Fatalf("应产生未收敛告警: %+v", active)
+	}
+}
+
+// 收敛时拆除声明集之外的 bond（apply 撤销缺口：数据面残留 BondEthernetX 与成员关系），
+// 声明仍在的 bond 不受影响。
+func TestEnsureConsistentPrunesUndeclaredBond(t *testing.T) {
+	f := newRecoveryFixture()
+	f.bond.addBond(102, "bond9", 2) // 数据面残留（配置已不再声明）
+	cfg := model.Config{Bonds: []model.Bond{{Name: "bond0", Members: []string{"ens192"}}}}
+
+	if errs := f.net.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("应收敛成功，实际: %v", errs)
+	}
+	if len(f.bond.deleted) != 1 || f.bond.deleted[0] != 102 {
+		t.Fatalf("只应拆除未声明的 bond9: %v", f.bond.deleted)
+	}
+	if len(f.bond.detach) != 1 || f.bond.detach[0] != 2 {
+		t.Fatalf("应摘除 bond9 的成员: %v", f.bond.detach)
+	}
+	// 声明仍在的 bond0 已按其配置建立（未被 prune 触碰）
+	if len(f.bond.created) != 1 || f.bond.names[101] != "bond0" {
+		t.Fatalf("声明中的 bond 应正常收敛: created=%v names=%v", f.bond.created, f.bond.names)
+	}
+	if got := len(f.alarms.List(AlarmActive)); got != 0 {
+		t.Fatalf("成功拆除不应产生告警，实际 %d", got)
+	}
+}
+
 // 配置引用的物理口被移除：不可收敛项进告警（error 级），其余对象继续收敛。
 func TestEnsureConsistentMissingIfaceRaisesAlarm(t *testing.T) {
 	f := newRecoveryFixture()

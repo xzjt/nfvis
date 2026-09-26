@@ -127,6 +127,99 @@ func VnfPortsOf(cfg model.Config, vhostDir, memifDir string) []VnfPort {
 	return out
 }
 
+// SwitchMembersOf 把「VNF/容器侧声明的 vNIC 接入」合流进交换机端口集合（FR-NET-020~023）。
+//
+// 两条声明看似等价、实则不同源：
+//   - 交换机侧 `virtual-switches <vs> ports <n> vnf <vm> interface <nic>` 直接写 vs.Ports；
+//   - VNF 侧 `virtual-machine-functions <n> interfaces <nic> virtual-switch <vs>` 只把交换机
+//     名记在 VNF 对象上（VnfInterface.VirtualSwitch）。
+//
+// 而 bridge-domain 的成员口只由 vs.Ports 决定，故 VNF 侧声明若不合流，vhost-user 口永远
+// 不会被挂进 BD：guest 的帧在 vhost 口被全部丢弃（rx 有计数、drops 同步涨），L2FIB 学不到
+// guest MAC，DHCP 拿不到地址——但全程零报错（决策 #170）。
+//
+// 此处以 VnfPortsOf 为唯一真源，投影出「带全部成员口的交换机副本」，供事务 apply 与恢复
+// 收敛共用（不在 l2.go 里另造一份遍历）。交换机侧已显式声明的同一 vNIC 以显式声明为准
+// （可带 trunk/native/acl 属性）。
+//
+// errors 列出无法归位的声明（vNIC 声明的交换机在配置中不存在）：调用方必须使其可见
+// （提交失败或进未收敛清单），**不得静默跳过**——静默正是该缺陷长期未被发现的原因。
+func SwitchMembersOf(cfg model.Config, vhostDir, memifDir string) ([]model.VirtualSwitch, []error) {
+	out := make([]model.VirtualSwitch, len(cfg.VirtualSwitches))
+	copy(out, cfg.VirtualSwitches)
+	idxOf := make(map[string]int, len(out))
+	declared := make(map[string]bool, len(out)) // 交换机侧已声明的 vNIC（属主/vNIC）
+	nextSeq := make(map[string]int, len(out))   // 合成端口序号：接在配置已用序号之后
+	for i := range out {
+		// 端口切片须独立复制：后续 append 不得写回调用方的配置（cap 可能大于 len）。
+		out[i].Ports = append([]model.VSwitchPort(nil), out[i].Ports...)
+		idxOf[out[i].Name] = i
+		for _, p := range out[i].Ports {
+			if key := vnicPortKey(p.Vnf, p.VnfInterface, p.Container, p.ContainerInterface); key != "" {
+				declared[out[i].Name+"/"+key] = true
+			}
+			if p.Seq >= nextSeq[out[i].Name] {
+				nextSeq[out[i].Name] = p.Seq + 1
+			}
+		}
+	}
+
+	var errs []error
+	for _, p := range VnfPortsOf(cfg, vhostDir, memifDir) {
+		if p.VirtualSwitch == "" {
+			continue // vNIC 未接入交换机：只建接口、不入 bridge-domain（合法声明）
+		}
+		i, ok := idxOf[p.VirtualSwitch]
+		if !ok {
+			errs = append(errs, fmt.Errorf("%s %s 的 vNIC %s 声明了虚拟交换机 %s，但该交换机不在配置中，"+
+				"该 vNIC 无法挂入任何 bridge-domain", vnicOwnerCN(p.Type), p.VM, p.Interface, p.VirtualSwitch))
+			continue
+		}
+		if out[i].Type != "l2" {
+			continue // L3 交换机经同名 VRF 编排（附录 B），不进 bridge-domain
+		}
+		key := p.VirtualSwitch + "/" + vnicKeyOfPort(p)
+		if declared[key] {
+			continue // 交换机侧已显式声明同一 vNIC
+		}
+		port := model.VSwitchPort{Seq: nextSeq[p.VirtualSwitch], Vnf: p.VM, VnfInterface: p.Interface}
+		if p.Type == "memif" {
+			port = model.VSwitchPort{Seq: nextSeq[p.VirtualSwitch], Container: p.VM, ContainerInterface: p.Interface}
+		}
+		out[i].Ports = append(out[i].Ports, port)
+		nextSeq[p.VirtualSwitch]++
+	}
+	return out, errs
+}
+
+// vnicPortKey 同一 vNIC 端口的同一性键（属主类别:属主/vNIC）；未指定属主时返回空串。
+// 带类别前缀是为了让同名的 VM 与容器不互相冒认。
+func vnicPortKey(vnf, vnfIface, container, ctIface string) string {
+	if vnf != "" {
+		return "vnf:" + vnf + "/" + vnfIface
+	}
+	if container != "" {
+		return "ct:" + container + "/" + ctIface
+	}
+	return ""
+}
+
+// vnicKeyOfPort 由 vNIC 接入点派生与 vnicPortKey 同构的同一性键。
+func vnicKeyOfPort(p VnfPort) string {
+	if p.Type == "memif" {
+		return vnicPortKey("", "", p.VM, p.Interface)
+	}
+	return vnicPortKey(p.VM, p.Interface, "", "")
+}
+
+// vnicOwnerCN vNIC 属主的中文类别（错误文案用）。
+func vnicOwnerCN(portType string) string {
+	if portType == "memif" {
+		return "容器"
+	}
+	return "VNF"
+}
+
 // vrfForSwitch 若虚拟交换机为 L3 类型则返回同名 VRF（附录 B），否则空。
 func vrfForSwitch(cfg model.Config, name string) string {
 	if name == "" {

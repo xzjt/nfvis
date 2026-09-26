@@ -159,8 +159,13 @@ func lldpEqual(old, new model.Config) bool { return configEqualPtr(old.Protocols
 // plan 生成操作序列：新增/变更在前（ACL→L2→L3→NAT/SPAN/QoS→VM→容器），
 // 删除在后（容器→VM→L3/L2→NAT/SPAN/QoS→ACL），保证引用先建后删。
 func (a *orchApplier) plan(old, new model.Config) []op {
+	// 交换机端口集合 = 交换机侧声明 ∪ VNF/容器侧 vNIC 声明（FR-NET-020~023，决策 #170）：
+	// 两侧必须在此合流后再 diff 与下发，否则「VNF 声明了 virtual-switch」既不触发 BD
+	// 重下发、也不出现在成员集里（vhost-user 口静默不进 BD ← guest 无 L2 连通）。
+	oldVSList, oldRefErrs := SwitchMembersOf(old, a.vhostDir, a.memifDir)
+	newVSList, newRefErrs := SwitchMembersOf(new, a.vhostDir, a.memifDir)
 	oldACLs := nameMap(old.Acls, func(x model.Acl) string { return x.Name })
-	oldVSs := nameMap(old.VirtualSwitches, func(x model.VirtualSwitch) string { return x.Name })
+	oldVSs := nameMap(oldVSList, func(x model.VirtualSwitch) string { return x.Name })
 	oldVRFs := nameMap(old.Vrfs, func(x model.Vrf) string { return x.Name })
 	oldVMs := nameMap(old.VirtualMachineFunctions, func(x model.VMFunction) string { return x.Name })
 	oldCTs := nameMap(old.ContainerFunctions, func(x model.ContainerFunction) string { return x.Name })
@@ -170,6 +175,16 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	oldQoS := nameMap(old.QosPolicies, func(x model.QosPolicy) string { return x.Name })
 
 	var ops []op
+	if err := vnicSwitchRefErr(newRefErrs); err != nil {
+		// 声明无法归位 → 该 vNIC 不会进入任何 bridge-domain（正是「静默不通」的旧行为）。
+		// 提交阶段直接失败，不猜测、不静默跳过。
+		return []op{{desc: "vnf-vswitch-refs", run: func(context.Context) error { return err }}}
+	}
+	if len(oldRefErrs) > 0 {
+		// 原配置的失效声明只影响回滚方向（回滚时那个 vNIC 本就无 BD 可挂），记告警不阻断提交。
+		a.warnf("原配置有 %d 条 vNIC 的虚拟交换机声明无法归位，仅影响回滚方向: %s",
+			len(oldRefErrs), joinErrs(oldRefErrs))
+	}
 
 	// —— VNF vNIC 接入（FR-NET-020/022/023）：必须先于 bridge-domain 下发，
 	// 因为交换机端口按确定性接口名挂接（vhost-user / memif 接口需已存在）。——
@@ -216,7 +231,7 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			))
 		}
 	}
-	for _, vs := range new.VirtualSwitches {
+	for _, vs := range newVSList {
 		if vs.Type != "l2" {
 			continue // L3 交换机数据经同名 VRF 条目编排（附录 B）
 		}
@@ -400,6 +415,18 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			})
 		}
 	}
+	// bond 删除须在引用它的交换机端口/L3 接口之后（上方 BD/VRF 段已解除引用），
+	// 且必须真的下发到数据面：只从配置里移除会留下 BondEthernetX 与成员关系。
+	for name := range oldBonds {
+		if _, ok := newBondNames(new)[name]; !ok {
+			bond := oldBonds[name]
+			ops = append(ops, op{
+				desc: fmt.Sprintf("del-bond[%s]", name),
+				run:  func(ctx context.Context) error { return a.net.DeleteBond(ctx, name) },
+				undo: func(ctx context.Context) error { return a.net.ApplyBond(ctx, bond) },
+			})
+		}
+	}
 	for _, pm := range old.PortMirroring {
 		if _, ok := newPMNames(new)[pm.Name]; !ok {
 			pm := pm
@@ -435,6 +462,23 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 
 // portKeyOf/portMapOf VNF 端口按「属主/vNIC」索引（diff 用）。
 func portKeyOf(p VnfPort) string { return p.VM + "/" + p.Interface }
+
+// vnicSwitchRefErr 把「vNIC 声明的虚拟交换机无法归位」汇总为一个错误（无则 nil）。
+func vnicSwitchRefErr(errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s", joinErrs(errs))
+}
+
+// joinErrs 以分号连接多条错误文案。
+func joinErrs(errs []error) string {
+	msgs := make([]string, 0, len(errs))
+	for _, e := range errs {
+		msgs = append(msgs, e.Error())
+	}
+	return strings.Join(msgs, "; ")
+}
 
 func portMapOf(ports []VnfPort) map[string]VnfPort {
 	m := make(map[string]VnfPort, len(ports))
@@ -488,6 +532,14 @@ func newVRFNames(c model.Config) map[string]bool {
 	m := map[string]bool{}
 	for _, v := range c.Vrfs {
 		m[v.Name] = true
+	}
+	return m
+}
+
+func newBondNames(c model.Config) map[string]bool {
+	m := map[string]bool{}
+	for _, b := range c.Bonds {
+		m[b.Name] = true
 	}
 	return m
 }

@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -21,12 +22,41 @@ type fakeBond struct {
 	deleted []uint32
 	mtu     map[uint32]uint32
 	state   map[uint32]bool
+	seq     []string            // 调用顺序（"detach:<idx>" / "delete:<idx>"）
+	bonds   []BondRuntime       // 数据面现存 bond（Bonds 返回）
+	members map[uint32][]uint32 // bond sw_if_index → 成员 sw_if_index
 	err     error
+	memErr  error // 仅成员枚举失败（Bonds 正常）
 }
 
 func newFakeBond() *fakeBond {
 	return &fakeBond{ifaces: map[string]uint32{"ens192": 1, "ens224": 2}, next: 100,
-		names: map[uint32]string{}, mtu: map[uint32]uint32{}, state: map[uint32]bool{}}
+		names: map[uint32]string{}, mtu: map[uint32]uint32{}, state: map[uint32]bool{},
+		members: map[uint32][]uint32{}}
+}
+
+// addBond 预置数据面现存 bond（撤销收敛用例）。
+func (f *fakeBond) addBond(idx uint32, name string, members ...uint32) {
+	f.bonds = append(f.bonds, BondRuntime{SwIfIndex: idx, Name: name})
+	f.members[idx] = members
+	f.names[idx] = name
+}
+
+func (f *fakeBond) Bonds() ([]BondRuntime, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.bonds, nil
+}
+
+func (f *fakeBond) BondMembers(bondSwIfIndex uint32) ([]uint32, error) {
+	if f.memErr != nil {
+		return nil, f.memErr
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.members[bondSwIfIndex], nil
 }
 
 func (f *fakeBond) Close() {}
@@ -76,6 +106,7 @@ func (f *fakeBond) BondDetachMember(memberSwIfIndex uint32) error {
 		return f.err
 	}
 	f.detach = append(f.detach, memberSwIfIndex)
+	f.seq = append(f.seq, "detach:"+u32str(memberSwIfIndex))
 	return nil
 }
 
@@ -84,8 +115,21 @@ func (f *fakeBond) BondDelete(bondSwIfIndex uint32) error {
 		return f.err
 	}
 	f.deleted = append(f.deleted, bondSwIfIndex)
+	f.seq = append(f.seq, "delete:"+u32str(bondSwIfIndex))
+	// 与 VPP 一致：bond 接口消失后不再出现在现存 bond 列表
+	kept := f.bonds[:0]
+	for _, b := range f.bonds {
+		if b.SwIfIndex != bondSwIfIndex {
+			kept = append(kept, b)
+		}
+	}
+	f.bonds = kept
+	delete(f.members, bondSwIfIndex)
+	delete(f.names, bondSwIfIndex)
 	return nil
 }
+
+func u32str(v uint32) string { return strconv.FormatUint(uint64(v), 10) }
 
 func (f *fakeBond) SetState(swIfIndex uint32, up bool) error {
 	if f.err != nil {
@@ -174,6 +218,101 @@ func TestBondStaticAndLacp(t *testing.T) {
 	}
 	if err := p.DeleteBond(context.Background(), "nope"); err != nil {
 		t.Fatalf("删除不存在应无害: %v", err)
+	}
+}
+
+// ---------- 撤销收敛：声明集之外的 bond 必须被拆除 ----------
+
+// 声明仍在的 bond 不被动；未声明的 bond 先摘成员再删接口（顺序不可颠倒）。
+func TestPruneBondsRemovesUndeclaredOnly(t *testing.T) {
+	f := newFakeBond()
+	f.addBond(101, "bond0", 1) // 仍在声明中
+	f.addBond(102, "bond9", 2) // 配置已不再声明
+	p := NewBondProvider(f)
+
+	declared := []model.Bond{{Name: "bond0", Members: []string{"ens192"}}}
+	if errs := p.PruneBonds(context.Background(), declared); len(errs) != 0 {
+		t.Fatalf("拆除应成功: %v", errs)
+	}
+	if len(f.deleted) != 1 || f.deleted[0] != 102 {
+		t.Fatalf("只应删除未声明的 bond9(102): %v", f.deleted)
+	}
+	if len(f.detach) != 1 || f.detach[0] != 2 {
+		t.Fatalf("应摘除 bond9 的成员 ens224(2): %v", f.detach)
+	}
+	want := []string{"detach:2", "delete:102"} // 先摘成员、再删接口
+	if len(f.seq) != len(want) {
+		t.Fatalf("调用序列不符: %v", f.seq)
+	}
+	for i, w := range want {
+		if f.seq[i] != w {
+			t.Fatalf("第 %d 步应为 %s，实际 %s（全部: %v）", i, w, f.seq[i], f.seq)
+		}
+	}
+	// 登记表里的 bond0 未被触碰（再次收敛不会重建它）
+	if errs := p.PruneBonds(context.Background(), declared); len(errs) != 0 {
+		t.Fatalf("重复收敛应成功: %v", errs)
+	}
+	if len(f.deleted) != 1 {
+		t.Fatalf("重复收敛不应再删（含声明中的 bond）: %v", f.deleted)
+	}
+}
+
+// 无残留 bond 时收敛不产生任何调用（避免误删与噪声）。
+func TestPruneBondsNoopWhenNothingStale(t *testing.T) {
+	f := newFakeBond()
+	f.addBond(101, "bond0", 1)
+	p := NewBondProvider(f)
+	if errs := p.PruneBonds(context.Background(), []model.Bond{{Name: "bond0"}}); len(errs) != 0 {
+		t.Fatalf("应收敛成功: %v", errs)
+	}
+	if len(f.detach) != 0 || len(f.deleted) != 0 {
+		t.Fatalf("声明中的 bond 不应被触碰: detach=%v deleted=%v", f.detach, f.deleted)
+	}
+}
+
+// 数据面查询/成员枚举失败按未收敛上报，不静默吞掉。
+func TestPruneBondsReportsErrors(t *testing.T) {
+	fe := newFakeBond()
+	fe.err = errors.New("boom")
+	if errs := NewBondProvider(fe).PruneBonds(context.Background(), nil); len(errs) != 1 {
+		t.Fatalf("查询失败应上报: %v", errs)
+	}
+
+	// 成员枚举失败：该项报错且不冒进删除（状态未知）
+	f := newFakeBond()
+	f.addBond(102, "bond9", 2)
+	p := NewBondProvider(f)
+	f.memErr = errors.New("dump failed")
+	errs := p.PruneBonds(context.Background(), nil)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "bond9") {
+		t.Fatalf("成员枚举失败应上报且指明对象: %v", errs)
+	}
+	if len(f.deleted) != 0 {
+		t.Fatalf("状态未知时不应删除: %v", f.deleted)
+	}
+}
+
+// nfvisd 重启后登记表为空：按接口名反查数据面后仍能删除（成员以数据面为准）。
+func TestDeleteBondFallsBackToDataplane(t *testing.T) {
+	f := newFakeBond()
+	f.addBond(101, "bond0", 1, 2)
+	p := NewBondProvider(f) // 未经过 ApplyBond：登记表为空
+	if err := p.DeleteBond(context.Background(), "bond0"); err != nil {
+		t.Fatalf("DeleteBond: %v", err)
+	}
+	if len(f.deleted) != 1 || f.deleted[0] != 101 {
+		t.Fatalf("应按名反查后删除: %v", f.deleted)
+	}
+	if len(f.detach) != 2 || f.detach[0] != 1 || f.detach[1] != 2 {
+		t.Fatalf("应摘除数据面上的全部成员: %v", f.detach)
+	}
+	if f.seq[0] != "detach:1" || f.seq[len(f.seq)-1] != "delete:101" {
+		t.Fatalf("应先摘成员再删接口: %v", f.seq)
+	}
+	// 二次删除幂等
+	if err := p.DeleteBond(context.Background(), "bond0"); err != nil {
+		t.Fatalf("重复删除应无害: %v", err)
 	}
 }
 
