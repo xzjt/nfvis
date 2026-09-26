@@ -433,4 +433,25 @@ images 80.7% 等）；`archtest`/`docscheck`（决策 169 项一致）/`toolchec
 - **R84-18（P3）**：`cross-connect` 端口数不足时**静默无操作**（既有测试把「缩减到 1 端口」定义为合法）。
 - 容器 memif 的同一投影路径只过了单测（机上容器未声明 vNIC）。
 
+
+§13 round84 追加现场：VNF 走 DHCP 上到上游 NAT 网段并 ping 通 Windows 宿主（用户点名场景）
+--------------------------------------------------------------------------------
+配置（都是产品路径，用户点名的三步）：`vs-vnf`（L2）端口 1 = `ens192`；VNF `vnf-dhcp` 的
+`interfaces eth0 type vhost-user` + `virtual-switch vs-vnf`（**只用 VNF 侧声明**，即 #171 修好的那条路）；
+cloud-init 不设静态地址，**由 guest 自己 DHCP**。
+- 数据面：`show bridge-domain 6252701 details` 成员 = `bvi0` + `ens192` + `vh-vnf-dhcp-eth0`；
+  `show l2fib verbose` 学到 guest MAC `52:54:fb:57:04:fd → vh-vnf-dhcp-eth0`。
+- **guest 侧（串口报告，连报三轮完全一致）**：接口 `enp1s0` 拿到
+  `inet 192.168.155.143/24 … dynamic valid_lft 1771sec`；默认路由 `default via 192.168.155.2 dev enp1s0
+  proto dhcp src 192.168.155.143`；
+  **`ping 192.168.155.1`（Windows 宿主 VMnet8）3 packets transmitted, 3 received, 0% packet loss，
+  0.314/0.698/1.366 ms**；`ping 192.168.155.2`（VMware NAT 网关）同样 3/3 0%；
+  至宿主代理 `192.168.155.1:2333` 的 TCP 亦可达（`curl http: 400`，与在宿主侧看到的一致）。
+- **宿主侧独立事实源**：VMware DHCP 租约表出现该 guest MAC；宿主 ARP 表 `192.168.155.143 → 52-54-fb-57-04-fd`；
+  `ping 192.168.155.143`（宿主 → guest）**4/4，0% 丢失，<1 ms**。
+- 结论：**VNF 经 vs-vnf（= ens192）成功 DHCP 到 192.168.155.0/24 并双向 ping 通 Windows 宿主**——
+  这条正是 round84 一开始拿不到、最终由决策 #171 修通的数据面路径。
+- 现场留物：VNF `vnf-dhcp`（running，1 vCPU / 1G 大页）与 `/data/incoming/dhcp-ud{,2,3}.sh` 保留，
+  便于复核；不再需要时 `request virtual-machine-functions vnf-dhcp stop` + `… delete --yes`。
+
 ================================================================================
