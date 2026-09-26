@@ -375,4 +375,62 @@ images 80.7% 等）；`archtest`/`docscheck`（决策 169 项一致）/`toolchec
   `pcap trace` 同时抓 vhost 与 ens192 两个方向，确认 DISCOVER 的走向。
   故本轮**仍未取得「VNF 数据面端到端 ping」证据**（历史 round79/80 曾有 5/5）。
 
+
+§12 round84 终章：两条未收敛项的收口（决策 #170/#171）+ 新登记
+--------------------------------------------------------------------------------
+接 §11 的 R84-14/R84-15，本轮把两条都收敛了——**其中 R84-15 是 P1，也是 round84 走查里
+「VNF guest 连通性未达」的最终真因**。
+
+**#170 / R84-14（apply 撤销缺口）`delete bonds <名>` 后 VPP 里 BondEthernet0 残留**
+- 根因：`internal/orchestrator/apply.go` 的 `plan()` **从未生成 `del-bond` 操作**（删除段只有
+  ct/vm/bd/vrf/span/qos/acl），而收敛路径又只「补齐不摘除」；于是删 bond 要等 `request vpp restart`
+  才清。残留期间该口同时是 bond 成员与 BD 成员（实测 VPP 允许这种并存——正是它把上一轮的
+  VNF 排障带偏）。
+- 做法：新增 `del-bond[<名>]` 计划操作（镜像 `del-vrf`，排在 BD/VRF 之后）；新增
+  `BondProvider.PruneBonds`（收敛时按 `sw_interface_bond_dump` 枚举数据面现存 bond、跳过声明集，
+  对残留项**先按数据面实况逐成员 `bond_detach_member`、再 `bond_delete`**）；`DeleteBond` 未命中
+  登记表时按接口名反查数据面。
+- 真机复验（1.1.41~dev1，用 ens224 以免动基线）：`set bonds bond0 members 0 ens224` + commit →
+  `show bond details` 有 BondEthernet0/ens224；`delete bonds bond0` + commit → **立刻**为空、
+  ens224 回普通口；随即把它作为交换机端口声明 → BD 立刻列出（**无需 vpp restart**）；
+  手工在 VPP 里加的残留 bond 在 `systemctl restart nfvis` 收敛后同样被拆掉，声明中的 bond 不受影响。
+
+**#171 / R84-15（P1）VNF 的 vhost 口从未挂进 bridge domain——两条「等价」声明其实不等价**
+- 现象（1.1.40 实机）：`show interface vh-<vm>-eth0` 恒为 `rx N / drops N (100%)`；
+  `show bridge-domain 6252701 details` 成员**只有** bvi0 + ens192；`show l2fib` 学不到 guest MAC；
+  连锁＝guest 拿不到 DHCP → cloud-init 卡在 `systemd-networkd-wait-online` → user-data 脚本从未执行
+  → BVI ping 100% 丢包，**全程零报错**。
+- 反向定位（决定性）：手工 `vppctl set interface l2 bridge vh-rc84b-probe-1-eth0 6252701` 后重启 VM
+  → ens192 立刻有 tx、**125µs 后**收到 `192.168.155.254 → 192.168.155.140` 的 DHCP Reply、
+  vhost 口 tx 7、L2FIB 学到 guest MAC、guest 拿到地址 ⇒ 断点在产品侧，不在上游也不在 guest。
+  同时排除了 `l2-fwd Reflection Drop` 计数与 ens192 rx drops 的干扰（那是 VMware NAT 把邻机
+  SSH 泛洪进 BD、VPP 正当拒绝原路回弹）。
+- 根因：`internal/orchestrator/network/l2.go` 的 `desiredMembers` 只遍历 `vs.Ports`；而
+  `set virtual-machine-functions <n> interfaces <nic> virtual-switch <vs>`（**手册 §9.2 用的写法**）
+  只把交换机名存在 VNF 对象上——**全仓没有任何生产代码给 `model.VSwitchPort.Vnf/VnfInterface` 赋值**，
+  故 `l2.go` 里处理 VNF 端口的分支与 `portIndex` 是**不可达死代码**。只有交换机侧的写法
+  `set virtual-switches <vs> ports <n> vnf <vm> interface <nic>` 才真的生效。
+  （这解释了为什么早前轮次「看起来能通」：那时的配置里两种写法都写了。）
+- 做法：在 orchestrator 的 `plan()` 与 `EnsureConsistent` 层，用新增的 `SwitchMembersOf`（以
+  `VnfPortsOf` 为唯一真源）把 VNF/容器侧声明投影进交换机端口集合的**副本**（显式端口优先、
+  不改写调用方配置、**不物化进配置库**，故 `show configuration` 不变）；双向覆盖——声明存在即挂进 BD，
+  改挂/删 VNF/删交换机即摘除（摘除排在删 vNIC 之前，单测断言顺序），收敛路径同样重放；
+  `desiredMembers` 解析失败改为如实上报（进未收敛清单）而不是静默跳过——这条静默正是缺陷藏了
+  这么久的原因。
+- **真机端到端（round84 一直缺的那条证据终于拿到）**：探针 VNF 仅用 VNF 侧声明
+  （交换机侧端口只有 ens192）→ `show bridge-domain 6252701 details` 成员出现 `vh-rc84c-probe-1-eth0`
+  → `show l2fib verbose` 学到 `52:54:5b:5f:23:6e → vh-rc84c-probe-1-eth0`（此前 learned=0）
+  → **`vppctl ping 192.168.100.10 source bvi0 repeat 5` 连续三次 5/5 0% 丢包**
+  （空闲后首个 ICMP 丢 1 个是已登记的既有环境现象）；
+  漂移验证：手工把该口挂到别的 BD → `systemctl restart nfvis` → 自动挂回 6252701、ping 复通 5/5。
+
+**§12 新登记（未修，供下轮裁）**：
+- **R84-16（P3，读视图缺口）**：VNF 侧声明的端口**不会**出现在 `show virtual-switches <vs> ports`
+  这类**配置来源**的读视图里（BD 成员关系只在运行态可见）。要一致就得在模型归一化层物化进
+  `vs.Ports`——但那会把合成端口写进配置库、改变 `show configuration` 的形状，**属需先决策的改动**，
+  本轮只做到「运行态正确」。
+- **R84-17（P3）**：删 VNF 后 `VNF_PORT_DOWN` 告警不自动消（进程内告警表，重启即清）。
+- **R84-18（P3）**：`cross-connect` 端口数不足时**静默无操作**（既有测试把「缩减到 1 端口」定义为合法）。
+- 容器 memif 的同一投影路径只过了单测（机上容器未声明 vNIC）。
+
 ================================================================================
