@@ -30,10 +30,10 @@
   26.06-release deb——快照基线自带）。
   源码树 `/root/src`（git archive 同步，见待办 §3.3，无 .git → 构建**必须显式传 SOURCE_DATE_EPOCH**）。
   **round81 后现状**（2026-09-26：决策 #155 `show` 族 JunOS 化第一步——接口族全运行态 + `show configuration | display set`
-  全家族反推（回放自校验），已真机验证未发布，证据 `docs/evidence/v1-closeout-round81-cli-junos-runtime-displayset.txt`；
+  全家族反推（回放自校验），已发布，证据 `docs/evidence/v1-closeout-round81-cli-junos-runtime-displayset.txt`；
   round80 基线见 `docs/evidence/v1-closeout-round80-cli-web-fulltest-and-release-1.1.34.txt`，
   三件套复跑仍以 `docs/evidence/v1-closeout-round36-three-suites.txt` 为准）：
-  nfvis **1.1.35~dev3** active（round81 验证版、未发布，含 R81-1/R81-2 display set 真机修复与 R81-3 管道位置补全；`/root/src` 已同步 #155 工作树）；
+  nfvis **1.1.35** active（**已发布 v1.1.35**：main `72ecd98` + SOURCE_DATE_EPOCH=1790405842，回下载 sha256 一致；升级实装后拓扑存活、新内容抽查全过）；
   管理口令 `WBF81vOA4M8GM28f@Aa1`（**随快照恢复而变**，取法见待办 §3.1；
   round81 已按哈希比对法核对**匹配**）；
   VPP 26.06 运行、主堆用 2M 大页、ens192/ens224 交 DPDK；

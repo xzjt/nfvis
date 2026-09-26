@@ -163,7 +163,22 @@ set vpp memory hugepage-preference 2M
   `| disp<Tab>` 补全为 display；`| display ?` 列出 json/set/xml；
   `| display s<Tab>` 补全后命令直接执行、输出 set 语句（正向闭环）。
 
-§9 遗留与后续
+§10 发布（2026-09-26，round48/80 口径）
+--------------------------------------------------------------------------------
+- PR #216 squash 合并 → main `72ecd98`；tag v1.1.35 打在该提交。
+- VM 构建：make deb VERSION=1.1.35 SOURCE_DATE_EPOCH=1790405842 →
+  nfvis_1.1.35_amd64.deb 9,106,442 字节，
+  sha256 962272d0ffc71d52f96358b16ec007352730948f6159c68470d9a3b470a0ff97。
+- 随包文档核对：用户手册含 display set（4 处）、规格书决策 155 条、
+  命令树设计含管道补全第 9 条——均为当前版本；前端 go:embed 随源码构建。
+- 升级实装（1.1.35~dev3 → 1.1.35）：服务 active、show version 报 1.1.35、
+  display set 42 条语句、bvi0 运行态视图、管道补全、vnf-a/vnf-b running——新内容抽查全过。
+- Release：https://github.com/xzjt/nfvis/releases/tag/v1.1.35（asset 为上述 deb）；
+  **回下载比对 sha256 一致**。
+- purge/重装循环本轮未重跑（dev1~dev3 三次实装已验证安装路径；发布件与验证件仅
+  VERSION 不同），如实登记。
+
+§11 遗留与后续
 --------------------------------------------------------------------------------
 - 未发布：1.1.35~dev1 为验证构建；发布需走 round48/80 口径（文档核对 → 重打包 →
   升级实装 → 回下载比对 → Release）。手册 28 张控制台截图与接口示例输出有轻微口径漂移
