@@ -7,8 +7,10 @@ package cliclient
 // 内——CLI 前端（internal/cli）不得 import internal/api（archtest 守护）。
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 
 	"golang.org/x/net/websocket"
@@ -17,16 +19,48 @@ import (
 // DialConsole 连接串口 WebSocket，返回双向流（调用方负责 Close）。
 // wsPath 为 CLIEResult.Console.WSURL（相对路径，如 /api/v1/...）。
 // 鉴权经 URL 上的 ticket（Bearer 不适用于 WebSocket 握手），故不加 Authorization 头。
+// TLS 口径与 REST **同源**（决策 #156）：证书固定 / -insecure 经 Client.tc 带入——
+// 此前用默认 TLS 校验，自签 HTTPS 下 console 必挂（x509 unknown authority，真机实测）。
 func (c *Client) DialConsole(wsPath string) (io.ReadWriteCloser, error) {
 	u, err := c.wsURL(wsPath)
 	if err != nil {
 		return nil, err
 	}
-	ws, err := websocket.Dial(u, "", c.wsOrigin(u))
+	cfg, err := websocket.NewConfig(u, c.wsOrigin(u))
+	if err != nil {
+		return nil, fmt.Errorf("连接串口 console 失败: %w", err)
+	}
+	if c.tc != nil {
+		cfg.TlsConfig = c.tlsConfigFor(hostOf(u))
+	}
+	ws, err := websocket.DialConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("连接串口 console 失败: %w", err)
 	}
 	return ws, nil
+}
+
+// tlsConfigFor 克隆共享 TLS 口径并补 ServerName（x/net/websocket 的 tls.Client
+// 不会从 URL 推导主机名，缺 ServerName 时校验直接报错）。
+func (c *Client) tlsConfigFor(host string) *tls.Config {
+	out := c.tc.Clone()
+	if out.ServerName == "" {
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			out.ServerName = h
+		} else {
+			out.ServerName = host
+		}
+	}
+	return out
+}
+
+// hostOf 取 URL 的 host[:port]。
+func hostOf(abs string) string {
+	u, err := url.Parse(abs)
+	if err != nil {
+		return ""
+	}
+	return u.Host
 }
 
 // wsURL 把相对 ws 路径解析为绝对 ws://（或 wss://）URL。

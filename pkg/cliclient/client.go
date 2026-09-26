@@ -42,6 +42,10 @@ type Client struct {
 	base  string
 	token string
 	hc    *http.Client
+	// tc HTTPS 的 TLS 口径（决策 #156）：REST 与 console 的 wss 拨号必须同源——
+	// 此前只装在 http.Transport 里，console 用默认 TLS 校验自签证书必挂。
+	// 明文（http://）为 nil。
+	tc *tls.Config
 }
 
 // RequestTimeout 单次请求上限。
@@ -74,8 +78,9 @@ type TLSOptions struct {
 // 因此优先**固定守护进程自己的证书**（安全且零配置），而不是默认跳过校验。
 func NewWithTLS(server string, opts TLSOptions) (*Client, error) {
 	hc := &http.Client{Timeout: RequestTimeout}
+	var tc *tls.Config
 	if strings.HasPrefix(server, "https://") {
-		tc := &tls.Config{MinVersion: tls.VersionTLS12}
+		tc = &tls.Config{MinVersion: tls.VersionTLS12}
 		switch {
 		case opts.Insecure:
 			tc.InsecureSkipVerify = true
@@ -92,7 +97,7 @@ func NewWithTLS(server string, opts TLSOptions) (*Client, error) {
 		}
 		hc.Transport = &http.Transport{TLSClientConfig: tc}
 	}
-	return &Client{base: server, hc: hc}, nil
+	return &Client{base: server, hc: hc, tc: tc}, nil
 }
 
 // DefaultServerCertPath 守护进程自签证书的缺省路径（与 system.DefaultTLSDir 一致）。
