@@ -1307,6 +1307,50 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 
 		// 取值挂起：本 token 即前一键头关键字的值
 		if pendingKey != "" {
+			if !isSet {
+				// delete 值叶子（决策 #158）：此前缺 isSet 判定，delete 带取值会反向写入
+				// （真机实测 delete … description orig 后描述仍在）。语义：数组值按值移除
+				// （范围展开，与 SPA 按值删除同口径），标量删整个叶；取值 token 容忍——
+				// 操作者常把 set 行原样换成 delete。
+				if arr, ok := cur[pendingKey].([]any); ok {
+					var rm []any
+					if fn, ok := valueTransforms[pendingKey]; ok {
+						if v, err := fn(tok); err == nil {
+							rm, _ = v.([]any)
+						}
+					} else {
+						rm = []any{scalarForNode(node, tok)}
+					}
+					out := make([]any, 0, len(arr))
+					for _, el := range arr {
+						drop := false
+						for _, r := range rm {
+							if el == r {
+								drop = true
+								break
+							}
+						}
+						if !drop {
+							out = append(out, el)
+						}
+					}
+					if len(out) == 0 {
+						delete(cur, pendingKey)
+					} else {
+						cur[pendingKey] = out
+					}
+				} else {
+					if _, ok := cur[pendingKey]; !ok {
+						return fmt.Errorf("无匹配配置: %s", pendingKey)
+					}
+					delete(cur, pendingKey)
+				}
+				pendingKey = ""
+				if i == len(tokens)-1 {
+					return validateTreeJSON(tree) // 语句结束
+				}
+				continue
+			}
 			if fn, ok := valueTransforms[pendingKey]; ok {
 				v, err := fn(tok)
 				if err != nil {
@@ -1466,6 +1510,34 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 
 		// 2a) 标量参数：取值写入父容器的标量字段（成员标量数组则追加）
 		if p := firstParamOf(node); p != nil && p.ScalarParam {
+			if !isSet {
+				// delete 标量参数（决策 #158）：此前缺 isSet 判定，delete 带取值会反向写入。
+				// ScalarIsArray 按值移除（空则删键）；标量删整个字段。
+				if arr, ok := cur[p.ScalarJSONKey].([]any); ok && p.ScalarIsArray {
+					rm := typedScalar(tok)
+					out := make([]any, 0, len(arr))
+					for _, el := range arr {
+						if el != rm {
+							out = append(out, el)
+						}
+					}
+					if len(out) == 0 {
+						delete(cur, p.ScalarJSONKey)
+					} else {
+						cur[p.ScalarJSONKey] = out
+					}
+				} else {
+					if _, ok := cur[p.ScalarJSONKey]; !ok {
+						return fmt.Errorf("无匹配配置: %s", tok)
+					}
+					delete(cur, p.ScalarJSONKey)
+				}
+				if i == len(tokens)-1 {
+					return validateTreeJSON(tree)
+				}
+				node = p // 后续兄弟关键字（如 vnf 下的 interface）是参数节点的子节点
+				continue
+			}
 			v := typedScalar(tok)
 			// ScalarIsArray（SPA）：模型字段是数组，**首个取值也必须落成数组**——
 			// 否则 ssh_keys/dns_servers 这类字段会先被写成字符串，与 []string 类型不符。
