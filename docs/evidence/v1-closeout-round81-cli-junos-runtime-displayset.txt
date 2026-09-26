@@ -218,7 +218,42 @@ set vpp memory hugepage-preference 2M
   Release + 回下载比对一致；升级实装后中文发布验证（正确 4 处/乱码 0 处）、拓扑存活。
 - 走查后清理：cli-vm 域/快照、bond0/vs-l2 运行态残留、开发态实例——环境回到干净生产态。
 
-§14 遗留与后续
+§14 round83（2026-09-26）：干净快照 → 从安装开始的拟人化走查
+--------------------------------------------------------------------------------
+- 用户将 nfvis-vm 恢复"干净"快照，要求从安装开始重新走查。快照态实测：/root/src 无、
+  nfvis 未装、go/make 未装、/var/lib/nfvis 无、VPP debs 9 个在位；SSH host key 变更
+  （按 §3.8 ssh-keygen -R 处理）。
+- 构建环境重装（make/golang-1.26/cloud-image-utils/qemu-utils，apt）→ git archive 同步
+  main `3ac5200` → VM 构建 nfvis_1.1.37_amd64.deb **与 Release asset 逐字节一致**
+  （sha256 67b217d9…；SOURCE_DATE_EPOCH=1790408993）——干净机构建可复现性顺带得证。
+- 底座：VPP 9 debs 装齐（vpp active）；libvirt/docker 首次 apt 失败——**快照把 apt 源
+  回滚为 aliyun（AGENTS.md 登记过"几乎不可用，勿切回"）**，按登记换回 USTC 后装齐
+  （qemu-kvm 在 26.04 无候选，按 provision.sh 用 qemu-system-x86）。
+- nfvis 安装：postinst 与手册 §2.2 逐条吻合（core_pattern 提示、1G 大页缺失提示、
+  isolcpus 提示、底座探测/警告、SSH 强化不重启 sshd、基线 RAM 7G→1G 大页 1 页 +
+  intel_iommu=on（Intel 自动补参）、enable 不自动 start）；§2.3 检查清单全过。
+- 重启后基线生效（cmdline 含 hugepages=1/intel_iommu=on/iommu=pt）；首启
+  （systemctl start nfvis）→ journal 一次性口令（yaEBXZGjd_5ARJDf@Aa1，已按此登录）；
+  `show system uptime` 与主机 uptime 一致（#117 语义正确）。
+- DPDK 接管全流程（手册 §7）：declare → set vpp dpdk dev → commit（rev 3，含"需 restart"
+  警告）→ **request interfaces ens192/ens224 bind-dpdk --yes**（自动加载 vfio-pci）→
+  request vpp restart → ens192/ens224 up/up driver=dpdk（CLI 与 vppctl 一致）。
+  管理口守卫事实启动日志在（default-route=ens160）。
+- 内核基线三方对照：基线与配置期望一致；大页 1G 运行 3 页（cmdline 1 + VPP/DPDK
+  运行期自增 2，主堆/stats 占用后 free 1）——显示为真实 sysfs 值，非缺陷。
+- **发现（待裁，未修）**：
+  - F1（P2，首装发现性）：新装机 `show interfaces` = 「（无接口）」、`set interfaces <Tab>`
+    候选为空——**内核侧网卡（ens160/192/224）对操作者完全不可见**（清单来源 = VPP 运行态
+    ∪ 配置声明，第三来源 kernel-ifnames 未进清单）。接管前操作者无从发现网卡名。
+    候选修法：清单并入 kernel-ifnames（来源列标「内核侧」）或空态指路。需决策 #158。
+  - F2（P3，提示语）：`set vpp dpdk dev` 提交警告与恢复日志只说「request vpp restart 后
+    自动收敛」，未提**先 bind-dpdk --yes**（绑定不跨重启）——新装操作者照做不收敛
+    （本轮走查即踩）。修法：警告文案补 bind-dpdk 前置。
+- 环境终态：1.1.37（源码构建）active、rev 3、VPP+DPDK 接管在位、libvirt/docker 运行、
+  USTC 源已恢复、make/golang-1.26/cloud-image-utils 已装、**alpine.qcow2 与
+  docker alpine:3.20 未重建**（走查未触及容器/阶段 3）、无 isolcpus（默认基线不设）。
+
+§15 遗留与后续
 --------------------------------------------------------------------------------
 - 未发布：1.1.35~dev1 为验证构建；发布需走 round48/80 口径（文档核对 → 重打包 →
   升级实装 → 回下载比对 → Release）。手册 28 张控制台截图与接口示例输出有轻微口径漂移
