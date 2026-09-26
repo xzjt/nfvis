@@ -946,6 +946,32 @@ nfvis# commit
 
 核对：`show nat`。
 
+> **跨 VRF（inside 与 outside 不同交换机）时的实测口径**：
+> - **用 `action interface <出接口>`（不带 `source-pool`）**：出接口自身的地址承担外部地址，
+>   已实测端到端可用（guest 经 NAT ping 通外网，`show nat44 ei sessions detail` 能看到
+>   `i2o <内网地址> fib <inside表> ↔ o2i <出接口地址> fib <outside表>` 的跨 VRF 会话）；
+> - **带显式 `source-pool`**：当前版本在跨 VRF 场景下**建不起会话**（VPP 侧
+>   `nat44-ei-in2out-slowpath  out of ports`，`show nat44 sessions` 为 0）——已登记待修，
+>   需要独立外部地址池时请先用 `static` 1:1 发布或等修复。
+>
+> **内网侧可以是 VNF 自己的网口**：把该 vNIC 声明为 L3 地址接口即可让 guest 的网关落在它自己的口上
+> （不这么写时 guest 会因为「网关地址不在它那一侧、VPP 不代答 ARP」而 100% `Destination Host Unreachable`）：
+>
+> ```bash
+> nfvis# edit virtual-switches vs-nat
+> nfvis# set type l3
+> nfvis# set l3-interface vh-fw-vm-eth0 ip address 192.168.200.1/24   # vNIC 的确定性口名 vh-<vm>-<vnic>
+> nfvis# top
+> nfvis# edit virtual-machine-functions fw-vm
+> nfvis# set interfaces eth0 virtual-switch vs-nat
+> nfvis# top
+> nfvis# commit
+> ```
+>
+> 注意：vNIC 的口名是 `vh-<VM名>-<vNIC名>`（超长时回退为 `vh-<8 位哈希>`，容器是 `mf-…`），
+> 且**必须先存在该 VNF 的 vNIC 声明**才能引用它（校验只放行「已声明的 vNIC 口」；物理口/bond/VLAN
+> 子接口照旧可用，其他名字仍被拒）。
+
 ### 8.9 链路聚合（bond）
 
 ```bash
