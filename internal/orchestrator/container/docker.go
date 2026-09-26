@@ -65,8 +65,9 @@ type dockerAPI interface {
 	Remove(ctx context.Context, name string, force bool) error
 	// RemoveImage 删除容器镜像（FR-CMP-033，经 Docker API）。
 	RemoveImage(ctx context.Context, ref string) error
-	// LoadImage 载入容器镜像归档（FR-CMP-031，经 Docker API `image load`）。
-	LoadImage(ctx context.Context, path string) error
+	// LoadImage 载入容器镜像归档（FR-CMP-031，经 Docker API `image load`）；
+	// name 为仓库目录项名，载入后按它重打标签 `<名>:latest`（决策 #160）。
+	LoadImage(ctx context.Context, path, name string) error
 	State(ctx context.Context, name string) (state string, exists bool, err error)
 	// ExitCode 返回容器退出码（不存在 exists=false）。
 	ExitCode(ctx context.Context, name string) (code int, exists bool, err error)
@@ -278,8 +279,8 @@ func (p *Provider) CheckContainerAlarms(ctx context.Context, cfg model.Config) [
 }
 
 // LoadImage 载入容器镜像归档（供镜像仓库导入容器镜像时调用）。
-func (p *Provider) LoadImage(ctx context.Context, path string) error {
-	return p.api.LoadImage(ctx, path)
+func (p *Provider) LoadImage(ctx context.Context, path, name string) error {
+	return p.api.LoadImage(ctx, path, name)
 }
 
 // RemoveImage 删除容器镜像（供镜像仓库删除容器镜像时调用）。

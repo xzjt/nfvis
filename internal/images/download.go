@@ -55,7 +55,7 @@ func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error
 			return Meta{}, fmt.Errorf("拉取容器镜像 %s：未接入 Docker", opts.Name)
 		}
 		archive := filepath.Join(s.cfg.Dir, opts.Name)
-		if err := s.dockerLoad(archive); err != nil {
+		if err := s.dockerLoad(archive, opts.Name); err != nil {
 			pending.ImportState = StateFailed
 			_ = s.setMeta(pending)
 			return Meta{}, fmt.Errorf("docker load %s: %w", opts.Name, err)

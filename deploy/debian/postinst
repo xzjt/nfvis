@@ -91,3 +91,15 @@ if [ -x "$SSH_HARDEN" ]; then
     sh "$SSH_HARDEN" --apply || log "提示：SSH 强化未完成（见上方输出）；可稍后执行 $SSH_HARDEN --apply 重试"
 fi
 exit 0
+# ⑨ libvirt AppArmor 助手放行 NFViS 路径：Ubuntu 的 virt-aa-helper 默认只放行
+#    /var/lib/libvirt/images 等，NFViS 的镜像/VM 磁盘在 /var/lib/nfvis 下——不放行
+#    则 VM 启动被 AppArmor 拒绝（干净快照首装实测）。幂等追加 + 重载该 profile。
+if [ -d /etc/apparmor.d/local ] && [ -f /etc/apparmor.d/usr.lib.libvirt.virt-aa-helper ]; then
+    AA_LOCAL=/etc/apparmor.d/local/usr.lib.libvirt.virt-aa-helper
+    if ! grep -q "/var/lib/nfvis/images" "$AA_LOCAL" 2>/dev/null; then
+        { echo ""; echo "# NFViS 镜像与 VM 磁盘路径"; echo "  /var/lib/nfvis/images/** r,"; echo "  /var/lib/nfvis/vms/** rk,"; } >> "$AA_LOCAL"
+        apparmor_parser -r /etc/apparmor.d/usr.lib.libvirt.virt-aa-helper 2>/dev/null || true
+        echo "nfvis postinst: libvirt AppArmor 已放行 NFViS 镜像/VM 路径"
+    fi
+fi
+

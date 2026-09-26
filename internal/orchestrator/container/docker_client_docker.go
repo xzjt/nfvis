@@ -152,8 +152,10 @@ func (c *dockerClient) RemoveImage(ctx context.Context, ref string) error {
 }
 
 // LoadImage 载入容器镜像归档（POST /images/load，body 为 docker save 的 tar；
-// 不复用 do()：其 body 走 JSON 序列化，无法流式传 tar）。
-func (c *dockerClient) LoadImage(ctx context.Context, path string) error {
+// 不复用 do()：其 body 走 JSON 序列化，无法流式传 tar）。载入后按 name 重打标签
+// `<name>:latest`（决策 #160）：tar 内嵌 tag 必含冒号（如 alpine:3.20）而容器引用的
+// 是目录项名（白名单禁冒号），不重打标签则 docker create 解析不到镜像。
+func (c *dockerClient) LoadImage(ctx context.Context, path, name string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("打开镜像归档 %s: %w", path, err)
@@ -173,8 +175,41 @@ func (c *dockerClient) LoadImage(ctx context.Context, path string) error {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("docker image load: %d %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return nil
+	loaded, err := loadedTagOf(resp.Body)
+	if err != nil {
+		return err
+	}
+	if loaded == "" {
+		return fmt.Errorf("docker image load: 归档中未解析到镜像 tag，无法按 %q 重打标签", name)
+	}
+	return c.tag(ctx, loaded, name, "latest")
+}
+
+// loadedTagOf 从 docker load 的响应流（NDJSON）解析载入的镜像引用：
+// 行形如 {"stream":"Loaded image: alpine:3.20\n"}；未打 tag 的归档为
+// "Loaded image ID: sha256:…"（ID 同样可作 tag 的引用源）。
+func loadedTagOf(r io.Reader) (string, error) {
+	dec := json.NewDecoder(r)
+	for dec.More() {
+		var line struct {
+			Stream string `json:"stream"`
+		}
+		if err := dec.Decode(&line); err != nil {
+			return "", fmt.Errorf("docker image load 响应解析: %w", err)
+		}
+		for _, p := range []string{"Loaded image: ", "Loaded image ID: "} {
+			if s := strings.TrimSpace(line.Stream); strings.HasPrefix(s, p) {
+				return strings.TrimSpace(strings.TrimPrefix(s, p)), nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// tag 给既有镜像引用打标签（POST /images/<ref>/tag）。
+func (c *dockerClient) tag(ctx context.Context, ref, repo, tag string) error {
+	q := url.Values{"repo": {repo}, "tag": {tag}}
+	return c.do(ctx, http.MethodPost, "/images/"+url.PathEscape(ref)+"/tag?"+q.Encode(), nil, nil)
 }
 
 // State 返回契约枚举；不存在 exists=false。
