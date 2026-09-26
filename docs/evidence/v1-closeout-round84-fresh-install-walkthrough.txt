@@ -454,4 +454,65 @@ cloud-init 不设静态地址，**由 guest 自己 DHCP**。
 - 现场留物：VNF `vnf-dhcp`（running，1 vCPU / 1G 大页）与 `/data/incoming/dhcp-ud{,2,3}.sh` 保留，
   便于复核；不再需要时 `request virtual-machine-functions vnf-dhcp stop` + `… delete --yes`。
 
+
+§14 round84 追加现场：用户点名的「VNF 的 eth0 走 NFViS NAT 拿 IP 并 ping Windows 宿主」测试
+--------------------------------------------------------------------------------
+**结论：当前产品的 NAT 功能对该场景不可用**——`nfvis-cli` 侧配置能提交、VPP 侧 NAT44-EI 也确实
+在位（`show nat44 ei interfaces` = `ens192 in` / `ens224 out`、池地址在位），但 **VNF 的 vNIC
+接不进 NAT 的 inside 转发域**，实测 guest 侧 100% `Destination Host Unreachable`。
+
+拓扑与配置（全部走产品路径，rev 118~122）：
+```
+vs-nat (L3): l3-interface ens192 192.168.200.1/24     # inside 转发域
+vs-wan (L3): l3-interface ens224 192.168.155.61/24    # outside 出接口
+nat rules 10 match source 192.168.200.0/24 virtual-switch vs-nat
+            action interface ens224 + action source-pool pool-a(192.168.155.62)
+vnf-dhcp: interfaces eth0 virtual-switch vs-nat
+guest: 192.168.200.10/24 gw 192.168.200.1（cloud-init 静态，无 DHCP 服务端）
+```
+- VPP 侧核对：`show nat44 ei interfaces` → `ens192 in` / `ens224 out`；`show nat44 ei addresses` →
+  `192.168.155.62`（池）+ `192.168.155.61`（出接口地址，VPP 自动纳入）⇒ **NAT 特性本身配起来了**。
+- guest 侧实测（串口两轮一致）：
+  `2: enp1s0 inet 192.168.200.10/24` + `default via 192.168.200.1`，
+  而 `ping 192.168.155.1` → `From 192.168.200.10 icmp_seq=1 Destination Host Unreachable` ×3，
+  **3 packets transmitted, 0 received, 100% packet loss**。
+- 断点：**guest 的网关 ARP 无人应答**。ARP 请求从 vhost 口进来，而 `192.168.200.1` 配在
+  `l3-interface ens192` 上——VPP 只为「接收接口自己所拥有的地址」作答，同 VRF 但另一接口的地址不代答。
+
+**根因（两条，都在产品侧）**
+1. **NAT 的 inside 接口集合永远不含 VNF 的 vNIC**：`internal/orchestrator/network/l3.go` 的
+   `SetVnfTable`（VNF vNIC 进 L3 交换机，FR-NET-020 的 L3 场景）只调 `sw_interface_set_table`
+   把接口置入 VRF 表，**不登记进 `p.ifaces[tableID]`**；而 NAT inside 的解析走
+   `AttachedIfaces()`（只读该登记集合，`provider.go` 里 `SetInsideResolver(n.l3.AttachedIfaces)`）
+   ⇒ vNIC 拿不到 `nat44-ei-in2out` 特性，其流量不会被转换。实测 VPP 里 inside 只有 ens192。
+2. **vNIC 无法承载网关地址**：决策 #41 规定 L3 交换机的 vNIC「置表、不配 IP」；而校验层
+   （`internal/model/validate.go`）明确拒绝把 vNIC/任何非物理口当 l3-interface——
+   `vrfs[vs-nat].l3_interfaces[vh-vnf-dhcp-eth0]: L3 接口 "vh-vnf-dhcp-eth0" 不存在或不是物理口/bond/vlan 子接口`；
+   本轮顺带实测**连 VPP tap 也被同一条校验拒**（`l3_interfaces[tap0]` 同样报错），
+   即 M5 证据里「tap 作 inside」的做法在当前校验下已不可复现。
+   两条叠加 ⇒ guest 在自己的口上既没有可 ARP 的网关、也不会被 NAT 命中。
+- 附带的三个 NAT 相关缺陷（本轮实测，未修）：
+  - **R84-20（P2，下发不幂等）**：重放时 `nat44_ei_add_del_interface_addr`（规则不带 source-pool 时）
+    与 `nat44_ei_add_del_address_range` 会对 VPP 重复下发并收到 `VPPApiError: Value already exists (-81)`，
+    **整个 `ApplyNAT` 中止**（表现为一条 WARN + 未收敛项），而配置与 `show nat` 看起来完全正常（误导）。
+    实测：把池地址与出接口地址错开、且池不带出接口自身地址时，首次下发可成功；`p.ifaddr/p.pools`
+    这类进程内状态一丢（重启 nfvisd）就会重放失败。
+  - **R84-21（P2，进程内状态不随 VPP 失效）**：带外 `systemctl restart vpp` 后，产品仍认为 NAT
+    已下发（`p.enabled/p.features/p.pools` 都在）→ 跳过重放 → `show nat44` 空、NAT 静默失效，
+    必须 `systemctl restart nfvis` 才恢复。与 R84-3（stats 连接只建一次）同族，但影响的是 apply 状态。
+  - **R84-22（P3，顺序）**：恢复收敛里把 vNIC 置入 L3 VRF 可能早于该 VRF 建表 →
+    `VNF 接口 … 置入 VRF vs-nat 的 IPv4 表: VPPApiError: No such FIB / VRF (-3)` 未收敛项，
+    再重放一次才成功（本轮 commit 与守护进程重启各见一次）。
+- 操作者注记：NAT 试验期间我用 cloud-config 给 guest 写了 `/etc/netplan/99-nfvis-static.yaml`（静态地址），
+  **该文件随 guest 磁盘持久**——把 user-data 换回 DHCP 后 guest 仍按旧静态地址跑（于是宿主 ping 不通，
+  看着像数据面坏了）。清理办法是再推一个 `rm -f /etc/netplan/99-nfvis-static.yaml && netplan apply`
+  的 user-data 并重启（本轮即如此复原）。**改 guest 网络配置时优先用脚本改运行态，别写持久化 netplan**。
+- 复原：已把拓扑退回用户上一轮验证过的形态（`vs-vnf` L2 + `ports 1 ens192` + BVI 192.168.100.1/24，
+  VNF eth0 回 `vs-vnf`，user-data 回 DHCP 报告脚本），并复验 **宿主 → guest `192.168.155.143` 4/4 0% 丢失 <1ms**、
+  `nfvis-vm → guest` 3/3 0%、`show l2fib` 学到 guest MAC。
+- **能给用户的可用路径**：要「guest 拿 192.168.155.x 并 ping 通 Windows 宿主」，当前版本请用
+  **L2 桥接**（guest 的 vNIC + `ens192` 同挂一个 L2 交换机，DHCP 由上游网段给）——即 §13 与本轮复原后的形态；
+  **经 NFViS NAT 的路径要等上面两条根因修掉**（建议：把 vNIC 登记进 inside 解析集合 + 允许 vNIC 承载
+  L3 地址，或为 L3 交换机提供自动的 vNIC 网关）。
+
 ================================================================================
