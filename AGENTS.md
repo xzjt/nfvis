@@ -33,7 +33,7 @@
   全家族反推（回放自校验），已发布，证据 `docs/evidence/v1-closeout-round81-cli-junos-runtime-displayset.txt`；
   round80 基线见 `docs/evidence/v1-closeout-round80-cli-web-fulltest-and-release-1.1.34.txt`，
   三件套复跑仍以 `docs/evidence/v1-closeout-round36-three-suites.txt` 为准）：
-  nfvis **1.1.35** active（**已发布 v1.1.35**：main `72ecd98` + SOURCE_DATE_EPOCH=1790405842，回下载 sha256 一致；升级实装后拓扑存活、新内容抽查全过）；
+  nfvis **1.1.36** active（**已发布 v1.1.36**＝决策 #156 console wss 证书固定修复；v1.1.35＝决策 #155；均回下载 sha256 一致，升级实装后拓扑存活）；
   管理口令 `WBF81vOA4M8GM28f@Aa1`（**随快照恢复而变**，取法见待办 §3.1；
   round81 已按哈希比对法核对**匹配**）；
   VPP 26.06 运行、主堆用 2M 大页、ens192/ens224 交 DPDK；

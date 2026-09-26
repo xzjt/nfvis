@@ -178,7 +178,25 @@ set vpp memory hugepage-preference 2M
 - purge/重装循环本轮未重跑（dev1~dev3 三次实装已验证安装路径；发布件与验证件仅
   VERSION 不同），如实登记。
 
-§11 遗留与后续
+§11 R81-4（v1.1.36）：串口 console wss 拨号未复用证书固定——自签 HTTPS 下必挂（决策 #156）
+--------------------------------------------------------------------------------
+- 用户真机报告：生产 443 上 request … console 报 x509 unknown authority。
+  根因：REST 的 TLS 口径只装在 http.Transport，console 的 wss 拨号用默认 TLS；
+  M4-12 真机验证走明文开发实例（ws://）故从未暴露。默认安装形态下串口不可用（P1）。
+- 修复：Client 持有 TLS 配置，DialConsole 经 websocket.DialConfig 同源携带
+  （clone 补 ServerName；-ca-file/-insecure/明文三路同源）。
+- 回归：pkg/cliclient 真实 TLS 回环（httptest 自签 + 证书固定 → echo 往返，修复前 x509 红）。
+- 真机：1.1.36 实装后 request … console 成功进入串口、Ctrl-] 干净退出、拓扑存活。
+
+§12 发布 v1.1.36（2026-09-26，round48/80 口径）
+--------------------------------------------------------------------------------
+- PR #217 squash 合并 → main `ada85c9`；tag v1.1.36。
+- 构建：SOURCE_DATE_EPOCH=1790407295，nfvis_1.1.36_amd64.deb
+  sha256 1124dae324c87d814ea3b525b4b01e004ebc988b061a937f07aa596c9993ae23；
+  Release https://github.com/xzjt/nfvis/releases/tag/v1.1.36，**回下载比对一致**。
+- 升级实装（1.1.35 → 1.1.36）：服务 active、console 串口连通、vnf-a/vnf-b running。
+
+§13 遗留与后续
 --------------------------------------------------------------------------------
 - 未发布：1.1.35~dev1 为验证构建；发布需走 round48/80 口径（文档核对 → 重打包 →
   升级实装 → 回下载比对 → Release）。手册 28 张控制台截图与接口示例输出有轻微口径漂移
