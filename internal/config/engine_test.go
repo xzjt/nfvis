@@ -802,9 +802,10 @@ func TestEngineNumaWarning(t *testing.T) {
 
 func intPtr(n int) *int { return &n }
 
-// TestImageMissingMessageIsActionable（附录 A #98）：「镜像不存在」的报错要能照着排查——
-// 列出仓库现有镜像；容器镜像再点出「可用名是 tar 内嵌 tag，与上传目录项名不一致时两个名字都不可用」
-// 这个已知陷阱（真机踩过：用目录名 → Docker API 404；用 tag → 校验拒「不存在」）。
+// TestImageMissingMessageIsActionable（附录 A #98）：「镜像不存在」的报错要能照着做——
+// 列出仓库里的可用名，并说明配置里该写哪个名字。
+// R84-7：此前这里说「容器镜像的可用名是 tar 内嵌 tag，与上传目录项名不一致时两个名字都用不了」，
+// 与实现不符（导入后已按仓库目录项名重打标签，唯一可用名就是仓库中的镜像名），照该提示写必被拒。
 func TestImageMissingMessageIsActionable(t *testing.T) {
 	images := mockImages{
 		"alpine-ct": {Name: "alpine-ct", Type: "container-image"},
@@ -833,8 +834,14 @@ func TestImageMissingMessageIsActionable(t *testing.T) {
 	if !strings.Contains(msg, "alpine-ct") || !strings.Contains(msg, "ubuntu-vm") {
 		t.Errorf("应列出仓库现有镜像: %v", msg)
 	}
-	if !strings.Contains(msg, "tar 内嵌 tag") {
-		t.Errorf("容器镜像缺失应点出入口名/tag 口径: %v", msg)
+	if !strings.Contains(msg, "请写仓库中的镜像名") {
+		t.Errorf("应点明配置里该写仓库中的镜像名: %v", msg)
+	}
+	if strings.Contains(msg, "内嵌 tag") || strings.Contains(msg, "两个名字都用不了") {
+		t.Errorf("不得再宣称「可用名是 tar 内嵌 tag / 两个名字都用不了」（与实现不符）: %v", msg)
+	}
+	if !strings.Contains(msg, "容器镜像的可用名就是仓库中的镜像名") {
+		t.Errorf("容器镜像应点出可用名口径: %v", msg)
 	}
 
 	// VM 镜像缺失：列出可选项，但不套用容器的那句口径
@@ -852,7 +859,7 @@ func TestImageMissingMessageIsActionable(t *testing.T) {
 	if !strings.Contains(msg, "ubuntu-vm") {
 		t.Errorf("应列出仓库现有镜像: %v", msg)
 	}
-	if strings.Contains(msg, "tar 内嵌 tag") {
+	if strings.Contains(msg, "容器镜像") {
 		t.Errorf("VM 镜像不应套用容器口径: %v", msg)
 	}
 }

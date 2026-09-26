@@ -190,7 +190,7 @@ func TestShowInterfacesPhysicalSubNotDropped(t *testing.T) {
 		}
 	}
 	// 子命令真的生效了（而不是回落到单口列表）：统计走运行态分支、sriov 走 VF 分支
-	if out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show interfaces physical ens2f0 statistics").Output; !strings.Contains(out, "统计运行态不可用") {
+	if out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show interfaces physical ens2f0 statistics").Output; !strings.Contains(out, "统计暂不可用") {
 		t.Fatalf("statistics 应走计数分支（此前被丢成单口列表）: %q", out)
 	}
 	if out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show interfaces physical ens2f0 sriov").Output; !strings.Contains(out, "SR-IOV") {

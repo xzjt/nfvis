@@ -5,12 +5,14 @@ package network
 // M3-7（二）[linux]：VPP stats segment 接入（接口统计 / buffer / 内存）。
 // 运行时数据供 internal/state 聚合；govpp 依赖集中在本文件，与其它 *_govpp.go
 // 一样由真机集成测试覆盖，不入本地覆盖率门槛。
+//
+// 连接策略（R84-3）：stats segment 的连接**会随 VPP 重启而失效**，取数失败即丢弃重连
+// （见 connCache，vpp_govpp.go）。修复前连接只建一次，VPP 重启后统计永久不可用。
 
 import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"sync"
 
 	"go.fd.io/govpp/adapter/statsclient"
 	"go.fd.io/govpp/api"
@@ -19,11 +21,9 @@ import (
 	"github.com/xzjt/nfvis/internal/state"
 )
 
-// statsConn 惰性建立的 stats segment 连接（同目录 stats.sock）。
-type statsConn struct {
-	mu   sync.Mutex
-	conn *core.StatsConnection
-}
+// statsConn stats segment 连接缓存（同目录 stats.sock）：
+// 惰性建立 + 「取数失败即失效重连」，句柄与策略见 vpp_govpp.go 的 connCache。
+type statsConn = connCache[*core.StatsConnection]
 
 // StatsSocketFor 由 binary API 套接字推导 stats 套接字。
 func StatsSocketFor(apiSock string) string {
@@ -33,29 +33,43 @@ func StatsSocketFor(apiSock string) string {
 	return filepath.Join(filepath.Dir(apiSock), "stats.sock")
 }
 
-func (m *Manager) stats() (*core.StatsConnection, error) {
-	m.statsOnce.Do(func() { m.statsConn = &statsConn{} })
-	m.statsConn.mu.Lock()
-	defer m.statsConn.mu.Unlock()
-	if m.statsConn.conn != nil {
-		return m.statsConn.conn, nil
-	}
+// statsConnRef 返回连接缓存（惰性初始化一次，statsOnce 保证并发下只建一个）。
+func (m *Manager) statsConnRef() *statsConn {
+	m.statsOnce.Do(func() {
+		m.statsConn = newConnCache(m.connectStats, closeStatsConn)
+	})
+	return m.statsConn
+}
+
+// connectStats 建立到 stats segment 的连接。
+func (m *Manager) connectStats() (*core.StatsConnection, error) {
 	sock := StatsSocketFor(m.cfg.Socket)
 	conn, err := core.ConnectStats(statsclient.NewStatsClient(sock))
 	if err != nil {
 		return nil, fmt.Errorf("连接 stats segment %s: %w", sock, err)
 	}
-	m.statsConn.conn = conn
 	return conn, nil
 }
 
-func (r *vppRuntime) InterfaceCounters(ctx context.Context, ifname string) (state.InterfaceCounters, bool) {
-	conn, err := r.m.stats()
-	if err != nil {
-		return state.InterfaceCounters{}, false
+// closeStatsConn 关闭被丢弃的陈旧连接（关闭失败无补救动作：它已不再被复用）。
+func closeStatsConn(conn *core.StatsConnection) {
+	if conn != nil {
+		conn.Disconnect()
 	}
+}
+
+// statsRead 在 stats 连接上取一次数：连接陈旧（典型是 VPP 刚重启）时由缓存失效重连后重试，
+// 重连后仍失败才报错——调用方据此降级为「统计不可用」。
+func (m *Manager) statsRead(read func(*core.StatsConnection) error) error {
+	return m.statsConnRef().use(read)
+}
+
+func (r *vppRuntime) InterfaceCounters(ctx context.Context, ifname string) (state.InterfaceCounters, bool) {
 	var all api.InterfaceStats
-	if err := conn.GetInterfaceStats(&all); err != nil {
+	if err := r.m.statsRead(func(conn *core.StatsConnection) error {
+		all = api.InterfaceStats{} // 重试前清空，避免新旧两次取数的条目混在一起
+		return conn.GetInterfaceStats(&all)
+	}); err != nil {
 		return state.InterfaceCounters{}, false
 	}
 	idx, ok := r.swIfIndex(ifname)
@@ -101,12 +115,11 @@ func (r *vppRuntime) Buffers(ctx context.Context) (state.Buffers, bool) {
 
 // buffersViaStatsClient 经 govpp statsclient 读取 buffer 池。
 func (r *vppRuntime) buffersViaStatsClient() (state.Buffers, bool) {
-	conn, err := r.m.stats()
-	if err != nil {
-		return state.Buffers{}, false
-	}
 	var bs api.BufferStats
-	if err := conn.GetBufferStats(&bs); err != nil {
+	if err := r.m.statsRead(func(conn *core.StatsConnection) error {
+		bs = api.BufferStats{}
+		return conn.GetBufferStats(&bs)
+	}); err != nil {
 		return state.Buffers{}, false
 	}
 	out := state.Buffers{}
@@ -122,12 +135,11 @@ func (r *vppRuntime) buffersViaStatsClient() (state.Buffers, bool) {
 }
 
 func (r *vppRuntime) Memory(ctx context.Context) (state.Memory, bool) {
-	conn, err := r.m.stats()
-	if err != nil {
-		return state.Memory{}, false
-	}
 	var ms api.MemoryStats
-	if err := conn.GetMemoryStats(&ms); err != nil {
+	if err := r.m.statsRead(func(conn *core.StatsConnection) error {
+		ms = api.MemoryStats{}
+		return conn.GetMemoryStats(&ms)
+	}); err != nil {
 		return state.Memory{}, false
 	}
 	var out state.Memory

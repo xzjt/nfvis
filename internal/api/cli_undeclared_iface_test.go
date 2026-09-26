@@ -54,7 +54,7 @@ func TestShowInterfacesUndeclaredRuntimePortAnswers(t *testing.T) {
 	}
 	// statistics 一律回计数单行（决策 #155 统一口径）
 	stat := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show interfaces bvi0 statistics").Output
-	if !strings.Contains(stat, "interface bvi0 statistics:") && !strings.Contains(stat, "统计运行态不可用") {
+	if !strings.Contains(stat, "interface bvi0 statistics:") && !strings.Contains(stat, "统计暂不可用") {
 		t.Fatalf("statistics 应回计数单行或如实说明不可用: %q", stat)
 	}
 }

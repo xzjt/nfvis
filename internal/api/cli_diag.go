@@ -116,7 +116,10 @@ func (x *cliExecutor) execMonitor(class string, t []string) string {
 	}
 	c, ok := x.state.InterfaceCounters(context.Background(), ifname)
 	if !ok {
-		return fmt.Sprintf("%% 接口 %s 统计不可用（不存在或 stats 未接入）\n", ifname)
+		// 如实描述（与 `show interfaces <n> statistics` 同口径）：stats 是接入了的，
+		// 取不到数是**这一刻连接没就绪/读取失败**（VPP 重启后连接陈旧即属此列，
+		// 取数路径会自行重连重试）；另一种成因是接口名本身不在数据面。
+		return fmt.Sprintf("%% 接口 %s 统计暂不可用（不存在或 stats 连接未就绪）\n", ifname)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%-12s %12s %12s %14s %14s %8s %8s\n",

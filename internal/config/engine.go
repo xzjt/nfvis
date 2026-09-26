@@ -798,18 +798,18 @@ func (e *Engine) checkImages(cfg *model.Config) []model.ValidateError {
 	check := func(vnf, image, want string, path string) {
 		info, ok := e.images.Lookup(image)
 		if !ok {
-			// 报错要能照着排查（附录 A #98）：只说「不存在」时，操作者最常踩的是
-			// 「容器镜像的可用名是 docker load 落地的 tar 内嵌 tag，与上传目录项名不一致
-			// 时两个名字都不可用」这个已知陷阱——故列出仓库现有镜像并点出该口径。
-			msg := fmt.Sprintf("仓库中不存在镜像 %q", image)
+			// 报错要能照着做（附录 A #98）：列出仓库里**真实可用**的名字，并说明配置里该写哪个。
+			// 此前这里写「容器镜像的可用名是 docker load 落地的 tar 内嵌 tag」——与实现不符：
+			// 导入后已按仓库目录项名重打标签，配置里唯一能用的就是仓库中的镜像名；照那句提示
+			// 去写反而被拒（R84-7 真机：内嵌 tag 与重打 tag 两个名字都过不了校验）。
+			msg := fmt.Sprintf("仓库中不存在镜像 %q；请写仓库中的镜像名", image)
 			if names := e.images.Names(); len(names) > 0 {
-				msg += "；仓库现有：" + strings.Join(names, "、")
+				msg += "，当前可用：" + strings.Join(names, "、")
 			} else {
-				msg += "（仓库为空，先上传或拉取镜像）"
+				msg += "（仓库为空，先用 request images upload 导入或 request images download 拉取）"
 			}
 			if want == "container-image" {
-				msg += "。注意：容器镜像的可用名是 docker load 落地的 tar 内嵌 tag；" +
-					"上传目录项名与它不一致时，两个名字都用不了"
+				msg += "。容器镜像的可用名就是仓库中的镜像名（导入时已按该名重打标签）"
 			}
 			errs = append(errs, model.ValidateError{Path: path, Message: msg})
 			return

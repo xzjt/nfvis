@@ -54,6 +54,14 @@ type Meta struct {
 	Description string    `json:"description,omitempty"`
 	ImportedAt  time.Time `json:"imported_at,omitempty"`
 	ImportState string    `json:"import_state,omitempty"`
+
+	// 下载进度与失败原因（R84-6）：URL 拉取是**异步**的，操作者只能经
+	// `show images <名> detail`（同一元数据）观察——此前只在开始/结束时写状态，
+	// 中断后既看不到进度、也看不到失败原因，只能看着 downloading 干等。
+	// 三个字段均为 omitempty，既有 index.json 与既有响应字段不受影响。
+	DownloadedBytes int64  `json:"downloaded_bytes,omitempty"` // 已下载字节（含续传的断点）
+	TotalBytes      int64  `json:"total_bytes,omitempty"`      // 服务端声明的总字节（未知为 0）
+	LastError       string `json:"last_error,omitempty"`       // 失败原因（failed 必填；ready 时可载清理告警）
 }
 
 // Store 镜像仓库（并发安全）。
@@ -111,7 +119,35 @@ func Open(cfg Config) (*Store, error) {
 	if err := s.load(); err != nil {
 		return nil, err
 	}
+	if err := s.reconcileStaleDownloads(); err != nil {
+		return nil, err
+	}
 	return s, nil
+}
+
+// reconcileStaleDownloads 把索引里残留的 downloading 改判 failed 并写明原因。
+//
+// URL 拉取在守护进程的协程里跑（受理即返回），进程一退出拉取就没了，且没有任何东西
+// 会再写这条状态——于是中断后 `show images` 会**永远**显示 downloading（R84-6 真机现象：
+// 无进度、无失败原因、无重试指引）。启动时改判是这条状态的兜底收口：操作者看到的
+// 至少是 failed + 可照做的原因，而不是一个永远不会变的状态。
+func (s *Store) reconcileStaleDownloads() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+	for name, m := range s.index {
+		if m.ImportState != StateDownloading {
+			continue
+		}
+		m.ImportState = StateFailed
+		m.LastError = "拉取未完成（下载中断或守护进程重启）；已下载部分保留在 .part，重跑同一命令即从断点续传"
+		s.index[name] = m
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return s.saveLocked()
 }
 
 // Config 返回生效配置。
@@ -160,10 +196,15 @@ func (s *Store) Lookup(name string) (config.ImageInfo, bool) {
 
 // Names 返回仓库现有镜像名（按名升序）。实现 config.ImageResolver，
 // 供「镜像不存在」的报错列出可选项（附录 A #98）。
+// 与 Lookup 同口径：**不列 failed**——拉取失败/校验失败留下的条目不算可用名，
+// 列出来等于把操作者指向一个必然被拒的名字（R84-6 后 failed 条目更常见，故一并收口）。
 func (s *Store) Names() []string {
 	metas := s.List()
 	out := make([]string, 0, len(metas))
 	for _, m := range metas {
+		if m.ImportState == StateFailed {
+			continue
+		}
 		out = append(out, m.Name)
 	}
 	return out
@@ -251,20 +292,27 @@ func (s *Store) ImportIncoming(name, typ, incomingFile, description string) (Met
 	if typ != TypeVM && typ != TypeContainer {
 		return Meta{}, fmt.Errorf("type 必须为 %s 或 %s", TypeVM, TypeContainer)
 	}
-	abs, err := filepath.Abs(incomingFile)
-	if err != nil {
-		return Meta{}, err
-	}
 	incAbs, err := filepath.Abs(s.cfg.IncomingDir)
 	if err != nil {
 		return Meta{}, err
 	}
+	// 相对路径按 incoming 目录解析（R84-8）：此前直接用 filepath.Abs，相对名会按**守护进程
+	// 的 CWD** 解析成 `/alpine.qcow2`，与候选描述「incoming 内的文件路径」不符，照候选敲必被拒。
+	// 越界判定不变：Join 会做 Clean，`../` 逃逸出去后仍被下面的前缀检查拒绝。
+	abs := incomingFile
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(incAbs, abs)
+	} else if abs, err = filepath.Abs(abs); err != nil {
+		return Meta{}, err
+	}
 	if !strings.HasPrefix(abs, incAbs+string(filepath.Separator)) {
-		return Meta{}, fmt.Errorf("文件 %s 必须位于 %s 内（先经 scp/sftp 传入）", incomingFile, s.cfg.IncomingDir)
+		return Meta{}, fmt.Errorf("文件 %s 必须位于 %s 内（相对路径按该目录解析；先经 scp/sftp 传入）",
+			incomingFile, s.cfg.IncomingDir)
 	}
 	// 容器镜像：归档（docker save 产物）经 Docker `image load` 入本地分层存储，
-	// 仓库只登记元数据、不留文件（FR-CMP-030）；name 须与归档内的镜像引用一致
-	// （容器 VNF 的 image 直接作为 Docker ref 使用）。
+	// 仓库只登记元数据、不留文件（FR-CMP-030）；name 即仓库目录项名，load 后按它重打标签
+	// `<name>:latest`（决策 #160），故配置里唯一可用的名字就是仓库中的镜像名——
+	// tar 内嵌 tag 与之无关（R84-7：旧文案宣称可用名是内嵌 tag，与实现不符）。
 	if typ == TypeContainer && s.dockerLoad == nil {
 		return Meta{}, fmt.Errorf("导入容器镜像 %s：未接入 Docker", name)
 	}

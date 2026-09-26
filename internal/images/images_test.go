@@ -1,6 +1,7 @@
 package images
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,7 +9,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -261,6 +264,214 @@ func TestRefCountAndList(t *testing.T) {
 		t.Fatalf("Path: %s", got)
 	}
 }
+
+// R84-6：URL 拉取中途中断必须**必然**落 failed，并把进度与可照做的原因留在元数据里。
+// 真机现象：CDN 限速后停滞，`show images` 长期停在 downloading、detail 无进度、
+// journal 无日志、.part 原地留存，操作者无进度/无错误/无重试指引。
+func TestDownloadInterruptedMarksFailedWithProgress(t *testing.T) {
+	const total = 1000
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("0123456789")) // 只发 10 字节后挂住（限速/停发的等效形态）
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case <-r.Context().Done(): // 客户端超时后连接被关，正常退出
+		case <-time.After(5 * time.Second): // 兜底，避免 handler 把 srv.Close 挂住
+		}
+	}))
+	defer srv.Close()
+	defer srv.CloseClientConnections()
+
+	s := newStore(t)
+	// 注入的 client 用**很短**的超时（不真等 10 分钟）：停滞必然转成超时中断。
+	_, err := s.Download(context.Background(), DownloadOptions{
+		Name: "stall.qcow2", Type: TypeVM, URL: srv.URL, SHA256: strings.Repeat("a", 64),
+		Client: &http.Client{Timeout: 300 * time.Millisecond},
+	})
+	if err == nil {
+		t.Fatal("停滞应报错")
+	}
+	for _, want := range []string{"中断", "可重试续传", "断点续传"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("中断错误应含 %q（要能照着做）: %v", want, err)
+		}
+	}
+	m, ok := s.Get("stall.qcow2")
+	if !ok {
+		t.Fatal("应登记镜像条目")
+	}
+	if m.ImportState != StateFailed {
+		t.Fatalf("中断应落 failed 状态: %+v", m)
+	}
+	if m.DownloadedBytes != 10 || m.TotalBytes != total {
+		t.Errorf("失败元数据应带进度（已下载 10 / 总 %d）: %+v", total, m)
+	}
+	if m.LastError == "" || !strings.Contains(m.LastError, "续传") {
+		t.Errorf("失败原因应可见且可照做: %q", m.LastError)
+	}
+	if _, err := os.Stat(filepath.Join(s.Config().Dir, "stall.qcow2.part")); err != nil {
+		t.Errorf("中断后 .part 应保留（续传的断点）: %v", err)
+	}
+
+	// 落盘而非只在内存：重开仓库（= 重启守护进程）后仍是 failed + 原因可见，
+	// 且**不会**因为「残留 downloading」被改判成别的状态。
+	s2, err := Open(s.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, ok := s2.Get("stall.qcow2")
+	if !ok || m2.ImportState != StateFailed || m2.LastError == "" || m2.DownloadedBytes != 10 {
+		t.Fatalf("failed 状态与进度应落盘: %+v %v", m2, ok)
+	}
+	// Names 与 Lookup 同口径：failed 的名字不能出现在「当前可用」里（否则报错把操作者
+	// 指向一个必然被拒的名字）。
+	for _, n := range s2.Names() {
+		if n == "stall.qcow2" {
+			t.Fatalf("failed 镜像不应出现在可用名清单: %v", s2.Names())
+		}
+	}
+	if _, ok := s2.Lookup("stall.qcow2"); ok {
+		t.Error("failed 镜像不应被 Lookup 命中")
+	}
+}
+
+// R84-6：残留的 downloading（进程退出时来不及收口）在下次打开仓库时改判 failed——
+// 否则 `show images` 会永远显示 downloading。
+func TestOpenReconcilesStaleDownloading(t *testing.T) {
+	s := newStore(t)
+	if err := s.setMeta(Meta{Name: "stale.qcow2", Type: TypeVM, ImportState: StateDownloading}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.setMeta(Meta{Name: "done.qcow2", Type: TypeVM, ImportState: StateReady}); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(s.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := s2.Get("stale.qcow2")
+	if m.ImportState != StateFailed || !strings.Contains(m.LastError, "续传") {
+		t.Fatalf("残留 downloading 应改判 failed 并写明可照做的原因: %+v", m)
+	}
+	if r, _ := s2.Get("done.qcow2"); r.ImportState != StateReady {
+		t.Fatalf("ready 条目不应被动: %+v", r)
+	}
+}
+
+// R84-6：下载中的进度写进元数据（`show images <名> detail` 可见），完成时进度=总大小。
+func TestDownloadPersistsProgressWhileDownloading(t *testing.T) {
+	content := bytes.Repeat([]byte("P"), 3<<20) // 3 MiB：够触发一次进度落盘（节流 1 MiB）
+	gate := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(content[:2<<20]) // 先发 2 MiB，再挂住等放行
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+			return
+		case <-time.After(10 * time.Second):
+			return
+		}
+		_, _ = w.Write(content[2<<20:])
+	}))
+	defer srv.Close()
+
+	s := newStore(t)
+	type result struct {
+		m   Meta
+		err error
+	}
+	var res result
+	done := make(chan struct{})
+	go func() {
+		res.m, res.err = s.Download(context.Background(), DownloadOptions{
+			Name: "progress.qcow2", Type: TypeVM, URL: srv.URL, SHA256: sha256Hex(content),
+		})
+		close(done)
+	}()
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	// 无论断言成败都放行并等拉取收尾：否则 t.TempDir 清理会与仍在写盘的协程竞态。
+	defer func() { release(); <-done }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if m, ok := s.Get("progress.qcow2"); ok && m.DownloadedBytes > 0 {
+			if m.ImportState != StateDownloading {
+				t.Fatalf("放行前应仍为 downloading: %+v", m)
+			}
+			// 进度按字节节流落盘（1 MiB），放行前读到的是 1~2 MiB 之间的某个检查点；
+			// 关键是「下载中就能读到进度」，而不是某个精确值。
+			if m.DownloadedBytes > 2<<20 || m.TotalBytes != int64(len(content)) {
+				t.Fatalf("下载中的进度应可读（已下载 ≤2MiB / 总 3MiB）: %+v", m)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("下载中未见进度落盘（show images detail 读不到进度）")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	release()
+	<-done
+	if res.err != nil {
+		t.Fatalf("Download: %v", res.err)
+	}
+	if res.m.ImportState != StateReady || res.m.DownloadedBytes != int64(len(content)) ||
+		res.m.TotalBytes != int64(len(content)) {
+		t.Fatalf("完成后应为 ready 且进度=总大小: %+v", res.m)
+	}
+}
+
+// R84-8：`request images upload … file <名>` 的相对名按 incoming 目录解析（候选描述即
+// 「incoming 内的文件路径」）；越界（含 ../ 逃逸）仍然拒绝。
+func TestImportIncomingRelativeName(t *testing.T) {
+	s := newStore(t)
+	inc := s.Config().IncomingDir
+	content := []byte("relative-qcow2")
+	if err := os.WriteFile(filepath.Join(inc, "rel.qcow2"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.ImportIncoming("rel.qcow2", TypeVM, "rel.qcow2", "")
+	if err != nil {
+		t.Fatalf("相对名应按 incoming 目录解析: %v", err)
+	}
+	if m.ImportState != StateReady || m.SizeBytes != int64(len(content)) {
+		t.Fatalf("元数据不符: %+v", m)
+	}
+	if _, err := os.Stat(filepath.Join(s.Config().Dir, "rel.qcow2")); err != nil {
+		t.Errorf("应落盘到仓库: %v", err)
+	}
+
+	// 子目录里的相对名同样按 incoming 解析
+	sub := filepath.Join(inc, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "in-sub.qcow2"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ImportIncoming("in-sub.qcow2", TypeVM, "sub/in-sub.qcow2", ""); err != nil {
+		t.Fatalf("子目录相对名应可导入: %v", err)
+	}
+
+	// 逃逸：`../` 与「先下潜再回退」都必须仍被拒绝（不能因为相对解析而放开）
+	for _, name := range []string{"../evil.qcow2", "sub/../../evil.qcow2"} {
+		if _, err := s.ImportIncoming("evil", TypeVM, name, ""); err == nil ||
+			!strings.Contains(err.Error(), "必须位于") {
+			t.Fatalf("越界相对名 %q 应拒绝: %v", name, err)
+		}
+	}
+}
+
+// TestHelpers
 
 func TestHelpers(t *testing.T) {
 	if formatOf("x.QCOW2") != "qcow2" || formatOf("noext") != "unknown" {

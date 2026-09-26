@@ -108,6 +108,13 @@ func runScript(session *cli.Session, cmdline string) {
 		if !strings.HasSuffix(out, "\n") {
 			fmt.Println()
 		}
+		// 破坏性动作的问询文本（`… ? [yes,no]`）：脚本模式没有答复来源，
+		// 不判定就会「只问不做」却以退出码 0 结束（假成功）。按失败处理并指引显式确认。
+		if msg, need := confirmRefusal(out); need {
+			fmt.Print(msg)
+			failed = true
+			break
+		}
 		if strings.Contains(out, "%%") {
 			failed = true
 			break
@@ -128,6 +135,28 @@ func teardownScript(session *cli.Session) {
 			fmt.Print(out)
 		}
 	}
+}
+
+// confirmSuffix 服务端问询确认文本的固定结尾（删 VNF/容器/镜像、软件 add|rollback、
+// reboot|shutdown、zeroize、接口 bind-dpdk|unbind-dpdk 都以它结尾）。
+// 交互 REPL 用同一判据（internal/cli/repl.go）：TrimSpace 后做后缀匹配，
+// 故**回显了历史问询文本**（如 `show log audit`）不会误判。
+const confirmSuffix = "[yes,no]"
+
+// confirmRefusal 判定服务端输出是否为「破坏性动作的交互确认问询」。
+//
+// 非交互模式（`-c`）没有答复来源：交互 REPL 会读一行答复并追加 `--yes` 重发
+// （见 internal/cli/repl.go），而脚本模式若把问询当普通输出，就会「命令问了没做、
+// 却以退出码 0 结束」——对自动化是**假成功**。故命中即返回一条以 `%%` 开头的
+// 错误（置 failed、按「任一行失败即停止」语义中止），并给出可操作的出路。
+//
+// 判据与 REPL 同源：仅看输出**结尾**，不猜语义。
+func confirmRefusal(out string) (msg string, need bool) {
+	if !strings.HasSuffix(strings.TrimSpace(out), confirmSuffix) {
+		return "", false
+	}
+	return "%% 该命令需交互确认（破坏性动作），非交互模式不会执行；" +
+		"确认要执行时请在命令尾追加 --yes 后重试（如再次问询，再追加一个 --yes）\n", true
 }
 
 // mustClient 构造 REST 客户端（FR-SEC-004：默认自签 HTTPS）。

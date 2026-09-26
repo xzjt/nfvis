@@ -12,8 +12,12 @@ echo "############ 阶段 3：前置对象 ############"
 
 mkdir -p /data/incoming
 cp -f /var/lib/nfvis/images/alpine.qcow2 /data/incoming/cli-test.qcow2 2>/dev/null
+# cli-del.qcow2：**供阶段 4 真删**的一次性镜像（不声明进任何 VNF/容器 → 无引用，删除必成功）。
+# 没有它就只剩「删历史残留的镜像名」这条路——那在本套件自己的产物之外，新装实例上并不存在。
+cp -f /var/lib/nfvis/images/alpine.qcow2 /data/incoming/cli-del.qcow2 2>/dev/null
 
 run S3 "request images upload name cli-test.qcow2 type vm-image file /data/incoming/cli-test.qcow2"
+run S3 "request images upload name cli-del.qcow2 type vm-image file /data/incoming/cli-del.qcow2"
 
 # 容器镜像：目录名必须**等于 Docker tag**（alpine:3.20），否则下发 Docker API 404
 # （报 docker: not found）——见决策 #76 §4①。

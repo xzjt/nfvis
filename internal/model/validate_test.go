@@ -324,13 +324,16 @@ func TestCheckSuperUserPresent(t *testing.T) {
 func TestValidateNatTopology(t *testing.T) {
 	natBase := func() Config {
 		c := validBase()
+		// 出接口只能用**未被数据面其它角色占用**的口：validBase 的 ens2f0 是 vs-app 的
+		// 交换机端口，再把它当 NAT outside 的 L3 接口会被角色互斥校验拒绝。
+		c.Interfaces = append(c.Interfaces, InterfaceConfig{Name: "ens2f1"})
 		c.VirtualSwitches = append(c.VirtualSwitches, VirtualSwitch{Name: "vs-l3", Type: "l3"})
 		// inside：vs-l3 的 l3-interface
 		c.Vrfs = append(c.Vrfs, Vrf{Name: "vs-l3",
 			L3Interfaces: []L3Interface{{Interface: "ens2f0.200", Addresses: []string{"10.99.0.1/24"}}}})
 		// outside：wan VRF 承载出接口地址
 		c.Vrfs = append(c.Vrfs, Vrf{Name: "wan",
-			L3Interfaces: []L3Interface{{Interface: "ens2f0", Addresses: []string{"203.0.113.1/24"}}}})
+			L3Interfaces: []L3Interface{{Interface: "ens2f1", Addresses: []string{"203.0.113.1/24"}}}})
 		c.Nat = &NatConfig{}
 		return c
 	}
@@ -339,13 +342,13 @@ func TestValidateNatTopology(t *testing.T) {
 	c := natBase()
 	c.Nat.SourcePools = []NatSourcePool{{Name: "pool1", AddressRange: "203.0.113.10 to 203.0.113.20"}}
 	c.Nat.Rules = []NatRule{{Seq: 10, MatchSource: "10.10.0.0/24", VirtualSwitch: "vs-l3",
-		Action: NatAction{SourcePool: "pool1", Interface: "ens2f0"}}}
+		Action: NatAction{SourcePool: "pool1", Interface: "ens2f1"}}}
 	mustNoErr(t, Validate(c))
 
 	// 合法：仅 interface（无池，以出接口地址作外部地址）
 	c2 := natBase()
 	c2.Nat.Rules = []NatRule{{Seq: 10, MatchSource: "10.10.0.0/24", VirtualSwitch: "vs-l3",
-		Action: NatAction{Interface: "ens2f0"}}}
+		Action: NatAction{Interface: "ens2f1"}}}
 	mustNoErr(t, Validate(c2))
 
 	// 缺出接口 → 报错（决策 #38）
@@ -360,8 +363,8 @@ func TestValidateNatTopology(t *testing.T) {
 	c4.VirtualSwitches = append(c4.VirtualSwitches, VirtualSwitch{Name: "vs-l3b", Type: "l3"})
 	c4.Vrfs = append(c4.Vrfs, Vrf{Name: "vs-l3b"})
 	c4.Nat.Rules = []NatRule{
-		{Seq: 10, MatchSource: "10.10.0.0/24", VirtualSwitch: "vs-l3", Action: NatAction{Interface: "ens2f0"}},
-		{Seq: 20, MatchSource: "10.20.0.0/24", VirtualSwitch: "vs-l3b", Action: NatAction{Interface: "ens2f0"}},
+		{Seq: 10, MatchSource: "10.10.0.0/24", VirtualSwitch: "vs-l3", Action: NatAction{Interface: "ens2f1"}},
+		{Seq: 20, MatchSource: "10.20.0.0/24", VirtualSwitch: "vs-l3b", Action: NatAction{Interface: "ens2f1"}},
 	}
 	mustErrContaining(t, Validate(c4), "virtual_switch", "单一 inside 转发域")
 
@@ -373,12 +376,12 @@ func TestValidateNatTopology(t *testing.T) {
 
 	// 出接口在多条规则中归属不同 VRF → 报错
 	c6 := natBase()
-	c6.Interfaces = append(c6.Interfaces, InterfaceConfig{Name: "ens2f1"})
+	c6.Interfaces = append(c6.Interfaces, InterfaceConfig{Name: "ens2f2"})
 	c6.Vrfs = append(c6.Vrfs, Vrf{Name: "wan2",
-		L3Interfaces: []L3Interface{{Interface: "ens2f1", Addresses: []string{"203.0.114.1/24"}}}})
+		L3Interfaces: []L3Interface{{Interface: "ens2f2", Addresses: []string{"203.0.114.1/24"}}}})
 	c6.Nat.Rules = []NatRule{
-		{Seq: 10, MatchSource: "10.10.0.0/24", VirtualSwitch: "vs-l3", Action: NatAction{Interface: "ens2f0"}},
-		{Seq: 20, MatchSource: "10.30.0.0/24", VirtualSwitch: "vs-l3", Action: NatAction{Interface: "ens2f1"}},
+		{Seq: 10, MatchSource: "10.10.0.0/24", VirtualSwitch: "vs-l3", Action: NatAction{Interface: "ens2f1"}},
+		{Seq: 20, MatchSource: "10.30.0.0/24", VirtualSwitch: "vs-l3", Action: NatAction{Interface: "ens2f2"}},
 	}
 	mustErrContaining(t, Validate(c6), "action.interface", "单一 outside VRF")
 }

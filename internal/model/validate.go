@@ -22,8 +22,9 @@ func (e ValidateError) Error() string { return e.Path + ": " + e.Message }
 //
 // 覆盖：名称语法/重复、枚举与格式（ip-prefix/ip/mac/vlan/端口段）、必填项、
 // 配置内引用存在性，以及 FR-CFG-011 中可由配置文档自身判定的规则
-// （①vhost-user 大页、②地址重叠、③MAC 重复、⑧dpdk dev 为物理口）与
-// FR-SYS-010 的 vpp 核/大页一致性。
+// （①vhost-user 大页、②地址重叠、③MAC 重复、⑧dpdk dev 为物理口）、
+// FR-SYS-010 的 vpp 核/大页一致性，以及数据面角色互斥
+// （一个网口只能出现在 bond 成员/交换机端口/L3 接口/镜像口之一，用户手册 §8.9）。
 // 依赖外部状态的规则（⑤镜像类型匹配、⑨⑪资源配额余量、⑩NUMA 警告等）由
 // 事务引擎 commit 阶段结合资源账本与镜像仓库执行。
 func Validate(c Config) []ValidateError {
@@ -45,6 +46,7 @@ func Validate(c Config) []ValidateError {
 	v.checkVMFunctions(c)
 	v.checkContainerFunctions(c)
 	v.checkAddressOverlap(c)
+	v.checkPortRoleExclusivity(c)
 	v.checkManagementIsolation(c)
 	return v.errs
 }
@@ -993,6 +995,64 @@ func (v *validator) checkAddressOverlap(c Config) {
 				v.errf(b.path, "地址网段与 %s 重叠", a.path)
 			}
 		}
+	}
+}
+
+// checkPortRoleExclusivity 强制一个网口在数据面角色中最多出现一次。
+//
+// 数据面角色：bond 成员、虚拟交换机端口、L3 接口（l3-interface）、端口镜像的源/分析口。
+// 四者在 VPP 里对应**互斥**的接管方式——成员口入向被 bond-input 吃掉、交换机端口进
+// bridge-domain、L3 接口承载地址/路由、镜像口被 SPAN 占用。同一物理口被两条声明绑定时
+// VPP 只兑现其中一种，配置侧却全部接受：实测 ens192 同时作为 bond0 成员与 vs-l3 的
+// l3-interface 时，该口入向被 bond-input 吃光、不进 bridge-domain，BD 转发整体失效
+// （learned=0），连锁到 VNF guest 拿不到 DHCP，而产品全程零报错。
+// 用户手册 §8.9 早已写明「bond 成员口须未被虚拟交换机引用」——本检查把该约束落到 commit。
+//
+// 判据是**接口名精确匹配**（与 checkManagementIsolation 同口径）：VLAN 子接口
+// （如 ens2f0.100）与其父口是两个接口，各自独立计数。未声明的引用由各角色自身的
+// 引用校验报错，此处不重复。
+func (v *validator) checkPortRoleExclusivity(c Config) {
+	type roleUse struct{ path, role string }
+	seen := map[string]roleUse{}
+	// claim 登记一次角色占用；exists 为假表示该引用本身不是合法接口（由别的检查报错），
+	// 不参与角色冲突判定，避免在错误清单里叠噪声。
+	claim := func(name, path, role string, exists bool) {
+		if name == "" || !exists {
+			return
+		}
+		prev, taken := seen[name]
+		if !taken {
+			seen[name] = roleUse{path: path, role: role}
+			return
+		}
+		v.errf(path, "接口 %q 的角色冲突：已作为%s（%s），不能再作为%s——"+
+			"同一网口在 bond 成员/交换机端口/L3 接口/镜像源或分析口 中只能出现一次",
+			name, prev.role, prev.path, role)
+	}
+
+	for _, b := range c.Bonds {
+		for i, m := range b.Members {
+			claim(m, fmt.Sprintf("bonds[%s].members[%d]", b.Name, i),
+				fmt.Sprintf("bond %s 的成员口", b.Name), v.ifaceNames[m])
+		}
+	}
+	for _, s := range c.VirtualSwitches {
+		for _, pt := range s.Ports {
+			claim(pt.Interface, fmt.Sprintf("virtual-switches[%s].ports[%d].interface", s.Name, pt.Seq),
+				fmt.Sprintf("虚拟交换机 %s 的端口", s.Name), v.anyIface(pt.Interface))
+		}
+	}
+	for _, r := range c.Vrfs {
+		for _, li := range r.L3Interfaces {
+			claim(li.Interface, fmt.Sprintf("vrfs[%s].l3_interfaces[%s].interface", r.Name, li.Interface),
+				fmt.Sprintf("VRF %s 的 L3 接口", r.Name), v.l3IfaceExists(li.Interface))
+		}
+	}
+	for _, pm := range c.PortMirroring {
+		claim(pm.Source.Interface, fmt.Sprintf("port-mirroring[%s].source.interface", pm.Name),
+			fmt.Sprintf("镜像会话 %s 的源端口", pm.Name), v.anyIface(pm.Source.Interface))
+		claim(pm.Analyzer, fmt.Sprintf("port-mirroring[%s].analyzer", pm.Name),
+			fmt.Sprintf("镜像会话 %s 的分析端口", pm.Name), v.ifaceNames[pm.Analyzer])
 	}
 }
 

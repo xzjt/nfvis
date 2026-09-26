@@ -852,6 +852,11 @@
           "description": {
             "type": "string"
           },
+          "downloaded_bytes": {
+            "description": "下载进度：已落盘字节（仅 URL 拉取的镜像在下载中或失败时出现）",
+            "format": "int64",
+            "type": "integer"
+          },
           "format": {
             "example": "qcow2",
             "type": "string"
@@ -869,6 +874,10 @@
             "format": "date-time",
             "type": "string"
           },
+          "last_error": {
+            "description": "最近一次失败原因（import_state=failed 时出现，含可照做的续传指引）",
+            "type": "string"
+          },
           "name": {
             "type": "string"
           },
@@ -880,6 +889,11 @@
             "type": "string"
           },
           "size_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_bytes": {
+            "description": "下载总量；服务端未给 Content-Length 时缺省",
             "format": "int64",
             "type": "integer"
           },
