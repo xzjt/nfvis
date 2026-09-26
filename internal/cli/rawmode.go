@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/term"
 
@@ -35,6 +36,7 @@ type Editor struct {
 	cursor     int
 	savedLine  string
 	lastWakeup time.Time
+	accum      utf8Accum // 逐字节 UTF-8 组装器（决策 #157：多字节输入按字符插入）
 }
 
 // NewEditor 构造（stdin TTY 时启用 raw 模式）。
@@ -139,8 +141,10 @@ func (e *Editor) ReadLine(prompt string) (string, error) {
 			e.completeLine(prompt)
 		case b == '?':
 			e.helpLine(prompt) // 按键即时列出候选，不进入行文本（§5.1）
-		case b >= 0x20 && b < 0x7f, b >= 0x80:
-			e.insertRune(b, prompt)
+		default:
+			if r, ok := e.accum.feed(b); ok {
+				e.insertRune(r, prompt)
+			}
 		}
 	}
 }
@@ -202,11 +206,56 @@ func (e *Editor) listCandidates(prompt string, cs []schema.Candidate) {
 	e.redraw(prompt)
 }
 
-func (e *Editor) insertRune(b byte, prompt string) {
-	r := rune(b)
-	if b >= 0x80 { // UTF-8 多字节：逐字节追加（简化处理，ASCII 为主）
-		r = rune(b)
+// utf8Accum 逐字节 UTF-8 组装器（决策 #157）：raw 模式一次只读一个字节，
+// 多字节序列（中文等）必须攒齐解码后按**字符**插入——此前逐字节当 rune 追加，
+// 输入被双重编码存坏（真机实测 description "中文" 落库为 ä¸­æ）。
+type utf8Accum struct {
+	buf []byte
+}
+
+func utf8SeqLen(lead byte) int {
+	switch {
+	case lead&0xE0 == 0xC0:
+		return 2
+	case lead&0xF0 == 0xE0:
+		return 3
+	case lead&0xF8 == 0xF0:
+		return 4
 	}
+	return 1
+}
+
+// feed 喂入一个字节；返回 (完成解码的 rune, true) 或 (0, false)——后者表示
+// 尚未攒齐或字节非法（非法首字节/孤儿续字节丢弃，不进入行文本）。
+func (a *utf8Accum) feed(b byte) (rune, bool) {
+	if len(a.buf) > 0 {
+		if b&0xC0 == 0x80 {
+			a.buf = append(a.buf, b)
+			if len(a.buf) < utf8SeqLen(a.buf[0]) {
+				return 0, false
+			}
+			r, size := utf8.DecodeRune(a.buf)
+			a.buf = a.buf[:0]
+			if r == utf8.RuneError && size <= 1 {
+				return 0, false
+			}
+			return r, true
+		}
+		a.buf = a.buf[:0] // 序列中途遇到非续字节：畸形，丢弃后本字节按新输入处理
+	}
+	if b < 0x80 {
+		return rune(b), true
+	}
+	if b >= 0xC2 && b <= 0xF4 {
+		a.buf = append(a.buf, b)
+	}
+	return 0, false
+}
+
+// drop 丢弃未完成的畸形序列（行终止/控制键时）。
+func (a *utf8Accum) drop() { a.buf = a.buf[:0] }
+
+func (e *Editor) insertRune(r rune, prompt string) {
 	if e.cursor == len(e.line) {
 		e.line = append(e.line, r)
 		e.cursor++
@@ -323,6 +372,7 @@ func (e *Editor) historyNav(prompt string, dir int) {
 // search Ctrl-R 反查：交互式输入检索词，Enter 接受、ESC 取消。
 func (e *Editor) search(prompt string) {
 	term := ""
+	var sacc utf8Accum // 搜索词同样按字符组装（决策 #157）
 	e.history.SearchStart(string(e.line))
 	for {
 		fmt.Fprintf(e.out, "\r\x1b[K%s(reverse-i-search `%s`): %s", prompt, term, e.history.SearchHit())
@@ -344,7 +394,8 @@ func (e *Editor) search(prompt string) {
 			return
 		case 0x7f, 0x08:
 			if term != "" {
-				term = term[:len(term)-1]
+				_, sz := utf8.DecodeLastRuneInString(term)
+				term = term[:len(term)-sz] // 按字符截断（多字节搜索词）
 			}
 		case 0x12: // 再次 Ctrl-R：下一条命中
 			if hit, _ := e.history.SearchStep(term); hit != "" {
@@ -352,8 +403,8 @@ func (e *Editor) search(prompt string) {
 			}
 			continue
 		default:
-			if b >= 0x20 && b < 0x7f {
-				term += string(b)
+			if r, ok := sacc.feed(b); ok {
+				term += string(r)
 			}
 		}
 		if hit, _ := e.history.SearchStep(term); hit != "" {

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -199,5 +200,50 @@ func TestREPLOutGoesThroughEditorWriter(t *testing.T) {
 	rp := NewREPL(New(stubClient{}, "ssh"), NewHistory(), NewIdleGuard(0, nil))
 	if rp.out != rp.editor.Out() {
 		t.Fatalf("REPL 输出应经 editor 的 raw 感知流（否则命令输出会阶梯错位）")
+	}
+}
+
+// TestEditorMultibyteInput（决策 #157，round82 真机走查发现）：raw 模式逐字节到达的
+// UTF-8 序列必须按字符（rune）插入——此前逐字节当 rune 追加，中文等输入被双重编码存坏
+// （真机实测 description "中文" 落库为 ä¸­æ）。畸形序列（孤儿续字节/非法首字节）丢弃
+// 且不影响后续 ASCII 输入。
+func TestEditorMultibyteInput(t *testing.T) {
+	var e Editor
+	e.out = io.Discard
+	for _, b := range []byte("中ab") {
+		if r, ok := e.accum.feed(b); ok {
+			e.insertRune(r, "")
+		}
+	}
+	if string(e.line) != "中ab" {
+		t.Fatalf("多字节输入应按字符插入: %q", string(e.line))
+	}
+	// 行中插入（cursor < len）：把 é 插到「中|ab」的中后面
+	e.cursor = 1
+	for _, b := range []byte("é") {
+		if r, ok := e.accum.feed(b); ok {
+			e.insertRune(r, "")
+		}
+	}
+	if string(e.line) != "中éab" {
+		t.Fatalf("行中插入多字节应正确: %q", string(e.line))
+	}
+	// 孤儿续字节：丢弃
+	if _, ok := e.accum.feed(0x8f); ok {
+		t.Fatalf("孤儿续字节应丢弃")
+	}
+	// 畸形后 ASCII 输入恢复
+	if r, ok := e.accum.feed('x'); !ok || r != 'x' {
+		t.Fatalf("畸形序列后 ASCII 输入应恢复: %v %v", r, ok)
+	}
+	// 二字节序列 é（先回到行尾）
+	e.cursor = len(e.line)
+	for _, b := range []byte{0xC3, 0xA9} {
+		if r, ok := e.accum.feed(b); ok {
+			e.insertRune(r, "")
+		}
+	}
+	if !strings.HasSuffix(string(e.line), "é") {
+		t.Fatalf("二字节 UTF-8 应正确解码: %q", string(e.line))
 	}
 }
