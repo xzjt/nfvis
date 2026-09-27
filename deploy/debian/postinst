@@ -92,16 +92,17 @@ if [ -x "$SSH_HARDEN" ]; then
 fi
 
 # 9) libvirt AppArmor 助手放行 NFViS 路径：Ubuntu 的 virt-aa-helper 默认只放行
-#    /var/lib/libvirt/images 等，NFViS 的镜像/VM 磁盘在 /var/lib/nfvis 下——不放行
-#    则 VM 启动被 AppArmor 拒绝（干净快照首装实测）。幂等追加 + 重载该 profile。
-#    ⚠️ 本段曾在 `exit 0` **之后**静默失效过一轮（放行没做，安装却报成功）——
-#    `contrib/scripts/offline-installer-selftest.sh` 现在守护「维护脚本 exit 之后不得有可执行语句」。
-if [ -d /etc/apparmor.d/local ] && [ -f /etc/apparmor.d/usr.lib.libvirt.virt-aa-helper ]; then
-    AA_LOCAL=/etc/apparmor.d/local/usr.lib.libvirt.virt-aa-helper
-    if ! grep -q "/var/lib/nfvis/images" "$AA_LOCAL" 2>/dev/null; then
-        { echo ""; echo "# NFViS 镜像与 VM 磁盘路径"; echo "  /var/lib/nfvis/images/** r,"; echo "  /var/lib/nfvis/vms/** rk,"; } >> "$AA_LOCAL"
-        apparmor_parser -r /etc/apparmor.d/usr.lib.libvirt.virt-aa-helper 2>/dev/null || true
-        echo "nfvis postinst: libvirt AppArmor 已放行 NFViS 镜像/VM 路径"
+#    /var/lib/libvirt/images 等，NFViS 的镜像/VM 磁盘在 /var/lib/nfvis 下——不放行则 VM 启动被
+#    AppArmor 拒读。规则只写在 nfvisd 里（单源），此处调用同一实现；nfvisd 运行期还会**周期复核**
+#    ——因为 libvirt 可能晚于 nfvis 安装、或与它同一次 apt 事务而被后配置，那种顺序下本步的
+#    探测条件并不成立（round85 干净快照离线安装实测：装机报成功而 VNF 起不来）。
+#    ⚠️ 这段曾因写在 `exit 0` 之后而静默失效过一轮；`contrib/scripts/check_maint_scripts.sh`
+#    现在守护「维护脚本顶层 exit 之后不得有可执行语句」。
+if [ -x /usr/bin/nfvisd ]; then
+    if /usr/bin/nfvisd -ensure-libvirt-apparmor >/dev/null 2>&1; then
+        log "libvirt AppArmor 放行检查完成（本机无 libvirt 时自动跳过；运行期仍会复核）"
+    else
+        log "提示：libvirt AppArmor 放行未完成（缺 libvirt 或 profile 重载失败）——nfvisd 运行期会重试"
     fi
 fi
 

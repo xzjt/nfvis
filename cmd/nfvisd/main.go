@@ -65,6 +65,8 @@ func run() error {
 		lowLatency    = flag.Bool("low-latency", false, "低延迟参数组（mitigations=off 等；显式选择，降低安全缓解与可诊断性；VM 上自动省略 idle=poll/tsc=reliable）")
 		tuned         = flag.String("tuned-profile", "", "tuned 性能档名")
 		extraParams   = flag.String("kernel-params", "", "附加内核参数（空格分隔）")
+		// libvirt AppArmor 放行（决策 #182）：同一实现供安装期脚本与运行期复核调用，避免双源。
+		ensureAA = flag.Bool("ensure-libvirt-apparmor", false, "确保 libvirt 的 AppArmor 助手放行 NFViS 镜像/VM 路径后退出（幂等）")
 	)
 	flag.Parse()
 	if *showVer {
@@ -100,6 +102,23 @@ func run() error {
 		fmt.Print(fstab)
 		if fstab != "" {
 			fmt.Println()
+		}
+		return nil
+	}
+
+	if *ensureAA {
+		changed, err := (&system.AppArmorLibvirt{Runner: func(ctx context.Context, name string, args ...string) (string, error) {
+			out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+			return string(out), err
+		}}).Ensure(context.Background())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "nfvisd: "+err.Error())
+			return err
+		}
+		if changed {
+			fmt.Println("nfvisd: libvirt AppArmor 已放行 NFViS 镜像/VM 路径")
+		} else {
+			fmt.Println("nfvisd: libvirt AppArmor 无需改动（本机未装 libvirt 或已放行）")
 		}
 		return nil
 	}
@@ -430,6 +449,17 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// 决策 #182：libvirt 的 AppArmor 助手放行 NFViS 镜像/VM 磁盘路径。安装期脚本做同一件事，
+	// 但 libvirt 可能**晚于** nfvis 安装，或与它同一次 apt 事务而被后配置——那时安装期探测条件
+	// 不成立、放行会静默漏掉：装机全程报成功，VNF 直到被启动才失败（round85 干净快照离线安装实测）。
+	// 运行期幂等补齐与安装顺序无关；失败只告警不阻塞启动，周期巡检会再试。
+	aaMgr := &system.AppArmorLibvirt{Runner: runCmd}
+	if changed, err := aaMgr.Ensure(ctx); err != nil {
+		log.Warn("libvirt AppArmor 放行未完成", "err", err)
+	} else if changed {
+		log.Info("libvirt AppArmor 已放行 NFViS 镜像/VM 路径")
+	}
+
 	// VPP 未运行时降级为告警并持续重连，不阻塞 nfvisd 启动。
 	// M3-8：每次连接成功（首连=启动收敛，重连=VPP 重启重放）触发恢复收敛；
 	// 单个对象失败不阻塞，未收敛项进告警表（FR-OPS-010/011）。
@@ -544,6 +574,12 @@ func run() error {
 					fmt.Sprintf("API 证书将在 %d 天内过期", days), "system")
 			} else {
 				alarms.Resolve("tls", "CERT_EXPIRING", "system")
+			}
+			// 决策 #182：libvirt AppArmor 放行的周期复核（幂等）——覆盖「nfvisd 起来之后才装 libvirt」。
+			if changed, err := aaMgr.Ensure(cctx); err != nil {
+				log.Warn("libvirt AppArmor 放行未完成", "err", err)
+			} else if changed {
+				log.Info("libvirt AppArmor 已放行 NFViS 镜像/VM 路径")
 			}
 		}
 		check()
