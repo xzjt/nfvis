@@ -29,7 +29,7 @@ EXPECT_VPP=${NFVIS_EXPECT_VPP:-26.06}
 
 PAYLOAD=${NFVIS_PAYLOAD:-$(cd "$(dirname "$0")" && pwd)}
 ASSUME_YES=0; DO_START=1; DO_INSTALL=1; KEEP=0; ADMIN_PW=""
-CLI_PW=""; OTP=""; PW_SRC=""
+CLI_PW=""; OTP=""; PW_SRC=""; PW_CONFIRMED=0
 NFVIS_DB=${NFVIS_DB:-/var/lib/nfvis/nfvis.db}
 FRESH_DB=1 # 配置库尚不存在 = 首次引导（--admin-password 与一次性口令都只在这种情况下出现）
 
@@ -308,8 +308,13 @@ run_checks() {
         bad "内核启动基线片段缺失（大页/隔离核无法生效）"
     fi
     for p in 1048576 2048; do
-        local f=/sys/kernel/mm/hugepages/hugepages-${p}kB/nr_hugepages
-        [ -r "$f" ] && info "$((p / 1024))M 大页池：$(cat "$f") 页（free $(cat /sys/kernel/mm/hugepages/hugepages-${p}kB/free_hugepages 2>/dev/null)）"
+        local f=/sys/kernel/mm/hugepages/hugepages-${p}kB/nr_hugepages label
+        case "$p" in
+            1048576) label=1G ;;
+            2048) label=2M ;;
+            *) label="${p}K" ;;
+        esac
+        [ -r "$f" ] && info "$label 大页池：$(cat "$f") 页（free $(cat /sys/kernel/mm/hugepages/hugepages-${p}kB/free_hugepages 2>/dev/null)）"
     done
 
     # nfvis 自己的读物：需要口令，取不到就如实记不可判定（绝不把"没测到"算通过）
@@ -344,9 +349,11 @@ run_checks() {
     fi
     if [ -n "$want" ] && printf '%s' "$out" | grep -q "$want"; then
         ok "CLI show version：$want（经 nfvisd 的 API 通路，口令取自$PW_SRC）"
+        PW_CONFIRMED=1
     else
         info "CLI show version 输出未含期望版本（$want），原文：$(printf '%s' "$out" | head -2 | tr '\n' ' ')"
-        ok "CLI 可用（show version 有应答）"
+        ok "CLI 可用（show version 有应答，口令取自$PW_SRC）"
+        PW_CONFIRMED=1
     fi
     out=$(cli nfvis-cli "$CLI_PW" "show vpp")
     if cli_is_err "$out"; then
@@ -364,10 +371,16 @@ summary() {
     hdr "结果"
     local admin_note=""
     if [ "$DO_INSTALL" = 1 ]; then
-        if [ -n "$ADMIN_PW" ]; then
+        if [ -n "$ADMIN_PW" ] && [ "$FRESH_DB" = 1 ]; then
             admin_note="admin 口令：按 --admin-password 预置（请尽快改：nfvis-cli 登录后 request system password change）"
         elif [ -n "$OTP" ]; then
-            admin_note="admin 口令（首次启动的一次性口令，仅此一处）：$OTP"
+            if [ "$FRESH_DB" = 1 ]; then
+                admin_note="admin 口令（首次启动的一次性口令，仅此一处）：$OTP"
+            elif [ "$PW_CONFIRMED" = 1 ]; then
+                admin_note="既有 admin 口令（取自日志，本次已用它登录 CLI 验证）：$OTP"
+            else
+                admin_note="日志里最近的一次性口令是 $OTP（本次未验证；若口令已改过，请以你手上的为准）"
+            fi
         fi
     fi
     [ -n "$admin_note" ] && printf '%s\n' "$admin_note"
