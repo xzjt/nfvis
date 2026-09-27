@@ -16,13 +16,24 @@
   `request system api tls`（M5-8）、`monitor vnf`（**决策 #92 把「只执行一次快照」改成真跟踪**）均已接；
   仅余两条**明确延期 V2**：`request system storage format-data`、`request system password change`（原因见决策 #65）。
   **T0-5（快照磁盘内容级回滚）已于 V1 收尾第七轮完成**（决策 #75）。
+- **round85（离线一键安装包）**：新增交付形态 `nfvis-vX.Y.Z.run`——自解压单文件（头部 shell + gzip 载荷），
+  内含产品 deb + VPP 26.06 的 9 个 deb + apt 递归闭包（实测 238 个，171 MB），在**无外网**的干净 Ubuntu 26.04 上
+  一步装齐并起服务，收尾做 18 项带独立事实源的自检（失败即非零退出）。构建端：`contrib/scripts/offline-closure.sh`
+  （抓闭包 + 离线自洽校验）、`build-offline-run.sh`（可复现打包，两打逐字节一致）、`offline-installer-selftest.sh`
+  （产物结构校验 + 两处工具自校准）；包内安装器 `deploy/offline/install.sh`。本轮修的两条缺陷：
+  **#181** #159 的 AppArmor 放行块写在 `exit 0` 之后（死代码，装机报成功而 VNF 起不来）、
+  **#182** 放行改由 nfvisd 单源保证（`internal/system/apparmor.go` + `nfvisd -ensure-libvirt-apparmor` +
+  启动/60s 巡检复核）——因为 libvirt 可能晚于 nfvis 装载或在同一次 apt 事务里被后配置。
+  ⚠️ **干净快照基线更正**：快照本身**没有 make/go**（只有 git、dpkg-deb、curl、chrony、tcpdump），
+  故 `.run`/deb 的构建必须在有工具链的机器上做；`.run` 安装端**不需要**任何构建工具。
 - M4 验收现状（`docs/M4-验收记录.md`）：M4-1~M4-11 真机通过（`make integration` 全绿）；M4-12 CLI 侧命令真机冒烟通过
   （show/request/delete 交互确认/console ticket/审计/动态候选）。**已知环境限制**：SR-IOV 无 PF/VF 未真机验证；
   容器侧 memif 通流未验（离线无自带 memif 的容器镜像）。
 - M3 验收现状（`docs/M3-人工演示记录.md`）：D1/D2/D3/D6/D8 真机通过；**D4 NAT 已在本轮 M5 补齐并真机端到端通过**
   （决策 #52 跨 VRF：inside=virtual-switch 的 VRF、outside=出接口所属 VRF，VPP 单实例仅一对）；**D5 SPAN 抓包已在 T0-7 实证通过**；
   D7 LLDP 仍环境受限（无对端），启用与命令均正常、M3 的 internal error 未复现。
-- 验证环境 nfvis-vm 当前状态（**2026-09-19 两度被恢复为干净快照**；快照恢复会清掉全部现场，
+- 验证环境 nfvis-vm 当前状态（**2026-09-27 round85 又恢复过一次干净快照**，此后按 round85 流程重装并配置；
+  快照恢复会清掉全部现场，
   重建路径见 `docs/evidence/v1-closeout-round32-install-iso.txt` §4e——该轮的 ISO 交付已按决策 #111 废除，
   文档仅作历史记录）：
   系统 Ubuntu Server 26.04.1 + **USTC 源**（aliyun 实测几乎不可用，勿切回）；构建工具按需装齐
@@ -33,19 +44,22 @@
   全家族反推（回放自校验），已发布，证据 `docs/evidence/v1-closeout-round81-cli-junos-runtime-displayset.txt`；
   round80 基线见 `docs/evidence/v1-closeout-round80-cli-web-fulltest-and-release-1.1.34.txt`，
   三件套复跑仍以 `docs/evidence/v1-closeout-round36-three-suites.txt` 为准）：
-  nfvis **1.1.46** active（**已发布 v1.1.46**＝决策 #179：删 VRF 的「假成功」——接口仍绑表时删表返回 0 却不生效导致空表滞留；先解绑再删表 + 删后读回校验；v1.1.45＝#178；＝决策 #178：静态路由的 apply 撤销缺口（`plan()` 补 `del-route`，同族 del-vrf/del-bond 的最后一处）；v1.1.44＝#177；＝决策 #177：`show nat` 会话改按用户 dump 汇总（此前恒报「无 NAT 会话」，实为取错事实）；v1.1.43＝#175/#176；＝决策 #175/#176：NAT 地址池的 tenant VRF 改取 inside 转发域（跨 VRF 带 source-pool 的 NAT 因此可用）+ `delete nat rules <seq> <叶子>` 只清叶子、空 `nat` 空壳回收；v1.1.42＝#172~#174；＝决策 #172~#174：VNF 的 vNIC 可作 L3 接口（guest 网关落在自己口上）+ NAT inside 覆盖 vNIC / VPP 重连按配置重建登记 / NAT 下发幂等 + 池带转发域 VRF——**「VNF 经 NFViS NAT ping 通 Windows 宿主」端到端打通**；v1.1.41＝#170/#171；＝决策 #170/#171：删 bond 的运行态撤销缺口 + **VNF 侧 vNIC 声明从未把 vhost 口挂进 bridge domain**（两条声明不等价、相关分支是死代码——round84「VNF guest 连通性未达」的真因，修后真机 ping 5/5 0%）；v1.1.40＝决策 #161~#169：非交互确认假成功 + 物理口多角色并存致数据面静默失效 + CLI 删 L3 交换机留 VRF 等九条；v1.1.39＝#159/#160；＝决策 #159 首装 AppArmor/快照 raw 排除 + #160 容器镜像命名闭环；v1.1.38＝#158 delete 反向写入、v1.1.37＝#157 多字节输入、v1.1.36＝#156 console TLS、v1.1.35＝#155 JunOS 化第一批；均回下载 sha256 一致）；
+  nfvis **1.1.47** active（**本轮已真机验证、尚未发布**＝决策 #180~#182 的离线一键安装包（见下）；v1.1.46＝#179 已发布：删 VRF 的「假成功」——接口仍绑表时删表返回 0 却不生效导致空表滞留；先解绑再删表 + 删后读回校验；v1.1.45＝#178；＝决策 #178：静态路由的 apply 撤销缺口（`plan()` 补 `del-route`，同族 del-vrf/del-bond 的最后一处）；v1.1.44＝#177；＝决策 #177：`show nat` 会话改按用户 dump 汇总（此前恒报「无 NAT 会话」，实为取错事实）；v1.1.43＝#175/#176；＝决策 #175/#176：NAT 地址池的 tenant VRF 改取 inside 转发域（跨 VRF 带 source-pool 的 NAT 因此可用）+ `delete nat rules <seq> <叶子>` 只清叶子、空 `nat` 空壳回收；v1.1.42＝#172~#174；＝决策 #172~#174：VNF 的 vNIC 可作 L3 接口（guest 网关落在自己口上）+ NAT inside 覆盖 vNIC / VPP 重连按配置重建登记 / NAT 下发幂等 + 池带转发域 VRF——**「VNF 经 NFViS NAT ping 通 Windows 宿主」端到端打通**；v1.1.41＝#170/#171；＝决策 #170/#171：删 bond 的运行态撤销缺口 + **VNF 侧 vNIC 声明从未把 vhost 口挂进 bridge domain**（两条声明不等价、相关分支是死代码——round84「VNF guest 连通性未达」的真因，修后真机 ping 5/5 0%）；v1.1.40＝决策 #161~#169：非交互确认假成功 + 物理口多角色并存致数据面静默失效 + CLI 删 L3 交换机留 VRF 等九条；v1.1.39＝#159/#160；＝决策 #159 首装 AppArmor/快照 raw 排除 + #160 容器镜像命名闭环；v1.1.38＝#158 delete 反向写入、v1.1.37＝#157 多字节输入、v1.1.36＝#156 console TLS、v1.1.35＝#155 JunOS 化第一批；均回下载 sha256 一致）；
   **round83 生命周期走查**：干净快照装机上 VNF 全生命周期（含快照回滚）与容器 create/start/stop/delete 已验证，vnf-a running 存续、镜像 debian-12/alpine 双就绪、docker 代理 192.168.155.1:2333（daemon.json）；v1.1.37＝#157 多字节输入、v1.1.36＝#156 console TLS、v1.1.35＝#155 JunOS 化第一批；均回下载 sha256 一致）；
   **2026-09-26 快照恢复后从安装重建**：main `3ac5200` git archive 同步、VM 源码构建（与 Release asset 逐字节一致）；round83 从安装拟人化走查完成，证据 round81 文件 §14；**口令已变：`yaEBXZGjd_5ARJDf@Aa1`**；rev 3；v1.1.36＝#156 console TLS、v1.1.35＝#155 JunOS 化第一批）；
   ⚠️ 快照恢复后须重做：apt 源换回 USTC（aliyun 不可用）、make/golang-1.26/cloud-image-utils/qemu-utils 重装、
   libvirt/docker 按 provision.sh 清单安装（qemu-kvm 在 26.04 无候选）、**alpine.qcow2 与 docker alpine:3.20 未重建**；
-  管理口令 `WBF81vOA4M8GM28f@Aa1`（**随快照恢复而变**，取法见待办 §3.1；
+  管理口令 `LQo79mRLbzhYje8y@Aa1`（**round85 首装时的一次性口令；随快照恢复/重装而变**，取法见待办 §3.1；
   round81 已按哈希比对法核对**匹配**）；
-  VPP 26.06 运行、主堆用 2M 大页、ens192/ens224 交 DPDK；
-  cmdline 含 hugepagesz=1G/2M + isolcpus=2-5 + intel_iommu=on；
-  **vs-vnf 拓扑与 vnf-a/vnf-b 在跑、流量已复通**（BVI→vnf-a ping 5/5 0%；
+  VPP 26.06 运行（`request vpp restart` 拉起，主堆 2M 大页）、ens192/ens224 交 DPDK **且已在配置里声明**
+  （`set interfaces … description` + `set vpp dpdk dev …`；只 bind-dpdk 不声明的话 VPP 里不会出现该口）；
+  cmdline（round85 基线）：`default_hugepagesz=1G hugepagesz=1G hugepages=4 hugepagesz=2M hugepages=768 isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5 irqaffinity=0-1 intel_iommu=on iommu=pt`；资源池 1G=4 / 2M=768，隔离核 2,3,4,5（VPP 占 2/3/4，空 5 给 VNF）；
+  **round85 后现场：无 VNF/容器/交换机**（快照恢复 + 三件套跑完已清理；round84 的 vs-vnf/vnf-a/vnf-b 随恢复消失）；
   vnf-b 的 user-data 与 vnf-a 同址 .11，BVI↔vnf-b 无独立流量口径——历史如此，非本轮引入）；
-  镜像 `debian-12-generic-amd64.qcow2` + `alpine.qcow2`（阶段 3 前置）+ 容器镜像 `alpine:3.20`；
-  配置库 rev 56 / audit 113（round81：真机套件级联在 cli-vm 上留过一次快照/域，已清理；
+  镜像：`alpine.qcow2`（阶段 3 前置，round85 已放回）+ 容器镜像 `alpine:3.20`（round85 已 `docker load` 放回）；
+  `debian-12-generic-amd64.qcow2` **已随快照恢复丢失**（跑 `make integration` 前需重新准备）；
+  配置库 rev 40+ / audit 若干（round85 的三件套会自己建删对象；套件**重复运行**会因「值未变化」报空操作失败，
+  这是套件头部写明的口径，重跑前把上轮对象/镜像注册清掉、把 ens224 置回 enable、并确认 docker 镜像还在），
   `request interfaces ens224 enable` 走一次性事务 +1 rev/audit，**内容指纹未变**）；
   `/var/lib/nfvis/tech-support` 0700 + 归档 0600、`/var/lib/nfvis/backup` 0600（决策 #149 口径在既有安装上也生效）；
   **`nodejs` v22.22.1**（round37 装，
@@ -56,7 +70,7 @@
   跑 `make integration` 前需先重建（布局与流程见待办 §3.3 / §0 第 1 条）。
   `ens160` 是管理口（vmxnet3、承载 SSH）——**永不拿管理路径做试验**的红线不变。
   设计基线在 `docs/`，**不要凭记忆重设计**。
-- 已定决策 179 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 182 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。
@@ -108,6 +122,14 @@ grep -rn "待评审\|TBD\|TODO" docs/   # 不允许引入未决标记
 ```bash
 bash contrib/scripts/cli-fulltest.sh        # 「命令能不能用」：256 条契约命令，见 %/%% 即失败
 bash contrib/scripts/cli-semantic-check.sh  # 「结果对不对」：与 VPP/内核/libvirt 独立事实源对照 + 扰动判别
+```
+
+**改了交付/安装路径后**（`deploy/debian/*`、`deploy/offline/`、离线包构建脚本），另跑（Linux + dpkg-deb；`make check`
+已含其中的守护与自校准）：
+
+```bash
+bash contrib/scripts/offline-closure.sh check <deb目录>                      # 依赖闭包自洽（离线可跑）
+bash contrib/scripts/offline-installer-selftest.sh --run build/nfvis-vX.run   # 产物结构：载荷 sha256/索引/清单/版本
 ```
 
 

@@ -170,7 +170,10 @@ postinst 的设计原则是「**校验与提示为主，不阻断安装**」—�
    **升级时不停止**已在运行的 nfvisd（由 postinst 换新版本二进制并 try-restart）；
 9. **libvirt 的 AppArmor 放行**：向 `/etc/apparmor.d/local/usr.lib.libvirt.virt-aa-helper` 幂等追加
    `/var/lib/nfvis/images/** r,` 与 `/var/lib/nfvis/vms/** rk,` 并重载该 profile——Ubuntu 的
-   virt-aa-helper 默认只放行 `/var/lib/libvirt/images`，不放行则 VM 启动被 AppArmor 拒绝（首装实测）。
+   virt-aa-helper 默认只放行 `/var/lib/libvirt/images`，不放行则 VM 启动会被 AppArmor 拒绝（首装实测）。
+   规则由 nfvisd 的同一实现落地（安装脚本调用 `nfvisd -ensure-libvirt-apparmor`），nfvisd **启动时补一次、
+   之后每 60 秒复核一次**：因为 libvirt 可能晚于 nfvis 安装、或与它在同一次 `apt`/`dpkg` 事务里被后配置，
+   那时安装脚本的探测条件还不成立——只靠安装期那一步会在这种顺序下静默漏掉（VM 直到被启动才失败）。
 
 > **基线会自动补全本机参数**：安装期写出的 GRUB 片段除大页外还含按 CPU 厂商自动补的参数
 > （Intel：`intel_iommu=on intel_pstate=disable`；AMD：`amd_iommu=on amd_pstate=disable`；都补 `iommu=pt`）。
