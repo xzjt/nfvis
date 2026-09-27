@@ -29,7 +29,7 @@ EXPECT_VPP=${NFVIS_EXPECT_VPP:-26.06}
 
 PAYLOAD=${NFVIS_PAYLOAD:-$(cd "$(dirname "$0")" && pwd)}
 ASSUME_YES=0; DO_START=1; DO_INSTALL=1; KEEP=0; ADMIN_PW=""
-CLI_PW=""; OTP=""
+CLI_PW=""; OTP=""; PW_SRC=""
 NFVIS_DB=${NFVIS_DB:-/var/lib/nfvis/nfvis.db}
 FRESH_DB=1 # 配置库尚不存在 = 首次引导（--admin-password 与一次性口令都只在这种情况下出现）
 
@@ -313,27 +313,37 @@ run_checks() {
     done
 
     # nfvis 自己的读物：需要口令，取不到就如实记不可判定（绝不把"没测到"算通过）
-    # 口令来源：仅当本次是首次引导（配置库尚不存在）时 --admin-password 才生效；
-    # 升级/重装场景配置库里已有用户，那个口令不适用——此时用日志里的一次性口令，
-    # 取不到就记不可判定，而不是拿一个必然失败的口令去判"失败"（假红同样有害）。
+    # 口令来源与可靠性：
+    #   · 首次引导（配置库尚不存在）：--admin-password 或本次生成的随机一次性口令 —— 可靠，
+    #     此时登录失败是真失败；
+    #   · 升级/重装：配置库里已有用户，那个口令不适用；只能用日志里的**历史**一次性口令试试
+    #     （可能早被改过）—— 因此登录失败记不可判定，不拿它判"失败"（工具假红同样有害）。
+    PW_RELIABLE=0
     if [ -n "$ADMIN_PW" ] && [ "$FRESH_DB" = 1 ]; then
-        CLI_PW="$ADMIN_PW"
-    else
-        sleep 1
-        grab_otp && CLI_PW="$OTP"
-    fi
-    if [ -z "$CLI_PW" ] && [ -n "$ADMIN_PW" ]; then
+        CLI_PW="$ADMIN_PW"; PW_SRC="本次预置的口令"; PW_RELIABLE=1
+    elif grab_otp; then
+        CLI_PW="$OTP"
+        if [ "$FRESH_DB" = 1 ]; then PW_SRC="本次首次启动的一次性口令"; PW_RELIABLE=1
+        else PW_SRC="日志里的历史一次性口令"; fi
+    elif [ -n "$ADMIN_PW" ]; then
+        PW_SRC=""
         info "配置库已存在（升级/重装）：本次未用 --admin-password 做自检，它只对首次引导生效"
     fi
     if [ -z "$CLI_PW" ]; then
-        skip "CLI 经产品路径的读写检查（本机未提供口令且日志中无首次口令）"
+        skip "CLI 经产品路径的读写检查（本机未提供口令且日志中无可用口令）"
         return 0
     fi
     out=$(cli nfvis-cli "$CLI_PW" "show version")
+    if cli_is_err "$out"; then
+        if [ "$PW_RELIABLE" = 1 ]; then
+            bad "CLI show version 报错：$(printf '%s' "$out" | head -2 | tr '\n' ' ')"
+        else
+            skip "CLI 登录未成功（$PW_SRC 可能已过期）：$(printf '%s' "$out" | head -1)"
+        fi
+        return 0
+    fi
     if [ -n "$want" ] && printf '%s' "$out" | grep -q "$want"; then
-        ok "CLI show version：$want（经 nfvisd 的 API 通路）"
-    elif printf '%s' "$out" | grep -qE '^%%|^%[^%]|^%$|^校验失败'; then
-        bad "CLI show version 报错：$(printf '%s' "$out" | head -2 | tr '\n' ' ')"
+        ok "CLI show version：$want（经 nfvisd 的 API 通路，口令取自$PW_SRC）"
     else
         info "CLI show version 输出未含期望版本（$want），原文：$(printf '%s' "$out" | head -2 | tr '\n' ' ')"
         ok "CLI 可用（show version 有应答）"
