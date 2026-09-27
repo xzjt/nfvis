@@ -8,6 +8,7 @@ import (
 
 	"go.fd.io/govpp/api"
 	ifapi "go.fd.io/govpp/binapi/interface"
+	"go.fd.io/govpp/binapi/ip"
 
 	"github.com/xzjt/nfvis/internal/model"
 )
@@ -34,6 +35,11 @@ type fakeL3 struct {
 	// vnfIndexFailOnce 首次解析该接口名时答「不存在」，之后正常：模拟 vNIC 接入路径
 	// 那一轮登记失败（此后接口才可见），恢复收敛的登记重建必须随后把它补回来。
 	vnfIndexFailOnce map[string]bool
+	// tableKeepOnDelete 这些表「删了也不消失」：模拟 VPP 返回 0 却保住表
+	// （R84-29：仍被接口占用时就是这样）。删后读回校验必须据此报未收敛，不得静默成功。
+	tableKeepOnDelete map[uint32]bool
+	// tableDumpErr 读回表存在性（ip_table_dump）失败：把「问不出来」当成「已删掉」同样是假成功。
+	tableDumpErr error
 	// ifaceFailN 前 N 次解析该接口名答「不存在」，之后正常：模拟 VPP 刚重启时接口尚未
 	// 枚举出来——重放那一刻解析不到（ApplyVRF 整条 VRF 因此失败、登记为空），稍后才可见。
 	// 登记重建必须不依赖重放那次是否成功。
@@ -54,7 +60,8 @@ func newFakeL3() *fakeL3 {
 		ifaces: map[string]uint32{"ens192": 1, "ens224": 2}, nextSub: 100, nextBVI: 900,
 		tables: map[uint32]bool{}, v4table: map[uint32]uint32{}, v6table: map[uint32]uint32{},
 		vnfIndexFailOnce: map[string]bool{}, ifaceFailN: map[string]int{},
-		addrs: map[uint32][]string{}, routes: map[uint32][]RouteEntry{},
+		tableKeepOnDelete: map[uint32]bool{},
+		addrs:             map[uint32][]string{}, routes: map[uint32][]RouteEntry{},
 		routes6: map[uint32][]RouteEntry{}, bviBD: map[uint32]uint32{},
 		state: map[uint32]bool{}, cleared: nil,
 	}
@@ -108,16 +115,49 @@ func (f *fakeL3) CreateSubif(req CreateSubifReq) (uint32, error) {
 	return f.nextSub, nil
 }
 
+// IPTableAddDel 镜像 VPP 的**实测**删表语义（R84-29）：仍被接口占用的表删不掉，而 VPP 对此
+// **返回成功**（表项继续留在 `show ip table` 里带 locks:[interface:…]，直到 VPP 重启）。
+// 只信返回码就会「报成功却没做到」，故删除只在无接口占用时真的生效；tableKeepOnDelete
+// 进一步模拟「即使无人占用也没删掉」，供删后校验的失败用例使用。
 func (f *fakeL3) IPTableAddDel(tableID uint32, isIP6, add bool, name string) error {
 	if f.err != nil {
 		return f.err
 	}
 	if add {
 		f.tables[tableID] = true
-	} else {
-		delete(f.tables, tableID)
+		return nil
 	}
+	if f.tableKeepOnDelete[tableID] || f.tableInUse(tableID) {
+		return nil
+	}
+	delete(f.tables, tableID)
 	return nil
+}
+
+// tableInUse 该表是否仍被某个接口占用（v4/v6 任一协议）——VPP 的 locks:[interface:…] 判据。
+func (f *fakeL3) tableInUse(tableID uint32) bool {
+	if tableID == 0 { // 默认表恒定存在，不属可删对象
+		return true
+	}
+	for _, t := range f.v4table {
+		if t == tableID {
+			return true
+		}
+	}
+	for _, t := range f.v6table {
+		if t == tableID {
+			return true
+		}
+	}
+	return false
+}
+
+// IPTableExists 读回表的存在性（ip_table_dump）：删表校验的唯一判据。
+func (f *fakeL3) IPTableExists(tableID uint32, isIP6 bool) (bool, error) {
+	if f.tableDumpErr != nil {
+		return false, f.tableDumpErr
+	}
+	return f.tables[tableID], nil
 }
 
 // SwInterfaceTable 运行态查询（sw_interface_get_table）：v4/v6 分开跟踪，镜像 VPP 语义。
@@ -244,6 +284,10 @@ func (f *fakeL3) BviDelete(swIfIndex uint32) error {
 		return f.err
 	}
 	f.bviGone = append(f.bviGone, swIfIndex)
+	// BVI 接口本身被删掉，它对该表的占用随之消失（否则删专属 VRF 表时会像我一样
+	// 认为「表还被占着」——镜像 VPP：接口没了，locks 也就没了）。
+	delete(f.v4table, swIfIndex)
+	delete(f.v6table, swIfIndex)
 	return nil
 }
 
@@ -615,7 +659,48 @@ func TestL3GovppSwInterfaceTable(t *testing.T) {
 	}
 }
 
-// 删除 VRF 时其 vNIC 登记一并清除（表已不存在，登记不再有意义）。
+// IPTableExists 走 govpp（ip_table_dump）：删表校验靠它读回，故必须按 **table_id + 协议**
+// 一起匹配（同一个 id 在 v4/v6 各有一张表，只按 id 匹配会把「v6 还在」当成「v4 还在」）。
+func TestL3GovppIPTableExists(t *testing.T) {
+	rows := []ip.IPTable{
+		{TableID: 4242, IsIP6: true, Name: "vs-a"},
+		{TableID: 7, IsIP6: false, Name: "vs-b"},
+	}
+	ch := &fakeAPIChannel{multiByReq: func(api.Message) func(api.Message) bool {
+		i := 0
+		return func(msg api.Message) bool {
+			if i >= len(rows) {
+				return false
+			}
+			msg.(*ip.IPTableDetails).Table = rows[i]
+			i++
+			return true
+		}
+	}}
+	c := &govppL3Client{ch: ch}
+	if ok, err := c.IPTableExists(4242, true); err != nil || !ok {
+		t.Fatalf("v6 表 4242 存在，应读回 (true,nil)，实际 (%v,%v)", ok, err)
+	}
+	if ok, err := c.IPTableExists(4242, false); err != nil || ok {
+		t.Fatalf("v4 表 4242 不存在（只有 v6），实际 (%v,%v)", ok, err)
+	}
+	if ok, err := c.IPTableExists(9999, false); err != nil || ok {
+		t.Fatalf("未列出的表应读回不存在，实际 (%v,%v)", ok, err)
+	}
+	if len(ch.sent) != 3 {
+		t.Fatalf("每次读回应下发一个 dump 请求: %d", len(ch.sent))
+	}
+	if _, ok := ch.sent[0].(*ip.IPTableDump); !ok {
+		t.Fatalf("请求类型不符: %T", ch.sent[0])
+	}
+	// dump 出错必须上抛（把「问不出来」当成「已删掉」就是假成功）
+	bad := &fakeAPIChannel{multiErr: func(api.Message) error { return errors.New("boom") }}
+	if _, err := (&govppL3Client{ch: bad}).IPTableExists(4242, false); err == nil {
+		t.Fatal("dump 出错应上抛")
+	}
+}
+
+// 删除 VRF 时其 vNIC 登记一并清除（表已不存在，登记不再有意义），且 vNIC 必须被解绑回默认表。
 func TestL3DeleteVrfClearsVnfAttach(t *testing.T) {
 	f := newFakeL3()
 	f.ifaces["vh-vm-a-eth0"] = 5
@@ -629,6 +714,98 @@ func TestL3DeleteVrfClearsVnfAttach(t *testing.T) {
 	}
 	if got := p.AttachedIfaces("vs-nat"); len(got) != 0 {
 		t.Fatalf("删 VRF 后不得残留 vNIC 登记: %v", got)
+	}
+	if _, ok := p.TableOfIface("vh-vm-a-eth0"); ok {
+		t.Fatal("删 VRF 后不得残留 vNIC 的所属表登记")
+	}
+	if f.v4table[5] != 0 || f.v6table[5] != 0 {
+		t.Fatalf("vNIC 必须随删表解绑回默认表（v4/v6）: %v %v", f.v4table, f.v6table)
+	}
+}
+
+// R84-29：删 VRF 必须**先解绑再删表**，且删后读回核对。假客户端镜像 VPP 实测语义——
+// 表仍被接口占用时 ip_table_add_del(del) 返回成功却不删——故少了解绑这一步，表就留在
+// VPP 里（本用例会以「表没删掉」失败），产品却以为删干净了。
+func TestL3DeleteVrfUnbindsBeforeDelete(t *testing.T) {
+	f := newFakeL3()
+	p := NewL3Provider(f)
+	ctx := context.Background()
+	tid := TableID("vs-l3")
+	if err := p.ApplyVRF(ctx, model.Vrf{Name: "vs-l3",
+		L3Interfaces: []model.L3Interface{{Interface: "ens192", Addresses: []string{"10.99.88.1/24"}}}}); err != nil {
+		t.Fatalf("ApplyVRF: %v", err)
+	}
+	if f.v4table[1] != tid || f.v6table[1] != tid {
+		t.Fatalf("前置：接口应在该表里: %v %v", f.v4table, f.v6table)
+	}
+	if err := p.DeleteVRF(ctx, "vs-l3"); err != nil {
+		t.Fatalf("DeleteVRF: %v", err)
+	}
+	if f.v4table[1] != 0 || f.v6table[1] != 0 {
+		t.Fatalf("接口必须改回默认表（v4/v6 都要）: %v %v", f.v4table, f.v6table)
+	}
+	if f.tables[tid] {
+		t.Fatal("接口解绑后表必须真的从 VPP 消失（只信返回码就会留空表滞留）")
+	}
+	if len(f.addrs[1]) != 0 {
+		t.Fatalf("接口地址应随删 VRF 一并清掉: %v", f.addrs[1])
+	}
+	// 登记清理照旧：转发域成员、按名归属都不许残留
+	if got := p.AttachedIfaces("vs-l3"); len(got) != 0 {
+		t.Fatalf("转发域登记不得残留: %v", got)
+	}
+	if _, ok := p.TableOfIface("ens192"); ok {
+		t.Fatal("接口的所属表登记不得残留")
+	}
+
+	// vlan 子接口（自建，索引与父口不同）同样要解绑：它是独立接口，锁的也是同一张表
+	f2 := newFakeL3()
+	p2 := NewL3Provider(f2)
+	if err := p2.ApplyVRF(ctx, model.Vrf{Name: "vs-vlan", L3Interfaces: []model.L3Interface{
+		{Interface: "ens192", Vlan: 100, Addresses: []string{"10.1.1.1/24"}}}}); err != nil {
+		t.Fatalf("ApplyVRF(vlan): %v", err)
+	}
+	tid2 := TableID("vs-vlan")
+	if err := p2.DeleteVRF(ctx, "vs-vlan"); err != nil {
+		t.Fatalf("DeleteVRF(vlan): %v", err)
+	}
+	if f2.v4table[101] != 0 || f2.v6table[101] != 0 {
+		t.Fatalf("子接口必须改回默认表: %v %v", f2.v4table, f2.v6table)
+	}
+	if f2.tables[tid2] {
+		t.Fatal("子接口解绑后表必须真的消失")
+	}
+}
+
+// R84-29：删后校验失败必须**报错**（按未收敛上报），不得静默成功——这是本缺陷最需要堵住的部分。
+// 两种失败都要覆盖：VPP 返回 0 却没删掉；以及读回查询本身失败（问不出来 ≠ 已删掉）。
+func TestL3DeleteVrfReportsWhenTableSurvives(t *testing.T) {
+	f := newFakeL3()
+	p := NewL3Provider(f)
+	ctx := context.Background()
+	if err := p.ApplyVRF(ctx, model.Vrf{Name: "vs-stuck"}); err != nil {
+		t.Fatalf("ApplyVRF: %v", err)
+	}
+	tid := TableID("vs-stuck")
+	f.tableKeepOnDelete[tid] = true // 模拟 VPP「返回 0 却保住表」
+	err := p.DeleteVRF(ctx, "vs-stuck")
+	if err == nil {
+		t.Fatal("表仍在 VPP 里时必须报错，不得静默成功")
+	}
+	if !errors.Is(err, ErrVrfNotRemoved) {
+		t.Fatalf("错误应可识别为未收敛（供调用方进未收敛清单/告警）: %v", err)
+	}
+	if !strings.Contains(err.Error(), "vs-stuck") {
+		t.Fatalf("错误文案应指出是哪台交换机: %v", err)
+	}
+
+	// 读回查询失败：不得当成「表已删」（把「问不出来」当成功同样是假成功）
+	f2 := newFakeL3()
+	f2.tableDumpErr = errors.New("dump 超时")
+	if err := NewL3Provider(f2).DeleteVRF(ctx, "vs-q"); err == nil {
+		t.Fatal("读回失败时应上抛，不得假定表已删")
+	} else if !strings.Contains(err.Error(), "dump 超时") {
+		t.Fatalf("错误应带上读回失败的原因: %v", err)
 	}
 }
 

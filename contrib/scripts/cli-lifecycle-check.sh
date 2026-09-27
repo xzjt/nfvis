@@ -15,8 +15,12 @@
 # 才可能拿到正向控制，故重启放最后（跑完机器也停在收敛态）：
 #   L1 删对象后回读：建 L3 交换机（含 L3 接口地址与静态路由）+ bond + 端口镜像会话
 #                    → 逐个删除 → 断言配置与建之前逐字段一致、运行态无残留、BD 成员还原。
-#                    判据细节：VPP **表条目本身**删不掉（没有删除表的接口），故「表还在」只登记；
-#                    但「本对象声明的静态路由仍留在表里」是产品可控的撤销项，判失败。
+#                    判据细节：接口仍绑着表时 VPP 对删表**返回成功却不删**（该表继续留在
+#                    `show ip table` 里带 locks:[interface:…]，直到 VPP 重启），故「表还在」
+#                    不再是登记项而是**断言**：删 L3 交换机 + commit 后该表（v4/v6 两张）必须从
+#                    `show ip table` / `show ip6 table` 消失、该口必须回到默认表（地址行不带
+#                    非默认 table-id）。
+#                    本对象声明的静态路由仍留在表里同样是失败项（产品可控的撤销项）。
 #                    端口镜像那项需要两个自由口（源口 + 分析口），本机只有一个时如实跳过。
 #   L3 组合能力：VNF 的 vNIC 是否真的接进它声明的交换机（L2 看 BD 成员、L3 看它属于哪张表），
 #                    并用 ping 该转发域里的主机（对端取自邻居表）作正向控制；NAT 会话与 VPP 会话表对账。
@@ -97,6 +101,9 @@ vpp_neighbors() {  # 邻居表 → 「IP MAC 接口名」
 }
 vpp_peer_ip()     { vpp_neighbors | awk -v i="$1" '$3 == i {print $1; exit}'; }
 vpp_table_id_of() { vppctl show ip table 2>/dev/null | tr -d '\r' | awk -v n="$1" '$NF == n {gsub("table_id:", "", $2); print $2; exit}'; }
+# v6 表要单独读（VPP 的 `show ip table` 只列 IPv4，`show ip6 table` 才是 v6 视图）：
+# v4/v6 两张表都要真的删掉，只看 v4 会漏掉 v6 的残留。
+vpp_table_id_of6() { vppctl show ip6 table 2>/dev/null | tr -d '\r' | awk -v n="$1" '$NF == n {gsub("table_id:", "", $2); print $2; exit}'; }
 vpp_tables()      { vppctl show ip table 2>/dev/null | tr -d '\r' | awk '/table_id:/ {print $NF}' | sort; }
 vpp_nat_ifaces()  { vppctl show nat44 ei interfaces 2>/dev/null | tr -d '\r' | awk 'NF >= 2 && $NF ~ /^(in|out)$/ {print $1, $NF}' | sort; }
 vpp_nat_sessions(){ vppctl show nat44 ei sessions detail 2>/dev/null | tr -d '\r' | awk '/^-+ thread/ {for (i=1;i<=NF;i++) if ($i=="sessions") s+=$(i-1)} END {print s+0}'; }
@@ -222,19 +229,32 @@ commit")
       else
         ok "L1-1 删除后 $P1 在 VPP 里的 L3 地址已撤"
       fi
-      # 运行态残留：表条目本身删不掉（VPP 没有删除表的接口），故**表存在只登记**；
-      # 但「本对象声明的静态路由还留在表里」是产品可控项（路由可逐条撤销），判失败。
-      rid=$(vpp_table_id_of "$V3")
-      if [ -n "$rid" ]; then
-        note "VPP 里仍留表条目 $V3（table_id=$rid）——VPP 无删除表的接口，本项不判失败，仅登记"
-        if vppctl show ip fib table "$rid" 2>/dev/null | tr -d '\r' | grep -qF "$ROUTE3"; then
-          exp_act "该对象声明的 $ROUTE3 随对象一起从 VPP 表内撤销" "仍在 $V3 的表里"
-          bad "L1-1 删除后数据面仍留着该对象声明的静态路由（撤销缺口）"
-        else
-          ok "L1-1 数据面里该对象声明的静态路由已撤销"
-        fi
+      # 运行态残留（R84-29）：产品必须**先解绑再删表**——接口仍绑着表时 VPP 的
+      # ip_table_add_del(del) 返回成功却不删（表项继续留在 show ip table 里带
+      # locks:[interface:…]，直到 VPP 重启），只信返回码就是「报成功却没做到」。
+      # 故这里按断言判定（此前是登记）：表不得再出现，且该口不得再带非默认 table-id。
+      rid=$(vpp_table_id_of "$V3"); rid6=$(vpp_table_id_of6 "$V3")
+      if [ -n "$rid" ] || [ -n "$rid6" ]; then
+        exp_act "$V3 的表从 show ip table / show ip6 table 消失" "IPv4 ${rid:-已消失} ｜ IPv6 ${rid6:-已消失}"
+        [ -n "$rid" ] && note "残留 IPv4 表的 VPP 详情：$(vppctl show ip fib table "$rid" 2>/dev/null | tr -d '\r' | head -1)"
+        bad "L1-1 删除后 VPP 里仍留着 $V3 的空表（删表未生效——接口未解绑时 VPP 返回成功却不删）"
       else
-        ok "L1-1 数据面里连表条目都不剩（比我以为的更干净）"
+        ok "L1-1 删除后 v4/v6 两张表都已从 VPP 消失（解绑→删表确实生效，不再是空表滞留）"
+      fi
+      # 旁证：「回到默认表」的直接体现是接口所属的表——有地址时地址行会打印 table-id，
+      # 无地址的口 VPP 不打印该字段，故与上一条（表已消失）合起来作判据，不单独立论。
+      pl3=$(vpp_if_l3 "$P1")
+      if printf '%s' "$pl3" | grep -q 'table-id [1-9]'; then
+        exp_act "$P1 回到默认表（地址行不带非默认 table-id）" "$pl3"
+        bad "L1-1 删除后 $P1 仍绑在非默认表里（该口没解绑）"
+      else
+        ok "L1-1 删除后 $P1 已回到默认表（地址行无非默认 table-id：${pl3:-该口已无 L3 地址}）"
+      fi
+      if [ -n "$rid" ] && vppctl show ip fib table "$rid" 2>/dev/null | tr -d '\r' | grep -qF "$ROUTE3"; then
+        exp_act "该对象声明的 $ROUTE3 随对象一起从 VPP 表内撤销" "仍在 $V3 的表里"
+        bad "L1-1 删除后数据面仍留着该对象声明的静态路由（撤销缺口）"
+      else
+        ok "L1-1 数据面里该对象声明的静态路由已撤销"
       fi
     else
       exp_act "配置条目≥1、VPP 有表、$P1 的地址在那张表里" "配置 $c1 ｜ 表 ${tid:-无} ｜ 地址行 ${l3:-无}"

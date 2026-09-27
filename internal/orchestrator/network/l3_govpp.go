@@ -71,6 +71,28 @@ func (g *govppL3Client) IPTableAddDel(tableID uint32, isIP6, add bool, name stri
 	return nil
 }
 
+// IPTableExists 读回该协议下 tableID 是否存在（全量 ip_table_dump 后按 table_id + 协议匹配）。
+//
+// 删表校验专用：VPP 的 ip_table_add_del(del) 在表仍被接口占用时返回 0 却不删，
+// 只信返回码（或只信 CLI/配置侧回读）就会「报成功却没做到」。同一个 table_id 在 v4/v6
+// 各有一张表，故必须连协议一起匹配。
+func (g *govppL3Client) IPTableExists(tableID uint32, isIP6 bool) (bool, error) {
+	reqCtx := g.ch.SendMultiRequest(&ip.IPTableDump{})
+	for {
+		d := &ip.IPTableDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return false, err
+		}
+		if stop {
+			return false, nil
+		}
+		if d.Table.TableID == tableID && d.Table.IsIP6 == isIP6 {
+			return true, nil
+		}
+	}
+}
+
 // SwInterfaceTable 查接口运行态当前所属表（供 SetVnfTable 判断是否需要下发置表：
 // VPP 只允许无地址的接口换表，带了地址的口重复下发会报 -114）。
 func (g *govppL3Client) SwInterfaceTable(swIfIndex uint32, isIP6 bool) (uint32, bool, error) {
