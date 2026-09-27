@@ -13,6 +13,14 @@
 # 用法：bash contrib/scripts/cli-semantic-selftest.sh
 # 红-绿验证本自校准自身：SEM_SCRIPT=<改了 oracle 的副本> bash contrib/scripts/cli-semantic-selftest.sh
 #   —— 喂「旧实现」必须报 ✗（证明这些断言真的在判别，不是恒绿）。
+#
+# 扩展（2026-09-26，round84 复盘的「测试盲区」）：S8/S9 的**判定函数**也纳入自校准。
+# 这两项此前是**假绿来源**——S8「两边都空也算一致」、S9「诊断，不计失败」，于是环境里没对象/没流量时
+# 永远绿，「没有证据」被当成「通过」。新判据把结果分三档（PASS / FAIL / UNKNOWN），
+# 于是自校准必须钉住两件事：① 空结果**不得**判 PASS（旧行为必须报 ✗）；
+# ② 一侧非空另一侧为空**必须**判 FAIL。改判定后请照下面两条手工验证一次：
+#   · 把 s8_verdict 的 nomember/nopeer 分支改回「printf PASS」（旧行为），本脚本必须报 ✗
+#   · 把 s9_verdict 的两侧都空分支改回「printf PASS」（旧行为），本脚本必须报 ✗
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 SCRIPT=${SEM_SCRIPT:-$HERE/cli-semantic-check.sh}
@@ -26,7 +34,7 @@ extract() {
   ' "$SCRIPT"
 }
 
-ORACLES=$(for f in vpp_bd_ids vpp_bd_tag vpp_l2fib_count vpp_bd_index_of_tag; do
+ORACLES=$(for f in vpp_bd_ids vpp_bd_tag vpp_l2fib_count vpp_bd_index_of_tag vpp_ifaces vpp_bd_members s8_verdict s9_verdict; do
   body=$(extract "$f")
   [ -z "$body" ] && { echo "✗ 抽不到函数 $f（脚本改名了？）" >&2; exit 1; }
   printf '%s\n' "$body"
@@ -36,12 +44,13 @@ eval "$ORACLES"
 
 CR=$'\r'
 # ---- 桩 vppctl：按子命令返回各用例设定的合成输出 ----
-STUB_BD=""; STUB_BD_DETAIL=""; STUB_L2FIB=""
+STUB_BD=""; STUB_BD_DETAIL=""; STUB_L2FIB=""; STUB_IFACES=""
 vppctl() {
   case "$*" in
     "show bridge-domain")        printf '%s\n' "$STUB_BD" ;;
     "show bridge-domain "*)      printf '%s\n' "$STUB_BD_DETAIL" ;;
     "show l2fib verbose")        printf '%s\n' "$STUB_L2FIB" ;;
+    "show interface")            printf '%s\n' "$STUB_IFACES" ;;
     *)                           printf '' ;;
   esac
 }
@@ -89,6 +98,75 @@ eq "vpp_bd_tag 剥 CR 后可精确比较" "vs-vnf" "$(vpp_bd_tag 6252701)"
 STUB_BD=""
 STUB_BD_DETAIL=""
 eq "无 BD → 空（不误报）" "" "$(vpp_bd_index_of_tag vs-vnf)"
+
+echo "— BD 成员表：首列接口名 + 次列数字才算成员行（无成员时段落整块不打印）—"
+# 成员行的判据是「接口名在 VPP 接口集合里」——表头列宽会随版本变，接口名集合才是稳定锚点。
+STUB_IFACES="              Name               Idx    State  MTU (L3/IP4/IP6/MPLS)     Counter          Count     ${CR}
+ens192                            1      up          9000/0/0/0     rx packets                   189${CR}
+ens224                            2      up          9000/0/0/0     rx packets                   579${CR}
+vh-vnf-dhcp-eth0                  3      up          9000/0/0/0     rx packets                   909${CR}
+local0                            0      down          0/0/0/0     ${CR}"
+STUB_BD_DETAIL="$STUB_BD${CR}
+           Interface           If-idx ISN  SHG  BVI  TxFlood        VLAN-Tag-Rewrite       ${CR}
+            ens192               1     1    0    -      *                 none             ${CR}
+            vh-vnf-dhcp-eth0     3     1    0    -      *                 none             ${CR}
+
+  BD-Tag: vs-vnf${CR}"
+eq "两个成员 → 取到 ens192 与 vhost 口（表头行不算成员）" "ens192 vh-vnf-dhcp-eth0" "$(vpp_bd_members 1 | tr '\n' ' ' | sed 's/ $//')"
+eq "vpp_ifaces 排除 local0、保留 vhost 口" "ens192 ens224 vh-vnf-dhcp-eth0" "$(vpp_ifaces | tr '\n' ' ' | sed 's/ $//')"
+STUB_BD_DETAIL="$STUB_BD${CR}
+           Interface           If-idx ISN  SHG  BVI  TxFlood        VLAN-Tag-Rewrite       ${CR}
+            ens999               9     1    0    -      *                 none             ${CR}
+
+  BD-Tag: vs-vnf${CR}"
+eq "成员行里的名字不在 VPP 接口集合 → 不认（防表头/垃圾行误判）" "" "$(vpp_bd_members 1)"
+STUB_BD_DETAIL="$STUB_BD${CR}
+
+  BD-Tag: vs-l2${CR}"
+eq "无成员（成员表整块不打印）→ 空集合，不报错" "" "$(vpp_bd_members 1)"
+
+echo "— 接口名集合：只认行首无缩进的行（计数续行是缩进的，第 2 列同样是数字）—"
+# VPP 把 rx/tx/drops/ip4 计数续行缩进打印，那些行的第 2 列也是数字——只按「第 2 列是数字」筛，
+# 集合里会混进 drops/ip4 这类垃圾（2026-09-26 真机实测：S1 因此把 drops/ip4/ip6 当成「期望的接口」→ 假红）。
+STUB_IFACES="              Name               Idx    State  MTU (L3/IP4/IP6/MPLS)     Counter          Count     ${CR}
+ens192                            1      up          9000/0/0/0     rx packets                   189${CR}
+                                                                   rx bytes                   19271${CR}
+                                                                   drops                        189${CR}
+                                                                   ip4                           85${CR}
+ens224                            2      up          9000/0/0/0     tx packets                   400${CR}
+                                                                   ip4                          438${CR}
+vh-vnf-dhcp-eth0                  3      up          9000/0/0/0     rx packets                   909${CR}
+                                                                   ip4                          634${CR}
+local0                            0      down          0/0/0/0     ${CR}"
+eq "接口名只取行首无缩进的行（缩进的 drops/ip4 续行不算）" "ens192 ens224 vh-vnf-dhcp-eth0" "$(vpp_ifaces | tr '\n' ' ' | sed 's/ $//')"
+STUB_BD_DETAIL="$STUB_BD${CR}
+           Interface           If-idx ISN  SHG  BVI  TxFlood        VLAN-Tag-Rewrite       ${CR}
+            ens192               1     1    0    -      *                 none             ${CR}
+            vh-vnf-dhcp-eth0     3     1    0    -      *                 none             ${CR}
+
+  BD-Tag: vs-vnf${CR}"
+eq "同一份输出下 BD 成员判断不受计数续行污染" "ens192 vh-vnf-dhcp-eth0" "$(vpp_bd_members 1 | tr '\n' ' ' | sed 's/ $//')"
+
+echo "— S8 判定：空结果不再算通过；有正控才判，且必须真学到该对端 MAC —"
+eqv() { # eqv <期望档> <说明> <判定输出>
+  local want="$1" desc="$2" got="${3%%:*}" msg="${3#*:}"
+  if [ "$got" = "$want" ]; then printf '  ✓ %-52s → %s（%s）\n' "$desc" "$got" "$msg"
+  else printf '  ✗ %-52s → 期望 %s 实际 %s（%s）\n' "$desc" "$want" "$got" "$msg"; RC=1; fi
+}
+eqv UNKNOWN "两侧都空、无正控 → 不可判定（旧行为此处判 PASS）" "$(s8_verdict 0 0 nomember no)"
+eqv UNKNOWN "有成员但无可 ping 对端 → 不可判定" "$(s8_verdict 0 0 nopeer no)"
+eqv UNKNOWN "ping 0 发包 → 不可判定（流量没发出去）" "$(s8_verdict 0 0 noflow no)"
+eqv PASS    "有正控、条数一致、该对端 MAC 已学到 → 通过" "$(s8_verdict 3 3 learned yes)"
+eqv FAIL    "有正控但事实源 0 条（学不到）→ 失败" "$(s8_verdict 0 0 learned no)"
+eqv FAIL    "有正控但学到的不是该对端 MAC → 失败" "$(s8_verdict 2 2 learned no)"
+eqv FAIL    "有正控但条数不一致 → 失败" "$(s8_verdict 1 4 learned yes)"
+
+echo "— S9 判定：一侧非空另一侧为空即失败；两侧都空=不可判定 —"
+eqv UNKNOWN "两侧都空 → 不可判定（旧行为此处静默通过）" "$(s9_verdict 'libvirt 域' '' 'CLI 视图' '')"
+eqv FAIL    "事实源有对象、CLI 视图为空 → 失败" "$(s9_verdict 'libvirt 域' 'vnf-a vnf-b' 'CLI 视图' '')"
+eqv FAIL    "反向：CLI 有对象、事实源为空 → 失败" "$(s9_verdict 'Docker 容器' '' 'CLI 视图' 'ct-a')"
+eqv PASS    "两侧非空且一致（顺序不同也算一致）→ 通过" "$(s9_verdict 'libvirt 域' 'vnf-a vnf-b' 'CLI 视图' 'vnf-b vnf-a')"
+eqv FAIL    "两侧非空但 CLI 少一个 → 失败（并点名缺谁）" "$(s9_verdict 'libvirt 域' 'vnf-a vnf-b' 'CLI 视图' 'vnf-a')"
 
 if [ $RC -eq 0 ]; then echo "全部符合预期"; else echo "有不符合预期的用例"; fi
 exit $RC
