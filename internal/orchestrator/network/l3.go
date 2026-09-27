@@ -33,6 +33,9 @@ type L3Client interface {
 	SwInterfaceTable(swIfIndex uint32, isIP6 bool) (uint32, bool, error)
 	CreateSubif(req CreateSubifReq) (uint32, error)
 	IPTableAddDel(tableID uint32, isIPv6, add bool, name string) error
+	// IPTableExists 读回该协议下 tableID 是否存在（ip_table_dump）。删表校验的唯一判据：
+	// ip_table_add_del(del) 在表仍被接口占用时**返回 0 却不删**，返回码不足以判断是否真删掉了。
+	IPTableExists(tableID uint32, isIP6 bool) (bool, error)
 	SwInterfaceSetTable(swIfIndex uint32, isIPv6 bool, tableID uint32) error
 	SwInterfaceAddDelAddress(swIfIndex uint32, prefix string, add, delAll bool) error
 	IPRouteAddDel(tableID uint32, prefix, nextHop string, add bool) error
@@ -315,9 +318,9 @@ func (p *L3Provider) ApplyRoute(ctx context.Context, vrfName string, r model.Rou
 
 // DeleteRoute 撤销一条静态路由（**声明里已不再有的路由必须从 FIB 撤走**）。
 //
-// 为什么不能让 ApplyVRF/DeleteVRF 代劳：ApplyVRF 只下发声明里的路由（只加不撤），
-// 而 DeleteVRF 依赖删表——VPP 会保住仍被接口占用的表（`show ip table` 里该项带
-// locks:[interface:…]），路由随之长期留在 FIB 里而配置、show 输出全绿（真机实测）。
+// 为什么不能让 ApplyVRF/DeleteVRF 代劳：ApplyVRF 只下发声明里的路由（只加不撤），而
+// DeleteVRF 只在整台 L3 交换机被删时才调用——「同名 VRF 仍在声明里、只去掉一条路由」
+// 走不到它，缺口下路由会长期留在 FIB 里，而配置与 show 输出全绿（真机实测）。
 // 表不存在时本条为「已达成」：路由本就无处可留。
 func (p *L3Provider) DeleteRoute(ctx context.Context, vrfName string, r model.Route) error {
 	return p.routeAddDel(ctx, vrfName, r, false)
@@ -351,7 +354,23 @@ func (p *L3Provider) TableOfIface(ifname string) (uint32, bool) {
 	return t, ok
 }
 
-// DeleteVRF 删除 VRF：清接口地址、删 v4/v6 table（路由随表删除）。
+// ErrVrfNotRemoved 删表后读回发现表仍在 VPP 里：按「未收敛」上报，调用方据此进未收敛清单/告警。
+//
+// 触发条件是 VPP 在表仍被接口占用时对 ip_table_add_del(del) **返回 0 却不真删**
+// （`show ip table` 里该项继续带 locks:[interface:…]，直到 VPP 重启才消失）。
+var ErrVrfNotRemoved = errors.New("VRF 对应的 IP 表删除后仍存在于 VPP（未收敛）")
+
+// DeleteVRF 删除 VRF：清接口地址 → 解绑接口回默认表 → 删 v4/v6 table（路由随表删除）→ 读回核对。
+//
+// 解绑与删后读回都是 R84-29 补上的必需步骤：VPP 的 ip_table_add_del(del) 在表仍被接口
+// 占用时**返回 0 但实际不删**（表项继续留在 `show ip table` 里带 locks:[interface:…]，
+// 界面与配置侧全干净），只信返回码就是「报成功却没做到」——空表滞留还会与「残留声明重建
+// 的表」混在一起误判。故：
+//  1. 先把该表里的接口逐一改回默认表（v4/v6 都要），失败即中止且**保留**登记，重试可重来；
+//  2. 删表后 dump 读回，确认表确实不存在，否则按未收敛报错，不静默成功。
+//
+// 登记清理（ifaces/subifs/ifaceTable/ifaceIdx/vnfs）落在解绑之后：解绑要按 ifaces 取索引清单，
+// 提前清掉就再也不知道哪些口还绑着该表。
 func (p *L3Provider) DeleteVRF(ctx context.Context, name string) error {
 	c, err := p.client()
 	if err != nil {
@@ -361,21 +380,8 @@ func (p *L3Provider) DeleteVRF(ctx context.Context, name string) error {
 	tableID := TableID(name)
 	p.mu.Lock()
 	idxs, subs := p.ifaces[tableID], p.subifs[tableID]
-	delete(p.ifaces, tableID)
-	delete(p.subifs, tableID)
-	for k, t := range p.ifaceTable {
-		if t == tableID {
-			delete(p.ifaceTable, k)
-			delete(p.ifaceIdx, k)
-		}
-	}
-	// 置入该表的 vNIC 登记一并摘除（表已删，登记不再有意义；重新声明时 ApplyVRF/SetVnfTable 重建）。
-	for k, a := range p.vnfs {
-		if a.tableID == tableID {
-			delete(p.vnfs, k)
-		}
-	}
 	p.mu.Unlock()
+	// 先清地址：VPP 拒绝把仍带地址的接口移到其它表（-114），与 ApplyVRF 同一前置。
 	for _, idx := range idxs {
 		if err := c.SwInterfaceAddDelAddress(idx, "", false, true); err != nil {
 			return fmt.Errorf("清理接口 %d 地址: %w", idx, err)
@@ -386,12 +392,68 @@ func (p *L3Provider) DeleteVRF(ctx context.Context, name string) error {
 			return fmt.Errorf("清理子接口 %d 地址: %w", sub, err)
 		}
 	}
+	// 先解绑、再删表：接口还绑着该表时删表不生效（VPP 返回 0 却保住表）。子接口通常在
+	// ifaces 里已有一份，去重由 unbindTableIfaces 负责。
+	if err := p.unbindTableIfaces(c, append(append([]uint32{}, idxs...), subs...)); err != nil {
+		return err
+	}
+	p.forgetTable(tableID)
 	for _, ip6 := range []bool{false, true} {
 		if err := c.IPTableAddDel(tableID, ip6, false, name); err != nil {
 			return fmt.Errorf("删 IP table %d: %w", tableID, err)
 		}
 	}
+	// 删后校验（返回 0 不等于删掉了）：读回确认，仍在则按未收敛上报。
+	for _, ip6 := range []bool{false, true} {
+		exists, err := c.IPTableExists(tableID, ip6)
+		if err != nil {
+			return fmt.Errorf("核对 IP table %d（%s）是否已删除: %w", tableID, ipVerName(ip6), err)
+		}
+		if exists {
+			return fmt.Errorf("%w: IP table %d（%s）在删除后仍存在于 VPP，%s 的数据面未收敛",
+				ErrVrfNotRemoved, tableID, ipVerName(ip6), name)
+		}
+	}
 	return nil
+}
+
+// unbindTableIfaces 把接口逐一改回默认表（table 0，v4/v6 都要），用于删表前解绑。
+// 幂等：已在默认表的口再置一次表是空操作；相同索引只下发一次（子接口可能在两处出现）。
+func (p *L3Provider) unbindTableIfaces(c L3Client, idxs []uint32) error {
+	seen := make(map[uint32]bool, len(idxs))
+	for _, idx := range idxs {
+		if seen[idx] {
+			continue
+		}
+		seen[idx] = true
+		for _, ip6 := range []bool{false, true} {
+			if err := c.SwInterfaceSetTable(idx, ip6, 0); err != nil {
+				return fmt.Errorf("把接口 %d 移出该 VRF（改回默认表，%s）: %w", idx, ipVerName(ip6), err)
+			}
+		}
+	}
+	return nil
+}
+
+// forgetTable 摘除该表的进程内登记：ifaces/subifs（转发域成员）、ifaceTable/ifaceIdx（按名归属）、
+// vnfs（置入该表的 vNIC）。五处缺一都会留下指向不存在表的死索引，NAT 解析与下一次删除都读它们。
+// 重新声明后 ApplyVRF/SetVnfTable/RegisterL3Interfaces 会重建登记。
+func (p *L3Provider) forgetTable(tableID uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.ifaces, tableID)
+	delete(p.subifs, tableID)
+	for k, t := range p.ifaceTable {
+		if t == tableID {
+			delete(p.ifaceTable, k)
+			delete(p.ifaceIdx, k)
+		}
+	}
+	for k, a := range p.vnfs {
+		if a.tableID == tableID {
+			delete(p.vnfs, k)
+		}
+	}
 }
 
 // AttachedIfaces 返回 VRF 转发域内已登记的 sw_if_index（供 NAT inside 解析）：
