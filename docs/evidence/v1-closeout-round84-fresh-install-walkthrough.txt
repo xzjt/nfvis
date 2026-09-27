@@ -606,4 +606,20 @@ o2i 192.168.155.61 proto icmp port 11570 fib 2
   `0.0.0.0/vrf 0`（探针实测：该查询 0 条，而按 `192.168.200.10/vrf 8922296` 查得到 32 条）。
   修法：先 `nat44_ei_user_dump` 再逐用户 dump。**影响**：NAT 明明在跑，`show nat` 却说没有会话（误导排查）。
 
+
+§17 round84 终章之四：R84-27 收口（决策 #177）——`show nat` 会话答非所问
+--------------------------------------------------------------------------------
+- **根因**：VPP 26.06 的 `nat44_ei_user_session_dump` 是**按用户** dump；产品的 `NATSessions()` 发的是
+  `0.0.0.0 / vrf 0` → 永远 0 条，于是 NAT 明明在跑（`vppctl` 有会话、guest 经 NAT ping 通宿主），
+  `show nat` 却说「（无 NAT 会话）」。
+- **真机探针**：`nat44_ei_user_dump` → `192.168.200.10 vrf_id=8922296 nsessions=13`（8922296 = `TableID("vs-nat")` 租户表，
+  **不是**会话里的 fib 1）；按该值 dump 得 13 条，按 `0.0.0.0/vrf 0` 得 0 条。
+- **修法**：先 `nat44_ei_user_dump` 收齐用户，再逐用户 `nat44_ei_user_session_dump{IP, VrfID 取自 user_dump}` 汇总；
+  空用户表如实返回空、dump 失败原样上抛（**不做静默降级**——退回旧口径正是缺陷成因）。
+- **真机验收（1.1.44~dev1 实装）**：造流量后立即查，`show nat` 输出 3 行配置 + 表头 + **25 条会话**
+  （如 `192.168.200.10  570  192.168.155.62  19948  1  6`），与 `vppctl show nat44 ei sessions detail`
+  **逐条对照 25 vs 25、双向差异 0**；`show nat sessions` 等价写法同结果。
+- 附注：产品侧会话字段与契约 `NatSession`（inside_ip/inside_port/outside_ip/outside_port/protocol/bytes/packets）
+  本就一致，CLI 表头未变——只修了「取哪份事实」。
+
 ================================================================================
