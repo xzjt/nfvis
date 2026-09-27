@@ -30,6 +30,8 @@ EXPECT_VPP=${NFVIS_EXPECT_VPP:-26.06}
 PAYLOAD=${NFVIS_PAYLOAD:-$(cd "$(dirname "$0")" && pwd)}
 ASSUME_YES=0; DO_START=1; DO_INSTALL=1; KEEP=0; ADMIN_PW=""
 CLI_PW=""; OTP=""
+NFVIS_DB=${NFVIS_DB:-/var/lib/nfvis/nfvis.db}
+FRESH_DB=1 # 配置库尚不存在 = 首次引导（--admin-password 与一次性口令都只在这种情况下出现）
 
 PASS=0; FAILED=0; SKIPPED=0
 FAILED_ITEMS=""
@@ -83,6 +85,12 @@ preflight() {
         have "$t" || die "缺少必需命令：$t"
     done
     info "系统：$( . /etc/os-release; printf '%s' "${PRETTY_NAME:-unknown}") / $ARCH"
+    if [ -s "$NFVIS_DB" ]; then FRESH_DB=0; fi
+    if [ "$FRESH_DB" = 1 ]; then
+        info "配置库：尚未建立（本次为首次引导）"
+    else
+        info "配置库：$NFVIS_DB 已存在（本次为升级/重装；既有账号与配置不受影响）"
+    fi
 
     # 有别的包管理进程在跑时抢锁，会留下"装了一半"的状态——先挡掉
     for p in apt-get apt dpkg unattended-upgrade; do
@@ -305,11 +313,17 @@ run_checks() {
     done
 
     # nfvis 自己的读物：需要口令，取不到就如实记不可判定（绝不把"没测到"算通过）
-    if [ -n "$ADMIN_PW" ]; then
+    # 口令来源：仅当本次是首次引导（配置库尚不存在）时 --admin-password 才生效；
+    # 升级/重装场景配置库里已有用户，那个口令不适用——此时用日志里的一次性口令，
+    # 取不到就记不可判定，而不是拿一个必然失败的口令去判"失败"（假红同样有害）。
+    if [ -n "$ADMIN_PW" ] && [ "$FRESH_DB" = 1 ]; then
         CLI_PW="$ADMIN_PW"
     else
         sleep 1
         grab_otp && CLI_PW="$OTP"
+    fi
+    if [ -z "$CLI_PW" ] && [ -n "$ADMIN_PW" ]; then
+        info "配置库已存在（升级/重装）：本次未用 --admin-password 做自检，它只对首次引导生效"
     fi
     if [ -z "$CLI_PW" ]; then
         skip "CLI 经产品路径的读写检查（本机未提供口令且日志中无首次口令）"
@@ -397,7 +411,7 @@ main() {
         confirm
         prepare_work
         do_install || { summary >/dev/null; printf '安装未完成——见上方日志。\n' >&2; return 1; }
-        if [ -n "$ADMIN_PW" ]; then
+        if [ -n "$ADMIN_PW" ] && [ "$FRESH_DB" = 1 ]; then
             install -d -m 0755 /etc/systemd/system/nfvis.service.d
             cat > /etc/systemd/system/nfvis.service.d/10-offline-init-password.conf <<EOF
 [Service]
@@ -407,10 +421,12 @@ ExecStart=/usr/bin/nfvisd -db \${NFVIS_DB} -listen \${NFVIS_LISTEN} -vpp-sock \$
 EOF
             systemctl daemon-reload
             info "已按 --admin-password 预置首次引导口令（该 drop-in 在用户建立后即删除）"
+        elif [ -n "$ADMIN_PW" ]; then
+            info "配置库已存在：--admin-password 只对首次引导生效，本次不写 drop-in（口令沿用既有库）"
         fi
         if [ "$DO_START" = 1 ]; then
             start_services
-            if [ -n "$ADMIN_PW" ]; then
+            if [ -n "$ADMIN_PW" ] && [ "$FRESH_DB" = 1 ]; then
                 rm -f /etc/systemd/system/nfvis.service.d/10-offline-init-password.conf
                 rmdir /etc/systemd/system/nfvis.service.d 2>/dev/null || true
                 systemctl daemon-reload

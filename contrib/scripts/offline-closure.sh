@@ -113,21 +113,27 @@ fetch_one() { # $1=名字 $2=输出目录；成功 0
 }
 
 cmd_fetch() {
-    local out="" no_seeds=0
+    local out=""
     local -a seeds=() pkgs=()
     while [ $# -gt 0 ]; do
         case "$1" in
-            --out) shift; out=${1:-} ;;
-            --seed-deb) shift; [ -n "${1:-}" ] && seeds+=("$1") ;;
-            --pkg) shift; [ -n "${1:-}" ] && pkgs+=("$1") ;;
+            --out) shift; out=${1:-}; shift ;;
+            --seed-deb) shift; [ -n "${1:-}" ] && seeds+=("$1"); shift ;;
+            --pkg) # 后面可以跟多个包名（直到下一个 -- 选项）
+                shift
+                while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+                    pkgs+=("$1")
+                    shift
+                done
+                ;;
             *) die "未知参数：$1" ;;
         esac
-        shift
     done
     [ -n "$out" ] || die "fetch 需要 --out DIR"
     have dpkg-deb || die "fetch 需要 dpkg-deb"
     have apt-get || die "fetch 需要 apt-get（在联网的 Ubuntu 构建机上执行）"
     mkdir -p "$out"
+    rm -f "$out/FETCH-FAILED.txt" # 重跑时重新记录（本工具可续跑：已在 out 里的 deb 会被视作已有）
 
     local s
     for s in "${seeds[@]}"; do

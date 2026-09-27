@@ -143,7 +143,9 @@ if [ -n "$RUN_FILE" ]; then
         bad "依赖闭包不自洽：$(grep '需要' "$TMP/c4.log" | head -5 | tr '\n' ' ')"
     fi
     # 安装清单里的包名必须都在包里（否则安装时必然失败）
-    want=$(sed -n 's/^PKGS_INSTALL="//; /^[a-z]/p' "$EX/install.sh" | tr '\n' ' ' | tr -s ' ')
+    # 提取 PKGS_INSTALL="…"（跨行），只取引号内的内容
+    want=$(awk '/^PKGS_INSTALL="/ { f = 1 } f { print } f && /"[ \t]*$/ { exit }' "$EX/install.sh" |
+        sed 's/^PKGS_INSTALL="//' | tr -d '"' | tr '\n' ' ' | tr -s ' ')
     missing=""
     for p in $want; do
         grep -q "^Package: ${p}$" "$EX/debs/Packages" || missing="$missing $p"

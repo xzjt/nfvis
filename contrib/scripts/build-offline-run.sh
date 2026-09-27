@@ -64,28 +64,32 @@ NFVIS_VER=$(dpkg-deb -f "$NFVIS_DEB" Version)
 
 # ---------- 本地 apt 源索引（扁平源；只用 dpkg-deb，不需要 dpkg-dev） ----------
 gen_packages() { # $1=deb 目录 $2=输出文件
-    local d name
+    local d name f v desc
     : > "$2"
     for d in "$1"/*.deb; do
         [ -e "$d" ] || continue
         name=$(dpkg-deb -f "$d" Package)
         [ -n "$name" ] || die "读不出包名：$d"
-        printf 'Package: %s\n' "$name"
-        printf 'Version: %s\n' "$(dpkg-deb -f "$d" Version)"
-        printf 'Architecture: %s\n' "$(dpkg-deb -f "$d" Architecture)"
-        local f v
-        for f in Section Priority Essential Multi-Arch Pre-Depends Depends Provides \
-            Conflicts Breaks Replaces Recommends Suggests; do
-            v=$(dpkg-deb -f "$d" "$f" 2>/dev/null || true)
-            [ -n "$v" ] && printf '%s: %s\n' "$f" "$v"
-        done
-        printf 'Filename: ./%s\n' "$(basename "$d")"
-        printf 'Size: %s\n' "$(stat -c %s "$d")"
-        printf 'SHA256: %s\n' "$(sha256sum "$d" | cut -d' ' -f1)"
-        printf 'MD5sum: %s\n' "$(md5sum "$d" | cut -d' ' -f1)"
-        # 只取短描述首行：apt 对多行 Description 的续行缩进有严格要求，
-        # 而这一栏对本地源无实际作用，保持单行最稳。
-        printf 'Description: %s\n\n' "$(dpkg-deb -f "$d" Description 2>/dev/null | head -1 || echo "$name")"
+        desc=$(dpkg-deb -f "$d" Description 2>/dev/null | head -1)
+        [ -n "$desc" ] || desc="$name"
+        {
+            printf 'Package: %s\n' "$name"
+            printf 'Version: %s\n' "$(dpkg-deb -f "$d" Version)"
+            printf 'Architecture: %s\n' "$(dpkg-deb -f "$d" Architecture)"
+            # Priority/Essential 要带上：apt 解析本地源时按它们判定"基础包"
+            for f in Section Priority Essential Multi-Arch Pre-Depends Depends Provides \
+                Conflicts Breaks Replaces Recommends Suggests; do
+                v=$(dpkg-deb -f "$d" "$f" 2>/dev/null || true)
+                [ -n "$v" ] && printf '%s: %s\n' "$f" "$v"
+            done
+            printf 'Filename: ./%s\n' "$(basename "$d")"
+            printf 'Size: %s\n' "$(stat -c %s "$d")"
+            printf 'SHA256: %s\n' "$(sha256sum "$d" | cut -d' ' -f1)"
+            printf 'MD5sum: %s\n' "$(md5sum "$d" | cut -d' ' -f1)"
+            # 只取短描述首行：apt 对多行 Description 的续行缩进有严格要求，
+            # 而这一栏对本地源无实际作用，保持单行最稳。
+            printf 'Description: %s\n\n' "$desc"
+        } >> "$2"
     done
 }
 
@@ -217,6 +221,7 @@ SIZE=$(du -sh "$WORK/payload.tar.gz" | cut -f1)
 sed -i "s|@VERSION@|$VERSION|g; s|@BUILT@|$BUILT|g; s|@NDEB@|$NDEB|g; s|@SIZE@|$SIZE|g" "$HDR"
 sh -n "$HDR" || die "头部脚本语法检查失败"
 
+MARK='__NFVIS_PAYLOAD_BELOW__' # 载荷起始标记（头部脚本按行号定位，必须单独占一行）
 printf '%s\n' "$MARK" >> "$HDR"
 cat "$HDR" "$WORK/payload.tar.gz" > "$OUT"
 chmod +x "$OUT"
