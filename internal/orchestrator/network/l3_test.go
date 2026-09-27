@@ -170,17 +170,41 @@ func (f *fakeL3) SwInterfaceAddDelAddress(swIfIndex uint32, prefix string, add, 
 	return nil
 }
 
+// IPRouteAddDel 按下发/撤销两种语义记录路由（镜像 VPP：同前缀的不同下一跳各成一条 path；
+// 重复下发同一 path 幂等；撤销不存在的路由同样返回成功——真机 `ip route del` 的实测口径）。
 func (f *fakeL3) IPRouteAddDel(tableID uint32, prefix, nextHop string, add bool) error {
 	if f.err != nil {
 		return f.err
 	}
-	if add {
-		entry := RouteEntry{Prefix: prefix, NextHop: nextHop}
-		if isV6Prefix(prefix) {
-			f.routes6[tableID] = append(f.routes6[tableID], entry)
-		} else {
-			f.routes[tableID] = append(f.routes[tableID], entry)
+	v6 := isV6Prefix(prefix)
+	cur := f.routes[tableID]
+	if v6 {
+		cur = f.routes6[tableID]
+	}
+	out := make([]RouteEntry, 0, len(cur)+1)
+	seen := false
+	for _, e := range cur {
+		if e.Prefix == prefix && e.NextHop == nextHop {
+			seen = true
 		}
+		out = append(out, e)
+	}
+	switch {
+	case !add && seen: // 撤销：摘掉该 path
+		out = out[:0]
+		for _, e := range cur {
+			if e.Prefix == prefix && e.NextHop == nextHop {
+				continue
+			}
+			out = append(out, e)
+		}
+	case add && !seen: // 下发：同 path 已存在则保持原样（幂等）
+		out = append(out, RouteEntry{Prefix: prefix, NextHop: nextHop})
+	}
+	if v6 {
+		f.routes6[tableID] = out
+	} else {
+		f.routes[tableID] = out
 	}
 	return nil
 }
@@ -257,6 +281,49 @@ func TestL3ApplyVRF(t *testing.T) {
 	rows, err := p.Routes(context.Background(), "vs-l3")
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("Routes 运行态: %v %+v", err, rows)
+	}
+}
+
+// R84-28：单条静态路由的撤销与补发（撤销由提交编排按「声明差集」下发，这里验数据面动作本身）。
+// 撤销必须真的从 FIB 里消失——ApplyVRF 只加不撤、DeleteVRF 依赖删表（VPP 会保住仍被接口
+// 占用的表），两条路径都留过残留路由。
+func TestL3DeleteAndApplyRoute(t *testing.T) {
+	f := newFakeL3()
+	p := NewL3Provider(f)
+	ctx := context.Background()
+	keep := model.Route{Prefix: "0.0.0.0/0", NextHop: "10.99.88.254"}
+	gone := model.Route{Prefix: "10.99.89.0/24", NextHop: "10.99.89.2"}
+	v6 := model.Route{Prefix: "2001:db8:9::/64", NextHop: "2001:db8:8::2"}
+	if err := p.ApplyVRF(ctx, model.Vrf{Name: "vs-l3", Routes: []model.Route{keep, gone, v6}}); err != nil {
+		t.Fatalf("ApplyVRF: %v", err)
+	}
+	if err := p.DeleteRoute(ctx, "vs-l3", gone); err != nil {
+		t.Fatalf("DeleteRoute: %v", err)
+	}
+	if err := p.DeleteRoute(ctx, "vs-l3", v6); err != nil {
+		t.Fatalf("DeleteRoute(v6): %v", err)
+	}
+	rows, err := p.Routes(ctx, "vs-l3")
+	if err != nil {
+		t.Fatalf("Routes: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Prefix != keep.Prefix {
+		t.Fatalf("撤销后应只剩仍在声明的路由: %+v", rows)
+	}
+	// 撤销不存在的路由：与 VPP 同口径（幂等成功），否则重放会把提交判失败
+	if err := p.DeleteRoute(ctx, "vs-l3", gone); err != nil {
+		t.Fatalf("重复撤销应为空操作: %v", err)
+	}
+	// 补偿（回滚用）：把撤掉的路由加回来
+	if err := p.ApplyRoute(ctx, "vs-l3", gone); err != nil {
+		t.Fatalf("ApplyRoute: %v", err)
+	}
+	if err := p.ApplyRoute(ctx, "vs-l3", gone); err != nil {
+		t.Fatalf("重复下发应为空操作: %v", err)
+	}
+	rows, err = p.Routes(ctx, "vs-l3")
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("补发后应有 2 条路由: %v %+v", err, rows)
 	}
 }
 

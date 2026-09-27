@@ -370,6 +370,22 @@ func (n *L2Network) DeleteVRF(ctx context.Context, name string) error {
 	return n.l3.DeleteVRF(ctx, name)
 }
 
+// ApplyRoute/DeleteRoute 单条静态路由的下发与撤销：撤销由提交编排按「旧/新声明差集」下发
+// （删除路径此前整条漏，见 internal/orchestrator/apply.go 的 del-route 计划操作）。
+func (n *L2Network) ApplyRoute(ctx context.Context, vrfName string, r model.Route) error {
+	if n.l3 == nil {
+		return nil
+	}
+	return n.l3.ApplyRoute(ctx, vrfName, r)
+}
+
+func (n *L2Network) DeleteRoute(ctx context.Context, vrfName string, r model.Route) error {
+	if n.l3 == nil {
+		return nil
+	}
+	return n.l3.DeleteRoute(ctx, vrfName, r)
+}
+
 // MACTable 供 /virtual-switches/{name}/mac-table 运行态查询（M3-3）。
 func (n *L2Network) MACTable(ctx context.Context, name string) ([]MACTableEntry, error) {
 	return n.l2.MACTable(ctx, name)

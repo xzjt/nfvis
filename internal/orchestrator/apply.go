@@ -167,6 +167,7 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	oldACLs := nameMap(old.Acls, func(x model.Acl) string { return x.Name })
 	oldVSs := nameMap(oldVSList, func(x model.VirtualSwitch) string { return x.Name })
 	oldVRFs := nameMap(old.Vrfs, func(x model.Vrf) string { return x.Name })
+	newVRFs := nameMap(new.Vrfs, func(x model.Vrf) string { return x.Name })
 	oldVMs := nameMap(old.VirtualMachineFunctions, func(x model.VMFunction) string { return x.Name })
 	oldCTs := nameMap(old.ContainerFunctions, func(x model.ContainerFunction) string { return x.Name })
 	oldIfaces := nameMap(old.Interfaces, func(x model.InterfaceConfig) string { return x.Name })
@@ -405,6 +406,30 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 		})
 	}
 
+	// 静态路由撤销：声明里已不再有的路由必须在**本次 diff** 里显式从 FIB 撤除。
+	// 两条路径都要覆盖：① 只删路由叶子（同名 VRF 仍在声明里）；② 整台 L3 交换机被删
+	// （连同其 VRF 条目）。二者此前都漏——ApplyVRF 只下发声明里的路由（只加不撤），
+	// DeleteVRF 依赖删表，而 VPP 会保住仍被接口占用的表（`vppctl show ip table` 里
+	// 该项仍带 locks:[interface:…]），残留路由因此长期留在 FIB 里、`show vrfs <n> routes`
+	// 依旧读得到（真机实测）。撤销放在 del-vrf 之前：表还在时逐条撤干净，不依赖删表。
+	// 恢复收敛不经本函数（EnsureConsistent 只补齐），故「只补齐不摘除」口径不变（附录 A #35）。
+	for _, ov := range old.Vrfs {
+		nv, still := newVRFs[ov.Name]
+		var gone []model.Route
+		if still {
+			gone = removedRoutes(ov, nv)
+		} else {
+			gone = ov.Routes
+		}
+		for _, r := range gone {
+			r := r
+			ops = append(ops, op{
+				desc: fmt.Sprintf("del-route[%s]", routeLabel(ov.Name, r)),
+				run:  func(ctx context.Context) error { return a.net.DeleteRoute(ctx, ov.Name, r) },
+				undo: func(ctx context.Context) error { return a.net.ApplyRoute(ctx, ov.Name, r) },
+			})
+		}
+	}
 	for name := range oldVRFs {
 		if _, ok := newVRFNames(new)[name]; !ok {
 			vrf := oldVRFs[name]
@@ -458,6 +483,41 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 		}
 	}
 	return ops
+}
+
+// routeKeyOf 一条静态路由在 FIB 里的身份（前缀 + 下一跳）。
+//
+// 刻意不含 distance：VPP 侧下发并不携带该字段（l3_govpp.go 的 IPRouteAddDel 只用
+// 前缀与下一跳），带它参与 diff 会把「只改 distance」判成「旧路由消失 + 新路由出现」，
+// 于是本次提交先补下发再撤销，把仍在声明的路由从 FIB 里误撤掉。
+func routeKeyOf(r model.Route) string { return r.Prefix + "|" + r.NextHop }
+
+// routeLabel 路由的展示标签（计划操作的描述与错误文案，如 vs-l3 10.0.0.0/24 via 10.0.0.254）。
+func routeLabel(vrfName string, r model.Route) string {
+	if r.NextHop == "" {
+		return fmt.Sprintf("%s %s", vrfName, r.Prefix)
+	}
+	return fmt.Sprintf("%s %s via %s", vrfName, r.Prefix, r.NextHop)
+}
+
+// removedRoutes 返回 old 里声明、new 里不再声明的静态路由（去重，保持声明序）：
+// 即声明驱动的撤销集合，供 del-route 计划操作使用。
+func removedRoutes(old, new model.Vrf) []model.Route {
+	keep := make(map[string]bool, len(new.Routes))
+	for _, r := range new.Routes {
+		keep[routeKeyOf(r)] = true
+	}
+	seen := make(map[string]bool, len(old.Routes))
+	var out []model.Route
+	for _, r := range old.Routes {
+		k := routeKeyOf(r)
+		if keep[k] || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, r)
+	}
+	return out
 }
 
 // portKeyOf/portMapOf VNF 端口按「属主/vNIC」索引（diff 用）。
