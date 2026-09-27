@@ -30,10 +30,13 @@ func (g *govppNatClient) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	return (&govppL3Client{ch: g.ch}).SwInterfaceIndex(ifname)
 }
 
-// NATAddressRange 增删一个地址池地址段。vrfID 是地址池所属转发域，必须传**外部转发域**
-// （与 outside 同一张表）：缺省 0 = 默认表，池会与 outside 的 VRF 不一致——包进了 NAT
-// 却分配不出端口（round84 实测：out of ports、会话恒为 0、show nat44 ei addresses 显示
-// tenant VRF: 0），全程无报错。删除方向必须传登记时所用的同一个 VRF，否则删不掉。
+// NATAddressRange 增删一个地址池地址段。vrfID 是地址池所属转发域，必须传**inside（租户）
+// 转发域**——即规则 virtual-switch 的那张表：VPP 用该 vrf_id 折算池地址的 FIB 索引
+// （nat44_ei_add_address），而 in2out 慢路径只从「与入接口同一张表」的池地址里分配端口
+// （nat44_ei_alloc_default_cb），或 fib_index == ~0 的 VRF independent 地址（接口地址形态）。
+// 传 outside 表或 0 时池与入接口的表对不上：包进了 NAT 却分配不出端口（round84 R84-24
+// 实测：`show errors` 见 nat44-ei-in2out-slowpath out of ports、会话恒为 0），全程无报错。
+// 删除方向同样带登记时所用的 VRF，保证 add/del 成对（换域先删旧再 add 新）。
 func (g *govppNatClient) NATAddressRange(add bool, first, last string, vrfID uint32) error {
 	f, err := ip_types.ParseIP4Address(first)
 	if err != nil {
@@ -70,6 +73,27 @@ func (g *govppNatClient) NATAddressRange(add bool, first, last string, vrfID uin
 		return fmt.Errorf("nat44_ei_add_del_address_range(%s-%s,vrf=%d,add=%v) retval=%d", first, last, vrfID, add, reply.Retval)
 	}
 	return nil
+}
+
+// NATAddressVRFs 读回 VPP 侧各 NAT 地址所在的转发域（地址 → tenant VRF；~0 = 与 VRF 无关，
+// 即 nat44_ei_add_del_interface_addr 那种接口地址形态）。地址池的 vrf_id 就是租户（inside）
+// 转发域的表 id，用它核对「同一地址是否已被按别的转发域下发过」——池地址按地址唯一，
+// add 命中「已存在」被幂等容忍，不读回就发现不了旧副本（NAT 会一直分配不出端口）。
+func (g *govppNatClient) NATAddressVRFs() (map[string]uint32, error) {
+	reqCtx := g.ch.SendMultiRequest(&nat44_ei.Nat44EiAddressDump{})
+	out := map[string]uint32{}
+	for {
+		d := &nat44_ei.Nat44EiAddressDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return nil, err
+		}
+		if stop {
+			break
+		}
+		out[d.IPAddress.String()] = d.VrfID
+	}
+	return out, nil
 }
 
 func (g *govppNatClient) NATFeature(swIfIndex uint32, inside, add bool) error {

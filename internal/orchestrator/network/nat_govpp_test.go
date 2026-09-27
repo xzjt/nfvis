@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.fd.io/govpp/api"
+	"go.fd.io/govpp/binapi/ip_types"
 	"go.fd.io/govpp/binapi/nat44_ei"
 
 	"github.com/xzjt/nfvis/internal/model"
@@ -19,6 +20,7 @@ import (
 type fakeAPIChannel struct {
 	reply func(msg api.Message) error // 应答错误（nil = 正常应答）
 	fill  func(msg api.Message)       // 应答前填充 reply 字段（可选，模拟 VPP 返回值）
+	multi func(msg api.Message) bool  // 多请求逐条填充明细（返回 false = 明细已给完）
 	sent  []api.Message
 }
 
@@ -31,7 +33,9 @@ func (f *fakeAPIChannel) SendRequest(msg api.Message) api.RequestCtx {
 	return rc
 }
 
-func (f *fakeAPIChannel) SendMultiRequest(api.Message) api.MultiRequestCtx { return fakeMultiCtx{} }
+func (f *fakeAPIChannel) SendMultiRequest(api.Message) api.MultiRequestCtx {
+	return fakeMultiCtx{fill: f.multi}
+}
 func (f *fakeAPIChannel) SubscribeNotification(chan api.Message, api.Message) (api.SubscriptionCtx, error) {
 	return nil, nil
 }
@@ -51,9 +55,15 @@ func (c fakeRequestCtx) ReceiveReply(msg api.Message) error {
 	return c.err
 }
 
-type fakeMultiCtx struct{}
+// fakeMultiCtx 假多请求应答：fill 逐条填充明细，填不出即视为结束（没有更多明细）。
+type fakeMultiCtx struct{ fill func(api.Message) bool }
 
-func (fakeMultiCtx) ReceiveReply(api.Message) (bool, error) { return true, nil }
+func (c fakeMultiCtx) ReceiveReply(msg api.Message) (bool, error) {
+	if c.fill == nil || !c.fill(msg) {
+		return true, nil
+	}
+	return false, nil
+}
 
 // natClientWithIfaceStub 组合客户端：接口索引走桩（不起 dump 请求），
 // NAT 下发走真实 govpp 客户端（由假通道注入 VPP 应答）。
@@ -92,8 +102,9 @@ func TestNatGovppAddIdempotentOnValueExist(t *testing.T) {
 	}
 }
 
-// 地址池的增删必须带 outside 转发域的 vrf_id：不带（0 = 默认表）时池与 outside 不在同一张表，
-// 包进了 NAT 却分配不出端口——`show errors` 见 out of ports、会话恒为 0、无任何报错（round84 缺陷 A）。
+// 地址池的增删必须带 inside（租户）转发域的 vrf_id：该值会被 VPP 折算成池地址的 FIB 索引，
+// in2out 分配端口只认与入接口同一张表的池地址；传 0（默认表）或 outside 表时对不上，
+// 包进了 NAT 却分配不出端口——`show errors` 见 out of ports、会话恒为 0、无任何报错（R84-24）。
 func TestNatGovppAddressRangeCarriesVRF(t *testing.T) {
 	ch := &fakeAPIChannel{}
 	if err := (&govppNatClient{ch: ch}).NATAddressRange(true, "203.0.113.10", "203.0.113.20", 7); err != nil {
@@ -111,6 +122,39 @@ func TestNatGovppAddressRangeCarriesVRF(t *testing.T) {
 	}
 	if !req.IsAdd {
 		t.Fatal("首轮应为 add")
+	}
+}
+
+// 地址池转发域读回：VPP 的 address dump 每条带 tenant VRF（~0 = 与 VRF 无关的接口地址）。
+// 收敛要靠它判断「同一地址是否已被按别的转发域下发过」。
+func TestNatGovppAddressVRFs(t *testing.T) {
+	rows := []struct {
+		ip  string
+		vrf uint32
+	}{{"192.168.155.62", 9726253}, {"192.168.155.61", ^uint32(0)}}
+	i := 0
+	ch := &fakeAPIChannel{multi: func(msg api.Message) bool {
+		if i >= len(rows) {
+			return false
+		}
+		d, ok := msg.(*nat44_ei.Nat44EiAddressDetails)
+		if !ok {
+			return false
+		}
+		addr, err := ip_types.ParseIP4Address(rows[i].ip)
+		if err != nil {
+			return false
+		}
+		d.IPAddress, d.VrfID = addr, rows[i].vrf
+		i++
+		return true
+	}}
+	got, err := (&govppNatClient{ch: ch}).NATAddressVRFs()
+	if err != nil {
+		t.Fatalf("NATAddressVRFs: %v", err)
+	}
+	if len(got) != 2 || got["192.168.155.62"] != 9726253 || got["192.168.155.61"] != ^uint32(0) {
+		t.Fatalf("读回应为 192.168.155.62→9726253 / 192.168.155.61→~0，实际 %v", got)
 	}
 }
 

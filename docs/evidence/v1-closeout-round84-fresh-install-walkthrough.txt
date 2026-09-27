@@ -585,4 +585,25 @@ o2i 192.168.155.61 proto icmp port 11570 fib 2
   VNF `vnf-dhcp` running；如需回到「guest 直接桥到上游网段」，把 VNF 的 eth0 指回一个 L2 交换机
   （端口含 ens192）并让 guest 走 DHCP 即可（§13 的形态）。
 
+
+§16 round84 终章之三：R84-24/25/26 三条收口（决策 #175/#176）
+--------------------------------------------------------------------------------
+- **R84-24 已修（决策 #175）**：显式 `source-pool` 在跨 VRF 下建不起会话的根因是**池的 tenant VRF 取错了域**。
+  真机 + VPP 26.06 源码定位：池地址带 FIB 索引，in2out 慢路径只从「接收接口所在表」或「VRF-independent」的
+  地址里挑端口；池被登记到 outside 表 → 永远没有候选地址 → `nat44-ei-in2out-slowpath  out of ports`、会话恒 0。
+  实测同一地址按 **inside 表（8922296）** 下发后立刻可用。修后**真机验收（1.1.43~dev2，带池配置）**：
+  `show nat44 ei addresses` → `192.168.155.62 / tenant VRF: 8922296`；
+  `show nat44 ei sessions detail` → `i2o 192.168.200.10 … fib 1` / `o2i 192.168.155.62 … fib 2`（12+ 条动态转换）；
+  guest 串口 `64 bytes from 192.168.155.1: icmp_seq=… ttl=127`（首轮偶发 33% 丢包＝已登记的空闲首包现象）；
+  `out of ports` 冻结在 6 不再增长。
+- **R84-25 已修（决策 #176①）**：`delete nat rules 10 action source-pool pool-a` 现在只清该叶子，
+  规则保留 `match-source 192.168.200.0/24` 与 `action interface ens224`（真机复验，rev 146）。
+  根因在别名表（带尾随 token 也整条删），已按「有尾随 token 就只清叶子」拆形态。
+- **R84-26 已修（决策 #176②）**：删光 NAT 后不再留空 `nat;` 节点，`show configuration | display set`
+  恢复正常输出（真机复验，rev 147）。
+- **新登记（本轮调查发现，未修）**：**R84-27（P2，答非所问）** `show nat` 恒回「（无 NAT 会话）」——
+  VPP 26.06 的 `nat44_ei_user_session_dump` 是**按用户** dump，而产品的 `NATSessions()` 发的是
+  `0.0.0.0/vrf 0`（探针实测：该查询 0 条，而按 `192.168.200.10/vrf 8922296` 查得到 32 条）。
+  修法：先 `nat44_ei_user_dump` 再逐用户 dump。**影响**：NAT 明明在跑，`show nat` 却说没有会话（误导排查）。
+
 ================================================================================

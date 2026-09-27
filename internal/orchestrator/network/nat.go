@@ -5,7 +5,7 @@ package network
 // ApplyNAT 为声明式全量收敛：地址池（nat44_ei_add_del_address_range）、静态映射
 // （nat44_ei_add_del_static_mapping）、接口 inside/outside 特性
 // （nat44_ei_interface_add_del_feature），按登记表增删补齐。
-// 地址池随**外部转发域**（outside VRF）下发与删除，登记里连 VRF 一起记住（见 natPool）。
+// 地址池随 **inside（租户）转发域** 下发与删除，登记里连 VRF 一起记住（见 natPool）。
 //
 // 内外口来源：rule.action.interface → outside；rule.virtual_switch 的 L3 交换机成员接口
 // → inside（经注入的 L3Provider.AttachedIfaces 解析，见 l3.go 的登记口径）。两处解析都是
@@ -36,6 +36,7 @@ type NATSession struct {
 type NatClient interface {
 	SwInterfaceIndex(ifname string) (uint32, bool, error)
 	NATAddressRange(add bool, first, last string, vrfID uint32) error
+	NATAddressVRFs() (map[string]uint32, error)
 	NATFeature(swIfIndex uint32, inside, add bool) error
 	NATEnable(enable bool, insideVRF, outsideVRF uint32) error
 	NATInterfaceAddr(add bool, swIfIndex uint32) error
@@ -46,12 +47,18 @@ type NatClient interface {
 
 // natPool 一个地址池的登记：地址范围 + 下发时所用的转发域（VRF tableID）。
 //
-// VRF 必须随池一起记住，两个方向都不能少（round84 实测缺陷 A）：
-//   - **下发**：nat44_ei_add_del_address_range 带 vrf_id，缺省 0 = 默认表。地址池必须落在
-//     **外部转发域**里才被 NAT 用来分配端口——不传时池进默认表，与 outside 的 VRF 不一致，
-//     包进了 NAT 却分配不出端口（`show errors` 见 nat44-ei-in2out-slowpath out of ports、
-//     `show nat44 ei addresses` 显示 tenant VRF: 0、会话数恒为 0），全程无报错。
-//   - **删除**：必须用同一个 VRF 才删得掉，故登记不能只存地址范围。
+// VRF 必须随池一起记住（round84 缺陷 A / R84-24）：
+//   - **下发**：nat44_ei_add_del_address_range 的 vrf_id 会被 VPP 折算成该池地址的 FIB 索引
+//     （nat44_ei_add_address: ap->fib_index = fib_table_find_or_create_and_lock(IP4, vrf_id)），
+//     而 in2out 慢路径分配端口时只认「fib_index == 入接口所在表」的池地址
+//     （nat44_ei_alloc_default_cb 的 a->fib_index == rx_fib_index），或 fib_index == ~0 的
+//     「tenant VRF independent」地址（那是 nat44_ei_add_del_interface_addr 的形态）。
+//     故池必须落在 **inside（租户）转发域**——即规则 virtual-switch 的那张表：
+//     落在 outside 表或默认表时与入接口的表对不上，包进了 NAT 却分配不出端口
+//     （`show errors` 见 nat44-ei-in2out-slowpath out of ports、`show nat44 ei addresses`
+//     里该地址 0 busy ports、会话数恒为 0），全程无报错。
+//   - **换域**：VPP 的地址池按地址唯一（重复下发报 -81，与 VRF 无关），改域必须先用**登记时**
+//     的旧域删掉再按新域下发，故登记不能只存地址范围。
 type natPool struct {
 	first, last string
 	vrf         uint32
@@ -141,10 +148,13 @@ func (p *NatProvider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 	if err != nil {
 		return err
 	}
-	// 地址池落在外部转发域里（决策 #52 的 outside VRF；未归属任何 VRF → 默认表 0）。
-	// 缺了这个 vrf_id 池会进默认表，与 outside 的 VRF 不一致 → 包进了 NAT 却分配不出端口。
+	// 地址池落在 **inside（租户）转发域**里——即规则 virtual-switch 的那张表（决策 #52 的
+	// inside VRF；未归属任何 VRF → 默认表 0）。VPP 把该 vrf_id 折算成池地址的 FIB 索引，
+	// in2out 慢路径只从「与入接口（inside）同一张表」的池地址里分配端口：
+	// 池落在 outside 表上时两者对不上 → out of ports、会话恒为 0（round84 R84-24 真机实测：
+	// 同一地址分别按 outside / inside 下发，前者 0 busy ports、后者立刻建起会话）。
 	for name, pool := range desiredPools {
-		pool.vrf = outsideVRF
+		pool.vrf = insideVRF
 		desiredPools[name] = pool
 	}
 	// 插件启用/关闭按**配置声明**判定，而不是按解析结果：解析为空只说明「这一轮没有可下发的
@@ -182,7 +192,8 @@ func (p *NatProvider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 	p.mu.Unlock()
 
 	// 地址池：删旧/改值/新增。删除必须用**登记时**的 VRF（池落在哪张表只有登记知道）：
-	// 用当前 outside VRF 去删另一张表里的池必然删不掉（round84 实测）。
+	// 换域时若省掉这一步，VPP 会以「地址已存在」拒绝新域的下发（按地址唯一，与 VRF 无关），
+	// 池就永远停在旧表上——而配置与 show nat 看起来完全正常。
 	p.mu.Lock()
 	oldPools := p.pools
 	p.mu.Unlock()
@@ -193,9 +204,30 @@ func (p *NatProvider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 			}
 		}
 	}
+	// 期望里有、登记里没有（冷启动）或与登记不同：下发前先确认 VPP 侧同一地址不在**别的**转发域里。
+	// 池地址在 VPP 里按**地址**唯一（与 VRF 无关），而 add 命中「已存在」又按幂等容忍（重放安全）——
+	// 于是旧版本（1.1.42 把池下发到 outside 表）或人工 vppctl 留下的同一地址副本永远纠不回来，
+	// in2out 也就永远分配不出端口（R84-24 的现场正是如此）。登记为空时读回真实 VRF，只删真不一致的。
+	var vppPools map[string]uint32
+	vppPoolsRead := false
 	for name, pool := range desiredPools {
 		if old, ok := oldPools[name]; ok && old == pool {
 			continue
+		}
+		if _, known := oldPools[name]; !known {
+			if !vppPoolsRead {
+				vppPoolsRead = true
+				got, err := c.NATAddressVRFs()
+				if err != nil {
+					return fmt.Errorf("读取 NAT 地址池的转发域: %w", err)
+				}
+				vppPools = got
+			}
+			if cur, ok := vppPools[pool.first]; ok && cur != pool.vrf {
+				if err := c.NATAddressRange(false, pool.first, pool.last, cur); err != nil {
+					return fmt.Errorf("删除 NAT 地址池 %s 在转发域 %d 的旧副本: %w", name, cur, err)
+				}
+			}
 		}
 		if err := c.NATAddressRange(true, pool.first, pool.last, pool.vrf); err != nil {
 			return fmt.Errorf("下发 NAT 地址池 %s（VRF %d）: %w", name, pool.vrf, err)

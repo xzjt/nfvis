@@ -381,9 +381,9 @@ func TestEnsureConsistentRebuildsL3RegistrationsForNAT(t *testing.T) {
 				t.Fatalf("NAT 特性缺少 %s：%v", want, feats)
 			}
 		}
-		want := "add:192.168.155.62-192.168.155.62@" + strconv.FormatUint(uint64(wanTable), 10)
+		want := "add:192.168.155.62-192.168.155.62@" + strconv.FormatUint(uint64(natTable), 10)
 		if !containsStr(ranges, want) {
-			t.Fatalf("地址池必须落 outside 转发域（%s）：%v", want, ranges)
+			t.Fatalf("地址池必须落 inside（租户）转发域（%s）：%v", want, ranges)
 		}
 		if len(enables) != 1 || enables[0] != "enable:"+strconv.FormatUint(uint64(natTable), 10)+
 			"/"+strconv.FormatUint(uint64(wanTable), 10) {
