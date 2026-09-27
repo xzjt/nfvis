@@ -53,6 +53,12 @@ func (n recNet) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 	return n.record("vrf:" + vrf.Name)
 }
 func (n recNet) DeleteVRF(ctx context.Context, name string) error { return n.record("del-vrf:" + name) }
+func (n recNet) ApplyRoute(ctx context.Context, vrfName string, r model.Route) error {
+	return n.record("route:" + routeLabel(vrfName, r))
+}
+func (n recNet) DeleteRoute(ctx context.Context, vrfName string, r model.Route) error {
+	return n.record("del-route:" + routeLabel(vrfName, r))
+}
 func (n recNet) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 	return n.record("nat")
 }
@@ -405,5 +411,111 @@ func TestApplyUnresolvableVnicSwitchRefFailsLoud(t *testing.T) {
 	}
 	if len(*calls) != 0 {
 		t.Fatalf("归位失败时不应先下发其它对象: %v", *calls)
+	}
+}
+
+// ---------- R84-28：静态路由的撤销（删路由叶子 / 删整台 L3 交换机） ----------
+//
+// 两条路径此前都漏：ApplyVRF 只下发声明里的路由（只加不撤），DeleteVRF 依赖删表而
+// VPP 会保住仍被接口占用的表——残留路由因此长期留在 FIB 里（真机实测）。
+
+// l3vrf 构造一台只声明静态路由的 L3 交换机（VRF 条目）。
+func l3vrf(name string, routes ...model.Route) model.Vrf {
+	return model.Vrf{Name: name, Routes: routes}
+}
+
+// 只删路由叶子（同名 L3 交换机仍在声明里）：被删的那条必须撤销，仍在声明的不误撤。
+func TestApplyDeleteRouteLeafRevolvesOnlyThatRoute(t *testing.T) {
+	ap, calls := newRecApplier("")
+	kept := model.Route{Prefix: "0.0.0.0/0", NextHop: "10.99.88.254"}
+	dropped := model.Route{Prefix: "10.99.89.0/24", NextHop: "10.99.89.2"}
+	old := model.Config{Vrfs: []model.Vrf{l3vrf("vs-l3", kept, dropped)}}
+	newCfg := model.Config{Vrfs: []model.Vrf{l3vrf("vs-l3", kept)}}
+	if err := ap.Apply(context.Background(), old, newCfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !hasCall(*calls, "del-route:vs-l3 10.99.89.0/24 via 10.99.89.2") {
+		t.Fatalf("被删的路由叶子应从数据面撤销: %v", *calls)
+	}
+	if hasCall(*calls, "del-route:vs-l3 0.0.0.0/0") {
+		t.Fatalf("仍在声明的路由不得被误撤: %v", *calls)
+	}
+	if !hasCall(*calls, "vrf:vs-l3") {
+		t.Fatalf("VRF 变更仍应按声明重下发: %v", *calls)
+	}
+}
+
+// 整台 L3 交换机被删（连同其 VRF 条目）：该对象声明的路由必须先逐条撤，再删 VRF。
+func TestApplyDeleteL3SwitchRevolvesItsRoutes(t *testing.T) {
+	ap, calls := newRecApplier("")
+	old := model.Config{
+		VirtualSwitches: []model.VirtualSwitch{{Name: "vs-l3", Type: "l3"}},
+		Vrfs:            []model.Vrf{l3vrf("vs-l3", model.Route{Prefix: "10.99.89.0/24", NextHop: "10.99.89.2"})},
+	}
+	if err := ap.Apply(context.Background(), old, model.Config{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !hasCall(*calls, "del-route:vs-l3 10.99.89.0/24 via 10.99.89.2") {
+		t.Fatalf("交换机声明的静态路由应随对象撤销: %v", *calls)
+	}
+	routeIdx, vrfIdx := -1, -1
+	for i, c := range *calls {
+		switch {
+		case c == "del-route:vs-l3 10.99.89.0/24 via 10.99.89.2":
+			routeIdx = i
+		case c == "del-vrf:vs-l3":
+			vrfIdx = i
+		}
+	}
+	// 撤销须在删 VRF 之前：表还在时逐条撤，不依赖删表（VPP 会保住仍被接口占用的表）
+	if routeIdx < 0 || vrfIdx < 0 || routeIdx > vrfIdx {
+		t.Fatalf("顺序应为 撤路由 → 删 VRF: %v", *calls)
+	}
+}
+
+// 撤销失败时的补偿：把撤掉的路由加回来（全有或全无）。
+func TestApplyRouteDeleteCompensatedOnFailure(t *testing.T) {
+	ap, calls := newRecApplier("del-vrf:vs-l3")
+	old := model.Config{
+		VirtualSwitches: []model.VirtualSwitch{{Name: "vs-l3", Type: "l3"}},
+		Vrfs:            []model.Vrf{l3vrf("vs-l3", model.Route{Prefix: "10.99.89.0/24", NextHop: "10.99.89.2"})},
+	}
+	if err := ap.Apply(context.Background(), old, model.Config{}); err == nil {
+		t.Fatal("删 VRF 失败应整体报错")
+	}
+	if !hasCall(*calls, "route:vs-l3 10.99.89.0/24 via 10.99.89.2") {
+		t.Fatalf("失败后应把已撤销的路由补偿回来: %v", *calls)
+	}
+}
+
+// 同一前缀换下一跳：旧下一跳那条 path 必须撤销（否则 FIB 里留下两条并行的等价路径）。
+func TestApplyRouteNextHopChangeRevolvesOldPath(t *testing.T) {
+	ap, calls := newRecApplier("")
+	old := model.Config{Vrfs: []model.Vrf{l3vrf("vs-l3", model.Route{Prefix: "10.99.89.0/24", NextHop: "10.99.89.2"})}}
+	newCfg := model.Config{Vrfs: []model.Vrf{l3vrf("vs-l3", model.Route{Prefix: "10.99.89.0/24", NextHop: "10.99.89.3"})}}
+	if err := ap.Apply(context.Background(), old, newCfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !hasCall(*calls, "del-route:vs-l3 10.99.89.0/24 via 10.99.89.2") {
+		t.Fatalf("换下一跳时旧路径应撤销: %v", *calls)
+	}
+	if hasCall(*calls, "del-route:vs-l3 10.99.89.0/24 via 10.99.89.3") {
+		t.Fatalf("新声明的下一跳不得被撤销: %v", *calls)
+	}
+}
+
+// 只改 distance：VPP 侧下发不携带该字段，故不得判成「旧路由消失」而误撤仍在声明的路由。
+func TestApplyRouteDistanceOnlyChangeDoesNotRevoke(t *testing.T) {
+	ap, calls := newRecApplier("")
+	old := model.Config{Vrfs: []model.Vrf{l3vrf("vs-l3", model.Route{Prefix: "10.99.89.0/24", NextHop: "10.99.89.2", Distance: 1})}}
+	newCfg := model.Config{Vrfs: []model.Vrf{l3vrf("vs-l3", model.Route{Prefix: "10.99.89.0/24", NextHop: "10.99.89.2", Distance: 5})}}
+	if err := ap.Apply(context.Background(), old, newCfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if hasCall(*calls, "del-route:") {
+		t.Fatalf("只改 distance 不应撤销路由: %v", *calls)
+	}
+	if !hasCall(*calls, "vrf:vs-l3") {
+		t.Fatalf("distance 变更仍应重下发该 VRF: %v", *calls)
 	}
 }

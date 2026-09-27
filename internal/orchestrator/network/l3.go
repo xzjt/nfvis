@@ -160,7 +160,8 @@ func (p *L3Provider) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 		idxOf[li.Interface] = idx
 	}
 
-	// 先清旧路由再全量下发（PUT 语义：全量替换静态路由）
+	// 静态路由：**只下发声明里的**（撤销由提交编排按旧/新声明求差集另行下发，
+	// 见 orchestrator/apply.go 的 del-route 计划操作与 DeleteRoute）。
 	for _, r := range vrf.Routes {
 		if err := c.IPRouteAddDel(tableID, r.Prefix, r.NextHop, true); err != nil {
 			return fmt.Errorf("下发路由 %s via %s: %w", r.Prefix, r.NextHop, err)
@@ -304,6 +305,41 @@ func vlanSubifName(li model.L3Interface) string {
 		base = base[:i]
 	}
 	return fmt.Sprintf("%s.%d", base, li.Vlan)
+}
+
+// ApplyRoute 下发一条静态路由（幂等）：供提交编排在撤销路由删除失败时补偿，
+// 也供将来按单条路由的增量下发使用。
+func (p *L3Provider) ApplyRoute(ctx context.Context, vrfName string, r model.Route) error {
+	return p.routeAddDel(ctx, vrfName, r, true)
+}
+
+// DeleteRoute 撤销一条静态路由（**声明里已不再有的路由必须从 FIB 撤走**）。
+//
+// 为什么不能让 ApplyVRF/DeleteVRF 代劳：ApplyVRF 只下发声明里的路由（只加不撤），
+// 而 DeleteVRF 依赖删表——VPP 会保住仍被接口占用的表（`show ip table` 里该项带
+// locks:[interface:…]），路由随之长期留在 FIB 里而配置、show 输出全绿（真机实测）。
+// 表不存在时本条为「已达成」：路由本就无处可留。
+func (p *L3Provider) DeleteRoute(ctx context.Context, vrfName string, r model.Route) error {
+	return p.routeAddDel(ctx, vrfName, r, false)
+}
+
+// routeAddDel 按 VRF 名派生表后下发/撤销一条路由。不在此处建表：建表是 ApplyVRF 的
+// 职责（撤销路径上表可能已被删，那时路由已不存在，属已达成而非失败）。
+func (p *L3Provider) routeAddDel(ctx context.Context, vrfName string, r model.Route, add bool) error {
+	c, err := p.client()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	tableID := TableID(vrfName)
+	if err := c.IPRouteAddDel(tableID, r.Prefix, r.NextHop, add); err != nil {
+		verb := "撤销"
+		if add {
+			verb = "下发"
+		}
+		return fmt.Errorf("%s路由 %s via %s（VRF %s）: %w", verb, r.Prefix, r.NextHop, vrfName, err)
+	}
+	return nil
 }
 
 // TableOfIface 返回接口所属 VRF 的 tableID（未归属任何 VRF 时 ok=false）。

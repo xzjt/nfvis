@@ -37,6 +37,12 @@ type NetworkProvider interface {
 	DeleteBridgeDomain(ctx context.Context, name string) error
 	ApplyVRF(ctx context.Context, vrf model.Vrf) error
 	DeleteVRF(ctx context.Context, name string) error
+	// ApplyRoute 下发一条静态路由到该 VRF 对应的表（幂等；撤销路由删除时的补偿）。
+	ApplyRoute(ctx context.Context, vrfName string, route model.Route) error
+	// DeleteRoute 撤销一条静态路由（声明里已不再有的路由必须显式从 FIB 撤除）：
+	// ApplyVRF 只下发声明里的路由（只加不撤），DeleteVRF 依赖删表而 VPP 会保住仍被接口
+	// 占用的表——两条路径都不会让既有路由消失，故撤销只能由声明驱动的 diff 显式下发。
+	DeleteRoute(ctx context.Context, vrfName string, route model.Route) error
 	ApplyNAT(ctx context.Context, nat model.NatConfig) error
 	ApplySpan(ctx context.Context, pm model.PortMirroring) error
 	DeleteSpan(ctx context.Context, name string) error
@@ -134,6 +140,8 @@ func (noopNetwork) ApplyBridgeDomain(context.Context, model.VirtualSwitch) error
 func (noopNetwork) DeleteBridgeDomain(context.Context, string) error             { return nil }
 func (noopNetwork) ApplyVRF(context.Context, model.Vrf) error                    { return nil }
 func (noopNetwork) DeleteVRF(context.Context, string) error                      { return nil }
+func (noopNetwork) ApplyRoute(context.Context, string, model.Route) error        { return nil }
+func (noopNetwork) DeleteRoute(context.Context, string, model.Route) error       { return nil }
 func (noopNetwork) ApplyNAT(context.Context, model.NatConfig) error              { return nil }
 func (noopNetwork) ApplySpan(context.Context, model.PortMirroring) error         { return nil }
 func (noopNetwork) DeleteSpan(context.Context, string) error                     { return nil }
