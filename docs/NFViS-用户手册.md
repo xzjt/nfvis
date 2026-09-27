@@ -2,14 +2,15 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 适用版本 | V1.1.19（随包安装于 `/usr/share/doc/nfvis/`） |
+| 适用版本 | V1.1.47（随包安装于 `/usr/share/doc/nfvis/`） |
 | 适用对象 | 一体机部署/运维工程师（需 Linux 与网络基础） |
 | 配套文档 | 命令速查：[`NFViS-CLI命令全表.md`](NFViS-CLI命令全表.md)（逐条命令含实测状态）<br>契约：[`NFViS-openapi.yaml`](NFViS-openapi.yaml)（REST）、[`NFViS-CLI命令树完整设计.md`](NFViS-CLI命令树完整设计.md)（CLI）<br>需求真源：`NFViS-系统产品需求与目标架构规格书.md` |
 | 证据口径 | 本手册中的命令与输出均取自 **nfvis-vm 真机实测**（`docs/evidence/` 各轮原始输出）；未实测处均显式标注 |
 
-> **快速上手（5 分钟版）**：装 deb → 重启 → `journalctl -u nfvis | grep 一次性口令` 取 admin 口令
-> → `nfvis-cli` 登录 → `wizard` 回答几问完成资源池与内核基线 → 重启 → 按 §8 声明业务口并
-> `request vpp restart` → 按 §9 建 VM/容器。每一步的细节与排错都在后文对应章节。
+> **快速上手（5 分钟版）**：全新或离线机器跑 `nfvis-v<版本>.run`（§2.2），已有底座则装 deb（§2.1）
+> → 重启 → `journalctl -u nfvis | grep 一次性口令` 取 admin 口令 → `nfvis-cli` 登录 →
+> `wizard` 回答几问完成资源池与内核基线 → 重启 → 按 §8 声明业务口并 `request vpp restart`
+> → 按 §9 建 VM/容器。每一步的细节与排错都在后文对应章节。
 
 ---
 
@@ -78,7 +79,7 @@ NFViS 把整机划成三个平面，**网卡的归属由平面决定**：
 
 ## 2. 安装与卸载
 
-### 2.1 方式 A：deb 包（生产推荐）
+### 2.1 方式 A：deb 包（已有底座、或在构建机上打升级包）
 
 deb 包**必须在 Linux 上构建**（依赖 `dpkg-deb`），目标平台 linux/amd64：
 
@@ -86,7 +87,7 @@ deb 包**必须在 Linux 上构建**（依赖 `dpkg-deb`），目标平台 linux
 # 在构建机上（任意 Linux + Go ≥1.26；**还需要 make**，dpkg-deb 随 dpkg 已有；构建不需要 gcc）
 sudo apt-get install -y make          # ⚠️ 全新 Ubuntu Server 不带 make：缺了直接 make: command not found
 git clone <repo> && cd nfvis
-make deb VERSION=1.1.19               # 产物：build/nfvis_1.1.19_amd64.deb
+make deb VERSION=1.1.47               # 产物：build/nfvis_1.1.47_amd64.deb
 ```
 
 包内布局：
@@ -96,16 +97,60 @@ make deb VERSION=1.1.19               # 产物：build/nfvis_1.1.19_amd64.deb
 | `/usr/bin/nfvisd`、`/usr/bin/nfvis-cli` | 守护进程与 CLI |
 | `/lib/systemd/system/nfvis.service` | systemd 单元（`Type=notify`、`Restart=always`、`WatchdogSec=30`） |
 | `/usr/share/nfvis/installer/nfvis-baseline.sh` | 内核基线落地脚本（§6） |
-| `/usr/share/nfvis/installer/nfvis-ssh-harden.sh` | SSH 强化脚本（§2.2⑥） |
+| `/usr/share/nfvis/installer/nfvis-ssh-harden.sh` | SSH 强化脚本（§2.3⑥） |
 | `/usr/share/doc/nfvis/` | OpenAPI 契约、CLI 命令树、规格书、用户手册、命令全表 |
 
 安装：
 
 ```bash
-sudo dpkg -i build/nfvis_1.1.19_amd64.deb
+sudo dpkg -i build/nfvis_1.1.47_amd64.deb
 ```
 
-### 2.2 安装脚本做了什么（`postinst` 逐条）
+> 这条路要求**目标机已有底座**（VPP、libvirt/QEMU、Docker 等，见 §1.2）。全新机器或离线环境
+> 请用下一节的 `.run` 一键包——它把这些依赖也一并带上。
+
+### 2.2 方式 B：离线一键安装包（.run，全新机器推荐）
+
+面向**没有外网**的全新 Ubuntu 26.04（amd64）：一个文件里装齐产品包与全部依赖 deb（VPP、libvirt/QEMU、
+Docker、镜像与 seed 工具），装完自动起服务并做一轮自检。安装过程**只用包内自带的 deb**（临时建一个
+指向解包目录的本地源），不改系统 apt 源、不访问网络、不碰业务网卡。
+
+```bash
+sudo ./nfvis-v1.1.47.run                                     # 交互确认
+sudo ./nfvis-v1.1.47.run -y --admin-password 'Adm1n@nfvis'    # 自动化：预置 admin 口令（≥8 字符）
+sudo ./nfvis-v1.1.47.run --verify                            # 只体检（装完、重启后都可跑，不改系统）
+```
+
+自检项**每项都有独立事实源**（`dpkg` 记录与审计、`systemctl` 服务状态、`vppctl` 直读的 VPP 版本、
+控制台 HTTP、经 nfvisd 的 CLI 通路、libvirt/Docker 就绪、AppArmor 放行、内核基线片段与大页池）；
+任一项失败即以非零退出码收场——**不把「装上了」当「能用了」**。缺正向控制的项单列「不可判定」、
+不计入通过。装完的下一步：
+
+1. 重启一次，让安装期写入的内核启动基线生效（大页/IOMMU）：`systemctl reboot`；
+2. 登录 CLI 规划资源与业务口：`nfvis-cli` → `wizard`（§5）；
+3. 浏览器打开控制台 `https://<管理地址>/api/v1/ui/`（§10.12）。
+
+> 包内布局与校验：`sh nfvis-v1.1.47.run --extract /tmp/x` 可只解包查看——`debs/`（产品包 + VPP +
+> 依赖闭包）、本地源索引 `debs/Packages`、逐包 sha256 清单 `MANIFEST.tsv`、`SHA256SUMS`。
+> 安装前逐文件校验 sha256；依赖闭包在构建端抓齐并做**离线自洽校验**（集合内每个包的依赖都能被
+> 集合自身满足），不依赖「目标机应该装了什么」的假设。
+
+构建（构建机需联网 Ubuntu + `dpkg-deb`）：
+
+```bash
+# 1) 抓依赖闭包（产品包 + VPP deb + apt 递归闭包；--pkg 后是要一并装载的底座）
+bash contrib/scripts/offline-closure.sh fetch --out /root/ob/debs \
+  --seed-deb build/nfvis_1.1.47_amd64.deb \
+  --pkg docker.io libvirt-daemon-system libvirt-clients qemu-system-x86 \
+        qemu-utils cloud-image-utils genisoimage chrony tcpdump curl ca-certificates
+# 2) 打 .run（可复现：同一批 deb + 同一版本 + 同一时间锚 ⇒ 逐字节相同的产物）
+bash contrib/scripts/build-offline-run.sh --debs /root/ob/debs \
+  --version 1.1.47 --epoch $(git log -1 --format=%ct) --output build/nfvis-v1.1.47.run
+# 3) 产物结构校验（载荷 sha256、索引与 deb 一一对应、闭包自洽、安装清单齐备）
+bash contrib/scripts/offline-installer-selftest.sh --run build/nfvis-v1.1.47.run
+```
+
+### 2.3 安装脚本做了什么（`postinst` 逐条）
 
 postinst 的设计原则是「**校验与提示为主，不阻断安装**」——底座差异只会产生提示，不会让 `dpkg` 失败。逐条：
 
@@ -122,13 +167,19 @@ postinst 的设计原则是「**校验与提示为主，不阻断安装**」—�
    写 GRUB 片段 + fstab 并 `update-grub`（输出形如 `按机器规格取默认：RAM 7G → 1G 大页 1 页`），
    **需重启生效**；已有基线则只做一致性检查；
 8. **systemd 装载**：`daemon-reload` + `enable`；**首次安装不自动 start**（避免安装期抢占网卡）；
-   **升级时不停止**已在运行的 nfvisd（由 postinst 换新版本二进制并 try-restart）。
+   **升级时不停止**已在运行的 nfvisd（由 postinst 换新版本二进制并 try-restart）；
+9. **libvirt 的 AppArmor 放行**：向 `/etc/apparmor.d/local/usr.lib.libvirt.virt-aa-helper` 幂等追加
+   `/var/lib/nfvis/images/** r,` 与 `/var/lib/nfvis/vms/** rk,` 并重载该 profile——Ubuntu 的
+   virt-aa-helper 默认只放行 `/var/lib/libvirt/images`，不放行则 VM 启动会被 AppArmor 拒绝（首装实测）。
+   规则由 nfvisd 的同一实现落地（安装脚本调用 `nfvisd -ensure-libvirt-apparmor`），nfvisd **启动时补一次、
+   之后每 60 秒复核一次**：因为 libvirt 可能晚于 nfvis 安装、或与它在同一次 `apt`/`dpkg` 事务里被后配置，
+   那时安装脚本的探测条件还不成立——只靠安装期那一步会在这种顺序下静默漏掉（VM 直到被启动才失败）。
 
 > **基线会自动补全本机参数**：安装期写出的 GRUB 片段除大页外还含按 CPU 厂商自动补的参数
 > （Intel：`intel_iommu=on intel_pstate=disable`；AMD：`amd_iommu=on amd_pstate=disable`；都补 `iommu=pt`）。
 > 实测这能把 VMware 等 vIOMMU 真正打开，vfio 绑定不再需要不安全模式。
 
-### 2.3 安装后检查清单
+### 2.4 安装后检查清单
 
 ```bash
 dpkg -l nfvis                                       # 已安装
@@ -139,7 +190,7 @@ cat /etc/default/grub.d/99-nfvis.cfg                # 基线片段（需重启�
 ls /etc/ssh/sshd_config.d/                          # 应有 99-nfvis.conf
 ```
 
-### 2.4 方式 B：从源码运行（开发/验证）
+### 2.5 方式 C：从源码运行（开发/验证）
 
 ```bash
 git clone <repo> && cd nfvis
@@ -161,25 +212,26 @@ ssh root@<vm> 'PROXY=http://<proxy>:2333 ./provision.sh'   # PROXY 按需，直�
 1G×N 大页（经 `-print-kernel-baseline` 生成，与 CLI 同源）、`/opt/nfvis/{src,images,incoming,backup}`。
 日志：`/var/log/nfvis-provision.log`。**大页需 reboot 生效**；VPP 装后设为不自启。
 
-### 2.5 升级与降级
+### 2.6 升级与降级
 
 ```bash
-# 升级：直接装新 deb。postinst 会 try-restart 已在运行的 nfvisd 加载新版本（服务保持运行换二进制）
-sudo dpkg -i nfvis_1.1.19_amd64.deb
+# 升级：直接装新 deb（或跑新版的 .run——它会把产品包与依赖一并更新）。
+# postinst 会 try-restart 已在运行的 nfvisd 加载新版本（服务保持运行换二进制）
+sudo dpkg -i nfvis_1.1.47_amd64.deb
 systemctl is-active nfvis && /usr/bin/nfvisd -version   # 验证版本
 
 # 降级：dpkg 允许；同上验证版本即可
-sudo dpkg -i nfvis_1.1.18_amd64.deb
+sudo dpkg -i nfvis_1.1.19_amd64.deb
 ```
 
-> 配置库在 `/var/lib/nfvis/nfvis.db`，**升级/降级/purge 都不会动它**（见 §2.6）。
+> 配置库在 `/var/lib/nfvis/nfvis.db`，**升级/降级/purge 都不会动它**（见 §2.7）。
 > 保险起见，动包管理前先备份（§10.7 的 `request system configuration backup`，或直接
 > `sqlite3` 在线备份 `/var/lib/nfvis/nfvis.db`）。
 
 `request system software add` 是**经 CLI/API 的在线升级**路径（校验 sha256 → 升级 → 重启
 nfvisd → 报告），见 §10.11。
 
-### 2.6 卸载（purge）与残留清理
+### 2.7 卸载（purge）与残留清理
 
 ```bash
 sudo dpkg --purge nfvis
@@ -1315,14 +1367,14 @@ nfvis$ request system ntp sync                 # 手动触发一次 NTP 同步
 ### 10.11 软件升级、重启与关机
 
 ```bash
-nfvis$ request system software add /data/incoming/nfvis_1.1.19_amd64.deb sha256 <hex>
+nfvis$ request system software add /data/incoming/nfvis_1.1.47_amd64.deb sha256 <hex>
 nfvis$ request system software rollback [to <version>]
 nfvis$ request system reboot
 nfvis$ request system shutdown
 ```
 
 - `software add` 先校验 sha256（可选但强烈建议）→ 安装 → 重启 nfvisd → 报告；
-- 升级期间配置库不受影响；`purge` 才会清运行态（配置数据仍保留，见 §2.6）。
+- 升级期间配置库不受影响；`purge` 才会清运行态（配置数据仍保留，见 §2.7）。
 
 ### 10.12 Web 控制台（导航 / 配置 / 运维）
 

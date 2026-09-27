@@ -442,7 +442,11 @@ hdr "S9 运行态对象是否被视图反映（**计入判定**：一侧非空�
 # 旧口径「诊断，不计失败」+ 两侧都空 → 静默通过：**没有对象时永远绿**，于是「视图根本没接运行态」
 # 这类缺陷在空环境里一次也测不出来。新口径按 s9_verdict 三档判（两侧都空 = 无对象可对照 = 不可判定）。
 libv=$(virsh list --all 2>/dev/null | awk 'NR>2 && $2!="" {print $2}' | tr '\n' ' ')
-dockerps=$(docker ps --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')
+# `-a` 必须带上：产品把「已声明但未运行」的容器如实列成 exited（absent 同理），而 VM 侧 oracle
+# 用的就是 `virsh list --all`（含关机域）——只列运行中的容器与「全部声明」比较是**不对称**的，
+# 任何 exited 容器都会变成假红（round85 实测：套件留下的 cli-ct2 exited 让 S9 判失败，而 CLI
+# 与 `docker ps -a` 完全一致）。oracle 取错事实与实现出错一样会毁掉信任。
+dockerps=$(docker ps -a --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')
 # CLI 视图第一行是表头，必须跳过（否则 "Name" 会被当成对象）；「（无容器）」这类整句按空处理。
 clivm=$(cli "show virtual-machine-functions" | awk 'NR>1 && $1 !~ /^（/ {print $1}' | tr '\n' ' ')
 clict=$(cli "show container-functions" | awk 'NR>1 && $1 !~ /^（/ {print $1}' | tr '\n' ' ')

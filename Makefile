@@ -70,11 +70,18 @@ docscheck:
 # 该项用 node 跑 DOM 桩；没有 node 的环境会如实说"没跑"（产品构建与其余检查都不依赖 node）。
 # 2026-09-24 补第四项：控制台的分级确认（低/中/高危）——高危的确认词与倒计时必须**真的**
 # 让「执行」按钮点不动，且确认前/取消后一条请求都不许发；档位归位也由同一张表守护。
+# 2026-09-27 补第五、六项：离线安装包（.run）工具链——
+#   ⑤ 维护脚本/安装器「顶层 exit 之后不得有可执行语句」（决策 #181：postinst 的 AppArmor
+#      放行块曾在 exit 0 之后静默失效一轮，安装报成功而 VNF 起不来）；
+#   ⑥ .run 的依赖闭包校验器自校准（已知自洽→通过、缺一个包→报缺口）——离线漏包
+#      只有在气隙机器上才炸，必须在构建端静态判定。
 toolcheck:
 	bash contrib/scripts/cli-fulltest-selftest.sh
 	bash contrib/scripts/cli-semantic-selftest.sh
 	bash contrib/scripts/web-console-config-selftest.sh
 	bash contrib/scripts/web-console-confirm-selftest.sh
+	bash contrib/scripts/check_maint_scripts.sh
+	bash contrib/scripts/offline-installer-selftest.sh
 
 # 真机集成测试（M3）：需 VPP 运行环境（nfvis-vm）。无环境时跳过并提示，CI 不跑。
 # 约定：build tag integration + 环境变量 NFVIS_VPP_SOCK（缺省 /run/vpp/api.sock）。

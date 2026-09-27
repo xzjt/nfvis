@@ -70,13 +70,16 @@ vpp_bond_set()    { vppctl show bond details 2>/dev/null | tr -d '\r' | awk '/^B
 vpp_bond_members(){ vppctl show bond details 2>/dev/null | tr -d '\r' | awk 'NF==1 && $1 !~ /^BondEthernet/ && $1 !~ /:$/ {print $1}' | sort -u; }
 vpp_bd_ids()      { vppctl show bridge-domain 2>/dev/null | tr -d '\r' | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $1}' | sort; }
 vpp_bd_tag()      { vppctl show bridge-domain "$1" detail 2>/dev/null | tr -d '\r' | sed -n 's/.*BD-Tag: //p'; }
-vpp_bd_index_of_tag() {
-  local tag="$1" id d idx
+# 按交换机名（BD-Tag）找 bridge-domain 的 **BD-ID**。
+# 注意返回的是 BD-ID，不是 Index：`vppctl show bridge-domain <参数>` 认 BD-ID，而本函数的唯一
+# 调用方就是成员表比对（vpp_bd_members 也直接吃 BD-ID）。早先这里返回 Index（$2），于是成员表
+# 查询永远为空——**工具假红**：直读 `show bridge-domain <BD-ID> detail` 明明有 vh- 成员，脚本
+# 却报「vNIC 从未挂进 BD」（round85 首次把带 vNIC 的 VNF 交给本脚本时才暴露：#171 之后首次
+# 真正走到 L3-1 的 L2 分支）。
+vpp_bd_id_of_tag() {
+  local tag="$1" id
   for id in $(vpp_bd_ids); do
-    [ "$(vpp_bd_tag "$id")" = "$tag" ] || continue
-    d=$(vppctl show bridge-domain "$id" detail 2>/dev/null)
-    idx=$(printf '%s\n' "$d" | tr -d '\r' | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $2; exit}')
-    [ -n "$idx" ] && { echo "$idx"; return; }
+    [ "$(vpp_bd_tag "$id")" = "$tag" ] && { echo "$id"; return; }
   done
 }
 # 成员表：首列接口名、次列数字 If-idx；无成员时 VPP 整块不打印成员表（空集合是正常结果）
@@ -385,12 +388,12 @@ else
         bad "L3-1 $vm 的 $nic 声明归 $vs，但 VPP 里没有 $ifn（vNIC 未落地）"
         continue
       fi
-      bdidx=$(vpp_bd_index_of_tag "$vs")
-      if [ -n "$bdidx" ]; then        # L2 交换机：成员表里必须有它（否则 guest 静默失去 L2 连通）
-        if vpp_bd_members "$bdidx" | grep -qx "$ifn"; then
-          ok "L3-1 $ifn 在该交换机的 BD 成员里（$vs index=$bdidx）"
+      bdid=$(vpp_bd_id_of_tag "$vs")
+      if [ -n "$bdid" ]; then         # L2 交换机：成员表里必须有它（否则 guest 静默失去 L2 连通）
+        if vpp_bd_members "$bdid" | grep -qx "$ifn"; then
+          ok "L3-1 $ifn 在该交换机的 BD 成员里（$vs bd-id=$bdid）"
         else
-          exp_act "$ifn 出现在 $vs 的 BD 成员表" "成员: $(vpp_bd_members "$bdidx" | tr '\n' ' ')"
+          exp_act "$ifn 出现在 $vs 的 BD 成员表" "成员: $(vpp_bd_members "$bdid" | tr '\n' ' ')"
           bad "L3-1 $ifn 从未挂进 $vs 的 bridge-domain（guest 拿不到地址，且全程零报错）"
         fi
       else                             # L3 交换机：看它属于哪张表（地址行里的 table-id）

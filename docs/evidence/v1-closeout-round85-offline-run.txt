@@ -1,0 +1,191 @@
+================================================================================
+round85 证据：离线一键安装包（nfvis-v1.1.47.run）——干净快照 + 封锁出网下的安装、
+重启生命周期、四维覆盖；途中抓到并修两条安装路径缺陷（决策 #181/#182）
+================================================================================
+日期：2026-09-27
+范围：新增交付形态 .run（决策 #180）；AppArmor 放行链路修复（#181/#182）；交付件构建与真机验收
+环境：nfvis-vm（192.168.155.129，SSH 密钥免密）= VMware 虚机，快照「干净」恢复后：
+      Ubuntu 26.04.1 LTS / amd64 / 6 vCPU / 7376 MB；715 个已装包；
+      **无** vpp/nfvis/libvirt/qemu/docker（`vppctl`/`nfvis-cli`/`virsh`/`docker` 全缺）；
+      cmdline 无 hugepages/isolcpus；`/var/lib/nfvis` 不存在；apt 源 USTC；
+      自带 `/root/vpp-v26.06-deb/`（9 个 26.06-release deb）。
+      ⚠️ 快照**没有** make/go（只有 git、dpkg-deb、curl、chrony、tcpdump）——构建须另装工具链。
+构建端：同一台 VM（后装 `make golang-go`，go1.26.0）；跨机传输用 scp；
+      网络：USTC 直连可用，另有代理 192.168.155.1:2333（本轮未使用）。
+源码：分支 `feat/offline-run-installer`；工具链/修复 `d994266`、`9efd9ba`、`562d350`、`6a26f68`、`aa990f4`；
+      文档与 oracle 修正 `bf9e789`；证据文件本文（末次提交）。
+产品版本：1.1.47（未发布 GitHub Release）。
+
+----- §1 交付物：nfvis-v1.1.47.run（自解压单文件）--------------------------------
+形态：头部 shell + gzip 载荷（tar）。载荷 = `install.sh`（安装器）+ `VERSION` + `MANIFEST.tsv`
+      （逐包 sha256）+ `BUILD-INFO.txt` + `SHA256SUMS` + `debs/`（238 个 deb，171 MB）+
+      `debs/Packages`（本地扁平源索引，只用 dpkg-deb -f 生成）。
+
+被验收件（本轮全部真机测试都打在它上面）：
+  build/nfvis-v1.1.47.run  178,463,630 字节
+  sha256 f6dd2efa77332813cc0169383437c72d61f8ab26626721282bae529f0f1c81fa
+  内含 nfvis_1.1.47_amd64.deb = d1232455d5521bd4e098fd1b0737b5a13f2174028427138f1751346972b5d94e
+  （该 deb 两次 `make deb VERSION=1.1.47 SOURCE_DATE_EPOCH=1790490069` 哈希一致）
+
+可复现：`build-offline-run.sh` 用 tar 排序 + 固定 mtime/属主（--epoch）+ `gzip -9n`；
+        同一批 deb + 同版本 + 同时间锚，连打两次 sha256 一致（实测：一次 6bcda7c2…（上一修订）、
+        最终件 d3a37c16…（§6）各自两打一致）。
+
+产物结构自检（`offline-installer-selftest.sh --run …`，12/12）：
+  自解压头部可执行、载荷可解包；SHA256SUMS 逐文件一致；Packages 条目数 = deb 数 = 238；
+  索引内 sha256 与实际 deb 逐一一致；依赖闭包自洽（238 包、837 条依赖声明、312 个提供名）；
+  安装清单 16 个包名都在载荷内；nfvis 包版本 = VERSION = 1.1.47。
+
+----- §2 干净快照基线 + 封锁出网（含探针自校准）----------------------------------
+基线（安装前实测）：715 包；vppctl/nfvis-cli/nfvisd/virsh/docker/qemu-img/cloud-localds 全缺；
+  make/go 缺；cmdline 无 hugepages/isolcpus；无 `/var/lib/nfvis`；apt 源 USTC。
+
+封锁出网（证明「离线可装」不是口号）：
+  iptables-save 备份 → `-I OUTPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT`、
+  `-I OUTPUT 2 -o lo -j ACCEPT`、`-A OUTPUT -j REJECT`；之后 iptables 计数显示
+  REJECT 5534 包、ESTABLISHED 放行 5811（SSH 未断，红线「管理路径」未被碰）。
+探针自校准（先证明「已知可达」的目标确实不可达，否则封锁结论无效）：
+  直连 USTC      → curl: (28) Resolving timed out after 6001 ms，code=000
+  经代理 :2333   → curl: (7) Failed to connect … Could not connect to server，code=000
+  回环 127.0.0.1 → code=200（临时 python http.server 自校准：自检要用回环，必须仍可用）
+安装后恢复出网并复核：`curl https://mirrors.ustc.edu.cn/` → 200。
+
+----- §3 离线安装：18/18 全绿、退出码 0（被验收件） --------------------------------
+命令：`sh /root/nfvis-v1.1.47.run -y`（默认路径：不预置口令，走随机一次性口令）
+结果（安装器自己的输出，节选）：
+  计划：4 upgraded, 57 newly installed, 0 to remove and 173 not upgraded
+  apt 安装完成（62 个包完成配置）；dpkg 审计无半装项；载荷 sha256 逐文件一致
+  vpp.service 已设为开机不自启（由 nfvis 管理）
+  VPP API 套接字就绪 /run/vpp/api.sock；控制面 HTTP 200
+  [通过] 18 项；[失败] 0；[不可判定] 0；退出码 0
+  admin 口令（首次启动的一次性口令，仅此一处）：LQo79mRLbzhYje8y@Aa1
+
+独立事实源（不经安装器，逐项对照）：
+  dpkg-query：nfvis 1.1.47 / vpp 26.06-release / vpp-plugin-core / vpp-plugin-dpdk / vpp-drivers /
+    libvirt-daemon-system 12.0.0-1ubuntu5.4 / libvirt-clients / qemu-system-x86 1:10.2.1+ds-1ubuntu3.2 /
+    qemu-utils / cloud-image-utils 0.33-1build1 / genisoimage 9:1.1.11-5 / docker.io 29.1.3-0ubuntu4.1 /
+    chrony 4.8-2ubuntu1 / tcpdump 4.99.6-1 / curl 8.18.0-1ubuntu2.7 —— 全部 `install ok installed`
+  已装包数 715 → 772；`dpkg -C` 输出为空
+  systemd：nfvis active/enabled、vpp active/**disabled（设计如此**，由 nfvis 管）、docker active/enabled、
+    libvirtd active/enabled
+  vppctl show version → `vpp v26.06-release built by root on 4bf4caa1c4e5 at 2026-06-24T09:27:07`
+  curl --cacert /var/lib/nfvis/tls/server.crt https://127.0.0.1/api/v1/ui/ → HTTP 200
+  nfvis-cli `show version` → NFViS 1.1.47 / Ubuntu 26.04 / VPP 26.06-release / DPDK（未探测到）/
+    libvirt 12.0.0 / QEMU 10.2.1 / Docker 29.1.3
+  nfvis-cli `show vpp` → version 26.06-release、connected: yes、pending_restart: no
+  aa-status 里 virt-aa-helper 条目数 = 1（放行真的进了内核策略）
+  journal：`首次启动已创建用户 admin` → `libvirt AppArmor 已放行 NFViS 镜像/VM 路径` →
+    `nfvisd 就绪` → `已连接 VPP` → `恢复收敛完成`
+  系统 apt 源仍只有 USTC（安装器没动它）；`/etc/fstab` 与 `/etc/default/grub.d/99-nfvis.cfg` 由安装期写入
+
+----- §4 安装路径抓到的缺陷 #181 / #182（红 → 绿）---------------------------------
+本轮第一次干净机离线安装（旧构建）时，**.run 自己的独立自检**报了 17/18：
+  [失败] AppArmor 未放行 /var/lib/nfvis（VNF 启动会被拒绝）
+  → `/etc/apparmor.d/local/usr.lib.libvirt.virt-aa-helper` 存在但**0 字节**；`--verify` 复跑仍 17/18/1。
+根因两条，都属「装机报成功、功能起不来」：
+  #181：决策 #159 声称的放行实现被追加在 postinst 的 `exit 0` **之后**——死代码，永不执行。
+  #182：即便把那段移到 exit 之前也不够——本机 libvirt 与 nfvis 落在**同一次 apt 事务**里，
+    apt 先配置 nfvis、后配置 libvirt，postinst 探测 profile 的条件当时尚不成立 → 静默跳过。
+修法（同一台机器上验证红→绿，证据见下）：
+  · 规则只写一处（Go：`internal/system/apparmor.go` 的 `AppArmorLibvirt.Ensure`：幂等追加两条路径规则
+    + `apparmor_parser -r` 重载；无 profile 静默跳过；写盘成功但重载失败如实报错）；
+  · 三处共用：postinst 改调 `nfvisd -ensure-libvirt-apparmor`、nfvisd 启动时补一次、60s 巡检周期复核
+    （覆盖「nfvisd 起来之后才装 libvirt」）；
+  · 新增守护 `check_maint_scripts.sh`（顶层 exit 之后不得有可执行语句）+ 两处自校准进 `make check`。
+红→绿实测（同一台暴露过缺陷的机器）：
+  修复版 deb 两次构建哈希一致（d1232455…）→ `dpkg -i` → postinst 打印放行检查完成 →
+  放行文件内容为两条规则 → `nfvisd -ensure-libvirt-apparmor` 复跑报「无需改动」（幂等）→
+  `.run --verify` 转 **12/12（0 失败）**。
+全新安装（干净快照 + 封锁出网）复验：18/18、退出码 0（§3）。
+
+----- §5 重启生命周期（②）--------------------------------------------------------
+重启后（`systemctl reboot`）：
+  cmdline：`default_hugepagesz=1G hugepagesz=1G hugepages=4 hugepagesz=2M hugepages=768
+            isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5 irqaffinity=0-1 intel_iommu=on iommu=pt`
+            （安装期写的 GRUB 基线生效）
+  大页池：1G=4 / 2M=768；`/dev/hugepages` 挂载 pagesize=1024M；`/sys/devices/system/cpu/isolated` = 2-5
+  服务：nfvis active/enabled ✓（**systemd 自起**）、docker/libvirtd active/enabled ✓、vpp inactive/disabled
+    （设计：由 nfvis 在 `request vpp restart` 时写 startup.conf 并拉起）
+  配置库仍在（`/var/lib/nfvis/nfvis.db`）；控制面 HTTP 200
+  `show system kernel` 三方对照：cmdline 1G=4 / 2M=768 / isolcpus=2-5 = 运行实际 = 配置期望，
+    结论「内核基线与配置期望一致（无需重启）」
+  产品路径拉起数据面：`request vpp restart` → 已按 committed 配置重启并触发恢复收敛；
+    vppctl `show threads`：vpp_main lcore 2、vpp_wk_0 lcore 3、vpp_wk_1 lcore 4（与
+    startup.conf 的 `cpu { main-core 2; corelist-workers 3-4 }` 逐项吻合）
+  资源池规划（等价 wizard：1G=4 / 2M=768 / isolated 2-5 / vpp main-core 2 + workers 3-4 /
+    hugepage-preference 2M）→ `request system kernel apply` → 重启 → 复核一致（rev 3）。
+
+----- §6 文档定稿后的重切（交付件）与「只文档变」证明 ------------------------------
+文档（手册 §2.2 新增 .run 一节、规格书附录 A 决策 #180~#182）定稿后重切：
+  新 deb sha256 61ea1d289e8093901740573172ad97bb8c55efe0937407bdbdc57e7eca3e7be0（两打一致）
+  与被验收 deb（d1232455…）`dpkg-deb -x` 后逐文件对照：**只有两个文件不同**——
+    `usr/share/doc/nfvis/NFViS-用户手册.md`、`…/NFViS-系统产品需求与目标架构规格书.md`；
+    `usr/bin/nfvisd` 与 `usr/bin/nfvis-cli` **逐字节相同**（cmp 一致）
+  交付件（重切）build/nfvis-v1.1.47.run = d3a37c16c650cc57a63f6d65d998c2ad82c9bd7d69949c0f410266da8e549803
+    （两次打包一致；结构自检 12/12；闭包自洽）
+  交付件真机冒烟（升级路径，machine 已配置）：`sh nfvis-v1.1.47.run -y` → 18/18、退出码 0
+    （口令提示正确地写成「既有 admin 口令（取自日志，本次已用它登录 CLI 验证）」）
+
+----- §7 四维覆盖（②③④，套件复跑；均在离线安装 + 重启 + 数据面声明之后）------------
+数据面前置（按手册 §7）：`request interfaces ens192/ens224 bind-dpdk --yes` →
+  `set interfaces … description` + `set vpp dpdk dev …` → `request vpp restart`；
+  vppctl 直读：ens192/ens224 up MTU 9000；startup.conf 的 `dpkg { dev 0000:0b:00.0 {name ens192} … }`
+  按 PCI 生成；管理口 ens160 全程未受影响（SSH 未断）。
+
+cli-fulltest.sh（①「命令能不能用」续，单遍干净跑）：**194 通过 / 1 失败 / 12 预期报错**
+  唯一失败 = `show vpp runtime`（附录 A #34 已登记的未接入项；round80 基线的同一条失败）。
+cli-semantic-check.sh（④ 对抗性等价对照 / 独立事实源 + 扰动）：**12 通过 / 0 失败 / 1 不可判定**
+  不可判定 = S8 MAC 表 ↔ l2fib（该交换机没有能产生流量的成员，缺正向控制）——按口径单列、不计通过。
+cli-lifecycle-check.sh（② 生命周期 + ③ 跨对象组合）：**15 通过 / 1 失败 / 5 不可判定**
+  L1 删对象后回读（全 ✓）：删 L3 交换机后配置逐字节还原、同名 VRF 不残留、v4/v6 两张表都从
+    `show ip table` 消失、该口回默认表、声明的静态路由已撤销（#178/#179 的修复面确实成立）。
+  L3-1 组合（✓）：`vh-vnf-r85-eth0` 在 `vs-r85` 的 BD 成员里（bd-id=6857658）——与 `vppctl` 直读一致。
+  L2 重启/重放（✓）：`systemctl restart vpp` 后统计可用且与 VPP counters 一致、日志无「未收敛」项。
+  唯一失败 = L1-2 建 bond：本机两个业务口都已有角色（ens192 在 bond0 里、ens224 已被声明），
+    脚本退而用 `bond0` 当成员被产品**正确拒绝**（`bonds[rc84t-b0].members: 成员口 "bond0" 不是物理口`）
+    ——前置不满足，不是产品缺陷。
+  5 项不可判定：SPAN 需两个自由口（本机只有 2 个且都带角色）、NAT 对账（配置里没有 NAT）、
+    vNIC 转发域连通性（邻居表里没有该域主机，需真实流量）、cli-vm 无 vNIC（套件自身对象）。
+cli-pty-smoke.sh（交互行为，pty 下）：**10 通过 / 0 失败**（`?`/Tab 即时列候选、不污染行文本、
+  管道路径不被 CRLF 污染）。
+③ 的直接硬证据（人工构造跨对象组合）：L2 交换机 `vs-r85` + 带 vhost-user vNIC 的 VNF `vnf-r85`
+  → `virsh domstate vnf-r85` = **running**（同时印证 AppArmor 放行真的够用：guest 盘在
+  `/var/lib/nfvis` 下）、VPP 里 `vh-vnf-r85-eth0` up 且 rx 计数非 0（guest 已在发包）、
+  `vppctl show bridge-domain 6857658 detail` 成员表含该口且 `BD-Tag: vs-r85`。
+  另一条实测约束：VM 内存 256 MB < 1G 页大小 → QEMU 拒绝启动
+  （`memory size 0x10000000 must be equal to or larger than page size 0x40000000`），改 1024 MB 即起，
+  说明「1G 页池下 VM 至少要一个整页」是硬约束。
+
+----- §8 工具假红两处（都已修）----------------------------------------------------
+1) cli-semantic-check.sh 的 S9 容器 oracle 用 `docker ps`（只列运行中）却与「全部声明容器」比较：
+   套件留下的 `cli-ct2` 处于 exited，被判「CLI 有对象而 Docker 为空」——而 `docker ps -a` 与
+   CLI 视图完全一致（cli-ct2 exited）。**oracle 取错事实**，改 `docker ps -a`
+   （VM 侧本来就用 `virsh list --all`，两侧本应对称）。
+2) cli-lifecycle-check.sh 的 L3-1 用 `vpp_bd_index_of_tag` 返回的 **Index**（2）去查
+   `show bridge-domain <参数>`（该参数要的是 **BD-ID**）→ 成员表恒空 → 报「vNIC 从未挂进 BD」，
+   而 `vppctl show bridge-domain 6857658 detail` 明明白白列着成员。改为返回 BD-ID
+   （`vpp_bd_id_of_tag`），复跑转 ✓（15 通过）。这两处都是「首次真正走到该分支」才暴露。
+
+----- §9 观察与如实登记 -----------------------------------------------------------
+1) 重启后 1G 池为何是 4 而不是基线的 1：**VPP 包自带的 `/etc/sysctl.d/80-vpp.conf` 有
+   `vm.nr_hugepages=1024`**，开机时按缺省页大小（1G）尽力分配，实际拿到 4 页（dmesg
+   `HugeTLB: registered 1.00 GiB page size, pre-allocated 1 pages` 是内核按 cmdline 预分配的 1 页，
+   其余为 sysctl 追加）。安装前（默认页大小 2M）同一 sysctl 给出的是 2M=1024 页。
+   `show system kernel` 会同时打印「内核基线(cmdline)」与「运行实际」，两者可不等而各自如实；
+   本轮把资源池显式规划为 1G=4 / 2M=768 之后，三方一致。
+2) 套件重跑口径：cli-fulltest 的阶段 3 头部写明「幂等：重复运行只会因『无变更』报错，属正常」；
+   本机第二次跑（未清理上轮对象）出现 11 条此类失败，清理对象/镜像注册 + `request interfaces
+   ens224 enable` + 恢复 docker 镜像后，单遍跑即 194/1。
+3) `show vpp runtime` 未接入（附录 A #34）——已登记缺口，非本轮回归。
+4) 快照恢复会清掉：make/go、`/root/ob`、镜像（`debian-12-generic-amd64.qcow2` 未复原，
+   `alpine.qcow2` 与 docker `alpine:3.20` 本轮已放回）、口令（现为 LQo79mRLbzhYje8y@Aa1）。
+
+----- §10 结论 -------------------------------------------------------------------
+· 离线一键安装包可用：干净 Ubuntu 26.04（715 包）在**封锁出网**下 `sh nfvis-v1.1.47.run -y`
+  18/18 自检全绿、退出码 0；重启后内核基线与服务自起成立；产品路径（bind-dpdk + dpdk dev 声明 +
+  request vpp restart）拉通数据面后，三件套 + pty 全部复跑（194/1、12/0/1、15/1、10/0）。
+· 安装路径上两条「装机报成功、功能起不来」的缺陷已修并红→绿验证（#181 死代码、#182 安装顺序）；
+  两处工具假红（语义容器 oracle、生命周期 BD-ID）已修。
+· 未发布 GitHub Release；交付件（重切）sha256 d3a37c16…，与全量真机验收件 f6dd2efa… 的差异
+  经逐文件对照证明**只在随包文档**（二进制逐字节相同）。
+================================================================================
