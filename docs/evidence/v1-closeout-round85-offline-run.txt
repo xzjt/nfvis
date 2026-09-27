@@ -14,7 +14,9 @@ round85 证据：离线一键安装包（nfvis-v1.1.47.run）——干净快照 
       网络：USTC 直连可用，另有代理 192.168.155.1:2333（本轮未使用）。
 源码：分支 `feat/offline-run-installer`；工具链/修复 `d994266`、`9efd9ba`、`562d350`、`6a26f68`、`aa990f4`；
       文档与 oracle 修正 `bf9e789`；证据文件本文（末次提交）。
-产品版本：1.1.47（未发布 GitHub Release）。
+产品版本：1.1.47（**已发布**：GitHub Release `v1.1.47`，tag → `main 44a8749`（PR #229 squash 合并）；
+          发布件 `.run` sha256 26349b76d48b12489f8b3653f84ed9cbe704d6f04a687311ccac7aa75e3c47b8、
+          deb sha256 3031b54da30a062b43c0e66043b53cf8dcc79a8110bf1c2bdd944c1fc97d3191）。
 
 ----- §1 交付物：nfvis-v1.1.47.run（自解压单文件）--------------------------------
 形态：头部 shell + gzip 载荷（tar）。载荷 = `install.sh`（安装器）+ `VERSION` + `MANIFEST.tsv`
@@ -126,6 +128,19 @@ round85 证据：离线一键安装包（nfvis-v1.1.47.run）——干净快照 
   交付件真机冒烟（升级路径，machine 已配置）：`sh nfvis-v1.1.47.run -y` → 18/18、退出码 0
     （口令提示正确地写成「既有 admin 口令（取自日志，本次已用它登录 CLI 验证）」）
 
+发布（`v1.1.47`，目标 main）：
+  tag → commit：`gh api …/git/refs/tags/v1.1.47` = `44a87494a0f60410eac722ed8a6f55cb1cf42d2d`（type=commit）
+  构建可复现：`main 44a8749` + `SOURCE_DATE_EPOCH=1790494742`，`make deb` 连打两次 sha256 一致；
+    重打 `.run` 两次亦一致
+  发布件 deb（3031b54d…）与被全量验收的 deb（d1232455…）`dpkg-deb -x` 逐文件对照：**只有用户手册与规格书
+    两个文件不同，`nfvisd`/`nfvis-cli` 逐字节相同**；发布件 `.run` 的 `--verify` 12/12、升级路径 18/18
+  资产（4 个，名称不带本地后缀）：`nfvis-v1.1.47.run` + `.sha256`、`nfvis_1.1.47_amd64.deb` + `.sha256`
+  回下载比对：deb 取回后 sha256 = 3031b54d… 且 `cmp` 与构建端逐字节一致；`.run`（178 MB）取回较慢，
+    改以 **GitHub 资产 digest（服务端对已存对象算的 sha256）** 核对 = `sha256:26349b76…`，与构建端一致
+    （构建端 / 上传件两处一致；deb 另经回下载逐字节复核）
+  环境注记：虚机**挂起/恢复**后 VPP 进程不可用（vpp 单元 inactive）——`.run --verify` 如实报失败而非假绿；
+    `request vpp restart` 后复跑 12/12 通过。
+
 ----- §7 四维覆盖（②③④，套件复跑；均在离线安装 + 重启 + 数据面声明之后）------------
 数据面前置（按手册 §7）：`request interfaces ens192/ens224 bind-dpdk --yes` →
   `set interfaces … description` + `set vpp dpdk dev …` → `request vpp restart`；
@@ -186,6 +201,8 @@ cli-pty-smoke.sh（交互行为，pty 下）：**10 通过 / 0 失败**（`?`/Ta
   request vpp restart）拉通数据面后，三件套 + pty 全部复跑（194/1、12/0/1、15/1、10/0）。
 · 安装路径上两条「装机报成功、功能起不来」的缺陷已修并红→绿验证（#181 死代码、#182 安装顺序）；
   两处工具假红（语义容器 oracle、生命周期 BD-ID）已修。
-· 未发布 GitHub Release；交付件（重切）sha256 d3a37c16…，与全量真机验收件 f6dd2efa… 的差异
-  经逐文件对照证明**只在随包文档**（二进制逐字节相同）。
+· 已发布 **v1.1.47**（tag `v1.1.47` → `main 44a8749`）：资产 `nfvis-v1.1.47.run`
+  （sha256 26349b76…）+ `nfvis_1.1.47_amd64.deb`（sha256 3031b54d…）各自带 `.sha256`；
+  回下载 sha256 一致、`cmp` 逐字节一致（构建端 / 上传件 / 回下载件 三处一致）。
+  发布件与全量真机验收件（f6dd2efa… / d1232455…）的差异经逐文件对照证明**只在随包文档**，二进制逐字节相同。
 ================================================================================
