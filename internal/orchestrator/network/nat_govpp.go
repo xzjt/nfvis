@@ -209,14 +209,69 @@ func (g *govppNatClient) NATStatic(add bool, inside, outside string) error {
 	return nil
 }
 
+// natUserVPP 一个 NAT44 用户：内网地址 + 其所属租户转发域。
+type natUserVPP struct {
+	ip    ip_types.IP4Address
+	vrfID uint32
+}
+
+// NATSessions 汇总 NAT44 EI 会话（运行态）。
+//
+// VPP 26.06 的 nat44_ei_user_session_dump 是**按用户** dump，不是全表 dump：请求要带具体
+// 内网用户地址 + 该用户的租户 VRF，VPP 用它定位用户后再遍历其会话。此前发的是
+// 0.0.0.0 / vrf 0——VPP 只当「查地址 0.0.0.0 那个用户」，找不到即结束应答，于是**恒 0 条**：
+// NAT 明明在转发（`vppctl show nat44 ei sessions detail` 有十几条转换），`show nat` 却报
+// 「无 NAT 会话」（round84 R84-27 真机实测）。故：先 nat44_ei_user_dump 列用户，再逐用户按其
+// 地址 + **user_dump 返回的**租户 VRF 查会话并汇总——用户表是全局的，漏掉任何一个用户都会少报会话。
+//
+// 用户表为空（还没有任何用户）如实返回空——那是「无会话」，不是错误；读取失败原样上抛，
+// **不做静默降级**：退回 0.0.0.0/vrf 0 只会重新变成「恒报无会话」这种答非所问。
 func (g *govppNatClient) NATSessions() ([]NATSession, error) {
-	reqCtx := g.ch.SendMultiRequest(&nat44_ei.Nat44EiUserSessionDump{IPAddress: ip_types.IP4Address{}})
+	users, err := g.natUsers()
+	if err != nil {
+		return nil, err
+	}
+	var out []NATSession
+	for _, u := range users {
+		rows, err := g.natUserSessions(u)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
+}
+
+// natUsers 列出 NAT44 用户（nat44_ei_user_dump）：每条带内网地址与租户 VRF。
+func (g *govppNatClient) natUsers() ([]natUserVPP, error) {
+	reqCtx := g.ch.SendMultiRequest(&nat44_ei.Nat44EiUserDump{})
+	var users []natUserVPP
+	for {
+		d := &nat44_ei.Nat44EiUserDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return nil, fmt.Errorf("列出 NAT44 用户: %w", err)
+		}
+		if stop {
+			break
+		}
+		users = append(users, natUserVPP{ip: d.IPAddress, vrfID: d.VrfID})
+	}
+	return users, nil
+}
+
+// natUserSessions 读一个用户的会话（nat44_ei_user_session_dump）。
+//
+// VRF 必须取自 user_dump 的返回（写死 0 或默认表都会查不到用户而静默返回空），
+// 该值就是会话所在租户转发域：VPP 侧该用户会话的 i2o 侧 fib 即由此 VRF 折算而来。
+func (g *govppNatClient) natUserSessions(u natUserVPP) ([]NATSession, error) {
+	reqCtx := g.ch.SendMultiRequest(&nat44_ei.Nat44EiUserSessionDump{IPAddress: u.ip, VrfID: u.vrfID})
 	var out []NATSession
 	for {
 		d := &nat44_ei.Nat44EiUserSessionDetails{}
 		stop, err := reqCtx.ReceiveReply(d)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("读取 NAT44 用户 %s（转发域 %d）的会话: %w", u.ip, u.vrfID, err)
 		}
 		if stop {
 			break

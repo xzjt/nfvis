@@ -18,10 +18,12 @@ import (
 
 // fakeAPIChannel 假 govpp API 通道：按请求类型应答并记录收到的请求。
 type fakeAPIChannel struct {
-	reply func(msg api.Message) error // 应答错误（nil = 正常应答）
-	fill  func(msg api.Message)       // 应答前填充 reply 字段（可选，模拟 VPP 返回值）
-	multi func(msg api.Message) bool  // 多请求逐条填充明细（返回 false = 明细已给完）
-	sent  []api.Message
+	reply      func(msg api.Message) error                  // 应答错误（nil = 正常应答）
+	fill       func(msg api.Message)                        // 应答前填充 reply 字段（可选，模拟 VPP 返回值）
+	multi      func(msg api.Message) bool                   // 多请求逐条填充明细（返回 false = 明细已给完）
+	multiByReq func(req api.Message) func(api.Message) bool // 按请求类型分派明细填充（可选，与 multi 互斥）
+	multiErr   func(req api.Message) error                  // 多请求的应答错误（可选）
+	sent       []api.Message
 }
 
 func (f *fakeAPIChannel) SendRequest(msg api.Message) api.RequestCtx {
@@ -33,8 +35,17 @@ func (f *fakeAPIChannel) SendRequest(msg api.Message) api.RequestCtx {
 	return rc
 }
 
-func (f *fakeAPIChannel) SendMultiRequest(api.Message) api.MultiRequestCtx {
-	return fakeMultiCtx{fill: f.multi}
+func (f *fakeAPIChannel) SendMultiRequest(msg api.Message) api.MultiRequestCtx {
+	f.sent = append(f.sent, msg)
+	fill := f.multi
+	if f.multiByReq != nil {
+		fill = f.multiByReq(msg)
+	}
+	ctx := fakeMultiCtx{fill: fill}
+	if f.multiErr != nil {
+		ctx.err = f.multiErr(msg)
+	}
+	return ctx
 }
 func (f *fakeAPIChannel) SubscribeNotification(chan api.Message, api.Message) (api.SubscriptionCtx, error) {
 	return nil, nil
@@ -56,9 +67,15 @@ func (c fakeRequestCtx) ReceiveReply(msg api.Message) error {
 }
 
 // fakeMultiCtx 假多请求应答：fill 逐条填充明细，填不出即视为结束（没有更多明细）。
-type fakeMultiCtx struct{ fill func(api.Message) bool }
+type fakeMultiCtx struct {
+	fill func(api.Message) bool
+	err  error
+}
 
 func (c fakeMultiCtx) ReceiveReply(msg api.Message) (bool, error) {
+	if c.err != nil {
+		return false, c.err
+	}
 	if c.fill == nil || !c.fill(msg) {
 		return true, nil
 	}
@@ -99,6 +116,164 @@ func TestNatGovppAddIdempotentOnValueExist(t *testing.T) {
 		if err := tc.call(&govppNatClient{ch: ch}); err == nil {
 			t.Errorf("%s 非 -81 错误必须上抛", tc.name)
 		}
+	}
+}
+
+// round84 R84-27：VPP 26.06 的 nat44_ei_user_session_dump 是**按用户** dump（要带具体内网
+// 地址 + 该用户的租户 VRF），发 0.0.0.0/vrf 0 时 VPP 只当「查地址 0.0.0.0 那个用户」→ 恒 0 条，
+// 而 NAT 明明在转发。本测试钉住正确调用序列：先一次 user_dump 列用户，再逐用户按其地址 +
+// **user_dump 返回的** VRF 查会话，并把各用户的会话汇总。
+func TestNatGovppSessionsDumpPerUser(t *testing.T) {
+	users := []struct {
+		ip       string
+		vrf      uint32
+		sessions int
+	}{
+		{"192.168.200.10", 8922296, 2},
+		{"192.168.200.11", 8922296, 1},
+	}
+	userIdx := 0
+	ch := &fakeAPIChannel{multiByReq: func(req api.Message) func(api.Message) bool {
+		switch r := req.(type) {
+		case *nat44_ei.Nat44EiUserDump:
+			return func(msg api.Message) bool {
+				if userIdx >= len(users) {
+					return false
+				}
+				d, ok := msg.(*nat44_ei.Nat44EiUserDetails)
+				if !ok {
+					return false
+				}
+				addr, err := ip_types.ParseIP4Address(users[userIdx].ip)
+				if err != nil {
+					return false
+				}
+				d.IPAddress, d.VrfID = addr, users[userIdx].vrf
+				d.Nsessions = uint32(users[userIdx].sessions)
+				userIdx++
+				return true
+			}
+		case *nat44_ei.Nat44EiUserSessionDump:
+			// 只有地址与租户 VRF 都对得上才答得出来（真 VPP 查不到用户即空应答）
+			match := -1
+			for i, u := range users {
+				addr, err := ip_types.ParseIP4Address(u.ip)
+				if err == nil && r.IPAddress == addr && r.VrfID == u.vrf {
+					match = i
+				}
+			}
+			got := 0
+			return func(msg api.Message) bool {
+				if match < 0 || got >= users[match].sessions {
+					return false
+				}
+				d, ok := msg.(*nat44_ei.Nat44EiUserSessionDetails)
+				if !ok {
+					return false
+				}
+				in, _ := ip_types.ParseIP4Address(users[match].ip)
+				out, _ := ip_types.ParseIP4Address("192.168.155.62")
+				d.InsideIPAddress, d.OutsideIPAddress = in, out
+				d.InsidePort, d.OutsidePort = uint16(570+got), uint16(19948+got)
+				d.Protocol, d.TotalPkts = 1, uint32(got+1)
+				got++
+				return true
+			}
+		}
+		return nil
+	}}
+
+	rows, err := (&govppNatClient{ch: ch}).NATSessions()
+	if err != nil {
+		t.Fatalf("NATSessions: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("两个用户的会话应汇总为 3 条，实际 %d 条: %+v", len(rows), rows)
+	}
+	// 调用序列：1 次 user_dump + 每用户 1 次 session_dump，且请求里带的是该用户的地址与租户 VRF
+	if len(ch.sent) != 1+len(users) {
+		t.Fatalf("应为 1 次用户 dump + %d 次会话 dump，实际 %d 个请求", len(users), len(ch.sent))
+	}
+	if _, ok := ch.sent[0].(*nat44_ei.Nat44EiUserDump); !ok {
+		t.Fatalf("首个请求必须是用户 dump，实际 %T", ch.sent[0])
+	}
+	for i, u := range users {
+		req, ok := ch.sent[1+i].(*nat44_ei.Nat44EiUserSessionDump)
+		if !ok {
+			t.Fatalf("第 %d 个请求应为会话 dump，实际 %T", i+1, ch.sent[1+i])
+		}
+		addr, err := ip_types.ParseIP4Address(u.ip)
+		if err != nil {
+			t.Fatalf("解析 %s: %v", u.ip, err)
+		}
+		if req.IPAddress != addr || req.VrfID != u.vrf {
+			t.Fatalf("会话 dump 必须带用户的地址与租户 VRF（应为 %s/%d，实际 %s/%d）",
+				u.ip, u.vrf, req.IPAddress, req.VrfID)
+		}
+	}
+	// 字段映射（内网/外网地址端口、包数）
+	for _, r := range rows {
+		if r.OutsideIP != "192.168.155.62" || r.InsideIP != "192.168.200.10" && r.InsideIP != "192.168.200.11" {
+			t.Fatalf("会话字段映射不符: %+v", r)
+		}
+		if r.InsidePort < 570 || r.OutsidePort < 19948 || r.Packets == 0 {
+			t.Fatalf("会话端口/计数不符: %+v", r)
+		}
+	}
+}
+
+// 一个用户都没有（NAT 还没有任何用户）→ 如实返回空，且不再发会话 dump；空结果不是错误。
+func TestNatGovppSessionsNoUsers(t *testing.T) {
+	ch := &fakeAPIChannel{multi: func(api.Message) bool { return false }}
+	rows, err := (&govppNatClient{ch: ch}).NATSessions()
+	if err != nil {
+		t.Fatalf("空用户表不是错误: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("无用户应返回空，实际 %+v", rows)
+	}
+	if len(ch.sent) != 1 {
+		t.Fatalf("无用户时不应再发会话 dump，实际发了 %d 个请求", len(ch.sent))
+	}
+}
+
+// dump 读取失败必须上抛，不得静默返回空：静默空 = 重新变成「答非所问」。
+func TestNatGovppSessionsDumpErrorPropagates(t *testing.T) {
+	// ① 列用户就失败
+	ch := &fakeAPIChannel{multiErr: func(api.Message) error { return errors.New("连接已断") }}
+	if _, err := (&govppNatClient{ch: ch}).NATSessions(); err == nil {
+		t.Fatal("列用户失败必须上抛")
+	}
+	// ② 列用户成功、会话 dump 失败
+	userIdx := 0
+	ch = &fakeAPIChannel{
+		multiByReq: func(req api.Message) func(api.Message) bool {
+			if _, ok := req.(*nat44_ei.Nat44EiUserDump); !ok {
+				return nil
+			}
+			return func(msg api.Message) bool {
+				if userIdx > 0 {
+					return false
+				}
+				d, ok := msg.(*nat44_ei.Nat44EiUserDetails)
+				if !ok {
+					return false
+				}
+				addr, _ := ip_types.ParseIP4Address("192.168.200.10")
+				d.IPAddress, d.VrfID = addr, 8922296
+				userIdx++
+				return true
+			}
+		},
+		multiErr: func(req api.Message) error {
+			if _, ok := req.(*nat44_ei.Nat44EiUserSessionDump); ok {
+				return errors.New("会话 dump 失败")
+			}
+			return nil
+		},
+	}
+	if _, err := (&govppNatClient{ch: ch}).NATSessions(); err == nil {
+		t.Fatal("会话 dump 失败必须上抛")
 	}
 }
 
