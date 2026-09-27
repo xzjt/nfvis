@@ -18,13 +18,22 @@
 #   ② 扰动判别：改动事实源（在 VPP 里建一个配置中没有的 BD、把接口链路翻 down），看 CLI 是否跟随；
 #   ③ round-trip：写 → 读 → 删 → 再读，验证配置通路自洽。
 #
+# 判定分**三档**（2026-09-26 round84 复盘后改；此前只有「通过/失败」，于是「没有证据」被算成通过）：
+#   通过（✓）   —— 有正向控制且与事实源一致；
+#   失败（✗）   —— 与事实源矛盾（含「一侧非空另一侧为空」）；
+#   不可判定（?）—— **缺正向控制**或**无对象可对照**，单列计数、**不得计入通过**。
+#   小结会打印「有 N 项不可判定」，据此可以区分「真的都对」与「没测到」。
+#   这是「四个维度」缺口的补丁之一：套件量的是「命令能用」，看不见作用效果/生命周期/跨对象组合/对抗性对照。
+#
 # ⚠️ 自身也会出错，故必须**自校准**：oracle 取错、断言写错都会制造假红/假绿，而假绿比没有测试更危险。
 #    修脚本后，请拿「已知正确」的实现确认判 PASS、拿「已知错误」的确认判 FAIL（红-绿）。
 #    已知坑（都已在本脚本里规避，勿退回去）：
 #      · 终端文本解析脆弱 → 候选一律走 REST（JSON），不 sed 终端输出；
 #      · 输出格式会变（本脚本会随契约调整）→ 解析要有兜底并打印原始片段；
 #      · 扰动必须**真的改变**事实源：用确定空闲的 BD id、把接口翻到**相反**状态，
-#        并先确认「扰动前后 oracle 值不同」，否则本项应报「无从判别」而不是 PASS。
+#        并先确认「扰动前后 oracle 值不同」，否则本项应报「无从判别」而不是 PASS；
+#      · 判定函数（s8_verdict / s9_verdict）刻意写成**纯函数**并被 cli-semantic-selftest.sh 抽取自校准，
+#        改判定时连同自校准一起改，否则「空结果算通过」这类返祖会静默回来。
 #
 # 前置（缺一不可，均在 nfvis-vm 上）：
 #   1) 开发态 nfvisd 已起：/tmp/nfvisd -db /tmp/nfvis-cli.db -listen 127.0.0.1:18443 \
@@ -34,7 +43,8 @@
 #
 # 用法：
 #   bash contrib/scripts/cli-semantic-check.sh
-# 退出码：有失败项 → 1（可用作发布前门槛）。
+# 退出码：有失败项 → 1（可用作发布前门槛）。**不可判定不算失败、也不算通过**，单列计数；
+#        要判断「会不会是环境让本项测不到」，看小结里的不可判定条数。
 #
 # 副作用与恢复：脚本会临时改 VPP（建/删一个 BD、翻转某接口 admin 状态、在**开发态实例**里
 # 建一个交换机并删除）。结束时会尽力恢复；仍建议随后 `systemctl restart vpp` + `restart nfvis`
@@ -107,7 +117,10 @@ api_cands() {
 }
 
 # ---------- oracles（独立事实源）----------
-vpp_ifaces()  { vppctl show interface 2>/dev/null | awk 'NR>1 && $2 ~ /^[0-9]+$/ {print $1}' | grep -v '^local0$' | sort; }
+# 接口名集合：**行首无缩进**才认（VPP 的 `show interface` 把 rx/tx/drops/ip4 计数缩进续行打印，
+# 那些行的第 2 列也是数字——只按「第 2 列是数字」筛会把 `drops`/`ip4` 当成接口名，
+# 于是集合里混进垃圾（2026-09-26 实测））。接口行与表头都在行首，续行都是缩进的。
+vpp_ifaces()  { vppctl show interface 2>/dev/null | tr -d '\r' | awk '/^[^ \t]/ && $2 ~ /^[0-9]+$/ {print $1}' | grep -v '^local0$' | sort; }
 vpp_state()   { vppctl show interface 2>/dev/null | awk -v n="$1" '$1==n && $2 ~ /^[0-9]+$/ {print $3}'; }
 vpp_bd_ids()  { vppctl show bridge-domain 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $1}' | sort; }
 # ⚠️ vppctl 输出是 **CRLF** 行尾：值要 `tr -d '\r'` 才能做**精确比较**
@@ -134,6 +147,40 @@ vpp_bd_index_of_tag() {
   done
 }
 kernel_phys() { for n in /sys/class/net/*; do [ -e "$n/device" ] && basename "$n"; done | sort; }
+# <BD-ID> → 该 BD 的成员口（`show bridge-domain <id> detail` 的成员表）。
+# 不按表头列位解析（列宽会随版本变），而是拿**已知接口名集合**去认行：首列是接口名、次列是数字 If-idx。
+# 无成员时该段整块不打印（VPP 只在有成员时才输出成员表），因此空集合是正常结果，不是解析失败。
+vpp_bd_members() {
+  local out names n rest
+  out=$(vppctl show bridge-domain "$1" detail 2>/dev/null)
+  names=$(vpp_ifaces | tr '\n' ' ')      # 用空格分隔才做得成整词匹配（换行会把「词尾」判错）
+  printf '%s\n' "$out" | while read -r n rest; do
+    case "$rest" in [0-9]*) case " $names " in *" $n "*) echo "$n";; esac;; esac
+  done
+}
+# <ifname> → 该口 rx 包数（无该口/取不到 → 0）。用于「这个成员能不能产生流量」这唯一一件事。
+vpp_if_rx() {
+  vppctl show interface "$1" 2>/dev/null | tr -d '\r' \
+    | awk '$1 == "rx" && $2 == "packets" {print $3; exit}' | grep -E '^[0-9]+$' || echo 0
+}
+# <ifname> → 该口的 L3 地址行（`show interface addr` 里缩进的那行），无则空。
+vpp_if_l3() {
+  vppctl show interface addr 2>/dev/null | tr -d '\r' | awk -v n="$1" '
+    $0 !~ /^[ \t]/ { cur = ($1 == n); next }
+    cur && /L3 / { print; exit }'
+}
+# 邻居表 → 「IP MAC 接口名」三列（`show ip neighbors` 的 Ethernet 列格式固定，用它认行）。
+vpp_neighbors() {
+  vppctl show ip neighbors 2>/dev/null | tr -d '\r' \
+    | awk 'NF >= 5 && $4 ~ /^([0-9a-fA-F][0-9a-fA-F]:){5}[0-9a-fA-F][0-9a-fA-F]$/ {print $2, tolower($4), $5}'
+}
+vpp_peer_ip()  { vpp_neighbors | awk -v i="$1" '$3 == i {print $1; exit}'; }
+vpp_peer_mac() { vpp_neighbors | awk -v i="$1" -v ip="$2" '$3 == i && $1 == ip {print $2; exit}'; }
+# <BD-Idx> → 该 BD 的 l2fib **MAC 集合**（小写）。条数由 vpp_l2fib_count 给，这里判「学到的是不是那个对端」。
+vpp_l2fib_macs() {
+  vppctl show l2fib verbose 2>/dev/null | tr -d '\r' \
+    | awk -v bd="$1" 'NR > 1 && $2 == bd {print tolower($1)}'
+}
 # CLI 的交换机列表：运行态表格（BD-ID 为数字的首列）；兼容旧配置块格式。
 # 无 tag 的 BD 记为 "-" 并**保留**——它正是「运行态多出一个」的证据（曾因过滤掉它而假红）。
 cli_bdnames() {
@@ -150,9 +197,10 @@ cli_bdrows() {
     END {print n+0}'
 }
 
-PASS=0; FAIL=0; INFO=0
+PASS=0; FAIL=0; INFO=0; UNK=0
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad()  { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
+unk()  { echo "  ? $1"; UNK=$((UNK+1)); }
 note() { echo "  · $1"; INFO=$((INFO+1)); }
 hdr()  { echo; echo "===== $1"; }
 cmp_sets() { # cmp_sets <标签> <期望> <实际>
@@ -160,6 +208,69 @@ cmp_sets() { # cmp_sets <标签> <期望> <实际>
   for i in $exp; do case " $got " in *" $i "*) ;; *) miss="$miss $i";; esac; done
   echo "    期望: ${exp:-（空）}"; echo "    实际: ${got:-（空）}"
   if [ -z "$miss" ]; then ok "$label"; else bad "$label —— 缺:$miss"; fi
+}
+# 判定函数输出的三档结果 → 计数。格式 `<PASS|FAIL|UNKNOWN>:<说明>`。
+judge() { # judge <项名> <判定输出>
+  local name="$1" v="$2" tok="${2%%:*}" msg="${2#*:}"
+  case "$tok" in
+    PASS)    ok "$name —— $msg";;
+    FAIL)    bad "$name —— $msg";;
+    UNKNOWN) unk "$name —— $msg";;
+    *)       bad "$name —— 判定函数输出异常: $v";;
+  esac
+}
+
+# ---------- S8/S9 判定（纯函数：供 cli-semantic-selftest.sh 抽取做红-绿自校准）----------
+# S8：<CLI 条数> <VPP l2fib 条数> <正控状态> <该对端 MAC 是否已在 l2fib>
+#   正控状态：learned —— 本次确实制造了流量（发包数 > 0）且事实源可读
+#             noflow  —— 有成员但流量没发出去（0 发包）
+#             nopeer  —— 有可产生流量的成员，但取不到可 ping 的对端
+#             nomember—— 该交换机没有能产生流量的成员
+# 判据（**没有正向控制就没有通过**）：
+#   缺正控 → UNKNOWN（不是 PASS——「两边都空」曾被算通过，于是没流量时永远绿）；
+#   有正控 → 事实源必须真的学到该对端 MAC（学不到即失败），且与 CLI 条数一致。
+s8_verdict() { # <cli_n> <fib_n> <control> <mac_learned>
+  local cli_n="$1" fib_n="$2" ctl="$3" mac="$4"
+  case "$ctl" in
+    nopeer)   printf 'UNKNOWN:有可产生流量的成员但取不到可 ping 的对端（缺正向控制）'; return;;
+    nomember) printf 'UNKNOWN:该交换机没有能产生流量的成员（缺正向控制）'; return;;
+    noflow)   printf 'UNKNOWN:流量未发出（ping 0 发包），事实源无从判别'; return;;
+    learned)  ;;
+    *)        printf 'UNKNOWN:正控状态未知（%s）' "$ctl"; return;;
+  esac
+  if [ "${fib_n:-0}" -eq 0 ]; then
+    printf 'FAIL:已制造流量但事实源没学到任何表项（l2fib 0 条，CLI %s 条）' "$cli_n"; return
+  fi
+  if [ "$mac" != "yes" ]; then
+    printf 'FAIL:已制造流量、事实源有 %s 条，但不含该对端 MAC（学到的不是本次流量的对端）' "$fib_n"; return
+  fi
+  if [ "$cli_n" -eq "$fib_n" ]; then
+    printf 'PASS:两侧一致（CLI %s 条 / VPP %s 条，正向控制已学到该对端 MAC）' "$cli_n" "$fib_n"
+  else
+    printf 'FAIL:条数不一致（CLI %s vs VPP %s）' "$cli_n" "$fib_n"
+  fi
+}
+# S9：<左标签> <左集合> <右标签> <右集合>（集合是空格分隔的名字串）
+#   两侧都空 → UNKNOWN（无对象可对照，**此后不再静默通过**）；
+#   一侧非空另一侧为空 → FAIL；
+#   两侧非空且有缺项 → FAIL；一致 → PASS。
+s9_verdict() { # <l_label> <l_set> <r_label> <r_set>
+  local ll="$1" ls="$2" rl="$3" rs="$4" i miss=""
+  if [ -z "$ls" ] && [ -z "$rs" ]; then
+    printf 'UNKNOWN:两侧都空（无对象可对照）'; return
+  fi
+  if [ -z "$rs" ]; then
+    printf 'FAIL:%s 有对象而 %s 视图为空：%s' "$ll" "$rl" "$ls"; return
+  fi
+  if [ -z "$ls" ]; then
+    printf 'FAIL:%s 有对象而 %s 视图为空：%s' "$rl" "$ll" "$rs"; return
+  fi
+  for i in $ls; do case " $rs " in *" $i "*) ;; *) miss="$miss $i";; esac; done
+  if [ -n "$miss" ]; then
+    printf 'FAIL:%s 有而 %s 未列出：%s' "$ll" "$rl" "$miss"
+  else
+    printf 'PASS:两侧一致（%s）' "$ls"
+  fi
 }
 
 echo "==================== CLI 语义校验（结果对不对）===================="
@@ -266,36 +377,79 @@ else
   note "| display set 输出为空或未知：$(echo "$pipeout" | head -1)"
 fi
 
-hdr "S8 MAC 表 ↔ VPP l2fib 条数（对照，两者都空也算一致）"
-l2vs=$(cli_bdnames | tr ' ' '\n' | grep -vE '^-$|^$' | head -1)
-if [ -n "$l2vs" ]; then
-  cliout=$(cli "show virtual-switches $l2vs mac-table")
-  if echo "$cliout" | grep -q 'MAC 表为空'; then cli_n=0
-  else cli_n=$(echo "$cliout" | awk 'NR>1 && $1 ~ /:/ {n++} END {print n+0}'); fi
-  bd_idx=$(vpp_bd_index_of_tag "$l2vs")
-  fib_n=$(vpp_l2fib_count "$bd_idx")
-  echo "    CLI mac-table 条数=$cli_n；VPP l2fib 条数=$fib_n（$l2vs index=${bd_idx:-未在 VPP 中找到}）"
-  if [ "$fib_n" -eq 0 ] && [ "$cli_n" -eq 0 ]; then ok "两侧一致（均为空，本环境无流量）"
-  elif [ "$cli_n" -eq "$fib_n" ]; then ok "两侧一致（$cli_n 条）"
-  else bad "条数不一致（CLI $cli_n vs VPP $fib_n）——需人工判读（该 BD 的静态/动态表项口径）"; fi
-else note "无交换机对象，本项略"; fi
+hdr "S8 MAC 表 ↔ VPP l2fib 条数（**必须带正向控制**；没流量=不可判定，不再算通过）"
+# 旧判据「两边都空也算一致」= 没有证据被当成通过：本环境无流量时该项**永远绿**。
+# 新判据：挑一个**有可产生流量成员**的交换机 → 制造一次穿过它的流量（ping 该口邻居表的对端）
+# → 要求 l2fib **确实学到该对端 MAC**（学不到即失败）；确实没有可用成员/对端时如实标不可判定。
+s8_tag=""; s8_idx=""; s8_member=""; s8_control=nomember; s8_mac=no
+for t in $(cli_bdnames); do
+  case "$t" in -|"") continue;; esac
+  i=$(vpp_bd_index_of_tag "$t"); [ -n "$i" ] || continue
+  s8_tag="$t"; s8_idx="$i"
+  for m in $(vpp_bd_members "$i"); do
+    if [ "$(vpp_if_rx "$m")" -gt 0 ] 2>/dev/null; then s8_member="$m"; break; fi
+  done
+  [ -n "$s8_member" ] && break
+done
+echo "    候选交换机: ${s8_tag:-（无）} ｜ 成员: ${s8_idx:+$(vpp_bd_members "$s8_idx" | tr '\n' ' ')}｜ 有 rx 计数的成员: ${s8_member:-（无）}"
+if [ -z "$s8_idx" ]; then
+  s8_cli_n=0; s8_fib_n=0
+else
+  out=$(cli "show virtual-switches $s8_tag mac-table")
+  if echo "$out" | grep -q 'MAC 表为空'; then s8_cli_n=0
+  else s8_cli_n=$(echo "$out" | awk 'NR>1 && $1 ~ /:/ {n++} END {print n+0}'); fi
+  s8_fib_n=$(vpp_l2fib_count "$s8_idx")
+  echo "    CLI mac-table 条数=$s8_cli_n；VPP l2fib 条数=$s8_fib_n（$s8_tag index=${s8_idx:-未在 VPP 中找到}）"
+fi
+if [ -n "$s8_member" ]; then
+  # 对端：该成员口邻居表里的地址（ARP 已解析才可能在 l2fib 里被认出来）。
+  # 流量源优先取**该 BD 里带 L3 地址的口**（BVI/网关）——从它 ping 对端，帧经 BD 转发到成员口，
+  # 对端的回复从成员口进来 ⇒ L2 学习必然发生；这正是「正向控制」。
+  s8_peer=$(vpp_peer_ip "$s8_member")
+  s8_src=""
+  for m in $(vpp_bd_members "$s8_idx"); do
+    [ -n "$(vpp_if_l3 "$m")" ] && { s8_src="$m"; break; }
+  done
+  if [ -z "$s8_peer" ]; then
+    s8_control=nopeer
+    echo "    （成员 $s8_member 无邻居表项，取不到可 ping 的对端）"
+  else
+    if [ -n "$s8_src" ]; then
+      s8_ping=$(vppctl ping "$s8_peer" source "$s8_src" repeat 5 2>&1 | tr -d '\r')
+    else
+      s8_ping=$(vppctl ping "$s8_peer" repeat 5 2>&1 | tr -d '\r')
+    fi
+    s8_sent=$(printf '%s' "$s8_ping" | sed -n 's/.*Statistics: *\([0-9][0-9]*\) sent.*/\1/p')
+    echo "    制造流量: ping $s8_peer${s8_src:+ source $s8_src} → $(printf '%s' "$s8_ping" | grep -E 'Statistics:' | head -1)"
+    if [ "${s8_sent:-0}" -gt 0 ]; then
+      s8_control=learned
+      s8_peer_mac=$(vpp_peer_mac "$s8_member" "$s8_peer")
+      s8_fib_n=$(vpp_l2fib_count "$s8_idx")          # 复测事实源（学习发生在本次流量之后）
+      if [ -n "$s8_peer_mac" ] && vpp_l2fib_macs "$s8_idx" | grep -qx "$s8_peer_mac"; then s8_mac=yes; fi
+      echo "    正控复核: 对端 MAC=${s8_peer_mac:-（邻居表取不到）} ｜ l2fib 现有 $(vpp_l2fib_macs "$s8_idx" | tr '\n' ' ')"
+      out=$(cli "show virtual-switches $s8_tag mac-table")
+      if echo "$out" | grep -q 'MAC 表为空'; then s8_cli_n=0
+      else s8_cli_n=$(echo "$out" | awk 'NR>1 && $1 ~ /:/ {n++} END {print n+0}'); fi
+      echo "    正控后 CLI mac-table 条数=$s8_cli_n"
+    else
+      s8_control=noflow
+    fi
+  fi
+fi
+judge "S8 MAC 表 ↔ l2fib" "$(s8_verdict "${s8_cli_n:-0}" "${s8_fib_n:-0}" "$s8_control" "$s8_mac")"
 
-hdr "S9 运行态对象是否被视图反映（诊断，不计失败）"
+hdr "S9 运行态对象是否被视图反映（**计入判定**：一侧非空另一侧为空即失败）"
+# 旧口径「诊断，不计失败」+ 两侧都空 → 静默通过：**没有对象时永远绿**，于是「视图根本没接运行态」
+# 这类缺陷在空环境里一次也测不出来。新口径按 s9_verdict 三档判（两侧都空 = 无对象可对照 = 不可判定）。
 libv=$(virsh list --all 2>/dev/null | awk 'NR>2 && $2!="" {print $2}' | tr '\n' ' ')
 dockerps=$(docker ps --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')
-clivm=$(cli "show virtual-machine-functions" | grep -oE '^[a-zA-Z0-9._-]+' | tr '\n' ' ')
-clict=$(cli "show container-functions" | grep -oE '^[a-zA-Z0-9._-]+' | tr '\n' ' ')
+# CLI 视图第一行是表头，必须跳过（否则 "Name" 会被当成对象）；「（无容器）」这类整句按空处理。
+clivm=$(cli "show virtual-machine-functions" | awk 'NR>1 && $1 !~ /^（/ {print $1}' | tr '\n' ' ')
+clict=$(cli "show container-functions" | awk 'NR>1 && $1 !~ /^（/ {print $1}' | tr '\n' ' ')
 echo "    libvirt 域: ${libv:-（无）} ｜ CLI VM 列表: ${clivm:-（空）}"
 echo "    Docker 容器: ${dockerps:-（无）} ｜ CLI 容器列表: ${clict:-（空）}"
-# 只在**确有**差异时登记：原实现仅凭「libvirt 有域」就打印「CLI 未列出」，
-# 而 CLI 已列出时该说法不成立（2026-09-22 实测：vnf-a/vnf-b 两侧都在，仍打印了该行）。
-miss=""
-for d in $libv; do case " $clivm " in *" $d "*) ;; *) miss="$miss $d";; esac; done
-[ -n "$miss" ] && note "libvirt 有域而 CLI 未列出:$miss（配置驱动；契约对 VM 列表口径未明确，仅登记）"
-miss=""
-for d in $dockerps; do case " $clict " in *" $d "*) ;; *) miss="$miss $d";; esac; done
-[ -n "$miss" ] && note "Docker 有容器而 CLI 未列出:$miss（同上，仅登记）"
-case " $clivm " in *" br0 "*) : ;; esac
+judge "S9 虚拟机列表（libvirt ↔ CLI 视图）" "$(s9_verdict 'libvirt 域' "$libv" 'CLI VM 视图' "$clivm")"
+judge "S9 容器列表（Docker ↔ CLI 视图）" "$(s9_verdict 'Docker 容器' "$dockerps" 'CLI 容器视图' "$clict")"
 
 # ============ 清理本脚本创建的对象 ============
 # 接口：先看**条目本身**是不是本次建出来的——是就整条删掉（发现 #15 的同类：收尾只删字段
@@ -324,7 +478,11 @@ fi
 vppctl create bridge-domain "$PERTURB_BD" del >/dev/null 2>&1
 
 echo
-echo "==================== 合计：通过 $PASS / 失败 $FAIL / 登记 $INFO ===================="
+echo "==================== 合计：通过 $PASS / 失败 $FAIL / 不可判定 $UNK / 登记 $INFO ===================="
+if [ "$UNK" -gt 0 ]; then
+  echo "⚠️ 有 $UNK 项**不可判定**（缺正向控制或无对象可对照）——它们**没有**计入通过；"
+  echo "   要分清「真的都对」与「这一轮没测到」：需要流量的项请在有业务流量/有对端的拓扑上复跑。"
+fi
 echo "（修复/复核后请对比上一次结果；失败项需人工判读契约与 oracle 后再改实现或改断言）"
 if [ "$FAIL" -gt 0 ]; then
   echo "⚠️ 有失败项：若为扰动/环境所致，请先确认 oracle 侧确实变化（本脚本已尽量自证）"
