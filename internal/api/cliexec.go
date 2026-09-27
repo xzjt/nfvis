@@ -914,14 +914,38 @@ func (x *cliExecutor) cfgRollback(user, source string, args []string) string {
 // 而空对象**不等于"没有配置"**——`show interfaces management` 会因此走另一条分支、
 // 后续管理口变更还会开始要求 commit confirmed（真机残留过）。
 // 放在这个合流点是因为 `delete` 有两条路径（别名表 / 通用树遍历），只修一条会漏（第一版即漏）。
+//
+// nat 同属此类（round84 R84-26）：删光池/规则/静态映射后留下空 `nat = {}`，
+// `show configuration | display set` 反推不出任何语句、回放自校验对不上而报内部错误
+// （自校验没错，错在空壳；空 `nat` 节点同样让「配置过又删光」与「从未配置 NAT」不可区分）。
 func pruneEmptySingleton(tree map[string]any) {
-	sys, _ := tree["system"].(map[string]any)
-	if sys == nil {
-		return
+	if sys, ok := tree["system"].(map[string]any); ok {
+		if mgmt, ok := sys["management"].(map[string]any); ok && len(mgmt) == 0 {
+			delete(sys, "management")
+		}
 	}
-	if mgmt, ok := sys["management"].(map[string]any); ok && len(mgmt) == 0 {
-		delete(sys, "management")
+	if nat, ok := tree["nat"].(map[string]any); ok && isEmptyShell(nat) {
+		delete(tree, "nat")
 	}
+}
+
+// isEmptyShell 容器是否已无内容：所有子键都是空数组或 nil。
+// 别名 apply 删掉最后一个数组元素时留下的是**空数组**（如 nat["rules"] = []any{}），
+// 经模型序列化（omitempty）后才成空对象，故两种形态都要判；
+// 出现任何其它取值（含未知键）一律视为有内容，宁可不剪。
+func isEmptyShell(m map[string]any) bool {
+	for _, v := range m {
+		switch x := v.(type) {
+		case nil:
+		case []any:
+			if len(x) > 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // applyStatement 按 schema 树驱动把 set 语句写入配置（语句→模型执行期翻译）。

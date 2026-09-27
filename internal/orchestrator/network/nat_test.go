@@ -14,12 +14,13 @@ import (
 // ---------- M3-5（三）：NAT44 收敛（假 NatClient） ----------
 
 type fakeNat struct {
-	ifaces  map[string]uint32
-	ranges  []string // "add/del first-last@vrf"
-	feats   []string // "add/del idx inside|outside"
-	static  []string
-	enables []string // "enable/disable insideVRF/outsideVRF"
-	err     error
+	ifaces    map[string]uint32
+	ranges    []string // "add/del first-last@vrf"
+	feats     []string // "add/del idx inside|outside"
+	static    []string
+	enables   []string          // "enable/disable insideVRF/outsideVRF"
+	vrfByAddr map[string]uint32 // VPP 侧现状：池地址 → tenant VRF（NATAddressVRFs 的应答）
+	err       error
 }
 
 func newFakeNat() *fakeNat {
@@ -27,6 +28,13 @@ func newFakeNat() *fakeNat {
 }
 
 func (f *fakeNat) Close() {}
+
+func (f *fakeNat) NATAddressVRFs() (map[string]uint32, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.vrfByAddr, nil
+}
 
 func (f *fakeNat) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	if f.err != nil {
@@ -127,7 +135,7 @@ func TestNatApplyConvergence(t *testing.T) {
 	if err := p.ApplyNAT(context.Background(), natFixture()); err != nil {
 		t.Fatalf("ApplyNAT: %v", err)
 	}
-	if len(f.ranges) != 1 || f.ranges[0] != "add:203.0.113.10-203.0.113.20@0" {
+	if len(f.ranges) != 1 || f.ranges[0] != fmt.Sprintf("add:203.0.113.10-203.0.113.20@%d", TableID("vs-l3")) {
 		t.Fatalf("地址池: %v", f.ranges)
 	}
 	if len(f.static) != 1 || f.static[0] != "add:10.0.0.5->203.0.113.1" {
@@ -228,16 +236,18 @@ func TestNatOutsideVRF(t *testing.T) {
 	}
 }
 
-// 地址池必须落在 outside 转发域里（vrf_id），且删除方向用**登记时**的那个 VRF——
-// 池进了默认表就跟 outside 不在同一张表：包进了 NAT 却分配不出端口，全程无报错（round84 缺陷 A）。
-func TestNatPoolUsesOutsideVRF(t *testing.T) {
+// 地址池必须落在 **inside（租户）转发域**里（vrf_id），删除方向用**登记时**的那个 VRF——
+// VPP 把该 vrf_id 折算成池地址的 FIB 索引，in2out 分配端口只认与入接口（inside）同一张表的
+// 池地址（或 ~0 的 VRF independent 地址）；池进了 outside 表/默认表就跟入接口对不上：
+// 包进了 NAT 却分配不出端口，全程无报错（round84 R84-24 真机实测）。
+func TestNatPoolUsesInsideVRF(t *testing.T) {
 	natf := newFakeNat()
 	p := NewNatProvider(natf)
 	p.SetInsideResolver(func(string) []uint32 { return []uint32{1} })
-	wanTable := TableID("vs-wan")
+	natTable := TableID("vs-nat")
 	p.SetOutsideResolver(func(ifname string) (uint32, bool) {
 		if ifname == "ens224" {
-			return wanTable, true
+			return TableID("vs-wan"), true
 		}
 		return 0, false
 	})
@@ -250,29 +260,115 @@ func TestNatPoolUsesOutsideVRF(t *testing.T) {
 	if err := p.ApplyNAT(ctx, cfg); err != nil {
 		t.Fatalf("ApplyNAT: %v", err)
 	}
-	wantAdd := fmt.Sprintf("add:192.168.155.62-192.168.155.62@%d", wanTable)
+	wantAdd := fmt.Sprintf("add:192.168.155.62-192.168.155.62@%d", natTable)
 	if len(natf.ranges) != 1 || natf.ranges[0] != wantAdd {
-		t.Fatalf("地址池应带 outside 的 VRF %d: %v", wanTable, natf.ranges)
+		t.Fatalf("地址池应带 inside 的 VRF %d（不是出接口所在表）: %v", natTable, natf.ranges)
 	}
 
-	// 出接口换到另一张表：旧池必须用**旧 VRF** 删（用新 VRF 删不掉，VPP 里会残留）
-	otherTable := TableID("vs-other")
-	p.SetOutsideResolver(func(ifname string) (uint32, bool) {
-		if ifname == "ens224" {
-			return otherTable, true
-		}
-		return 0, false
-	})
+	// inside 转发域换到另一张表（规则改指另一个 L3 交换机）：旧池必须用**旧 VRF** 删、
+	// 再用新 VRF 下发——VPP 的池地址按地址唯一，不先删旧就加不进新表。
+	cfg.Rules[0].VirtualSwitch = "vs-nat2"
 	natf.ranges = nil
 	if err := p.ApplyNAT(ctx, cfg); err != nil {
 		t.Fatalf("换转发域 ApplyNAT: %v", err)
 	}
 	wantOps := []string{
-		fmt.Sprintf("del:192.168.155.62-192.168.155.62@%d", wanTable),
-		fmt.Sprintf("add:192.168.155.62-192.168.155.62@%d", otherTable),
+		fmt.Sprintf("del:192.168.155.62-192.168.155.62@%d", natTable),
+		fmt.Sprintf("add:192.168.155.62-192.168.155.62@%d", TableID("vs-nat2")),
 	}
 	if len(natf.ranges) != 2 || natf.ranges[0] != wantOps[0] || natf.ranges[1] != wantOps[1] {
 		t.Fatalf("删除须用登记时的 VRF、下发用新 VRF，实际 %v（期望 %v）", natf.ranges, wantOps)
+	}
+}
+
+// 出接口换到另一张表（outside 转发域变了）时池**不换域**：池跟的是入接口所在的 inside 表，
+// 换 outside 只是插件转发域变（先关再开），池不该被删了重下。
+func TestNatPoolKeepsVRFWhenOutsideChanges(t *testing.T) {
+	natf := newFakeNat()
+	p := NewNatProvider(natf)
+	p.SetInsideResolver(func(string) []uint32 { return []uint32{1} })
+	p.SetOutsideResolver(func(ifname string) (uint32, bool) {
+		if ifname == "ens224" {
+			return TableID("vs-wan"), true
+		}
+		return 0, false
+	})
+	cfg := model.NatConfig{
+		SourcePools: []model.NatSourcePool{{Name: "pool-a", AddressRange: "192.168.155.62"}},
+		Rules: []model.NatRule{{Seq: 10, MatchSource: "192.168.200.0/24", VirtualSwitch: "vs-nat",
+			Action: model.NatAction{SourcePool: "pool-a", Interface: "ens224"}}},
+	}
+	ctx := context.Background()
+	if err := p.ApplyNAT(ctx, cfg); err != nil {
+		t.Fatalf("ApplyNAT: %v", err)
+	}
+	natf.ranges, natf.enables = nil, nil
+	p.SetOutsideResolver(func(ifname string) (uint32, bool) {
+		if ifname == "ens224" {
+			return TableID("vs-other"), true
+		}
+		return 0, false
+	})
+	if err := p.ApplyNAT(ctx, cfg); err != nil {
+		t.Fatalf("换 outside 转发域 ApplyNAT: %v", err)
+	}
+	if len(natf.ranges) != 0 {
+		t.Fatalf("换 outside 不应重下地址池（池跟 inside 表）: %v", natf.ranges)
+	}
+	// 插件转发域变了：必须关旧再开新（VPP 不允许在启用状态下切域）
+	wantEnables := []string{
+		fmt.Sprintf("disable:%d/%d", TableID("vs-nat"), TableID("vs-wan")),
+		fmt.Sprintf("enable:%d/%d", TableID("vs-nat"), TableID("vs-other")),
+	}
+	if len(natf.enables) != 2 || natf.enables[0] != wantEnables[0] || natf.enables[1] != wantEnables[1] {
+		t.Fatalf("换 outside 转发域应关旧开新: %v（期望 %v）", natf.enables, wantEnables)
+	}
+}
+
+// 冷启动（进程内登记为空）时 VPP 里可能还留着同一池地址的**旧副本**——旧版本按别的转发域
+// 下发过、或人工 vppctl 加过。池地址按地址唯一且 add 的「已存在」被幂等容忍，不先读回就永远
+// 纠不回来（in2out 一直分配不出端口）。此处覆盖两种现状：旧副本在别的域 → 删了重下；
+// 已在目标域 → 只下发、不多删一次（不给在跑的会话制造无谓中断）。
+func TestNatPoolReassertsStaleVRFOnColdStart(t *testing.T) {
+	natTable := TableID("vs-nat")
+	cfg := model.NatConfig{
+		SourcePools: []model.NatSourcePool{{Name: "pool-a", AddressRange: "192.168.155.62"}},
+		Rules: []model.NatRule{{Seq: 10, MatchSource: "192.168.200.0/24", VirtualSwitch: "vs-nat",
+			Action: model.NatAction{SourcePool: "pool-a", Interface: "ens224"}}},
+	}
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		cur  uint32 // VPP 侧现状（该地址所在转发域）
+		want []string
+	}{
+		{"旧副本在 outside 表", TableID("vs-wan"), []string{
+			fmt.Sprintf("del:192.168.155.62-192.168.155.62@%d", TableID("vs-wan")),
+			fmt.Sprintf("add:192.168.155.62-192.168.155.62@%d", natTable),
+		}},
+		{"已在目标表", natTable, []string{
+			fmt.Sprintf("add:192.168.155.62-192.168.155.62@%d", natTable),
+		}},
+	} {
+		natf := newFakeNat()
+		natf.vrfByAddr = map[string]uint32{"192.168.155.62": tc.cur}
+		p := NewNatProvider(natf)
+		p.SetInsideResolver(func(string) []uint32 { return []uint32{1} })
+		if err := p.ApplyNAT(ctx, cfg); err != nil {
+			t.Fatalf("%s: ApplyNAT: %v", tc.name, err)
+		}
+		if len(natf.ranges) != len(tc.want) || natf.ranges[0] != tc.want[0] ||
+			(len(tc.want) > 1 && natf.ranges[1] != tc.want[1]) {
+			t.Fatalf("%s: 池收敛应为 %v，实际 %v", tc.name, tc.want, natf.ranges)
+		}
+		// 第二轮：登记已在位且一致 → 幂等重放，不再读回、不再动 VPP
+		natf.ranges = nil
+		if err := p.ApplyNAT(ctx, cfg); err != nil {
+			t.Fatalf("%s: 重放 ApplyNAT: %v", tc.name, err)
+		}
+		if len(natf.ranges) != 0 {
+			t.Fatalf("%s: 重放不应再动地址池: %v", tc.name, natf.ranges)
+		}
 	}
 }
 

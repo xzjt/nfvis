@@ -596,6 +596,12 @@ func aliasNatPoolDel(tree map[string]any, t []string, _ bool) error {
 
 // aliasNatRule：nat rules <seq> [match source <prefix> [virtual-switch <n>]]
 // [action source-pool <n> | action interface <if>]，键值对可任意组合。
+//
+// delete 两种形态（R84-25）：
+//   - `delete nat rules <seq>`：整条规则删除（无尾随 token）；
+//   - `delete nat rules <seq> <键值对…>`：只清对应叶子，规则与其余叶子保留——
+//     此前不分形态一律整条删，操作者 `delete nat rules 10 action source-pool pool-a`
+//     想摘掉池引用，结果连 match 与 action interface 一起消失。
 func aliasNatRule(tree map[string]any, t []string, isSet bool) error {
 	nat := objOrNil(tree, "nat")
 	rest := t[2:]
@@ -608,20 +614,30 @@ func aliasNatRule(tree map[string]any, t []string, isSet bool) error {
 			return errString("无匹配配置: nat rules")
 		}
 		arr, _ := nat["rules"].([]any)
-		out := make([]any, 0, len(arr))
-		hit := false
-		for _, e := range arr {
-			if em, ok := e.(map[string]any); ok && scalarEq(em["seq"], seq) {
-				hit = true
-				continue
+		// 无尾随 token：整条规则删除（`delete nat rules <seq>`）——重复 seq 一并删，
+		// 既有行为不变（该状态本身非法，操作者要能一次清干净）
+		if len(rest) == 1 {
+			out := make([]any, 0, len(arr))
+			hit := false
+			for _, e := range arr {
+				if em, ok := e.(map[string]any); ok && scalarEq(em["seq"], seq) {
+					hit = true
+					continue
+				}
+				out = append(out, e)
 			}
-			out = append(out, e)
+			if !hit {
+				return errString("无匹配配置: rule " + seq)
+			}
+			nat["rules"] = out
+			return nil
 		}
-		if !hit {
+		// 带尾随 token：只清对应叶子，规则与其余叶子保留（R84-25）
+		rule, _ := selectElement(arr, "seq", seq)
+		if rule == nil {
 			return errString("无匹配配置: rule " + seq)
 		}
-		nat["rules"] = out
-		return nil
+		return clearNatRuleLeaves(rule, rest)
 	}
 	nat = ensureObj(tree, "nat")
 	rule := elemByField(nat, "rules", "seq", seq)
@@ -670,6 +686,89 @@ func aliasNatRule(tree map[string]any, t []string, isSet bool) error {
 			action["source_pool"] = rest[i+1]
 		case "interface":
 			action["interface"] = rest[i+1]
+		default:
+			return errString("未知语句: \"" + rest[i] + "\"")
+		}
+	}
+	return nil
+}
+
+// clearNatRuleLeaves 清规则内的叶子（R84-25；与 aliasNatRule 的 set 键值对解析镜像）。
+//
+// 取值 token 容忍：操作者常把 set 行原样换成 delete，取值与现值不一致也照删
+// （与 applyTokens 的值叶子删除同口径）。叶子本就不在场（键缺失或空串）则报
+// 「无匹配配置」——否则会由 commitTree 的 Diff 兜底报「值未变化」，对 delete 场景
+// 指错了方向（applyTokens 删不存在的叶子同样报「无匹配配置」）。
+func clearNatRuleLeaves(rule map[string]any, rest []string) error {
+	action, _ := rule["action"].(map[string]any)
+	clear := func(container map[string]any, key, label string) error {
+		if container == nil {
+			return errString("无匹配配置: " + label)
+		}
+		if v, ok := container[key]; !ok || v == "" {
+			return errString("无匹配配置: " + label)
+		}
+		delete(container, key)
+		return nil
+	}
+	for i := 1; i < len(rest); i += 2 {
+		if i+1 >= len(rest) {
+			return errString("语句不完整: " + rest[i] + " 缺少取值")
+		}
+		switch rest[i] {
+		case "match":
+			// "match source <prefix> [virtual-switch <n>]"：逐键清，virtual-switch 另给才清
+			if rest[i+1] != "source" {
+				return errString("未知语句: \"" + rest[i+1] + "\"")
+			}
+			if i+2 >= len(rest) {
+				return errString("语句不完整: match source 缺少取值")
+			}
+			if err := clear(rule, "match_source", "match source"); err != nil {
+				return err
+			}
+			i++
+		case "source":
+			if i+2 >= len(rest) {
+				return errString("语句不完整: source 缺少取值")
+			}
+			if err := clear(rule, "match_source", "match source"); err != nil {
+				return err
+			}
+			i++
+		case "virtual-switch":
+			if err := clear(rule, "virtual_switch", "virtual-switch"); err != nil {
+				return err
+			}
+		case "action":
+			switch rest[i+1] {
+			case "source-pool":
+				if i+2 >= len(rest) {
+					return errString("语句不完整: action source-pool 缺少取值")
+				}
+				if err := clear(action, "source_pool", "action source-pool"); err != nil {
+					return err
+				}
+				i++
+			case "interface":
+				if i+2 >= len(rest) {
+					return errString("语句不完整: action interface 缺少取值")
+				}
+				if err := clear(action, "interface", "action interface"); err != nil {
+					return err
+				}
+				i++
+			default:
+				return errString("未知语句: \"" + rest[i+1] + "\"")
+			}
+		case "source-pool":
+			if err := clear(action, "source_pool", "action source-pool"); err != nil {
+				return err
+			}
+		case "interface":
+			if err := clear(action, "interface", "action interface"); err != nil {
+				return err
+			}
 		default:
 			return errString("未知语句: \"" + rest[i] + "\"")
 		}
