@@ -97,8 +97,9 @@ R86-4（P1，跨对象删除 + 补偿残渣）**NAT 用过的表让所属 L3 交
     不要放在同一次提交里」。
   单测：`internal/orchestrator/network/l3_test.go`（文案必须含 `request vpp restart` 与 `NAT`）。
   真机复验（1.1.48~dev2）：同一删除命令返回上述带指引的文案。
-  **同批登记未修**：① 提交失败后的补偿若也失败，残渣（新建 VRF 表滞留、NAT inside 特性被摘而配置仍声明它）
-    只出现在当次提交输出，**不进告警**，事后不可见；② 同一 candidate 内「改 NAT 出接口 + 删旧交换机」必然失败。
+  **同批登记未修（编号 R86-9 / R86-10）**：R86-9 提交失败后的补偿若也失败，残渣（新建 VRF 表滞留、NAT inside
+    特性被摘而配置仍声明它）只出现在当次提交输出，**不进告警**，事后不可见；R86-10 同一 candidate 内「改 NAT 出接口 +
+    删旧交换机」必然失败（拆两次提交、中间 request vpp restart）。
 
 R86-5（P0，服务中断）**console 用过之后停那台 VM，会让 nfvisd 退出（SIGHUP）**
   现象：`request virtual-machine-functions <vm> console` 用过之后，`… <vm> stop` 的调用方收到
