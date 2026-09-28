@@ -170,3 +170,29 @@ R86-5（P0，服务中断）**console 用过之后停那台 VM，会让 nfvisd �
   ens224 的 VMware carrier 一度 down（`vppctl show hardware-interfaces ens224` → `carrier down`，
   重插虚拟网线无效）——同一 vmnet8 上的 ens192 正常，故 NAT 出接口改用 ens192。这条与产品无关，
   但会影响「按手册 §8.8 用 ens224 做 NAT 外部口」的复现，接手时先看 carrier。
+
+----- §7 Web 控制面（Browser Use 黑盒，本轮重点抽查）--------------------------------
+- 登录 https://192.168.155.129/api/v1/ui/（admin / 一次性口令）成功；主导航 21 条 hash 路由在位；
+  顶栏显示主机名、`admin（super-user）`、实时通道「已连接」；总览页版本 **1.1.48~dev2**、
+  组件版本（VPP 26.06-release / libvirt 12.0.0 / QEMU 10.2.1 / Docker 29.1.3 / Ubuntu 26.04）与 CLI 同源。
+- **诊断页「刷新服务端日志（末 100 行）」实点验证 R86-2**：点击后日志区出现**真实 journal 行**
+  （`Sep 28 13:54:17 nfvis nfvisd[42700]: …`）——修复前这里是 `-- No entries --`。
+  截图存 `docs/images/`（本轮随会话产出，见下）。
+- 接口页：Rx/Tx/Rx 错误/Tx 丢弃列**有真实计数**（ens192 Rx 包=2，与 `vppctl` 的 rx packets 2 同刻一致）；
+  但 **MTU 列恒为「—」**——见下「本轮新登记」。
+
+----- §8 本轮新登记（未修，如实记录）------------------------------------------------
+- **R86-6（P2，告警生命周期）对象删除后告警不自消，且「主动停容器」被报成 critical「异常退出」**：
+  `show alarms active`（配置里**已无** VNF/容器）仍长期挂着
+  `VNF_PORT_DOWN vnf-a/eth0`、`VNF_PORT_DOWN vnf-b/eth0`、`critical CONTAINER_EXITED walk-ct
+  容器 walk-ct 异常退出（状态 exited）`；其中 walk-ct 是**操作者主动 `request … stop`** 的
+  （并非异常），措辞与严重度都指向"故障"。控制台总览页同样列出这三条（仪表盘长期挂着不存在的对象）。
+  与 R84-17（删 VNF 后 VNF_PORT_DOWN 不自消）同族、本轮在「对象已删除」的条件下再次复现。
+- **R86-7（P3，读视图缺字段）接口读视图不含 MTU**：`show interfaces <口> detail` 与 REST 都不给 MTU，
+  故控制台接口列表的 MTU 列恒为「—」；而同刻 `vppctl show interface ens192` 明确有 `9000/0/0/0`
+  （配置侧也能 `set interfaces <n> mtu`）——与 R84-3（列表端点不返回计数）同族，属"取不到就不给"的
+  保守口径，登记待补。
+- **R86-8（P3，脚本模式可用性）`-c` 脚本里「值未变化」的空操作会中止整段脚本**：套件与本轮多次踩到
+  （`set interfaces ens192 description cli-pre` 已是该值 → `%% 语句未产生配置变更` → 后续行全部不执行、候选被丢弃）。
+  这是套件头部写明的口径，也是"任一行出错即停"的必然结果；登记**建议**（非缺陷）：给套件加一个"前置复位"
+  步骤，或让 CLI 支持 `--keep-going` 之类的脚本选项（交互模式下无此问题）。
