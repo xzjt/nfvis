@@ -81,8 +81,19 @@ func (g *govppL2Client) SwInterfaceNames() (map[uint32]SwIfInfo, error) {
 			LinkUp:      d.Flags&interface_types.IF_STATUS_API_FLAG_LINK_UP != 0,
 			LinkSpeed:   d.LinkSpeed,
 			DevType:     d.InterfaceDevType,
+			Mtu:         swIfL3MTU(d),
 		}
 	}
+}
+
+// swIfL3MTU VPP 接口的 L3 MTU：sw_interface_details.Mtu 是 4 元组（按 mtu_tag 下标：
+// 0=L3 / 1=IP4 / 2=IP6 / 3=MPLS），产品口径取 L3（下标 0）。长度异常时返回 0
+// （「取不到就不给」，由调用方决定是否省略该字段）。
+func swIfL3MTU(d *ifapi.SwInterfaceDetails) uint32 {
+	if len(d.Mtu) == 0 {
+		return 0
+	}
+	return d.Mtu[0]
 }
 
 // BridgeDomains 全部 bridge-domain 的运行态（决策 #84）。

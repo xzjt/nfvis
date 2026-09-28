@@ -980,6 +980,7 @@ func (c *vppStateController) InterfaceStates() (map[string]api.InterfaceState, e
 	for name, st := range m {
 		out[name] = api.InterfaceState{
 			AdminUp: st.AdminUp, LinkUp: st.LinkUp, LinkSpeed: st.LinkSpeed, DevType: st.DevType,
+			MTU: st.Mtu,
 		}
 	}
 	return out, nil

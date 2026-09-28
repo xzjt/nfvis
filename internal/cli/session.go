@@ -46,20 +46,32 @@ func New(client Backend, source string) *Session {
 	return &Session{client: client, Source: source, Mode: "oper"}
 }
 
+// Execute 执行一行命令并返回**完整结果**（含服务端的结构化提示标记 Warning），
+// 同时更新本地模式/层级（提示符与 ?/Tab 补全据此渲染）。
+//
+// 脚本模式（`-c`）用它区分「提示」与「失败」：`Warning` 为真表示服务端明确回了
+// 非失败提示（当前为「语句未产生配置变更」），应继续执行后续语句——不去猜输出
+// 文本前缀（`%%` 是错误前缀，提示行不带它；而语句文本自身可能含 `%`）。
+func (s *Session) Execute(line string) cliclient.Result {
+	res, err := s.client.Execute(line, s.Source)
+	if err != nil {
+		// 传输层失败（连不上/超时）与 ExecuteLine 同口径：`%%` + 本地提示符。
+		return cliclient.Result{Output: "%% " + err.Error() + "\n", Prompt: s.Prompt()}
+	}
+	s.Mode, s.Path = res.Mode, res.Path
+	return res
+}
+
 // ExecuteLine 执行一行命令，返回输出与更新后的提示符。
 func (s *Session) ExecuteLine(line string) (string, string) {
-	out, prompt, _ := s.ExecuteFull(line)
-	return out, prompt
+	res := s.Execute(line)
+	return res.Output, res.Prompt
 }
 
 // ExecuteFull 执行一行命令并返回完整结果（含更新后的提示符与可能的串口接管请求）。
 // 供 REPL 处理 `request … console`（M4-12，FR-CMP-014）与交互确认。
 func (s *Session) ExecuteFull(line string) (string, string, *cliclient.ConsoleRequest) {
-	res, err := s.client.Execute(line, s.Source)
-	if err != nil {
-		return "%% " + err.Error() + "\n", s.Prompt(), nil
-	}
-	s.Mode, s.Path = res.Mode, res.Path
+	res := s.Execute(line)
 	return res.Output, res.Prompt, res.Console
 }
 

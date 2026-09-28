@@ -307,7 +307,7 @@ CLI 参数：
 | `-ca` | 空 | 服务端证书 PEM；**缺省固定本机 `/var/lib/nfvis/tls/server.crt`**（自签场景零配置） |
 | `-insecure` | 关 | 跳过证书校验（仅调试） |
 | `-source` | `ssh` | 接入源（`ssh`/`console`），影响管理口自锁保护与 `start shell` 权限 |
-| `-c "…"` | 空 | **脚本模式**：执行多行命令后退出（换行分隔；任一行出错即停） |
+| `-c "…"` | 空 | **脚本模式**：执行多行命令后退出（换行分隔；任一行**真错误**即停——「值未变化」的空操作只是提示，见下） |
 | `-version` | - | CLI 版本（与守护进程同源注入） |
 
 > **零参数即可连**：缺省 `https://127.0.0.1:443` 与守护进程缺省一致，
@@ -323,6 +323,11 @@ nfvis-cli -c "configure
 set system hostname fw-01
 commit"
 ```
+
+> **「值未变化」不是错误（幂等脚本可重跑）**：脚本里一条**语义正确、但配置值已经是目标值**的语句
+> （例如重跑同一份脚本时 `set system hostname fw-01` 与现值相同）只打印一行
+> `警告: 语句未产生配置变更（值未变化或尚未映射到模型），已继续：<语句>`（不带 `%` 前缀），
+> **脚本继续执行后续语句**，退出码不受影响。真错误（语法/校验/权限/下发失败）照旧中止脚本并返回非零退出码。
 
 > **脚本模式不代答确认**：删除 VNF/容器/镜像、软件升级/回退、重启/关机、恢复出厂、
 > 接口交 DPDK 等破坏性动作，服务端会先问 `… ? [yes,no]`。交互模式下由 CLI 读你的答复；
@@ -1250,6 +1255,10 @@ nfvis$ show configuration
 nfvis$ show users
 ```
 
+> 接口的 **MTU 是有效值**：配置里显式设了 `set interfaces <名> mtu` 就用配置值，否则显示**数据面当前**的
+> L3 MTU（VPP 事实源）——`show interfaces <名> detail` 与控制台「系统 → 接口」页同源；两侧都取不到才显示
+> `-`（不编造默认值）。
+
 ### 10.2 连通性测试
 
 ```bash
@@ -1306,6 +1315,14 @@ nfvis$ show alarms all
 nfvis$ request alarms clear id <id>           # 清除已 resolved 的告警
 nfvis$ request alarms clear all
 ```
+
+> **告警会自己消解，别拿 `clear` 当日常手段**：vNIC 链路恢复、接口重新就绪、容器回到 running、
+> **对象从配置里删除**（VNF/容器/接口不再声明）之后，对应告警都会自动转为 resolved，不再出现在
+> `show alarms active`（总览页同理）。`request alarms clear` 是清"已经 resolved 的残留记录"，不是修故障。
+>
+> **「已停止」不等于「异常退出」**：容器被主动 `request container-functions <名> stop` 之后是
+> **已停止**（`docker stop` 的 137/143 退出码属正常结果），**不会**产生告警；只有 OOM 被杀
+> （Docker `OOMKilled`）或其它非零退出码才报 `CONTAINER_EXITED` critical。
 
 ### 10.7 备份 / 恢复 / 恢复出厂
 

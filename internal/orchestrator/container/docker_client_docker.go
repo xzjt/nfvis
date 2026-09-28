@@ -246,6 +246,23 @@ func (c *dockerClient) ExitCode(ctx context.Context, name string) (int, bool, er
 	return out.State.ExitCode, true, nil
 }
 
+// OOMKilled 返回容器是否因内存超限被终止（State.OOMKilled）。
+func (c *dockerClient) OOMKilled(ctx context.Context, name string) (bool, bool, error) {
+	var out struct {
+		State struct {
+			OOMKilled bool `json:"OOMKilled"`
+		} `json:"State"`
+	}
+	err := c.do(ctx, http.MethodGet, "/containers/"+url.PathEscape(name)+"/json", nil, &out)
+	if err == errDockerNotFound {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return out.State.OOMKilled, true, nil
+}
+
 func (c *dockerClient) Logs(ctx context.Context, name string, tail int) (string, error) {
 	path := "/containers/" + url.PathEscape(name) + "/logs?stdout=1&stderr=1&tail=" + strconv.Itoa(tail)
 	var sb strings.Builder

@@ -58,6 +58,10 @@ type CLIEResult struct {
 	// （M4-12；FR-CMP-014）。前端经 pkg/cliclient.DialConsole 连 Console.WSURL，
 	// Ctrl-] 退出后恢复行编辑。
 	Console *ConsoleRequest `json:"console,omitempty"`
+	// Warning 为真表示本条命令的输出是**提示**（非失败）：当前唯一来源是「语句未产生
+	// 配置变更」（值未变化/未映射到模型）。前端据此判定「继续执行、不影响退出码」，
+	// 而不是去猜输出文本前缀（`%%` 是错误前缀，提示行不带它）。
+	Warning bool `json:"warning,omitempty"`
 }
 
 // ConsoleRequest 串口终端接管请求（CLI 前端与守护进程间的接管约定）。
@@ -108,6 +112,10 @@ type cliExecutor struct {
 	structuredPath []string
 	// consolePending 本次命令要求前端接管串口时的接管请求（单命令执行期内有效）
 	consolePending *ConsoleRequest
+	// warningPending 本次命令以**提示**结束（非失败；当前唯一来源：语句未产生配置变更）。
+	// 随 CLIEResult.Warning 回传前端——脚本模式据此继续执行，而不是猜输出文本前缀。
+	// 单命令执行期内有效（Execute 起始复位，与 consolePending 同法）。
+	warningPending bool
 	// issueConsole 签发 console 一次性 ticket 并返回 ws 相对路径与有效期
 	// （M4-12；由 Server.New 注入，复用 handleConsoleWS 的同一 ticket 表与审计落点）
 	issueConsole func(vm, user string) (wsPath string, ttl int, err error)
@@ -225,6 +233,7 @@ func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
 	x.structured = nil
 	x.structuredPath = nil
 	x.consolePending = nil
+	x.warningPending = false
 	var out string
 	if perr != nil {
 		out = "%% " + perr.Error() + "\n"
@@ -238,7 +247,8 @@ func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
 	if cur == nil {
 		cur = &cliSession{Mode: "oper"}
 	}
-	return CLIEResult{Output: out, Mode: cur.Mode, Path: append([]string{}, cur.Path...), Prompt: promptOf(cur), Console: x.consolePending}
+	return CLIEResult{Output: out, Mode: cur.Mode, Path: append([]string{}, cur.Path...), Prompt: promptOf(cur),
+		Console: x.consolePending, Warning: x.warningPending}
 }
 
 // canonicalize 按当前模式/层级把命令 token 规整为规范关键字（FR-CLI-004：
@@ -757,14 +767,25 @@ func (x *cliExecutor) execSetDelete(user, source string, s *cliSession, op strin
 	if err != nil {
 		return "%% " + err.Error() + "\n"
 	}
-	if op == "set" {
-		if err := applyStatement(&cfg, full); err != nil {
-			return "%% " + err.Error() + "\n"
+	apply := applyStatement
+	if op != "set" {
+		apply = deleteStatement
+	}
+	if err := apply(&cfg, full); err != nil {
+		var nc *noChangeError
+		if errors.As(err, &nc) {
+			// 空操作**不是错误**（round86 R86-8）：值已是目标值时重跑脚本属正常
+			// （幂等重跑），此前按 `%%` 报错 → `-c` 脚本「任一行出错即停」→ 后续语句
+			// 全部不执行、候选被丢弃。现改为一行的**提示**（无 `%` 前缀 = 产品里只有
+			// `%`/`%%` 才是错误）+ 结构化标记 Warning，由前端决定是否继续：
+			// 脚本模式继续（退出码不受影响），交互模式照常显示。
+			// 语句按与 `[ok]` 回显同一处掩码（口令类取值不回显明文），并带回 op
+			//（full 不含首位 set/delete，单独带上才好抄改）。
+			x.warningPending = true
+			return "警告: 语句未产生配置变更（值未变化或尚未映射到模型），已继续：" + op + " " +
+				strings.Join(maskStatementTokens(full), " ") + "\n"
 		}
-	} else {
-		if err := deleteStatement(&cfg, full); err != nil {
-			return "%% " + err.Error() + "\n"
-		}
+		return "%% " + err.Error() + "\n"
 	}
 	if err := x.engine.UpdateCandidate(sess, cfg); err != nil {
 		return "%% " + err.Error() + "\n"
@@ -1002,9 +1023,21 @@ func commitTree(cfg *model.Config, tree map[string]any, before model.Config, tok
 		return err
 	}
 	if model.Diff(before, *cfg) == "" {
-		return fmt.Errorf("语句未产生配置变更（尚未映射到模型或值未变化）: %s", strings.Join(tokens, " "))
+		return &noChangeError{stmt: strings.Join(tokens, " ")}
 	}
 	return nil
+}
+
+// noChangeError 「语句未产生配置变更」：语句语义正确，但配置**没有变化**
+// （值已是目标值——幂等重跑；或语句尚未映射到模型）。
+//
+// 用**类型**传递而不是让前端去猜输出文本前缀：脚本模式（`-c`）据此把空操作当提示
+// 继续，而真错误（语法/校验/权限/底座下发失败）仍是 `%%` + 非零退出。
+// 其余调用方（display set 回放自校验 setstmt.go）照旧按 error 处理，行为不变。
+type noChangeError struct{ stmt string }
+
+func (e *noChangeError) Error() string {
+	return "语句未产生配置变更（尚未映射到模型或值未变化）: " + e.stmt
 }
 
 // ---------- 语句别名表（CLI 嵌套 ⇄ 模型扁平不一致的映射） ----------

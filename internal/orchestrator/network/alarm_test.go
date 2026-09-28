@@ -5,6 +5,8 @@ package network
 import (
 	"testing"
 	"time"
+
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 func fixedClock(t *testing.T) (*AlarmStore, func(time.Duration)) {
@@ -93,6 +95,35 @@ func TestAlarmSyncScoped(t *testing.T) {
 	s.Sync(recoveryScope, nil)
 	if got := len(s.List(AlarmActive)); got != 1 {
 		t.Fatalf("其它作用域告警不应被 Sync 收敛，实际活动 %d", got)
+	}
+}
+
+// round86：ActiveOf 只列本 scope 的活动告警（已 resolved 与其它 scope 不算），顺序确定。
+func TestAlarmActiveOfScoped(t *testing.T) {
+	s, _ := fixedClock(t)
+	s.Raise(vnfScope, SeverityWarning, AlarmVnfPortDown, "down", "vnf-b/eth0")
+	s.Raise(vnfScope, SeverityWarning, AlarmVnfPortDown, "down", "vnf-a/eth0")
+	s.Raise(ifLinkScope, SeverityWarning, AlarmIfaceLinkDown, "down", "ens224")
+	s.Raise(vnfScope, SeverityWarning, "OTHER", "别的", "vnf-c/eth0")
+	if !s.Resolve(vnfScope, "OTHER", "vnf-c/eth0") {
+		t.Fatal("前置：应命中消警")
+	}
+
+	got := s.ActiveOf(vnfScope)
+	want := []orchestrator.AlarmRef{
+		{Code: AlarmVnfPortDown, Source: "vnf-a/eth0"},
+		{Code: AlarmVnfPortDown, Source: "vnf-b/eth0"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ActiveOf 应只含本 scope 活动告警: %+v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ActiveOf[%d] = %+v，期望 %+v（全部 %+v）", i, got[i], want[i], got)
+		}
+	}
+	if other := s.ActiveOf("vnf"); len(other) != 0 {
+		t.Fatalf("scope 应整段匹配（vnf 不应命中 vnf-port）: %+v", other)
 	}
 }
 

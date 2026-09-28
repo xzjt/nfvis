@@ -574,9 +574,9 @@ function ifdMsg(text, isErr) {
   p.className = isErr ? 'error small' : 'muted small';
 }
 
-// 详情页取两个端点：`/interfaces/{name}`（配置字段 + 该口计数）与 `/interfaces`（**运行态**字段：
-// 驱动 / 链路 / 速率——单取端点不回运行态，只回配置对象；"现在挂的是哪个驱动"正是本页要看的东西，
-// 故两个都声明、都在路由表的 endpoints 里）。运行态缺席时如实显示「—」，不编造。
+// 详情页取两个端点：`/interfaces/{name}`（合并视图：配置字段 + 运行态字段 + 该口计数）与
+// `/interfaces`（运行态行清单，用于按名取行；保留是为了与列表页共用一份渲染数据）。
+// 运行态缺席时如实显示「—」，不编造。
 function renderIfaceDetail(iface, ifaces, params) {
   const name = (params && params.name) || '';
   const ok = iface && !iface.__err;
@@ -592,7 +592,8 @@ function renderIfaceDetail(iface, ifaces, params) {
   fill($('ifd-info'), ok ? [
     ['说明', iface.description],
     ['MTU', iface.mtu],
-    ['启用（配置）', iface.enabled === true ? '是' : (iface.enabled === false ? '否' : undefined)],
+    // 不在此处重复展示「启用」：`enabled` 是**运行态** admin 状态（详情端点与列表端点同一合并视图），
+    // 已在头部「管理状态」呈现——原先那行标着「启用（配置）」会把运行态值说成配置值。
     ['入向限速策略', iface.ingress_policy],
     ['SR-IOV VF 数（配置）', iface.sriov ? iface.sriov.vf_count : undefined],
     ['VF 占用', iface.sriov && Array.isArray(iface.sriov.vfs) && iface.sriov.vfs.length

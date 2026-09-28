@@ -12,6 +12,7 @@ import (
 	"fmt"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 // ifLinkScope 告警作用域（与 vnf-port / recovery 各自 Sync 互不影响）。
@@ -27,6 +28,10 @@ const AlarmIfaceLinkDown = "INTERFACE_LINK_DOWN"
 //   - VPP 中不存在该口 → 交由恢复收敛处理（RECOVERY_IFACE_MISSING），此处不重复告警；
 //   - 存在但 `!(AdminUp && LinkUp)` → warning 告警，消息区分 admin/link 哪一侧未起；
 //   - 恢复 up 后自动消警。
+//
+// 对账清警（round86 缺陷 1）：VPP 接口状态查询成功时，scope 内**源已不在配置期望集合**
+// （从 interfaces[] 删除、或已被显式 disable）的活动告警一律 Resolve——否则它们永久滞留。
+// 查询失败（取不到运行态）时不清警，保持既有告警原样。
 func (n *L2Network) CheckInterfaceLinks(ctx context.Context, cfg model.Config) []error {
 	if n.l2 == nil {
 		return nil
@@ -43,10 +48,12 @@ func (n *L2Network) CheckInterfaceLinks(ctx context.Context, cfg model.Config) [
 	if n.alarms == nil {
 		return nil
 	}
+	expect := map[string]bool{}
 	for _, iface := range cfg.Interfaces {
 		if iface.Enabled != nil && !*iface.Enabled {
 			continue // 显式禁用：不下发也不告警（用户意图）
 		}
+		expect[iface.Name] = true
 		info, exists := infoByName(names, iface.Name)
 		if !exists {
 			continue // 缺口由恢复收敛告警（RECOVERY_IFACE_MISSING）
@@ -65,6 +72,7 @@ func (n *L2Network) CheckInterfaceLinks(ctx context.Context, cfg model.Config) [
 		n.alarms.Raise(ifLinkScope, SeverityWarning, AlarmIfaceLinkDown,
 			fmt.Sprintf("物理口 %s 未就绪：%s", iface.Name, reason), iface.Name)
 	}
+	orchestrator.ResolveStale(n.alarms, ifLinkScope, expect)
 	return nil
 }
 

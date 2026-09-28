@@ -19,6 +19,9 @@ type cliExecuteResponse struct {
 	Path    []string        `json:"path"`
 	Prompt  string          `json:"prompt"`
 	Console *ConsoleRequest `json:"console,omitempty"` // M4-12：串口终端接管请求（FR-CMP-014）
+	// Warning 输出为**提示**而非失败（当前唯一来源：语句未产生配置变更，round86 R86-8）。
+	// nfvis-cli 脚本模式（`-c`）据此继续执行，而不是猜输出文本前缀。
+	Warning bool `json:"warning,omitempty"`
 }
 
 // handleCLIExecute POST /api/v1/cli/execute：执行一行 CLI 命令。
@@ -37,6 +40,6 @@ func (s *Server) handleCLIExecute(w http.ResponseWriter, r *http.Request) {
 	res := s.cliExec.Execute(info.User, info.Class, source, req.Line)
 	writeJSON(w, http.StatusOK, cliExecuteResponse{
 		Output: res.Output, Mode: res.Mode, Path: res.Path, Prompt: res.Prompt,
-		Console: res.Console,
+		Console: res.Console, Warning: res.Warning,
 	})
 }

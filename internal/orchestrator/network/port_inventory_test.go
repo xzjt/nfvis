@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	ifapi "go.fd.io/govpp/binapi/interface"
 )
 
 // 决策 #83：运行态端口清单——VPP 侧与内核侧必须各自正确，且都不含「虚拟接口」。
@@ -69,5 +71,38 @@ func TestVPPIfnamesErrorWhenClientFails(t *testing.T) {
 	var nilNet *L2Network
 	if _, err := nilNet.VPPIfnames(); err == nil {
 		t.Fatal("未接入时应报错")
+	}
+}
+
+// R86-7：接口运行态清单必须把 L3 MTU 透传出来（接口读视图的「有效 MTU」取自这里；
+// 此前 SwIfInfo 没有该字段，Web 控制台 MTU 列因此恒为 —）。
+func TestInterfaceStatesCarriesMTU(t *testing.T) {
+	f := newFakeL2()
+	f.names = map[uint32]SwIfInfo{
+		1: {Name: "ens192", Mtu: 9000},
+		2: {Name: "ens224"}, // 未上报 MTU（0）
+	}
+	n := &L2Network{l2: NewL2Provider(f)}
+
+	got, err := n.InterfaceStates()
+	if err != nil {
+		t.Fatalf("InterfaceStates: %v", err)
+	}
+	if got["ens192"].Mtu != 9000 {
+		t.Fatalf("ens192 的 Mtu 应为 9000，实得 %+v", got["ens192"])
+	}
+	if got["ens224"].Mtu != 0 {
+		t.Fatalf("未上报 MTU 的口应为 0（取不到就不给由上层决定），实得 %+v", got["ens224"])
+	}
+}
+
+// R86-7：L3 MTU 取 sw_interface_details.Mtu 的下标 0（1/2/3 依次是 IP4/IP6/MPLS）；
+// 长度异常时返回 0——读视图据此「取不到就不给」，不得编造。
+func TestSwIfL3MTUPicksL3Index(t *testing.T) {
+	if got := swIfL3MTU(&ifapi.SwInterfaceDetails{Mtu: []uint32{9000, 1500, 1500, 1500}}); got != 9000 {
+		t.Fatalf("L3 MTU 应取 Mtu[0]，实得 %d（取错下标会把 IP4/IP6 的 MTU 当成 L3）", got)
+	}
+	if got := swIfL3MTU(&ifapi.SwInterfaceDetails{}); got != 0 {
+		t.Fatalf("Mtu 缺失时应为 0，实得 %d", got)
 	}
 }

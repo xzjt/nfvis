@@ -50,6 +50,7 @@ type SwIfInfo struct {
 	LinkUp      bool   // LINK_UP 位
 	LinkSpeed   uint32 // 速率（kbps；DPDK 口可能为 0）
 	DevType     string // 设备类型/驱动名（interface_dev_type）
+	Mtu         uint32 // L3 MTU（sw_interface_details.Mtu[0]；取不到时为 0）
 }
 
 // BDRuntime bridge-domain 运行态（决策 #84）：`show virtual-switches` 的事实来源。

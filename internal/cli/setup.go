@@ -467,20 +467,21 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 	// —— 执行：逐条经既有语句；任一步报错即停（candidate 保留，操作者可修正或 discard）。
 	// 「语句未产生配置变更」例外：在已按相同值配置过的机器上重跑向导属预期，不算失败。 ——
 	for _, st := range plan.Statements {
-		o, _ := sess.ExecuteLine(st)
-		if strings.TrimSpace(o) != "" {
+		res := sess.Execute(st)
+		if res.Warning {
+			// 重跑向导时值已配置属预期：判据是服务端的**结构化标记**（不再匹配输出
+			// 文本），文案沿用 round83 走查定下的 [跳过] 口径——服务端的 `警告: …`
+			// 提示不再重复打印，操作者只看到一行跳过说明。
+			fmt.Fprintln(out, "  [跳过] "+st+"（值已是期望值）")
+			continue
+		}
+		if o := res.Output; strings.TrimSpace(o) != "" {
 			fmt.Fprint(out, o)
 			if !strings.HasSuffix(o, "\n") {
 				fmt.Fprintln(out)
 			}
 		}
-		if strings.Contains(o, "语句未产生配置变更") {
-			// 重跑向导时值已配置属预期（上面的例外注释），但 %% 错误样式会让操作者
-			// 以为失败（round83 走查实测）——改写为跳过说明再落盘。
-			fmt.Fprintln(out, "  [跳过] "+st+"（值已是期望值）")
-			continue
-		}
-		if stepFailed(o) {
+		if stepFailed(res.Output) {
 			fmt.Fprintln(out, "向导在上述步骤失败：candidate 已保留，可修正后重新 commit，或执行 discard 放弃。")
 			return fmt.Errorf("语句执行失败: %s", st)
 		}

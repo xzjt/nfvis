@@ -333,6 +333,10 @@
           },
           "prompt": {
             "type": "string"
+          },
+          "warning": {
+            "description": "本次输出是**提示**而非失败（当前唯一来源：语句未产生配置变更——值已经是目标值）。nfvis-cli 脚本模式（-c）据此继续执行后续语句而不中止；真错误不带本字段。",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -942,6 +946,7 @@
             "type": "string"
           },
           "mtu": {
+            "description": "有效 MTU：配置显式值优先，否则运行态（VPP sw_interface_details 的 L3 MTU）",
             "type": "integer"
           },
           "name": {

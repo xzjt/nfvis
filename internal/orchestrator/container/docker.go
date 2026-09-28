@@ -71,6 +71,9 @@ type dockerAPI interface {
 	State(ctx context.Context, name string) (state string, exists bool, err error)
 	// ExitCode 返回容器退出码（不存在 exists=false）。
 	ExitCode(ctx context.Context, name string) (code int, exists bool, err error)
+	// OOMKilled 返回容器是否因内存超限被终止（Docker State.OOMKilled；不存在 exists=false）。
+	// 用它与退出码共同判定「异常退出」：docker stop 的正常结果是 137/143，不以此为故障。
+	OOMKilled(ctx context.Context, name string) (killed bool, exists bool, err error)
 	Logs(ctx context.Context, name string, tail int) (string, error)
 }
 
@@ -249,11 +252,46 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 	return errs
 }
 
+// exitOutcome exited 容器退出性质。
+type exitOutcome int
+
+const (
+	// exitStopped 正常退出（码 0）或操作者主动停止（137/143，docker stop 的 SIGKILL/SIGTERM）：
+	// 属于「已停止」，不告警。
+	exitStopped exitOutcome = iota
+	// exitOOM 因内存超限被终止（Docker State.OOMKilled）→ 异常，critical。
+	exitOOM
+	// exitAbnormal 其它非零退出码 → 异常，critical。
+	exitAbnormal
+)
+
+// classifyExit 判定 exited 容器的退出性质（纯函数，单测覆盖）。
+// 判据以 OOMKilled 为核心：docker stop 的正常结果就是 137（超时 SIGKILL）/143（SIGTERM），
+// 若只看 `code != 0` 会把操作者的主动停止报成 critical「异常退出」（round86 缺陷 2）。
+func classifyExit(code int, oomKilled bool) exitOutcome {
+	if oomKilled {
+		return exitOOM
+	}
+	if code == 0 || code == 137 || code == 143 {
+		return exitStopped
+	}
+	return exitAbnormal
+}
+
 // CheckContainerAlarms 检测容器异常退出并维护告警（FR-CMP-022）：
-// dead 或 exited 且退出码非零 → critical `CONTAINER_EXITED`；running/正常退出 → 消警。
+//   - dead → critical `CONTAINER_EXITED`（异常，口径不变）；
+//   - exited 时按 OOMKilled / 退出码判定（见 classifyExit）：OOM 或其它非零码 → critical；
+//     正常退出与主动停止（137/143）→ 消警（已停止，不是故障）；
+//   - running → 消警。
+//
+// 对账清警（round86 缺陷 1）：状态查询全部成功时，还会把 scope 内**源已不在配置期望集合**
+// （容器已从配置删除）的活动告警 Resolve 掉；任一查询失败则不清警，避免运行态未知时误清。
+// 退出原因查询失败时该容器保持既有告警状态（既不清也不重复报）。
 func (p *Provider) CheckContainerAlarms(ctx context.Context, cfg model.Config) []error {
+	expect := make(map[string]bool, len(cfg.ContainerFunctions))
 	var errs []error
 	for _, ct := range cfg.ContainerFunctions {
+		expect[ct.Name] = true
 		state, exists, err := p.api.State(ctx, ct.Name)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("容器 %s 状态查询: %w", ct.Name, err))
@@ -262,18 +300,38 @@ func (p *Provider) CheckContainerAlarms(ctx context.Context, cfg model.Config) [
 		if !exists || p.alarms == nil {
 			continue
 		}
-		abnormal := state == orchestrator.CTStateDead
-		if state == orchestrator.CTStateExited {
-			if code, _, cerr := p.api.ExitCode(ctx, ct.Name); cerr == nil && code != 0 {
-				abnormal = true
-			}
-		}
-		if abnormal {
+		if state == orchestrator.CTStateDead {
 			p.alarms.Raise(orchestrator.RecoveryScopeContainer, orchestrator.SeverityCritical, orchestrator.ContainerExited,
 				fmt.Sprintf("容器 %s 异常退出（状态 %s）", ct.Name, state), ct.Name)
 			continue
 		}
+		if state == orchestrator.CTStateExited {
+			oom, _, oerr := p.api.OOMKilled(ctx, ct.Name)
+			if oerr != nil {
+				errs = append(errs, fmt.Errorf("容器 %s 退出原因查询: %w", ct.Name, oerr))
+				continue
+			}
+			code, _, cerr := p.api.ExitCode(ctx, ct.Name)
+			if cerr != nil {
+				errs = append(errs, fmt.Errorf("容器 %s 退出码查询: %w", ct.Name, cerr))
+				continue
+			}
+			switch classifyExit(code, oom) {
+			case exitOOM:
+				p.alarms.Raise(orchestrator.RecoveryScopeContainer, orchestrator.SeverityCritical, orchestrator.ContainerExited,
+					fmt.Sprintf("容器 %s 因内存超限被终止（OOMKilled，退出码 %d）", ct.Name, code), ct.Name)
+				continue
+			case exitAbnormal:
+				p.alarms.Raise(orchestrator.RecoveryScopeContainer, orchestrator.SeverityCritical, orchestrator.ContainerExited,
+					fmt.Sprintf("容器 %s 异常退出（状态 %s，退出码 %d）", ct.Name, state, code), ct.Name)
+				continue
+			}
+			// 正常退出/主动停止：落到下面的 Resolve（已停止，不是故障）
+		}
 		p.alarms.Resolve(orchestrator.RecoveryScopeContainer, orchestrator.ContainerExited, ct.Name)
+	}
+	if p.alarms != nil && len(errs) == 0 {
+		orchestrator.ResolveStale(p.alarms, orchestrator.RecoveryScopeContainer, expect)
 	}
 	return errs
 }

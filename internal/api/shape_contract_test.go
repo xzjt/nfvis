@@ -37,7 +37,7 @@ var shapeConditional = map[string]map[string]string{
 		"speed_mbps":  "同上；且 DPDK 口速率可能为 0（取不到就不给）",
 		"mac":         "模型未采集（无数据源）",
 		"numa_node":   "模型未采集（无数据源）",
-		"mtu":         "未配置时省略",
+		"mtu":         "有效 MTU：配置未显式给且运行态未上报时省略（不编造 0/默认值）",
 		"description": "未配置时省略",
 		"sriov":       "未配置 SR-IOV 时省略",
 		"statistics":  "仅在详情端点 /interfaces/{name} 附带",

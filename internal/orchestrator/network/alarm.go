@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 // 告警严重级别（契约 Alarm.severity）。
@@ -172,6 +174,30 @@ func (s *AlarmStore) Clear(id string, all bool) int {
 		}
 	}
 	return n
+}
+
+// ActiveOf 返回 scope 内全部活动告警的识别信息（按 code、source 升序，便于对账与测试确定）。
+//
+// 用途：对象从配置里删除后，检查函数不再遍历到它，其告警便无人 Resolve（round86 真机缺陷）。
+// 检查函数在查询运行态成功之后按期望集合对账（见 orchestrator.ResolveStale）清掉这类滞留告警。
+func (s *AlarmStore) ActiveOf(scope string) []orchestrator.AlarmRef {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prefix := scope + "\x00"
+	out := make([]orchestrator.AlarmRef, 0, 4)
+	for k, a := range s.byKey {
+		if a.State != AlarmActive || !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		out = append(out, orchestrator.AlarmRef{Code: a.Code, Source: a.Source})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Code == out[j].Code {
+			return out[i].Source < out[j].Source
+		}
+		return out[i].Code < out[j].Code
+	})
+	return out
 }
 
 // List 按状态过滤告警（active|resolved|all，缺省/非法值按 active），按 raised_at 升序。

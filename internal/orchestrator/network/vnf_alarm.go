@@ -23,10 +23,15 @@ const AlarmVnfPortDown = "VNF_PORT_DOWN"
 
 // CheckVnfPorts 检查配置中所有 vhost-user vNIC 的链路状态并维护告警。
 // 返回不可查询项的错误（不阻塞调用方）。
+//
+// 对账清警（round86 缺陷 1）：本次查询全部成功时，还会把 scope 内**源已不在配置期望集合**
+// 的活动告警 Resolve 掉——VNF 从配置删除后，循环再也遍历不到它，否则其 VNF_PORT_DOWN
+// 会永久滞留。查询失败（任何一项）时不做对账：运行态未知时清警会掩盖真实故障。
 func (n *L2Network) CheckVnfPorts(ctx context.Context, cfg model.Config) []error {
 	if n.vhost == nil {
 		return nil
 	}
+	expect := map[string]bool{}
 	var errs []error
 	for _, vm := range cfg.VirtualMachineFunctions {
 		for _, nic := range vm.Interfaces {
@@ -34,6 +39,7 @@ func (n *L2Network) CheckVnfPorts(ctx context.Context, cfg model.Config) []error
 				continue
 			}
 			source := vm.Name + "/" + nic.Name
+			expect[source] = true
 			exists, up, err := n.vhost.LinkState(ctx, vm.Name, nic.Name)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("vNIC %s 链路状态查询: %w", source, err))
@@ -53,6 +59,9 @@ func (n *L2Network) CheckVnfPorts(ctx context.Context, cfg model.Config) []error
 			n.alarms.Raise(vnfScope, SeverityWarning, AlarmVnfPortDown,
 				fmt.Sprintf("VNF %s 的 vNIC %s %s", vm.Name, nic.Name, reason), source)
 		}
+	}
+	if n.alarms != nil && len(errs) == 0 {
+		orchestrator.ResolveStale(n.alarms, vnfScope, expect)
 	}
 	return errs
 }

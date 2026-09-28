@@ -17,10 +17,14 @@ type mockDocker struct {
 	err       error
 	logs      string
 	exitCodes map[string]int
+	oomKilled map[string]bool
+	stateErr  error // State 查询失败注入（查询失败不清警的单测）
+	oomErr    error // OOMKilled 查询失败注入
 }
 
 func newMockDocker() *mockDocker {
-	return &mockDocker{states: map[string]string{}, specs: map[string]CreateSpec{}, exitCodes: map[string]int{}}
+	return &mockDocker{states: map[string]string{}, specs: map[string]CreateSpec{}, exitCodes: map[string]int{},
+		oomKilled: map[string]bool{}}
 }
 
 func (m *mockDocker) Create(_ context.Context, name string, spec CreateSpec) error {
@@ -56,6 +60,13 @@ func (m *mockDocker) ExitCode(_ context.Context, name string) (int, bool, error)
 	_, ok := m.states[name]
 	return m.exitCodes[name], ok, nil
 }
+func (m *mockDocker) OOMKilled(_ context.Context, name string) (bool, bool, error) {
+	if m.oomErr != nil {
+		return false, false, m.oomErr
+	}
+	_, ok := m.states[name]
+	return m.oomKilled[name], ok, nil
+}
 func (m *mockDocker) LoadImage(_ context.Context, _, _ string) error { return nil }
 
 func (m *mockDocker) RemoveImage(_ context.Context, ref string) error {
@@ -63,6 +74,9 @@ func (m *mockDocker) RemoveImage(_ context.Context, ref string) error {
 	return nil
 }
 func (m *mockDocker) State(_ context.Context, name string) (string, bool, error) {
+	if m.stateErr != nil {
+		return "", false, m.stateErr
+	}
 	s, ok := m.states[name]
 	return s, ok, nil
 }
@@ -220,12 +234,52 @@ func TestDockerStateToContract(t *testing.T) {
 	}
 }
 
-type fakeSink struct{ raised, resolved []string }
+// sinkAlarm 假告警表里的一条活动告警（对账清警只需 scope/code/source）。
+type sinkAlarm struct{ scope, severity, code, message, source string }
 
-func (f *fakeSink) Raise(_, _, _, _, source string) { f.raised = append(f.raised, source) }
-func (f *fakeSink) Resolve(_, _, source string) bool {
+// fakeSink 记录告警并模拟活动集合（ActiveOf 供对账清警断言；与真实表同口径：同键幂等）。
+type fakeSink struct {
+	raised   []string // Raise 的 source 序列（逐次追加）
+	details  []sinkAlarm
+	active   []sinkAlarm // 当前活动告警
+	resolved []string    // Resolve 的 source 序列（逐次追加）
+}
+
+func (f *fakeSink) Raise(scope, severity, code, message, source string) {
+	f.raised = append(f.raised, source)
+	f.details = append(f.details, sinkAlarm{scope, severity, code, message, source})
+	for _, a := range f.active {
+		if a.scope == scope && a.code == code && a.source == source {
+			return
+		}
+	}
+	f.active = append(f.active, sinkAlarm{scope, severity, code, message, source})
+}
+
+func (f *fakeSink) Resolve(scope, code, source string) bool {
 	f.resolved = append(f.resolved, source)
-	return true
+	for i, a := range f.active {
+		if a.scope == scope && a.code == code && a.source == source {
+			f.active = append(f.active[:i], f.active[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeSink) ActiveOf(scope string) []orchestrator.AlarmRef {
+	var out []orchestrator.AlarmRef
+	for _, a := range f.active {
+		if a.scope == scope {
+			out = append(out, orchestrator.AlarmRef{Code: a.code, Source: a.source})
+		}
+	}
+	return out
+}
+
+// seed 预置一条活动告警：模拟此前检查已 Raise、对象随后被删除的场景。
+func (f *fakeSink) seed(scope, code, source string) {
+	f.active = append(f.active, sinkAlarm{scope: scope, code: code, source: source})
 }
 
 func TestEnsureConsistentAlarms(t *testing.T) {
@@ -282,5 +336,149 @@ func TestCheckContainerAlarms(t *testing.T) {
 	p.CheckContainerAlarms(context.Background(), cfg)
 	if len(sink.resolved) != 1 {
 		t.Fatalf("正常退出应消警: %v", sink.resolved)
+	}
+}
+
+// classifyExit 纯函数：OOMKilled 是异常判据核心；0/137/143（docker stop 的正常结果）为已停止。
+func TestClassifyExit(t *testing.T) {
+	cases := []struct {
+		code int
+		oom  bool
+		want exitOutcome
+	}{
+		{0, false, exitStopped}, {137, false, exitStopped}, {143, false, exitStopped},
+		{1, false, exitAbnormal}, {139, false, exitAbnormal},
+		{137, true, exitOOM}, {0, true, exitOOM}, // OOMKilled 优先于退出码
+	}
+	for _, c := range cases {
+		if got := classifyExit(c.code, c.oom); got != c.want {
+			t.Errorf("classifyExit(%d, %v) = %v，期望 %v", c.code, c.oom, got, c.want)
+		}
+	}
+}
+
+// round86 缺陷 2：request container-functions <名> stop → docker stop 退出码 137/143，
+// 属「已停止」而非异常退出：不 Raise，且清掉既有告警（此前报 critical「异常退出」）。
+func TestCheckContainerAlarmsStoppedNotAlarmed(t *testing.T) {
+	for _, code := range []int{137, 143} {
+		m := newMockDocker()
+		p := NewProvider(DefaultConfig(), m)
+		sink := &fakeSink{}
+		p.SetAlarms(sink)
+		// 预置一条（例如上次检查的残留）活动告警
+		sink.seed(orchestrator.RecoveryScopeContainer, orchestrator.ContainerExited, "walk-ct")
+		m.states["walk-ct"] = orchestrator.CTStateExited
+		m.exitCodes["walk-ct"] = code
+		cfg := model.Config{ContainerFunctions: []model.ContainerFunction{{Name: "walk-ct", Image: "alpine:3.20"}}}
+		if errs := p.CheckContainerAlarms(context.Background(), cfg); len(errs) != 0 {
+			t.Fatalf("巡检不应报错: %v", errs)
+		}
+		if len(sink.raised) != 0 {
+			t.Fatalf("主动停止（退出码 %d）不应告警: %v", code, sink.raised)
+		}
+		if len(sink.active) != 0 || len(sink.resolved) != 1 {
+			t.Fatalf("主动停止应消警: active=%+v resolved=%v", sink.active, sink.resolved)
+		}
+	}
+}
+
+// OOMKilled=true（即使退出码是 137）→ critical，文案指向内存超限而非「异常退出」。
+func TestCheckContainerAlarmsOOMKilled(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	sink := &fakeSink{}
+	p.SetAlarms(sink)
+	m.states["ct1"] = orchestrator.CTStateExited
+	m.exitCodes["ct1"] = 137
+	m.oomKilled["ct1"] = true
+	cfg := model.Config{ContainerFunctions: []model.ContainerFunction{ctFixture("ct1")}}
+	if errs := p.CheckContainerAlarms(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("巡检不应报错: %v", errs)
+	}
+	if len(sink.details) != 1 {
+		t.Fatalf("OOM 应告警: %+v", sink.details)
+	}
+	d := sink.details[0]
+	if d.severity != orchestrator.SeverityCritical || d.code != orchestrator.ContainerExited || d.source != "ct1" {
+		t.Fatalf("OOM 告警级别/码/源不符: %+v", d)
+	}
+	if !strings.Contains(d.message, "内存超限") || strings.Contains(d.message, "异常退出") {
+		t.Fatalf("OOM 告警文案应指向内存超限: %q", d.message)
+	}
+}
+
+// round86 缺陷 1：容器从配置删除后其活动告警（异常退出/未收敛）必须被对账清掉。
+func TestCheckContainerAlarmsResolvesRemovedContainer(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	sink := &fakeSink{}
+	p.SetAlarms(sink)
+	sink.seed(orchestrator.RecoveryScopeContainer, orchestrator.ContainerExited, "walk-ct")
+	sink.seed(orchestrator.RecoveryScopeContainer, orchestrator.RecoveryUnconverged, "walk-ct")
+	cfg := model.Config{} // 配置中已无该容器
+	if errs := p.CheckContainerAlarms(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("巡检不应报错: %v", errs)
+	}
+	if len(sink.active) != 0 {
+		t.Fatalf("已删除容器的告警应被清掉: %+v", sink.active)
+	}
+}
+
+// 状态查询失败：报错且**不**清警（运行态未知时清警会掩盖真实故障）。
+func TestCheckContainerAlarmsQueryFailureKeepsAlarm(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	sink := &fakeSink{}
+	p.SetAlarms(sink)
+	sink.seed(orchestrator.RecoveryScopeContainer, orchestrator.ContainerExited, "walk-ct")
+	m.states["ct1"] = orchestrator.CTStateRunning
+	m.stateErr = fmt.Errorf("docker down")
+	cfg := model.Config{ContainerFunctions: []model.ContainerFunction{ctFixture("ct1")}}
+	errs := p.CheckContainerAlarms(context.Background(), cfg)
+	if len(errs) != 1 {
+		t.Fatalf("查询失败应上报错误: %v", errs)
+	}
+	if len(sink.active) != 1 || len(sink.resolved) != 0 {
+		t.Fatalf("查询失败不应清警: active=%+v resolved=%v", sink.active, sink.resolved)
+	}
+}
+
+// 退出原因查询失败：该容器保持既有告警（不清也不重复报），错误照常上报。
+func TestCheckContainerAlarmsExitQueryFailureKeepsAlarm(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	sink := &fakeSink{}
+	p.SetAlarms(sink)
+	sink.seed(orchestrator.RecoveryScopeContainer, orchestrator.ContainerExited, "ct1")
+	m.states["ct1"] = orchestrator.CTStateExited
+	m.exitCodes["ct1"] = 137
+	m.oomErr = fmt.Errorf("docker down")
+	cfg := model.Config{ContainerFunctions: []model.ContainerFunction{ctFixture("ct1")}}
+	errs := p.CheckContainerAlarms(context.Background(), cfg)
+	if len(errs) != 1 {
+		t.Fatalf("查询失败应上报错误: %v", errs)
+	}
+	if len(sink.active) != 1 || len(sink.resolved) != 0 {
+		t.Fatalf("退出原因未知时不应动告警: active=%+v resolved=%v", sink.active, sink.resolved)
+	}
+}
+
+// 非零且非停止码（如 3）仍然是异常退出 → critical。
+func TestCheckContainerAlarmsNonZeroStillCritical(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	sink := &fakeSink{}
+	p.SetAlarms(sink)
+	m.states["ct1"] = orchestrator.CTStateExited
+	m.exitCodes["ct1"] = 3
+	cfg := model.Config{ContainerFunctions: []model.ContainerFunction{ctFixture("ct1")}}
+	if errs := p.CheckContainerAlarms(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("巡检不应报错: %v", errs)
+	}
+	if len(sink.details) != 1 || sink.details[0].severity != orchestrator.SeverityCritical {
+		t.Fatalf("非零退出应 critical: %+v", sink.details)
+	}
+	if !strings.Contains(sink.details[0].message, "退出码 3") {
+		t.Fatalf("告警文案应带退出码: %q", sink.details[0].message)
 	}
 }
