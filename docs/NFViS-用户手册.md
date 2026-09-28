@@ -1006,6 +1006,13 @@ nfvis# commit
 >   `nat44-ei-in2out-slowpath  out of ports`，`show nat44 sessions` 为 0）——已登记待修，
 >   需要独立外部地址池时请先用 `static` 1:1 发布或等修复。
 >
+> ⚠️ **NAT 用过的表，其所属交换机删除前要先重启数据面**：NAT44 一旦把某张表当作 inside/outside，
+> 就在该表上留一个引用锁（`vppctl show ip fib summary` 里可见 `locks:[nat44-ei-hi:…]`），
+> **删 NAT 规则、关插件都不释放它**——于是 `delete virtual-switches <那台 L3 交换机>` 会报
+> 「IP 表删除后仍存在于 VPP（未收敛）」，怎么重试都不成功（报错文案会带这句指引）。
+> 处置：`request vpp restart` 之后重试删除（重启按 committed 配置重建，代价是一次数据面中断）。
+> 也因此，**「改 NAT 出接口 + 删旧的 L3 交换机」不要放在同一次提交里**——拆成两次、中间重启数据面。
+>
 > **内网侧可以是 VNF 自己的网口**：把该 vNIC 声明为 L3 地址接口即可让 guest 的网关落在它自己的口上
 > （不这么写时 guest 会因为「网关地址不在它那一侧、VPP 不代答 ARP」而 100% `Destination Host Unreachable`）：
 >
@@ -1087,6 +1094,12 @@ nfvis$ request images download name img.qcow2 type vm-image \
         url https://example.com/img.qcow2 sha256 <64位十六进制>
 nfvis$ show images img.qcow2 detail
 ```
+
+> **慢链路也能拉完**：拉取只在**服务端停发**（连续 5 分钟收不到任何字节）或连接中断时失败，
+> 不设「整体耗时」上限——每秒几十 KB 的链路拉几百 MB 的镜像属正常，不会因为耗时长而中断。
+> 中断时 `import_state=failed`、原因与已下载字节写在 `show images <名> detail`（`last-error`），
+> **已下载部分保留在 `.part`**：重跑同一条命令即从断点续传（不必重新下载）。
+> 若目标机到镜像站链路太差，也可以在别处下好再 `request images upload`（见上）。
 
 **容器镜像**（docker save 出的 tar）：
 

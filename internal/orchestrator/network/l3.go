@@ -356,9 +356,20 @@ func (p *L3Provider) TableOfIface(ifname string) (uint32, bool) {
 
 // ErrVrfNotRemoved 删表后读回发现表仍在 VPP 里：按「未收敛」上报，调用方据此进未收敛清单/告警。
 //
-// 触发条件是 VPP 在表仍被接口占用时对 ip_table_add_del(del) **返回 0 却不真删**
-// （`show ip table` 里该项继续带 locks:[interface:…]，直到 VPP 重启才消失）。
+// 触发条件是 VPP 在表仍被占用时对 ip_table_add_del(del) **返回 0 却不真删**
+// （`show ip table` 里该项继续带 locks:[…]，直到 VPP 重启才消失）。占用者有两类：
+// 接口（本实现已在删表前解绑）与**数据面插件的 IP_TABLE_LOCK**（见 vrfDeleteStuckHint）。
 var ErrVrfNotRemoved = errors.New("VRF 对应的 IP 表删除后仍存在于 VPP（未收敛）")
+
+// vrfDeleteStuckHint 读回失败时的可照做提示（决策 #187）。
+//
+// 真机实测（round86，可稳定复现）：**NAT44 一旦把某张表当作 inside/outside，就会在该表上留一个
+// IP_TABLE_LOCK**（`vppctl show ip fib summary` 里可见 `locks:[nat44-ei-hi:1]`）。此后删 NAT 规则、
+// 关插件（nat44_ei_plugin_enable_disable(false)）、乃至**手工 vppctl 再关一次**，该锁都**不释放**——
+// 只有重启 VPP 才回到干净状态（重启按 committed 配置重建，代价是一次数据面中断）。
+// 没有这句提示，操作者会反复重试一个永远不会成功的提交（round86 的现场就是这样）。
+const vrfDeleteStuckHint = "（表可能仍被数据面插件引用：NAT44 用过这张表后 VPP 不释放该引用，" +
+	"执行 request vpp restart 后重试删除）"
 
 // DeleteVRF 删除 VRF：清接口地址 → 解绑接口回默认表 → 删 v4/v6 table（路由随表删除）→ 读回核对。
 //
@@ -410,8 +421,8 @@ func (p *L3Provider) DeleteVRF(ctx context.Context, name string) error {
 			return fmt.Errorf("核对 IP table %d（%s）是否已删除: %w", tableID, ipVerName(ip6), err)
 		}
 		if exists {
-			return fmt.Errorf("%w: IP table %d（%s）在删除后仍存在于 VPP，%s 的数据面未收敛",
-				ErrVrfNotRemoved, tableID, ipVerName(ip6), name)
+			return fmt.Errorf("%w: IP table %d（%s）在删除后仍存在于 VPP，%s 的数据面未收敛%s",
+				ErrVrfNotRemoved, tableID, ipVerName(ip6), name, vrfDeleteStuckHint)
 		}
 	}
 	return nil
