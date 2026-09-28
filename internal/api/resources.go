@@ -141,6 +141,66 @@ func (s *Server) handleGetInterfaces(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, paginate(r, s.interfaceViews(cfg)))
 }
 
+// interfaceStates 接口运行态快照（未接入或查询失败返回空表——调用方按「取不到就不给」处理，
+// **不**退回配置视图，决策 #84）。
+func (s *Server) interfaceStates() map[string]InterfaceState {
+	if s.vppState == nil {
+		return nil
+	}
+	st, err := s.vppState.InterfaceStates()
+	if err != nil {
+		return nil
+	}
+	return st
+}
+
+// effectiveMTU 接口的**有效 MTU**：配置显式值优先（`set interfaces <n> mtu`），否则用运行态值
+// （VPP `sw_interface_details` 的 L3 MTU）；两者都取不到返回 false——**不给该字段**，
+// 不编造 0 或默认值（契约 `Interface.mtu` 的说明；同为 #116 的「取不到就不给」口径）。
+func effectiveMTU(cfgMTU int, st InterfaceState) (uint32, bool) {
+	if cfgMTU > 0 {
+		return uint32(cfgMTU), true
+	}
+	if st.MTU > 0 {
+		return st.MTU, true
+	}
+	return 0, false
+}
+
+// interfaceView 单个接口的读视图：配置字段 + 运行态字段（列表端点与详情端点**共用**，
+// 防两处渲染漂移）。hasState=false 表示运行态里没有该口（或运行态未接入）——此时
+// enabled/link/speed/driver 一律不给，不编造（决策 #116/#84）。
+func (s *Server) interfaceView(ifc model.InterfaceConfig, st InterfaceState, hasState bool) map[string]any {
+	// 先取配置对象的 JSON 形态再加运行态字段，避免字段名两处各写一份。
+	b, _ := json.Marshal(ifc)
+	m := map[string]any{}
+	if json.Unmarshal(b, &m) != nil {
+		m = map[string]any{}
+	}
+	if m["name"] == nil {
+		m["name"] = ifc.Name
+	}
+	// cfg.Interfaces 就是产品模型里的**物理业务口**（与 `show interfaces physical` 同口径）。
+	m["kind"] = "physical"
+	if hasState {
+		m["enabled"] = st.AdminUp
+		m["link"] = "down"
+		if st.LinkUp {
+			m["link"] = "up"
+		}
+		if st.LinkSpeed > 0 { // kbps → Mbps；DPDK 口可能为 0，取不到就不给
+			m["speed_mbps"] = st.LinkSpeed / 1000
+		}
+		if st.DevType != "" {
+			m["driver"] = st.DevType
+		}
+	}
+	if mtu, ok := effectiveMTU(ifc.MTU, st); ok {
+		m["mtu"] = mtu
+	}
+	return m
+}
+
 // interfaceViews 接口列表视图：配置字段 + **运行态**字段（决策 #116）。
 //
 // 契约的 `Interface` 同时声明了配置字段（mtu/description/sriov）与运行态字段
@@ -148,40 +208,13 @@ func (s *Server) handleGetInterfaces(w http.ResponseWriter, r *http.Request) {
 // 照契约开发的客户端拿不到任何运行态。这里补运行态，**来源与 CLI `show interfaces physical`
 // 同源**（`VppStateRuntime.InterfaceStates()`，决策 #84 定的运行态事实来源）；
 // 取不到的字段（mac/numa_node 等）**不给**，不编造。
+// `mtu` 给的是**有效 MTU**：配置显式值优先、否则运行态（R86-7）。
 func (s *Server) interfaceViews(cfg model.Config) []map[string]any {
 	out := make([]map[string]any, 0, len(cfg.Interfaces))
-	states := map[string]InterfaceState{}
-	if s.vppState != nil {
-		if st, err := s.vppState.InterfaceStates(); err == nil {
-			states = st
-		}
-	}
+	states := s.interfaceStates()
 	for _, ifc := range cfg.Interfaces {
-		// 先取配置对象的 JSON 形态再加运行态字段，避免字段名两处各写一份。
-		b, _ := json.Marshal(ifc)
-		m := map[string]any{}
-		if json.Unmarshal(b, &m) != nil {
-			m = map[string]any{}
-		}
-		if m["name"] == nil {
-			m["name"] = ifc.Name
-		}
-		// cfg.Interfaces 就是产品模型里的**物理业务口**（与 `show interfaces physical` 同口径）。
-		m["kind"] = "physical"
-		if st, ok := states[ifc.Name]; ok {
-			m["enabled"] = st.AdminUp
-			m["link"] = "down"
-			if st.LinkUp {
-				m["link"] = "up"
-			}
-			if st.LinkSpeed > 0 { // kbps → Mbps；DPDK 口可能为 0，取不到就不给
-				m["speed_mbps"] = st.LinkSpeed / 1000
-			}
-			if st.DevType != "" {
-				m["driver"] = st.DevType
-			}
-		}
-		out = append(out, m)
+		st, ok := states[ifc.Name]
+		out = append(out, s.interfaceView(ifc, st, ok))
 	}
 	return out
 }
@@ -196,19 +229,16 @@ func (s *Server) handleGetInterface(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, i := range cfg.Interfaces {
 		if i.Name == name {
-			// 契约 Interface.statistics：运行态可用时附带（M3-7）
+			// 与列表端点**同一视图**（决策 #116）：配置字段 + 运行态字段（含有效 MTU，R86-7）；
+			// 再按契约 Interface.statistics 附带计数（M3-7，取不到就不给）。
+			st, hasState := s.interfaceStates()[i.Name]
+			m := s.interfaceView(i, st, hasState)
 			if s.state != nil {
-				if st, ok := s.state.InterfaceCounters(r.Context(), name); ok {
-					b, _ := json.Marshal(i)
-					var m map[string]any
-					if json.Unmarshal(b, &m) == nil {
-						m["statistics"] = st
-						writeJSON(w, http.StatusOK, m)
-						return
-					}
+				if c, ok := s.state.InterfaceCounters(r.Context(), name); ok {
+					m["statistics"] = c
 				}
 			}
-			writeJSON(w, http.StatusOK, i)
+			writeJSON(w, http.StatusOK, m)
 			return
 		}
 	}

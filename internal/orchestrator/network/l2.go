@@ -15,7 +15,6 @@ package network
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"hash/fnv"
 	"sort"
@@ -51,6 +50,7 @@ type SwIfInfo struct {
 	LinkUp      bool   // LINK_UP 位
 	LinkSpeed   uint32 // 速率（kbps；DPDK 口可能为 0）
 	DevType     string // 设备类型/驱动名（interface_dev_type）
+	Mtu         uint32 // L3 MTU（sw_interface_details.Mtu[0]；取不到时为 0）
 }
 
 // BDRuntime bridge-domain 运行态（决策 #84）：`show virtual-switches` 的事实来源。
@@ -455,7 +455,11 @@ func portKey(port model.VSwitchPort) string {
 }
 
 // ErrL2Unavailable 未连接 VPP 时 L2 客户端不可用。
-var ErrL2Unavailable = errors.New("VPP 未连接，L2 客户端不可用")
+//
+// 与 orchestrator.ErrL2Unavailable **是同一个 error 值**（决策 #186；与 ErrIfaceUnavailable
+// 同一手法，见 recovery.go）：提交编排（orchestrator/apply.go）要识别它来决定「延后收敛而非
+// 整体回滚」——从零首装/整机重启后 VPP 未运行是**正常过渡态**——而依赖方向不允许那里 import 本包。
+var ErrL2Unavailable = orchestrator.ErrL2Unavailable
 
 // isMissingIfaceErr 判断 VPP 错误是否为「接口索引已失效」（VPPApiError -2
 // Invalid sw_if_index）。此类错误在删除流程中表示成员已不存在，可按已摘除处理。

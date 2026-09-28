@@ -39,6 +39,65 @@ func TestShowPortMirroringRejectsExtraArgs(t *testing.T) {
 	}
 }
 
+// R86-7：`show interfaces <名> detail` 的 MTU 列 = **有效 MTU**——配置显式值优先
+// （`set interfaces <n> mtu`），否则运行态（VPP sw_interface_details 的 L3 MTU）；
+// 两者都取不到显示 `-`（不编造 0/默认值）。列表表（`show interfaces physical`）的列
+// **不变**：cli-semantic-check.sh 按列比对 vppctl，MTU 只进单口视图。
+func TestShowInterfacesDetailMTUEffective(t *testing.T) {
+	x, _ := newCLIKit(t)
+	x.setPorts(fakePorts{vpp: []string{"bvi0", "ens2f0", "ens2f1", "ens2f2"}})
+	x.setVppState(fakeVppState{ifs: map[string]InterfaceState{
+		"ens2f0": {AdminUp: true, LinkUp: true, MTU: 1500}, // 配置显式 9000 → 显示 9000
+		"ens2f1": {AdminUp: true, LinkUp: true, MTU: 1500}, // 配置未给 → 显示运行态 1500
+		"ens2f2": {AdminUp: true, LinkUp: true},            // 两侧都没有 → 显示 -
+		"bvi0":   {AdminUp: true, LinkUp: true, MTU: 9000}, // 未声明口 → 运行态 9000
+	}})
+	run(t, x, "admin", aaa.ClassSuperUser, "ssh",
+		"configure",
+		"set interfaces ens2f0 mtu 9000",
+		"set interfaces ens2f1 description no-cfg-mtu",
+		"set interfaces ens2f2 description no-mtu",
+		"commit", "exit",
+	)
+
+	rowOf := func(out, name string) string {
+		for _, l := range strings.Split(out, "\n") {
+			if strings.HasPrefix(l, name) {
+				return l
+			}
+		}
+		return ""
+	}
+	for _, c := range []struct{ name, want, why string }{
+		{"ens2f0", "9000", "配置显式值优先（运行态是 1500）"},
+		{"ens2f1", "1500", "配置未给 → 取运行态 L3 MTU"},
+		{"ens2f2", "-", "两侧都取不到 → 不编造"},
+		{"bvi0", "9000", "未声明口 → 取运行态 L3 MTU"},
+	} {
+		out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show interfaces "+c.name+" detail").Output
+		if !strings.Contains(out, "MTU") {
+			t.Fatalf("%s detail 视图应有 MTU 列: %q", c.name, out)
+		}
+		row := rowOf(out, c.name)
+		if row == "" {
+			t.Fatalf("%s 应有数据行: %q", c.name, out)
+		}
+		// 列序：Interface Admin Link Speed MTU Driver RxPkts TxPkts Description
+		// （Description 为空时行尾被裁剪，故只要求到 MTU 列为止）
+		fs := strings.Fields(row)
+		if len(fs) < 5 || fs[4] != c.want {
+			t.Fatalf("%s 的 MTU 列应为 %q（%s），实际 %v —— 行 %q", c.name, c.want, c.why, fs, row)
+		}
+	}
+
+	// 列表表列不得改动（语义校验按列比对 vppctl）
+	listOut := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show interfaces physical").Output
+	hdr := strings.SplitN(listOut, "\n", 2)[0]
+	if strings.Contains(hdr, "MTU") {
+		t.Fatalf("`show interfaces physical` 列表列不得改动（cli-semantic-check.sh 按列比对 vppctl）: %q", hdr)
+	}
+}
+
 // 发现 #14：`show interfaces management` 的「没有配置」是**空态**不是**错误**——
 // 带 %% 前缀会被真机冒烟按失败计（同一条命令在不同配置状态下结论不同）。
 // 三种「没有」的形态必须给同一句普通提示：从未配置 / 空对象（配置过又删除）/ 无可显示内容。

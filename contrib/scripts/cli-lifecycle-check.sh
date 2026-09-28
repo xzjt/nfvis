@@ -65,7 +65,23 @@ exp_act() { echo "    期望: ${1:-（空）}"; echo "    实际: ${2:-（空）
 
 # ---------- 独立事实源（oracle；与 cli-semantic-check.sh 的同名函数保持一致口径）----------
 vpp_ifaces()      { vppctl show interface 2>/dev/null | tr -d '\r' | awk '/^[^ \t]/ && $2 ~ /^[0-9]+$/ {print $1}' | grep -v '^local0$' | sort; }
-vpp_phys_ports()  { vpp_ifaces | grep -vE '^BondEthernet|^vh-|^tap|^memif'; }
+# 产品侧已知的 bond 名（`show bonds` 首列）。
+#
+# 为什么不能只按 `^BondEthernet` 前缀排除：**产品会给 bond 起自己的名字**（如 `bond0`），
+# `vppctl show interface` 里显示的就是这个名字，而 `show bond details` 里才是 `BondEthernet0`。
+# round86 实测（工具假红）：自由口枚举把 `bond0` 当成了「可自由分配的物理口」，于是 L1-2
+# 建 bond 时拿另一个 bond 当成员口 → 被产品校验拒（「成员口 "bond0" 不是物理口」）→
+# 看上去像「产品建不起 bond」。工具选错对象造成的假红与产品缺陷同样要修。
+# `show bonds` 是配置视图（`name <bond>;` 行才是名字，首列是字段名），故按 name 行取。
+product_bonds()   { "$CLI_BIN" -server "$SRV" -u admin -p "$PW" -source console -c "show bonds" 2>/dev/null | tr -d '\r' | sed -n 's/^[[:space:]]*name[[:space:]]\+\([^;]*\);.*/\1/p' | sort -u; }
+vpp_phys_ports()  {
+  local skip p
+  skip=" $(product_bonds | tr '\n' ' ') "
+  for p in $(vpp_ifaces | grep -vE '^BondEthernet|^bvi|^vh-|^tap|^memif'); do
+    case "$skip" in *" $p "*) continue;; esac
+    printf '%s\n' "$p"
+  done
+}
 vpp_bond_set()    { vppctl show bond details 2>/dev/null | tr -d '\r' | awk '/^BondEthernet/ {print $1}' | sort; }
 vpp_bond_members(){ vppctl show bond details 2>/dev/null | tr -d '\r' | awk 'NF==1 && $1 !~ /^BondEthernet/ && $1 !~ /:$/ {print $1}' | sort -u; }
 vpp_bd_ids()      { vppctl show bridge-domain 2>/dev/null | tr -d '\r' | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $1}' | sort; }

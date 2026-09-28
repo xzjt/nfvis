@@ -50,6 +50,7 @@ type InterfaceState struct {
 	LinkUp    bool
 	LinkSpeed uint32 // kbps（DPDK 口可能为 0）
 	DevType   string // 设备类型/驱动名
+	MTU       uint32 // L3 MTU（VPP sw_interface_details.Mtu[0]；取不到时为 0）
 }
 
 // bdStates / ifaceStates 运行态取值：未接入或查询失败返回错误，由调用方明确提示

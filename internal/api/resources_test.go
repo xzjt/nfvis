@@ -117,6 +117,78 @@ func TestInterfacesEndpoint(t *testing.T) {
 	}
 }
 
+// R86-7：接口读视图必须给出**有效 MTU**——配置显式值优先，否则运行态（VPP
+// sw_interface_details 的 L3 MTU）；两者都取不到时**不给该字段**（不编造 0/默认值）。
+// 列表（GET /interfaces）与详情（GET /interfaces/{name}）两条路径同源，都要生效。
+func TestInterfaceReadViewEffectiveMTU(t *testing.T) {
+	ts := newTestServerOpts(t, Options{VppState: fakeVppState{ifs: map[string]InterfaceState{
+		"ens2f0": {AdminUp: true, LinkUp: true, MTU: 1500}, // 运行态有、配置没给 → 用运行态
+		"ens2f1": {AdminUp: true, LinkUp: true, MTU: 1500}, // 配置显式 9000 → 配置覆盖运行态
+		"ens2f2": {AdminUp: true, LinkUp: true},            // 两侧都没有 → 字段缺席
+	}}})
+	token := loginAdmin(t, ts)
+
+	// 声明三个口：ens2f0/ens2f2 不给 mtu，ens2f1 显式 mtu 9000
+	for _, body := range []map[string]any{
+		{"name": "ens2f0"},
+		{"name": "ens2f1", "mtu": 9000},
+		{"name": "ens2f2"},
+	} {
+		status, _, data := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/interfaces/"+body["name"].(string), token, body,
+			map[string]string{"X-NFVIS-Auto-Commit": "true"})
+		if status != http.StatusOK {
+			t.Fatalf("PUT interface %v: %d %s", body["name"], status, data)
+		}
+	}
+
+	// 列表视图：逐口核对（行序不保证，按 name 索引）
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/interfaces", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /interfaces: %d %s", status, data)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(data, &rows); err != nil {
+		t.Fatalf("解析列表: %v %s", err, data)
+	}
+	byName := map[string]map[string]any{}
+	for _, r := range rows {
+		if n, ok := r["name"].(string); ok {
+			byName[n] = r
+		}
+	}
+	if len(byName) != 3 {
+		t.Fatalf("列表应有 3 个接口，实得 %d: %s", len(byName), data)
+	}
+	if got := byName["ens2f0"]["mtu"]; got != float64(1500) {
+		t.Errorf("配置未给 mtu 时应取运行态 1500，实得 %v（R86-7：读视图此前恒缺该字段）", got)
+	}
+	if got := byName["ens2f1"]["mtu"]; got != float64(9000) {
+		t.Errorf("配置显式 mtu 应覆盖运行态（配置 9000 / 运行态 1500），实得 %v", got)
+	}
+	if _, ok := byName["ens2f2"]["mtu"]; ok {
+		t.Errorf("配置与运行态都取不到 mtu 时字段必须缺席（不编造），实得 %v", byName["ens2f2"]["mtu"])
+	}
+
+	// 详情端点走同一视图，一并生效
+	for name, want := range map[string]any{"ens2f0": float64(1500), "ens2f1": float64(9000)} {
+		status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/interfaces/"+name, token, nil, nil)
+		if status != http.StatusOK {
+			t.Fatalf("GET /interfaces/%s: %d %s", name, status, data)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("解析详情 %s: %v %s", name, err, data)
+		}
+		if got["mtu"] != want {
+			t.Errorf("详情 %s 的 mtu 应为 %v（有效 MTU），实得 %v", name, want, got["mtu"])
+		}
+	}
+	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/interfaces/ens2f2", token, nil, nil)
+	if status != http.StatusOK || strings.Contains(string(data), "\"mtu\"") {
+		t.Fatalf("详情 ens2f2 两侧都取不到 mtu：字段必须缺席，实得 %d %s", status, data)
+	}
+}
+
 func TestVirtualSwitchesEndpoint(t *testing.T) {
 	ts := newTestServer(t)
 	token := loginAdmin(t, ts)

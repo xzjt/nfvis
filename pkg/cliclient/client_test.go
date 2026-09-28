@@ -8,9 +8,11 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -146,5 +148,37 @@ func TestDefaultServerMatchesDaemonDefault(t *testing.T) {
 		t.Fatalf("CLI 缺省端口 %s 与守护进程缺省 %s 不一致（决策 #78：默认参数会连不上）\n"+
 			"改一处须同改另一处：NFVIS_LISTEN(%s) ↔ cliclient.DefaultServer(%s)",
 			cliPort, daemonPort, listen, DefaultServer)
+	}
+}
+
+// round86 R86-8：/cli/execute 响应里的 `warning` 结构化标记必须被**解出来**——
+// nfvis-cli 脚本模式据它把「语句未产生配置变更」当提示继续（不中止、退出码 0），
+// 漏解或字段名写错就等于退回「猜输出文本前缀」，而语句文本自身可能含 `%`。
+func TestExecuteDecodesWarningMark(t *testing.T) {
+	payload := `{"output":"警告: 语句未产生配置变更（值未变化或尚未映射到模型），已继续：set x y\n",` +
+		`"mode":"config","path":[],"prompt":"nfvis# ","warning":true}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/cli/execute" {
+			t.Errorf("路径应为 /api/v1/cli/execute，实得 %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, payload)
+	}))
+	defer srv.Close()
+
+	c, err := NewWithTLS(srv.URL, TLSOptions{}) // http → 明文
+	if err != nil {
+		t.Fatalf("NewWithTLS: %v", err)
+	}
+	c.SetToken("tok")
+	res, err := c.Execute("set x y", "ssh")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !res.Warning {
+		t.Fatalf("warning 标记未被解出（脚本模式会误判为失败）：%+v", res)
+	}
+	if res.Mode != "config" || res.Prompt != "nfvis# " {
+		t.Fatalf("其余字段仍应正常解出：%+v", res)
 	}
 }

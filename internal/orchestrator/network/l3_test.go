@@ -956,3 +956,26 @@ func TestRegisterL3InterfacesVlanSubif(t *testing.T) {
 		t.Fatalf("不得退回父口登记: %v", got)
 	}
 }
+
+// 决策 #187：删表读回失败时，错误里必须带**可照做**的下一步，否则操作者会反复重试一个
+// 永远不会成功的提交（真机现场：NAT 用过的表带 nat44-ei-hi 锁，除 VPP 重启外无解）。
+func TestL3DeleteVrfStuckHintIsActionable(t *testing.T) {
+	f := newFakeL3()
+	p := NewL3Provider(f)
+	ctx := context.Background()
+	if err := p.ApplyVRF(ctx, model.Vrf{Name: "vs-nat-locked"}); err != nil {
+		t.Fatalf("ApplyVRF: %v", err)
+	}
+	f.tableKeepOnDelete[TableID("vs-nat-locked")] = true
+	err := p.DeleteVRF(ctx, "vs-nat-locked")
+	if err == nil {
+		t.Fatal("表仍在时必须报错")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "request vpp restart") {
+		t.Fatalf("错误文案应给出下一步（request vpp restart）: %v", err)
+	}
+	if !strings.Contains(msg, "NAT") {
+		t.Fatalf("错误文案应点明常见的占用者（NAT44 的引用锁）: %v", err)
+	}
+}

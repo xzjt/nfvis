@@ -2,12 +2,127 @@
 //
 // 由来：`nfvis-cli -c "request system reboot"` 曾经只把问句打印出来、什么也不做，
 // 却以退出码 0 结束——自动化据此认为命令成功（假成功），顺带让冒烟套件对它判 ✓。
+//
+// 另覆盖 round86 R86-8：「值未变化」的空操作**不是失败**（脚本继续、退出码不受影响），
+// 判据是服务端回的结构化标记 Warning，而不是输出文本前缀。
 package main
 
 import (
+	"errors"
+	"io"
 	"strings"
 	"testing"
+
+	"github.com/xzjt/nfvis/internal/cli"
+	"github.com/xzjt/nfvis/pkg/cliclient"
 )
+
+// ---------- 脚本模式逐行执行（runScriptLines，runScript 的可测核心） ----------
+
+// scriptBackend 脚本模式单测用的假 Backend：按行给出预置结果并记录执行顺序。
+type scriptBackend struct {
+	replies  map[string]cliclient.Result
+	executed []string
+}
+
+func (b *scriptBackend) Execute(line, _ string) (cliclient.Result, error) {
+	b.executed = append(b.executed, line)
+	if res, ok := b.replies[line]; ok {
+		return res, nil
+	}
+	return cliclient.Result{Output: "ok\n", Mode: "config", Prompt: "nfvis# "}, nil
+}
+
+func (b *scriptBackend) DynamicCandidates(string) ([]string, error) { return nil, nil }
+func (b *scriptBackend) Logout() error                              { return nil }
+func (b *scriptBackend) MetricsText() (string, error)               { return "", nil }
+
+func (b *scriptBackend) DialConsole(string) (io.ReadWriteCloser, error) {
+	return nil, errors.New("stub 不支持 console")
+}
+
+// noChangeResult 服务端「值未变化」提示的伪响应（文案与 internal/api 同源）。
+func noChangeResult(stmt string) cliclient.Result {
+	return cliclient.Result{
+		Output:  "警告: 语句未产生配置变更（值未变化或尚未映射到模型），已继续：" + stmt + "\n",
+		Mode:    "config",
+		Prompt:  "nfvis# ",
+		Warning: true,
+	}
+}
+
+// TestRunScriptContinuesAfterNoChangeWarning ① 空操作不中止脚本：后续语句照旧执行、整体不算失败。
+func TestRunScriptContinuesAfterNoChangeWarning(t *testing.T) {
+	const noop = "set interfaces ens192 description cli-pre"
+	be := &scriptBackend{replies: map[string]cliclient.Result{noop: noChangeResult(noop)}}
+	sess := cli.New(be, "ssh")
+
+	failed := runScriptLines(sess, strings.Join([]string{
+		"configure", noop, "set system dns server 8.8.8.8", "commit",
+	}, "\n"))
+	if failed {
+		t.Fatal("空操作（值未变化）不该判失败——脚本应继续，退出码 0")
+	}
+	want := []string{"configure", noop, "set system dns server 8.8.8.8", "commit"}
+	if len(be.executed) != len(want) {
+		t.Fatalf("空操作之后的语句必须照旧执行，实执行 %v", be.executed)
+	}
+	for i, w := range want {
+		if be.executed[i] != w {
+			t.Fatalf("第 %d 行应为 %q，实得 %q（全部：%v）", i, w, be.executed[i], be.executed)
+		}
+	}
+}
+
+// TestRunScriptStopsOnRealError ② 真错误仍中止且退出码非 0（「不要放宽真错误」）。
+func TestRunScriptStopsOnRealError(t *testing.T) {
+	const bad = "set system hostname"
+	be := &scriptBackend{replies: map[string]cliclient.Result{
+		bad: {Output: "%% 配置不完整，缺少取值: hostname\n", Mode: "config", Prompt: "nfvis# "},
+	}}
+	sess := cli.New(be, "ssh")
+
+	failed := runScriptLines(sess, strings.Join([]string{
+		"configure", bad, "set system dns server 8.8.8.8",
+	}, "\n"))
+	if !failed {
+		t.Fatal("真错误应判失败（退出码非 0）")
+	}
+	if len(be.executed) != 2 || be.executed[1] != bad {
+		t.Fatalf("失败行之后的语句不得执行，实执行 %v", be.executed)
+	}
+}
+
+// TestRunScriptWarningIsMarkedNotParsed 提示行的**语句文本自身含 `%%`** 时也不得误判为失败
+// （判据是结构化标记，不是文本前缀——这正是不能靠字符串解析的原因）。
+func TestRunScriptWarningIsMarkedNotParsed(t *testing.T) {
+	const stmt = `set interfaces ens192 description "50%% loss"`
+	be := &scriptBackend{replies: map[string]cliclient.Result{stmt: noChangeResult(stmt)}}
+	sess := cli.New(be, "ssh")
+
+	if failed := runScriptLines(sess, stmt+"\nshow version"); failed {
+		t.Fatal("提示（Warning）不该因语句文本含 % 而判失败")
+	}
+	if len(be.executed) != 2 {
+		t.Fatalf("提示之后的语句应照旧执行，实执行 %v", be.executed)
+	}
+}
+
+// TestRunScriptStillRefusesConfirmPrompt 破坏性动作的非交互问询仍按失败处理（不得因本轮改动放宽）。
+func TestRunScriptStillRefusesConfirmPrompt(t *testing.T) {
+	const del = "request virtual-machine-functions fw-vm delete"
+	be := &scriptBackend{replies: map[string]cliclient.Result{
+		del: {Output: "Delete VNF 'fw-vm'? [yes,no] \n", Mode: "oper", Prompt: "nfvis> "},
+	}}
+	sess := cli.New(be, "ssh")
+
+	if failed := runScriptLines(sess, del+"\nshow version"); !failed {
+		t.Fatal("非交互确认问询应判失败（假成功回归）")
+	}
+	if len(be.executed) != 1 {
+		t.Fatalf("问询之后的语句不得执行，实执行 %v", be.executed)
+	}
+}
 
 func TestConfirmRefusal(t *testing.T) {
 	cases := []struct {

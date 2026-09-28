@@ -17,6 +17,9 @@ type setupFake struct {
 	metrics   string
 	committed string
 	failOn    string // 语句含该子串时返回 %% 错误（失败即停路径）
+	// warnOn 语句含该子串时返回**提示**（Warning=true，无 `%%`）——「值未变化」的空操作
+	// （round86 R86-8）：重跑向导属预期，不算失败。
+	warnOn string
 	// singlePctOn 语句含该子串时返回**单个 %** 的错误输出（`% 无效命令` 一类）——
 	// 决策 #113 前向导只认 "%%"，这类失败会被漏判成成功（假绿）。
 	singlePctOn string
@@ -33,6 +36,14 @@ func (f *setupFake) Execute(line, source string) (cliclient.Result, error) {
 	}
 	if f.singlePctOn != "" && strings.Contains(line, f.singlePctOn) {
 		return cliclient.Result{Output: "% 无效命令: " + line + "（输入 ? 查看可用命令）\n", Mode: "config", Prompt: "nfvis# "}, nil
+	}
+	if f.warnOn != "" && strings.Contains(line, f.warnOn) {
+		return cliclient.Result{
+			Output:  "警告: 语句未产生配置变更（值未变化或尚未映射到模型），已继续：" + line + "\n",
+			Mode:    "config",
+			Prompt:  "[edit] nfvis# ",
+			Warning: true,
+		}, nil
 	}
 	return cliclient.Result{Output: "[ok] " + line + "\n", Mode: "oper", Prompt: "nfvis> "}, nil
 }
@@ -248,5 +259,32 @@ func TestSetupPlanNavigationOrder(t *testing.T) {
 	}
 	if ci < 0 || ei < 0 || ai < 0 || !(ci < ei && ei < ai) {
 		t.Fatalf("应为 commit → exit → request system kernel apply，实际 %v", p.Statements)
+	}
+}
+
+// round86 R86-8：向导重跑时「值未变化」的语句由服务端的**结构化标记**（Warning）判定——
+// 属预期、不算失败，且不再重复打印服务端提示（只留 round83 定下的 [跳过] 一行）。
+func TestRunWizardSkipsNoChangeByWarningMark(t *testing.T) {
+	f := &setupFake{
+		metrics:   "nfvis_system_cpu_online_count 6\nnfvis_system_memory_total_bytes 7516192768\n",
+		committed: committedEmpty,
+		warnOn:    "set vpp cpu main-core",
+	}
+	sess := New(f, "ssh")
+	var out strings.Builder
+	if err := RunWizard(sess, true, strings.NewReader("\n\n\n\n\n\n\n"), &out); err != nil {
+		t.Fatalf("空操作（值未变化）不算失败：%v", err)
+	}
+	if !strings.Contains(out.String(), "[跳过] set vpp cpu main-core") {
+		t.Fatalf("应给出跳过说明：\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "向导在上述步骤失败") {
+		t.Fatalf("空操作不得判失败：\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "向导完成") {
+		t.Fatalf("空操作之后应继续走完向导：\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "警告: 语句未产生配置变更") {
+		t.Fatalf("服务端提示与 [跳过] 说明重复打印：\n%s", out.String())
 	}
 }

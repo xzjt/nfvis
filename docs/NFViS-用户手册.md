@@ -307,7 +307,7 @@ CLI 参数：
 | `-ca` | 空 | 服务端证书 PEM；**缺省固定本机 `/var/lib/nfvis/tls/server.crt`**（自签场景零配置） |
 | `-insecure` | 关 | 跳过证书校验（仅调试） |
 | `-source` | `ssh` | 接入源（`ssh`/`console`），影响管理口自锁保护与 `start shell` 权限 |
-| `-c "…"` | 空 | **脚本模式**：执行多行命令后退出（换行分隔；任一行出错即停） |
+| `-c "…"` | 空 | **脚本模式**：执行多行命令后退出（换行分隔；任一行**真错误**即停——「值未变化」的空操作只是提示，见下） |
 | `-version` | - | CLI 版本（与守护进程同源注入） |
 
 > **零参数即可连**：缺省 `https://127.0.0.1:443` 与守护进程缺省一致，
@@ -323,6 +323,11 @@ nfvis-cli -c "configure
 set system hostname fw-01
 commit"
 ```
+
+> **「值未变化」不是错误（幂等脚本可重跑）**：脚本里一条**语义正确、但配置值已经是目标值**的语句
+> （例如重跑同一份脚本时 `set system hostname fw-01` 与现值相同）只打印一行
+> `警告: 语句未产生配置变更（值未变化或尚未映射到模型），已继续：<语句>`（不带 `%` 前缀），
+> **脚本继续执行后续语句**，退出码不受影响。真错误（语法/校验/权限/下发失败）照旧中止脚本并返回非零退出码。
 
 > **脚本模式不代答确认**：删除 VNF/容器/镜像、软件升级/回退、重启/关机、恢复出厂、
 > 接口交 DPDK 等破坏性动作，服务端会先问 `… ? [yes,no]`。交互模式下由 CLI 读你的答复；
@@ -1006,6 +1011,13 @@ nfvis# commit
 >   `nat44-ei-in2out-slowpath  out of ports`，`show nat44 sessions` 为 0）——已登记待修，
 >   需要独立外部地址池时请先用 `static` 1:1 发布或等修复。
 >
+> ⚠️ **NAT 用过的表，其所属交换机删除前要先重启数据面**：NAT44 一旦把某张表当作 inside/outside，
+> 就在该表上留一个引用锁（`vppctl show ip fib summary` 里可见 `locks:[nat44-ei-hi:…]`），
+> **删 NAT 规则、关插件都不释放它**——于是 `delete virtual-switches <那台 L3 交换机>` 会报
+> 「IP 表删除后仍存在于 VPP（未收敛）」，怎么重试都不成功（报错文案会带这句指引）。
+> 处置：`request vpp restart` 之后重试删除（重启按 committed 配置重建，代价是一次数据面中断）。
+> 也因此，**「改 NAT 出接口 + 删旧的 L3 交换机」不要放在同一次提交里**——拆成两次、中间重启数据面。
+>
 > **内网侧可以是 VNF 自己的网口**：把该 vNIC 声明为 L3 地址接口即可让 guest 的网关落在它自己的口上
 > （不这么写时 guest 会因为「网关地址不在它那一侧、VPP 不代答 ARP」而 100% `Destination Host Unreachable`）：
 >
@@ -1087,6 +1099,12 @@ nfvis$ request images download name img.qcow2 type vm-image \
         url https://example.com/img.qcow2 sha256 <64位十六进制>
 nfvis$ show images img.qcow2 detail
 ```
+
+> **慢链路也能拉完**：拉取只在**服务端停发**（连续 5 分钟收不到任何字节）或连接中断时失败，
+> 不设「整体耗时」上限——每秒几十 KB 的链路拉几百 MB 的镜像属正常，不会因为耗时长而中断。
+> 中断时 `import_state=failed`、原因与已下载字节写在 `show images <名> detail`（`last-error`），
+> **已下载部分保留在 `.part`**：重跑同一条命令即从断点续传（不必重新下载）。
+> 若目标机到镜像站链路太差，也可以在别处下好再 `request images upload`（见上）。
 
 **容器镜像**（docker save 出的 tar）：
 
@@ -1237,6 +1255,10 @@ nfvis$ show configuration
 nfvis$ show users
 ```
 
+> 接口的 **MTU 是有效值**：配置里显式设了 `set interfaces <名> mtu` 就用配置值，否则显示**数据面当前**的
+> L3 MTU（VPP 事实源）——`show interfaces <名> detail` 与控制台「系统 → 接口」页同源；两侧都取不到才显示
+> `-`（不编造默认值）。
+
 ### 10.2 连通性测试
 
 ```bash
@@ -1293,6 +1315,14 @@ nfvis$ show alarms all
 nfvis$ request alarms clear id <id>           # 清除已 resolved 的告警
 nfvis$ request alarms clear all
 ```
+
+> **告警会自己消解，别拿 `clear` 当日常手段**：vNIC 链路恢复、接口重新就绪、容器回到 running、
+> **对象从配置里删除**（VNF/容器/接口不再声明）之后，对应告警都会自动转为 resolved，不再出现在
+> `show alarms active`（总览页同理）。`request alarms clear` 是清"已经 resolved 的残留记录"，不是修故障。
+>
+> **「已停止」不等于「异常退出」**：容器被主动 `request container-functions <名> stop` 之后是
+> **已停止**（`docker stop` 的 137/143 退出码属正常结果），**不会**产生告警；只有 OOM 被杀
+> （Docker `OOMKilled`）或其它非零退出码才报 `CONTAINER_EXITED` critical。
 
 ### 10.7 备份 / 恢复 / 恢复出厂
 

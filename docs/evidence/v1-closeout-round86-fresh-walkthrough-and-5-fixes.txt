@@ -1,0 +1,258 @@
+================================================================================
+round86 证据：干净快照 → 从零装机 → 拟人化全功能走查；抓到并收口五条缺陷
+（决策 #183~#187），含一条 P0（console 用过之后停 VM 会让守护进程退出）
+================================================================================
+日期：2026-09-28
+范围：干净快照上从零装齐环境与产品、走完内核基线/wizard、数据面、VNF 与容器生命周期、
+      快照、NAT、诊断与记录类功能、三件套；对每条发现做真机复验
+环境：nfvis-vm（192.168.155.129，SSH 密钥免密）= VMware 虚机，快照「干净」恢复后：
+      Ubuntu 26.04.1 LTS / amd64 / 6 vCPU / 7376 MB；715 个已装包；
+      **无** vpp/nfvis/libvirt/qemu/docker/make/go；apt 源 USTC；自带 `/root/vpp-v26.06-deb/`（9 个 deb）；
+      cmdline 无 hugepages/isolcpus（真·从零）；三块网卡都在 VMware NAT 网段（vmnet8，192.168.155.0/24）
+构建：VM 上后装 make/golang-go（go 1.26）；源码 `git archive` 同步到 `/root/src`（无 .git）；
+      `make deb VERSION=1.1.48~dev1 SOURCE_DATE_EPOCH=1790496166` → 9,163,318 字节
+      sha256 e6a2d576578ea02ea870f33aae4ffbf9e3eb7ec79a7fe05ad9b6078324a60b39（走查用）
+      修复后 `VERSION=1.1.48~dev2` → sha256 29d02dab9c0eda611aa87223192734346b0564a564b2fb41829f3f2dc4e035d2（复验用）
+产品版本：1.1.48~dev1 / ~dev2（修复版）
+
+----- §1 环境重建 → 首装 → 首启（拟人化，逐条照手册）---------------------------
+- 依赖装齐（USTC 直连；未用代理）：build-essential make golang-go sshpass jq socat qemu-utils
+  cloud-image-utils genisoimage tcpdump libvirt-daemon-system libvirt-clients qemu-system-x86
+  virtinst docker.io；VPP 26.06-release 由 `/root/vpp-v26.06-deb` 的 9 个 deb 装齐（`systemctl disable vpp`）。
+- `dpkg -i nfvis_1.1.48~dev1_amd64.deb` 首装输出与手册 §2.3 逐条吻合：core_pattern 提示、
+  「未检测到 1G 大页池」「未见 isolcpus」提示、底座三探测（vpp/libvirtd/dockerd 均在）、
+  enable 不自动 start、基线片段 `/etc/default/grub.d/99-nfvis.cfg` + fstab 大页行 + update-grub、
+  SSH 强化（root 口令登录禁用、密钥保留、不重启 sshd）、libvirt AppArmor 放行复核（#182 单源）。
+- 首启（`systemctl start nfvis`）：`% 首次启动已创建用户 admin (super-user)。一次性口令…`，
+  口令 vV0UM6NG46pUo6tq@Aa1（**随快照恢复而变**）；启动日志含「管理口守卫事实
+  （declared="" default-route=ens160 listen=""）」「已连接 VPP 26.06-release」「恢复收敛完成」。
+- wizard（**真 pty**，拟人化：隔离核/主/工作线程取默认，1G 大页取 4 以便跑两台 VNF，低延迟 false）：
+  打印计划 → `commit 成功 (revision 3)` → 三条待重启警告 → `request system kernel apply`
+  （片段写入 1G=4 / 2M=768 / isolcpus=2-5 nohz_full rcu_nocbs irqaffinity + 低延迟组）。
+- `request system reboot`：非交互（-c）**正确拒绝**（rc=1，提示加 `--yes`；#161 生效）；
+  真 pty 输入 yes 后正常重启，重启后 cmdline 与配置一致（`show system kernel` 三方一致：
+  1G 4/4、2M 768/768、isolcpus 2-5），nfvisd 自起。
+- 数据面（手册 §7）：`request interfaces ens192|ens224 bind-dpdk --yes`（vfio-pci 自动加载并持久化）
+  → 声明 + `set vpp dpdk dev` → `request vpp restart` → `vppctl show interface` 两口 up（driver dpdk），
+  CLI `show interfaces physical` 同刻同值（10G/dpdk）。
+
+----- §2 五条缺陷（决策 #183~#187）-----------------------------------------------
+
+R86-1（P1，假失败/与手册相反）**从零首次声明物理口：VPP 未运行时整体失败并回滚**
+  现象（本机可稳定复现）：整机重启后（VPP 停止态）按手册 §7.3 顺序首次声明业务口并提交：
+    `set interfaces ens192|ens224` + `set vpp dpdk dev …` → 四条都 `[ok]`，随后
+    `%% 底座下发失败（已补偿）: 下发失败 interface[ens192]: VPP 未连接，L2 客户端不可用`
+    → 配置整体回滚（`display set` 里没有 interfaces/dpdk；`request vpp restart` 生成的
+    startup.conf 也没有 dpdk 段）——而手册该处明写「commit 会成功……执行 request vpp restart
+    后自动收敛」。VPP 起来后重做同一提交即成功（revision 4 + 「vpp 变更需 restart」警告）。
+  根因：`internal/orchestrator/apply.go` 的 `ifaceApply` 只把 `ErrIfaceUnavailable`（口不在数据面）
+    当可延后，未覆盖 `ErrL2Unavailable`（VPP 未连接）。**决策 #186**。
+  修：`ErrL2Unavailable` 定义下沉到 `internal/orchestrator`（network 包别名复用同一实例，依赖方向不变），
+    `ifaceApply` 在 DPDK 端口上同时延后这两类失败并告警；未声明为 DPDK 的口照旧硬失败。
+  单测：`internal/orchestrator/apply_dpdk_test.go` 两例（正例延后 + 告警含下一步；反例仍硬失败并保留原文）。
+  真机复验（1.1.48~dev2）：停 VPP（`systemctl stop vpp`、`vppctl` 连接被拒）后重做同一提交
+    → `commit 成功 (revision 25)`；守护进程日志两行 WARN：
+    「接口 ens192 的数据面尚未就绪（VPP 未运行）：本次提交不阻断，执行 request vpp restart 后自动收敛」
+    （ens224 同）→ `request vpp restart` 后 `vppctl show interface` 两口 up、CLI 同刻一致。
+
+R86-2（P2，答非所问/诊断缺料）**show log system 与诊断包 logs.txt 恒空（已装 systemd 部署）**
+  现象：`show log system last 20` → `-- No entries --`（同一时刻 `journalctl -u nfvis` 有 500+ 行）；
+    诊断包 logs.txt 同样只有这一行（M5-4 诊断包核心内容为空，#149 的一次性口令打码因此空转）。
+  根因：`cmd/nfvisd/main.go` `nfvisdLogTail` ① 查单元名 `nfvisd`，而安装的单元是 `nfvis.service`；
+    ② journalctl 无条目时把提示行 `-- No entries --` 打到 stdout（rc=0、长度>0），
+    代码用 `len(out) > 0` 判「拿到日志」→ 回退分支永不触发。**决策 #184**。
+  修：按 `nfvis` → `nfvisd` 逐个单元名尝试 + `journalctlHasNoEntries` 识别提示行后再回退。
+  真机复验：`show log system last 5` 返回真实日志行（本文件第 §3 现场即引用它）；诊断包 logs.txt 同样有内容。
+
+R86-3（P2，功能缺口 + 误导文案）**URL 拉取镜像被「客户端整体超时」截断**
+  现象：`request images download name alpine.qcow2 …`（URL 给的 alpine 云镜像，Content-Length
+    187,695,104）两次尝试都在 ~10 分钟处失败：第一次停在 39,615,168 字节，last-error=
+    「拉取中断（已下载 39615168 字节，可重试续传）：等待服务端数据超时（HTTP 客户端整体超时触发）」。
+  独立事实源：同一 URL 经宿主代理 `curl` 取回 **187,695,104 字节，sha256
+    900c91ed360beac704158ee99f45bab49e97858f8cb37469d0cc30e8e8e2ca60**（与产品登记的期望、
+    与手册 §9.1 记的哈希逐字一致）→ URL 与文件本身没问题；实测 CDN 速率 ~26~78KB/s。
+  根因：`defaultDownloadTimeout = 10*time.Minute` 是 `http.Client.Timeout`（**整体**上限：连接+读 body）；
+    按实测速率，10 分钟只够 ~40MB，任何大镜像在常见链路上都走不完；文案还把责任写成「服务端停发」。
+    **决策 #185**。
+  修：缺省客户端 = 「连接+响应头 60s」+「**空闲**上限 5 分钟」（`idleTimeoutReader` 每次读到字节重置），
+    不设整体上限；两种超时分开表述（空闲判据 = 服务端停发；注入客户端的整体超时 = 客户端侧上限）。
+  单测：`internal/images/images_test.go` 两例（慢而持续 10 chunk × 30ms、空闲上限 200ms → 必须成功；
+    chunk 间隙超空闲上限 → 必须报「服务端停发」且文案含续传指引）。
+  真机复验：13:06:31 重跑同一条下载（从 52,734,717 字节断点续传）→ 13:13:30 63.8MB、13:18:22 69.9MB，
+    **import-state 一直 downloading**——已跨过旧实现 13:16:31 的 10 分钟死线（旧版必失败）；
+    续传本身也再次验证（52.7MB → 69.9MB 未重下）。
+
+R86-4（P1，跨对象删除 + 补偿残渣）**NAT 用过的表让所属 L3 交换机永远删不掉（除 VPP 重启）**
+  现象（本机稳定复现，纯产品路径）：`delete virtual-switches <用过 NAT 的 L3 交换机>` 报
+    `%% 底座下发失败（已补偿）: 下发失败 del-vrf[vs-exp]: VRF 对应的 IP 表删除后仍存在于 VPP（未收敛）:
+     IP table 1804284（IPv4）在删除后仍存在于 VPP`；重试永远失败。
+  定位（VPP 事实源）：NAT44-EI 一旦把某张表当作 inside/outside，该表就带 `locks:[nat44-ei-hi:1]`
+    （`vppctl show ip fib summary`）；此后**删 NAT 规则（特性已摘）、
+    `nat44_ei_plugin_enable_disable(false)`、手工 `vppctl nat44 ei plugin disable` 都不释放该锁**，
+    `ip_table_add_del(del)` 返回 0 却不真删（#179 的读回校验正确报了未收敛）；只有 `request vpp restart`
+    回到干净状态后，同一删除**立即成功**（rev 23）。
+  修（决策 #187，只改可诊断性，不改 VPP 行为）：读回失败的错误里直接带可照做指引
+    「（表可能仍被数据面插件引用：NAT44 用过这张表后 VPP 不释放该引用，执行 request vpp restart 后重试删除）」；
+    手册 §8.8 同步写明「NAT 用过的表，其所属交换机删除前先重启数据面；改 NAT 出接口 + 删旧 L3 交换机
+    不要放在同一次提交里」。
+  单测：`internal/orchestrator/network/l3_test.go`（文案必须含 `request vpp restart` 与 `NAT`）。
+  真机复验（1.1.48~dev2）：同一删除命令返回上述带指引的文案。
+  **同批登记未修**：① 提交失败后的补偿若也失败，残渣（新建 VRF 表滞留、NAT inside 特性被摘而配置仍声明它）
+    只出现在当次提交输出，**不进告警**，事后不可见；② 同一 candidate 内「改 NAT 出接口 + 删旧交换机」必然失败。
+
+R86-5（P0，服务中断）**console 用过之后停那台 VM，会让 nfvisd 退出（SIGHUP）**
+  现象：`request virtual-machine-functions <vm> console` 用过之后，`… <vm> stop` 的调用方收到
+    `Post "https://127.0.0.1:443/api/v1/cli/execute": EOF`；`systemctl` 侧看到
+    `Deactivated successfully` + `ExecMainCode=0/ExecMainStatus=0` + `NRestarts` +1（systemd 按
+    Restart=always 拉起）——**看起来像"服务自己重启了"**，从现象推不到根因；同一台机器上
+    「没用过 console 就停 VM」不会复现（故单测/冒烟测不到）。
+  定位过程：给调试构建装 `signal.Notify(ch)`（一次性接管全部可捕获信号）后复现，日志立刻现形：
+    `DEBUG-R86 收到信号 sig="hangup"`（还有一次 `sig="broken pipe"`）；进程被接管才活下来。
+  根因：`internal/orchestrator/compute/console_libvirt.go` 用 `os.OpenFile(pty, os.O_RDWR, 0)` 打开
+    libvirt 给域串口分配的 pty——nfvisd 由 systemd 拉起时是「无控制终端的会话首进程」，
+    **不带 O_NOCTTY 打开 tty 会让它夺取控制终端**；此后该 pty 的 master（QEMU）一关闭
+    （VM 被 stop/destroy），内核就向会话前台进程组发 SIGHUP，默认动作是终止进程。
+  修（决策 #183）：① `os.OpenFile(pty, os.O_RDWR|syscall.O_NOCTTY, 0)`（根因）；
+    ② 纵深防御 `internal/systemd.WatchHangup`（linux 实现 + 非 linux 空操作）——接管 SIGHUP 记 WARN 后继续；
+    ③ `deploy/nfvis.service` 删掉 `ExecReload=/bin/kill -HUP $MAINPID`（本进程无重载语义，
+      旧行为下 `systemctl reload nfvis` 实为"杀掉再拉起"）。
+  测试：`internal/systemd/hangup_linux_test.go`（真发两次 SIGHUP：回调被调用且进程仍存活）；
+    `internal/archtest/console_pty_test.go`（源码守护：串口 pty 打开点必须带 O_NOCTTY）。
+  真机复验（1.1.48~dev2，4 个循环）：每轮 start → 真 pty 打开 console（日志里能看到 guest 的
+    `cloud-init`/`login:` 行，即**真的在用**）→ stop；结果 `ps -o tty` 全程 `?`（未夺取控制终端）、
+    守护进程 PID 不变、`NRestarts` 0 → 0、四轮全部干净。
+
+----- §3 其它现场（未发现新缺陷，或按登记项复现）----------------------------------
+- 快照（§9.3）：运行中 `s
+
+----- §4 真机套件（1.1.48~dev2 修复版，干净状态）-------------------------------
+※ 套件要求「自由对象/空闲隔离核/夹具镜像」等前置；本轮的**多次跑数**恰好把前置关系也测清楚了：
+  - 首跑（13:13）把套件的 CLI 路径参数漏了（SRV/CLI_BIN 未传 → 用开发态缺省 /tmp/nfvis-cli）→ 207 全红；
+    传对参数后 161/37/9；
+  - 其后几跑的失败**全是环境前置的级联**，逐条定位清楚：
+    ① cli-vm 建不起来 → 根因是「隔离核不足：需要 1，可用 0」——本机被**我自己的两台 VNF 声明**占满
+       （vnf-a/vnf-b 各 1 核 + VPP 2 核 = 池 1-4 全满），与产品无关；
+    ② vs-l2/vs-l3/acl-test 建不起来 → 根因是 S2-pre 块里 `set interfaces ens192 description cli-pre`
+       已经是该值 → 「值未变化」空操作 → `-c` 脚本**任一行失败即停** → 整块被丢弃（套件头部写明的口径）；
+    ③ bond0 冲突 → 我保留的 vs-vnf 端口与套件的 bond 成员口撞同一物理口（角色互斥，产品校验正确拒绝）。
+  - 把上述前置复位（删掉我的 VNF/交换机、清描述叶子、释放端口、备好夹具镜像）后：
+    **fulltest 通过 194 / 失败 1 / 预期报错 12**（唯一失败 = 已登记的 `show vpp runtime`「govpp runtime
+      解码限制」；预期报错 12 条含交互确认守卫、SR-IOV 无 PF/VF、镜像被引用、ping 未通即失败等）
+    **语义校验 通过 12 / 失败 0 / 不可判定 1**（不可判定 = MAC 表条数需先有流量，无流量不算通过）
+    **生命周期与组合 通过 21 / 失败 0 / 跳过 3**（跳过 = 无 NAT 对象 / 无带交换机声明的 VNF / 端口镜像需两个自由口）
+    **pty 交互冒烟 10 / 10**
+  与历史干净基线（round36/84：194/1）一致；本轮修的五条在套件上未见回归。
+  ⚠️ 套件**不能重复跑**：它的前置块里有「把描述/资源池设成固定值」这类语句，第二次跑必然撞「值未变化」
+  而整块停摆——重跑前需把上轮对象/描述叶子/端口角色复位（本轮已把这条口径写进 §6 的待办建议）。
+
+----- §5 工具假红（与产品缺陷分开记）：生命周期检查器把产品命名的 bond 当成了自由物理口
+  现象：`cli-lifecycle-check.sh` 的 L1-2（删 bond 后无残留）恒报
+    `✗ L1-2 建立 bond 失败或未落数据面`，细节是 `bonds[rc84t-b0].members: 成员口 "bond0" 不是物理口`。
+  根因（工具侧）：`vpp_phys_ports()` 只按 `^BondEthernet` 前缀排除，而**产品会给 bond 起自己的名字**
+    （如 `bond0`）——`vppctl show interface` 里显示的是产品名，`show bond details` 里才是 BondEthernet0；
+    于是自由口枚举把 `bond0` 当成了可自由分配的物理口，L1-2 拿另一个 bond 当成员口 → 被产品校验正确拒绝
+    → 看起来像「产品建不起 bond」。
+  修：自由口枚举改为「物理口 = VPP 口 − `^BondEthernet/^bvi/^vh-/^tap/^memif` − **产品 `show bonds`
+    列出的 bond 名**」；修后同一现场：枚举正确排除 `bond0`（无自由口时如实**跳过**而不是假红），
+    有自由口时 L1-2 转绿（建立侧正向控制 `VPP bond 集合 →BondEthernet0`、删除后无 BondEthernet 残留、
+    成员口回到普通口、配置逐字节一致）。
+  与「工具假绿」同一条原则：**判据本身错了要先修判据**——本轮先确认产品校验的理由（角色互斥）成立，
+    再改工具。
+
+----- §6 终态环境事实（供下一轮接手）-----------------------------------------------
+- nfvis **1.1.48~dev2** active（修复版已实装：`/usr/bin/nfvisd` 21 字节数 19,296,521；unit 已无 ExecReload）
+- 配置库：本轮的走查对象多数已清（vnf-a/vnf-b/vs-nat/vs-vnf/vs-exp/walk-ct 容器已删）；
+  套件自身的对象按套件口径自行建删；当前 `show images` = alpine.qcow2(failed，**文件在**：下载被
+  我中止后状态不是 ready)、alpine:3.20(ready)、debian-12-generic-amd64.qcow2(ready)
+- cmdline：1G=4 / 2M=768 / isolcpus=2-5 / nohup_full…（与配置一致，`show system kernel` 三方一致）
+- 数据面：ens192/ens224 均由 DPDK 接管；本轮结束时 VPP 已被生命周期检查器重启过一次（收敛正常）
+- ⚠️ 未复现的环境现象（如实登记，不作为缺陷）：alpine 云镜像 URL 直连很慢（26~78KB/s）；
+  ens224 的 VMware carrier 一度 down（`vppctl show hardware-interfaces ens224` → `carrier down`，
+  重插虚拟网线无效）——同一 vmnet8 上的 ens192 正常，故 NAT 出接口改用 ens192。这条与产品无关，
+  但会影响「按手册 §8.8 用 ens224 做 NAT 外部口」的复现，接手时先看 carrier。
+
+----- §7 Web 控制面（Browser Use 黑盒，本轮重点抽查）--------------------------------
+- 登录 https://192.168.155.129/api/v1/ui/（admin / 一次性口令）成功；主导航 21 条 hash 路由在位；
+  顶栏显示主机名、`admin（super-user）`、实时通道「已连接」；总览页版本 **1.1.48~dev2**、
+  组件版本（VPP 26.06-release / libvirt 12.0.0 / QEMU 10.2.1 / Docker 29.1.3 / Ubuntu 26.04）与 CLI 同源。
+- **诊断页「刷新服务端日志（末 100 行）」实点验证 R86-2**：点击后日志区出现**真实 journal 行**
+  （`Sep 28 13:54:17 nfvis nfvisd[42700]: …`）——修复前这里是 `-- No entries --`。
+  截图存 `docs/images/`（本轮随会话产出，见下）。
+- 接口页：Rx/Tx/Rx 错误/Tx 丢弃列**有真实计数**（ens192 Rx 包=2，与 `vppctl` 的 rx packets 2 同刻一致）；
+  但 **MTU 列恒为「—」**——见下「本轮新登记」。
+
+----- §8 本轮新登记（未修，如实记录）------------------------------------------------
+- **R86-6（P2，告警生命周期）对象删除后告警不自消，且「主动停容器」被报成 critical「异常退出」**：
+  `show alarms active`（配置里**已无** VNF/容器）仍长期挂着
+  `VNF_PORT_DOWN vnf-a/eth0`、`VNF_PORT_DOWN vnf-b/eth0`、`critical CONTAINER_EXITED walk-ct
+  容器 walk-ct 异常退出（状态 exited）`；其中 walk-ct 是**操作者主动 `request … stop`** 的
+  （并非异常），措辞与严重度都指向"故障"。控制台总览页同样列出这三条（仪表盘长期挂着不存在的对象）。
+  与 R84-17（删 VNF 后 VNF_PORT_DOWN 不自消）同族、本轮在「对象已删除」的条件下再次复现。
+- **R86-7（P3，读视图缺字段）接口读视图不含 MTU**：`show interfaces <口> detail` 与 REST 都不给 MTU，
+  故控制台接口列表的 MTU 列恒为「—」；而同刻 `vppctl show interface ens192` 明确有 `9000/0/0/0`
+  （配置侧也能 `set interfaces <n> mtu`）——与 R84-3（列表端点不返回计数）同族，属"取不到就不给"的
+  保守口径，登记待补。
+- **R86-8（P3，脚本模式可用性）`-c` 脚本里「值未变化」的空操作会中止整段脚本**：套件与本轮多次踩到
+  （`set interfaces ens192 description cli-pre` 已是该值 → `%% 语句未产生配置变更` → 后续行全部不执行、候选被丢弃）。
+  这是套件头部写明的口径，也是"任一行出错即停"的必然结果；登记**建议**（非缺陷）：给套件加一个"前置复位"
+  步骤，或让 CLI 支持 `--keep-going` 之类的脚本选项（交互模式下无此问题）。
+
+================================================================================
+round86 第二批：清掉三条未修（决策 #188~#190）+ Web 侧同步
+================================================================================
+日期：2026-09-28（同日续）
+范围：R86-6（告警生命周期）、R86-7（接口读视图 MTU）、R86-8（脚本模式空操作）三条**已修复并真机复验**；
+      涉及 Web 的两处（接口页 MTU 列、告警展示）在浏览器里实点复核
+产品版本：1.1.48~dev3（sha256 d05a3b6e5239997fa1abc9aa29cae4aec60ec1c871418c2fbd9a5b8a8381c922）
+
+----- §9 三条修复与真机复验 --------------------------------------------------------
+
+R86-6 → 决策 #188 **告警随对象消失与状态恢复而消解（对账式清警）+ 主动停止不再报「异常退出」**
+  修：`AlarmSink` 增 `ActiveOf(scope)`；新增共享对账函数 `orchestrator.ResolveStale(sink, scope, expect)`，
+    VNF vNIC / 接口链路 / 容器三处检查在**运行态查询成功之后**按配置期望集合清掉源已不在其中的活动告警
+    （查询失败不清，避免运行态未知时误清）；容器退出性质改由 `classifyExit(code, oomKilled)` 判定——
+    **以 Docker `State.OOMKilled` 为核心判据**（OOM→critical），`0/137/143`（正常退出与 `docker stop`
+    的 SIGTERM/SIGKILL）视为**已停止**→消警，其它非零码仍 critical；`dockerAPI` 增 `OOMKilled`。
+  真机复验（1.1.48~dev3，升级实装后）：
+    ① 升级前挂着的那三条滞留告警（`VNF_PORT_DOWN vnf-a/eth0`、`VNF_PORT_DOWN vnf-b/eth0`、
+       `critical CONTAINER_EXITED walk-ct`——它们的对象在配置里**早已删除**）在升级后的下一轮巡检里
+       **全部自清**：`show alarms active` → `（无 active 告警）`；
+    ② 现造现场：`container-functions a86-ct` 定义 → start（`docker ps` Up）→ 主动 `request … stop`
+       → **无 critical 告警**（旧版此处必挂 `critical CONTAINER_EXITED`，退出码 137 被误判为异常）；
+    ③ 再 `delete container-functions a86-ct` → 等一轮巡检 → 仍 `（无 active 告警）`；
+    ④ 控制台总览页同刻显示 **（无未解决告警）**（浏览器实点）。
+  单测 12 例（含删除后清警、主动停止不告警、OOMKilled 仍 critical、非零码仍 critical、运行态查询失败不清警）。
+
+R86-7 → 决策 #189 **接口读视图给「有效 MTU」（配置显式值优先、否则运行态）**
+  修：VPP `sw_interface_details.Mtu[0]`（L3 MTU）→ `SwIfInfo.Mtu` → `api.InterfaceState.MTU`；抽出
+    `interfaceView()` 让**列表与详情端点共用同一视图**；`mtu` 取「配置显式值优先 → 否则运行态 →
+    两者都无则**不给该字段**」；CLI `show interfaces <名> detail` 增 MTU 列（**不动** physical 列表列）；
+    控制台详情卡删掉「启用（配置）」一行（`enabled` 是运行态 admin 状态，头部「管理状态」已有）。
+  真机复验：
+    ① CLI：`show interfaces ens192 detail` → 表头含 **MTU**，值 **9000**（旧版无该列）；
+    ② REST 列表 `GET /interfaces` → `ens192 mtu=9000 link=up driver=dpdk`、`ens224 mtu=9000 link=down`；
+       详情 `GET /interfaces/ens192` → `mtu: 9000`（+link/enabled/driver/statistics）；
+    ③ 控制台「系统 → 接口」列表 **MTU 列 = 9000**（旧版恒「—」，浏览器实点 + 截图）；
+       详情页同样显示 MTU 9000 且不再有把运行态说成配置值的「启用（配置）」行。
+  单测 4 例（运行态 / 配置覆盖 / 字段缺席 / L3 下标映射）。
+
+R86-8 → 决策 #190 **脚本模式：语句「未产生配置变更」是提示而非失败**
+  修：服务端把这类空操作标记为**结构化提示**（`CLIExecuteResult.warning=true`，输出行改为不带 `%` 前缀的
+    `警告: 语句未产生配置变更（值未变化或尚未映射到模型），已继续：<语句>`）；`nfvis-cli` 脚本模式据此
+    **继续执行**后续语句且不影响退出码；**真错误照旧中止并保持非零退出码**。契约与手册同步。
+  真机复验：
+    ① 正例：脚本里第一条 `set system idle-timeout-minutes 14`（已是该值）→ 打一行警告；
+       第二条 `set … 17` → `[ok]`；`commit 成功 (revision 174)`；读回 = **17**；退出码 **0**
+       （旧版：第一条即中止整段、后续不执行、候选丢弃）；
+    ② 反例：脚本里插入一条真错误（`set system 不存在的叶子 1`）→ `%% 未知命令` + **退出码 1**，
+       且其后的 `set … 12` **未执行**（读回仍是 17）——真错误语义未放宽。
+  附带效果（同一条修复的收益）：**测试套件不再需要"前置复位"就能重跑**——本轮**不做任何复位**直接重跑：
+    fulltest **194 / 1 / 12**（与复位后的基线完全一致；旧版会因前置块的「值未变化」整块停摆、级联 20+ 假红）。
+
+----- §10 四套件与 Web 复跑（1.1.48~dev3）------------------------------------------
+  · fulltest（**未做前置复位**）：通过 **194** / 失败 **1**（= 已登记的 `show vpp runtime`）/ 预期报错 **12**
+  · 语义校验：通过 **12** / 失败 **0** / 不可判定 **1**（MAC 表需先有流量）
+  · 生命周期与组合（套件对象清掉后，给检查器留自由口）：通过 **21** / 失败 **0** / 跳过 **3**
+  · pty 交互冒烟：**10 / 10**
+  · Web 控制台（Browser Use 黑盒）：登录 → 总览「（无未解决告警）」→ 接口页 MTU 9000 → 接口详情
+    MTU 9000/管理状态 启用 → 诊断页日志真实行——全部实点确认，截图留档。

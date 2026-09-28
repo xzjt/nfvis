@@ -29,6 +29,10 @@ type Result struct {
 	// Console 非空表示该命令要求前端接管终端并桥接串口（M4-12，FR-CMP-014）：
 	// 前端（internal/cli）经 DialConsole 连 WSURL，Ctrl-] 退出后恢复行编辑。
 	Console *ConsoleRequest
+	// Warning 为真表示 Output 是**提示**而非失败（当前唯一来源：语句未产生配置变更——
+	// 值未变化/未映射到模型）。脚本模式（`-c`）据此继续执行、不影响退出码；
+	// 判据是服务端的结构化标记，不是输出文本（round86 R86-8）。
+	Warning bool
 }
 
 // ConsoleRequest 串口终端接管请求（守护进程 CLIEResult.Console）。
@@ -148,6 +152,7 @@ func (c *Client) Execute(line, source string) (Result, error) {
 		Path    []string        `json:"path"`
 		Prompt  string          `json:"prompt"`
 		Console *ConsoleRequest `json:"console"`
+		Warning bool            `json:"warning"`
 	}
 	err := c.do(http.MethodPost, "/api/v1/cli/execute", map[string]string{
 		"line": line, "source": source,
@@ -157,7 +162,7 @@ func (c *Client) Execute(line, source string) (Result, error) {
 	}
 	return Result{
 		Output: resp.Output, Mode: resp.Mode, Path: resp.Path, Prompt: resp.Prompt,
-		Console: resp.Console,
+		Console: resp.Console, Warning: resp.Warning,
 	}, nil
 }
 

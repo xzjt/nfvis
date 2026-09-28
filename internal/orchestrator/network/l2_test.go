@@ -25,6 +25,7 @@ type fakeL2 struct {
 	calls      []string
 	subifs     []CreateSubifReq
 	err        error // 非 nil 时各方法返回该错误
+	namesErr   error // 非 nil 时 SwInterfaceNames 返回该错误（链路告警「查询失败不清警」单测）
 }
 
 func newFakeL2() *fakeL2 {
@@ -54,7 +55,12 @@ func (f *fakeL2) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	return idx, ok, nil
 }
 
-func (f *fakeL2) SwInterfaceNames() (map[uint32]SwIfInfo, error) { return f.names, nil }
+func (f *fakeL2) SwInterfaceNames() (map[uint32]SwIfInfo, error) {
+	if f.namesErr != nil {
+		return nil, f.namesErr
+	}
+	return f.names, nil
+}
 
 // BridgeDomains 假的 BD 运行态（决策 #84）。
 func (f *fakeL2) BridgeDomains() ([]BDRuntime, error) {

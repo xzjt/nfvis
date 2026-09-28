@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -448,6 +449,14 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// 决策 #183：SIGHUP（终端挂断）**不得**杀死守护进程。真机实测：console 打开的 VM 串口
+	// pty 曾成为本进程的控制终端（打开时未带 O_NOCTTY），此后 stop 那台 VM → QEMU 关闭
+	// pty master → 内核发 SIGHUP → nfvisd 退出，请求方只看到连接 EOF、systemd 静默重启。
+	// 根因已在 OpenConsole 用 O_NOCTTY 修掉；这里再对 SIGHUP 免疫，杜绝同类路径重现。
+	defer systemd.WatchHangup(func() {
+		log.Warn("收到 SIGHUP（终端挂断），已忽略：本守护进程无重载语义，配置变更请经 commit")
+	})()
 
 	// 决策 #182：libvirt 的 AppArmor 助手放行 NFViS 镜像/VM 磁盘路径。安装期脚本做同一件事，
 	// 但 libvirt 可能**晚于** nfvis 安装，或与它同一次 apt 事务而被后配置——那时安装期探测条件
@@ -971,6 +980,7 @@ func (c *vppStateController) InterfaceStates() (map[string]api.InterfaceState, e
 	for name, st := range m {
 		out[name] = api.InterfaceState{
 			AdminUp: st.AdminUp, LinkUp: st.LinkUp, LinkSpeed: st.LinkSpeed, DevType: st.DevType,
+			MTU: st.Mtu,
 		}
 	}
 	return out, nil
@@ -1191,15 +1201,36 @@ func kernelRelease() string {
 }
 
 // nfvisdLogTail 取 nfvisd 日志尾部（systemd 单元优先，其次系统日志尾部）。
+//
+// 两个坑（决策 #184，真机实测）：
+//  1. **单元名**：产品安装的单元是 `nfvis.service`（开发态才叫 nfvisd）——查 `-u nfvisd`
+//     永远查不到东西，`show log system` 与诊断包 logs.txt 因此恒空；
+//  2. **`-- No entries --` 是 journalctl 打到 **stdout** 的提示行**（rc=0、长度>0）——
+//     用 `len(out) > 0` 判「拿到了日志」会把这条提示当成日志，设计好的「回退到系统日志尾部」
+//     永不触发。
+//
+// 故：逐个候选单元名尝试，并用 journalctlHasNoEntries 识别「无条目」提示后再回退。
 func nfvisdLogTail() ([]byte, error) {
-	if out, err := exec.Command("journalctl", "-u", "nfvisd", "--no-pager", "-n", "500").Output(); err == nil && len(out) > 0 {
-		return out, nil
+	for _, unit := range []string{"nfvis", "nfvisd"} {
+		out, err := exec.Command("journalctl", "-u", unit, "--no-pager", "-n", "500").Output()
+		if err == nil && len(out) > 0 && !journalctlHasNoEntries(out) {
+			return out, nil
+		}
 	}
 	out, err := exec.Command("journalctl", "--no-pager", "-n", "200").Output()
 	if err != nil {
 		return []byte("(journalctl unavailable: " + err.Error() + ")\n"), nil
 	}
+	if journalctlHasNoEntries(out) {
+		return []byte("(journalctl 无条目：本次启动以来系统日志为空)\n"), nil
+	}
 	return out, nil
+}
+
+// journalctlHasNoEntries 判定 journalctl 输出是否为「无条目」提示行（而非日志内容）。
+// 形如 `-- No entries --`（可带前导空白）；日志正常时该行不会出现，故按子串判定即可。
+func journalctlHasNoEntries(out []byte) bool {
+	return bytes.Contains(out, []byte("No entries"))
 }
 
 // captureController 装配 api.CaptureRuntime（M5-3）。

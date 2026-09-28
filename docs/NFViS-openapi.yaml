@@ -2192,7 +2192,7 @@ components:
         enabled: { type: boolean }
         link: { type: string, enum: [up, down] }
         speed_mbps: { type: integer }
-        mtu: { type: integer }
+        mtu: { type: integer, description: "有效 MTU：配置显式值优先，否则运行态（VPP sw_interface_details 的 L3 MTU）" }
         mac: { type: string }
         numa_node: { type: integer }
         description: { type: string }
@@ -2891,6 +2891,9 @@ components:
         mode: { type: string, enum: [oper, config] }
         path: { type: array, items: { type: string } }
         prompt: { type: string }
+        warning:
+          type: boolean
+          description: "本次输出是**提示**而非失败（当前唯一来源：语句未产生配置变更——值已经是目标值）。nfvis-cli 脚本模式（-c）据此继续执行后续语句而不中止；真错误不带本字段。"
 
     ConfigSession:
       type: object

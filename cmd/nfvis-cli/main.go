@@ -83,13 +83,22 @@ func main() {
 	}
 }
 
-// runScript 多行脚本模式：任一行失败即停止；结束时清理会话。
+// runScript 多行脚本模式：任一行**真错误**即停止；结束时清理会话。
 //
 // 收尾必须清理（会话按 user@source 在服务端保留）：否则脚本会残留配置模式、
 // 脏 candidate 与 candidate 会话锁，导致后续调用被按上一模式解释、
 // 再次以 exit 收尾时报「存在未提交变更」并失败（见 docs/reviews/2026-09-13.md）。
 func runScript(session *cli.Session, cmdline string) {
-	failed := false
+	failed := runScriptLines(session, cmdline)
+	teardownScript(session)
+	if failed {
+		os.Exit(1)
+	}
+}
+
+// runScriptLines 逐行执行脚本，返回是否失败（失败即已停止，后续行不执行）。
+// 与 runScript 分开是为了可单测（后者收尾后直接 os.Exit）。
+func runScriptLines(session *cli.Session, cmdline string) (failed bool) {
 	for _, line := range strings.Split(cmdline, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -98,12 +107,12 @@ func runScript(session *cli.Session, cmdline string) {
 		if line == "wizard" { // 初始化向导（决策 #107）：交互式编排，非 TTY 时向导自行拒绝
 			if err := cli.RunWizard(session, term.IsTerminal(int(os.Stdin.Fd())), os.Stdin, os.Stdout); err != nil {
 				fmt.Printf("%% %v\n", err)
-				failed = true
-				break
+				return true
 			}
 			continue
 		}
-		out, _ := session.ExecuteLine(line)
+		res := session.Execute(line)
+		out := res.Output
 		fmt.Print(out)
 		if !strings.HasSuffix(out, "\n") {
 			fmt.Println()
@@ -112,18 +121,16 @@ func runScript(session *cli.Session, cmdline string) {
 		// 不判定就会「只问不做」却以退出码 0 结束（假成功）。按失败处理并指引显式确认。
 		if msg, need := confirmRefusal(out); need {
 			fmt.Print(msg)
-			failed = true
-			break
+			return true
 		}
-		if strings.Contains(out, "%%") {
-			failed = true
-			break
+		// 「语句未产生配置变更」这类**空操作**不是失败：服务端以 Warning 明确标记，
+		// 脚本继续、退出码不受影响（round86 R86-8：否则一条同值 set 会中止整段脚本，
+		// 幂等重跑根本不可用）。判据用结构化标记而不是输出文本——语句自身可能含 `%`。
+		if strings.Contains(out, "%%") && !res.Warning {
+			return true
 		}
 	}
-	teardownScript(session)
-	if failed {
-		os.Exit(1)
-	}
+	return false
 }
 
 // teardownScript 退出配置模式（有 candidate 先丢弃）、释放会话并吊销 token。

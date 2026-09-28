@@ -27,7 +27,11 @@ Environment=NFVIS_VPP_SOCK=/run/vpp/api.sock
 # 明文仅由 -allow-plaintext 显式开启（开发/测试）。生产可用 set system api tls 安装正式证书。
 # FR-SEC-001：NFVIS_LISTEN 为通配时，nfvisd 按 committed 管理口地址收敛绑定地址。
 ExecStart=/usr/bin/nfvisd -db ${NFVIS_DB} -listen ${NFVIS_LISTEN} -vpp-sock ${NFVIS_VPP_SOCK}
-ExecReload=/bin/kill -HUP $MAINPID
+# 决策 #186：**不声明 ExecReload**。原先写的是 `ExecReload=/bin/kill -HUP $MAINPID`，而本
+# 守护进程没有重载语义——旧行为下 `systemctl reload nfvis` 会把进程**杀掉**（SIGHUP 的默认
+# 动作是终止进程），systemd 再按 Restart=always 拉起，看起来像"重启"而不是"重载"。现在守护
+# 进程对 SIGHUP 免疫（记一条 WARN 并忽略，见 internal/systemd/hangup_linux.go），这里也就不
+# 再声明一个并不存在的动作——配置变更走 CLI/REST 的 commit，数据面补齐由恢复收敛负责。
 KillSignal=SIGTERM
 TimeoutStopSec=30
 # 底座交互需要 root（VPP socket / libvirt / docker / sysfs）

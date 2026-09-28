@@ -552,3 +552,82 @@ func TestValidateDownloadOptions(t *testing.T) {
 		})
 	}
 }
+
+// ---- 决策 #185（R86-3）：慢而持续的下载必须能走完；停发才判中断 ----
+
+// 慢而持续（每个 chunk 间隔 < 空闲上限）的下载必须成功：这正是真机上被
+// http.Client.Timeout 的**整体**上限掐断的形态（187MB @ ~70KB/s）。
+func TestDownloadSlowButSteadySucceeds(t *testing.T) {
+	payload := bytes.Repeat([]byte("nfvis"), 4000) // 20 KB
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		w.WriteHeader(http.StatusOK)
+		f, _ := w.(http.Flusher)
+		for i := 0; i < len(payload); i += 2048 {
+			end := i + 2048
+			if end > len(payload) {
+				end = len(payload)
+			}
+			_, _ = w.Write(payload[i:end])
+			if f != nil {
+				f.Flush()
+			}
+			time.Sleep(30 * time.Millisecond) // 拖长整体耗时（10 个 chunk ≈ 300ms）
+		}
+	}))
+	defer srv.Close()
+
+	s := newStore(t)
+	sum := sha256Hex(payload)
+	// 空闲上限 200ms > 每 chunk 间隔 30ms：整体耗时远超空闲上限也必须成功。
+	_, err := s.Download(context.Background(), DownloadOptions{
+		Name: "slow.qcow2", Type: TypeVM, URL: srv.URL, SHA256: sum,
+		IdleTimeout: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("慢而持续的下载不应失败（整体耗时 > 空闲上限是正常的）: %v", err)
+	}
+	m, ok := s.Get("slow.qcow2")
+	if !ok || m.ImportState != StateReady || m.SizeBytes != int64(len(payload)) {
+		t.Fatalf("慢速下载应完成并 ready: %+v ok=%v", m, ok)
+	}
+}
+
+// 服务端停发（chunk 之间超过空闲上限）→ 判「服务端停发」，且文案不给服务端背锅给客户端。
+func TestDownloadIdleStallReportedAsServerStall(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("0123456789"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	defer srv.Close()
+	defer srv.CloseClientConnections()
+
+	s := newStore(t)
+	_, err := s.Download(context.Background(), DownloadOptions{
+		Name: "stall2.qcow2", Type: TypeVM, URL: srv.URL, SHA256: strings.Repeat("a", 64),
+		IdleTimeout: 150 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("停发应报错")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "空闲超过") {
+		t.Errorf("应说明是「空闲多久没数据」而非笼统超时: %v", err)
+	}
+	if strings.Contains(msg, "客户端请求超时") {
+		t.Errorf("停发不应被说成客户端侧超时: %v", err)
+	}
+	for _, want := range []string{"可重试续传", "断点续传"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("中断错误应含 %q: %v", want, err)
+		}
+	}
+}

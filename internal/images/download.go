@@ -24,18 +24,69 @@ type DownloadOptions struct {
 	URL         string
 	SHA256      string // 期望校验和（可空）
 	Description string
-	Client      *http.Client // 可空（缺省 10 分钟超时）
+	Client      *http.Client // 可空（缺省：连接/响应头 60s + **空闲** 5 分钟上限，无整体上限）
 	Progress    func(done, total int64)
+	// IdleTimeout 空闲上限（0 = defaultDownloadIdleTimeout）。每次读到字节即重置；
+	// 连续这么久没有新数据才判「服务端停发」。测试用短值注入，生产走缺省。
+	IdleTimeout time.Duration
 }
 
 const (
-	// defaultDownloadTimeout 未注入 Client 时的超时。注意它是**整体**上限（连接+读 body），
-	// 不是空闲超时：服务端停发数据时只有到这个点才会失败——故中断原因与已下载字节必须落盘，
-	// 否则这段时间里操作者只能看着 downloading（R84-6）。
-	defaultDownloadTimeout = 10 * time.Minute
+	// defaultDownloadHeaderTimeout 未注入 Client 时「建立连接 + 收到响应头」的上限。
+	defaultDownloadHeaderTimeout = 60 * time.Second
+	// defaultDownloadIdleTimeout 未注入 Client 时的**空闲**上限：连续这么久收不到任何字节
+	// 才判定服务端停发（中断）。
+	//
+	// 为什么不是整体上限（决策 #185，真机实测 R86-3）：此前用 http.Client.Timeout=10 分钟，
+	// 而它是**整体**上限（连接+读 body）——服务端一直在稳稳地发数据（实测 CDN ~70KB/s），
+	// 只是文件大（alpine 云镜像 187,695,104 字节），10 分钟到了照样被掐断，还把它报成
+	// 「等待服务端数据超时」把责任推给服务端。空闲上限只约束「停发」，慢而持续的下载能走完
+	// （实测同一 URL 经代理 curl 取回逐字节一致，证明 URL 与文件本身都没问题）。
+	defaultDownloadIdleTimeout = 5 * time.Minute
 	// progressSaveStep 进度落盘的字节节流（每下载这么多更新一次元数据，避免每 256KB 写索引）。
 	progressSaveStep = 1 << 20
 )
+
+// stallIdleError 空闲超时：判定「服务端停发」而非「客户端上限」。
+// 实现 Timeout() bool = true，故 isTimeoutErr 认同它（与网络层超时同一分类）。
+type stallIdleError struct{ idle time.Duration }
+
+func (e *stallIdleError) Error() string {
+	return fmt.Sprintf("空闲 %s 未收到任何字节", e.idle)
+}
+
+func (e *stallIdleError) Timeout() bool   { return true }
+func (e *stallIdleError) Temporary() bool { return true }
+
+// idleTimeoutReader 给响应体加「空闲上限」：每次读到字节就重置计时；空闲超过 idle
+// 没有新数据 → 返回 stallIdleError。用于替代 http.Client.Timeout 的整体上限
+// （整体上限会把「慢而持续」的正常下载掐断，见 defaultDownloadIdleTimeout 的说明）。
+type idleTimeoutReader struct {
+	rc   io.Reader
+	idle time.Duration
+}
+
+func (r *idleTimeoutReader) Read(p []byte) (int, error) {
+	type result struct {
+		n   int
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		n, err := r.rc.Read(p)
+		ch <- result{n, err}
+	}()
+	timer := time.NewTimer(r.idle)
+	defer timer.Stop()
+	select {
+	case res := <-ch:
+		return res.n, res.err
+	case <-timer.C:
+		// 放弃这次读：调用方收到空闲超时后会关掉响应体（defer resp.Body.Close()），
+		// 被卡住的 goroutine 随之返回。
+		return 0, &stallIdleError{idle: r.idle}
+	}
+}
 
 // Download 拉取镜像到仓库并登记元数据。中途状态记 downloading，成功 ready、失败 failed。
 // 支持断点续传：若存在 <dest>.part 且服务端支持 Range，则从断点续传。
@@ -135,7 +186,17 @@ func (s *Store) fail(m Meta, cause error) error {
 func (s *Store) downloadFile(ctx context.Context, opts DownloadOptions) (Meta, error) {
 	client := opts.Client
 	if client == nil {
-		client = &http.Client{Timeout: defaultDownloadTimeout}
+		// 缺省客户端：只在「连接 + 响应头」上设上限，**不设整体上限**（决策 #185）。
+		// 读 body 的进度约束交给下面的空闲超时包装——整体上限会把慢而持续的下载掐断。
+		if tr, ok := http.DefaultTransport.(*http.Transport); ok {
+			tr = tr.Clone()
+			tr.ResponseHeaderTimeout = defaultDownloadHeaderTimeout
+			client = &http.Client{Transport: tr}
+		} else {
+			// 理论上不可达（DefaultTransport 恒为 *http.Transport）；仍不给整体上限，
+			// 因为那正是本决策要避免的行为。
+			client = &http.Client{}
+		}
 	}
 	dest := filepath.Join(s.cfg.Dir, opts.Name)
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
@@ -162,6 +223,12 @@ func (s *Store) downloadFile(ctx context.Context, opts DownloadOptions) (Meta, e
 	if resp.StatusCode >= 400 {
 		return Meta{}, fmt.Errorf("拉取 %s: HTTP %d", opts.URL, resp.StatusCode)
 	}
+	// 空闲超时包装（决策 #185）：服务端停发（而不是慢）才是中断判据。
+	idle := opts.IdleTimeout
+	if idle <= 0 {
+		idle = defaultDownloadIdleTimeout
+	}
+	body := io.Reader(&idleTimeoutReader{rc: resp.Body, idle: idle})
 
 	flags := os.O_CREATE | os.O_WRONLY
 	resuming := false
@@ -200,7 +267,7 @@ func (s *Store) downloadFile(ctx context.Context, opts DownloadOptions) (Meta, e
 	written := offset
 	buf := make([]byte, 256*1024)
 	for {
-		n, rerr := resp.Body.Read(buf)
+		n, rerr := body.Read(buf)
 		if n > 0 {
 			if _, werr := f.Write(buf[:n]); werr != nil {
 				_ = f.Close()
@@ -220,10 +287,17 @@ func (s *Store) downloadFile(ctx context.Context, opts DownloadOptions) (Meta, e
 		}
 		if rerr != nil {
 			_ = f.Close()
-			// 中断原因要能照着做（R84-6）：说清断在哪、断点还在、怎么续——服务端限速/停发
-			// 时最常见的失败是「等到客户端整体超时」，与网络断开区分开。
+			// 中断原因要能照着做（R84-6）：说清断在哪、断点还在、怎么续。
+			// 两种「超时」要分清（决策 #185）：① 我们自己的**空闲**判据 = 服务端停发；
+			// ② 注入客户端自带的**整体**超时（测试/嵌入方）= 客户端侧上限。
+			// 此前一律写成「HTTP 客户端整体超时触发」，把慢而持续的下载说成服务端停发（R86-3）。
+			var stall *stallIdleError
+			if errors.As(rerr, &stall) {
+				return Meta{}, fmt.Errorf("拉取中断（已下载 %d 字节，可重试续传）：等待服务端数据超时（空闲超过 %s 未收到任何字节）；"+
+					"已下载部分保留在 .part，重跑同一命令即从断点续传: %w", written, stall.idle, rerr)
+			}
 			if isTimeoutErr(rerr) {
-				return Meta{}, fmt.Errorf("拉取中断（已下载 %d 字节，可重试续传）：等待服务端数据超时（HTTP 客户端整体超时触发）；"+
+				return Meta{}, fmt.Errorf("拉取中断（已下载 %d 字节，可重试续传）：等待数据超时（客户端请求超时，非服务端停发）；"+
 					"已下载部分保留在 .part，重跑同一命令即从断点续传: %w", written, rerr)
 			}
 			return Meta{}, fmt.Errorf("拉取中断（已下载 %d 字节，可重试续传）：连接中断；"+

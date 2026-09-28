@@ -100,3 +100,56 @@ func containsStr(list *[]string, want string) bool {
 	}
 	return false
 }
+
+// ---- 决策 #186：VPP 未运行（数据面不可达）时的延后收敛 ----
+
+// vppDownNet 让指定接口在下发时报「VPP 未连接」（数据面根本没起来），其余同 recNet。
+type vppDownNet struct {
+	recNet
+	down map[string]bool
+}
+
+func (n vppDownNet) ApplyInterface(_ context.Context, iface model.InterfaceConfig) error {
+	*n.calls = append(*n.calls, "iface:"+iface.Name)
+	if n.down[iface.Name] {
+		return fmt.Errorf("下发失败 interface[%s]: %w", iface.Name, ErrL2Unavailable)
+	}
+	return nil
+}
+
+// 已声明为 DPDK 口的接口在 VPP 未运行时也必须**延后收敛**：从零首装/整机重启后 VPP 是停的，
+// 而手册记载的首次声明顺序（声明 → commit → request vpp restart）不能死在第一步。
+func TestApplyDefersWhenVppNotRunning(t *testing.T) {
+	calls := &[]string{}
+	var warns []string
+	a := NewApplier(vppDownNet{recNet{calls: calls}, map[string]bool{"ens192": true}},
+		recCompute{calls: calls}, recContainer{calls: calls},
+		WithWarn(func(msg string) { warns = append(warns, msg) }))
+
+	if err := a.Apply(context.Background(), model.Config{}, dpdkCfg("ens192", true)); err != nil {
+		t.Fatalf("VPP 未运行时应延后收敛（否则手册的从零顺序第一步就无法通过）: %v", err)
+	}
+	joined := strings.Join(warns, " | ")
+	if !strings.Contains(joined, "ens192") {
+		t.Fatalf("延后必须有可读告警: %q", joined)
+	}
+	if !strings.Contains(joined, "request vpp restart") {
+		t.Fatalf("告警应指出下一步（request vpp restart）: %q", joined)
+	}
+}
+
+// 未声明为 DPDK 的口：VPP 未运行照旧**硬失败**（不能把真错误吞掉）。
+func TestApplyVppDownStillFailsForUndeclaredIface(t *testing.T) {
+	calls := &[]string{}
+	a := NewApplier(vppDownNet{recNet{calls: calls}, map[string]bool{"ens999": true}},
+		recCompute{calls: calls}, recContainer{calls: calls},
+		WithWarn(func(string) {}))
+
+	err := a.Apply(context.Background(), model.Config{}, dpdkCfg("ens999", false))
+	if err == nil {
+		t.Fatal("未声明为 DPDK 口的接口在 VPP 未运行时必须照旧失败")
+	}
+	if !strings.Contains(err.Error(), "VPP 未连接") {
+		t.Fatalf("错误应保留原始原因（VPP 未连接）: %v", err)
+	}
+}

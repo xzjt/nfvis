@@ -536,6 +536,9 @@ func (f *fakeSink) Resolve(_, _, source string) bool {
 	return true
 }
 
+// ActiveOf 仅为满足 orchestrator.AlarmSink（计算侧不做按 scope 对账清警）。
+func (f *fakeSink) ActiveOf(string) []orchestrator.AlarmRef { return nil }
+
 func TestEnsureConsistentAlarms(t *testing.T) {
 	api := newMockLibvirt()
 	store := newMockStorage("/images/img.qcow2")

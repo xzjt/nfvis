@@ -26,6 +26,27 @@
   启动/60s 巡检复核）——因为 libvirt 可能晚于 nfvis 装载或在同一次 apt 事务里被后配置。
   ⚠️ **干净快照基线更正**：快照本身**没有 make/go**（只有 git、dpkg-deb、curl、chrony、tcpdump），
   故 `.run`/deb 的构建必须在有工具链的机器上做；`.run` 安装端**不需要**任何构建工具。
+- **round86（干净快照从零走查 + 五条缺陷收口，2026-09-28）**（**首批**）：在恢复为「干净」快照的 nfvis-vm 上从零装工具链与
+  VPP、源码构建 `1.1.48~dev1` 实装、wizard（真 pty）→ 重启 → 数据面 → VNF/容器/快照/诊断全面拟人化走查，
+  收口**五条**缺陷（决策 **#183~#187**，均为真机复验过）：
+  **#183（P0）** console 打开的 VM 串口 pty 曾是本进程的**控制终端**（打开时未带 `O_NOCTTY`）——此后
+  **停那台 VM** 会让 nfvisd 收到 SIGHUP 而退出（调用方只看到 `Post …: EOF`、systemd 按 Restart=always 拉起，
+  看不出根因）；修法是 `O_NOCTTY` + `internal/systemd.WatchHangup`（SIGHUP 免疫）+ 单元删掉并不存在的
+  `ExecReload`（旧行为下 `systemctl reload nfvis` 实为"杀掉再拉起"）。
+  **#184** `show log system` 与诊断包 logs.txt 在已装实例上恒空（查的是单元 `nfvisd` 而实际是 `nfvis.service`；
+  又把 journalctl 的 `-- No entries --` 提示当成日志，回退分支永不触发）。
+  **#185** 镜像 URL 拉取曾用 `http.Client.Timeout`（整体上限）——慢而持续的下载被掐断且归咎服务端；
+  现改为「连接/响应头 60s + **空闲** 5 分钟」。
+  **#186** 从零首次声明物理口时 VPP 未运行 → commit 整体失败并回滚（与手册 §7.3 的「延后收敛」承诺相反）；
+  现对**已声明 DPDK 端口**同时延后 `ErrL2Unavailable`。
+  **#187** NAT 用过的表带 VPP `nat44-ei-hi` 锁 → 该 L3 交换机删不掉（删规则/关插件都不释放，只有
+  `request vpp restart`）；现把可照做指引写进错误文案并写进手册 §8.8。
+  **四套真机工具跑数（1.1.48~dev2）**：`cli-fulltest` **194/1/12**（唯一失败=已登记的 `show vpp runtime`）、
+  `cli-semantic-check` **12/0/1**、`cli-lifecycle-check` **21/0/3**、`cli-pty-smoke` **10/10**。
+  ⚠️ **本轮未发版**（改动已入 `main`；发版步骤见待办 §3.7）。**新登记未修**：① 提交失败的**补偿再失败**时
+  残渣只出现在当次提交输出、不进告警；② 同一 candidate 内「改 NAT 出接口 + 删旧 L3 交换机」因该 VPP 锁必然失败。
+  **工具假红已修**：生命周期检查器的自由口枚举把产品命名的 bond（`bond0`）当物理口 → L1-2 恒假红。
+  证据 `docs/evidence/v1-closeout-round86-fresh-walkthrough-and-5-fixes.txt`。
 - M4 验收现状（`docs/M4-验收记录.md`）：M4-1~M4-11 真机通过（`make integration` 全绿）；M4-12 CLI 侧命令真机冒烟通过
   （show/request/delete 交互确认/console ticket/审计/动态候选）。**已知环境限制**：SR-IOV 无 PF/VF 未真机验证；
   容器侧 memif 通流未验（离线无自带 memif 的容器镜像）。
@@ -58,8 +79,9 @@
   vnf-b 的 user-data 与 vnf-a 同址 .11，BVI↔vnf-b 无独立流量口径——历史如此，非本轮引入）；
   镜像：`alpine.qcow2`（阶段 3 前置，round85 已放回）+ 容器镜像 `alpine:3.20`（round85 已 `docker load` 放回）；
   `debian-12-generic-amd64.qcow2` **已随快照恢复丢失**（跑 `make integration` 前需重新准备）；
-  配置库 rev 40+ / audit 若干（round85 的三件套会自己建删对象；套件**重复运行**会因「值未变化」报空操作失败，
-  这是套件头部写明的口径，重跑前把上轮对象/镜像注册清掉、把 ens224 置回 enable、并确认 docker 镜像还在），
+  配置库 rev 40+ / audit 若干（round85 的三件套会自己建删对象；**v1.1.48 起「值未变化」是提示而非失败（决策 #190）**，套件重复运行不再因此级联中止；
+  但**上轮对象本身仍要清**（重复声明会撞其它校验：bond 成员口角色冲突、隔离核被已声明 VNF 占满等），
+  并确认夹具镜像（`alpine.qcow2`）与 docker `alpine:3.20` 还在），
   `request interfaces ens224 enable` 走一次性事务 +1 rev/audit，**内容指纹未变**）；
   `/var/lib/nfvis/tech-support` 0700 + 归档 0600、`/var/lib/nfvis/backup` 0600（决策 #149 口径在既有安装上也生效）；
   **`nodejs` v22.22.1**（round37 装，
@@ -70,7 +92,7 @@
   跑 `make integration` 前需先重建（布局与流程见待办 §3.3 / §0 第 1 条）。
   `ens160` 是管理口（vmxnet3、承载 SSH）——**永不拿管理路径做试验**的红线不变。
   设计基线在 `docs/`，**不要凭记忆重设计**。
-- 已定决策 182 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 190 项见规格书附录 A——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。

@@ -262,7 +262,7 @@ func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) strin
 	}
 	switch sub {
 	case "", "detail":
-		if out, ok := x.ifaceRuntimeView(name, desc, declared); ok {
+		if out, ok := x.ifaceRuntimeView(name, desc, declared, ifc.MTU); ok {
 			return out
 		}
 		// 未声明且不在 VPP 清单（决策 #154：清单查询成功才可判「不在」）
@@ -301,7 +301,10 @@ func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) strin
 // （ifaceRuntimeRow/ifaceRowFmt）。declared=该口在配置中声明（描述列取声明值）；
 // 未声明口仅在 VPP 清单可核时作答（ok=false → 调用方按 #154 口径报错）。
 // 注记三态：未声明（说明口径）、已声明但运行态未出现（状态列为 -）、运行态不可用。
-func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool) (string, bool) {
+//
+// MTU 列为**有效 MTU**（R86-7）：配置显式值优先、否则运行态（VPP L3 MTU）；两者都取不到
+// 显示 `-`，结构化输出不带 mtu 字段（「取不到就不给」，同 REST 读视图口径）。
+func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool, cfgMTU int) (string, bool) {
 	names, invOK := x.vppIfaceNamesSafe()
 	inInv := invOK && ifaceInList(names, name)
 	if !declared && !inInv {
@@ -309,6 +312,11 @@ func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool) (string
 	}
 	states, stErr := x.ifaceStates()
 	entry, admin, link, speed, driver, rx, tx := x.ifaceRuntimeRow(name, desc, states)
+	mtuCol := "-"
+	if mtu, ok := effectiveMTU(cfgMTU, states[name]); ok {
+		mtuCol = fmt.Sprintf("%d", mtu)
+		entry["mtu"] = mtu
+	}
 	_, inStates := states[name]
 	var b strings.Builder
 	switch {
@@ -317,8 +325,8 @@ func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool) (string
 	case !inStates && !inInv:
 		fmt.Fprintf(&b, "（接口 %s 已声明，未在 VPP 运行态出现，状态列显示 -）\n", name)
 	}
-	fmt.Fprintf(&b, ifaceRowFmt, "Interface", "Admin", "Link", "Speed", "Driver", "RxPkts", "TxPkts", "Description")
-	fmt.Fprintf(&b, ifaceRowFmt, name, admin, link, speed, driver, rx, tx, desc)
+	fmt.Fprintf(&b, ifaceRowFmt, "Interface", "Admin", "Link", "Speed", "MTU", "Driver", "RxPkts", "TxPkts", "Description")
+	fmt.Fprintf(&b, ifaceRowFmt, name, admin, link, speed, mtuCol, driver, rx, tx, desc)
 	if stErr != nil {
 		b.WriteString("%% 注: VPP 运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
 	}
@@ -354,8 +362,9 @@ func errIfaceUnknown(name string) string {
 	return fmt.Sprintf("%% 接口 %s 未在配置中声明、也不在 VPP 接口清单中（show interfaces physical 看运行态清单）\n", name)
 }
 
-// ifaceRowFmt 接口运行态表的行格式（表头与数据行共用）。
-const ifaceRowFmt = "%-14s %-7s %-7s %-10s %-12s %-10s %-12s %s\n"
+// ifaceRowFmt 接口运行态表的行格式（表头与数据行共用；单口视图含 MTU 列，
+// 列表表 ifaceListRowFmt 不含——语义校验按列比对 vppctl，列表列不变，R86-7）。
+const ifaceRowFmt = "%-14s %-7s %-7s %-10s %-7s %-12s %-10s %-12s %s\n"
 
 // ifaceRuntimeRow 单口运行态数据与展示值（决策 #84 口径：Admin/Link/Speed/Driver 取
 // VPP 运行态，收发计数取 state 快照）。物理口表与未声明运行态口视图共用（同一实现，

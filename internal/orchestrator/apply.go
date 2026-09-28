@@ -99,7 +99,17 @@ func dpdkManagedIfaces(vpp *model.VppConfig) map[string]bool {
 // 否则「先声明端口、绑定后再提交」会死锁——提交要求端口已在 VPP，而端口进 VPP
 // 要 `request vpp restart` 重生成 startup.conf，重启又要 committed 已落库。
 //
-// 只延后「接口不在数据面」这一种失败；其余失败原样冒泡（不吞真错误）。
+// 延后覆盖两种「数据面还没准备好」的失败（决策 #186）：
+//   - ErrIfaceUnavailable：口不在数据面（VPP 在跑，但该口还没被接管）；
+//   - ErrL2Unavailable：**VPP 根本没在跑**（未连接，L2 客户端为空）。
+//
+// 第二种是真机实测漏掉的：从零首装/整机重启后 VPP 是停的（产品有意不自动拉起，见手册 §7.5），
+// 而手册 §7.3 记载的首次声明顺序恰恰是「声明 → commit → request vpp restart」——
+// 此时 commit 会以「VPP 未连接，L2 客户端不可用」整体失败并回滚，与该处承诺的「延后收敛」
+// 相反，操作者只能自己猜到「先 request vpp restart」。两种情形对该口是同一件事：
+// 配置先落库，口由数据面重启后的恢复收敛补齐。
+//
+// 只延后这两类「数据面未就绪」失败；其余失败原样冒泡（不吞真错误）。
 func (a *orchApplier) ifaceApply(iface model.InterfaceConfig, dpdkManaged bool) func(context.Context) error {
 	run := func(ctx context.Context) error { return a.net.ApplyInterface(ctx, iface) }
 	if !dpdkManaged {
@@ -107,12 +117,20 @@ func (a *orchApplier) ifaceApply(iface model.InterfaceConfig, dpdkManaged bool) 
 	}
 	return func(ctx context.Context) error {
 		err := run(ctx)
-		if err == nil || !errors.Is(err, ErrIfaceUnavailable) {
-			return err
+		if err == nil {
+			return nil
 		}
-		a.warnf("接口 %s 尚未进入数据面（已声明为 DPDK 端口）：本次提交不阻断，"+
-			"执行 request vpp restart 后自动收敛", iface.Name)
-		return nil
+		switch {
+		case errors.Is(err, ErrIfaceUnavailable):
+			a.warnf("接口 %s 尚未进入数据面（已声明为 DPDK 端口）：本次提交不阻断，"+
+				"执行 request vpp restart 后自动收敛", iface.Name)
+			return nil
+		case errors.Is(err, ErrL2Unavailable):
+			a.warnf("接口 %s 的数据面尚未就绪（VPP 未运行）：本次提交不阻断，"+
+				"执行 request vpp restart 后自动收敛", iface.Name)
+			return nil
+		}
+		return err
 	}
 }
 

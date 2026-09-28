@@ -24,6 +24,17 @@ var ErrVMNotFound = errors.New("VM 未定义")
 // 故各 provider 与 API 层原有的 `errors.Is` 判定不受影响（同一个 error 值）。
 var ErrIfaceUnavailable = errors.New("接口在 VPP 中不存在")
 
+// ErrL2Unavailable 数据面**不可达**：VPP 未连接（进程没在跑 / socket 连不上），
+// 拿不到 API channel。与 ErrIfaceUnavailable 同属「数据面尚未就绪」，提交阶段对
+// **已声明为 DPDK 端口**的接口同样**延后收敛**（决策 #186）：从零首装或整机重启后 VPP
+// 是停的（产品有意不自动拉起，见手册 §7.5），而手册记载的首次声明顺序恰恰是
+// 「声明 → commit → request vpp restart」——commit 必须能走通，否则操作者只能猜到
+// 「先 request vpp restart」。
+//
+// 与 ErrIfaceUnavailable 同一理由定义在本包（依赖方向不允许 orchestrator 反向 import
+// network）；network 包以别名复用同一实例，各 provider 原有判定不受影响。
+var ErrL2Unavailable = errors.New("VPP 未连接，L2 客户端不可用")
+
 // NetworkProvider VPP 侧编排接口。L2 虚拟交换机 → bridge domain，
 // L3 虚拟交换机 → VRF（规格书附录 B 映射）。实现需声明是否并发安全。
 type NetworkProvider interface {
