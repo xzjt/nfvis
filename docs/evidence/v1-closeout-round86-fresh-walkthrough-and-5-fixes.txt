@@ -256,3 +256,29 @@ R86-8 → 决策 #190 **脚本模式：语句「未产生配置变更」是提�
   · pty 交互冒烟：**10 / 10**
   · Web 控制台（Browser Use 黑盒）：登录 → 总览「（无未解决告警）」→ 接口页 MTU 9000 → 接口详情
     MTU 9000/管理状态 启用 → 诊断页日志真实行——全部实点确认，截图留档。
+
+================================================================================
+round86 发布记录：v1.1.48（2026-09-28）
+================================================================================
+- PR：**#230**（`feat/round86-clear-unfixed` → `main`，CI `build-test` 双跑全绿）squash 合并 →
+  `main 08f4f6a`；tag **v1.1.48** → `main 08f4f6a`。
+- 可复现：`make deb VERSION=1.1.48 SOURCE_DATE_EPOCH=1790609977` **连打两次逐字节一致**
+  （9,175,826 字节，sha256 `2bd380d8a27358bbafef851c46e3a64c54d9e92ab392646045d44337eda6d868`）；
+  `build-offline-run.sh --epoch 1790609977` **连打两次逐字节一致**
+  （178,481,364 字节，sha256 `2d8f0ffc87128e465023ab7c09dd9ffb64bdb05d38a2a33d1fb6c4794a0a2661`，
+  载荷 238 个 deb / 171M，含 VPP 26.06 的 deb 与 apt 递归闭包）。
+- `.run` 产物自检 **12/12**（含依赖闭包自洽 238 包 / 837 条依赖声明 / 312 个提供名、安装清单 16 个包名都在载荷内）；
+  `sh nfvis-v1.1.48.run --verify` **12/12**（nfvis 版本、dpkg 审计、unit active+enabled、VPP 运行中与 socket、
+  控制台 200、libvirtd/docker、AppArmor 放行、内核基线片段、CLI 可用、CLI 看 VPP 连通）。
+  ⚠️ 闭包抓取**必须把 VPP 的 deb 一并放进去**：本机 VPP 来自 `/root/vpp-v26.06-deb/`（不在 apt 源里），
+  首轮 `--pkg …` 只抓到 228 个、自检报「安装清单有包不在载荷内：vpp vpp-plugin-core vpp-plugin-dpdk vpp-drivers」——
+  把 9 个本地 VPP deb 放入 `--out` 目录后重跑（工具支持续跑）即 238 个、自检转绿。这条已写进待办。
+- 升级实装：1.1.48~dev3 → **1.1.48**（`dpkg -i`，postinst 正常；服务 active）；
+  **拓扑存活**（`virsh domstate vnf-a` = running）、**流量复通**（`vppctl ping 192.168.100.10 source bvi0 repeat 5`
+  → 5 sent / 5 received / 0% loss）；随包规格书 **190 条决策**、随包手册含 §3.3/§10.6 新语义、
+  **服务端所发前端与仓库源码逐字节一致**（`GET /api/v1/ui/app.js` 与 `internal/api/ui/app.js` sha256 同为
+  `44aee47a…`）、单元文件无 `ExecReload` 指令。
+- 发布件上的套件跑数：`cli-fulltest` **194 / 1 / 12**（唯一失败＝已登记的 `show vpp runtime`；**未做前置复位**即可重跑）、
+  `cli-semantic-check` **12 / 0 / 1**。
+- GitHub Release **v1.1.48**（4 个资产：deb/.run 各自带 `.sha256`，资产名无本地后缀）→ **回下载比对**：
+  deb `2bd380d8…` ✓、`.run` `2d8f0ffc…` ✓（178,481,364 字节逐字节一致）。
