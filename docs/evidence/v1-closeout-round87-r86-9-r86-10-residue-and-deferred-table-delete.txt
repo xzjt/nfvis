@@ -1,0 +1,179 @@
+================================================================================
+round87 证据：提交期残渣进告警 + 删表延后收敛（R86-9 / R86-10）+ 接口换表登记残留
+（决策 #191~#193，v1.1.49）
+================================================================================
+日期：2026-09-29
+范围：把 round86 登记的两条未修缺陷收口（R86-9 补偿残渣不进告警、R86-10 同一 candidate 内
+      「改 NAT 出接口 + 删旧 L3 交换机」必然失败），途中又抓到一条同族缺陷（接口换表后旧表
+      登记残留 ⇒ 删旧表把接口踢回默认表）。
+手法：先在**未修版**（已装的 v1.1.48）上按同一脚本复现三条缺陷，再装修复版（1.1.49~dev1~dev3）
+      逐条复验；三件套 + pty 复跑；Web 控制面黑盒复核。
+环境：nfvis-vm（192.168.155.129，SSH 密钥免密）——1.1.48 active → 升级为 1.1.49~dev3；
+      VPP 26.06-release；2 个 DPDK 业务口（ens192/ens224）；管理口 ens160（全程未触碰）。
+      管理口令 `vV0UM6NG46pUo6tq@Aa1`（按待办 §3.1 哈希比对法核对匹配）。
+
+----- §1 修复前复现（v1.1.48，同一脚本三条都成立）-----------------------------------
+
+R86-10：同一 candidate 内「改 NAT 出接口 + 删旧 L3 交换机」必然失败
+  拓扑：vs-in（inside，池落它的表）/ vs-old（ens192 10.10.10.1/24，旧出接口所在）/
+        vs-keep（ens224 192.168.155.20/24，新出接口所在）；`nat rules 10` 出接口 = ens192。
+  独立事实源（`vppctl show ip fib summary`，提交前）：vs-old 的表带 `nat44-ei-hi:1`
+        （NAT44 把该表当 outside 后 VPP 留的引用；inside 表另有 `nat44-ei-low:6`）。
+  一条提交：
+        set nat rules 10 … virtual-switch vs-in action interface ens224 source-pool p1
+        delete virtual-switches vs-old
+        commit
+      ⇒ `%% 底座下发失败（已补偿）: 下发失败 del-vrf[vs-old]: VRF 对应的 IP 表删除后仍存在于
+        VPP（未收敛）: IP table 12675530（IPv4）在删除后仍存在于 VPP，vs-old 的数据面未收敛
+        （表可能仍被数据面插件引用：NAT44 用过这张表后 VPP 不释放该引用，执行 request vpp
+        restart 后重试删除）`
+  提交后事实：`show alarms active` = **（无 active 告警）**；被回滚的配置仍指向旧出接口
+        （`vppctl show nat44 ei interfaces` = `ens192 out`）；vs-old 的表仍在，且 **interface 锁
+        已消失**（ens192 已被失败的删表操作解绑）——即数据面已偏离配置而无人知道。
+
+R86-9：补偿也失败时，残渣只出现在当次提交输出里
+  构造（一条提交）：新建 `vs-lock`（L3）→ NAT 规则改引用它 → 声明一台 `vm-r87`，其
+        `cloud-init user-data /root/does-not-exist-r87.sh`（apply 阶段读文件必失败）。
+  下发顺序（vrf → nat → vm）⇒ vm 失败 → 逆序补偿：先撤 NAT，再撤 `vrf[vs-lock]`
+        （`DeleteVRF` 读回发现表仍在 = 上面那把锁）⇒ 补偿失败。
+  提交输出（1.1.48）：`%% 底座下发失败（已补偿）: 下发失败 vm[vm-r87]: 生成 VM vm-r87
+        cloud-init seed: 读取 user-data 文件 …: no such file or directory;
+        补偿失败 vrf[vs-lock]: VRF 对应的 IP 表删除后仍存在于 VPP（未收敛）: IP table 9292598
+        （IPv4）在删除后仍存在于 VPP …`
+  提交后：`show alarms active` = **（无 active 告警）**——残渣（多出来的 9292598 表）
+        事后完全不可见，而配置里已没有 vs-lock。
+
+R87-1（本轮新发现）：接口换表后旧表登记残留，删旧表会把接口踢回默认表
+  一条提交：`set virtual-switches vs-keep l3-interface ens192 ip address 10.10.10.1/24`
+        （改挂）+ `delete virtual-switches vs-old` ⇒ **commit 成功（rev 250）**，但
+  `vppctl show interface address`：
+        ens192 (up):            ← 既无地址
+        ens224 (dn): L3 192.168.155.20/24 ip4 table-id 9767356
+  即：配置说 ens192 是 vs-keep 的 L3 接口且带 10.10.10.1/24，数据面却在默认表且无地址，
+  全程零报错（旧表成员清单里还留着它，删旧表时"照章"清地址 + 解绑）。
+
+----- §2 R86-10 复验（1.1.49~dev3，同一拓扑与脚本）-----------------------------------
+  前置（rev 252 提交后）：`vppctl show ip fib summary` 三张表，vs-old 带 `nat44-ei-hi:1`；
+        `show nat44 ei interfaces` = `ens192 out`。
+  同一条提交（改出接口 + 删旧交换机）：
+        [ok] nat rules 10 … action interface ens224 source-pool p1
+        已删除 virtual-switches vs-old（未提交）
+        commit 成功 (revision 253)
+        警告: L3 交换机 vs-old 的表被 NAT 使用过：VPP 不释放该引用，表要到 request vpp restart
+              后才从数据面移除（在此之前该表仍留在数据面，已记告警）
+  提交后：
+    - `show alarms active`：
+        warning  COMMIT_VRF_DELETE_DEFERRED  vs-old  2026-09-29 05:50:58
+        L3 交换机 vs-old 的表在数据面仍存在（NAT 用过该表后 VPP 不释放引用，只有重启数据面
+        才会移除）：配置已删除，执行 request vpp restart 后自动清理；在此之前该表仍留在数据面
+    - `vppctl show ip fib summary`：`vs-old, … locks:[nat44-ei-hi:1]`（表确实还在——提交成功
+      不等于表已消失，这句话在提交输出与告警里都写明了）；
+      `show nat44 ei interfaces` = `ens224 out`（出接口已改到新交换机）；
+      `show interface address`：ens192 已解绑、无地址（它不再属于任何交换机，符合新配置）。
+  自动清理与消警：`request vpp restart --yes` → 恢复收敛后
+    - `vppctl show ip fib summary`：只剩 vs-keep / vs-in（**vs-old 的表已消失**）；
+    - `show alarms active` = （无 active 告警），`show alarms resolved` 留该条记录（可追溯）；
+    - journal：`恢复收敛完成`；（同族的「删表延后项已清理」日志见 §3 的补偿场景）。
+  跨进程复核（R86-9 的「事后不可见」）：重启 nfvisd（不重启 VPP）后，残留在**新进程**里
+    仍然可见——恢复收敛按「配置声明集 ⇄ VPP 实况」对账：
+        warning  VRF_TABLE_LEFTOVER  ip-table/9292598  2026-09-29 06:05:44
+        数据面存在配置未声明的 IP 表 9292598：多来自「删表延后」或提交补偿失败留下的残渣
+        （不会被任何配置引用），执行 request vpp restart 后自动清理；若该表是手工 vppctl
+        创建的，请自行核对
+        （journal 同时有一条「网络恢复收敛未收敛项 ip-table/9292598: …」）
+    随后 `request vpp restart` ⇒ 表消失、该告警自动消解（active 空、resolved 留痕）。
+
+----- §3 R86-9 与 R87-1 复验（1.1.49~dev3）-------------------------------------------
+
+R86-9（补偿失败 → 告警 + 自动清理）
+  同一构造（新建 vs-lock（无接口，池仍落它的表）+ NAT 改引用它 + vm-r87 的 user-data 指向
+  不存在的文件）：
+        %% 底座下发失败（已补偿）: 下发失败 vm[vm-r87]: 生成 VM vm-r87 cloud-init seed:
+           读取 user-data 文件 /root/does-not-exist-r87.sh: no such file or directory;
+           补偿失败 vrf[vs-lock]: VRF 对应的 IP 表删除后仍存在于 VPP（未收敛）: IP table 9292598
+           （IPv4）在删除后仍存在于 VPP，vs-lock 的数据面未收敛（表可能仍被数据面插件引用：
+           NAT44 用过这张表后 VPP 不释放该引用，执行 request vpp restart 后自动清理）
+        （错误文案照旧完整保留；下面的告警是新行为）
+  `show alarms active`：
+        error  COMMIT_COMPENSATION_FAILED  vrf[vs-lock]  2026-09-29 06:08:11
+        提交失败后的补偿未完成：vrf[vs-lock] 回滚失败（…）。配置已回滚到上一版本，数据面该对象
+        可能残留中间状态（多出来的对象，或没有被恢复的地址/归属）；重新提交同一变更、或先执行
+        request vpp restart 再提交即可复原
+  配置侧已回滚（`show configuration | display set` 里 vs-lock 出现 0 次），残渣 = 数据面
+  多出来的 9292598 表（`vppctl show ip fib summary` 可见）。
+  `request vpp restart --yes` → 10 秒后（15s 巡检）journal：
+        INFO  删表延后项已清理  vrfs=["vs-lock"]
+  `show alarms active` = （无 active 告警）——残渣与告警一并收口。
+
+R87-1（接口换表 + 删旧交换机）
+  前置：新建 vs-old（ens192 10.10.10.1/24）→ rev 254；`show interface address` 显示 ens192
+        的表为 vs-old（table-id 12675530）。
+  一条提交：改挂 ens192 到 vs-keep + 删 vs-old ⇒ `commit 成功 (revision 255)`，无警告无告警。
+  `vppctl show interface address`：
+        ens192 (up): L3 10.10.10.1/24 ip4 table-id 9767356 fib-idx 1     ← vs-keep 的表
+        ens224 (dn): L3 192.168.155.20/24 ip4 table-id 9767356 fib-idx 1
+  `vppctl show ip fib summary`：vs-old 的表已删除，无残留；`show alarms active` 空。
+
+----- §4 三件套 + pty 复跑（1.1.49~dev3，已装实例；脚本取自同一提交的树）---------------
+  · `cli-fulltest.sh`（SRV=https://127.0.0.1:443、CLI_BIN=/usr/bin/nfvis-cli）：
+      **通过 194 / 失败 1 / 预期报错 12**——与 round36/86 干净基线一致；唯一失败
+      = 已登记的 `show vpp runtime`（`%% VPP runtime 统计未接入（govpp runtime 解码限制）`）。
+  · `cli-semantic-check.sh`：**通过 12 / 失败 0 / 不可判定 1**（不可判定 = MAC 表条数需先有流量）。
+  · `cli-lifecycle-check.sh`：**通过 21 / 失败 0 / 跳过 3**
+      （首跑只有 3/0/6——因为前一套件留下的 vs-l3/bond0 占满了两个业务口，「自由口」类检查
+       全部跳过；清场后复跑 21/0/3，与 round86 基线一致）。
+  · `cli-pty-smoke.sh`：**通过 10 / 失败 0**。
+  · `make integration`（真机，VPP 26.06 + libvirt/docker）：见 §6。
+  与 round86 基线逐项一致 ⇒ 本轮改动在套件上无回归。
+
+----- §5 Web 控制面（Browser Use 黑盒，1.1.49~dev3）----------------------------------  · 登录 https://192.168.155.129/api/v1/ui/（admin / 一次性口令）成功；主导航 21 条路由在位；
+    顶栏主机名/`admin（super-user）`/实时通道「已连接」；总览页组件版本 **1.1.49~dev3**。
+  · **告警卡实测**（决策 #191/#192 的新码在界面上真的显示）：制造一条 `COMMIT_VRF_DELETE_DEFERRED`
+    后刷新总览页，告警卡出现
+        [warning] COMMIT_VRF_DELETE_DEFERRED
+        L3 交换机 vs-nat2 的表在数据面仍存在（NAT 用过该表后 VPP 不释放引用，只有重启数据面才会
+        移除）：配置已删除，执行 request vpp restart 后自动清理；在此之前该表仍留在数据面
+        vs-nat2 · 2026-09-29 06:09:05 UTC
+    与独立事实源对照：同刻 CLI `show alarms active` 同源同值；`vppctl show ip fib summary` 里
+    vs-nat2 的表确实还在（带 nat 引用）。截图 `docs/images/round87-web-console-alarm-overview.png`。
+  · 提交输出里的**预测式警告**（引擎侧新增文案）走的是同一个 `warnings` 字段：CLI 实测输出见 §2，
+    控制台配置页对该字段的渲染路径为 `internal/api/ui/app.js:cfgCommit()`（`提示：<warnings>`），
+    即同一响应字段，界面无需改动。
+  · 本轮未新增/改动任何 UI 组件（只新增告警码与警告文案），故未做全量页面巡检。
+
+----- §6 make integration（真机）与终态环境事实 ---------------------------------------
+  ⚠️ **§6 补充（由本轮实跑结果回写）**：
+  - 首跑（修复版）出现 3 例失败：`TestE2EFlow`、`TestIPv6AddressAndStaticRoutes`、
+    `TestMainChainVMRealVPPAndLibvirt`，都是 `commit 校验失败，共 1 条`。
+    **归因**：在**未改动的 1.1.48 源码树**（`/root/src`）上跑同三条用例，**同样三条同样失败**
+    ⇒ 与本轮改动无关，是套件自身陈旧。
+  - 根因（R87-2，工具/夹具问题，与产品缺陷分开记）：这三条用例的基线配置里**没有 super-user**，
+    而决策 #152 给「整文档提交」加了自锁兜底（`model.CheckSuperUserPresent`：配置里至少要留一个
+    super-user）——守卫是**对的**（产品行为），用例是 #152 之前写的、之后再没跑过这套集成测试。
+    连带影响：用例的**收尾提交**（清对象）也被拒 ⇒ 留下的 VRF 表在后续用例里被本轮的残留对账
+    （`VRF_TABLE_LEFTOVER`）如实报出，`TestE2EFlow` 的「恢复收敛应零未收敛项」因此断言失败
+    （级联，不是产品回归）。
+  - 修（只改测试夹具）：`test/integration/e2e_test.go` 增 `withSuperUser()`（配置里已有 super-user
+    则原样返回），`harness.commit()` 与 `m4_main_chain_test.go` 的局部 commit 闭包各补一次——
+    与真机现实一致（committed 配置总有首启建的 admin）。
+  - 复跑（修复版 + 夹具修复，VPP 重启后干净环境）：结果见本文件末尾「§6 终稿」——
+    该行由本轮实跑结束后回写，写之前不预设结论。
+  终态环境（供下一轮接手）：
+  - nfvis **1.1.49~dev3** active（修复版实装；`/usr/bin/nfvisd -version` = 1.1.49~dev3）
+  - 配置库 rev 258+（本轮走查对象已清：vs-keep/vs-in/vs-nat2/vs-lock/NAT 规则与池/vm-r87 全删）
+  - 数据面：ens192/ens224 交 DPDK、VPP 运行；`show ip table` 只剩默认表 0；
+    `show alarms active` 空
+  - 源码树 `/root/src-r87`（本轮工作树的 git archive；构建 dev1~dev3 用
+    `SOURCE_DATE_EPOCH=1790609977`）；`/root/src` 仍是 round86 的 1.1.48 树
+  - ⚠️ 套件复跑前需清上轮对象（本轮实测：不清场时 lifecycle 只跑出 3/0/6，清场后 21/0/3）
+
+----- §7 本轮登记未修 / 已知限制 ------------------------------------------------------
+  - `COMMIT_COMPENSATION_FAILED` 的**通用**消解路径只有两条：同一对象的计划操作下次成功执行；
+    或该对象是 VRF 表类残渣且网络侧确认表已清理（§3 的路径）。其它对象类型的残渣（例如某个
+    NAT 特性没被恢复）在**不动配置**的前提下不会被自动消解——告警文案已写明复原方式
+    （重试同一提交 / 先 request vpp restart 再提交）。V1 的告警表本身是进程内的，
+    nfvisd 重启会丢掉历史；**表类残渣**不受此限（§2 的跨进程复核）。
+  - `VRF_TABLE_LEFTOVER` 的判据是「VPP 里的 IP 表 ∉ 配置声明集」，因此**手工 `vppctl` 建的表**
+    同样会报（文案里已写明这一可能）——这是有意的：配置与数据面不一致就该有人看见。
+  - 策略上仍不自动重启数据面：产品只把「需要重启」这件事说清楚（提交警告 + 告警 + 手册 §8.8），
+    重启仍由操作者决定（`request vpp restart` 是一次明确的数据面中断）。

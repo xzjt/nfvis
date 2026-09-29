@@ -1011,12 +1011,28 @@ nfvis# commit
 >   `nat44-ei-in2out-slowpath  out of ports`，`show nat44 sessions` 为 0）——已登记待修，
 >   需要独立外部地址池时请先用 `static` 1:1 发布或等修复。
 >
-> ⚠️ **NAT 用过的表，其所属交换机删除前要先重启数据面**：NAT44 一旦把某张表当作 inside/outside，
-> 就在该表上留一个引用锁（`vppctl show ip fib summary` 里可见 `locks:[nat44-ei-hi:…]`），
-> **删 NAT 规则、关插件都不释放它**——于是 `delete virtual-switches <那台 L3 交换机>` 会报
-> 「IP 表删除后仍存在于 VPP（未收敛）」，怎么重试都不成功（报错文案会带这句指引）。
-> 处置：`request vpp restart` 之后重试删除（重启按 committed 配置重建，代价是一次数据面中断）。
-> 也因此，**「改 NAT 出接口 + 删旧的 L3 交换机」不要放在同一次提交里**——拆成两次、中间重启数据面。
+> ⚠️ **NAT 用过的表，其所属交换机删除会「延后到数据面重启」才真正生效**：NAT44 一旦把某张表
+> 当作 inside/outside，就在该表上留一个引用锁（`vppctl show ip fib summary` 里可见
+> `locks:[nat44-ei-hi:…]`），**删 NAT 规则、关插件都不释放它**，只有重启数据面才干净。
+> 自 v1.1.49 起产品按「延后收敛」处理（与「已声明的 DPDK 口要等重启才进数据面」同一套口径）：
+>
+> ```bash
+> nfvis# configure
+> nfvis(config)# set nat rules 10 … action interface ens224          # 改 NAT 出接口
+> nfvis(config)# delete virtual-switches vs-old                      # 同一次提交里删旧交换机
+> nfvis(config)# commit
+> commit 成功 (revision 253)
+> 警告: L3 交换机 vs-old 的表被 NAT 使用过：VPP 不释放该引用，表要到 request vpp restart 后
+>       才从数据面移除（在此之前该表仍留在数据面，已记告警）
+> ```
+>
+> 此时配置侧已删除，**数据面里那张表还在**——这件事在提交输出、`show alarms active`
+> （`COMMIT_VRF_DELETE_DEFERRED`）与 Web 总览页都看得到；执行 `request vpp restart` 后表随
+> 重启消失，告警自动消解（`show alarms all` 留 resolved 记录）。若你不重启数据面，残留表也会以
+> `VRF_TABLE_LEFTOVER` 告警长期可见（**重启 nfvisd 之后依然可见**：它是按「配置声明集 ⇄
+> VPP 实况」对账出来的事实，不依赖进程内记忆），且它不被任何配置引用、不影响转发。
+> 反之，**以前那种「先拆成两次提交、中间重启一次」的做法现在也不再必要**——一次提交即可，
+> 重启留给需要重启的时候（例如顺手做别的变更）。
 >
 > **内网侧可以是 VNF 自己的网口**：把该 vNIC 声明为 L3 地址接口即可让 guest 的网关落在它自己的口上
 > （不这么写时 guest 会因为「网关地址不在它那一侧、VPP 不代答 ARP」而 100% `Destination Host Unreachable`）：
@@ -1323,6 +1339,14 @@ nfvis$ request alarms clear all
 > **「已停止」不等于「异常退出」**：容器被主动 `request container-functions <名> stop` 之后是
 > **已停止**（`docker stop` 的 137/143 退出码属正常结果），**不会**产生告警；只有 OOM 被杀
 > （Docker `OOMKilled`）或其它非零退出码才报 `CONTAINER_EXITED` critical。
+>
+> **提交类告警（提交期残渣 / 删表延后）**——都带「下一步怎么做」，也会自己消解：
+>
+> | 码 | 级别 | 含义与处置 |
+> |---|---|---|
+> | `COMMIT_COMPENSATION_FAILED` | error | 提交失败后的**补偿没做完**：配置已回滚，数据面该对象可能残留中间状态（如多出来的表、没被恢复的地址）。处置：重新提交同一变更，或先 `request vpp restart` 再提交——同一对象的操作下次成功后自动消解 |
+> | `COMMIT_VRF_DELETE_DEFERRED` | warning | 被删的 L3 交换机的 IP 表**仍在数据面**（NAT 用过该表，VPP 不释放引用）。配置侧已生效；`request vpp restart` 后表消失、告警自动消解 |
+> | `VRF_TABLE_LEFTOVER` | warning | 数据面存在**配置未声明**的 IP 表（上两类处置留下的残渣）。它不被任何配置引用、不影响转发；`request vpp restart` 后自动清理并消警。**跨 nfvisd 重启仍可见**（按配置声明集与 VPP 实况对账，不靠进程内记忆）|
 
 ### 10.7 备份 / 恢复 / 恢复出厂
 
