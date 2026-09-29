@@ -4,6 +4,7 @@ package network
 
 import (
 	"fmt"
+	"sort"
 
 	"go.fd.io/govpp/api"
 	"go.fd.io/govpp/binapi/fib_types"
@@ -295,4 +296,31 @@ func (g *govppL3Client) BviSetBD(swIfIndex, bdID uint32) error {
 		return fmt.Errorf("sw_interface_set_l2_bridge(BVI %d, bd=%d) retval=%d", swIfIndex, bdID, reply.Retval)
 	}
 	return nil
+}
+
+// IPTables 列出 VPP 里现有的 IP 表（v4/v6 合并去重，升序）。
+//
+// 与 IPTableExists 同一次 dump 的能力，只是这里要全集：删表延后/补偿残渣留下的空表只有靠
+// 「配置声明集 ⇄ VPP 实况」对账才看得见（决策 #192，见 L3Provider.LeftoverTables）。
+// 默认表 0 也在返回里——声明集同样含它，不会被当成残留。
+func (g *govppL3Client) IPTables() ([]uint32, error) {
+	reqCtx := g.ch.SendMultiRequest(&ip.IPTableDump{})
+	seen := map[uint32]bool{}
+	for {
+		d := &ip.IPTableDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return nil, fmt.Errorf("列出 IP 表: %w", err)
+		}
+		if stop {
+			break
+		}
+		seen[d.Table.TableID] = true
+	}
+	out := make([]uint32, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
 }

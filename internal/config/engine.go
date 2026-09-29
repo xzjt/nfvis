@@ -474,6 +474,14 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 	if !configEq(committed.ResourcePools, newCfg.ResourcePools) {
 		res.Warnings = append(res.Warnings, "警告: resource-pools 变更需 reboot 生效")
 	}
+	// 删掉被 NAT 用过的 L3 交换机：VPP 在该表上留 `nat44-ei-hi` 引用，只有数据面重启才释放
+	// （round86 真机 R86-4/R86-10 实证）。提交本身按「延后收敛」口径成功（决策 #192），但
+	// **表不会随本次提交从数据面消失**——必须在提交输出里说清，否则就是假成功；残渣另进告警。
+	for _, name := range deletedNatRefVRFs(committed, newCfg) {
+		res.Warnings = append(res.Warnings, fmt.Sprintf(
+			"警告: L3 交换机 %s 的表被 NAT 使用过：VPP 不释放该引用，表要到 request vpp restart "+
+				"后才从数据面移除（在此之前该表仍留在数据面，已记告警）", name))
+	}
 	res.Warnings = append(res.Warnings, e.numaWarnings(committed, newCfg)...)
 
 	// FR-CFG-011⑤：镜像检查需要 committed 之后的候选配置
@@ -833,6 +841,45 @@ func (e *Engine) checkImages(cfg *model.Config) []model.ValidateError {
 }
 
 // numaWarnings FR-CFG-011⑩：vNIC 物理 NIC 与 VM 内存 NUMA 不一致时给性能警告。
+// deletedNatRefVRFs 本次提交删掉的、**旧配置里被 NAT 用作转发域**的 L3 交换机名（按旧声明序）。
+//
+// NAT 只作用于 L3 交换机（规格书 §4.3），其转发域有两处来源（决策 #52）：规则的
+// virtual-switch（inside；地址池也落在该表）与出接口所属的 Vrf 条目（outside）。这两张表在
+// VPP 里都会带 `nat44-ei-hi` 引用，而该引用**只有数据面重启才释放**——删表要到
+// request vpp restart 后才真正生效（round86 真机 R86-4/R86-10，决策 #192）。
+// 提交因此把这些交换机列进提示：提交成功不等于表已经从数据面消失。
+func deletedNatRefVRFs(old, new model.Config) []string {
+	if len(old.Vrfs) == 0 || old.Nat == nil || len(old.Nat.Rules) == 0 {
+		return nil
+	}
+	kept := make(map[string]bool, len(new.Vrfs))
+	for _, v := range new.Vrfs {
+		kept[v.Name] = true
+	}
+	owner := make(map[string]string, len(old.Vrfs))
+	for _, v := range old.Vrfs {
+		for _, li := range v.L3Interfaces {
+			owner[li.Interface] = v.Name
+		}
+	}
+	ref := make(map[string]bool, len(old.Nat.Rules))
+	for _, r := range old.Nat.Rules {
+		if r.VirtualSwitch != "" {
+			ref[r.VirtualSwitch] = true
+		}
+		if name, ok := owner[r.Action.Interface]; ok {
+			ref[name] = true
+		}
+	}
+	var out []string
+	for _, v := range old.Vrfs {
+		if ref[v.Name] && !kept[v.Name] {
+			out = append(out, v.Name)
+		}
+	}
+	return out
+}
+
 func (e *Engine) numaWarnings(old, new model.Config) []string {
 	if e.topology == nil {
 		return nil

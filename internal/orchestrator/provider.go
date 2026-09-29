@@ -35,6 +35,19 @@ var ErrIfaceUnavailable = errors.New("接口在 VPP 中不存在")
 // network）；network 包以别名复用同一实例，各 provider 原有判定不受影响。
 var ErrL2Unavailable = errors.New("VPP 未连接，L2 客户端不可用")
 
+// ErrVrfNotRemoved 删表后读回发现表仍在 VPP 里（按「未收敛」上报）。
+//
+// 触发条件是 VPP 在表仍被占用时对 ip_table_add_del(del) **返回 0 却不真删**——占用者可能是
+// 接口（删表前会先解绑，正常路径不会留下），更常见的是**数据面插件的 IP_TABLE_LOCK**：
+// NAT44 一旦把某张表当作 inside/outside，就永久持有一个 nat44-ei-hi 引用，删规则、关插件
+// 乃至手工 vppctl 关插件都不释放，只有重启 VPP 才回到干净状态（round86 真机 R86-4 实证）。
+//
+// 与 ErrIfaceUnavailable/ErrL2Unavailable 同一理由定义在本包（依赖方向不允许 orchestrator
+// 反向 import network）；network 包以别名复用同一实例，各 provider 原有判定不受影响。
+// 提交编排据此把「删表延后」当作非致命处置（决策 #192）：配置侧照常删除，数据面清理由
+// 数据面重启后的恢复收敛完成，残渣进告警留痕。
+var ErrVrfNotRemoved = errors.New("VRF 对应的 IP 表删除后仍存在于 VPP（未收敛）")
+
 // NetworkProvider VPP 侧编排接口。L2 虚拟交换机 → bridge domain，
 // L3 虚拟交换机 → VRF（规格书附录 B 映射）。实现需声明是否并发安全。
 type NetworkProvider interface {

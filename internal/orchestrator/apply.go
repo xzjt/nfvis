@@ -47,6 +47,19 @@ func WithWarn(warn func(string)) ApplierOption {
 	}
 }
 
+// WithCommitAlarms 注入提交期残渣/延后处置的告警落点（缺省丢弃：残渣仅进提交输出与日志）。
+//
+// 上报两类（见 alarm.go 的 CommitCompensationFailed / CommitVrfDeleteDeferred）：
+// 补偿未完成留下的残渣（事后必须可见，否则数据面已与配置不同却无人知道）与
+// 「表的删除延后到数据面重启」这类非致命处置（提交成功但尚未完全收敛）。
+func WithCommitAlarms(sink CommitAlarmSink) ApplierOption {
+	return func(a *orchApplier) {
+		if sink != nil {
+			a.alarms = sink
+		}
+	}
+}
+
 // NewApplier 组合三类 Provider 构造编排器。资源池（内核 cpuset/大页）由 M3
 // 内核编排接入后追加为第一阶段；M1 仅编排 网络→计算→容器。
 func NewApplier(net NetworkProvider, comp ComputeProvider, cont ContainerProvider, opts ...ApplierOption) Applier {
@@ -64,6 +77,8 @@ type orchApplier struct {
 
 	// warn 告警回调（延后收敛等非致命情形的可见化）。
 	warn func(string)
+	// alarms 提交期残渣/延后处置的落点（可空）。
+	alarms CommitAlarmSink
 
 	// vhostDir VNF vhost-user socket 目录（compute 与 network 必须一致，缺省 /run/nfvis/vhost）。
 	vhostDir string
@@ -74,6 +89,21 @@ type orchApplier struct {
 func (a *orchApplier) warnf(format string, args ...any) {
 	if a.warn != nil {
 		a.warn(fmt.Sprintf(format, args...))
+	}
+}
+
+// raiseCommit 记一条提交期告警（无落点时只写日志：残渣至少要出现在守护进程日志里）。
+func (a *orchApplier) raiseCommit(severity, code, source, message string) {
+	a.warnf("%s", message)
+	if a.alarms != nil {
+		a.alarms.Raise(CommitScope, severity, code, message, source)
+	}
+}
+
+// resolveCommit 消一条提交期告警（同一对象的计划操作重新成功执行 = 该对象已重新收敛）。
+func (a *orchApplier) resolveCommit(code, source string) {
+	if a.alarms != nil {
+		a.alarms.Resolve(CommitScope, code, source)
 	}
 }
 
@@ -134,7 +164,37 @@ func (a *orchApplier) ifaceApply(iface model.InterfaceConfig, dpdkManaged bool) 
 	}
 }
 
-// SetVhostDir 设置 vhost-user socket 目录（须与 compute.Config.VhostDir 一致）。
+// deleteVRF 删 L3 交换机，含「删表延后」口径（决策 #192）。
+//
+// NAT44 用过的表在 VPP 里带 `nat44-ei-hi` 引用（`vppctl show ip fib summary` 可见），
+// 该引用**只有数据面重启才释放**：删 NAT 规则、关插件都不行，于是 `ip_table_add_del(del)`
+// 返回 0 却删不掉表（round86 真机 R86-4 实证）。此前这会让「改 NAT 出接口 + 删旧 L3 交换机」
+// 这类**同一提交内**的组合必然整体失败并回滚（R86-10）：配置与数据面都停在中间态，
+// 操作者只能自己拆成两次提交并在中间 request vpp restart。
+//
+// 现在按产品既有的「延后收敛」口径处理（与 DPDK 端口的 #100/#186 同一套语义）：
+// 配置侧照常删除（本轮提交成功），数据面那把**空表**的清理由数据面重启后的恢复收敛完成
+// （VPP 重启即无此表；恢复收敛不再声明它，网络侧另有待清理登记兜底），并通过告警留痕——
+// 「提交成功但表还在」这件事必须事后查得到，否则就是假成功。
+//
+// 只延后 `ErrVrfNotRemoved`（读回确认表仍在）：解绑失败、API 报错等真错误照旧冒泡，
+// 由补偿按旧配置复原该 VRF。
+func (a *orchApplier) deleteVRF(ctx context.Context, name string) error {
+	err := a.net.DeleteVRF(ctx, name)
+	if err == nil {
+		// 该交换机本轮真的删干净了：清掉它历史上的「删除延后」告警。
+		a.resolveCommit(CommitVrfDeleteDeferred, name)
+		return nil
+	}
+	if !errors.Is(err, ErrVrfNotRemoved) {
+		return err
+	}
+	a.raiseCommit(SeverityWarning, CommitVrfDeleteDeferred, name, fmt.Sprintf(
+		"L3 交换机 %s 的表在数据面仍存在（NAT 用过该表后 VPP 不释放引用，只有重启数据面才会移除）："+
+			"配置已删除，执行 request vpp restart 后自动清理；在此之前该表仍留在数据面", name))
+	return nil
+}
+
 // 等价于 WithVhostDir 选项，供装配期后置调整。
 func (a *orchApplier) SetVhostDir(dir string) {
 	if dir != "" {
@@ -147,6 +207,13 @@ type op struct {
 	desc string
 	run  func(ctx context.Context) error
 	undo func(ctx context.Context) error
+	// compensateOnFail 该操作**失败时也执行 undo**：复合操作（一次调用内含多步底座动作）
+	// 失败时可能已部分生效，undo 是把它复原的唯一途径。
+	// 现状只有 VRF 两个操作置位：DeleteVRF 的顺序是「清地址 → 解绑接口回默认表 → 删表 → 读回」，
+	// 任何一步失败都会把该交换机的接口留在默认表、地址已清空，而配置此时已回滚为「仍然声明它」
+	// ——不复原就是「配置与数据面不一致且无人知道」（真机 round87 实测：删表读回失败后
+	// ens192 留在默认表且丢了地址）。
+	compensateOnFail bool
 }
 
 func (a *orchApplier) Apply(ctx context.Context, old, new model.Config) error {
@@ -159,16 +226,38 @@ func (a *orchApplier) Apply(ctx context.Context, old, new model.Config) error {
 		if err := o.run(ctx); err != nil {
 			// 逆序补偿已执行操作；补偿失败仅追加说明，不掩盖原始错误
 			errs := []string{fmt.Sprintf("下发失败 %s: %v", o.desc, err)}
+			// 失败操作本身可能已部分生效（复合操作）：先按旧配置复原，使回滚真正回到变更前状态。
+			if o.compensateOnFail {
+				if cerr := o.undo(ctx); cerr != nil {
+					errs = append(errs, fmt.Sprintf("补偿失败 %s: %v", o.desc, cerr))
+					a.residueAlarm(o.desc, cerr)
+				}
+			}
 			for i := len(executed) - 1; i >= 0; i-- {
 				if cerr := executed[i].undo(ctx); cerr != nil {
 					errs = append(errs, fmt.Sprintf("补偿失败 %s: %v", executed[i].desc, cerr))
+					a.residueAlarm(executed[i].desc, cerr)
 				}
 			}
 			return fmt.Errorf("%s", strings.Join(errs, "; "))
 		}
+		// 该对象本轮重新收敛成功：清掉它历史上的残渣告警（重试提交即为复原方式）。
+		a.resolveCommit(CommitCompensationFailed, o.desc)
 		executed = append(executed, o)
 	}
 	return nil
+}
+
+// residueAlarm 补偿未完成 → 告警（FR-OPS-014 的可追溯口径）。
+//
+// 残渣此前只出现在当次提交的输出里：操作者当时看得到，事后 `show alarms`、Web 总览页、
+// 诊断包里都查不到，而数据面此时已经与配置不同（round86 登记 R86-9）。告警里带上
+// 「下一步能做什么」，因为这类残渣的复原路径都是确定的（重试提交 / 重启数据面后再提交）。
+func (a *orchApplier) residueAlarm(desc string, err error) {
+	a.raiseCommit(SeverityError, CommitCompensationFailed, desc, fmt.Sprintf(
+		"提交失败后的补偿未完成：%s 回滚失败（%v）。配置已回滚到上一版本，数据面该对象可能残留"+
+			"中间状态（多出来的对象，或没有被恢复的地址/归属）；重新提交同一变更、或先执行 "+
+			"request vpp restart 再提交即可复原", desc, err))
 }
 
 // lldpEqual 判断 LLDP 配置是否变化（Protocols 指针比较已由 configEqualPtr 覆盖，此处冗余防御）。
@@ -266,13 +355,16 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	}
 	for _, vrf := range new.Vrfs {
 		if o, ok := oldVRFs[vrf.Name]; !ok || !configEqual(o, vrf) {
-			ops = append(ops, applyOp(
-				fmt.Sprintf("vrf[%s]", vrf.Name),
+			op := applyOp(
+				VrfOpDesc(vrf.Name),
 				func(ctx context.Context) error { return a.net.ApplyVRF(ctx, vrf) },
 				vrf.Name, ok,
 				func(ctx context.Context) error { return a.net.ApplyVRF(ctx, o) },
 				func(ctx context.Context) error { return a.net.DeleteVRF(ctx, vrf.Name) },
-			))
+			)
+			// 复合操作（建表 → 配地址 → 置表 → 下路由）：失败时可能已部分生效，需按旧配置复原。
+			op.compensateOnFail = true
+			ops = append(ops, op)
 		}
 	}
 	if !configEqualPtr(old.Nat, new.Nat) {
@@ -452,9 +544,12 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 		if _, ok := newVRFNames(new)[name]; !ok {
 			vrf := oldVRFs[name]
 			ops = append(ops, op{
-				desc: fmt.Sprintf("del-vrf[%s]", name),
-				run:  func(ctx context.Context) error { return a.net.DeleteVRF(ctx, name) },
+				desc: VrfDeleteOpDesc(name),
+				run:  func(ctx context.Context) error { return a.deleteVRF(ctx, name) },
 				undo: func(ctx context.Context) error { return a.net.ApplyVRF(ctx, vrf) },
+				// 删表是复合操作（清地址 → 解绑接口 → 删表 → 读回）：失败时可能已把接口留在
+				// 默认表、地址已清空，需按旧配置复原（见 op.compensateOnFail）。
+				compensateOnFail: true,
 			})
 		}
 	}

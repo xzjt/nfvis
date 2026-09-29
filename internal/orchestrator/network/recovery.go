@@ -169,6 +169,31 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 		}
 	}
 
+	// 删表延后项的复核（决策 #192）：删表时 VPP 报「读回仍存在」的交换机，在数据面重启后
+	// 其表已随重启消失（VPP 的 IP 表是运行态），这里确认并清登记 + 消警；配置又把该交换机
+	// 声明回来时同样清（表是合法存在）。单列一步：它不属于「按配置重放」。
+	_ = n.RetryDeferredVRFDeletes(ctx, cfg)
+
+	// 残留 IP 表对账（决策 #192）：VPP 里存在**配置未声明**的表 ⇒ 未收敛项 + 告警。
+	// 与进程内登记不同，这是随时可复查的事实，故跨 nfvisd 重启仍然可见（R86-9 的「事后不可见」）；
+	// 表随数据面重启消失后本项自然不再出现，Sync 自动消警。
+	if n.l3 != nil {
+		leftovers, lerr := n.l3.LeftoverTables(cfg)
+		if lerr != nil {
+			record("ip-tables", fmt.Errorf("对账数据面 IP 表: %w", lerr))
+		}
+		for _, id := range leftovers {
+			msg := fmt.Sprintf("数据面存在配置未声明的 IP 表 %d：多来自「删表延后」或提交补偿失败"+
+				"留下的残渣（不会被任何配置引用），执行 request vpp restart 后自动清理；"+
+				"若该表是手工 vppctl 创建的，请自行核对", id)
+			errs = append(errs, fmt.Errorf("ip-table/%d: %s", id, msg))
+			failures = append(failures, Alarm{
+				Severity: SeverityWarning, Code: AlarmTableLeftover,
+				Message: msg, Source: fmt.Sprintf("ip-table/%d", id),
+			})
+		}
+	}
+
 	if n.alarms != nil {
 		n.alarms.Sync(recoveryScope, failures)
 	}

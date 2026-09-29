@@ -39,6 +39,11 @@ const (
 	AlarmUnconverged = "RECOVERY_UNCONVERGED"
 	// AlarmIfaceMissing 配置引用的接口已不存在（不可收敛），严重级别 error。
 	AlarmIfaceMissing = "RECOVERY_IFACE_MISSING"
+	// AlarmTableLeftover 数据面存在**配置未声明**的 IP 表：删表延后（NAT 用过的表 VPP 不释放
+	// 引用）或提交补偿失败留下的残渣（决策 #192）。它不阻塞任何配置，但「配置与数据面不一致」
+	// 必须有人看得到——此前只出现在当次提交输出里，事后无从查证（round86 R86-9）。
+	// 残留随数据面重启消失（VPP 的 IP 表是运行态），恢复收敛据此自动消警。
+	AlarmTableLeftover = "VRF_TABLE_LEFTOVER"
 )
 
 // Alarm 一条告警（契约 components/schemas/Alarm）。

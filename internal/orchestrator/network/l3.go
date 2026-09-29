@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 // RouteEntry 一条 FIB 路由（运行态）。
@@ -36,6 +37,9 @@ type L3Client interface {
 	// IPTableExists 读回该协议下 tableID 是否存在（ip_table_dump）。删表校验的唯一判据：
 	// ip_table_add_del(del) 在表仍被接口占用时**返回 0 却不删**，返回码不足以判断是否真删掉了。
 	IPTableExists(tableID uint32, isIP6 bool) (bool, error)
+	// IPTables 列出 VPP 里现有的 IP 表（v4/v6 合并去重，升序）：供「配置未声明的表」
+	// 对账（残留发现，决策 #192）。查询失败必须上抛，不得按空集处理。
+	IPTables() ([]uint32, error)
 	SwInterfaceSetTable(swIfIndex uint32, isIPv6 bool, tableID uint32) error
 	SwInterfaceAddDelAddress(swIfIndex uint32, prefix string, add, delAll bool) error
 	IPRouteAddDel(tableID uint32, prefix, nextHop string, add bool) error
@@ -87,13 +91,20 @@ type L3Provider struct {
 	// 权威索引（vlan 子接口由 create_subif 返回，按名重查可能查到父口）、ForgetVnfIface/
 	// DeleteVRF 的摘除口径与 ifaces/ifaceTable 对齐。
 	ifaceIdx map[string]uint32
-	acl      *AclProvider // 可选：L3 接口/BVI 的 acl-in 绑定
+	// pendingDeletes 删除未收敛的 L3 交换机（tableID → VRF 名）：删表读回报「表仍存在」，
+	// 该表只能在数据面重启后消失。留档供后续复核（恢复收敛/周期巡检）：表真没了 → 清登记并消警；
+	// 配置又把它声明回来（合法存在）同样清登记。见 RetryPendingDeletes。
+	pendingDeletes map[uint32]string
+	acl            *AclProvider // 可选：L3 接口/BVI 的 acl-in 绑定
 }
 
 // SetACL 注入 ACL 编排（L3 接口与 BVI 网关的 acl-in 绑定）。
 func (p *L3Provider) SetACL(a *AclProvider) { p.acl = a }
 
 // reset 清空进程内登记表（恢复收敛前调用，避免陈旧 sw_if_index/表归属把重放带偏）。
+//
+// pendingDeletes **不**随 reset 清空：待清理项是「数据面已确实存在、配置里已没有」的残留，
+// 与按配置重放无关；清掉它就再也没人复核该表的去留（正是 round86 R86-9「残渣事后不可见」）。
 func (p *L3Provider) reset() {
 	p.mu.Lock()
 	p.ifaces = map[uint32][]uint32{}
@@ -111,14 +122,15 @@ func NewL3Provider(c L3Client) *L3Provider {
 	return &L3Provider{client: func() (L3Client, error) { return c, nil },
 		ifaces: map[uint32][]uint32{}, subifs: map[uint32][]uint32{}, vnfs: map[string]vnfAttach{},
 		bvis: map[string]uint32{}, ownTable: map[string]bool{}, ifaceTable: map[string]uint32{},
-		ifaceIdx: map[string]uint32{}}
+		ifaceIdx: map[string]uint32{}, pendingDeletes: map[uint32]string{}}
 }
 
 // NewL3ProviderFunc 以客户端工厂构造（连接可重连）。
 func NewL3ProviderFunc(f func() (L3Client, error)) *L3Provider {
 	return &L3Provider{client: f, ifaces: map[uint32][]uint32{}, subifs: map[uint32][]uint32{},
 		vnfs: map[string]vnfAttach{}, bvis: map[string]uint32{}, ownTable: map[string]bool{},
-		ifaceTable: map[string]uint32{}, ifaceIdx: map[string]uint32{}}
+		ifaceTable: map[string]uint32{}, ifaceIdx: map[string]uint32{},
+		pendingDeletes: map[uint32]string{}}
 }
 
 // ApplyVRF 把 VRF（L3 交换机）收敛到 VPP：建 v4/v6 table、配置 L3 接口地址、
@@ -188,6 +200,10 @@ func (p *L3Provider) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 	}
 
 	p.mu.Lock()
+	// 移入本表的接口必须从**其它**表的登记里摘掉：登记是「转发域成员」的唯一来源，
+	// 接口换表（改归属到另一台交换机）后旧表仍留着它，会让旧表被删时的解绑把它踢回默认表
+	// ——新配置刚把它置入新表，转眼又被旧表的清理撤销（数据面与配置不一致，且全程无报错）。
+	p.reassignLocked(tableID, idxs)
 	p.ifaces[tableID], p.subifs[tableID] = idxs, subs
 	for name, idx := range idxOf {
 		p.ifaceTable[name] = tableID
@@ -213,6 +229,38 @@ func containsIdx(idxs []uint32, idx uint32) bool {
 		}
 	}
 	return false
+}
+
+// reassignLocked 把 idxs 从**除 keep 之外**所有表的成员登记里摘掉（调用方须持 p.mu）。
+//
+// 一个接口在同一时刻只能属于一张表（VPP 的 sw_interface_set_table 就是这么做的），
+// 而登记是删除路径（DeleteVRF 清地址/解绑）与 NAT inside 解析的唯一依据：不摘旧登记，
+// 接口换表之后旧表被删时会被"顺手"解绑回默认表——新配置的归属被无声撤销。
+func (p *L3Provider) reassignLocked(keep uint32, idxs []uint32) {
+	moved := make(map[uint32]bool, len(idxs))
+	for _, idx := range idxs {
+		moved[idx] = true
+	}
+	prune := func(m map[uint32][]uint32) {
+		for t, list := range m {
+			if t == keep || len(list) == 0 {
+				continue
+			}
+			out := list[:0]
+			for _, idx := range list {
+				if !moved[idx] {
+					out = append(out, idx)
+				}
+			}
+			if len(out) == 0 {
+				delete(m, t)
+				continue
+			}
+			m[t] = out
+		}
+	}
+	prune(p.ifaces)
+	prune(p.subifs)
 }
 
 // AttachFailure 一条「按配置重建登记」的失败项：Source 与恢复收敛其它步骤同风格
@@ -263,6 +311,7 @@ func (p *L3Provider) RegisterL3Interfaces(ctx context.Context, vrf model.Vrf) []
 			continue
 		}
 		p.mu.Lock()
+		p.reassignLocked(tableID, []uint32{idx})
 		p.ifaceTable[li.Interface] = tableID
 		p.ifaceIdx[li.Interface] = idx
 		if !containsIdx(p.ifaces[tableID], idx) {
@@ -359,17 +408,24 @@ func (p *L3Provider) TableOfIface(ifname string) (uint32, bool) {
 // 触发条件是 VPP 在表仍被占用时对 ip_table_add_del(del) **返回 0 却不真删**
 // （`show ip table` 里该项继续带 locks:[…]，直到 VPP 重启才消失）。占用者有两类：
 // 接口（本实现已在删表前解绑）与**数据面插件的 IP_TABLE_LOCK**（见 vrfDeleteStuckHint）。
-var ErrVrfNotRemoved = errors.New("VRF 对应的 IP 表删除后仍存在于 VPP（未收敛）")
+//
+// 与 orchestrator.ErrVrfNotRemoved **是同一个 error 值**（决策 #192）：提交编排要识别该状态
+// 以决定「删表延后而非整体回滚」，而依赖方向不允许那里 import 本包；本包保留该名字，
+// 使既有调用方（含测试与 API 层）的 errors.Is 判定不变。
+var ErrVrfNotRemoved = orchestrator.ErrVrfNotRemoved
 
-// vrfDeleteStuckHint 读回失败时的可照做提示（决策 #187）。
+// vrfDeleteStuckHint 读回失败时的可照做提示（决策 #187，round87 按新口径改文案）。
 //
 // 真机实测（round86，可稳定复现）：**NAT44 一旦把某张表当作 inside/outside，就会在该表上留一个
 // IP_TABLE_LOCK**（`vppctl show ip fib summary` 里可见 `locks:[nat44-ei-hi:1]`）。此后删 NAT 规则、
 // 关插件（nat44_ei_plugin_enable_disable(false)）、乃至**手工 vppctl 再关一次**，该锁都**不释放**——
 // 只有重启 VPP 才回到干净状态（重启按 committed 配置重建，代价是一次数据面中断）。
-// 没有这句提示，操作者会反复重试一个永远不会成功的提交（round86 的现场就是这样）。
+//
+// 自决策 #192 起，提交编排把这一情形当作**非致命**：配置侧照常删除，残渣进告警，
+// 数据面清理由重启后的恢复收敛完成（本包的 pendingDeletes 兜底）。本提示因此不再说
+// 「重试删除」（表已在配置里删掉了，没有什么可重试的），只说清释放条件与清理时机。
 const vrfDeleteStuckHint = "（表可能仍被数据面插件引用：NAT44 用过这张表后 VPP 不释放该引用，" +
-	"执行 request vpp restart 后重试删除）"
+	"执行 request vpp restart 后自动清理）"
 
 // DeleteVRF 删除 VRF：清接口地址 → 解绑接口回默认表 → 删 v4/v6 table（路由随表删除）→ 读回核对。
 //
@@ -421,11 +477,132 @@ func (p *L3Provider) DeleteVRF(ctx context.Context, name string) error {
 			return fmt.Errorf("核对 IP table %d（%s）是否已删除: %w", tableID, ipVerName(ip6), err)
 		}
 		if exists {
+			// 留档：该表只能等数据面重启才消失，后续复核（恢复收敛/周期巡检）负责清登记与消警。
+			p.markPendingDelete(tableID, name)
 			return fmt.Errorf("%w: IP table %d（%s）在删除后仍存在于 VPP，%s 的数据面未收敛%s",
 				ErrVrfNotRemoved, tableID, ipVerName(ip6), name, vrfDeleteStuckHint)
 		}
 	}
 	return nil
+}
+
+// markPendingDelete 登记一台「删表未收敛」的交换机（幂等）。
+func (p *L3Provider) markPendingDelete(tableID uint32, name string) {
+	p.mu.Lock()
+	if p.pendingDeletes == nil {
+		p.pendingDeletes = map[uint32]string{}
+	}
+	p.pendingDeletes[tableID] = name
+	p.mu.Unlock()
+}
+
+// RetryPendingDeletes 复核「删表未收敛」的交换机，返回**已确认干净**（可消警）的交换机名。
+//
+// declared 报告某个 VRF 名是否仍被 committed 配置声明：声明回来了说明那张表是合法存在
+// （例如操作者又把交换机加了回来），残渣顾虑随之消失，直接清除登记。
+//
+// 未声明的一般情形按**复核**处理：表已不在 VPP（数据面重启后的正常结果）→ 清除登记；
+// 表仍在 → 再试一次删除（删不掉的仍是同一锁，保持登记、不重复告警文案）。
+// 本方法不产生告警/日志噪声：真正的可见化由提交期告警（COMMIT_VRF_DELETE_DEFERRED）
+// 与恢复收敛的未收敛清单承担。
+func (p *L3Provider) RetryPendingDeletes(ctx context.Context, declared func(string) bool) []string {
+	p.mu.Lock()
+	pending := make(map[uint32]string, len(p.pendingDeletes))
+	for t, n := range p.pendingDeletes {
+		pending[t] = n
+	}
+	p.mu.Unlock()
+	if len(pending) == 0 {
+		return nil
+	}
+	c, err := p.client()
+	if err != nil {
+		return nil
+	}
+	defer c.Close()
+	var cleared []string
+	for tableID, name := range pending {
+		if declared != nil && declared(name) {
+			p.clearPending(tableID)
+			cleared = append(cleared, name)
+			continue
+		}
+		// 表已不在 VPP（数据面重启后的正常结果）即视为干净；仍在则再试一次删除——
+		// 删表前该表已由 DeleteVRF 解绑清空，这里只需「删 + 读回」。
+		if !p.tableExists(c, tableID) {
+			p.clearPending(tableID)
+			cleared = append(cleared, name)
+			continue
+		}
+		for _, ip6 := range []bool{false, true} {
+			_ = c.IPTableAddDel(tableID, ip6, false, name)
+		}
+		if !p.tableExists(c, tableID) {
+			p.clearPending(tableID)
+			cleared = append(cleared, name)
+		}
+	}
+	return cleared
+}
+
+// tableExists 读回 v4/v6 两张表是否还有一张存在；读不到按「存在」处理（不清登记、不消警）。
+func (p *L3Provider) tableExists(c L3Client, tableID uint32) bool {
+	for _, ip6 := range []bool{false, true} {
+		exists, err := c.IPTableExists(tableID, ip6)
+		if err != nil || exists {
+			return true
+		}
+	}
+	return false
+}
+
+// clearPending 摘除一台交换机的待清理登记。
+func (p *L3Provider) clearPending(tableID uint32) {
+	p.mu.Lock()
+	delete(p.pendingDeletes, tableID)
+	p.mu.Unlock()
+}
+
+// LeftoverTables 返回**配置未声明**却在 VPP 里存在的 IP 表（升序）。
+//
+// 用途：把「删表延后 / 补偿残渣」留下的空表变成一条可对账的事实——恢复收敛据此记未收敛项与
+// 告警（scope=recovery，随 Sync 自动消解），因此**跨 nfvisd 重启仍然可见**：进程内登记会丢，
+// 而「配置没声明这张表，它却在 VPP 里」是随时可复查的事实（round86 R86-9 的「事后不可见」
+// 正是指这类残渣只能靠进程内记忆）。
+//
+// 声明的表 = 默认表 0 ∪ 各 Vrf 条目（L3 交换机与显式网关 VRF）∪ 自建网关 VRF（vr-<交换机>）。
+// 查询失败上抛（把「问不出来」当「没有残留」是假绿）。
+func (p *L3Provider) LeftoverTables(cfg model.Config) ([]uint32, error) {
+	c, err := p.client()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	have, err := c.IPTables()
+	if err != nil {
+		return nil, err
+	}
+	declared := map[uint32]bool{0: true}
+	for _, v := range cfg.Vrfs {
+		declared[TableID(v.Name)] = true
+	}
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.Gateway == nil {
+			continue
+		}
+		name := vs.Gateway.Vrf
+		if name == "" {
+			name = GatewayVRFName(vs.Name)
+		}
+		declared[TableID(name)] = true
+	}
+	var out []uint32
+	for _, id := range have {
+		if !declared[id] {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 // unbindTableIfaces 把接口逐一改回默认表（table 0，v4/v6 都要），用于删表前解绑。
@@ -562,6 +739,8 @@ func (p *L3Provider) SetVnfTable(ctx context.Context, vrfName, ifname string) er
 	// 同一登记使 TableOfIface（NAT outside 转发域解析）与 DeleteVRF 的清理也覆盖 vNIC。
 	// ifaces 同样带上它：NAT inside 的解析来源之一是 vnfs，两处一致才不会出现
 	// 「登记在、集合里没有」的错觉（DeleteVRF 按 ifaces 清地址时对 vNIC 是空操作）。
+	// 换交换机（vNIC 改挂另一台 L3 交换机）时必须把旧表登记摘掉，见 reassignLocked。
+	p.reassignLocked(tableID, []uint32{idx})
 	p.ifaceTable[ifname] = tableID
 	p.ifaceIdx[ifname] = idx
 	if !containsIdx(p.ifaces[tableID], idx) {

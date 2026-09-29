@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 
@@ -158,6 +159,24 @@ func (f *fakeL3) IPTableExists(tableID uint32, isIP6 bool) (bool, error) {
 		return false, f.tableDumpErr
 	}
 	return f.tables[tableID], nil
+}
+
+// IPTables 列出全部表（含默认表 0）：供「配置未声明的表」对账（决策 #192）。
+func (f *fakeL3) IPTables() ([]uint32, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.tableDumpErr != nil {
+		return nil, f.tableDumpErr
+	}
+	out := []uint32{0}
+	for id := range f.tables {
+		if id != 0 {
+			out = append(out, id)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
 }
 
 // SwInterfaceTable 运行态查询（sw_interface_get_table）：v4/v6 分开跟踪，镜像 VPP 语义。
