@@ -115,3 +115,64 @@ func TestStripLegacyGrubParams(t *testing.T) {
 		t.Fatal("应保留 /etc/default/grub.nfvis-bak 备份")
 	}
 }
+
+// R88-1 回归：大页池 sysctl 片段按**默认尺寸**池的声明值生成。
+//
+// 真机 round88 现场（1.1.49，干净快照首装）：GRUB 片段声明 1G=1，但 VPP 包自带的
+// /etc/sysctl.d/80-vpp.conf（vm.nr_hugepages=1024，本意给 2M 池）落到默认尺寸（1G）池上，
+// 开机被撑到 nr=4 —— `show system kernel` 里「内核基线 1 / 运行实际 4」长期不一致。
+// 修法：按同一「默认尺寸 = 1G 当且仅当 1G>0」判据写 90 号 sysctl 落点钉回。
+func TestGenerateHugepageSysctlPinsDeclaredCount(t *testing.T) {
+	// 双池（默认尺寸 1G）：钉 1G 声明值
+	got := GenerateHugepageSysctl(KernelDesired{Hugepages1G: 4, Hugepages2M: 768})
+	if !strings.Contains(got, "vm.nr_hugepages = 4") {
+		t.Fatalf("双池应钉 1G 声明值 4：%q", got)
+	}
+	// 接管 vpp 包那条 conffile 时必须把它另一个生效键一起带上（决策 #201），
+	// 否则挪走文件就顺手丢了「root 组可访问大页」。
+	if !strings.Contains(got, "vm.hugetlb_shm_group = 0") {
+		t.Fatalf("应接管 vpp 的 vm.hugetlb_shm_group：%q", got)
+	}
+	if strings.Contains(got, "= 768") {
+		t.Fatalf("不得把 2M 池数写给默认尺寸池：%q", got)
+	}
+	// 单 2M 池（默认尺寸 2M）：钉 2M 声明值
+	got = GenerateHugepageSysctl(KernelDesired{Hugepages2M: 768})
+	if !strings.Contains(got, "vm.nr_hugepages = 768") {
+		t.Fatalf("单 2M 池应钉 2M 声明值：%q", got)
+	}
+	// 都不托管：不产出（调用方删文件）
+	if got := GenerateHugepageSysctl(KernelDesired{}); got != "" {
+		t.Fatalf("未托管大页时不应产出 sysctl 片段：%q", got)
+	}
+}
+
+// R88-1：Apply 落盘 sysctl 片段、Rollback 撤除；启动期按 cmdline 补写（首装路径）。
+func TestEnsureHugepageSysctlFromCmdline(t *testing.T) {
+	root := t.TempDir()
+	writeProc(t, root, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro default_hugepagesz=1G hugepagesz=1G hugepages=1 intel_iommu=on\n")
+
+	changed, err := EnsureHugepageSysctlFromCmdline(root)
+	if err != nil || !changed {
+		t.Fatalf("首次应写入（changed=%v err=%v）", changed, err)
+	}
+	b, err := os.ReadFile(root + hugepageSysctlRel)
+	if err != nil {
+		t.Fatalf("读取 sysctl 片段: %v", err)
+	}
+	if !strings.Contains(string(b), "vm.nr_hugepages = 1") {
+		t.Fatalf("应按 cmdline 声明钉 1：%q", b)
+	}
+	// 幂等：内容未变不再报告变更
+	if changed, err := EnsureHugepageSysctlFromCmdline(root); err != nil || changed {
+		t.Fatalf("重复调用不应再变更（changed=%v err=%v）", changed, err)
+	}
+	// cmdline 不再声明大页 → 撤除片段
+	writeProc(t, root, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro quiet\n")
+	if changed, err := EnsureHugepageSysctlFromCmdline(root); err != nil || !changed {
+		t.Fatalf("未托管时应撤除（changed=%v err=%v）", changed, err)
+	}
+	if _, err := os.Stat(root + hugepageSysctlRel); !os.IsNotExist(err) {
+		t.Fatalf("sysctl 片段应已删除: %v", err)
+	}
+}

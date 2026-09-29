@@ -57,12 +57,41 @@ type Memory struct {
 	Free  uint64 `json:"free"`
 }
 
+// RuntimeThread 单线程的运行态（向量率与主循环速率）。
+//
+// 数据来源：VPP stats segment 的 `/sys/vector_rate_per_worker` 与 `/sys/loops_per_worker`
+// （**组合计数**，按线程索引一条；索引 0 = 主线程，1..N = 工作线程），与 `vppctl show runtime`
+// 每线程汇总行是同一量（实测量级吻合）。
+type RuntimeThread struct {
+	ID         uint32  `json:"id"`
+	Core       uint32  `json:"core,omitempty"`
+	Name       string  `json:"name,omitempty"`
+	VectorRate float64 `json:"vector_rate"`
+	LoopsRate  float64 `json:"loops_rate"`
+}
+
+// RuntimeStats 数据面运行态（**线程级**；决策 #200）。
+//
+// 口径说明：VPP 26.06 的**按节点**明细（`show runtime` 主体那张 Calls/Vectors/Suspends/
+// Packet-Clocks 表）既不在 stats segment 里、也没有二进制 API（govpp 无 runtime binapi），
+// 产品不解析 vppctl 文本，故本结构只承载线程级运行态；Source 标注来源，
+// 不可用时 Reason 给原因（不静默省略）。
+type RuntimeStats struct {
+	Threads       []RuntimeThread `json:"threads"`
+	VectorRate    float64         `json:"vector_rate"`              // 整机向量率（/sys/vector_rate）
+	WorkerThreads float64         `json:"worker_threads,omitempty"` // 工作线程数（/sys/num_worker_threads）
+	UptimeSeconds float64         `json:"uptime_seconds,omitempty"` // 数据面运行时长（now - /sys/boottime）
+	Source        string          `json:"source,omitempty"`
+	Reason        string          `json:"reason,omitempty"`
+}
+
 // Runtime 运行态数据源。
 type Runtime interface {
 	Threads(ctx context.Context) ([]Thread, error)
 	InterfaceCounters(ctx context.Context, ifname string) (InterfaceCounters, bool)
 	Buffers(ctx context.Context) (Buffers, bool)
 	Memory(ctx context.Context) (Memory, bool)
+	RuntimeStats(ctx context.Context) (RuntimeStats, bool)
 }
 
 // State 运行态聚合器（Runtime 可为 nil，方法安全返回空）。
@@ -105,4 +134,12 @@ func (s *State) Memory(ctx context.Context) (Memory, bool) {
 		return Memory{}, false
 	}
 	return s.vpp.Memory(ctx)
+}
+
+// RuntimeStats 返回线程级运行态（不可用返回 ok=false）。
+func (s *State) RuntimeStats(ctx context.Context) (RuntimeStats, bool) {
+	if s == nil || s.vpp == nil {
+		return RuntimeStats{}, false
+	}
+	return s.vpp.RuntimeStats(ctx)
 }

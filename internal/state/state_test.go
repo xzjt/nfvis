@@ -22,6 +22,11 @@ func (f *fakeRuntime) Memory(context.Context) (Memory, bool) {
 	return Memory{Total: 100, Used: 40}, true
 }
 
+func (f *fakeRuntime) RuntimeStats(context.Context) (RuntimeStats, bool) {
+	return RuntimeStats{VectorRate: 12, WorkerThreads: 1,
+		Threads: []RuntimeThread{{ID: 1, VectorRate: 12, LoopsRate: 34}}}, true
+}
+
 func TestStateThreads(t *testing.T) {
 	s := New(&fakeRuntime{rows: []Thread{{ID: 0, Name: "vpp_main", Core: 4}, {ID: 1, Name: "vpp_wk_0", Type: "workers", Core: 5}}})
 	rows := s.Threads(context.Background())

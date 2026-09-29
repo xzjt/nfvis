@@ -267,3 +267,22 @@ func TestUIConsoleRoleGating(t *testing.T) {
 		}
 	}
 }
+
+// R88-5 守护：网络对象页 VRF 表的「路由数」列必须给**条数**，不能把路由对象数组直接
+// 塞进单元格（会渲染成 "[object Object],[object Object]"）。
+//
+// 真机 round88 现场（1.1.49）：vs-wan 有两条静态路由，该列显示 "[object Object],[object Object]"，
+// 而详情页同一数据用 .length 是正常的——列表与详情两处口径不一致。
+func TestNetworkObjectsVrfRouteCountRendersNumber(t *testing.T) {
+	app, err := os.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatalf("读取 ui/app.js: %v", err)
+	}
+	src := string(app)
+	if strings.Contains(src, "v.routes != null ? v.routes : undefined") {
+		t.Error("VRF 列表的「路由数」列仍在直接塞对象数组（会渲染成 [object Object]）：应取 v.routes.length")
+	}
+	if !strings.Contains(src, "v.routes != null ? v.routes.length : undefined") {
+		t.Error("找不到「路由数」取 length 的渲染（守护锚点变了，本用例要跟着改）")
+	}
+}

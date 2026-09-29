@@ -449,13 +449,23 @@ func (p *L3Provider) DeleteVRF(ctx context.Context, name string) error {
 	idxs, subs := p.ifaces[tableID], p.subifs[tableID]
 	p.mu.Unlock()
 	// 先清地址：VPP 拒绝把仍带地址的接口移到其它表（-114），与 ApplyVRF 同一前置。
+	// 接口已被删（如「同一提交里既删 VNF 又删引用其 vNIC 的 L3 交换机」，见 R88-6）时
+	// VPP 返回 Invalid sw_if_index(-2)：地址随接口一起消失，属**已达成**，不能因此
+	// 打断整次删除（否则用户连一次清干净都做不到）。提交编排的删除顺序已按依赖倒序修正，
+	// 这里是第二道保险。
 	for _, idx := range idxs {
 		if err := c.SwInterfaceAddDelAddress(idx, "", false, true); err != nil {
+			if isMissingIfaceErr(err) {
+				continue
+			}
 			return fmt.Errorf("清理接口 %d 地址: %w", idx, err)
 		}
 	}
 	for _, sub := range subs {
 		if err := c.SwInterfaceAddDelAddress(sub, "", false, true); err != nil {
+			if isMissingIfaceErr(err) {
+				continue
+			}
 			return fmt.Errorf("清理子接口 %d 地址: %w", sub, err)
 		}
 	}
@@ -616,6 +626,10 @@ func (p *L3Provider) unbindTableIfaces(c L3Client, idxs []uint32) error {
 		seen[idx] = true
 		for _, ip6 := range []bool{false, true} {
 			if err := c.SwInterfaceSetTable(idx, ip6, 0); err != nil {
+				// 接口已不存在：无需（也无法）置回默认表，视为已达成（R88-6）。
+				if isMissingIfaceErr(err) {
+					break
+				}
 				return fmt.Errorf("把接口 %d 移出该 VRF（改回默认表，%s）: %w", idx, ipVerName(ip6), err)
 			}
 		}

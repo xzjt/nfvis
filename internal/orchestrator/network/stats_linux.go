@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"go.fd.io/govpp/adapter/statsclient"
 	"go.fd.io/govpp/api"
@@ -132,6 +133,28 @@ func (r *vppRuntime) buffersViaStatsClient() (state.Buffers, bool) {
 		out.Pools = append(out.Pools, state.BufferPool{Name: name, Used: p.Used, Available: p.Available, Cached: p.Cached})
 	}
 	return out, len(out.Pools) > 0
+}
+
+// RuntimeStats 返回线程级运行态（决策 #200）。
+//
+// 走同版本工具 vpp_get_stats 而不是 statsclient：本命令要的 `/sys/*_per_worker` 是
+// **组合计数**，正是 statsclient 在 VPP 26.06 上解不出的那类值类型（见 Buffers 的注释）；
+// 工具的解码与 VPP 同版本，实测 /sys/loops_per_worker 与 `vppctl show runtime` 各线程
+// loops/sec 量级吻合。按节点明细无结构化来源，故不在此列（见 runtime_stats.go 的口径说明）。
+func (r *vppRuntime) RuntimeStats(ctx context.Context) (state.RuntimeStats, bool) {
+	tool := r.m.statsTool
+	if tool == nil {
+		return state.RuntimeStats{Reason: "无同版本统计工具回退源（vpp_get_stats）"}, false
+	}
+	text, err := tool.DumpMachine(ctx, runtimeSysPattern)
+	if err != nil {
+		return state.RuntimeStats{Reason: err.Error()}, false
+	}
+	out, ok := RuntimeStatsFromDump(text, time.Now())
+	if !ok {
+		return state.RuntimeStats{Reason: "vpp_get_stats 未返回 /sys 运行态计数"}, false
+	}
+	return out, true
 }
 
 func (r *vppRuntime) Memory(ctx context.Context) (state.Memory, bool) {

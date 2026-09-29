@@ -503,19 +503,6 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			})
 		}
 	}
-	// vNIC 接入删除：在 bridge-domain 删除之后（BD 删除会摘除成员）；此时删除 vhost-user/memif 接口安全。
-	for _, ov := range oldPorts {
-		if _, ok := newByKey[portKeyOf(ov)]; ok {
-			continue
-		}
-		ov := ov
-		ops = append(ops, op{
-			desc: fmt.Sprintf("del-vnf-if[%s/%s]", ov.VM, ov.Interface),
-			run:  func(ctx context.Context) error { return a.net.DeleteVnfInterface(ctx, ov.VM, ov.Interface) },
-			undo: func(ctx context.Context) error { return a.net.ApplyVnfInterface(ctx, ov) },
-		})
-	}
-
 	// 静态路由撤销：声明里已不再有的路由必须在**本次 diff** 里显式从 FIB 撤除。
 	// 两条路径都要覆盖：① 只删路由叶子（同名 VRF 仍在声明里）；② 整台 L3 交换机被删
 	// （连同其 VRF 条目）。二者此前都漏——ApplyVRF 只下发声明里的路由（只加不撤），
@@ -564,6 +551,21 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 				undo: func(ctx context.Context) error { return a.net.ApplyBond(ctx, bond) },
 			})
 		}
+	}
+	// vNIC 接入删除排在**所有引用它的转发域之后**（BD 摘成员、L3 交换机清地址/解绑，见上）。
+	// 真机 round88（R88-6）：同一提交里删 VNF 又删引用其 vNIC 的 L3 交换机（vNIC 作
+	// l3-interface），旧顺序把 vNIC 先删掉 → del-vrf 清地址时接口已不在（Invalid sw_if_index）
+	// → 整次提交失败并回滚，「一次清干净」做不到。删除顺序按依赖倒序（先解引用、后删被引用）。
+	for _, ov := range oldPorts {
+		if _, ok := newByKey[portKeyOf(ov)]; ok {
+			continue
+		}
+		ov := ov
+		ops = append(ops, op{
+			desc: fmt.Sprintf("del-vnf-if[%s/%s]", ov.VM, ov.Interface),
+			run:  func(ctx context.Context) error { return a.net.DeleteVnfInterface(ctx, ov.VM, ov.Interface) },
+			undo: func(ctx context.Context) error { return a.net.ApplyVnfInterface(ctx, ov) },
+		})
 	}
 	for _, pm := range old.PortMirroring {
 		if _, ok := newPMNames(new)[pm.Name]; !ok {

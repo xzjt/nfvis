@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -372,9 +373,18 @@ func (s *Server) handleGetSystemStatus(w http.ResponseWriter, r *http.Request) {
 		mapEngineError(w, err)
 		return
 	}
+	// hostname：配置里显式声明优先；未声明时**回退主机实际主机名**（os.Hostname）。
+	// 此前只取配置值，全新安装（没人设过 `set system hostname`）时恒为空 → 控制台总览
+	// 「主机名」永远显示「—」，而机器明明有主机名（真机 round88 现场；与 #189 接口 MTU
+	// 的「配置优先、否则运行态」同一口径）。
 	hostname := ""
 	if cfg.System != nil {
 		hostname = cfg.System.Hostname
+	}
+	if hostname == "" {
+		if h, err := os.Hostname(); err == nil && h != "" {
+			hostname = h
+		}
 	}
 	val := map[string]float64{}
 	for _, smp := range metrics.HostMetrics() {

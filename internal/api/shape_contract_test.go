@@ -25,7 +25,7 @@ import (
 // shapeConditional 「字段会合法缺席（或为空串）」的白名单：`METHOD /path` → 字段 → 理由。
 var shapeConditional = map[string]map[string]string{
 	"GET /system/status": {
-		"hostname": "取自 committed 的 system.hostname：未配置时为空串（真机上通常已配置；有意不退回内核 hostname）",
+		"hostname": "配置声明优先；未声明时回退主机实际主机名（os.Hostname）；两者都取不到才为空串（不编造）",
 		"cpu":      "依赖宿主指标：Linux 采集（读 /proc），非 Linux 上是空实现",
 		"memory":   "同上",
 		"storage":  "同上",

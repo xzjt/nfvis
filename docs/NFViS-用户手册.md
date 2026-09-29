@@ -667,6 +667,17 @@ cat /sys/devices/system/cpu/isolated           # 隔离核生效清单
 nfvis$ show system kernel                      # 三方对照（cmdline / 运行实际 / 配置期望）
 ```
 
+> **大页池钉值**：写入内核基线时，产品同时维护 `/etc/sysctl.d/90-nfvis-hugepages.conf`，
+> 把 `vm.nr_hugepages` 钉为**默认页尺寸**池的声明值（基线里 1G 池 > 0 时默认尺寸即 1G，否则 2M）。
+> 原因：VPP 的 deb 自带 `/etc/sysctl.d/80-vpp.conf`（`vm.nr_hugepages=1024`，注释写明是给 **2M**
+> 池留的），而该 sysctl 只作用于**默认尺寸**池——基线设了 `default_hugepagesz=1G` 时它会落到
+> **1G** 池上，开机时按可用内存尽量分配，使 1G 池**大于**声明值（实测：声明 1 页、实际 3 页，
+> `show system kernel` 于是长期显示「基线 1 / 实际 3」）。
+> **安装时由产品把 VPP 那个文件接管走**（`dpkg-divert` 挪到 `/etc/sysctl.d/80-vpp.conf.vpp-disabled`，
+> 卸载时还原），因此 `vm.nr_hugepages` 只由本文件声明——不依赖文件名排序，也没有开机期
+> 「先撑大再回缩」的抖动；VPP 原文件里另一个生效键 `vm.hugetlb_shm_group=0` 由本文件一并接管。
+> 回退内核基线时本文件一并撤除。
+
 ### 6.3 护栏（写错 isolcpus 是重启后才暴露的「进不了系统」级错误）
 
 以下情况**生成被拒绝、什么都不会写**（CLI 与脚本两条路径同样生效）：
@@ -1699,7 +1710,7 @@ DPDK 没有独立版本来源（随 VPP 一起编译），同样显示「—」�
 | 容器下发报 `docker: not found` | 镜像名与 Docker tag 不一致 | 上传时 `name` 用 Docker tag（§9.1） |
 | `show lldp neighbors` 为空 | 无 LLDP 对端 | 正常；对端启用后可见 |
 | `request sriov …` 报「不支持 SR-IOV」 | 网卡无 SR-IOV 能力 | 换支持的网卡 |
-| `show vpp runtime` 报「未接入」 | V1 未实现（解码受限） | 已知限制，非故障 |
+| `show vpp runtime` 只给线程级、没有逐节点明细 | VPP 26.06 的按节点明细（指令周期/向量数）既不在 stats segment 也无二进制 API | 正常：需要逐节点明细时用 `vppctl show runtime`；产品不解析 vppctl 文本 |
 | `show system hardware` 值为空 | 无 BMC/传感器 | 降级路径，非故障 |
 
 ### 11.4 取日志
@@ -1775,8 +1786,8 @@ show log audit last 20                   # 审计（§10）
 |---|---|
 | 容器镜像目录名须等于 Docker tag | §9.1 |
 | 快照 create/rollback 需关机态 | §9.3（运行中回滚会静默重启 VM） |
-| `show \| display set` 已实现；`show vpp runtime` 未接入 | `show vpp threads`/`show vpp buffers` 替代；display set 支持 `show configuration` 与配置模式各层级 |
-| `show vpp runtime` 未接入 | govpp runtime 解码受限，CLI 明确提示 |
+| `show \| display set` 已实现；`show vpp runtime` 给线程级运行态，**无逐节点明细** | `show vpp threads`/`show vpp buffers` 是另外两条；display set 支持 `show configuration` 与配置模式各层级；逐节点明细用 `vppctl show runtime` |
+| `show vpp runtime` 无逐节点明细（只有线程级） | 该明细无结构化来源（非故障）；需要时 `vppctl show runtime` |
 | `?` 不能作为取值字面量 | 它是即时帮助键（§3.3） |
 | 硬件健康在无 BMC/传感器环境为降级路径 | 值可能为空，非故障 |
 | SR-IOV / LLDP 邻居需对应硬件与对端 | 无 PF/VF、无对端时无法演示 |

@@ -519,3 +519,38 @@ func TestApplyRouteDistanceOnlyChangeDoesNotRevoke(t *testing.T) {
 		t.Fatalf("distance 变更仍应重下发该 VRF: %v", *calls)
 	}
 }
+
+// R88-6 回归：删除顺序必须按依赖倒序——被 vNIC 引用的转发域（L3 交换机）先解引用，
+// 再删 vNIC 本身。
+//
+// 真机 round88 现场：同一提交里「删 vnf-b」+「删把它的 vNIC 当 l3-interface 的 vs-nat」，
+// 旧顺序先删 vNIC → del-vrf 清该接口地址时 VPP 报 Invalid sw_if_index(-2) → 整次提交
+// 失败并回滚（用户一次清不干净，只能拆两次提交）。修法：del-vnf-if 排到 del-vrf 之后。
+func TestApplyVnicDeleteAfterVrfThatReferencesIt(t *testing.T) {
+	ap, calls := newRecApplier("")
+	old := model.Config{
+		VirtualMachineFunctions: []model.VMFunction{{Name: "vnf-a", Image: "img",
+			Interfaces: []model.VnfInterface{{Name: "eth0", Type: "vhost-user"}}}},
+		Vrfs: []model.Vrf{{Name: "vs-nat",
+			L3Interfaces: []model.L3Interface{{Interface: "vh-vnf-a-eth0", Addresses: []string{"192.168.200.1/24"}}}}},
+	}
+	newCfg := model.Config{}
+	if err := ap.Apply(context.Background(), old, newCfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	vrfIdx, ifIdx := -1, -1
+	for i, c := range *calls {
+		switch c {
+		case "del-vrf:vs-nat":
+			vrfIdx = i
+		case "del-vnf-if:vnf-a/eth0":
+			ifIdx = i
+		}
+	}
+	if vrfIdx < 0 || ifIdx < 0 {
+		t.Fatalf("应同时出现 del-vrf 与 del-vnf-if: %v", *calls)
+	}
+	if ifIdx < vrfIdx {
+		t.Fatalf("删除顺序错误：引用 vNIC 的 L3 交换机（del-vrf）必须先于 vNIC 删除（del-vnf-if）: %v", *calls)
+	}
+}
