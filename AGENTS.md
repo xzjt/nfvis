@@ -64,7 +64,9 @@
   **已发布 v1.1.50**（tag `v1.1.50` → `main 7cd81f9`；PR #232 + #233 均 squash 合并、CI 双跑全绿；
   `SOURCE_DATE_EPOCH=1790692519`）：deb sha256 `03b5721f06b53bc7321b56c39d01a08348934e85a92a9d5d5abf4ca8931e2777`（9,200,286 字节）、
   `.run` sha256 `5aa1ab49b0f8fe3584bcec93644b18b41fa1a699efba5c7f2725da898454558e`（178,505,119 字节）——两件均连打两次
-  逐字节一致、回下载一致（另与 GitHub 服务端资产摘要逐字相同）；发布件上 fulltest **195/0/12**（首次零失败）、
+  逐字节一致；回下载侧已有：deb 真实回下载逐字节一致、`.run` 与 GitHub 服务端资产摘要逐字相同
+  （⚠️ `.run` 的完整 178MB 回下载本轮未完成——两条链路到 GitHub 都约 7~8KB/s，刻意不阻塞发版，已如实登记）；
+  发布件上 fulltest **195/0/12**（首次零失败）、
   `.run` 自检与 `--verify` 各 **12/12**。
   证据 `docs/evidence/v1-closeout-round88-fresh-walkthrough-and-6-fixes.txt`（§7 为本轮追加）。
 - **round87（清 round86 登记的两条未修 + 本轮新抓一条，2026-09-29）**：先在**未修版 1.1.48**（已装实例）
