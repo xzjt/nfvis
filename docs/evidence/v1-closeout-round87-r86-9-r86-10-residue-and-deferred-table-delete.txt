@@ -172,14 +172,18 @@ R87-1（接口换表 + 删旧交换机）
     争抢隔离核，guest 侧写入因此在超时内没落盘（该用例本身就依赖 guest 引导 + 串口登录的时序）。
     ⇒ 记为「前一轮失败跑的环境残留导致的假红」；清干净后全套复跑见本节末（332/0）。
     （教训与待办 §7 的「先看级联关系」同条：**先归因，再判红**。）
-  终态环境（供下一轮接手）：
-  - nfvis **1.1.49~dev3** active（修复版实装；`/usr/bin/nfvisd -version` = 1.1.49~dev3）
-  - 配置库 rev 258+（本轮走查对象已清：vs-keep/vs-in/vs-nat2/vs-lock/NAT 规则与池/vm-r87 全删）
-  - 数据面：ens192/ens224 交 DPDK、VPP 运行；`show ip table` 只剩默认表 0；
-    `show alarms active` 空
-  - 源码树 `/root/src-r87`（本轮工作树的 git archive；构建 dev1~dev3 用
-    `SOURCE_DATE_EPOCH=1790609977`）；`/root/src` 仍是 round86 的 1.1.48 树
-  - ⚠️ 套件复跑前需清上轮对象（本轮实测：不清场时 lifecycle 只跑出 3/0/6，清场后 21/0/3）
+  终态环境（供下一轮接手；**2026-09-29 发布后收尾**）：
+  - nfvis **1.1.49（发布件，已装）** active：`/usr/bin/nfvisd -version` = **1.1.49**
+  - 配置库 rev **283**（本轮与发布复验对象全部已清：vs-keep/vs-in/vs-old/vs-nat2/vs-lock/NAT 规则与池/
+    vm-r87 全删）；升级实装前后配置**逐字段未变**（51 revs / max 280 / cfg sha `bbf67cdb87b9fc7e`）；
+    备份 `/root/nfvis-db-backup-20260929-0742-r87`
+  - 数据面：ens192/ens224 交 DPDK、VPP 运行；`vppctl show ip fib summary` 只剩默认表 0
+    （已 `request vpp restart` 收尾）；`show alarms active` 空；`show virtual-switches` 无
+  - 源码树：`/root/src-rel`（**发布件构建树** = main `e4ce946`，`SOURCE_DATE_EPOCH=1790667231`）；
+    `/root/src-r87`（本轮 dev1~dev3 构建树）；`/root/src` 仍是 round86 的 1.1.48 树；
+    产物 `/root/rel-1.1.49.deb`、`/root/rel-1.1.49.run`；闭包缓存 `/root/ob`（238 deb）
+  - ⚠️ 套件复跑前需清上轮对象（本轮实测：不清场时 lifecycle 只跑出 3/0/6，清场后 21/0/3）；
+    **`make integration` 要求先停 nfvis**（`pkill -x nfvisd`），跑完记得 `systemctl restart nfvis`
 
 ----- §7 发布（v1.1.49，2026-09-29）----------------------------------------------------
   流程：PR #231（squash 合并 → `main e4ce946`）→ 在 nfvis-vm 上以
