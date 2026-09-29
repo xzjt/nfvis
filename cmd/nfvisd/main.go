@@ -498,6 +498,11 @@ func run() error {
 		}
 		rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		// 决策 #192：删表延后项的复核放在恢复收敛**之前**——数据面重启后那些表已随重启消失，
+		// 先复核一次既有日志可查（EnsureConsistent 内部也会复核，幂等无害）。
+		if names := netProvider.RetryDeferredVRFDeletes(rctx, cfg); len(names) > 0 {
+			log.Info("删表延后项已清理", "vrfs", names)
+		}
 		if errs := netProvider.EnsureConsistent(rctx, cfg); len(errs) > 0 {
 			for _, e := range errs {
 				log.Warn("网络恢复收敛未收敛项", "err", e)
