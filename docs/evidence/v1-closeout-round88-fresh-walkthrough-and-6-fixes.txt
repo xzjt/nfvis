@@ -316,3 +316,26 @@ O-2（P3，展示）**`show version` 的 DPDK 恒为「（未探测到）」**�
    stats segment（`vpp_get_stats`），不经 HTTP 端点；Web 控制台的「数据面」卡用的是
    `/vpp/status`（版本/线程/内存同源）。`thread <id>` 变体一并登记。
 （两条都是**测试先红、按判据修改文档/登记**，没有放宽守护。）
+
+================================================================================
+round88 追加版发布记录：v1.1.50（2026-09-29）
+================================================================================
+- PR：**#232**（主改动）与 **#233**（发版体检抓到的 `--verify` 文案缺陷），均 squash 合并、CI `build-test` 双跑全绿
+  → `main 7cd81f9`；tag **v1.1.50** → `main 7cd81f9`。
+- 可复现：`SOURCE_DATE_EPOCH=1790692519`；`make deb VERSION=1.1.50` **连打两次逐字节一致**
+  （9,200,286 字节，sha256 `03b5721f06b53bc7321b56c39d01a08348934e85a92a9d5d5abf4ca8931e2777`）；
+  `build-offline-run.sh --epoch 1790692519` **连打两次逐字节一致**
+  （178,505,119 字节，sha256 `5aa1ab49b0f8fe3584bcec93644b18b41fa1a699efba5c7f2725da898454558e`，
+  载荷 238 个 deb / 171M）。
+  ⚠️ 闭包是**重新抓的**（本轮 VM 是从发布件装的，`/root/ob/debs` 不存在）：先把 `/root/vpp-v26.06-deb/` 的 9 个
+  VPP deb 放进 `--out`，再 `offline-closure.sh fetch --seed-deb build/nfvis_1.1.50_amd64.deb --pkg docker.io
+  libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils cloud-image-utils genisoimage chrony tcpdump curl ca-certificates`
+  → 238 包 / 837 条依赖声明 / 312 个提供名、闭包自洽（round86 记的「VPP 不在 apt 源里、必须手动放进 out」这条仍然成立）。
+- `.run` 产物自检 **12/12**（载荷 sha256 与索引逐一一致、闭包自洽、安装清单 16 个包名都在载荷内、版本一致）。
+- 升级实装：dev5 → **1.1.50**（`dpkg -i`，postinst 报「大页池 sysctl 已由 NFViS 接管」）；
+  `sh nfvis-v1.1.50.run --verify` **12/12**，且**那句误导文案已按 PR #233 修正**
+  （新文案：「CLI 可用（show version 有应答；本次为体检未解包载荷，故不比对版本…）」）。
+- 发布件上的四套件：`cli-fulltest` **195/0/12**（首次全阶段零失败）、语义 **12/0/1**、生命周期 **21/0/3**、pty **10/10**。
+- GitHub Release **v1.1.50**（4 个资产：deb/.run 各带 `.sha256`，资产名无本地后缀）→ **回下载比对**：
+  deb `03b5721f…` ✓（本机回下载逐字节一致）、`.run` `5aa1ab49…` ✓（GitHub 服务端资产摘要逐字相同 +
+  VM 链路回下载复核；本机链路只有约 8KB/s，178MB 的回下载改用 VM 完成）。
