@@ -200,3 +200,76 @@ func TestVrfNotRemovedHintKeepsNextStep(t *testing.T) {
 		t.Fatalf("文案应含原因（NAT）与下一步（request vpp restart）: %v", err)
 	}
 }
+
+// 未收敛项的**可复查口径**：VPP 里存在配置未声明的表 ⇒ 报未收敛并进告警（跨 nfvisd 重启
+// 依然看得见——这一项不靠进程内登记）；表随数据面重启消失后自动消警。
+func TestEnsureConsistentReportsLeftoverTable(t *testing.T) {
+	fx := newRecoveryFixture()
+	ctx := context.Background()
+	name := "vs-leftover"
+	tid := TableID(name)
+	if err := fx.net.l3.ApplyVRF(ctx, model.Vrf{Name: name}); err != nil {
+		t.Fatalf("ApplyVRF: %v", err)
+	}
+	fx.l3.tableKeepOnDelete[tid] = true
+	if err := fx.net.DeleteVRF(ctx, name); !errors.Is(err, ErrVrfNotRemoved) {
+		t.Fatalf("应报未收敛: %v", err)
+	}
+	// 配置里已无该交换机（模拟提交已删掉它）⇒ 表成为残留
+	errs := fx.net.EnsureConsistent(ctx, model.Config{Vrfs: []model.Vrf{}})
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "ip-table/") && strings.Contains(e.Error(), "配置未声明") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("残留表必须进未收敛清单: %v", errs)
+	}
+	active := fx.alarms.List("active")
+	if len(active) != 1 || active[0].Code != AlarmTableLeftover || active[0].Severity != SeverityWarning {
+		t.Fatalf("残留表应产生 VRF_TABLE_LEFTOVER 告警: %+v", active)
+	}
+	if !strings.Contains(active[0].Message, "request vpp restart") {
+		t.Fatalf("告警文案要给下一步: %+v", active[0])
+	}
+	// 数据面重启后表消失：对账不再命中 ⇒ 自动消警
+	delete(fx.l3.tables, tid)
+	if errs := fx.net.EnsureConsistent(ctx, model.Config{Vrfs: []model.Vrf{}}); len(errs) != 0 {
+		t.Fatalf("表已消失不应再报未收敛: %v", errs)
+	}
+	if got := fx.alarms.List("active"); len(got) != 0 {
+		t.Fatalf("残留消失应自动消警: %+v", got)
+	}
+}
+
+// 声明里的交换机（含 BVI 网关专属 VRF）不算残留：正常收敛必须一条告警都不产生。
+func TestEnsureConsistentNoLeftoverForDeclaredTables(t *testing.T) {
+	fx := newRecoveryFixture()
+	ctx := context.Background()
+	cfg := model.Config{
+		Vrfs: []model.Vrf{{Name: "vs-l3"}},
+		VirtualSwitches: []model.VirtualSwitch{
+			{Name: "vs-l2", Type: "l2", Gateway: &model.VSGateway{Addresses: []string{"10.9.9.1/24"}}},
+		},
+	}
+	if errs := fx.net.EnsureConsistent(ctx, cfg); len(errs) != 0 {
+		t.Fatalf("正常收敛不应有未收敛项: %v", errs)
+	}
+	if got := fx.alarms.List("active"); len(got) != 0 {
+		t.Fatalf("声明内的表不得报残留: %+v", got)
+	}
+	if _, err := fx.net.l3.LeftoverTables(cfg); err != nil {
+		t.Fatalf("LeftoverTables: %v", err)
+	}
+}
+
+// 读回失败不得被当成「没有残留」（问不出来 ≠ 没有）。
+func TestLeftoverTablesQueryFailurePropagates(t *testing.T) {
+	f := newFakeL3()
+	p := NewL3Provider(f)
+	f.tableDumpErr = errors.New("dump 超时")
+	if _, err := p.LeftoverTables(model.Config{}); err == nil {
+		t.Fatal("读回失败必须上抛，不得按「无残留」处理")
+	}
+}

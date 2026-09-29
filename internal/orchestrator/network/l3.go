@@ -37,6 +37,9 @@ type L3Client interface {
 	// IPTableExists 读回该协议下 tableID 是否存在（ip_table_dump）。删表校验的唯一判据：
 	// ip_table_add_del(del) 在表仍被接口占用时**返回 0 却不删**，返回码不足以判断是否真删掉了。
 	IPTableExists(tableID uint32, isIP6 bool) (bool, error)
+	// IPTables 列出 VPP 里现有的 IP 表（v4/v6 合并去重，升序）：供「配置未声明的表」
+	// 对账（残留发现，决策 #192）。查询失败必须上抛，不得按空集处理。
+	IPTables() ([]uint32, error)
 	SwInterfaceSetTable(swIfIndex uint32, isIPv6 bool, tableID uint32) error
 	SwInterfaceAddDelAddress(swIfIndex uint32, prefix string, add, delAll bool) error
 	IPRouteAddDel(tableID uint32, prefix, nextHop string, add bool) error
@@ -558,6 +561,48 @@ func (p *L3Provider) clearPending(tableID uint32) {
 	p.mu.Lock()
 	delete(p.pendingDeletes, tableID)
 	p.mu.Unlock()
+}
+
+// LeftoverTables 返回**配置未声明**却在 VPP 里存在的 IP 表（升序）。
+//
+// 用途：把「删表延后 / 补偿残渣」留下的空表变成一条可对账的事实——恢复收敛据此记未收敛项与
+// 告警（scope=recovery，随 Sync 自动消解），因此**跨 nfvisd 重启仍然可见**：进程内登记会丢，
+// 而「配置没声明这张表，它却在 VPP 里」是随时可复查的事实（round86 R86-9 的「事后不可见」
+// 正是指这类残渣只能靠进程内记忆）。
+//
+// 声明的表 = 默认表 0 ∪ 各 Vrf 条目（L3 交换机与显式网关 VRF）∪ 自建网关 VRF（vr-<交换机>）。
+// 查询失败上抛（把「问不出来」当「没有残留」是假绿）。
+func (p *L3Provider) LeftoverTables(cfg model.Config) ([]uint32, error) {
+	c, err := p.client()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	have, err := c.IPTables()
+	if err != nil {
+		return nil, err
+	}
+	declared := map[uint32]bool{0: true}
+	for _, v := range cfg.Vrfs {
+		declared[TableID(v.Name)] = true
+	}
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.Gateway == nil {
+			continue
+		}
+		name := vs.Gateway.Vrf
+		if name == "" {
+			name = GatewayVRFName(vs.Name)
+		}
+		declared[TableID(name)] = true
+	}
+	var out []uint32
+	for _, id := range have {
+		if !declared[id] {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 // unbindTableIfaces 把接口逐一改回默认表（table 0，v4/v6 都要），用于删表前解绑。
