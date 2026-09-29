@@ -350,9 +350,14 @@ run_checks() {
     if [ -n "$want" ] && printf '%s' "$out" | grep -q "$want"; then
         ok "CLI show version：$want（经 nfvisd 的 API 通路，口令取自$PW_SRC）"
         PW_CONFIRMED=1
-    else
+    elif [ -n "$want" ]; then
         info "CLI show version 输出未含期望版本（$want），原文：$(printf '%s' "$out" | head -2 | tr '\n' ' ')"
         ok "CLI 可用（show version 有应答，口令取自$PW_SRC）"
+        PW_CONFIRMED=1
+    else
+        # --verify（只体检、不解包载荷）时没有期望版本可比：**别说"未含期望版本（）"**——
+        # 空括号看起来像产品缺陷，实际只是本次没有比对目标（round88 发版体检实测）。
+        ok "CLI 可用（show version 有应答；本次为体检未解包载荷，故不比对版本；口令取自$PW_SRC）"
         PW_CONFIRMED=1
     fi
     out=$(cli nfvis-cli "$CLI_PW" "show vpp")
