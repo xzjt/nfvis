@@ -87,6 +87,7 @@ func TestMainChainVMRealVPPAndLibvirt(t *testing.T) {
 	sess := config.Session{User: "itest", Source: "integration"}
 	commit := func(cfg model.Config) {
 		t.Helper()
+		cfg = withSuperUser(cfg)
 		if err := engine.Edit(sess); err != nil {
 			t.Fatalf("edit: %v", err)
 		}

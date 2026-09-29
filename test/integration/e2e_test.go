@@ -133,8 +133,13 @@ func newHarness(t *testing.T, sock string) *harness {
 }
 
 // commit 以整份覆盖方式提交配置（编辑→替换 candidate→commit→释放锁）。
+//
+// 整文档提交由引擎补一道「至少要留一个 super-user」（决策 #152 的自锁兜底），而真机的
+// committed 配置总有首启建的 admin；本套件因此按同样的现实补齐基线 system 段，否则连
+// 「清空配置」这类收尾提交也会被正确拒绝（2026-09-29 复跑时三例因此变红）。
 func (h *harness) commit(t *testing.T, cfg model.Config) config.CommitResult {
 	t.Helper()
+	cfg = withSuperUser(cfg)
 	ctx := context.Background()
 	if err := h.engine.Edit(h.sess); err != nil {
 		t.Fatalf("edit: %v", err)
@@ -276,4 +281,21 @@ func TestE2EFlow(t *testing.T) {
 	// 清理：删除本测试对象（BD 成员随删 BD 释放，再删 VRF 表）
 	cleanupCfg := model.Config{Interfaces: []model.InterfaceConfig{{Name: "ens192"}, {Name: "ens224"}}}
 	h.commit(t, cleanupCfg)
+}
+
+// withSuperUser 补齐基线账号：配置里已有 super-user 时原样返回。
+func withSuperUser(cfg model.Config) model.Config {
+	if len(model.CheckSuperUserPresent(cfg)) == 0 {
+		return cfg
+	}
+	users := []model.LoginUserConfig{{Name: "itest", Class: model.ClassSuperUser,
+		PasswordHash: "pbkdf2$sha256$600000$itest$itest"}}
+	if cfg.System == nil {
+		cfg.System = &model.SystemConfig{}
+	}
+	if cfg.System.Login == nil {
+		cfg.System.Login = &model.SystemLogin{}
+	}
+	cfg.System.Login.Users = append(cfg.System.Login.Users, users...)
+	return cfg
 }
