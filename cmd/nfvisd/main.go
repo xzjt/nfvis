@@ -270,7 +270,10 @@ func run() error {
 		orchestrator.WithVhostDir(computeCfg.VhostDir), orchestrator.WithMemifDir(ctCfg.MemifDir),
 		// 非致命处置（如「已声明 DPDK 口尚未进数据面，本次延后收敛」）必须让操作者看得到：
 		// 提交仍然回 [ok]，只靠 CLI 是看不出来的，故至少落日志（决策 #100）。
-		orchestrator.WithWarn(func(msg string) { log.Warn(msg) }))
+		orchestrator.WithWarn(func(msg string) { log.Warn(msg) }),
+		// 提交期残渣/延后处置落告警（决策 #191/#192）：补偿未完成的残渣、以及「NAT 用过的表
+		// 要等数据面重启才消失」都必须事后查得到——它们此前只出现在当次提交输出里。
+		orchestrator.WithCommitAlarms(alarms))
 
 	// 系统命令执行器（软件/证书/日志保留共用；与 SoftwareManager 一致带超时）
 	runCmd := func(ctx context.Context, name string, args ...string) (string, error) {
@@ -521,6 +524,10 @@ func run() error {
 		for _, e := range netProvider.CheckInterfaceLinks(rctx, cfg) {
 			log.Warn("物理口链路检查", "err", e)
 		}
+		// 决策 #192：删表延后项的复核（数据面重启后其表已消失；配置又声明回来则本就合法）。
+		if names := netProvider.RetryDeferredVRFDeletes(rctx, cfg); len(names) > 0 {
+			log.Info("删表延后项已清理", "vrfs", names)
+		}
 		log.Info("恢复收敛完成")
 	}
 	// M4-10：运行态异常退出巡检（FR-CMP-017/022）——VM crashed / 容器异常退出 → critical 告警；
@@ -548,6 +555,9 @@ func run() error {
 					for _, e := range netProvider.CheckInterfaceLinks(ctx, cfg) {
 						log.Warn("物理口链路巡检", "err", e)
 					}
+					// 决策 #192：删表延后项的复核（表一旦不在数据面就清登记并消警，
+					// 不依赖「恰好又发生了一次 VPP 重连」）。
+					netProvider.RetryDeferredVRFDeletes(ctx, cfg)
 				}
 				recoveryMu.Unlock()
 			}

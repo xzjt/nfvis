@@ -169,6 +169,11 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 		}
 	}
 
+	// 删表延后项的复核（决策 #192）：删表时 VPP 报「读回仍存在」的交换机，在数据面重启后
+	// 其表已随重启消失（VPP 的 IP 表是运行态），这里确认并清登记 + 消警；配置又把该交换机
+	// 声明回来时同样清（表是合法存在）。单列一步：它不属于「按配置重放」。
+	_ = n.RetryDeferredVRFDeletes(ctx, cfg)
+
 	if n.alarms != nil {
 		n.alarms.Sync(recoveryScope, failures)
 	}

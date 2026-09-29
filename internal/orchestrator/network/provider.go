@@ -370,6 +370,32 @@ func (n *L2Network) DeleteVRF(ctx context.Context, name string) error {
 	return n.l3.DeleteVRF(ctx, name)
 }
 
+// RetryDeferredVRFDeletes 复核「删表延后」的 L3 交换机（决策 #192），返回本轮**确认已清理**的
+// 交换机名，并把与之相关的提交期告警（延后 + 补偿残渣）清掉。
+//
+// 调用时机：恢复收敛（VPP 重启后的重连）与周期巡检。cfg 是 committed 配置——表被重新声明
+// 回来时该项本来就是合法存在，登记与告警一并清除；否则以「表在不在 VPP 里」为唯一判据。
+func (n *L2Network) RetryDeferredVRFDeletes(ctx context.Context, cfg model.Config) []string {
+	if n == nil || n.l3 == nil {
+		return nil
+	}
+	declared := make(map[string]bool, len(cfg.Vrfs))
+	for _, v := range cfg.Vrfs {
+		declared[v.Name] = true
+	}
+	cleared := n.l3.RetryPendingDeletes(ctx, func(name string) bool { return declared[name] })
+	if n.alarms != nil {
+		for _, name := range cleared {
+			n.alarms.Resolve(orchestrator.CommitScope, orchestrator.CommitVrfDeleteDeferred, name)
+			// 同一张表的补偿残渣告警一并消掉：表没了/被重新声明，那条残渣已不成立。
+			for _, desc := range []string{orchestrator.VrfOpDesc(name), orchestrator.VrfDeleteOpDesc(name)} {
+				n.alarms.Resolve(orchestrator.CommitScope, orchestrator.CommitCompensationFailed, desc)
+			}
+		}
+	}
+	return cleared
+}
+
 // ApplyRoute/DeleteRoute 单条静态路由的下发与撤销：撤销由提交编排按「旧/新声明差集」下发
 // （删除路径此前整条漏，见 internal/orchestrator/apply.go 的 del-route 计划操作）。
 func (n *L2Network) ApplyRoute(ctx context.Context, vrfName string, r model.Route) error {
