@@ -142,7 +142,7 @@ R87-1（接口换表 + 删旧交换机）
   · 本轮未新增/改动任何 UI 组件（只新增告警码与警告文案），故未做全量页面巡检。
 
 ----- §6 make integration（真机）与终态环境事实 ---------------------------------------
-  ⚠️ **§6 补充（由本轮实跑结果回写）**：
+  ⚠️ 这一节按「先归因、再判红」写成：三次跑数、两处对照，结论只认可复现的那次。
   - 首跑（修复版）出现 3 例失败：`TestE2EFlow`、`TestIPv6AddressAndStaticRoutes`、
     `TestMainChainVMRealVPPAndLibvirt`，都是 `commit 校验失败，共 1 条`。
     **归因**：在**未改动的 1.1.48 源码树**（`/root/src`）上跑同三条用例，**同样三条同样失败**
@@ -156,8 +156,22 @@ R87-1（接口换表 + 删旧交换机）
   - 修（只改测试夹具）：`test/integration/e2e_test.go` 增 `withSuperUser()`（配置里已有 super-user
     则原样返回），`harness.commit()` 与 `m4_main_chain_test.go` 的局部 commit 闭包各补一次——
     与真机现实一致（committed 配置总有首启建的 admin）。
-  - 复跑（修复版 + 夹具修复，VPP 重启后干净环境）：结果见本文件末尾「§6 终稿」——
-    该行由本轮实跑结束后回写，写之前不预设结论。
+  - 复跑（修复版 + 夹具修复，VPP 重启后干净环境，07:11–07:24）：
+    **`make integration` 全绿**——`=== RUN` **332**、`--- PASS` **332**、`--- FAIL` **0**、跳过 0；
+    `ok github.com/xzjt/nfvis/test/integration 786.341s` +
+    `ok …/internal/orchestrator{,/compute,/container,/network}`（各包 ok）。
+    （round36 记录的基线是 238 PASS——本轮计数口径按 `=== RUN/--- PASS` 逐条计，数字不同属口径差异，
+    重点是 **0 失败 0 跳过**。）
+  - ⚠️ 中间还抓到一条**假红**（记法同 round86 §5：与产品缺陷分开记）：修复版首轮跑（06:38 起）
+    只有一例失败 `TestSnapshotContentLevelRollbackRealLibvirt`，日志里读到的是**首启内容
+    `T05-KNOWN`**（即 guest 内那次写入没生效）。归因过程：
+      ① 同一用例在**未改动的 1.1.48 树**上跑（06:55，环境干净）**通过**（读到 `T05-LATER`）；
+      ② 在**本轮的树**上、**干净环境**复跑（07:03）**通过**（429s）。
+    差别不在代码而在**环境**：更早那次（06:18）的整体失败跑（三条用例被 super-user 守卫拒绝）
+    的**收尾提交同样被拒**，于是它建的 VM 没有被删掉、留在机器上；06:38 的复跑与这些残留 VM
+    争抢隔离核，guest 侧写入因此在超时内没落盘（该用例本身就依赖 guest 引导 + 串口登录的时序）。
+    ⇒ 记为「前一轮失败跑的环境残留导致的假红」；清干净后全套复跑见本节末（332/0）。
+    （教训与待办 §7 的「先看级联关系」同条：**先归因，再判红**。）
   终态环境（供下一轮接手）：
   - nfvis **1.1.49~dev3** active（修复版实装；`/usr/bin/nfvisd -version` = 1.1.49~dev3）
   - 配置库 rev 258+（本轮走查对象已清：vs-keep/vs-in/vs-nat2/vs-lock/NAT 规则与池/vm-r87 全删）
