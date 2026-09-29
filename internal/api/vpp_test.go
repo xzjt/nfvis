@@ -198,6 +198,11 @@ func (f *fakeStateRuntime) Memory(context.Context) (state.Memory, bool) {
 	return state.Memory{Total: 2048, Used: 512, Free: 1536}, true
 }
 
+func (f *fakeStateRuntime) RuntimeStats(context.Context) (state.RuntimeStats, bool) {
+	return state.RuntimeStats{VectorRate: 7, WorkerThreads: 1, Source: state.StatsSourceTool,
+		Threads: []state.RuntimeThread{{ID: 1, VectorRate: 7, LoopsRate: 123}}}, true
+}
+
 func TestVppStatusIncludesThreads(t *testing.T) {
 	fake := &fakeVppController{status: VppStatus{Version: "26.06-release", Connected: true}}
 	st := state.New(&fakeStateRuntime{rows: []state.Thread{

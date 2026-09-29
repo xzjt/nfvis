@@ -154,25 +154,12 @@ func (g *govppL3Client) IPRouteAddDel(tableID uint32, prefix, nextHop string, ad
 	}
 	route := ip.IPRoute{TableID: tableID, Prefix: p}
 	if nextHop != "" {
-		addr, err := ip_types.ParseAddress(nextHop)
+		paths, err := recursiveNextHopPaths(tableID, nextHop)
 		if err != nil {
-			return fmt.Errorf("解析下一跳 %q: %w", nextHop, err)
-		}
-		var nh ip_types.AddressUnion
-		proto := fib_types.FIB_API_PATH_NH_PROTO_IP4
-		switch addr.Af {
-		case ip_types.ADDRESS_IP6:
-			nh = ip_types.AddressUnionIP6(addr.Un.GetIP6())
-			proto = fib_types.FIB_API_PATH_NH_PROTO_IP6
-		default:
-			nh = ip_types.AddressUnionIP4(addr.Un.GetIP4())
+			return err
 		}
 		route.NPaths = 1
-		route.Paths = []fib_types.FibPath{{
-			SwIfIndex: ^uint32(0), // ~0 = 经下一跳递归解析
-			Proto:     proto,
-			Nh:        fib_types.FibPathNh{Address: nh},
-		}}
+		route.Paths = paths
 	}
 	reply := &ip.IPRouteAddDelReply{}
 	if err := g.ch.SendRequest(&ip.IPRouteAddDel{IsAdd: add, Route: route}).ReceiveReply(reply); err != nil {
@@ -182,6 +169,34 @@ func (g *govppL3Client) IPRouteAddDel(tableID uint32, prefix, nextHop string, ad
 		return fmt.Errorf("ip_route_add_del(%s via %s, table=%d) retval=%d", prefix, nextHop, tableID, reply.Retval)
 	}
 	return nil
+}
+
+// recursiveNextHopPaths 构造「经下一跳递归解析」的 FIB path（下一跳为纯地址，不含出接口）。
+//
+// TableID 必填：递归下一跳在**哪张表**里解析由 path 的 table_id 决定，缺省 0 = 默认表。
+// 不填时 VRF 内路由会去默认表找下一跳（真机 round88：FIB 显示 `via X in fib:0`，
+// 默认表里没有该邻居 → 整条路由恒 dpo-drop、不转发，而 IPRouteDump 回读一切正常，
+// 是典型「命令成功但答非所问」）。
+func recursiveNextHopPaths(tableID uint32, nextHop string) ([]fib_types.FibPath, error) {
+	addr, err := ip_types.ParseAddress(nextHop)
+	if err != nil {
+		return nil, fmt.Errorf("解析下一跳 %q: %w", nextHop, err)
+	}
+	proto := fib_types.FIB_API_PATH_NH_PROTO_IP4
+	var nh ip_types.AddressUnion
+	switch addr.Af {
+	case ip_types.ADDRESS_IP6:
+		nh = ip_types.AddressUnionIP6(addr.Un.GetIP6())
+		proto = fib_types.FIB_API_PATH_NH_PROTO_IP6
+	default:
+		nh = ip_types.AddressUnionIP4(addr.Un.GetIP4())
+	}
+	return []fib_types.FibPath{{
+		SwIfIndex: ^uint32(0), // ~0 = 经下一跳递归解析
+		TableID:   tableID,    // 在路由所属表内解析下一跳（勿省，见上）
+		Proto:     proto,
+		Nh:        fib_types.FibPathNh{Address: nh},
+	}}, nil
 }
 
 // fibNhString 从 FIB path 解析下一跳文本（IPv4/IPv6）。

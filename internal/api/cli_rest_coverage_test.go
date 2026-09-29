@@ -190,29 +190,33 @@ var cliRESTCoverage = map[string]string{
 
 // cliRESTExceptions CLI-only by design（REPL 交互形态或 CLI 侧渲染，Web 用等价形态，不需要 API）。
 var cliRESTExceptions = map[string]string{
-	"wizard":                      "决策 #107：CLI 端交互编排，明确无 API 端点（Web 等价物是向导式页面）",
-	"monitor interfaces <ifname>": "决策 #92：CLI 轮询形态；Web 等价物是定时刷新 + GET /events 推送",
-	"monitor vnf <name>":          "决策 #92：同上",
-	"start shell":                 "本地控制台 shell，Web 无对应形态",
-	"exit":                        "CLI 本地行为",
-	"quit":                        "CLI 本地行为",
-	"help":                        "REPL 帮助；Web 用表单与静态候选",
-	"help <command>":              "REPL 帮助；Web 用表单与静态候选",
-	"?":                           "上下文补全（按键即时）；Web 用表单与静态候选",
-	"edit":                        "配置模式层级导航；数据操作已被 candidate API 覆盖",
-	"up":                          "配置模式层级导航；同上",
-	"top":                         "配置模式层级导航；同上",
-	"annotate":                    "REPL 注释便利",
-	"run":                         "配置模式内执行便利；被运行的命令本身都有端点",
-	"show log vnf <name>":         "指引型命令（指向容器 log / VM console），等价物已存在",
-	"| match":                     "CLI 文本过滤；Web 以前端过滤 + 分页查询参数实现",
-	"| except":                    "同上",
-	"| count":                     "同上",
-	"| last":                      "同上",
-	"| begin":                     "同上",
-	"| display json":              "CLI 渲染；Web 原生消费 JSON",
-	"| display xml":               "CLI 渲染；Web 原生消费 JSON",
-	"show | display set":          "CLI 文本渲染；契约已登记未实现（决策 #84④）",
+	"wizard": "决策 #107：CLI 端交互编排，明确无 API 端点（Web 等价物是向导式页面）",
+	// `show vpp runtime` 是本机 stats segment 的读视图（CLI 侧渲染），
+	// 不经 HTTP 端点；Web 控制台「数据面」卡用的是 /vpp/status（版本/线程/内存同源）。
+	"show vpp runtime":             "决策 #200：数据源是本机 VPP stats segment（vpp_get_stats），不经 HTTP 端点；Web 等价形态是 /vpp/status",
+	"show vpp runtime thread <id>": "决策 #200：同上（thread 只是本机过滤参数）",
+	"monitor interfaces <ifname>":  "决策 #92：CLI 轮询形态；Web 等价物是定时刷新 + GET /events 推送",
+	"monitor vnf <name>":           "决策 #92：同上",
+	"start shell":                  "本地控制台 shell，Web 无对应形态",
+	"exit":                         "CLI 本地行为",
+	"quit":                         "CLI 本地行为",
+	"help":                         "REPL 帮助；Web 用表单与静态候选",
+	"help <command>":               "REPL 帮助；Web 用表单与静态候选",
+	"?":                            "上下文补全（按键即时）；Web 用表单与静态候选",
+	"edit":                         "配置模式层级导航；数据操作已被 candidate API 覆盖",
+	"up":                           "配置模式层级导航；同上",
+	"top":                          "配置模式层级导航；同上",
+	"annotate":                     "REPL 注释便利",
+	"run":                          "配置模式内执行便利；被运行的命令本身都有端点",
+	"show log vnf <name>":          "指引型命令（指向容器 log / VM console），等价物已存在",
+	"| match":                      "CLI 文本过滤；Web 以前端过滤 + 分页查询参数实现",
+	"| except":                     "同上",
+	"| count":                      "同上",
+	"| last":                       "同上",
+	"| begin":                      "同上",
+	"| display json":               "CLI 渲染；Web 原生消费 JSON",
+	"| display xml":                "CLI 渲染；Web 原生消费 JSON",
+	"show | display set":           "CLI 文本渲染；契约已登记未实现（决策 #84④）",
 }
 
 // cliRESTGaps 已登记的 REST 缺口（CLI 有、REST 无）→ 理由/归属。补一个划掉一个。
@@ -222,7 +226,6 @@ var cliRESTExceptions = map[string]string{
 var cliRESTGaps = map[string]string{
 	"request system api token revoke":        "V1 明确延期（决策 #76⑧）；服务端仅会话级吊销（POST /logout；CLI 提示文案已与注册端点一致），核查 #3",
 	"request system storage format-data":     "V1 有意延期（破坏性；决策 #65：待数据分区定义），核查 #4",
-	"show vpp runtime":                       "两边都未接入（附录 A #34），核查 #1",
 	"show configuration permissions <class>": "子形态无 REST 端点：class 视角语义从未定义，本轮改为明确提示未实现（附录 A #153 /《命令全表》§4⑧）；裸写法由 GET /configuration 承载，核查 #2",
 }
 

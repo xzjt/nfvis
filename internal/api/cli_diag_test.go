@@ -40,6 +40,10 @@ type fakeDiagRT struct {
 	clearErr error
 }
 
+func (fakeCounters) RuntimeStats(context.Context) (state.RuntimeStats, bool) {
+	return state.RuntimeStats{}, false
+}
+
 func (f *fakeDiagRT) Ping(_ context.Context, host, source, vrf string, count int) (string, error) {
 	f.pingHost, f.pingSrc, f.pingVRF, f.pingCnt = host, source, vrf, count
 	return f.pingOut, f.pingErr

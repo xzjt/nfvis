@@ -140,10 +140,36 @@ apply() {
         if [ -f "$BAK" ]; then cp -f "$BAK" "$FRAG"; else rm -f "$FRAG"; fi
         die "update-grub 失败，已回退片段（系统未改变）"
     fi
+
+    # R88-1/#201：大页池 sysctl 的唯一真源。VPP 包自带 /etc/sysctl.d/80-vpp.conf
+    # （vm.nr_hugepages=1024，注释写明是给 2M 池的），而该 sysctl 只作用于**默认尺寸**池——
+    # 本脚本设了 default_hugepagesz=1G 时它就落到 1G 池上，开机按可用内存尽量分配，
+    # 1G 池会大于这里的声明值（真机 round88：cmdline hugepages=1、实际 nr=4，于是
+    # show system kernel 长期显示「基线 1 / 实际 4」不一致）。安装期由 postinst 用
+    # dpkg-divert 把 vpp 那个 conffile 挪开（决策 #201），本文件按声明值写
+    # vm.nr_hugepages（并接管 vpp 原文件里的 vm.hugetlb_shm_group=0）。
+    # 生成器与运行期（nfvisd 的内核基线 Apply / 启动补写）共用同一个
+    # `nfvisd --print-hugepage-sysctl`，避免两处各写一份而漂移。
+    SYSCTL="/etc/sysctl.d/90-nfvis-hugepages.conf"
+    SYSCTL_NEW=$("$NFVISD" --print-hugepage-sysctl --hugepages-1g "$HP1G" --hugepages-2m "$HP2M" 2>/dev/null || true)
+    if [ -n "$SYSCTL_NEW" ]; then
+        mkdir -p "$(dirname "$SYSCTL")"
+        if [ -f "$SYSCTL" ] && [ "$(cat "$SYSCTL")" = "$SYSCTL_NEW" ]; then
+            log "大页池 sysctl 片段未变，跳过写入"
+        else
+            printf '%s\n' "$SYSCTL_NEW" > "$SYSCTL"
+            log "大页池 sysctl 已写入：$SYSCTL（$(printf '%s\n' "$SYSCTL_NEW" | tail -1)）"
+        fi
+    else
+        rm -f "$SYSCTL"
+    fi
+
     log "update-grub 成功；**需重启生效**：重启后 show system kernel 应显示与配置一致"
 }
 
 rollback() {
+    # 大页池 sysctl 片段同为本脚本产物：回退时一并撤除（否则它会继续把默认尺寸池钉在旧值上）
+    rm -f /etc/sysctl.d/90-nfvis-hugepages.conf
     if [ -f "$BAK" ]; then
         cp -f "$BAK" "$FRAG"
         log "已恢复上一次片段（$BAK）"

@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -25,6 +26,9 @@ const (
 	fstabRel        = "/etc/fstab"
 	fstabMarker     = "# nfvis-hugepages"
 	tunedRel        = "/var/lib/nfvis/tuned-profile"
+	// 大页池 sysctl 落点（R88-1）。序号 **大于** VPP 包自带的 /etc/sysctl.d/80-vpp.conf，
+	// systemd-sysctl 按文件名序执行，故本文件后执行、最后生效。
+	hugepageSysctlRel = "/etc/sysctl.d/90-nfvis-hugepages.conf"
 )
 
 // KernelApplier 内核基线落地能力（CLI/API 注入；实现见 BaselineApplier）。
@@ -85,6 +89,10 @@ func (a *BaselineApplier) Apply(d KernelDesired) (string, error) {
 	if err := a.setFstabLine(fstabLine); err != nil {
 		return "", err
 	}
+	// 大页池 sysctl 落点：把 vm.nr_hugepages 钉回本次基线声明的页数（R88-1，见函数注释）。
+	if err := a.ensureHugepageSysctl(d); err != nil {
+		return "", err
+	}
 	if d.TunedProfile != "" {
 		if err := writeFile(a.path(tunedRel), d.TunedProfile+"\n"); err != nil {
 			return "", err
@@ -109,6 +117,10 @@ func (a *BaselineApplier) Apply(d KernelDesired) (string, error) {
 func (a *BaselineApplier) Rollback() (string, error) {
 	fragPath := a.path(grubFragmentRel)
 	backup := a.path(grubBackupRel)
+	// 大页池 sysctl 片段同属本基线产物：回退时一并撤除（否则它会继续把池钉在旧声明值上）。
+	if err := os.Remove(a.path(hugepageSysctlRel)); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("删除大页池 sysctl 片段: %w", err)
+	}
 	prev, err := os.ReadFile(backup)
 	if err != nil {
 		if rmErr := os.Remove(fragPath); rmErr != nil && !os.IsNotExist(rmErr) {
@@ -149,6 +161,69 @@ func (a *BaselineApplier) setFstabLine(line string) error {
 		kept = append(kept, fstabMarker, line)
 	}
 	return writeFile(p, strings.Join(kept, "\n")+"\n")
+}
+
+// GenerateHugepageSysctl 产出「把默认尺寸大页池钉回声明值」的 sysctl 片段内容。
+//
+// 为什么需要（R88-1，真机 round88 定位）：VPP 的 deb 装了 /etc/sysctl.d/80-vpp.conf
+// （`vm.nr_hugepages=1024`，注释写明是给 **2M** 池留的），而 `vm.nr_hugepages` 只作用于
+// **默认尺寸**池。产品内核基线一旦设了 `default_hugepagesz=1G`（1G 池 > 0 时必设，见
+// GenerateBaseline），这条 sysctl 就落到 **1G** 池上：开机时 systemd-sysctl 按可用内存
+// 尽量分配，1G 池因此**大于**内核基线声明的页数（真机现场：cmdline `hugepages=1`，
+// 运行实际 nr=4）。此前被记作「1G 池无主占用，未做回收」，机制其实在这里。
+//
+// 本文件按同一规则写回声明值：序号 90 > 80 ⇒ 后执行者生效，多余的空闲页随之释放。
+// 默认尺寸判据与 GenerateBaseline 完全同源：1G 池 > 0 时才写 default_hugepagesz=1G。
+// GenerateHugepageSysctl 产出大页池 sysctl 片段内容——**唯一真源**（决策 #199 引入、#201 收口）。
+//
+// 为什么需要（真机 round88 定位）：VPP 的 deb 装了 /etc/sysctl.d/80-vpp.conf
+// （`vm.nr_hugepages=1024`，注释写明是给 **2M** 池留的），而 `vm.nr_hugepages` 只作用于
+// **默认尺寸**池。产品内核基线一旦设了 `default_hugepagesz=1G`（1G 池 > 0 时必设，见
+// GenerateBaseline），这条 sysctl 就落到 **1G** 池上：开机时 systemd-sysctl 按可用内存
+// 尽量分配，1G 池因此**大于**内核基线声明的页数（真机现场：cmdline `hugepages=1`，
+// 运行实际 nr=4）。此前被记作「1G 池无主占用，未做回收」，机制其实在这里。
+//
+// 单一事实源：安装期由 postinst 用 dpkg-divert 把 vpp 那个 conffile 挪到
+// `<同名>.vpp-disabled`（决策 #201），此后 `vm.nr_hugepages` 只由本文件声明——
+// 不再依赖「90 号文件名序在 80 号之后」的排序约定，也没有开机期「先撑大再回缩」的抖动。
+// vpp 原文件里另一个生效键 `vm.hugetlb_shm_group=0`（root 组可访问大页）由本文件接管保持原值，
+// 免得挪走文件顺手丢掉它。回退内核基线时本文件一并撤除（见 Rollback）。
+//
+// 默认尺寸判据与 GenerateBaseline 完全同源：1G 池 > 0 时才写 default_hugepagesz=1G。
+func GenerateHugepageSysctl(d KernelDesired) string {
+	n, size := 0, ""
+	switch {
+	case d.Hugepages1G > 0:
+		n, size = d.Hugepages1G, "1G"
+	case d.Hugepages2M > 0:
+		n, size = d.Hugepages2M, "2M"
+	default:
+		return ""
+	}
+	return "# 由 NFViS 生成：大页池 sysctl 的**唯一真源**\n" +
+		"# vpp 包自带的 /etc/sysctl.d/80-vpp.conf 已由 dpkg-divert 挪到 .vpp-disabled\n" +
+		"# （它的 vm.nr_hugepages=1024 本意给 2M 池，而这枚 sysctl 只作用于**默认尺寸**池；\n" +
+		"#   产品基线设了 default_hugepagesz=1G 时它会落到 1G 池上、把池撑过声明值）\n" +
+		fmt.Sprintf("# 默认页尺寸 %s，声明 %d 页；hugetlb_shm_group 沿用 vpp 包原值\n", size, n) +
+		fmt.Sprintf("vm.nr_hugepages = %d\n", n) +
+		"vm.hugetlb_shm_group = 0\n"
+}
+
+// ensureHugepageSysctl 落盘大页池 sysctl 片段（幂等；无声明时删除该文件）。
+func (a *BaselineApplier) ensureHugepageSysctl(d KernelDesired) error {
+	p := a.path(hugepageSysctlRel)
+	content := GenerateHugepageSysctl(d)
+	if content == "" {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("删除大页池 sysctl 片段: %w", err)
+		}
+		return nil
+	}
+	prev, err := os.ReadFile(p)
+	if err == nil && string(prev) == content {
+		return nil // 内容未变：不重写（保持 mtime，避免无意义的改动）
+	}
+	return writeFile(p, content)
 }
 
 func (a *BaselineApplier) updateGrub() error {
@@ -202,3 +277,57 @@ func (a *BaselineApplier) stripLegacyGrubParams() error {
 // 覆盖 GenerateBaseline 可能产出的全部参数名：旧片段/主 grub 里若残留同名参数，
 // 不摘除会与片段重复注入（cmdline 同名参数以最后一个为准）。
 var legacyParamRe = regexp.MustCompile(` ?(default_hugepagesz|hugepagesz|hugepages|isolcpus|nohz_full|rcu_nocbs|irqaffinity|nmi_watchdog|transparent_hugepage|iommu|intel_iommu|amd_iommu|intel_pstate|amd_pstate)=[^ "]*`)
+
+// EnsureHugepageSysctlFromCmdline 按**当前内核基线声明**（/proc/cmdline）落盘大页池
+// sysctl 片段，返回是否发生了变更。
+//
+// 启动时调用（nfvisd 单源保证，与决策 #182 的 AppArmor 放行同一思路）：安装期由
+// postinst → nfvis-baseline.sh 直接写 GRUB 片段，不经过 BaselineApplier.Apply，因此
+// 只靠 Apply 挂 sysctl 会漏掉「首装即被 80-vpp.conf 撑大」这条路径。cmdline 是那次
+// 基线真正生效的声明值，正是要钉住的数。
+func EnsureHugepageSysctlFromCmdline(root string) (bool, error) {
+	raw, err := os.ReadFile(join(root, "/proc/cmdline"))
+	if err != nil {
+		return false, err
+	}
+	args := strings.Fields(string(raw))
+	var d KernelDesired
+	if v := HugepageFromCmdline(args, "1G"); v != "" {
+		d.Hugepages1G, _ = strconv.Atoi(v)
+	}
+	if v := HugepageFromCmdline(args, "2M"); v != "" {
+		d.Hugepages2M, _ = strconv.Atoi(v)
+	}
+	p := join(root, hugepageSysctlRel)
+	content := GenerateHugepageSysctl(d)
+	prev, readErr := os.ReadFile(p)
+	if content == "" {
+		if readErr == nil {
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				return false, fmt.Errorf("删除大页池 sysctl 片段: %w", err)
+			}
+			return true, nil
+		}
+		return false, nil
+	}
+	if readErr == nil && string(prev) == content {
+		return false, nil
+	}
+	if root == "" || root == "/" {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return false, err
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			return false, fmt.Errorf("写入 %s: %w", p, err)
+		}
+		return true, nil
+	}
+	// 注入 root（单测）：root 下不一定有 /etc/sysctl.d，MkdirAll 会建出来。
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		return false, fmt.Errorf("写入 %s: %w", p, err)
+	}
+	return true, nil
+}

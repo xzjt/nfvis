@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 
 type fakeL2 struct {
 	ifaces  map[string]uint32
+	nameIdx map[string]uint32 // 接口名 → idx（子接口按名可查，与真实 VPP 一致）
 	names   map[uint32]SwIfInfo
 	nextSub uint32
 
@@ -31,6 +33,9 @@ type fakeL2 struct {
 func newFakeL2() *fakeL2 {
 	return &fakeL2{
 		ifaces: map[string]uint32{"ens192": 1, "ens224": 2},
+		// nameIdx 只由 CreateSubif 动态登记子接口（真实 VPP 里子接口是独立接口、可按名查）；
+		// 物理口一律走 ifaces，避免「删掉 ifaces 端口但仍能按名查到」把缺失口用例变成假绿。
+		nameIdx: map[string]uint32{},
 		names: map[uint32]SwIfInfo{
 			1:   {Name: "ens192"},
 			2:   {Name: "ens224"},
@@ -51,7 +56,10 @@ func (f *fakeL2) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	if f.err != nil {
 		return 0, false, f.err
 	}
-	idx, ok := f.ifaces[ifname]
+	if idx, ok := f.ifaces[ifname]; ok {
+		return idx, true, nil
+	}
+	idx, ok := f.nameIdx[ifname] // 子接口按名可查（真实 VPP 亦然）
 	return idx, ok, nil
 }
 
@@ -110,12 +118,42 @@ func (f *fakeL2) SwInterfaceSetL2Xconnect(swIfIndex, bdID uint32, enable bool) e
 }
 
 func (f *fakeL2) CreateSubif(req CreateSubifReq) (uint32, error) {
+	// 复刻 VPP 的 create_subif 语义：同父口 + 同 sub-id 已存在 → -56（Value already exists），
+	// 且子接口名按真实规则命名（`<父口名>.<sub-id>`）——R88-3 的现场正是这个返回码把整次
+	// 提交打回滚，幂等复用则按这个名字查回来。
+	parentName := ""
+	if info, ok := f.names[req.ParentSwIfIndex]; ok {
+		parentName = info.Name
+	}
+	if parentName == "" {
+		parentName = fmt.Sprintf("%d", req.ParentSwIfIndex)
+	}
+	key := fmt.Sprintf("%s.%d", parentName, req.SubID)
+	if _, ok := f.nameIdx[key]; ok {
+		f.log("subif-exists")
+		return 0, fmt.Errorf("create_subif(parent=%d,sub=%d) retval=-56", req.ParentSwIfIndex, req.SubID)
+	}
 	f.subifs = append(f.subifs, req)
 	f.nextSub++
 	idx := f.nextSub
-	f.names[idx] = SwIfInfo{Name: "sub", OuterVlanID: req.OuterVlanID}
+	f.nameIdx[key] = idx
+	f.names[idx] = SwIfInfo{Name: key, OuterVlanID: req.OuterVlanID}
 	f.log("subif")
 	return idx, nil
+}
+
+func (f *fakeL2) DeleteSubif(swIfIndex uint32) error {
+	if _, ok := f.names[swIfIndex]; !ok {
+		return fmt.Errorf("delete_subif(if=%d) retval=-2", swIfIndex)
+	}
+	for k, v := range f.nameIdx {
+		if v == swIfIndex {
+			delete(f.nameIdx, k)
+		}
+	}
+	delete(f.names, swIfIndex)
+	f.log("delsubif")
+	return nil
 }
 
 func (f *fakeL2) L2InterfaceVlanTagRewrite(VlanTagRewriteReq) error { return nil }
@@ -212,6 +250,81 @@ func TestL2AccessVlanCreatesSubif(t *testing.T) {
 	}
 	if f.bridge[101] != BDID("vs-vlan") {
 		t.Fatalf("子接口应挂接到 BD: %v", f.bridge)
+	}
+}
+
+// R88-3 回归：BD 重放必须幂等——已有 access 子接口不得再建一次。
+//
+// 真机 round88 现场：先建好 vs-l2（access vlan 100，成员 ens224），之后把 vnf-a 的 vNIC
+// 加进同一台交换机 → ApplyBridgeDomain 全量重放 → 对 ens224 再 create_subif → VPP 返回
+// -56（already exists）→ **整次提交失败并回滚**（把交换机加个口都做不到）。BD 自身早有
+// 存在性判断，子接口这一层当年漏了。
+func TestL2AccessVlanSubifIdempotentOnReplay(t *testing.T) {
+	f := newFakeL2()
+	p := NewL2Provider(f)
+	vs := l2vs("vs-vlan", model.VSwitchPort{Seq: 0, Interface: "ens224"})
+	vs.VlanAccess = 100
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("首次下发: %v", err)
+	}
+	// 模拟「给同一台交换机新增一个端口」（VNF vNIC 已在 VPP 里）后的重放
+	f.ifaces["vh-vnf-a-eth0"] = 7
+	f.names[7] = SwIfInfo{Name: "vh-vnf-a-eth0"}
+	vs.Ports = append(vs.Ports, model.VSwitchPort{Seq: 1, Vnf: "vnf-a", VnfInterface: "eth0"})
+
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("重放（新增 VNF 端口）不应失败（旧实现在此撞 -56 并整体回滚）: %v", err)
+	}
+	// access VLAN 是交换机级的：每个端口各一个 <父口>.100 子接口。这里要断言的是
+	// **已有端口（ens224）不得被再建一次**，而不是子接口总数。
+	recreated := 0
+	for _, req := range f.subifs {
+		if req.ParentSwIfIndex == 2 {
+			recreated++
+		}
+	}
+	if recreated != 1 {
+		t.Fatalf("ens224 的 access 子接口只应创建一次，实际 %d 次: %+v", recreated, f.subifs)
+	}
+	if _, ok := f.nameIdx["ens224.100"]; !ok {
+		t.Fatalf("ens224 的子接口应存在并可按名查到: %v", f.nameIdx)
+	}
+	if _, ok := f.nameIdx["vh-vnf-a-eth0.100"]; !ok {
+		t.Fatalf("新增端口的子接口应已创建: %v", f.nameIdx)
+	}
+	if f.bridge[101] != BDID("vs-vlan") {
+		t.Fatalf("子接口应仍挂接在 BD 上: %v", f.bridge)
+	}
+	// access VLAN 下端口是经其子接口挂接的（不是裸 vNIC）
+	subVnic := f.nameIdx["vh-vnf-a-eth0.100"]
+	if subVnic == 0 || f.bridge[subVnic] != BDID("vs-vlan") {
+		t.Fatalf("新增 vNIC 端口的子接口应挂接在 BD 上: %v（idx=%d）", f.bridge, subVnic)
+	}
+}
+
+// R88-3 回归：删 L2 交换机时回收本交换机建的 VLAN 子接口（数据面不留 `ens224.100` 残留）。
+func TestDeleteBridgeDomainReclaimsSubif(t *testing.T) {
+	f := newFakeL2()
+	p := NewL2Provider(f)
+	vs := l2vs("vs-vlan", model.VSwitchPort{Seq: 0, Interface: "ens224"})
+	vs.VlanAccess = 100
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("下发: %v", err)
+	}
+	if _, ok := f.names[101]; !ok {
+		t.Fatalf("前置：子接口应已创建: %v", f.names)
+	}
+	if err := p.DeleteBridgeDomain(context.Background(), "vs-vlan"); err != nil {
+		t.Fatalf("删交换机: %v", err)
+	}
+	if _, ok := f.names[101]; ok {
+		t.Fatalf("子接口应随交换机删除被回收（旧实现留在数据面，真机显示「未声明」残留）: %v", f.names)
+	}
+	if f.bridge[101] != 0 {
+		t.Fatalf("子接口应从 BD 摘除: %v", f.bridge)
+	}
+	if f.bds[BDID("vs-vlan")] {
+		t.Fatal("BD 应已删除")
 	}
 }
 

@@ -4484,7 +4484,9 @@ const NET_OBJECT_VIEWS = [
   ['VRF（L3 虚拟交换机）', 'vrfs', ['名称', 'L3 接口', '路由数'], (v) => [
     v.name,
     (v.l3_interfaces || []).map((i) => i.interface).join(', '),
-    v.routes != null ? v.routes : undefined,
+    // 列名是「路由数」：routes 是对象数组，直接塞进单元格会渲染成
+    // "[object Object],[object Object]"（真机 round88 现场）。取长度，与详情页同一口径。
+    v.routes != null ? v.routes.length : undefined,
   ], '#/network/vrfs/'],
   ['ACL', 'acls', ['名称', '规则数'], (a) => [a.name, (a.rules || []).length], '#/network/acls/'],
   // NAT 是对象（source_pools/rules/static），按池与规则各出一行

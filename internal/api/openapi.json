@@ -1778,6 +1778,7 @@
             "type": "object"
           },
           "hostname": {
+            "description": "配置声明的 system.hostname 优先；未声明时回退主机实际主机名（os.Hostname）；两者都取不到时为空串（不编造）",
             "type": "string"
           },
           "hugepages": {

@@ -30,3 +30,7 @@ func (r *vppRuntime) Buffers(ctx context.Context) (state.Buffers, bool) {
 func (r *vppRuntime) Memory(ctx context.Context) (state.Memory, bool) {
 	return state.Memory{}, false
 }
+
+func (r *vppRuntime) RuntimeStats(ctx context.Context) (state.RuntimeStats, bool) {
+	return state.RuntimeStats{Reason: "stats segment 仅在 Linux 可用"}, false
+}

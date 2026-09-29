@@ -113,6 +113,9 @@ type L2Client interface {
 	SwInterfaceSetL2Bridge(swIfIndex, bdID uint32, portType L2PortType, shg uint8, enable bool) error
 	SwInterfaceSetL2Xconnect(swIfIndex, bdID uint32, enable bool) error
 	CreateSubif(req CreateSubifReq) (uint32, error)
+	// DeleteSubif 删除 VLAN 子接口（FR-NET-011 的回收面）：L2 交换机删除时须把本交换机
+	// 建的 access/trunk 子接口一并回收，否则数据面留下无人管理的 `ens224.100` 之类残留。
+	DeleteSubif(swIfIndex uint32) error
 	L2InterfaceVlanTagRewrite(req VlanTagRewriteReq) error
 	MACTable(bdID uint32) ([]MACEntry, error)
 	Close()
@@ -142,7 +145,9 @@ type L2Provider struct {
 
 	mu       sync.Mutex
 	attached map[uint32]map[uint32]attachment // bdID → swIfIndex → 挂接方式
-	acl      *AclProvider                     // 可选：端口 acl-in/acl-out 绑定
+	// subifs bdID → 本交换机创建的 VLAN 子接口集合（删交换机时回收，FR-NET-011 的回收面）
+	subifs map[uint32]map[uint32]bool
+	acl    *AclProvider // 可选：端口 acl-in/acl-out 绑定
 }
 
 // NewL2Provider 以固定客户端构造（测试/单连接场景）。
@@ -162,6 +167,7 @@ func (p *L2Provider) SetACL(a *AclProvider) { p.acl = a }
 func (p *L2Provider) reset() {
 	p.mu.Lock()
 	p.attached = map[uint32]map[uint32]attachment{}
+	p.subifs = map[uint32]map[uint32]bool{}
 	p.mu.Unlock()
 }
 
@@ -266,6 +272,25 @@ func (p *L2Provider) DeleteBridgeDomain(ctx context.Context, name string) error 
 			return fmt.Errorf("删 bridge-domain %s(id=%d): %w", name, bdID, err)
 		}
 	}
+	// 回收本交换机建的 VLAN 子接口：成员摘除只把子接口从 BD 上摘下来，接口本身仍在数据面
+	// （真机 round88：删掉带 access 端口的 L2 交换机后，`show interfaces physical` 里长期挂着
+	// `ens224.100`「未声明」）。必须在 BD 删除之后做——子接口在 BD 里时删不掉。
+	p.mu.Lock()
+	subifs := make([]int, 0, len(p.subifs[bdID]))
+	for idx := range p.subifs[bdID] {
+		subifs = append(subifs, int(idx))
+	}
+	delete(p.subifs, bdID)
+	p.mu.Unlock()
+	sort.Ints(subifs)
+	for _, idx := range subifs {
+		if err := c.DeleteSubif(uint32(idx)); err != nil {
+			// 已被删掉（如 VPP 重启后重建、父口已下线）时视为已回收。
+			if !isMissingIfaceErr(err) {
+				return fmt.Errorf("回收子接口 %d: %w", idx, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -362,26 +387,27 @@ func (p *L2Provider) desiredMembers(c L2Client, vs model.VirtualSwitch) (map[uin
 		if err != nil {
 			return nil, err
 		}
+		parent := l2ParentIfaceName(port)
 		switch {
 		case vs.VlanAccess > 0: // access：每个端口建 VLAN 子接口后挂接（FR-NET-011）
-			sub, err := c.CreateSubif(CreateSubifReq{
+			sub, err := p.ensureSubif(c, parent, portIdx, vs.Name, CreateSubifReq{
 				ParentSwIfIndex: portIdx, SubID: uint32(vs.VlanAccess),
 				OuterVlanID: uint16(vs.VlanAccess), OneTag: true,
-			})
+			}, portKey(port), vs.VlanAccess)
 			if err != nil {
-				return nil, fmt.Errorf("创建 access 子接口 %s vlan %d: %w", portKey(port), vs.VlanAccess, err)
+				return nil, err
 			}
 			attached[sub] = func(c L2Client) error {
 				return c.SwInterfaceSetL2Bridge(sub, bdID, L2PortNormal, 0, true)
 			}
 		case len(port.TrunkVlans) > 0: // trunk：tagged VID 建子接口，native 挂物理口
 			for _, vid := range port.TrunkVlans {
-				sub, err := c.CreateSubif(CreateSubifReq{
+				sub, err := p.ensureSubif(c, parent, portIdx, vs.Name, CreateSubifReq{
 					ParentSwIfIndex: portIdx, SubID: uint32(vid),
 					OuterVlanID: uint16(vid), OneTag: true, ExactMatch: true,
-				})
+				}, portKey(port), vid)
 				if err != nil {
-					return nil, fmt.Errorf("创建 trunk 子接口 %s vlan %d: %w", portKey(port), vid, err)
+					return nil, err
 				}
 				attached[sub] = func(c L2Client) error {
 					return c.SwInterfaceSetL2Bridge(sub, bdID, L2PortNormal, 0, true)
@@ -399,6 +425,65 @@ func (p *L2Provider) desiredMembers(c L2Client, vs model.VirtualSwitch) (map[uin
 		}
 	}
 	return attached, nil
+}
+
+// l2ParentIfaceName 端口在 VPP 里的父接口名（VLAN 子接口名 = `<父口>.<vlan>`，与 L3 侧同规则）。
+// 取不到名字（未指定接口）时返回空串，调用方退回「直接 create」。
+func l2ParentIfaceName(port model.VSwitchPort) string {
+	switch {
+	case port.Vnf != "":
+		return orchestrator.VnfIfaceName(port.Vnf, port.VnfInterface)
+	case port.Container != "":
+		return orchestrator.MemifIfaceName(port.Container, port.ContainerInterface)
+	default:
+		return port.Interface
+	}
+}
+
+// subifName VLAN 子接口在 VPP 里的确定性名字（`<父口>.<vlan>`）。
+func subifName(parent string, vlan int) string {
+	return fmt.Sprintf("%s.%d", parent, vlan)
+}
+
+// ensureSubif 幂等创建 VLAN 子接口：同父口 + 同 vlan 的子接口已存在时**复用**。
+//
+// 为什么必须幂等：create_subif 对已存在的子接口返回 -56（already exists），而
+// ApplyBridgeDomain 是「按声明全量重放」的——只要交换机定义有任何变化（例如给它新增一个
+// VNF 端口），旧成员的口就会再建一次子接口。真机 round88 现场：先建好 vs-l2（access vlan
+// 100，成员 ens224）→ 之后新提交把 vnf-a 的 vNIC 加进同一台交换机 → 重放撞 -56 →
+// **整个提交失败并回滚**（用户看到的是"加个口而已，怎么就失败"）。BD 自身早有存在性判断
+// （见 ApplyBridgeDomain 的 BridgeDomainExists），子接口这一层此前漏了。
+func (p *L2Provider) ensureSubif(c L2Client, parentName string, parentIdx uint32, vsName string, req CreateSubifReq, label string, vlan int) (uint32, error) {
+	if parentName != "" {
+		if idx, ok, err := c.SwInterfaceIndex(subifName(parentName, vlan)); err == nil && ok {
+			p.rememberSubif(BDID(vsName), idx)
+			return idx, nil
+		}
+	}
+	sub, err := c.CreateSubif(req)
+	if err != nil {
+		return 0, fmt.Errorf("创建子接口 %s vlan %d: %w", label, vlan, err)
+	}
+	p.rememberSubif(BDID(vsName), sub)
+	return sub, nil
+}
+
+// rememberSubif 登记「本交换机建的 VLAN 子接口」，供删交换机时回收（避免数据面残留）。
+func (p *L2Provider) rememberSubif(bdID, subIdx uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.subifs == nil {
+		p.subifs = map[uint32]map[uint32]bool{}
+	}
+	if p.subifs[bdID] == nil {
+		p.subifs[bdID] = map[uint32]bool{}
+	}
+	p.subifs[bdID][subIdx] = true
+	// 子接口同时是 BD 成员：并入挂接登记，删 BD 时按成员摘除（幂等，重复写无害）。
+	if p.attached[bdID] == nil {
+		p.attached[bdID] = map[uint32]attachment{}
+	}
+	p.attached[bdID][subIdx] = attachment{}
 }
 
 func (p *L2Provider) portIndex(c L2Client, vs model.VirtualSwitch, port model.VSwitchPort) (uint32, error) {

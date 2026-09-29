@@ -58,6 +58,7 @@ func run() error {
 		// 安装期内核基线生成（FR-SYS-014 / 决策 #66）：安装器调用本开关生成 GRUB 片段与
 		// fstab 行，保证与 CLI（request system kernel apply）**同一生成器**，避免双源。
 		printBaseline = flag.Bool("print-kernel-baseline", false, "打印内核基线（GRUB 片段 + ---FSTAB--- + fstab 行）后退出")
+		printHPSysctl = flag.Bool("print-hugepage-sysctl", false, "打印大页池 sysctl 片段（默认尺寸池钉值，配合 --hugepages-1g/--hugepages-2m）后退出")
 		hp1g          = flag.Int("hugepages-1g", 0, "1G 大页数量（安装期基线）")
 		hp2m          = flag.Int("hugepages-2m", 0, "2M 大页数量（安装期基线）")
 		isoCores      = flag.String("isolated-cores", "", "隔离核列表，如 4-15（安装期基线）")
@@ -104,6 +105,23 @@ func run() error {
 		if fstab != "" {
 			fmt.Println()
 		}
+		return nil
+	}
+
+	// R88-1：大页池 sysctl 片段（默认尺寸池的声明值）。安装期脚本用它写
+	// /etc/sysctl.d/90-nfvis-hugepages.conf，与运行期 Apply/启动补写共用同一生成器。
+	if *printHPSysctl {
+		pageSize, count := "", 0
+		if *hp1g > 0 {
+			pageSize, count = "1G", *hp1g
+		} else if *hp2m > 0 {
+			pageSize, count = "2M", *hp2m
+		}
+		d := system.DesiredFromConfig(pageSize, count, "", "", "", "", "", nil)
+		if pageSize == "1G" && *hp2m > 0 {
+			d.Hugepages2M = *hp2m
+		}
+		fmt.Print(system.GenerateHugepageSysctl(d))
 		return nil
 	}
 
@@ -470,6 +488,16 @@ func run() error {
 		log.Warn("libvirt AppArmor 放行未完成", "err", err)
 	} else if changed {
 		log.Info("libvirt AppArmor 已放行 NFViS 镜像/VM 路径")
+	}
+
+	// R88-1：大页池 sysctl 钉值。VPP 包自带 /etc/sysctl.d/80-vpp.conf（vm.nr_hugepages=1024，
+	// 本意给 2M 池），而该 sysctl 只作用于**默认尺寸**池——产品基线设了 default_hugepagesz=1G
+	// 时它就落到 1G 池上，开机按可用内存尽量分配，1G 池因此大于基线声明值（真机：声明 1、实际 4）。
+	// 按 cmdline 声明写 90 号落点钉回，与安装顺序无关（同 #182 的单源口径）。
+	if changed, err := system.EnsureHugepageSysctlFromCmdline(""); err != nil {
+		log.Warn("大页池 sysctl 钉值未完成", "err", err)
+	} else if changed {
+		log.Info("已按内核基线声明写入大页池 sysctl 片段（/etc/sysctl.d/90-nfvis-hugepages.conf，下次开机生效）")
 	}
 
 	// VPP 未运行时降级为告警并持续重连，不阻塞 nfvisd 启动。

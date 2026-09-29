@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/config"
@@ -519,12 +520,82 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 		x.structured = anyToTree(mem)
 		return fmt.Sprintf("total=%d used=%d free=%d\n", mem.Total, mem.Used, mem.Free)
 	case "runtime":
-		// 契约 §1.1：每线程指令周期/向量率；govpp runtime 未接入时为明确提示
-		return "%% VPP runtime 统计未接入（govpp runtime 解码限制）\n"
+		return x.execShowVppRuntime(ctx, args[1:])
 	case "capture":
 		return x.execShowVppCapture()
 	}
 	return fmt.Sprintf("%% 无效命令: show vpp %s（可用：threads|buffers|memory|runtime|capture）\n", sub)
+}
+
+// execShowVppRuntime：`show vpp runtime [thread <id>]`——**线程级**运行态（决策 #200）。
+//
+// 口径（与手册同步）：给每线程的向量率与主循环速率、整机向量率、工作线程数、数据面运行时长；
+// 数据源是 VPP stats segment（经与 VPP 同版本的 vpp_get_stats 解码，与 buffer/接口计数同一条通道）。
+// VPP 26.06 的**按节点**明细（`show runtime` 主体那张 Calls/Vectors/Packet-Clocks 表）既不在
+// stats segment 也无二进制 API——产品不解析 vppctl 文本，故如实只报线程级，并把这句话打印出来，
+// 免得操作者以为「这台机器没有运行态」。
+func (x *cliExecutor) execShowVppRuntime(ctx context.Context, rest []string) string {
+	filter := -1
+	switch {
+	case len(rest) == 0:
+	case len(rest) == 2 && rest[0] == "thread":
+		id, err := strconv.Atoi(rest[1])
+		if err != nil || id < 0 {
+			return fmt.Sprintf("%% 线程号 %q 不合法\n", rest[1])
+		}
+		filter = id
+	default:
+		return "%% 用法: show vpp runtime [thread <id>]\n"
+	}
+
+	rs, ok := x.state.RuntimeStats(ctx)
+	if !ok {
+		return fmt.Sprintf("%% VPP runtime 运行态不可用：%s\n", runtimeUnavailableReason(rs))
+	}
+	// 线程名/绑核能从 show_threads 拿到就带上（best-effort：取不到不影响本命令）
+	meta := map[uint32]state.Thread{}
+	for _, th := range x.state.Threads(ctx) {
+		meta[th.ID] = th
+	}
+	rows := rs.Threads
+	if filter >= 0 {
+		rows = nil
+		for _, r := range rs.Threads {
+			if r.ID == uint32(filter) {
+				rows = []state.RuntimeThread{r}
+				break
+			}
+		}
+		if len(rows) == 0 {
+			ids := make([]string, 0, len(rs.Threads))
+			for _, r := range rs.Threads {
+				ids = append(ids, strconv.Itoa(int(r.ID)))
+			}
+			return fmt.Sprintf("%% 无线程 %d 的运行态（可用线程：%s）\n", filter, strings.Join(ids, ","))
+		}
+	}
+
+	x.structured = anyToTree(rs)
+	var b strings.Builder
+	fmt.Fprintf(&b, "source: %s\n", rs.Source)
+	fmt.Fprintf(&b, "vector rate: %.2f\n", rs.VectorRate)
+	fmt.Fprintf(&b, "worker threads: %.0f\n", rs.WorkerThreads)
+	fmt.Fprintf(&b, "uptime: %.0fs\n", rs.UptimeSeconds)
+	fmt.Fprintf(&b, "%-4s %-12s %-6s %-12s %s\n", "ID", "Name", "Core", "VectorRate", "LoopsRate")
+	for _, r := range rows {
+		th := meta[r.ID]
+		fmt.Fprintf(&b, "%-4d %-12s %-6d %-12.2f %.2f\n", r.ID, th.Name, th.Core, r.VectorRate, r.LoopsRate)
+	}
+	b.WriteString("说明: 线程级运行态；按节点明细（逐节点的指令周期/向量数）无结构化来源，需要时用 vppctl show runtime\n")
+	return b.String()
+}
+
+// runtimeUnavailableReason 取不可用原因（与 bufUnavailableReason 同口径：不静默省略）。
+func runtimeUnavailableReason(rs state.RuntimeStats) string {
+	if rs.Reason != "" {
+		return rs.Reason
+	}
+	return "stats segment 不可用（未取到 /sys 运行态计数）"
 }
 
 // filterLLDPNeighbors 按接口名过滤 LLDP 邻居表（ifname 为空 = 不过滤）。

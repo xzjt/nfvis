@@ -239,6 +239,22 @@ func (g *govppL2Client) CreateSubif(req CreateSubifReq) (uint32, error) {
 	return uint32(reply.SwIfIndex), nil
 }
 
+// DeleteSubif 删除 VLAN 子接口（FR-NET-011 的回收面）。
+// 已不存在（父口下线/已被删）时 VPP 返回 Invalid sw_if_index(-2)，由调用方按「已回收」处理。
+func (g *govppL2Client) DeleteSubif(swIfIndex uint32) error {
+	reply := &ifapi.DeleteSubifReply{}
+	err := g.ch.SendRequest(&ifapi.DeleteSubif{
+		SwIfIndex: interface_types.InterfaceIndex(swIfIndex),
+	}).ReceiveReply(reply)
+	if err != nil {
+		return err
+	}
+	if reply.Retval != 0 {
+		return fmt.Errorf("delete_subif(if=%d) retval=%d", swIfIndex, reply.Retval)
+	}
+	return nil
+}
+
 func (g *govppL2Client) L2InterfaceVlanTagRewrite(req VlanTagRewriteReq) error {
 	reply := &l2.L2InterfaceVlanTagRewriteReply{}
 	err := g.ch.SendRequest(&l2.L2InterfaceVlanTagRewrite{

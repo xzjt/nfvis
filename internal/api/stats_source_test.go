@@ -42,6 +42,10 @@ func getVppStatus(t *testing.T, st *state.State) VppStatus {
 	return got
 }
 
+func (f *fakeBufRuntime) RuntimeStats(context.Context) (state.RuntimeStats, bool) {
+	return state.RuntimeStats{}, false
+}
+
 // 回退源成功时须标注 source=vpp_get_stats（且不出现 unavailable）。
 func TestVppStatusBufferSourceAnnotation(t *testing.T) {
 	st := state.New(&fakeBufRuntime{bufs: state.Buffers{

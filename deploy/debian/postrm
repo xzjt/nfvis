@@ -19,6 +19,12 @@ fi
 if [ "$1" = "purge" ]; then
     rm -rf /run/nfvis
     echo "nfvis postrm: 已清理 /run/nfvis（/var/lib/nfvis 数据保留）"
+    # 产品自己写的大页池 sysctl 落点（决策 #199/#201）：purge 时删掉，否则 nfvis 已卸载、
+    # 它还在把默认尺寸大页池钉在旧声明值上（vpp 包原文件已由 prerm 还原）。
+    if [ -f /etc/sysctl.d/90-nfvis-hugepages.conf ]; then
+        rm -f /etc/sysctl.d/90-nfvis-hugepages.conf
+        echo "nfvis postrm: 已删除 /etc/sysctl.d/90-nfvis-hugepages.conf（大页池交回 vpp 包默认声明）"
+    fi
 
     # ① SSH 强化：撤销 drop-in（它会让卸载后的系统继续禁止 root 口令登录）。
     # **必须内联**：postrm 运行时包文件已被删除（dpkg 先删文件再跑 postrm），

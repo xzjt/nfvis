@@ -1,0 +1,318 @@
+================================================================================
+round88 证据：干净快照 → 发布件 .run 安装 v1.1.49 → 拟人化全功能走查
+              抓到并收口六条缺陷（R88-1~R88-6）+ 两条观察项
+================================================================================
+日期：2026-09-29
+范围：干净快照上走**真人路径**（发布件 nfvis-v1.1.49.run）→ 首启向导（真 pty）→ 数据面 →
+      接口/交换机/NAT/VNF 生命周期/容器/快照/抓包/诊断/备份/Web 控制台黑盒全面走查 →
+      逐条缺陷真机复验；四套件（修复前基线与修复后复跑）。
+环境：nfvis-vm（192.168.155.129，SSH 密钥免密）= VMware 虚机，**恢复为「干净」快照**：
+      Ubuntu 26.04.1 LTS / amd64 / 6 vCPU / 7376 MB / 723 个已装包；
+      **无** vpp/nfvis/libvirt/qemu/docker/make/go/node；apt 源已是 USTC；
+      自带 `/root/vpp-v26.06-deb/`（9 个 deb）；cmdline 无 hugepages/isolcpus（真·从零）。
+安装件：`nfvis-v1.1.49.run`（178,489,951 字节，sha256
+      559f5b8467da4976b6c01395a052ecb143f207307a472848c4d59df0740c19e4 —— 与 GitHub Release
+      公布值逐字一致）；另备 `nfvis_1.1.49_amd64.deb` sha256 97a6e5f3… 一致。
+产品版本：1.1.49（走查基线）/ 1.1.50~dev1（本轮修复版，真机复验用）
+
+----- §1 安装与首启（真人路径：发布件 .run，不借任何本地构建产物）-----------------------
+- scp 发布件上机 → 机上 sha256 与公布值一致 → `sh nfvis-v1.1.49.run -y`：
+  「载荷 238 个 deb（171M）」「本地源索引 238 个候选」「apt 安装完成（62 个包完成配置）」
+  「dpkg 审计：无半装/未配置项」→**自检 18 / 失败 0 / 不可判定 0**，退出码 0。
+  一次性口令：`O-Qxds9HWDMNyxTW@Aa1`（随快照恢复而变）。
+- 按安装器「下一步」重启：cmdline 生效 `default_hugepagesz=1G hugepagesz=1G hugepages=1
+  intel_iommu=on iommu=pt`；nfvisd 自起（active）；VPP 不自启（由 nfvis 管理，符合设计）。
+- wizard（**真 pty**，`script -qec`）：隔离核取默认 2-5、VPP 主核 5 / 工作核 4、1G 大页取 4
+  （跑两台 VNF 用）、低延迟 false → `commit 成功 (revision 3)` → `request system kernel apply`
+  → 重启后 cmdline = `1G=4 / 2M=768 / isolcpus=2-5 nohz_full rcu_nocbs irqaffinity=0-1`，
+  池 `1G 4/4`、`2M 768/768`，`show system kernel` 三方一致。
+- 数据面（手册 §7）：`request interfaces ens192|ens224 bind-dpdk --yes`（vfio-pci）→
+  声明 + `set vpp dpdk dev` → `commit 成功 (revision 4)` → `request vpp restart`
+  → VPP 两口 up（MTU 9000、driver dpdk）；CLI `show interfaces physical` 同刻同值。
+- 镜像：`request images download`（alpine 云镜像 URL + sha256）→ **ready 179.0 MiB**，
+  落盘文件独立 `sha256sum` = `900c91ed…`（与登记期望逐字一致，即 #185 的「慢链路也能拉完」口径
+  在本轮链路上 4 分钟内跑完）；容器镜像经宿主代理 `docker pull alpine:3.20` → 移除代理 drop-in
+  → `docker save` → `request images upload`（ready）；debian-12 云镜像经代理下载后
+  `request images upload`（ready）。
+
+----- §2 走查覆盖与独立事实源（每条都有第三方事实源，不只信产品自述）-------------------
+| 走查项 | 产品侧 | 独立事实源（逐条对照） |
+|---|---|---|
+| 物理口交数据面 | `show interfaces physical` 两口 up/dpdk/10G | `vppctl show interface`（up、MTU 9000） |
+| L2 交换机 + BVI | `show virtual-switches` | `vppctl show bridge-domain`（BD 4813927、BVI-Intf bvi0） |
+| L3 交换机 + 静态路由 | `show vrfs vs-wan routes` | `vppctl show ip fib`（表内 DPO 逐条核对，**本项抓到 R88-2**） |
+| VNF 定义/启动 | `show virtual-machine-functions` running | `virsh domstate vnf-b` = running；`vppctl show interface` 里 `vh-vnf-b-eth0` up |
+| VNF 数据面（跨 VNF） | — | `vppctl ping 192.168.101.10 source bvi1 repeat 5` → **5 sent / 4 received**（首包丢为 §3.1 已登记环境现象） |
+| console（真 pty） | `request … console` 看到 guest 串口输出（cloud-init 行） | 关闭 console 后 stop 该 VM：MainPID 不变、`NRestarts` 0、服务 active（**round86 #183 的 P0 回归通过**） |
+| VNF 快照 | `request … snapshot create/rollback/delete` | `virsh snapshot-list vnf-a`（同一名字/时间/状态） |
+| vNIC 作 L3 接口 + 跨 VRF NAT | `show nat`（会话表） | `vppctl show nat44 ei sessions`（`192.168.200.10: 1 dynamic`）与 `show nat44 ei interfaces`（`vh-vnf-b-eth0 in` / `ens192 out`） |
+| NAT 端到端（guest → Windows 宿主） | guest 串口自检行 | `R88-NAT 11:01:33 2 packets transmitted, 1 received … 0.578 ms`（guest 内 ping 192.168.155.1） |
+| 抓包 | `request vpp trace start/export` + `show vpp capture` | `tcpdump -nr` 读导出 pcap：`192.168.155.240 > 192.168.155.1 ICMP echo request / reply`（**NAT 转换后的源地址**，宿主真回包） |
+| 容器生命周期 | `show container-functions` running | `docker ps` = `ct-r88 Up … alpine:3.20`；`stop` 后 `Exited (137)` 且**无** critical 告警（#188 回归通过） |
+| 日志/审计 | `show log system/audit` 有真实行 | `journalctl -u nfvis` 同刻有内容（#184 回归通过） |
+| 诊断包 | `request system tech-support generate` | 归档落盘 + `show system tech-support` 列出 |
+| Web 控制台（Browser Use 黑盒） | 登录 → 总览/接口/网络对象/虚拟机/诊断逐页 | 与 CLI/vppctl 同源比对（版本 1.1.49、接口 MTU 9000 与 RxPkts、VM 状态与 libvirt 一致、告警卡与 `show alarms active` 一致、诊断页日志真实行） |
+
+（走查中同时验证了若干既有修复：R84-27/#177 `show nat` 会话可见、#189 接口 MTU 读视图、
+#188 告警生命周期、#184 日志源、#183 console 不夺控制终端、#191 补偿失败进告警。）
+
+----- §3 六条缺陷（R88-1~R88-6）：现象 / 定位 / 修法 / 单测 / 真机复验 -------------------
+
+R88-1（P3，环境交互 + 读视图长期不一致）**VPP 包自带 sysctl 把 1G 大页池撑过内核基线声明值**
+  现象（1.1.49，干净快照首装后即出现）：cmdline 声明 `hugepages=1`（1G），而
+    `show system kernel` 显示「大页 1G：内核基线 1 / 运行实际 4」——池比声明多 3 页。
+    此前被记作「1G 池无主占用（未做回收）」，机制未定位。
+  定位（本轮查清）：VPP 的 deb 装了 `/etc/sysctl.d/80-vpp.conf`，其中 `vm.nr_hugepages=1024`
+    （文件注释写明是给 **2M** 池留的）；而 **`vm.nr_hugepages` 只作用于「默认尺寸」池**。
+    产品内核基线设了 `default_hugepagesz=1G`（1G 池 > 0 时必设）→ 该 sysctl 落到 **1G** 池上，
+    systemd-sysctl 在开机早期按**可用内存尽量分配**（`journalctl -b` 可见 `systemd-sysctl.service`
+    的执行记录）⇒ 1G 池被撑到内存允许的上限。
+  修：产品写内核基线时**同时**维护 `/etc/sysctl.d/90-nfvis-hugepages.conf`，把 `vm.nr_hugepages`
+    钉为**默认尺寸池的声明值**（判据与 `GenerateBaseline` 同源：1G>0 ⇒ 默认尺寸 1G，写 1G 页数；
+    否则写 2M 页数）。文件名序 90 > 80 ⇒ systemd-sysctl 后执行者生效，多余空闲页随之释放；
+    回退基线时该文件一并撤除。生成器单源：`internal/system.GenerateHugepageSysctl` +
+    `nfvisd --print-hugepage-sysctl`（安装器脚本与运行期共用），运行期另有启动补写
+    `EnsureHugepageSysctlFromCmdline`（覆盖「安装期直接写片段、没走 Apply」的首装路径，同 #182 口径）。
+  单测：`kernel_apply_test.go` 两例（双池钉 1G 值且**不得**把 2M 数写给默认尺寸池 / 单 2M 钉 2M /
+  都不托管则不产出；从 cmdline 补写的幂等与撤除）。
+  真机复验（1.1.50~dev1，**对照实验**）：把 1G 声明改为 1 →
+    ① **对照组**（删掉 90 号文件后重启）：cmdline `hugepages=1`，实际 **nr=3**（缺陷复现）+
+       nfvisd 启动时自动重建了钉值文件（本 boot 的 sysctl 已执行完，故本 boot 不生效）；
+    ② **实验组**（有钉值文件时重启）：cmdline `hugepages=1`，实际 **nr=1（free 1）**，
+       `show system kernel` 三方对照「大页 1G：基线 1 / 实际 1」**一致**。
+    随后恢复 1G=4 并复跑，池 = 4（声明值）。
+
+R88-2（P1，功能不可用 + 假绿）**VRF 内静态路由的下一跳解析在默认表，路由恒 drop 而读视图全绿**
+  现象（1.1.49 干净现场，纯产品路径）：`set virtual-switches vs-wan static-routes 10.0.0.0/8
+    next-hop 192.168.155.2` → `commit 成功`；`show vrfs vs-wan routes` 也读得到这一条。
+    但 VPP 侧该路由 **DPO 恒为 `dpo-drop`**、不转发：
+      `vppctl show ip fib index 2 10.0.0.0/8` → `path: recursive: via 192.168.155.2 **in fib:0**`
+    而同一张表（fib 2）里 `192.168.155.2/32` 在 ARP 解析后是 resolved adjacency（fib 0 里始终 drop）。
+  定位：`internal/orchestrator/network/l3_govpp.go` 的 `IPRouteAddDel` 构造 `FibPath` 时**没填
+    `TableID`**（binapi 的 `fib_types.FibPath.TableID` 存在）——递归下一跳在**哪张表**里解析由该
+    字段决定，缺省 0 = 默认表。控制面（`IPRouteDump`）回读正常，所以「命令成功、读视图正常、
+    数据面全丢」，属典型「答非所问」。
+  修：把路径构造抽成纯函数 `recursiveNextHopPaths(tableID, nextHop)` 并填 `TableID: tableID`。
+  单测：`l3_route_table_test.go` 三例（表号必须落到 FibPath、IPv6 分支、非法地址报错）。
+  真机复验（1.1.50~dev1）：同一条命令后 FIB 里 DPO 变为已解析的
+    `ipv4 via 192.168.155.2 ens192: mtu:9000 next:3`（**不再是 dpo-drop**）。
+
+R88-3（P1，改配置的顺序敏感 + 整体回滚 + 数据面残留）**L2 access/trunk 子接口重建不幂等**
+  现象（可稳定复现）：先建好 vs-l2（`type l2` + `vlan access 100` + 端口 ens224）→ commit 成功；
+    之后**再给同一台交换机加一个端口**（本例是 VNF 的 vNIC）→ commit 报
+      `%% 底座下发失败（已补偿）: 下发失败 bridge-domain[vs-l2]: 创建 access 子接口 ens224 vlan 100:
+       VPPApiError: VLAN subif already exists (-56)` → **整次提交失败并回滚**。
+    第二个面：删掉该交换机后，VPP 里长期残留 `ens224.100`（`show interfaces physical` 标「未声明」，
+    产品当时**没有**清理它的路径；`delete interfaces ens224.100` 也报「无匹配配置」）。
+  定位：BD 自身有存在性判断（`ApplyBridgeDomain` 的 `BridgeDomainExists`），但**成员子接口**
+    在 `desiredMembers` 里无条件 `create_subif`——而「按声明全量重放」在交换机定义有任何变化时都会
+    重跑一遍。残留面则是 `DeleteBridgeDomain` 只摘成员、不删子接口。
+  修：① `ensureSubif` 幂等——建之前按真实命名规则 `<父口名>.<vlan>`（`l2ParentIfaceName` +
+    `subifName`，与 L3 侧同规则）查一次，存在即复用，并登记进「本交换机建的子接口」集合；
+    ② 删 BD 后回收该集合（`DeleteSubif`，已不存在按已达成容错），回退/恢复收敛的 `reset`
+    一并清登记。
+  单测：`l2_test.go` 三例（幂等重放：给已建交换机新增端口必须成功且旧端口子接口只建一次 /
+    删交换机回收子接口 / 原有「access vlan 建子接口」仍绿）；假客户端复刻 `-56` 语义与
+    `delete_subif` 的 `-2`。
+  真机复验（1.1.50~dev1）：① 建 vs-l2a（access 200、端口 ens224）后**追加端口 ens192** →
+    `commit 成功 (revision 67)`，VPP 里 `ens224.200`（复用）与 `ens192.200`（新建）并存；
+    ② `delete virtual-switches vs-l2a` → `commit 成功 (revision 68)`，两子接口**都从 VPP 消失**，
+    `show interfaces physical` 只剩两个物理口。
+
+R88-4（P3，读视图缺字段/答非所问）**`/system/status.hostname` 只取配置值，全新安装恒为空**
+  现象（1.1.49 干净安装）：控制台总览「系统 → 主机名」显示 **「—」**，而机器实际主机名是 `nfvis`
+    （`hostname`、`/etc/hostname` 一致）；`GET /api/v1/system/status` 里 `"hostname": ""`。
+  定位：`internal/api/resources_w5.go` 只取 `cfg.System.Hostname`；全新安装没人设过
+    `set system hostname` ⇒ 恒空。形状守护的白名单里当时写着「有意不退回内核 hostname」，
+    但附录 A 并无对应决策（属实现口径未与「面板承诺了该字段」对齐）。
+  修：配置显式值优先，未声明时回退 `os.Hostname()`，两者都取不到才为空串（不编造）——
+    与 #189 接口 MTU 的「配置优先、否则运行态」同一口径。白名单说明与 OpenAPI 字段描述同步。
+  单测：`system_status_hostname_test.go` 两例（未声明 ⇒ 等于 `os.Hostname()`；**显式声明优先**，
+    不能被内核主机名盖掉）。
+  真机复验（1.1.50~dev1）：配置里有套件留下的 hostname ⇒ 返回该配置值（配置优先）；
+    `delete system hostname` 后 ⇒ 返回 **`nfvis`**（= 主机名事实）。
+
+R88-5（P2，界面渲染错误）**控制台网络对象页 VRF 的「路由数」列把对象数组直接渲染成 `[object Object]`**
+  现象（Browser Use 黑盒）：网络对象页 VRF 表里 vs-wan（两条静态路由）的「路由数」列显示
+    **`[object Object],[object Object]`**；而同一页的 ACL「规则数」与 VRF 详情页的「静态路由」
+    计数都是正常数字（同一数据在 detail 用的是 `.length`）。
+  定位：`internal/api/ui/app.js` 的 `NET_OBJECT_VIEWS` 里 VRF 行取值为 `v.routes != null ? v.routes : …`
+    （直接把路由对象数组塞进单元格）。
+  修：取 `v.routes.length`（列名即「路由数」，与详情页口径一致）；加源码守护
+    `TestNetworkObjectsVrfRouteCountRendersNumber`（禁止旧写法回归）。
+  真机复验（1.1.50~dev1，浏览器刷新后）：该列显示 **2**。
+  ⚠️ 附带发现（观察项，非缺陷）：SPA 的 hash 导航不重载页面，升级后**已打开**的旧页面会继续跑旧
+    `app.js`（界面上版本号会随轮询变新，渲染逻辑还是旧的）；手动刷新即恢复。静态资源响应头是
+    `cache-control: no-cache`（策略正确），故这里只是「升级后需刷新」的体验提示。
+
+R88-6（P1，一次清干净做不到 + 依赖容错）**同一提交里删 VNF 与「把它 vNIC 当 L3 接口的交换机」必然失败**
+  现象（清出走查对象时撞上，可稳定复现）：一次提交里
+      `delete virtual-machine-functions vnf-b` + `delete virtual-switches vs-nat`
+    （vs-nat 的 l3-interface 是 `vh-vnf-b-eth0`）→ 报
+      `%% 底座下发失败（已补偿）: 下发失败 del-vrf[vs-nat]: 清理接口 7 地址:
+       VPPApiError: Invalid sw_if_index (-2)`；补偿也失败（本轮 **#191 的机制如实报出**
+      `补偿失败 del-vrf[…]`/`补偿失败 del-bridge-domain[…]` 与原因）。
+    拆开也走不通：先删 VNF ⇒ 校验正确拒绝（悬空引用）；先删交换机 ⇒ 需在别的提交里。
+    用户只能按「先删交换机、再删 VNF、再删其余」三次提交绕行（本轮即如此清场）。
+  定位（两层）：① `internal/orchestrator/apply.go` 的删除段把 `del-vnf-if` 排在 `del-vrf` **之前**，
+    于是被引用的 vNIC 先消失，`DeleteVRF` 清理地址时接口已不在；② `DeleteVRF` 对
+    「接口已不存在」不容错，直接中断整次删除。
+  修：① 删除顺序按**依赖倒序**——`del-vnf-if` 移到 `del-vrf`/`del-bond` **之后**
+    （先解引用、后删被引用）；② `DeleteVRF` 的清地址与 `unbindTableIfaces` 对
+    `isMissingIfaceErr`（`Invalid sw_if_index`/`-2`）按**已达成**容错（接口都没了，地址与表归属
+    自然不存在，属第二道保险）。
+  单测：`apply_test.go` 新增 `TestApplyVnicDeleteAfterVrfThatReferencesIt`（断言
+    `del-vrf:vs-nat` 下标 < `del-vnf-if:vnf-a/eth0` 下标）。
+  真机复验（1.1.50~dev1）：重建同样拓扑（vnf-x + vs-nat2 以其 vNIC 作 l3-interface）→
+    **一次提交**同时删两者 → `commit 成功 (revision 70)`，现场干净（无交换机/无 VNF），
+    `show alarms active` = **（无 active 告警）**（修复前必有补偿失败残渣）。
+
+----- §4 观察项（如实登记，不占缺陷号）--------------------------------------------------
+O-1（P3，可用性）**systemd 看门狗在负载尖峰下会杀服务**：本轮套件跑到阶段 3 的
+  `request images upload`（179MB）时，nfvisd 的登录请求超时（1m30s）→
+  `nfvis.service: Watchdog timeout (limit 30s)!` → systemd 按 Restart=always 杀掉并以 SIGABRT
+  终结（同刻 systemd-resolved/networkd/udevd 等单元也被 SIGABRT，load average 达 8.68）。
+  不是代码崩溃（journal 无 panic/goroutine dump），也**不是本轮修复引入**（该次跑的阶段 2
+  59 条全绿，含本轮改动涉及的交换机/子接口路径）。同一套件在系统 idle 时跑则全绿（见 §5）。
+  建议：`WatchdogSec=30`（interval 15s）在 6 vCPU 小机上遇到「大文件上传 + 并发配置」这类
+  尖峰时偏紧，可评估放宽或用独立于请求路径的喂狗。
+O-2（P3，展示）**`show version` 的 DPDK 恒为「（未探测到）」**：CLI 注释写明「DPDK 无可靠来源」
+  （决策 #118 收口，如实呈现不编造），VPP 26.06 的 `show version verbose` 里也确实没有 DPDK 版本行；
+  CLI 与 Web 总览一致。属已知取舍，登记备查。
+
+----- §5 四套件跑数（**修复前基线** 1.1.49 与 **修复后** 1.1.50~dev1 逐项对照）-------------------
+⚠️ 前置（本轮**两次踩到**，务必照做）：套件会用自己的名字建对象，而**上轮留下的对象会造成假红**——
+  本轮第 1 次跑 fulltest 时我留着自己的 `vs-wan`（占 ens192），套件把 ens192 当 bond0 成员 ⇒ 撞
+  「同一网口角色互斥」的**正确**校验 ⇒ 阶段 2/3/5/6 级联 18 条假红（178/18/11）；清场后同一套件
+  立刻 194/1/12。第 2 次踩坑发生在修复版复跑前（我复验 R88-2/R88-5 时又建了 vs-wan）。
+  结论：**清场（VNF/容器/交换机/bond/NAT/端口镜像全空）是跑套件的硬性前置**。
+
+| 套件 | 1.1.49（修复前） | 1.1.50~dev1（修复后） | 历史基线（round86/87） |
+|---|---|---|---|
+| `cli-fulltest`（命令能不能用） | **194 / 1 / 12** | **194 / 1 / 12** | 194 / 1 / 12 |
+| `cli-semantic-check`（结果对不对） | 11 / 0 / 2（缺现场） | **12 / 0 / 1**（造了业务现场后；无现场时 10/0/3） | 12 / 0 / 1 |
+| `cli-lifecycle-check`（生命周期/组合） | **21 / 0 / 3** | **21 / 0 / 3** | 21 / 0 / 3 |
+| `cli-pty-smoke`（交互/真 pty） | **10 / 10** | **10 / 10** | 10 / 10 |
+
+- fulltest 唯一失败始终是**已登记**的 `show vpp runtime`（govpp runtime 解码限制，附录 A #34）。
+- 语义校验的「不可判定」项全部是**缺正向控制/无对象可对照**（S8 MAC 表需真实流量等），按口径
+  **不计入通过**；为拿到与历史可比的跑数，额外造了业务现场（L2 交换机 + debian VNF 在跑 + 容器在跑 +
+  `vppctl ping … source bvi0` 产生流量，`show l2fib` 显示 2/1 条）后复跑 ⇒ 12/0/1。
+- ⚠️ **一次作废的跑数**（如实记录，并已登记为观察项 O-1）：修复版复跑中有一轮 fulltest 出现
+  **100 通过 / 107 失败**，全部由「`connection refused`」级联——服务在那次跑的中途退出过一次。
+  查 journal：`nfvis.service: Watchdog timeout (limit 30s)!`（systemd 按 Restart=always 以 SIGABRT
+  终结并拉起），同刻 systemd-resolved/networkd/udevd 也被 SIGABRT，`load average` 达 8.68，内核日志
+  有 `watchdog: BUG: soft lockup - CPU#0 stuck for 318s! [kworker/0:0:9]`（与决策 #79 记录的
+  soft lockup 同族：CPU 饱和下 kworker 长自旋）。**不是代码崩溃**（journal 无 panic/goroutine dump），
+  **也不是本轮修复引入**（那次跑的阶段 2 —— 59 条，含本轮改动触及的交换机/子接口/VRF 路径 —— 全绿；
+  卡点出现在阶段 3 的第一条 `request images upload`，179MB 上传叠加负载）。系统 idle 后复跑即
+  194/1/12，且此后 `NRestarts` 不再增长。
+
+
+----- §6 终态环境事实（供下一轮接手）-----------------------------------------------
+- nfvis **1.1.50~dev1** active（**本轮修复版已实装**，用于真机复验；
+  `/root/src/build/nfvis_1.1.50~dev1_amd64.deb` 9,191,544 字节 sha256 `a7caf3bc0108d5c870e278edb3d545455aa30b868959817229d626acc2a04b26`，**SOURCE_DATE_EPOCH=1790700000**）
+  ⚠️ **未提交、未发版**：六条修复在工作区（AGENTS.md / 待办 / 手册 / 附录 A（#194~#199）已同步回写）。
+- 配置库：rev **116**（本轮的走查与复验对象已全部清空——无交换机/VNF/容器/bond/NAT/端口镜像）；
+  镜像保留 3 个可用夹具：`alpine.qcow2`（179.0 MiB，ready）、`alpine:3.20`（容器镜像，ready）、
+  `debian-12-generic-amd64.qcow2`（427.0 MiB，ready）。
+- 已复位到 wizard 基线并重启核对：cmdline `hugepages=4 hugepages=768 isolcpus=2-5`；
+  `show system kernel` 三方**一致**（配置期望 1G=4 / isolated 2-5）；1G 池 `nr=4`、`free=3`
+  （有 1 页为**无主占用**——与 §3.1 记录的「1G 池无主占用」既有现象一致；已用 VPP 侧独立事实排除
+  数据面：`vppctl show memory` 的段全是 2M 与 4K，主堆 512×2M）；
+  2M 池 `nr=768 free=235`（VPP 主堆 + buffer）；`request vpp restart` 后两口回数据面（driver dpdk）。
+- `/etc/sysctl.d/90-nfvis-hugepages.conf` 在位（`vm.nr_hugepages = 4`，由 nfvisd 启动时按 cmdline 声明写）。
+- 管理口令 `O-Qxds9HWDMNyxTW@Aa1`（**随快照恢复而变**，别照抄）；SSH host key 本轮多次因重启/快照
+  陈旧而提示变化，按 §3.8 刷新 known_hosts 即可（**不是产品行为**）。
+- 数据面/夹具之外的环境：`/data/incoming/` 有两个我自己写的 user-data（`vnf-b-ud.sh`/`vnf-c-ud.sh`），
+  可删；VPP 26.06-release 由 `/root/vpp-v26.06-deb/` 安装（安装器闭包自带）。
+- 源码树 `/root/src`：本轮用**工作树 tar 包**同步（含未提交修复，无 .git → 构建须显式传
+  `SOURCE_DATE_EPOCH`）。
+- 观察项 O-1（软锁死/看门狗）在本机**可复现**：密集操作 + 大文件上传时先出现 `soft lockup`，
+  继而 `Watchdog timeout` 杀 nfvisd；排查时先看 `journalctl -k | grep soft lockup` 与 load。
+
+================================================================================
+§7 round88 追加（同轮）：`show vpp runtime` 落地 + 大页 sysctl 单一事实源
+（用户点名两问：「runtime 能修吗」「大页声明能否全由 nfvis 控制」；两条都是设计级改动，
+  先查数据源再动手 —— 决策 #200 / #201，修复版 1.1.50~dev2/~dev5 真机复验）
+================================================================================
+
+① `show vpp runtime`（此前是「%% VPP runtime 统计未接入」占位，cli-fulltest 长期**唯一一条 ✗**）
+
+   数据源实测（VPP 26.06-release，nfvis-vm）：
+   · **按节点**明细（`show runtime` 主体那张 Calls/Vectors/Suspends/Packet-Clocks 表）**没有结构化来源**：
+       - `vpp_get_stats dump machine "/*"` 全量 **18090 条**里没有任何 `/sys/node/*` 或 runtime 类路径；
+       - govpp v0.13.0 的 module cache 里**没有 runtime 的 binapi 包**（无二进制 API 可用）；
+       - 本机 `vpp_plugins/` 里也没有 `runtime_plugin.so`——`show runtime` 是 vlib 内核数据、由 vppctl 直读。
+   · **线程级**运行态在 stats segment 里有，且与 `show runtime` 每线程汇总行同源：
+       `/sys/vector_rate`、`/sys/vector_rate_per_worker`、`/sys/loops_per_worker`（后两条是**组合计数**，
+       按线程索引一条，索引 0 = 主线程、1..N = 工作线程）、`/sys/num_worker_threads`、`/sys/boottime`。
+       实测对照（同一时刻附近采样）：产品读到主线程 loops 420873 / 工作线程 7671480，
+       `vppctl show runtime` 给 290325.85 / 7536236.03 —— 同量级同步调。
+
+   实现：`state.RuntimeStats` + `network.ParseStatsPerThread` / `RuntimeStatsFromDump`（纯函数）+
+     `show vpp runtime [thread <id>]` 渲染；数据源走既有的同版本工具 `vpp_get_stats`（决策 #68 的通道，
+     组合计数正是 statsclient 在 26.06 上解不出的那类值类型）。**不解析 vppctl 文本**，按节点明细在输出里
+     如实说明需 `vppctl show runtime`，不假装有。
+
+   真机复验（1.1.50~dev2）：
+   · 有流量（300 个 ICMP 穿过 VPP）→ `vector rate: 2.00`、两线程 `VectorRate 1.00`；
+   · 空载 → `vector rate: 0.00`；`uptime` 随 /sys/boottime 变化（3164s）；
+   · `show vpp runtime thread 0` 只列主线程；`show vpp runtime thread 9` →
+     `% 无线程 9 的运行态（可用线程：0,1）`（不静默给空表）。
+   测试：`runtime_stats_test.go` 4 例（用**真机 dump 原文**：值在第 4 段、简单计数不得混入组合表、
+     无运行态计数时宁缺勿错、boottime 缺失/未来时刻不给负数）、`cli_vpp_runtime_test.go` 3 例
+     （有数据时不得出现行首 `%`、过滤与不存在的线程、不可用时 `%%` + 原因）；
+     该命令补进 `cli_contract_coverage_test.go` 的契约命令清单。
+   套件效果：`cli-fulltest` 从 **194/1/12 → 195/0/12**（round80 以来那条唯一 ✗ 归零）。
+     附注：CLI 命令全表里这条的「⚠️ 未接入」登记与手册三处「未接入」说明已同步更新，
+     已知缺口计数 3 → 2。
+
+② 大页池 sysctl 的单一事实源（接管 vpp 包的 conffile；承接 #199）
+
+   事实：`/etc/sysctl.d/80-vpp.conf` 是 **vpp 包的 conffile**（dpkg 记录了 md5），其**生效内容只有两行**
+     —— `vm.nr_hugepages=1024`（本轮问题源）与 `vm.hugetlb_shm_group=0`（root 组可访问大页），
+     其余（`vm.max_map_count`、`kernel.shmmax`）全是注释。`dpkg-divert` 是 dpkg 官方机制且本机已在用
+     （libreadline8t64）。
+   实现：postinst `dpkg-divert --package nfvis --add --rename --divert …80-vpp.conf.vpp-disabled …80-vpp.conf`
+     （**幂等**；失败只提示不阻断安装，因为 90 号钉值仍在），prerm 的 `remove|deconfigure` 分支
+     `--remove --rename` 还原，postrm 的 `purge` 分支删掉产品自己的 90 号文件；90 号文件同时**接管**
+     `vm.hugetlb_shm_group = 0`。
+   ⚠️ 过程中真机抓到一处自伤：第一版幂等守卫写成 `[ -e /etc/sysctl.d/80-vpp.conf ]`——接管之后该路径
+     本就不存在，于是「已接管」这条日志永远不会出现（行为正确、可观测性错）。判据改为 **diversion 记录**
+     （`dpkg-divert --list <path>`）后才正确。
+
+   真机复验（1.1.50~dev2~dev5，**装/幂等/卸/重装/重启**全链路）：
+   · 首装（从已卸载态）：`已接管 /etc/sysctl.d/80-vpp.conf（挪到 .vpp-disabled；大页池由 NFViS 单源声明）`，
+     `/etc/sysctl.d/` 里只剩 `80-vpp.conf.vpp-disabled` + 我们的 90 号文件；
+   · 覆盖安装：`大页池 sysctl 已由 NFViS 接管（…vpp-disabled）`（幂等分支，diversion 仍只一条）；
+   · `dpkg -r nfvis`：`已还原 /etc/sysctl.d/80-vpp.conf（vpp 包自带的 sysctl 恢复原位）`，
+     diversion 清零、`80-vpp.conf` 回到原路径；
+   · **接管后的对照实验（决定性问题）**：把产品自己的 90 号文件移走、cmdline 声明 `hugepages=1` →
+     池 **nr=1**；而接管前同一条件是 **nr=3**（被 vpp 的 1024 撑大）⇒ 撑大机制**彻底消失**，
+     不只是"被压回"；重启后 nfvisd 又按 cmdline 补写了 90 号文件（启动单源补写仍生效）；
+   · 恢复声明 4 + 重启：`1G nr=4`、`vm.nr_hugepages=4`、`vm.hugetlb_shm_group=0`，服务 active；
+     `/etc/sysctl.d/` 只剩被接管的 vpp 件与 90 号文件 ⇒ 开机期不再有"先撑大再回缩"的抖动。
+   测试：`kernel_apply_test.go` 断言 90 号内容含 `vm.nr_hugepages = <默认尺寸池声明值>` 与
+     `vm.hugetlb_shm_group = 0`；`check_maint_scripts.sh`（顶层 exit 后可执行语句守护）在改动后仍通过。
+
+----- §7 的四套件跑数（1.1.50~dev5）--------------------------------------------------
+| 套件 | 结果 | 与历史基线 |
+|---|---|---|
+| `cli-fulltest` | **195 / 0 / 12** | 194/1/12 → **唯一那条 ✗ 转绿**（历史最好） |
+| `cli-semantic-check` | **12 / 0 / 1**（造业务现场：L2 交换机 + debian VNF 在跑 + 容器在跑 + `vppctl ping … source bvi0` 产生流量）｜无现场时 10 / 0 / 3 | 与历史基线一致 |
+| `cli-lifecycle-check` | **21 / 0 / 3** | 与历史基线一致 |
+| `cli-pty-smoke` | **10 / 10** | 与历史基线一致 |
+服务：本轮改动（含多次装/卸/重启）期间除按设计的重启外**零意外重启**。
+
+----- §7 附：本轮被既有守护各抓到一次（说明守护确实在干活，已按判据修正）-------------------
+1. **`internal/archtest/user_text_test.go`（操作者可见文本不得含内部引用）**：
+   我一度把「（决策 #200）」写进了**随包用户手册**的两行表格里 —— 操作者读不懂决策号，
+   且那属于「需求可追溯写在注释与设计类 docs 里」的口径。守护红 → 手册里删掉决策号，
+   只留操作者视角的说明（"给线程级运行态，无逐节点明细；需要时用 vppctl show runtime"）。
+2. **`internal/api/cli_rest_coverage_test.go`（契约命令必须归类）**：
+   新增可用的 `show vpp runtime` 后，它原本躺在 **`cliRESTGaps`（缺口表）**里（"两边都未接入"，
+   已过期）→ 现移入 **`cliRESTExceptions`（CLI-only by design）** 并写明理由：数据源是本机
+   stats segment（`vpp_get_stats`），不经 HTTP 端点；Web 控制台的「数据面」卡用的是
+   `/vpp/status`（版本/线程/内存同源）。`thread <id>` 变体一并登记。
+（两条都是**测试先红、按判据修改文档/登记**，没有放宽守护。）

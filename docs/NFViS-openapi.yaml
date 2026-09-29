@@ -1990,7 +1990,7 @@ components:
         系统状态摘要。数据源与 CLI 的 `show system uptime|cpu|memory|storage` **同源**
         （`internal/metrics.HostMetrics()`，Linux 采集），`hugepages` 与 `/resource-pools` 同源。
       properties:
-        hostname: { type: string }
+        hostname: { type: string, description: 配置声明的 system.hostname 优先；未声明时回退主机实际主机名（os.Hostname）；两者都取不到时为空串（不编造） }
         uptime_seconds: { type: integer, description: 主机运行时长（/proc/uptime，与 CLI `show system uptime` 同源；非 Linux 取不到时退回守护进程运行时长） }
         config_ready: { type: boolean, description: 配置库可用（已建库且可读 committed） }
         cpu:

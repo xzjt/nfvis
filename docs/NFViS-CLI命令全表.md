@@ -4,8 +4,8 @@
 |---|---|
 | 用途 | **命令参考全表**：把 CLI 命令树逐条列出，附权限、落点与**真机实测状态** |
 | 来源 | 命令树取自实现（`internal/schema/tree_oper.go`、`internal/schema/tree_config.go`，即 `?` 补全与 `cli_bridge` 前置校验的真实来源）；契约见 `docs/NFViS-CLI命令树完整设计.md`；REST 落点对照见 `docs/NFViS-openapi.yaml` 与 `internal/api/server.go` 的路由注册 |
-| 实测状态 | 来自 **2026-09-25 round80 真机实测**（nfvis-vm，修复后开发态实例）：`contrib/scripts/cli-fulltest.sh`（全功能 CLI 套件，**通过 195 / 失败 1 / 预期报错 5**；唯一失败是已登记的 `show vpp runtime`）+ `contrib/scripts/cli-pty-smoke.sh`（pty 交互冒烟，**通过 10 / 失败 0**）。**上一轮（2026-09-14）的状态已过期**，本表一律以 round80 为准 |
-| 基线 | main（提交 `f46d291` 之后的工作树）；决策 **153** 项 |
+| 实测状态 | 来自 **2026-09-29 round88 真机实测**（nfvis-vm，已装发布件走查 + 修复版复验）：`contrib/scripts/cli-fulltest.sh`（全功能 CLI 套件，**通过 195 / 失败 0 / 预期报错 12** —— `show vpp runtime` 已实现，全表**首次无失败**）+ `contrib/scripts/cli-pty-smoke.sh`（pty 交互冒烟，**通过 10 / 失败 0**）+ `cli-semantic-check.sh` **12 / 0 / 1**、`cli-lifecycle-check.sh` **21 / 0 / 3**。**更早轮次的状态已过期**，本表**上一轮（2026-09-14）的状态已过期**，本表一律以 round80 为准 |
+| 基线 | main（round88 修复版工作树）；决策 **201** 项 |
 
 ## 0. 阅读约定
 
@@ -87,7 +87,7 @@
 | `show qos policies` | 限速策略与绑定 | `GET /qos/policies` | ✅ |
 | `show vpp` | 数据面概览：**版本/连接/待重启**/线程/buffer/内存 | `GET /vpp/status` | ✅（发现 #11 补齐前三项） |
 | `show vpp threads` | main/worker 线程清单与绑核 | 运行态（govpp threads） | ✅ |
-| `show vpp runtime [thread <id>]` | 每线程向量率/指令周期 | 运行态（govpp runtime） | ⚠️ **未接入**（附录 A #34；CLI 明确提示）。round80 套件里**唯一一条 ✗**——已登记缺口，不是本轮回归 |
+| `show vpp runtime [thread <id>]` | **线程级**运行态：每线程向量率/主循环速率 + 整机向量率 + 工作线程数 + 数据面运行时长 | 运行态（stats segment，经 `vpp_get_stats` 解码，与 buffer/接口计数同源） | ✅（决策 #200；按节点明细无结构化来源，CLI 如实说明需 `vppctl show runtime`） |
 | `show vpp buffers` | buffer 池（每 NUMA）用量；打印统计来源 | 运行态（statsclient ‖ `vpp_get_stats`，决策 #68） | ✅ |
 | `show vpp memory` | main-heap 与 hugepage 占用 | 运行态 | ✅ |
 | `show vpp capture` | 抓包会话状态与已导出 pcap 清单 | `GET /vpp/capture` | ✅ |
@@ -428,16 +428,21 @@
 | 状态 | 行数 | 逐条 |
 |---|---|---|
 | ✅ 实测通过 | 239 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归） |
-| ⚠️ 已知缺口 | 3 | `show vpp runtime`（未接入）、`show configuration [permissions <class>]`（按 class 视角未实现，明确提示）、`request system api token revoke`（V1 仅提示，逐 token 随 V2）；`show \| display set` 已由决策 #155 实现、移出缺口 |
+| ⚠️ 已知缺口 | 2 | `show configuration [permissions <class>]`（按 class 视角未实现，明确提示）、`request system api token revoke`（V1 仅提示，逐 token 随 V2）；`show \| display set` 已由决策 #155 实现、`show vpp runtime` 已由决策 #200 实现，均移出缺口 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
 | 🚫 本轮未执行 | 12 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`format-data`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`）与需交互者（VM/容器删除确认、改密） |
 
-round80 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
-**通过 195 / 失败 1 / 预期报错 5**（阶段 1 的 41/1/0、阶段 2 的 59/0/0、阶段 3 的 7/0/0、
-阶段 4 的 34/0/2、阶段 5 的 43/0/3、阶段 6 的 11/0/0）；
-**唯一失败**是已登记的 `show vpp runtime` 未接入；**5 条预期报错**是「运行中快照被拒」（1）、
-「无 PF/VF 时 `request sriov create-vfs` 明确报错」（1）、「目标不可达时 `ping` 报失败」（3）。
-pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**。
+round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
+**通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
+阶段 4 的 33/0/8、阶段 5 的 42/0/4、阶段 6 的 11/0/0）——**首次全阶段零失败**：
+`show vpp runtime` 已实现（线程级运行态；按节点明细无结构化来源，CLI 如实说明），
+round80 以来那条唯一 ✗ 归零。
+**12 条预期报错**都是「环境受限或防呆守卫正确拒绝」：运行中快照被拒（1）、
+无 PF/VF 时 `request sriov create-vfs`（1）、非交互下的高危动作需 `--yes`/确认词
+（`reboot`/`shutdown`/`zeroize`/`software rollback`/`unbind-dpdk`，5）、镜像被引用（1）、
+目标不可达时 `ping` 报失败（3）、`show configuration permissions <class>` 暂未实现（1）。
+pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**；
+语义校验 **12 / 0 / 1**、生命周期与组合 **21 / 0 / 3**（有业务现场时跑）。
 
 ---
 
@@ -448,7 +453,7 @@ pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**
    用目录名则下发 Docker API 404（`docker: not found`），用 tag 则被校验拒为「仓库中不存在镜像」。
    唯一可用组合是上传时 `name` 恰好写成 tag（如 `alpine:3.20`）。**待产品决策**（规格书 §12 V2）。
 
-② `show vpp runtime` 未接入（govpp runtime 解码，附录 A #34）——CLI 明确提示「VPP runtime 统计未接入」。
+② `show vpp runtime` **已实现（决策 #200）**：给**线程级**运行态（每线程向量率/主循环速率、整机向量率、工作线程数、数据面运行时长），数据源为 stats segment（经 `vpp_get_stats` 解码，与 buffer/接口计数同源）；VPP 26.06 的**按节点**明细无结构化来源，CLI 如实说明需 `vppctl show runtime`。round80 那条唯一 ✗ 随之关闭。
    round80 套件里**唯一一条 ✗**，属已登记缺口，不是本轮回归。
 
 ③ `request sriov delete-vfs` 收下 `vf <n>` 但**按数量回收**（编号不参与定位），

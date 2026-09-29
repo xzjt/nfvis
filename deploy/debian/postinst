@@ -91,6 +91,26 @@ if [ -x "$SSH_HARDEN" ]; then
     sh "$SSH_HARDEN" --apply || log "提示：SSH 强化未完成（见上方输出）；可稍后执行 $SSH_HARDEN --apply 重试"
 fi
 
+# 8) 大页池 sysctl 的单一事实源（决策 #199/#201）：把 vpp 包自带的
+#    /etc/sysctl.d/80-vpp.conf 接管走。它的 vm.nr_hugepages=1024 是给 **2M** 池写的，而这枚
+#    sysctl 只作用于**默认尺寸**池——产品内核基线设了 default_hugepagesz=1G 时它落到 1G 池上，
+#    开机按可用内存尽量分配，1G 池因此大于声明值（真机首装现场：声明 1、实际 4）。接管后
+#    vm.nr_hugepages 只由 nfvisd 维护的 90 号文件声明，不再依赖文件名排序、也没有开机期
+#    「先撑大再回缩」的抖动。**幂等**（已接管则跳过）；卸载时由 prerm 还原。失败不阻断安装。
+VPP_SYSCTL=/etc/sysctl.d/80-vpp.conf
+if command -v dpkg-divert >/dev/null 2>&1; then
+    if dpkg-divert --list "$VPP_SYSCTL" 2>/dev/null | grep -q "$VPP_SYSCTL"; then
+        # 已接管：二次安装/升级走这里。判据是 **diversion 记录**而非「原路径还在不在」——
+        # 接管之后原路径本就不存在，若用 [ -e ] 当守卫，这条日志永远不会出现（实测踩到）。
+        log "大页池 sysctl 已由 NFViS 接管（$VPP_SYSCTL.vpp-disabled）"
+    elif [ -e "$VPP_SYSCTL" ] && dpkg-divert --package nfvis --add --rename \
+            --divert "${VPP_SYSCTL}.vpp-disabled" "$VPP_SYSCTL" >/dev/null 2>&1; then
+        log "已接管 $VPP_SYSCTL（挪到 .vpp-disabled；大页池由 NFViS 单源声明）"
+    elif [ -e "$VPP_SYSCTL" ] || [ -e "${VPP_SYSCTL}.vpp-disabled" ]; then
+        log "提示：$VPP_SYSCTL 接管失败——大页池钉值仍由 /etc/sysctl.d/90-nfvis-hugepages.conf 保证"
+    fi
+fi
+
 # 9) libvirt AppArmor 助手放行 NFViS 路径：Ubuntu 的 virt-aa-helper 默认只放行
 #    /var/lib/libvirt/images 等，NFViS 的镜像/VM 磁盘在 /var/lib/nfvis 下——不放行则 VM 启动被
 #    AppArmor 拒读。规则只写在 nfvisd 里（单源），此处调用同一实现；nfvisd 运行期还会**周期复核**
