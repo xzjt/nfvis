@@ -434,9 +434,13 @@ func formatScalar(v any) string {
 }
 
 // quoteStatementToken 取值 token 的引号规则与语句分词器 splitFieldsQuoted 对偶：
-// 含空白/引号/反斜杠或为空的 token 必须加引号（内部 " 与 \ 转义）。
+// 含空白/换行/引号/反斜杠或为空的 token 必须加引号（内部 " 与 \ 转义）。
+//
+// 换行必须纳入加引号的字符集（决策 #313）：多行取值（如内联的 user-data）若不引号，
+// display set 会把值直接铺成多行，经脚本切句后不再是同一条语句、回放即不等；
+// 加引号后 `cliparse.SplitStatements` 会把跨行引号值并回整段（值内换行保留）。
 func quoteStatementToken(s string) string {
-	if s != "" && !strings.ContainsAny(s, " \t\"\\") {
+	if s != "" && !strings.ContainsAny(s, " \t\r\n\"\\") {
 		return s
 	}
 	var b strings.Builder

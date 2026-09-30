@@ -103,6 +103,21 @@ const (
 	CTStateAbsent  = "absent"
 )
 
+// VMStartProbe 启动动作受理后的**结果回读**（决策 #311）。
+//
+// 启动仍异步受理（REST 202），但受理后在**有界探测窗口**内回读域状态；达到运行态即返回
+// OK=true（正常路径语义与耗时不变）；窗口内停在非预期态（paused/crashed/shutoff/absent）
+// 即报失败，并尽可能给出**可诊断原因**与恢复建议。诊断只取事实（libvirt 状态/reason +
+// 域日志摘录），取不到就留空并给日志路径，不臆测。
+type VMStartProbe struct {
+	OK      bool     // 是否到达预期运行态（running/blocked）
+	State   string   // 回读到的运行态（契约枚举；absent = 域已不存在）
+	Reason  string   // libvirt 状态与 reason 的可读文本，如 "paused (starting up)"
+	Detail  string   // 补充诊断（libvirt 域日志末尾摘录）；取不到时为空
+	LogPath string   // 域日志位置（Detail 为空时供操作者自查）
+	Hints   []string // 恢复建议（产品已验证的可照做路径）
+}
+
 // ComputeProvider libvirt/KVM 侧编排接口。
 //
 // DefineVM 为声明式且幂等：按 (vm, alloc) 组装 domain XML 并 DomainDefineXML

@@ -111,6 +111,28 @@ func TestRunScriptWarningIsMarkedNotParsed(t *testing.T) {
 	}
 }
 
+// TestRunScriptMultilineQuotedValue 决策 #313：引号跨行的取值按**整段**执行——
+// 多行 user-data 内联时，后续行必须是同一条语句的一部分（值内保留换行），
+// 而不是被当成新命令逐条执行（旧行为：静默只取首行）。
+func TestRunScriptMultilineQuotedValue(t *testing.T) {
+	be := &scriptBackend{}
+	sess := cli.New(be, "ssh")
+
+	script := "configure\n" +
+		"set virtual-machine-functions fw-vm cloud-init user-data \"#!/bin/sh\n" +
+		"echo hi\"\n" +
+		"commit"
+	if failed := runScriptLines(sess, script); failed {
+		t.Fatalf("多行引号值脚本不该失败，实执行 %v", be.executed)
+	}
+	if len(be.executed) != 3 {
+		t.Fatalf("应执行 3 条语句（configure / set 多行值 / commit），实得 %d 条：%#v", len(be.executed), be.executed)
+	}
+	if !strings.Contains(be.executed[1], "#!/bin/sh\necho hi") {
+		t.Fatalf("多行值应保留换行并作为一条语句执行，实得 %q", be.executed[1])
+	}
+}
+
 // TestRunScriptStillRefusesConfirmPrompt 破坏性动作的非交互问询仍按失败处理（不得因本轮改动放宽）。
 func TestRunScriptStillRefusesConfirmPrompt(t *testing.T) {
 	const del = "request virtual-machine-functions fw-vm delete"

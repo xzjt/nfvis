@@ -16,6 +16,10 @@ import (
 type fakeVM struct {
 	states  map[string]string
 	actions []string
+	// startProbe 非 nil 时 StartVMChecked 返回它（决策 #311 的失败诊断测试）；
+	// nil 表示正常启动（OK、无诊断字段）。
+	startProbe *orchestrator.VMStartProbe
+	startErr   error
 }
 
 func newFakeVM() *fakeVM { return &fakeVM{states: map[string]string{}} }
@@ -30,6 +34,20 @@ func (f *fakeVM) StartVM(_ context.Context, name string) error {
 	f.actions = append(f.actions, "start:"+name)
 	f.states[name] = orchestrator.VMStateRunning
 	return nil
+}
+
+// StartVMChecked 决策 #311：默认正常启动（OK）；测试可注入 startProbe 模拟非预期态。
+func (f *fakeVM) StartVMChecked(_ context.Context, name string) (orchestrator.VMStartProbe, error) {
+	f.actions = append(f.actions, "start-checked:"+name)
+	if f.startErr != nil {
+		return orchestrator.VMStartProbe{}, f.startErr
+	}
+	if f.startProbe != nil {
+		f.states[name] = f.startProbe.State
+		return *f.startProbe, nil
+	}
+	f.states[name] = orchestrator.VMStateRunning
+	return orchestrator.VMStartProbe{OK: true, State: orchestrator.VMStateRunning}, nil
 }
 func (f *fakeVM) StopVM(_ context.Context, name string) error {
 	f.actions = append(f.actions, "stop:"+name)
@@ -157,6 +175,65 @@ func TestVMLifecycleEndpoints(t *testing.T) {
 	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/virtual-machine-functions", token, nil, nil)
 	if status != http.StatusOK || strings.Contains(string(data), "fw-vm") {
 		t.Fatalf("删除后列表应为空: %s", data)
+	}
+}
+
+// TestVMActionStartSurfacesDiagnosis 决策 #311：启动停在非预期态时，REST 用既有 Error 形状
+// （500 VM_START_FAILED + detail[]）如实透出域状态、日志摘录与恢复建议。
+func TestVMActionStartSurfacesDiagnosis(t *testing.T) {
+	fake := newFakeVM()
+	fake.startProbe = &orchestrator.VMStartProbe{
+		OK:      false,
+		State:   orchestrator.VMStatePaused,
+		Reason:  "paused (starting up)",
+		Detail:  "qemu: vhost-user: connect failed",
+		LogPath: "/var/log/libvirt/qemu/fw-vm.log",
+		Hints:   []string{"确认数据面 VPP 正在运行", "request vpp restart 后重新 start"},
+	}
+	ts := newTestServerOpts(t, Options{VM: fake})
+	token := loginAdmin(t, ts)
+	seedVMPool(t, ts, token)
+	cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		vmBody("fw-vm"), map[string]string{"X-NFVIS-Auto-Commit": "true"})
+
+	status, _, data := cfgRequest(t, http.MethodPost,
+		ts.URL+APIPrefix+"/virtual-machine-functions/fw-vm:start", token, nil, nil)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("停在非预期态应 500: %d %s", status, data)
+	}
+	for _, want := range []string{"VM_START_FAILED", "paused", "starting up",
+		"vhost-user", "/var/log/libvirt/qemu/fw-vm.log", "request vpp restart"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("响应应含 %q：%s", want, data)
+		}
+	}
+	// 失败必须入审计（failure）。
+	_, _, alog := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/audit-logs?limit=50", token, nil, nil)
+	if !strings.Contains(string(alog), "vm.start") {
+		t.Errorf("启动失败应入审计: %s", alog)
+	}
+}
+
+// TestVMActionStartNormalShapeUnchanged 正常启动：仍 202 且响应体与既有逐字一致
+// （决策 #311：正常路径不因探测而改变输出）。
+func TestVMActionStartNormalShapeUnchanged(t *testing.T) {
+	fake := newFakeVM()
+	ts := newTestServerOpts(t, Options{VM: fake})
+	token := loginAdmin(t, ts)
+	seedVMPool(t, ts, token)
+	cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		vmBody("fw-vm"), map[string]string{"X-NFVIS-Auto-Commit": "true"})
+
+	status, _, data := cfgRequest(t, http.MethodPost,
+		ts.URL+APIPrefix+"/virtual-machine-functions/fw-vm:start", token, nil, nil)
+	if status != http.StatusAccepted {
+		t.Fatalf("正常启动应 202: %d %s", status, data)
+	}
+	if !strings.Contains(string(data), `"status":"starting"`) || !strings.Contains(string(data), `"name":"fw-vm"`) {
+		t.Fatalf("正常启动响应体应保持既有形状: %s", data)
+	}
+	if strings.Contains(string(data), "VM_START_FAILED") || strings.Contains(string(data), "vm_state") {
+		t.Fatalf("正常启动不应带诊断字段: %s", data)
 	}
 }
 

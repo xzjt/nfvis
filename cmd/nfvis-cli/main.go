@@ -15,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/xzjt/nfvis/internal/cli"
+	"github.com/xzjt/nfvis/internal/cliparse"
 	"github.com/xzjt/nfvis/pkg/cliclient"
 )
 
@@ -170,11 +171,15 @@ func runScript(session *cli.Session, script string) {
 	}
 }
 
-// runScriptLines 逐行执行脚本，返回是否失败（失败即已停止，后续行不执行）。
+// runScriptLines 逐条语句执行脚本，返回是否失败（失败即已停止，后续语句不执行）。
 // 与 runScript 分开是为了可单测（后者收尾后直接 os.Exit）。
 // 入参 script 已由 resolveScript 归一（CRLF/孤立 CR → LF、剥 BOM），`-c` 与 `-f` 共用本函数。
+//
+// 切句用 cliparse.SplitStatements（决策 #313）：**按未引用的换行**切，引号未闭合时把后续行
+// 并入同一语句——这样多行引号值（如内联的 user-data）取整段、值内保留换行；此前按 `\n` 盲切
+// 会把值只当首行、其余行当命令执行（静默截断）。
 func runScriptLines(session *cli.Session, script string) (failed bool) {
-	for _, line := range strings.Split(script, "\n") {
+	for _, line := range cliparse.SplitStatements(script) {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

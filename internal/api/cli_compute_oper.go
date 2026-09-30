@@ -27,6 +27,7 @@ import (
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/images"
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator"
 	"github.com/xzjt/nfvis/internal/schema"
 )
 
@@ -133,6 +134,8 @@ func (x *cliExecutor) requestVM(user, class, source string, t []string) string {
 			return errComputeUnavailable
 		}
 		ctx := context.Background()
+		// probe 仅在 start 路径上有值（决策 #311）：受理后回读域状态，非预期态按失败报出。
+		var probe *orchestrator.VMStartProbe
 		switch action {
 		case "start":
 			// 启动前按当前配置重建 cloud-init seed（决策 #114）：user-data 可为文件路径，
@@ -142,7 +145,11 @@ func (x *cliExecutor) requestVM(user, class, source string, t []string) string {
 					return "%% " + err.Error() + "\n"
 				}
 			}
-			err = x.vm.StartVM(ctx, name)
+			pr, perr := x.vm.StartVMChecked(ctx, name)
+			err = perr
+			if perr == nil {
+				probe = &pr
+			}
 		case "stop":
 			err = x.vm.StopVM(ctx, name)
 		case "restart":
@@ -153,8 +160,15 @@ func (x *cliExecutor) requestVM(user, class, source string, t []string) string {
 			}
 			err = x.vm.RestartVM(ctx, name)
 		}
+		// 启动回读到非预期态 = 失败（审计记 failure）；诊断文案与 REST 同源。
+		if err == nil && probe != nil && !probe.OK {
+			err = fmt.Errorf("启动后未达到运行态（%s）%s", probe.State, probe.Reason)
+		}
 		x.audit(user, "vm."+action, fmt.Sprintf("%s VM %s", action, name), err)
 		if err != nil {
+			if probe != nil && !probe.OK {
+				return "%% " + vmStartFailureCLIText(name, *probe) + "\n"
+			}
 			return "%% " + err.Error() + "\n"
 		}
 		x.publishState("virtual-machine-functions", name, action+"ing") // M5-1：CLI 直连动作也发事件
@@ -439,7 +453,23 @@ func (x *cliExecutor) imagesUpload(user string, rest []string) string {
 	if err != nil {
 		return "%% " + err.Error() + "\n"
 	}
-	return fmt.Sprintf("镜像 %s 导入完成（类型 %s，大小 %s）\n", m.Name, m.Type, humanSize(m.SizeBytes))
+	out := fmt.Sprintf("镜像 %s 导入完成（类型 %s，大小 %s）\n", m.Name, m.Type, humanSize(m.SizeBytes))
+	if m.Type == images.TypeContainer {
+		out += containerTagNote(m.Name, m.SourceTags)
+	}
+	return out
+}
+
+// containerTagNote 容器镜像导入后的命名说明（决策 #312）：产品按仓库目录项名重打标签
+// `<名>:latest`（决策 #160），故配置里唯一可用名就是目录项名；归档内嵌 tag 如实列出，
+// 让「tar 里的 tag 去哪了」有据可查（重命名不再静默）。
+func containerTagNote(name string, tags []string) string {
+	if len(tags) == 0 {
+		return fmt.Sprintf("（容器镜像）已按仓库名重打标签 %s:latest；归档未内嵌 tag（或未解析到 manifest.json）——配置中请用 %s 引用。\n",
+			name, name)
+	}
+	return fmt.Sprintf("（容器镜像）归档内嵌 tag 为 %s；已按仓库名重打标签 %s:latest——配置中请用 %s 引用。\n",
+		strings.Join(tags, ", "), name, name)
 }
 
 // imagesDownload：request images download name <n> type <t> url <url> [sha256 <hex>]

@@ -62,6 +62,12 @@ type Meta struct {
 	DownloadedBytes int64  `json:"downloaded_bytes,omitempty"` // 已下载字节（含续传的断点）
 	TotalBytes      int64  `json:"total_bytes,omitempty"`      // 服务端声明的总字节（未知为 0）
 	LastError       string `json:"last_error,omitempty"`       // 失败原因（failed 必填；ready 时可载清理告警）
+
+	// SourceTags 容器镜像归档（docker save）内嵌的 tag（决策 #312）。
+	// 导入时产品按仓库目录项名重打标签 `<name>:latest`（决策 #160），故配置里唯一可用名就是
+	// `name`；本字段把来源 tag 显式登记下来（不再静默改名）。归档无 tag 或未解析到 manifest.json
+	// 时**省略**——如实说没有，不编造。
+	SourceTags []string `json:"source_tags,omitempty"`
 }
 
 // Store 镜像仓库（并发安全）。
@@ -321,6 +327,9 @@ func (s *Store) ImportIncoming(name, typ, incomingFile, description string) (Met
 		return Meta{}, err
 	}
 	if typ == TypeContainer {
+		// 读出归档内嵌 tag（决策 #312）：用于**说明**（重命名不再静默），不作放行判据——
+		// 读不到只如实记「未解析到」，不阻断导入（放行看 docker load 是否成功）。
+		tags, _ := ReadDockerArchiveTags(abs)
 		if err := s.dockerLoad(abs, name); err != nil {
 			return Meta{}, fmt.Errorf("docker load %s: %w", name, err)
 		}
@@ -328,7 +337,7 @@ func (s *Store) ImportIncoming(name, typ, incomingFile, description string) (Met
 			return Meta{}, fmt.Errorf("导入后清理 %s: %w", incomingFile, err)
 		}
 		m := Meta{Name: name, Type: typ, SizeBytes: size, SHA256: sha, Format: "docker-archive",
-			Description: description, ImportedAt: s.now().UTC(), ImportState: StateReady}
+			Description: description, ImportedAt: s.now().UTC(), ImportState: StateReady, SourceTags: tags}
 		if err := s.setMeta(m); err != nil {
 			return Meta{}, err
 		}

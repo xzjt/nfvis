@@ -3,6 +3,7 @@ package compute
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,6 +54,47 @@ func (qemuStorage) CreateBlank(ctx context.Context, diskPath string, sizeGB int)
 }
 
 func (qemuStorage) RemoveAll(p string) error { return os.RemoveAll(p) }
+
+// ReadTail 读取文件末尾 maxLines 行（决策 #311：libvirt 域日志摘录）。
+// 读不到即返回 error（调用方如实说「取不到」，不编造内容）。日志可能很大，按块从尾部读。
+func (qemuStorage) ReadTail(p string, maxLines int) (string, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if maxLines <= 0 {
+		maxLines = 20
+	}
+	const chunk = 32 << 10
+	st, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	size := st.Size()
+	var collected []byte
+	off := size
+	for int64(len(collected)) < 64<<10 && off > 0 {
+		n := int64(chunk)
+		if off < n {
+			n = off
+		}
+		off -= n
+		buf := make([]byte, n)
+		if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
+			return "", err
+		}
+		collected = append(buf, collected...)
+		if strings.Count(string(collected), "\n") > maxLines {
+			break
+		}
+	}
+	lines := strings.Split(strings.TrimRight(string(collected), "\n"), "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return strings.Join(lines, "\n"), nil
+}
 
 // cloudLocaldsSeed seedBuilder 真实实现：写 user-data/meta-data → cloud-localds
 // 生成卷标 cidata 的 NoCloud seed ISO（NoCloud 约定，FR-CMP-016）。

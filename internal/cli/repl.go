@@ -15,7 +15,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/xzjt/nfvis/internal/cliparse"
 )
+
+// continuationPrompt 引号未闭合时的续行提示（决策 #313）；与主提示符区分，操作者能看出
+// 「这条语句还没结束、正在等引号闭合」。
+const continuationPrompt = "... "
 
 // ErrIdleTimeout 会话空闲超时（FR-CLI-006）。
 var ErrIdleTimeout = errors.New("会话空闲超时")
@@ -54,6 +60,15 @@ func (r *REPL) Run() error {
 			return nil
 		case err != nil:
 			return err
+		}
+		// 决策 #313：引号可跨行——未闭合双引号时继续读后续行，拼成同一语句（值内保留换行）。
+		// 多行 user-data 因此能**内联**输入，不必只走文件路径；引号内的 `|`/`#` 也不是管道/注释。
+		for cliparse.OpenQuote(line) {
+			more, merr := r.readLine(continuationPrompt)
+			if merr != nil {
+				break // 读取结束/空闲超时：按已有内容继续，由执行器给出明确报错（不静默丢弃）
+			}
+			line += "\n" + more
 		}
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
