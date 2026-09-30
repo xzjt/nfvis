@@ -1,0 +1,48 @@
+NFViS v2 真机验证记录 round91 —— 决策 #304（生效权限视图）+ 四套件
+====================================================================
+日期：2026-09-30
+环境：nfvis-vm（SSH key）；本轮构建 2.0.0~dev4（v2 线，PR #238 合并后）
+源码：git archive v2；SOURCE_DATE_EPOCH = HEAD 提交时间（1790760397）
+
+§1 决策 #304 真机验证（`show configuration permissions <class>` 生效权限视图）
+预置三档（单源判定见 aaa，视图只枚举+判定+渲染）：
+- super-user：允许 248 / 拒绝 0（共 248 条命令路径）
+- operator：允许 197 / 拒绝 51 —— detail 抽样与独立事实源一致：
+  `[拒绝] request vpp…（预置等级不足）`、`[允许] show system kernel（预置等级满足）`
+- read-only：允许 104 / 拒绝 144
+自定义 class（`set system login class ops allow "show"` + `deny "show configuration"`）：
+- 摘要：允许 90 / 拒绝 158（共 248 条）；detail 抽样：`[拒绝] show configuration…（deny 前缀命中）`
+  ——deny 优先口径在真机生效
+- `| display set` 输出与配置库逐条一致：`set system login class ops allow show` /
+  `set system login class ops deny "show configuration"`（配置库对照 2 行）
+REST 等价端点与权限边界：
+- super 查任意 class → 200；未知 class → 404；`?class=ops` → `{"class":"ops","source":"custom"}`
+- 非 super（临时 op304, operator）：查自己 → 200；查 super-user → **403** +
+  「仅 super-user 可查看任意 class 的生效权限；其他 class 只能查看自己所属的 class」（不泄露他人规则）
+- 测试用户建/用/删全过（201/200）；自定义 class 用毕已删（终态 0 条）
+Web 黑盒（Browser Use，决策 #141）：
+- 用户与权限页「权限类（class）」表新增「生效权限」列与按钮；点 ops 行按钮 → 摘要面板
+  `class ops（自定义）：允许 90 / 拒绝 158（共 248 条命令路径）` + 允许路径样本 +
+  「完整列表见命令行 / detail / REST 端点」说明 —— **与 CLI、REST 三面数字完全一致**
+- 截图：docs/images/round91-web-console-class-permissions.png
+口径登记（非缺陷）：CLI 形式 `permissions <class>` 的 class **必填**（无参回语法提示），
+与 REST 的「无参 = 调用者自己」是**有意差异**，已在命令树契约（L132/L150/L594/L609）写明。
+
+§2 四套件（2.0.0~dev4）
+- cli-fulltest：**198 通过 / 0 失败 / 11 预期报错**（基线 195/0/12 的变化即预期：permissions 命令由
+  expect_fail 转实跑 +1 通过/−1 预期，另加 detail 与管道两形态 +2 通过）
+- cli-semantic-check：12 / 0 / 1 —— 与基线一致
+- cli-lifecycle-check：22 / 0 / 3（按前轮口径先清场 + 建对照现场；0 失败）
+- cli-pty-smoke：10 / 10
+结论：零失败。
+
+§3 本轮观察（环境侧，非产品缺陷）
+- Browser Use 的 Playwright 点击通道本轮多次报「no click point / 交互超时」，而 DOM 诊断显示
+  按钮位置正确、命中测试命中的就是按钮本体（`elementFromPoint` = `#login-btn`）、无遮挡、
+  无滚动 —— 判定为**浏览器自动化通道侧的交互问题**，改用坐标点击（CUA 通道）后登录与按钮点击
+  全部成功。已如实登记，供后续浏览器验证参考（先做命中测试区分「产品遮挡」与「通道问题」）。
+- 高负载（套件运行中）期间的浏览器交互尤其不稳定；建议浏览器黑盒与真机套件错峰执行。
+
+§4 现场终态
+- 清场：sw=0 / vmf=0 / ct=0、会话 1、自定义 class 0 条
+- 基线核对：配置 ens192/ens224 共 7 行、VPP 持有 2 口、版本 nfvis 2.0.0~dev4
