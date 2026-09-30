@@ -161,7 +161,7 @@
 | `request interfaces <ifname\|pci> unbind-dpdk [to-driver <d>]` | 解绑交还内核驱动 | O | `PUT /interfaces/{n}/dpdk` | ✅（提示确认；接管后须按 PCI） |
 | `request sriov create-vfs <ifname> count <n>` | 创建 VF | O | `PUT /interfaces/{n}/sriov` | ⊘ 本机无 PF/VF，明确报错（round80 实测：报「不支持 SR-IOV」，未静默成功） |
 | `request sriov delete-vfs <ifname> vf <n>` | 回收 VF | O | `PUT /interfaces/{n}/sriov` | ⊘ 同上（另：`vf <n>` 不参与定位——按数量回收，回显已明确说明，附录 A #94） |
-| `request vpp restart` | 按 committed 配置重建数据面 + 恢复收敛 | S | `POST /vpp/restart` | ✅ |
+| `request vpp restart` | 按 committed 配置重建数据面 + 恢复收敛 | S | `POST /vpp/restart` | ✅（返回成功即代表数据面可查询：等 VPP 起来**且**连接管理器换成新连接才返回；未重建则如实报「数据面连接在重启窗口内不可用」+ 指引，附录 A #315） |
 | `request vpp trace start interface <if> [count <n>] [filter <acl>]` | 开始抓包 | S | `POST /vpp/capture` | ✅ |
 | `request vpp trace stop` | 停止抓包（不导出） | S | `DELETE /vpp/capture` | ✅ |
 | `request vpp trace export [name <n>]` | 导出 pcap（**隐含 stop**） | S | `DELETE /vpp/capture` | ✅ |
