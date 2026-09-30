@@ -4,7 +4,7 @@
 |---|---|
 | 用途 | **命令参考全表**：把 CLI 命令树逐条列出，附权限、落点与**真机实测状态** |
 | 来源 | 命令树取自实现（`internal/schema/tree_oper.go`、`internal/schema/tree_config.go`，即 `?` 补全与 `cli_bridge` 前置校验的真实来源）；契约见 `docs/NFViS-CLI命令树完整设计.md`；REST 落点对照见 `docs/NFViS-openapi.yaml` 与 `internal/api/server.go` 的路由注册 |
-| 实测状态 | 来自 **2026-09-29 round88 真机实测**（nfvis-vm，已装发布件走查 + 修复版复验）：`contrib/scripts/cli-fulltest.sh`（全功能 CLI 套件，**通过 195 / 失败 0 / 预期报错 12** —— `show vpp runtime` 已实现，全表**首次无失败**）+ `contrib/scripts/cli-pty-smoke.sh`（pty 交互冒烟，**通过 10 / 失败 0**）+ `cli-semantic-check.sh` **12 / 0 / 1**、`cli-lifecycle-check.sh` **21 / 0 / 3**。**更早轮次的状态已过期**，本表**上一轮（2026-09-14）的状态已过期**，本表一律以 round80 为准 |
+| 实测状态 | 来自 **2026-09-29 round88 真机实测**（nfvis-vm，已装发布件走查 + 修复版复验）：`contrib/scripts/cli-fulltest.sh`（全功能 CLI 套件，**通过 195 / 失败 0 / 预期报错 12** —— `show vpp runtime` 已实现，全表**首次无失败**）+ `contrib/scripts/cli-pty-smoke.sh`（pty 交互冒烟，**通过 10 / 失败 0**）+ `cli-semantic-check.sh` **12 / 0 / 1**、`cli-lifecycle-check.sh` **21 / 0 / 3**。**更早轮次的状态已过期**，本表**上一轮（2026-09-14）的状态已过期**，本表一律以 round80 为准；**v2 开发线的当前基线见 §3 末尾**（决策 #319 后：fulltest 212/0/13、语义 24/0/1、生命周期 21/0/3、pty 10/10，真机复跑待执行） |
 | 基线 | main（round88 修复版工作树）；决策 **201** 项 |
 
 ## 0. 阅读约定
@@ -38,6 +38,13 @@
 无 IPMI/温度传感器/SMART、离线无自带 memif 的容器镜像）；
 其余行（§2 中未被套件逐条执行的配置语句，以及 `request … console`、`bind-dpdk`/`unbind-dpdk`、
 `request vpp restart`、`wizard`、`start shell` 等）也沿用上一轮的真机结论，本轮按代码与单测复核、未发现回归。
+
+**这道「覆盖面」现在受守护约束（决策 #319）**：可执行命令要么出现在 `cli-fulltest-phase*.sh` 的命令清单里，
+要么逐条登记进 `contrib/scripts/cli-fulltest-exemptions.tsv`（命令/类别/理由三列，理由须写明**改由谁覆盖**）；
+守护 `contrib/scripts/check_suite_contract_sync.sh`（自带桩式自校准）随 `make check` 的 `toolcheck` 跑。
+本表 §2 有 **70 条**命令因此登记为豁免（类别与理由见该文件；多数是「配置语句未逐条执行」，替代覆盖是
+schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选项**（`-c`/`-f`/`--yes`/`-server` …）不是
+命令表里的命令，**不受该守护管辖**——`-f` 的覆盖写在 `cli-fulltest-phase7.sh`（决策 #309/#319，如实登记）。
 
 **落点**：`POST /cli/execute` 是所有 CLI 命令的统一入口；表中「落点」列给出该命令**实际作用的**
 等价 REST 端点或底座子系统。说明理由：CLI 执行器对 `show`/`request` 族**直连运行态 Provider**
@@ -113,8 +120,8 @@
 | `show log audit [last <n>]` | 审计日志 | `GET /audit-logs` | ✅ |
 | `show log vnf <name> [last <n>]` | VNF 控制台/事件日志 | 运行态 | ✅ |
 | `show users` | 本地用户与 class | `GET /system/login-users` | ✅ |
-| `show system api tokens` | 活动会话 / API Token 清单：token-id、用户、权限类、签发时间、过期时间、是否当前会话（super-user 列**全部用户**的会话，其他 class 只列自己的；token 为内存态，重启后清空） | `GET /system/api-tokens` | 🚫 本轮新增（决策 #301）：单测覆盖，真机四套件待跑 |
-| `show configuration [permissions <class> [detail]]` | 省略子命令 = 当前 committed 配置（JunOS 风格）；`permissions <class>` = 该 class 的**生效权限视图**（决策 #304）——按顶层命令族列出**允许路径** + 末行汇总（class、来源＝预置/自定义、允许/拒绝条数），`detail` 逐路径附判定依据（预置等级满足 / allow 前缀命中 / deny 前缀命中 / 默认拒绝）；判定单源在 `internal/aaa`，与运行期授权同一实现（不在 show 层另写一套） | 省略子命令：`GET /configuration`（committed 视图）；`permissions <class>`：`GET /configuration/permissions?class=<name>` | ✅ 本轮落地（决策 #304）：默认/detail/display set 三形态；R 类，read-only 仅可查自己所属 class，非 super-user 查他人拒绝、未知 class 报错。单测覆盖，真机四套件待跑 |
+| `show system api tokens` | 活动会话 / API Token 清单：token-id、用户、权限类、签发时间、过期时间、是否当前会话（super-user 列**全部用户**的会话，其他 class 只列自己的；token 为内存态，重启后清空） | `GET /system/api-tokens` | 🚫 本轮新增（决策 #301）：单测覆盖；已入 fulltest（`show system api tokens` 见阶段 1；吊销不存在的 id 见阶段 4）与 semantic S10-8（吊销真实会话 ⇒ 其下一个请求 401），真机复跑待执行（决策 #319） |
+| `show configuration [permissions <class> [detail]]` | 省略子命令 = 当前 committed 配置（JunOS 风格）；`permissions <class>` = 该 class 的**生效权限视图**（决策 #304）——按顶层命令族列出**允许路径** + 末行汇总（class、来源＝预置/自定义、允许/拒绝条数），`detail` 逐路径附判定依据（预置等级满足 / allow 前缀命中 / deny 前缀命中 / 默认拒绝）；判定单源在 `internal/aaa`，与运行期授权同一实现（不在 show 层另写一套） | 省略子命令：`GET /configuration`（committed 视图）；`permissions <class>`：`GET /configuration/permissions?class=<name>` | ✅ 本轮落地（决策 #304）：默认/detail/display set 三形态；R 类，read-only 仅可查自己所属 class，非 super-user 查他人拒绝、未知 class 报错。单测覆盖；真机覆盖已在 fulltest 阶段 5（三种形态各一条），真机复跑待执行（决策 #319） |
 | `show configuration candidate` | 当前持锁会话的 candidate | `GET /configuration/candidate` | ✅ |
 | `show configuration history` | 提交历史快照列表：rev/时间/用户/注释/是否当前（**不含配置正文**） | `GET /configuration/history` | ✅ |
 | `show configuration compare rollback <n>` | 与第 n 个历史快照比对；与管道形态 `\| compare rollback <n>` **等价**（同一实现） | `GET /configuration/diff` | ✅ |
@@ -179,10 +186,10 @@
 | `request system core-dumps delete [file <n>]` | 删除转储 | O | `DELETE /system/core-dumps` | ✅（**决策 #76⑨** 修错误文案） |
 | `request system zeroize` | 恢复出厂（双重确认） | S | `POST /system:zeroize` | 🚫 破坏性 |
 | `request system api tls regenerate` | 重签自签证书 | S | `POST /system/tls:regenerate` | ✅ |
-| `request system api token revoke <token-id>` | 吊销指定会话（O；范围按身份裁定——super-user 可吊销任意会话，其他 class 仅自己的；不存在的/他人的 id 统一报「会话不存在或无权操作」，不泄露存在性。token-id 见 `show system api tokens`。request 域以 O 为基线，read-only 的自助结束会话走 POST /logout；REST 侧同能力对全部登录 class 开放） | O | `POST /system/api-tokens/{id}:revoke` | 🚫 本轮新增（决策 #301）：单测覆盖，真机四套件待跑 |
+| `request system api token revoke <token-id>` | 吊销指定会话（O；范围按身份裁定——super-user 可吊销任意会话，其他 class 仅自己的；不存在的/他人的 id 统一报「会话不存在或无权操作」，不泄露存在性。token-id 见 `show system api tokens`。request 域以 O 为基线，read-only 的自助结束会话走 POST /logout；REST 侧同能力对全部登录 class 开放） | O | `POST /system/api-tokens/{id}:revoke` | 🚫 本轮新增（决策 #301）：单测覆盖；已入 fulltest（`show system api tokens` 见阶段 1；吊销不存在的 id 见阶段 4）与 semantic S10-8（吊销真实会话 ⇒ 其下一个请求 401），真机复跑待执行（决策 #319） |
 | `request system ssh host-key regenerate` | 重新生成 SSH host key | S | `POST /system/ssh-host-key:regenerate` | ✅ |
 | `request system password change` | 登录者自助改密（验证旧口令） | O | `POST /system/login-users/{n}:change-password`（与 REST 同源） | 🚫 需交互输入（契约已登记延期） |
-| `request system storage format-data` | 恢复出厂数据状态（保留管理面可达）：收敛删全部受管 VNF/容器与网络对象、清受管数据目录、配置库重置为保留节（决策 #305） | S | `POST /system:format-data`（宿主编排；双确认照搬 zeroize） | ✅ 破坏性但已验（决策 #305 落地：收敛/保留/清数据与 zeroize 同一确认与审计口径，单测逐条覆盖；真机按交付报告步骤在测试机执行） |
+| `request system storage format-data` | 恢复出厂数据状态（保留管理面可达）：收敛删全部受管 VNF/容器与网络对象、清受管数据目录、配置库重置为保留节（决策 #305） | S | `POST /system:format-data`（宿主编排；双确认照搬 zeroize） | ✅ 破坏性但已验（决策 #305 落地：收敛/保留/清数据与 zeroize 同一确认与审计口径，单测逐条覆盖；真机按交付报告步骤在测试机执行）。**fulltest 侧只做结构检查**（阶段 4：非交互下必须被双重确认问询挡住——命令已接线且破坏性闸门在位，**不真执行**），并在 `contrib/scripts/cli-fulltest-exemptions.tsv` 登记豁免（决策 #319） |
 | `request system ntp sync` | 立即触发一次 NTP 同步 | O | `POST /system/ntp:sync`（宿主 chrony/ntpd） | ✅ |
 | `request alarms clear [id <id> \| all]` | 清除已 resolved 告警 | O | `POST /alarms:clear` | ✅ |
 
@@ -258,7 +265,7 @@
 | `set system syslog local level <lvl>` | 本地日志级别 | 宿主日志 | ✅ |
 | `set system syslog local retention-days <n>` | 日志保留天数（FR-SYS-013） | 宿主 logrotate | ✅ |
 | `set system syslog local max-size-mb <n>` | 日志容量上限 | 宿主 logrotate | ✅ |
-| `set system login banner <text>` | 登录横幅（显示在 Web 登录页与 CLI 登录提示之前，未认证即可见；单行，最长 512 字节，超限/含换行拒绝；`delete system login banner` 清除） | 配置库 | 🚫 本轮新增（决策 #303）：单测覆盖，真机四套件待跑 |
+| `set system login banner <text>` | 登录横幅（显示在 Web 登录页与 CLI 登录提示之前，未认证即可见；单行，最长 512 字节，超限/含换行拒绝；`delete system login banner` 清除） | 配置库 | 🚫 本轮新增（决策 #303）：单测覆盖；已入 fulltest 阶段 2（`set`/`delete` 语句 + 提交→回读→清除往返，回读用内容断言），真机复跑待执行（决策 #319） |
 | `set system login user <n> password <s> class <c>` | 本地用户（口令**加盐哈希**落库、回显脱敏） | 配置库（PBKDF2） | ✅（决策 #79 修复；**`<n>` 不可省**，把 `password`/`class` 写在名字位会被拒并提示正确写法，决策 #82） |
 | `set system login class <n> allow <path>` | 自定义 class 允许项（可多条） | 配置库 | ✅（决策 #79 修复） |
 | `set system login class <n> deny <path>` | 自定义 class 拒绝项（可多条） | 配置库 | ✅（决策 #79 修复） |
@@ -434,7 +441,7 @@
 | ✅ 实测通过 | 243 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶；`request system storage format-data` 由决策 #305 落地（原 🚫 破坏性、契约已登记延期），按「破坏性但已验」移入本桶 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 14 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖但真机四套件待跑的 3 行（`show system api tokens`、`request system api token revoke <token-id>`、`set system login banner <text>`） |
+| 🚫 本轮未执行 | 14 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 3 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
@@ -447,6 +454,15 @@ round80 以来那条唯一 ✗ 归零。
 目标不可达时 `ping` 报失败（3）、`show configuration permissions <class>` 暂未实现（1——该条已由决策 #304 落地为**生效权限视图**，此后不再走预期报错，`contrib/scripts/cli-fulltest-phase5.sh` 同步由 `expect_fail` 改为 `run`；上面的 195/0/12 是 round88 当时的现场，保留为历史基线）。
 pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**；
 语义校验 **12 / 0 / 1**、生命周期与组合 **21 / 0 / 3**（有业务现场时跑）。
+
+**决策 #319 之后的基线（v2 开发线；数字为「旧基线 + 本轮增量」，真机复跑待执行）**：
+`cli-fulltest` **212 / 0 / 13**（旧 198/0/11；增量逐阶段 = 阶段 1 `+1` `show system api tokens`、
+阶段 2 `+4`（登录横幅语句 1 + 提交→回读→清除 3）、阶段 4 `+2`（`format-data` 结构检查、
+吊销不存在的 token id，两条都进「预期报错」桶 ⇒ 11→13）、**新增阶段 7** `+7`（CLI 脚本文件模式 `-f`））、
+`cli-semantic-check` **24 / 0 / 1**（旧 12/0/1；新增 **S10 配置编辑锁语义** 12 项，含 5 项正向控制，
+覆盖 #317/#318 的排他/接管/`ErrLockLost`/登出释放）、`cli-lifecycle-check` **21 / 0 / 3**（不变）、
+`cli-pty-smoke` **10 / 10**（不变）。逐阶段差异与原因见规格书附录 A #319⑤；
+命令清单与契约的对账由 `contrib/scripts/check_suite_contract_sync.sh` 守护（`make check` 的 `toolcheck`）。
 
 ---
 

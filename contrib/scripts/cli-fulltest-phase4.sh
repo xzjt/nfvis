@@ -67,6 +67,15 @@ expect_fail S4 "需交互确认" "request system shutdown"
 expect_fail S4 "需交互确认" "request system zeroize"
 expect_fail S4 "需交互确认" "request system software rollback"
 expect_fail S4 "需交互确认" "request interfaces ens224 unbind-dpdk"
+# 决策 #305 的 `request system storage format-data`（恢复出厂数据状态）：**不真执行**，
+# 只做**结构检查**——非交互下必须被双重确认问询挡住（与 zeroize 同一口径）。
+# 这条断言的就是「命令已接线 + 破坏性闸门在位」，它同时保证该命令不会被静默执行。
+expect_fail S4 "需交互确认" "request system storage format-data"
+
+# ---- 逐 token 吊销（决策 #301）：不存在的 id 必须被明确拒绝，且不泄露存在性 ----
+# 正向路径（吊销真实会话）在 semantic 套件的两会话场景里断言（那里才有第二个会话可用）。
+expect_fail S4 "会话不存在或无权操作" \
+  "request system api token revoke 00000000-0000-4000-8000-000000000000"
 
 # ---- 镜像删除：无害对象**真删**（这才是真覆盖）----
 # cli-del.qcow2 由阶段 3 创建、无任何引用 → 加 --yes 走完整「确认 → 真删」路径。

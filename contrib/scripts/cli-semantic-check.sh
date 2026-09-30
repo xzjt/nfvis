@@ -17,6 +17,10 @@
 #   ① 事实源对照：CLI 输出 vs 独立 oracle（VPP / 内核 sysfs / 配置库 / libvirt / Docker）；
 #   ② 扰动判别：改动事实源（在 VPP 里建一个配置中没有的 BD、把接口链路翻 down），看 CLI 是否跟随；
 #   ③ round-trip：写 → 读 → 删 → 再读，验证配置通路自洽。
+# 另有 S10「配置编辑锁语义」（决策 #317/#318）：它量的是**两个会话之间**的排他与接管——
+# 单条 CLI 命令是一次性会话（收尾即释放），表达不了，故经 REST 同时持两个 token，
+# 用「HTTP 状态码 + 响应体 + 会话视图」三方对照，且**每项先立正向控制**再判结果
+# （dirty 严格排他 / 干净锁可接管 / 被接管者 ErrLockLost / 登出只清本会话）。
 #
 # 判定分**三档**（2026-09-26 round84 复盘后改；此前只有「通过/失败」，于是「没有证据」被算成通过）：
 #   通过（✓）   —— 有正向控制且与事实源一致；
@@ -47,8 +51,10 @@
 #        要判断「会不会是环境让本项测不到」，看小结里的不可判定条数。
 #
 # 副作用与恢复：脚本会临时改 VPP（建/删一个 BD、翻转某接口 admin 状态、在**开发态实例**里
-# 建一个交换机并删除）。结束时会尽力恢复；仍建议随后 `systemctl restart vpp` + `restart nfvis`
-# 以清掉残留拓扑（脚本会打印提醒）。
+# 建一个交换机并删除）。S10（配置编辑锁语义）另外会：① 用两个 REST 会话取锁并**提交一次
+# 内容未变的修订**（造出「干净锁」现场，不改配置语义）；② 临时持有/释放编辑锁——每一项结束前
+# 都释放，异常中断时下一遍开头的清理会兜底。结束时会尽力恢复；仍建议随后
+# `systemctl restart vpp` + `restart nfvis` 以清掉残留拓扑（脚本会打印提醒）。
 set -u
 
 SRV=${SRV:-http://127.0.0.1:18443}
@@ -454,6 +460,137 @@ echo "    libvirt 域: ${libv:-（无）} ｜ CLI VM 列表: ${clivm:-（空）}
 echo "    Docker 容器: ${dockerps:-（无）} ｜ CLI 容器列表: ${clict:-（空）}"
 judge "S9 虚拟机列表（libvirt ↔ CLI 视图）" "$(s9_verdict 'libvirt 域' "$libv" 'CLI VM 视图' "$clivm")"
 judge "S9 容器列表（Docker ↔ CLI 视图）" "$(s9_verdict 'Docker 容器' "$dockerps" 'CLI 容器视图' "$clict")"
+
+# ============ S10 配置编辑锁语义（决策 #317/#318）============
+# 为什么在这里、为什么用 REST：这两条决策的判据是**两个会话之间**的排他与接管——单条 CLI
+# 命令是一次性会话（收尾即释放），表达不了；只有 REST 能同时持两个 token。三个事实源
+# （HTTP 状态码 + 响应体 + 会话视图）都要对上，且**每项先立正向控制**（现场真的处于那个状态），
+# 再判结果——否则「什么都没发生」会被算成通过（round84 之后本脚本的既定口径）。
+# 副作用：两个会话都只是「取锁 + 空 merge（内容与 committed 相同）」——后者提交一次**内容未变**的
+# 修订，不改变机器的配置语义；结束前释放锁，不留现场。
+hdr "S10 配置编辑锁语义：同一用户两会话的排他 / 接管 / 释放"
+S10B=/tmp/cli-s10-body-$$.txt
+login_json() { curl_api -X POST "$SRV/api/v1/login" -H 'Content-Type: application/json' \
+                 -d "{\"username\":\"admin\",\"password\":\"$PW\"}"; }
+jfield() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" | head -1; }
+cand_put() { # cand_put <token>：空 merge（override 后候选=committed，再 merge {} 不改内容）
+  curl_api -o "$S10B" -w '%{http_code}' -X PUT "$SRV/api/v1/configuration/candidate" \
+    -H "Authorization: Bearer $1" -H 'Content-Type: application/json' -H 'X-NFVIS-Merge: true' -d '{}'
+}
+cand_del()   { curl_api -o /dev/null -w '%{http_code}' -X DELETE "$SRV/api/v1/configuration/candidate" -H "Authorization: Bearer $1"; }
+cand_dirty() { curl_api "$SRV/api/v1/configuration/candidate" -H "Authorization: Bearer $1" \
+                 | sed -nE 's/.*"dirty":(true|false).*/\1/p' | head -1; }
+commit_now() { curl_api -o "$S10B" -w '%{http_code}' -X POST "$SRV/api/v1/configuration/commit" \
+                 -H "Authorization: Bearer $1" -H 'Content-Type: application/json' -d '{}'; }
+logout_now() { curl_api -o /dev/null -w '%{http_code}' -X POST "$SRV/api/v1/logout" -H "Authorization: Bearer $1"; }
+
+A_JSON=$(login_json); A_TOK=$(printf '%s' "$A_JSON" | jfield token); A_ID=$(printf '%s' "$A_JSON" | jfield token_id)
+B_JSON=$(login_json); B_TOK=$(printf '%s' "$B_JSON" | jfield token); B_ID=$(printf '%s' "$B_JSON" | jfield token_id)
+if [ -z "$A_TOK" ] || [ -z "$B_TOK" ] || [ -z "$A_ID" ] || [ -z "$B_ID" ]; then
+  bad "S10 前置：两次登录未取到 token/token_id（无法做两会话对照）"
+else
+  cand_del "$A_TOK" >/dev/null; cand_del "$B_TOK" >/dev/null   # 清上一轮异常中断可能留下的锁
+
+  # S10-1 脏候选严格排他（#318 边界：dirty=true 绝不丢弃他人未提交改动）
+  rc=$(cand_put "$A_TOK"); d=$(cand_dirty "$A_TOK")
+  if [ "$rc" = "200" ] && [ "$d" = "true" ]; then
+    ok "S10-1 正控：A 写入候选成功且 dirty=true（$rc/$d）"
+    rc=$(cand_put "$B_TOK"); body=$(cat "$S10B" 2>/dev/null)
+    if [ "$rc" = "409" ] && printf '%s' "$body" | grep -q '持有'; then
+      ok "S10-1 脏候选严格排他：同用户另一会话写入被拒（409，说明持有者）"
+    else
+      bad "S10-1 期望 409 且说明持有者，实际 $rc：$(printf '%s' "$body" | head -c 200)"
+    fi
+  else
+    bad "S10-1 正控不成立（A 写入 $rc，dirty=$d）——本项不继续判定"
+  fi
+
+  # S10-2 干净锁不排他（#318 口径①）——先造出「A 持锁但候选干净」的现场
+  rc=$(commit_now "$A_TOK"); d=$(cand_dirty "$A_TOK")
+  if [ "$rc" = "200" ] && [ "$d" = "false" ]; then
+    ok "S10-2 正控：A 提交（内容未变）后仍持锁、候选干净（dirty=false）"
+    rc=$(cand_put "$B_TOK"); body=$(cat "$S10B" 2>/dev/null)
+    if [ "$rc" = "200" ]; then
+      ok "S10-2 干净锁不排他：同用户新会话接管成功（200）"
+    else
+      bad "S10-2 干净锁接管失败（实际 $rc）：$(printf '%s' "$body" | head -c 200)"
+    fi
+  else
+    bad "S10-2 正控不成立：A 提交返回 $rc、dirty=$d（$(head -c 200 "$S10B" 2>/dev/null)）"
+  fi
+
+  # S10-3 被接管者得明确错误（#318：ErrLockLost，不静默把现场接管回自己）
+  rc=$(cand_put "$A_TOK"); body=$(cat "$S10B" 2>/dev/null)
+  if [ "$rc" = "409" ] && printf '%s' "$body" | grep -q '接管'; then
+    ok "S10-3 被接管者得明确错误（409，文案含「接管」）"
+  elif [ "$rc" = "409" ]; then
+    bad "S10-3 被接管者确被拒（409）但文案未说明被接管：$(printf '%s' "$body" | head -c 200)"
+  else
+    bad "S10-3 被接管者竟仍能写入（$rc）——ErrLockLost 未生效"
+  fi
+
+  # S10-4 被接管者登出不影响接管者的脏候选（#317 的保护语义不被 #318 的释放路径误伤）
+  d=$(cand_dirty "$B_TOK")
+  if [ "$d" = "true" ]; then ok "S10-4 正控：接管者 B 现持脏候选（dirty=true）"
+  else bad "S10-4 正控不成立：B 的候选 dirty=$d"; fi
+  rc=$(logout_now "$A_TOK"); d2=$(cand_dirty "$B_TOK")
+  if [ "$rc" = "204" ] && [ "$d2" = "true" ]; then
+    ok "S10-4 被接管者登出后接管者的脏候选原封不动（仍 200/dirty=true）"
+  else
+    bad "S10-4 登出（$rc）后接管者候选被动到（dirty=$d2）——同一用户的其它会话被误清"
+  fi
+
+  # S10-5 会话视图如实列会话标识与用户（#317③）
+  sessions=$(cli "show configuration sessions")
+  if printf '%s' "$sessions" | grep -q 'Session' && printf '%s' "$sessions" | grep -q 'User' \
+     && printf '%s' "$sessions" | grep -qF "$B_ID"; then
+    ok "S10-5 会话视图列 Session/User 且含持锁会话标识（$B_ID 与所属用户一并可见）"
+  else
+    bad "S10-5 会话视图缺列或缺持锁会话标识：$(printf '%s' "$sessions" | head -3 | tr '\n' ' ')"
+  fi
+
+  # S10-6 接管者释放后原用户可重新进入（#318：superseded 记录随释放失效）
+  rc=$(cand_del "$B_TOK")
+  if [ "$rc" = "204" ]; then ok "S10-6 正控：接管者释放锁（204）"
+  else bad "S10-6 正控不成立：接管者释放锁返回 $rc"; fi
+  A2_JSON=$(login_json); A2_TOK=$(printf '%s' "$A2_JSON" | jfield token)
+  if [ -z "$A2_TOK" ]; then
+    bad "S10-6 前置：重新登录失败（无法验证释放后可重新进入）"
+  else
+    rc=$(cand_put "$A2_TOK")
+    if [ "$rc" = "200" ]; then ok "S10-6 接管者释放后原用户的新会话可重新进入（200）"
+    else bad "S10-6 重新进入失败（$rc）：$(head -c 200 "$S10B" 2>/dev/null)"; fi
+
+    # S10-7 登出按会话清理本会话锁（#318 口径②）——A2 的候选是**脏**的，
+    # 若登出没释放锁，B 的写入必然 409：这是一个能区分「真的释放了」的判据。
+    rc=$(logout_now "$A2_TOK"); rc2=$(cand_put "$B_TOK")
+    if [ "$rc" = "204" ] && [ "$rc2" = "200" ]; then
+      ok "S10-7 登出按会话清理本会话锁（A2 登出后 B 可立即取锁）"
+    else
+      bad "S10-7 登出未释放本会话锁（logout=$rc，随后写候选=$rc2）：$(head -c 200 "$S10B" 2>/dev/null)"
+    fi
+    cand_del "$B_TOK" >/dev/null   # 收尾：不留锁
+
+    # S10-8 逐 token 吊销正向路径（#301）：super-user 吊销另一会话 → 其下一个请求 401
+    C_JSON=$(login_json); C_TOK=$(printf '%s' "$C_JSON" | jfield token); C_ID=$(printf '%s' "$C_JSON" | jfield token_id)
+    if [ -z "$C_TOK" ] || [ -z "$C_ID" ]; then
+      unk "S10-8 逐 token 吊销 —— 第三个登录未取到 token/token_id"
+    else
+      rev=$(curl_api -o "$S10B" -w '%{http_code}' -X POST "$SRV/api/v1/system/api-tokens/$C_ID:revoke" \
+              -H "Authorization: Bearer $B_TOK")
+      after=$(curl_api -o /dev/null -w '%{http_code}' "$SRV/api/v1/system/version" -H "Authorization: Bearer $C_TOK")
+      if [ "$rev" = "204" ] && [ "$after" = "401" ]; then
+        ok "S10-8 逐 token 吊销：被吊销会话的下一个请求 401（$rev → $after）"
+      elif [ "$rev" != "204" ]; then
+        bad "S10-8 吊销未成功（$rev）：$(head -c 200 "$S10B" 2>/dev/null)"
+      else
+        bad "S10-8 吊销返回 204 但被吊销 token 仍可用（$after）——吊销未真正生效"
+      fi
+    fi
+  fi
+  logout_now "$B_TOK" >/dev/null
+  rm -f "$S10B"
+fi
 
 # ============ 清理本脚本创建的对象 ============
 # 接口：先看**条目本身**是不是本次建出来的——是就整条删掉（发现 #15 的同类：收尾只删字段

@@ -181,8 +181,8 @@
   `commit and-quit`（成功才退出并释放）、操作模式 `exit/quit`、新增 `Engine.DiscardSession(user,id)`（登出/吊销**不区分
   接入源**）、干净锁用更短的空闲阈值（默认 1 分钟，复用既有巡检）。无 schema 迁移，是**收敛修正**不是回退。
   证据 `docs/evidence/v2-round99-d318-clean-lock-takeover.txt`。
-- 已定决策 220 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#318）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 221 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#319）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。
@@ -251,6 +251,14 @@ bash contrib/scripts/offline-installer-selftest.sh --run build/nfvis-vX.run   # 
 ④ 对抗性等价对照（两种「等价」写法、两份事实源）。第 ②③ 项与「删/改后回读」由
 `contrib/scripts/cli-lifecycle-check.sh` 承担——**它首次运行就抓到一条既有缺陷（删 L3 交换机后静态路由残留）**；
 语义校验里**空结果一律进「不可判定」、不计入通过**（此前「两侧都空也算一致」是假绿）。
+
+**新功能须同步入套件、或登记豁免（由 #319 的守护强制）**：契约里可执行的 CLI 命令要么出现在
+`cli-fulltest-phase*.sh` 的命令清单里，要么逐条登记进 `contrib/scripts/cli-fulltest-exemptions.tsv`
+（三列：命令 / 类别 / 理由，理由须说明**改由谁覆盖**）。守护 `contrib/scripts/check_suite_contract_sync.sh`
+（自带桩式自校准）随 `make check` 的 `toolcheck` 跑——**只进实现不补套件的命令会被它挡住**（v2 线的
+`show system api tokens`、`set/delete system login banner` 就是这么漏进过的）。四套件基线（v2 线，见 #319）：
+`cli-fulltest` **212/0/13**、`cli-semantic-check` **24/0/1**、`cli-lifecycle-check` **21/0/3**、`cli-pty-smoke` **10/10**；
+套件数字的每一处变化都要写清「哪条新增/移除、为什么」（#304 那次 195/0/12→198/0/11 的漂移是教训）。
 
 后者是唯一能发现「命令成功但答非所问 / 取自配置而非运行态」的那层（决策 #84/#85）——
 2026-09-15 它一次跑出 4 类契约违反，而同期 256 条冒烟是 197 全绿。

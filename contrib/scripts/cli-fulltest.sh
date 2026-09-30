@@ -18,6 +18,9 @@
 #   bash contrib/scripts/cli-fulltest.sh            # 全部阶段
 #   bash contrib/scripts/cli-fulltest.sh 1 5        # 只跑阶段 1 与 5
 #
+# 阶段：1 show 只读 · 2 配置语句 · 3 前置对象 · 4 request 运维动作 · 5 操作命令与管道 ·
+#       6 事务语义 · 7 CLI 脚本文件模式 `-f`（决策 #309，客户端开关；见该脚本头部说明）。
+#
 # 输出：逐条 ✓/✗ 与小结；原始输出见 /tmp/cli-test/full.log（可用 LOG= 覆盖）。
 # 判定：行首 % / %% 或「校验失败」即失败。注意**环境受限项**（SR-IOV 无 PF/VF）也会显示 ✗，需人工判读。
 #       注：「语句未产生配置变更」（值未变化）自 v1.1.48 起是**提示**（不再带 % 前缀、不中止脚本），
@@ -30,6 +33,8 @@
 #    那三个维度在另外两套真机套件里，跑发布前门槛时三套都要跑：
 #      · cli-semantic-check.sh   —— 结果对不对（独立事实源对照 + 扰动判别；含不可判定档）
 #      · cli-lifecycle-check.sh  —— 删除后回读、重启后重放、跨对象组合
+# ⚠️ 命令清单本身不再靠手工维护记得住：契约里的命令必须出现在本套件或登记进
+#    cli-fulltest-exemptions.tsv（守护 contrib/scripts/check_suite_contract_sync.sh，决策 #319）。
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 export LOG=${LOG:-/tmp/cli-test/full.log}
@@ -44,6 +49,7 @@ phase_of() { # phase_of <phase1.sh> → 阶段号
     *phase4*) echo 4;;
     *phase5*) echo 5;;
     *phase6*) echo 6;;
+    *phase7*) echo 7;;
     *) echo 0;;
   esac
 }
