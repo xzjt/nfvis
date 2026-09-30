@@ -427,7 +427,11 @@ func (x *cliExecutor) execOper(user, class, source string, s *cliSession, t []st
 		s.Path = nil
 		return ""
 	case "exit", "quit":
+		// 决策 #318：退出即释放本会话可能持有的 candidate 锁。此前这里只清 CLI 本地会话态，
+		// 对**引擎锁**不闻不问——`commit and-quit` 等把本地模式变回 oper 的路径留下的干净锁
+		// 因此无人释放（R98-1）。未持锁时 Release 返回 ErrNotEditing，忽略即可。
 		delete(x.sess, x.sessionStateKey(user, source, x.callerTokenID))
+		_ = x.engine.Release(x.sessOf(user, source))
 		return ""
 	case "wizard":
 		// 初始化向导是 CLI 端交互编排（决策 #107）：REST/脚本路径无 TTY 不能问答，
@@ -1025,8 +1029,15 @@ func (x *cliExecutor) cfgCommit(user, source string, s *cliSession, args []strin
 		}
 	case len(args) > 0 && args[0] == "and-quit":
 		res := x.cfgCommit(user, source, s, nil)
+		// 决策 #318：提交**成功**才退出配置模式并释放本会话锁（提交未成功时保持配置模式与锁，
+		// 操作者要接着改）。此前无论成败都把本地模式改成 oper、且**从不释放**引擎锁——这正是
+		// R98-1 实测现场那把「由 admin@ssh 持有、dirty:false」的残留锁的来路。
+		if strings.HasPrefix(res, "%%") || strings.HasPrefix(res, "校验失败") {
+			return res
+		}
 		s.Mode = "oper"
 		s.Path = nil
+		_ = x.engine.Release(x.sessOf(user, source))
 		return res
 	}
 	res, err := x.engine.Commit(context.Background(), x.sessOf(user, source), opts)

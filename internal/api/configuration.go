@@ -68,6 +68,29 @@ func endOneShot(engine *config.Engine, sess config.Session, log *slog.Logger) {
 	}
 }
 
+// discardOwnSession 结束本会话时的候选清理（决策 #119 → #317 → #318）。
+//
+// 按**会话稳定标识**（token ID）定位本会话的锁，**不区分接入源**：CLI 会话取得的锁其 holder 是
+// `user@ssh`/`user@console`，而登出/吊销请求的会话身份来自 REST（holder `user@api`）——按身份键
+// 匹配会漏（R98-1：CLI 一次性/脚本调用留下的干净锁因此无人释放）。按 token ID 匹配则精确：
+// 同一用户的**另一** token 不受影响（R79-1 的保护语义不变）。无稳定 ID 的旧式调用退回 Discard。
+func discardOwnSession(engine *config.Engine, sess config.Session, log *slog.Logger) {
+	var err error
+	if sess.ID != "" {
+		err = engine.DiscardSession(sess.User, sess.ID)
+	} else {
+		err = engine.Discard(sess)
+	}
+	switch {
+	case err == nil, errors.Is(err, config.ErrNotEditing), errors.Is(err, config.ErrLockLost):
+		// 未在编辑是常态，不算失败；结束会话本就不能因清理失败而失败。
+	default:
+		if log != nil {
+			log.Warn("结束会话时释放 candidate 失败", "err", err)
+		}
+	}
+}
+
 // mapEngineError 引擎错误 → 统一错误响应。
 func mapEngineError(w http.ResponseWriter, err error) {
 	switch {
@@ -75,6 +98,9 @@ func mapEngineError(w http.ResponseWriter, err error) {
 		return
 	case errors.Is(err, config.ErrLocked):
 		writeError(w, http.StatusConflict, "CONFLICT", err.Error(), nil) // 409 会话锁占用
+	case errors.Is(err, config.ErrLockLost):
+		// 决策 #318：锁由同一用户的另一会话持有（可能已被接管）——明确报出，不静默。
+		writeError(w, http.StatusConflict, "CONFLICT", err.Error(), nil)
 	case errors.Is(err, config.ErrNotEditing):
 		writeError(w, http.StatusConflict, "CONFLICT", "当前会话未持有 candidate（先 PUT /configuration/candidate）", nil)
 	case errors.Is(err, config.ErrNoRevision):

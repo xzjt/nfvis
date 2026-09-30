@@ -10,9 +10,13 @@ info:
       区分**（决策 #317）：展示用持有者为「用户 + 接入源」，实际归属按会话稳定标识（token 稳定 ID）
       ——同一用户的另一个登录（控制台/CLI/脚本）是**另一个会话**，其登出或一次性命令不会丢弃本会话
       未提交的候选。
+      锁的排他性只为保护**未提交的候选**（决策 #318）：持有会话的候选**无未提交改动**时，
+      同一用户的新会话可直接**接管**该锁（跨用户不可；原持有者再操作报明确错误）；有未提交改动时
+      严格排他。
       一次性事务（带 `X-NFVIS-Auto-Commit: true` 的写、以及 /system/login-users 一族——它们提交即生效）
       在收尾时交还锁；纯候选写入（无该头）与 POST /configuration/commit 之后锁仍在，
-      由客户端显式收尾（`DELETE /configuration/candidate`）或 POST /logout 释放。
+      由客户端显式收尾（`DELETE /configuration/candidate`）或 POST /logout 释放（登出按会话标识清本
+      会话的锁，**不区分接入源**——CLI 侧 `user@ssh` 取得的锁也一并释放）。
     - 错误响应统一为 Error 结构；校验错误逐条列入 detail。
     - 事件经 SSE 推送：GET /events（text/event-stream）。
 servers:
@@ -76,6 +80,8 @@ paths:
         吊销调用者自己的 token，并**丢弃本会话**的 candidate 编辑锁（决策 #119）。
         决策 #317：只作用**本会话**（会话标识 = 本 token 的稳定 ID）——同一用户其它登录
         （另一个浏览器/CLI 终端/脚本）未提交的候选与编辑锁**不受影响**。未在编辑时也返回 204。
+        决策 #318：本会话的锁**不区分接入源**地释放——CLI 侧以 `user@ssh`（或 `user@console`）
+        取得的锁，由登出请求（会话身份来自 REST）按 token 稳定 ID 一并清掉；匹配仍只认本 token。
       responses:
         "204": { description: 已吊销 }
 
@@ -118,7 +124,8 @@ paths:
       description: |
         权限与范围：super-user 可吊销任意 token；其他 class 只能吊销自己的。
         吊销不存在的/他人的 token_id 统一回 404「会话不存在或无权操作」（不泄露存在性）；
-        吊销后该 token 的下一个请求即 401。吊销**当前**会话等价于登出（本会话 candidate 锁随之释放）；
+        吊销后该 token 的下一个请求即 401。吊销**当前**会话等价于登出（本会话 candidate 锁随之释放；
+        决策 #318：按 token 稳定标识释放，**不区分接入源**——CLI 侧 `user@ssh` 的锁也一并清掉）；
         吊销**他人**会话不主动释放其编辑锁——由既有空闲巡检（lock_idle_ttl）回收（决策 #317）。
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, description: token 稳定 ID（GET /system/api-tokens 的 token_id） }
@@ -3195,7 +3202,8 @@ components:
         candidate 会话锁持有信息（FR-CFG-009）。决策 #317：会话与身份键分离——`holder` 是展示
         用的身份键（user@source），`session_id` 是该会话的稳定标识（token 稳定 ID，决策 #301），
         `user` 是所属用户。同一用户的多个会话各占一条、不会被合并；非 super-user 只能看到/影响
-        自己的会话（范围判定在服务端）。
+        自己的会话（范围判定在服务端）。决策 #318：`dirty: false` 的持锁会话（干净锁）可被**同一用户**
+        的新会话接管（跨用户不行）——接管后本表随之显示新的持锁会话。
       properties:
         holder: { type: string, example: "admin@ssh" }
         session_id:
