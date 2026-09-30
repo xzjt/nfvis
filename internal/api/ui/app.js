@@ -803,7 +803,7 @@ export const VIEWS = {
     render(d) { pageWarn(d); renderKernel(d['/system/kernel']); },
   },
   'users': {
-    render(d) { pageWarn(d); renderUsers(d['/system/login-users']); renderTokens(d['/system/api-tokens']); },
+    render(d) { pageWarn(d); renderUsers(d['/system/login-users']); renderTokens(d['/system/api-tokens']); renderBannerCard(d['/login-banner']); },
   },
   'tls': {
     render(d) { pageWarn(d); renderTLS(d['/system/tls']); },
@@ -936,11 +936,14 @@ async function knlAct(action) {
 // ---------- 用户与权限（#/system/users）----------
 //
 // **写这条代码前逐条核实过的端点语义**（服务端实现见 resources_w5.go）：
+//   GET    /login-banner                           读登录横幅（决策 #303；横幅卡片与登录页共用同一端点）
 //   GET    /system/login-users                     读**已生效配置**里的本地用户与 class（口令哈希永不回显）
 //   POST   /system/login-users                     建用户 / 建 class
 //   PUT    /system/login-users/{name}              改 class / 重置口令
 //   DELETE /system/login-users/{name}              删用户（不能删自己、不能删最后一个 super-user）
 //   POST   /system/login-users/{name}:change-password  本人改口令（要验旧口令）
+//   PUT    /system/login-banner                    设置登录横幅（等价 CLI set system login banner）
+//   DELETE /system/login-banner                    清除登录横幅（等价 CLI delete system login banner）
 // 写操作**既不是**"纯候选两段式"、**也不是**"无锁直连"：服务端先取**配置编辑锁**（engine.Edit），
 // 把改动写进候选，然后**立即提交**（响应头 X-NFVIS-Committed: true）——即"取锁 + 直提"。
 // 界面因此按三条口径处理：
@@ -1246,6 +1249,70 @@ async function usrMyPassword(oldPw, newPw, say) {
     emit('口令已修改——请用新口令重新登录。', false);
   } catch (e) {
     emit('修改口令失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+// ---------- 登录横幅卡（#/system/users 页，决策 #303） ----------
+//
+//   GET    /login-banner        当前值（与登录页共用同一端点：卡片显示的就是登录者会看到的）
+//   PUT    /system/login-banner 设置（单行、≤512 字节，服务端校验拒绝超限/含换行并说明上限）
+//   DELETE /system/login-banner 清除
+// 写模式与用户管理同一条路（取配置编辑锁 → 写候选 → 立即提交 → 审计），确认按**低危**档
+//（横幅随时可改回/清除，影响面就是登录页那行字）。
+function renderBannerCard(payload) {
+  const el = $('usr-banner-current');
+  if (!el) return;
+  const ok = payload && !payload.__err;
+  const banner = ok && typeof payload.banner === 'string' ? payload.banner : '';
+  el.textContent = ok ? (banner || '（未设置）') : '（读取失败：' + (payload ? payload.__err : '未取到数据') + '）';
+}
+
+async function usrBannerSave() {
+  const text = $('usr-banner-text').value;
+  if (!(text || '').trim()) {
+    usrMsg('请先填横幅文本；要清除现有横幅请点「清除横幅」。', true);
+    return;
+  }
+  const block = await usrCandidateBlock();
+  if (block) { usrMsg(block, true); return; } // 本会话在配置页有未提交候选：拒绝（同用户管理口径）
+  const ok = await uiConfirm('保存登录横幅', {
+    tier: 'low',
+    paragraphs: ['把登录横幅设为这次填的文本，**立即生效**（取配置编辑锁后直接提交）。',
+      '横幅显示在控制台登录页与命令行登录提示之前，登录者尚未认证就能看到。',
+      '单行文本，最长 512 字节；超限时服务端会拒绝并说明上限。'],
+    cli: 'set system login banner <文本>',
+  });
+  if (!ok) return;
+  usrMsg('提交中…', false);
+  try {
+    await api('/system/login-banner', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ banner: text }),
+    });
+    usrMsg('登录横幅已更新（已提交生效）。', false);
+  } catch (e) {
+    usrMsg('保存横幅失败：' + e.message, true);
+  }
+  $('usr-banner-text').value = '';
+  await reload().catch(() => {});
+}
+
+async function usrBannerClear() {
+  const block = await usrCandidateBlock();
+  if (block) { usrMsg(block, true); return; } // 本会话在配置页有未提交候选：拒绝（同用户管理口径）
+  const ok = await uiConfirm('清除登录横幅', {
+    tier: 'low',
+    paragraphs: ['清除登录横幅？清除后登录页与命令行登录提示不再显示横幅（立即生效，取配置编辑锁后直接提交）。'],
+    cli: 'delete system login banner',
+  });
+  if (!ok) return;
+  usrMsg('提交中…', false);
+  try {
+    await api('/system/login-banner', { method: 'DELETE' });
+    usrMsg('登录横幅已清除。', false);
+  } catch (e) {
+    usrMsg('清除横幅失败：' + e.message, true);
   }
   await reload().catch(() => {});
 }
@@ -3419,6 +3486,25 @@ export function showGlobalError(msg) {
 
 // ---------- 登录 / 退出 ----------
 
+// 登录横幅（决策 #303）：GET /login-banner 未认证可达，登录页每次回到登录视图都取一次
+//（设置/清除横幅后无需刷新浏览器）。任何失败都静默：横幅是展示性功能，不能挡住登录。
+async function loadLoginBanner() {
+  const box = $('login-banner');
+  try {
+    const res = await fetch(API + '/login-banner');
+    if (!res.ok) { box.hidden = true; return; }
+    const body = await res.json().catch(() => ({}));
+    if (body && typeof body.banner === 'string' && body.banner !== '') {
+      box.textContent = body.banner; // textContent 落值：横幅文本不会变成标记
+      box.hidden = false;
+    } else {
+      box.hidden = true; // 未设置时字段省略：不渲染横幅块
+    }
+  } catch (e) {
+    box.hidden = true;
+  }
+}
+
 function showLogin(msg) {
   $('main-view').hidden = true;
   $('login-view').hidden = false;
@@ -3427,6 +3513,7 @@ function showLogin(msg) {
   e.hidden = !msg;
   $('password').value = '';
   $('username').focus();
+  loadLoginBanner();
 }
 
 // applyRole：按账号 class 切角色渲染（决策 #145，设计 §8：`read-only` 只见只读页、写按钮**隐藏**）。
@@ -5400,6 +5487,10 @@ $('usr-mypw-btn').addEventListener('click', () => {
   const newPw = $('usr-my-new').value;
   return usrMyPassword(oldPw, newPw).then(() => { $('usr-my-old').value = ''; $('usr-my-new').value = ''; });
 });
+
+// 登录横幅卡（决策 #303）：低危档确认，写模式与用户管理同一套（取锁直提入审计）。
+$('usr-banner-save-btn').addEventListener('click', usrBannerSave);
+$('usr-banner-clear-btn').addEventListener('click', usrBannerClear);
 
 // 顶栏「我的账号」（决策 #147）：**所有角色**都看得见（不带 data-write），
 // 走的是同一条处理器 usrMyPassword，提示落在这个框里（用户页那条仍落在 #usr-msg）。

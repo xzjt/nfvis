@@ -341,6 +341,18 @@ func (v *validator) checkSystemLogin(s *SystemConfig) {
 		return
 	}
 	l := s.Login
+	// 登录横幅（决策 #303）：单行文本、最长 512 字节。单行约束的由来：CLI 对多行
+	// 引号值只取首行（已登记的解析缺陷），banner 在语义上只该是一行，约束单行
+	// 从根上规避；上限的报错文案必须带上限值与当前字节数，操作者才知道怎么改。
+	if l.Banner != "" {
+		const bannerMax = 512
+		if n := len(l.Banner); n > bannerMax {
+			v.errf("system.login.banner", "登录横幅超过长度上限 %d 字节（当前 %d 字节），请缩短后重试", bannerMax, n)
+		}
+		if strings.ContainsAny(l.Banner, "\n\r") {
+			v.errf("system.login.banner", "登录横幅须为单行文本（不能包含换行）")
+		}
+	}
 	preset := map[string]bool{"super-user": true, "operator": true, "read-only": true}
 	defined := map[string]bool{}
 	dupCheck(v, l.Classes, "system.login.classes", func(c ClassDef) string { return c.Name }, "class")

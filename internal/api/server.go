@@ -157,6 +157,10 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 
 	// 认证（免 token，FR-API-001）
 	mux.HandleFunc("POST "+APIPrefix+"/login", s.handleLogin)
+	// 登录横幅（决策 #303）：**有意不进 s.auth**——横幅要在登录之前显示（Web 登录页与
+	// nfvis-cli 登录提示前），与 POST /login 同级免 token。边界：handler 只回横幅文本本身，
+	// 不回主机名/版本/用户等任何其他信息（登录前不给探查面）；无限流豁免，随既有中间件。
+	mux.HandleFunc("GET "+APIPrefix+"/login-banner", s.handleLoginBanner)
 	// 认证后端点：required class + 命令树路径（自定义 class ACL 判定用）
 	mux.Handle("POST "+APIPrefix+"/logout", s.auth(s.handleLogout, schema.ClassReadOnly, "logout"))
 	mux.Handle("GET "+APIPrefix+"/system/version", s.auth(s.handleVersion, schema.ClassReadOnly, "show version"))
@@ -195,6 +199,9 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("POST "+APIPrefix+"/system/login-users", cfgAPI(s.handlePostLoginUser))
 	mux.Handle("PUT "+APIPrefix+"/system/login-users/{name}", cfgAPI(s.handlePutLoginUser))
 	mux.Handle("DELETE "+APIPrefix+"/system/login-users/{name}", cfgAPI(s.handleDeleteLoginUser))
+	// 登录横幅管理面（决策 #303）：与用户管理同一写模式（cfgAPI 取锁 → 一次性事务直提 → 审计）
+	mux.Handle("PUT "+APIPrefix+"/system/login-banner", cfgAPI(s.handlePutLoginBanner))
+	mux.Handle("DELETE "+APIPrefix+"/system/login-banner", cfgAPI(s.handleDeleteLoginBanner))
 	// {name}:change-password 含冒号后缀，ServeMux 通配符不支持——以 {tail...} 捕获后分发
 	mux.Handle("POST "+APIPrefix+"/system/login-users/{tail...}", s.auth(s.dispatchLoginUsersPost, schema.ClassReadOnly, "request system password change"))
 	// 决策 #301：活动会话 / API Token（GET ≡ show system api tokens；{id}:revoke 含冒号后缀，

@@ -60,6 +60,11 @@ var shapeConditional = map[string]map[string]string{
 		// 注意：`config_revision` **不在白名单里**——它已实现（决策 #116），必须真的发得出来。
 		// 白名单只该收"会合法缺席"的字段；把已实现字段列进来会让对应断言变成空转。
 	},
+	"GET /login-banner": {
+		// 决策 #303：未设置横幅时 banner 字段省略——不回空串、不编造，客户端（Web 登录页
+		// 与 CLI 登录前）据此不渲染横幅块；端点也只回这一个字段。
+		"banner": "未设置横幅时省略该字段（不编造空串）；设置了就必须原样发出",
+	},
 }
 
 // TestResponseShapeMatchesContract 契约声明的响应字段必须出现在实际响应里。
@@ -94,6 +99,7 @@ func TestResponseShapeMatchesContract(t *testing.T) {
 		{"GET", "/resource-pools"},
 		{"GET", "/configuration"},     // 决策 #119：整配置出口（committed）
 		{"GET", "/system/api-tokens"}, // 决策 #301：活动会话清单（登录后恒有≥1 条，自己的会话）
+		{"GET", "/login-banner"},      // 决策 #303：登录横幅（未设置时走白名单省略）
 	} {
 		props := declaredProps(t, spec, ep.path, ep.method)
 		if len(props) == 0 {

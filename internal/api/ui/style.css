@@ -53,6 +53,13 @@ p { margin: 6px 0; }
 
 /* 登录 */
 .login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+/* 登录横幅（决策 #303）：登录卡片上方的一行公告文本，服务端有横幅才显示（hidden 压过一切）。 */
+.login-banner {
+  width: 340px; margin: 0 0 12px; padding: 10px 14px;
+  border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 8px; background: var(--panel); color: var(--fg);
+  font-size: 13px; white-space: pre-wrap; word-break: break-word;
+}
 .login-card {
   width: 340px; padding: 26px; border: 1px solid var(--line);
   border-radius: 10px; background: var(--panel);

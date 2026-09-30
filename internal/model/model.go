@@ -49,9 +49,12 @@ type HealthThresholds struct {
 	DiskUsedPercent int `json:"disk_used_percent,omitempty"`
 }
 
-// SystemLogin 本地 AAA 配置：用户/class/口令策略，声明式存于配置文档
+// SystemLogin 本地 AAA 配置：登录横幅/用户/class/口令策略，声明式存于配置文档
 // （可 compare/rollback）；口令仅存加盐哈希，明文永不回显（附录 A #25）。
 type SystemLogin struct {
+	// Banner 登录横幅（决策 #303）：显示在 Web 登录页与 CLI 登录提示之前——
+	// 未认证即可见，不要存放敏感信息。单行文本、最长 512 字节（校验见 validate.go）。
+	Banner         string            `json:"banner,omitempty"`
 	Users          []LoginUserConfig `json:"users,omitempty"`
 	Classes        []ClassDef        `json:"classes,omitempty"`
 	PasswordPolicy *PasswordPolicy   `json:"password_policy,omitempty"`

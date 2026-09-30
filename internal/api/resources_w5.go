@@ -153,7 +153,8 @@ func effectiveClassOf(u model.LoginUserConfig) string {
 // 用户/口令变更**必须**生效（FR-SEC-008），故本族每个入口都是「取锁 → 写候选 → 立即提交」
 // 的一次性事务：收尾时按 endOneShot 的判据交还会话锁（决策 #151）——此前提交后仍持有
 // 全局编辑锁，其它会话随后的配置写被 409 挡住（round76 三次复现）。
-func (s *Server) mutateLoginUsers(w http.ResponseWriter, r *http.Request, status int, mutate func(*model.SystemLogin) error) {
+// msg 是提交说明（入审计；登录横幅的变更与用户管理共用本编排，决策 #303）。
+func (s *Server) mutateLoginUsers(w http.ResponseWriter, r *http.Request, status int, msg string, mutate func(*model.SystemLogin) error) {
 	sess := sessionFromIdentity(r)
 	if err := s.engine.Edit(sess); err != nil {
 		mapEngineError(w, err)
@@ -186,7 +187,7 @@ func (s *Server) mutateLoginUsers(w http.ResponseWriter, r *http.Request, status
 	}
 	// 用户/口令变更强制直提生效（FR-SEC-008，入审计）
 	opts := CommitOptsFrom(r)
-	opts.Message = "login-users 变更"
+	opts.Message = msg
 	res, err := s.engine.Commit(r.Context(), sess, opts)
 	if err != nil {
 		mapEngineError(w, err)
@@ -214,7 +215,7 @@ func (s *Server) handlePostLoginUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "name 必填", nil)
 		return
 	}
-	s.mutateLoginUsers(w, r, http.StatusCreated, func(l *model.SystemLogin) error {
+	s.mutateLoginUsers(w, r, http.StatusCreated, "login-users 变更", func(l *model.SystemLogin) error {
 		if in.Kind == "class" {
 			for _, c := range l.Classes {
 				if c.Name == in.Name {
@@ -255,7 +256,7 @@ func (s *Server) handlePutLoginUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
 		return
 	}
-	s.mutateLoginUsers(w, r, http.StatusOK, func(l *model.SystemLogin) error {
+	s.mutateLoginUsers(w, r, http.StatusOK, "login-users 变更", func(l *model.SystemLogin) error {
 		for i := range l.Users {
 			if l.Users[i].Name != name {
 				continue
@@ -284,7 +285,7 @@ func (s *Server) handlePutLoginUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteLoginUser(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	info, _ := Identity(r)
-	s.mutateLoginUsers(w, r, http.StatusOK, func(l *model.SystemLogin) error {
+	s.mutateLoginUsers(w, r, http.StatusOK, "login-users 变更", func(l *model.SystemLogin) error {
 		if name == info.User {
 			return conflictError("不能删除当前登录用户")
 		}
@@ -351,7 +352,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, na
 		mapEngineError(w, err)
 		return
 	}
-	s.mutateLoginUsers(w, r, http.StatusOK, func(l *model.SystemLogin) error {
+	s.mutateLoginUsers(w, r, http.StatusOK, "login-users 变更", func(l *model.SystemLogin) error {
 		for i := range l.Users {
 			if l.Users[i].Name == name {
 				l.Users[i].PasswordHash = hash

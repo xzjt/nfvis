@@ -1243,6 +1243,16 @@
         },
         "type": "object"
       },
+      "LoginBanner": {
+        "properties": {
+          "banner": {
+            "description": "横幅文本；未设置时省略该字段（不回空串、不编造）",
+            "maxLength": 512,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "LoginResponse": {
         "properties": {
           "expires_in": {
@@ -1622,6 +1632,11 @@
           "login": {
             "description": "本地用户与 login class（FR-SEC-002/003；口令仅存加盐 PBKDF2 哈希，附录 A",
             "properties": {
+              "banner": {
+                "description": "登录横幅（单行文本，最长 512 字节）：显示在 Web 登录页与 CLI 登录提示之前，\n未认证即可见，请勿写入敏感信息。未设置时该字段省略。\n",
+                "maxLength": 512,
+                "type": "string"
+              },
               "classes": {
                 "description": "自定义 class（命令路径 allow/deny；预置 super-user/operator/read-only 见命令树 §4）",
                 "items": {
@@ -4162,6 +4177,28 @@
         ]
       }
     },
+    "/login-banner": {
+      "get": {
+        "description": "返回配置的登录横幅文本。该端点**不要求鉴权**（登录前就要显示），且**只返回横幅文本本身**——\n不返回主机名、版本、用户清单等任何其他信息（登录前不给探查面）。\n未设置横幅时响应为空对象：`banner` 字段省略（不回空串、不编造），客户端据此不渲染横幅块。\n",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginBanner"
+                }
+              }
+            },
+            "description": "OK（未设置横幅时 banner 字段省略）"
+          }
+        },
+        "security": [],
+        "summary": "登录横幅（未认证只读，登录页展示用）",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/logout": {
       "post": {
         "responses": {
@@ -5062,6 +5099,45 @@
           }
         },
         "summary": "回退上一次内核基线（需重启生效，FR-SYS-014，super-user）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/login-banner": {
+      "delete": {
+        "description": "一次性事务：提交即生效、收尾交还编辑锁（同 `PUT /system/login-banner`）。",
+        "responses": {
+          "200": {
+            "description": "已清除（入审计）"
+          }
+        },
+        "summary": "清除登录横幅（等价 CLI delete system login banner）",
+        "tags": [
+          "system"
+        ]
+      },
+      "put": {
+        "description": "一次性事务：取配置编辑锁 → 写候选 → 立即提交生效（同 /system/login-users 一族），\n入配置提交审计。横幅为**单行文本、最长 512 字节**：超限或含换行时校验拒绝并说明上限。\n注意：横幅在登录前（未认证）即可见，请勿写入敏感信息。\n",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginBanner"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已更新（入审计）"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          }
+        },
+        "summary": "设置登录横幅（等价 CLI set system login banner）",
         "tags": [
           "system"
         ]
