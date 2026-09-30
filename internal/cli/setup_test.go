@@ -288,3 +288,30 @@ func TestRunWizardSkipsNoChangeByWarningMark(t *testing.T) {
 		t.Fatalf("服务端提示与 [跳过] 说明重复打印：\n%s", out.String())
 	}
 }
+
+// TestOutputFailedJudgement 锁定失败判据（决策 #113 同源、决策 #320 起由脚本模式共用）：
+// 行首单个或双个 % 与行首「校验失败」算失败；提示行与普通输出不算。
+func TestOutputFailedJudgement(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"双 % 错误", "%% 配置不完整，缺少取值: hostname\n", true},
+		{"单 % 错误（真实服务端形态）", "% 无效命令: show system no-such-subcommand-xyz（可用：uptime|cpu）\n", true},
+		{"独行 %", "%\n", true},
+		{"校验失败", "校验失败（candidate 保留）:\n  - x\n", true},
+		{"多行里有一行是错误", "NFViS 1.0.0\n% 无效命令: show vpp bogus\n", true},
+		{"空操作提示不算失败", "警告: 语句未产生配置变更（值未变化或尚未映射到模型），已继续：set x y\n", false},
+		{"普通输出", "NFViS 1.0.0\nUbuntu 26.04\n", false},
+		{"空输出", "", false},
+		{"句中的百分号不是错误", "packet loss 50%\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := OutputFailed(tc.out); got != tc.want {
+				t.Fatalf("OutputFailed(%q) = %v，期望 %v", tc.out, got, tc.want)
+			}
+		})
+	}
+}

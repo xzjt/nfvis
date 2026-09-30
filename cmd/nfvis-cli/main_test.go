@@ -96,6 +96,191 @@ func TestRunScriptStopsOnRealError(t *testing.T) {
 	}
 }
 
+// singlePercentResult 服务端**单 %** 错误的伪响应（来源：`%%` 写在 fmt 格式串里被折叠成 `%`，
+// 真机 `show system <未知子命令>` 即此形）。
+func singlePercentResult(line string) cliclient.Result {
+	return cliclient.Result{
+		Output: "% 无效命令: " + line + "（可用：uptime|cpu|memory|storage）\n",
+		Mode:   "oper", Prompt: "nfvis> ",
+	}
+}
+
+// runScriptCapture 跑脚本并捕获输出（runScriptLinesTo 的可测入口）。
+func runScriptCapture(sess *cli.Session, script string) (bool, string) {
+	var buf bytes.Buffer
+	failed := runScriptLinesTo(sess, script, &buf)
+	return failed, buf.String()
+}
+
+// TestRunScriptStopsAtUnknownCommandMiddleLine 决策 #320 / R100-1 真机场景：脚本中间一条未知命令，
+// 必须**停在它**、报出行号与原文、其后语句**未执行**（用后续语句的特征串反证）。
+//
+// 回归的是「服务端单 % 错误不被判失败」：`%%` 写在 fmt 格式串里会渲染成单 %，脚本曾据此继续执行。
+func TestRunScriptStopsAtUnknownCommandMiddleLine(t *testing.T) {
+	const (
+		bad   = "show system no-such-subcommand-xyz"
+		later = "show vpp also-no-such-subcommand-abc"
+	)
+	be := &scriptBackend{replies: map[string]cliclient.Result{bad: singlePercentResult(bad)}}
+	sess := cli.New(be, "ssh")
+
+	failed, out := runScriptCapture(sess, strings.Join([]string{"show version", bad, later}, "\n"))
+	if !failed {
+		t.Fatal("未知命令（单 % 错误）应判失败并停止脚本")
+	}
+	if len(be.executed) != 2 || be.executed[1] != bad {
+		t.Fatalf("应停在失败行、其后不执行，实执行 %v", be.executed)
+	}
+	for _, want := range []string{"第 2 行", "show system no-such-subcommand-xyz", "其余 1 行未执行"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("停止报告应含 %q：\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "also-no-such-subcommand-abc") {
+		t.Errorf("失败行之后的语句不得执行（特征串出现在输出里）：\n%s", out)
+	}
+}
+
+// TestRunScriptStopsAtUnknownCommandFirstLine 未知命令在**首行**：报第 1 行、其余 2 行未执行。
+func TestRunScriptStopsAtUnknownCommandFirstLine(t *testing.T) {
+	const (
+		bad  = "show system no-such-subcommand-xyz"
+		next = "show vpp also-no-such-subcommand-abc"
+	)
+	be := &scriptBackend{replies: map[string]cliclient.Result{bad: singlePercentResult(bad)}}
+	sess := cli.New(be, "ssh")
+
+	failed, out := runScriptCapture(sess, strings.Join([]string{bad, next, "show version"}, "\n"))
+	if !failed {
+		t.Fatal("首行未知命令应判失败并停止脚本")
+	}
+	if len(be.executed) != 1 || be.executed[0] != bad {
+		t.Fatalf("应停在首行、其后不执行，实执行 %v", be.executed)
+	}
+	for _, want := range []string{"第 1 行", "其余 2 行未执行"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("停止报告应含 %q：\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "also-no-such-subcommand-abc") {
+		t.Errorf("失败行之后的语句不得执行：\n%s", out)
+	}
+}
+
+// TestRunScriptCleanAllExecuted 全绿脚本：逐行执行完、无失败、不打印停止报告。
+func TestRunScriptCleanAllExecuted(t *testing.T) {
+	be := &scriptBackend{}
+	sess := cli.New(be, "ssh")
+
+	failed, out := runScriptCapture(sess, "show version\nshow system api tokens\n")
+	if failed {
+		t.Fatalf("全绿脚本不该判失败：%s", out)
+	}
+	if len(be.executed) != 2 {
+		t.Fatalf("全绿脚本应逐行执行完，实执行 %v", be.executed)
+	}
+	if strings.Contains(out, "未执行") {
+		t.Errorf("全绿脚本不该打印停止报告：\n%s", out)
+	}
+}
+
+// TestRunScriptFailureReportsLineNumberAndReason 停止报告须含行号、原文、原因与剩余行数。
+func TestRunScriptFailureReportsLineNumberAndReason(t *testing.T) {
+	const bad = "request system reboot"
+	be := &scriptBackend{replies: map[string]cliclient.Result{
+		bad: {Output: "Restart the system? [yes,no] \n", Mode: "oper", Prompt: "nfvis> "},
+	}}
+	sess := cli.New(be, "ssh")
+
+	failed, out := runScriptCapture(sess, "show version\n"+bad+"\nshow version\n")
+	if !failed {
+		t.Fatal("非交互确认问询应判失败")
+	}
+	if len(be.executed) != 2 {
+		t.Fatalf("问询之后的语句不得执行，实执行 %v", be.executed)
+	}
+	for _, want := range []string{"第 2 行", "request system reboot", "原因：", "其余 1 行未执行"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("停止报告应含 %q：\n%s", want, out)
+		}
+	}
+}
+
+// TestRunScriptReportsPhysicalStartLineForMultiline 多行引号值语句：行号取该语句的**起始物理行**，
+// 原文折成单行（不把值里的换行倒出来），剩余行数按逻辑行计。
+func TestRunScriptReportsPhysicalStartLineForMultiline(t *testing.T) {
+	const stmt = "set virtual-machine-functions fw cloud-init user-data \"#!/bin/sh\nbad\""
+	be := &scriptBackend{replies: map[string]cliclient.Result{
+		stmt: {Output: "% 无效命令: bad\n", Mode: "oper", Prompt: "nfvis> "},
+	}}
+	sess := cli.New(be, "ssh")
+
+	failed, out := runScriptCapture(sess, "show version\n"+stmt+"\nshow version\n")
+	if !failed {
+		t.Fatal("多行值语句失败也应即停")
+	}
+	if len(be.executed) != 2 {
+		t.Fatalf("失败行之后的语句不得执行，实执行 %v", be.executed)
+	}
+	for _, want := range []string{"第 2 行", "#!/bin/sh bad", "其余 1 行未执行"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("停止报告应含 %q：\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\nbad") {
+		t.Errorf("多行值应折成单行，不应原样倒出换行：\n%s", out)
+	}
+}
+
+// TestScriptSourcesSameFailFast 决策 #320：`-c` / `-f <file>` / `-f -`（stdin）三条来源
+// **收敛到同一执行路径**（resolveScript → runScriptLinesTo），失败即停的语义与报告逐字一致。
+func TestScriptSourcesSameFailFast(t *testing.T) {
+	const (
+		bad   = "show system no-such-subcommand-xyz"
+		later = "show vpp also-no-such-subcommand-abc"
+	)
+	body := "show version\n" + bad + "\n" + later + "\n"
+
+	filePath := filepath.Join(t.TempDir(), "stop.txt")
+	if err := os.WriteFile(filePath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sources := map[string]func() (string, error){
+		"-c":   func() (string, error) { return resolveScript(body, "", nil) },
+		"-f":   func() (string, error) { return resolveScript("", filePath, nil) },
+		"-f -": func() (string, error) { return resolveScript("", "-", strings.NewReader(body)) },
+	}
+	var wantOut string
+	for name, load := range sources {
+		t.Run(name, func(t *testing.T) {
+			script, err := load()
+			if err != nil {
+				t.Fatalf("%s 解析失败: %v", name, err)
+			}
+			be := &scriptBackend{replies: map[string]cliclient.Result{bad: singlePercentResult(bad)}}
+			sess := cli.New(be, "ssh")
+			failed, out := runScriptCapture(sess, script)
+			if !failed {
+				t.Fatal("三条来源都应在失败行即停")
+			}
+			if len(be.executed) != 2 || be.executed[1] != bad {
+				t.Fatalf("三条来源都应停在失败行，实执行 %v", be.executed)
+			}
+			if !strings.Contains(out, "第 2 行") || !strings.Contains(out, "其余 1 行未执行") {
+				t.Fatalf("%s 的停止报告不完整：\n%s", name, out)
+			}
+			if strings.Contains(out, "also-no-such-subcommand-abc") {
+				t.Fatalf("%s 失败行之后的语句被执行：\n%s", name, out)
+			}
+			if wantOut == "" {
+				wantOut = out
+			} else if out != wantOut {
+				t.Errorf("%s 与其它来源的报告不一致：\n got %q\nwant %q", name, out, wantOut)
+			}
+		})
+	}
+}
+
 // TestRunScriptWarningIsMarkedNotParsed 提示行的**语句文本自身含 `%%`** 时也不得误判为失败
 // （判据是结构化标记，不是文本前缀——这正是不能靠字符串解析的原因）。
 func TestRunScriptWarningIsMarkedNotParsed(t *testing.T) {
