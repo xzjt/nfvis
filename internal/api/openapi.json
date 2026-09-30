@@ -875,6 +875,93 @@
         },
         "type": "object"
       },
+      "FormatDataRemoved": {
+        "description": "按类别统计的删除对象数（配置里除保留节之外的一切）。",
+        "properties": {
+          "acls": {
+            "type": "integer"
+          },
+          "bonds": {
+            "type": "integer"
+          },
+          "containers": {
+            "type": "integer"
+          },
+          "lldp_interfaces": {
+            "type": "integer"
+          },
+          "nat_rules": {
+            "type": "integer"
+          },
+          "port_mirroring": {
+            "type": "integer"
+          },
+          "qos_policies": {
+            "type": "integer"
+          },
+          "routes": {
+            "type": "integer"
+          },
+          "virtual_switches": {
+            "type": "integer"
+          },
+          "vms": {
+            "type": "integer"
+          },
+          "vrfs": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "FormatDataResult": {
+        "description": "决策",
+        "properties": {
+          "already_factory": {
+            "description": "已是出厂态（本次未删任何受管对象/数据）时为 true；幂等第二次执行如实回此值",
+            "type": "boolean"
+          },
+          "freed_bytes": {
+            "description": "释放的字节数（镜像记录大小 + 受管目录文件大小）",
+            "format": "int64",
+            "type": "integer"
+          },
+          "kept_sections": {
+            "description": "原样保留的配置节（保命条款）：system.management / system.api / system.login / interfaces / vpp.dpdk",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "purged_files": {
+            "description": "受管数据目录里清理的文件数",
+            "type": "integer"
+          },
+          "removed_images": {
+            "description": "从镜像仓库删除的镜像数",
+            "type": "integer"
+          },
+          "removed_objects": {
+            "$ref": "#/components/schemas/FormatDataRemoved"
+          },
+          "residuals": {
+            "description": "未清掉的残留（逐条含原因）；非空即表示本次未清干净，端点据此返回 500",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "description": "提交保留节配置后的修订号；已是出厂态时为当前修订号",
+            "type": "integer"
+          },
+          "status": {
+            "example": "formatted",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "HardwareHealth": {
         "properties": {
           "bmc_present": {
@@ -5736,6 +5823,52 @@
           }
         },
         "summary": "组件版本",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system:format-data": {
+      "post": {
+        "description": "收敛删除全部受管 VNF/容器（含其快照）与网络配置对象、清空受管数据目录（镜像/备份/抓包/转储/诊断归档/VM 磁盘），\n并把配置重置为「保留节」最小配置。`system.management`/`system.api`/`system.login` 三节与物理口声明\n`set interfaces …`、DPDK 声明 `set vpp dpdk dev …` 原样保留，底座与身份（VPP/libvirt/docker、二进制、\nTLS 证书、SSH host key、systemd 单元）不动——操作者执行完仍可登录继续配置，不必重启才能恢复。\n高危档：需 `confirm=true`；**部分失败（有残留）时返回 500** 并在 message 里逐条列出残留与原因，绝不在未清干净时报成功。\n",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "confirm": {
+                    "description": "双重确认，必须为 true",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "confirm"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FormatDataResult"
+                }
+              }
+            },
+            "description": "已重置；响应体为统计与残留清单"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "500": {
+            "description": "部分失败：有残留未清除（message 逐条列出），已清部分不回滚"
+          }
+        },
+        "summary": "重置数据分区（恢复出厂数据状态，保留管理面可达；决策",
         "tags": [
           "system"
         ]

@@ -31,7 +31,9 @@
 避免一条失败掩盖其余）；`request` 族覆盖 VM/容器生命周期、快照（含「运行中拒绝」的守卫用例）、
 接口启停、抓包、诊断归档/备份/ntp/tls/ssh-key 回退、镜像删除、告警清除。
 **未进套件**的命令分三类，其记号沿用上一轮并已按本轮代码核对：破坏性命令（`reboot`/`shutdown`/`poweroff`/
-`zeroize`/`format-data`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`）、
+`zeroize`/`format-data`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`；
+其中 `zeroize` 与 `format-data` 均为**已实现的破坏性命令**，标记 ✅ 表示「破坏性但已验」——实现与单测逐条覆盖，
+真机执行按交付报告步骤在测试机单独走查，不进全功能套件）、
 需交互输入者（VM/容器删除确认、改密）、本机环境不具备者（SR-IOV 无 PF/VF、LLDP 无对端、
 无 IPMI/温度传感器/SMART、离线无自带 memif 的容器镜像）；
 其余行（§2 中未被套件逐条执行的配置语句，以及 `request … console`、`bind-dpdk`/`unbind-dpdk`、
@@ -180,7 +182,7 @@
 | `request system api token revoke <token-id>` | 吊销指定会话（O；范围按身份裁定——super-user 可吊销任意会话，其他 class 仅自己的；不存在的/他人的 id 统一报「会话不存在或无权操作」，不泄露存在性。token-id 见 `show system api tokens`。request 域以 O 为基线，read-only 的自助结束会话走 POST /logout；REST 侧同能力对全部登录 class 开放） | O | `POST /system/api-tokens/{id}:revoke` | 🚫 本轮新增（决策 #301）：单测覆盖，真机四套件待跑 |
 | `request system ssh host-key regenerate` | 重新生成 SSH host key | S | `POST /system/ssh-host-key:regenerate` | ✅ |
 | `request system password change` | 登录者自助改密（验证旧口令） | O | `POST /system/login-users/{n}:change-password`（与 REST 同源） | 🚫 需交互输入（契约已登记延期） |
-| `request system storage format-data` | 重置数据分区（危险，双确认） | S | 宿主 | 🚫 破坏性（契约已登记延期） |
+| `request system storage format-data` | 恢复出厂数据状态（保留管理面可达）：收敛删全部受管 VNF/容器与网络对象、清受管数据目录、配置库重置为保留节（决策 #305） | S | `POST /system:format-data`（宿主编排；双确认照搬 zeroize） | ✅ 破坏性但已验（决策 #305 落地：收敛/保留/清数据与 zeroize 同一确认与审计口径，单测逐条覆盖；真机按交付报告步骤在测试机执行） |
 | `request system ntp sync` | 立即触发一次 NTP 同步 | O | `POST /system/ntp:sync`（宿主 chrony/ntpd） | ✅ |
 | `request alarms clear [id <id> \| all]` | 清除已 resolved 告警 | O | `POST /alarms:clear` | ✅ |
 
@@ -429,10 +431,10 @@
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 242 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶 |
+| ✅ 实测通过 | 243 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶；`request system storage format-data` 由决策 #305 落地（原 🚫 破坏性、契约已登记延期），按「破坏性但已验」移入本桶 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 15 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`format-data`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖但真机四套件待跑的 3 行（`show system api tokens`、`request system api token revoke <token-id>`、`set system login banner <text>`） |
+| 🚫 本轮未执行 | 14 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖但真机四套件待跑的 3 行（`show system api tokens`、`request system api token revoke <token-id>`、`set system login banner <text>`） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
