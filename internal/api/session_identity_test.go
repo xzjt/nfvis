@@ -260,15 +260,21 @@ func TestR79_1NonSuperSeesOnlyOwnSessions(t *testing.T) {
 	}
 }
 
+// TestR79_1ConcurrentEditSecondRejected 同一用户两个会话同时编辑：持**脏**候选者排他。
+//
+// 决策 #318 起，干净锁可被同一用户的新会话接管（见 clean_lock_test.go），故这里让 A 先写入
+// 一条未提交变更（dirty=true）再断言 B 被拒——这才是锁必须保护的东西。
 func TestR79_1ConcurrentEditSecondRejected(t *testing.T) {
 	ts := newTestServer(t)
 	tokenA, tokenB := loginAdminTwice(t, ts)
 
-	cliRun(t, ts, tokenA, "ssh", "configure") // A 取锁
+	cliRun(t, ts, tokenA, "ssh", "configure")                    // A 取锁
+	cliRun(t, ts, tokenA, "ssh", "set system hostname r79-hold") // A 持脏候选
 	if res := cliLine(t, ts, tokenB, "ssh", "configure"); !strings.Contains(res.Output, "锁被占用") {
 		t.Fatalf("B（同用户另一会话）此时 configure 应被拒，实得：%s", res.Output)
 	}
 	// A 释放后，B 才能取锁。
+	cliRun(t, ts, tokenA, "ssh", "discard")
 	cliRun(t, ts, tokenA, "ssh", "exit")
 	if res := cliLine(t, ts, tokenB, "ssh", "configure"); strings.Contains(res.Output, "%%") {
 		t.Fatalf("A 释放后 B 应能取锁，实得：%s", res.Output)

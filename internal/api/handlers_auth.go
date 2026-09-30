@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/xzjt/nfvis/internal/aaa"
-	"github.com/xzjt/nfvis/internal/config"
 )
 
 // ---------- 统一错误格式（FR-API-005：Error{code, message, detail[]}） ----------
@@ -94,11 +93,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // 决策 #317：清理**只作用于调用者自己的会话**（会话标识 = token 稳定 ID），不再按
 // user@api 身份键归并——R79-1 的现场正是「同用户另一 token 登出把本会话候选丢掉」。
 // 同时清掉该会话在 CLI 执行器里的本地态（模式/层级），避免按 token 键控后条目只增不减。
+//
+// 决策 #318：本会话的锁**不区分接入源**地释放（`discardOwnSession` → `DiscardSession`）——
+// CLI 会话的锁 holder 是 user@ssh/console，而登出请求的会话身份是 REST（user@api），按身份键
+// 匹配清不掉它（R98-1：CLI 退出后留下的干净锁把后续调用挡住）。匹配仍只认本 token 的稳定 ID。
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	sess := s.sessionFromIdentity(r)
-	if err := s.engine.Discard(sess); err != nil && !errors.Is(err, config.ErrNotEditing) {
-		s.log.Warn("登出时释放 candidate 失败", "err", err)
-	}
+	discardOwnSession(s.engine, sess, s.log)
 	if tok := bearerToken(r); tok != "" {
 		if info, ok := Identity(r); ok {
 			s.cliExec.DropSession(info.ID)

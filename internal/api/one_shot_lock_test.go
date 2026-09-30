@@ -85,16 +85,28 @@ func assertOneShotEnded(t *testing.T, ts *httptest.Server, token, what string) {
 	}
 }
 
-// assertLockKept 断言锁**仍在**（反向用例）：会话表里是本会话，且别的会话取不到锁。
-// 探针用 CLI/console 来源——与 ssh、api 都是不同会话，且不会与正在配置模式里的 ssh 会话混在一起。
+// assertLockKept 断言锁**仍在且仍是本会话**（反向用例），且**别的会话取不到**。
+// 前提：被持有的候选是**脏**的（决策 #318 起，干净锁可被同一用户的新会话接管——那种情形
+// 用 assertLockRowHeld）。探针用 CLI/console 来源——与 ssh、api 都是不同会话，
+// 且不会与正在配置模式里的 ssh 会话混在一起。
 func assertLockKept(t *testing.T, ts *httptest.Server, token, want, what string) {
+	t.Helper()
+	assertLockRowHeld(t, ts, token, want, what)
+	out := cliLine(t, ts, token, "console", "configure")
+	if !strings.Contains(out.Output, "锁被占用") {
+		t.Errorf("%s：别的会话此时不该能取脏锁，实得：%s", what, out.Output)
+	}
+}
+
+// assertLockRowHeld 断言锁行仍在、holder 仍是 `want`（**不**要求别的会话取不到）。
+//
+// 决策 #318 起，「别的会话取不到」只在候选**脏**时成立：干净锁可被同一用户的新会话接管。
+// 故「某动作之后锁没被释放」这一层用本函数断言；排他性由 assertLockKept 或
+// clean_lock_test.go 的跨用户/脏候选用例断言。
+func assertLockRowHeld(t *testing.T, ts *httptest.Server, token, want, what string) {
 	t.Helper()
 	if h := lockHolder(t, ts, token); h != want {
 		t.Errorf("%s：锁应仍由 %s 持有，实得 %q", what, want, h)
-	}
-	out := cliLine(t, ts, token, "console", "configure")
-	if !strings.Contains(out.Output, "锁被占用") {
-		t.Errorf("%s：别的会话此时不该能取锁，实得：%s", what, out.Output)
 	}
 }
 
@@ -231,13 +243,17 @@ func TestFailedCommitKeepsLockAndDirtyCandidate(t *testing.T) {
 	}
 }
 
-// ③ 显式收尾路径：CLI 的 configure/commit 与 REST 的 POST /configuration/commit 都不释放
+// ③ 显式收尾路径：CLI 的 configure/commit 与 REST 的 POST /configuration/commit 都**不**释放
 // （客户端自己按决策 #120 的口径收尾：CLI 用 exit/discard，控制台用 DELETE candidate）。
+//
+// 决策 #318 起：commit 之后候选是**干净**的，同一用户的另一会话此刻可以**接管**（干净锁不排他）；
+// 故本用例只断言「锁没被 commit 释放」（assertLockRowHeld）——排他性由 `assertLockKept`（脏候选）
+// 与 `clean_lock_test.go` 的跨用户用例承担。
 func TestExplicitCommitPathsKeepLock(t *testing.T) {
 	ts := newTestServer(t)
 	token := loginAdmin(t, ts)
 
-	// CLI：configure → set → commit 之后仍在配置模式、仍持锁
+	// CLI：configure → set → commit 之后仍在配置模式、仍持锁（未释放）
 	cliRun(t, ts, token, "ssh", "configure")
 	cliRun(t, ts, token, "ssh", "set system hostname cli-keep")
 	if res := cliLine(t, ts, token, "ssh", "commit"); strings.Contains(res.Output, "%%") {
@@ -246,8 +262,11 @@ func TestExplicitCommitPathsKeepLock(t *testing.T) {
 	if res := cliLine(t, ts, token, "ssh", "show"); res.Mode != "config" {
 		t.Errorf("commit 后应仍在配置模式：mode=%q", res.Mode)
 	}
-	assertLockKept(t, ts, token, "admin@ssh", "CLI configure/commit 之后")
+	assertLockRowHeld(t, ts, token, "admin@ssh", "CLI configure/commit 之后")
 	cliRun(t, ts, token, "ssh", "exit")
+	if h := lockHolder(t, ts, token); h != "" {
+		t.Fatalf("exit 后应无持锁会话，实得 %q", h)
+	}
 
 	// REST：PUT candidate（编辑态）+ POST /configuration/commit 之后锁仍在，直到客户端收尾
 	if status, _, body := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token, sampleCandidate(), nil); status != http.StatusOK {
@@ -256,7 +275,7 @@ func TestExplicitCommitPathsKeepLock(t *testing.T) {
 	if status, _, body := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/configuration/commit", token, map[string]any{}, nil); status != http.StatusOK {
 		t.Fatalf("commit：%d %s", status, body)
 	}
-	assertLockKept(t, ts, token, "admin@api", "REST POST /configuration/commit 之后")
+	assertLockRowHeld(t, ts, token, "admin@api", "REST POST /configuration/commit 之后")
 	status, _, _ := cfgRequest(t, http.MethodDelete, ts.URL+APIPrefix+"/configuration/candidate", token, nil, nil)
 	if status != http.StatusNoContent {
 		t.Fatalf("discard 应 204：%d", status)
@@ -279,7 +298,7 @@ func TestCLIConfigModeRunRequestKeepsLock(t *testing.T) {
 	if res.Mode != "config" {
 		t.Errorf("run 之后应仍在配置模式：mode=%q", res.Mode)
 	}
-	assertLockKept(t, ts, token, "admin@ssh", "配置模式内 run request 之后")
+	assertLockRowHeld(t, ts, token, "admin@ssh", "配置模式内 run request 之后")
 
 	cliRun(t, ts, token, "ssh", "discard")
 	if h := lockHolder(t, ts, token); h != "" {

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/xzjt/nfvis/internal/aaa"
-	"github.com/xzjt/nfvis/internal/config"
 )
 
 // apiTokenJSON GET /system/api-tokens 的响应条目（契约 ApiToken）。
@@ -81,9 +80,9 @@ func (s *Server) handleRevokeAPIToken(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	if id == ident.ID {
-		if err := s.engine.Discard(s.sessionFromIdentity(r)); err != nil && !errors.Is(err, config.ErrNotEditing) {
-			s.log.Warn("吊销当前会话时释放 candidate 失败", "err", err)
-		}
+		// 决策 #318：本会话的锁不区分接入源地释放（CLI 会话的锁 holder 是 user@ssh/console，
+		// 而吊销请求的会话身份是 REST；按身份键匹配清不掉它）。
+		discardOwnSession(s.engine, s.sessionFromIdentity(r), s.log)
 	}
 	s.cliExec.DropSession(id)
 	// 安全相关动作入审计（与 CLI 执行器同一动作名，两侧同源可配对）

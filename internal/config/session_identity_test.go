@@ -13,6 +13,9 @@ import (
 )
 
 // TestEngineSessionIdentitySeparatesSameUserSessions 同一身份键、不同会话 ID = 两把锁。
+//
+// 决策 #318 起补充：**干净锁**可被同一用户的新会话接管（见 clean_lock_test.go），故这里的
+// 排他性用**脏候选**验证——这才是锁必须保护的东西。
 func TestEngineSessionIdentitySeparatesSameUserSessions(t *testing.T) {
 	k := newEngineKit(t)
 	a := Session{User: "admin", Source: "api", ID: "tok-a"}
@@ -21,19 +24,19 @@ func TestEngineSessionIdentitySeparatesSameUserSessions(t *testing.T) {
 	if err := k.engine.Edit(a); err != nil {
 		t.Fatalf("会话 A 取锁: %v", err)
 	}
-	// 同一身份键的会话 B 不得据此认为自己是持有者。
-	if err := k.engine.Edit(b); !errors.Is(err, ErrLocked) {
-		t.Fatalf("会话 B（同身份键）取锁应 ErrLocked，实得 %v", err)
-	}
-	if err := k.engine.UpdateCandidate(b, baseCommitted()); !errors.Is(err, ErrNotEditing) {
-		t.Fatalf("会话 B 未持锁编辑应 ErrNotEditing，实得 %v", err)
-	}
-
 	cfg := baseCommitted()
 	cfg.System.Hostname = "held-by-a"
 	if err := k.engine.UpdateCandidate(a, cfg); err != nil {
 		t.Fatalf("会话 A 写候选: %v", err)
 	}
+	// A 持**脏**候选时，同一身份键的会话 B 不得取锁、不得据此认为自己是持有者。
+	if err := k.engine.Edit(b); !errors.Is(err, ErrLocked) {
+		t.Fatalf("会话 B（同身份键）取脏锁应 ErrLocked，实得 %v", err)
+	}
+	if err := k.engine.UpdateCandidate(b, baseCommitted()); !errors.Is(err, ErrLockLost) {
+		t.Fatalf("会话 B 未持锁编辑应 ErrLockLost，实得 %v", err)
+	}
+
 	views, err := k.engine.Sessions()
 	if err != nil || len(views) != 1 {
 		t.Fatalf("Sessions: %+v err=%v", views, err)
@@ -43,7 +46,7 @@ func TestEngineSessionIdentitySeparatesSameUserSessions(t *testing.T) {
 	}
 
 	// B 不能释放 / 丢弃 A 的锁（#317 的核心：登出只作用本会话）。
-	if err := k.engine.Discard(b); !errors.Is(err, ErrNotEditing) {
+	if err := k.engine.Discard(b); !errors.Is(err, ErrLockLost) {
 		t.Fatalf("会话 B 不得丢弃会话 A 的候选，实得 %v", err)
 	}
 	if v, _, err := k.engine.Candidate(); err != nil || v.System.Hostname != "held-by-a" {
@@ -77,7 +80,12 @@ func TestEngineLegacySessionMergesByIdentity(t *testing.T) {
 	if err := k.engine.Edit(legacy); err != nil {
 		t.Fatalf("旧式会话重复 Edit 应幂等: %v", err)
 	}
-	// 有稳定 ID 的同名会话是**另一**会话 → 被拒。
+	// 旧式会话持有**脏**候选 → 有稳定 ID 的同名会话是另一会话，被拒（排他）。
+	cfg := baseCommitted()
+	cfg.System.Hostname = "legacy-dirty"
+	if err := k.engine.UpdateCandidate(legacy, cfg); err != nil {
+		t.Fatalf("旧式会话写候选: %v", err)
+	}
 	if err := k.engine.Edit(Session{User: "system", Source: "console", ID: "x"}); !errors.Is(err, ErrLocked) {
 		t.Fatalf("有 ID 的同身份键会话应被拒，实得 %v", err)
 	}

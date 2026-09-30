@@ -21,7 +21,11 @@ import (
 
 // 事务引擎错误。ErrLocked/ErrNoRevision 定义于 store_sqlite.go。
 var (
-	ErrNotEditing      = errors.New("当前会话未持有 candidate（需先进入配置模式）")
+	ErrNotEditing = errors.New("当前会话未持有 candidate（需先进入配置模式）")
+	// ErrLockLost 本会话曾经（或将）持锁，但当前锁由**同一用户的另一会话**持有——按决策
+	// #318，干净锁可被同一用户的新会话接管，原会话再操作必须得到这条**明确**的错误，而不是
+	// 静默地以为「锁还是我的」。与 ErrNotEditing（压根没进入过配置模式）区分开。
+	ErrLockLost        = errors.New("本会话已失去 candidate 编辑权（编辑锁由同一用户的另一会话持有，可能已被接管；请重新进入配置模式）")
 	ErrConfirmRequired = errors.New("管理口地址/网关变更必须以 commit confirmed 提交")
 )
 
@@ -33,6 +37,13 @@ const (
 
 // DefaultLockIdleTTL candidate 会话空闲超时（骨架 §3.4：空闲超时自动释放）。
 const DefaultLockIdleTTL = 10 * time.Minute
+
+// DefaultCleanLockIdleTTL **干净锁**的空闲回收阈值（决策 #318）。
+//
+// 「干净锁」＝持有会话的候选无未提交改动（dirty=false）——没有需要保护的东西，故比 10 分钟
+// 的常规阈值更快回收（复用既有 `sweepLocked` 巡检，不新造定时器）。1 分钟的口径：足够覆盖
+// 「进入配置模式后思考片刻再敲第一条 set」，又不会让一次遗留的干净锁挡住后续调用太久。
+const DefaultCleanLockIdleTTL = 1 * time.Minute
 
 // Session 配置会话标识。User 用于审计与锁展示，Source 用于 FR-CFG-012 判定。
 type Session struct {
@@ -143,12 +154,14 @@ type TopologyReader interface {
 
 // Options 引擎可选项（零值取默认）。
 type Options struct {
-	LockIdleTTL time.Duration                            // candidate 空闲超时，默认 10m
-	Now         func() time.Time                         // 时钟注入（测试）
-	AfterFunc   func(d time.Duration, fn func()) func()  // 定时器注入（测试），返回 stop
-	OnEvent     func(Event)                              // 事件回调（在引擎锁内调用，须快速返回）
-	OnCommitted func(revision int, user string)          // commit 成功回调（M5-1 config-committed 事件）
-	Validate    func(model.Config) []model.ValidateError // commit 校验器，默认 model.Validate + CheckResources
+	LockIdleTTL time.Duration // candidate 空闲超时，默认 10m
+	// CleanLockIdleTTL 「干净锁」（候选无未提交改动）的空闲回收阈值，默认 1m（决策 #318）。
+	CleanLockIdleTTL time.Duration
+	Now              func() time.Time                         // 时钟注入（测试）
+	AfterFunc        func(d time.Duration, fn func()) func()  // 定时器注入（测试），返回 stop
+	OnEvent          func(Event)                              // 事件回调（在引擎锁内调用，须快速返回）
+	OnCommitted      func(revision int, user string)          // commit 成功回调（M5-1 config-committed 事件）
+	Validate         func(model.Config) []model.ValidateError // commit 校验器，默认 model.Validate + CheckResources
 	// TimeSynced 宿主时钟是否已与 NTP 同步的探针（NFR-006）。注入而非直接依赖 internal/system
 	// ——引擎是最内层，不该反向依赖宿主交互包（骨架 §3.5）。nil = 不记录（字段为 NULL，表示未知）。
 	TimeSynced     func() bool
@@ -162,15 +175,16 @@ type Engine struct {
 	store   *Store
 	applier orchestrator.Applier
 
-	lockIdleTTL time.Duration
-	now         func() time.Time
-	timeSynced  func() bool
-	afterFunc   func(d time.Duration, fn func()) func()
-	onEvent     func(Event)
-	onCommit    func(revision int, user string)
-	validate    func(model.Config) []model.ValidateError
-	images      ImageResolver
-	topology    TopologyReader
+	lockIdleTTL      time.Duration
+	cleanLockIdleTTL time.Duration
+	now              func() time.Time
+	timeSynced       func() bool
+	afterFunc        func(d time.Duration, fn func()) func()
+	onEvent          func(Event)
+	onCommit         func(revision int, user string)
+	validate         func(model.Config) []model.ValidateError
+	images           ImageResolver
+	topology         TopologyReader
 
 	confirmStop func() // 在途 confirmed 定时器的 stop
 
@@ -179,24 +193,34 @@ type Engine struct {
 	holder     string        // 当前持锁会话的展示用身份键（user@source）
 	sessionID  string        // 当前持锁会话的稳定标识（决策 #317）
 	dirty      bool
+	// superseded 记录「本会话的干净锁被谁接管了」（决策 #318 边界）：`被接管者键 → 接管者键`。
+	// 被接管后，原会话只要面对的仍是那把接管者的锁，其 Edit/写候选/提交都得到**明确**的
+	// ErrLockLost（而不是静默重新接管、把现场又变回自己）；接管者释放后原会话即可重新进入。
+	// 仅内存态、随进程重启清空，条目数由接管次数上界。
+	superseded map[string]string
 }
 
 // NewEngine 装配引擎；空库时写入初始空配置（rev 1），并恢复在途的
 // confirmed 状态（nfvisd 重启不丢定时回滚，骨架 §3.4「计时器在 nfvisd 侧」）。
 func NewEngine(store *Store, applier orchestrator.Applier, opts Options) (*Engine, error) {
 	e := &Engine{
-		store:       store,
-		applier:     applier,
-		lockIdleTTL: opts.LockIdleTTL,
-		now:         opts.Now,
-		timeSynced:  opts.TimeSynced,
-		afterFunc:   opts.AfterFunc,
-		onEvent:     opts.OnEvent,
-		onCommit:    opts.OnCommitted,
-		validate:    opts.Validate,
+		store:            store,
+		applier:          applier,
+		lockIdleTTL:      opts.LockIdleTTL,
+		cleanLockIdleTTL: opts.CleanLockIdleTTL,
+		now:              opts.Now,
+		timeSynced:       opts.TimeSynced,
+		afterFunc:        opts.AfterFunc,
+		onEvent:          opts.OnEvent,
+		onCommit:         opts.OnCommitted,
+		validate:         opts.Validate,
+		superseded:       map[string]string{},
 	}
 	if e.lockIdleTTL <= 0 {
 		e.lockIdleTTL = DefaultLockIdleTTL
+	}
+	if e.cleanLockIdleTTL <= 0 {
+		e.cleanLockIdleTTL = DefaultCleanLockIdleTTL
 	}
 	if e.now == nil {
 		e.now = time.Now
@@ -262,8 +286,20 @@ func (e *Engine) Close() {
 
 // Edit 进入配置模式：获取 candidate 会话锁（FR-CFG-009），candidate 置为
 // committed 副本。**同一会话**（同一 key，决策 #317：身份键 + 稳定会话 ID）重复调用幂等；
-// 其它会话一律拒绝。nfvisd 重启后遗留锁已在装配时释放（候选随进程消失），故重启后
+// 其它会话的**脏**锁一律拒绝。nfvisd 重启后遗留锁已在装配时释放（候选随进程消失），故重启后
 // 任意会话都可重新进入配置模式。
+//
+// 决策 #318（干净锁不排他）：锁的排他性只为保护**未提交的候选**而存在。当锁的持有会话其候选
+// **无未提交改动**（dirty=false）时，**同一用户**的任何新会话可直接**接管**该锁——原持有者失去
+// 锁、新会话成为持有者（记一条 `config.lock-takeover` 审计，不报错）。边界**逐条保持**：
+//   - `dirty=true` 时严格排他，绝不丢弃/抢占他人未提交候选（R79-1 的保护语义不变）；
+//   - 仅限同一用户内接管，跨用户仍按既有语义报 ErrLocked（super-user 的额外能力不变）；
+//   - 接管不改变 `sessions` 端点的可见性与 #317 的会话/身份分离（只是换了个持锁会话）；
+//   - 被接管后原会话再操作得到 **ErrLockLost**（明确报错，不静默变成别人）——含它的写语句
+//     重新进入配置模式（Edit）也被拒，直到接管者释放锁（见 superseded）。
+//
+// 由来（R98-1）：#317 按 token 拆开 CLI 会话后，CLI 一次性/脚本调用留下的**干净锁**不再被
+// 下一次调用接管（新 token = 新会话键），于是挡住后续调用（真机 fulltest 195/3/11）。
 func (e *Engine) Edit(sess Session) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -275,25 +311,49 @@ func (e *Engine) Edit(sess Session) error {
 	if err != nil {
 		return err
 	}
-	if li != nil && li.key() != k {
-		return fmt.Errorf("%w: 由 %s 持有", ErrLocked, li.Holder)
+	// 决策 #318 边界：本会话的干净锁**刚被**另一会话接管 ⇒ 不静默重新接管回来，
+	// 给明确的 ErrLockLost（接管者释放锁后此条自动失效，本会话可重新进入）。
+	if li != nil && li.key() != k && e.superseded[k] == li.key() {
+		return fmt.Errorf("%w（已被 %s 接管）", ErrLockLost, li.Holder)
 	}
-	if li != nil && e.candidate != nil {
+	takeover := false
+	if li != nil && li.key() != k {
+		if e.canTakeOverLocked(li, sess) {
+			takeover = true
+		} else {
+			return fmt.Errorf("%w: 由 %s 持有", ErrLocked, li.Holder)
+		}
+	}
+	if li != nil && !takeover && e.candidate != nil {
 		// 同一会话重复 configure：幂等，保留未提交变更
 		return e.store.RefreshLock(li.Holder, li.SessionID, e.now())
 	}
-	if li == nil {
+	if li == nil || takeover {
+		if takeover {
+			// 接管：原持有者失去锁（其候选无未提交改动，丢弃不丢东西），本会话成为持有者。
+			if err := e.store.ReleaseLock(li.Holder, li.SessionID); err != nil {
+				return err
+			}
+			e.clearLockStateLocked()
+			e.superseded[li.key()] = k // 记住「原会话被谁接管」——它再操作时报 ErrLockLost
+			e.appendAudit(AuditEntry{
+				Time: e.now(), User: sess.User, Action: "config.lock-takeover",
+				Detail: fmt.Sprintf("接管空闲的干净编辑锁：原会话 %s 的候选无未提交改动，改由 %s 持有", li.Holder, h),
+				Result: "success",
+			})
+		}
 		if err := e.store.AcquireLock(h, sess.ID, e.now()); err != nil {
 			return err
 		}
 	}
 	committed, err := e.committedLocked()
 	if err != nil {
-		if li == nil {
+		if li == nil || takeover {
 			_ = e.store.ReleaseLock(h, sess.ID)
 		}
 		return err
 	}
+	delete(e.superseded, k) // 本会话已成为（或重新成为）持有者，旧的「被接管」记录失效
 	cand := committed
 	e.candidate = &cand
 	e.holder = h
@@ -301,6 +361,63 @@ func (e *Engine) Edit(sess Session) error {
 	e.sessionKey = k
 	e.dirty = false
 	return e.store.RefreshLock(h, sess.ID, e.now())
+}
+
+// canTakeOverLocked 判定本次 Edit 能否接管既有锁（决策 #318，调用方持引擎锁）：
+// 锁的持有会话的候选**无未提交改动**，且是**同一用户**的会话。
+//
+// 干净判据与 Sessions() 的 Dirty 列同源（lockDirtyLocked）：只有「内存里 candidate 存在
+// 且确实是这把锁的会话在持」才算脏；锁行存在而内存 candidate 为空（装配后遗留锁等）也按干净处理
+// ——没有未提交改动可保护。跨用户永不接管（仍按既有权限/互斥语义）。
+func (e *Engine) canTakeOverLocked(li *LockInfo, sess Session) bool {
+	if e.lockDirtyLocked(li) {
+		return false
+	}
+	return userOfHolder(li.Holder) == sess.User
+}
+
+// lockDirtyLocked 这把锁的持有会话是否有未提交改动（决策 #318；与 Sessions() 的 dirty 同源）。
+func (e *Engine) lockDirtyLocked(li *LockInfo) bool {
+	return li != nil && e.dirty && e.candidate != nil && e.sessionKey == li.key()
+}
+
+// clearLockStateLocked 清空内存编辑态（不动存储；调用方持锁）。
+func (e *Engine) clearLockStateLocked() {
+	e.candidate = nil
+	e.holder = ""
+	e.sessionID = ""
+	e.sessionKey = ""
+	e.dirty = false
+}
+
+// DiscardSession 结束**本会话（按稳定标识）**时丢弃其 candidate 并释放锁（决策 #318）。
+//
+// 与 Discard(Session) 的区别：**不以接入源（Source）为匹配维度**。CLI 会话取得的锁其 holder
+// 是 `user@ssh`（或 `user@console`），而登出/吊销请求的会话身份来自 REST（holder `user@api`）；
+// 二者按会话稳定标识（token ID）是**同一个会话**，按身份键却是两个 —— 此前 `handleLogout`
+// 用 Discard({user,"api",id}) 清不掉 CLI 会话留下的锁（R98-1 的释放缺口）。匹配仍只认本 token
+// 的稳定标识：同一用户的**另一** token 不受影响（R79-1 的保护语义不变）。
+//
+// id 为空（无稳定标识的旧式调用）返回 ErrNotEditing —— 调用方应退回 Discard(sess) 走身份键语义。
+func (e *Engine) DiscardSession(user, id string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sweepLocked()
+	if id == "" {
+		return ErrNotEditing
+	}
+	li, err := e.store.GetLock()
+	if err != nil {
+		return err
+	}
+	if li == nil || li.SessionID != id || userOfHolder(li.Holder) != user {
+		return ErrNotEditing
+	}
+	if e.sessionKey == li.key() {
+		return e.releaseLocked()
+	}
+	// 理论不可达（内存编辑态与锁行同源）；仍按锁行释放，不留无主锁。
+	return e.store.ReleaseLock(li.Holder, li.SessionID)
 }
 
 // Release 退出配置模式并释放锁（保留 candidate 变更与否由调用方先 commit/discard 决定）。
@@ -425,7 +542,7 @@ func (e *Engine) Sessions() ([]SessionView, error) {
 			User:         userOfHolder(li.Holder),
 			AcquiredAt:   li.AcquiredAt,
 			LastActivity: li.LastActivity,
-			Dirty:        e.dirty && e.sessionKey == li.key(),
+			Dirty:        e.lockDirtyLocked(li),
 		})
 	}
 	cf, err := e.store.GetConfirmed()
@@ -726,14 +843,21 @@ func (e *Engine) CompareCandidate() (string, error) {
 
 // requireHolderLocked 要求调用会话正是当前持锁会话（决策 #317：按匹配键判定，
 // 不再按身份键——同一用户的不同会话互不冒充）。
+//
+// 决策 #318：若锁由**同一用户的另一会话**持有（含本会话的干净锁被接管后），返回
+// **ErrLockLost**（明确报错：「你已不是持有者」），而不是笼统的 ErrNotEditing——否则被接管的
+// 会话会以为自己从未进入配置模式、或以为锁还在自己手里。跨用户仍是 ErrNotEditing（不泄露他人）。
 func (e *Engine) requireHolderLocked(sess Session) error {
 	if e.candidate == nil || e.sessionKey == "" {
 		return ErrNotEditing
 	}
-	if e.sessionKey != sess.key() {
-		return ErrNotEditing
+	if e.sessionKey == sess.key() {
+		return nil
 	}
-	return nil
+	if userOfHolder(e.holder) == sess.User {
+		return fmt.Errorf("%w（当前由 %s 持有）", ErrLockLost, e.holder)
+	}
+	return ErrNotEditing
 }
 
 // requireEditingLocked 仅要求存在编辑态会话（candidate 只读视图使用）。
@@ -747,33 +871,36 @@ func (e *Engine) requireEditingLocked() error {
 // releaseLocked 释放锁并清空编辑态（调用方持锁）。
 func (e *Engine) releaseLocked() error {
 	err := e.store.ReleaseLock(e.holder, e.sessionID)
-	e.candidate = nil
-	e.holder = ""
-	e.sessionID = ""
-	e.sessionKey = ""
-	e.dirty = false
+	e.clearLockStateLocked()
 	return err
 }
 
 // sweepLocked 兜底巡检：confirmed 到期回滚（定时器丢失/重启时序）与
 // candidate 空闲超时释放（骨架 §3.4）。
+//
+// 决策 #318：对**干净锁**（持有会话候选无未提交改动）用更短的 cleanLockIdleTTL 回收——
+// 「干净锁本就没有需要保护的东西」，留久了只会挡住后续调用（R98-1）。复用本巡检，
+// 不新造定时器；脏锁仍走 10 分钟的既有阈值（绝不替操作者丢掉未提交改动）。
 func (e *Engine) sweepLocked() {
 	now := e.now()
 	if cf, _ := e.store.GetConfirmed(); cf != nil && !now.Before(cf.Deadline) {
 		e.doConfirmedRollback(cf)
 	}
 	li, _ := e.store.GetLock()
-	if li != nil && now.Sub(li.LastActivity) > e.lockIdleTTL {
+	if li == nil {
+		return
+	}
+	ttl, detail := e.lockIdleTTL, "candidate 空闲超时，自动释放会话锁"
+	if !e.lockDirtyLocked(li) {
+		ttl, detail = e.cleanLockIdleTTL, "空闲的干净锁（候选无未提交改动）超时，自动释放会话锁"
+	}
+	if now.Sub(li.LastActivity) > ttl {
 		holder, sessionID := li.Holder, li.SessionID
-		e.candidate = nil
-		e.holder = ""
-		e.sessionID = ""
-		e.sessionKey = ""
-		e.dirty = false
+		e.clearLockStateLocked()
 		_ = e.store.ReleaseLock(holder, sessionID)
 		e.appendAudit(AuditEntry{
 			Time: now, User: holder, Action: "config.lock-timeout",
-			Detail: "candidate 空闲超时，自动释放会话锁", Result: "success",
+			Detail: detail, Result: "success",
 		})
 		e.emit(EventLockTimeout, fmt.Sprintf("会话 %s 空闲超时，candidate 已释放", holder))
 	}
