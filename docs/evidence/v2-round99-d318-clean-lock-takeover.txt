@@ -1,0 +1,97 @@
+NFViS v2 决策 #318 实现与验证登记 —— 干净锁不排他 + CLI 调用路径必释放本会话锁（修 R98-1）
+================================================================================
+日期：2026-10-01
+分支：fix/v2-318-clean-lock-not-exclusive
+由来：docs/evidence/v2-round98-d317-verified-but-lock-leak-regression.txt（round98 真机）
+关系：**对 #317 的收敛修正，不是回退**——会话/身份键分离（#317）保持不变，只修正「干净锁」的排他性与释放路径。
+
+§1 调查结论：谁留下了那把干净锁
+- round98 现场：cli-fulltest 198/0/11 → 195/3/11、语义 12/0/1 → 10/1/1，签名同为
+  `%% candidate 会话锁被占用: 由 admin@ssh 持有`；`sessions` 里
+  `{holder:"admin@ssh", session_id:"<旧 token>", dirty:false}`。
+- 逐条定位（代码路径）：
+  ① **`commit and-quit`**（配置模式分支，internal/api/cliexec.go）：提交后把 CLI 本地模式改回
+     oper，但**从不释放引擎锁**。客户端 `cli.Session.Teardown` 只在本地模式为 config 时
+     discard/exit，于是锁活过整个 CLI 进程。真机 fulltest 的三条失败正紧随 phase6 的
+     `commit and-quit` 用例（phase6 第 44~50 行）。
+  ② **登出清不掉它**（internal/api/handlers_auth.go 的 handleLogout）：登出请求的会话身份来自
+     REST（holder `user@api`），`Engine.Discard` 按会话键 `user@api#<token>` 匹配，而 CLI 锁的键是
+     `user@ssh#<token>` —— 两者按身份键是两个。**#317 之前**同一用户下一把 CLI 调用能走
+     「同身份键 + 同候选幂等」路径接管该锁，症状被掩盖；**#317 之后**新 token = 新会话键
+     ⇒ `ErrLocked`，症状暴露。
+  ③ **操作模式 `exit/quit`**（execOper）：只 `delete(x.sess, key)` 清 CLI 本地态，对引擎锁不闻不问。
+  ④ **一次性 / 脚本收尾**（`-c`、`-f`、单条命令、REST 一次性事务）在本地模式回到 oper 时，
+     同样只依赖 ② 的登出路径，故同样漏（②③ 的公共后果）。
+- 结论：「干净锁」（dirty=false）本就没有需要保护的东西，却被当成排他锁挡住后续调用；而释放路径
+  又因接入源不匹配而失效——两条叠加即成 R98-1。
+
+§2 口径① - 干净锁不排他（internal/config/engine.go）
+- `Engine.Edit`：当既有锁的持有会话候选**无未提交改动**（`lockDirtyLocked` 为假）且**同一用户**时，
+  允许**接管**：先 `ReleaseLock(旧)`，`clearLockStateLocked()`，记审计 `config.lock-takeover`
+  （detail 含原 holder 与新 holder），再 `AcquireLock(新)`；随后候选置为 committed 副本。
+- 边界（逐条有测试）：
+  · `dirty=true` 严格排他（`ErrLocked`），R79-1 保护不回归；
+  · 仅限同一用户（`userOfHolder(li.Holder) == sess.User`），跨用户仍 `ErrLocked`；
+  · 接管不改变 `sessions` 端点可见性与 #317 的会话/身份分离（只是换了持锁会话）；
+  · `superseded`（被接管者键 → 接管者键，仅内存态）：被接管者只要面对的仍是那把接管者的锁，
+    其 `Edit`（写语句的内部路径）/`UpdateCandidate`/`Commit`/`Release`/`Discard` 一律得到新错误
+    `ErrLockLost`（REST 映射 409 CONFLICT），**不静默把现场接管回自己**；接管者释放锁后该记录失效，
+    原会话可重新进入。
+- `requireHolderLocked`：同用户但非持有者 ⇒ `ErrLockLost`；跨用户 ⇒ 仍 `ErrNotEditing`（不泄露他人）。
+
+§3 口径② - 路径级释放
+- `commit and-quit`：仅**提交成功**时退出配置模式并 `Release(本会话)`；提交失败保持配置模式与锁。
+- 操作模式 `exit/quit`：`Release(本会话)`（未持锁时忽略）。
+- **`Engine.DiscardSession(user, id)`**（新）：结束会话时按**稳定标识**（token ID）清本会话的锁与候选，
+  **不区分接入源**；`handleLogout` 与「吊销当前会话」改走它（`api.discardOwnSession`）。
+  匹配仍只认本 token：同一用户的另一 token 不受影响（R79-1 不变）；`id==""` 返回 `ErrNotEditing`
+  （不当 wildcard）。
+- 干净锁更快回收：`sweepLocked` 复用既有空闲巡检，干净锁用 `CleanLockIdleTTL`（默认 1 分钟），
+  脏锁仍用 `DefaultLockIdleTTL`（10 分钟）。
+
+§4 契约面
+- 规格书附录 A 加 #318；AGENTS.md 决策条数 219→220、v2 线区间 #300~#318。
+- docs/NFViS-openapi.yaml：顶部编辑锁说明、`/logout` 与 `/{id}:revoke` 释放口径、`ConfigSession.dirty`
+  语义；`internal/api/openapi.json` 由 `check_openapi_json_sync.sh --write` 同步。
+- docs/NFViS-CLI命令树完整设计.md：新增「配置会话锁的排他口径（决策 #317 / #318）」段。
+- docs/NFViS-用户手册.md §4.2：新增「锁只为保护未提交改动而存在（干净锁可被同用户接管）」。
+- docs/v2待做.md：R98-1 登记并标已收口（决策 #318），二节条数 17→18。
+
+§5 测试（Windows 本机；errno=1455 用 `go test -p 1 ./...`）
+- internal/config/clean_lock_test.go（新增）：连续三次 configure/写/commit 的新会话都能接管（真机
+  fulltest 三连现场）、脏锁同用户仍 ErrLocked 且候选原封不动、跨用户干净锁仍 ErrLocked、接管后原会话
+  Edit/UpdateCandidate/Release/Commit 全 ErrLockLost 且接管者释放后可重新进入、接管留审计、
+  DiscardSession 跨接入源释放且别 token/别用户/空 ID 不释放、干净锁按 1 分钟回收而脏锁不被干净阈值回收、
+  与 #151 交还锁并存。
+- internal/api/clean_lock_test.go（新增）：干净锁被新 token 的 CLI `configure` 接管、被接管者写语句报
+  「已失去编辑权」、`commit and-quit` 释放锁且脚本多轮（新 token）全成功、`commit and-quit` 失败保持
+  配置模式与锁、登出（REST 身份）清掉同一 token 的 CLI 锁、脏锁同用户被拒且候选原封不动、跨用户干净锁被拒。
+- 既有用例按 #318 语义更新：#317 的会话分离用例改为「脏候选排他」、one_shot_lock 的干净锁用例改用
+  `assertLockRowHeld`（只断言锁未被释放，排他性由脏候选/跨用户用例承担）。
+
+§6 真机验证步骤（nfvis-vm；升级到本分支构建的 deb 后）
+1) 复现 #317 的 R79-1 断言（确保未回归）：
+   · token A `PUT /configuration/candidate`（脏）→ token B（同用户另一 token）`POST /logout` ⇒
+     A 读 candidate 仍 **200**、A 仍持锁、A 仍能提交。
+2) 复现 R98-1 现场并确认已修（干净锁接管）：
+   · `nfvis-cli -c "configure"`（干净锁留着，无 exit）→ 立即 `nfvis-cli -c "show system configuration sessions"`
+     看到 `{holder:"admin@ssh", dirty:false}`；再 `nfvis-cli -c "configure"` ⇒ **成功**（不再报锁被占用）。
+3) `commit and-quit` 路径级释放：
+   · `nfvis-cli -c "configure
+       set system hostname t318
+       commit and-quit"` ⇒ 提交成功且退出配置模式；
+     `show system configuration sessions` **不再有持锁会话**（修复前会留 `admin@ssh` 干净锁）。
+4) 脏候选仍严格排他（R79-1 保护）：
+   · 会话 A `configure` + `set system hostname hold-me`（dirty）→ 会话 B（同用户另一 token）
+     `configure` ⇒ **仍报** `candidate 会话锁被占用: 由 admin@ssh 持有`；A 的候选原封不动。
+5) 接管与明确错误：
+   · 会话 A `configure`（干净）→ 会话 B（同用户）`configure` ⇒ **接管成功**；
+     A 再 `set ...` ⇒ 报「本会话已失去 candidate 编辑权 …」（明确错误）；B `discard`/`exit` 后 A 可再 `configure`。
+6) 登出跨接入源释放：
+   · 同一 token 先经 CLI `configure`（holder `admin@ssh`）→ 对同一 token `POST /logout` ⇒
+     `sessions` 里该锁消失，新 token 立刻能 `configure`。
+7) 套件回归（验收口径）：**清场**后跑四套件，预期
+   · `bash contrib/scripts/cli-fulltest.sh` ⇒ **198 / 0 / 11**（修复前 195/3/11）
+   · `bash contrib/scripts/cli-semantic-check.sh` ⇒ **12 / 0 / 1**（修复前 10/1/1）
+   · `bash contrib/scripts/cli-lifecycle-check.sh` ⇒ 与 round88 后基线一致（清场后 21/0/3 量级）
+   · `bash contrib/scripts/cli-pty-smoke.sh` ⇒ **10 / 10**

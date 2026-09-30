@@ -491,6 +491,13 @@ VPP 线程核不在隔离核内）。
 `show system configuration sessions`（列出 Holder/Session/User/Acquired/Last-Activity/Dirty，
 Session 列即该会话的稳定标识）；`GET /system/configuration/sessions` 同源。
 
+**锁只为保护「未提交的改动」而存在（干净锁可被同用户接管）**：若持锁会话的候选**没有未提交改动**
+（Dirty 列为 `false`，例如上一次 CLI 命令已 commit、但会话尚未释放锁），同一用户的**新会话**可以直接
+`configure`（自动接管该锁，审计留有 `config.lock-takeover` 记录），不必等空闲超时——`-c`/`-f` 脚本与
+逐条命令连续执行因此不会被上一次调用的残留锁挡住。反之，**有未提交改动**（Dirty 为 `true`）时严格
+排他：别的会话（含同一用户的另一会话）一律被拒，你的改动不会被抢占或丢弃。被接管的会话再操作会得到
+明确提示（`本会话已失去 candidate 编辑权 …`），重新 `configure` 即可。
+
 **「提交即生效」的写操作不会占着锁**：`system login-users` 一族（建/删用户、改权限类、重置口令、
 自助改密）与带 `X-NFVIS-Auto-Commit: true` 的直提写都是**一次性事务**——提交生效后立刻交还会话锁，
 不必（也不该）为了放锁而登出；提交**因校验失败**时锁与候选都留着，让你接着改。
