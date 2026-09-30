@@ -11,6 +11,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -122,6 +124,124 @@ func TestRunScriptStillRefusesConfirmPrompt(t *testing.T) {
 	}
 	if len(be.executed) != 1 {
 		t.Fatalf("问询之后的语句不得执行，实执行 %v", be.executed)
+	}
+}
+
+// ---------- 决策 #309：脚本来源收敛（resolveScript）与 -f 文件解析 ----------
+
+// TestResolveScriptMutualExclusion `-c` 与 `-f` 同时给出必须报错，且说清二者选一。
+func TestResolveScriptMutualExclusion(t *testing.T) {
+	_, err := resolveScript("show version", "cmds.txt", strings.NewReader(""))
+	if err == nil {
+		t.Fatal("-c 与 -f 同时给出必须报错")
+	}
+	for _, want := range []string{"-c", "-f", "选其一"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("互斥报错应含 %q：%v", want, err)
+		}
+	}
+}
+
+// TestResolveScriptInteractive 两者皆空＝交互模式：返回空文本、不报错。
+func TestResolveScriptInteractive(t *testing.T) {
+	s, err := resolveScript("", "", strings.NewReader("show version\n"))
+	if err != nil || s != "" {
+		t.Fatalf("两者皆空应回交互模式（空文本无错）：%q %v", s, err)
+	}
+}
+
+// TestResolveScriptFlagC `-c` 文本原样（仅归一换行）。
+func TestResolveScriptFlagC(t *testing.T) {
+	s, err := resolveScript("show version\nshow interfaces", "", nil)
+	if err != nil {
+		t.Fatalf("-c 解析不应报错: %v", err)
+	}
+	if s != "show version\nshow interfaces" {
+		t.Fatalf("-c 文本应原样: %q", s)
+	}
+}
+
+// TestResolveScriptFromFileNormalizesCRLFAndBOM Windows 编写的文件（BOM + CRLF）须归一为 LF。
+func TestResolveScriptFromFileNormalizesCRLFAndBOM(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "cmds.txt")
+	if err := os.WriteFile(p, []byte("\ufeffconfigure\r\nset system hostname fw-01\r\ncommit\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := resolveScript("", p, nil)
+	if err != nil {
+		t.Fatalf("读取脚本文件失败: %v", err)
+	}
+	want := "configure\nset system hostname fw-01\ncommit\n"
+	if s != want {
+		t.Fatalf("CRLF/BOM 应归一为 LF：\n got %q\nwant %q", s, want)
+	}
+	if strings.ContainsAny(s, "\r\ufeff") {
+		t.Fatalf("归一后不得残留 CR/BOM：%q", s)
+	}
+}
+
+// TestResolveScriptMissingFile 缺文件：报错须含路径、不静默。
+func TestResolveScriptMissingFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "nope.txt")
+	_, err := resolveScript("", p, nil)
+	if err == nil {
+		t.Fatal("缺文件必须报错")
+	}
+	if !strings.Contains(err.Error(), p) {
+		t.Fatalf("报错须含路径 %q：%v", p, err)
+	}
+}
+
+// TestResolveScriptEmptyFile 空/纯空白文件必须报错（不静默成功）。
+func TestResolveScriptEmptyFile(t *testing.T) {
+	for name, body := range map[string]string{"empty": "", "blank": "  \n\t\n"} {
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "s.txt")
+			if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := resolveScript("", p, nil); err == nil {
+				t.Fatal("空/纯空白脚本必须报错（不静默成功）")
+			}
+		})
+	}
+}
+
+// TestResolveScriptStdin `-f -` 从 stdin 读脚本。
+func TestResolveScriptStdin(t *testing.T) {
+	s, err := resolveScript("", "-", strings.NewReader("show version\nshow vpp\n"))
+	if err != nil {
+		t.Fatalf("-f - 应读 stdin: %v", err)
+	}
+	if s != "show version\nshow vpp\n" {
+		t.Fatalf("stdin 脚本文本不符：%q", s)
+	}
+}
+
+// TestRunScriptCRLFFileExecutesClean CRLF 文件经 resolveScript → runScriptLines 后
+// 逐行执行且**执行到的命令行不残留 `\r`**（与 -c 复用同一执行路径）。
+func TestRunScriptCRLFFileExecutesClean(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "cmds.txt")
+	if err := os.WriteFile(p, []byte("configure\r\nset system dns server 8.8.8.8\r\ncommit\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script, err := resolveScript("", p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &scriptBackend{}
+	sess := cli.New(be, "ssh")
+	if failed := runScriptLines(sess, script); failed {
+		t.Fatal("正常脚本不应判失败")
+	}
+	want := []string{"configure", "set system dns server 8.8.8.8", "commit"}
+	if len(be.executed) != len(want) {
+		t.Fatalf("应执行 %v，实得 %v", want, be.executed)
+	}
+	for i, w := range want {
+		if be.executed[i] != w {
+			t.Fatalf("第 %d 行应为 %q（不得残留 \\r），实得 %q", i, w, be.executed[i])
+		}
 	}
 }
 
