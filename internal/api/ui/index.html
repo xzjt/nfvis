@@ -237,6 +237,16 @@
         <thead><tr><th>名称</th><th>允许</th><th>拒绝</th></tr></thead>
         <tbody></tbody>
       </table>
+      <h3>活动会话 / API Token <span id="usr-token-note" class="muted small"></span></h3>
+      <p class="muted small">
+        列出当前在线的 API 会话（命令行登录与控制台登录都在内）。会话只存在内存里，服务重启后自动清空；
+        「过期时间」到点后该会话自动失效。吊销立即生效：被吊销的会话在下一个请求时要求重新登录。
+        super-user 看到全部用户的会话，其他角色只看到自己的；吊销别人的会话是 super-user 的能力。
+      </p>
+      <table id="usr-token-table">
+        <thead><tr><th>会话 ID</th><th>用户</th><th>权限类</th><th>签发</th><th>过期</th><th>会话</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
       <div class="cfg-forms">
         <fieldset>
           <legend>新建用户</legend>

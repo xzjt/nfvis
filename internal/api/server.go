@@ -197,6 +197,11 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("DELETE "+APIPrefix+"/system/login-users/{name}", cfgAPI(s.handleDeleteLoginUser))
 	// {name}:change-password 含冒号后缀，ServeMux 通配符不支持——以 {tail...} 捕获后分发
 	mux.Handle("POST "+APIPrefix+"/system/login-users/{tail...}", s.auth(s.dispatchLoginUsersPost, schema.ClassReadOnly, "request system password change"))
+	// 决策 #301：活动会话 / API Token（GET ≡ show system api tokens；{id}:revoke 含冒号后缀，
+	// ServeMux 通配符不支持——{tail...} 捕获后分发）。范围判定（super-user 全量 / 其他 class
+	// 仅自己、404 不泄露存在性）单源落在 aaa.Service；这里只设最低 class 作纵深防御。
+	mux.Handle("GET "+APIPrefix+"/system/api-tokens", s.auth(s.handleListAPITokens, schema.ClassReadOnly, "show system api tokens"))
+	mux.Handle("POST "+APIPrefix+"/system/api-tokens/{tail...}", s.auth(s.dispatchAPITokensPost, schema.ClassReadOnly, "request system api token revoke"))
 	mux.Handle("GET "+APIPrefix+"/system/status", s.auth(s.handleGetSystemStatus, schema.ClassReadOnly, "show system uptime"))
 	// M3-2：VPP 数据面状态与重启（FR-SYS-007/009）
 	mux.Handle("GET "+APIPrefix+"/vpp/status", s.auth(s.handleGetVppStatus, schema.ClassReadOnly, "show vpp"))

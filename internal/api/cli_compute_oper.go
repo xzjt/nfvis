@@ -769,10 +769,14 @@ func (x *cliExecutor) requestSystem(user, class, source string, t []string) stri
 		if len(t) >= 3 && t[1] == "tls" && t[2] == "regenerate" {
 			return x.systemTLSRegenerate(user)
 		}
+		// request system api token revoke <token-id>（决策 #301：占位转真实现）
 		if len(t) >= 3 && t[1] == "token" && t[2] == "revoke" {
-			return "%% token 吊销请经 API POST /logout（吊销当前会话的令牌；逐 token 吊销随 V2）\n"
+			if len(t) < 4 {
+				return "%% 语法: request system api token revoke <token-id>（token-id 见 show system api tokens）\n"
+			}
+			return x.systemTokenRevoke(user, class, t[3])
 		}
-		return "%% 语法: request system api tls regenerate\n"
+		return "%% 语法: request system api tls regenerate | token revoke <token-id>\n"
 	case "ssh":
 		// request system ssh host-key regenerate（FR-SYS-011）
 		if len(t) >= 3 && t[1] == "host-key" && t[2] == "regenerate" {
@@ -781,6 +785,24 @@ func (x *cliExecutor) requestSystem(user, class, source string, t []string) stri
 		return "%% 语法: request system ssh host-key regenerate\n"
 	}
 	return fmt.Sprintf("%% request system %s：将在后续里程碑接入\n", strings.Join(t, " "))
+}
+
+// systemTokenRevoke：request system api token revoke <token-id>（决策 #301）。
+// 权限与数据范围（super-user 吊销任意 / 其他 class 仅自己的、不泄露存在性）单源在
+// aaa.Service.RevokeToken；执行器负责入审计与把结果讲清楚。
+func (x *cliExecutor) systemTokenRevoke(user, class, id string) string {
+	if x.tokens == nil {
+		return "%% 活动会话管理未接入\n"
+	}
+	err := x.tokens.RevokeToken(user, class, id)
+	x.audit(user, "system.api-token.revoke", "吊销会话 "+id, err)
+	if err != nil {
+		return "%% " + err.Error() + "\n"
+	}
+	if x.callerTokenID != "" && id == x.callerTokenID {
+		return "已吊销当前会话。本会话的下一个请求将要求重新登录。\n"
+	}
+	return "已吊销会话 " + id + "。该会话的下一个请求将要求重新登录。\n"
 }
 
 // systemSoftware：request system software add <deb|url> [sha256 <hex>] | rollback（FR-OPS-001/002）。

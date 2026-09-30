@@ -148,6 +148,7 @@ var uiDynamicWired = map[string]string{
 	"/system/kernel:apply":                       "knlAct()：api('/system/kernel:apply', {method:'POST'})（内核基线页写入引导基线，中危档）",
 	"/system/kernel:rollback":                    "knlAct()：api('/system/kernel:rollback', {method:'POST'})（同上）",
 	"/system/login-users/{name}":                 "usrPut()/usrDelete()：PUT / DELETE '/system/login-users/' + name（用户页改权限类/重置口令/删用户，高危档）",
+	"/system/api-tokens/{id}:revoke":             "usrTokenRevoke()：POST '/system/api-tokens/' + id + ':revoke'（用户页活动会话卡片的「吊销」，中危档；清单本体在路由表 endpoints）",
 	"/system/login-users/{name}:change-password": "usrMyPassword()：api('/system/login-users/' + me + ':change-password')（改我自己的口令，要验旧口令）",
 }
 

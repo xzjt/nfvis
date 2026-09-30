@@ -72,6 +72,38 @@ paths:
       responses:
         "204": { description: 已吊销 }
 
+  /system/api-tokens:
+    get:
+      tags: [system]
+      summary: 活动会话 / API Token 清单（等价 CLI show system api tokens）
+      description: |
+        token 为内存运行态（nfvisd 重启后全部失效），本清单只覆盖当前进程内的活动会话。
+        权限与范围：super-user 列出**全部用户**的 token；其他 class 只列出自己的。
+        token 本体（凭据）永不出现在本清单，只有稳定 token_id。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiTokenList" }
+        "401": { $ref: "#/components/responses/Error401" }
+
+  /system/api-tokens/{id}:revoke:
+    post:
+      tags: [system]
+      summary: 吊销指定会话（等价 CLI request system api token revoke <token-id>）
+      description: |
+        权限与范围：super-user 可吊销任意 token；其他 class 只能吊销自己的。
+        吊销不存在的/他人的 token_id 统一回 404「会话不存在或无权操作」（不泄露存在性）；
+        吊销后该 token 的下一个请求即 401。吊销当前会话等价于登出（candidate 锁随登出释放，
+        见 POST /logout 的说明）。
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, description: token 稳定 ID（GET /system/api-tokens 的 token_id） }
+      responses:
+        "204": { description: 已吊销 }
+        "401": { $ref: "#/components/responses/Error401" }
+        "404": { $ref: "#/components/responses/Error404" }
+
   /system/status:
     get:
       tags: [system]
@@ -1971,10 +2003,29 @@ components:
     LoginResponse:
       type: object
       properties:
-        token: { type: string }
-        token_id: { type: string }
+        token: { type: string, description: Bearer token 本体；仅登录响应出现这一次 }
+        token_id: { type: string, description: token 稳定 ID（UUID）；列表/吊销按它定位，重启后失效 }
         user: { $ref: "#/components/schemas/LoginUser" }
         expires_in: { type: integer }
+
+    ApiTokenList:
+      type: object
+      required: [tokens]
+      properties:
+        tokens:
+          type: array
+          items: { $ref: "#/components/schemas/ApiToken" }
+
+    ApiToken:
+      type: object
+      required: [token_id, user, class, issued_at, expires_at, current]
+      properties:
+        token_id: { type: string, description: token 稳定 ID（UUID）；吊销按它定位 }
+        user: { type: string, description: 签发时认证的用户名 }
+        class: { type: string, description: 该会话继承的权限类 }
+        issued_at: { type: string, format: date-time, description: 签发时间 }
+        expires_at: { type: string, format: date-time, description: 过期时间（TTL 到期即失效） }
+        current: { type: boolean, description: 是否发起本次请求的会话 }
 
     LoginUser:
       type: object

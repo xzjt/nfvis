@@ -11,7 +11,7 @@
 
 ## 0. 结论
 
-**259 行命令中：236 行已有类型化 REST 端点（可直接写页面）、4 行是真缺口（需补 API 或不补）、19 行是 CLI-only by design（交互形态差异，不需要 API）。236 + 4 + 19 = 259（行口径）。**
+**260 行命令中：238 行已有类型化 REST 端点（可直接写页面）、2 行是真缺口（需补 API 或不补）、20 行是 CLI-only by design（交互形态差异，不需要 API）。238 + 2 + 20 = 260（行口径；本节为**当前口径**，历轮数字见下方更新记录）。**
 
 REST 侧现状（本轮复核）：
 
@@ -28,8 +28,8 @@ REST 侧现状（本轮复核）：
   （`show configuration [permissions <class>]` 的 `permissions` 分支，语义从未定义）、V1 登记的延期（逐 token 吊销、`format-data`）。
 - **19 个例外分三类**：REPL 交互形态（`wizard` / `monitor` / `?` / `help` / 层级导航）、CLI 侧文本渲染（通用管道 / `display set`）、
   CLI 本地行为（`exit` / `quit` / `start shell`）。
-- **口径换算**：若把 ` / ` 并列的两行拆开（`exit` / `quit`；`edit <path>` / `up` / `top` / `exit`），则 **263 条 = 覆盖 236 / 缺口 4 / 例外 23**
-  （多出的 4 条全在例外桶：本地行为与层级导航）。**本核查全篇用“行”口径，合计 259**。
+- **口径换算**：若把 ` / ` 并列的两行拆开（`exit` / `quit`；`edit <path>` / `up` / `top` / `exit`），则 **264 条 = 覆盖 238 / 缺口 2 / 例外 24**
+  （多出的 4 条全在例外桶：本地行为与层级导航）。**本核查全篇用“行”口径，合计 260**。
 
 ### 历史更新记录
 
@@ -43,6 +43,7 @@ REST 侧现状（本轮复核）：
 | round49 | 缺口 #5/#6 VS / VM 详情的 `statistics` 字段（决策 #124）、#8 `ssh host-key regenerate`（决策 #125）、#9 `core-dumps export`（决策 #126，同时修掉 CLI 侧「只打印已受理」的假成功）、#11 `load merge`（决策 #127，`X-NFVIS-Merge: true`） | 覆盖 231→236、缺口 8→3 |
 | 决策 #142 前置 | 新增命令行 `show configuration history` 与端点 `GET /configuration/history`（配置提交历史——此前只有 `rollback [n]` / `compare rollback <n>`，没有「列出历史快照」的读物） | 形态 258→259、覆盖 236→237 |
 | **round80（本轮）** | 以《命令全表》按**实际行数**重算的 259 行为新基数逐行重算；`show configuration [permissions <class>]` 由覆盖桶改判**缺口**（该行 `permissions` 分支本轮改为明确提示未实现，决策 #153）；本轮新落地的等价写法行（`show configuration sessions`、`show protocols lldp neighbors`、`show interfaces <ifname> detail\|statistics\|sriov`）全部有端点承载，计入覆盖 | **覆盖 236 / 缺口 4 / 例外 19（新表行口径，合计 259）** |
+| v2 决策 #301（2026-09-30） | ① 新增 `show system api tokens` 行（形态 259→260），端点 `GET /system/api-tokens`；② 缺口 #3「逐 token 吊销」收口：`request system api token revoke <token-id>` → `POST /system/api-tokens/{id}:revoke`（Web 控制台用户与权限页同步实现）；③ 顺带按既成事实把缺口 #1 `show vpp runtime` 移入例外桶（决策 #200 已实现：数据源是本机 stats segment、CLI 侧渲染，Web 等价形态 `/vpp/status`） | **覆盖 236→238 / 缺口 4→2 / 例外 19→20（合计 260）** |
 
 > **与上轮绝对值对不上的原因**（口径变化，不是能力增减）：①《命令全表》本轮按实际行数重算分族（67/46/11/9/126，此前表内
 > 统计与实际行数不符）；② `show configuration [permissions <class>]` 从覆盖桶移到缺口桶；③ round80 新增的等价写法行全部计入覆盖。
@@ -68,9 +69,9 @@ REST 侧现状（本轮复核）：
 - **方法**：逐族对照《命令全表》与 `openapi.yaml` 的路径 / 方法 / 响应 schema；响应缺字段的以契约 schema 为准绳核实
   （round49 的 VS / VM `statistics` 字段就是这样定的）。端点引用必须真实存在于契约，由 §5 的守护断言 A 机器盯着。
 
-## 2. A 覆盖矩阵（236 行）
+## 2. A 覆盖矩阵（238 行）
 
-### 2.1 show 族（63/67）
+### 2.1 show 族（64/68）
 
 | 命令族（行数） | REST 端点 |
 |---|---|
@@ -102,6 +103,7 @@ REST 侧现状（本轮复核）：
 | `show container-functions`（1） / `<name> [detail]`（1） / `<name> interfaces`（1） | `GET /container-functions`、`/{name}` |
 | `show images`（1） / `show images <name> detail`（1） | `GET /images` / `GET /images/{name}` |
 | `show resource-pools`（1） / `show alarms [active\|all]`（1） / `show users`（1） | `GET /resource-pools` / `GET /alarms` / `GET /system/login-users` |
+| `show system api tokens`（1，v2 决策 #301） | `GET /system/api-tokens`（super-user 见全部、其他 class 仅自己；范围在服务端按身份裁定） |
 | `show log audit [last <n>]`（1） | `GET /audit-logs` |
 | `show log system [level <lvl>] [last <n>]`（1） | `GET /system/logs`（`text/plain`、`?last=<n>`；round47 收口） |
 | `show configuration candidate`（1） | `GET /configuration/candidate` |
@@ -110,11 +112,12 @@ REST 侧现状（本轮复核）：
 | `show tech-support`（1，顶级等价写法） | `GET /system/tech-support` |
 | `show`（1，配置模式：candidate 当前层级） | `GET /configuration/candidate` |
 
-未计入本表的 4 行：`show vpp runtime [thread <id>]`、`show configuration [permissions <class>]`（**缺口**，§3 #1/#2；
-后者**裸写法** `show configuration`（committed 全量）由 `GET /configuration` 承载，round43 决策 #119）、
-`show log vnf <name> [last <n>]`、`show | display set`（**例外**，§4）。
+未计入本表的 3 行：`show configuration [permissions <class>]`（**缺口**，§3 #2；
+**裸写法** `show configuration`（committed 全量）由 `GET /configuration` 承载，round43 决策 #119）、
+`show vpp runtime [thread <id>]`、`show log vnf <name> [last <n>]`、`show | display set`（**例外**，§4；
+`show vpp runtime` 自 v2 决策 #301 起按既成事实归例外——CLI 侧渲染，Web 等价形态 `/vpp/status`）。
 
-### 2.2 request 族（44/46）
+### 2.2 request 族（45/46）
 
 | 命令族（行数） | REST 端点 |
 |---|---|
@@ -138,8 +141,9 @@ REST 侧现状（本轮复核）：
 | `request system ssh host-key regenerate`（1） | `POST /system/ssh-host-key:regenerate`（round49 决策 #125） |
 | `request system password change`（1） | `POST /system/login-users/{name}:change-password`（与 REST 同源） |
 | `request system ntp sync` / `request alarms clear [id <id> \| all]`（2） | `POST /system/ntp:sync` / `POST /alarms:clear` |
+| `request system api token revoke <token-id>`（1，v2 决策 #301 收口） | `POST /system/api-tokens/{id}:revoke`（super-user 任意、其他 class 仅自己的；不存在/无权统一 404 不泄露存在性） |
 
-未计入本表的 2 行：`request system api token revoke <token-id>`、`request system storage format-data`（**缺口**，§3 #3/#4）。
+未计入本表的 1 行：`request system storage format-data`（**缺口**，§3 #4）。
 
 ### 2.3 其余操作与通用管道（4/11 + 2/9）
 
@@ -173,13 +177,13 @@ REST 侧现状（本轮复核）：
 
 未计入本表的 3 行：`edit <path>` / `up` / `top` / `exit`、`annotate <path> "text"`、`run <oper-command>`——**例外**（§4）。
 
-## 3. B 缺口清单（4 行；补法一律契约先行，不碰 `/cli/execute`）
+## 3. B 缺口清单（2 行未收口；补法一律契约先行，不碰 `/cli/execute`）
 
-| # | 命令（行） | round80 CLI 实测 | REST 现状 | 理由与归属 |
+| # | 命令（行） | CLI 实测 | REST 现状 | 理由与归属 |
 |---|---|---|---|---|
-| 1 | `show vpp runtime [thread <id>]` | ⚠️ **未接入**（CLI 明确提示；套件里唯一 ✗，属已登记缺口、非本轮回归） | 无 | 两边都未接入（附录 A #34）：补它等于补 CLI 自己也没做的能力。归属：低价值，随 govpp runtime 解码一并做 |
-| 2 | `show configuration [permissions <class>]` | ⚠️ **明确提示暂未实现**（本轮由「静默返回配置正文」改为报错提示，决策 #153） | **裸写法**已有 `GET /configuration`（`{configuration, revision}`，round43 决策 #119）；`permissions <class>` 子形态无端点 | 「按 class 视角显示」的语义从未定义（脱敏按敏感字段、与 class 无关；class 只决定命令节点能否执行），**不做 lossy 版本**以免制造静默错误（《命令全表》§4⑧）。归属：**不做**；替代 `show configuration` + `\| display json` |
-| 3 | `request system api token revoke <token-id>` | ⚠️ V1 仅提示（提示文案已与注册端点一致：`POST /logout` 吊销当前会话） | 仅会话级：登出吊销当前 token（`POST /logout`） | 逐 token 吊销**明确延期 V2**（决策 #76⑧）。归属：V2 |
+| 1 | ~~`show vpp runtime [thread <id>]`~~ | **已收口**（决策 #200）：CLI 给线程级运行态（stats segment），按节点明细无结构化来源、CLI 如实说明 | 无类型化端点（Web 等价形态 `/vpp/status` 同源） | 归入**例外**桶（§4）：CLI 侧渲染，Web 走 `/vpp/status`。v2 决策 #301 起按既成事实移出缺口 |
+| 2 | `show configuration [permissions <class>]` | ⚠️ **明确提示暂未实现**（决策 #153：由「静默返回配置正文」改为报错提示） | **裸写法**已有 `GET /configuration`（`{configuration, revision}`，round43 决策 #119）；`permissions <class>` 子形态无端点 | 「按 class 视角显示」的语义从未定义（脱敏按敏感字段、与 class 无关；class 只决定命令节点能否执行），**不做 lossy 版本**以免制造静默错误（《命令全表》§4⑧）。归属：**不做**；替代 `show configuration` + `\| display json` |
+| 3 | ~~`request system api token revoke <token-id>`~~ | **已收口**（v2 决策 #301）：逐 token 吊销真实现 | `GET /system/api-tokens` + `POST /system/api-tokens/{id}:revoke`（super-user 任意、其他 class 仅自己的；404 统一文案不泄露存在性） | 移入**覆盖**桶（§2.1/§2.2）；会话级登出 `POST /logout` 照旧 |
 | 4 | `request system storage format-data` | 🚫 破坏性（契约已登记延期） | 无 | **V1 有意延期**：破坏性，待数据分区定义后再开放（决策 #65）。归属：V2 |
 
 ## 4. C 例外清单（19 行，CLI-only by design，不需要 API）
@@ -224,9 +228,9 @@ REST 侧现状（本轮复核）：
 
 - **API 侧够用**：计入覆盖的 236 行全部有类型化端点——配置读写（candidate / check / commit / confirm / diff / rollback / history）、
   生命周期、诊断、抓包、备份恢复、用户与告警都在位，**不需要为任何一条配置语句新增端点**（113 条语句走同一套事务 API）。
-- **4 个缺口的归属已定**：2 项登记延期到 V2（逐 token 吊销、`format-data`）、1 项两边都未接（`show vpp runtime`）、
-  1 项明确不做（`permissions` 子形态，语义未定义；不做 lossy 视图）。控制台的等价形态：`permissions` 用
-  `show configuration` + 前端渲染，其余三项在界面上按“未提供”如实标注即可。
+- **缺口的归属（v2 决策 #301 后）**：未收口的只剩 2 项——`format-data`（登记延期 V2）与 `permissions` 子形态
+  （语义未定义，明确不做；控制台用 `show configuration` + 前端渲染等价承担）。`show vpp runtime` 归例外桶
+  （Web 走 `/vpp/status`），逐 token 吊销已收口（活动会话卡片落在「用户与权限」页）。
 - **19 个例外由 Web 形态等价承担**：表单 + 静态候选（`help`/`?`/`wizard`）、定时刷新 + `GET /events`（`monitor`）、
   前端过滤与分页（管道）、原生 JSON（`display`）、向导页（`wizard`）；高危动作的确认语义照搬 CLI 的
   `--yes` / `confirm` / `commit confirmed` 体系。

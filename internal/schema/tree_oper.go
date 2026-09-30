@@ -19,6 +19,11 @@ func OperRoot() *Node {
 				K("hardware", "硬件健康：温度/风扇/电源/SMART"),
 				K("core-dumps", "崩溃转储清单（VPP/QEMU/nfvisd）"),
 				K("tech-support", "诊断归档清单"),
+				// 决策 #301：活动会话 / API Token 清单——super-user 见全部、其他 class 仅自己的
+				// （数据范围判定在执行器调用的 aaa 实现处，树只声明命令级权限 R）。
+				K("api", "API 服务",
+					K("tokens", "活动会话 / API Token 清单"),
+				),
 				// 只挂 `sessions`（契约 §1.1）：此处**没有** `candidate`——「当前持锁会话的
 				// candidate」的写法是顶层 `show configuration candidate`（唯一实现），
 				// 这里再挂一份既重复又无实现（执行器只认前者；决策 #153 收口）。
@@ -267,14 +272,17 @@ func OperRoot() *Node {
 					K("delete", "删除转储", Opt(K("file", "指定文件", PT("<name>", "name", "文件名")))),
 				),
 				Su(K("zeroize", "恢复出厂（双重确认）")),
-				Su(K("api", "API 服务管理",
-					K("tls", "TLS 证书",
+				// 决策 #301：S 不再压在 api 域节点上——tls regenerate 保持 S（写证书是敏感动作），
+				// token revoke 为 R（任何登录 class 可执行；super-user 吊销任意、其他 class 仅自己的，
+				// 数据范围判定在 aaa 实现处，与 show system api tokens 同一权限矩阵）。
+				K("api", "API 服务管理",
+					Su(K("tls", "TLS 证书",
 						K("regenerate", "重签自签证书"),
-					),
+					)),
 					K("token", "Token 管理",
-						K("revoke", "吊销 token", PT("<token-id>", "name", "token ID")),
+						K("revoke", "吊销指定会话（super-user 任意、其他仅自己的）", PT("<token-id>", "name", "会话 ID")),
 					),
-				)),
+				),
 				Su(K("ssh", "SSH 管理",
 					K("host-key", "Host Key",
 						K("regenerate", "重新生成"),

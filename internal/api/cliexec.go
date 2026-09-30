@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/events"
 	"github.com/xzjt/nfvis/internal/model"
@@ -34,6 +35,14 @@ import (
 // authorizer 授权接口（aaa.Service 实现）。
 type authorizer interface {
 	Authorize(cfgClass string, required schema.Class, path ...string) bool
+}
+
+// tokenAdmin 活动会话管理接口（决策 #301；aaa.Service 实现）。
+// 与 authorizer 同例：CLI 执行器不经 HTTP handler 直调服务，权限与数据范围
+// （super-user 全量 / 其他 class 仅自己、不泄露存在性）单源落在 aaa 实现处。
+type tokenAdmin interface {
+	ListTokens(viewerUser, viewerClass string) []aaa.TokenView
+	RevokeToken(viewerUser, viewerClass, id string) error
 }
 
 // identityFields 具名数组创建元素时的身份字段（与 model.Flatten 键控一致，默认 name）。
@@ -103,6 +112,7 @@ type cliExecutor struct {
 	vppRestart func(context.Context) error // request vpp restart（M5-9；nil = 报未接入）
 	events     *events.Bus                 // 事件总线（M5-1；nil = 不发布）
 	versions   VersionsRuntime             // 组件版本探测（R37-2 收口，决策 #118；nil = show version 只印 NFViS）
+	tokens     tokenAdmin                  // 活动会话清单/逐 token 吊销（决策 #301；nil = 命令报未接入）
 	mu         sync.Mutex
 	sess       map[string]*cliSession
 	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
@@ -116,6 +126,9 @@ type cliExecutor struct {
 	// 随 CLIEResult.Warning 回传前端——脚本模式据此继续执行，而不是猜输出文本前缀。
 	// 单命令执行期内有效（Execute 起始复位，与 consolePending 同法）。
 	warningPending bool
+	// callerTokenID 发起本条命令的会话稳定 ID（决策 #301；ExecuteAs 注入，Execute 起始复位）。
+	// 「是否当前会话」标记与「吊销自己的会话」提示都以此为判据；空串 = 调用方没有稳定 ID（不猜）。
+	callerTokenID string
 	// issueConsole 签发 console 一次性 ticket 并返回 ws 相对路径与有效期
 	// （M4-12；由 Server.New 注入，复用 handleConsoleWS 的同一 ticket 表与审计落点）
 	issueConsole func(vm, user string) (wsPath string, ttl int, err error)
@@ -127,8 +140,17 @@ type cliSession struct {
 }
 
 func newCLIExecutor(e *config.Engine, a authorizer) *cliExecutor {
-	return &cliExecutor{engine: e, authz: a, sess: map[string]*cliSession{}}
+	x := &cliExecutor{engine: e, authz: a, sess: map[string]*cliSession{}}
+	// 决策 #301：装配方传入的 authorizer 就是 *aaa.Service——它同时实现 tokenAdmin，
+	// 直接同源接线（清单/吊销与授权共用同一个 AAA 服务，不出现第二份会话事实源）。
+	if ta, ok := a.(tokenAdmin); ok {
+		x.tokens = ta
+	}
+	return x
 }
+
+// setTokenAdmin 显式注入活动会话管理能力（测试可注入假源；装配路径走 newCLIExecutor 的同源断言）。
+func (x *cliExecutor) setTokenAdmin(ta tokenAdmin) { x.tokens = ta }
 
 // setRuntime 注入诊断与运行态数据源（M3-9；Server.New 装配，测试可省略）。
 // setEventBus 注入事件总线（M5-1）：CLI 直连运行态的动作不经 HTTP handler，
@@ -218,8 +240,15 @@ func promptOf(s *cliSession) string {
 	return "nfvis> "
 }
 
-// Execute 执行一行命令。
+// Execute 执行一行命令（无稳定会话 ID 的调用形态；tests 与内部便利调用走这条）。
 func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
+	return x.ExecuteAs(user, class, source, "", line)
+}
+
+// ExecuteAs 同 Execute，另注入发起本条命令的会话稳定 ID（决策 #301：
+// handleCLIExecute 从认证身份取出 token ID 传入）——`show system api tokens`
+// 的「当前会话」标记与吊销自己的会话时的提示都以它为判据。
+func (x *cliExecutor) ExecuteAs(user, class, source, tokenID, line string) CLIEResult {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	key := user + "@" + source
@@ -234,6 +263,7 @@ func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
 	x.structuredPath = nil
 	x.consolePending = nil
 	x.warningPending = false
+	x.callerTokenID = tokenID
 	var out string
 	if perr != nil {
 		out = "%% " + perr.Error() + "\n"
@@ -354,7 +384,7 @@ func (x *cliExecutor) execOper(user, class, source string, s *cliSession, t []st
 		return "%% wizard 是交互式向导，仅可在交互式 nfvis-cli 终端执行；" +
 			"脚本/REST 请改用 set/request 语句（见用户手册「3.1 内核基线」）\n"
 	case "show":
-		return x.execOperShow(class, t[1:])
+		return x.execOperShow(user, class, t[1:])
 	case "ping":
 		return x.execPing(class, t[1:])
 	case "traceroute":
@@ -404,7 +434,7 @@ func (x *cliExecutor) versionSummary() string {
 	return b.String()
 }
 
-func (x *cliExecutor) execOperShow(class string, t []string) string {
+func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 	// 与 request 域同口径（决策 #144）：取匹配到的最深节点的 RequiredClass()。
 	// show 子树当前全是只读，故行为与只看 show 域节点一致；但若将来给某个 show 子命令
 	// 标了 Op()/Su()，这里会立刻生效，而不是被域节点吃掉。
@@ -528,8 +558,10 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 		return x.execShowResourcePools()
 	case len(t) >= 3 && t[0] == "system" && t[1] == "configuration" && t[2] == "sessions":
 		return x.showConfigSessions()
+	case len(t) >= 3 && t[0] == "system" && t[1] == "api":
+		return x.execShowSystemAPI(user, class, t[2:]) // 决策 #301：活动会话 / API Token
 	}
-	if len(t) >= 2 && t[0] == "system" && t[1] != "configuration" {
+	if len(t) >= 2 && t[0] == "system" && t[1] != "configuration" && t[1] != "api" {
 		return x.execShowSystemDiag(t[1:]) // M5-4/M5-9：运行态信息 / 诊断归档 / 转储
 	}
 	if len(t) == 1 && t[0] == "tech-support" {
@@ -544,7 +576,7 @@ func (x *cliExecutor) execOperShow(class string, t []string) string {
 	if len(t) >= 2 && t[0] == "vpp" && t[1] == "capture" {
 		return x.execShowVppCapture() // M5-3：抓包会话状态与已导出 pcap 清单
 	}
-	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class>|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | port-mirroring | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions\n"
+	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class>|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | port-mirroring | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions | system api tokens\n"
 }
 
 // invalidShowConfiguration：`show configuration <未知/多余 token>` 的统一报错
@@ -705,7 +737,7 @@ func (x *cliExecutor) execConfig(user, class, source string, s *cliSession, t []
 	case "show":
 		if len(t) > 1 && t[1] == "configuration" {
 			// 配置模式下查看 committed（委托操作模式 show configuration）
-			return x.execOperShow(class, t[1:])
+			return x.execOperShow(user, class, t[1:])
 		}
 		return x.cfgShow(user, source, s, t[1:])
 	case "commit":

@@ -45,7 +45,7 @@
     { "path": "#/system/kernel", "title": "内核基线", "view": "kernel", "breadcrumb": ["系统", "内核基线"],
       "endpoints": ["/system/kernel"], "poll": 0, "write": true },
     { "path": "#/system/users", "title": "用户与权限", "view": "users", "breadcrumb": ["系统", "用户与权限"],
-      "endpoints": ["/system/login-users"], "poll": 0, "write": true },
+      "endpoints": ["/system/login-users", "/system/api-tokens"], "poll": 0, "write": true },
     { "path": "#/system/tls", "title": "证书", "view": "tls", "breadcrumb": ["系统", "证书"],
       "endpoints": ["/system/tls"], "poll": 0, "write": true },
     { "path": "#/config", "title": "配置", "view": "config", "breadcrumb": ["配置"],

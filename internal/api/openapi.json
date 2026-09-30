@@ -189,6 +189,59 @@
         ],
         "type": "object"
       },
+      "ApiToken": {
+        "properties": {
+          "class": {
+            "description": "该会话继承的权限类",
+            "type": "string"
+          },
+          "current": {
+            "description": "是否发起本次请求的会话",
+            "type": "boolean"
+          },
+          "expires_at": {
+            "description": "过期时间（TTL 到期即失效）",
+            "format": "date-time",
+            "type": "string"
+          },
+          "issued_at": {
+            "description": "签发时间",
+            "format": "date-time",
+            "type": "string"
+          },
+          "token_id": {
+            "description": "token 稳定 ID（UUID）；吊销按它定位",
+            "type": "string"
+          },
+          "user": {
+            "description": "签发时认证的用户名",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token_id",
+          "user",
+          "class",
+          "issued_at",
+          "expires_at",
+          "current"
+        ],
+        "type": "object"
+      },
+      "ApiTokenList": {
+        "properties": {
+          "tokens": {
+            "items": {
+              "$ref": "#/components/schemas/ApiToken"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tokens"
+        ],
+        "type": "object"
+      },
       "AuditEntry": {
         "properties": {
           "action": {
@@ -1192,9 +1245,11 @@
             "type": "integer"
           },
           "token": {
+            "description": "Bearer token 本体；仅登录响应出现这一次",
             "type": "string"
           },
           "token_id": {
+            "description": "token 稳定 ID（UUID）；列表/吊销按它定位，重启后失效",
             "type": "string"
           },
           "user": {
@@ -4609,6 +4664,61 @@
           }
         },
         "summary": "修改系统配置（hostname/ntp/dns/syslog/api/management/idle-timeout）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/api-tokens": {
+      "get": {
+        "description": "token 为内存运行态（nfvisd 重启后全部失效），本清单只覆盖当前进程内的活动会话。\n权限与范围：super-user 列出**全部用户**的 token；其他 class 只列出自己的。\ntoken 本体（凭据）永不出现在本清单，只有稳定 token_id。\n",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiTokenList"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          }
+        },
+        "summary": "活动会话 / API Token 清单（等价 CLI show system api tokens）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/api-tokens/{id}:revoke": {
+      "post": {
+        "description": "权限与范围：super-user 可吊销任意 token；其他 class 只能吊销自己的。\n吊销不存在的/他人的 token_id 统一回 404「会话不存在或无权操作」（不泄露存在性）；\n吊销后该 token 的下一个请求即 401。吊销当前会话等价于登出（candidate 锁随登出释放，\n见 POST /logout 的说明）。\n",
+        "parameters": [
+          {
+            "description": "token 稳定 ID（GET /system/api-tokens 的 token_id）",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "已吊销"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        },
+        "summary": "吊销指定会话（等价 CLI request system api token revoke <token-id>）",
         "tags": [
           "system"
         ]
