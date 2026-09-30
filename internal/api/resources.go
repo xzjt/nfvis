@@ -8,8 +8,10 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"sort"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
 // 资源 CRUD handlers 第一组（OpenAPI 附录 B 映射：system/interfaces/
@@ -209,14 +211,77 @@ func (s *Server) interfaceView(ifc model.InterfaceConfig, st InterfaceState, has
 // 同源**（`VppStateRuntime.InterfaceStates()`，决策 #84 定的运行态事实来源）；
 // 取不到的字段（mac/numa_node 等）**不给**，不编造。
 // `mtu` 给的是**有效 MTU**：配置显式值优先、否则运行态（R86-7）。
+//
+// 决策 #302（首装接口可见性）：清单并入**内核侧未接管的物理口**（kernel − VPP 已接管 −
+// 配置已声明，与 CLI `show interfaces` 同一集合与排序），kind 仍 physical，事实取 sysfs，
+// `taken_over=false` 与 VPP 侧区分；既有条目补 `taken_over`（已出现在 VPP 运行态 → true；
+// 清单查询成功而不在 → false；VPP 运行态不可判定 → 不给该字段，不编造）。
+// 合并后按名排序（行序此前即「不保证」，按 name 索引）。
 func (s *Server) interfaceViews(cfg model.Config) []map[string]any {
-	out := make([]map[string]any, 0, len(cfg.Interfaces))
 	states := s.interfaceStates()
-	for _, ifc := range cfg.Interfaces {
-		st, ok := states[ifc.Name]
-		out = append(out, s.interfaceView(ifc, st, ok))
+	inv, invOK := s.vppIfnamesOK()
+	inInv := map[string]bool{}
+	for _, n := range inv {
+		inInv[n] = true
 	}
+	declaredNames := make([]string, 0, len(cfg.Interfaces))
+	out := make([]map[string]any, 0, len(cfg.Interfaces))
+	for _, ifc := range cfg.Interfaces {
+		declaredNames = append(declaredNames, ifc.Name)
+		st, ok := states[ifc.Name]
+		m := s.interfaceView(ifc, st, ok)
+		switch {
+		case ok || inInv[ifc.Name]:
+			m["taken_over"] = true
+		case invOK:
+			m["taken_over"] = false
+		}
+		out = append(out, m)
+	}
+	facts := s.kernelIfFacts()
+	if len(facts) > 0 {
+		byName := make(map[string]network.KernelIfFacts, len(facts))
+		kernNames := make([]string, 0, len(facts))
+		for _, f := range facts {
+			byName[f.Name] = f
+			kernNames = append(kernNames, f.Name)
+		}
+		for _, name := range untakenKernelIfnames(kernNames, inv, declaredNames) {
+			out = append(out, kernelInterfaceView(byName[name]))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ni, _ := out[i]["name"].(string)
+		nj, _ := out[j]["name"].(string)
+		return ni < nj
+	})
 	return out
+}
+
+// kernelInterfaceView 未接管内核口的读视图（决策 #302）：kind 仍 physical，事实取 sysfs；
+// 取不到的字段不给（「取不到就不给」，同 #116 口径）。与列表端点、详情端点共用。
+func kernelInterfaceView(f network.KernelIfFacts) map[string]any {
+	m := map[string]any{"name": f.Name, "kind": "physical", "taken_over": false}
+	m["enabled"] = f.AdminUp
+	if f.LinkKnown {
+		m["link"] = "down"
+		if f.LinkUp {
+			m["link"] = "up"
+		}
+	}
+	if f.SpeedMbps > 0 { // 内核 speed 文件本就以 Mbps 计
+		m["speed_mbps"] = f.SpeedMbps
+	}
+	if f.Driver != "" {
+		m["driver"] = f.Driver
+	}
+	if f.MAC != "" {
+		m["mac"] = f.MAC
+	}
+	if f.MTU > 0 {
+		m["mtu"] = f.MTU
+	}
+	return m
 }
 
 // handleGetInterface GET /api/v1/interfaces/{name}。
@@ -239,6 +304,14 @@ func (s *Server) handleGetInterface(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			writeJSON(w, http.StatusOK, m)
+			return
+		}
+	}
+	// 未在配置中声明：内核侧未接管口回**同一内核视图**（决策 #302，与 CLI 详情同口径，
+	// 与列表端点同一实现）；名字在哪一侧都不存在才 404。
+	for _, f := range s.kernelIfFacts() {
+		if f.Name == name {
+			writeJSON(w, http.StatusOK, kernelInterfaceView(f))
 			return
 		}
 	}

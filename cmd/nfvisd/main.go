@@ -991,6 +991,11 @@ func (c *portInventoryController) VPPIfnames() ([]string, error) { return c.net.
 
 func (c *portInventoryController) KernelIfnames() ([]string, error) { return c.net.KernelIfnames() }
 
+// KernelIfFacts 内核侧物理口事实（决策 #302）：未接管口读视图的驱动/MAC/速率/状态取 sysfs。
+func (c *portInventoryController) KernelIfFacts() ([]network.KernelIfFacts, error) {
+	return c.net.KernelIfFacts()
+}
+
 // vppStateController 装配 api.VppStateRuntime（决策 #84）：bridge-domain 与接口的运行态，
 // 供 `show virtual-switches`（列表/成员口/计数）与 `show interfaces physical`（链接状态/速率/驱动）。
 type vppStateController struct{ net *network.L2Network }

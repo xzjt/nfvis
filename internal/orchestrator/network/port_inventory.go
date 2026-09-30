@@ -17,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 // sysfsNetRoot 内核网卡目录（测试可改）。
@@ -67,6 +69,70 @@ func (n *L2Network) KernelIfnames() ([]string, error) {
 		out = append(out, name)
 	}
 	return dedupeSorted(out), nil
+}
+
+// KernelIfFacts 内核侧物理网卡事实（决策 #302，首装接口可见性）：未被 VPP 接管的口在
+// 内核侧仍有 netdev，驱动/MAC/速率/状态逐项读 sysfs——读视图据此如实展示，
+// **不编造数据面（VPP）侧事实**。清单口径与 KernelIfnames 相同（仅含带 device 的物理口）。
+type KernelIfFacts struct {
+	Name      string // 网卡名（ens160…）
+	AdminUp   bool   // 管理态（flags 的 IFF_UP 位）
+	LinkUp    bool   // operstate == up
+	LinkKnown bool   // operstate 可判（up/down）；unknown/读取失败 → false（上层不给 link）
+	SpeedMbps uint32 // speed 文件（本就以 Mbps 计）；取不到（含口未连、驱动不支持）→ 0
+	MAC       string
+	Driver    string // device/driver 链接目标名；无 → 空（上层不给）
+	MTU       int
+}
+
+// KernelIfFacts 内核侧物理口事实清单（顺序与 KernelIfnames 一致：按名排序去重）。
+func (n *L2Network) KernelIfFacts() ([]KernelIfFacts, error) {
+	names, err := n.KernelIfnames()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]KernelIfFacts, 0, len(names))
+	for _, name := range names {
+		out = append(out, kernelIfFacts(sysfsNetRoot, name))
+	}
+	return out, nil
+}
+
+// kernelIfFacts 单口的内核事实：逐项读 sysfs，读不到/解析不了的字段保持零值
+// （上层「取不到就不给」，不编造）。口未连时内核 speed 文件报 Invalid argument 或 -1，
+// 解析失败即零值，正合口径。
+func kernelIfFacts(root, name string) KernelIfFacts {
+	f := KernelIfFacts{Name: name}
+	if v, err := os.ReadFile(filepath.Join(root, name, "operstate")); err == nil {
+		switch s := strings.TrimSpace(string(v)); s {
+		case "up":
+			f.LinkUp, f.LinkKnown = true, true
+		case "down":
+			f.LinkKnown = true
+		}
+	}
+	if v, err := os.ReadFile(filepath.Join(root, name, "flags")); err == nil {
+		if bits, err := strconv.ParseUint(strings.TrimSpace(string(v)), 0, 64); err == nil {
+			f.AdminUp = bits&0x1 != 0 // IFF_UP
+		}
+	}
+	if v, err := os.ReadFile(filepath.Join(root, name, "speed")); err == nil {
+		if sp, err := strconv.ParseUint(strings.TrimSpace(string(v)), 10, 32); err == nil {
+			f.SpeedMbps = uint32(sp)
+		}
+	}
+	if v, err := os.ReadFile(filepath.Join(root, name, "address")); err == nil {
+		f.MAC = strings.TrimSpace(string(v))
+	}
+	if link, err := os.Readlink(filepath.Join(root, name, "device", "driver")); err == nil {
+		f.Driver = filepath.Base(link)
+	}
+	if v, err := os.ReadFile(filepath.Join(root, name, "mtu")); err == nil {
+		if mtu, err := strconv.Atoi(strings.TrimSpace(string(v))); err == nil && mtu > 0 {
+			f.MTU = mtu
+		}
+	}
+	return f
 }
 
 // BridgeDomains VPP 中全部 bridge-domain 的运行态（决策 #84）。

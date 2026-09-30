@@ -9,6 +9,7 @@ import (
 
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
 // ---------- 资源 handlers 第一组（system/interfaces/virtual-switches/vrfs） ----------
@@ -77,6 +78,88 @@ func putLoginUser(t *testing.T, ts *httptest.Server, token string) error {
 		t.Fatalf("写入 login 配置: %d %s", status, data)
 	}
 	return nil
+}
+
+// 决策 #302：GET /interfaces 并入内核侧未接管的物理口（kind=physical、taken_over=false、
+// 事实取 sysfs 经注入的假源核对）；详情端点对未接管口回同一视图（不再 404），
+// 未知名仍 404；已出现在 VPP 运行态的声明口 taken_over=true。
+func TestInterfacesListIncludesUntakenKernelPorts(t *testing.T) {
+	ts := newTestServerOpts(t, Options{Ports: fakePorts{
+		vpp:    []string{"ens224"},
+		kernel: []string{"ens160", "ens192"},
+		facts: []network.KernelIfFacts{
+			{Name: "ens160", AdminUp: true, LinkKnown: true, LinkUp: true,
+				SpeedMbps: 10000, MAC: "00:50:56:00:00:01", Driver: "vmxnet3", MTU: 1500},
+			{Name: "ens192"}, // 事实取不到：字段缺席（不编造）
+		},
+	}})
+	token := loginAdmin(t, ts)
+
+	// 声明 ens224（VPP 清单里有 → taken_over=true）
+	iface := model.InterfaceConfig{Name: "ens224", Description: "to-TOR", MTU: 9000}
+	status, _, _ := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/interfaces/ens224", token, iface,
+		map[string]string{"X-NFVIS-Auto-Commit": "true"})
+	if status != http.StatusOK {
+		t.Fatalf("PUT interface: %d", status)
+	}
+
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/interfaces", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /interfaces: %d %s", status, data)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(data, &rows); err != nil {
+		t.Fatalf("解析列表: %v %s", err, data)
+	}
+	byName := map[string]map[string]any{}
+	for _, r := range rows {
+		byName[r["name"].(string)] = r
+	}
+	if len(byName) != 3 {
+		t.Fatalf("列表应有 3 个接口（2 内核 + 1 声明）: %s", data)
+	}
+	// 内核口：kind=physical、taken_over=false、sysfs 事实
+	k := byName["ens160"]
+	if k["kind"] != "physical" || k["taken_over"] != false {
+		t.Fatalf("内核口 kind/taken_over 不符: %v", k)
+	}
+	if k["driver"] != "vmxnet3" || k["mac"] != "00:50:56:00:00:01" ||
+		k["speed_mbps"] != float64(10000) || k["mtu"] != float64(1500) ||
+		k["enabled"] != true || k["link"] != "up" {
+		t.Fatalf("内核口事实不符（应取注入的 sysfs 假源）: %v", k)
+	}
+	// 事实取不到的内核口：字段缺席
+	g := byName["ens192"]
+	if g["taken_over"] != false || g["kind"] != "physical" {
+		t.Fatalf("ens192 kind/taken_over 不符: %v", g)
+	}
+	for _, f := range []string{"driver", "mac", "speed_mbps", "mtu", "link", "description"} {
+		if _, ok := g[f]; ok {
+			t.Errorf("ens192 取不到的 %s 必须缺席（不编造）: %v", f, g)
+		}
+	}
+	// 声明口：taken_over=true（VPP 清单里有）
+	d := byName["ens224"]
+	if d["taken_over"] != true || d["kind"] != "physical" {
+		t.Fatalf("声明口 taken_over/kind 不符: %v", d)
+	}
+
+	// 详情端点：未接管口回同一内核视图；未知名仍 404
+	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/interfaces/ens160", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /interfaces/ens160: %d %s", status, data)
+	}
+	var detail map[string]any
+	if err := json.Unmarshal(data, &detail); err != nil {
+		t.Fatalf("解析详情: %v %s", err, data)
+	}
+	if detail["taken_over"] != false || detail["driver"] != "vmxnet3" {
+		t.Fatalf("未接管口详情应为内核视图: %v", detail)
+	}
+	status, _, _ = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/interfaces/nope0", token, nil, nil)
+	if status != http.StatusNotFound {
+		t.Fatalf("真未知名仍应 404: %d", status)
+	}
 }
 
 func TestInterfacesEndpoint(t *testing.T) {

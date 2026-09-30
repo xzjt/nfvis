@@ -53,11 +53,12 @@ func (x *cliExecutor) execShowInterfaces(args []string) string {
 	return x.showInterfaceList(cfg)
 }
 
-// showInterfaceList 接口运行态清单（决策 #155）：行 = 配置声明 ∪ VPP 运行态口，
+// showInterfaceList 接口运行态清单（决策 #155）：行 = 配置声明 ∪ VPP 运行态口
+// ∪ 内核未接管口（决策 #302，收口 round81 F1：首装在接管前也能看见网卡），
 // Admin/Link/Speed/Driver/计数全取运行态。旧摘要的 Admin 取自配置的 enabled、
 // 旧聚合表只列声明口——两处都是 #84「字段取配置而非运行态」的残留，本轮收口。
-// 来源列标注两类特殊情况：仅声明未生效（VPP 运行态里没有）、纯运行态口
-// （派生口 bvi0/vh-* 或外部接管，未声明）。
+// 来源列标注三类特殊情况：仅声明未生效（VPP 运行态里没有）、纯运行态口
+// （派生口 bvi0/vh-* 或外部接管，未声明）、内核侧未接管的物理口（未接管）。
 func (x *cliExecutor) showInterfaceList(cfg model.Config) string {
 	states, stErr := x.ifaceStates()
 	inv, invOK := x.vppIfaceNamesSafe()
@@ -66,16 +67,27 @@ func (x *cliExecutor) showInterfaceList(cfg model.Config) string {
 		inInv[n] = true
 	}
 	declared := map[string]string{} // name → description
+	declaredNames := make([]string, 0, len(cfg.Interfaces))
 	names := make([]string, 0, len(cfg.Interfaces)+len(inv))
 	seen := map[string]bool{}
 	for _, ifc := range cfg.Interfaces {
 		declared[ifc.Name] = ifc.Description
+		declaredNames = append(declaredNames, ifc.Name)
 		if !seen[ifc.Name] {
 			seen[ifc.Name] = true
 			names = append(names, ifc.Name)
 		}
 	}
 	for _, n := range inv {
+		if !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	// 决策 #302：内核侧未接管的物理口并入清单（kernel − VPP 已接管 − 配置已声明）。
+	untaken := map[string]bool{}
+	for _, n := range untakenKernelIfnames(x.kernelIfnamesSafe(), inv, declaredNames) {
+		untaken[n] = true
 		if !seen[n] {
 			seen[n] = true
 			names = append(names, n)
@@ -101,6 +113,9 @@ func (x *cliExecutor) showInterfaceList(cfg model.Config) string {
 		}
 		source := "-"
 		switch {
+		case untaken[name]:
+			// 未接管的内核口（决策 #302）：如实标注；不编造 VPP 侧事实（各列保持 -）
+			source = "未接管"
 		case decl && !inVPP:
 			source = "已声明未生效"
 		case !decl:
@@ -114,7 +129,7 @@ func (x *cliExecutor) showInterfaceList(cfg model.Config) string {
 		// 运行态不可用：明确说明状态列为何是 "-"
 		b.WriteString("%% 注: VPP 运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
 	} else if !invOK {
-		b.WriteString("%% 注: VPP 端口清单不可用，清单仅含配置声明的接口\n")
+		b.WriteString("%% 注: VPP 端口清单不可用，清单不含 VPP 运行态口（内核侧未接管口照列）\n")
 	}
 	x.structured = map[string]any{"interfaces": items}
 	return b.String()
@@ -266,6 +281,11 @@ func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) strin
 		if out, ok := x.ifaceRuntimeView(name, desc, declared, ifc.MTU); ok {
 			return out
 		}
+		// 未声明且不在 VPP 运行态：先看内核侧（决策 #302）——未接管的物理口回内核事实
+		// 视图（驱动/MAC/速率/状态取 sysfs，不编造数据面统计）；真未知名才报错。
+		if out, ok := x.kernelIfaceView(name); ok {
+			return out
+		}
 		// 未声明且不在 VPP 清单（决策 #154：清单查询成功才可判「不在」）
 		names, ok := x.vppIfaceNamesSafe()
 		if ok && !ifaceInList(names, name) {
@@ -279,6 +299,10 @@ func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) strin
 				x.structured = map[string]any{"interface": name, "statistics": anyToTree(c)}
 				return fmt.Sprintf("interface %s statistics: %v\n", name, c)
 			}
+		}
+		// 未接管的内核口没有数据面统计（决策 #302）：如实区分于「连接未就绪」。
+		if _, ok := x.kernelIfaceFacts(name); ok {
+			return fmt.Sprintf("（接口 %s 未被 VPP 接管，无数据面统计）\n", name)
 		}
 		// 如实描述：stats 是接入了的，取不到数是**这一刻连接没就绪/读取失败**
 		// （VPP 重启后连接陈旧即属此列，取数路径会自行重连重试）。
@@ -330,6 +354,60 @@ func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool, cfgMTU 
 	fmt.Fprintf(&b, ifaceRowFmt, name, admin, link, speed, mtuCol, driver, rx, tx, desc)
 	if stErr != nil {
 		b.WriteString("%% 注: VPP 运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
+	}
+	x.structured = map[string]any{"interfaces": []any{entry}}
+	return b.String(), true
+}
+
+// kernelIfaceView 未接管口的内核侧单口视图（决策 #302）：与运行态单口视图同一张表
+// （ifaceRowFmt），值取 sysfs（Admin/Link/Speed/MTU/Driver），计数列如实为 -
+// （不编造 VPP 侧统计），MAC 单独成行（表没有该列）。name 不是内核物理口时 ok=false，
+// 由调用方继续原有的判错链。
+func (x *cliExecutor) kernelIfaceView(name string) (string, bool) {
+	f, ok := x.kernelIfaceFacts(name)
+	if !ok {
+		return "", false
+	}
+	admin := "down"
+	if f.AdminUp {
+		admin = "up"
+	}
+	link := "-"
+	if f.LinkKnown {
+		link = "down"
+		if f.LinkUp {
+			link = "up"
+		}
+	}
+	speed, mtu := "-", "-"
+	if f.SpeedMbps > 0 { // 内核 speed 本就以 Mbps 计；换算成 kbps 走同一渲染
+		speed = fmtSpeed(f.SpeedMbps * 1000)
+	}
+	if f.MTU > 0 {
+		mtu = fmt.Sprintf("%d", f.MTU)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "（接口 %s 未被 VPP 接管，以下为内核侧视图）\n", name)
+	fmt.Fprintf(&b, ifaceRowFmt, "Interface", "Admin", "Link", "Speed", "MTU", "Driver", "RxPkts", "TxPkts", "Description")
+	fmt.Fprintf(&b, ifaceRowFmt, name, admin, link, speed, mtu, orDash(f.Driver), "-", "-", "-")
+	if f.MAC != "" {
+		fmt.Fprintf(&b, "mac: %s\n", f.MAC)
+	}
+	entry := map[string]any{"name": name, "taken_over": false, "admin_up": f.AdminUp}
+	if f.LinkKnown {
+		entry["link_up"] = f.LinkUp
+	}
+	if f.SpeedMbps > 0 {
+		entry["link_speed_kbps"] = f.SpeedMbps * 1000 // 与 VPP 口同单位（kbps）
+	}
+	if f.Driver != "" {
+		entry["driver"] = f.Driver
+	}
+	if f.MAC != "" {
+		entry["mac"] = f.MAC
+	}
+	if f.MTU > 0 {
+		entry["mtu"] = f.MTU
 	}
 	x.structured = map[string]any{"interfaces": []any{entry}}
 	return b.String(), true
