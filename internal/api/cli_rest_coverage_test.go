@@ -168,6 +168,7 @@ var cliRESTCoverage = map[string]string{
 	"request system core-dumps delete":                        "DELETE /system/core-dumps",
 	"request system core-dumps export":                        "POST /system/core-dumps:export",
 	"request system zeroize":                                  "POST /system:zeroize",
+	"request system storage format-data":                      "POST /system:format-data",
 	"request system api tls regenerate":                       "POST /system/tls:regenerate",
 	"request system api token revoke <token-id>":              "POST /system/api-tokens/{id}:revoke",
 	"request system ssh host-key regenerate":                  "POST /system/ssh-host-key:regenerate",
@@ -225,10 +226,9 @@ var cliRESTExceptions = map[string]string{
 
 // cliRESTGaps 已登记的 REST 缺口（CLI 有、REST 无）→ 理由/归属。补一个划掉一个。
 // 与 docs/CLI-REST覆盖核查.md §3 对应；v2 决策 #304 把 `show configuration permissions <class>`
-// 从缺口移入覆盖表（`GET /configuration/permissions`），当前只剩 `format-data` 一项（登记延期 V2）。
-var cliRESTGaps = map[string]string{
-	"request system storage format-data": "V1 有意延期（破坏性；决策 #65：待数据分区定义），核查 #4",
-}
+// 从缺口移入覆盖表（`GET /configuration/permissions`），v2 决策 #305 把最后一项
+// `request system storage format-data` 移入覆盖表（`POST /system:format-data`）——缺口表**已清空**。
+var cliRESTGaps = map[string]string{}
 
 // classify 返回命令的归属：A=覆盖（端点）、C=例外、B=缺口、""=未归类。
 // set/delete 配置语句由 candidate API 架构性覆盖（一整轮 API 覆盖全部配置语句，

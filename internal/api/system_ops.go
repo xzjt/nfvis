@@ -7,6 +7,7 @@ package api
 // GET    /system/backup/{file}     下载归档（octet-stream，路径限定在备份目录内）
 // POST   /system/restore           从归档恢复（multipart file → candidate 提交）
 // POST   /system:zeroize           恢复出厂（JSON confirm=true，双重确认）
+// POST   /system:format-data        重置数据分区（决策 #305：恢复出厂数据状态、保留管理面可达）
 
 import (
 	"context"
@@ -28,6 +29,7 @@ type SystemOpsRuntime interface {
 	Path(name string) (string, error)
 	Restore(ctx context.Context, data []byte, user string) (config.CommitResult, []images.Meta, error)
 	Zeroize(ctx context.Context, user string) (system.ZeroizeResult, error)
+	FormatData(ctx context.Context, user string) (system.FormatDataResult, error)
 }
 
 func (s *Server) requireSystemOps(w http.ResponseWriter) bool {
@@ -176,4 +178,53 @@ func (s *Server) handleZeroize(w http.ResponseWriter, r *http.Request) {
 		"status": "zeroized", "revision": res.Revision, "removed_images": res.RemovedImages,
 		"note": strings.TrimSpace("配置/镜像/VNF 已清空，账号复位；重启后进入初始化状态"),
 	})
+}
+
+// handleFormatData POST /api/v1/system:format-data（决策 #305，需 confirm=true）。
+//
+// 语义：恢复出厂**数据状态**（保留管理面可达）——收敛删全部受管 VNF/容器与网络对象、
+// 清受管数据目录、配置库重置为「保留节」最小配置；`system.management`/`system.api`/
+// `system.login` 与物理口/DPDK 声明保留，底座与身份不动。
+//
+// 诚实性：**部分失败（有残留）返回 500**，并在 detail 里逐条列出残留——绝不在未清干净时报成功。
+func (s *Server) handleFormatData(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSystemOps(w) {
+		return
+	}
+	var in struct {
+		Confirm bool `json:"confirm"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	if !in.Confirm {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "重置数据分区需 confirm=true（双重确认）", nil)
+		return
+	}
+	user := "api"
+	if info, ok := Identity(r); ok {
+		user = info.User
+	}
+	// 决策 #150：重置数据分区是高危档动作——执行前写意图、执行后写结果（成功/失败都写）。
+	// CLI `request system storage format-data` 走同一助手（同一 action 与意图文案）。
+	var res system.FormatDataResult
+	err := runHighRisk(s.engine, user, highRiskFormatData(), func() (string, error) {
+		var rerr error
+		res, rerr = s.sysOps.FormatData(r.Context(), user)
+		if rerr != nil {
+			return "", rerr
+		}
+		return res.Summary(), nil
+	})
+	if err != nil {
+		// 残留逐条进 detail（与 message 同一份事实），让客户端无需解析文本就能列出未清项。
+		details := make([]ErrorDetail, 0, len(res.Residuals))
+		for _, d := range res.Residuals {
+			details = append(details, ErrorDetail{Message: d})
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), details)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, res)
 }

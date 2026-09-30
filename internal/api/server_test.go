@@ -78,9 +78,18 @@ func newTestServerOpts(t *testing.T, opts Options) *httptest.Server {
 	if opts.Log == nil {
 		opts.Log = slog.New(slog.DiscardHandler)
 	}
-	// M5-6：默认装配备份/恢复管理器（绑定同一引擎，测试可直接打端点）
+	// M5-6：默认装配备份/恢复管理器（绑定同一引擎，测试可直接打端点）。
+	// 决策 #305：format-data 的受管数据目录也全部指向临时目录——否则在装了产品的机器上跑测试
+	// 会清空真实的 /var/lib/nfvis/{captures,coredumps,…}（测试绝不允许动真机的受管数据）。
 	if opts.SysOps == nil {
-		opts.SysOps = system.NewManager(system.Config{Dir: filepath.Join(t.TempDir(), "backup")}, engine, nil, "test")
+		tmp := t.TempDir()
+		opts.SysOps = system.NewManager(system.Config{
+			Dir:         filepath.Join(tmp, "backup"),
+			Captures:    filepath.Join(tmp, "captures"),
+			CoreDumps:   filepath.Join(tmp, "coredumps"),
+			TechSupport: filepath.Join(tmp, "tech-support"),
+			VMs:         filepath.Join(tmp, "vms"),
+		}, engine, nil, "test")
 	}
 	srv := New(engine, authz, opts)
 	ts := httptest.NewServer(srv.Handler())

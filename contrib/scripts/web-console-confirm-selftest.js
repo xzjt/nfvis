@@ -457,6 +457,8 @@ const HIGH_ACTIONS = [
     pre: (ctx) => { nodeOf(ctx, 'ops-restore-file').value = 'cfg-20260924.json'; } },
   { id: 'ops-zeroize-btn', title: '恢复出厂（清空配置与镜像）', word: 'zeroize',
     cli: /request system zeroize$/, req: { method: 'POST', url: /\/system:zeroize$/ } },
+  { id: 'ops-formatdata-btn', title: '重置数据分区（恢复出厂数据状态）', word: 'format-data',
+    cli: /request system storage format-data$/, req: { method: 'POST', url: /\/system:format-data$/ } },
   { id: 'usr-create-btn', title: '创建本地用户', word: 'netop2',
     cli: /set system login user netop2 password/, req: { method: 'POST', url: /\/system\/login-users$/ },
     pre: (ctx) => {

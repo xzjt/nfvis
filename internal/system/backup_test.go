@@ -16,11 +16,25 @@ import (
 type fakeImages struct {
 	metas   []images.Meta
 	deleted []string
+	fail    map[string]error // 决策 #305：注入删除失败（部分失败测试用）
+	seen    []int            // 收到的 refCount（校验 format-data 传 0）
 }
 
 func (f *fakeImages) List() []images.Meta { return append([]images.Meta(nil), f.metas...) }
-func (f *fakeImages) Delete(name string, _ int) error {
+func (f *fakeImages) Delete(name string, refCount int) error {
+	f.seen = append(f.seen, refCount)
+	if err := f.fail[name]; err != nil {
+		return err
+	}
 	f.deleted = append(f.deleted, name)
+	// 与真实仓库一致：删成功后索引里不再有它（List 不再返回）——否则二次执行会重复计数。
+	kept := f.metas[:0]
+	for _, m := range f.metas {
+		if m.Name != name {
+			kept = append(kept, m)
+		}
+	}
+	f.metas = kept
 	return nil
 }
 

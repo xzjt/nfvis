@@ -56,6 +56,16 @@ func highRiskZeroize() highRiskAction {
 	}
 }
 
+// highRiskFormatData 重置数据分区（决策 #305）。语义是「恢复出厂数据状态、保留管理面可达」，
+// 与 zeroize 是**两件事**（zeroize 清空账号、需重启初始化；format-data 保留管理面、不重启），
+// 故各有独立 action 名（`system.format-data`），不靠同一动作分类混用。
+func highRiskFormatData() highRiskAction {
+	return highRiskAction{
+		Action: "system.format-data",
+		Intent: "重置数据分区：收敛删除全部受管 VNF/容器与网络配置对象、清空受管数据目录，保留管理面配置（system.management/api/login 与物理口/DPDK 声明）",
+	}
+}
+
 // highRiskSoftwareAdd 软件升级。sha256 只取前 12 位入审计（够核对「用的是哪个包」，
 // 又不让一行 detail 被 64 位十六进制占满）。
 func highRiskSoftwareAdd(pkg, sha256 string) highRiskAction {

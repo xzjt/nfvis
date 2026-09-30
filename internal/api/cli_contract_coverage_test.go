@@ -22,9 +22,9 @@ const (
 )
 
 // deferred 明确延期的命令（返回自身说明而非通用 fallback，且已记入决策）。
+// 决策 #305 已把 `request system storage format-data` 落地，从本表移出；当前只剩改密一条。
 var deferred = map[string]string{
-	"request system storage format-data": "破坏性操作，V1 仅重置数据分区，待数据分区定义后开放",
-	"request system password change":     "需交互式口令输入（CLI 前端 prompt），待前端交互落地",
+	"request system password change": "需交互式口令输入（CLI 前端 prompt），待前端交互落地",
 }
 
 // contractCLICommands 契约 §1.1/§1.2/§1.3 的代表命令（新增命令须同步补入）。
@@ -56,6 +56,7 @@ var contractCLICommands = []string{
 	"request interfaces ens224 enable", "request interfaces ens224 disable",
 	"request sriov create-vfs ens224 count 2", "request sriov delete-vfs ens224 vf 1",
 	"request system reboot", "request system zeroize", "request system software rollback",
+	"request system storage format-data",
 	"request system configuration backup", "request system tech-support generate",
 	"request system ntp sync", "request system api tls regenerate",
 	"request system api token revoke 0b8fd6a2-1c67-4f83-9b3e-2b6f5e7ad910",

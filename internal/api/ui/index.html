@@ -840,6 +840,14 @@
             清空数据分区的配置与镜像、级联删除虚拟机与容器、账号随空配置复位；<strong>本机不会自动重启</strong>，
             重启后进入初始化状态，届时需要带外/控制台重新初始化——本机没有「撤销恢复出厂」。
           </p>
+          <h3 class="muted small">重置数据分区（恢复出厂数据状态，保留管理面）</h3>
+          <div class="cfg-actions">
+            <button id="ops-formatdata-btn" data-write type="button" class="danger">重置数据分区（保留管理面可达）</button>
+          </div>
+          <p class="muted small">
+            删除全部受管 VNF/容器与网络配置对象、清空镜像/备份/抓包/转储/诊断归档等受管数据，并把配置重置为出厂数据状态；
+            <strong>管理口、API 与登录用户、物理口与 DPDK 声明保留</strong>——执行完仍可登录继续配置，不必重启。
+          </p>
         </fieldset>
         <fieldset>
           <legend>电源（影响业务，请先确认）</legend>

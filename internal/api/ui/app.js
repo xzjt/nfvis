@@ -5522,6 +5522,63 @@ async function zeroizeRun() {
   await reload().catch(() => {});
 }
 
+// ---------- 运维动作：重置数据分区（高危档，不可撤销）----------
+//
+// 与「恢复出厂」是**两件事**：这是「恢复出厂**数据状态**、保留管理面可达」——删全部受管 VNF/容器与
+// 网络配置对象、清受管数据目录（镜像/备份/抓包/转储/诊断归档），但**管理口/API/登录用户**与
+// **物理口/DPDK 声明**原样保留，执行完仍能登录继续配置、不必重启。契约要求请求体 confirm=true；
+// 界面这一层是确认词 format-data + 10 秒倒计时。
+async function formatDataRun() {
+  const ok = await uiConfirm('重置数据分区（恢复出厂数据状态）', {
+    tier: 'high',
+    requireWord: 'format-data',
+    bullets: [
+      '删除全部受管虚拟机与容器（含其快照；业务中断），以及全部网络配置对象（交换机/VRF/静态路由/ACL/NAT/QoS/端口镜像/LAG/LLDP）。',
+      '清空受管数据目录：镜像、备份归档、抓包文件、core dump、诊断归档、虚拟机磁盘数据（不可撤销，需要的先取到本机之外）。',
+      '**保留管理面配置**：管理口、API（端口/TLS/token TTL）、登录用户与权限类；物理口声明与 DPDK 声明也保留——执行完仍可登录继续配置，不必重启。',
+      '配置库重置为「保留节」最小配置；结果会如实给出删除对象数、清理文件数与释放空间。',
+      '不可撤销：本机没有「撤销重置数据分区」；要退回来只能用先前的配置备份恢复（镜像需另行导入）。',
+    ],
+    cli: 'request system storage format-data',
+  });
+  if (!ok) return;
+  opsMsg('重置数据分区：执行中…', false);
+  opsOut('');
+  try {
+    const r = await api('/system:format-data', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true }),
+    });
+    if (r && r.already_factory) {
+      opsMsg('已是出厂态：无受管对象/数据可清（修订 ' + dash(r.revision) + '）。', false);
+    } else {
+      opsMsg('已重置数据分区：删除对象 ' + fmtDataCount(r && r.removed_objects) +
+        ' 个、清理文件 ' + dash(r && r.purged_files) + ' 个、释放 ' + fmtBytes(r && r.freed_bytes) +
+        '（修订 ' + dash(r && r.revision) + '）。管理面配置与物理口/DPDK 声明已保留。', false);
+    }
+    if (r) opsOut(JSON.stringify(r, null, 2));
+  } catch (e) {
+    opsMsg('重置数据分区失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+// fmtDataCount 累加 removed_objects 各类计数（服务端按类别给，界面只要总数）。
+function fmtDataCount(o) {
+  if (!o) return '—';
+  return Object.keys(o).reduce((a, k) => a + (Number(o[k]) || 0), 0);
+}
+
+// fmtBytes 人类可读字节（结果统计里的释放空间）。
+function fmtBytes(n) {
+  const v = Number(n);
+  if (!isFinite(v) || v <= 0) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0, x = v;
+  while (x >= 1024 && i < u.length - 1) { x /= 1024; i++; }
+  return (i === 0 ? x : x.toFixed(1)) + ' ' + u[i];
+}
+
 // 运维动作：软件版本 / 恢复配置 / 恢复出厂（三个高危入口，处理器见上面的 swAdd/swRollback/
 // restoreRun/zeroizeRun；按钮本身不做事，值都从控件现取）。
 $('ops-sw-add-btn').addEventListener('click', () => swAdd($('ops-sw-pkg').value, $('ops-sw-sha').value));
@@ -5529,6 +5586,7 @@ $('ops-sw-rollback-btn').addEventListener('click', () => swRollback());
 $('ops-restore-refresh').addEventListener('click', () => reload().catch((e) => opsMsg('刷新失败：' + e.message, true)));
 $('ops-restore-btn').addEventListener('click', () => restoreRun($('ops-restore-file').value));
 $('ops-zeroize-btn').addEventListener('click', () => zeroizeRun());
+$('ops-formatdata-btn').addEventListener('click', () => formatDataRun());
 
 // 接口详情页：驱动接管（DPDK 绑定/解绑）与 SR-IOV VF 数量。
 $('ifd-dpdk-bind').addEventListener('click', () => dpdkAct(true));

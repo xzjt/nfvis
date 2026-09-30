@@ -294,7 +294,7 @@ func OperRoot() *Node {
 					K("change", "登录者自助改密（验证旧口令）"),
 				),
 				Su(K("storage", "存储管理",
-					K("format-data", "重置数据分区（危险，双确认）"),
+					K("format-data", "重置数据分区：恢复出厂数据状态（保留管理面可达）"),
 				)),
 				K("ntp", "时间同步",
 					K("sync", "立即触发一次 NTP 同步"),

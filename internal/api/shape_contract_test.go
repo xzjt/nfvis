@@ -296,12 +296,18 @@ func loadEmbeddedSpec(t *testing.T) map[string]any {
 // declaredProps 取某端点 200 响应的**字段名**；数组响应取 items 的字段。
 func declaredProps(t *testing.T, spec map[string]any, path, method string) []string {
 	t.Helper()
+	return declaredPropsStatus(t, spec, path, method, "200")
+}
+
+// declaredPropsStatus 同上，可取任意状态码（如 202）。
+func declaredPropsStatus(t *testing.T, spec map[string]any, path, method, status string) []string {
+	t.Helper()
 	paths, _ := spec["paths"].(map[string]any)
 	node, _ := paths[path].(map[string]any)
 	op, _ := node[strings.ToLower(method)].(map[string]any)
 	resp, _ := op["responses"].(map[string]any)
-	ok200, _ := resp["200"].(map[string]any)
-	schema := schemaOf(t, spec, ok200)
+	ok, _ := resp[status].(map[string]any)
+	schema := schemaOf(t, spec, ok)
 	if items, ok := schema["items"].(map[string]any); ok {
 		schema = schemaOf(t, spec, items)
 	}
@@ -312,6 +318,56 @@ func declaredProps(t *testing.T, spec map[string]any, path, method string) []str
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestFormatDataResponseShapeMatchesContract 决策 #305：`POST /system:format-data`（202）的响应形状。
+//
+// 契约声明的统计字段必须真的发得出来。只有两个字段是**条件出现**：
+//   - `already_factory`：已是出厂态才出现（幂等第二次执行的如实结论）；非出厂态缺席；
+//   - `residuals`：无残留时缺席；**有残留时端点返回 500**（走错误分支），202 里因此不见。
+//
+// 两者都是"有意义的事实"而非"没实现"——与 zeroize 的响应口径一致（zeroize 不设响应 schema，
+// 本端点按用户要求把统计写进契约，故这里单列一条守护）。
+func TestFormatDataResponseShapeMatchesContract(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+	spec := loadEmbeddedSpec(t)
+	props := declaredPropsStatus(t, spec, "/system:format-data", "POST", "202")
+	if len(props) == 0 {
+		t.Fatal("契约里取不到 POST /system:format-data 的 202 响应字段（schema 缺 properties？）")
+	}
+	status, _, body := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system:format-data", token,
+		map[string]any{"confirm": true}, map[string]string{"X-NFVIS-Auto-Commit": "true"})
+	if status != http.StatusAccepted {
+		t.Fatalf("POST /system:format-data：状态 %d %s", status, body)
+	}
+	got := responseObject(t, body)
+	// 条件出现字段的白名单（理由见函数注释）。
+	optional := map[string]string{
+		"already_factory": "已是出厂态才出现（幂等第二次执行的如实结论）",
+		"residuals":       "无残留时缺席；有残留时端点返回 500（错误分支），202 里因此不见",
+	}
+	checked, allowed := 0, 0
+	for _, f := range props {
+		if _, ok := got[f]; ok {
+			checked++
+			continue
+		}
+		if reason, a := optional[f]; a {
+			allowed++
+			t.Logf("  跳过 %s（%s）", f, reason)
+			continue
+		}
+		t.Errorf("POST /system:format-data：契约声明了 %s，响应里没有（照契约开发的客户端会取空）", f)
+	}
+	// 统计的必发字段逐个点名（防"整体缺席也算过"）。
+	for _, f := range []string{"status", "revision", "kept_sections", "removed_objects",
+		"removed_images", "purged_files", "freed_bytes"} {
+		if _, ok := got[f]; !ok {
+			t.Errorf("统计字段 %s 必须发出（契约声明且非条件字段）", f)
+		}
+	}
+	t.Logf("POST /system:format-data：核对 %d 个字段，白名单跳过 %d 个", checked, allowed)
 }
 
 // schemaOf 取 content.application/json.schema（或 items），必要时解一层 $ref。
