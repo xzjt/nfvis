@@ -87,6 +87,10 @@ func (s *Server) dynamicValues(kind string) []string {
 	case schema.DynKernelIfnames:
 		// 内核网卡（未被接管）：管理口 / bind-dpdk / SR-IOV PF 的名字在内核侧才成立。
 		return s.kernelIfnames()
+	case schema.DynAllIfnames:
+		// `set interfaces <n>` 的候选并集（决策 #302）：内核未接管 ∪ 配置已声明 ∪ VPP 运行态——
+		// 首装（VPP 未接管任何口、配置未声明）也能补全到内核网卡名。
+		return s.allIfnamesDeclared()
 	case schema.DynIfnames:
 		// 并集：`request interfaces <n> enable|bind-dpdk|unbind-dpdk` 的动作混合，
 		// 参数位置在动作之前、无法按动作区分来源，故两侧都给（决策 #83）。

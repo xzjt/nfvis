@@ -42,9 +42,14 @@ show system
                                                     #   唯一的实现也在那里；`show system configuration candidate`
                                                     #   不存在，别在树里再加一份重复且无实现的形态——决策 #153）
 
-show interfaces                                     # 接口运行态清单：行 = 配置声明 ∪ VPP 运行态口（决策 #155；
+show interfaces                                     # 接口运行态清单：行 = 配置声明 ∪ VPP 运行态口 ∪ 内核未接管口（决策 #155；
                                                     #   Admin/Link/Speed/Driver/计数全取运行态——#84 字段级残留收口；
-                                                    #   仅声明未生效的行状态列 - 并标注，纯运行态口标注「未声明」）
+                                                    #   仅声明未生效的行状态列 - 并标注，纯运行态口标注「未声明」；
+                                                    #   内核侧未被 VPP 接管的物理口并入清单并标注「未接管」（决策 #302，
+                                                    #   收口 round81 F1：首装在接管前也能看见网卡）——枚举口径：
+                                                    #   /sys/class/net − 无 device 链接的虚拟口（lo/veth/docker0…，
+                                                    #   lo 与 VPP 内置 local0 再防御性剔除）− VPP 已接管 − 配置已声明，
+                                                    #   去重按名排序；未接管口不编造 VPP 侧事实，状态列 -）
 show interfaces physical                            # **与上一条完全等价**（决策 #155：`physical` 选择器退役为等价写法）
 show interfaces physical <ifname>
   ├─ detail                                         # 运行态单口视图（与裸写法同一实现）
@@ -55,8 +60,10 @@ show interfaces <ifname> [detail|statistics|sriov]   # **≡ `show interfaces ph
                                                     #   `<ifname>`（vpp-ifnames，决策 #83）：**候选里的名字必须答得上来**
                                                     #   （决策 #154/#155）——已声明的口回运行态视图（声明但运行态不可得 →
                                                     #   状态列 - 并注明），未声明但在清单里的口（派生口 bvi0/vh-*、未声明的
-                                                    #   DPDK 口）同回运行态视图并注明；两侧都不在（清单查询成功才可判）→
-                                                    #   `% 接口 … 未在配置中声明、也不在 VPP 接口清单中`。
+                                                    #   DPDK 口）同回运行态视图并注明；内核侧未接管的物理口（不在上述两侧，
+                                                    #   决策 #302）回内核事实视图（驱动/MAC/速率/Admin/Link/MTU 取 sysfs，
+                                                    #   注明「未被 VPP 接管」，不编造数据面统计）；三侧都不在（VPP 清单
+                                                    #   查询成功才可判）→ `% 接口 … 未在配置中声明、也不在 VPP 接口清单中`。
                                                     #   接口的**配置视图**在配置模式：`configure` → `edit interfaces <ifname>`
                                                     #   → `show`（层级子树），或 `show configuration | display set`（#155）
 show interfaces management                          # 管理口（内核侧，IP/链路）
@@ -600,17 +607,21 @@ virtual-machine-functions {
    补到公共前缀或唯一匹配时**只改写行文本、不列候选**；多匹配且公共前缀无进展时才响铃并列出。
 3. 动态候选来源（实时向 nfvisd 查询，失败则退化为仅关键字）：`<ifname>`→接口清单、`<name>`→对应资源清单、`<image-name>`→镜像清单、`<class-name>`→class 清单。
    **接口名一族分三种来源，不是同一个清单（附录 A #83）**——此前三者共用一个「已写进配置的接口名」，
-   既漏掉未声明的 DPDK 口（已接管的口在内核中已无 netdev），又会列出根本不存在的名字：
+   既漏掉未声明的 DPDK 口（已接管的口在内核中已无 netdev），又会列出根本不存在的名字；
+   决策 #302 为 `set interfaces` 增设第四种（配置声明位的全量并集，首装可见内核网卡）：
 
    | kind | 含义 | 用它的位置 |
    |---|---|---|
-   | `vpp-ifnames` | VPP 中的接口 = **已被 DPDK 接管的数据面端口** | `set interfaces <ifname>`、`show interfaces physical <ifname>`、`show interfaces <ifname>`（`physical` 可省的等价写法）、`virtual-switches … l3-interface`、`set vpp dpdk dev <ifname>`、`request vpp trace start interface <ifname>`、`monitor interfaces <ifname>`、`clear interfaces statistics [<ifname>]`、`set protocols lldp interface <ifname>`、`show lldp neighbors interface <ifname>` |
+   | `vpp-ifnames` | VPP 中的接口 = **已被 DPDK 接管的数据面端口** | `show interfaces physical <ifname>`、`show interfaces <ifname>`（`physical` 可省的等价写法）、`virtual-switches … l3-interface`、`set vpp dpdk dev <ifname>`、`request vpp trace start interface <ifname>`、`monitor interfaces <ifname>`、`clear interfaces statistics [<ifname>]`、`set protocols lldp interface <ifname>`、`show lldp neighbors interface <ifname>` |
    | `kernel-ifnames` | 内核网卡（**未被接管**的物理口；有 `/sys/class/net/<n>/device` 的才算） | `set system management interface <ifname>`、`request interfaces <ifname> bind-dpdk`、`request sriov create-vfs/delete-vfs <ifname>` |
    | `ifnames` | 两者**并集** | `request interfaces <ifname> enable\|disable\|bind-dpdk\|unbind-dpdk`（动作混合、参数位置在动作之前，无法按动作区分来源） |
+   | `all-ifnames` | **内核未接管 ∪ 配置已声明 ∪ VPP 运行态**（决策 #302） | `set interfaces <ifname>`（声明是接管流程的第一步，首装在接管前也能补全到内核网卡名；声明口在「已绑定 + VPP 未起」等生命周期各态都可能暂时缺席其它清单，故三源取并） |
 
    实现：`internal/orchestrator/network/port_inventory.go`（VPP 侧 `sw_interface_dump`、内核侧 sysfs），
    经 `api.PortInventory` 接口注入，与 `show interfaces physical` 的空态同源。
-   **失败（VPP 未接入/查询失败）时退化为「仅关键字」，不退回「已配置接口名」**——那正是本决策要修的错误来源。
+   **失败（VPP 未接入/查询失败）时退化为「仅关键字」，不退回「已配置接口名」**——那正是本决策要修的错误来源
+   （`all-ifnames` 是有意把声明名并入的例外：声明位候选答的是「配置里正在编辑哪个口」，见 #302；
+   每个来源独立退化——VPP 不可用时内核侧与声明名照常给值）。
 4. 配置模式下 `?` 还会提示当前 `[edit]` 层级下可 `set/delete` 的直接子节点。
 5. 命令缩写：无歧义前缀即合法（`sh vi` = `show virtual-machine-functions` 前缀匹配按树节点逐级消歧）。
 6. 候选列表渲染：每条一行、行首两空格；列宽取「最长候选 token 宽度 + 2 空格」与 24 的较大者。

@@ -155,7 +155,9 @@ func ConfigPathTree() *Node {
 
 		// —— interfaces / bonds（§2.3，FR-NET-003/004/017）——
 		K("interfaces", "物理网卡",
-			P("<ifname>", "接口名", DynVppIfnames,
+			// 候选 = 内核未接管 ∪ 配置已声明 ∪ VPP 运行态（决策 #302）：声明是接管流程的
+			// 第一步，首装在接管前也要能补全到内核网卡名。
+			P("<ifname>", "接口名", DynAllIfnames,
 				K("description", "描述", V("string", "文本")),
 				K("disable", "禁用接口"),
 				K("mtu", "MTU", V("uint", "字节数")),

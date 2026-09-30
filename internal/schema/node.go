@@ -63,12 +63,16 @@ func (c Class) String() string {
 
 // 动态候选来源（§5.3：实时向 nfvisd 查询，失败退化为仅关键字）。
 //
-// 接口名一族分三种来源（决策 #83）——它们**不是**同一个清单：
+// 接口名一族分来源（决策 #83 起，#302 增第四种）——它们**不是**同一个清单：
 //   - DynVppIfnames：VPP 里的接口（= 已被 DPDK 接管的数据面端口）。已接管的口在内核中
-//     已无 netdev，故**只能**从 VPP 侧枚举；`set interfaces <n>` 等必须用这个。
+//     已无 netdev，故**只能**从 VPP 侧枚举。
 //   - DynKernelIfnames：内核网卡（未被接管的物理口）。管理口 / bind-dpdk / SR-IOV PF 用它。
 //   - DynIfnames：两者并集，用于「动作混合、无法按位置区分」的节点
 //     （`request interfaces <n> enable|bind-dpdk|unbind-dpdk`）。
+//   - DynAllIfnames：内核未接管 ∪ 配置已声明 ∪ VPP 运行态（决策 #302）——
+//     `set interfaces <n>` 的声明位候选：首装（VPP 未接管、配置未声明）也能补全到
+//     内核网卡名（round81 F1）；声明名在「已绑定 + VPP 未起」等生命周期各态里
+//     可能暂时缺席另两份清单，故三源取并。
 //
 // 此前三者共用一个「已写进配置的接口名」来源：既漏掉未声明的 DPDK 口（内核里没有），
 // 又会列出根本不存在的名字（set 阶段不校验、commit 才失败）。
@@ -76,6 +80,7 @@ const (
 	DynIfnames       = "ifnames"        // 接口清单（VPP ∪ 内核；动作混合节点用）
 	DynVppIfnames    = "vpp-ifnames"    // VPP 接口（= 已被 DPDK 接管的数据面端口）
 	DynKernelIfnames = "kernel-ifnames" // 内核网卡（未被接管的物理口）
+	DynAllIfnames    = "all-ifnames"    // 内核未接管 ∪ 配置已声明 ∪ VPP 运行态（set interfaces 用，决策 #302）
 	DynVSwitches     = "vswitches"      // 虚拟交换机清单
 	DynVrfs          = "vrfs"           // VRF（L3 交换机）清单
 	DynVMs           = "vmnames"        // VM VNF 清单

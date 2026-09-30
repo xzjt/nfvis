@@ -2239,6 +2239,13 @@ components:
       properties:
         name: { type: string, example: "ens2f0" }
         kind: { type: string, enum: [physical, management, vpp-internal] }
+        taken_over:
+          type: boolean
+          description: |
+            数据面（VPP）是否已接管该口（决策 #302，首装接口可见性）。true = 该口已出现在
+            VPP 运行态；false = 内核侧网卡、VPP 未接管（首装 bind-dpdk 前的事实状态，此类口
+            也会出现在本清单，kind 仍为 physical）。VPP 运行态不可判定（未接入/查询失败）时
+            省略该字段——不编造。
         driver: { type: string, example: "ice-dpdk" }
         enabled: { type: boolean }
         link: { type: string, enum: [up, down] }

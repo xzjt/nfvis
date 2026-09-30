@@ -63,14 +63,14 @@
 | `show system tech-support` | 诊断归档清单 | `GET /system/tech-support` | ✅ |
 | `show system configuration sessions` | candidate 持锁会话列表（FR-CFG-009） | `GET /system/configuration/sessions` | ✅ |
 | `show configuration sessions` | **等价写法**（与上一条**同一实现**、输出逐字相同；本轮起多余 token 会报错，不再静默回配置正文） | 同上 | ✅（round80 真机复验：与上一条输出一致） |
-| `show interfaces` | 接口运行态清单：行 = 配置声明 ∪ VPP 运行态口，Admin/Link/Speed/Driver/计数全取运行态（决策 #155；仅声明未生效的行状态列 - 并标注，纯运行态口标注「未声明」） | `GET /interfaces` | ✅ |
+| `show interfaces` | 接口运行态清单：行 = 配置声明 ∪ VPP 运行态口 ∪ **内核未接管口**（决策 #302，收口 round81 F1：首装在接管前也能看见网卡；内核口在备注列标注「未接管」，不编造 VPP 侧事实），Admin/Link/Speed/Driver/计数全取运行态（决策 #155；仅声明未生效的行状态列 - 并标注，纯运行态口标注「未声明」） | `GET /interfaces` | ✅ |
 | `show interfaces physical` | **与上一条完全等价**（决策 #155：`physical` 选择器退役为等价写法；原「仅声明口聚合+空态提示」口径废止） | `GET /interfaces` | ✅ |
 | `show interfaces physical <ifname> detail` | 运行态单口视图（与裸写法同一实现，决策 #155） | 运行态（VPP） | ✅ |
 | `show interfaces physical <ifname> statistics` | 收发包/字节/错误/drop | VPP 运行态统计 | ✅ |
 | `show interfaces physical <ifname> sriov` | VF 列表与占用状态 | sysfs SR-IOV | ✅（无 PF/VF 时为空列表） |
 | `show interfaces management` | 管理口（内核侧，IP/链路） | 运行态（内核） | ✅ |
-| `show interfaces <ifname> detail` | **≡ `show interfaces physical <ifname> detail`（全形态等价、同一实现）**；回**运行态单口视图**——已声明与未声明但在 VPP 清单里的口（派生口 bvi0/vh-* 等）都答，候选 advertise 的名字必须答得上来（决策 #154/#155）；接口配置视图在配置模式 `edit interfaces <ifname>` + `show` | 运行态（VPP）；配置视图走配置模式层级 show | ✅ |
-| `show interfaces <ifname> statistics` | 同上（等价写法） | VPP 运行态统计 | ✅（round80 逐条比对：两侧输出逐字相同） |
+| `show interfaces <ifname> detail` | **≡ `show interfaces physical <ifname> detail`（全形态等价、同一实现）**；回**运行态单口视图**——已声明与未声明但在 VPP 清单里的口（派生口 bvi0/vh-* 等）都答，候选 advertise 的名字必须答得上来（决策 #154/#155）；内核侧未接管的物理口回**内核事实视图**（驱动/MAC/速率/Admin/Link/MTU 取 sysfs，注明「未被 VPP 接管」；决策 #302）；接口配置视图在配置模式 `edit interfaces <ifname>` + `show` | 运行态（VPP）；内核口取 sysfs；配置视图走配置模式层级 show | ✅ |
+| `show interfaces <ifname> statistics` | 同上（等价写法）；未接管口如实说明无数据面统计（决策 #302） | VPP 运行态统计 | ✅（round80 逐条比对：两侧输出逐字相同） |
 | `show interfaces <ifname> sriov` | 同上（等价写法） | sysfs SR-IOV | ✅ |
 | `show virtual-switches` | 全部虚拟交换机摘要 | `GET /virtual-switches` | ✅ |
 | `show virtual-switches <name> detail` | 类型/成员端口/VLAN/VRF | `GET /virtual-switches/{name}` | ✅ |
@@ -278,7 +278,7 @@
 
 | 命令 | 说明 | 落点 | 实测 |
 |---|---|---|---|
-| `set interfaces <ifname> description <s>` | 描述（`<ifname>` 的 Tab 候选 = **VPP 中的接口**，即已被 DPDK 接管的口；决策 #83） | 配置库 | ✅ |
+| `set interfaces <ifname> description <s>` | 描述（`<ifname>` 的 Tab 候选 = **内核未接管 ∪ 配置已声明 ∪ VPP 运行态**（决策 #302：首装在接管前也能补全到内核网卡名）；此前只取 VPP 中的接口，决策 #83） | 配置库 | ✅ |
 | `set interfaces <ifname> disable` | 禁用接口 | VPP | ✅ |
 | `set interfaces <ifname> mtu <n>` | MTU | VPP | ✅ |
 | `set interfaces <ifname> sriov vf-count <n>` | 创建/回收 VF（FR-NET-004） | sysfs `sriov_numvfs` | ⊘ 无 PF/VF 时 commit 明确报错（不再静默无效，决策 #70） |

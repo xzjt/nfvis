@@ -38,6 +38,80 @@ func TestKernelIfnamesOnlyPhysical(t *testing.T) {
 	}
 }
 
+// 决策 #302：内核侧事实逐文件读 sysfs——驱动/MAC/速率/状态/MTU；读不到或解析不了的
+// 字段保持零值（上层「取不到就不给」，不编造）。lo 一类无 device 的虚拟口进不到清单。
+func TestKernelIfFactsReadSysfs(t *testing.T) {
+	root := t.TempDir()
+	mk := func(name string, files map[string]string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, name, "device"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range files {
+			if err := os.WriteFile(filepath.Join(root, name, k), []byte(v), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	mkVirtual := func(name string, files map[string]string) { // 无 device 的虚拟接口
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range files {
+			if err := os.WriteFile(filepath.Join(root, name, k), []byte(v), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// ens160：全量事实（driver 是 device/ 下的符号链接，与真机 sysfs 同构）
+	mk("ens160", map[string]string{
+		"operstate": "up\n", "flags": "0x1003\n", "speed": "10000\n",
+		"address": "00:50:56:aa:bb:cc\n", "mtu": "1500\n",
+	})
+	if err := os.Symlink("../../vmxnet3", filepath.Join(root, "ens160", "device", "driver")); err != nil {
+		t.Fatal(err)
+	}
+	// ens224：operstate unknown（LinkKnown=false）、口未连 speed=-1（取不到）、无 driver 链接
+	mk("ens224", map[string]string{
+		"operstate": "unknown\n", "flags": "0x1002\n", "speed": "-1\n",
+		"address": "00:11:22:33:44:55\n",
+	})
+	// lo：无 device —— 物理口判断过滤掉
+	mkVirtual("lo", map[string]string{"operstate": "unknown\n"})
+
+	old := sysfsNetRoot
+	sysfsNetRoot = root
+	t.Cleanup(func() { sysfsNetRoot = old })
+
+	got, err := (&L2Network{}).KernelIfFacts()
+	if err != nil {
+		t.Fatalf("KernelIfFacts: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("应只含两个物理口（lo 无 device 被过滤）: %+v", got)
+	}
+	byName := map[string]KernelIfFacts{}
+	for _, f := range got {
+		byName[f.Name] = f
+	}
+	f := byName["ens160"]
+	if !f.AdminUp || !f.LinkUp || !f.LinkKnown || f.SpeedMbps != 10000 ||
+		f.MAC != "00:50:56:aa:bb:cc" || f.Driver != "vmxnet3" || f.MTU != 1500 {
+		t.Fatalf("ens160 事实不符: %+v", f)
+	}
+	g := byName["ens224"]
+	if g.LinkKnown || g.AdminUp {
+		t.Fatalf("operstate unknown / flags 无 IFF_UP 位时不可判定: %+v", g)
+	}
+	if g.SpeedMbps != 0 || g.Driver != "" {
+		t.Fatalf("speed 异常值应取不到、无 driver 链接应为空（不编造）: %+v", g)
+	}
+	if g.MAC != "00:11:22:33:44:55" || g.Name != "ens224" {
+		t.Fatalf("ens224 名字与 MAC 应照实读出: %+v", g)
+	}
+}
+
 // VPP 侧：取 VPP 接口名，去重排序，剔除 VPP 内置 loopback（不是物理口）。
 func TestVPPIfnamesSkipsLoopbackAndSorts(t *testing.T) {
 	f := newFakeL2()
