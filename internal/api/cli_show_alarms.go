@@ -30,8 +30,14 @@ func (x *cliExecutor) execShowAlarms(args []string) string {
 	fmt.Fprintf(&b, "%-10s %-10s %-22s %-20s %s\n", "Severity", "Code", "Source", "Raised", "Message")
 	for _, r := range rows {
 		items = append(items, anyToTree(r))
-		fmt.Fprintf(&b, "%-10s %-10s %-22s %-20s %s\n", r.Severity, r.Code, r.Source,
-			r.RaisedAt.Format("2006-01-02 15:04:05"), r.Message)
+		// NFR-006：记录该告警时宿主时钟**未与 NTP 同步**则带标记（时间可能不准）。
+		// nil 表示**没有这个信息**（未知），不加标记、也不谎称已同步——与 show log audit 同款。
+		mark := ""
+		if r.TimeSynced != nil && !*r.TimeSynced {
+			mark = "  [时钟未同步]"
+		}
+		fmt.Fprintf(&b, "%-10s %-10s %-22s %-20s %s%s\n", r.Severity, r.Code, r.Source,
+			r.RaisedAt.Format("2006-01-02 15:04:05"), r.Message, mark)
 	}
 	x.structured = map[string]any{"alarms": items}
 	return b.String()

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xzjt/nfvis/internal/clocksync"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
 )
@@ -482,6 +483,7 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 			"警告: L3 交换机 %s 的表被 NAT 使用过：VPP 不释放该引用，表要到 request vpp restart "+
 				"后才从数据面移除（在此之前该表仍留在数据面，已记告警）", name))
 	}
+	res.Warnings = append(res.Warnings, crossConnectPortWarnings(newCfg)...)
 	res.Warnings = append(res.Warnings, e.numaWarnings(committed, newCfg)...)
 
 	// FR-CFG-011⑤：镜像检查需要 committed 之后的候选配置
@@ -840,7 +842,30 @@ func (e *Engine) checkImages(cfg *model.Config) []model.ValidateError {
 	return errs
 }
 
-// numaWarnings FR-CFG-011⑩：vNIC 物理 NIC 与 VM 内存 NUMA 不一致时给性能警告。
+// crossConnectPortWarnings 报出「cross-connect 交换机端口数不足（<2）」的提交提示。
+//
+// 点对点直通必须两端，applier 在 `cross_connect=true` 且端口数 <2 时**有意什么都不挂载**
+// （internal/orchestrator/network/l2.go 的 desiredMembers 返回空集合，随后的 takeStale
+// 还会摘除旧成员）——这是**合法无操作**（既有 TestL2CrossConnectDetach 把「缩减到 1 端口」
+// 判为合法），但提交照常成功、操作者看不到任何提示（round84 真机登记 R84-18）。
+// 触发路径是「先建两点直通、再删掉一个端口」（或 load/恢复收敛回灌一份这种配置），
+// 不是 `set … cross-connect <a> <b>`（决策 #79⑤ 已要求恰两个已声明端口，不足即报错）。
+// 故在提交期把「本次提交不会建立直通」如实说清（决策 #308），不改合法性、不阻断提交。
+// 端口数正常（≥2）的 cross-connect 交换机不提示；>2 由别名校验与 applier 明确报错覆盖。
+func crossConnectPortWarnings(cfg model.Config) []string {
+	var out []string
+	for _, vs := range cfg.VirtualSwitches {
+		if !vs.CrossConnect || len(vs.Ports) >= 2 {
+			continue
+		}
+		out = append(out, fmt.Sprintf(
+			"警告: cross-connect 交换机 %s 当前只有 %d 个端口：二层直通需恰好两个端口，"+
+				"本次提交不会建立直通（配置保留、不报错）；请补足端口或改用普通 L2 转发",
+			vs.Name, len(vs.Ports)))
+	}
+	return out
+}
+
 // deletedNatRefVRFs 本次提交删掉的、**旧配置里被 NAT 用作转发域**的 L3 交换机名（按旧声明序）。
 //
 // NAT 只作用于 L3 交换机（规格书 §4.3），其转发域有两处来源（决策 #52）：规则的
@@ -880,6 +905,7 @@ func deletedNatRefVRFs(old, new model.Config) []string {
 	return out
 }
 
+// numaWarnings FR-CFG-011⑩：vNIC 物理 NIC 与 VM 内存 NUMA 不一致时给性能警告。
 func (e *Engine) numaWarnings(old, new model.Config) []string {
 	if e.topology == nil {
 		return nil
@@ -1031,12 +1057,10 @@ func (e *Engine) AuditTrail(limit, offset int) ([]AuditEntry, error) {
 }
 
 // appendAudit 统一写审计：补上**时钟是否已同步**的标记（NFR-006）。
-// 所有审计写入都必须经此，避免个别路径漏标。
+// 所有审计写入都必须经此，避免个别路径漏标。三态口径与告警侧共用 clocksync.Mark
+// （单一事实源：探针为 nil ⇒ 未知，不谎称已同步）。
 func (e *Engine) appendAudit(a AuditEntry) {
-	if e.timeSynced != nil {
-		synced := e.timeSynced()
-		a.TimeSynced = &synced
-	}
+	a.TimeSynced = clocksync.Mark(e.timeSynced)
 	e.store.AppendAudit(a)
 }
 

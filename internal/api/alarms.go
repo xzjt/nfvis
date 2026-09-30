@@ -19,6 +19,9 @@ type AlarmRow struct {
 	RaisedAt   time.Time  `json:"raised_at"`
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
 	State      string     `json:"state"`
+	// TimeSynced NFR-006：记录该告警时宿主时钟是否已同步（true/false）；nil = 未知
+	// （探针未接入），据 omitempty 省略——与审计 AuditEntry.time_synced 同口径。
+	TimeSynced *bool `json:"time_synced,omitempty"`
 }
 
 // AlarmRuntime 告警表读取能力（编排器装配注入；nil = 503）。

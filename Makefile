@@ -129,7 +129,7 @@ deb:
 	install -m 0755 deploy/debian/postinst build/deb/DEBIAN/postinst
 	install -m 0755 deploy/debian/prerm build/deb/DEBIAN/prerm
 	install -m 0755 deploy/debian/postrm build/deb/DEBIAN/postrm
-	printf 'Package: nfvis\nVersion: %s\nSection: net\nPriority: optional\nArchitecture: %s\nMaintainer: NFViS <nfvis@example.invalid>\nDepends: libc6\nRecommends: vpp, libvirt-daemon-system, docker.io\nDescription: NFViS NFV infrastructure appliance (nfvisd + nfvis-cli)\n JunOS-style CLI + REST API for VPP/KVM/Docker NFV orchestration.\n' "$(VERSION)" "$(ARCH)" > build/deb/DEBIAN/control
+	printf 'Package: nfvis\nVersion: %s\nSection: net\nPriority: optional\nArchitecture: %s\nMaintainer: NFViS <nfvis@example.invalid>\nDepends: libc6\nRecommends: vpp, libvirt-daemon-system, docker.io, qemu-utils, cloud-image-utils\nDescription: NFViS NFV infrastructure appliance (nfvisd + nfvis-cli)\n JunOS-style CLI + REST API for VPP/KVM/Docker NFV orchestration.\n' "$(VERSION)" "$(ARCH)" > build/deb/DEBIAN/control
 	install -d build/deb/usr/share/doc/nfvis
 	printf 'nfvis %s\n' "$(VERSION)" > build/deb/usr/share/doc/nfvis/version
 	# 归一化暂存树 mtime：`-depth` 让子项先于父目录被 touch（touch 子项会改父目录 mtime，
