@@ -197,6 +197,9 @@ func run() error {
 	}
 	// M3-8：恢复收敛的不可收敛项落点（GET /alarms）
 	alarms := network.NewAlarmStore()
+	// NFR-006：告警也带「记录时时钟是否已同步」三态标记，探针与审计侧取同一个
+	// system.ClockSynced（单源），未注入即未知（决策 #307）。
+	alarms.SetClockProbe(system.ClockSynced)
 	netProvider.SetAlarms(alarms)
 	// M5-1：事件总线（FR-API-006 / FR-OPS-020~022）。所有事件源经此汇聚，
 	// 由 GET /events（SSE）推送；告警变更同时进入总线。
@@ -1091,7 +1094,7 @@ func (c *alarmController) List(state string) []api.AlarmRow {
 	for _, a := range rows {
 		out = append(out, api.AlarmRow{ID: a.ID, Severity: a.Severity, Code: a.Code,
 			Message: a.Message, Source: a.Source, RaisedAt: a.RaisedAt,
-			ResolvedAt: a.ResolvedAt, State: a.State})
+			ResolvedAt: a.ResolvedAt, State: a.State, TimeSynced: a.TimeSynced})
 	}
 	return out
 }

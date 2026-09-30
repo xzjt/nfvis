@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xzjt/nfvis/internal/clocksync"
 	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
@@ -56,6 +57,10 @@ type Alarm struct {
 	RaisedAt   time.Time  `json:"raised_at"`
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
 	State      string     `json:"state"`
+	// TimeSynced 记录该告警（创建/重新激活）时宿主时钟是否已与 NTP 同步（NFR-006，
+	// 三态：true 已同步 / false 未同步 / nil 未知）。与审计记录同一套语义，由
+	// clocksync.Mark 单一事实源计算——探针未接入时为 nil，**不谎称已同步**。
+	TimeSynced *bool `json:"time_synced,omitempty"`
 }
 
 // AlarmStore 进程内告警表（并发安全）。
@@ -66,6 +71,15 @@ type AlarmStore struct {
 
 	now    func() time.Time // 注入时钟（测试确定性）
 	notify func(Alarm)      // 变更通知（M5-1 事件总线；锁内调用须快速返回）
+	clock  func() bool      // 时钟同步探针（NFR-006；未注入 ⇒ 标记为未知）
+}
+
+// SetClockProbe 注入「宿主时钟是否已同步」探针（NFR-006，与审计侧同一 system.ClockSynced）。
+// 告警创建或重新激活时按**同一时刻的事实**打三态标记；未注入时保持 nil（未知，不谎称已同步）。
+func (s *AlarmStore) SetClockProbe(probe func() bool) {
+	s.mu.Lock()
+	s.clock = probe
+	s.mu.Unlock()
 }
 
 // SetNotifier 注入告警变更通知（新增/重新激活时 state=active，消警时 state=resolved）。
@@ -101,6 +115,8 @@ func (s *AlarmStore) Raise(scope, severity, code, message, source string) {
 		a.Severity, a.Message = severity, message
 		if wasResolved {
 			a.State, a.ResolvedAt, a.RaisedAt = AlarmActive, nil, s.now()
+			// 重新激活刷新了 RaisedAt，故按**当时**的探针事实重打标，不沿用旧值（NFR-006）。
+			a.TimeSynced = clocksync.Mark(s.clock)
 			s.emitLocked(a)
 		}
 		return
@@ -109,6 +125,7 @@ func (s *AlarmStore) Raise(scope, severity, code, message, source string) {
 	a := &Alarm{
 		ID: fmt.Sprintf("alm-%05d", s.seq), Severity: severity, Code: code,
 		Message: message, Source: source, RaisedAt: s.now(), State: AlarmActive,
+		TimeSynced: clocksync.Mark(s.clock),
 	}
 	s.byKey[k] = a
 	s.emitLocked(a)
@@ -141,6 +158,7 @@ func (s *AlarmStore) Sync(scope string, failures []Alarm) {
 			a.Severity, a.Message = f.Severity, f.Message
 			if a.State == AlarmResolved {
 				a.State, a.ResolvedAt, a.RaisedAt = AlarmActive, nil, s.now()
+				a.TimeSynced = clocksync.Mark(s.clock) // 与 Raise 同口径：重新激活即重打标
 				s.emitLocked(a)
 			}
 			continue
@@ -149,6 +167,7 @@ func (s *AlarmStore) Sync(scope string, failures []Alarm) {
 		al := &Alarm{
 			ID: fmt.Sprintf("alm-%05d", s.seq), Severity: f.Severity, Code: f.Code,
 			Message: f.Message, Source: f.Source, RaisedAt: s.now(), State: AlarmActive,
+			TimeSynced: clocksync.Mark(s.clock),
 		}
 		s.byKey[k] = al
 		s.emitLocked(al)

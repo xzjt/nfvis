@@ -108,7 +108,7 @@
 | `show images` | 镜像仓库列表 | `GET /images` | ✅ |
 | `show images <name> detail` | 类型/大小/sha256/引用计数 | `GET /images/{name}` | ✅ |
 | `show resource-pools` | 大页池/隔离核：总量、已分配、空闲（含 vpp-reserved） | `GET /resource-pools` | ✅ |
-| `show alarms [active\|all]` | 告警列表 | `GET /alarms` | ✅ |
+| `show alarms [active\|all]` | 告警列表（未同步时消息后标 `[时钟未同步]`） | `GET /alarms` | ✅ |
 | `show log system [level <lvl>] [last <n>]` | 系统日志 | 服务端日志文件 | ✅ |
 | `show log audit [last <n>]` | 审计日志 | `GET /audit-logs` | ✅ |
 | `show log vnf <name> [last <n>]` | VNF 控制台/事件日志 | 运行态 | ✅ |

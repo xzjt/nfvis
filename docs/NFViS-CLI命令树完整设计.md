@@ -122,7 +122,7 @@ show images                                         # 镜像仓库列表（GET /
 show images <name> detail                           # 元数据：类型/大小/sha256/引用计数
 show resource-pools                                 # 大页池/隔离核：总量、已分配、空闲（GET /resource-pools）
 
-show alarms [active|all]                            # GET /alarms
+show alarms [active|all]                            # GET /alarms；未同步时消息后标 [时钟未同步]（NFR-006）
 show log
   ├─ system [level <debug|info|warn|error>] [last <n>]
   ├─ audit [last <n>]                               # GET /audit-logs；
