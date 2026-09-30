@@ -1,0 +1,38 @@
+NFViS v2 真机验证记录 round93 —— 决策 #306/#307/#308（小型缺陷清偿批）+ 四套件
+====================================================================
+日期：2026-09-30
+环境：nfvis-vm（SSH key）；本轮构建 2.0.0~dev6（v2 线，PR #240 合并后）；升级前 2.0.0~dev5
+源码：git archive v2（46e313b）；SOURCE_DATE_EPOCH=1790771429
+
+§1 决策 #306 deb Recommends 补 VM 运行时依赖（真机确认）
+`dpkg-deb -f build/nfvis_2.0.0~dev6_amd64.deb Recommends` →
+  `vpp, libvirt-daemon-system, docker.io, qemu-utils, cloud-image-utils` ✓（新增两项在位）
+（离线安装器本就显式含这两包、不吃 Recommends——实现侧已核查，故无需改动）
+
+§2 决策 #307 告警侧 `time_synced` 三态（真机确认一态）
+制造告警（VNF 的 vNIC 随其交换机被删而 link down）→ 得到 `VNF_PORT_DOWN`：
+- REST `GET /alarms`：`[{"code":"VNF_PORT_DOWN","time_synced":true}]` ✓ 字段真的发得出来
+- CLI `show alarms`：表格行正常渲染（时钟已同步故无 `[时钟未同步]` 标记——标记只在 false 时出现）
+- 如实登记：**未同步态（false + 标记）本轮未在真机走**（需停 NTP 再触发），该路径由单测以探针注入覆盖；
+  真机补做建议：`timedatectl set-ntp false` → 触发任一告警 → 核字段与标记 → 恢复
+
+§3 决策 #308 cross-connect 端口数不足「如实报告」（真机确认）
+- 按正确语法建两点直通（`ports <seq> interface <ifname>` ×2 + `cross-connect 1 2`），再删掉一个端口的
+  那次提交，输出正是新增的如实警告：
+  「警告: cross-connect 交换机 vs-xc 当前只有 1 个端口：二层直通需恰好两个端口，**本次提交不会建立直通
+  （配置保留、不报错）**；请补足端口或改用普通 L2 转发」✓ —— 静默无操作已消除，且既有合法性判定未改
+- 走查中发现的两处产品守卫行为（都正确，作为正向证据记录）：
+  ① `cross-connect` 引用未声明的端口 → 明确拒绝并给出前置语句（`set virtual-switches <vs> ports <seq> interface <ifname>`）；
+  ② 端口取值为字符串（而非序号）→ 「语句无法落到配置模型」并指路 `?` 候选
+- 如实登记：本轮 ad-hoc 探针里两点直通的**建立侧**未见 `vppctl show l2xconnect` 出现对端
+  （怀疑与其中一口在配置里 `disable` 有关）；建立侧的覆盖在生命周期套件（L1-x，本轮 22/0/3 通过）
+
+§4 四套件（2.0.0~dev6）
+- cli-fulltest：**198 通过 / 0 失败 / 11 预期报错** —— 与 round91/92 一致
+- cli-semantic-check：12 / 0 / 1 —— 与基线一致
+- cli-lifecycle-check：22 / 0 / 3（清场 + 对照现场口径）
+- cli-pty-smoke：10 / 10
+结论：零失败。
+
+§5 现场终态
+sw=0 / vmf=0 / ct=0 / 告警 0（已 clear）/ 会话 1；VPP 持有 ens192/ens224；版本 nfvis 2.0.0~dev6
