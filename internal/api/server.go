@@ -186,6 +186,9 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("POST "+APIPrefix+"/configuration/check", cfgAPI(s.handleCheck))
 	mux.Handle("POST "+APIPrefix+"/configuration/rollback/{n}", cfgAPI(s.handleRollback))
 	mux.Handle("GET "+APIPrefix+"/system/configuration/sessions", cfgAPI(s.handleSessions))
+	// 决策 #304：某 class 的生效权限视图（等价 CLI show configuration permissions <class>）。
+	// R 类；边界（非 super 查他人 403、未知 class 404）单源落在 handler 调用的同一实现处。
+	mux.Handle("GET "+APIPrefix+"/configuration/permissions", s.auth(s.handleGetPermissions, schema.ClassReadOnly, "show configuration permissions"))
 
 	// CLI 执行通道（cli_bridge）：逐命令权限在执行器内按 schema 节点判定
 	mux.Handle("POST "+APIPrefix+"/cli/execute", s.auth(s.handleCLIExecute, schema.ClassReadOnly, "cli"))

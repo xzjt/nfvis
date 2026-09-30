@@ -464,6 +464,62 @@
         },
         "type": "object"
       },
+      "ClassPermissions": {
+        "description": "某 login class 的**生效权限视图**（等价 CLI `show configuration permissions <class>`，\n决策 #304）：把该 class 在 CLI 命令树上的有效判定逐路径算出来。判定与 CLI 同一实现\n（`internal/aaa`，与运行期授权同一套函数），响应只是同一份事实的 JSON 形态。\n",
+        "properties": {
+          "allow_rules": {
+            "description": "自定义 class 的 allow 路径前缀（预置 class 为空数组）",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "allowed_count": {
+            "description": "允许的命令路径条数",
+            "type": "integer"
+          },
+          "allowed_paths": {
+            "description": "允许的命令路径（与 CLI 视图同一枚举与判定；按命令树顺序）",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "class": {
+            "description": "目标 class 名",
+            "type": "string"
+          },
+          "denied_count": {
+            "description": "拒绝的命令路径条数",
+            "type": "integer"
+          },
+          "deny_rules": {
+            "description": "自定义 class 的 deny 路径前缀（预置 class 为空数组）",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "source": {
+            "description": "预置三档（super-user/operator/read-only）或自定义 class",
+            "enum": [
+              "preset",
+              "custom"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "class",
+          "source",
+          "allowed_count",
+          "denied_count",
+          "allowed_paths",
+          "allow_rules",
+          "deny_rules"
+        ],
+        "type": "object"
+      },
       "CommitResult": {
         "properties": {
           "committed": {
@@ -3282,6 +3338,47 @@
           }
         },
         "summary": "配置提交历史（rev/时间/用户/注释，最新在前）",
+        "tags": [
+          "configuration"
+        ]
+      }
+    },
+    "/configuration/permissions": {
+      "get": {
+        "description": "把该 class 在 CLI 命令树上的有效判定**逐路径**算出来（决策 #304）：预置三档按 §4 权限矩阵的\n节点等级，自定义 class 按 allow/deny 路径前缀（deny 优先、allow 放行、其余默认拒绝）。\n判定与 CLI **同一实现单源**（`internal/aaa`，与运行期授权同一套函数）。\n权限：R 类；`class` 缺省 = 调用者自己的 class；非 super-user 查他人 class 返回 403\n（不泄露他人 class 的规则细节）；未知 class 名返回 404。\n",
+        "parameters": [
+          {
+            "description": "目标 class 名（缺省 = 调用者自己的 class）",
+            "in": "query",
+            "name": "class",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClassPermissions"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        },
+        "summary": "某 login class 的生效权限视图（等价 CLI show configuration permissions <class>）",
         "tags": [
           "configuration"
         ]

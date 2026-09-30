@@ -113,6 +113,7 @@ type cliExecutor struct {
 	events     *events.Bus                 // 事件总线（M5-1；nil = 不发布）
 	versions   VersionsRuntime             // 组件版本探测（R37-2 收口，决策 #118；nil = show version 只印 NFViS）
 	tokens     tokenAdmin                  // 活动会话清单/逐 token 吊销（决策 #301；nil = 命令报未接入）
+	perms      permissionResolver          // 生效权限视图的 class 解析（决策 #304；nil = 命令报未接入）
 	mu         sync.Mutex
 	sess       map[string]*cliSession
 	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
@@ -126,6 +127,10 @@ type cliExecutor struct {
 	// 随 CLIEResult.Warning 回传前端——脚本模式据此继续执行，而不是猜输出文本前缀。
 	// 单命令执行期内有效（Execute 起始复位，与 consolePending 同法）。
 	warningPending bool
+	// displaySetOverride 本次命令的 `| display set` 专属文本（决策 #304）：预置 class 的
+	// 生效权限没有 allow/deny 路径表、结构化快照为空，故用一句说明替代「不支持 display set」
+	// 的通用报错。单命令执行期内有效（Execute 起始复位）。
+	displaySetOverride string
 	// callerTokenID 发起本条命令的会话稳定 ID（决策 #301；ExecuteAs 注入，Execute 起始复位）。
 	// 「是否当前会话」标记与「吊销自己的会话」提示都以此为判据；空串 = 调用方没有稳定 ID（不猜）。
 	callerTokenID string
@@ -146,11 +151,19 @@ func newCLIExecutor(e *config.Engine, a authorizer) *cliExecutor {
 	if ta, ok := a.(tokenAdmin); ok {
 		x.tokens = ta
 	}
+	// 决策 #304：同一 *aaa.Service 也提供生效权限视图的 class 解析——判定单源在 aaa，
+	// 执行器只做枚举 + 判定 + 渲染。
+	if pr, ok := a.(permissionResolver); ok {
+		x.perms = pr
+	}
 	return x
 }
 
 // setTokenAdmin 显式注入活动会话管理能力（测试可注入假源；装配路径走 newCLIExecutor 的同源断言）。
 func (x *cliExecutor) setTokenAdmin(ta tokenAdmin) { x.tokens = ta }
+
+// setPermissionResolver 显式注入生效权限视图的 class 解析（决策 #304；测试可注入假源）。
+func (x *cliExecutor) setPermissionResolver(pr permissionResolver) { x.perms = pr }
 
 // setRuntime 注入诊断与运行态数据源（M3-9；Server.New 装配，测试可省略）。
 // setEventBus 注入事件总线（M5-1）：CLI 直连运行态的动作不经 HTTP handler，
@@ -263,6 +276,7 @@ func (x *cliExecutor) ExecuteAs(user, class, source, tokenID, line string) CLIER
 	x.structuredPath = nil
 	x.consolePending = nil
 	x.warningPending = false
+	x.displaySetOverride = ""
 	x.callerTokenID = tokenID
 	var out string
 	if perr != nil {
@@ -487,21 +501,13 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 				}
 				// 落到下面的配置渲染（取候选）
 			case "permissions":
-				// `permissions <class>`：契约 §1.1 声明「按 class 视角显示」，但**语义没有权威定义**：
-				// §3「配置显示语义」对照表里没有这一行，产品也没有按 class 渲染配置的机制——
-				// 脱敏按**敏感字段**（口令哈希，与 class 无关），class 只决定**命令节点**能不能执行。
-				// 因此本轮**不发明**一种「class 视角」渲染（那会是 lossy 且无从校验的假承诺，
-				// 同 §3 里 `| display set` 的处理），而是**明说未实现**：此前它静默回 committed 正文，
-				// 操作者会以为拿到的是「read-only 视角的那份配置」——最忌讳的一类静默误答。
-				// 需要看配置正文时用 `show configuration`（省略子命令 = 读 committed，语义不变）。
-				if len(t) > 3 {
-					return invalidShowConfiguration(t[1:])
-				}
-				if len(t) == 2 {
-					return "%% 语法: show configuration permissions <class>\n"
-				}
-				return fmt.Sprintf("%% show configuration permissions %s：按 class 视角显示暂未实现"+
-					"（committed 原样配置见 show configuration）\n", t[2])
+				// `permissions <class> [detail]`：**该 class 的生效权限视图**（决策 #304）——
+				// 把该 class 在命令树上的有效判定逐路径算出来。判定单源在 internal/aaa
+				// （与运行期授权同一实现），这里只枚举路径 + 调用判定 + 渲染（见
+				// permissions_view.go）。此前它是「明说未实现」的占位（决策 #153），
+				// 因「按 class 视角渲染配置」的语义从未定义；本决策给的是**权限视图**，
+				// 不渲染配置正文，与那一版语义不是一回事。
+				return x.showConfigurationPermissions(class, t[2:])
 			default:
 				return invalidShowConfiguration(t[1:])
 			}
@@ -576,7 +582,7 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 	if len(t) >= 2 && t[0] == "vpp" && t[1] == "capture" {
 		return x.execShowVppCapture() // M5-3：抓包会话状态与已导出 pcap 清单
 	}
-	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class>|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | port-mirroring | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions | system api tokens\n"
+	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class> [detail]|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | port-mirroring | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions | system api tokens\n"
 }
 
 // invalidShowConfiguration：`show configuration <未知/多余 token>` 的统一报错
@@ -584,8 +590,51 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 // 操作者以为「命令成功了、这就是我要的那份事实」。措辞与既有 `% 无效命令` 一致：
 // 给出可用的子命令，便于直接照着敲。
 func invalidShowConfiguration(rest []string) string {
-	return fmt.Sprintf("%% 无效命令: show configuration %s（可用：candidate|history|permissions <class>|sessions|compare rollback <n>）\n",
+	return fmt.Sprintf("%% 无效命令: show configuration %s（可用：candidate|history|permissions <class> [detail]|sessions|compare rollback <n>）\n",
 		strings.Join(rest, " "))
+}
+
+// showConfigurationPermissions `show configuration permissions <class> [detail]`（决策 #304）。
+// rest = [<class>] 或 [<class> detail]。判定与视图组装单源在 internal/aaa + permissions_view.go。
+//
+// 权限边界（R 类）：非 super-user 只能查**自己所属** class——其余一律拒绝且**不泄露**他人
+// class 的规则细节；未知 class 名明确报错。边界判定在解析之前做，避免非 super-user 借
+// 「未知 class」与否探测他人 class 是否存在。
+func (x *cliExecutor) showConfigurationPermissions(callerClass string, rest []string) string {
+	if len(rest) == 0 {
+		return "%% 语法: show configuration permissions <class> [detail]\n"
+	}
+	if len(rest) > 2 || (len(rest) == 2 && rest[1] != "detail") {
+		return invalidShowConfiguration(append([]string{"permissions"}, rest...))
+	}
+	name, detail := rest[0], len(rest) == 2
+	if callerClass != aaa.ClassSuperUser && name != callerClass {
+		return "%% 无权查看 class " + name + " 的生效权限（仅 super-user 可查任意 class；" +
+			"其他 class 只能查看自己所属的 class）\n"
+	}
+	if x.perms == nil {
+		return "%% 生效权限视图未接入\n"
+	}
+	def, ok := x.perms.ResolveClass(name)
+	if !ok {
+		return "%% 未知 class: " + name + "（可用：super-user/operator/read-only 或自定义 class 名）\n"
+	}
+	v, err := buildPermissionView(x.perms, name)
+	if err != nil {
+		return "%% " + err.Error() + "\n"
+	}
+	if def.Source == aaa.ClassSourceCustom {
+		// `| display set` 经既有反推机制输出等价 set 语句（决策 #155 单一实现）。
+		x.structured = permClassTree(def)
+		x.structuredPath = nil
+	} else {
+		// 预置 class 没有 allow/deny 路径表：display set 给出基等级说明（不编造语句）。
+		x.displaySetOverride = presetDisplaySetNote(name)
+	}
+	if detail {
+		return renderPermViewDetail(v)
+	}
+	return renderPermViewDefault(v)
 }
 
 // ---------- 「已知前缀但形态不合法」的语法指引 ----------

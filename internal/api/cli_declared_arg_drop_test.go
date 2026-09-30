@@ -6,7 +6,9 @@ package api
 //
 //	① `show lldp neighbors interface <ifname>`：过滤参数被 `execShowLldp` 丢掉（只透传
 //	   `lldp neighbors`），问「某个口的邻居」拿到的是全量邻居表。
-//	② `show configuration permissions <class>`：class 参数被忽略，直接渲染 committed 配置正文。
+//	② `show configuration permissions <class>`：class 参数被忽略，直接渲染 committed 配置正文
+//	   （原处置为「明说未实现」，决策 #153；后由决策 #304 落地为**生效权限视图**，本文件的
+//	   ② 组用例随之改为核对该视图的判定与权限边界）。
 //
 // 判据取「同一事实源对照」：过滤必须**真的改变结果**；未实现必须**明说**，不得静默换语义。
 //
@@ -215,12 +217,12 @@ func TestShowLldpNeighborsRuntimeErrorPropagates(t *testing.T) {
 	}
 }
 
-// ---------- ② show configuration permissions <class> ----------
+// ---------- ② show configuration permissions <class>（决策 #304：生效权限视图） ----------
 
-// TestShowConfigurationPermissionsNotImplemented：`permissions <class>` 的「按 class 视角」
-// 没有权威语义（契约 §3 对照表未定义、产品也没有按 class 渲染配置的机制），
-// 故三档 class **一律明说未实现**——不得静默渲染 committed 正文冒充「class 视角」。
-func TestShowConfigurationPermissionsNotImplemented(t *testing.T) {
+// TestShowConfigurationPermissionsView：`permissions <class>` 给出该 class 在命令树上的
+// 逐路径判定（默认列允许路径 + 汇总；detail 附判定依据），**不得回配置正文**。
+// 补全菜单的描述与执行器同源（不再写「未实现」）。
+func TestShowConfigurationPermissionsView(t *testing.T) {
 	x, _ := newCLIKit(t)
 	run(t, x, "admin", aaa.ClassSuperUser, "ssh",
 		"configure", "set system hostname perm-node", "commit", "exit",
@@ -229,62 +231,120 @@ func TestShowConfigurationPermissionsNotImplemented(t *testing.T) {
 		t.Fatalf("前置：committed 应含 perm-node: %q", body)
 	}
 
-	for _, class := range []string{aaa.ClassSuperUser, aaa.ClassOperator, aaa.ClassReadOnly} {
-		class := class
-		t.Run(class, func(t *testing.T) {
-			out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration permissions "+class).Output
-			if !strings.Contains(out, "未实现") {
-				t.Fatalf("应明确提示未实现: %q", out)
-			}
-			if !strings.HasPrefix(out, "%") {
-				t.Fatalf("未实现应带 %% 前缀（与既有提示同族）: %q", out)
-			}
-			if !strings.Contains(out, class) {
-				t.Fatalf("应回显所问的 class（证明参数没被丢）: %q", out)
-			}
-			if strings.Contains(out, "perm-node") {
-				t.Fatalf("不得静默回 committed 配置正文: %q", out)
-			}
-			if strings.Contains(out, "无效命令") {
-				t.Fatalf("命令形式是合法的（只是未实现），不该判「无效命令」: %q", out)
-			}
-		})
+	// read-only：show 族允许、configure 拒绝
+	ro := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration permissions read-only").Output
+	if strings.HasPrefix(ro, "%%") {
+		t.Fatalf("super-user 查 read-only 不应报错: %q", ro)
+	}
+	if !strings.Contains(ro, "show version") {
+		t.Fatalf("read-only 的默认视图应列出允许路径 show version: %q", ro)
+	}
+	if !strings.Contains(ro, "允许") || !strings.Contains(ro, "拒绝") {
+		t.Fatalf("应有允许/拒绝汇总: %q", ro)
+	}
+	if strings.Contains(ro, "perm-node") {
+		t.Fatalf("生效权限视图不得回配置正文: %q", ro)
 	}
 
-	// 补全菜单（`?`）与执行器同源：描述里也必须如实标注未实现——
-	// 写着「按 class 视角显示」而执行器回「暂未实现」，同样是树 ⇄ 执行器不同源。
-	found := false
-	for _, cand := range schema.Candidates(schema.OperRoot(), []string{"show", "configuration"}, "", nil) {
-		if cand.Token != "permissions" {
-			continue
-		}
-		found = true
-		if !strings.Contains(cand.Desc, "未实现") {
-			t.Errorf("`show configuration ?` 的 permissions 描述应标注未实现，实得 %q", cand.Desc)
-		}
+	// detail：逐路径带判定依据
+	roD := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration permissions read-only detail").Output
+	if !strings.Contains(roD, "[允许] show version（预置等级满足）") {
+		t.Fatalf("read-only detail 应含「[允许] show version（预置等级满足）」: %q", roD)
 	}
-	if !found {
-		t.Fatalf("`show configuration ?` 候选里应有 permissions")
+	if !strings.Contains(roD, "[拒绝] configure（预置等级不足）") {
+		t.Fatalf("read-only detail 应含「[拒绝] configure（预置等级不足）」: %q", roD)
+	}
+	suD := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration permissions super-user detail").Output
+	if !strings.Contains(suD, "[允许] configure（预置等级满足）") {
+		t.Fatalf("super-user detail 应允许 configure: %q", suD)
+	}
+
+	// 补全菜单描述与执行器同源：不再写「未实现」
+	for _, cand := range schema.Candidates(schema.OperRoot(), []string{"show", "configuration"}, "", nil) {
+		if cand.Token == "permissions" && strings.Contains(cand.Desc, "未实现") {
+			t.Errorf("permissions 候选描述不应再写「未实现」: %q", cand.Desc)
+		}
 	}
 }
 
-// TestShowConfigurationPermissionsMissingClassSyntax：省略 <class> 是语法错误
-// （树里 `permissions` 的参数是必填的 `P("<class>")`），且同样不得回配置正文。
-func TestShowConfigurationPermissionsMissingClassSyntax(t *testing.T) {
+// TestShowConfigurationPermissionsBoundary：权限边界——非 super-user 只能查自己所属 class
+// （不泄露他人规则），未知 class 明确报错；多余 token 按无效命令报错。
+func TestShowConfigurationPermissionsBoundary(t *testing.T) {
+	x, _ := newCLIKit(t)
+	// read-only 查自己：可以
+	if out := x.Execute("admin", aaa.ClassReadOnly, "ssh", "show configuration permissions read-only").Output; strings.HasPrefix(out, "%%") {
+		t.Fatalf("read-only 查自己应可: %q", out)
+	}
+	// read-only 查他人：拒绝，且不泄露他人规则（不回允许路径）
+	out := x.Execute("admin", aaa.ClassReadOnly, "ssh", "show configuration permissions operator").Output
+	if !strings.HasPrefix(out, "%%") || !strings.Contains(out, "无权查看") {
+		t.Fatalf("read-only 查他人应拒绝: %q", out)
+	}
+	if strings.Contains(out, "show version") {
+		t.Fatalf("拒绝时不得泄露他人 class 的规则: %q", out)
+	}
+	// operator 查自己：可以
+	if out := x.Execute("admin", aaa.ClassOperator, "ssh", "show configuration permissions operator").Output; strings.HasPrefix(out, "%%") {
+		t.Fatalf("operator 查自己应可: %q", out)
+	}
+	// 未知 class（super-user）：明确报错
+	out = x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration permissions ghost").Output
+	if !strings.HasPrefix(out, "%%") || !strings.Contains(out, "未知 class") {
+		t.Fatalf("未知 class 应明确报错: %q", out)
+	}
+	// 多余 token：无效命令
+	out = x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration permissions read-only bogus").Output
+	if !strings.Contains(out, "无效命令") {
+		t.Fatalf("多余 token 应报无效命令: %q", out)
+	}
+	// 省略 <class>：语法提示
+	out = x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration permissions").Output
+	if !strings.Contains(out, "语法") {
+		t.Fatalf("缺 <class> 应报语法: %q", out)
+	}
+}
+
+// TestShowConfigurationPermissionsCustomClass：自定义 class 的 allow/deny（deny 优先）在视图中
+// 如实体现，且 `| display set` 输出等价 set 语句（经既有反推机制单一实现）。
+func TestShowConfigurationPermissionsCustomClass(t *testing.T) {
 	x, _ := newCLIKit(t)
 	run(t, x, "admin", aaa.ClassSuperUser, "ssh",
-		"configure", "set system hostname perm-node", "commit", "exit",
+		"configure",
+		`set system login class ops allow "show"`,
+		`set system login class ops deny "show configuration"`,
+		"commit", "exit",
 	)
-	out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration permissions").Output
-	if !strings.Contains(out, "语法") {
-		t.Fatalf("缺 <class> 应报语法并给用法: %q", out)
+
+	// 默认：allow 命中放行、deny 命中拒绝（deny 优先）；未列出的族默认拒绝
+	out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration permissions ops").Output
+	if strings.HasPrefix(out, "%%") {
+		t.Fatalf("查自定义 class 不应报错: %q", out)
 	}
-	if strings.Contains(out, "perm-node") {
-		t.Fatalf("不得回配置正文: %q", out)
+	if !strings.Contains(out, "自定义") || !strings.Contains(out, "show version") {
+		t.Fatalf("自定义 class 默认视图应列出 allow 命中路径: %q", out)
 	}
-	// 多余 token 仍按决策 #153 的「无效命令」口径（回归保护）
-	out = x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration permissions super-user bogus").Output
-	if !strings.Contains(out, "无效命令") || strings.Contains(out, "perm-node") {
-		t.Fatalf("多余 token 应报「无效命令」且不回配置正文: %q", out)
+	// detail：deny 优先于 allow
+	d := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration permissions ops detail").Output
+	if !strings.Contains(d, "[拒绝] show configuration（deny 前缀命中）") {
+		t.Fatalf("deny 应优先拒绝 show configuration: %q", d)
+	}
+	if !strings.Contains(d, "[允许] show version（allow 前缀命中）") {
+		t.Fatalf("allow 应放行 show version: %q", d)
+	}
+	if !strings.Contains(d, "[拒绝] request（默认拒绝）") {
+		t.Fatalf("未列出的路径应默认拒绝: %q", d)
+	}
+
+	// display set：等价 set 语句（自定义 class 有 allow/deny 路径表）
+	ds := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration permissions ops | display set").Output
+	if !strings.Contains(ds, "set system login class ops allow show") ||
+		!strings.Contains(ds, `set system login class ops deny`) {
+		t.Fatalf("自定义 class 的 display set 应输出等价 set 语句: %q", ds)
+	}
+
+	// 预置 class 的 display set：如实说明由等级判定、不编造语句
+	pd := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show configuration permissions read-only | display set").Output
+	if !strings.Contains(pd, "预置 class read-only") || strings.Contains(pd, "set system login class") {
+		t.Fatalf("预置 class 的 display set 应给基等级说明而非编造 set 语句: %q", pd)
 	}
 }

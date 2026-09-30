@@ -162,6 +162,12 @@ func (x *cliExecutor) applyPipes(text string, pipes []pipeSpec) string {
 		case "display-set":
 			// 决策 #155：配置（子）树 → set 语句。structured 必须是配置 JSON 树，
 			// structuredPath 为其在整配置中的绝对路径（配置模式层级 show 时非空）。
+			// 决策 #304：预置 class 的生效权限没有 allow/deny 路径表，结构化快照为空，
+			// 由 displaySetOverride 给出专属说明，而不是「不支持 display set」的通用报错。
+			if x.displaySetOverride != "" {
+				text = x.displaySetOverride
+				continue
+			}
 			tree, ok := x.structured.(map[string]any)
 			if !ok {
 				// 命令本身已报错时保留原错误（round81 真机实测：`show configuration /`

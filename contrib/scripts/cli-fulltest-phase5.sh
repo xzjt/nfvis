@@ -56,9 +56,10 @@ run S5 "show lldp neighbors interface ens224"
 run S5 "show log system level info last 5"
 run S5 "show log audit last 5"
 run S5 "show log vnf cli-vm last 5"
-# 按 class 视角显示**未实现**（契约 §1.1 该行已标注；语义无权威定义，见附录 A #153 处置）：
-# 命令现在**应当**明确报「暂未实现」，而不是静默返回 committed 配置正文——故走 expect_fail。
-expect_fail S5 "暂未实现" "show configuration permissions super-user"
+# 生效权限视图（决策 #304）：给出该 class 在命令树上的逐路径判定（默认/detail/管道三形态）。
+run S5 "show configuration permissions super-user"
+run S5 "show configuration permissions super-user detail"
+run S5 "show configuration permissions read-only | count"
 run S5 "show virtual-machine-functions cli-vm detail"
 run S5 "show virtual-machine-functions cli-vm interfaces"
 run S5 "show virtual-machine-functions cli-vm statistics"

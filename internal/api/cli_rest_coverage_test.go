@@ -125,6 +125,8 @@ var cliRESTCoverage = map[string]string{
 	"show configuration candidate":                     "GET /configuration/candidate",
 	"show configuration history":                       "GET /configuration/history",
 	"show configuration":                               "GET /configuration",
+	"show configuration permissions <class>":           "GET /configuration/permissions",
+	"show configuration permissions <class> detail":    "GET /configuration/permissions",
 	"show configuration compare rollback <n>":          "GET /configuration/diff + POST /configuration/rollback/{n}",
 	// ---- request 族 ----
 	"request virtual-machine-functions <n> start":             "POST /virtual-machine-functions/{name}:start",
@@ -222,12 +224,10 @@ var cliRESTExceptions = map[string]string{
 }
 
 // cliRESTGaps 已登记的 REST 缺口（CLI 有、REST 无）→ 理由/归属。补一个划掉一个。
-// 与 docs/CLI-REST覆盖核查.md §3 的 4 项一一对应；其中 `show configuration [permissions <class>]`
-// 是**整行计入缺口**的（《命令全表》该行实测列即标 ⚠️ 已知缺口：`permissions` 分支本轮改为明确提示
-// 未实现，裸写法 `show configuration` 仍由覆盖表的 `GET /configuration` 承载）。
+// 与 docs/CLI-REST覆盖核查.md §3 对应；v2 决策 #304 把 `show configuration permissions <class>`
+// 从缺口移入覆盖表（`GET /configuration/permissions`），当前只剩 `format-data` 一项（登记延期 V2）。
 var cliRESTGaps = map[string]string{
-	"request system storage format-data":     "V1 有意延期（破坏性；决策 #65：待数据分区定义），核查 #4",
-	"show configuration permissions <class>": "子形态无 REST 端点：class 视角语义从未定义，本轮改为明确提示未实现（附录 A #153 /《命令全表》§4⑧）；裸写法由 GET /configuration 承载，核查 #2",
+	"request system storage format-data": "V1 有意延期（破坏性；决策 #65：待数据分区定义），核查 #4",
 }
 
 // classify 返回命令的归属：A=覆盖（端点）、C=例外、B=缺口、""=未归类。

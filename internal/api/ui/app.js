@@ -30,6 +30,8 @@ const MAX_IFACE_DETAIL = 12;
 let token = sessionStorage.getItem(TOKEN_KEY) || '';
 // 当前登录用户名（接口来源的会话持有者记作 `用户@api`，配置页据此判断候选是不是本会话的）。
 let currentUser = '';
+// 当前登录账号的权限类（决策 #304：非 super-user 只看得到自己所属 class 的「生效权限」入口）。
+let currentClass = '';
 let pollTimer = null;
 let pollRoute = null;      // 当前路由（轮询节奏取它声明的 poll）
 let pollPath = '';         // 已武装的路由地址（同一页的重复渲染不重置计时器）
@@ -983,6 +985,67 @@ function usrClassSelect(id, names, selected) {
   return sel;
 }
 
+// 「生效权限」入口的解析口径（决策 #304）：非 super-user 只能查看**自己所属** class 的
+// 生效权限（服务端 403 兜底；界面只是不摆必被拒的按钮）。currentClass 在 enterApp 里从登录
+// 响应设置、signOut 清空。
+const USR_PERM_PREVIEW = 12;
+
+// usrPermLoad 就地展开某 class 的生效权限摘要：取 GET /configuration/permissions
+// （与命令行 show configuration permissions <class> 同一实现单源），显示允许/拒绝条数 +
+// 前若干条允许路径；完整列表与逐路径依据指向命令行 / 该 REST 端点。
+async function usrPermLoad(name) {
+  const out = $('usr-perm-out');
+  if (!out) return;
+  out.hidden = false;
+  out.textContent = '读取中…';
+  try {
+    const d = await api('/configuration/permissions?class=' + encodeURIComponent(name));
+    const total = (d.allowed_count || 0) + (d.denied_count || 0);
+    const paths = Array.isArray(d.allowed_paths) ? d.allowed_paths : [];
+    const head = 'class ' + dash(d.class) + '（' + (d.source === 'custom' ? '自定义' : '预置') +
+      '）：允许 ' + (d.allowed_count || 0) + ' / 拒绝 ' + (d.denied_count || 0) +
+      '（共 ' + total + ' 条命令路径）';
+    const shown = paths.slice(0, USR_PERM_PREVIEW).map((p) => '  ' + p);
+    const more = paths.length > shown.length
+      ? '\n  … 其余 ' + (paths.length - shown.length) + ' 条允许路径见命令行 show configuration permissions ' + d.class
+      : '';
+    out.textContent = head + '\n' + shown.join('\n') + more +
+      '\n（摘要：完整列表与逐路径判定依据见命令行 show configuration permissions ' + d.class +
+      ' detail，或 REST 端点 GET /configuration/permissions）';
+  } catch (e) {
+    out.textContent = '读取失败：' + apiErrText(e, '服务端未提供该接口，请在命令行执行 show configuration permissions ' + name);
+  }
+}
+
+// renderPermClassTable 权限类表：每行一个「生效权限」按钮（决策 #304）。
+// 非 super-user 只在自己所属 class 行给出入口（其余行如实说明，不摆必被拒的按钮）。
+function renderPermClassTable(classes) {
+  const tbody = $('usr-class-table').querySelector('tbody');
+  tbody.textContent = '';
+  if (!classes.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '4', class: 'muted', text: '（无自定义权限类）' }));
+    tbody.appendChild(tr);
+    return;
+  }
+  classes.forEach((c) => {
+    const tr = el('tr');
+    tr.appendChild(el('td', { text: String(dash(c.name)) }));
+    tr.appendChild(el('td', { text: String(dash(list(c.allow))) }));
+    tr.appendChild(el('td', { text: String(dash(list(c.deny))) }));
+    const cell = el('td', { class: 'actions' });
+    if (currentClass === 'super-user' || currentClass === c.name) {
+      const btn = el('button', { type: 'button', class: 'ghost small', text: '生效权限' });
+      btn.addEventListener('click', () => usrPermLoad(c.name));
+      cell.appendChild(btn);
+    } else {
+      cell.appendChild(el('span', { class: 'muted small', text: '仅自己所属的 class' }));
+    }
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
+  });
+}
+
 function renderUsers(lu) {
   const ok = lu && !lu.__err;
   const users = ok ? rowsOf(lu.users) : [];
@@ -1022,8 +1085,7 @@ function renderUsers(lu) {
     tbody.appendChild(tr);
   });
 
-  table($('usr-class-table').querySelector('tbody'), 3,
-    classes.map((c) => [c.name, list(c.allow), list(c.deny)]));
+  renderPermClassTable(classes);
 
   // 新建用户的 class 下拉（重画时按当前 class 列表重建）。
   const ns = $('usr-new-class');
@@ -3533,6 +3595,7 @@ async function enterApp(user) {
   $('main-view').hidden = false;
   $('global-error').hidden = true;
   currentUser = (user && user.name) || '';
+  currentClass = (user && user.class) || '';
   $('user-line').textContent = user ? user.name + '（' + user.class + '）' : '';
   applyRole(user);
   cfgSetEditing(false);
@@ -3558,6 +3621,7 @@ function signOut(msg) {
   token = '';
   events = [];
   currentUser = '';
+  currentClass = '';
   applyRole(null);
   cfg = { committed: null, editing: false };
   cfgSetEditing(false);

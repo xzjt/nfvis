@@ -237,9 +237,15 @@
       </table>
       <h3>权限类（class）</h3>
       <table id="usr-class-table">
-        <thead><tr><th>名称</th><th>允许</th><th>拒绝</th></tr></thead>
+        <thead><tr><th>名称</th><th>允许</th><th>拒绝</th><th>生效权限</th></tr></thead>
         <tbody></tbody>
       </table>
+      <p class="muted small">
+        「生效权限」把该 class 在命令树上逐路径的判定算出来（与命令行同一套授权判定）：
+        显示允许/拒绝条数与部分允许路径，完整列表见命令行 `show configuration permissions &lt;class&gt;`。
+        非 super-user 只能查看自己所属的 class。
+      </p>
+      <pre id="usr-perm-out" class="code console-out" hidden></pre>
       <h3>活动会话 / API Token <span id="usr-token-note" class="muted small"></span></h3>
       <p class="muted small">
         列出当前在线的 API 会话（命令行登录与控制台登录都在内）。会话只存在内存里，服务重启后自动清空；

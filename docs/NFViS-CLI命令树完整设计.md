@@ -129,11 +129,16 @@ show log
   │                                                 # 未同步记录带「[时钟未同步]」标记（NFR-006）
   └─ vnf <name> [last <n>]                          # VNF 控制台/事件日志
 show users                                          # 本地用户与 class
-show configuration [permissions <class>]            # 当前 committed 配置（下详 §3）
-                                                    #   ⚠️ `permissions <class>`（「按 class 视角显示」）**未实现**：
-                                                    #   语义在 §3 里没有定义（脱敏按敏感字段、class 只决定命令节点能否执行），
-                                                    #   故执行器回 `% …暂未实现（committed 原样配置见 show configuration）`
-                                                    #   ——**不再静默渲染 committed 正文**冒充「class 视角」（决策 #153 处置）
+show configuration [permissions <class> [detail]] # 省略子命令 = 当前 committed 配置（下详 §3）
+                                                    #   `permissions <class>` = **该 class 的生效权限视图**（决策 #304）：
+                                                    #   把该 class 在命令树上的有效判定逐路径算出来（判定单源在 aaa，
+                                                    #   与运行期授权同一实现）。默认按顶层命令族列出**允许路径**，
+                                                    #   末行汇总（class、来源、允许/拒绝条数）；`detail` 逐路径附判定依据。
+                                                    #   依据四类：预置等级满足 / allow 前缀命中 / deny 前缀命中 / 默认拒绝。
+                                                    #   `| display set`：自定义 class 输出等价 `set system login class …` 语句；
+                                                    #   预置 class 由等级判定、无路径表，如实说明不编造语句。
+                                                    #   权限 R：read-only 仅可查自己所属 class；非 super-user 查他人一律拒绝
+                                                    #   （不泄露他人规则），未知 class 明确报错。
 show configuration candidate                        # 当前持锁会话的 candidate
 show configuration sessions                         # candidate 持锁会话列表；**等价于 `show system configuration sessions`**
                                                     #   （同一读物：`Engine.Sessions`，与 `GET /system/configuration/sessions` 同源）
@@ -586,7 +591,7 @@ virtual-machine-functions {
 | 操作模式 `show configuration \| compare rollback <n>` | committed ⇄ 第 n 个历史快照 diff（**已实现**：`Engine.Compare(n)`） |
 | 操作模式 `show configuration compare rollback <n>` | 与上一行的**管道形态等价**（同一 `Engine.Compare(n)`；两种写法都在命令树里，`?`/Tab 均可补出） |
 | 操作模式 `show configuration <未知子命令>` | **报错**（`% 无效命令: show configuration <x>（可用：…）`），**不显示配置正文**——`show configuration` 省略子命令才是"读 committed"（决策 #153） |
-| 操作模式 `show configuration permissions <class>` | **未实现**（原声明「按 class 视角显示」）——本表**从未定义**该「视角」过滤哪些字段（脱敏按敏感字段、与 class 无关；class 只决定命令节点能否执行），产品也没有按 class 渲染配置的机制，做出来就是一份无从校验的 lossy 视图（同下一行的处理）。故执行器**明说未实现**：`% show configuration permissions <class>：按 class 视角显示暂未实现（committed 原样配置见 show configuration）`，**不再静默渲染 committed 正文**（决策 #153 处置）。替代：`show configuration`（committed 原样） |
+| 操作模式 `show configuration permissions <class> [detail]` | **该 class 的生效权限视图**（决策 #304）：把该 class 在 CLI 命令树上的有效判定**逐路径**算出来并展示——默认按顶层命令族列出**允许路径** + 末行汇总（class 名、来源＝预置/自定义、允许/拒绝条数）；`detail` 附**判定依据**列（预置等级满足 / allow 前缀命中 / deny 前缀命中 / 默认拒绝）。判定**单源在 `internal/aaa`**（与运行期 `Authorize` 同一实现，show 层只枚举命令树路径 + 调用判定 + 渲染）：预置三档按 §4 权限矩阵等级；自定义 class 按 allow/deny 路径前缀（**deny 优先、allow 放行、其余默认拒绝**）。`\| display set` 对自定义 class 输出等价 `set system login class <name> allow/deny <prefix>` 语句（经 display set 反推机制）；预置 class 由等级判定、无 allow/deny 路径表，如实给出基等级说明、不编造语句。权限 R：read-only 可查自己所属 class；**非 super-user 查他人 class 一律拒绝**（不泄露他人规则）；super-user 可查任意 class（含自定义）；未知 class 名明确报错。REST 等价 `GET /configuration/permissions?class=<name>`（无参 = 调用者自己；非 super 查他人 403、未知 404） |
 | 配置模式 `show` | candidate（当前层级） |
 | 配置模式 `show \| display set` | **已实现**（决策 #155，推翻 #84 的搁置）：把当前层级（含顶层）配置反推为逐行 `set` 语句，语句带**绝对路径**、敏感值**不输出**并以 `#` 注释说明（`model.IsSensitiveKey` 单一真源；掩码占位符回放会静默替换凭据，故省略）、含空格取值按语句分词器同规则加引号；**生成后回放自校验**（语句经真实 `applyStatement` 回放进空配置必须还原原配置，不等即报内部错误——#84 担心的「复制配置静默错误」在结构上被排除）。实现 = 通用逆走器（`jsonKeyOf` 机械双射 + `identityFields` + IVK + ScalarParam）+ 13 个别名家族的逆映射发射器（与别名 apply 同源对照维护）。`show configuration \| display set`（操作模式）同管道同实现 |
 | 配置模式 `show \| compare` | candidate ⇄ committed diff（**已实现**：`Engine.CompareCandidate`，2026-09-18 接线，发现 #4） |
@@ -601,6 +606,7 @@ virtual-machine-functions {
 | `request`（software/reboot/configuration） | ✔ | ✘ | ✘ |
 | `clear` / `start shell` | ✔ | ✘ | ✘ |
 | `show system api tokens`（决策 #301） | ✔（全部用户的会话） | ✔（仅自己的） | ✔（仅自己的） |
+| `show configuration permissions <class> [detail]`（决策 #304） | ✔（任意 class，含自定义） | ✔（仅自己所属 class） | ✔（仅自己所属 class） |
 | `request system api token revoke <token-id>`（决策 #301） | ✔（任意会话） | ✔（仅自己的） | ✘（request 域以 O 为基线；read-only 的自助结束会话用 `POST /logout`，REST 侧同能力开放） |
 
 ## 5. 补全行为细则（供补全引擎实现）

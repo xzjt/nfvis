@@ -339,12 +339,71 @@ func (s *Service) RevokeToken(viewerUser, viewerClass, id string) error {
 	return ErrTokenNotFoundOrForbidden
 }
 
+// ---------- 生效权限视图的判定查询（决策 #304） ----------
+//
+// 判定逻辑的**单一事实源**：运行期逐命令授权（Authorize）与生效权限视图
+// （CLI `show configuration permissions <class>` / REST `GET /configuration/permissions`）
+// 共用同一套函数。视图侧只暴露「解析 class 定义 + 逐路径判定 + 依据」的查询能力，
+// **不得另写一套判定**（本决策要点）。
+
+// ClassSource 生效权限视图里 class 的来源。
+type ClassSource string
+
+const (
+	ClassSourcePreset ClassSource = "preset" // 预置三档（super-user/operator/read-only）
+	ClassSourceCustom ClassSource = "custom" // 配置里自定义的 class（allow/deny 前缀表）
+)
+
+// 判定依据（视图逐路径展示；四类允许/拒绝理由 + 预置等级不足这一反例）。
+const (
+	ReasonPresetSatisfied    = "预置等级满足"
+	ReasonPresetInsufficient = "预置等级不足"
+	ReasonAllowPrefixHit     = "allow 前缀命中"
+	ReasonDenyPrefixHit      = "deny 前缀命中"
+	ReasonDefaultDeny        = "默认拒绝"
+)
+
+// ClassDefView class 的生效定义：预置档只有名称；自定义 class 带 allow/deny 前缀表。
+type ClassDefView struct {
+	Name   string
+	Source ClassSource
+	Allow  []string
+	Deny   []string
+}
+
+// ResolveClass 解析 class 定义（决策 #304）。预置三档恒存在；自定义从 committed 配置的
+// system.login.classes 读；未知 class（非预置、配置里也没有）返回 ok=false——视图侧据此
+// 明确报错，而不是拿「默认拒绝」冒充一个真实存在的 class。
+func (s *Service) ResolveClass(name string) (ClassDefView, bool) {
+	switch name {
+	case ClassSuperUser, ClassOperator, ClassReadOnly:
+		return ClassDefView{Name: name, Source: ClassSourcePreset}, true
+	}
+	allow, deny, found := s.customClassRules(name)
+	if !found {
+		return ClassDefView{}, false
+	}
+	return ClassDefView{Name: name, Source: ClassSourceCustom, Allow: allow, Deny: deny}, true
+}
+
+// Evaluate 判定该 class 对 (required, path) 的授权并给出依据（决策 #304）。
+// 与运行期 Authorize **同一实现**：预置档按等级；自定义按 deny→allow→默认拒绝。
+func (d ClassDefView) Evaluate(required schema.Class, path ...string) (bool, string) {
+	if d.Source == ClassSourcePreset {
+		return evaluatePreset(d.Name, required)
+	}
+	return evaluateClassRules(d.Allow, d.Deny, path)
+}
+
 // Authorize 判定 class 是否获得授权（FR-SEC-002）。
 //
 // 预置 class（super-user/operator/read-only）按命令树 §4 权限矩阵的等级判定：
 // 用户 class 能力等级须覆盖操作所需等级 required。
 // 自定义 class 为纯路径 ACL：deny 前缀优先拒绝，allow 前缀放行，其余默认拒绝
 // ——授权完全由管理员显式配置的路径表决定（与 required 等级正交）。
+//
+// 与 ResolveClass/ClassDefView.Evaluate 共用同一套判定函数（决策 #304 重构，
+// 行为逐字不变，由既有 aaa 单测兜底）。
 func (s *Service) Authorize(cfgClass string, required schema.Class, path ...string) bool {
 	switch cfgClass {
 	case ClassSuperUser:
@@ -354,32 +413,66 @@ func (s *Service) Authorize(cfgClass string, required schema.Class, path ...stri
 	case ClassReadOnly:
 		return required == schema.ClassReadOnly
 	}
-	// 自定义 class：查 committed 配置中的 allow/deny 前缀表
+	allow, deny, found := s.customClassRules(cfgClass)
+	if !found {
+		return false
+	}
+	ok, _ := evaluateClassRules(allow, deny, path)
+	return ok
+}
+
+// customClassRules 从 committed 配置读自定义 class 的 allow/deny 前缀表
+// （决策 #304 从 Authorize 抽出，与原逻辑逐字等价）。
+func (s *Service) customClassRules(name string) (allow, deny []string, found bool) {
 	cfg, err := s.src.Committed()
 	if err != nil {
-		return false
+		return nil, nil, false
 	}
 	if cfg.System == nil || cfg.System.Login == nil {
-		return false
+		return nil, nil, false
 	}
-	full := strings.Join(path, " ")
 	for _, c := range cfg.System.Login.Classes {
-		if c.Name != cfgClass {
-			continue
+		if c.Name == name {
+			return c.Allow, c.Deny, true
 		}
-		for _, d := range c.Deny {
-			if matchPrefix(full, d) {
-				return false
-			}
-		}
-		for _, a := range c.Allow {
-			if matchPrefix(full, a) {
-				return true
-			}
-		}
-		return false // 自定义 class 默认拒绝
 	}
-	return false
+	return nil, nil, false
+}
+
+// evaluatePreset 预置 class 的等级判定 + 依据（与 Authorize 原 switch 逐字等价）。
+func evaluatePreset(name string, required schema.Class) (bool, string) {
+	switch name {
+	case ClassSuperUser:
+		return true, ReasonPresetSatisfied
+	case ClassOperator:
+		if required <= schema.ClassOperator {
+			return true, ReasonPresetSatisfied
+		}
+		return false, ReasonPresetInsufficient
+	case ClassReadOnly:
+		if required == schema.ClassReadOnly {
+			return true, ReasonPresetSatisfied
+		}
+		return false, ReasonPresetInsufficient
+	}
+	return false, ReasonPresetInsufficient
+}
+
+// evaluateClassRules 自定义 class 的路径前缀判定 + 依据（deny 优先、allow 放行、
+// 其余默认拒绝；与 Authorize 原自定义分支逐字等价）。
+func evaluateClassRules(allow, deny []string, path []string) (bool, string) {
+	full := strings.Join(path, " ")
+	for _, d := range deny {
+		if matchPrefix(full, d) {
+			return false, ReasonDenyPrefixHit
+		}
+	}
+	for _, a := range allow {
+		if matchPrefix(full, a) {
+			return true, ReasonAllowPrefixHit
+		}
+	}
+	return false, ReasonDefaultDeny
 }
 
 // ChangePassword 校验旧口令与新口令策略（FR-SEC-008）。配置变更本身由

@@ -459,3 +459,86 @@ func TestListTokensExcludesExpired(t *testing.T) {
 		t.Fatalf("清单应按签发时间升序: %+v", list)
 	}
 }
+
+// ---------- 决策 #304：生效权限视图的判定查询（单一事实源） ----------
+
+func TestResolveClassAndEvaluatePresets(t *testing.T) {
+	s := NewService(fakeSource{testConfig()}, nil)
+	for _, name := range []string{ClassSuperUser, ClassOperator, ClassReadOnly} {
+		def, ok := s.ResolveClass(name)
+		if !ok || def.Source != ClassSourcePreset {
+			t.Fatalf("%s 应为预置 class: %+v ok=%v", name, def, ok)
+		}
+	}
+	cases := []struct {
+		class    string
+		required schema.Class
+		want     bool
+		reason   string
+	}{
+		{ClassSuperUser, schema.ClassSuperUser, true, ReasonPresetSatisfied},
+		{ClassOperator, schema.ClassReadOnly, true, ReasonPresetSatisfied},
+		{ClassOperator, schema.ClassSuperUser, false, ReasonPresetInsufficient},
+		{ClassReadOnly, schema.ClassReadOnly, true, ReasonPresetSatisfied},
+		{ClassReadOnly, schema.ClassOperator, false, ReasonPresetInsufficient},
+	}
+	for _, c := range cases {
+		def, _ := s.ResolveClass(c.class)
+		got, reason := def.Evaluate(c.required, "show", "version")
+		if got != c.want || reason != c.reason {
+			t.Errorf("%s/%v: got(%v,%q) want(%v,%q)", c.class, c.required, got, reason, c.want, c.reason)
+		}
+	}
+}
+
+func TestResolveClassAndEvaluateCustom(t *testing.T) {
+	s := NewService(fakeSource{testConfig()}, nil)
+	def, ok := s.ResolveClass("limited")
+	if !ok || def.Source != ClassSourceCustom {
+		t.Fatalf("limited 应为自定义 class: %+v ok=%v", def, ok)
+	}
+	if len(def.Allow) == 0 || len(def.Deny) == 0 {
+		t.Fatalf("自定义 class 应带 allow/deny 表: %+v", def)
+	}
+	// deny 优先
+	if allow, reason := def.Evaluate(schema.ClassReadOnly, "show", "alarms"); allow || reason != ReasonDenyPrefixHit {
+		t.Fatalf("deny 前缀应优先拒绝: allow=%v reason=%q", allow, reason)
+	}
+	// allow 命中
+	if allow, reason := def.Evaluate(schema.ClassReadOnly, "show", "version"); !allow || reason != ReasonAllowPrefixHit {
+		t.Fatalf("allow 前缀应放行: allow=%v reason=%q", allow, reason)
+	}
+	// 默认拒绝
+	if allow, reason := def.Evaluate(schema.ClassReadOnly, "configure"); allow || reason != ReasonDefaultDeny {
+		t.Fatalf("未匹配应默认拒绝: allow=%v reason=%q", allow, reason)
+	}
+	// 空与未知 class 名解析失败（视图侧据此明确报错）
+	for _, name := range []string{"", "ghost"} {
+		if _, ok := s.ResolveClass(name); ok {
+			t.Fatalf("class %q 不应解析成功", name)
+		}
+	}
+}
+
+// TestAuthorizeMatchesEvaluate 判定单源：Authorize 与视图判定（ResolveClass+Evaluate）
+// 对同一 (class, path) 必须给出一致结果（含未知 class 的默认拒绝）。
+func TestAuthorizeMatchesEvaluate(t *testing.T) {
+	s := NewService(fakeSource{testConfig()}, nil)
+	paths := [][]string{
+		{"show", "version"}, {"show", "alarms"}, {"configure"},
+		{"request", "virtual-machine-functions", "fw-vm", "start"},
+	}
+	for _, class := range []string{ClassSuperUser, ClassOperator, ClassReadOnly, "netops", "limited", "ghost"} {
+		def, ok := s.ResolveClass(class)
+		for _, p := range paths {
+			want := s.Authorize(class, schema.ClassReadOnly, p...)
+			var got bool
+			if ok {
+				got, _ = def.Evaluate(schema.ClassReadOnly, p...)
+			}
+			if got != want {
+				t.Errorf("%s %v：Authorize=%v 视图=%v（判定必须单源）", class, p, want, got)
+			}
+		}
+	}
+}

@@ -445,3 +445,62 @@ func TestPipeCandidates(t *testing.T) {
 		t.Fatalf("未知管道关键字段应无候选: %v", got)
 	}
 }
+
+// TestOperCommandPaths 决策 #304：命令路径枚举与命令树同源、稳定、含代表性路径。
+func TestOperCommandPaths(t *testing.T) {
+	paths := OperCommandPaths()
+	if len(paths) < 100 {
+		t.Fatalf("只枚举到 %d 条命令路径（枚举器可能失效）", len(paths))
+	}
+	seen := map[string]bool{}
+	for _, cp := range paths {
+		if len(cp.Path) == 0 {
+			t.Fatalf("空路径")
+		}
+		key := strings.Join(cp.Path, " ")
+		if seen[key] {
+			t.Fatalf("重复路径: %s", key)
+		}
+		seen[key] = true
+		// 与 Match 同源：每条路径都能解析到，且等级一致
+		n, _, err := Match(OperRoot(), cp.Path)
+		if err != nil {
+			t.Fatalf("路径 %v 解析失败: %v", cp.Path, err)
+		}
+		if got := n.RequiredClass(); got != cp.Required {
+			t.Fatalf("路径 %v 等级不一致: 枚举 %v / Match %v", cp.Path, cp.Required, got)
+		}
+	}
+	// 代表性路径与等级：show 全 R；request 破坏性动作 S；request 生命周期 O
+	cases := []struct {
+		path string
+		want Class
+	}{
+		{"show version", ClassReadOnly},
+		{"show configuration permissions <class>", ClassReadOnly},
+		{"show configuration permissions <class> detail", ClassReadOnly},
+		{"configure", ClassSuperUser},
+		{"request vpp restart", ClassSuperUser},
+		{"request system reboot", ClassSuperUser},
+		{"request virtual-machine-functions <name> start", ClassOperator},
+	}
+	for _, c := range cases {
+		if !seen[c.path] {
+			t.Errorf("枚举结果里应有路径 %q", c.path)
+			continue
+		}
+		if _, _, err := Match(OperRoot(), strings.Fields(c.path)); err != nil {
+			t.Errorf("路径 %q 应可解析: %v", c.path, err)
+		}
+	}
+	// 稳定：两次调用逐字一致
+	again := OperCommandPaths()
+	if len(again) != len(paths) {
+		t.Fatalf("两次枚举条数不同: %d / %d", len(paths), len(again))
+	}
+	for i := range paths {
+		if strings.Join(paths[i].Path, " ") != strings.Join(again[i].Path, " ") {
+			t.Fatalf("第 %d 条不稳定: %v / %v", i, paths[i].Path, again[i].Path)
+		}
+	}
+}
