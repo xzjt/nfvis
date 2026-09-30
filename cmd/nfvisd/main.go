@@ -789,9 +789,45 @@ type vppController struct {
 	probe vppProbeFunc
 	// poolPages 读某页尺寸的运行期大页池（可注入；缺省读 sysfs；ok=false = 读不到不判定）
 	poolPages func(size string) (int, bool)
+	// connGen/connReady 连接管理器**自身会话**的世代与就绪判定（可注入；缺省读 mgr）。
+	// 决策 #315：`request vpp restart` 在返回前必须确认管理器已换成**新连接**（与
+	// /vpp/status 同一管理器，即决策 #314 的单一事实源）——只看裸 socket 探针不够：
+	// VPP 重启后 govpp 报断连前的窗口里，管理器仍持有旧会话，立即查询会撞 broken pipe。
+	connGen   func() uint64
+	connReady func(since uint64) bool
 	// healthTimeout/healthInterval 起后健康等待的有界参数（<=0 取缺省；测试可缩短）
 	healthTimeout  time.Duration
 	healthInterval time.Duration
+}
+
+// generation 当前连接世代（mgr 未接入 / 未注入时返回 0）。
+func (c *vppController) generation() uint64 {
+	if c.connGen != nil {
+		return c.connGen()
+	}
+	if c.mgr != nil {
+		return c.mgr.ConnGeneration()
+	}
+	return 0
+}
+
+// sessionReady 管理器自身会话是否已是新连接（未接管理器时不额外判定，保留既有探针语义）。
+func (c *vppController) sessionReady(since uint64) bool {
+	if c.connReady != nil {
+		return c.connReady(since)
+	}
+	if c.mgr != nil {
+		return c.mgr.ConnectedSince(since)
+	}
+	return true
+}
+
+// lastConnErr 管理器最近一次连接错误（用于把「为何没就绪」说清楚）。
+func (c *vppController) lastConnErr() error {
+	if c.mgr != nil {
+		return c.mgr.LastError()
+	}
+	return nil
 }
 
 func (c *vppController) Status(vpp *model.VppConfig) api.VppStatus {
@@ -804,8 +840,10 @@ func (c *vppController) Status(vpp *model.VppConfig) api.VppStatus {
 //
 // `systemctl restart` 返回 0 只说明「重启动作被接受」：VPP 起不来时（如大页池被清空）
 // 进程会立刻 SEGV 退出，而 CLI/REST 都会把它当成功报给操作者——操作者看到成功、
-// 数据面其实全挂（R84-4/R83-6）。故这里在返回成功前做两件事：
-// 重启前按配置预检大页池，重启后有界等待 binary API 可连。
+// 数据面其实全挂（R84-4/R83-6）。故这里在返回成功前做三件事：
+// 重启前按配置预检大页池；重启后有界等待裸 socket 可连（VPP 进程真的活着）；
+// **并且**等 nfvisd 连接管理器把自身会话换成新连接（决策 #315）——否则「重启返回后
+// 立即查询」会撞上旧会话的 `write: broken pipe`（round34/35 的既定现场）。
 func (c *vppController) Restart(ctx context.Context, _ *model.VppConfig) error {
 	cfg, err := c.engine.Committed()
 	if err != nil {
@@ -814,10 +852,12 @@ func (c *vppController) Restart(ctx context.Context, _ *model.VppConfig) error {
 	if err := c.precheckHugepages(cfg.Vpp); err != nil {
 		return err
 	}
+	// 记下重启前的连接世代：重启会杀掉旧连接，管理器必须重连才会前进（决策 #315）。
+	since := c.generation()
 	if _, err := c.applier.Apply(ctx, &cfg); err != nil {
 		return err
 	}
-	return c.waitHealthy(ctx)
+	return c.waitHealthy(ctx, since)
 }
 
 // 起后健康校验参数：VPP 正常起约 1~2 秒，给足 15 秒（含 systemctl 停/起与 DPDK 初始化），
@@ -830,8 +870,18 @@ const (
 // vppProbeFunc 一次起后健康探测：返回 nil 表示 binary API 可连（VPP 真的起来了）。
 type vppProbeFunc func(ctx context.Context) error
 
-// waitHealthy 有界轮询确认 VPP 真的起来了（binary API 可连）。
-func (c *vppController) waitHealthy(ctx context.Context) error {
+// errSessionStale VPP 进程活着（裸 socket 探针通了），但 nfvisd 的连接管理器尚未把
+// 自身会话换成新连接——此窗口内查询会在旧 socket 上报 broken pipe（决策 #315）。
+var errSessionStale = errors.New("VPP 已起来，但数据面连接尚未重建（仍是重启前的旧会话）")
+
+// waitHealthy 有界轮询确认 VPP 真的起来了**且查询可用**（决策 #315）：
+//   - 裸 socket 探针：证明 VPP 进程活着（VPP 起不来时必须如实报错，R84-4）；
+//   - 连接管理器会话就绪：证明「重启返回后立即查询」不会撞上陈旧会话（与 /vpp/status 同源）。
+//
+// 两者都满足才返回 nil。探针通了但管理器会话没在窗口内重建时，**不返回成功**——那正是
+// 操作者立即查询得到 broken pipe 的现场；如实报出并给指引，绝不把「重启动作已接受」
+// 当成「数据面可服务」。
+func (c *vppController) waitHealthy(ctx context.Context, since uint64) error {
 	timeout, interval := c.healthTimeout, c.healthInterval
 	if timeout <= 0 {
 		timeout = vppHealthTimeout
@@ -845,13 +895,21 @@ func (c *vppController) waitHealthy(ctx context.Context) error {
 	}
 	deadline := time.Now().Add(timeout)
 	var lastErr error
+	probeOK := false
 	for {
 		limit := time.Until(deadline)
 		if limit <= 0 {
 			break
 		}
-		if lastErr = probeWithin(ctx, probe, limit); lastErr == nil {
-			return nil
+		if perr := probeWithin(ctx, probe, limit); perr == nil {
+			probeOK = true
+			if c.sessionReady(since) {
+				return nil
+			}
+			// 探针通了（VPP 进程活着），但管理器还是一副旧会话：继续等它重连。
+			lastErr = errSessionStale
+		} else {
+			lastErr = perr
 		}
 		if ctx.Err() != nil {
 			// 等待被取消（如 REST 请求中断）：如实说「没等到」，不当作成功
@@ -867,6 +925,17 @@ func (c *vppController) waitHealthy(ctx context.Context) error {
 		case <-ctx.Done():
 			t.Stop()
 		}
+	}
+	if probeOK {
+		// VPP 起来了，但数据面连接没在窗口内恢复为可用会话：返回成功只会让操作者的
+		// 下一条查询撞 broken pipe。如实报「数据面连接在重启窗口内不可用」并给指引。
+		reason := errSessionStale.Error()
+		if e := c.lastConnErr(); e != nil {
+			reason += "；连接管理器最近错误：" + e.Error()
+		}
+		return fmt.Errorf("VPP 已起来，但数据面连接未在 %s 内恢复为可用会话（%s）；"+
+			"此刻查询会报「数据面连接不可用」；请稍后重试，或 request vpp restart（自查：show vpp）",
+			timeout, reason)
 	}
 	return fmt.Errorf("VPP 重启后未起来：%s 内 binary API 未连上（%v）；"+
 		"请查 systemctl status vpp 与 journalctl -u vpp 的启动日志，数据面当前不可用", timeout, lastErr)

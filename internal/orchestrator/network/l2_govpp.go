@@ -13,18 +13,34 @@ import (
 )
 
 // APIChannel 打开一条 binary API channel（未连接时返回 ErrL2Unavailable）。
+//
+// 决策 #315：连接不可用时返回的错误**必须说清是「数据面连接不可用」并给出下一步**，
+// 不能只回一句「未连接」也不能让调用方把空结果当成「没有数据」。成因常见两类：VPP 进程
+// 没在跑、以及 `request vpp restart` 返回后管理器会话尚未重建（重建窗口内查询会撞
+// `write: broken pipe`）。两类都走这里，故把管理器最近一次连接错误与指引一并带上。
 func (m *Manager) APIChannel() (api.Channel, error) {
 	m.mu.Lock()
 	s := m.session
+	lastErr := m.lastErr
 	m.mu.Unlock()
 	if s == nil {
-		return nil, ErrL2Unavailable
+		return nil, fmt.Errorf("%w（%s）", ErrL2Unavailable, sessionDownReason(lastErr))
 	}
 	cs, ok := s.(interface{ APIChannel() (api.Channel, error) })
 	if !ok {
-		return nil, ErrL2Unavailable
+		return nil, fmt.Errorf("%w（%s）", ErrL2Unavailable, sessionDownReason(lastErr))
 	}
 	return cs.APIChannel()
+}
+
+// sessionDownReason 连接不可用时的可操作原因（决策 #315）。把「重启后重建窗口」这一
+// 高频成因点名，并给出自查与下一步，避免操作者把一次查询失败当成产品功能坏掉。
+func sessionDownReason(lastErr error) string {
+	reason := "数据面连接不可用（VPP 未连接或正在重启后的重连窗口内）"
+	if lastErr != nil {
+		reason += "：" + lastErr.Error()
+	}
+	return reason + "；若刚执行 request vpp restart，请等命令返回后再查询；自查：show vpp"
 }
 
 func (s *govppSession) APIChannel() (api.Channel, error) { return s.conn.NewAPIChannel() }

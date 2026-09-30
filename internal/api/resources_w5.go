@@ -161,9 +161,21 @@ func (s *Server) mutateLoginUsers(w http.ResponseWriter, r *http.Request, status
 		return
 	}
 	defer endOneShot(s.engine, sess, s.log)
-	cfg, _, err := s.engine.Candidate()
+	cfg, dirty, err := s.engine.Candidate()
 	if err != nil {
 		mapEngineError(w, err)
+		return
+	}
+	// 决策 #316：本会话已持有**有未提交改动**的候选（典型：控制台配置页正在编辑）。
+	// 本族是「取锁 → 写候选 → 立即提交」的一次性事务，直接提交会把操作者尚未打算提交的
+	// 配置页候选一并提交生效（round77 观察项：改自己的口令连带提交了配置页改动）。
+	// 客户端已按同口径拒绝（app.js 的 usrCandidateBlock），但那只是界面；此处是**服务端权威
+	// 判定**（CLI/脚本绕过界面也拦得住）。拒绝时不改候选、不提交，且因候选仍脏，
+	// defer endOneShot 不会替操作者释放编辑锁——他的编辑现场原封不动。
+	if dirty {
+		writeError(w, http.StatusConflict, "CONFLICT",
+			"本会话已有未提交的候选配置：请先在配置页提交或丢弃它，再改动用户/口令/登录横幅"+
+				"（本次操作只做该改动，不会连带提交其它候选改动）", nil)
 		return
 	}
 	if cfg.System == nil {

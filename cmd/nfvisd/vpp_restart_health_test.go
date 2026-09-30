@@ -30,7 +30,7 @@ func TestWaitHealthyTimesOutWhenProbeKeepsFailing(t *testing.T) {
 		probe:          func(context.Context) error { return errors.New("connection refused") },
 	}
 	start := time.Now()
-	err := c.waitHealthy(context.Background())
+	err := c.waitHealthy(context.Background(), 0)
 	if err == nil {
 		t.Fatal("探针一直失败必须报错（否则又是「界面报成功、数据面全挂」）")
 	}
@@ -57,7 +57,7 @@ func TestWaitHealthySucceedsWhenProbeRecovers(t *testing.T) {
 			return nil
 		},
 	}
-	if err := c.waitHealthy(context.Background()); err != nil {
+	if err := c.waitHealthy(context.Background(), 0); err != nil {
 		t.Fatalf("探针第 3 次成功应判定健康: %v", err)
 	}
 	if calls != 3 {
@@ -68,7 +68,7 @@ func TestWaitHealthySucceedsWhenProbeRecovers(t *testing.T) {
 func TestWaitHealthyImmediateSuccess(t *testing.T) {
 	c := &vppController{probe: func(context.Context) error { return nil }}
 	start := time.Now()
-	if err := c.waitHealthy(context.Background()); err != nil {
+	if err := c.waitHealthy(context.Background(), 0); err != nil {
 		t.Fatalf("探针立即成功不该报错: %v", err)
 	}
 	if d := time.Since(start); d > time.Second {
@@ -86,7 +86,7 @@ func TestWaitHealthyBoundsHungProbe(t *testing.T) {
 		probe:          func(context.Context) error { <-release; return errors.New("仍然连不上") },
 	}
 	start := time.Now()
-	err := c.waitHealthy(context.Background())
+	err := c.waitHealthy(context.Background(), 0)
 	if err == nil {
 		t.Fatal("探针卡住时必须按上限报错，不能一直等")
 	}
@@ -152,9 +152,16 @@ func TestReadHugepagePoolUnknownSize(t *testing.T) {
 type fakeRestarter struct {
 	calls int
 	err   error
+	hook  func() // 每次重启动作时执行（测试用它模拟「重启导致管理器重连」）
 }
 
-func (f *fakeRestarter) Restart(context.Context) error { f.calls++; return f.err }
+func (f *fakeRestarter) Restart(context.Context) error {
+	f.calls++
+	if f.hook != nil {
+		f.hook()
+	}
+	return f.err
+}
 
 // newTestVppController 构造真实配置引擎 + 假落地器（写文件与重启都注入，不碰底座）。
 func newTestVppController(t *testing.T, cfg model.Config, c *vppController) *fakeRestarter {
@@ -236,5 +243,96 @@ func TestRestartRefusesBeforeRestartWhenHugepagePoolEmpty(t *testing.T) {
 	}
 	if restarter.calls != 0 {
 		t.Fatalf("预检拒绝时不该真的重启数据面，实际 %d 次", restarter.calls)
+	}
+}
+
+// ---------- 决策 #315：重启返回即代表「查询可用」（等管理器换成新连接） ----------
+
+// 裸探针已通但连接管理器会话尚未重建：waitHealthy 不能就此返回成功，
+// 要等它重建（否则操作者紧接着的查询会撞旧会话的 broken pipe）。
+func TestWaitHealthyWaitsForFreshSessionRebuild(t *testing.T) {
+	checks := 0
+	c := &vppController{
+		healthTimeout:  time.Second,
+		healthInterval: 2 * time.Millisecond,
+		probe:          func(context.Context) error { return nil },
+		connReady: func(uint64) bool {
+			checks++
+			return checks >= 3 // 前两次仍报「旧会话」
+		},
+	}
+	if err := c.waitHealthy(context.Background(), 0); err != nil {
+		t.Fatalf("会话重建后应判定健康: %v", err)
+	}
+	if checks < 3 {
+		t.Fatalf("不能在会话重建前就返回成功，实际就绪检查 %d 次", checks)
+	}
+}
+
+// 探针通（VPP 进程活着）但会话始终没重建：如实报「数据面连接在重启窗口内不可用」+ 指引，
+// 不得返回成功、也不得显示为空结果。
+func TestWaitHealthyReportsStaleSessionHonestly(t *testing.T) {
+	c := &vppController{
+		healthTimeout:  40 * time.Millisecond,
+		healthInterval: 5 * time.Millisecond,
+		probe:          func(context.Context) error { return nil },
+		connReady:      func(uint64) bool { return false },
+	}
+	err := c.waitHealthy(context.Background(), 0)
+	if err == nil {
+		t.Fatal("VPP 已起来但会话未重建时必须报错（否则返回成功即撞 broken pipe）")
+	}
+	for _, want := range []string{"数据面连接未在", "此刻查询会报", "request vpp restart", "show vpp"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("错误文案应含 %q，实得：%v", want, err)
+		}
+	}
+}
+
+// Restart 必须把「重启前的连接世代」抓在重启动作之前，并在返回前等到世代前进：
+// 若管理器会话始终没换新，即便 VPP 进程活着也要报错（决策 #315 的核心口径）。
+func TestRestartFailsWhenManagerSessionNeverRebuilds(t *testing.T) {
+	c := &vppController{
+		healthTimeout:  40 * time.Millisecond,
+		healthInterval: 5 * time.Millisecond,
+		probe:          func(context.Context) error { return nil },
+		connGen:        func() uint64 { return 7 },
+		connReady:      func(since uint64) bool { return since != 7 }, // 世代永不前进
+	}
+	restarter := newTestVppController(t, model.Config{}, c)
+	err := c.Restart(context.Background(), nil)
+	if err == nil {
+		t.Fatal("会话未重建时必须报错，不能报成功")
+	}
+	if !strings.Contains(err.Error(), "数据面连接未在") {
+		t.Fatalf("错误应说明数据面连接未恢复: %v", err)
+	}
+	if restarter.calls != 1 {
+		t.Fatalf("重启动作应已执行一次，实际 %d 次", restarter.calls)
+	}
+}
+
+// 正例：重启动作触发管理器重连（世代前进），Restart 等到新会话才返回成功——
+// 「返回后立即查询」因此不会撞旧会话。
+func TestRestartSucceedsAfterManagerSessionRebuilds(t *testing.T) {
+	gen := uint64(7)
+	c := &vppController{
+		healthTimeout:  time.Second,
+		healthInterval: 2 * time.Millisecond,
+		probe:          func(context.Context) error { return nil },
+		connGen:        func() uint64 { return gen },
+		connReady:      func(since uint64) bool { return gen > since },
+	}
+	restarter := newTestVppController(t, model.Config{}, c)
+	restarter.hook = func() { gen = 8 } // 模拟重启导致管理器重连
+
+	if err := c.Restart(context.Background(), nil); err != nil {
+		t.Fatalf("管理器重连后 Restart 应成功: %v", err)
+	}
+	if restarter.calls != 1 {
+		t.Fatalf("应执行一次重启，实际 %d 次", restarter.calls)
+	}
+	if !c.sessionReady(7) {
+		t.Fatal("返回后会话应为新连接（sessionReady(重启前世代) 应 true）")
 	}
 }

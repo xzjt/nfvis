@@ -337,3 +337,70 @@ func TestMapConnState(t *testing.T) {
 		}
 	}
 }
+
+// ---------- 决策 #315：连接世代（「重启返回即代表查询可用」的判据） ----------
+
+// 世代只在**成功建立连接**时前进；未重连时即便状态仍显示 Connected（陈旧会话），
+// ConnectedSince(旧世代) 也必须是 false——否则重启窗口内会被误判为「查询可用」。
+func TestConnGenerationAdvancesOnReconnect(t *testing.T) {
+	ch1 := make(chan Event, 4)
+	ch1 <- connectedEvent()
+	ch2 := make(chan Event, 1)
+	ch2 <- connectedEvent()
+	s1 := &fakeSession{version: "26.06-release"}
+	s2 := &fakeSession{version: "26.06-release"}
+	d := &fakeDialer{sessions: []*fakeSession{s1, s2}, events: []chan Event{ch1, ch2}}
+
+	m := NewManager(testConfig(), d)
+	connected := make(chan struct{}, 2)
+	m.OnConnect(func(string) { connected <- struct{}{} })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = m.Run(ctx) }()
+
+	select {
+	case <-connected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("超时未建立首连")
+	}
+	gen1 := m.ConnGeneration()
+	if gen1 == 0 {
+		t.Fatal("首次连接成功后世代应 > 0")
+	}
+	if m.ConnectedSince(gen1) {
+		t.Fatal("尚未重连时 ConnectedSince(当前世代) 必须为 false（旧会话不算可用）")
+	}
+
+	// 触发断连 → 管理器重连 → 世代前进
+	ch1 <- Event{State: StateDisconnected}
+	select {
+	case <-connected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("超时未重连")
+	}
+	gen2 := m.ConnGeneration()
+	if gen2 <= gen1 {
+		t.Fatalf("重连后世代应前进：%d → %d", gen1, gen2)
+	}
+	if !m.ConnectedSince(gen1) {
+		t.Fatal("重连后 ConnectedSince(重启前世代) 应为 true（已换成新连接）")
+	}
+}
+
+// 连接不可用时的查询错误必须说清成因并给下一步，不能只剩一句「未连接」。
+func TestAPIChannelUnavailableMessageIsActionable(t *testing.T) {
+	m := NewManager(testConfig(), &fakeDialer{dialErr: errors.New("connection refused")})
+	if _, err := m.ConnectOnce(context.Background()); err == nil {
+		t.Fatal("拨号失败应返回错误")
+	}
+	_, err := m.APIChannel()
+	if !errors.Is(err, ErrL2Unavailable) {
+		t.Fatalf("未连接时 APIChannel 应返回 ErrL2Unavailable（包装后仍可 Is）: %v", err)
+	}
+	for _, want := range []string{"数据面连接不可用", "request vpp restart", "show vpp"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("错误文案应含 %q 以便自查：%v", want, err)
+		}
+	}
+}

@@ -125,6 +125,10 @@ type Manager struct {
 	lastErr     error
 	appliedHash string // 最近一次落地/重启所依据的 vpp 配置段哈希（pending_restart 判定）
 	onConnect   func(version string)
+	// gen 成功建立连接的世代：首次连接与每次重连各 +1（决策 #315）。
+	// 判据用途：`state == StateConnected` 可能来自**陈旧会话**（VPP 重启后 govpp 尚未
+	// 报出断连的那段窗口），世代前进才说明管理器已换成新连接、查询路径可用。
+	gen uint64
 
 	statsOnce sync.Once // stats segment 惰性连接（stats_govpp.go）
 	statsConn *statsConn
@@ -219,6 +223,27 @@ func (m *Manager) StatusView(vpp *model.VppConfig) StatusView {
 	return view
 }
 
+// ConnGeneration 连接世代：每次成功建立连接（首次或重连）自增（决策 #315）。
+//
+// 用途：`request vpp restart` 在返回前要确认「查询真的可用」。**只看 StateConnected 不够**——
+// VPP 进程重启后，govpp 检测到断连有一个窗口（健康探针间隔 1s、连续 2 次超时才报
+// NotResponding），此窗口内管理器仍持有**旧会话**、状态仍是 Connected，随后任何查询都会
+// 在旧 socket 上写入而得到 `write: broken pipe`（round34/35 登记的「重启返回后立即查询偶发
+// broken pipe」）。世代的语义是「管理器已换成新连接」，它是把这事说清楚的唯一事实源。
+func (m *Manager) ConnGeneration() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.gen
+}
+
+// ConnectedSince 报告「当前会话可用，且建立于 since 之后」：已连接且世代已前进。
+// 供重启路径判定「返回即可查询」（与 /vpp/status 同一管理器，决策 #314 的单一事实源）。
+func (m *Manager) ConnectedSince(since uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.state == StateConnected && m.gen > since
+}
+
 // ConnectOnce 尝试连接一次并校验版本，成功返回版本号。
 // 版本不匹配返回 *VersionError；连不上返回 ErrUnavailable（包装原因）。
 func (m *Manager) ConnectOnce(ctx context.Context) (string, error) {
@@ -266,6 +291,7 @@ func (m *Manager) ConnectOnce(ctx context.Context) (string, error) {
 
 	m.mu.Lock()
 	m.session, m.events, m.state, m.version, m.lastErr = sess, events, StateConnected, ver, nil
+	m.gen++
 	m.mu.Unlock()
 	return ver, nil
 }

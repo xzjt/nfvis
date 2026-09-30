@@ -5301,10 +5301,13 @@
     },
     "/system/login-banner": {
       "delete": {
-        "description": "一次性事务：提交即生效、收尾交还编辑锁（同 `PUT /system/login-banner`）。",
+        "description": "一次性事务：提交即生效、收尾交还编辑锁（同 `PUT /system/login-banner`）。\n**本会话已有未提交候选时拒绝**（决策 #316）。\n",
         "responses": {
           "200": {
             "description": "已清除（入审计）"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
           }
         },
         "summary": "清除登录横幅（等价 CLI delete system login banner）",
@@ -5313,7 +5316,7 @@
         ]
       },
       "put": {
-        "description": "一次性事务：取配置编辑锁 → 写候选 → 立即提交生效（同 /system/login-users 一族），\n入配置提交审计。横幅为**单行文本、最长 512 字节**：超限或含换行时校验拒绝并说明上限。\n注意：横幅在登录前（未认证）即可见，请勿写入敏感信息。\n",
+        "description": "一次性事务：取配置编辑锁 → 写候选 → 立即提交生效（同 /system/login-users 一族），\n入配置提交审计。横幅为**单行文本、最长 512 字节**：超限或含换行时校验拒绝并说明上限。\n注意：横幅在登录前（未认证）即可见，请勿写入敏感信息。\n**本会话已有未提交候选时拒绝**（决策 #316）：见 `POST /system/login-users` 同款口径。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -5330,6 +5333,9 @@
           },
           "400": {
             "$ref": "#/components/responses/Error400"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
           }
         },
         "summary": "设置登录横幅（等价 CLI set system login banner）",
@@ -5361,7 +5367,7 @@
         ]
       },
       "post": {
-        "description": "一次性事务：用户/口令变更**必须生效**（FR-SEC-008），本族端点提交即生效、\n无需（也不该）由调用方再 commit；收尾时交还全局编辑锁（决策 #151）——\n提交后本会话不再持锁，其它会话可立即写入 candidate。\n",
+        "description": "一次性事务：用户/口令变更**必须生效**（FR-SEC-008），本族端点提交即生效、\n无需（也不该）由调用方再 commit；收尾时交还全局编辑锁（决策 #151）——\n提交后本会话不再持锁，其它会话可立即写入 candidate。\n**本会话已有未提交候选时拒绝**（决策 #316）：本族操作只做它声明的那一项改动，\n不会把配置页正在编辑的候选一并提交；此时返回 409 并说明「先提交或丢弃候选」。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -5378,6 +5384,9 @@
           },
           "400": {
             "$ref": "#/components/responses/Error400"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
           }
         },
         "summary": "创建用户或 class",
@@ -5413,7 +5422,7 @@
         }
       ],
       "put": {
-        "description": "一次性事务：提交即生效、收尾交还编辑锁（决策",
+        "description": "一次性事务：提交即生效、收尾交还编辑锁（决策 #151，同 `POST /system/login-users`）。\n**本会话已有未提交候选时拒绝**（决策 #316）：见 `POST /system/login-users` 同款口径。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -5436,6 +5445,9 @@
         "responses": {
           "200": {
             "description": "已更新（入审计）"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
           }
         },
         "summary": "修改用户（class/口令，需 super-user）",
@@ -5456,7 +5468,7 @@
         }
       ],
       "post": {
-        "description": "一次性事务：校验旧口令 + 策略后提交生效（FR-SEC-008），收尾交还编辑锁（决策 #151）——\n改完口令的会话不再持有全局编辑锁，其它会话的配置写不会被挡（也无需为此登出）。\n",
+        "description": "一次性事务：校验旧口令 + 策略后提交生效（FR-SEC-008），收尾交还编辑锁（决策 #151）——\n改完口令的会话不再持有全局编辑锁，其它会话的配置写不会被挡（也无需为此登出）。\n**只改口令，不牵动候选**（决策 #316）：本会话已有未提交候选（典型＝控制台配置页正在编辑）时\n**拒绝**（409）并说明「先提交或丢弃候选」——绝不再把那份候选一并提交生效（round77 观察项）。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -5487,6 +5499,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
           }
         },
         "summary": "口令自助修改（登录者本人或 super-user，需旧口令）",
@@ -6929,12 +6944,23 @@
     },
     "/vpp/restart": {
       "post": {
+        "description": "返回成功**即代表数据面可查询**（决策 #315）：本端点返回前完成两项有界判定——\n①裸 binary API socket 可连（VPP 进程真的活着，避免「重启动作被接受」被报成成功）；\n②nfvisd 连接管理器的**自身会话已换成新连接**（与 `/vpp/status` 同一事实源）。\n只看①不够：VPP 重启后 govpp 报断连前，管理器仍持有旧会话，「重启返回后立即查询」\n会撞 `write: broken pipe`（round34/35 现象）。任一判定在窗口内未满足则返回 500 并\n说明「VPP 已起来 / VPP 未起来」与「数据面连接在重启窗口内不可用」及下一步指引。\n",
         "responses": {
           "202": {
             "$ref": "#/components/responses/ConfigAccepted"
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "VPP 未起来（大页池被清空/启动失败等）或 **数据面连接未在窗口内恢复**（决策 #315）；\nmessage 含成因与指引（`show vpp` / `request vpp restart` / `journalctl -u vpp`）。\n"
           }
         },
         "summary": "按 committed 配置重建 startup.conf 并重启 VPP（FR-SYS-009，super-user）",
