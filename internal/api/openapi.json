@@ -6444,12 +6444,23 @@
         }
       ],
       "post": {
+        "description": "运行中域走 ACPI 重启；**已关机**域的 off→start 分支与 `:start` 同路径：数据面（VPP）\n不可用时在进入会阻塞的 vhost-user 准备之前返回 503 `UNAVAILABLE`（决策 #314）。\n",
         "responses": {
           "202": {
             "description": "已受理"
           },
           "404": {
             "$ref": "#/components/responses/Error404"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "数据面（VPP）当前不可用，未启动虚拟机（仅 off→start 分支，决策"
           }
         },
         "summary": "重启（运行中 ACPI 重启；已关机则启动）",
@@ -6470,7 +6481,7 @@
         }
       ],
       "post": {
-        "description": "启动动作异步受理，但受理后会在**有界探测窗口**（缺省 3s）内回读域状态：\n一旦达到 `running` 即返回 202（正常路径语义与耗时不变）；若窗口内停在\n`paused`（如 vhost-user 初始化失败的 `paused (starting up)`）/`crashed`/`shutoff`\n一类**非预期态**，则返回 500 `VM_START_FAILED`，并在 `detail[]` 里逐条给出\n域状态与 reason、libvirt 域日志摘录（取不到则说明取不到并给出路径）与恢复建议\n（如 `request vpp restart` 后重试 start）。**不新增响应字段**——诊断经既有\nError 形状的 `message`/`detail[]` 透出，故成功形状与既往逐字一致。\n",
+        "description": "启动动作异步受理，但受理后会在**有界探测窗口**（缺省 3s）内回读域状态：\n一旦达到 `running` 即返回 202（正常路径语义与耗时不变）；若窗口内停在\n`paused`（如 vhost-user 初始化失败的 `paused (starting up)`）/`crashed`/`shutoff`\n一类**非预期态**，则返回 500 `VM_START_FAILED`，并在 `detail[]` 里逐条给出\n域状态与 reason、libvirt 域日志摘录（取不到则说明取不到并给出路径）与恢复建议\n（如 `request vpp restart` 后重试 start）。**不新增响应字段**——诊断经既有\nError 形状的 `message`/`detail[]` 透出，故成功形状与既往逐字一致。\n\n另外，若数据面（VPP）当前不可用（未运行 / 连接不可达），会在**进入会阻塞的\nvhost-user 准备之前**即判定并返回 503 `UNAVAILABLE`（`message` 含「数据面（VPP）当前\n不可用，未启动虚拟机 <name>」与 `request vpp restart` 指引），**不产生 paused 残域**\n（决策 #314；同一判定覆盖 restart 的 off→start 分支）。该 503 复用既有 Error 形状与\n既有 `UNAVAILABLE` code，不新增响应字段。\n",
         "responses": {
           "202": {
             "description": "已受理且回读到运行态（异步完成，事件通知）"
@@ -6490,6 +6501,16 @@
               }
             },
             "description": "启动后未达到运行态（paused/crashed/shutoff/absent）；detail 含域状态、libvirt 日志摘录与恢复建议"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "数据面（VPP）当前不可用，未启动虚拟机（决策"
           }
         },
         "summary": "启动（受理后回读域状态）",

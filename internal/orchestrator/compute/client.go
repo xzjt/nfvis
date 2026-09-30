@@ -73,6 +73,14 @@ type Config struct {
 	// LibvirtLogDir 域日志目录（决策 #311：启动失败诊断读 <dir>/<name>.log）。
 	// 空取 DefaultLibvirtLogDir；读不到只如实说「未取到」，不编造内容。
 	LibvirtLogDir string
+
+	// DataPlaneProbe 数据面（VPP）可用性前置判定（决策 #314）：返回 nil = 可用；返回 error =
+	// 不可用（error 文本作为原因透出）。由装配层注入、复用**既有**的 VPP 连接状态查询
+	// （cmd/nfvisd 用 network.Manager.StatusView，与 /vpp/status 同源）——本包不另写探测，
+	// 判定单一事实源。启动（start 及 restart 的 off→start 分支）在进入 api.Start 之前调用：
+	// 命中即立即失败，不进入会阻塞的 vhost-user/socket 准备阶段，也不产生 paused 残域。
+	// **nil = 不做判定**——正常路径与既有语义逐字/逐秒不变（单测与无 VPP 的环境即此情形）。
+	DataPlaneProbe func() error
 }
 
 // 启动结果回读的缺省参数（决策 #311）。

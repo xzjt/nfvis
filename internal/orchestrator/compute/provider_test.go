@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -254,6 +255,16 @@ func testConfig() Config {
 
 func newTestProvider(api libvirtAPI, store storageAPI, seed seedBuilder) *Provider {
 	p := NewProvider(testConfig(), api, store, seed)
+	p.poll = time.Millisecond
+	p.sleep = func(context.Context, time.Duration) error { return nil }
+	return p
+}
+
+// newTestProviderProbe 同 newTestProvider，但注入数据面可用性判定（决策 #314）。
+func newTestProviderProbe(api libvirtAPI, store storageAPI, seed seedBuilder, probe func() error) *Provider {
+	c := testConfig()
+	c.DataPlaneProbe = probe
+	p := NewProvider(c, api, store, seed)
 	p.poll = time.Millisecond
 	p.sleep = func(context.Context, time.Duration) error { return nil }
 	return p
@@ -529,6 +540,101 @@ func TestStartVMChecked_CrashedAfterStart(t *testing.T) {
 	}
 	if len(probe.Hints) == 0 {
 		t.Fatalf("应给出恢复建议：%+v", probe)
+	}
+}
+
+// ---------- 数据面前置判定（决策 #314） ----------
+
+// TestStartVM_DataPlaneUnavailableFailsFastBeforeLibvirt 决策 #314：VPP 不可用时，start 前置判定
+// 立即失败——**不调用 libvirt Start**（不进会阻塞的 vhost-user/socket 准备阶段），错误含指引。
+func TestStartVM_DataPlaneUnavailableFailsFastBeforeLibvirt(t *testing.T) {
+	api := newMockLibvirt()
+	api.present["fw-vm"] = true
+	api.states["fw-vm"] = domShutoff // 关机态：否则幂等分支直接成功，判不到前置
+	p := newTestProviderProbe(api, newMockStorage(), nil,
+		func() error { return errors.New("VPP 未连接（状态 failed）") })
+
+	_, err := p.StartVMChecked(context.Background(), "fw-vm")
+	if !errors.Is(err, orchestrator.ErrDataPlaneUnavailable) {
+		t.Fatalf("应返回数据面不可用错误（哨兵可判），实得 %v", err)
+	}
+	if len(api.started) != 0 {
+		t.Fatalf("不可用时不得调用 libvirt Start（阻塞点）: %v", api.started)
+	}
+	for _, want := range []string{"数据面（VPP）当前不可用", "未启动虚拟机", "request vpp restart", "show vpp"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("错误文案应含 %q：%v", want, err)
+		}
+	}
+}
+
+// TestStartVM_DataPlaneAvailableProceeds 可用时前置判定放行：正常启动与既有语义一致。
+func TestStartVM_DataPlaneAvailableProceeds(t *testing.T) {
+	api := newMockLibvirt()
+	api.present["fw-vm"] = true
+	api.states["fw-vm"] = domShutoff
+	calls := 0
+	p := newTestProviderProbe(api, newMockStorage(), nil, func() error { calls++; return nil })
+
+	probe, err := p.StartVMChecked(context.Background(), "fw-vm")
+	if err != nil || !probe.OK || probe.State != orchestrator.VMStateRunning {
+		t.Fatalf("可用时应正常启动：probe=%+v err=%v", probe, err)
+	}
+	if calls != 1 || len(api.started) != 1 {
+		t.Fatalf("应判定一次并真的启动一次: calls=%d started=%v", calls, api.started)
+	}
+}
+
+// TestRestartVM_DataPlaneUnavailableOnOffBranch 决策 #314：restart 的 off→start 分支同样前置判定，
+// 且同样**不进 libvirt Start**。
+func TestRestartVM_DataPlaneUnavailableOnOffBranch(t *testing.T) {
+	api := newMockLibvirt()
+	api.present["fw-vm"] = true
+	api.states["fw-vm"] = domShutoff
+	p := newTestProviderProbe(api, newMockStorage(), nil,
+		func() error { return errors.New("VPP 未运行") })
+
+	err := p.RestartVM(context.Background(), "fw-vm")
+	if !errors.Is(err, orchestrator.ErrDataPlaneUnavailable) {
+		t.Fatalf("off→start 分支应返回数据面不可用错误，实得 %v", err)
+	}
+	if len(api.started) != 0 || len(api.rebooted) != 0 {
+		t.Fatalf("不可用时不得调用 libvirt Start/Reboot: started=%v rebooted=%v", api.started, api.rebooted)
+	}
+}
+
+// TestRestartVM_RunningUsesRebootWithoutDataPlaneCheck 运行中 restart 走 ACPI 重启、不经启动前置
+// 判定——不因 VPP 状态改变既有重启语义（决策 #314 的覆盖边界）。
+func TestRestartVM_RunningUsesRebootWithoutDataPlaneCheck(t *testing.T) {
+	api := newMockLibvirt()
+	api.present["fw-vm"] = true
+	api.states["fw-vm"] = domRunning
+	called := false
+	p := newTestProviderProbe(api, newMockStorage(), nil,
+		func() error { called = true; return errors.New("VPP 未运行") })
+
+	if err := p.RestartVM(context.Background(), "fw-vm"); err != nil {
+		t.Fatalf("运行中 restart 应走 ACPI 重启成功: %v", err)
+	}
+	if called {
+		t.Fatal("运行中 restart 不应触发数据面前置判定（只有 off→start 分支才判）")
+	}
+	if len(api.rebooted) != 1 || len(api.started) != 0 {
+		t.Fatalf("应只调用 Reboot: rebooted=%v started=%v", api.rebooted, api.started)
+	}
+}
+
+// TestStartVM_NoProbeKeepsLegacyBehavior 未注入判定（nil）时行为与既有完全一致（不判定、直接启动）。
+func TestStartVM_NoProbeKeepsLegacyBehavior(t *testing.T) {
+	api := newMockLibvirt()
+	api.present["fw-vm"] = true
+	api.states["fw-vm"] = domShutoff
+	p := newTestProvider(api, newMockStorage(), nil) // 既有构造，无 DataPlaneProbe
+	if err := p.StartVM(context.Background(), "fw-vm"); err != nil {
+		t.Fatalf("未注入判定时启动应照常成功: %v", err)
+	}
+	if len(api.started) != 1 {
+		t.Fatalf("应真的启动一次: %v", api.started)
 	}
 }
 

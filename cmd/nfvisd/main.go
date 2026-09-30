@@ -227,6 +227,19 @@ func run() error {
 	)
 	computeCfg := compute.DefaultConfig()
 	computeCfg.URI = envOr("NFVIS_LIBVIRT_URI", compute.DefaultURI)
+	// 决策 #314：启动路径的数据面前置判定。复用连接管理器的既有状态视图（与 /vpp/status 同源），
+	// 不另写探测——VPP 未连接时 start/restart(off→start) 立即失败，不进入会阻塞的 vhost-user
+	// 准备阶段（round95 真机：该阶段会一直等到客户端超时且留下 paused 残域）。
+	computeCfg.DataPlaneProbe = func() error {
+		v := vppMgr.StatusView(nil)
+		if v.Connected {
+			return nil
+		}
+		if v.LastError != "" {
+			return errors.New(v.LastError)
+		}
+		return fmt.Errorf("VPP 连接状态为 %s", vppMgr.State())
+	}
 	// vhost-user socket 目录须存在且可被 QEMU/VPP 访问（M4-P0 记录 §5）。
 	if err := os.MkdirAll(computeCfg.VhostDir, 0o755); err != nil {
 		log.Warn("创建 vhost-user socket 目录失败", "dir", computeCfg.VhostDir, "err", err)

@@ -166,8 +166,34 @@ func (p *Provider) StartVM(ctx context.Context, name string) error {
 	if isActiveState(state) {
 		return nil
 	}
+	if err := p.checkDataPlaneForStart(name); err != nil {
+		return err
+	}
 	if err := p.api.Start(ctx, name); err != nil {
 		return fmt.Errorf("启动 VM %s: %w", name, err)
+	}
+	return nil
+}
+
+// checkDataPlaneForStart 启动路径的数据面前置判定（决策 #314）。
+//
+// 由来（round95 真机实证）：VPP 未运行时，带 vhost-user vNIC 的域在 libvirt DomainCreate
+// （p.api.Start）内**阻塞**等待 VPP 的 vhost-user socket——请求在到达决策 #311 的探测窗口之前
+// 就耗到客户端超时（90s），域还停在 paused。故判定必须落在**进入 api.Start 之前**：命中即
+// 立即失败（不碰 libvirt，故不阻塞、不留 paused 残域），并给出恢复指引。
+//
+// 判定复用装配层注入的**既有** VPP 连接状态查询（单一事实源）；未注入（nil）时不判定——
+// 正常路径与既有语义逐字/逐秒不变。
+//
+// 只在**启动动作**（start，以及 restart 的 off→start 分支）调用：已运行域的 start 是幂等
+// 空操作、运行中域的 restart 走 ACPI 重启，二者都不经这里（不改变正常语义）。
+func (p *Provider) checkDataPlaneForStart(name string) error {
+	if p.cfg.DataPlaneProbe == nil {
+		return nil
+	}
+	if err := p.cfg.DataPlaneProbe(); err != nil {
+		return fmt.Errorf("%w：未启动虚拟机 %s（%v）；请先恢复数据面后重试——request vpp restart（自查：show vpp）",
+			orchestrator.ErrDataPlaneUnavailable, name, err)
 	}
 	return nil
 }
@@ -324,6 +350,10 @@ func (p *Provider) RestartVM(ctx context.Context, name string) error {
 		return fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
 	}
 	if !isActiveState(state) {
+		// off→start 分支同样做数据面前置判定（决策 #314）：与 start 一样会在 api.Start 阻塞。
+		if err := p.checkDataPlaneForStart(name); err != nil {
+			return err
+		}
 		if err := p.api.Start(ctx, name); err != nil {
 			return fmt.Errorf("启动 VM %s: %w", name, err)
 		}

@@ -169,8 +169,10 @@ request virtual-machine-functions <name>
   │      # 受理后在探测窗口内回读域状态（缺省 3s、可配置）；达到运行态即刻返回，
   │      # 落在 paused/crashed/shutoff 一类非预期态时报失败，并给出域状态 + reason、
   │      # libvirt 域日志摘录与恢复建议（如 request vpp restart 后重试 start）
+  │      # 数据面（VPP）不可用时在进入会阻塞的 vhost-user 准备之前即判定，
+  │      # 秒级报「数据面（VPP）当前不可用，未启动虚拟机」+ request vpp restart 指引（决策 #314）
   ├─ stop                                           # POST /vmf/{n}:stop
-  ├─ restart
+  ├─ restart                                        # 运行中 ACPI 重启；已关机的 off→start 分支同 start 数据面前置判定（决策 #314）
   ├─ console                                        # 进入串口（Ctrl-] 退出；POST /vmf/{n}/console）
   ├─ snapshot create|rollback|delete [name <name>]   # create/rollback 需关机态（运行中 409，决策 #75）
   └─ delete                                         # S；CLI 交互确认 "Delete VNF 'x'? [yes,no]"
