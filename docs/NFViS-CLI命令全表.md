@@ -139,9 +139,9 @@
 
 | 命令 | 说明 | 权限 | 落点 | 实测 |
 |---|---|---|---|---|
-| `request virtual-machine-functions <n> start` | 启动 VM；受理后回读域状态（决策 #311） | O | `POST /vmf/{n}:start` | ✅（停在 `paused`/`crashed` 等非预期态时以 `%%` 报出域状态、libvirt 日志摘录与恢复建议） |
+| `request virtual-machine-functions <n> start` | 启动 VM；受理后回读域状态（决策 #311）；VPP 不可用时秒级前置失败（决策 #314） | O | `POST /vmf/{n}:start` | ✅（停在 `paused`/`crashed` 等非预期态时以 `%%` 报出域状态、libvirt 日志摘录与恢复建议；VPP 停时秒级 `%%` 报「数据面（VPP）当前不可用…」+ `request vpp restart`，不再阻塞到超时） |
 | `request virtual-machine-functions <n> stop` | 停止（ACPI 关机，超时强杀） | O | `POST /vmf/{n}:stop` | ✅（**决策 #76③** 修超时误报） |
-| `request virtual-machine-functions <n> restart` | 重启 | O | `POST /vmf/{n}:restart` | ✅ |
+| `request virtual-machine-functions <n> restart` | 重启（运行中 ACPI；已关机的 off→start 分支同 `start` 前置判定，决策 #314） | O | `POST /vmf/{n}:restart` | ✅ |
 | `request virtual-machine-functions <n> console` | 进入串口（Ctrl-] 退出） | O | `POST /vmf/{n}/console` + WS | ✅（非 TTY 明确提示；真人 Ctrl-] 见 T0-4） |
 | `request virtual-machine-functions <n> snapshot create [name <s>]` | 创建快照 | O | `POST /vmf/{n}/snapshots` | ✅ **需关机态**（决策 #75） |
 | `request virtual-machine-functions <n> snapshot rollback [name <s>]` | 回滚快照 | O | `POST .../snapshots/{s}:rollback` | ✅ **需关机态**（决策 #75） |

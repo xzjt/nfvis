@@ -682,12 +682,23 @@ paths:
         域状态与 reason、libvirt 域日志摘录（取不到则说明取不到并给出路径）与恢复建议
         （如 `request vpp restart` 后重试 start）。**不新增响应字段**——诊断经既有
         Error 形状的 `message`/`detail[]` 透出，故成功形状与既往逐字一致。
+
+        另外，若数据面（VPP）当前不可用（未运行 / 连接不可达），会在**进入会阻塞的
+        vhost-user 准备之前**即判定并返回 503 `UNAVAILABLE`（`message` 含「数据面（VPP）当前
+        不可用，未启动虚拟机 <name>」与 `request vpp restart` 指引），**不产生 paused 残域**
+        （决策 #314；同一判定覆盖 restart 的 off→start 分支）。该 503 复用既有 Error 形状与
+        既有 `UNAVAILABLE` code，不新增响应字段。
       responses:
         "202": { description: 已受理且回读到运行态（异步完成，事件通知） }
         "404": { $ref: "#/components/responses/Error404" }
         "409": { $ref: "#/components/responses/Error409" }
         "500":
           description: 启动后未达到运行态（paused/crashed/shutoff/absent）；detail 含域状态、libvirt 日志摘录与恢复建议
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: 数据面（VPP）当前不可用，未启动虚拟机（决策 #314）；message 含原因与 `request vpp restart` 指引
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -704,9 +715,17 @@ paths:
     post:
       tags: [virtual-machine-functions]
       summary: 重启（运行中 ACPI 重启；已关机则启动）
+      description: |
+        运行中域走 ACPI 重启；**已关机**域的 off→start 分支与 `:start` 同路径：数据面（VPP）
+        不可用时在进入会阻塞的 vhost-user 准备之前返回 503 `UNAVAILABLE`（决策 #314）。
       responses:
         "202": { description: 已受理 }
         "404": { $ref: "#/components/responses/Error404" }
+        "503":
+          description: 数据面（VPP）当前不可用，未启动虚拟机（仅 off→start 分支，决策 #314）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /virtual-machine-functions/{name}/console:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
     post:

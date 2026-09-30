@@ -1223,6 +1223,12 @@ nfvis$ request virtual-machine-functions fw-vm delete   # super-user；交互确
 > 非预期态，CLI 会以 `%%` 报出**域状态、libvirt 日志摘录与恢复建议**（常见处置：确认数据面在跑
 > `show vpp status` → `request vpp restart` → 再 `start`；REST 侧同一失败返回 500 且 `detail[]`
 > 带同样信息，控制台详情页也能看到）。启动正常时行为与耗时不变。
+>
+> **VPP 未运行时 `start`/`restart` 会秒级失败**：数据面不可用时（如 `systemctl stop vpp`、
+> 或连接不可达），启动在进入会阻塞的 vhost-user 准备**之前**就判定并立即返回 `%%`——明确告知
+> 「数据面（VPP）当前不可用，未启动虚拟机」并给出恢复路径 `request vpp restart`（用 `show vpp`
+> 自查连接状态），**不会**卡到客户端超时，也**不会留下 `paused` 残域**；`restart` 对**已关机** VM
+> 的 off→start 分支同样如此（运行中 VM 的 ACPI 重启不受影响）。REST 侧返回 503 `UNAVAILABLE`。
 > guest 内要有 getty 监听串口（云镜像一般自带 `console=ttyS0`）才能在 console 里看到登录提示。
 > 串口正常退出用 `Ctrl-]`；若**服务端/串口断开**（如 VM 被停、nfvisd 重启）或本地输入 EOF，
 > console 会**自动退出并回到提示符，无需再按键**。
