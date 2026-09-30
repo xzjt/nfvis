@@ -65,6 +65,7 @@ var cliRESTCoverage = map[string]string{
 	"show system tech-support":                         "GET /system/tech-support",
 	"show tech-support":                                "GET /system/tech-support",
 	"show system configuration sessions":               "GET /system/configuration/sessions",
+	"show system api tokens":                           "GET /system/api-tokens",
 	"show configuration sessions":                      "GET /system/configuration/sessions",
 	"show interfaces":                                  "GET /interfaces",
 	"show interfaces physical":                         "GET /interfaces",
@@ -166,6 +167,7 @@ var cliRESTCoverage = map[string]string{
 	"request system core-dumps export":                        "POST /system/core-dumps:export",
 	"request system zeroize":                                  "POST /system:zeroize",
 	"request system api tls regenerate":                       "POST /system/tls:regenerate",
+	"request system api token revoke <token-id>":              "POST /system/api-tokens/{id}:revoke",
 	"request system ssh host-key regenerate":                  "POST /system/ssh-host-key:regenerate",
 	"request system password change":                          "POST /system/login-users/{name}:change-password",
 	"request system ntp sync":                                 "POST /system/ntp:sync",
@@ -224,7 +226,6 @@ var cliRESTExceptions = map[string]string{
 // 是**整行计入缺口**的（《命令全表》该行实测列即标 ⚠️ 已知缺口：`permissions` 分支本轮改为明确提示
 // 未实现，裸写法 `show configuration` 仍由覆盖表的 `GET /configuration` 承载）。
 var cliRESTGaps = map[string]string{
-	"request system api token revoke":        "V1 明确延期（决策 #76⑧）；服务端仅会话级吊销（POST /logout；CLI 提示文案已与注册端点一致），核查 #3",
 	"request system storage format-data":     "V1 有意延期（破坏性；决策 #65：待数据分区定义），核查 #4",
 	"show configuration permissions <class>": "子形态无 REST 端点：class 视角语义从未定义，本轮改为明确提示未实现（附录 A #153 /《命令全表》§4⑧）；裸写法由 GET /configuration 承载，核查 #2",
 }

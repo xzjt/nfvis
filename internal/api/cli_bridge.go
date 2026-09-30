@@ -37,7 +37,9 @@ func (s *Server) handleCLIExecute(w http.ResponseWriter, r *http.Request) {
 		source = "ssh"
 	}
 	info, _ := Identity(r)
-	res := s.cliExec.Execute(info.User, info.Class, source, req.Line)
+	// 决策 #301：把会话稳定 ID 传入执行器——`show system api tokens` 的「当前会话」标记
+	// 与吊销自己的会话时的提示都以它为判据。
+	res := s.cliExec.ExecuteAs(info.User, info.Class, source, info.ID, req.Line)
 	writeJSON(w, http.StatusOK, cliExecuteResponse{
 		Output: res.Output, Mode: res.Mode, Path: res.Path, Prompt: res.Prompt,
 		Console: res.Console, Warning: res.Warning,

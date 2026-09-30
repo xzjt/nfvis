@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -148,14 +149,34 @@ type ConfigSource interface {
 // TokenInfo 已验证 token 的身份信息。
 type TokenInfo struct {
 	Token     string
+	ID        string // token 稳定 ID（UUID；仅内存保存，与 token 同生命周期，决策 #301）
 	User      string
 	Class     string
+	IssuedAt  time.Time
 	ExpiresAt time.Time
 }
 
+// TokenView 活动会话清单条目（决策 #301）：不含 token 本体（凭据永不回显），
+// 供 ListTokens 输出与 REST GET /system/api-tokens 使用。
+type TokenView struct {
+	ID        string    `json:"token_id"`
+	User      string    `json:"user"`
+	Class     string    `json:"class"`
+	IssuedAt  time.Time `json:"issued_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// Current 报告该会话是否为 viewerID 发起请求的会话（决策 #301 的「当前会话」标记；
+// viewerID 为空串时恒 false——调用方没有稳定 ID 可比，不猜）。
+func (v TokenView) Current(viewerID string) bool {
+	return viewerID != "" && v.ID == viewerID
+}
+
 type tokenEntry struct {
+	id        string
 	user      string
 	class     string
+	issuedAt  time.Time
 	expiresAt time.Time
 }
 
@@ -222,14 +243,20 @@ func (s *Service) Login(user, password string) (*TokenInfo, error) {
 	entry := tokenEntry{
 		user:      u.Name,
 		class:     effectiveClass(cfg, u),
+		issuedAt:  now,
 		expiresAt: now.Add(s.tokenTTL(cfg)),
 	}
 	tok, err := randomToken()
 	if err != nil {
 		return nil, err
 	}
+	id, err := newTokenID()
+	if err != nil {
+		return nil, err
+	}
+	entry.id = id
 	s.tokens[tok] = entry
-	return &TokenInfo{Token: tok, User: entry.user, Class: entry.class, ExpiresAt: entry.expiresAt}, nil
+	return &TokenInfo{Token: tok, ID: entry.id, User: entry.user, Class: entry.class, IssuedAt: entry.issuedAt, ExpiresAt: entry.expiresAt}, nil
 }
 
 // Logout 吊销 token（FR-API-001 可吊销）。
@@ -248,7 +275,68 @@ func (s *Service) VerifyToken(token string) (*TokenInfo, error) {
 	if !ok {
 		return nil, ErrUnauthorized
 	}
-	return &TokenInfo{Token: token, User: entry.user, Class: entry.class, ExpiresAt: entry.expiresAt}, nil
+	return &TokenInfo{Token: token, ID: entry.id, User: entry.user, Class: entry.class, IssuedAt: entry.issuedAt, ExpiresAt: entry.expiresAt}, nil
+}
+
+// ---------- 活动会话清单与逐 token 吊销（决策 #301） ----------
+
+// ErrTokenNotFoundOrForbidden 吊销/定位一个「不存在、或存在但 viewer 无权操作」的会话。
+// 两种情况共用同一错误与文案：非 super-user 的调用方不能借响应差异探测他人会话是否存在。
+var ErrTokenNotFoundOrForbidden = errors.New("会话不存在或无权操作该会话")
+
+// isSuperUser 报告 class 是否为预置 super-user（活动会话的全量可见/全权吊销判据）。
+// 自定义 class 一律按「仅自己」处理——它没有全量凭据的语义。
+func isSuperUser(class string) bool { return class == ClassSuperUser }
+
+// ListTokens 列出活动会话（决策 #301）。
+//
+// 权限矩阵：super-user 列出**全部用户**的 token；其他 class（含自定义 class）只列自己的。
+// 已过 TTL 的会话先被清扫，不会出现在清单里。输出按签发时间升序（同刻按 ID 排），
+// 保证同一状态多次读取的输出稳定。
+func (s *Service) ListTokens(viewerUser, viewerClass string) []TokenView {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked()
+	all := isSuperUser(viewerClass)
+	out := make([]TokenView, 0, len(s.tokens))
+	for _, e := range s.tokens {
+		if !all && e.user != viewerUser {
+			continue
+		}
+		out = append(out, TokenView{ID: e.id, User: e.user, Class: e.class, IssuedAt: e.issuedAt, ExpiresAt: e.expiresAt})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].IssuedAt.Equal(out[j].IssuedAt) {
+			return out[i].IssuedAt.Before(out[j].IssuedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+// RevokeToken 吊销指定 ID 的活动会话（决策 #301）。
+//
+// 权限矩阵：super-user 可吊销任意 token；其他 class 只能吊销自己的。
+// 「不存在」与「存在但无权操作」一律返回 ErrTokenNotFoundOrForbidden——同一错误不泄露存在性。
+// 吊销立即生效：该 token 的下一次 VerifyToken 返回 ErrUnauthorized。
+func (s *Service) RevokeToken(viewerUser, viewerClass, id string) error {
+	if id == "" {
+		return ErrTokenNotFoundOrForbidden
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked()
+	for tok, e := range s.tokens {
+		if e.id != id {
+			continue
+		}
+		if !isSuperUser(viewerClass) && e.user != viewerUser {
+			return ErrTokenNotFoundOrForbidden
+		}
+		delete(s.tokens, tok)
+		return nil
+	}
+	return ErrTokenNotFoundOrForbidden
 }
 
 // Authorize 判定 class 是否获得授权（FR-SEC-002）。
@@ -423,4 +511,17 @@ func randomToken() (string, error) {
 		return "", fmt.Errorf("生成 token: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// newTokenID 生成会话稳定 ID（UUID v4 格式字符串，决策 #301）。
+// 仅内存保存、与 token 同生命周期：不落库、不参与认证（认证只认 token 本体），
+// 列表与逐 token 吊销以它为键。
+func newTokenID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("生成会话 ID: %w", err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }

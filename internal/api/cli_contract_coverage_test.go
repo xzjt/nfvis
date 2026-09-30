@@ -33,6 +33,7 @@ var contractCLICommands = []string{
 	"show version", "show system uptime", "show system cpu", "show system memory",
 	"show system storage", "show system hugepages", "show system hardware",
 	"show system core-dumps", "show system tech-support", "show system configuration sessions",
+	"show system api tokens",
 	"show interfaces", "show interfaces physical", "show interfaces physical ens224",
 	"show interfaces ens224", "show interfaces ens224 detail", "show interfaces ens224 statistics",
 	"show interfaces ens224 sriov", "show interfaces management",
@@ -57,6 +58,7 @@ var contractCLICommands = []string{
 	"request system reboot", "request system zeroize", "request system software rollback",
 	"request system configuration backup", "request system tech-support generate",
 	"request system ntp sync", "request system api tls regenerate",
+	"request system api token revoke 0b8fd6a2-1c67-4f83-9b3e-2b6f5e7ad910",
 	"request system ssh host-key regenerate",
 	"request alarms clear all", "request vpp restart", "request vpp trace stop",
 	// §1.3 其余

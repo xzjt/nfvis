@@ -74,9 +74,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// FR-SEC-007：token 不落日志；响应仅此一次携带
+	// （决策 #301：token_id 是签发时的稳定 UUID，列表/吊销按它定位；此前取 token 前 8 字符）
 	writeJSON(w, http.StatusOK, loginResponse{
 		Token:     tok.Token,
-		TokenID:   tok.Token[:8],
+		TokenID:   tok.ID,
 		User:      loginUser{Name: tok.User, Class: tok.Class},
 		ExpiresIn: int(time.Until(tok.ExpiresAt).Seconds()),
 	})

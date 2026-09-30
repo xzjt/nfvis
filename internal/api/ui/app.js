@@ -803,7 +803,7 @@ export const VIEWS = {
     render(d) { pageWarn(d); renderKernel(d['/system/kernel']); },
   },
   'users': {
-    render(d) { pageWarn(d); renderUsers(d['/system/login-users']); },
+    render(d) { pageWarn(d); renderUsers(d['/system/login-users']); renderTokens(d['/system/api-tokens']); },
   },
   'tls': {
     render(d) { pageWarn(d); renderTLS(d['/system/tls']); },
@@ -1031,6 +1031,77 @@ function renderUsers(lu) {
     if (n === keep) opt.setAttribute('selected', 'selected');
     ns.appendChild(opt);
   });
+}
+
+// ---------- 活动会话 / API Token（#/system/users 页的卡片，决策 #301） ----------
+//
+//   GET  /system/api-tokens                    清单（super-user 见全部、其他角色仅自己；
+//                                              范围在服务端按身份裁定，界面如实显示拿到的行）
+//   POST /system/api-tokens/{id}:revoke        吊销指定会话（吊销不存在的/无权的，服务端统一
+//                                              回 404「会话不存在或无权操作」，界面原样显示）
+// token_id 是服务端签发的稳定 ID；token 本体永不回显。吊销立即生效，被吊销的会话在下一个
+// 请求时 401（若吊销的是当前浏览器这个会话，下一次取数就回到登录页——api() 已按 401 处理）。
+function renderTokens(payload) {
+  const ok = payload && !payload.__err;
+  const tokens = ok && Array.isArray(payload.tokens) ? payload.tokens : [];
+  const note = $('usr-token-note');
+  if (note) {
+    note.textContent = ok ? '（' + tokens.length + ' 个活动会话）'
+      : '（读取失败：' + (payload ? payload.__err : '未取到数据') + '）';
+  }
+  const tbody = $('usr-token-table').querySelector('tbody');
+  tbody.textContent = '';
+  if (!tokens.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '7', class: 'muted', text: ok ? '（无活动会话）' : '读取失败' }));
+    tbody.appendChild(tr);
+    return;
+  }
+  tokens.forEach((tk) => {
+    const tr = el('tr');
+    tr.appendChild(el('td', { text: String(dash(tk.token_id)) }));
+    tr.appendChild(el('td', { text: String(dash(tk.user)) }));
+    tr.appendChild(el('td', { text: String(dash(tk.class)) }));
+    tr.appendChild(el('td', { text: String(dash(tk.issued_at)) }));
+    tr.appendChild(el('td', { text: String(dash(tk.expires_at)) }));
+    tr.appendChild(el('td', { text: tk.current ? '本会话' : '—' }));
+    const cell = el('td', { class: 'actions' });
+    const btn = wbtn({ type: 'button', class: 'danger small', text: '吊销' });
+    btn.addEventListener('click', () => usrTokenRevoke(tk));
+    cell.appendChild(btn);
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
+  });
+}
+
+// 吊销一个活动会话（中危档：影响面列清楚——谁被踢下线、是否不可回退、本会话吊销即登出）。
+// 确认前不发任何请求；确认词不必手打（会话 ID 是 36 位机器串，手打没有防错价值，
+// 判别主体靠行内按钮对应的这一行）。
+async function usrTokenRevoke(tk) {
+  const id = (tk && tk.token_id) || '';
+  if (!id) return;
+  const who = tk.user ? '用户 ' + tk.user + ' 的' : '该';
+  const self = tk.current;
+  const ok = await uiConfirm('吊销活动会话', {
+    tier: 'mid',
+    bullets: [
+      '吊销 ' + who + '会话（ID ' + id + '）：**立即生效**，该会话的下一个请求就要重新登录。',
+      self
+        ? '这是**当前浏览器正在用的会话**：吊销后本页的下一个请求会回到登录页。'
+        : '被吊销方正在编辑的未提交配置会随会话失效，需要重新登录后重做。',
+      '不可回退：对方重新登录会得到一个新会话（原会话不会恢复）。',
+    ],
+    cli: 'request system api token revoke ' + id,
+  });
+  if (!ok) return;
+  usrMsg('提交中…', false);
+  try {
+    await api('/system/api-tokens/' + encodeURIComponent(id) + ':revoke', { method: 'POST' });
+    usrMsg('已吊销会话 ' + id + '。', false);
+  } catch (e) {
+    usrMsg('吊销失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
 }
 
 // 本会话是否正持有**有未提交改动**的候选：有就返回一句说明（调用方据此拒绝这次写操作）。

@@ -302,3 +302,160 @@ func newBootstrapEngine(t *testing.T, store *config.Store, now func() time.Time)
 	}
 	return e
 }
+
+// ---------- 活动会话清单与逐 token 吊销（决策 #301） ----------
+
+// idLikeUUID 报告 id 是否为 UUID v4 格式（8-4-4-4-12、版本位 4）。
+func idLikeUUID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for i, r := range id {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		case 14:
+			if r != '4' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func TestLoginIssuesStableTokenID(t *testing.T) {
+	now, _ := fakeClock()
+	s := NewService(fakeSource{testConfig()}, now)
+	tok, err := s.Login("admin", "s3cret-Passw0rd!")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	// 签发即有稳定 ID：UUID 格式、与签发时间成对
+	if tok.ID == "" || !idLikeUUID(tok.ID) {
+		t.Fatalf("签发的 token_id 应为 UUID 格式，实得 %q", tok.ID)
+	}
+	if tok.IssuedAt.IsZero() || !tok.IssuedAt.Equal(now()) {
+		t.Fatalf("签发时间应等于当前时刻: %+v", tok.IssuedAt)
+	}
+	// VerifyToken 回带同一 ID（handler 的「当前会话」标记依据）
+	vt, err := s.VerifyToken(tok.Token)
+	if err != nil || vt.ID != tok.ID {
+		t.Fatalf("VerifyToken 应回同一 ID: %+v err=%v", vt, err)
+	}
+	// 多次登录 ID 互不相同（逐 token 吊销要求可区分）
+	tok2, _ := s.Login("admin", "s3cret-Passw0rd!")
+	if tok2.ID == tok.ID {
+		t.Fatalf("两次登录的 token_id 不应相同: %s", tok.ID)
+	}
+}
+
+func TestListTokensScopeByClass(t *testing.T) {
+	now, _ := fakeClock()
+	s := NewService(fakeSource{testConfig()}, now)
+	adminTok, _ := s.Login("admin", "s3cret-Passw0rd!") // super-user
+	netopTok, _ := s.Login("netop", "s3cret-Passw0rd!") // operator
+	viewerTok, _ := s.Login("viewer", "s3cret-Passw0rd!")
+
+	// super-user：全部用户的会话都可见
+	all := s.ListTokens("admin", ClassSuperUser)
+	if len(all) != 3 {
+		t.Fatalf("super-user 应见全部 3 个会话，实得 %d", len(all))
+	}
+	// 其他 class：只见自己的
+	op := s.ListTokens("netop", ClassOperator)
+	if len(op) != 1 || op[0].ID != netopTok.ID {
+		t.Fatalf("operator 应只见自己的会话: %+v", op)
+	}
+	ro := s.ListTokens("viewer", ClassReadOnly)
+	if len(ro) != 1 || ro[0].ID != viewerTok.ID {
+		t.Fatalf("read-only 应只见自己的会话: %+v", ro)
+	}
+	// 当前会话标记只对持 ID 的会话为真
+	if !ro[0].Current(viewerTok.ID) || ro[0].Current(adminTok.ID) {
+		t.Fatalf("Current 标记不符: %+v", ro[0])
+	}
+	if ro[0].Current("") {
+		t.Fatalf("viewer ID 为空时 Current 必须为 false（不猜）")
+	}
+	// 凭据永不出现在清单里
+	for _, v := range all {
+		if v.ID == "" || v.User == "" || v.ExpiresAt.IsZero() {
+			t.Fatalf("清单条目字段缺失: %+v", v)
+		}
+	}
+}
+
+func TestRevokeTokenScopeByClass(t *testing.T) {
+	now, _ := fakeClock()
+	s := NewService(fakeSource{testConfig()}, now)
+	adminTok, _ := s.Login("admin", "s3cret-Passw0rd!")
+	netopTok, _ := s.Login("netop", "s3cret-Passw0rd!")
+	viewerTok, _ := s.Login("viewer", "s3cret-Passw0rd!")
+
+	// 非 super 吊销他人会话：与「不存在」同一错误（不泄露存在性）
+	if err := s.RevokeToken("netop", ClassOperator, adminTok.ID); !errors.Is(err, ErrTokenNotFoundOrForbidden) {
+		t.Fatalf("operator 吊销他人会话应 ErrTokenNotFoundOrForbidden: %v", err)
+	}
+	if err := s.RevokeToken("netop", ClassOperator, "no-such-id"); !errors.Is(err, ErrTokenNotFoundOrForbidden) {
+		t.Fatalf("吊销不存在的会话应同一错误: %v", err)
+	}
+	// 空串 id 同样拒绝
+	if err := s.RevokeToken("netop", ClassOperator, ""); !errors.Is(err, ErrTokenNotFoundOrForbidden) {
+		t.Fatalf("空 id 应拒绝: %v", err)
+	}
+	// 两会话应原样还在
+	if len(s.ListTokens("admin", ClassSuperUser)) != 3 {
+		t.Fatalf("无权吊销不应改变任何会话")
+	}
+
+	// 非 super 吊销自己的：成功且立即失效
+	if err := s.RevokeToken("viewer", ClassReadOnly, viewerTok.ID); err != nil {
+		t.Fatalf("吊销自己的会话应成功: %v", err)
+	}
+	if _, err := s.VerifyToken(viewerTok.Token); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("吊销后下一请求应 401（ErrUnauthorized）: %v", err)
+	}
+
+	// super 吊销他人的：成功且立即失效
+	if err := s.RevokeToken("admin", ClassSuperUser, netopTok.ID); err != nil {
+		t.Fatalf("super-user 吊销他人会话应成功: %v", err)
+	}
+	if _, err := s.VerifyToken(netopTok.Token); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("被 super 吊销后下一请求应 401: %v", err)
+	}
+	// admin 自己的会话还在
+	if _, err := s.VerifyToken(adminTok.Token); err != nil {
+		t.Fatalf("未吊销的会话应仍有效: %v", err)
+	}
+	// 吊销不存在的 id（super 视角）也是同一错误
+	if err := s.RevokeToken("admin", ClassSuperUser, netopTok.ID); !errors.Is(err, ErrTokenNotFoundOrForbidden) {
+		t.Fatalf("重复吊销应报同一错误: %v", err)
+	}
+}
+
+func TestListTokensExcludesExpired(t *testing.T) {
+	now, clockPtr := fakeClock()
+	s := NewService(fakeSource{testConfig()}, now)
+	if _, err := s.Login("admin", "s3cret-Passw0rd!"); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if len(s.ListTokens("admin", ClassSuperUser)) != 1 {
+		t.Fatalf("签发后应见 1 个会话")
+	}
+	// 越过 TTL：过期项先被清扫，不出现在清单里
+	*clockPtr = clockPtr.Add(61 * time.Minute)
+	if got := s.ListTokens("admin", ClassSuperUser); len(got) != 0 {
+		t.Fatalf("过期会话不应出现在清单里: %+v", got)
+	}
+	// 清单输出按签发时间稳定排序
+	*clockPtr = clockPtr.Add(2 * time.Minute)
+	s.Login("admin", "s3cret-Passw0rd!")
+	*clockPtr = clockPtr.Add(2 * time.Minute)
+	s.Login("netop", "s3cret-Passw0rd!")
+	list := s.ListTokens("admin", ClassSuperUser)
+	if len(list) != 2 || !list[0].IssuedAt.Before(list[1].IssuedAt) {
+		t.Fatalf("清单应按签发时间升序: %+v", list)
+	}
+}

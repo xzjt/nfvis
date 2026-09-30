@@ -15,6 +15,43 @@ import (
 	ksys "github.com/xzjt/nfvis/internal/system"
 )
 
+// execShowSystemAPI：`show system api tokens`（决策 #301）——活动会话 / API Token 清单。
+// 数据范围（super-user 全部 / 其他 class 仅自己）与「当前会话」标记的判据都在 aaa 实现
+// （ListTokens / TokenView.Current）；执行器只负责渲染。callerTokenID 是发起本条命令的
+// 会话 ID（ExecuteAs 注入），空串表示调用方没有稳定 ID 可比，标记列一律不加。
+func (x *cliExecutor) execShowSystemAPI(user, class string, t []string) string {
+	if len(t) != 1 || t[0] != "tokens" {
+		return "%% 无效命令: show system api " + strings.Join(t, " ") + "（可用：tokens）\n"
+	}
+	if x.tokens == nil {
+		return errRuntimeUnavailable
+	}
+	views := x.tokens.ListTokens(user, class)
+	if len(views) == 0 {
+		return "（无活动会话）\n"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-38s %-16s %-12s %-17s %-17s %s\n", "Token-ID", "User", "Class", "Issued", "Expires", "Session")
+	items := make([]any, 0, len(views))
+	for _, v := range views {
+		current := v.Current(x.callerTokenID)
+		items = append(items, map[string]any{
+			"token_id": v.ID, "user": v.User, "class": v.Class,
+			"issued_at": v.IssuedAt.Format(time.RFC3339), "expires_at": v.ExpiresAt.Format(time.RFC3339),
+			"current": current,
+		})
+		mark := "-"
+		if current {
+			mark = "当前会话"
+		}
+		fmt.Fprintf(&b, "%-38s %-16s %-12s %-17s %-17s %s\n",
+			v.ID, v.User, v.Class,
+			v.IssuedAt.Format("2006-01-02 15:04"), v.ExpiresAt.Format("2006-01-02 15:04"), mark)
+	}
+	x.structured = map[string]any{"api_tokens": items}
+	return b.String()
+}
+
 func (x *cliExecutor) execShowSystemDiag(t []string) string {
 	if len(t) == 0 {
 		return "%% 语法: show system <uptime|cpu|memory|storage|hugepages|core-dumps|tech-support>\n"
