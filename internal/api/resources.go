@@ -37,7 +37,7 @@ func sprintf(format string, args ...any) string { return fmt.Sprintf(format, arg
 // 无论成功、还是写候选之前就失败，收尾都交还会话锁（决策 #151，见 endOneShot）；
 // 不带该头时是纯候选写入（操作者正在编辑），锁必须留着。
 func (s *Server) mutateCandidate(w http.ResponseWriter, r *http.Request, status int, mutate func(*model.Config) error) {
-	sess := sessionFromIdentity(r)
+	sess := s.sessionFromIdentity(r)
 	if err := s.engine.Edit(sess); err != nil {
 		mapEngineError(w, err)
 		return

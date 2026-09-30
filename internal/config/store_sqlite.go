@@ -33,11 +33,20 @@ type AuditEntry struct {
 }
 
 // LockInfo candidate 会话锁持有信息（FR-CFG-009）。
+//
+// 决策 #317：Holder 是**展示/审计**用的身份键（user@source）；SessionID 是持锁会话的
+// **稳定标识**（REST 侧为 token 稳定 ID，决策 #301），两把不同的锁靠它区分（同一用户在
+// 同一 Source 下可以有两个会话）。匹配键见 key()。
 type LockInfo struct {
 	Holder       string
+	SessionID    string
 	AcquiredAt   time.Time
 	LastActivity time.Time
 }
+
+// key 会话锁的匹配键：身份键 + 稳定会话 ID（与 config.Session.key 同一算法，单源在
+// sessionKeyFor）。迁移前写入的老锁 session_id 为空（退回身份键），与旧语义一致。
+func (li LockInfo) key() string { return sessionKeyFor(li.Holder, li.SessionID) }
 
 // ConfirmedInfo commit confirmed 待确认状态（FR-CFG-003/004）。
 type ConfirmedInfo struct {
@@ -244,12 +253,15 @@ func (s *Store) PruneRevisions(keep int) error {
 }
 
 // AcquireLock 获取 candidate 会话锁；被占用时返回 ErrLocked（包装持有者）。
-func (s *Store) AcquireLock(holder string, at time.Time) error {
+//
+// holder = 展示用身份键（user@source），sessionID = 会话稳定标识（决策 #317，空串表示
+// 无稳定标识的旧式调用）。锁「被占用」的判据是二者构成的匹配键，不再只看身份键。
+func (s *Store) AcquireLock(holder, sessionID string, at time.Time) error {
 	res, err := s.db.Exec(
-		`INSERT INTO candidate_lock (lock_id, holder, acquired_at, last_activity)
-		 VALUES (1, ?, ?, ?)
+		`INSERT INTO candidate_lock (lock_id, holder, session_id, acquired_at, last_activity)
+		 VALUES (1, ?, ?, ?, ?)
 		 ON CONFLICT(lock_id) DO NOTHING`,
-		holder, fmtTime(at), fmtTime(at),
+		holder, sessionID, fmtTime(at), fmtTime(at),
 	)
 	if err != nil {
 		return fmt.Errorf("获取会话锁: %w", err)
@@ -264,11 +276,12 @@ func (s *Store) AcquireLock(holder string, at time.Time) error {
 	return nil
 }
 
-// RefreshLock 更新持有者的最后活动时间（空闲超时判定依据）。
-func (s *Store) RefreshLock(holder string, at time.Time) error {
+// RefreshLock 更新持有者的最后活动时间（空闲超时判定依据）。须由**同一会话**调用
+// （holder 与 sessionID 共同定位，决策 #317）。
+func (s *Store) RefreshLock(holder, sessionID string, at time.Time) error {
 	res, err := s.db.Exec(
-		`UPDATE candidate_lock SET last_activity = ? WHERE lock_id = 1 AND holder = ?`,
-		fmtTime(at), holder,
+		`UPDATE candidate_lock SET last_activity = ? WHERE lock_id = 1 AND holder = ? AND session_id = ?`,
+		fmtTime(at), holder, sessionID,
 	)
 	if err != nil {
 		return fmt.Errorf("刷新会话锁: %w", err)
@@ -279,10 +292,10 @@ func (s *Store) RefreshLock(holder string, at time.Time) error {
 	return nil
 }
 
-// ReleaseLock 释放锁；非持有者报错。
-func (s *Store) ReleaseLock(holder string) error {
+// ReleaseLock 释放锁；非持有者（含同一身份键下的**其它会话**）报错。
+func (s *Store) ReleaseLock(holder, sessionID string) error {
 	res, err := s.db.Exec(
-		`DELETE FROM candidate_lock WHERE lock_id = 1 AND holder = ?`, holder,
+		`DELETE FROM candidate_lock WHERE lock_id = 1 AND holder = ? AND session_id = ?`, holder, sessionID,
 	)
 	if err != nil {
 		return fmt.Errorf("释放会话锁: %w", err)
@@ -298,8 +311,8 @@ func (s *Store) GetLock() (*LockInfo, error) {
 	var li LockInfo
 	var acquired, activity string
 	err := s.db.QueryRow(
-		`SELECT holder, acquired_at, last_activity FROM candidate_lock WHERE lock_id = 1`,
-	).Scan(&li.Holder, &acquired, &activity)
+		`SELECT holder, session_id, acquired_at, last_activity FROM candidate_lock WHERE lock_id = 1`,
+	).Scan(&li.Holder, &li.SessionID, &acquired, &activity)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

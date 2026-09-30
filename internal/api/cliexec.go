@@ -261,11 +261,12 @@ func (x *cliExecutor) Execute(user, class, source, line string) CLIEResult {
 
 // ExecuteAs 同 Execute，另注入发起本条命令的会话稳定 ID（决策 #301：
 // handleCLIExecute 从认证身份取出 token ID 传入）——`show system api tokens`
-// 的「当前会话」标记与吊销自己的会话时的提示都以它为判据。
+// 的「当前会话」标记与吊销自己的会话时的提示都以它为判据；决策 #317 起，
+// CLI 会话态（模式/层级）与引擎 candidate 会话也以其为键，使同一用户的不同会话互不干扰。
 func (x *cliExecutor) ExecuteAs(user, class, source, tokenID, line string) CLIEResult {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	key := user + "@" + source
+	key := x.sessionStateKey(user, source, tokenID)
 	s := x.sess[key]
 	if s == nil {
 		s = &cliSession{Mode: "oper"}
@@ -294,6 +295,41 @@ func (x *cliExecutor) ExecuteAs(user, class, source, tokenID, line string) CLIER
 	}
 	return CLIEResult{Output: out, Mode: cur.Mode, Path: append([]string{}, cur.Path...), Prompt: promptOf(cur),
 		Console: x.consolePending, Warning: x.warningPending}
+}
+
+// sessionStateKey CLI 会话态（模式/层级）在 x.sess 里的键（决策 #317）：
+// 身份键（user@source）+ 稳定会话 ID（token ID）——同一用户在同一接入源下的两个会话因此
+// 互不干扰（旧行为按 user@source 归并，两个终端共享模式/层级），但 ssh 与 console 仍是
+// 不同接入源、各自独立；无稳定 ID 时退回 user@source，与旧语义逐字一致。
+func (x *cliExecutor) sessionStateKey(user, source, tokenID string) string {
+	holder := user + "@" + source
+	if tokenID == "" {
+		return holder
+	}
+	return holder + "#" + tokenID
+}
+
+// DropSession 结束一个会话时清掉它的 CLI 会话态（决策 #317，由 handleLogout 调用）。
+// 会话态键是「user@source#tokenID」，同一 token 可能在多个接入源下各有一条，故按键尾
+// 匹配删除；按 token 键控后逐次登录会各自留下条目，登出即会话结束，正是清理点。
+func (x *cliExecutor) DropSession(tokenID string) {
+	if tokenID == "" {
+		return
+	}
+	suffix := "#" + tokenID
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	for k := range x.sess {
+		if strings.HasSuffix(k, suffix) {
+			delete(x.sess, k)
+		}
+	}
+}
+
+// sessOf 构造当前命令所属的引擎会话（决策 #317）：带上发起会话的稳定 ID，
+// 使 candidate/编辑锁按会话而非身份键归属。x.callerTokenID 在单条命令执行期内有效。
+func (x *cliExecutor) sessOf(user, source string) config.Session {
+	return config.Session{User: user, Source: source, ID: x.callerTokenID}
 }
 
 // canonicalize 按当前模式/层级把命令 token 规整为规范关键字（FR-CLI-004：
@@ -384,14 +420,14 @@ func (x *cliExecutor) execOper(user, class, source string, s *cliSession, t []st
 			return "%% 无权限进入配置模式（需 super-user）\n"
 		}
 		// FR-CFG-001：进入配置模式即取得 candidate（副本），被占用时报错
-		if err := x.engine.Edit(config.Session{User: user, Source: source}); err != nil {
+		if err := x.engine.Edit(x.sessOf(user, source)); err != nil {
 			return "%% " + err.Error() + "\n"
 		}
 		s.Mode = "config"
 		s.Path = nil
 		return ""
 	case "exit", "quit":
-		delete(x.sess, user+"@"+source)
+		delete(x.sess, x.sessionStateKey(user, source, x.callerTokenID))
 		return ""
 	case "wizard":
 		// 初始化向导是 CLI 端交互编排（决策 #107）：REST/脚本路径无 TTY 不能问答，
@@ -495,7 +531,7 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 				}
 				// 与 `show system configuration sessions` **同一实现**（同一读物，
 				// 不复制渲染逻辑——两处各写一份必然漂移）。
-				return x.showConfigSessions()
+				return x.showConfigSessions(user, class)
 			case "candidate":
 				if len(t) != 2 {
 					return invalidShowConfiguration(t[1:])
@@ -564,7 +600,7 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 	case len(t) == 1 && t[0] == "resource-pools":
 		return x.execShowResourcePools()
 	case len(t) >= 3 && t[0] == "system" && t[1] == "configuration" && t[2] == "sessions":
-		return x.showConfigSessions()
+		return x.showConfigSessions(user, class)
 	case len(t) >= 3 && t[0] == "system" && t[1] == "api":
 		return x.execShowSystemAPI(user, class, t[2:]) // 决策 #301：活动会话 / API Token
 	}
@@ -755,18 +791,34 @@ func soleKeywordChild(n *schema.Node) *schema.Node {
 
 // showConfigSessions：candidate 持锁会话列表（`show system configuration sessions` 与
 // 等价写法 `show configuration sessions` 的**唯一**实现，与 GET /system/configuration/sessions 同源）。
-func (x *cliExecutor) showConfigSessions() string {
+//
+// 决策 #317：除展示用 holder 外，如实列出**会话标识**与**所属用户**——同一用户的多个会话
+// 不再被合并成一条，操作者可据此判断「是谁、哪个会话」在编辑。会话标识为空（confirmed
+// 在途但无持锁会话、或迁移前遗留的老锁）显示 `-`（未记录，不编造）。
+// 范围：**非 super-user 只能看到自己的会话**（决策 #317，与 /system/api-tokens 的
+// 「其他 class 只列自己的」同口径）；super-user 看全部。
+func (x *cliExecutor) showConfigSessions(user, class string) string {
 	views, err := x.engine.Sessions()
 	if err != nil {
 		return "%% 查询失败: " + err.Error() + "\n"
 	}
+	views = visibleSessions(views, user, class)
 	if len(views) == 0 {
 		return "（无持锁会话）\n"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Holder       Acquired            Last-Activity       Dirty\n")
+	fmt.Fprintf(&b, "%-12s %-36s %-10s %-19s %-19s %v\n",
+		"Holder", "Session", "User", "Acquired", "Last-Activity", "Dirty")
 	for _, v := range views {
-		fmt.Fprintf(&b, "%-12s %-19s %-19s %v\n", v.Holder,
+		sid := v.SessionID
+		if sid == "" {
+			sid = "-"
+		}
+		user := v.User
+		if user == "" {
+			user = "-"
+		}
+		fmt.Fprintf(&b, "%-12s %-36s %-10s %-19s %-19s %v\n", v.Holder, sid, user,
 			v.AcquiredAt.Format("2006-01-02 15:04"), v.LastActivity.Format("2006-01-02 15:04"), v.Dirty)
 	}
 	return b.String()
@@ -795,7 +847,7 @@ func (x *cliExecutor) execConfig(user, class, source string, s *cliSession, t []
 	case "rollback":
 		return x.cfgRollback(user, source, t[1:])
 	case "discard":
-		if err := x.engine.Discard(config.Session{User: user, Source: source}); err != nil {
+		if err := x.engine.Discard(x.sessOf(user, source)); err != nil {
 			return "%% " + err.Error() + "\n"
 		}
 		return "candidate 已丢弃，会话锁已释放\n"
@@ -820,7 +872,7 @@ func (x *cliExecutor) execConfig(user, class, source string, s *cliSession, t []
 		if _, dirty, err := x.engine.Candidate(); err == nil && dirty {
 			return "%% 存在未提交变更，先 commit 或 discard\n"
 		}
-		_ = x.engine.Release(config.Session{User: user, Source: source})
+		_ = x.engine.Release(x.sessOf(user, source))
 		s.Mode = "oper"
 		s.Path = nil
 		return ""
@@ -841,7 +893,7 @@ func (x *cliExecutor) execSetDelete(user, source string, s *cliSession, op strin
 	if _, _, err := schema.Match(schema.ConfigPathTree(), full); err != nil {
 		return "%% " + err.Error() + "\n"
 	}
-	sess := config.Session{User: user, Source: source}
+	sess := x.sessOf(user, source)
 	if err := x.engine.Edit(sess); err != nil {
 		return "%% " + err.Error() + "\n"
 	}
@@ -913,7 +965,7 @@ func (x *cliExecutor) cfgShow(user, source string, s *cliSession, args []string)
 	}
 	// FR-CFG-009：非持有者会话只读——展示 committed 而非持有者的 candidate
 	views, _ := x.engine.Sessions()
-	if len(views) == 0 || views[0].Holder != user+"@"+source {
+	if !x.sessionHoldsLock(views, user, source) {
 		cfg, _ = x.engine.Committed()
 	}
 	tree := toJSONTree(cfg)
@@ -935,11 +987,25 @@ func (x *cliExecutor) cfgShow(user, source string, s *cliSession, args []string)
 	return out + "\n"
 }
 
+// sessionHoldsLock 报告会话表里的持锁者是否就是本命令的会话（决策 #317：按会话标识判定，
+// 不再只比身份键——同一用户的另一会话不得误认为自己持有 candidate）。
+// callerTokenID 为空（无稳定标识的旧式调用）时退回身份键比较，与旧语义一致。
+func (x *cliExecutor) sessionHoldsLock(views []config.SessionView, user, source string) bool {
+	if len(views) == 0 {
+		return false
+	}
+	v := views[0]
+	if v.Holder != user+"@"+source {
+		return false
+	}
+	return v.SessionID == x.callerTokenID
+}
+
 func (x *cliExecutor) cfgCommit(user, source string, s *cliSession, args []string) string {
 	opts := config.CommitOpts{}
 	switch {
 	case len(args) > 0 && args[0] == "check":
-		errs, err := x.engine.CommitCheck(config.Session{User: user, Source: source})
+		errs, err := x.engine.CommitCheck(x.sessOf(user, source))
 		if err != nil {
 			return "%% " + err.Error() + "\n"
 		}
@@ -963,7 +1029,7 @@ func (x *cliExecutor) cfgCommit(user, source string, s *cliSession, args []strin
 		s.Path = nil
 		return res
 	}
-	res, err := x.engine.Commit(context.Background(), config.Session{User: user, Source: source}, opts)
+	res, err := x.engine.Commit(context.Background(), x.sessOf(user, source), opts)
 	if err != nil {
 		var ve *config.ValidationError
 		if errors.As(err, &ve) {
@@ -999,7 +1065,7 @@ func (x *cliExecutor) cfgRollback(user, source string, args []string) string {
 		}
 		n = v
 	}
-	sess := config.Session{User: user, Source: source}
+	sess := x.sessOf(user, source)
 	if err := x.engine.Edit(sess); err != nil { // 未持锁时先进入编辑态
 		return "%% " + err.Error() + "\n"
 	}

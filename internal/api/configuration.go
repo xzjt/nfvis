@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/model"
 )
@@ -18,13 +19,25 @@ import (
 // 与 CLI 会话（user@ssh/user@console）按会话锁规则互斥（决策 #26）。
 // 配置端点要求 configure 权限（命令树 §4：S）。
 
-// sessionFromIdentity 由 token 身份构造引擎会话。
-func sessionFromIdentity(r *http.Request) config.Session {
+// sessionFromIdentity 由 token 身份构造引擎会话（*Server 方法，缺稳定标识时记日志）。
+//
+// 决策 #317：会话标识取 token 稳定 ID（决策 #301），使同一用户的不同 token（控制台一个、
+// CLI 脚本一个、REST 客户端一个）成为**互不干扰**的独立会话——R79-1 的根因正是所有 REST
+// 流量都归并成 `user@api` 一个身份键，于是任一 token 登出即丢弃该用户全部候选。
+// 无身份（理论上不该到达受保护端点）或无稳定 ID 的**旧式调用**退回保守的身份键语义
+// （只影响自己、不动他人），并记一条日志（修复过程可核查、不静默）。
+func (s *Server) sessionFromIdentity(r *http.Request) config.Session {
 	info, ok := Identity(r)
 	if !ok {
+		if s.log != nil {
+			s.log.Warn("配置会话缺少认证身份，按保守身份键处理（只影响自己）", "source", "api")
+		}
 		return config.Session{User: "anonymous", Source: "api"}
 	}
-	return config.Session{User: info.User, Source: "api"}
+	if info.ID == "" && s.log != nil {
+		s.log.Warn("配置会话缺少稳定标识，按身份键归并（只影响自己、不动他人）", "user", info.User, "source", "api")
+	}
+	return config.Session{User: info.User, Source: "api", ID: info.ID}
 }
 
 // endOneShot 一次性事务的收尾：候选干净时交还全局编辑锁（决策 #151）。
@@ -138,7 +151,7 @@ func (s *Server) handleConfigurationHistory(w http.ResponseWriter, r *http.Reque
 //
 // X-NFVIS-Auto-Commit: true 时校验+下发+落库一次完成（决策 #22）。
 func (s *Server) handlePutCandidate(w http.ResponseWriter, r *http.Request) {
-	sess := sessionFromIdentity(r)
+	sess := s.sessionFromIdentity(r)
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "读取请求体失败", nil)
@@ -196,7 +209,7 @@ func (s *Server) handlePutCandidate(w http.ResponseWriter, r *http.Request) {
 // handleDeleteCandidate DELETE /configuration/candidate：丢弃 candidate 并释放锁
 // （discard，骨架 §3.4）。
 func (s *Server) handleDeleteCandidate(w http.ResponseWriter, r *http.Request) {
-	sess := sessionFromIdentity(r)
+	sess := s.sessionFromIdentity(r)
 	if err := s.engine.Discard(sess); err != nil {
 		mapEngineError(w, err)
 		return
@@ -206,7 +219,7 @@ func (s *Server) handleDeleteCandidate(w http.ResponseWriter, r *http.Request) {
 
 // handleCommit POST /configuration/commit：提交 candidate（FR-CFG-002/003）。
 func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
-	sess := sessionFromIdentity(r)
+	sess := s.sessionFromIdentity(r)
 	res, err := s.engine.Commit(r.Context(), sess, CommitOptsFrom(r))
 	if err != nil {
 		mapEngineError(w, err)
@@ -218,7 +231,7 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 // handleCommitConfirm POST /configuration/commit:confirm：确认在途 confirmed
 // （FR-CFG-004）。
 func (s *Server) handleCommitConfirm(w http.ResponseWriter, r *http.Request) {
-	sess := sessionFromIdentity(r)
+	sess := s.sessionFromIdentity(r)
 	if err := s.engine.ConfirmCommit(sess); err != nil {
 		mapEngineError(w, err)
 		return
@@ -230,7 +243,7 @@ func (s *Server) handleCommitConfirm(w http.ResponseWriter, r *http.Request) {
 // REST 等价物，round42 覆盖核查缺口 #10 / 决策 #122）。校验发现问题时**仍返回 200**——
 // 检查本身是成功的，结果在 ok 与 errors 里（客户端不必把 400 当"检查失败"处理）。
 func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
-	verrs, err := s.engine.CommitCheck(sessionFromIdentity(r))
+	verrs, err := s.engine.CommitCheck(s.sessionFromIdentity(r))
 	if err != nil {
 		mapEngineError(w, err)
 		return
@@ -256,7 +269,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 // handleRollback POST /configuration/rollback/{n}：取历史快照为 candidate
 // （FR-CFG-005，需再 commit 生效）。
 func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
-	sess := sessionFromIdentity(r)
+	sess := s.sessionFromIdentity(r)
 	n, err := strconv.Atoi(r.PathValue("n"))
 	if err != nil || n < 1 {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "rollback 编号必须为正整数", nil)
@@ -275,13 +288,34 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSessions GET /system/configuration/sessions：持锁会话列表（FR-CFG-009，决策 #26）。
+//
+// 决策 #317：非 super-user 只能看到**自己的**会话（与 /system/api-tokens 同口径）；
+// super-user 看全部。配置锁只有具备 configure 权限（super-user）的会话能取得，故此过滤
+// 对非 super-user 实际等价于「看不到别人的编辑锁」——不泄露其他用户的会话标识。
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	views, err := s.engine.Sessions()
 	if err != nil {
 		mapEngineError(w, err)
 		return
 	}
+	if info, ok := Identity(r); ok {
+		views = visibleSessions(views, info.User, info.Class)
+	}
 	writeJSON(w, http.StatusOK, views)
+}
+
+// visibleSessions 按调用者范围过滤持锁会话（决策 #317）：super-user 全量，其他 class 仅自己。
+func visibleSessions(views []config.SessionView, user, class string) []config.SessionView {
+	if class == aaa.ClassSuperUser {
+		return views
+	}
+	out := make([]config.SessionView, 0, len(views))
+	for _, v := range views {
+		if v.User == user {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // ---------- 辅助 ----------

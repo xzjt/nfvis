@@ -78,19 +78,23 @@ func TestStoreLock(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Now()
 
-	if err := s.AcquireLock("admin@ssh", now); err != nil {
+	if err := s.AcquireLock("admin@ssh", "sess-a", now); err != nil {
 		t.Fatalf("AcquireLock: %v", err)
 	}
-	if err := s.AcquireLock("netop@ssh", now); !errors.Is(err, ErrLocked) {
+	if err := s.AcquireLock("netop@ssh", "", now); !errors.Is(err, ErrLocked) {
 		t.Fatalf("重复加锁应返回 ErrLocked，实际 %v", err)
+	}
+	// 决策 #317：同一身份键下的**另一会话**同样被拒（会话标识不同即不是持有者）。
+	if err := s.AcquireLock("admin@ssh", "sess-b", now); !errors.Is(err, ErrLocked) {
+		t.Fatalf("同身份键的其它会话加锁也应返回 ErrLocked，实际 %v", err)
 	}
 
 	li, err := s.GetLock()
-	if err != nil || li == nil || li.Holder != "admin@ssh" {
+	if err != nil || li == nil || li.Holder != "admin@ssh" || li.SessionID != "sess-a" {
 		t.Fatalf("GetLock: %+v err=%v", li, err)
 	}
 
-	if err := s.RefreshLock("admin@ssh", now.Add(time.Minute)); err != nil {
+	if err := s.RefreshLock("admin@ssh", "sess-a", now.Add(time.Minute)); err != nil {
 		t.Fatalf("RefreshLock: %v", err)
 	}
 	li, _ = s.GetLock()
@@ -98,10 +102,13 @@ func TestStoreLock(t *testing.T) {
 		t.Fatalf("RefreshLock 未更新活动时间: %+v", li)
 	}
 
-	if err := s.ReleaseLock("netop@ssh"); err == nil {
+	if err := s.ReleaseLock("netop@ssh", ""); err == nil {
 		t.Fatalf("非持有者释放锁应报错")
 	}
-	if err := s.ReleaseLock("admin@ssh"); err != nil {
+	if err := s.ReleaseLock("admin@ssh", "sess-b"); err == nil {
+		t.Fatalf("同身份键的其它会话释放锁应报错（不得误伤本会话）")
+	}
+	if err := s.ReleaseLock("admin@ssh", "sess-a"); err != nil {
 		t.Fatalf("ReleaseLock: %v", err)
 	}
 	if li, _ := s.GetLock(); li != nil {

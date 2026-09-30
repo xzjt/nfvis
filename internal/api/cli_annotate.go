@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/schema"
 )
@@ -48,7 +47,7 @@ func (x *cliExecutor) cfgAnnotate(user, source string, s *cliSession, raw string
 	}
 	key := strings.Join(resolved, " ")
 
-	sess := config.Session{User: user, Source: source}
+	sess := x.sessOf(user, source)
 	if err := x.engine.Edit(sess); err != nil {
 		return "%% " + err.Error() + "\n"
 	}
@@ -101,7 +100,7 @@ func (x *cliExecutor) cfgLoad(user, source string, args []string) string {
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return "%% 配置 JSON 不合法: " + err.Error() + "\n"
 	}
-	sess := config.Session{User: user, Source: source}
+	sess := x.sessOf(user, source)
 	if err := x.engine.Edit(sess); err != nil {
 		return "%% " + err.Error() + "\n"
 	}

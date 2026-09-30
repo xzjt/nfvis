@@ -85,10 +85,10 @@ func (s *Session) Logout() {
 
 // Teardown 退出前收尾：丢弃 candidate → 退出配置模式 → 吊销 token；返回各步输出。
 //
-// 服务端会话按 user@source 保留（与 token 生命周期无关），不做收尾会把
-// 「配置模式 + candidate 锁」留给下一次登录——表现为下一次 `configure` 报
-// `%% 无效命令`，且 `?` 候选与执行都按上一模式解释。`-c` 脚本与交互 REPL
-// 的两条退出路径（EOF / 空闲超时）都必须调用（附录 A #82④）。
+// 服务端配置会话按**会话标识**保留（决策 #317：身份键 + token 稳定 ID，与 token 生命周期
+// 绑定的语义见决策 #301），不做收尾会把「配置模式 + candidate 锁」留给下一次登录——表现为
+// 下一次 `configure` 报 `%% 无效命令`，且 `?` 候选与执行都按上一模式解释。`-c` 脚本与交互
+// REPL 的两条退出路径（EOF / 空闲超时）都必须调用（附录 A #82④）。
 func (s *Session) Teardown() []string {
 	var outs []string
 	if s.Mode == "config" {
