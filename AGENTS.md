@@ -257,7 +257,7 @@ bash contrib/scripts/offline-installer-selftest.sh --run build/nfvis-vX.run   # 
 （三列：命令 / 类别 / 理由，理由须说明**改由谁覆盖**）。守护 `contrib/scripts/check_suite_contract_sync.sh`
 （自带桩式自校准）随 `make check` 的 `toolcheck` 跑——**只进实现不补套件的命令会被它挡住**（v2 线的
 `show system api tokens`、`set/delete system login banner` 就是这么漏进过的）。四套件基线（v2 线，见 #319）：
-`cli-fulltest` **212/0/13**、`cli-semantic-check` **24/0/1**、`cli-lifecycle-check` **21/0/3**、`cli-pty-smoke` **10/10**；
+`cli-fulltest` **210/0/13**（实测修正：2026-10-01 round101 真机为 210/0/13——设计里的 212 系逐阶段增量相加的算术偏差）、`cli-semantic-check` **24/0/1**、`cli-lifecycle-check` **21/0/3**、`cli-pty-smoke` **10/10**；
 套件数字的每一处变化都要写清「哪条新增/移除、为什么」（#304 那次 195/0/12→198/0/11 的漂移是教训）。
 
 后者是唯一能发现「命令成功但答非所问 / 取自配置而非运行态」的那层（决策 #84/#85）——
