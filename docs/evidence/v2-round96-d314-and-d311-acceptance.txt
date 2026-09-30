@@ -1,0 +1,35 @@
+NFViS v2 真机验证记录 round96 —— 决策 #314（VPP 不可用前置判定）+ #311 验收 + 四套件
+====================================================================
+日期：2026-09-30
+环境：nfvis-vm（SSH key）；本轮构建 2.0.0~dev9（v2 线，PR #243 合并后）；升级前 2.0.0~dev8
+源码：git archive v2（bba9bcc）；SOURCE_DATE_EPOCH=1790783338
+
+§1 决策 #314 验收（✓ 通过）—— 用「停 VPP」注入，按决策行写明的验收条件逐条核对
+现场：带 vhost-user vNIC 的 fw-vm（关机态，`virsh domstate` = shut off）→ `systemctl stop vpp` →
+- **`start` 耗时 0 秒**（round95 同一注入下为 90s 客户端超时）✓
+  文案：`%% 数据面（VPP）当前不可用：未启动虚拟机 fw-vm（unable to process request: write unix @->/run/vpp/api.sock: write: broken pipe）；`
+- **无 paused 残域**：`virsh domstate fw-vm` = `shut off` ✓（未进入阻塞路径，也就没有残域）
+- **`restart` 的 off→start 分支同样 0 秒失败** ✓（#311 曾登记该分支未纳入，#314 一并覆盖）
+  文案：`%% 数据面（VPP）当前不可用：未启动虚拟机 fw-vm（dial unix /run/vpp/api.sock: connect: connection refused）；…`
+- **REST 同路径**：`POST /virtual-machine-functions/fw-vm:start` → **503 UNAVAILABLE**，
+  message 与 CLI 同款（既有 Error 形状、未新增字段）✓
+- **恢复**：`systemctl start vpp` → `start` 回既有成功文案「启动 VNF fw-vm 已受理」+ `virsh domstate` = `running` ✓
+  （正常路径语义与耗时未变：判定是一次内存读）
+
+§2 决策 #311 的验收（✓ 一并完成）
+#311 的验收条件依赖 #314 的前置判定（否则请求走不到探测窗口）。本条与 §1 同一次注入完成：
+VPP 不可用时不再有「阻塞到超时 + paused 悬停」这条路径，因此 #311 在**可达路径**上的行为即为
+「VPP 可用但域停在 paused（例如 vhost 初始化失败）」——该路径的诊断由 #311 的窗口负责（单测覆盖：
+paused/starting-up ⇒ 失败 + 状态/原因/建议/日志摘录；正常 ⇒ 202 逐字不变），
+真机上未能构造出「VPP 在跑而域停在 paused」的稳定注入（如后续需要，可考虑移除 vhost socket 目录等方法），
+**如实登记为真机未走查项**（单测 + 本轮 #314 的端到端证据为本条的支撑）。
+
+§3 四套件（2.0.0~dev9）
+- cli-fulltest：**198 通过 / 0 失败 / 11 预期报错**
+- cli-semantic-check：**12 / 0 / 1**
+- cli-lifecycle-check：**3 通过 / 0 失败 / 6 跳过**——本轮为「自由口/对象被占」的同族退化（round87 记录过同类：
+  未清场/现场不满足前置时自由口类检查全跳过），**零失败**；待下一轮在干净现场复跑到 21~22/0/3
+- cli-pty-smoke：**10 / 10**
+
+§4 现场终态
+sw=0 / vmf=0 / 告警已清 / 会话 1；VPP 持有 ens192/ens224；nfvis 与 vpp active；版本 nfvis 2.0.0~dev9
