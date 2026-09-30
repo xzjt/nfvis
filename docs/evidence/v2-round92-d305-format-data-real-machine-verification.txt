@@ -1,0 +1,56 @@
+NFViS v2 真机验证记录 round92 —— 决策 #305（format-data 收口）+ 四套件
+====================================================================
+日期：2026-09-30
+环境：nfvis-vm（SSH key）；本轮构建 2.0.0~dev5（v2 线，PR #239 合并后）；升级前为 2.0.0~dev4
+源码：git archive v2（a820cff）；SOURCE_DATE_EPOCH=1790767689
+⚠️ 本轮为**破坏性功能**的真机验证：会真的清空测试机的受管数据（夹具已先备份、事后按产品路径恢复）。
+
+§1 夹具备份与恢复（含两处产品防呆的真实走通）
+备份（执行前）：`/root/fixtures-backup/` ← images 目录全量拷贝、`docker save alpine:3.20`、
+配置快照 `config-pre.txt`（26 行）、docker 镜像清单。
+恢复（四源核对与套件之后）：
+- `docker load` alpine:3.20 ✓
+- 镜像用**产品路径**重新导入：`request images upload name <n> type vm-image file <path>`
+  —— 两处防呆按设计的走了：① 缺 `type` 参数 → 语法回显修正；② 上传源**必须位于 `/data/incoming`**
+  （相对路径按该目录解析）→ 先 `cp` 进暂存区再传；三件导入完成（alpine/cli-test 179 MiB、
+  debian-12-generic 427 MiB），`GET /images` = 4 条（与备份一致）
+
+§2 决策 #305 真机验证（恢复出厂数据状态）
+造现场：L3 受管对象齐备（交换机 vs-fmt + VNF cli-vm(1G 大页、vNIC) + 容器 ct-fmt）；
+执行前 REST sw/vmf/ct 各 1、`virsh list --all` 有 cli-vm、`docker ps -a` 有 ct-fmt。
+执行：`request system storage format-data --yes --yes`（双确认，照搬 zeroize 口径）→
+  输出：「已重置数据分区：删除对象 5 个（容器 1 / VNF 1 / 交换机 1 / VRF 0 / 路由 0 / ACL 1 / NAT 0 / 镜像 4）、
+  清理文件 20 个、释放 827051647 字节（修订 257）；保留 system.management/system.api/system.login/interfaces/vpp.dpdk」
+四源核对（全部符合口径）：
+- **(a) 配置逐行差异**（`config-pre.txt` ↔ 执行后）：被清 = acls（测试残渣）、resource-pools、
+  system hostname/idle-timeout、vpp cpu、vpp memory hugepage-preference、qos policies；
+  保留 = interfaces ens192/224（含声明与 description/disable）、system login user、vpp dpdk dev 两条
+  —— **保命条款逐条兑现**（management/api 处于默认值故不出现于 display set）
+- **(b) CLI 读视图**：虚拟交换机/VNF/容器 全 0；`show interfaces` 仍见两个 DPDK 口；镜像 0 → 恢复后 4
+- **(c) 独立底座事实源**：`vppctl` 仍持有 ens192/ens224；`virsh list --all` 无 cli-vm；
+  `docker ps -a` 无 ct-fmt；`/var/lib/nfvis/{backup,captures,coredumps}` 空、`images` 仅剩 index.json（保持同步）；
+  `/var/lib/nfvis` 权限 755 root:root **不变**
+- **(d) 管理面可达**：`POST /login` 200、服务 active、**未重启即恢复可用**
+幂等复核：再次执行 → 「已是出厂态：无受管对象/数据可清（修订 257）」，不提交空修订、计数全 0
+审计（决策 #150 两条）：`system.format-data | intent` + `system.format-data | success` 成对落
+恢复基线段：被清的 resource-pools（isolated-cores 1,2,3,4；1G=2 / 2M=768）与 vpp cpu/memory 按备份快照
+  用 CLI 回补（测试残渣 acls/qos/hostname/idle-timeout **有意不回补**）→ 配置 16 行、`show resource-pools` 1G 池 total 2 / free 2
+
+§3 四套件（2.0.0~dev5）
+- cli-fulltest：**198 通过 / 0 失败 / 11 预期报错** —— 与 round91 基线一致
+   （format-data 属 fulltest 的「破坏性不执行」清单，故计数不变）
+- cli-semantic-check：12 / 0 / 1 —— 与基线一致
+- cli-lifecycle-check：22 / 0 / 3（按前轮口径清场 + 建对照现场）
+- cli-pty-smoke：10 / 10
+结论：零失败。
+
+§4 观察（按设计、已登记）
+- format-data 的「保留节」不含 `resource-pools` / `vpp.cpu` / `vpp.memory`（决策 #305 已写明理由：
+  vpp.cpu 的校验依赖 resource-pools，一起保留会自相矛盾）——因此执行后需要按现场需要重新声明资源池，
+  这是「恢复出厂数据状态」的应有语义，非缺陷；本轮以备份快照回补了测试机基线段
+- 顺带验证了「测试残渣被清」的正向效果：多轮套件留下的 acls/qos/hostname/idle-timeout 测试条目
+  一并被清掉，配置回到干净基线
+
+§5 现场终态
+- sw=0 / vmf=0 / ct=0、会话 1、镜像 4（与备份一致）、docker alpine:3.20 已恢复
+- VPP 持有 ens192/ens224、版本 nfvis 2.0.0~dev5
