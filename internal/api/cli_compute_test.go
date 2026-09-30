@@ -12,6 +12,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -206,6 +207,38 @@ func TestCLIRequestVMStartSurfacesDiagnosis(t *testing.T) {
 	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", "request virtual-machine-functions fw-vm start")
 	if res.Output != "启动 VNF fw-vm 已受理\n" {
 		t.Fatalf("正常启动文案不得改变，实得 %q", res.Output)
+	}
+}
+
+// TestCLIRequestVMStartDataPlaneUnavailable 决策 #314：VPP 不可用时 start 以 `%%` 秒级报出
+// 「数据面（VPP）当前不可用，未启动虚拟机」与恢复指引，并记审计 failure；restart 同源。
+func TestCLIRequestVMStartDataPlaneUnavailable(t *testing.T) {
+	x, engine := newCLIKit(t)
+	seedVMConfig(t, x)
+	vmRT := newFakeVM()
+	vmRT.startErr = fmt.Errorf("%w：未启动虚拟机 fw-vm（VPP 未连接）；请先恢复数据面后重试——request vpp restart（自查：show vpp）",
+		orchestrator.ErrDataPlaneUnavailable)
+	x.setComputeRuntime(vmRT, nil, nil, nil, nil)
+
+	res := x.Execute("admin", aaa.ClassSuperUser, "ssh", "request virtual-machine-functions fw-vm start")
+	if !strings.Contains(res.Output, "%%") {
+		t.Fatalf("数据面不可用应报失败: %s", res.Output)
+	}
+	for _, want := range []string{"当前不可用", "未启动虚拟机", "request vpp restart", "show vpp"} {
+		if !strings.Contains(res.Output, want) {
+			t.Errorf("CLI 输出应含 %q：%s", want, res.Output)
+		}
+	}
+	if !auditHas(t, engine, "vm.start") {
+		t.Fatal("启动失败应入审计")
+	}
+
+	// restart 的 off→start 分支同源（restart 直接返回同一哨兵错误）。
+	vmRT.restartErr = vmRT.startErr
+	vmRT.startErr = nil
+	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", "request virtual-machine-functions fw-vm restart")
+	if !strings.Contains(res.Output, "%%") || !strings.Contains(res.Output, "request vpp restart") {
+		t.Fatalf("restart 数据面不可用应报失败并给指引: %s", res.Output)
 	}
 }
 

@@ -35,6 +35,19 @@ var ErrIfaceUnavailable = errors.New("接口在 VPP 中不存在")
 // network）；network 包以别名复用同一实例，各 provider 原有判定不受影响。
 var ErrL2Unavailable = errors.New("VPP 未连接，L2 客户端不可用")
 
+// ErrDataPlaneUnavailable 数据面（VPP）当前不可用（未运行 / 连接不可达）——启动虚拟机的前置
+// 判定命中（决策 #314）。启动路径据此在**进入会阻塞的 vhost-user/socket 准备之前**立即失败。
+//
+// 由来（round95 真机实证）：VPP 未运行时，带 vhost-user vNIC 的域在 libvirt DomainCreate
+// （compute.Provider 的 p.api.Start）内**阻塞**等待 VPP vhost-user socket 出现——请求在到达
+// 决策 #311 的 3s 探测窗口之前就耗到客户端超时（90s），且域停在 paused。故判定必须前移到
+// api.Start 之前：命中即秒级返回原因与恢复指引，且不产生 paused 残域。
+//
+// 判定复用**既有**的 VPP 连接状态查询（装配层注入 network.Manager.StatusView，与 /vpp/status
+// 同源），不在 compute 里另写探测。与 ErrL2Unavailable/ErrVrfNotRemoved 同一理由定义在本包
+// （依赖方向不允许 orchestrator 反向 import network）；API 层据此映射 503 UNAVAILABLE。
+var ErrDataPlaneUnavailable = errors.New("数据面（VPP）当前不可用")
+
 // ErrVrfNotRemoved 删表后读回发现表仍在 VPP 里（按「未收敛」上报）。
 //
 // 触发条件是 VPP 在表仍被占用时对 ip_table_add_del(del) **返回 0 却不真删**——占用者可能是

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,6 +21,8 @@ type fakeVM struct {
 	// nil 表示正常启动（OK、无诊断字段）。
 	startProbe *orchestrator.VMStartProbe
 	startErr   error
+	// restartErr 非 nil 时 RestartVM 返回它（决策 #314 的 restart off→start 分支测试）。
+	restartErr error
 }
 
 func newFakeVM() *fakeVM { return &fakeVM{states: map[string]string{}} }
@@ -56,6 +59,9 @@ func (f *fakeVM) StopVM(_ context.Context, name string) error {
 }
 func (f *fakeVM) RestartVM(_ context.Context, name string) error {
 	f.actions = append(f.actions, "restart:"+name)
+	if f.restartErr != nil {
+		return f.restartErr
+	}
 	f.states[name] = orchestrator.VMStateRunning
 	return nil
 }
@@ -235,6 +241,65 @@ func TestVMActionStartNormalShapeUnchanged(t *testing.T) {
 	if strings.Contains(string(data), "VM_START_FAILED") || strings.Contains(string(data), "vm_state") {
 		t.Fatalf("正常启动不应带诊断字段: %s", data)
 	}
+}
+
+// TestVMActionStartDataPlaneUnavailable503 决策 #314：VPP 不可用（启动前置判定命中）时，
+// REST 用既有 Error 形状返回 503 UNAVAILABLE（不新增 code/响应字段），message 含「未启动虚拟机」
+// 与恢复指引；不得误用「已创建域但没起来」的 500 VM_START_FAILED。
+func TestVMActionStartDataPlaneUnavailable503(t *testing.T) {
+	fake := newFakeVM()
+	fake.startErr = fmt.Errorf("%w：未启动虚拟机 fw-vm（VPP 未连接）；请先恢复数据面后重试——request vpp restart（自查：show vpp）",
+		orchestrator.ErrDataPlaneUnavailable)
+	ts := newTestServerOpts(t, Options{VM: fake})
+	token := loginAdmin(t, ts)
+	seedVMPool(t, ts, token)
+	cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		vmBody("fw-vm"), map[string]string{"X-NFVIS-Auto-Commit": "true"})
+
+	status, _, data := cfgRequest(t, http.MethodPost,
+		ts.URL+APIPrefix+"/virtual-machine-functions/fw-vm:start", token, nil, nil)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("数据面不可用应 503: %d %s", status, data)
+	}
+	for _, want := range []string{"UNAVAILABLE", "数据面（VPP）当前不可用", "未启动虚拟机", "request vpp restart"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("响应应含 %q：%s", want, data)
+		}
+	}
+	if strings.Contains(string(data), "VM_START_FAILED") {
+		t.Errorf("数据面前置判定不是 VM_START_FAILED: %s", data)
+	}
+	if !strings.Contains(string(alogOf(t, ts, token)), "vm.start") {
+		t.Error("启动失败应入审计")
+	}
+}
+
+// TestVMActionRestartDataPlaneUnavailable503 决策 #314：restart 的 off→start 分支命中数据面
+// 不可用，同样 503 UNAVAILABLE（既有 Error 形状）。
+func TestVMActionRestartDataPlaneUnavailable503(t *testing.T) {
+	fake := newFakeVM()
+	fake.restartErr = fmt.Errorf("%w：未启动虚拟机 fw-vm（VPP 未运行）", orchestrator.ErrDataPlaneUnavailable)
+	ts := newTestServerOpts(t, Options{VM: fake})
+	token := loginAdmin(t, ts)
+	seedVMPool(t, ts, token)
+	cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		vmBody("fw-vm"), map[string]string{"X-NFVIS-Auto-Commit": "true"})
+
+	status, _, data := cfgRequest(t, http.MethodPost,
+		ts.URL+APIPrefix+"/virtual-machine-functions/fw-vm:restart", token, nil, nil)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("数据面不可用应 503: %d %s", status, data)
+	}
+	if !strings.Contains(string(data), "UNAVAILABLE") {
+		t.Errorf("响应应含 code UNAVAILABLE：%s", data)
+	}
+}
+
+// alogOf 取审计日志原始响应体（断言动作已入库）。
+func alogOf(t *testing.T, ts *httptest.Server, token string) []byte {
+	t.Helper()
+	_, _, alog := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/audit-logs?limit=50", token, nil, nil)
+	return alog
 }
 
 func TestVMActionErrors(t *testing.T) {

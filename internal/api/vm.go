@@ -247,6 +247,12 @@ func (s *Server) vmAction(w http.ResponseWriter, r *http.Request, name, action s
 			writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error(), nil)
 			return
 		}
+		// 决策 #314：数据面（VPP）不可用时的前置判定——既有 Error 形状 + 既有 503 UNAVAILABLE
+		// （不新增 code、不新增响应字段）；message 已含「未启动虚拟机」与 request vpp restart 指引。
+		if errors.Is(err, orchestrator.ErrDataPlaneUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", err.Error(), nil)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
 		return
 	}
