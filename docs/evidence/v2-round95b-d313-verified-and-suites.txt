@@ -1,0 +1,27 @@
+NFViS v2 真机验证记录 round95 补记 —— #313 终结验证 + 四套件补跑
+====================================================================
+日期：2026-09-30；续 `v2-round95-d311-d313-partial.txt`（该文件如实登记了首轮的未验成，**本文档是它们的后续**）
+
+§1 决策 #313 复验（✓ 通过）
+首轮「未提交变更」的真因已查清，**不是 #313 的问题**：
+- 首轮我的探针把 `-f` 输出用 `tail -2` 截断了，恰好只留下 configure 块内 `exit` 的守卫文案
+  （`internal/api/cliexec.go` 的 `exit` 分支：candidate 脏时拒绝退出）——真实错误被截掉；
+- 用完整输出重测看到真因：**我的探针没给必填项**（`vcpu count` / `memory size-mb`），提交校验正确拒绝、
+  candidate 保留、`exit` 守卫随之拒绝 —— 三处都是产品正确行为
+- **#313 的修复实测生效**：同一次 `-f` 里，跨行引号值被当作**一条语句**（回显把 user-data 的值跨行原样带出：
+  `cloud-init user-data #cloud-config` 换行 `hostname: fw95`）；补齐必填项后提交成功，
+  `show configuration | display json` 与 `| display set` 均含该多行 user-data
+- 附带确认：`show version | match VPP` 管道正常；`discard` 输出「candidate 已丢弃，会话锁已释放」正常
+
+§2 四套件补跑（2.0.0~dev8）
+- cli-fulltest：**198 通过 / 0 失败 / 11 预期报错**
+- cli-semantic-check：**12 / 0 / 1**
+- cli-lifecycle-check：**19 通过 / 0 失败 / 4 跳过**（跳过为环境对象类；与前轮同口径）
+- cli-pty-smoke：**10 / 10**
+结论：零失败 —— round95 因注入事故缺的那一遍补齐。
+
+§3 仍待办（已在 partial 文档登记，本文档重申）
+- **#311 的验收仍未完成**：首轮用「停 VPP」注入时，`start` 在到达探测窗口前阻塞到客户端 90s 超时；
+  该路径需要**前置判定**（VPP 不可用 → 快速失败 + `request vpp restart` 指引）——建议单独立项，
+  并用它作为 #311 的验收前提（VPP 停 → `start` 数秒内返回原因）
+- 现场终态：sw=0 / vmf=0 / 会话 1；nfvis 与 vpp active；版本 nfvis 2.0.0~dev8
