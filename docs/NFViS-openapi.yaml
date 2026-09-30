@@ -951,6 +951,28 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CommittedConfig" }
 
+  /configuration/permissions:
+    get:
+      tags: [configuration]
+      summary: 某 login class 的生效权限视图（等价 CLI show configuration permissions <class>）
+      description: |
+        把该 class 在 CLI 命令树上的有效判定**逐路径**算出来（决策 #304）：预置三档按 §4 权限矩阵的
+        节点等级，自定义 class 按 allow/deny 路径前缀（deny 优先、allow 放行、其余默认拒绝）。
+        判定与 CLI **同一实现单源**（`internal/aaa`，与运行期授权同一套函数）。
+        权限：R 类；`class` 缺省 = 调用者自己的 class；非 super-user 查他人 class 返回 403
+        （不泄露他人 class 的规则细节）；未知 class 名返回 404。
+      parameters:
+        - { name: class, in: query, required: false, schema: { type: string }, description: 目标 class 名（缺省 = 调用者自己的 class） }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClassPermissions" }
+        "401": { $ref: "#/components/responses/Error401" }
+        "403": { $ref: "#/components/responses/Error403" }
+        "404": { $ref: "#/components/responses/Error404" }
+
   /configuration/candidate:
     get:
       tags: [configuration]
@@ -2081,6 +2103,31 @@ components:
         name: { type: string }
         class: { type: string, example: super-user }
         kind: { type: string, enum: [user, class], description: 区分用户与 class 定义 }
+
+    ClassPermissions:
+      type: object
+      description: |
+        某 login class 的**生效权限视图**（等价 CLI `show configuration permissions <class>`，
+        决策 #304）：把该 class 在 CLI 命令树上的有效判定逐路径算出来。判定与 CLI 同一实现
+        （`internal/aaa`，与运行期授权同一套函数），响应只是同一份事实的 JSON 形态。
+      required: [class, source, allowed_count, denied_count, allowed_paths, allow_rules, deny_rules]
+      properties:
+        class: { type: string, description: 目标 class 名 }
+        source: { type: string, enum: [preset, custom], description: 预置三档（super-user/operator/read-only）或自定义 class }
+        allowed_count: { type: integer, description: 允许的命令路径条数 }
+        denied_count: { type: integer, description: 拒绝的命令路径条数 }
+        allowed_paths:
+          type: array
+          items: { type: string }
+          description: 允许的命令路径（与 CLI 视图同一枚举与判定；按命令树顺序）
+        allow_rules:
+          type: array
+          items: { type: string }
+          description: 自定义 class 的 allow 路径前缀（预置 class 为空数组）
+        deny_rules:
+          type: array
+          items: { type: string }
+          description: 自定义 class 的 deny 路径前缀（预置 class 为空数组）
 
     SystemStatus:
       type: object

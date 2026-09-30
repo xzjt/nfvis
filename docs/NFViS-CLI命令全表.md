@@ -112,7 +112,7 @@
 | `show log vnf <name> [last <n>]` | VNF 控制台/事件日志 | 运行态 | ✅ |
 | `show users` | 本地用户与 class | `GET /system/login-users` | ✅ |
 | `show system api tokens` | 活动会话 / API Token 清单：token-id、用户、权限类、签发时间、过期时间、是否当前会话（super-user 列**全部用户**的会话，其他 class 只列自己的；token 为内存态，重启后清空） | `GET /system/api-tokens` | 🚫 本轮新增（决策 #301）：单测覆盖，真机四套件待跑 |
-| `show configuration [permissions <class>]` | 省略子命令 = 当前 committed 配置（JunOS 风格），**正常可用**；`permissions <class>` **暂未实现**（本轮改为明确提示「按 class 视角显示暂未实现」，不再回配置正文——那会让人误以为是「该 class 视角下的那份配置」） | 省略子命令：`GET /configuration/candidate`（committed 视图）；`permissions`：本地提示（无 REST 端点） | ⚠️ **已知缺口（明确提示）**：`permissions <class>` 未实现；committed 原样配置请用 `show configuration` |
+| `show configuration [permissions <class> [detail]]` | 省略子命令 = 当前 committed 配置（JunOS 风格）；`permissions <class>` = 该 class 的**生效权限视图**（决策 #304）——按顶层命令族列出**允许路径** + 末行汇总（class、来源＝预置/自定义、允许/拒绝条数），`detail` 逐路径附判定依据（预置等级满足 / allow 前缀命中 / deny 前缀命中 / 默认拒绝）；判定单源在 `internal/aaa`，与运行期授权同一实现（不在 show 层另写一套） | 省略子命令：`GET /configuration`（committed 视图）；`permissions <class>`：`GET /configuration/permissions?class=<name>` | ✅ 本轮落地（决策 #304）：默认/detail/display set 三形态；R 类，read-only 仅可查自己所属 class，非 super-user 查他人拒绝、未知 class 报错。单测覆盖，真机四套件待跑 |
 | `show configuration candidate` | 当前持锁会话的 candidate | `GET /configuration/candidate` | ✅ |
 | `show configuration history` | 提交历史快照列表：rev/时间/用户/注释/是否当前（**不含配置正文**） | `GET /configuration/history` | ✅ |
 | `show configuration compare rollback <n>` | 与第 n 个历史快照比对；与管道形态 `\| compare rollback <n>` **等价**（同一实现） | `GET /configuration/diff` | ✅ |
@@ -429,8 +429,8 @@
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 241 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归） |
-| ⚠️ 已知缺口 | 1 | `show configuration [permissions <class>]`（按 class 视角未实现，明确提示）；`show \| display set` 已由决策 #155 实现、`show vpp runtime` 已由决策 #200 实现、`request system api token revoke` 已由决策 #301 实现逐 token 吊销，均移出缺口 |
+| ✅ 实测通过 | 242 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶 |
+| ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
 | 🚫 本轮未执行 | 15 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`format-data`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖但真机四套件待跑的 3 行（`show system api tokens`、`request system api token revoke <token-id>`、`set system login banner <text>`） |
 
@@ -442,7 +442,7 @@ round80 以来那条唯一 ✗ 归零。
 **12 条预期报错**都是「环境受限或防呆守卫正确拒绝」：运行中快照被拒（1）、
 无 PF/VF 时 `request sriov create-vfs`（1）、非交互下的高危动作需 `--yes`/确认词
 （`reboot`/`shutdown`/`zeroize`/`software rollback`/`unbind-dpdk`，5）、镜像被引用（1）、
-目标不可达时 `ping` 报失败（3）、`show configuration permissions <class>` 暂未实现（1）。
+目标不可达时 `ping` 报失败（3）、`show configuration permissions <class>` 暂未实现（1——该条已由决策 #304 落地为**生效权限视图**，此后不再走预期报错，`contrib/scripts/cli-fulltest-phase5.sh` 同步由 `expect_fail` 改为 `run`；上面的 195/0/12 是 round88 当时的现场，保留为历史基线）。
 pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**；
 语义校验 **12 / 0 / 1**、生命周期与组合 **21 / 0 / 3**（有业务现场时跑）。
 
@@ -493,11 +493,15 @@ pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**
 - **解析器末位实例参数即语句结束**（原先误报「缺少取值」）；**`SPA` 首值落数组**（`ssh_keys` 等以前首值被写成字符串）。
 - **口令回显脱敏**：`set … password <pw>` 回显为 `«已隐藏»`——配置只存哈希、展示层已脱敏（决策 #70），回显不该例外。
 
-⑧ **两条「未实现但明确提示」的已知缺口**（不做静默降级，故标 ⚠️ 而非 ⊘）：
+⑧ **`show configuration permissions <class>` 已落地为「生效权限视图」（决策 #304）**：
 
-- `show configuration permissions <class>`：「按 class 视角显示」**语义从未定义**（脱敏按敏感字段、与 class 无关；
-  class 只决定命令节点能否执行），故**明说未实现**并回显所问 class，**不再静默返回 committed 正文**（决策 #153）。
-  替代：`show configuration`（committed 原样，可再 `| display json`）。
+- `show configuration permissions <class> [detail]`：给出该 class 在 CLI 命令树上的**有效判定**
+  （默认按顶层命令族列允许路径 + 汇总；`detail` 逐路径附判定依据）。判定**单源在 `internal/aaa`**
+  （与运行期授权同一实现）。R 类：read-only 仅可查自己所属 class，非 super-user 查他人拒绝（不泄露他人规则），
+  未知 class 明确报错。`| display set` 对自定义 class 输出等价 `set system login class …` 语句，
+  预置 class 由等级判定、无路径表，如实说明不编造语句。REST 等价 `GET /configuration/permissions?class=<name>`。
+  原「语义未定义、不做 lossy 版本」的处置（决策 #153）由此收口——本命令**不渲染配置**，与「按 class 视角显示配置」
+  不是一回事。
 - `show | display set`：需要 model→CLI 的**反向映射**（别名语句无法由配置树反推），做 lossy 版本会在「复制配置」上
   制造静默错误（附录 A #84），故**明说仅支持 `json|xml`**。替代：`save <file>`（JSON）/ `show configuration`（块状）/
   `| display json`。
