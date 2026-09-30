@@ -533,7 +533,7 @@ func (x *cliExecutor) imagesDelete(user string, rest []string, confirmed bool) s
 // 不再需要继续编辑，锁留着只会挡住别的会话；**配置模式除外**——`run request …` 是从
 // 配置模式里发起的，操作者还要接着 set/commit（与 CLI 的 configure/commit 同口径）。
 func (x *cliExecutor) commitMutate(user, source string, mutate func(*model.Config) error) (string, error) {
-	sess := config.Session{User: user, Source: source}
+	sess := x.sessOf(user, source)
 	if err := x.engine.Edit(sess); err != nil {
 		return "", err
 	}
@@ -561,8 +561,9 @@ func (x *cliExecutor) commitMutate(user, source string, mutate func(*model.Confi
 
 // endOneShotOper 操作模式下一次性事务的收尾（决策 #151）。
 // 会话处于配置模式时不动锁——那是操作者正在编辑的会话（`run request …` 即此情形）。
+// 会话态按「身份键 + 稳定会话 ID」取（决策 #317），与 ExecuteAs 写入时同一算法。
 func (x *cliExecutor) endOneShotOper(user, source string, sess config.Session) {
-	if s := x.sess[user+"@"+source]; s != nil && s.Mode == "config" {
+	if s := x.sess[x.sessionStateKey(user, source, x.callerTokenID)]; s != nil && s.Mode == "config" {
 		return
 	}
 	endOneShot(x.engine, sess, nil)

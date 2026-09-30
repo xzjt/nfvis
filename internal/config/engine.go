@@ -38,9 +38,39 @@ const DefaultLockIdleTTL = 10 * time.Minute
 type Session struct {
 	User   string
 	Source string // ssh | console | api
+	// ID 会话稳定标识（决策 #317）：同一用户在**同一 Source** 下的多个会话（控制台、CLI、
+	// 脚本各一个）以此互相区分。REST 侧取 token 稳定 ID（决策 #301），CLI 侧取发起该命令
+	// 的 token 稳定 ID。空串 = 无稳定标识的旧式调用（引导/恢复/一次性内部动作），
+	// **退回按身份键 user@source 归并**（保守：只影响自己、不动他人）。
+	ID string
 }
 
+// holder 展示与审计用的身份键（user@source，不含会话标识）。
 func (s Session) holder() string { return s.User + "@" + s.Source }
+
+// key 会话锁的匹配键（决策 #317）：身份键 + 稳定会话 ID。ID 为空串时退回身份键本身，
+// 与迁移前的老锁（session_id 为空）保持同一语义。
+func (s Session) key() string { return sessionKeyFor(s.holder(), s.ID) }
+
+// sessionKeyFor 由「展示用身份键 + 稳定会话 ID」构造匹配键。
+//
+// 用 `#` 作分隔：用户名的字符集不含 `#`、Source 是固定枚举，故拼接无歧义；
+// LockInfo.key 与 Session.key 共用本函数，保证两侧算法单源。
+func sessionKeyFor(holder, id string) string {
+	if id == "" {
+		return holder
+	}
+	return holder + "#" + id
+}
+
+// userOfHolder 从展示用身份键（user@source）取出所属用户（会话列表展示用）。
+// 用户名不含 `@`、Source 是固定枚举，取最后一个 `@` 之前即用户名；取不到时原样返回。
+func userOfHolder(holder string) string {
+	if i := strings.LastIndex(holder, "@"); i > 0 {
+		return holder[:i]
+	}
+	return holder
+}
 
 // CommitOpts commit 参数。
 type CommitOpts struct {
@@ -62,8 +92,13 @@ type CommitResult struct {
 }
 
 // SessionView 会话列表视图（show system configuration sessions，FR-CFG-009）。
+//
+// 决策 #317：除展示用的 holder 外，如实给出会话稳定标识与所属用户——同一用户的不同会话
+// 不再被合并成一条，操作者可据此判断「是谁、哪个会话」在编辑。
 type SessionView struct {
 	Holder         string     `json:"holder"`
+	SessionID      string     `json:"session_id"`
+	User           string     `json:"user"`
 	AcquiredAt     time.Time  `json:"acquired_at"`
 	LastActivity   time.Time  `json:"last_activity"`
 	Dirty          bool       `json:"dirty"`
@@ -139,9 +174,11 @@ type Engine struct {
 
 	confirmStop func() // 在途 confirmed 定时器的 stop
 
-	candidate *model.Config // nil = 无会话持锁
-	holder    string
-	dirty     bool
+	candidate  *model.Config // nil = 无会话持锁
+	sessionKey string        // 当前持锁会话的匹配键（决策 #317）
+	holder     string        // 当前持锁会话的展示用身份键（user@source）
+	sessionID  string        // 当前持锁会话的稳定标识（决策 #317）
+	dirty      bool
 }
 
 // NewEngine 装配引擎；空库时写入初始空配置（rev 1），并恢复在途的
@@ -197,6 +234,17 @@ func NewEngine(store *Store, applier orchestrator.Applier, opts Options) (*Engin
 	if err := e.recoverConfirmedLocked(); err != nil {
 		return nil, err
 	}
+	// 决策 #317：candidate 只存在于内存，进程重启后必然没有未提交编辑；遗留的 candidate_lock
+	// 行已无保护对象，且其 session_id 指向旧 token（新会话的 ID 必然不同）——不清掉会把新会话
+	// 挡在门外直到空闲超时（10 分钟）。故装配时释放遗留锁（如实登记：候选随进程消失）。
+	// 注意：在途 commit confirmed 记在另一张表（confirmed_pending），不受此影响。
+	if li, err := store.GetLock(); err != nil {
+		return nil, err
+	} else if li != nil {
+		if err := store.ReleaseLock(li.Holder, li.SessionID); err != nil {
+			return nil, err
+		}
+	}
 	return e, nil
 }
 
@@ -213,41 +261,46 @@ func (e *Engine) Close() {
 // ---------- candidate 生命周期 ----------
 
 // Edit 进入配置模式：获取 candidate 会话锁（FR-CFG-009），candidate 置为
-// committed 副本。持有者重复调用幂等；nfvisd 重启后同持有者可接管。
+// committed 副本。**同一会话**（同一 key，决策 #317：身份键 + 稳定会话 ID）重复调用幂等；
+// 其它会话一律拒绝。nfvisd 重启后遗留锁已在装配时释放（候选随进程消失），故重启后
+// 任意会话都可重新进入配置模式。
 func (e *Engine) Edit(sess Session) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.sweepLocked()
 	h := sess.holder()
+	k := sess.key()
 
 	li, err := e.store.GetLock()
 	if err != nil {
 		return err
 	}
-	if li != nil && li.Holder != h {
+	if li != nil && li.key() != k {
 		return fmt.Errorf("%w: 由 %s 持有", ErrLocked, li.Holder)
 	}
 	if li != nil && e.candidate != nil {
-		// 同持有者重复 configure：幂等，保留未提交变更
-		return e.store.RefreshLock(h, e.now())
+		// 同一会话重复 configure：幂等，保留未提交变更
+		return e.store.RefreshLock(li.Holder, li.SessionID, e.now())
 	}
 	if li == nil {
-		if err := e.store.AcquireLock(h, e.now()); err != nil {
+		if err := e.store.AcquireLock(h, sess.ID, e.now()); err != nil {
 			return err
 		}
 	}
 	committed, err := e.committedLocked()
 	if err != nil {
 		if li == nil {
-			_ = e.store.ReleaseLock(h)
+			_ = e.store.ReleaseLock(h, sess.ID)
 		}
 		return err
 	}
 	cand := committed
 	e.candidate = &cand
 	e.holder = h
+	e.sessionID = sess.ID
+	e.sessionKey = k
 	e.dirty = false
-	return e.store.RefreshLock(h, e.now())
+	return e.store.RefreshLock(h, sess.ID, e.now())
 }
 
 // Release 退出配置模式并释放锁（保留 candidate 变更与否由调用方先 commit/discard 决定）。
@@ -295,7 +348,7 @@ func (e *Engine) UpdateCandidate(sess Session, cfg model.Config) error {
 	}
 	e.candidate = &cand
 	e.dirty = true
-	return e.store.RefreshLock(sess.holder(), e.now())
+	return e.store.RefreshLock(sess.holder(), sess.ID, e.now())
 }
 
 // inheritSensitive 把 committed 里的敏感叶子补进 candidate 的**同名对象**（当前仅口令哈希）。
@@ -333,7 +386,7 @@ func (e *Engine) MergeCandidate(sess Session, patch model.Config) error {
 	}
 	e.candidate = &merged
 	e.dirty = true
-	return e.store.RefreshLock(sess.holder(), e.now())
+	return e.store.RefreshLock(sess.holder(), sess.ID, e.now())
 }
 
 // Candidate 返回当前会话的 candidate 与 dirty 标记。
@@ -368,9 +421,11 @@ func (e *Engine) Sessions() ([]SessionView, error) {
 	if li != nil {
 		out = append(out, SessionView{
 			Holder:       li.Holder,
+			SessionID:    li.SessionID,
+			User:         userOfHolder(li.Holder),
 			AcquiredAt:   li.AcquiredAt,
 			LastActivity: li.LastActivity,
-			Dirty:        e.dirty && e.holder == li.Holder,
+			Dirty:        e.dirty && e.sessionKey == li.key(),
 		})
 	}
 	cf, err := e.store.GetConfirmed()
@@ -380,7 +435,7 @@ func (e *Engine) Sessions() ([]SessionView, error) {
 	if cf != nil {
 		deadline := cf.Deadline
 		if len(out) == 0 {
-			out = append(out, SessionView{Holder: cf.Holder})
+			out = append(out, SessionView{Holder: cf.Holder, User: userOfHolder(cf.Holder)})
 		}
 		out[0].ConfirmedUntil = &deadline
 	}
@@ -622,7 +677,7 @@ func (e *Engine) Rollback(sess Session, n int) error {
 		Time: e.now(), User: sess.User, Action: "config.rollback",
 		Detail: fmt.Sprintf("rollback %d：候选配置置为 rev %d（需 commit 生效）", n, rev-n), Result: "success",
 	})
-	return e.store.RefreshLock(sess.holder(), e.now())
+	return e.store.RefreshLock(sess.holder(), sess.ID, e.now())
 }
 
 // Compare 输出 committed ⇄ 第 n 个历史快照的 JunOS 风格 diff
@@ -669,11 +724,13 @@ func (e *Engine) CompareCandidate() (string, error) {
 
 // ---------- 内部 ----------
 
+// requireHolderLocked 要求调用会话正是当前持锁会话（决策 #317：按匹配键判定，
+// 不再按身份键——同一用户的不同会话互不冒充）。
 func (e *Engine) requireHolderLocked(sess Session) error {
-	if e.candidate == nil || e.holder == "" {
+	if e.candidate == nil || e.sessionKey == "" {
 		return ErrNotEditing
 	}
-	if e.holder != sess.holder() {
+	if e.sessionKey != sess.key() {
 		return ErrNotEditing
 	}
 	return nil
@@ -689,9 +746,11 @@ func (e *Engine) requireEditingLocked() error {
 
 // releaseLocked 释放锁并清空编辑态（调用方持锁）。
 func (e *Engine) releaseLocked() error {
-	err := e.store.ReleaseLock(e.holder)
+	err := e.store.ReleaseLock(e.holder, e.sessionID)
 	e.candidate = nil
 	e.holder = ""
+	e.sessionID = ""
+	e.sessionKey = ""
 	e.dirty = false
 	return err
 }
@@ -705,8 +764,13 @@ func (e *Engine) sweepLocked() {
 	}
 	li, _ := e.store.GetLock()
 	if li != nil && now.Sub(li.LastActivity) > e.lockIdleTTL {
-		holder := li.Holder
-		_ = e.releaseLocked()
+		holder, sessionID := li.Holder, li.SessionID
+		e.candidate = nil
+		e.holder = ""
+		e.sessionID = ""
+		e.sessionKey = ""
+		e.dirty = false
+		_ = e.store.ReleaseLock(holder, sessionID)
 		e.appendAudit(AuditEntry{
 			Time: now, User: holder, Action: "config.lock-timeout",
 			Detail: "candidate 空闲超时，自动释放会话锁", Result: "success",

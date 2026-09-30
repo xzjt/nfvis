@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/xzjt/nfvis/internal/aaa"
+	"github.com/xzjt/nfvis/internal/config"
 )
 
 // apiTokenJSON GET /system/api-tokens 的响应条目（契约 ApiToken）。
@@ -65,6 +66,10 @@ func (s *Server) dispatchAPITokensPost(w http.ResponseWriter, r *http.Request) {
 
 // handleRevokeAPIToken POST /api/v1/system/api-tokens/{id}:revoke：吊销指定会话。
 // 吊销成功 204；「不存在或无权」一律 404 同一文案（不泄露存在性）。
+//
+// 决策 #317：吊销**当前**会话等价于登出（丢弃本会话 candidate 并释放锁，与 POST /logout
+// 同口径）；吊销**他人**会话不主动释放其编辑锁——其锁由既有空闲巡检（lockIdleTTL）回收，
+// 口径写在附录 A #317。两种情形都清掉该会话在 CLI 执行器里的本地态（键 = token 稳定 ID）。
 func (s *Server) handleRevokeAPIToken(w http.ResponseWriter, r *http.Request, id string) {
 	ident, _ := Identity(r)
 	if err := s.aaa.RevokeToken(ident.User, ident.Class, id); err != nil {
@@ -75,6 +80,12 @@ func (s *Server) handleRevokeAPIToken(w http.ResponseWriter, r *http.Request, id
 		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
 		return
 	}
+	if id == ident.ID {
+		if err := s.engine.Discard(s.sessionFromIdentity(r)); err != nil && !errors.Is(err, config.ErrNotEditing) {
+			s.log.Warn("吊销当前会话时释放 candidate 失败", "err", err)
+		}
+	}
+	s.cliExec.DropSession(id)
 	// 安全相关动作入审计（与 CLI 执行器同一动作名，两侧同源可配对）
 	s.engine.Audit(ident.User, "system.api-token.revoke", "吊销会话 "+id, "success")
 	w.WriteHeader(http.StatusNoContent)

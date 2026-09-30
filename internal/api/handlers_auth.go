@@ -90,11 +90,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // 保留到空闲超时，会把随后登录的 CLI 挡在门外（报「candidate 会话锁被占用: 由 admin@api
 // 持有」）。未在编辑（ErrNotEditing）是常态、不算失败；其它错误只记日志——登出不能因
 // 清理失败而失败（本地清掉 token 后即无凭据可用）。
+//
+// 决策 #317：清理**只作用于调用者自己的会话**（会话标识 = token 稳定 ID），不再按
+// user@api 身份键归并——R79-1 的现场正是「同用户另一 token 登出把本会话候选丢掉」。
+// 同时清掉该会话在 CLI 执行器里的本地态（模式/层级），避免按 token 键控后条目只增不减。
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if err := s.engine.Discard(sessionFromIdentity(r)); err != nil && !errors.Is(err, config.ErrNotEditing) {
+	sess := s.sessionFromIdentity(r)
+	if err := s.engine.Discard(sess); err != nil && !errors.Is(err, config.ErrNotEditing) {
 		s.log.Warn("登出时释放 candidate 失败", "err", err)
 	}
 	if tok := bearerToken(r); tok != "" {
+		if info, ok := Identity(r); ok {
+			s.cliExec.DropSession(info.ID)
+		}
 		s.aaa.Logout(tok)
 	}
 	w.WriteHeader(http.StatusNoContent)

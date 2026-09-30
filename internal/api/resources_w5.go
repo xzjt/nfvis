@@ -155,7 +155,7 @@ func effectiveClassOf(u model.LoginUserConfig) string {
 // 全局编辑锁，其它会话随后的配置写被 409 挡住（round76 三次复现）。
 // msg 是提交说明（入审计；登录横幅的变更与用户管理共用本编排，决策 #303）。
 func (s *Server) mutateLoginUsers(w http.ResponseWriter, r *http.Request, status int, msg string, mutate func(*model.SystemLogin) error) {
-	sess := sessionFromIdentity(r)
+	sess := s.sessionFromIdentity(r)
 	if err := s.engine.Edit(sess); err != nil {
 		mapEngineError(w, err)
 		return

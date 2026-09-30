@@ -706,7 +706,7 @@
         "type": "object"
       },
       "ConfigSession": {
-        "description": "candidate 会话锁持有信息（FR-CFG-009）",
+        "description": "candidate 会话锁持有信息（FR-CFG-009）。决策 #317：会话与身份键分离——`holder` 是展示\n用的身份键（user@source），`session_id` 是该会话的稳定标识（token 稳定 ID，决策 #301），\n`user` 是所属用户。同一用户的多个会话各占一条、不会被合并；非 super-user 只能看到/影响\n自己的会话（范围判定在服务端）。\n",
         "properties": {
           "acquired_at": {
             "format": "date-time",
@@ -727,6 +727,16 @@
           },
           "last_activity": {
             "format": "date-time",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "持锁会话的稳定标识（token 稳定 ID）；迁移前遗留的老锁或无持锁会话（仅在途 commit confirmed）时为空串",
+            "example": "3ba85201-3df9-49ff-8498-b821651c1bca",
+            "type": "string"
+          },
+          "user": {
+            "description": "会话所属用户",
+            "example": "admin",
             "type": "string"
           }
         },
@@ -2763,7 +2773,7 @@
     }
   },
   "info": {
-    "description": "NFViS 一体机 REST API（V1）。\n- 配置类写操作默认作用于 candidate，需 POST /configuration/commit 生效；\n  请求头 `X-NFVIS-Auto-Commit: true` 可让单请求直接提交。\n- 编辑锁（会话锁，FR-CFG-009）：写入 candidate 的请求会取得全局编辑锁（持有者 = 用户 + 接入源）。\n  一次性事务（带 `X-NFVIS-Auto-Commit: true` 的写、以及 /system/login-users 一族——它们提交即生效）\n  在收尾时交还锁；纯候选写入（无该头）与 POST /configuration/commit 之后锁仍在，\n  由客户端显式收尾（`DELETE /configuration/candidate`）或 POST /logout 释放。\n- 错误响应统一为 Error 结构；校验错误逐条列入 detail。\n- 事件经 SSE 推送：GET /events（text/event-stream）。\n",
+    "description": "NFViS 一体机 REST API（V1）。\n- 配置类写操作默认作用于 candidate，需 POST /configuration/commit 生效；\n  请求头 `X-NFVIS-Auto-Commit: true` 可让单请求直接提交。\n- 编辑锁（会话锁，FR-CFG-009）：写入 candidate 的请求会取得全局编辑锁。**会话按「身份 + 登录」\n  区分**（决策 #317）：展示用持有者为「用户 + 接入源」，实际归属按会话稳定标识（token 稳定 ID）\n  ——同一用户的另一个登录（控制台/CLI/脚本）是**另一个会话**，其登出或一次性命令不会丢弃本会话\n  未提交的候选。\n  一次性事务（带 `X-NFVIS-Auto-Commit: true` 的写、以及 /system/login-users 一族——它们提交即生效）\n  在收尾时交还锁；纯候选写入（无该头）与 POST /configuration/commit 之后锁仍在，\n  由客户端显式收尾（`DELETE /configuration/candidate`）或 POST /logout 释放。\n- 错误响应统一为 Error 结构；校验错误逐条列入 detail。\n- 事件经 SSE 推送：GET /events（text/event-stream）。\n",
     "title": "NFViS REST API",
     "version": "1.0.0"
   },
@@ -4396,6 +4406,7 @@
     },
     "/logout": {
       "post": {
+        "description": "吊销调用者自己的 token，并**丢弃本会话**的 candidate 编辑锁（决策 #119）。\n决策 #317：只作用**本会话**（会话标识 = 本 token 的稳定 ID）——同一用户其它登录\n（另一个浏览器/CLI 终端/脚本）未提交的候选与编辑锁**不受影响**。未在编辑时也返回 204。\n",
         "responses": {
           "204": {
             "description": "已吊销"
@@ -4931,7 +4942,7 @@
     },
     "/system/api-tokens/{id}:revoke": {
       "post": {
-        "description": "权限与范围：super-user 可吊销任意 token；其他 class 只能吊销自己的。\n吊销不存在的/他人的 token_id 统一回 404「会话不存在或无权操作」（不泄露存在性）；\n吊销后该 token 的下一个请求即 401。吊销当前会话等价于登出（candidate 锁随登出释放，\n见 POST /logout 的说明）。\n",
+        "description": "权限与范围：super-user 可吊销任意 token；其他 class 只能吊销自己的。\n吊销不存在的/他人的 token_id 统一回 404「会话不存在或无权操作」（不泄露存在性）；\n吊销后该 token 的下一个请求即 401。吊销**当前**会话等价于登出（本会话 candidate 锁随之释放）；\n吊销**他人**会话不主动释放其编辑锁——由既有空闲巡检（lock_idle_ttl）回收（决策 #317）。\n",
         "parameters": [
           {
             "description": "token 稳定 ID（GET /system/api-tokens 的 token_id）",
