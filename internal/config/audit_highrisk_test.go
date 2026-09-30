@@ -198,6 +198,12 @@ func TestHighRiskIntentDescription(t *testing.T) {
 			source: SourceRestore,
 			want:   nil,
 		},
+		{
+			name:   "重置数据分区来源不重复判定（决策 #305，保留 login 节）",
+			next:   model.Config{System: &model.SystemConfig{Login: base.System.Login}},
+			source: SourceFormatData,
+			want:   nil,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

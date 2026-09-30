@@ -227,7 +227,21 @@ request system
   │                                                 # API: POST /system/api-tokens/{id}:revoke
   ├─ ssh host-key regenerate                        # 重新生成 SSH host key
   ├─ password change                                # 登录者自助改密（验证旧口令）
-  ├─ storage format-data                            # S；危险，双确认（V1 仅重置数据分区）
+  ├─ storage format-data                            # S；双重确认（照搬 zeroize 口径），恢复出厂**数据状态**（决策 #305）
+  │                                                 #   一句话：把受管数据恢复到出厂状态，但保证管理面仍然可达。
+  │                                                 #   ① 收敛（复用事务引擎 applier 级联，不另写删对象逻辑）：
+  │                                                 #     停并删全部受管容器/VNF（含 qcow2 内部快照）+ 全部网络配置
+  │                                                 #     对象（交换机/VRF/静态路由/ACL/NAT/QoS/端口镜像/LAG(bond)/LLDP）。
+  │                                                 #   ② 保留（保命条款）：system.management / system.api / system.login
+  │                                                 #     三节逐字段原样保留；物理口声明 set interfaces … 与
+  │                                                 #     set vpp dpdk dev …（vpp.dpdk）原样保留（绑定状态在 sysfs，不触碰）；
+  │                                                 #     底座与身份（VPP/libvirt/docker、二进制、TLS 证书、SSH host key、
+  │                                                 #     systemd 单元）一律不动。不保留 vpp.cpu/vpp.memory/resource-pools
+  │                                                 #     （与保留节校验自相矛盾，属业务面容量配置）。
+  │                                                 #   ③ 清数据：images/backup/captures/coredumps/tech-support/vms 下
+  │                                                 #     受管数据清空（目录本体与属主/权限保留），配置库重置为保留节最小配置。
+  │                                                 #   ⑤ 幂等 + 部分失败如实报告：残留逐条列出、非空即返回失败（不假成功）。
+  │                                                 #   API: POST /system:format-data（JSON confirm=true）
   └─ ntp sync
 request alarms clear [id <id> | all]                # 确认后清除已 resolved 告警
 ```

@@ -33,14 +33,34 @@ const ArchiveVersion = 1
 // Config Manager 配置。
 type Config struct {
 	Dir string // 备份目录
+
+	// 决策 #305：`request system storage format-data` 清空的**受管数据目录**（清空内容、
+	// 保留目录本体与属主/权限）。空串取 DefaultConfig 的缺省；单测可指向临时目录。
+	Captures    string // 抓包导出（network.DefaultCaptureDir）
+	CoreDumps   string // core dump（DefaultCoreDir）
+	TechSupport string // 诊断归档（DefaultTechSupportDir）
+	VMs         string // VNF 磁盘与快照（compute.DefaultConfig().VMsDir）
 }
 
 // DefaultConfig 生产缺省。
-func DefaultConfig() Config { return Config{Dir: "/var/lib/nfvis/backup"} }
+//
+// 路径与各子系统的缺省常量同址：抓包 = network.DefaultCaptureDir、core dump = DefaultCoreDir、
+// 诊断归档 = DefaultTechSupportDir、VNF 磁盘 = compute.DefaultConfig().VMsDir。此处以字面量
+// 复制是为了不让 internal/system 反向依赖 orchestrator（保持既有的依赖方向），值必须与之一致。
+func DefaultConfig() Config {
+	return Config{
+		Dir:         "/var/lib/nfvis/backup",
+		Captures:    "/var/lib/nfvis/captures",
+		CoreDumps:   DefaultCoreDir,
+		TechSupport: DefaultTechSupportDir,
+		VMs:         "/var/lib/nfvis/vms",
+	}
+}
 
 // Engine 事务引擎最小能力集（*config.Engine 满足；便于单测注入）。
 type Engine interface {
 	Committed() (model.Config, error)
+	CurrentRevision() (int, error)
 	Edit(sess config.Session) error
 	UpdateCandidate(sess config.Session, cfg model.Config) error
 	Commit(ctx context.Context, sess config.Session, opts config.CommitOpts) (config.CommitResult, error)
@@ -83,8 +103,22 @@ type Manager struct {
 
 // NewManager 构造（ver 为 nfvis 版本，写入归档便于跨版本恢复比对）。
 func NewManager(cfg Config, engine Engine, imgs ImageStore, ver string) *Manager {
+	def := DefaultConfig()
 	if cfg.Dir == "" {
-		cfg.Dir = DefaultConfig().Dir
+		cfg.Dir = def.Dir
+	}
+	// 决策 #305：受管数据目录缺省值（format-data 的清空目标）。
+	if cfg.Captures == "" {
+		cfg.Captures = def.Captures
+	}
+	if cfg.CoreDumps == "" {
+		cfg.CoreDumps = def.CoreDumps
+	}
+	if cfg.TechSupport == "" {
+		cfg.TechSupport = def.TechSupport
+	}
+	if cfg.VMs == "" {
+		cfg.VMs = def.VMs
 	}
 	return &Manager{cfg: cfg, engine: engine, images: imgs, ver: ver, now: time.Now}
 }

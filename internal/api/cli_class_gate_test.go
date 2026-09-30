@@ -95,6 +95,7 @@ func TestDeclaredSuperUserCommandsRejectOperator(t *testing.T) {
 		{"request system shutdown", "关机（声明 S）"},
 		{"request system poweroff", "断电（声明 S）"},
 		{"request system zeroize", "恢复出厂（声明 S）"},
+		{"request system storage format-data", "重置数据分区（声明 S；决策 #305）"},
 		{"request system software add /tmp/nonexistent.deb", "软件升级（声明 S）"},
 		{"request system software rollback", "软件回退（声明 S）"},
 		{"request system configuration backup", "配置备份导出（声明 S）"},

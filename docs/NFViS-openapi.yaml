@@ -1444,6 +1444,33 @@ paths:
       responses:
         "202": { description: 已受理，重启后进入初始化状态 }
         "400": { $ref: "#/components/responses/Error400" }
+  /system:format-data:
+    post:
+      tags: [system]
+      summary: 重置数据分区（恢复出厂数据状态，保留管理面可达；决策 #305）
+      description: |
+        收敛删除全部受管 VNF/容器（含其快照）与网络配置对象、清空受管数据目录（镜像/备份/抓包/转储/诊断归档/VM 磁盘），
+        并把配置重置为「保留节」最小配置。`system.management`/`system.api`/`system.login` 三节与物理口声明
+        `set interfaces …`、DPDK 声明 `set vpp dpdk dev …` 原样保留，底座与身份（VPP/libvirt/docker、二进制、
+        TLS 证书、SSH host key、systemd 单元）不动——操作者执行完仍可登录继续配置，不必重启才能恢复。
+        高危档：需 `confirm=true`；**部分失败（有残留）时返回 500** 并在 message 里逐条列出残留与原因，绝不在未清干净时报成功。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: boolean, description: 双重确认，必须为 true }
+      responses:
+        "202":
+          description: 已重置；响应体为统计与残留清单
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FormatDataResult" }
+        "400": { $ref: "#/components/responses/Error400" }
+        "500": { description: 部分失败：有残留未清除（message 逐条列出），已清部分不回滚 }
   /system/software:
     post:
       tags: [system]
@@ -2590,6 +2617,41 @@ components:
         size_bytes: { type: integer, format: int64 }
         created_at: { type: string, format: date-time }
         includes_core_dumps: { type: boolean, description: tech-support 归档时 }
+
+    FormatDataResult:
+      type: object
+      description: 决策 #305：`request system storage format-data` / `POST /system:format-data` 的结果统计。
+      properties:
+        status: { type: string, example: formatted }
+        revision: { type: integer, description: 提交保留节配置后的修订号；已是出厂态时为当前修订号 }
+        kept_sections:
+          type: array
+          items: { type: string }
+          description: 原样保留的配置节（保命条款）：system.management / system.api / system.login / interfaces / vpp.dpdk
+        removed_objects: { $ref: "#/components/schemas/FormatDataRemoved" }
+        removed_images: { type: integer, description: 从镜像仓库删除的镜像数 }
+        purged_files: { type: integer, description: 受管数据目录里清理的文件数 }
+        freed_bytes: { type: integer, format: int64, description: 释放的字节数（镜像记录大小 + 受管目录文件大小） }
+        already_factory: { type: boolean, description: 已是出厂态（本次未删任何受管对象/数据）时为 true；幂等第二次执行如实回此值 }
+        residuals:
+          type: array
+          items: { type: string }
+          description: 未清掉的残留（逐条含原因）；非空即表示本次未清干净，端点据此返回 500
+    FormatDataRemoved:
+      type: object
+      description: 按类别统计的删除对象数（配置里除保留节之外的一切）。
+      properties:
+        containers: { type: integer }
+        vms: { type: integer }
+        virtual_switches: { type: integer }
+        vrfs: { type: integer }
+        routes: { type: integer }
+        acls: { type: integer }
+        nat_rules: { type: integer }
+        port_mirroring: { type: integer }
+        qos_policies: { type: integer }
+        bonds: { type: integer }
+        lldp_interfaces: { type: integer }
 
     CoreDump:
       type: object

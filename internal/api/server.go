@@ -295,6 +295,8 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/system/backup/{file}", s.auth(s.handleDownloadBackup, schema.ClassSuperUser, "show system backup"))
 	mux.Handle("POST "+APIPrefix+"/system/restore", cfgAPI(s.handleRestore))
 	mux.Handle("POST "+APIPrefix+"/system:zeroize", cfgAPI(s.handleZeroize))
+	// 决策 #305：重置数据分区（恢复出厂数据状态，保留管理面可达）。与 zeroize 同权限档（S）。
+	mux.Handle("POST "+APIPrefix+"/system:format-data", cfgAPI(s.handleFormatData))
 
 	// M5-3：数据面抓包（FR-OPS-042）
 	mux.Handle("GET "+APIPrefix+"/vpp/capture", s.auth(s.handleGetCapture, schema.ClassReadOnly, "show vpp capture"))

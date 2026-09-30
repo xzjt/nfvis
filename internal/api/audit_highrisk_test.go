@@ -60,8 +60,12 @@ func (s stubTLS) Install(certPEM, keyPEM string) (system.TlsInfo, error) {
 func (s stubTLS) RegenerateSelfSigned(string) (system.TlsInfo, error) { return system.TlsInfo{}, nil }
 func (s stubTLS) RegenerateSSHHostKeys(context.Context) error         { return nil }
 
-// stubSysOps 备份/恢复/恢复出厂的可控桩（只为失败路径；成功路径用真实 Manager）。
-type stubSysOps struct{ failZeroize error }
+// stubSysOps 备份/恢复/恢复出厂/重置数据分区的可控桩（只为失败路径；成功路径用真实 Manager）。
+type stubSysOps struct {
+	failZeroize    error
+	failFormatData error
+	formatDataRes  system.FormatDataResult
+}
 
 func (s stubSysOps) Backup() (system.File, error) { return system.File{File: "x.json"}, nil }
 func (s stubSysOps) List() []system.File          { return nil }
@@ -74,6 +78,12 @@ func (s stubSysOps) Zeroize(context.Context, string) (system.ZeroizeResult, erro
 		return system.ZeroizeResult{}, s.failZeroize
 	}
 	return system.ZeroizeResult{Revision: 9}, nil
+}
+func (s stubSysOps) FormatData(context.Context, string) (system.FormatDataResult, error) {
+	if s.failFormatData != nil {
+		return s.formatDataRes, s.failFormatData
+	}
+	return system.FormatDataResult{Revision: 11, Status: "formatted"}, nil
 }
 
 // ---------- 断言工具 ----------
@@ -274,6 +284,39 @@ func TestHighRiskAuditZeroizeFailureTwoRows(t *testing.T) {
 		t.Fatalf("CLI 恢复出厂应失败: %s", res.Output)
 	}
 	assertPair(t, newRows(t, beforeCLI, cliAuditRows(t, engine)), "system.zeroize", "恢复出厂", "failure")
+}
+
+// 决策 #305：重置数据分区失败也记两条；**部分失败（有残留）如实报失败**（不假成功），
+// 残留逐条进错误 detail。
+func TestHighRiskAuditFormatDataFailureTwoRows(t *testing.T) {
+	ts := newTestServerOpts(t, Options{SysOps: stubSysOps{
+		failFormatData: errors.New("未清干净：1 项残留——镜像 stuck.qcow2：删除失败"),
+		formatDataRes:  system.FormatDataResult{Residuals: []string{"镜像 stuck.qcow2：删除失败"}},
+	}})
+	token := loginAdmin(t, ts)
+	before := auditRows(t, ts, token)
+	if status, _, _ := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system:format-data", token,
+		map[string]any{"confirm": true}, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusInternalServerError {
+		t.Fatalf("有残留时应 500（绝不当成功），实得 %d", status)
+	}
+	added := newRows(t, before, auditRows(t, ts, token))
+	assertPair(t, added, "system.format-data", "重置数据分区", "failure")
+	if !strings.Contains(added[0].Detail, "stuck.qcow2") {
+		t.Errorf("失败结果行要写残留原因: %+v", added[0])
+	}
+
+	// CLI 侧同一个助手 → 同样两条。
+	x, engine := newCLIKit(t)
+	x.setSystemOps(stubSysOps{
+		failFormatData: errors.New("未清干净：1 项残留——镜像 stuck.qcow2：删除失败"),
+		formatDataRes:  system.FormatDataResult{Residuals: []string{"镜像 stuck.qcow2：删除失败"}},
+	})
+	beforeCLI := cliAuditRows(t, engine)
+	res := x.Execute("admin", aaa.ClassSuperUser, "ssh", "request system storage format-data --yes --yes")
+	if !strings.Contains(res.Output, "%%") {
+		t.Fatalf("CLI 重置数据分区应失败: %s", res.Output)
+	}
+	assertPair(t, newRows(t, beforeCLI, cliAuditRows(t, engine)), "system.format-data", "重置数据分区", "failure")
 }
 
 // 前置拒绝（confirm=false）不落审计：动作没开始。

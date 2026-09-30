@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -313,5 +314,127 @@ func TestCLITLSAndSyslog(t *testing.T) {
 	}
 	if cfg.System.API == nil || !cfg.System.API.TLSSelfSigned {
 		t.Fatalf("tls self-signed 未落模型: %+v", cfg.System.API)
+	}
+}
+
+// ---------- 决策 #305：request system storage format-data（恢复出厂数据状态，保留管理面可达） ----------
+
+// TestFormatDataEndpointAndCLI REST 与 CLI 两条入口的闭环：收敛删除受管对象、保留管理面配置，
+// 缺 confirm/未确认一律拒绝，且**保留节**（物理口声明、登录用户）原样留下。
+func TestFormatDataEndpointAndCLI(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+
+	// 预置：一个待删对象（虚拟交换机）+ 一个保留项（物理口声明 ens3f0）。
+	for _, line := range []string{
+		"configure",
+		"set virtual-switches vs-x type l2",
+		"set virtual-switches vs-x vlan access 100",
+		"set interfaces ens3f0 description to-tor",
+		"commit",
+		"exit",
+	} {
+		if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/cli/execute", token,
+			map[string]any{"line": line}, nil); status != http.StatusOK {
+			t.Fatalf("预置 %q: %d %s", line, status, data)
+		}
+	}
+
+	// 缺 confirm → 400，且不落审计（动作没开始）。
+	if status, _, _ := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system:format-data", token,
+		map[string]any{"confirm": false}, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusBadRequest {
+		t.Fatalf("无 confirm 应 400，实际 %d", status)
+	}
+	if n := countAction(auditRows(t, ts, token), "system.format-data"); n != 0 {
+		t.Fatalf("被前置拒绝的请求不应落审计，实得 %d 条", n)
+	}
+
+	// confirm=true → 202，返回统计。
+	status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system:format-data", token,
+		map[string]any{"confirm": true}, map[string]string{"X-NFVIS-Auto-Commit": "true"})
+	if status != http.StatusAccepted {
+		t.Fatalf("format-data: %d %s", status, data)
+	}
+	var res struct {
+		Status         string   `json:"status"`
+		Revision       int      `json:"revision"`
+		KeptSections   []string `json:"kept_sections"`
+		RemovedObjects struct {
+			VirtualSwitches int `json:"virtual_switches"`
+		} `json:"removed_objects"`
+	}
+	if err := json.Unmarshal(data, &res); err != nil || res.Status != "formatted" {
+		t.Fatalf("结果: %s (%v)", data, err)
+	}
+	if res.RemovedObjects.VirtualSwitches != 1 {
+		t.Errorf("应删 1 台虚拟交换机: %s", data)
+	}
+	for _, want := range []string{"system.management", "system.api", "system.login", "interfaces", "vpp.dpdk"} {
+		found := false
+		for _, k := range res.KeptSections {
+			if k == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("kept_sections 应含 %s: %v", want, res.KeptSections)
+		}
+	}
+
+	// 收敛：交换机没了；保留：物理口声明与登录用户还在。
+	if status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/virtual-switches", token, nil, nil); status != http.StatusOK ||
+		strings.Contains(string(data), "vs-x") {
+		t.Fatalf("format-data 后虚拟交换机应清空: %d %s", status, data)
+	}
+	if status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/interfaces", token, nil, nil); status != http.StatusOK ||
+		!strings.Contains(string(data), "ens3f0") {
+		t.Fatalf("物理口声明属保留节，应留下: %d %s", status, data)
+	}
+	if status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/system/login-users", token, nil, nil); status != http.StatusOK ||
+		!strings.Contains(string(data), "admin") {
+		t.Fatalf("登录用户属保留节，应留下: %d %s", status, data)
+	}
+
+	// 审计两条（意图 + 结果）。
+	assertPair(t, newRows(t, nil, auditRows(t, ts, token)), "system.format-data", "重置数据分区", "success")
+}
+
+// TestFormatDataCLIDoubleConfirm CLI 侧双确认（与 zeroize 同构）：首次问询 → 二次问询 → 两次 --yes 才执行。
+func TestFormatDataCLIDoubleConfirm(t *testing.T) {
+	x, eng := newCLIKit(t)
+	tmp := t.TempDir()
+	mgr := system.NewManager(system.Config{
+		Dir: filepath.Join(tmp, "backup"), Captures: filepath.Join(tmp, "captures"),
+		CoreDumps: filepath.Join(tmp, "coredumps"), TechSupport: filepath.Join(tmp, "tech-support"),
+		VMs: filepath.Join(tmp, "vms"),
+	}, eng, nil, "test")
+	x.setSystemOps(mgr)
+
+	run(t, x, "admin", "super-user", "ssh",
+		"configure", "set virtual-switches vs-y type l2", "commit", "exit")
+
+	r1 := x.Execute("admin", "super-user", "ssh", "request system storage format-data")
+	if !strings.HasSuffix(strings.TrimSpace(r1.Output), "[yes,no]") {
+		t.Fatalf("首次应问询: %q", r1.Output)
+	}
+	r2 := x.Execute("admin", "super-user", "ssh", "request system storage format-data --yes")
+	if !strings.HasSuffix(strings.TrimSpace(r2.Output), "[yes,no]") || !strings.Contains(r2.Output, "再次确认") {
+		t.Fatalf("二次仍应问询: %q", r2.Output)
+	}
+	// 未确认前不得动手：交换机仍在。
+	if cfg, _ := eng.Committed(); len(cfg.VirtualSwitches) != 1 {
+		t.Fatalf("未确认不应执行: %+v", cfg.VirtualSwitches)
+	}
+	r3 := x.Execute("admin", "super-user", "ssh", "request system storage format-data --yes --yes")
+	if !strings.Contains(r3.Output, "已重置数据分区") {
+		t.Fatalf("两次确认后应执行: %q", r3.Output)
+	}
+	if cfg, _ := eng.Committed(); len(cfg.VirtualSwitches) != 0 {
+		t.Fatalf("执行后交换机应清空: %+v", cfg.VirtualSwitches)
+	}
+	// 幂等：再执行一次如实回「已是出厂态」。
+	r4 := x.Execute("admin", "super-user", "ssh", "request system storage format-data --yes --yes")
+	if !strings.Contains(r4.Output, "已是出厂态") {
+		t.Fatalf("第二次应如实回「已是出厂态」: %q", r4.Output)
 	}
 }

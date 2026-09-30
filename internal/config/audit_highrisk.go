@@ -31,11 +31,13 @@ import (
 	"github.com/xzjt/nfvis/internal/model"
 )
 
-// 高危动作专用的配置会话来源。恢复出厂与恢复配置各自是一个**动作**（操作级助手已记
-// 意图 + 结果两条），故它们的提交不再走本文件的变更判定——否则同一个动作会留下两组记录。
+// 高危动作专用的配置会话来源。恢复出厂、恢复配置、重置数据分区各自是一个**动作**
+// （操作级助手已记意图 + 结果两条），故它们的提交不再走本文件的变更判定——否则同一个
+// 动作会留下两组记录。
 const (
-	SourceZeroize = "system-zeroize"
-	SourceRestore = "system-restore"
+	SourceZeroize    = "system-zeroize"
+	SourceRestore    = "system-restore"
+	SourceFormatData = "system-format-data" // 决策 #305：request system storage format-data
 )
 
 // AuditResultIntent 审计 result 字段的「意图」取值（决策 #150）：动作开始执行之前落库的
@@ -48,8 +50,8 @@ const AuditResultIntent = "intent"
 //
 // prev / next 是 committed 与候选配置，source 是提交会话来源。
 func highRiskConfigIntent(prev, next model.Config, source string) string {
-	if source == SourceZeroize || source == SourceRestore {
-		return "" // 这两个动作由操作级助手记两行，不重复
+	if source == SourceZeroize || source == SourceRestore || source == SourceFormatData {
+		return "" // 这几个动作由操作级助手记两行，不重复
 	}
 	p, n := loginOf(prev), loginOf(next)
 	var parts []string

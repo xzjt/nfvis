@@ -733,7 +733,7 @@ func (x *cliExecutor) requestSystem(user, class, source string, t []string) stri
 	raw := t
 	t, _ = splitConfirm(t)
 	if len(t) == 0 {
-		return "%% 语法: request system <configuration|zeroize|software|reboot|shutdown|ntp|tech-support|core-dumps|api> …\n"
+		return "%% 语法: request system <configuration|zeroize|storage|software|reboot|shutdown|ntp|tech-support|core-dumps|api> …\n"
 	}
 	switch t[0] {
 	case "kernel":
@@ -748,6 +748,12 @@ func (x *cliExecutor) requestSystem(user, class, source string, t []string) stri
 		return "%% 语法: request system configuration backup [to <path>] | restore <path>\n"
 	case "zeroize":
 		return x.systemZeroize(user, raw)
+	case "storage":
+		// request system storage format-data（决策 #305：恢复出厂数据状态，保留管理面可达）
+		if len(t) >= 2 && t[1] == "format-data" {
+			return x.systemFormatData(user, raw)
+		}
+		return "%% 语法: request system storage format-data\n"
 	case "tech-support":
 		if len(t) >= 2 && t[1] == "generate" {
 			return x.systemTechSupportGenerate(user)
@@ -1099,6 +1105,46 @@ func (x *cliExecutor) systemZeroize(user string, raw []string) string {
 		return "%% " + err.Error() + "\n"
 	}
 	return fmt.Sprintf("已恢复出厂（revision %d，删除镜像 %d 个）。重启后进入初始化状态。\n", rev, removed)
+}
+
+// systemFormatData：request system storage format-data（决策 #305）。
+// 双确认照搬 zeroize：首次问询 → 二次问询 → 两次 --yes 后执行（REPL 每轮在命令尾部追加一个 --yes）。
+func (x *cliExecutor) systemFormatData(user string, raw []string) string {
+	if x.sys == nil {
+		return "%% 系统运维模块未接入（重置数据分区不可用）\n"
+	}
+	confirmations := 0
+	for _, tok := range raw {
+		if tok == confirmFlagSuffix {
+			confirmations++
+		}
+	}
+	const warn = "重置数据分区将删除全部受管 VNF/容器与网络配置对象，清空镜像/备份/抓包/转储/诊断归档等受管数据，" +
+		"并把配置重置为出厂数据状态；管理面配置（管理口/API/登录用户）与物理口/DPDK 声明保留。"
+	switch confirmations {
+	case 0:
+		return warn + " Continue? [yes,no] "
+	case 1:
+		return "再次确认：此操作不可撤销。" + warn + " Proceed? [yes,no] "
+	}
+	// 决策 #150：高危档动作——审计两条（意图 + 结果），与 REST `POST /system:format-data` 同源。
+	var summary string
+	err := runHighRisk(x.engine, user, highRiskFormatData(), func() (string, error) {
+		res, rerr := x.sys.FormatData(context.Background(), user)
+		if rerr != nil {
+			return "", rerr
+		}
+		summary = res.Summary()
+		return summary, nil
+	})
+	if err != nil {
+		// 部分失败：残留逐条在 err 文案里；有统计时一并给出，便于看出「清掉了哪些」。
+		if summary != "" {
+			return summary + "\n%% " + err.Error() + "\n"
+		}
+		return "%% " + err.Error() + "\n"
+	}
+	return summary + "\n"
 }
 
 // checkBackupExportDst 校验配置归档的导出目标路径（决策 #148）。
