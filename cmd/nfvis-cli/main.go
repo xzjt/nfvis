@@ -171,46 +171,93 @@ func runScript(session *cli.Session, script string) {
 	}
 }
 
-// runScriptLines 逐条语句执行脚本，返回是否失败（失败即已停止，后续语句不执行）。
+// runScriptLines 逐条语句执行脚本，返回是否失败。失败即**停止**（后续语句不执行），
+// 并如实用行号说明停在哪一条、其余几条未执行（决策 #320）。
 // 与 runScript 分开是为了可单测（后者收尾后直接 os.Exit）。
 // 入参 script 已由 resolveScript 归一（CRLF/孤立 CR → LF、剥 BOM），`-c` 与 `-f` 共用本函数。
 //
 // 切句用 cliparse.SplitStatements（决策 #313）：**按未引用的换行**切，引号未闭合时把后续行
 // 并入同一语句——这样多行引号值（如内联的 user-data）取整段、值内保留换行；此前按 `\n` 盲切
 // 会把值只当首行、其余行当命令执行（静默截断）。
-func runScriptLines(session *cli.Session, script string) (failed bool) {
-	for _, line := range cliparse.SplitStatements(script) {
-		line = strings.TrimSpace(line)
-		if line == "" {
+func runScriptLines(session *cli.Session, script string) bool {
+	return runScriptLinesTo(session, script, os.Stdout)
+}
+
+// runScriptLinesTo 是 runScriptLines 的可测核心：输出写到 w（单测传 buffer 核对「停在哪一行」）。
+//
+// 失败判据与初始化向导**同源**（cli.OutputFailed，决策 #113）：**行首**单个或双个 %、
+// 或行首「校验失败」即该行失败——不新造第二套判据。这一条曾只查 `%%`，于是服务端用
+// fmt 格式串写出的 `%% 无效命令: show system …` 实际渲染成单 %（`fmt.Sprintf` 把 `%%`
+// 折叠为一个 `%`）时不被判失败，脚本会继续执行后续语句，把前段错误掩盖掉（真机 round100
+// 阶段 7 实测，R100-1）。「值未变化」这类空操作由服务端以结构化标记 Warning 明确为非失败，
+// 脚本继续（决策 #190）——故还须 `!res.Warning`，而不是去猜输出文本里哪里有 `%`。
+func runScriptLinesTo(session *cli.Session, script string, w io.Writer) (failed bool) {
+	stmts := cliparse.SplitStatements(script)
+	total := 0
+	for _, s := range stmts {
+		if strings.TrimSpace(s) != "" {
+			total++
+		}
+	}
+	line, done := 1, 0 // line = 当前语句的起始物理行号；done = 已执行（含失败那条）的非空语句数
+	for _, raw := range stmts {
+		stmt := strings.TrimSpace(raw)
+		startLine := line
+		line += strings.Count(raw, "\n") + 1 // 本语句占用 count+1 个物理行
+		if stmt == "" {
 			continue
 		}
-		if line == "wizard" { // 初始化向导（决策 #107）：交互式编排，非 TTY 时向导自行拒绝
+		done++
+		if stmt == "wizard" { // 初始化向导（决策 #107）：交互式编排，非 TTY 时向导自行拒绝
 			if err := cli.RunWizard(session, term.IsTerminal(int(os.Stdin.Fd())), os.Stdin, os.Stdout); err != nil {
-				fmt.Printf("%% %v\n", err)
+				fmt.Fprintf(w, "%% %v\n", err)
+				reportScriptStop(w, startLine, stmt, "初始化向导执行失败", total-done)
 				return true
 			}
 			continue
 		}
-		res := session.Execute(line)
+		res := session.Execute(stmt)
 		out := res.Output
-		fmt.Print(out)
+		fmt.Fprint(w, out)
 		if !strings.HasSuffix(out, "\n") {
-			fmt.Println()
+			fmt.Fprintln(w)
 		}
 		// 破坏性动作的问询文本（`… ? [yes,no]`）：脚本模式没有答复来源，
 		// 不判定就会「只问不做」却以退出码 0 结束（假成功）。按失败处理并指引显式确认。
 		if msg, need := confirmRefusal(out); need {
-			fmt.Print(msg)
+			fmt.Fprint(w, msg)
+			reportScriptStop(w, startLine, stmt, "命令需交互确认（非交互模式不执行破坏性动作）", total-done)
 			return true
 		}
-		// 「语句未产生配置变更」这类**空操作**不是失败：服务端以 Warning 明确标记，
-		// 脚本继续、退出码不受影响（round86 R86-8：否则一条同值 set 会中止整段脚本，
-		// 幂等重跑根本不可用）。判据用结构化标记而不是输出文本——语句自身可能含 `%`。
-		if strings.Contains(out, "%%") && !res.Warning {
+		// 行首 %/「校验失败」= 该行失败（判据与向导同源）；Warning 的空操作不算失败（决策 #190）。
+		if cli.OutputFailed(out) && !res.Warning {
+			reportScriptStop(w, startLine, stmt, "命令执行失败（输出含错误标记）", total-done)
 			return true
 		}
 	}
 	return false
+}
+
+// reportScriptStop 如实报告脚本为何停、停在哪一条、还有几条未执行（决策 #320）。
+//
+// 行号口径：**该语句在归一后脚本里的起始物理行号**（1 起，便于对照文件）；「行」的计数
+// 按**逻辑行**（cliparse.SplitStatements 的执行单元：未引用换行分隔，跨行引号值算一条）——
+// 单行语句时二者一致。语句原文折成单行并限长，避免把整段 user-data 倒出来。
+func reportScriptStop(w io.Writer, lineNo int, stmt, reason string, remaining int) {
+	fmt.Fprintf(w, "%% 脚本在第 %d 行停止执行：%s\n", lineNo, scriptStatementBrief(stmt))
+	fmt.Fprintf(w, "%% 原因：%s\n", reason)
+	fmt.Fprintf(w, "%% 其余 %d 行未执行\n", remaining)
+}
+
+// scriptStatementBrief 把一条语句渲染成**单行**摘要：多行引号值折叠为一行，过长截断。
+// 报告要让人一眼看清「是哪一行」，而不是把值里的换行与整段内容原样倒出来。
+func scriptStatementBrief(stmt string) string {
+	s := strings.ReplaceAll(stmt, "\n", " ")
+	const maxBrief = 200
+	if r := []rune(s); len(r) > maxBrief {
+		return string(r[:maxBrief]) + "…"
+	}
+	return s
 }
 
 // teardownScript 退出配置模式（有 candidate 先丢弃）、释放会话并吊销 token。

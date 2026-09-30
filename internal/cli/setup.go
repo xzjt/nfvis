@@ -481,7 +481,7 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 				fmt.Fprintln(out)
 			}
 		}
-		if stepFailed(res.Output) {
+		if OutputFailed(res.Output) {
 			fmt.Fprintln(out, "向导在上述步骤失败：candidate 已保留，可修正后重新 commit，或执行 discard 放弃。")
 			return fmt.Errorf("语句执行失败: %s", st)
 		}
@@ -493,13 +493,17 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 	return nil
 }
 
-// stepFailed 判定一条语句的输出是否失败——与 contrib/scripts/cli-fulltest 的判定模式同源：
+// OutputFailed 判定一条语句的输出是否失败——与 contrib/scripts/cli-fulltest 的判定模式同源：
 // 行首单个或双个 %（`% 无效命令`、`%% 底座下发失败`…）与行首「校验失败」都算失败。
 //
 // 此前只查 "%%"，漏掉单 % 错误（如 `% 无效命令: request system kernel apply`），
 // 于是向导在最后一步失败的情况下照样打印「向导完成」并返回成功——典型假绿
 // （真机 round34 实测：计划里 top 未离开配置模式，apply 被判无效命令而向导报成功）。
-func stepFailed(o string) bool {
+//
+// 导出后作为**脚本模式**（cmd/nfvis-cli 的 `-c`/`-f`）与向导共用的唯一失败判据：
+// 两处若各写一份必然漂移（脚本模式曾只查 `%%`，于是服务端用 fmt 格式串写出的
+// `%% 无效命令: show system …` 实际渲染成单 % 时不被判失败，脚本继续执行）。
+func OutputFailed(o string) bool {
 	for _, line := range strings.Split(o, "\n") {
 		t := strings.TrimSpace(line)
 		if strings.HasPrefix(t, "%") || strings.HasPrefix(t, "校验失败") {
