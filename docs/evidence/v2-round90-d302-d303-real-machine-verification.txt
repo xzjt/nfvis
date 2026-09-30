@@ -1,0 +1,64 @@
+NFViS v2 真机验证记录 round90 —— 决策 #302（首装接口可见性）+ #303（登录横幅）+ 四套件
+====================================================================
+日期：2026-09-30
+环境：nfvis-vm（SSH key）；本轮两次构建安装：2.0.0~dev2（#302+#303）→ 2.0.0~dev3（含 R90-1 布局修复）
+源码：git archive v2；SOURCE_DATE_EPOCH 取各自 HEAD 提交时间
+
+§1 决策 #302「首装接口可见性」真机验证（F1 原现场复现法）
+复现路径（不碰管理口 ens160）：配置摘除 ens224 声明（delete vpp dpdk dev ens224 + delete interfaces ens224）→
+request vpp restart（VPP 卸下该口）→ request interfaces ens224 unbind-dpdk。
+- **守卫行为正确**：直接解绑被拒——「接口仍被数据面占用……请先删声明、request vpp restart 确认不在数据面后再解绑
+  （直接解绑会让该口悬空）」；按提示路径后控件层解绑成功，但内核未自动重新探测，产品提示
+  `request interfaces <PCI> unbind-dpdk to-driver <驱动名>`——查 lspci（Kernel modules: vmxnet3）后带驱动名解绑，
+  ens224 回到内核（vmxnet3，DOWN，MAC 00:0c:29:a9:61:98）——F1 现场（内核物理口、未被 VPP 接管、配置未声明）复现。
+四处检查（全部符合口径）：
+- `show interfaces`：ens224 与 ens160 以行出现、备注列「未接管」；ens192（已声明+已接管）保持原样（description cli-pre、备注 -）
+- `show interfaces ens224`：表头「（接口 ens224 未被 VPP 接管，以下为内核侧视图）」+ 内核事实（down/down、MTU 1500、
+  驱动 vmxnet3）+ mac 行；未编造 VPP 侧计数
+- `show interfaces ens224 statistics`：「（接口 ens224 未被 VPP 接管，无数据面统计）」
+- `GET /interfaces?kind=physical`：ens224 带 `taken_over:false` 与 sysfs 事实
+  （driver=vmxnet3, mac=00:0c:29:a9:61:98, mtu=1500, link=down, enabled=false）
+- 候选（`GET /cli/candidates?tokens=set,interfaces`）：ens160 / ens192 / ens224 —— 首装即可 Tab 补全到内核口名
+还原：重写 4 行声明（set interfaces ens224 / description cli-pre / disable / set vpp dpdk dev ens224）→ commit →
+bind-dpdk --yes（vfio-pci）→ request vpp restart → 核对：配置 7 行（ens192/ens224 全部）、VPP 持有 2 口、
+内核无 ens224 netdev —— 与基线一致。
+红线遵守：《AGENTS.md》「永远不要拿管理路径做试验」——管理口 ens160 只观察其出现在视图里，**未做绑定试验**；
+#302 决策明确守卫为零改动（diff 可查），决策 #101 的守卫另有历史真机证据。
+
+§2 决策 #303「登录横幅」真机验证（六点 CLI/REST + Web 黑盒）
+- 未设置时 `GET /login-banner` = `{}`（字段省略，不泄露探查面）
+- CLI 设置（`set system login banner "…"` + commit）后：未认证端点回 `{"banner":"…"}`
+- `show configuration | display set` 反推含该语句（#155 机制覆盖）
+- 审计：`config.commit | success | [edit system login] + banner …`（设置）与 `- banner …`（清除）两条 diff 可查
+- nfvis-cli `-c` 脚本模式输出**无**横幅（判定口径不受污染）；pty 交互模式横幅打印在登录提示**之前**
+- Web 黑盒（Browser Use）：未登录登录页横幅渲染在表单上方（R90-1 修复后）；用户与权限页「登录横幅」卡
+  显示当前值，清除走**低危**档确认（单次点按 + 只读回显 `delete system login banner`）；
+  清除后三处独立对账：端点 `{}`、display set 0 行、审计 `- banner` diff；退出后登录页横幅块不渲染
+- 截图：docs/images/round90-login-banner-before-fix.png / round90-login-banner-after-fix.png
+
+§3 R90-1（本轮抓到并已修复）：登录横幅被排到登录卡左侧
+- 现象：DOM 顺序正确（横幅在表单前），但 `.login-wrap` 是**默认行方向** flex，横幅与登录卡成了左右并排
+  （大片留白），与决策 #303「表单上方」口径不符——**单测/DOM 守护覆盖不到视觉排布**，真机浏览器截图一眼可见
+- 修复：`.login-wrap { flex-direction: column }`（PR #237，已合入 v2）
+- 价值注记：这正是决策 #141「界面交付必须在浏览器里真操作/看一眼」的口径价值；修复后复验截图对比留存
+
+§4 四套件（2.0.0~dev3，对照 v1.1.50/round88 基线）
+- cli-fulltest：195 通过 / 0 失败 / 12 预期报错 —— 与基线一致
+- cli-semantic-check：12 / 0 / 1 —— 与基线一致
+- cli-lifecycle-check：首遍（承接 fulltest+semantic 现场、不清场）3/0/6——0 失败但端口/对象被占、覆盖不足；
+  按 round89 口径清场 + 建对照现场（vs-lcx + 带 vhost vNIC 的 cli-vm）后复跑 **22 通过 / 0 失败 / 3 跳过**
+  （跳过 = NAT/流量类环境条件，与基线同族）
+- cli-pty-smoke：10 / 10
+结论：与基线逐项一致、零失败。⚠️ 套件顺序经验（再次印证）：semantic 需要现场对象、lifecycle 需要**干净自由口**——
+中间必须清场；「不清场直连」会让 lifecycle 退化为 3/0/6。
+
+§5 现场终态
+- 清场：sw=0 / vmf=0 / ct=0、剩余会话 1（运维用）
+- 基线核对：配置 ens192/ens224 共 7 行、VPP 持有 2 口、1G 大页池 nr=4
+- 版本：nfvis 2.0.0~dev3（v2 开发线常驻验证环境；回退路径 = 重装 v1.1.50 发布件）
+
+§6 观察项（非本轮引入、不占缺陷号）
+- 登录时打印的内核基线提示「isolcpus：期望 1-4，cmdline 为 2-5」——既有基线漂移提示（round85 基线 cmdline 为
+  isolcpus=2-5），与本轮改动无关，如实登记
+- 登录横幅取数发生在口令提示之前，而 cliclient 请求超时为 90s：`--server` 指向**静默丢包**地址时口令提示会被拖延
+  （连接被拒/不可达是秒回）。本轮未实测该场景（子智能体已在决策 #303 登记），如需收敛另立决策
