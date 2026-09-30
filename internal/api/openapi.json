@@ -177,6 +177,10 @@
               "resolved"
             ],
             "type": "string"
+          },
+          "time_synced": {
+            "description": "记录该告警（创建/重新激活）时宿主时钟是否已与 NTP 同步（NFR-006，与审计\n`AuditEntry.time_synced` 同一套三态语义）。**未同步时为 false**，据此判断\n`raised_at` 是否可信。该字段缺失表示**未知**（探针未接入），不代表已同步。\n",
+            "type": "boolean"
           }
         },
         "required": [
