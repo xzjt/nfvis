@@ -195,6 +195,109 @@ func TestChangePasswordEndpoint(t *testing.T) {
 	_ = resp
 }
 
+// 决策 #316：本会话已有未提交候选时，自助改密（及 login-users 一族一次性事务）必须拒绝，
+// 且候选原封不动——不得把配置页正在编辑的改动一并提交生效（round77 观察项）。
+func TestChangePasswordRefusedWhenCandidateDirty(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+
+	// 配置页写候选但不提交（hostname 改为候选值）
+	cand := sampleCandidate()
+	cand.System.Hostname = "keep-me-candidate"
+	status, hdr, body := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token, cand, nil)
+	if status != http.StatusOK || hdr.Get("X-NFVIS-Committed") != "false" {
+		t.Fatalf("PUT candidate 应 200 且未提交: %d %s", status, body)
+	}
+
+	// 改密 → 409，并说清原因与做法
+	status, _, body = cfgRequest(t, http.MethodPost,
+		ts.URL+APIPrefix+"/system/login-users/admin:change-password", token,
+		map[string]any{"old_password": "s3cret-Passw0rd!", "new_password": "NewPassw0rd!x"}, nil)
+	if status != http.StatusConflict {
+		t.Fatalf("候选脏时改密应 409（拒绝而非连带提交）: %d %s", status, body)
+	}
+	for _, want := range []string{"未提交的候选配置", "提交或丢弃"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("拒绝文案应说清原因与操作者该怎么做，缺 %q：%s", want, body)
+		}
+	}
+
+	// 候选原封不动：仍脏、hostname 仍是候选值（逐字段断言）
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/configuration/candidate", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET candidate: %d %s", status, data)
+	}
+	var got struct {
+		Dirty     bool `json:"dirty"`
+		Candidate struct {
+			System struct {
+				Hostname string `json:"hostname"`
+			} `json:"system"`
+		} `json:"candidate"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("解析 candidate: %v (%s)", err, data)
+	}
+	if !got.Dirty {
+		t.Fatal("被拒后候选应仍为脏：操作者的改动不能被替它丢掉")
+	}
+	if got.Candidate.System.Hostname != "keep-me-candidate" {
+		t.Fatalf("候选 hostname 应原封不动，实得 %q", got.Candidate.System.Hostname)
+	}
+
+	// committed 未受牵连：不含候选值；旧口令仍有效（改密没生效，不产生额外提交）
+	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/configuration", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET configuration: %d %s", status, data)
+	}
+	if strings.Contains(string(data), "keep-me-candidate") {
+		t.Fatal("committed 不应含候选值：改密被拒后不得提交任何东西")
+	}
+	if st, _ := login(t, ts, "admin", "s3cret-Passw0rd!"); st != http.StatusOK {
+		t.Fatalf("被拒后旧口令应仍有效: %d", st)
+	}
+
+	// 丢弃候选后改密成功（且只改口令）
+	status, _, _ = cfgRequest(t, http.MethodDelete, ts.URL+APIPrefix+"/configuration/candidate", token, nil, nil)
+	if status != http.StatusNoContent {
+		t.Fatalf("discard 应 204: %d", status)
+	}
+	status, _, body = cfgRequest(t, http.MethodPost,
+		ts.URL+APIPrefix+"/system/login-users/admin:change-password", token,
+		map[string]any{"old_password": "s3cret-Passw0rd!", "new_password": "NewPassw0rd!x"}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("候选清空后改密应成功: %d %s", status, body)
+	}
+	if st, _ := login(t, ts, "admin", "NewPassw0rd!x"); st != http.StatusOK {
+		t.Fatalf("新口令应可登录: %d", st)
+	}
+}
+
+// 同一守卫覆盖 login-users 一族其它一次性入口（建用户）：候选脏时同样拒绝。
+func TestLoginUserWriteRefusedWhenCandidateDirty(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+
+	cand := sampleCandidate()
+	cand.System.Hostname = "keep-me-candidate"
+	if status, _, body := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token, cand, nil); status != http.StatusOK {
+		t.Fatalf("PUT candidate: %d %s", status, body)
+	}
+	status, _, body := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system/login-users", token,
+		map[string]any{"name": "ops88", "kind": "user", "password": "OneShot-Passw0rd!9", "class": "read-only"}, nil)
+	if status != http.StatusConflict {
+		t.Fatalf("候选脏时建用户应 409: %d %s", status, body)
+	}
+	if strings.Contains(string(body), "ops88") && strings.Contains(string(body), "已存在") {
+		t.Fatalf("应是候选占用拒绝，不是重名冲突: %s", body)
+	}
+	// 候选仍脏
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/configuration/candidate", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), "keep-me-candidate") {
+		t.Fatalf("候选应原封不动: %d %s", status, data)
+	}
+}
+
 func TestSystemStatusEndpoint(t *testing.T) {
 	ts := newTestServer(t)
 	token := loginAdmin(t, ts)

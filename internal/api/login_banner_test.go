@@ -119,7 +119,16 @@ func TestLoginBannerPutValidation(t *testing.T) {
 		t.Fatalf("错误文案应说明 512 字节上限: %s", body)
 	}
 
+	// 决策 #316：每次 commit 校验失败都会把候选留脏（操作者可修），而本族的其它一次性
+	// 入口此时会被「候选占用」守卫拒绝——故后续用例先丢弃再试，与操作者的正确做法一致。
+	discard := func() {
+		if st, _, b := cfgRequest(t, http.MethodDelete, ts.URL+APIPrefix+"/configuration/candidate", token, nil, nil); st != http.StatusNoContent {
+			t.Fatalf("丢弃候选应 204: %d %s", st, b)
+		}
+	}
+
 	// 含换行：拒绝（横幅语义上是单行）。
+	discard()
 	status, _, body = cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/system/login-banner", token,
 		map[string]any{"banner": "第一行\n第二行"}, nil)
 	if status != http.StatusBadRequest {
@@ -130,6 +139,7 @@ func TestLoginBannerPutValidation(t *testing.T) {
 	}
 
 	// 边界内（恰 512 字节）应成功。
+	discard()
 	ok512 := strings.Repeat("a", 512)
 	status, _, body = cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/system/login-banner", token,
 		map[string]any{"banner": ok512}, nil)

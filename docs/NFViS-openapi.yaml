@@ -146,9 +146,23 @@ paths:
     post:
       tags: [vpp]
       summary: 按 committed 配置重建 startup.conf 并重启 VPP（FR-SYS-009，super-user）
+      description: |
+        返回成功**即代表数据面可查询**（决策 #315）：本端点返回前完成两项有界判定——
+        ①裸 binary API socket 可连（VPP 进程真的活着，避免「重启动作被接受」被报成成功）；
+        ②nfvisd 连接管理器的**自身会话已换成新连接**（与 `/vpp/status` 同一事实源）。
+        只看①不够：VPP 重启后 govpp 报断连前，管理器仍持有旧会话，「重启返回后立即查询」
+        会撞 `write: broken pipe`（round34/35 现象）。任一判定在窗口内未满足则返回 500 并
+        说明「VPP 已起来 / VPP 未起来」与「数据面连接在重启窗口内不可用」及下一步指引。
       responses:
         "202": { $ref: "#/components/responses/ConfigAccepted" }
         "409": { $ref: "#/components/responses/Error409" }
+        "500":
+          description: |
+            VPP 未起来（大页池被清空/启动失败等）或 **数据面连接未在窗口内恢复**（决策 #315）；
+            message 含成因与指引（`show vpp` / `request vpp restart` / `journalctl -u vpp`）。
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /system/configuration/sessions:
     get:
@@ -204,6 +218,8 @@ paths:
         一次性事务：用户/口令变更**必须生效**（FR-SEC-008），本族端点提交即生效、
         无需（也不该）由调用方再 commit；收尾时交还全局编辑锁（决策 #151）——
         提交后本会话不再持锁，其它会话可立即写入 candidate。
+        **本会话已有未提交候选时拒绝**（决策 #316）：本族操作只做它声明的那一项改动，
+        不会把配置页正在编辑的候选一并提交；此时返回 409 并说明「先提交或丢弃候选」。
       requestBody:
         required: true
         content:
@@ -212,6 +228,7 @@ paths:
       responses:
         "201": { $ref: "#/components/responses/ConfigAccepted" }
         "400": { $ref: "#/components/responses/Error400" }
+        "409": { $ref: "#/components/responses/Error409" }   # 本会话候选未提交（决策 #316）/ 重名
 
   /interfaces:
     parameters:
@@ -2021,6 +2038,7 @@ paths:
         一次性事务：取配置编辑锁 → 写候选 → 立即提交生效（同 /system/login-users 一族），
         入配置提交审计。横幅为**单行文本、最长 512 字节**：超限或含换行时校验拒绝并说明上限。
         注意：横幅在登录前（未认证）即可见，请勿写入敏感信息。
+        **本会话已有未提交候选时拒绝**（决策 #316）：见 `POST /system/login-users` 同款口径。
       requestBody:
         required: true
         content:
@@ -2029,19 +2047,25 @@ paths:
       responses:
         "200": { description: 已更新（入审计） }
         "400": { $ref: "#/components/responses/Error400" }
+        "409": { $ref: "#/components/responses/Error409" }   # 本会话候选未提交（决策 #316）
     delete:
       tags: [system]
       summary: 清除登录横幅（等价 CLI delete system login banner）
-      description: 一次性事务：提交即生效、收尾交还编辑锁（同 `PUT /system/login-banner`）。
+      description: |
+        一次性事务：提交即生效、收尾交还编辑锁（同 `PUT /system/login-banner`）。
+        **本会话已有未提交候选时拒绝**（决策 #316）。
       responses:
         "200": { description: 已清除（入审计） }
+        "409": { $ref: "#/components/responses/Error409" }   # 本会话候选未提交（决策 #316）
 
   /system/login-users/{name}:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
     put:
       tags: [system]
       summary: 修改用户（class/口令，需 super-user）
-      description: 一次性事务：提交即生效、收尾交还编辑锁（决策 #151，同 `POST /system/login-users`）。
+      description: |
+        一次性事务：提交即生效、收尾交还编辑锁（决策 #151，同 `POST /system/login-users`）。
+        **本会话已有未提交候选时拒绝**（决策 #316）：见 `POST /system/login-users` 同款口径。
       requestBody:
         required: true
         content:
@@ -2053,6 +2077,7 @@ paths:
                 password: { type: string, format: password }
       responses:
         "200": { description: 已更新（入审计） }
+        "409": { $ref: "#/components/responses/Error409" }   # 本会话候选未提交（决策 #316）
     delete:
       tags: [system]
       summary: 删除用户
@@ -2068,6 +2093,8 @@ paths:
       description: |
         一次性事务：校验旧口令 + 策略后提交生效（FR-SEC-008），收尾交还编辑锁（决策 #151）——
         改完口令的会话不再持有全局编辑锁，其它会话的配置写不会被挡（也无需为此登出）。
+        **只改口令，不牵动候选**（决策 #316）：本会话已有未提交候选（典型＝控制台配置页正在编辑）时
+        **拒绝**（409）并说明「先提交或丢弃候选」——绝不再把那份候选一并提交生效（round77 观察项）。
       requestBody:
         required: true
         content:
@@ -2081,6 +2108,7 @@ paths:
       responses:
         "200": { description: 已修改（入审计） }
         "403": { $ref: "#/components/responses/Error403" }
+        "409": { $ref: "#/components/responses/Error409" }   # 本会话候选未提交（决策 #316）
 
 components:
   securitySchemes:
