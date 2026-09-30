@@ -41,6 +41,8 @@ show system
                                                     #   `candidate` 的写法是顶层 `show configuration candidate`，
                                                     #   唯一的实现也在那里；`show system configuration candidate`
                                                     #   不存在，别在树里再加一份重复且无实现的形态——决策 #153）
+                                                    #   **列 Holder/Session/User/Acquired/Last-Activity/Dirty**——
+                                                    #   会话标识与所属用户如实列出、不同会话不合并（决策 #317）
 
 show interfaces                                     # 接口运行态清单：行 = 配置声明 ∪ VPP 运行态口 ∪ 内核未接管口（决策 #155；
                                                     #   Admin/Link/Speed/Driver/计数全取运行态——#84 字段级残留收口；
@@ -142,6 +144,8 @@ show configuration [permissions <class> [detail]] # 省略子命令 = 当前 com
 show configuration candidate                        # 当前持锁会话的 candidate
 show configuration sessions                         # candidate 持锁会话列表；**等价于 `show system configuration sessions`**
                                                     #   （同一读物：`Engine.Sessions`，与 `GET /system/configuration/sessions` 同源）
+                                                    #   列 Holder/Session/User/Acquired/Last-Activity/Dirty；会话标识 = 持锁会话的
+                                                    #   稳定 ID（决策 #317），与所属用户一并如实列出、不合并
 show configuration history                          # 提交历史快照列表：rev/时间/用户/注释/是否当前
                                                     #   （GET /configuration/history；**不含配置正文**）
 show configuration compare rollback <n>             # committed ⇄ 第 n 个历史快照 diff；**等价于管道形态
@@ -607,7 +611,7 @@ virtual-machine-functions {
 | 操作模式 `show configuration` | **committed** 配置 |
 | 操作模式 `show configuration candidate` | 当前持锁会话的 candidate |
 | 操作模式 `show configuration history` | 保留的历史提交快照**列表**（rev/时间/用户/注释/是否当前；**不含配置正文**。`Engine.History`，与 `GET /configuration/history` 同源，决策 #142） |
-| 操作模式 `show configuration sessions` | 与 `show system configuration sessions` **同一读物**（`Engine.Sessions`，与 `GET /system/configuration/sessions` 同源）——等价写法，不复制渲染逻辑（决策 #153） |
+| 操作模式 `show configuration sessions` | 与 `show system configuration sessions` **同一读物**（`Engine.Sessions`，与 `GET /system/configuration/sessions` 同源）——等价写法，不复制渲染逻辑（决策 #153）。输出列 Holder/Session/User/Acquired/Last-Activity/Dirty：**会话标识**（持锁会话的稳定 ID）与**所属用户**如实列出，同一用户的多个会话不被合并（决策 #317） |
 | 操作模式 `show system configuration candidate` | **不存在该形态**（不是「等价写法」）：`show system` 下只挂 `configuration sessions`，`candidate` 的唯一写法是上表 `show configuration candidate` 那一行。真敲该形态，执行器回 `% 该 show 命令形式未支持…`，**不会**静默当「读配置」作答（决策 #153） |
 | 操作模式 `show configuration \| compare rollback <n>` | committed ⇄ 第 n 个历史快照 diff（**已实现**：`Engine.Compare(n)`） |
 | 操作模式 `show configuration compare rollback <n>` | 与上一行的**管道形态等价**（同一 `Engine.Compare(n)`；两种写法都在命令树里，`?`/Tab 均可补出） |

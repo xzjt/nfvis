@@ -63,7 +63,7 @@
 | `show system hardware` | 硬件健康：温度/风扇/电源/SMART（FR-SYS-012） | `GET /system/hardware` | ✅（本机无 IPMI/传感器，走降级路径） |
 | `show system core-dumps` | 崩溃转储清单（VPP/QEMU/nfvisd） | `GET /system/core-dumps` | ✅ |
 | `show system tech-support` | 诊断归档清单 | `GET /system/tech-support` | ✅ |
-| `show system configuration sessions` | candidate 持锁会话列表（FR-CFG-009） | `GET /system/configuration/sessions` | ✅ |
+| `show system configuration sessions` | candidate 持锁会话列表（FR-CFG-009）；列 Holder/Session/User/Acquired/Last-Activity/Dirty（会话标识与所属用户，决策 #317） | `GET /system/configuration/sessions` | ✅ |
 | `show configuration sessions` | **等价写法**（与上一条**同一实现**、输出逐字相同；本轮起多余 token 会报错，不再静默回配置正文） | 同上 | ✅（round80 真机复验：与上一条输出一致） |
 | `show interfaces` | 接口运行态清单：行 = 配置声明 ∪ VPP 运行态口 ∪ **内核未接管口**（决策 #302，收口 round81 F1：首装在接管前也能看见网卡；内核口在备注列标注「未接管」，不编造 VPP 侧事实），Admin/Link/Speed/Driver/计数全取运行态（决策 #155；仅声明未生效的行状态列 - 并标注，纯运行态口标注「未声明」） | `GET /interfaces` | ✅ |
 | `show interfaces physical` | **与上一条完全等价**（决策 #155：`physical` 选择器退役为等价写法；原「仅声明口聚合+空态提示」口径废止） | `GET /interfaces` | ✅ |

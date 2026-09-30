@@ -485,7 +485,11 @@ VPP 线程核不在隔离核内）。
 请用 `request system zeroize`（恢复出厂）——那是唯一被允许把账号表清空的路径。
 
 会话锁：一个会话持 candidate 时，其他会话不能取得写锁（报 `candidate 会话锁被占用: 由 … 持有`，
-直到对方 commit/discard 或空闲超时）。查看谁持锁：`show system configuration sessions`。
+直到对方 commit/discard 或空闲超时）。**会话按「谁、哪个登录」区分**（会话标识 = 登录 token 的稳定 ID），
+同一用户的多个登录（控制台、CLI 终端、脚本各一个）是**互不干扰**的
+独立会话——其中一个登出或跑一条一次性命令，**不会**丢掉另一个未提交的候选。查看谁持锁：
+`show system configuration sessions`（列出 Holder/Session/User/Acquired/Last-Activity/Dirty，
+Session 列即该会话的稳定标识）；`GET /system/configuration/sessions` 同源。
 
 **「提交即生效」的写操作不会占着锁**：`system login-users` 一族（建/删用户、改权限类、重置口令、
 自助改密）与带 `X-NFVIS-Auto-Commit: true` 的直提写都是**一次性事务**——提交生效后立刻交还会话锁，
