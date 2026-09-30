@@ -21,3 +21,7 @@ vendor/
 Thumbs.db
 .DS_Store
 build/
+
+# ZCode 会话本地产物（规划文件等），不入库；.zcode/commands/ 是仓库自带命令定义，照常跟踪
+.zcode/plans/
+.zcodeignore
