@@ -1,0 +1,31 @@
+NFViS v2 真机验证记录 round97 —— 决策 #315/#316 + 四套件（含生命周期干净现场基线）
+====================================================================
+日期：2026-10-01
+环境：nfvis-vm（SSH key）；本轮构建 2.0.0~dev10（v2 线，PR #244 合并后）；升级前 2.0.0~dev9
+源码：git archive v2（73bed6f）；SOURCE_DATE_EPOCH=1790786165
+
+§1 决策 #315 vpp restart 返回后查询偶发 broken pipe（✓ 真机确认）
+- `request vpp restart` 返回文案照旧（「已按 committed 配置重启 VPP（binary API 已连通）并触发恢复收敛。」），
+  随后**连续 30 次** `show virtual-switches`（走 govpp 的 BD dump 路径）：
+  **带 `%%` / broken pipe 的次数 = 0**（耗时 38s，平均 1.3s/次）✓
+- 与修前对照：round96 同一路径曾见 `write: broken pipe`；修法（动作成功判据与可查询判据同源：
+  抓连接世代、要求「探针通 **且** 管理器已换新连接」才返回成功）在真机成立
+
+§2 决策 #316 自助改密不再连带提交候选（✓ 真机确认）
+- 造脏候选（`PUT /configuration/candidate`，改 hostname）→ 对临时用户 op97 改密：
+  **409 CONFLICT**「本会话已有未提交的候选配置：请先在配置页提交或丢弃它，再改动用户/口令/登录横幅
+  （本次操作只做该改动，不会连带提交其它候选改动）」✓
+- 候选**原封不动**（`GET /configuration/diff` 仍有该候选差异）✓ —— 没有「改密顺手把配置页改动提交生效」
+- `DELETE /configuration/candidate`（丢弃）→ 再改密 → **200 `{"committed":true,"revision":432}`** ✓
+- 临时用户 op97 建/用/删全过（201/200/200），未触碰 admin 口令
+
+§3 四套件（2.0.0~dev10）
+- **干净现场** lifecycle（本轮开头单独跑）：**22 通过 / 0 失败 / 3 跳过** —— 回到基线（round90~92 数值）
+  ⇒ round96 的 3/0/6 确属「前序套件占用自由口/对象」的现场退化，非回归
+- 连跑口径（fulltest → semantic → lifecycle）下的 lifecycle：3 / 0 / 6（0 失败；同上同族退化）
+- cli-fulltest：**198 通过 / 0 失败 / 11 预期报错**
+- cli-semantic-check：**12 / 0 / 1**
+- cli-pty-smoke：**10 / 10**
+
+§4 现场终态
+sw=0 / vmf=0 / 告警已清 / 会话 1 / 候选已丢弃；VPP 持有 ens192/ens224；版本 nfvis 2.0.0~dev10
