@@ -118,6 +118,7 @@ func TestStatementPathsExist(t *testing.T) {
 		{"system", "health", "thresholds", "disk-used-percent", "90"},
 		{"system", "syslog", "host", "10.0.0.9", "port", "514", "severity", "warn"},
 		{"system", "syslog", "local", "retention-days", "30"},
+		{"system", "login", "banner", "Authorized access only"},
 		{"system", "login", "user", "admin", "password", "x", "class", "super-user"},
 		{"system", "login", "class", "netops", "allow", "show"},
 		{"system", "login", "password-policy", "min-length", "12"},

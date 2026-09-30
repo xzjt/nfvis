@@ -72,6 +72,22 @@ paths:
       responses:
         "204": { description: 已吊销 }
 
+  /login-banner:
+    get:
+      tags: [auth]
+      summary: 登录横幅（未认证只读，登录页展示用）
+      security: []
+      description: |
+        返回配置的登录横幅文本。该端点**不要求鉴权**（登录前就要显示），且**只返回横幅文本本身**——
+        不返回主机名、版本、用户清单等任何其他信息（登录前不给探查面）。
+        未设置横幅时响应为空对象：`banner` 字段省略（不回空串、不编造），客户端据此不渲染横幅块。
+      responses:
+        "200":
+          description: OK（未设置横幅时 banner 字段省略）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginBanner" }
+
   /system/api-tokens:
     get:
       tags: [system]
@@ -1916,6 +1932,29 @@ paths:
         "400": { $ref: "#/components/responses/Error400" }
         "404": { $ref: "#/components/responses/Error404" }
 
+  /system/login-banner:
+    put:
+      tags: [system]
+      summary: 设置登录横幅（等价 CLI set system login banner）
+      description: |
+        一次性事务：取配置编辑锁 → 写候选 → 立即提交生效（同 /system/login-users 一族），
+        入配置提交审计。横幅为**单行文本、最长 512 字节**：超限或含换行时校验拒绝并说明上限。
+        注意：横幅在登录前（未认证）即可见，请勿写入敏感信息。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginBanner" }
+      responses:
+        "200": { description: 已更新（入审计） }
+        "400": { $ref: "#/components/responses/Error400" }
+    delete:
+      tags: [system]
+      summary: 清除登录横幅（等价 CLI delete system login banner）
+      description: 一次性事务：提交即生效、收尾交还编辑锁（同 `PUT /system/login-banner`）。
+      responses:
+        "200": { description: 已清除（入审计） }
+
   /system/login-users/{name}:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
     put:
@@ -2007,6 +2046,14 @@ components:
         token_id: { type: string, description: token 稳定 ID（UUID）；列表/吊销按它定位，重启后失效 }
         user: { $ref: "#/components/schemas/LoginUser" }
         expires_in: { type: integer }
+
+    LoginBanner:
+      type: object
+      properties:
+        banner:
+          type: string
+          maxLength: 512
+          description: 横幅文本；未设置时省略该字段（不回空串、不编造）
 
     ApiTokenList:
       type: object
@@ -2170,6 +2217,12 @@ components:
           type: object
           description: 本地用户与 login class（FR-SEC-002/003；口令仅存加盐 PBKDF2 哈希，附录 A #25）
           properties:
+            banner:
+              type: string
+              maxLength: 512
+              description: |
+                登录横幅（单行文本，最长 512 字节）：显示在 Web 登录页与 CLI 登录提示之前，
+                未认证即可见，请勿写入敏感信息。未设置时该字段省略。
             users:
               type: array
               items:

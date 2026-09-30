@@ -256,6 +256,7 @@
 | `set system syslog local level <lvl>` | 本地日志级别 | 宿主日志 | ✅ |
 | `set system syslog local retention-days <n>` | 日志保留天数（FR-SYS-013） | 宿主 logrotate | ✅ |
 | `set system syslog local max-size-mb <n>` | 日志容量上限 | 宿主 logrotate | ✅ |
+| `set system login banner <text>` | 登录横幅（显示在 Web 登录页与 CLI 登录提示之前，未认证即可见；单行，最长 512 字节，超限/含换行拒绝；`delete system login banner` 清除） | 配置库 | 🚫 本轮新增（决策 #303）：单测覆盖，真机四套件待跑 |
 | `set system login user <n> password <s> class <c>` | 本地用户（口令**加盐哈希**落库、回显脱敏） | 配置库（PBKDF2） | ✅（决策 #79 修复；**`<n>` 不可省**，把 `password`/`class` 写在名字位会被拒并提示正确写法，决策 #82） |
 | `set system login class <n> allow <path>` | 自定义 class 允许项（可多条） | 配置库 | ✅（决策 #79 修复） |
 | `set system login class <n> deny <path>` | 自定义 class 拒绝项（可多条） | 配置库 | ✅（决策 #79 修复） |
@@ -395,10 +396,10 @@
 > **复核方法**（下面每个数字都可这样复算）：
 >
 > ```bash
-> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 262（§1/§2 的命令行 260 行 + §3 本表的 `show`、`request` 两行）
+> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 263（§1/§2 的命令行 261 行 + §3 本表的 `show`、`request` 两行）
 > ```
 >
-> 即 §1/§2 合计 **260 行**；把 ` / ` 并列的写法各拆成一条后为 **264 条**命令
+> 即 §1/§2 合计 **261 行**；把 ` / ` 并列的写法各拆成一条后为 **265 条**命令
 > （`exit` / `quit` +1；§2.1 的 `edit <path>` / `up` / `top` / `exit` +3）。
 
 **分族**（族 = 该行**首个 token**；§2.1 的裸 `show` 与 `show | display set` 因此计入 `show` 族，`help` 计入其余操作）：
@@ -409,8 +410,8 @@
 | `request` | 46 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/系统/告警） |
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
-| 配置模式 | 126 | §2.1 余下 13 行 + §2.2~§2.9 共 113 行 |
-| **合计** | **260** | 不含管道则为 **251**；按 ` / ` 拆开后 **264 条** |
+| 配置模式 | 127 | §2.1 余下 13 行 + §2.2~§2.9 共 114 行 |
+| **合计** | **261** | 不含管道则为 **252**；按 ` / ` 拆开后 **265 条** |
 
 **分节**（行数）：
 
@@ -420,18 +421,18 @@
 | §1.2 `request` | 46 | §2.3 `interfaces` 与 `bonds` | 10 |
 | §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 13 |
 | §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 9 |
-| §2.2 `system` | 34 | §2.6 `resource-pools` | 3 |
+| §2.2 `system` | 35 | §2.6 `resource-pools` | 3 |
 | §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 20 |
-| §2.9 `container-functions` | 10 | **合计** | **260** |
+| §2.9 `container-functions` | 10 | **合计** | **261** |
 
-**按实测状态分布**（共 260 行）：
+**按实测状态分布**（共 261 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
 | ✅ 实测通过 | 241 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归） |
 | ⚠️ 已知缺口 | 1 | `show configuration [permissions <class>]`（按 class 视角未实现，明确提示）；`show \| display set` 已由决策 #155 实现、`show vpp runtime` 已由决策 #200 实现、`request system api token revoke` 已由决策 #301 实现逐 token 吊销，均移出缺口 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 14 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`format-data`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖但真机四套件待跑的 2 行（`show system api tokens`、`request system api token revoke <token-id>`） |
+| 🚫 本轮未执行 | 15 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`format-data`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖但真机四套件待跑的 3 行（`show system api tokens`、`request system api token revoke <token-id>`、`set system login banner <text>`） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、

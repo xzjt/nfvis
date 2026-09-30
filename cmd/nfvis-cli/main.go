@@ -39,6 +39,11 @@ func main() {
 		return
 	}
 
+	// 客户端先于口令提示装配：登录横幅（决策 #303）要在提示口令**之前**展示。
+	client := mustClient(*server, *caFile, *insecure)
+	fmt.Printf("连接 %s ...\n", *server)
+	// 登录横幅在提示口令之前取一次；脚本模式不取也不打印（见 printLoginBanner）。
+	printLoginBanner(os.Stdout, *cmdline, client)
 	password := *passwordFlag
 	if password == "" {
 		// 未给 -p / NFVIS_PASSWORD 时**交互式索取**：口令不进命令行（`ps` 与 shell 历史都看不到），
@@ -51,9 +56,6 @@ func main() {
 		}
 		password = pw
 	}
-
-	client := mustClient(*server, *caFile, *insecure)
-	fmt.Printf("连接 %s ...\n", *server)
 	if err := client.Login(*user, password); err != nil {
 		fmt.Fprintf(os.Stderr, "%% 登录失败: %v\n", err)
 		if isConnErr(err) {
@@ -81,6 +83,18 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%% %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// printLoginBanner 交互模式的登录横幅（决策 #303）：在提示口令**之前**展示，未认证阶段即可见。
+//
+// `-c` 脚本模式**不取也不打印**：脚本的成败判定看输出行首的 %/%%（见 runScriptLines），
+// 横幅文本会污染输出与判定。网络/服务端任何失败静默跳过（横幅是展示性功能，不得挡住登录流程），
+// 这一层由 cli.PrintLoginBanner 保证。返回值仅供单测断言，调用方忽略。
+func printLoginBanner(w io.Writer, cmdline string, f cli.BannerFetcher) bool {
+	if cmdline != "" {
+		return false
+	}
+	return cli.PrintLoginBanner(w, f)
 }
 
 // runScript 多行脚本模式：任一行**真错误**即停止；结束时清理会话。

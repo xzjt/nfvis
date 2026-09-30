@@ -114,6 +114,10 @@ func ConfigPathTree() *Node {
 				),
 			),
 			K("login", "本地用户与 class",
+				// 决策 #303：登录横幅。单行 + 512 字节上限是**校验口径**（model.Validate 在
+				// commit 拒绝超限/含换行的取值）——树里只声明取值类型，便于 ?/Tab 如实提示。
+				K("banner", "登录横幅（登录页与 CLI 登录提示前显示；单行，最长 512 字节）",
+					V("string", "横幅文本（单行，最长 512 字节）")),
 				K("user", "本地用户",
 					// RQ：`set system login user <name>` 不能单独成句——只给名字会落库成
 					// 「有名字、无 password_hash、无 class」的账号（真机实测：CLI 报 [ok] 且

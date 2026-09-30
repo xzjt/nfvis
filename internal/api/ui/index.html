@@ -10,6 +10,9 @@
 
 <!-- 登录视图：未持有 token 时显示。口令只用于换 token，不做任何本地留存。 -->
 <section id="login-view" class="login-wrap" hidden>
+  <!-- 登录横幅（决策 #303）：GET /login-banner 未认证即可读，有横幅才显示。
+       它对任何未认证访问者可见，别把敏感信息写进横幅。 -->
+  <div id="login-banner" class="login-banner" hidden></div>
   <form id="login-form" class="login-card">
     <h1>NFViS 控制台</h1>
     <p class="muted">总览 / 配置 / 诊断：数据取自本机 REST 接口</p>
@@ -248,6 +251,21 @@
         <tbody></tbody>
       </table>
       <div class="cfg-forms">
+        <fieldset>
+          <legend>登录横幅</legend>
+          <p class="muted small">
+            显示在控制台登录页与命令行登录提示<strong>之前</strong>——登录者尚未认证就能看到，
+            请勿写入敏感信息。单行文本，最长 512 字节；保存后立即生效并记入审计。
+            当前值：<span id="usr-banner-current" class="muted">（读取中）</span>
+          </p>
+          <label for="usr-banner-text">横幅文本</label>
+          <input id="usr-banner-text" data-write type="text" autocomplete="off" maxlength="512">
+          <div class="cfg-actions">
+            <button id="usr-banner-save-btn" data-write type="button" class="danger">保存横幅</button>
+            <button id="usr-banner-clear-btn" data-write type="button" class="danger">清除横幅</button>
+          </div>
+          <p class="muted small">清除后登录页与命令行不再显示横幅。</p>
+        </fieldset>
         <fieldset>
           <legend>新建用户</legend>
           <label for="usr-new-name">用户名</label>

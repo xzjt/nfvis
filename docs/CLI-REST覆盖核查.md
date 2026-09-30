@@ -2,34 +2,36 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 用途 | 回答“Web 控制台能否实现 CLI 的全部功能”：把 **259 行 CLI 命令**逐一对照 **135 个 REST 端点**，分出**已有类型化端点 / 需补 API / CLI-only by design** 三张清单 |
-| 日期 | 2026-09-25（round80） |
-| CLI 侧权威清单 | `docs/NFViS-CLI命令全表.md`（**259 行**，分族：show 67 / request 46 / 其余操作 11 / 通用管道 9 / 配置模式 126；该表由 CLI 批次维护，本核查不修改它） |
-| REST 侧权威清单 | `docs/NFViS-openapi.yaml`（99 个路径 / **135 个操作**）+ `internal/api/server.go` 的 131 条路由注册（其中 4 条 `{tail...}` 通配展开为 8 条 → 合计 **135 个端点**） |
+| 用途 | 回答“Web 控制台能否实现 CLI 的全部功能”：把 **261 行 CLI 命令**逐一对照 **140 个 REST 端点**，分出**已有类型化端点 / 需补 API / CLI-only by design** 三张清单 |
+| 日期 | 2026-09-25（round80）；2026-09-30（v2 决策 #301/#303 复核） |
+| CLI 侧权威清单 | `docs/NFViS-CLI命令全表.md`（**261 行**，分族：show 68 / request 46 / 其余操作 11 / 通用管道 9 / 配置模式 127；该表由 CLI 批次维护，本核查不修改它） |
+| REST 侧权威清单 | `docs/NFViS-openapi.yaml`（103 个路径 / **140 个操作**）+ `internal/api/server.go` 的 136 条路由注册（其中 5 条 `{tail...}` 通配展开：4 条各展开为 2 条、1 条为 1 条 → 合计 **140 个端点**） |
 | 机器守护 | `internal/api/cli_rest_coverage_test.go`（覆盖表 / 例外表 / 缺口表三张 + 三条断言：端点必须存在、契约命令必须归类、缺口与例外必须写理由） |
-| 依据 | 规格书 §12 与附录 A 决策 #65/#76⑧/#107/#115/#119/#122/#123/#124/#125/#126/#127/#142/#153；round80 真机实测（`contrib/scripts/cli-fulltest.sh` 通过 195 / 失败 1 / 预期报错 5，pty 冒烟 `cli-pty-smoke.sh` 通过 10 / 失败 0） |
+| 依据 | 规格书 §12 与附录 A 决策 #65/#76⑧/#107/#115/#119/#122/#123/#124/#125/#126/#127/#142/#153/#301/#303；round80 真机实测（`contrib/scripts/cli-fulltest.sh` 通过 195 / 失败 1 / 预期报错 5，pty 冒烟 `cli-pty-smoke.sh` 通过 10 / 失败 0） |
 
 ## 0. 结论
 
-**260 行命令中：238 行已有类型化 REST 端点（可直接写页面）、2 行是真缺口（需补 API 或不补）、20 行是 CLI-only by design（交互形态差异，不需要 API）。238 + 2 + 20 = 260（行口径；本节为**当前口径**，历轮数字见下方更新记录）。**
+**261 行命令中：239 行已有类型化 REST 端点（可直接写页面）、2 行是真缺口（需补 API 或不补）、20 行是 CLI-only by design（交互形态差异，不需要 API）。239 + 2 + 20 = 261（行口径；本节为**当前口径**，历轮数字见下方更新记录）。**
 
 REST 侧现状（本轮复核）：
 
-- **135 个端点** = 99 个路径 / 135 个操作（GET 60 / POST 47 / DELETE 14 / PUT 14；class：R 53 / O 3 / S 73 / 免鉴权 6）。
+- **140 个端点** = 103 个路径 / 140 个操作（GET 62 / POST 48 / DELETE 15 / PUT 15；免鉴权 7）。
+  round80 复核时的 class 分布为 R 53 / O 3 / S 73 / 免鉴权 6——本核查只维护 CLI 行口径与端点存在性，
+  class 分布以 `internal/api/server.go` 的注册为准，不逐轮重算。
   其中 `x-internal` 2 条（`POST /cli/execute`、`GET /cli/candidates`）**不计入覆盖**（round37 口径：契约明言仅 nfvis-cli 使用，前端不碰）。
-  另有 7 条端点不对应任何命令行形态（`/login`、`/logout`、`/events`、`/metrics`、`/openapi.json`、`/ui`、`/ui/`：会话 / 运行 / 控制台自身读物）。
-- **契约零漂移**：server.go 注册的 135 个端点**全部**在契约里（无注册缺契约，也无契约缺注册）；本轮把契约里唯一的幽灵声明
+  另有 8 条端点不对应任何命令行形态（`/login`、`/login-banner`、`/logout`、`/events`、`/metrics`、`/openapi.json`、`/ui`、`/ui/`：会话 / 运行 / 控制台自身读物）。
+- **契约零漂移**：server.go 注册的 140 个端点**全部**在契约里（无注册缺契约，也无契约缺注册）；本轮把契约里唯一的幽灵声明
   **`PUT /vpp/config` 删除**（决策 #153——该 `put:` 从未注册，VPP 配置的写入路径是配置模式 `set vpp …` + `commit`，即
   `PUT /configuration/candidate` + `POST /configuration/commit`，不另设写端点）。
-- 覆盖的主体：**配置模式 126 行里 123 行计入覆盖**，其中 **113 条 `set`/`delete` 语句整族由 candidate API 架构性覆盖**
+- 覆盖的主体：**配置模式 127 行里 124 行计入覆盖**，其中 **114 条 `set`/`delete` 语句整族由 candidate API 架构性覆盖**
   （`PUT`/`DELETE /configuration/candidate` + `POST /configuration/commit`，可带 `X-NFVIS-Auto-Commit`）——这正是 REST 事务模型
-  相对 CLI 语句的本质，不需要逐条端点；**show 族 67 行里 63 行**有对应 GET；**request 族 46 行里 44 行**有对应动作端点。
-- **4 个缺口分三类**：未接入的运行态统计（`show vpp runtime`，两边都未接）、明确不做的子形态
-  （`show configuration [permissions <class>]` 的 `permissions` 分支，语义从未定义）、V1 登记的延期（逐 token 吊销、`format-data`）。
-- **19 个例外分三类**：REPL 交互形态（`wizard` / `monitor` / `?` / `help` / 层级导航）、CLI 侧文本渲染（通用管道 / `display set`）、
+  相对 CLI 语句的本质，不需要逐条端点；**show 族 68 行里 64 行**有对应 GET；**request 族 46 行里 45 行**有对应动作端点。
+- **2 个缺口**：明确不做的子形态（`show configuration [permissions <class>]` 的 `permissions` 分支，语义从未定义）
+  与 V1 登记的延期（`request system storage format-data`）。
+- **20 个例外分三类**：REPL 交互形态（`wizard` / `monitor` / `?` / `help` / 层级导航）、CLI 侧文本渲染（通用管道 / `display set`）、
   CLI 本地行为（`exit` / `quit` / `start shell`）。
-- **口径换算**：若把 ` / ` 并列的两行拆开（`exit` / `quit`；`edit <path>` / `up` / `top` / `exit`），则 **264 条 = 覆盖 238 / 缺口 2 / 例外 24**
-  （多出的 4 条全在例外桶：本地行为与层级导航）。**本核查全篇用“行”口径，合计 260**。
+- **口径换算**：若把 ` / ` 并列的两行拆开（`exit` / `quit`；`edit <path>` / `up` / `top` / `exit`），则 **265 条 = 覆盖 239 / 缺口 2 / 例外 24**
+  （多出的 4 条全在例外桶：本地行为与层级导航）。**本核查全篇用“行”口径，合计 261**。
 
 ### 历史更新记录
 
@@ -44,6 +46,7 @@ REST 侧现状（本轮复核）：
 | 决策 #142 前置 | 新增命令行 `show configuration history` 与端点 `GET /configuration/history`（配置提交历史——此前只有 `rollback [n]` / `compare rollback <n>`，没有「列出历史快照」的读物） | 形态 258→259、覆盖 236→237 |
 | **round80（本轮）** | 以《命令全表》按**实际行数**重算的 259 行为新基数逐行重算；`show configuration [permissions <class>]` 由覆盖桶改判**缺口**（该行 `permissions` 分支本轮改为明确提示未实现，决策 #153）；本轮新落地的等价写法行（`show configuration sessions`、`show protocols lldp neighbors`、`show interfaces <ifname> detail\|statistics\|sriov`）全部有端点承载，计入覆盖 | **覆盖 236 / 缺口 4 / 例外 19（新表行口径，合计 259）** |
 | v2 决策 #301（2026-09-30） | ① 新增 `show system api tokens` 行（形态 259→260），端点 `GET /system/api-tokens`；② 缺口 #3「逐 token 吊销」收口：`request system api token revoke <token-id>` → `POST /system/api-tokens/{id}:revoke`（Web 控制台用户与权限页同步实现）；③ 顺带按既成事实把缺口 #1 `show vpp runtime` 移入例外桶（决策 #200 已实现：数据源是本机 stats segment、CLI 侧渲染，Web 等价形态 `/vpp/status`） | **覆盖 236→238 / 缺口 4→2 / 例外 19→20（合计 260）** |
+| v2 决策 #303（2026-09-30） | 新增 1 行 `set system login banner <text>`（配置语句 → candidate API **架构性覆盖**，无需新端点；`delete system login banner` 同族）。该能力的**两个展示面**由新端点承载：未认证只读 `GET /login-banner`（登录页/CLI 登录前展示，`security: []`、只回 banner 本身）与 `PUT`/`DELETE /system/login-banner`（Web「用户与权限」页的「登录横幅」卡，S 级、一次性事务直提入审计）——登录页与 CLI 前置横幅不对应任何命令行形态，故不计入 CLI 行覆盖 | **覆盖 238→239 / 缺口 2 / 例外 20（合计 261）；REST 侧本决策 +3 操作 / +2 路径（连同 #301 的 +2 操作 / +2 路径，当前 140 操作 / 103 路径）** |
 
 > **与上轮绝对值对不上的原因**（口径变化，不是能力增减）：①《命令全表》本轮按实际行数重算分族（67/46/11/9/126，此前表内
 > 统计与实际行数不符）；② `show configuration [permissions <class>]` 从覆盖桶移到缺口桶；③ round80 新增的等价写法行全部计入覆盖。
@@ -51,10 +54,10 @@ REST 侧现状（本轮复核）：
 
 ## 1. 口径与方法
 
-- **行口径（259）**：以《命令全表》§1/§2 中**以反引号命令起始的表行**计，与该表 §3 的“一行一个命令行”一致
+- **行口径（261）**：以《命令全表》§1/§2 中**以反引号命令起始的表行**计，与该表 §3 的“一行一个命令行”一致
   （同一命令的二级子命令各计一行；`a` / `b` 并列写在同一行只算 1 行）。复核方法：
-  `grep -c '^| \`' docs/NFViS-CLI命令全表.md` → **261**（= 259 + §3 统计表自身的 `show`、`request` 两行）。
-  本轮已按实际行数重算分族：**show 67 / request 46 / 其余操作 11 / 通用管道 9 / 配置模式 126 = 259**
+  `grep -c '^| \`' docs/NFViS-CLI命令全表.md` → **263**（= 261 + §3 统计表自身的 `show`、`request` 两行）。
+  本轮已按实际行数重算分族：**show 68 / request 46 / 其余操作 11 / 通用管道 9 / 配置模式 127 = 261**
   （其余操作含 §1.1 的 `help [command]`；§1.3 的 `Tab` 补全行与 `?` 行同属 REPL 补全形态，按一行归类）。
 - **分类定义**：
   - **A 覆盖**：存在承载该行功能的类型化 REST 端点。`/cli/execute` 与 `/cli/candidates` 是 `x-internal`，
@@ -69,7 +72,7 @@ REST 侧现状（本轮复核）：
 - **方法**：逐族对照《命令全表》与 `openapi.yaml` 的路径 / 方法 / 响应 schema；响应缺字段的以契约 schema 为准绳核实
   （round49 的 VS / VM `statistics` 字段就是这样定的）。端点引用必须真实存在于契约，由 §5 的守护断言 A 机器盯着。
 
-## 2. A 覆盖矩阵（238 行）
+## 2. A 覆盖矩阵（239 行）
 
 ### 2.1 show 族（64/68）
 
@@ -160,11 +163,11 @@ REST 侧现状（本轮复核）：
 `monitor vnf <name>`、`start shell`、`?`（含 `Tab` 补全）、`help [command]`）与通用管道 7 行
 （`\| match` / `\| except` / `\| count` / `\| last` / `\| begin` / `\| display json` / `\| display xml`）——全为**例外**（§4）。
 
-### 2.4 配置模式（123/126；末行 `show` 属 show 族，仅交叉引用、不计入本节的 123）
+### 2.4 配置模式（124/127；末行 `show` 属 show 族，仅交叉引用、不计入本节的 124）
 
 | 命令族（行数） | REST 落点 |
 |---|---|
-| `set <path> …` / `delete <path> …`（2 行通用形态 + §2.2~§2.9 的 **113 条语句** = 115） | `PUT`/`DELETE /configuration/candidate`（`X-NFVIS-Auto-Commit: true` 时校验 + 下发 + 落库一次完成；删除走 candidate 上的键删除） |
+| `set <path> …` / `delete <path> …`（2 行通用形态 + §2.2~§2.9 的 **114 条语句** = 116） | `PUT`/`DELETE /configuration/candidate`（`X-NFVIS-Auto-Commit: true` 时校验 + 下发 + 落库一次完成；删除走 candidate 上的键删除）。含 v2 决策 #303 的 `set system login banner <text>` / `delete system login banner`（单行、≤512 字节，提交校验拒绝超限） |
 | `commit`（1） | `POST /configuration/commit` |
 | `commit check`（1） | `POST /configuration/check`（同一份校验、不落库不下发；round46 决策 #122） |
 | `commit confirmed [min]`（1） | `POST /configuration/commit`（`confirmed_minutes>0`）+ `POST /configuration/commit:confirm` |
@@ -222,16 +225,19 @@ REST 侧现状（本轮复核）：
 6. 断言 C：缺口与例外必须写明理由（登记不写理由等于没登记）。
 
 纪律（写在测试头部注释里）：新增 CLI 命令须同步补《命令全表》、`contractCLICommands` 与本覆盖表/例外表/缺口表之一；
-本测试只认这三张表，文档策展的完整 259 行清单以《命令全表》为准。
+本测试只认这三张表，文档策展的完整 261 行清单以《命令全表》为准。
 
 ## 6. 对控制台的输入（现状）
 
-- **API 侧够用**：计入覆盖的 236 行全部有类型化端点——配置读写（candidate / check / commit / confirm / diff / rollback / history）、
-  生命周期、诊断、抓包、备份恢复、用户与告警都在位，**不需要为任何一条配置语句新增端点**（113 条语句走同一套事务 API）。
+- **API 侧够用**：计入覆盖的 239 行全部有类型化端点——配置读写（candidate / check / commit / confirm / diff / rollback / history）、
+  生命周期、诊断、抓包、备份恢复、用户与告警都在位，**不需要为任何一条配置语句新增端点**（114 条语句走同一套事务 API）。
 - **缺口的归属（v2 决策 #301 后）**：未收口的只剩 2 项——`format-data`（登记延期 V2）与 `permissions` 子形态
   （语义未定义，明确不做；控制台用 `show configuration` + 前端渲染等价承担）。`show vpp runtime` 归例外桶
   （Web 走 `/vpp/status`），逐 token 吊销已收口（活动会话卡片落在「用户与权限」页）。
-- **19 个例外由 Web 形态等价承担**：表单 + 静态候选（`help`/`?`/`wizard`）、定时刷新 + `GET /events`（`monitor`）、
+- **v2 决策 #303 的界面落点**：`set system login banner` 的图形等价物是「用户与权限」页的「登录横幅」卡
+  （`GET /login-banner` 读当前值、`PUT`/`DELETE /system/login-banner` 保存/清除，低危档确认）；登录横幅本身
+  另有两个展示面（Web 登录页表单上方、`nfvis-cli` 交互模式口令提示之前）——都消费同一个未认证只读端点。
+- **20 个例外由 Web 形态等价承担**：表单 + 静态候选（`help`/`?`/`wizard`）、定时刷新 + `GET /events`（`monitor`）、
   前端过滤与分页（管道）、原生 JSON（`display`）、向导页（`wizard`）；高危动作的确认语义照搬 CLI 的
   `--yes` / `confirm` / `commit confirmed` 体系。
 - **边界**：本核查只回答**API 够不够**，不回答**界面接没接**——界面侧清单与验收另见控制台 IA 设计

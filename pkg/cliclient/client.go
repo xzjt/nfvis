@@ -257,6 +257,20 @@ func (c *Client) IdleTimeoutMinutes() (int, error) {
 	return out.IdleTimeoutMinutes, nil
 }
 
+// LoginBanner 拉取登录横幅（未认证端点，决策 #303）。
+// nfvis-cli 交互模式在口令提示**之前**展示：本方法在未认证阶段调用（无 token，
+// 端点也不要求）。未设置横幅返回空串；网络/服务端失败原样返回错误，由调用方
+// 静默跳过（横幅是展示性功能，不得挡住登录流程）。
+func (c *Client) LoginBanner() (string, error) {
+	var out struct {
+		Banner string `json:"banner"`
+	}
+	if err := c.do(http.MethodGet, "/api/v1/login-banner", nil, &out); err != nil {
+		return "", err
+	}
+	return out.Banner, nil
+}
+
 // DynamicCandidates 查询指定来源的动态候选（接口名/VNF 名/镜像名等，§5.3）。
 func (c *Client) DynamicCandidates(kind string) ([]string, error) {
 	var resp []string

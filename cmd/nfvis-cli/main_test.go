@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"strings"
@@ -121,6 +122,51 @@ func TestRunScriptStillRefusesConfirmPrompt(t *testing.T) {
 	}
 	if len(be.executed) != 1 {
 		t.Fatalf("问询之后的语句不得执行，实执行 %v", be.executed)
+	}
+}
+
+// ---------- 登录横幅（决策 #303） ----------
+
+// bannerStub 登录横幅取数器的桩：记录**是否真的取了**——脚本模式的判据是"不取"，
+// 比"不打印"更严（连端点都不该碰）。
+type bannerStub struct {
+	banner string
+	calls  int
+}
+
+func (s *bannerStub) LoginBanner() (string, error) {
+	s.calls++
+	return s.banner, nil
+}
+
+// TestLoginBannerInteractiveOnly 登录横幅只在交互模式取与打印；脚本模式（-c）一个字都不输出。
+//
+// 脚本模式的成败判定看输出行首的 %/%%（见 runScriptLines），横幅文本会污染它与判定——
+// 故脚本模式下**不取也不打印**（不与服务端建立这条无谓的请求）。
+func TestLoginBannerInteractiveOnly(t *testing.T) {
+	f := &bannerStub{banner: "仅限授权人员访问"}
+	var out bytes.Buffer
+
+	// 脚本模式：不取、不打印。
+	if printLoginBanner(&out, "show version", f) {
+		t.Fatal("脚本模式不应打印横幅")
+	}
+	if f.calls != 0 {
+		t.Fatalf("脚本模式不应取横幅（会污染 %%/%% 判定），实际取了 %d 次", f.calls)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("脚本模式不应有任何输出：%q", out.String())
+	}
+
+	// 交互模式（-c 为空）：取一次、打印横幅（随后才是口令提示）。
+	if !printLoginBanner(&out, "", f) {
+		t.Fatal("交互模式有横幅应打印")
+	}
+	if f.calls != 1 {
+		t.Fatalf("交互模式应恰好取一次横幅，实际 %d 次", f.calls)
+	}
+	if !strings.Contains(out.String(), "仅限授权人员访问") {
+		t.Fatalf("输出应含横幅文本：%q", out.String())
 	}
 }
 

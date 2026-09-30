@@ -385,6 +385,11 @@ nfvis$ show users
 REST 等价（`POST /api/v1/system/login-users`，201）见配套 OpenAPI；改口令/改 class 用 `PUT`，
 删除用 `DELETE`。
 
+**登录横幅**：`set system login banner <文本>` 设置、`delete system login banner` 清除
+（单行文本，最长 512 字节）。横幅显示在 Web 控制台登录页与命令行登录提示**之前**——
+登录者尚未认证就能看到，请勿写入敏感信息；控制台「用户与权限」页的「登录横幅」卡可查看、
+设置与清除（保存后立即生效并记入审计）。
+
 自助改密（登录者本人，验证旧口令）：
 
 ```bash

@@ -318,7 +318,12 @@ set syslog
       └─ max-size-mb <uint>                   # 本地日志容量上限，滚动覆盖
 # 管理口地址/网关变更：commit 时若当前会话来自 SSH，强制要求使用
 # commit confirmed 并输出自锁警告（FR-CFG-012）
-set login
+set login                               # 权限：S（配置模式既有权限位，本节全部语句同）
+  ├─ banner <text>                     # 登录横幅：显示在 Web 登录页与 CLI 登录提示之前（未认证即可见，
+  │                                    #   请勿写入敏感信息）；单行、最长 512 字节，超限/含换行时
+  │                                    #   commit 校验拒绝并说明上限；delete system login banner 清除
+  │                                    #   API: PUT/DELETE /system/login-banner（管理面，一次性事务）、
+  │                                    #        GET /login-banner（未认证只读，登录页展示）
   ├─ user <name> password <string> class <class-name>
   ├─ class <name>                      # 自定义 class
   │   ├─ allow <command-path>          # 允许的命令树节点
