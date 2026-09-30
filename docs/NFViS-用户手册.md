@@ -307,7 +307,8 @@ CLI 参数：
 | `-ca` | 空 | 服务端证书 PEM；**缺省固定本机 `/var/lib/nfvis/tls/server.crt`**（自签场景零配置） |
 | `-insecure` | 关 | 跳过证书校验（仅调试） |
 | `-source` | `ssh` | 接入源（`ssh`/`console`），影响管理口自锁保护与 `start shell` 权限 |
-| `-c "…"` | 空 | **脚本模式**：执行多行命令后退出（换行分隔；任一行**真错误**即停——「值未变化」的空操作只是提示，见下） |
+| `-c "…"` | 空 | **脚本模式**：执行多行命令后退出（换行分隔；任一行**真错误**即停——「值未变化」的空操作只是提示，见下）；与 `-f` 互斥 |
+| `-f <file>` | 空 | **脚本文件模式**：按行执行文件里的命令后退出，**语义与 `-c` 完全相同**（失败即停、收尾一致）；`-f -` 从 stdin 读（此时口令须用 `-p`/`NFVIS_PASSWORD` 提供）；与 `-c` 互斥 |
 | `-version` | - | CLI 版本（与守护进程同源注入） |
 
 > **零参数即可连**：缺省 `https://127.0.0.1:443` 与守护进程缺省一致，
@@ -323,6 +324,26 @@ nfvis-cli -c "configure
 set system hostname fw-01
 commit"
 ```
+
+**脚本文件模式 `-f`**：把同样的多行脚本放进文件后按行执行，**语义与 `-c` 完全一致**
+（失败即停、退出码规则、收尾一致）——多行值、含引号的命令不必再挤进 shell 字符串：
+
+```bash
+cat > bringup.txt <<'EOF'
+configure
+set system hostname fw-01
+set virtual-switches vs-dmz type l2
+commit
+EOF
+nfvis-cli -f bringup.txt
+```
+
+- `-c` 与 `-f` **互斥**，同时给出会明确报错并退出；`-c` 直接给命令串，`-f` 从文件读。
+- 文件不存在/不可读、或**去空白后为空**，都会报错（含路径）并返回非零——不会静默成功。
+- 脚本文件的行尾 `CRLF`（Windows 编辑）与文件头 BOM 会被自动归一，无需手工转换；
+  `-c` 与 `-f` 走同一归一，两种来源语义一致。
+- `-f -` 从 **stdin** 读脚本（适合管道喂入生成的脚本）；此时 stdin 已用于脚本，
+  口令必须由 `-p` 或 `NFVIS_PASSWORD` 提供，否则会报错退出。
 
 > **「值未变化」不是错误（幂等脚本可重跑）**：脚本里一条**语义正确、但配置值已经是目标值**的语句
 > （例如重跑同一份脚本时 `set system hostname fw-01` 与现值相同）只打印一行
@@ -1195,6 +1216,8 @@ nfvis$ request virtual-machine-functions fw-vm delete   # super-user；交互确
 ```
 
 > guest 内要有 getty 监听串口（云镜像一般自带 `console=ttyS0`）才能在 console 里看到登录提示。
+> 串口正常退出用 `Ctrl-]`；若**服务端/串口断开**（如 VM 被停、nfvisd 重启）或本地输入 EOF，
+> console 会**自动退出并回到提示符，无需再按键**。
 
 **③ cloud-init 注意事项**：
 
