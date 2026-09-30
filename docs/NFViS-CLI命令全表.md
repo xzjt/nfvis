@@ -139,7 +139,7 @@
 
 | 命令 | 说明 | 权限 | 落点 | 实测 |
 |---|---|---|---|---|
-| `request virtual-machine-functions <n> start` | 启动 VM | O | `POST /vmf/{n}:start` | ✅ |
+| `request virtual-machine-functions <n> start` | 启动 VM；受理后回读域状态（决策 #311） | O | `POST /vmf/{n}:start` | ✅（停在 `paused`/`crashed` 等非预期态时以 `%%` 报出域状态、libvirt 日志摘录与恢复建议） |
 | `request virtual-machine-functions <n> stop` | 停止（ACPI 关机，超时强杀） | O | `POST /vmf/{n}:stop` | ✅（**决策 #76③** 修超时误报） |
 | `request virtual-machine-functions <n> restart` | 重启 | O | `POST /vmf/{n}:restart` | ✅ |
 | `request virtual-machine-functions <n> console` | 进入串口（Ctrl-] 退出） | O | `POST /vmf/{n}/console` + WS | ✅（非 TTY 明确提示；真人 Ctrl-] 见 T0-4） |
@@ -152,7 +152,7 @@
 | `request container-functions <n> restart` | 重启容器 | O | `POST /container-functions/{n}:restart` | ✅ |
 | `request container-functions <n> log [last <n>]` | 容器 stdout/stderr | O | `GET /container-functions/{n}/logs` | ✅ |
 | `request container-functions <n> delete` | 删除容器 | S | `DELETE /container-functions/{n}` | 🚫 交互确认 |
-| `request images upload name <n> type <t> file <path>` | 从 `/data/incoming/` 导入（成功自动清理源文件） | O | `POST /images` | ✅（见 §4 已知限制①） |
+| `request images upload name <n> type <t> file <path>` | 从 `/data/incoming/` 导入（成功自动清理源文件）；容器镜像读出 tar 内嵌 tag 并回显（决策 #312） | O | `POST /images` | ✅ |
 | `request images download name <n> type <t> url <u> sha256 <hex>` | 从 HTTP(S) 拉取；**`sha256` 必填**（键值形态，非可选——校验层在受理前同步强制，缺省即拒） | O | `POST /images` | ✅（FR-SEC-004） |
 | `request images delete name <n>` | 删除镜像（引用检查） | S | `DELETE /images/{n}` | ✅ |
 | `request interfaces <ifname> enable` | 启用接口 | O | `PUT /interfaces/{n}` | ✅ |
@@ -377,7 +377,7 @@
 
 | 命令 | 说明 | 落点 | 实测 |
 |---|---|---|---|
-| `set container-functions <n> image <img>` | 引用 container-image | Docker | ✅（**须与 Docker tag 同名**，见 §4①） |
+| `set container-functions <n> image <img>` | 引用 container-image（候选名 = 导入时按目录项名重打标签的名字，决策 #312） | Docker | ✅ |
 | `set container-functions <n> vcpu count <n>` | cgroup CPU 限制 | Docker | ✅ |
 | `set container-functions <n> memory size-mb <n>` | cgroup 内存限制 | Docker | ✅ |
 | `set container-functions <n> interfaces <vnic> type memif virtual-switch <n> [mac <m>] [vlan <v>]` | memif vNIC | VPP + Docker | ✅（决策 #79 修复） |
@@ -452,10 +452,12 @@ pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**
 
 ## 4. 已知限制与缺口（务必先读）
 
-① **容器镜像目录名须等于 Docker tag**：`request images upload name X` 的目录项名与
-   `docker load` 落地的 tar 内嵌 tag 不是一回事。二者不一致时该镜像**用哪个名字都不可用**——
-   用目录名则下发 Docker API 404（`docker: not found`），用 tag 则被校验拒为「仓库中不存在镜像」。
-   唯一可用组合是上传时 `name` 恰好写成 tag（如 `alpine:3.20`）。**待产品决策**（规格书 §12 V2）。
+① **容器镜像命名：目录项名是唯一可用名（已收口，决策 #160 + #312）**：此前文档记的是
+   「目录名须等于 Docker tag 否则不可用」——该**运行时缺陷已由决策 #160 修掉**：`docker load`
+   之后按仓库目录项名**重打标签 `<名>:latest`**，故配置/候选里用目录项名恒可用；决策 #312
+   进一步**读出 tar 内嵌 tag 并记入 `Image.source_tags`**、在导入输出与 `show images <名> detail`
+   里回显（重命名不再静默），并加守护测试保证「候选 ↔ 实际可用」同源。**已知限制**：删除容器镜像
+   只删 `<名>:latest`，归档内嵌的原始 tag（如 `alpine:3.20`）可能作为悬空引用留在 Docker。
 
 ② `show vpp runtime` **已实现（决策 #200）**：给**线程级**运行态（每线程向量率/主循环速率、整机向量率、工作线程数、数据面运行时长），数据源为 stats segment（经 `vpp_get_stats` 解码，与 buffer/接口计数同源）；VPP 26.06 的**按节点**明细无结构化来源，CLI 如实说明需 `vppctl show runtime`。round80 那条唯一 ✗ 随之关闭。
    round80 套件里**唯一一条 ✗**，属已登记缺口，不是本轮回归。

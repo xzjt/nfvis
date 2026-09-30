@@ -24,6 +24,7 @@ import (
 	"sync"
 
 	"github.com/xzjt/nfvis/internal/aaa"
+	"github.com/xzjt/nfvis/internal/cliparse"
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/events"
 	"github.com/xzjt/nfvis/internal/model"
@@ -2398,43 +2399,17 @@ func dpdkPerDev(tree map[string]any, ifname, key string, val any, isSet bool) er
 	return nil
 }
 
-// splitFieldsQuoted 按空白切分命令，但**尊重双引号**：引号内的空白不切分、引号不保留。
-// 反斜杠转义（" 与 \\）表示字面量。
+// splitFieldsQuoted 按空白切分命令，但**尊重双引号**：引号内的空白与换行不切分、引号剥除，
+// 反斜杠转义（`\"` 与 `\\`）表示字面量。
 //
 // 由来（决策 #79）：`set … cloud-init ssh-key <key>` 的取值是 SSH 公钥，**必然含空格**，
 // 而此前用 strings.Fields 切分 → 公钥被拆成多个 token → 报「未知语句」，
 // 使 FR-CMP-016 的 CLI 注入路径实际不可用。引号是用户对「这是一整个取值」的自然表达，
 // 故在解析入口统一支持，而不是为每个多词取值单开别名。
-func splitFieldsQuoted(s string) []string {
-	var out []string
-	var b strings.Builder
-	inQuote, started := false, false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == '\\' && i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\\'):
-			b.WriteByte(s[i+1])
-			i++
-			started = true
-		case c == '"':
-			inQuote = !inQuote
-			started = true
-		case (c == ' ' || c == '\t') && !inQuote:
-			if started {
-				out = append(out, b.String())
-				b.Reset()
-				started = false
-			}
-		default:
-			b.WriteByte(c)
-			started = true
-		}
-	}
-	if started {
-		out = append(out, b.String()) // 未闭合引号：按到行尾为一个 token（宽容，不静默出错）
-	}
-	return out
-}
+//
+// 词法单源（决策 #313）：实现在 internal/cliparse（与管道切分、CLI 脚本切句共用同一套
+// 引号语义），此处仅保留薄封装，避免两份近似实现漂移（旧 splitUnquoted 不认转义即此弊）。
+func splitFieldsQuoted(s string) []string { return cliparse.SplitFields(s) }
 
 // maskStatementTokens 对语句回显做脱敏：把敏感关键字（password）**紧随的取值**替换为占位符。
 //

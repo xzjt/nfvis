@@ -43,6 +43,9 @@ type storageAPI interface {
 	CreateBlank(ctx context.Context, diskPath string, sizeGB int) error
 	// RemoveAll 级联清理 VM 目录（盘/seed/日志）。
 	RemoveAll(path string) error
+	// ReadTail 读取文件末尾若干行（决策 #311：libvirt 域日志摘录，供启动失败诊断）。
+	// 文件不存在/不可读返回 error——调用方如实说「取不到」并给出路径，不编造。
+	ReadTail(path string, maxLines int) (string, error)
 }
 
 // seedBuilder 生成 cloud-init NoCloud seed ISO（FR-CMP-016）。
@@ -62,15 +65,34 @@ type Config struct {
 
 	// StopTimeout ACPI 关机等待上限，超时强杀（契约 stop 语义）。
 	StopTimeout time.Duration
+
+	// StartProbeWindow 启动受理后回读域状态的探测窗口（决策 #311）。
+	// <=0 取 DefaultStartProbeWindow；窗口只在**非运行态**路径上耗满——达到 running 即刻返回，
+	// 故正常启动不因它多等。
+	StartProbeWindow time.Duration
+	// LibvirtLogDir 域日志目录（决策 #311：启动失败诊断读 <dir>/<name>.log）。
+	// 空取 DefaultLibvirtLogDir；读不到只如实说「未取到」，不编造内容。
+	LibvirtLogDir string
 }
+
+// 启动结果回读的缺省参数（决策 #311）。
+const (
+	// DefaultStartProbeWindow 缺省探测窗口：宽到能覆盖 vhost-user 握手/后端就绪的常见时延，
+	// 又不至于让「必然失败」的启动等太久。
+	DefaultStartProbeWindow = 3 * time.Second
+	// DefaultLibvirtLogDir libvirt 域日志目录（Ubuntu/libvirt 缺省；`virsh` 亦写此处）。
+	DefaultLibvirtLogDir = "/var/log/libvirt/qemu"
+)
 
 // DefaultConfig 生产缺省配置。
 func DefaultConfig() Config {
 	return Config{
-		URI:         DefaultURI,
-		VMsDir:      "/var/lib/nfvis/vms",
-		VhostDir:    "/run/nfvis/vhost",
-		ImagesDir:   "/var/lib/nfvis/images",
-		StopTimeout: 30 * time.Second,
+		URI:              DefaultURI,
+		VMsDir:           "/var/lib/nfvis/vms",
+		VhostDir:         "/run/nfvis/vhost",
+		ImagesDir:        "/var/lib/nfvis/images",
+		StopTimeout:      30 * time.Second,
+		StartProbeWindow: DefaultStartProbeWindow,
+		LibvirtLogDir:    DefaultLibvirtLogDir,
 	}
 }

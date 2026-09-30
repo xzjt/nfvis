@@ -4559,6 +4559,9 @@ function renderImageDetail(img, params) {
     ['引用计数', img.ref_count],
     ['导入状态', img.import_state || 'ready'],
     ['导入时间', img.imported_at ? fmtTime(img.imported_at) : undefined],
+    // 容器镜像归档内嵌的 tag：导入时产品按仓库名重打标签 `<名>:latest`，故配置里唯一可用名
+    // 就是仓库里的名字；这里如实回显来源 tag，便于核对（重命名不再静默）。
+    ['归档内嵌 tag', (img.source_tags && img.source_tags.length) ? img.source_tags.join('、') : undefined],
   ] : []);
 }
 
@@ -4575,7 +4578,14 @@ function imgOutcome(res, name) {
     const why = (res && (res.error || res.message)) || '服务端未给出原因';
     return '导入失败（' + name + '）：' + why;
   }
-  if (st === 'ready' || st === 'imported') return '导入完成：' + name;
+  // 容器镜像导入后按仓库名重打标签：显式告诉操作者配置里该写哪个名字（不静默改名）。
+  const tags = (res && res.source_tags) || [];
+  const tagNote = (res && res.type === 'container-image')
+    ? '；已按仓库名重打标签 ' + name + ':latest' +
+      (tags.length ? '（归档内嵌 tag：' + tags.join('、') + '）' : '（归档未内嵌 tag）') +
+      '，配置中请用 ' + name + ' 引用'
+    : '';
+  if (st === 'ready' || st === 'imported') return '导入完成：' + name + tagNote;
   if (st) return '已受理（' + name + '）：状态 ' + st + '，可在列表中查看';
   return '已受理：' + name + '（可在列表中查看导入状态）';
 }

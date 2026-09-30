@@ -673,11 +673,24 @@ paths:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
     post:
       tags: [virtual-machine-functions]
-      summary: 启动
+      summary: 启动（受理后回读域状态）
+      description: |
+        启动动作异步受理，但受理后会在**有界探测窗口**（缺省 3s）内回读域状态：
+        一旦达到 `running` 即返回 202（正常路径语义与耗时不变）；若窗口内停在
+        `paused`（如 vhost-user 初始化失败的 `paused (starting up)`）/`crashed`/`shutoff`
+        一类**非预期态**，则返回 500 `VM_START_FAILED`，并在 `detail[]` 里逐条给出
+        域状态与 reason、libvirt 域日志摘录（取不到则说明取不到并给出路径）与恢复建议
+        （如 `request vpp restart` 后重试 start）。**不新增响应字段**——诊断经既有
+        Error 形状的 `message`/`detail[]` 透出，故成功形状与既往逐字一致。
       responses:
-        "202": { description: 已受理（异步完成，事件通知） }
+        "202": { description: 已受理且回读到运行态（异步完成，事件通知） }
         "404": { $ref: "#/components/responses/Error404" }
         "409": { $ref: "#/components/responses/Error409" }
+        "500":
+          description: 启动后未达到运行态（paused/crashed/shutoff/absent）；detail 含域状态、libvirt 日志摘录与恢复建议
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /virtual-machine-functions/{name}:stop:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
     post:
@@ -2991,6 +3004,13 @@ components:
         downloaded_bytes: { type: integer, format: int64, description: 下载进度：已落盘字节（仅 URL 拉取的镜像在下载中或失败时出现） }
         total_bytes: { type: integer, format: int64, description: 下载总量；服务端未给 Content-Length 时缺省 }
         last_error: { type: string, description: 最近一次失败原因（import_state=failed 时出现，含可照做的续传指引） }
+        source_tags:
+          type: array
+          items: { type: string }
+          description: |
+            容器镜像归档（docker save）内嵌的镜像 tag（如 alpine:3.20，决策 #312）。
+            导入时已按仓库目录项名重打标签 `<name>:latest`，故配置里唯一可用名就是 `name`；
+            本字段用于显式登记来源 tag，便于排障（归档无 tag 或未解析到 manifest.json 时**省略**，不编造）。
 
     Snapshot:
       type: object

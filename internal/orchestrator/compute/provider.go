@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,6 +62,12 @@ func NewProvider(cfg Config, api libvirtAPI, store storageAPI, seed seedBuilder)
 	}
 	if cfg.StopTimeout <= 0 {
 		cfg.StopTimeout = def.StopTimeout
+	}
+	if cfg.StartProbeWindow <= 0 {
+		cfg.StartProbeWindow = def.StartProbeWindow
+	}
+	if cfg.LibvirtLogDir == "" {
+		cfg.LibvirtLogDir = def.LibvirtLogDir
 	}
 	return &Provider{
 		cfg:   cfg,
@@ -163,6 +170,105 @@ func (p *Provider) StartVM(ctx context.Context, name string) error {
 		return fmt.Errorf("启动 VM %s: %w", name, err)
 	}
 	return nil
+}
+
+// StartVMChecked 启动并在探测窗口内回读域状态（决策 #311）。
+//
+// 复用 StartVM（幂等、错误语义不变），随后 probeStart 在窗口内观测：达到运行态即 OK；
+// 窗口内停在非预期态则返回诊断（域状态 + reason + 域日志摘录 + 恢复建议）。
+// 「已运行」的幂等情形会在首个观测点看到 running，故正常路径不额外等待。
+func (p *Provider) StartVMChecked(ctx context.Context, name string) (orchestrator.VMStartProbe, error) {
+	if err := p.StartVM(ctx, name); err != nil {
+		return orchestrator.VMStartProbe{}, err
+	}
+	return p.probeStart(ctx, name), nil
+}
+
+// probeStart 在有界窗口内轮询域状态：running/blocked 即 OK；窗口内未达运行态则组装诊断。
+func (p *Provider) probeStart(ctx context.Context, name string) orchestrator.VMStartProbe {
+	deadline := time.Now().Add(p.cfg.StartProbeWindow)
+	var lastState, lastReason int
+	for {
+		st, rs, exists, err := p.api.StateReason(ctx, name)
+		if err != nil {
+			// 状态读不出来：如实报「查询失败」，不臆测（不把它当启动失败的原因）。
+			return orchestrator.VMStartProbe{
+				State:   "",
+				Reason:  "查询域状态失败: " + err.Error(),
+				LogPath: p.domainLogPath(name),
+				Hints:   startRecoveryHints(""),
+			}
+		}
+		lastState, lastReason = st, rs
+		state := orchestrator.VMStateAbsent
+		if exists {
+			state = VMStateFromLibvirtReason(st, rs)
+		}
+		if state == orchestrator.VMStateRunning {
+			return orchestrator.VMStartProbe{OK: true, State: state}
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		if err := p.sleep(ctx, p.poll); err != nil {
+			break // ctx 取消：按当前观测如实返回
+		}
+	}
+	out := orchestrator.VMStartProbe{
+		State:   VMStateFromLibvirtReason(lastState, lastReason),
+		Reason:  StateReasonText(lastState, lastReason),
+		LogPath: p.domainLogPath(name),
+		Hints:   startRecoveryHints(VMStateFromLibvirtReason(lastState, lastReason)),
+	}
+	// 域已不存在（缺定义）：StateReason 会返回 exists=false，reason 文本无意义。
+	if _, _, exists, err := p.api.StateReason(ctx, name); err == nil && !exists {
+		out.State = orchestrator.VMStateAbsent
+		out.Reason = "域已不存在（定义缺失或被删除）"
+	}
+	out.Detail = p.readDomainLogTail(name)
+	return out
+}
+
+// domainLogPath libvirt 域日志路径（缺省 /var/log/libvirt/qemu/<name>.log）。
+func (p *Provider) domainLogPath(name string) string {
+	return path.Join(p.cfg.LibvirtLogDir, name+".log")
+}
+
+// readDomainLogTail 读域日志末尾若干行（取不到返回空串——调用方据此如实说「未取到」，不编造）。
+func (p *Provider) readDomainLogTail(name string) string {
+	if p.store == nil {
+		return ""
+	}
+	txt, err := p.store.ReadTail(p.domainLogPath(name), 15)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(txt)
+}
+
+// startRecoveryHints 启动失败时的恢复建议（决策 #311）：只给产品**已验证**的可照做路径，
+// 不臆测根因。state 为观测到的契约运行态（可为空）。
+func startRecoveryHints(state string) []string {
+	hints := []string{
+		"确认数据面 VPP 正在运行（show vpp status）；vhost-user vNIC 需要 VPP 先建立该 VM 的 socket",
+	}
+	switch state {
+	case orchestrator.VMStatePaused:
+		hints = append(hints,
+			"按上面的 socket 事实排查后 request vpp restart 重建数据面，再重新 start",
+			"用 show virtual-machine-functions <n> detail 与 request virtual-machine-functions <n> console 深入")
+	case orchestrator.VMStateCrashed:
+		hints = append(hints,
+			"域已崩溃并保留现场：查看上方 libvirt 日志与 guest 控制台（request virtual-machine-functions <n> console）",
+			"request vpp restart 后重新 start；仍失败请用 show virtual-machine-functions <n> detail 核对资源分配")
+	case orchestrator.VMStateShutoff, orchestrator.VMStateAbsent:
+		hints = append(hints,
+			"域已退出/不存在：确认大页与内存足够、主盘镜像就绪（show images）",
+			"request vpp restart 后重新 start；仍失败请查 libvirt 日志")
+	default:
+		hints = append(hints, "request vpp restart 后重新 start；仍失败请查 libvirt 日志")
+	}
+	return hints
 }
 
 // StopVM ACPI 关机，超时强杀（契约 stop 语义，FR-CMP-011）。

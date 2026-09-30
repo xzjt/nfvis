@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/xzjt/nfvis/internal/cliparse"
 )
 
 // pipeSpec 一段管道。
@@ -83,25 +85,9 @@ func splitPipes(line string) (string, []pipeSpec, error) {
 	return cmd, pipes, nil
 }
 
-// splitUnquoted 按竖线拆分，忽略双引号内的 |。
-func splitUnquoted(line string, sep rune) []string {
-	var segs []string
-	var cur strings.Builder
-	inQuote := false
-	for _, r := range line {
-		switch {
-		case r == '"':
-			inQuote = !inQuote
-			cur.WriteRune(r)
-		case r == sep && !inQuote:
-			segs = append(segs, cur.String())
-			cur.Reset()
-		default:
-			cur.WriteRune(r)
-		}
-	}
-	return append(segs, cur.String())
-}
+// splitUnquoted 按分隔符拆分，忽略双引号内的分隔符（并尊重 `\"`/`\\` 转义）。
+// 词法单源：实现在 internal/cliparse（决策 #313），与分词器、CLI 脚本切句共用同一套引号语义。
+func splitUnquoted(line string, sep rune) []string { return cliparse.SplitUnquoted(line, sep) }
 
 // applyPipes 自左向右应用管道；display json/xml 需要执行器的结构化快照。
 func (x *cliExecutor) applyPipes(text string, pipes []pipeSpec) string {

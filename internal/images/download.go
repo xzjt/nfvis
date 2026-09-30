@@ -151,6 +151,10 @@ func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error
 			return Meta{}, s.fail(failedMeta(), fmt.Errorf("拉取容器镜像 %s：未接入 Docker", opts.Name))
 		}
 		archive := filepath.Join(s.cfg.Dir, opts.Name)
+		// 读出归档内嵌 tag（决策 #312）：用于说明，不作放行判据（读不到不阻断）。
+		if tags, terr := ReadDockerArchiveTags(archive); terr == nil {
+			meta.SourceTags = tags
+		}
 		if err := s.dockerLoad(archive, opts.Name); err != nil {
 			return Meta{}, s.fail(failedMeta(), fmt.Errorf("docker load %s: %w", opts.Name, err))
 		}

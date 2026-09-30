@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,10 @@ type mockLibvirt struct {
 	defineErr    error
 	startErr     error
 	shutdownNoop bool // 模拟 ACPI 关机无响应（触发超时强杀）
+	// pauseOnStart 模拟 vhost-user 后端未就绪：Start 后域停在 paused(starting up)（决策 #311）。
+	pauseOnStart bool
+	// crashOnStart 模拟域启动后立刻退出（SHUTOFF+CRASHED）（决策 #311）。
+	crashOnStart bool
 
 	domainXML string
 	autostart map[string]bool
@@ -88,7 +93,16 @@ func (m *mockLibvirt) Start(_ context.Context, name string) error {
 		return m.startErr
 	}
 	m.started = append(m.started, name)
-	m.states[name] = domRunning
+	switch {
+	case m.pauseOnStart:
+		m.states[name] = domPaused
+		m.reasons[name] = pausedReasonStartingUp
+	case m.crashOnStart:
+		m.states[name] = domShutoff
+		m.reasons[name] = shutoffReasonCrashed
+	default:
+		m.states[name] = domRunning
+	}
 	return nil
 }
 func (m *mockLibvirt) Shutdown(_ context.Context, name string) error {
@@ -173,14 +187,24 @@ type mockStorage struct {
 	clones  []string
 	blanks  []string
 	removed []string
+	// logs 域日志内容（决策 #311：ReadTail 供启动失败诊断）。
+	logs map[string]string
 }
 
 func newMockStorage(files ...string) *mockStorage {
-	s := &mockStorage{files: map[string]bool{}}
+	s := &mockStorage{files: map[string]bool{}, logs: map[string]string{}}
 	for _, f := range files {
 		s.files[f] = true
 	}
 	return s
+}
+
+// ReadTail 返回预置的日志内容；未预置即「取不到」（error），与真实读文件同语义。
+func (s *mockStorage) ReadTail(p string, _ int) (string, error) {
+	if txt, ok := s.logs[p]; ok {
+		return txt, nil
+	}
+	return "", os.ErrNotExist
 }
 func (s *mockStorage) EnsureDir(p string) error { s.dirs = append(s.dirs, p); return nil }
 func (s *mockStorage) Exists(p string) bool     { return s.files[p] }
@@ -222,6 +246,9 @@ func testConfig() Config {
 	c.VhostDir = "/run/vhost"
 	c.ImagesDir = "/images"
 	c.StopTimeout = 50 * time.Millisecond
+	// 探测窗口取极小值：单测不真实等待（sleep 已注入为 no-op）。
+	c.StartProbeWindow = time.Millisecond
+	c.LibvirtLogDir = "/var/log/libvirt/qemu"
 	return c
 }
 
@@ -418,6 +445,111 @@ func TestStartVM_IdempotentAndNotFound(t *testing.T) {
 	}
 	if err := p.StartVM(context.Background(), "ghost"); err == nil {
 		t.Fatal("未定义应报错")
+	}
+}
+
+// TestStartVMChecked_UnexpectedStateSurfacesDiagnosis 决策 #311：启动后停在 vhost-user
+// 初始化失败的典型态 paused(starting up) ⇒ 非 OK，并给出域状态/reason、日志摘录与恢复建议。
+func TestStartVMChecked_UnexpectedStateSurfacesDiagnosis(t *testing.T) {
+	api := newMockLibvirt()
+	store := newMockStorage()
+	api.present["fw-vm"] = true
+	api.states["fw-vm"] = domShutoff
+	api.pauseOnStart = true // Start 后停在 paused(starting up)
+	store.logs["/var/log/libvirt/qemu/fw-vm.log"] = "2026-09-30: qemu: vhost-user: connect failed"
+	p := newTestProvider(api, store, nil)
+
+	probe, err := p.StartVMChecked(context.Background(), "fw-vm")
+	if err != nil {
+		t.Fatalf("StartVMChecked 不应报错（域已创建，只是没起来）: %v", err)
+	}
+	if probe.OK {
+		t.Fatalf("停在 paused 不应判 OK：%+v", probe)
+	}
+	if probe.State != orchestrator.VMStatePaused {
+		t.Fatalf("State 应为 paused，实得 %q", probe.State)
+	}
+	if !strings.Contains(probe.Reason, "starting up") {
+		t.Fatalf("Reason 应含 libvirt reason，实得 %q", probe.Reason)
+	}
+	if !strings.Contains(probe.Detail, "vhost-user") {
+		t.Fatalf("Detail 应含域日志摘录，实得 %q", probe.Detail)
+	}
+	if probe.LogPath == "" || len(probe.Hints) == 0 {
+		t.Fatalf("应给出日志路径与恢复建议：%+v", probe)
+	}
+	// 恢复建议须是可照做的已知路径（不臆测根因）。
+	joined := strings.Join(probe.Hints, " ")
+	if !strings.Contains(joined, "request vpp restart") {
+		t.Fatalf("恢复建议应含已验证路径 request vpp restart，实得 %v", probe.Hints)
+	}
+}
+
+// TestStartVMChecked_NormalStartNoDiagnosis 正常启动路径：OK、无 reason/detail/hints，
+// 不改变既有语义（决策 #311 的「正常路径不变」）。
+func TestStartVMChecked_NormalStartNoDiagnosis(t *testing.T) {
+	api := newMockLibvirt()
+	api.present["fw-vm"] = true
+	api.states["fw-vm"] = domShutoff
+	p := newTestProvider(api, newMockStorage(), nil)
+
+	probe, err := p.StartVMChecked(context.Background(), "fw-vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !probe.OK || probe.State != orchestrator.VMStateRunning {
+		t.Fatalf("正常启动应 OK/running，实得 %+v", probe)
+	}
+	if probe.Reason != "" || probe.Detail != "" || len(probe.Hints) != 0 {
+		t.Fatalf("正常启动不应带诊断字段：%+v", probe)
+	}
+	if len(api.started) != 1 {
+		t.Fatalf("应真的启动一次: %v", api.started)
+	}
+}
+
+// TestStartVMChecked_CrashedAfterStart 启动后域立刻退出（SHUTOFF+CRASHED）也判失败，
+// 契约态映射为 crashed 并给崩溃处置建议（决策 #311）。
+func TestStartVMChecked_CrashedAfterStart(t *testing.T) {
+	api := newMockLibvirt()
+	api.present["fw-vm"] = true
+	api.states["fw-vm"] = domShutoff
+	api.crashOnStart = true
+	p := newTestProvider(api, newMockStorage(), nil)
+
+	probe, err := p.StartVMChecked(context.Background(), "fw-vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probe.OK {
+		t.Fatalf("启动后立刻退出不应判 OK：%+v", probe)
+	}
+	if probe.State != orchestrator.VMStateCrashed {
+		t.Fatalf("State 应为 crashed，实得 %q（reason=%q）", probe.State, probe.Reason)
+	}
+	if len(probe.Hints) == 0 {
+		t.Fatalf("应给出恢复建议：%+v", probe)
+	}
+}
+
+// TestStateReasonText 只报事实的可读映射（决策 #311）。
+func TestStateReasonText(t *testing.T) {
+	cases := []struct {
+		state, reason int
+		want          string
+	}{
+		{domPaused, pausedReasonStartingUp, "paused (starting up)"},
+		{domPaused, pausedReasonIoerror, "paused (I/O error)"},
+		{domPaused, 99, "paused (reason 99)"}, // 未知 reason 如实给编号，不编造短语
+		{domCrashed, 0, "crashed"},
+		{domShutoff, shutoffReasonFailed, "shutoff (failed)"},
+		{domShutoff, shutoffReasonCrashed, "crashed"},
+		{domRunning, 0, "running"},
+	}
+	for _, c := range cases {
+		if got := StateReasonText(c.state, c.reason); got != c.want {
+			t.Errorf("StateReasonText(%d,%d) = %q，期望 %q", c.state, c.reason, got, c.want)
+		}
 	}
 }
 

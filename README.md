@@ -173,7 +173,8 @@ V1 的降级/未验项统一登记在 [`docs/NFViS-CLI命令全表.md`](docs/NFV
 
 - **SR-IOV / LLDP 邻居**需对应硬件与对端（验证环境不具备；代码与单测齐备）；
 - **快照 create/rollback 需关机态**（对运行中域回滚会静默重启该 VM，故显式拒绝）；
-- **容器镜像的目录名须等于 Docker tag**，否则下发报 `docker: not found`；
+- **容器镜像用「目录项名」引用**：导入时已按该名重打标签 `<名>:latest`（决策 #160），tar 内嵌 tag 记入
+  `Image.source_tags` 并在导入输出里回显（决策 #312）；删除时只删该名对应的标签，归档内嵌的原始 tag 可能留在 Docker；
 - `show vpp runtime` 未接入（govpp runtime 解码受限，CLI 明确提示而非静默空值）；
 - **Web 控制台尚未覆盖的 CLI 能力**：console 交互终端、`ssh host-key regenerate`、
   `core-dumps export`、`load merge` 与 VS/VM 详情的 statistics 字段（逐项见

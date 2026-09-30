@@ -22,6 +22,7 @@ import (
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/images"
+	"github.com/xzjt/nfvis/internal/orchestrator"
 	"github.com/xzjt/nfvis/internal/system"
 )
 
@@ -158,7 +159,8 @@ func TestCLIRequestVMLifecycleAudits(t *testing.T) {
 	}
 	// start/restart 前须重建 cloud-init seed（决策 #114：user-data 可为文件路径，
 	// 文件内容变化不改配置值——不重建则「改了文件、重启不生效」）；stop 不重建。
-	want := []string{"refresh-seed:fw-vm", "start:fw-vm", "stop:fw-vm", "refresh-seed:fw-vm", "restart:fw-vm"}
+	// start 走 StartVMChecked（决策 #311：受理后回读域状态）。
+	want := []string{"refresh-seed:fw-vm", "start-checked:fw-vm", "stop:fw-vm", "refresh-seed:fw-vm", "restart:fw-vm"}
 	if strings.Join(vmRT.actions, ",") != strings.Join(want, ",") {
 		t.Fatalf("生命周期动作序列应为 %v，实际 %v", want, vmRT.actions)
 	}
@@ -166,6 +168,44 @@ func TestCLIRequestVMLifecycleAudits(t *testing.T) {
 		if !auditHas(t, engine, act) {
 			t.Fatalf("动作 %s 应入审计（FR-OPS-031）", act)
 		}
+	}
+}
+
+// TestCLIRequestVMStartSurfacesDiagnosis 决策 #311：启动停在非预期态时 CLI 以 `%%` 报出
+// 域状态、libvirt 日志摘录与恢复建议，并记审计 failure；正常启动文案逐字不变。
+func TestCLIRequestVMStartSurfacesDiagnosis(t *testing.T) {
+	x, engine := newCLIKit(t)
+	seedVMConfig(t, x)
+	vmRT := newFakeVM()
+	vmRT.startProbe = &orchestrator.VMStartProbe{
+		OK:      false,
+		State:   orchestrator.VMStatePaused,
+		Reason:  "paused (starting up)",
+		Detail:  "qemu: vhost-user: connect failed",
+		LogPath: "/var/log/libvirt/qemu/fw-vm.log",
+		Hints:   []string{"确认数据面 VPP 正在运行", "request vpp restart 后重新 start"},
+	}
+	x.setComputeRuntime(vmRT, nil, nil, nil, nil)
+
+	res := x.Execute("admin", aaa.ClassSuperUser, "ssh", "request virtual-machine-functions fw-vm start")
+	if !strings.Contains(res.Output, "%%") {
+		t.Fatalf("非预期态应报失败: %s", res.Output)
+	}
+	for _, want := range []string{"paused", "starting up", "vhost-user",
+		"/var/log/libvirt/qemu/fw-vm.log", "request vpp restart"} {
+		if !strings.Contains(res.Output, want) {
+			t.Errorf("CLI 输出应含 %q：%s", want, res.Output)
+		}
+	}
+	if !auditHas(t, engine, "vm.start") {
+		t.Fatal("启动失败应入审计")
+	}
+
+	// 正常启动：文案与既有逐字一致（不得因探测改变）。
+	vmRT.startProbe = nil
+	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", "request virtual-machine-functions fw-vm start")
+	if res.Output != "启动 VNF fw-vm 已受理\n" {
+		t.Fatalf("正常启动文案不得改变，实得 %q", res.Output)
 	}
 }
 

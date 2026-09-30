@@ -166,6 +166,9 @@ show tech-support                                   # 诊断包清单预览（�
 ```
 request virtual-machine-functions <name>
   ├─ start                                          # POST /vmf/{n}:start
+  │      # 受理后在探测窗口内回读域状态（缺省 3s、可配置）；达到运行态即刻返回，
+  │      # 落在 paused/crashed/shutoff 一类非预期态时报失败，并给出域状态 + reason、
+  │      # libvirt 域日志摘录与恢复建议（如 request vpp restart 后重试 start）
   ├─ stop                                           # POST /vmf/{n}:stop
   ├─ restart
   ├─ console                                        # 进入串口（Ctrl-] 退出；POST /vmf/{n}/console）
@@ -178,6 +181,8 @@ request container-functions <name>
 request images
   ├─ upload name <name> type <vm-image|container-image> file <path>
   │      # path 须位于 /data/incoming/（先经 scp/sftp 传入管理网卡），导入成功自动清理
+  │      # 容器镜像：docker load 后按目录项名重打标签 `<name>:latest`；tar 内嵌 tag 记入
+  │      #   source_tags 并在输出/详情里回显，配置里唯一的可用名就是 `<name>`
   ├─ download name <name> type <...> url <url> sha256 <hex>
   │      # URL 拉取必填 sha256（FR-SEC-004 默认强制校验，缺省即拒绝）；
   │      #   树里 **不得** 把 sha256 标成可选（`[...]`）——`?`/Tab 会据此告诉操作者「可以不给」，
@@ -670,6 +675,13 @@ virtual-machine-functions {
    双引号内的 `|` 不视为管道分隔（与守护进程 splitPipes 同语义）。
    实现：`schema.PipeCandidates`（与 `PipeKeywords` 同一单一来源），CLI 会话把含未引用 `|`
    的行的补全上下文切到管道段。
+10. CLI 词法（决策 #313）：**引号内的一切不参与切分**——双引号内的 `|` 不是管道分隔、
+   `#` 不是注释（CLI 本就没有注释语法，`#` 在任何位置都是普通字符，以便 user-data 的
+   `#!/bin/sh`/`#cloud-config` 能内联）；**引号可跨行**——脚本（`-c`/`-f`）与交互 REPL
+   都按「引号未闭合则并入后续行」切逻辑语句，值内**保留换行**（多行 user-data 可内联，
+   不必只走文件路径）。转义 `\"` 与 `\\` 在引号内有效（管道切分与分词器同源，不再两套词法）。
+   值里的换行随 token 进入配置；只该单行的值（如登录横幅）由提交校验明确拒绝，
+   **不静默取首行**。实现 = `internal/cliparse`（纯函数，管道切分与分词共用）。
 8. **说明文本口径（附录 A #86、#87）**：命令树的 `Desc`（`?`/Tab 候选列表与 `help` 输出里的那列说明）
    是**给操作者看的**，**不得包含内部引用**——`FR-xxx`、`§x`、`决策 #nn`、`附录 A #nn` 一律不写。
    需求可追溯（AGENTS 规则 2）写在**代码注释与设计类 `docs/`** 里。

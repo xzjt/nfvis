@@ -22,6 +22,9 @@ import (
 // VMRuntime VM 生命周期运行态能力（libvirt 编排器注入；nil = 503）。
 type VMRuntime interface {
 	StartVM(ctx context.Context, name string) error
+	// StartVMChecked 启动并在探测窗口内回读域状态（决策 #311）：正常启动返回零值 probe
+	// （OK=true、无诊断字段），停在非预期态时返回诊断（域状态 + 原因 + 日志摘录 + 建议）。
+	StartVMChecked(ctx context.Context, name string) (orchestrator.VMStartProbe, error)
 	StopVM(ctx context.Context, name string) error
 	RestartVM(ctx context.Context, name string) error
 	// RefreshSeed 启动/重启前按当前配置重建 cloud-init seed（决策 #114）。
@@ -212,18 +215,29 @@ func (s *Server) vmAction(w http.ResponseWriter, r *http.Request, name, action s
 		return
 	}
 
+	user := "api"
+	if info, ok := Identity(r); ok {
+		user = info.User
+	}
 	ctx := r.Context()
 	switch action {
 	case "start":
-		err = s.vm.StartVM(ctx, name)
+		// 决策 #311：受理后回读域状态；非预期态用既有 Error 形状（message + detail[]）如实报出。
+		probe, perr := s.vm.StartVMChecked(ctx, name)
+		if perr != nil {
+			err = perr
+			break
+		}
+		if !probe.OK {
+			s.engine.Audit(user, "vm.start", fmt.Sprintf("start VM %s: %s", name, probe.Reason), "failure")
+			writeError(w, http.StatusInternalServerError, "VM_START_FAILED",
+				vmStartFailureMessage(name, probe), vmStartFailureDetail(probe))
+			return
+		}
 	case "stop":
 		err = s.vm.StopVM(ctx, name)
 	case "restart":
 		err = s.vm.RestartVM(ctx, name)
-	}
-	user := "api"
-	if info, ok := Identity(r); ok {
-		user = info.User
 	}
 	if err != nil {
 		result := "failure"
@@ -251,6 +265,68 @@ func (s *Server) vmStateSafe(ctx context.Context, name string) string {
 		return ""
 	}
 	return state
+}
+
+// ---------- 启动结果回读的文案（决策 #311）----------
+//
+// REST 与 CLI 共用同一组装器，避免两处各写一份而漂移（CLI 不经 HTTP handler）。
+
+// vmStartFailureMessage 一行摘要：VM 名 + 观测到的运行态 + libvirt 状态/reason + 首条建议。
+func vmStartFailureMessage(name string, p orchestrator.VMStartProbe) string {
+	state := p.State
+	if state == "" {
+		state = "未知"
+	}
+	msg := fmt.Sprintf("VM %s 启动后未达到运行态（%s）", name, state)
+	if p.Reason != "" {
+		msg += "：" + p.Reason
+	}
+	if len(p.Hints) > 0 {
+		msg += "。" + p.Hints[0]
+	}
+	return msg
+}
+
+// vmStartFailureDetail 结构化明细：域状态 / libvirt 日志摘录（或「未取到」+ 路径）/ 恢复建议逐条。
+func vmStartFailureDetail(p orchestrator.VMStartProbe) []ErrorDetail {
+	var out []ErrorDetail
+	if p.Reason != "" {
+		out = append(out, ErrorDetail{Path: "vm_state", Message: p.Reason})
+	}
+	switch {
+	case p.Detail != "":
+		out = append(out, ErrorDetail{Path: "libvirt_log", Message: p.LogPath + "（末尾）：\n" + p.Detail})
+	case p.LogPath != "":
+		out = append(out, ErrorDetail{Path: "libvirt_log", Message: "未取到日志内容；请查看 " + p.LogPath})
+	}
+	for i, h := range p.Hints {
+		out = append(out, ErrorDetail{Path: fmt.Sprintf("recovery_%d", i+1), Message: h})
+	}
+	return out
+}
+
+// vmStartFailureCLIText CLI 侧的多行失败文案（同一批事实，按终端可读排版）。
+func vmStartFailureCLIText(name string, p orchestrator.VMStartProbe) string {
+	var b strings.Builder
+	state := p.State
+	if state == "" {
+		state = "未知"
+	}
+	fmt.Fprintf(&b, "VNF %s 启动后未达到运行态（%s）", name, state)
+	if p.Reason != "" {
+		b.WriteString("：" + p.Reason)
+	}
+	b.WriteString("\n")
+	switch {
+	case p.Detail != "":
+		fmt.Fprintf(&b, "libvirt 日志 %s（末尾）：\n%s\n", p.LogPath, p.Detail)
+	case p.LogPath != "":
+		fmt.Fprintf(&b, "（未能读取 libvirt 日志 %s，请在该路径自查）\n", p.LogPath)
+	}
+	for _, h := range p.Hints {
+		b.WriteString("建议：" + h + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func findVM(cfg model.Config, name string) (model.VMFunction, bool) {

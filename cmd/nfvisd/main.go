@@ -1133,6 +1133,14 @@ func (c *vmController) StartVM(ctx context.Context, name string) error {
 	return err
 }
 
+// StartVMChecked 启动 + 回读域状态（决策 #311）。显式包装：不能用内嵌 Provider 的
+// 提升方法，否则会绕过 refreshVnfAlarms（VM 启停后必须刷新 vNIC 断连告警）。
+func (c *vmController) StartVMChecked(ctx context.Context, name string) (orchestrator.VMStartProbe, error) {
+	probe, err := c.Provider.StartVMChecked(ctx, name)
+	c.refreshVnfAlarms()
+	return probe, err
+}
+
 func (c *vmController) StopVM(ctx context.Context, name string) error {
 	err := c.Provider.StopVM(ctx, name)
 	c.refreshVnfAlarms()
