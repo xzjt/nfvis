@@ -75,6 +75,11 @@ docscheck:
 #      放行块曾在 exit 0 之后静默失效一轮，安装报成功而 VNF 起不来）；
 #   ⑥ .run 的依赖闭包校验器自校准（已知自洽→通过、缺一个包→报缺口）——离线漏包
 #      只有在气隙机器上才炸，必须在构建端静态判定。
+# 2026-10-01 补第七项：**套件命令清单 ↔ 契约同步守护**（决策 #319）——
+#   由来：v2 线的新命令（`show system api tokens`、`set/delete system login banner`…）只进实现
+#   与单测、没进真机套件的命令清单，于是 `cli-fulltest` 全绿只证明「老命令没坏」。
+#   该项把 docs/NFViS-CLI命令全表.md 的 §1/§2 与 cli-fulltest-phase*.sh 对账，缺口必须逐条
+#   登记进 cli-fulltest-exemptions.tsv（理由非空）；先跑桩式自校准再对账（纯文本，CI 可跑）。
 toolcheck:
 	bash contrib/scripts/cli-fulltest-selftest.sh
 	bash contrib/scripts/cli-semantic-selftest.sh
@@ -82,6 +87,8 @@ toolcheck:
 	bash contrib/scripts/web-console-confirm-selftest.sh
 	bash contrib/scripts/check_maint_scripts.sh
 	bash contrib/scripts/offline-installer-selftest.sh
+	bash contrib/scripts/check_suite_contract_sync.sh --selftest
+	bash contrib/scripts/check_suite_contract_sync.sh
 
 # 真机集成测试（M3）：需 VPP 运行环境（nfvis-vm）。无环境时跳过并提示，CI 不跑。
 # 约定：build tag integration + 环境变量 NFVIS_VPP_SOCK（缺省 /run/vpp/api.sock）。

@@ -44,6 +44,9 @@ run S1 "show alarms all"
 run S1 "show log system"
 run S1 "show log audit"
 run S1 "show users"
+# 活动会话清单（决策 #301）：正向内容断言——表头必须在，否则「无活动会话」这类空答会被算作通过
+# （本条命令由 CLI 自己发起，调用方本身就是一个会话 ⇒ 必然至少一行）。
+expect_out S1 "Token-ID" "show system api tokens"
 run S1 "show configuration"
 run S1 "show configuration history"
 run S1 "show tech-support"

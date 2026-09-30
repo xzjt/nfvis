@@ -72,6 +72,32 @@ expect_fail() { # expect_fail <阶段> <期望错误里的关键词> <命令>   
   printf '=== [%s][expect-fail] %s\n%s\n\n' "$phase" "$cmd" "$out" >> "$LOG"
 }
 
+# expect_out：**正向内容断言**——输出里必须真的出现关键词，缺失即失败。
+# 与 run 的分工：run 只量「命令能不能用」（有值没值都算过），本函数量「答的是不是这件事」，
+# 用于套件内**可自证**的内容（如「提交后配置里真能读到刚写的值」「会话清单真带当前会话」）——
+# 避免「命令返回 0 但什么也没答」被算作通过（同决策 #89 的判定自洽精神）。
+expect_out() { # expect_out <阶段> <关键词> <命令>
+  local phase="$1"; shift
+  local want="$1"; shift
+  local cmd="$*" out rc
+  out=$($CLI -c "$cmd" 2>&1); rc=$?
+  out=$(printf '%s\n' "$out" | sed '1{/^连接 /d;}')
+  if printf '%s\n' "$out" | _is_fail || [ $rc -ne 0 ]; then
+    FAIL=$((FAIL+1))
+    FAILED_LIST+=("[$phase] $cmd :: 命令失败: $(printf '%s' "$out" | head -1)")
+    printf '  ✗ %s（命令失败，无从核对内容）\n' "$cmd"
+    printf '%s\n' "$out" | sed 's/^/       | /' | head -5
+  elif printf '%s\n' "$out" | grep -qF -- "$want"; then
+    PASS=$((PASS+1)); printf '  ✓ %s（输出含「%s」）\n' "$cmd" "$want"
+  else
+    FAIL=$((FAIL+1))
+    FAILED_LIST+=("[$phase] $cmd :: 输出不含「$want」（疑似假成功）")
+    printf '  ✗ %s（输出不含「%s」）\n' "$cmd" "$want"
+    printf '%s\n' "$out" | sed 's/^/       | /' | head -5
+  fi
+  printf '=== [%s][expect-out] %s\n%s\n\n' "$phase" "$cmd" "$out" >> "$LOG"
+}
+
 # expect_ping_coherent：ping 的**判定自洽**（附录 A #89 / #93）。
 #
 # 不变量：**未通就不能算通过**。两条支路都必须有 %% 错误——

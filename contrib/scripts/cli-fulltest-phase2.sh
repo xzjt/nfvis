@@ -108,6 +108,22 @@ set virtual-switches vs-l3 static-routes 10.99.0.0/16 next-hop 192.168.155.1
 set virtual-switches vs-l3 static-routes default next-hop 192.168.155.1
 # —— resource-pools（§2.6）——
 set resource-pools cpu numa node 0 cores 1-4
+# —— system login 横幅（§2.2；决策 #303）——
+# 单行、≤512 字节；上面「逐条独立会话」的形态只验证解析/接线，真落库与清除见下方提交往返。
+set system login banner 本机为套件测试实例，请勿用于生产
 EOF
+
+# ---------- 登录横幅：真落库 → 回读 → 清除（决策 #303）----------
+# 单条语句只在独立会话里解析不够——横幅的价值在「提交后真的进了配置、删得掉」。
+# 这是一次真实提交往返（值含中文与连字符），提交后立即删除，不改变机器的长期现场。
+run S2-banner "configure
+set system login banner 套件横幅-roundtrip
+commit"
+# 写→读往返：只断言「提交不报错」等于假绿（值没落库也照样 0 退出），故要求配置回读里
+# 真的出现刚写的值（决策 #303 的 banner 落在 system.login.banner）。
+expect_out S2-banner "套件横幅-roundtrip" "show configuration"
+run S2-banner "configure
+delete system login banner
+commit"
 
 summary "阶段 2"

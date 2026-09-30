@@ -1,0 +1,92 @@
+# 真机 fulltest 套件豁免清单（决策 #319）
+#
+# 用途：`contrib/scripts/check_suite_contract_sync.sh` 对账时，**契约命令**若不在
+#       `cli-fulltest-phase*.sh` 的命令清单里，必须在此逐条登记；否则守护报缺口（make check 失败）。
+# 格式：`命令<TAB>类别<TAB>理由`（三列都要非空——守护会检查「理由字段非空」）。
+#   · 命令：与 docs/NFViS-CLI命令全表.md 该行的首个单元格**逐字一致**（改名/删除后请同步清理，
+#     守护会报「失效登记」）。
+#   · 类别：等价写法 / 环境受限 / 破坏性不执行 / 需交互确认 / 本地模式命令 /
+#     由其他套件或单测覆盖 / 配置语句未逐条执行。
+#   · 理由：说清「为什么不进 fulltest」以及「改由谁覆盖」——不要写「暂不覆盖」这类空话。
+# 增删条目时请一并回答：这条命令**新的**验证入口在哪（套件/单测/真机步骤）。
+#
+# 命令	类别	理由
+# —— 等价写法（同一实现，已被其他写法覆盖）——
+show interfaces physical <ifname> statistics	等价写法	与 `show interfaces <ifname> statistics` 同一实现（决策 #155），后者已在阶段 5 执行
+show interfaces physical <ifname> sriov	等价写法	与 `show interfaces <ifname> sriov` 同一实现（决策 #155），后者已在阶段 5 执行
+show | display set	等价写法	管道形态；反推与回放自校验由 cli-semantic-check.sh 的 S7 覆盖（阶段 6 的 `show` 与 `| display json` 覆盖同族其它管道）
+# —— 环境受限（真机现场不具备条件，报错即正确行为）——
+request sriov delete-vfs <ifname> vf <n>	环境受限	本机无 PF/VF；`request sriov create-vfs` 已在阶段 4 以 expect_fail 覆盖同族守卫
+set interfaces <ifname> sriov vf-count <n>	环境受限	同上（无 PF/VF，commit 必被正确拒绝）
+set … interfaces <vnic> sriov physical-interface <if> vf <n>	环境受限	SR-IOV 直通需真实 VF，本机为 vmxnet3
+request images download name <n> type <t> url <u> sha256 <hex>	环境受限	需要可用的外网/内网 URL 与 sha256 夹具（阶段 3 只覆盖本地上传路径）；「sha256 必填」由单测覆盖
+request system core-dumps export <url>	环境受限	需要「先存在转储文件 + 可外发 URL」；`show system core-dumps` 已在阶段 4 执行
+request system core-dumps delete [file <n>]	环境受限	同上（无转储文件可删，删空清单无判定价值）
+# —— 破坏性不执行（一次执行会真重启/真关机/真清库/真改启动项/真中断数据面）——
+request system software add <deb|url> [sha256 <hex>]	破坏性不执行	升级包会替换 nfvis 并重启 nfvisd；实现与单测覆盖，真机按交付步骤单独走查
+request system poweroff	破坏性不执行	断电（reboot/shutdown 已在阶段 4 以 expect_fail 覆盖同一问询闸门）
+request system kernel apply	破坏性不执行	写 GRUB 启动项（重启才生效，且会改机器启动基线）
+request system kernel rollback	破坏性不执行	同上（回退启动项）
+request system configuration restore <path>	破坏性不执行	会覆盖现网配置；backup 已在阶段 4 执行，恢复路径由单测与交付步骤覆盖
+request system storage format-data	破坏性不执行	会真清受管数据；阶段 4 已补**结构检查**（非交互下被双重确认问询挡住 ⇒ 命令已接线且闸门在位），真机执行按交付步骤单独走查
+request interfaces <ifname> bind-dpdk [uio-driver <d>]	破坏性不执行	会把业务口交 DPDK（中断该口流量）；unbind-dpdk 已在阶段 4 以 expect_fail 覆盖同款确认闸门
+set system management ip address <ip-prefix>	破坏性不执行	改管理口地址会切断管理路径（FR-CFG-012 要求 commit confirmed）；非交互提交必被拒，且不该在测试机上真改
+set system management gateway <ip>	破坏性不执行	同上
+set system api tls cert-file <p> key-file <p>	破坏性不执行	装外部证书会替换服务端证书（阶段 4 已覆盖 request system api tls regenerate 自签路径）
+# —— 需交互确认 / 需真实终端 ——
+request container-functions <n> delete	需交互确认	CLI 提问 Delete container 'x'? [yes,no]；非交互下必须被拒（阶段 4 已用「镜像删除」覆盖同一确认闸门）
+request virtual-machine-functions <n> console	需交互确认	串口需真实 TTY（非 TTY 明确提示）；真人按键路径见 T0-4 与交付步骤
+request system password change	需交互确认	需交互输入旧口令（契约已登记延期 V2）；REST 自助改密由决策 #316 单测覆盖
+wizard	需交互确认	交互式问答向导（非 TTY 拒绝）；Web 等价物与单测覆盖
+start shell	需交互确认	仅本地 console 可用（SSH 会话必须被拒，由 cli_contract_coverage 单测覆盖）
+# —— 本地模式命令（脚本/-c 模式无独立断言口径）——
+exit	本地模式命令	CLI 模式切换/退出；-c 脚本模式收尾自动执行（阶段 6 的 commit and-quit 覆盖退出路径）
+quit	本地模式命令	同上（exit/quit 同一实现）
+edit <path>	本地模式命令	配置模式层级导航；阶段 6 的 annotate/show/run 触及同一层级状态机
+up	本地模式命令	同上（层级导航）
+top	本地模式命令	同上（层级导航）
+discard	本地模式命令	脚本模式收尾自动丢弃候选（阶段 6 反复验证「不手写 discard」）；显式丢弃由 internal/api 单测覆盖
+# —— 由其他套件或单测覆盖 ——
+request vpp restart	由其他套件或单测覆盖	重启数据面会中断业务（fulltest 不执行）；重放/收敛由 cli-lifecycle-check.sh 的 L2 段覆盖（systemctl restart vpp + 恢复断言）
+show configuration candidate	由其他套件或单测覆盖	需**持锁会话**才能在配置模式内读（脚本模式每行独立会话）；阶段 6 的 configure 到 show 覆盖同一读物
+set system login user <n> password <s> class <c>	由其他套件或单测覆盖	口令落库/加盐哈希/回显脱敏由 internal/api 单测与 cli_mapping 守护覆盖；套件不宜反复改写登录用户
+set system login class <n> allow <path>	由其他套件或单测覆盖	自定义 class 的生效权限视图由 show configuration permissions（阶段 5）与 aaa 单测覆盖
+set system login class <n> deny <path>	由其他套件或单测覆盖	同上（deny 优先语义由 aaa 单测覆盖）
+# —— 配置语句未逐条执行（§2；阶段 2 逐条执行 60 条代表语句）——
+# 这些语句的解析/落库由 internal/schema + internal/api 单测与 cli_mapping 守护覆盖；
+# 涉及数据面下发的由真机「按交付步骤单独走查」或在 lifecycle 套件中按对象覆盖。
+set system kernel low-latency <bool>	配置语句未逐条执行	内核参数组（需真机 apply + 重启才生效），由 kernel baseline 单测与交付步骤覆盖
+set interfaces <ifname> ingress-policy <name>	配置语句未逐条执行	QoS 绑定语句；同族 set qos policies 已在阶段 2 执行，绑定效果由真机单独走查
+set bonds <name> lacp disable	配置语句未逐条执行	同族 set bonds <name> lacp mode 已在阶段 2 执行；规则由 bonding 单测覆盖
+set virtual-switches <n> gateway ip <ip-prefix>	配置语句未逐条执行	BVI 网关；需 L2 交换机 + 地址，由真机按对象走查
+set virtual-switches <n> gateway vrf <name>	配置语句未逐条执行	同上（跨 VRF 网关）
+set virtual-switches <n> gateway acl-in|acl-out <acl>	配置语句未逐条执行	网关 ACL 绑定；同族 set acls 已在阶段 2 执行
+set virtual-switches <n> ports [<seq>] interface <if> [trunk vlans <l>|native <v>]	配置语句未逐条执行	端口成员需占用物理口（阶段 2 的口位已被 vs-l3/bond0 占满）；由 lifecycle L1 的建删对象覆盖
+set virtual-switches <n> ports [<seq>] vnf <vm> interface <vnic> [trunk vlans <l>]	配置语句未逐条执行	vNIC 成员需 VNF（阶段 3 才建）；由 lifecycle L3-1 的 BD 成员断言覆盖
+set virtual-switches <n> ports [<seq>] container <ct> interface <vnic>	配置语句未逐条执行	容器 memif 成员；本机无自带 memif 的容器镜像（T0-3 环境受限）
+set virtual-switches <n> cross-connect <a> <b>	配置语句未逐条执行	二层直通需两个空闲口且不能同广播域；由 network 单测与交付步骤覆盖
+set virtual-switches <n> l3-interface <if> acl-in <acl>	配置语句未逐条执行	L3 口 ACL 绑定；同族 set virtual-switches <n> l3-interface <if> ip address 已在阶段 2 执行
+set nat rules <seq> match source <p> virtual-switch <n> action interface <if> [source-pool <n>]	配置语句未逐条执行	NAT 规则需出接口与转发域齐备；由 lifecycle L3-3 的会话对账与真机 NAT 走查覆盖
+set port-mirroring <n> source vnf <vm> interface <vnic> direction <…>	配置语句未逐条执行	SPAN 源为 vNIC（需 VNF + 两个口）；物理口源形态已在阶段 2 覆盖
+set vpp cpu workers-per-numa <n>	配置语句未逐条执行	与 corelist-workers 互斥（后者已在阶段 2 执行）；由 vpp 配置单测覆盖
+delete vpp dpdk dev <ifname> [<参数>]	配置语句未逐条执行	删除覆盖项；需先建过覆盖项，由 vpp 配置单测覆盖
+set virtual-machine-functions <n> memory numa node <n>	配置语句未逐条执行	NUMA 亲和需与宿主机拓扑一致；由 model/compute 单测覆盖
+set virtual-machine-functions <n> memory backing <hugepage|normal>	配置语句未逐条执行	内存后端切换；阶段 3 已覆盖 hugepage-size 形态
+set virtual-machine-functions <n> disks <d> size-gb <n>	配置语句未逐条执行	附加数据盘需真实镜像仓库空间；由 compute/libvirt 单测覆盖
+set virtual-machine-functions <n> disks <d> image <img>	配置语句未逐条执行	同上（从镜像克隆数据盘）
+delete virtual-machine-functions <n> disks <d>	配置语句未逐条执行	同上（需先建盘）
+set virtual-machine-functions <n> interfaces <vnic> type <vhost-user|sriov-vf>	配置语句未逐条执行	vNIC 类型声明；vhost-user 路径由 round84/决策 #171 真机 ping 走查与 lifecycle L3-1 覆盖
+set … interfaces <vnic> mac <mac>	配置语句未逐条执行	MAC 声明；缺省自动生成路径已在阶段 3 的 cli-vm 上生效
+set … interfaces <vnic> vlan <vlan>	配置语句未逐条执行	VLAN tag；由 schema 单测（决策 #79⑥ 的数值转换）覆盖
+set … interfaces <vnic> virtual-switch <name>	配置语句未逐条执行	归属交换机；由 lifecycle L3-1 的 BD/表成员断言覆盖
+set … cloud-init user-data <path|text>	配置语句未逐条执行	user-data 注入需 guest 引导验证；由 seed ISO 单测与集成测试覆盖
+set … cloud-init ssh-key <key>	配置语句未逐条执行	同上（引号感知切分由决策 #79⑦ 单测覆盖）
+set … cloud-init hostname <s>	配置语句未逐条执行	同上
+set … serial console enable	配置语句未逐条执行	串口控制台声明；由 libvirt domain XML 组装单测覆盖
+set … autostart <bool>	配置语句未逐条执行	随系统自启；由 libvirt 单测覆盖
+set container-functions <n> interfaces <vnic> type memif virtual-switch <n> [mac <m>] [vlan <v>]	配置语句未逐条执行	memif vNIC 需容器侧支持（T0-3 环境受限），由 schema 单测覆盖
+set container-functions <n> env <key> <value>	配置语句未逐条执行	map 型取值；由 schema 单测（决策 #79⑧）覆盖
+set container-functions <n> args <s>	配置语句未逐条执行	同族 command 已在阶段 3 执行
+set container-functions <n> restart-policy <no|on-failure>	配置语句未逐条执行	Docker 重启策略；由 container 单测覆盖
+set container-functions <n> autostart <bool>	配置语句未逐条执行	随系统自启；由 container 单测覆盖
+set container-functions <n> description <s>	配置语句未逐条执行	描述字段；同族 set interfaces <ifname> description 已在阶段 2 执行
