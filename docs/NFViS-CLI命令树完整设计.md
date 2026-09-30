@@ -33,6 +33,10 @@ show system
   ├─ hardware                                       # 硬件健康：CPU 温度/风扇/电源（IPMI/Redfish/lm-sensors）、磁盘 SMART
   ├─ core-dumps                                     # 崩溃转储清单（VPP/QEMU/nfvisd）
   ├─ tech-support                                   # 诊断归档清单
+  ├─ api tokens                                     # 活动会话 / API Token 清单（R；决策 #301）：token-id、
+  │                                                 #   用户、class、签发、过期、是否当前会话；
+  │                                                 #   super-user 列全部、其他 class 只列自己的
+  │                                                 #   API: GET /system/api-tokens
   └─ configuration sessions                        # candidate 持锁会话列表（**此处只有 sessions**：
                                                     #   `candidate` 的写法是顶层 `show configuration candidate`，
                                                     #   唯一的实现也在那里；`show system configuration candidate`
@@ -200,10 +204,15 @@ request system
   ├─ core-dumps export <url> | delete [file <name>]
   ├─ zeroize                                        # S；双重确认，恢复出厂（FR-OPS-007）
   ├─ api
-  │   ├─ tls regenerate                             # 重签自签证书（或经配置安装外部证书）
-  │   └─ token revoke <token-id>                    # S；**在 api 之下**（决策 #76：原文档误置于顶级
-  │                                                 # request 下）。V1 仅提示「经 API POST /logout
-  │                                                 # 吊销当前会话」，逐 token 吊销随 V2
+  │   ├─ tls regenerate                             # S；重签自签证书（或经配置安装外部证书）
+  │   └─ token revoke <token-id>                    # O（request 域基线；决策 #301）；**在 api 之下**
+  │                                                 # （决策 #76：原文档误置于顶级 request 下）。逐 token
+  │                                                 # 吊销：super-user 可吊销任意会话、其他 class 仅自己的；
+  │                                                 # 不存在的/他人的 token id 统一报「会话不存在或无权
+  │                                                 # 操作」（不泄露存在性），吊销后该会话下一个请求即 401。
+  │                                                 # REST 侧同能力以最低 class 开放（自服务例），read-only
+  │                                                 # 的自助结束会话另有 POST /logout
+  │                                                 # API: POST /system/api-tokens/{id}:revoke
   ├─ ssh host-key regenerate                        # 重新生成 SSH host key
   ├─ password change                                # 登录者自助改密（验证旧口令）
   ├─ storage format-data                            # S；危险，双确认（V1 仅重置数据分区）
@@ -579,6 +588,8 @@ virtual-machine-functions {
 | `request`（生命周期/镜像/接口） | ✔ | ✔ | ✘ |
 | `request`（software/reboot/configuration） | ✔ | ✘ | ✘ |
 | `clear` / `start shell` | ✔ | ✘ | ✘ |
+| `show system api tokens`（决策 #301） | ✔（全部用户的会话） | ✔（仅自己的） | ✔（仅自己的） |
+| `request system api token revoke <token-id>`（决策 #301） | ✔（任意会话） | ✔（仅自己的） | ✘（request 域以 O 为基线；read-only 的自助结束会话用 `POST /logout`，REST 侧同能力开放） |
 
 ## 5. 补全行为细则（供补全引擎实现）
 

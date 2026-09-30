@@ -111,6 +111,7 @@
 | `show log audit [last <n>]` | 审计日志 | `GET /audit-logs` | ✅ |
 | `show log vnf <name> [last <n>]` | VNF 控制台/事件日志 | 运行态 | ✅ |
 | `show users` | 本地用户与 class | `GET /system/login-users` | ✅ |
+| `show system api tokens` | 活动会话 / API Token 清单：token-id、用户、权限类、签发时间、过期时间、是否当前会话（super-user 列**全部用户**的会话，其他 class 只列自己的；token 为内存态，重启后清空） | `GET /system/api-tokens` | 🚫 本轮新增（决策 #301）：单测覆盖，真机四套件待跑 |
 | `show configuration [permissions <class>]` | 省略子命令 = 当前 committed 配置（JunOS 风格），**正常可用**；`permissions <class>` **暂未实现**（本轮改为明确提示「按 class 视角显示暂未实现」，不再回配置正文——那会让人误以为是「该 class 视角下的那份配置」） | 省略子命令：`GET /configuration/candidate`（committed 视图）；`permissions`：本地提示（无 REST 端点） | ⚠️ **已知缺口（明确提示）**：`permissions <class>` 未实现；committed 原样配置请用 `show configuration` |
 | `show configuration candidate` | 当前持锁会话的 candidate | `GET /configuration/candidate` | ✅ |
 | `show configuration history` | 提交历史快照列表：rev/时间/用户/注释/是否当前（**不含配置正文**） | `GET /configuration/history` | ✅ |
@@ -176,7 +177,7 @@
 | `request system core-dumps delete [file <n>]` | 删除转储 | O | `DELETE /system/core-dumps` | ✅（**决策 #76⑨** 修错误文案） |
 | `request system zeroize` | 恢复出厂（双重确认） | S | `POST /system:zeroize` | 🚫 破坏性 |
 | `request system api tls regenerate` | 重签自签证书 | S | `POST /system/tls:regenerate` | ✅ |
-| `request system api token revoke <token-id>` | 吊销 token | S | `POST /logout`（吊销当前 token；**命令当前只提示**，提示文案与注册端点一致） | ⚠️ V1 仅提示「经 API POST /logout 吊销当前会话，逐 token 随 V2」（**决策 #76⑧** 修正契约位置；提示文案本轮已与注册端点对齐） |
+| `request system api token revoke <token-id>` | 吊销指定会话（O；范围按身份裁定——super-user 可吊销任意会话，其他 class 仅自己的；不存在的/他人的 id 统一报「会话不存在或无权操作」，不泄露存在性。token-id 见 `show system api tokens`。request 域以 O 为基线，read-only 的自助结束会话走 POST /logout；REST 侧同能力对全部登录 class 开放） | O | `POST /system/api-tokens/{id}:revoke` | 🚫 本轮新增（决策 #301）：单测覆盖，真机四套件待跑 |
 | `request system ssh host-key regenerate` | 重新生成 SSH host key | S | `POST /system/ssh-host-key:regenerate` | ✅ |
 | `request system password change` | 登录者自助改密（验证旧口令） | O | `POST /system/login-users/{n}:change-password`（与 REST 同源） | 🚫 需交互输入（契约已登记延期） |
 | `request system storage format-data` | 重置数据分区（危险，双确认） | S | 宿主 | 🚫 破坏性（契约已登记延期） |
@@ -394,43 +395,43 @@
 > **复核方法**（下面每个数字都可这样复算）：
 >
 > ```bash
-> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 261（§1/§2 的命令行 259 行 + §3 本表的 `show`、`request` 两行）
+> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 262（§1/§2 的命令行 260 行 + §3 本表的 `show`、`request` 两行）
 > ```
 >
-> 即 §1/§2 合计 **259 行**；把 ` / ` 并列的写法各拆成一条后为 **263 条**命令
+> 即 §1/§2 合计 **260 行**；把 ` / ` 并列的写法各拆成一条后为 **264 条**命令
 > （`exit` / `quit` +1；§2.1 的 `edit <path>` / `up` / `top` / `exit` +3）。
 
 **分族**（族 = 该行**首个 token**；§2.1 的裸 `show` 与 `show | display set` 因此计入 `show` 族，`help` 计入其余操作）：
 
 | 族 | 行数 | 明细 |
 |---|---|---|
-| `show` | 67 | §1.1 show 表 65 行 + §2.1 的 `show`、`show \| display set` 2 行 |
+| `show` | 68 | §1.1 show 表 66 行 + §2.1 的 `show`、`show \| display set` 2 行 |
 | `request` | 46 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/系统/告警） |
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
 | 配置模式 | 126 | §2.1 余下 13 行 + §2.2~§2.9 共 113 行 |
-| **合计** | **259** | 不含管道则为 **250**；按 ` / ` 拆开后 **263 条** |
+| **合计** | **260** | 不含管道则为 **251**；按 ` / ` 拆开后 **264 条** |
 
 **分节**（行数）：
 
 | 节 | 行数 | 节 | 行数 |
 |---|---|---|---|
-| §1.1 `show`（含通用管道 9） | 75 | §2.2b `protocols` | 3 |
+| §1.1 `show`（含通用管道 9） | 76 | §2.2b `protocols` | 3 |
 | §1.2 `request` | 46 | §2.3 `interfaces` 与 `bonds` | 10 |
 | §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 13 |
 | §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 9 |
 | §2.2 `system` | 34 | §2.6 `resource-pools` | 3 |
 | §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 20 |
-| §2.9 `container-functions` | 10 | **合计** | **259** |
+| §2.9 `container-functions` | 10 | **合计** | **260** |
 
-**按实测状态分布**（共 259 行）：
+**按实测状态分布**（共 260 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 239 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归） |
-| ⚠️ 已知缺口 | 2 | `show configuration [permissions <class>]`（按 class 视角未实现，明确提示）、`request system api token revoke`（V1 仅提示，逐 token 随 V2）；`show \| display set` 已由决策 #155 实现、`show vpp runtime` 已由决策 #200 实现，均移出缺口 |
+| ✅ 实测通过 | 241 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归） |
+| ⚠️ 已知缺口 | 1 | `show configuration [permissions <class>]`（按 class 视角未实现，明确提示）；`show \| display set` 已由决策 #155 实现、`show vpp runtime` 已由决策 #200 实现、`request system api token revoke` 已由决策 #301 实现逐 token 吊销，均移出缺口 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 12 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`format-data`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`）与需交互者（VM/容器删除确认、改密） |
+| 🚫 本轮未执行 | 14 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`format-data`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖但真机四套件待跑的 2 行（`show system api tokens`、`request system api token revoke <token-id>`） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
@@ -462,7 +463,7 @@ pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**
 ④ 快照 `create`/`rollback` **需关机态**（决策 #75）：对运行中 VM 回滚实测会**替换 QEMU 进程**
    （静默重启），故显式拒绝并提示先关机。
 
-⑤ `request system api token revoke` 仅提示「经 API POST /logout 吊销当前会话」，逐 token 吊销随 V2。
+⑤ **已收口**：`request system api token revoke <token-id>` 已实现逐 token 吊销（决策 #301，配套 `show system api tokens` 与 REST `GET /system/api-tokens`、`POST /system/api-tokens/{id}:revoke`；Web 控制台「用户与权限」页同步提供活动会话卡片）；会话级吊销（`POST /logout`）照旧。两条新命令的状态列标 🚫：真机四套件待跑。
 
 ⑥ 环境受限（非实现问题）：SR-IOV（本机无 PF/VF）、LLDP 邻居（无对端，邻居表恒空）、
    硬件健康（无 IPMI/温度传感器/SMART）、容器侧 memif 通流（离线无自带 memif 的镜像）、
