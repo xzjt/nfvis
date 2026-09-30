@@ -114,7 +114,7 @@ REST 侧现状（本轮复核）：
 | `show configuration compare rollback <n>`（1） | `GET /configuration/diff` + `POST /configuration/rollback/{n}`（两步组合） |
 | `show tech-support`（1，顶级等价写法） | `GET /system/tech-support` |
 | `show`（1，配置模式：candidate 当前层级） | `GET /configuration/candidate` |
-| `show configuration permissions <class> [detail]`（1，v2 决策 #304 收口） | `GET /configuration/permissions?class=<name>`（生效权限视图：该 class 逐路径判定 + 依据；无参 = 调用者自己 class；非 super 查他人 403、未知 404；`detail` 的判定依据由同一响应字段承载，CLI 渲染） |
+| `show configuration permissions <class> [detail]`（1，v2 决策 #304 收口） | `GET /configuration/permissions?class=<name>`（生效权限视图：该 class 逐路径判定 + 依据；无参 = 调用者自己 class；非 super 查他人 403、未知 404）；`detail` 的判定依据列由 CLI 侧渲染（与端点同一判定实现） |
 
 未计入本表的 3 行：`show vpp runtime [thread <id>]`、`show log vnf <name> [last <n>]`、`show | display set`（**例外**，§4；
 `show vpp runtime` 自 v2 决策 #301 起按既成事实归例外——CLI 侧渲染，Web 等价形态 `/vpp/status`）。
