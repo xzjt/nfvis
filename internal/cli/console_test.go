@@ -187,3 +187,84 @@ func TestREPLConsoleNonTTYDialErrorSkipped(t *testing.T) {
 	}
 	_ = os.Stdout
 }
+
+// ---------- 决策 #310：console 断开后主循环不得阻塞在 Read ----------
+
+// copyConsoleWithin 在限时内运行 copyConsole，返回是否在限时内返回（false = 仍阻塞）。
+func copyConsoleWithin(t *testing.T, rp *REPL, stream io.Writer, localIn io.Reader, done <-chan struct{}, limit time.Duration) bool {
+	t.Helper()
+	fin := make(chan struct{})
+	go func() {
+		rp.copyConsole(stream, localIn, done)
+		close(fin)
+	}()
+	select {
+	case <-fin:
+		return true
+	case <-time.After(limit):
+		return false
+	}
+}
+
+// TestCopyConsoleExitsOnServerClose 回归（决策 #310）：服务端断开（done 关闭）时，
+// 即便本地输入一直阻塞（用户没按键），copyConsole 也必须立即返回——旧实现直接阻塞在
+// stdin 的 Read 上，done 收到信号也看不到，必须再按一次键才能退出。
+func TestCopyConsoleExitsOnServerClose(t *testing.T) {
+	pr, pw := io.Pipe() // 本地输入：永不写入，模拟「没人按键」
+	defer pw.Close()
+	var out bytes.Buffer
+	rp := &REPL{out: &out}
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		close(done)
+	}()
+	if !copyConsoleWithin(t, rp, io.Discard, pr, done, 2*time.Second) {
+		t.Fatal("服务端已断开但仍阻塞（需按键才退出），决策 #310 回归")
+	}
+	if !strings.Contains(out.String(), "串口已断开") {
+		t.Fatalf("应提示串口已断开: %q", out.String())
+	}
+}
+
+// TestCopyConsoleExitsOnLocalEOF 本地输入 EOF（管道关闭）即返回并触发退出路径。
+func TestCopyConsoleExitsOnLocalEOF(t *testing.T) {
+	var out bytes.Buffer
+	rp := &REPL{out: &out}
+	done := make(chan struct{}) // 永不关闭：退出只能来自本地 EOF
+	if !copyConsoleWithin(t, rp, io.Discard, strings.NewReader(""), done, 2*time.Second) {
+		t.Fatal("本地 EOF 后仍阻塞")
+	}
+	if strings.Contains(out.String(), "串口已断开") {
+		t.Fatalf("本地 EOF 不应报服务端断开: %q", out.String())
+	}
+}
+
+// TestCopyConsoleCtrlBracketExits Ctrl-] 照旧退出；退出键自身不转发给服务端。
+func TestCopyConsoleCtrlBracketExits(t *testing.T) {
+	var out, sent bytes.Buffer
+	rp := &REPL{out: &out}
+	done := make(chan struct{})
+	if !copyConsoleWithin(t, rp, &sent, strings.NewReader("hi\x1d"), done, 2*time.Second) {
+		t.Fatal("Ctrl-] 应退出")
+	}
+	if sent.String() != "hi" {
+		t.Fatalf("Ctrl-] 之前的字节应转发、退出键不转发：%q", sent.String())
+	}
+	if !strings.Contains(out.String(), "已退出串口") {
+		t.Fatalf("应提示已退出串口: %q", out.String())
+	}
+}
+
+// TestCopyConsoleForwardsInput 本地按键原样转发到服务端，本地 EOF 后返回。
+func TestCopyConsoleForwardsInput(t *testing.T) {
+	var out, sent bytes.Buffer
+	rp := &REPL{out: &out}
+	done := make(chan struct{})
+	if !copyConsoleWithin(t, rp, &sent, strings.NewReader("hello"), done, 2*time.Second) {
+		t.Fatal("本地 EOF 后应返回")
+	}
+	if sent.String() != "hello" {
+		t.Fatalf("本地输入应原样转发：%q", sent.String())
+	}
+}

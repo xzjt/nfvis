@@ -29,6 +29,7 @@ func main() {
 		passwordFlag = flag.String("p", os.Getenv("NFVIS_PASSWORD"), "口令（缺省读 NFVIS_PASSWORD；均未给则在终端下交互索取）")
 		source       = flag.String("source", "ssh", "接入源（ssh|console）")
 		cmdline      = flag.String("c", "", "执行多行命令后退出（换行分隔）")
+		scriptFile   = flag.String("f", "", "执行脚本文件后退出（按行，语义同 -c；- 表示读 stdin；与 -c 互斥）")
 		showVer      = flag.Bool("version", false, "输出版本后退出")
 		caFile       = flag.String("ca", "", "服务端证书 PEM（HTTPS 校验；缺省尝试固定本机 nfvisd 证书）")
 		insecure     = flag.Bool("insecure", false, "跳过 HTTPS 证书校验（仅限调试）")
@@ -39,13 +40,27 @@ func main() {
 		return
 	}
 
+	// 脚本来源（-c 字符串 / -f 文件或 stdin）收敛到同一入口：执行路径只有一条（runScript），
+	// 两种来源解析后的文本完全同义（决策 #309）。解析失败（互斥/缺文件/空文件）在此即退出，
+	// 不必先握手/登录取口令。
+	script, err := resolveScript(*cmdline, *scriptFile, os.Stdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%% %v\n", err)
+		os.Exit(1)
+	}
+
 	// 客户端先于口令提示装配：登录横幅（决策 #303）要在提示口令**之前**展示。
 	client := mustClient(*server, *caFile, *insecure)
 	fmt.Printf("连接 %s ...\n", *server)
 	// 登录横幅在提示口令之前取一次；脚本模式不取也不打印（见 printLoginBanner）。
-	printLoginBanner(os.Stdout, *cmdline, client)
+	printLoginBanner(os.Stdout, script, client)
 	password := *passwordFlag
 	if password == "" {
+		// `-f -` 时 stdin 已被脚本吃掉，不能再拿它当口令来源：给明确指引而非静默挂起。
+		if *scriptFile == "-" {
+			fmt.Fprintln(os.Stderr, "%% 使用 -f - 时 stdin 已用于脚本，请用 -p 或 NFVIS_PASSWORD 提供口令")
+			os.Exit(1)
+		}
 		// 未给 -p / NFVIS_PASSWORD 时**交互式索取**：口令不进命令行（`ps` 与 shell 历史都看不到），
 		// 也避免口令中的 shell 特殊字符（如 `!`）被 shell 先行展开。
 		// 非 TTY（脚本/管道）不提示，直接给明确指引，以免挂起。
@@ -69,8 +84,8 @@ func main() {
 	}
 	session := cli.New(client, *source)
 
-	if *cmdline != "" {
-		runScript(session, *cmdline)
+	if script != "" {
+		runScript(session, script)
 		return
 	}
 	// 空闲超时取 system idle-timeout-minutes，缺省 10 分钟（FR-SEC-005/FR-CLI-006）。
@@ -87,14 +102,59 @@ func main() {
 
 // printLoginBanner 交互模式的登录横幅（决策 #303）：在提示口令**之前**展示，未认证阶段即可见。
 //
-// `-c` 脚本模式**不取也不打印**：脚本的成败判定看输出行首的 %/%%（见 runScriptLines），
+// 脚本模式（script 非空，`-c` 或 `-f`）**不取也不打印**：脚本的成败判定看输出行首的 %/%%（见 runScriptLines），
 // 横幅文本会污染输出与判定。网络/服务端任何失败静默跳过（横幅是展示性功能，不得挡住登录流程），
 // 这一层由 cli.PrintLoginBanner 保证。返回值仅供单测断言，调用方忽略。
-func printLoginBanner(w io.Writer, cmdline string, f cli.BannerFetcher) bool {
-	if cmdline != "" {
+func printLoginBanner(w io.Writer, script string, f cli.BannerFetcher) bool {
+	if script != "" {
 		return false
 	}
 	return cli.PrintLoginBanner(w, f)
+}
+
+// resolveScript 把脚本来源（`-c` 字符串 / `-f` 文件或 stdin）收敛到**同一入口**，
+// 返回归一后的脚本文本；两者皆空表示交互模式（返回 ""）。
+//
+// 契约（决策 #309）：
+//   - `-c` 与 `-f` **互斥**，同时给出即报错（文案说清二者选一）；
+//   - `-f <file>` 文件不存在/不可读 ⇒ 报错含路径；去空白后为空 ⇒ 报错（空脚本静默退出 0 是假成功）；
+//   - `-f -` 读 stdin（管道喂脚本的自动化形态）；
+//   - 两种来源都经 normalizeScriptText 归一，语义完全一致。
+func resolveScript(cmdline, file string, stdin io.Reader) (string, error) {
+	switch {
+	case cmdline != "" && file != "":
+		return "", errors.New("-c 与 -f 只能选其一：-c 直接给命令串，-f 从文件读；请去掉其中之一")
+	case cmdline != "":
+		return normalizeScriptText(cmdline), nil
+	case file == "":
+		return "", nil
+	}
+	var data []byte
+	var err error
+	if file == "-" {
+		data, err = io.ReadAll(stdin)
+	} else {
+		data, err = os.ReadFile(file)
+	}
+	if err != nil {
+		return "", fmt.Errorf("读取脚本失败（%s）: %w", file, err)
+	}
+	text := normalizeScriptText(string(data))
+	if strings.TrimSpace(text) == "" {
+		return "", fmt.Errorf("脚本为空（%s）：没有任何命令可执行", file)
+	}
+	return text, nil
+}
+
+// normalizeScriptText 归一脚本换行与 BOM（决策 #309）。
+//
+// 脚本文件常由 Windows 编辑器写好：CRLF 行尾会让最后一条命令读成 `commit\r` 而报语法错，
+// 文件头的 UTF-8 BOM 会让首条命令读成 `\ufeffconfigure`。这里统一剥 BOM、把 CRLF 与孤立 CR
+// 归一为 LF；`-c` 与 `-f` 走同一归一点，故两种来源语义一致。
+func normalizeScriptText(s string) string {
+	s = strings.TrimPrefix(s, "\ufeff")
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.ReplaceAll(s, "\r", "\n")
 }
 
 // runScript 多行脚本模式：任一行**真错误**即停止；结束时清理会话。
@@ -102,8 +162,8 @@ func printLoginBanner(w io.Writer, cmdline string, f cli.BannerFetcher) bool {
 // 收尾必须清理（会话按 user@source 在服务端保留）：否则脚本会残留配置模式、
 // 脏 candidate 与 candidate 会话锁，导致后续调用被按上一模式解释、
 // 再次以 exit 收尾时报「存在未提交变更」并失败（见 docs/reviews/2026-09-13.md）。
-func runScript(session *cli.Session, cmdline string) {
-	failed := runScriptLines(session, cmdline)
+func runScript(session *cli.Session, script string) {
+	failed := runScriptLines(session, script)
 	teardownScript(session)
 	if failed {
 		os.Exit(1)
@@ -112,8 +172,9 @@ func runScript(session *cli.Session, cmdline string) {
 
 // runScriptLines 逐行执行脚本，返回是否失败（失败即已停止，后续行不执行）。
 // 与 runScript 分开是为了可单测（后者收尾后直接 os.Exit）。
-func runScriptLines(session *cli.Session, cmdline string) (failed bool) {
-	for _, line := range strings.Split(cmdline, "\n") {
+// 入参 script 已由 resolveScript 归一（CRLF/孤立 CR → LF、剥 BOM），`-c` 与 `-f` 共用本函数。
+func runScriptLines(session *cli.Session, script string) (failed bool) {
+	for _, line := range strings.Split(script, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
