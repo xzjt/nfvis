@@ -442,6 +442,37 @@ func Find(root *Node, names ...string) (*Node, error) {
 	return n, nil
 }
 
+// CommandPath 操作树上一段可判定的命令路径（决策 #304）：关键字名与参数占位符
+// （如 "show interfaces <ifname>"），Required 为该路径所需的最低预置等级。
+type CommandPath struct {
+	Path     []string
+	Required Class
+}
+
+// OperCommandPaths 枚举操作树上的命令路径（每个关键字/参数节点一条），按命令树
+// **声明顺序**稳定输出（确定性）。与 Match/补全同源（同一棵树），**不手抄清单**——
+// 供 `show configuration permissions <class>` 逐路径判定（决策 #304 单一事实源）。
+//
+// 口径：各层关键字/参数节点都算一条可判定路径（前缀路径也是可判定的命令路径——
+// 自定义 class 的 allow/deny 前缀正是在路径前缀上匹配）；取值叶子（Value）是取值、
+// 不是命令，跳过。
+func OperCommandPaths() []CommandPath {
+	var out []CommandPath
+	var walk func(n *Node, prefix []string)
+	walk = func(n *Node, prefix []string) {
+		for _, c := range n.Children {
+			if c.Kind == Value {
+				continue
+			}
+			p := append(append([]string{}, prefix...), c.Name)
+			out = append(out, CommandPath{Path: p, Required: c.RequiredClass()})
+			walk(c, p)
+		}
+	}
+	walk(OperRoot(), nil)
+	return out
+}
+
 // ---------- 补全（FR-CLI-001/002/003/007，§5 行为细则） ----------
 
 // Candidate 一条补全候选。

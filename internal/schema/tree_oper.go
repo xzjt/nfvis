@@ -139,11 +139,13 @@ func OperRoot() *Node {
 			K("configuration", "配置显示",
 				K("candidate", "当前持锁会话的 candidate"),
 				K("history", "提交历史快照：rev/时间/用户/注释/是否当前（不含配置正文）"),
-				// 「按 class 视角显示」**未实现**（决策 #153 处置：语义无权威定义——契约 §3 对照表里
-				// 没有这一行，脱敏按敏感字段、与 class 无关）。`?` 这里必须如实标注：补全菜单也是
-				// 面向操作者的承诺，写着「按 class 视角显示」而执行器回「暂未实现」同样是不同源。
-				K("permissions", "按 class 视角显示（暂未实现；committed 原样配置见 show configuration）",
-					P("<class>", "class 名", DynClasses),
+				// 决策 #304：`permissions <class> [detail]` 的「按 class 视角显示」落地为
+				// **生效权限视图**（逐路径判定 + 依据；判定单源在 internal/aaa）。这里的
+				// 描述如实说明它给的是什么，`?` 菜单同样是面向操作者的承诺。
+				K("permissions", "某 class 的生效权限视图（逐路径判定；权限 R）",
+					P("<class>", "class 名", DynClasses,
+						Opt(K("detail", "逐路径附带判定依据")),
+					),
 				),
 				// 契约 §1.1/§3（决策 #153）：`show configuration sessions` 等价于
 				// `show system configuration sessions`（同一读物）；`show configuration compare

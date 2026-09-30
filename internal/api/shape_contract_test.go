@@ -97,9 +97,10 @@ func TestResponseShapeMatchesContract(t *testing.T) {
 		{"GET", "/system/version"},
 		{"GET", "/interfaces"},
 		{"GET", "/resource-pools"},
-		{"GET", "/configuration"},     // 决策 #119：整配置出口（committed）
-		{"GET", "/system/api-tokens"}, // 决策 #301：活动会话清单（登录后恒有≥1 条，自己的会话）
-		{"GET", "/login-banner"},      // 决策 #303：登录横幅（未设置时走白名单省略）
+		{"GET", "/configuration"},             // 决策 #119：整配置出口（committed）
+		{"GET", "/system/api-tokens"},         // 决策 #301：活动会话清单（登录后恒有≥1 条，自己的会话）
+		{"GET", "/login-banner"},              // 决策 #303：登录横幅（未设置时走白名单省略）
+		{"GET", "/configuration/permissions"}, // 决策 #304：生效权限视图（调用者自己 class）
 	} {
 		props := declaredProps(t, spec, ep.path, ep.method)
 		if len(props) == 0 {
