@@ -35,12 +35,13 @@ var shapeConditional = map[string]map[string]string{
 		"link":        "同上",
 		"driver":      "同上",
 		"speed_mbps":  "同上；且 DPDK 口速率可能为 0（取不到就不给）",
-		"mac":         "模型未采集（无数据源）",
+		"mac":         "仅内核未接管口有 sysfs 来源（决策 #302）；VPP 口暂无 MAC 来源，测试环境无 /sys 故验不到",
 		"numa_node":   "模型未采集（无数据源）",
 		"mtu":         "有效 MTU：配置未显式给且运行态未上报时省略（不编造 0/默认值）",
-		"description": "未配置时省略",
+		"description": "未配置时省略；内核未接管口无配置描述",
 		"sriov":       "未配置 SR-IOV 时省略",
 		"statistics":  "仅在详情端点 /interfaces/{name} 附带",
+		"taken_over":  "决策 #302：VPP 运行态不可判定（未接入/查询失败）时省略，不编造",
 	},
 	"GET /system/version": {
 		// R37-2 已收口（决策 #118）：ubuntu/libvirt/qemu/docker 经 VersionProbe 探测、
