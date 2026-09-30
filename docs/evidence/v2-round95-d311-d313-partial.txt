@@ -1,0 +1,40 @@
+NFViS v2 真机验证记录 round95 —— 决策 #311/#312/#313（部分完成，如实登记）
+====================================================================
+日期：2026-09-30
+环境：nfvis-vm（SSH key）；本轮构建 2.0.0~dev8（v2 线，PR #242 合并后）；升级前 2.0.0~dev7
+源码：git archive v2（24df2c0）；SOURCE_DATE_EPOCH=1790776171
+⚠️ 本轮**三条中只有一条验成**，另两条因测试前置/注入方式问题未完成，且**四套件本轮未跑**——
+  原因与后续口径见下（不以任何方式含糊成「通过」）。
+
+§1 决策 #312 容器镜像内嵌 tag 一致性（✓ 真机确认）
+`docker save alpine:3.20` → `request images upload name alpine type container-image file /data/incoming/a95.tar`：
+- CLI 回显：「（容器镜像）归档内嵌 tag 为 alpine:3.20；已按仓库名重打标签 alpine:latest——配置中请用 alpine 引用」✓
+- REST `GET /images/alpine`：`source_tags: ["alpine:3.20"]` ✓（字段真发得出来）
+- 与实现侧核查一致：运行时缺陷实为决策 #160 已修，本批补的是「明确指引 + 单一身份守护 + 文档一致」
+
+§2 决策 #313 CLI 多行引号值（✗ 本轮未验成）
+- 现象：`-f u95.txt`（含跨行 user-data 一条语句）返回 `%% 存在未提交变更，先 commit 或 discard`
+  ⇒ **前置未就绪**：上一轮（round94 的 #310 验证/或更早）遗留了未提交的 candidate，我的脚本没有先清 candidate；
+  因而 user-data 实换行数 = 0（什么都没写成），该条未获得可判定证据
+- 附带确认（非本条的完整证据）：`show version | match VPP` 管道仍正常
+- 后续复验口径：先 `discard`（或提交）掉遗留 candidate，再跑同一脚本；交互续行（`... ` 提示）需在 pty 下另行走查
+
+§3 决策 #311 VM 启动失败可诊断（✗ 未按设计验成，但暴露一条**真实待处理项**）
+- 我的注入方式：`systemctl stop vpp` → 期望「约 3s 回 `%% … paused (starting up)` + 诊断」
+- 实际：`start` 请求**卡到客户端 90s 超时**才返回（`context deadline exceeded (Client.Timeout exceeded while awaiting headers)`），
+  **没有走到设计中的 3s 探测窗口**；`virsh domstate cli-vm` 独立印证为 `paused`；
+  `systemctl start vpp` 后再 `start` 仍然 90s 超时、VM 仍 `paused`
+- 恢复：`virsh destroy cli-vm` + `systemctl restart nfvis` 后服务与数据面正常（此后对象已清零）
+- **登记为待处理项（本轮发现）**：VPP 不在运行时，`start` 的**请求本身**在到达 `StartVMChecked` 的探测窗口之前就阻塞
+  （疑似 vhost-user/socket 准备阶段在等 VPP 连接），于是 #311 设计的「有界窗口 + 原因透出」在这条路径上**根本用不上**——
+  需要一条**前置判定**（VPP 未运行/连接不可用 → 立刻失败并给 `request vpp restart` 指引），或把探测窗口提前到阻塞点之前。
+  建议单独立项（可直接补进 v2 待做第二节），并把验收条件写清：VPP 停 → `start` 在数秒内返回原因，而非 90s 超时
+- 也如实说明：本轮的注入方式（停 VPP）本身把数据面留在了坏状态，导致脚本后续的清场/套件阶段卡住、**四套件本轮未执行**；
+  恢复后环境已回到基线（sw=0 / vmf=0 / VPP 2 口 / nfvis 与 vpp 均 active）
+
+§4 四套件
+**未跑**（脚本在清场阶段因数据面坏状态卡住，已停并恢复环境）。待 #313 复验那一轮一并补跑，基线参照
+round91~94（198/0/11、12/0/1、21~22/0/3~4、10/10）。
+
+§5 现场终态
+nfvis/vpp 均 active；sw=0 / vmf=0；VPP 持有 ens192/ens224；版本 nfvis 2.0.0~dev8
