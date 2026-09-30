@@ -52,7 +52,9 @@ p { margin: 6px 0; }
 .crumb { color: var(--muted); font-size: 12px; }
 
 /* 登录 */
-.login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+/* flex-direction: column 是必须的：横幅与登录卡是 .login-wrap 的两个子元素，
+   默认行方向会把横幅排到卡片左侧（round90 真机视觉验收抓到）。 */
+.login-wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; }
 /* 登录横幅（决策 #303）：登录卡片上方的一行公告文本，服务端有横幅才显示（hidden 压过一切）。 */
 .login-banner {
   width: 340px; margin: 0 0 12px; padding: 10px 14px;
