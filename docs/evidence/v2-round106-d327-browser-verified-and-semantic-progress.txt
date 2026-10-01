@@ -1,0 +1,45 @@
+NFViS v2 真机验证记录 round106 —— #327（R105-1）修复经 Browser Use 确认；语义「不留不可判定」推进到 24/0/1
+====================================================================
+日期：2026-10-01
+环境：nfvis-vm；本轮安装 **2.0.0~dev18**（含 #327）；**Web 验证全部走 Browser Use（IAB）实机操作**
+口径更新（用户指定）：涉及 Web 一律用 Browser Use 实机验证；涉及数据面可自行启动 VNF；**不留不可判定**。
+
+§1 决策 #327（修 R105-1）—— ✓ 修复经浏览器确认，并**更正我 round105 的误读**
+- **服务端 app.js 已含修复**（页面内直接取服务端文件核对）：镜像页删除按钮的创建为
+  `const btn = rowButton(wbtn({ type: 'button', class: 'danger small', text: '删除' }));`
+  带注释「super-user 级写入口（DELETE /images/{name}）——必须经 wbtn 带 data-write…（决策 #327 修 R105-1）」✓
+- **dev18 上 Browser Use 实测（operator 会话 webop2，`body.role-nonsuper`）**：
+  `#/compute/images` 的「删除」按钮 **存在 5 / 可见 0** ✓（进 DOM 但不渲染）
+- **运维动作页 / 内核页逐 id 取 computed display（同一次浏览器会话）**：
+  `ops-sw-pkg / ops-sw-add-btn / ops-sw-rollback-btn / ops-restore-btn / ops-zeroize-btn /
+   ops-formatdata-btn / ops-reboot-btn / ops-shutdown-btn / ops-vpprestart-btn / ops-backup-btn /
+   ops-techsupport-btn / knl-apply-btn / knl-rollback-btn` **全部 `display:none`**；
+  仅 O 级 `diag-ping-btn` / `ops-export-btn` 为 `block` ✓
+- ⚠️ **更正 round105 的两处读法**：
+  ① 当时「运维动作页软件版本卡控件、内核基线按钮对 operator 可见」——**误读**（我把 DOM 全域
+     `querySelectorAll('button')` 与卡片说明文字当成了可见控件；本轮用 computed display 逐 id 判定为 none）；
+  ② 当时「镜像页删除按钮 5 个可见」**在 dev17 上确实可见**——那是 #327 修的那个真漏点，但本轮初次复验
+     又见 5 个可见，原因是**该标签页早于升级打开、加载的是缓存的旧 app.js**；硬刷新后点数即 0。
+  ⇒ 教训（写进 §4）：**浏览器验证前必须确认页面加载的是当前构建**。
+- 结论：R105-1 的唯一真漏点（镜像页删除按钮）已修并**在浏览器里确认**；其余页面的写控件门禁本就生效。
+
+§2 语义套件「不留不可判定」（推进 22/0/3 → 24/0/1）
+- 按用户口径**自建现场**（`vs-l2s` + `fw-vm`（running）+ `ct-sem` 容器）后重跑：
+  **24 通过 / 0 失败 / 1 不可判定** —— **S9 虚拟机列表与 S9 容器列表两项已从「两侧都空」转为可判定并计入通过** ✓
+- 剩余 **1 项：S8 MAC 表 ↔ l2fib**，根因两条（套件报告原文）：
+  `候选交换机: vs-l2s ｜ 成员: ｜ 有 rx 计数的成员: （无）`，而 `CLI mac-table 条数=1；VPP l2fib 条数=1`
+  ① 该 VNF 的 vNIC **link down**（客户端未连接），故**没有能产生流量的成员**（无正向控制）；
+  ② **套件的成员枚举看不到 #326 的派生端口**（它显示「成员:（空）」）——即 #326 改了读视图后，
+     套件这一处口径未跟上。
+- 待办（下一轮，属「新功能后套件要更新」这条线）：把语义套件 S8 的成员枚举改为使用**包含派生条目的新端口读视图**
+  （#326 的 `source=config|vnf|container`），并在现场让 VNF 口**真的产生流量**（启动 guest 并让其发帧/收包），
+  使 S8 具备正向控制 → 目标 **0 不可判定**。
+
+§3 现场终态
+sw=0 / vmf=0 / ct=0 / 用户=["admin"] / 告警 0；版本 nfvis 2.0.0~dev18
+
+§4 方法学（本轮新增两条）
+1. **浏览器验证先确认加载的是当前构建**：升级后旧的标签页/缓存会把旧 JS 呈现成「修复无效」——
+   本轮因此先得出过错误结论；正确做法 = 升级后重开/硬刷新，并可直接 `fetch('/api/v1/ui/app.js')` 核对修复是否在**服务端当前产物**里。
+2. **可见性判定一律用 computed display（或 offsetParent）逐 id 取**，不得用
+   `querySelectorAll('button')` 的结果或 `innerText` 关键字命中来推断「可见」——那会把隐藏控件与说明文字算进来。
