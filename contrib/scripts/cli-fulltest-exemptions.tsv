@@ -58,6 +58,7 @@ set system login class <n> deny <path>	由其他套件或单测覆盖	同上（d
 # 涉及数据面下发的由真机「按交付步骤单独走查」或在 lifecycle 套件中按对象覆盖。
 set system kernel low-latency <bool>	配置语句未逐条执行	内核参数组（需真机 apply + 重启才生效），由 kernel baseline 单测与交付步骤覆盖
 set interfaces <ifname> ingress-policy <name>	配置语句未逐条执行	QoS 绑定语句；同族 set qos policies 已在阶段 2 执行，绑定效果由真机单独走查
+set interfaces <ifname> egress-policy <name>	配置语句未逐条执行	QoS 出向绑定（决策 #331）；与入向同族、复用同一 policer 路径，绑定效果由真机「小 cir 对照」走查
 set bonds <name> lacp disable	配置语句未逐条执行	同族 set bonds <name> lacp mode 已在阶段 2 执行；规则由 bonding 单测覆盖
 set virtual-switches <n> gateway ip <ip-prefix>	配置语句未逐条执行	BVI 网关；需 L2 交换机 + 地址，由真机按对象走查
 set virtual-switches <n> gateway vrf <name>	配置语句未逐条执行	同上（跨 VRF 网关）

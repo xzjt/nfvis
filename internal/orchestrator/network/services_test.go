@@ -20,6 +20,7 @@ type fakeSvc struct {
 	policers map[string]uint32
 	nextIdx  uint32
 	pins     []string
+	pouts    []string
 	closed   int
 	err      error
 }
@@ -89,6 +90,14 @@ func (f *fakeSvc) PolicerInput(swIfIndex uint32, name string, apply bool) error 
 		return f.err
 	}
 	f.pins = append(f.pins, name+":"+map[bool]string{true: "on", false: "off"}[apply])
+	return nil
+}
+
+func (f *fakeSvc) PolicerOutput(swIfIndex uint32, name string, apply bool) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.pouts = append(f.pouts, name+":"+map[bool]string{true: "on", false: "off"}[apply])
 	return nil
 }
 
@@ -171,6 +180,62 @@ func TestQosApplyBindUnbind(t *testing.T) {
 	}
 	if _, ok := f.policers["pol1"]; ok {
 		t.Fatalf("policer 应删除: %v", f.policers)
+	}
+}
+
+// TestQosEgressBindUnbind 决策 #331：出向绑定走 policer_output，与入向**并存且各自独立**；
+// 同接口同时绑两向、改一向不动另一向；DeleteQos 把两向都解绑后再删。
+func TestQosEgressBindUnbind(t *testing.T) {
+	f := newFakeSvc()
+	p := NewServicesProvider(f)
+	if err := p.ApplyQos(context.Background(), model.QosPolicy{Name: "pol1", Cir: 1000000}); err != nil {
+		t.Fatalf("ApplyQos: %v", err)
+	}
+	if err := p.ApplyQos(context.Background(), model.QosPolicy{Name: "pol2", Cir: 2000000}); err != nil {
+		t.Fatalf("ApplyQos: %v", err)
+	}
+	// 同一接口：入向 pol1、出向 pol2 —— 两者并存
+	if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{
+		Name: "ens192", IngressPolicy: "pol1", EgressPolicy: "pol2"}); err != nil {
+		t.Fatalf("ApplyInterface: %v", err)
+	}
+	if len(f.pins) != 1 || f.pins[0] != "pol1:on" {
+		t.Fatalf("入向应绑定 pol1: %v", f.pins)
+	}
+	if len(f.pouts) != 1 || f.pouts[0] != "pol2:on" {
+		t.Fatalf("出向应绑定 pol2: %v", f.pouts)
+	}
+	// 只改出向（pol2 → pol1）→ 不动入向；出向先解绑旧、再绑新
+	if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{
+		Name: "ens192", IngressPolicy: "pol1", EgressPolicy: "pol1"}); err != nil {
+		t.Fatalf("改出向: %v", err)
+	}
+	if len(f.pins) != 1 {
+		t.Fatalf("只改出向不应动入向: %v", f.pins)
+	}
+	if len(f.pouts) != 3 || f.pouts[1] != "pol2:off" || f.pouts[2] != "pol1:on" {
+		t.Fatalf("出向应先解绑 pol2 再绑 pol1: %v", f.pouts)
+	}
+	// 清掉入向、保留出向（出向已是 pol1，不应再有任何出向动作）
+	if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{
+		Name: "ens192", EgressPolicy: "pol1"}); err != nil {
+		t.Fatalf("清入向: %v", err)
+	}
+	if len(f.pins) != 2 || f.pins[1] != "pol1:off" {
+		t.Fatalf("入向应解绑: %v", f.pins)
+	}
+	if len(f.pouts) != 3 || f.pouts[2] != "pol1:on" {
+		t.Fatalf("出向已是 pol1，清入向不应再动出向: %v", f.pouts)
+	}
+	// DeleteQos 把 pol1 的两向绑定都解掉（当前只剩出向）
+	if err := p.DeleteQos(context.Background(), "pol1"); err != nil {
+		t.Fatalf("DeleteQos: %v", err)
+	}
+	if len(f.pouts) != 4 || f.pouts[3] != "pol1:off" {
+		t.Fatalf("DeleteQos 应解绑出向: %v", f.pouts)
+	}
+	if _, ok := f.policers["pol1"]; ok {
+		t.Fatalf("policer pol1 应删除: %v", f.policers)
 	}
 }
 

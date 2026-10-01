@@ -153,3 +153,20 @@ func (g *govppSvcClient) PolicerInput(swIfIndex uint32, name string, apply bool)
 	}
 	return nil
 }
+
+// PolicerOutput 出向 policer 绑定（决策 #331）：VPP `policer_output` 把 policer 装成
+// 接口的 output feature（与 ingress 的 policer_input 对称，同一 1R2C 策略可两向独立引用）。
+func (g *govppSvcClient) PolicerOutput(swIfIndex uint32, name string, apply bool) error {
+	reply := &policer.PolicerOutputReply{}
+	if err := g.ch.SendRequest(&policer.PolicerOutput{
+		Name:      name,
+		SwIfIndex: interface_types.InterfaceIndex(swIfIndex),
+		Apply:     apply,
+	}).ReceiveReply(reply); err != nil {
+		return err
+	}
+	if reply.Retval != 0 {
+		return fmt.Errorf("policer_output(if=%d,name=%s,apply=%v) retval=%d", swIfIndex, name, apply, reply.Retval)
+	}
+	return nil
+}

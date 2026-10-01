@@ -663,6 +663,7 @@ function renderIfaceDetail(iface, ifaces, params) {
     // 不在此处重复展示「启用」：`enabled` 是**运行态** admin 状态（详情端点与列表端点同一合并视图），
     // 已在头部「管理状态」呈现——原先那行标着「启用（配置）」会把运行态值说成配置值。
     ['入向限速策略', iface.ingress_policy],
+    ['出向限速策略', iface.egress_policy],
     ['SR-IOV VF 数（配置）', iface.sriov ? iface.sriov.vf_count : undefined],
     ['VF 占用', iface.sriov && Array.isArray(iface.sriov.vfs) && iface.sriov.vfs.length
       ? iface.sriov.vfs.map((v) => v.vf_id + (v.assigned_vnf ? '→' + v.assigned_vnf : '（空闲）')).join('；')
@@ -1751,6 +1752,8 @@ function cfgRenderForms(c) {
         (e) => cfgApplyIface(it.name, 'enabled', e.target.value === '' ? '' : e.target.value === 'true'), 'select');
       addField(sub, '入向限速策略', it.ingress_policy,
         (e) => cfgApplyIface(it.name, 'ingress_policy', e.target.value));
+      addField(sub, '出向限速策略', it.egress_policy,
+        (e) => cfgApplyIface(it.name, 'egress_policy', e.target.value));
       f.appendChild(sub);
     });
     box.appendChild(f);
@@ -3446,12 +3449,15 @@ function fmtTimeOpt(ts) {
 // 原始回显照原样展示以便排查）；日志取服务端尾部（与 show log system 同源）。
 // 日志不随页面轮询刷新（按需点按钮），避免无谓的重复拉取。
 
-// pingBody 组请求体：源地址留空则不传（服务端按目标自动选路）。
+// pingBody 组请求体：源地址留空则不传（服务端按目标自动选路）；IPv6 勾选则 ipv6=true
+// （决策 #330：ping 走 v6 平面、traceroute 走宿主侧 ICMPv6，与 CLI `ping/traceroute ipv6` 同源）。
 function pingBody(host, count) {
   const body = { host };
   if (count) body.count = count;
   const src = $('diag-source').value.trim();
   if (src) body.source = src;
+  const v6 = $('diag-ipv6');
+  if (v6 && v6.checked) body.ipv6 = true;
   return body;
 }
 
@@ -5002,6 +5008,10 @@ function renderQosDetail(rows, params) {
     ['承诺速率（CIR）', q.cir != null ? q.cir + ' bps' : undefined],
     ['突发（CBS）', q.cbs != null ? q.cbs + ' 字节' : undefined],
     ['绑定接口', list(q.bound_interfaces)],
+    // 决策 #331：逐条方向绑定（同一策略可被不同接口以不同方向引用）。
+    ['绑定（方向）', Array.isArray(q.bindings) && q.bindings.length
+      ? q.bindings.map((b) => b.interface + ':' + (b.direction === 'egress' ? 'out' : 'in')).join('；')
+      : undefined],
   ] : []);
 }
 

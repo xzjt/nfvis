@@ -15,75 +15,104 @@ import (
 )
 
 // DiagRuntime 诊断操作能力（编排器装配注入；nil = 命令报不可用）。
+// ipv6（决策 #330）：ping 显式走 v6 平面（vppctl ping ipv6），traceroute 走宿主侧 ICMPv6。
 type DiagRuntime interface {
-	Ping(ctx context.Context, host, source, vrf string, count int) (string, error)
-	Traceroute(ctx context.Context, host, vrf string) (string, error)
+	Ping(ctx context.Context, host, source, vrf string, count int, ipv6 bool) (string, error)
+	Traceroute(ctx context.Context, host, vrf string, ipv6 bool) (string, error)
 	ClearInterfaceStats(ctx context.Context, ifname string) error
 }
 
+// execPing：`ping [ipv6] <host> [source <ip>] [count <n>] [vrf <name>]`（决策 #330）。
+// `ipv6` 是无值选择器（与 VPP CLI `ping ipv6 <addr>` 同形；命令树里也可写在目标之后，
+// 故解析器按「单 token 扫描」容忍两种顺序，与命令树保持同源）；不给则照旧由 vppctl
+// 按地址字面判族（IPv6 字面也能走通），既有 IPv4 写法一字不变。
 func (x *cliExecutor) execPing(class string, t []string) string {
-	const usage = "%% 语法: ping <host> [source <ip>] [count <n>] [vrf <name>]\n"
-	if len(t) == 0 {
-		return usage
-	}
+	const usage = "%% 语法: ping [ipv6] <host> [source <ip>] [count <n>] [vrf <name>]\n"
 	if !x.allow(class, mustNode(schema.OperRoot(), "ping"), "ping") {
 		return "%% 无权限执行 ping\n"
 	}
 	if x.diag == nil {
 		return "%% ping 不可用（VPP 未接入）\n"
 	}
-	host := t[0]
-	var source, vrf string
+	var host, source, vrf string
 	count := 0
-	for i := 1; i < len(t); {
-		if i+1 >= len(t) {
-			return usage
-		}
-		key, val := t[i], t[i+1]
-		switch key {
+	ipv6 := false
+	for i := 0; i < len(t); {
+		switch t[i] {
+		case "ipv6": // 无值选择器
+			ipv6 = true
+			i++
 		case "source":
-			source = val
+			if i+1 >= len(t) {
+				return usage
+			}
+			source, i = t[i+1], i+2
 		case "count":
-			n, err := strconv.Atoi(val)
+			if i+1 >= len(t) {
+				return usage
+			}
+			n, err := strconv.Atoi(t[i+1])
 			if err != nil || n <= 0 {
 				return "%% count 必须为正整数\n"
 			}
-			count = n
+			count, i = n, i+2
 		case "vrf":
-			vrf = val
+			if i+1 >= len(t) {
+				return usage
+			}
+			vrf, i = t[i+1], i+2
 		default:
-			return usage
+			if host != "" {
+				return usage // 只允许一个目标
+			}
+			host, i = t[i], i+1
 		}
-		i += 2
 	}
-	out, err := x.diag.Ping(context.Background(), host, source, vrf, count)
+	if host == "" {
+		return usage
+	}
+	out, err := x.diag.Ping(context.Background(), host, source, vrf, count, ipv6)
 	if err != nil {
 		return appendErr(out, err)
 	}
 	return out
 }
 
+// execTraceroute：`traceroute [ipv6] <host> [vrf <name>]`（决策 #330）。
+// vrf 对 v4/v6 都明确报不支持（宿主侧 ICMP 无法经 VPP VRF 转发）；不静默降级成 v4。
 func (x *cliExecutor) execTraceroute(class string, t []string) string {
-	const usage = "%% 语法: traceroute <host> [vrf <name>]\n"
-	if len(t) == 0 {
-		return usage
-	}
+	const usage = "%% 语法: traceroute [ipv6] <host> [vrf <name>]\n"
 	if !x.allow(class, mustNode(schema.OperRoot(), "traceroute"), "traceroute") {
 		return "%% 无权限执行 traceroute\n"
 	}
 	if x.diag == nil {
 		return "%% traceroute 不可用（诊断未接入）\n"
 	}
-	host := t[0]
-	vrf := ""
-	if len(t) >= 3 && t[1] == "vrf" {
-		vrf = t[2]
-	} else if len(t) != 1 {
+	var host, vrf string
+	ipv6 := false
+	for i := 0; i < len(t); {
+		switch t[i] {
+		case "ipv6":
+			ipv6 = true
+			i++
+		case "vrf":
+			if i+1 >= len(t) {
+				return usage
+			}
+			vrf, i = t[i+1], i+2
+		default:
+			if host != "" {
+				return usage
+			}
+			host, i = t[i], i+1
+		}
+	}
+	if host == "" {
 		return usage
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
-	out, err := x.diag.Traceroute(ctx, host, vrf)
+	out, err := x.diag.Traceroute(ctx, host, vrf, ipv6)
 	if err != nil {
 		return appendErr(out, err)
 	}

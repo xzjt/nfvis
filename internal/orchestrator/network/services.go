@@ -22,6 +22,7 @@ type SvcClient interface {
 	SpanSet(from, to uint32, state string, isL2 bool) error
 	PolicerAddDel(name string, cirKbps uint32, cb uint64, add bool) (uint32, error)
 	PolicerInput(swIfIndex uint32, name string, apply bool) error
+	PolicerOutput(swIfIndex uint32, name string, apply bool) error // 出向 policer（决策 #331）
 	SpanDisable(from, to uint32) error
 	Close()
 }
@@ -33,22 +34,24 @@ type spanRec struct{ from, to uint32 }
 type ServicesProvider struct {
 	client func() (SvcClient, error)
 
-	mu      sync.Mutex
-	spans   map[string]spanRec // 会话名 → 源/目的 sw_if_index
-	policer map[string]bool    // 已创建的 policer 名
-	bound   map[string]string  // 接口名 → 绑定的 policer 名
+	mu          sync.Mutex
+	spans       map[string]spanRec // 会话名 → 源/目的 sw_if_index
+	policer     map[string]bool    // 已创建的 policer 名
+	bound       map[string]string  // 接口名 → 入向绑定的 policer 名
+	boundEgress map[string]string  // 接口名 → 出向绑定的 policer 名（决策 #331）
 }
 
 // NewServicesProvider 以固定客户端构造（测试）。
 func NewServicesProvider(c SvcClient) *ServicesProvider {
 	return &ServicesProvider{client: func() (SvcClient, error) { return c, nil },
-		spans: map[string]spanRec{}, policer: map[string]bool{}, bound: map[string]string{}}
+		spans: map[string]spanRec{}, policer: map[string]bool{},
+		bound: map[string]string{}, boundEgress: map[string]string{}}
 }
 
 // NewServicesProviderFunc 以客户端工厂构造（连接可重连）。
 func NewServicesProviderFunc(f func() (SvcClient, error)) *ServicesProvider {
 	return &ServicesProvider{client: f, spans: map[string]spanRec{},
-		policer: map[string]bool{}, bound: map[string]string{}}
+		policer: map[string]bool{}, bound: map[string]string{}, boundEgress: map[string]string{}}
 }
 
 // reset 清空进程内登记表（恢复收敛前调用，SPAN/policer/绑定全量重放）。
@@ -57,6 +60,7 @@ func (p *ServicesProvider) reset() {
 	p.spans = map[string]spanRec{}
 	p.policer = map[string]bool{}
 	p.bound = map[string]string{}
+	p.boundEgress = map[string]string{}
 	p.mu.Unlock()
 }
 
@@ -131,7 +135,7 @@ func (p *ServicesProvider) ApplyQos(ctx context.Context, q model.QosPolicy) erro
 	return nil
 }
 
-// DeleteQos 删除限速策略（先解绑再删）。
+// DeleteQos 删除限速策略（先解绑再删；入向与出向绑定都要解，决策 #331）。
 func (p *ServicesProvider) DeleteQos(ctx context.Context, name string) error {
 	c, err := p.client()
 	if err != nil {
@@ -139,21 +143,36 @@ func (p *ServicesProvider) DeleteQos(ctx context.Context, name string) error {
 	}
 	defer c.Close()
 	p.mu.Lock()
-	var boundIfaces []string
+	var boundIn, boundOut []string
 	for ifname, pol := range p.bound {
 		if pol == name {
-			boundIfaces = append(boundIfaces, ifname)
+			boundIn = append(boundIn, ifname)
 		}
 	}
-	for _, ifname := range boundIfaces {
+	for ifname, pol := range p.boundEgress {
+		if pol == name {
+			boundOut = append(boundOut, ifname)
+		}
+	}
+	for _, ifname := range boundIn {
 		delete(p.bound, ifname)
+	}
+	for _, ifname := range boundOut {
+		delete(p.boundEgress, ifname)
 	}
 	delete(p.policer, name)
 	p.mu.Unlock()
-	for _, ifname := range boundIfaces {
+	for _, ifname := range boundIn {
 		if idx, ok, err := c.SwInterfaceIndex(ifname); err == nil && ok {
 			if err := c.PolicerInput(idx, name, false); err != nil {
-				return fmt.Errorf("解绑接口 %s 的 policer %s: %w", ifname, name, err)
+				return fmt.Errorf("解绑接口 %s 的入向 policer %s: %w", ifname, name, err)
+			}
+		}
+	}
+	for _, ifname := range boundOut {
+		if idx, ok, err := c.SwInterfaceIndex(ifname); err == nil && ok {
+			if err := c.PolicerOutput(idx, name, false); err != nil {
+				return fmt.Errorf("解绑接口 %s 的出向 policer %s: %w", ifname, name, err)
 			}
 		}
 	}
@@ -163,7 +182,8 @@ func (p *ServicesProvider) DeleteQos(ctx context.Context, name string) error {
 	return nil
 }
 
-// ApplyInterface 下发接口层配置：MTU 与 ingress-policy（policer 入向绑定）。
+// ApplyInterface 下发接口层配置：MTU、admin 状态，与 ingress-policy/egress-policy
+// （policer 入向/出向绑定，决策 #331：两方向可并存、各自独立增删）。
 func (p *ServicesProvider) ApplyInterface(ctx context.Context, iface model.InterfaceConfig) error {
 	c, err := p.client()
 	if err != nil {
@@ -187,30 +207,58 @@ func (p *ServicesProvider) ApplyInterface(ctx context.Context, iface model.Inter
 	if err := c.SetState(idx, up); err != nil {
 		return fmt.Errorf("设置接口 %s 状态 %v: %w", iface.Name, up, err)
 	}
+	prevIn, prevOut := p.swapBindings(iface)
+	// 入向（policer_input）
+	if prevIn != iface.IngressPolicy {
+		if prevIn != "" {
+			if err := c.PolicerInput(idx, prevIn, false); err != nil {
+				return fmt.Errorf("解绑接口 %s 原入向策略 %s: %w", iface.Name, prevIn, err)
+			}
+		}
+		if iface.IngressPolicy != "" {
+			// policer 须先由 ApplyQos 创建（apply 顺序保证）
+			if err := c.PolicerInput(idx, iface.IngressPolicy, true); err != nil {
+				return fmt.Errorf("绑定接口 %s 入向策略 %s: %w", iface.Name, iface.IngressPolicy, err)
+			}
+		}
+	}
+	// 出向（policer_output，决策 #331）
+	if prevOut != iface.EgressPolicy {
+		if prevOut != "" {
+			if err := c.PolicerOutput(idx, prevOut, false); err != nil {
+				return fmt.Errorf("解绑接口 %s 原出向策略 %s: %w", iface.Name, prevOut, err)
+			}
+		}
+		if iface.EgressPolicy != "" {
+			if err := c.PolicerOutput(idx, iface.EgressPolicy, true); err != nil {
+				return fmt.Errorf("绑定接口 %s 出向策略 %s: %w", iface.Name, iface.EgressPolicy, err)
+			}
+		}
+	}
+	return nil
+}
+
+// swapBindings 更新进程内的入/出向绑定登记，返回**变更前**的两个绑定名（决策 #331）。
+// 入向与出向各自独立比较：同一接口上两者可并存，改一个不动另一个。
+func (p *ServicesProvider) swapBindings(iface model.InterfaceConfig) (prevIn, prevOut string) {
 	p.mu.Lock()
-	prev := p.bound[iface.Name]
-	if prev != iface.IngressPolicy {
+	defer p.mu.Unlock()
+	prevIn, prevOut = p.bound[iface.Name], p.boundEgress[iface.Name]
+	if prevIn != iface.IngressPolicy {
 		if iface.IngressPolicy != "" {
 			p.bound[iface.Name] = iface.IngressPolicy
 		} else {
 			delete(p.bound, iface.Name)
 		}
 	}
-	p.mu.Unlock()
-	if prev != iface.IngressPolicy {
-		if prev != "" {
-			if err := c.PolicerInput(idx, prev, false); err != nil {
-				return fmt.Errorf("解绑接口 %s 原策略 %s: %w", iface.Name, prev, err)
-			}
-		}
-		if iface.IngressPolicy != "" {
-			// policer 须先由 ApplyQos 创建（apply 顺序保证）
-			if err := c.PolicerInput(idx, iface.IngressPolicy, true); err != nil {
-				return fmt.Errorf("绑定接口 %s 策略 %s: %w", iface.Name, iface.IngressPolicy, err)
-			}
+	if prevOut != iface.EgressPolicy {
+		if iface.EgressPolicy != "" {
+			p.boundEgress[iface.Name] = iface.EgressPolicy
+		} else {
+			delete(p.boundEgress, iface.Name)
 		}
 	}
-	return nil
+	return prevIn, prevOut
 }
 
 func resolveIface(c SvcClient, ifname string) (uint32, error) {

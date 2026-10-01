@@ -169,6 +169,7 @@ func ConfigPathTree() *Node {
 					K("vf-count", "创建/回收 VF 数量", V("uint", "数量")),
 				),
 				K("ingress-policy", "入向限速策略绑定", P("<name>", "策略名", DynQos)),
+				K("egress-policy", "出向限速策略绑定", P("<name>", "策略名", DynQos)),
 			),
 		),
 		K("bonds", "链路聚合（bond 名可如物理口般引用）",

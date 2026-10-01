@@ -5,6 +5,32 @@ package schema
 // 权限按 §4 预置 class 矩阵：show 全 R；request 生命周期/镜像/接口 O；
 // request 破坏性动作（software/reboot/configuration/zeroize 等）与
 // clear/start shell 为 S。
+// pingOperArgs 返回 `ping` 的参数/选项子树（每次新建节点——节点在 finalize 时回填父指针，
+// 不可跨父共享）。
+//
+// 决策 #330：`ipv6` 是**可选的无值族选择器关键字**（`ping [ipv6] <host> …`，取 VPP CLI
+// `ping ipv6 <addr>` 的写法）。它建模为一个**叶子关键字**、与 `<host>` 平级且在其前——
+// 这样「参数组」枚举器（cli_table_cover_test 的 coverForms）恰好产出
+// `ping <host>` 与 `ping ipv6 <host>` 两族完整形态，不会把 `<host>` 与 v6 子参数错序拼接。
+func pingOperArgs() []*Node {
+	return []*Node{
+		Opt(K("ipv6", "IPv6（v6 平面；目标为 IPv6 地址）")),
+		PT("<host>", "string", "目标地址"),
+		Opt(K("source", "源地址", V("ip", "IP"))),
+		Opt(K("count", "次数", PT("<n>", "uint", "次数"))),
+		Opt(K("vrf", "经指定 VRF", P("<name>", "VRF 名", DynVrfs))),
+	}
+}
+
+// tracerouteOperArgs 返回 `traceroute` 的参数/选项子树（同 pingOperArgs 的建模约定）。
+func tracerouteOperArgs() []*Node {
+	return []*Node{
+		Opt(K("ipv6", "IPv6（宿主侧 ICMPv6；需 root/CAP_NET_RAW）")),
+		PT("<host>", "string", "目标地址"),
+		Opt(K("vrf", "经指定 VRF", P("<name>", "VRF 名", DynVrfs))),
+	}
+}
+
 func OperRoot() *Node {
 	root := K("", "root",
 		K("show", "显示系统状态与配置",
@@ -314,16 +340,8 @@ func OperRoot() *Node {
 		)),
 		Op(K("wizard", "初始化向导（CLI 端交互式：问答规划资源池与内核基线并提交；非 TTY 不可用）")),
 		Su(K("configure", "进入配置模式（仅 super-user）")),
-		Op(K("ping", "连通性测试",
-			PT("<host>", "string", "目标地址"),
-			Opt(K("source", "源地址", V("ip", "IP"))),
-			Opt(K("count", "次数", PT("<n>", "uint", "次数"))),
-			Opt(K("vrf", "经指定 VRF", P("<name>", "VRF 名", DynVrfs))),
-		)),
-		Op(K("traceroute", "路径跟踪",
-			PT("<host>", "string", "目标地址"),
-			Opt(K("vrf", "经指定 VRF", P("<name>", "VRF 名", DynVrfs))),
-		)),
+		Op(K("ping", "连通性测试", pingOperArgs()...)),
+		Op(K("traceroute", "路径跟踪", tracerouteOperArgs()...)),
 		Op(K("monitor", "实时监控",
 			K("interfaces", "实时刷新接口计数（Ctrl-C 退出）",
 				P("<ifname>", "接口名", DynVppIfnames),
