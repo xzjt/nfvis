@@ -615,6 +615,12 @@ func run() error {
 					for _, e := range netProvider.ReconcileResidue(ctx, cfg) {
 						log.Warn("残渣对账未收敛项", "err", e)
 					}
+					// 决策 #333：恢复收敛告警族的按来源廉价复核（不做全量重放）——来源对象
+					// 已不在 committed 配置即消解；RECOVERY_IFACE_MISSING 的口已出现在 VPP
+					// 即消解；其余（UNCONVERGED 等）保守保留，权威重放仍只在 VPP 重连。
+					for _, e := range netProvider.ReconcileRecoveryAlarms(ctx, cfg) {
+						log.Warn("恢复收敛告警复核", "err", e)
+					}
 				}
 				recoveryMu.Unlock()
 			}
