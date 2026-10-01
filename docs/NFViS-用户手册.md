@@ -1048,12 +1048,14 @@ nfvis# edit qos
 nfvis# set policies pol-1g cir 1000000000 cbs 1000000    # bps / bytes
 nfvis# top
 nfvis# edit interfaces
-nfvis# set ens192 ingress-policy pol-1g
+nfvis# set ens192 ingress-policy pol-1g    # 入向（VPP policer input）
+nfvis# set ens192 egress-policy  pol-1g    # 出向（VPP policer output；可与入向并存）
 nfvis# top
 nfvis# commit
 ```
 
-核对：`show qos policies`。
+核对：`show qos policies`（读视图逐条标注方向绑定：`接口:in` / `接口:out`）。
+两个方向各自独立——改/删一向不影响另一向；策略被任一方向引用时删除策略会被拒绝。
 
 ### 8.7 SPAN（端口镜像）
 
@@ -1378,12 +1380,22 @@ nfvis$ show users
 nfvis$ ping 192.168.1.1 count 4              # **仅 VPP 数据面**（经 VPP 路由/接口）
 nfvis$ ping 192.168.1.1 source 192.168.1.2   # source 须为 **VPP 接口**地址
 nfvis$ ping 10.0.0.1 vrf vs-wan
+nfvis$ ping ipv6 2001:db8::1 count 4         # IPv6：显式走 v6 平面（vppctl ping ipv6）
 nfvis$ traceroute 192.168.1.1                # 宿主侧 ICMP（不支持 vrf，会明确报错）
+nfvis$ traceroute ipv6 2001:db8::1           # 宿主侧 ICMPv6
 ```
+
+> **支持矩阵**：
+>
+> | 命令 | 平面 | v4 | v6 | vrf |
+> |---|---|---|---|---|
+> | `ping [ipv6] <host> …` | VPP 数据面 | ✅ | ✅ | ✅（VPP table-id） |
+> | `traceroute [ipv6] <host>` | 宿主侧 ICMP/ICMPv6 | ✅ | ✅ | ❌ 明确拒绝（改用 `ping … vrf`） |
 
 > **ping 未通即失败**：一个包都没发出去（VPP 无到达目标的接口/路由）或发出了但无应答
 > （`100% packet loss`）都返回**错误**，并点明平面归属——管理口属内核平面，VPP 看不到它，
-> `ping <管理口网关>` 必然失败，请改用宿主 `ping` 或 `traceroute`。
+> `ping <管理口网关>` 必然失败，请改用宿主 `ping` 或 `traceroute`。IPv4/IPv6 同一口径；
+> `traceroute` 的 vrf 对 v4/v6 都不支持并给出替代（不静默降级）。
 
 ### 10.3 实时监控与统计清零
 

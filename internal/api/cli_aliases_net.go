@@ -105,18 +105,15 @@ var statementAliasesNet = []aliasRule{
 	{pattern: []string{"qos", "policies", "**"},
 		apply: aliasQosPolicy},
 
-	// interfaces <if> ingress-policy <name>
+	// interfaces <if> ingress-policy <name> | egress-policy <name>（决策 #331：出向为同族语句）
 	{pattern: []string{"interfaces", "*", "ingress-policy", "*"},
-		apply: aliasIngressPolicy},
+		apply: ifacePolicyAlias("ingress_policy")},
 	{pattern: []string{"interfaces", "*", "ingress-policy"},
-		apply: func(tree map[string]any, t []string, _ bool) error {
-			ifc, err := elemByID(tree, "interfaces", t[1])
-			if err != nil {
-				return err
-			}
-			delete(ifc, "ingress_policy")
-			return nil
-		}},
+		apply: ifacePolicyClearAlias("ingress_policy")},
+	{pattern: []string{"interfaces", "*", "egress-policy", "*"},
+		apply: ifacePolicyAlias("egress_policy")},
+	{pattern: []string{"interfaces", "*", "egress-policy"},
+		apply: ifacePolicyClearAlias("egress_policy")},
 
 	// protocols lldp enable <bool> | advertisement-interval <n> | interface <if> enable <bool>
 	{pattern: []string{"protocols", "lldp", "enable", "*"},
@@ -930,23 +927,38 @@ func aliasQosPolicy(tree map[string]any, t []string, isSet bool) error {
 	return nil
 }
 
-// aliasIngressPolicy：interfaces <if> ingress-policy <name>。
-func aliasIngressPolicy(tree map[string]any, t []string, isSet bool) error {
-	var ifc map[string]any
-	if isSet {
-		ifc = ensureElem(tree, "interfaces", t[1])
-	} else {
-		var err error
-		if ifc, err = elemByID(tree, "interfaces", t[1]); err != nil {
-			return err
+// ifacePolicyAlias：`interfaces <if> <ingress-policy|egress-policy> <name>`（决策 #331：
+// 两个方向的绑定是同一族语句，仅模型字段不同，故用同一实现参数化字段名）。
+func ifacePolicyAlias(field string) func(map[string]any, []string, bool) error {
+	return func(tree map[string]any, t []string, isSet bool) error {
+		var ifc map[string]any
+		if isSet {
+			ifc = ensureElem(tree, "interfaces", t[1])
+		} else {
+			var err error
+			if ifc, err = elemByID(tree, "interfaces", t[1]); err != nil {
+				return err
+			}
 		}
-	}
-	if !isSet {
-		delete(ifc, "ingress_policy")
+		if !isSet {
+			delete(ifc, field)
+			return nil
+		}
+		ifc[field] = t[3]
 		return nil
 	}
-	ifc["ingress_policy"] = t[3]
-	return nil
+}
+
+// ifacePolicyClearAlias：`delete interfaces <if> <ingress-policy|egress-policy>`（不带策略名）。
+func ifacePolicyClearAlias(field string) func(map[string]any, []string, bool) error {
+	return func(tree map[string]any, t []string, _ bool) error {
+		ifc, err := elemByID(tree, "interfaces", t[1])
+		if err != nil {
+			return err
+		}
+		delete(ifc, field)
+		return nil
+	}
 }
 
 // aliasLldpEnable：protocols lldp enable <bool>。

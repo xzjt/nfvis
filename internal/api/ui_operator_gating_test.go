@@ -52,6 +52,7 @@ func TestUIConsoleOperatorGating(t *testing.T) {
 		"diag-host":      "ping 目标（连通性测试，REST 端点 O 级）",
 		"diag-count":     "ping 次数（O 级）",
 		"diag-source":    "ping 源地址（O 级）",
+		"diag-ipv6":      "IPv6 选择（连通性测试，O 级）",
 		"diag-ping-btn":  "执行 ping（O 级）",
 		"diag-trace-btn": "执行 traceroute（O 级）",
 		"ops-export-url": "core dump 清单导出地址（O 级）",

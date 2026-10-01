@@ -133,17 +133,50 @@ func (s *Server) handlePutNat(w http.ResponseWriter, r *http.Request) {
 
 // ---------- qos/policies ----------
 
+// qosBinding 一条方向绑定（决策 #331）：策略被哪个接口、以哪个方向引用。
+type qosBinding struct {
+	Interface string `json:"interface"`
+	Direction string `json:"direction"`
+}
+
+// qosPolicyViews 限速策略读视图：配置字段 + **绑定关系**（决策 #331）。
+// 绑定取自 committed 的接口声明（`interfaces[].ingress_policy|egress_policy`），
+// 两向一并呈现——单看策略对象看不出方向绑定，这正是出向落地后要补的读视图。
+// `bound_interfaces` 给去重后的接口名（兼容既有字段），`bindings` 逐条带方向。
+func qosPolicyViews(cfg model.Config) []map[string]any {
+	out := make([]map[string]any, 0, len(cfg.QosPolicies))
+	for _, q := range cfg.QosPolicies {
+		names := []string{}
+		bindings := []qosBinding{}
+		seen := map[string]bool{}
+		for _, i := range cfg.Interfaces {
+			for _, b := range []struct{ pol, dir string }{
+				{i.IngressPolicy, "ingress"}, {i.EgressPolicy, "egress"},
+			} {
+				if b.pol != q.Name {
+					continue
+				}
+				bindings = append(bindings, qosBinding{Interface: i.Name, Direction: b.dir})
+				if !seen[i.Name] {
+					seen[i.Name] = true
+					names = append(names, i.Name)
+				}
+			}
+		}
+		m := map[string]any{"name": q.Name, "cir": q.Cir, "cbs": q.Cbs,
+			"bound_interfaces": names, "bindings": bindings}
+		out = append(out, m)
+	}
+	return out
+}
+
 func (s *Server) handleGetQosPolicies(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.engine.Committed()
 	if err != nil {
 		mapEngineError(w, err)
 		return
 	}
-	out := cfg.QosPolicies
-	if out == nil {
-		out = []model.QosPolicy{}
-	}
-	writeJSON(w, http.StatusOK, paginate(r, out))
+	writeJSON(w, http.StatusOK, paginate(r, qosPolicyViews(cfg)))
 }
 
 func (s *Server) handlePostQosPolicy(w http.ResponseWriter, r *http.Request) {
@@ -174,7 +207,10 @@ func (s *Server) handleDeleteQosPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, i := range cfg.Interfaces {
 			if i.IngressPolicy == name {
-				return conflict("限速策略 %s 被接口 %s 绑定，先解除引用", name, i.Name)
+				return conflict("限速策略 %s 被接口 %s 的入向绑定，先解除引用", name, i.Name)
+			}
+			if i.EgressPolicy == name {
+				return conflict("限速策略 %s 被接口 %s 的出向绑定，先解除引用", name, i.Name)
 			}
 		}
 		cfg.QosPolicies = slices.Delete(cfg.QosPolicies, idx, idx+1)

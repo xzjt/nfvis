@@ -316,14 +316,20 @@ func emitLldpFamily(w *stmtWriter, node *schema.Node, val any, prefix, keyPath [
 
 // ---------- interfaces ----------
 //
-// ingress_policy 是字符串而语句树按「具名数组容器」建模（ingress-policy <name>），
-// 机械逆走按数组解容器失败即跳过；sriov 子对象机械可达（经委托再入本发射器后委托）。
+// ingress_policy / egress_policy 是字符串而语句树按「具名数组容器」建模
+// （ingress-policy <name> / egress-policy <name>，决策 #331 加出向），机械逆走按数组解容器
+// 失败即跳过；sriov 子对象机械可达（经委托再入本发射器后委托）。
 
 func emitInterfacesFamily(w *stmtWriter, node *schema.Node, val any, prefix, keyPath []string) error {
 	if kpOf(keyPath) == "interfaces" {
 		if m, ok := val.(map[string]any); ok {
-			if v, ok := m["ingress_policy"]; ok && v != "" {
-				w.add(toks(prefix, "ingress-policy", formatScalar(v)))
+			for _, p := range []struct{ key, kw string }{
+				{"ingress_policy", "ingress-policy"},
+				{"egress_policy", "egress-policy"},
+			} {
+				if v, ok := m[p.key]; ok && v != "" {
+					w.add(toks(prefix, p.kw, formatScalar(v)))
+				}
 			}
 		}
 	}

@@ -31,10 +31,12 @@ type fakeDiagRT struct {
 	pingCnt  int
 	pingVRF  string
 	pingSrc  string
+	pingIPv6 bool
 
-	trOut string
-	trErr error
-	trVRF string
+	trOut  string
+	trErr  error
+	trVRF  string
+	trIPv6 bool
 
 	cleared  []string
 	clearErr error
@@ -44,12 +46,12 @@ func (fakeCounters) RuntimeStats(context.Context) (state.RuntimeStats, bool) {
 	return state.RuntimeStats{}, false
 }
 
-func (f *fakeDiagRT) Ping(_ context.Context, host, source, vrf string, count int) (string, error) {
-	f.pingHost, f.pingSrc, f.pingVRF, f.pingCnt = host, source, vrf, count
+func (f *fakeDiagRT) Ping(_ context.Context, host, source, vrf string, count int, ipv6 bool) (string, error) {
+	f.pingHost, f.pingSrc, f.pingVRF, f.pingCnt, f.pingIPv6 = host, source, vrf, count, ipv6
 	return f.pingOut, f.pingErr
 }
-func (f *fakeDiagRT) Traceroute(_ context.Context, host, vrf string) (string, error) {
-	f.trVRF = vrf
+func (f *fakeDiagRT) Traceroute(_ context.Context, host, vrf string, ipv6 bool) (string, error) {
+	f.trVRF, f.trIPv6 = vrf, ipv6
 	return f.trOut, f.trErr
 }
 func (f *fakeDiagRT) ClearInterfaceStats(_ context.Context, ifname string) error {
@@ -68,6 +70,56 @@ func TestCLIPingExecution(t *testing.T) {
 	}
 	if d.pingHost != "10.0.0.1" || d.pingSrc != "192.168.1.1" || d.pingVRF != "vs-a" || d.pingCnt != 3 {
 		t.Fatalf("参数解析: %+v", d)
+	}
+}
+
+// TestCLIPingIPv6 决策 #330：`ping ipv6 <host>` 与 `ping <host> ipv6` 两种写法
+// 都在命令树上成立、执行器同源；族选择透传给运行时。`ping ipv6`（缺目标）报语法。
+func TestCLIPingIPv6(t *testing.T) {
+	x, _ := newCLIKit(t)
+	d := &fakeDiagRT{pingOut: "Statistics: 2 sent, 2 received, 0% packet loss\n"}
+	x.setRuntime(d, nil)
+
+	if out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "ping ipv6 2001:db8::1 count 2").Output; !strings.Contains(out, "2 received") {
+		t.Fatalf("ping ipv6 应执行: %q", out)
+	}
+	if d.pingHost != "2001:db8::1" || !d.pingIPv6 || d.pingCnt != 2 {
+		t.Fatalf("ping ipv6 参数: %+v", d)
+	}
+	// 族选择器写在目标之后（命令树同形）：同样识别为 v6
+	if out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "ping 2001:db8::1 ipv6").Output; !strings.Contains(out, "2 received") {
+		t.Fatalf("ping <host> ipv6 应执行: %q", out)
+	}
+	if !d.pingIPv6 {
+		t.Fatalf("目标之后的 ipv6 也应识别: %+v", d)
+	}
+	// 缺目标
+	if out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "ping ipv6").Output; !strings.Contains(out, "语法") {
+		t.Fatalf("ping ipv6 缺目标应报语法: %q", out)
+	}
+	// 不显式给族：IPv4 语义（ipv6=false）
+	d.pingIPv6 = true
+	x.Execute("admin", aaa.ClassSuperUser, "ssh", "ping 10.0.0.1")
+	if d.pingIPv6 {
+		t.Fatalf("未给 ipv6 不应置位: %+v", d)
+	}
+}
+
+// TestCLITracerouteIPv6 决策 #330：`traceroute ipv6 <host>` 透传族；vrf 报不支持（不降级）。
+func TestCLITracerouteIPv6(t *testing.T) {
+	x, _ := newCLIKit(t)
+	d := &fakeDiagRT{trOut: "traceroute to 2001:db8::1, 30 hops max, 宿主侧 ICMPv6\n 1  2001:db8::1  0.5 ms\n"}
+	x.setRuntime(d, nil)
+
+	out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "traceroute ipv6 2001:db8::1").Output
+	if !strings.Contains(out, "ICMPv6") || !d.trIPv6 {
+		t.Fatalf("traceroute ipv6 应透传 v6: out=%q %+v", out, d)
+	}
+	// vrf 明确报不支持（底座返回，执行器原样回显）
+	x.setRuntime(&fakeDiagRT{trErr: errors.New("traceroute 不支持 vrf \"vs-a\"")}, nil)
+	out = x.Execute("admin", aaa.ClassSuperUser, "ssh", "traceroute ipv6 2001:db8::1 vrf vs-a").Output
+	if !strings.Contains(out, "不支持 vrf") {
+		t.Fatalf("v6 vrf 应报不支持: %q", out)
 	}
 }
 

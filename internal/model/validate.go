@@ -397,6 +397,10 @@ func (v *validator) checkInterfaces(c Config) {
 		if i.IngressPolicy != "" && !v.qosNames[i.IngressPolicy] {
 			v.errf(p+".ingress_policy", "限速策略 %q 不存在", i.IngressPolicy)
 		}
+		// 出向绑定（决策 #331）：与入向同一份策略账本校验（删除被引用的策略即在此被拒）。
+		if i.EgressPolicy != "" && !v.qosNames[i.EgressPolicy] {
+			v.errf(p+".egress_policy", "限速策略 %q 不存在", i.EgressPolicy)
+		}
 	}
 }
 

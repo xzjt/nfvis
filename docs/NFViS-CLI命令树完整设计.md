@@ -276,8 +276,8 @@ request alarms clear [id <id> | all]                # 确认后清除已 resolve
 ```
 configure                                           # 进入配置模式（S/O；被 class 拒绝时提示）
 exit | quit                                         # 退出 CLI
-ping <host> [source <ip>] [count <n>] [vrf <name>]  # **仅 VPP 数据面**（vppctl ping；source 按接口地址反查接口）；**未通即报错**（0 发包 / 无应答）
-traceroute <host> [vrf <name>]                      # 宿主侧 ICMP；vrf 经 VPP 路径不支持（明确报错）
+ping [ipv6] <host> [source <ip>] [count <n>] [vrf <name>]   # **仅 VPP 数据面**（vppctl ping；source 按接口地址反查接口）；`ipv6` 显式走 v6 平面（vppctl ping ipv6）；**未通即报错**（0 发包 / 无应答）
+traceroute [ipv6] <host> [vrf <name>]               # 宿主侧 ICMP/ICMPv6（`ipv6` 走 ICMPv6）；vrf 对 v4/v6 都不支持（明确报错）
 monitor interfaces <ifname> [interval <sec>]        # 实时刷新计数，Ctrl-C 退出（CLI 端轮询）
 monitor vnf <name>                                  # 跟踪 VNF 状态/事件（CLI 端轮询，Ctrl-C 退出）
 wizard                                              # 初始化向导（CLI 端交互式：问答规划资源池+内核基线并提交；非 TTY 拒绝）
@@ -291,6 +291,15 @@ help [command]
 > 实现说明（M3-9，附录 A #36）：VPP 26.06 的 ping 插件仅提供 finished-event API、无发起接口，故 `ping` 经 `vppctl`（CLI socket）执行；`source <ip>` 经 VPP 接口地址反查接口名后作为 `vppctl ping source <iface>`。VPP 26.06 无 traceroute 插件/CLI/API，`traceroute` 由 nfvisd 宿主侧 raw ICMP 实现，`vrf` 参数在经 VPP 的路径上不支持并明确报错。`monitor interfaces` 服务端返回单次快照，nfvis-cli REPL 按 interval 本地轮询、Ctrl-C 退出。
 >
 > **`ping` 的平面口径（附录 A #89）**：`ping` **只覆盖 VPP 数据面**——目标要能经 VPP 的路由/接口到达。管理口属**内核平面**，VPP 看不到它，因此 `ping <管理口网关>` 必然失败。此前它把 vppctl 的原始输出（含 `Statistics: 0 sent, 0 received, 0% packet loss`）原样返回且**不报错**，而判定只看 `^%` 与退出码——「一个包都没发出去」被算作通过，`cli-fulltest.sh` 里那条 `ping` 长期是假绿。现规则：**未通即失败**——① **一个包都没发出去**（sent=0，VPP 无到达目标的接口/路由）② **发出了但无任何应答**（`100% packet loss`）**都返回错误**（给 `%` 与非零结果），并在输出里区分两种情况、点明平面归属与替代手段（管理口用宿主 `ping`，或 `traceroute`——它走宿主侧 ICMP）。理由：`ping` 是**连通性测试**，没通就是失败；否则 `ping <不可达>` 返回 0，调用方与判定侧都会以为通了（真机实测 VPP ping 自己的回环地址也是 `2 sent, 0 received`）。判不出汇总行时**不**判失败（格式一变就误报比漏报更糟）。
+>
+> **IPv6 诊断（附录 A #330）与支持矩阵**：`ping ipv6 <addr>` 经 `vppctl ping ipv6 <addr>`（族选择器写在目标之前，与 VPP CLI 同形；不写 `ipv6` 时照旧按地址字面判族，既有 IPv4 写法一字不变）。`traceroute ipv6 <addr>` 由 nfvisd 宿主侧 **raw ICMPv6**（`ip6:ipv6-icmp` 原生套接字，需 root/CAP_NET_RAW；与 v4 同构，差别只在协议族/常量）。**未通即失败对 v4/v6 同口径**，并区分「没发出去」与「发出了没应答」两种情况（v6 的提示语改按 v6 口径：v6 接口/路由/NDP 邻居）。`traceroute` 的 `vrf` 对 **v4 与 v6 都明确报不支持**（VPP 26.06 无 traceroute 能力、宿主侧 ICMP 无法经 VPP VRF 转发），**不静默降级成 v4**；要经 VRF 测 v4 连通性请用 `ping <host> vrf <name>`。
+>
+> | 命令 | 平面 | v4 | v6 | vrf | 说明 |
+> |---|---|---|---|---|---|
+> | `ping <host> …` | VPP 数据面 | ✅ | ✅（地址字面 / `ping ipv6`） | ✅（VPP table-id） | 未通即失败；管理口（内核平面）不可达 |
+> | `traceroute <host>` | 宿主侧 raw ICMP | ✅ | ✅（`traceroute ipv6`） | ❌ 明确拒绝 + 替代（`ping … vrf`） | 需 root/CAP_NET_RAW；可测管理口 |
+>
+> 三面同源：CLI（`?` 候选含 `ipv6`）、REST（`POST /diagnostics/ping|traceroute` 请求体 `ipv6` 布尔）、Web 诊断页（`diag-ipv6` 勾选，走既有 `data-write data-op` 门禁）。
 
 ---
 
@@ -460,7 +469,11 @@ set analyzer interface <ifname>
 
 [edit qos]
 set policies <name> cir <uint> cbs <uint>            # bps / bytes
-# 绑定：set interfaces <ifname> ingress-policy <name>
+# 绑定（决策 #331）：set interfaces <ifname> ingress-policy <name>   # VPP policer input
+#                    set interfaces <ifname> egress-policy  <name>   # VPP policer output
+# 两个方向是同一族语句、各自独立；同一接口可同时绑入向与出向（可为不同策略），
+# 删除任一绑定（delete interfaces <if> ingress-policy|egress-policy）不影响另一方向；
+# 策略被任一方向引用时删除策略即被拒绝（读视图逐条标注 接口:in / 接口:out）。
 ```
 
 ### 2.6 `resource-pools`

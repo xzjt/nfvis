@@ -241,8 +241,24 @@
   收敛不掉时以 `HUGEPAGE_POOL_SURPLUS`（warning，跨重启按内核实况重建、收敛后自动消警）如实呈现。契约先行（附录 A #329）、
   `AGENTS.md` 决策条数 230→231、`docs/v2待做.md` 二.6 标为已收口；命令全表/命令树设计/openapi/形状与 UI 门禁守护均同步。
   **真机验证（造「无主占用」现场：root 抬高 1G 池 nr_hugepages → show/reclaim/回读/Web 三面）待执行**。
-- 已定决策 231 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#329）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- **v2 线收口两则（决策 #330/#331，2026-10-01）**：**#330 IPv6 诊断 + 支持矩阵如实化**（清 `docs/v2待做.md` 三.8、三.4 部分）——
+  新增 `ping [ipv6] <host> [source|count|vrf]`（`vppctl ping ipv6`；命令树把 `ipv6` 建成可选无值叶子关键字、与 `<host>` 平级，
+  `?`/Tab 可补且「参数组」枚举器不错序；执行器容忍 `ipv6` 在目标前后两种顺序，既有 v4 写法不变）与
+  `traceroute [ipv6] <host> [vrf]`（**先确认 raw ICMPv6 可行**——nfvisd root 可开 `ip6:ipv6-icmp`，`trace6` 与 v4 同构后落地）；
+  **未通即失败对 v4/v6 同口径**（0 发包 / 0 应答都报错、判不出汇总行不判失败），提示语按 v6 口径；
+  `traceroute` 的 `vrf` 对 **v4/v6 都明确拒绝**（不静默降级）+ 给替代；命令树设计 §1.3 与用户手册给
+  「命令 × 平面 × v4/v6 × vrf」支持矩阵小表；三面同源（CLI `?` 候选 / REST `POST /diagnostics/ping|traceroute` 加 `ipv6` 布尔 /
+  Web 诊断页 `diag-ipv6` 勾选、走既有 O 级 `data-write data-op` 门禁）。**#331 QoS 出向限速绑定**（清 `docs/v2待做.md` 三.5）——
+  新增同族语句 `set/delete interfaces <ifname> egress-policy <name>`（与 `ingress-policy` 同一参数化别名实现，仅模型字段不同），
+  数据面**复用同一 VPP policer**、经 `PolicerOutput`（`policer_output`）装成 output feature，与入向 `PolicerInput` 对称；
+  `ApplyInterface` 入/出两向**各自独立**比较增删（`swapBindings`）、`DeleteQos` 先解两向再删；校验沿用同一策略账本、
+  删除被引用策略**入向/出向都拒**并分别指明方向；读视图能看出方向（`show qos policies`/`GET /qos/policies` 加 `bindings` +
+  `bound_interfaces`，接口详情显示「QoS: 入向 X / 出向 Y」）。两决策均**契约先行**（附录 A）、`AGENTS.md` 决策条数
+  231→233、`docs/v2待做.md` 三.5 收口 / 三.8 收口，命令全表/命令树设计/openapi/UI 门禁守护同步。
+  **真机验证（待执行）**：#330 走 v6 可达/不可达两路与既有 v4 回归；#331 用 VNF/流量造现场、同一策略做「出向小 cir 实验组
+  vs 不绑定对照组」，以 `vppctl` 计数/丢包为独立事实源判定限速生效（**不得只看命令成功**）。
+- 已定决策 233 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#331）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。
@@ -268,7 +284,7 @@
   以及 **1.1.11~1.1.14、1.1.16~1.1.18、1.1.21~1.1.24**——同一 merge 线上的内部验证构建、从未发布，
   故由 v1.1.10 跳到 v1.1.15、v1.1.15 跳到 v1.1.19、v1.1.20 跳到 v1.1.25；v1.1.26 紧接 v1.1.25、v1.1.27 紧接 v1.1.26、v1.1.28 紧接 v1.1.27、v1.1.29 紧接 v1.1.28、v1.1.30 紧接 v1.1.29、v1.1.31 紧接 v1.1.30、v1.1.32 紧接 v1.1.31、v1.1.33 紧接 v1.1.32，无跳号）。
   **用户文档**：`docs/NFViS-用户手册.md`（安装→使用全流程）、`docs/NFViS-CLI命令全表.md`
-  （256 条命令 + 逐条真机实测状态）；真机手动脚本：`contrib/scripts/cli-fulltest.sh`（问「命令能不能用」）、
+  （257 条命令 + 逐条真机实测状态）；真机手动脚本：`contrib/scripts/cli-fulltest.sh`（问「命令能不能用」）、
   `contrib/scripts/cli-semantic-check.sh`（问「结果对不对」）、`contrib/scripts/cli-pty-smoke.sh`（交互行为）。
 - `docs/NFViS-openapi.yaml` 与 `docs/NFViS-CLI命令树完整设计.md` 是**契约**。
 
@@ -293,7 +309,7 @@ grep -rn "待评审\|TBD\|TODO" docs/   # 不允许引入未决标记
 外还须在真机上跑这两项（CI 跑不了，二者互补）：
 
 ```bash
-bash contrib/scripts/cli-fulltest.sh        # 「命令能不能用」：256 条契约命令，见 %/%% 即失败
+bash contrib/scripts/cli-fulltest.sh        # 「命令能不能用」：257 条契约命令，见 %/%% 即失败
 bash contrib/scripts/cli-semantic-check.sh  # 「结果对不对」：与 VPP/内核/libvirt 独立事实源对照 + 扰动判别
 ```
 

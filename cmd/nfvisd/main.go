@@ -1222,12 +1222,12 @@ func (c *alarmController) Clear(id string, all bool) int { return c.store.Clear(
 // diagController 装配 api.DiagRuntime（M3-9）：ping/traceroute/clear 统计。
 type diagController struct{ diag *network.Diagnostics }
 
-func (c *diagController) Ping(ctx context.Context, host, source, vrf string, count int) (string, error) {
-	return c.diag.Ping(ctx, network.PingRequest{Host: host, Source: source, VRF: vrf, Count: count})
+func (c *diagController) Ping(ctx context.Context, host, source, vrf string, count int, ipv6 bool) (string, error) {
+	return c.diag.Ping(ctx, network.PingRequest{Host: host, Source: source, VRF: vrf, Count: count, IPv6: ipv6})
 }
 
-func (c *diagController) Traceroute(ctx context.Context, host, vrf string) (string, error) {
-	return c.diag.Traceroute(ctx, network.TracerouteRequest{Host: host, VRF: vrf})
+func (c *diagController) Traceroute(ctx context.Context, host, vrf string, ipv6 bool) (string, error) {
+	return c.diag.Traceroute(ctx, network.TracerouteRequest{Host: host, VRF: vrf, IPv6: ipv6})
 }
 
 func (c *diagController) ClearInterfaceStats(ctx context.Context, ifname string) error {

@@ -155,8 +155,8 @@ REST 侧现状（本轮复核）：
 | 命令（行数） | REST 落点 |
 |---|---|
 | `configure`（1） | 配置事务端点族（§2.4） |
-| `ping <host> [source <ip>] [count <n>] [vrf <name>]`（1） | `POST /diagnostics/ping`（**未通即 502**；round47 决策 #123） |
-| `traceroute <host> [vrf <name>]`（1） | `POST /diagnostics/traceroute`（round47 收口） |
+| `ping [ipv6] <host> [source <ip>] [count <n>] [vrf <name>]`（1） | `POST /diagnostics/ping`（**未通即 502**；round47 决策 #123；`ipv6` 布尔，决策 #330） |
+| `traceroute [ipv6] <host> [vrf <name>]`（1） | `POST /diagnostics/traceroute`（round47 收口；`ipv6` 布尔，决策 #330；`vrf` 明确拒绝） |
 | `clear interfaces statistics [<ifname>]`（1） | `POST /interfaces:clear-statistics`（204；round47 收口） |
 | `\| compare`（1） | `GET /configuration/diff`（差异数据；渲染形态见 §4） |
 | `\| compare rollback <n>`（1） | `GET /configuration/diff` + `POST /configuration/rollback/{n}` |

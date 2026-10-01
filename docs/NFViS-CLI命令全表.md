@@ -200,8 +200,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 |---|---|---|---|---|
 | `configure` | 进入配置模式 | S | 本地（会话模式切换） | ✅ |
 | `exit` / `quit` | 退出 CLI | R | 本地 | ✅ |
-| `ping <host> [source <ip>] [count <n>] [vrf <name>]` | 经 VPP L3 连通性测试 | O | `vppctl ping`（CLI socket） | ✅（`source` 须为 **VPP 接口**地址；`vrf` 经 VPP 路径）。round80 套件里三条 ping 用例均记 ⊘：该实例到 `192.168.155.1` 不通（「0 发包 / 100% 丢包即报失败」的**判定自洽**通过，决策 #89——0 发包不再被算作通过） |
-| `traceroute <host> [vrf <name>]` | 路径跟踪 | O | 宿主侧 raw ICMP | ✅（`vrf` **不支持**并明确报错，附录 A #36） |
+| `ping [ipv6] <host> [source <ip>] [count <n>] [vrf <name>]` | 经 VPP L3 连通性测试（`ipv6` 显式走 v6 平面，即 `vppctl ping ipv6`） | O | `vppctl ping`（CLI socket） | ✅（`source` 须为 **VPP 接口**地址；`vrf` 经 VPP 路径）。round80 套件里三条 ping 用例均记 ⊘：该实例到 `192.168.155.1` 不通（「0 发包 / 100% 丢包即报失败」的**判定自洽**通过，决策 #89——0 发包不再被算作通过）。IPv6（决策 #330）：4/6 同口径「未通即失败」，并区分「没发出去」与「发了没应答」 |
+| `traceroute [ipv6] <host> [vrf <name>]` | 路径跟踪（`ipv6` 走宿主侧 ICMPv6） | O | 宿主侧 raw ICMP/ICMPv6 | ✅（`vrf` 对 v4/v6 **都不支持**并明确报错、不静默降级，附录 A #36/#330） |
 | `monitor interfaces <ifname> [interval <sec>]` | 实时刷新计数（Ctrl-C 退出） | O | 服务端单次快照 + 前端轮询 | ✅（round80 实测不带 `interval` 的写法） |
 | `wizard` | 初始化向导：问答规划资源池+内核基线并提交（CLI 端交互） | O | 本地（CLI 端交互编排，无 REST 端点；Web 等价物是向导式页面） | ✅（非 TTY 明确拒绝） |
 | `monitor vnf <name>` | 跟踪 VNF 状态/事件（**真跟踪**，决策 #92） | O | 运行态 | ✅ |
@@ -293,7 +293,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set interfaces <ifname> disable` | 禁用接口 | VPP | ✅ |
 | `set interfaces <ifname> mtu <n>` | MTU | VPP | ✅ |
 | `set interfaces <ifname> sriov vf-count <n>` | 创建/回收 VF（FR-NET-004） | sysfs `sriov_numvfs` | ⊘ 无 PF/VF 时 commit 明确报错（不再静默无效，决策 #70） |
-| `set interfaces <ifname> ingress-policy <name>` | 入向限速策略绑定 | VPP policer | ✅ |
+| `set interfaces <ifname> ingress-policy <name>` | 入向限速策略绑定 | VPP policer input | ✅ |
+| `set interfaces <ifname> egress-policy <name>` | 出向限速策略绑定（决策 #331；VPP policer output，可与入向并存） | VPP policer output | ✅ |
 | `set bonds <name> members [<seq>] <ifname>` | 聚合成员 | VPP bonding | ✅ |
 | `set bonds <name> lacp mode <active\|passive> [interval <fast\|slow>]` | LACP 模式 | VPP bonding | ✅ |
 | `set bonds <name> lacp disable` | 关闭 LACP（转静态聚合） | VPP bonding | ✅ |

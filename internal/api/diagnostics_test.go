@@ -15,18 +15,22 @@ import (
 
 // fakeDiag 诊断运行时的测试替身。
 type fakeDiag struct {
-	pingOut string
-	pingErr error
-	trOut   string
-	trErr   error
-	cleared string
-	clrErr  error
+	pingOut  string
+	pingErr  error
+	pingIPv6 bool
+	trOut    string
+	trErr    error
+	trIPv6   bool
+	cleared  string
+	clrErr   error
 }
 
-func (f *fakeDiag) Ping(context.Context, string, string, string, int) (string, error) {
+func (f *fakeDiag) Ping(_ context.Context, _, _, _ string, _ int, ipv6 bool) (string, error) {
+	f.pingIPv6 = ipv6
 	return f.pingOut, f.pingErr
 }
-func (f *fakeDiag) Traceroute(context.Context, string, string) (string, error) {
+func (f *fakeDiag) Traceroute(_ context.Context, _, _ string, ipv6 bool) (string, error) {
+	f.trIPv6 = ipv6
 	return f.trOut, f.trErr
 }
 func (f *fakeDiag) ClearInterfaceStats(_ context.Context, ifname string) error {
@@ -102,6 +106,24 @@ func TestPingEndpoint(t *testing.T) {
 	status, _, _ = cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/diagnostics/ping", token, map[string]any{}, nil)
 	if status != http.StatusBadRequest {
 		t.Fatalf("缺 host 应 400，得到 %d", status)
+	}
+}
+
+// ping/traceroute 的 ipv6 标志（决策 #330）必须透传到运行时（不与 CLI 漂移）。
+func TestDiagIPv6FlagPassthrough(t *testing.T) {
+	d := &fakeDiag{pingOut: "Statistics: 1 sent, 1 received, 0% packet loss\n", trOut: "ok\n"}
+	ts := diagServer(t, d)
+	token := loginAdmin(t, ts)
+
+	status, _, body := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/diagnostics/ping", token,
+		map[string]any{"host": "2001:db8::1", "ipv6": true}, nil)
+	if status != http.StatusOK || !d.pingIPv6 {
+		t.Fatalf("ping ipv6 标志应透传: %d %s %+v", status, body, d)
+	}
+	status, _, body = cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/diagnostics/traceroute", token,
+		map[string]any{"host": "2001:db8::1", "ipv6": true}, nil)
+	if status != http.StatusOK || !d.trIPv6 {
+		t.Fatalf("traceroute ipv6 标志应透传: %d %s %+v", status, body, d)
 	}
 }
 

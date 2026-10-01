@@ -116,14 +116,15 @@ type APIConfig struct {
 	TLSSelfSigned   bool   `json:"tls_self_signed,omitempty"` // 声明使用自签证书（缺证书时由 nfvisd 生成）
 }
 
-// InterfaceConfig 物理网卡的配置视图（OpenAPI InterfaceUpdate，契约补全后含 name/sriov/ingress_policy）。
+// InterfaceConfig 物理网卡的配置视图（OpenAPI InterfaceUpdate，契约补全后含 name/sriov/ingress_policy/egress_policy）。
 type InterfaceConfig struct {
 	Name          string          `json:"name"`
 	Description   string          `json:"description,omitempty"`
 	MTU           int             `json:"mtu,omitempty"`
 	Enabled       *bool           `json:"enabled,omitempty"`
 	Sriov         *InterfaceSriov `json:"sriov,omitempty"`          // FR-NET-004
-	IngressPolicy string          `json:"ingress_policy,omitempty"` // QoS 绑定（命令树 §2.5）
+	IngressPolicy string          `json:"ingress_policy,omitempty"` // 入向 QoS 绑定（命令树 §2.5，决策 #331 前后并存）
+	EgressPolicy  string          `json:"egress_policy,omitempty"`  // 出向 QoS 绑定（决策 #331；VPP policer output）
 }
 
 // InterfaceSriov 物理口上的 SR-IOV VF 数量配置。

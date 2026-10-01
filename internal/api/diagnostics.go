@@ -70,11 +70,13 @@ type pingRequest struct {
 	Source string `json:"source"`
 	VRF    string `json:"vrf"`
 	Count  int    `json:"count"`
+	IPv6   bool   `json:"ipv6"` // 决策 #330：显式 IPv6（vppctl ping ipv6）
 }
 
 type tracerouteRequest struct {
 	Host string `json:"host"`
 	VRF  string `json:"vrf"`
+	IPv6 bool   `json:"ipv6"` // 决策 #330：宿主侧 ICMPv6
 }
 
 // handlePing POST /diagnostics/ping：经 VPP 数据面做连通性测试（与 CLI `ping` 同源）。
@@ -89,7 +91,7 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "需要 host", nil)
 		return
 	}
-	out, err := s.diag.Ping(r.Context(), req.Host, req.Source, req.VRF, req.Count)
+	out, err := s.diag.Ping(r.Context(), req.Host, req.Source, req.VRF, req.Count, req.IPv6)
 	if err != nil {
 		// 未通/不可用：把原始回显一并给出（客户端要能照着排查）
 		writeError(w, http.StatusBadGateway, "PING_FAILED", err.Error(), detailOf(out))
@@ -109,7 +111,7 @@ func (s *Server) handleTraceroute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "需要 host", nil)
 		return
 	}
-	out, err := s.diag.Traceroute(r.Context(), req.Host, req.VRF)
+	out, err := s.diag.Traceroute(r.Context(), req.Host, req.VRF, req.IPv6)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "TRACEROUTE_FAILED", err.Error(), detailOf(out))
 		return

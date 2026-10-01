@@ -69,10 +69,12 @@ type fakeProber struct {
 	hops   []Hop
 	err    error
 	maxTTL int
+	ipv6   bool
 }
 
-func (f *fakeProber) Trace(_ context.Context, _ string, maxTTL int, _ time.Duration) ([]Hop, error) {
+func (f *fakeProber) Trace(_ context.Context, _ string, ipv6 bool, maxTTL int, _ time.Duration) ([]Hop, error) {
 	f.maxTTL = maxTTL
+	f.ipv6 = ipv6
 	return f.hops, f.err
 }
 
@@ -99,6 +101,52 @@ func TestPingArgMapping(t *testing.T) {
 	}
 	if got := strings.Join(sh.calls[1], " "); got != "ping 10.0.0.9 source ens192" {
 		t.Fatalf("source 反查: %q", got)
+	}
+}
+
+// TestPingIPv6ArgMapping 决策 #330：显式 ipv6 让 vppctl 收到 `ping ipv6 <host>`
+// （族选择写在目标之前）；不显式给时照旧只写目标（vppctl 按字面判族，不改既有行为）。
+func TestPingIPv6ArgMapping(t *testing.T) {
+	sh := &fakeShell{out: "Statistics: 3 sent, 3 received, 0% packet loss\n"}
+	d := diagWith(newFakeDiag(), sh, nil)
+
+	if _, err := d.Ping(context.Background(), PingRequest{Host: "2001:db8::1", Count: 3, IPv6: true}); err != nil {
+		t.Fatalf("Ping(v6): %v", err)
+	}
+	if got, want := strings.Join(sh.calls[0], " "), "ping ipv6 2001:db8::1 repeat 3"; got != want {
+		t.Fatalf("v6 参数映射:\n got=%q\nwant=%q", got, want)
+	}
+	// 不显式给：保持原形（v6 字面也能被 vppctl 自动判族）
+	if _, err := d.Ping(context.Background(), PingRequest{Host: "2001:db8::1"}); err != nil {
+		t.Fatalf("Ping(auto): %v", err)
+	}
+	if got, want := strings.Join(sh.calls[1], " "), "ping 2001:db8::1"; got != want {
+		t.Fatalf("未显式族不应加 ipv6:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+// TestPingIPv6UnreachableNotes 决策 #330：v6 的「未通」按 IPv6 口径给下一步
+// （点明无路由/NDP 与宿主侧替代手段），不像 v4 那样只说「管理口」。
+func TestPingIPv6UnreachableNotes(t *testing.T) {
+	const noEgress = "Failed: no egress interface\n\nStatistics: 0 sent, 0 received, 0% packet loss\n"
+	out, err := diagWith(newFakeDiag(), &fakeShell{out: noEgress}, nil).
+		Ping(context.Background(), PingRequest{Host: "2001:db8::9", IPv6: true})
+	if err == nil {
+		t.Fatal("v6 0 发包必须报错")
+	}
+	for _, want := range []string{"IPv6", "v6 接口/路由", "ICMPv6"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("v6 未发出提示应含 %q:\n%s", want, out)
+		}
+	}
+	// 发出了但无应答：也要按 v6 口径报错并给下一步
+	uo, uerr := diagWith(newFakeDiag(), &fakeShell{out: "Statistics: 3 sent, 0 received, 100% packet loss\n"}, nil).
+		Ping(context.Background(), PingRequest{Host: "2001:db8::9", IPv6: true})
+	if uerr == nil || !strings.Contains(uerr.Error(), "无应答") {
+		t.Fatalf("v6 无应答必须报错: %v", uerr)
+	}
+	if !strings.Contains(uo, "IPv6") || !strings.Contains(uo, "ICMPv6") {
+		t.Errorf("v6 无应答提示应含 IPv6/ICMPv6:\n%s", uo)
 	}
 }
 
@@ -138,10 +186,13 @@ func TestIfaceByAddrIPv6(t *testing.T) {
 }
 
 func TestTracerouteRejectsVRF(t *testing.T) {
-	d := diagWith(newFakeDiag(), nil, &fakeProber{})
-	_, err := d.Traceroute(context.Background(), TracerouteRequest{Host: "10.0.0.1", VRF: "vs-a"})
-	if err == nil || !strings.Contains(err.Error(), "不支持 vrf") {
-		t.Fatalf("vrf 应明确报不支持: %v", err)
+	// vrf 在 v4/v6 两个族都明确报不支持（决策 #330：不静默降级成 v4）。
+	for _, ipv6 := range []bool{false, true} {
+		d := diagWith(newFakeDiag(), nil, &fakeProber{})
+		_, err := d.Traceroute(context.Background(), TracerouteRequest{Host: "10.0.0.1", VRF: "vs-a", IPv6: ipv6})
+		if err == nil || !strings.Contains(err.Error(), "不支持 vrf") {
+			t.Fatalf("vrf 应明确报不支持（ipv6=%v）: %v", ipv6, err)
+		}
 	}
 }
 
@@ -155,7 +206,7 @@ func TestTracerouteUsesProberAndFormats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Traceroute: %v", err)
 	}
-	for _, want := range []string{"traceroute to 10.0.0.1", "192.168.155.1", "1.200 ms", " 2  *", "10.0.0.1", "3.000 ms"} {
+	for _, want := range []string{"traceroute to 10.0.0.1", "192.168.155.1", "1.200 ms", " 2  *", "10.0.0.1", "3.000 ms", "宿主侧 ICMP\n"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("输出缺少 %q:\n%s", want, out)
 		}
@@ -163,8 +214,28 @@ func TestTracerouteUsesProberAndFormats(t *testing.T) {
 	if pr.maxTTL != 30 {
 		t.Fatalf("maxTTL 应为 30，实际 %d", pr.maxTTL)
 	}
+	if pr.ipv6 {
+		t.Fatalf("未指定族时不应走 v6: %+v", pr)
+	}
 	if _, err := diagWith(newFakeDiag(), nil, nil).Traceroute(context.Background(), TracerouteRequest{Host: "x"}); err == nil {
 		t.Fatal("未装配 prober 应报错")
+	}
+}
+
+// TestTracerouteIPv6 决策 #330：`traceroute ipv6` 把族选择透传给 prober，并在标题里
+// 标注 ICMPv6（不静默降级成 v4）。
+func TestTracerouteIPv6(t *testing.T) {
+	pr := &fakeProber{hops: []Hop{{TTL: 1, Addr: "2001:db8::1", RTT: time.Millisecond}}}
+	out, err := diagWith(newFakeDiag(), nil, pr).Traceroute(context.Background(),
+		TracerouteRequest{Host: "2001:db8::1", IPv6: true})
+	if err != nil {
+		t.Fatalf("Traceroute(v6): %v", err)
+	}
+	if !pr.ipv6 {
+		t.Fatalf("IPv6 应透传给 prober: %+v", pr)
+	}
+	if !strings.Contains(out, "宿主侧 ICMPv6") || !strings.Contains(out, "2001:db8::1") {
+		t.Fatalf("v6 标题应标注 ICMPv6: %q", out)
 	}
 }
 

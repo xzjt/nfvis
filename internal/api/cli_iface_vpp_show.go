@@ -278,7 +278,7 @@ func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) strin
 	}
 	switch sub {
 	case "", "detail":
-		if out, ok := x.ifaceRuntimeView(name, desc, declared, ifc.MTU); ok {
+		if out, ok := x.ifaceRuntimeView(name, desc, declared, ifc); ok {
 			return out
 		}
 		// 未声明且不在 VPP 运行态：先看内核侧（决策 #302）——未接管的物理口回内核事实
@@ -329,7 +329,7 @@ func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) strin
 //
 // MTU 列为**有效 MTU**（R86-7）：配置显式值优先、否则运行态（VPP L3 MTU）；两者都取不到
 // 显示 `-`，结构化输出不带 mtu 字段（「取不到就不给」，同 REST 读视图口径）。
-func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool, cfgMTU int) (string, bool) {
+func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool, ifc model.InterfaceConfig) (string, bool) {
 	names, invOK := x.vppIfaceNamesSafe()
 	inInv := invOK && ifaceInList(names, name)
 	if !declared && !inInv {
@@ -338,9 +338,18 @@ func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool, cfgMTU 
 	states, stErr := x.ifaceStates()
 	entry, admin, link, speed, driver, rx, tx := x.ifaceRuntimeRow(name, desc, states)
 	mtuCol := "-"
-	if mtu, ok := effectiveMTU(cfgMTU, states[name]); ok {
+	if mtu, ok := effectiveMTU(ifc.MTU, states[name]); ok {
 		mtuCol = fmt.Sprintf("%d", mtu)
 		entry["mtu"] = mtu
+	}
+	// QoS 方向绑定（决策 #331）：接口详情要能看出入向/出向各绑了哪条策略。
+	if declared {
+		if ifc.IngressPolicy != "" {
+			entry["ingress_policy"] = ifc.IngressPolicy
+		}
+		if ifc.EgressPolicy != "" {
+			entry["egress_policy"] = ifc.EgressPolicy
+		}
 	}
 	_, inStates := states[name]
 	var b strings.Builder
@@ -352,6 +361,16 @@ func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool, cfgMTU 
 	}
 	fmt.Fprintf(&b, ifaceRowFmt, "Interface", "Admin", "Link", "Speed", "MTU", "Driver", "RxPkts", "TxPkts", "Description")
 	fmt.Fprintf(&b, ifaceRowFmt, name, admin, link, speed, mtuCol, driver, rx, tx, desc)
+	if declared && (ifc.IngressPolicy != "" || ifc.EgressPolicy != "") {
+		in, out := ifc.IngressPolicy, ifc.EgressPolicy
+		if in == "" {
+			in = "-"
+		}
+		if out == "" {
+			out = "-"
+		}
+		fmt.Fprintf(&b, "QoS: 入向 %s / 出向 %s\n", in, out)
+	}
 	if stErr != nil {
 		b.WriteString("%% 注: VPP 运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
 	}
@@ -494,6 +513,8 @@ func (x *cliExecutor) execShowPortMirroring(args []string) string {
 	return RenderConfigJSON(tree) + "\n"
 }
 
+// execShowQos：show qos policies —— 策略 + **方向绑定**（决策 #331：单看策略对象看不出
+// 入向/出向被谁引用，故加「绑定」列：接口:in / 接口:out，与 REST 读视图同源）。
 func (x *cliExecutor) execShowQos(args []string) string {
 	if len(args) >= 1 && args[0] != "policies" {
 		return fmt.Sprintf("%% 无效命令: show qos %s（可用：show qos policies）\n", strings.Join(args, " "))
@@ -505,12 +526,31 @@ func (x *cliExecutor) execShowQos(args []string) string {
 	if len(cfg.QosPolicies) == 0 {
 		return "（无 QoS 限速策略）\n"
 	}
-	items := make([]any, 0, len(cfg.QosPolicies))
+	views := qosPolicyViews(cfg)
 	var b strings.Builder
-	fmt.Fprintf(&b, "%-14s %-12s %s\n", "Policy", "CIR(bps)", "CBS(bytes)")
-	for _, p := range cfg.QosPolicies {
-		items = append(items, anyToTree(p))
-		fmt.Fprintf(&b, "%-14s %-12d %d\n", p.Name, p.Cir, p.Cbs)
+	fmt.Fprintf(&b, "%-14s %-12s %-12s %s\n", "Policy", "CIR(bps)", "CBS(bytes)", "绑定方向（接口:in|out）")
+	for _, v := range views {
+		name, _ := v["name"].(string)
+		cir, _ := v["cir"].(int)
+		cbs, _ := v["cbs"].(int)
+		binds, _ := v["bindings"].([]qosBinding)
+		var parts []string
+		for _, bd := range binds {
+			dir := "in"
+			if bd.Direction == "egress" {
+				dir = "out"
+			}
+			parts = append(parts, bd.Interface+":"+dir)
+		}
+		col := "-"
+		if len(parts) > 0 {
+			col = strings.Join(parts, ",")
+		}
+		fmt.Fprintf(&b, "%-14s %-12d %-12d %s\n", name, cir, cbs, col)
+	}
+	items := make([]any, 0, len(views))
+	for _, v := range views {
+		items = append(items, anyToTree(v))
 	}
 	x.structured = map[string]any{"qos_policies": items}
 	return b.String()
