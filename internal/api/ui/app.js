@@ -4555,7 +4555,9 @@ function renderImages(imgs) {
     const detBtn = rowButton(el('button', { type: 'button', class: 'ghost small', text: '详情' }));
     detBtn.addEventListener('click', () => goDetail('#/compute/images/' + encodeURIComponent(i.name)));
     cell.appendChild(detBtn);
-    const btn = rowButton(el('button', { type: 'button', class: 'danger small', text: '删除' }));
+    // 删除镜像 = super-user 级写入口（DELETE /images/{name}）——**必须经 wbtn 带 data-write**，
+    // 否则 read-only/operator 仍会看到它（决策 #327 修 R105-1：动态写入口漏打门禁标记）。
+    const btn = rowButton(wbtn({ type: 'button', class: 'danger small', text: '删除' }));
     btn.addEventListener('click', () => imgDelete(i.name, i.ref_count));
     cell.appendChild(btn);
     tr.appendChild(cell);

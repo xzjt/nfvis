@@ -215,8 +215,21 @@
   派生条目只读，`delete … ports` 对派生条目**拒绝并指向 VNF/容器侧**（顺带修掉「删不存在序号会凭空建空壳端口」）。
   两决策均**契约先行**（附录 A）、`AGENTS.md` 决策条数 226→228，`docs/v2待做.md` 二.4 与 二.8 标为已收口。
   真机验证步骤见交付说明（待执行）。
-- 已定决策 228 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#326）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- **v2 线收口（决策 #327，2026-10-01）**：**运维动作页写控件按 class 收敛（修 round105 登记的 R105-1）**——
+  round105 用 Browser Use 以 operator 登录看到运维动作页仍渲染 super-user 级写入口（软件版本卡、内核基线卡）。
+  本轮**先用无头 Chrome 加载真实 `index.html`+`style.css`（`body.role-nonsuper`）取 `getComputedStyle` 复核**：
+  #324 的既有机制**有效**（Su 控件 computed `display:none`，仅 `data-op` 的 O 级入口可见），静态控件的 class
+  本就合规；**真正漏点是动态写控件未经 `wbtn` 打 `data-write`**——整份 `app.js` 排查抓到唯一一处：**镜像列表的
+  「删除」**（`DELETE /images/{name}`，super-user 级）用 `el('button')` 生成，read-only/operator 都看得见、点下去
+  403。修法走**既有机制不新造第二套**：该处改 `wbtn`；`data-op` 例外 7 条**逐条复核确为 O 级**（诊断 ping/traceroute、
+  core dump 清单导出，端点均 `ClassOperator`）。**守护**：新增 `internal/api/ui_ops_writes_gating_test.go`——把运维
+  动作页家族（`#/ops/actions`、`#/system/kernel`、`#/system/tls`、`#/ops/capture`、`#/ops/diagnostics`，39 个控件）
+  逐条列成 `id→期望 class（hide/op/read）`清单，并**从 `server.go` 现读「控件触发端点→服务端 class」交叉核对**
+  （新增/删除控件或标错 class 未同步清单即失败）；另一条断言**动态写入口必须经 `wbtn`**。**说明性文字与控件分清**
+  （判据是「有没有可点的写控件」，卡片解释文字对 operator 保留可见，本轮未发现有诱导点击的文案）。契约先行（附录 A）、
+  `AGENTS.md` 决策条数 228→229、`docs/v2待做.md` R105-1 标为已收口；**真机验证（Browser Use，operator）待执行**。
+- 已定决策 229 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#327）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。
