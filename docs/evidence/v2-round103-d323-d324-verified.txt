@@ -1,0 +1,34 @@
+NFViS v2 真机验证记录 round103 —— 决策 #323（套件自清场）+ #324（operator 粒度）验收通过
+====================================================================
+日期：2026-10-01
+环境：nfvis-vm（SSH key）；本轮构建 2.0.0~dev16（v2 线，PR #251 合并后）；升级前 2.0.0~dev15
+源码：git archive v2（4699c91）；SOURCE_DATE_EPOCH=1790824319
+
+§1 决策 #323 套件收尾自清场（✓ 通过）
+- **连跑两遍 `cli-fulltest`（两遍之间不手工清场）**：
+  - 第 1 遍：**210 通过 / 0 失败 / 13 预期报错**（失败项 0）
+  - 第 2 遍：**210 通过 / 0 失败 / 13 预期报错**（失败项 0）
+  ⇒ **两遍数字逐项一致**，未出现「上轮残渣致级联假红/数字变少」✓
+- **收尾后现场**：`virtual-switches=[]`、`acls=[]`、`vmf=0`、`ct=0` ✓
+  （round102c 实测的残留 `vs-l3` / `acl-test` 已不再出现——套件现在按「入口快照 + 特征名 + 打标字段」三重口径
+  清自己的对象，通用名如 `bond0` / `alpine:3.20` 只在本轮创建时才删）
+
+§2 决策 #324 operator 粒度（✓ 通过，服务端权威 class 生效）
+- **operator**：`GET /cli/candidates?tokens=request` 的子候选 = `alarms, container-functions, images,
+  interfaces, sriov, system, virtual-machine-functions`
+  ⇒ **`software` / `kernel` / `configuration` / `reboot` / `storage` / `ssh` 等 super-user-only 入口不再出现** ✓
+  （`system` 保留是正确口径：其下 `tech-support`/`ntp`/`api`/`password` 属 operator 可用）
+- **纵深防御仍在**：operator 直发 `request system reboot` → `%% 无权限执行该命令` ✓
+  （候选不给 ≠ 执行不查；两处都在）
+- **read-only**：顶层候选只剩 `exit, help, quit, show` ✓
+- **super-user**：未受影响（§1 的 fulltest 210 项即含大量 super 路径）
+- 临时用户 netop/ro103 建/用/删（末态用户数回到基线）
+- **未做项（如实登记）**：Web 的 `role-nonsuper` 视觉验收（本轮未开浏览器）——数据面判定与候选过滤已由 REST 端到端验过，
+  控制台侧有 `ui_operator_gating_test.go` 的机制守护（三件套 + `data-op` 期望集合）；视觉一项留待下次浏览器会话补。
+
+§3 其他
+- cli-pty-smoke：**全部通过**（10/10）
+- 现场终态：sw/vmf/ct/acl 全 0、用户数回基线、告警空；版本 nfvis 2.0.0~dev16
+
+§4 结论
+#323 与 #324 的验收条件均达成（前者「两遍一致且无残留」、后者「非 super 候选不含超权限入口、直发仍拒」）。
