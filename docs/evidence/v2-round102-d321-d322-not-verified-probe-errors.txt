@@ -1,0 +1,41 @@
+NFViS v2 真机验证记录 round102 —— 决策 #321/#322：**两条新行为均未验成**（探针错误），套件无回归
+====================================================================
+日期：2026-10-01
+环境：nfvis-vm（SSH key）；本轮构建 2.0.0~dev15（v2 线，PR #249 合并后）；升级前 2.0.0~dev14
+源码：git archive v2（86a79bf）；SOURCE_DATE_EPOCH=1790816791
+⚠️ 本轮的**结论只有一半**：套件确认无回归，但两条新行为的真机证据**没有拿到**——原因是我的探针写错了，
+  不是产品失败。**不以「没有出现异常」当作通过**。
+
+§1 ❌ #322（恢复收敛顺序）未验成 —— 探针错误
+- 我的造现场两步**都返回 400**：`POST /virtual-switches {"type":"l3","l3_interfaces":[{"interface":"ens192","addresses":["198.51.100.1/24"]}]}`
+  与随后的建 VNF —— 即**场景根本没建起来**（L3 交换机的 REST 载荷形状我写错了，字段名/结构与契约不符）。
+- 因此后续「No such FIB/VRF 出现 0 次」「vppctl 表存在」「无未收敛告警」**都不构成证据**（没有对象可收敛）。
+- 正确的复验口径（下一步照此做）：先用 `?`/契约确认 L3 交换机与 l3-interface 的**正确 REST/CLI 形状**
+  （CLI 路径是 `set virtual-switches <n> l3-interface <if> address <cidr>`），再建 VNF 并把 vNIC 声明到该交换机，
+  然后 `request vpp restart` + `systemctl restart nfvis`，断言**首次收敛**即无 `No such FIB / VRF`，
+  并以 `vppctl show interface address`（该 vNIC 在目标表内）与 `vppctl show ip table`（表存在）作为独立事实源。
+
+§2 ❌ #321（残渣对账扩展到 ACL/BD）未验成 —— 探针语法无效
+- 我用 `vppctl create bridge-domain 777` + `vppctl set bridge-domain 777 tag oob-round102` 造带外对象，
+  重启 nfvis 后**未出现 `BRIDGE_DOMAIN_LEFTOVER`**。两种可能：① 该 vppctl tag 语法在本版本无效（BD 实际无名）——
+  而决策 #321 已把「**无名 BD 不参与对账**」登记为边界，于是它本就不会被报；② 我的检查时机/口径有误。
+- 无论哪种，**本轮没有拿到该码的真机证据**，不能计为验证通过。
+- 下一步照此复验：先确认本版本给 BD 打 tag 的正确 vppctl 语法（或改用 ACL 带外对象：
+  `vppctl acl_add_replace` 建一个带 tag 的 ACL），重启 nfvis 后断言出现对应 `*_LEFTOVER`，
+  清除后 15s 巡检内自动消解；三面（`show alarms` / `GET /alarms` / Web 告警卡）一致。
+- 另：决策 #321 已如实登记的边界保持不变——「真正补偿失败留 ACL/BD 残渣」在真机**无法稳定构造**
+  （产品没有注入 undo 失败的入口），该项的覆盖 = 单元测试（`residue_test.go` 全覆盖）+ 带外对象路径（本轮未成）。
+
+§3 套件（2.0.0~dev15）——无回归
+- cli-fulltest：**210 通过 / 0 失败 / 13 预期报错**（= round101 基线）
+- cli-semantic-check：**24 / 0 / 1**（= 新基线）
+- cli-pty-smoke：**10 / 10**
+⇒ #321/#322 的实现没有破坏既有契约面与语义面。
+
+§4 现场终态
+sw=0 / vmf=0 / 告警已清 / 带外 BD 已删；版本 nfvis 2.0.0~dev15
+
+§5 方法学注记（本轮教训）
+本轮的两次「未验成」都是**探针自伤**：一次 REST 载荷形状错、一次 vppctl 语法无效——
+与 round95 的「tail 截断把真错误藏掉」同族。教训固化：**造现场失败要显式判失败并停下**，
+不得把「随后没看到异常」当成通过（本轮已按此处理）。
