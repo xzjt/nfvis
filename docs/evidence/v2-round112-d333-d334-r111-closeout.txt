@@ -1,0 +1,46 @@
+NFViS v2 真机验证记录 round112 —— 决策 #333/#334（R111-1/R111-2 收口）
+====================================================================
+日期：2026-10-01；环境：nfvis-vm，2.0.0~dev21 → **2.0.0~dev22**；
+代码：PR #259（squash 合入 v2，CI 双跑全绿）；实现由子智能体执行、主会话审报告+复核代码。
+
+§1 决策 #333（修 R111-1）：恢复收敛告警族随事实消解 —— 真机验证 ✓
+- 实现：`internal/orchestrator/network/recovery_reconcile.go`（`ReconcileRecoveryAlarms`，
+  15s 巡检与 ReconcileResidue 同块调用，共用 recoveryMu）+ `services.go` 的
+  `InterfaceExists`（复用既有 `SwInterfaceIndex`，dump 级代价）+ main.go 巡检接线；
+  单测 8 用例；make check RC=0。不做周期性全量重放、绝不 Raise、UNCONVERGED 保守保留。
+- 告警现场造法（比 round111b 的认知更精确）：`interfaces bvi0` 的声明**只能在 bvi0 存在于 VPP 时
+  提交**（口不在时 commit 被「底座下发失败（已补偿）」正确拒绝，candidate 不收）——故现场序列为
+  fixture up（网关把 bvi0 带进 VPP）→ 声明（rev 813/819 成功）→ fixture down（口消失、声明残留）→
+  `systemctl restart nfvis` → 启动收敛触发 RECOVERY_IFACE_MISSING（error，active）✓。
+- **持久性（防误清）**：事实未变（声明在 + 口仍缺）时，一个完整 15s 巡检周期后告警**仍在**（计数=1）✓
+  ——复核只按事实消解，不把「还没重估到」当「已复原」。
+- **方向②（删声明→消解）**：`delete interfaces bvi0`（rev 817）→ **不重启**，约 22s（一个巡检周期）后
+  `show alarms active` =「（无 active 告警）」✓。修复前（round111b 实测）该场景告警永久挂起。
+- **方向①（口出现在 VPP→消解）**：告警在场（rev 819 后重启触发）→ fixture up 把 bvi0 带进 VPP
+  （接口 up、rx 增长）→ **不重启**，约 22s 后 =「（无 active 告警）」✓。
+- 终态：fixture down + 删声明（rev 827）→ 无 active 告警、配置无 bvi0/sem-* 残留、版本 2.0.0~dev22。
+- 原始输出：nfvis-vm:/tmp/round112-*.log（fixture up/down 各次）。
+
+§2 决策 #334（修 R111-2）：lifecycle L3-2 邻居表按域取 —— 真机验证 ✓（dev21 上）
+- **根因更正（真机实测，推翻 round111b 登记）**：`vppctl show ip neighbors` **无参＝v4+v6 全表混排**
+  （VPP 26.06 无 vrf/table 过滤参数，`unknown input`），原登记「无参只给表 0」系误读；真正卡住 L3-2 的是
+  邻居行的接口列锚在**域锚点口（bvi0）**而非 vhost，且起机窗口内条目一度消失（VPP 主动 ARP 通后重建）。
+- 修复（contrib/scripts/cli-lifecycle-check.sh 仅此一文件）：`vpp_domain_neighbors <tid> <vhost>`——
+  行匹配＝对端口==vhost 或对端口地址行 table-id==域表（行解析从行尾锚定）；table-id 全动态推导
+  （L3 交换机→同名表按名反查；L2+BVI 网关→`vr-<交换机名>` 表（产品 GatewayVRFName，实测
+  `table_id:1445873 vr-sem-vs`）；退 vhost 地址行 table-id；空=表 0 口径）；ping 源 vhost 带地址从
+  vhost 发、否则退对端所在口（如 BVI）并如实说明；取不到仍如实跳过。
+- 真机复跑（fixture 现场）：**L3-2 转可判定并通过**——`ping 192.168.99.2 source bvi0` →
+  `5 sent, 5 received, 0% packet loss`；全套件 **20/0/3**（基线 19~22/0/3~4，无新失败；
+  3 跳过＝L1-3 缺第二自由口、L3-3/L2-2 无 NAT 现场）。
+- 如实登记：① 邻居条目在 guest 起机窗口有瞬时消失（套件若撞上仍会如实跳过，本轮未撞上）；
+  ② 语义套件 `cli-semantic-check.sh` 存在**同型行解析**（未按域取的同款写法），本轮未动——
+  如需同口径加固另行登记。
+
+§3 过程中的失败尝试（如实登记）
+- 两次「口不在 VPP 时声明 `interfaces bvi0`」的提交被产品正确拒绝（底座下发失败已补偿、candidate 不收）——
+  非缺陷，恰证明「声明必须有口在场」的校验有效；已据此调整造现场序列。
+
+§4 现场终态
+- 版本 2.0.0~dev22；配置无 bvi0/sem-*/pol-* 残留（grep=0）；**无 active 告警**；最终 rev 827。
+- 本轮提交：PR #259（决策 #333/#334）；决策条数 234→236（守护核对一致）。
