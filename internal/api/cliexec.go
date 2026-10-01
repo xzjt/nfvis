@@ -1049,7 +1049,7 @@ func (x *cliExecutor) cfgCommit(user, source string, s *cliSession, args []strin
 	if err != nil {
 		var ve *config.ValidationError
 		if errors.As(err, &ve) {
-			return "校验失败（candidate 保留）:\n" + formatVErrors(ve.Errors) + "\n"
+			return "校验失败（candidate 保留在本会话内；会话/进程结束即释放，show configuration candidate 可查看）:\n" + formatVErrors(ve.Errors) + "\n"
 		}
 		return "%% " + err.Error() + "\n"
 	}

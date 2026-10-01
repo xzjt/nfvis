@@ -300,7 +300,7 @@ func TestOutputFailedJudgement(t *testing.T) {
 		{"双 % 错误", "%% 配置不完整，缺少取值: hostname\n", true},
 		{"单 % 错误（真实服务端形态）", "% 无效命令: show system no-such-subcommand-xyz（可用：uptime|cpu）\n", true},
 		{"独行 %", "%\n", true},
-		{"校验失败", "校验失败（candidate 保留）:\n  - x\n", true},
+		{"校验失败", "校验失败（candidate 保留在本会话内；会话/进程结束即释放，show configuration candidate 可查看）:\n  - x\n", true},
 		{"多行里有一行是错误", "NFViS 1.0.0\n% 无效命令: show vpp bogus\n", true},
 		{"空操作提示不算失败", "警告: 语句未产生配置变更（值未变化或尚未映射到模型），已继续：set x y\n", false},
 		{"普通输出", "NFViS 1.0.0\nUbuntu 26.04\n", false},

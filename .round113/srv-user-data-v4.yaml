@@ -1,0 +1,117 @@
+#cloud-config
+write_files:
+  - path: /usr/local/bin/minidhcpd.py
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env python3
+      # 最小 DHCP 服务器——仅用于决策 #335（DHCP relay）真机验证的测试设备：
+      # 服务 192.168.99.100-150；RFC 2131——有 giaddr 的报文单播回 giaddr:67（经中继），
+      # 无 giaddr 的广播回 255.255.255.255:68（直连）。控制台与 /tmp/dhcpd.log 双写，
+      # recv 行带 giaddr/来源地址——relay 开/关的两态对照就在这两行上。
+      import socket, struct, time
+
+      NET = '192.168.99'
+      SERVER_IP = NET + '.10'
+      POOL_START, POOL_END = 100, 150
+      LOG = open('/tmp/dhcpd.log', 'a', buffering=1)
+
+      def log(*a):
+          line = time.strftime('%H:%M:%S') + ' ' + ' '.join(str(x) for x in a)
+          print(line, flush=True)
+          LOG.write(line + '\n')
+
+      s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+      s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+      s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+      s.bind(('0.0.0.0', 67))
+
+      leases, next_ip = {}, POOL_START - 1
+
+      def lease_for(mac):
+          global next_ip
+          if mac not in leases:
+              next_ip = next_ip + 1 if next_ip < POOL_END else POOL_START
+              leases[mac] = '%s.%d' % (NET, next_ip)
+          return leases[mac]
+
+      log('minidhcpd up, server-id=' + SERVER_IP)
+      while True:
+          data, addr = s.recvfrom(2048)
+          if len(data) < 241:
+              continue
+          xid = data[4:8]
+          giaddr = socket.inet_ntoa(data[12:16])
+          chaddr = data[28:34]
+          mac = ':'.join('%02x' % b for b in chaddr)
+          ck = data.find(bytes([99, 130, 83, 99]), 236)
+          if ck < 0:
+              continue
+          opts = data[ck:]  # 含 cookie，解析从 +4 开始
+          i, mtype = 4, None
+          while i + 2 <= len(opts):
+              c = opts[i]
+              if c == 255:
+                  break
+              ln = opts[i + 1]
+              if c == 53 and ln >= 1:
+                  mtype = opts[i + 2]
+              i += 2 + ln
+          if mtype not in (1, 3):
+              continue
+          yi = lease_for(mac)
+          log('recv', 'DISCOVER' if mtype == 1 else 'REQUEST', 'from', addr[0] + ':' + str(addr[1]),
+              'giaddr=' + giaddr, 'chaddr=' + mac, '->', yi)
+          rep = struct.pack('!BBBBIHH', 2, 1, 6, 0, struct.unpack('!I', xid)[0], 0, 0x8000)
+          rep += socket.inet_aton('0.0.0.0')   # ciaddr
+          rep += socket.inet_aton(yi)          # yiaddr
+          rep += socket.inet_aton('0.0.0.0')   # siaddr
+          rep += socket.inet_aton(giaddr)      # giaddr 原样回填
+          rep += chaddr + b'\x00' * 10
+          rep += b'\x00' * 64 + b'\x00' * 128
+          rep += bytes([99, 130, 83, 99])
+          rep += bytes([53, 1, 5 if mtype == 3 else 2])                     # ACK / OFFER
+          rep += bytes([54, 4]) + socket.inet_aton(SERVER_IP)               # server id
+          rep += bytes([51, 4]) + struct.pack('!I', 600)                    # lease 600s
+          rep += bytes([1, 4]) + socket.inet_aton('255.255.255.0')          # mask
+          rep += bytes([3, 4]) + socket.inet_aton(NET + '.1')               # router
+          rep += bytes([255])
+          dst = (giaddr, 67) if giaddr != '0.0.0.0' else ('255.255.255.255', 68)
+          s.sendto(rep, dst)
+          log('sent', 'reply', yi, '->', dst[0] + ':' + str(dst[1]))
+
+  - path: /usr/local/bin/dhcp-sniff.py
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env python3
+      import socket, struct, time
+      s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
+      end = time.time() + 300
+      out = open('/tmp/sniff.log', 'a', buffering=1)
+      while time.time() < end:
+          pkt = s.recvfrom(2048)[0]
+          if len(pkt) < 34: continue
+          et = struct.unpack('!H', pkt[12:14])[0]
+          if et == 0x0806:
+              a = pkt[14:]
+              print(time.strftime('%H:%M:%S') + ' ARP ' + '.'.join(str(b) for b in a[14:18]) + '->' + '.'.join(str(b) for b in a[24:28]), flush=True)
+              out.write(time.strftime('%H:%M:%S') + ' ARP ' + '.'.join(str(b) for b in a[14:18]) + '->' + '.'.join(str(b) for b in a[24:28]) + '
+')
+          elif et == 0x0800 and pkt[23] == 17:
+              ip = pkt[14:]; ihl = (ip[0] & 0xf) * 4
+              udp = ip[ihl:]; sp, dp = struct.unpack('!HH', udp[:4])
+              if 67 in (sp, dp) or 68 in (sp, dp):
+                  line = time.strftime('%H:%M:%S') + ' DHCP %s:%d->%s:%d' % ('.'.join(str(b) for b in ip[12:16]), sp, '.'.join(str(b) for b in ip[16:20]), dp)
+                  print(line, flush=True); out.write(line + '
+')
+runcmd:
+  - |
+    NIC=$(ls /sys/class/net | grep -v '^lo$' | head -1)
+    ip link set "$NIC" up
+    ip addr add 192.168.99.10/24 dev "$NIC"
+    echo "=== v4 diag start $(date +%H:%M:%S) NIC=$NIC" > /dev/ttyS0 2>/dev/null || true
+    echo "=== v4 diag start" > /dev/console 2>/dev/null || true
+    nohup python3 /usr/local/bin/minidhcpd.py > /dev/ttyS0 2>/dev/null &
+    nohup python3 /usr/local/bin/dhcp-sniff.py > /dev/ttyS0 2>/dev/null &
+    nohup python3 /usr/local/bin/minidhcpd.py >> /tmp/dhcpd-live.log 2>&1 &
+    (sleep 60; echo "HEARTBEAT leases-check $(date +%H:%M:%S)"; tail -5 /tmp/dhcpd-live.log; tail -5 /tmp/sniff.log) >> /dev/ttyS0 2>/dev/null || true
+    (sleep 60; tail -5 /tmp/dhcpd-live.log) >> /dev/console 2>/dev/null || true
