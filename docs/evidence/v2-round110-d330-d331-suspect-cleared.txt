@@ -1,0 +1,38 @@
+NFViS v2 真机验证记录 round110 —— 可疑项澄清（非缺陷）+ ping ipv6 判定确认 + 限速对照仍未取到
+====================================================================
+日期：2026-10-01；环境：nfvis-vm，2.0.0~dev20（含 #330/#331）；探针纪律：`^%%` 锚定、退出码不经管道
+接 `v2-round109-d330-d331-partial-and-one-suspect.txt` 的下一轮清单，逐条处理：
+
+§1 ① 可疑项**澄清：不是缺陷，是我探针口径错**（✓ 关闭）
+- 复现：造流量现场后 `set qos policies pol-x cir 8000 cbs 8000` + `set interfaces bvi0 egress-policy pol-x`（提交成功），
+  读视图显示 `pol-x 8000 8000 bvi0:out`（方向明确）✓
+- **删除仍被出向引用的策略 → 确实被拒**：`rc=1`（**不经管道**捕获）+ 原始输出
+  「已删除 qos policies pol-x（未提交）／**校验失败（candidate 保留）**」，且**删后 `show qos policies` 里 pol-x 仍在**（计数 1）✓
+- round109 我把「拒绝」计成 0 的原因：该失败走**「校验失败（candidate 保留）」+ `%` 前缀的脚本模式文案**，
+  而我当时只 grep 了行首 `%%` ⇒ **探针口径错**（产品行为正确）
+- 结论：出向引用**已纳入删除校验**，与决策 #331 的口径一致。
+
+§2 ② `ping ipv6` 判定与退出码（✓）
+- `ping ipv6 2001:db8::dead`：**`rc=1`**（不经管道）、**行首 `%%` 计数=1**、尾部为脚本模式原因行
+  ⇒ **按决策 #89「未通即失败」成立**（0 发包不再是假绿）✓
+- 候选探针仍未写好：我用 `ping ipv6 127.0.0.1` 去判「语法是否被接受」，取法不对（那不是候选查询）
+  ⇒ 契约侧「`?`/Tab 候选含 `ipv6`」仍待用正确方式核（或直接看命令树守护输出）。
+- 仍未验：`ping ipv6` 的**可达**路径（需 v6 对端；建议下一轮给 fixture 的 guest 配 v6 地址后 ping 它）。
+
+§3 ③ 限速对照（❌ 仍未取到可判定数据）
+- policer **确实下到数据面**：`vppctl show policer` → `Name "pol-lim" type 1r2c cir 8 eir 0 cb 8000 eb 0 / rate type kbps /
+  conform action transmit, exceed action drop, violate action drop` ✓（策略语义正确）
+- 但我的**定量对照探针失败**：用 `grep -A1 'tx packets' | awk '{print $1}'` 提取接口 tx 计数，
+  该写法与 VPP 26.06 的 `show interface` 实际排版不符 ⇒ 对照组/实验组都取到空值
+- 下一步：改用**已在本仓库验证过的取法**（`cli-semantic-check.sh` 的 `vpp_if_rx`：找相邻两列 `rx/tx packets` 取后一列）
+  或直接用 `vppctl show hardware-interfaces` 的 rx/tx 计数；判定口径仍按决策行（实验组 vs 对照组，vppctl 为独立事实源）。
+
+§4 套件
+- cli-fulltest：**210 通过 / 0 失败 / 13 预期报错**（= 基线）✓
+- cli-pty-smoke：**10/10** ✓
+- （semantic/lifecycle 本轮未跑，下一轮与对照验证一并复跑）
+
+§5 仍待（下一轮，按序）
+1. **限速定量对照**（用已验证过的计数取法）+ **Web 面 Browser Use**：诊断页 IPv6 选项、QoS 出向绑定与接口详情方向显示；
+2. `ping ipv6` 可达路径（给 guest 配 v6 后 ping）+ CLI 候选含 `ipv6` 的正确探针；
+3. semantic/lifecycle 复跑并保持「不可判定 0」口径。
