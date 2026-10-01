@@ -1,0 +1,48 @@
+NFViS v2 真机验证记录 round105 —— #326 补齐验证（含 Web）；#321 Web 告警卡通过；#324 Web 门禁发现缺口
+====================================================================
+日期：2026-10-01
+环境：nfvis-vm；**沿用 2.0.0~dev17**（PR #252 的实现）；本轮以「整段保留输出」方式重做探针
+浏览器：**Browser Use（IAB）实机操作**（按用户要求：涉及 Web 的一律走浏览器真操作）
+
+§1 语义 22/0/3 查明：**现场状态、非回归**（✓）
+逐条取出 3 项不可判定，全部是套件自述的「不可判定」档：
+- `S8 MAC 表 ↔ l2fib —— 该交换机没有能产生流量的成员（缺正向控制）`（无流量）
+- `S9 虚拟机列表（libvirt ↔ CLI 视图）—— 两侧都空（无对象可对照）`
+- `S9 容器列表（Docker ↔ CLI 视图）—— 两侧都空（无对象可对照）`
+⇒ 本轮语义跑在**干净现场**（无自建对象/无流量），而 round100 的 24/0/1 是现场有对象的场景；
+  「空结果进不可判定、不计通过」正是套件的既定口径（round84 起）。**无失败、无回归。**
+
+§2 决策 #326 补齐验证（✓ 数据面/接口 + Web 全部通过）
+- **先前的真因（本轮查明）**：`cli-test.qcow2` **已从镜像仓库丢失**（可用镜像只剩 alpine 系列与 debian），
+  提交被**正确拒绝**（「仓库中不存在镜像 cli-test.qcow2」）——这正是我上一轮用 `grep -c` 把错误行压成
+  一个数字后漏掉的那条。已从 round92 的 `/root/fixtures-backup/images/cli-test.qcow2` 按**产品路径**
+  （`/data/incoming` 暂存 + `request images upload … type vm-image`）恢复。**登记为夹具丢失，非产品问题。**
+- CLI：`show virtual-switches vs-a ports` →
+  `vh-fw-vm-nic0  vnf  up  down  0  0` + 指引行「（来源 vnf: fw-vm/nic0 只读——在 VNF 侧删除：
+  delete virtual-machine-functions fw-vm interfaces nic0 virtual-switch vs-a）」✓
+- REST：`GET /virtual-switches/vs-a/ports` → `[{"source":"vnf","port":"vh-fw-vm-nic0","vnf":"fw-vm","vnf_interface":"nic0"}]` ✓
+- 删除拒绝：`%% 端口 9 来自 VNF fw-vm 的 vNIC 声明（读视图派生条目，source=vnf），不能在交换机侧删除；
+  请在 VNF 侧删除该接口的挂接：delete virtual-machine-functions fw-vm interfaces <vnic> virtual-switch vs-a` ✓
+  且**不建空壳**（`show virtual-switches vs-a ports` 无 seq 9；本轮顺带修掉的正是「删不存在序号会凭空建空壳」）✓
+- **Web（Browser Use）**：交换机详情页 `#/network/switches/vs-a` 的「成员端口」表**带「来源」列**，
+  显示 `vh-fw-vm-nic0 | VNF 声明 | up | down | 0 | 0` ✓
+
+§3 决策 #321 的 Web 告警卡（✓ Browser Use 实机确认）
+- 用带外工具（PR #250 的 `oob-residue`）建 `bd_tag=oob-web-105` 的 bridge-domain → 15s 巡检报出
+- **浏览器看总览告警卡**：同时显示 `VNF_PORT_DOWN` 与 **`BRIDGE_DOMAIN_LEFTOVER`**，
+  后者文案含「…本项由启动/巡检对账按数据面事实重建」✓（如实措辞在界面上也成立）
+- 验后删除带外 BD → 告警自动消解（末态告警 0）✓
+
+§4 决策 #324 的 Web 门禁（⚠️ 发现覆盖缺口 —— 新登记 **R105-1**）
+- 通过的部分：operator 会话下 `document.body.className = "role-nonsuper"` 已生效；落地页可见文本无超权限关键字 ✓
+- **缺口（浏览器实机所见 + 截图留证）**：operator 的**运维动作页**仍渲染出——
+  ① **「软件版本」卡的写控件**（输入框 + 「安装并立即生效」按钮，对应 `request system software add`，S 级）；
+  ② **「内核基线」卡的「写入基线（按配置期望）」「回退上一次基线」按钮**（对应 `request system kernel apply|rollback`，Su 级）；
+  ③ 可见文本里出现「恢复出厂 / 重置数据分区 / 回退版本 / 重签自签证书」等超权限关键字（需区分是控件还是说明文字）。
+  ⇒ operator 点了这些控件会得到 403（纵深防御仍在），但**界面上不该出现**（违反 #324 的口径与决策 #141 的交付标准）。
+- 用户截图（本轮 Browser Use 实拍）已在会话内留证；**待修**：把运维动作页各写控件按 class 收敛
+  （补 `data-write`/按 class 渲染），并补一条「operator 下逐卡可见控件清单」的界面守护；
+  修完须再用 Browser Use 复验该页。
+
+§5 现场终态
+sw=0 / vmf=0 / 用户=["admin"] / 告警 0 / VPP BD=0 / 主机名=nfvis-lab（测试期间被改成 t318，#318 那轮的残留，本轮已复原）
