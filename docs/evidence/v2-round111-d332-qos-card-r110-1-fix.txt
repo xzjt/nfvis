@@ -1,0 +1,63 @@
+NFViS v2 真机验证记录 round111 —— 决策 #332（R110-1）Web QoS 策略卡的确认、修复与 Browser Use 复验
+====================================================================
+日期：2026-10-01；环境：nfvis-vm，修复前 2.0.0~dev20 → 修复后 2.0.0~dev21；
+代码：PR #257（squash 合入 v2 @ fa6e194，CI 双跑全绿）；验证按用户口径 §1 第 1 条（Browser Use 实机 + 当前构建确认 + computed display/offsetParent 判定）
+
+§1 根因（修复前确认）
+- round110b 登记的 R110-1 **确认为真缺陷**：网络对象页（#/network）QoS 策略卡在策略有
+  出向绑定（CLI/REST 读视图 ens224:out）时「类型/目标」两列显示「—」。
+- **字段级根因**：该卡自决策 #128 起渲染 `q.type` / `q.target || q.interface`，而
+  `/qos/policies` 响应里**从来没有**这些字段（#331 前是 {name,cir,cbs}；#331 后是
+  {name,cir,cbs,bound_interfaces,bindings}）——「类型/目标」自始恒「—」，不是 #331 引入的回归。
+  #331 的三面同源补了 CLI/REST 读视图、QoS 详情页（绑定（方向））与接口详情页（入向/出向限速策略），
+  漏了这张列表卡。路径级覆盖守护（ui_coverage_test.go）只盯端点，挡不住「端点对、字段错」。
+- 修复前复现（dev20 上）：建 `pol-web cir 8000 cbs 8000` + `set interfaces ens224 egress-policy pol-web`
+  → CLI `show qos policies` 显示 `pol-web … ens224:out`；REST `GET /qos/policies` 返回
+  `bindings:[{interface:"ens224",direction:"egress"}]` —— 两面都有数据，只有 Web 卡看不见。
+
+§2 修复（PR #257，决策 #332）
+- 卡列改为与 CLI `show qos policies` 同源：`名称 / CIR(bps) / 绑定（接口:in|out）`；
+  绑定文本逐条 `接口:in|out`（无绑定时如实「—」）；CBS 只在详情页展示。
+- 绑定文本抽 `qosBindingsText` 单源，列表卡与详情页共用（防两处再漂移）。
+- **字段级守护** `internal/api/ui_qos_card_fields_test.go`：从 ui/app.js 提取 QoS 卡行与
+  共用 formatter 消费的全部 `q.*`/`b.*` 属性，逐个对照 openapi QosPolicy schema（含
+  bindings.items）；解析器带自校准（已知字段缺失即失败）。**负向验证**：往卡行注入 `q.type`
+  守护即红（报「这就是 R110-1 的复刻」），还原后回绿。
+- openapi 未改（bindings/bound_interfaces 已是 #331 契约）；规格书附录 A 追加决策 #332；
+  AGENTS.md 决策条数 233→234。`make check` 全绿（app.js `node --check` 通过）。
+
+§3 真机验证（Browser Use，dev21）
+- 构建/安装：git archive v2 → /root/src，`SOURCE_DATE_EPOCH=1790859330 make deb VERSION=2.0.0~dev21`
+  → `dpkg -i`；服务 active、`show version` = 2.0.0~dev21。
+- **当前构建确认**（口径 1）：页面同源 fetch('app.js', no-store) → HTTP 200，
+  含 `function qosBindingsText` 与新卡行「绑定（接口:in|out）」，不含旧 `q.target || q.interface`；
+  总览页组件版本亦显示 2.0.0~dev21。（注：首轮误用 `/ui/app.js` 取到 mux 404——UI 实际挂在
+  `/api/v1/ui/` 下；修正路径后确认无误。）
+- 现场重建：`pol-web`（cir 8000 cbs 8000，出向绑 ens224）+ `pol-idle`（cir 5000 cbs 5000，无绑定），
+  commit rev 761/762。
+- **列表卡（R110-1 核心）**：QoS 策略卡列头 `名称 / CIR(bps) / 绑定（接口:in|out） / 详情`；
+  pol-web 行 = `pol-web / 8000 / ens224:out`；pol-idle 行 = `pol-idle / 5000 / —`。
+  可见性按 computed display + offsetParent 判定（卡与表格均可见）。
+  截图 docs/images/round111-web-qos-card-egress-binding.png。
+- **详情页**（#/network/qos/pol-web）：「绑定（方向）」= ens224:out、「绑定接口」= ens224、
+  CIR 8000 bps / CBS 8000 字节（共用 helper 生效；round110b 的未验项收口）。
+  截图 docs/images/round111-web-qos-detail-binding.png。
+- **接口详情页**（#/system/interfaces/ens224）：「出向限速策略」= pol-web、「入向限速策略」= —
+  （#331 的未验项收口）。截图 docs/images/round111-web-iface-egress-policy.png。
+- **三方对照**（同一事实三个面一致）：
+  CLI `show qos policies`：`pol-web 8000 8000 ens224:out` / `pol-idle 5000 5000 -`
+  REST `GET /qos/policies`：bindings=[{ens224,egress}] / []
+  Web 列表卡：`pol-web 8000 ens224:out` / `pol-idle 5000 —`
+
+§4 清场与现场终态
+- 验证后清场：`delete interfaces ens224 egress-policy` + 删 pol-web/pol-idle，commit rev 763；
+  `show qos policies` =（无 QoS 限速策略）。
+- 现场既有（非本轮引入，如实登记）：总览页有 RECOVERY_IFACE_MISSING（bvi0）告警
+  ——配置里声明了 bvi0 而 VPP 无此口（此前轮次遗留声明）；commit 时有内核基线不一致警告
+  （大页 1G 期望 2 vs cmdline 4、isolcpus 期望 1-4 vs 2-5，交接文档 §4.2 已登记的既知状态）。
+
+§5 未验/边界
+- 本决策只改 Web 渲染，CLI/REST/数据面行为不变；#331 的限速定量对照（vppctl 计数）仍在
+  交接清单 §3.2 第 2 条，待下一轮。
+- 服务零重启（dpkg 升级自带重启 nfvis；未做四套件复跑——本轮未动 CLI/引擎代码路径，
+  套件基线见交接文档 §3.1）。

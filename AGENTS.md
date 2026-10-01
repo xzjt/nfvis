@@ -265,7 +265,9 @@
   （`名称 / CIR(bps) / 绑定（接口:in|out）`），绑定文本抽 `qosBindingsText` **单源**（列表卡与详情页共用）；
   新增**字段级守护** `internal/api/ui_qos_card_fields_test.go`（卡片消费的 `q.*`/`b.*` 字段逐一对照 openapi
   QosPolicy schema，含 `bindings.items`，解析器带自校准）。openapi **不改**（`bindings` 已是 #331 契约）。
-  `AGENTS.md` 决策条数 233→234。**真机复验（Browser Use）待执行后记入证据**。
+  `AGENTS.md` 决策条数 233→234。**真机复验已完成（round111，Browser Use）**：当前构建确认（页面加载的
+  app.js 含新代码）、列表卡 `pol-web 8000 ens224:out` / 无绑定策略如实「—」、详情页与接口详情页方向一致、
+  与 CLI/REST 三方对照一致；证据 `docs/evidence/v2-round111-d332-qos-card-r110-1-fix.txt`。
 - 已定决策 234 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#332）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
