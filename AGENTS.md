@@ -268,6 +268,19 @@
   `AGENTS.md` 决策条数 233→234。**真机复验已完成（round111，Browser Use）**：当前构建确认（页面加载的
   app.js 含新代码）、列表卡 `pol-web 8000 ens224:out` / 无绑定策略如实「—」、详情页与接口详情页方向一致、
   与 CLI/REST 三方对照一致；证据 `docs/evidence/v2-round111-d332-qos-card-r110-1-fix.txt`。
+- **round111b（#330/#331 真机验证收口 + 新登记两条，2026-10-01）**：交接清单 §3.2 第 2/3/4 条全部收口。
+  **#331 限速定量对照通过**：实验组（cir 8000 绑 bvi0:out）policer conform ≈4.94 kbps ≤ cir、violate 丢包、
+  bvi0 tx 18.4→6.4 pps；解绑后计数冻结、速率复原——三段窗口唯一变量是绑定状态；如实登记 ICMP 自钟摆
+  效应（offered 降速，后续用 UDP/iperf）与「BVI tx_drops 不计 policer 丢包」。**#330 可达路径成立**：
+  BVI v6 走 `set virtual-switches <vs> gateway ip <v6-prefix>`（**没有** `interfaces <if> address`），
+  `ping ipv6 2001:db8::2 vrf <交换机VRF>` rc=0；候选两面（REST/pty）确认含 `ipv6`，探针测试
+  `TestCLIDiagIPv6Candidates` 入仓（PR #258）；经验：非表内目标 ping 默认查表 0 → `0 sent`，
+  判不可达建议带 vrf 复核。**套件复跑**：语义 **25/0/0**（不可判定 0）；lifecycle **19/0/4**（0 失败；
+  首跑 L2-3 失败系 round110 遗留 `interfaces bvi0` 空壳声明，删除后转绿）。**新登记**：
+  **R111-1**（中，根因已定位）恢复收敛告警族只在 VPP（重）连时重估——声明已删/口已出现都不消警
+  （`runRecovery` 只挂 `OnConnect`，15s 残留对账有意只动残渣码），修法方向见 `docs/v2待做.md` 二.21；
+  **R111-2**（低）lifecycle L3-2 邻居表查询不按转发域取（#328 同族套件 oracle 候选），见二.22。
+  证据 `docs/evidence/v2-round111b-d331-d330-suites-and-observations.txt`。
 - 已定决策 234 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#332）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——

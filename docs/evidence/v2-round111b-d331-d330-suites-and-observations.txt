@@ -1,0 +1,84 @@
+NFViS v2 真机验证记录 round111b —— 交接清单 §3.2 第 2/3/4 条收口 + R111-1/R111-2 新登记
+====================================================================
+日期：2026-10-01；环境：nfvis-vm，2.0.0~dev21（本会话前半已装，见 v2-round111-d332 证据）；
+实现类工作按会话口径派子智能体执行、主会话审报告+抽查原始日志。
+
+§1 交接第 2 条：#331 限速定量对照（✓ 通过，以独立事实源判定）
+- 现场：fixture（sem-vs/sem-vm/sem-ct，rev 764 起）；guest beat 提速（user-data sleep 1→0.05 +
+  `request virtual-machine-functions sem-vm restart`，按红线 12 触发 cloud-init 重放）≈20pps；
+  BVI=bvi0（round110 遗留声明仍在配置，fixture 网关使其在 VPP 出现）。
+- 对照组（未绑定，30s）：bvi0 tx +553 pkts（18.4 pps ≈ 14.4 kbps）、tx_drops +1（噪声）；
+  `vppctl show policer` 无 pol-small。
+- 实验组（pol-small cir 8000 cbs 1000 绑 `interfaces bvi0 egress-policy`，rev 765，30s）：
+  policer 增量（主事实源）conform +189 pkts（≈4.94 kbps ≤ cir 8 kbps ✓）、exceed 0、
+  violate（=drop）+9 pkts（784 B）✓；bvi0 tx +191 ≈ conform 189（两源自洽）；
+  CLI 读视图 `pol-small 8000 1000 bvi0:out`、`vppctl show policer` 出现 1r2c cir 8kbps exceed=drop。
+- 反向（解绑 rev 766，30s）：policer 计数冻结（conform 1014→1014、violate 48→48）、
+  bvi0 tx 回到 18.5 pps。三段窗口唯一变量是绑定状态。
+- 如实登记：① 打到 policer 的 offered 率在绑定后降至 ~6.6pps——ICMP ping 的自钟摆效应
+  （应答被丢 → guest -W2 超时慢循环），故「稳定超 cir 的 exceed 率」未测出；限速生效由
+  「丢包出现 + 放行率受控 + 解绑复原」三段判定。此类实验后续建议用 UDP/iperf 恒定负载。
+  ② BVI 接口的 tx_drops 不计 policer 丢包（丢包只记在 policer 统计）——VPP 正常行为，
+  后人勿拿接口 drops 当 QoS 事实源。
+- 主会话抽查真机原始日志（/tmp/qos-exp-experiment.log、-reverse.log 尾部）与报告数字一致。
+- 清场：解绑 + 删策略（rev 767）+ fixture down；最终 rev 770（当时）。
+- 原始输出：nfvis-vm:/tmp/qos-exp-*.log（测量脚本 /tmp/qos-measure.sh）。
+
+§2 交接第 3 条：#330 `ping ipv6` 可达路径 + 候选正确探针（✓ 可达路径端到端成立）
+- **重要更正（任务前提错、被真机纠正）**：配置树**没有** `interfaces <if> address`；
+  BVI 的 v6 地址走 `set virtual-switches <vs> gateway ip <v6-prefix>`（值校验器 ip-prefix
+  本就声明 IPv4/IPv6；govpp `SwInterfaceAddDelAddress` 用 ParseAddressWithPrefix，v4/v6 同源）。
+  `set virtual-switches sem-vs gateway ip 2001:db8::1/64` 提交成功（rev 772），VPP bvi0 出现
+  `L3 2001:db8::1/64 ip6 table-id 1445873`。
+- guest v6：user-data 加 `ip -6 addr add 2001:db8::2/64` + restart 重放生效；
+  `vppctl show ip6 neighbors` 出现 2001:db8::2（NDP 通）。
+- **可达路径**：`ping ipv6 2001:db8::2 vrf vr-sem-vs count 2` → 76 bytes from 2001:db8::2、
+  `2 sent, 1 received`（首包被 NDP 解析消耗）、**rc=0**。v4 回归 `ping 192.168.99.2 vrf …` 2/2 rc=0。
+- 不可达两型复确认（rc=1 + 行首 %%）：无 vrf → `0 sent`；带 vrf → `2 sent, 0 received`。
+- 候选两面同源确认：REST `GET /cli/candidates?tokens=ping` → `<host>,count,ipv6,source,vrf`；
+  pty `ping ?` → 列出 ipv6（traceroute 同）。round110 的「执行当探针」做法正式废弃。
+- **探针测试入仓**：`TestCLIDiagIPv6Candidates`（internal/api/cli_diag_test.go，PR #258 squash
+  合入 v2 @ 9aac572，CI 双跑全绿）——断言 tokens [ping]/[traceroute] 的候选都含 ipv6。
+- 经验备忘：非 VRF 表内目标 ping（v4/v6 同）默认查表 0 → `0 sent`；判不可达建议带 vrf 复核
+  （round110 的「0 sent」型证据与「目标在别的表」不可区分）。REST 登录字段是 `username`。
+- 清场：删 v6 网关地址（rev 773）+ fixture down（rev 774~776）。
+- 原始输出：nfvis-vm:/tmp/ipv6-*.log。
+
+§3 交接第 4 条：semantic + lifecycle 复跑（fixture 现场按口径先造）
+- **semantic：25 / 0 / 0（不可判定 0 ✓）**。首跑 24/0/1——S8 的 3s 窗口撞上 beat 的超时慢周期
+  （ping -W2 超时+sleep 1 = 3s/发，窗口可跨零；当时成员口 rx 停在 19），现场健康时复跑即
+  `✓ S8 两侧一致（CLI 2 条 / VPP 2 条，成员口已学到 MAC）`。套件需显式
+  `SRV=https://127.0.0.1:443 CLI_BIN=/usr/bin/nfvis-cli`（缺省指向开发态，报错即拦，未造成假红）。
+- **lifecycle：19 / 0 / 4**（基线带 19~22/0/3~4）。首跑 17/1/4：唯一失败 L2-3「重启后日志有未收敛项」
+  = **round110 遗留的 `interfaces bvi0` 空壳声明**（VPP 重启后无此口 → 产品如实报告）——属现场残留
+  非产品缺陷；删除该声明（rev 795）+ fixture 现场复跑 → L2-3 ✓（0 未收敛）、L3-1 ✓（vNIC 在 BD）。
+- 4 项跳过（如实、与基线同族）：L1-3 需两个自由口（本机 ens192 被既有 bond0 声明占用、ens224 单口）；
+  L3-3/L2-2 需 NAT 配置现场；L3-2 见 §5（R111-2）。跳过未改成通过（口径 3）。
+- 收尾清场：fixture down 终态核对全空；**（无 active 告警）**；版本 2.0.0~dev21。
+
+§4 新登记 R111-1（中）：恢复收敛告警族不随事实变化重估（根因已定位，未修）
+- 现象链（全在本会话实测）：`interfaces bvi0` 声明 + VPP 无此口 → 启动告警
+  RECOVERY_IFACE_MISSING（error，raised 12:56:40）；① fixture 把 bvi0 带进 VPP 并通流 25 分钟以上
+  → 告警不消；② 配置声明删除（rev 795）→ 告警仍不消；③ lifecycle 的 VPP 重启（OnConnect）后
+  → 立即消解（「（无 active 告警）」）。
+- 根因（代码定位）：`runRecovery`（内含 EnsureConsistent 末尾对 recovery 作用域的 `Sync` 全量覆盖）
+  **只挂在 `vppMgr.OnConnect`**（cmd/nfvisd/main.go:698）；15s 巡检的残留对账
+  `applyResidueAlarms`（internal/orchestrator/network/residue.go:172）**有意只动残渣码**
+  （其注释：Sync 覆盖整个作用域会把不在本轮失败清单里的项当陈旧清掉，而 15s 路径不算全量失败集）。
+  故恢复族告警的事实基础（声明已删/口已出现）变化后无人重估，直到下次 VPP 重连。
+  与 #188/#321 的「随对象消失/状态恢复自动消解」口径不符。
+- 修法方向（待立项决策）：恢复族告警的**廉价按事实复核**（按 source 查「声明是否已删/口是否已在 VPP」），
+  不做周期性全量重放（重且会把暂时性错误刷成告警抖动）。
+
+§5 新登记 R111-2（低）：lifecycle L3-2 邻居表查询看不到现场邻居（套件 oracle 缺陷候选，未修）
+- 现场 sem-vm 持续 ping 网关（双向通，bvi0 收发各 ~1pps），guest 邻居表项必然存在于交换机 VRF
+  （表 1445873）；L3-2 却报「邻居表里没有该域的任何主机」而跳过。`vppctl show ip neighbors`（无参=表 0）
+  为空是语义正确的；疑似套件按表 0/全表取邻居而非按 vhost 所在转发域取——与 #328 修掉的
+  S8 成员枚举同族。跳过是如实报告，但漏掉了可判定的正向控制。
+
+§6 现场终态
+- 配置：无 sem-*/pol-* /bvi0 声明；**既有 bond0(ens192) 声明保留**（本会话开始前即在，非本轮对象，
+  未动——它占用 ens192 使 L1-3 维持跳过，后续轮次如需两个自由口可评估清理）。
+- 告警：无 active。最终 rev 796（fixture down 后）；版本 2.0.0~dev21；服务零异常重启
+  （仅 lifecycle L2 按套件设计重启 VPP 一次）。
+- 本轮提交：PR #257（决策 #332，round111 前半）、PR #258（候选探针测试）。
