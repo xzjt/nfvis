@@ -500,6 +500,9 @@ func run() error {
 	// 不成立、放行会静默漏掉：装机全程报成功，VNF 直到被启动才失败（round85 干净快照离线安装实测）。
 	// 运行期幂等补齐与安装顺序无关；失败只告警不阻塞启动，周期巡检会再试。
 	aaMgr := &system.AppArmorLibvirt{Runner: runCmd}
+	// 决策 #329：大页池回收的写能力（按页尺寸写 sysfs）。与 API/CLI 装配的同一实现，
+	// 巡检与 request system hugepages reclaim 不出现两套行为。
+	hugepageSetter := system.NewSysfsHugepageSetter()
 	if changed, err := aaMgr.Ensure(ctx); err != nil {
 		log.Warn("libvirt AppArmor 放行未完成", "err", err)
 	} else if changed {
@@ -654,6 +657,32 @@ func run() error {
 			} else if changed {
 				log.Info("libvirt AppArmor 已放行 NFViS 镜像/VM 路径")
 			}
+			// 决策 #329：大页池对账回收（复用本巡检，不新造定时器）——只回收「实际 > 声明且空闲」
+			// 的多余页，在用页一律不动；写后回读确认才算收敛。收敛不掉（在用页挡住）时以
+			// HUGEPAGE_POOL_SURPLUS 告警如实呈现（含谁在占用的可查证据），收敛后自动消警。
+			hpRes := api.HugepageReconcile("/", cfg, hugepageSetter)
+			for _, p := range hpRes.Pools {
+				switch p.Action {
+				case system.HugepageActionReclaimed:
+					log.Info("大页池已回收空闲多余页", "size", p.PageSize,
+						"before", p.ActualBefore, "after", p.ActualAfter, "reclaimed", p.Reclaimed)
+				case system.HugepageActionVerifyFailed:
+					log.Warn("大页池回收未收敛", "size", p.PageSize, "err", p.Error)
+				}
+			}
+			if bad := hpRes.Unconverged(); len(bad) > 0 {
+				msgs := make([]string, 0, len(bad))
+				for _, p := range bad {
+					msgs = append(msgs, fmt.Sprintf("%s：声明 %d、实际 %d、在用 %d%s",
+						p.PageSize, p.Declared, p.ActualAfter, p.InUse, hugepageBlockerText(p)))
+				}
+				alarms.Raise("hugepages", network.SeverityWarning, system.HugepageSurplusAlarmCode,
+					"大页池实际高于声明且未能收敛（在用页不动）："+strings.Join(msgs, "；")+
+						"。处置：停掉持页的 VNF 后再 request system hugepages reclaim，或调整声明值（set resource-pools hugepages … count <n>，需 reboot）",
+					"system")
+			} else {
+				alarms.Resolve("hugepages", system.HugepageSurplusAlarmCode, "system")
+			}
 		}
 		check()
 		for {
@@ -718,6 +747,7 @@ func run() error {
 				return ok, err
 			}},
 		Kernel:      system.NewBaselineApplier(),
+		Hugepages:   system.NewSysfsHugepageSetter(), // 决策 #329：大页池回收（按页尺寸写 sysfs）
 		NAT:         &natSessionsController{net: netProvider},
 		Alarms:      &alarmController{store: alarms},
 		Diag:        &diagController{diag: vppMgr.Diagnostics()},
@@ -1645,4 +1675,13 @@ func (c *dpdkController) SetDPDKBound(ctx context.Context, ifname string, bound 
 		time.Sleep(200 * time.Millisecond)
 	}
 	return pci, cur, nil
+}
+
+// hugepageBlockerText 把「谁在占用」的可查证据拼成告警文案的一小段（决策 #329）。
+// 没有具体证据时如实说明（内核只给池总量与空闲数），不编造持有者。
+func hugepageBlockerText(p system.HugepagePoolResult) string {
+	if len(p.Blockers) == 0 {
+		return ""
+	}
+	return "（占用者：" + strings.Join(p.Blockers, "；") + "）"
 }

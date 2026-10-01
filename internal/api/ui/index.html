@@ -133,9 +133,27 @@
     </section>
 
     <section class="page" id="page-pools" hidden>
-    <article class="card">
+    <article class="card wide">
       <h2>资源池</h2>
       <div id="pools"></div>
+    </article>
+    <article class="card wide">
+      <h2>大页池 <span id="hp-note" class="muted small"></span></h2>
+      <p class="muted small">
+        三方数字：<strong>声明</strong>（配置唯一真源）、<strong>内核实际</strong>（宿主 sysfs 读到的池大小）、
+        <strong>在用</strong>（有持有者的页，<strong>一律不动</strong>）；<strong>可回收</strong> = 空闲的多余页。
+        回收只把<strong>内核实际高于声明</strong>的空闲多余页收回到<strong>已声明</strong>值——<strong>不改声明值</strong>
+        （改声明在「配置」页的 resource-pools，需重启生效）。取不到内核值时如实显示「取不到」，不编造。
+      </p>
+      <table id="hp-table">
+        <thead><tr><th>页尺寸</th><th>声明</th><th>内核实际</th><th>在用</th><th>空闲</th><th>可回收</th><th>状态</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="cfg-actions">
+        <button id="hp-reclaim-btn" data-write type="button" class="danger">回收空闲的多余页</button>
+      </div>
+      <p id="hp-msg" class="muted small" hidden></p>
+      <pre id="hp-out" class="code console-out" hidden></pre>
     </article>
     </section>
 

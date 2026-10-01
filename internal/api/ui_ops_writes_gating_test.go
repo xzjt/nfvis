@@ -82,6 +82,10 @@ var uiOpsFamilyControls = map[string]map[string]uiPageControl{
 		"knl-apply-btn":    {uiClassHide, "POST /system/kernel:apply"},    // 写入基线（Su）
 		"knl-rollback-btn": {uiClassHide, "POST /system/kernel:rollback"}, // 回退上一次基线（Su）
 	},
+	// #/system/pools 资源池（决策 #329：大页池回收）
+	"page-pools": {
+		"hp-reclaim-btn": {uiClassHide, "POST /system/hugepages:reclaim"}, // 回收空闲的多余大页（S）
+	},
 	// #/system/tls 证书
 	"page-tls": {
 		"tls-cert":        {uiClassHide, "PUT /system/tls"},             // 证书正文（S）

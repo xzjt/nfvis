@@ -92,31 +92,33 @@ type cliExecutor struct {
 	natRT  NatSessionsRuntime // NAT 会话（nil = 报未接入）
 	alarms AlarmRuntime       // 告警表（nil = 报未接入）
 	// 计算/容器/镜像运行态（M4-12；nil = 对应命令报未接入，与 HTTP 端点 503 一致）
-	vm         VMRuntime
-	console    VMConsoleRuntime
-	snaps      VMSnapshotRuntime
-	ct         ContainerRuntime
-	images     ImagesRuntime
-	ports      PortInventory               // 运行态端口清单（决策 #83；nil = show 空态不列端口）
-	vppState   VppStateRuntime             // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
-	vpp        VppController               // VPP 连接管理器（show vpp 的版本/待重启；发现 #11）
-	sys        SystemOpsRuntime            // 备份/恢复/恢复出厂（M5-6；nil = 命令报未接入）
-	diagOps    DiagOpsRuntime              // 诊断归档/core dump（M5-4；nil = 命令报未接入）
-	logs       func() ([]byte, error)      // 系统日志来源（show log system，M5-9；nil = 报不可用）
-	capture    CaptureRuntime              // 数据面抓包（M5-3；nil = 报未接入）
-	sw         SoftwareRuntime             // 软件升级/电源/NTP（M5-7；nil = 报未接入）
-	hw         HardwareRuntime             // 硬件健康（M5-5；nil = 报未接入）
-	sriov      SRIOVSetter                 // SR-IOV VF 数量（M3-7；nil = 命令报未接入）
-	dpdk       DPDKSetter                  // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72）
-	kernel     ksys.KernelApplier          // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
-	tlsR       TlsRuntime                  // 证书管理（M5-8；nil = 报未接入）
-	vppRestart func(context.Context) error // request vpp restart（M5-9；nil = 报未接入）
-	events     *events.Bus                 // 事件总线（M5-1；nil = 不发布）
-	versions   VersionsRuntime             // 组件版本探测（R37-2 收口，决策 #118；nil = show version 只印 NFViS）
-	tokens     tokenAdmin                  // 活动会话清单/逐 token 吊销（决策 #301；nil = 命令报未接入）
-	perms      permissionResolver          // 生效权限视图的 class 解析（决策 #304；nil = 命令报未接入）
-	mu         sync.Mutex
-	sess       map[string]*cliSession
+	vm           VMRuntime
+	console      VMConsoleRuntime
+	snaps        VMSnapshotRuntime
+	ct           ContainerRuntime
+	images       ImagesRuntime
+	ports        PortInventory               // 运行态端口清单（决策 #83；nil = show 空态不列端口）
+	vppState     VppStateRuntime             // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
+	vpp          VppController               // VPP 连接管理器（show vpp 的版本/待重启；发现 #11）
+	sys          SystemOpsRuntime            // 备份/恢复/恢复出厂（M5-6；nil = 命令报未接入）
+	diagOps      DiagOpsRuntime              // 诊断归档/core dump（M5-4；nil = 命令报未接入）
+	logs         func() ([]byte, error)      // 系统日志来源（show log system，M5-9；nil = 报不可用）
+	capture      CaptureRuntime              // 数据面抓包（M5-3；nil = 报未接入）
+	sw           SoftwareRuntime             // 软件升级/电源/NTP（M5-7；nil = 报未接入）
+	hw           HardwareRuntime             // 硬件健康（M5-5；nil = 报未接入）
+	sriov        SRIOVSetter                 // SR-IOV VF 数量（M3-7；nil = 命令报未接入）
+	dpdk         DPDKSetter                  // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72）
+	kernel       ksys.KernelApplier          // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
+	hugepages    ksys.HugepagePoolSetter     // 大页池回收（FR-SYS-002，决策 #329；nil = 命令报未接入）
+	hugepageRoot string                      // 大页池 sysfs 根（决策 #329；空 = "/"，测试注入临时目录）
+	tlsR         TlsRuntime                  // 证书管理（M5-8；nil = 报未接入）
+	vppRestart   func(context.Context) error // request vpp restart（M5-9；nil = 报未接入）
+	events       *events.Bus                 // 事件总线（M5-1；nil = 不发布）
+	versions     VersionsRuntime             // 组件版本探测（R37-2 收口，决策 #118；nil = show version 只印 NFViS）
+	tokens       tokenAdmin                  // 活动会话清单/逐 token 吊销（决策 #301；nil = 命令报未接入）
+	perms        permissionResolver          // 生效权限视图的 class 解析（决策 #304；nil = 命令报未接入）
+	mu           sync.Mutex
+	sess         map[string]*cliSession
 	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
 	structured any
 	// structuredPath structured 在整配置中的绝对路径（display set 反推语句时作前缀，
@@ -215,6 +217,9 @@ func (x *cliExecutor) setDPDK(d DPDKSetter) { x.dpdk = d }
 
 // setKernel 注入内核基线落地器（FR-SYS-014：request system kernel apply|rollback）。
 func (x *cliExecutor) setKernel(k ksys.KernelApplier) { x.kernel = k }
+
+// setHugepages 注入大页池写能力（决策 #329：request system hugepages reclaim）。
+func (x *cliExecutor) setHugepages(h ksys.HugepagePoolSetter) { x.hugepages = h }
 
 // setTLS 注入证书管理（M5-8）。
 func (x *cliExecutor) setTLS(t TlsRuntime) { x.tlsR = t }
