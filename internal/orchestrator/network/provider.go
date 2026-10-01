@@ -9,7 +9,16 @@ import (
 
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
+	"github.com/xzjt/nfvis/internal/state"
 )
+
+// InterfaceCounterReader 接口 rx 计数读物（决策 #337 判据③的成员口风暴判定）。
+// 复用 #326 的运行态读数路径 `state.Runtime.InterfaceCounters`（stats segment），
+// 不新造 VPP 查询；ok=false 表示读数不可用（stats 未接入/接口不在数据面），
+// 调用方据此如实报错、放弃该轮判定（不误报）。
+type InterfaceCounterReader interface {
+	InterfaceCounters(ctx context.Context, ifname string) (state.InterfaceCounters, bool)
+}
 
 // L2Network 在基础 NetworkProvider 上覆盖 L2 虚拟交换机与 L3/VRF 编排。
 type L2Network struct {
@@ -21,14 +30,15 @@ type L2Network struct {
 	nat                          *NatProvider
 	bond                         *BondProvider
 	lldp                         *LldpProvider
-	dhcp                         *DhcpProvider      // 交换机 DHCP 中继（决策 #335，可空——未注入即无 relay 编排）
-	vhost                        *VhostUserProvider // M4-4：VNF vNIC 接入
-	memif                        *MemifProvider     // M4-7：容器 vNIC 接入
-	vhostDir                     string             // vhost-user socket 目录（恢复收敛重放用）
-	memifDir                     string             // memif socket 目录
-	alarms                       *AlarmStore        // 恢复收敛失败项落点（M3-8，可空）
-	loop                         *loopDetector      // 采样式 L2 环路检测状态（决策 #337，进程内）
-	sriov                        *SRIOVProvider     // PF 的 VF 数量（声明式 vf-count，决策 #70）
+	dhcp                         *DhcpProvider          // 交换机 DHCP 中继（决策 #335，可空——未注入即无 relay 编排）
+	vhost                        *VhostUserProvider     // M4-4：VNF vNIC 接入
+	memif                        *MemifProvider         // M4-7：容器 vNIC 接入
+	vhostDir                     string                 // vhost-user socket 目录（恢复收敛重放用）
+	memifDir                     string                 // memif socket 目录
+	alarms                       *AlarmStore            // 恢复收敛失败项落点（M3-8，可空）
+	loop                         *loopDetector          // 采样式 L2 环路检测状态（决策 #337，进程内）
+	counters                     InterfaceCounterReader // 成员口 rx 计数读物（判据③，可空——未注入即跳过该判据）
+	sriov                        *SRIOVProvider         // PF 的 VF 数量（声明式 vf-count，决策 #70）
 	// runtimeMu 串行化「进程内登记失效」与「NAT 下发」：失效清的是 NAT inside/outside 的解析
 	// 来源（L3 侧登记），若与一次 ApplyNAT 交错，那次下发会按「空 inside」算期望集——
 	// 少下发特性，甚至把既有 inside 特性当成配置里已删的项删掉。
@@ -104,6 +114,10 @@ func (n *L2Network) SetMemif(p *MemifProvider) { n.memif = p }
 
 // SetSRIOV 注入 SR-IOV VF 数量编排（声明式 interfaces[].sriov.vf_count）。
 func (n *L2Network) SetSRIOV(p *SRIOVProvider) { n.sriov = p }
+
+// SetCounters 注入接口 rx 计数读物（决策 #337 判据③的成员口风暴判定）。
+// 未注入时该判据静默跳过（与未注入告警表同口径）。
+func (n *L2Network) SetCounters(r InterfaceCounterReader) { n.counters = r }
 
 // InvalidateRuntimeState 让状态型子编排器的进程内登记失效（VPP 连接（重）建立时调用）。
 //

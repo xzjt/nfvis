@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
 )
@@ -37,6 +38,18 @@ const loopCalmRounds = 2
 // loopMinFlips 判定抖动所需的「连续落在不同成员口」的最小轮数（≥2 轮 ⇒ 至少 3 次观测）。
 const loopMinFlips = 2
 
+// loopStormPps 判据③「成员口同时被广播风暴打满」的速率阈值（pps）。
+//
+// 由来（round115 真机实证，不得省的教训）：经典两口环（双 vNIC 的 VNF + guest 内 bridge）
+// 实测两个成员口各 ~137k pps；取 50000 为门槛，既远高于正常业务/突发（单台忙 VM 只打满
+// 自己的口），又低于实测环路量级，留足采样抖动余量。改此常量即调整该判据。
+const loopStormPps = 50000
+
+// loopStormRounds 判据③所需的连续「全员高负载」**可计算**轮次。
+// 首轮仅建 rx 基线（无上一轮样本算不出 pps），故实际至少需 3 次采样；连续 2 轮同时高负载
+// 才 Raise，避免单次采样尖峰误报。
+const loopStormRounds = 2
+
 // loopDetector 采样式 L2 环路检测的进程内状态（跨 nfvisd 重启重置）。
 type loopDetector struct {
 	mu   sync.Mutex
@@ -52,6 +65,74 @@ type loopMacMotion struct {
 
 type loopSwitchState struct {
 	calm int // 连续无嫌疑轮次（达到 loopCalmRounds 即消警）
+	// 判据③（决策 #337 修订）：上一轮各成员口 rx 采样，本轮据此换算 pps。
+	prev        map[string]loopCounterSample
+	stormStreak int // 连续「全员高负载」轮次
+}
+
+// loopCounterSample 上一轮单个成员口的 rx 累计计数与采样时刻。
+type loopCounterSample struct {
+	rx uint64
+	at time.Time
+}
+
+// loopPortSample 单个已声明成员口本轮的 rx 计数采样（判据③输入，由 CheckLoop 填充）。
+type loopPortSample struct {
+	port string    // VPP 侧接口名（与 #326 读视图同源）
+	rx   uint64    // 累计 rx 包数
+	at   time.Time // 采样时刻（换算 pps 用）
+}
+
+// loopPortPps 单个成员口本轮换算出的 rx 速率（供告警消息）。
+type loopPortPps struct {
+	port string
+	pps  float64
+}
+
+// loopStormResult 一轮「成员口同时高负载」判据的结果。
+type loopStormResult struct {
+	allHigh bool          // 所有成员口 pps 均 ≥ loopStormPps
+	ok      bool          // 本轮可判定（≥2 口、有上轮样本、时间前进、计数未回绕）
+	pps     []loopPortPps // 各成员口 pps（按接口名升序，消息确定性）
+}
+
+// stormRound 计算本轮「成员口同时高负载」判据，并把本轮采样滚动为下一轮的基线。
+//   - 口数 <2（单口不可能成环）、成员集与上轮不同（缺上轮样本）、采样时间未前进、
+//     rx 计数回绕（VPP 重启/统计清零）——一律 ok=false（不可判定，宁缺勿错、不报）；
+//   - 所有口 pps 均 ≥ loopStormPps 时 allHigh=true。
+func (st *loopSwitchState) stormRound(cur []loopPortSample) loopStormResult {
+	defer func() { // 无论是否可判，本轮采样都成为下一轮基线（缺失即下一轮重新建基线）
+		m := make(map[string]loopCounterSample, len(cur))
+		for _, s := range cur {
+			m[s.port] = loopCounterSample{rx: s.rx, at: s.at}
+		}
+		st.prev = m
+	}()
+	var res loopStormResult
+	if len(cur) < 2 {
+		return res
+	}
+	sorted := append([]loopPortSample(nil), cur...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].port < sorted[j].port })
+	for _, s := range sorted {
+		p, ok := st.prev[s.port]
+		if !ok {
+			return loopStormResult{} // 成员集变化：本轮不可判定
+		}
+		dt := s.at.Sub(p.at).Seconds()
+		if dt <= 0 || s.rx < p.rx {
+			return loopStormResult{} // 时间未前进 / 计数回绕：不可判定
+		}
+		res.pps = append(res.pps, loopPortPps{port: s.port, pps: float64(s.rx-p.rx) / dt})
+	}
+	res.ok = true
+	res.allHigh = true
+	for _, e := range res.pps {
+		if e.pps < loopStormPps {
+			res.allHigh = false
+		}
+	}
+	return res
 }
 
 func newLoopDetector() *loopDetector {
@@ -68,13 +149,20 @@ type loopVerdict struct {
 
 // observe 用本轮快照更新一台交换机的检测状态并给出判决。
 //   - macPorts：MAC → 成员口展示名（本轮学习表）；
-//   - entries / learnLimit：学习表条目数与交换机声明的 learn-limit（0=未配置则不判逼近上限）。
+//   - entries / learnLimit：学习表条目数与交换机声明的 learn-limit（0=未配置则不判逼近上限）；
+//   - ports：各已声明成员口的 rx 采样（判据③；读数不可用/成员口不足 2 个时为空切片，该判据跳过）。
 //
 // 抖动判据（保守）：同一 MAC **连续 ≥2 轮**落在不同成员口，**且出现回跳**（本轮成员口等于
 // 两轮前所在的口，即 A→B→A 形态）——只单向移动一次不报，避免把正常的 MAC 迁移当成环路。
-func (d *loopDetector) observe(sw string, macPorts map[string]string, entries, learnLimit int) loopVerdict {
+func (d *loopDetector) observe(sw string, macPorts map[string]string, entries, learnLimit int, ports []loopPortSample) loopVerdict {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	st := d.sw[sw]
+	if st == nil {
+		st = &loopSwitchState{}
+		d.sw[sw] = st
+	}
 
 	var reasons []string
 
@@ -111,11 +199,26 @@ func (d *loopDetector) observe(sw string, macPorts map[string]string, entries, l
 			entries, learnLimit))
 	}
 
-	st := d.sw[sw]
-	if st == nil {
-		st = &loopSwitchState{}
-		d.sw[sw] = st
+	// 3) 成员口同时高负载（判据③，决策 #337 修订）。round115 真机实证：两口环下 MAC 稳定
+	//    落单口（判据①不命中）、学习数远离上限（判据②不命中），但两成员口各 ~137k pps——
+	//    该形态下 ①② 结构性漏报，故补此判据：所有成员口（≥2）同时 ≥ loopStormPps 且
+	//    连续 loopStormRounds 轮 → 判嫌疑；单台忙 VM 只打满自己的口，不构成「同时高」。
+	sr := st.stormRound(ports)
+	if sr.ok && sr.allHigh {
+		st.stormStreak++
+		if st.stormStreak >= loopStormRounds {
+			parts := make([]string, 0, len(sr.pps))
+			for _, e := range sr.pps {
+				parts = append(parts, fmt.Sprintf("%s≈%.0f pps", e.port, e.pps))
+			}
+			reasons = append(reasons, fmt.Sprintf(
+				"疑似广播风暴/环路（成员口同时高负载）：%s；连续 %d 轮 ≥ %d pps",
+				strings.Join(parts, "、"), st.stormStreak, loopStormPps))
+		}
+	} else {
+		st.stormStreak = 0
 	}
+
 	if len(reasons) > 0 {
 		st.calm = 0
 		return loopVerdict{suspected: true, message: strings.Join(reasons, "；")}
@@ -138,9 +241,12 @@ func (d *loopDetector) forget(sw string) {
 }
 
 // CheckLoop 采样式 L2 环路检测（决策 #337）：对每个 L2 交换机读一次 MAC 学习表并与上一轮快照
-// 比较，疑似环路/学习表逼近上限时 Raise LOOP_SUSPECTED（独立 scope "loop"），连续多轮平静后 Resolve。
+// 比较，疑似环路/学习表逼近上限/成员口同时被风暴打满时 Raise LOOP_SUSPECTED（独立 scope
+// "loop"），连续多轮平静后 Resolve。
 //
-// 读路径复用既有的 `L2Provider`/`L2Client.MACTable`（FR-NET-015 的 MAC 表读物，不新造一套）。
+// 读路径复用既有读物（不新造一套）：MAC 表走 `L2Provider`/`L2Client.MACTable`（FR-NET-015）；
+// 成员口清单走 `model.DerivedSwitchPorts`（#326 读视图，config/vnf/container 并集）；成员口
+// rx 计数走 `InterfaceCounterReader.InterfaceCounters`（#326 的运行态读数路径）。
 // 接线：cmd/nfvisd 的 60s 巡检块（与硬件/大页告警同循环）；查询失败如实回错误（不谎报「无环路」）。
 func (n *L2Network) CheckLoop(ctx context.Context, cfg model.Config) []error {
 	if n == nil || n.l2 == nil {
@@ -179,7 +285,8 @@ func (n *L2Network) CheckLoop(ctx context.Context, cfg model.Config) []error {
 			}
 			macPorts[r.MAC] = port
 		}
-		v := n.loop.observe(vs.Name, macPorts, len(rows), vs.LearnLimit)
+		ports := n.loopPortSamples(ctx, cfg, vs.Name, &errs)
+		v := n.loop.observe(vs.Name, macPorts, len(rows), vs.LearnLimit, ports)
 		if n.alarms == nil {
 			continue // 未注入告警表（如无 VPP 路径的部署）：仅检测不落告警
 		}
@@ -203,4 +310,34 @@ func (n *L2Network) CheckLoop(ctx context.Context, cfg model.Config) []error {
 		}
 	}
 	return errs
+}
+
+// loopPortSamples 读该交换机全部**已声明**成员口的 rx 计数采样（判据③，决策 #337 修订）。
+//
+// 成员口清单复用 #326 的读视图 `model.DerivedSwitchPorts`（静态 ports 与 VNF/容器 vNIC 声明的
+// 并集），计数读数复用 #326 的运行态路径 `InterfaceCounterReader.InterfaceCounters`——不新造
+// VPP 查询。无法解析到 VPP 接口名的成员口（如 SR-IOV VF）不计数、不编造。
+//
+// 读数不完整即**放弃本轮风暴判定**（返回 nil）并把失败如实 append 到 errs：宁可漏报也不误报
+// （计数读不到时无法断言「同时高负载」）。未注入读数源（n.counters == nil）时同样返回 nil，
+// 但**不报错**（与未注入告警表同口径：该判据在无运行态读数的部署上静默跳过）。
+func (n *L2Network) loopPortSamples(ctx context.Context, cfg model.Config, sw string, errs *[]error) []loopPortSample {
+	if n.counters == nil {
+		return nil
+	}
+	now := time.Now()
+	var out []loopPortSample
+	for _, p := range model.DerivedSwitchPorts(cfg, sw) {
+		name := p.Port
+		if name == "" {
+			continue // 无法确定 VPP 接口名：计数不可得
+		}
+		c, ok := n.counters.InterfaceCounters(ctx, name)
+		if !ok {
+			*errs = append(*errs, fmt.Errorf("交换机 %s: 读取成员口 %s 计数失败", sw, name))
+			return nil // 读数不完整：本轮不做风暴判定（错误已如实上报）
+		}
+		out = append(out, loopPortSample{port: name, rx: c.RxPackets, at: now})
+	}
+	return out
 }
