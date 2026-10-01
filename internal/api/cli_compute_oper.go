@@ -552,7 +552,7 @@ func (x *cliExecutor) commitMutate(user, source string, mutate func(*model.Confi
 	if err != nil {
 		var ve *config.ValidationError
 		if errors.As(err, &ve) {
-			return "", fmt.Errorf("提交校验失败（candidate 保留）:\n%s", formatVErrors(ve.Errors))
+			return "", fmt.Errorf("提交校验失败（candidate 保留在本会话内；会话/进程结束即释放）:\n%s", formatVErrors(ve.Errors))
 		}
 		return "", err
 	}
