@@ -1,0 +1,155 @@
+NFViS v2 真机验证记录 round107 —— 语义套件 S8 由「不可判定」转「可判定并通过」；两处 oracle 缺陷同批修掉
+====================================================================
+日期：2026-10-01
+环境：nfvis-vm；**已装 2.0.0~dev18**（与 round106 同一实例，未重装）
+口径来源：round106 证据 §2 的待办（`docs/evidence/v2-round106-d327-browser-verified-and-semantic-progress.txt`）
+本文件所有片段均为**原始输出**（造现场命令与套件输出整段保留，未用 grep -c 压成数字）。
+
+§1 结论（先行）
+- 语义套件在**有正控现场**时：**25 通过 / 0 失败 / 0 不可判定**（S8 ✓、S9 两项 ✓）——目标达成。
+- **反证**：同一现场**把 VNF 停掉**（对象仍在、无流量）复跑 ⇒ **24 通过 / 0 失败 / 1 不可判定**，
+  S8 如实回「有成员但窗口内无任何帧从成员口进来（缺正向控制）」并打印造现场命令
+  ⇒ **没有把「不可判定」改成「通过」**。
+- 顺带修掉**两处套件 oracle 缺陷**（都会把有证据的现场误报成「没有」，是 r106 S8 不可判定的一部分真因）。
+
+§2 现场怎么造（可复现；已固化为前置脚本）
+新增 `contrib/scripts/cli-semantic-fixture.sh`（up/status/down）。`up` 用**产品既有手段**造：
+L2 交换机 `sem-vs` + BVI 网关 `192.168.99.1/24` + 一台 VNF `sem-vm`（vNIC `nic0` 挂 `sem-vs`，
+cloud-init 给 guest 配 `192.168.99.2/24` 并**持续 ping 网关**）+ 容器 `sem-ct`。
+guest 发帧 ⇒ vhost 成员口 rx 增长 ⇒ l2fib 学到 guest MAC ⇒ S8 具备正向控制。
+
+真机 `bash cli-semantic-fixture.sh up` 的原始输出（节选，含正控成立那行与三处独立事实源）：
+
+    · 建交换机 sem-vs（L2 + BVI 192.168.99.1/24）、VNF sem-vm（镜像 debian-12-generic-amd64.qcow2，1G 大页 1024MB，vNIC→sem-vs）、容器 sem-ct
+    [ok] virtual-switches sem-vs type l2
+    [ok] virtual-switches sem-vs gateway ip 192.168.99.1/24
+    ... (VNF/容器各字段 [ok]) ...
+    commit 成功 (revision 699)
+    · 启动 VNF 与容器
+    启动 VNF sem-vm 已受理
+    启动容器 sem-ct 已受理
+    · 等待 guest 起网并产生流量（最多 600s；Debian cloud 首启含 cloud-init 需数分钟）
+      ✓ 成员口 vh-sem-vm-nic0 rx 增长：0 → 6（帧确实从成员口进来）
+    · 现场证据（独立事实源）
+      -- 读视图（产品；含派生条目）:
+         Port                 Source    Admin   Link    RxPkts       TxPkts
+         vh-sem-vm-nic0       vnf       up      up      7            0
+         bvi0                 runtime   up      up      7            0
+         （来源 vnf: sem-vm/nic0 只读——在 VNF 侧删除：delete virtual-machine-functions sem-vm interfaces nic0 virtual-switch sem-vs）
+      -- VPP 成员口 vh-sem-vm-nic0:
+         vh-sem-vm-nic0                    4      up          9000/0/0/0     rx packets                     7
+      -- VPP l2fib:
+            Mac-Address     BD-Idx If-Idx BSN-ISN Age(min) static filter bvi         Interface-Name
+         52:54:42:e6:31:0d    1      4      4/12     -       -      -     -          vh-sem-vm-nic0
+         b0:b0:00:00:00:00    1      5      0/0      no      *      -     *               bvi0
+         L2FIB total/learned entries: 2/1  Last scan time: 0.0000e0sec  Learn limit: 16777216
+      -- VPP 邻居表:
+      -- CLI mac-table:
+         MAC                  VLAN       Port
+         52:54:42:e6:31:0d    0          vh-sem-vm-nic0
+         b0:b0:00:00:00:00    0          bvi0
+    · 正控已就绪：跑 bash contrib/scripts/cli-semantic-check.sh（S8 应可判定并通过）
+
+§3 收益：S8 段原始输出（有正控 → ✓）
+    ===== S8 MAC 表 ↔ VPP l2fib 条数（**必须带正向控制**；没流量=不可判定，不再算通过）
+        交换机 sem-vs（bd-id=314680 index=1）
+          产品读视图成员: [vh-sem-vm-nic0 bvi0]
+          VPP BD 成员:    [bvi0 vh-sem-vm-nic0]
+          制造流量: ping 192.168.99.2 source bvi0 → Statistics: 5 sent, 5 received, 0% packet loss
+          成员口 rx 3s 窗口: vh-sem-vm-nic0 bvi0（快照 vh-sem-vm-nic0 176;bvi0 176）
+        候选交换机: sem-vs ｜ VPP 成员: ｜ 有流量的成员: vh-sem-vm-nic0 bvi0
+        CLI mac-table 条数=2；VPP l2fib 条数=2（sem-vs index=1）
+        l2fib 非静态/非 BVI 学习条目: 52:54:42:e6:31:0d vh-sem-vm-nic0
+        成员口是否学到 MAC: yes（成员口集合: vh-sem-vm-nic0 bvi0）
+        正控后 CLI mac-table 条数=2；VPP l2fib 条数=2
+      ✓ S8 MAC 表 ↔ l2fib —— 两侧一致（CLI 2 条 / VPP 2 条，成员口已学到 MAC）
+
+    合计行：
+    ==================== 合计：通过 25 / 失败 0 / 不可判定 0 / 登记 0 ====================
+
+    同一次运行里 S9 也从「两侧都空」转为可判定：
+      ✓ S9 虚拟机列表（libvirt ↔ CLI 视图） —— 两侧一致（sem-vm ）
+      ✓ S9 容器列表（Docker ↔ CLI 视图） —— 两侧一致（sem-ct ）
+
+§4 反证：停掉 VNF（对象仍在、无流量）→ S8 仍如实报不可判定（原始输出）
+    · 停 VNF（对象仍在、无流量）——验证 S8 不会静默变绿
+    停止 VNF sem-vm 已受理
+    shut off
+
+    ===== S8 MAC 表 ↔ VPP l2fib 条数（**必须带正向控制**；没流量=不可判定，不再算通过）
+        交换机 sem-vs（bd-id=314680 index=1）
+          产品读视图成员: [vh-sem-vm-nic0 bvi0]
+          VPP BD 成员:    [bvi0 vh-sem-vm-nic0]
+          制造流量: ping 192.168.99.2 source bvi0 → Statistics: 5 sent, 0 received, 100% packet loss
+          成员口 rx 3s 窗口: 无增长（快照 vh-sem-vm-nic0 522;bvi0 522）
+        候选交换机: sem-vs ｜ VPP 成员: ｜ 有流量的成员: （无）
+        CLI mac-table 条数=2；VPP l2fib 条数=2（sem-vs index=1）
+      ? S8 MAC 表 ↔ l2fib —— 有成员但窗口内无任何帧从成员口进来（缺正向控制）
+        · 造正控现场：bash contrib/scripts/cli-semantic-fixture.sh up（在交换机里起一台持续收发的 VNF；见该脚本头部）
+
+    ==================== 合计：通过 24 / 失败 0 / 不可判定 1 / 登记 0 ====================
+
+§5 成员枚举口径（本条核心）
+- S8 取成员的**唯一正源 = 产品读视图** `show virtual-switches <vs> ports`
+  （与 REST `GET /virtual-switches/{n}/ports` 同源；#326 起含 source=config|vnf|container|runtime）。
+- 再用 `vppctl show bridge-domain <BD-ID> detail` 的成员表**双向印证**：
+  **VPP 有而读视图没有 ⇒ 直接报失败行**（读视图应含运行态成员），不静默取其一。
+  真机同一时刻两侧一致：读视图 `[vh-sem-vm-nic0 bvi0]`、VPP `[bvi0 vh-sem-vm-nic0]`。
+
+§6 同批修掉的两处 oracle 缺陷（都会「有证据却报没有」）
+(a) `vpp_if_rx` 认错列 ⇒ **任何口的 rx 恒得 0**。VPP 把 `rx packets` 打在**接口名下那一行**
+    （`<名> <idx> <state> <mtu> rx packets <n>`，rx 在第 5 列），只有 `rx bytes/drops/ip4` 才是缩进续行；
+    旧实现按 `$1=="rx" && $2=="packets"` 认行 ⇒ 永远匹配不到 `rx packets`。
+    真机取证（单口查询原样）：
+        vppctl show interface vh-sem-vm-nic0
+                      Name               Idx    State  MTU (L3/IP4/IP6/MPLS)     Counter          Count
+        vh-sem-vm-nic0                    5      up          9000/0/0/0     rx packets                   202
+                                                                           rx bytes                   21101
+    这正是 r106 报告「有 rx 计数的成员:（无）」的真因之一。修为「在本口输出里找相邻两列 rx packets，取其后一列」。
+(b) 成员表查询把 **Index 当 BD-ID** ⇒ `vppctl show bridge-domain <参数>` 只认 BD-ID
+    （本机 `sem-vs`：BD-ID=314680、Index=1）⇒ `show bridge-domain 1` 报 "No such bridge domain 1"、
+    **成员表恒空**（r106 报告「成员:（空）」的另一真因）。新增 `vpp_bd_id_of_tag`（与
+    `cli-lifecycle-check.sh` 同口径——那边早修过同族缺陷并写明）；成员表一律吃 BD-ID，l2fib 过滤仍用 Index。
+    真机取证：
+        vppctl show bridge-domain 1 detail        → show bridge-domain: No such bridge domain 1
+        vppctl show bridge-domain 314680 detail   → 成员表含 bvi0、vh-sem-vm-nic0
+
+§7 判定语义（未放宽；只把「该对端 MAC」改为「成员口学到的 MAC」）
+- 正控 = **成员口 rx 在 3s 窗口内增长**（本次 ping 的应答，或既有业务流量穿过该交换机皆可）。
+- 有正控 ⇒ 要求 l2fib 有**成员口学到的 MAC**（`vpp_l2fib_learned` 按 verbose 表 `static`/`bvi`
+  标志列排除 BVI 合成 MAC `b0:b0:…` 与静态条目）且与 CLI mac-table 条数一致；
+  没学到、或条数不一致 ⇒ FAIL。
+- 无正控（无成员 / 无对端且无流量 / 有成员但窗口内无帧）⇒ **UNKNOWN**（三档语义不变，见 §4 反证）。
+
+§8 自校准（make check 的 toolcheck，桩式、CI 可跑）
+`bash contrib/scripts/cli-semantic-selftest.sh` 新增 5 条断言（全部 ✓）：
+- 读视图成员枚举含派生条目、跳表头与「（来源 …）」说明行；空读视图得空集；
+- l2fib 学习条目只留非 static、非 BVI（两个 BD 过滤各一条）；
+- `vpp_bd_id_of_tag` 与 Index 不同（vs-vnf 的 BD-ID=6252701）、tag 不存在得空；
+- 成员口 rx：rx packets 在**接口名下那行**（ens192→189、只有 tx 的口→0、不存在→0）；
+- S8 判定三档（含「旧行为此处判 PASS」的红-绿：空结果不得 PASS）。
+
+§9 环境观察（如实登记，非本条引入）
+① 内存必须用 **1G 大页**：本机 `/dev/hugepages` 以 `pagesize=1024M` 挂载，2M 大页**无挂载点**，
+   libvirt 以 `定义 domain 失败: invalid argument` 拒绝定义 domain（1G/1024MB 才成）。
+② **libvirtd 重启而 nfvisd 未重启**时定义 VNF 同样报该 `invalid argument`（nfvisd 缓存的 libvirt
+   连接失效）；`systemctl restart nfvis` 后即刻成功。两条都写进前置脚本头部。
+③ Alpine 云镜像在本环境**未应用** user-data（guest 无静态地址、无 ping 循环）；其内核 isofs 只作为
+   模块存在、镜像无 udev 自动加载，NoCloud 的 iso9660 seed 未挂上（诊断到此，未再深挖）——
+   故前置脚本缺省用 Debian 12 cloud image（真机证明可读 seed）。
+
+§10 现场终态（清理后核对）
+    -- sw --   （VPP 中无 bridge-domain）
+    -- vmf --  （无 VNF）
+    -- ct --   （无容器）
+    -- alarms -- 仅表头（0 条 active 告警）
+    -- virsh --  无域
+    -- docker -- 无容器
+    -- version -- NFViS 2.0.0~dev18 / Ubuntu 26.04
+  现场对象（sem-vs / sem-vm / sem-ct）已由 `cli-semantic-fixture.sh down` 全部清理；临时物（原始镜像
+  转换件、探针测试文件）亦已清除。**未触碰 ens160 管理口，未改 GRUB/大页。**
+
+§11 方法学（本轮新增一条）
+- **判据错与实现错一样会毁掉信任**：S8 报「不可判定」时，先查的是**套件自己的两个 oracle**
+  （rx 认错列、成员表喂错 ID）——它们让「有证据」的现场看起来「什么都没有」。修 oracle 与修实现
+  必须一起做，且 oracle 的错法要进**桩式自校准**（§8），否则同样的假红会再回来。
