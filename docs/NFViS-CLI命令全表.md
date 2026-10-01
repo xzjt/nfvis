@@ -83,7 +83,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show interfaces <ifname> sriov` | 同上（等价写法） | sysfs SR-IOV | ✅ |
 | `show virtual-switches` | 全部虚拟交换机摘要 | `GET /virtual-switches` | ✅ |
 | `show virtual-switches <name> detail` | 类型/成员端口/VLAN/VRF | `GET /virtual-switches/{name}` | ✅ |
-| `show virtual-switches <name> ports` | 成员端口及状态/计数 | `GET /virtual-switches/{name}/ports` | ✅ |
+| `show virtual-switches <name> ports` | 成员端口及状态/计数（配置静态 ports ∪ VNF/容器声明派生，标注 source） | `GET /virtual-switches/{name}/ports` | ✅ |
 | `show virtual-switches <name> mac-table` | MAC 学习表（仅 L2） | `GET /virtual-switches/{name}/mac-table` | ✅ |
 | `show virtual-switches <name> statistics` | 每端口收发计数 | `GET /virtual-switches/{name}`（statistics 字段） | ✅ |
 | `show vrfs` | L3 交换机（VRF）列表 | `GET /vrfs` | ✅ |

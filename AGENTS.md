@@ -201,8 +201,22 @@
   执行路径的既有拒绝不变（纵深防御）；Web 控制台按 class 切 `body.role-nonsuper`、隐藏未带
   `data-op` 的写入口（#145 的 operator 缺口）。两决策均**契约先行**（附录 A）、`AGENTS.md` 决策条数
   224→226，`docs/v2待做.md` 二.3 标为已收口。真机验证步骤见交付说明（待执行）。
-- 已定决策 226 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#324）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- **v2 线收口两则（决策 #325/#326，2026-10-01）**：**#325「秘密出口」全量复查**——枚举「出口 × 敏感项」
+  并逐条分类，抓出并修掉**两处真泄漏**：① CLI `show configuration | display json|xml` 直接取自**原始配置树**
+  （`x.structured`），只读账号即可读走全部用户口令哈希（`display set` 自带剥离、json/xml 没有）——修法是在
+  `internal/api/pipes.go` 渲染前经 `model.RedactSensitive`；② CLI `show log system` 与 `GET /system/logs`
+  泄露产品首启打印的**一次性口令**（`nfvisdLogTail` 的 journal 原文，#149 只剥了归档）——修法是把剥离实现
+  导出为 `system.ScrubBootstrapCredential`（唯一实现）并在装配期用 `scrubLogSource` 包裹日志来源。
+  守护落成 `internal/api/secrets_egress_test.go` 的**出口矩阵** + **穷尽 GET 路由分类**（新增出口未分类即失败）；
+  例外清单每条写明理由（备份下载/save 导出/抓包/guest 日志/user_data 自由文本）。
+  **#326 交换机成员端口读视图**——VNF/容器 `interfaces <nic> virtual-switch <vs>` 声明的 vNIC 作为**派生条目**
+  并入端口列表（`source=config|vnf|container|runtime`），**配置库 `Config` 结构不动**；三面同源
+  （CLI `show virtual-switches <vs> ports` / REST `GET /virtual-switches/{n}/ports` / Web 详情页新增「来源」列）；
+  派生条目只读，`delete … ports` 对派生条目**拒绝并指向 VNF/容器侧**（顺带修掉「删不存在序号会凭空建空壳端口」）。
+  两决策均**契约先行**（附录 A）、`AGENTS.md` 决策条数 226→228，`docs/v2待做.md` 二.4 与 二.8 标为已收口。
+  真机验证步骤见交付说明（待执行）。
+- 已定决策 228 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#326）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。
