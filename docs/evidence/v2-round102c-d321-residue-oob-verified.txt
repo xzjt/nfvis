@@ -1,0 +1,151 @@
+NFViS v2 真机验证记录 round102c —— 决策 #321 残渣对账：**带外对象复验通过**
+====================================================================
+日期：2026-10-01；承接 `v2-round102b-d322-verified-d321-prereq.txt` §2（#321 前置条件已查明：需一个能写
+BD-Tag / ACL-Tag 的带外手段，而 vppctl 本版本写不出 BD 的 Tag）
+环境：nfvis-vm；产品 **2.0.0~dev15**（已装，含 #321 实现）；仓库副本 `/root/src`
+口径：本轮的**唯一交付**是给 #321 补一条可复跑的带外复验；对象（BD/ACL）均为**带外**（binapi 直建，
+配置未声明），复验后全部清理。
+
+§1 验证工具（新增，入库）
+- 落点：`contrib/scripts/oob-residue/main.go`（package main，独立子目录）。
+  选这里的理由：`contrib/scripts/` 是本仓库**真机手工工具**的既有落点（`cli-fulltest.sh` 等），
+  子目录既能让 `go build ./...` / `go vet ./...` 编译到它（保证不腐），又不会被只认
+  `contrib/scripts/*.sh` 与 shebang 的脚本类守护误认；它不是测试（无测试语义、不进 CI 判定），
+  故不放 `test/`（那里是带 build tag 的集成/e2e 测试包）。
+- 用途：**为残渣对账造带外对象**——用 govpp/binapi 直调 `bridge_domain_add_del`（写 `BdTag`）
+  与 `acl_add_replace`（写 `Tag`），与产品**同一条 API 路径**即为「带外」。头注释已写明
+  「验证用途…非产品功能，不进任何发布件」。工具只做一件事（建/删/列，BD 与 ACL 可选）。
+- 运行方式（**本轮实测两种都可行**）：
+  ① 开发机交叉编译后上机：`GOOS=linux GOARCH=amd64 go build -o oob-residue ./contrib/scripts/oob-residue`
+     → `scp oob-residue nfvis-vm:/tmp/` → `/tmp/oob-residue -action …`（本轮采用此路）。
+  ② 在 nfvis-vm 的 `/root/src` 里 `go run ./contrib/scripts/oob-residue -action …`。
+- 动作：`list | create-bd | delete-bd | create-acl | delete-acl`；参数 `-socket`（缺省
+  `/run/vpp/api.sock`）、`-bd-id`（缺省 4094）、`-bd-tag`（缺省 `oob-verify-residue`）、
+  `-acl-tag`（缺省 `oob-verify-acl`）。
+- 与上一轮失败的因果：round102/102b 用 `vppctl create bridge-domain` + `set bridge-domain … tag`
+  造对象无果——本版本该路径**写不出 BD 的 BdTag**（产品这条走的是 binapi 的 `BdTag` 字段，
+  `internal/orchestrator/network/l2_govpp.go`），而无名 BD 本就被残渣对账**有意跳过**
+  （`internal/orchestrator/network/residue.go`：`if bd.Name == "" { continue }`）。故上一轮
+  「重启后未出现 BRIDGE_DOMAIN_LEFTOVER」是**探针语法无效**，不是产品不工作。
+
+§2 决策 #321 —— BRIDGE_DOMAIN_LEFTOVER（✓ 逐条成立）
+基线（复验前，均为**已声明**对象，非本工具所造）：数据面 BD 仅 `bd_id=4813927 bd_tag="vs-l2"`；
+`show alarms` 无 active。
+
+(1) 造带 tag 的带外 BD —— 成立
+```
+$ /tmp/oob-residue -action create-bd -bd-id 4094 -bd-tag oob-verify-residue
+已建 bridge-domain bd_id=4094 bd_tag="oob-verify-residue"
+$ /tmp/oob-residue -action list
+bridge-domain:
+  bd_id=4813927    bd_tag="vs-l2"
+  bd_id=4094       bd_tag="oob-verify-residue"
+```
+独立事实源（vppctl，非本工具）：`vppctl show bridge-domain 4094 detail` 输出含
+`BD-Tag: oob-verify-residue` ⇒ **tag 真的在数据面里**（这正是上一轮拿不到的事实）。
+
+(2) 15s 巡检即报出，且码/源正确 —— 成立
+```
+$ nfvis-cli -c 'show alarms active'      # 建后约 18s
+warning  BRIDGE_DOMAIN_LEFTOVER  bridge-domain/oob-verify-residue  2026-10-01 02:08:51  <对账文案…>
+$ journalctl -u nfvis | grep 残渣对账
+… "msg":"残渣对账未收敛项","err":"bridge-domain/oob-verify-residue: 数据面存在配置未声明的 bridge-domain oob-verify-residue：…本项由启动/巡检对账按数据面事实重建（原始提交不可回溯）…"
+```
+
+(3) **跨重启可见（重建而非落盘）** —— 成立
+```
+$ systemctl restart nfvis            # 只重启产品服务，未动 VPP——
+$ vppctl show bridge-domain 4094 detail | grep BD-Tag
+  BD-Tag: oob-verify-residue          # VPP 里对象仍在（跨的是 nfvisd 重启，不是 VPP 重启）
+$ nfvis-cli -c 'show alarms active'
+warning  BRIDGE_DOMAIN_LEFTOVER  bridge-domain/oob-verify-residue  2026-10-01 02:09:27  <同一文案>
+```
+`raised_at` 由重启时刻（02:09:27）**重建**（重启前那次巡检的是 02:08:51）⇒ 重启后是从数据面
+**重新对账**出来的，不是进程内记忆/落盘复读。
+
+(4) 清除对象 → 15s 内自动消解 —— 成立
+```
+$ /tmp/oob-residue -action delete-bd -bd-id 4094
+已删 bridge-domain bd_id=4094
+$ vppctl show bridge-domain 4094 detail | grep BD-Tag || echo "(BD 4094 不在数据面)"
+(BD 4094 不在数据面)
+$ sleep 18; nfvis-cli -c 'show alarms active'
+（无 active 告警）
+$ nfvis-cli -c 'show alarms all'
+warning  BRIDGE_DOMAIN_LEFTOVER  bridge-domain/oob-verify-residue  2026-10-01 02:09:27  <同一文案>
+```
+活动表已清、`all` 里该条转为 resolved ⇒ 自动消解。
+
+§3 决策 #321 —— ACL_LEFTOVER（✓ 逐条成立，与 BD 同流程）
+(1) 造带 tag 的带外 ACL：
+```
+$ /tmp/oob-residue -action create-acl -acl-tag oob-verify-acl
+已建 ACL index=1 tag="oob-verify-acl"
+$ vppctl show acl-plugin acl
+acl-index 0 count 1 tag {acl-test}
+acl-index 1 count 1 tag {oob-verify-acl}     # 独立事实源确认 tag 在数据面
+```
+(2) 巡检报出：
+```
+$ nfvis-cli -c 'show alarms active'      # 约 12s 后
+warning  ACL_LEFTOVER  acl/oob-verify-acl  2026-10-01 02:10:12  <对账文案…>
+```
+(3) 跨重启可见：`systemctl restart nfvis` 后 VPP 里 `tag {oob-verify-acl}` 仍在，
+`show alarms active` 于 02:10:23（重启时刻）重建出同一条 `ACL_LEFTOVER`。
+(4) 清除后自动消解：`/tmp/oob-residue -action delete-acl -acl-tag oob-verify-acl`（按 tag 反查
+索引后删）→ 18s 后 `show alarms active` 为空、`show alarms all` 显示该条 resolved。
+（删除时工具自身打印了一句 govpp 告警 `Received reply to an already closed binary API request`
+——那是本工具「dump 后紧接着 request 共用一条 channel」的噪音，删除**成功**，与产品无关。）
+
+§4 三面一致（CLI / REST；Web 卡的数据路径）
+- CLI `show alarms active` 与 REST `GET /api/v1/alarms`（Bearer）**逐字一致**。示例（BD 那条活动告警）：
+```
+$ nfvis-cli -c 'show alarms active'
+warning  BRIDGE_DOMAIN_LEFTOVER  bridge-domain/oob-verify-residue  2026-10-01 02:11:08  <文案>
+
+$ curl -sk -H "Authorization: Bearer $TOK" https://127.0.0.1/api/v1/alarms
+[{"id":"alm-00002","severity":"warning","code":"BRIDGE_DOMAIN_LEFTOVER","message":"<同 CLI 文案>",
+  "source":"bridge-domain/oob-verify-residue","raised_at":"2026-10-01T02:11:08.778664163Z",
+  "state":"active","time_synced":true}]
+```
+  清场后两端点均回到空数组 `[]`。
+- Web 总览告警卡：本次**未做浏览器视觉验收**——浏览器工具在本子代理不可用
+  （`Browser is not available in subagent`），如实登记。可核的数据路径：控制台总览页
+  `renderAlarms` 的入参就是路由表声明的 `/alarms` 端点（`internal/api/ui/app.js`：
+  `renderAlarms(rowsOf(d['/alarms']))`，经 `router.js` 按 `routes.json` 取数、带同一 Bearer），
+  即**上面已逐字核对过的同一个 `GET /api/v1/alarms`**；卡片按 `severity`/`code`/`message`/
+  `source`/`raised_at` 原样渲染，`code` 为自由字符串。故数据面已对齐，仅缺一张视觉截图。
+- REST 端点注意：API 前缀是 `/api/v1`（`internal/api/server.go` 的 `APIPrefix`），裸 `/alarms`
+  返回 404；认证走 Bearer（`POST /api/v1/login` 换 token），Basic 会被拒（`缺少 Bearer Token`）。
+  此点在 round102 未记录，补记以免后续复验再撞。
+
+§5 套件（2.0.0~dev15，复验过程未破坏契约面）
+- `cli-fulltest`（`SRV=https://127.0.0.1:443 CLI_BIN=/usr/bin/nfvis-cli`）：**210 通过 / 0 失败 /
+  13 预期报错**（= round102b 基线，零回归）。
+
+§6 现场复原
+- 本工具所造对象（BD 4094、ACL index 1）**全部删除**：数据面 `bd_tag` 仅剩 `vs-l2`、
+  ACL `tag` 仅剩 `acl-test`；`show alarms all` 无告警；临时二进制 `/tmp/oob-residue` 已删。
+- ⚠️ **基线差异（如实登记）**：本轮开工时现场**并非** round102b 记的 `sw=0 / vmf=0`——
+  已有 `virtual-switch vs-l2`（l2）、`acl acl-test`、`vm cli-vm`、`container cli-ct2`；
+  `show log audit` 显示它们创建于 **01:12~01:29**（早于本会话 ~02:08 开工），**不是本工具所造**，
+  故一律**保留未删**（跑套件时 fulltest 复用了既有 `cli-vm`，`vm.start cli-vm` 出现在 02:12:59）。
+  本轮只保证「自己造的清理干净」，未越权删除他人的声明对象。若需要严格 `sw=0/vmf=0`，
+  应由拥有这些对象的会话自行清理。
+
+§7 结论与口径
+- 决策 #321 的两码（`BRIDGE_DOMAIN_LEFTOVER` / `ACL_LEFTOVER`）**真机复验通过**：造带外对象 →
+  巡检/启动对账报出 → **跨 nfvisd 重启按数据面重建可见** → 清除后 15s 内自动消解；CLI/REST 一致。
+- **口径无需修正**，**未发现新缺陷**（故不新增 #323）：
+  - 「无名 BD 不参与对账」的边界维持**正确**——上一轮的「未验成」正是踩在这条边界上（vppctl 建的
+    BD 无名），不是产品漏报；本轮用带 tag 的 BD 才落到对账视野内。
+  - 「残渣只能覆盖能**枚举数据面对象**的类别（IP 表 / ACL / BD）」的边界也不变：VM/容器等残渣仍只
+    有「同一对象下次成功执行」一条消解路径（本轮未验证、仍如实登记）。
+- 仍未覆盖（保持登记）：真正「提交补偿**也**失败留下残渣」在真机**无法稳定构造**（产品无注入
+  undo 失败的入口）——该项的覆盖口径仍是单元测试（`residue_test.go`）+ 本轮的带外对象路径。
+
+§8 方法学注记
+- 造现场失败必须**显式判失败并停下**，不得把「随后没看到异常」当通过（round102 的教训）；
+  本轮每步都先确认对象**真的**在数据面（vppctl 独立事实源），再做后续断言。
+- 探针本身也会「假绿/假红」：上一轮 vppctl 的 tag 口令无效却看不出——凡「造对象」的探针，
+  都要用**另一个事实源**（这里是 `vppctl show … detail` 与 binapi dump）确认对象真的带上了预期属性。
