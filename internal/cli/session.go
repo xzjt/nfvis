@@ -39,11 +39,31 @@ type Session struct {
 	Source string // ssh | console（影响 FR-CFG-012 自锁判定）
 	Mode   string // oper | config
 	Path   []string
+	// class 本会话的服务端权威 login class（决策 #324；由 cmd/nfvis-cli 从登录响应注入）。
+	// `?`/Tab 候选据此过滤：本会话无权执行的入口不列出，避免「列了但一用就 403」。
+	// 空串/未知（含自定义 class）时**不过滤**——薄客户端拿不到路径 ACL，执行路径仍由
+	// 服务端拒绝（纵深防御保留）；这条边界如实登记在决策行。
+	class string
 }
 
 // New 构造会话（初始操作模式）。
 func New(client Backend, source string) *Session {
 	return &Session{client: client, Source: source, Mode: "oper"}
+}
+
+// SetClass 注入服务端权威的本会话 login class（决策 #324）。
+func (s *Session) SetClass(class string) { s.class = class }
+
+// candidateFilter 按本会话 class 过滤 `?`/Tab 候选的谓词（决策 #324）。
+// 判定与运行期授权**同源**：预置档的等级映射取自 schema.PresetClassLevel（internal/aaa
+// 的预置档判定同一张表），候选按命令树节点的 RequiredClass() 判等级；非预置 class
+// （自定义，纯路径 ACL）返回 nil = 不过滤（边界，见 Session.class 注释）。
+func (s *Session) candidateFilter() schema.CandidateFilter {
+	lvl, ok := schema.PresetClassLevel(s.class)
+	if !ok {
+		return nil
+	}
+	return func(_ []string, n *schema.Node) bool { return lvl.Covers(n.RequiredClass()) }
 }
 
 // Execute 执行一行命令并返回**完整结果**（含服务端的结构化提示标记 Warning），
@@ -173,7 +193,8 @@ func (s *Session) completionContext(line string) (base, partial string, cs []sch
 	}
 	tokens, partial := completionTokens(line)
 	base = strings.TrimSuffix(strings.TrimRight(line, " \t"), partial)
-	return base, partial, schema.Candidates(s.rootForContext(tokens), tokens, partial, s.dynCandidates())
+	return base, partial, schema.CandidatesFiltered(s.rootForContext(tokens), tokens, partial,
+		s.dynCandidates(), s.candidateFilter())
 }
 
 // pipeSegment 返回行内最后一个未引用 `|` 之后的片段与是否存在。

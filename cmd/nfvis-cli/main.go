@@ -84,6 +84,9 @@ func main() {
 		os.Exit(1)
 	}
 	session := cli.New(client, *source)
+	// 决策 #324：把服务端权威的本会话 class 交给前端，`?`/Tab 候选按同一口径过滤
+	// （无权执行的入口不列出；执行路径的既有拒绝语义不变，纵深防御保留）。
+	session.SetClass(client.Class())
 
 	if script != "" {
 		runScript(session, script)

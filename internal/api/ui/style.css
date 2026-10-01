@@ -281,6 +281,13 @@ td.st-crit { color: var(--err); }
    隐藏不是安全边界：服务端按 class 判定，界面只是不把"点下去必被拒"的入口摆出来。 */
 body.role-readonly [data-write] { display: none !important; }
 
+/* 角色渲染（决策 #324）：**非 super-user**（operator / 自定义 class）看不到声明为
+   super-user 的写入口。判据取服务端权威的登录 class（app.js 的 applyRole），按"会改状态
+   但服务端按 REST 端点 class 会拒绝"的动作整类隐藏——避免"列了但一用就 403"。
+   operator 仍可用的少数 O 级入口（连通性测试、core dump 清单导出）显式带 data-op，
+   由 :not() 放行；其余未带 data-op 的写入口对非 super-user 一律隐藏（缺省收紧，宁可少放）。 */
+body.role-nonsuper [data-write]:not([data-op]) { display: none !important; }
+
 /* read-only 落在写页上（深链/收藏）时的说明条：讲清"为什么这页是空的、该找谁"。 */
 #role-notice { display: none; }
 body.role-readonly.role-notice-on #role-notice { display: block; }

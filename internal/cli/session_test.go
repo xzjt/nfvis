@@ -209,3 +209,70 @@ func TestPipePositionCompletion(t *testing.T) {
 		t.Fatalf("无管道行应回归命令树补全: %v", cs)
 	}
 }
+
+// ---------- 决策 #324：`?`/Tab 候选按服务端权威 class 过滤 ----------
+
+func hasCandidate(cs []schema.Candidate, tok string) bool {
+	for _, c := range cs {
+		if c.Token == tok {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCandidatesFilteredByClass(t *testing.T) {
+	// read-only：只见只读入口（show/help/exit），request/configure/ping 整族不可见。
+	ro := newTestSession("oper")
+	ro.SetClass("read-only")
+	top := ro.Candidates("")
+	if !hasCandidate(top, "show") || !hasCandidate(top, "help") {
+		t.Fatalf("read-only 顶层候选应含 show/help: %v", top)
+	}
+	for _, absent := range []string{"request", "configure", "ping", "traceroute", "monitor", "wizard", "clear", "start"} {
+		if hasCandidate(top, absent) {
+			t.Errorf("read-only 顶层候选不应含 %q（只读账号只能 show）: %v", absent, top)
+		}
+	}
+
+	// operator：request/ping 可见，configure/clear/start 不可见；request system 下 super-user 子域不列。
+	op := newTestSession("oper")
+	op.SetClass("operator")
+	top = op.Candidates("")
+	if !hasCandidate(top, "request") || !hasCandidate(top, "ping") {
+		t.Fatalf("operator 顶层候选应含 request/ping: %v", top)
+	}
+	for _, absent := range []string{"configure", "clear", "start"} {
+		if hasCandidate(top, absent) {
+			t.Errorf("operator 顶层候选不应含 super-user-only 的 %q: %v", absent, top)
+		}
+	}
+	sys := op.Candidates("request system ")
+	for _, absent := range []string{"reboot", "shutdown", "poweroff", "zeroize", "software", "kernel", "configuration", "ssh", "storage"} {
+		if hasCandidate(sys, absent) {
+			t.Errorf("operator 的 `request system ?` 不应列出 %q: %v", absent, sys)
+		}
+	}
+	for _, present := range []string{"tech-support", "ntp", "api", "password"} {
+		if !hasCandidate(sys, present) {
+			t.Errorf("operator 的 `request system ?` 应保留 %q: %v", present, sys)
+		}
+	}
+
+	// super-user：不变（configure 可见、request system reboot 可见）。
+	su := newTestSession("oper")
+	su.SetClass("super-user")
+	if top = su.Candidates(""); !hasCandidate(top, "configure") {
+		t.Fatalf("super-user 顶层候选应含 configure: %v", top)
+	}
+	if sys = su.Candidates("request system "); !hasCandidate(sys, "reboot") {
+		t.Fatalf("super-user 的 `request system ?` 应含 reboot: %v", sys)
+	}
+
+	// 自定义 class（非预置）：薄客户端不过滤（边界，见 Session.class 注释）。
+	custom := newTestSession("oper")
+	custom.SetClass("my-custom-class")
+	if top = custom.Candidates(""); !hasCandidate(top, "configure") {
+		t.Fatalf("自定义 class 本地不过滤（fail-open 边界）: %v", top)
+	}
+}

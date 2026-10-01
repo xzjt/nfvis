@@ -17,9 +17,16 @@
 # 用法：
 #   bash contrib/scripts/cli-fulltest.sh            # 全部阶段
 #   bash contrib/scripts/cli-fulltest.sh 1 5        # 只跑阶段 1 与 5
+#   bash contrib/scripts/cli-fulltest.sh --cleanup-only   # 只做收尾清场（异常中断后的补救）
 #
 # 阶段：1 show 只读 · 2 配置语句 · 3 前置对象 · 4 request 运维动作 · 5 操作命令与管道 ·
 #       6 事务语义 · 7 CLI 脚本文件模式 `-f`（决策 #309，客户端开关；见该脚本头部说明）。
+#
+# 收尾清场（决策 #323）：套件在配置库/运行态里**真的建对象**，跑完必须自己清干净——
+# 残渣会让后续套件/走查撞上「同一网口角色互斥」这类**正确校验**而级联出假红。
+# 口径：**套件入口拍开始前现场快照 + 末尾自动清场（EXIT/INT/TERM trap 兜底）**；
+# 清场失败逐条如实打印（不静默）；`--cleanup-only` 仅供异常中断后补救。
+# 详见 cli-fulltest-lib.sh 末尾「套件收尾清场」与规格书附录 A #323。
 #
 # 输出：逐条 ✓/✗ 与小结；原始输出见 /tmp/cli-test/full.log（可用 LOG= 覆盖）。
 # 判定：行首 % / %% 或「校验失败」即失败。注意**环境受限项**（SR-IOV 无 PF/VF）也会显示 ✗，需人工判读。
@@ -62,6 +69,18 @@ want() { # want <n> <想跑的阶段...>：未指定则全跑
 }
 
 TOTAL_PASS=0; TOTAL_FAIL=0; TOTAL_EXP=0
+
+# `--cleanup-only`：只做收尾清场（异常中断后补救入口；常规流程不需要）。
+if [ "${1:-}" = "--cleanup-only" ]; then
+  cleanup_suite
+  exit $?
+fi
+
+# 套件入口：拍「开始前现场」快照（判定通用名对象是否本轮创建的唯一依据，见 lib），
+# 并挂 trap——正常结束、阶段失败、Ctrl-C 都会清场（幂等，重复调用安全）。
+suite_snapshot_before
+trap 'cleanup_suite quiet' EXIT INT TERM
+
 for script in "$HERE"/cli-fulltest-phase*.sh; do
   n=$(phase_of "$script")
   [ "$n" = 0 ] && continue
@@ -82,3 +101,9 @@ echo
 echo "################ 全功能 CLI 冒烟合计 ################"
 echo "通过 $TOTAL_PASS / 失败 $TOTAL_FAIL / 预期报错 $TOTAL_EXP"
 echo "（「预期报错」= 环境受限或防呆守卫正确拒绝；失败项需人工判读，见脚本头部说明）"
+
+# 先显式清一次（把「未清项」并入退出码），再撤 trap，避免清场结论被静默吞掉。
+cleanup_suite
+clean_rc=$?
+trap - EXIT INT TERM
+exit $clean_rc

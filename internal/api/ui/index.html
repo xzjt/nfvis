@@ -788,8 +788,8 @@
             <button id="ops-alarms-btn" data-write type="button" class="ghost">清除已恢复告警</button>
           </div>
           <label for="ops-export-url">core dump 清单导出到</label>
-          <input id="ops-export-url" data-write type="text" placeholder="http://192.0.2.10:8080/collect">
-          <div class="cfg-actions"><button id="ops-export-btn" data-write type="button" class="ghost">导出清单</button></div>
+          <input id="ops-export-url" data-write data-op type="text" placeholder="http://192.0.2.10:8080/collect">
+          <div class="cfg-actions"><button id="ops-export-btn" data-write data-op type="button" class="ghost">导出清单</button></div>
         </fieldset>
         <fieldset>
           <legend>归档下载</legend>
@@ -881,14 +881,14 @@
         <fieldset>
           <legend>连通性测试（经数据面）</legend>
           <label for="diag-host">目标</label>
-          <input id="diag-host" data-write type="text" placeholder="192.0.2.1">
+          <input id="diag-host" data-write data-op type="text" placeholder="192.0.2.1">
           <label for="diag-count">次数</label>
-          <input id="diag-count" data-write type="text" value="5">
+          <input id="diag-count" data-write data-op type="text" value="5">
           <label for="diag-source">源地址（可选，如 192.168.100.1）</label>
-          <input id="diag-source" data-write type="text" placeholder="留空则按目标自动选路">
+          <input id="diag-source" data-write data-op type="text" placeholder="留空则按目标自动选路">
           <div class="cfg-actions">
-            <button id="diag-ping-btn" data-write type="button">执行 ping</button>
-            <button id="diag-trace-btn" data-write type="button" class="ghost">执行 traceroute</button>
+            <button id="diag-ping-btn" data-write data-op type="button">执行 ping</button>
+            <button id="diag-trace-btn" data-write data-op type="button" class="ghost">执行 traceroute</button>
           </div>
         </fieldset>
         <fieldset>

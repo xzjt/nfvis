@@ -3584,8 +3584,10 @@ function showLogin(msg) {
   loadLoginBanner();
 }
 
-// applyRole：按账号 class 切角色渲染（决策 #145，设计 §8：`read-only` 只见只读页、写按钮**隐藏**）。
-// 机制：给 <body> 挂 role-readonly 类，由 style.css 隐藏所有 [data-write]（含动态生成的，见 wbtn）；
+// applyRole：按账号 class 切角色渲染（决策 #145，设计 §8：`read-only` 只见只读页、写按钮**隐藏**；
+// 决策 #324 补齐 operator 粒度：非 super-user 看不到声明为 super-user 的写入口）。
+// 机制：给 <body> 挂 role-readonly（隐藏所有 [data-write]）与 role-nonsuper
+// （隐藏未带 data-op 的 [data-write]——即服务端按 REST 端点 class 会拒绝的那些）；
 // 导航里去掉"写页"（routes.json 里 write: true 的那几条，由 router.js 过滤）。
 //
 // **隐藏不是安全边界**：服务端按 class 判定（决策 #141 前提⑥），界面只是不把"点下去必被拒"的入口摆出来。
@@ -3594,6 +3596,8 @@ function showLogin(msg) {
 function applyRole(user) {
   const cls = (user && user.class) || '';
   document.body.classList.toggle('role-readonly', cls === 'read-only');
+  // 非 super-user（operator / 自定义 class）藏掉 super-user 级写入口；class 缺失时 fail-open。
+  document.body.classList.toggle('role-nonsuper', cls !== '' && cls !== 'super-user');
 }
 
 async function enterApp(user) {
