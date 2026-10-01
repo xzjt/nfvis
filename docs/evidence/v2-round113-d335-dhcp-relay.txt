@@ -1,0 +1,65 @@
+NFViS v2 真机验证记录 round113 —— 决策 #335（DHCP relay）：实现合并 + 数据面转发实证 + 端到端租约未竟登记
+====================================================================
+日期：2026-10-02；环境：nfvis-vm，2.0.0~dev22 → **2.0.0~dev23**；
+代码：PR #260（squash 合入 v2，CI 双跑全绿）；实现由子智能体执行（含契约三处）、主会话审代码。
+
+§1 契约与实现（PR #260）
+- 命令：`set virtual-switches <vs> dhcp-relay server <ip>` / `delete virtual-switches <vs> dhcp-relay`；
+  校验=合法 v4 server + 已 `set gateway ip` 的交换机（source 自动取 BVI 的 v4 地址）。
+- **实现期更正决策初稿**：#335 原文写「仅 type l3 可配」——现有契约/实现里 type=l3 交换机禁止 gateway、
+  无 BVI（relay 的 rx 域正是 BVI 网关域），照字面实现是死特性；实际落地为「L2 交换机 + BVI 网关域」
+  （round112 真机 `vr-sem-vs` 即此形态），决策文本已同步更正。
+- 数据面：binapi `DHCPProxyConfig{RxVrfID=ServerVrfID=网关域表 id, DHCPServer, DHCPSrcAddress=BVI v4}`，
+  与 ApplyGateway 同一来源；随交换机事务 apply（bridge-domain 之后）、undo 收敛回旧声明、删交换机连带撤；
+  **恢复重放含 relay**（独立记源 `virtual-switches/<名>/dhcp-relay`）。
+- 读视图三面：CLI `show virtual-switches <n> detail`「DHCP 中继」行 / REST `dhcp_relay.server` / Web 详情页。
+- 套件：fulltest +2（257→259，phase2）；语义新增 S11（读视图 ↔ `vppctl show dhcp proxy` 对照，
+  无 relay 配置时如实不可判定）。
+- make check RC=0；决策条数 236→237（守护一致）。
+
+§2 真机验证（dev23）——已证部分（独立事实源）
+- **proxy 下发正确**：`set virtual-switches sem-vs type l2 + gateway ip 192.168.99.1/24 + dhcp-relay server
+  192.168.99.10`（rev 828）→ `vppctl show dhcp proxy` = `RX FIB 1445873 | Src 192.168.99.1 |
+  Servers 1445873,192.168.99.10`——与决策的 binapi 字段逐一对应；读视图三面同步显示。
+- **relay 转发真实发生（决定性 pcap 证据，relay ON）**：`vppctl pcap trace rx tx intfc bvi0` 抓到客户端
+  DISCOVER 被 VPP 以 **`192.168.99.1:68 → 192.168.99.10:67` 单播重发**（src=中继源地址）——中继的
+  核心数据面行为在线上可观察。实现细节（如实记录）：VPP 的 relay 以**源地址重写**形态转发，
+  giaddr 字段为 0（非 RFC 2131 的 giaddr 标记），转发判定不依赖 giaddr。
+- **对照（relay OFF，relay-off3 pcap）**：`delete virtual-switches sem-vs dhcp-relay`（rev 835）→
+  `show dhcp proxy` 清空 + 读视图同步 ✓；同拓扑重启客户端，线上 DISCOVER 只有**直连广播形态**
+  `0.0.0.0:68 → 255.255.255.255:67`，**无任何中继单播**。两态相减即为 relay 的净效果。
+- **恢复重放存活**：期间 VM 重启 ×3、`systemctl restart nfvis` ×2、libvirtd 重启 ×1，`show dhcp proxy`
+  配置始终随重放回来；撤销路径（IsAdd=false）幂等生效。
+- 套件：**fulltest 212/0/13**（210→212，+2 条 dhcp-relay；#323 自清场正常）；**语义 25/0/1**（带 fixture
+  现场，唯一不可判定=S11 无 relay 配置如实跳过——其可判定形态已在 §2 人工验证：读视图与
+  `vppctl show dhcp proxy` 三方一致）。
+
+§3 端到端租约：未取得（如实登记，环境工具链阻塞，非产品缺陷证据）
+- 测试设备序列：DHCP server = 第二台 VM（Debian + python3 minidhcpd via user-data）。
+- 阻塞链（逐项实测）：① 容器不能进 BD（vNIC 仅 memif，T0-3 已知限制）→ 退到 VM；② 1G 大页池仅 2 页
+  （VPP 主堆 + server VM 各 1），第二台 vhost VM 起不来（vhost-user 必须大页后备，`useHugepages`
+  缺省 true）；③ 运行时抬 1G 页失败（guest 无连续 1G 空闲块）；改 2M 大页（挂 hugetlbfs pagesize=2M
+  + 2M 池补页）后 client 起来；④ **guest 串口全静默**（product console 60s 窗口收不到任何 guest 输出，
+  域 XML serial=pty 正常）——minidhcpd 的应答缺失无法在 guest 内定位（cookie 偏移问题已修两版仍无
+  OFFER）；⑤ 无 exec 通道（一.9 延后）。
+- 对照态本身干净（§2 relay OFF：客户端广播正常发出）——server 侧应答缺失只影响「租约到手」的
+  最后一环，不影响 relay 转发行为的判定。
+- **遗留**：端到端租约验证待下一轮，前提=可用的 in-guest DHCP server 观测通道（修串口静默，或
+  预制带 DHCP server 的镜像 / 或 server 改挂在跨域静态路由可达的拓扑）。
+
+§4 过程中新登记（缺陷/观察，未修）
+1. **R113-1（中，候选）停机 VM 的配置变更在 start 时不重定义 libvirt domain**：sem-cli 以 1G 大页
+   定义后 `delete memory hugepage-size` → commit（rev 829）→ start 仍按旧 XML（hugepages backing）
+   失败；`systemctl restart nfvis` 后**依旧**；仅 delete+recreate 才重新定义（rev 831 后 XML 正确）。
+   配置是唯一真源，start 应对已停机 VM 按当前配置重定义（或明确报「需删除重建」）。
+2. **R113-2（低，候选）脚本模式校验失败「candidate 保留」随 CLI 进程退出丢失**：commit 校验失败输出
+   「校验失败（candidate 保留）」，但 -c 进程退出后新会话 `show configuration candidate`=无活跃会话、
+   重提交为**空差异**（rev 827 即空提交）——保留语义只在本会话内成立，对脚本用户是假承诺。
+3. **环境观察（非缺陷）**：guest 串口静默（console=ttyS0 与否未知，域 XML 正常）；运行时抬 1G 大页在
+   guest 内不可行；2M 池运行时补页可行（echo 1400 → #329 巡检随后把空闲多余页收回 768，
+   **在用页不动**——#329 的对账与红线在真实场景验证了一次）。
+
+§5 现场终态
+- 版本 2.0.0~dev23；配置无 sem-*/dhcp 残留（grep=0）；**无 active 告警**（大页余量告警在对账收回
+  后自动消解）；最终 rev 836；2M hugetlbfs 临时挂载已卸载。
+- 本轮提交：PR #260（决策 #335）；决策条数 236→237。
