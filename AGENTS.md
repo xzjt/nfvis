@@ -281,8 +281,20 @@
   （`runRecovery` 只挂 `OnConnect`，15s 残留对账有意只动残渣码），修法方向见 `docs/v2待做.md` 二.21；
   **R111-2**（低）lifecycle L3-2 邻居表查询不按转发域取（#328 同族套件 oracle 候选），见二.22。
   证据 `docs/evidence/v2-round111b-d331-d330-suites-and-observations.txt`。
-- 已定决策 234 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#332）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- **round112（R111-1/R111-2 收口：决策 #333/#334，2026-10-01）**：**#333 恢复收敛告警族随事实消解**——
+  R111-1 实测「口已出现在 VPP」「配置声明已删」两种事实变化都不消警、直到 VPP 重连才消（`runRecovery`
+  只挂 `OnConnect`，15s 残留对账有意只动残渣码）。修法**不做周期性全量重放**：新增
+  `L2Network.ReconcileRecoveryAlarms`（15s 巡检与 `ReconcileResidue` 同块调用），对 recovery 作用域
+  活动告警逐条**按来源廉价复核**：来源对象已不在 committed 配置 → 消解（逐族映射；family 级与不可解析者
+  保守保留）；`RECOVERY_IFACE_MISSING` 且来源 `interfaces/<n>` 且配置仍声明 → 用既有 `SwInterfaceIndex`
+  查口是否已在 VPP，已出现即消解；其余（UNCONVERGED 等）保守保留不猜。告警码/形状不变，openapi 不改。
+  **#334 lifecycle L3-2 邻居表按域取**（修 R111-2，#328 同族套件 oracle；根因真机更正：`show ip neighbors`
+  无参＝v4+v6 全表混排、非「只给表 0」，卡点在邻居行锚 bvi0 而非 vhost + 起机期条目瞬时消失）——
+  行匹配对端口==vhost 或对端口 table-id==域表、table-id 全动态推导，fixture 现场 L3-2 转可判定（5/5 正控），
+  全套件 20/0/3。两决策均契约先行（附录 A）、`AGENTS.md` 决策条数
+  234→236、`docs/v2待做.md` 二.21/二.22 标收口。真机验证（dev22：告警两方向消解；lifecycle 复跑）见交付说明。
+- 已定决策 236 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#334）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。

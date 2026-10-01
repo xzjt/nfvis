@@ -115,10 +115,27 @@ vpp_if_l3() {  # <ifname> → 该口的 L3 地址行（无则空）
     cur && /L3 / { print; exit }'
 }
 vpp_neighbors() {  # 邻居表 → 「IP MAC 接口名」
+  # 行格式（VPP 26.06 实测）：Time IP Flags Ethernet Interface（Flags 动态=D、静态=S）。
+  # 列锚定**从行尾**取（$NF=接口、$NF-1=MAC），Flags 列为空导致字段左移时也不丢行。
   vppctl show ip neighbors 2>/dev/null | tr -d '\r' \
-    | awk 'NF >= 5 && $4 ~ /^([0-9a-fA-F][0-9a-fA-F]:){5}[0-9a-fA-F][0-9a-fA-F]$/ {print $2, tolower($4), $5}'
+    | awk '$(NF-1) ~ /^([0-9a-fA-F][0-9a-fA-F]:){5}[0-9a-fA-F][0-9a-fA-F]$/ {print $2, tolower($(NF-1)), $NF}'
 }
-vpp_peer_ip()     { vpp_neighbors | awk -v i="$1" '$3 == i {print $1; exit}'; }
+# <table-id> <vhost-if> → 该**转发域**里的邻居行「IP 接口名」。
+# 决策 #334：VPP 26.06 的 `show ip neighbors` **没有 vrf/表过滤参数**（唯一参数是
+# **位置参数的接口名**；无参＝v4+v6 全表混排、行内不带表号）——「无参只给表 0」是
+# 当年现场的误读。故「按表取」只能按行内接口的表归属筛：
+#   · 对端行就是 vhost 自己 → 它本身就是域成员，直接认；
+#   · 否则对端行的口带地址、且地址行上的 table-id 等于该域 → 认；
+#   · table-id 参数为空＝表 0 口径：只认地址行**不带** table-id 的口（原行为等价）。
+vpp_domain_neighbors() {
+  local tid="$1" ifn="$2" ip mac ifc it
+  vpp_neighbors | while read -r ip mac ifc; do
+    [ -n "$ifc" ] || continue
+    if [ "$ifc" = "$ifn" ]; then printf '%s %s\n' "$ip" "$ifc"; continue; fi
+    it=$(vpp_if_l3 "$ifc" 2>/dev/null | sed -n 's/.*table-id *\([0-9][0-9]*\).*/\1/p')
+    [ "$it" = "$tid" ] && printf '%s %s\n' "$ip" "$ifc"
+  done
+}
 vpp_table_id_of() { vppctl show ip table 2>/dev/null | tr -d '\r' | awk -v n="$1" '$NF == n {gsub("table_id:", "", $2); print $2; exit}'; }
 # v6 表要单独读（VPP 的 `show ip table` 只列 IPv4，`show ip6 table` 才是 v6 视图）：
 # v4/v6 两张表都要真的删掉，只看 v4 会漏掉 v6 的残留。
@@ -423,32 +440,41 @@ else
           bad "L3-1 $ifn 不在 $vs 的表里（L3 侧没接上）"
         fi
       fi
-      # 正向控制：ping 该转发域里的主机（对端地址只认**邻居表**这个独立事实源；
-      # ARP 里没有就如实标「不可判定」——绝不猜地址，猜错会把「对端不在」判成「产品不通」）。
-      # 取不到再退一步：同一张表里**别的**口的邻居也算（同一转发域里的主机同样是有效对端）。
-      peer=$(vpp_peer_ip "$ifn"); psrc="$ifn"
-      if [ -z "$peer" ]; then
-        tid4=$(vpp_if_l3 "$ifn" | sed -n 's/.*table-id *\([0-9][0-9]*\).*/\1/p')
-        for cand in $(vpp_neighbors | awk '$3 != "" {print $1" "$3}'); do
-          set -- $cand
-          case "$(vpp_if_l3 "$2" 2>/dev/null)" in *"table-id $tid4"*) peer="$1"; psrc="$2";; esac
-          [ -n "$peer" ] && break
-        done
-      fi
+      # 正向控制（决策 #334）：ping **该转发域**里的主机（对端地址只认**邻居表**这个独立
+      # 事实源；没有就如实标「不可判定」——绝不猜地址，猜错会把「对端不在」判成「产品不通」）。
+      # 域 table-id 动态推导（**禁写死现场值**，每一步都有独立事实源）：
+      #   ① L3 交换机 → 同名表（`show ip table` 输出末列即表名，按名反查）；
+      #   ② L2 交换机带 BVI 网关 → 产品为网关专属建的 VRF「vr-<交换机名>」同名表
+      #      （internal/orchestrator/network/l3.go GatewayVRFName；真机实测
+      #      `table_id:1445873 vr-sem-vs`，表名不带 vr- 前缀外的任何修饰）；
+      #   ③ 退路 → vhost 自己地址行上的 table-id（vNIC 作 L3 接口，决策 #172）；
+      #   ④ 都取不到 → 空串＝表 0 口径（只认地址行不带 table-id 的口）。
+      if [ -n "$bdid" ]; then dom_tid=$(vpp_table_id_of "vr-$vs"); else dom_tid="$tid"; fi
+      [ -z "$dom_tid" ] && dom_tid=$(vpp_if_l3 "$ifn" | sed -n 's/.*table-id *\([0-9][0-9]*\).*/\1/p')
+      dom_peers=$(vpp_domain_neighbors "$dom_tid" "$ifn")
+      # 优先认 vhost 自己行上的邻居——能从 vhost 发的 ping 才是 vNIC 侧数据面的正控；
+      # 没有再退到同域**别的口**（如 BVI 网关）行上的邻居（同一转发域的主机同样有效）。
+      peer=$(printf '%s\n' "$dom_peers" | awk -v i="$ifn" '$2 == i {print $1" "$2; exit}')
+      [ -z "$peer" ] && peer=$(printf '%s\n' "$dom_peers" | sed -n 1p)
       if [ -z "$peer" ]; then
         skip "L3-2 $ifn 的转发域连通性 —— 邻居表里没有该域的任何主机（先让 guest 发一次流量，ARP 才会有它）"
       else
-        pout=$(vppctl ping "$peer" source "$ifn" repeat 5 2>&1 | tr -d '\r')
+        set -- $peer; peer_ip="$1"; psrc="$2"
+        # ping 源：vhost 带地址（vNIC 作 L3 接口）就从 vhost 发；vhost 无地址（BD 成员，
+        # VPP ping 无源可用）时只能从对端所在口的 L3 身份发（如 BVI 网关）——此时证明的是
+        # 转发域连通（vhost 是否真在域里已由 L3-1 的 BD 成员断言背书），输出里如实说明。
+        src="$ifn"; [ -z "$(vpp_if_l3 "$ifn")" ] && src="$psrc"
+        pout=$(vppctl ping "$peer_ip" source "$src" repeat 5 2>&1 | tr -d '\r')
         sent=$(printf '%s' "$pout" | sed -n 's/.*Statistics: *\([0-9][0-9]*\) sent.*/\1/p')
         recv=$(printf '%s' "$pout" | sed -n 's/.*Statistics: *[0-9][0-9]* sent, *\([0-9][0-9]*\) received.*/\1/p')
-        echo "    ping $peer source $ifn（对端取自邻居表，见 $psrc）→ $(printf '%s' "$pout" | grep Statistics: | head -1)"
+        echo "    ping $peer_ip source $src（对端取自转发域 table-id=${dom_tid:-0} 的邻居表，见 $psrc）→ $(printf '%s' "$pout" | grep Statistics: | head -1)"
         if [ "${sent:-0}" -eq 0 ]; then
-          skip "L3-2 $ifn 到主机 $peer 的连通性 —— 0 发包（本机到该地址没有可用路径）"
+          skip "L3-2 $ifn 到主机 $peer_ip 的连通性 —— 0 发包（本机到该地址没有可用路径）"
         elif [ "${recv:-0}" -gt 0 ]; then
-          ok "L3-2 正向控制成立：经 $ifn 能 ping 通 $peer（$recv/$sent 应答）"
+          ok "L3-2 正向控制成立：经 $src 能 ping 通 $peer_ip（$recv/$sent 应答）"
         else
           exp_act "至少 1 个应答" "$sent 发包 0 应答"
-          bad "L3-2 经 $ifn ping $peer 无应答（vNIC 侧数据面不通）"
+          bad "L3-2 经 $src ping $peer_ip 无应答（vNIC 侧数据面不通）"
         fi
       fi
     done <<< "$pairs"

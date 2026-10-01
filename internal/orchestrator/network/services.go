@@ -238,6 +238,19 @@ func (p *ServicesProvider) ApplyInterface(ctx context.Context, iface model.Inter
 	return nil
 }
 
+// InterfaceExists 查询接口当前是否存在于 VPP（决策 #333：恢复收敛告警的按来源廉价复核用，
+// 与 ApplyInterface 判 ok 同一条 SwInterfaceIndex，dump 级代价；复用本 Provider 的既有
+// 客户端工厂，不新建 VPP 连接通道）。
+func (p *ServicesProvider) InterfaceExists(ifname string) (bool, error) {
+	c, err := p.client()
+	if err != nil {
+		return false, err
+	}
+	defer c.Close()
+	_, ok, err := c.SwInterfaceIndex(ifname)
+	return ok, err
+}
+
 // swapBindings 更新进程内的入/出向绑定登记，返回**变更前**的两个绑定名（决策 #331）。
 // 入向与出向各自独立比较：同一接口上两者可并存，改一个不动另一个。
 func (p *ServicesProvider) swapBindings(iface model.InterfaceConfig) (prevIn, prevOut string) {
