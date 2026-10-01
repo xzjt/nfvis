@@ -677,6 +677,72 @@ else
   rm -f "$S10B"
 fi
 
+# ---------- S11 DHCP 中继（决策 #335）：产品读视图 ↔ vppctl show dhcp proxy ----------
+# 有 relay 配置才可判定：现场没有 relay 时缺正向控制，如实报「不可判定」、**不计入通过**
+# （round84 三档口径）。oracle：`vppctl show dhcp proxy` 的行须同时含中继源地址（BVI 的
+# IPv4 网关）与 server 地址（该行的 RX FIB 表就是网关转发域）；CRLF 行尾先剥（本脚本已知坑）。
+hdr "S11 DHCP 中继：产品读视图 ↔ vppctl show dhcp proxy"
+relay_json=$(curl_api "$SRV/api/v1/configuration" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
+if [ -z "$relay_json" ]; then
+  unk "S11 取不到产品配置（GET /configuration 失败），无法对照"
+elif ! command -v python3 >/dev/null 2>&1; then
+  unk "S11 无 python3（解析配置 JSON 用），无法对照——如实登记"
+else
+  relay_rows=$(printf '%s' "$relay_json" | python3 -c '
+import json, sys
+try:
+    cfg = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for vs in (cfg.get("virtual_switches") or []):
+    srv = vs.get("dhcp_relay_server")
+    if not srv:
+        continue
+    src = ""
+    for a in ((vs.get("gateway") or {}).get("addresses") or []):
+        ip = a.split("/")[0]
+        if ":" not in ip:
+            src = ip
+            break
+    print("%s	%s	%s" % (vs.get("name", ""), srv, src))
+')
+  if [ -z "$relay_rows" ]; then
+    unk "S11 现场没有 relay 配置（无对象可对照）——造现场：set virtual-switches <vs> gateway ip … + dhcp-relay server … 后复跑"
+  else
+    vpp_proxy=$(vppctl show dhcp proxy 2>/dev/null | tr -d '
+')
+    echo "    vppctl show dhcp proxy:"; printf '%s
+' "$vpp_proxy" | sed 's/^/      | /' | head -5
+    if [ -z "$vpp_proxy" ]; then
+      bad "S11 vppctl show dhcp proxy 无输出（oracle 取不到事实）"
+    fi
+    while IFS="$(printf '	')" read -r vsn srv src; do
+      [ -n "$vsn" ] || continue
+      echo "    对象: $vsn  server=$srv  src=$src"
+      rv=$(curl_api "$SRV/api/v1/virtual-switches/$vsn" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
+      if printf '%s' "$rv" | grep -q '"dhcp_relay" *"server" *: *"[^"]*'$srv'"'; then
+        ok "S11 $vsn 产品读视图带 dhcp_relay.server=$srv"
+      else
+        bad "S11 $vsn 产品读视图缺 dhcp_relay.server（或值非 $srv）：$(printf '%s' "$rv" | head -c 160)"
+      fi
+      if printf '%s
+' "$vpp_proxy" | grep -q "$src" &&
+         printf '%s
+' "$vpp_proxy" | grep "$src" | grep -q "$srv"; then
+        ok "S11 $vsn 的 relay 与 VPP 一致（src=$src server=$srv 同行）"
+      elif printf '%s
+' "$vpp_proxy" | grep -q "$src"; then
+        bad "S11 $vsn 在 show dhcp proxy 里只有 src 无 server=$srv：$(printf '%s
+' "$vpp_proxy" | grep "$src" | head -2)"
+      else
+        bad "S11 show dhcp proxy 里找不到 $vsn 的中继源 $src（relay 未下发或未随恢复重放）"
+      fi
+    done <<RELAY_ROWS
+$relay_rows
+RELAY_ROWS
+  fi
+fi
+
 # ============ 清理本脚本创建的对象 ============
 # 接口：先看**条目本身**是不是本次建出来的——是就整条删掉（发现 #15 的同类：收尾只删字段
 # 会留下空壳条目）；否则描述**还回原值**（发现 #15），原本就没有描述才删字段。

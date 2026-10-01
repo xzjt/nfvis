@@ -95,6 +95,26 @@ func checkIP(s string) bool   { return net.ParseIP(s) != nil }
 func checkMAC(s string) bool  { _, err := net.ParseMAC(s); return err == nil }
 func checkVlan(n int) bool    { return n >= 1 && n <= 4094 }
 
+// checkIP4 严格 IPv4（决策 #335：dhcp-relay 的 server 与 BVI 中继源地址都只走 v4）。
+func checkIP4(s string) bool {
+	ip := net.ParseIP(s)
+	return ip != nil && ip.To4() != nil
+}
+
+// gatewayHasV4 网关声明里是否带 IPv4 网关地址（dhcp-relay 的中继源取它）。
+func gatewayHasV4(gw *VSGateway) bool {
+	if gw == nil {
+		return false
+	}
+	for _, a := range gw.Addresses {
+		ip, _, err := net.ParseCIDR(a)
+		if err == nil && ip.To4() != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (v *validator) anyIface(n string) bool { return v.ifaceNames[n] || v.bondNames[n] }
 
 // l3IfaceExists 判断 L3 接口引用：物理口/bond、物理口上的 VLAN 子接口（如 ens2f0.100），
@@ -466,6 +486,21 @@ func (v *validator) checkVirtualSwitches(c Config) {
 			}
 			v.checkACLRef(p+".gateway.acl_in", s.Gateway.AclIn)
 			v.checkACLRef(p+".gateway.acl_out", s.Gateway.AclOut)
+		}
+		// 决策 #335：DHCP 中继只挂在「有 BVI 网关」的交换机域上——中继源地址自动取 BVI 的
+		// IPv4 网关地址，rx 域就是该网关的转发域。type=l3 交换机没有 BVI（L2 专属校验也拦下
+		// gateway），配 relay 只会得到一个永远发不出去的 proxy，故在配置层直接拒绝并给出可照做的下一步。
+		if s.DhcpRelayServer != "" {
+			if !checkIP4(s.DhcpRelayServer) {
+				v.errf(p+".dhcp_relay_server", "DHCP 服务器地址 %q 必须是 IPv4 地址", s.DhcpRelayServer)
+			}
+			switch {
+			case s.Type == "l3":
+				v.errf(p+".dhcp_relay_server", "type=l3 交换机没有 BVI 网关，DHCP 中继仅支持已配置网关的 L2 交换机")
+			case !gatewayHasV4(s.Gateway):
+				v.errf(p+".dhcp_relay_server", "配置 DHCP 中继前须先 set virtual-switches %s gateway ip <ip-prefix>"+
+					"（中继源地址自动取 BVI 的 IPv4 网关地址）", s.Name)
+			}
 		}
 		dupCheck(v, s.Ports, p+".ports", func(pt VSwitchPort) string { return strconv.Itoa(pt.Seq) }, "端口")
 		for _, pt := range s.Ports {

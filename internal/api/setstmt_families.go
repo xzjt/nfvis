@@ -422,6 +422,10 @@ func emitVirtualSwitchFamily(w *stmtWriter, node *schema.Node, val any, prefix, 
 				emitVSGateway(w, gw, toks(prefix, "gateway"))
 			}
 		}
+		// DHCP 中继（决策 #335）：模型单值字符串，语句树是 dhcp-relay server <ip> 两层关键字
+		if v, ok := m["dhcp_relay_server"]; ok && v != "" {
+			w.add(toks(prefix, "dhcp-relay", "server", formatScalar(v)))
+		}
 		if cc, ok := m["cross_connect"].(bool); ok && cc {
 			if len(seqs) == 2 {
 				w.add(toks(prefix, "cross-connect", seqs[0], seqs[1]))

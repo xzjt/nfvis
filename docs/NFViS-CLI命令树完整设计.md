@@ -75,7 +75,9 @@ show interfaces management                          # 管理口（内核侧，IP
 
 show virtual-switches                               # 全部虚拟交换机摘要（GET /virtual-switches）
 show virtual-switches <name>
-  ├─ detail                                         # 类型、成员端口、VLAN/VRF 配置
+  ├─ detail                                         # 类型、成员端口、VLAN/VRF 配置、DHCP 中继（决策 #335：
+                                                    #   配置了 dhcp-relay 才显示「DHCP 中继」行，与 REST
+                                                    #   GET /virtual-switches/{n} 的 dhcp_relay 同源）
   ├─ ports                                          # 成员端口及状态/计数：配置静态 ports ∪ VNF/容器声明派生，
                                                     #   逐条标注 source（config|vnf|container|runtime，附录 A #326）；
                                                     #   与 REST GET /virtual-switches/{n}/ports 同源；派生条目只读
@@ -432,6 +434,14 @@ set vlan access <vlan>                               # 交换机级默认 untag 
 set gateway ip <ip-prefix>                           # BVI 三层网关（IPv4/IPv6 可配多条，FR-NET-014）
 set gateway vrf <name>                               # 网关所属 VRF；缺省为专属 VRF vr-<name>
 set gateway acl-in <acl> | acl-out <acl>
+set dhcp-relay server <ip>                           # DHCP 中继（决策 #335）：把该交换机转发域（网关 VRF，
+                                                     #   缺省专属 vr-<name>）里的 DHCP 广播中继到 <ip>。
+                                                     #   前置校验：仅 L2 且已 `set gateway ip` 的交换机可配——
+                                                     #   src 地址自动取 BVI 的 IPv4 网关地址（用户不填），
+                                                     #   未配网关/无 IPv4 网关地址即拒绝并指向 `set gateway ip`；
+                                                     #   server 必填、IPv4，且须在该转发域内可达（跨 VRF 的 server 不在 v1）
+delete dhcp-relay                                    # 撤销中继（发 dhcp_proxy_config IsAdd=false，幂等；
+                                                     #   随交换机删除一并撤）
 set ports [<seq>] interface <ifname> [trunk vlans <vlan-list> | native <vlan>]
 set ports [<seq>] vnf <vm-name> interface <vnic-name> [trunk vlans <vlan-list>]
 set ports [<seq>] container <ct-name> interface <vnic-name>

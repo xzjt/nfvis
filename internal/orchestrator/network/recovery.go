@@ -119,6 +119,15 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 		if err := n.ApplyBridgeDomain(ctx, vs); err != nil {
 			record("virtual-switches/"+vs.Name, err)
 		}
+		// 决策 #335：声明了 relay 的交换机重放同一条 proxy 消息——VPP 重启后 proxy 运行态
+		// 消失，不重放即静默丢中继（与 L2-2 同族教训）。独立记源、失败不阻塞其余对象；
+		// resetProviders 已清空 DhcpProvider 登记，声明未变也会重新下发（幂等）。
+		// 只补齐不摘除（附录 A #35）：清 relay 走提交编排（IsAdd=false），恢复段不猜。
+		if n.dhcp != nil && vs.DhcpRelayServer != "" {
+			if err := n.dhcp.SyncRelay(ctx, vs); err != nil {
+				record("virtual-switches/"+vs.Name+"/dhcp-relay", err)
+			}
+		}
 	}
 	for _, vrf := range cfg.Vrfs {
 		if err := n.ApplyVRF(ctx, vrf); err != nil {
@@ -238,6 +247,9 @@ func (n *L2Network) resetProviders() {
 	}
 	if n.svc != nil {
 		n.svc.reset()
+	}
+	if n.dhcp != nil {
+		n.dhcp.reset()
 	}
 	if n.lldp != nil {
 		n.lldp.reset()

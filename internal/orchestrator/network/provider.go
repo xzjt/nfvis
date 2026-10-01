@@ -21,6 +21,7 @@ type L2Network struct {
 	nat                          *NatProvider
 	bond                         *BondProvider
 	lldp                         *LldpProvider
+	dhcp                         *DhcpProvider      // 交换机 DHCP 中继（决策 #335，可空——未注入即无 relay 编排）
 	vhost                        *VhostUserProvider // M4-4：VNF vNIC 接入
 	memif                        *MemifProvider     // M4-7：容器 vNIC 接入
 	vhostDir                     string             // vhost-user socket 目录（恢复收敛重放用）
@@ -86,6 +87,10 @@ func (n *L2Network) SetNAT(p *NatProvider) {
 
 // SetBond 追加 bond 编排（M3-6）。
 func (n *L2Network) SetBond(p *BondProvider) { n.bond = p }
+
+// SetDhcp 追加交换机 DHCP 中继编排（决策 #335；未注入时 relay 语句在提交校验层仍可配，
+// 但数据面无下发路径——恢复收敛会如实记未收敛项，正常装配总是注入）。
+func (n *L2Network) SetDhcp(p *DhcpProvider) { n.dhcp = p }
 
 // SetLldp 追加 LLDP 编排（M3-6）。
 func (n *L2Network) SetLldp(p *LldpProvider) { n.lldp = p }
@@ -346,6 +351,13 @@ func (n *L2Network) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitc
 }
 
 func (n *L2Network) DeleteBridgeDomain(ctx context.Context, name string) error {
+	// 决策 #335：先撤 DHCP 中继（proxy 引用该域的表与 BVI 地址），再拆网关与 BD——
+	// 与「先解引用、后删被引用」的删除顺序一致。无登记时幂等空操作。
+	if n.dhcp != nil {
+		if err := n.dhcp.DeleteRelay(ctx, name); err != nil {
+			return err
+		}
+	}
 	// 先删 BVI 网关（其 BD 成员身份随之消失），再删 BD：BD 仍有成员时
 	// VPP 拒绝删除（-120）；l2 摘除已失效成员（BVI/vhost）按已摘除处理。
 	if n.l3 != nil {
@@ -354,6 +366,17 @@ func (n *L2Network) DeleteBridgeDomain(ctx context.Context, name string) error {
 		}
 	}
 	return n.l2.DeleteBridgeDomain(ctx, name)
+}
+
+// ApplyDhcpRelay 收敛一台交换机的 DHCP 中继声明（决策 #335）。调用时机：
+// 提交编排把它作为 bridge-domain **之后**的伴随操作（proxy 的表 id 与中继源地址来自网关声明，
+// 先有 BVI 地址与表才有 relay）；恢复收敛的重放走 recovery.go 交换机段的独立记源。
+// 未注入 DhcpProvider 时为空操作（noop/无 VPP 路径）。
+func (n *L2Network) ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) error {
+	if n.dhcp == nil {
+		return nil
+	}
+	return n.dhcp.SyncRelay(ctx, vs)
 }
 
 func (n *L2Network) ApplyVRF(ctx context.Context, vrf model.Vrf) error {

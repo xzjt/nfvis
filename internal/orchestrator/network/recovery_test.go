@@ -23,6 +23,7 @@ type recoveryFixture struct {
 	svc    *fakeSvc
 	bond   *fakeBond
 	lldp   *fakeLldp
+	dhcp   *fakeDhcp
 	alarms *AlarmStore
 }
 
@@ -37,9 +38,12 @@ func newRecoveryFixture() *recoveryFixture {
 	net.SetNAT(NewNatProvider(nat))
 	net.SetBond(NewBondProvider(bond))
 	net.SetLldp(NewLldpProvider(lldp))
+	dhcp := &fakeDhcp{}
+	net.SetDhcp(NewDhcpProvider(dhcp))
 	alarms := NewAlarmStore()
 	net.SetAlarms(alarms)
-	return &recoveryFixture{net: net, l2: l2, l3: l3, acl: acl, nat: nat, svc: svc, bond: bond, lldp: lldp, alarms: alarms}
+	return &recoveryFixture{net: net, l2: l2, l3: l3, acl: acl, nat: nat, svc: svc, bond: bond, lldp: lldp,
+		dhcp: dhcp, alarms: alarms}
 }
 
 func l2Switch(name string, ports ...string) model.VirtualSwitch {

@@ -348,11 +348,27 @@ func (s *Server) handleGetVSwitches(w http.ResponseWriter, r *http.Request) {
 		mapEngineError(w, err)
 		return
 	}
-	out := cfg.VirtualSwitches
-	if out == nil {
-		out = []model.VirtualSwitch{}
+	out := make([]map[string]any, 0, len(cfg.VirtualSwitches))
+	for _, vs := range cfg.VirtualSwitches {
+		out = append(out, vswitchView(vs))
 	}
 	writeJSON(w, http.StatusOK, paginate(r, out))
+}
+
+// vswitchView 交换机的读视图形状（决策 #335）：配置库的 dhcp_relay_server 以
+// dhcp_relay:{server} 对象呈现（与 openapi VirtualSwitch.dhcp_relay 契约同源）；
+// 未配置时两者都缺席（不编造）。其余字段保持模型序列化原样。
+func vswitchView(vs model.VirtualSwitch) map[string]any {
+	b, _ := json.Marshal(vs)
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return map[string]any{}
+	}
+	if vs.DhcpRelayServer != "" {
+		m["dhcp_relay"] = map[string]any{"server": vs.DhcpRelayServer}
+	}
+	delete(m, "dhcp_relay_server")
+	return m
 }
 
 // handleGetVSwitch GET /api/v1/virtual-switches/{name}。
@@ -367,15 +383,12 @@ func (s *Server) handleGetVSwitch(w http.ResponseWriter, r *http.Request) {
 		if vs.Name == name {
 			// 契约 VirtualSwitch.statistics：运行态可用且该交换机在数据面时附带（FR-NET-016）
 			if st, ok := s.vswitchStatistics(r.Context(), name); ok {
-				b, _ := json.Marshal(vs)
-				var m map[string]any
-				if json.Unmarshal(b, &m) == nil {
-					m["statistics"] = st
-					writeJSON(w, http.StatusOK, m)
-					return
-				}
+				m := vswitchView(vs)
+				m["statistics"] = st
+				writeJSON(w, http.StatusOK, m)
+				return
 			}
-			writeJSON(w, http.StatusOK, vs)
+			writeJSON(w, http.StatusOK, vswitchView(vs))
 			return
 		}
 	}

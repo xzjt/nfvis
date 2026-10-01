@@ -296,8 +296,13 @@
   都在一个 15s 巡检周期内消解（删声明/口进 VPP，均不重启），且事实未变时告警保持不误清；告警现场的
   正确造法是「fixture 在场时声明→fixture 落口→重启触发」（口不在 VPP 时声明会被正确拒绝、candidate 不收）。
   #334 已在 dev21 验证（见上）。证据 `docs/evidence/v2-round112-d333-d334-r111-closeout.txt`。
-- 已定决策 236 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#334）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- **round113 起第 1 批余项开工（决策 #335，2026-10-01，实现中）**：**DHCP relay**——`set virtual-switches <vs>
+  dhcp-relay server <ip>`（VPP dhcp proxy 按 rx-VRF 中继，src 自动取 BVI v4 网关地址；适用形态=「L2 交换机 + BVI 网关域」——实现期更正：type=l3 无 BVI/网关，语义不适用；
+  binapi `DHCPProxyConfig/DHCPProxyDump` 真机已探明可用）。范围：只做 relay（server 延后）、server 须域内可达
+  （跨 VRF 不在 v1）；恢复重放必须含 relay。契约先行（附录 A #335、命令树设计、命令全表、openapi），
+  `AGENTS.md` 决策条数 236→237；真机验证（端到端租约 + server 侧 giaddr 单播 + 无 relay 对照）见交付说明。
+- 已定决策 237 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#335）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。

@@ -353,6 +353,19 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 				func(ctx context.Context) error { return a.net.ApplyBridgeDomain(ctx, o) },
 				func(ctx context.Context) error { return a.net.DeleteBridgeDomain(ctx, vs.Name) },
 			))
+			// 决策 #335：DHCP 中继作为 bridge-domain 之后的伴随操作下发（先有 BVI 地址与表
+			// 才有 relay）。新配/改 server 下发 IsAdd=true，清 relay 按登记撤（IsAdd=false），
+			// 声明未变时幂等跳过；undo 把中继收敛回旧声明（新交换机的删除向=整体撤销）。
+			// 校验层已保证：配 relay 的交换机必有 IPv4 网关（中继源地址的来源）。
+			ops = append(ops, applyOp(
+				fmt.Sprintf("dhcp-relay[%s]", vs.Name),
+				func(ctx context.Context) error { return a.net.ApplyDhcpRelay(ctx, vs) },
+				vs.Name, ok,
+				func(ctx context.Context) error { return a.net.ApplyDhcpRelay(ctx, o) },
+				func(ctx context.Context) error {
+					return a.net.ApplyDhcpRelay(ctx, model.VirtualSwitch{Name: vs.Name})
+				},
+			))
 		}
 	}
 	for _, vrf := range new.Vrfs {

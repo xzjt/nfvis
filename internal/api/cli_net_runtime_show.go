@@ -75,6 +75,10 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 		for _, vs := range cfg.VirtualSwitches {
 			if vs.Name == name {
 				m["configured_type"] = vs.Type
+				// 决策 #335：声明了 DHCP 中继才显示（与 REST 详情的 dhcp_relay 同源、同形状）
+				if vs.DhcpRelayServer != "" {
+					m["dhcp_relay"] = map[string]any{"server": vs.DhcpRelayServer}
+				}
 			}
 		}
 	}
