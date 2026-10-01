@@ -493,3 +493,65 @@ func TestDeleteBridgeDomainRemovesRelay(t *testing.T) {
 		t.Fatal("BD 应已删除")
 	}
 }
+
+// ---------- 决策 #337：MAC 学习上限（learn-limit）下发/清配置/幂等 ----------
+
+func TestLearnLimitApplyResetIdempotent(t *testing.T) {
+	f := newFakeL2()
+	p := NewL2Provider(f)
+	vs := model.VirtualSwitch{Name: "vs-l2", Type: "l2", LearnLimit: 8192,
+		Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens192"}}}
+	bd := BDID("vs-l2")
+
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("ApplyBridgeDomain(apply): %v", err)
+	}
+	if f.learn[bd] != 8192 {
+		t.Fatalf("应下发学习上限 8192，实际 %v（calls=%v）", f.learn, f.calls)
+	}
+
+	// 声明未变：幂等（不重发 learn 消息；端口重挂会记 attach，故只数 learn 消息）
+	learnCalls := func() int {
+		n := 0
+		for _, c := range f.calls {
+			if strings.HasPrefix(c, "learn:") {
+				n++
+			}
+		}
+		return n
+	}
+	n := learnCalls()
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("ApplyBridgeDomain(幂等): %v", err)
+	}
+	if learnCalls() != n {
+		t.Fatalf("声明未变不应重发 learn 消息（实际 %v）", f.calls)
+	}
+
+	// 改值：重发新上限
+	vs.LearnLimit = 4096
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("ApplyBridgeDomain(改值): %v", err)
+	}
+	if f.learn[bd] != 4096 {
+		t.Fatalf("改值应重发 4096，实际 %v", f.learn)
+	}
+
+	// 清配置：恢复 VPP 默认（不设限）
+	vs.LearnLimit = 0
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("ApplyBridgeDomain(清配置): %v", err)
+	}
+	if f.learn[bd] != vppDefaultLearnLimit {
+		t.Fatalf("清配置应恢复默认 %d，实际 %d", vppDefaultLearnLimit, f.learn[bd])
+	}
+
+	// 已无登记：再清是空操作
+	n = learnCalls()
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("ApplyBridgeDomain(再清): %v", err)
+	}
+	if learnCalls() != n {
+		t.Fatalf("无登记时再清不应下发: %v", f.calls)
+	}
+}

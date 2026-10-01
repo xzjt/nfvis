@@ -27,6 +27,7 @@ type L2Network struct {
 	vhostDir                     string             // vhost-user socket 目录（恢复收敛重放用）
 	memifDir                     string             // memif socket 目录
 	alarms                       *AlarmStore        // 恢复收敛失败项落点（M3-8，可空）
+	loop                         *loopDetector      // 采样式 L2 环路检测状态（决策 #337，进程内）
 	sriov                        *SRIOVProvider     // PF 的 VF 数量（声明式 vf-count，决策 #70）
 	// runtimeMu 串行化「进程内登记失效」与「NAT 下发」：失效清的是 NAT inside/outside 的解析
 	// 来源（L3 侧登记），若与一次 ApplyNAT 交错，那次下发会按「空 inside」算期望集——
@@ -39,7 +40,7 @@ func NewL2Network(base orchestrator.NetworkProvider, l2 *L2Provider) *L2Network 
 	if base == nil {
 		base = orchestrator.NewNoopNetwork()
 	}
-	return &L2Network{NetworkProvider: base, l2: l2,
+	return &L2Network{NetworkProvider: base, l2: l2, loop: newLoopDetector(),
 		vhostDir: orchestrator.DefaultVhostDir, memifDir: orchestrator.DefaultMemifDir}
 }
 

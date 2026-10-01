@@ -223,3 +223,58 @@ func TestCLIVSwitchDhcpRelayCandidates(t *testing.T) {
 		t.Fatalf("dhcp-relay 下应能补到 server，实际: %v", kids)
 	}
 }
+
+// TestCLIVSwitchLearnLimitStatementAndView（决策 #337）：语句 → 模型 → display set 反推 →
+// 读视图（detail 带 learn_limit）→ delete 清除的端到端回归。
+func TestCLIVSwitchLearnLimitStatementAndView(t *testing.T) {
+	x, engine := newCLIKit(t)
+
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-ll type l2",
+		"set virtual-switches vs-ll learn-limit 8192",
+		"commit",
+		"exit", // 回操作模式（show virtual-switches … detail 是运行态读视图）
+	)
+	cfg, err := engine.Committed()
+	if err != nil {
+		t.Fatalf("读取 committed: %v", err)
+	}
+	if len(cfg.VirtualSwitches) != 1 || cfg.VirtualSwitches[0].LearnLimit != 8192 {
+		t.Fatalf("learn-limit 应写入模型: %+v", cfg.VirtualSwitches)
+	}
+
+	// display set 反推：learn-limit 语句必须可还原（决策 #155 往返口径）
+	res := x.Execute("admin", aaaClassSU, "ssh", "show configuration | display set")
+	if !strings.Contains(res.Output, "learn-limit 8192") {
+		t.Fatalf("display set 应反推出 learn-limit 语句:\n%s", res.Output)
+	}
+
+	// 读视图：详情在配置了 learn-limit 时带「学习上限」行（渲染为 learn-limit，与 REST 详情同源）
+	x.setVppState(fakeVppState{bds: []BridgeDomainState{
+		{ID: 11, Name: "vs-ll", Learn: true, Flood: true},
+	}})
+	out := x.Execute("admin", aaaClassSU, "ssh", "show virtual-switches vs-ll detail").Output
+	if !strings.Contains(out, "learn-limit") || !strings.Contains(out, "8192") {
+		t.Fatalf("交换机详情应显示学习上限:\n%s", out)
+	}
+
+	// delete 语句：值清空；此后详情不再出现学习上限
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"delete virtual-switches vs-ll learn-limit",
+		"commit",
+		"exit",
+	)
+	cfg, err = engine.Committed()
+	if err != nil {
+		t.Fatalf("读取 committed: %v", err)
+	}
+	if cfg.VirtualSwitches[0].LearnLimit != 0 {
+		t.Fatalf("delete learn-limit 应清空: %+v", cfg.VirtualSwitches)
+	}
+	out = x.Execute("admin", aaaClassSU, "ssh", "show virtual-switches vs-ll detail").Output
+	if strings.Contains(out, "learn-limit") {
+		t.Fatalf("未配置时详情不得出现 learn-limit:\n%s", out)
+	}
+}

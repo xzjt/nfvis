@@ -110,6 +110,9 @@ type L2Client interface {
 	BridgeDomains() ([]BDRuntime, error)
 	BridgeDomainExists(bdID uint32) (bool, error)
 	BridgeDomainAddDel(bdID uint32, add, learn bool, tag string) error
+	// SetLearnLimit 下发 bridge-domain 的 MAC 学习条数上限（决策 #337，VPP
+	// `bridge_domain_set_learn_limit`）。传 VPP 默认值即恢复不设限。
+	SetLearnLimit(bdID, limit uint32) error
 	SwInterfaceSetL2Bridge(swIfIndex, bdID uint32, portType L2PortType, shg uint8, enable bool) error
 	SwInterfaceSetL2Xconnect(swIfIndex, bdID uint32, enable bool) error
 	CreateSubif(req CreateSubifReq) (uint32, error)
@@ -138,6 +141,10 @@ type attachment struct {
 	xconnect bool
 }
 
+// vppDefaultLearnLimit VPP bridge-domain 的默认 MAC 学习上限（binapi 的
+// `bridge_domain_set_default_learn_limit` 口径）：产品用它表示「未配置 / 恢复默认」。
+const vppDefaultLearnLimit uint32 = 16777216
+
 // L2Provider 实现 L2 虚拟交换机的编排。
 type L2Provider struct {
 	// client 每次操作获取一个 L2Client（govpp 侧按需开 API channel；测试注入假实现）。
@@ -147,17 +154,22 @@ type L2Provider struct {
 	attached map[uint32]map[uint32]attachment // bdID → swIfIndex → 挂接方式
 	// subifs bdID → 本交换机创建的 VLAN 子接口集合（删交换机时回收，FR-NET-011 的回收面）
 	subifs map[uint32]map[uint32]bool
-	acl    *AclProvider // 可选：端口 acl-in/acl-out 绑定
+	// learnLimits bdID → 已下发的 MAC 学习上限（决策 #337）。进程内登记：值未变则幂等跳过、
+	// 清配置时按登记恢复 VPP 默认值；跨 nfvisd 重启/VPP 重启由恢复收敛按配置重放。
+	learnLimits map[uint32]uint32
+	acl         *AclProvider // 可选：端口 acl-in/acl-out 绑定
 }
 
 // NewL2Provider 以固定客户端构造（测试/单连接场景）。
 func NewL2Provider(c L2Client) *L2Provider {
-	return &L2Provider{client: func() (L2Client, error) { return c, nil }, attached: map[uint32]map[uint32]attachment{}}
+	return &L2Provider{client: func() (L2Client, error) { return c, nil }, attached: map[uint32]map[uint32]attachment{},
+		learnLimits: map[uint32]uint32{}}
 }
 
 // NewL2ProviderFunc 以客户端工厂构造（连接可能重连时使用）。
 func NewL2ProviderFunc(f func() (L2Client, error)) *L2Provider {
-	return &L2Provider{client: f, attached: map[uint32]map[uint32]attachment{}}
+	return &L2Provider{client: f, attached: map[uint32]map[uint32]attachment{},
+		learnLimits: map[uint32]uint32{}}
 }
 
 // SetACL 注入 ACL 编排（端口 acl-in/acl-out 绑定）。
@@ -181,6 +193,7 @@ func (p *L2Provider) reset() {
 	p.mu.Lock()
 	p.attached = map[uint32]map[uint32]attachment{}
 	p.subifs = map[uint32]map[uint32]bool{}
+	p.learnLimits = map[uint32]uint32{} // 决策 #337：VPP 重启后学习上限随 BD 一并复位，须按配置重放
 	p.mu.Unlock()
 }
 
@@ -204,6 +217,11 @@ func (p *L2Provider) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwit
 		if err := c.BridgeDomainAddDel(bdID, true, true, vs.Name); err != nil {
 			return fmt.Errorf("建 bridge-domain %s(id=%d): %w", vs.Name, bdID, err)
 		}
+	}
+
+	// 决策 #337：MAC 学习条数上限（缓解环路）。BD 必须先存在，故放在建 BD 之后。
+	if err := p.syncLearnLimit(c, bdID, vs.LearnLimit); err != nil {
+		return fmt.Errorf("交换机 %s: %w", vs.Name, err)
 	}
 
 	desired, err := p.desiredMembers(c, vs)
@@ -246,6 +264,57 @@ func (p *L2Provider) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwit
 		}
 	}
 	return nil
+}
+
+// syncLearnLimit 把交换机的学习条数上限收敛到 VPP bridge-domain（决策 #337）。
+//   - want>0：与登记一致则幂等空操作，否则下发 `bridge_domain_set_learn_limit` 并登记；
+//   - want<=0（未配置/清配置）：有登记才按 VPP 默认值下发一次（恢复不设限），随后清登记。
+//
+// 只声明「按配置收敛」，不做运行态读回——govpp v0.13.0 的 `bridge_domain_details` **没有**
+// learn_limit 字段（见 l2_govpp.go 的 BridgeDomains），无独立事实源可读；读视图因此呈现配置值。
+func (p *L2Provider) syncLearnLimit(c L2Client, bdID uint32, want int) error {
+	p.mu.Lock()
+	applied, had := p.learnLimits[bdID]
+	p.mu.Unlock()
+	if want <= 0 {
+		if !had {
+			return nil // 未配置且无登记：VPP 侧本就是默认值，无动作（幂等）
+		}
+		if err := c.SetLearnLimit(bdID, vppDefaultLearnLimit); err != nil {
+			return fmt.Errorf("恢复 bridge-domain %d 的默认学习上限: %w", bdID, err)
+		}
+		p.mu.Lock()
+		delete(p.learnLimits, bdID)
+		p.mu.Unlock()
+		return nil
+	}
+	if had && applied == uint32(want) {
+		return nil
+	}
+	if err := c.SetLearnLimit(bdID, uint32(want)); err != nil {
+		return fmt.Errorf("设置 bridge-domain %d 的学习上限 %d: %w", bdID, want, err)
+	}
+	p.mu.Lock()
+	if p.learnLimits == nil {
+		p.learnLimits = map[uint32]uint32{}
+	}
+	p.learnLimits[bdID] = uint32(want)
+	p.mu.Unlock()
+	return nil
+}
+
+// ApplyLearnLimit 按声明重放一台 L2 交换机的学习上限（决策 #337，恢复收敛用独立记源）。
+// 与 ApplyBridgeDomain 内联的收敛共用 syncLearnLimit；声明未变时为幂等空操作。
+func (p *L2Provider) ApplyLearnLimit(ctx context.Context, vs model.VirtualSwitch) error {
+	if vs.Type != "l2" {
+		return nil
+	}
+	c, err := p.client()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	return p.syncLearnLimit(c, BDID(vs.Name), vs.LearnLimit)
 }
 
 // DeleteBridgeDomain 删除 BD：先摘除登记成员，再删 BD（FR-NET-016）。
@@ -294,6 +363,7 @@ func (p *L2Provider) DeleteBridgeDomain(ctx context.Context, name string) error 
 		subifs = append(subifs, int(idx))
 	}
 	delete(p.subifs, bdID)
+	delete(p.learnLimits, bdID) // 决策 #337：BD 已删，学习上限登记随之下线（不必恢复默认）
 	p.mu.Unlock()
 	sort.Ints(subifs)
 	for _, idx := range subifs {

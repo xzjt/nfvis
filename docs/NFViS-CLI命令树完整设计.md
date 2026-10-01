@@ -77,7 +77,9 @@ show virtual-switches                               # 全部虚拟交换机摘�
 show virtual-switches <name>
   ├─ detail                                         # 类型、成员端口、VLAN/VRF 配置、DHCP 中继（决策 #335：
                                                     #   配置了 dhcp-relay 才显示「DHCP 中继」行，与 REST
-                                                    #   GET /virtual-switches/{n} 的 dhcp_relay 同源）
+                                                    #   GET /virtual-switches/{n} 的 dhcp_relay 同源）、
+                                                    #   MAC 学习上限（决策 #337：配置了 learn-limit 才显示
+                                                    #   「学习上限」行，与 REST 的 learn_limit 同源）
   ├─ ports                                          # 成员端口及状态/计数：配置静态 ports ∪ VNF/容器声明派生，
                                                     #   逐条标注 source（config|vnf|container|runtime，附录 A #326）；
                                                     #   与 REST GET /virtual-switches/{n}/ports 同源；派生条目只读
@@ -442,6 +444,12 @@ set dhcp-relay server <ip>                           # DHCP 中继（决策 #335
                                                      #   server 必填、IPv4，且须在该转发域内可达（跨 VRF 的 server 不在 v1）
 delete dhcp-relay                                    # 撤销中继（发 dhcp_proxy_config IsAdd=false，幂等；
                                                      #   随交换机删除一并撤）
+set learn-limit <n>                                  # MAC 学习条数上限（决策 #337，仅 L2）：下发
+                                                     #   bridge_domain_set_learn_limit，环路/广播风暴的
+                                                     #   缓解手段（**只缓解不阻断**）。取值 1-16777216
+                                                     #   （超限拒绝并说明；VPP 默认 16777216 即不设限）。
+                                                     #   候选为取值（无枚举）；校验在模型 validate。
+delete learn-limit                                   # 清上限（恢复 VPP 默认 16777216，幂等）
 set ports [<seq>] interface <ifname> [trunk vlans <vlan-list> | native <vlan>]
 set ports [<seq>] vnf <vm-name> interface <vnic-name> [trunk vlans <vlan-list>]
 set ports [<seq>] container <ct-name> interface <vnic-name>

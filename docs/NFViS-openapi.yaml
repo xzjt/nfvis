@@ -2863,6 +2863,12 @@ components:
             DHCP 中继的服务器地址在**配置库/POST 请求体**里的存储键（与 dhcp_relay.server 同一声明，
             两种形状各司其职：GET 详情/列表回 dhcp_relay 对象，写入与 GET /configuration 用本键）。
             未配置时省略。
+        learn_limit:
+          type: integer
+          description: |
+            仅 L2：MAC 学习条数上限（决策 #337）。读视图与配置库**同一键、同值**（不像 dhcp_relay
+            那样换形状）；下发 VPP `bridge_domain_set_learn_limit`，是环路/广播风暴的**缓解**手段
+            （只告警不阻断，非 STP）。取值 1-16777216（超出拒绝）。未配置时省略（VPP 默认不设限）。
         ports:
           type: array
           items: { $ref: "#/components/schemas/VSwitchPort" }

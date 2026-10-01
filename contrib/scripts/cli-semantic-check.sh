@@ -743,6 +743,67 @@ RELAY_ROWS
   fi
 fi
 
+# ---------- S12 MAC 学习上限（决策 #337）：产品读视图 learn_limit ↔ vppctl Learn-li ----------
+# 有 learn-limit 配置才可判定：现场没有该配置时缺对照对象，如实报「不可判定」、**不计入通过**
+# （与 S11 同口径）。oracle：`vppctl show bridge-domain <bd-id> detail` 里带 Learn-li/limit 的那一行
+# 的整数（CRLF 行尾先剥）。⚠️ binapi v0.13.0 的 bridge_domain_details 没有 learn_limit 字段，
+# 故这条 vppctl oracle 是「产品真下发到数据面」的**唯一独立事实源**。
+vpp_bd_learn_limit() { # <BD-ID> → vppctl 报告的 MAC 学习上限（取不到回空 ⇒ 判不可判定）
+  vppctl show bridge-domain "$1" detail 2>/dev/null | tr -d '\r' \
+    | awk 'tolower($0) ~ /learn.?li/ {for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) {print $i; exit}}'
+}
+hdr "S12 MAC 学习上限：产品读视图 learn_limit ↔ vppctl show bridge-domain detail 的 Learn-li"
+ll_cfg=$(curl_api "$SRV/api/v1/configuration" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
+if [ -z "$ll_cfg" ]; then
+  unk "S12 取不到产品配置（GET /configuration 失败），无法对照"
+elif ! command -v python3 >/dev/null 2>&1; then
+  unk "S12 无 python3（解析配置 JSON 用），无法对照——如实登记"
+else
+  ll_rows=$(printf '%s' "$ll_cfg" | python3 -c '
+import json, sys
+try:
+    cfg = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for vs in (cfg.get("virtual_switches") or []):
+    if vs.get("type") != "l2":
+        continue
+    n = vs.get("learn_limit")
+    if not n:
+        continue
+    print("%s\t%d" % (vs.get("name", ""), n))
+')
+  if [ -z "$ll_rows" ]; then
+    unk "S12 现场没有 learn-limit 配置（无对象可对照）——造现场：set virtual-switches <vs> learn-limit <n> 后复跑"
+  else
+    while IFS="$(printf '\t')" read -r vsn want; do
+      [ -n "$vsn" ] || continue
+      bid=$(vpp_bd_id_of_tag "$vsn")
+      echo "    对象: $vsn  声明 learn-limit=$want  bd-id=${bid:-（vppctl 里找不到）}"
+      rv=$(curl_api "$SRV/api/v1/virtual-switches/$vsn" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
+      if printf '%s' "$rv" | grep -q '"learn_limit" *: *'$want; then
+        ok "S12 $vsn 产品读视图带 learn_limit=$want"
+      else
+        bad "S12 $vsn 产品读视图缺 learn_limit=$want（或值不同）：$(printf '%s' "$rv" | head -c 160)"
+      fi
+      if [ -z "$bid" ]; then
+        bad "S12 $vsn 在 vppctl 里找不到该交换机的 bridge-domain（未落地？）"
+        continue
+      fi
+      got=$(vpp_bd_learn_limit "$bid")
+      if [ -z "$got" ]; then
+        unk "S12 $vsn oracle 取不到 Learn-li（bd-id=$bid）——vppctl detail 无该字段，本项不可判定"
+      elif [ "$got" = "$want" ]; then
+        ok "S12 $vsn VPP Learn-li=$got 与产品声明一致（bd-id=$bid）"
+      else
+        bad "S12 $vsn VPP Learn-li=$got ≠ 产品声明 $want（bd-id=$bid）——下发未生效或未随恢复重放"
+      fi
+    done <<LL_ROWS
+$ll_rows
+LL_ROWS
+  fi
+fi
+
 # ============ 清理本脚本创建的对象 ============
 # 接口：先看**条目本身**是不是本次建出来的——是就整条删掉（发现 #15 的同类：收尾只删字段
 # 会留下空壳条目）；否则描述**还回原值**（发现 #15），原本就没有描述才删字段。

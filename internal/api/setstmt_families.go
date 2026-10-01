@@ -426,6 +426,10 @@ func emitVirtualSwitchFamily(w *stmtWriter, node *schema.Node, val any, prefix, 
 		if v, ok := m["dhcp_relay_server"]; ok && v != "" {
 			w.add(toks(prefix, "dhcp-relay", "server", formatScalar(v)))
 		}
+		// MAC 学习条数上限（决策 #337）：模型单值整数，语句树是单层关键字 learn-limit <n>
+		if v, ok := m["learn_limit"].(float64); ok && v != 0 {
+			w.add(toks(prefix, "learn-limit", formatScalar(v)))
+		}
 		if cc, ok := m["cross_connect"].(bool); ok && cc {
 			if len(seqs) == 2 {
 				w.add(toks(prefix, "cross-connect", seqs[0], seqs[1]))

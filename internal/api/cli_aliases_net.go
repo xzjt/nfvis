@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -57,6 +58,21 @@ var statementAliasesNet = []aliasRule{
 				return err
 			}
 			delete(vs, "dhcp_relay_server")
+			return nil
+		}},
+
+	// virtual-switches <n> learn-limit <n>（决策 #337：MAC 学习条数上限，模型单值整数）。
+	// 走别名而非通用树：delete 无值形态在「键不存在」时须为幂等空操作（套件里 set 与 delete 各在
+	// 独立会话、delete 时 committed 里本就没有该键），通用树遍历会回「无匹配配置」而中止脚本。
+	{pattern: []string{"virtual-switches", "*", "learn-limit", "*"},
+		apply: aliasVSLearnLimit},
+	{pattern: []string{"virtual-switches", "*", "learn-limit"},
+		apply: func(tree map[string]any, t []string, _ bool) error {
+			vs, err := elemByID(tree, "virtual_switches", t[1])
+			if err != nil {
+				return err
+			}
+			delete(vs, "learn_limit")
 			return nil
 		}},
 
@@ -380,6 +396,26 @@ func aliasVSDhcpRelay(tree map[string]any, t []string, isSet bool) error {
 		return nil
 	}
 	vs["dhcp_relay_server"] = t[4]
+	return nil
+}
+
+// aliasVSLearnLimit：virtual-switches <n> learn-limit <n>（决策 #337）。
+// 模型是单值整数（learn_limit）；delete 由无值形态的注册键处理（整键删除，幂等）。
+// 取值必须为十进制正整数——负数/0/非数一律拒绝（与模型校验同口径，避免写出模型不认的值）。
+func aliasVSLearnLimit(tree map[string]any, t []string, isSet bool) error {
+	vs, err := elemByID(tree, "virtual_switches", t[1])
+	if err != nil {
+		return err
+	}
+	if !isSet {
+		delete(vs, "learn_limit")
+		return nil
+	}
+	n, err := strconv.Atoi(t[3])
+	if err != nil || n < 1 {
+		return errString("学习上限须为正整数: " + t[3])
+	}
+	vs["learn_limit"] = float64(n)
 	return nil
 }
 

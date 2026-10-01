@@ -4285,6 +4285,8 @@ function renderSwitchDetail(vs, ports, params) {
     ['数据面 BD', st ? st.bd_id : undefined],
     // 决策 #335：DHCP 中继（读视图 dhcp_relay.server；未配置如实「—」，不编造）
     ['DHCP 中继', vs.dhcp_relay && vs.dhcp_relay.server ? vs.dhcp_relay.server : undefined],
+    // 决策 #337：MAC 学习上限（读视图 learn_limit；未配置如实「—」，不编造）
+    ['学习上限', vs.learn_limit !== undefined && vs.learn_limit !== 0 ? vs.learn_limit : undefined],
   ] : [['读取失败', vs ? vs.__err : notFoundText(name, '虚拟交换机')]]);
   table($('vsd-port-table').querySelector('tbody'), 6, rows.map((r) => {
     const q = r.rt || {};
