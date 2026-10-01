@@ -1,0 +1,30 @@
+NFViS v2 记录 round114 —— R113-1 撤回（误判更正）+ 决策 #336 收口 R113-2
+====================================================================
+日期：2026-10-02；代码：PR #261（squash 合入 v2 @ ae6ae51，CI 双跑全绿）。本轮无真机改动。
+
+§1 R113-1 撤回：round113 的登记是误判（代码级更正，无产品缺陷）
+- round113 曾登记「停机 VM 改配置后 start 不重定义 domain」（依据：sem-cli 执行
+  `delete virtual-machine-functions sem-cli memory hugepage-size` 提交后，start 仍以 hugepages
+  backing 失败；`systemctl restart nfvis` 后依旧）。
+- **更正依据（代码）**：`model.AllocationFor`——`HugepageSize` **未设时缺省回落资源池主池**
+  （`ResourcePools.Hugepages[0].PageSize`，本机 = 1G）；`domain_xml.useHugepages`——除非
+  `memory backing normal`（且产品限定无 vhost-user 的 VM）否则大页后备。故「删 hugepage-size」
+  的语义是**回落缺省 1G**、不是「改普通内存」——域仍带 1G 是**正确的文档化行为**。
+  `internal/orchestrator/apply.go` 对变更 VM 确有 `vm[<名>]`→`DefineVM` 重定义操作，commit 成功
+  即已重定义（以 1G），start 路径不重定义也不违反「配置唯一真源」。
+- 结论：round113 §4 的 R113-1 系把「正确的 1G 缺省」误读为「start 未重定义」；已在
+  `docs/v2待做.md` 二.23 划线撤回并写明教益（判定前先确认字段语义；要普通内存须
+  `memory backing normal`）。**产品代码零改动**。
+
+§2 决策 #336 收口 R113-2（PR #261）
+- 文案（行为零变化）：`cliexec.go` 的 `commit` 校验失败行与 `cli_compute_oper.go` 的提交类操作失败行
+  追加「在本会话内；会话/进程结束即释放」（前者另给 `show configuration candidate` 指引）。
+- 保留语义不动（#317/#318 的会话级 candidate/锁生命周期是刻意设计）；行首锚定
+  （`校验失败`/`%%`）与套件判定语义不变；`internal/cli/setup_test.go` 夹具随文案更新。
+- 子智能体另如实报告：向导运行时的同族文案（`internal/cli/setup.go:485`「candidate 已保留，可修正后
+  重新 commit」）与本次两处**不同源**且向导会话持续存活——语义准确，未动（登记在案）。
+- `make check` RC=0；决策条数 237→238（守护一致）。
+- 真机文案核对随下一轮 dev 构建（`-c` 制造一次校验失败看新提示原文）。
+
+§3 现场
+- 未做真机改动；真机仍 2.0.0~dev23、无 active 告警、rev 836。
