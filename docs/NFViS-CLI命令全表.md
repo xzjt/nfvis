@@ -312,8 +312,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-switches <n> gateway acl-in\|acl-out <acl>` | 网关 ACL | VPP acl | ✅ |
 | `set virtual-switches <n> dhcp-relay server <ip>` | DHCP 中继（仅已 `set gateway ip` 的 L2 交换机可配；src 自动取 BVI 的 IPv4 网关地址，server 须在该转发域内可达） | VPP dhcp proxy | ✓（round113：配置/撤销/读视图/`vppctl show dhcp proxy` 对照 + pcap 转发签名实证；端到端租约因测试设备工具链受限未取得，见 `docs/evidence/v2-round113-*.txt`） |
 | `delete virtual-switches <n> dhcp-relay` | 撤销 DHCP 中继（`dhcp_proxy_config` IsAdd=false，幂等；随交换机删除一并撤） | VPP dhcp proxy | ✓（round113：撤销后 `show dhcp proxy` 清空、读视图同步；恢复重放存活经多次 VM/nfvis 重启实证） |
-| `set virtual-switches <n> learn-limit <n>` | MAC 学习条数上限（仅 L2；环路/广播风暴缓解，**非阻断**；1-16777216，超限拒绝） | VPP `bridge_domain_set_learn_limit` | 🚫 待真机（决策 #337） |
-| `delete virtual-switches <n> learn-limit` | 清 MAC 学习上限（恢复 VPP 默认 16777216，幂等） | VPP `bridge_domain_set_learn_limit` | 🚫 待真机（决策 #337） |
+| `set virtual-switches <n> learn-limit <n>` | MAC 学习条数上限（仅 L2；环路/广播风暴缓解，**非阻断**；1-16777216，超限拒绝） | VPP `bridge_domain_set_learn_limit` | ✓（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
+| `delete virtual-switches <n> learn-limit` | 清 MAC 学习上限（恢复 VPP 默认 16777216，幂等） | VPP `bridge_domain_set_learn_limit` | ✓（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
 | `set virtual-switches <n> ports [<seq>] interface <if> [trunk vlans <l>\|native <v>]` | 物理口成员 | VPP BD | ✅ |
 | `set virtual-switches <n> ports [<seq>] vnf <vm> interface <vnic> [trunk vlans <l>]` | vhost-user 成员 | VPP + libvirt | ✅ |
 | `set virtual-switches <n> ports [<seq>] container <ct> interface <vnic>` | 容器 memif 成员 | VPP + Docker | ✅ |
@@ -444,10 +444,10 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 245 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。决策 #335 的两条 dhcp-relay 命令于 round113 真机实测（配置/撤销/读视图对照/pcap 转发签名），移入本桶。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶；`request system storage format-data` 由决策 #305 落地（原 🚫 破坏性、契约已登记延期），按「破坏性但已验」移入本桶 |
+| ✅ 实测通过 | 247 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。决策 #335 的两条 dhcp-relay 命令于 round113、决策 #337 的两条 learn-limit 命令于 round115 真机实测，均移入本桶。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶；`request system storage format-data` 由决策 #305 落地（原 🚫 破坏性、契约已登记延期），按「破坏性但已验」移入本桶 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 17 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 5 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319。决策 #337 的 `set/delete virtual-switches <n> learn-limit …` 两条已入 fulltest 阶段 2、单测覆盖，真机复跑待执行；原 `set/delete virtual-switches <n> dhcp-relay …` 已于 round113 真机验证并移出本行（决策 #335）） |
+| 🚫 本轮未执行 | 15 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 5 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319。决策 #337 的 `set/delete virtual-switches <n> learn-limit …` 两条已入 fulltest 阶段 2、单测覆盖，真机复跑待执行；原 `set/delete virtual-switches <n> dhcp-relay …` 已于 round113 真机验证并移出本行（决策 #335）） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
