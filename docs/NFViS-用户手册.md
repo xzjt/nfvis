@@ -963,11 +963,25 @@ nfvis$ request vpp restart
 
 ```bash
 nfvis$ show resource-pools      # 大页/隔离核的 总量/已分配/空闲，含 vpp-reserved
+nfvis$ show system hugepages    # 大页池三方数字：声明 / 内核实际 / 在用 + 可回收
 nfvis$ show vpp                 # 版本/线程/buffer/内存（含 pending_restart 提示）
 nfvis$ show vpp threads
 nfvis$ show vpp memory
 nfvis$ show system kernel       # 三方对照（cmdline / 运行实际 / 配置期望）
 ```
+
+**大页池「无主占用」怎么办**：如果 `show system hugepages` 显示**内核实际**高于**声明值**（例如实际 4 / 声明 2），
+说明池里有多出来的页。产品会在既有巡检里自动把**空闲的多余页**收回到声明值；也可以手动执行：
+
+```bash
+nfvis$ show system hugepages              # 看 声明 / 内核实际 / 在用 / 可回收
+nfvis$ request system hugepages reclaim   # 回收空闲的多余页（在用页一律不动）
+```
+
+三条边界要记住：① 只回收**空闲**的多余页——VPP/VNF 正在用的页**一律不动**；② 只收敛到**已声明**值，
+**不改变声明值**（改声明仍用 `set resource-pools hugepages page-size <size> count <n>`，需重启生效）；
+③ 命令会**回读**内核实际值确认，写不进去或回读不一致会如实报错、并说明**谁在占用**（声明用该页池的 VNF、
+数据面页尺寸偏好、大页挂载点）。收敛不掉时 `show alarms` 会有一条 `HUGEPAGE_POOL_SURPLUS`，收敛后自动消警。
 
 ### 8.3 L2 虚拟交换机 + BVI 网关
 
@@ -1432,6 +1446,7 @@ nfvis$ request alarms clear all
 > | `VRF_TABLE_LEFTOVER` | warning | 数据面存在**配置未声明**的 IP 表（上两类处置留下的残渣）。它不被任何配置引用、不影响转发；`request vpp restart` 后自动清理并消警。**跨 nfvisd 重启仍可见**（按配置声明集与 VPP 实况对账，不靠进程内记忆）|
 > | `ACL_LEFTOVER` | warning | 数据面存在**配置未声明**的 ACL（tag 不在配置里，多为补偿失败留下的残渣）。同上：不被任何配置引用；`request vpp restart` 或手工清理后自动消警；**跨 nfvisd 重启仍可见**（按数据面实况对账重建）|
 > | `BRIDGE_DOMAIN_LEFTOVER` | warning | 数据面存在**配置未声明**的 bridge-domain（BD-Tag 不在配置里，同上）。处置与上面两条一致；**跨 nfvisd 重启仍可见** |
+> | `HUGEPAGE_POOL_SURPLUS` | warning | 大页池**内核实际页数高于声明值**且收敛不掉（多出的页正被占用，回收**不动在用页**）。按内核实况重建、跨 nfvisd 重启仍可见。处置：`show system hugepages` 看谁在占用（声明用该页池的 VNF / 数据面页尺寸偏好 / 大页挂载点）；停掉持页的 VNF 后再 `request system hugepages reclaim`，或调整资源池声明值（`set resource-pools hugepages … count <n>`，需重启）。收敛后自动消警 |
 >
 > 上面四条残渣告警的文案都会注明「由启动/巡检对账按数据面事实重建、原始提交不可回溯」——是哪次提交失败、是否被 NAT 引用，数据面看不出来，产品**不编造**。
 
@@ -1572,7 +1587,7 @@ nfvis$ request system shutdown
 | 动作 | 在哪一页 | 确认档位 |
 |---|---|---|
 | 单台虚拟机/容器启停重启、清接口计数、清告警、删快照、取消抓包、生成备份/诊断归档、立即同步时间 | 各详情页 / 运维动作页 | 低危：点一次确认 |
-| 重启数据面、重启主机、关机、重签自签证书、重生成 SSH host key、**内核基线写入/回退**、**DPDK 绑定/解绑**、**SR-IOV VF 数量**、删除 QoS 策略/端口镜像会话 | 运维动作页 / 系统域各页 | 中危：逐条列出影响面 + 主按钮标红 |
+| 重启数据面、重启主机、关机、重签自签证书、重生成 SSH host key、**内核基线写入/回退**、**回收空闲的多余大页**、**DPDK 绑定/解绑**、**SR-IOV VF 数量**、删除 QoS 策略/端口镜像会话 | 运维动作页 / 系统域各页 | 中危：逐条列出影响面 + 主按钮标红 |
 | **软件升级/回退、从备份恢复配置、恢复出厂、重置数据分区、安装外部证书、创建/删除用户、改口令与权限类** | 运维动作页 / 证书页 / 用户与权限页 | 高危：还要手工输入确认词 + 等 10 秒倒计时走完 |
 
 每个确认框里都只读回显这条动作对应的命令行语句（便于工单对照，不需要你输入语句）。
@@ -1627,7 +1642,7 @@ DPDK 没有独立版本来源（随 VPP 一起编译），同样显示「—」�
 
 ![资源池](images/console/14-pools.jpg)
 
-*图 10.12-13　资源池：大页池与核分配。*
+*图 10.12-13　资源池：大页池与核分配；下半张卡是大页池三方数字（声明/内核实际/在用 + 可回收）与「回收空闲的多余页」入口（super-user）。*
 
 ![接口列表](images/console/15-ifaces.jpg)
 

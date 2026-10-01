@@ -220,6 +220,12 @@ request system
   ├─ software rollback [to <version>]
   ├─ reboot | shutdown | poweroff                   # S；确认
   ├─ kernel apply | rollback                        # S；确认。按 committed 配置写 GRUB 基线/回退，需重启生效（FR-SYS-014）
+  ├─ hugepages reclaim                              # S。回收**空闲**的多余大页，收敛到声明值（决策 #329）：
+  │                                                 #   ① 只回收「内核实际 > 声明且空闲」的多余页，**在用页一律不动**；
+  │                                                 #   ② 写后**回读**内核实际值确认（写成功 ≠ 收敛），未收敛如实报错；
+  │                                                 #   ③ **不改声明值**——改声明是 set resource-pools hugepages … count <n>（需 reboot）；
+  │                                                 #   ④ 自动收敛在既有 60s 巡检里做（对账式，不新造定时器），本命令是手动入口。
+  │                                                 # API: POST /system/hugepages:reclaim（REST 侧同实现）
   ├─ configuration backup [to <path>] | restore <path>   # S；确认。to <path> 另存一份归档（0600）：
   │                                                 #   须绝对路径、目标不得已存在、父目录须已存在；
   │                                                 #   目标已存在即如实拒绝，不覆盖既有文件

@@ -27,6 +27,7 @@ request system software add <deb|url> [sha256 <hex>]	破坏性不执行	升级�
 request system poweroff	破坏性不执行	断电（reboot/shutdown 已在阶段 4 以 expect_fail 覆盖同一问询闸门）
 request system kernel apply	破坏性不执行	写 GRUB 启动项（重启才生效，且会改机器启动基线）
 request system kernel rollback	破坏性不执行	同上（回退启动项）
+request system hugepages reclaim	破坏性不执行	会立即改变**宿主大页池**（回收空闲的多余页，机器基线可能因此缩池），不宜在套件里反复执行；纯函数（声明/实际/在用→回收量、有无空闲、实际<声明不回收、回读不一致要报）与命令/端点由 internal/system 与 internal/api 单测覆盖（决策 #329），真机按交付说明「造无主占用现场 → show → reclaim → 回读」单独走查
 request system configuration restore <path>	破坏性不执行	会覆盖现网配置；backup 已在阶段 4 执行，恢复路径由单测与交付步骤覆盖
 request system storage format-data	破坏性不执行	会真清受管数据；阶段 4 已补**结构检查**（非交互下被双重确认问询挡住 ⇒ 命令已接线且闸门在位），真机执行按交付步骤单独走查
 request interfaces <ifname> bind-dpdk [uio-driver <d>]	破坏性不执行	会把业务口交 DPDK（中断该口流量）；unbind-dpdk 已在阶段 4 以 expect_fail 覆盖同款确认闸门
