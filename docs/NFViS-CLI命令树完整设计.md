@@ -76,9 +76,11 @@ show interfaces management                          # 管理口（内核侧，IP
 show virtual-switches                               # 全部虚拟交换机摘要（GET /virtual-switches）
 show virtual-switches <name>
   ├─ detail                                         # 类型、成员端口、VLAN/VRF 配置
-  ├─ ports                                          # 成员端口及状态/计数
+  ├─ ports                                          # 成员端口及状态/计数：配置静态 ports ∪ VNF/容器声明派生，
+                                                    #   逐条标注 source（config|vnf|container|runtime，附录 A #326）；
+                                                    #   与 REST GET /virtual-switches/{n}/ports 同源；派生条目只读
   ├─ mac-table                                      # MAC 学习表（仅 L2；govpp bridge-domain-dump）
-  └─ statistics                                     # 每端口收发计数
+  └─ statistics                                     # 每端口收发计数（同 ports 的读视图）
 
 show vrfs                                           # GET /vrfs
 show vrfs <name>                                    # detail：L3 接口、地址、路由数

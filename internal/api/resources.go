@@ -474,6 +474,11 @@ func (s *Server) handleDeleteVSwitch(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetVSwitchPorts GET /api/v1/virtual-switches/{name}/ports。
+//
+// 决策 #326（收口 R84-16）：返回的是**读视图**——配置里静态声明的 `ports` 与
+// VNF/容器声明（`interfaces <nic> virtual-switch <name>`）派生出的 vNIC 成员**并集**，
+// 逐条带 `source`（config|vnf|container）。配置库形状不动（写路径仍是 PUT 静态 ports）。
+// 交换机未在 committed 声明时 404（与其它详情端点同口径，不把派生条目单独发出来）。
 func (s *Server) handleGetVSwitchPorts(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	cfg, err := s.engine.Committed()
@@ -483,9 +488,24 @@ func (s *Server) handleGetVSwitchPorts(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, vs := range cfg.VirtualSwitches {
 		if vs.Name == name {
-			ports := vs.Ports
+			// 运行态成员（仅有 source=runtime 的补条目）：数据面未接入/该 BD 不在数据面时为空，
+			// 不编造。配置派生部分与 CLI `show virtual-switches <n> ports` 同源（switchPortViews）。
+			var runtimePorts []string
+			if s.vppState != nil {
+				if bds, err := s.vppState.BridgeDomains(); err == nil {
+					for _, bd := range bds {
+						if bd.Name != name {
+							continue
+						}
+						for _, p := range bd.Ports {
+							runtimePorts = append(runtimePorts, p.Name)
+						}
+					}
+				}
+			}
+			ports := switchPortViews(cfg, name, runtimePorts)
 			if ports == nil {
-				ports = []model.VSwitchPort{}
+				ports = []model.SwitchPortView{}
 			}
 			writeJSON(w, http.StatusOK, ports)
 			return

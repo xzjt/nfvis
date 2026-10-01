@@ -23,6 +23,11 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 	if len(args) >= 2 && args[1] == "mac-table" {
 		return x.showMacTable(args[0])
 	}
+	// 决策 #326：ports/statistics 走端口**读视图**（配置静态 ports ∪ VNF/容器声明派生），
+	// 与 REST GET /virtual-switches/{name}/ports 同源；交换机未在配置中声明时内部退回运行态。
+	if len(args) >= 2 && (args[1] == "ports" || args[1] == "statistics") {
+		return x.showVSwitchPorts(args[0])
+	}
 	bds, err := x.bdStates()
 	if err != nil {
 		// 运行态不可用：明确说明，**不**退回配置视图（那正是缺陷来源）
@@ -63,56 +68,23 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 	if bd == nil {
 		return fmt.Sprintf("%% 虚拟交换机 %s 在 VPP 中不存在（show virtual-switches 看运行态列表）\n", name)
 	}
-	sub := ""
-	if len(args) >= 2 {
-		sub = args[1]
+	// detail 及不带子命令：运行态（状态 + 成员口）叠加配置的类型信息。
+	// （ports/statistics 已在函数入口转给端口读视图，决策 #326。）
+	m := bdView(*bd)
+	if cfg, err := x.engine.Committed(); err == nil {
+		for _, vs := range cfg.VirtualSwitches {
+			if vs.Name == name {
+				m["configured_type"] = vs.Type
+			}
+		}
 	}
-	switch sub {
-	case "ports", "statistics":
-		// 契约：成员端口**及状态/计数**（statistics 侧重每端口收发计数）
-		var b strings.Builder
-		fmt.Fprintf(&b, "%-16s %-7s %-7s %-12s %-12s %s\n", "Port", "Admin", "Link", "RxPkts", "TxPkts", "Shg")
-		items := make([]any, 0, len(bd.Ports))
-		states, _ := x.ifaceStates()
-		for _, p := range bd.Ports {
-			row := map[string]any{"port": p.Name, "sw_if_index": p.SwIfIndex, "shg": p.Shg}
-			admin, link, rx, tx := "-", "-", "-", "-"
-			if st, ok := states[p.Name]; ok {
-				admin, link = yn(st.AdminUp), yn(st.LinkUp)
-				row["admin"], row["link"] = st.AdminUp, st.LinkUp
-			}
-			if x.state != nil {
-				if c, ok := x.state.InterfaceCounters(context.Background(), p.Name); ok {
-					rx, tx = fmt.Sprintf("%d", c.RxPackets), fmt.Sprintf("%d", c.TxPackets)
-					row["rx_packets"], row["tx_packets"] = c.RxPackets, c.TxPackets
-				}
-			}
-			fmt.Fprintf(&b, "%-16s %-7s %-7s %-12s %-12s %d\n", p.Name, admin, link, rx, tx, p.Shg)
-			items = append(items, row)
+	if x.l2 != nil {
+		if rows, err := x.l2.MACTable(context.Background(), name); err == nil {
+			m["mac_table_entries"] = len(rows)
 		}
-		if len(bd.Ports) == 0 {
-			b.WriteString("（该 BD 无成员口）\n")
-		}
-		x.structured = map[string]any{"bd_id": bd.ID, "name": bd.Name, "ports": items}
-		return b.String()
-	default:
-		// detail 及不带子命令：运行态（状态 + 成员口）叠加配置的类型信息
-		m := bdView(*bd)
-		if cfg, err := x.engine.Committed(); err == nil {
-			for _, vs := range cfg.VirtualSwitches {
-				if vs.Name == name {
-					m["configured_type"] = vs.Type
-				}
-			}
-		}
-		if x.l2 != nil {
-			if rows, err := x.l2.MACTable(context.Background(), name); err == nil {
-				m["mac_table_entries"] = len(rows)
-			}
-		}
-		x.structured = m
-		return RenderConfigJSON(m) + "\n"
 	}
+	x.structured = m
+	return RenderConfigJSON(m) + "\n"
 }
 
 // bdView BD 运行态的对外形态（structured 快照与 detail 渲染共用）。

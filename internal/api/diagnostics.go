@@ -12,7 +12,30 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	ksys "github.com/xzjt/nfvis/internal/system"
 )
+
+// scrubLogSource 包裹日志来源，剥掉产品自己打印的一次性口令（决策 #325）。
+//
+// nfvisd 日志有一处明文凭据：首启引导打印的一次性口令（`fmt.Printf` → journald）。
+// 该日志有多个出口——CLI `show log system`、REST `GET /system/logs`、诊断归档 logs.txt——
+// 决策 #149 只对归档做了脱敏，另两条把口令原样交给了任何只读账号。脱敏实现单源在
+// internal/system.ScrubBootstrapCredential（与归档同一份），本函数在装配期把两个
+// 出口的日志来源都包上（cliExec 与 s.logs 共用返回值），出口新增时不必各自记得脱敏。
+// nil 来源原样返回（保持「未接入即报不可用」的既有语义）。
+func scrubLogSource(fn func() ([]byte, error)) func() ([]byte, error) {
+	if fn == nil {
+		return nil
+	}
+	return func() ([]byte, error) {
+		b, err := fn()
+		if err != nil {
+			return b, err
+		}
+		return ksys.ScrubBootstrapCredential(b), nil
+	}
+}
 
 // handleSystemLogs GET /system/logs：服务端日志尾部（与 CLI `show log system` 同源）。
 func (s *Server) handleSystemLogs(w http.ResponseWriter, r *http.Request) {
