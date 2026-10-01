@@ -2850,6 +2850,19 @@ components:
             vrf: { type: string, description: 缺省为专属 VRF vr-<name> }
             acl_in: { type: string }
             acl_out: { type: string }
+        dhcp_relay:
+          type: object
+          description: |
+            仅 L2 且已配网关：DHCP 中继（决策 #335）。**读视图形状**（GET 响应）——中继源地址
+            自动取 BVI 的 IPv4 网关地址，不随响应给出。未配置时整个对象缺席（不编造）。
+          properties:
+            server: { type: string, description: DHCP 服务器 IPv4 地址（须在该交换机转发域内可达） }
+        dhcp_relay_server:
+          type: string
+          description: |
+            DHCP 中继的服务器地址在**配置库/POST 请求体**里的存储键（与 dhcp_relay.server 同一声明，
+            两种形状各司其职：GET 详情/列表回 dhcp_relay 对象，写入与 GET /configuration 用本键）。
+            未配置时省略。
         ports:
           type: array
           items: { $ref: "#/components/schemas/VSwitchPort" }

@@ -72,6 +72,9 @@ type NetworkProvider interface {
 	DeleteACL(ctx context.Context, name string) error
 	ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch) error
 	DeleteBridgeDomain(ctx context.Context, name string) error
+	// ApplyDhcpRelay 收敛一台交换机的 DHCP 中继声明（决策 #335；随 bridge-domain 之后的
+	// 伴随操作下发，声明未变时幂等跳过、清 relay 按登记撤销）。
+	ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) error
 	ApplyVRF(ctx context.Context, vrf model.Vrf) error
 	DeleteVRF(ctx context.Context, name string) error
 	// ApplyRoute 下发一条静态路由到该 VRF 对应的表（幂等；撤销路由删除时的补偿）。
@@ -190,6 +193,7 @@ func (noopNetwork) ApplyLLDP(context.Context, *model.LldpConfig) error          
 func (noopNetwork) DeleteACL(context.Context, string) error                      { return nil }
 func (noopNetwork) ApplyBridgeDomain(context.Context, model.VirtualSwitch) error { return nil }
 func (noopNetwork) DeleteBridgeDomain(context.Context, string) error             { return nil }
+func (noopNetwork) ApplyDhcpRelay(context.Context, model.VirtualSwitch) error    { return nil }
 func (noopNetwork) ApplyVRF(context.Context, model.Vrf) error                    { return nil }
 func (noopNetwork) DeleteVRF(context.Context, string) error                      { return nil }
 func (noopNetwork) ApplyRoute(context.Context, string, model.Route) error        { return nil }

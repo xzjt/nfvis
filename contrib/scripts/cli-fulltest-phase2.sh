@@ -29,6 +29,7 @@ set interfaces ens224 description cli-pre
 set acls acl-test rule 10 source any destination any protocol tcp destination-port 443 action permit
 set qos policies pol-test cir 1000000000 cbs 1000000
 set virtual-switches vs-l2 type l2
+set virtual-switches vs-l2 gateway ip 192.168.100.1/24
 set virtual-switches vs-l3 type l3
 set virtual-switches vs-l3 l3-interface ens224 ip address 192.168.155.10/24
 set vpp cpu main-core 1
@@ -106,6 +107,10 @@ set nat static 10.0.0.5 to 203.0.113.5
 set virtual-switches vs-l2 vlan access 100
 set virtual-switches vs-l3 static-routes 10.99.0.0/16 next-hop 192.168.155.1
 set virtual-switches vs-l3 static-routes default next-hop 192.168.155.1
+# —— virtual-switches dhcp-relay（§2.4；决策 #335，仅已配网关的 L2 交换机可配）——
+# 前置：S2-pre 里给 vs-l2 配了网关（中继源地址自动取 BVI 的 IPv4 地址），relay 语句才可提交。
+set virtual-switches vs-l2 dhcp-relay server 192.168.100.2
+delete virtual-switches vs-l2 dhcp-relay
 # —— resource-pools（§2.6）——
 set resource-pools cpu numa node 0 cores 1-4
 # —— system login 横幅（§2.2；决策 #303）——

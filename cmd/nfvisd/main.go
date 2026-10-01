@@ -170,6 +170,8 @@ func run() error {
 	netProvider := network.NewL2Network(orchestrator.NewNoopNetwork(), l2Provider)
 	netProvider.SetL3(l3Provider)
 	netProvider.SetServices(network.NewServicesProviderFunc(vppMgr.SvcClientFunc()))
+	// 决策 #335：交换机 DHCP 中继（VPP dhcp proxy；恢复重放含 relay）
+	netProvider.SetDhcp(network.NewDhcpProviderFunc(vppMgr.DhcpClientFunc()))
 	netProvider.SetACL(network.NewAclProviderFunc(vppMgr.AclClientFunc()))
 	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
 	netProvider.SetBond(network.NewBondProviderFunc(vppMgr.BondClientFunc()))

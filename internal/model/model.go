@@ -160,13 +160,16 @@ type KernelConfig struct {
 // VirtualSwitch 虚拟交换机（L2 = bridge domain，见附录 B 映射）。
 // L3 交换机（type=l3）的 l3-interface 与静态路由数据按附录 B 映射存放在同名 Vrf 条目中。
 type VirtualSwitch struct {
-	Name         string        `json:"name"`
-	Type         string        `json:"type"` // l2|l3，创建后不可改
-	Description  string        `json:"description,omitempty"`
-	VlanAccess   int           `json:"vlan_access,omitempty"`   // 仅 L2
-	CrossConnect bool          `json:"cross_connect,omitempty"` // 仅 L2，与 ports/gateway 互斥
-	Gateway      *VSGateway    `json:"gateway,omitempty"`       // 仅 L2：BVI 三层网关（FR-NET-014）
-	Ports        []VSwitchPort `json:"ports,omitempty"`
+	Name         string     `json:"name"`
+	Type         string     `json:"type"` // l2|l3，创建后不可改
+	Description  string     `json:"description,omitempty"`
+	VlanAccess   int        `json:"vlan_access,omitempty"`   // 仅 L2
+	CrossConnect bool       `json:"cross_connect,omitempty"` // 仅 L2，与 ports/gateway 互斥
+	Gateway      *VSGateway `json:"gateway,omitempty"`       // 仅 L2：BVI 三层网关（FR-NET-014）
+	// DhcpRelayServer DHCP 中继的服务器地址（决策 #335）：仅已配网关（BVI）的 L2 交换机可配，
+	// 中继源地址自动取 BVI 的 IPv4 网关地址；读视图（REST 详情/列表）以 dhcp_relay:{server} 形状给出。
+	DhcpRelayServer string        `json:"dhcp_relay_server,omitempty"`
+	Ports           []VSwitchPort `json:"ports,omitempty"`
 }
 
 // Vrf L3 虚拟交换机的配置数据（FR-NET-013；CLI `virtual-switches <n> type l3` 映射为同名条目）。

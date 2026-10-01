@@ -337,6 +337,45 @@ func TestVirtualSwitchesEndpoint(t *testing.T) {
 	}
 }
 
+// TestVirtualSwitchDhcpRelayView（决策 #335）：读视图以 dhcp_relay:{server} 形状给出中继
+// （列表与详情同源）；未配置时该对象缺席、配置库键 dhcp_relay_server 不出现在读视图里。
+func TestVirtualSwitchDhcpRelayView(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+
+	vs := model.VirtualSwitch{Name: "vs-relay", Type: "l2",
+		Gateway:         &model.VSGateway{Addresses: []string{"192.168.100.1/24"}},
+		DhcpRelayServer: "192.168.100.2"}
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-switches", token, vs,
+		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("创建带 relay 的交换机应 201: %d %s", status, data)
+	}
+	plain := model.VirtualSwitch{Name: "vs-plain", Type: "l2"}
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-switches", token, plain,
+		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("创建普通交换机应 201: %d %s", status, data)
+	}
+
+	for _, path := range []string{"/virtual-switches", "/virtual-switches/vs-relay", "/virtual-switches/vs-plain"} {
+		status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+path, token, nil, nil)
+		if status != http.StatusOK {
+			t.Fatalf("GET %s: %d %s", path, status, data)
+		}
+		if strings.Contains(string(data), "dhcp_relay_server") {
+			t.Errorf("GET %s 读视图不得暴露配置库键 dhcp_relay_server: %s", path, data)
+		}
+	}
+	// 详情：relay 交换机带 dhcp_relay.server；普通交换机无该对象
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/virtual-switches/vs-relay", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), `"dhcp_relay":{"server":"192.168.100.2"}`) {
+		t.Fatalf("详情应带 dhcp_relay.server: %d %s", status, data)
+	}
+	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/virtual-switches/vs-plain", token, nil, nil)
+	if status != http.StatusOK || strings.Contains(string(data), "dhcp_relay") {
+		t.Fatalf("未配置 relay 的详情不得出现 dhcp_relay: %d %s", status, data)
+	}
+}
+
 func TestVrfsEndpoint(t *testing.T) {
 	ts := newTestServer(t)
 	token := loginAdmin(t, ts)

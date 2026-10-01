@@ -4283,6 +4283,8 @@ function renderSwitchDetail(vs, ports, params) {
     ['类型', vs.type],
     ['成员端口', rows.length],
     ['数据面 BD', st ? st.bd_id : undefined],
+    // 决策 #335：DHCP 中继（读视图 dhcp_relay.server；未配置如实「—」，不编造）
+    ['DHCP 中继', vs.dhcp_relay && vs.dhcp_relay.server ? vs.dhcp_relay.server : undefined],
   ] : [['读取失败', vs ? vs.__err : notFoundText(name, '虚拟交换机')]]);
   table($('vsd-port-table').querySelector('tbody'), 6, rows.map((r) => {
     const q = r.rt || {};

@@ -1,9 +1,12 @@
 package api
 
 import (
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/schema"
 )
 
 // R84-2（round84 装机走查）：CLI **整节点**删除虚拟交换机（`delete virtual-switches <名>`）
@@ -135,5 +138,88 @@ func TestDeleteStatementVSwitchVrfForms(t *testing.T) {
 	}
 	if vrfNameSet(mustConfig(t, tree))["vs-l3"] {
 		t.Fatalf("整节点删除应清同名 VRF: %v", tree["vrfs"])
+	}
+}
+
+// TestCLIVSwitchDhcpRelayStatementAndView（决策 #335）：语句 → 模型 → 提交校验 → 读视图
+// 与 display set 反推的端到端回归。
+func TestCLIVSwitchDhcpRelayStatementAndView(t *testing.T) {
+	x, engine := newCLIKit(t)
+
+	// 未配网关：提交校验拒绝，文案指向先 set gateway ip
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-relay type l2",
+		"set virtual-switches vs-relay dhcp-relay server 192.168.100.2",
+	)
+	res := x.Execute("admin", aaaClassSU, "ssh", "commit")
+	if !strings.Contains(res.Output, "校验失败") || !strings.Contains(res.Output, "gateway ip") {
+		t.Fatalf("无网关配 relay 应校验失败并指向 gateway ip:\n%s", res.Output)
+	}
+
+	// 补网关后提交成功，committed 保留 server 值
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-relay gateway ip 192.168.100.1/24",
+		"commit",
+		"exit", // 回操作模式（show virtual-switches … detail 是运行态读视图）
+	)
+	cfg, err := engine.Committed()
+	if err != nil {
+		t.Fatalf("读取 committed: %v", err)
+	}
+	if len(cfg.VirtualSwitches) != 1 || cfg.VirtualSwitches[0].DhcpRelayServer != "192.168.100.2" {
+		t.Fatalf("dhcp-relay server 应写入模型: %+v", cfg.VirtualSwitches)
+	}
+
+	// display set 反推：dhcp-relay 语句必须可还原（决策 #155 往返口径）
+	res = x.Execute("admin", aaaClassSU, "ssh", "show configuration | display set")
+	if !strings.Contains(res.Output, "dhcp-relay server 192.168.100.2") {
+		t.Fatalf("display set 应反推出 dhcp-relay 语句:\n%s", res.Output)
+	}
+
+	// 读视图：详情在配置了 relay 时带 dhcp_relay.server（与 REST 详情同源、同形状）
+	x.setVppState(fakeVppState{bds: []BridgeDomainState{
+		{ID: 9, Name: "vs-relay", Learn: true, Flood: true},
+	}})
+	out := x.Execute("admin", aaaClassSU, "ssh", "show virtual-switches vs-relay detail").Output
+	if !strings.Contains(out, "dhcp-relay") || !strings.Contains(out, "192.168.100.2") {
+		t.Fatalf("交换机详情应显示 DHCP 中继:\n%s", out)
+	}
+
+	// delete 语句：值清空；此后详情不再出现 dhcp_relay
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"delete virtual-switches vs-relay dhcp-relay",
+		"commit",
+		"exit",
+	)
+	cfg, err = engine.Committed()
+	if err != nil {
+		t.Fatalf("读取 committed: %v", err)
+	}
+	if cfg.VirtualSwitches[0].DhcpRelayServer != "" {
+		t.Fatalf("delete dhcp-relay 应清空 server: %+v", cfg.VirtualSwitches)
+	}
+	out = x.Execute("admin", aaaClassSU, "ssh", "show virtual-switches vs-relay detail").Output
+	if strings.Contains(out, "dhcp-relay") {
+		t.Fatalf("未配置时详情不得出现 dhcp_relay:\n%s", out)
+	}
+}
+
+// TestCLIVSwitchDhcpRelayCandidates（决策 #335 边界）：候选语义与语句树同源——
+// `set virtual-switches <n> dhcp-relay ?` 必须能补到 `server`，值位置无候选（自由取值）。
+func TestCLIVSwitchDhcpRelayCandidates(t *testing.T) {
+	relayNode, _, err := schema.Match(schema.ConfigPathTree(),
+		[]string{"virtual-switches", "vs1", "dhcp-relay"})
+	if err != nil {
+		t.Fatalf("dhcp-relay 应在语句树里可解析到: %v", err)
+	}
+	var kids []string
+	for _, c := range relayNode.Children {
+		kids = append(kids, c.Name)
+	}
+	if !slices.Contains(kids, "server") {
+		t.Fatalf("dhcp-relay 下应能补到 server，实际: %v", kids)
 	}
 }

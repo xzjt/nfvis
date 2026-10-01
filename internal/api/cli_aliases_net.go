@@ -47,6 +47,19 @@ var statementAliasesNet = []aliasRule{
 			return nil
 		}},
 
+	// virtual-switches <n> dhcp-relay server <ip>（决策 #335：DHCP 中继，模型单值字符串）
+	{pattern: []string{"virtual-switches", "*", "dhcp-relay", "server", "*"},
+		apply: aliasVSDhcpRelay},
+	{pattern: []string{"virtual-switches", "*", "dhcp-relay"},
+		apply: func(tree map[string]any, t []string, _ bool) error {
+			vs, err := elemByID(tree, "virtual_switches", t[1])
+			if err != nil {
+				return err
+			}
+			delete(vs, "dhcp_relay_server")
+			return nil
+		}},
+
 	// virtual-switches <n> cross-connect <port-a> <port-b>（FR-NET-012，两端口直通）
 	// 模型只有 `cross_connect bool`（OpenAPI 亦为 boolean），两个端口的"身份"由该交换机的
 	// ports 列表承担（applier 取前两个端口做 sw_interface_set_l2_xconnect）。
@@ -352,6 +365,21 @@ func aliasVSType(tree map[string]any, t []string, isSet bool) error {
 	} else {
 		removeVrf(tree, t[1])
 	}
+	return nil
+}
+
+// aliasVSDhcpRelay：virtual-switches <n> dhcp-relay server <ip>（决策 #335）。
+// 模型是单值字符串（dhcp_relay_server）；delete 由无值形态的注册键处理（整键删除）。
+func aliasVSDhcpRelay(tree map[string]any, t []string, isSet bool) error {
+	vs, err := elemByID(tree, "virtual_switches", t[1])
+	if err != nil {
+		return err
+	}
+	if !isSet {
+		delete(vs, "dhcp_relay_server")
+		return nil
+	}
+	vs["dhcp_relay_server"] = t[4]
 	return nil
 }
 

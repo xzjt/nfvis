@@ -232,6 +232,39 @@ func TestValidateL3SwitchMapping(t *testing.T) {
 	mustErrContaining(t, Validate(c2), "vs-l3", "L2")
 }
 
+func TestValidateDhcpRelay(t *testing.T) {
+	// 合法：L2 交换机已配 IPv4 网关（中继源自动取 BVI v4 地址）
+	c := validBase()
+	c.VirtualSwitches[0].DhcpRelayServer = "192.168.100.2"
+	mustNoErr(t, Validate(c))
+
+	// server 必须是合法 IPv4 地址
+	c1 := validBase()
+	c1.VirtualSwitches[0].DhcpRelayServer = "not-an-ip"
+	mustErrContaining(t, Validate(c1), "dhcp_relay_server", "IPv4")
+	c1b := validBase()
+	c1b.VirtualSwitches[0].DhcpRelayServer = "2001:db8::1"
+	mustErrContaining(t, Validate(c1b), "dhcp_relay_server", "IPv4")
+
+	// 未配网关拒绝：文案指向先 set gateway ip
+	c2 := validBase()
+	c2.VirtualSwitches[0].Gateway = nil
+	c2.VirtualSwitches[0].DhcpRelayServer = "192.168.100.2"
+	mustErrContaining(t, Validate(c2), "dhcp_relay_server", "gateway ip")
+
+	// 网关只有 IPv6 地址同样拒绝（中继源需要 v4）
+	c3 := validBase()
+	c3.VirtualSwitches[0].Gateway = &VSGateway{Addresses: []string{"2001:db8:100::1/64"}}
+	c3.VirtualSwitches[0].DhcpRelayServer = "192.168.100.2"
+	mustErrContaining(t, Validate(c3), "dhcp_relay_server", "gateway ip")
+
+	// type=l3 交换机没有 BVI 网关，relay 一律拒绝
+	c4 := validBase()
+	c4.VirtualSwitches = append(c4.VirtualSwitches, VirtualSwitch{Name: "vs-l3", Type: "l3", DhcpRelayServer: "10.0.0.1"})
+	c4.Vrfs = append(c4.Vrfs, Vrf{Name: "vs-l3"})
+	mustErrContaining(t, Validate(c4), "vs-l3", "BVI")
+}
+
 func TestValidateSystemLogin(t *testing.T) {
 	c := validBase()
 	c.System.Login = &SystemLogin{

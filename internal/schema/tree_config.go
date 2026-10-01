@@ -203,6 +203,11 @@ func ConfigPathTree() *Node {
 					K("acl-in", "入向 ACL", SP("<acl>", "acl_in", "ACL 名")),
 					K("acl-out", "出向 ACL", SP("<acl>", "acl_out", "ACL 名")),
 				),
+				// 决策 #335：DHCP 中继随网关域生效——仅已配网关（BVI）的 L2 交换机可配
+				// （中继源地址自动取 BVI 的 IPv4 网关地址），前置校验在模型 validate。
+				K("dhcp-relay", "DHCP 中继（仅已配网关的 L2 交换机）",
+					K("server", "DHCP 服务器地址（IPv4，须在该交换机转发域内可达）", V("ip", "如 192.168.100.2")),
+				),
 				K("ports", "成员端口",
 					PT("<seq>", "uint", "端口序号",
 						K("interface", "物理口/bond 成员",

@@ -82,7 +82,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show interfaces <ifname> statistics` | 同上（等价写法）；未接管口如实说明无数据面统计（决策 #302） | VPP 运行态统计 | ✅（round80 逐条比对：两侧输出逐字相同） |
 | `show interfaces <ifname> sriov` | 同上（等价写法） | sysfs SR-IOV | ✅ |
 | `show virtual-switches` | 全部虚拟交换机摘要 | `GET /virtual-switches` | ✅ |
-| `show virtual-switches <name> detail` | 类型/成员端口/VLAN/VRF | `GET /virtual-switches/{name}` | ✅ |
+| `show virtual-switches <name> detail` | 类型/成员端口/VLAN/VRF/DHCP 中继 | `GET /virtual-switches/{name}` | ✅ |
 | `show virtual-switches <name> ports` | 成员端口及状态/计数（配置静态 ports ∪ VNF/容器声明派生，标注 source） | `GET /virtual-switches/{name}/ports` | ✅ |
 | `show virtual-switches <name> mac-table` | MAC 学习表（仅 L2） | `GET /virtual-switches/{name}/mac-table` | ✅ |
 | `show virtual-switches <name> statistics` | 每端口收发计数 | `GET /virtual-switches/{name}`（statistics 字段） | ✅ |
@@ -310,6 +310,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-switches <n> gateway ip <ip-prefix>` | BVI 三层网关（可多条） | VPP BVI | ✅ |
 | `set virtual-switches <n> gateway vrf <name>` | 网关所属 VRF | VPP | ✅ |
 | `set virtual-switches <n> gateway acl-in\|acl-out <acl>` | 网关 ACL | VPP acl | ✅ |
+| `set virtual-switches <n> dhcp-relay server <ip>` | DHCP 中继（仅已 `set gateway ip` 的 L2 交换机可配；src 自动取 BVI 的 IPv4 网关地址，server 须在该转发域内可达） | VPP dhcp proxy | 🚫 待真机（决策 #335；已入 fulltest 阶段 2、单测覆盖） |
+| `delete virtual-switches <n> dhcp-relay` | 撤销 DHCP 中继（`dhcp_proxy_config` IsAdd=false，幂等；随交换机删除一并撤） | VPP dhcp proxy | 🚫 待真机（决策 #335；已入 fulltest 阶段 2、单测覆盖） |
 | `set virtual-switches <n> ports [<seq>] interface <if> [trunk vlans <l>\|native <v>]` | 物理口成员 | VPP BD | ✅ |
 | `set virtual-switches <n> ports [<seq>] vnf <vm> interface <vnic> [trunk vlans <l>]` | vhost-user 成员 | VPP + libvirt | ✅ |
 | `set virtual-switches <n> ports [<seq>] container <ct> interface <vnic>` | 容器 memif 成员 | VPP + Docker | ✅ |
@@ -421,8 +423,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request` | 46 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/系统/告警） |
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
-| 配置模式 | 127 | §2.1 余下 13 行 + §2.2~§2.9 共 114 行 |
-| **合计** | **262** | 不含管道则为 **253**；按 ` / ` 拆开后 **266 条** |
+| 配置模式 | 129 | §2.1 余下 13 行 + §2.2~§2.9 共 116 行 |
+| **合计** | **264** | 不含管道则为 **255**；按 ` / ` 拆开后 **268 条** |
 
 **分节**（行数）：
 
@@ -430,20 +432,20 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 |---|---|---|---|
 | §1.1 `show`（含通用管道 9） | 76 | §2.2b `protocols` | 3 |
 | §1.2 `request` | 47 | §2.3 `interfaces` 与 `bonds` | 10 |
-| §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 13 |
+| §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 15 |
 | §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 9 |
 | §2.2 `system` | 35 | §2.6 `resource-pools` | 3 |
 | §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 20 |
-| §2.9 `container-functions` | 10 | **合计** | **262** |
+| §2.9 `container-functions` | 10 | **合计** | **264** |
 
-**按实测状态分布**（共 262 行）：
+**按实测状态分布**（共 264 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
 | ✅ 实测通过 | 243 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶；`request system storage format-data` 由决策 #305 落地（原 🚫 破坏性、契约已登记延期），按「破坏性但已验」移入本桶 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 15 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 3 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319） |
+| 🚫 本轮未执行 | 17 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 5 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319；`set/delete virtual-switches <n> dhcp-relay …` 阶段 2，决策 #335） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、

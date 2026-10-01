@@ -49,6 +49,9 @@ func (n recNet) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch) e
 func (n recNet) DeleteBridgeDomain(ctx context.Context, name string) error {
 	return n.record("del-bd:" + name)
 }
+func (n recNet) ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) error {
+	return n.record("dhcp-relay:" + vs.Name)
+}
 func (n recNet) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 	return n.record("vrf:" + vrf.Name)
 }
@@ -164,8 +167,9 @@ func TestApplyOrderNetworkBeforeCompute(t *testing.T) {
 	if err := ap.Apply(context.Background(), old, newCfg); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	// 顺序：ACL 先于交换机（端口绑定引用 ACL），网络先于计算/容器（骨架 §3.3：网络→计算→容器）
-	want := []string{"acl:acl-1", "bd:vs-1", "vrf:vrf-1", "vm:vm-1", "ct:ct-1"}
+	// 顺序：ACL 先于交换机（端口绑定引用 ACL），网络先于计算/容器（骨架 §3.3：网络→计算→容器）；
+	// dhcp-relay 是 bridge-domain 之后的伴随操作（决策 #335，先有 BVI 地址与表才有 relay）。
+	want := []string{"acl:acl-1", "bd:vs-1", "dhcp-relay:vs-1", "vrf:vrf-1", "vm:vm-1", "ct:ct-1"}
 	if len(*calls) != len(want) {
 		t.Fatalf("调用数不符: %v", *calls)
 	}

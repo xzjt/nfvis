@@ -280,3 +280,216 @@ func TestServicesProviderClosedEachCall(t *testing.T) {
 		t.Fatalf("每次操作应关闭 channel: %d", f.closed)
 	}
 }
+
+// ---------- 决策 #335：交换机 DHCP 中继（VPP dhcp proxy） ----------
+
+// proxyCall 一次 ProxySet 调用的实参快照（断言消息字段与方向用）。
+type proxyCall struct {
+	rx, srvVrf uint32
+	isAdd      bool
+	server     string
+	src        string
+}
+
+type fakeDhcp struct {
+	calls []proxyCall
+	err   error
+}
+
+func (f *fakeDhcp) ProxySet(rxVrfID, serverVrfID uint32, isAdd bool, server, src string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.calls = append(f.calls, proxyCall{rx: rxVrfID, srvVrf: serverVrfID, isAdd: isAdd, server: server, src: src})
+	return nil
+}
+
+func (f *fakeDhcp) Close() {}
+
+func TestDhcpRelayApplyAndClear(t *testing.T) {
+	f := &fakeDhcp{}
+	p := NewDhcpProvider(f)
+	vs := model.VirtualSwitch{Name: "vs-a", Type: "l2",
+		Gateway:         &model.VSGateway{Addresses: []string{"192.168.100.1/24", "2001:db8:100::1/64"}},
+		DhcpRelayServer: "192.168.100.2"}
+
+	// apply：表 id 取网关专属 VRF（vr-<名>），源地址自动取 BVI 的第一个 IPv4 网关地址（跳过 v6）
+	if err := p.SyncRelay(context.Background(), vs); err != nil {
+		t.Fatalf("SyncRelay(apply): %v", err)
+	}
+	want := TableID(GatewayVRFName("vs-a"))
+	if len(f.calls) != 1 {
+		t.Fatalf("应恰好下发一次 proxy，实际 %v", f.calls)
+	}
+	c := f.calls[0]
+	if c.rx != want || c.srvVrf != want || !c.isAdd || c.server != "192.168.100.2" || c.src != "192.168.100.1" {
+		t.Fatalf("proxy 字段不符: %+v（want rx=srvVrf=%d）", c, want)
+	}
+
+	// 声明未变：幂等跳过（不再下发）
+	if err := p.SyncRelay(context.Background(), vs); err != nil {
+		t.Fatalf("SyncRelay(幂等): %v", err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("声明未变不应重复下发，实际 %v", f.calls)
+	}
+
+	// 清 relay：按登记值发 IsAdd=false
+	vs.DhcpRelayServer = ""
+	if err := p.SyncRelay(context.Background(), vs); err != nil {
+		t.Fatalf("SyncRelay(clear): %v", err)
+	}
+	if len(f.calls) != 2 || f.calls[1].isAdd || f.calls[1].server != "192.168.100.2" || f.calls[1].src != "192.168.100.1" {
+		t.Fatalf("清 relay 应按登记值撤销: %v", f.calls)
+	}
+	// 已无登记：再次清是空操作（幂等）
+	if err := p.SyncRelay(context.Background(), vs); err != nil {
+		t.Fatalf("SyncRelay(再清): %v", err)
+	}
+	if len(f.calls) != 2 {
+		t.Fatalf("无登记时清 relay 不应下发: %v", f.calls)
+	}
+}
+
+func TestDhcpRelayChangeServerAndGatewayDomain(t *testing.T) {
+	f := &fakeDhcp{}
+	p := NewDhcpProvider(f)
+	vs := model.VirtualSwitch{Name: "vs-a", Type: "l2",
+		Gateway:         &model.VSGateway{Addresses: []string{"192.168.100.1/24"}},
+		DhcpRelayServer: "192.168.100.2"}
+	if err := p.SyncRelay(context.Background(), vs); err != nil {
+		t.Fatalf("初次 apply: %v", err)
+	}
+
+	// 改 server：同域重发 IsAdd=true（覆盖）
+	vs.DhcpRelayServer = "10.0.0.99"
+	if err := p.SyncRelay(context.Background(), vs); err != nil {
+		t.Fatalf("改 server: %v", err)
+	}
+	if len(f.calls) != 2 || !f.calls[1].isAdd || f.calls[1].server != "10.0.0.99" {
+		t.Fatalf("改 server 应重发 proxy: %v", f.calls)
+	}
+
+	// 网关换域（gateway.vrf）：先撤旧域 proxy，再下发新域
+	vs.Gateway = &model.VSGateway{Vrf: "vs-mgmt", Addresses: []string{"10.10.0.1/24"}}
+	if err := p.SyncRelay(context.Background(), vs); err != nil {
+		t.Fatalf("换网关域: %v", err)
+	}
+	if len(f.calls) != 4 {
+		t.Fatalf("换域应先撤旧再下发新，实际 %v", f.calls)
+	}
+	oldID, newID := TableID(GatewayVRFName("vs-a")), TableID("vs-mgmt")
+	if f.calls[2].isAdd || f.calls[2].rx != oldID || f.calls[2].server != "10.0.0.99" {
+		t.Fatalf("第 3 步应撤旧域: %+v", f.calls[2])
+	}
+	if !f.calls[3].isAdd || f.calls[3].rx != newID || f.calls[3].src != "10.10.0.1" || f.calls[3].server != "10.0.0.99" {
+		t.Fatalf("第 4 步应在新域下发: %+v", f.calls[3])
+	}
+}
+
+func TestDhcpRelayDeleteAndErrors(t *testing.T) {
+	f := &fakeDhcp{}
+	p := NewDhcpProvider(f)
+	vs := model.VirtualSwitch{Name: "vs-a", Type: "l2",
+		Gateway:         &model.VSGateway{Addresses: []string{"192.168.100.1/24"}},
+		DhcpRelayServer: "192.168.100.2"}
+	if err := p.SyncRelay(context.Background(), vs); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	// 删交换机连带撤 proxy（IsAdd=false，按登记值）；无登记再删是空操作
+	if err := p.DeleteRelay(context.Background(), "vs-a"); err != nil {
+		t.Fatalf("DeleteRelay: %v", err)
+	}
+	if len(f.calls) != 2 || f.calls[1].isAdd || f.calls[1].server != "192.168.100.2" {
+		t.Fatalf("删交换机应撤 proxy: %v", f.calls)
+	}
+	if err := p.DeleteRelay(context.Background(), "vs-a"); err != nil {
+		t.Fatalf("DeleteRelay(无登记): %v", err)
+	}
+	if len(f.calls) != 2 {
+		t.Fatalf("无登记时删除不应下发: %v", f.calls)
+	}
+
+	// 底座错误上抛（与 QoS/SPAN 删除同一口径）
+	f2 := &fakeDhcp{err: errors.New("boom")}
+	p2 := NewDhcpProvider(f2)
+	if err := p2.SyncRelay(context.Background(), vs); err == nil {
+		t.Fatal("下发错误应上抛")
+	}
+	// 无网关的交换机声明了 relay（防御：提交校验已挡，编排层仍不静默）
+	if err := p2.SyncRelay(context.Background(),
+		model.VirtualSwitch{Name: "vs-b", Type: "l2", DhcpRelayServer: "10.0.0.1"}); err == nil ||
+		!strings.Contains(err.Error(), "gateway ip") {
+		t.Fatalf("无网关应报错并指向 gateway ip: %v", err)
+	}
+}
+
+func TestDhcpRelayRecoveryReplay(t *testing.T) {
+	f := newRecoveryFixture()
+	vs := l2Switch("vs-a", "ens192")
+	vs.Gateway = &model.VSGateway{Addresses: []string{"192.168.100.1/24"}}
+	vs.DhcpRelayServer = "192.168.100.2"
+	cfg := model.Config{VirtualSwitches: []model.VirtualSwitch{vs}}
+
+	// 首次收敛即重放 relay（登记为空）
+	errs := f.net.EnsureConsistent(context.Background(), cfg)
+	if len(errs) != 0 {
+		t.Fatalf("应收敛成功，实际: %v", errs)
+	}
+	want := TableID(GatewayVRFName("vs-a"))
+	calls := f.dhcp.calls
+	if len(calls) != 1 || !calls[0].isAdd || calls[0].rx != want ||
+		calls[0].server != "192.168.100.2" || calls[0].src != "192.168.100.1" {
+		t.Fatalf("恢复重放应含 relay proxy: %v", calls)
+	}
+
+	// 模拟 VPP 重启：登记清空后重放同一条 proxy 消息（幂等重发）
+	if errs := f.net.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("重复收敛应成功: %v", errs)
+	}
+	calls = f.dhcp.calls
+	if len(calls) != 2 || !calls[1].isAdd || calls[1].rx != want {
+		t.Fatalf("重放后应再次下发 relay: %v", calls)
+	}
+
+	// 下发失败 → 独立记源（virtual-switches/<名>/dhcp-relay）且不阻塞其余对象
+	f.dhcp.err = errors.New("boom")
+	f.dhcp.calls = nil
+	errs = f.net.EnsureConsistent(context.Background(), cfg)
+	if len(errs) == 0 {
+		t.Fatal("relay 下发失败应记未收敛项")
+	}
+	found := false
+	for _, a := range f.alarms.List(AlarmActive) {
+		if a.Source == "virtual-switches/vs-a/dhcp-relay" && a.Code == AlarmUnconverged {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("失败项应以 dhcp-relay 独立记源进告警，实际: %+v", f.alarms.List(AlarmActive))
+	}
+}
+
+func TestDeleteBridgeDomainRemovesRelay(t *testing.T) {
+	f := newRecoveryFixture()
+	vs := l2Switch("vs-a", "ens192")
+	vs.Gateway = &model.VSGateway{Addresses: []string{"192.168.100.1/24"}}
+	vs.DhcpRelayServer = "192.168.100.2"
+	cfg := model.Config{VirtualSwitches: []model.VirtualSwitch{vs}}
+	if errs := f.net.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("收敛: %v", errs)
+	}
+	f.dhcp.calls = nil
+
+	// 删交换机：先撤 proxy（IsAdd=false），再拆网关与 BD
+	if err := f.net.DeleteBridgeDomain(context.Background(), "vs-a"); err != nil {
+		t.Fatalf("DeleteBridgeDomain: %v", err)
+	}
+	if len(f.dhcp.calls) != 1 || f.dhcp.calls[0].isAdd || f.dhcp.calls[0].server != "192.168.100.2" {
+		t.Fatalf("删交换机应连带撤 proxy: %v", f.dhcp.calls)
+	}
+	if f.l2.bds[BDID("vs-a")] {
+		t.Fatal("BD 应已删除")
+	}
+}
