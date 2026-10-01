@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/xzjt/nfvis/internal/aaa"
+	"github.com/xzjt/nfvis/internal/schema"
 	"github.com/xzjt/nfvis/internal/state"
 )
 
@@ -213,5 +214,22 @@ func TestCLIClearInterfaceStats(t *testing.T) {
 	}
 	if out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "clear interfaces").Output; !strings.Contains(out, "语法") {
 		t.Fatalf("不完整命令应报语法: %q", out)
+	}
+}
+
+// TestCLIDiagIPv6Candidates 决策 #330 真机验证遗留（round110 登记的「候选正确探针」缺口）：
+// round110 曾用「`ping ipv6 127.0.0.1` 执行是否报错」当候选探针——那是**执行**路径，不是候选查询。
+// 正确探针是直接断言候选树：`?`/Tab 在 tokens ["ping"] 与 ["traceroute"] 位置都应列出
+// 名为 `ipv6` 的候选（决策 #330 把 ipv6 建成可选无值叶子关键字，与 <host> 平级）。
+func TestCLIDiagIPv6Candidates(t *testing.T) {
+	for _, tokens := range [][]string{{"ping"}, {"traceroute"}} {
+		cs := schema.CandidatesFiltered(schema.OperRoot(), tokens, "", nil, nil)
+		toks := make([]string, 0, len(cs))
+		for _, c := range cs {
+			toks = append(toks, c.Token)
+		}
+		if !hasTok(toks, "ipv6") {
+			t.Errorf("`%s ?` 候选应含 ipv6（可选族选择器）：%v", strings.Join(tokens, " "), toks)
+		}
 	}
 }
