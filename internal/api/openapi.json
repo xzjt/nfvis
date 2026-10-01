@@ -1283,8 +1283,16 @@
             "example": "ice-dpdk",
             "type": "string"
           },
+          "egress_policy": {
+            "description": "出向限速策略绑定（VPP policer output，决策 #331）",
+            "type": "string"
+          },
           "enabled": {
             "type": "boolean"
+          },
+          "ingress_policy": {
+            "description": "入向限速策略绑定（决策 #331）",
+            "type": "string"
           },
           "kind": {
             "enum": [
@@ -1390,6 +1398,10 @@
         "description": "物理网卡配置视图。在 ConfigDocument（整份配置文档）中 name 必填；PUT /interfaces/{name} 时可省略",
         "properties": {
           "description": {
+            "type": "string"
+          },
+          "egress_policy": {
+            "description": "出向限速策略绑定（命令树 §2.5；VPP policer output，决策 #331）",
             "type": "string"
           },
           "enabled": {
@@ -1708,7 +1720,27 @@
       },
       "QosPolicy": {
         "properties": {
+          "bindings": {
+            "description": "逐条方向绑定（决策 #331：同一策略可被不同接口以不同方向引用）",
+            "items": {
+              "properties": {
+                "direction": {
+                  "enum": [
+                    "ingress",
+                    "egress"
+                  ],
+                  "type": "string"
+                },
+                "interface": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
           "bound_interfaces": {
+            "description": "引用该策略的接口名（去重；入向/出向合并）",
             "items": {
               "type": "string"
             },
@@ -3947,7 +3979,7 @@
     },
     "/diagnostics/ping": {
       "post": {
-        "description": "经 VPP 数据面 ping（**只覆盖 VPP 平面**：管理口属内核平面，请用宿主 ping），\n与 CLI `ping` 同一实现（决策 #123）。**未通即失败**（0 发包或 0 应答都报 502），\n与 CLI 的判定口径一致（附录 A #89/#93）。\n",
+        "description": "经 VPP 数据面 ping（**只覆盖 VPP 平面**：管理口属内核平面，请用宿主 ping），\n与 CLI `ping` 同一实现（决策 #123）。**未通即失败**（0 发包或 0 应答都报 502），\n与 CLI 的判定口径一致（附录 A #89/#93）。`ipv6=true` 显式走 v6 平面\n（`vppctl ping ipv6`，决策 #330），v4/v6 同判定口径。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -3959,6 +3991,10 @@
                   },
                   "host": {
                     "type": "string"
+                  },
+                  "ipv6": {
+                    "description": "显式 IPv6（vppctl ping ipv6；决策 #330）",
+                    "type": "boolean"
                   },
                   "source": {
                     "description": "源 IP（按接口地址反查接口）",
@@ -4004,6 +4040,7 @@
     },
     "/diagnostics/traceroute": {
       "post": {
+        "description": "宿主侧 raw ICMP/ICMPv6 路径跟踪（VPP 26.06 无 traceroute 能力）。\n`ipv6=true` 走宿主侧 ICMPv6（决策 #330）。`vrf` 对 v4/v6 **都明确拒绝**\n（宿主侧 ICMP 无法经 VPP VRF 转发，不静默降级）；要经 VRF 测 v4 连通性请用 `/diagnostics/ping`。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -4012,7 +4049,12 @@
                   "host": {
                     "type": "string"
                   },
+                  "ipv6": {
+                    "description": "宿主侧 ICMPv6（决策 #330）",
+                    "type": "boolean"
+                  },
                   "vrf": {
+                    "description": "VRF 名；v4/v6 都不支持，非空即 502",
                     "type": "string"
                   }
                 },

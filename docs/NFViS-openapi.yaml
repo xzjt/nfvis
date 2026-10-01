@@ -1898,7 +1898,8 @@ paths:
       description: |
         经 VPP 数据面 ping（**只覆盖 VPP 平面**：管理口属内核平面，请用宿主 ping），
         与 CLI `ping` 同一实现（决策 #123）。**未通即失败**（0 发包或 0 应答都报 502），
-        与 CLI 的判定口径一致（附录 A #89/#93）。
+        与 CLI 的判定口径一致（附录 A #89/#93）。`ipv6=true` 显式走 v6 平面
+        （`vppctl ping ipv6`，决策 #330），v4/v6 同判定口径。
       requestBody:
         required: true
         content:
@@ -1911,6 +1912,7 @@ paths:
                 source: { type: string, description: 源 IP（按接口地址反查接口） }
                 vrf: { type: string, description: 经指定 VRF }
                 count: { type: integer, description: 次数（缺省 5） }
+                ipv6: { type: boolean, description: "显式 IPv6（vppctl ping ipv6；决策 #330）" }
       responses:
         "200":
           description: 已通（output 为原始回显）
@@ -1925,6 +1927,10 @@ paths:
     post:
       tags: [system]
       summary: 路径跟踪（与 CLI `traceroute` 同源）
+      description: |
+        宿主侧 raw ICMP/ICMPv6 路径跟踪（VPP 26.06 无 traceroute 能力）。
+        `ipv6=true` 走宿主侧 ICMPv6（决策 #330）。`vrf` 对 v4/v6 **都明确拒绝**
+        （宿主侧 ICMP 无法经 VPP VRF 转发，不静默降级）；要经 VRF 测 v4 连通性请用 `/diagnostics/ping`。
       requestBody:
         required: true
         content:
@@ -1934,7 +1940,8 @@ paths:
               required: [host]
               properties:
                 host: { type: string }
-                vrf: { type: string }
+                vrf: { type: string, description: VRF 名；v4/v6 都不支持，非空即 502 }
+                ipv6: { type: boolean, description: "宿主侧 ICMPv6（决策 #330）" }
       responses:
         "200":
           description: OK
@@ -2497,6 +2504,8 @@ components:
         mac: { type: string }
         numa_node: { type: integer }
         description: { type: string }
+        ingress_policy: { type: string, description: "入向限速策略绑定（决策 #331）" }
+        egress_policy: { type: string, description: "出向限速策略绑定（VPP policer output，决策 #331）" }
         sriov:
           type: object
           description: |
@@ -2538,6 +2547,7 @@ components:
           properties:
             vf_count: { type: integer }
         ingress_policy: { type: string, description: 入向限速策略绑定（命令树 §2.5） }
+        egress_policy: { type: string, description: "出向限速策略绑定（命令树 §2.5；VPP policer output，决策 #331）" }
 
     VppConfig:
       type: object
@@ -3016,6 +3026,15 @@ components:
         bound_interfaces:
           type: array
           items: { type: string }
+          description: 引用该策略的接口名（去重；入向/出向合并）
+        bindings:
+          type: array
+          description: "逐条方向绑定（决策 #331：同一策略可被不同接口以不同方向引用）"
+          items:
+            type: object
+            properties:
+              interface: { type: string }
+              direction: { type: string, enum: [ingress, egress] }
 
     ResourcePool:
       type: object
