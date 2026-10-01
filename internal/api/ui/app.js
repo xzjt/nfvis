@@ -4816,6 +4816,15 @@ async function imgImportFile() {
 
 // ---------- 网络对象（只读总览）----------
 
+// QoS 绑定读视图（决策 #331）：`接口:in|out` 逐条列出，与 CLI `show qos policies` 的
+// 「绑定方向（接口:in|out）」列同源；无绑定时返回 undefined（表格里如实显示「—」）。
+// 列表卡与详情页共用——两处各写一遍就会像 R110-1 那样漂移（曾取响应里不存在的字段）。
+function qosBindingsText(q) {
+  return Array.isArray(q.bindings) && q.bindings.length
+    ? q.bindings.map((b) => b.interface + ':' + (b.direction === 'egress' ? 'out' : 'in')).join('；')
+    : undefined;
+}
+
 // 每块：[标题, 数据, 列名, 取值函数, 详情页路由前缀（可选）]；有前缀时表格多一列"详情"，
 // 且整行可点进详情页。NAT 没有独立详情页（没有"单对象"语义：NAT 是配置对象），故只列在总览里；
 // LLDP 也有自己的页面（#/network/lldp），不在这里重复列一遍。
@@ -4833,7 +4842,10 @@ const NET_OBJECT_VIEWS = [
   ['链路聚合（bond）', 'bonds', ['名称', '模式', '成员'], (b) => [
     b.name, b.mode, (b.members || []).join(', '),
   ], '#/network/bonds/'],
-  ['QoS 策略', 'qos', ['名称', '类型', '目标'], (q) => [q.name, q.type, q.target || q.interface], '#/network/qos/'],
+  // 列与 CLI `show qos policies`（Policy / CIR(bps) / 绑定方向）同源；CBS 只在详情页展示。
+  // 曾取 `q.type`/`q.target`/`q.interface` —— 响应里从来没有这些字段，「类型/目标」恒「—」
+  // （R110-1，决策 #332），字段以契约 QosPolicy schema 为准。
+  ['QoS 策略', 'qos', ['名称', 'CIR(bps)', '绑定（接口:in|out）'], (q) => [q.name, q.cir, qosBindingsText(q)], '#/network/qos/'],
   ['端口镜像（SPAN）', 'span', ['名称', '源', '目的'], (s) => [
     s.name, list(s.sources || s.source), s.destination,
   ], '#/network/span/'],
@@ -5008,10 +5020,8 @@ function renderQosDetail(rows, params) {
     ['承诺速率（CIR）', q.cir != null ? q.cir + ' bps' : undefined],
     ['突发（CBS）', q.cbs != null ? q.cbs + ' 字节' : undefined],
     ['绑定接口', list(q.bound_interfaces)],
-    // 决策 #331：逐条方向绑定（同一策略可被不同接口以不同方向引用）。
-    ['绑定（方向）', Array.isArray(q.bindings) && q.bindings.length
-      ? q.bindings.map((b) => b.interface + ':' + (b.direction === 'egress' ? 'out' : 'in')).join('；')
-      : undefined],
+    // 决策 #331：逐条方向绑定（同一策略可被不同接口以不同方向引用）——与列表卡同一 helper。
+    ['绑定（方向）', qosBindingsText(q)],
   ] : []);
 }
 
