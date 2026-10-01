@@ -115,7 +115,11 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, vppState: opts.VppState, sriov: opts.SRIOV, dpdk: opts.DPDK, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, ports: opts.Ports, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), versions: opts.Versions, logs: opts.LogSource, diag: opts.Diag, log: log}
+	// 日志来源统一经 scrubLogSource 包裹（决策 #325）：CLI `show log system` 与
+	// REST `GET /system/logs` 是**同一份** nfvisd 日志的两个出口，其中可能出现产品
+	// 首启引导打印的一次性口令——三个出口（含诊断归档）共用同一份脱敏实现。
+	logs := scrubLogSource(opts.LogSource)
+	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, vppState: opts.VppState, sriov: opts.SRIOV, dpdk: opts.DPDK, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, ports: opts.Ports, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), versions: opts.Versions, logs: logs, diag: opts.Diag, log: log}
 	s.cliExec.setRuntime(opts.Diag, opts.State)
 	s.cliExec.setPorts(opts.Ports)       // 决策 #83：show 的空态与 Tab 候选同源
 	s.cliExec.setVppCtl(opts.VPP)        // 发现 #11：show vpp 的版本/连接/待重启
@@ -125,7 +129,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.cliExec.setEventBus(opts.Events) // M5-1：CLI 直连动作也发布 vnf-state-changed
 	s.cliExec.setSystemOps(opts.SysOps)
 	s.cliExec.setDiagOps(opts.DiagOps)
-	s.cliExec.setLogSource(opts.LogSource)
+	s.cliExec.setLogSource(logs)
 	s.cliExec.setVersions(opts.Versions) // R37-2 收口（决策 #118）：show version 七组件汇总
 	s.cliExec.setCapture(opts.Capture)
 	s.cliExec.setSoftware(opts.Software)

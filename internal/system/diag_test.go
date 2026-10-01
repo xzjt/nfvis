@@ -272,7 +272,7 @@ func TestTechSupportLogsScrubOnlyCredentialLine(t *testing.T) {
 	body := []byte("line1: 用户口令策略已更新\n" +
 		"line2: " + bootstrapCredentialMarker + ": " + tsBootstrapPassword + "（仅这一次）\n" +
 		"line3: 口令已修改\n")
-	out := string(scrubBootstrapCredential(body))
+	out := string(ScrubBootstrapCredential(body))
 	if strings.Contains(out, tsBootstrapPassword) {
 		t.Fatalf("凭据值应被剥掉: %q", out)
 	}
@@ -283,7 +283,7 @@ func TestTechSupportLogsScrubOnlyCredentialLine(t *testing.T) {
 	}
 	// 无标记的日志原样返回（不做猜测式改写）
 	plain := []byte("no marker here\n")
-	if got := scrubBootstrapCredential(plain); string(got) != string(plain) {
+	if got := ScrubBootstrapCredential(plain); string(got) != string(plain) {
 		t.Fatalf("无标记应原样返回: %q", got)
 	}
 }

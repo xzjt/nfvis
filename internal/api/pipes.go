@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/cliparse"
+	"github.com/xzjt/nfvis/internal/model"
 )
 
 // pipeSpec 一段管道。
@@ -132,7 +133,13 @@ func (x *cliExecutor) applyPipes(text string, pipes []pipeSpec) string {
 				}
 				continue
 			}
-			b, err := json.MarshalIndent(x.structured, "", "  ")
+			// 决策 #325：结构化快照可能是**原始配置树**（`show configuration` 等配置 show 族把
+			// toJSONTree(cfg) 直接挂上 x.structured），而它含 `password_hash` 一类的敏感叶子。
+			// display set 自带敏感值剥离，display json/xml 此前**没有**——只读账号执行
+			// `show configuration | display json` 即可读到全部用户口令哈希（真机复现）。
+			// 脱敏单源仍是 model.RedactSensitive（与 REST 配置视图、诊断归档同一规则）；
+			// 规则只命中敏感键名，对运行态/元数据快照是无操作。
+			b, err := json.MarshalIndent(model.RedactSensitive(x.structured), "", "  ")
 			if err != nil {
 				return "%% 结构化输出失败: " + err.Error() + "\n"
 			}
@@ -144,7 +151,8 @@ func (x *cliExecutor) applyPipes(text string, pipes []pipeSpec) string {
 				}
 				continue
 			}
-			text = renderXML(x.structured, "configuration", 0)
+			// 同 display-json：XML 渲染前先按同一规则脱敏（决策 #325）。
+			text = renderXML(model.RedactSensitive(x.structured), "configuration", 0)
 		case "display-set":
 			// 决策 #155：配置（子）树 → set 语句。structured 必须是配置 JSON 树，
 			// structuredPath 为其在整配置中的绝对路径（配置模式层级 show 时非空）。

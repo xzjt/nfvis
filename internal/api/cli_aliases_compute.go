@@ -164,15 +164,36 @@ var statementAliasesCompute = []aliasRule{
 
 // aliasPortVnfMember：交换机端口的 VM vNIC 成员（VSwitchPort.Vnf/VnfInterface）。
 // t = [virtual-switches, <vs>, ports, <seq>, "vnf"(, <vm>[, "interface", <vnic>])]。
+//
+// 删除边界（决策 #326）：派生端口（VNF 侧声明挂到本交换机、**不在**静态 ports 里）不可在此删。
+// 此前 portElem 在序号不存在时会**凭空建一个空端口元素**再删其 vnf 字段（无字段可删），
+// 于是「删一个派生端口」静默留下 {"seq":N} 空壳——既没删掉自认的对象、又污染了配置。
+// 现改为：元素不存在时不创建，若该 VM 确有此 vNIC 声明挂到本交换机则给出「去 VNF 侧删」的指引。
 func aliasPortVnfMember(tree map[string]any, t []string, isSet bool) error {
-	port, err := portElem(tree, t[1], t[3])
-	if err != nil {
-		return err
-	}
 	if !isSet {
+		if _, err := elemByID(tree, "virtual_switches", t[1]); err != nil {
+			return err
+		}
+		port := existingPortElem(tree, t[1], t[3])
+		if port == nil {
+			owner := ""
+			if len(t) >= 6 {
+				owner = t[5]
+			}
+			if owner != "" && vnicDeclaredOnVSwitch(tree, "virtual_machine_functions", owner, t[1]) {
+				return fmt.Errorf("端口 %s 来自 VNF %s 的 vNIC 声明（读视图派生条目，source=vnf），不能在交换机侧删除；"+
+					"请在 VNF 侧删除该接口的挂接：delete virtual-machine-functions %s interfaces %s virtual-switch %s",
+					t[3], owner, owner, deleteNicHint(t), t[1])
+			}
+			return fmt.Errorf("端口序号 %s 在交换机 %s 的静态 ports 中不存在（不创建空端口）", t[3], t[1])
+		}
 		delete(port, "vnf")
 		delete(port, "vnf_interface")
 		return nil
+	}
+	port, err := portElem(tree, t[1], t[3])
+	if err != nil {
+		return err
 	}
 	if len(t) < 6 {
 		return fmt.Errorf("配置不完整: ports %s vnf 缺少 VNF 名", t[3])
@@ -185,15 +206,32 @@ func aliasPortVnfMember(tree map[string]any, t []string, isSet bool) error {
 }
 
 // aliasPortContainerMember：交换机端口的容器 memif 成员（VSwitchPort.Container/ContainerInterface）。
+// 删除边界同 aliasPortVnfMember（决策 #326）。
 func aliasPortContainerMember(tree map[string]any, t []string, isSet bool) error {
-	port, err := portElem(tree, t[1], t[3])
-	if err != nil {
-		return err
-	}
 	if !isSet {
+		if _, err := elemByID(tree, "virtual_switches", t[1]); err != nil {
+			return err
+		}
+		port := existingPortElem(tree, t[1], t[3])
+		if port == nil {
+			owner := ""
+			if len(t) >= 6 {
+				owner = t[5]
+			}
+			if owner != "" && vnicDeclaredOnVSwitch(tree, "container_functions", owner, t[1]) {
+				return fmt.Errorf("端口 %s 来自容器 %s 的 vNIC 声明（读视图派生条目，source=container），不能在交换机侧删除；"+
+					"请在容器侧删除该接口的挂接：delete container-functions %s interfaces %s virtual-switch %s",
+					t[3], owner, owner, deleteNicHint(t), t[1])
+			}
+			return fmt.Errorf("端口序号 %s 在交换机 %s 的静态 ports 中不存在（不创建空端口）", t[3], t[1])
+		}
 		delete(port, "container")
 		delete(port, "container_interface")
 		return nil
+	}
+	port, err := portElem(tree, t[1], t[3])
+	if err != nil {
+		return err
 	}
 	if len(t) < 6 {
 		return fmt.Errorf("配置不完整: ports %s container 缺少容器名", t[3])
@@ -203,6 +241,52 @@ func aliasPortContainerMember(tree map[string]any, t []string, isSet bool) error
 		port["container_interface"] = t[7]
 	}
 	return nil
+}
+
+// deleteNicHint 删除指引里的 vNIC 名：8-token 形态（含 `interface <vnic>`）给出实际名，
+// 6-token 形态未给 vNIC 时用占位符（指引仍可照做，只是要补上接口名）。
+func deleteNicHint(t []string) string {
+	if len(t) >= 8 && t[7] != "" {
+		return t[7]
+	}
+	return "<vnic>"
+}
+
+// existingPortElem 取交换机静态 ports 里序号为 seq 的元素；不存在返回 nil（**不创建**）。
+func existingPortElem(tree map[string]any, vsName, seq string) map[string]any {
+	vs, err := elemByID(tree, "virtual_switches", vsName)
+	if err != nil {
+		return nil
+	}
+	arr, _ := vs["ports"].([]any)
+	em, _ := selectElement(arr, "seq", seq)
+	return em
+}
+
+// vnicDeclaredOnVSwitch 报告 JSON 树里 owner（VM/容器）是否有 vNIC 声明挂到交换机 vs
+// （branch 为 virtual_machine_functions 或 container_functions）。用于删除派生端口的指引。
+func vnicDeclaredOnVSwitch(tree map[string]any, branch, owner, vs string) bool {
+	arr, _ := tree[branch].([]any)
+	for _, e := range arr {
+		em, _ := e.(map[string]any)
+		if em == nil {
+			continue
+		}
+		if name, _ := em["name"].(string); name != owner {
+			continue
+		}
+		ifaces, _ := em["interfaces"].([]any)
+		for _, ie := range ifaces {
+			im, _ := ie.(map[string]any)
+			if im == nil {
+				continue
+			}
+			if v, _ := im["virtual_switch"].(string); v == vs {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // aliasVnicVirtualSwitch：vNIC 的所属 L2 交换机（VnfInterface.VirtualSwitch）。

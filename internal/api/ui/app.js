@@ -4178,26 +4178,45 @@ function vsdMacClear(text, isErr) {
   vsdMsg(text || '', isErr === true);
 }
 
+// 端口来源的中文标注（决策 #326）：与服务端 source 字段一一对应。
+const VSD_SOURCE_TEXT = { config: '配置', vnf: 'VNF 声明', container: '容器声明', runtime: '运行态' };
+
 function renderSwitchDetail(vs, ports, params) {
   const name = (params && params.name) || '';
   const ok = vs && !vs.__err;
   const st = (vs && vs.statistics) || null;
-  // 成员端口取**该路径自己的 GET**（配置里的成员端口列表）；取不到时退回对象里带的 ports
-  // （对象详情同样含 ports——两处同源，前者是独立读法，后者是兜底）。
+  // 成员端口取**该路径自己的 GET**（决策 #326：配置静态 ports ∪ VNF/容器声明派生，逐条带 source）；
+  // 取不到时退回对象里带的 ports（对象详情同样是配置视图，两处同源，前者是独立读法）。
   const cfgPorts = (ports && !ports.__err && Array.isArray(ports)) ? ports
     : ((vs && Array.isArray(vs.ports)) ? vs.ports : []);
+  const rt = (st && Array.isArray(st.ports)) ? st.ports : [];
+  const rtByName = {};
+  rt.forEach((p) => { if (p && p.port != null) rtByName[p.port] = p; });
+  // 端口读视图：配置派生在前（端口名已由服务端算好，port 字段），运行态里**不与之同名**的补一条
+  // source=runtime（保留「VPP 里存在但配置没写」的可见性，与 CLI `show virtual-switches <n> ports` 同口径）。
+  const rows = [], seen = {};
+  cfgPorts.forEach((p) => {
+    const label = p.port || p.interface || (p.vnf ? p.vnf + '/' + (p.vnf_interface || '') : '') ||
+      (p.container ? p.container + '/' + (p.container_interface || '') : '') || '—';
+    seen[label] = true;
+    rows.push({ label, source: p.source, rt: rtByName[label] });
+  });
+  rt.forEach((p) => { if (p && p.port != null && !seen[p.port]) rows.push({ label: p.port, source: 'runtime', rt: p }); });
   $('vsd-name').textContent = name;
   fill($('vsd-head'), ok ? [
     ['类型', vs.type],
-    ['成员端口', cfgPorts.length],
+    ['成员端口', rows.length],
     ['数据面 BD', st ? st.bd_id : undefined],
   ] : [['读取失败', vs ? vs.__err : notFoundText(name, '虚拟交换机')]]);
-  const rt = (st && Array.isArray(st.ports)) ? st.ports : [];
-  table($('vsd-port-table').querySelector('tbody'), 5, rt.map((p) => [
-    p.port, p.admin === false ? 'down' : (p.admin === true ? 'up' : undefined),
-    p.link === false ? 'down' : (p.link === true ? 'up' : undefined),
-    p.rx_packets, p.tx_packets,
-  ]));
+  table($('vsd-port-table').querySelector('tbody'), 6, rows.map((r) => {
+    const q = r.rt || {};
+    return [
+      r.label, VSD_SOURCE_TEXT[r.source] || r.source,
+      q.admin === false ? 'down' : (q.admin === true ? 'up' : undefined),
+      q.link === false ? 'down' : (q.link === true ? 'up' : undefined),
+      q.rx_packets, q.tx_packets,
+    ];
+  }));
   $('vsd-stat-note').textContent = !ok ? ''
     : (st ? '' : '（无运行态：该交换机当前不在数据面，或数据面未连接）');
   // 换了对象：上一台的 MAC 表必须清掉（否则显示的是一台交换机的表、标题却是另一台）。

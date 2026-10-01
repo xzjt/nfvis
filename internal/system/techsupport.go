@@ -183,12 +183,19 @@ func (t *TechSupport) sectionLogs() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return scrubBootstrapCredential(b), nil
+	return ScrubBootstrapCredential(b), nil
 }
 
-// scrubBootstrapCredential 把带一次性口令的行改为「标记 + 占位」：保留这行（引导发生过
+// ScrubBootstrapCredential 把带一次性口令的行改为「标记 + 占位」：保留这行（引导发生过
 // 是诊断事实），只把值换成占位符。命中不了标记时原样返回（不做任何猜测式改写）。
-func scrubBootstrapCredential(b []byte) []byte {
+//
+// 导出（决策 #325）：这是产品自己打印的**唯一**一处明文凭据，出现在 nfvisd 日志里
+// （`fmt.Printf` 打在 stdout、systemd 收进 journal），而 nfvisd 日志有**多个出口**——
+// 诊断归档（本文件 sectionLogs）、CLI `show log system`、REST `GET /system/logs`。
+// 此前只有归档这条出口剥掉了它，另两条把一次性口令原样交给任何只读账号（真机可复现）。
+// 现由本函数作**唯一实现**，三个出口共用：api 层在装配时包裹日志来源（internal/api/server.go
+// 的 scrubLogSource），归档层在 sectionLogs 再兜一次（幂等，覆盖注入的其它日志来源）。
+func ScrubBootstrapCredential(b []byte) []byte {
 	marker := []byte(bootstrapCredentialMarker)
 	if !bytes.Contains(b, marker) {
 		return b
