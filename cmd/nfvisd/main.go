@@ -203,6 +203,8 @@ func run() error {
 	// system.ClockSynced（单源），未注入即未知（决策 #307）。
 	alarms.SetClockProbe(system.ClockSynced)
 	netProvider.SetAlarms(alarms)
+	// 决策 #337 判据③：成员口 rx 计数读物（复用 #326 的运行态读数路径，不新造 VPP 查询）。
+	netProvider.SetCounters(vppMgr.Runtime())
 	// M5-1：事件总线（FR-API-006 / FR-OPS-020~022）。所有事件源经此汇聚，
 	// 由 GET /events（SSE）推送；告警变更同时进入总线。
 	bus := events.New()
