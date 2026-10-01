@@ -764,11 +764,17 @@ func (x *cliExecutor) requestSystem(user, class, source string, t []string) stri
 	raw := t
 	t, _ = splitConfirm(t)
 	if len(t) == 0 {
-		return "%% 语法: request system <configuration|zeroize|storage|software|reboot|shutdown|ntp|tech-support|core-dumps|api> …\n"
+		return "%% 语法: request system <configuration|zeroize|storage|software|reboot|shutdown|ntp|tech-support|core-dumps|api|hugepages> …\n"
 	}
 	switch t[0] {
 	case "kernel":
 		return x.requestKernelBaseline(user, t[1:])
+	case "hugepages":
+		// request system hugepages reclaim（决策 #329）
+		if len(t) >= 2 && t[1] == "reclaim" {
+			return x.requestHugepagesReclaim(user)
+		}
+		return "%% 语法: request system hugepages reclaim\n"
 	case "configuration":
 		if len(t) >= 2 && t[1] == "backup" {
 			return x.systemBackup(user, t[2:])

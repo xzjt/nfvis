@@ -33,77 +33,81 @@ var VersionStr = "1.0.0-dev"
 
 // Options server 可选项。
 type Options struct {
-	Addr        string // 监听地址（默认 :443）
-	TLSCert     string // TLS 证书路径（FR-API-001，HTTPS；与 TLSKey 成对）
-	TLSKey      string // TLS 私钥路径；二者为空 = 明文 HTTP（仅限开发/测试）
-	Log         *slog.Logger
-	VPP         VppController          // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
-	L2          L2Runtime              // L2 运行态查询（M3-3；nil = mac-table 503）
-	L3          L3Runtime              // L3 运行态查询（M3-4；nil = routes 503）
-	LLDP        LldpRuntime            // LLDP 邻居（M3-6；nil = 503）
-	State       *state.State           // 运行态聚合（M3-7；nil = 省略运行态字段）
-	SRIOV       SRIOVSetter            // SR-IOV VF 数量（M3-7；nil = 503）
-	DPDK        DPDKSetter             // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72；nil = 503）
-	Kernel      ksys.KernelApplier     // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
-	NAT         NatSessionsRuntime     // NAT 会话（M3-7；nil = 503）
-	Alarms      AlarmRuntime           // 告警列表（M3-8；nil = 503）
-	Diag        DiagRuntime            // CLI 诊断命令（M3-9；nil = 命令报不可用）
-	VM          VMRuntime              // VM 生命周期（M4-3；nil = 生命周期动作 503、状态省略）
-	VMConsole   VMConsoleRuntime       // VM 串口 console（M4-5；nil = console 端点 503）
-	VMSnapshots VMSnapshotRuntime      // VM 快照（M4-6；nil = 快照端点 503）
-	Containers  ContainerRuntime       // 容器生命周期/日志（M4-7；nil = 503）
-	Images      ImagesRuntime          // 镜像仓库（M4-8；nil = 503）
-	Events      *events.Bus            // 事件总线（M5-1；nil = /events 503）
-	SysOps      SystemOpsRuntime       // 备份/恢复/恢复出厂（M5-6；nil = 503）
-	DiagOps     DiagOpsRuntime         // 诊断归档/core dump（M5-4；nil = 503）
-	LogSource   func() ([]byte, error) // 系统日志来源（M5-9 show log system；nil = 报不可用）
-	Capture     CaptureRuntime         // 数据面抓包（M5-3；nil = 503）
-	Software    SoftwareRuntime        // 软件升级/电源/NTP（M5-7；nil = 503）
-	Hardware    HardwareRuntime        // 硬件健康采集（M5-5；nil = 503）
-	TLS         TlsRuntime             // 证书管理（M5-8；nil = 503）
-	Ports       PortInventory          // 运行态端口清单（决策 #83；nil = 接口名无动态候选）
-	VppState    VppStateRuntime        // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
-	Versions    VersionsRuntime        // 组件版本探测（R37-2 收口，决策 #118；nil = 只回 NFViS 版本）
+	Addr         string // 监听地址（默认 :443）
+	TLSCert      string // TLS 证书路径（FR-API-001，HTTPS；与 TLSKey 成对）
+	TLSKey       string // TLS 私钥路径；二者为空 = 明文 HTTP（仅限开发/测试）
+	Log          *slog.Logger
+	VPP          VppController           // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
+	L2           L2Runtime               // L2 运行态查询（M3-3；nil = mac-table 503）
+	L3           L3Runtime               // L3 运行态查询（M3-4；nil = routes 503）
+	LLDP         LldpRuntime             // LLDP 邻居（M3-6；nil = 503）
+	State        *state.State            // 运行态聚合（M3-7；nil = 省略运行态字段）
+	SRIOV        SRIOVSetter             // SR-IOV VF 数量（M3-7；nil = 503）
+	DPDK         DPDKSetter              // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72；nil = 503）
+	Kernel       ksys.KernelApplier      // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
+	Hugepages    ksys.HugepagePoolSetter // 大页池回收（FR-SYS-002，决策 #329；nil = 命令/端点报未接入）
+	HugepageRoot string                  // 大页池 sysfs 根（决策 #329；空 = "/"，测试注入临时目录）
+	NAT          NatSessionsRuntime      // NAT 会话（M3-7；nil = 503）
+	Alarms       AlarmRuntime            // 告警列表（M3-8；nil = 503）
+	Diag         DiagRuntime             // CLI 诊断命令（M3-9；nil = 命令报不可用）
+	VM           VMRuntime               // VM 生命周期（M4-3；nil = 生命周期动作 503、状态省略）
+	VMConsole    VMConsoleRuntime        // VM 串口 console（M4-5；nil = console 端点 503）
+	VMSnapshots  VMSnapshotRuntime       // VM 快照（M4-6；nil = 快照端点 503）
+	Containers   ContainerRuntime        // 容器生命周期/日志（M4-7；nil = 503）
+	Images       ImagesRuntime           // 镜像仓库（M4-8；nil = 503）
+	Events       *events.Bus             // 事件总线（M5-1；nil = /events 503）
+	SysOps       SystemOpsRuntime        // 备份/恢复/恢复出厂（M5-6；nil = 503）
+	DiagOps      DiagOpsRuntime          // 诊断归档/core dump（M5-4；nil = 503）
+	LogSource    func() ([]byte, error)  // 系统日志来源（M5-9 show log system；nil = 报不可用）
+	Capture      CaptureRuntime          // 数据面抓包（M5-3；nil = 503）
+	Software     SoftwareRuntime         // 软件升级/电源/NTP（M5-7；nil = 503）
+	Hardware     HardwareRuntime         // 硬件健康采集（M5-5；nil = 503）
+	TLS          TlsRuntime              // 证书管理（M5-8；nil = 503）
+	Ports        PortInventory           // 运行态端口清单（决策 #83；nil = 接口名无动态候选）
+	VppState     VppStateRuntime         // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
+	Versions     VersionsRuntime         // 组件版本探测（R37-2 收口，决策 #118；nil = 只回 NFViS 版本）
 }
 
 // Server NFViS REST server。
 type Server struct {
-	aaa         *aaa.Service
-	engine      *config.Engine
-	cliExec     *cliExecutor
-	vpp         VppController
-	l2          L2Runtime
-	l3          L3Runtime
-	lldp        LldpRuntime
-	state       *state.State
-	vppState    VppStateRuntime        // VPP 运行态快照（决策 #84/#116：CLI show 与 REST 同源）
-	versions    VersionsRuntime        // 组件版本探测（R37-2 收口，决策 #118）
-	logs        func() ([]byte, error) // 服务端日志来源（决策 #123：GET /system/logs）
-	diag        DiagRuntime            // 诊断命令（决策 #123：/diagnostics/* 与清零统计）
-	sriov       SRIOVSetter
-	dpdk        DPDKSetter
-	natSessions NatSessionsRuntime
-	alarms      AlarmRuntime
-	vm          VMRuntime
-	vmConsole   VMConsoleRuntime
-	vmSnapshots VMSnapshotRuntime
-	containers  ContainerRuntime
-	images      ImagesRuntime
-	ports       PortInventory // 运行态端口清单（决策 #83；候选与 show 同源）
-	events      *events.Bus
-	sysOps      SystemOpsRuntime
-	diagOps     DiagOpsRuntime
-	capture     CaptureRuntime
-	software    SoftwareRuntime
-	hardware    HardwareRuntime
-	tlsMgr      TlsRuntime
-	kernel      ksys.KernelApplier // 内核启动基线落地（决策 #146：REST 侧与 CLI 共用同一实现）
-	consoleTix  *consoleTickets
-	log         *slog.Logger
-	mux         *http.ServeMux
-	http        *http.Server
-	tlsCert     string
-	tlsKey      string
+	aaa          *aaa.Service
+	engine       *config.Engine
+	cliExec      *cliExecutor
+	vpp          VppController
+	l2           L2Runtime
+	l3           L3Runtime
+	lldp         LldpRuntime
+	state        *state.State
+	vppState     VppStateRuntime        // VPP 运行态快照（决策 #84/#116：CLI show 与 REST 同源）
+	versions     VersionsRuntime        // 组件版本探测（R37-2 收口，决策 #118）
+	logs         func() ([]byte, error) // 服务端日志来源（决策 #123：GET /system/logs）
+	diag         DiagRuntime            // 诊断命令（决策 #123：/diagnostics/* 与清零统计）
+	sriov        SRIOVSetter
+	dpdk         DPDKSetter
+	natSessions  NatSessionsRuntime
+	alarms       AlarmRuntime
+	vm           VMRuntime
+	vmConsole    VMConsoleRuntime
+	vmSnapshots  VMSnapshotRuntime
+	containers   ContainerRuntime
+	images       ImagesRuntime
+	ports        PortInventory // 运行态端口清单（决策 #83；候选与 show 同源）
+	events       *events.Bus
+	sysOps       SystemOpsRuntime
+	diagOps      DiagOpsRuntime
+	capture      CaptureRuntime
+	software     SoftwareRuntime
+	hardware     HardwareRuntime
+	tlsMgr       TlsRuntime
+	kernel       ksys.KernelApplier      // 内核启动基线落地（决策 #146：REST 侧与 CLI 共用同一实现）
+	hugepage     ksys.HugepagePoolSetter // 大页池回收（决策 #329：REST 侧与 CLI 共用同一实现）
+	hugepageRoot string                  // 大页池 sysfs 根（决策 #329；空 = "/"）
+	consoleTix   *consoleTickets
+	log          *slog.Logger
+	mux          *http.ServeMux
+	http         *http.Server
+	tlsCert      string
+	tlsKey       string
 }
 
 // Handler 返回根 HTTP handler（测试与嵌套装配使用）。
@@ -138,6 +142,10 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.cliExec.setDPDK(opts.DPDK)
 	s.cliExec.setKernel(opts.Kernel)
 	s.kernel = opts.Kernel
+	s.cliExec.setHugepages(opts.Hugepages) // 决策 #329：大页池回收（CLI 与 REST 共用）
+	s.hugepage = opts.Hugepages
+	s.hugepageRoot = opts.HugepageRoot
+	s.cliExec.hugepageRoot = opts.HugepageRoot
 	s.cliExec.setTLS(opts.TLS)
 	s.cliExec.setVPPRestart(func(ctx context.Context) error {
 		if s.vpp == nil {
@@ -173,6 +181,10 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	// class 与命令树/《命令全表》一致 = S（写 GRUB 启动参数、需重启生效）。
 	mux.Handle("POST "+APIPrefix+"/system/kernel:apply", s.auth(s.handleKernelApply, schema.ClassSuperUser, "request system kernel apply"))
 	mux.Handle("POST "+APIPrefix+"/system/kernel:rollback", s.auth(s.handleKernelRollback, schema.ClassSuperUser, "request system kernel rollback"))
+	// 决策 #329：大页池三方数字（R）与空闲多余页回收（S，与 request system kernel apply 同档：
+	// 都写宿主机内核侧状态；回收只动空闲页、不动在用页，但仍按 super-user 收敛入口）。
+	mux.Handle("GET "+APIPrefix+"/system/hugepages", s.auth(s.handleGetHugepages, schema.ClassReadOnly, "show system hugepages"))
+	mux.Handle("POST "+APIPrefix+"/system/hugepages:reclaim", s.auth(s.handleHugepagesReclaim, schema.ClassSuperUser, "request system hugepages reclaim"))
 
 	// 配置事务（/configuration/*，configure 为 S 级权限，命令树 §4）
 	cfgAPI := func(h http.HandlerFunc) http.Handler {

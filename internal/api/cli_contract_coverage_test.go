@@ -56,6 +56,7 @@ var contractCLICommands = []string{
 	"request interfaces ens224 enable", "request interfaces ens224 disable",
 	"request sriov create-vfs ens224 count 2", "request sriov delete-vfs ens224 vf 1",
 	"request system reboot", "request system zeroize", "request system software rollback",
+	"request system hugepages reclaim",
 	"request system storage format-data",
 	"request system configuration backup", "request system tech-support generate",
 	"request system ntp sync", "request system api tls regenerate",

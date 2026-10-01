@@ -65,7 +65,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show system cpu` | 总核/隔离核/每核占用 | 运行态（宿主 `/proc`） | ✅ |
 | `show system memory` | 内存与大页使用（池内/池外） | 运行态 | ✅ |
 | `show system storage` | 磁盘与镜像仓库占用 | 运行态 + 镜像仓库 | ✅ |
-| `show system hugepages` | 大页内核参数与池状态 | 运行态（`/proc/meminfo`） | ✅ |
+| `show system hugepages` | 大页池三方数字：声明（配置唯一真源）/ 内核实际（sysfs）/ 在用（有持有者的页）+ 可回收（决策 #329，与 `GET /system/hugepages` 同源；取不到内核值时如实显示「取不到」，不编造） | `GET /system/hugepages` | ✅ |
 | `show system kernel` | 内核启动基线三方对照（cmdline/运行实际/配置期望，FR-SYS-014） | 配置 + 运行态 | ✅ |
 | `show system hardware` | 硬件健康：温度/风扇/电源/SMART（FR-SYS-012） | `GET /system/hardware` | ✅（本机无 IPMI/传感器，走降级路径） |
 | `show system core-dumps` | 崩溃转储清单（VPP/QEMU/nfvisd） | `GET /system/core-dumps` | ✅ |
@@ -179,6 +179,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request system poweroff` | 断电 | S | `POST /system:shutdown` | 🚫 破坏性 |
 | `request system kernel apply` | 写入 GRUB 内核基线（需重启生效） | S | `POST /system/kernel:apply` | 🚫 会改启动项，本轮不执行 |
 | `request system kernel rollback` | 回退内核基线 | S | `POST /system/kernel:rollback` | 🚫 同上 |
+| `request system hugepages reclaim` | 回收**空闲**的多余大页，收敛到声明值（决策 #329）；**在用页一律不动**、**不改声明值**、写后回读确认（未收敛如实报出谁在占用） | S | `POST /system/hugepages:reclaim`（与 REST 同源） | 🚫 会改宿主大页池（只动空闲多余页）；真机按交付说明单独走查（造「无主占用」现场再回收），纯函数与命令/端点由单测覆盖；fulltest 登记豁免（决策 #319） |
 | `request system configuration backup [to <path>]` | 导出 committed 配置归档（`to <path>` 是另存一份：须绝对路径、目标不得已存在、父目录须已存在；已存在即如实拒绝） | S | `POST /system/backup`（生成归档；只读清单是 `GET /system/backup`） | ✅ |
 | `request system configuration restore <path>` | 导入归档为 candidate 并提交 | S | `POST /system/restore`（与 REST 同源，高危档审计两条，决策 #150） | 🚫 会覆盖现网配置 |
 | `request system tech-support generate` | 生成诊断归档 tar.gz（归档里的配置是**脱敏视图**：口令哈希等已隐藏，不能用于恢复；要可恢复的完整配置用 `configuration backup`） | O | `POST /system/tech-support` | ✅ |
@@ -420,28 +421,28 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
 | 配置模式 | 127 | §2.1 余下 13 行 + §2.2~§2.9 共 114 行 |
-| **合计** | **261** | 不含管道则为 **252**；按 ` / ` 拆开后 **265 条** |
+| **合计** | **262** | 不含管道则为 **253**；按 ` / ` 拆开后 **266 条** |
 
 **分节**（行数）：
 
 | 节 | 行数 | 节 | 行数 |
 |---|---|---|---|
 | §1.1 `show`（含通用管道 9） | 76 | §2.2b `protocols` | 3 |
-| §1.2 `request` | 46 | §2.3 `interfaces` 与 `bonds` | 10 |
+| §1.2 `request` | 47 | §2.3 `interfaces` 与 `bonds` | 10 |
 | §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 13 |
 | §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 9 |
 | §2.2 `system` | 35 | §2.6 `resource-pools` | 3 |
 | §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 20 |
-| §2.9 `container-functions` | 10 | **合计** | **261** |
+| §2.9 `container-functions` | 10 | **合计** | **262** |
 
-**按实测状态分布**（共 261 行）：
+**按实测状态分布**（共 262 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
 | ✅ 实测通过 | 243 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶；`request system storage format-data` 由决策 #305 落地（原 🚫 破坏性、契约已登记延期），按「破坏性但已验」移入本桶 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 14 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 3 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319） |
+| 🚫 本轮未执行 | 15 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 3 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、

@@ -62,8 +62,11 @@ func (x *cliExecutor) execShowSystemDiag(t []string) string {
 			return errRuntimeUnavailable
 		}
 		return x.renderDiag(t)
-	case "uptime", "cpu", "memory", "storage", "hugepages":
+	case "uptime", "cpu", "memory", "storage":
 		return x.renderHostMetrics(t[0])
+	case "hugepages":
+		// 决策 #329：三方数字（声明/内核实际/在用）+ 可回收，与其他三面（REST/Web）同源。
+		return x.renderHugepagePools()
 	case "kernel":
 		return x.renderKernelBaseline()
 	case "hardware":
@@ -136,11 +139,6 @@ func (x *cliExecutor) renderHostMetrics(kind string) string {
 		var b strings.Builder
 		b.WriteString(line("mem-total", "nfvis_system_memory_total_bytes", "%.0f"))
 		b.WriteString(line("mem-avail", "nfvis_system_memory_available_bytes", "%.0f"))
-		b.WriteString(line("hp-total", "nfvis_system_hugepages_total", "%.0f"))
-		b.WriteString(line("hp-free", "nfvis_system_hugepages_free", "%.0f"))
-		return b.String()
-	case "hugepages":
-		var b strings.Builder
 		b.WriteString(line("hp-total", "nfvis_system_hugepages_total", "%.0f"))
 		b.WriteString(line("hp-free", "nfvis_system_hugepages_free", "%.0f"))
 		return b.String()

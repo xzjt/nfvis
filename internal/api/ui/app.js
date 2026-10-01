@@ -534,6 +534,72 @@ function renderPools(pools) {
   }
 }
 
+// 大页池卡（决策 #329）：三方数字（声明/内核实际/在用）+ 可回收，与 `show system hugepages`
+// 和 `GET /system/hugepages` 同源。回收只收「实际高于声明且空闲」的多余页（在用页一律不动），
+// 且**不改声明值**——回收按钮按既有门禁 wbtn/data-write 收敛（super-user 级，非 super 隐藏）。
+function hpMsg(text, isErr) {
+  const p = $('hp-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+const hpNum = (v) => (v === undefined || v === null || v < 0 ? '取不到' : String(v));
+const hpDeclared = (v) => (v === undefined || v === null || v <= 0 ? '未声明' : String(v));
+const hpState = (s) => ({
+  ok: '一致',
+  surplus: '有无主占用（可回收）',
+  in_use: '有无主占用（在用）',
+  unmanaged: '未声明（不托管）',
+  unreadable: '取不到内核实际值',
+}[s] || dash(s));
+
+function renderHugepagePools(hp) {
+  const tbody = $('hp-table').querySelector('tbody');
+  tbody.textContent = '';
+  const ok = hp && !hp.__err;
+  $('hp-note').textContent = ok ? '' : '（读取失败：' + (hp ? hp.__err : '未取到数据') + '）';
+  const pools = ok ? rowsOf(hp.pools) : [];
+  if (!pools.length) {
+    tbody.appendChild(el('tr', {}, [el('td', { colspan: '7', class: 'muted', text: ok ? '（无）' : '读取失败' })]));
+    return;
+  }
+  pools.forEach((p) => {
+    const tr = el('tr');
+    [p.page_size, hpDeclared(p.declared), hpNum(p.actual), hpNum(p.in_use), hpNum(p.free),
+      p.reclaimable, hpState(p.state),
+    ].forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
+    tbody.appendChild(tr);
+  });
+}
+
+async function hpReclaim() {
+  const ok = await uiConfirm('回收空闲的多余大页', {
+    tier: 'mid',
+    bullets: [
+      '只回收「内核实际高于声明、且**空闲**」的多余大页；**在用页一律不动**（不会抽走 VPP/VNF 正在用的大页）。',
+      '收敛目标 = 已声明值；本动作**不改变**声明值（改声明在「配置」页的 resource-pools，需重启生效）。',
+      '写后会回读内核实际值确认；未收敛（被在用页挡住）会如实报出谁在占用。',
+      '可回退：把声明值调回去并重启，或重启主机按引导基线重新分配。',
+    ],
+    cli: 'request system hugepages reclaim',
+  });
+  if (!ok) return;
+  hpMsg('回收大页池：执行中…', false);
+  $('hp-out').hidden = true;
+  try {
+    const r = await api('/system/hugepages:reclaim', { method: 'POST' });
+    hpMsg('已执行回收（结果见下表刷新）。', false);
+    if (r) {
+      $('hp-out').hidden = false;
+      $('hp-out').textContent = typeof r === 'string' ? r : JSON.stringify(r, null, 2);
+    }
+  } catch (e) {
+    hpMsg('回收大页池失败：' + apiErrText(e, '请在命令行执行 request system hugepages reclaim'), true);
+  }
+  await reload().catch(() => {});
+}
+
 // 接口卡：列表端点只有配置字段（名称/说明/MTU 等），逐口统计在详情端点上（见 loadInterfaceStats）。
 // 行可点进详情页（#/system/interfaces/:name）——驱动接管（DPDK）与 VF 数量都在那一页。
 function renderInterfaces(ifaces, ifaceRows) {
@@ -791,7 +857,11 @@ export const VIEWS = {
     render(d) { pageWarn(d); renderHardware(d['/system/hardware'], d['/system/health/thresholds']); },
   },
   'pools': {
-    render(d) { pageWarn(d); renderPools(d['/resource-pools']); },
+    render(d) {
+      pageWarn(d);
+      renderPools(d['/resource-pools']);
+      renderHugepagePools(d['/system/hugepages']);
+    },
   },
   'interfaces': {
     async render(d) {
@@ -5637,6 +5707,7 @@ $('ifd-sriov-btn').addEventListener('click', sriovSet);
 // 内核基线：写入 / 回退（都需重启生效，故按中危档确认）。
 $('knl-apply-btn').addEventListener('click', () => knlAct('apply'));
 $('knl-rollback-btn').addEventListener('click', () => knlAct('rollback'));
+$('hp-reclaim-btn').addEventListener('click', () => hpReclaim());
 
 // 用户与权限（写操作全是高危档；口令控件只在提交那一刻读值，不留在别处）。
 $('usr-create-btn').addEventListener('click', () => {

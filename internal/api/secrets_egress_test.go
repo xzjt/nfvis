@@ -279,6 +279,7 @@ var secretEgressRoutes = map[string]string{
 	"/system/hardware":                  "硬件健康运行态",
 	"/system/health/thresholds":         "阈值配置段视图",
 	"/system/kernel":                    "内核基线配置段视图",
+	"/system/hugepages":                 "大页池读视图（#329）：声明/内核实际/在用页数，无秘密字段",
 	"/system/login-users":               "用户列表：只投影 name/class（口令哈希在 model 层就被移除）",
 	"/system/logs":                      "系统日志：scrubLogSource 剥掉一次性口令（#325 修复）",
 	"/system/status":                    "运行态摘要（uptime/主机名/容量）",

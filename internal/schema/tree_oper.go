@@ -252,6 +252,11 @@ func OperRoot() *Node {
 					K("apply", "按 committed 配置写入 GRUB 基线（需重启生效）"),
 					K("rollback", "回退上一次内核基线（需重启生效）"),
 				)),
+				// 决策 #329：回收空闲的多余大页，收敛到**已声明**值（在用页不动、不改声明值）。
+				// 与 kernel apply/rollback 同档（S）：都写宿主机内核侧状态。
+				Su(K("hugepages", "大页池回收",
+					K("reclaim", "回收空闲的多余页，收敛到声明值（在用页不动；不改声明值）"),
+				)),
 				Su(K("software", "软件升级",
 					K("add", "安装 deb 包/URL",
 						PT("<deb>", "path", "deb 包路径或 URL"),

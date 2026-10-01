@@ -16,6 +16,7 @@ import (
 	"net/http"
 
 	"github.com/xzjt/nfvis/internal/metrics"
+	ksys "github.com/xzjt/nfvis/internal/system"
 	"reflect"
 	"sort"
 	"strings"
@@ -97,6 +98,7 @@ func TestResponseShapeMatchesContract(t *testing.T) {
 		{"GET", "/system/version"},
 		{"GET", "/interfaces"},
 		{"GET", "/resource-pools"},
+		{"GET", "/system/hugepages"},          // 决策 #329：大页池三方数字（恒有 pools/reclaimable）
 		{"GET", "/configuration"},             // 决策 #119：整配置出口（committed）
 		{"GET", "/system/api-tokens"},         // 决策 #301：活动会话清单（登录后恒有≥1 条，自己的会话）
 		{"GET", "/login-banner"},              // 决策 #303：登录横幅（未设置时走白名单省略）
@@ -368,6 +370,96 @@ func TestFormatDataResponseShapeMatchesContract(t *testing.T) {
 		}
 	}
 	t.Logf("POST /system:format-data：核对 %d 个字段，白名单跳过 %d 个", checked, allowed)
+}
+
+// TestHugepageReclaimResponseShapeMatchesContract 决策 #329：`POST /system/hugepages:reclaim`
+// 的响应形状（契约声明的字段必须真的发得出来）。
+//
+// 只有三个字段是**条件出现**：
+//   - `blockers`：无法回收时给出「谁在占用」的证据；能回收/无需回收时缺席；
+//   - `error`：写入失败/回读不一致时的原因；正常收敛时缺席；
+//   - `note` 属读视图（GET）的条件字段，不在本端点。
+//
+// 其余字段（page_size/declared/actual_before/actual_after/in_use/free/reclaimed/action/reasons）
+// 一律必发——「字段没发出来」与「没有这一项」分不清正是本守护要防的漂移。
+func TestHugepageReclaimResponseShapeMatchesContract(t *testing.T) {
+	root := t.TempDir()
+	writeHugepageFixture(t, root, "1G", 4, 2) // 声明 2 时造出 2 页可回收的空闲多余页
+	ts := newTestServerOpts(t, Options{
+		Hugepages:    ksys.SysfsHugepageSetter{Root: root},
+		HugepageRoot: root,
+	})
+	token := loginAdmin(t, ts)
+	if status, _, body := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/resource-pools", token,
+		map[string]any{"hugepages": []map[string]any{{"page_size": "1G", "count": 2}}},
+		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusOK {
+		t.Fatalf("声明大页池: %d %s", status, body)
+	}
+	spec := loadEmbeddedSpec(t)
+	props := declaredPropsStatus(t, spec, "/system/hugepages:reclaim", "POST", "200")
+	if len(props) == 0 {
+		t.Fatal("契约里取不到 POST /system/hugepages:reclaim 的 200 响应字段")
+	}
+	status, _, body := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system/hugepages:reclaim", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("POST reclaim: %d %s", status, body)
+	}
+	got := responseObject(t, body)
+	for _, f := range props {
+		if _, ok := got[f]; !ok {
+			t.Errorf("契约声明了 %s，响应里没有（照契约开发的客户端会取空）", f)
+		}
+	}
+	// 逐池字段（items.properties）也要真的发得出来。
+	itemProps := declaredItemProps(t, spec, "/system/hugepages:reclaim", "POST", "200")
+	if len(itemProps) == 0 {
+		t.Fatal("契约里取不到回收结果 items 的字段")
+	}
+	pools, _ := got["pools"].([]any)
+	if len(pools) == 0 {
+		t.Fatal("pools 为空——测试应先造出无主占用（否则什么都验不到）")
+	}
+	first, _ := pools[0].(map[string]any)
+	optional := map[string]string{
+		"blockers": "无法回收时才出现（谁在占用的证据）",
+		"error":    "写入失败/回读不一致时才出现",
+	}
+	for _, f := range itemProps {
+		if _, ok := first[f]; ok {
+			continue
+		}
+		if r, a := optional[f]; a {
+			t.Logf("  跳过 pools[0].%s（%s）", f, r)
+			continue
+		}
+		t.Errorf("契约声明了 pools[].%s，该池响应里没有", f)
+	}
+	// reasons 是声明为 array 的字段，必须是数组而非 null。
+	if _, ok := first["reasons"].([]any); !ok {
+		t.Errorf("pools[].reasons 应为数组，得到 %T（发 null 会让「没有依据」与「没实现」分不清）", first["reasons"])
+	}
+}
+
+// declaredItemProps 取某端点响应 schema 的 items.properties 字段名（数组元素字段）。
+func declaredItemProps(t *testing.T, spec map[string]any, path, method, status string) []string {
+	t.Helper()
+	paths, _ := spec["paths"].(map[string]any)
+	node, _ := paths[path].(map[string]any)
+	op, _ := node[strings.ToLower(method)].(map[string]any)
+	resp, _ := op["responses"].(map[string]any)
+	ok, _ := resp[status].(map[string]any)
+	schema := schemaOf(t, spec, ok)
+	// schema.properties.pools.items
+	props, _ := schema["properties"].(map[string]any)
+	pools, _ := props["pools"].(map[string]any)
+	items, _ := pools["items"].(map[string]any)
+	itemProps, _ := items["properties"].(map[string]any)
+	out := make([]string, 0, len(itemProps))
+	for k := range itemProps {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // schemaOf 取 content.application/json.schema（或 items），必要时解一层 $ref。
