@@ -163,6 +163,19 @@ func NewL2ProviderFunc(f func() (L2Client, error)) *L2Provider {
 // SetACL 注入 ACL 编排（端口 acl-in/acl-out 绑定）。
 func (p *L2Provider) SetACL(a *AclProvider) { p.acl = a }
 
+// BDsInVPP 返回 VPP 里全部 bridge-domain 的运行态（含 BD-Tag 与成员口）。
+//
+// 用途（决策 #321）：残渣对账据此找「BD-Tag 不在配置里」的 bridge-domain——提交补偿失败
+// 留下的残渣。查询失败上抛（问不出来 ≠ 没有残渣）。
+func (p *L2Provider) BDsInVPP() ([]BDRuntime, error) {
+	c, err := p.client()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	return c.BridgeDomains()
+}
+
 // reset 清空挂接登记表（恢复收敛前调用，按 VPP 实况重新挂接）。
 func (p *L2Provider) reset() {
 	p.mu.Lock()

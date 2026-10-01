@@ -543,6 +543,57 @@ func containsStr(list []string, want string) bool {
 	return false
 }
 
+// indexOf 返回元素首次出现的下标（-1 表示没有）。
+func indexOf(list []string, want string) int {
+	for i, s := range list {
+		if s == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// 决策 #322（修 R84-22）：恢复收敛**先建 VRF/L3 表与交换机，再置接口/成员**。
+// 用可注入的调用顺序记录断言：声明表（vs-nat）的预建发生在 vNIC 接入重放（vhost 建口）之前，
+// 因此 vNIC 置表时表已存在——首次收敛不会出现 `No such FIB / VRF (-3)` 未收敛项，
+// 不靠「失败了再重放一次」。
+func TestEnsureConsistentCreatesVrfTablesBeforeVnicPlacement(t *testing.T) {
+	f := newRecoveryFixture()
+	fv := newFakeVhost()
+	var order []string
+	fv.logFn = func(s string) { order = append(order, s) }
+	f.l3.logFn = func(s string) { order = append(order, s) }
+	f.net.SetVhostUser(vhostProvider(fv))
+	vh := orchestrator.VnfIfaceName("vm-a", "eth0")
+	f.l3.ifaces[vh] = 5 // 接入重放后该 vNIC 在 VPP 中存在
+
+	cfg := model.Config{
+		VirtualSwitches: []model.VirtualSwitch{{Name: "vs-nat", Type: "l3"}},
+		Vrfs: []model.Vrf{{Name: "vs-nat", L3Interfaces: []model.L3Interface{
+			{Interface: "ens192", Addresses: []string{"192.168.200.1/24"}}}}},
+		VirtualMachineFunctions: []model.VMFunction{{Name: "vm-a", Image: "img",
+			Interfaces: []model.VnfInterface{{Name: "eth0", Type: "vhost-user", VirtualSwitch: "vs-nat"}}}},
+	}
+	errs := f.net.EnsureConsistent(context.Background(), cfg)
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "No such FIB") || strings.Contains(e.Error(), "VRF") {
+			t.Fatalf("首次收敛不得出现建表顺序导致的未收敛项: %v", errs)
+		}
+	}
+	ti := indexOf(order, "table-add:"+strconv.FormatUint(uint64(TableID("vs-nat")), 10))
+	vi := indexOf(order, "vhost-create")
+	if ti < 0 || vi < 0 {
+		t.Fatalf("应记录到表预建与 vNIC 接入，实际顺序: %v", order)
+	}
+	if ti > vi {
+		t.Fatalf("先建表再置接口：表预建应早于 vNIC 接入（表@%d vhost@%d）: %v", ti, vi, order)
+	}
+	// 该 vNIC 最终必须置入 vs-nat 表
+	if got := f.l3.v4table[5]; got != TableID("vs-nat") {
+		t.Fatalf("vNIC 应置入 vs-nat 表，实际 %d", got)
+	}
+}
+
 // round84 R84-21：VPP 连接（重）建立时进程内登记必须失效，使随后的收敛全量重放。
 // 带外 `systemctl restart vpp` 清空 VPP 侧配置后，残留登记会让 ApplyNAT 认为「已下发」
 // 而跳过重放——show nat44 空、NAT 静默失效，必须重启 nfvisd 才恢复。

@@ -63,6 +63,17 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 		failures = append(failures, Alarm{Severity: sev, Code: code, Message: err.Error(), Source: source})
 	}
 
+	// 依赖顺序（决策 #322，修 R84-22）：**先建 VRF/L3 表与交换机，再置接口/成员**。
+	// vNIC 接入重放会把声明的 vNIC 置入其所属 L3 交换机的表（FR-NET-020），而表若尚未建立，
+	// VPP 报 `No such FIB / VRF (-3)` 成为未收敛项、要再重放一次才成功（round84 登记）。
+	// 这里在重放 vNIC/交换机**之前**按配置预建全部声明表（幂等，复用各 Provider 的建表；
+	// 与残留表对账共用 DeclaredTables 一份声明集口径）——首次收敛即成功，不靠「失败再重放」。
+	if n.l3 != nil {
+		for _, err := range n.l3.PrecreateTables(ctx, cfg) {
+			record("ip-tables", err)
+		}
+	}
+
 	// VNF/容器 vNIC 接入重放（FR-NET-020/022/023）：VPP 重启后 vhost-user/memif 接口
 	// 会消失，须先于 BD 重放，交换机端口才能按名挂接。
 	// 此处的 L3 置表登记可能失败（同名 Vrf 条目尚未重放、接口带地址不让换表 -114），
@@ -174,29 +185,28 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 	// 声明回来时同样清（表是合法存在）。单列一步：它不属于「按配置重放」。
 	_ = n.RetryDeferredVRFDeletes(ctx, cfg)
 
-	// 残留 IP 表对账（决策 #192）：VPP 里存在**配置未声明**的表 ⇒ 未收敛项 + 告警。
-	// 与进程内登记不同，这是随时可复查的事实，故跨 nfvisd 重启仍然可见（R86-9 的「事后不可见」）；
-	// 表随数据面重启消失后本项自然不再出现，Sync 自动消警。
-	if n.l3 != nil {
-		leftovers, lerr := n.l3.LeftoverTables(cfg)
-		if lerr != nil {
-			record("ip-tables", fmt.Errorf("对账数据面 IP 表: %w", lerr))
-		}
-		for _, id := range leftovers {
-			msg := fmt.Sprintf("数据面存在配置未声明的 IP 表 %d：多来自「删表延后」或提交补偿失败"+
-				"留下的残渣（不会被任何配置引用），执行 request vpp restart 后自动清理；"+
-				"若该表是手工 vppctl 创建的，请自行核对", id)
-			errs = append(errs, fmt.Errorf("ip-table/%d: %s", id, msg))
-			failures = append(failures, Alarm{
-				Severity: SeverityWarning, Code: AlarmTableLeftover,
-				Message: msg, Source: fmt.Sprintf("ip-table/%d", id),
-			})
-		}
+	// 残渣对账（决策 #192 的 IP 表 ∪ 决策 #321 的 ACL/bridge-domain）：把「数据面存在、
+	// 配置未声明」的对象变成可复查的事实与告警。它不靠进程内记忆、按数据面实况逐次重建，
+	// 故**跨 nfvisd 重启仍然可见**；对象随数据面重启/清理消失后 Sync 自动消警。
+	// 与 EnsureConsistent 的同一次 Sync 合用：同一份「声明集 ⇄ 实况」口径，不另造巡检。
+	s := n.scanResidue(cfg)
+	for _, e := range s.errs {
+		record("residue-scan", e)
+	}
+	for _, it := range s.items {
+		errs = append(errs, fmt.Errorf("%s: %s", it.Source(), it.Message()))
+		failures = append(failures, Alarm{
+			Severity: SeverityWarning, Code: it.Code(), Message: it.Message(), Source: it.Source(),
+		})
 	}
 
 	if n.alarms != nil {
 		n.alarms.Sync(recoveryScope, failures)
 	}
+	// 提交期补偿告警的消解（决策 #321）：该对象已对得上配置（配置声明了它，或它确实不在
+	// 数据面）即不再是「数据面与配置不一致」，消解其 COMMIT_COMPENSATION_FAILED；
+	// 不属于可核对类别的（VM/容器等）保持原样，如实不猜测。
+	n.resolveCompensationAlarms(cfg, s)
 	return errs
 }
 
