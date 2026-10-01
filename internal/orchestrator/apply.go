@@ -257,7 +257,9 @@ func (a *orchApplier) residueAlarm(desc string, err error) {
 	a.raiseCommit(SeverityError, CommitCompensationFailed, desc, fmt.Sprintf(
 		"提交失败后的补偿未完成：%s 回滚失败（%v）。配置已回滚到上一版本，数据面该对象可能残留"+
 			"中间状态（多出来的对象，或没有被恢复的地址/归属）；重新提交同一变更、或先执行 "+
-			"request vpp restart 再提交即可复原", desc, err))
+			"request vpp restart 再提交即可复原。本条是进程内记录（重启后不再出现）；若残渣是可对账"+
+			"的对象（IP 表/ACL/bridge-domain），启动/巡检对账会另行以 *_LEFTOVER 告警持续呈现，"+
+			"对象清理后自动消解", desc, err))
 }
 
 // lldpEqual 判断 LLDP 配置是否变化（Protocols 指针比较已由 configEqualPtr 覆盖，此处冗余防御）。

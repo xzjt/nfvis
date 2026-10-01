@@ -607,6 +607,11 @@ func run() error {
 					// 决策 #192：删表延后项的复核（表一旦不在数据面就清登记并消警，
 					// 不依赖「恰好又发生了一次 VPP 重连」）。
 					netProvider.RetryDeferredVRFDeletes(ctx, cfg)
+					// 决策 #321：残渣对账（IP 表 ∪ ACL ∪ bridge-domain）——按数据面实况逐次
+					// 重建/消解 *LEFTOVER 告警，并把已复原对象的提交期补偿告警一并消解。
+					for _, e := range netProvider.ReconcileResidue(ctx, cfg) {
+						log.Warn("残渣对账未收敛项", "err", e)
+					}
 				}
 				recoveryMu.Unlock()
 			}

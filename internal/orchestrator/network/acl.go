@@ -12,6 +12,7 @@ package network
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,10 @@ type ACLClient interface {
 	ACLAddReplace(index uint32, tag string, rules []ACLRuleSpec) (uint32, error)
 	ACLDel(index uint32) error
 	ACLInterfaceSet(swIfIndex, inAcl, outAcl uint32, inSet, outSet bool) error
+	// ACLTags 列出 VPP 里全部 ACL 的 tag（acl_dump 全量）。残渣对账用（决策 #321）：
+	// 「tag 不在配置里」即提交补偿失败留下的 ACL 残渣——与残留表（#192）同一份对账视野，
+	// 不靠进程内记忆，故跨 nfvisd 重启仍可见。
+	ACLTags() ([]string, error)
 	Close()
 }
 
@@ -219,6 +224,33 @@ func (p *AclProvider) lookup(name string) (uint32, bool) {
 	defer p.mu.Unlock()
 	idx, ok := p.index[name]
 	return idx, ok
+}
+
+// ACLTagsInVPP 返回 VPP 里全部 ACL 的 tag（去重、升序）。
+//
+// 用途（决策 #321）：残渣对账据此找「tag 不在配置里」的 ACL——提交补偿失败留下的残渣。
+// 查询失败上抛（把「问不出来」当「没有残渣」是假绿）。
+func (p *AclProvider) ACLTagsInVPP() ([]string, error) {
+	c, err := p.client()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	tags, err := c.ACLTags()
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(tags))
+	out := make([]string, 0, len(tags))
+	for _, t := range tags {
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (p *AclProvider) pairOf(swIf uint32) aclPair {

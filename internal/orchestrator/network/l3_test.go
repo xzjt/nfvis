@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -54,6 +55,15 @@ type fakeL3 struct {
 	bviCreated int             // BviCreate 调用次数（恢复幂等断言用）
 	cleared    []uint32        // 被清地址的接口（删除全部地址）
 	err        error
+	// logFn 可选的调用顺序记录（决策 #322 的「表先于成员」顺序断言用）：每次建表/置表记一条。
+	logFn func(string)
+}
+
+// note 记录一次调用（未注入 logFn 时为空操作）。
+func (f *fakeL3) note(s string) {
+	if f.logFn != nil {
+		f.logFn(s)
+	}
 }
 
 func newFakeL3() *fakeL3 {
@@ -125,9 +135,11 @@ func (f *fakeL3) IPTableAddDel(tableID uint32, isIP6, add bool, name string) err
 		return f.err
 	}
 	if add {
+		f.note("table-add:" + strconv.FormatUint(uint64(tableID), 10))
 		f.tables[tableID] = true
 		return nil
 	}
+	f.note("table-del:" + strconv.FormatUint(uint64(tableID), 10))
 	if f.tableKeepOnDelete[tableID] || f.tableInUse(tableID) {
 		return nil
 	}
@@ -204,6 +216,7 @@ func (f *fakeL3) SwInterfaceSetTable(swIfIndex uint32, isIP6 bool, tableID uint3
 	if f.setTableErr != nil {
 		return f.setTableErr
 	}
+	f.note("set-table:" + strconv.FormatUint(uint64(swIfIndex), 10))
 	f.setTables++
 	f.setTableIdx = append(f.setTableIdx, swIfIndex)
 	if isIP6 {

@@ -1423,13 +1423,17 @@ nfvis$ request alarms clear all
 > **已停止**（`docker stop` 的 137/143 退出码属正常结果），**不会**产生告警；只有 OOM 被杀
 > （Docker `OOMKilled`）或其它非零退出码才报 `CONTAINER_EXITED` critical。
 >
-> **提交类告警（提交期残渣 / 删表延后）**——都带「下一步怎么做」，也会自己消解：
+> **提交类与残渣类告警**——都带「下一步怎么做」，也会自己消解：
 >
 > | 码 | 级别 | 含义与处置 |
 > |---|---|---|
-> | `COMMIT_COMPENSATION_FAILED` | error | 提交失败后的**补偿没做完**：配置已回滚，数据面该对象可能残留中间状态（如多出来的表、没被恢复的地址）。处置：重新提交同一变更，或先 `request vpp restart` 再提交——同一对象的操作下次成功后自动消解 |
+> | `COMMIT_COMPENSATION_FAILED` | error | 提交失败后的**补偿没做完**：配置已回滚，数据面该对象可能残留中间状态（如多出来的表、没被恢复的地址）。处置：重新提交同一变更，或先 `request vpp restart` 再提交——同一对象的操作下次成功后自动消解；若残渣是可对账对象（IP 表/ACL/bridge-domain），对账会另行以 `*_LEFTOVER` 持续呈现 |
 > | `COMMIT_VRF_DELETE_DEFERRED` | warning | 被删的 L3 交换机的 IP 表**仍在数据面**（NAT 用过该表，VPP 不释放引用）。配置侧已生效；`request vpp restart` 后表消失、告警自动消解 |
 > | `VRF_TABLE_LEFTOVER` | warning | 数据面存在**配置未声明**的 IP 表（上两类处置留下的残渣）。它不被任何配置引用、不影响转发；`request vpp restart` 后自动清理并消警。**跨 nfvisd 重启仍可见**（按配置声明集与 VPP 实况对账，不靠进程内记忆）|
+> | `ACL_LEFTOVER` | warning | 数据面存在**配置未声明**的 ACL（tag 不在配置里，多为补偿失败留下的残渣）。同上：不被任何配置引用；`request vpp restart` 或手工清理后自动消警；**跨 nfvisd 重启仍可见**（按数据面实况对账重建）|
+> | `BRIDGE_DOMAIN_LEFTOVER` | warning | 数据面存在**配置未声明**的 bridge-domain（BD-Tag 不在配置里，同上）。处置与上面两条一致；**跨 nfvisd 重启仍可见** |
+>
+> 上面四条残渣告警的文案都会注明「由启动/巡检对账按数据面事实重建、原始提交不可回溯」——是哪次提交失败、是否被 NAT 引用，数据面看不出来，产品**不编造**。
 
 ### 10.7 备份 / 恢复 / 恢复出厂
 

@@ -21,6 +21,14 @@ type fakeVhost struct {
 	create []string
 	del    []uint32
 	err    error
+	// logFn 可选的调用顺序记录（决策 #322 的顺序断言用）。
+	logFn func(string)
+}
+
+func (f *fakeVhost) note(s string) {
+	if f.logFn != nil {
+		f.logFn(s)
+	}
 }
 
 func newFakeVhost() *fakeVhost {
@@ -32,6 +40,7 @@ func (f *fakeVhost) CreateVhostUser(sock string, isServer bool, tag string) (uin
 	if f.err != nil {
 		return 0, f.err
 	}
+	f.note("vhost-create")
 	f.next++
 	f.create = append(f.create, sock)
 	id := f.next

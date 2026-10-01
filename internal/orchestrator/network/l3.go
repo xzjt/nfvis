@@ -573,6 +573,61 @@ func (p *L3Provider) clearPending(tableID uint32) {
 	p.mu.Unlock()
 }
 
+// DeclaredTables 返回配置声明的 IP 表 ID → 名（默认表 0 亦在内，名为空）。
+//
+// 声明的表 = 默认表 0 ∪ 各 Vrf 条目（L3 交换机与显式网关 VRF）∪ 自建网关 VRF（vr-<交换机>）。
+// 口径**唯一**：残留表对账（LeftoverTables）与恢复收敛的表预建（PrecreateTables）共用本函数，
+// 避免「谁算声明表」出现第二份实现后各说各话。
+func DeclaredTables(cfg model.Config) map[uint32]string {
+	declared := map[uint32]string{0: ""}
+	for _, v := range cfg.Vrfs {
+		declared[TableID(v.Name)] = v.Name
+	}
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.Gateway == nil {
+			continue
+		}
+		name := vs.Gateway.Vrf
+		if name == "" {
+			name = GatewayVRFName(vs.Name)
+		}
+		declared[TableID(name)] = name
+	}
+	return declared
+}
+
+// PrecreateTables 预建配置声明的 IP 表（默认表 0 跳过），按表 ID 升序逐一幂等下发。
+//
+// 恢复收敛在重放 vNIC 接入/交换机**之前**调用：vNIC 若声明在某台 L3 交换机下（FR-NET-020），
+// 置表要求该表已存在，否则 VPP 报 `No such FIB / VRF (-3)` 成为未收敛项、要再重放一次才成功
+// （round84 登记 R84-22）。这里是「先建 VRF/L3 表与交换机，再置接口/成员」这条依赖顺序的
+// 显式落点——复用各 Provider 既有的幂等建表（ensureTables），不新造排序器。
+//
+// 单个表建失败不阻塞其余表：逐条上报（调用方记未收敛项），与恢复收敛「单对象失败不阻塞其余」同口径。
+func (p *L3Provider) PrecreateTables(ctx context.Context, cfg model.Config) []error {
+	c, err := p.client()
+	if err != nil {
+		return []error{err}
+	}
+	defer c.Close()
+	declared := DeclaredTables(cfg)
+	ids := make([]uint32, 0, len(declared))
+	for id := range declared {
+		if id == 0 {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var errs []error
+	for _, id := range ids {
+		if err := p.ensureTables(c, id, declared[id]); err != nil {
+			errs = append(errs, fmt.Errorf("预建 IP 表 %d(%s): %w", id, declared[id], err))
+		}
+	}
+	return errs
+}
+
 // LeftoverTables 返回**配置未声明**却在 VPP 里存在的 IP 表（升序）。
 //
 // 用途：把「删表延后 / 补偿残渣」留下的空表变成一条可对账的事实——恢复收敛据此记未收敛项与
@@ -580,8 +635,8 @@ func (p *L3Provider) clearPending(tableID uint32) {
 // 而「配置没声明这张表，它却在 VPP 里」是随时可复查的事实（round86 R86-9 的「事后不可见」
 // 正是指这类残渣只能靠进程内记忆）。
 //
-// 声明的表 = 默认表 0 ∪ 各 Vrf 条目（L3 交换机与显式网关 VRF）∪ 自建网关 VRF（vr-<交换机>）。
-// 查询失败上抛（把「问不出来」当「没有残留」是假绿）。
+// 声明的表由 DeclaredTables 给出（与表预建同一份口径）。查询失败上抛（把「问不出来」当
+// 「没有残留」是假绿）。
 func (p *L3Provider) LeftoverTables(cfg model.Config) ([]uint32, error) {
 	c, err := p.client()
 	if err != nil {
@@ -592,25 +647,31 @@ func (p *L3Provider) LeftoverTables(cfg model.Config) ([]uint32, error) {
 	if err != nil {
 		return nil, err
 	}
-	declared := map[uint32]bool{0: true}
-	for _, v := range cfg.Vrfs {
-		declared[TableID(v.Name)] = true
-	}
-	for _, vs := range cfg.VirtualSwitches {
-		if vs.Gateway == nil {
-			continue
-		}
-		name := vs.Gateway.Vrf
-		if name == "" {
-			name = GatewayVRFName(vs.Name)
-		}
-		declared[TableID(name)] = true
-	}
+	declared := DeclaredTables(cfg)
 	var out []uint32
 	for _, id := range have {
-		if !declared[id] {
+		if _, ok := declared[id]; !ok {
 			out = append(out, id)
 		}
+	}
+	return out, nil
+}
+
+// AllTables 返回 VPP 里当前的 IP 表 ID 集合（含默认表 0），供残渣对账判定「提交期告警对象
+// 是否已复原」用（与 LeftoverTables 同一数据来源，避免第二次查询口径分叉）。
+func (p *L3Provider) AllTables() (map[uint32]bool, error) {
+	c, err := p.client()
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	ids, err := c.IPTables()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uint32]bool, len(ids))
+	for _, id := range ids {
+		out[id] = true
 	}
 	return out, nil
 }

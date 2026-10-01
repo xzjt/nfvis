@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 
@@ -19,13 +20,37 @@ type fakeAcl struct {
 	setCalls [][3]uint32 // swIf, in, out
 	del      []uint32
 	err      error
+	// tags/idxTag 模拟 VPP 里现存的 ACL（ACLTags 残渣对账用，决策 #321）。
+	tags   map[string]uint32
+	idxTag map[uint32]string
 }
 
 func newFakeAcl() *fakeAcl {
-	return &fakeAcl{ifaces: map[string]uint32{"ens192": 1, "ens224": 2, "bvi0": 3}, nextIdx: 99}
+	return &fakeAcl{ifaces: map[string]uint32{"ens192": 1, "ens224": 2, "bvi0": 3}, nextIdx: 99,
+		tags: map[string]uint32{}, idxTag: map[uint32]string{}}
+}
+
+// putACL 直接注入一个「数据面已存在」的 ACL（模拟补偿失败留下的残渣）。
+func (f *fakeAcl) putACL(tag string) uint32 {
+	f.nextIdx++
+	f.tags[tag] = f.nextIdx
+	f.idxTag[f.nextIdx] = tag
+	return f.nextIdx
 }
 
 func (f *fakeAcl) Close() {}
+
+func (f *fakeAcl) ACLTags() ([]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make([]string, 0, len(f.tags))
+	for t := range f.tags {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out, nil
+}
 
 func (f *fakeAcl) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	if f.err != nil {
@@ -42,9 +67,13 @@ func (f *fakeAcl) ACLAddReplace(index uint32, tag string, rules []ACLRuleSpec) (
 	if index == aclIndexNew {
 		f.nextIdx++
 		f.added = append(f.added, tag)
+		f.tags[tag] = f.nextIdx
+		f.idxTag[f.nextIdx] = tag
 		return f.nextIdx, nil
 	}
 	f.replaced = append(f.replaced, index)
+	f.tags[tag] = index
+	f.idxTag[index] = tag
 	return index, nil
 }
 
@@ -53,6 +82,10 @@ func (f *fakeAcl) ACLDel(index uint32) error {
 		return f.err
 	}
 	f.del = append(f.del, index)
+	if tag, ok := f.idxTag[index]; ok {
+		delete(f.tags, tag)
+		delete(f.idxTag, index)
+	}
 	return nil
 }
 

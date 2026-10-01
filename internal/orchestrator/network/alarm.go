@@ -45,7 +45,28 @@ const (
 	// 必须有人看得到——此前只出现在当次提交输出里，事后无从查证（round86 R86-9）。
 	// 残留随数据面重启消失（VPP 的 IP 表是运行态），恢复收敛据此自动消警。
 	AlarmTableLeftover = "VRF_TABLE_LEFTOVER"
+	// AlarmACLLeftover 数据面存在**配置未声明**的 ACL（tag 不在配置里）：提交补偿失败留下的
+	// 残渣（决策 #321，把非 VRF 表类残渣纳入与 #192 同一份对账视野）。与 VRF_TABLE_LEFTOVER
+	// 同口径：不靠进程内记忆，恢复收敛/巡检按数据面事实重建，随对象消失自动消警、跨 nfvisd 重启可见。
+	AlarmACLLeftover = "ACL_LEFTOVER"
+	// AlarmBDLeftover 数据面存在**配置未声明**的 bridge-domain（BD-Tag 不在配置里）：
+	// 同上（决策 #321）。BD 名取 BD-Tag，无名时以 BD ID 标识。
+	AlarmBDLeftover = "BRIDGE_DOMAIN_LEFTOVER"
 )
+
+// ResidueCodes 全部「残渣对账」告警码（消解只在本集合内进行，不误伤恢复收敛的其它告警）。
+func ResidueCodes() []string {
+	return []string{AlarmTableLeftover, AlarmACLLeftover, AlarmBDLeftover}
+}
+
+// IsResidueCode 报告该告警码是否为残渣对账码。
+func IsResidueCode(code string) bool {
+	switch code {
+	case AlarmTableLeftover, AlarmACLLeftover, AlarmBDLeftover:
+		return true
+	}
+	return false
+}
 
 // Alarm 一条告警（契约 components/schemas/Alarm）。
 type Alarm struct {

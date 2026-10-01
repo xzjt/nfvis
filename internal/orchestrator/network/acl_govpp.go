@@ -46,6 +46,25 @@ func (g *govppAclClient) ACLIndexByTag(tag string) (uint32, bool, error) {
 	}
 }
 
+// ACLTags 经 acl_dump（~0 = 全量）列出 VPP 里全部 ACL 的 tag。
+//
+// 残渣对账用（决策 #321）：tag 不在配置里即补偿失败留下的 ACL 残渣。
+func (g *govppAclClient) ACLTags() ([]string, error) {
+	reqCtx := g.ch.SendMultiRequest(&acl.ACLDump{ACLIndex: ^uint32(0)})
+	var out []string
+	for {
+		d := &acl.ACLDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return nil, err
+		}
+		if stop {
+			return out, nil
+		}
+		out = append(out, d.Tag)
+	}
+}
+
 func (g *govppAclClient) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	return (&govppL3Client{ch: g.ch}).SwInterfaceIndex(ifname)
 }
