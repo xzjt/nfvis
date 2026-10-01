@@ -79,6 +79,10 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 				if vs.DhcpRelayServer != "" {
 					m["dhcp_relay"] = map[string]any{"server": vs.DhcpRelayServer}
 				}
+				// 决策 #337：声明了 MAC 学习上限才显示（与 REST 详情的 learn_limit 同源、同形状）
+				if vs.LearnLimit != 0 {
+					m["learn_limit"] = vs.LearnLimit
+				}
 			}
 		}
 	}

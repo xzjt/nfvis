@@ -119,6 +119,15 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 		if err := n.ApplyBridgeDomain(ctx, vs); err != nil {
 			record("virtual-switches/"+vs.Name, err)
 		}
+		// 决策 #337：声明了学习上限的交换机重放同一条 bridge_domain_set_learn_limit——
+		// VPP 重启后 BD 与上限一并复位，不重放即静默丢缓解手段（与 L2-2/#335 同族教训）。
+		// 独立记源、失败不阻塞其余对象；resetProviders 已清空 L2Provider 登记，声明未变也会重放（幂等）。
+		// 只补齐不摘除（附录 A #35）：清配置走提交编排（发默认值），恢复段不猜。
+		if n.l2 != nil && vs.LearnLimit > 0 {
+			if err := n.l2.ApplyLearnLimit(ctx, vs); err != nil {
+				record("virtual-switches/"+vs.Name+"/learn-limit", err)
+			}
+		}
 		// 决策 #335：声明了 relay 的交换机重放同一条 proxy 消息——VPP 重启后 proxy 运行态
 		// 消失，不重放即静默丢中继（与 L2-2 同族教训）。独立记源、失败不阻塞其余对象；
 		// resetProviders 已清空 DhcpProvider 登记，声明未变也会重新下发（幂等）。

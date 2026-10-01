@@ -193,6 +193,21 @@ func (g *govppL2Client) BridgeDomainAddDel(bdID uint32, add, learn bool, tag str
 	return nil
 }
 
+// SetLearnLimit 下发 bridge-domain 的 MAC 学习条数上限（决策 #337）。
+// VPP 26.06/binapi v0.13.0 有专用消息 bridge_domain_set_learn_limit（go.fd.io/govpp/binapi/l2），
+// 无需 vppctl 旁路。
+func (g *govppL2Client) SetLearnLimit(bdID, limit uint32) error {
+	reply := &l2.BridgeDomainSetLearnLimitReply{}
+	err := g.ch.SendRequest(&l2.BridgeDomainSetLearnLimit{BdID: bdID, LearnLimit: limit}).ReceiveReply(reply)
+	if err != nil {
+		return err
+	}
+	if reply.Retval != 0 {
+		return fmt.Errorf("bridge_domain_set_learn_limit(bd=%d,limit=%d) retval=%d", bdID, limit, reply.Retval)
+	}
+	return nil
+}
+
 func (g *govppL2Client) SwInterfaceSetL2Bridge(swIfIndex, bdID uint32, portType L2PortType, shg uint8, enable bool) error {
 	reply := &l2.SwInterfaceSetL2BridgeReply{}
 	err := g.ch.SendRequest(&l2.SwInterfaceSetL2Bridge{

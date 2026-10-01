@@ -24,6 +24,7 @@ type fakeL2 struct {
 	bridge     map[uint32]uint32 // swIfIndex → bdID
 	xconn      map[uint32]uint32
 	macs       map[uint32][]MACEntry
+	learn      map[uint32]uint32 // 决策 #337：bdID → 已下发的学习上限
 	calls      []string
 	subifs     []CreateSubifReq
 	err        error // 非 nil 时各方法返回该错误
@@ -92,6 +93,19 @@ func (f *fakeL2) BridgeDomainAddDel(bdID uint32, add, learn bool, tag string) er
 	} else {
 		delete(f.bds, bdID)
 	}
+	return nil
+}
+
+// SetLearnLimit 记录学习上限下发（决策 #337 单测的真值来源）。
+func (f *fakeL2) SetLearnLimit(bdID, limit uint32) error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.learn == nil {
+		f.learn = map[uint32]uint32{}
+	}
+	f.learn[bdID] = limit
+	f.calls = append(f.calls, fmt.Sprintf("learn:%d=%d", bdID, limit))
 	return nil
 }
 

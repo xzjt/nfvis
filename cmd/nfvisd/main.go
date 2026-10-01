@@ -691,6 +691,11 @@ func run() error {
 			} else {
 				alarms.Resolve("hugepages", system.HugepageSurplusAlarmCode, "system")
 			}
+			// 决策 #337：L2 环路疑似巡检（采样式，只告警不阻断）——对每个 L2 交换机读一次 MAC
+			// 学习表与上一轮快照比较；独立 scope "loop"，连续多轮平静自动消警。
+			for _, e := range netProvider.CheckLoop(cctx, cfg) {
+				log.Warn("环路检测", "err", e)
+			}
 		}
 		check()
 		for {

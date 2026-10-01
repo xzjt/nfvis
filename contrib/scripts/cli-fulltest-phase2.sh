@@ -111,6 +111,9 @@ set virtual-switches vs-l3 static-routes default next-hop 192.168.155.1
 # 前置：S2-pre 里给 vs-l2 配了网关（中继源地址自动取 BVI 的 IPv4 地址），relay 语句才可提交。
 set virtual-switches vs-l2 dhcp-relay server 192.168.100.2
 delete virtual-switches vs-l2 dhcp-relay
+# —— virtual-switches learn-limit（§2.4；决策 #337，MAC 学习上限=环路缓解，不依赖网关）——
+set virtual-switches vs-l2 learn-limit 8192
+delete virtual-switches vs-l2 learn-limit
 # —— resource-pools（§2.6）——
 set resource-pools cpu numa node 0 cores 1-4
 # —— system login 横幅（§2.2；决策 #303）——

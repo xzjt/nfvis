@@ -312,6 +312,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-switches <n> gateway acl-in\|acl-out <acl>` | 网关 ACL | VPP acl | ✅ |
 | `set virtual-switches <n> dhcp-relay server <ip>` | DHCP 中继（仅已 `set gateway ip` 的 L2 交换机可配；src 自动取 BVI 的 IPv4 网关地址，server 须在该转发域内可达） | VPP dhcp proxy | ✓（round113：配置/撤销/读视图/`vppctl show dhcp proxy` 对照 + pcap 转发签名实证；端到端租约因测试设备工具链受限未取得，见 `docs/evidence/v2-round113-*.txt`） |
 | `delete virtual-switches <n> dhcp-relay` | 撤销 DHCP 中继（`dhcp_proxy_config` IsAdd=false，幂等；随交换机删除一并撤） | VPP dhcp proxy | ✓（round113：撤销后 `show dhcp proxy` 清空、读视图同步；恢复重放存活经多次 VM/nfvis 重启实证） |
+| `set virtual-switches <n> learn-limit <n>` | MAC 学习条数上限（仅 L2；环路/广播风暴缓解，**非阻断**；1-16777216，超限拒绝） | VPP `bridge_domain_set_learn_limit` | 🚫 待真机（决策 #337） |
+| `delete virtual-switches <n> learn-limit` | 清 MAC 学习上限（恢复 VPP 默认 16777216，幂等） | VPP `bridge_domain_set_learn_limit` | 🚫 待真机（决策 #337） |
 | `set virtual-switches <n> ports [<seq>] interface <if> [trunk vlans <l>\|native <v>]` | 物理口成员 | VPP BD | ✅ |
 | `set virtual-switches <n> ports [<seq>] vnf <vm> interface <vnic> [trunk vlans <l>]` | vhost-user 成员 | VPP + libvirt | ✅ |
 | `set virtual-switches <n> ports [<seq>] container <ct> interface <vnic>` | 容器 memif 成员 | VPP + Docker | ✅ |
@@ -409,10 +411,10 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 > **复核方法**（下面每个数字都可这样复算）：
 >
 > ```bash
-> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 263（§1/§2 的命令行 261 行 + §3 本表的 `show`、`request` 两行）
+> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 265（§1/§2 的命令行 263 行 + §3 本表的 `show`、`request` 两行）
 > ```
 >
-> 即 §1/§2 合计 **261 行**；把 ` / ` 并列的写法各拆成一条后为 **265 条**命令
+> 即 §1/§2 合计 **263 行**；把 ` / ` 并列的写法各拆成一条后为 **267 条**命令
 > （`exit` / `quit` +1；§2.1 的 `edit <path>` / `up` / `top` / `exit` +3）。
 
 **分族**（族 = 该行**首个 token**；§2.1 的裸 `show` 与 `show | display set` 因此计入 `show` 族，`help` 计入其余操作）：
@@ -423,8 +425,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request` | 46 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/系统/告警） |
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
-| 配置模式 | 129 | §2.1 余下 13 行 + §2.2~§2.9 共 116 行 |
-| **合计** | **264** | 不含管道则为 **255**；按 ` / ` 拆开后 **268 条** |
+| 配置模式 | 131 | §2.1 余下 13 行 + §2.2~§2.9 共 118 行 |
+| **合计** | **266** | 不含管道则为 **257**；按 ` / ` 拆开后 **270 条** |
 
 **分节**（行数）：
 
@@ -432,20 +434,20 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 |---|---|---|---|
 | §1.1 `show`（含通用管道 9） | 76 | §2.2b `protocols` | 3 |
 | §1.2 `request` | 47 | §2.3 `interfaces` 与 `bonds` | 10 |
-| §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 15 |
+| §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 17 |
 | §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 9 |
 | §2.2 `system` | 35 | §2.6 `resource-pools` | 3 |
 | §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 20 |
-| §2.9 `container-functions` | 10 | **合计** | **264** |
+| §2.9 `container-functions` | 10 | **合计** | **266** |
 
-**按实测状态分布**（共 264 行）：
+**按实测状态分布**（共 266 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
 | ✅ 实测通过 | 245 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。决策 #335 的两条 dhcp-relay 命令于 round113 真机实测（配置/撤销/读视图对照/pcap 转发签名），移入本桶。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶；`request system storage format-data` 由决策 #305 落地（原 🚫 破坏性、契约已登记延期），按「破坏性但已验」移入本桶 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 15 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 3 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319；原 `set/delete virtual-switches <n> dhcp-relay …` 已于 round113 真机验证并移出本行（决策 #335）） |
+| 🚫 本轮未执行 | 17 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 5 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319。决策 #337 的 `set/delete virtual-switches <n> learn-limit …` 两条已入 fulltest 阶段 2、单测覆盖，真机复跑待执行；原 `set/delete virtual-switches <n> dhcp-relay …` 已于 round113 真机验证并移出本行（决策 #335）） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
@@ -460,11 +462,14 @@ pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**
 语义校验 **12 / 0 / 1**、生命周期与组合 **21 / 0 / 3**（有业务现场时跑）。
 
 **决策 #319 之后的基线（v2 开发线；数字为「旧基线 + 本轮增量」，真机复跑待执行）**：
-`cli-fulltest` **212 / 0 / 13**（旧 198/0/11；增量逐阶段 = 阶段 1 `+1` `show system api tokens`、
+`cli-fulltest` **214 / 0 / 13**（旧 198/0/11；增量逐阶段 = 阶段 1 `+1` `show system api tokens`、
 阶段 2 `+4`（登录横幅语句 1 + 提交→回读→清除 3）、阶段 4 `+2`（`format-data` 结构检查、
-吊销不存在的 token id，两条都进「预期报错」桶 ⇒ 11→13）、**新增阶段 7** `+7`（CLI 脚本文件模式 `-f`））、
+吊销不存在的 token id，两条都进「预期报错」桶 ⇒ 11→13）、**新增阶段 7** `+7`（CLI 脚本文件模式 `-f`）；
+决策 #337 再于阶段 2 `+2`：`set/delete virtual-switches <n> learn-limit <n>`）、
 `cli-semantic-check` **24 / 0 / 1**（旧 12/0/1；新增 **S10 配置编辑锁语义** 12 项，含 5 项正向控制，
-覆盖 #317/#318 的排他/接管/`ErrLockLost`/登出释放）、`cli-lifecycle-check` **21 / 0 / 3**（不变）、
+覆盖 #317/#318 的排他/接管/`ErrLockLost`/登出释放；**决策 #337 新增 S12**：产品读视图
+`learn_limit` ↔ `vppctl show bridge-domain <id> detail` 的 Learn-li，无配置如实报不可判定）、
+`cli-lifecycle-check` **21 / 0 / 3**（不变）、
 `cli-pty-smoke` **10 / 10**（不变）。逐阶段差异与原因见规格书附录 A #319⑤；
 命令清单与契约的对账由 `contrib/scripts/check_suite_contract_sync.sh` 守护（`make check` 的 `toolcheck`）。
 

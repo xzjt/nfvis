@@ -265,6 +265,33 @@ func TestValidateDhcpRelay(t *testing.T) {
 	mustErrContaining(t, Validate(c4), "vs-l3", "BVI")
 }
 
+func TestValidateLearnLimit(t *testing.T) {
+	// 未配置（0）合法；合法范围内的正整数合法
+	mustNoErr(t, Validate(validBase()))
+	c := validBase()
+	c.VirtualSwitches[0].LearnLimit = 8192
+	mustNoErr(t, Validate(c))
+	c1 := validBase()
+	c1.VirtualSwitches[0].LearnLimit = 16777216
+	mustNoErr(t, Validate(c1))
+
+	// 负数 / 0 显式（用负值与越界值覆盖边界；0 即未配置、不报错）
+	neg := validBase()
+	neg.VirtualSwitches[0].LearnLimit = -1
+	mustErrContaining(t, Validate(neg), "learn_limit", "1-16777216")
+
+	// 超过 VPP 上限
+	over := validBase()
+	over.VirtualSwitches[0].LearnLimit = 16777217
+	mustErrContaining(t, Validate(over), "learn_limit", "1-16777216")
+
+	// type=l3 交换机不允许 L2 专属配置（含 learn_limit）——避免「设了却不生效」的静默假成功
+	c3 := validBase()
+	c3.VirtualSwitches = append(c3.VirtualSwitches, VirtualSwitch{Name: "vs-l3", Type: "l3", LearnLimit: 100})
+	c3.Vrfs = append(c3.Vrfs, Vrf{Name: "vs-l3"})
+	mustErrContaining(t, Validate(c3), "vs-l3", "L2")
+}
+
 func TestValidateSystemLogin(t *testing.T) {
 	c := validBase()
 	c.System.Login = &SystemLogin{

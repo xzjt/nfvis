@@ -656,3 +656,28 @@ func TestInvalidateRuntimeStateForcesFullNATReplay(t *testing.T) {
 		}
 	}
 }
+
+// 决策 #337：恢复收敛重放 MAC 学习上限（VPP 重启后 BD 与上限一并复位，必须按配置重放）。
+func TestEnsureConsistentReplaysLearnLimit(t *testing.T) {
+	f := newRecoveryFixture()
+	vs := l2Switch("vs-ll", "ens192")
+	vs.LearnLimit = 4096
+	cfg := model.Config{VirtualSwitches: []model.VirtualSwitch{vs}}
+
+	if errs := f.net.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("应收敛成功，实际: %v", errs)
+	}
+	if got := f.l2.learn[BDID("vs-ll")]; got != 4096 {
+		t.Fatalf("恢复重放应下发学习上限 4096，实际 %d", got)
+	}
+
+	// 未声明上限的交换机：不产生任何设置动作（VPP 侧保持默认）
+	f2 := newRecoveryFixture()
+	cfg2 := model.Config{VirtualSwitches: []model.VirtualSwitch{l2Switch("vs-none", "ens192")}}
+	if errs := f2.net.EnsureConsistent(context.Background(), cfg2); len(errs) != 0 {
+		t.Fatalf("收敛: %v", errs)
+	}
+	if len(f2.l2.learn) != 0 {
+		t.Fatalf("未配 learn-limit 不应下发，实际 %v", f2.l2.learn)
+	}
+}

@@ -168,8 +168,11 @@ type VirtualSwitch struct {
 	Gateway      *VSGateway `json:"gateway,omitempty"`       // 仅 L2：BVI 三层网关（FR-NET-014）
 	// DhcpRelayServer DHCP 中继的服务器地址（决策 #335）：仅已配网关（BVI）的 L2 交换机可配，
 	// 中继源地址自动取 BVI 的 IPv4 网关地址；读视图（REST 详情/列表）以 dhcp_relay:{server} 形状给出。
-	DhcpRelayServer string        `json:"dhcp_relay_server,omitempty"`
-	Ports           []VSwitchPort `json:"ports,omitempty"`
+	DhcpRelayServer string `json:"dhcp_relay_server,omitempty"`
+	// LearnLimit MAC 学习条数上限（决策 #337）：仅 L2；>0 时下发 VPP
+	// `bridge_domain_set_learn_limit`（缓解环路/广播风暴的第二道防线，非阻断）。0=未配置（VPP 默认）。
+	LearnLimit int           `json:"learn_limit,omitempty"`
+	Ports      []VSwitchPort `json:"ports,omitempty"`
 }
 
 // Vrf L3 虚拟交换机的配置数据（FR-NET-013；CLI `virtual-switches <n> type l3` 映射为同名条目）。

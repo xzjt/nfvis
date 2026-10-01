@@ -208,6 +208,9 @@ func ConfigPathTree() *Node {
 				K("dhcp-relay", "DHCP 中继（仅已配网关的 L2 交换机）",
 					K("server", "DHCP 服务器地址（IPv4，须在该交换机转发域内可达）", V("ip", "如 192.168.100.2")),
 				),
+				// 决策 #337：MAC 学习条数上限（仅 L2）——VPP bridge_domain_set_learn_limit，
+				// 环路/广播风暴的缓解手段（非阻断），值必为正整数、上限 16777216（VPP 语义）。
+				K("learn-limit", "MAC 学习条数上限（仅 L2；环路缓解，1-16777216）", V("uint", "如 8192")),
 				K("ports", "成员端口",
 					PT("<seq>", "uint", "端口序号",
 						K("interface", "物理口/bond 成员",

@@ -471,3 +471,30 @@ func TestVrfsEndpoint(t *testing.T) {
 		t.Fatalf("VRF 列表: %d %s", status, data)
 	}
 }
+
+// TestVirtualSwitchLearnLimitView（决策 #337）：读视图以 learn_limit 给出 MAC 学习上限
+// （列表与详情同源）；未配置时该键缺席（不编造）。
+func TestVirtualSwitchLearnLimitView(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+
+	limited := model.VirtualSwitch{Name: "vs-ll", Type: "l2", LearnLimit: 8192}
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-switches", token, limited,
+		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("创建带 learn-limit 的交换机应 201: %d %s", status, data)
+	}
+	plain := model.VirtualSwitch{Name: "vs-noll", Type: "l2"}
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-switches", token, plain,
+		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("创建普通交换机应 201: %d %s", status, data)
+	}
+
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/virtual-switches/vs-ll", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), `"learn_limit":8192`) {
+		t.Fatalf("详情应带 learn_limit=8192: %d %s", status, data)
+	}
+	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/virtual-switches/vs-noll", token, nil, nil)
+	if status != http.StatusOK || strings.Contains(string(data), "learn_limit") {
+		t.Fatalf("未配置 learn-limit 的详情不得出现该键: %d %s", status, data)
+	}
+}

@@ -466,14 +466,20 @@ func (v *validator) checkVirtualSwitches(c Config) {
 			if !v.vrfNames[s.Name] {
 				v.errf(p, "type=l3 交换机需要同名 VRF 条目承载 L3 配置（L3 虚拟交换机映射为同名 VRF）")
 			}
-			if s.VlanAccess != 0 || s.CrossConnect || len(s.Ports) > 0 || s.Gateway != nil {
-				v.errf(p, "type=l3 交换机不允许 L2 专属配置（vlan_access/ports/gateway/cross-connect）")
+			if s.VlanAccess != 0 || s.CrossConnect || len(s.Ports) > 0 || s.Gateway != nil || s.LearnLimit != 0 {
+				v.errf(p, "type=l3 交换机不允许 L2 专属配置（vlan_access/ports/gateway/cross-connect/learn_limit）")
 			}
 		default:
 			v.errf(p+".type", "type 必须为 l2 或 l3")
 		}
 		if s.VlanAccess != 0 && !checkVlan(s.VlanAccess) {
 			v.errf(p+".vlan_access", "vlan %d 必须在 1-4094", s.VlanAccess)
+		}
+		// 决策 #337：MAC 学习条数上限（仅 L2）。VPP bridge_domain_set_learn_limit 的取值域是
+		// uint32，但报文 MAC 表实际有意义的上界就是 VPP 默认值 16777216（0x1000000）——超过它
+		// 等于「不设限」却写成显式值，属无效配置，直接拒绝并说明。
+		if s.LearnLimit != 0 && (s.LearnLimit < 1 || s.LearnLimit > 16777216) {
+			v.errf(p+".learn_limit", "学习上限 %d 超出范围：须为 1-16777216（VPP 默认 16777216 即不设限）", s.LearnLimit)
 		}
 		if s.Gateway != nil {
 			for i, a := range s.Gateway.Addresses {
