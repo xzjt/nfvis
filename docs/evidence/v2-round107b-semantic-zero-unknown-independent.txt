@@ -1,0 +1,24 @@
+NFViS v2 真机验证记录 round107 补 —— 语义「不可判定 0」由我独立复跑确认
+====================================================================
+日期：2026-10-01
+环境：nfvis-vm；2.0.0~dev18；套件与前置脚本取自合并后的 v2（PR #254）
+（决策 #328 的实现者自测证据见 `v2-round107-semantic-s8-decidable.txt`；本文是我自己的独立复跑记录）
+
+§1 复跑序列与结果（原始输出片段）
+- 造流量现场：`bash contrib/scripts/cli-semantic-fixture.sh up`
+  → 正控就绪输出含 `52:54:42:e6:31:0d  vh-sem-vm-nic0` 与 `b0:b0:00:00:00:00  bvi0`
+  → 「正控已就绪：跑 …（S8 应可判定并通过）」
+- 跑语义：`bash contrib/scripts/cli-semantic-check.sh`
+  → **合计：通过 25 / 失败 0 / 不可判定 0 / 登记 0** ✓（**用户口径「不留不可判定」达成**）
+  → S8 段：`产品读视图成员: [vh-sem-vm-nic0 bvi0]` 与 `VPP BD 成员: [bvi0 vh-sem-vm-nic0]` **两侧一致**
+- 拆现场：`bash contrib/scripts/cli-semantic-fixture.sh down` → VNF/容器均无
+- 终态：`sw=0`；版本 nfvis 2.0.0~dev18
+
+§2 与实现者自测的一致性
+实现者报告：有现场 25/0/0、无流量（停 VNF）仍如实 24/0/1。本轮我独立复跑得同一结论（25/0/0），
+且**未把 UNKNOWN 改成通过**（无流量路径的 UNKNOWN 保留，前置里明确提示怎么造正控）。
+
+§3 结论
+- 「不留不可判定」在**有正控现场**下成立，且方法可复现（`cli-semantic-fixture.sh up` 一条命令造现场）。
+- 顺带修掉的两处套件 oracle 缺陷（rx 认错列、成员表用 Index 当 BD-ID）已由实现者随本决策修复，
+  自校准新增 5 条断言把它们钉住。
