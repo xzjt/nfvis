@@ -34,7 +34,7 @@ extract() {
   ' "$SCRIPT"
 }
 
-ORACLES=$(for f in vpp_bd_ids vpp_bd_tag vpp_l2fib_count vpp_bd_index_of_tag vpp_ifaces vpp_bd_members s8_verdict s9_verdict; do
+ORACLES=$(for f in vpp_bd_ids vpp_bd_tag vpp_l2fib_count vpp_bd_index_of_tag vpp_bd_id_of_tag vpp_ifaces vpp_if_rx vpp_bd_members vsw_ports_parse vpp_l2fib_learned s8_verdict s9_verdict; do
   body=$(extract "$f")
   [ -z "$body" ] && { echo "✗ 抽不到函数 $f（脚本改名了？）" >&2; exit 1; }
   printf '%s\n' "$body"
@@ -44,13 +44,15 @@ eval "$ORACLES"
 
 CR=$'\r'
 # ---- 桩 vppctl：按子命令返回各用例设定的合成输出 ----
-STUB_BD=""; STUB_BD_DETAIL=""; STUB_L2FIB=""; STUB_IFACES=""
+STUB_BD=""; STUB_BD_DETAIL=""; STUB_L2FIB=""; STUB_IFACES=""; STUB_IFACE1=""
 vppctl() {
   case "$*" in
     "show bridge-domain")        printf '%s\n' "$STUB_BD" ;;
     "show bridge-domain "*)      printf '%s\n' "$STUB_BD_DETAIL" ;;
     "show l2fib verbose")        printf '%s\n' "$STUB_L2FIB" ;;
     "show interface")            printf '%s\n' "$STUB_IFACES" ;;
+    # 单口查询：真机上 `show interface <名>` 只回该口的块，故单口用独立桩变量
+    "show interface "*)          printf '%s\n' "${STUB_IFACE1-}" ;;
     *)                           printf '' ;;
   esac
 }
@@ -94,6 +96,8 @@ STUB_BD_DETAIL="$STUB_BD${CR}  BD-Tag: vs-vnf${CR}"
 eq "CRLF 的 BD-Tag: vs-vnf → 取到 Index 1（不剥 \\r 则恒空）" 1 "$(vpp_bd_index_of_tag vs-vnf)"
 eq "tag 不存在 → 空" "" "$(vpp_bd_index_of_tag no-such-vs)"
 eq "vpp_bd_tag 剥 CR 后可精确比较" "vs-vnf" "$(vpp_bd_tag 6252701)"
+eq "BD-ID（成员表查询用它）与 Index 不同：vs-vnf 的 BD-ID = 6252701" "6252701" "$(vpp_bd_id_of_tag vs-vnf)"
+eq "tag 不存在 → BD-ID 为空" "" "$(vpp_bd_id_of_tag no-such-vs)"
 
 STUB_BD=""
 STUB_BD_DETAIL=""
@@ -125,6 +129,29 @@ STUB_BD_DETAIL="$STUB_BD${CR}
   BD-Tag: vs-l2${CR}"
 eq "无成员（成员表整块不打印）→ 空集合，不报错" "" "$(vpp_bd_members 1)"
 
+echo "— 交换机读视图成员枚举（含 VNF/容器派生条目）：取 show virtual-switches <vs> ports 的 Port 列 —"
+# 读视图与 REST 同源，含派生条目（source=vnf|container）与运行态成员（source=runtime）；
+# 表头（NR==1）与收尾的「（来源 vnf: …）」说明行必须跳过——旧实现只看 vppctl 的 BD 成员表，
+# 于是 link down（不在 BD）的派生端口在套件里「不存在」。
+RV="Port                 Source    Admin   Link    RxPkts       TxPkts
+vh-s8-vm-nic0        vnf       up      up      12           3
+ens224               config    up      up      579          0
+bvi0                 runtime   up      up      9            0
+（来源 vnf: s8-vm/nic0 只读——在 VNF 侧删除：delete virtual-machine-functions s8-vm interfaces nic0 virtual-switch vs-s8）"
+eq "读视图取 Port 列（含 vnf/container 派生与 runtime），跳表头与说明行" \
+   "vh-s8-vm-nic0 ens224 bvi0" "$(vsw_ports_parse "$RV" | tr '\n' ' ' | sed 's/ $//')"
+eq "空读视图（无成员）→ 空集合，不报错" "" "$(vsw_ports_parse "")"
+
+echo "— l2fib 学习条目：排除 static 与 BVI 自身（按 static/bvi 标志列），判「成员口学到 MAC」—"
+STUB_L2FIB="    Mac-Address     BD-Idx If-Idx BSN-ISN Age(min) static filter bvi         Interface-Name        ${CR}
+ b0:b0:00:00:00:00    1      5      0/0      no      *      -     *               bvi0              ${CR}
+ 52:54:64:63:E6:7B    1      4      2/7      -       -      -     -           vh-s8-vm-nic0        ${CR}
+ aa:aa:aa:aa:aa:01    1      1      0/0      no      *      -     -               ens192             ${CR}
+L2FIB total/learned entries: 3/1  Last scan time: 5.4e-3sec  Learn limit: 16777216${CR}"
+eq "只留非 static、非 BVI 的条目（MAC 转小写 + 接口名）" \
+   "52:54:64:63:e6:7b vh-s8-vm-nic0" "$(vpp_l2fib_learned 1 | tr '\n' ' ' | sed 's/ $//')"
+eq "别的 BD 的条目不计入（按 BD-Idx 过滤）" "" "$(vpp_l2fib_learned 7)"
+
 echo "— 接口名集合：只认行首无缩进的行（计数续行是缩进的，第 2 列同样是数字）—"
 # VPP 把 rx/tx/drops/ip4 计数续行缩进打印，那些行的第 2 列也是数字——只按「第 2 列是数字」筛，
 # 集合里会混进 drops/ip4 这类垃圾（2026-09-26 真机实测：S1 因此把 drops/ip4/ip6 当成「期望的接口」→ 假红）。
@@ -139,6 +166,18 @@ vh-vnf-dhcp-eth0                  3      up          9000/0/0/0     rx packets  
                                                                    ip4                          634${CR}
 local0                            0      down          0/0/0/0     ${CR}"
 eq "接口名只取行首无缩进的行（缩进的 drops/ip4 续行不算）" "ens192 ens224 vh-vnf-dhcp-eth0" "$(vpp_ifaces | tr '\n' ' ' | sed 's/ $//')"
+echo "— 成员口 rx：rx packets 打在**接口名下那行**（按第 1 列认 rx 会恒得 0）—"
+# 这是 S8 报告「有 rx 计数的成员:（无）」的真因之一（2026-10-01 round107 实测）：
+# `<名> <idx> … rx packets <n>` 的 rx 在第 5 列，只有 rx bytes/drops/ip4 才是缩进续行，
+# 旧实现按 $1=="rx" 认行 ⇒ 任何口的 rx 都取不到 ⇒ 永远「没有能产生流量的成员」。
+eq "ens192 的 rx 取到 189（不是续行的 bytes/drops）" "189" "$(STUB_IFACE1="              Name               Idx    State  MTU (L3/IP4/IP6/MPLS)     Counter          Count     ${CR}
+ens192                            1      up          9000/0/0/0     rx packets                   189${CR}
+                                                                   rx bytes                   19271${CR}
+                                                                   drops                        189${CR}"; vpp_if_rx ens192)"
+eq "ens224 只有 tx packets（无 rx）→ 0" "0" "$(STUB_IFACE1="              Name               Idx    State  MTU (L3/IP4/IP6/MPLS)     Counter          Count     ${CR}
+ens224                            2      up          9000/0/0/0     tx packets                   400${CR}
+                                                                   ip4                          438${CR}"; vpp_if_rx ens224)"
+eq "不存在的口 → 0（不误报）" "0" "$(STUB_IFACE1=""; vpp_if_rx no-such-iface)"
 STUB_BD_DETAIL="$STUB_BD${CR}
            Interface           If-idx ISN  SHG  BVI  TxFlood        VLAN-Tag-Rewrite       ${CR}
             ens192               1     1    0    -      *                 none             ${CR}
@@ -147,7 +186,7 @@ STUB_BD_DETAIL="$STUB_BD${CR}
   BD-Tag: vs-vnf${CR}"
 eq "同一份输出下 BD 成员判断不受计数续行污染" "ens192 vh-vnf-dhcp-eth0" "$(vpp_bd_members 1 | tr '\n' ' ' | sed 's/ $//')"
 
-echo "— S8 判定：空结果不再算通过；有正控才判，且必须真学到该对端 MAC —"
+echo "— S8 判定：空结果不再算通过；有正控才判，且必须真学到成员口 MAC —"
 eqv() { # eqv <期望档> <说明> <判定输出>
   local want="$1" desc="$2" got="${3%%:*}" msg="${3#*:}"
   if [ "$got" = "$want" ]; then printf '  ✓ %-52s → %s（%s）\n' "$desc" "$got" "$msg"
@@ -156,9 +195,9 @@ eqv() { # eqv <期望档> <说明> <判定输出>
 eqv UNKNOWN "两侧都空、无正控 → 不可判定（旧行为此处判 PASS）" "$(s8_verdict 0 0 nomember no)"
 eqv UNKNOWN "有成员但无可 ping 对端 → 不可判定" "$(s8_verdict 0 0 nopeer no)"
 eqv UNKNOWN "ping 0 发包 → 不可判定（流量没发出去）" "$(s8_verdict 0 0 noflow no)"
-eqv PASS    "有正控、条数一致、该对端 MAC 已学到 → 通过" "$(s8_verdict 3 3 learned yes)"
+eqv PASS    "有正控、条数一致、成员口已学到 MAC → 通过" "$(s8_verdict 3 3 learned yes)"
 eqv FAIL    "有正控但事实源 0 条（学不到）→ 失败" "$(s8_verdict 0 0 learned no)"
-eqv FAIL    "有正控但学到的不是该对端 MAC → 失败" "$(s8_verdict 2 2 learned no)"
+eqv FAIL    "有正控但学到的不是成员口 MAC → 失败" "$(s8_verdict 2 2 learned no)"
 eqv FAIL    "有正控但条数不一致 → 失败" "$(s8_verdict 1 4 learned yes)"
 
 echo "— S9 判定：一侧非空另一侧为空即失败；两侧都空=不可判定 —"
