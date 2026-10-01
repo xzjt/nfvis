@@ -45,6 +45,9 @@ type ConsoleRequest struct {
 type Client struct {
 	base  string
 	token string
+	// class 登录响应 `user.class`（服务端权威的本会话 login class，决策 #145/#324）。
+	// nfvis-cli 据此按同一口径过滤 `?`/Tab 候选（见 internal/cli.Session）。
+	class string
 	hc    *http.Client
 	// tc HTTPS 的 TLS 口径（决策 #156）：REST 与 console 的 wss 拨号必须同源——
 	// 此前只装在 http.Transport 里，console 用默认 TLS 校验自签证书必挂。
@@ -121,10 +124,17 @@ const DefaultServer = "https://127.0.0.1:443"
 // SetToken 注入既有 token（跳过登录）。
 func (c *Client) SetToken(tok string) { c.token = tok }
 
-// Login 登录换取 token（FR-API-001）。
+// Class 返回登录响应里服务端权威的本会话 login class（未登录/缺字段为空串）。
+// 决策 #324：CLI 前端按它与命令树节点等级同源地过滤 `?`/Tab 候选。
+func (c *Client) Class() string { return c.class }
+
+// Login 登录换取 token（FR-API-001），并记下服务端权威的 login class（决策 #324）。
 func (c *Client) Login(user, password string) error {
 	var resp struct {
 		Token string `json:"token"`
+		User  struct {
+			Class string `json:"class"`
+		} `json:"user"`
 	}
 	if err := c.do(http.MethodPost, "/api/v1/login", map[string]string{
 		"username": user, "password": password,
@@ -135,6 +145,7 @@ func (c *Client) Login(user, password string) error {
 		return fmt.Errorf("登录失败：响应缺少 token")
 	}
 	c.token = resp.Token
+	c.class = resp.User.Class
 	return nil
 }
 

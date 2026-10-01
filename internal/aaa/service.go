@@ -33,11 +33,12 @@ var (
 	ErrForbidden          = errors.New("无权限执行该操作")
 )
 
-// 预置 login class（命令树 §4 权限矩阵）。
+// 预置 login class（命令树 §4 权限矩阵）。名称取自 schema 的单一事实源（决策 #324）——
+// 等级映射（名称→schema.Class）也由 schema.PresetClassLevel 给出，本包不再各写一份。
 const (
-	ClassSuperUser = "super-user"
-	ClassOperator  = "operator"
-	ClassReadOnly  = "read-only"
+	ClassSuperUser = schema.ClassNameSuperUser
+	ClassOperator  = schema.ClassNameOperator
+	ClassReadOnly  = schema.ClassNameReadOnly
 )
 
 const (
@@ -403,15 +404,11 @@ func (d ClassDefView) Evaluate(required schema.Class, path ...string) (bool, str
 // ——授权完全由管理员显式配置的路径表决定（与 required 等级正交）。
 //
 // 与 ResolveClass/ClassDefView.Evaluate 共用同一套判定函数（决策 #304 重构，
-// 行为逐字不变，由既有 aaa 单测兜底）。
+// 行为逐字不变，由既有 aaa 单测兜底）；预置档的**等级映射**自决策 #324 起取自
+// schema.PresetClassLevel（命令树单一事实源），本包不再各写一份名称→等级的表。
 func (s *Service) Authorize(cfgClass string, required schema.Class, path ...string) bool {
-	switch cfgClass {
-	case ClassSuperUser:
-		return true
-	case ClassOperator:
-		return required <= schema.ClassOperator
-	case ClassReadOnly:
-		return required == schema.ClassReadOnly
+	if lvl, ok := schema.PresetClassLevel(cfgClass); ok {
+		return lvl.Covers(required)
 	}
 	allow, deny, found := s.customClassRules(cfgClass)
 	if !found {
@@ -439,21 +436,15 @@ func (s *Service) customClassRules(name string) (allow, deny []string, found boo
 	return nil, nil, false
 }
 
-// evaluatePreset 预置 class 的等级判定 + 依据（与 Authorize 原 switch 逐字等价）。
+// evaluatePreset 预置 class 的等级判定 + 依据（与 Authorize 逐字等价；等级映射单源在
+// schema.PresetClassLevel，决策 #324）。
 func evaluatePreset(name string, required schema.Class) (bool, string) {
-	switch name {
-	case ClassSuperUser:
+	lvl, ok := schema.PresetClassLevel(name)
+	if !ok {
+		return false, ReasonPresetInsufficient
+	}
+	if lvl.Covers(required) {
 		return true, ReasonPresetSatisfied
-	case ClassOperator:
-		if required <= schema.ClassOperator {
-			return true, ReasonPresetSatisfied
-		}
-		return false, ReasonPresetInsufficient
-	case ClassReadOnly:
-		if required == schema.ClassReadOnly {
-			return true, ReasonPresetSatisfied
-		}
-		return false, ReasonPresetInsufficient
 	}
 	return false, ReasonPresetInsufficient
 }

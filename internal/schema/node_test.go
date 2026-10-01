@@ -504,3 +504,82 @@ func TestOperCommandPaths(t *testing.T) {
 		}
 	}
 }
+
+// 决策 #324：预置 class 名 → 等级映射与覆盖判定的单一事实源（internal/aaa 与客户端共用）。
+func TestPresetClassLevelAndCovers(t *testing.T) {
+	cases := []struct {
+		name string
+		want Class
+		ok   bool
+	}{
+		{ClassNameSuperUser, ClassSuperUser, true},
+		{ClassNameOperator, ClassOperator, true},
+		{ClassNameReadOnly, ClassReadOnly, true},
+		{"my-custom", 0, false},
+		{"", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := PresetClassLevel(c.name)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("PresetClassLevel(%q) = (%v,%v)，期望 (%v,%v)", c.name, got, ok, c.want, c.ok)
+		}
+	}
+	// R ⊂ O ⊂ S
+	if !ClassSuperUser.Covers(ClassSuperUser) || !ClassSuperUser.Covers(ClassReadOnly) {
+		t.Error("super-user 应覆盖全部等级")
+	}
+	if !ClassOperator.Covers(ClassReadOnly) || ClassOperator.Covers(ClassSuperUser) {
+		t.Error("operator 覆盖 R 但不覆盖 S")
+	}
+	if ClassReadOnly.Covers(ClassOperator) || ClassReadOnly.Covers(ClassSuperUser) {
+		t.Error("read-only 只覆盖 R")
+	}
+}
+
+// CandidatesFiltered：过滤谓词按节点等级剔除无权入口，且不误伤同级允许项。
+func TestCandidatesFiltered(t *testing.T) {
+	ro, _ := PresetClassLevel(ClassNameReadOnly)
+	allow := func(_ []string, n *Node) bool { return ro.Covers(n.RequiredClass()) }
+
+	// read-only：顶层 request/configure 被剔除，show 保留。
+	cs := CandidatesFiltered(OperRoot(), nil, "", nil, allow)
+	if !candidateHas(cs, "show") {
+		t.Fatalf("过滤后应保留 show: %v", cs)
+	}
+	for _, absent := range []string{"request", "configure", "ping", "clear", "start"} {
+		if candidateHas(cs, absent) {
+			t.Errorf("read-only 过滤后不应含 %q: %v", absent, cs)
+		}
+	}
+
+	// nil 过滤 == 不过滤（Candidates 与 CandidatesFiltered 行为一致）。
+	all := Candidates(OperRoot(), nil, "", nil)
+	filtered := CandidatesFiltered(OperRoot(), nil, "", nil, nil)
+	if !reflect.DeepEqual(all, filtered) {
+		t.Fatalf("nil 过滤应与 Candidates 逐条一致:\n %v\n %v", all, filtered)
+	}
+
+	// 谓词若一律拒绝，则一个候选都不给（判据真的生效，不是摆设）。
+	none := CandidatesFiltered(OperRoot(), nil, "", nil, func([]string, *Node) bool { return false })
+	if len(none) != 0 {
+		t.Fatalf("全拒谓词应得空候选: %v", none)
+	}
+
+	// NodePath：show interfaces 下参数的规范路径与 OperCommandPaths 同形。
+	n, _, err := Match(OperRoot(), []string{"show", "interfaces"})
+	if err != nil {
+		t.Fatalf("Match: %v", err)
+	}
+	if got := strings.Join(NodePath(n), " "); got != "show interfaces" {
+		t.Fatalf("NodePath = %q，期望 show interfaces", got)
+	}
+}
+
+func candidateHas(cs []Candidate, tok string) bool {
+	for _, c := range cs {
+		if c.Token == tok {
+			return true
+		}
+	}
+	return false
+}

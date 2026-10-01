@@ -46,9 +46,14 @@ func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 
 // handleCLICandidates GET /api/v1/cli/candidates?tokens=a,b&partial=x：
 // CLI ?/Tab 候选（§5.1~5.3）：schema 关键字 + 动态候选（实时读 committed 配置）。
+//
+// 决策 #324：候选按**调用会话的 class 过滤**——本会话无权执行的入口不再列出
+// （避免「列了但一用就 403」）。判定与服务端运行期授权**同源**：同一个
+// aaa.Authorize（预置档按等级、自定义 class 按路径 ACL），不另写一套。
 func (s *Server) handleCLICandidates(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	// kind 模式：仅返回指定来源的动态候选清单（供 cliclient 缓存/补全使用）
+	// kind 模式：仅返回指定来源的动态候选清单（供 cliclient 缓存/补全使用）。
+	// 这一支只给某个参数位的取值清单（接口名/VNF 名等），不含命令入口，故不按 class 过滤。
 	if kind := q.Get("kind"); kind != "" {
 		writeJSON(w, http.StatusOK, s.dynamicValues(kind))
 		return
@@ -59,7 +64,15 @@ func (s *Server) handleCLICandidates(w http.ResponseWriter, r *http.Request) {
 	}
 	partial := q.Get("partial")
 	root := rootForQuery(tokens)
-	cs := schema.Candidates(root, tokens, partial, s.dynamicValues)
+	ident, _ := Identity(r)
+	// nil ident（端点恒已鉴权，理论不会）时不过滤——宁可不筛，也不把入口错藏。
+	allow := schema.CandidateFilter(nil)
+	if ident.Class != "" {
+		allow = func(path []string, n *schema.Node) bool {
+			return s.aaa.Authorize(ident.Class, n.RequiredClass(), path...)
+		}
+	}
+	cs := schema.CandidatesFiltered(root, tokens, partial, s.dynamicValues, allow)
 	writeJSON(w, http.StatusOK, cs)
 }
 

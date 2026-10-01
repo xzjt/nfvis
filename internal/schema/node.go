@@ -61,6 +61,31 @@ func (c Class) String() string {
 	}
 }
 
+// 预置 login class 名（命令树 §4 权限矩阵）。**单一事实源**：internal/aaa 的预置档判定
+// 与此同源（决策 #324），避免「等级映射」在两处各写一份而漂移。
+const (
+	ClassNameSuperUser = "super-user"
+	ClassNameOperator  = "operator"
+	ClassNameReadOnly  = "read-only"
+)
+
+// PresetClassLevel 预置 login class 名 → 命令树等级；非预置名 ok=false（自定义 class 为
+// 纯路径 ACL，其判定不由等级决定，见 internal/aaa 的 Authorize）。
+func PresetClassLevel(name string) (Class, bool) {
+	switch name {
+	case ClassNameSuperUser:
+		return ClassSuperUser, true
+	case ClassNameOperator:
+		return ClassOperator, true
+	case ClassNameReadOnly:
+		return ClassReadOnly, true
+	}
+	return 0, false
+}
+
+// Covers 报告该等级是否覆盖所需等级（R ⊂ O ⊂ S，命令树 §4 矩阵；决策 #324 单源）。
+func (c Class) Covers(required Class) bool { return required <= c }
+
 // 动态候选来源（§5.3：实时向 nfvisd 查询，失败退化为仅关键字）。
 //
 // 接口名一族分来源（决策 #83 起，#302 增第四种）——它们**不是**同一个清单：
@@ -484,18 +509,47 @@ type Candidate struct {
 // DynamicValues 动态候选来源：按 kind 返回实时清单（CLI 向 nfvisd 查询）。
 type DynamicValues func(kind string) []string
 
+// NodePath 返回节点在命令树上的**规范命令路径**（祖先的名称 + 自身名；根节点名为空不计；
+// **取值叶子（Value）不计入**——与 OperCommandPaths 同形，取值不是命令路径的一段）。
+// 权限视图（OperCommandPaths）与候选过滤因此能用同一串路径比对（决策 #324：
+// 服务端判定与客户端呈现同源）。
+func NodePath(n *Node) []string {
+	var rev []string
+	for x := n; x != nil; x = x.parent {
+		if x.Name != "" && x.Kind != Value {
+			rev = append(rev, x.Name)
+		}
+	}
+	out := make([]string, len(rev))
+	for i := range rev {
+		out[len(rev)-1-i] = rev[i]
+	}
+	return out
+}
+
+// CandidateFilter 候选过滤谓词：path 为候选在命令树上的规范路径（NodePath 形态），
+// n 为候选节点。返回 false 表示**不给该会话列出**这个候选（决策 #324：无权执行的入口
+// 不出现在 ?/Tab 候选里；判定由调用方按同源权限实现给出）。
+type CandidateFilter func(path []string, n *Node) bool
+
 // Candidates 返回已完成 tokens 后、输入 partial 时的全部候选（已按前缀过滤）。
 // 含：关键字（名称+描述）、参数占位符的动态值、取值枚举。
 // 动态来源查询失败（dyn 为 nil 或返回空）时退化为占位符提示（§5.3）。
 func Candidates(root *Node, tokens []string, partial string, dyn DynamicValues) []Candidate {
+	return CandidatesFiltered(root, tokens, partial, dyn, nil)
+}
+
+// CandidatesFiltered 同 Candidates，另按 allow 过滤（nil = 不过滤，行为与 Candidates 逐字一致）。
+// 决策 #324：CLI `?`/Tab 与服务端 `/cli/candidates` 共用本函数，只是各自传入同源的过滤谓词。
+func CandidatesFiltered(root *Node, tokens []string, partial string, dyn DynamicValues, allow CandidateFilter) []Candidate {
 	n, _, err := Match(root, tokens)
 	if err != nil {
 		return nil
 	}
-	return candidatesAt(n, partial, dyn)
+	return candidatesAt(n, partial, dyn, allow)
 }
 
-func candidatesAt(n *Node, partial string, dyn DynamicValues) []Candidate {
+func candidatesAt(n *Node, partial string, dyn DynamicValues, allow CandidateFilter) []Candidate {
 	var out []Candidate
 
 	// 无子树的参数（实例名/标量取值）消耗掉一个 token 后，**下一位置的候选是父层的关键字**
@@ -513,7 +567,7 @@ func candidatesAt(n *Node, partial string, dyn DynamicValues) []Candidate {
 	// （如 `api tls cert-file <path>` 之后的 key-file），oper 树（show）的同级关键字更不是
 	// 续写，一律列出会把 `?` 变成噪声。这条边界如实登记在附录 A #90 的局限里。
 	if n.Kind == Param && len(n.Children) == 0 {
-		return keywordCandidatesUpward(n, partial)
+		return keywordCandidatesUpward(n, partial, allow)
 	}
 
 	// 取值位置：枚举候选（§5.2 枚举型参数值可 Tab 补全）
@@ -530,7 +584,12 @@ func candidatesAt(n *Node, partial string, dyn DynamicValues) []Candidate {
 		return sortedCandidates(out)
 	}
 
+	base := NodePath(n)
 	for _, c := range n.Children {
+		path := append(append([]string{}, base...), c.Name)
+		if allow != nil && !allow(path, c) {
+			continue // 决策 #324：本会话无权执行的入口不列出
+		}
 		switch c.Kind {
 		case Param:
 			// 动态候选（查询失败退化为占位符提示）
@@ -562,7 +621,7 @@ func candidatesAt(n *Node, partial string, dyn DynamicValues) []Candidate {
 // 排除来路（cameFrom），否则 `management interface ens160 ` 会把 `interface` 自己再列一遍。
 // 只列关键字、不列同级参数：`cross-connect <a> <b>` 那种连续位置参数此处仍列不出 <b>
 // ——如实登记为已知局限（附录 A #90），不靠猜把它补成噪声。
-func keywordCandidatesUpward(n *Node, partial string) []Candidate {
+func keywordCandidatesUpward(n *Node, partial string, allow CandidateFilter) []Candidate {
 	var out []Candidate
 	cameFrom := n
 	for p := n.parent; p != nil; p = p.parent {
@@ -576,7 +635,11 @@ func keywordCandidatesUpward(n *Node, partial string) []Candidate {
 			cameFrom = p
 			continue
 		}
+		base := NodePath(p)
 		for _, c := range lvl {
+			if allow != nil && !allow(append(append([]string{}, base...), c.Name), c) {
+				continue
+			}
 			if strings.HasPrefix(c.Name, partial) {
 				out = append(out, Candidate{Token: c.Name, Desc: c.Desc})
 			}
