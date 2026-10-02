@@ -1,0 +1,56 @@
+NFViS v2 真机验证记录 round117 —— 决策 #339（ACL 逐规则命中计数）：机制成立、现场验证受阻；网关 ACL 区域挖出三个真缺陷
+====================================================================
+日期：2026-10-02；环境：nfvis-vm，2.0.0~dev28（PR #265 的构建）；
+实现：#339 合入（解析/读视图三面/套件 S13，make check RC=0）。
+
+§1 #339 已证部分（结构层，✓）
+- 计数**确实存在**于 stats segment：`vpp_get_stats dump machine '/acl/*'` 打出组合计数
+  `3:<规则>:<线程>:<packets>:<bytes>:/acl/<acl-index>/matches`（2 规则 × 3 线程 = 6 行）——
+  口径以 VPP 源码定死（`COUNTER_VECTOR_VECTOR_COMBINED`；更正 round117 初读的 hi:lo）。
+- 产品侧解析/映射/读视图全部工作：`show acls hit-acl detail` 能显示 `hits`（配置链、acl-index
+  映射、组合行解析与跨线程求和都通）；REST `GET /acls/{n}` 同源。
+- 现场（ACL 绑定 + 真实流量）**未能取得非零命中**——原因不是解析，而是下面的 R117-1。
+
+§2 新发现（三个真缺陷，均在真机实证；本轮**只登记不修**）
+**R117-1（高，安全相关）：网关（BVI）绑定的 ACL 对域内流量「零生效」——既不拦截也不计数**
+- 现场：`hit-vs`（L2 + BVI 网关 192.168.99.1/24）+ ACL `hit-acl`（规则 10=**deny** ICMP src
+  192.168.99.0/24；规则 20=permit TCP 10.99.0.0/16）经 `set virtual-switches hit-vs gateway acl-in
+  hit-acl` 绑定；guest 内造**转发流量**（`ip route add 10.77.0.0/16 via 192.168.99.1` 后 ping
+  10.77.0.1，静态邻居免 ARP）。
+- **决定性实测**：deny 规则在场时，guest 的 `.2→10.77.0.1` ICMP **照常在线上出现**（VPP pcap）、
+  `/acl/0/matches` 六行**恒 0**（原始组合计数）。即：绑定登记在插件表里（`show acl-plugin interface
+  sw_if_index 4` = `input acl(s): 0`），但**一个包都没被评估**。
+- 机制：`show interface features bvi0` 显示 ACL 入向特性只启用在 **`ip4-unicast`** 弧
+  （`acl-plugin-in-ip4-fa`），而 BD 成员→BVI 的 IPv4 走 **`l2-input-ip4`** 弧（该弧 `none configured`；
+  对照：`l2-input-ip6` 上 `acl-plugin-in-ip6-l2` 是启用的）。
+- 影响：命令全表里 `set virtual-switches <n> gateway acl-in|acl-out <acl>` 此前记 **✅ 实测通过**
+  ——该结论**失实**（已更正为 ⚠️）；凡「以为网关 ACL 在拦」的部署实际**没有防护**。
+- 待定方向（未立项）：查 VPP 侧为何 ip4 的 l2-arc 特性未启用（插件行为/绑定 API 用法），或产品侧显式启用
+  `l2-input-ip4`/`l2-output-ip4` 弧的 ACL 特性；或对该绑定形态明确拒绝并指引用 L3 接口绑定。
+
+**R117-2（高）：同一提交删「网关 ACL 绑定 + 交换机/ACL」违反依赖倒序（#196 同族）**
+- 现场：一次提交 `delete virtual-machine-functions hit-vm` + `delete virtual-switches hit-vs` +
+  `delete acls hit-acl` → `%% 底座下发失败（已补偿）: del-acl[hit-acl]: 解绑接口 4 的 ACL:
+  VPPApiError: Invalid sw_if_index (-2); 补偿失败 del-bridge-domain[hit-vs]: ACL hit-acl 尚未下发
+  （apply 顺序应为 ACL 先于 L2/L3）`——**先删了 BVI（接口 4 消失）再解绑 ACL** → 解绑撞 -2、补偿也失败、
+  整次提交回滚。分次提交（先解绑/删交换机、再删 ACL）可绕行，两次都成功（rev 938/939）。
+- 另：ACL 删除**未落到数据面**——之后 `vppctl show acl-plugin acl` 仍见 `acl-index 0`，
+  由 **ACL_LEFTOVER**（决策 #321 的残渣对账）如期指出，`request vpp restart` 后清除。
+
+**R117-3（中）：网关绑 L3 ACL 后域内 ARP 被 ACL 插件的非 IP 白名单丢弃（静默断网）**
+- 现场：绑上 ACL 后 guest 卡在 ARP——`vppctl show interface bvi0` = `rx 22 / drops 22 / ip4 6`
+  （除 6 个 IPv4 外全部丢弃），guest 的 ping 到不了网关（此后用静态邻居才绕开）。
+- 机制：VPP 的 ACL 插件在接口启用 ACL 后对**非 IP L2** 走「白名单」路径，未配 macip ACL 即丢弃
+  （`/err/acl-plugin-in-nonip-l2/...` 一族节点在列）。产品无 macip ACL 配置，也无任何提示——
+  操作者按手册绑网关 ACL 会让**整个域的 ARP 静默失效**。待定方向：产品对网关绑定自动放行 ARP
+  （或引导/提示 macip 能力），至少在手册写明。
+
+§3 结论与遗留
+- #339 的**机制/解析/读视图**成立；**真机非零命中验证待重做**——须改用「**vNIC 作 L3 接口**」的绑定形态
+  （帧到达 vhost 即进 L3 → 走 `ip4-unicast` 弧，预期可评估/计数），或先修 R117-1 再回到网关形态。
+  口径已按此更新（决策 #339 行与 S13 的说明）。
+- 网关 ACL 区域三个缺陷（R117-1/2/3）**优先级高于 #339 的收尾**：安全相关的「零生效」应先定位修复。
+
+§4 现场终态
+- 版本 2.0.0~dev28；配置无 hit-* 残留；`vppctl show acl-plugin acl` 空；**无 active 告警**；
+  最终 rev 939（+ 一次 `request vpp restart` 清残）。
