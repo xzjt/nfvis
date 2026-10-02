@@ -225,13 +225,13 @@ func run() error {
 		_ = syslogFwd.Forward(alarmSyslogSeverity(a.Severity), "nfvisd", "alarm",
 			fmt.Sprintf("[%s] %s source=%s state=%s", a.Code, a.Message, a.Source, a.State))
 	})
-	// M4-3：计算编排（libvirt）。连接失败（libvirtd 未起/无权限）降级为 NoopCompute
-	// 并告警，不阻塞 nfvisd 启动；此时 VM 生命周期动作返回不可用。
-	var (
-		computeProvider orchestrator.ComputeProvider = orchestrator.NewNoopCompute()
-		vmRuntime       api.VMRuntime
-		libvirtConn     *compute.Conn
-	)
+	// M4-3：计算编排（libvirt）。连接失败（libvirtd 未起/无权限）降级为动态持有层
+	//（未接入 = Noop 语义）并告警，不阻塞 nfvisd 启动；此时 VM 生命周期动作返回不可用。
+	// 决策 #351：降级不再是永久性的——快路径失败后由后台接入循环兜底（在信号 ctx 就绪处
+	// 启动），开机后 libvirtd 完成 autostart 的窗口期不再要求人工 restart nfvis。
+	computeProvider := newDynamicCompute()
+	// 持有层记账的 libvirt 连接随进程优雅停机关闭（同步/后台两路接入统一记账）。
+	defer func() { _ = computeProvider.Close() }()
 	computeCfg := compute.DefaultConfig()
 	computeCfg.URI = envOr("NFVIS_LIBVIRT_URI", compute.DefaultURI)
 	// 决策 #314：启动路径的数据面前置判定。复用连接管理器的既有状态视图（与 /vpp/status 同源），
@@ -251,38 +251,37 @@ func run() error {
 	if err := os.MkdirAll(computeCfg.VhostDir, 0o755); err != nil {
 		log.Warn("创建 vhost-user socket 目录失败", "dir", computeCfg.VhostDir, "err", err)
 	}
-	libvirtCtx, libvirtCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	libvirtCtx, libvirtCancel := context.WithTimeout(context.Background(), asyncConnectAttemptTimeout)
 	p, conn, cerr := compute.NewConnectedProvider(libvirtCtx, computeCfg)
 	libvirtCancel()
 	if cerr != nil {
-		// 连接失败/超时（含 libvirtd 假死被 Connect 的有界等待截断）→ 降级 NoopCompute
-		// 并落告警，不阻塞启动（决策 #349：降级必须可见，不能只有一行日志）。
+		// 连接失败/超时（含 libvirtd 假死被 Connect 的有界等待截断）→ 降级 + 落告警，
+		// 不阻塞启动（决策 #349：降级必须可见，不能只有一行日志）；后台接入循环随后兜底。
 		log.Warn("计算编排未接入（libvirt 连接失败），VM 生命周期不可用", "uri", computeCfg.URI, "err", cerr)
 		computeUnavailableAlarm(alarms, computeCfg.URI, cerr)
 	} else {
 		p.SetVFResolver(network.NewSysfsVFResolver()) // SR-IOV VF PCI 解析（FR-NET-021）
 		p.SetAlarms(alarms)                           // M4-9：计算收敛告警落点
-		computeProvider, libvirtConn, vmRuntime = p, conn, p
-		defer func() { _ = libvirtConn.Close() }()
+		computeProvider.Swap(p, conn)                 // 快路径接入：与既有直接接线同行为
 		log.Info("计算编排已接入", "uri", computeCfg.URI)
 	}
 
-	// M4-7：容器编排（Docker）。连接不可用（daemon 未起/权限不足）降级为 NoopContainer。
+	// M4-7：容器编排（Docker）。连接不可用（daemon 未起/权限不足）降级为动态持有层
+	//（未接入 = Noop 语义）；决策 #351：失败后同样由后台接入循环兜底。
 	ctCfg := container.DefaultConfig()
 	ctCfg.Socket = envOr("NFVIS_DOCKER_HOST", ctCfg.Socket)
-	var containerProvider orchestrator.ContainerProvider = orchestrator.NewNoopContainer()
-	var ctRuntime api.ContainerRuntime
+	containerProvider := newContainerHolder()
 	ctProvider := container.NewConnectedProvider(ctCfg)
 	// 探测有界（决策 #349）：dockerClient 的请求构造已全程 NewRequestWithContext，
 	// 但调用方此前传的是 Background ⇒ dockerd 假死同样永久卡启动。只改调用方 ctx
 	//（10s 上界），**不给共享 http.Client 加整体超时** —— 镜像导入等长操作共用
 	// 同一客户端，全局超时会截断它们。
-	ctProbeCtx, ctProbeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctProbeCtx, ctProbeCancel := context.WithTimeout(context.Background(), asyncConnectAttemptTimeout)
 	st, perr := ctProvider.ContainerState(ctProbeCtx, "__nfvis_probe__")
 	ctProbeCancel()
 	if perr == nil || st != "" {
 		ctProvider.SetAlarms(alarms) // M4-9：容器收敛告警落点
-		containerProvider, ctRuntime = ctProvider, ctProvider
+		containerProvider.Swap(ctProvider)
 		log.Info("容器编排已接入", "socket", ctCfg.Socket)
 	} else {
 		log.Warn("容器编排未接入（Docker 连接失败），容器生命周期不可用", "socket", ctCfg.Socket, "err", perr)
@@ -654,6 +653,70 @@ func run() error {
 			}
 		}
 	}()
+	// 决策 #351：底座编排的启动后异步接入。装配期快路径同步尝试已失败（持有层未接入）时，
+	// 各起一个进程生命周期内的后台接入 goroutine：每 30s 一次尝试（每次 10s 上界）、失败
+	// 静默；成功即原子换装 + INFO 日志 + 消解对应告警（消解键与 raise 的 scope/code/source
+	// 完全一致）+ 补跑一次该底座的 EnsureConsistent（把降级期落下的收敛补上，照 runRecovery
+	// 的写法逐错落日志、与巡检共用 recoveryMu），随后循环终结——本决策只服务「从未接入」
+	// 状态，接入成功后连接中断的自动重连不在范围。
+	if !computeProvider.Connected() {
+		go runAsyncConnect(ctx, asyncConnectInterval, log,
+			func(ctx context.Context) error {
+				cctx, cancel := context.WithTimeout(ctx, asyncConnectAttemptTimeout)
+				defer cancel()
+				p, conn, err := compute.NewConnectedProvider(cctx, computeCfg)
+				if err != nil {
+					return err
+				}
+				p.SetVFResolver(network.NewSysfsVFResolver())
+				p.SetAlarms(alarms)
+				computeProvider.Swap(p, conn)
+				return nil
+			},
+			func(ctx context.Context) {
+				log.Info("计算编排已接入（后台）", "uri", computeCfg.URI)
+				alarms.Resolve("compute", alarmCodeComputeUnavailable, "libvirt")
+				cfg, err := engine.Committed()
+				if err != nil {
+					log.Warn("计算编排后台接入后读取 committed 配置失败", "err", err)
+					return
+				}
+				recoveryMu.Lock()
+				defer recoveryMu.Unlock()
+				for _, e := range computeProvider.EnsureConsistent(ctx, cfg) {
+					log.Warn("计算恢复收敛未收敛项", "err", e)
+				}
+			})
+	}
+	if !containerProvider.Connected() {
+		go runAsyncConnect(ctx, asyncConnectInterval, log,
+			func(ctx context.Context) error {
+				cctx, cancel := context.WithTimeout(ctx, asyncConnectAttemptTimeout)
+				defer cancel()
+				cp := container.NewConnectedProvider(ctCfg)
+				st, err := cp.ContainerState(cctx, "__nfvis_probe__")
+				if err != nil && st == "" {
+					return err // 与快路径同判据：err == nil 或 st != "" 即视为已接入
+				}
+				cp.SetAlarms(alarms)
+				containerProvider.Swap(cp)
+				return nil
+			},
+			func(ctx context.Context) {
+				log.Info("容器编排已接入（后台）", "socket", ctCfg.Socket)
+				alarms.Resolve("container", alarmCodeContainerUnavailable, "docker")
+				cfg, err := engine.Committed()
+				if err != nil {
+					log.Warn("容器编排后台接入后读取 committed 配置失败", "err", err)
+					return
+				}
+				recoveryMu.Lock()
+				defer recoveryMu.Unlock()
+				for _, e := range containerProvider.EnsureConsistent(ctx, cfg) {
+					log.Warn("容器恢复收敛未收敛项", "err", e)
+				}
+			})
+	}
 	// M5-5：硬件阈值巡检（FR-SYS-012）——越限产生告警，恢复消警（与 /system/hardware 同源）
 	go func() {
 		interval := 60 * time.Second
@@ -750,16 +813,10 @@ func run() error {
 		Restarter: network.NewSystemctlRestarter(), RestartOnApply: true}
 
 	// M4-4：VM 生命周期动作后刷新 vNIC 断连告警（FR-NET-023）。
-	var (
-		vmAPI     api.VMRuntime
-		vmConsole api.VMConsoleRuntime
-		vmSnaps   api.VMSnapshotRuntime
-	)
-	if vmRuntime != nil && p != nil {
-		vmAPI = &vmController{Provider: p, net: netProvider, engine: engine, log: log}
-		vmConsole = p // M4-5：串口 console（libvirt 域串口 ↔ WebSocket）
-		vmSnaps = &snapshotController{p: p}
-	}
+	// 决策 #351：持有层常驻接线（未接入 = Noop 语义）——API 控制器不再按 nil 分支降级，
+	// 后台接入成功后同一批对象即开始转发真实 Provider，无须重启 nfvis。
+	vmAPI := &vmController{Provider: computeProvider, net: netProvider, engine: engine, log: log}
+	vmSnaps := &snapshotController{p: computeProvider}
 
 	apiServer := api.New(engine, aaaSvc, api.Options{
 		Addr:    *listen,
@@ -791,9 +848,9 @@ func run() error {
 		Alarms:      &alarmController{store: alarms},
 		Diag:        &diagController{diag: vppMgr.Diagnostics()},
 		VM:          vmAPI,
-		VMConsole:   vmConsole,
+		VMConsole:   computeProvider, // M4-5：串口 console（libvirt 域串口 ↔ WebSocket；持有层常驻）
 		VMSnapshots: vmSnaps,
-		Containers:  ctRuntime,
+		Containers:  containerProvider,
 		Images:      imagesStore,
 		Events:      bus,
 		SysOps:      sysOps,
@@ -1276,11 +1333,13 @@ func (c *diagController) ClearInterfaceStats(ctx context.Context, ifname string)
 // vmController 包装计算 Provider（M4-4）：生命周期动作后刷新 VNF vNIC 断连告警
 // （FR-NET-023）。VM 关机导致 vhost-user 客户端断连 → VPP 接口 link down → warning 告警；
 // 重新启动且客户端连上后自动消警。
+// 决策 #351：Provider 为动态持有层（未接入 = Noop 语义）——生命周期动作报「计算编排
+// 未接入」，后台接入成功后无须重启即转发真实实现。
 type vmController struct {
-	*compute.Provider
-	net    *network.L2Network
-	engine *config.Engine
-	log    *slog.Logger
+	Provider *dynamicCompute
+	net      *network.L2Network
+	engine   *config.Engine
+	log      *slog.Logger
 }
 
 func (c *vmController) StartVM(ctx context.Context, name string) error {
@@ -1289,8 +1348,8 @@ func (c *vmController) StartVM(ctx context.Context, name string) error {
 	return err
 }
 
-// StartVMChecked 启动 + 回读域状态（决策 #311）。显式包装：不能用内嵌 Provider 的
-// 提升方法，否则会绕过 refreshVnfAlarms（VM 启停后必须刷新 vNIC 断连告警）。
+// StartVMChecked 启动 + 回读域状态（决策 #311）。显式包装：不能用持有层的
+// 同名方法直接顶替，否则会绕过 refreshVnfAlarms（VM 启停后必须刷新 vNIC 断连告警）。
 func (c *vmController) StartVMChecked(ctx context.Context, name string) (orchestrator.VMStartProbe, error) {
 	probe, err := c.Provider.StartVMChecked(ctx, name)
 	c.refreshVnfAlarms()
@@ -1309,6 +1368,16 @@ func (c *vmController) RestartVM(ctx context.Context, name string) error {
 	return err
 }
 
+// RefreshSeed/VMState 显式转发到持有层（Provider 为具名字段后没有内嵌提升；
+// api.VMRuntime 的其余四法在本类型上有包装——它们必须先刷新 vNIC 告警）。
+func (c *vmController) RefreshSeed(ctx context.Context, vm model.VMFunction) error {
+	return c.Provider.RefreshSeed(ctx, vm)
+}
+
+func (c *vmController) VMState(ctx context.Context, name string) (string, error) {
+	return c.Provider.VMState(ctx, name)
+}
+
 func (c *vmController) refreshVnfAlarms() {
 	cfg, err := c.engine.Committed()
 	if err != nil {
@@ -1322,7 +1391,9 @@ func (c *vmController) refreshVnfAlarms() {
 }
 
 // snapshotController 装配 api.VMSnapshotRuntime（M4-6）。
-type snapshotController struct{ p *compute.Provider }
+// 决策 #351：p 为动态持有层——未接入时快照 4 法报「计算编排未接入」（与 api 的
+// 快照 nil 分支 errComputeUnavailable 同正文），接入成功后无须重启即转发真实实现。
+type snapshotController struct{ p *dynamicCompute }
 
 // requirePoweredOff 快照 create/rollback 需 VM 关机态（决策 #75，FR-CMP-015）。
 //
@@ -1795,24 +1866,25 @@ const (
 
 // computeUnavailableAlarm 启动期 libvirt 未接入的降级告警（scope compute、source
 // libvirt、severity warning）。文案要素：发生了什么（启动时未接入、已降级、VM
-// 生命周期动作不可用、已有配置声明不受影响）、独立事实源手查路径、恢复路径、
-// 以及「产品不自动重连」的如实边界。抽成纯函数（hugepageAlarms 先例）便于单测
-// 锁住 scope/source/级别与文案要素。
+// 生命周期动作不可用、已有配置声明不受影响）、独立事实源手查路径、恢复路径
+// （决策 #351：告警在场期间后台持续重试接入，成功自动消解，无须重启 nfvis）。
+// 抽成纯函数（hugepageAlarms 先例）便于单测锁住 scope/source/级别与文案要素。
 func computeUnavailableAlarm(sink alarmSink, uri string, err error) {
 	sink.Raise("compute", network.SeverityWarning, alarmCodeComputeUnavailable,
 		"启动时未接入 libvirt，已降级运行：VM 生命周期动作不可用，已有配置声明不受影响（原因："+errReason(err)+"）。"+
 			"请查底座实况：systemctl status libvirtd、journalctl -u libvirtd、virsh -c "+uri+" list。"+
-			"底座恢复后执行 systemctl restart nfvis 恢复接入；当前产品不自动重连",
+			"告警在场期间产品在后台持续重试接入（约每 30 秒一次），接入成功后本告警自动消解、VM 编排恢复，无需重启 nfvis",
 		"libvirt")
 }
 
 // containerUnavailableAlarm 启动期 Docker 未接入的降级告警（scope container、
-// source docker、severity warning）。文案要素与 computeUnavailableAlarm 同一口径。
+// source docker、severity warning）。文案要素与 computeUnavailableAlarm 同一口径
+// （恢复路径按决策 #351 如实写后台重试接入）。
 func containerUnavailableAlarm(sink alarmSink, socket string, err error) {
 	sink.Raise("container", network.SeverityWarning, alarmCodeContainerUnavailable,
 		"启动时未接入 Docker，已降级运行：容器生命周期动作不可用，已有配置声明不受影响（原因："+errReason(err)+"）。"+
 			"请查底座实况：systemctl status docker、journalctl -u docker（socket: "+socket+"）。"+
-			"底座恢复后执行 systemctl restart nfvis 恢复接入；当前产品不自动重连",
+			"告警在场期间产品在后台持续重试接入（约每 30 秒一次），接入成功后本告警自动消解、容器编排恢复，无需重启 nfvis",
 		"docker")
 }
 

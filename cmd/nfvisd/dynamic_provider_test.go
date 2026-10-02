@@ -1,0 +1,494 @@
+package main
+
+// 动态持有层（决策 #351）的单元守护：
+//   1. 未接入语义表逐法——静默成功/空结果/错误文案（与 internal/api nil 分支逐字对齐）；
+//   2. 换装后全部方法转发到真实实现（注入假件，断言参数与返回值原样穿透）；
+//   3. Connected() 前后变化与连接记账的关闭。
+//
+// 文案断言用的是与 internal/api nil 分支**相同的字符串**（api 侧常量未导出：
+// errComputeUnavailable = "%% " + 正文 + "\n"，此处锁正文逐字一致）。
+
+import (
+	"context"
+	"errors"
+	"io"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator"
+	"github.com/xzjt/nfvis/internal/orchestrator/compute"
+)
+
+// 与 internal/api nil 分支逐字相同的正文（改动任一侧本测试即红，防止漂移）。
+const (
+	wantComputeBody   = "计算编排未接入（libvirt 未装配），运行态不可用"
+	wantConsoleBody   = "串口 console 不可用（libvirt 未装配）"
+	wantContainerBody = "容器编排未接入（Docker 未装配），运行态不可用"
+)
+
+// nopRWC 空 io.ReadWriteCloser（转发断言用）。
+type nopRWC struct{ io.ReadWriteCloser }
+
+// fakeCompute 记录调用的 computeFacade 假件。
+type fakeCompute struct {
+	mu           sync.Mutex
+	defined      []model.VMFunction
+	deletedVM    []string
+	started      []string
+	stopped      []string
+	restarted    []string
+	startChecked []string
+	refreshed    []model.VMFunction
+	states       []string
+	consoled     []string
+	snapCreated  [][3]string
+	snapListed   []string
+	snapReverted [][2]string
+	snapDeleted  [][2]string
+	ensured      []model.Config
+	alarmRuns    []model.Config
+
+	stateVal   string
+	stateErr   error
+	consoleRWC io.ReadWriteCloser
+	consoleErr error
+	snapErr    error
+	snapInfos  []compute.SnapshotInfo
+}
+
+func (f *fakeCompute) DefineVM(_ context.Context, vm model.VMFunction, _ model.AllocatedResources) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.defined = append(f.defined, vm)
+	return nil
+}
+
+func (f *fakeCompute) DeleteVM(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deletedVM = append(f.deletedVM, name)
+	return nil
+}
+
+func (f *fakeCompute) StartVM(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.started = append(f.started, name)
+	return nil
+}
+
+func (f *fakeCompute) StopVM(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopped = append(f.stopped, name)
+	return nil
+}
+
+func (f *fakeCompute) RestartVM(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.restarted = append(f.restarted, name)
+	return nil
+}
+
+func (f *fakeCompute) StartVMChecked(ctx context.Context, name string) (orchestrator.VMStartProbe, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.startChecked = append(f.startChecked, name)
+	return orchestrator.VMStartProbe{OK: true, State: orchestrator.VMStateRunning}, nil
+}
+
+func (f *fakeCompute) RefreshSeed(_ context.Context, vm model.VMFunction) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refreshed = append(f.refreshed, vm)
+	return nil
+}
+
+func (f *fakeCompute) VMState(_ context.Context, name string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.states = append(f.states, name)
+	return f.stateVal, f.stateErr
+}
+
+func (f *fakeCompute) Console(_ context.Context, name string) (io.ReadWriteCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.consoled = append(f.consoled, name)
+	return f.consoleRWC, f.consoleErr
+}
+
+func (f *fakeCompute) SnapshotCreate(_ context.Context, domain, name, description string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snapCreated = append(f.snapCreated, [3]string{domain, name, description})
+	return f.snapErr
+}
+
+func (f *fakeCompute) Snapshots(_ context.Context, domain string) ([]compute.SnapshotInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snapListed = append(f.snapListed, domain)
+	return f.snapInfos, f.snapErr
+}
+
+func (f *fakeCompute) SnapshotRevert(_ context.Context, domain, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snapReverted = append(f.snapReverted, [2]string{domain, name})
+	return f.snapErr
+}
+
+func (f *fakeCompute) SnapshotDelete(_ context.Context, domain, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snapDeleted = append(f.snapDeleted, [2]string{domain, name})
+	return f.snapErr
+}
+
+func (f *fakeCompute) EnsureConsistent(_ context.Context, cfg model.Config) []error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensured = append(f.ensured, cfg)
+	return nil
+}
+
+func (f *fakeCompute) CheckVMAlarms(_ context.Context, cfg model.Config) []error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.alarmRuns = append(f.alarmRuns, cfg)
+	return nil
+}
+
+// fakeContainer 记录调用的 containerFacade 假件。
+type fakeContainer struct {
+	mu        sync.Mutex
+	applied   []model.ContainerFunction
+	deleted   []string
+	started   []string
+	stopped   []string
+	restarted []string
+	states    []string
+	logs      []string
+	ensured   []model.Config
+	alarmRuns []model.Config
+
+	stateVal string
+	stateErr error
+	logsVal  string
+	logsErr  error
+}
+
+func (f *fakeContainer) ApplyContainer(_ context.Context, ct model.ContainerFunction) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.applied = append(f.applied, ct)
+	return nil
+}
+
+func (f *fakeContainer) DeleteContainer(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted = append(f.deleted, name)
+	return nil
+}
+
+func (f *fakeContainer) StartContainer(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.started = append(f.started, name)
+	return nil
+}
+
+func (f *fakeContainer) StopContainer(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopped = append(f.stopped, name)
+	return nil
+}
+
+func (f *fakeContainer) RestartContainer(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.restarted = append(f.restarted, name)
+	return nil
+}
+
+func (f *fakeContainer) ContainerState(_ context.Context, name string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.states = append(f.states, name)
+	return f.stateVal, f.stateErr
+}
+
+func (f *fakeContainer) ContainerLogs(_ context.Context, name string, _ int) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logs = append(f.logs, name)
+	return f.logsVal, f.logsErr
+}
+
+func (f *fakeContainer) EnsureConsistent(_ context.Context, cfg model.Config) []error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensured = append(f.ensured, cfg)
+	return nil
+}
+
+func (f *fakeContainer) CheckContainerAlarms(_ context.Context, cfg model.Config) []error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.alarmRuns = append(f.alarmRuns, cfg)
+	return nil
+}
+
+func TestDynamicComputeDegradedSemantics(t *testing.T) {
+	h := newDynamicCompute()
+	if h.Connected() {
+		t.Fatal("零值持有层应处于未接入态")
+	}
+	ctx := context.Background()
+	vm := model.VMFunction{Name: "vm-a"}
+	alloc := model.AllocatedResources{}
+
+	// 静默成功：提交路径在降级期照常工作。
+	if err := h.DefineVM(ctx, vm, alloc); err != nil {
+		t.Fatalf("未接入 DefineVM 应静默成功: %v", err)
+	}
+	if err := h.DeleteVM(ctx, "vm-a"); err != nil {
+		t.Fatalf("未接入 DeleteVM 应静默成功: %v", err)
+	}
+	// 空结果：巡检/恢复收敛不产生噪声。
+	if errs := h.EnsureConsistent(ctx, model.Config{}); len(errs) != 0 {
+		t.Fatalf("未接入 EnsureConsistent 应为空: %v", errs)
+	}
+	if errs := h.CheckVMAlarms(ctx, model.Config{}); len(errs) != 0 {
+		t.Fatalf("未接入 CheckVMAlarms 应为空: %v", errs)
+	}
+	// 生命周期/seed/启动回读：与 nil 分支同文案的错误。
+	for name, fn := range map[string]func() error{
+		"StartVM":   func() error { return h.StartVM(ctx, "vm-a") },
+		"StopVM":    func() error { return h.StopVM(ctx, "vm-a") },
+		"RestartVM": func() error { return h.RestartVM(ctx, "vm-a") },
+		"RefreshSeed": func() error {
+			return h.RefreshSeed(ctx, vm)
+		},
+	} {
+		if err := fn(); err == nil || err.Error() != wantComputeBody {
+			t.Fatalf("未接入 %s 应报与 nil 分支同文案的错误: %v", name, err)
+		}
+	}
+	if _, err := h.StartVMChecked(ctx, "vm-a"); err == nil || err.Error() != wantComputeBody {
+		t.Fatalf("未接入 StartVMChecked 应报同文案错误: %v", err)
+	}
+	// VMState：错误（show 路径经既有错误分支渲染「-」）。
+	if st, err := h.VMState(ctx, "vm-a"); err == nil || err.Error() != wantComputeBody || st != "" {
+		t.Fatalf("未接入 VMState 应报同文案错误: state=%q err=%v", st, err)
+	}
+	// Console：独立文案。
+	if rwc, err := h.Console(ctx, "vm-a"); err == nil || err.Error() != wantConsoleBody || rwc != nil {
+		t.Fatalf("未接入 Console 应报 console 文案错误: rwc=%v err=%v", rwc, err)
+	}
+	// 快照 4 法：与快照 nil 分支（errComputeUnavailable 正文）同文案。
+	if err := h.SnapshotCreate(ctx, "vm-a", "s1", ""); err == nil || err.Error() != wantComputeBody {
+		t.Fatalf("未接入 SnapshotCreate 应报同文案错误: %v", err)
+	}
+	if rows, err := h.Snapshots(ctx, "vm-a"); err == nil || err.Error() != wantComputeBody || rows != nil {
+		t.Fatalf("未接入 Snapshots 应报同文案错误: rows=%v err=%v", rows, err)
+	}
+	if err := h.SnapshotRevert(ctx, "vm-a", "s1"); err == nil || err.Error() != wantComputeBody {
+		t.Fatalf("未接入 SnapshotRevert 应报同文案错误: %v", err)
+	}
+	if err := h.SnapshotDelete(ctx, "vm-a", "s1"); err == nil || err.Error() != wantComputeBody {
+		t.Fatalf("未接入 SnapshotDelete 应报同文案错误: %v", err)
+	}
+}
+
+func TestDynamicComputeForwardsAfterSwap(t *testing.T) {
+	h := newDynamicCompute()
+	fake := &fakeCompute{stateVal: orchestrator.VMStateRunning, consoleRWC: nopRWC{}}
+	h.Swap(fake, nil)
+	if !h.Connected() {
+		t.Fatal("Swap 后应处于已接入态")
+	}
+	ctx := context.Background()
+	vm := model.VMFunction{Name: "vm-a"}
+
+	if err := h.DefineVM(ctx, vm, model.AllocatedResources{}); err != nil {
+		t.Fatalf("DefineVM 转发失败: %v", err)
+	}
+	if err := h.DeleteVM(ctx, "vm-a"); err != nil {
+		t.Fatalf("DeleteVM 转发失败: %v", err)
+	}
+	if err := h.StartVM(ctx, "vm-a"); err != nil {
+		t.Fatalf("StartVM 转发失败: %v", err)
+	}
+	if err := h.StopVM(ctx, "vm-a"); err != nil {
+		t.Fatalf("StopVM 转发失败: %v", err)
+	}
+	if err := h.RestartVM(ctx, "vm-a"); err != nil {
+		t.Fatalf("RestartVM 转发失败: %v", err)
+	}
+	if probe, err := h.StartVMChecked(ctx, "vm-a"); err != nil || !probe.OK {
+		t.Fatalf("StartVMChecked 转发失败: probe=%+v err=%v", probe, err)
+	}
+	if err := h.RefreshSeed(ctx, vm); err != nil {
+		t.Fatalf("RefreshSeed 转发失败: %v", err)
+	}
+	if st, err := h.VMState(ctx, "vm-a"); err != nil || st != orchestrator.VMStateRunning {
+		t.Fatalf("VMState 转发失败: state=%q err=%v", st, err)
+	}
+	rwc, err := h.Console(ctx, "vm-a")
+	if err != nil || rwc == nil {
+		t.Fatalf("Console 转发失败: rwc=%v err=%v", rwc, err)
+	}
+	fake.snapErr = errors.New("libvirt boom")
+	if err := h.SnapshotCreate(ctx, "vm-a", "s1", "d"); err == nil || err.Error() != "libvirt boom" {
+		t.Fatalf("SnapshotCreate 应原样穿透假件错误: %v", err)
+	}
+	fake.snapErr = nil
+	fake.snapInfos = []compute.SnapshotInfo{{Name: "s1"}}
+	if rows, err := h.Snapshots(ctx, "vm-a"); err != nil || len(rows) != 1 || rows[0].Name != "s1" {
+		t.Fatalf("Snapshots 转发失败: rows=%v err=%v", rows, err)
+	}
+	if err := h.SnapshotRevert(ctx, "vm-a", "s1"); err != nil {
+		t.Fatalf("SnapshotRevert 转发失败: %v", err)
+	}
+	if err := h.SnapshotDelete(ctx, "vm-a", "s1"); err != nil {
+		t.Fatalf("SnapshotDelete 转发失败: %v", err)
+	}
+	if errs := h.EnsureConsistent(ctx, model.Config{}); len(errs) != 0 {
+		t.Fatalf("EnsureConsistent 转发失败: %v", errs)
+	}
+	if errs := h.CheckVMAlarms(ctx, model.Config{}); len(errs) != 0 {
+		t.Fatalf("CheckVMAlarms 转发失败: %v", errs)
+	}
+	// 参数确实到达了真实实现（抽两条核对）。
+	if len(fake.startChecked) != 1 || fake.startChecked[0] != "vm-a" {
+		t.Fatalf("StartVMChecked 参数未到达实现: %v", fake.startChecked)
+	}
+	if len(fake.consoled) != 1 || fake.consoled[0] != "vm-a" {
+		t.Fatalf("Console 参数未到达实现: %v", fake.consoled)
+	}
+}
+
+func TestDynamicComputeCloseClosesTrackedConn(t *testing.T) {
+	h := newDynamicCompute()
+	if err := h.Close(); err != nil {
+		t.Fatalf("未接入时 Close 应为空操作: %v", err)
+	}
+	// 零值 *compute.Conn 的 Close 幂等返回 nil（conn_libvirt.go 对 l==nil 有守卫），
+	// 用它验证记账关闭路径不 panic、可重复调用。
+	h.Swap(&fakeCompute{}, &compute.Conn{})
+	h.Swap(&fakeCompute{}, nil) // 覆盖换装：旧连接应被防御性关闭，不 panic
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close 失败: %v", err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close 应可重复调用: %v", err)
+	}
+	if !h.Connected() {
+		t.Fatal("Close 只关连接记账，不撤销已接入的实现")
+	}
+}
+
+func TestContainerHolderDegradedSemantics(t *testing.T) {
+	h := newContainerHolder()
+	if h.Connected() {
+		t.Fatal("零值持有层应处于未接入态")
+	}
+	ctx := context.Background()
+	ct := model.ContainerFunction{Name: "ct-a"}
+
+	// 静默成功：noopContainer 现状即如此（提交路径照常）。
+	if err := h.ApplyContainer(ctx, ct); err != nil {
+		t.Fatalf("未接入 ApplyContainer 应静默成功: %v", err)
+	}
+	if err := h.DeleteContainer(ctx, "ct-a"); err != nil {
+		t.Fatalf("未接入 DeleteContainer 应静默成功: %v", err)
+	}
+	// 空结果。
+	if errs := h.EnsureConsistent(ctx, model.Config{}); len(errs) != 0 {
+		t.Fatalf("未接入 EnsureConsistent 应为空: %v", errs)
+	}
+	if errs := h.CheckContainerAlarms(ctx, model.Config{}); len(errs) != 0 {
+		t.Fatalf("未接入 CheckContainerAlarms 应为空: %v", errs)
+	}
+	// 生命周期/日志：与 nil 分支同文案的错误。
+	for name, fn := range map[string]func() error{
+		"StartContainer":   func() error { return h.StartContainer(ctx, "ct-a") },
+		"StopContainer":    func() error { return h.StopContainer(ctx, "ct-a") },
+		"RestartContainer": func() error { return h.RestartContainer(ctx, "ct-a") },
+	} {
+		if err := fn(); err == nil || err.Error() != wantContainerBody {
+			t.Fatalf("未接入 %s 应报与 nil 分支同文案的错误: %v", name, err)
+		}
+	}
+	if out, err := h.ContainerLogs(ctx, "ct-a", 100); err == nil || err.Error() != wantContainerBody || out != "" {
+		t.Fatalf("未接入 ContainerLogs 应报同文案错误: out=%q err=%v", out, err)
+	}
+	// ContainerState：错误（ctStateOf 经既有错误分支渲染「-」）。
+	if st, err := h.ContainerState(ctx, "ct-a"); err == nil || err.Error() != wantContainerBody || st != "" {
+		t.Fatalf("未接入 ContainerState 应报同文案错误: state=%q err=%v", st, err)
+	}
+}
+
+func TestContainerHolderForwardsAfterSwap(t *testing.T) {
+	h := newContainerHolder()
+	fake := &fakeContainer{stateVal: orchestrator.CTStateRunning, logsVal: "log line"}
+	h.Swap(fake)
+	if !h.Connected() {
+		t.Fatal("Swap 后应处于已接入态")
+	}
+	ctx := context.Background()
+
+	if err := h.ApplyContainer(ctx, model.ContainerFunction{Name: "ct-a"}); err != nil {
+		t.Fatalf("ApplyContainer 转发失败: %v", err)
+	}
+	if err := h.DeleteContainer(ctx, "ct-a"); err != nil {
+		t.Fatalf("DeleteContainer 转发失败: %v", err)
+	}
+	if err := h.StartContainer(ctx, "ct-a"); err != nil {
+		t.Fatalf("StartContainer 转发失败: %v", err)
+	}
+	if err := h.StopContainer(ctx, "ct-a"); err != nil {
+		t.Fatalf("StopContainer 转发失败: %v", err)
+	}
+	if err := h.RestartContainer(ctx, "ct-a"); err != nil {
+		t.Fatalf("RestartContainer 转发失败: %v", err)
+	}
+	if st, err := h.ContainerState(ctx, "ct-a"); err != nil || st != orchestrator.CTStateRunning {
+		t.Fatalf("ContainerState 转发失败: state=%q err=%v", st, err)
+	}
+	if out, err := h.ContainerLogs(ctx, "ct-a", 50); err != nil || out != "log line" {
+		t.Fatalf("ContainerLogs 转发失败: out=%q err=%v", out, err)
+	}
+	if errs := h.EnsureConsistent(ctx, model.Config{}); len(errs) != 0 {
+		t.Fatalf("EnsureConsistent 转发失败: %v", errs)
+	}
+	if errs := h.CheckContainerAlarms(ctx, model.Config{}); len(errs) != 0 {
+		t.Fatalf("CheckContainerAlarms 转发失败: %v", errs)
+	}
+	if len(fake.started) != 1 || fake.started[0] != "ct-a" {
+		t.Fatalf("StartContainer 参数未到达实现: %v", fake.started)
+	}
+}
+
+// TestUnavailableErrorTextsMatchAPINilBranches 锁三段正文逐字（含全角括号与空格）——
+// 与 internal/api 的 nil 分支常量对齐，任一侧改动本测试即红。
+func TestUnavailableErrorTextsMatchAPINilBranches(t *testing.T) {
+	if errComputeNotConnectedText != wantComputeBody ||
+		!strings.HasPrefix(errComputeNotConnectedText, "计算编排未接入") ||
+		strings.ContainsAny(errComputeNotConnectedText, "()\n") {
+		t.Fatalf("compute 正文与 api nil 分支不对齐: %q", errComputeNotConnectedText)
+	}
+	if errConsoleNotConnectedText != wantConsoleBody {
+		t.Fatalf("console 正文与 api nil 分支不对齐: %q", errConsoleNotConnectedText)
+	}
+	if errContainerNotConnectedText != wantContainerBody {
+		t.Fatalf("container 正文与 api nil 分支不对齐: %q", errContainerNotConnectedText)
+	}
+}

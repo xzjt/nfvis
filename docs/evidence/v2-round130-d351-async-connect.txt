@@ -1,0 +1,51 @@
+NFViS v2 真机验证记录 round130 —— 决策 #351（底座编排的启动后异步接入，根治 R129-2）
+====================================================================
+日期：2026-10-03；环境：nfvis-vm；构建：2.0.0~dev46（本分支 git archive 同步构建 + dpkg -i）；
+前置：#349（有界降级）已合并、#350（启动期固定重试）已撤回（窗口实测 ≈90s）。
+
+§0 结论
+三步真机验证全部通过。**R129-2 闭环**：reboot 后零人工干预，开机 ~2 分钟内计算编排经后台接入
+自动恢复（告警自动消解、EnsureConsistent 补跑、sem-vm running 可见、VM 动作可用）；
+快路径（底座健康）行为与今天逐字同序；降级语义与今天逐字一致。PR #281。
+
+§1 验证 ①（决定性）—— 重启测试，零人工干预
+- `reboot` 后不做任何操作。boot 内 `Starting nfvis.service` 计数 = 1（无循环）；
+  journal 序列：「计算编排未接入（libvirt 连接失败）」（快路径 10s 有界失败，正常）→
+  「检测到 VPP 未运行，发起拉起（不等待）」（#348）→ **「计算编排已接入（后台）」**（#351 循环，
+  窗口期结束后首次 30s tick 接入成功）→ COMPUTE_UNAVAILABLE **自动消解**；
+- boot 后 ~2.5min 检查：nfvis/vpp/libvirtd 全 active；告警面板仅剩既有 `HUGEPAGE_POOL_ORPHAN`；
+  `show virtual-machine-functions` → sem-vm **running**（EnsureConsistent 补跑后）。
+- 对比修复前（round129/130 实测）：同一现场需人工 `systemctl restart nfvis` 才能恢复 VM 编排。
+
+§2 验证 ② —— 快路径回归（底座健康）
+- libvirt/Docker 健康时 `systemctl restart nfvis`：active 即达；journal 逐字同序
+  （「计算编排已接入」「容器编排已接入」「VPP 已在运行，无需拉起」「nfvisd 就绪」）；
+  **零「后台」日志**（接入循环未启动）、无 COMPUTE/CONTAINER 告警。快路径行为零变化（契约①）。
+
+§3 验证 ③ —— 降级语义 + 自动接入全周期
+- 前半（降级态，libvirtd 全停 + restart nfvis）：active 即达（拨号即拒）；
+  `request virtual-machine-functions sem-vm stop` → `%% 计算编排未接入（libvirt 未装配），
+  运行态不可用`（**与今天 nil 分支逐字一致**）；`show virtual-machine-functions` → State「-」；
+  `COMPUTE_UNAVAILABLE` 在场。
+- 后半（libvirt 恢复，不重启 nfvis）：**20 秒内**（第一个 30s tick）journal「计算编排已接入（后台）」；
+  `COMPUTE_UNAVAILABLE` 自动消解；EnsureConsistent 补跑；`show` → sem-vm running。
+- 实现报告的逐点文案核对结论：CLI 生命周期/快照/console/容器文案逐字一致；vmStateOf/ctStateOf
+  经错误分支渲染「-」一致；**如实差异**（契约 ④ 预告）：REST 生命周期错误状态码 503→5xx（消息文本
+  对齐）；console 失败时点后移（ticket 签发后才失败，文案同源）；**REST PUT VM 降级态由「跳过运行态
+  检查成功」变 503**——持有层恒接线后无法复刻 nil 跳过，且新行为更安全（窗口期不再绕过对可能运行中
+  VM 的检查），如实登记不追加处理。
+
+§5 测试与门禁
+- 新增单测 11 个：持有层语义表逐法 + 换装转发 + conn 记账关闭（8 断言钉住 facade 实现）；
+  接入循环驱动（首次等一间隔/成功终结恰好一次 onConnected/持续失败静默/ctx 取消退出）。
+- `make check` 全绿（决策条数 253、契约同步、archtest/user_text/原型全绿）；`-race` 本机不可跑
+  （无 cgo），持有层并发安全以 RWMutex + grab-and-call 模式论证。
+- 告警 raise 文案随 #351 如实化（「不自动重连」→「后台持续重试接入，成功后自动消解」），
+  与手册两行同步；用户手册中的内部缺陷号引用已清除（随包文档不含内部编号）。
+
+§6 未验项 / 后续
+- 接入成功后连接**中断**的自动重连不在本决策范围（#349 边界的残余部分，如实登记）——libvirt 中途
+  挂掉仍需人工 restart nfvis；如需覆盖另立决策（同一持有层已就位，增量小）。
+- Docker 同治已实现（同机制同节奏），但未观测到 Docker 开机竞态的现场——降级路径回归已覆盖其语义。
+- `cli-fulltest` 等四套件本轮未复跑（改动不触及命令树与 show 读数；make check 全绿 + 本记录三维
+  真机行为验证）；下轮照例清场后复跑。
