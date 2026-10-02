@@ -223,6 +223,8 @@ request sriov create-vfs <ifname> count <uint> | delete-vfs <ifname> vf <uint>
    # delete-vfs 的 vf <n> **不参与定位**：V1 的 VF 是数量型配置，按数量回收一个（回显会明确说明）
 request vpp restart                                 # S；确认。按 committed 配置重新生成 startup.conf 并重启 VPP，
                                                     # 随后 recovery 收敛重放网络配置、vhost-user 重连（影响业务转发）
+                                                    # nfvisd 启动时会自动确保 VPP 运行（未运行即发起拉起、不阻塞自身启动）并按 committed 配置重放——重启后数据面自动恢复；
+                                                    # 但 VNF/容器需在配置里声明 `autostart true` 才会随系统自启，未声明则需手工 request … start
 request vpp trace
   ├─ start interface <ifname> [count <n>] [filter <acl>]   # 开始数据面抓包（达到报文数自动停止）
   ├─ stop                                            # 停止抓包
