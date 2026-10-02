@@ -62,7 +62,7 @@ set interfaces <ifname> egress-policy <name>	配置语句未逐条执行	QoS 出
 set bonds <name> lacp disable	配置语句未逐条执行	同族 set bonds <name> lacp mode 已在阶段 2 执行；规则由 bonding 单测覆盖
 set virtual-switches <n> gateway ip <ip-prefix>	配置语句未逐条执行	BVI 网关；需 L2 交换机 + 地址，由真机按对象走查
 set virtual-switches <n> gateway vrf <name>	配置语句未逐条执行	同上（跨 VRF 网关）
-set virtual-switches <n> gateway acl-in|acl-out <acl>	配置语句未逐条执行	网关 ACL 绑定；同族 set acls 已在阶段 2 执行
+set virtual-switches <n> gateway acl-in|acl-out <acl>	设计拒绝	网关 ACL 绑定：由决策 #340 在提交期硬拒（VPP 26.06 不评估 BVI 域内流量，绑定给不出保护），不再需要真机执行；替代形态 `l3-interface <if> acl-in` 已由语义/生命周期套件覆盖
 set virtual-switches <n> ports [<seq>] interface <if> [trunk vlans <l>|native <v>]	配置语句未逐条执行	端口成员需占用物理口（阶段 2 的口位已被 vs-l3/bond0 占满）；由 lifecycle L1 的建删对象覆盖
 set virtual-switches <n> ports [<seq>] vnf <vm> interface <vnic> [trunk vlans <l>]	配置语句未逐条执行	vNIC 成员需 VNF（阶段 3 才建）；由 lifecycle L3-1 的 BD 成员断言覆盖
 set virtual-switches <n> ports [<seq>] container <ct> interface <vnic>	配置语句未逐条执行	容器 memif 成员；本机无自带 memif 的容器镜像（T0-3 环境受限）
