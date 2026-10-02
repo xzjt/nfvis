@@ -65,7 +65,7 @@ func (x *cliExecutor) execShowSystemDiag(t []string) string {
 	case "uptime", "cpu", "memory", "storage":
 		return x.renderHostMetrics(t[0])
 	case "hugepages":
-		// 决策 #329：三方数字（声明/内核实际/在用）+ 可回收，与其他三面（REST/Web）同源。
+		// 决策 #329/#346：数字（声明/内核实际/在用/实际持有/无主占用）+ 可回收，与其他三面（REST/Web）同源。
 		return x.renderHugepagePools()
 	case "kernel":
 		return x.renderKernelBaseline()

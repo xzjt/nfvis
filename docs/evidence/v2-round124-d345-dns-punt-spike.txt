@@ -138,3 +138,19 @@ NFViS v2 真机验证记录 round124 —— 三.3 DNS 数据面代理「路线 c
 - spike 临时物（loop0、ip table 100、punt 注册、旧 socket/pcap）早前已清理；`VRF_TABLE_LEFTOVER` 告警已在
   15s 对账内自动消解。
 
+§更正（round126，dev34 真机实测）
+================================
+日期 2026-10-04；环境 nfvis-vm，2.0.0~dev34。
+- **本文件 §6.6 与 §7.4 的「VPP 不占 1G、另有 1 页无主占用」改判不成立**，应回到原记录「**1G 池被 VPP 与
+  sem-vm 各占 1 页**」的读法：
+  dev34 `show system hugepages` 实测 **`1G 声明2/实际2/在用2/持有2/无主0`**——两页**都被真持有**，无无主占用。
+- 1G 两页的持有者（held 由决策 #346 的读视图给出：只认 `/proc/*/smaps` 里 `VmFlags` 含 `ht` 的 hugetlb 映射、
+  按 inode 去重、按 `KernelPageSize` 折算）：
+  · **VPP main heap 的 `/memfd:seg_0-0`（`VmFlags` 含 `ht`，1G 页）**——**VPP 确实占 1 个 1G 页**；
+  · sem-vm 的 guest RAM（qemu 持 fd、VPP 持共享映射，同一 inode）——占另 1 页。
+  ⇒ 原「**各占 1 页**」是对的；§6.6/§7.4 改判的「无主占用」是错的。
+- held 数字为何可信：只认内核自己的 hugetlb 标记（`VmFlags` 含 `ht`，不按 maps 路径过滤）；同一 inode 跨进程
+  共享映射只计一次；按每行 `KernelPageSize` 折算到对应页尺寸池 ⇒ `held=2` 即两页各有真实引用者。
+- 结论：round124 那次「第二个 VM 起不来」的直接成因是 **1G 池两页都被占满、无空闲页**（并非「无主占用」），
+  与 DNS 代理无关。
+

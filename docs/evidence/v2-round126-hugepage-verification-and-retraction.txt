@@ -1,0 +1,57 @@
+NFViS v2 真机验证记录 round126 —— 决策 #346 落地复验：可见性成立、回收机制撤回（含对 round124/125 的更正）
+====================================================================
+日期：2026-10-02；环境：nfvis-vm；轮次：dev34 → dev35（构建取错代码，作废）→ **dev36**（修正版）。
+
+§0 结论摘要
+1. **可见性成立且算得准**：`show system hugepages` 新增的「实际持有 / 无主占用」两列在真机上与 smaps 事实
+   逐项吻合（1G 持有 2 / 无主 0；2M 持有 23 / 无主 510）。
+2. **回收机制撤回**：原设想的「降 `nr_hugepages` 释放无主占用页」**不成立**（实测写 nr 后内核账不变）；
+   dev34 上命令还报了**假成功**（"已回收 510（回读确认）"而账目未变）。dev36 已改为「只回收空闲多余页
+   + 如实报无可回收」，并如实说明那类页是什么、为何回收不了。
+3. **两条真缺陷**（均源于「1G 只给 VNF、VPP 该用 2M」这一目标口径）：① VPP 的 main heap 占用 **1 个 1G 页**；
+   ② 2M 池 533 页在用里 **510 页是进程预留未使用**。已登记 `docs/v2待做.md`。
+
+§1 此前的两次错误解读（如实登记并更正）
+- round124 曾写「1G 池被 VPP 与 sem-vm 各占 1 页」——**这条是对的**（见 §2），但我随后在 round125 把它
+  "更正"掉了。
+- round125 曾写「1G 另有一页无主占用、`echo 1 > nr_hugepages` 能释放它」——**错**：1G 两页都被真持有
+  （VPP main heap + sem-vm guest RAM）；`echo 1` 成功只因当时**停掉了 sem-vm、池里恰有 1 页空闲**。
+  两处已在 round124/125 末尾追加「§更正（round126）」。
+
+§2 实证：VPP 的 main heap 就是 1 个 1G 页（smaps 权威口径）
+```
+VPP 进程（vpp_main, pid 428319）的 smaps：KernelPageSize 分布 = 2 × 1048576 kB、7 × 2048 kB、977 × 4 kB
+140000000-180000000 rw-s 00:12 1316916   /memfd:seg_0-0 (deleted)                       VmFlags: ... ht
+710640000000-710680000000 rw-s 00:21 1327570  /dev/hugepages/libvirt/qemu/59-sem-vm/... VmFlags: ... ht
+```
+- `/memfd:seg_0-0` = **VPP 自己的 main heap**（1G，`VmFlags` 含 `ht`）⇒ **VPP 占 1 个 1G 页**。
+- `vppctl show memory` 的 `main heap … page stats: page-size 2M, total 512` 是 **VPP 内部**把这一页 1G 切成
+  512 个 2M subpage 的记账，**不代表内核层面用 2M 页**——这正是 round125 误判的来源。
+- 那条 `libvirt/qemu/59-sem-vm/...` 是 sem-vm 的 guest RAM（vhost-user 共享映射）⇒ 1G 池两页 =
+  VPP main heap + sem-vm，**都被真持有、无无主占用**。
+
+§3 实证：2M 池的 510 页是「预留未用」且**产品侧释放不了**
+- per-node 账：`nr=768 free=235 surplus=0`（无 `reserved_hugepages` 文件；meminfo 只报默认尺寸 1G 的账，
+  故 2M 的 Rsvd 不可见）。
+- 持有者三向对照（smaps 的 ht 映射 / `/proc/*/fd` / `HugetlbPages`）：只有 23 页有进程/inode 引用
+  （VPP 的 buffers 等），**510 页无任何引用**；`vppctl show physmem` 报 `reserved-pages 8192`
+  ⇒ 它们是**被进程预留（reserve）但未 fault** 的页。
+- **回收尝试（dev34）**：`request system hugepages reclaim` 先写 nr=23 再写回 768——实测 **nr 完全不变**
+  （内核不会回收"不在空闲链表"的预留页）；而命令却报「已回收 510（回读确认）」= **假成功**。
+
+§4 修正后的真机行为（2.0.0~dev36）
+- 读视图（如实）：`1G 2/2/2/2/0`、`2M 768/768/533/23/510`，状态「有无主占用页（**产品侧不可回收**）」；
+  说明写明「多为被进程预留但尚未使用的大页（例如数据面 DPDK 预留）。它们不在空闲链表上，产品侧写
+  nr_hugepages 释放不了、reclaim 不会动它们——需从预留者一侧释放」。
+- `request system hugepages reclaim`：表头「只回收空闲的多余页」；本次两池均「无需回收 / 已回收 0」，
+  末行「**无可回收的空闲多余页**（内核实际已不高于声明值，未做任何改动）」，并单列说明 510 页不在回收范围。
+  **不再报未发生的成功**。
+- 内核账回收前后一致（`1G nr=2 free=0`、`2M nr=768 free=235`）；sem-vm `running`、VPP 正常（未被触及）。
+
+§5 过程教训（如实登记）
+- **dev35 作废**：其 `SOURCE_DATE_EPOCH` 与 dev34 相同（1790944404）——我**并行**启动「提交修正」与
+  「同步源码 + 构建」两个后台任务，`git archive` 取到修正前的 `cd0e85d`，那次复验跑的是旧代码、结论无效；
+  重构建 dev36（EPOCH=1790946496）才得到 §4 的结果。**有依赖的步骤不能并行**。
+- **判「谁占大页」的唯一可靠口径**：smaps 里的 hugetlb 映射（`VmFlags` 含 `ht`）+ `KernelPageSize`
+  + 按头行 `dev:inode` 跨进程去重，辅以 `/proc/*/status` 的 `HugetlbPages`。**按 maps 路径过滤会得出
+  相反结论**（本轮我据此错了两次）。

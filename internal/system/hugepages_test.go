@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// ---------- 纯函数：回收计划 ----------
+// ---------- 纯函数：回收计划（只回收空闲的多余页，#329） ----------
 
 func TestPlanHugepageReclaim(t *testing.T) {
 	cases := []struct {
@@ -52,29 +52,69 @@ func TestPlanHugepageReclaim(t *testing.T) {
 	}
 }
 
+// 计划**不含无主占用页**（决策 #346 撤回无主页回收）：即便「在用 > 持有」，只要没有空闲的
+// 多余页（实际 <= 声明），计划就不产生任何写（Reclaimable=0、Target=Actual）。
+func TestPlanHugepageReclaim_IgnoresOrphan(t *testing.T) {
+	// round125/dev34 形态：实际 == 声明、空闲 <= 0 → 不动作（无主页不在计划内）。
+	for _, c := range []struct {
+		declared, actual, free int
+	}{
+		{2, 2, 0},     // 1G：实际 2、空闲 0（在用 2）
+		{768, 768, 0}, // 2M：实际 == 声明、空闲 0
+		{768, 768, 235},
+	} {
+		p := PlanHugepageReclaim("1G", c.declared, c.actual, c.free)
+		if p.Reclaimable != 0 || p.Target != c.actual {
+			t.Errorf("declared=%d actual=%d free=%d：无空闲多余页时不该有召回计划，实得 %+v", c.declared, c.actual, c.free, p)
+		}
+	}
+}
+
 func TestHugepagePoolViewFor(t *testing.T) {
-	// 无主占用（有可回收）
-	v := HugepagePoolViewFor("1G", 2, 4, 2, true)
-	if v.State != HugepageStateSurplus || v.Reclaimable != 2 || v.InUse != 2 || !v.Managed {
+	// 多余页（有可回收）但都有持有者（在用 == 持有）
+	v := HugepagePoolViewFor("1G", 2, 4, 2, true, 2, true)
+	if v.State != HugepageStateSurplus || v.Reclaimable != 2 || v.InUse != 2 || v.Held != 2 || v.Orphan != 0 || !v.Managed {
 		t.Fatalf("surplus 视图不符：%+v", v)
 	}
-	// 多余页全在用
-	v = HugepagePoolViewFor("1G", 2, 4, 0, true)
-	if v.State != HugepageStateInUse || v.Reclaimable != 0 {
+	// 多余页全在用且有持有者
+	v = HugepagePoolViewFor("1G", 2, 4, 0, true, 4, true)
+	if v.State != HugepageStateInUse || v.Reclaimable != 0 || v.Orphan != 0 {
 		t.Fatalf("in_use 视图不符：%+v", v)
 	}
 	// 一致
-	if v = HugepagePoolViewFor("1G", 4, 4, 1, true); v.State != HugepageStateOK {
+	if v = HugepagePoolViewFor("1G", 4, 4, 1, true, 3, true); v.State != HugepageStateOK {
 		t.Fatalf("ok 视图不符：%+v", v)
 	}
 	// 未托管
-	if v = HugepagePoolViewFor("2M", -1, 768, 100, true); v.State != HugepageStateUnmanaged || v.Managed {
+	if v = HugepagePoolViewFor("2M", -1, 768, 100, true, 668, true); v.State != HugepageStateUnmanaged || v.Managed {
 		t.Fatalf("unmanaged 视图不符：%+v", v)
 	}
 	// 取不到内核值：actual/free/in_use 一律 -1，不编造 0
-	v = HugepagePoolViewFor("1G", 2, 0, 0, false)
+	v = HugepagePoolViewFor("1G", 2, 0, 0, false, 0, false)
 	if v.State != HugepageStateUnreadable || v.Actual != -1 || v.Free != -1 || v.InUse != -1 {
 		t.Fatalf("unreadable 视图不符（应回 -1 而非 0）：%+v", v)
+	}
+	// 无主占用（决策 #346）：在用 2、持有 1 → orphan 1，state=orphan（即便实际 == 声明）。
+	// ⚠️ Reclaimable 仍为 0——无主页**不可回收**，不计入。
+	v = HugepagePoolViewFor("1G", 2, 2, 0, true, 1, true)
+	if v.State != HugepageStateOrphan || v.Orphan != 1 || v.Held != 1 || v.Reclaimable != 0 {
+		t.Fatalf("orphan 视图不符（Reclaimable 应为 0，无主页不可回收）：%+v", v)
+	}
+	if !strings.Contains(v.Note, "释放不了") || !strings.Contains(v.Note, "预留") {
+		t.Fatalf("orphan 的 note 应说明预留页与产品侧释放不了：%q", v.Note)
+	}
+	// dev34 形态（2M）：声明 768 / 实际 768 / 空闲 235 / 持有 23 → 在用 533、无主 510、不可回收。
+	v = HugepagePoolViewFor("2M", 768, 768, 235, true, 23, true)
+	if v.State != HugepageStateOrphan || v.Orphan != 510 || v.InUse != 533 || v.Reclaimable != 0 {
+		t.Fatalf("2M dev34 形态视图不符：%+v", v)
+	}
+	// 持有值取不到：held/orphan 一律 -1，note 说明，不编造 0。
+	v = HugepagePoolViewFor("1G", 2, 2, 0, true, 0, false)
+	if v.Held != -1 || v.Orphan != -1 {
+		t.Fatalf("持有值取不到时应回 -1 而非 0：%+v", v)
+	}
+	if !strings.Contains(v.Note, "实际持有值取不到") {
+		t.Fatalf("持有值取不到时 note 应如实说明：%q", v.Note)
 	}
 }
 
@@ -97,6 +137,18 @@ func writePool(t *testing.T, root, pageSize string, nr, free int) {
 	if err := os.WriteFile(filepath.Join(dir, "free_hugepages"), []byte(strconv.Itoa(free)), 0o644); err != nil {
 		t.Fatalf("写 free: %v", err)
 	}
+}
+
+// poolBySize 从对账结果里按页尺寸取池（HugepageSizes = 1G,2M，不能假定下标）。
+func poolBySize(t *testing.T, res HugepageReconcileResult, size string) HugepagePoolResult {
+	t.Helper()
+	for _, p := range res.Pools {
+		if p.PageSize == size {
+			return p
+		}
+	}
+	t.Fatalf("结果里没有 %s 池：%+v", size, res.Pools)
+	return HugepagePoolResult{}
 }
 
 func TestReadHugepagePool(t *testing.T) {
@@ -166,6 +218,31 @@ func TestReconcileHugepages_BlockedByInUse(t *testing.T) {
 	}
 }
 
+// 写成功但回读**未变**（内核只释放空闲页；目标页不在空闲链表上）→ 绝不报成功（无假绿）。
+func TestReconcileHugepages_ReadbackUnchangedNotReclaimed(t *testing.T) {
+	root := t.TempDir()
+	writePool(t, root, "2M", 768, 235) // 计划里看似有多余页（此处故意让计划 > 0 以走到写路径）
+	// 用一个「写了个寂寞」的落地器模拟内核未按请求变化（写后回读不变）。
+	set := &frozenSetter{root: root}
+
+	// 声明低于实际、且有空闲 → plan.Reclaimable > 0，会尝试写。
+	res := ReconcileHugepages(root, map[string]int{"2M": 512}, set, nil)
+	p := poolBySize(t, res, "2M")
+	if p.Action != HugepageActionReclaimed && p.Action != HugepageActionVerifyFailed {
+		t.Fatalf("结果应为 reclaimed 或 verify_failed，实得 %+v", p)
+	}
+	// 回读未变（仍 768）→ 必须 verify_failed 且不计入已回收（不谎称收敛）。
+	if p.ActualAfter != 768 {
+		t.Fatalf("回读未变时应如实为 768，实得 %d", p.ActualAfter)
+	}
+	if p.Action != HugepageActionVerifyFailed || p.Error == "" {
+		t.Fatalf("回读未变必须报 verify_failed 且带原因：%+v", p)
+	}
+	if p.Reclaimed != 0 || res.Reclaimed != 0 {
+		t.Fatalf("回读未变不该计入已回收：%+v", p)
+	}
+}
+
 func TestReconcileHugepages_ReadbackMismatchReported(t *testing.T) {
 	root := t.TempDir()
 	writePool(t, root, "1G", 4, 2)
@@ -232,3 +309,126 @@ func TestSetPoolPages_UnknownSizeAndWrite(t *testing.T) {
 type noopSetter struct{}
 
 func (noopSetter) SetPoolPages(string, int) error { return nil }
+
+// frozenSetter 模拟「写 sysfs 成功但内核未按请求变化」（例如目标页不在空闲链表上）：回读不变。
+type frozenSetter struct{ root string }
+
+func (s *frozenSetter) SetPoolPages(pageSize string, target int) error {
+	// 写目标值，但随即「内核」又把它改回原样——模拟只在空闲页上生效、其余释放不了。
+	nr, free, _ := ReadHugepagePool(s.root, pageSize)
+	_ = target
+	writePoolRaw(s.root, pageSize, nr, free)
+	return nil
+}
+
+// writePoolRaw 直接按数值写池（无 *testing.T，供假落地器复用）。
+func writePoolRaw(root, pageSize string, nr, free int) {
+	kb, ok := HugepagePageKB(pageSize)
+	if !ok {
+		return
+	}
+	dir := filepath.Join(root, "sys", "kernel", "mm", "hugepages", fmt.Sprintf("hugepages-%dkB", kb))
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "nr_hugepages"), []byte(strconv.Itoa(nr)), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "free_hugepages"), []byte(strconv.Itoa(free)), 0o644)
+}
+
+// ---------- 实际持有汇总（决策 #346） ----------
+
+// writeSmaps 在临时根下造出 /proc/<pid>/smaps。
+func writeSmaps(t *testing.T, root, pid, content string) {
+	t.Helper()
+	dir := filepath.Join(root, "proc", pid)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("建 /proc/%s 目录: %v", pid, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "smaps"), []byte(content), 0o644); err != nil {
+		t.Fatalf("写 /proc/%s/smaps: %v", pid, err)
+	}
+}
+
+// smapsBlock 拼一个 smaps 映射块：头行（地址范围/权限/偏移/dev:inode/路径）+ Size +
+// KernelPageSize + VmFlags。huge=true 时 VmFlags 带 `ht`（内核的 HugeTLB 标记）。
+func smapsBlock(start, end, dev, inode string, sizeKB, pageKB int, huge bool, path string) string {
+	flags := "rd wr mr mw me ac"
+	if huge {
+		flags = "rd wr sh mr mw me ms de ht pf io"
+	}
+	return fmt.Sprintf("%s-%s rw-s 00000000 %s %s %s\nSize: %d kB\nKernelPageSize: %d kB\nMMUPageSize: %d kB\nVmFlags: %s\n",
+		start, end, dev, inode, path, sizeKB, pageKB, pageKB, flags)
+}
+
+func TestHugepageHeldPages(t *testing.T) {
+	root := t.TempDir()
+	// pid 100：1G 映射 2 页 + 2M 映射 3 页 + 一个普通 4kB 映射（不计）+ 一个 THP
+	// （KernelPageSize=2M 但无 ht → 不是 hugetlb，不计）。
+	pid100 := smapsBlock("7f0000000000", "7f0040000000", "00:0d", "42", 2*1048576, 1048576, true, "/dev/hugepages/1-sem-vm/pc.ram") +
+		smapsBlock("7f1000000000", "7f1000600000", "00:0d", "77", 3*2048, 2048, true, "/dev/hugepages/vpp") +
+		smapsBlock("7f2000000000", "7f2000001000", "08:01", "999", 4, 4, false, "/usr/lib/x.so") +
+		smapsBlock("7f3000000000", "7f3000200000", "00:00", "0", 2*2048, 2048, false, "[heap]")
+	// pid 200：与 pid 100 共享同一个 1G hugetlbfs 映射（同 dev:inode → 只应计一次）。
+	pid200 := smapsBlock("7fa000000000", "7fa040000000", "00:0d", "42", 2*1048576, 1048576, true, "/dev/hugepages/1-sem-vm/pc.ram")
+	writeSmaps(t, root, "100", pid100)
+	writeSmaps(t, root, "200", pid200)
+
+	held, ok := HugepageHeldPages(root)
+	if !ok {
+		t.Fatal("应能读到持有值")
+	}
+	if held["1G"] != 2 {
+		t.Errorf("1G 实际持有 = %d，期望 2（共享映射按 inode 只计一次；普通/THP 映射不计）", held["1G"])
+	}
+	if held["2M"] != 3 {
+		t.Errorf("2M 实际持有 = %d，期望 3", held["2M"])
+	}
+
+	// 取不到：/proc 不存在（非 Linux / 权限不足）→ ok=false，调用方应回 -1，不编造 0。
+	if _, ok := HugepageHeldPages(t.TempDir()); ok {
+		t.Fatal("/proc 不存在时应报「取不到」（ok=false），不编造 0")
+	}
+}
+
+// ---------- 对账回收：无主占用页**不在**回收范围（决策 #346 真机实测撤回） ----------
+
+// dev34 形态（2M）：声明 768 / 实际 768 / 空闲 235；进程只持有 23 页 → 无主占用 510 页。
+// reclaim 只回收空闲的多余页（此处实际 <= 声明，无多余页）→ 不动作、不写、如实报无可回收；
+// 无主页只作可见性（Orphan/Held 观测 + Orphaned() 供告警），**绝不报成功**。
+func TestReconcileHugepages_OrphanNotReclaimed(t *testing.T) {
+	root := t.TempDir()
+	writePool(t, root, "2M", 768, 235)
+	// 进程持有 23 页 2M（ha 映射）。
+	writeSmaps(t, root, "555",
+		smapsBlock("7f0000000000", "7f0002e00000", "00:0d", "42", 23*2048, 2048, true, "/dev/hugepages/vpp-heap"))
+
+	set := &countingSetter{}
+	res := ReconcileHugepages(root, map[string]int{"2M": 768}, set, nil)
+	p := poolBySize(t, res, "2M")
+	if p.PageSize != "2M" {
+		t.Fatalf("应取到 2M 池：%+v", p)
+	}
+	if p.Held != 23 || p.Orphan != 510 {
+		t.Fatalf("进入对账时应观测到持有 23 / 无主 510：%+v", p)
+	}
+	if p.Action != HugepageActionNone || p.Reclaimed != 0 || res.Reclaimed != 0 {
+		t.Fatalf("实际 == 声明（无空闲多余页）时不该回收、更不该报成功：%+v", p)
+	}
+	if len(set.writes) != 0 {
+		t.Fatalf("无空闲多余页时不该写 sysfs，实得 %v", set.writes)
+	}
+	// 独立事实源：池与空闲数完全没变（无主页写 nr 也释放不了）。
+	if nr, free, _ := ReadHugepagePool(root, "2M"); nr != 768 || free != 235 {
+		t.Fatalf("回读 = nr %d free %d，期望 nr 768 free 235（无变化）", nr, free)
+	}
+	// 无主页仍应如实呈现，供 ORPHAN 告警。
+	if len(res.Orphaned()) != 1 || res.Orphaned()[0].Orphan != 510 {
+		t.Fatalf("Orphaned 应列出该池与 510 页无主（供建 ORPHAN 告警）：%+v", res.Orphaned())
+	}
+}
+
+// countingSetter 记录写次数（不真改文件）。
+type countingSetter struct{ writes []int }
+
+func (s *countingSetter) SetPoolPages(pageSize string, target int) error {
+	s.writes = append(s.writes, target)
+	return nil
+}

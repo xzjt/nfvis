@@ -40,3 +40,20 @@ round124 记录「1G 池无空闲页 ⇒ 第二个 VM（`cli-vm`/`dns-vm`）报 
 §4 现场改动与清场
 - 实验只临时停止/启动 sem-vm 并临时写了一次 `nr_hugepages`（1 → 立即恢复 2）；终态：`nr=2`、
   sem-vm running、现场与实验前一致；**未改 GRUB/cmdline 基线**。
+
+§更正（round126，dev34 真机实测）
+================================
+日期 2026-10-04；环境 nfvis-vm，2.0.0~dev34。
+- **§2 的「另 1 页无主、`echo 1 > nr_hugepages` 能释放它」不成立**：dev34 实测 1G
+  `声明2/实际2/在用2/持有2/无主0`——两页**都被真持有**，没有无主占用。当年 `echo 1` 成功**只因池里恰有
+  1 页空闲**（开机预分配 4 页 → 按声明收敛到 2 时留下的是**空闲**页，而非无主页），**并非**「释放了无主页」。
+- **§1 的「VPP 用 2M、不占 1G」也不成立**：VPP main heap 的 `/memfd:seg_0-0`（`VmFlags` 含 `ht`）就是一个
+  **1G 页**；1G 两页 = VPP 1 页 + sem-vm guest RAM 1 页（即 round124 最初的「各占 1 页」是对的）。
+- **可回收性结论随之撤回**：无主占用页（真出现时）**不能**靠写 `nr_hugepages` 回收——dev34 实测 2M
+  `声明768/实际768/在用533/持有23/无主510`：那 510 页**不在 free list**（所以算「在用」）、**不在任何
+  smaps 的 ht 映射里**（所以 held 看不到）、**无 fd/inode 引用**；结合 VPP `show physmem` 的
+  `reserved-pages 8192`，判定为**被进程预留（reserve）但未 fault 的 2M 页**（数据面 DPDK 预留）——写
+  `nr_hugepages` **释放不了**（实测 `nr` 不变，回收前后 `nr=768 free=235` 完全没变）。
+  ⇒ 产品侧只保留**可见性**（读视图两列 + `state=orphan` + `HUGEPAGE_POOL_ORPHAN` 告警），**撤回无主页回收**。
+- held 数字为何可信：同 round124 §更正——只认 `VmFlags` 含 `ht` 的 hugetlb 映射、按 inode 去重、按
+  `KernelPageSize` 折算（dev34 2M `held=23` 与 VPP 的实际映射一致）。
