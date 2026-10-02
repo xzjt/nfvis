@@ -1,0 +1,45 @@
+NFViS v2 真机验证记录 round129 —— 决策 #348（nfvisd 启动时确保 VPP 运行）重启测试定论
+====================================================================
+日期：2026-10-03；环境：nfvis-vm；构建：2.0.0~dev44（本 PR 重基于 #349 合并后的 v2 @ 9d79275，
+/root/src git archive 同步构建 + dpkg -i）；前置：#349（底座无响应时启动有界降级）已合并并真机验证。
+
+§0 结论
+**#348 达成**。`reboot` 后三观察项全部通过：
+① **nfvis 单次启动即 active**（本 boot 的 `Starting nfvis.service` 计数 = 1，无 90s 超时、无 restart 循环）；
+② **VPP 自启**（本决策的核心目标）：journal 明证「检测到 VPP 未运行，发起拉起（不等待）」→
+   「已发起拉起 VPP；就绪由连接重试循环接管」→ `vppctl show version` 正常（26.06-release）→
+   「已连接 VPP」→「恢复收敛完成」；`VPP_AUTOSTART_FAILED` 未出现（VPP 正常拉起）；
+③ **开机 libvirtd 假死未复现**（virsh rc=0、sem-vm running）——round129 的开机假死是偶发而非必现；
+   但见 §2，开机竞态（R129-2）是本轮新登记的真缺口。
+
+§1 重启测试时间线（本 boot，UTC）
+- 19:27:19  libvirtd.service Started（systemd 记账）；
+- 19:27:24  machine-qemu×2d1×2dsem×2dvm.scope Started（libvirt autostart 拉 sem-vm，1G 大页 prealloc）；
+- ~19:27:21-31  nfvisd 启动装配：libvirt 连接 10s 有界等待内 libvirtd 忙于自启 sem-vm、不服务 AuthList
+  → **#349 的有界降级生效**：`WARN 计算编排未接入（libvirt 连接失败）`（context deadline exceeded），
+  nfvisd **继续启动**（修复前这一步会永久阻塞 → 90s 超时循环——round128 的四次失败现场）；
+- 同一启动序列：「检测到 VPP 未运行，发起拉起（不等待）」→「已发起拉起 VPP」→「nfvisd 就绪」（READY=1）
+  →「已连接 VPP」→「恢复收敛完成」。
+- 复查（boot 后 ~2min）：`systemctl is-active nfvis vpp libvirtd` = active/active/active；
+  `vppctl show version` rc=0；`virsh -c qemu:///system list --all` rc=0（sem-vm running，libvirt autostart 拉起）。
+
+§2 新登记 R129-2（开机竞态，真缺口，本轮不修）
+- 时序：libvirtd「Started」后要先做完 sem-vm 的 autostart（1G 大页 prealloc + mem-lock）才服务客户端
+  握手；nfvisd（After=libvirtd.service 但 libvirtd 的 systemd 记账早于实际可服务）在 10s 有界等待内
+  连不上 ⇒ 按 #349 口径降级为 NoopCompute，**且不自动重连（#34349 契约的如实边界）**。
+- 后果：**每次开机后 VM 编排（VM 生命周期动作）需人工 `systemctl restart nfvis` 恢复**——本次实测：
+  降级态下 `request virtual-machine-functions … stop` 如实拒绝、`show virtual-machine-functions`
+  State「-」；`systemctl restart nfvis` 后「计算编排已接入」、COMPUTE_UNAVAILABLE 消失、sem-vm running。
+- 候选修法（待立项）：启动期 libvirt 连接失败后**有界重试数次**（如 3×10s 退避）再转永久降级，或
+  周期巡检对 COMPUTE_UNAVAILABLE 做自动重连（需评估 Provider 换装的线程安全）。VNF 本身不受影响
+  （libvirt autostart 已把它拉起）。
+
+§3 幂等路径（口径②）同场验证
+- 重启测试后 `systemctl restart nfvis`：journal「**VPP 已在运行，无需拉起**」→「已连接 VPP」——
+  EnsureRunning 对「VPP 已运行」零动作 ✓；告警面板无 VPP_AUTOSTART_FAILED、COMPUTE_UNAVAILABLE
+  已随新进程消失，仅剩既有的 HUGEPAGE_POOL_ORPHAN（#346 登记的独立事项）。
+
+§4 门禁
+- 本 PR 分支 rebase 后 `make check` 全绿（决策条数 251、契约同步、全量测试）；R129-1 的 #349 已在
+  v2（PR #279 squash 合并）。
+- 结论：#348 状态注记在附录 A 改写为「达成」，本 PR 可合并。
