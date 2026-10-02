@@ -94,6 +94,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show nat` | NAT 池/规则/转换会话计数 | `GET /nat` | ✅ |
 | `show port-mirroring` | SPAN 会话状态 | `GET /port-mirroring` | ✅ |
 | `show qos policies` | 限速策略与绑定 | `GET /qos/policies` | ✅ |
+| `show dns proxy` | 数据面 DNS 代理（启用态 + 全局上游 + 各域覆盖；决策 #345） | `GET /dns/proxy` | ✓（round124：启用态/上游读视图三面同源；数据面路径见 round124 证据——punt socket 转发器） |
 | `show vpp` | 数据面概览：**版本/连接/待重启**/线程/buffer/内存 | `GET /vpp/status` | ✅（发现 #11 补齐前三项） |
 | `show vpp threads` | main/worker 线程清单与绑核 | 运行态（govpp threads） | ✅ |
 | `show vpp runtime [thread <id>]` | **线程级**运行态：每线程向量率/主循环速率 + 整机向量率 + 工作线程数 + 数据面运行时长 | 运行态（stats segment，经 `vpp_get_stats` 解码，与 buffer/接口计数同源） | ✅（决策 #200；按节点明细无结构化来源，CLI 如实说明需 `vppctl show runtime`） |
@@ -245,6 +246,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set system timezone <tz>` | 时区 | 宿主 timedatectl | ✅ |
 | `set system ntp server <ip\|host> [prefer]` | NTP 服务器（`prefer` 为无值 flag） | 宿主 NTP | ✅（**决策 #76②** 修复） |
 | `set system dns server <ip> [secondary <ip>]` | DNS（主/备） | 宿主 resolv | ✅（**决策 #76⑥** 修复 secondary） |
+| `set system dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**全局上游**（决策 #345）：域内 VNF/容器指向网关即可解析；上游为**宿主侧可达**（非 VPP FIB），nfvisd 内自研转发器经 `punt socket` 收包、解析后按原域回注 | nfvisd punt socket + 宿主解析 | ✓（round124：能力前提与端到端数据面实证，见 `docs/evidence/v2-round124-*.txt`） |
+| `delete system dns proxy server [<ip> \| secondary <ip>]` | 撤销全局上游；不带取值即清空（全空则停用并注销 punt，VPP 恢复默认处理） | nfvisd punt socket | ✓（round124：见 `docs/evidence/v2-round124-*.txt`） |
 | `set system api port <n>` | HTTPS 端口（默认 443） | nfvisd | ✅ |
 | `set system api token-ttl-minutes <n>` | Token 有效期（默认 60） | nfvisd | ✅ |
 | `set system api max-sessions <n>` | 并发会话上限（真限流） | nfvisd | ✅（决策 #71） |
@@ -314,6 +317,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `delete virtual-switches <n> dhcp-relay` | 撤销 DHCP 中继（`dhcp_proxy_config` IsAdd=false，幂等；随交换机删除一并撤） | VPP dhcp proxy | ✓（round113：撤销后 `show dhcp proxy` 清空、读视图同步；恢复重放存活经多次 VM/nfvis 重启实证） |
 | `set virtual-switches <n> learn-limit <n>` | MAC 学习条数上限（仅 L2；环路/广播风暴缓解，**非阻断**；1-16777216，超限拒绝） | VPP `bridge_domain_set_learn_limit` | ✓（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
 | `delete virtual-switches <n> learn-limit` | 清 MAC 学习上限（恢复 VPP 默认 16777216，幂等） | VPP `bridge_domain_set_learn_limit` | ✓（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
+| `set virtual-switches <n> dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**按域上游**（决策 #345）：只对该交换机转发域（L2＝BVI；L3＝其 l3-interface）的入向查询生效；本域非空优先，否则回落全局；两者皆空则回 SERVFAIL | nfvisd punt socket + 宿主解析 | ✓（round124：能力前提与端到端数据面实证，见 `docs/evidence/v2-round124-*.txt`） |
+| `delete virtual-switches <n> dns proxy server [<ip> \| secondary <ip>]` | 撤销本域上游（不带取值即清空本域；回落全局） | nfvisd punt socket | ✓（round124：见 `docs/evidence/v2-round124-*.txt`） |
 | `set virtual-switches <n> ports [<seq>] interface <if> [trunk vlans <l>\|native <v>]` | 物理口成员 | VPP BD | ✅ |
 | `set virtual-switches <n> ports [<seq>] vnf <vm> interface <vnic> [trunk vlans <l>]` | vhost-user 成员 | VPP + libvirt | ✅ |
 | `set virtual-switches <n> ports [<seq>] container <ct> interface <vnic>` | 容器 memif 成员 | VPP + Docker | ✅ |
@@ -432,15 +437,15 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 节 | 行数 | 节 | 行数 |
 |---|---|---|---|
-| §1.1 `show`（含通用管道 9） | 76 | §2.2b `protocols` | 3 |
+| §1.1 `show`（含通用管道 9） | 77 | §2.2b `protocols` | 3 |
 | §1.2 `request` | 47 | §2.3 `interfaces` 与 `bonds` | 10 |
-| §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 17 |
+| §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 19 |
 | §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 9 |
-| §2.2 `system` | 35 | §2.6 `resource-pools` | 3 |
+| §2.2 `system` | 37 | §2.6 `resource-pools` | 3 |
 | §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 20 |
-| §2.9 `container-functions` | 10 | **合计** | **266** |
+| §2.9 `container-functions` | 10 | **合计** | **271** |
 
-**按实测状态分布**（共 266 行）：
+**按实测状态分布**（共 271 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
@@ -448,7 +453,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 设计拒绝（decision #340） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 15 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 5 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319。决策 #337 的 `set/delete virtual-switches <n> learn-limit …` 两条已入 fulltest 阶段 2、单测覆盖，真机复跑待执行；原 `set/delete virtual-switches <n> dhcp-relay …` 已于 round113 真机验证并移出本行（决策 #335）） |
+| 🚫 本轮未执行 | 20 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 10 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319。决策 #337 的 `set/delete virtual-switches <n> learn-limit …` 两条已入 fulltest 阶段 2、单测覆盖，真机复跑待执行；原 `set/delete virtual-switches <n> dhcp-relay …` 已于 round113 真机验证并移出本行（决策 #335）；决策 #345 的 5 行（`show dns proxy`、`set`/`delete system dns proxy server`、`set`/`delete virtual-switches <n> dns proxy server`）单测覆盖、真机复跑待执行） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、

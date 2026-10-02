@@ -172,6 +172,11 @@ func run() error {
 	netProvider.SetServices(network.NewServicesProviderFunc(vppMgr.SvcClientFunc()))
 	// 决策 #335：交换机 DHCP 中继（VPP dhcp proxy；恢复重放含 relay）
 	netProvider.SetDhcp(network.NewDhcpProviderFunc(vppMgr.DhcpClientFunc()))
+	// 决策 #345：数据面 DNS 代理（自研域内转发器，punt socket；恢复重放含它）
+	dnsProxy := network.NewDNSProxyProviderFunc(vppMgr.PuntClientFunc())
+	// 优雅退出必须注销 punt（否则留一个指向已消失 socket 的注册＝域内 DNS 黑洞）
+	defer func() { _ = dnsProxy.Close() }()
+	netProvider.SetDNSProxy(dnsProxy)
 	netProvider.SetACL(network.NewAclProviderFunc(vppMgr.AclClientFunc()))
 	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
 	netProvider.SetBond(network.NewBondProviderFunc(vppMgr.BondClientFunc()))

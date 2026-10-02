@@ -24,6 +24,14 @@ import (
 var statementAliasesArray = []aliasRule{
 	// system dns server <ip>（备用地址写法：`dns server <ip> secondary <ip>`，见命令树）
 	{pattern: []string{"system", "dns", "server", "*"}, apply: dnsServerApply},
+	// system dns proxy server …（决策 #345）：数据面 DNS 代理的全局上游。模型落点不是 system 下，
+	// 而是 vpp.dns_proxy_servers（与各交换机 dns_proxy_servers 一并决定启用/注销）——SPA 机制按
+	// 父容器落点、指向不了 vpp 结构，故用别名重定向（与 dnsServerApply 同一手法）。
+	// ⚠️ 更具体的形态须排在带通配的形态之前，否则 `… server <ip> secondary <ip>` 会被单值形态吞掉。
+	{pattern: []string{"system", "dns", "proxy", "server", "*", "secondary", "*"}, apply: dnsProxyApplyPair},
+	{pattern: []string{"system", "dns", "proxy", "server", "secondary", "*"}, apply: dnsProxyApplyOne},
+	{pattern: []string{"system", "dns", "proxy", "server", "*"}, apply: dnsProxyApplyOne},
+	{pattern: []string{"system", "dns", "proxy", "server"}, apply: dnsProxyClearAll},
 	// system kernel params <param>
 	{pattern: []string{"system", "kernel", "params", "*"}, apply: kernelParamsApply},
 	// bonds <name> members [<seq>] <ifname>
@@ -37,6 +45,49 @@ func dnsServerApply(tree map[string]any, t []string, isSet bool) error {
 		return err
 	}
 	return appendOrRemove(sys, "dns_servers", t[3], isSet)
+}
+
+// dnsProxyVpp 取（或建）vpp 对象：数据面 DNS 代理**全局上游**的落点（决策 #345）。
+func dnsProxyVpp(tree map[string]any) (map[string]any, error) {
+	return ensureObjErr(tree, "vpp")
+}
+
+// dnsProxyApplyPair：`set/delete system dns proxy server <ip> secondary <ip>`。
+// t[4] 与 t[6] 是两个上游地址，一并追加或移除。
+func dnsProxyApplyPair(tree map[string]any, t []string, isSet bool) error {
+	vpp, err := dnsProxyVpp(tree)
+	if err != nil {
+		return err
+	}
+	for _, ip := range []string{t[4], t[6]} {
+		if err := appendOrRemove(vpp, "dns_proxy_servers", ip, isSet); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// dnsProxyApplyOne：`set/delete system dns proxy server [secondary] <ip>`。
+func dnsProxyApplyOne(tree map[string]any, t []string, isSet bool) error {
+	vpp, err := dnsProxyVpp(tree)
+	if err != nil {
+		return err
+	}
+	return appendOrRemove(vpp, "dns_proxy_servers", t[len(t)-1], isSet)
+}
+
+// dnsProxyClearAll：`delete system dns proxy server`（整表清空 → 全局上游归零）。
+// `set` 形态缺取值：明确报错而不是静默清空（避免误把「忘了填地址」当「清空」）。
+func dnsProxyClearAll(tree map[string]any, _ []string, isSet bool) error {
+	if isSet {
+		return fmt.Errorf("缺少上游地址：set system dns proxy server <ip> [secondary <ip>]")
+	}
+	vpp, err := dnsProxyVpp(tree)
+	if err != nil {
+		return err
+	}
+	delete(vpp, "dns_proxy_servers")
+	return nil
 }
 
 func kernelParamsApply(tree map[string]any, t []string, isSet bool) error {

@@ -42,7 +42,7 @@ func init() {
 	subtreeEmitters["nat"] = emitNatFamily
 	subtreeEmitters["port-mirroring"] = emitPortMirroringFamily
 	subtreeEmitters["resource-pools"] = emitResourcePoolsFamily
-	subtreeEmitters["vpp dpdk"] = emitVppDpdkFamily
+	subtreeEmitters["vpp"] = emitVppFamily
 	subtreeEmitters["virtual-machine-functions"] = emitVMFamily
 	subtreeEmitters["container-functions"] = emitContainerFamily
 }
@@ -430,6 +430,13 @@ func emitVirtualSwitchFamily(w *stmtWriter, node *schema.Node, val any, prefix, 
 		if v, ok := m["learn_limit"].(float64); ok && v != 0 {
 			w.add(toks(prefix, "learn-limit", formatScalar(v)))
 		}
+		// 数据面 DNS 代理的按域上游（决策 #345）：模型数组，语句树是 dns→proxy→server <ip> 三层
+		// （与别名 aliasVSDNSProxy* 对偶）。元素此时已由上面的 type 语句建出（别名 elemByID 要求）。
+		if arr, ok := m["dns_proxy_servers"].([]any); ok {
+			for _, ip := range arr {
+				w.add(toks(prefix, "dns", "proxy", "server", formatScalar(ip)))
+			}
+		}
 		if cc, ok := m["cross_connect"].(bool); ok && cc {
 			if len(seqs) == 2 {
 				w.add(toks(prefix, "cross-connect", seqs[0], seqs[1]))
@@ -782,11 +789,65 @@ func emitNumaNode(w *stmtWriter, em map[string]any, numaToks []string) {
 	w.add(t)
 }
 
-// ---------- vpp dpdk ----------
+// ---------- vpp（dns-proxy 显式；cpu/memory/plugins 机械，dpdk 委托 dpdk 发射器） ----------
 //
-// dev 全局默认在模型里是对象、树按「具名数组容器 + 透明参数」建模，机械逆走按数组
-// 解对象失败即跳过；per_dev 无树关键字。uio-driver 机械可达（委托）。
+// 决策 #345 后注册键为 "vpp"（原先只注册 "vpp dpdk"，与 "vpp" 前缀重叠会导致命中不确定，
+// 故合并为一处）：dns_proxy_servers 扁平在 vpp 下、而语句树在 system→dns→proxy 下，
+// 机械逆走查不到 "dns_proxy_servers" 键即跳过，须在本层显式发射为 `set system dns proxy server <ip>`
+// （绝对语句前缀，与别名 cli_aliases_array.go 的 dnsProxyApply* 对偶；回放自校验据此验证还原性）。
+func emitVppFamily(w *stmtWriter, node *schema.Node, val any, prefix, keyPath []string) error {
+	switch kpOf(keyPath) {
+	case "vpp":
+		m, ok := val.(map[string]any)
+		if !ok {
+			return nil
+		}
+		if arr, ok := m["dns_proxy_servers"].([]any); ok {
+			for _, ip := range arr {
+				// 语句落在 system 族（与既有 dns server 同形），故用绝对前缀而非 prefix。
+				w.add(append([]string{"system", "dns", "proxy", "server"}, formatScalar(ip)))
+			}
+		}
+		// dpdk 子族显式接管（原 "vpp dpdk" 注册键的处理器）：dev 全局默认为对象而树按数组建模，
+		// 机械逆走会失败，必须在此调用 dpdk 发射器；其余键（cpu/memory/plugins）机械可达。
+		if dm, ok := m["dpdk"].(map[string]any); ok {
+			if dn := childKeyword(node, "dpdk"); dn != nil {
+				if err := emitVppDpdkFamily(w, dn, dm, toks(prefix, "dpdk"),
+					append(append([]string{}, keyPath...), "dpdk")); err != nil {
+					return err
+				}
+			}
+			filtered := make(map[string]any, len(m))
+			for k, v := range m {
+				if k != "dpdk" {
+					filtered[k] = v
+				}
+			}
+			return emitMechanicalInner(w, node, filtered, prefix, keyPath)
+		}
+		return emitMechanicalInner(w, node, m, prefix, keyPath)
+	case "vpp dpdk":
+		return emitVppDpdkFamily(w, node, val, prefix, keyPath)
+	default:
+		// vpp cpu / memory / plugins（edit 进入的层级）与 dpdk 内层级：机械可达
+		return emitMechanicalInner(w, node, val, prefix, keyPath)
+	}
+}
 
+// childKeyword 在 n 的直接子节点里按名取关键字节点（供发射器显式接管子族）。
+func childKeyword(n *schema.Node, name string) *schema.Node {
+	if n == nil {
+		return nil
+	}
+	for _, c := range n.Children {
+		if c.Kind == schema.Keyword && c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// emitVppDpdkFamily：vpp dpdk 子族（dev 全局默认对象 / per_dev 无树关键字；uio-driver 机械可达）。
 func emitVppDpdkFamily(w *stmtWriter, node *schema.Node, val any, prefix, keyPath []string) error {
 	switch kpOf(keyPath) {
 	case "vpp dpdk":

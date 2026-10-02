@@ -95,6 +95,9 @@ show acls <name> detail
 show nat                                            # NAT 池、规则、转换会话计数
 show port-mirroring                                 # SPAN 会话状态
 show qos policies                                   # 限速策略与绑定
+show dns proxy                                      # 数据面 DNS 代理（决策 #345）：启用态 + 全局上游 + 各域覆盖
+                                                    #   （GET /dns/proxy；只读产品配置声明——vpp.dns_proxy_servers
+                                                    #   与各 virtual-switches[].dns_proxy_servers）
 
 show vpp                                            # VPP 数据面概览：版本、线程/worker、buffer、内存（GET /vpp/status）
 show vpp threads                                    # main/worker 线程清单与绑核（govpp threads dump）
@@ -353,7 +356,28 @@ discard | exit                    # discard 丢弃 candidate；exit 有未提交
 set hostname <string>
 set timezone <tz>
 set ntp server <ip|host> [prefer]
-set dns server <ip> [secondary <ip>]
+set dns server <ip> [secondary <ip>]                 # 宿主解析器（本机 resolv/systemd-resolved；不改）
+set dns proxy server <ip> [secondary <ip>]           # 数据面 DNS 代理——**全局上游**（决策 #345）：域内 VNF/容器把
+                                                     #   resolver 指向**产品自己的地址**（交换机网关 BVI / L3 接口
+                                                     #   地址）即可解析。实现＝**自研域内转发器**：VPP 经 `punt socket`
+                                                     #   （startup.conf 的 `punt { socket … }`，由产品生成）把
+                                                     #   「目的地址 ∈ VPP 本机」的 UDP/53 交给 nfvisd，nfvisd 用
+                                                     #   **宿主网络栈**向上游解析后按原域回注（`PUNT_IP4_ROUTED`）。
+                                                     #   ⚠️ 边界更正（决策 #338 撤回记录那条「上游须在 VPP FIB 内可达」
+                                                     #   只适用于 VPP dns 插件形态）：本轮上游是**宿主侧可达**。
+                                                     #   启用判据：全局或任一交换机非空即注册并启用；全空即注销
+                                                     #   （VPP 恢复默认处理）。纯 UDP 转发：不缓存、不解析内容。
+                                                     #   ⚠️ 代价（如实告知）：启用期间指向产品地址的 UDP/53 由 nfvisd
+                                                     #   独占——nfvisd 不在（崩溃/被停）时这些包被 VPP punt 节点
+                                                     #   **丢弃**（节点 IS_DROP），域内 DNS 中断；故停用必须注销。
+                                                     #   客户端用 **TCP** 查 DNS 不在覆盖内（punt 只注册 UDP 53）；
+                                                     #   上游不可达/超时按运行期如实回 SERVFAIL 并计数。
+                                                     #   ⚠️ 覆盖 **IPv4/UDP/53**（punt 注册按地址族）：IPv6 的解析
+                                                     #   查询尚未注册与回注，不在覆盖内（属后续：v6 回注路径真机验证
+                                                     #   后再启用，不先做成假能力）。
+delete dns proxy server [<ip> | secondary <ip>]      # 撤销全局上游；不带取值即清空全部
+                                                     #   （清空后若各域也空 → 停用并注销 punt）
+                                                     #   注：`set dns server`（宿主解析器）与之各管一路，互不影响
 set api
   ├─ port <uint>                       # HTTPS 端口，默认 443
   ├─ token-ttl-minutes <uint>          # 默认 60
@@ -441,6 +465,13 @@ set gateway acl-in <acl> | acl-out <acl>
                                                      #   既不拦截也不计数，绑定给不出任何保护。提交期直接拒绝。
                                                      #   替代：`set virtual-switches <vs> l3-interface <ifname>
                                                      #   acl-in <acl>`（vNIC/物理口作 L3 接口，该形态已实证生效）。
+set dns proxy server <ip> [secondary <ip>]           # 数据面 DNS 代理——**按域上游**（决策 #345）：只对该交换机
+                                                     #   转发域的入向查询生效（L2＝网关 BVI；L3＝其 l3-interface 地址）。
+                                                     #   优先级：本域非空 → 用本域；否则回落全局
+                                                     #   （`set system dns proxy server`）；两者皆空 → 对来自本域的
+                                                     #   查询如实回 **SERVFAIL**（不静默超时——那比未启用代理时 VPP
+                                                     #   回 ICMP unreachable 更差）。
+delete dns proxy server [<ip> | secondary <ip>]      # 撤销本域上游（不带取值即清空本域；回落全局）
 set dhcp-relay server <ip>                           # DHCP 中继（决策 #335）：把该交换机转发域（网关 VRF，
                                                      #   缺省专属 vr-<name>）里的 DHCP 广播中继到 <ip>。
                                                      #   前置校验：仅 L2 且已 `set gateway ip` 的交换机可配——

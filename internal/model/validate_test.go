@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -328,6 +329,48 @@ func TestValidateLearnLimit(t *testing.T) {
 	c3.VirtualSwitches = append(c3.VirtualSwitches, VirtualSwitch{Name: "vs-l3", Type: "l3", LearnLimit: 100})
 	c3.Vrfs = append(c3.Vrfs, Vrf{Name: "vs-l3"})
 	mustErrContaining(t, Validate(c3), "vs-l3", "L2")
+}
+
+// 决策 #345：数据面 DNS 代理上游（全局 vpp.dns_proxy_servers + 按域 vs.dns_proxy_servers）
+// 逐条须为合法 IP（v4/v6），空串拒绝；条数不设上限。
+func TestValidateDNSProxyUpstreams(t *testing.T) {
+	// 未配置（nil/空）合法
+	mustNoErr(t, Validate(validBase()))
+
+	// 全局：合法 v4/v6、可多条
+	c := validBase()
+	c.Vpp.DNSProxyServers = []string{"8.8.8.8", "2001:4860:4860::8888", "1.1.1.1"}
+	mustNoErr(t, Validate(c))
+
+	// 全局：非法 IP 与空串拒绝
+	bad := validBase()
+	bad.Vpp.DNSProxyServers = []string{"8.8.8.8", "not-an-ip"}
+	mustErrContaining(t, Validate(bad), "vpp.dns_proxy_servers[1]", "有效 IP")
+	empty := validBase()
+	empty.Vpp.DNSProxyServers = []string{""}
+	mustErrContaining(t, Validate(empty), "vpp.dns_proxy_servers[0]", "有效 IP")
+
+	// 按域：合法 v4/v6
+	vs := validBase()
+	vs.VirtualSwitches[0].DNSProxyServers = []string{"10.0.0.53", "2001:db8::53"}
+	mustNoErr(t, Validate(vs))
+
+	// 按域：非法拒绝（L3 交换机也可配按域上游——转发域是其 l3-interface，不要求 BVI 网关）
+	l3 := validBase()
+	l3.VirtualSwitches = append(l3.VirtualSwitches, VirtualSwitch{Name: "vs-l3", Type: "l3", DNSProxyServers: []string{"2001:db8::1"}})
+	l3.Vrfs = append(l3.Vrfs, Vrf{Name: "vs-l3"})
+	mustNoErr(t, Validate(l3))
+
+	badVS := validBase()
+	badVS.VirtualSwitches[0].DNSProxyServers = []string{"10.0.0.999"}
+	mustErrContaining(t, Validate(badVS), "dns_proxy_servers[0]", "有效 IP")
+
+	// 条数不设上限：多条合法
+	many := validBase()
+	for i := 0; i < 40; i++ {
+		many.Vpp.DNSProxyServers = append(many.Vpp.DNSProxyServers, fmt.Sprintf("10.0.%d.%d", i/256, i%256))
+	}
+	mustNoErr(t, Validate(many))
 }
 
 func TestValidateSystemLogin(t *testing.T) {

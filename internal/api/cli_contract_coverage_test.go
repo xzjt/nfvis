@@ -42,7 +42,7 @@ var contractCLICommands = []string{
 	"show vpp", "show vpp threads", "show vpp buffers", "show vpp memory", "show vpp capture",
 	"show vpp runtime", "show vpp runtime thread 1",
 	"show acls", "show acls a1", "show bonds", "show nat",
-	"show port-mirroring", "show qos policies",
+	"show port-mirroring", "show qos policies", "show dns proxy",
 	"show protocols lldp neighbors", "show lldp neighbors",
 	"show alarms", "show users", "show images", "show resource-pools",
 	"show log system", "show log audit", "show log vnf vm1",

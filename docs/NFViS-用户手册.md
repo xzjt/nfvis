@@ -922,6 +922,37 @@ nfvis# commit
 > 会话，普通 commit 会被拒并输出自锁警告；confirmed 让它在超时未确认时自动回滚。
 > 管理口 IP 只在下次启动时收敛监听（运行期不热改地址）。
 
+#### DNS 的两条路：宿主解析器 vs 数据面代理
+
+NFViS 有两个互不影响的 DNS 配置，别混用：
+
+| | 命令 | 谁在用 | 上游要求 |
+|---|---|---|---|
+| **宿主解析器** | `set system dns server <ip> [secondary <ip>]` | 管理面：本机（nfvisd/CLI/`apt` 等）经 systemd-resolved 解析 | 管理口可达即可 |
+| **数据面 DNS 代理（全局）** | `set system dns proxy server <ip> [secondary <ip>]` | 数据面：域内 VNF/容器把 resolver 指向**产品自己的地址**即可解析 | **宿主侧可达**（解析由 nfvisd 发起） |
+| **数据面 DNS 代理（按域）** | `set virtual-switches <vs> dns proxy server <ip> [secondary <ip>]` | 同上，但只对该交换机转发域的入向查询生效 | 同上 |
+
+```bash
+nfvis# set system dns proxy server 8.8.8.8 secondary 1.1.1.1     # 全局上游（所有域）
+nfvis# set virtual-switches vs-lan dns proxy server 192.168.1.53 # 该域专用上游（覆盖全局）
+nfvis# commit
+nfvis$ show dns proxy                                             # 启用态 + 全局上游 + 各域覆盖
+```
+
+- **启用判据**：全局或任一交换机配了上游即启用（注册 VPP punt socket + 起转发器）；全空即停用并**注销**
+  ——不会留下「启用但无上游」的坏态。
+- **优先级**：来源域（该交换机的转发域）配了 → 用按域；否则回落全局；两者皆空 → 该域查询回 **SERVFAIL**
+  （快速失败，不静默超时）。
+- **上游可达性是宿主路径**：解析请求由 nfvisd 用**宿主网络栈**发出（不是 VPP 数据面），因此配的是
+  「管理/主机网络能到」的 DNS；产品不做可达性预检——上游不通时运行期如实回 SERVFAIL。
+- **客户端 resolver 由操作者/DHCP 指定**：域内 VM/容器把 `/etc/resolv.conf` 指向**产品自己的地址**
+  （该域的网关 BVI / L3 接口地址）才会经 NFViS 解析；自动经 DHCP option 6 下发不在本版范围。
+- **代价（如实告知）**：代理启用期间，指向产品地址的 **UDP/53** 由 nfvisd 独占处理——若 nfvisd 不在
+  （崩溃/被停），这些包会被 VPP 丢弃，域内 DNS 中断；故停用请用 `delete … dns proxy server` 走注销路径。
+  客户端用 **TCP** 查 DNS 不在覆盖内；本版不做缓存。
+- 只读视图：CLI `show dns proxy`、REST `GET /dns/proxy`（`{enabled, servers, switches}`）与 Web 系统页同源。
+- **覆盖范围**：本版覆盖 **IPv4/UDP/53**（punt 注册按地址族）；IPv6 的域名解析尚未覆盖（待 v6 注册与回注路径真机验证后启用）。
+
 其他系统级语句：`set system api port <uint>`、`token-ttl-minutes`、`max-sessions`、
 `api tls cert-file <p> key-file <p>`（装外部证书，立即生效）、`api tls self-signed regenerate`
 （重签自签）、`set protocols lldp …`（见 §8.10）。

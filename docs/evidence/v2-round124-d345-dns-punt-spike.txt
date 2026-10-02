@@ -1,0 +1,65 @@
+NFViS v2 真机验证记录 round124 —— 三.3 DNS 数据面代理「路线 c（自研域内转发器，走 VPP punt socket）」
+能力前提核实（spike，先于契约与实现）
+====================================================================
+日期：2026-10-02；环境：nfvis-vm，2.0.0~dev32；VPP v26.06-release；分支 v2 @ 76f1b98。
+缘起：决策 #338（VPP dns 插件）真机实证「只在默认表解析上游」而整体撤回；本轮立项前按 #338 的教训
+**先核实能力前提**再写契约——被核实的对象是「VPP punt socket 能否把域内（VRF 表内）的 UDP/53 查询交给
+宿主用户态程序，且用户态回注的应答能否按该域的表路由回域内客户端」。
+
+§1 底座语义（源码 + 真机实测双向确认）
+- `punt { socket <path> }` 必须在 **startup.conf** 里配置（VPP `punt_config` 是 VLIB_CONFIG_FUNCTION），
+  否则 `vnet_punt_socket_add` 直接以 `"socket is not configured"` 拒绝注册——**运行期无 API 可补**。
+- `punt socket register ipv4 udp <port> socket <client-path>` 的实现是 `udp_register_dst_port(...)`：
+  只对「**目的地址是 VPP 本机地址**」的 UDP/<port> 包生效（转发中的 UDP 包不进 udp4-lookup，不受影响）。
+- 上行包格式 = `punt_packetdesc_t{u32 sw_if_index; enum punt_action_e action}`（8 字节，packed）+ 包体；
+  上行 action 恒 0，`sw_if_index` = `vnet_buffer(b)->sw_if_index[VLIB_RX]`，即**包进入 IP 栈的那个接口**。
+- 回注格式同 8 字节 desc；`action = 1 (PUNT_IP4_ROUTED)` 时 VPP 执行
+  `sw_if_index[VLIB_RX] = desc.sw_if_index` 后送 **ip4-lookup**（即**按该接口所属的 FIB 表**查路由），
+  `action = 0 (PUNT_L2)` 则送 interface-output（按 L2 直接发）。送 ip4-lookup 的是**裸 IP 包**（无以太头），
+  VPP 自己重写 L2 头。
+
+§2 实测（两段，均为真机）
+2a 最小通道（loopback 在**非默认表**，证「按接口的表解析」而非只看表 0）
+- `punt { socket /run/vpp/punt.sock }` 写入 /etc/vpp/startup.conf → `systemctl restart vpp`（产品现场自动恢复：
+  bond0/ens192/ens224 回到 VPP、nfvisd active）。
+- `ip table add 100` + `set interface ip table loop0 100` + `loop0 10.99.99.1/24` + 静态邻居 10.99.99.2。
+- 用户态（python，unix datagram）注入伪查询 10.99.99.2:34567 → 10.99.99.1:53（action=1, RX=loop0）：
+  **收到了 punt**（`desc: sw_if_index=6 action=0`，len=78；VPP 侧 `ip4-udp-punt-socket Socket TX` 计数 +1）。
+- 同轮回注应答（action=1, RX=loop0，dst=10.99.99.2）：`show interface loop0` 由无计数变为
+  `tx packets 2 / tx bytes 140`——**回注的包确实按 loop0 所在的表 100 路由并发出**。
+2b 生死点（真实域：BVI 在 VRF 表 + 真实 vhost 口 + 真实 guest）
+- 现场：`cli-semantic-fixture.sh up` → sem-vs（L2 + BVI 192.168.99.1/24，VPP 表 `vr-sem-vs` table-id 1445873）
+  + sem-vm（guest 192.168.99.2，vhost 口 `vh-sem-vm-nic0`，同 BD 314680，邻居已解析 52:54:42:e6:31:0d）。
+- **关键实测（一条判据就分清了对错）**：注入伪查询时
+  · `RX = vhost 成员口（idx 4）` → **收不到 punt**（L2 成员口不在任何 VRF 表里，包落在表 0 而丢失）；
+  · `RX = bvi0（idx 5）` → **收到 punt**（`desc: sw_if_index=5`）。
+  ⇒ 真实场景中包是**经 BVI 进到 IP 栈**的，上行 desc 的 sw_if_index 就是 **BVI**；回注用同一索引即对称。
+- 回注应答（action=1, RX=bvi0，192.168.99.1:53 → 192.168.99.2:34567）后，抓 **vhost 口出向** pcap
+  （`pcap trace tx intfc vh-sem-vm-nic0`，注意 CLI 是 `intfc`、且 `file` 只认相对名、VPP cwd=/tmp）：
+  `08:06:14.641170 IP 192.168.99.1.53 > 192.168.99.2.34567: [udp sum ok] 8738+ A? probe.test. (28)`
+  ⇒ **应答以 BVI 地址为源、经 vhost 口送到域内客户端**（独立事实源，非产品自述）。
+
+§3 结论（路线 c 的能力前提成立）
+1. 域内客户端 → 域网关地址:53 →（VPP 本机地址）→ punt socket → nfvisd：**成立**。
+2. nfvisd 用宿主网络栈向上游解析：普通用户态 UDP 查询，无底座前提（本次未实测上游，风险低）。
+3. nfvisd 回注应答（desc.action=1 + sw_if_index=该 BVI）→ 按该域的 VRF 表路由 → 经 vhost 口到客户端：**成立**。
+4. 不需要「默认表寻址」（路线 a 的前提）、不需要 VPP dns 插件（#338 的死因）——**#338 的阻塞点被绕开**。
+
+§4 实测暴露的实现要点（必须写进契约/实现口径）
+- startup.conf 必须有 `punt { socket … }`（产品生成器 `startup.go` 要加），且**这会改变 vpp 段哈希** ⇒ 升级后
+  首次需要 `request vpp restart` 才生效（pending-restart 语义已有）。
+- 注册是**运行期**动作、VPP 重启即丢 ⇒ 必须并入恢复重放；nfvisd 重启也要重注册。
+- **代价（如实告知）**：注册存在期间，指向 VPP 本机地址的 UDP/53 由 nfvisd 独占处理；注册在而 nfvisd 不在
+  （崩溃/被停）时包会被 punt 节点**丢弃**（该节点 flags=IS_DROP）⇒ 域内 DNS 中断，直到 nfvisd 回来或注销。
+  故：关闭代理必须注销（恢复 VPP 默认处理），启用是显式动作。
+- 上行包体的前 14 字节（以太头位置）在「注入方未带 L2 头」时可能是**残留垃圾**（实测两次内容不同）⇒
+  读侧不要依赖它；产品自己构造应答时应按 desc 决定从哪张表回注，而不是照抄 L2 头。
+- punt 注册是**全局单点**（udp 端口级，不分表/接口）：多域共用同一注册，靠上行 desc.sw_if_index 区分来源。
+
+§5 现场改动与回滚（如实登记）
+- `/etc/vpp/startup.conf`：**追加** `punt { socket /run/vpp/punt.sock }`（备份 /tmp/startup.conf.spike-bak）。
+  该改动**保留**在真机上（供后续实现阶段验证产品生成器接管），若不保留可从备份恢复。
+- 已清理：loop0、ip table 100、punt 注册（`punt socket deregister ipv4 udp 53`）、临时 pcap/socket 文件。
+  清理后 `show ip table` 仅剩 `[0]` 与 `vr-sem-vs`；产品 `VRF_TABLE_LEFTOVER ip-table/100` 告警在 15s 对账内
+  **自动消解**（顺带复证 #321 的对账口径）；当前无 active 告警。
+- 保留在现场：fixture 的 sem-vs/sem-vm（语义套件 S8 正控用），无 vh 之 外的临时对象。

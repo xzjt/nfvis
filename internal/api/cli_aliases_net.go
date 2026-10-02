@@ -61,6 +61,18 @@ var statementAliasesNet = []aliasRule{
 			return nil
 		}},
 
+	// virtual-switches <n> dns proxy server <ip> [secondary <ip>]（决策 #345：按域上游，模型数组）。
+	// 与 system 级同名语句对偶：system 落 vpp.dns_proxy_servers（全局），本语句落该交换机元素的
+	// dns_proxy_servers（本域优先、回落全局）。更具体的形态须排在带通配的形态之前。
+	{pattern: []string{"virtual-switches", "*", "dns", "proxy", "server", "*", "secondary", "*"},
+		apply: aliasVSDNSProxyPair},
+	{pattern: []string{"virtual-switches", "*", "dns", "proxy", "server", "secondary", "*"},
+		apply: aliasVSDNSProxyOne},
+	{pattern: []string{"virtual-switches", "*", "dns", "proxy", "server", "*"},
+		apply: aliasVSDNSProxyOne},
+	{pattern: []string{"virtual-switches", "*", "dns", "proxy", "server"},
+		apply: aliasVSDNSProxyClear},
+
 	// virtual-switches <n> learn-limit <n>（决策 #337：MAC 学习条数上限，模型单值整数）。
 	// 走别名而非通用树：delete 无值形态在「键不存在」时须为幂等空操作（套件里 set 与 delete 各在
 	// 独立会话、delete 时 committed 里本就没有该键），通用树遍历会回「无匹配配置」而中止脚本。
@@ -399,8 +411,45 @@ func aliasVSDhcpRelay(tree map[string]any, t []string, isSet bool) error {
 	return nil
 }
 
-// aliasVSLearnLimit：virtual-switches <n> learn-limit <n>（决策 #337）。
-// 模型是单值整数（learn_limit）；delete 由无值形态的注册键处理（整键删除，幂等）。
+// aliasVSDNSProxyPair：virtual-switches <n> dns proxy server <ip> secondary <ip>（决策 #345）。
+// t[5] 与 t[7] 是两个上游地址，一并追加或移除。
+func aliasVSDNSProxyPair(tree map[string]any, t []string, isSet bool) error {
+	vs, err := elemByID(tree, "virtual_switches", t[1])
+	if err != nil {
+		return err
+	}
+	for _, ip := range []string{t[5], t[7]} {
+		if err := appendOrRemove(vs, "dns_proxy_servers", ip, isSet); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// aliasVSDNSProxyOne：virtual-switches <n> dns proxy server [secondary] <ip>（决策 #345）。
+func aliasVSDNSProxyOne(tree map[string]any, t []string, isSet bool) error {
+	vs, err := elemByID(tree, "virtual_switches", t[1])
+	if err != nil {
+		return err
+	}
+	return appendOrRemove(vs, "dns_proxy_servers", t[len(t)-1], isSet)
+}
+
+// aliasVSDNSProxyClear：delete virtual-switches <n> dns proxy server（清空本域上游，回落全局）。
+// set 形态缺取值即明确报错（与 system 级同口径，避免误把「忘了填地址」当清空）。
+func aliasVSDNSProxyClear(tree map[string]any, t []string, isSet bool) error {
+	if isSet {
+		return errString("缺少上游地址：set virtual-switches " + t[1] + " dns proxy server <ip> [secondary <ip>]")
+	}
+	vs, err := elemByID(tree, "virtual_switches", t[1])
+	if err != nil {
+		return err
+	}
+	delete(vs, "dns_proxy_servers")
+	return nil
+}
+
+// aliasVSLearnLimit：virtual-switches <n> learn-limit <n>（决策 #337）。// 模型是单值整数（learn_limit）；delete 由无值形态的注册键处理（整键删除，幂等）。
 // 取值必须为十进制正整数——负数/0/非数一律拒绝（与模型校验同口径，避免写出模型不认的值）。
 func aliasVSLearnLimit(tree map[string]any, t []string, isSet bool) error {
 	vs, err := elemByID(tree, "virtual_switches", t[1])

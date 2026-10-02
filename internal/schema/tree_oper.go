@@ -95,6 +95,10 @@ func OperRoot() *Node {
 			),
 			K("nat", "NAT 池、规则与转换会话计数"),
 			K("port-mirroring", "SPAN 会话状态"),
+			// 决策 #345：数据面 DNS 代理读视图（启用态 + 全局上游 + 各域覆盖，与 GET /dns/proxy 同源）。
+			K("dns", "DNS",
+				K("proxy", "数据面 DNS 代理（启用态 + 全局上游 + 各域覆盖）"),
+			),
 			K("qos", "限速策略",
 				K("policies", "策略与绑定列表"),
 			),
