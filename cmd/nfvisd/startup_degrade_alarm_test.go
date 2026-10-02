@@ -1,11 +1,12 @@
 package main
 
-// 启动期底座降级告警（决策 #349）的文案与去向守护。
+// 启动期底座降级告警（决策 #349/#351）的文案与去向守护。
 //
 // 降级必须可见：libvirt 连接失败/超时 → COMPUTE_UNAVAILABLE（scope compute、
 // source libvirt）；Docker 探测失败 → CONTAINER_UNAVAILABLE（scope container、
-// source docker）。两告警文案都要求带「发生了什么 / 独立事实源手查路径 / 恢复
-// 路径 / 不自动重连的边界」，且不得出现内部编号（user_text 规则的单元级镜像）。
+// source docker）。两告警文案都要求带「发生了什么 / 独立事实源手查路径 / 恢复路径」，
+// 且不得出现内部编号（user_text 规则的单元级镜像）。恢复路径按 #351 如实写后台
+// 持续重试接入（成功自动消解、无须重启 nfvis）——不再是「不自动重连、须 restart nfvis」。
 // 用独立假告警表记录全部字段（hugepages_alarm_test.go 的 fakeAlarmSink 只记
 // scope|code|message，不记 severity，不满足本守护对级别的断言）。
 
@@ -59,7 +60,7 @@ func TestComputeUnavailableAlarm(t *testing.T) {
 	assertMessage(t, a,
 		"未接入 libvirt", "降级运行", "VM 生命周期动作不可用", "已有配置声明不受影响",
 		"systemctl status libvirtd", "journalctl -u libvirtd", "virsh -c qemu:///system list",
-		"systemctl restart nfvis", "不自动重连")
+		"后台持续重试接入", "自动消解", "无需重启 nfvis")
 	if !strings.Contains(a.message, "超时") {
 		t.Fatalf("文案应带上游原因：%s", a.message)
 	}
@@ -88,7 +89,7 @@ func TestContainerUnavailableAlarm(t *testing.T) {
 	assertMessage(t, a,
 		"未接入 Docker", "降级运行", "容器生命周期动作不可用", "已有配置声明不受影响",
 		"systemctl status docker", "journalctl -u docker",
-		"systemctl restart nfvis", "不自动重连")
+		"后台持续重试接入", "自动消解", "无需重启 nfvis")
 	if !strings.Contains(a.message, "unix:///var/run/docker.sock") {
 		t.Fatalf("文案应带 socket 线索：%s", a.message)
 	}
