@@ -45,8 +45,22 @@ type ACLClient interface {
 	// 「tag 不在配置里」即提交补偿失败留下的 ACL 残渣——与残留表（#192）同一份对账视野，
 	// 不靠进程内记忆，故跨 nfvisd 重启仍可见。
 	ACLTags() ([]string, error)
+	// MacipACLAddReplace 创建/替换伴随的「放行全部非 IP 帧」macip ACL（决策 #341）：
+	// index=aclIndexNew 新建，否则替换；返回实际索引。
+	//
+	// 为何需要它：VPP acl plugin 在启用 IP ACL 的接口上对**非 IP L2 帧**走 macip 白名单路径，
+	// 未配 macip ACL 即丢弃——产品唯一可用的 ACL 形态（L3 接口 acl-in）一绑上就把域内 ARP 丢了。
+	// 这条 macip ACL（permit 任意 ip/mac，mask 0=不比较 MAC）是该路径的唯一载体，只作用于非 IP 帧，
+	// IPv4/IPv6 仍走已绑的 IP ACL，故 IP 过滤语义不受影响。
+	MacipACLAddReplace(index uint32, tag string) (uint32, error)
+	// MacipACLInterfaceAddDel 把 macip ACL 绑定/解绑到接口（isAdd=true 绑、false 解）。
+	MacipACLInterfaceAddDel(swIfIndex, aclIndex uint32, isAdd bool) error
 	Close()
 }
+
+// macipACLTag 伴随 macip ACL 的稳定 tag（VPP string[64]）。
+// 它是**另一类对象**（macip_acl_dump，不进 acl_dump），故不会被 ACL 残渣对账（决策 #321）误报。
+const macipACLTag = "nfvis-nonip-permit"
 
 // AclProvider ACL 规则与接口绑定编排。
 type AclProvider struct {
@@ -56,6 +70,11 @@ type AclProvider struct {
 	index   map[string]uint32  // ACL 名 → VPP acl index
 	bound   map[uint32]aclPair // sw_if_index → 绑定的 in/out ACL 名
 	byIface map[string]uint32  // 接口名 → sw_if_index（解绑用）
+	// 伴随 macip ACL（决策 #341）：进程内的 index 登记与已绑接口集合。
+	// 与 index 同属「进程内登记、reset 清空、重放按需重建」的同一风格。
+	macipIdx   uint32          // 伴随 macip ACL 的 VPP 索引
+	macipKnown bool            // 是否已创建/反查登记
+	macipBound map[uint32]bool // sw_if_index → 是否已绑伴随 macip ACL
 }
 
 type aclPair struct{ in, out string }
@@ -66,25 +85,35 @@ type ACLIndexLookup interface {
 	ACLIndexByTag(tag string) (uint32, bool, error)
 }
 
+// MacipIndexLookup 可选的「按 tag 反查已存在 macip ACL 索引」能力（决策 #341，恢复收敛用）：
+// nfvisd 重启后进程内登记为空，但 VPP 侧可能已有伴随 macip ACL，据此复用而非重复创建。
+type MacipIndexLookup interface {
+	MacipACLIndexByTag(tag string) (uint32, bool, error)
+}
+
 // reset 清空进程内登记表（恢复收敛前调用，索引改由 acl_dump 按 tag 反查）。
+// 伴随 macip 登记一并清空（决策 #341）：避免 nfvisd 重启/重放时用陈旧 index 去绑。
 func (p *AclProvider) reset() {
 	p.mu.Lock()
 	p.index = map[string]uint32{}
 	p.bound = map[uint32]aclPair{}
 	p.byIface = map[string]uint32{}
+	p.macipIdx, p.macipKnown = 0, false
+	p.macipBound = map[uint32]bool{}
 	p.mu.Unlock()
 }
 
 // NewAclProvider 以固定客户端构造（测试）。
 func NewAclProvider(c ACLClient) *AclProvider {
 	return &AclProvider{client: func() (ACLClient, error) { return c, nil },
-		index: map[string]uint32{}, bound: map[uint32]aclPair{}, byIface: map[string]uint32{}}
+		index: map[string]uint32{}, bound: map[uint32]aclPair{}, byIface: map[string]uint32{},
+		macipBound: map[uint32]bool{}}
 }
 
 // NewAclProviderFunc 以客户端工厂构造（连接可重连）。
 func NewAclProviderFunc(f func() (ACLClient, error)) *AclProvider {
 	return &AclProvider{client: f, index: map[string]uint32{},
-		bound: map[uint32]aclPair{}, byIface: map[string]uint32{}}
+		bound: map[uint32]aclPair{}, byIface: map[string]uint32{}, macipBound: map[uint32]bool{}}
 }
 
 // ApplyACL 下发/更新 ACL 规则（同名走 replace）。
@@ -194,8 +223,31 @@ func (p *AclProvider) Bind(ctx context.Context, ifname, aclIn, aclOut string) er
 }
 
 // BindIndex 按 sw_if_index 绑定（VLAN 子接口/BVI 等无配置名场景）。
+//
+// 决策 #341：IP ACL 非空时**自动伴随**一条 macip 白名单（放行全部非 IP 帧，含 ARP）并绑到同一接口
+// ——VPP acl plugin 对启用 IP ACL 的接口上的非 IP 帧走 macip 白名单路径，不配就丢 ARP。
+// aclIn 与 aclOut 都为空表示**解绑**：IP ACL 与伴随 macip 一并解绑（有登记才动 VPP，幂等）。
+// IP ACL 的绑定/顺序/语义不因本次改动发生任何变化。
 func (p *AclProvider) BindIndex(c ACLClient, swIfIndex uint32, aclIn, aclOut string) error {
 	if aclIn == "" && aclOut == "" {
+		p.mu.Lock()
+		_, hadPair := p.bound[swIfIndex]
+		hadMacip := p.macipBound[swIfIndex]
+		p.mu.Unlock()
+		if !hadPair && !hadMacip {
+			return nil // 无登记即无操作（与既有「空绑定为无操作」一致）
+		}
+		if err := c.ACLInterfaceSet(swIfIndex, 0, 0, false, false); err != nil {
+			return fmt.Errorf("解绑接口 %d 的 ACL: %w", swIfIndex, err)
+		}
+		if hadMacip {
+			if err := p.MacipDisallowNonIP(c, swIfIndex); err != nil {
+				return err
+			}
+		}
+		p.mu.Lock()
+		delete(p.bound, swIfIndex)
+		p.mu.Unlock()
 		return nil
 	}
 	in, inSet := p.lookup(aclIn)
@@ -209,8 +261,82 @@ func (p *AclProvider) BindIndex(c ACLClient, swIfIndex uint32, aclIn, aclOut str
 	if err := c.ACLInterfaceSet(swIfIndex, in, out, inSet && aclIn != "", outSet && aclOut != ""); err != nil {
 		return fmt.Errorf("绑定接口 %d 的 ACL: %w", swIfIndex, err)
 	}
+	// 伴随绑定（决策 #341）：IP ACL 非空即确保该接口放行非 IP 帧（幂等）。
+	if err := p.MacipAllowNonIP(c, swIfIndex); err != nil {
+		return err
+	}
 	p.mu.Lock()
 	p.bound[swIfIndex] = aclPair{in: aclIn, out: aclOut}
+	p.mu.Unlock()
+	return nil
+}
+
+// MacipAllowNonIP 确保接口上有一条第 #341 的伴随 macip ACL（放行全部非 IP 帧）并绑定之。
+//
+// 幂等：① 进程内已登记「该接口已绑」→ 空操作；② 进程内无 macip index（首次/恢复收敛）时，
+// 先按 tag 反查 VPP 侧既有 macip ACL（nfvisd 重启场景复用，避免重复项），查不到才新建；
+// ③ 绑定收到「已存在」按目标状态处理（跨 nfvisd 重启时 VPP 侧绑定可能仍在）。
+// 失败如实上抛（不吞）——绑定不出即为提交失败，走既有补偿。
+func (p *AclProvider) MacipAllowNonIP(c ACLClient, swIfIndex uint32) error {
+	p.mu.Lock()
+	if p.macipKnown && p.macipBound[swIfIndex] {
+		p.mu.Unlock()
+		return nil
+	}
+	known, idx := p.macipKnown, p.macipIdx
+	p.mu.Unlock()
+
+	if !known {
+		if lk, ok := c.(MacipIndexLookup); ok {
+			got, found, err := lk.MacipACLIndexByTag(macipACLTag)
+			if err != nil {
+				return fmt.Errorf("查询已存在 macip ACL: %w", err)
+			}
+			if found {
+				known, idx = true, got
+			}
+		}
+	}
+	if !known {
+		idx = aclIndexNew // ~0：新建
+	}
+	newIdx, err := c.MacipACLAddReplace(idx, macipACLTag)
+	if err != nil {
+		return fmt.Errorf("创建非 IP 放行 macip ACL: %w", err)
+	}
+	// 先登记 index：即便随后绑定失败，重放也能复用同一 ACL 而不重复创建。
+	p.mu.Lock()
+	p.macipIdx, p.macipKnown = newIdx, true
+	p.mu.Unlock()
+
+	if err := c.MacipACLInterfaceAddDel(swIfIndex, newIdx, true); err != nil {
+		if !vppErrIs(err, vppValueExist) { // 已绑定 = 目标状态
+			return fmt.Errorf("绑定非 IP 放行 macip ACL 到接口 %d: %w", swIfIndex, err)
+		}
+	}
+	p.mu.Lock()
+	p.macipBound[swIfIndex] = true
+	p.mu.Unlock()
+	return nil
+}
+
+// MacipDisallowNonIP 解绑接口上的伴随 macip ACL（幂等：无登记即无操作）。
+func (p *AclProvider) MacipDisallowNonIP(c ACLClient, swIfIndex uint32) error {
+	p.mu.Lock()
+	if !p.macipKnown || !p.macipBound[swIfIndex] {
+		p.mu.Unlock()
+		return nil
+	}
+	idx := p.macipIdx
+	p.mu.Unlock()
+	if err := c.MacipACLInterfaceAddDel(swIfIndex, idx, false); err != nil {
+		// 解绑方向：对象本就不在 / 已是目标状态按成功（同 natRemovalBenign 口径）
+		if !vppErrIs(err, vppNoSuchEntry, vppValueExist) {
+			return fmt.Errorf("解绑接口 %d 的非 IP 放行 macip ACL: %w", swIfIndex, err)
+		}
+	}
+	p.mu.Lock()
+	delete(p.macipBound, swIfIndex)
 	p.mu.Unlock()
 	return nil
 }

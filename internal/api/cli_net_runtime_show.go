@@ -178,6 +178,10 @@ func (x *cliExecutor) execShowVrfs(args []string) string {
 			continue
 		}
 		m, _ := anyToTree(v).(map[string]any)
+		// 决策 #341：绑了 IP ACL 的 L3 接口会自动伴随一条「放行非 IP（含 ARP）」的 macip 白名单
+		// （VPP acl plugin 对启用 IP ACL 的接口上的非 IP 帧走 macip 白名单路径）。读视图如实标注；
+		// 这是 CLI 展示层的派生说明，不改模型/契约结构（REST/持久化配置里不出现该字段）。
+		annotateL3AclMacip(m)
 		if x.l3 != nil {
 			if rows, err := x.l3.Routes(context.Background(), name); err == nil {
 				rt := make([]any, 0, len(rows))
@@ -191,6 +195,24 @@ func (x *cliExecutor) execShowVrfs(args []string) string {
 		return RenderConfigJSON(m) + "\n"
 	}
 	return fmt.Sprintf("%% VRF %s 不存在\n", name)
+}
+
+// annotateL3AclMacip 给 `show vrfs <name>` 里绑了 IP ACL 的 L3 接口加「含非 IP/ARP 自动放行」说明
+// （决策 #341）。只作用于该 CLI 读视图的展示副本，不改模型/契约结构。
+func annotateL3AclMacip(m map[string]any) {
+	lis, ok := m["l3_interfaces"].([]any)
+	if !ok {
+		return
+	}
+	for _, l := range lis {
+		li, ok := l.(map[string]any)
+		if !ok {
+			continue
+		}
+		if acl, _ := li["acl_in"].(string); acl != "" {
+			li["acl_in_note"] = "含非 IP/ARP 自动放行"
+		}
+	}
 }
 
 // showVrfRoutes 渲染 VRF 的 FIB 路由表（运行态）。
