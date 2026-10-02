@@ -321,7 +321,8 @@
   风暴下 MAC 稳定落单口（判据①不触发）、学习数仅 3（判据②远离上限）——**契约先行补入判据③**（每成员口
   rx 同时 ≥50000 pps 连续 2 轮）后复验命中（消息双证据、138.8k pps 与 vppctl 独立吻合）；误报基线 0、
   拆环两轮消解、删 learn-limit 回默认。套件：fulltest **214/0/13**（+2）、语义 **24/0/3**（S11/S12
-  无配置按设计跳过；S8 窗口敏感系重复性弱点 → 登记 **R115-1**）。复现教益：停/起 VM 不重建 guest 内
+  无配置按设计跳过；S8 窗口敏感系重复性弱点 → 登记 **R115-1**，**已由决策 #343 收口**：S8 正控改为
+  窗口内增长周期计数 ⇒ 语义 **25/0/2**）。复现教益：停/起 VM 不重建 guest 内
   的桥——造环复现须按红线 12 改 user-data 再 restart。证据 `docs/evidence/v2-round115-d337-loop-protection.txt`。
 - **round116（决策 #338 数据面 DNS 代理：真机实证「未达」→ 整体撤回，2026-10-02）**：用 VPP 内置 dns 插件
   做域内 DNS 代理（PR #264 已合入、dev26 真机验证）——**客户端面向成立**（查询到达 VPP：`dns4-request`
@@ -389,8 +390,8 @@
   结束后出现的 `COMMIT_VRF_DELETE_DEFERRED`/`VRF_TABLE_LEFTOVER` 是**既有删表延后行为**（#192，按文案
   `request vpp restart` 后自动消解，已与本次修复区分）。测试：4 例容错 + 顺序断言反转；make check RC=0。
   证据 `docs/evidence/v2-round121-d342-acl-delete-order-verified.txt`。
-- 已定决策 244 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#342）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 245 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#343）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。
@@ -465,7 +466,7 @@ bash contrib/scripts/offline-installer-selftest.sh --run build/nfvis-vX.run   # 
 （三列：命令 / 类别 / 理由，理由须说明**改由谁覆盖**）。守护 `contrib/scripts/check_suite_contract_sync.sh`
 （自带桩式自校准）随 `make check` 的 `toolcheck` 跑——**只进实现不补套件的命令会被它挡住**（v2 线的
 `show system api tokens`、`set/delete system login banner` 就是这么漏进过的）。四套件基线（v2 线，见 #319）：
-`cli-fulltest` **210/0/13**（实测修正：2026-10-01 round101 真机为 210/0/13——设计里的 212 系逐阶段增量相加的算术偏差）、`cli-semantic-check` **24/0/1**、`cli-lifecycle-check` **21/0/3**、`cli-pty-smoke` **10/10**；
+`cli-fulltest` **210/0/13**（实测修正：2026-10-01 round101 真机为 210/0/13——设计里的 212 系逐阶段增量相加的算术偏差）、`cli-semantic-check` **25/0/2**（决策 #343 后：无新增/移除项，是既有 S8 由「不可判定」转「通过」——正控改为窗口内增长周期计数、慢周期下不再整窗跨零，收口 R115-1；另 2 项不可判定为 S11/S12 按设计无配置跳过）、`cli-lifecycle-check` **21/0/3**、`cli-pty-smoke` **10/10**；
 套件数字的每一处变化都要写清「哪条新增/移除、为什么」（#304 那次 195/0/12→198/0/11 的漂移是教训）。
 
 后者是唯一能发现「命令成功但答非所问 / 取自配置而非运行态」的那层（决策 #84/#85）——

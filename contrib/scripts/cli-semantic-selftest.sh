@@ -21,6 +21,9 @@
 # ② 一侧非空另一侧为空**必须**判 FAIL。改判定后请照下面两条手工验证一次：
 #   · 把 s8_verdict 的 nomember/nopeer 分支改回「printf PASS」（旧行为），本脚本必须报 ✗
 #   · 把 s9_verdict 的两侧都空分支改回「printf PASS」（旧行为），本脚本必须报 ✗
+# 扩展（决策 #343 / R115-1）：S8 正控窗口的**增长周期计数**也纳入抽取（`s8_rx_cycles_of`），
+# 把「单次 3s 窗口」的判据钉住（1pps 型 ≈ 采样数−1、慢周期型 ≥2、全 0/单值 = 0）。
+#   · 把 s8_rx_cycles_of 改成恒 `printf '%s' "$#"` 或恒 0，本脚本必须报 ✗
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 SCRIPT=${SEM_SCRIPT:-$HERE/cli-semantic-check.sh}
@@ -34,7 +37,7 @@ extract() {
   ' "$SCRIPT"
 }
 
-ORACLES=$(for f in vpp_bd_ids vpp_bd_tag vpp_l2fib_count vpp_bd_index_of_tag vpp_bd_id_of_tag vpp_ifaces vpp_if_rx vpp_bd_members vsw_ports_parse vpp_l2fib_learned s8_verdict s9_verdict; do
+ORACLES=$(for f in vpp_bd_ids vpp_bd_tag vpp_l2fib_count vpp_bd_index_of_tag vpp_bd_id_of_tag vpp_ifaces vpp_if_rx vpp_bd_members vsw_ports_parse vpp_l2fib_learned s8_verdict s9_verdict s8_rx_cycles_of; do
   body=$(extract "$f")
   [ -z "$body" ] && { echo "✗ 抽不到函数 $f（脚本改名了？）" >&2; exit 1; }
   printf '%s\n' "$body"
@@ -199,6 +202,18 @@ eqv PASS    "有正控、条数一致、成员口已学到 MAC → 通过" "$(s8
 eqv FAIL    "有正控但事实源 0 条（学不到）→ 失败" "$(s8_verdict 0 0 learned no)"
 eqv FAIL    "有正控但学到的不是成员口 MAC → 失败" "$(s8_verdict 2 2 learned no)"
 eqv FAIL    "有正控但条数不一致 → 失败" "$(s8_verdict 1 4 learned yes)"
+
+echo "— S8 正控窗口：增长周期计数（1pps 型 / 慢周期型 / 全 0 与单值不误报）—"
+# 决策 #343（R115-1）：S8 的正控原为**单次 3s 窗口**比对成员口 rx；fixture 的 beat 在 ping 超时时
+# 降为 ~3s/发 ⇒ 窗口可整窗跨零，有流量却被判 noflow。改为窗口内「相邻采样增长即记 1 周期」后：
+# 1pps 型序列得「采样数−1」、慢周期型仍 ≥2（能判 learned）、无流量时恒 0（不误报）。
+# 红-绿验证本函数：把 s8_rx_cycles_of 改成恒 `printf '%s' "$#"`（或恒 0）后本段必须报 ✗。
+eq "1pps 型序列（5 6 7 8 9 10）→ 5 个增长周期" 5 "$(s8_rx_cycles_of '5 6 7 8 9 10')"
+eq "慢周期型序列（5 5 6 5 5 7）→ 2（慢周期下也能判 learned）" 2 "$(s8_rx_cycles_of '5 5 6 5 5 7')"
+eq "平段不算增长（10 12 12 15）→ 2" 2 "$(s8_rx_cycles_of '10 12 12 15')"
+eq "全 0 序列 → 0（无流量不误报）" 0 "$(s8_rx_cycles_of '0 0 0 0 0')"
+eq "单值序列 → 0（无从比较）" 0 "$(s8_rx_cycles_of '7')"
+eq "非数字按 0 容错（'x 5' → x 作 0，故 0→5 记 1 周期）" 1 "$(s8_rx_cycles_of 'x 5')"
 
 echo "— S9 判定：一侧非空另一侧为空即失败；两侧都空=不可判定 —"
 eqv UNKNOWN "两侧都空 → 不可判定（旧行为此处静默通过）" "$(s9_verdict 'libvirt 域' '' 'CLI 视图' '')"
