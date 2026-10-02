@@ -1904,9 +1904,11 @@
       "SwitchPortView": {
         "properties": {
           "acl_in": {
+            "description": "**不支持**（与写入形状同口径，决策 #340）：该形态提交期即被拒，故本列恒空。",
             "type": "string"
           },
           "acl_out": {
+            "description": "**不支持**（同 acl_in，决策 #340）。",
             "type": "string"
           },
           "container": {
@@ -2498,9 +2500,11 @@
       "VSwitchPort": {
         "properties": {
           "acl_in": {
+            "description": "**不支持**：VPP 26.06 不评估 L2 成员端口上的 ACL（既不拦也不计，真机实证），提交期拒绝（决策 #340）。\nACL 请绑 L3 接口（`Vrf.l3_interfaces[].acl_in`）。该字段保留仅为解析兼容；命令树也**有意**不提供语句\n（见 `docs/NFViS-CLI命令树完整设计.md`）。\n",
             "type": "string"
           },
           "acl_out": {
+            "description": "**不支持**（同 acl_in）：提交期拒绝（决策 #340）；ACL 请绑 L3 接口。",
             "type": "string"
           },
           "container": {
@@ -2607,9 +2611,11 @@
             "description": "仅 L2：BVI 三层网关（FR-NET-014）",
             "properties": {
               "acl_in": {
+                "description": "**不支持**：VPP 26.06 不评估网关（BVI）上的域内流量 ACL（既不拦也不计，真机实证），提交期拒绝\n（决策 #340）。入向过滤请改用 L3 接口绑定：`Vrf.l3_interfaces[].acl_in`。本字段保留仅为解析兼容。\n",
                 "type": "string"
               },
               "acl_out": {
+                "description": "**不支持**（同 acl_in）：提交期拒绝（决策 #340）；ACL 请绑 L3 接口。",
                 "type": "string"
               },
               "addresses": {
@@ -2976,6 +2982,7 @@
             "items": {
               "properties": {
                 "acl_in": {
+                  "description": "**支持**：L3 接口的入向 ACL（唯一可用的 ACL 绑定形态）。绑定时产品**自动创建并绑定伴随\nmacip 白名单放行非 IP（含 ARP）**（决策 #341）——否则该接口会丢弃 ARP、域内主机无法解析\n网关；IPv4/IPv6 仍走本 ACL（macip 只作用于非 IP 帧）。\n",
                   "type": "string"
                 },
                 "addresses": {

@@ -478,7 +478,8 @@ set rule <seq> direction <ingress|egress>
 #       ⊘ 设计拒绝（同网关口径，决策 #340 修订）：真机实证（round119）VPP 26.06
 #          不评估 L2 路径（成员端口）上的 ACL——既不拦也不计，提交期直接拒绝。
 #          替代：`set virtual-switches <n> l3-interface <ifname> acl-in <acl>`。
-#          ⚠️ 命令树本无该语句（`ports <seq> acl-in` 报「未知命令」），字段仅 REST 可达。
+#          ⚠️ 命令树**有意不提供**该语句（`ports <seq> acl-in` 报「未知命令」；决策 #344）——
+#             该形态不支持，故不建叶子；字段仅 REST 可达且置非空必被拒（契约已如实标注）。
 #   set virtual-switches <n> l3-interface ... acl-in <acl>
 #       ✅ 已实证生效（round118）：vNIC/物理口作 L3 接口时 ACL 确实在拦。
 #       🔁 绑定时产品**自动伴随**一条放行全部非 IP（含 ARP）的 macip 白名单（决策 #341），
