@@ -115,13 +115,12 @@ delete virtual-switches vs-l2 dhcp-relay
 set virtual-switches vs-l2 learn-limit 8192
 delete virtual-switches vs-l2 learn-limit
 # —— 数据面 DNS 代理（§2.2 全局 / §2.4 按域；决策 #345，自研转发器 + punt socket）——
-# 仅验证解析与落点（本阶段不 commit）；数据面生效与读视图对照见语义套件 DNS 项与真机走查。
+# 本段各条是**独立会话、不 commit**：因此 delete 一律用「无值形态」（清空整表 / 清本域），
+# 幂等且不要求值已落库；**带地址的 delete 只有在值已落库时才能匹配**，故它放在下方
+# 「真落库 → 回读 → 按地址删除」的提交往返里（否则本段必然报「无匹配配置」）。
 set system dns proxy server 8.8.8.8 secondary 8.8.4.4
-delete system dns proxy server 8.8.4.4
-delete system dns proxy server secondary 8.8.4.4
 delete system dns proxy server
 set virtual-switches vs-l2 dns proxy server 10.0.0.53
-delete virtual-switches vs-l2 dns proxy server secondary 10.0.0.54
 delete virtual-switches vs-l2 dns proxy server
 # —— resource-pools（§2.6）——
 set resource-pools cpu numa node 0 cores 1-4
@@ -141,6 +140,32 @@ commit"
 expect_out S2-banner "套件横幅-roundtrip" "show configuration"
 run S2-banner "configure
 delete system login banner
+commit"
+
+# ---------- 数据面 DNS 代理：真落库 → 回读 → 按地址删除（决策 #345）----------
+# 与横幅同理：只在独立会话里解析不够——要证「提交后真的进了配置、按地址删得掉」。
+# 一次真实提交往返（全局对 + 按域），提交后立即删除，不改变机器的长期现场。
+run S2-dnsproxy "configure
+set system dns proxy server 8.8.8.8 secondary 8.8.4.4
+commit"
+expect_out S2-dnsproxy "8.8.4.4" "show configuration"
+# 按地址删除：只删指定上游（另一个 8.8.8.8 应仍在）——这正是「无值/按地址」两个形态的分工。
+run S2-dnsproxy "configure
+delete system dns proxy server 8.8.4.4
+commit"
+expect_out S2-dnsproxy "8.8.8.8" "show configuration"
+run S2-dnsproxy "configure
+delete system dns proxy server
+commit"
+run S2-dnsproxy "configure
+set virtual-switches vs-l2 dns proxy server 10.0.0.53
+commit"
+expect_out S2-dnsproxy "10.0.0.53" "show configuration"
+run S2-dnsproxy "configure
+delete virtual-switches vs-l2 dns proxy server 10.0.0.53
+commit"
+run S2-dnsproxy "configure
+delete virtual-switches vs-l2 dns proxy server
 commit"
 
 summary "阶段 2"
