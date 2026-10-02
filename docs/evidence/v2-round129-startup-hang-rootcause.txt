@@ -1,0 +1,97 @@
+NFViS v2 真机诊断记录 round129 —— nfvisd 启动超时循环根因定位 + 环境恢复
+====================================================================
+日期：2026-10-03；环境：nfvis-vm（Ubuntu Server 26.04，libvirt 12.0.0-1ubuntu5.5，VPP 26.06，
+已装 nfvis 2.0.0~dev42 = v2 代码 @ 86c3cb5）；接手会话（round129）。
+
+§0 结论（一句话版）
+1. **「nfvis 卡 activating → systemd 90s 超时 → restart 循环」的唯一根因**：nfvisd 启动早期的
+   **libvirt 连接永久阻塞**——`internal/orchestrator/compute/conn_libvirt.go` 的 `Connect` 只在入口
+   查一次 `ctx.Err()`，随后调 **go-libvirt 包级 `ConnectToURI(uri)`（不收 context）**，该调用在
+   协议认证握手（AuthList → getResponse）上无限等应答；`cmd/nfvisd/main.go:254` 包在它外面的
+   10s `libvirtCtx` **完全不起作用**。nfvisd 因此永远到不了 READY=1（unit 是 Type=notify），
+   systemd `TimeoutStartSec=90s` 到点 SIGTERM 杀掉、3s 后重启——无限循环。
+2. **阻塞的触发者是环境级故障**：本机 libvirtd 开机自启 sem-vm（产品配置 `"autostart":true`
+   ⇒ 产品建 libvirt autostart 软链 ⇒ 开机 libvirtd 拉起 qemu）时**假死**——主进程活着
+   （Ssl、poll）、socket 可连，但**对一切客户端零响应**：`virsh -c qemu:///system list` 同样挂
+   （timeout 8s rc=124），go-libvirt 的 AuthList 一个字节都收不到。qemu（PID 1902）以 `-S`
+   暂停态启动后从未被 resume。
+3. **上一会话（round128）的两个假设被本轮证据更正**：
+   ①「nfvisd 启动含恢复收敛、现场对象重所以超 90s」——不成立：恢复收敛根本没开始
+   （journal 90s 内 **零行** nfvisd 输出；SIGQUIT 栈显示卡在 main.go:255，恢复收敛在 711 行之后）；
+   ②「#348 四次真机失败」——**全部是本环境故障所致，与 #348 代码无关**（回退 dev42 也不起，旁证）。
+4. **环境已恢复**（§4）：杀假死 qemu → 摘 autostart 软链 → `systemctl restart libvirtd` →
+   virsh 秒回 → 手动跑 nfvisd **20s 内走完启动**（计算编排接入 → 就绪 → 连上 VPP → 恢复收敛完成）
+   → `systemctl start nfvis` 立即 active、API 可达。
+5. **新登记产品缺陷（R129-1，待修）**：底座组件（libvirt；Docker 探测同样待核）无响应时
+   nfvisd 启动**无界阻塞**，把任何底座故障放大成「管理面整体不可用 + 无限重启循环」。
+   产品设计本意是「连接失败降级 NoopCompute 并告警、不阻塞启动」（main.go:228 注释、FR-OPS-010），
+   缺陷在于有界超时未被真正执行。修复 = 决策 #349。
+
+§1 证据链
+1. **journal（systemd 侧）**：每次启动都精确 90s 超时（`TimeoutStartUSec=1min 30s`，unit 未覆盖默认值）：
+     17:52:05 Starting… → 17:53:35 start operation timed out. Terminating. → Failed with result 'timeout'
+   反复七轮（17:52~18:01）。**90s 窗口内 nfvisd 零行输出**（连「计算编排已接入/未接入」这类必然
+   打印的行都没有）⇒ 卡点在第一个必打日志点（main.go:258/264）之前。
+2. **SIGQUIT 全栈（决定性证据）**：手动跑 `nfvisd -db … -listen 127.0.0.1:8443`（不被 systemd 管），
+   150s 零输出、进程存活；`kill -QUIT` 抓栈——
+     goroutine 1  [chan receive]  main.run() main.go:255
+       ← compute.NewConnectedProvider ← compute.Connect (conn_libvirt.go:44)
+       ← go-libvirt.ConnectToURI → (*Libvirt).authenticate → **AuthList** → getResponse（等应答）
+     goroutine 22 [IO wait]  socket.(*Socket).Connect 派生的 listen goroutine，
+       卡在 `io.ReadFull`（**libvirtd 一个字节都没回**）
+   ⇒ 主流程卡在 libvirt 认证握手；10s ctx 未被传递到阻塞点（conn_libvirt.go:34 只查一次入口）。
+3. **libvirtd 同款挂死（环境侧）**：`timeout 8 virsh -c qemu:///system list` → rc=124（超时）；
+   `systemctl status libvirtd` active（Main PID 1271，Ssl，poll_schedule_timeout）；
+   /run/libvirt/libvirt-sock 存在可连。两个独立客户端（virsh、go-libvirt）都得不到响应 ⇒ 假死。
+4. **假死与 sem-vm 开机自启的关联**：
+   - 产品库 `/var/lib/nfvis/nfvis.db`：`"autostart":true`（sem-vm）；
+   - `/etc/libvirt/qemu/autostart/sem-vm.xml` 软链建于 17:10（上次 nfvisd 运行期，round128）；
+   - 开机 17:13:52 libvirtd 起动 → 17:13:58 qemu 被 libvirtd 拉起（cmdline 带 `-S` 暂停 + 1G 大页
+     `prealloc:true` + `mem-lock=on`）→ systemd-machined 记 scope → **此后 libvirtd 再无任何日志**，
+     对客户端零响应；
+   - libvirtd 日志仅两条 warning（`virSecurityValidateTimestamp: Invalid XATTR timestamp …`，
+     sem-vm master-key.aes / disk.qcow2——上次不干净关机的残迹），无 error/fatal。
+   ⇒ 判定：libvirtd 在自启 sem-vm 的路径上假死（未再 resume qemu、也不服务任何新连接）。
+   深层机理属 libvirt 12.0.0（Ubuntu 26.04）自身行为，本轮不做底层追因；以「开机是否复现」为
+   后续重启测试的观察项（§5）。
+5. **旁证**：vpp 自 17:0x 起 active 且 `vppctl show version` 正常——排除 VPP 因素；
+   DB 557KB、WAL 0 字节、磁盘 14%、load ~1——排除资源因素；无残留 nfvisd 进程、无锁竞争。
+
+§2 环境恢复操作（按序，全部留痕）
+1. `systemctl stop nfvis`（停重启循环）+ `systemctl start vpp`（数据面先可用）——交接文档既定两条命令。
+2. SSH host key 变更（预告过：3 次重启会重建）——`ssh-keygen -R 192.168.155.129` + accept-new 重录。
+3. `kill 1902`（终止 -S 暂停的假死现场 qemu；sem-vm 转为 shut off）。
+4. `rm /etc/libvirt/qemu/autostart/sem-vm.xml`（摘 autostart 软链，防 libvirtd 重启时再次自启再次假死）。
+5. `systemctl restart libvirtd` → `timeout 8 virsh -c qemu:///system list --all` 秒回、rc=0。
+6. 手动 nfvisd 跑 20s：32 行日志，「计算编排已接入」「nfvisd 就绪」「已连接 VPP」「恢复收敛完成」，
+   `curl -k https://127.0.0.1:8443/api/v1/system/status` → 401（服务在、等凭据）。
+7. `systemctl start nfvis` → **active**（ActiveEnterTimestamp 即启动秒，Type=notify READY 正常送达），
+   journal 见「恢复收敛完成」，API 401 同上。启动日志里的 govpp「Received reply to an already closed
+   binary API request」为手动实例收尾与服务启动瞬间重叠的既有噪声，非缺陷。
+
+§3 ⚠️ 重要观察：autostart 软链会被产品自动重建
+第 2 步摘掉的软链在 **18:14 被手动跑的 nfvisd 重建**（`/etc/libvirt/qemu/autostart/` 下 mtime 18:14）
+——产品在启动/收敛期按 committed 配置的 `"autostart":true` 重建 libvirt autostart。
+⇒ **下次重启 libvirtd 仍会开机自启 sem-vm，假死风险原样存在**。这不推翻恢复操作（当时必须摘），
+但意味着：① #349（nfvisd 有界降级）必须先落，任何底座假死都不再拖死管理面；
+② 「开机 libvirtd 自启 sem-vm 是否复现假死」列为 #348 重验（重启测试）的第一观察项；
+③ 若复现，须立项评估「VNF 自起不依赖 libvirt autostart、改由恢复收敛受控拉起」的产品口径
+（libvirt autostart 在 libvirtd 起动早期执行、先于 nfvisd、不可观测不可控——与产品「恢复收敛
+负责现场重建」的既有架构存在张力）。
+
+§4 对既有记录的更正
+- round128 交接「根因方向：nfvisd 启动（含恢复收敛）超过 TimeoutStartSec——现场对象比 round127 时重」
+  → **更正**：恢复收敛未参与；卡点是 libvirt 连接（main.go:255），与现场对象多少无关（手动实例
+  同样 150s 零进展；libvirtd 修好后同现场 20s 走完）。
+- round128 交接「#348 四次真机验证失败」→ **更正**：四次失败均为本环境故障所致；#348 代码未被
+  真正测过（其验证前提——nfvisd 能走到启动完成——不成立）。处置：PR #278 保持 open，
+  附录 A #348 行加「未达成/待重验」状态注记，待 #349 落地后做重启测试定论。
+
+§5 后续（按序）
+1. **#349**（契约先行）：底座无响应时 nfvisd 启动有界降级——libvirt 连接全程有界（含协议握手，
+   超时即放弃并降级 NoopCompute）、Docker 探测同口径核查、降级以告警如实呈现（设计本意补落实）。
+   真机验证判据：`systemctl stop libvirtd` 后重启 nfvis，服务须在 ~10s 量级 active 且带降级告警，
+   管理面（CLI/REST）不受影响；恢复 libvirtd 后按既有口径处理。
+2. **#348 重验**（PR #278 重基于 #349 后）：重启测试——VPP 自启、nfvis active、观察开机 libvirtd
+   假死是否复现（§3）。
+3. round128 同轮登记的「probeOnce 只看 api.sock 存在会误判陈旧 socket」保持待做（#348 附属）。
