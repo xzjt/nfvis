@@ -400,6 +400,8 @@ set management
   ├─ ip address <ip-prefix>            # 独立管理网卡静态地址（IPv4/IPv6）
   └─ gateway <ip>                      # 管理口默认网关
 set kernel                                    # 内核启动基线（大页/隔离核由 resource-pools 派生，唯一真源）
+  │                                           #   默认大页尺寸 default_hugepagesz 恒为 2M（数据面/VPP 默认尺寸，决策 #347）：
+  │                                           #   池以 hugepagesz=<size> hugepages=N 显式声明（2M 池给 VPP、1G 池给 VNF）
   ├─ nmi-watchdog <true|false>                # NMI watchdog（VPP 场景通常 false）
   ├─ transparent-hugepages <always|madvise|never>
   ├─ iommu <on|off|pt>
@@ -552,6 +554,8 @@ set policies <name> cir <uint> cbs <uint>            # bps / bytes
 
 ```
 [edit resource-pools]
+# 内核基线里 default_hugepagesz 恒为 2M（数据面/VPP 默认尺寸）：2M 池显式 hugepagesz=2M hugepages=N、
+# 1G 池显式 hugepagesz=1G hugepages=N（只给 VNF）——决策 #347；hugepages= 归属其前最近的 hugepagesz=。
 set hugepages page-size <2M|1G> count <uint>         # 变更需 reboot，commit 时提示
 set cpu isolated-cores <core-list>                   # 如 "4-15"；变更需 reboot
 set cpu numa node <uint> cores <core-list>           # NUMA 亲和声明（校验与拓扑一致）

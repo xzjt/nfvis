@@ -151,17 +151,29 @@ apply() {
     # 生成器与运行期（nfvisd 的内核基线 Apply / 启动补写）共用同一个
     # `nfvisd --print-hugepage-sysctl`，避免两处各写一份而漂移。
     SYSCTL="/etc/sysctl.d/90-nfvis-hugepages.conf"
-    SYSCTL_NEW=$("$NFVISD" --print-hugepage-sysctl --hugepages-1g "$HP1G" --hugepages-2m "$HP2M" 2>/dev/null || true)
-    if [ -n "$SYSCTL_NEW" ]; then
-        mkdir -p "$(dirname "$SYSCTL")"
-        if [ -f "$SYSCTL" ] && [ "$(cat "$SYSCTL")" = "$SYSCTL_NEW" ]; then
-            log "大页池 sysctl 片段未变，跳过写入"
-        else
-            printf '%s\n' "$SYSCTL_NEW" > "$SYSCTL"
-            log "大页池 sysctl 已写入：$SYSCTL（$(printf '%s\n' "$SYSCTL_NEW" | tail -1)）"
-        fi
+    # 决策 #347：vm.nr_hugepages 作用于**当前内核默认尺寸池**（cmdline 的 default_hugepagesz）。
+    # 取不到默认尺寸时保守不动（不写不删）——不猜，也不把某尺寸的声明值喂给未知的池。
+    # 优先取**即将生效**的基线（刚写入的 GRUB 片段），回退当前运行 cmdline——
+    # apply 后重启前运行 cmdline 仍是旧基线，按它取会把值钉给错的默认尺寸池（真机 round127）。
+    DEFSZ=$(grep -oE 'default_hugepagesz=[0-9]+[MG]' "$FRAG" 2>/dev/null | head -1 | cut -d= -f2 || true)
+    if [ -z "$DEFSZ" ]; then
+        DEFSZ=$(grep -oE 'default_hugepagesz=[0-9]+[MG]' /proc/cmdline 2>/dev/null | head -1 | cut -d= -f2 || true)
+    fi
+    if [ -z "$DEFSZ" ]; then
+        log "未取到内核默认大页尺寸（default_hugepagesz），保守不动大页池 sysctl 片段：$SYSCTL"
     else
-        rm -f "$SYSCTL"
+        SYSCTL_NEW=$("$NFVISD" --print-hugepage-sysctl --hugepages-1g "$HP1G" --hugepages-2m "$HP2M" 2>/dev/null || true)
+        if [ -n "$SYSCTL_NEW" ]; then
+            mkdir -p "$(dirname "$SYSCTL")"
+            if [ -f "$SYSCTL" ] && [ "$(cat "$SYSCTL")" = "$SYSCTL_NEW" ]; then
+                log "大页池 sysctl 片段未变，跳过写入"
+            else
+                printf '%s\n' "$SYSCTL_NEW" > "$SYSCTL"
+                log "大页池 sysctl 已写入：$SYSCTL（$(printf '%s\n' "$SYSCTL_NEW" | tail -1)）"
+            fi
+        else
+            rm -f "$SYSCTL"
+        fi
     fi
 
     log "update-grub 成功；**需重启生效**：重启后 show system kernel 应显示与配置一致"

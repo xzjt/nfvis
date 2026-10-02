@@ -116,63 +116,173 @@ func TestStripLegacyGrubParams(t *testing.T) {
 	}
 }
 
-// R88-1 回归：大页池 sysctl 片段按**默认尺寸**池的声明值生成。
+// R88-1 / 决策 #347：大页池 sysctl 片段钉**当前内核默认尺寸池**的声明值。
 //
-// 真机 round88 现场（1.1.49，干净快照首装）：GRUB 片段声明 1G=1，但 VPP 包自带的
-// /etc/sysctl.d/80-vpp.conf（vm.nr_hugepages=1024，本意给 2M 池）落到默认尺寸（1G）池上，
-// 开机被撑到 nr=4 —— `show system kernel` 里「内核基线 1 / 运行实际 4」长期不一致。
-// 修法：按同一「默认尺寸 = 1G 当且仅当 1G>0」判据写 90 号 sysctl 落点钉回。
+// 真机 round88 现场（1.1.49，干净快照首装）：VPP 包自带的 /etc/sysctl.d/80-vpp.conf
+// （vm.nr_hugepages=1024，本意给 2M 池）落到**默认尺寸**池上，开机被撑到 nr=4——
+// `show system kernel` 里「内核基线 1 / 运行实际 4」长期不一致。`vm.nr_hugepages` 只作用于
+// 默认尺寸池，而默认尺寸由当前内核 cmdline 的 default_hugepagesz 决定（#347 后产品基线恒 2M，
+// 但旧基线尚未重启时仍是 1G）——故判据取自 d.DefaultHugepageSize，不硬编码。
 func TestGenerateHugepageSysctlPinsDeclaredCount(t *testing.T) {
-	// 双池（默认尺寸 1G）：钉 1G 声明值
-	got := GenerateHugepageSysctl(KernelDesired{Hugepages1G: 4, Hugepages2M: 768})
+	// ① 旧基线（默认尺寸 1G）：钉 1G 池声明值，不写 2M 池数
+	got := GenerateHugepageSysctl(KernelDesired{DefaultHugepageSize: "1G", Hugepages1G: 4, Hugepages2M: 768})
 	if !strings.Contains(got, "vm.nr_hugepages = 4") {
-		t.Fatalf("双池应钉 1G 声明值 4：%q", got)
+		t.Fatalf("旧基线应钉 1G 声明值 4：%q", got)
+	}
+	if strings.Contains(got, "vm.nr_hugepages = 768") {
+		t.Fatalf("不得把 2M 池数写给 1G 默认尺寸池：%q", got)
 	}
 	// 接管 vpp 包那条 conffile 时必须把它另一个生效键一起带上（决策 #201），
 	// 否则挪走文件就顺手丢了「root 组可访问大页」。
 	if !strings.Contains(got, "vm.hugetlb_shm_group = 0") {
 		t.Fatalf("应接管 vpp 的 vm.hugetlb_shm_group：%q", got)
 	}
-	if strings.Contains(got, "= 768") {
-		t.Fatalf("不得把 2M 池数写给默认尺寸池：%q", got)
-	}
-	// 单 2M 池（默认尺寸 2M）：钉 2M 声明值
-	got = GenerateHugepageSysctl(KernelDesired{Hugepages2M: 768})
+	// ② 新基线（默认尺寸 2M）：钉 2M 池声明值，不写 1G 池数
+	got = GenerateHugepageSysctl(KernelDesired{DefaultHugepageSize: "2M", Hugepages1G: 4, Hugepages2M: 768})
 	if !strings.Contains(got, "vm.nr_hugepages = 768") {
+		t.Fatalf("新基线应钉 2M 声明值 768：%q", got)
+	}
+	if strings.Contains(got, "vm.nr_hugepages = 4") {
+		t.Fatalf("不得把 1G 池数写给 2M 默认尺寸池：%q", got)
+	}
+	// 单 2M 池、新基线：钉 2M
+	if got := GenerateHugepageSysctl(KernelDesired{DefaultHugepageSize: "2M", Hugepages2M: 768}); !strings.Contains(got, "vm.nr_hugepages = 768") {
 		t.Fatalf("单 2M 池应钉 2M 声明值：%q", got)
 	}
-	// 都不托管：不产出（调用方删文件）
-	if got := GenerateHugepageSysctl(KernelDesired{}); got != "" {
-		t.Fatalf("未托管大页时不应产出 sysctl 片段：%q", got)
+	// ③ 取不到默认尺寸（DefaultHugepageSize 空）：不产出（调用方据此不动文件）
+	if got := GenerateHugepageSysctl(KernelDesired{Hugepages1G: 4, Hugepages2M: 768}); got != "" {
+		t.Fatalf("默认尺寸未知时不应产出：%q", got)
+	}
+	// ④ 旧基线且未声明 1G 池：不产出（调用方删文件）
+	if got := GenerateHugepageSysctl(KernelDesired{DefaultHugepageSize: "1G", Hugepages2M: 768}); got != "" {
+		t.Fatalf("旧基线未声明 1G 池时不应产出：%q", got)
+	}
+	// 该尺寸池未声明（==0）：不产出
+	if got := GenerateHugepageSysctl(KernelDesired{DefaultHugepageSize: "2M"}); got != "" {
+		t.Fatalf("该尺寸池未声明时不应产出：%q", got)
 	}
 }
 
-// R88-1：Apply 落盘 sysctl 片段、Rollback 撤除；启动期按 cmdline 补写（首装路径）。
+// R88-1 / 决策 #347：Apply 落盘 sysctl 片段、Rollback 撤除；启动期按 cmdline 补写（首装路径），
+// 判据跟随当前内核默认尺寸池（旧基线 default 1G 钉 1G、新基线 default 2M 钉 2M）。
 func TestEnsureHugepageSysctlFromCmdline(t *testing.T) {
 	root := t.TempDir()
-	writeProc(t, root, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro default_hugepagesz=1G hugepagesz=1G hugepages=1 intel_iommu=on\n")
 
+	// 旧基线（default 1G）：钉 1G 池声明值 4，不写 2M 池数
+	writeProc(t, root, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro default_hugepagesz=1G hugepagesz=1G hugepages=4 hugepagesz=2M hugepages=768 intel_iommu=on\n")
 	changed, err := EnsureHugepageSysctlFromCmdline(root)
 	if err != nil || !changed {
-		t.Fatalf("首次应写入（changed=%v err=%v）", changed, err)
+		t.Fatalf("旧基线首次应写入（changed=%v err=%v）", changed, err)
 	}
 	b, err := os.ReadFile(root + hugepageSysctlRel)
 	if err != nil {
 		t.Fatalf("读取 sysctl 片段: %v", err)
 	}
-	if !strings.Contains(string(b), "vm.nr_hugepages = 1") {
-		t.Fatalf("应按 cmdline 声明钉 1：%q", b)
+	if !strings.Contains(string(b), "vm.nr_hugepages = 4") || strings.Contains(string(b), "vm.nr_hugepages = 768") {
+		t.Fatalf("旧基线应钉 1G 声明值 4：%q", b)
 	}
 	// 幂等：内容未变不再报告变更
 	if changed, err := EnsureHugepageSysctlFromCmdline(root); err != nil || changed {
 		t.Fatalf("重复调用不应再变更（changed=%v err=%v）", changed, err)
 	}
-	// cmdline 不再声明大页 → 撤除片段
-	writeProc(t, root, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro quiet\n")
+
+	// 切到新基线（default 2M）：重写为 2M 池声明值 768
+	writeProc(t, root, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro default_hugepagesz=2M hugepagesz=2M hugepages=768 hugepagesz=1G hugepages=4 intel_iommu=on\n")
 	if changed, err := EnsureHugepageSysctlFromCmdline(root); err != nil || !changed {
-		t.Fatalf("未托管时应撤除（changed=%v err=%v）", changed, err)
+		t.Fatalf("切新基线应重写（changed=%v err=%v）", changed, err)
+	}
+	b, _ = os.ReadFile(root + hugepageSysctlRel)
+	if !strings.Contains(string(b), "vm.nr_hugepages = 768") {
+		t.Fatalf("新基线应钉 2M 声明值 768：%q", b)
+	}
+
+	// 默认尺寸已知但该尺寸池未声明 → 撤除片段
+	writeProc(t, root, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro default_hugepagesz=2M intel_iommu=on\n")
+	if changed, err := EnsureHugepageSysctlFromCmdline(root); err != nil || !changed {
+		t.Fatalf("该尺寸池未声明时应撤除（changed=%v err=%v）", changed, err)
 	}
 	if _, err := os.Stat(root + hugepageSysctlRel); !os.IsNotExist(err) {
 		t.Fatalf("sysctl 片段应已删除: %v", err)
+	}
+}
+
+// 决策 #347：取不到内核默认大页尺寸时**保守不动**该文件（不写不删），不猜。
+func TestEnsureHugepageSysctlFromCmdlineUnknownDefaultNoTouch(t *testing.T) {
+	root := t.TempDir()
+	// 预置一份既有片段，期望它被原样保留
+	writeProc(t, root, hugepageSysctlRel, "# 既有内容\nvm.nr_hugepages = 1\n")
+	// cmdline 无 default_hugepagesz：取不到默认尺寸
+	writeProc(t, root, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro hugepages=768 quiet\n")
+
+	changed, err := EnsureHugepageSysctlFromCmdline(root)
+	if err != nil {
+		t.Fatalf("取不到默认尺寸不应报错: %v", err)
+	}
+	if changed {
+		t.Fatal("取不到默认尺寸不应报告变更（保守不动）")
+	}
+	b, err := os.ReadFile(root + hugepageSysctlRel)
+	if err != nil {
+		t.Fatalf("既有片段不应被删除: %v", err)
+	}
+	if string(b) != "# 既有内容\nvm.nr_hugepages = 1\n" {
+		t.Fatalf("既有片段不应被改写: %q", b)
+	}
+}
+
+// 决策 #347：默认尺寸判据取**即将生效的内核基线**——优先产品写的 GRUB 片段，回退当前 cmdline。
+func TestEffectiveDefaultHugepageSize(t *testing.T) {
+	// 片段存在且含 default_hugepagesz：以片段为准（apply 后重启前的关键形态：片段=2M、cmdline=1G）
+	root := t.TempDir()
+	writeProc(t, root, grubFragmentRel, "GRUB_CMDLINE_LINUX=\"${GRUB_CMDLINE_LINUX} default_hugepagesz=2M hugepagesz=2M hugepages=768 hugepagesz=1G hugepages=2\"\n")
+	writeProc(t, root, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro default_hugepagesz=1G hugepagesz=1G hugepages=2 hugepagesz=2M hugepages=768\n")
+	if got := EffectiveDefaultHugepageSize(root); got != "2M" {
+		t.Fatalf("有片段时应以片段为准（2M），实际 %q", got)
+	}
+	// 片段 default=1G、cmdline=2M：仍以片段为准
+	writeProc(t, root, grubFragmentRel, "GRUB_CMDLINE_LINUX=\"${GRUB_CMDLINE_LINUX} default_hugepagesz=1G hugepagesz=1G hugepages=2\"\n")
+	if got := EffectiveDefaultHugepageSize(root); got != "1G" {
+		t.Fatalf("有片段时应以片段为准（1G），实际 %q", got)
+	}
+	// 片段不存在：回退 cmdline
+	root2 := t.TempDir()
+	writeProc(t, root2, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro default_hugepagesz=1G hugepagesz=1G hugepages=4\n")
+	if got := EffectiveDefaultHugepageSize(root2); got != "1G" {
+		t.Fatalf("无片段时应回退 cmdline（1G），实际 %q", got)
+	}
+	// 片段存在但不含 default_hugepagesz：回退 cmdline
+	writeProc(t, root2, grubFragmentRel, "GRUB_TIMEOUT=5\n")
+	if got := EffectiveDefaultHugepageSize(root2); got != "1G" {
+		t.Fatalf("片段无 default 时应回退 cmdline（1G），实际 %q", got)
+	}
+	// 两者都取不到：空
+	root3 := t.TempDir()
+	writeProc(t, root3, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro quiet\n")
+	if got := EffectiveDefaultHugepageSize(root3); got != "" {
+		t.Fatalf("都取不到应为空，实际 %q", got)
+	}
+}
+
+// 决策 #347 关键回归（真机 round127 事故形态）：GRUB 片段（即将生效的新基线）=default 2M，
+// 而当前运行 cmdline=default 1G 时，须按 **2M 池**的声明值钉——不能按运行 cmdline 的 1G 池取值
+// （后者会把旧尺寸池的值写到重启后已是 2M 的默认尺寸池上，把 2M 池收小、VPP 起不来）。
+func TestEnsureHugepageSysctlFromCmdlinePrefersGrubFragment(t *testing.T) {
+	root := t.TempDir()
+	writeProc(t, root, grubFragmentRel, "GRUB_CMDLINE_LINUX=\"${GRUB_CMDLINE_LINUX} default_hugepagesz=2M hugepagesz=2M hugepages=768 hugepagesz=1G hugepages=2\"\n")
+	writeProc(t, root, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro default_hugepagesz=1G hugepagesz=1G hugepages=2 hugepagesz=2M hugepages=768\n")
+
+	changed, err := EnsureHugepageSysctlFromCmdline(root)
+	if err != nil || !changed {
+		t.Fatalf("应写入（changed=%v err=%v）", changed, err)
+	}
+	b, err := os.ReadFile(root + hugepageSysctlRel)
+	if err != nil {
+		t.Fatalf("读取 sysctl 片段: %v", err)
+	}
+	if !strings.Contains(string(b), "vm.nr_hugepages = 768") {
+		t.Fatalf("应按即将生效基线（default 2M）钉 2M 池声明值 768：%q", b)
+	}
+	if strings.Contains(string(b), "vm.nr_hugepages = 2\n") {
+		t.Fatalf("不得按当前运行 cmdline 的 1G 池声明值 2 钉（池身份错位）：%q", b)
 	}
 }

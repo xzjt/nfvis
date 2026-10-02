@@ -21,17 +21,21 @@ import (
 // 此前无 tag → 序列化出 Go 字段名（Hugepages1G/IsolatedCores…），与契约不符（R37-1 类）。
 // 该结构体不落盘为 JSON（GRUB 片段备份是文本），故加 tag 无兼容性影响。
 type KernelDesired struct {
-	Hugepages1G   int      `json:"hugepages_1g"`           // default_hugepagesz=1G hugepagesz=1G hugepages=N
-	Hugepages2M   int      `json:"hugepages_2m"`           // hugepages=N（2M 默认页）
-	IsolatedCores string   `json:"isolated_cores"`         // isolcpus=<list>
-	IRQAffinity   string   `json:"irq_affinity,omitempty"` // irqaffinity=<非隔离核>（EnrichDesired 按真机在线核派生；空 = 不写）
-	NoHZFull      *bool    `json:"nohz_full,omitempty"`    // nil = 未探测（按支持处理）；false = 内核无 CONFIG_NO_HZ_FULL，省略 nohz_full/rcu_nocbs
-	LowLatency    bool     `json:"low_latency"`            // 低延迟参数组（显式选择；idle=poll/tsc=reliable 由 EnrichDesired 按是否虚拟化决定）
-	NMIWatchdog   *bool    `json:"nmi_watchdog"`           // nil = 不托管（保留现状）
-	THP           string   `json:"transparent_hugepages"`  // always|madvise|never；空 = 不托管
-	IOMMU         string   `json:"iommu"`                  // on|off|pt；空 = 不托管
-	TunedProfile  string   `json:"tuned_profile"`          // 非 cmdline：写入 /etc/nfvis/tuned-profile
-	ExtraParams   []string `json:"params,omitempty"`
+	Hugepages1G int `json:"hugepages_1g"` // default_hugepagesz=1G hugepagesz=1G hugepages=N
+	Hugepages2M int `json:"hugepages_2m"` // hugepages=N（2M 默认页）
+	// DefaultHugepageSize 当前内核基线的默认大页尺寸（"1G"/"2M"），空 = 未知。
+	// 决策 #347：仅用于大页池 sysctl 钉值——`vm.nr_hugepages` 只作用于**默认尺寸池**，
+	// 其判据须跟随当前内核基线（cmdline 的 default_hugepagesz），不得硬编码。
+	DefaultHugepageSize string   `json:"default_hugepage_size,omitempty"`
+	IsolatedCores       string   `json:"isolated_cores"`         // isolcpus=<list>
+	IRQAffinity         string   `json:"irq_affinity,omitempty"` // irqaffinity=<非隔离核>（EnrichDesired 按真机在线核派生；空 = 不写）
+	NoHZFull            *bool    `json:"nohz_full,omitempty"`    // nil = 未探测（按支持处理）；false = 内核无 CONFIG_NO_HZ_FULL，省略 nohz_full/rcu_nocbs
+	LowLatency          bool     `json:"low_latency"`            // 低延迟参数组（显式选择；idle=poll/tsc=reliable 由 EnrichDesired 按是否虚拟化决定）
+	NMIWatchdog         *bool    `json:"nmi_watchdog"`           // nil = 不托管（保留现状）
+	THP                 string   `json:"transparent_hugepages"`  // always|madvise|never；空 = 不托管
+	IOMMU               string   `json:"iommu"`                  // on|off|pt；空 = 不托管
+	TunedProfile        string   `json:"tuned_profile"`          // 非 cmdline：写入 /etc/nfvis/tuned-profile
+	ExtraParams         []string `json:"params,omitempty"`
 }
 
 // KernelActual 运行实际（从 /proc、/sys 读取）。
@@ -152,6 +156,14 @@ func ParamValueFromCmdline(cmdline []string, name string) string {
 	return ""
 }
 
+// DefaultHugepageSizeFromCmdline 返回 cmdline 里 `default_hugepagesz=` 的值（如 "1G"/"2M"）；
+// 无该参数时返回 ""（未知）。决策 #347：`vm.nr_hugepages` 只作用于该默认尺寸池，
+// 故大页池 sysctl 钉值的判据跟随它，而不是硬编码——过渡期（apply 后尚未重启）
+// 当前内核默认尺寸仍是旧值，硬编码会把某尺寸的声明值喂给另一尺寸的池。
+func DefaultHugepageSizeFromCmdline(cmdline []string) string {
+	return ParamValueFromCmdline(cmdline, "default_hugepagesz")
+}
+
 // Compare 返回「配置期望 vs 内核基线（cmdline）」的差异项（空 = 一致）。
 // 仅比较已托管的项：大页（1G/2M 页数）、isolcpus、NMI watchdog、THP。
 //
@@ -244,16 +256,20 @@ func HugepageRuntimeNotes(d KernelDesired, a KernelActual) []string {
 // 保证"首次装机"与"后续调整"同源）。tuned profile 另写文件，不出现在 cmdline。
 func GenerateBaseline(d KernelDesired) (grubFragment string, fstabLine string) {
 	var params []string
+	// 决策 #347：内核启动基线的默认大页尺寸恒为 2M（数据面/VPP 的默认尺寸），不随池声明变化。
+	// 根因（round126/127 实测）：VPP 的 main heap 页尺寸取**内核**默认大页尺寸——VPP 自己的
+	// memory { default-hugepage-size / main-heap-page-size } 两个键都管不了它（实测：写 2M 也无用）。
+	// 旧的「1G 池 > 0 就写 default_hugepagesz=1G」会让 VPP 的 main heap 占 1 个 1G 页，
+	// 于是 1G 池声明 N 只能给 VNF N−1 页——第二个 VNF 起不来（round124 实测 Cannot allocate memory）。
+	// 改后 1G 池只给 VNF；VPP 的 main heap 改从 2M 池取页。
+	params = append(params, "default_hugepagesz=2M")
+	if d.Hugepages2M > 0 {
+		// 2M 池显式声明（hugepages= 归属其前最近的 hugepagesz=，与 1G 段同规则）。
+		params = append(params, "hugepagesz=2M", fmt.Sprintf("hugepages=%d", d.Hugepages2M))
+	}
 	if d.Hugepages1G > 0 {
-		params = append(params, "default_hugepagesz=1G", "hugepagesz=1G", fmt.Sprintf("hugepages=%d", d.Hugepages1G))
-		// 双池（决策 #106）：2M 池随 1G 一起进 cmdline——VPP 用 2M（hugepage-preference）、
-		// VM 用 1G；否则 2M 池只能运行期手工预留、重启即失。hugepages= 归属其前最近的 hugepagesz=。
-		if d.Hugepages2M > 0 {
-			params = append(params, "hugepagesz=2M", fmt.Sprintf("hugepages=%d", d.Hugepages2M))
-		}
-	} else if d.Hugepages2M > 0 {
-		// 单 2M 池：不写 hugepagesz/default_hugepagesz，hugepages= 归缺省页尺寸（x86_64 即 2M）
-		params = append(params, fmt.Sprintf("hugepages=%d", d.Hugepages2M))
+		// 1G 池只给 VNF（VM 内存），显式写成 hugepagesz=1G hugepages=<声明>。
+		params = append(params, "hugepagesz=1G", fmt.Sprintf("hugepages=%d", d.Hugepages1G))
 	}
 	if d.IsolatedCores != "" {
 		params = append(params, "isolcpus="+d.IsolatedCores)
