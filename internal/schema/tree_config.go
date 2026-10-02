@@ -60,9 +60,19 @@ func ConfigPathTree() *Node {
 				),
 			),
 			K("dns", "DNS",
-				K("server", "DNS 服务器",
+				K("server", "DNS 服务器（宿主解析器：本机 resolv/systemd-resolved 用）",
 					SPA("<ip>", "dns_servers", "服务器地址"),
 					K("secondary", "备用服务器", SPA("<ip>", "dns_servers", "地址")),
+				),
+				// 决策 #338：数据面 DNS 代理（VPP 内置 dns 插件）。与上面的宿主解析器是两回事：
+				// 域内 VNF/容器把 resolver 指向网关即可解析，上游由 VPP 代为转发/缓存，故上游须在
+				// **VPP 的 FIB 内可达**（不自动把宿主上游喂给 VPP）。模型落点 vpp.dns_proxy_servers
+				// （别名 cli_aliases_array.go 重定向），非空即 dns enable、清空即 dns disable。
+				K("proxy", "数据面 DNS 代理（上游须在 VPP FIB 内可达；不自动取宿主上游）",
+					K("server", "上游 DNS 服务器",
+						SPA("<ip>", "dns_proxy_servers", "上游地址"),
+						K("secondary", "备用上游", SPA("<ip>", "dns_proxy_servers", "上游地址")),
+					),
 				),
 			),
 			K("api", "API 服务",

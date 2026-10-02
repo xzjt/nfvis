@@ -95,6 +95,9 @@ show acls <name> detail
 show nat                                            # NAT 池、规则、转换会话计数
 show port-mirroring                                 # SPAN 会话状态
 show qos policies                                   # 限速策略与绑定
+show dns proxy                                      # 数据面 DNS 代理：启用态 + 上游列表（GET /dns/proxy，
+                                                    #   决策 #338）：只读产品配置声明（vpp.dns_proxy_servers）；
+                                                    #   与 `vppctl show dns servers` 的对照由真机语义套件承担
 
 show vpp                                            # VPP 数据面概览：版本、线程/worker、buffer、内存（GET /vpp/status）
 show vpp threads                                    # main/worker 线程清单与绑核（govpp threads dump）
@@ -354,6 +357,12 @@ set hostname <string>
 set timezone <tz>
 set ntp server <ip|host> [prefer]
 set dns server <ip> [secondary <ip>]
+set dns proxy server <ip> [secondary <ip>]           # 数据面 DNS 代理上游（决策 #338）：VPP 内置 dns 插件，
+                                                     #   域内 VNF/容器把 resolver 指向网关即可解析；非空即 dns enable、
+                                                     #   清空即 dns disable。**上游须在 VPP 的 FIB 内可达**
+                                                     #   （数据面发起的解析走 VPP 路由；不自动把宿主上游喂给 VPP）
+delete dns proxy server [<ip> | secondary <ip>]      # 撤销指定上游；不带取值即清空全部（清空 → dns disable）
+                                                     #   注：`set dns server`（宿主解析器）与之各管一路，互不影响
 set api
   ├─ port <uint>                       # HTTPS 端口，默认 443
   ├─ token-ttl-minutes <uint>          # 默认 60

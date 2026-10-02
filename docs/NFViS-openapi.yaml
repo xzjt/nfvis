@@ -35,6 +35,7 @@ tags:
   - name: port-mirroring
   - name: qos
   - name: vpp
+  - name: dns
   - name: resource-pools
   - name: virtual-machine-functions
   - name: container-functions
@@ -1361,6 +1362,23 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VppConfig" }
+  /dns/proxy:
+    get:
+      tags: [dns]
+      summary: 数据面 DNS 代理的启用态与上游列表（决策 #338，FR-NET-010）
+      description: |
+        域内 VNF/容器把 resolver 指向网关地址即可解析——VPP 内置 dns 插件代为转发/缓存。
+        本端点只读产品自身配置声明（`Vpp.DNSProxyServers`，**非空即启用**）；`servers` 恒为数组
+        （未配置时为空数组，不发 null）。与 CLI `show dns proxy` **同一实现**。
+        **与宿主解析器 `set system dns server`（SystemConfig.dns_servers）是两回事**；
+        上游须在 **VPP 的 FIB 内可达**（不自动把宿主上游喂给 VPP）。产品视图与数据面实况
+        （`vppctl show dns servers`）的对照由真机语义套件承担，本端点不解析 vppctl 文本。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DnsProxyView" }
   /vpp/capture:
     get:
       tags: [system]
@@ -2595,6 +2613,27 @@ components:
             properties:
               name: { type: string }
               state: { type: string, enum: [enable, disable] }
+        dns_proxy_servers:
+          type: array
+          description: |
+            数据面 DNS 代理的上游服务器（决策 #338，FR-NET-010）：**非空即启用**
+            （逐条下发 VPP dns name-server + dns enable），清空即 dns disable。
+            与 `SystemConfig.dns_servers`（宿主解析器）是两回事；上游须在 **VPP 的 FIB 内可达**
+            （产品不自动把宿主上游喂给 VPP）。
+          items: { type: string }
+
+    DnsProxyView:
+      type: object
+      description: 数据面 DNS 代理读视图（GET /dns/proxy；与 CLI `show dns proxy` 同源）
+      required: [enabled, servers]
+      properties:
+        enabled:
+          type: boolean
+          description: 上游列表非空即 true（与「非空即启用」同口径）
+        servers:
+          type: array
+          description: 上游服务器列表（按声明序；未配置时为空数组，不发 null）
+          items: { type: string }
 
     CaptureFile:
       type: object

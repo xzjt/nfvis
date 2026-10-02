@@ -276,6 +276,7 @@ var secretEgressRoutes = map[string]string{
 	"/system/backup/{file}":             "备份归档下载（例外：#143，super-user + 0600，恢复所必需）",
 	"/system/configuration/sessions":    "持锁会话列表（标识/用户/时间），无配置正文",
 	"/system/core-dumps":                "core dump 清单（文件名/大小/时间），不含转储正文",
+	"/dns/proxy":                        "数据面 DNS 代理读视图（#338）：启用态与上游 IP 列表，无秘密字段",
 	"/system/hardware":                  "硬件健康运行态",
 	"/system/health/thresholds":         "阈值配置段视图",
 	"/system/kernel":                    "内核基线配置段视图",
