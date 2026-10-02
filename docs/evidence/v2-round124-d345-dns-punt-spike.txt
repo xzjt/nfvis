@@ -100,8 +100,15 @@ NFViS v2 真机验证记录 round124 —— 三.3 DNS 数据面代理「路线 c
   静默」的必要性**：静默超时比这个默认行为更差。
 6.6 四套件（dev33）
 - `cli-fulltest` **228 / 0 / 13**（让出 1G 页、无第二个 VM 争用时的干净基线）。同一现场若 sem-vm 在跑，
-  stage 4 会有 4 项失败，全部是 `cli-vm` 因 **1G 池声明 2 页、运行时被 VPP 与 sem-vm 各占 1 页而无空闲页**
-  起不来——环境受限，与 #345 无关（修套件用例后 stage 2 由 71/3 转 **80/0**）。
+  stage 4 会有 4 项失败，全部是 `cli-vm` 因 **1G 池无空闲页**而起不来（`Cannot allocate memory`）；
+  与 #345 无关（修套件用例后 stage 2 由 71/3 转 **80/0**）。
+  ⚠️ **更正（用户指正后复核）**：那页 1G 页**不是 VPP 占的**——`vppctl show memory` 显示 VPP 的 main heap
+  是 **2M 页**（`page-size 2M, total 512` = 1G），`show physmem` 的 `default-page-size 2M`、arena
+  `subpage-size 2M`；VPP maps 里那条 1024MB 是 **vhost-user 对 sem-vm guest RAM 的共享映射**（与 qemu
+  同 inode），VPP 不额外占 1G 页。1G 池的真实账（单 NUMA node）：声明 2 / 内核 2 / `free 0` / `Rsvd 0` /
+  `Surp 0`，而**唯一持有者只有 sem-vm 的 guest RAM 1 页** ⇒ **另有 1 页是无主占用**。
+  ⇒ 结论改为：环境里有 1 页 1G **无主占用**（分配了但无活进程持有），产品当前口径
+  （可回收 = 内核实际 − 声明）既**看不见**也**回收不了**它（已登记进 `docs/v2待做.md`）。
 - `cli-semantic-check` **26 / 0 / 3**（新增 **S13**：读视图 ↔ CLI ↔ `vppctl show punt socket registrations l4`
   三档口径，本轮**转可判定并通过**；余 3 项为 S11/S12 按设计无配置跳过）。
 - `cli-lifecycle-check` **19 / 0 / 4**（首跑 18/1/4：失败项系 sem-vm 刚启动尚未就绪的时序波动，复跑归零，
@@ -118,6 +125,10 @@ NFViS v2 真机验证记录 round124 —— 三.3 DNS 数据面代理「路线 c
    回注失败计入 `SendFailCount`。
 3. **覆盖边界如实化**：punt 注册按地址族，故 v1 覆盖 **IPv4/UDP/53**；IPv6 的注册与回注路径未做真机验证，
    不先做成假能力（契约/读视图/手册三处已写明）。
+4. **对「1G 池被占」的更正**（用户指正后复核）：VPP 用 **2M** 页（`show memory`/`show physmem` 两项实证），
+   `/proc/<pid>/maps` 里那条 1024MB 是 vhost-user 对 guest RAM 的**共享映射**，不能按路径过滤判占用者；
+   1G 池 2 页 = sem-vm guest RAM 1 页 + **无主占用 1 页**（`Rsvd`/`Surp` 皆 0、单 NUMA、仅一个 inode 被映射）。
+   新登记的缺口（可见性 + 回收）见 `docs/v2待做.md`；§6.6 与 §7.4 的措辞已同步更正。
 
 §8 现场改动与清场
 - 真机：安装 2.0.0~dev33；`/etc/vpp/startup.conf` 的 punt 段由产品生成器写入（此前手工加的同路径，备份
