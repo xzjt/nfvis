@@ -390,6 +390,14 @@
   结束后出现的 `COMMIT_VRF_DELETE_DEFERRED`/`VRF_TABLE_LEFTOVER` 是**既有删表延后行为**（#192，按文案
   `request vpp restart` 后自动消解，已与本次修复区分）。测试：4 例容错 + 顺序断言反转；make check RC=0。
   证据 `docs/evidence/v2-round121-d342-acl-delete-order-verified.txt`。
+- **round122（决策 #343 收口 R115-1：语义 S8 正向控制改窗口周期计数，2026-10-02，PR #270）**：S8 原判据是
+  **单次 3s 窗口**比对成员口 rx，而 fixture guest beat 在 ping 超时后降为 ~3s/发，**窗口会整窗跨零** →
+  有流量却判 noflow（round115 三次复跑均如此）。改为：新增纯函数 `s8_rx_cycles_of` + `s8_rx_window`
+  （各成员口**共用 20s 窗口**、每 1s 采一次、`S8_WINDOW_SECS` 可覆盖），**任一成员口周期数 ≥2** 即 learned；
+  无增长仍如实 UNKNOWN（不把不可判定改成通过）；`s8_verdict` 语义不动；自校准加 6 条红-绿用例并验证判别力。
+  **真机复跑：语义 25/0/2**（S8 转可判定并通过；余 2 项 S11/S12 按设计跳过）——套件基线变化已按纪律登记。
+  顺带实测：fixture down 后 `VNF_PORT_DOWN` 在对象消失的下一个巡检周期**自动消解**（#188 对账口径成立）。
+  证据 `docs/evidence/v2-round122-d343-s8-window-verified.txt`。
 - 已定决策 245 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#343）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
