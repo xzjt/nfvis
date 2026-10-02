@@ -255,7 +255,10 @@ func run() error {
 	p, conn, cerr := compute.NewConnectedProvider(libvirtCtx, computeCfg)
 	libvirtCancel()
 	if cerr != nil {
+		// 连接失败/超时（含 libvirtd 假死被 Connect 的有界等待截断）→ 降级 NoopCompute
+		// 并落告警，不阻塞启动（决策 #349：降级必须可见，不能只有一行日志）。
 		log.Warn("计算编排未接入（libvirt 连接失败），VM 生命周期不可用", "uri", computeCfg.URI, "err", cerr)
+		computeUnavailableAlarm(alarms, computeCfg.URI, cerr)
 	} else {
 		p.SetVFResolver(network.NewSysfsVFResolver()) // SR-IOV VF PCI 解析（FR-NET-021）
 		p.SetAlarms(alarms)                           // M4-9：计算收敛告警落点
@@ -270,12 +273,20 @@ func run() error {
 	var containerProvider orchestrator.ContainerProvider = orchestrator.NewNoopContainer()
 	var ctRuntime api.ContainerRuntime
 	ctProvider := container.NewConnectedProvider(ctCfg)
-	if st, err := ctProvider.ContainerState(context.Background(), "__nfvis_probe__"); err == nil || st != "" {
+	// 探测有界（决策 #349）：dockerClient 的请求构造已全程 NewRequestWithContext，
+	// 但调用方此前传的是 Background ⇒ dockerd 假死同样永久卡启动。只改调用方 ctx
+	//（10s 上界），**不给共享 http.Client 加整体超时** —— 镜像导入等长操作共用
+	// 同一客户端，全局超时会截断它们。
+	ctProbeCtx, ctProbeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	st, perr := ctProvider.ContainerState(ctProbeCtx, "__nfvis_probe__")
+	ctProbeCancel()
+	if perr == nil || st != "" {
 		ctProvider.SetAlarms(alarms) // M4-9：容器收敛告警落点
 		containerProvider, ctRuntime = ctProvider, ctProvider
 		log.Info("容器编排已接入", "socket", ctCfg.Socket)
 	} else {
-		log.Warn("容器编排未接入（Docker 连接失败），容器生命周期不可用", "socket", ctCfg.Socket, "err", err)
+		log.Warn("容器编排未接入（Docker 连接失败），容器生命周期不可用", "socket", ctCfg.Socket, "err", perr)
+		containerUnavailableAlarm(alarms, ctCfg.Socket, perr)
 	}
 	if err := os.MkdirAll(ctCfg.MemifDir, 0o755); err != nil {
 		log.Warn("创建 memif socket 目录失败", "dir", ctCfg.MemifDir, "err", err)
@@ -510,11 +521,15 @@ func run() error {
 	// 决策 #329：大页池回收的写能力（按页尺寸写 sysfs）。与 API/CLI 装配的同一实现，
 	// 巡检与 request system hugepages reclaim 不出现两套行为。
 	hugepageSetter := system.NewSysfsHugepageSetter()
-	if changed, err := aaMgr.Ensure(ctx); err != nil {
+	// 启动期 Ensure 有界（15s，决策 #349）：Ensure 内部走 runCmd（10 分钟上界），
+	// 底座异常时会在启动序列里叠一段长等待；启动期无须长等 —— 周期巡检本就幂等重试。
+	aaCtx, aaCancel := context.WithTimeout(ctx, 15*time.Second)
+	if changed, err := aaMgr.Ensure(aaCtx); err != nil {
 		log.Warn("libvirt AppArmor 放行未完成", "err", err)
 	} else if changed {
 		log.Info("libvirt AppArmor 已放行 NFViS 镜像/VM 路径")
 	}
+	aaCancel()
 
 	// R88-1 / 决策 #347：大页池 sysctl 钉值。VPP 包自带 /etc/sysctl.d/80-vpp.conf
 	// （vm.nr_hugepages=1024，本意给 2M 池），而该 sysctl 只作用于**默认尺寸**池——历史上产品
@@ -1741,4 +1756,42 @@ func hugepageBlockerText(p system.HugepagePoolResult) string {
 		return ""
 	}
 	return "（占用者：" + strings.Join(p.Blockers, "；") + "）"
+}
+
+// 启动期底座降级告警码（决策 #349 契约面：scope/source/码三要素经 show alarms 与
+// GET /alarms/active 呈现）。
+const (
+	alarmCodeComputeUnavailable   = "COMPUTE_UNAVAILABLE"
+	alarmCodeContainerUnavailable = "CONTAINER_UNAVAILABLE"
+)
+
+// computeUnavailableAlarm 启动期 libvirt 未接入的降级告警（scope compute、source
+// libvirt、severity warning）。文案要素：发生了什么（启动时未接入、已降级、VM
+// 生命周期动作不可用、已有配置声明不受影响）、独立事实源手查路径、恢复路径、
+// 以及「产品不自动重连」的如实边界。抽成纯函数（hugepageAlarms 先例）便于单测
+// 锁住 scope/source/级别与文案要素。
+func computeUnavailableAlarm(sink alarmSink, uri string, err error) {
+	sink.Raise("compute", network.SeverityWarning, alarmCodeComputeUnavailable,
+		"启动时未接入 libvirt，已降级运行：VM 生命周期动作不可用，已有配置声明不受影响（原因："+errReason(err)+"）。"+
+			"请查底座实况：systemctl status libvirtd、journalctl -u libvirtd、virsh -c "+uri+" list。"+
+			"底座恢复后执行 systemctl restart nfvis 恢复接入；当前产品不自动重连",
+		"libvirt")
+}
+
+// containerUnavailableAlarm 启动期 Docker 未接入的降级告警（scope container、
+// source docker、severity warning）。文案要素与 computeUnavailableAlarm 同一口径。
+func containerUnavailableAlarm(sink alarmSink, socket string, err error) {
+	sink.Raise("container", network.SeverityWarning, alarmCodeContainerUnavailable,
+		"启动时未接入 Docker，已降级运行：容器生命周期动作不可用，已有配置声明不受影响（原因："+errReason(err)+"）。"+
+			"请查底座实况：systemctl status docker、journalctl -u docker（socket: "+socket+"）。"+
+			"底座恢复后执行 systemctl restart nfvis 恢复接入；当前产品不自动重连",
+		"docker")
+}
+
+// errReason 告警文案里的原因兜底（nil 时如实说未知，不拼出「原因: <nil>」）。
+func errReason(err error) string {
+	if err == nil {
+		return "未知"
+	}
+	return err.Error()
 }

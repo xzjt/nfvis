@@ -2,9 +2,13 @@ package compute
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/digitalocean/go-libvirt"
 
@@ -13,6 +17,74 @@ import (
 
 // DefaultURI libvirt 系统域连接 URI（FR-CMP-010：qemu:///system）。
 const DefaultURI = "qemu:///system"
+
+// defaultLibvirtSocket unix 形态缺省 socket 路径 —— 与 go-libvirt socket/dialers
+// 的 defaultSocket 同一取值（路径规则见 libvirtSocketPath）。
+const defaultLibvirtSocket = "/var/run/libvirt/libvirt-sock"
+
+// handshakeDrain 超时关闭 conn 后等待握手 goroutine 退出的有界时长。conn 关闭后
+// go-libvirt 的解除路径（listen 退出 → waitAndDisconnect → deregisterAll 解除挂起
+// 调用）是纯内存操作、毫秒级完成；这里只给 Connect 的返回留上界，不让「等清理」
+// 自己变成又一段无界等待。
+const handshakeDrain = 2 * time.Second
+
+// libvirtSocketPath unix 形态的 socket 路径：URI query 参数 socket 优先，缺省
+// /var/run/libvirt/libvirt-sock。与 go-libvirt 的 dialerForURI/defaultSocket 同一
+// 规则 —— 必须同源，否则「产品拨的」与「go-libvirt 认为该拨的」不是同一个文件。
+func libvirtSocketPath(u *url.URL) string {
+	if s := u.Query().Get("socket"); s != "" {
+		return s
+	}
+	return defaultLibvirtSocket
+}
+
+// libvirtTransport 按 go-libvirt dialerForURI 的同一规则推导传输形态：
+// scheme 带「+」取后缀（qemu+tcp → tcp），无后缀但带 host 视为 tls，否则 unix。
+func libvirtTransport(u *url.URL) string {
+	if scheme := strings.SplitN(u.Scheme, "+", 2); len(scheme) > 1 {
+		return scheme[1]
+	}
+	if u.Host != "" {
+		return "tls"
+	}
+	return "unix"
+}
+
+// connectBounded 拨号 + go-libvirt 协议握手，全程受 ctx 上界约束。network/addr
+// 参数化（unix 入口传 "unix"+socket 路径；单测在 Windows 上用 tcp 造假服务）。
+//
+// 中断手段是「自持 conn + 超时关闭」而非 libvirt.Disconnect()——后者内部先发
+// ConnectClose RPC，对假死守护进程同样会挂。已核实 go-libvirt 源码：conn 关闭后
+// listen goroutine 的 pktlen 读到非临时错误退出 → listenAndRoute 关闭 disconnected
+// → waitAndDisconnect 执行 removeAllStreams + deregisterAll，解除挂起的 getResponse
+// （返回 ErrInterrupted），握手 goroutine 确定性返回（有单测守护不泄漏）。
+func connectBounded(ctx context.Context, network, addr string, remote libvirt.ConnectURI) (*libvirt.Libvirt, error) {
+	conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	lv := libvirt.New(conn)
+	// 带缓冲（size 1）：即便走超时路径不收结果，握手 goroutine 发送后也能退出。
+	errCh := make(chan error, 1)
+	go func() { errCh <- lv.ConnectToURI(remote) }()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			_ = conn.Close() // 握手失败：释放自持 conn（go-libvirt 内部已可能关过，重复关无害）
+			return nil, err
+		}
+		return lv, nil
+	case <-ctx.Done():
+		_ = conn.Close()
+		t := time.NewTimer(handshakeDrain)
+		defer t.Stop()
+		select {
+		case <-errCh: // 顺手收掉握手结果，只丢弃
+		case <-t.C:
+		}
+		return nil, ctx.Err()
+	}
+}
 
 // Conn libvirt 薄适配层：真实 RPC 调用集中于此，不含业务逻辑。
 //
@@ -30,6 +102,13 @@ type Conn struct {
 var _ libvirtAPI = (*Conn)(nil)
 
 // Connect 连接 libvirt。uri 为空时用 DefaultURI。
+//
+// 连接全程有界（决策 #349）：go-libvirt 的包级 ConnectToURI 不收 context，对
+// 「socket 可连但守护进程不回应任何字节」的假死 libvirtd，会在 AuthList 认证握手
+// 上无限阻塞 —— 把「底座假死」放大成「nfvisd 到不了 READY、被 systemd 90s 启动
+// 超时反复重启」。unix 形态（产品唯一支持形态）由产品自拨并自持 conn，超时关 conn
+// 即确定性中断；非 unix 形态不在产品支持范围，只能在外层有界等待（如实注明可能的
+// 内部 goroutine 遗留）。成功路径行为与有界化之前完全一致。
 func Connect(ctx context.Context, uri string) (*Conn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -41,11 +120,41 @@ func Connect(ctx context.Context, uri string) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("libvirt URI %q 非法: %w", uri, err)
 	}
-	l, err := libvirt.ConnectToURI(u)
-	if err != nil {
-		return nil, fmt.Errorf("连接 libvirt %s 失败: %w", uri, err)
+	if libvirtTransport(u) == "unix" {
+		lv, cerr := connectBounded(ctx, "unix", libvirtSocketPath(u), libvirt.RemoteURI(u))
+		if cerr != nil {
+			if errors.Is(cerr, context.DeadlineExceeded) || errors.Is(cerr, context.Canceled) {
+				return nil, fmt.Errorf("连接 libvirt %s 超时：libvirt 可能未就绪、假死或过载。"+
+					"请查底座实况：systemctl status libvirtd、journalctl -u libvirtd、virsh -c %s list；"+
+					"底座恢复后 systemctl restart nfvis 即恢复接入（%w）", uri, uri, cerr)
+			}
+			return nil, fmt.Errorf("连接 libvirt %s 失败: %w", uri, cerr)
+		}
+		return &Conn{l: lv, uri: uri}, nil
 	}
-	return &Conn{l: l, uri: uri}, nil
+	// 非 unix 形态：沿原包级 ConnectToURI 路径，仅在外层用同一 ctx 有界等待。超时时
+	// 无法中断其内部拨号/握手（conn 由 go-libvirt 自拨，产品不持有），极端情况下可能
+	// 遗留其内部 goroutine，直到 libvirt 侧自身超时 —— 该形态不在产品支持范围，仅作
+	// 开发试验之用，如实注明即可（不做无法确定的清理）。
+	errCh := make(chan error, 1)
+	var lv *libvirt.Libvirt
+	go func() {
+		l, err := libvirt.ConnectToURI(u)
+		if l != nil {
+			lv = l
+		}
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return nil, fmt.Errorf("连接 libvirt %s 失败: %w", uri, err)
+		}
+		return &Conn{l: lv, uri: uri}, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("连接 libvirt %s 超时（%w）：该 URI 的传输形态不在产品支持范围，"+
+			"连接可能遗留内部 goroutine，直到 libvirt 侧超时返回", uri, ctx.Err())
+	}
 }
 
 // NewConnectedProvider 连接 libvirt 并装配生产 Provider（真实存储/seed 实现）。
