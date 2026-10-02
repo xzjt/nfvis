@@ -31,6 +31,8 @@ type fakeAcl struct {
 	macipBind     [][3]uint32 // swIf, aclIdx, isAdd(1/0)
 	macipErr      error
 	macipExists   bool // 是否让 add 返回「已存在」错误
+	// setErr 只作用于 ACLInterfaceSet（决策 #342：绑定成功后单独注入解绑失败）。
+	setErr error
 }
 
 func newFakeAcl() *fakeAcl {
@@ -100,6 +102,9 @@ func (f *fakeAcl) ACLDel(index uint32) error {
 func (f *fakeAcl) ACLInterfaceSet(swIfIndex, inAcl, outAcl uint32, inSet, outSet bool) error {
 	if f.err != nil {
 		return f.err
+	}
+	if f.setErr != nil {
+		return f.setErr
 	}
 	if !inSet {
 		inAcl = 0
@@ -450,5 +455,106 @@ func TestEnsureConsistentReplaysMacipCompanion(t *testing.T) {
 	}
 	if len(f.acl.macipCreated) != 2 || len(f.acl.macipBind) != 2 {
 		t.Fatalf("reset 后重放应重建 macip: created=%v bind=%v", f.acl.macipCreated, f.acl.macipBind)
+	}
+}
+
+// ---------- 决策 #342：解绑遇「接口已不存在」按已达成（不触发回滚） ----------
+
+// ⑦ 解绑时 VPP 报「接口不存在」(-2) → BindIndex 返回 nil 且清登记（IP + 伴随 macip）。
+func TestAclUnbindMissingIfaceTolerated(t *testing.T) {
+	f := newFakeAcl()
+	p := NewAclProvider(f)
+	if err := p.ApplyACL(context.Background(), model.Acl{Name: "web"}); err != nil {
+		t.Fatalf("ApplyACL: %v", err)
+	}
+	if err := p.BindIndex(f, 1, "web", ""); err != nil {
+		t.Fatalf("BindIndex: %v", err)
+	}
+	p.mu.Lock()
+	_, hadPair := p.bound[1]
+	_, hadMacip := p.macipBound[1]
+	p.mu.Unlock()
+	if !hadPair || !hadMacip {
+		t.Fatalf("前置：接口 1 应已登记 IP ACL 与伴随 macip")
+	}
+	f.setErr = api.VPPApiError(-2) // 接口已随交换机/VM 删除
+	if err := p.BindIndex(f, 1, "", ""); err != nil {
+		t.Fatalf("接口不存在时解绑应按已达成返回 nil: %v", err)
+	}
+	p.mu.Lock()
+	_, hadPair = p.bound[1]
+	_, hadMacip = p.macipBound[1]
+	p.mu.Unlock()
+	if hadPair || hadMacip {
+		t.Fatalf("接口不存在解绑后登记应被清空: bound=%v macip=%v", hadPair, hadMacip)
+	}
+}
+
+// ⑧ 解绑遇其它 VPP 错误 → 如实上抛（不吞、不泛化），登记保留。
+func TestAclUnbindOtherErrorPropagates(t *testing.T) {
+	f := newFakeAcl()
+	p := NewAclProvider(f)
+	if err := p.ApplyACL(context.Background(), model.Acl{Name: "web"}); err != nil {
+		t.Fatalf("ApplyACL: %v", err)
+	}
+	if err := p.BindIndex(f, 1, "web", ""); err != nil {
+		t.Fatalf("BindIndex: %v", err)
+	}
+	f.setErr = errors.New("boom")
+	if err := p.BindIndex(f, 1, "", ""); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("其它错误应上抛: %v", err)
+	}
+	p.mu.Lock()
+	_, hadPair := p.bound[1]
+	p.mu.Unlock()
+	if !hadPair {
+		t.Fatalf("解绑未达成时不应清登记")
+	}
+}
+
+// ⑨ 伴随 macip 解绑遇「接口不存在」→ 按已达成、清 macip 登记。
+func TestMacipUnbindMissingIfaceTolerated(t *testing.T) {
+	f := newFakeAcl()
+	p := NewAclProvider(f)
+	if err := p.ApplyACL(context.Background(), model.Acl{Name: "web"}); err != nil {
+		t.Fatalf("ApplyACL: %v", err)
+	}
+	if err := p.BindIndex(f, 1, "web", ""); err != nil {
+		t.Fatalf("BindIndex: %v", err)
+	}
+	f.macipErr = api.VPPApiError(-2)
+	if err := p.MacipDisallowNonIP(f, 1); err != nil {
+		t.Fatalf("macip 解绑遇接口不存在应按已达成: %v", err)
+	}
+	p.mu.Lock()
+	_, hadMacip := p.macipBound[1]
+	p.mu.Unlock()
+	if hadMacip {
+		t.Fatalf("macip 登记应被清")
+	}
+}
+
+// ⑩ DeleteACL（真实 del-acl 计划操作）：接口已不存在(-2)时解绑按已达成，ACL 仍被删除且清扫登记。
+func TestDeleteACLMissingIfaceTolerated(t *testing.T) {
+	f := newFakeAcl()
+	p := NewAclProvider(f)
+	if err := p.ApplyACL(context.Background(), model.Acl{Name: "web"}); err != nil {
+		t.Fatalf("ApplyACL: %v", err)
+	}
+	if err := p.BindIndex(f, 1, "web", ""); err != nil {
+		t.Fatalf("BindIndex: %v", err)
+	}
+	f.setErr = api.VPPApiError(-2) // 接口已随交换机/VM 删除
+	if err := p.DeleteACL(context.Background(), "web"); err != nil {
+		t.Fatalf("接口不存在时删 ACL 应按已达成、不得中止整次删除: %v", err)
+	}
+	if len(f.del) != 1 {
+		t.Fatalf("ACL 本身仍应被删除: %v", f.del)
+	}
+	p.mu.Lock()
+	_, hadPair := p.bound[1]
+	p.mu.Unlock()
+	if hadPair {
+		t.Fatalf("陈旧绑定登记应被清（此前须重启 nfvis 才能删掉）")
 	}
 }

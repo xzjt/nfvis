@@ -266,7 +266,7 @@ func (a *orchApplier) residueAlarm(desc string, err error) {
 func lldpEqual(old, new model.Config) bool { return configEqualPtr(old.Protocols, new.Protocols) }
 
 // plan 生成操作序列：新增/变更在前（ACL→L2→L3→NAT/SPAN/QoS→VM→容器），
-// 删除在后（容器→VM→L3/L2→NAT/SPAN/QoS→ACL），保证引用先建后删。
+// 删除在后（ACL→容器→VM→L3/L2→NAT/SPAN/QoS），保证引用先建后删。
 func (a *orchApplier) plan(old, new model.Config) []op {
 	// 交换机端口集合 = 交换机侧声明 ∪ VNF/容器侧 vNIC 声明（FR-NET-020~023，决策 #170）：
 	// 两侧必须在此合流后再 diff 与下发，否则「VNF 声明了 virtual-switch」既不触发 BD
@@ -484,7 +484,20 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 		}
 	}
 
-	// —— 删除：容器 → VM → 网络（bd/vrf → span/qos → acl），与新增顺序相反 ——
+	// —— 删除：**先解引用**（先删/解绑 ACL，此时引用它的接口仍必须存在）→ 容器 → VM →
+	// 网络（bd/vrf → span/qos），与新增顺序相反（决策 #342，同 #196「先解引用、后删被引用」）。
+	// ACL 删除内含「解绑引用它的接口」，若接口先被交换机/VM 删除，解绑必然撞 VPP -2 并整次回滚
+	// （真机 round117/119/120 四次复现）。故 ACL 排在容器/VM/bd/vrf 之前。
+	for _, acl := range old.Acls {
+		if _, ok := newACLNames(new)[acl.Name]; !ok {
+			acl := acl
+			ops = append(ops, op{
+				desc: fmt.Sprintf("del-acl[%s]", acl.Name),
+				run:  func(ctx context.Context) error { return a.net.DeleteACL(ctx, acl.Name) },
+				undo: func(ctx context.Context) error { return a.net.ApplyACL(ctx, acl) },
+			})
+		}
+	}
 	for name := range oldCTs {
 		if _, ok := nameMap(new.ContainerFunctions, func(x model.ContainerFunction) string { return x.Name })[name]; !ok {
 			ct := oldCTs[name]
@@ -599,16 +612,6 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 				desc: fmt.Sprintf("del-qos[%s]", q.Name),
 				run:  func(ctx context.Context) error { return a.net.DeleteQos(ctx, q.Name) },
 				undo: func(ctx context.Context) error { return a.net.ApplyQos(ctx, q) },
-			})
-		}
-	}
-	for _, acl := range old.Acls {
-		if _, ok := newACLNames(new)[acl.Name]; !ok {
-			acl := acl
-			ops = append(ops, op{
-				desc: fmt.Sprintf("del-acl[%s]", acl.Name),
-				run:  func(ctx context.Context) error { return a.net.DeleteACL(ctx, acl.Name) },
-				undo: func(ctx context.Context) error { return a.net.ApplyACL(ctx, acl) },
 			})
 		}
 	}

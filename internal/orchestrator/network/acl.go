@@ -12,6 +12,7 @@ package network
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -187,6 +188,16 @@ func (p *AclProvider) DeleteACL(ctx context.Context, name string) error {
 		in, inSet := p.lookup(pair.in)
 		out, outSet := p.lookup(pair.out)
 		if err := c.ACLInterfaceSet(swIf, in, out, inSet && pair.in != "", outSet && pair.out != ""); err != nil {
+			// 决策 #342：目标接口已不存在（VPP INVALID_SW_IF_INDEX -2）——绑定随接口一起消失，
+			// 解绑属**已达成**，不能因此打断整次删除（真机 round117/119/120：整次提交回滚）。
+			if isMissingIfaceErr(err) {
+				log.Printf("接口 %d 已不存在，按已回收处理（ACL 解绑）", swIf)
+				p.mu.Lock()
+				delete(p.bound, swIf)
+				delete(p.macipBound, swIf)
+				p.mu.Unlock()
+				continue
+			}
 			return fmt.Errorf("解绑接口 %d 的 ACL %s: %w", swIf, name, err)
 		}
 	}
@@ -238,15 +249,19 @@ func (p *AclProvider) BindIndex(c ACLClient, swIfIndex uint32, aclIn, aclOut str
 			return nil // 无登记即无操作（与既有「空绑定为无操作」一致）
 		}
 		if err := c.ACLInterfaceSet(swIfIndex, 0, 0, false, false); err != nil {
-			return fmt.Errorf("解绑接口 %d 的 ACL: %w", swIfIndex, err)
-		}
-		if hadMacip {
+			// 决策 #342：目标接口已不存在（-2）时绑定随接口一起消失，解绑属已达成。
+			if !isMissingIfaceErr(err) {
+				return fmt.Errorf("解绑接口 %d 的 ACL: %w", swIfIndex, err)
+			}
+			log.Printf("接口 %d 已不存在，按已回收处理（ACL 解绑）", swIfIndex)
+		} else if hadMacip {
 			if err := p.MacipDisallowNonIP(c, swIfIndex); err != nil {
 				return err
 			}
 		}
 		p.mu.Lock()
 		delete(p.bound, swIfIndex)
+		delete(p.macipBound, swIfIndex)
 		p.mu.Unlock()
 		return nil
 	}
@@ -330,9 +345,13 @@ func (p *AclProvider) MacipDisallowNonIP(c ACLClient, swIfIndex uint32) error {
 	idx := p.macipIdx
 	p.mu.Unlock()
 	if err := c.MacipACLInterfaceAddDel(swIfIndex, idx, false); err != nil {
-		// 解绑方向：对象本就不在 / 已是目标状态按成功（同 natRemovalBenign 口径）
-		if !vppErrIs(err, vppNoSuchEntry, vppValueExist) {
+		// 解绑方向：对象本就不在 / 已是目标状态按成功（同 natRemovalBenign 口径）；
+		// 决策 #342：目标接口已不存在（-2）时绑定随接口消失，同属已达成。
+		if !vppErrIs(err, vppNoSuchEntry, vppValueExist) && !isMissingIfaceErr(err) {
 			return fmt.Errorf("解绑接口 %d 的非 IP 放行 macip ACL: %w", swIfIndex, err)
+		}
+		if isMissingIfaceErr(err) {
+			log.Printf("接口 %d 已不存在，按已回收处理（ACL 解绑）", swIfIndex)
 		}
 	}
 	p.mu.Lock()
