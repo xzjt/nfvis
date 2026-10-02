@@ -892,6 +892,13 @@ func (v *validator) checkVpp(c Config) {
 			v.errf(fmt.Sprintf("vpp.plugins[%s].state", pl.Name), "state 必须为 enable 或 disable")
 		}
 	}
+	// 数据面 DNS 代理上游（决策 #338，FR-NET-010）：逐条须为合法 IP（v4/v6）。条数不设上限
+	// （与既有 system.dns_servers 同风格——VPP 侧按序下发，多上游即多备份）。
+	for i, s := range vp.DNSProxyServers {
+		if !checkIP(s) {
+			v.errf(fmt.Sprintf("vpp.dns_proxy_servers[%d]", i), "DNS 代理上游 %q 必须是有效 IP（IPv4/IPv6）", s)
+		}
+	}
 }
 
 func (v *validator) checkProtocols(c Config) {

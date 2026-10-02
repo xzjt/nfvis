@@ -24,6 +24,7 @@ type recoveryFixture struct {
 	bond   *fakeBond
 	lldp   *fakeLldp
 	dhcp   *fakeDhcp
+	dns    *fakeDNS
 	alarms *AlarmStore
 }
 
@@ -40,10 +41,12 @@ func newRecoveryFixture() *recoveryFixture {
 	net.SetLldp(NewLldpProvider(lldp))
 	dhcp := &fakeDhcp{}
 	net.SetDhcp(NewDhcpProvider(dhcp))
+	dns := &fakeDNS{}
+	net.SetDNSProxy(NewDNSProxyProvider(dns))
 	alarms := NewAlarmStore()
 	net.SetAlarms(alarms)
 	return &recoveryFixture{net: net, l2: l2, l3: l3, acl: acl, nat: nat, svc: svc, bond: bond, lldp: lldp,
-		dhcp: dhcp, alarms: alarms}
+		dhcp: dhcp, dns: dns, alarms: alarms}
 }
 
 func l2Switch(name string, ports ...string) model.VirtualSwitch {
@@ -679,5 +682,31 @@ func TestEnsureConsistentReplaysLearnLimit(t *testing.T) {
 	}
 	if len(f2.l2.learn) != 0 {
 		t.Fatalf("未配 learn-limit 不应下发，实际 %v", f2.l2.learn)
+	}
+}
+
+// 决策 #338：恢复收敛重放数据面 DNS 代理（VPP 重启后 dns 插件的上游与 enable 状态一并消失）。
+func TestEnsureConsistentReplaysDNSProxy(t *testing.T) {
+	f := newRecoveryFixture()
+	cfg := model.Config{Vpp: &model.VppConfig{DNSProxyServers: []string{"8.8.8.8", "8.8.4.4"}}}
+
+	if errs := f.net.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("应收敛成功，实际: %v", errs)
+	}
+	if len(f.dns.calls) != 2 || !f.dns.calls[0].add || f.dns.calls[0].server != "8.8.8.8" ||
+		f.dns.calls[1].server != "8.8.4.4" {
+		t.Fatalf("恢复重放应逐条下发上游: %v", f.dns.calls)
+	}
+	if len(f.dns.enabled) != 1 || !f.dns.enabled[0] {
+		t.Fatalf("恢复重放应 dns enable: %v", f.dns.enabled)
+	}
+
+	// 未声明上游：不产生任何动作（不 enable、不 disable——恢复段只补齐不摘除）
+	f2 := newRecoveryFixture()
+	if errs := f2.net.EnsureConsistent(context.Background(), model.Config{}); len(errs) != 0 {
+		t.Fatalf("收敛: %v", errs)
+	}
+	if len(f2.dns.calls) != 0 || len(f2.dns.enabled) != 0 {
+		t.Fatalf("未声明上游不应下发，实际 calls=%v enabled=%v", f2.dns.calls, f2.dns.enabled)
 	}
 }

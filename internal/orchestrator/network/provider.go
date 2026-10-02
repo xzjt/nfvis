@@ -31,6 +31,7 @@ type L2Network struct {
 	bond                         *BondProvider
 	lldp                         *LldpProvider
 	dhcp                         *DhcpProvider          // 交换机 DHCP 中继（决策 #335，可空——未注入即无 relay 编排）
+	dns                          *DNSProxyProvider      // 数据面 DNS 代理（决策 #338，可空）
 	vhost                        *VhostUserProvider     // M4-4：VNF vNIC 接入
 	memif                        *MemifProvider         // M4-7：容器 vNIC 接入
 	vhostDir                     string                 // vhost-user socket 目录（恢复收敛重放用）
@@ -102,6 +103,20 @@ func (n *L2Network) SetBond(p *BondProvider) { n.bond = p }
 // SetDhcp 追加交换机 DHCP 中继编排（决策 #335；未注入时 relay 语句在提交校验层仍可配，
 // 但数据面无下发路径——恢复收敛会如实记未收敛项，正常装配总是注入）。
 func (n *L2Network) SetDhcp(p *DhcpProvider) { n.dhcp = p }
+
+// SetDNSProxy 追加数据面 DNS 代理编排（决策 #338；未注入时上游语句在提交校验层仍可配，
+// 但数据面无下发路径——恢复收敛会如实记未收敛项，正常装配总是注入）。
+func (n *L2Network) SetDNSProxy(p *DNSProxyProvider) { n.dns = p }
+
+// ApplyDNSProxy 收敛数据面 DNS 代理声明（决策 #338）。调用时机：提交编排把它作为 vpp 段的
+// 伴随操作（非空即 dns name-server + dns enable；清空即 del 全部 + dns disable）；恢复收敛的
+// 重放走 recovery.go 的 vpp 段独立记源。未注入 provider 时为空操作（noop/无 VPP 路径）。
+func (n *L2Network) ApplyDNSProxy(ctx context.Context, servers []string) error {
+	if n.dns == nil {
+		return nil
+	}
+	return n.dns.Sync(ctx, servers)
+}
 
 // SetLldp 追加 LLDP 编排（M3-6）。
 func (n *L2Network) SetLldp(p *LldpProvider) { n.lldp = p }

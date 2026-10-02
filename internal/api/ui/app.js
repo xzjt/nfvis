@@ -481,9 +481,16 @@ function renderSystem(st, ver) {
 // 系统域一级页（#/system）：状态与版本（与总览同源）+ **已生效配置**的系统段只读回显。
 // 系统段里口令哈希这类敏感叶子由服务端脱敏后才发出来（界面拿不到原文，也不回显）。
 // 改字段仍在「配置」页的系统段表单里做（只写候选、提交后生效）——本页不提供第二个写入口。
-function renderSystemPage(st, ver, sysCfg) {
+function renderSystemPage(st, ver, sysCfg, dnsProxy) {
   $('sysp-note').textContent = st && st.hostname ? '（' + st.hostname + '）' : '';
-  fill($('sysp-list'), st && st.__err ? [['读取失败', st.__err]] : systemPairs(st));
+  const pairs = st && st.__err ? [['读取失败', st.__err]] : systemPairs(st);
+  // 决策 #338：数据面 DNS 代理（只读两行，与 `show dns proxy` / GET /dns/proxy 同源）。
+  // 与「宿主解析器」无关——这里读的是 vpp.dns_proxy_servers；未配置如实「未配置」不编造。
+  if (dnsProxy && !dnsProxy.__err) {
+    pairs.push(['数据面 DNS 代理', dnsProxy.enabled ? '启用' : '未配置']);
+    pairs.push(['DNS 代理上游', dnsProxy.enabled ? list(dnsProxy.servers) : undefined]);
+  }
+  fill($('sysp-list'), pairs);
   fill($('sysp-ver'), ver && ver.__err ? [['读取失败', ver.__err]] : versionPairs(ver));
   $('sysp-cfg').textContent = sysCfg && sysCfg.__err
     ? '读取失败：' + sysCfg.__err
@@ -875,7 +882,7 @@ export const VIEWS = {
     render(d, params) { pageWarn(d); renderIfaceDetail(d['/interfaces/{name}'], d['/interfaces'], params); },
   },
   'system': {
-    render(d) { pageWarn(d); renderSystemPage(d['/system/status'], d['/system/version'], d['/system']); },
+    render(d) { pageWarn(d); renderSystemPage(d['/system/status'], d['/system/version'], d['/system'], d['/dns/proxy']); },
   },
   'kernel': {
     render(d) { pageWarn(d); renderKernel(d['/system/kernel']); },
