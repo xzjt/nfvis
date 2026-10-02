@@ -406,7 +406,7 @@
   编排路径保留防御性）。make check 全绿（含 openapi 同步/可解析/无重复键守护）。**ACL 线至此全部收口**
   （#339 撤回、#340 网关/端口拒绝、#341 自动放行 ARP、#342 删除倒序容错、#344 契约如实）。
   证据 `docs/evidence/v2-round123-d344-acl-contract-truthful.txt`。
-- **round129（nfvisd 启动超时根因定位 + R129-1 登记 + 环境恢复，2026-10-03）**：接手 round124~128 交接的
+- **round129（启动超时根因定位 + R129-1/#349 收口 + #348 重启测试达成 + 环境恢复，2026-10-03）**：接手 round124~128 交接的
   「真机环境未恢复」（nfvis 卡 activating → systemd 90s 超时 → restart 循环）。**只读诊断三层证据定根**
   （journal 90s 零输出 / SIGQUIT 全栈 / virsh 同挂）：① **环境级**——libvirtd 开机自启 sem-vm
   （产品 `"autostart":true` ⇒ 产品建 libvirt autostart 软链）时**假死**（socket 可连、对一切客户端零响应，
@@ -414,12 +414,19 @@
   `ctx.Err()`，随后调 go-libvirt **包级 `ConnectToURI`（不收 context）**，认证握手无限阻塞 ⇒ main.go 装配处的
   10s `libvirtCtx` 形同虚设 ⇒ nfvisd 永远到不了 READY（Type=notify）⇒ systemd 启动超时循环、管理面整体不可用。
   **round128 的两个假设被更正**：「启动含恢复收敛、现场重所以超 90s」不成立（恢复收敛未开始）；「#348 四次
-  真机失败」全是本环境故障所致、与其代码无关（四次均卡在 main.go:255，未走到 #348 装配点）——PR #278 保持
-  open、附录 A #348 行加「未达成/待重验」注记，待 #349 落地后重启测试定论。**环境已恢复**（杀假死 qemu →
-  摘 autostart 软链 → restart libvirtd → virsh 秒回 → nfvisd 启动 20s 走完 → 服务 active）。⚠️ **软链会被产品
-  自动重建**（nfvisd 按 committed 配置在启动/收敛期重建）⇒ 开机 libvirtd 假死风险原样存在，列为重启测试
-  第一观察项；若复现须评估「VNF 自起不依赖 libvirt autostart、改由恢复收敛受控拉起」。决策 **#349**
-  （底座无响应时启动有界降级，收口 R129-1）契约先行开工。证据 `docs/evidence/v2-round129-startup-hang-rootcause.txt`。
+  真机失败」全是本环境故障所致、与其代码无关（四次均卡在 main.go:255，未走到 #348 装配点）——**环境已恢复**（杀假死 qemu → 摘 autostart 软链 → restart libvirtd → virsh 秒回 → nfvisd 启动 20s 走完 →
+  服务 active；软链随后被产品自动重建）。**两项决策当日收口（PR + 真机证据齐全）**：**#349**（PR #279，底座
+  无响应时启动有界降级，收口 R129-1）——libvirt 连接**自持 conn 有界化**（中断 = 超时关 conn；go-libvirt 的
+  `Disconnect()` 内部先发 RPC、对假死进程同样挂死，不可用作中断手段——源码核实）+ Docker 探测/AppArmor
+  Ensure 有界 ctx + 降级告警 `COMPUTE_UNAVAILABLE`/`CONTAINER_UNAVAILABLE`；四步真机验证全过（假死现场
+  11s active、告警在场、底座恢复后告警保持且 VM 动作如实拒绝、健康回归无告警、Docker 同款对照）。
+  **#348**（PR #278，重基于 #349）——dev44 重启测试**达成**：`reboot` 后单次启动即 active（无 90s 循环）、
+  VPP 自动拉起（journal「检测到 VPP 未运行，发起拉起（不等待）」→「已连接 VPP」→「恢复收敛完成」）、
+  幂等路径「VPP 已在运行，无需拉起」同场验证；开机 libvirtd 假死未复现（偶发非必现）。**新登记 R129-2（中）**：
+  开机竞态——libvirt 自启 1G 大页 VNF 期间不服务客户端握手 >10s ⇒ nfvisd 按 #349 有界降级且不自动重连 ⇒
+  **每次开机后 VM 编排需人工 `systemctl restart nfvis`**（VNF/数据面本身不受影响；候选修法登记在
+  `docs/v2待做.md`）。证据 `docs/evidence/v2-round129-startup-hang-rootcause.txt`、
+  `v2-round129-d349-bounded-startup.txt`、`v2-round129-d348-reboot-verified.txt`。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
