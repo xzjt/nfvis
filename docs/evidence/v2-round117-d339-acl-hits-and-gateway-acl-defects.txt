@@ -51,6 +51,26 @@ NFViS v2 真机验证记录 round117 —— 决策 #339（ACL 逐规则命中计
   口径已按此更新（决策 #339 行与 S13 的说明）。
 - 网关 ACL 区域三个缺陷（R117-1/2/3）**优先级高于 #339 的收尾**：安全相关的「零生效」应先定位修复。
 
+§5 追加（同日，R117-1 根因深挖：**修复假设未通过验证**）
+- 假设：产品在绑定网关 ACL 时未启用 l2-arc 的特性（`l2-input-ip4/acl-plugin-in-ip4-l2`），补启用即可修。
+- 事实核实：① `vppctl show features` 确认 l2-arc 上**确有**该特性名（`l2-input-ip4: acl-plugin-in-ip4-l2`、
+  `l2-output-ip4: acl-plugin-out-ip4-l2`）；② `feature` binapi 存在（`FeatureEnableDisable` +
+  `FeatureIsEnabled` 回读），产品侧「可启用」这一层成立。
+- **但验证探针未支持假设**：写了一次性 Go 探针（`feature.FeatureEnableDisable`，见本轮临时
+  `/root/src/cmd/probe_feature`，已删）对 BVI（idx 5）查询/启用 `l2-input-ip4/acl-plugin-in-ip4-l2`——
+  **API 回读 `enabled=true`（且已处于启用态，无需变更）**；与此同时 deny 规则下流量**照旧通过**、
+  `/acl/0/matches` **恒 0**。⇒ 「特性未启用」不是根因；**根因更深**（疑点在 ACL 插件对该接口的 L2 路径
+  注册/查找上下文，或 VPP 26.06 在此拓扑下 BVI 的 L2→L3 路径不经过 IP ACL 特性）。
+- VPP 侧逐节点 trace 不可用（`trace add acl-plugin-in-ip4-l2`/`l2-input` 均报 "doesn't support per-node
+  tracing"），故**下一步定位方案**（未做）：a) 纯 `vppctl` 造一个 ACL + 绑 BVI 的对照（隔离「产品绑定
+  路径」与「VPP 行为」）；b) 读 VPP 26.06 acl 插件源码里 L2 路径的接口注册条件（`acl_plugin_enable_disable_interface`
+  与 l2 arcs 的启用条件）；c) 试 `show acl-plugin interface sw_if_index N` 的完整字段确认插件侧把该口
+  当作 L2 还是仅 L3 接口。
+- **R117-2 二次独立复现**：清场时又一次「同一提交删交换机 + 删 ACL」→ 同样的
+  `解绑接口 5 的 ACL: VPPApiError: Invalid sw_if_index (-2)` + 回滚（分步提交 942/943 才清干净）。
+- 现场终态：rev 943 + 数据面重启；配置无 hit-* 残留、`vppctl show acl-plugin acl` 空、无 active 告警；
+  探针已从 /root/src 删除（仓库不受影响）。
+
 §4 现场终态
 - 版本 2.0.0~dev28；配置无 hit-* 残留；`vppctl show acl-plugin acl` 空；**无 active 告警**；
   最终 rev 939（+ 一次 `request vpp restart` 清残）。
