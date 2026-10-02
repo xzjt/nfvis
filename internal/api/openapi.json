@@ -1141,7 +1141,7 @@
                   "type": "string"
                 },
                 "orphan": {
-                  "description": "无主占用页数 = in_use - held（>=0；不可读时 -1）",
+                  "description": "无主占用页数 = in_use - held（>=0；不可读时 -1）；多为被进程预留未使用的大页，产品侧不可回收（只作可见性，见 HUGEPAGE_POOL_ORPHAN 告警）",
                   "type": "integer"
                 },
                 "page_size": {
@@ -1152,7 +1152,7 @@
                   "type": "string"
                 },
                 "reclaimable": {
-                  "description": "可回收页数 = 空闲多余页 + 无主占用页",
+                  "description": "可回收的**空闲多余页**数（无主占用页不可回收，不计入）",
                   "type": "integer"
                 },
                 "state": {
@@ -5585,7 +5585,7 @@
     },
     "/system/hugepages": {
       "get": {
-        "description": "数字如实呈现：**声明值**（committed 的 resource-pools，产品唯一真源）、**内核实际**（sysfs\nnr_hugepages）、**在用值**（实际 − 空闲）、**实际持有**（按 `/proc/*/smaps` 的 hugetlb 映射\n按 inode 去重汇总、折算到本页尺寸）、**无主占用**（= 在用 − 实际持有，≥0）。\n⚠️ **在用 ≠ 有持有者**（决策 #346 更正 #329 的措辞）：内核收缩池（例如开机 `hugepages=4`\n后按声明收敛到 2）可能留下「已分配但无任何进程/inode 引用」的页——统计上算「在用」，却\n没人能用它；这类页只体现在 `orphan`，并由 `HUGEPAGE_POOL_ORPHAN` 告警如实报出。\n取不到内核值时就 state=unreadable、actual/free/in_use 回 -1 并给 note；持有值取不到时\nheld/orphan 回 -1 并给 note，**都不编造**。\n与 CLI `show system hugepages` **同一实现**；pools 恒列 1G/2M 两项（形状稳定）。\n",
+        "description": "数字如实呈现：**声明值**（committed 的 resource-pools，产品唯一真源）、**内核实际**（sysfs\nnr_hugepages）、**在用值**（实际 − 空闲）、**实际持有**（按 `/proc/*/smaps` 的 hugetlb 映射\n按 inode 去重汇总、折算到本页尺寸）、**无主占用**（= 在用 − 实际持有，≥0）。\n⚠️ **在用 ≠ 有持有者**（决策 #346 更正 #329 的措辞）：内核收缩池（例如开机 `hugepages=4`\n后按声明收敛到 2）、或被进程**预留（reserve）但未 fault** 的页（如数据面 DPDK 预留）都算\n「在用」却没有可见持有者；这类页只体现在 `orphan`，并由 `HUGEPAGE_POOL_ORPHAN` 告警如实\n报出——它们**不在空闲链表上**，产品侧写 `nr_hugepages` 释放不了，`reclaim` **不会动它们**\n（需从预留者一侧释放）。\n取不到内核值时就 state=unreadable、actual/free/in_use 回 -1 并给 note；持有值取不到时\nheld/orphan 回 -1 并给 note，**都不编造**。\n与 CLI `show system hugepages` **同一实现**；pools 恒列 1G/2M 两项（形状稳定）。\n",
         "responses": {
           "200": {
             "content": {
@@ -5606,7 +5606,7 @@
     },
     "/system/hugepages:reclaim": {
       "post": {
-        "description": "与 CLI `request system hugepages reclaim` **同一实现**（同一份派生 + 同一份回收）。\n回收两类页：① 「内核实际高于声明、且**空闲**」的多余页（#329）；② **无主占用页**（#346：\n`in_use > held` 的那些——分配了但无任何进程/inode 引用，内核算作在用）。\n**在用且被引用的页一律不动**（不抽走 VPP/VNF 的大页）：无主页的回收是把内核 `nr_hugepages`\n收敛到**实际持有值**（内核只释放空闲页，被引用的页有引用计数、释放不了）后再升回**声明值**，\n因此运行中的 VM/VPP 不受影响。\n每个池至多**两次写 + 两次回读**（有界，不重试不循环）：写成功不等于收敛，回读不一致即 400\n并如实说明原因（含谁在占用）。本动作只收敛到**已声明**值，不改声明值\n（改声明用 `set resource-pools hugepages … count <n>`，需 reboot）。\nclass 为 super-user（与 `request system kernel apply` 同档：都写宿主机内核侧状态）。\n",
+        "description": "与 CLI `request system hugepages reclaim` **同一实现**（同一份派生 + 同一份回收）。\n只回收「内核实际高于声明、且**空闲**」的多余页（#329）；**在用页一律不动**（不抽走 VPP/VNF\n正在用的大页，也不动被进程预留但未使用的页）。\n⚠️ **无主占用页（`orphan`）不在回收范围**（决策 #346 真机实测撤回）：这类页多为**被进程\n预留（reserve）但未 fault 的大页**（如数据面 DPDK 预留）——它们**不在空闲链表上**，写\n`nr_hugepages` **释放不了**它们（实测 `nr` 不变）；产品侧回收不动它们，只能从预留者一侧释放。\n每个池至多**一次写 + 一次回读**（有界，不重试不循环）：写成功不等于收敛，必须**回读**内核\n实际值——回读与目标不一致即 400 并如实说明原因；无变化即如实报「无可回收的空闲多余页」。\n本动作只收敛到**已声明**值，不改声明值（改声明用 `set resource-pools hugepages … count <n>`，需 reboot）。\nclass 为 super-user（与 `request system kernel apply` 同档：都写宿主机内核侧状态）。\n",
         "responses": {
           "200": {
             "content": {
@@ -5628,7 +5628,7 @@
             "description": "大页池回收未接入（未装配写能力）"
           }
         },
-        "summary": "回收空闲的多余大页与无主占用页，收敛到声明值（在用页不动；不改声明值；super-user，决策",
+        "summary": "回收空闲的多余大页，收敛到声明值（在用页不动；不改声明值；super-user，决策",
         "tags": [
           "system"
         ]

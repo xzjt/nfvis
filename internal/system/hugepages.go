@@ -4,18 +4,24 @@ package system
 // FR-CMP-004 / FR-OPS-010）。
 //
 // 由来：`show system hugepages` / REST / 控制台资源池页会看到「声明 N、内核实际 M（M>N）」
-// 的无主占用，产品此前**没有回收路径**（只能重启或手工写 sysctl）。成因已由决策
+// 的多余页，产品此前**没有回收路径**（只能重启或手工写 sysctl）。成因已由决策
 // #199/#201 消掉（vpp 包自带的 vm.nr_hugepages 撑大机制被 dpkg-divert 接管 + 90 号
 // sysctl 钉声明值），但历史遗留 / 手工设置 / 早期版本升上来的机器仍可能带着多余页——
-// 本文件给它一条**有界、诚实**的运行时收敛路径。
+// 本文件给它一条**有界、诚实**的运行时收敛路径（回收范围见下）。
 //
-// 决策 #346 补上 #329 的口径盲区（round124/125 真机）：
-//   · #329 把「在用 = 内核实际 − 空闲」当作「有持有者的页」，但二者并不相等——内核收缩池
-//     （例如开机 `hugepages=4` 预分配、随后按声明收敛到 2）可能留下「已分配却没有任何
-//     进程/inode 引用」的页：统计上算「在用」，却谁都用不了。round124 搭 DNS 现场时 1G 池
-//     正是被这样一页占着（`nr=2`、`free=0`，唯一持有者只有 sem-vm 的 guest RAM），于是
-//     新 VM `Cannot allocate memory` 起不来，而读视图四列全「一致」+「无需回收」，**极易
-//     被误读成「环境受限」**。round125 实验证实该页可回收（`echo 1 > nr_hugepages` 能释放它）。
+// 决策 #346 给 #329 补上「实际持有 / 无主占用」两列（round124/125 真机），但真机实测
+// （dev34，round126 更正，见 `docs/evidence/v2-round12{4,5}-*.txt`）证明**无主占用页不能
+// 靠写 nr_hugepages 回收**：
+//   · #329 把「在用 = 内核实际 − 空闲」当作「有持有者的页」，但二者并不相等——读视图因此增两列
+//     **实际持有**（按 `/proc/*/smaps` 的 hugetlb 映射、按 inode 去重、按 KernelPageSize 折算）
+//     与 **无主占用**（= 在用 − 实际持有，≥ 0），并新增 `state=orphan` 与 `HUGEPAGE_POOL_ORPHAN`
+//     告警——**看得见确有效**。
+//   · ⚠️ 但「无主占用页」**不是**「内核释放得掉的页」：这类页多为**被进程预留（reserve）但尚未
+//     fault 的大页**（例如数据面 DPDK 的预留）——它们**不在空闲链表上**（所以算「在用」）、
+//     也**不在任何 smaps 的 ht 映射里**（所以 held 看不到），写 `nr_hugepages` **释放不了**它们
+//     （实测 `nr` 不变）。⇒ **本决策只保留「可见性」**（两列 + state=orphan + 告警），
+//     **不尝试回收无主占用页**：reclaim 只回收「内核实际 > 声明 **且空闲**」的多余页（#329 原范围）。
+//     能释放预留页的是**预留者本身**（如停掉数据面 DPDK / 释放预留），不是产品侧内核 sysfs。
 //
 // 口径：
 //   · 数字如实呈现：**声明**（配置唯一真源）/ **内核实际**（sysfs nr_hugepages）/
@@ -28,12 +34,12 @@ package system
 //     `KernelPageSize` 折算到对应页尺寸池，用映射头行的 `dev:inode` 去重——同一页被多进程共享
 //     映射（如 vhost-user 同时出现在 qemu 与 VPP 的映射里）只计一次。也**不用**
 //     `/proc/<pid>/status` 的 `HugetlbPages`（它是全尺寸总量、不分页尺寸）。
-//   · 回收：① 空闲的多余页（#329）= min(实际−声明, 空闲)；② 无主占用页（#346）。无主页的回收
-//     机制是「把此尺寸的 nr_hugepages 先写到**实际持有值**（内核只释放空闲页，被引用的页有
-//     引用计数、释放不了）→ 回读 → 再写回**声明值** → 回读」，故运行中的 VM/VPP 不受影响。
-//   · 有界：每池**至多两次写 + 两次回读**（不重试不循环）；写 sysfs 返回成功不等于池已收敛，
-//     必须回读确认。红线：**在用且被引用的页一律不动**；只收敛到**已声明**值——不改声明值
-//     （改声明是 `set resource-pools hugepages page-size <size> count <n>`，需 reboot 生效）。
+//   · 回收：只回收**空闲的多余页**（#329）= min(实际−声明, 空闲)。写 sysfs `nr_hugepages` 只能
+//     释放**空闲**页——被进程引用的页、被预留未 fault 的页都释放不了，故**在用页一律不动**。
+//   · 有界：每池**至多一次写 + 一次回读**（不重试不循环）；写 sysfs 返回成功不等于池已收敛，
+//     必须**回读**内核实际值确认；**无变化即如实报「无可回收的空闲多余页」**，绝不报未发生的成功。
+//   · 红线：**在用页一律不动**；只收敛到**已声明**值——不改声明值（改声明是
+//     `set resource-pools hugepages page-size <size> count <n>`，需 reboot 生效）。
 
 import (
 	"fmt"
@@ -53,25 +59,26 @@ var HugepageSizes = []string{"1G", "2M"}
 const HugepageSurplusAlarmCode = "HUGEPAGE_POOL_SURPLUS"
 
 // HugepageOrphanAlarmCode 大页池「存在无主占用页」的告警码（决策 #346）：在用 > 实际持有，
-// 即分配了却没有任何进程/inode 引用。与 #329 的 HUGEPAGE_POOL_SURPLUS 同一对账位置与口径
-// （启动/60s 巡检按内核实况重建、收敛后自动消解、跨 nfvisd 重启仍可见），但有**独立的 scope**。
+// 即分配了却没有任何进程/inode 引用（多为被进程预留但未使用的大页）。与 #329 的
+// HUGEPAGE_POOL_SURPLUS 同一对账位置与口径（启动/60s 巡检按内核实况重建、收敛后自动消解、
+// 跨 nfvisd 重启仍可见），但有**独立的 scope**。**只作可见性告警**——产品侧回收不动这类页。
 const HugepageOrphanAlarmCode = "HUGEPAGE_POOL_ORPHAN"
 
 // 池读视图状态（HugepagePoolView.State；枚举顺序按 openapi）。
 const (
 	HugepageStateOK         = "ok"         // 实际 <= 声明（无多余）
 	HugepageStateSurplus    = "surplus"    // 实际 > 声明，且有多余**空闲**页可回收
-	HugepageStateInUse      = "in_use"     // 实际 > 声明，多余页全/部分在用（有持有者，回收不掉或只能回收一部分）
-	HugepageStateOrphan     = "orphan"     // 存在**无主占用页**（在用 > 实际持有；决策 #346）
+	HugepageStateInUse      = "in_use"     // 实际 > 声明，多余页全/部分在用（不可回收）
+	HugepageStateOrphan     = "orphan"     // 存在**无主占用页**（在用 > 实际持有；决策 #346；产品侧不可回收）
 	HugepageStateUnmanaged  = "unmanaged"  // 声明值 <= 0：产品不托管该池
 	HugepageStateUnreadable = "unreadable" // 内核未提供该页尺寸池（sysfs 不可读）
 )
 
 // 回收动作（HugepagePoolResult.Action）。
 const (
-	HugepageActionNone         = "none"          // 无需回收（实际 <= 声明 或 未托管）
+	HugepageActionNone         = "none"          // 无需回收（实际 <= 声明 或 未托管）；无可回收的空闲多余页
 	HugepageActionReclaimed    = "reclaimed"     // 已回收并回读确认收敛到声明
-	HugepageActionPartial      = "partial"       // 回收了可回收页，但仍有在用多余页（未收敛）
+	HugepageActionPartial      = "partial"       // 回收了空闲多余页，但仍有在用多余页（未收敛）
 	HugepageActionBlocked      = "blocked"       // 有多余页但全部在用，一页都回收不了
 	HugepageActionUnmanaged    = "unmanaged"     // 未声明该池，不动作
 	HugepageActionUnreadable   = "unreadable"    // 内核未提供该池，不动作
@@ -163,6 +170,9 @@ var smapsHeaderRe = regexp.MustCompile(`^([0-9a-f]+)-([0-9a-f]+) (\S+) ([0-9a-f]
 //	· 页尺寸按该映射的 `KernelPageSize` 折算，归属到同尺寸的池；不属于 1G/2M 的忽略。
 //	· 同一页被多进程共享映射（如 vhost-user 同时出现在 qemu 与 VPP 的映射里）：用映射头行的
 //	  `dev:inode` 去重，只计一次。
+//
+// ⚠️ 「无主占用 = 在用 − 实际持有」里那些页**不在这份汇总里**——它们恰恰是没有任何 smaps 引用的
+// 页（多为被进程预留 reserve 但未 fault 的大页），故本函数**看不到**它们，这也正是它们「无主」的原因。
 func HugepageHeldPages(root string) (map[string]int, bool) {
 	procDir := join(root, "/proc")
 	ents, err := os.ReadDir(procDir)
@@ -274,7 +284,7 @@ type HugepagePoolView struct {
 	InUse       int    `json:"in_use"`      // 在用页数 = actual - free（不可读时 -1）
 	Held        int    `json:"held"`        // 实际持有页数（进程/inode 引用汇总；取不到时 -1）
 	Orphan      int    `json:"orphan"`      // 无主占用页数 = in_use - held（>=0；取不到时 -1）
-	Reclaimable int    `json:"reclaimable"` // 可回收页数 = 空闲多余页 + 无主占用页
+	Reclaimable int    `json:"reclaimable"` // 可回收的**空闲多余页**数（无主占用页不可回收，故不计入）
 	State       string `json:"state"`
 	Note        string `json:"note,omitempty"` // 判定依据 / 取不到的原因（不编造）
 }
@@ -282,6 +292,7 @@ type HugepagePoolView struct {
 // HugepagePoolViewFor 纯函数：由声明/实际/空闲/持有（+ 是否可读）产出读视图。
 //
 // heldOK=false 表示持有值取不到（/proc 不可读）——held/orphan 回 -1 并给 note，不编造。
+// 注意：无主占用（orphan）**只作可见性呈现**，不计入 Reclaimable（产品侧回收不动这类页）。
 func HugepagePoolViewFor(pageSize string, declared, actual, free int, readable bool, held int, heldOK bool) HugepagePoolView {
 	v := HugepagePoolView{PageSize: pageSize, Declared: declared}
 	if !readable {
@@ -318,24 +329,24 @@ func HugepagePoolViewFor(pageSize string, declared, actual, free int, readable b
 		v.Note = "配置未声明该页尺寸的池，产品不托管（不回收）" + heldNote
 	case v.Orphan > 0:
 		v.State = HugepageStateOrphan
-		p := PlanHugepageReclaim(pageSize, declared, actual, free, held, heldOK)
-		v.Reclaimable = p.Reclaimable
-		v.Note = fmt.Sprintf("在用 %d 页中实际只有 %d 页有持有者：%d 页无主占用（分配了但无进程/inode 引用），可回收",
-			v.InUse, v.Held, v.Orphan)
+		v.Reclaimable = PlanHugepageReclaim(pageSize, declared, actual, free).Reclaimable
+		v.Note = fmt.Sprintf("在用 %d 页中仅 %d 页有进程/inode 引用：%d 页无主占用（多为被进程预留但尚未使用的大页，例如数据面 DPDK 预留）。"+
+			"它们不在空闲链表上，产品侧写 nr_hugepages 释放不了、reclaim 不会动它们——需从预留者一侧释放（如停/重启数据面或释放预留）%s",
+			v.InUse, v.Held, v.Orphan, heldNote)
 	case actual <= declared:
 		v.State = HugepageStateOK
 		v.Note = heldNote
 	default:
-		p := PlanHugepageReclaim(pageSize, declared, actual, free, held, heldOK)
+		p := PlanHugepageReclaim(pageSize, declared, actual, free)
 		v.Reclaimable = p.Reclaimable
 		surplus := actual - declared
 		if p.Reclaimable == 0 {
 			v.State = HugepageStateInUse
-			v.Note = fmt.Sprintf("实际 %d 高于声明 %d：多出的 %d 页全部在用（有持有者），无可回收的空闲页%s",
+			v.Note = fmt.Sprintf("实际 %d 高于声明 %d：多出的 %d 页全部在用（不在空闲链表上，可能含被进程预留的大页），无可回收的空闲页%s",
 				actual, declared, surplus, heldNote)
 		} else if p.Blocked > 0 {
 			v.State = HugepageStateInUse
-			v.Note = fmt.Sprintf("实际 %d 高于声明 %d：可回收 %d 页，另有 %d 页在用（不可回收）%s",
+			v.Note = fmt.Sprintf("实际 %d 高于声明 %d：可回收空闲 %d 页，另有 %d 页在用（不可回收）%s",
 				actual, declared, p.Reclaimable, p.Blocked, heldNote)
 		} else {
 			v.State = HugepageStateSurplus
@@ -362,103 +373,53 @@ func HugepagePoolViews(root string, declared map[string]int) []HugepagePoolView 
 }
 
 // HugepagePlan 单个大页池的回收计划（纯函数输出，便于直接单测）。
+//
+// 计划**只覆盖「空闲的多余页」**（#329）：无主占用页不可回收（见文件顶部说明），故不在计划内。
 type HugepagePlan struct {
 	PageSize    string
 	Declared    int
 	Actual      int
 	Free        int
 	InUse       int
-	Held        int   // 实际持有（-1 = 取不到）
-	HeldOK      bool  // 持有值是否可读
-	Orphan      int   // 无主占用 = InUse - Held（>=0；HeldOK=false 时 0，由 HeldOK 表意）
-	FreeSurplus int   // 空闲的多余页（#329）
-	Reclaimable int   // 本次可回收页数 = FreeSurplus + Orphan
-	Writes      []int // 有界写序列（0/1/2 步；无主占用时先降到实际持有、再升回声明）
-	Target      int   // 收敛目标内核实际值（写完后的期望 nr；Reclaimable=0 时 = Actual）
-	Blocked     int   // 多余但在用（有持有者）、不可回收的页数
+	Reclaimable int // 本次可回收页数 = 空闲的多余页 = min(实际-声明, 空闲)
+	Target      int // 回收后目标内核实际值（Reclaimable=0 时 = Actual）
+	Blocked     int // 多余但在用（不在空闲链表上）、不可回收的页数
 	Reasons     []string
 }
 
-// PlanHugepageReclaim 纯函数：由声明/实际/空闲/持有算出回收计划。有界（Writes 长度 ≤ 2）。
+// PlanHugepageReclaim 纯函数：由声明/实际/空闲算出回收计划（只回收空闲的多余页，#329）。
 //
+//	actual <= declared      → 不动作（Target=Actual，Reclaimable=0）
 //	declared <= 0            → 未托管，不动作
-//	无主占用（in_use > held）→ 写序列 [held, declared]（内核只释放空闲页；被引用的页释放不了）
-//	仅空闲的多余页（#329）   → 写序列 [actual - min(actual-declared, free)]
-//	无可回收页              → 不动作
-func PlanHugepageReclaim(pageSize string, declared, actual, free, held int, heldOK bool) HugepagePlan {
-	p := HugepagePlan{PageSize: pageSize, Declared: declared, Actual: actual, Free: free, Held: -1, HeldOK: heldOK, Target: actual}
+//	actual > declared        → Reclaimable = min(actual-declared, free)，Target = actual - Reclaimable
+func PlanHugepageReclaim(pageSize string, declared, actual, free int) HugepagePlan {
+	p := HugepagePlan{PageSize: pageSize, Declared: declared, Actual: actual, Free: free, Target: actual}
 	p.InUse = actual - free
 	if p.InUse < 0 {
 		p.InUse = 0
 	}
-	if heldOK {
-		if held < 0 {
-			held = 0
-		}
-		p.Held = held
-		orphan := p.InUse - held
-		if orphan < 0 {
-			orphan = 0
-		}
-		p.Orphan = orphan
-	}
-
-	if declared <= 0 {
+	switch {
+	case declared <= 0:
 		p.Reasons = append(p.Reasons, "配置未声明该页尺寸的池（不托管），不回收")
-		return p
-	}
-
-	// #329：空闲的多余页 = min(实际-声明, 空闲)。
-	if actual > declared {
+	case actual <= declared:
+		p.Reasons = append(p.Reasons, fmt.Sprintf("实际 %d 不高于声明 %d，无需回收", actual, declared))
+	default:
 		surplus := actual - declared
+		if free <= 0 {
+			p.Blocked = surplus
+			p.Reasons = append(p.Reasons, fmt.Sprintf("多余的 %d 页全部在用（不在空闲链表上，可能含被进程预留的大页），无空闲页可回收", surplus))
+			return p
+		}
+		p.Reclaimable = surplus
 		if free < surplus {
-			p.FreeSurplus = free
-		} else {
-			p.FreeSurplus = surplus
+			p.Reclaimable = free
 		}
-		if p.FreeSurplus < 0 {
-			p.FreeSurplus = 0
+		p.Target = actual - p.Reclaimable
+		p.Blocked = surplus - p.Reclaimable
+		p.Reasons = append(p.Reasons, fmt.Sprintf("回收空闲的多余页 %d 页（%d → %d）", p.Reclaimable, actual, p.Target))
+		if p.Blocked > 0 {
+			p.Reasons = append(p.Reasons, fmt.Sprintf("另有 %d 页在用（不可回收）", p.Blocked))
 		}
-		p.Blocked = surplus - p.FreeSurplus
-	}
-	p.Reclaimable = p.FreeSurplus + p.Orphan
-
-	if p.Reclaimable == 0 {
-		switch {
-		case p.Blocked > 0:
-			p.Reasons = append(p.Reasons, fmt.Sprintf("多余的 %d 页全部在用（有持有者），无空闲页可回收", p.Blocked))
-		case actual <= declared:
-			p.Reasons = append(p.Reasons, fmt.Sprintf("实际 %d 不高于声明 %d，无需回收", actual, declared))
-		default:
-			p.Reasons = append(p.Reasons, "无可回收的页")
-		}
-		if !heldOK {
-			p.Reasons = append(p.Reasons, "持有值取不到（/proc 不可读），无主占用无法判定，不做无主页回收")
-		}
-		return p
-	}
-
-	if p.Orphan > 0 {
-		// 无主占用页（#346）：两步——先降到实际持有值（内核只释放空闲页；被引用的页有引用计数、
-		// 释放不了），再升回声明值。运行中的 VM/VPP 因此不受影响。
-		p.Writes = []int{p.Held, declared}
-		p.Target = declared
-		if p.Held > declared {
-			p.Target = p.Held // 被引用的页降到声明以下降不动：收敛目标即实际持有
-		}
-		p.Reasons = append(p.Reasons, fmt.Sprintf("回收无主占用页 %d 页：先把内核收敛到实际持有 %d 页（内核只释放空闲页），再升回声明 %d 页",
-			p.Orphan, p.Held, declared))
-		if p.FreeSurplus > 0 {
-			p.Reasons = append(p.Reasons, fmt.Sprintf("同时回收空闲的多余页 %d 页（%d → 声明 %d）", p.FreeSurplus, actual, declared))
-		}
-	} else {
-		// 只有空闲的多余页（#329）：一次写。
-		p.Target = actual - p.FreeSurplus
-		p.Writes = []int{p.Target}
-		p.Reasons = append(p.Reasons, fmt.Sprintf("回收空闲的多余页 %d 页（%d → %d）", p.FreeSurplus, actual, p.Target))
-	}
-	if p.Blocked > 0 {
-		p.Reasons = append(p.Reasons, fmt.Sprintf("另有 %d 页在用且有持有者，不可回收", p.Blocked))
 	}
 	return p
 }
@@ -475,8 +436,9 @@ type HugepagePoolSetter interface {
 // 为什么按尺寸写 sysfs 而不是 `vm.nr_hugepages`：后者只作用于**默认尺寸**池，
 // 对非默认尺寸池无效；按尺寸的 sysfs 对 1G/2M 都成立（与决策 #106 的双池口径一致）。
 //
-// 安全性（决策 #346）：内核的 `set_max_huge_pages` **只释放空闲页**——被进程引用的页有引用计数、
-// 释放不了。因此把 nr_hugepages 收敛到「实际持有值」再升回声明值，**运行中的 VM/VPP 不受影响**。
+// 能力边界（决策 #346 真机实测）：内核的 `set_max_huge_pages` **只能释放空闲页**——被进程引用
+// 的页（有引用计数）与被进程**预留但未 fault** 的页（不在空闲链表上）都**释放不了**。因此把
+// `nr_hugepages` 写小只会腾出真正的空闲页；写入成功不代表池变小，必须回读核验。
 type SysfsHugepageSetter struct{ Root string }
 
 // NewSysfsHugepageSetter 真实系统上的落地器（Root="/"）。
@@ -531,7 +493,7 @@ type HugepageReconcileResult struct {
 	Reclaimed int                  `json:"reclaimed"` // 本次实际回收的页数合计
 }
 
-// Unconverged 仍未收敛到声明值的池（实际 > 声明：在用页挡住 / 回读不一致）。
+// Unconverged 仍未收敛到声明值的池（实际 > 声明：在用/预留页挡住 / 回读不一致）。
 func (r HugepageReconcileResult) Unconverged() []HugepagePoolResult {
 	out := []HugepagePoolResult{}
 	for _, p := range r.Pools {
@@ -553,32 +515,17 @@ func (r HugepageReconcileResult) Orphaned() []HugepagePoolResult {
 	return out
 }
 
-// executeHugepageWrites 执行有界的写序列（每步后回读），返回最后一次成功回读的 (nr, free)。
-// 任一步写失败 / 回读失败即如实返回错误（**不谎称收敛**）。
-func executeHugepageWrites(root string, set HugepagePoolSetter, pageSize string, writes []int) (int, int, error) {
-	after, free := -1, -1
-	for _, target := range writes {
-		if err := set.SetPoolPages(pageSize, target); err != nil {
-			return after, free, err
-		}
-		a, f, ok := ReadHugepagePool(root, pageSize)
-		if !ok {
-			return after, free, fmt.Errorf("写入后回读失败：sysfs 不可读，无法确认是否收敛")
-		}
-		after, free = a, f
-	}
-	return after, free, nil
-}
-
-// ReconcileHugepages 对账式回收（决策 #329 起步、#346 扩）：既回收「实际 > 声明 且空闲」的多余页
-// （#329），也回收**无主占用页**（#346）。每个池**至多两次写 + 两次回读**（有界，不重试、不循环）。
+// ReconcileHugepages 对账式回收（决策 #329）：只回收「实际 > 声明 **且空闲**」的多余页，
+// 每个池**至多一次写 + 一次回读**（有界，不重试、不循环）。**无主占用页不在回收范围**
+// （决策 #346：这类页多为被进程预留但未 fault 的大页，写 nr_hugepages 释放不了），
+// 只在结果里如实呈现（供 HUGEPAGE_POOL_ORPHAN 告警）。
 //
 // declared：页尺寸 → 声明页数（<=0 / 缺失 = 不托管，不动作）。
 // set：写能力（nil = 用 SysfsHugepageSetter{Root: root}）。
 // blockers：无法回收/未完全收敛时取「谁在占用」的证据（可 nil）。
 //
-// 诚实性：写成功不等于收敛——一律回读内核实际值；回读 != 目标即报 verify_failed 并给出原因，
-// 绝不把「sysctl/sysfs 写成功」当成「池已收敛」。
+// 诚实性：写成功不等于收敛——一律**回读**内核实际值；回读 != 目标即报 verify_failed 并给出原因；
+// 回读无变化（目标未达成）即如实报，绝不把「sysctl/sysfs 写成功」当成「池已收敛」。
 func ReconcileHugepages(root string, declared map[string]int, set HugepagePoolSetter,
 	blockers func(pageSize string, inUse int) []string) HugepageReconcileResult {
 
@@ -591,32 +538,39 @@ func ReconcileHugepages(root string, declared map[string]int, set HugepagePoolSe
 		decl := declared[size]
 		nr, free, ok := ReadHugepagePool(root, size)
 		res := HugepagePoolResult{PageSize: size, Declared: decl, Reasons: []string{}}
-		h := 0
-		if heldOK {
-			h = held[size]
-		}
 		if !ok {
 			res.ActualBefore, res.ActualAfter = -1, -1
 			res.InUse, res.Free = -1, -1
 			res.Held, res.Orphan = -1, -1
 			if heldOK {
-				res.Held = h
+				res.Held = held[size]
 			}
 			res.Action = HugepageActionUnreadable
 			res.Reasons = append(res.Reasons, "内核未提供该页尺寸的池（sysfs 不可读）——不动作")
 			out.Pools = append(out.Pools, res)
 			continue
 		}
-		plan := PlanHugepageReclaim(size, decl, nr, free, h, heldOK)
+		// held/orphan 观测值（决策 #346 可见性；不参与回收）。
+		res.Held = -1
+		if heldOK {
+			res.Held = held[size]
+			orphan := nr - free - held[size]
+			if orphan < 0 {
+				orphan = 0
+			}
+			res.Orphan = orphan
+		} else {
+			res.Orphan = -1
+		}
+		plan := PlanHugepageReclaim(size, decl, nr, free)
 		res.ActualBefore, res.InUse, res.Free = nr, plan.InUse, free
-		res.Held, res.Orphan = plan.Held, plan.Orphan
 		res.Reasons = append(res.Reasons, plan.Reasons...)
 
 		switch {
 		case decl <= 0:
 			res.ActualAfter = nr
 			res.Action = HugepageActionUnmanaged
-		case len(plan.Writes) == 0:
+		case plan.Reclaimable == 0:
 			res.ActualAfter = nr
 			if plan.Blocked > 0 {
 				res.Action = HugepageActionBlocked
@@ -627,16 +581,17 @@ func ReconcileHugepages(root string, declared map[string]int, set HugepagePoolSe
 				res.Action = HugepageActionNone
 			}
 		default:
-			after, freeAfter, err := executeHugepageWrites(root, set, size, plan.Writes)
-			if err != nil {
-				if after < 0 {
-					res.ActualAfter = nr
-				} else {
-					res.ActualAfter = after
-					res.Free = freeAfter
-				}
+			if err := set.SetPoolPages(size, plan.Target); err != nil {
+				res.ActualAfter = nr
 				res.Action = HugepageActionVerifyFailed
 				res.Error = err.Error()
+				break
+			}
+			after, freeAfter, okAfter := ReadHugepagePool(root, size)
+			if !okAfter {
+				res.ActualAfter = nr
+				res.Action = HugepageActionVerifyFailed
+				res.Error = "写入后回读失败：sysfs 不可读，无法确认是否收敛"
 				break
 			}
 			res.ActualAfter, res.Free = after, freeAfter
@@ -646,15 +601,18 @@ func ReconcileHugepages(root string, declared map[string]int, set HugepagePoolSe
 			}
 			if after != plan.Target {
 				res.Action = HugepageActionVerifyFailed
-				res.Error = fmt.Sprintf("写入目标 %d 页后回读为 %d 页（内核未按请求释放：多余的空闲页可能已被并发占用）",
+				res.Error = fmt.Sprintf("写入目标 %d 页后回读为 %d 页（内核只释放空闲页：目标页可能不在空闲链表上/已被并发占用）",
 					plan.Target, after)
 				break
 			}
-			res.Reclaimed = plan.Reclaimable
+			res.Reclaimed = nr - after // 基于回读的**实际**观测（不是计划值）
+			if res.Reclaimed < 0 {
+				res.Reclaimed = 0
+			}
 			out.Reclaimed += res.Reclaimed
 			if after > decl {
 				res.Action = HugepageActionPartial
-				res.Reasons = append(res.Reasons, fmt.Sprintf("已回收 %d 页，实际仍为 %d（高于声明 %d）：剩余 %d 页在用且有持有者，不可回收",
+				res.Reasons = append(res.Reasons, fmt.Sprintf("已回收 %d 页，实际仍为 %d（高于声明 %d）：剩余 %d 页在用或在预留中，不可回收",
 					res.Reclaimed, after, decl, after-decl))
 				if blockers != nil {
 					res.Blockers = blockers(size, res.InUse)

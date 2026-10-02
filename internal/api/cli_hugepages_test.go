@@ -54,29 +54,6 @@ func writeHugepageSmaps(t *testing.T, root, pid string, pages1G int) {
 	}
 }
 
-// apiKernelSetter 模拟内核 sysfs：写 nr_hugepages 只释放空闲页（被引用的 held 页释放不了）。
-type apiKernelSetter struct {
-	t      *testing.T
-	root   string
-	held   map[string]int
-	writes int
-}
-
-func (k *apiKernelSetter) SetPoolPages(pageSize string, target int) error {
-	k.writes++
-	held := k.held[pageSize]
-	nr := target
-	if nr < held {
-		nr = held
-	}
-	free := nr - held
-	if free < 0 {
-		free = 0
-	}
-	writeHugepageFixture(k.t, k.root, pageSize, nr, free)
-	return nil
-}
-
 func TestHugepageDeclaredFromConfig(t *testing.T) {
 	cfg := model.Config{ResourcePools: &model.ResourcePool{
 		Hugepages: []model.HPool{{PageSize: "1G", Count: 2}, {PageSize: "2M", Count: 768}},
@@ -318,15 +295,15 @@ func TestRESTHugepagesReclaimUnavailable(t *testing.T) {
 	}
 }
 
-// 决策 #346 端到端：内核实际 == 声明、但有一页无主占用（round124 现场形态）——
-// 读视图如实报 state=orphan/orphan=1（#329 口径下这里四列全「一致」且「无需回收」），
-// POST reclaim 把无主页回收并回读确认（池仍为声明值、腾出一页空闲）。
-func TestRESTHugepagesOrphanReadAndReclaim(t *testing.T) {
+// 决策 #346 端到端：内核实际 == 声明、但有一页无主占用（round125 现场形态）——
+// 读视图如实报 state=orphan/orphan=1（旧 #329 口径下这里四列全「一致」），
+// 但 POST reclaim **不回收无主页**（真机实测：写 nr_hugepages 释放不了这类预留页）：
+// 不写、如实报无可回收、池与空闲数不变，**绝不报成功**。
+func TestRESTHugepagesOrphanReadNotReclaimed(t *testing.T) {
 	root := t.TempDir()
 	writeHugepageFixture(t, root, "1G", 2, 0) // 实际 2、空闲 0：在用 2
 	writeHugepageSmaps(t, root, "555", 1)     // 进程只持有 1 页 → 1 页无主占用
-	setter := &apiKernelSetter{t: t, root: root, held: map[string]int{"1G": 1}}
-	ts := newTestServerOpts(t, Options{Hugepages: setter, HugepageRoot: root})
+	ts := newTestServerOpts(t, Options{Hugepages: ksys.SysfsHugepageSetter{Root: root}, HugepageRoot: root})
 	token := loginAdmin(t, ts)
 
 	// 声明 1G=2（== 内核实际）。
@@ -337,30 +314,26 @@ func TestRESTHugepagesOrphanReadAndReclaim(t *testing.T) {
 		t.Fatalf("声明大页池: %d %s", status, body)
 	}
 
-	// GET：1G 池应如实报 held=1 / orphan=1 / state=orphan。
+	// GET：1G 池应如实报 held=1 / orphan=1 / state=orphan / reclaimable=0（无主页不可回收）。
 	status, _, body = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/system/hugepages", token, nil, nil)
 	if status != http.StatusOK {
 		t.Fatalf("GET /system/hugepages: %d %s", status, body)
 	}
+	type poolView struct {
+		PageSize    string `json:"page_size"`
+		Held        int    `json:"held"`
+		Orphan      int    `json:"orphan"`
+		InUse       int    `json:"in_use"`
+		Reclaimable int    `json:"reclaimable"`
+		State       string `json:"state"`
+	}
 	var view struct {
-		Pools []struct {
-			PageSize string `json:"page_size"`
-			Held     int    `json:"held"`
-			Orphan   int    `json:"orphan"`
-			InUse    int    `json:"in_use"`
-			State    string `json:"state"`
-		} `json:"pools"`
+		Pools []poolView `json:"pools"`
 	}
 	if err := json.Unmarshal(body, &view); err != nil {
 		t.Fatalf("解析响应: %v %s", err, body)
 	}
-	var p1 *struct {
-		PageSize string `json:"page_size"`
-		Held     int    `json:"held"`
-		Orphan   int    `json:"orphan"`
-		InUse    int    `json:"in_use"`
-		State    string `json:"state"`
-	}
+	var p1 *poolView
 	for i := range view.Pools {
 		if view.Pools[i].PageSize == "1G" {
 			p1 = &view.Pools[i]
@@ -369,23 +342,23 @@ func TestRESTHugepagesOrphanReadAndReclaim(t *testing.T) {
 	if p1 == nil {
 		t.Fatalf("响应里没有 1G 池：%s", body)
 	}
-	if p1.InUse != 2 || p1.Held != 1 || p1.Orphan != 1 || p1.State != ksys.HugepageStateOrphan {
-		t.Fatalf("1G 无主占用读视图不符：%+v", *p1)
+	if p1.InUse != 2 || p1.Held != 1 || p1.Orphan != 1 || p1.State != ksys.HugepageStateOrphan || p1.Reclaimable != 0 {
+		t.Fatalf("1G 无主占用读视图不符（reclaimable 应为 0）：%+v", *p1)
 	}
 
-	// POST reclaim：回收无主页并回读确认。
+	// POST reclaim：无主页不在回收范围 → 不动作、如实报无可回收、绝不报成功。
 	status, _, body = cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system/hugepages:reclaim", token, nil, nil)
 	if status != http.StatusOK {
 		t.Fatalf("POST reclaim: %d %s", status, body)
 	}
-	if !strings.Contains(string(body), `"reclaimed":1`) {
-		t.Errorf("响应应报回收 1 页无主占用：%s", body)
+	if strings.Contains(string(body), `"action":"reclaimed"`) || strings.Contains(string(body), `"reclaimed":1`) {
+		t.Errorf("无主页不可回收，绝不报成功：%s", body)
 	}
-	// 独立事实源：池仍为声明值 2，但腾出一页空闲（无主页被回收）。
-	if nr, free, _ := ksys.ReadHugepagePool(root, "1G"); nr != 2 || free != 1 {
-		t.Fatalf("回读 = nr %d free %d，期望 nr 2 free 1", nr, free)
+	if !strings.Contains(string(body), `"reclaimed":0`) {
+		t.Errorf("应如实报回收 0 页：%s", body)
 	}
-	if setter.writes != 2 {
-		t.Fatalf("无主占用回收应为有界两步写，实得 %d 次", setter.writes)
+	// 独立事实源：池与空闲数完全没变（写 nr 也释放不了无主页）。
+	if nr, free, _ := ksys.ReadHugepagePool(root, "1G"); nr != 2 || free != 0 {
+		t.Fatalf("回读 = nr %d free %d，期望 nr 2 free 0（无变化）", nr, free)
 	}
 }

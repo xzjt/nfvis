@@ -14,16 +14,16 @@ package api
 //	在用值   = 内核实际 - 空闲页（**不一定都有持有者**——见下）
 //	实际持有 = 遍历 /proc/*/smaps 的 hugetlb 映射、按 inode 去重、按 KernelPageSize 折算
 //	无主占用 = 在用 - 实际持有（≥0）：分配了却无进程/inode 引用的页（决策 #346）
-//	可回收   = 空闲的多余页（#329）+ 无主占用页（#346）
+//	可回收   = 空闲的多余页（#329）；**无主占用页不可回收**（#346 真机实测撤回）
 //
-// ⚠️ **在用 ≠ 有持有者**（决策 #346 更正 #329 的措辞）：内核收缩池（如开机 hugepages=4 后按
-// 声明收敛）可能留下「谁都持有不到」的页——它算「在用」却没人能用，正是 round124 新 VM
-// 起不来的成因。取不到内核值/持有值时如实显示「取不到」，**不编造**。
+// ⚠️ **在用 ≠ 有持有者**（决策 #346 更正 #329 的措辞）：内核收缩池、或被进程**预留（reserve）
+// 但未 fault** 的页（如数据面 DPDK 预留）都算「在用」却没有可见持有者——它们**不在空闲链表上**，
+// 写 nr_hugepages **释放不了**（dev34 实测：`nr` 不变）。取不到内核值/持有值时如实显示「取不到」，
+// **不编造**。
 //
-// 回收：既回收空闲的多余页（#329），也回收无主占用页（#346，机制：先把 nr_hugepages 收敛到
-// 实际持有值、再升回声明值——内核只释放空闲页，被引用的页释放不了）。**在用且被引用的页一律
-// 不动**；只收敛到**已声明**值——不改声明值；改声明是
-// `set resource-pools hugepages page-size <size> count <n>`（需 reboot 生效）。
+// 回收：**只回收空闲的多余页**（#329）= min(实际-声明, 空闲)；**无主占用页不在回收范围**
+// （产品侧动不了它们，需从预留者一侧释放）。**在用页一律不动**；只收敛到**已声明**值——不改声明值；
+// 改声明是 `set resource-pools hugepages page-size <size> count <n>`（需 reboot 生效）。
 
 import (
 	"fmt"
@@ -187,11 +187,11 @@ func (x *cliExecutor) renderHugepagePools() string {
 	if total > 0 {
 		for _, p := range pools {
 			if p.Reclaimable > 0 {
-				b.WriteString(fmt.Sprintf("  - %s 可回收 %d 页（空闲的多余页 + 无主占用页）：request system hugepages reclaim\n", p.PageSize, p.Reclaimable))
+				b.WriteString(fmt.Sprintf("  - %s 可回收 %d 页（空闲的多余页）：request system hugepages reclaim\n", p.PageSize, p.Reclaimable))
 			}
 		}
 	} else {
-		b.WriteString("  - 无需回收（无空闲的多余页、也无无主占用页）\n")
+		b.WriteString("  - 无可回收的空闲多余页（内核实际已不高于声明值；无主占用页不在回收范围）\n")
 	}
 	// 未声明页池的指引（本决策不改声明值；改声明需 reboot）。
 	for _, p := range pools {
@@ -200,12 +200,13 @@ func (x *cliExecutor) renderHugepagePools() string {
 				p.PageSize, p.PageSize))
 		}
 	}
-	// 无主占用页：说明它「谁都持有不到」及其回收机制（不编造持有者）。
+	// 无主占用页：如实说明它「谁都持有不到」且 reclaim 动不了它（不编造「可回收」）。
 	for _, p := range pools {
 		if p.State == ksys.HugepageStateOrphan {
-			b.WriteString(fmt.Sprintf("  - %s 有 %d 页无主占用（在用 %s 页中仅 %s 页有进程/inode 引用）：request system hugepages reclaim 可回收"+
-				"（机制：先把 nr_hugepages 收敛到实际持有值、再升回声明值；内核只释放空闲页，运行中的 VM/VPP 不受影响）\n",
-				p.PageSize, p.Orphan, hugepageNum(p.InUse), hugepageNum(p.Held)))
+			b.WriteString(fmt.Sprintf("  - %s 有 %s 页无主占用（在用 %s 页中仅 %s 页有进程/inode 引用）：该类页多为被进程预留但尚未使用的大页"+
+				"（如数据面 DPDK 预留），不在空闲链表上，**request system hugepages reclaim 不会动它们**（写 nr_hugepages 释放不了）"+
+				"——需从预留者一侧释放（停/重启数据面或释放预留）\n",
+				p.PageSize, hugepageNum(p.Orphan), hugepageNum(p.InUse), hugepageNum(p.Held)))
 		}
 	}
 	// 多余页全部在用时的证据（不编造）。
@@ -224,7 +225,7 @@ func (x *cliExecutor) renderHugepagePools() string {
 }
 
 // requestHugepagesReclaim `request system hugepages reclaim`（决策 #329）：
-// 只回收**空闲**的多余页；在用页一律不动；写后回读确认。
+// 只回收**空闲**的多余页；在用页（含无主占用/预留页）一律不动；写后回读确认。
 func (x *cliExecutor) requestHugepagesReclaim(user string) string {
 	if x.hugepages == nil {
 		return "%% 大页池回收不可用（编排器未装配）\n"
@@ -237,7 +238,7 @@ func (x *cliExecutor) requestHugepagesReclaim(user string) string {
 		func(size string, inUse int) []string { return hugepageOccupants(cfg, size) })
 
 	var b strings.Builder
-	b.WriteString("大页池回收（回收空闲的多余页与无主占用页，收敛到声明值；在用且被引用的页不动）：\n")
+	b.WriteString("大页池回收（只回收空闲的多余页，收敛到声明值；在用/预留页一律不动）：\n")
 	fmt.Fprintf(&b, "%-8s %-10s %-10s %-10s %-8s %-8s %s\n",
 		"页尺寸", "声明", "回收前", "回收后", "在用", "已回收", "结果")
 	for _, p := range res.Pools {
@@ -258,15 +259,20 @@ func (x *cliExecutor) requestHugepagesReclaim(user string) string {
 	}
 	unconv := res.Unconverged()
 	if len(unconv) == 0 && res.Reclaimed == 0 {
-		b.WriteString("无需回收：内核实际已不高于声明值，未做任何改动。\n")
+		b.WriteString("无可回收的空闲多余页（内核实际已不高于声明值，未做任何改动）。\n")
 	} else if len(unconv) == 0 {
-		b.WriteString(fmt.Sprintf("已回收 %d 页，各池均已收敛到声明值。\n", res.Reclaimed))
+		b.WriteString(fmt.Sprintf("已回收 %d 页空闲多余页，各池均已收敛到声明值。\n", res.Reclaimed))
 	} else {
 		b.WriteString("仍有未收敛项（多为在用页挡住，本命令不动在用页）：\n")
 		for _, p := range unconv {
 			b.WriteString(fmt.Sprintf("  - %s：声明 %s、实际 %s、在用 %s；处置见上方占用者说明\n",
 				p.PageSize, hugepageDeclaredText(p.Declared), hugepageNum(p.ActualAfter), hugepageNum(p.InUse)))
 		}
+	}
+	// 无主占用页：本命令不动它们（与读视图/告警口径一致，如实说明）。
+	for _, p := range res.Orphaned() {
+		b.WriteString(fmt.Sprintf("  · %s：另有 %s 页无主占用（多为被进程预留但尚未使用的大页），**不在回收范围**——写 nr_hugepages 释放不了，需从预留者一侧释放\n",
+			p.PageSize, hugepageNum(p.Orphan)))
 	}
 
 	detail := fmt.Sprintf("大页池回收：回收 %d 页", res.Reclaimed)
@@ -316,7 +322,7 @@ func hugepageStateText(state string) string {
 	case ksys.HugepageStateInUse:
 		return "多余页在用（回收不了/只能回收一部分）"
 	case ksys.HugepageStateOrphan:
-		return "有无主占用页（可回收）"
+		return "有无主占用页（产品侧不可回收）"
 	case ksys.HugepageStateUnmanaged:
 		return "未声明（不托管）"
 	case ksys.HugepageStateUnreadable:
@@ -371,7 +377,7 @@ func (s *Server) handleGetHugepages(w http.ResponseWriter, r *http.Request) {
 // handleHugepagesReclaim POST /system/hugepages:reclaim（决策 #329，super-user）。
 //
 // 与 CLI `request system hugepages reclaim` 共用 ksys.ReconcileHugepages——只回收**空闲**的
-// 多余页（在用页一律不动），写后回读确认；写入失败/回读不一致时 400（如实报错，不谎称收敛）。
+// 多余页（在用页/无主占用页一律不动），写后回读确认；写入失败/回读不一致时 400（如实报错，不谎称收敛）。
 func (s *Server) handleHugepagesReclaim(w http.ResponseWriter, r *http.Request) {
 	if s.hugepage == nil {
 		writeError(w, http.StatusServiceUnavailable, "RUNTIME_UNAVAILABLE", errRuntimeUnavailable, nil)

@@ -1699,8 +1699,8 @@ type alarmSink interface {
 //
 // 两条告警同一对账位置与口径：按内核实况**重建**（不靠进程内记忆，跨 nfvisd 重启仍可见）、
 // 收敛后**自动消解**；各自独立 scope（SURPLUS 在 "hugepages"、ORPHAN 在 "hugepages_orphan"）。
-// 无主占用（Orphan>0）按进入对账时观测到的内核实况如实报——即便本轮已把它回收，也留下痕迹，
-// 下一轮内核实况无无主占用即自动消解。
+// 无主占用（Orphan>0）按进入对账时观测到的内核实况如实报（这类页产品侧不可回收，只作可见性）；
+// 内核实况不再有无主占用即自动消解。
 func hugepageAlarms(sink alarmSink, res system.HugepageReconcileResult) {
 	if bad := res.Unconverged(); len(bad) > 0 {
 		msgs := make([]string, 0, len(bad))
@@ -1723,9 +1723,9 @@ func hugepageAlarms(sink alarmSink, res system.HugepageReconcileResult) {
 				p.PageSize, p.InUse, p.Held, p.Orphan))
 		}
 		sink.Raise("hugepages_orphan", network.SeverityWarning, system.HugepageOrphanAlarmCode,
-			"大页池存在无主占用页（分配了却无任何进程/inode 引用、未被收回）："+strings.Join(msgs, "；")+
-				"。它们只占着池、却没人能用（新 VNF 会 Cannot allocate memory）；处置：request system hugepages reclaim 回收"+
-				"（先把 nr_hugepages 收敛到实际持有值再升回声明值，不动运行中的 VM/VPP）",
+			"大页池存在无主占用页（分配了却无任何进程/inode 引用）："+strings.Join(msgs, "；")+
+				"。这类页多为被进程预留但未使用的大页（如数据面 DPDK 预留），不在空闲链表上、产品侧写 nr_hugepages 释放不了——"+
+				"request system hugepages reclaim 不会动它们，需从预留者一侧释放",
 			"system")
 	} else {
 		sink.Resolve("hugepages_orphan", system.HugepageOrphanAlarmCode, "system")

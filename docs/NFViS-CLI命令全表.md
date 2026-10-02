@@ -65,7 +65,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show system cpu` | 总核/隔离核/每核占用 | 运行态（宿主 `/proc`） | ✅ |
 | `show system memory` | 内存与大页使用（池内/池外） | 运行态 | ✅ |
 | `show system storage` | 磁盘与镜像仓库占用 | 运行态 + 镜像仓库 | ✅ |
-| `show system hugepages` | 大页池数字：声明（配置唯一真源）/ 内核实际（sysfs）/ 在用（= 实际 − 空闲）/ **实际持有**（按 `/proc/*/smaps` 的 hugetlb 映射按 inode 去重汇总）/**无主占用**（= 在用 − 持有，决策 #346）+ 可回收（决策 #329/#346，与 `GET /system/hugepages` 同源；取不到内核值/持有值时如实显示「取不到」，不编造） | `GET /system/hugepages` | ✅ |
+| `show system hugepages` | 大页池数字：声明（配置唯一真源）/ 内核实际（sysfs）/ 在用（= 实际 − 空闲）/ **实际持有**（按 `/proc/*/smaps` 的 hugetlb 映射按 inode 去重汇总）/**无主占用**（= 在用 − 持有，决策 #346）+ 可回收（决策 #329/#346，与 `GET /system/hugepages` 同源；**无主占用页不可回收**、只作可见性 + `HUGEPAGE_POOL_ORPHAN` 告警；取不到内核值/持有值时如实显示「取不到」，不编造） | `GET /system/hugepages` | ✅ |
 | `show system kernel` | 内核启动基线三方对照（cmdline/运行实际/配置期望，FR-SYS-014） | 配置 + 运行态 | ✅ |
 | `show system hardware` | 硬件健康：温度/风扇/电源/SMART（FR-SYS-012） | `GET /system/hardware` | ✅（本机无 IPMI/传感器，走降级路径） |
 | `show system core-dumps` | 崩溃转储清单（VPP/QEMU/nfvisd） | `GET /system/core-dumps` | ✅ |
@@ -180,7 +180,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request system poweroff` | 断电 | S | `POST /system:shutdown` | 🚫 破坏性 |
 | `request system kernel apply` | 写入 GRUB 内核基线（需重启生效） | S | `POST /system/kernel:apply` | 🚫 会改启动项，本轮不执行 |
 | `request system kernel rollback` | 回退内核基线 | S | `POST /system/kernel:rollback` | 🚫 同上 |
-| `request system hugepages reclaim` | 回收**空闲**的多余大页与**无主占用页**，收敛到声明值（决策 #329/#346）；**在用且被引用的页一律不动**、**不改声明值**、写后回读确认（未收敛如实报出谁在占用）；无主占用页的回收机制＝先收敛到实际持有值再升回声明值 | S | `POST /system/hugepages:reclaim`（与 REST 同源） | 🚫 会改宿主大页池（只动空闲多余页与无主页）；真机按交付说明单独走查（造「无主占用」现场再回收），纯函数与命令/端点由单测覆盖；fulltest 登记豁免（决策 #319） |
+| `request system hugepages reclaim` | 回收**空闲**的多余大页，收敛到声明值（决策 #329）；**在用页一律不动**、**不改声明值**、写后回读确认（未收敛/无变化如实报，含谁在占用）；⚠️ **无主占用页不在回收范围**（决策 #346 真机实测撤回：多为 DPDK 预留页，写 nr_hugepages 释放不了，需从预留者一侧释放） | S | `POST /system/hugepages:reclaim`（与 REST 同源） | 🚫 会改宿主大页池（只动空闲多余页）；真机按交付说明单独走查（造「实际>声明且空闲」现场再回收），纯函数与命令/端点由单测覆盖；fulltest 登记豁免（决策 #319） |
 | `request system configuration backup [to <path>]` | 导出 committed 配置归档（`to <path>` 是另存一份：须绝对路径、目标不得已存在、父目录须已存在；已存在即如实拒绝） | S | `POST /system/backup`（生成归档；只读清单是 `GET /system/backup`） | ✅ |
 | `request system configuration restore <path>` | 导入归档为 candidate 并提交 | S | `POST /system/restore`（与 REST 同源，高危档审计两条，决策 #150） | 🚫 会覆盖现网配置 |
 | `request system tech-support generate` | 生成诊断归档 tar.gz（归档里的配置是**脱敏视图**：口令哈希等已隐藏，不能用于恢复；要可恢复的完整配置用 `configuration backup`） | O | `POST /system/tech-support` | ✅ |
