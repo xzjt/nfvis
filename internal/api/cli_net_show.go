@@ -2,10 +2,9 @@ package api
 
 // T0-1：`show acls [<name> [detail]]`、`show bonds [<name> [detail]]` 的 CLI 渲染。
 // 读取 committed 配置构造 JunOS 风格配置树，x.structured 供 `| display json/xml`；
-// ACL 逐规则命中为运行态（决策 #339，aclDetailView 注入）；bond 的 LACP actor/partner 运行态仍属后续。
+// 运行态字段（ACL 命中计数、LACP actor/partner）属 M3，此处先呈现配置视图。
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 )
@@ -40,25 +39,9 @@ func (x *cliExecutor) execShowAcls(args []string) string {
 		if a.Name != name {
 			continue
 		}
-		// 决策 #339：逐规则命中（运行态）。与 REST `GET /acls/{name}` 同一 ACLCountersRuntime、
-		// 同一 aclDetailView，保证两面一致。取数失败仍渲染配置详情（配置读视图不因运行态失效而
-		// 不可用），随后**如实**附一行原因——不静默省略、不把「取不到」当「零命中」。
-		hits, herr := aclHitsFor(context.Background(), x.aclHits, name)
-		view := aclDetailView(a, hits)
-		x.structured = view
-		out := RenderConfigJSON(view) + "\n"
-		switch {
-		case herr != nil:
-			out += "命中计数不可用：" + herr.Error() + "\n"
-		case hits != nil:
-			// 总命中一行（决策 #339）：逐规则之和，便于一眼看整体。
-			var total uint64
-			for _, h := range hits {
-				total += h
-			}
-			out += fmt.Sprintf("总命中：%d\n", total)
-		}
-		return out
+		m, _ := anyToTree(a).(map[string]any)
+		x.structured = m
+		return RenderConfigJSON(m) + "\n"
 	}
 	return fmt.Sprintf("%% ACL %s 不存在\n", name)
 }

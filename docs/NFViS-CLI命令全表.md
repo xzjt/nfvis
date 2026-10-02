@@ -90,7 +90,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show vrfs <name>` | detail：L3 接口/地址/路由 | `GET /vrfs/{name}` | ✅ |
 | `show vrfs <name> routes` | FIB 路由表 | `GET /vrfs/{name}/routes` | ✅（VRF 不存在时明确报错，决策 #76④） |
 | `show acls` | ACL 列表 | `GET /acls` | ✅ |
-| `show acls <name> detail` | 规则与绑定详情；**逐规则命中（运行态，决策 #339）**（来源 stats segment `/acl/<idx>/matches` 组合计数，经 `vpp_get_stats` 解码；运行态取不到时附一行原因，不静默省略） | `GET /acls/{name}`（rules[].hits） | ✅ |
+| `show acls <name> detail` | 规则与绑定详情 | `GET /acls/{name}` | ✅ |
 | `show nat` | NAT 池/规则/转换会话计数 | `GET /nat` | ✅ |
 | `show port-mirroring` | SPAN 会话状态 | `GET /port-mirroring` | ✅ |
 | `show qos policies` | 限速策略与绑定 | `GET /qos/policies` | ✅ |

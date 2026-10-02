@@ -82,16 +82,15 @@ type ConsoleRequest struct {
 
 // cliExecutor 守护进程侧 CLI 执行器。会话（模式/层级）按持有者+接入源隔离。
 type cliExecutor struct {
-	engine  *config.Engine
-	authz   authorizer
-	diag    DiagRuntime        // 诊断命令（M3-9；nil = 报不可用）
-	state   *state.State       // 接口计数快照（monitor；nil = 报不可用）
-	l2      L2Runtime          // L2 运行态（mac-table；nil = 报未接入）
-	l3      L3Runtime          // L3 运行态（routes；nil = 报未接入）
-	lldp    LldpRuntime        // LLDP 邻居（nil = 报未接入）
-	natRT   NatSessionsRuntime // NAT 会话（nil = 报未接入）
-	alarms  AlarmRuntime       // 告警表（nil = 报未接入）
-	aclHits ACLCountersRuntime // ACL 逐规则命中（决策 #339；nil = 报运行态未接入）
+	engine *config.Engine
+	authz  authorizer
+	diag   DiagRuntime        // 诊断命令（M3-9；nil = 报不可用）
+	state  *state.State       // 接口计数快照（monitor；nil = 报不可用）
+	l2     L2Runtime          // L2 运行态（mac-table；nil = 报未接入）
+	l3     L3Runtime          // L3 运行态（routes；nil = 报未接入）
+	lldp   LldpRuntime        // LLDP 邻居（nil = 报未接入）
+	natRT  NatSessionsRuntime // NAT 会话（nil = 报未接入）
+	alarms AlarmRuntime       // 告警表（nil = 报未接入）
 	// 计算/容器/镜像运行态（M4-12；nil = 对应命令报未接入，与 HTTP 端点 503 一致）
 	vm           VMRuntime
 	console      VMConsoleRuntime
@@ -243,10 +242,6 @@ func (x *cliExecutor) setRuntime(diag DiagRuntime, st *state.State) {
 func (x *cliExecutor) setNetRuntime(l2 L2Runtime, l3 L3Runtime, lldp LldpRuntime, nat NatSessionsRuntime, alarms AlarmRuntime) {
 	x.l2, x.l3, x.lldp, x.natRT, x.alarms = l2, l3, lldp, nat, alarms
 }
-
-// setACLCounters 注入 ACL 逐规则命中来源（决策 #339；nil = `show acls … detail` 报运行态未接入，
-// 与 REST 侧同源——同一 ACLCountersRuntime 实例）。
-func (x *cliExecutor) setACLCounters(c ACLCountersRuntime) { x.aclHits = c }
 
 // setComputeRuntime 注入计算/容器/镜像运行态（M4-12；契约 §1.1 show 与 §1.2 request
 // 的 VNF/容器/镜像命令，nil = 对应命令报“未接入”，与端点 503 语义一致）。

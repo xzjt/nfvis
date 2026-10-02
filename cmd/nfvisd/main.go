@@ -172,11 +172,7 @@ func run() error {
 	netProvider.SetServices(network.NewServicesProviderFunc(vppMgr.SvcClientFunc()))
 	// 决策 #335：交换机 DHCP 中继（VPP dhcp proxy；恢复重放含 relay）
 	netProvider.SetDhcp(network.NewDhcpProviderFunc(vppMgr.DhcpClientFunc()))
-	// 决策 #339：ACL 逐规则命中读视图的映射来源就是这台 AclProvider 的下发登记
-	// （name → VPP acl index），故保留句柄与 vppMgr 一起交给 api 层（CLI/REST 同源）。
-	aclProvider := network.NewAclProviderFunc(vppMgr.AclClientFunc())
-	netProvider.SetACL(aclProvider)
-	aclCounters := network.NewACLCounters(vppMgr, aclProvider)
+	netProvider.SetACL(network.NewAclProviderFunc(vppMgr.AclClientFunc()))
 	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
 	netProvider.SetBond(network.NewBondProviderFunc(vppMgr.BondClientFunc()))
 	netProvider.SetLldp(network.NewLldpProviderFunc(vppMgr.LldpClientFunc()))
@@ -753,9 +749,7 @@ func run() error {
 		L3:    &l3Controller{net: netProvider},
 		LLDP:  &lldpController{net: netProvider},
 		State: state.New(vppMgr.Runtime()),
-		// 决策 #339：ACL 逐规则命中（CLI show 与 REST 详情同源；VPP 重启归零的运行时事实）
-		ACLCounters: aclCounters,
-		SRIOV:       sriovProvider,
+		SRIOV: sriovProvider,
 		DPDK: &dpdkController{b: dpdkBinder, rec: dpdkBindings, logger: log, facts: mgmtFacts,
 			// 数据面占用探测（发现 #13）：解绑前问 VPP「这个口还在你手里吗」
 			dataplane: func(ifname string) (bool, error) {
