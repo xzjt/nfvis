@@ -6,6 +6,7 @@ package api
 // 不 import internal/orchestrator 实现，下发经既有 Provider 接口（mock 可运行）。
 
 import (
+	"context"
 	"net/http"
 	"slices"
 
@@ -13,6 +14,50 @@ import (
 )
 
 // ---------- acls（FR：ACL 绑定校验见 FR-CFG-011 前置引用） ----------
+
+// ACLCountersRuntime ACL 逐规则命中来源（决策 #339；编排器装配注入，nil = 运行态未接入）。
+// 错误**如实上抛**——调用方呈现原因，不静默当作「无命中」。
+type ACLCountersRuntime interface {
+	ACLHitCounters(ctx context.Context) (map[string]map[uint32]uint64, error)
+}
+
+// aclHitsFor 取某 ACL 的逐规则命中（键 = 规则下发下标，与配置 rules 顺序同源）。
+//
+// 返回 (nil, nil) 表示运行态未接入（无命中来源，读视图如实不带 hits）；
+// 非 nil error 表示取数失败（调用方呈现原因，不吞）。
+func aclHitsFor(ctx context.Context, src ACLCountersRuntime, name string) (map[uint32]uint64, error) {
+	if src == nil {
+		return nil, nil
+	}
+	all, err := src.ACLHitCounters(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return all[name], nil
+}
+
+// aclDetailView ACL 详情视图：配置对象 + 每条规则附命中数 `hits`（运行态，决策 #339）。
+//
+// 用 anyToTree 复用模型序列化，保证除 hits 外与既有详情逐字段一致。hits 为 nil
+// （运行态未接入 / 该 ACL 无计数）时不加该字段——契约里 hits 是可选只读字段。
+func aclDetailView(a model.Acl, hits map[uint32]uint64) map[string]any {
+	m, _ := anyToTree(a).(map[string]any)
+	if m == nil {
+		m = map[string]any{}
+	}
+	if hits == nil {
+		return m
+	}
+	rules, _ := m["rules"].([]any)
+	for i, r := range rules {
+		rm, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		rm["hits"] = hits[uint32(i)]
+	}
+	return m
+}
 
 func (s *Server) handleGetAcls(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.engine.Committed()
@@ -28,6 +73,8 @@ func (s *Server) handleGetAcls(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetAcl GET /api/v1/acls/{name}：ACL 详情（T0-1；契约 /acls/{name} get）。
+// 自决策 #339 起每条规则附运行态命中数 `hits`（来源与 CLI `show acls <name> detail` 同一
+// ACLCountersRuntime）；取数失败不拖垮配置读视图，改为在 `hits_unavailable` 里如实说明原因。
 func (s *Server) handleGetAcl(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	cfg, err := s.engine.Committed()
@@ -36,10 +83,16 @@ func (s *Server) handleGetAcl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, a := range cfg.Acls {
-		if a.Name == name {
-			writeJSON(w, http.StatusOK, a)
-			return
+		if a.Name != name {
+			continue
 		}
+		hits, herr := aclHitsFor(r.Context(), s.aclCounters, name)
+		view := aclDetailView(a, hits)
+		if herr != nil {
+			view["hits_unavailable"] = herr.Error()
+		}
+		writeJSON(w, http.StatusOK, view)
+		return
 	}
 	writeError(w, http.StatusNotFound, "NOT_FOUND", "ACL "+name+" 不存在", nil)
 }

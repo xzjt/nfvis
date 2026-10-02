@@ -4984,8 +4984,11 @@ function renderAclDetail(acl, params) {
     ['规则数', (acl.rules || []).length],
   ] : [['读取失败', acl ? acl.__err : notFoundText(name, 'ACL')]]);
   const rules = ok ? (acl.rules || []) : [];
-  table($('acd-rule-table').querySelector('tbody'), 6, rules.map((r) => [
-    r.seq, r.direction, r.source, r.destination, r.protocol, r.source_port,
+  // 决策 #339：逐规则命中（运行态，GET /acls/{name} 的 rules[].hits；取数失败时端点不给该字段）。
+  // 只读展示，无写控件；VPP 重启后归零是运行态事实。
+  const hit = (r) => (r && r.hits != null ? r.hits : '—');
+  table($('acd-rule-table').querySelector('tbody'), 7, rules.map((r) => [
+    r.seq, r.direction, r.source, r.destination, r.protocol, r.source_port, hit(r),
   ]));
 }
 
