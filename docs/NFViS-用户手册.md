@@ -993,7 +993,6 @@ nfvis# set vlan access 100
 nfvis# set ports 1 interface ens224
 nfvis# set ports 2 vnf fw-vm interface eth0
 nfvis# set gateway ip 192.168.100.1/24
-nfvis# set gateway acl-in acl-web
 nfvis# top
 nfvis# commit
 ```
@@ -1001,6 +1000,11 @@ nfvis# commit
 L2 交换机在 VPP 侧落地为 **bridge-domain**；`gateway ip` 创建 BVI（三层网关），
 缺省归入专属 VRF `vr-<交换机名>`（也可 `set gateway vrf <name>` 挂到别的 VRF）。
 端口支持 trunk（`trunk vlans 100,200`）与 native VLAN。
+
+> **网关（BVI）上不能绑 ACL**：`set gateway acl-in|acl-out <acl>` 会被**提交期直接拒绝**。
+> 原因：VPP 26.06 不评估 BVI（网关）上的域内流量——既不拦截也不计数，绑定给不出任何保护
+> （真机实证：deny 规则在场时转发流量照走、计数恒 0）。需要按 ACL 过滤时，改用 **L3 接口形态**
+> `set l3-interface <ifname> acl-in <acl>`（见 §8.5），该形态已实证生效。
 
 核对：
 
@@ -1040,6 +1044,27 @@ nfvis# commit
 ```
 
 核对：`show acls`、`show acls acl-web detail`。
+
+绑定 ACL 有三条务必注意：
+
+1. **只能绑在 L3 接口（`l3-interface … acl-in`）或交换机端口上，不能绑在网关（BVI）上**。
+   `set gateway acl-in|acl-out` 会在提交期被**直接拒绝**——VPP 26.06 不评估 BVI 上的域内流量，
+   既不拦截也不计数（见 §8.3）。
+2. **绑 ACL 的接口会丢弃未在白名单的非 IP 帧（含 ARP）**。也就是说，除了放行 IP 流量，
+   该接口入向还会把 ARP 一并丢掉；对端要能通信，须**预置静态邻居**（或在白名单里另行放行）。
+   实测由来：vNIC 作 L3 接口绑 ACL 后，域内 ARP 被 ACL 插件的非 IP 白名单丢弃，对端因邻居解析
+   失败而 ping 不通；产品当前不自动放行 ARP，用前请先配好静态邻居。
+3. **交换机端口级 `acl-in`/`acl-out` 本轮未经真机验证**（与网关 ACL 同走 L2 路径、机制疑似相同），
+   使用前请自行验证；生产过滤优先用上面已实证生效的 L3 接口形态。
+
+需要按 ACL 过滤时，推荐写法：
+
+```bash
+nfvis# edit virtual-switches vs-wan
+nfvis# set l3-interface ens192 acl-in acl-web        # vNIC/物理口作 L3 接口，已实证生效
+nfvis# top
+nfvis# commit
+```
 
 ### 8.6 QoS（VPP policer）
 

@@ -436,6 +436,11 @@ set vlan access <vlan>                               # 交换机级默认 untag 
 set gateway ip <ip-prefix>                           # BVI 三层网关（IPv4/IPv6 可配多条，FR-NET-014）
 set gateway vrf <name>                               # 网关所属 VRF；缺省为专属 VRF vr-<name>
 set gateway acl-in <acl> | acl-out <acl>
+                                                     # ⊘ 设计拒绝（VPP 26.06 限制，见规格书附录 A #340）：
+                                                     #   真机实证 VPP 26.06 不评估 BVI（网关）上的域内流量——
+                                                     #   既不拦截也不计数，绑定给不出任何保护。提交期直接拒绝。
+                                                     #   替代：`set virtual-switches <vs> l3-interface <ifname>
+                                                     #   acl-in <acl>`（vNIC/物理口作 L3 接口，该形态已实证生效）。
 set dhcp-relay server <ip>                           # DHCP 中继（决策 #335）：把该交换机转发域（网关 VRF，
                                                      #   缺省专属 vr-<name>）里的 DHCP 广播中继到 <ip>。
                                                      #   前置校验：仅 L2 且已 `set gateway ip` 的交换机可配——
@@ -470,7 +475,11 @@ set rule <seq> source <ip-prefix|any> destination <ip-prefix|any> \
 set rule <seq> direction <ingress|egress>
 # 绑定（在端口/接口下）：
 #   set virtual-switches <n> ports <seq> acl-in <acl> / acl-out <acl>
+#       ⚠️ 待验：端口级绑定本轮未做真机验证，与网关 ACL 同走 L2 路径、机制疑似相同
+#          （见规格书附录 A #340 ④；验证后同口径处置）。
 #   set virtual-switches <n> l3-interface ... acl-in <acl>
+#       ✅ 已实证生效（round118）：vNIC/物理口作 L3 接口时 ACL 确实在拦。
+#       ⚠️ 绑 ACL 的接口会丢弃未在白名单的非 IP 帧（含 ARP）——对端须预置静态邻居（R117-3）。
 
 [edit nat]
 set source-pool <name> address-range <ip> to <ip>    # 外部地址池（可选；未用时以出接口地址作外部地址）

@@ -37,18 +37,20 @@ func TestAclEndpoint(t *testing.T) {
 		t.Fatalf("ACL 列表: %d %s", status, data)
 	}
 
-	// 绑定到交换机网关后删除 → 409
+	// 绑定到 L3 接口后删除 → 409。
+	// 注：网关（BVI）绑定形态已由决策 #340 在提交期硬拒（VPP 26.06 不评估 BVI 域内流量），
+	// 故此处改用已实证生效的 L3 接口形态来覆盖「被引用的 ACL 不可删」这条守卫。
 	seedIface(t, ts, token, "ens2f0")
-	vs := model.VirtualSwitch{Name: "vs-app", Type: "l2",
-		Gateway: &model.VSGateway{Addresses: []string{"192.168.100.1/24"}, AclIn: "acl-web"}}
-	if status, _, _ := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-switches", token, vs,
+	vrf := model.Vrf{Name: "vs-l3",
+		L3Interfaces: []model.L3Interface{{Interface: "ens2f0", AclIn: "acl-web"}}}
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/vrfs", token, vrf,
 		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
-		t.Fatalf("创建交换机")
+		t.Fatalf("创建带 ACL 绑定的 L3 接口: %d %s", status, data)
 	}
 	status, _, data = cfgRequest(t, http.MethodDelete, ts.URL+APIPrefix+"/acls/acl-web", token, nil,
 		map[string]string{"X-NFVIS-Auto-Commit": "true"})
-	if status != http.StatusConflict || !strings.Contains(string(data), "网关") {
-		t.Fatalf("被网关引用删除应 409: %d %s", status, data)
+	if status != http.StatusConflict || !strings.Contains(string(data), "引用") {
+		t.Fatalf("被 L3 接口引用删除应 409: %d %s", status, data)
 	}
 }
 

@@ -309,7 +309,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-switches <n> vlan access <vlan>` | L2 默认 untag VLAN | VPP BD | ✅ |
 | `set virtual-switches <n> gateway ip <ip-prefix>` | BVI 三层网关（可多条） | VPP BVI | ✅ |
 | `set virtual-switches <n> gateway vrf <name>` | 网关所属 VRF | VPP | ✅ |
-| `set virtual-switches <n> gateway acl-in\|acl-out <acl>` | 网关 ACL | VPP acl | ⚠️ 实测**不生效**（round117：绑定登记可见、但域内流量零评估——deny 规则下转发流量照走、计数恒 0；ACL 入向特性只在 `ip4-unicast` 弧，BD→BVI 的 IPv4 走 `l2-input-ip4` 弧且未启用。见 `docs/v2待做.md` R117-1） |
+| `set virtual-switches <n> gateway acl-in\|acl-out <acl>` | 网关 ACL | VPP acl | ⊘ **设计拒绝（decision #340）**：真机实证 VPP 26.06 不评估 BVI（网关）上的域内流量——既不拦截也不计数（round117 绑定登记可见但域内流量零评估；round118 复核），绑定给不出任何保护，故提交期硬拒。替代：`set virtual-switches <n> l3-interface <if> acl-in <acl>`（见下一行，已实证生效）。 |
 | `set virtual-switches <n> dhcp-relay server <ip>` | DHCP 中继（仅已 `set gateway ip` 的 L2 交换机可配；src 自动取 BVI 的 IPv4 网关地址，server 须在该转发域内可达） | VPP dhcp proxy | ✓（round113：配置/撤销/读视图/`vppctl show dhcp proxy` 对照 + pcap 转发签名实证；端到端租约因测试设备工具链受限未取得，见 `docs/evidence/v2-round113-*.txt`） |
 | `delete virtual-switches <n> dhcp-relay` | 撤销 DHCP 中继（`dhcp_proxy_config` IsAdd=false，幂等；随交换机删除一并撤） | VPP dhcp proxy | ✓（round113：撤销后 `show dhcp proxy` 清空、读视图同步；恢复重放存活经多次 VM/nfvis 重启实证） |
 | `set virtual-switches <n> learn-limit <n>` | MAC 学习条数上限（仅 L2；环路/广播风暴缓解，**非阻断**；1-16777216，超限拒绝） | VPP `bridge_domain_set_learn_limit` | ✓（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
@@ -319,7 +319,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-switches <n> ports [<seq>] container <ct> interface <vnic>` | 容器 memif 成员 | VPP + Docker | ✅ |
 | `set virtual-switches <n> cross-connect <a> <b>` | 两端口直通（与 ports/gateway 互斥） | VPP | ✅（决策 #79 修复：置 `cross_connect` 并校验两端口已声明） |
 | `set virtual-switches <n> l3-interface <if> ip address <p>` | L3 接口地址（v4/v6 多条） | VPP | ✅ |
-| `set virtual-switches <n> l3-interface <if> acl-in <acl>` | L3 接口 ACL 绑定 | VPP acl | ✅ |
+| `set virtual-switches <n> l3-interface <if> acl-in <acl>` | L3 接口 ACL 绑定 | VPP acl | ✅ 已实证生效（round118：vNIC/物理口作 L3 接口时 ACL 确实在拦；⚠️ 绑 ACL 的接口会丢弃未在白名单的非 IP 帧（含 ARP），对端须预置静态邻居，见决策 #340） |
 | `set virtual-switches <n> static-routes <prefix> next-hop <ip> [distance <n>]` | 静态路由（v4/v6） | VPP FIB | ✅ |
 | `set virtual-switches <n> static-routes default next-hop <ip>` | 默认路由 | VPP FIB | ✅ |
 
@@ -444,8 +444,9 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 247 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。决策 #335 的两条 dhcp-relay 命令于 round113、决策 #337 的两条 learn-limit 命令于 round115 真机实测，均移入本桶。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶；`request system storage format-data` 由决策 #305 落地（原 🚫 破坏性、契约已登记延期），按「破坏性但已验」移入本桶 |
+| ✅ 实测通过 | 246 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。决策 #335 的两条 dhcp-relay 命令于 round113、决策 #337 的两条 learn-limit 命令于 round115 真机实测，均移入本桶。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶；`request system storage format-data` 由决策 #305 落地（原 🚫 破坏性、契约已登记延期），按「破坏性但已验」移入本桶。**决策 #340 把 `gateway acl-in\|acl-out` 一行改判为「设计拒绝」，故本桶 247→246**（该行 round117 由 ✅ 改标 ⚠️ 时未同步本表，属既有陈旧漂移，本轮按增量口径一并订正） |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
+| ⊘ 设计拒绝（decision #340） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
 | 🚫 本轮未执行 | 15 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 5 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319。决策 #337 的 `set/delete virtual-switches <n> learn-limit …` 两条已入 fulltest 阶段 2、单测覆盖，真机复跑待执行；原 `set/delete virtual-switches <n> dhcp-relay …` 已于 round113 真机验证并移出本行（决策 #335）） |
 

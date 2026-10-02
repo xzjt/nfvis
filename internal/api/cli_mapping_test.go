@@ -26,6 +26,9 @@ var contractStatements = []string{
 	"set virtual-switches vs-a ports 1 interface ens224 trunk vlans 100,200",
 	"set virtual-switches vs-a gateway ip 192.168.100.1/24",
 	"set virtual-switches vs-a gateway vrf vr-a",
+	// 决策 #340：网关 ACL 已在**提交期**硬拒（真机实证 VPP 26.06 不评估 BVI 域内流量，绑定
+	// 给不出保护）；此处保留该语句是为守护**解析仍映射到模型**（对应 model.VSwitchPort/VSGateway
+	// 字段仅为解析兼容），从而保证被拒是一句清楚的校验错误、而非「未知语句」。生效形态见下一行。
 	"set virtual-switches vs-a gateway acl-in acl-a",
 	"set virtual-switches vs-l3 type l3",
 	"set virtual-switches vs-l3 l3-interface ens192 ip address 192.168.155.200/24",

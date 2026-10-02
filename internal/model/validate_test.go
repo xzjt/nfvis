@@ -149,6 +149,27 @@ func TestValidateReferences(t *testing.T) {
 	mustErrContaining(t, Validate(c6), "ingress_policy", "pol-ghost")
 }
 
+func TestValidateGatewayACLRejected(t *testing.T) {
+	// 决策 #340：网关上绑 ACL 在提交期硬拒（真机实证 VPP 26.06 不评估 BVI/网关上的域内流量，
+	// 既不拦截也不计数），文案须指向已实证生效的 L3 接口形态。
+	c := validBase()
+	c.VirtualSwitches[0].Gateway.AclIn = "acl-web"
+	mustErrContaining(t, Validate(c), "gateway.acl_in", "l3-interface")
+
+	c2 := validBase()
+	c2.VirtualSwitches[0].Gateway.AclOut = "acl-web"
+	mustErrContaining(t, Validate(c2), "gateway.acl_out", "l3-interface")
+
+	// 决策边界：L3 接口形态（L3Interface.AclIn）保持可用，不因本决策受影响。
+	c3 := validBase()
+	c3.Vrfs[0].L3Interfaces[0].AclIn = "acl-web"
+	mustNoErr(t, Validate(c3))
+
+	// 网关不设 ACL 时不报错（其余网关配置照常可用）。
+	c4 := validBase()
+	mustNoErr(t, Validate(c4))
+}
+
 func TestValidateFRConfig011Rules(t *testing.T) {
 	// ① vhost-user 必须 hugepage backing（FR-CFG-011①）
 	c := validBase()

@@ -490,8 +490,20 @@ func (v *validator) checkVirtualSwitches(c Config) {
 			if s.Gateway.Vrf != "" && !v.vrfNames[s.Gateway.Vrf] {
 				v.errf(p+".gateway.vrf", "VRF %q 不存在", s.Gateway.Vrf)
 			}
-			v.checkACLRef(p+".gateway.acl_in", s.Gateway.AclIn)
-			v.checkACLRef(p+".gateway.acl_out", s.Gateway.AclOut)
+			// 网关上绑 ACL 直接拒绝：真机实证 VPP 26.06 不评估 BVI（网关）上的域内流量——
+			// deny 规则在场时转发流量照走、计数恒 0，绑定给不出任何保护（既不拦也不计）。
+			// 与其留一个静默失效的保护手段（同管理口守卫先例），不如在提交期硬拒并指向已实证
+			// 生效的 L3 接口形态。模型字段保留仅为解析兼容（见规格书本条决策）。
+			if s.Gateway.AclIn != "" {
+				v.errf(p+".gateway.acl_in", "网关（BVI）上不支持 acl-in：VPP 26.06 不评估 BVI 上的域内流量，"+
+					"既不拦截也不计数（真机实证），绑定给不出任何保护。入向过滤请改用 L3 接口形态："+
+					"set virtual-switches %s l3-interface <ifname> acl-in <acl>（该形态已实测生效）", s.Name)
+			}
+			if s.Gateway.AclOut != "" {
+				v.errf(p+".gateway.acl_out", "网关（BVI）上不支持 acl-out：VPP 26.06 不评估 BVI 上的域内流量，"+
+					"既不拦截也不计数（真机实证），绑定给不出任何保护。入向过滤请改用 L3 接口形态："+
+					"set virtual-switches %s l3-interface <ifname> acl-in <acl>（该形态已实测生效）", s.Name)
+			}
 		}
 		// 决策 #335：DHCP 中继只挂在「有 BVI 网关」的交换机域上——中继源地址自动取 BVI 的
 		// IPv4 网关地址，rx 域就是该网关的转发域。type=l3 交换机没有 BVI（L2 专属校验也拦下
