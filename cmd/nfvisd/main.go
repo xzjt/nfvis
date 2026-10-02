@@ -108,13 +108,14 @@ func run() error {
 		return nil
 	}
 
-	// R88-1 / 决策 #347：大页池 sysctl 片段（作用于**当前内核默认尺寸池**的声明值）。
+	// R88-1 / 决策 #347：大页池 sysctl 片段（作用于**即将生效的内核基线默认尺寸池**的声明值）。
 	// 安装期脚本用它写 /etc/sysctl.d/90-nfvis-hugepages.conf，与运行期 Apply/启动补写共用
-	// 同一生成器。判据取自当前 /proc/cmdline 的 default_hugepagesz（而非新基线的 2M）——
-	// apply 后尚未重启时作用对象仍是旧默认尺寸池；取不到时生成器返回空，脚本据此不动该文件。
+	// 同一生成器。默认尺寸判据取即将生效的基线（优先产品写的 GRUB 片段、回退当前 cmdline）
+	// ——apply 后重启前运行 cmdline 仍是旧基线，按它取会写错池（真机 round127）；取不到时
+	// 生成器返回空，脚本据此不动该文件。
 	if *printHPSysctl {
 		d := system.KernelDesired{
-			DefaultHugepageSize: system.CurrentDefaultHugepageSize(""),
+			DefaultHugepageSize: system.EffectiveDefaultHugepageSize(""),
 			Hugepages1G:         *hp1g,
 			Hugepages2M:         *hp2m,
 		}
@@ -524,8 +525,8 @@ func run() error {
 		log.Warn("大页池 sysctl 钉值未完成", "err", err)
 	} else if changed {
 		log.Info("已按内核基线声明写入大页池 sysctl 片段（/etc/sysctl.d/90-nfvis-hugepages.conf，下次开机生效）")
-	} else if system.CurrentDefaultHugepageSize("") == "" {
-		// 决策 #347：取不到当前内核默认大页尺寸时保守不动该文件（不写不删），如实提示。
+	} else if system.EffectiveDefaultHugepageSize("") == "" {
+		// 决策 #347：取不到（即将生效基线的）默认大页尺寸时保守不动该文件（不写不删），如实提示。
 		log.Warn("未取到内核默认大页尺寸（default_hugepagesz），大页池 sysctl 片段保守未动")
 	}
 

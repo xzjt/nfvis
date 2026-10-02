@@ -153,7 +153,12 @@ apply() {
     SYSCTL="/etc/sysctl.d/90-nfvis-hugepages.conf"
     # 决策 #347：vm.nr_hugepages 作用于**当前内核默认尺寸池**（cmdline 的 default_hugepagesz）。
     # 取不到默认尺寸时保守不动（不写不删）——不猜，也不把某尺寸的声明值喂给未知的池。
-    DEFSZ=$(grep -oE 'default_hugepagesz=[0-9]+[MG]' /proc/cmdline 2>/dev/null | head -1 | cut -d= -f2 || true)
+    # 优先取**即将生效**的基线（刚写入的 GRUB 片段），回退当前运行 cmdline——
+    # apply 后重启前运行 cmdline 仍是旧基线，按它取会把值钉给错的默认尺寸池（真机 round127）。
+    DEFSZ=$(grep -oE 'default_hugepagesz=[0-9]+[MG]' "$FRAG" 2>/dev/null | head -1 | cut -d= -f2 || true)
+    if [ -z "$DEFSZ" ]; then
+        DEFSZ=$(grep -oE 'default_hugepagesz=[0-9]+[MG]' /proc/cmdline 2>/dev/null | head -1 | cut -d= -f2 || true)
+    fi
     if [ -z "$DEFSZ" ]; then
         log "未取到内核默认大页尺寸（default_hugepagesz），保守不动大页池 sysctl 片段：$SYSCTL"
     else

@@ -229,3 +229,60 @@ func TestEnsureHugepageSysctlFromCmdlineUnknownDefaultNoTouch(t *testing.T) {
 		t.Fatalf("既有片段不应被改写: %q", b)
 	}
 }
+
+// 决策 #347：默认尺寸判据取**即将生效的内核基线**——优先产品写的 GRUB 片段，回退当前 cmdline。
+func TestEffectiveDefaultHugepageSize(t *testing.T) {
+	// 片段存在且含 default_hugepagesz：以片段为准（apply 后重启前的关键形态：片段=2M、cmdline=1G）
+	root := t.TempDir()
+	writeProc(t, root, grubFragmentRel, "GRUB_CMDLINE_LINUX=\"${GRUB_CMDLINE_LINUX} default_hugepagesz=2M hugepagesz=2M hugepages=768 hugepagesz=1G hugepages=2\"\n")
+	writeProc(t, root, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro default_hugepagesz=1G hugepagesz=1G hugepages=2 hugepagesz=2M hugepages=768\n")
+	if got := EffectiveDefaultHugepageSize(root); got != "2M" {
+		t.Fatalf("有片段时应以片段为准（2M），实际 %q", got)
+	}
+	// 片段 default=1G、cmdline=2M：仍以片段为准
+	writeProc(t, root, grubFragmentRel, "GRUB_CMDLINE_LINUX=\"${GRUB_CMDLINE_LINUX} default_hugepagesz=1G hugepagesz=1G hugepages=2\"\n")
+	if got := EffectiveDefaultHugepageSize(root); got != "1G" {
+		t.Fatalf("有片段时应以片段为准（1G），实际 %q", got)
+	}
+	// 片段不存在：回退 cmdline
+	root2 := t.TempDir()
+	writeProc(t, root2, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro default_hugepagesz=1G hugepagesz=1G hugepages=4\n")
+	if got := EffectiveDefaultHugepageSize(root2); got != "1G" {
+		t.Fatalf("无片段时应回退 cmdline（1G），实际 %q", got)
+	}
+	// 片段存在但不含 default_hugepagesz：回退 cmdline
+	writeProc(t, root2, grubFragmentRel, "GRUB_TIMEOUT=5\n")
+	if got := EffectiveDefaultHugepageSize(root2); got != "1G" {
+		t.Fatalf("片段无 default 时应回退 cmdline（1G），实际 %q", got)
+	}
+	// 两者都取不到：空
+	root3 := t.TempDir()
+	writeProc(t, root3, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro quiet\n")
+	if got := EffectiveDefaultHugepageSize(root3); got != "" {
+		t.Fatalf("都取不到应为空，实际 %q", got)
+	}
+}
+
+// 决策 #347 关键回归（真机 round127 事故形态）：GRUB 片段（即将生效的新基线）=default 2M，
+// 而当前运行 cmdline=default 1G 时，须按 **2M 池**的声明值钉——不能按运行 cmdline 的 1G 池取值
+// （后者会把旧尺寸池的值写到重启后已是 2M 的默认尺寸池上，把 2M 池收小、VPP 起不来）。
+func TestEnsureHugepageSysctlFromCmdlinePrefersGrubFragment(t *testing.T) {
+	root := t.TempDir()
+	writeProc(t, root, grubFragmentRel, "GRUB_CMDLINE_LINUX=\"${GRUB_CMDLINE_LINUX} default_hugepagesz=2M hugepagesz=2M hugepages=768 hugepagesz=1G hugepages=2\"\n")
+	writeProc(t, root, "/proc/cmdline", "BOOT_IMAGE=/vmlinuz ro default_hugepagesz=1G hugepagesz=1G hugepages=2 hugepagesz=2M hugepages=768\n")
+
+	changed, err := EnsureHugepageSysctlFromCmdline(root)
+	if err != nil || !changed {
+		t.Fatalf("应写入（changed=%v err=%v）", changed, err)
+	}
+	b, err := os.ReadFile(root + hugepageSysctlRel)
+	if err != nil {
+		t.Fatalf("读取 sysctl 片段: %v", err)
+	}
+	if !strings.Contains(string(b), "vm.nr_hugepages = 768") {
+		t.Fatalf("应按即将生效基线（default 2M）钉 2M 池声明值 768：%q", b)
+	}
+	if strings.Contains(string(b), "vm.nr_hugepages = 2\n") {
+		t.Fatalf("不得按当前运行 cmdline 的 1G 池声明值 2 钉（池身份错位）：%q", b)
+	}
+}

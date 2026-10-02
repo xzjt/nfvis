@@ -210,12 +210,15 @@ func GenerateHugepageSysctl(d KernelDesired) string {
 }
 
 // ensureHugepageSysctl 落盘大页池 sysctl 片段（幂等；该尺寸池有声明则写、未声明则删）。
-// 决策 #347：`vm.nr_hugepages` 作用于**当前内核默认尺寸池**（cmdline 的 default_hugepagesz），
-// 而非新基线的 2M——apply 之后尚未重启，作用对象仍是旧默认尺寸池。取不到默认尺寸时
-// **保守不动**该文件（不写不删），绝不猜。
+// 决策 #347：`vm.nr_hugepages` 作用于**默认尺寸池**，故判据取**即将生效的内核基线**的
+// `default_hugepagesz`（优先产品写的 GRUB 片段、回退当前 cmdline）——**不是**当前运行 cmdline：
+// apply 之后重启之前，运行 cmdline 仍是旧基线（default 1G），而 GRUB 片段已是新基线（default 2M），
+// 若按运行 cmdline 取，会在重启前写下旧尺寸池的值，重启后同一行落到新池上（池身份错位）。
+// 真机 round127 实测：新基线 apply 后重启，90 号文件里的 `vm.nr_hugepages=2`（旧 1G 池声明值）
+// 落到已为 2M 的默认尺寸池上，2M 池被收成 2 页、VPP 起不来。取不到默认尺寸时**保守不动**该文件。
 func (a *BaselineApplier) ensureHugepageSysctl(d KernelDesired) error {
 	p := a.path(hugepageSysctlRel)
-	d.DefaultHugepageSize = CurrentDefaultHugepageSize(a.Root)
+	d.DefaultHugepageSize = EffectiveDefaultHugepageSize(a.Root)
 	if d.DefaultHugepageSize == "" {
 		return nil // 默认尺寸未知：保守不动（不写不删）
 	}
@@ -286,7 +289,7 @@ func (a *BaselineApplier) stripLegacyGrubParams() error {
 var legacyParamRe = regexp.MustCompile(` ?(default_hugepagesz|hugepagesz|hugepages|isolcpus|nohz_full|rcu_nocbs|irqaffinity|nmi_watchdog|transparent_hugepage|iommu|intel_iommu|amd_iommu|intel_pstate|amd_pstate)=[^ "]*`)
 
 // CurrentDefaultHugepageSize 读 root 前缀下 /proc/cmdline 的 `default_hugepagesz`（"1G"/"2M"），
-// 取不到返回 ""（未知）。供大页池 sysctl 钉值判据与安装器打印路径共用（决策 #347）。
+// 取不到返回 ""（未知）。即**当前运行内核**的默认大页尺寸。
 func CurrentDefaultHugepageSize(root string) string {
 	b, err := os.ReadFile(join(root, "/proc/cmdline"))
 	if err != nil {
@@ -295,23 +298,48 @@ func CurrentDefaultHugepageSize(root string) string {
 	return DefaultHugepageSizeFromCmdline(strings.Fields(string(b)))
 }
 
-// EnsureHugepageSysctlFromCmdline 按**当前内核基线声明**（/proc/cmdline）落盘大页池
-// sysctl 片段，返回是否发生了变更。
+// effectiveBaselineArgs 返回**即将生效的内核基线**参数：优先产品写下的 GRUB 片段
+// （`request system kernel apply` / 安装器写的 `/etc/default/grub.d/99-nfvis.cfg`，重启后生效），
+// 其次当前 `/proc/cmdline`；片段存在但取不到 `default_hugepagesz` 时也回退 cmdline；
+// 两者都读不到返回 nil（调用方据此保守不动）。
+//
+// 为何优先片段（决策 #347，真机 round127）：`vm.nr_hugepages` 作用于**默认尺寸池**，而该尺寸在
+// apply 后重启前已变（GRUB 新基线 default 2M，运行 cmdline 仍是 1G）——按 cmdline 取会写错池。
+// 片段文本按引号拆分以剥离 `GRUB_CMDLINE_LINUX="…"` 的引号。
+func effectiveBaselineArgs(root string) []string {
+	if b, err := os.ReadFile(join(root, grubFragmentRel)); err == nil {
+		fs := strings.Fields(strings.ReplaceAll(string(b), `"`, " "))
+		if DefaultHugepageSizeFromCmdline(fs) != "" {
+			return fs
+		}
+	}
+	b, err := os.ReadFile(join(root, "/proc/cmdline"))
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(b))
+}
+
+// EffectiveDefaultHugepageSize 返回**即将生效的内核基线**的默认大页尺寸（"1G"/"2M"）：
+// 优先产品写的 GRUB 片段，回退当前 /proc/cmdline；两者都取不到返回 ""（未知）。
+// 大页池 sysctl 钉值判据与安装器打印路径共用（决策 #347）。
+func EffectiveDefaultHugepageSize(root string) string {
+	return DefaultHugepageSizeFromCmdline(effectiveBaselineArgs(root))
+}
+
+// EnsureHugepageSysctlFromCmdline 按**即将生效的内核基线声明**落盘大页池 sysctl 片段，
+// 返回是否发生了变更。
 //
 // 启动时调用（nfvisd 单源保证，与决策 #182 的 AppArmor 放行同一思路）：安装期由
 // postinst → nfvis-baseline.sh 直接写 GRUB 片段，不经过 BaselineApplier.Apply，因此
-// 只靠 Apply 挂 sysctl 会漏掉「首装即被 80-vpp.conf 撑大」这条路径。cmdline 是那次
-// 基线真正生效的声明值，正是要钉住的数。
+// 只靠 Apply 挂 sysctl 会漏掉「首装即被 80-vpp.conf 撑大」这条路径。
 //
-// 决策 #347：`vm.nr_hugepages` 作用于 cmdline 里 `default_hugepagesz` 决定的**默认尺寸池**
-// ——旧基线（default 1G）钉 1G 池、新基线（default 2M）钉 2M 池；取不到默认尺寸时**保守不动**
-// 该文件（不写不删），不猜。
+// 决策 #347：`vm.nr_hugepages` 作用于**默认尺寸池**，判据取即将生效基线的 `default_hugepagesz`
+// 与该尺寸池的声明值（优先产品写的 GRUB 片段、回退当前 cmdline）——**不是**当前运行 cmdline：
+// apply 后重启前运行 cmdline 仍是旧基线，按它取会在重启前写下旧尺寸池的值、重启后落到新池上
+// （池身份错位，真机 round127 实测）。取不到默认尺寸时**保守不动**该文件。
 func EnsureHugepageSysctlFromCmdline(root string) (bool, error) {
-	raw, err := os.ReadFile(join(root, "/proc/cmdline"))
-	if err != nil {
-		return false, err
-	}
-	args := strings.Fields(string(raw))
+	args := effectiveBaselineArgs(root)
 	size := DefaultHugepageSizeFromCmdline(args)
 	if size == "" {
 		return false, nil // 默认尺寸未知：保守不动该文件（不写不删）

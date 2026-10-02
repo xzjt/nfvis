@@ -717,13 +717,15 @@ nfvis$ show system kernel                      # 三方对照（cmdline / 运行
 ```
 
 > **大页默认尺寸与钉值**：内核启动基线的默认大页尺寸 `default_hugepagesz` **恒为 2M**（数据面/
-> VPP 的默认尺寸），不随池声明变化——VPP 的 main heap 只认内核默认尺寸（实测，VPP 自己的 memory
-> 配置键管不了它），默认为 1G 时它会占掉一个 1G 页，使 1G 池给 VNF 的页数少一个（第二个 VNF 起不来）；
-> 恒 2M 后 VPP 的 main heap 改从 2M 池取页，1G 池只给 VNF。池一律以 `hugepagesz=<size> hugepages=N`
-> 显式声明（2M 给 VPP、1G 给 VNF）。写入内核基线时，产品同时维护 `/etc/sysctl.d/90-nfvis-hugepages.conf`，
-> 把 `vm.nr_hugepages` 钉为**当前内核基线默认尺寸池**的声明值——钉哪个尺寸的池**跟随内核启动参数里的
-> 默认大页尺寸**（而非写死 2M），保证改基线（`request system kernel apply`）后**尚未重启**的过渡期
-> 不会把某尺寸的页数喂给另一尺寸的池；取不到默认大页尺寸时保守不动该文件。
+> VPP 的默认尺寸），不随池声明变化；池一律以 `hugepagesz=<size> hugepages=N` 显式声明（2M 给 VPP、
+> 1G 给 VNF）。⚠️ **1G 池的可用页数**：数据面（VPP）的 main heap **偏好最大可用页尺寸、实测始终占
+> 1 个 1G 页**，且 VPP 自己的 `default-hugepage-size`/`main-heap-page-size` 与内核 `default_hugepagesz`
+> **都改不了它**（三组对照 + 新基线重启后复测）；因此 **1G 池声明 N 页时，VNF 实际可用 N−1 页**
+> （第 N 台及以后的 VNF 会因 `Cannot allocate memory` 起不来）——规划 1G 池时请把这一页算进去。
+> 写入内核基线时，产品同时维护 `/etc/sysctl.d/90-nfvis-hugepages.conf`，把 `vm.nr_hugepages` 钉为
+> **即将生效的默认尺寸池**的声明值——判据优先取产品写下的 GRUB 片段（`request system kernel apply`
+> 后即将生效），回退当前内核启动参数；两者都取不到时保守不动该文件。这样**改基线后尚未重启**的过渡期
+> 不会把某尺寸的页数喂给另一尺寸的池（否则重启后会把该尺寸池收小、数据面起不来）。
 > 原因：VPP 的 deb 自带 `/etc/sysctl.d/80-vpp.conf`（`vm.nr_hugepages=1024`，注释写明是给 **2M**
 > 池留的），而该 sysctl 只作用于**默认尺寸**池——历史上产品默认为 1G 时它会落到 **1G** 池上，开机
 > 时按可用内存尽量分配，使 1G 池**大于**声明值（实测：声明 1 页、实际 3 页，`show system kernel`
