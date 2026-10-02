@@ -427,13 +427,18 @@
   **每次开机后 VM 编排需人工 `systemctl restart nfvis`**（VNF/数据面本身不受影响；候选修法登记在
   `docs/v2待做.md`）。证据 `docs/evidence/v2-round129-startup-hang-rootcause.txt`、
   `v2-round129-d349-bounded-startup.txt`、`v2-round129-d348-reboot-verified.txt`。
-- **round130（#350 撤回 + R129-2 窗口测量，2026-10-03）**：R129-2 的第一案（#350 启动期 libvirt 重试 3×10s）
-  实现与降级路径回归都成立，但**重启测试未达**——三次开机实测 libvirt 可服务窗口 ≈ **65s / >32s / ≈90s**
+- **round130（#350 撤回 + #351 交付收口 R129-2，2026-10-03）**：① R129-2 第一案（#350 启动期 libvirt 重试
+  3×10s）实现与降级路径回归都成立，但**重启测试未达**——三次开机实测 libvirt 可服务窗口 ≈ **65s / >32s / ≈90s**
   （libvirtd「Started」后要先完成 autostart 等驱动初始化才服务握手），固定启动期重试被 TimeoutStartSec（90s）
-  顶死；加次数会把启动超时循环风险重新引入 ⇒ 按「不留假功能」撤回（PR #280 不合并，决策号保留、
-  实现留在分支）。**根治路线（待立项 #351，取舍留契约审查）**：READY 不被 libvirt 阻塞 + 启动后异步接入
-  （后台有界重试 + Provider 动态换装，`COMPUTE_UNAVAILABLE` 随接入成功消解），或运行期巡检自动重连；
-  Docker 是否同治一并定。测量与算术见 `docs/evidence/v2-round130-r350-retracted-window-measured.txt`。
+  顶死 ⇒ 按「不留假功能」撤回（PR #280 不合并，决策号保留）。② **#351（PR #281）落地**：启动序列不再同步等
+  libvirt 到降级为止——快路径失败后由**后台接入循环**（30s 节奏 × 10s 有界、重试静默）兜底，接入成功即
+  **原子换装**（动态持有层转发 ComputeProvider 9 法 + StartVMChecked/Console/快照 4 法、ContainerProvider 9 法；
+  未接入语义表逐法对齐今天 nil/Noop 行为）+ INFO 日志 + 消解告警 + 补跑 EnsureConsistent；**重启测试零人工
+  干预闭环**（boot 后 ~2min 内「计算编排已接入（后台）」、告警自动消解、sem-vm running 可见、VM 动作可用），
+  快路径逐字同序、降级文案逐字一致。**如实边界**：REST 降级态生命周期错误状态码 503→5xx（文本对齐）、
+  REST PUT VM 降级态由「跳过运行态检查」变 503（更安全）、console 失败时点后移；接入成功后连接中断的
+  自动重连不在范围（残余边界如实登记）。证据 `v2-round130-r350-retracted-window-measured.txt`、
+  `v2-round130-d351-async-connect.txt`。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
