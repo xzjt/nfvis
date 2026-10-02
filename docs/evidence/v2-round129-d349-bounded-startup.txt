@@ -1,0 +1,69 @@
+NFViS v2 真机验证记录 round129 —— 决策 #349（底座组件无响应时 nfvisd 启动有界降级，修 R129-1）
+====================================================================
+日期：2026-10-03；环境：nfvis-vm；构建：2.0.0~dev43（本分支源码 /root/src git archive 同步 +
+SOURCE_DATE_EPOCH 构建 + dpkg -i）；前置：round129 诊断（`v2-round129-startup-hang-rootcause.txt`）
+已完成环境恢复（vpp/libvirtd/nfvis 全 active）。
+
+§0 结论
+四步真机验证全部通过：**底座假死/未起时 nfvisd 在上界内放弃并降级（不再拖死整机启动），
+降级以 COMPUTE_UNAVAILABLE / CONTAINER_UNAVAILABLE 告警如实呈现；底座健康时行为与修复前
+完全一致**。PR #279。
+
+§1 验证 ① —— libvirt「accept 后零应答」假死现场（对齐 round129 故障签名）
+- 造现场：`systemctl stop libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket`
+  （⚠️ 必须连三个 socket 单元一起停——首次只停 service 时 nfvisd 一连就被 socket-activation
+  按需拉起 libvirtd，打不出降级路径）+ `nc -lU /run/libvirt/libvirt-sock`（accept 后零应答，
+  与真机 round129 的 libvirtd 假死同签名）。
+- `systemctl restart nfvis`：**elapsed=11s 到 active**（10s libvirt 上界 + ~1s）——修复前此现场
+  为 90s systemd 超时 → SIGTERM → restart 无限循环。
+- journal（19:15:13，PID 7064）：
+  `WARN 计算编排未接入（libvirt 连接失败），VM 生命周期不可用 err="连接 libvirt qemu:///system
+  超时：libvirt 可能未就绪、假死或过载。请查底座实况：systemctl status libvirtd、journalctl -u
+  libvirtd、virsh -c qemu:///system list；底座恢复后 systemctl restart nfvis 即恢复接入（context
+  deadline exceeded）"`
+- 告警面板 `GET /alarms`：**`COMPUTE_UNAVAILABLE`**（warning、scope compute、source libvirt、
+  state active），文案含手查路径、恢复路径、「当前产品不自动重连」的如实边界。
+
+§2 验证 ② —— 底座恢复后：告警保持（不自动重连的既定边界）+ 动作如实不可用
+- `systemctl start` 四个 libvirt 单元 → `virsh -c qemu:///system list` 秒回（底座已恢复）；
+  不重启 nfvis。
+- **`COMPUTE_UNAVAILABLE` 保持 active**（不自动消解——产品不自动重连，如实呈现，与契约一致）。
+- `request virtual-machine-functions sem-vm stop` → `%% 计算编排未接入（libvirt 未装配），
+  运行态不可用`（生命周期动作如实拒绝）；`show virtual-machine-functions` → State 列「-」
+  （运行态如实取不到）。
+- 观察项：本次 libvirtd 启动**正常自启了 sem-vm**（running、virsh 秒回）——round129 的开机
+  假死不是每次 libvirtd 启动都复现（当时是开机场景）；「重启测试时是否复现」仍是 #348 重验
+  的第一观察项。
+
+§3 验证 ③ —— 健康底座回归：成功路径零变化
+- libvirt 健康时 `systemctl restart nfvis`：**elapsed=1s 到 active**，journal「计算编排已接入」
+  「容器编排已接入」「nfvisd 就绪」「已连接 VPP」；告警面板**无** COMPUTE_UNAVAILABLE /
+  CONTAINER_UNAVAILABLE（仅既有的 HUGEPAGE_POOL_ORPHAN——#346 登记的独立事项）。
+- `show virtual-machine-functions` → sem-vm **running**（成功路径运行态照常）。
+
+§4 验证 ④ —— Docker 同款对照
+- `systemctl stop docker.service docker.socket` → `systemctl restart nfvis`：
+  **elapsed=0s 到 active**（dial refused 即时有界失败）、
+  `WARN 容器编排未接入（Docker 连接失败）… dial unix /var/run/docker.sock: connect: connection
+  refused`、告警面板 **`CONTAINER_UNAVAILABLE`**（warning、scope container、source docker）。
+- 恢复：`systemctl start docker.socket docker.service` → `systemctl restart nfvis` → 两个编排
+  均接入、无降级告警。收尾状态：nfvis/vpp/libvirtd/docker 全 active。
+
+§5 测试与门禁
+- 新增单测（本机 Windows 全绿，`-count=1` 与计时敏感两条 ×5 复跑均绿）：
+  `TestConnectBoundedTimeoutOnSilentServer`（TCP 假服务 accept 后零应答 → 300ms 上界附近返回、
+  错误包装 ctx 超时）、`TestConnectBoundedNoGoroutineLeak`（返回后 goroutine 数回落基线——
+  泄漏守护）、`TestConnectBoundedDialFailure`、`TestLibvirtSocketPath`、`TestLibvirtTransport`；
+  `TestComputeUnavailableAlarm` / `TestComputeUnavailableAlarmNilErr` / `TestContainerUnavailableAlarm`
+  （scope/severity/code/source 四要素 + 文案要素 + **不含内部编号**双向断言）。
+- `make check` 全绿（决策条数 250、openapi 同步、套件—契约同步、覆盖率门禁、archtest/user_text 全过）。
+- 如实登记：`-race` 本机不可跑（无 gcc/cgo）；数据安全按 happens-before 论证（lv 仅在收到
+  errCh 值后读取），make check 不用 -race，不受影响。
+
+§6 未验项 / 后续
+- 「libvirtd 挂起在握手中」的单测以 TCP 假服务仿真（unix 形态产品入口共用同一 connectBounded）；
+  真 unix + 真 libvirtd 的完整成功路径由既有集成覆盖（conn_libvirt.go 在 COVER_EXCLUDE）。
+- #348 重验（PR #278 重基于本决策后）：重启测试三观察项（VPP 自启 / nfvis active / 开机
+  libvirtd 假死是否复现）。
+- 告警文案中「原因」段（底层错误的文字）已含一遍手查路径，与告警文案自身的路径有少量重复——
+  可读性可再打磨，不构成缺陷。
