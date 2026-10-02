@@ -35,5 +35,23 @@ NFViS v2 真机验证记录 round119 —— 决策 #340（网关 ACL 绑定提�
 - R117-2（删除倒序链）与 R117-3 的**根治**（macip 白名单自动放行 ARP）仍为后续项；本轮只做了
   R117-1 的处置与 R117-3 的文档如实化。
 
+§5 追加（同日，端口级绑定的补验与扩展处置，PR #267 + dev30）
+- **机制对照（vppctl，不经产品）**：在成员 vhost 口上直绑同一 deny ACL
+  （`set acl-plugin interface vh-p-vm-nic0 input 0`）——**同样不拦**（pcap 10.77 包数 3 → 3）、
+  插件 err 计数全 0 ⇒ **端口级与网关/BVI 同机制不生效**（VPP 26.06 不评估 L2 路径上的 ACL）。
+- **契约事实**：命令树**本无** `set virtual-switches <n> ports <seq> acl-in <acl>` 语句（实测
+  `未知命令`）；该字段只经 REST 可达（`PUT /virtual-switches/{name}/ports` 全量替换静态 ports）。
+- **处置（#340 扩展，dev30 真机验证）**：`VSwitchPort.AclIn/AclOut` 非空**提交期直接拒绝**，文案与网关
+  同口径（原因 + 替代 L3 接口形态）。真机验证（经 REST 写 `ports[].acl_in` 后同会话提交）：
+  `{"code":"VALIDATION_FAILED","detail":[{"path":"virtual-switches[p2-vs].ports[1].acl_in","message":
+  "交换机端口上不支持 acl-in：VPP 26.06 不评估 L2 路径（成员端口）上的 ACL，既不拦截也不计数（真机实证）…
+   入向过滤请改用 L3 接口形态：set virtual-switches p2-vs l3-interface <ifname> acl-in <acl>（该形态已实测生效）"}]}`
+  ✓ 路径精确、文案含原因与替代。
+- 顺带印证：**会话锁语义**（#317/#318）——REST 会话的脏候选持有编辑锁，CLI 新会话的 `commit` 被
+  正确拒绝（`%% candidate 会话锁被占用: 由 admin@api 持有`）；清候选须在原会话内做完。
+- 新登记 **R119-1**（低，契约一致性）：端口级 acl 字段「模型 + openapi + 编排（`l2.go` 的 Bind）都有、
+  命令树没语句」；将来若底座支持该形态，须**先补树叶子（契约先行）**再启用（见 `docs/v2待做.md` 二.29）。
+- 现场终态：rev 959（候选清空 rev 958 → 对象删除 rev 959）；无残留、无 active 告警。
+
 §4 现场终态
 - 版本 2.0.0~dev29；无残留对象/无 active 告警；最终 rev 954（+ 一次数据面重启清残）。
