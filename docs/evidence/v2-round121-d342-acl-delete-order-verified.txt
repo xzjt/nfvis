@@ -1,0 +1,32 @@
+NFViS v2 真机验证记录 round121 —— 决策 #342（ACL 解绑容忍「接口已不存在」+ 删除计划先解引用）真机复验
+====================================================================
+日期：2026-10-02；环境：nfvis-vm，2.0.0~dev31 → **dev32**；代码：PR #269（squash 合入、CI 双跑全绿）。
+
+§1 修复内容（PR #269）
+- `internal/orchestrator/network/acl.go`：解绑路径遇「目标接口已不存在」（VPP `Invalid sw_if_index (-2)`）
+  按**已达成**处理——复用既有 `isMissingIfaceErr`（补 `retval=-2` 精确后缀）、记日志、清 `bound/macipBound`
+  登记、返回 nil 不打断删除；**其它错误仍如实上抛**。覆盖三处（子智能体核实后指明真实触发点）：
+  **`DeleteACL` 的重绑循环**（真机报错的来源）、`BindIndex` 空绑定分支（实际不可达，一并加固）、
+  macip 解绑（-2 并入既有容忍集）。
+- `internal/orchestrator/apply.go`：删除计划把 **ACL 提到最前**（先解引用、后删被引用，与 #196 口径一致）——
+  原顺序「bd/vrf → span/qos → **acl**」正是「被引用者先删」；注释同步。
+
+§2 真机复验（dev32，✓ 两个此前必失败的形态）
+- **形态①（同提交删「L3 交换机 + 其 ACL」）**：建 `t-vs`（type l3）+ `l3-interface ens224 … acl-in t-acl`
+  （rev 972）→ 一次提交同删两者 → **`commit 成功 (revision 973)`**、无 `%%`、无补偿回滚
+  （修复前：`del-acl: 解绑接口 N 的 ACL: Invalid sw_if_index (-2)` + 整次回滚）。
+- **形态②（先删 `l3-interface` 再删 ACL，round120 的新变体）**：建 `t2-*` 场景（rev 974，VPP 侧
+  `sw_if_index 2: input acl(s): 0` 绑定可见）→ 先删 `l3-interface ens224`（rev 975）→ 再同提交删
+  「交换机 + ACL」（rev 976）→ **两次提交都成功、无需 `systemctl restart nfvis`**
+  （修复前：删 ACL 撞 `-2`、须重启 nfvisd 清进程内登记才能删）。
+- 结束后出现的 `COMMIT_VRF_DELETE_DEFERRED`（warning）+`VRF_TABLE_LEFTOVER`（warning）是**既有的删表延后
+  行为**（#192：VPP 不释放被 NAT 引用过的表，产品文案本就指引 `request vpp restart`）——按指引重启数据面后
+  **两条告警自动消解**、配置无 `t-*`/`t2-*` 残留、`vppctl show acl-plugin acl` 空 ✓（与 #342 无关，如实区分）。
+
+§3 测试与回归
+- 新增 4 例容错单测（解绑 -2 → nil+清登记；其它错误上抛；macip 解绑 -2 → nil；`DeleteACL` -2 容忍且 ACL
+  仍删除）；`TestApplyRemovalsAfterAdds` 的顺序断言随修复反转（全仓仅此一处断言旧序）；`make check` RC=0。
+- **正常路径不回归**：绑定（`input acl(s)` 可见）/macip 伴随/恢复重放均未动（round120 的实证仍适用）。
+
+§4 现场终态
+- 版本 2.0.0~dev32；无残留对象/无 active 告警；最终 rev 976（+ 一次 `request vpp restart` 清删表残留）。
