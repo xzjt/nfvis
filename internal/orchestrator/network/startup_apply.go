@@ -140,7 +140,7 @@ type Starter interface {
 	Start(ctx context.Context) error
 }
 
-// systemctlStarter 经 systemctl 启动 VPP（决策 #348：VPP 有意不自启，由 nfvisd 启动时确保运行）。
+// systemctlStarter 经 systemctl 发起启动 VPP（决策 #348：VPP 有意不自启，由 nfvisd 启动时确保运行）。
 // 与 systemctlRestarter 同一调用方式（同一个 systemctl 二进制的 start 动作），不另造拉起路径。
 type systemctlStarter struct{ Unit string }
 
@@ -152,9 +152,16 @@ func (s systemctlStarter) Start(ctx context.Context) error {
 	if unit == "" {
 		unit = "vpp"
 	}
-	cmd := exec.CommandContext(ctx, "systemctl", "start", unit)
+	cmd := exec.CommandContext(ctx, "systemctl", systemctlStartArgs(unit)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl start %s: %v: %s", unit, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("systemctl start --no-block %s: %v: %s", unit, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// systemctlStartArgs 发起启动 VPP 的参数：--no-block 让 systemctl **提交启动 job 后立即返回**、
+// 不等 job 完成——nfvisd 的启动序列绝不能被 VPP 拉起阻塞（决策 #348）。数据面就绪由连接管理器的
+// 连接重试循环承担（VPP 起来后自然连上并进入恢复收敛），而非在启动路径上等待。
+func systemctlStartArgs(unit string) []string {
+	return []string{"start", "--no-block", unit}
 }

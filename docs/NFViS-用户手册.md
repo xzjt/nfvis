@@ -900,9 +900,10 @@ nfvis$ show interfaces physical                                # ③ 核对两�
 > committed 配置本身是持久的（config 声明与「口名→PCI」记录都在磁盘上），所以重启后
 > **不需要**重新声明，只需要②③两步。
 >
-> **数据面在 nfvisd 启动时自动恢复**：nfvisd 启动时会确保 VPP 运行——VPP 未在运行即由它拉起，
-> 并按 committed 配置重放已声明的网络配置（无需人工 `systemctl start vpp`；拉起失败会给出原因与
-> 自查路径并以告警如实报出）。但 **DPDK 口绑定不跨重启**，①逐口重绑仍要做。
+> **数据面在 nfvisd 启动时自动恢复**：nfvisd 启动时会确保 VPP 运行——VPP 未在运行即以**发起式**
+> 拉起（`systemctl start`，不等启动完成），就绪由连接重试自动接管、按 committed 配置重放已声明的
+> 网络配置（无需人工 `systemctl start vpp`；发起失败会给出原因与自查路径并以告警如实报出）。
+> nfvisd 自身的启动**不会**因数据面未就绪而卡住。但 **DPDK 口绑定不跨重启**，①逐口重绑仍要做。
 > **VNF/容器不会自动起**：只有声明了 `autostart true` 的负载才随系统自启；未声明的重启后为
 > 关机（VM）/停机（容器）态，需手工 `request virtual-machine-functions <名> start`（VM）或
 > `request container-functions <名> start`（容器）。

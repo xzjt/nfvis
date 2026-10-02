@@ -725,15 +725,14 @@ func run() error {
 		}
 	}()
 
-	// 决策 #348：nfvisd 启动时确保 VPP 运行（重启后数据面自动恢复）。只在此处（连接管理
-	// Run 之前）调用一次——VPP 已在运行则不做动作；未运行则拉起（systemctl start vpp）并有界
-	// 等待就绪；拉起失败/超时如实告警但**不阻塞启动**。拉起成功后仍走既有连接 + 恢复收敛
-	// 路径（本方法不短路连接）。VPP 未运行时的「数据面不可用」降级口径见决策 #314。
+	// 决策 #348：nfvisd 启动时确保 VPP 运行（重启后数据面自动恢复）。只在此处（连接管理 Run
+	// 之前）调用一次，且是**发起式、不等待**：VPP 已在运行则不做动作；未运行则发起拉起
+	// （systemctl start --no-block vpp）后立即返回，就绪由既有连接重试循环接管（不在这里等）。
+	// 发起失败如实告警但**不阻塞启动**；VPP 是否真的可用由连接状态体现（不谎称可用）。
+	// 注意：发起成功 ≠ 已在线，故这里**不消解**告警——VPP 连接成功时由 runRecovery 消解。
 	if err := vppMgr.EnsureRunning(ctx); err != nil {
-		log.Warn("启动时确保 VPP 运行未成功，数据面可能暂不可用", "err", err)
+		log.Warn("启动时发起确保 VPP 运行未成功，数据面可能暂不可用（就绪由连接重试循环接管）", "err", err)
 		vppAutostartAlarms(alarms, err)
-	} else {
-		vppAutostartAlarms(alarms, nil)
 	}
 	vppMgr.OnConnect(func(version string) { go runRecovery() })
 	go func() {
@@ -1719,16 +1718,16 @@ func (c *dpdkController) SetDPDKBound(ctx context.Context, ifname string, bound 
 
 // vppAutostartAlarms 把一次「启动时确保 VPP 运行」的结果落到告警表（决策 #348）。
 //
-// 与 #329/#346 同口径：失败（拉起失败或拉起后超时未就绪）→ Raise
+// 与 #329/#346 同口径：失败（未能发起拉起）→ Raise
 // VPP_AUTOSTART_FAILED（warning，scope "vpp_autostart"，source 为 vpp 单元）；
-// 成功（VPP 已在运行或已拉起就绪）→ Resolve 自动消解。err==nil 表示 VPP 已可用。
+// VPP 已在运行（err==nil）或恢复在线（runRecovery 调用）→ Resolve 自动消解。
 func vppAutostartAlarms(sink alarmSink, err error) {
 	if err == nil {
 		sink.Resolve("vpp_autostart", network.AlarmVPPAutostartFailed, "vpp")
 		return
 	}
 	sink.Raise("vpp_autostart", network.SeverityWarning, network.AlarmVPPAutostartFailed,
-		"nfvisd 启动时未能确保 VPP 运行（拉起失败或超时未就绪）："+err.Error()+
+		"nfvisd 启动时未能发起拉起 VPP："+err.Error()+
 			"。数据面当前不可用；处置：systemctl status vpp / journalctl -u vpp 查因，"+
 			"或手工 systemctl start vpp，随后 show vpp 确认连接（VPP 恢复在线后本告警自动消解）",
 		"vpp")

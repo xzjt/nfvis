@@ -27,11 +27,12 @@ const (
 	defaultInterval    = 500 * time.Millisecond
 	defaultRetryDelay  = 3 * time.Second
 
-	// DefaultEnsureTimeout 决策 #348：nfvisd 启动时确保 VPP 运行（EnsureRunning）拉起后
-	// 等待就绪的默认上限（有界，超时即如实报错，不无限等）。
-	DefaultEnsureTimeout = 60 * time.Second
-	// defaultEnsureInterval 就绪轮询间隔。
-	defaultEnsureInterval = 500 * time.Millisecond
+	// defaultEnsureProbeTimeout 决策 #348：启动序列里「探一下 VPP 是否已在运行」的硬超时上限。
+	// 探测即使卡住（govpp 连接路径不接收 context）也在此上限内返回，绝不拖住 nfvisd 启动。
+	defaultEnsureProbeTimeout = 2 * time.Second
+	// defaultEnsureStartTimeout 决策 #348：发起拉起（systemctl start --no-block）的防御性超时上限。
+	// --no-block 正常立即返回，本上限只兜底异常（如 dbus 卡住），同样不阻塞启动。
+	defaultEnsureStartTimeout = 5 * time.Second
 )
 
 // State 连接状态（对 govpp core.ConnectionState 的本地投影，避免上层依赖 govpp）。
@@ -142,11 +143,11 @@ type Manager struct {
 	statsTool StatsTool // statsclient 解码失败/缺项时的同版本工具回退源（决策 #68）
 
 	// 决策 #348：nfvisd 启动时确保 VPP 运行（EnsureRunning）。
-	// 拉起后仍走既有连接 + 恢复收敛路径，本组字段只服务「启动时把 VPP 进程拉起来」这一件事。
-	ensureStart    Starter                     // 拉起 VPP（缺省 systemctl start vpp）
-	ensureProbe    func(context.Context) error // 就绪探测（缺省 socket 存在 + API 可连；测试注入）
-	ensureTimeout  time.Duration               // 有界等待上限（<=0 取 DefaultEnsureTimeout）
-	ensureInterval time.Duration               // 就绪轮询间隔（<=0 取 defaultEnsureInterval）
+	// 拉起是**发起式**的（--no-block），启动序列绝不能被 VPP 拉起阻塞；就绪由既有连接重试循环承担。
+	ensureStart        Starter                     // 发起拉起（缺省 systemctl start --no-block vpp）
+	ensureProbe        func(context.Context) error // 「VPP 是否已在运行」探测（缺省 socket 存在 + API 可连；测试注入）
+	ensureProbeTimeout time.Duration               // 探测硬超时（<=0 取 defaultEnsureProbeTimeout）
+	ensureStartTimeout time.Duration               // 发起动作的防御性超时（<=0 取 defaultEnsureStartTimeout）
 }
 
 // NewManager 构造管理器（dialer 为 nil 时使用 govpp 实现）。
@@ -312,10 +313,10 @@ func (m *Manager) ConnectOnce(ctx context.Context) (string, error) {
 
 // ---------- 决策 #348：nfvisd 启动时确保 VPP 运行 ----------
 
-// SetEnsureStarter 注入拉起实现（nil 表示缺省 systemctl start vpp）。
+// SetEnsureStarter 注入发起拉起实现（nil 表示缺省 systemctl start --no-block vpp）。
 func (m *Manager) SetEnsureStarter(s Starter) { m.ensureStart = s }
 
-// SetEnsureProbe 注入就绪探测（测试用；nil 表示缺省真实探测）。
+// SetEnsureProbe 注入「VPP 是否已在运行」探测（测试用；nil 表示缺省真实探测）。
 func (m *Manager) SetEnsureProbe(fn func(context.Context) error) { m.ensureProbe = fn }
 
 // EnsureRunning 确保 VPP 数据面在运行（决策 #348）。
@@ -324,74 +325,73 @@ func (m *Manager) SetEnsureProbe(fn func(context.Context) error) { m.ensureProbe
 // 重试」、从不拉起 ⇒ 整机重启后数据面长时间不可用，须人工 systemctl start vpp。本方法在
 // nfvisd 启动装配里（连接管理 Run 之前）**调用一次**，补齐这半边：
 //   - VPP 已在运行（或管理器已有可用连接）⇒ **不做任何动作**（幂等、不滥用拉起）；
-//   - VPP 未运行 ⇒ 拉起一次（systemctl start vpp），并有界等待其就绪；
+//   - VPP 未运行 ⇒ **发起式**拉起一次（systemctl start --no-block vpp，提交 job 即返回）；
 //   - 每次启动**只尝试一次**，失败即返回、不循环重试。
 //
-// 本方法只保证「VPP 进程在运行」，不建立连接、不改动连接状态——拉起之后仍走既有的
-// 连接与恢复收敛路径（单一事实源，不短路）。拉起失败或拉起后超时未就绪时**如实返回错误**
-// （带原因与手查路径），由调用方降级并告警，不阻塞 nfvisd 启动，也不谎称数据面可用。
+// **本方法绝不阻塞启动序列**：不在这里等待 VPP 就绪——就绪探测交给既有的连接重试循环
+// （Run 会在 VPP 起来后连上并进入恢复收敛）。探测与发起都套有界的硬超时
+// （defaultEnsureProbeTimeout / defaultEnsureStartTimeout），即便探针或 systemctl 卡住也在
+// 上限内返回。本方法只保证「已在线」或「已发起拉起」，不建立连接、不改动连接状态、不谎称
+// 数据面可用（可用性由连接状态体现）；发起失败时如实返回错误（带手查路径）供上层告警。
 func (m *Manager) EnsureRunning(ctx context.Context) error {
 	if m.State() == StateConnected {
 		return nil // 已有可用连接：不滥拉
 	}
-	probe := m.ensureProbeFn()
-	if err := probe(ctx); err == nil {
+	if m.probeOnce(ctx) == nil {
 		m.cfg.Log.Info("VPP 已在运行，无需拉起", "socket", m.cfg.Socket)
 		return nil
 	}
-	m.cfg.Log.Info("检测到 VPP 未运行，由 nfvisd 拉起", "unit", "vpp")
+	m.cfg.Log.Info("检测到 VPP 未运行，发起拉起（不等待）", "unit", "vpp")
 	starter := m.ensureStart
 	if starter == nil {
 		starter = NewSystemctlStarter()
 	}
-	if err := starter.Start(ctx); err != nil {
-		m.cfg.Log.Error("拉起 VPP 失败", "err", err, "自查", "systemctl status vpp / journalctl -u vpp")
-		return fmt.Errorf("拉起 VPP 失败（systemctl start vpp）：%v；"+
-			"请查 systemctl status vpp 与 journalctl -u vpp，或手工 systemctl start vpp", err)
+	done := make(chan error, 1)
+	go func() { done <- starter.Start(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			m.cfg.Log.Error("发起拉起 VPP 失败", "err", err,
+				"自查", "systemctl status vpp / journalctl -u vpp")
+			return fmt.Errorf("发起拉起 VPP 失败（systemctl start --no-block vpp）：%v；"+
+				"请查 systemctl status vpp 与 journalctl -u vpp，或手工 systemctl start vpp", err)
+		}
+		m.cfg.Log.Info("已发起拉起 VPP；就绪由连接重试循环接管", "unit", "vpp")
+		return nil
+	case <-time.After(m.startTimeout()):
+		// 发起动作异常地迟迟不返回（--no-block 正常应立即返回）：不阻塞启动，交连接重试循环。
+		m.cfg.Log.Warn("发起拉起 VPP 的动作未及时返回，不阻塞启动（就绪由连接重试循环接管）", "unit", "vpp")
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("发起拉起 VPP 被取消：%v", ctx.Err())
 	}
-	if err := m.waitReady(ctx, probe); err != nil {
-		m.cfg.Log.Error("VPP 拉起后未在窗口内就绪", "err", err,
-			"自查", "systemctl status vpp / show vpp")
-		return err
-	}
-	m.cfg.Log.Info("VPP 已拉起并就绪")
-	return nil
 }
 
-// waitReady 有界轮询确认 VPP 拉起后真的就绪（决策 #348）：默认上限 DefaultEnsureTimeout，
-// 探针按 socket 存在 + API 可连判定（健康判定必须基于实际连接）；超时如实返回错误。
-func (m *Manager) waitReady(ctx context.Context, probe func(context.Context) error) error {
-	timeout, interval := m.ensureTimeout, m.ensureInterval
-	if timeout <= 0 {
-		timeout = DefaultEnsureTimeout
+// probeOnce 做一次「VPP 是否已在运行」探测，硬超时上限 defaultEnsureProbeTimeout（可注入）：
+// 探测即使卡住（govpp 连接路径不接收 context）也在此上限内返回——启动序列不被拖住。
+func (m *Manager) probeOnce(ctx context.Context) error {
+	pt := m.ensureProbeTimeout
+	if pt <= 0 {
+		pt = defaultEnsureProbeTimeout
 	}
-	if interval <= 0 {
-		interval = defaultEnsureInterval
+	pctx, cancel := context.WithTimeout(ctx, pt)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- m.ensureProbeFn()(pctx) }()
+	select {
+	case err := <-done:
+		return err
+	case <-pctx.Done():
+		return fmt.Errorf("探测 VPP 是否在运行超时（%s）：%v", pt, pctx.Err())
 	}
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			break
-		}
-		// 单次探测以剩余时间为上限，保证整体等待有界（govpp 连接路径自带超时）。
-		pctx, cancel := context.WithTimeout(ctx, remaining)
-		err := probe(pctx)
-		cancel()
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if !sleepCtx(ctx, interval) {
-			break
-		}
+}
+
+// startTimeout 发起拉起的防御性超时上限（<=0 取 defaultEnsureStartTimeout）。
+func (m *Manager) startTimeout() time.Duration {
+	if m.ensureStartTimeout > 0 {
+		return m.ensureStartTimeout
 	}
-	if ctx.Err() != nil {
-		return fmt.Errorf("VPP 拉起后未就绪（等待被取消）：%v", ctx.Err())
-	}
-	return fmt.Errorf("VPP 拉起后未在 %s 内就绪：%v；数据面当前不可用，"+
-		"请查 systemctl status vpp 与 show vpp", timeout, lastErr)
+	return defaultEnsureStartTimeout
 }
 
 // ensureProbeFn 返回就绪探测（注入优先，缺省真实探测）。
@@ -402,8 +402,9 @@ func (m *Manager) ensureProbeFn() func(context.Context) error {
 	return m.probeRunning
 }
 
-// probeRunning 真实就绪探测：API 套接字存在且能建立一次 binary API 连接（决策 #348：
-// 健康判定必须基于实际连接）。用独立连接探测，不碰连接管理器的会话。
+// probeRunning 真实探测「VPP 是否已在运行」：API 套接字存在且能建立一次 binary API 连接
+// （决策 #348：健康判定必须基于实际连接，但不再等待就绪——探测有硬超时，见 probeOnce）。
+// 用独立连接探测，不碰连接管理器的会话。
 func (m *Manager) probeRunning(ctx context.Context) error {
 	if _, err := os.Stat(m.cfg.Socket); err != nil {
 		return fmt.Errorf("VPP API 套接字 %s 不可用：%w", m.cfg.Socket, err)
