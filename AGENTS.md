@@ -372,6 +372,14 @@
   `ports[].acl_in` 后提交报 `ports[1].acl_in` 拒绝文案 ✓）；命令树本无该语句（字段仅 REST 可达）→
   登记 **R119-1**（契约一致性：将来底座支持须先补树叶子）。顺带印证 #317/#318 会话锁语义
   （REST 脏候选持锁时 CLI 新会话 commit 被正确拒绝）。
+- **round120（决策 #341 根治 R117-3：绑 L3 ACL 自动放行非 IP/ARP，2026-10-02，PR #268 + dev31）**：产品在绑定
+  `l3-interface <if> acl-in <acl>` 时**自动创建并绑定伴随 macip 白名单**（tag `nfvis-nonip-permit`，permit 任意
+  ip/mac、mask 0），修复「唯一可用的 ACL 形态一绑上就丢域内 ARP」。真机验证（dev31，guest **不配静态邻居**）：
+  ① 产品读视图 `acl-in-note 含非 IP/ARP 自动放行`、VPP 侧 macip 建/绑（`macip interface = sw_if_index 4: 0`）；
+  ② **邻居表出现对端**（ARP 通、无需静态邻居）；③ 翻 deny 后 IP 侧计数增长（真在拦）而邻居表不受影响；
+  ④ `request vpp restart` 后 macip 随重放回来、ARP 重新通。**R117-2 扩为四次复现/三种形态**（含「接口先删、
+  ACL 绑定登记陈旧 → 删 ACL 撞 -2、须 restart nfvisd」的新变体）；修法方向已写进待做（接口消失时同步清
+  ACL 绑定登记 / 对「接口不存在」容错解绑）。证据 `docs/evidence/v2-round120-d341-macip-arp-verified.txt`。
 - 已定决策 243 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#341）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——

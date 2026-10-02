@@ -1,0 +1,39 @@
+NFViS v2 真机验证记录 round120 —— 决策 #341（绑 L3 接口 ACL 时自动放行非 IP/ARP）真机验证 + R117-2 新变体复现
+====================================================================
+日期：2026-10-02；环境：nfvis-vm，2.0.0~dev30 → **dev31**；代码：PR #268（squash 合入、CI 双跑全绿）。
+
+§1 方案验证（实验室，vppctl-only）
+- 在 L3 接口上绑 IPv4 ACL 后，域内 ARP 被 ACL 插件的**非 IP 白名单**丢弃（`bvi0 rx=drops` 族现象）。
+- 加 `set acl-plugin macip acl permit ip 0.0.0.0/0 mac 00:00:00:00:00:00 mask 0` +
+  `set acl-plugin macip interface <if> <idx>` 后：**VPP 邻居表立刻出现对端**、drops 停止增长 ⇒ 方案成立。
+
+§2 产品侧实现与真机验证（dev31，✓ 全项过）
+- 现场：`ma-vs`（type l3）+ `l3-interface vh-ma-vm-nic0 ip address 10.1.1.1/24 acl-in ma-acl`；
+  guest **不配静态邻居**（user-data：静态 IP + 持续 ping 网关，靠 ARP）——正是修复前「唯一可用形态也难用」的场景。
+- ① **产品自动伴随**：读视图 `show vrfs ma-vs` = `acl-in ma-acl; acl-in-note 含非 IP/ARP 自动放行;` ✓；
+  VPP 侧 `show acl-plugin macip acl` = `MACIP acl_index: 0, count: 1 tag {nfvis-nonip-permit}`、
+  `rule 0: ipv4 action 1 ip 0.0.0.0/0 mac 00:00:00:00:00:00 mask 00:00:00:00:00:00` ✓；
+  `show acl-plugin macip interface` = `sw_if_index 4: 0`（已绑到 guest 端口）✓。
+- ② **ARP 通了（修复目标）**：guest 起机后 `show ip neighbors` 出现 `10.1.1.2 → 52:54:ea:1b:1e:56
+  （vh-ma-vm-nic0）`——**无任何静态邻居**；接口 drops 未暴涨；IP 侧 `ACL permit packets` 计数在涨（29）。
+- ③ **IP 过滤语义不受影响（判别性）**：规则翻 **deny** 后 `ACL deny packets` 从 7 涨到 17（真在拦），
+  而**邻居表仍在**（ARP 不受影响）——两条路径各自独立，正是设计目标。
+- ④ **恢复重放含 macip**：`request vpp restart` 后 macip ACL 以同 tag 重现、邻居表重新建立
+  （guest 的 ARP 又在走）✓（同「VPP 重启后静默丢失」族教训，进 EnsureConsistent 的路径有效）。
+- ⑤ 实现要点（PR #268）：`ACLClient` 增 `MacipACLAddReplace`/`MacipACLInterfaceAddDel`（CRC 与 govpp v0.13.0
+  核对一致）+ 按 tag 反查复用；`BindIndex` 在 IP ACL 非空时自动伴随绑定、解绑时一并解绑；`resetProviders`
+  清登记、重放按需重建；6 例单测；make check RC=0。
+
+§3 R117-2 新变体复现（第 4 次，均同类）
+- 清场时 `delete virtual-switches ma-vs l3-interface vh-ma-vm-nic0` 之后，再 `delete acls ma-acl` →
+  `%% 底座下发失败（已补偿）: del-acl[ma-acl]: 解绑接口 3 的 ACL ma-acl: VPPApiError: Invalid sw_if_index (-2)`
+  ——**接口已删但 ACL 的进程内绑定登记仍在** → 解绑撞 -2、整次回滚；`systemctl restart nfvis`
+  （清进程内登记）后同一删除成功（rev 971）。
+- 计入 R117-2（删除倒序/陈旧登记，round117/118/119/120 共四次独立复现，三种触发形态：
+  ① 同提交删「网关 ACL+交换机/ACL」；② 同提交删「交换机+ACL」；③ 接口先删、ACL 的绑定登记陈旧）。
+  建议修法方向（登记）：删除事务按「先解引用、后删被引用」的既有 #196 口径扩展，并在**接口消失时同步
+  清理 ACL 侧绑定登记**（或以「接口不存在」容错解绑，与 #196 的同类容错一致）。
+
+§4 现场终态
+- 版本 2.0.0~dev31；配置无 ma-* 残留；`vppctl show acl-plugin acl` 空；**无 active 告警**；
+  最终 rev 971（含一次 `systemctl restart nfvis` 与 `request vpp restart` 清残）。
