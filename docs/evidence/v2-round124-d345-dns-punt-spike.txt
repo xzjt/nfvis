@@ -63,3 +63,67 @@ NFViS v2 真机验证记录 round124 —— 三.3 DNS 数据面代理「路线 c
   清理后 `show ip table` 仅剩 `[0]` 与 `vr-sem-vs`；产品 `VRF_TABLE_LEFTOVER ip-table/100` 告警在 15s 对账内
   **自动消解**（顺带复证 #321 的对账口径）；当前无 active 告警。
 - 保留在现场：fixture 的 sem-vs/sem-vm（语义套件 S8 正控用），无 vh 之 外的临时对象。
+
+§6 真机验证（2.0.0~dev33；四维覆盖：配置 → 数据面 → 读视图三面 → 边界）
+6.1 前置与升级路径
+- `dpkg -i` dev33 → `show vpp` 报 **`pending_restart: yes`**（vpp 段哈希混入 punt 路径所致，如实提示）；
+  `request vpp restart` 后 `pending_restart: no`，且 punt 注册由**恢复重放**自动回来
+  （`punt ip4 UDP port 53 to socket /run/vpp/nfvis-dns.sock` 重新在场）；startup.conf 由**产品生成器**重建并含
+  `punt { socket /run/vpp/punt.sock }`。⇒ 「升级后首次需 restart 让 punt 段生效」这条路径真机成立。
+6.2 现场（可用产品能力自造）
+- `dns-vs`（L2 + BVI 192.168.77.1/24）+ `dns-vm`（debian-12 cloud image；guest 每 3s 向网关 :53 发
+  `A? probe.test`）+ 宿主侧最小 DNS 应答器（127.0.0.1:53 → 10.9.9.9、127.0.0.2:53 → 10.8.8.8，各自打印
+  收到的查询＝独立事实源）。
+6.3 读视图三面同源
+- CLI `show dns proxy`：启用态 + 全局/按域上游 + 边界说明（含「覆盖 IPv4/UDP/53」）。
+- REST `GET /dns/proxy`：`{"enabled":true,"servers":["127.0.0.1"],"switches":[]}`。
+- Web（**Browser Use 实机**，§1 口径）：登录 → `#/system`，页面自报 **NFViS 2.0.0~dev33**（先确认当前构建）；
+  系统页渲染 `数据面 DNS 代理=启用`、`全局上游=（空）`、`按域上游=dns-vs→127.0.0.1`，并截图留档。
+  **如实降级**：本机 browser 集成的 `eval` 返回值不可读（脚本只读、对页面无副作用），故未能逐 id 打印
+  computed display/offsetParent；改以 **Chrome a11y 树（本身排除 display:none 元素）+ 截图**为可见性证据。
+6.4 数据面（独立事实源）
+- 注册：`vppctl show punt socket registrations l4` → `punt ip4 UDP port 53 to socket /run/vpp/nfvis-dns.sock`；
+  nfvisd 的 client socket 文件在场。
+- 端到端（**真实 guest 流量**，非伪造包）：宿主 `tcpdump -i lo udp port 53` 每 3s 看到
+  `127.0.0.1.x > 127.0.0.1.53: A? probe.test.` 及其应答；vhost 口出向 pcap 每 3s 看到
+  `192.168.77.1.53 > 192.168.77.2.y: 1/0/0 A 10.9.9.9 (44)`——**以网关地址为源、经 vhost 口把真实应答送到
+  域内客户端**（即「域内 VNF 把 resolver 指向网关即可解析」）；`ip4-udp-punt-socket Socket TX` 同步增长。
+- 排除性证据：直接把伪造上行包投到 nfvisd 的 client socket → 3 次上游查询被转发、收到应答 ⇒ 转发器处理
+  路径（解析 → 选上游 → 转发）本身成立，问题若在必在投递侧。
+6.5 语义矩阵
+- **按域优先**：全局=127.0.0.1、dns-vs 按域=127.0.0.2 时，guest 收到的是 **10.8.8.8**（按域上游），而非
+  全局的 10.9.9.9。
+- **皆空 ⇒ SERVFAIL**（该域无按域上游且全局为空；代理因另一交换机非空仍启用）：guest 收到
+  `192.168.77.1.53 > …: ServFail- q: A? probe.test.`，且 **[udp sum ok]**（回注包 UDP 校验和为真值）。
+- **撤销 ⇒ 注销 ⇒ 回落**：全部清空后 `show punt socket registrations l4` 为空、读视图「未配置」，guest 随后
+  收到 `ICMP 192.168.77.1 udp port 53 unreachable`（VPP 默认处理）——**实证了「无上游时回 SERVFAIL 而非
+  静默」的必要性**：静默超时比这个默认行为更差。
+6.6 四套件（dev33）
+- `cli-fulltest` **228 / 0 / 13**（让出 1G 页、无第二个 VM 争用时的干净基线）。同一现场若 sem-vm 在跑，
+  stage 4 会有 4 项失败，全部是 `cli-vm` 因 **1G 池声明 2 页、运行时被 VPP 与 sem-vm 各占 1 页而无空闲页**
+  起不来——环境受限，与 #345 无关（修套件用例后 stage 2 由 71/3 转 **80/0**）。
+- `cli-semantic-check` **26 / 0 / 3**（新增 **S13**：读视图 ↔ CLI ↔ `vppctl show punt socket registrations l4`
+  三档口径，本轮**转可判定并通过**；余 3 项为 S11/S12 按设计无配置跳过）。
+- `cli-lifecycle-check` **19 / 0 / 4**（首跑 18/1/4：失败项系 sem-vm 刚启动尚未就绪的时序波动，复跑归零，
+  与交接 §五「随现场 19~22/0/3~4 波动」一致）。
+- `cli-pty-smoke` **10 / 10**。
+
+§7 本轮发现与修复（真机验证的价值）
+1. **套件用例缺陷（本轮修）**：`cli-fulltest-phase2.sh` 的 DNS 代理段把「**带地址的 delete**」放在
+   「独立会话、不 commit」的解析段里——该形态候选不保留，`delete … <ip>` 必然报「无匹配配置」⇒ 3 项假失败
+   （对照：同段 `learn-limit` 用无值 delete 才通过）。修法：该段 delete 一律用无值形态，并照登录横幅的样板
+   新增「真落库 → 回读 → 按地址删除」的提交往返（`run`×6 + `expect_out`×2，提交后立即清除，不改长期现场）。
+2. **审查中修的三处实现问题**（已随 PR #272 合并）：回注包按 IPv4 伪头计算 UDP 校验和（真机 pcap 显示
+   `[udp sum ok]`）；`extractIP` 改三级判据（ethertype → 首字节 nibble → 14 偏移 nibble，兼容带/不带 L2）；
+   回注失败计入 `SendFailCount`。
+3. **覆盖边界如实化**：punt 注册按地址族，故 v1 覆盖 **IPv4/UDP/53**；IPv6 的注册与回注路径未做真机验证，
+   不先做成假能力（契约/读视图/手册三处已写明）。
+
+§8 现场改动与清场
+- 真机：安装 2.0.0~dev33；`/etc/vpp/startup.conf` 的 punt 段由产品生成器写入（此前手工加的同路径，备份
+  `/tmp/startup.conf.spike-bak`）；DNS 现场与临时应答器/临时文件在验证后清理。
+- 本机：为完成 §1 的 Web 实机验证，经用户授权把真机自签证书导入**当前用户**的「受信任的根证书颁发机构」
+  （sha1 `aaa358ee9ddf93c13f35333b58b4907d66b38468`；撤销：`certutil -user -delstore Root nfvis`）。
+- spike 临时物（loop0、ip table 100、punt 注册、旧 socket/pcap）早前已清理；`VRF_TABLE_LEFTOVER` 告警已在
+  15s 对账内自动消解。
+
