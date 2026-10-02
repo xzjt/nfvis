@@ -1,0 +1,39 @@
+NFViS v2 真机验证记录 round119 —— 决策 #340（网关 ACL 绑定提交期硬拒绝 + 指引 L3 形态）真机复验
+====================================================================
+日期：2026-10-02；环境：nfvis-vm，2.0.0~dev28 → **dev29**；代码：PR #266（squash 合入、CI 双跑全绿）。
+
+§1 真机复验（✓ 两点全过）
+- **网关绑定被拒（dev29）**：`set acls v-acl … / set virtual-switches v-vs type l2 / gateway ip 10.1.1.1/24 /
+  gateway acl-in v-acl` → commit **被拒**且文案完整：
+  `virtual-switches[v-vs].gateway.acl_in: 网关（BVI）上不支持 acl-in：VPP 26.06 不评估 BVI 上的域内流量，
+  既不拦截也不计数（真机实证），绑定给不出任何保护。入向过滤请改用 L3 接口形态：
+  set virtual-switches v-vs l3-interface <ifname> acl-in <acl>（该形态已实测生效）`
+  ——原因、结论、替代（点名交换机）齐备，且无 FR/决策/round 内部编号。
+- **L3 形态仍可用（dev29）**：`set virtual-switches v-l3 type l3` +
+  `l3-interface ens224 ip address 10.2.2.1/24` + `l3-interface ens224 acl-in v-acl` → **commit 成功（rev 952）**，
+  VPP 侧 `show acl-plugin interface` = `sw_if_index 2（ens224）: input acl(s): 0` ✓ 绑定到达数据面。
+  （该形态的**行为**已在 round118 实证：ACL 确实在拦——`ACL deny packets` 递增。）
+- 清场：解绑（rev 953）→ 删 ACL 与交换机（rev 954）→ `request vpp restart` 清残；**无 active 告警**、
+  配置无 v-acl/v-l3/v-vs 残留。
+
+§2 交付内容（PR #266）
+- 校验（单源，`internal/model/validate.go`）：`VSGateway.AclIn/AclOut` 非空**直接拒绝**（同管理口守卫先例：
+  静默失效的保护手段一律硬拒、不给 force 出口）；模型字段保留（解析兼容）；`L3Interface.AclIn`
+  与 `VSwitchPort` 绑定**行为不动**。
+- 文档如实化：命令树设计（网关行标 ⊘ 设计拒绝；L3 形态标已实证 + 非 IP/ARP 代价；端口级标待验）、
+  命令全表（两条网关 ACL 行 → ⊘ 设计拒绝 + 原因与替代；`l3-interface … acl-in` 标已实证；计数桶
+  顺带订正一处既有陈旧漂移）、用户手册（删网关示例；补「绑 ACL 的接口会丢弃非 IP 含 ARP，对端需
+  预置静态邻居」「端口级绑定未验证」两条注意）、fulltest 豁免两行改「设计拒绝」。
+- 测试：新增 `TestValidateGatewayACLRejected`（acl-in/acl-out 被拒且文案含 l3-interface 替代；
+  L3 形态通过；不设 ACL 通过）；`TestAclEndpoint`（原本用网关绑定验「被引用 ACL 不可删」）改用
+  L3 形态、保持原意；`cli_mapping_test` 的网关 acl 行保留并加注释（守护「解析仍映射到模型」，
+  被拒是一句清楚校验错误而非「未知语句」）。`make check` RC=0；套件同步守护过。
+
+§3 待验（登记，未做）
+- 交换机**端口级** `acl-in/acl-out`（`model.VSwitchPort`）同机制疑似（同走 L2 路径）——用「端口绑 ACL +
+  deny + 观察是否拦」的最小现场补验后按同口径处置（拒绝或保留）。
+- R117-2（删除倒序链）与 R117-3 的**根治**（macip 白名单自动放行 ARP）仍为后续项；本轮只做了
+  R117-1 的处置与 R117-3 的文档如实化。
+
+§4 现场终态
+- 版本 2.0.0~dev29；无残留对象/无 active 告警；最终 rev 954（+ 一次数据面重启清残）。

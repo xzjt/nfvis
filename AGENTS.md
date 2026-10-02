@@ -360,6 +360,14 @@
   仍成立，原因更正**（不是危险，而是 26.06 不递增）。④ 清 L3 现场时补记 **删除倒序链**（ACL 被 l3-interface
   引用、l3-interface 引用 vNIC、VM 引用交换机——须逐级解绑；产品校验会明确拒绝，属 R117-2 同族）。
   证据 `docs/evidence/v2-round118-acl-l3-form-and-counters-never-increment.txt`。
+- **round119（决策 #340：网关 ACL 绑定提交期硬拒绝 + 指引 L3 形态，2026-10-02，PR #266 + dev29）**：真机实证
+  的处置落地——`set virtual-switches <n> gateway acl-in|acl-out` 在**提交期直接拒绝**（同管理口守卫先例：
+  静默失效的保护手段一律硬拒、不给 force 出口），文案写明「VPP 26.06 不评估 BVI 域内流量」与替代
+  （`l3-interface <if> acl-in <acl>`，已实证生效）；`L3Interface.AclIn`/`VSwitchPort` 行为不动；契约/全表/手册
+  如实化（含**绑 ACL 的接口会丢弃非 IP 含 ARP、对端需预置静态邻居**这条代价，与「端口级绑定待验」的标注）。
+  **真机复验（dev29）**：网关绑定被拒且文案含替代指引 ✓；L3 形态提交成功且 VPP 侧 `input acl(s)` 绑上 ✓。
+  测试：`TestValidateGatewayACLRejected` 新增、`TestAclEndpoint` 改用 L3 形态；套件豁免改「设计拒绝」；
+  make check RC=0。**待验**：端口级 `acl-in/acl-out`（同机制疑似）。
 - 已定决策 242 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#340）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
