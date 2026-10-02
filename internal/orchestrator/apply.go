@@ -382,6 +382,20 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			ops = append(ops, op)
 		}
 	}
+	// —— 新增/变更：数据面 DNS 代理（决策 #345，FR-NET-010）——
+	// vpp 段 + 各交换机段的伴随操作：全局或任一交换机非空 ⇒ 注册 punt socket 并起域内转发器；
+	// 全空 ⇒ 注销（VPP 恢复默认处理）。声明未变时 Sync 内部按状态幂等跳过；undo 收敛回旧声明。
+	// 放在交换机/VRF 之后：启用只依赖注册，但按域上游的转发域（BVI/L3 接口索引）此刻才就绪。
+	oldDNS := dnsProxyUpstreamsOf(old)
+	newDNS := dnsProxyUpstreamsOf(new)
+	if !reflect.DeepEqual(oldDNS, newDNS) {
+		ops = append(ops, op{
+			desc: "dns-proxy",
+			run:  func(ctx context.Context) error { return a.net.ApplyDNSProxy(ctx, newDNS) },
+			undo: func(ctx context.Context) error { return a.net.ApplyDNSProxy(ctx, oldDNS) },
+		})
+	}
+
 	if !configEqualPtr(old.Nat, new.Nat) {
 		newNat := model.NatConfig{}
 		if new.Nat != nil {
@@ -774,6 +788,25 @@ func configEqualPtr[T any](a, b *T) bool {
 		return true
 	}
 	return configEqual(*a, *b)
+}
+
+// dnsProxyUpstreamsOf 从配置提取数据面 DNS 代理的期望上游（决策 #345）：全局 + 各交换机按域。
+// 只收**真配了上游**的交换机（空声明不入 PerSwitch，与「全空即停用」判据一致）。
+func dnsProxyUpstreamsOf(cfg model.Config) DNSProxyUpstreams {
+	want := DNSProxyUpstreams{}
+	if cfg.Vpp != nil {
+		want.Global = append([]string{}, cfg.Vpp.DNSProxyServers...)
+	}
+	for _, vs := range cfg.VirtualSwitches {
+		if len(vs.DNSProxyServers) == 0 {
+			continue
+		}
+		if want.PerSwitch == nil {
+			want.PerSwitch = map[string][]string{}
+		}
+		want.PerSwitch[vs.Name] = append([]string{}, vs.DNSProxyServers...)
+	}
+	return want
 }
 
 func jsonKey(v any) any {

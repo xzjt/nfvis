@@ -172,6 +172,29 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 			}
 		}
 	}
+	// 数据面 DNS 代理（决策 #345）：VPP 重启后 punt 注册丢失，不重放即静默丢域内 DNS
+	// （与 L2-2/#335/#337 同族教训）。独立记源、失败不阻塞其余对象；resetProviders 已把
+	// DNSProxyProvider 标记为「未注册」，声明非空会重新注册并起转发器（幂等）。
+	// 只补齐不摘除（附录 A #35）：停用走提交编排（注销），恢复段不猜。放在 VRF/登记之后：
+	// 按域上游的转发域（BVI/L3 接口索引）此刻已登记，转发器可按来源域选上游。
+	if n.dns != nil {
+		want := orchestrator.DNSProxyUpstreams{}
+		if cfg.Vpp != nil {
+			want.Global = cfg.Vpp.DNSProxyServers
+		}
+		for _, vs := range cfg.VirtualSwitches {
+			if len(vs.DNSProxyServers) == 0 {
+				continue
+			}
+			if want.PerSwitch == nil {
+				want.PerSwitch = map[string][]string{}
+			}
+			want.PerSwitch[vs.Name] = vs.DNSProxyServers
+		}
+		if err := n.ApplyDNSProxy(ctx, want); err != nil {
+			record("vpp/dns-proxy", err)
+		}
+	}
 	if cfg.Nat != nil {
 		if err := n.ApplyNAT(ctx, *cfg.Nat); err != nil {
 			record("nat", err)
@@ -259,6 +282,9 @@ func (n *L2Network) resetProviders() {
 	}
 	if n.dhcp != nil {
 		n.dhcp.reset()
+	}
+	if n.dns != nil {
+		n.dns.reset()
 	}
 	if n.lldp != nil {
 		n.lldp.reset()

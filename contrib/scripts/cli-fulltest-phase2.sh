@@ -114,6 +114,15 @@ delete virtual-switches vs-l2 dhcp-relay
 # —— virtual-switches learn-limit（§2.4；决策 #337，MAC 学习上限=环路缓解，不依赖网关）——
 set virtual-switches vs-l2 learn-limit 8192
 delete virtual-switches vs-l2 learn-limit
+# —— 数据面 DNS 代理（§2.2 全局 / §2.4 按域；决策 #345，自研转发器 + punt socket）——
+# 仅验证解析与落点（本阶段不 commit）；数据面生效与读视图对照见语义套件 DNS 项与真机走查。
+set system dns proxy server 8.8.8.8 secondary 8.8.4.4
+delete system dns proxy server 8.8.4.4
+delete system dns proxy server secondary 8.8.4.4
+delete system dns proxy server
+set virtual-switches vs-l2 dns proxy server 10.0.0.53
+delete virtual-switches vs-l2 dns proxy server secondary 10.0.0.54
+delete virtual-switches vs-l2 dns proxy server
 # —— resource-pools（§2.6）——
 set resource-pools cpu numa node 0 cores 1-4
 # —— system login 横幅（§2.2；决策 #303）——

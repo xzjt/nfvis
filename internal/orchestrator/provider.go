@@ -61,6 +61,17 @@ var ErrDataPlaneUnavailable = errors.New("数据面（VPP）当前不可用")
 // 数据面重启后的恢复收敛完成，残渣进告警留痕。
 var ErrVrfNotRemoved = errors.New("VRF 对应的 IP 表删除后仍存在于 VPP（未收敛）")
 
+// DNSProxyUpstreams 数据面 DNS 代理的期望上游（决策 #345，FR-NET-010）。
+//
+// Global 是全局上游（VppConfig.DNSProxyServers）；PerSwitch 是各交换机的按域上游
+// （VirtualSwitch.DNSProxyServers，键为交换机名，仅含真配了上游的交换机）。启用判据：
+// Global 非空或 PerSwitch 非空 ⇒ 注册 punt 并起转发器；两者皆空 ⇒ 注销（VPP 恢复默认处理）。
+// 上游选择：按上行包所属交换机取 PerSwitch[名]，为空则回落 Global，皆空则对该查询回 SERVFAIL。
+type DNSProxyUpstreams struct {
+	Global    []string
+	PerSwitch map[string][]string
+}
+
 // NetworkProvider VPP 侧编排接口。L2 虚拟交换机 → bridge domain，
 // L3 虚拟交换机 → VRF（规格书附录 B 映射）。实现需声明是否并发安全。
 type NetworkProvider interface {
@@ -75,6 +86,9 @@ type NetworkProvider interface {
 	// ApplyDhcpRelay 收敛一台交换机的 DHCP 中继声明（决策 #335；随 bridge-domain 之后的
 	// 伴随操作下发，声明未变时幂等跳过、清 relay 按登记撤销）。
 	ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) error
+	// ApplyDNSProxy 收敛数据面 DNS 代理声明（决策 #345）：全局或任一交换机非空 ⇒ 注册 punt socket
+	// 并起域内转发器；全空 ⇒ 注销（VPP 恢复默认处理）。声明未变时幂等跳过。
+	ApplyDNSProxy(ctx context.Context, want DNSProxyUpstreams) error
 	ApplyVRF(ctx context.Context, vrf model.Vrf) error
 	DeleteVRF(ctx context.Context, name string) error
 	// ApplyRoute 下发一条静态路由到该 VRF 对应的表（幂等；撤销路由删除时的补偿）。
@@ -194,6 +208,7 @@ func (noopNetwork) DeleteACL(context.Context, string) error                     
 func (noopNetwork) ApplyBridgeDomain(context.Context, model.VirtualSwitch) error { return nil }
 func (noopNetwork) DeleteBridgeDomain(context.Context, string) error             { return nil }
 func (noopNetwork) ApplyDhcpRelay(context.Context, model.VirtualSwitch) error    { return nil }
+func (noopNetwork) ApplyDNSProxy(context.Context, DNSProxyUpstreams) error       { return nil }
 func (noopNetwork) ApplyVRF(context.Context, model.Vrf) error                    { return nil }
 func (noopNetwork) DeleteVRF(context.Context, string) error                      { return nil }
 func (noopNetwork) ApplyRoute(context.Context, string, model.Route) error        { return nil }

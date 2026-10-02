@@ -171,8 +171,12 @@ type VirtualSwitch struct {
 	DhcpRelayServer string `json:"dhcp_relay_server,omitempty"`
 	// LearnLimit MAC 学习条数上限（决策 #337）：仅 L2；>0 时下发 VPP
 	// `bridge_domain_set_learn_limit`（缓解环路/广播风暴的第二道防线，非阻断）。0=未配置（VPP 默认）。
-	LearnLimit int           `json:"learn_limit,omitempty"`
-	Ports      []VSwitchPort `json:"ports,omitempty"`
+	LearnLimit int `json:"learn_limit,omitempty"`
+	// DNSProxyServers 数据面 DNS 代理的**按域上游**（决策 #345，FR-NET-010）：只对该交换机转发域
+	// （L2＝网关 BVI；L3＝其 l3-interface）的入向查询生效。本域非空优先，否则回落全局
+	// （VppConfig.DNSProxyServers）；两者皆空时对该域查询回 SERVFAIL。逐条须为合法 IP（v4/v6）。
+	DNSProxyServers []string      `json:"dns_proxy_servers,omitempty"`
+	Ports           []VSwitchPort `json:"ports,omitempty"`
 }
 
 // Vrf L3 虚拟交换机的配置数据（FR-NET-013；CLI `virtual-switches <n> type l3` 映射为同名条目）。
@@ -312,6 +316,11 @@ type VppConfig struct {
 	Memory  *VppMemory  `json:"memory,omitempty"`
 	DPDK    *VppDPDK    `json:"dpdk,omitempty"`
 	Plugins []VppPlugin `json:"plugins,omitempty"`
+	// DNSProxyServers 数据面 DNS 代理的**全局上游**（决策 #345，FR-NET-010）：全局或任一交换机
+	// （VirtualSwitch.DNSProxyServers）非空即启用——注册 punt socket 并起自研域内转发器；全空即注销
+	// （VPP 恢复默认处理）。上游由 nfvisd 用**宿主网络栈**发起（不是 VPP FIB；`set system dns server`
+	// 的宿主解析器与之互不影响）。逐条须为合法 IP（v4/v6），条数不设上限。纯 UDP 转发：不缓存。
+	DNSProxyServers []string `json:"dns_proxy_servers,omitempty"`
 }
 
 type VppCPU struct {

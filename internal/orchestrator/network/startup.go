@@ -47,6 +47,7 @@ func GenerateStartup(cfg *model.Config, pciOf PCIResolver) (string, error) {
 
 	var b strings.Builder
 	unixStanza(&b)
+	puntStanza(&b)
 	cpuStanza(&b, vpp.CPU)
 	if err := memoryStanza(&b, vpp.Memory); err != nil {
 		return "", err
@@ -66,7 +67,11 @@ func VppSectionHash(vpp *model.VppConfig) string {
 		vpp = &model.VppConfig{}
 	}
 	b, _ := json.Marshal(vpp)
-	sum := sha256.Sum256(b)
+	// 决策 #345：punt 段（DNS 转发器前置）由生成器常驻输出，但它是**底座**配置、不在 VppConfig 里。
+	// 把它混入哈希，使「升级到含 punt 段的新版本」对同一 vpp 配置得到不同哈希 ⇒ 既有的
+	// pending-restart 语义如实提示「首次需 request vpp restart」，让新 startup.conf 的 punt 段生效
+	// （无需另造机制）。
+	sum := sha256.Sum256(append(b, []byte("\x00punt:"+PuntSocketPath)...))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -161,6 +166,18 @@ func unixStanza(b *strings.Builder) {
 	b.WriteString("}\n\n")
 	b.WriteString("api-segment {\n  gid vpp\n}\n\n")
 	b.WriteString("socksvr {\n  default\n}\n\n")
+}
+
+// PuntSocketPath 产品固定的 VPP punt socket 路径（决策 #345）：域内 DNS 转发器经它收/发 punt 包。
+// nfvisd 把回注包 sendto 到这里；VPP 把「目的地址 ∈ 本机」的 UDP/53 用 sendmsg 发到 nfvisd 的
+// client socket（DNSProxyClientSock）。
+const PuntSocketPath = "/run/vpp/punt.sock"
+
+// puntStanza 输出 punt 段（决策 #345）：punt socket 必须在 startup.conf 里就地配置——VPP 的
+// punt_config 是 VLIB_CONFIG_FUNCTION，**运行期没有 API 可补**；未配置时 `punt_socket_register`
+// 被 VPP 以 "socket is not configured" 拒绝。产品固定路径，与 nfvisd 的 DNSProxyServerSock 一致。
+func puntStanza(b *strings.Builder) {
+	fmt.Fprintf(b, "punt {\n  socket %s\n}\n\n", PuntSocketPath)
 }
 
 func cpuStanza(b *strings.Builder, cpu *model.VppCPU) {

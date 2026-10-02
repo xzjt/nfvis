@@ -60,9 +60,19 @@ func ConfigPathTree() *Node {
 				),
 			),
 			K("dns", "DNS",
-				K("server", "DNS 服务器",
+				K("server", "DNS 服务器（宿主解析器：本机 resolv/systemd-resolved 用）",
 					SPA("<ip>", "dns_servers", "服务器地址"),
 					K("secondary", "备用服务器", SPA("<ip>", "dns_servers", "地址")),
+				),
+				// 决策 #345：数据面 DNS 代理的**全局上游**（自研域内转发器，非 VPP dns 插件）。
+				// 与上面的宿主解析器是两回事：域内 VNF/容器把 resolver 指向产品自己的地址即可解析，
+				// 上游由 nfvisd 用**宿主网络栈**发起（不是 VPP FIB）。模型落点 vpp.dns_proxy_servers
+				// （别名 cli_aliases_array.go 重定向）；全局或任一交换机非空即启用，全空即注销 punt。
+				K("proxy", "数据面 DNS 代理（全局上游；域内客户端把 resolver 指向网关即可解析）",
+					K("server", "上游 DNS 服务器",
+						SPA("<ip>", "dns_proxy_servers", "上游地址"),
+						K("secondary", "备用上游", SPA("<ip>", "dns_proxy_servers", "上游地址")),
+					),
 				),
 			),
 			K("api", "API 服务",
@@ -211,6 +221,18 @@ func ConfigPathTree() *Node {
 				// 决策 #337：MAC 学习条数上限（仅 L2）——VPP bridge_domain_set_learn_limit，
 				// 环路/广播风暴的缓解手段（非阻断），值必为正整数、上限 16777216（VPP 语义）。
 				K("learn-limit", "MAC 学习条数上限（仅 L2；环路缓解，1-16777216）", V("uint", "如 8192")),
+				// 决策 #345：数据面 DNS 代理的**按域上游**——只对该交换机转发域（L2＝网关 BVI；
+				// L3＝其 l3-interface）的入向查询生效。本域非空优先，否则回落全局
+				// （`set system dns proxy server`）；两者皆空时对该域查询回 SERVFAIL。
+				// 模型落点 virtual-switches[<n>].dns_proxy_servers（别名 cli_aliases_net.go 重定向）。
+				K("dns", "数据面 DNS 代理（按域上游；本域非空优先，否则回落全局）",
+					K("proxy", "数据面 DNS 代理",
+						K("server", "上游 DNS 服务器",
+							SPA("<ip>", "dns_proxy_servers", "上游地址"),
+							K("secondary", "备用上游", SPA("<ip>", "dns_proxy_servers", "上游地址")),
+						),
+					),
+				),
 				K("ports", "成员端口",
 					PT("<seq>", "uint", "端口序号",
 						K("interface", "物理口/bond 成员",

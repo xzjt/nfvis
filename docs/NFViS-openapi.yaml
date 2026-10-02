@@ -35,6 +35,7 @@ tags:
   - name: port-mirroring
   - name: qos
   - name: vpp
+  - name: dns
   - name: resource-pools
   - name: virtual-machine-functions
   - name: container-functions
@@ -1361,6 +1362,25 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VppConfig" }
+  /dns/proxy:
+    get:
+      tags: [dns]
+      summary: 数据面 DNS 代理的启用态、全局上游与各域覆盖（决策 #345，FR-NET-010）
+      description: |
+        域内 VNF/容器把 resolver 指向**产品自己的地址**（交换机网关 BVI / L3 接口地址）即可解析。
+        产品侧实现为**自研域内转发器**：VPP 经 `punt socket` 把「目的地址 ∈ VPP 本机」的 UDP/53
+        交给 nfvisd，nfvisd 用**宿主网络栈**向上游解析后按原域回注（VPP `PUNT_IP4_ROUTED`）。
+        上游取来源域（按交换机）配置，未配则回落全局；两者皆空时对该域查询回 **SERVFAIL**
+        （不静默超时）。纯 UDP 转发：不缓存、不解析内容；客户端用 **TCP** 查 DNS 不在覆盖内。
+        本端点只读产品自身配置声明；与宿主解析器 `set system dns server`
+        （`SystemConfig.dns_servers`）是两回事。**覆盖范围**：本版注册的是 **IPv4/UDP/53**
+        （punt 按地址族注册）——IPv6 的解析查询尚未覆盖（待 v6 注册与回注路径真机验证后启用）。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DnsProxyView" }
   /vpp/capture:
     get:
       tags: [system]
@@ -2595,6 +2615,40 @@ components:
             properties:
               name: { type: string }
               state: { type: string, enum: [enable, disable] }
+        dns_proxy_servers:
+          type: array
+          description: |
+            数据面 DNS 代理的**全局上游**（决策 #345，FR-NET-010）：域内 VNF/容器把 resolver 指向
+            产品自己的地址即可解析。上游由 nfvisd 用**宿主网络栈**发起（**不是** VPP FIB——决策 #338
+            撤回记录里那条边界只适用于 VPP dns 插件形态）。全局或任一交换机
+            （见 `VirtualSwitch.dns_proxy_servers`）非空即启用并注册 punt；全空即注销
+            （VPP 恢复默认处理）。纯 UDP 转发：不缓存、不解析内容；客户端用 TCP 查 DNS 不在覆盖内。
+            覆盖 **IPv4/UDP/53**（punt 按地址族注册）；IPv6 的解析查询尚未覆盖。
+          items: { type: string }
+
+    DnsProxyView:
+      type: object
+      description: 数据面 DNS 代理读视图（`GET /dns/proxy`；与 CLI `show dns proxy` 同源，决策 #345）
+      required: [enabled, servers, switches]
+      properties:
+        enabled:
+          type: boolean
+          description: |
+            全局或任一交换机配了上游即 true（启用判据）；为 false 时**未注册 punt**，
+            指向产品地址的 UDP/53 仍由 VPP 按默认处理（不致中断）。
+        servers:
+          type: array
+          description: 全局上游（按声明序；未配置时为空数组，不发 null）
+          items: { type: string }
+        switches:
+          type: array
+          description: 按域覆盖（只列**已声明且真配了上游**的交换机；未配置的交换机不出现）
+          items:
+            type: object
+            required: [name, servers]
+            properties:
+              name: { type: string }
+              servers: { type: array, items: { type: string } }
 
     CaptureFile:
       type: object
@@ -2856,6 +2910,13 @@ components:
             acl_out:
               type: string
               description: '**不支持**（同 acl_in）：提交期拒绝（决策 #340）；ACL 请绑 L3 接口。'
+        dns_proxy_servers:
+          type: array
+          description: |
+            数据面 DNS 代理的**按域上游**（决策 #345）：只对该交换机转发域（L2＝网关 BVI；
+            L3＝其 l3-interface 地址）的入向查询生效。本域非空优先，否则回落全局
+            （`VppConfig.dns_proxy_servers`）；两者皆空时对该域查询回 SERVFAIL。
+          items: { type: string }
         dhcp_relay:
           type: object
           description: |

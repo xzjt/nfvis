@@ -91,6 +91,10 @@ type L3Provider struct {
 	// 权威索引（vlan 子接口由 create_subif 返回，按名重查可能查到父口）、ForgetVnfIface/
 	// DeleteVRF 的摘除口径与 ifaces/ifaceTable 对齐。
 	ifaceIdx map[string]uint32
+	// idxSwitch sw_if_index → 作为该口「转发域」的交换机名（决策 #345）：BVI（L2）、L3 接口、
+	// 置入该 L3 交换机表的 VNF vNIC 三者都登记。DNS 代理按上行 desc.sw_if_index 反查所属交换机、
+	// 取按域上游（未配则回落全局）；索引在 VPP 重启后会变，故随重置/重放一并更新。
+	idxSwitch map[uint32]string
 	// pendingDeletes 删除未收敛的 L3 交换机（tableID → VRF 名）：删表读回报「表仍存在」，
 	// 该表只能在数据面重启后消失。留档供后续复核（恢复收敛/周期巡检）：表真没了 → 清登记并消警；
 	// 配置又把它声明回来（合法存在）同样清登记。见 RetryPendingDeletes。
@@ -114,6 +118,7 @@ func (p *L3Provider) reset() {
 	p.ownTable = map[string]bool{}
 	p.ifaceTable = map[string]uint32{}
 	p.ifaceIdx = map[string]uint32{}
+	p.idxSwitch = map[uint32]string{}
 	p.mu.Unlock()
 }
 
@@ -122,14 +127,14 @@ func NewL3Provider(c L3Client) *L3Provider {
 	return &L3Provider{client: func() (L3Client, error) { return c, nil },
 		ifaces: map[uint32][]uint32{}, subifs: map[uint32][]uint32{}, vnfs: map[string]vnfAttach{},
 		bvis: map[string]uint32{}, ownTable: map[string]bool{}, ifaceTable: map[string]uint32{},
-		ifaceIdx: map[string]uint32{}, pendingDeletes: map[uint32]string{}}
+		ifaceIdx: map[string]uint32{}, idxSwitch: map[uint32]string{}, pendingDeletes: map[uint32]string{}}
 }
 
 // NewL3ProviderFunc 以客户端工厂构造（连接可重连）。
 func NewL3ProviderFunc(f func() (L3Client, error)) *L3Provider {
 	return &L3Provider{client: f, ifaces: map[uint32][]uint32{}, subifs: map[uint32][]uint32{},
 		vnfs: map[string]vnfAttach{}, bvis: map[string]uint32{}, ownTable: map[string]bool{},
-		ifaceTable: map[string]uint32{}, ifaceIdx: map[string]uint32{},
+		ifaceTable: map[string]uint32{}, ifaceIdx: map[string]uint32{}, idxSwitch: map[uint32]string{},
 		pendingDeletes: map[uint32]string{}}
 }
 
@@ -205,6 +210,10 @@ func (p *L3Provider) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 	// ——新配置刚把它置入新表，转眼又被旧表的清理撤销（数据面与配置不一致，且全程无报错）。
 	p.reassignLocked(tableID, idxs)
 	p.ifaces[tableID], p.subifs[tableID] = idxs, subs
+	// 决策 #345：登记「该口属于哪台交换机」（DNS 代理按上行 sw_if_index 反查按域上游）。
+	for _, idx := range idxs {
+		p.idxSwitch[idx] = vrf.Name
+	}
 	for name, idx := range idxOf {
 		p.ifaceTable[name] = tableID
 		p.ifaceIdx[name] = idx
@@ -314,6 +323,7 @@ func (p *L3Provider) RegisterL3Interfaces(ctx context.Context, vrf model.Vrf) []
 		p.reassignLocked(tableID, []uint32{idx})
 		p.ifaceTable[li.Interface] = tableID
 		p.ifaceIdx[li.Interface] = idx
+		p.idxSwitch[idx] = vrf.Name // 决策 #345：L3 接口是该交换机的转发域
 		if !containsIdx(p.ifaces[tableID], idx) {
 			p.ifaces[tableID] = append(p.ifaces[tableID], idx)
 		}
@@ -401,6 +411,18 @@ func (p *L3Provider) TableOfIface(ifname string) (uint32, bool) {
 	defer p.mu.Unlock()
 	t, ok := p.ifaceTable[ifname]
 	return t, ok
+}
+
+// ForwardDomainOf 返回该 sw_if_index 作为「转发域」所属的交换机名（决策 #345）。
+//
+// L2 交换机的转发域是 BVI；L3 交换机是其 l3-interface（含 vlan 子接口）与置入其表的 VNF vNIC。
+// 供数据面 DNS 代理按上行 desc.sw_if_index 反查交换机、取按域上游（未配则回落全局）。
+// 未登记（不属于任何已收敛交换机的转发域）时 ok=false——调用方据此按「无按域上游」处理。
+func (p *L3Provider) ForwardDomainOf(idx uint32) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	name, ok := p.idxSwitch[idx]
+	return name, ok
 }
 
 // ErrVrfNotRemoved 删表后读回发现表仍在 VPP 里：按「未收敛」上报，调用方据此进未收敛清单/告警。
@@ -704,6 +726,14 @@ func (p *L3Provider) unbindTableIfaces(c L3Client, idxs []uint32) error {
 func (p *L3Provider) forgetTable(tableID uint32) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// 先摘 idxSwitch（决策 #345）：该表的口不再作为任何交换机的转发域。索引从删除前的
+	// ifaces/subifs/vnfs 一并取出，避免漏摘（与 ifaceTable/vnfs 同一次遍历口径）。
+	for _, idx := range p.ifaces[tableID] {
+		delete(p.idxSwitch, idx)
+	}
+	for _, idx := range p.subifs[tableID] {
+		delete(p.idxSwitch, idx)
+	}
 	delete(p.ifaces, tableID)
 	delete(p.subifs, tableID)
 	for k, t := range p.ifaceTable {
@@ -715,6 +745,7 @@ func (p *L3Provider) forgetTable(tableID uint32) {
 	for k, a := range p.vnfs {
 		if a.tableID == tableID {
 			delete(p.vnfs, k)
+			delete(p.idxSwitch, a.idx) // 决策 #345：转发域归属随之消失
 		}
 	}
 }
@@ -818,6 +849,7 @@ func (p *L3Provider) SetVnfTable(ctx context.Context, vrfName, ifname string) er
 	p.reassignLocked(tableID, []uint32{idx})
 	p.ifaceTable[ifname] = tableID
 	p.ifaceIdx[ifname] = idx
+	p.idxSwitch[idx] = vrfName // 决策 #345：vNIC 是该 L3 交换机的转发域
 	if !containsIdx(p.ifaces[tableID], idx) {
 		p.ifaces[tableID] = append(p.ifaces[tableID], idx)
 	}
@@ -847,6 +879,7 @@ func (p *L3Provider) ForgetVnfIface(ifname string) (uint32, bool) {
 	if !ok {
 		return 0, false
 	}
+	delete(p.idxSwitch, a.idx) // 决策 #345：该 vNIC 不再作为转发域
 	// 该口若同时是 L3 接口（配了地址），ApplyVRF 也登记过它：一并摘掉，避免留下死索引。
 	// 重新声明后 ApplyVRF/SetVnfTable 会再次登记（新 sw_if_index）。
 	if rec := p.ifaces[a.tableID]; len(rec) > 0 {
@@ -960,6 +993,7 @@ func (p *L3Provider) ApplyGateway(ctx context.Context, vs model.VirtualSwitch) e
 	p.mu.Lock()
 	p.bvis[vs.Name] = bvi
 	p.ownTable[vs.Name] = own
+	p.idxSwitch[bvi] = vs.Name // 决策 #345：BVI 是 L2 交换机的转发域（DNS 代理反查用）
 	p.mu.Unlock()
 	return nil
 }
@@ -971,6 +1005,7 @@ func (p *L3Provider) DeleteGateway(ctx context.Context, vsName string) error {
 	own := p.ownTable[vsName]
 	delete(p.bvis, vsName)
 	delete(p.ownTable, vsName)
+	delete(p.idxSwitch, bvi) // 决策 #345：BVI 转发域归属随之消失
 	p.mu.Unlock()
 	if !ok {
 		return nil

@@ -520,6 +520,15 @@ func (v *validator) checkVirtualSwitches(c Config) {
 					"（中继源地址自动取 BVI 的 IPv4 网关地址）", s.Name)
 			}
 		}
+		// 决策 #345：数据面 DNS 代理的**按域上游**——逐条须为合法 IP（v4/v6），空串拒绝；
+		// 条数不设上限（多上游即多备份，按声明序尝试）。L3 交换机的转发域是其 l3-interface，
+		// 故不要求 BVI 网关（与 dhcp-relay 不同）。
+		for i, srv := range s.DNSProxyServers {
+			if !checkIP(srv) {
+				v.errf(fmt.Sprintf("%s.dns_proxy_servers[%d]", p, i),
+					"DNS 代理上游 %q 必须是有效 IP（IPv4/IPv6）", srv)
+			}
+		}
 		dupCheck(v, s.Ports, p+".ports", func(pt VSwitchPort) string { return strconv.Itoa(pt.Seq) }, "端口")
 		for _, pt := range s.Ports {
 			pp := fmt.Sprintf("%s.ports[%d]", p, pt.Seq)
@@ -891,6 +900,13 @@ func (v *validator) checkVpp(c Config) {
 	if vp.Memory != nil && vp.Memory.HugepagePreference != "" {
 		if !v.hpSizes[vp.Memory.HugepagePreference] {
 			v.errf("vpp.memory.hugepage_preference", "大页偏好 %s 必须与 resource-pools 页大小一致", vp.Memory.HugepagePreference)
+		}
+	}
+	// 决策 #345：数据面 DNS 代理的**全局上游**——逐条须为合法 IP（v4/v6），空串拒绝；
+	// 条数不设上限（与既有 system.dns_servers 同风格）。
+	for i, srv := range vp.DNSProxyServers {
+		if !checkIP(srv) {
+			v.errf(fmt.Sprintf("vpp.dns_proxy_servers[%d]", i), "DNS 代理上游 %q 必须是有效 IP（IPv4/IPv6）", srv)
 		}
 	}
 	if vp.DPDK != nil {

@@ -92,6 +92,7 @@ var cliRESTCoverage = map[string]string{
 	"show acls <name> detail":                          "GET /acls/{name}",
 	"show nat":                                         "GET /nat + GET /nat/sessions",
 	"show port-mirroring":                              "GET /port-mirroring",
+	"show dns proxy":                                   "GET /dns/proxy",
 	"show qos policies":                                "GET /qos/policies",
 	"show vpp":                                         "GET /vpp/status",
 	"show vpp threads":                                 "GET /vpp/status",

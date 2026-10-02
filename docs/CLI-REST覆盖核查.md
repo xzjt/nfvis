@@ -48,6 +48,7 @@ REST 侧现状（本轮复核）：
 | v2 决策 #303（2026-09-30） | 新增 1 行 `set system login banner <text>`（配置语句 → candidate API **架构性覆盖**，无需新端点；`delete system login banner` 同族）。该能力的**两个展示面**由新端点承载：未认证只读 `GET /login-banner`（登录页/CLI 登录前展示，`security: []`、只回 banner 本身）与 `PUT`/`DELETE /system/login-banner`（Web「用户与权限」页的「登录横幅」卡，S 级、一次性事务直提入审计）——登录页与 CLI 前置横幅不对应任何命令行形态，故不计入 CLI 行覆盖 | **覆盖 238→239 / 缺口 2 / 例外 20（合计 261）；REST 侧本决策 +3 操作 / +2 路径（连同 #301 的 +2 操作 / +2 路径，当前 140 操作 / 103 路径）** |
 | v2 决策 #304（2026-09-30） | 缺口 #2「`show configuration [permissions <class>]` 的 `permissions` 分支」收口：语义定义为**生效权限视图**（逐路径判定 + 依据，判定单源在 aaa），端点 `GET /configuration/permissions?class=<name>`；Web「用户与权限」页「权限类」表每行「生效权限」按钮同源消费 | **覆盖 239→240 / 缺口 2→1 / 例外 20（合计 261）；REST 侧本决策 +1 操作 / +1 路径（当前 141 操作 / 104 路径）** |
 | v2 决策 #305（2026-09-30） | 最后一个缺口 `request system storage format-data` 收口：语义定义为「恢复出厂数据状态（保留管理面可达）」，端点 `POST /system:format-data`（JSON `confirm=true`，响应 `FormatDataResult`：统计 + 残留清单，残留非空返回 500）；Web「运维动作」页「恢复与出厂」小节新增同名高危档按钮 | **覆盖 240→241 / 缺口 1→0 / 例外 20（合计 261）；REST 侧本决策 +1 操作 / +1 路径（当前 142 操作 / 105 路径）** |
+| v2 决策 #345（2026-10-02） | 三.3 数据面 DNS 代理 v2（自研域内转发器，VPP `punt socket`；取代已撤回的 #338）：新增 `show dns proxy`（→ `GET /dns/proxy`）与 4 条配置语句（`set`/`delete system dns proxy server`、`set`/`delete virtual-switches <n> dns proxy server`，均走 candidate API 架构性覆盖、无需新端点）；上游按域/全局两级优先级，读视图 `DnsProxyView` 与 CLI/Web 三面同源 | **覆盖 241→246 / 缺口 0 / 例外 20（合计 266）；REST 侧本决策 +1 操作 / +1 路径（当前 143 操作 / 106 路径）** |
 
 > **与上轮绝对值对不上的原因**（口径变化，不是能力增减）：①《命令全表》本轮按实际行数重算分族（67/46/11/9/126，此前表内
 > 统计与实际行数不符）；② `show configuration [permissions <class>]` 从覆盖桶移到缺口桶；③ round80 新增的等价写法行全部计入覆盖。
@@ -73,9 +74,9 @@ REST 侧现状（本轮复核）：
 - **方法**：逐族对照《命令全表》与 `openapi.yaml` 的路径 / 方法 / 响应 schema；响应缺字段的以契约 schema 为准绳核实
   （round49 的 VS / VM `statistics` 字段就是这样定的）。端点引用必须真实存在于契约，由 §5 的守护断言 A 机器盯着。
 
-## 2. A 覆盖矩阵（241 行）
+## 2. A 覆盖矩阵（246 行）
 
-### 2.1 show 族（65/68）
+### 2.1 show 族（66/69）
 
 | 命令族（行数） | REST 端点 |
 |---|---|
@@ -97,6 +98,7 @@ REST 侧现状（本轮复核）：
 | `show acls`（1） / `show acls <name> detail`（1） | `GET /acls` / `GET /acls/{name}` |
 | `show nat`（1） | `GET /nat`（运行态会话表另有 `GET /nat/sessions`） |
 | `show port-mirroring`（1） / `show qos policies`（1） | `GET /port-mirroring` / `GET /qos/policies` |
+| `show dns proxy`（1，v2 决策 #345） | `GET /dns/proxy`（启用态 + 全局上游 + 各域覆盖；与宿主解析器 `set system dns server` 两回事） |
 | `show vpp` / `threads` / `buffers` / `memory`（4） | `GET /vpp/status` |
 | `show vpp capture`（1） | `GET /vpp/capture`（导出文件下载 `GET /vpp/capture/{file}`） |
 | `show bonds`（1） / `show bonds <name> detail`（1） | `GET /bonds` / `GET /bonds/{name}` |
@@ -165,11 +167,11 @@ REST 侧现状（本轮复核）：
 `monitor vnf <name>`、`start shell`、`?`（含 `Tab` 补全）、`help [command]`）与通用管道 7 行
 （`\| match` / `\| except` / `\| count` / `\| last` / `\| begin` / `\| display json` / `\| display xml`）——全为**例外**（§4）。
 
-### 2.4 配置模式（124/127；末行 `show` 属 show 族，仅交叉引用、不计入本节的 124）
+### 2.4 配置模式（128/131；末行 `show` 属 show 族，仅交叉引用、不计入本节的 128）
 
 | 命令族（行数） | REST 落点 |
 |---|---|
-| `set <path> …` / `delete <path> …`（2 行通用形态 + §2.2~§2.9 的 **114 条语句** = 116） | `PUT`/`DELETE /configuration/candidate`（`X-NFVIS-Auto-Commit: true` 时校验 + 下发 + 落库一次完成；删除走 candidate 上的键删除）。含 v2 决策 #303 的 `set system login banner <text>` / `delete system login banner`（单行、≤512 字节，提交校验拒绝超限） |
+| `set <path> …` / `delete <path> …`（2 行通用形态 + §2.2~§2.9 的 **118 条语句** = 120） | `PUT`/`DELETE /configuration/candidate`（`X-NFVIS-Auto-Commit: true` 时校验 + 下发 + 落库一次完成；删除走 candidate 上的键删除）。含 v2 决策 #303 的 `set system login banner <text>` / `delete system login banner`（单行、≤512 字节，提交校验拒绝超限） |
 | `commit`（1） | `POST /configuration/commit` |
 | `commit check`（1） | `POST /configuration/check`（同一份校验、不落库不下发；round46 决策 #122） |
 | `commit confirmed [min]`（1） | `POST /configuration/commit`（`confirmed_minutes>0`）+ `POST /configuration/commit:confirm` |

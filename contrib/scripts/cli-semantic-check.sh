@@ -838,6 +838,53 @@ LL_ROWS
   fi
 fi
 
+# ---------- S13 数据面 DNS 代理（决策 #345）：产品读视图 ↔ CLI ↔ VPP punt 注册 ----------
+# 有 DNS 代理配置才可判定正控：现场没配（enabled=false）或缺 VPP 侧 oracle 时如实报「不可判定」，
+# **不计入通过**（与 S11/S12 三档口径一致）。oracle：VPP punt socket 注册（`vppctl show punt socket
+# registrations l4`，round124 真机实测该形态可用；裸 `show punt socket` 会报 unknown input）
+# 里应有 nfvisd 的 client socket（/run/vpp/nfvis-dns.sock）——即「产品真的注册了 punt」的独立事实源；
+# 该命令在底座不存在或无输出时如实报不可判定（不伪造）。
+hdr "S13 数据面 DNS 代理：产品读视图 ↔ CLI show dns proxy ↔ VPP punt 注册"
+dnsview=$(curl_api "$SRV/api/v1/dns/proxy" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
+if [ -z "$dnsview" ]; then
+  unk "S13 取不到产品读视图（GET /dns/proxy 失败），无法对照"
+elif ! command -v python3 >/dev/null 2>&1; then
+  unk "S13 无 python3（解析读视图 JSON 用），无法判定——如实登记"
+else
+  dns_enabled=$(printf '%s' "$dnsview" | python3 -c 'import json,sys
+try: v=json.load(sys.stdin)
+except Exception: print(""); sys.exit(0)
+print("true" if v.get("enabled") else "false")')
+  cli_view=$(cli "show dns proxy" 2>/dev/null)
+  if printf '%s' "$cli_view" | grep -q '%%'; then
+    bad "S13 CLI show dns proxy 报错：$(printf '%s' "$cli_view" | head -c 160)"
+  elif [ "$dns_enabled" = "true" ] && ! printf '%s' "$cli_view" | grep -q '启用'; then
+    bad "S13 REST enabled=true 但 CLI 显示未启用（两面不同源）"
+  elif [ "$dns_enabled" = "false" ] && ! printf '%s' "$cli_view" | grep -q '未配置'; then
+    bad "S13 REST enabled=false 但 CLI 未显示未配置：$(printf '%s' "$cli_view" | head -c 160)"
+  else
+    ok "S13 CLI 与 REST 读视图一致（enabled=$dns_enabled）"
+  fi
+
+  if [ "$dns_enabled" = "true" ]; then
+    if ! command -v vppctl >/dev/null 2>&1; then
+      unk "S13 无 vppctl，无法核对 VPP punt 注册——如实登记"
+    else
+      punt=$(vppctl show punt socket registrations l4 2>/dev/null | tr -d '\r')
+      echo "    vppctl show punt socket registrations l4:"; printf '%s\n' "$punt" | sed 's/^/      | /' | head -6
+      if [ -z "$punt" ]; then
+        unk "S13 vppctl show punt socket registrations l4 无输出（oracle 取不到事实；底座可能无该命令）——如实报不可判定"
+      elif printf '%s\n' "$punt" | grep -q 'nfvis-dns.sock'; then
+        ok "S13 VPP 侧存在 punt 注册（nfvisd client socket 在场，与 enabled=true 一致）"
+      else
+        bad "S13 enabled=true 但 VPP 侧无 nfvisd 的 punt 注册——命令成功而数据面未生效（假功能）"
+      fi
+    fi
+  else
+    unk "S13 现场没有 DNS 代理配置（enabled=false，无正向控制）——造现场：set system dns proxy server <ip> 提交后复跑"
+  fi
+fi
+
 # ============ 清理本脚本创建的对象 ============
 # 接口：先看**条目本身**是不是本次建出来的——是就整条删掉（发现 #15 的同类：收尾只删字段
 # 会留下空壳条目）；否则描述**还回原值**（发现 #15），原本就没有描述才删字段。

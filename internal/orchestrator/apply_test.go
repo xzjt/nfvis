@@ -11,9 +11,10 @@ import (
 
 // recProviders 记录下发调用序列的 mock Provider（验证依赖顺序与失败补偿）。
 type recNet struct {
-	calls  *[]string
-	failOn string
-	bds    *[]model.VirtualSwitch // 非 nil 时记录每次 ApplyBridgeDomain 收到的交换机（含端口集合）
+	calls    *[]string
+	failOn   string
+	bds      *[]model.VirtualSwitch // 非 nil 时记录每次 ApplyBridgeDomain 收到的交换机（含端口集合）
+	dnsProxy *DNSProxyUpstreams     // 非 nil 时记录最近一次 ApplyDNSProxy 收到的声明
 }
 
 func (n recNet) record(op string) error {
@@ -51,6 +52,12 @@ func (n recNet) DeleteBridgeDomain(ctx context.Context, name string) error {
 }
 func (n recNet) ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) error {
 	return n.record("dhcp-relay:" + vs.Name)
+}
+func (n recNet) ApplyDNSProxy(ctx context.Context, want DNSProxyUpstreams) error {
+	if n.dnsProxy != nil {
+		*n.dnsProxy = want
+	}
+	return n.record("dns-proxy")
 }
 func (n recNet) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 	return n.record("vrf:" + vrf.Name)
@@ -177,6 +184,39 @@ func TestApplyOrderNetworkBeforeCompute(t *testing.T) {
 		if (*calls)[i] != w {
 			t.Fatalf("第 %d 步应为 %s，实际 %s（全部: %v）", i, w, (*calls)[i], *calls)
 		}
+	}
+}
+
+// 决策 #345：改动 vpp.dns_proxy_servers / 交换机 dns_proxy_servers 应产生 dns-proxy 伴随操作，
+// 并把完整声明（全局 + 按域）交给 provider；声明未变不产生操作。
+func TestApplyDNSProxyPlan(t *testing.T) {
+	dnsProxy := &DNSProxyUpstreams{}
+	calls := &[]string{}
+	ap := NewApplier(
+		recNet{calls: calls, dnsProxy: dnsProxy},
+		recCompute{calls: calls},
+		recContainer{calls: calls},
+	)
+	newCfg := model.Config{
+		Vpp:             &model.VppConfig{DNSProxyServers: []string{"8.8.8.8"}},
+		VirtualSwitches: []model.VirtualSwitch{{Name: "vs-dns", Type: "l2", DNSProxyServers: []string{"10.0.0.53"}}},
+	}
+	if err := ap.Apply(context.Background(), model.Config{}, newCfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(dnsProxy.Global) != 1 || dnsProxy.Global[0] != "8.8.8.8" {
+		t.Fatalf("全局上游应传给 provider: %+v", dnsProxy)
+	}
+	if len(dnsProxy.PerSwitch["vs-dns"]) != 1 || dnsProxy.PerSwitch["vs-dns"][0] != "10.0.0.53" {
+		t.Fatalf("按域上游应传给 provider: %+v", dnsProxy)
+	}
+	// 声明未变：不重发 dns-proxy（plan 里 reflect.DeepEqual 判定）
+	*dnsProxy = DNSProxyUpstreams{}
+	if err := ap.Apply(context.Background(), newCfg, newCfg); err != nil {
+		t.Fatalf("Apply(noop): %v", err)
+	}
+	if dnsProxy.Global != nil || dnsProxy.PerSwitch != nil {
+		t.Fatalf("声明未变不应重发 dns-proxy: %+v", dnsProxy)
 	}
 }
 

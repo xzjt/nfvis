@@ -253,6 +253,7 @@ var secretEgressRoutes = map[string]string{
 	"/configuration/diff":               "diff 文本：model.Diff 掩码敏感叶子",
 	"/configuration/history":            "提交历史：**有意**只回元数据、不含配置正文",
 	"/configuration/permissions":        "生效权限视图（路径与判定），无配置正文/秘密",
+	"/dns/proxy":                        "数据面 DNS 代理配置声明（上游地址/交换机名），无秘密字段",
 	"/container-functions":              "资源列表（配置视图），无秘密字段",
 	"/container-functions/{name}":       "同上",
 	"/container-functions/{name}/logs":  "容器日志原文（guest 内容，例外——见矩阵）",

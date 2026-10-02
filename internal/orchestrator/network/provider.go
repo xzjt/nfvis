@@ -31,6 +31,7 @@ type L2Network struct {
 	bond                         *BondProvider
 	lldp                         *LldpProvider
 	dhcp                         *DhcpProvider          // 交换机 DHCP 中继（决策 #335，可空——未注入即无 relay 编排）
+	dns                          *DNSProxyProvider      // 数据面 DNS 代理（决策 #345，可空）
 	vhost                        *VhostUserProvider     // M4-4：VNF vNIC 接入
 	memif                        *MemifProvider         // M4-7：容器 vNIC 接入
 	vhostDir                     string                 // vhost-user socket 目录（恢复收敛重放用）
@@ -102,6 +103,31 @@ func (n *L2Network) SetBond(p *BondProvider) { n.bond = p }
 // SetDhcp 追加交换机 DHCP 中继编排（决策 #335；未注入时 relay 语句在提交校验层仍可配，
 // 但数据面无下发路径——恢复收敛会如实记未收敛项，正常装配总是注入）。
 func (n *L2Network) SetDhcp(p *DhcpProvider) { n.dhcp = p }
+
+// SetDNSProxy 追加数据面 DNS 代理编排（决策 #345；未注入时上游语句在提交校验层仍可配，
+// 但数据面无下发路径）。注入的同时把「sw_if_index → 所属交换机」的反查来源接上（L3Provider），
+// 供转发器按上行包来源选按域上游——未接 L3 时反查恒 false（一律回落全局）。
+func (n *L2Network) SetDNSProxy(p *DNSProxyProvider) {
+	n.dns = p
+	if p != nil {
+		p.SetSwitchResolver(func(idx uint32) (string, bool) {
+			if n.l3 == nil {
+				return "", false
+			}
+			return n.l3.ForwardDomainOf(idx)
+		})
+	}
+}
+
+// ApplyDNSProxy 收敛数据面 DNS 代理声明（决策 #345）。调用时机：提交编排把它作为交换机/VRF
+// 之后的伴随操作（全局或任一交换机非空 ⇒ 注册 punt + 起转发器；全空 ⇒ 注销）；恢复收敛的重放
+// 走 recovery.go 的独立记源。未注入 provider 时为空操作（noop/无 VPP 路径）。
+func (n *L2Network) ApplyDNSProxy(ctx context.Context, want orchestrator.DNSProxyUpstreams) error {
+	if n.dns == nil {
+		return nil
+	}
+	return n.dns.Sync(ctx, want)
+}
 
 // SetLldp 追加 LLDP 编排（M3-6）。
 func (n *L2Network) SetLldp(p *LldpProvider) { n.lldp = p }
