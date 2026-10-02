@@ -685,19 +685,10 @@ func run() error {
 					log.Warn("大页池回收未收敛", "size", p.PageSize, "err", p.Error)
 				}
 			}
-			if bad := hpRes.Unconverged(); len(bad) > 0 {
-				msgs := make([]string, 0, len(bad))
-				for _, p := range bad {
-					msgs = append(msgs, fmt.Sprintf("%s：声明 %d、实际 %d、在用 %d%s",
-						p.PageSize, p.Declared, p.ActualAfter, p.InUse, hugepageBlockerText(p)))
-				}
-				alarms.Raise("hugepages", network.SeverityWarning, system.HugepageSurplusAlarmCode,
-					"大页池实际高于声明且未能收敛（在用页不动）："+strings.Join(msgs, "；")+
-						"。处置：停掉持页的 VNF 后再 request system hugepages reclaim，或调整声明值（set resource-pools hugepages … count <n>，需 reboot）",
-					"system")
-			} else {
-				alarms.Resolve("hugepages", system.HugepageSurplusAlarmCode, "system")
-			}
+			// 决策 #329/#346：把对账结果落到告警表——SURPLUS（实际高于声明且收敛不掉）与
+			// ORPHAN（存在无主占用页）。按内核实况重建、收敛后自动消解（同一对账位置与口径、
+			// 各自独立 scope）。逻辑抽到 hugepageAlarms 便于单测。
+			hugepageAlarms(alarms, hpRes)
 			// 决策 #337：L2 环路疑似巡检（采样式，只告警不阻断）——对每个 L2 交换机读一次 MAC
 			// 学习表与上一轮快照比较；独立 scope "loop"，连续多轮平静自动消警。
 			for _, e := range netProvider.CheckLoop(cctx, cfg) {
@@ -1695,6 +1686,50 @@ func (c *dpdkController) SetDPDKBound(ctx context.Context, ifname string, bound 
 		time.Sleep(200 * time.Millisecond)
 	}
 	return pci, cur, nil
+}
+
+// alarmSink 是大页池告警建/消所需的最小告警表能力（由 *network.AlarmStore 实现；
+// 抽成接口便于单测注入假告警表）。
+type alarmSink interface {
+	Raise(scope, severity, code, message, source string)
+	Resolve(scope, code, source string) bool
+}
+
+// hugepageAlarms 把一次大页池对账结果落到告警表（决策 #329 SURPLUS + #346 ORPHAN）。
+//
+// 两条告警同一对账位置与口径：按内核实况**重建**（不靠进程内记忆，跨 nfvisd 重启仍可见）、
+// 收敛后**自动消解**；各自独立 scope（SURPLUS 在 "hugepages"、ORPHAN 在 "hugepages_orphan"）。
+// 无主占用（Orphan>0）按进入对账时观测到的内核实况如实报——即便本轮已把它回收，也留下痕迹，
+// 下一轮内核实况无无主占用即自动消解。
+func hugepageAlarms(sink alarmSink, res system.HugepageReconcileResult) {
+	if bad := res.Unconverged(); len(bad) > 0 {
+		msgs := make([]string, 0, len(bad))
+		for _, p := range bad {
+			msgs = append(msgs, fmt.Sprintf("%s：声明 %d、实际 %d、在用 %d%s",
+				p.PageSize, p.Declared, p.ActualAfter, p.InUse, hugepageBlockerText(p)))
+		}
+		sink.Raise("hugepages", network.SeverityWarning, system.HugepageSurplusAlarmCode,
+			"大页池实际高于声明且未能收敛（在用页不动）："+strings.Join(msgs, "；")+
+				"。处置：停掉持页的 VNF 后再 request system hugepages reclaim，或调整声明值（set resource-pools hugepages … count <n>，需 reboot）",
+			"system")
+	} else {
+		sink.Resolve("hugepages", system.HugepageSurplusAlarmCode, "system")
+	}
+
+	if orphaned := res.Orphaned(); len(orphaned) > 0 {
+		msgs := make([]string, 0, len(orphaned))
+		for _, p := range orphaned {
+			msgs = append(msgs, fmt.Sprintf("%s：在用 %d、实际持有 %d、无主占用 %d 页",
+				p.PageSize, p.InUse, p.Held, p.Orphan))
+		}
+		sink.Raise("hugepages_orphan", network.SeverityWarning, system.HugepageOrphanAlarmCode,
+			"大页池存在无主占用页（分配了却无任何进程/inode 引用、未被收回）："+strings.Join(msgs, "；")+
+				"。它们只占着池、却没人能用（新 VNF 会 Cannot allocate memory）；处置：request system hugepages reclaim 回收"+
+				"（先把 nr_hugepages 收敛到实际持有值再升回声明值，不动运行中的 VM/VPP）",
+			"system")
+	} else {
+		sink.Resolve("hugepages_orphan", system.HugepageOrphanAlarmCode, "system")
+	}
 }
 
 // hugepageBlockerText 把「谁在占用」的可查证据拼成告警文案的一小段（决策 #329）。

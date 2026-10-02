@@ -1009,10 +1009,16 @@ nfvis$ show system hugepages              # 看 声明 / 内核实际 / 在用 /
 nfvis$ request system hugepages reclaim   # 回收空闲的多余页（在用页一律不动）
 ```
 
-三条边界要记住：① 只回收**空闲**的多余页——VPP/VNF 正在用的页**一律不动**；② 只收敛到**已声明**值，
+四条边界要记住：① 只回收**空闲**的多余页——VPP/VNF 正在用的页**一律不动**；② 只收敛到**已声明**值，
 **不改变声明值**（改声明仍用 `set resource-pools hugepages page-size <size> count <n>`，需重启生效）；
 ③ 命令会**回读**内核实际值确认，写不进去或回读不一致会如实报错、并说明**谁在占用**（声明用该页池的 VNF、
 数据面页尺寸偏好、大页挂载点）。收敛不掉时 `show alarms` 会有一条 `HUGEPAGE_POOL_SURPLUS`，收敛后自动消警。
+④ **「在用」不等于「有持有者」**：读视图另有两列「**实际持有**」（按进程的 hugetlb
+映射按 inode 去重汇总，折算到本页尺寸）与「**无主占用**」（= 在用 − 持有）。内核收缩池（例如开机
+`hugepages=4` 后按声明收敛到 2）可能留下一页**谁都持有不到**的页——它在统计上算「在用」，却没人能用它，
+新 VNF 会因 `Cannot allocate memory` 起不来。这类页由 `HUGEPAGE_POOL_ORPHAN`（warning）如实报出，
+`request system hugepages reclaim` 也能收掉它（机制：先把内核 `nr_hugepages` 收敛到**实际持有值**、
+再升回**声明值**——内核只释放空闲页，被引用的页有引用计数、释放不了，所以**运行中的 VM/VPP 不受影响**）。
 
 ### 8.3 L2 虚拟交换机 + BVI 网关
 
@@ -1551,6 +1557,7 @@ nfvis$ request alarms clear all
 > | `ACL_LEFTOVER` | warning | 数据面存在**配置未声明**的 ACL（tag 不在配置里，多为补偿失败留下的残渣）。同上：不被任何配置引用；`request vpp restart` 或手工清理后自动消警；**跨 nfvisd 重启仍可见**（按数据面实况对账重建）|
 > | `BRIDGE_DOMAIN_LEFTOVER` | warning | 数据面存在**配置未声明**的 bridge-domain（BD-Tag 不在配置里，同上）。处置与上面两条一致；**跨 nfvisd 重启仍可见** |
 > | `HUGEPAGE_POOL_SURPLUS` | warning | 大页池**内核实际页数高于声明值**且收敛不掉（多出的页正被占用，回收**不动在用页**）。按内核实况重建、跨 nfvisd 重启仍可见。处置：`show system hugepages` 看谁在占用（声明用该页池的 VNF / 数据面页尺寸偏好 / 大页挂载点）；停掉持页的 VNF 后再 `request system hugepages reclaim`，或调整资源池声明值（`set resource-pools hugepages … count <n>`，需重启）。收敛后自动消警 |
+> | `HUGEPAGE_POOL_ORPHAN` | warning | 大页池存在**无主占用页**（在用 > 实际持有：分配了但无任何进程/inode 引用，内核收缩池时未归还）——表现为“池看着满、却没空页”，新 VNF 会 `Cannot allocate memory`。按内核实况重建、跨 nfvisd 重启可见、收敛后自动消警。处置：`show system hugepages` 看「在用 / 持有 / 无主」三列→ `request system hugepages reclaim` 回收（不动运行中的 VM/VPP） |
 >
 > 上面四条残渣告警的文案都会注明「由启动/巡检对账按数据面事实重建、原始提交不可回溯」——是哪次提交失败、是否被 NAT 引用，数据面看不出来，产品**不编造**。
 

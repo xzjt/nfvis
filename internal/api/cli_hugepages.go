@@ -1,6 +1,6 @@
 package api
 
-// 大页池读视图与回收（决策 #329，FR-SYS-002 / FR-CMP-004 / FR-OPS-010）。
+// 大页池读视图与回收（决策 #329 起步、#346 扩，FR-SYS-002 / FR-CMP-004 / FR-OPS-010）。
 //
 // 三面同源：
 //   · CLI  `show system hugepages`          与 `request system hugepages reclaim`
@@ -11,10 +11,18 @@ package api
 //
 //	声明值   = committed 的 resource-pools 声明（产品唯一真源；deriveKernelDesired 派生）
 //	内核实际 = sysfs nr_hugepages
-//	在用值   = 内核实际 - 空闲页（有持有者的页，**一律不动**）
-//	可回收   = 空闲的多余页 = min(实际-声明, 空闲)
+//	在用值   = 内核实际 - 空闲页（**不一定都有持有者**——见下）
+//	实际持有 = 遍历 /proc/*/smaps 的 hugetlb 映射、按 inode 去重、按 KernelPageSize 折算
+//	无主占用 = 在用 - 实际持有（≥0）：分配了却无进程/inode 引用的页（决策 #346）
+//	可回收   = 空闲的多余页（#329）+ 无主占用页（#346）
 //
-// 本决策只做「收敛到**已声明**值」——不改声明值；改声明是
+// ⚠️ **在用 ≠ 有持有者**（决策 #346 更正 #329 的措辞）：内核收缩池（如开机 hugepages=4 后按
+// 声明收敛）可能留下「谁都持有不到」的页——它算「在用」却没人能用，正是 round124 新 VM
+// 起不来的成因。取不到内核值/持有值时如实显示「取不到」，**不编造**。
+//
+// 回收：既回收空闲的多余页（#329），也回收无主占用页（#346，机制：先把 nr_hugepages 收敛到
+// 实际持有值、再升回声明值——内核只释放空闲页，被引用的页释放不了）。**在用且被引用的页一律
+// 不动**；只收敛到**已声明**值——不改声明值；改声明是
 // `set resource-pools hugepages page-size <size> count <n>`（需 reboot 生效）。
 
 import (
@@ -139,7 +147,8 @@ func hugepagePagesForMB(sizeMB int, pageSize string) int {
 	return 0
 }
 
-// renderHugepagePools `show system hugepages`：大页池三方数字 + 可回收（决策 #329）。
+// renderHugepagePools `show system hugepages`：大页池数字（声明/内核实际/在用/实际持有/
+// 无主占用）+ 可回收（决策 #329/#346）。
 func (x *cliExecutor) renderHugepagePools() string {
 	cfg, err := x.engine.Committed()
 	if err != nil {
@@ -149,12 +158,13 @@ func (x *cliExecutor) renderHugepagePools() string {
 	pools, _ := view["pools"].([]ksys.HugepagePoolView)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%-8s %-10s %-10s %-8s %-8s %-8s %s\n",
-		"页尺寸", "声明", "内核实际", "在用", "空闲", "可回收", "状态")
+	fmt.Fprintf(&b, "%-8s %-10s %-10s %-8s %-10s %-10s %-8s %-8s %s\n",
+		"页尺寸", "声明", "内核实际", "在用", "实际持有", "无主占用", "空闲", "可回收", "状态")
 	for _, p := range pools {
-		fmt.Fprintf(&b, "%-8s %-10s %-10s %-8s %-8s %-8d %s\n",
+		fmt.Fprintf(&b, "%-8s %-10s %-10s %-8s %-10s %-10s %-8s %-8d %s\n",
 			p.PageSize, hugepageDeclaredText(p.Declared), hugepageNum(p.Actual),
-			hugepageNum(p.InUse), hugepageNum(p.Free), p.Reclaimable, hugepageStateText(p.State))
+			hugepageNum(p.InUse), hugepageNum(p.Held), hugepageNum(p.Orphan),
+			hugepageNum(p.Free), p.Reclaimable, hugepageStateText(p.State))
 	}
 
 	// 说明：逐池给出判定依据；无主占用时进一步给「谁在占用」与「该怎么做」。
@@ -177,17 +187,25 @@ func (x *cliExecutor) renderHugepagePools() string {
 	if total > 0 {
 		for _, p := range pools {
 			if p.Reclaimable > 0 {
-				b.WriteString(fmt.Sprintf("  - %s 可回收 %d 页（空闲的多余页）：request system hugepages reclaim\n", p.PageSize, p.Reclaimable))
+				b.WriteString(fmt.Sprintf("  - %s 可回收 %d 页（空闲的多余页 + 无主占用页）：request system hugepages reclaim\n", p.PageSize, p.Reclaimable))
 			}
 		}
 	} else {
-		b.WriteString("  - 无需回收（无空闲的多余页）\n")
+		b.WriteString("  - 无需回收（无空闲的多余页、也无无主占用页）\n")
 	}
 	// 未声明页池的指引（本决策不改声明值；改声明需 reboot）。
 	for _, p := range pools {
 		if p.State == ksys.HugepageStateUnmanaged {
 			b.WriteString(fmt.Sprintf("  - %s 未声明（不托管）：如需声明用 set resource-pools hugepages page-size %s count <n>（变更需 reboot）\n",
 				p.PageSize, p.PageSize))
+		}
+	}
+	// 无主占用页：说明它「谁都持有不到」及其回收机制（不编造持有者）。
+	for _, p := range pools {
+		if p.State == ksys.HugepageStateOrphan {
+			b.WriteString(fmt.Sprintf("  - %s 有 %d 页无主占用（在用 %s 页中仅 %s 页有进程/inode 引用）：request system hugepages reclaim 可回收"+
+				"（机制：先把 nr_hugepages 收敛到实际持有值、再升回声明值；内核只释放空闲页，运行中的 VM/VPP 不受影响）\n",
+				p.PageSize, p.Orphan, hugepageNum(p.InUse), hugepageNum(p.Held)))
 		}
 	}
 	// 多余页全部在用时的证据（不编造）。
@@ -219,7 +237,7 @@ func (x *cliExecutor) requestHugepagesReclaim(user string) string {
 		func(size string, inUse int) []string { return hugepageOccupants(cfg, size) })
 
 	var b strings.Builder
-	b.WriteString("大页池回收（只回收空闲的多余页，收敛到声明值；在用页不动）：\n")
+	b.WriteString("大页池回收（回收空闲的多余页与无主占用页，收敛到声明值；在用且被引用的页不动）：\n")
 	fmt.Fprintf(&b, "%-8s %-10s %-10s %-10s %-8s %-8s %s\n",
 		"页尺寸", "声明", "回收前", "回收后", "在用", "已回收", "结果")
 	for _, p := range res.Pools {
@@ -294,9 +312,11 @@ func hugepageStateText(state string) string {
 	case ksys.HugepageStateOK:
 		return "一致"
 	case ksys.HugepageStateSurplus:
-		return "有无主占用（可回收）"
+		return "有可回收的空闲多余页"
 	case ksys.HugepageStateInUse:
-		return "有无主占用（在用，回收不了/只能回收一部分）"
+		return "多余页在用（回收不了/只能回收一部分）"
+	case ksys.HugepageStateOrphan:
+		return "有无主占用页（可回收）"
 	case ksys.HugepageStateUnmanaged:
 		return "未声明（不托管）"
 	case ksys.HugepageStateUnreadable:

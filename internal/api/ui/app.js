@@ -558,8 +558,9 @@ const hpNum = (v) => (v === undefined || v === null || v < 0 ? '取不到' : Str
 const hpDeclared = (v) => (v === undefined || v === null || v <= 0 ? '未声明' : String(v));
 const hpState = (s) => ({
   ok: '一致',
-  surplus: '有无主占用（可回收）',
-  in_use: '有无主占用（在用）',
+  surplus: '有可回收的空闲多余页',
+  in_use: '多余页在用（回收不了/只能回收一部分）',
+  orphan: '有无主占用页（可回收）',
   unmanaged: '未声明（不托管）',
   unreadable: '取不到内核实际值',
 }[s] || dash(s));
@@ -571,23 +572,24 @@ function renderHugepagePools(hp) {
   $('hp-note').textContent = ok ? '' : '（读取失败：' + (hp ? hp.__err : '未取到数据') + '）';
   const pools = ok ? rowsOf(hp.pools) : [];
   if (!pools.length) {
-    tbody.appendChild(el('tr', {}, [el('td', { colspan: '7', class: 'muted', text: ok ? '（无）' : '读取失败' })]));
+    tbody.appendChild(el('tr', {}, [el('td', { colspan: '9', class: 'muted', text: ok ? '（无）' : '读取失败' })]));
     return;
   }
   pools.forEach((p) => {
     const tr = el('tr');
-    [p.page_size, hpDeclared(p.declared), hpNum(p.actual), hpNum(p.in_use), hpNum(p.free),
-      p.reclaimable, hpState(p.state),
+    [p.page_size, hpDeclared(p.declared), hpNum(p.actual), hpNum(p.in_use), hpNum(p.held),
+      hpNum(p.orphan), hpNum(p.free), p.reclaimable, hpState(p.state),
     ].forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
     tbody.appendChild(tr);
   });
 }
 
 async function hpReclaim() {
-  const ok = await uiConfirm('回收空闲的多余大页', {
+  const ok = await uiConfirm('回收多余的大页', {
     tier: 'mid',
     bullets: [
-      '只回收「内核实际高于声明、且**空闲**」的多余大页；**在用页一律不动**（不会抽走 VPP/VNF 正在用的大页）。',
+      '回收两类页：①「内核实际高于声明、且**空闲**」的多余大页；②**无主占用页**（在用 > 实际持有，即分配了却无任何进程/inode 引用的页）。',
+      '**在用且被引用的页一律不动**（不会抽走 VPP/VNF 正在用的大页）——无主页的回收是先把 nr_hugepages 收敛到实际持有值、再升回声明值，内核只释放空闲页。',
       '收敛目标 = 已声明值；本动作**不改变**声明值（改声明在「配置」页的 resource-pools，需重启生效）。',
       '写后会回读内核实际值确认；未收敛（被在用页挡住）会如实报出谁在占用。',
       '可回退：把声明值调回去并重启，或重启主机按引导基线重新分配。',

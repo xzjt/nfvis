@@ -28,7 +28,11 @@ show system
   ├─ cpu                                            # 总核/隔离核/每核占用
   ├─ memory                                         # 内存与大页使用（池内/池外）
   ├─ storage                                        # 磁盘与镜像仓库占用
-  ├─ hugepages                                      # 大页内核参数与池状态
+  ├─ hugepages                                      # 大页池数字：声明 / 内核实际 / 在用 / **实际持有** /
+  │                                                 #   **无主占用**（决策 #329 起、#346 细分）：
+  │                                                 #   在用 ≠ 有持有者——内核收缩池（如开机 hugepages=4
+  │                                                 #   后按声明收敛）可能留下无人持的页，它算「在用」却
+  │                                                 #   没人能用；持有值取不到就如实说取不到
   ├─ kernel                                         # 内核启动基线三方对照（cmdline/运行实际/配置期望，FR-SYS-014）
   ├─ hardware                                       # 硬件健康：CPU 温度/风扇/电源（IPMI/Redfish/lm-sensors）、磁盘 SMART
   ├─ core-dumps                                     # 崩溃转储清单（VPP/QEMU/nfvisd）
@@ -227,11 +231,18 @@ request system
   ├─ software rollback [to <version>]
   ├─ reboot | shutdown | poweroff                   # S；确认
   ├─ kernel apply | rollback                        # S；确认。按 committed 配置写 GRUB 基线/回退，需重启生效（FR-SYS-014）
-  ├─ hugepages reclaim                              # S。回收**空闲**的多余大页，收敛到声明值（决策 #329）：
-  │                                                 #   ① 只回收「内核实际 > 声明且空闲」的多余页，**在用页一律不动**；
+  ├─ hugepages reclaim                              # S。回收**空闲**的多余大页与**无主占用页**，收敛到声明值
+  │                                                 #   （决策 #329/#346）：
+  │                                                 #   ① 回收「内核实际 > 声明且空闲」的多余页，**在用页一律不动**；
+  │                                                 #   ①b 也回收**无主占用页**（在用 > 实际持有，决策 #346）：机制是先把
+  │                                                 #      `nr_hugepages` 收敛到**实际持有值**（内核只释放空闲页；
+  │                                                 #      被引用的页有引用计数、释放不了）再升回**声明值**，
+  │                                                 #      故运行中的 VM/VPP 不受影响；
   │                                                 #   ② 写后**回读**内核实际值确认（写成功 ≠ 收敛），未收敛如实报错；
   │                                                 #   ③ **不改声明值**——改声明是 set resource-pools hugepages … count <n>（需 reboot）；
-  │                                                 #   ④ 自动收敛在既有 60s 巡检里做（对账式，不新造定时器），本命令是手动入口。
+  │                                                 #   ④ 自动收敛在既有 60s 巡检里做（对账式，不新造定时器），本命令是手动入口；
+  │                                                 #   ⑤ 无主占用持续存在时以 `HUGEPAGE_POOL_ORPHAN`（warning）如实告警，
+  │                                                 #      收敛后自动消解（与 #329 的 `HUGEPAGE_POOL_SURPLUS` 同口径）。
   │                                                 # API: POST /system/hugepages:reclaim（REST 侧同实现）
   ├─ configuration backup [to <path>] | restore <path>   # S；确认。to <path> 另存一份归档（0600）：
   │                                                 #   须绝对路径、目标不得已存在、父目录须已存在；

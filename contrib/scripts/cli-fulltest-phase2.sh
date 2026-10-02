@@ -142,23 +142,31 @@ run S2-banner "configure
 delete system login banner
 commit"
 
-# ---------- 数据面 DNS 代理：真落库 → 回读 → 按地址删除（决策 #345）----------
-# 与横幅同理：只在独立会话里解析不够——要证「提交后真的进了配置、按地址删得掉」。
+# ---------- 数据面 DNS 代理：真落库 → 回读 → 删除（决策 #345）----------
+# 与横幅同理：只在独立会话里解析不够——要证「提交后真的进了配置、删得掉」。
 # 一次真实提交往返（全局对 + 按域），提交后立即删除，不改变机器的长期现场。
+# 删除的三种形态都要有实例（契约行是可选组 `[<ip> | secondary <ip>]`）：
+#   ① `… secondary <ip>` 删备用；② `… <ip>` 按地址删；③ 无值 = 清空整表 / 清本域。
 run S2-dnsproxy "configure
 set system dns proxy server 8.8.8.8 secondary 8.8.4.4
 commit"
 expect_out S2-dnsproxy "8.8.4.4" "show configuration"
-# 按地址删除：只删指定上游（另一个 8.8.8.8 应仍在）——这正是「无值/按地址」两个形态的分工。
 run S2-dnsproxy "configure
-delete system dns proxy server 8.8.4.4
+delete system dns proxy server secondary 8.8.4.4
 commit"
 expect_out S2-dnsproxy "8.8.8.8" "show configuration"
+run S2-dnsproxy "configure
+delete system dns proxy server 8.8.8.8
+commit"
 run S2-dnsproxy "configure
 delete system dns proxy server
 commit"
 run S2-dnsproxy "configure
-set virtual-switches vs-l2 dns proxy server 10.0.0.53
+set virtual-switches vs-l2 dns proxy server 10.0.0.53 secondary 10.0.0.54
+commit"
+expect_out S2-dnsproxy "10.0.0.54" "show configuration"
+run S2-dnsproxy "configure
+delete virtual-switches vs-l2 dns proxy server secondary 10.0.0.54
 commit"
 expect_out S2-dnsproxy "10.0.0.53" "show configuration"
 run S2-dnsproxy "configure
