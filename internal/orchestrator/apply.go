@@ -439,20 +439,6 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 		})
 	}
 
-	// —— 新增/变更：数据面 DNS 代理（决策 #338，FR-NET-010）——
-	// vpp 段的伴随操作：上游非空 → dns name-server + dns enable；清空 → 按登记 del 全部 +
-	// dns disable（避免「启用但无上游」）。声明未变时 Sync 内部按登记幂等跳过；
-	// undo 收敛回旧声明。上游须在 VPP 的 FIB 内可达（校验层只保证是合法 IP）。
-	oldDNS := vppDNSProxyServers(old.Vpp)
-	newDNS := vppDNSProxyServers(new.Vpp)
-	if !equalStringSlices(oldDNS, newDNS) {
-		ops = append(ops, op{
-			desc: "dns-proxy",
-			run:  func(ctx context.Context) error { return a.net.ApplyDNSProxy(ctx, newDNS) },
-			undo: func(ctx context.Context) error { return a.net.ApplyDNSProxy(ctx, oldDNS) },
-		})
-	}
-
 	// —— 新增/变更：接口层（MTU / ingress-policy 绑定；QoS 之后，保证 policer 已建）——
 	dpdkPorts := dpdkManagedIfaces(new.Vpp)
 	for _, iface := range new.Interfaces {
@@ -785,28 +771,6 @@ func configEqualPtr[T any](a, b *T) bool {
 		return true
 	}
 	return configEqual(*a, *b)
-}
-
-// vppDNSProxyServers 取 vpp 声明的数据面 DNS 代理上游（决策 #338；nil Vpp 即无声明）。
-func vppDNSProxyServers(vpp *model.VppConfig) []string {
-	if vpp == nil {
-		return nil
-	}
-	return vpp.DNSProxyServers
-}
-
-// equalStringSlices 顺序敏感的字符串切片相等（决策 #338：DNS 代理上游按声明序还原，
-// 故顺序变化也算变更，与 display set 反推保序一致）。
-func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func jsonKey(v any) any {

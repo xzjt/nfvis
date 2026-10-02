@@ -580,11 +580,6 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 		return x.execShowInterfaces(t[1:])
 	case len(t) >= 1 && t[0] == "port-mirroring":
 		return x.execShowPortMirroring(t[1:])
-	case len(t) >= 1 && t[0] == "dns":
-		if len(t) != 2 || t[1] != "proxy" {
-			return "%% 语法: show dns proxy\n"
-		}
-		return x.renderDNSProxy() // 决策 #338：与 GET /dns/proxy 同源
 	case len(t) >= 1 && t[0] == "qos":
 		return x.execShowQos(t[1:])
 	case len(t) >= 1 && t[0] == "vpp":
@@ -633,7 +628,7 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 	if len(t) >= 2 && t[0] == "vpp" && t[1] == "capture" {
 		return x.execShowVppCapture() // M5-3：抓包会话状态与已导出 pcap 清单
 	}
-	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class> [detail]|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | dns proxy | port-mirroring | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions | system api tokens\n"
+	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class> [detail]|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | port-mirroring | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions | system api tokens\n"
 }
 
 // invalidShowConfiguration：`show configuration <未知/多余 token>` 的统一报错

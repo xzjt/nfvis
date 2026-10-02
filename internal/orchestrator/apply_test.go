@@ -52,9 +52,6 @@ func (n recNet) DeleteBridgeDomain(ctx context.Context, name string) error {
 func (n recNet) ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) error {
 	return n.record("dhcp-relay:" + vs.Name)
 }
-func (n recNet) ApplyDNSProxy(ctx context.Context, servers []string) error {
-	return n.record("dns-proxy:" + strings.Join(servers, ","))
-}
 func (n recNet) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 	return n.record("vrf:" + vrf.Name)
 }

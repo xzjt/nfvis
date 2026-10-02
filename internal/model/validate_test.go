@@ -292,23 +292,6 @@ func TestValidateLearnLimit(t *testing.T) {
 	mustErrContaining(t, Validate(c3), "vs-l3", "L2")
 }
 
-func TestValidateDNSProxyServers(t *testing.T) {
-	// 合法：v4/v6 混合、多条
-	c := validBase()
-	c.Vpp.DNSProxyServers = []string{"8.8.8.8", "2001:4860:4860::8888"}
-	mustNoErr(t, Validate(c))
-
-	// 非法地址拒绝（决策 #338：上游须是有效 IP）
-	bad := validBase()
-	bad.Vpp.DNSProxyServers = []string{"not-an-ip"}
-	mustErrContaining(t, Validate(bad), "dns_proxy_servers", "有效 IP")
-
-	// 空串也拒绝（非空即启用，空串会被下发成无效上游）
-	empty := validBase()
-	empty.Vpp.DNSProxyServers = []string{""}
-	mustErrContaining(t, Validate(empty), "dns_proxy_servers", "有效 IP")
-}
-
 func TestValidateSystemLogin(t *testing.T) {
 	c := validBase()
 	c.System.Login = &SystemLogin{

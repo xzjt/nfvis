@@ -804,45 +804,6 @@ LL_ROWS
   fi
 fi
 
-# ---------- S13 数据面 DNS 代理（决策 #338）：产品读视图 ↔ vppctl show dns servers ----------
-# 有上游配置才可判定：现场没有该配置时缺对照对象，如实报「不可判定」、**不计入通过**（与 S11/S12
-# 同口径）。产品侧只读自身配置声明（GET /dns/proxy），oracle 是数据面实况 `vppctl show dns servers`
-# ——两者一致才证明「下发了 / 随恢复重放回来」，不看命令是否成功。
-hdr "S13 数据面 DNS 代理：产品读视图 ↔ vppctl show dns servers"
-dns_cfg=$(curl_api "$SRV/api/v1/dns/proxy" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
-if [ -z "$dns_cfg" ]; then
-  unk "S13 取不到 GET /dns/proxy，无法对照"
-elif ! command -v python3 >/dev/null 2>&1; then
-  unk "S13 无 python3（解析响应 JSON 用），无法对照——如实登记"
-else
-  dns_servers=$(printf '%s' "$dns_cfg" | python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-print(" ".join(d.get("servers") or []))
-')
-  if [ -z "$dns_servers" ]; then
-    unk "S13 现场没有数据面 DNS 代理配置（无上游可对照）——造现场：set system dns proxy server <ip> 后复跑"
-  else
-    echo "    产品声明上游: $dns_servers"
-    dns_vpp=$(vppctl show dns servers 2>/dev/null | tr -d '\r')
-    echo "    vppctl show dns servers:"; printf '%s\n' "$dns_vpp"
-    if [ -z "$dns_vpp" ]; then
-      bad "S13 vppctl show dns servers 无输出（oracle 取不到事实）"
-    else
-      for ip in $dns_servers; do
-        if printf '%s' "$dns_vpp" | grep -qF "$ip"; then
-          ok "S13 上游 $ip 在 vppctl show dns servers 中可见（已下发/已重放）"
-        else
-          bad "S13 上游 $ip 不在 vppctl show dns servers 中——下发未生效或未随恢复重放"
-        fi
-      done
-    fi
-  fi
-fi
-
 # ============ 清理本脚本创建的对象 ============
 # 接口：先看**条目本身**是不是本次建出来的——是就整条删掉（发现 #15 的同类：收尾只删字段
 # 会留下空壳条目）；否则描述**还回原值**（发现 #15），原本就没有描述才删字段。

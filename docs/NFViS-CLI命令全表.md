@@ -93,7 +93,6 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show acls <name> detail` | 规则与绑定详情 | `GET /acls/{name}` | ✅ |
 | `show nat` | NAT 池/规则/转换会话计数 | `GET /nat` | ✅ |
 | `show port-mirroring` | SPAN 会话状态 | `GET /port-mirroring` | ✅ |
-| `show dns proxy` | 数据面 DNS 代理：启用态 + 上游列表（只读产品配置声明；与 `vppctl show dns servers` 的对照由真机语义套件承担） | `GET /dns/proxy` | 🚫 待真机（决策 #338；已入 fulltest 阶段 2、语义 S13、单测覆盖） |
 | `show qos policies` | 限速策略与绑定 | `GET /qos/policies` | ✅ |
 | `show vpp` | 数据面概览：**版本/连接/待重启**/线程/buffer/内存 | `GET /vpp/status` | ✅（发现 #11 补齐前三项） |
 | `show vpp threads` | main/worker 线程清单与绑核 | 运行态（govpp threads） | ✅ |
@@ -245,9 +244,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set system hostname <s>` | 主机名 | 宿主 hostname | ✅ |
 | `set system timezone <tz>` | 时区 | 宿主 timedatectl | ✅ |
 | `set system ntp server <ip\|host> [prefer]` | NTP 服务器（`prefer` 为无值 flag） | 宿主 NTP | ✅（**决策 #76②** 修复） |
-| `set system dns server <ip> [secondary <ip>]` | DNS（主/备，**宿主解析器**：resolv/systemd-resolved） | 宿主 resolv | ✅（**决策 #76⑥** 修复 secondary） |
-| `set system dns proxy server <ip> [secondary <ip>]` | **数据面** DNS 代理上游（VPP dns 插件；非空即启用、清空即禁用；上游须在 **VPP FIB 内可达**，不自动取宿主上游） | VPP dns 插件 | 🚫 待真机（决策 #338；已入 fulltest 阶段 2、语义 S13、单测覆盖） |
-| `delete system dns proxy server [<ip>\|secondary <ip>]` | 撤销指定上游；不带取值即清空全部（清空发 `dns disable`，避免「启用但无上游」） | VPP dns 插件 | 🚫 待真机（决策 #338；已入 fulltest 阶段 2、语义 S13、单测覆盖） |
+| `set system dns server <ip> [secondary <ip>]` | DNS（主/备） | 宿主 resolv | ✅（**决策 #76⑥** 修复 secondary） |
 | `set system api port <n>` | HTTPS 端口（默认 443） | nfvisd | ✅ |
 | `set system api token-ttl-minutes <n>` | Token 有效期（默认 60） | nfvisd | ✅ |
 | `set system api max-sessions <n>` | 并发会话上限（真限流） | nfvisd | ✅（决策 #71） |
@@ -424,33 +421,33 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 族 | 行数 | 明细 |
 |---|---|---|
-| `show` | 69 | §1.1 show 表 67 行 + §2.1 的 `show`、`show \| display set` 2 行 |
+| `show` | 68 | §1.1 show 表 66 行 + §2.1 的 `show`、`show \| display set` 2 行 |
 | `request` | 46 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/系统/告警） |
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
-| 配置模式 | 133 | §2.1 余下 13 行 + §2.2~§2.9 共 120 行 |
-| **合计** | **269** | 不含管道则为 **260**；按 ` / ` 拆开后 **273 条** |
+| 配置模式 | 131 | §2.1 余下 13 行 + §2.2~§2.9 共 118 行 |
+| **合计** | **266** | 不含管道则为 **257**；按 ` / ` 拆开后 **270 条** |
 
 **分节**（行数）：
 
 | 节 | 行数 | 节 | 行数 |
 |---|---|---|---|
-| §1.1 `show`（含通用管道 9） | 77 | §2.2b `protocols` | 3 |
+| §1.1 `show`（含通用管道 9） | 76 | §2.2b `protocols` | 3 |
 | §1.2 `request` | 47 | §2.3 `interfaces` 与 `bonds` | 10 |
 | §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 17 |
 | §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 9 |
-| §2.2 `system` | 37 | §2.6 `resource-pools` | 3 |
+| §2.2 `system` | 35 | §2.6 `resource-pools` | 3 |
 | §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 20 |
-| §2.9 `container-functions` | 10 | **合计** | **269** |
+| §2.9 `container-functions` | 10 | **合计** | **266** |
 
-**按实测状态分布**（共 269 行）：
+**按实测状态分布**（共 266 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
 | ✅ 实测通过 | 247 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。决策 #335 的两条 dhcp-relay 命令于 round113、决策 #337 的两条 learn-limit 命令于 round115 真机实测，均移入本桶。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶；`request system storage format-data` 由决策 #305 落地（原 🚫 破坏性、契约已登记延期），按「破坏性但已验」移入本桶 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 18 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319。决策 #337 的 `set/delete virtual-switches <n> learn-limit …` 两条已入 fulltest 阶段 2、单测覆盖，真机复跑待执行；原 `set/delete virtual-switches <n> dhcp-relay …` 已于 round113 真机验证并移出本行（决策 #335）。决策 #338 的 `show dns proxy`、`set/delete system dns proxy server …` 三条已入 fulltest 阶段 1/2、语义 S13、单测覆盖，真机复跑待执行） |
+| 🚫 本轮未执行 | 15 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 5 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319。决策 #337 的 `set/delete virtual-switches <n> learn-limit …` 两条已入 fulltest 阶段 2、单测覆盖，真机复跑待执行；原 `set/delete virtual-switches <n> dhcp-relay …` 已于 round113 真机验证并移出本行（决策 #335）） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
@@ -468,12 +465,10 @@ pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**
 `cli-fulltest` **214 / 0 / 13**（旧 198/0/11；增量逐阶段 = 阶段 1 `+1` `show system api tokens`、
 阶段 2 `+4`（登录横幅语句 1 + 提交→回读→清除 3）、阶段 4 `+2`（`format-data` 结构检查、
 吊销不存在的 token id，两条都进「预期报错」桶 ⇒ 11→13）、**新增阶段 7** `+7`（CLI 脚本文件模式 `-f`）；
-决策 #337 再于阶段 2 `+2`：`set/delete virtual-switches <n> learn-limit <n>`；
-决策 #338 再于阶段 1 `+1` `show dns proxy`、阶段 2 `+2` `set/delete system dns proxy server …` ⇒ 217）、
-`cli-semantic-check` **26 / 0 / 1**（旧 12/0/1；新增 **S10 配置编辑锁语义** 12 项，含 5 项正向控制，
+决策 #337 再于阶段 2 `+2`：`set/delete virtual-switches <n> learn-limit <n>`）、
+`cli-semantic-check` **24 / 0 / 1**（旧 12/0/1；新增 **S10 配置编辑锁语义** 12 项，含 5 项正向控制，
 覆盖 #317/#318 的排他/接管/`ErrLockLost`/登出释放；**决策 #337 新增 S12**：产品读视图
-`learn_limit` ↔ `vppctl show bridge-domain <id> detail` 的 Learn-li，无配置如实报不可判定；
-**决策 #338 新增 S13**：产品读视图 `show dns proxy` ↔ `vppctl show dns servers`，无配置如实跳过）、
+`learn_limit` ↔ `vppctl show bridge-domain <id> detail` 的 Learn-li，无配置如实报不可判定）、
 `cli-lifecycle-check` **21 / 0 / 3**（不变）、
 `cli-pty-smoke` **10 / 10**（不变）。逐阶段差异与原因见规格书附录 A #319⑤；
 命令清单与契约的对账由 `contrib/scripts/check_suite_contract_sync.sh` 守护（`make check` 的 `toolcheck`）。

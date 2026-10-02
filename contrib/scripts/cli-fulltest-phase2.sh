@@ -50,8 +50,6 @@ set system timezone Asia/Shanghai
 set system ntp server 192.168.155.1
 set system ntp server 192.168.155.2 prefer
 set system dns server 8.8.8.8 secondary 8.8.4.4
-set system dns proxy server 8.8.8.8 secondary 8.8.4.4
-delete system dns proxy server
 set system api port __API_PORT__
 set system api token-ttl-minutes 60
 set system api max-sessions 8

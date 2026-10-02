@@ -95,11 +95,6 @@ func OperRoot() *Node {
 			),
 			K("nat", "NAT 池、规则与转换会话计数"),
 			K("port-mirroring", "SPAN 会话状态"),
-			K("dns", "DNS",
-				// 决策 #338：数据面 DNS 代理读视图（上游列表 + 启用态）。与 `show system` 无关——
-				// 它读的是 vpp.dns_proxy_servers，不是宿主解析器。
-				K("proxy", "数据面 DNS 代理（上游与启用态；与 vppctl show dns servers 对照）"),
-			),
 			K("qos", "限速策略",
 				K("policies", "策略与绑定列表"),
 			),

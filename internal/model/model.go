@@ -312,11 +312,6 @@ type VppConfig struct {
 	Memory  *VppMemory  `json:"memory,omitempty"`
 	DPDK    *VppDPDK    `json:"dpdk,omitempty"`
 	Plugins []VppPlugin `json:"plugins,omitempty"`
-	// DNSProxyServers 数据面 DNS 代理的上游服务器（决策 #338，FR-NET-010）：非空即启用
-	// （逐条下发 VPP dns name-server + dns enable），清空即 dns disable（避免「启用但无上游」
-	// 的坏态）。与 SystemConfig.DNSServers（宿主解析器）是两回事：本字段是**数据面**域内
-	// VNF/容器把 resolver 指向网关时用的上游；上游须在 VPP 的 FIB 内可达（不自动喂宿主上游）。
-	DNSProxyServers []string `json:"dns_proxy_servers,omitempty"`
 }
 
 type VppCPU struct {

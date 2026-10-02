@@ -922,32 +922,6 @@ nfvis# commit
 > 会话，普通 commit 会被拒并输出自锁警告；confirmed 让它在超时未确认时自动回滚。
 > 管理口 IP 只在下次启动时收敛监听（运行期不热改地址）。
 
-#### DNS 的两条路：宿主解析器 vs 数据面代理
-
-NFViS 有两个互不影响的 DNS 配置，**别混用**：
-
-| | 命令 | 谁在用 | 上游要求 |
-|---|---|---|---|
-| **宿主解析器** | `set system dns server <ip> [secondary <ip>]` | 管理面：本机（nfvisd/CLI/`apt` 等）经 systemd-resolved 解析 | 管理口可达即可 |
-| **数据面 DNS 代理** | `set system dns proxy server <ip> [secondary <ip>]` | 数据面：域内 VNF/容器把 resolver 指向**网关地址**即可解析（VPP 内置 dns 插件代为转发/缓存） | 上游必须**在 VPP 的 FIB 内可达** |
-
-```bash
-nfvis# set system dns proxy server 8.8.8.8 secondary 1.1.1.1   # 启用数据面 DNS 代理
-nfvis# commit
-nfvis$ show dns proxy                                          # 启用态 + 上游列表
-```
-
-- **非空即启用**：只要配了上游，产品就逐条下发 `dns name-server` 并 `dns enable`；
-  **清空即禁用**：`delete system dns proxy server`（不带地址即清空全部）会撤销全部上游并 `dns disable`
-  ——不会留下「启用但无上游」的坏态。
-- **上游可达性是数据面路径**：解析请求由 VPP 从数据面发出，走 **VPP 的路由（FIB）**，因此上游
-  必须能被 VPP 路由到。**产品不会自动把宿主解析器的上游喂给 VPP**——宿主上游通常经管理口，
-  在 VPP 的 FIB 里并不存在。
-- **客户端 resolver 由操作者/DHCP 指定**：域内 VM/容器要把 `/etc/resolv.conf` 指向**网关地址**
-  （该交换机的 BVI 网关 IP）才会经 NFViS 解析；自动经 DHCP option 6 下发不在本版范围。
-- 只读视图：CLI `show dns proxy` 与 REST `GET /dns/proxy`（`{enabled, servers}`）同源，
-  只呈现**产品配置声明**；与数据面实况的对照用 `vppctl show dns servers`。
-
 其他系统级语句：`set system api port <uint>`、`token-ttl-minutes`、`max-sessions`、
 `api tls cert-file <p> key-file <p>`（装外部证书，立即生效）、`api tls self-signed regenerate`
 （重签自签）、`set protocols lldp …`（见 §8.10）。

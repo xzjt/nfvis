@@ -192,15 +192,6 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 			record("protocols/lldp", err)
 		}
 	}
-	// 数据面 DNS 代理（决策 #338）：VPP 重启后 dns 插件的 name-server 与 enable 状态一并消失，
-	// 不重放即静默丢代理（与 L2-2/#335/#337 同族教训）。独立记源、失败不阻塞其余对象；
-	// resetProviders 已清空 DNSProxyProvider 登记，声明未变也会重新下发（幂等）。
-	// 只补齐不摘除（附录 A #35）：清空走提交编排（dns disable），恢复段不猜。
-	if n.dns != nil && cfg.Vpp != nil && len(cfg.Vpp.DNSProxyServers) > 0 {
-		if err := n.ApplyDNSProxy(ctx, cfg.Vpp.DNSProxyServers); err != nil {
-			record("vpp/dns-proxy", err)
-		}
-	}
 	for _, iface := range cfg.Interfaces {
 		if err := n.ApplyInterface(ctx, iface); err != nil {
 			record("interfaces/"+iface.Name, err)
@@ -268,9 +259,6 @@ func (n *L2Network) resetProviders() {
 	}
 	if n.dhcp != nil {
 		n.dhcp.reset()
-	}
-	if n.dns != nil {
-		n.dns.reset()
 	}
 	if n.lldp != nil {
 		n.lldp.reset()

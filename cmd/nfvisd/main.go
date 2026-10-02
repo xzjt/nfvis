@@ -172,8 +172,6 @@ func run() error {
 	netProvider.SetServices(network.NewServicesProviderFunc(vppMgr.SvcClientFunc()))
 	// 决策 #335：交换机 DHCP 中继（VPP dhcp proxy；恢复重放含 relay）
 	netProvider.SetDhcp(network.NewDhcpProviderFunc(vppMgr.DhcpClientFunc()))
-	// 决策 #338：数据面 DNS 代理（VPP dns 插件；恢复重放含它）
-	netProvider.SetDNSProxy(network.NewDNSProxyProviderFunc(vppMgr.DNSClientFunc()))
 	netProvider.SetACL(network.NewAclProviderFunc(vppMgr.AclClientFunc()))
 	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
 	netProvider.SetBond(network.NewBondProviderFunc(vppMgr.BondClientFunc()))

@@ -105,7 +105,6 @@ func TestResponseShapeMatchesContract(t *testing.T) {
 		{"GET", "/system/api-tokens"},         // 决策 #301：活动会话清单（登录后恒有≥1 条，自己的会话）
 		{"GET", "/login-banner"},              // 决策 #303：登录横幅（未设置时走白名单省略）
 		{"GET", "/configuration/permissions"}, // 决策 #304：生效权限视图（调用者自己 class）
-		{"GET", "/dns/proxy"},                 // 决策 #338：数据面 DNS 代理（enabled/servers 恒有）
 	} {
 		props := declaredProps(t, spec, ep.path, ep.method)
 		if len(props) == 0 {
