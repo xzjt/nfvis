@@ -251,10 +251,26 @@ func run() error {
 	if err := os.MkdirAll(computeCfg.VhostDir, 0o755); err != nil {
 		log.Warn("创建 vhost-user socket 目录失败", "dir", computeCfg.VhostDir, "err", err)
 	}
-	libvirtCtx, libvirtCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	p, conn, cerr := compute.NewConnectedProvider(libvirtCtx, computeCfg)
-	libvirtCancel()
-	if cerr != nil {
+	// 决策 #350：启动期 libvirt 连接的有界重试。开机竞态：libvirtd「Started」后仍要先做完
+	// 既有 VM 的 autostart（大页 prealloc）才服务客户端握手，单次 10s 可能连不上，而一次
+	// 失败即永久降级、每次开机后 VM 编排需人工恢复。重试**只在启动装配期**：任一次成功即
+	// 按既有路径接入（成功路径行为不变），最终失败仍走既有降级 + 告警（文案不变）；运行期
+	// 「不自动重连」语义不变。
+	var (
+		p    *compute.Provider
+		conn *compute.Conn
+		cerr error
+	)
+	libvirtConnect := func() error {
+		// 单次尝试各自有界（沿用既有 10s 上界）。
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		p, conn, cerr = compute.NewConnectedProvider(ctx, computeCfg)
+		return cerr
+	}
+	if err := boundedRetry(libvirtConnectAttempts, libvirtRetryBackoff, func(attempt int, err error) {
+		log.Warn("libvirt 连接未就绪，稍后重试", "attempt", attempt, "err", err)
+	}, libvirtConnect); err != nil {
 		// 连接失败/超时（含 libvirtd 假死被 Connect 的有界等待截断）→ 降级 NoopCompute
 		// 并落告警，不阻塞启动（决策 #349：降级必须可见，不能只有一行日志）。
 		log.Warn("计算编排未接入（libvirt 连接失败），VM 生命周期不可用", "uri", computeCfg.URI, "err", cerr)
@@ -1822,4 +1838,40 @@ func errReason(err error) string {
 		return "未知"
 	}
 	return err.Error()
+}
+
+// 启动期 libvirt 连接重试参数（写入契约防膨胀）：3 次尝试（首次 + 2 次重试），每次沿用
+// 既有 10s 上界，尝试间固定退避 1s ⇒ 启动期 libvirt 总上界 ≈32s。只对 libvirt 加重试
+// （观测到的开机竞态只有它）；Docker 维持单次有界探测，不为未观测场景扩面。
+const (
+	libvirtConnectAttempts = 3
+	libvirtRetryBackoff    = 1 * time.Second
+)
+
+// boundedRetry 以固定次数调用 connect（调用方自行保证单次有界）；非首次尝试前等待 backoff。
+// 每次失败经 onRetry 上报（attempt 从 1 开始、含最后一次）；返回最后一次的错误（全败）或 nil。
+// attempts <= 0 视为 1；connect 为 nil 时报错（防御）。纯函数：不在函数里打日志，失败经
+// onRetry 回调交调用方决定（可单测锁住次数/退避/回调语义）。
+func boundedRetry(attempts int, backoff time.Duration, onRetry func(attempt int, err error), connect func() error) error {
+	if attempts <= 0 {
+		attempts = 1
+	}
+	if connect == nil {
+		return errors.New("boundedRetry：connect 为 nil")
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if attempt > 1 {
+			time.Sleep(backoff)
+		}
+		err := connect()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if onRetry != nil {
+			onRetry(attempt, err)
+		}
+	}
+	return lastErr
 }
