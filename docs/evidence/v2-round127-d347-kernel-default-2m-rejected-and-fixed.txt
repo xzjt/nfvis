@@ -1,0 +1,53 @@
+NFViS v2 真机验证记录 round127 —— 决策 #347（内核默认大页尺寸 2M）真机验证
+====================================================================
+日期：2026-10-02；环境：nfvis-vm；轮次：dev37（apply+reboot）→ dev38（修复后再次 apply+reboot 复验）。
+
+§0 结论
+1. **原目标被真机否决**：VPP 的 main heap **偏好最大可用页尺寸（1G）**——`default-hugepage-size`、
+   `main-heap-page-size`、**内核 `default_hugepagesz`** 都改不了它（新基线重启后复测：仍 1 个 1G 映射）；
+   拆 hugetlbfs 挂载点也不通（那页是匿名 mmap）。⇒「让 1G 池只给 VNF」此路不通；**1G 池声明 N ⇒ VNF 可用 N−1**。
+   用户据此改选「保留新基线（default=2M，与数据面概念对齐），只修过渡期 bug」，并把「数据面固定占 1 个
+   1G 页」写进用户可见口径（已登记待做）。
+2. **修掉一个真缺陷（sysctl 池身份错位）**：`vm.nr_hugepages` 只作用于**默认尺寸池**，而该尺寸在
+   `request system kernel apply` 之后、重启之前就已改变（GRUB 新基线 2M、运行中 cmdline 仍 1G）——
+   旧判据取「当前 cmdline」⇒ 写下旧尺寸池的值 ⇒ 重启后同一行落到 2M 池上（dev37 实测：2M 从 dmesg 的
+   768 掉到 2，VPP 起不来、数据面长时间不可用）。修法：判据取**即将生效的基线**（优先产品写下的 GRUB
+   片段 `/etc/default/grub.d/99-nfvis.cfg`，回退 `/proc/cmdline`，两者都取不到则保守不动）。
+   **dev38 复验通过**：apply 前后 90 号片段均按 2M 池写 768；重启后 `2M nr=768`、
+   `show system kernel` 报「内核基线与配置期望一致（无需重启）」。
+3. **另发现两项（已登记，未修）**：① **重启后 VPP 不自启**——`vpp.service` 为 `disabled`（systemd 不起它），
+   而 nfvisd 只打「连接 VPP 失败，稍后重试」、**不主动拉起** ⇒ 重启后数据面不可用，需人工 `systemctl start vpp`；
+   ② **重启后 VNF 也不自启**（sem-vm `shut off`）。两者同族：**重启后现场（数据面 + 负载）不自动恢复**。
+
+§1 对照实验（dev36 时期；三种 memory 配置各起一次 VPP，看 `/proc/<pid>/smaps` 的 KernelPageSize 分布）
+| memory 段配置 | 1G 映射 | 2M 映射 |
+|---|---|---|
+| `default-hugepage-size 2M` + `main-heap-page-size 2M`（现状） | 1 | 7 |
+| 去掉整个 memory 段 | 2 | 1 |
+| 只写 `default-hugepage-size 2M` | 1 | 2 |
+
+⇒ 变化的是 **buffers 等 arena**；**main heap 恒为 1 个 1G 映射**。我最初把 arena 的变化误读成 main heap，
+据此推出的「main heap 跟内核默认尺寸」是错的——新基线重启后复测推翻（§3）。
+
+§2 dev37 真机（apply + reboot 后）
+- cmdline 已是 `default_hugepagesz=2M hugepagesz=2M hugepages=768 hugepagesz=1G hugepages=2 isolcpus=1-4` ✓
+  （`show system kernel` 的期望侧此时已一致）
+- **但 2M 池被写成 2**（dmesg 明记 `HugeTLB: registered 2.00 MiB page size, pre-allocated 768 pages`）
+  ⇒ VPP 起不来（main heap 需 1G 的页）⇒ `show vpp` connected: no、数据面长时间不可用。
+- 人工恢复：`echo 768 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages` + `systemctl start vpp`。
+- 根因分析见 §0.2（判据取错「池身份」）。
+
+§3 dev38 真机（修复后 apply + reboot 复验，本决策的最终验证）
+- 90 号 sysctl 片段：apply 前后均为「默认页尺寸 2M，声明 768 页；`vm.nr_hugepages = 768`」
+  （**未回退成旧尺寸池的值** ✓）。
+- 重启后池账：`2M nr=768 free=768`、`1G nr=2 free=2`、`vm.nr_hugepages=768` ✓。
+- `show system kernel`：「**内核基线与配置期望一致（无需重启）**」✓。
+- 大页读视图（手工起 VPP 前）：`1G 2/2/在用0/空闲2`、`2M 768/768/在用0/空闲768` ✓。
+- 手工起 VPP 后：**VPP 仍占 1 个 1G 页**（`1 × KernelPageSize 1048576 kB`）⇒ 读视图 `1G 在用 1 / 持有 1`、
+  `2M 在用 533 / 持有 23 / 无主 510`——**如实**呈现（正是 §0.1 的边界与 #346 的可见性）。
+
+§4 现场终态与登记
+- 版本 2.0.0~dev38；新基线（default=2M）已生效且与配置期望一致；VPP 已手工拉起、数据面可用；
+  sem-vm 未起（见 §0.3）。
+- 重启还会导致 **SSH host key 变更**（本次两次 reboot 后均出现，相对次要，一并登记）。
+- 新登记（`docs/v2待做.md`）：**重启后现场不自动恢复**（VPP 不自启 + VNF 不起）。
