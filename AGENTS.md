@@ -380,6 +380,15 @@
   ④ `request vpp restart` 后 macip 随重放回来、ARP 重新通。**R117-2 扩为四次复现/三种形态**（含「接口先删、
   ACL 绑定登记陈旧 → 删 ACL 撞 -2、须 restart nfvisd」的新变体）；修法方向已写进待做（接口消失时同步清
   ACL 绑定登记 / 对「接口不存在」容错解绑）。证据 `docs/evidence/v2-round120-d341-macip-arp-verified.txt`。
+- **round121（决策 #342 收口 R117-2：ACL 解绑容错 + 删除计划先解引用，2026-10-02，PR #269 + dev32）**：真机四次
+  复现的删除倒序家族定根同修——`acl.go` 解绑遇 VPP `Invalid sw_if_index (-2)` 按**已达成**处理（复用既有
+  `isMissingIfaceErr`，清 `bound/macipBound` 登记、不打断删除；**真实触发点是 `DeleteACL` 的重绑循环**，
+  `BindIndex` 空绑定分支实际不可达——子智能体核实并如实报告）+ `apply.go` 删除计划把 **ACL 提到最前**
+  （先解引用、后删被引用，与 #196 口径一致）。**真机复验（dev32）**：同提交删「L3 交换机 + 其 ACL」、
+  先删 `l3-interface` 再删 ACL——**均一次提交成功、无需重启 nfvisd**（修复前必撞 -2 + 回滚/须 restart）。
+  结束后出现的 `COMMIT_VRF_DELETE_DEFERRED`/`VRF_TABLE_LEFTOVER` 是**既有删表延后行为**（#192，按文案
+  `request vpp restart` 后自动消解，已与本次修复区分）。测试：4 例容错 + 顺序断言反转；make check RC=0。
+  证据 `docs/evidence/v2-round121-d342-acl-delete-order-verified.txt`。
 - 已定决策 244 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#342）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
