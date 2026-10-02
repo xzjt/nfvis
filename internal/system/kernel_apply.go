@@ -163,55 +163,62 @@ func (a *BaselineApplier) setFstabLine(line string) error {
 	return writeFile(p, strings.Join(kept, "\n")+"\n")
 }
 
-// GenerateHugepageSysctl 产出「把默认尺寸大页池钉回声明值」的 sysctl 片段内容。
+// GenerateHugepageSysctl 产出把**默认尺寸大页池**钉回声明值的 sysctl 片段内容——
+// 唯一真源（决策 #199 引入、#201 收口，#347 同步口径）。
 //
-// 为什么需要（R88-1，真机 round88 定位）：VPP 的 deb 装了 /etc/sysctl.d/80-vpp.conf
-// （`vm.nr_hugepages=1024`，注释写明是给 **2M** 池留的），而 `vm.nr_hugepages` 只作用于
-// **默认尺寸**池。产品内核基线一旦设了 `default_hugepagesz=1G`（1G 池 > 0 时必设，见
-// GenerateBaseline），这条 sysctl 就落到 **1G** 池上：开机时 systemd-sysctl 按可用内存
-// 尽量分配，1G 池因此**大于**内核基线声明的页数（真机现场：cmdline `hugepages=1`，
-// 运行实际 nr=4）。此前被记作「1G 池无主占用，未做回收」，机制其实在这里。
-//
-// 本文件按同一规则写回声明值：序号 90 > 80 ⇒ 后执行者生效，多余的空闲页随之释放。
-// 默认尺寸判据与 GenerateBaseline 完全同源：1G 池 > 0 时才写 default_hugepagesz=1G。
-// GenerateHugepageSysctl 产出大页池 sysctl 片段内容——**唯一真源**（决策 #199 引入、#201 收口）。
+// `vm.nr_hugepages` 只作用于**内核默认尺寸池**，而该尺寸由 cmdline 的 `default_hugepagesz`
+// 决定。决策 #347 把内核启动基线的默认尺寸固定为 2M（见 GenerateBaseline），但**当下生效的**
+// 默认尺寸仍可能是旧基线的 1G（apply 后尚未重启）。故这里的判据取自 d.DefaultHugepageSize
+// （调用方从当前 /proc/cmdline 填入），**不硬编码 2M**——否则过渡期会把 2M 池的声明值喂给
+// 仍是 1G 的默认尺寸池（内存级事故），或反之。
+//   - 默认尺寸已知且该尺寸池声明 > 0 ⇒ 钉该池声明值；
+//   - 默认尺寸已知但该尺寸池未声明（<= 0）⇒ 不产出（调用方删除该文件）；
+//   - 默认尺寸未知（d.DefaultHugepageSize 为空）⇒ 不产出（调用方据此**不动**该文件，
+//     见 ensureHugepageSysctl / EnsureHugepageSysctlFromCmdline）。
 //
 // 为什么需要（真机 round88 定位）：VPP 的 deb 装了 /etc/sysctl.d/80-vpp.conf
-// （`vm.nr_hugepages=1024`，注释写明是给 **2M** 池留的），而 `vm.nr_hugepages` 只作用于
-// **默认尺寸**池。产品内核基线一旦设了 `default_hugepagesz=1G`（1G 池 > 0 时必设，见
-// GenerateBaseline），这条 sysctl 就落到 **1G** 池上：开机时 systemd-sysctl 按可用内存
-// 尽量分配，1G 池因此**大于**内核基线声明的页数（真机现场：cmdline `hugepages=1`，
-// 运行实际 nr=4）。此前被记作「1G 池无主占用，未做回收」，机制其实在这里。
+// （`vm.nr_hugepages=1024`，注释写明是给 **2M** 池留的）。历史上产品基线设了
+// `default_hugepagesz=1G`（当时 1G 池 > 0 必设，见 GenerateBaseline）时这条 sysctl 落到
+// **1G** 池上，开机时 systemd-sysctl 按可用内存尽量分配，1G 池因此**大于**内核基线声明的
+// 页数（真机现场：cmdline `hugepages=1`，运行实际 nr=4）。#347 后默认尺寸恒为 2M，这条
+// sysctl 与它的本意（2M 池）自然一致——#347 前是「配置写 2M、实际落 1G」的错配，改后消除。
 //
 // 单一事实源：安装期由 postinst 用 dpkg-divert 把 vpp 那个 conffile 挪到
 // `<同名>.vpp-disabled`（决策 #201），此后 `vm.nr_hugepages` 只由本文件声明——
 // 不再依赖「90 号文件名序在 80 号之后」的排序约定，也没有开机期「先撑大再回缩」的抖动。
 // vpp 原文件里另一个生效键 `vm.hugetlb_shm_group=0`（root 组可访问大页）由本文件接管保持原值，
 // 免得挪走文件顺手丢掉它。回退内核基线时本文件一并撤除（见 Rollback）。
-//
-// 默认尺寸判据与 GenerateBaseline 完全同源：1G 池 > 0 时才写 default_hugepagesz=1G。
 func GenerateHugepageSysctl(d KernelDesired) string {
-	n, size := 0, ""
-	switch {
-	case d.Hugepages1G > 0:
-		n, size = d.Hugepages1G, "1G"
-	case d.Hugepages2M > 0:
-		n, size = d.Hugepages2M, "2M"
+	var n int
+	switch d.DefaultHugepageSize {
+	case "1G":
+		n = d.Hugepages1G
+	case "2M":
+		n = d.Hugepages2M
 	default:
+		return "" // 默认尺寸未知：不产出（调用方据此不动）
+	}
+	if n <= 0 {
 		return ""
 	}
 	return "# 由 NFViS 生成：大页池 sysctl 的**唯一真源**\n" +
 		"# vpp 包自带的 /etc/sysctl.d/80-vpp.conf 已由 dpkg-divert 挪到 .vpp-disabled\n" +
-		"# （它的 vm.nr_hugepages=1024 本意给 2M 池，而这枚 sysctl 只作用于**默认尺寸**池；\n" +
-		"#   产品基线设了 default_hugepagesz=1G 时它会落到 1G 池上、把池撑过声明值）\n" +
-		fmt.Sprintf("# 默认页尺寸 %s，声明 %d 页；hugetlb_shm_group 沿用 vpp 包原值\n", size, n) +
+		"# （它的 vm.nr_hugepages=1024 本意给 2M 池；钉值以**当前内核默认尺寸池**为准）\n" +
+		fmt.Sprintf("# 默认页尺寸 %s，声明 %d 页；hugetlb_shm_group 沿用 vpp 包原值\n", d.DefaultHugepageSize, n) +
 		fmt.Sprintf("vm.nr_hugepages = %d\n", n) +
 		"vm.hugetlb_shm_group = 0\n"
 }
 
-// ensureHugepageSysctl 落盘大页池 sysctl 片段（幂等；无声明时删除该文件）。
+// ensureHugepageSysctl 落盘大页池 sysctl 片段（幂等；该尺寸池有声明则写、未声明则删）。
+// 决策 #347：`vm.nr_hugepages` 作用于**当前内核默认尺寸池**（cmdline 的 default_hugepagesz），
+// 而非新基线的 2M——apply 之后尚未重启，作用对象仍是旧默认尺寸池。取不到默认尺寸时
+// **保守不动**该文件（不写不删），绝不猜。
 func (a *BaselineApplier) ensureHugepageSysctl(d KernelDesired) error {
 	p := a.path(hugepageSysctlRel)
+	d.DefaultHugepageSize = CurrentDefaultHugepageSize(a.Root)
+	if d.DefaultHugepageSize == "" {
+		return nil // 默认尺寸未知：保守不动（不写不删）
+	}
 	content := GenerateHugepageSysctl(d)
 	if content == "" {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
@@ -278,6 +285,16 @@ func (a *BaselineApplier) stripLegacyGrubParams() error {
 // 不摘除会与片段重复注入（cmdline 同名参数以最后一个为准）。
 var legacyParamRe = regexp.MustCompile(` ?(default_hugepagesz|hugepagesz|hugepages|isolcpus|nohz_full|rcu_nocbs|irqaffinity|nmi_watchdog|transparent_hugepage|iommu|intel_iommu|amd_iommu|intel_pstate|amd_pstate)=[^ "]*`)
 
+// CurrentDefaultHugepageSize 读 root 前缀下 /proc/cmdline 的 `default_hugepagesz`（"1G"/"2M"），
+// 取不到返回 ""（未知）。供大页池 sysctl 钉值判据与安装器打印路径共用（决策 #347）。
+func CurrentDefaultHugepageSize(root string) string {
+	b, err := os.ReadFile(join(root, "/proc/cmdline"))
+	if err != nil {
+		return ""
+	}
+	return DefaultHugepageSizeFromCmdline(strings.Fields(string(b)))
+}
+
 // EnsureHugepageSysctlFromCmdline 按**当前内核基线声明**（/proc/cmdline）落盘大页池
 // sysctl 片段，返回是否发生了变更。
 //
@@ -285,18 +302,29 @@ var legacyParamRe = regexp.MustCompile(` ?(default_hugepagesz|hugepagesz|hugepag
 // postinst → nfvis-baseline.sh 直接写 GRUB 片段，不经过 BaselineApplier.Apply，因此
 // 只靠 Apply 挂 sysctl 会漏掉「首装即被 80-vpp.conf 撑大」这条路径。cmdline 是那次
 // 基线真正生效的声明值，正是要钉住的数。
+//
+// 决策 #347：`vm.nr_hugepages` 作用于 cmdline 里 `default_hugepagesz` 决定的**默认尺寸池**
+// ——旧基线（default 1G）钉 1G 池、新基线（default 2M）钉 2M 池；取不到默认尺寸时**保守不动**
+// 该文件（不写不删），不猜。
 func EnsureHugepageSysctlFromCmdline(root string) (bool, error) {
 	raw, err := os.ReadFile(join(root, "/proc/cmdline"))
 	if err != nil {
 		return false, err
 	}
 	args := strings.Fields(string(raw))
-	var d KernelDesired
-	if v := HugepageFromCmdline(args, "1G"); v != "" {
-		d.Hugepages1G, _ = strconv.Atoi(v)
+	size := DefaultHugepageSizeFromCmdline(args)
+	if size == "" {
+		return false, nil // 默认尺寸未知：保守不动该文件（不写不删）
 	}
-	if v := HugepageFromCmdline(args, "2M"); v != "" {
-		d.Hugepages2M, _ = strconv.Atoi(v)
+	d := KernelDesired{DefaultHugepageSize: size}
+	if v := HugepageFromCmdline(args, size); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if size == "1G" {
+				d.Hugepages1G = n
+			} else {
+				d.Hugepages2M = n
+			}
+		}
 	}
 	p := join(root, hugepageSysctlRel)
 	content := GenerateHugepageSysctl(d)

@@ -705,7 +705,7 @@ nfvis$ request system reboot
 | CPU 厂商参数 | Intel 补 `intel_iommu=on intel_pstate=disable`；AMD 补 `amd_iommu=on amd_pstate=disable`；两者都补 `iommu=pt` | `/proc/cpuinfo` 的 vendor_id |
 | `irqaffinity=` | 隔离核的**补集**（中断亲和到非隔离核上）；用户已给则不覆盖 | 隔离核 + 在线核 |
 | `nohz_full=` / `rcu_nocbs=` | 内核未编入 nohz_full 支持时**省略**（写了也只会被忽略） | sysfs / 内核配置探测 |
-| 双大页池 | 1G 与 2M 都配置时连写 `hugepagesz=1G hugepages=N hugepagesz=2M hugepages=M` | resource-pools（1G 给 VM、2M 给 VPP） |
+| 大页默认尺寸 | 内核默认大页尺寸 `default_hugepagesz` **恒为 2M**（数据面/VPP 默认尺寸），不随池声明变化；池一律以 `hugepagesz=<size> hugepages=N` 显式声明（2M 给 VPP、1G 给 VNF） | 固定（数据面默认 2M） |
 
 生效后核对：
 
@@ -716,12 +716,18 @@ cat /sys/devices/system/cpu/isolated           # 隔离核生效清单
 nfvis$ show system kernel                      # 三方对照（cmdline / 运行实际 / 配置期望）
 ```
 
-> **大页池钉值**：写入内核基线时，产品同时维护 `/etc/sysctl.d/90-nfvis-hugepages.conf`，
-> 把 `vm.nr_hugepages` 钉为**默认页尺寸**池的声明值（基线里 1G 池 > 0 时默认尺寸即 1G，否则 2M）。
+> **大页默认尺寸与钉值**：内核启动基线的默认大页尺寸 `default_hugepagesz` **恒为 2M**（数据面/
+> VPP 的默认尺寸），不随池声明变化——VPP 的 main heap 只认内核默认尺寸（实测，VPP 自己的 memory
+> 配置键管不了它），默认为 1G 时它会占掉一个 1G 页，使 1G 池给 VNF 的页数少一个（第二个 VNF 起不来）；
+> 恒 2M 后 VPP 的 main heap 改从 2M 池取页，1G 池只给 VNF。池一律以 `hugepagesz=<size> hugepages=N`
+> 显式声明（2M 给 VPP、1G 给 VNF）。写入内核基线时，产品同时维护 `/etc/sysctl.d/90-nfvis-hugepages.conf`，
+> 把 `vm.nr_hugepages` 钉为**当前内核基线默认尺寸池**的声明值——钉哪个尺寸的池**跟随内核启动参数里的
+> 默认大页尺寸**（而非写死 2M），保证改基线（`request system kernel apply`）后**尚未重启**的过渡期
+> 不会把某尺寸的页数喂给另一尺寸的池；取不到默认大页尺寸时保守不动该文件。
 > 原因：VPP 的 deb 自带 `/etc/sysctl.d/80-vpp.conf`（`vm.nr_hugepages=1024`，注释写明是给 **2M**
-> 池留的），而该 sysctl 只作用于**默认尺寸**池——基线设了 `default_hugepagesz=1G` 时它会落到
-> **1G** 池上，开机时按可用内存尽量分配，使 1G 池**大于**声明值（实测：声明 1 页、实际 3 页，
-> `show system kernel` 于是长期显示「基线 1 / 实际 3」）。
+> 池留的），而该 sysctl 只作用于**默认尺寸**池——历史上产品默认为 1G 时它会落到 **1G** 池上，开机
+> 时按可用内存尽量分配，使 1G 池**大于**声明值（实测：声明 1 页、实际 3 页，`show system kernel`
+> 于是长期显示「基线 1 / 实际 3」）；默认为 2M 后它与本意一致。
 > **安装时由产品把 VPP 那个文件接管走**（`dpkg-divert` 挪到 `/etc/sysctl.d/80-vpp.conf.vpp-disabled`，
 > 卸载时还原），因此 `vm.nr_hugepages` 只由本文件声明——不依赖文件名排序，也没有开机期
 > 「先撑大再回缩」的抖动；VPP 原文件里另一个生效键 `vm.hugetlb_shm_group=0` 由本文件一并接管。

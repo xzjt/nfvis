@@ -68,7 +68,7 @@ func TestGenerateBaseline(t *testing.T) {
 	if !strings.Contains(grub, `GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} `) {
 		t.Fatalf("GRUB 片段必须以追加形式写标准变量: %s", grub)
 	}
-	for _, want := range []string{"default_hugepagesz=1G", "hugepagesz=1G", "hugepages=8",
+	for _, want := range []string{"default_hugepagesz=2M", "hugepagesz=1G", "hugepages=8",
 		"isolcpus=4-15", "nohz_full=4-15", "rcu_nocbs=4-15", "nmi_watchdog=0",
 		"transparent_hugepage=never", "iommu=pt", "intel_iommu=on"} {
 		if !strings.Contains(grub, want) {
@@ -82,6 +82,34 @@ func TestGenerateBaseline(t *testing.T) {
 	d2 := KernelDesired{NMIWatchdog: &on}
 	if g, _ := GenerateBaseline(d2); strings.Contains(g, "nmi_watchdog=0") {
 		t.Fatal("期望开启 NMI watchdog 时不应写 nmi_watchdog=0")
+	}
+	// 决策 #347：1G 池 > 0 时 default_hugepagesz 仍恒为 2M（不随池声明变化）
+	if strings.Contains(grub, "default_hugepagesz=1G") {
+		t.Fatalf("1G 池 > 0 时 default_hugepagesz 也必须为 2M:\n%s", grub)
+	}
+}
+
+// TestGenerateBaselineDefaultHugepageSizeFixed 决策 #347：内核基线的 default_hugepagesz
+// 恒为 2M（数据面/VPP 的默认尺寸），不随池声明变化——1G 池以 hugepagesz=1G 显式声明给 VNF。
+func TestGenerateBaselineDefaultHugepageSizeFixed(t *testing.T) {
+	// 1G 池 > 0、2M 未声明：default 仍 2M，1G 以 hugepagesz=1G 显式声明
+	grub, _ := GenerateBaseline(KernelDesired{Hugepages1G: 2})
+	if !strings.Contains(grub, "default_hugepagesz=2M") || !strings.Contains(grub, "hugepagesz=1G hugepages=2") {
+		t.Fatalf("1G 池形态异常:\n%s", grub)
+	}
+	if strings.Contains(grub, "default_hugepagesz=1G") {
+		t.Fatalf("default_hugepagesz 不得为 1G:\n%s", grub)
+	}
+	// 无任何池声明：只留 default_hugepagesz=2M，不写任何 hugepagesz/hugepages
+	grub, fstab := GenerateBaseline(KernelDesired{})
+	if !strings.Contains(grub, "default_hugepagesz=2M") {
+		t.Fatalf("无池时也应写 default_hugepagesz=2M:\n%s", grub)
+	}
+	if strings.Contains(grub, " hugepagesz=") || strings.Contains(grub, " hugepages=") {
+		t.Fatalf("无池时不应写 hugepagesz/hugepages:\n%s", grub)
+	}
+	if fstab != "" {
+		t.Fatalf("无池时不应有 fstab 大页行: %q", fstab)
 	}
 }
 
@@ -154,7 +182,7 @@ func TestHugepageFromCmdline(t *testing.T) {
 
 func TestGenerateBaselineDualHugepages(t *testing.T) {
 	grub, fstab := GenerateBaseline(KernelDesired{Hugepages1G: 2, Hugepages2M: 768})
-	for _, want := range []string{"default_hugepagesz=1G", "hugepagesz=1G", "hugepages=2", "hugepagesz=2M", "hugepages=768"} {
+	for _, want := range []string{"default_hugepagesz=2M", "hugepagesz=1G", "hugepages=2", "hugepagesz=2M", "hugepages=768"} {
 		if !strings.Contains(grub, want) {
 			t.Fatalf("双池片段缺少 %q:\n%s", want, grub)
 		}

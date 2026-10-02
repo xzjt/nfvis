@@ -108,18 +108,15 @@ func run() error {
 		return nil
 	}
 
-	// R88-1：大页池 sysctl 片段（默认尺寸池的声明值）。安装期脚本用它写
-	// /etc/sysctl.d/90-nfvis-hugepages.conf，与运行期 Apply/启动补写共用同一生成器。
+	// R88-1 / 决策 #347：大页池 sysctl 片段（作用于**当前内核默认尺寸池**的声明值）。
+	// 安装期脚本用它写 /etc/sysctl.d/90-nfvis-hugepages.conf，与运行期 Apply/启动补写共用
+	// 同一生成器。判据取自当前 /proc/cmdline 的 default_hugepagesz（而非新基线的 2M）——
+	// apply 后尚未重启时作用对象仍是旧默认尺寸池；取不到时生成器返回空，脚本据此不动该文件。
 	if *printHPSysctl {
-		pageSize, count := "", 0
-		if *hp1g > 0 {
-			pageSize, count = "1G", *hp1g
-		} else if *hp2m > 0 {
-			pageSize, count = "2M", *hp2m
-		}
-		d := system.DesiredFromConfig(pageSize, count, "", "", "", "", "", nil)
-		if pageSize == "1G" && *hp2m > 0 {
-			d.Hugepages2M = *hp2m
+		d := system.KernelDesired{
+			DefaultHugepageSize: system.CurrentDefaultHugepageSize(""),
+			Hugepages1G:         *hp1g,
+			Hugepages2M:         *hp2m,
 		}
 		fmt.Print(system.GenerateHugepageSysctl(d))
 		return nil
@@ -518,14 +515,18 @@ func run() error {
 		log.Info("libvirt AppArmor 已放行 NFViS 镜像/VM 路径")
 	}
 
-	// R88-1：大页池 sysctl 钉值。VPP 包自带 /etc/sysctl.d/80-vpp.conf（vm.nr_hugepages=1024，
-	// 本意给 2M 池），而该 sysctl 只作用于**默认尺寸**池——产品基线设了 default_hugepagesz=1G
-	// 时它就落到 1G 池上，开机按可用内存尽量分配，1G 池因此大于基线声明值（真机：声明 1、实际 4）。
+	// R88-1 / 决策 #347：大页池 sysctl 钉值。VPP 包自带 /etc/sysctl.d/80-vpp.conf
+	// （vm.nr_hugepages=1024，本意给 2M 池），而该 sysctl 只作用于**默认尺寸**池——历史上产品
+	// 基线设了 default_hugepagesz=1G 时它就落到 1G 池上，开机按可用内存尽量分配，1G 池因此大于
+	// 基线声明值（真机：声明 1、实际 4）。#347 后内核默认大页尺寸恒为 2M，该 sysctl 与 2M 池本意一致。
 	// 按 cmdline 声明写 90 号落点钉回，与安装顺序无关（同 #182 的单源口径）。
 	if changed, err := system.EnsureHugepageSysctlFromCmdline(""); err != nil {
 		log.Warn("大页池 sysctl 钉值未完成", "err", err)
 	} else if changed {
 		log.Info("已按内核基线声明写入大页池 sysctl 片段（/etc/sysctl.d/90-nfvis-hugepages.conf，下次开机生效）")
+	} else if system.CurrentDefaultHugepageSize("") == "" {
+		// 决策 #347：取不到当前内核默认大页尺寸时保守不动该文件（不写不删），如实提示。
+		log.Warn("未取到内核默认大页尺寸（default_hugepagesz），大页池 sysctl 片段保守未动")
 	}
 
 	// VPP 未运行时降级为告警并持续重连，不阻塞 nfvisd 启动。
