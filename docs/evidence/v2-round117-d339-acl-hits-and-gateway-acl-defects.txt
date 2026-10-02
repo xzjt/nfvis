@@ -71,6 +71,23 @@ NFViS v2 真机验证记录 round117 —— 决策 #339（ACL 逐规则命中计
 - 现场终态：rev 943 + 数据面重启；配置无 hit-* 残留、`vppctl show acl-plugin acl` 空、无 active 告警；
   探针已从 /root/src 删除（仓库不受影响）。
 
+§6 追加（同日，纯 vppctl 对照：**定位到这是 VPP 26.06 的拓扑限制，不是产品绑定路径的 bug**）
+- 目的：隔离「产品绑定路径」与「VPP 行为」——场景同前（L2+BVI 网关 + guest 造 `10.77.0.1` 的转发流量），
+  但**完全不经产品**：`vppctl set acl-plugin acl deny src 192.168.99.0/24 dst 0.0.0.0/0 proto 1`
+  （VPP 自报 `ACL index:0`）+ `vppctl set acl-plugin interface bvi0 input 0`。
+- 结果：**同样不生效**——绑定前 pcap 见 3 个 `10.77` 包，绑定后**仍有 2 个**（deny 没拦住）；
+  `/acl/0/matches` 计数行仍在（1 规则 × 线程）但**全 0**。
+- 结论（定性）：**在「L2 交换机 + BVI 网关」这一拓扑下，绑到 BVI 的 L3 ACL 不被评估**——与产品无关，
+  是 VPP 26.06 的行为（L2→L3 的 BVI 路径不经过 ip4 入向 ACL；与之对照，同一 ACL 机制在纯 L3 接口上
+  的可用性**本轮未验**，需要「有真实转发出口的 L3 接口」场景）。
+- 对产品的含义（**产品侧仍有失实之处，需修**）：`set virtual-switches <n> gateway acl-in|acl-out` 这一
+  绑定形态在本产品的主拓扑（L2+BVI）下**给不出任何保护**，而它在命令全表里曾标 ✅、手册有指引——
+  操作者会以为已防护。**建议的处置（下一轮立项）**：① 提交期对该绑定形态给出**明确警示/拒绝**并指引用
+  L3 接口绑定；② 手册与命令全表如实写明「BVI 绑定的 L3 ACL 在 VPP 26.06 下不评估域内流量」；
+  ③ 补验「L3 接口（`l3-interface <if> acl-in`）在有真实转发流量时是否生效」——那是产品 ACL 能力
+  是否可用的关键前置。R117-3（ARP 被非 IP 白名单丢）依旧成立（与是否评估 IP 无关）。
+- 现场终态：rev 945 + 数据面重启；配置无 d1-* 残留、`vppctl show acl-plugin acl` 空、无 active 告警。
+
 §4 现场终态
 - 版本 2.0.0~dev28；配置无 hit-* 残留；`vppctl show acl-plugin acl` 空；**无 active 告警**；
   最终 rev 939（+ 一次 `request vpp restart` 清残）。
