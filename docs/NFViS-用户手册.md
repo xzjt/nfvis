@@ -1041,6 +1041,13 @@ nfvis# commit
 
 核对：`show acls`、`show acls acl-web detail`。
 
+**命中计数（运行态）**：`show acls <name> detail` 会为每条规则附运行态命中数（REST
+`GET /acls/{n}` 的 `rules[].hits`、Web 控制台 ACL 详情页的「命中」列同源）。它取自数据面的
+stats segment（`/acl/<index>/matches` 组合计数，按规则汇总——**无「按接口」拆分**，VPP 侧
+没有该粒度），**不启用任何 VPP 开关**。三条边界：① 这是**运行态**，`request vpp restart`
+后归零；② 只覆盖 L3 ACL 的规则命中（macip 不计）；③ 规则下标按下发顺序对应配置里的规则；
+运行态取不到时读视图会如实附一行原因（不把「取不到」显示成「零命中」）。
+
 ### 8.6 QoS（VPP policer）
 
 ```bash

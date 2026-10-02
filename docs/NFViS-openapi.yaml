@@ -2965,6 +2965,13 @@ components:
       required: [name, rules]
       properties:
         name: { type: string }
+        hits_unavailable:
+          type: string
+          readOnly: true
+          description: |
+            逐规则命中（`hits`）取不到时的原因（决策 #339）。命中是**运行态**数据（VPP stats
+            segment 的 `/acl/<index>/matches` 组合计数），取不到时省略全部 `hits` 并在本字段
+            如实说明，不把「取不到」显示成「零命中」。只在 `GET /acls/{name}` 详情出现。
         rules:
           type: array
           items:
@@ -2979,7 +2986,14 @@ components:
               source_port: { type: string }
               destination_port: { type: string }
               action: { type: string, enum: [permit, deny] }
-              hits: { type: integer, description: 运行态命中计数 }
+              hits:
+                type: integer
+                format: int64
+                readOnly: true
+                description: |
+                  运行态命中数（VPP stats segment `/acl/<index>/matches` 组合计数的 packets，
+                  跨线程求和；决策 #339）。**VPP 重启归零**；只在 `GET /acls/{name}` 详情给出，
+                  列表端点不带；取不到时整条省略（原因见 `hits_unavailable`）。
 
     NatConfig:
       type: object

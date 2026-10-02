@@ -226,6 +226,20 @@ func (p *AclProvider) lookup(name string) (uint32, bool) {
 	return idx, ok
 }
 
+// ACLIndexes 返回 ACL 名 → VPP acl index 的登记快照（决策 #339：逐规则命中读视图的映射来源）。
+//
+// 快照而非直通内部 map，避免调用方在锁外读到并发修改。索引 0 是合法 ACL 索引，调用方
+// 一律以「键是否存在」判定，不得用 0 当「未下发」。
+func (p *AclProvider) ACLIndexes() map[string]uint32 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]uint32, len(p.index))
+	for name, idx := range p.index {
+		out[name] = idx
+	}
+	return out
+}
+
 // ACLTagsInVPP 返回 VPP 里全部 ACL 的 tag（去重、升序）。
 //
 // 用途（决策 #321）：残渣对账据此找「tag 不在配置里」的 ACL——提交补偿失败留下的残渣。
