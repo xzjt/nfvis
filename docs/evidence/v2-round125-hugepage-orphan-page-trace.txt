@@ -1,0 +1,42 @@
+NFViS v2 真机调查记录 round125 —— 1G 大页池「无主占用」一页的来历与可回收性
+====================================================================
+日期：2026-10-02；环境：nfvis-vm，2.0.0~dev33；单 NUMA node；1G 池声明 2 页。
+
+§0 缘起与更正
+round124 记录「1G 池无空闲页 ⇒ 第二个 VM（`cli-vm`/`dns-vm`）报 `Cannot allocate memory` 起不来」，
+并把它写成「**VPP 与 sem-vm 各占 1 页**」——**该措辞错误**（用户指正后复核）。本记录用独立事实源重新定位。
+
+§1 更正：VPP 用 **2M** 页，**不占** 1G
+- `vppctl show memory`：`main heap` → `page stats: page-size 2M, total 512, populated 512`（512×2M = 1G）。
+- `vppctl show physmem`：`default-page-size 2M`；arena `buffers-numa-0` `subpage-size 2M`。
+- 2M 池账自洽：`nr=768 / free=235` ⇒ 在用 533 = main heap 512 + buffers 20 + 其余 1。
+- VPP maps 里那条 1024MB（`/dev/hugepages/libvirt/qemu/<id>-sem-vm/qemu_back_mem...`）是 **vhost-user 对
+  guest RAM 的共享映射**（与 qemu 同一 inode），VPP 只是映射方，**不额外占 1G 页**。
+- **方法教训**：判「谁占大页」**不能按 maps 路径过滤**（既漏匿名 hugetlb，又会把共享映射当成独立分配）；
+  权威口径是 `/proc/<pid>/status` 的 `HugetlbPages` 与「文件/inode 引用（fd + maps）」两侧对照。
+
+§2 1G 池的真实账，与那页无主占用的来历
+- 账：声明 2 / 内核实际 2 / `free 0` / `HugePages_Rsvd 0` / `Surp 0`；单 NUMA node（`lscpu` 确认）。
+- 持有者扫描（fd + maps + `/proc/*/status`）：**只有 sem-vm 的 RAM 文件**被引用（qemu 持 fd + VPP 持 fd，
+  同一 inode = 1 页）；`/dev/hugepages/libvirt/qemu/` 下也只有当前域目录，**无残留 inode/文件**。
+  ⇒ 另一页**无活进程、无 inode 引用**，却被内核计为「在用」。
+- 来历（实验三步，全部只读 + 可恢复）：
+  a) 开机内核日志：`HugeTLB: registered 1.00 GiB page size, pre-allocated **4** pages`（cmdline `hugepages=4`）；
+  b) 产品按**声明值**把 `nr_hugepages` 收敛到 2（#199/#201 的 sysctl 钉值口径）；
+  c) 停 sem-vm 后 `nr=2 free=**1**` ⇒ 那页**独立于 sem-vm**；
+  d) `echo 1 > nr_hugepages` **成功**（`nr=1 free=0`）⇒ 内核**能**释放它：它确实是「已分配但无持有者」的
+     **可回收**页，而不是计数错乱；随后恢复 `nr=2`（`free=1`）→ 起 sem-vm（`free=0`），现场复原。
+  ⇒ **结论**：这页来自「开机预分配 4 页 → 按声明收敛到 2 页」的收缩过程；它不属于任何进程，
+    但内核仍把它算在「在用」里（收缩时未能归还）。
+
+§3 产品口径的缺口（已在 `docs/v2待做.md` 登记，本记录为其证据）
+- `show system hugepages` 四列 = 声明 / 内核实际 / **在用**（=实际−空闲）/ **可回收**（=空闲的多余页，即 nr−声明）。
+- 对「**nr = 声明值、但在用数 > 实际持有者**」这类无主占用：读视图四列全「一致」，并输出
+  「无需回收（无空闲的多余页）」——既不暴露也不回收。后果是 round124 那次 `cli-vm`/`dns-vm` 起不来
+  （`Cannot allocate memory`），且**极易被误读成"环境受限"**（本轮就误读过一次）。
+- 可回收性已验证（§2d）⇒ 修复路径存在，但**必须在无 1G 需求时动作**（降 nr 会与运行中 VM 的分配竞争），
+  所以回收动作需要前置判据（区分「无主占用」与「页正被 VM 使用」）。
+
+§4 现场改动与清场
+- 实验只临时停止/启动 sem-vm 并临时写了一次 `nr_hugepages`（1 → 立即恢复 2）；终态：`nr=2`、
+  sem-vm running、现场与实验前一致；**未改 GRUB/cmdline 基线**。
