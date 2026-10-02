@@ -52,6 +52,9 @@ const (
 	// AlarmBDLeftover 数据面存在**配置未声明**的 bridge-domain（BD-Tag 不在配置里）：
 	// 同上（决策 #321）。BD 名取 BD-Tag，无名时以 BD ID 标识。
 	AlarmBDLeftover = "BRIDGE_DOMAIN_LEFTOVER"
+	// AlarmVPPAutostartFailed nfvisd 启动时未能确保 VPP 运行（决策 #348）：拉起失败或
+	// 拉起后未在有界窗口内就绪。严重级别 warning；VPP 恢复在线即自动消解（与 #329/#346 同口径）。
+	AlarmVPPAutostartFailed = "VPP_AUTOSTART_FAILED"
 )
 
 // ResidueCodes 全部「残渣对账」告警码（消解只在本集合内进行，不误伤恢复收敛的其它告警）。

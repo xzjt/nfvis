@@ -607,6 +607,8 @@ func run() error {
 			log.Info("删表延后项已清理", "vrfs", names)
 		}
 		log.Info("恢复收敛完成")
+		// 决策 #348：VPP 已连接（数据面在线）即自动消解「启动拉起失败」告警（幂等）。
+		vppAutostartAlarms(alarms, nil)
 	}
 	// M4-10：运行态异常退出巡检（FR-CMP-017/022）——VM crashed / 容器异常退出 → critical 告警；
 	// 周期性（15s）检测，事件驱动实时告警随 M5 /events。与恢复收敛共用锁避免并发使用 VPP API。
@@ -723,6 +725,16 @@ func run() error {
 		}
 	}()
 
+	// 决策 #348：nfvisd 启动时确保 VPP 运行（重启后数据面自动恢复）。只在此处（连接管理
+	// Run 之前）调用一次——VPP 已在运行则不做动作；未运行则拉起（systemctl start vpp）并有界
+	// 等待就绪；拉起失败/超时如实告警但**不阻塞启动**。拉起成功后仍走既有连接 + 恢复收敛
+	// 路径（本方法不短路连接）。VPP 未运行时的「数据面不可用」降级口径见决策 #314。
+	if err := vppMgr.EnsureRunning(ctx); err != nil {
+		log.Warn("启动时确保 VPP 运行未成功，数据面可能暂不可用", "err", err)
+		vppAutostartAlarms(alarms, err)
+	} else {
+		vppAutostartAlarms(alarms, nil)
+	}
 	vppMgr.OnConnect(func(version string) { go runRecovery() })
 	go func() {
 		if err := vppMgr.Run(ctx); err != nil {
@@ -1703,6 +1715,23 @@ func (c *dpdkController) SetDPDKBound(ctx context.Context, ifname string, bound 
 		time.Sleep(200 * time.Millisecond)
 	}
 	return pci, cur, nil
+}
+
+// vppAutostartAlarms 把一次「启动时确保 VPP 运行」的结果落到告警表（决策 #348）。
+//
+// 与 #329/#346 同口径：失败（拉起失败或拉起后超时未就绪）→ Raise
+// VPP_AUTOSTART_FAILED（warning，scope "vpp_autostart"，source 为 vpp 单元）；
+// 成功（VPP 已在运行或已拉起就绪）→ Resolve 自动消解。err==nil 表示 VPP 已可用。
+func vppAutostartAlarms(sink alarmSink, err error) {
+	if err == nil {
+		sink.Resolve("vpp_autostart", network.AlarmVPPAutostartFailed, "vpp")
+		return
+	}
+	sink.Raise("vpp_autostart", network.SeverityWarning, network.AlarmVPPAutostartFailed,
+		"nfvisd 启动时未能确保 VPP 运行（拉起失败或超时未就绪）："+err.Error()+
+			"。数据面当前不可用；处置：systemctl status vpp / journalctl -u vpp 查因，"+
+			"或手工 systemctl start vpp，随后 show vpp 确认连接（VPP 恢复在线后本告警自动消解）",
+		"vpp")
 }
 
 // alarmSink 是大页池告警建/消所需的最小告警表能力（由 *network.AlarmStore 实现；

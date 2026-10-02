@@ -899,6 +899,13 @@ nfvis$ show interfaces physical                                # ③ 核对两�
 
 > committed 配置本身是持久的（config 声明与「口名→PCI」记录都在磁盘上），所以重启后
 > **不需要**重新声明，只需要②③两步。
+>
+> **数据面在 nfvisd 启动时自动恢复**：nfvisd 启动时会确保 VPP 运行——VPP 未在运行即由它拉起，
+> 并按 committed 配置重放已声明的网络配置（无需人工 `systemctl start vpp`；拉起失败会给出原因与
+> 自查路径并以告警如实报出）。但 **DPDK 口绑定不跨重启**，①逐口重绑仍要做。
+> **VNF/容器不会自动起**：只有声明了 `autostart true` 的负载才随系统自启；未声明的重启后为
+> 关机（VM）/停机（容器）态，需手工 `request virtual-machine-functions <名> start`（VM）或
+> `request container-functions <名> start`（容器）。
 
 ---
 
@@ -1569,6 +1576,7 @@ nfvis$ request alarms clear all
 > | `HUGEPAGE_POOL_ORPHAN` | warning | 大页池存在**无主占用页**（在用 > 实际持有：分配了却无任何进程/inode 引用）——表现为“池看着满、却没空页”，新 VNF 会 `Cannot allocate memory`。**这类页多为被进程预留（reserve）但尚未使用的大页**（例如数据面 DPDK 预留），**不在空闲链表上**，产品侧写 `nr_hugepages` **释放不了**：`request system hugepages reclaim` **不会动它们**。按内核实况重建、跨 nfvisd 重启可见、收敛后自动消解。处置：`show system hugepages` 看「在用 / 持有 / 无主」三列定位；要释放需**从预留者一侧**入手（如停/重启数据面或释放其预留） |
 > | `COMPUTE_UNAVAILABLE` | warning | 启动时**计算编排（libvirt）未接入**——连接失败或超时（libvirtd 未起/假死时，产品在 10 秒量级内放弃并降级，**不会拖住整机启动**）。VM 生命周期动作（创建/启动/快照/串口等）不可用，配置声明不受影响。产品**不自动重连**（如实边界）。处置：`systemctl status libvirtd`、`virsh -c qemu:///system list`、`journalctl -u libvirtd` 查底座；底座恢复后 `systemctl restart nfvis` 重新接入（重启前本告警保持，如实呈现） |
 > | `CONTAINER_UNAVAILABLE` | warning | 启动时**容器编排（Docker）未接入**——探测失败或超时（dockerd 未起/假死时，产品在 10 秒量级内放弃并降级）。容器生命周期动作不可用，配置声明不受影响。产品**不自动重连**。处置：`systemctl status docker`、`journalctl -u docker` 查底座；底座恢复后 `systemctl restart nfvis` 重新接入 |
+> | `VPP_AUTOSTART_FAILED` | warning | nfvisd 启动时**未能确保数据面（VPP）运行**（拉起失败，或拉起后未在限定时间内就绪）。此时数据面不可用，依赖它的操作会失败。处置：`systemctl status vpp` / `journalctl -u vpp` 查因，或手工 `systemctl start vpp`，随后 `show vpp` 确认已连接。**VPP 恢复在线后自动消解** |
 >
 > 上面四条残渣告警的文案都会注明「由启动/巡检对账按数据面事实重建、原始提交不可回溯」——是哪次提交失败、是否被 NAT 引用，数据面看不出来，产品**不编造**。
 
