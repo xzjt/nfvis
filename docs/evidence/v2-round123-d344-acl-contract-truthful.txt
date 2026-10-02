@@ -1,0 +1,24 @@
+NFViS v2 记录 round123 —— 决策 #344（ACL 绑定字段契约如实化，收口 R119-1）
+====================================================================
+日期：2026-10-02；代码：PR #271（squash 合入、CI 双跑全绿）。**纯契约文档轮**，无代码/真机改动。
+
+§1 问题（R119-1）
+- openapi 里三处 `acl_in/acl_out` 是**无说明**的 `{type:string}`（`VirtualSwitch.gateway`、`VSwitchPort`、
+  `SwitchPortView`），而网关/端口两种绑定已被 #340 **提交期拒绝**（VPP 26.06 不评估该路径的 ACL——既不拦也不计，
+  真机实证）；`Vrf.l3_interfaces[].acl_in` 才是**唯一可用**形态（且 #341 已让它自动放行非 IP/ARP）。
+  契约不说明会让人以为三种都能用。
+
+§2 处置（只改契约文档，不改代码/命令/行为）
+- 四处字段加如实 description：
+  - `VirtualSwitch.gateway.acl_in/acl_out`、`VSwitchPort.acl_in/acl_out`、`SwitchPortView.acl_in/acl_out`
+    → **不支持**（VPP 26.06 不评估该路径 ACL、提交期拒绝）+ 替代指引（绑 L3 接口）；
+  - `Vrf.l3_interfaces[].acl_in` → **支持** + 绑定时产品自动创建/绑定伴随 macip **放行非 IP（含 ARP）**（#341）；
+    IPv4/IPv6 仍走该 ACL。
+- `docs/NFViS-CLI命令树完整设计.md`：端口级 ACL 的注记补一句「**有意不提供**该语句」（该形态不支持，故不建叶子）。
+- `internal/api/openapi.json` 以 `check_openapi_json_sync.sh --write` 同步。
+- 模型字段保留（解析兼容）、编排路径保留（防御性；校验先挡）——与 #340 的既定处置一致。
+
+§3 验证与登记
+- `make check` 全绿（含 openapi 可解析/无重复键/`openapi.json` 同步守护/决策条数 246 一致/套件同步守护）。
+- 无真机改动（契约层修复，无需装机）；`docs/v2待做.md` 二.29（R119-1）标**已收口**。
+- 现场：真机仍 2.0.0~dev32、无 active 告警（本轮未动真机）。
