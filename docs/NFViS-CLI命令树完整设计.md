@@ -475,8 +475,10 @@ set rule <seq> source <ip-prefix|any> destination <ip-prefix|any> \
 set rule <seq> direction <ingress|egress>
 # 绑定（在端口/接口下）：
 #   set virtual-switches <n> ports <seq> acl-in <acl> / acl-out <acl>
-#       ⚠️ 待验：端口级绑定本轮未做真机验证，与网关 ACL 同走 L2 路径、机制疑似相同
-#          （见规格书附录 A #340 ④；验证后同口径处置）。
+#       ⊘ 设计拒绝（同网关口径，决策 #340 修订）：真机实证（round119）VPP 26.06
+#          不评估 L2 路径（成员端口）上的 ACL——既不拦也不计，提交期直接拒绝。
+#          替代：`set virtual-switches <n> l3-interface <ifname> acl-in <acl>`。
+#          ⚠️ 命令树本无该语句（`ports <seq> acl-in` 报「未知命令」），字段仅 REST 可达。
 #   set virtual-switches <n> l3-interface ... acl-in <acl>
 #       ✅ 已实证生效（round118）：vNIC/物理口作 L3 接口时 ACL 确实在拦。
 #       ⚠️ 绑 ACL 的接口会丢弃未在白名单的非 IP 帧（含 ARP）——对端须预置静态邻居（R117-3）。

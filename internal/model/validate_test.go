@@ -133,9 +133,9 @@ func TestValidateReferences(t *testing.T) {
 	c3.VirtualSwitches[0].Ports = append(c3.VirtualSwitches[0].Ports, VSwitchPort{Seq: 2, Vnf: "ghost-vm", VnfInterface: "eth0"})
 	mustErrContaining(t, Validate(c3), "ports[2]", "ghost-vm")
 
-	// 端口 ACL 引用不存在的 ACL
+	// L3 接口 ACL 引用不存在的 ACL（端口级绑定已被决策 #340 硬拒，改由 L3 接口形态覆盖本引用校验）
 	c4 := validBase()
-	c4.VirtualSwitches[0].Ports[0].AclIn = "acl-ghost"
+	c4.Vrfs[0].L3Interfaces[0].AclIn = "acl-ghost"
 	mustErrContaining(t, Validate(c4), "acl_in", "acl-ghost")
 
 	// 网关显式 VRF 引用不存在
@@ -168,6 +168,23 @@ func TestValidateGatewayACLRejected(t *testing.T) {
 	// 网关不设 ACL 时不报错（其余网关配置照常可用）。
 	c4 := validBase()
 	mustNoErr(t, Validate(c4))
+}
+
+func TestValidatePortACLRejected(t *testing.T) {
+	// 决策 #340 修订（round119 补验）：交换机端口级 acl-in/acl-out 与网关同口径硬拒——
+	// 真机实证 VPP 26.06 不评估 L2 路径（成员端口）上的 ACL，既不拦截也不计数；
+	// 文案须指向已实证生效的 L3 接口形态。
+	c := validBase()
+	c.VirtualSwitches[0].Ports[0].AclIn = "acl-web"
+	mustErrContaining(t, Validate(c), "ports[1].acl_in", "l3-interface")
+
+	c2 := validBase()
+	c2.VirtualSwitches[0].Ports[0].AclOut = "acl-web"
+	mustErrContaining(t, Validate(c2), "ports[1].acl_out", "l3-interface")
+
+	// 端口不设 ACL 时不受影响（既有配置照常通过）。
+	c3 := validBase()
+	mustNoErr(t, Validate(c3))
 }
 
 func TestValidateFRConfig011Rules(t *testing.T) {

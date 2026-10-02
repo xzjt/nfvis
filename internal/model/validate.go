@@ -560,8 +560,19 @@ func (v *validator) checkVirtualSwitches(c Config) {
 			if s.VlanAccess != 0 && len(pt.TrunkVlans) > 0 && !slices.Contains(pt.TrunkVlans, s.VlanAccess) {
 				v.errf(pp, "交换机 access VLAN %d 不在端口 trunk 允许列表内", s.VlanAccess)
 			}
-			v.checkACLRef(pp+".acl_in", pt.AclIn)
-			v.checkACLRef(pp+".acl_out", pt.AclOut)
+			// 决策 #340（round119 补验）：交换机端口级 ACL 同样在提交期硬拒——真机实证
+			// VPP 26.06 不评估 L2 路径（成员端口）上的 ACL，既不拦截也不计数；与网关（BVI）
+			// 同机制。模型字段保留仅为解析兼容（见规格书本条决策），绑定一律拒绝。
+			if pt.AclIn != "" {
+				v.errf(pp+".acl_in", "交换机端口上不支持 acl-in：VPP 26.06 不评估 L2 路径（成员端口）上的 ACL，"+
+					"既不拦截也不计数（真机实证），绑定给不出任何保护。入向过滤请改用 L3 接口形态："+
+					"set virtual-switches %s l3-interface <ifname> acl-in <acl>（该形态已实测生效）", s.Name)
+			}
+			if pt.AclOut != "" {
+				v.errf(pp+".acl_out", "交换机端口上不支持 acl-out：VPP 26.06 不评估 L2 路径（成员端口）上的 ACL，"+
+					"既不拦截也不计数（真机实证），绑定给不出任何保护。入向过滤请改用 L3 接口形态："+
+					"set virtual-switches %s l3-interface <ifname> acl-in <acl>（该形态已实测生效）", s.Name)
+			}
 		}
 	}
 }
