@@ -1,0 +1,50 @@
+NFViS v2 真机验证记录 round116 —— 决策 #338（数据面 DNS 代理）真机实证「未达」→ 整体撤回
+====================================================================
+日期：2026-10-02；环境：nfvis-vm，2.0.0~dev25 → **dev26**（PR #264 的构建）；
+代码：PR #264 实现并合入 → **本轮按实证整体 revert（含 CLI/REST/Web/套件/手册与实现）**；
+决策 #338 在附录 A 改写为撤回记录（决策号保留、计数仍 240）。
+
+§1 实现与接线（已被 revert 移出，列此备查）
+- 命令 `set/delete system dns proxy server <ip> [secondary <ip>]` → `Vpp.DNSProxyServers`（非空即启用/
+  清空即禁用）；binapi `dns.DNSNameServerAddDel` + `dns.DNSEnableDisable`（实测字段 `Enable`/`IsIP6`）；
+  随提交编排收敛、恢复重放独立记源；读视图三面（`show dns proxy`/`GET /dns/proxy`/Web）；
+  套件 fulltest +3、语义 S13。make check RC=0。
+
+§2 真机验证（dev26）——客户端面向成立、**上游面向不成立**
+- 现场：`dns-vs`（L2+BVI 网关 192.168.88.1/24）+ 单 VM（1G 大页）在 guest 内**同时跑最小 DNS 应答器
+  （:53 答 A→10.9.9.9）与查询器（每 3s 向网关 53 发 probe.test A 查询）**；`set system dns proxy server
+  192.168.88.10`。
+- **配置链正确（✓）**：读视图 `show dns proxy` = 启用 + 上游 192.168.88.10；REST
+  `GET /dns/proxy` = `{"enabled":true,"servers":["192.168.88.10"]}`；`vppctl show dns servers` =
+  `192.168.88.10`（产品确实把上游推进了 dns 插件）；撤销路径正向验证：`delete … dns proxy` →
+  `show dns servers: No name servers configured`（del + disable 生效）。
+- **客户端面向成立（✓）**：域内客户端查询确实到达 VPP——`show dns cache verbose` 出现 pending 的
+  `probe.test` A/AAAA（含 guest systemd-resolved 的 AAAA）、节点计数 `dns4-request` 持续增长
+  （30→61）；pcap 见 `.10:43443 → .1:53`。
+- **上游面向不成立（✗，决定性）**：**VPP 从未向上游发出任何包**——缓存永久 pending（`2 queries,
+  0 answers`）、pcap 25s 窗口内**无任何 `.1 → .10:53` 流量**、`dns4-request` 计数语义即
+  「pending upstream name reso」。根因（能力级）：VPP 26.06 的 dns 插件**只在默认表（table 0）解析
+  上游**——binapi `DNSNameServerAddDel` **无 VRF/fib 字段**、CLI `dns name-server <ip>` 亦无表参数；
+  而产品的 L3 域都是 VRF（真机 `show ip table`：`[0] table_id:0`（无地址）+ `[1] table_id:4860925
+  vr-dns-vs`），产品**没有在默认表配地址的手段**（`interfaces <if> address` 不存在）。
+  ⇒ 上游 192.168.88.10 在域 VRF 内、VPP 的代理在表 0 里找不到去它的路——**永远解析不出去**。
+- 另：本轮排查中还实测了一处**测试设备问题**（已修正、非产品）：guest 内应答器 bind `0.0.0.0:53`
+  与 systemd-resolved 的 `127.0.0.53:53` 冲突的风险——改为绑定网卡地址；该修正后仍 0 answers，
+  进一步坐实是 VPP 侧的默认表问题（VPP 根本没发包）。
+
+§3 处置：整体撤回（「不留假功能」）
+- 理由：实现虽忠实接线，但**端到端永远不可达**，「配了就是启用」会把一个解析不了的能力呈现给操作者
+  ——正是本项目最忌的「命令成功、答非所问 / 假绿」。故 `git revert` PR #264 的 squash 提交：
+  CLI/REST/Web/套件/手册/实现全部移除；附录 A #338 改写为撤回记录（保留决策号与完整实证）；
+  `docs/v2待做.md` 三.3 复原为未收口并写明根因与后续路线。
+- 撤回可行性已先行验证：真机上 `delete … dns proxy` 正常（`show dns servers` 清空、无残留、无告警），
+  现场清理在 dev26（认识该语句）下完成，避免陈旧配置漂到 revert 后的二进制。
+
+§4 后续路线（登记，未立项）
+a) 给产品补「默认表寻址」能力（例如默认表内的接口地址/路由）后再启该代理；
+b) 待 VPP 的 dns 插件支持按表/VRF；
+c) 产品自研域内 DNS 转发器（新服务，工作量大）。
+
+§5 现场终态
+- 版本 2.0.0~dev26（待 revert 后构建 dev27 与 v2 对齐）；配置无 dns proxy/dns-vm/dns-vs 残留；
+  `vppctl show dns servers` 空；**无 active 告警**；最终 rev 928。
