@@ -481,7 +481,8 @@ set rule <seq> direction <ingress|egress>
 #          ⚠️ 命令树本无该语句（`ports <seq> acl-in` 报「未知命令」），字段仅 REST 可达。
 #   set virtual-switches <n> l3-interface ... acl-in <acl>
 #       ✅ 已实证生效（round118）：vNIC/物理口作 L3 接口时 ACL 确实在拦。
-#       ⚠️ 绑 ACL 的接口会丢弃未在白名单的非 IP 帧（含 ARP）——对端须预置静态邻居（R117-3）。
+#       🔁 绑定时产品**自动伴随**一条放行全部非 IP（含 ARP）的 macip 白名单（决策 #341），
+#          故对端无需预置静态邻居；IP 流量仍受 ACL，解绑时伴随白名单一并解绑。
 
 [edit nat]
 set source-pool <name> address-range <ip> to <ip>    # 外部地址池（可选；未用时以出接口地址作外部地址）

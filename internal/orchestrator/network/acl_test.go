@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.fd.io/govpp/api"
+
 	"github.com/xzjt/nfvis/internal/model"
 )
 
@@ -23,6 +25,12 @@ type fakeAcl struct {
 	// tags/idxTag 模拟 VPP 里现存的 ACL（ACLTags 残渣对账用，决策 #321）。
 	tags   map[string]uint32
 	idxTag map[uint32]string
+	// 伴随 macip ACL（决策 #341）：创建/替换/绑定调用与失败注入。
+	macipCreated  []string
+	macipReplaced []uint32
+	macipBind     [][3]uint32 // swIf, aclIdx, isAdd(1/0)
+	macipErr      error
+	macipExists   bool // 是否让 add 返回「已存在」错误
 }
 
 func newFakeAcl() *fakeAcl {
@@ -100,6 +108,43 @@ func (f *fakeAcl) ACLInterfaceSet(swIfIndex, inAcl, outAcl uint32, inSet, outSet
 		outAcl = 0
 	}
 	f.setCalls = append(f.setCalls, [3]uint32{swIfIndex, inAcl, outAcl})
+	return nil
+}
+
+// MacipACLAddReplace 模拟伴随 macip ACL 的创建/替换（决策 #341）。
+// fakeAcl **不**实现 MacipIndexLookup：这样 reset 后重放走「新建」分支（与 VPP 重启后实况一致）。
+func (f *fakeAcl) MacipACLAddReplace(index uint32, tag string) (uint32, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	if f.macipErr != nil {
+		return 0, f.macipErr
+	}
+	if index == aclIndexNew {
+		f.nextIdx++
+		f.macipCreated = append(f.macipCreated, tag)
+		return f.nextIdx, nil
+	}
+	f.macipReplaced = append(f.macipReplaced, index)
+	return index, nil
+}
+
+func (f *fakeAcl) MacipACLInterfaceAddDel(swIfIndex, aclIndex uint32, isAdd bool) error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.macipErr != nil {
+		return f.macipErr
+	}
+	if f.macipExists {
+		f.macipExists = false
+		return api.VPPApiError(vppValueExist)
+	}
+	add := uint32(0)
+	if isAdd {
+		add = 1
+	}
+	f.macipBind = append(f.macipBind, [3]uint32{swIfIndex, aclIndex, add})
 	return nil
 }
 
@@ -235,5 +280,175 @@ func TestAclIndexZero(t *testing.T) {
 	}
 	if len(f.setCalls) != 1 || f.setCalls[0] != [3]uint32{1, 0, 0} {
 		t.Fatalf("应绑入向 ACL 索引 0: %v", f.setCalls)
+	}
+}
+
+// ---------- 决策 #341：绑 L3 接口 ACL 时自动伴随 macip（放行非 IP/ARP） ----------
+
+// ① 绑 IPv4 ACL → 发出 macip create + bind 消息。
+func TestMacipCompanionOnBind(t *testing.T) {
+	f := newFakeAcl()
+	p := NewAclProvider(f)
+	if err := p.ApplyACL(context.Background(), model.Acl{Name: "web",
+		Rules: []model.AclRule{{Seq: 10, Action: "permit", Source: "any", Destination: "any"}}}); err != nil {
+		t.Fatalf("ApplyACL: %v", err)
+	}
+	if err := p.BindIndex(f, 1, "web", ""); err != nil {
+		t.Fatalf("BindIndex: %v", err)
+	}
+	if len(f.macipCreated) != 1 || f.macipCreated[0] != macipACLTag {
+		t.Fatalf("应创建一条伴随 macip ACL: %v", f.macipCreated)
+	}
+	if len(f.macipBind) != 1 || f.macipBind[0][0] != 1 || f.macipBind[0][2] != 1 {
+		t.Fatalf("应把 macip ACL 绑到接口 1: %v", f.macipBind)
+	}
+	// IP ACL 绑定语义不受影响：仍是同一次 set（if=1,in=100）
+	if len(f.setCalls) != 1 || f.setCalls[0] != [3]uint32{1, 100, 0} {
+		t.Fatalf("IP ACL 绑定不应变化: %v", f.setCalls)
+	}
+}
+
+// ② 重复绑 → 幂等（不重复 create、不重复 bind）。
+func TestMacipCompanionIdempotent(t *testing.T) {
+	f := newFakeAcl()
+	p := NewAclProvider(f)
+	if err := p.ApplyACL(context.Background(), model.Acl{Name: "web"}); err != nil {
+		t.Fatalf("ApplyACL: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.BindIndex(f, 1, "web", ""); err != nil {
+			t.Fatalf("BindIndex #%d: %v", i, err)
+		}
+	}
+	if len(f.macipCreated) != 1 {
+		t.Fatalf("重复绑不得重复创建 macip ACL: %v", f.macipCreated)
+	}
+	if len(f.macipBind) != 1 {
+		t.Fatalf("重复绑不得重复 bind: %v", f.macipBind)
+	}
+	// 另一接口复用同一条 macip ACL（只 create 一次，bind 两次）
+	if err := p.BindIndex(f, 2, "web", ""); err != nil {
+		t.Fatalf("BindIndex 接口2: %v", err)
+	}
+	if len(f.macipCreated) != 1 || len(f.macipBind) != 2 {
+		t.Fatalf("另一接口应复用 macip ACL 并各自 bind: created=%v bind=%v", f.macipCreated, f.macipBind)
+	}
+}
+
+// ③ 解绑（空绑定）→ macip 一并解绑。
+func TestMacipCompanionUnbind(t *testing.T) {
+	f := newFakeAcl()
+	p := NewAclProvider(f)
+	if err := p.ApplyACL(context.Background(), model.Acl{Name: "web"}); err != nil {
+		t.Fatalf("ApplyACL: %v", err)
+	}
+	if err := p.BindIndex(f, 1, "web", ""); err != nil {
+		t.Fatalf("BindIndex: %v", err)
+	}
+	if err := p.BindIndex(f, 1, "", ""); err != nil {
+		t.Fatalf("解绑: %v", err)
+	}
+	last := f.macipBind[len(f.macipBind)-1]
+	if last[0] != 1 || last[2] != 0 {
+		t.Fatalf("解绑应发出 macip unbind(接口1): %v", f.macipBind)
+	}
+	// 解绑后 IP ACL 也被清空
+	if got := f.setCalls[len(f.setCalls)-1]; got != [3]uint32{1, 0, 0} {
+		t.Fatalf("解绑应清 IP ACL 绑定: %v", f.setCalls)
+	}
+	// 无登记再解绑 → 空操作（幂等）
+	n := len(f.macipBind)
+	if err := p.BindIndex(f, 1, "", ""); err != nil {
+		t.Fatalf("重复解绑应无害: %v", err)
+	}
+	if len(f.macipBind) != n {
+		t.Fatalf("重复解绑不得再发消息: %v", f.macipBind)
+	}
+}
+
+// ④ reset() 后重放 → 重建（清掉陈旧的 macip 登记，重新 create+bind）。
+func TestMacipCompanionRebuiltAfterReset(t *testing.T) {
+	f := newFakeAcl()
+	p := NewAclProvider(f)
+	if err := p.ApplyACL(context.Background(), model.Acl{Name: "web"}); err != nil {
+		t.Fatalf("ApplyACL: %v", err)
+	}
+	if err := p.BindIndex(f, 1, "web", ""); err != nil {
+		t.Fatalf("BindIndex: %v", err)
+	}
+	if len(f.macipCreated) != 1 {
+		t.Fatalf("首次应创建: %v", f.macipCreated)
+	}
+	p.reset() // 恢复收敛开头：登记全清
+	// reset 清了 index 登记，但 ApplyACL 不在本测试重放；BindIndex 依赖 index 登记，故先重放 ACL。
+	if err := p.ApplyACL(context.Background(), model.Acl{Name: "web"}); err != nil {
+		t.Fatalf("重放 ApplyACL: %v", err)
+	}
+	if err := p.BindIndex(f, 1, "web", ""); err != nil {
+		t.Fatalf("reset 后重放 BindIndex: %v", err)
+	}
+	if len(f.macipCreated) != 2 {
+		t.Fatalf("reset 后应重建 macip ACL（VPP 侧已随重启消失）: %v", f.macipCreated)
+	}
+	if len(f.macipBind) != 2 || f.macipBind[1][2] != 1 {
+		t.Fatalf("reset 后应再次 bind: %v", f.macipBind)
+	}
+}
+
+// ⑤ 失败路径如实上抛（不吞）：macip create 失败 → BindIndex 报错；已存在按目标状态。
+func TestMacipCompanionErrors(t *testing.T) {
+	f := newFakeAcl()
+	p := NewAclProvider(f)
+	if err := p.ApplyACL(context.Background(), model.Acl{Name: "web"}); err != nil {
+		t.Fatalf("ApplyACL: %v", err)
+	}
+	f.macipErr = errors.New("boom")
+	if err := p.BindIndex(f, 1, "web", ""); err == nil || !strings.Contains(err.Error(), "macip") {
+		t.Fatalf("macip 创建失败应上抛并指名 macip: %v", err)
+	}
+	// 「已存在」按目标状态：不报错且登记为已绑（再次绑定时不再发 bind）
+	f2 := newFakeAcl()
+	p2 := NewAclProvider(f2)
+	if err := p2.ApplyACL(context.Background(), model.Acl{Name: "web"}); err != nil {
+		t.Fatalf("ApplyACL: %v", err)
+	}
+	f2.macipExists = true
+	if err := p2.BindIndex(f2, 1, "web", ""); err != nil {
+		t.Fatalf("绑定已存在应按成功: %v", err)
+	}
+	if len(f2.macipBind) != 0 {
+		t.Fatalf("「已存在」的 add 不应被记为成功 bind: %v", f2.macipBind)
+	}
+	if err := p2.BindIndex(f2, 1, "web", ""); err != nil {
+		t.Fatalf("再次绑定: %v", err)
+	}
+	if len(f2.macipCreated) != 1 || len(f2.macipBind) != 0 {
+		t.Fatalf("「已存在」后应登记为已绑，再次绑定为空操作: created=%v bind=%v", f2.macipCreated, f2.macipBind)
+	}
+}
+
+// ⑥ 恢复收敛重放含伴随 macip：配置里 L3 接口带 acl_in → EnsureConsistent 重放时重建 macip 绑定。
+// （VPP 重启后 macip 绑定随运行态消失，不重放即静默丢 ARP 放行——同「静默丢失」族教训。）
+func TestEnsureConsistentReplaysMacipCompanion(t *testing.T) {
+	f := newRecoveryFixture()
+	cfg := model.Config{
+		Acls: []model.Acl{{Name: "web",
+			Rules: []model.AclRule{{Seq: 10, Action: "permit", Source: "any", Destination: "any"}}}},
+		VirtualSwitches: []model.VirtualSwitch{{Name: "vs-l3", Type: "l3"}},
+		Vrfs: []model.Vrf{{Name: "vs-l3",
+			L3Interfaces: []model.L3Interface{{Interface: "ens192", AclIn: "web"}}}},
+	}
+	if errs := f.net.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("应收敛成功: %v", errs)
+	}
+	if len(f.acl.macipCreated) != 1 || len(f.acl.macipBind) != 1 {
+		t.Fatalf("重放应含伴随 macip create+bind: created=%v bind=%v", f.acl.macipCreated, f.acl.macipBind)
+	}
+	// 再次收敛（reset 清登记，模拟 VPP 重连/重启）：必须再次重建绑定。
+	if errs := f.net.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("重复收敛应成功: %v", errs)
+	}
+	if len(f.acl.macipCreated) != 2 || len(f.acl.macipBind) != 2 {
+		t.Fatalf("reset 后重放应重建 macip: created=%v bind=%v", f.acl.macipCreated, f.acl.macipBind)
 	}
 }

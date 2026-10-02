@@ -8,6 +8,7 @@ import (
 	"go.fd.io/govpp/api"
 	"go.fd.io/govpp/binapi/acl"
 	"go.fd.io/govpp/binapi/acl_types"
+	"go.fd.io/govpp/binapi/ethernet_types"
 	"go.fd.io/govpp/binapi/interface_types"
 	"go.fd.io/govpp/binapi/ip_types"
 )
@@ -148,3 +149,75 @@ func (g *govppAclClient) ACLInterfaceSet(swIfIndex, inAcl, outAcl uint32, inSet,
 	}
 	return nil
 }
+
+// MacipACLAddReplace 创建/替换伴随的 macip ACL（决策 #341）。
+//
+// 唯一规则：`permit ip 0.0.0.0/0 mac 00:00:00:00:00:00 mask 0`——mask 0 表示不比较 MAC、
+// 前缀 0.0.0.0/0 表示任意源，等价于「放行全部非 IP 帧」。round120 实验室验证（vppctl 同语句）
+// 加在绑 ACL 的 L3 接口上后 ARP 立即通、drops 停止增长。本 ACL 只作用于非 IP 帧，
+// IPv4/IPv6 仍走已绑的 IP ACL，故 IP 过滤语义不受影响。
+func (g *govppAclClient) MacipACLAddReplace(index uint32, tag string) (uint32, error) {
+	mac, err := ethernet_types.ParseMacAddress("00:00:00:00:00:00")
+	if err != nil {
+		return 0, fmt.Errorf("macip 通配 MAC: %w", err)
+	}
+	src, err := ip_types.ParsePrefix("0.0.0.0/0")
+	if err != nil {
+		return 0, fmt.Errorf("macip 通配前缀: %w", err)
+	}
+	rules := []acl_types.MacipACLRule{{
+		IsPermit:   acl_types.ACL_ACTION_API_PERMIT,
+		SrcMac:     mac,
+		SrcMacMask: mac, // mask 0：不比较 MAC（permit 任意）
+		SrcPrefix:  src,
+	}}
+	reply := &acl.MacipACLAddReplaceReply{}
+	if err := g.ch.SendRequest(&acl.MacipACLAddReplace{
+		ACLIndex: index, Tag: tag, Count: uint32(len(rules)), R: rules,
+	}).ReceiveReply(reply); err != nil {
+		return 0, err
+	}
+	if reply.Retval != 0 {
+		return 0, fmt.Errorf("macip_acl_add_replace(%s,index=%d) retval=%d", tag, index, reply.Retval)
+	}
+	return reply.ACLIndex, nil
+}
+
+// MacipACLInterfaceAddDel 绑定/解绑接口的 macip ACL（决策 #341）。
+func (g *govppAclClient) MacipACLInterfaceAddDel(swIfIndex, aclIndex uint32, isAdd bool) error {
+	reply := &acl.MacipACLInterfaceAddDelReply{}
+	if err := g.ch.SendRequest(&acl.MacipACLInterfaceAddDel{
+		IsAdd:     isAdd,
+		SwIfIndex: interface_types.InterfaceIndex(swIfIndex),
+		ACLIndex:  aclIndex,
+	}).ReceiveReply(reply); err != nil {
+		return err
+	}
+	if reply.Retval != 0 {
+		return fmt.Errorf("macip_acl_interface_add_del(if=%d,acl=%d,add=%v) retval=%d",
+			swIfIndex, aclIndex, isAdd, reply.Retval)
+	}
+	return nil
+}
+
+// MacipACLIndexByTag 经 macip_acl_dump（~0 = 全量）按 tag 反查已存在 macip ACL 的索引。
+// 恢复收敛用：nfvisd 重启后登记表为空，但 VPP 侧可能已有伴随 macip ACL，据此复用而非重复创建。
+func (g *govppAclClient) MacipACLIndexByTag(tag string) (uint32, bool, error) {
+	reqCtx := g.ch.SendMultiRequest(&acl.MacipACLDump{ACLIndex: ^uint32(0)})
+	for {
+		d := &acl.MacipACLDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return 0, false, err
+		}
+		if stop {
+			return 0, false, nil
+		}
+		if d.Tag == tag {
+			return d.ACLIndex, true, nil
+		}
+	}
+}
+
+// 编译期断言：govpp 客户端实现可选的反查能力（决策 #341）。
+var _ MacipIndexLookup = (*govppAclClient)(nil)
