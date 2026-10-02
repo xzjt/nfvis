@@ -631,10 +631,16 @@ var ErrL2Unavailable = orchestrator.ErrL2Unavailable
 
 // isMissingIfaceErr 判断 VPP 错误是否为「接口索引已失效」（VPPApiError -2
 // Invalid sw_if_index）。此类错误在删除流程中表示成员已不存在，可按已摘除处理。
+//
+// 三种形态都要认：① govpp 把非零 retval 转成的 api.VPPApiError(-2)（"…Invalid sw_if_index (-2)"）；
+// ② 少量客户端把 retval 拼进文案（acl_govpp.go 的 `… retval=-2` 兜底分支，精确后缀以免误认 -20..-29）；
+// ③ 直接含 "(-2)" 的文案。
 func isMissingIfaceErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "Invalid sw_if_index") || strings.Contains(msg, "(-2)")
+	return strings.Contains(msg, "Invalid sw_if_index") ||
+		strings.HasSuffix(msg, "retval=-2") ||
+		strings.Contains(msg, "(-2)")
 }

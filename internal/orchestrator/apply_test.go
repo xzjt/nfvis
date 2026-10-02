@@ -199,7 +199,8 @@ func TestApplyRemovalsAfterAdds(t *testing.T) {
 	if !hasCall(*calls, "del-bond:bond-old") {
 		t.Fatalf("bond 删除操作缺失: %v", *calls)
 	}
-	// 交换机/VNF 删除先于 ACL 删除（绑定解挂后再删 ACL），bond 删除先于其成员口相关的解挂
+	// 决策 #342：ACL 解绑/删除**先于**被引用对象的删除（bd/vrf/VM）——ACL 删除内含解绑引用它的
+	// 接口，接口先被删则解绑必撞 VPP -2 并整次回滚（round117/119/120）。bond 删除先于其成员口相关的解挂。
 	bdIdx, aclIdx, bondIdx := -1, -1, -1
 	for i, c := range *calls {
 		switch c {
@@ -211,8 +212,8 @@ func TestApplyRemovalsAfterAdds(t *testing.T) {
 			bondIdx = i
 		}
 	}
-	if bdIdx > aclIdx {
-		t.Fatalf("删除顺序错误：bd 应先于 acl: %v", *calls)
+	if aclIdx < 0 || bdIdx < 0 || aclIdx > bdIdx {
+		t.Fatalf("删除顺序错误：ACL 应先于其引用对象 bd/vrf/VM: %v", *calls)
 	}
 	if bondIdx < bdIdx {
 		t.Fatalf("删除顺序错误：引用 bond 的交换机应先解除引用: %v", *calls)
