@@ -1,0 +1,44 @@
+NFViS v2 真机验证记录 round118 —— ACL 能力边界实证：L3 形态会拦、逐规则计数在 VPP 26.06 永不递增 → 决策 #339 撤回 + #68 更正
+====================================================================
+日期：2026-10-02；环境：nfvis-vm，2.0.0~dev28；本轮撤回 PR #265 的实现（决策 #339 改写为撤回记录，计数仍 241）。
+
+§1 L3 形态的 ACL 是**会拦**的（正面证据，✓）
+- 现场：`l3-vs`（type l3）+ `l3-interface vh-l3-vm-nic0 ip address 10.1.1.1/24 acl-in l3-acl`；guest 单 vNIC
+  设 10.1.1.2/24、静态邻居（避 ARP）、`ip route add 10.99.1.0/24 via 10.1.1.1` 后 ping 10.99.1.1
+  （**经网关转发的流量**）。
+- 事实：① 该口 `show interface features` = `ip4-unicast: acl-plugin-in-ip4-fa`（特性在）、
+  `show acl-plugin interface` = `applied inbound on sw_if_index 4`（绑定可见）；② 规则翻 **deny** 后
+  `/err/acl-plugin-in-ip4-fa/ACL deny packets` 在 worker 线程上**递增（8 → 12）**——**ACL 确实在拦**。
+  ⇒ **产品的 ACL 能力在「vNIC 作 L3 接口」形态下可用**；R117-1 只关乎「网关/BVI 绑定」形态。
+
+§2 但**逐规则计数在 VPP 26.06 永不递增**（决定性，✗）
+- `/acl/<idx>/matches`（组合计数）在整个过程中**恒 0**（permit 与 deny 两态、多次绑定/重绑定、25s 窗口）。
+- 定位：插件 .so 导出 `acl_stats_intf_counters_enable` 与「Stats counters enabled for interface ACLs: %d」
+  ⇒ 该计数有**全局开关**。核对 CRC：VPP 26.06 的 API JSON 里 `acl_stats_intf_counters_enable` = `0xb3e225d2`、
+  `acl_del` = `0xef34fea4`，与 govpp v0.13.0 的生成物**逐一一致**。
+- 实测调用该开关（一次性 Go 探针，已删）→ 再重绑定 → 计数**仍恒 0**（ACL 依旧在拦：deny 计数继续涨）
+  ⇒ **VPP 26.06 只注册、不递增该组合计数**；可用的只有插件 err 族（permit/deny 总数粒度，无逐规则）。
+- 处置：读视图恒 0 会把「有流量匹配」说成「无匹配」——按「不留假功能」纪律**整体 revert PR #265**
+  （`git revert` 的 squash 提交；AGENTS.md 曾有的冲突已解决：保留 round117 段落与 241 计数行）；决策 #339
+  在附录 A 改写为撤回记录；`docs/v2待做.md` 一.6 复原为未收口并写明新原因与后续路线。
+
+§3 对 #68 的更正（如实登记，本轮实测）
+- #68 记「govpp v0.13.0 调 `acl_stats_intf_counters_enable` 会被 VPP 误执行为 `acl_del`（应答错位，可能误删 ACL）」。
+- **实测不成立**：请求 CRC 两面一致，VPP 按 `counters_enable` 正常执行；探针看到的报错是
+  `received unexpected message … expected acl_stats_intf_counters_enable_reply (ID 136), but got acl_del_reply_e8d4e804 (ID 108)`
+  ——根因是 **govpp 对「空应答」的 CRC 碰撞误报**：VPP 的**所有空应答共用 CRC `0xe8d4e804`**
+  （`acl_del_reply` / `acl_stats_intf_counters_enable_reply` / `macip_acl_del_reply` 三家同名同 CRC），
+  govpp 按 CRC 反查名字时命中了另一个并**把应答当意外消息丢弃**——是**应答识别噪声**，不是「请求被当成 acl_del 执行」。
+  实测副作用：实验室 ACL **未被误删**（调用前后 `acl-index 0` 完好）。
+- **结论**：#68 的「危险」判断应更正为「govpp 会误报应答（噪声），可在容忍/换用 send-and-forget 后继续」；
+  但**「该能力不可用」的结论仍成立、原因不同**——不是危险，而是 **VPP 26.06 不递增逐规则计数**。
+
+§4 删除倒序链的补充登记（R117-2 同族）
+- 清 L3 现场时实测的依赖倒序（产品校验均**明确拒绝**、非静默失败）：ACL 被 `l3-interface … acl-in` 引用 ⇒
+  删 ACL 前须先解绑（`delete virtual-switches <vs> l3-interface <if> acl-in <acl>`，**带值**才匹配）；
+  `l3-interface` 引用 vNIC ⇒ 删 VM 前须先删该 `l3-interface`；VM 引用交换机 ⇒ 删交换机前须先删 VM。
+  按 ACL→l3-interface→VM→交换机 逐级解绑后一次通过（rev 948/949/950/951）。
+
+§5 现场终态
+- 版本 2.0.0~dev28；配置无 l3-vs/l3-acl/hit-* 残留；`vppctl show acl-plugin acl` 空；**无 active 告警**；
+  最终 rev 951（+ 一次 `request vpp restart` 清残）；两个一次性探针均已从 /root/src 删除。
