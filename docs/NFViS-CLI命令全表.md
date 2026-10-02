@@ -4,7 +4,7 @@
 |---|---|
 | 用途 | **命令参考全表**：把 CLI 命令树逐条列出，附权限、落点与**真机实测状态** |
 | 来源 | 命令树取自实现（`internal/schema/tree_oper.go`、`internal/schema/tree_config.go`，即 `?` 补全与 `cli_bridge` 前置校验的真实来源）；契约见 `docs/NFViS-CLI命令树完整设计.md`；REST 落点对照见 `docs/NFViS-openapi.yaml` 与 `internal/api/server.go` 的路由注册 |
-| 实测状态 | 来自 **2026-09-29 round88 真机实测**（nfvis-vm，已装发布件走查 + 修复版复验）：`contrib/scripts/cli-fulltest.sh`（全功能 CLI 套件，**通过 195 / 失败 0 / 预期报错 12** —— `show vpp runtime` 已实现，全表**首次无失败**）+ `contrib/scripts/cli-pty-smoke.sh`（pty 交互冒烟，**通过 10 / 失败 0**）+ `cli-semantic-check.sh` **12 / 0 / 1**、`cli-lifecycle-check.sh` **21 / 0 / 3**。**更早轮次的状态已过期**，本表**上一轮（2026-09-14）的状态已过期**，本表一律以 round80 为准；**v2 开发线的当前基线见 §3 末尾**（决策 #319 后：fulltest 210/0/13（实测修正，round101）、语义 24/0/1、生命周期 21/0/3、pty 10/10，真机复跑待执行） |
+| 实测状态 | 来自 **2026-09-29 round88 真机实测**（nfvis-vm，已装发布件走查 + 修复版复验）：`contrib/scripts/cli-fulltest.sh`（全功能 CLI 套件，**通过 195 / 失败 0 / 预期报错 12** —— `show vpp runtime` 已实现，全表**首次无失败**）+ `contrib/scripts/cli-pty-smoke.sh`（pty 交互冒烟，**通过 10 / 失败 0**）+ `cli-semantic-check.sh` **12 / 0 / 1**、`cli-lifecycle-check.sh` **21 / 0 / 3**。**更早轮次的状态已过期**，本表**上一轮（2026-09-14）的状态已过期**，本表一律以 round80 为准；**v2 开发线的当前基线见 §3 末尾**（决策 #319 后：fulltest 210/0/13（实测修正，round101）、语义 25/0/2（决策 #343 后，见 §3）、生命周期 21/0/3、pty 10/10，真机复跑待执行） |
 | 基线 | main（round88 修复版工作树）；决策 **201** 项 |
 
 ## 0. 阅读约定
@@ -469,7 +469,10 @@ pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**
 决策 #337 再于阶段 2 `+2`：`set/delete virtual-switches <n> learn-limit <n>`）、
 `cli-semantic-check` **24 / 0 / 1**（旧 12/0/1；新增 **S10 配置编辑锁语义** 12 项，含 5 项正向控制，
 覆盖 #317/#318 的排他/接管/`ErrLockLost`/登出释放；**决策 #337 新增 S12**：产品读视图
-`learn_limit` ↔ `vppctl show bridge-domain <id> detail` 的 Learn-li，无配置如实报不可判定）、
+`learn_limit` ↔ `vppctl show bridge-domain <id> detail` 的 Learn-li，无配置如实报不可判定；
+**决策 #343 后为 25 / 0 / 2**——**无新增/移除项**，是既有 **S8** 由「不可判定」转「通过」（S8 正控由
+单次 3s 窗口改为窗口内增长周期计数，慢周期下不再整窗跨零 ⇒ 转可判定并通过，收口 R115-1），
+另 2 项不可判定为 S11/S12 按设计的「无配置跳过」）、
 `cli-lifecycle-check` **21 / 0 / 3**（不变）、
 `cli-pty-smoke` **10 / 10**（不变）。逐阶段差异与原因见规格书附录 A #319⑤；
 命令清单与契约的对账由 `contrib/scripts/check_suite_contract_sync.sh` 守护（`make check` 的 `toolcheck`）。

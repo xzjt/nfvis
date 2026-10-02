@@ -86,6 +86,9 @@ esac
 curl_api() { curl -s "${CURL_TLS[@]}" "$@"; }
 PW=${NFVIS_PASSWORD:-Admin@12345}
 PERTURB_BD=${PERTURB_BD:-5100}   # 扰动用的 BD id（须为确定空闲；脚本用完即删）
+# S8 正控观察窗口：每 1s 采一次成员口 rx、共这么多次采样（见 s8_rx_window）。20s 足以跨过
+# fixture guest beat 的超时慢周期（~3s/发）——单次 3s 窗口会整窗跨零（决策 #343 / R115-1）。
+S8_WINDOW_SECS=${S8_WINDOW_SECS:-20}
 MARK=$$                           # 本次运行的唯一后缀，便于清理
 
 cli() { "$CLI_BIN" -server "$SRV" -u admin -p "$PW" -source console -c "$1" 2>&1 | grep -v '^连接'; }
@@ -223,14 +226,39 @@ vsw_ports_parse() {
 }
 # <vs-name> → 产品读视图里的成员口（调 CLI；解析在 vsw_ports_parse，便于自校准）。
 vsw_readview_ports() { vsw_ports_parse "$(cli "show virtual-switches $1 ports")"; }
-# <成员口列表> → 「口 rx」快照（每行一条），用于「这个窗口内有没有帧从成员口进来」。
-s8_rx_snapshot() { for m in $1; do echo "$m $(vpp_if_rx "$m")"; done; }
-# <快照> → 窗口内 rx 增长的成员口（逐行）。这是一条**可判别**的正控判据：
-# 有帧从成员口进来 ⇒ 确实有流量穿过该交换机（与「ping 发包数」互补，不依赖对端必须应答）。
-s8_rx_grew() {
-  printf '%s\n' "$1" | while read -r m b; do
-    [ -n "$m" ] || continue
-    a=$(vpp_if_rx "$m"); [ "${a:-0}" -gt "${b:-0}" ] 2>/dev/null && echo "$m"
+# <空格分隔的 rx 采样值> → 「增长周期数」（相邻采样增长记 1 次）。纯函数，供自校准抽取：
+#   `10 12 12 15` → 2；全 0 → 0；单值 → 0；非数字按 0 容错。把「一瞬」的比对换成「一段时间」的
+#   计数——fixture guest beat 在 ping 超时时降为 ~3s/发，单次 3s 窗口会整窗跨零（决策 #343 / R115-1）。
+s8_rx_cycles_of() {
+  local prev="" v n=0
+  for v in $1; do
+    case "$v" in ''|*[!0-9]*) v=0;; esac
+    if [ -n "$prev" ] && [ "$v" -gt "$prev" ]; then n=$((n + 1)); fi
+    prev="$v"
+  done
+  printf '%s' "$n"
+}
+# <成员口> [<采样次数>] → 逐口一行「<口> <增长周期数>」：**共用一个观察窗口**——每 1s 把各成员口
+#   各采一次、共 N 次（默认 S8_WINDOW_SECS=20，故整窗约 N 秒、不随成员口数放大），每口的采样序列
+#   交给 s8_rx_cycles_of 计周期。每口至少 2 个增长周期才算「确实有帧从成员口进来」——慢周期下也
+#   不会整窗跨零（决策 #343 / R115-1）。
+s8_rx_window() {
+  local members="$1" secs="${2:-${S8_WINDOW_SECS:-20}}" m i=0 idx=0
+  local -a acc=()
+  for m in $members; do acc+=(""); done
+  while [ "$i" -lt "$secs" ]; do
+    idx=0
+    for m in $members; do
+      acc[idx]="${acc[idx]} $(vpp_if_rx "$m")"
+      idx=$((idx + 1))
+    done
+    i=$((i + 1))
+    [ "$i" -lt "$secs" ] && sleep 1
+  done
+  idx=0
+  for m in $members; do
+    printf '%s %s\n' "$m" "$(s8_rx_cycles_of "${acc[idx]}")"
+    idx=$((idx + 1))
   done
 }
 # <空格分隔的成员口> → 这些口里 **VPP 真的认得** 的那些（读视图的派生条目在没落地时只有
@@ -445,7 +473,9 @@ hdr "S8 MAC 表 ↔ VPP l2fib 条数（**必须带正向控制**；没流量=不
 # 已含 VNF/容器声明的派生条目 source=vnf|container 与运行态成员 source=runtime），再用 `vppctl` 的
 # BD 成员表**双向印证**：VPP 有而读视图没有 ⇒ 读视图漏成员，如实报（不静默取其一——r106 就是
 # 前者看不见 link down 的派生端口，后者看不见未落地的声明）。
-# 正控：先按邻居表找可 ping 的对端（源取同 BD 的 L3 口/BVI），再看**成员口 rx 在 3s 窗口内是否真的增长**；
+# 正控：先按邻居表找可 ping 的对端（源取同 BD 的 L3 口/BVI），再看**成员口 rx 在观察窗口内是否真的增长**
+# （决策 #343：每 1s 采一次、共 S8_WINDOW_SECS 次，按「相邻采样增长即记 1 周期」计数，任一成员口 ≥2 周期
+# 即判有流量——单次 3s 窗口会撞上 fixture guest beat 的超时慢周期 ~3s/发而整窗跨零，R115-1）；
 # 取不到对端时仅看成员口 rx 是否增长（既有业务流量穿过该交换机同样是正控）。
 # 两者都无 ⇒ 如实标不可判定——**没有把「这一轮没测到」变成「通过」**。
 # 现场没有在交换机里收发帧的对象时，用 contrib/scripts/cli-semantic-fixture.sh up 造现场（见其头部）。
@@ -491,8 +521,12 @@ EOF
     echo "      制造流量: ping $peer${src:+ source $src} → $(printf '%s' "$pingout" | grep -E 'Statistics:' | head -1)"
     s8_control=noflow    # 有对端但还没证明帧从成员口进来（下面按 rx 增长定论）
   fi
-  snap=$(s8_rx_snapshot "$memvpp"); sleep 3; grew=$(s8_rx_grew "$snap" | tr '\n' ' '); grew=${grew% }
-  echo "      成员口 rx 3s 窗口: ${grew:-无增长}（快照 $(printf '%s' "$snap" | tr '\n' '; ')）"
+  # 正控取样（决策 #343）：窗口内「增长周期计数」——每 1s 采一次成员口 rx、共 S8_WINDOW_SECS 次；
+  # 任一成员口 ≥2 个增长周期即判 learned（单次 3s 窗口在 beat 超时慢周期下会整窗跨零）。
+  win=$(s8_rx_window "$memvpp" "$S8_WINDOW_SECS")
+  grew=$(printf '%s\n' "$win" | awk 'NF >= 2 && $2 + 0 >= 2 {print $1}' | tr '\n' ' '); grew=${grew% }
+  winline=$(printf '%s\n' "$win" | awk 'NF >= 2 {printf "%s%s=%s 周期", (n++ ? "  " : ""), $1, $2}')
+  echo "      成员口 rx ${S8_WINDOW_SECS}s 窗口: ${winline:-（无采样）}"
   if [ -n "$grew" ]; then
     s8_tag="$t"; s8_idx="$i"; s8_memvpp="$memvpp"; s8_member="$grew"; s8_control=learned
     break
