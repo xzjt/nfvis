@@ -1099,6 +1099,11 @@ nfvis# commit
 
 核对：`show acls`、`show acls acl-web detail`。
 
+> **地址家族（IPv4/IPv6）**：一条规则是**单族**语句——`source`/`destination` 都接受 IPv4 或 IPv6
+> 前缀（显式两侧须同族，混族在提交期拒绝并指明两侧家族）；`any` **跟随对侧家族**（对侧是 v6 即
+> `::/0`，否则 `0.0.0.0/0`；两侧都是 any 按 v4 处理）。`protocol icmp` 在 v6 规则中指 **ICMPv6**（58），
+> v4 规则中指 ICMPv4（1）。要同时过滤 v4 与 v6，写两条规则。
+
 绑定 ACL 有三条务必注意：
 
 1. **只能绑在 L3 接口（`l3-interface … acl-in`）上**。绑在网关（BVI）或交换机端口上都会被
@@ -1162,6 +1167,9 @@ nfvis# commit
 > NAT 约束：inside 转发域由 virtual-switch（须 l3）派生，outside 由**出接口所属 VRF** 派生
 > （出接口须为某 l3 交换机的 l3-interface 且已配地址）；VPP NAT44 单实例仅一对 (inside, outside)，
 > 故多规则的 virtual-switch 与出接口 VRF 必须各自一致。
+>
+> **NAT44 仅支持 IPv4**：地址池、匹配源、静态映射的地址都必须是 IPv4，v6 值在**提交校验期**即被拒绝
+> （NAT44 是 IPv4 专用的 NAT 形态；VPP 自带的 NAT66/NAT64 插件产品尚未接入）。
 
 核对：`show nat`。
 
