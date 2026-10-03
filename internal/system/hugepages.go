@@ -193,13 +193,17 @@ const dataplaneCommPrefix = "vpp"
 // HugepageHeldPagesDetail 在 HugepageHeldPages 的基础上，把「数据面（comm 以 vpp 开头，实测 vpp_main）提交的页」
 // 单独归属出来（决策 #353）。total 与 HugepageHeldPages 的返回值完全一致。
 //
-// 归属口径：
+// 归属口径（round133b 上机修正——**独占归属**，勿改回「首见归属」）：
 //
-//	· 逐进程读 `/proc/<pid>/comm`，**以 "vpp" 开头**（真机实测 `vpp_main`）的进程**提交的页**计入 dataplane；comm 读不到
-//	  （进程已退出 / 无权限 / 内核未提供）的进程**按非数据面计**——宁少不猜。
-//	· 共享页沿用同一个 seen 去重：一页全局只计一次，**归属取首个提交进程**。VPP 与 VNF
-//	  （qemu）共享同一个 1G 大页在本产品的数据面内存模型下不会发生（VPP 主堆/缓冲池独立，
-//	  vhost-user 共享段在 VPP 侧同样由 vpp 提交），故「首发归属」如实即可。
+//	· 对每个 hugetlb 页（dev:inode）记录**全部映射它的进程**是否数据面（comm 以 "vpp" 开头，
+//	  真机实测 `vpp_main`）。一页**仅由数据面进程映射、无其它进程共享**才计入 dataplane。
+//	  ⚠️ 真机教训：vhost-user 会把 **VNF 的 guest RAM 大页映射进 VPP 进程**（该页同时出现在
+//	  vpp_main 与 qemu 的 smaps 里）——若按「首个被扫描到的进程」归属，/proc 目录序一变
+//	  （如 VNF 重启换 pid）同一现场会在 1↔2 间翻转（round133b Browser Use 复核抓到，CLI 与
+//	  REST 读数互相矛盾）。guest RAM 是 VNF 的页、不是「数据面固定占用」，独占判据把它排除。
+//	· comm 读不到的进程**按非数据面计**——宁少不猜；因此「无其它进程共享」若含 comm 读不到的
+//	  进程，也会把该页排除在 dataplane 之外（保守、不虚报数据面占用）。
+//	· 每页全局只计一次（total 与旧实现一致）。
 //
 // ok=false 表示一个进程的 smaps 都读不到（非 Linux / 无权限）：total/dataplane 为 nil，
 // 调用方应回 -1 并给 note，**不编造 0**。
@@ -209,9 +213,14 @@ func HugepageHeldPagesDetail(root string) (total, dataplane map[string]int, ok b
 	if err != nil {
 		return nil, nil, false
 	}
-	total = map[string]int{"1G": 0, "2M": 0}
-	dataplane = map[string]int{"1G": 0, "2M": 0}
-	seen := map[string]bool{} // dev:inode → 已计（跨进程共享映射只计一次）
+	// 每页记录：页尺寸 + 页数 + 映射者构成（是否数据面映射过 / 是否被非数据面映射过）。
+	type heldPage struct {
+		size    string
+		pages   int
+		byDP    bool
+		byOther bool
+	}
+	pages := map[string]*heldPage{} // dev:inode → 记录（跨进程共享映射只记一次）
 	readAny := false
 	for _, e := range ents {
 		if !e.IsDir() {
@@ -226,19 +235,31 @@ func HugepageHeldPagesDetail(root string) (total, dataplane map[string]int, ok b
 			continue // 进程已退出 / 无权限：跳过（不因单个进程读不到就把整个池判为取不到）
 		}
 		readAny = true
-		isDataplane := strings.HasPrefix(readProcComm(pidDir), dataplaneCommPrefix)
-		counts := map[string]int{"1G": 0, "2M": 0}
-		scanSmapsHeld(b, counts, seen)
-		for _, size := range HugepageSizes {
-			total[size] += counts[size]
-			if isDataplane {
-				dataplane[size] += counts[size]
+		isDP := strings.HasPrefix(readProcComm(pidDir), dataplaneCommPrefix)
+		for _, pg := range scanSmapsPages(b) {
+			rec, ok := pages[pg.key]
+			if !ok {
+				rec = &heldPage{size: pg.size, pages: pg.pages}
+				pages[pg.key] = rec
+			}
+			if isDP {
+				rec.byDP = true
+			} else {
+				rec.byOther = true
 			}
 		}
 	}
 	if !readAny {
 		// 一个进程的 smaps 都读不到（非 Linux / 无权限）：如实报取不到，不编造 0。
 		return nil, nil, false
+	}
+	total = map[string]int{"1G": 0, "2M": 0}
+	dataplane = map[string]int{"1G": 0, "2M": 0}
+	for _, rec := range pages {
+		total[rec.size] += rec.pages
+		if rec.byDP && !rec.byOther {
+			dataplane[rec.size] += rec.pages // 独占归属：仅数据面映射的页才算「数据面固定占用」
+		}
 	}
 	return total, dataplane, true
 }
@@ -252,9 +273,19 @@ func readProcComm(pidDir string) string {
 	return strings.TrimSpace(string(b))
 }
 
-// scanSmapsHeld 解析一份 smaps 内容，把其中 hugetlb 映射的页数累加进 counts（去重键放进 seen）。
-func scanSmapsHeld(data []byte, counts map[string]int, seen map[string]bool) {
+// heldPageRef 一份 smaps 里的一个托管 hugetlb 页（按 dev:inode 标识）。
+type heldPageRef struct {
+	key   string // dev:inode（跨进程共享映射的同一页同键）
+	size  string // "1G" / "2M"
+	pages int    // 该映射的页数（sizeKB / KernelPageSize）
+}
+
+// scanSmapsPages 解析一份 smaps 内容，返回其中**托管尺寸**的 hugetlb 映射（逐页记录，不去重）。
+// 去重与归属由调用方（HugepageHeldPagesDetail）按 dev:inode 汇总——独占归属需要看到**所有**
+// 映射者，故本函数不做 seen 过滤（决策 #353，round133b 修正）。
+func scanSmapsPages(data []byte) []heldPageRef {
 	var (
+		out      []heldPageRef
 		devInode string // 当前映射头行的 dev:inode
 		inBlock  bool
 		isHuge   bool // 当前映射是否 hugetlb（VmFlags 含 ht）
@@ -269,11 +300,7 @@ func scanSmapsHeld(data []byte, counts map[string]int, seen map[string]bool) {
 		if size == "" {
 			return // 不是本产品托管的页尺寸
 		}
-		if seen[devInode] {
-			return // 同一页被多进程共享映射：只计一次
-		}
-		seen[devInode] = true
-		counts[size] += sizeKB / pageKB
+		out = append(out, heldPageRef{key: devInode, size: size, pages: sizeKB / pageKB})
 	}
 	for _, raw := range strings.Split(string(data), "\n") {
 		ln := strings.TrimRight(raw, "\r")
@@ -298,6 +325,7 @@ func scanSmapsHeld(data []byte, counts map[string]int, seen map[string]bool) {
 		}
 	}
 	flush()
+	return out
 }
 
 // smapsKBNum 取 smaps 行里的 kB 数值（如 "KernelPageSize:  2048 kB" → 2048）。

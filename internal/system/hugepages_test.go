@@ -119,6 +119,34 @@ func TestHugepagePoolViewFor(t *testing.T) {
 }
 
 // 决策 #353：1G 池「数据面固定占用」进读视图（字段 + 说明）。
+// TestHugepageHeldPagesDetailSharedGuestRAMExcluded 复刻 round133b 真机现场：
+// vhost-user 把 VNF 的 guest RAM 大页映射进 VPP——该页**不得**算「数据面固定占用」
+// （独占归属）。构造上让 vpp 的 pid 字符串排前（先被扫描）：旧「首见归属」实现会把它
+// 误算给数据面（dp=2），本测试即锁死该回归。
+func TestHugepageHeldPagesDetailSharedGuestRAMExcluded(t *testing.T) {
+	root := t.TempDir()
+	// pid 100（vpp_main）：主堆（独占，inode 90）+ guest RAM（与 qemu 共享，inode 91）
+	writeSmaps(t, root, "100",
+		smapsBlock("7f0000000000", "7f0040000000", "00:0d", "90", 1*1048576, 1048576, true, "/memfd:seg_0-0 (deleted)")+
+			smapsBlock("7f1000000000", "7f1040000000", "00:0d", "91", 1*1048576, 1048576, true, "/dev/hugepages/libvirt/qemu/5-sem-vm/pc.ram"))
+	writeProcComm(t, root, "100", "vpp_main")
+	// pid 200（qemu）：同一 guest RAM 页（inode 91）
+	writeSmaps(t, root, "200",
+		smapsBlock("7f2000000000", "7f2040000000", "00:0d", "91", 1*1048576, 1048576, true, "/dev/hugepages/libvirt/qemu/5-sem-vm/pc.ram"))
+	writeProcComm(t, root, "200", "qemu-system-x86")
+
+	total, dp, ok := HugepageHeldPagesDetail(root)
+	if !ok {
+		t.Fatal("ok=false，预期可读")
+	}
+	if total["1G"] != 2 {
+		t.Fatalf("total[1G]=%d，期望 2（主堆 + guest RAM 各一页，共享页只计一次）", total["1G"])
+	}
+	if dp["1G"] != 1 {
+		t.Fatalf("dataplane[1G]=%d，期望 1——共享的 guest RAM 页必须被独占判据排除（round133b 教训）", dp["1G"])
+	}
+}
+
 func TestHugepagePoolViewForDataplane(t *testing.T) {
 	// 1G 池且实测数据面占用 >=1 → note 追加可用性说明（Y = 空闲页数）。
 	v := HugepagePoolViewFor("1G", 2, 2, 0, true, 2, true, 1, true)
@@ -440,8 +468,8 @@ func writeProcComm(t *testing.T, root, pid, comm string) {
 	}
 }
 
-// 归属口径：comm=vpp 的进程提交的页计入 dataplane；共享页（同 dev:inode）全局只计一次、
-// 归属取首个提交进程；comm 读不到的进程按非数据面计（宁少不猜）。
+// 归属口径（独占归属，round133b 修正）：一页**仅由** comm=vpp 的进程映射、无其它进程共享
+// 才计入 dataplane；共享页全局只计一次（total）；comm 读不到的进程按非数据面计（宁少不猜）。
 func TestHugepageHeldPagesDetailDataplaneAttribution(t *testing.T) {
 	root := t.TempDir()
 	// pid 100（comm=vpp）：1G inode 42 共 2 页 + 2M inode 77 共 3 页 → 全部计入数据面。
@@ -449,7 +477,8 @@ func TestHugepageHeldPagesDetailDataplaneAttribution(t *testing.T) {
 		smapsBlock("7f0000000000", "7f0040000000", "00:0d", "42", 2*1048576, 1048576, true, "/dev/hugepages/vpp-heap")+
 			smapsBlock("7f1000000000", "7f1000600000", "00:0d", "77", 3*2048, 2048, true, "/dev/hugepages/vpp-buf"))
 	writeProcComm(t, root, "100", "vpp_main")
-	// pid 200（qemu）：与 vpp 共享 inode 42 的 2 页（应去重不计，归属仍是首个提交者 vpp）
+	// pid 200（qemu）：与 vpp 共享 inode 42 的 2 页（total 去重只计一次；dataplane 因「有非数据面
+	// 映射者」而被独占判据排除）
 	// + 自己的 1G inode 55 共 1 页（非数据面）。
 	writeSmaps(t, root, "200",
 		smapsBlock("7fa000000000", "7fa040000000", "00:0d", "42", 2*1048576, 1048576, true, "/dev/hugepages/vpp-heap")+
@@ -470,9 +499,11 @@ func TestHugepageHeldPagesDetailDataplaneAttribution(t *testing.T) {
 	if total["2M"] != 3 {
 		t.Errorf("total[2M] = %d，期望 3", total["2M"])
 	}
-	// 数据面只算 comm=vpp 的提交：1G 2 页、2M 3 页；qemu/读不到 comm 的进程不计。
-	if dp["1G"] != 2 || dp["2M"] != 3 {
-		t.Errorf("dataplane = %+v，期望 1G=2 2M=3（仅 comm=vpp 的进程）", dp)
+	// 独占归属（round133b 修正）：数据面只算**仅 vpp 映射、无其它进程共享**的页——
+	// inode42「vpp+qemu 共享」不计、inode55（qemu）不计、inode66（comm 读不到）不计 ⇒ 1G=0；
+	// inode77（仅 vpp）⇒ 2M=3。
+	if dp["1G"] != 0 || dp["2M"] != 3 {
+		t.Errorf("dataplane = %+v，期望 1G=0（共享/他进程页被独占判据排除） 2M=3", dp)
 	}
 	// 与既有签名同源：HugepageHeldPages 的汇总必须与 Detail 的 total 一致（保留旧调用方不动）。
 	held, ok2 := HugepageHeldPages(root)

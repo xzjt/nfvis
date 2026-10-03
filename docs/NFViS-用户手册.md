@@ -1041,7 +1041,7 @@ nfvis$ request system hugepages reclaim   # 回收空闲的多余页（在用页
 它偏好最大可用页尺寸，且 VPP 自己的 `default-hugepage-size`/`main-heap-page-size` 与内核
 `default_hugepagesz` **都改不了它**（真机三组对照，见 §6.2），产品也没有配置键可释放这一页。
 因此 **1G 池声明 N 页时，VNF 实际可用 N−1 页**（第 N 台及以后的 VNF 会因 `Cannot allocate memory`
-起不来）。读法：`show system hugepages` 的「**数据面占用**」列 = 实际持有中数据面进程（VPP，`comm` 形如 `vpp_main`）提交的页
+起不来）。读法：`show system hugepages` 的「**数据面占用**」列 = 实际持有中**仅由**数据面进程（VPP，`comm` 形如 `vpp_main`）映射、无其它进程共享的页（vhost-user 共享给 VPP 的 VNF guest RAM 不计入）
 （实测；取不到显示「取不到」，不编造），「**空闲（可分配）**」列 = 内核空闲页数（也就是还能起几台
 1G 内存的 VNF）；1G 行「数据面占用 ≥1」时，说明区会直接写出「VNF 可起页数 = 空闲页数」。
 控制台「资源池」页的「数据面占用」列与说明行同源（同一端点）。`wizard` 问 1G 数量时按同一口径提示

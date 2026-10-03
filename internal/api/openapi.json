@@ -1131,7 +1131,7 @@
                   "type": "integer"
                 },
                 "held_by_dataplane": {
-                  "description": "实际持有中数据面占用的页数（实测：comm 以 vpp 开头的进程（真机 vpp_main）提交的页；不可读时 -1，不编造）；1G 池该值 >=1 时 note 追加可用性说明（数据面固定占用、VNF 可起页数 = 空闲页数，决策 #353）",
+                  "description": "实际持有中数据面占用的页数（实测：**仅** comm 以 vpp 开头（真机 vpp_main）的进程映射、无其它进程共享的页（独占归属；vhost-user 共享的 VNF guest RAM 不计）；不可读时 -1，不编造）；1G 池该值 >=1 时 note 追加可用性说明（数据面固定占用、VNF 可起页数 = 空闲页数，决策 #353）",
                   "type": "integer"
                 },
                 "in_use": {
