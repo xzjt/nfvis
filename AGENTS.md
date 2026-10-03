@@ -469,6 +469,15 @@
   `checked 40 / deny 20`（**20 个 v6 包全被拒**）。至此 #352 四种真机验证（any 家族/混族拒绝/NAT v6 拒绝/
   enforcement）全达成，三.4 该项登记撤销。顺带如实记录：绑「只含 v6 规则」的 ACL 后接口上环境 v4 流量按
   缺省语义被拒（ACL 绑定对两族都生效）。证据 `docs/evidence/v2-round133-d352-acl6-enforcement.txt`。
+- **round134（#353 交付：1G 池「数据面固定占用」进用户可见口径，2026-10-03）**：读视图（CLI/REST/Web 三面
+  同源）增「数据面占用」**实测**列（`held_by_dataplane`，**独占归属**）+ 1G 说明「VNF 可起页数 = 空闲页数」
+  + 向导（1G 问句提示 N−1；0<N<2 出「无法再起 VNF」告警）。**Browser Use 复核抓到并修掉一个真缺陷
+  （round134b）**：首版「首见归属」按 /proc 扫描顺序归属——**vhost-user 会把 VNF 的 guest RAM 大页映射进
+  VPP**，sem-vm 停/起换 pid 后归属在 1↔2 间非确定翻转（Web 显 2、CLI 显 1、REST 显 2，三源互相矛盾）；
+  改**独占归属**（仅 vpp 映射且无其它进程共享才计入；comm 读不到按非数据面计）后稳定 dp=1，含共享页
+  排除回归测试。**教益**：归属判据用全量映射者集合、不用扫描顺序；跨事实源对照能暴露非确定读数。
+  验证：sysfs/smaps/CLI 三方 + REST + 停/起动态 + wizard 预演 + **dev51（合并后构建）Browser 复核 + 截图**
+  （`docs/images/round134-web-pools-dataplane-column.png`）；证据 `v2-round134-d353-hugepage-visibility-verified.txt`。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
