@@ -1,10 +1,12 @@
 package api
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/xzjt/nfvis/internal/aaa"
+	"github.com/xzjt/nfvis/internal/model"
 )
 
 // 决策 #356：历史时序存储配置面回归。
@@ -106,4 +108,31 @@ func TestMetricsHistoryConfigZeroMeansDefault(t *testing.T) {
 		t.Fatalf("全 0 的 metrics 不应留下空壳: %+v", cfg.System.Metrics)
 	}
 	execOK(t, x, "show configuration | display set")
+}
+
+// 概览里「采样间隔」的注记必须与**模型默认值**比较（不能拿生效值和它自己比——那样恒说「默认」）。
+// 曾实现成后者：把生效值同时当左右两侧，注记恒真（真机现场 interval=10 仍显示「默认」）。
+func TestMetricsHistoryIntervalNote(t *testing.T) {
+	x, _ := newCLIKit(t)
+	for _, tc := range []struct {
+		interval int
+		want     string
+	}{
+		{model.MetricsIntervalDefaultSeconds, "（默认值"},
+		{10, "（已配置"},
+		{3600, "（已配置"},
+	} {
+		x.metricsHistoryView = func(string, int64, int64, int64, int) map[string]any {
+			return map[string]any{
+				"available": true, "sample_interval_seconds": tc.interval, "retention_days": 7,
+				"metrics": []string{}, "series": []any{},
+				"store": map[string]any{"path": "/tmp/metrics.db", "enabled": true,
+					"size_bytes": int64(4096), "series": int64(1), "samples": int64(2)},
+			}
+		}
+		out := x.renderMetricsHistoryOverview()
+		if !strings.Contains(out, "采样间隔:     "+strconv.Itoa(tc.interval)+"s"+tc.want) {
+			t.Fatalf("interval=%d 的注记应含 %q，实际：\n%s", tc.interval, tc.want, out)
+		}
+	}
 }

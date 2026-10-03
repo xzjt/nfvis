@@ -377,7 +377,7 @@ func (x *cliExecutor) renderMetricsHistoryOverview() string {
 	retention := viewInt(view, "retention_days")
 	b.WriteString("历史时序存储: 已启用\n")
 	fmt.Fprintf(&b, "库路径:       %s（%s）\n", viewText(viewString(store, "path")), humanSize(viewInt64(store, "size_bytes")))
-	fmt.Fprintf(&b, "采样间隔:     %ds%s\n", interval, defaultNote(x.historyIntervalDefault() == interval))
+	fmt.Fprintf(&b, "采样间隔:     %ds%s\n", interval, intervalNote(interval))
 	fmt.Fprintf(&b, "保留天数:     %d 天（另有 2,000,000 行硬上限兜底）\n", retention)
 	fmt.Fprintf(&b, "序列数:       %d\n", viewInt64(store, "series"))
 	fmt.Fprintf(&b, "样本数:       %d\n", viewInt64(store, "samples"))
@@ -472,7 +472,7 @@ func (x *cliExecutor) metricsHistoryViewFor(name string, since, until, step int6
 	return x.metricsHistoryView(name, since, until, step, limit)
 }
 
-// historyIntervalDefault 生效的采样间隔（CLI 侧用于自动步长与「默认」注记）。
+// historyIntervalDefault 生效的采样间隔（CLI 侧用于自动步长推导）。
 func (x *cliExecutor) historyIntervalDefault() int {
 	if x.engine == nil {
 		return model.MetricsIntervalDefaultSeconds
@@ -583,12 +583,13 @@ func viewText(s string) string {
 	return s
 }
 
-// defaultNote 「默认」注记（生效值等于模型默认时）。
-func defaultNote(isDefault bool) string {
-	if isDefault {
-		return "（默认，可用 set system metrics history interval <n> 调整）"
+// intervalNote 采样间隔的注记：与**模型默认值**比较（不能拿生效值和它自己比——那样注记恒真）。
+// 显式配成 60 与未配置不可区分，此处按值如实说「默认值」即可。
+func intervalNote(seconds int) string {
+	if seconds == model.MetricsIntervalDefaultSeconds {
+		return "（默认值；可用 set system metrics history interval <n> 调整）"
 	}
-	return ""
+	return "（已配置；set system metrics history interval <n> 调整）"
 }
 
 func fmtHistoryTS(ts int64) string {
