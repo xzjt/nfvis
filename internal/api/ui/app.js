@@ -834,7 +834,11 @@ function svgNode(tag, attrs) {
 function mhValueText(name, v) {
   if (v === undefined || v === null || !isFinite(v)) return '—';
   if (/_bytes$/.test(name || '')) return bytes(v);
-  return String(v);
+  // 浮点读数压缩到 4 位有效数字（原始 IEEE 串如 0.17999450927800728 既读不出也占满坐标轴）；
+  // 整数原样（计数类），不四舍五入成科学计数法。
+  if (Number.isInteger(v)) return String(v);
+  const s = Number(v.toPrecision(4));
+  return String(s);
 }
 
 function mhLabelsText(labels) {
