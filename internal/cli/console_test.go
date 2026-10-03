@@ -195,7 +195,7 @@ func copyConsoleWithin(t *testing.T, rp *REPL, stream io.Writer, localIn io.Read
 	t.Helper()
 	fin := make(chan struct{})
 	go func() {
-		rp.copyConsole(stream, localIn, done)
+		rp.copyConsole(stream, localIn, done, "串口")
 		close(fin)
 	}()
 	select {

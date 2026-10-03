@@ -49,7 +49,7 @@ func (r *REPL) runConsole(req *cliclient.ConsoleRequest) {
 		close(done)
 	}()
 
-	r.copyConsole(stream, os.Stdin, done)
+	r.copyConsole(stream, os.Stdin, done, strings.TrimSpace(consoleKindLabel(req)))
 }
 
 // consoleKindLabel 会话种类后缀：VM 串口 / 容器终端（决策 #358）。
@@ -110,14 +110,14 @@ func pumpConsoleInput(stop <-chan struct{}, in io.Reader) <-chan consoleChunk {
 //
 // 参数皆可注入（stream 为可写端、localIn 为本地输入、done 在服务端断开时关闭），
 // 便于单测在没有真实 TTY/WebSocket 的情况下复现旧阻塞：断言「服务端断开后限时返回」。
-func (r *REPL) copyConsole(stream io.Writer, localIn io.Reader, done <-chan struct{}) {
+func (r *REPL) copyConsole(stream io.Writer, localIn io.Reader, done <-chan struct{}, label string) {
 	stop := make(chan struct{})
 	defer close(stop)
 	in := pumpConsoleInput(stop, localIn)
 	for {
 		select {
 		case <-done:
-			fmt.Fprintf(r.out, "\r\n[串口已断开]\r\n")
+			fmt.Fprintf(r.out, "\r\n[%s已断开]\r\n", label)
 			return
 		case c, ok := <-in:
 			if !ok { // 输入协程已结束（stop 生效）：静默返回
@@ -125,11 +125,11 @@ func (r *REPL) copyConsole(stream io.Writer, localIn io.Reader, done <-chan stru
 			}
 			if len(c.data) > 0 {
 				if c.data[0] == consoleExitByte {
-					fmt.Fprintf(r.out, "\r\n[已退出串口]\r\n")
+					fmt.Fprintf(r.out, "\r\n[已退出%s]\r\n", label)
 					return
 				}
 				if _, werr := stream.Write(c.data); werr != nil {
-					fmt.Fprintf(r.out, "\r\n[串口写入失败: %v]\r\n", werr)
+					fmt.Fprintf(r.out, "\r\n[%s写入失败: %v]\r\n", label, werr)
 					return
 				}
 			}
