@@ -572,16 +572,35 @@ function renderHugepagePools(hp) {
   $('hp-note').textContent = ok ? '' : '（读取失败：' + (hp ? hp.__err : '未取到数据') + '）';
   const pools = ok ? rowsOf(hp.pools) : [];
   if (!pools.length) {
-    tbody.appendChild(el('tr', {}, [el('td', { colspan: '9', class: 'muted', text: ok ? '（无）' : '读取失败' })]));
+    tbody.appendChild(el('tr', {}, [el('td', { colspan: '10', class: 'muted', text: ok ? '（无）' : '读取失败' })]));
+    hpDataplaneNote(pools);
     return;
   }
   pools.forEach((p) => {
     const tr = el('tr');
     [p.page_size, hpDeclared(p.declared), hpNum(p.actual), hpNum(p.in_use), hpNum(p.held),
-      hpNum(p.orphan), hpNum(p.free), p.reclaimable, hpState(p.state),
+      hpNum(p.held_by_dataplane), hpNum(p.orphan), hpNum(p.free), p.reclaimable, hpState(p.state),
     ].forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
     tbody.appendChild(tr);
   });
+  hpDataplaneNote(pools);
+}
+
+// 1G 池的数据面固定占用说明（决策 #353）：仅当**实测** held_by_dataplane >= 1 时显示，
+// 与 `show system hugepages` 的说明行同口径（VPP 主堆固定占 1 页、无配置键可释放 ⇒
+// VNF 可起页数 = 空闲页数）。取不到（-1）或非 1G 池时不显示，不编造。
+function hpDataplaneNote(pools) {
+  const box = $('hp-dp-note');
+  const p1 = pools.find((p) => p && p.page_size === '1G') || {};
+  const dp = p1.held_by_dataplane;
+  if (!(typeof dp === 'number' && dp >= 1)) {
+    box.hidden = true;
+    box.textContent = '';
+    return;
+  }
+  box.hidden = false;
+  box.textContent = '数据面（VPP 主堆）固定占用 ' + dp + ' 页（实测；不可释放）——VNF 可起页数 = 空闲页数（' +
+    hpNum(p1.free) + '）。';
 }
 
 async function hpReclaim() {

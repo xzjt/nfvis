@@ -13,8 +13,13 @@ package api
 //	内核实际 = sysfs nr_hugepages
 //	在用值   = 内核实际 - 空闲页（**不一定都有持有者**——见下）
 //	实际持有 = 遍历 /proc/*/smaps 的 hugetlb 映射、按 inode 去重、按 KernelPageSize 折算
+//	数据面占用 = 实际持有中 comm=vpp 的进程提交的页（实测归属，决策 #353；取不到时 -1）
 //	无主占用 = 在用 - 实际持有（≥0）：分配了却无进程/inode 引用的页（决策 #346）
 //	可回收   = 空闲的多余页（#329）；**无主占用页不可回收**（#346 真机实测撤回）
+//
+// ⚠️ 决策 #353（收口 #347 的困惑）：VPP 主堆**固定占 1 个 1G 页且无配置键可释放**——
+// 1G 池「数据面占用 ≥1」时读视图说明里给出「VNF 可起页数 = 空闲页数」。纯呈现，
+// 不影响任何回收/对账/告警语义。
 //
 // ⚠️ **在用 ≠ 有持有者**（决策 #346 更正 #329 的措辞）：内核收缩池、或被进程**预留（reserve）
 // 但未 fault** 的页（如数据面 DPDK 预留）都算「在用」却没有可见持有者——它们**不在空闲链表上**，
@@ -148,7 +153,7 @@ func hugepagePagesForMB(sizeMB int, pageSize string) int {
 }
 
 // renderHugepagePools `show system hugepages`：大页池数字（声明/内核实际/在用/实际持有/
-// 无主占用）+ 可回收（决策 #329/#346）。
+// 数据面占用/无主占用）+ 空闲（可分配）与可回收（决策 #329/#346/#353）。
 func (x *cliExecutor) renderHugepagePools() string {
 	cfg, err := x.engine.Committed()
 	if err != nil {
@@ -158,13 +163,13 @@ func (x *cliExecutor) renderHugepagePools() string {
 	pools, _ := view["pools"].([]ksys.HugepagePoolView)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%-8s %-10s %-10s %-8s %-10s %-10s %-8s %-8s %s\n",
-		"页尺寸", "声明", "内核实际", "在用", "实际持有", "无主占用", "空闲", "可回收", "状态")
+	fmt.Fprintf(&b, "%-8s %-10s %-10s %-8s %-10s %-12s %-10s %-14s %-8s %s\n",
+		"页尺寸", "声明", "内核实际", "在用", "实际持有", "数据面占用", "无主占用", "空闲（可分配）", "可回收", "状态")
 	for _, p := range pools {
-		fmt.Fprintf(&b, "%-8s %-10s %-10s %-8s %-10s %-10s %-8s %-8d %s\n",
+		fmt.Fprintf(&b, "%-8s %-10s %-10s %-8s %-10s %-12s %-10s %-14s %-8d %s\n",
 			p.PageSize, hugepageDeclaredText(p.Declared), hugepageNum(p.Actual),
-			hugepageNum(p.InUse), hugepageNum(p.Held), hugepageNum(p.Orphan),
-			hugepageNum(p.Free), p.Reclaimable, hugepageStateText(p.State))
+			hugepageNum(p.InUse), hugepageNum(p.Held), hugepageNum(p.HeldByDataplane),
+			hugepageNum(p.Orphan), hugepageNum(p.Free), p.Reclaimable, hugepageStateText(p.State))
 	}
 
 	// 说明：逐池给出判定依据；无主占用时进一步给「谁在占用」与「该怎么做」。

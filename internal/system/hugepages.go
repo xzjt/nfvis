@@ -29,6 +29,10 @@ package system
 //     去重、按 KernelPageSize 折算）/ **无主占用**（= 在用 − 实际持有，≥ 0）。取不到内核值就
 //     如实说取不到（actual/free/in_use = -1、state=unreadable）；取不到持有值就 held/orphan = -1
 //     并给 note，**都不编造**。
+//   · 数据面归属（决策 #353，收口 #347）：持有汇总再按进程 `/proc/<pid>/comm` 拆出
+//     **数据面占用**（comm 以 vpp 开头的进程提交的页，实测；真机 `vpp_main`）——VPP 主堆固定占 1 个 1G 页且无配置键
+//     可释放，「声明 2 却只能起 1 个 VNF」的困惑正源于此。1G 池该值 ≥1 时读视图的 note 追加
+//     可用性说明（VNF 可起页数 = 空闲页数）。**纯呈现，不改回收/对账/告警任何语义**。
 //   · 判占用者**不能按 maps 路径过滤**（round125 教训：既漏匿名 hugetlb、又把共享映射当成独立
 //     分配）；本实现用 smaps 逐映射行的**内核 hugetlb 标记（VmFlags 含 `ht`）**识别，用
 //     `KernelPageSize` 折算到对应页尺寸池，用映射头行的 `dev:inode` 去重——同一页被多进程共享
@@ -173,14 +177,50 @@ var smapsHeaderRe = regexp.MustCompile(`^([0-9a-f]+)-([0-9a-f]+) (\S+) ([0-9a-f]
 //
 // ⚠️ 「无主占用 = 在用 − 实际持有」里那些页**不在这份汇总里**——它们恰恰是没有任何 smaps 引用的
 // 页（多为被进程预留 reserve 但未 fault 的大页），故本函数**看不到**它们，这也正是它们「无主」的原因。
+//
+// 需要区分「这页算谁的」时用 HugepageHeldPagesDetail（决策 #353）；本函数保持既有签名与语义。
 func HugepageHeldPages(root string) (map[string]int, bool) {
+	total, _, ok := HugepageHeldPagesDetail(root)
+	return total, ok
+}
+
+// dataplaneCommPrefix 数据面进程名前缀（`/proc/<pid>/comm` 的**主线程名**）：真机实测 VPP 为
+// `vpp_main`（worker 线程另名 `vpp_wk_*`，但 `/proc/<pid>/comm` 只反映主线程）——**用前缀
+// `vpp` 匹配**（round133 上机核对的实测值；勿写死 "vpp" 精确值）。决策 #353 用它把持有页
+// 归属出「数据面占用」。
+const dataplaneCommPrefix = "vpp"
+
+// HugepageHeldPagesDetail 在 HugepageHeldPages 的基础上，把「数据面（comm 以 vpp 开头，实测 vpp_main）提交的页」
+// 单独归属出来（决策 #353）。total 与 HugepageHeldPages 的返回值完全一致。
+//
+// 归属口径（round133b 上机修正——**独占归属**，勿改回「首见归属」）：
+//
+//	· 对每个 hugetlb 页（dev:inode）记录**全部映射它的进程**是否数据面（comm 以 "vpp" 开头，
+//	  真机实测 `vpp_main`）。一页**仅由数据面进程映射、无其它进程共享**才计入 dataplane。
+//	  ⚠️ 真机教训：vhost-user 会把 **VNF 的 guest RAM 大页映射进 VPP 进程**（该页同时出现在
+//	  vpp_main 与 qemu 的 smaps 里）——若按「首个被扫描到的进程」归属，/proc 目录序一变
+//	  （如 VNF 重启换 pid）同一现场会在 1↔2 间翻转（round133b Browser Use 复核抓到，CLI 与
+//	  REST 读数互相矛盾）。guest RAM 是 VNF 的页、不是「数据面固定占用」，独占判据把它排除。
+//	· comm 读不到的进程**按非数据面计**——宁少不猜；因此「无其它进程共享」若含 comm 读不到的
+//	  进程，也会把该页排除在 dataplane 之外（保守、不虚报数据面占用）。
+//	· 每页全局只计一次（total 与旧实现一致）。
+//
+// ok=false 表示一个进程的 smaps 都读不到（非 Linux / 无权限）：total/dataplane 为 nil，
+// 调用方应回 -1 并给 note，**不编造 0**。
+func HugepageHeldPagesDetail(root string) (total, dataplane map[string]int, ok bool) {
 	procDir := join(root, "/proc")
 	ents, err := os.ReadDir(procDir)
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
-	counts := map[string]int{"1G": 0, "2M": 0}
-	seen := map[string]bool{} // dev:inode → 已计（跨进程共享映射只计一次）
+	// 每页记录：页尺寸 + 页数 + 映射者构成（是否数据面映射过 / 是否被非数据面映射过）。
+	type heldPage struct {
+		size    string
+		pages   int
+		byDP    bool
+		byOther bool
+	}
+	pages := map[string]*heldPage{} // dev:inode → 记录（跨进程共享映射只记一次）
 	readAny := false
 	for _, e := range ents {
 		if !e.IsDir() {
@@ -189,23 +229,63 @@ func HugepageHeldPages(root string) (map[string]int, bool) {
 		if _, err := strconv.Atoi(e.Name()); err != nil {
 			continue // 非 pid 目录（mm/sys/…）
 		}
-		b, err := os.ReadFile(filepath.Join(procDir, e.Name(), "smaps"))
+		pidDir := filepath.Join(procDir, e.Name())
+		b, err := os.ReadFile(filepath.Join(pidDir, "smaps"))
 		if err != nil {
 			continue // 进程已退出 / 无权限：跳过（不因单个进程读不到就把整个池判为取不到）
 		}
 		readAny = true
-		scanSmapsHeld(b, counts, seen)
+		isDP := strings.HasPrefix(readProcComm(pidDir), dataplaneCommPrefix)
+		for _, pg := range scanSmapsPages(b) {
+			rec, ok := pages[pg.key]
+			if !ok {
+				rec = &heldPage{size: pg.size, pages: pg.pages}
+				pages[pg.key] = rec
+			}
+			if isDP {
+				rec.byDP = true
+			} else {
+				rec.byOther = true
+			}
+		}
 	}
 	if !readAny {
 		// 一个进程的 smaps 都读不到（非 Linux / 无权限）：如实报取不到，不编造 0。
-		return nil, false
+		return nil, nil, false
 	}
-	return counts, true
+	total = map[string]int{"1G": 0, "2M": 0}
+	dataplane = map[string]int{"1G": 0, "2M": 0}
+	for _, rec := range pages {
+		total[rec.size] += rec.pages
+		if rec.byDP && !rec.byOther {
+			dataplane[rec.size] += rec.pages // 独占归属：仅数据面映射的页才算「数据面固定占用」
+		}
+	}
+	return total, dataplane, true
 }
 
-// scanSmapsHeld 解析一份 smaps 内容，把其中 hugetlb 映射的页数累加进 counts（去重键放进 seen）。
-func scanSmapsHeld(data []byte, counts map[string]int, seen map[string]bool) {
+// readProcComm 读 `/proc/<pid>/comm`（进程名）；读不到返回 ""（按非数据面计——不猜）。
+func readProcComm(pidDir string) string {
+	b, err := os.ReadFile(filepath.Join(pidDir, "comm"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// heldPageRef 一份 smaps 里的一个托管 hugetlb 页（按 dev:inode 标识）。
+type heldPageRef struct {
+	key   string // dev:inode（跨进程共享映射的同一页同键）
+	size  string // "1G" / "2M"
+	pages int    // 该映射的页数（sizeKB / KernelPageSize）
+}
+
+// scanSmapsPages 解析一份 smaps 内容，返回其中**托管尺寸**的 hugetlb 映射（逐页记录，不去重）。
+// 去重与归属由调用方（HugepageHeldPagesDetail）按 dev:inode 汇总——独占归属需要看到**所有**
+// 映射者，故本函数不做 seen 过滤（决策 #353，round133b 修正）。
+func scanSmapsPages(data []byte) []heldPageRef {
 	var (
+		out      []heldPageRef
 		devInode string // 当前映射头行的 dev:inode
 		inBlock  bool
 		isHuge   bool // 当前映射是否 hugetlb（VmFlags 含 ht）
@@ -220,11 +300,7 @@ func scanSmapsHeld(data []byte, counts map[string]int, seen map[string]bool) {
 		if size == "" {
 			return // 不是本产品托管的页尺寸
 		}
-		if seen[devInode] {
-			return // 同一页被多进程共享映射：只计一次
-		}
-		seen[devInode] = true
-		counts[size] += sizeKB / pageKB
+		out = append(out, heldPageRef{key: devInode, size: size, pages: sizeKB / pageKB})
 	}
 	for _, raw := range strings.Split(string(data), "\n") {
 		ln := strings.TrimRight(raw, "\r")
@@ -249,6 +325,7 @@ func scanSmapsHeld(data []byte, counts map[string]int, seen map[string]bool) {
 		}
 	}
 	flush()
+	return out
 }
 
 // smapsKBNum 取 smaps 行里的 kB 数值（如 "KernelPageSize:  2048 kB" → 2048）。
@@ -276,25 +353,36 @@ func smapsHasVmFlag(line, flag string) bool {
 
 // HugepagePoolView 单个大页池的读视图（数字 + 可回收）。
 type HugepagePoolView struct {
-	PageSize    string `json:"page_size"`
-	Managed     bool   `json:"managed"`     // 配置是否声明该池（声明 > 0）
-	Declared    int    `json:"declared"`    // 声明页数（配置唯一真源；<=0 = 未声明/不托管）
-	Actual      int    `json:"actual"`      // 内核实际页数（sysfs nr_hugepages；不可读时 -1）
-	Free        int    `json:"free"`        // 内核空闲页数（不可读时 -1）
-	InUse       int    `json:"in_use"`      // 在用页数 = actual - free（不可读时 -1）
-	Held        int    `json:"held"`        // 实际持有页数（进程/inode 引用汇总；取不到时 -1）
-	Orphan      int    `json:"orphan"`      // 无主占用页数 = in_use - held（>=0；取不到时 -1）
-	Reclaimable int    `json:"reclaimable"` // 可回收的**空闲多余页**数（无主占用页不可回收，故不计入）
-	State       string `json:"state"`
-	Note        string `json:"note,omitempty"` // 判定依据 / 取不到的原因（不编造）
+	PageSize string `json:"page_size"`
+	Managed  bool   `json:"managed"`  // 配置是否声明该池（声明 > 0）
+	Declared int    `json:"declared"` // 声明页数（配置唯一真源；<=0 = 未声明/不托管）
+	Actual   int    `json:"actual"`   // 内核实际页数（sysfs nr_hugepages；不可读时 -1）
+	Free     int    `json:"free"`     // 内核空闲页数（不可读时 -1）
+	InUse    int    `json:"in_use"`   // 在用页数 = actual - free（不可读时 -1）
+	Held     int    `json:"held"`     // 实际持有页数（进程/inode 引用汇总；取不到时 -1）
+	// HeldByDataplane 其中数据面（comm 以 vpp 开头，即 VPP 主堆/缓冲）提交的页数（实测；取不到时 -1）。
+	// 决策 #353：VPP 主堆固定占 1 个 1G 页且无配置键可释放——这列回答「池里的页算谁的」。
+	HeldByDataplane int    `json:"held_by_dataplane"`
+	Orphan          int    `json:"orphan"`      // 无主占用页数 = in_use - held（>=0；取不到时 -1）
+	Reclaimable     int    `json:"reclaimable"` // 可回收的**空闲多余页**数（无主占用页不可回收，故不计入）
+	State           string `json:"state"`
+	Note            string `json:"note,omitempty"` // 判定依据 / 取不到的原因（不编造）
 }
 
-// HugepagePoolViewFor 纯函数：由声明/实际/空闲/持有（+ 是否可读）产出读视图。
+// HugepagePoolViewFor 纯函数：由声明/实际/空闲/持有/数据面占用（+ 是否可读）产出读视图。
 //
 // heldOK=false 表示持有值取不到（/proc 不可读）——held/orphan 回 -1 并给 note，不编造。
+// dataplane/dataplaneOK 为「数据面（comm 以 vpp 开头）提交的页数」及其可取性（决策 #353）——取不到时
+// HeldByDataplane 回 -1；1G 池且实测占用 >=1 时 note 追加可用性说明（VNF 可起页数 = 空闲页数）。
 // 注意：无主占用（orphan）**只作可见性呈现**，不计入 Reclaimable（产品侧回收不动这类页）。
-func HugepagePoolViewFor(pageSize string, declared, actual, free int, readable bool, held int, heldOK bool) HugepagePoolView {
+func HugepagePoolViewFor(pageSize string, declared, actual, free int, readable bool,
+	held int, heldOK bool, dataplane int, dataplaneOK bool) HugepagePoolView {
+
 	v := HugepagePoolView{PageSize: pageSize, Declared: declared}
+	v.HeldByDataplane = -1
+	if dataplaneOK {
+		v.HeldByDataplane = dataplane
+	}
 	if !readable {
 		v.Actual, v.Free, v.InUse = -1, -1, -1
 		v.Held, v.Orphan = -1, -1
@@ -302,7 +390,8 @@ func HugepagePoolViewFor(pageSize string, declared, actual, free int, readable b
 			v.Held = held // 内核池不可读，但进程持有值仍可读：如实给出
 		}
 		v.State = HugepageStateUnreadable
-		v.Note = "内核未提供该页尺寸的池（sysfs 不可读）——取不到实际值，不编造"
+		v.Note = joinHugepageNote("内核未提供该页尺寸的池（sysfs 不可读）——取不到实际值，不编造",
+			hugepageDataplaneNote(pageSize, v.HeldByDataplane, v.Free))
 		return v
 	}
 	v.Actual, v.Free = actual, free
@@ -353,21 +442,48 @@ func HugepagePoolViewFor(pageSize string, declared, actual, free int, readable b
 			v.Note = fmt.Sprintf("实际 %d 高于声明 %d：有 %d 页空闲可回收%s", actual, declared, p.Reclaimable, heldNote)
 		}
 	}
+	v.Note = joinHugepageNote(v.Note, hugepageDataplaneNote(pageSize, v.HeldByDataplane, free))
 	return v
 }
 
+// hugepageDataplaneNote 1G 池且实测有数据面占用时的可用性说明（决策 #353）。非 1G 池、
+// 占用值取不到（-1）、占用为 0 时返回空串——不编造；空闲值取不到时如实写「取不到」。
+func hugepageDataplaneNote(pageSize string, dataplane, free int) string {
+	if pageSize != "1G" || dataplane < 1 {
+		return ""
+	}
+	freeText := "取不到"
+	if free >= 0 {
+		freeText = strconv.Itoa(free)
+	}
+	return fmt.Sprintf("数据面（VPP 主堆）固定占用 %d 页（实测；不可配置释放）——VNF 可起页数 = 空闲页数（当前 %s）",
+		dataplane, freeText)
+}
+
+// joinHugepageNote 用「；」拼接读视图说明（空串跳过；既有说明在前、追加说明在后）。
+func joinHugepageNote(base, extra string) string {
+	switch {
+	case extra == "":
+		return base
+	case base == "":
+		return extra
+	}
+	return base + "；" + extra
+}
+
 // HugepagePoolViews 读视图全集：两个页尺寸**恒列出**（读不到的池 state=unreadable 并说明），
-// 使契约声明的数组形状稳定、客户端不会因机器差异取到空数组。持有值同样遍历 /proc 求取。
+// 使契约声明的数组形状稳定、客户端不会因机器差异取到空数组。持有值与数据面归属同样遍历 /proc 求取
+// （决策 #353；两者同一次遍历，取不到时一律回 -1）。
 func HugepagePoolViews(root string, declared map[string]int) []HugepagePoolView {
-	held, heldOK := HugepageHeldPages(root)
+	held, dataplane, heldOK := HugepageHeldPagesDetail(root)
 	out := make([]HugepagePoolView, 0, len(HugepageSizes))
 	for _, size := range HugepageSizes {
 		nr, free, ok := ReadHugepagePool(root, size)
-		h := 0
+		h, d := 0, 0
 		if heldOK {
-			h = held[size]
+			h, d = held[size], dataplane[size]
 		}
-		out = append(out, HugepagePoolViewFor(size, declared[size], nr, free, ok, h, heldOK))
+		out = append(out, HugepagePoolViewFor(size, declared[size], nr, free, ok, h, heldOK, d, heldOK))
 	}
 	return out
 }

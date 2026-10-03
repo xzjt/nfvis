@@ -54,6 +54,14 @@ func writeHugepageSmaps(t *testing.T, root, pid string, pages1G int) {
 	}
 }
 
+// writeHugepageComm 造 /proc/<pid>/comm（决策 #353：dataplane 归属按 comm=vpp 判定）。
+func writeHugepageComm(t *testing.T, root, pid, comm string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, "proc", pid, "comm"), []byte(comm+"\n"), 0o644); err != nil {
+		t.Fatalf("写 /proc/%s/comm: %v", pid, err)
+	}
+}
+
 func TestHugepageDeclaredFromConfig(t *testing.T) {
 	cfg := model.Config{ResourcePools: &model.ResourcePool{
 		Hugepages: []model.HPool{{PageSize: "1G", Count: 2}, {PageSize: "2M", Count: 768}},
@@ -111,7 +119,8 @@ func TestCLIShowSystemHugepagesThreeWay(t *testing.T) {
 	commitHugepagePool(t, x, "1G", 2)
 
 	out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show system hugepages").Output
-	for _, want := range []string{"页尺寸", "声明", "内核实际", "在用", "实际持有", "无主占用", "可回收", "request system hugepages reclaim"} {
+	for _, want := range []string{"页尺寸", "声明", "内核实际", "在用", "实际持有", "数据面占用",
+		"无主占用", "空闲（可分配）", "可回收", "request system hugepages reclaim"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("show system hugepages 输出缺少 %q：\n%s", want, out)
 		}
@@ -131,6 +140,38 @@ func TestCLIShowSystemHugepagesThreeWay(t *testing.T) {
 	}
 	if x.structured == nil {
 		t.Error("show system hugepages 应给出结构化输出（display json 用）")
+	}
+}
+
+// 决策 #353：1G 池「数据面固定占用」进 CLI 读视图——列有「数据面占用」，
+// 说明区给出「VNF 可起页数 = 空闲页数」（数据源：/proc/<pid>/comm == vpp）。
+func TestCLIShowSystemHugepagesDataplaneNote(t *testing.T) {
+	x, _ := newCLIKit(t)
+	root := t.TempDir()
+	x.hugepageRoot = root
+	writeHugepageFixture(t, root, "1G", 2, 0) // 实际 2、空闲 0
+	writeHugepageSmaps(t, root, "100", 1)     // vpp 主堆持有 1 页
+	writeHugepageComm(t, root, "100", "vpp")
+	commitHugepagePool(t, x, "1G", 2)
+
+	out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show system hugepages").Output
+	if strings.Contains(out, "%%") {
+		t.Fatalf("show 不该失败：%s", out)
+	}
+	// 1G 行（表内）「数据面占用」列应为 1；2M 池无进程持有 → 0。
+	if !strings.Contains(out, "数据面（VPP 主堆）固定占用 1 页（实测；不可配置释放）——VNF 可起页数 = 空闲页数（当前 0）") {
+		t.Fatalf("说明区应给出数据面固定占用与可起 VNF 页数：\n%s", out)
+	}
+	// 结构化输出同样带新字段（供 display json 与 REST 同源消费）。
+	if x.structured == nil {
+		t.Fatal("应给出结构化输出")
+	}
+	raw, err := json.Marshal(x.structured)
+	if err != nil {
+		t.Fatalf("结构化输出不可序列化: %v", err)
+	}
+	if !strings.Contains(string(raw), `"held_by_dataplane":1`) {
+		t.Fatalf("结构化输出应带 held_by_dataplane=1：%s", raw)
 	}
 }
 
@@ -320,12 +361,13 @@ func TestRESTHugepagesOrphanReadNotReclaimed(t *testing.T) {
 		t.Fatalf("GET /system/hugepages: %d %s", status, body)
 	}
 	type poolView struct {
-		PageSize    string `json:"page_size"`
-		Held        int    `json:"held"`
-		Orphan      int    `json:"orphan"`
-		InUse       int    `json:"in_use"`
-		Reclaimable int    `json:"reclaimable"`
-		State       string `json:"state"`
+		PageSize        string `json:"page_size"`
+		Held            int    `json:"held"`
+		HeldByDataplane int    `json:"held_by_dataplane"`
+		Orphan          int    `json:"orphan"`
+		InUse           int    `json:"in_use"`
+		Reclaimable     int    `json:"reclaimable"`
+		State           string `json:"state"`
 	}
 	var view struct {
 		Pools []poolView `json:"pools"`
@@ -344,6 +386,10 @@ func TestRESTHugepagesOrphanReadNotReclaimed(t *testing.T) {
 	}
 	if p1.InUse != 2 || p1.Held != 1 || p1.Orphan != 1 || p1.State != ksys.HugepageStateOrphan || p1.Reclaimable != 0 {
 		t.Fatalf("1G 无主占用读视图不符（reclaimable 应为 0）：%+v", *p1)
+	}
+	// 决策 #353：该 fixture 的进程没写 comm → 按非数据面计，held_by_dataplane 如实为 0。
+	if p1.HeldByDataplane != 0 {
+		t.Fatalf("comm 读不到的进程应按非数据面计（held_by_dataplane=0），实得 %d：%+v", p1.HeldByDataplane, *p1)
 	}
 
 	// POST reclaim：无主页不在回收范围 → 不动作、如实报无可回收、绝不报成功。

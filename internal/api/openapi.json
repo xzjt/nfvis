@@ -1123,11 +1123,15 @@
                   "type": "integer"
                 },
                 "free": {
-                  "description": "内核空闲页数（不可读时 -1）",
+                  "description": "内核空闲页数（不可读时 -1）；也就是**可分配给 VNF 的页数**（1G 池需扣除数据面固定占用，见 note）",
                   "type": "integer"
                 },
                 "held": {
                   "description": "实际持有页数（进程/inode 引用汇总，按 inode 去重；不可读时 -1）",
+                  "type": "integer"
+                },
+                "held_by_dataplane": {
+                  "description": "实际持有中数据面占用的页数（实测：**仅** comm 以 vpp 开头（真机 vpp_main）的进程映射、无其它进程共享的页（独占归属；vhost-user 共享的 VNF guest RAM 不计）；不可读时 -1，不编造）；1G 池该值 >=1 时 note 追加可用性说明（数据面固定占用、VNF 可起页数 = 空闲页数，决策 #353）",
                   "type": "integer"
                 },
                 "in_use": {

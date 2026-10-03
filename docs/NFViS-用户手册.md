@@ -1010,7 +1010,7 @@ nfvis$ request vpp restart
 
 ```bash
 nfvis$ show resource-pools      # 大页/隔离核的 总量/已分配/空闲，含 vpp-reserved
-nfvis$ show system hugepages    # 大页池三方数字：声明 / 内核实际 / 在用 + 可回收
+nfvis$ show system hugepages    # 大页池数字：声明/内核实际/在用/实际持有/数据面占用/无主占用 + 空闲（可分配）/可回收
 nfvis$ show vpp                 # 版本/线程/buffer/内存（含 pending_restart 提示）
 nfvis$ show vpp threads
 nfvis$ show vpp memory
@@ -1036,6 +1036,17 @@ nfvis$ request system hugepages reclaim   # 回收空闲的多余页（在用页
 **不会动它们**（本命令只回收空闲的多余页）；它们只作**可见性**，由 `HUGEPAGE_POOL_ORPHAN`（warning）
 如实报出。要释放它们得**从预留者一侧入手**（如停/重启数据面、释放其预留）。若池因此满而新 VNF 起不来
 （`Cannot allocate memory`），请先看「实际持有 / 无主占用」两列定位究竟是谁在用或谁预留了它。
+
+**1G 池为什么少一页可用（数据面固定占用）**：数据面（VPP）的 main heap **固定占 1 个 1G 页**——
+它偏好最大可用页尺寸，且 VPP 自己的 `default-hugepage-size`/`main-heap-page-size` 与内核
+`default_hugepagesz` **都改不了它**（真机三组对照，见 §6.2），产品也没有配置键可释放这一页。
+因此 **1G 池声明 N 页时，VNF 实际可用 N−1 页**（第 N 台及以后的 VNF 会因 `Cannot allocate memory`
+起不来）。读法：`show system hugepages` 的「**数据面占用**」列 = 实际持有中**仅由**数据面进程（VPP，`comm` 形如 `vpp_main`）映射、无其它进程共享的页（vhost-user 共享给 VPP 的 VNF guest RAM 不计入）
+（实测；取不到显示「取不到」，不编造），「**空闲（可分配）**」列 = 内核空闲页数（也就是还能起几台
+1G 内存的 VNF）；1G 行「数据面占用 ≥1」时，说明区会直接写出「VNF 可起页数 = 空闲页数」。
+控制台「资源池」页的「数据面占用」列与说明行同源（同一端点）。`wizard` 问 1G 数量时按同一口径提示
+（数据面固定占用其中 1 页 ⇒ 可起 VNF 数 ≈ N−1）；只声明 1 页时，计划预览会给出
+「1G 池仅 1 页：数据面占 1，无法再起 VNF」的告警行——**装 VNF 建议 1G 池 ≥2 页**。
 
 ### 8.3 L2 虚拟交换机 + BVI 网关
 

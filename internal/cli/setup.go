@@ -326,6 +326,16 @@ func planStatements(p SetupPlan) []string {
 	return out
 }
 
+// setupPlanWarnings 计划预览的告警行（纯函数，便于单测；决策 #353）。
+// 数据面（VPP 主堆）固定占用 1 个 1G 页且无配置键可释放：1G 池只声明 1 页时，
+// 数据面占走唯一那页，再起不了 VNF——声明前就该看见，而不是等 VNF 起不来才发现。
+func setupPlanWarnings(p SetupPlan) []string {
+	if p.HP1G > 0 && p.HP1G < 2 {
+		return []string{fmt.Sprintf("⚠ 1G 池仅 %d 页：数据面占 1，无法再起 VNF（装 VNF 建议 ≥2）", p.HP1G)}
+	}
+	return nil
+}
+
 // RunWizard 交互式初始化向导。interactive=false（管道/脚本）时打印指引并返回——不读输入、不挂起。
 func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) error {
 	if !interactive {
@@ -403,7 +413,7 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 	if hp1Def == 0 {
 		hp1Def = defaultHP1G(f.MemTotalGB)
 	}
-	fmt.Fprintf(out, "3/4 1G 大页数量（VM 内存从 1G 池分配） [默认 %s]： ", orInt(hp1Def))
+	fmt.Fprintf(out, "3/4 1G 大页数量（VM 内存从 1G 池分配；数据面固定占用其中 1 页 ⇒ 可起 VNF 数 ≈ N−1） [默认 %s]： ", orInt(hp1Def))
 	line = ask(rd)
 	if line == "q" {
 		fmt.Fprintln(out, "已中止（未做任何变更）。")
@@ -456,6 +466,9 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 	fmt.Fprintln(out, "\n—— 将提交以下语句 ——")
 	for _, st := range plan.Statements {
 		fmt.Fprintln(out, "  "+st)
+	}
+	for _, w := range setupPlanWarnings(plan) {
+		fmt.Fprintln(out, "  "+w)
 	}
 	fmt.Fprintf(out, "确认提交？[yes/no]（默认 yes）： ")
 	line = ask(rd)

@@ -72,31 +72,31 @@ func TestPlanHugepageReclaim_IgnoresOrphan(t *testing.T) {
 
 func TestHugepagePoolViewFor(t *testing.T) {
 	// 多余页（有可回收）但都有持有者（在用 == 持有）
-	v := HugepagePoolViewFor("1G", 2, 4, 2, true, 2, true)
+	v := HugepagePoolViewFor("1G", 2, 4, 2, true, 2, true, 0, true)
 	if v.State != HugepageStateSurplus || v.Reclaimable != 2 || v.InUse != 2 || v.Held != 2 || v.Orphan != 0 || !v.Managed {
 		t.Fatalf("surplus 视图不符：%+v", v)
 	}
 	// 多余页全在用且有持有者
-	v = HugepagePoolViewFor("1G", 2, 4, 0, true, 4, true)
+	v = HugepagePoolViewFor("1G", 2, 4, 0, true, 4, true, 0, true)
 	if v.State != HugepageStateInUse || v.Reclaimable != 0 || v.Orphan != 0 {
 		t.Fatalf("in_use 视图不符：%+v", v)
 	}
 	// 一致
-	if v = HugepagePoolViewFor("1G", 4, 4, 1, true, 3, true); v.State != HugepageStateOK {
+	if v = HugepagePoolViewFor("1G", 4, 4, 1, true, 3, true, 0, true); v.State != HugepageStateOK {
 		t.Fatalf("ok 视图不符：%+v", v)
 	}
 	// 未托管
-	if v = HugepagePoolViewFor("2M", -1, 768, 100, true, 668, true); v.State != HugepageStateUnmanaged || v.Managed {
+	if v = HugepagePoolViewFor("2M", -1, 768, 100, true, 668, true, 0, true); v.State != HugepageStateUnmanaged || v.Managed {
 		t.Fatalf("unmanaged 视图不符：%+v", v)
 	}
 	// 取不到内核值：actual/free/in_use 一律 -1，不编造 0
-	v = HugepagePoolViewFor("1G", 2, 0, 0, false, 0, false)
+	v = HugepagePoolViewFor("1G", 2, 0, 0, false, 0, false, 0, false)
 	if v.State != HugepageStateUnreadable || v.Actual != -1 || v.Free != -1 || v.InUse != -1 {
 		t.Fatalf("unreadable 视图不符（应回 -1 而非 0）：%+v", v)
 	}
 	// 无主占用（决策 #346）：在用 2、持有 1 → orphan 1，state=orphan（即便实际 == 声明）。
 	// ⚠️ Reclaimable 仍为 0——无主页**不可回收**，不计入。
-	v = HugepagePoolViewFor("1G", 2, 2, 0, true, 1, true)
+	v = HugepagePoolViewFor("1G", 2, 2, 0, true, 1, true, 0, true)
 	if v.State != HugepageStateOrphan || v.Orphan != 1 || v.Held != 1 || v.Reclaimable != 0 {
 		t.Fatalf("orphan 视图不符（Reclaimable 应为 0，无主页不可回收）：%+v", v)
 	}
@@ -104,17 +104,83 @@ func TestHugepagePoolViewFor(t *testing.T) {
 		t.Fatalf("orphan 的 note 应说明预留页与产品侧释放不了：%q", v.Note)
 	}
 	// dev34 形态（2M）：声明 768 / 实际 768 / 空闲 235 / 持有 23 → 在用 533、无主 510、不可回收。
-	v = HugepagePoolViewFor("2M", 768, 768, 235, true, 23, true)
+	v = HugepagePoolViewFor("2M", 768, 768, 235, true, 23, true, 0, true)
 	if v.State != HugepageStateOrphan || v.Orphan != 510 || v.InUse != 533 || v.Reclaimable != 0 {
 		t.Fatalf("2M dev34 形态视图不符：%+v", v)
 	}
 	// 持有值取不到：held/orphan 一律 -1，note 说明，不编造 0。
-	v = HugepagePoolViewFor("1G", 2, 2, 0, true, 0, false)
+	v = HugepagePoolViewFor("1G", 2, 2, 0, true, 0, false, 0, false)
 	if v.Held != -1 || v.Orphan != -1 {
 		t.Fatalf("持有值取不到时应回 -1 而非 0：%+v", v)
 	}
 	if !strings.Contains(v.Note, "实际持有值取不到") {
 		t.Fatalf("持有值取不到时 note 应如实说明：%q", v.Note)
+	}
+}
+
+// 决策 #353：1G 池「数据面固定占用」进读视图（字段 + 说明）。
+// TestHugepageHeldPagesDetailSharedGuestRAMExcluded 复刻 round133b 真机现场：
+// vhost-user 把 VNF 的 guest RAM 大页映射进 VPP——该页**不得**算「数据面固定占用」
+// （独占归属）。构造上让 vpp 的 pid 字符串排前（先被扫描）：旧「首见归属」实现会把它
+// 误算给数据面（dp=2），本测试即锁死该回归。
+func TestHugepageHeldPagesDetailSharedGuestRAMExcluded(t *testing.T) {
+	root := t.TempDir()
+	// pid 100（vpp_main）：主堆（独占，inode 90）+ guest RAM（与 qemu 共享，inode 91）
+	writeSmaps(t, root, "100",
+		smapsBlock("7f0000000000", "7f0040000000", "00:0d", "90", 1*1048576, 1048576, true, "/memfd:seg_0-0 (deleted)")+
+			smapsBlock("7f1000000000", "7f1040000000", "00:0d", "91", 1*1048576, 1048576, true, "/dev/hugepages/libvirt/qemu/5-sem-vm/pc.ram"))
+	writeProcComm(t, root, "100", "vpp_main")
+	// pid 200（qemu）：同一 guest RAM 页（inode 91）
+	writeSmaps(t, root, "200",
+		smapsBlock("7f2000000000", "7f2040000000", "00:0d", "91", 1*1048576, 1048576, true, "/dev/hugepages/libvirt/qemu/5-sem-vm/pc.ram"))
+	writeProcComm(t, root, "200", "qemu-system-x86")
+
+	total, dp, ok := HugepageHeldPagesDetail(root)
+	if !ok {
+		t.Fatal("ok=false，预期可读")
+	}
+	if total["1G"] != 2 {
+		t.Fatalf("total[1G]=%d，期望 2（主堆 + guest RAM 各一页，共享页只计一次）", total["1G"])
+	}
+	if dp["1G"] != 1 {
+		t.Fatalf("dataplane[1G]=%d，期望 1——共享的 guest RAM 页必须被独占判据排除（round133b 教训）", dp["1G"])
+	}
+}
+
+func TestHugepagePoolViewForDataplane(t *testing.T) {
+	// 1G 池且实测数据面占用 >=1 → note 追加可用性说明（Y = 空闲页数）。
+	v := HugepagePoolViewFor("1G", 2, 2, 0, true, 2, true, 1, true)
+	if v.HeldByDataplane != 1 {
+		t.Fatalf("HeldByDataplane = %d，期望 1（实测 comm=vpp 持有）：%+v", v.HeldByDataplane, v)
+	}
+	if !strings.Contains(v.Note, "数据面（VPP 主堆）固定占用 1 页") ||
+		!strings.Contains(v.Note, "VNF 可起页数 = 空闲页数（当前 0）") {
+		t.Fatalf("1G 数据面占用说明不符：%q", v.Note)
+	}
+	// 与既有说明用「；」拼接（1G 无主占用 + 数据面占用并存）。
+	v = HugepagePoolViewFor("1G", 2, 2, 0, true, 1, true, 1, true)
+	if !strings.Contains(v.Note, "无主占用") || !strings.Contains(v.Note, "；数据面（VPP 主堆）固定占用 1 页") {
+		t.Fatalf("数据面说明应与既有说明以「；」拼接：%q", v.Note)
+	}
+	// dp=0（实测没有数据面占用）：字段为 0，不追加说明——没有占用就不编造。
+	v = HugepagePoolViewFor("1G", 2, 2, 1, true, 1, true, 0, true)
+	if v.HeldByDataplane != 0 || strings.Contains(v.Note, "数据面（VPP 主堆）") {
+		t.Fatalf("dp=0 时不该追加数据面说明：%+v", v)
+	}
+	// dp 取不到：字段回 -1（不编造 0），不追加说明。
+	v = HugepagePoolViewFor("1G", 2, 2, 1, true, 1, true, 0, false)
+	if v.HeldByDataplane != -1 || strings.Contains(v.Note, "数据面（VPP 主堆）") {
+		t.Fatalf("dp 取不到时应回 -1 且不追加说明：%+v", v)
+	}
+	// 内核池不可读时仍如实给出数据面占用，空闲写「取不到」（不编造 0）。
+	v = HugepagePoolViewFor("1G", 2, 0, 0, false, 0, false, 1, true)
+	if v.HeldByDataplane != 1 || !strings.Contains(v.Note, "VNF 可起页数 = 空闲页数（当前 取不到）") {
+		t.Fatalf("池不可读时数据面说明应如实写空闲取不到：%+v", v)
+	}
+	// 非 1G 池即使 dp >= 1 也不追加（本决策只针对 1G 的数据面固定占用）。
+	v = HugepagePoolViewFor("2M", 768, 768, 100, true, 668, true, 668, true)
+	if v.HeldByDataplane != 668 || strings.Contains(v.Note, "数据面（VPP 主堆）") {
+		t.Fatalf("2M 池不该出现 1G 数据面固定占用说明：%+v", v)
 	}
 }
 
@@ -385,6 +451,93 @@ func TestHugepageHeldPages(t *testing.T) {
 	// 取不到：/proc 不存在（非 Linux / 权限不足）→ ok=false，调用方应回 -1，不编造 0。
 	if _, ok := HugepageHeldPages(t.TempDir()); ok {
 		t.Fatal("/proc 不存在时应报「取不到」（ok=false），不编造 0")
+	}
+}
+
+// ---------- 数据面归属（决策 #353）：HugepageHeldPagesDetail ----------
+
+// writeProcComm 在临时根下造出 /proc/<pid>/comm（决策 #353：数据面按 comm=vpp 归属）。
+func writeProcComm(t *testing.T, root, pid, comm string) {
+	t.Helper()
+	dir := filepath.Join(root, "proc", pid)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("建 /proc/%s 目录: %v", pid, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "comm"), []byte(comm+"\n"), 0o644); err != nil {
+		t.Fatalf("写 /proc/%s/comm: %v", pid, err)
+	}
+}
+
+// 归属口径（独占归属，round133b 修正）：一页**仅由** comm=vpp 的进程映射、无其它进程共享
+// 才计入 dataplane；共享页全局只计一次（total）；comm 读不到的进程按非数据面计（宁少不猜）。
+func TestHugepageHeldPagesDetailDataplaneAttribution(t *testing.T) {
+	root := t.TempDir()
+	// pid 100（comm=vpp）：1G inode 42 共 2 页 + 2M inode 77 共 3 页 → 全部计入数据面。
+	writeSmaps(t, root, "100",
+		smapsBlock("7f0000000000", "7f0040000000", "00:0d", "42", 2*1048576, 1048576, true, "/dev/hugepages/vpp-heap")+
+			smapsBlock("7f1000000000", "7f1000600000", "00:0d", "77", 3*2048, 2048, true, "/dev/hugepages/vpp-buf"))
+	writeProcComm(t, root, "100", "vpp_main")
+	// pid 200（qemu）：与 vpp 共享 inode 42 的 2 页（total 去重只计一次；dataplane 因「有非数据面
+	// 映射者」而被独占判据排除）
+	// + 自己的 1G inode 55 共 1 页（非数据面）。
+	writeSmaps(t, root, "200",
+		smapsBlock("7fa000000000", "7fa040000000", "00:0d", "42", 2*1048576, 1048576, true, "/dev/hugepages/vpp-heap")+
+			smapsBlock("7fb000000000", "7fb040000000", "00:0d", "55", 1*1048576, 1048576, true, "/dev/hugepages/1-sem-vm/pc.ram"))
+	writeProcComm(t, root, "200", "qemu-system-x86")
+	// pid 300（不写 comm，模拟读不到）：按非数据面计，但页数仍进 total。
+	writeSmaps(t, root, "300",
+		smapsBlock("7fc000000000", "7fc040000000", "00:0d", "66", 1*1048576, 1048576, true, "/dev/hugepages/1-sem-vm2/pc.ram"))
+
+	total, dp, ok := HugepageHeldPagesDetail(root)
+	if !ok {
+		t.Fatal("应能读到持有值")
+	}
+	// 1G = 2（vpp）+ 1（qemu 自有）+ 1（comm 读不到）= 4；共享 inode 42 的三次出现只计 vpp 那次。
+	if total["1G"] != 4 {
+		t.Errorf("total[1G] = %d，期望 4（共享页按 inode 去重）", total["1G"])
+	}
+	if total["2M"] != 3 {
+		t.Errorf("total[2M] = %d，期望 3", total["2M"])
+	}
+	// 独占归属（round133b 修正）：数据面只算**仅 vpp 映射、无其它进程共享**的页——
+	// inode42「vpp+qemu 共享」不计、inode55（qemu）不计、inode66（comm 读不到）不计 ⇒ 1G=0；
+	// inode77（仅 vpp）⇒ 2M=3。
+	if dp["1G"] != 0 || dp["2M"] != 3 {
+		t.Errorf("dataplane = %+v，期望 1G=0（共享/他进程页被独占判据排除） 2M=3", dp)
+	}
+	// 与既有签名同源：HugepageHeldPages 的汇总必须与 Detail 的 total 一致（保留旧调用方不动）。
+	held, ok2 := HugepageHeldPages(root)
+	if !ok2 || held["1G"] != total["1G"] || held["2M"] != total["2M"] {
+		t.Errorf("HugepageHeldPages 与 Detail 不一致：held=%+v total=%+v ok=%v", held, total, ok2)
+	}
+	// 取不到：/proc 不存在 → ok=false 且 total/dataplane 为 nil（调用方回 -1，不编造 0）。
+	if total, dp, ok := HugepageHeldPagesDetail(t.TempDir()); ok || total != nil || dp != nil {
+		t.Errorf("/proc 不存在时应报取不到（total/dataplane 为 nil）：ok=%v total=%v dp=%v", ok, total, dp)
+	}
+}
+
+// 读视图集成：1G 池的数据面占用与说明由 HugepagePoolViews 一次遍历给出；2M 不出现该说明。
+func TestHugepagePoolViewsDataplaneField(t *testing.T) {
+	root := t.TempDir()
+	writePool(t, root, "1G", 2, 0) // 实际 2、空闲 0
+	writePool(t, root, "2M", 768, 700)
+	writeSmaps(t, root, "100",
+		smapsBlock("7f0000000000", "7f0040000000", "00:0d", "42", 1*1048576, 1048576, true, "/dev/hugepages/vpp-heap")+
+			smapsBlock("7f1000000000", "7f1000600000", "00:0d", "77", 3*2048, 2048, true, "/dev/hugepages/vpp-buf"))
+	writeProcComm(t, root, "100", "vpp_main")
+
+	views := HugepagePoolViews(root, map[string]int{"1G": 2, "2M": 768})
+	bySize := map[string]HugepagePoolView{}
+	for _, v := range views {
+		bySize[v.PageSize] = v
+	}
+	p1 := bySize["1G"]
+	if p1.HeldByDataplane != 1 || !strings.Contains(p1.Note, "VNF 可起页数 = 空闲页数（当前 0）") {
+		t.Fatalf("1G 视图应含数据面占用与可用性说明：%+v", p1)
+	}
+	p2 := bySize["2M"]
+	if p2.HeldByDataplane != 3 || strings.Contains(p2.Note, "数据面（VPP 主堆）") {
+		t.Fatalf("2M 视图应如实给出数据面占用、但不出现 1G 固定占用说明：%+v", p2)
 	}
 }
 

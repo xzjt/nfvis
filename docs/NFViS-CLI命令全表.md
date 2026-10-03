@@ -65,7 +65,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show system cpu` | 总核/隔离核/每核占用 | 运行态（宿主 `/proc`） | ✅ |
 | `show system memory` | 内存与大页使用（池内/池外） | 运行态 | ✅ |
 | `show system storage` | 磁盘与镜像仓库占用 | 运行态 + 镜像仓库 | ✅ |
-| `show system hugepages` | 大页池数字：声明（配置唯一真源）/ 内核实际（sysfs）/ 在用（= 实际 − 空闲）/ **实际持有**（按 `/proc/*/smaps` 的 hugetlb 映射按 inode 去重汇总）/**无主占用**（= 在用 − 持有，决策 #346）+ 可回收（决策 #329/#346，与 `GET /system/hugepages` 同源；**无主占用页不可回收**、只作可见性 + `HUGEPAGE_POOL_ORPHAN` 告警；取不到内核值/持有值时如实显示「取不到」，不编造） | `GET /system/hugepages` | ✅ |
+| `show system hugepages` | 大页池数字：声明（配置唯一真源）/ 内核实际（sysfs）/ 在用（= 实际 − 空闲）/ **实际持有**（按 `/proc/*/smaps` 的 hugetlb 映射按 inode 去重汇总）/**数据面占用**（= 实际持有中 comm=vpp 的进程提交的页，实测归属；决策 #353）/**无主占用**（= 在用 − 持有，决策 #346）+ 空闲（可分配）与可回收（决策 #329/#346/#353，与 `GET /system/hugepages` 同源；**无主占用页不可回收**、只作可见性 + `HUGEPAGE_POOL_ORPHAN` 告警；1G 池「数据面占用 ≥1」时说明区给出「VNF 可起页数 = 空闲页数」——VPP 主堆固定占 1 个 1G 页、无配置键可释放；取不到内核值/持有值/占用值时如实显示「取不到」，不编造） | `GET /system/hugepages` | ✅ |
 | `show system kernel` | 内核启动基线三方对照（cmdline/运行实际/配置期望，FR-SYS-014） | 配置 + 运行态 | ✅ |
 | `show system hardware` | 硬件健康：温度/风扇/电源/SMART（FR-SYS-012） | `GET /system/hardware` | ✅（本机无 IPMI/传感器，走降级路径） |
 | `show system core-dumps` | 崩溃转储清单（VPP/QEMU/nfvisd） | `GET /system/core-dumps` | ✅ |
