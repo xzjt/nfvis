@@ -1069,6 +1069,25 @@ nfvis$ show virtual-switches vs-dmz mac-table
 nfvis$ show virtual-switches vs-dmz statistics
 ```
 
+**DHCP 中继**（域内客户端到域外/异机 DHCP server）：
+
+```bash
+nfvis# edit virtual-switches vs-dmz
+nfvis# set dhcp-relay server 192.168.100.10    # 须已 set gateway ip；中继源自动取 BVI 地址
+nfvis# top
+nfvis# commit
+```
+
+> 语义：把该域里的 DHCP 广播以**单播**中继给 server（源地址重写为 BVI 网关地址），server 的应答
+> 再回程转发给客户端；`show virtual-switches <n> detail` 的「DHCP 中继」行与
+> `vppctl show dhcp proxy` 同源。server 须在该域（同子网或域内静态路由）可达。
+>
+> ⚠️ **排障要点（真机实证）**：VPP 的中继在**回程**要求 DHCP server **回显 option 82**
+> （Relay Agent Information，RFC 3046 的常规中继行为）——不回显时应答会被**静默丢弃**，
+> 表现为「relay 配置正确、客户端始终拿不到租约」。此时查 `vppctl show errors`：
+> 出现 `dhcp-proxy-to-client  DHCP option 82 missing` 即为该因，改用会回显 option 82 的
+> server（常见 DHCP 服务默认回显；自研/精简实现需自行保证）。
+
 ### 8.4 L3 虚拟交换机 + 静态路由
 
 ```bash

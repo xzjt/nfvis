@@ -1,0 +1,67 @@
+NFViS v2 真机验证记录 round131 —— 决策 #335 DHCP relay 端到端租约（收口 round113 遗留）
+====================================================================
+日期：2026-10-03；环境：nfvis-vm（2.0.0~dev47）+ Windows 宿主（测试用 DHCP server）；
+观测通道换法：**不再依赖 in-guest 观测**（round113 的阻塞点），改四路独立事实源。
+
+§0 结论
+**relay 端到端租约达成**：客户端（sem-vm，debian 云镜像）经 `sem-vs`（BVI 192.168.99.1/24）的
+DHCP 中继，从「宿主上真实运行的 DHCP server（192.168.99.10）」取得租约 192.168.99.50 并**实际使用**。
+四路独立证据齐备（§3）。过程中定位一条对操作者关键的底座行为：**VPP dhcp proxy 的回程要求 server
+回显 option 82**（RFC 3046）——不回显则应答被静默丢弃（已补进用户手册 relay 段）。
+
+§1 观测通道换法（round113 遗留的解法）
+- round113 阻塞：guest 串口静默/无 exec ⇒ 「server 侧应答缺失」无法定位。
+- 本轮解法：**server 移到 Windows 宿主**（VMnet8 适配器加次地址 192.168.99.10 + 测试专用最小
+  DHCP server，Python ~120 行，绑 99.10:67）；客户端/回程观测点全部在网络侧：
+  ① server 事务日志（DISCOVER/OFFER/REQUEST/ACK 逐条含 src/xid/mac）；
+  ② VPP pcap（`vppctl pcap trace rx tx intfc any`，/tmp/rxtx.pcap）；
+  ③ **客户端真实使用租约的网络痕迹**（无需进 guest：以 99.50 为源的 IGMP/LLMNR 出包）；
+  ④ VPP 错误计数器（`show errors`，直接指出丢包原因）。
+- 测试策略：server **只应答源=中继（192.168.99.1）的单播**，直连广播按策略忽略并留痕——对照干净
+  且双向可审计（每条 IGNORED 都记下）。
+- 拓扑：`sem-vs` 临时加物理口 **ens224**（启用；ens192 被历史遗留 bond0 占着，未动）+ sem-vm vNIC；
+  Windows 停 VMware DHCP 服务释放 67 端口（ens160 管理口为静态地址，不受影响）。
+
+§2 对照（relay OFF）——客户端广播到达但无租约
+- `vppctl pcap trace` on `vh-sem-vm-nic0`：客户端出向仅 `0.0.0.0:68 → 255.255.255.255:67` 广播
+  DISCOVER（及一条 IPv6 RS）。
+- server 日志 8 条：`IGNORED src=0.0.0.0:68 DISCOVER ...（非中继单播，按策略忽略）`——**广播确实
+  到达宿主 NIC 但被策略忽略，无 OFFER、无租约**（客户端持续退避重试）。
+
+§3 实验（relay ON）——完整 DORA + 客户端实际使用
+- `set virtual-switches sem-vs dhcp-relay server 192.168.99.10`（rev 1112）→ `show dhcp proxy` =
+  `RX FIB 1445873 | Src 192.168.99.1 | Servers 1445873,192.168.99.10`（与 round113 形态一致）。
+- pcap 三跳 + DORA 全链（xid=0x812da71d，客户端 MAC 52:54:42:e6:31:0d）：
+  1. 客户端广播 DISCOVER（BD 内 `0.0.0.0:68→255.255.255.255:67`）；
+  2. **中继转发**：`192.168.99.1:68 → 192.168.99.10:67`（源重写=中继源地址，长度 289→303，
+     VPP 注入 option 82）；
+  3. **server 回 OFFER 192.168.99.50** → `192.168.99.10:67 → 192.168.99.1:67`；
+  4. **中继回程**：`192.168.99.1:67 → 255.255.255.255:68`（Reply，Your-IP 192.168.99.50）——
+     客户端**收到 OFFER 后发出 REQUEST**（接受）；
+  5. server ACK → 中继再以广播回程 → **DORA 完成**。
+- server 日志同链：`收到中继 DISCOVER → 发出 OFFER → 收到中继 REQUEST → 发出 ACK`（每条含 src/xid）。
+- **客户端实际使用租约**：`192.168.99.50 > 224.0.0.22: igmp v3 report`、`192.168.99.50:5355 >
+  224.0.0.252:5355`——以租约地址为源的出包（不用进 guest 即可确认客户端接受了租约）。
+- VPP 错误计数器：无 `option 82 missing`（此前 16 次，见 §4）。
+
+§4 关键发现与处置
+- **VPP dhcp proxy 回程要求 server 回显 option 82**：首轮实验（server 未回显 option 82）时，
+  server 明明回了 OFFER，客户端却收不到并持续 DISCOVER；`vppctl show errors` 给出决定性线索：
+  `dhcp-proxy-to-client  DHCP option 82 missing  ×16`——应答按「缺 option 82」被丢弃。给测试 server
+  补上「回显 option 82」后回程即通。**对操作者的意义**：real DHCP server 不回显 option 82 时，relay
+  「配置正确、客户端拿不到租约」，唯一线索是 VPP 错误计数——已补进用户手册 relay 段（排障要点）。
+- **续租路径边界（如实）**：客户端进入 RENEW 后以 `192.168.99.50:68 → 192.168.99.10:67` **单播直发**
+  server（不经代理；server-id 来自 ACK）——本机拓扑 client 与 server 同 L2 故直连可达；跨 L3 部署时
+  续租路径（proxy 语义）需另行评估。日志如实记录该包（IGNORED，策略所致）。
+- 环境备注：ens192 被**历史遗留 bond0**（`set bonds bond0 members ens192`，VPP 侧 BondEthernet0 在场）
+  占用，本测试改用 ens224（临时启用），bond0 未动；pcap trace 的 `file` 参数在本构建不接受任意路径
+  （缺省落 /tmp/rxtx.pcap，直接采用）。
+
+§5 现场还原（双向核对）
+- 配置：`delete dhcp-relay` + `delete ports 10` + `set interfaces ens224 disable`（rev 1113）——
+  `display set` 无 relay/端口行、ens224 恢复 disable、`show dhcp proxy` 空；sem-vm 已重启回无租约态。
+- 宿主：测试 server 停、防火墙规则删、VMnet8 次地址 99.10 删、VMware DHCP 服务恢复 Running；
+  管理路径（ens160 静态 155.129）全程未动、SSH 无中断。
+
+§6 门禁
+- 本项为验证型工作（无代码改动）；`make check` 不适用；手册补一条排障要点（随本证据提交）。
