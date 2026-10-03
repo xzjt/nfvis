@@ -232,6 +232,15 @@ func runScriptLinesTo(session *cli.Session, script string, w io.Writer) (failed 
 			reportScriptStop(w, startLine, stmt, "命令需交互确认（非交互模式不执行破坏性动作）", total-done)
 			return true
 		}
+		// 交互式终端接管请求（串口 console / 容器 shell）：脚本模式**无法**接管终端。
+		// 静默丢弃会让脚本看到「正在打开 …」却什么都没开——与「只问不做」同一类假成功，
+		// 故按失败处理并指引交互式 CLI（决策 #358 顺带收口；此前对 console 也存在）。
+		if res.Console != nil {
+			fmt.Fprintf(w, "%% 脚本模式（非 TTY）不支持交互式终端接管（%s）：请在交互式 CLI 里执行本命令\n",
+				res.Console.VM)
+			reportScriptStop(w, startLine, stmt, "交互式命令不能在脚本模式执行", total-done)
+			return true
+		}
 		// 行首 %/「校验失败」= 该行失败（判据与向导同源）；Warning 的空操作不算失败（决策 #190）。
 		if cli.OutputFailed(out) && !res.Warning {
 			reportScriptStop(w, startLine, stmt, "命令执行失败（输出含错误标记）", total-done)
