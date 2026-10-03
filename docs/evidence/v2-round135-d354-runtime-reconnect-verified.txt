@@ -1,0 +1,46 @@
+NFViS v2 真机验证记录 round135 —— 决策 #354（接入成功后连接中断的自动重连）
+====================================================================
+日期：2026-10-03；环境：nfvis-vm（2.0.0~dev52 = 本分支构建，PR #284）；收口 #351 的残余边界。
+
+§0 结论
+三组真机验证全部通过：**libvirt 中断（重启/长时间停止）在运行期被自动发现、告警、自动复连并消警——
+无需重启 nfvis**；Docker 侧按契约**无需重连**（对照零动作）。配合 #348（VPP 自启）/#349（有界降级）/
+#351（启动后异步接入），「重启后现场自动恢复」家族**全链路自愈**，仅剩「完全楔死的守护进程不会在
+RPC 中途被打断」这类与既有管理调用一致的边界（如实登记）。
+
+§1 验证① —— 运行中 `systemctl restart libvirtd`（全周期）
+- 时序（~20s 内完成）：T0 重启 → 探活连续 2 次失败判中断（WARN「libvirt 连接中断，开始自动复连」）
+  → 有界复连成功（INFO「**libvirt 连接已恢复（自动复连成功）**」）→ 消警 → `show virtual-machine-functions`
+  经新连接读到 sem-vm **running**。
+- 告警面板核查：COMPUTE_UNAVAILABLE 出现后即消（面板只剩既有的 HUGEPAGE_POOL_ORPHAN）。
+
+§2 验证② —— 长窗口 stop（告警保持）→ start（自动恢复）
+- 停窗口（80s 后采样）：`COMPUTE_UNAVAILABLE` **active**，文案为**运行期口径**：
+  「libvirt 连接中断，正在自动重连：VM 生命周期动作暂时不可用，已有配置声明不受影响
+  （原因：查找 domain __nfvis_probe__ 失败: invalid argument）。产品每 15 秒探活、连接未恢复时按有界
+  尝试自动复连；重连成功后本告警自动消解，无需重启 nfvis。请查底座实况：systemctl status libvirtd、
+  journalctl -u libvirtd、virsh -c qemu:///system list」。
+- 恢复窗口：`systemctl start` 四个单元后，日志 **06:45:47「libvirt 连接已恢复（自动复连成功）」**
+  （带真实时间戳；注意首采曾被上一轮的旧日志撞成假阳性——采证须用窄窗口/时间戳，已按纪律更正）；
+  告警消解（面板只剩 ORPHAN）；`show virtual-machine-functions` → sem-vm **running**
+  （libvirtd 重启后 autostart 拉起/复连后读数恢复）。
+
+§3 验证③ —— Docker 对照（契约：无需重连）
+- `systemctl restart docker` 窗口内：journal 中 libvirt 侧「中断/复连」**0 条**、面板无新告警；
+- 容器编排自然恢复：`show container-functions` 正常读到 sem-ct（docker 重启已将其停为 exited，
+  属 Docker 语义、非产品缺陷）；随后 `request container-functions sem-ct start` 一次成功 →
+  **running**（容器侧无需任何重连逻辑，与契约的正文明文一致）。
+
+§4 门禁与交付
+- 状态机毫秒注入单测 10 条（阈值清零/连续 2 次触发/复连成功消警 + Ensure 恰一次/3 败退回 30s 节奏/
+  取消退出）+ 运行期告警文案断言（含要素、不含内部编号）+ Probe 转发；#351 既有 5 条原样保留全绿；
+  `make check` 全绿（决策 256）。
+- 交付：PR #284（squash 合并，v2 @ 0301e1e）；附录 A #354 行（含实现期两处口径对齐：复连失败退回
+  30s 节奏「永不放弃」、探活用 VMState 空名查询——Provider 无 Version 透传且不洞开 compute 包）；#351 行
+  的残余边界句已加 ✅ 指针；手册 `COMPUTE_UNAVAILABLE` 行补「运行期中断亦自动重连消警」。
+
+§5 如实登记（未覆盖）
+- **完全楔死的 libvirtd**（accept 连接但不回应）：探活/RPC 会先超时后失败，判中断与复连逻辑同样成立；
+  但单条 RPC **中途**不会被打断（go-libvirt 无 per-call deadline），表现为该条调用挂到守护进程恢复或
+  进程重启——与既有全部管理调用同一边界。
+- Docker 侧无「连接中断」概念（无会话态），故无对应告警族；容器异常退出仍走既有巡检告警（#188 口径）。

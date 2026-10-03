@@ -478,6 +478,14 @@
   排除回归测试。**教益**：归属判据用全量映射者集合、不用扫描顺序；跨事实源对照能暴露非确定读数。
   验证：sysfs/smaps/CLI 三方 + REST + 停/起动态 + wizard 预演 + **dev51（合并后构建）Browser 复核 + 截图**
   （`docs/images/round134-web-pools-dataplane-column.png`）；证据 `v2-round134-d353-hugepage-visibility-verified.txt`。
+- **round135（#354 交付：接入成功后连接中断的自动重连，2026-10-03）**：libvirt 侧驱动改**常驻状态机**
+  （未接入 30s 节奏接入同 #351；已接入**每 15s 探活**、连续 2 次失败判中断 ⇒ 运行期告警（同码
+  COMPUTE_UNAVAILABLE）+ 有界复连（10s×3）⇒ 成功换装/消警/EnsureConsistent，失败退回 30s 节奏**永不放弃**
+  ——彻底反转 #349 的「不自动重连」边界）；Docker 侧**不改**（无会话态，契约明文）。真机三验：① 运行中
+  restart libvirtd ⇒ **20s 内**中断判定→复连 INFO→消警→读数恢复；② 长窗口 stop ⇒ 告警保持（运行期文案
+  含探活/复连口径与手查路径）→ start 后 06:45:47「已恢复」+ 消警 + sem-vm running；③ docker restart
+  对照 ⇒ libvirt 侧零动作零告警、容器侧自然恢复（start sem-ct 一次成功）。**教益**：采证窗口要窄/带时间戳
+  （首采被上一轮旧日志撞成假阳性，已更正）。证据 `v2-round135-d354-runtime-reconnect-verified.txt`。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
