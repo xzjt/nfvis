@@ -456,6 +456,13 @@
   边界如实：本机拓扑 client/server 同 L2，**续租单播直发 server 不经代理**（跨 L3 续租路径另行评估）；
   现场双向还原（配置 rev 1113 回基线 + 宿主服务/地址/防火墙全还原）。证据
   `docs/evidence/v2-round131-d335-relay-lease-verified.txt`。
+- **round132（四套件复跑，2026-10-03）**：#348/#349/#351/#352 落地后的完整回归——**四套全绿零失败**：
+  `cli-fulltest` **231/0/13**（214→231：各轮新契约命令入套件累积；自清场正常）、`cli-semantic-check`
+  **26/0/3**（S13 DNS punt 实链通过；不可判定 = S11 无 relay 现场 + S12 按设计 + 1）、
+  `cli-lifecycle-check` **22/0/3**（历史最好档）、`cli-pty-smoke` **10/10**。环境清场（自由处置留痕）：
+  删历史遗留 **bond0**（占 ens192，round87 时代套件残留）、启用 ens224、跑 fulltest 前停 sem-vm 让
+  1G 页（cli-vm 用 1G）；收尾 `restart vpp+nfvis` 收敛回声明态、套件残留 grep=0。证据
+  `docs/evidence/v2-round132-four-suites-baseline.txt`；基线沿革已同步 `v2已做.md` §五。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。

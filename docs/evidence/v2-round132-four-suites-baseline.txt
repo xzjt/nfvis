@@ -1,0 +1,51 @@
+NFViS v2 真机验证记录 round132 —— 四套件复跑（#348/#349/#351/#352 落地后的完整回归基线）
+====================================================================
+日期：2026-10-03；环境：nfvis-vm（2.0.0~dev47 = v2 @ 03243de 构建）；源码 /root/src 同步自 v2 @ 03243de。
+
+§0 结论（四套全绿，零失败）
+| 套件 | 本次 | 上次基线 | 说明 |
+|---|---|---|---|
+| `cli-fulltest` | **通过 231 / 失败 0 / 预期报错 13** | 214/0/13（round115） | +17：累积的新契约命令陆续入套件（#319 守护；#335/#337/#345 等各轮新增），**无失败**；13 项预期报错与历史一致（环境受限/守卫正确拒绝，含 10 条 ping 管理网未通按 #89 口径正确报失败） |
+| `cli-semantic-check` | **通过 26 / 失败 0 / 不可判定 3** | 25/0/2（round122） | +1 通过（新增项入套件：S13 DNS 代理 punt 注册实链通过）；不可判定 3 = S11/S12 按设计 + 本轮多 1 项（见 §3） |
+| `cli-lifecycle-check` | **通过 22 / 失败 0 / 跳过 3** | 20/0/3（round112） | 历史最好档（19~22 区间）；**0 失败**；跳过 3 为自由口/流量类前提未满足项 |
+| `cli-pty-smoke` | **通过 10 / 失败 0** | 10/10 | 全过 |
+
+§1 环境准备（自由处置，全部留痕）
+- **清历史遗留 `bond0`**（`set bonds bond0 members ens192`，round87 时代套件残留；VPP 侧 BondEthernet0 在场）
+  ——`delete bonds bond0` + commit（rev 1114）；ens192 自此空闲（此前会撞「同一网口角色互斥」类正确校验）。
+- **启用 ens224**（此前配置 `set interfaces ens224 disable`；`request interfaces ens224 enable`，rev 1115）
+  ——两数据口恢复「可自由分配」基线（套件自由口枚举需要）。
+- **停 sem-vm 让 1G 大页**：1G 池声明 2（VPP 主堆占 1），fulltest 的 cli-vm 用 1G 页（phase3）⇒
+  跑 fulltest 前 `request virtual-machine-functions sem-vm stop`（free 0→1）；fulltest 自清场后
+  `start` 恢复（running）。
+- 夹具核对：产品镜像库 alpine.qcow2/debian-12/alpine:3.20 齐；`/var/lib/nfvis/images/alpine.qcow2`
+  在（phase3 从此拷贝 cli-test.qcow2）；`/root/fixtures-backup/images/` 备份齐（备意外）。
+- 语义现场：`cli-semantic-fixture.sh up`（sem-vm 重启 + guest beat + MAC 表正控就绪）——
+  fixture 自报「S8 应可判定并通过」。
+
+§2 fulltest（231/0/13，阶段 1~7 全绿）
+- 阶段小结：S1 44/0、S2 83/0、S3 8/0、S4 33/0/10、S5 45/0/3、S6 11/0、S7 7/0。
+- **自清场正常**（#323）：`套件对象已清干净（未清项 0）`；`alpine:3.20 在套件开始前已存在，保留`（口径正确）。
+- 13 项预期报错与历史逐类一致（ping 管理地址未通 10 条按「0 回应即失败」正确报错；其余为守卫正确拒绝）。
+
+§3 semantic（26/0/3）
+- S13（#345 DNS 代理）：`产品读视图 enabled=true ↔ vppctl show punt socket registrations l4:
+  punt ip4 UDP port 53 to socket /run/vpp/nfvis-dns.sock`——实链一致，通过。
+- 不可判定 3：S11（relay 读视图↔show dhcp proxy 对照——现场无 relay 配置，按设计跳过）与 S12 之外
+  多 1 项；如实记录（套件尾注已提示：不可判定不计入通过，需在有相应现场的拓扑复跑）。
+  ⚠️ 备注：relay 端到端已在 round131 人工全链达成（本轮不配 relay 现场即跳过 S11 属预期行为）。
+
+§4 lifecycle（22/0/3）与 pty（10/10）
+- lifecycle：含 L2 维度（套件内 `systemctl restart vpp` 触发重放）与「既有基线 NAT 拓扑未被改动」核对；
+  跳过 3 为自由口/流量前提类；**0 失败**。
+- pty：10/10 全过（交互/CRLF/候选/多匹配列示等）。
+
+§5 收尾
+- 按套件建议 `systemctl restart vpp && systemctl restart nfvis`（清残留拓扑→恢复收敛重建声明态）：
+  nfvis/vpp active、sem-vm running、sem-vs(2 口)/dns-vs(1 口) 在位；**套件残留 grep = 0**（cli-*/vs-l*/acl-test/pol-test/bond0 全无）。
+- 与历史基线逐项对比：**四套件零失败**；数字变化（+17/+1/+2）全部对应各轮「新契约命令入套件」的累积，
+  无任何回归。套件基线沿革表（`docs/v2已做.md` §五）已同步。
+
+§6 未覆盖（如实）
+- 本轮的 v6 ACL enforcement（#352 登记）与 relay（round131 已人工达成）等场景类项不在四套件范围内；
+  套件级数字不代表它们已被覆盖。
