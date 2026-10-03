@@ -653,41 +653,37 @@ func run() error {
 			}
 		}
 	}()
-	// 决策 #351：底座编排的启动后异步接入。装配期快路径同步尝试已失败（持有层未接入）时，
-	// 各起一个进程生命周期内的后台接入 goroutine：每 30s 一次尝试（每次 10s 上界）、失败
-	// 静默；成功即原子换装 + INFO 日志 + 消解对应告警（消解键与 raise 的 scope/code/source
-	// 完全一致）+ 补跑一次该底座的 EnsureConsistent（把降级期落下的收敛补上，照 runRecovery
-	// 的写法逐错落日志、与巡检共用 recoveryMu），随后循环终结——本决策只服务「从未接入」
-	// 状态，接入成功后连接中断的自动重连不在范围。
-	if !computeProvider.Connected() {
-		go runAsyncConnect(ctx, asyncConnectInterval, log,
-			func(ctx context.Context) error {
-				cctx, cancel := context.WithTimeout(ctx, asyncConnectAttemptTimeout)
-				defer cancel()
-				p, conn, err := compute.NewConnectedProvider(cctx, computeCfg)
-				if err != nil {
-					return err
-				}
-				p.SetVFResolver(network.NewSysfsVFResolver())
-				p.SetAlarms(alarms)
-				computeProvider.Swap(p, conn)
-				return nil
-			},
-			func(ctx context.Context) {
-				log.Info("计算编排已接入（后台）", "uri", computeCfg.URI)
-				alarms.Resolve("compute", alarmCodeComputeUnavailable, "libvirt")
-				cfg, err := engine.Committed()
-				if err != nil {
-					log.Warn("计算编排后台接入后读取 committed 配置失败", "err", err)
-					return
-				}
-				recoveryMu.Lock()
-				defer recoveryMu.Unlock()
-				for _, e := range computeProvider.EnsureConsistent(ctx, cfg) {
-					log.Warn("计算恢复收敛未收敛项", "err", e)
-				}
-			})
-	}
+	// 决策 #351/#354：计算编排的常驻连接状态机（进程生命周期 goroutine，恒启动——
+	// 未接入/已接入两态由状态机自身处理，不再以 Connected() 守卫）。未接入：每 30s 一次
+	// 有界接入尝试（失败静默），成功 ⇒ 换装 + INFO + 消解对应告警 + 补跑一次
+	// EnsureConsistent；已接入：每 15s 探活（≤5s 上界），连续 2 次失败判「连接中断」⇒
+	// 运行期告警（同码同 scope/source）+ 有界复连（10s × 至多 3 次、1s 退避），成功 ⇒
+	// 换装 + INFO + 消警 + EnsureConsistent，失败 ⇒ 告警保持、退回未接入态继续 30s 节奏
+	// （永不放弃）。探活是只读 libvirt RPC，不取 recoveryMu；接入/复连成功的收尾
+	// （读 committed + EnsureConsistent）与 15s 巡检共用 recoveryMu（照 #351 的锁纪律）。
+	go runBaseWatch(ctx, computeProvider.Connected(), defaultWatchOptions(), baseWatchDeps{
+		log: log,
+		connect: func(ctx context.Context) error {
+			// ctx 已由驱动按 asyncConnectAttemptTimeout 上界（此处不再包一层）。
+			p, conn, err := compute.NewConnectedProvider(ctx, computeCfg)
+			if err != nil {
+				return err
+			}
+			p.SetVFResolver(network.NewSysfsVFResolver())
+			p.SetAlarms(alarms)
+			computeProvider.Swap(p, conn) // 换装：旧连接关闭、新连接记账（首接与复连同一路径）
+			return nil
+		},
+		probe:            func(ctx context.Context) error { return computeProvider.Probe(ctx) },
+		onFirstConnected: computeConnectedCallback(false, log, alarms, computeCfg.URI, &recoveryMu, engine.Committed, computeProvider.EnsureConsistent),
+		onReconnected:    computeConnectedCallback(true, log, alarms, computeCfg.URI, &recoveryMu, engine.Committed, computeProvider.EnsureConsistent),
+		onLost: func(err error) {
+			computeLostAlarm(alarms, computeCfg.URI, err)
+			log.Warn("libvirt 连接中断，开始自动复连", "uri", computeCfg.URI, "err", err)
+		},
+	})
+	// 决策 #351：Docker 侧维持「未接入才起、成功即终结」的一次性接入（#354 明文
+	// Docker 无需重连：HTTP over unix socket 无会话态，dockerd 重启后既有 client 自然恢复）。
 	if !containerProvider.Connected() {
 		go runAsyncConnect(ctx, asyncConnectInterval, log,
 			func(ctx context.Context) error {
@@ -1864,6 +1860,34 @@ const (
 	alarmCodeContainerUnavailable = "CONTAINER_UNAVAILABLE"
 )
 
+// computeConnectedCallback 计算侧「接入/复连成功」收尾回调（决策 #354；由 #351 的
+// onConnected 抽出）：INFO（首接/恢复文案区分）+ 消解 COMPUTE_UNAVAILABLE（同码同
+// scope/source 键）+ 以 committed 配置补跑一次 EnsureConsistent（把降级/中断期落下的
+// 收敛补上，逐错落日志）；读 committed 与收敛期间取 recoveryMu，与 15s 巡检互斥（照 #351）。
+// 返回的闭包供 runBaseWatch 的 onFirstConnected / onReconnected 两处使用（共用实现）。
+func computeConnectedCallback(reconnected bool, log *slog.Logger, sink alarmSink, uri string,
+	mu *sync.Mutex, committed func() (model.Config, error),
+	ensure func(ctx context.Context, cfg model.Config) []error) func(ctx context.Context) {
+	return func(ctx context.Context) {
+		if reconnected {
+			log.Info("libvirt 连接已恢复（自动复连成功）", "uri", uri)
+		} else {
+			log.Info("计算编排已接入（后台）", "uri", uri)
+		}
+		sink.Resolve("compute", alarmCodeComputeUnavailable, "libvirt")
+		cfg, err := committed()
+		if err != nil {
+			log.Warn("计算编排后台接入后读取 committed 配置失败", "err", err)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		for _, e := range ensure(ctx, cfg) {
+			log.Warn("计算恢复收敛未收敛项", "err", e)
+		}
+	}
+}
+
 // computeUnavailableAlarm 启动期 libvirt 未接入的降级告警（scope compute、source
 // libvirt、severity warning）。文案要素：发生了什么（启动时未接入、已降级、VM
 // 生命周期动作不可用、已有配置声明不受影响）、独立事实源手查路径、恢复路径
@@ -1874,6 +1898,20 @@ func computeUnavailableAlarm(sink alarmSink, uri string, err error) {
 		"启动时未接入 libvirt，已降级运行：VM 生命周期动作不可用，已有配置声明不受影响（原因："+errReason(err)+"）。"+
 			"请查底座实况：systemctl status libvirtd、journalctl -u libvirtd、virsh -c "+uri+" list。"+
 			"告警在场期间产品在后台持续重试接入（约每 30 秒一次），接入成功后本告警自动消解、VM 编排恢复，无需重启 nfvis",
+		"libvirt")
+}
+
+// computeLostAlarm 运行期 libvirt 连接中断的运行期告警（决策 #354；与启动期
+// computeUnavailableAlarm **同码同 scope/source**——同一事实、同一告警键，消解
+// 键与 raise 键完全一致，复连成功后由 computeConnectedCallback 消解）。文案要素：
+// 发生了什么（连接中断、正在自动重连、VM 生命周期动作暂时不可用、配置声明不受影响）、
+// 自动恢复路径与节奏（每 15 秒探活、复连成功自动消解、无须重启 nfvis）、独立事实源
+// 手查路径。文案中不得出现内部编号（user_text 规则）。
+func computeLostAlarm(sink alarmSink, uri string, err error) {
+	sink.Raise("compute", network.SeverityWarning, alarmCodeComputeUnavailable,
+		"libvirt 连接中断，正在自动重连：VM 生命周期动作暂时不可用，已有配置声明不受影响（原因："+errReason(err)+"）。"+
+			"产品每 15 秒探活、连接未恢复时按有界尝试自动复连；重连成功后本告警自动消解，无需重启 nfvis。"+
+			"请查底座实况：systemctl status libvirtd、journalctl -u libvirtd、virsh -c "+uri+" list",
 		"libvirt")
 }
 

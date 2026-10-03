@@ -75,6 +75,40 @@ func TestComputeUnavailableAlarmNilErr(t *testing.T) {
 	}
 }
 
+// TestComputeLostAlarm 运行期连接中断告警（决策 #354）：与启动期同码同 scope/source
+// （消解键一致），文案是运行期口径——连接中断、正在自动重连（每 15 秒探活）、
+// 手查路径、重连成功自动消解且无须重启 nfvis；不得出现内部编号（assertMessage 内置）。
+func TestComputeLostAlarm(t *testing.T) {
+	s := &degradeAlarmSink{}
+	computeLostAlarm(s, "qemu:///system", errors.New("connection closed"))
+
+	if len(s.raised) != 1 {
+		t.Fatalf("应恰好一条告警：%+v", s.raised)
+	}
+	a := s.raised[0]
+	if a.scope != "compute" || a.severity != "warning" || a.code != "COMPUTE_UNAVAILABLE" || a.source != "libvirt" {
+		t.Fatalf("scope/severity/code/source 应与启动期同键：%+v", a)
+	}
+	assertMessage(t, a,
+		"libvirt 连接中断", "正在自动重连", "每 15 秒",
+		"systemctl status libvirtd", "journalctl -u libvirtd", "virsh -c qemu:///system list",
+		"自动消解", "无需重启 nfvis")
+	if !strings.Contains(a.message, "connection closed") {
+		t.Fatalf("文案应带上游原因：%s", a.message)
+	}
+	if strings.Contains(a.message, "启动时未接入") {
+		t.Fatalf("运行期告警不应使用启动期文案：%s", a.message)
+	}
+}
+
+func TestComputeLostAlarmNilErr(t *testing.T) {
+	s := &degradeAlarmSink{}
+	computeLostAlarm(s, "qemu:///system", nil)
+	if !strings.Contains(s.raised[0].message, "未知") {
+		t.Fatalf("nil 错误应如实写未知：%s", s.raised[0].message)
+	}
+}
+
 func TestContainerUnavailableAlarm(t *testing.T) {
 	s := &degradeAlarmSink{}
 	containerUnavailableAlarm(s, "unix:///var/run/docker.sock", errors.New("dial unix /var/run/docker.sock: connect: no such file or directory"))

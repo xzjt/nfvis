@@ -15,6 +15,9 @@ package main
 //   - EnsureConsistent/CheckVMAlarms/CheckContainerAlarms ⇒ 空结果（巡检/恢复收敛不产生噪声）；
 //   - VMState/ContainerState ⇒ 错误（show 路径经既有错误分支照旧渲染「-」）；
 //   - 其余生命周期动作/快照/日志/console ⇒ 与 internal/api nil 分支逐字同文案的错误。
+//
+// 决策 #354 在持有层之上加了常驻探活/复连状态机（async_connect.go）；持有层新增
+// Probe（经既有廉价 RPC 探活，见其注释），Swap 记账同时服务首接与复连两种换装。
 
 import (
 	"context"
@@ -114,6 +117,25 @@ func (h *dynamicCompute) current() computeFacade {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.p
+}
+
+// computeProbeVMName 探活使用的保留域名（决策 #354）：libvirt 对查无此域返回
+// 「不存在」而非错误——正常返回即证明连接可用（与 Docker 侧 "__nfvis_probe__" 同一手法）。
+const computeProbeVMName = "__nfvis_probe__"
+
+// Probe 探活（决策 #354 契约②）：经当前实现的一个既有廉价 RPC 判定 libvirt 连接是否
+// 健康；nil = 健康，非 nil = 本次探活失败（调用方按连续失败阈值判「连接中断」）。
+//
+// 方法选择：*compute.Provider 没有 Conn.Version() 的直接透传（Conn 由持有层记账、
+// Provider 不暴露），本决策又不改 compute 包内部——故取既有最廉价 RPC 之一
+// VMState(ctx, 保留域名)：一次 DomainLookupByName（查无此域 ⇒ absent/nil，正常返回），
+// 与 Version() 同级开销、只读、无副作用。未接入态经 VMState 返回既有「未接入」错误，
+// 同样计为探活失败（防御性——探活只在已接入态被调用）。
+func (h *dynamicCompute) Probe(ctx context.Context) error {
+	if _, err := h.VMState(ctx, computeProbeVMName); err != nil {
+		return err
+	}
+	return nil
 }
 
 // DefineVM 未接入 ⇒ 静默成功：提交路径在降级期照常工作（配置入库、网络侧照常下发），
