@@ -33,13 +33,14 @@ expect_out S4 "nfvis-exec-ok" 'request container-functions cli-ct2 exec "echo nf
 expect_out S4 "退出码: 0" 'request container-functions cli-ct2 exec "echo nfvis-exec-ok"'
 # 含空格不加引号 ⇒ 给可照做的提示（不得拼起来猜）
 expect_fail S4 "含空格请加引号" "request container-functions cli-ct2 exec ip addr"
+# 交互式终端（决策 #358）：**运行中**才谈得上开终端——脚本（非 TTY）下不做终端接管、给可照做的提示
+# （透传会阻塞脚本，属设计行为）；真终端下的接管行为由真机 pty 验证覆盖（见 round139 证据）。
+# 注意放在停机之前：停机时先撞的是「未处于运行态」前置，验不到非 TTY 这条。
+expect_fail S4 "非 TTY" "request container-functions cli-ct2 shell"
 run S4 "request container-functions cli-ct2 restart"
 run S4 "request container-functions cli-ct2 stop"
 # 停机后执行 ⇒ 明确拒绝并指向 start（前置判定）
 expect_fail S4 "未处于运行态" 'request container-functions cli-ct2 exec "echo x"'
-# 交互式终端（决策 #358）：脚本（非 TTY）下**不做终端接管**，给可照做的提示——这是设计行为
-# （透传会阻塞脚本）；真终端下的接管行为由真机 pty 验证覆盖（见 round139 证据）。
-expect_fail S4 "非 TTY" "request container-functions cli-ct2 shell"
 
 # ---- 物理口 enable/disable ----
 run S4 "request interfaces ens224 enable"
