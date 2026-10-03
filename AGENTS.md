@@ -445,6 +445,17 @@
   成功且 VPP 显示 `ipv6 … dst ::/0`、混族与 NAT v6 均校验期拒绝）。**登记未竟**：v6 ACL enforcement
   （真拦 v6 流量）待 vNIC-L3 场景验证；NAT66/NAT64 插件在构建里、未接。**教训**：`-c` 脚本模式每次
   运行是独立会话，set 与 commit 必须同会话（#336 会话级候选）。证据 `v2-round130-v6-coverage.txt`。
+- **round131（#335 relay 端到端租约补验达成，2026-10-03）**：round113 遗留（观测通道受限）的 relay
+  端到端租约**达成**——观测通道换法：server 移到 Windows 宿主（VMnet8 次地址 99.10 + 测试专用最小
+  DHCP server，只应答中继单播、广播按策略忽略留痕）、客户端/回程观测全在网络侧（server 事务日志 +
+  `vppctl pcap trace intfc any` 三跳 pcap + **客户端以租约地址为源的出包痕迹**（IGMP/LLMNR，无需进
+  guest）+ VPP 错误计数）；对照（relay OFF：8 条广播到达但被忽略、无租约）与实验（relay ON：完整
+  Discover→Offer→**Request→ACK**，Your-IP 99.50，客户端实际使用）两态相减。**关键发现**：VPP dhcp
+  proxy 回程要求 server **回显 option 82**（不回显则应答被静默丢弃，唯一线索是
+  `show errors` 的 `dhcp-proxy-to-client DHCP option 82 missing`）——已补进用户手册 §8.3（排障要点）。
+  边界如实：本机拓扑 client/server 同 L2，**续租单播直发 server 不经代理**（跨 L3 续租路径另行评估）；
+  现场双向还原（配置 rev 1113 回基线 + 宿主服务/地址/防火墙全还原）。证据
+  `docs/evidence/v2-round131-d335-relay-lease-verified.txt`。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
