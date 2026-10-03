@@ -142,7 +142,7 @@
       <p class="muted small">
         数字：<strong>声明</strong>（配置唯一真源）、<strong>内核实际</strong>（宿主 sysfs 读到的池大小）、
         <strong>在用</strong>（= 内核实际 − 空闲）、<strong>实际持有</strong>（按进程的 hugetlb 映射按 inode
-        去重汇总）、<strong>数据面占用</strong>（= 实际持有中 comm=vpp 的进程提交的页，实测）、
+        去重汇总）、<strong>数据面占用</strong>（= 实际持有中<strong>仅由</strong>数据面进程（VPP，comm 形如 vpp_main）映射、无其它进程共享的页，实测；vhost-user 共享给 VPP 的 VNF guest RAM 不计入）、
         <strong>无主占用</strong>（= 在用 − 实际持有）。
         ⚠️ <strong>在用 ≠ 有持有者</strong>：内核收缩池、或被进程<strong>预留（reserve）但未使用</strong>的页
         （如数据面 DPDK 预留）都算「在用」却无可见持有者；这类页只体现在「无主占用」，由
