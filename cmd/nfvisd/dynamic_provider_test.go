@@ -375,6 +375,29 @@ func TestDynamicComputeForwardsAfterSwap(t *testing.T) {
 	}
 }
 
+// TestDynamicComputeProbe 探活转发（决策 #354）：未接入 ⇒ 与 nil 分支同文案的错误（防御性，
+// 探活只在已接入态被调用）；换装后经既有廉价 RPC VMState(保留域名) 判定，错误原样穿透。
+// 方法选择缘由见 dynamic_provider.go 的 Probe 注释（Provider 无 Conn.Version() 透传）。
+func TestDynamicComputeProbe(t *testing.T) {
+	ctx := context.Background()
+	h := newDynamicCompute()
+	if err := h.Probe(ctx); err == nil || err.Error() != wantComputeBody {
+		t.Fatalf("未接入 Probe 应报同文案错误: %v", err)
+	}
+	fake := &fakeCompute{}
+	h.Swap(fake, nil)
+	if err := h.Probe(ctx); err != nil {
+		t.Fatalf("已接入 Probe 应成功: %v", err)
+	}
+	if len(fake.states) != 1 || fake.states[0] != computeProbeVMName {
+		t.Fatalf("探活应经保留域名调用 VMState: %v", fake.states)
+	}
+	fake.stateErr = errors.New("connection closed")
+	if err := h.Probe(ctx); err == nil || err.Error() != "connection closed" {
+		t.Fatalf("探活失败应原样穿透假件错误: %v", err)
+	}
+}
+
 func TestDynamicComputeCloseClosesTrackedConn(t *testing.T) {
 	h := newDynamicCompute()
 	if err := h.Close(); err != nil {
