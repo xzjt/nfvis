@@ -1,0 +1,56 @@
+NFViS v2 真机核实记录 round130 —— 三.4「NAT44 与 ACL 五元组的 v6 覆盖专项核实」+ 决策 #352 验证
+====================================================================
+日期：2026-10-03；环境：nfvis-vm（dev46→dev47）；接手会话续（round130 第三段）。
+
+§0 核实结论（一句话版）
+1. **ACL**：校验层与下发管道本就双栈、VPP acl_plugin 实证接受 ipv6 规则——**唯一缺口是
+   `prefixOrAny` 把 `any` 硬编码 `0.0.0.0/0`**（含 any 的 v6 规则成混族被 VPP `-57` 打回）。
+   已由**决策 #352** 修复（any 家族跟随 + 显式混族校验期拒绝 + icmp 家族映射），真机验证通过。
+2. **NAT44**：下发层严格 v4（`ParseIP4Address`；nat44_ei 插件本就 v4-only），校验层此前放行 v6
+   ⇒ commit 期才报 `invalid IP4 address`。已由 **#352** 改为校验期显式拒绝（文案注明仅支持 IPv4）。
+   VPP 26.06 构建里有 **nat66（NPTv6）/nat64** 插件、产品未接（另立项，非本轮范围）。
+
+§1 核实过程与证据（dev46 = #351 代码）
+1. 插件清单：`vppctl show plugins` → acl_plugin、nat44_ei、**nat66、nat64**、det44、cnat、pnat 均在。
+2. **ACL 纯 v6 规则（两侧显式 v6）**：`set acls acl-v6probe2 rule 10 source 2001:db8::/64
+   destination 2001:db8:1::/48 protocol any action deny` + commit → **成功**（rev 1106），
+   `vppctl show acl-plugin acl` → `0: ipv6 deny src 2001:db8::/64 dst 2001:db8:1::/48 proto 0 …`
+   ⇒ 插件与管道双栈实证。
+3. **ACL「any」缺口**：`source 2001:db8::/64 destination any …` + commit → **失败**
+   `%% 底座下发失败（已补偿）: 下发 ACL acl-v6probe: VPPApiError: Invalid src address (-57)`
+   ——根因 `acl.go prefixOrAny` 把 any/空 硬编码 `0.0.0.0/0`（混族规则）；VPP 侧错误文案不含 v6 信息。
+4. **NAT44 v6**：`set nat source-pool pool-v6probe address-range 2001:db8::1 to 2001:db8::10`（set 期
+   [ok]、校验放行）→ 同会话 commit → 失败 `下发 NAT 地址池 pool-v6probe（VRF 0）: 解析起始地址
+   "2001:db8::1": invalid IP4 address`（有信息量但发现太晚；nat.rules/static 同理）。
+5. **CLY 会话模型教训**：`-c` 脚本模式每次运行是**独立会话**——`configure`+`set` 后进程退出，
+   candidate 随会话释放（#336「仅本会话内保留」）；set 与 commit 必须同一会话，否则 commit 的是
+   空变更（本轮实测踩到并更正）。
+6. 清场：探针 ACL/池全部删除（配置库 `display set` 与 `vppctl show acl-plugin acl` 双向归零）。
+
+§2 决策 #352 真机验证（dev47）
+1. **① any 家族跟随**：`set acls acl-v6 rule 10 source 2001:db8::/64 destination any protocol any
+   action deny` + commit → **成功**（rev 1108）；`vppctl show acl-plugin acl` →
+   `0: ipv6 deny src 2001:db8::/64 dst ::/0 proto 0 …` ✓
+2. **② 显式混族校验期拒绝**：同会话 set + commit →
+   `acls[acl-mixed].rules[10].source: source/destination 地址族不一致（10.0.0.0/8 与 2001:db8::/64）：
+   一条规则仅匹配单族，双族需两条规则` ✓
+3. **③ NAT44 校验期拒绝 v6**（三处文案均含「NAT44 仅支持 IPv4」）：
+   - `nat.source-pools[pool-v6].address_range: 地址范围 "2001:db8::1 to 2001:db8::10" 必须为
+     "<IPv4> to <IPv4>"（NAT44 仅支持 IPv4）` ✓
+   - `nat.static[0].inside_ip: 内部地址 "2001:db8::5" 必须为 IPv4 地址（NAT44 仅支持 IPv4）` ✓
+   - `nat.static[0].outside_ip: 外部地址 "2001:db8::6" 必须为 IPv4 地址（NAT44 仅支持 IPv4）` ✓
+   拒绝发生在**校验期**（candidate 保留、随会话释放，无残留）——替代了修复前的 commit 期解析错误。
+4. 清场：acl-v6 已删（rev 1109），VPP 侧 acl-index 归零。
+
+§3 门禁与测试
+- 单测：`TestBuildACLRulesIPv6Family`（9 子用例：纯 v6 透传/any 跟随双向/空侧跟随/两侧 any 回归/
+  icmp 家族映射/icmp6 恒 58）、`TestIsExplicitV6`、`TestAclApplyMixedFamilyRejected`（防御分支）、
+  `TestValidateAclMixedFamilyRejected`、`TestValidateNatV6Rejected`（三处 v6 拒绝 + v4 回归）。
+- `make check` 全绿（决策条数 254、契约同步、archtest/user_text 全过）。
+
+§4 登记的未竟项
+- **v6 ACL 的数据面 enforcement**（真拦 v6 流量）：需 vNIC-L3 场景 + 1G 大页（sem-vm 让页），
+  登记为待验证（机制链已实证到数据面规则可见，缺端到端流量一环）。
+- **NAT66（NPTv6）/NAT64**：插件在构建里、产品未接——若立项属新特性（契约先行），非缺陷。
+- 探针期间的 CLI 会话模型教训已记录（§1.5）；套件四件本轮未复跑（改动面：ACL 规则映射与 NAT 校验
+  ——fulltest 的 ACL 用例为 v4 语法、语义不受影响；下轮照例清场复跑）。
