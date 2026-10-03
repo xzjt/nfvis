@@ -980,7 +980,9 @@ paths:
         权限：**super-user only**（`request container-functions <name> shell` 为 S 档，与 exec 同因：
         免凭据的容器内命令执行＝等价 root）。前置：容器须 **running**（否则 409 并指向 start）。
         返回的 `ws_url` 以**一次性 ticket** 鉴权（WebSocket 握手带不了 Bearer，与 console 同一成因）。
-        **断开即释放**：WS 任一侧断开 ⇒ 关流、exec 进程随之终止（与 exec 的「超时只中止等待」语义不同）。
+        **断开只关产品侧桥接**（真机实测更正）：WS 断开 ⇒ 关流，但容器内的 shell 进程**可能仍在运行**
+        （Docker 不提供 exec 进程的中止接口；round139 对照实验：一次会话结束后容器内仍有 `/bin/sh`）。
+        这与 exec 的「超时只中止客户端等待」是同一类边界——产品侧不谎称已释放；需清理时用 `exec` 杀进程或重启容器。
       responses:
         "200":
           description: OK

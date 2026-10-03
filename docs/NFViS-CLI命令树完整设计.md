@@ -227,7 +227,8 @@ request container-functions <name>
   │      #   退出（前端体验一致），底座换成 Docker exec 的 TTY 形态（`Tty:true` + `Upgrade: tcp`
   │      #   ⇒ `101 UPGRADED` 全双工裸流，round139 真机实证）。
   │      # 权限 **S**（同 exec：免凭据的容器内命令执行＝等价 root）；前置：容器须 **running**（否则拒绝并指向 start）。
-  │      # ⚠️ **断开即释放**——WS 任一侧断开 ⇒ 关流、exec 进程随之终止（与 exec 的「超时只中止等待」语义不同）。
+  │      # ⚠️ **断开只关产品侧桥接**（真机实测更正）——WS 断开 ⇒ 关流，但容器内 shell 进程**可能仍在**
+  │      #   （Docker 无 exec 中止接口；对照实验：会话结束后容器内仍有 /bin/sh）。需清理时 exec 杀进程或重启容器。
   │      # 不做**窗口尺寸同步**（无 resize 通道，如实登记）；Web 端为纯文本终端（不引入终端模拟器）。
   │      # API: POST /container-functions/{name}/shell（Bearer）⇒ {ws_url, expires_in}；
   │      #      GET  /container-functions/{name}/shell/ws?ticket=…（一次性 ticket 鉴权，与 console 同因）

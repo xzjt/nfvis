@@ -5,8 +5,9 @@ package api
 // raw 接管与 Ctrl-] 退出。底座是 Docker exec 的 TTY 形态（`Tty:true` + `Upgrade: tcp`
 // ⇒ `101 UPGRADED` 全双工裸流，round139 真机实证）。
 //
-// 与 exec（#357）的语义差别：**断开即释放**——WS 任一侧断开 ⇒ 关流，容器内 exec 进程
-// 随之终止；而 exec 的超时只中止**客户端等待**（容器内进程可能仍在跑）。
+// 与 exec（#357）同一类边界：**断开只关产品侧桥接**——WS 断开 ⇒ 关流，但容器内的 shell 进程
+// **可能仍在运行**（Docker 不提供 exec 进程的中止接口；round139 对照实验：一次会话结束后容器内
+// 仍有 /bin/sh）。需要清理时用 exec 杀进程或重启容器——不谎称已释放。
 // 窗口尺寸同步本期不做（如实登记，见决策 #358）。
 //
 // ticket 与 VM 串口**共用一张表**（consoleTickets），靠资源键前缀（ct/ 与 vm/）隔离：
@@ -89,7 +90,7 @@ func (s *Server) handleContainerShellWS(w http.ResponseWriter, r *http.Request) 
 		s.engine.Audit(user, "container.shell", fmt.Sprintf("open shell %s", name), "success")
 		defer s.engine.Audit(user, "container.shell", fmt.Sprintf("close shell %s", name), "success")
 
-		// 任一侧断开即结束会话（关流由 defer 触发）——**断开即释放**：容器内 exec 进程随之终止。
+		// 任一侧断开即结束**桥接**（关流由 defer 触发）；容器内的 shell 进程可能仍在运行（见文件头注释）。
 		done := make(chan struct{}, 2)
 		go func() { _, _ = io.Copy(stream, ws); done <- struct{}{} }()
 		go func() { _, _ = io.Copy(ws, stream); done <- struct{}{} }()

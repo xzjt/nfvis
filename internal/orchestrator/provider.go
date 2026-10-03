@@ -218,7 +218,7 @@ type ContainerProvider interface {
 	// ErrContainerNotRunning、不存在返回 ErrVMNotFound。
 	ContainerExec(ctx context.Context, name, command string, timeout time.Duration) (ExecResult, error)
 	// ContainerShell 打开容器内的**交互式 TTY**（决策 #358）；返回全双工流，
-	// Close 即关会话（容器内进程随之终止）。非运行态返回 ErrContainerNotRunning。
+	// Close 只关产品侧流；容器内进程可能仍在运行（Docker 无 exec 中止接口）。非运行态返回 ErrContainerNotRunning。
 	ContainerShell(ctx context.Context, name string) (io.ReadWriteCloser, error)
 	EnsureConsistent(ctx context.Context, cfg model.Config) []error
 	// CheckContainerAlarms 异常退出巡检（FR-CMP-022）：dead/非零退出 → critical 告警。

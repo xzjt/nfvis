@@ -267,7 +267,8 @@ func (p *Provider) ContainerExec(ctx context.Context, name, command string, time
 // ContainerShell 打开**运行中**容器的交互式终端（决策 #358）。
 //
 // 前置判定与 exec 同口径（不存在 ⇒ ErrVMNotFound、非运行态 ⇒ ErrContainerNotRunning）；
-// 返回的全双工流由调用方（WS 桥接）持有，Close 即关会话（容器内 exec 进程随之终止）。
+// 返回的全双工流由调用方（WS 桥接）持有；Close 只关产品侧流——容器内的 shell 进程可能仍在运行
+// （Docker 不提供 exec 进程的中止接口，round139 真机实测）。
 func (p *Provider) ContainerShell(ctx context.Context, name string) (io.ReadWriteCloser, error) {
 	state, exists, err := p.api.State(ctx, name)
 	if err != nil {
