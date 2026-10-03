@@ -657,8 +657,9 @@
         </div>
         <p class="muted small">
           终端连的是容器里的 <code>sh</code>（与 CLI 的 <code>request container-functions &lt;名&gt; shell</code>
-          同一路，仅 super-user 可用）。连接后输入的内容直接进入容器——
-          <strong>断开即结束</strong>（容器内的 shell 进程随之退出）；离开本页会自动断开。
+          同一路，仅 super-user 可用）。连接后输入的内容直接进入容器；离开本页会自动断开。
+          注意：断开只关本页桥接，<strong>容器内的 shell 进程可能仍在运行</strong>（Docker 不提供中止接口，
+          需要时用「执行命令」清理）——产品不会谎称已经释放。
         </p>
         <div id="ct-shell" hidden>
           <h3>容器终端 <span id="ct-shell-name" class="muted small"></span>

@@ -4795,7 +4795,8 @@ function ctTabClick(tab) {
 
 // ---- 容器交互式终端（决策 #358，S 档）----
 // 与 VM 串口页**同一形态**（一次性 ticket → WebSocket → 纯文本终端 + 输入行 + 断开），
-// 底座是 Docker exec 的 TTY。**断开即结束**：WS 一关，容器内的 shell 进程也随之退出。
+// 底座是 Docker exec 的 TTY。**断开只关本页桥接**：WS 一关，容器内的 shell 进程**可能仍在运行**
+// （Docker 不提供 exec 进程的中止接口——真机对照实验：会话结束后容器内仍有 /bin/sh）。
 // 入口是静态写控件（data-write），非 super-user 由 body.role-nonsuper 的 CSS 隐藏。
 
 let ctShellWS = null;
@@ -4844,9 +4845,9 @@ async function ctShellOpen(name) {
   }
   ctShellName = name;
   ctShellSyncBtn();
-  ctShellWS.onopen = () => ctShellMsg('已连接 ' + name + ' 的容器终端（输入命令后回车；断开即结束会话）。', false);
+  ctShellWS.onopen = () => ctShellMsg('已连接 ' + name + ' 的容器终端（输入命令后回车）。注意：断开只关本页桥接，容器内进程可能仍在运行。', false);
   ctShellWS.onmessage = (ev) => ctShellAppend(ev.data);
-  ctShellWS.onclose = () => { ctShellMsg('连接已关闭（容器内的 shell 已结束）。', false); ctShellWS = null; ctShellName = ''; ctShellSyncBtn(); };
+  ctShellWS.onclose = () => { ctShellMsg('连接已关闭（本页桥接已断开；容器内进程可能仍在运行——需要时用「执行命令」清理）。', false); ctShellWS = null; ctShellName = ''; ctShellSyncBtn(); };
   ctShellWS.onerror = () => ctShellMsg('WebSocket 出错（凭证过期或容器终端不可用）。', true);
   $('ct-shell-in').focus();
 }
