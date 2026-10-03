@@ -527,6 +527,23 @@
   新增分栏一致性守护 `TestDetailTabsConsistentBetweenHTMLAndJS` 并自校准）。**环境事故（入册）**：换身份验证
   忘了给 `-u`，失败登录计到 admin 头上触发**15 分钟锁号**（#76 策略按设计生效）——别拿真账号试口令。
   证据 `docs/evidence/v2-round138-d357-container-exec.txt`。
+- **round139（一.9 收口：#358 容器交互式终端，2026-10-03）**：接 #357 的另一半——`request container-functions
+  <name> shell`（**S 档**）+ REST `POST …/{name}/shell` + `GET …/shell/ws?ticket=…` + Web 容器详情页
+  「交互终端」分栏。**能力前提先核实**（#338 的教训）：真机 spike——Docker exec 带 `Tty:true` +
+  `Connection: Upgrade`/`Upgrade: tcp` 回 **`101 UPGRADED`** + raw-stream，此后同一连接全双工。
+  **复用既有 console 管线**（一次性 ticket + WebSocket + CLI raw 接管 + **Ctrl-] 退出**），ticket 表按
+  **资源键**隔离（`ct/` 与 `vm/`：一类会话的票开不了另一类，真机四态对照过）。**真机四维全过**：
+  ① 真 **pty** 下进容器 shell（`id -un`⇒root、`hostname`⇒容器 ID）；② 前置（停机 ⇒ 409 + 指向 start）、
+  Ctrl-] 正常退出；③ 跨对象 ticket 隔离（两向 401）；④ 对抗（ticket 过期 401、**operator 双面被拒**
+  CLI `%% 无权限`/REST 403、非 TTY 脚本给明确提示）。**Browser Use 复核**（dev66）通过，
+  截图 `docs/images/round139-web-container-shell.png`。**本轮实测修掉 3 处**：会话刚建立就断开
+  （`http.ReadResponse` 对 101 的 body 语义不合用 ⇒ 改手工解析升级响应）、**「断开即释放」是想当然**
+  （对照实验：会话结束后容器内仍有 `/bin/sh` ⇒ 契约/手册/树/全表/openapi/注释/Web 文案**全面改写为实测事实**）、
+  CLI 断开/退出文案写死「串口」。**工具坑入册**：`node --check` 对含 `export` 的 ESM **漏报**「字符串里
+  真换行」类语法错误——拦得住的是 `web-console-config-selftest.sh`（toolcheck 里跑）。
+  **环境事故（第二次）**：admin 被口令策略**锁定**（阈值 5 次/按用户名），全量套件日志零「登录失败」
+  ⇒ 非套件所致、来源未定位（如实登记）；处置是等窗口过期后复跑。证据
+  `docs/evidence/v2-round139-d358-container-shell.txt`。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
