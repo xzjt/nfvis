@@ -1,0 +1,36 @@
+NFViS v2 真机验证记录 round133 —— 决策 #352 登记项：v6 ACL 数据面 enforcement（真拦）
+====================================================================
+日期：2026-10-03；环境：nfvis-vm（2.0.0~dev47）+ Windows 宿主（v6 流量源）。
+
+§0 结论
+**v6 ACL 在数据面真拦——补齐 #352 的最后一块**。机制链此前已到「规则下发且 VPP 可见」（round130），
+本轮补上**流量级判定**：IPv6 报文确实经 `acl-plugin-in-ip6-fa` 弧被逐包检查，deny 规则下
+**20/20 命中拒绝**。**形态说明**：用**物理口 ens192 作 L3 接口**（免 VM/免 1G 大页；#352 原登记写
+「vNIC-L3 场景 + 让页」，物理口 L3 是同一绑定机制——vNIC-L3 形态的 v4 拦截已由 #341/#120 实证）。
+
+§1 场景（零 VM、可完全观测）
+- VPP 侧：`set virtual-switches acl6-vs type l3` + `l3-interface ens192 ip address 2001:db8::1/64`
+  + `acl-in acl6`（rev 1155）；acl6 = `source 2001:db8::/64 destination 2001:db8::/64 protocol any`
+  （显式 v6 规则；双方显式 v6 正是 #352 校准过的合法形态）。
+- VPP 侧核对：`show acl-plugin acl` → `0: ipv6 permit …`；`show acl-plugin interface` →
+  `applied inbound on sw_if_index: 1`（ens192）。
+- 宿主侧：VMnet8 加 `2001:db8::2/64` + **静态邻居** 2001:db8::1 → VPP 的 ens192 MAC
+  （00:0c:29:a9:61:8e，免 ND 依赖）；Python UDP6 逐包发送（可控计数）。
+
+§2 两相判定（VPP 错误计数器为准，独立于产品读视图）
+| 相位 | 规则 | 发送 | `acl-plugin-in-ip6-fa` 读数 | 判定 |
+|---|---|---|---|---|
+| 基线 | permit | 20 | `checked 20 / ACL permit 20`、`ip6-inacl 20` | v6 数据路径经 ACL 弧且放行 ✓ |
+| 翻转 | **deny** | 20 | `checked 40 / ACL deny **20** / permit 20` | **20 个 v6 包全被拒——真拦 ✓** |
+- 另记：同一接口 `acl-plugin-in-ip4-fa` 出现 `deny 3 / checked 3`——绑定了「只含 v6 规则」的 ACL 后，
+  接口上**环境 v4 流量按 ACL 缺省语义被拒**（ACL 绑定对两族都生效；v4 无匹配 permit ⇒ 默认拒）。
+  属预期语义、与 v6 判定无关，如实记录。
+
+§3 清场与还原（三向核对）
+- 配置：删绑定/地址/acl6/交换机（rev 1157）——`display set` 中 acl6 计数 0、`show acl-plugin acl`
+  acl-index 计数 0、ens192 无地址。
+- 宿主：删 2001:db8::2 与静态邻居（仅剩链路本地）。
+
+§4 至此 #352 收口说明
+- #352 的三项真机验证（round130：any 家族跟随 / 混族拒绝 / NAT v6 拒绝）+ 本轮 enforcement，
+  **全部达成**；《v2待做》三.4 的「v6 ACL enforcement 待验证」登记撤销。

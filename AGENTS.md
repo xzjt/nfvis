@@ -463,6 +463,12 @@
   删历史遗留 **bond0**（占 ens192，round87 时代套件残留）、启用 ens224、跑 fulltest 前停 sem-vm 让
   1G 页（cli-vm 用 1G）；收尾 `restart vpp+nfvis` 收敛回声明态、套件残留 grep=0。证据
   `docs/evidence/v2-round132-four-suites-baseline.txt`；基线沿革已同步 `v2已做.md` §五。
+- **round133（#352 登记项补验：v6 ACL 数据面真拦，2026-10-03）**：形态改为**物理口 ens192 作 L3 接口**
+  （免 VM/免 1G 大页；同一绑定机制），宿主（VMnet8 加 2001:db8::2 + 静态邻居）发 UDP6，VPP 错误计数器
+  两相判定：permit 相位 `acl-plugin-in-ip6-fa checked 20 / permit 20`（v6 路径过 ACL 弧）→ 翻 deny 后
+  `checked 40 / deny 20`（**20 个 v6 包全被拒**）。至此 #352 四种真机验证（any 家族/混族拒绝/NAT v6 拒绝/
+  enforcement）全达成，三.4 该项登记撤销。顺带如实记录：绑「只含 v6 规则」的 ACL 后接口上环境 v4 流量按
+  缺省语义被拒（ACL 绑定对两族都生效）。证据 `docs/evidence/v2-round133-d352-acl6-enforcement.txt`。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
