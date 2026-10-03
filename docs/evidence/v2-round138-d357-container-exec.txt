@@ -1,0 +1,136 @@
+# round138 证据 · 决策 #357 容器 exec v1（非交互）
+
+真机：nfvis-vm；构建 `feat/d357-container-exec` → **2.0.0~dev57 → dev58 → dev59/60**
+（`SOURCE_DATE_EPOCH` 显式传入，`make deb` + `dpkg -i`）。契约先行：附录 A #357、`AGENTS.md` 计数
+258→259、openapi（`/container-functions/{name}:exec` + `ContainerExecRequest`/`ContainerExecResult`）、
+命令树设计 §1.2、命令全表、用户手册 §9.4。`make check` RC=0。
+
+---
+
+## §0 能力前提核实（动手前，真机 spike — #338 的教训）
+
+先在真机**直接打 Docker Engine API**（Docker 29.1.3，curl --unix-socket），确认三种形态都成立才写实现：
+
+- `POST /containers/sem-ct/exec`（`AttachStdout/AttachStderr=true, Tty=false, Cmd=[...]`）⇒ 拿到 exec id；
+- `POST /exec/{id}/start`（`Detach=false, Tty=false`）⇒ **多路复用流**，`xxd` 实证：
+  `01 00 00 00 00 00 00 04 "out\n"` 紧跟 `02 … "err\n"`（`01`=stdout、`02`=stderr，后跟 4 字节大端长度）；
+- `GET /exec/{id}/json` ⇒ `{"ExitCode":7,...}`；
+- TTY 形态（`Tty=true`）⇒ `Content-Type: application/vnd.docker.raw-stream` + 裸 body。
+
+⇒ 能力可用，据此写实现（`demuxDockerStream` 纯函数按实测帧格式写）。
+
+## §1 作用效果（独立事实源＝`docker exec` 直跑）
+
+```
+$ nfvis-cli -c 'request container-functions sem-ct exec "ip addr"'
+退出码: 0（耗时 55ms）
+--- stdout ---
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+    ...
+--- stderr ---
+（无输出）
+```
+
+- **逐字对照**：产品 stdout 段与 `docker exec sem-ct ip addr` 的输出**完全一致**（Python 字符串比对 `True`）。
+- **退出码对照**：`sh -c 'echo out; echo err 1>&2; exit 7'` ⇒ 产品报 `退出码: 7`、stdout=`out`、stderr=`err`；
+  `docker exec` 直跑同命令 `rc=7` ⇒ 一致。
+- stderr 与 stdout **分流**正确（两块分开渲染，各自「（无输出）」）。
+
+## §2 生命周期
+
+- `restart` 后 exec 仍可用：`exec "cat /etc/hostname"` ⇒ 容器 ID `5cc2f35882b1`（alpine）。
+- **停机后如实拒绝**（CLI 与 REST 同款文案，且指向下一步）：
+  ```
+  %% 容器未处于运行态: sem-ct（当前 exited）；先 request container-functions sem-ct start
+  ```
+  REST 同场景 **409**，`message` 与 CLI 逐字一致。
+- 再 `start` 回来即可用（无需重启 nfvisd）。
+
+## §3 跨对象组合
+
+`exec "ps -o pid,comm"` ⇒ `PID 1 sleep` / `13 ps` —— 看到的是**容器自己**的进程视图（不是宿主），
+与容器编排（Entrypoint/Cmd）在配置里的声明一致。
+
+## §4 对抗性
+
+**① 超时（`sleep 60` + `timeout 3`）**：rc=1，输出
+`%% 命令在 3s 内未结束（已停止等待；容器内进程可能仍在运行，退出码未知）`，**不报退出码**（未知 ≠ 0）。
+**并且验证了这句文案是实话**（独立事实源）：超时后 `docker exec sem-ct ps | grep -c "sleep 60"` = **1**
+⇒ 容器内进程确实仍在运行（Docker 无 exec 中止接口）。
+
+**② 大输出（1 MiB）**：置 `truncated` 并标注「已截断：…超过 256 KiB 上限」，输出文件 ≈262 KB
+（256 KiB 上限 + 头部），未撑爆内存、命令仍跑完（退出码 0）。
+
+**③ 命令不存在**：`exec nope-xyz` ⇒ `退出码: 127`、stderr 回 `/bin/sh: nope-xyz: not found`，
+而**本操作成功**（rc=0）——退出码是**结果**不是失败。
+
+**④ 参数误用**：`exec ip addr`（忘加引号）⇒ `%% 命令是一个整体：含空格请加引号（如 exec "ip addr"）；
+要加超时用 … <command> timeout <seconds>`；`timeout 999` ⇒ `%% timeout 须在 1..300 秒之间（缺省 30）`。
+
+**⑤ S 档拒绕（临时建 `op-probe` operator 账号，验后已删）**：
+
+| 面 | 命令/端点 | 结果 |
+|---|---|---|
+| CLI | `request container-functions sem-ct exec "id"`（operator） | `%% 无权限执行该命令` |
+| CLI（对照） | `request container-functions sem-ct log last 2`（operator） | 正常返回 |
+| REST | `POST …/sem-ct:exec`（operator token） | **403** |
+| REST（对照） | `GET …/sem-ct/logs`（同一 token） | **200** |
+
+**⑥ REST 状态码矩阵**：无 token **401** / 未知容器 **404** / 停机 **409** / 空命令 **400** /
+`timeout_seconds=999` **400** / 正常 **200**（响应含 `exit_code`/`stdout`/`stderr`/`duration_ms`）。
+
+## §5 Web（Browser Use 黑盒，决策 #141）
+
+入口 `https://192.168.155.129/api/v1/ui/?v=20261003d357b#/compute/containers/sem-ct`（带查询串绕缓存），
+先核**当前构建**（页面内 `GET /system/version` ⇒ `nfvis: 2.0.0~dev60`）：
+
+- 容器详情页新增**「执行命令」分栏**；填 `cat /etc/os-release` → 输出
+  `退出码: 0（耗时 61ms）` + stdout（`NAME="Alpine Linux"` / `VERSION_ID=3.20.10` …）+ stderr`（无输出）`。
+- **operator 登录复核**（同一页面）：`body.role-nonsuper`，命令输入/超时/「执行」按钮 computed
+  `display` **全为 none**（隐藏）；而分栏说明文字**保留可见**（标题写明「仅 super-user」）——
+  与 #327「说明性文字与控件分清」同一口径。
+- 截图 `docs/images/round138-web-container-exec.png`。
+
+## §6 本轮实测修掉 3 处（均真机/交互复现）
+
+1. **CLI 非运行态未指向 `start`**（REST 有、CLI 没有）——与契约 ③「拒绝并指向 start」不符。
+   修后 CLI 与 REST 同款文案（含新增断言）。
+2. **Web「执行命令」分栏点了没反应**（真缺陷）：`index.html` 的按钮与面板都加了，但 `app.js` 的
+   `CT_TABS` 常量漏加 `'exec'`——`ctTabShow` 对不在清单里的 tab **静默回落「概览」**。
+   **所有静态守护都看不见**（它们只看端点、写控件与角色门禁，不看「点了有没有用」）；
+   **Browser Use 真机点一遍才抓到**——决策 #141 的价值再次变现。
+3. **新增分栏一致性守护** `TestDetailTabsConsistentBetweenHTMLAndJS`：HTML 的 `data-tab` 列表 ⇄
+   JS 的 `*_TABS` 常量逐项一致 + 每个分栏都有对应面板 id；**已自校准**（把 `CT_TABS` 改回漏加的样子即报红）。
+
+## §7 套件（对照 round137 基线）
+
+| 套件 | round137 基线 | 本轮 | 变化说明 |
+|---|---|---|---|
+| `cli-fulltest` | 240/0/13 | 见下 | +新增 `exec` 断言（4 条：正控 2 + 误用 1 + 停机 1）|
+| 其余三套 | 26/0/3 · 22/0/3 · 10/10 | 见下 | 本轮未改语义/生命周期判据 |
+
+**首跑实测发现套件夹具问题并已修**：`cli-ct2` 的命令是 `command /bin/sh`（无参）——容器 start 后
+**立刻退出**，于是 `exec` 正控必然撞「未处于运行态」（首跑 240/2/15）。修法是给夹具补
+`args -c "sleep 3600"` 让容器**常驻**（否则只有「拒绝」没有「能执行」，正控缺失）；
+`command`→Entrypoint、`args`→Cmd，即 `/bin/sh -c "sleep 3600"`。
+
+**跑套件时撞到的环境事故（如实登记）**：我早前用 `op-probe` 口令做 CLI 验证时**忘了 `-u op-probe`**，
+于是那几次失败登录被计到 **admin** 头上，叠加阈值后 **admin 被锁定 15 分钟**
+（`% 登录失败: 连续失败次数过多，账号已锁定：14:01:45 前禁止登录`，决策 #76 的口令策略按设计生效）。
+**教训**：换身份验证必须显式给 `-u`；失败登录是**有代价**的（累计到阈值即锁号），别拿真账号试口令。
+（锁定窗口结束后复跑，结果见 §7 补记。）
+
+## §8 未在本轮（如实登记）
+
+- **交互式终端（PTY + 双向流）不在 v1**：需 raw conn + 终端 raw 模式 + 断连处理（TTY 形态的底座
+  可用性已在 §0 确认），另行立项。
+- **stdin 输入**不在 v1（非交互）；不承诺「在容器里起长驻进程」。
+- 命令原文入审计（`container.exec`，含退出码），**输出不入审计**（可能很大）。
+
+## §9 环境（本轮结束时）
+
+- 探针账号 `op-probe` **已删除**（`show users` 只剩 `admin`）；`/tmp/op_probe.sh` 已删。
+- `sem-vm` 在跑 fulltest 前停掉（让 1G 页），套件跑完按惯例恢复。
+- 历史时序库继续增长（#356），采样间隔仍为 10s（round137 所留）。
