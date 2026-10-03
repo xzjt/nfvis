@@ -255,6 +255,9 @@ var coverArgGroupParents = map[string]bool{
 	"request sriov delete-vfs":    true,
 	"request vpp trace start":     true,
 	"request system software add": true,
+	// 容器内执行命令（决策 #357）：`exec <command> [timeout <n>]` 同属「必填位置参数 + 可选开关」。
+	// 不登记的话枚举器会把带 `timeout` 的那条形态渲染成**丢掉 `<command>`** 的短形态，覆盖判定必然假红。
+	"request container-functions <name> exec": true,
 	// 「一个必填位置参数 + 若干可选开关」也是参数组：只给开关不给位置参数不是能用的命令
 	// （`ping count <n>`、`monitor interfaces interval <sec>`、`traceroute vrf <name>`）。
 	"ping":               true,

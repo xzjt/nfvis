@@ -744,6 +744,54 @@
         },
         "type": "object"
       },
+      "ContainerExecRequest": {
+        "properties": {
+          "command": {
+            "description": "在容器内执行的命令串（等价 `sh -c <command>`）；空串拒绝",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "description": "超时秒数（默认 30）；超时只中止**客户端等待**，容器内进程可能仍在运行",
+            "maximum": 300,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "ContainerExecResult": {
+        "description": "容器 exec 结果（决策 #357）。退出码未知时不发该字段（超时/流中断 ⇒ 不谎报 0）；\n`truncated` 仅在被上限裁剪时出现；`timed_out` 仅在超时时出现。\n",
+        "properties": {
+          "duration_ms": {
+            "description": "耗时（毫秒）",
+            "type": "integer"
+          },
+          "exit_code": {
+            "description": "命令退出码（条件出现：仅当命令跑完）",
+            "type": "integer"
+          },
+          "stderr": {
+            "description": "标准错误（最多 256 KiB，超限置 truncated）",
+            "type": "string"
+          },
+          "stdout": {
+            "description": "标准输出（最多 256 KiB，超限置 truncated）",
+            "type": "string"
+          },
+          "timed_out": {
+            "description": "已超时（条件出现；此时 exit_code 不出现）",
+            "type": "boolean"
+          },
+          "truncated": {
+            "description": "stdout/stderr 至少一侧被上限裁剪（条件出现）",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "ContainerFunction": {
         "properties": {
           "args": {
@@ -4153,6 +4201,62 @@
           }
         }
       ]
+    },
+    "/container-functions/{name}:exec": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "在**运行中**的容器内执行一条命令并返回 stdout/stderr 与退出码（等价容器内 `sh -c`）。\n权限：**super-user only**（`request container-functions <name> exec` 为 S 档）——与 VM 串口\n`console` 的关键差别是「console 进 guest 串口仍需 guest 凭据，而 exec 是**免凭据的容器内\n命令执行**（等价 root）」，operator 本不能创建容器，故不能经此绕过。\n有界且如实：超时默认 30s（可配 1..300），超时**只中止客户端等待**——Docker 不提供 exec\n进程的中止接口，容器内进程**可能仍在运行**；stdout/stderr **各自**上限 256 KiB，超限置\n`truncated`；退出码未知时（超时/流中断）该字段**不出现**（不谎报 0）。\n",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContainerExecRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContainerExecResult"
+                }
+              }
+            },
+            "description": "OK（命令已执行完或已超时；结果形状见 ContainerExecResult）"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "description": "权限不足（需 super-user）"
+          },
+          "404": {
+            "description": "容器不存在"
+          },
+          "409": {
+            "description": "容器非运行态（先 start）"
+          },
+          "503": {
+            "description": "容器编排未接入"
+          }
+        },
+        "summary": "在运行中的容器内执行命令（非交互；决策",
+        "tags": [
+          "container-functions"
+        ]
+      }
     },
     "/container-functions/{name}:restart": {
       "parameters": [

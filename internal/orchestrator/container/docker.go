@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
@@ -75,6 +76,9 @@ type dockerAPI interface {
 	// 用它与退出码共同判定「异常退出」：docker stop 的正常结果是 137/143，不以此为故障。
 	OOMKilled(ctx context.Context, name string) (killed bool, exists bool, err error)
 	Logs(ctx context.Context, name string, tail int) (string, error)
+	// Exec 在运行中的容器内执行命令（决策 #357；非 TTY ⇒ 多路复用流，见 exec.go）。
+	// timeout 只界定**客户端等待**：超时返回 TimedOut=true 且不带退出码（容器内进程可能仍在跑）。
+	Exec(ctx context.Context, name, command string, timeout time.Duration) (ExecResult, error)
 }
 
 // Provider 容器编排实现。
@@ -230,6 +234,31 @@ func (p *Provider) ContainerLogs(ctx context.Context, name string, tail int) (st
 		return "", fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
 	}
 	return p.api.Logs(ctx, name, tail)
+}
+
+// ContainerExec 在**运行中**的容器内执行命令（决策 #357，非交互）。
+//
+// 前置由本层判定（不靠字符串匹配 Docker 错误）：容器不存在 ⇒ ErrVMNotFound（API 404）、
+// 非运行态 ⇒ ErrContainerNotRunning（API 409）。命令跑完（哪怕非 0 退出码）不算失败——
+// 退出码是**结果**；只有「没跑完」（超时/流中断）才由调用方按失败处置。
+func (p *Provider) ContainerExec(ctx context.Context, name, command string, timeout time.Duration) (ExecResult, error) {
+	if strings.TrimSpace(command) == "" {
+		return ExecResult{}, fmt.Errorf("命令不能为空")
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	state, exists, err := p.api.State(ctx, name)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	if !exists {
+		return ExecResult{}, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+	}
+	if state != orchestrator.CTStateRunning {
+		return ExecResult{}, fmt.Errorf("%w: %s（当前 %s）", orchestrator.ErrContainerNotRunning, name, state)
+	}
+	return p.api.Exec(ctx, name, command, timeout)
 }
 
 // EnsureConsistent 恢复收敛（FR-OPS-010/012）：补建缺失容器；单对象失败不阻塞其余。

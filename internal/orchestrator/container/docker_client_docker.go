@@ -303,3 +303,80 @@ func stripDockerLogFrames(b []byte) []byte {
 	}
 	return out
 }
+
+// Exec 在容器内执行命令（决策 #357，非 TTY）。
+//
+// 三步（Docker Engine API）：① `POST /containers/{name}/exec` 建 exec 实例；
+// ② `POST /exec/{id}/start` 拿**多路复用流**（8 字节头，见 exec.go 的 demuxDockerStream）；
+// ③ `GET /exec/{id}/json` 读退出码。
+//
+// 超时语义（如实）：timeout 只界定**客户端等待**——超时返回 TimedOut=true、不带退出码
+// （容器内进程可能仍在运行；Docker 不提供 exec 进程的中止接口），**不**当成错误。
+func (c *dockerClient) Exec(ctx context.Context, name, command string, timeout time.Duration) (ExecResult, error) {
+	started := time.Now()
+	var created struct {
+		ID string `json:"Id"`
+	}
+	body := map[string]any{
+		"AttachStdout": true,
+		"AttachStderr": true,
+		"Tty":          false,
+		"Cmd":          []string{"/bin/sh", "-c", command},
+	}
+	if err := c.do(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/exec", body, &created); err != nil {
+		return ExecResult{}, err
+	}
+	if created.ID == "" {
+		return ExecResult{}, fmt.Errorf("docker exec: 未返回 exec 实例 id")
+	}
+
+	// 等待窗口与「调用方 ctx」分离：超时是我们**预期**的一种结果（如实上报），不是异常。
+	wctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(wctx, http.MethodPost,
+		c.base+"/exec/"+url.PathEscape(created.ID)+"/start",
+		strings.NewReader(`{"Detach":false,"Tty":false}`))
+	if err != nil {
+		return ExecResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if wctx.Err() != nil {
+			return ExecResult{TimedOut: true, Duration: time.Since(started)}, nil
+		}
+		return ExecResult{}, fmt.Errorf("docker exec start: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		return ExecResult{}, fmt.Errorf("docker exec start: %d %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+
+	stdout, stderr, truncated, derr := demuxDockerStream(resp.Body, ExecMaxStreamBytes)
+	res := ExecResult{
+		Stdout:    string(stdout),
+		Stderr:    string(stderr),
+		Truncated: truncated,
+	}
+	if derr != nil {
+		// 流中断：超时窗口到点 ⇒ 如实报「超时」（已读到的部分保留）；否则是真错。
+		if wctx.Err() != nil {
+			res.TimedOut = true
+			res.Duration = time.Since(started)
+			return res, nil
+		}
+		return res, fmt.Errorf("docker exec 读取输出: %w", derr)
+	}
+
+	var inspect struct {
+		ExitCode int `json:"ExitCode"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/exec/"+url.PathEscape(created.ID)+"/json", nil, &inspect); err != nil {
+		return res, fmt.Errorf("docker exec 读取退出码: %w", err)
+	}
+	res.ExitCode = inspect.ExitCode
+	res.HasExitCode = true
+	res.Duration = time.Since(started)
+	return res, nil
+}

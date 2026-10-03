@@ -15,10 +15,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
 	"github.com/xzjt/nfvis/internal/orchestrator/compute"
+	"github.com/xzjt/nfvis/internal/orchestrator/container"
 )
 
 // 与 internal/api nil 分支逐字相同的正文（改动任一侧本测试即红，防止漂移）。
@@ -229,6 +231,9 @@ func (f *fakeContainer) ContainerLogs(_ context.Context, name string, _ int) (st
 	defer f.mu.Unlock()
 	f.logs = append(f.logs, name)
 	return f.logsVal, f.logsErr
+}
+func (f *fakeContainer) ContainerExec(_ context.Context, name, command string, _ time.Duration) (container.ExecResult, error) {
+	return container.ExecResult{}, nil
 }
 
 func (f *fakeContainer) EnsureConsistent(_ context.Context, cfg model.Config) []error {

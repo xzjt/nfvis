@@ -1490,9 +1490,24 @@ nfvis# top
 nfvis# commit
 nfvis$ request container-functions ct-1 start
 nfvis$ request container-functions ct-1 log last 50
+nfvis$ request container-functions ct-1 exec "ip addr"          # 容器内执行命令（非交互）
+nfvis$ request container-functions ct-1 exec "cat /etc/os-release" timeout 10
 nfvis$ request container-functions ct-1 stop
 nfvis$ request container-functions ct-1 delete
 ```
+
+> **容器内执行命令（`exec`，仅 super-user）**：在**运行中**的容器里执行一条命令并回显 stdout/stderr
+> 与退出码，语义等价容器内 `sh -c "<命令>"`。`<命令>` 是**一个整体**，含空格请用引号包起来。
+>
+> - **为什么是 super-user 档**：VM 串口 `console` 进的是 guest 串口、**仍需 guest 凭据**；而 `exec` 是
+>   **免凭据的容器内命令执行**（等价 root）。operator 本不能创建容器（配置模式只对 super-user 开放），
+>   若 `exec` 对它开放就等于绕过该限制，故与配置模式/删除同档。
+> - **前置**：容器必须处于运行态；停机时命令会被拒绝并提示先 `request container-functions <名> start`。
+> - **有界**：超时默认 30 秒（`timeout <秒>`，1..300）；stdout/stderr **各自**最多 256 KiB，
+>   超出会被截断并明确标注（不会静默丢内容）。
+> - **超时的含义**：超时只中止**产品侧等待**——Docker 不提供中止 exec 进程的接口，容器内的进程
+>   **可能仍在运行**；此时退出码未知，产品**不会**报一个假的 0。
+> - 交互式终端（进容器里的 shell）不在本期范围，需要交互请用 `log` 观察或用本命令逐条执行。
 
 ---
 
