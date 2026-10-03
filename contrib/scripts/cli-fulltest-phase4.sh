@@ -37,6 +37,9 @@ run S4 "request container-functions cli-ct2 restart"
 run S4 "request container-functions cli-ct2 stop"
 # 停机后执行 ⇒ 明确拒绝并指向 start（前置判定）
 expect_fail S4 "未处于运行态" 'request container-functions cli-ct2 exec "echo x"'
+# 交互式终端（决策 #358）：脚本（非 TTY）下**不做终端接管**，给可照做的提示——这是设计行为
+# （透传会阻塞脚本）；真终端下的接管行为由真机 pty 验证覆盖（见 round139 证据）。
+expect_out S4 "非 TTY" "request container-functions cli-ct2 shell"
 
 # ---- 物理口 enable/disable ----
 run S4 "request interfaces ens224 enable"

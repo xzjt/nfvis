@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -139,6 +140,9 @@ func (c recContainer) ContainerState(context.Context, string) (string, error) {
 func (c recContainer) ContainerLogs(context.Context, string, int) (string, error) { return "", nil }
 func (c recContainer) ContainerExec(context.Context, string, string, time.Duration) (ExecResult, error) {
 	return ExecResult{}, nil
+}
+func (c recContainer) ContainerShell(context.Context, string) (io.ReadWriteCloser, error) {
+	return nil, nil
 }
 func (c recContainer) CheckContainerAlarms(context.Context, model.Config) []error { return nil }
 

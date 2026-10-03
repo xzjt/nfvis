@@ -39,6 +39,9 @@ type Result struct {
 type ConsoleRequest struct {
 	VM    string `json:"vm"`
 	WSURL string `json:"ws_url"`
+	// Kind 会话种类："vm"（缺省，VM 串口 console）或 "container"（容器交互式终端，
+	// 决策 #358）——前端据此选择提示文案，桥接方式两者相同。
+	Kind string `json:"kind,omitempty"`
 }
 
 // Client nfvisd REST 客户端。

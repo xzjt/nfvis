@@ -7,6 +7,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
@@ -216,6 +217,9 @@ type ContainerProvider interface {
 	// ContainerExec 在**运行中**的容器内执行命令（决策 #357，非交互）；非运行态返回
 	// ErrContainerNotRunning、不存在返回 ErrVMNotFound。
 	ContainerExec(ctx context.Context, name, command string, timeout time.Duration) (ExecResult, error)
+	// ContainerShell 打开容器内的**交互式 TTY**（决策 #358）；返回全双工流，
+	// Close 即关会话（容器内进程随之终止）。非运行态返回 ErrContainerNotRunning。
+	ContainerShell(ctx context.Context, name string) (io.ReadWriteCloser, error)
 	EnsureConsistent(ctx context.Context, cfg model.Config) []error
 	// CheckContainerAlarms 异常退出巡检（FR-CMP-022）：dead/非零退出 → critical 告警。
 	CheckContainerAlarms(ctx context.Context, cfg model.Config) []error
@@ -287,6 +291,11 @@ func (noopContainer) ContainerLogs(context.Context, string, int) (string, error)
 // ContainerExec 未接入的容器不执行任何命令：如实报错（不假装成功）。
 func (noopContainer) ContainerExec(context.Context, string, string, time.Duration) (ExecResult, error) {
 	return ExecResult{}, ErrContainerNotRunning
+}
+
+// ContainerShell 未接入的容器不提供终端：如实报错（不假装成功）。
+func (noopContainer) ContainerShell(context.Context, string) (io.ReadWriteCloser, error) {
+	return nil, ErrContainerNotRunning
 }
 
 func (noopContainer) EnsureConsistent(context.Context, model.Config) []error     { return nil }

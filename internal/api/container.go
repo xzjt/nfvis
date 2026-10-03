@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strconv"
@@ -29,6 +30,8 @@ type ContainerRuntime interface {
 	ContainerLogs(ctx context.Context, name string, tail int) (string, error)
 	// ContainerExec 在运行中的容器内执行命令（决策 #357，非交互）。
 	ContainerExec(ctx context.Context, name, command string, timeout time.Duration) (container.ExecResult, error)
+	// ContainerShell 打开容器内的交互式 TTY（决策 #358）；返回全双工流，Close 即关会话。
+	ContainerShell(ctx context.Context, name string) (io.ReadWriteCloser, error)
 }
 
 // containerResponse ContainerFunction + 运行态 state（契约 GET 视图）。

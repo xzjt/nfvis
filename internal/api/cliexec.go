@@ -78,6 +78,9 @@ type CLIEResult struct {
 type ConsoleRequest struct {
 	VM    string `json:"vm"`
 	WSURL string `json:"ws_url"`
+	// Kind 会话种类："vm"（缺省，VM 串口 console）或 "container"（容器交互式终端，
+	// 决策 #358）——前端据此选择提示文案，桥接方式两者相同。
+	Kind string `json:"kind,omitempty"`
 }
 
 // cliExecutor 守护进程侧 CLI 执行器。会话（模式/层级）按持有者+接入源隔离。
@@ -144,6 +147,8 @@ type cliExecutor struct {
 	// issueConsole 签发 console 一次性 ticket 并返回 ws 相对路径与有效期
 	// （M4-12；由 Server.New 注入，复用 handleConsoleWS 的同一 ticket 表与审计落点）
 	issueConsole func(vm, user string) (wsPath string, ttl int, err error)
+	// issueShell 签发容器交互式终端的一次性 ticket 并返回 ws 相对路径与有效期（决策 #358）。
+	issueShell func(name, user string) (wsPath string, ttl int, err error)
 }
 
 type cliSession struct {

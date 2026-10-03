@@ -238,6 +238,9 @@ func OperRoot() *Node {
 						P("<command>", "命令", ""),
 						Opt(K("timeout", "超时秒数（1..300，缺省 30）", PT("<n>", "uint", "秒"))),
 					)),
+					// 决策 #358：容器交互式终端（与 VM 串口 console 同一套 ticket + WS 管线）。
+					// 同 exec 为 **S 档**：免凭据的容器内命令执行＝等价 root。
+					Su(K("shell", "交互式终端（进容器里的 sh；Ctrl-] 退出）")),
 					Su(K("delete", "删除容器")),
 				),
 			),

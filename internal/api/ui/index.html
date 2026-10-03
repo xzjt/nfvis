@@ -610,6 +610,7 @@
         <button type="button" class="tab" data-tab="overview" aria-selected="true">概览</button>
         <button type="button" class="tab" data-tab="logs">日志</button>
         <button type="button" class="tab" data-tab="exec">执行命令</button>
+        <button type="button" class="tab" data-tab="shell">交互终端</button>
       </div>
 
       <div class="tab-panel" id="ct-tab-overview">
@@ -648,6 +649,27 @@
           <code>request container-functions &lt;名&gt; exec "&lt;命令&gt;"</code>）。退出码是<strong>结果</strong>不是失败——
           命令跑完即算成功，非 0 退出码如实回显；<strong>超时只中止本页等待</strong>（容器内进程可能仍在运行，
           此时不报退出码）。stdout/stderr 各侧上限 256 KiB，超出会标注截断。</p>
+      </div>
+
+      <div class="tab-panel" id="ct-tab-shell" hidden>
+        <div class="cfg-actions">
+          <button id="ct-shell-connect" data-write type="button">连接容器终端</button>
+        </div>
+        <p class="muted small">
+          终端连的是容器里的 <code>sh</code>（与 CLI 的 <code>request container-functions &lt;名&gt; shell</code>
+          同一路，仅 super-user 可用）。连接后输入的内容直接进入容器——
+          <strong>断开即结束</strong>（容器内的 shell 进程随之退出）；离开本页会自动断开。
+        </p>
+        <div id="ct-shell" hidden>
+          <h3>容器终端 <span id="ct-shell-name" class="muted small"></span>
+            <button id="ct-shell-close" data-write type="button" class="ghost small">断开</button></h3>
+          <pre id="ct-shell-out" class="code console-out"></pre>
+          <div class="cfg-actions">
+            <input id="ct-shell-in" data-write type="text" placeholder="输入后回车发送（Ctrl-C 可中断）">
+            <button id="ct-shell-send" data-write type="button" class="ghost">发送</button>
+            <button id="ct-shell-enter" data-write type="button" class="ghost">只发回车</button>
+          </div>
+        </div>
       </div>
     </article>
     </section>

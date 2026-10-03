@@ -1492,6 +1492,7 @@ nfvis$ request container-functions ct-1 start
 nfvis$ request container-functions ct-1 log last 50
 nfvis$ request container-functions ct-1 exec "ip addr"          # 容器内执行命令（非交互）
 nfvis$ request container-functions ct-1 exec "cat /etc/os-release" timeout 10
+nfvis$ request container-functions ct-1 shell           # 交互式终端（Ctrl-] 退出）
 nfvis$ request container-functions ct-1 stop
 nfvis$ request container-functions ct-1 delete
 ```
@@ -1507,7 +1508,16 @@ nfvis$ request container-functions ct-1 delete
 >   超出会被截断并明确标注（不会静默丢内容）。
 > - **超时的含义**：超时只中止**产品侧等待**——Docker 不提供中止 exec 进程的接口，容器内的进程
 >   **可能仍在运行**；此时退出码未知，产品**不会**报一个假的 0。
-> - 交互式终端（进容器里的 shell）不在本期范围，需要交互请用 `log` 观察或用本命令逐条执行。
+
+> **交互式终端（`shell`，仅 super-user）**：`request container-functions <名> shell` 直接进容器里的 `sh`，
+> 与 VM 串口 `console` 是**同一套体验**（一次性凭证 + WebSocket 桥接 + 终端原样接管），**按 `Ctrl-]` 退出**。
+>
+> - **前置**：容器必须处于运行态；停机时会被拒绝并提示先 `start`。
+> - **断开即释放**：终端连接一断（按 `Ctrl-]`、关窗口、网络断），容器里的这个 shell 进程也随之结束——
+>   与 `exec` 的「超时只中止等待」不是一回事。
+> - **不做窗口尺寸同步**：终端宽度变化不会同步给容器（长行可能折行不齐），本期如实不支持。
+> - 控制台（Web）的容器详情页有对应的「交互终端」分栏，形态与 VM 串口页一致（纯文本终端，不引入终端模拟器）。
+> - 想进容器里交互操作，用 `request container-functions <名> shell`（见下）。
 
 ---
 
