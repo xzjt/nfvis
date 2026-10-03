@@ -555,3 +555,74 @@ func TestValidateSyslogRemoteFields(t *testing.T) {
 	ok.System.Syslog = &SyslogConfig{RemoteHost: "10.0.0.9", Facility: "LOCAL7"}
 	mustNoErr(t, Validate(ok))
 }
+
+// 决策 #352：ACL 规则只匹配单族——两侧都写显式前缀时，混族（v4 与 v6）在校验期拒绝；
+// 双族过滤的正解是两条规则（各自同族，any 一侧由编排层跟随显式侧家族）。
+func TestValidateAclMixedFamilyRejected(t *testing.T) {
+	c := validBase()
+	c.Acls = []Acl{{Name: "acl-mix", Rules: []AclRule{{
+		Seq: 10, Action: "permit", Source: "10.0.0.0/8", Destination: "2001:db8::/64",
+	}}}}
+	mustErrContaining(t, Validate(c), "rules[10].source", "地址族不一致")
+
+	// 反向混族同样拒绝（source v6、destination v4）
+	c2 := validBase()
+	c2.Acls = []Acl{{Name: "acl-mix2", Rules: []AclRule{{
+		Seq: 10, Action: "deny", Source: "2001:db8::/64", Destination: "192.168.1.0/24",
+	}}}}
+	mustErrContaining(t, Validate(c2), "rules[10].source", "地址族不一致")
+
+	// 同族规则（含 any 跟随形态）不受影响
+	c3 := validBase()
+	c3.Acls = []Acl{{Name: "acl-v6", Rules: []AclRule{
+		{Seq: 10, Action: "deny", Source: "2001:db8::/64", Destination: "any"},
+		{Seq: 20, Action: "permit", Source: "10.0.0.0/8", Destination: "any"},
+	}}}
+	mustNoErr(t, Validate(c3))
+}
+
+// 决策 #352：NAT44 下发层严格 v4（ParseIP4Address）——池地址范围、规则 match-source、
+// 静态映射的 v6 在校验期拒绝（文案注明仅支持 IPv4），不再等到 commit 期报 invalid IP4 address。
+func TestValidateNatV6Rejected(t *testing.T) {
+	base := func() Config {
+		c := validBase()
+		c.Interfaces = append(c.Interfaces, InterfaceConfig{Name: "ens2f1"})
+		c.VirtualSwitches = append(c.VirtualSwitches, VirtualSwitch{Name: "vs-l3", Type: "l3"})
+		c.Vrfs = append(c.Vrfs, Vrf{Name: "vs-l3",
+			L3Interfaces: []L3Interface{{Interface: "ens2f0.200", Addresses: []string{"10.99.0.1/24"}}}})
+		c.Vrfs = append(c.Vrfs, Vrf{Name: "wan",
+			L3Interfaces: []L3Interface{{Interface: "ens2f1", Addresses: []string{"203.0.113.1/24"}}}})
+		c.Nat = &NatConfig{}
+		return c
+	}
+
+	// 池地址范围含 v6 → 拒绝
+	c := base()
+	c.Nat.SourcePools = []NatSourcePool{{Name: "pool6", AddressRange: "2001:db8::10 to 2001:db8::20"}}
+	c.Nat.Rules = []NatRule{{Seq: 10, MatchSource: "10.10.0.0/24", VirtualSwitch: "vs-l3",
+		Action: NatAction{SourcePool: "pool6", Interface: "ens2f1"}}}
+	mustErrContaining(t, Validate(c), "address_range", "仅支持 IPv4")
+
+	// match-source v6 → 拒绝
+	c2 := base()
+	c2.Nat.Rules = []NatRule{{Seq: 10, MatchSource: "2001:db8::/64", VirtualSwitch: "vs-l3",
+		Action: NatAction{Interface: "ens2f1"}}}
+	mustErrContaining(t, Validate(c2), "match_source", "仅支持 IPv4")
+
+	// 静态映射 v6 → 拒绝（inside / outside 各一例）
+	c3 := base()
+	c3.Nat.Static = []NatStatic{{InsideIP: "2001:db8::5", OutsideIP: "203.0.113.9"}}
+	mustErrContaining(t, Validate(c3), "inside_ip", "仅支持 IPv4")
+
+	c4 := base()
+	c4.Nat.Static = []NatStatic{{InsideIP: "10.99.0.5", OutsideIP: "2001:db8::9"}}
+	mustErrContaining(t, Validate(c4), "outside_ip", "仅支持 IPv4")
+
+	// v4 正常值回归：三种形态同时声明都不报错
+	c5 := base()
+	c5.Nat.SourcePools = []NatSourcePool{{Name: "pool1", AddressRange: "203.0.113.10 to 203.0.113.20"}}
+	c5.Nat.Rules = []NatRule{{Seq: 10, MatchSource: "10.10.0.0/24", VirtualSwitch: "vs-l3",
+		Action: NatAction{SourcePool: "pool1", Interface: "ens2f1"}}}
+	c5.Nat.Static = []NatStatic{{InsideIP: "10.99.0.5", OutsideIP: "203.0.113.9"}}
+	mustNoErr(t, Validate(c5))
+}

@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,7 +30,7 @@ type ACLRuleSpec struct {
 	Permit    bool
 	Src       string // ip-prefix 或 any
 	Dst       string
-	Proto     uint8 // 6/17/1；0=any
+	Proto     uint8 // 6/17；icmp 随规则家族 1(v4)/58(v6)；0=any
 	SPortFrom uint16
 	SPortTo   uint16
 	DPortFrom uint16
@@ -405,14 +406,25 @@ func (p *AclProvider) pairOf(swIf uint32) aclPair {
 }
 
 // BuildACLRules 把配置模型规则转换为与底座解耦的规则形态。
+//
+// 决策 #352 家族语义：一条规则只匹配单一地址族——任一侧显式 v6 即整条规则按 v6 下发，
+// any/空一侧跟随显式侧取 `::/0`（其余 any/空维持 `0.0.0.0/0` 的既有 v4 行为）；
+// `icmp` 协议随规则家族映射（v4=1 / v6=58）。混族规则在校验层（model）已拒绝，
+// 此处返回同文案 error 作防御（校验拦截后理论不可达）。
 func BuildACLRules(acl model.Acl) ([]ACLRuleSpec, error) {
 	out := make([]ACLRuleSpec, 0, len(acl.Rules))
 	for _, r := range acl.Rules {
+		srcV6, dstV6 := isExplicitV6(r.Source), isExplicitV6(r.Destination)
+		if srcV6 != dstV6 && !isAnyAddr(r.Source) && !isAnyAddr(r.Destination) {
+			return nil, fmt.Errorf("规则 %d source/destination 地址族不一致（%s 与 %s）：一条规则仅匹配单族，双族需两条规则",
+				r.Seq, r.Source, r.Destination)
+		}
+		v6 := srcV6 || dstV6
 		spec := ACLRuleSpec{
 			Permit: strings.EqualFold(r.Action, "permit"),
-			Src:    prefixOrAny(r.Source),
-			Dst:    prefixOrAny(r.Destination),
-			Proto:  protoOf(r.Protocol),
+			Src:    prefixOrAny(r.Source, v6),
+			Dst:    prefixOrAny(r.Destination, v6),
+			Proto:  protoOf(r.Protocol, v6),
 		}
 		var err error
 		if spec.SPortFrom, spec.SPortTo, err = parsePortRange(r.SourcePort); err != nil {
@@ -426,21 +438,51 @@ func BuildACLRules(acl model.Acl) ([]ACLRuleSpec, error) {
 	return out, nil
 }
 
-func prefixOrAny(s string) string {
+// isAnyAddr 规则地址字段是否为「any/空」（any/空一侧的家族由显式侧决定，见 #352）。
+func isAnyAddr(s string) bool {
 	s = strings.TrimSpace(s)
-	if s == "" || strings.EqualFold(s, "any") {
-		return "0.0.0.0/0"
-	}
-	return s
+	return s == "" || strings.EqualFold(s, "any")
 }
 
-func protoOf(p string) uint8 {
+// isExplicitV6 判定规则地址字段是否为**显式** IPv6（非 any/空，且前缀的地址部分解析为 v6；
+// any/空与解析失败的值都不是显式 v6）。any/空的家族由调用方按显式侧跟随（决策 #352），
+// 本函数只回答「这一侧自己写明了 v6 吗」。
+func isExplicitV6(s string) bool {
+	if isAnyAddr(s) {
+		return false
+	}
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		s = s[:i]
+	}
+	ip := net.ParseIP(s)
+	return ip != nil && ip.To4() == nil
+}
+
+// prefixOrAny 规则地址字段：any/空 → 该规则家族的全零前缀（决策 #352 家族跟随：
+// 显式侧是 v6 时 any 侧取 ::/0；其余维持 0.0.0.0/0 的既有 v4 行为）；显式值原样透传。
+func prefixOrAny(s string, v6 bool) string {
+	if isAnyAddr(s) {
+		if v6 {
+			return "::/0"
+		}
+		return "0.0.0.0/0"
+	}
+	return strings.TrimSpace(s)
+}
+
+// protoOf 协议名 → IANA 编号：tcp=6、udp=17；icmp 随规则家族映射（v4=1、v6=58，
+// 决策 #352）；icmp6/icmpv6 恒 58；any/未知 → 0（不比较协议）。
+func protoOf(p string, v6 bool) uint8 {
 	switch strings.ToLower(strings.TrimSpace(p)) {
 	case "tcp":
 		return 6
 	case "udp":
 		return 17
 	case "icmp":
+		if v6 {
+			return 58
+		}
 		return 1
 	case "icmp6", "icmpv6":
 		return 58
