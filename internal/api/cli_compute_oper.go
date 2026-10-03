@@ -409,6 +409,10 @@ func (x *cliExecutor) containerExec(user, name string, rest []string) string {
 	res, err := x.ct.ContainerExec(context.Background(), name, command, timeout)
 	if err != nil {
 		x.audit(user, "container.exec", fmt.Sprintf("exec %s: %v", name, err), err)
+		// 前置不满足要给**可照做**的下一步（与 REST 侧同一口径）：非运行态指向 start。
+		if errors.Is(err, orchestrator.ErrContainerNotRunning) {
+			return "%% " + err.Error() + "；先 request container-functions " + name + " start\n"
+		}
 		return "%% " + err.Error() + "\n"
 	}
 	exit := "未知（未跑完）"

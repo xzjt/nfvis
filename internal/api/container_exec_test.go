@@ -220,6 +220,14 @@ func TestCLIContainerExecRender(t *testing.T) {
 		t.Fatalf("超时越界应报范围: %s", res.Output)
 	}
 
+	// ⑧ 非运行态：CLI 也要指向 start（与 REST 侧同一口径，别只说「不可用」）
+	ct.execErr = orchestrator.ErrContainerNotRunning
+	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", `request container-functions sbc-ct1 exec "echo x"`)
+	if !strings.Contains(res.Output, "先 request container-functions sbc-ct1 start") {
+		t.Fatalf("非运行态应指向 start: %s", res.Output)
+	}
+	ct.execErr = nil
+
 	// ⑦ operator（S 档）不得执行
 	res = x.Execute("bob", aaa.ClassOperator, "ssh", `request container-functions sbc-ct1 exec "id"`)
 	if !strings.Contains(res.Output, "无权限") {
