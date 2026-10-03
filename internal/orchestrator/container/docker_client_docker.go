@@ -385,20 +385,20 @@ func (c *dockerClient) Exec(ctx context.Context, name, command string, timeout t
 
 // hijackedStream Docker exec TTY 的**全双工**裸流（决策 #358）。
 //
-// 读走 resp.Body：Go 的 http.ReadResponse 对 101 会把**响应头之后同包到达**的首批数据
-// 留在它自己的 buffer 里——只用裸 conn 读会丢掉首屏（提示符消失）。
-// 写走裸 conn（同一连接的另一半），Close 关连接（容器内 exec 进程随之终止）。
+// 读走 bufio.Reader（**不是** http.Response.Body）：升级响应的头之后可能紧跟同包到达的
+// 首批数据（首屏提示符），自己拿 reader 才不会丢。写走同一连接的裸 conn。
+//
+// 为什么不用 http.ReadResponse 拿 body：真机实测（round139 pty）Go 对 101 的 body 语义
+// 与本用途不合——`resp.Body` 读起来立刻 EOF ⇒ 桥接两侧马上都结束，表现为「会话刚建立就
+// 断开」。手工解析状态行 + 头（读掉空行即止）后两端都用同一连接，行为与 Docker 语义一致。
 type hijackedStream struct {
 	conn net.Conn
-	body io.ReadCloser
+	r    *bufio.Reader
 }
 
-func (h *hijackedStream) Read(p []byte) (int, error)  { return h.body.Read(p) }
+func (h *hijackedStream) Read(p []byte) (int, error)  { return h.r.Read(p) }
 func (h *hijackedStream) Write(p []byte) (int, error) { return h.conn.Write(p) }
-func (h *hijackedStream) Close() error {
-	_ = h.body.Close()
-	return h.conn.Close()
-}
+func (h *hijackedStream) Close() error                { return h.conn.Close() }
 
 // ExecShell 打开容器内的**交互式 TTY**（决策 #358）：建 TTY exec → 裸 unix conn 手写带
 // `Connection: Upgrade` / `Upgrade: tcp` 的 start 请求 → 期望 `101 UPGRADED` → 返回全双工流。
@@ -436,16 +436,35 @@ func (c *dockerClient) ExecShell(ctx context.Context, name string) (io.ReadWrite
 		_ = conn.Close()
 		return nil, fmt.Errorf("docker exec shell 请求: %w", err)
 	}
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	br := bufio.NewReader(conn)
+	statusLine, err := br.ReadString('\n')
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("docker exec shell 响应: %w", err)
 	}
-	if resp.StatusCode != http.StatusSwitchingProtocols {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-		_ = resp.Body.Close()
+	if !strings.Contains(statusLine, " 101 ") {
+		// 非升级响应：把可读到的正文带上（Docker 的报错在正文里），便于定位。
+		rest := make([]byte, 0, 512)
+		for len(rest) < 4096 {
+			b, rerr := br.ReadByte()
+			if rerr != nil {
+				break
+			}
+			rest = append(rest, b)
+		}
 		_ = conn.Close()
-		return nil, fmt.Errorf("docker exec shell: 未升级为裸流（%d %s）", resp.StatusCode, strings.TrimSpace(string(data)))
+		return nil, fmt.Errorf("docker exec shell: 未升级为裸流（%s：%s）",
+			strings.TrimSpace(statusLine), strings.TrimSpace(string(rest)))
 	}
-	return &hijackedStream{conn: conn, body: resp.Body}, nil
+	for { // 读掉响应头（空行即止；其后即 TTY 字节流）
+		line, lerr := br.ReadString('\n')
+		if lerr != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("docker exec shell 读取响应头: %w", lerr)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+	return &hijackedStream{conn: conn, r: br}, nil
 }
