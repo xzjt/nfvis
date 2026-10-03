@@ -4762,7 +4762,9 @@ async function ctAction(name, action, label, msg) {
 // 对象头 + 两个 Tab（概览 / 日志）。日志复用 ctLogsLoad（tail=200，与 CLI 同源），
 // 且**进 Tab 或点「刷新」才拉**——大段文本不该跟着页面轮询反复下载。
 
-const CT_TABS = ['overview', 'logs'];
+// 容器详情页的分栏：新增分栏必须同时加到这里（`ctTabShow` 按它切换面板，
+// 漏加会让点击静默回落「概览」——静态守护看不见，只有真机点一遍才发现，决策 #141）。
+const CT_TABS = ['overview', 'logs', 'exec'];
 let ctTab = 'overview';
 let ctDetailName = '';
 let ctLogsName = '';
