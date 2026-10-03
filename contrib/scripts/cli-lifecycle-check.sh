@@ -568,14 +568,28 @@ else
     fi
   fi
 
-  # L2-3 日志：重启这段不许有未收敛项（顺序问题会在这里冒出来）
-  unc=$(journalctl -u "$NFVIS_UNIT" --since "$TS" --no-pager 2>/dev/null | grep -c 未收敛 || true)
+  # L2-3 日志：重启这段不许有未收敛项（顺序问题会在这里冒出来）。
+  #
+  # ⚠️ 判据要分清「查不了」与「查到残渣」（round139 实测到的**偶发假红**）：重启窗口内 15s 巡检的
+  # **残渣对账**可能正好落在 VPP 不可用的那几秒，于是打出
+  #   WARN 残渣对账未收敛项  err=… VPP 未连接 … connection refused …
+  # ——那是「对账没跑成、下轮再来」，**不是**残渣判定；把它算成失败会让**干净的现场**偶发报红
+  # （工具假红也是缺陷）。故：**只把能读出结论的行计入**，查不了的行单独如实报出（不隐藏）。
+  jall=$(journalctl -u "$NFVIS_UNIT" --since "$TS" --no-pager 2>/dev/null | grep 未收敛 || true)
+  junjudge=$(printf '%s
+' "$jall" | grep -c 'VPP 未连接' || true)
+  unc=$(printf '%s
+' "$jall" | grep -v 'VPP 未连接' | grep -c . || true)
   if [ "$unc" -eq 0 ]; then
-    ok "L2-3 重启后日志无「未收敛」（0 条）"
+    ok "L2-3 重启后日志无「未收敛」判定（0 条；另有 $junjudge 条属「对账时 VPP 不可用」= 查不了，不计）"
   else
-    exp_act "0 条未收敛" "$unc 条"
-    journalctl -u "$NFVIS_UNIT" --since "$TS" --no-pager 2>/dev/null | grep 未收敛 | head -3 | sed 's/^/      | /'
+    exp_act "0 条未收敛判定" "$unc 条"
+    printf '%s
+' "$jall" | grep -v 'VPP 未连接' | head -3 | sed 's/^/      | /'
     bad "L2-3 重启后日志有未收敛项"
+  fi
+  if [ "$junjudge" -gt 0 ]; then
+    note "L2-3 附注：$junjudge 条「未收敛」是**对账时 VPP 不可用**（查不了 ≠ 查到残渣，按不可判定跳过）"
   fi
   echo "    重启后: BD $(vpp_bd_ids | tr '\n' ' ')｜IP 表 $(vpp_tables | tr '\n' ' ')"
 fi
