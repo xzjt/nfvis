@@ -37,6 +37,9 @@ set container-functions cli-ct2 image alpine:3.20
 set container-functions cli-ct2 vcpu count 1
 set container-functions cli-ct2 memory size-mb 128
 set container-functions cli-ct2 command /bin/sh
+# 让容器**保持运行**（`sh` 无参会在 stdin 关闭时立刻退出）：阶段 4 的 `exec` 需要运行态，
+# 停在 exited 上只能验「拒绝」验不到「能执行」——正控缺了，套件就只剩半张证据。
+set container-functions cli-ct2 args -c "sleep 3600"
 set bonds bond0 members 0 ens192
 commit"
 
