@@ -117,6 +117,10 @@ func (s *Server) configMetrics() []metrics.Sample {
 }
 
 // vnfMetrics VNF 运行态与 vCPU 分配。
+//
+// 决策 #355：新增运行态可用性序列 `nfvis_vnf_runtime_available`（1/0，始终发出）与逐对象
+// `nfvis_vnf_up`（1/0；运行态不可查询时不发该对象，宁缺不谎报 0）——聚合计数在编排不可用时
+// 仍沿用既有行为（不计入 running），但外部可凭可用性序列判定「计数不可信」。
 func (s *Server) vnfMetrics(ctx context.Context) []metrics.Sample {
 	if s.engine == nil {
 		return nil
@@ -125,39 +129,69 @@ func (s *Server) vnfMetrics(ctx context.Context) []metrics.Sample {
 	if err != nil {
 		return nil
 	}
+	const upHelp = "VNF 是否运行中（1=运行中，0=已知非运行；运行态不可查询时该对象不出现，见 nfvis_vnf_runtime_available）"
+	var out []metrics.Sample
 	var vmsRunning, ctsRunning, vcpuVM, vcpuCT float64
-	if s.vm != nil {
+	vmAvail, ctAvail := float64(1), float64(1)
+	if s.vm == nil {
+		vmAvail = 0 // 编排未接入：聚合计数沿用既有行为，但可用性如实置 0
+	} else {
 		for _, vm := range cfg.VirtualMachineFunctions {
 			vcpuVM += float64(vm.VCPU.Count)
 			cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			st, err := s.vm.VMState(cctx, vm.Name)
 			cancel()
-			if err == nil && st == orchestrator.VMStateRunning {
+			if err != nil {
+				vmAvail = 0 // 查询出错：不发该对象序列（宁缺不谎报 0）
+				continue
+			}
+			up := float64(0)
+			if st == orchestrator.VMStateRunning {
+				up = 1
 				vmsRunning++
 			}
+			out = append(out, metrics.Sample{Name: "nfvis_vnf_up", Help: upHelp, Type: "gauge",
+				Labels: map[string]string{"kind": "vm", "name": vm.Name}, Value: up})
 		}
 	}
-	if s.containers != nil {
+	if s.containers == nil {
+		ctAvail = 0
+	} else {
 		for _, ct := range cfg.ContainerFunctions {
 			vcpuCT += float64(ct.VCPU)
 			cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			st, err := s.containers.ContainerState(cctx, ct.Name)
 			cancel()
-			if err == nil && st == orchestrator.CTStateRunning {
+			if err != nil {
+				ctAvail = 0 // 查询出错：不发该对象序列（宁缺不谎报 0）
+				continue
+			}
+			up := float64(0)
+			if st == orchestrator.CTStateRunning {
+				up = 1
 				ctsRunning++
 			}
+			out = append(out, metrics.Sample{Name: "nfvis_vnf_up", Help: upHelp, Type: "gauge",
+				Labels: map[string]string{"kind": "container", "name": ct.Name}, Value: up})
 		}
 	}
-	out := []metrics.Sample{
-		{Name: "nfvis_vnf_running", Help: "运行中的 VNF 数", Type: "gauge",
+	// 可用性序列始终发出（同 #68 的 buffer 可用性口径）：1=可查询（计数可信），0=编排未接入或查询失败。
+	const availHelp = "VNF 运行态是否可查询（1=可查询，计数可信；0=编排未接入或查询失败）"
+	out = append(out,
+		metrics.Sample{Name: "nfvis_vnf_runtime_available", Help: availHelp, Type: "gauge",
+			Labels: map[string]string{"kind": "vm"}, Value: vmAvail},
+		metrics.Sample{Name: "nfvis_vnf_runtime_available", Help: availHelp, Type: "gauge",
+			Labels: map[string]string{"kind": "container"}, Value: ctAvail},
+		// 聚合计数：指标名、标签与取值不变（向后兼容；不可用时仍不计入 running）。
+		metrics.Sample{Name: "nfvis_vnf_running", Help: "运行中的 VNF 数", Type: "gauge",
 			Labels: map[string]string{"kind": "vm"}, Value: vmsRunning},
-		{Name: "nfvis_vnf_running", Help: "运行中的 VNF 数", Type: "gauge",
+		metrics.Sample{Name: "nfvis_vnf_running", Help: "运行中的 VNF 数", Type: "gauge",
 			Labels: map[string]string{"kind": "container"}, Value: ctsRunning},
-		{Name: "nfvis_vnf_vcpu_allocated", Help: "已分配的 vCPU 数（按配置）", Type: "gauge",
+		metrics.Sample{Name: "nfvis_vnf_vcpu_allocated", Help: "已分配的 vCPU 数（按配置）", Type: "gauge",
 			Labels: map[string]string{"kind": "vm"}, Value: vcpuVM},
-		{Name: "nfvis_vnf_vcpu_allocated", Help: "已分配的 vCPU 数（按配置）", Type: "gauge",
+		metrics.Sample{Name: "nfvis_vnf_vcpu_allocated", Help: "已分配的 vCPU 数（按配置）", Type: "gauge",
 			Labels: map[string]string{"kind": "container"}, Value: vcpuCT},
-	}
+	)
 	return out
 }
 
