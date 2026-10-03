@@ -442,6 +442,64 @@ func TestHugepageReclaimResponseShapeMatchesContract(t *testing.T) {
 	}
 }
 
+// TestHugepagePoolsReadShapeMatchesContract 决策 #329/#346/#353：`GET /system/hugepages` 的
+// 读视图形状（契约声明字段必须真的发得出来，含 items 级字段）。
+//
+// 重点在**决策 #353 新增的 `held_by_dataplane` 是恒发字段**：取不到时也要发 -1（不编造、
+// 也不省略）——「字段缺席」与「取不到」分不清正是本守护要防的漂移。本 fixture 的临时根
+// 没有 /proc，恰好覆盖「取不到 → -1 仍发出」这一路；有 /proc 的正路（comm=vpp 归属）
+// 由 internal/system 与本包 CLI/REST 单测覆盖。
+func TestHugepagePoolsReadShapeMatchesContract(t *testing.T) {
+	root := t.TempDir()
+	writeHugepageFixture(t, root, "1G", 2, 0)
+	ts := newTestServerOpts(t, Options{HugepageRoot: root})
+	token := loginAdmin(t, ts)
+	if status, _, body := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/resource-pools", token,
+		map[string]any{"hugepages": []map[string]any{{"page_size": "1G", "count": 2}}},
+		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusOK {
+		t.Fatalf("声明大页池: %d %s", status, body)
+	}
+	spec := loadEmbeddedSpec(t)
+	props := declaredProps(t, spec, "/system/hugepages", "GET")
+	itemProps := declaredItemProps(t, spec, "/system/hugepages", "GET", "200")
+	if len(props) == 0 || len(itemProps) == 0 {
+		t.Fatal("契约里取不到 GET /system/hugepages 的响应字段（schema 缺 properties？）")
+	}
+	status, _, body := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/system/hugepages", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /system/hugepages: %d %s", status, body)
+	}
+	got := responseObject(t, body)
+	for _, f := range props {
+		if _, ok := got[f]; !ok {
+			t.Errorf("契约声明了 %s，响应里没有（照契约开发的客户端会取空）", f)
+		}
+	}
+	pools, _ := got["pools"].([]any)
+	if len(pools) != 2 {
+		t.Fatalf("pools 应恒为两个页尺寸，实得 %d：%s", len(pools), body)
+	}
+	optional := map[string]string{"note": "判定依据 / 取不到的原因只在有话说时出现（条件出现）"}
+	for i, raw := range pools {
+		p, _ := raw.(map[string]any)
+		for _, f := range itemProps {
+			if _, ok := p[f]; ok {
+				continue
+			}
+			if r, a := optional[f]; a {
+				t.Logf("  跳过 pools[%d].%s（%s）", i, f, r)
+				continue
+			}
+			t.Errorf("契约声明了 pools[].%s，响应里没有", f)
+		}
+		// held_by_dataplane（决策 #353）恒发：本 fixture 无 /proc → -1，且必须是数字而非 null/省略。
+		if v, ok := p["held_by_dataplane"].(float64); !ok || v != -1 {
+			t.Errorf("pools[%d].held_by_dataplane = %v（%T），无 /proc 时也应恒发 -1 而不是省略",
+				i, p["held_by_dataplane"], p["held_by_dataplane"])
+		}
+	}
+}
+
 // declaredItemProps 取某端点响应 schema 的 items.properties 字段名（数组元素字段）。
 func declaredItemProps(t *testing.T, spec map[string]any, path, method, status string) []string {
 	t.Helper()

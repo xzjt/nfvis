@@ -2763,7 +2763,7 @@ components:
 
     HugepagePools:
       type: object
-      description: 大页池读视图（决策 #329/#346）：数字（声明/内核实际/在用/实际持有/无主占用）+ 可回收的空闲多余页
+      description: 大页池读视图（决策 #329/#346/#353）：数字（声明/内核实际/在用/实际持有/数据面占用/无主占用）+ 可回收的空闲多余页
       properties:
         pools:
           type: array
@@ -2775,9 +2775,10 @@ components:
               managed: { type: boolean, description: 配置是否声明该池（声明 > 0） }
               declared: { type: integer, description: 声明页数（配置唯一真源；<=0 = 未声明/不托管） }
               actual: { type: integer, description: 内核实际页数（sysfs nr_hugepages；不可读时 -1） }
-              free: { type: integer, description: 内核空闲页数（不可读时 -1） }
+              free: { type: integer, description: 内核空闲页数（不可读时 -1）；也就是**可分配给 VNF 的页数**（1G 池需扣除数据面固定占用，见 note） }
               in_use: { type: integer, description: 在用页数 = actual - free（不可读时 -1） }
               held: { type: integer, description: "实际持有页数（进程/inode 引用汇总，按 inode 去重；不可读时 -1）" }
+              held_by_dataplane: { type: integer, description: "实际持有中数据面占用的页数（实测：comm=vpp 的进程提交的页；不可读时 -1，不编造）；1G 池该值 >=1 时 note 追加可用性说明（数据面固定占用、VNF 可起页数 = 空闲页数，决策 #353）" }
               orphan: { type: integer, description: "无主占用页数 = in_use - held（>=0；不可读时 -1）；多为被进程预留未使用的大页，产品侧不可回收（只作可见性，见 HUGEPAGE_POOL_ORPHAN 告警）" }
               reclaimable: { type: integer, description: 可回收的**空闲多余页**数（无主占用页不可回收，不计入） }
               state: { type: string, enum: [ok, surplus, in_use, orphan, unmanaged, unreadable] }

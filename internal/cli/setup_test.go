@@ -237,6 +237,57 @@ func TestRunWizardDetectsSinglePercentError(t *testing.T) {
 	}
 }
 
+// 决策 #353：1G 池「数据面固定占用 1 页」的向导口径——0 < 1G < 2 的计划预览必须
+// 给出告警行；正常值（>=2 / 0=不配）不出现。
+func TestSetupPlanWarnings(t *testing.T) {
+	w := setupPlanWarnings(SetupPlan{HP1G: 1})
+	if len(w) != 1 || !strings.Contains(w[0], "1G 池仅 1 页") || !strings.Contains(w[0], "无法再起 VNF") {
+		t.Fatalf("1G=1 页应给告警行，实得 %v", w)
+	}
+	if !strings.Contains(w[0], "装 VNF 建议 ≥2") {
+		t.Fatalf("告警行应给出建议值：%q", w[0])
+	}
+	for _, n := range []int{0, 2, 3, 8} {
+		if got := setupPlanWarnings(SetupPlan{HP1G: n}); len(got) != 0 {
+			t.Fatalf("HP1G=%d 不该有告警行：%v", n, got)
+		}
+	}
+}
+
+// 同口径的端到端路径：向导问答与计划预览都要出现 1G 固定占用提示/告警；声明 2 页时不出现。
+func TestRunWizardWarnsSingleHP1G(t *testing.T) {
+	newFake := func() *setupFake {
+		return &setupFake{
+			metrics:   "nfvis_system_cpu_online_count 6\nnfvis_system_memory_total_bytes 7516192768\n",
+			committed: committedEmpty,
+		}
+	}
+	// 默认 1G = 1（7GB 内存按 min(RAM/4,8)）：问句带 N−1 提示、计划预览给告警行。
+	f := newFake()
+	var out strings.Builder
+	if err := RunWizard(New(f, "ssh"), true, strings.NewReader("\n\n\n\n\n\n\n"), &out); err != nil {
+		t.Fatalf("全流程: %v", err)
+	}
+	if !strings.Contains(out.String(), "数据面固定占用其中 1 页 ⇒ 可起 VNF 数 ≈ N−1") {
+		t.Fatalf("1G 数量问句应写明固定占用口径：\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "⚠ 1G 池仅 1 页：数据面占 1，无法再起 VNF（装 VNF 建议 ≥2）") {
+		t.Fatalf("计划预览应给 1G 池告警行：\n%s", out.String())
+	}
+	// 显式声明 2 页：无告警行，问句仍在（口径统一）。
+	f2 := newFake()
+	var out2 strings.Builder
+	if err := RunWizard(New(f2, "ssh"), true, strings.NewReader("\n\n\n2\n\n\n\n"), &out2); err != nil {
+		t.Fatalf("2 页全流程: %v", err)
+	}
+	if strings.Contains(out2.String(), "⚠ 1G 池仅") {
+		t.Fatalf("声明 2 页不该出现告警行：\n%s", out2.String())
+	}
+	if !strings.Contains(strings.Join(f2.lines, "\n"), "set resource-pools hugepages page-size 1G count 2") {
+		t.Fatalf("应提交 1G=2 的语句：%v", f2.lines)
+	}
+}
+
 // 语句清单的导航顺序（决策 #113）：commit 在配置模式下执行，exit 必须紧随其后
 // （top 只回配置层级顶层、不离开配置模式；exit 若在 commit 前会因未提交变更被拒）。
 func TestSetupPlanNavigationOrder(t *testing.T) {
