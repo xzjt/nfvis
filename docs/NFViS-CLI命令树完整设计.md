@@ -222,6 +222,16 @@ request container-functions <name>
   │      #   而 exec 是**免凭据的容器内命令执行**（等价 root）；operator 本不能创建容器（配置模式 S），
   │      #   若 exec 为 O 即等于绕过该限制 ⇒ 与配置模式/删除同档。
   │      # API: POST /container-functions/{name}:exec（body {command, timeout_seconds?}）
+  ├─ shell                                          # S；**交互式终端**（进容器里的 sh，Ctrl-] 退出；决策 #358）
+  │      # 与 VM 串口 `console` **同一套管线**：一次性 ticket + WebSocket 桥接 + CLI raw 接管 + Ctrl-]
+  │      #   退出（前端体验一致），底座换成 Docker exec 的 TTY 形态（`Tty:true` + `Upgrade: tcp`
+  │      #   ⇒ `101 UPGRADED` 全双工裸流，round139 真机实证）。
+  │      # 权限 **S**（同 exec：免凭据的容器内命令执行＝等价 root）；前置：容器须 **running**（否则拒绝并指向 start）。
+  │      # ⚠️ **断开只关产品侧桥接**（真机实测更正）——WS 断开 ⇒ 关流，但容器内 shell 进程**可能仍在**
+  │      #   （Docker 无 exec 中止接口；对照实验：会话结束后容器内仍有 /bin/sh）。需清理时 exec 杀进程或重启容器。
+  │      # 不做**窗口尺寸同步**（无 resize 通道，如实登记）；Web 端为纯文本终端（不引入终端模拟器）。
+  │      # API: POST /container-functions/{name}/shell（Bearer）⇒ {ws_url, expires_in}；
+  │      #      GET  /container-functions/{name}/shell/ws?ticket=…（一次性 ticket 鉴权，与 console 同因）
   └─ delete                                         # S；确认
 request images
   ├─ upload name <name> type <vm-image|container-image> file <path>

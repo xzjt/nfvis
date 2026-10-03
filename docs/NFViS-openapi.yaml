@@ -969,6 +969,51 @@ paths:
         "409": { description: 容器非运行态（先 start） }
         "503": { description: 容器编排未接入 }
 
+  /container-functions/{name}/shell:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [container-functions]
+      summary: 申请容器交互式终端凭证（一次性 ticket；决策 #358）
+      description: |
+        与 VM 串口 `console` **同一套管线**（一次性 ticket + WebSocket 桥接），底座换成 Docker exec 的
+        TTY 形态（`Tty:true` + `Upgrade: tcp` ⇒ `101 UPGRADED` 全双工裸流，round139 真机实证）。
+        权限：**super-user only**（`request container-functions <name> shell` 为 S 档，与 exec 同因：
+        免凭据的容器内命令执行＝等价 root）。前置：容器须 **running**（否则 409 并指向 start）。
+        返回的 `ws_url` 以**一次性 ticket** 鉴权（WebSocket 握手带不了 Bearer，与 console 同一成因）。
+        **断开只关产品侧桥接**（真机实测更正）：WS 断开 ⇒ 关流，但容器内的 shell 进程**可能仍在运行**
+        （Docker 不提供 exec 进程的中止接口；round139 对照实验：一次会话结束后容器内仍有 `/bin/sh`）。
+        这与 exec 的「超时只中止客户端等待」是同一类边界——产品侧不谎称已释放；需清理时用 `exec` 杀进程或重启容器。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ws_url: { type: string, description: WebSocket 相对路径（带一次性 ticket） }
+                  expires_in: { type: integer, description: ticket 有效期（秒） }
+        "403": { description: 权限不足（需 super-user） }
+        "404": { description: 容器不存在 }
+        "409": { description: 容器非运行态（先 start） }
+        "503": { description: 容器编排未接入 }
+
+  /container-functions/{name}/shell/ws:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+      - { name: ticket, in: query, required: true, schema: { type: string }, description: 一次性凭证（POST …/shell 取得） }
+    get:
+      tags: [container-functions]
+      summary: 容器交互式终端 WebSocket（以一次性 ticket 鉴权；决策 #358）
+      description: |
+        WebSocket 升级后与容器 TTY 双向桥接（字节原样透传；前端自行决定是否剥离 ANSI）。
+        ticket 无效/已过期/已用过 ⇒ 401。**不做窗口尺寸同步**（如实登记，见决策 #358）。
+      security: []
+      responses:
+        "101": { description: 升级为 WebSocket 并桥接容器 TTY }
+        "401": { description: ticket 无效、已过期或已消费 }
+        "503": { description: 容器编排未接入 }
+
   /images:
     parameters:
       - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }

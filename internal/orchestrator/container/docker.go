@@ -12,6 +12,7 @@ package container
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync"
@@ -79,6 +80,8 @@ type dockerAPI interface {
 	// Exec 在运行中的容器内执行命令（决策 #357；非 TTY ⇒ 多路复用流，见 exec.go）。
 	// timeout 只界定**客户端等待**：超时返回 TimedOut=true 且不带退出码（容器内进程可能仍在跑）。
 	Exec(ctx context.Context, name, command string, timeout time.Duration) (ExecResult, error)
+	// ExecShell 打开容器内的交互式 TTY（决策 #358）：返回全双工流，Close 即关会话。
+	ExecShell(ctx context.Context, name string) (io.ReadWriteCloser, error)
 }
 
 // Provider 容器编排实现。
@@ -259,6 +262,25 @@ func (p *Provider) ContainerExec(ctx context.Context, name, command string, time
 		return ExecResult{}, fmt.Errorf("%w: %s（当前 %s）", orchestrator.ErrContainerNotRunning, name, state)
 	}
 	return p.api.Exec(ctx, name, command, timeout)
+}
+
+// ContainerShell 打开**运行中**容器的交互式终端（决策 #358）。
+//
+// 前置判定与 exec 同口径（不存在 ⇒ ErrVMNotFound、非运行态 ⇒ ErrContainerNotRunning）；
+// 返回的全双工流由调用方（WS 桥接）持有；Close 只关产品侧流——容器内的 shell 进程可能仍在运行
+// （Docker 不提供 exec 进程的中止接口，round139 真机实测）。
+func (p *Provider) ContainerShell(ctx context.Context, name string) (io.ReadWriteCloser, error) {
+	state, exists, err := p.api.State(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+	}
+	if state != orchestrator.CTStateRunning {
+		return nil, fmt.Errorf("%w: %s（当前 %s）", orchestrator.ErrContainerNotRunning, name, state)
+	}
+	return p.api.ExecShell(ctx, name)
 }
 
 // EnsureConsistent 恢复收敛（FR-OPS-010/012）：补建缺失容器；单对象失败不阻塞其余。

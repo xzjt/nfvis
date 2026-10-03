@@ -1092,6 +1092,8 @@ export const VIEWS = {
   },
   'containerDetail': {
     render(d, params) { pageWarn(d); renderContainerDetail(d, params); },
+    // 交互终端是有状态的（WebSocket）：离开这一页就断开，别把连接留在后台（与 VM 串口同纪律）。
+    leave() { ctShellClose(); },
   },
   'images': {
     render(d) { pageWarn(d); renderImages(rowsOf(d['/images'])); },
@@ -4764,7 +4766,7 @@ async function ctAction(name, action, label, msg) {
 
 // 容器详情页的分栏：新增分栏必须同时加到这里（`ctTabShow` 按它切换面板，
 // 漏加会让点击静默回落「概览」——静态守护看不见，只有真机点一遍才发现，决策 #141）。
-const CT_TABS = ['overview', 'logs', 'exec'];
+const CT_TABS = ['overview', 'logs', 'exec', 'shell'];
 let ctTab = 'overview';
 let ctDetailName = '';
 let ctLogsName = '';
@@ -4790,6 +4792,79 @@ function ctTabClick(tab) {
 // 入口是静态写控件（data-write），operator/只读由 body.role-nonsuper 的 CSS 隐藏（#145/#327 同一门禁）。
 // 如实口径：命令跑完（哪怕非 0 退出码）⇒ 成功，退出码是**结果**；超时只中止本页等待，
 // 此时**不报**退出码（容器内进程可能仍在运行，Docker 不提供中止接口）。
+
+// ---- 容器交互式终端（决策 #358，S 档）----
+// 与 VM 串口页**同一形态**（一次性 ticket → WebSocket → 纯文本终端 + 输入行 + 断开），
+// 底座是 Docker exec 的 TTY。**断开只关本页桥接**：WS 一关，容器内的 shell 进程**可能仍在运行**
+// （Docker 不提供 exec 进程的中止接口——真机对照实验：会话结束后容器内仍有 /bin/sh）。
+// 入口是静态写控件（data-write），非 super-user 由 body.role-nonsuper 的 CSS 隐藏。
+
+let ctShellWS = null;
+let ctShellName = '';
+
+function ctShellSyncBtn() {
+  const b = $('ct-shell-connect');
+  if (b) b.disabled = !!ctShellWS;
+}
+
+function ctShellAppend(text) {
+  const out = $('ct-shell-out');
+  const atBottom = out.scrollTop + out.clientHeight >= out.scrollHeight - 8;
+  out.textContent += stripANSI(text);
+  if (out.textContent.length > 200000) out.textContent = out.textContent.slice(-150000);
+  if (atBottom) out.scrollTop = out.scrollHeight;
+}
+
+function ctShellMsg(text, isErr) {
+  const out = $('ct-shell-out');
+  out.textContent += (isErr ? '\n[错误] ' : '\n[信息] ') + text + '\n';
+  out.scrollTop = out.scrollHeight;
+}
+
+async function ctShellOpen(name) {
+  if (ctShellWS) { ctShellMsg('先断开当前终端（' + ctShellName + '）。', true); return; }
+  $('ct-shell').hidden = false;
+  $('ct-shell-name').textContent = name;
+  $('ct-shell-out').textContent = '';
+  ctShellMsg('正在申请终端凭证…', false);
+  let res;
+  try {
+    res = await api('/container-functions/' + encodeURIComponent(name) + '/shell', { method: 'POST' });
+  } catch (e) {
+    ctShellMsg('申请凭证失败：' + apiErrText(e, '请确认容器处于运行中（先「启动」）'), true);
+    return;
+  }
+  const wsURL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + res.ws_url;
+  try {
+    ctShellWS = new WebSocket(wsURL);
+  } catch (e) {
+    ctShellWS = null;
+    ctShellMsg('打开 WebSocket 失败：' + e.message, true);
+    ctShellSyncBtn();
+    return;
+  }
+  ctShellName = name;
+  ctShellSyncBtn();
+  ctShellWS.onopen = () => ctShellMsg('已连接 ' + name + ' 的容器终端（输入命令后回车）。注意：断开只关本页桥接，容器内进程可能仍在运行。', false);
+  ctShellWS.onmessage = (ev) => ctShellAppend(ev.data);
+  ctShellWS.onclose = () => { ctShellMsg('连接已关闭（本页桥接已断开；容器内进程可能仍在运行——需要时用「执行命令」清理）。', false); ctShellWS = null; ctShellName = ''; ctShellSyncBtn(); };
+  ctShellWS.onerror = () => ctShellMsg('WebSocket 出错（凭证过期或容器终端不可用）。', true);
+  $('ct-shell-in').focus();
+}
+
+function ctShellClose() {
+  if (ctShellWS) { ctShellWS.close(); ctShellWS = null; ctShellName = ''; }
+  ctShellSyncBtn();
+  const box = $('ct-shell');
+  if (box) box.hidden = true;
+  const out = $('ct-shell-out');
+  if (out) out.textContent = '';
+}
+
+function ctShellSend(text, enter) {
+  if (!ctShellWS || ctShellWS.readyState !== 1) { ctShellMsg('尚未连接。', true); return; }
+  ctShellWS.send(text + (enter ? '\n' : ''));
+}
 
 function ctExecMsg(text, isErr) {
   const p = $('ct-exec-msg');
@@ -5712,6 +5787,12 @@ for (const b of $('ctd-tabs').querySelectorAll('button')) {
 }
 // 容器内执行命令（决策 #357）：入口按 data-write 门禁，非 super-user 时按钮/输入被 CSS 隐藏。
 $('ct-exec-run').addEventListener('click', ctExecRun);
+// 容器交互终端（决策 #358）：连接/断开/发送；输入框回车即发送。
+$('ct-shell-connect').addEventListener('click', () => ctShellOpen(ctDetailName));
+$('ct-shell-close').addEventListener('click', ctShellClose);
+$('ct-shell-send').addEventListener('click', () => { const i = $('ct-shell-in'); ctShellSend(i.value, true); i.value = ''; });
+$('ct-shell-enter').addEventListener('click', () => ctShellSend('', true));
+$('ct-shell-in').addEventListener('keydown', (e) => { if (e.key === 'Enter') { ctShellSend($('ct-shell-in').value, true); $('ct-shell-in').value = ''; } });
 $('ct-exec-cmd').addEventListener('keydown', (e) => { if (e.key === 'Enter') ctExecRun(); });
 
 // VRF 详情：路由表按需重拉

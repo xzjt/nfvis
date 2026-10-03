@@ -25,11 +25,12 @@ type VMConsoleRuntime interface {
 	Console(ctx context.Context, name string) (io.ReadWriteCloser, error)
 }
 
-// consoleTicket 一次性 console 凭证。
+// consoleTicket 一次性终端凭证（VM 串口 console 与容器 shell **共用同一张表**，
+// 靠 resource 键前缀区分，决策 #358）。
 type consoleTicket struct {
-	vm      string
-	user    string
-	expires time.Time
+	resource string
+	user     string
+	expires  time.Time
 }
 
 // consoleTickets 进程内 ticket 表（一次性、短 TTL；M5 可换持久化/事件总线）。
@@ -44,9 +45,13 @@ func newConsoleTickets() *consoleTickets {
 	return &consoleTickets{m: map[string]consoleTicket{}, now: time.Now, ttl: 60 * time.Second}
 }
 
-func ticketKey(vm, token string) string { return vm + "\x00" + token }
+// 资源键：同类会话共享一张表、不同类互不通用（一张表的 ticket 开不了另一类会话）。
+func vmConsoleResource(name string) string { return "vm/" + name }
+func ctShellResource(name string) string   { return "ct/" + name }
 
-func (t *consoleTickets) issue(vm, user string) (string, int, error) {
+func ticketKey(resource, token string) string { return resource + "\x00" + token }
+
+func (t *consoleTickets) issue(resource, user string) (string, int, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		return "", 0, err
@@ -54,18 +59,18 @@ func (t *consoleTickets) issue(vm, user string) (string, int, error) {
 	tok := hex.EncodeToString(b)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.m[ticketKey(vm, tok)] = consoleTicket{vm: vm, user: user, expires: t.now().Add(t.ttl)}
+	t.m[ticketKey(resource, tok)] = consoleTicket{resource: resource, user: user, expires: t.now().Add(t.ttl)}
 	return tok, int(t.ttl.Seconds()), nil
 }
 
 // consume 校验并消费 ticket（一次性：无论成败均移除）。
-func (t *consoleTickets) consume(vm, token string) (consoleTicket, bool) {
+func (t *consoleTickets) consume(resource, token string) (consoleTicket, bool) {
 	if token == "" {
 		return consoleTicket{}, false
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	k := ticketKey(vm, token)
+	k := ticketKey(resource, token)
 	ct, ok := t.m[k]
 	if !ok {
 		return consoleTicket{}, false
@@ -103,7 +108,7 @@ func (s *Server) handleConsoleTicket(w http.ResponseWriter, r *http.Request) {
 	if info, ok := Identity(r); ok {
 		user = info.User
 	}
-	tok, ttl, err := s.consoleTix.issue(name, user)
+	tok, ttl, err := s.consoleTix.issue(vmConsoleResource(name), user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "生成 console 凭证失败", nil)
 		return
@@ -122,7 +127,7 @@ func (s *Server) handleConsoleWS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "计算编排未接入（libvirt 未装配）", nil)
 		return
 	}
-	ct, ok := s.consoleTix.consume(name, r.URL.Query().Get("ticket"))
+	ct, ok := s.consoleTix.consume(vmConsoleResource(name), r.URL.Query().Get("ticket"))
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "console ticket 无效或已过期", nil)
 		return

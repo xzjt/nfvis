@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,10 @@ type mockDocker struct {
 	execTimeout time.Duration
 	execResult  ExecResult
 	execErr     error
+
+	// 决策 #358：交互式终端（返回的流与注入错误）。
+	shell    io.ReadWriteCloser
+	shellErr error
 }
 
 func newMockDocker() *mockDocker {
@@ -96,6 +101,14 @@ func (m *mockDocker) Exec(_ context.Context, name, command string, timeout time.
 	m.calls = append(m.calls, "exec:"+name)
 	m.execCmd, m.execTimeout = command, timeout
 	return m.execResult, m.execErr
+}
+
+func (m *mockDocker) ExecShell(_ context.Context, name string) (io.ReadWriteCloser, error) {
+	m.calls = append(m.calls, "shell:"+name)
+	if m.shellErr != nil {
+		return nil, m.shellErr
+	}
+	return m.shell, nil
 }
 
 func ctFixture(name string) model.ContainerFunction {

@@ -10,9 +10,11 @@ package api
 //  3. 动态候选：DynImages 读镜像仓库运行态（附录 A #51）。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -44,6 +46,10 @@ type fakeCLIContainer struct {
 	execTimeout time.Duration
 	execResult  container.ExecResult
 	execErr     error
+
+	// 决策 #358：容器交互式终端的记账（返回的流与注入错误）。
+	shell    *shellStream
+	shellErr error
 }
 
 func newFakeCLIContainer() *fakeCLIContainer {
@@ -80,6 +86,29 @@ func (f *fakeCLIContainer) ContainerExec(_ context.Context, name, command string
 	f.actions = append(f.actions, "exec:"+name)
 	f.execCommand, f.execTimeout = command, timeout
 	return f.execResult, f.execErr
+}
+
+// shellStream fake 的终端流：把写入当输入记录、按预置内容回读（单测不需要真 socket）。
+type shellStream struct {
+	in  bytes.Buffer // 客户端写入（本地输入）
+	out bytes.Buffer // 服务端回读（终端输出）
+}
+
+func (s *shellStream) Read(p []byte) (int, error) {
+	if s.out.Len() == 0 {
+		return 0, io.EOF
+	}
+	return s.out.Read(p)
+}
+func (s *shellStream) Write(p []byte) (int, error) { return s.in.Write(p) }
+func (s *shellStream) Close() error                { return nil }
+
+func (f *fakeCLIContainer) ContainerShell(_ context.Context, name string) (io.ReadWriteCloser, error) {
+	f.actions = append(f.actions, "shell:"+name)
+	if f.shellErr != nil {
+		return nil, f.shellErr
+	}
+	return f.shell, nil
 }
 
 // ---------- show 族 ----------

@@ -4,6 +4,7 @@ package container
 // 由 nfvis-vm 集成测试覆盖。字段以 Docker Engine API 29.x 为准（实测版本见 M4-P0 记录）。
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,8 +19,9 @@ import (
 )
 
 type dockerClient struct {
-	http *http.Client
-	base string
+	http   *http.Client
+	base   string
+	socket string // unix socket 路径（shell 的裸流 hijack 需要自己 dial，决策 #358）
 }
 
 // NewDockerClient 连接 Docker Engine API（缺省 /var/run/docker.sock）。
@@ -33,7 +35,7 @@ func NewDockerClient(socket string) dockerAPI {
 			return d.DialContext(ctx, "unix", socket)
 		},
 	}
-	return &dockerClient{http: &http.Client{Transport: tr}, base: "http://docker"}
+	return &dockerClient{http: &http.Client{Transport: tr}, base: "http://docker", socket: socket}
 }
 
 // NewConnectedProvider 装配生产 Provider（真实 Docker 客户端）。
@@ -379,4 +381,90 @@ func (c *dockerClient) Exec(ctx context.Context, name, command string, timeout t
 	res.HasExitCode = true
 	res.Duration = time.Since(started)
 	return res, nil
+}
+
+// hijackedStream Docker exec TTY 的**全双工**裸流（决策 #358）。
+//
+// 读走 bufio.Reader（**不是** http.Response.Body）：升级响应的头之后可能紧跟同包到达的
+// 首批数据（首屏提示符），自己拿 reader 才不会丢。写走同一连接的裸 conn。
+//
+// 为什么不用 http.ReadResponse 拿 body：真机实测（round139 pty）Go 对 101 的 body 语义
+// 与本用途不合——`resp.Body` 读起来立刻 EOF ⇒ 桥接两侧马上都结束，表现为「会话刚建立就
+// 断开」。手工解析状态行 + 头（读掉空行即止）后两端都用同一连接，行为与 Docker 语义一致。
+type hijackedStream struct {
+	conn net.Conn
+	r    *bufio.Reader
+}
+
+func (h *hijackedStream) Read(p []byte) (int, error)  { return h.r.Read(p) }
+func (h *hijackedStream) Write(p []byte) (int, error) { return h.conn.Write(p) }
+func (h *hijackedStream) Close() error                { return h.conn.Close() }
+
+// ExecShell 打开容器内的**交互式 TTY**（决策 #358）：建 TTY exec → 裸 unix conn 手写带
+// `Connection: Upgrade` / `Upgrade: tcp` 的 start 请求 → 期望 `101 UPGRADED` → 返回全双工流。
+//
+// 真机 spike 实证（round139）：升级后写入 `echo SHELL-OK; id -u` 能读到 shell 回显；
+// 这正是「不用 WebSocket 也能双向」的那条路——与 CLI/Web 的 WS 桥接在 API 层相接。
+func (c *dockerClient) ExecShell(ctx context.Context, name string) (io.ReadWriteCloser, error) {
+	var created struct {
+		ID string `json:"Id"`
+	}
+	body := map[string]any{
+		"AttachStdin":  true,
+		"AttachStdout": true,
+		"AttachStderr": true,
+		"Tty":          true,
+		"Cmd":          []string{"/bin/sh"},
+	}
+	if err := c.do(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/exec", body, &created); err != nil {
+		return nil, err
+	}
+	if created.ID == "" {
+		return nil, fmt.Errorf("docker exec shell: 未返回 exec 实例 id")
+	}
+
+	d := net.Dialer{Timeout: 5 * time.Second}
+	conn, err := d.DialContext(ctx, "unix", c.socket)
+	if err != nil {
+		return nil, fmt.Errorf("连接 Docker socket: %w", err)
+	}
+	startBody := `{"Detach":false,"Tty":true}`
+	req := fmt.Sprintf("POST /exec/%s/start HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\n"+
+		"Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: %d\r\n\r\n%s",
+		url.PathEscape(created.ID), len(startBody), startBody)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("docker exec shell 请求: %w", err)
+	}
+	br := bufio.NewReader(conn)
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("docker exec shell 响应: %w", err)
+	}
+	if !strings.Contains(statusLine, " 101 ") {
+		// 非升级响应：把可读到的正文带上（Docker 的报错在正文里），便于定位。
+		rest := make([]byte, 0, 512)
+		for len(rest) < 4096 {
+			b, rerr := br.ReadByte()
+			if rerr != nil {
+				break
+			}
+			rest = append(rest, b)
+		}
+		_ = conn.Close()
+		return nil, fmt.Errorf("docker exec shell: 未升级为裸流（%s：%s）",
+			strings.TrimSpace(statusLine), strings.TrimSpace(string(rest)))
+	}
+	for { // 读掉响应头（空行即止；其后即 TTY 字节流）
+		line, lerr := br.ReadString('\n')
+		if lerr != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("docker exec shell 读取响应头: %w", lerr)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+	return &hijackedStream{conn: conn, r: br}, nil
 }

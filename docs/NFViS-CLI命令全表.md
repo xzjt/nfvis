@@ -162,6 +162,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request container-functions <n> restart` | 重启容器 | O | `POST /container-functions/{n}:restart` | ✅ |
 | `request container-functions <n> log [last <n>]` | 容器 stdout/stderr | O | `GET /container-functions/{n}/logs` | ✅ |
 | `request container-functions <n> exec <command> [timeout <seconds>]` | 在**运行中**的容器内执行命令（非交互；`<command>` 是整体、含空格请加引号；等价容器内 `sh -c`）；超时默认 30s（1..300）、stdout/stderr 各自上限 256 KiB（超限置 truncated）；**超时只中止客户端等待**（Docker 无 exec 中止接口，容器内进程可能仍在跑）、退出码未知时不报（决策 #357） | S | `POST /container-functions/{n}:exec` | 🚫 本轮新增（决策 #357）：单测覆盖；已入 fulltest，真机复跑待执行 |
+| `request container-functions <n> shell` | **交互式终端**：进容器里的 `sh`（TTY；Ctrl-] 退出）。与 VM 串口 console **同一套管线**（一次性 ticket + WebSocket + CLI raw 接管），底座是 Docker exec 的 TTY 形态；**断开只关产品侧桥接**（WS 断开后容器内 shell 进程**可能仍在**，真机实测；Docker 无 exec 中止接口）；不做窗口尺寸同步（决策 #358） | S | `POST /container-functions/{n}/shell` + `GET …/shell/ws?ticket=…` | 🚫 本轮新增（决策 #358）：单测覆盖；真机 pty 复验见证据 |
 | `request container-functions <n> delete` | 删除容器 | S | `DELETE /container-functions/{n}` | 🚫 交互确认 |
 | `request images upload name <n> type <t> file <path>` | 从 `/data/incoming/` 导入（成功自动清理源文件）；容器镜像读出 tar 内嵌 tag 并回显（决策 #312） | O | `POST /images` | ✅ |
 | `request images download name <n> type <t> url <u> sha256 <hex>` | 从 HTTP(S) 拉取；**`sha256` 必填**（键值形态，非可选——校验层在受理前同步强制，缺省即拒） | O | `POST /images` | ✅（FR-SEC-004） |

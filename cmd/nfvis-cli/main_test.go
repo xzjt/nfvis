@@ -554,3 +554,35 @@ func TestConfirmRefusal(t *testing.T) {
 		})
 	}
 }
+
+// 决策 #358 顺带收口：**脚本模式（-c/-f）无法接管终端**——结果里带 Console（串口 console /
+// 容器 shell）时不得静默丢弃（否则脚本看到「正在打开 …」却什么都没开，与「只问不做」同一类假成功），
+// 必须按失败处理并指引交互式 CLI。此前对 `request virtual-machine-functions … console` 也存在。
+func TestRunScriptRejectsConsoleTakeover(t *testing.T) {
+	const (
+		console = "request virtual-machine-functions vm-a console"
+		shell   = "request container-functions ct-a shell"
+		later   = "show version"
+	)
+	be := &scriptBackend{replies: map[string]cliclient.Result{
+		console: {Output: "正在打开 vm-a 的串口（Ctrl-] 退出，60 秒内有效）…\n",
+			Console: &cliclient.ConsoleRequest{VM: "vm-a", WSURL: "/ws?ticket=x"}},
+		shell: {Output: "正在打开 ct-a 的容器终端（Ctrl-] 退出，60 秒内有效）…\n",
+			Console: &cliclient.ConsoleRequest{VM: "ct-a", WSURL: "/ws?ticket=y", Kind: "container"}},
+	}}
+	sess := cli.New(be, "ssh")
+
+	for _, tc := range []struct{ cmd, name string }{{console, "vm-a"}, {shell, "ct-a"}} {
+		be.executed = nil
+		failed, out := runScriptCapture(sess, tc.cmd+"\n"+later)
+		if !failed {
+			t.Fatalf("%s：脚本模式带终端接管请求应判失败（不得静默丢弃）", tc.cmd)
+		}
+		if !strings.Contains(out, "非 TTY") || !strings.Contains(out, tc.name) {
+			t.Fatalf("%s：应说明「非 TTY 不支持接管」并点名对象，实得：%s", tc.cmd, out)
+		}
+		if len(be.executed) != 1 {
+			t.Fatalf("%s：应停在该行、其后语句不执行，实执行 %v", tc.cmd, be.executed)
+		}
+	}
+}

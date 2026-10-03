@@ -1,0 +1,139 @@
+# round139 证据 · 决策 #358 容器交互式终端 v1
+
+真机：nfvis-vm；构建 `feat/d358-container-shell` → **2.0.0~dev62 → dev63 → dev64 → dev65 → dev66**
+（`SOURCE_DATE_EPOCH` 显式传入，`make deb` + `dpkg -i`）。契约先行：附录 A #358、`AGENTS.md` 计数
+259→260、openapi（`POST /container-functions/{name}/shell` + `GET …/shell/ws`）、命令树设计 §1.2、
+命令全表、用户手册 §9.4。`make check` RC=0。
+
+---
+
+## §0 能力前提核实（动手前，真机 spike — #338 的教训）
+
+直接打 Docker Engine API：exec 建实例带 `Tty:true, AttachStdin:true`，`start` 请求带
+`Connection: Upgrade` / `Upgrade: tcp` ⇒ 回 **`HTTP/1.1 101 UPGRADED`** +
+`Content-Type: application/vnd.docker.raw-stream`，此后同一连接**全双工**：
+
+```
+状态行: HTTP/1.1 101 UPGRADED
+升级头: ['HTTP/1.1 101 UPGRADED', 'Content-Type: application/vnd.docker.raw-stream', 'Connection: Upgrade', 'Upgrade: tcp']
+读回: b'/ # echo SHELL-OK; id -u\r\nSHELL-OK\r\n0\r\n/ # \x1b[6n'
+```
+
+⇒ 可行，据此写实现（不重蹈「先写实现再发现底座不成立」）。
+
+## §1 作用效果（真 pty，决策 #81：交互行为必须在 pty 下验）
+
+```
+$ script -qec "nfvis-cli" /dev/null        # 真 pty
+nfvis> request container-functions sem-ct shell
+正在打开 sem-ct 的容器终端（Ctrl-] 退出，60 秒内有效）…
+[已进入 sem-ct 容器终端，Ctrl-] 退出]
+/ # id -un; hostname
+root
+ebf1447cc32c
+/ # 
+[已退出容器终端]
+```
+
+- 进入的是容器内 `/bin/sh` 的**真 TTY**（有提示符 `/ #`、作业控制）；
+- `id -un` ⇒ `root`、`hostname` ⇒ 容器 ID `ebf1447cc32c`（与 `docker exec` 一致）；
+- **Ctrl-] 退出**、终端状态正常恢复（其后 `show version` 等命令照常，仅 #310 记载的「最多吃掉一个在途字节」边界）。
+
+## §2 生命周期（含一处**口径被真机推翻并改写**）
+
+**① 断开后的容器侧进程 —— 原口径「断开即释放」被对照实验推翻。**
+会话前容器内**无** `sh`；一次会话（进入 → 执行 → Ctrl-]）结束后容器内**仍有 1 个 `/bin/sh`**：
+
+```
+基线:        （无 sh）
+会话结束后:    13 /bin/sh
+```
+
+⇒ 「连接断则 exec 进程随之终止」是想当然。**已按实测改写契约/手册/命令树/全表/openapi/代码注释与
+Web 文案**：**断开只关产品侧桥接**，容器内进程可能仍在运行（Docker 不提供 exec 进程的中止接口），
+需清理时用 `exec` 杀进程或重启容器——**不谎称已释放**。
+
+**② 前置**：容器 stop 后申请终端 ⇒ **409** + `容器 sem-ct 未处于运行态（当前 exited）；先 request
+container-functions sem-ct start`（在签发 ticket 时就判，不给「连上就断」）。再 start 即可用。
+
+## §3 跨对象组合（ticket 按资源键隔离）
+
+同一张 ticket 表、不同键前缀（`ct/` 与 `vm/`），实测四态：
+
+| 用例 | 结果 |
+|---|---|
+| 容器票用在 **VM 串口** WS | **401** ✓ |
+| VM 票用在 **容器 shell** WS | **401** ✓ |
+| 容器票用在容器 shell WS（合法但非 WS 握手） | 非 401（票被接受，随即因非握手结束） |
+| 同一容器票**再次**使用 | **401** ✓（一次性） |
+
+## §4 对抗性
+
+- **ticket 过期**：签发后立即用（被接受）→ 等 65 秒（TTL 60s）→ **401** ✓
+- **S 档拒绕**（临时 operator `op-probe2`，验后已删）：
+  - CLI `request container-functions sem-ct shell` ⇒ `%% 无权限执行该命令`（rc=1）
+  - REST `POST …/sem-ct/shell` ⇒ **403**（对照：同一 token 读 `…/logs` ⇒ **200**）
+- **非 TTY（脚本）**：`%% 当前环境不支持交互式容器终端接管（非 TTY）。`——**设计行为**（透传会阻塞脚本），
+  套件按**预期失败**断言（`expect_fail`）。
+
+## §5 三面同源与 Web（Browser Use 黑盒，决策 #141）
+
+入口 `https://192.168.155.129/api/v1/ui/?v=20261003d358b#/compute/containers/sem-ct`（带查询串绕缓存），
+先核当前构建（页面内 `GET /system/version` ⇒ `nfvis: 2.0.0~dev66`）：
+
+- 容器详情页新增**「交互终端」分栏**（与 VM 串口页同一形态：连接按钮 + 输出区 + 输入行 + 断开）；
+- 点「连接容器终端」⇒ `[信息] 已连接 sem-ct 的容器终端（输入命令后回车）。注意：断开只关本页桥接，容器内进程可能仍在运行。`
+  随后出现容器提示符 `/ # `；
+- 输入 `uname -a` ⇒ `Linux ebf1447cc32c 7.0.0-34-generic #34-Ubuntu SMP PREEMPT_DYNAMIC … x86_64 Linux`；
+- 点「断开」⇒ 终端区收起、连接按钮恢复可用；
+- **operator 视角**：三个控件（连接按钮/输入框/发送）computed `display:none`，说明文字保留可见（#327 口径）。
+- 截图 `docs/images/round139-web-container-shell.png`。
+
+## §6 本轮实测修掉 3 处（均真机/交互复现）
+
+1. **会话刚建立就断开**（pty 首次实测）：原实现用 `http.ReadResponse` 取 body —— Go 对 101 的 body
+   语义与本用途不合（读侧立刻 EOF ⇒ 桥接两侧同时结束）。改为**手工解析状态行与响应头**（读掉空行即止），
+   两端都用同一连接（读侧用**自己的** `bufio.Reader` 以免吃掉与响应头同包到达的首批数据）。
+2. **「断开即释放」是想当然**（见 §2①）：对照实验推翻 ⇒ 契约/文档/注释/Web 文案全面改写为实测事实。
+3. **CLI 断开/退出文案写死「串口」**：容器会话也显示「[已退出串口]」；改为按会话种类取词
+   （`consoleKindLabel`，`ConsoleRequest.kind`），`copyConsole` 的标签改为参数传入（单测同步）。
+
+**工具坑（入册）**：`node --check internal/api/ui/app.js` 对**含 `export` 的 ESM 漏报**「字符串里出现真换行」
+这类语法错误（实测 rc=0 而 `vm.runInContext` 报 SyntaxError）——本项目真正拦得住的是
+`contrib/scripts/web-console-config-selftest.sh`（make check 的 toolcheck 里跑）。
+
+## §7 套件（对照 round138 基线）
+
+| 套件 | round138 基线 | 本轮 | 变化说明 |
+|---|---|---|---|
+| `cli-fulltest` | 242/0/15 | **242/0/16** | +1 预期报错：`request container-functions <n> shell` 在脚本（非 TTY）下**预期失败**并指引交互式 CLI；零失败 |
+| `cli-semantic-check` | 26/0/3 | **26/0/3** | 未改语义判据（3 项不可判定＝S11/S12 按设计 + 1） |
+| `cli-lifecycle-check` | 22/0/3 | **23/0/2** | 零失败；**首跑 21/1/3 是工具假红**（见下），修 oracle 后复跑转绿 |
+| `cli-pty-smoke` | 10/10 | **10/10** | 全部通过 |
+
+**首跑 lifecycle 报红的根因与收口（工具假红也是缺陷）**：L2-3「重启后日志有未收敛项」判据是
+`grep 未收敛`，而重启窗口内 15s 巡检的**残渣对账**可能正好落在 VPP 不可用的几秒，打出
+`WARN 残渣对账未收敛项 err=… VPP 未连接 … connection refused …`——那是「**对账没跑成、下轮再来**」，
+**不是**残渣判定。把它算成失败会让干净现场偶发报红。**修法**：判据分清「查不了」与「查到残渣」——
+含 `VPP 未连接` 的行**不计入**判定并单独 `note` 如实报出（不隐藏）；其余照旧计入。
+**已自校准**（合成日志四态：只有查不了⇒判定 0、真残渣⇒判定 1、两者都有⇒1+1、空⇒0）。
+**复跑 23/0/2 零失败**。
+
+**跑套件时撞到的环境事故（如实登记，第二次）**：admin 账号被**口令策略锁定**（`% 登录失败: 连续失败
+次数过多，账号已锁定：…`，决策 #76 的口径按设计生效）。本次锁定发生在阶段 3+4 复跑期间，全量套件日志里
+**零**「登录失败」——即**不是套件自己**造成的；锁定键是**按用户名**（`aaa.lockouts[user]`，阈值 5 次），
+来源未定位到单条命令（如实登记，不猜）。**处置**：等锁定窗口过期后复跑（复跑已全绿）；期间不再做任何可能失败登录的动作。
+另：`sem-vm` 在跑 fulltest 前停掉（让 1G 页），语义夹具用后 `up` 回来。
+
+## §8 未在本轮（如实登记）
+
+- **窗口尺寸同步**不做（Docker exec 有 `resize` API，WS 侧未接）——终端宽度变化不会同步给容器。
+- 完整终端模拟（xterm 类）不引入（免构建约束）；Web 端为纯文本终端（ANSI 剥离后渲染）。
+- 会话不可恢复（关连接即结束产品侧桥接；容器内进程另见 §2①）。
+- `docker attach` 不涉及（那是容器主进程的 stdin，语义不同）。
+
+## §9 环境（本轮结束时）
+
+- 探针账号 `op-probe2` **已删除**（`show users` 只剩 `admin`）；`/tmp/op_probe2.sh` 留在机器上（仅测试脚本，含临时口令，**下轮请删**）。
+- `sem-vm` 在跑 fulltest 前停掉（让 1G 页）；套件跑完按惯例恢复。
+- 历史时序库继续增长（#356）；容器 `sem-ct` running。

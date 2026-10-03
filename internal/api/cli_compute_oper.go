@@ -330,6 +330,8 @@ func (x *cliExecutor) requestContainer(user, class, source string, t []string) s
 		return x.containerLog(name, t[2:])
 	case "exec":
 		return x.containerExec(user, name, t[2:])
+	case "shell":
+		return x.containerShell(user, name, t[2:])
 	case "delete":
 		if ask, ok := confirmOrAsk("Delete container", name, confirmed); !ok {
 			return ask
@@ -366,6 +368,33 @@ func (x *cliExecutor) containerLog(name string, rest []string) string {
 		out += "\n"
 	}
 	return out
+}
+
+// containerShell 打开容器交互式终端（决策 #358）：与 VM 串口 console **同一条接管路径**
+// （签发一次性 ticket → 把 ws 路径交给 CLI 前端 raw 接管 → Ctrl-] 退出），只换文案与资源键。
+//
+// 前置在这里就判（运行态），让操作者拿到能照做的提示，而不是「连上就断」。
+func (x *cliExecutor) containerShell(user, name string, rest []string) string {
+	if len(rest) != 0 {
+		return "%% 语法: request container-functions <name> shell\n"
+	}
+	if x.ct == nil {
+		return "%% 容器编排未接入（Docker 未装配），运行态不可用\n"
+	}
+	if x.issueShell == nil {
+		return "%% 容器终端凭证不可用（服务未装配 ticket 签发）\n"
+	}
+	ctx := context.Background()
+	if st, err := x.ct.ContainerState(ctx, name); err == nil && st != orchestrator.CTStateRunning {
+		return fmt.Sprintf("%% 容器 %s 未处于运行态（当前 %s）；先 request container-functions %s start\n", name, st, name)
+	}
+	wsPath, ttl, err := x.issueShell(name, user)
+	if err != nil {
+		return "%% " + err.Error() + "\n"
+	}
+	x.consolePending = &ConsoleRequest{VM: name, WSURL: wsPath, Kind: "container"}
+	x.audit(user, "container.shell", fmt.Sprintf("open shell %s", name), nil)
+	return fmt.Sprintf("正在打开 %s 的容器终端（Ctrl-] 退出，%d 秒内有效）…\n", name, ttl)
 }
 
 // containerExec 在运行中的容器内执行命令（决策 #357，非交互）。

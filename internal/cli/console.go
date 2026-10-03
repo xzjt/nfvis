@@ -29,7 +29,7 @@ const confirmFlag = "--yes"
 func (r *REPL) runConsole(req *cliclient.ConsoleRequest) {
 	if !r.editor.IsRaw() {
 		// 非 TTY：不做终端接管（透传会阻塞脚本）；给出可复制的手工方式。
-		fmt.Fprintf(r.out, "%% 当前环境不支持交互式串口接管（非 TTY）。\n")
+		fmt.Fprintf(r.out, "%% 当前环境不支持交互式%s接管（非 TTY）。\n", strings.TrimSpace(consoleKindLabel(req)))
 		fmt.Fprintf(r.out, "%% 如需脚本接入：WebSocket %s（需一次性 ticket，请经 API 客户端连接）。\n", req.WSURL)
 		return
 	}
@@ -40,7 +40,7 @@ func (r *REPL) runConsole(req *cliclient.ConsoleRequest) {
 	}
 	defer stream.Close()
 
-	fmt.Fprintf(r.out, "\r\n[已进入 %s 串口，Ctrl-] 退出]\r\n", req.VM)
+	fmt.Fprintf(r.out, "\r\n[已进入 %s%s，Ctrl-] 退出]\r\n", req.VM, consoleKindLabel(req))
 
 	// 服务端 → 本地：原样回显（串口字节流）。EOF/错误即结束，close(done) 通知主循环。
 	done := make(chan struct{})
@@ -49,7 +49,16 @@ func (r *REPL) runConsole(req *cliclient.ConsoleRequest) {
 		close(done)
 	}()
 
-	r.copyConsole(stream, os.Stdin, done)
+	r.copyConsole(stream, os.Stdin, done, strings.TrimSpace(consoleKindLabel(req)))
+}
+
+// consoleKindLabel 会话种类后缀：VM 串口 / 容器终端（决策 #358）。
+// 两类会话走**同一条接管路径**，只有文案不同——故按 Kind 取词，不复制一套接管逻辑。
+func consoleKindLabel(req *cliclient.ConsoleRequest) string {
+	if req != nil && req.Kind == "container" {
+		return " 容器终端"
+	}
+	return " 串口"
 }
 
 // consoleChunk 本地输入的一小片字节（data 非空）或结束信号（err 非 nil）。
@@ -101,14 +110,14 @@ func pumpConsoleInput(stop <-chan struct{}, in io.Reader) <-chan consoleChunk {
 //
 // 参数皆可注入（stream 为可写端、localIn 为本地输入、done 在服务端断开时关闭），
 // 便于单测在没有真实 TTY/WebSocket 的情况下复现旧阻塞：断言「服务端断开后限时返回」。
-func (r *REPL) copyConsole(stream io.Writer, localIn io.Reader, done <-chan struct{}) {
+func (r *REPL) copyConsole(stream io.Writer, localIn io.Reader, done <-chan struct{}, label string) {
 	stop := make(chan struct{})
 	defer close(stop)
 	in := pumpConsoleInput(stop, localIn)
 	for {
 		select {
 		case <-done:
-			fmt.Fprintf(r.out, "\r\n[串口已断开]\r\n")
+			fmt.Fprintf(r.out, "\r\n[%s已断开]\r\n", label)
 			return
 		case c, ok := <-in:
 			if !ok { // 输入协程已结束（stop 生效）：静默返回
@@ -116,11 +125,11 @@ func (r *REPL) copyConsole(stream io.Writer, localIn io.Reader, done <-chan stru
 			}
 			if len(c.data) > 0 {
 				if c.data[0] == consoleExitByte {
-					fmt.Fprintf(r.out, "\r\n[已退出串口]\r\n")
+					fmt.Fprintf(r.out, "\r\n[已退出%s]\r\n", label)
 					return
 				}
 				if _, werr := stream.Write(c.data); werr != nil {
-					fmt.Fprintf(r.out, "\r\n[串口写入失败: %v]\r\n", werr)
+					fmt.Fprintf(r.out, "\r\n[%s写入失败: %v]\r\n", label, werr)
 					return
 				}
 			}

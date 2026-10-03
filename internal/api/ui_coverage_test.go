@@ -130,6 +130,8 @@ var uiDynamicWired = map[string]string{
 	"/container-functions/{name}:restart":                             "ctAction()：POST …/{name}:restart",
 	"/container-functions/{name}/logs":                                "ctLogsLoad()：fetch('/container-functions/' + name + '/logs?tail=200')",
 	"/container-functions/{name}:exec":                                "ctExecRun()：POST …/{name}:exec（容器详情页「执行命令」卡；S 档，入口按 data-write 门禁）",
+	"/container-functions/{name}/shell":                               "ctShellOpen()：POST …/{name}/shell（容器详情页「交互终端」分栏，一次性 ticket；S 档，入口按 data-write 门禁）",
+	"/container-functions/{name}/shell/ws":                            "ctShellOpen()：WebSocket 连 res.ws_url（ticket 鉴权；字节原样透传 + 前端剥离 ANSI）",
 	"/virtual-machine-functions/{name}/console":                       "vmConsoleOpen()：api('/virtual-machine-functions/' + name + '/console')",
 	"/virtual-machine-functions/{name}/snapshots":                     "vmSnapLoad()/vmSnapCreate()：api(… + '/snapshots')",
 	"/virtual-machine-functions/{name}/snapshots/{snapshot}":          "vmSnapAct()：DELETE …/snapshots/{snapshot}",

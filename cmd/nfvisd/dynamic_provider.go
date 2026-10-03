@@ -355,6 +355,14 @@ func (h *containerHolder) ContainerExec(ctx context.Context, name, command strin
 	return container.ExecResult{}, errContainerNotConnected
 }
 
+// ContainerShell 未接入 ⇒ 与 containerLog nil 分支同文案的错误（决策 #358）。
+func (h *containerHolder) ContainerShell(ctx context.Context, name string) (io.ReadWriteCloser, error) {
+	if p := h.current(); p != nil {
+		return p.ContainerShell(ctx, name)
+	}
+	return nil, errContainerNotConnected
+}
+
 // EnsureConsistent 未接入 ⇒ 空结果（恢复收敛不产生噪声）。
 func (h *containerHolder) EnsureConsistent(ctx context.Context, cfg model.Config) []error {
 	if p := h.current(); p != nil {

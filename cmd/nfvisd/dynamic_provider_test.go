@@ -236,6 +236,10 @@ func (f *fakeContainer) ContainerExec(_ context.Context, name, command string, _
 	return container.ExecResult{}, nil
 }
 
+func (f *fakeContainer) ContainerShell(_ context.Context, name string) (io.ReadWriteCloser, error) {
+	return nil, nil
+}
+
 func (f *fakeContainer) EnsureConsistent(_ context.Context, cfg model.Config) []error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

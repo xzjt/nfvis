@@ -171,11 +171,20 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	})
 	// M4-12：CLI `request … console` 复用 console 端点同一 ticket 表（ws 桥接与审计同源）
 	s.cliExec.issueConsole = func(vm, user string) (string, int, error) {
-		tok, ttl, err := s.consoleTix.issue(vm, user)
+		tok, ttl, err := s.consoleTix.issue(vmConsoleResource(vm), user)
 		if err != nil {
 			return "", 0, err
 		}
 		return fmt.Sprintf("%s/virtual-machine-functions/%s/console/ws?ticket=%s", APIPrefix, vm, tok), ttl, nil
+	}
+	// 决策 #358：CLI `request container-functions <n> shell` 与 REST 端点**共用同一 ticket 表**
+	// （WS 桥接与审计同源；资源键前缀隔离，一张表的 ticket 开不了另一类会话）。
+	s.cliExec.issueShell = func(name, user string) (string, int, error) {
+		tok, ttl, err := s.consoleTix.issue(ctShellResource(name), user)
+		if err != nil {
+			return "", 0, err
+		}
+		return fmt.Sprintf("%s/container-functions/%s/shell/ws?ticket=%s", APIPrefix, name, tok), ttl, nil
 	}
 	mux := http.NewServeMux()
 
@@ -295,6 +304,9 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("DELETE "+APIPrefix+"/container-functions/{name}", cfgAPI(s.handleDeleteContainer))
 	mux.Handle("GET "+APIPrefix+"/container-functions/{name}/logs", s.auth(s.handleContainerLogs, schema.ClassReadOnly, "request container-functions log"))
 	mux.Handle("POST "+APIPrefix+"/container-functions/{tail...}", s.auth(s.dispatchContainerPost, schema.ClassSuperUser, "request container-functions"))
+	// 决策 #358：容器交互式终端（与 VM 串口 console 同一套 ticket + WS 管线）
+	mux.Handle("POST "+APIPrefix+"/container-functions/{name}/shell", s.auth(s.handleContainerShellTicket, schema.ClassSuperUser, "request container-functions shell"))
+	mux.Handle("GET "+APIPrefix+"/container-functions/{name}/shell/ws", http.HandlerFunc(s.handleContainerShellWS))
 
 	// M4-8：镜像仓库（FR-CMP-030~033）
 	mux.Handle("GET "+APIPrefix+"/images", s.auth(s.handleListImages, schema.ClassReadOnly, "show images"))
