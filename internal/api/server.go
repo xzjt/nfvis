@@ -20,6 +20,7 @@ import (
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/events"
+	"github.com/xzjt/nfvis/internal/metricshist"
 	"github.com/xzjt/nfvis/internal/schema"
 	"github.com/xzjt/nfvis/internal/state"
 	ksys "github.com/xzjt/nfvis/internal/system"
@@ -33,39 +34,47 @@ var VersionStr = "1.0.0-dev"
 
 // Options server 可选项。
 type Options struct {
-	Addr         string // 监听地址（默认 :443）
-	TLSCert      string // TLS 证书路径（FR-API-001，HTTPS；与 TLSKey 成对）
-	TLSKey       string // TLS 私钥路径；二者为空 = 明文 HTTP（仅限开发/测试）
-	Log          *slog.Logger
-	VPP          VppController           // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
-	L2           L2Runtime               // L2 运行态查询（M3-3；nil = mac-table 503）
-	L3           L3Runtime               // L3 运行态查询（M3-4；nil = routes 503）
-	LLDP         LldpRuntime             // LLDP 邻居（M3-6；nil = 503）
-	State        *state.State            // 运行态聚合（M3-7；nil = 省略运行态字段）
-	SRIOV        SRIOVSetter             // SR-IOV VF 数量（M3-7；nil = 503）
-	DPDK         DPDKSetter              // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72；nil = 503）
-	Kernel       ksys.KernelApplier      // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
-	Hugepages    ksys.HugepagePoolSetter // 大页池回收（FR-SYS-002，决策 #329；nil = 命令/端点报未接入）
-	HugepageRoot string                  // 大页池 sysfs 根（决策 #329；空 = "/"，测试注入临时目录）
-	NAT          NatSessionsRuntime      // NAT 会话（M3-7；nil = 503）
-	Alarms       AlarmRuntime            // 告警列表（M3-8；nil = 503）
-	Diag         DiagRuntime             // CLI 诊断命令（M3-9；nil = 命令报不可用）
-	VM           VMRuntime               // VM 生命周期（M4-3；nil = 生命周期动作 503、状态省略）
-	VMConsole    VMConsoleRuntime        // VM 串口 console（M4-5；nil = console 端点 503）
-	VMSnapshots  VMSnapshotRuntime       // VM 快照（M4-6；nil = 快照端点 503）
-	Containers   ContainerRuntime        // 容器生命周期/日志（M4-7；nil = 503）
-	Images       ImagesRuntime           // 镜像仓库（M4-8；nil = 503）
-	Events       *events.Bus             // 事件总线（M5-1；nil = /events 503）
-	SysOps       SystemOpsRuntime        // 备份/恢复/恢复出厂（M5-6；nil = 503）
-	DiagOps      DiagOpsRuntime          // 诊断归档/core dump（M5-4；nil = 503）
-	LogSource    func() ([]byte, error)  // 系统日志来源（M5-9 show log system；nil = 报不可用）
-	Capture      CaptureRuntime          // 数据面抓包（M5-3；nil = 503）
-	Software     SoftwareRuntime         // 软件升级/电源/NTP（M5-7；nil = 503）
-	Hardware     HardwareRuntime         // 硬件健康采集（M5-5；nil = 503）
-	TLS          TlsRuntime              // 证书管理（M5-8；nil = 503）
-	Ports        PortInventory           // 运行态端口清单（决策 #83；nil = 接口名无动态候选）
-	VppState     VppStateRuntime         // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
-	Versions     VersionsRuntime         // 组件版本探测（R37-2 收口，决策 #118；nil = 只回 NFViS 版本）
+	Addr           string // 监听地址（默认 :443）
+	TLSCert        string // TLS 证书路径（FR-API-001，HTTPS；与 TLSKey 成对）
+	TLSKey         string // TLS 私钥路径；二者为空 = 明文 HTTP（仅限开发/测试）
+	Log            *slog.Logger
+	VPP            VppController           // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
+	L2             L2Runtime               // L2 运行态查询（M3-3；nil = mac-table 503）
+	L3             L3Runtime               // L3 运行态查询（M3-4；nil = routes 503）
+	LLDP           LldpRuntime             // LLDP 邻居（M3-6；nil = 503）
+	State          *state.State            // 运行态聚合（M3-7；nil = 省略运行态字段）
+	SRIOV          SRIOVSetter             // SR-IOV VF 数量（M3-7；nil = 503）
+	DPDK           DPDKSetter              // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72；nil = 503）
+	Kernel         ksys.KernelApplier      // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
+	Hugepages      ksys.HugepagePoolSetter // 大页池回收（FR-SYS-002，决策 #329；nil = 命令/端点报未接入）
+	HugepageRoot   string                  // 大页池 sysfs 根（决策 #329；空 = "/"，测试注入临时目录）
+	NAT            NatSessionsRuntime      // NAT 会话（M3-7；nil = 503）
+	Alarms         AlarmRuntime            // 告警列表（M3-8；nil = 503）
+	Diag           DiagRuntime             // CLI 诊断命令（M3-9；nil = 命令报不可用）
+	VM             VMRuntime               // VM 生命周期（M4-3；nil = 生命周期动作 503、状态省略）
+	VMConsole      VMConsoleRuntime        // VM 串口 console（M4-5；nil = console 端点 503）
+	VMSnapshots    VMSnapshotRuntime       // VM 快照（M4-6；nil = 快照端点 503）
+	Containers     ContainerRuntime        // 容器生命周期/日志（M4-7；nil = 503）
+	Images         ImagesRuntime           // 镜像仓库（M4-8；nil = 503）
+	Events         *events.Bus             // 事件总线（M5-1；nil = /events 503）
+	SysOps         SystemOpsRuntime        // 备份/恢复/恢复出厂（M5-6；nil = 503）
+	DiagOps        DiagOpsRuntime          // 诊断归档/core dump（M5-4；nil = 503）
+	LogSource      func() ([]byte, error)  // 系统日志来源（M5-9 show log system；nil = 报不可用）
+	Capture        CaptureRuntime          // 数据面抓包（M5-3；nil = 503）
+	Software       SoftwareRuntime         // 软件升级/电源/NTP（M5-7；nil = 503）
+	Hardware       HardwareRuntime         // 硬件健康采集（M5-5；nil = 503）
+	TLS            TlsRuntime              // 证书管理（M5-8；nil = 503）
+	Ports          PortInventory           // 运行态端口清单（决策 #83；nil = 接口名无动态候选）
+	VppState       VppStateRuntime         // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
+	Versions       VersionsRuntime         // 组件版本探测（R37-2 收口，决策 #118；nil = 只回 NFViS 版本）
+	MetricsHistory *MetricsHistoryOptions  // 历史时序存储（决策 #356；nil = 未启用）
+}
+
+// MetricsHistoryOptions 历史时序存储的装配信息（决策 #356）。Store 为空时仍如实回报路径与原因。
+type MetricsHistoryOptions struct {
+	Store    *metricshist.Store // 历史时序库（nil = 打不开/未启用）
+	Path     string             // 库文件路径（Store 为空时也如实回报）
+	Disabled string             // 未启用/不可用的原因（如实回报，不编造）
 }
 
 // Server NFViS REST server。
@@ -102,6 +111,7 @@ type Server struct {
 	kernel       ksys.KernelApplier      // 内核启动基线落地（决策 #146：REST 侧与 CLI 共用同一实现）
 	hugepage     ksys.HugepagePoolSetter // 大页池回收（决策 #329：REST 侧与 CLI 共用同一实现）
 	hugepageRoot string                  // 大页池 sysfs 根（决策 #329；空 = "/"）
+	history      *MetricsHistoryOptions  // 历史时序存储（决策 #356；nil = 未启用）
 	consoleTix   *consoleTickets
 	log          *slog.Logger
 	mux          *http.ServeMux
@@ -124,6 +134,8 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	// 首启引导打印的一次性口令——三个出口（含诊断归档）共用同一份脱敏实现。
 	logs := scrubLogSource(opts.LogSource)
 	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, vppState: opts.VppState, sriov: opts.SRIOV, dpdk: opts.DPDK, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, ports: opts.Ports, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), versions: opts.Versions, logs: logs, diag: opts.Diag, log: log}
+	s.history = opts.MetricsHistory
+	s.cliExec.setMetricsHistory(s.metricsHistoryView) // 决策 #356：CLI 渲染与 REST 同一读视图
 	s.cliExec.setRuntime(opts.Diag, opts.State)
 	s.cliExec.setPorts(opts.Ports)       // 决策 #83：show 的空态与 Tab 候选同源
 	s.cliExec.setVppCtl(opts.VPP)        // 发现 #11：show vpp 的版本/连接/待重启
@@ -298,6 +310,9 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/events", s.auth(s.handleEvents, schema.ClassReadOnly))
 	// M5-2：Prometheus 指标（契约 security: []，无鉴权，FR-SYS-005）
 	mux.Handle("GET "+APIPrefix+"/metrics", http.HandlerFunc(s.handleMetrics))
+	// 决策 #356：历史时序读视图（运维读视图，**要求 Bearer**——与 /metrics 的
+	// 无鉴权是刻意的不对称：抓取方不需要历史，操作者需要）。
+	mux.Handle("GET "+APIPrefix+"/metrics/history", s.auth(s.handleMetricsHistory, schema.ClassReadOnly, "show system metrics history"))
 	// V1 收尾：OpenAPI 规范运行时副本（契约 security: []，无鉴权，FR-API-002/决策 #69）
 	mux.Handle("GET "+APIPrefix+"/openapi.json", http.HandlerFunc(s.handleOpenAPISpec))
 	// 决策 #115：Web 控制面增量 1（只读总览）——免构建前端随二进制内嵌、同源托管。

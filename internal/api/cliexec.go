@@ -97,28 +97,32 @@ type cliExecutor struct {
 	snaps        VMSnapshotRuntime
 	ct           ContainerRuntime
 	images       ImagesRuntime
-	ports        PortInventory               // 运行态端口清单（决策 #83；nil = show 空态不列端口）
-	vppState     VppStateRuntime             // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
-	vpp          VppController               // VPP 连接管理器（show vpp 的版本/待重启；发现 #11）
-	sys          SystemOpsRuntime            // 备份/恢复/恢复出厂（M5-6；nil = 命令报未接入）
-	diagOps      DiagOpsRuntime              // 诊断归档/core dump（M5-4；nil = 命令报未接入）
-	logs         func() ([]byte, error)      // 系统日志来源（show log system，M5-9；nil = 报不可用）
-	capture      CaptureRuntime              // 数据面抓包（M5-3；nil = 报未接入）
-	sw           SoftwareRuntime             // 软件升级/电源/NTP（M5-7；nil = 报未接入）
-	hw           HardwareRuntime             // 硬件健康（M5-5；nil = 报未接入）
-	sriov        SRIOVSetter                 // SR-IOV VF 数量（M3-7；nil = 命令报未接入）
-	dpdk         DPDKSetter                  // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72）
-	kernel       ksys.KernelApplier          // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
-	hugepages    ksys.HugepagePoolSetter     // 大页池回收（FR-SYS-002，决策 #329；nil = 命令报未接入）
-	hugepageRoot string                      // 大页池 sysfs 根（决策 #329；空 = "/"，测试注入临时目录）
-	tlsR         TlsRuntime                  // 证书管理（M5-8；nil = 报未接入）
-	vppRestart   func(context.Context) error // request vpp restart（M5-9；nil = 报未接入）
-	events       *events.Bus                 // 事件总线（M5-1；nil = 不发布）
-	versions     VersionsRuntime             // 组件版本探测（R37-2 收口，决策 #118；nil = show version 只印 NFViS）
-	tokens       tokenAdmin                  // 活动会话清单/逐 token 吊销（决策 #301；nil = 命令报未接入）
-	perms        permissionResolver          // 生效权限视图的 class 解析（决策 #304；nil = 命令报未接入）
-	mu           sync.Mutex
-	sess         map[string]*cliSession
+	ports        PortInventory           // 运行态端口清单（决策 #83；nil = show 空态不列端口）
+	vppState     VppStateRuntime         // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
+	vpp          VppController           // VPP 连接管理器（show vpp 的版本/待重启；发现 #11）
+	sys          SystemOpsRuntime        // 备份/恢复/恢复出厂（M5-6；nil = 命令报未接入）
+	diagOps      DiagOpsRuntime          // 诊断归档/core dump（M5-4；nil = 命令报未接入）
+	logs         func() ([]byte, error)  // 系统日志来源（show log system，M5-9；nil = 报不可用）
+	capture      CaptureRuntime          // 数据面抓包（M5-3；nil = 报未接入）
+	sw           SoftwareRuntime         // 软件升级/电源/NTP（M5-7；nil = 报未接入）
+	hw           HardwareRuntime         // 硬件健康（M5-5；nil = 报未接入）
+	sriov        SRIOVSetter             // SR-IOV VF 数量（M3-7；nil = 命令报未接入）
+	dpdk         DPDKSetter              // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72）
+	kernel       ksys.KernelApplier      // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
+	hugepages    ksys.HugepagePoolSetter // 大页池回收（FR-SYS-002，决策 #329；nil = 命令报未接入）
+	hugepageRoot string                  // 大页池 sysfs 根（决策 #329；空 = "/"，测试注入临时目录）
+	// metricsHistoryView 历史时序读视图（决策 #356）：`show system metrics history` 的文本渲染
+	// 与 REST `GET /metrics/history` **同一实现**（三面同源）。由 Server.New 注入；nil = 未接入
+	// （测试可省略），此时命令如实报「历史时序存储未启用」。
+	metricsHistoryView func(name string, since, until, step int64, limit int) map[string]any
+	tlsR               TlsRuntime                  // 证书管理（M5-8；nil = 报未接入）
+	vppRestart         func(context.Context) error // request vpp restart（M5-9；nil = 报未接入）
+	events             *events.Bus                 // 事件总线（M5-1；nil = 不发布）
+	versions           VersionsRuntime             // 组件版本探测（R37-2 收口，决策 #118；nil = show version 只印 NFViS）
+	tokens             tokenAdmin                  // 活动会话清单/逐 token 吊销（决策 #301；nil = 命令报未接入）
+	perms              permissionResolver          // 生效权限视图的 class 解析（决策 #304；nil = 命令报未接入）
+	mu                 sync.Mutex
+	sess               map[string]*cliSession
 	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
 	structured any
 	// structuredPath structured 在整配置中的绝对路径（display set 反推语句时作前缀，
@@ -220,6 +224,12 @@ func (x *cliExecutor) setKernel(k ksys.KernelApplier) { x.kernel = k }
 
 // setHugepages 注入大页池写能力（决策 #329：request system hugepages reclaim）。
 func (x *cliExecutor) setHugepages(h ksys.HugepagePoolSetter) { x.hugepages = h }
+
+// setMetricsHistory 注入历史时序读视图构建器（决策 #356）：CLI 渲染与 REST 端点共用
+// 同一份视图（三面同源），执行器不自己另查一遍。nil = 命令如实报「未启用」。
+func (x *cliExecutor) setMetricsHistory(view func(name string, since, until, step int64, limit int) map[string]any) {
+	x.metricsHistoryView = view
+}
 
 // setTLS 注入证书管理（M5-8）。
 func (x *cliExecutor) setTLS(t TlsRuntime) { x.tlsR = t }
@@ -634,7 +644,7 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 	if len(t) >= 2 && t[0] == "vpp" && t[1] == "capture" {
 		return x.execShowVppCapture() // M5-3：抓包会话状态与已导出 pcap 清单
 	}
-	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class> [detail]|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | port-mirroring | dns proxy | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions | system api tokens\n"
+	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class> [detail]|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|metrics history [name <metric> [last <duration>] [step <duration>]]|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | port-mirroring | dns proxy | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions | system api tokens\n"
 }
 
 // invalidShowConfiguration：`show configuration <未知/多余 token>` 的统一报错
@@ -1109,10 +1119,22 @@ func (x *cliExecutor) cfgRollback(user, source string, args []string) string {
 // nat 同属此类（round84 R84-26）：删光池/规则/静态映射后留下空 `nat = {}`，
 // `show configuration | display set` 反推不出任何语句、回放自校验对不上而报内部错误
 // （自校验没错，错在空壳；空 `nat` 节点同样让「配置过又删光」与「从未配置 NAT」不可区分）。
+//
+// system.metrics（决策 #356）同理：`delete system metrics history interval|retention-days`
+// 删光两个叶子后留下 `system.metrics.history = {}`，反推不出语句、回放自校验报内部错误。
+// 它比 management 还多一层（空壳在 history 上、容器 metrics 因此在），故先剪内层再判外层。
 func pruneEmptySingleton(tree map[string]any) {
 	if sys, ok := tree["system"].(map[string]any); ok {
 		if mgmt, ok := sys["management"].(map[string]any); ok && len(mgmt) == 0 {
 			delete(sys, "management")
+		}
+		if met, ok := sys["metrics"].(map[string]any); ok {
+			if hist, ok := met["history"].(map[string]any); ok && isEmptyShell(hist) {
+				delete(met, "history")
+			}
+			if isEmptyShell(met) {
+				delete(sys, "metrics")
+			}
 		}
 	}
 	if nat, ok := tree["nat"].(map[string]any); ok && isEmptyShell(nat) {

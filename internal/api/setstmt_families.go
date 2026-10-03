@@ -211,6 +211,28 @@ func emitSystemFamily(w *stmtWriter, node *schema.Node, val any, prefix, keyPath
 			w.add(toks(prefix, "local", "max-size-mb", formatScalar(v)))
 		}
 		return nil
+	case "system metrics", "system metrics history":
+		// 历史时序存储（决策 #356）：模型键 interval_seconds/retention_days 与树叶子
+		// interval/retention-days 词形不同、且多一层 history，机械逆走查不到，须显式发射。
+		// 两字段均为 omitempty：0/未设置不发射（空 metrics 对象不产生任何语句）。
+		m, ok := val.(map[string]any)
+		if !ok {
+			return nil
+		}
+		if kpOf(keyPath) == "system metrics" { // 顶层进入：val 是 metrics 对象，history 在下一层
+			h, ok := m["history"].(map[string]any)
+			if !ok {
+				return nil
+			}
+			m, prefix = h, toks(prefix, "history")
+		}
+		if v, ok := m["interval_seconds"].(float64); ok && v != 0 {
+			w.add(toks(prefix, "interval", formatScalar(v)))
+		}
+		if v, ok := m["retention_days"].(float64); ok && v != 0 {
+			w.add(toks(prefix, "retention-days", formatScalar(v)))
+		}
+		return nil
 	default:
 		// system kernel（全机械）、system login password-policy（值叶子机械）等
 		return emitMechanicalInner(w, node, val, prefix, keyPath)

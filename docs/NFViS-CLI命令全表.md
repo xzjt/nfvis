@@ -67,6 +67,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show system storage` | 磁盘与镜像仓库占用 | 运行态 + 镜像仓库 | ✅ |
 | `show system hugepages` | 大页池数字：声明（配置唯一真源）/ 内核实际（sysfs）/ 在用（= 实际 − 空闲）/ **实际持有**（按 `/proc/*/smaps` 的 hugetlb 映射按 inode 去重汇总）/**数据面占用**（= 实际持有中 comm=vpp 的进程提交的页，实测归属；决策 #353）/**无主占用**（= 在用 − 持有，决策 #346）+ 空闲（可分配）与可回收（决策 #329/#346/#353，与 `GET /system/hugepages` 同源；**无主占用页不可回收**、只作可见性 + `HUGEPAGE_POOL_ORPHAN` 告警；1G 池「数据面占用 ≥1」时说明区给出「VNF 可起页数 = 空闲页数」——VPP 主堆固定占 1 个 1G 页、无配置键可释放；取不到内核值/持有值/占用值时如实显示「取不到」，不编造） | `GET /system/hugepages` | ✅ |
 | `show system kernel` | 内核启动基线三方对照（cmdline/运行实际/配置期望，FR-SYS-014） | 配置 + 运行态 | ✅ |
+| `show system metrics history` | 历史时序**概览**（决策 #356）：存储状态（可用/不可用 + 原因）、生效采样间隔与保留天数、库大小、序列数、样本数、时间范围（最旧/最新）、上次采样时刻与是否停滞（stale）。数据源＝独立 SQLite 库 `/var/lib/nfvis/metrics.db`（`/metrics` 的历史底座） | `GET /metrics/history` | ✅ |
+| `show system metrics history name <metric> [last <duration>] [step <duration>]` | 某指标**各序列**（按标签分组）的时间点；`<metric>` 走动态候选（来源＝存储内已知指标名）；`last` 默认 1h、`step` 省略=自动降采样（取桶内最后一个样本）；存储不可用/无数据时如实说明，不编造 | `GET /metrics/history?name=…` | ✅ |
 | `show system hardware` | 硬件健康：温度/风扇/电源/SMART（FR-SYS-012） | `GET /system/hardware` | ✅（本机无 IPMI/传感器，走降级路径） |
 | `show system core-dumps` | 崩溃转储清单（VPP/QEMU/nfvisd） | `GET /system/core-dumps` | ✅ |
 | `show system tech-support` | 诊断归档清单 | `GET /system/tech-support` | ✅ |
@@ -279,6 +281,9 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set system login password-policy lockout-threshold <n>` | 连续失败锁定阈值 | 配置库 | ✅ |
 | `set system login password-policy lockout-minutes <n>` | 锁定时长（**独立语句**，决策 #76） | 配置库 | ✅ |
 | `set system idle-timeout-minutes <n>` | CLI 空闲超时（默认 10，FR-SEC-005） | 会话态 | ✅ |
+| `set system metrics history interval <n>` | 历史采样间隔（秒，默认 60，10..3600；改配置无需重启即生效，决策 #356） | 后台采样器 → `/var/lib/nfvis/metrics.db` | 🚫 本轮新增（决策 #356）：单测覆盖；已入 fulltest 阶段 2，真机复跑待执行（决策 #319） |
+| `set system metrics history retention-days <n>` | 历史保留天数（默认 7，1..365；另有 2,000,000 行硬顶兜底，决策 #356） | 后台采样器裁剪 | 🚫 本轮新增（决策 #356）：同上 |
+| `delete system metrics history interval\|retention-days` | 回落默认（字段缺省＝用默认值，决策 #356） | 配置库 | 🚫 本轮新增（决策 #356）：同上 |
 
 ### 2.2b `protocols`（顶级层级，FR-NET-018）
 

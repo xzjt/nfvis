@@ -556,6 +556,66 @@ func TestValidateSyslogRemoteFields(t *testing.T) {
 	mustNoErr(t, Validate(ok))
 }
 
+// 决策 #356：历史时序存储的采样间隔/保留天数——仅非零时校验范围，0 = 未设置（允许，用默认）。
+func TestValidateMetricsHistory(t *testing.T) {
+	withHist := func(iv, rd int) Config {
+		c := validBase()
+		c.System.Metrics = &MetricsConfig{History: &MetricsHistoryConfig{IntervalSeconds: iv, RetentionDays: rd}}
+		return c
+	}
+
+	// 合法值（含边界）
+	mustNoErr(t, Validate(withHist(60, 7)))
+	mustNoErr(t, Validate(withHist(MetricsIntervalMinSeconds, MetricsRetentionDaysMin)))
+	mustNoErr(t, Validate(withHist(MetricsIntervalMaxSeconds, MetricsRetentionDaysMax)))
+
+	// 0 = 未设置（字段缺省），允许
+	mustNoErr(t, Validate(withHist(0, 0)))
+
+	// 低于下界：报错须含范围与越界值（保留天数的下界是 1，0 即「未设置」哨兵，
+	// 故「低于下界」只能用负数覆盖——MIN-1 会等于 0 而被当作未设置）
+	mustErrContaining(t, Validate(withHist(MetricsIntervalMinSeconds-1, 7)),
+		"system.metrics.history.interval_seconds", "10-3600")
+	mustErrContaining(t, Validate(withHist(60, -1)),
+		"system.metrics.history.retention_days", "1-365")
+
+	// 高于上界：报错须含范围
+	mustErrContaining(t, Validate(withHist(MetricsIntervalMaxSeconds+1, 7)),
+		"system.metrics.history.interval_seconds", "10-3600")
+	mustErrContaining(t, Validate(withHist(60, MetricsRetentionDaysMax+1)),
+		"system.metrics.history.retention_days", "1-365")
+
+	// 负数同样越界
+	mustErrContaining(t, Validate(withHist(-1, -1)),
+		"system.metrics.history.interval_seconds", "10-3600")
+
+	// 空壳（metrics 有、history 缺）不报错
+	c := validBase()
+	c.System.Metrics = &MetricsConfig{}
+	mustNoErr(t, Validate(c))
+
+	// 访问器：缺省/越界回落默认，合法值原样
+	okCfg := withHist(120, 30)
+	if got := okCfg.MetricsHistoryIntervalSeconds(); got != 120 {
+		t.Fatalf("合法采样间隔应原样返回，实得 %d", got)
+	}
+	emptyCfg := Config{}
+	if got := emptyCfg.MetricsHistoryIntervalSeconds(); got != MetricsIntervalDefaultSeconds {
+		t.Fatalf("缺省采样间隔应回落默认 %d，实得 %d", MetricsIntervalDefaultSeconds, got)
+	}
+	overCfg := withHist(MetricsIntervalMaxSeconds+1, 0)
+	if got := overCfg.MetricsHistoryIntervalSeconds(); got != MetricsIntervalDefaultSeconds {
+		t.Fatalf("越界采样间隔应回落默认 %d，实得 %d", MetricsIntervalDefaultSeconds, got)
+	}
+	overRet := withHist(0, 400)
+	if got := overRet.MetricsHistoryRetentionDays(); got != MetricsRetentionDaysDefault {
+		t.Fatalf("越界保留天数应回落默认 %d，实得 %d", MetricsRetentionDaysDefault, got)
+	}
+	if got := (*Config)(nil).MetricsHistoryRetentionDays(); got != MetricsRetentionDaysDefault {
+		t.Fatalf("nil 接收者应回落默认 %d，实得 %d", MetricsRetentionDaysDefault, got)
+	}
+}
+
 // 决策 #352：ACL 规则只匹配单族——两侧都写显式前缀时，混族（v4 与 v6）在校验期拒绝；
 // 双族过滤的正解是两条规则（各自同族，any 一侧由编排层跟随显式侧家族）。
 func TestValidateAclMixedFamilyRejected(t *testing.T) {

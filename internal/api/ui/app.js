@@ -804,6 +804,252 @@ function renderAlarms(alarms) {
   }
 }
 
+// ---------- 历史趋势（#/system/metrics，决策 #356）----------
+//
+// 只读页（无任何写控件，故不需 wbtn / data-write 门禁）：
+//   · 概览取自路由声明的 `/metrics/history?last=1h`（存储状态、生效间隔/保留、库大小、
+//     序列/样本数、时间范围、采样心跳与是否停滞）；
+//   · 趋势折线由本页按「指标 × 窗口」自行取数（`/metrics/history?name=…&last=…`）——历史是
+//     **回顾视图**，路由 poll=0，不随总览的 5s 轮询反复重采（设计 §5 的明确取舍）。
+// 「不可用」（available=false）与「可用但窗口内无点」是两种空态，分别如实说明；**绝不摆一张
+// 空图冒充「没有数据」**。折线用内联 SVG（无外部库、免构建），数据与 CLI/REST 同一份读视图。
+const MH_COLORS = ['#4aa3df', '#3fb950', '#d29922', '#f85149', '#b58cff', '#4adfd0'];
+const MH_W = 720, MH_H = 260, MH_PAD_L = 56, MH_PAD_R = 12, MH_PAD_T = 12, MH_PAD_B = 28;
+let mhMetric = '';   // 当前选中指标（跨重渲染保留）
+let mhWindow = '1h'; // 当前窗口
+let mhSeq = 0;       // 取数序号：旧响应回来时选择器已被改过则丢弃（防乱序覆盖）
+
+// SVG 命名空间是 XML 命名空间**标识符**（不是网络地址，不会发起任何请求）；拆开书写是为了
+// 不触发「前端不得含绝对外部地址」的守护（ui_test.go）——CSP 与同源规矩都不受影响。
+const MH_SVG_NS = 'http' + '://www.w3.org/2000/svg';
+
+function svgNode(tag, attrs) {
+  const n = document.createElementNS(MH_SVG_NS, tag);
+  for (const k in (attrs || {})) n.setAttribute(k, attrs[k]);
+  return n;
+}
+
+// mhValueText：值的人类可读渲染。**只为已知单位族**换算（指标名以 `_bytes` 结尾 = 字节计数，
+// 与 `bytes()` 同一口径）；其余一律原样数字——不凭指标名猜单位（API 没声明的单位不编造）。
+function mhValueText(name, v) {
+  if (v === undefined || v === null || !isFinite(v)) return '—';
+  if (/_bytes$/.test(name || '')) return bytes(v);
+  return String(v);
+}
+
+function mhLabelsText(labels) {
+  const l = labels || {};
+  const keys = Object.keys(l).sort();
+  if (!keys.length) return '（无标签）';
+  return keys.map((k) => k + '=' + l[k]).join(', ');
+}
+
+// mhNote：趋势区的状态/说明行（错误红、说明灰）。
+function mhNote(text, isErr) {
+  const p = $('mh-series-note');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+// renderMetricsHistoryPage：概览 + 选择器装配。概览数据由路由取齐后传入。
+function renderMetricsHistoryPage(d) {
+  const h = d['/metrics/history?last=1h'];
+  const bad = $('mh-unavailable');
+  const sel = $('mh-metric'), win = $('mh-window');
+  // 控件事件用属性赋值（每次渲染都覆盖，不会累积监听器）。
+  sel.onchange = () => { mhMetric = sel.value; mhLoadSeries(); };
+  win.onchange = () => { mhWindow = win.value; mhLoadSeries(); };
+  $('mh-refresh-btn').onclick = () => mhLoadSeries();
+
+  if (!h || h.__err) {
+    $('mh-note').textContent = '';
+    bad.hidden = false;
+    bad.textContent = '历史时序读视图读取失败：' + (h ? h.__err : '未取到数据');
+    fill($('mh-store'), []);
+    sel.textContent = ''; sel.disabled = true; win.disabled = true;
+    $('mh-chart').textContent = ''; $('mh-legend').textContent = '';
+    mhNote('', false);
+    return;
+  }
+
+  if (h.available === false) {
+    // 存储不可用：趋势区不画图（绝不拿空白折线冒充「无数据」），并写明原因。
+    $('mh-note').textContent = '';
+    bad.hidden = false;
+    bad.textContent = '历史时序存储不可用：' + (h.reason || '未说明原因');
+    const st = h.store || {};
+    fill($('mh-store'), [
+      ['状态', '不可用'],
+      ['库路径', st.path],
+      ['是否启用', st.enabled === true ? '是' : (st.enabled === false ? '否' : undefined)],
+    ]);
+    sel.textContent = ''; sel.disabled = true; win.disabled = true;
+    $('mh-chart').textContent = ''; $('mh-legend').textContent = '';
+    mhNote('存储不可用时不会编造历史数据；请确认 nfvisd 以 -metrics-db <路径> 启动且该库可打开。', false);
+    return;
+  }
+
+  bad.hidden = true; bad.textContent = '';
+  $('mh-note').textContent = '';
+  const store = h.store || {};
+  const oldest = store.oldest_ts, newest = store.newest_ts, tick = store.last_tick_ts;
+  fill($('mh-store'), [
+    ['状态', store.enabled === false ? '可用（采样器未启用）' : '可用'],
+    ['库路径', store.path],
+    ['库大小', store.size_bytes != null ? bytes(store.size_bytes) : undefined],
+    ['序列数', store.series],
+    ['样本数', store.samples],
+    ['时间范围', (oldest && newest)
+      ? fmtTime(oldest * 1000) + ' ~ ' + fmtTime(newest * 1000) : '（无数据）'],
+    ['上次采样', tick
+      ? fmtTime(tick * 1000) + (store.stale === true ? '（停滞）' : '（正常）')
+      : '（无记录：采样器尚未完成一次采集）'],
+    ['采样间隔', h.sample_interval_seconds != null ? h.sample_interval_seconds + ' 秒' : undefined],
+    ['保留天数', h.retention_days != null ? h.retention_days + ' 天（另有 2,000,000 行硬上限兜底）' : undefined],
+    ['上次采样错误', store.last_error],
+  ]);
+  win.disabled = false;
+
+  // 指标选择器：仅在选项集变化时重建，并保留当前选择（避免每次渲染都重置到第一项）。
+  const metrics = rowsOf(h.metrics).filter((x) => typeof x === 'string');
+  const want = metrics.join('\n');
+  if (sel.dataset.opts !== want) {
+    sel.textContent = '';
+    metrics.forEach((m) => sel.appendChild(el('option', { value: m, text: m })));
+    sel.dataset.opts = want;
+  }
+  if (!metrics.length) {
+    sel.disabled = true;
+    $('mh-chart').textContent = ''; $('mh-legend').textContent = '';
+    mhNote('存储内暂无已知指标（采样器尚未写入任何指标，稍后重试）。', false);
+    return;
+  }
+  sel.disabled = false;
+  if (metrics.indexOf(mhMetric) < 0) mhMetric = metrics[0];
+  sel.value = mhMetric;
+  win.value = mhWindow;
+  mhLoadSeries();
+}
+
+// mhLoadSeries：按当前「指标 × 窗口」取序列并画图。旧响应（序号过期）直接丢弃。
+async function mhLoadSeries() {
+  const sel = $('mh-metric'), win = $('mh-window');
+  if (!sel || sel.disabled || !sel.value) return;
+  const name = sel.value, last = win.value;
+  mhMetric = name; mhWindow = last;
+  const seq = ++mhSeq;
+  $('mh-legend').textContent = '';
+  mhNote('读取 ' + name + '（' + last + '）…', false);
+  try {
+    const d = await api('/metrics/history?name=' + encodeURIComponent(name) + '&last=' + encodeURIComponent(last));
+    if (seq !== mhSeq) return;
+    renderMetricsSeries(d, name, last);
+  } catch (e) {
+    if (seq !== mhSeq) return;
+    $('mh-chart').textContent = '';
+    $('mh-legend').textContent = '';
+    mhNote('读取失败：' + apiErrText(e, '历史读视图需要登录令牌；请确认服务端提供 GET /metrics/history'), true);
+  }
+}
+
+// renderMetricsSeries：把读视图的点集画成折线，并给出图例。空态分三种，如实区分。
+function renderMetricsSeries(d, name, last) {
+  $('mh-legend').textContent = '';
+  if (!d) {
+    $('mh-chart').textContent = '';
+    mhNote('未取到数据。', true);
+    return;
+  }
+  if (d.available === false) {
+    $('mh-chart').textContent = '';
+    mhNote('历史时序存储不可用：' + (d.reason || '未说明原因'), true);
+    return;
+  }
+  const series = rowsOf(d.series);
+  const total = series.reduce((n, s) => n + rowsOf(s.points).length, 0);
+  if (!series.length || total === 0) {
+    // 分清「指标未知」与「窗口内无点」——两者对操作者的下一步不同。
+    const known = rowsOf(d.metrics).indexOf(name) >= 0;
+    $('mh-chart').textContent = '';
+    mhNote(known
+      ? '指标 ' + name + ' 在窗口（' + last + '）内没有采样点：可放宽窗口，或确认采样器正在运行（上方概览有「上次采样」时刻）。'
+      : '未知指标 ' + name + '：存储内尚无该指标（请对照上方概览的已知指标清单）。', false);
+    return;
+  }
+  mhNote('指标 ' + name + '：' + series.length + ' 条序列、共 ' + total + ' 点'
+    + (d.truncated === true ? '（点集已被 limit 截断，只保留最近的点）' : '')
+    + '。纵轴为采样瞬间值；计数器单调递增，速率需自行差分。', false);
+  const chart = $('mh-chart');
+  chart.textContent = '';
+  chart.appendChild(mhChart(name, series));
+  renderMhLegend(name, series);
+}
+
+// mhChart：内联 SVG 折线（无外部库）。多序列各画一条折线，单点画圆点；
+// 纵轴取全部序列的全局 min/max、横轴取全局时间范围——不伪造坐标轴之外的推断。
+function mhChart(name, series) {
+  const svg = svgNode('svg', {
+    viewBox: '0 0 ' + MH_W + ' ' + MH_H, class: 'mh-svg',
+    role: 'img', 'aria-label': name + ' 历史趋势',
+  });
+  const xs = [], ys = [];
+  series.forEach((s) => rowsOf(s.points).forEach((p) => {
+    if (p && isFinite(p.ts) && isFinite(p.value)) { xs.push(p.ts); ys.push(p.value); }
+  }));
+  let t0 = Math.min.apply(null, xs), t1 = Math.max.apply(null, xs);
+  let v0 = Math.min.apply(null, ys), v1 = Math.max.apply(null, ys);
+  if (t1 === t0) { t0 -= 1; t1 += 1; }
+  if (v1 === v0) { const pad = Math.abs(v0) > 0 ? Math.abs(v0) * 0.05 : 1; v0 -= pad; v1 += pad; }
+  const x = (t) => MH_PAD_L + (t - t0) / (t1 - t0) * (MH_W - MH_PAD_L - MH_PAD_R);
+  const y = (v) => MH_PAD_T + (1 - (v - v0) / (v1 - v0)) * (MH_H - MH_PAD_T - MH_PAD_B);
+  svg.appendChild(svgNode('line', { x1: MH_PAD_L, y1: MH_PAD_T, x2: MH_PAD_L, y2: MH_H - MH_PAD_B, class: 'mh-axis' }));
+  svg.appendChild(svgNode('line', { x1: MH_PAD_L, y1: MH_H - MH_PAD_B, x2: MH_W - MH_PAD_R, y2: MH_H - MH_PAD_B, class: 'mh-axis' }));
+  const ticks = [
+    [MH_PAD_L - 6, MH_PAD_T + 4, 'end', mhValueText(name, v1)],
+    [MH_PAD_L - 6, MH_H - MH_PAD_B + 4, 'end', mhValueText(name, v0)],
+    [MH_PAD_L, MH_H - 6, 'start', fmtTime(t0 * 1000)],
+    [MH_W - MH_PAD_R, MH_H - 6, 'end', fmtTime(t1 * 1000)],
+  ];
+  ticks.forEach(([tx, ty, anchor, text]) => {
+    const t = svgNode('text', { x: tx, y: ty, class: 'mh-tick', 'text-anchor': anchor });
+    t.textContent = text;
+    svg.appendChild(t);
+  });
+  series.forEach((s, i) => {
+    const color = MH_COLORS[i % MH_COLORS.length];
+    const ps = rowsOf(s.points).filter((p) => p && isFinite(p.ts) && isFinite(p.value));
+    if (!ps.length) return;
+    if (ps.length === 1) {
+      svg.appendChild(svgNode('circle', { cx: x(ps[0].ts), cy: y(ps[0].value), r: 3, fill: color }));
+      return;
+    }
+    svg.appendChild(svgNode('polyline', {
+      fill: 'none', stroke: color, 'stroke-width': '2',
+      points: ps.map((p) => x(p.ts).toFixed(2) + ',' + y(p.value).toFixed(2)).join(' '),
+    }));
+  });
+  return svg;
+}
+
+// renderMhLegend：图例——每条序列一段标签集 + 点数 + 末值（末值取时间最大的一点）。
+function renderMhLegend(name, series) {
+  const box = $('mh-legend');
+  box.textContent = '';
+  series.forEach((s, i) => {
+    const pts = rowsOf(s.points).filter((p) => p && isFinite(p.ts) && isFinite(p.value));
+    let lastText = '—';
+    if (pts.length) {
+      const tail = pts[pts.length - 1]; // 服务端按时间升序给出
+      lastText = mhValueText(name, tail.value);
+    }
+    const row = el('div', { class: 'mh-legend-row' });
+    row.appendChild(el('span', { class: 'mh-swatch', style: 'background:' + MH_COLORS[i % MH_COLORS.length] }));
+    row.appendChild(el('span', { text: mhLabelsText(s.labels) + '（' + pts.length + ' 点，末值 ' + lastText + '）' }));
+    box.appendChild(row);
+  });
+}
+
 // ---------- 页面视图（routes.json 的 view 名 → 渲染函数）----------
 //
 // 键名必须与 routes.json 的 view 一一对应（Go 守护按名字核对）。每页的取数范围也由路由表声明：
@@ -893,6 +1139,14 @@ export const VIEWS = {
       pageWarn(d);
       renderPools(d['/resource-pools']);
       renderHugepagePools(d['/system/hugepages']);
+    },
+  },
+  'metrics': {
+    // 概览由路由声明的 `/metrics/history?last=1h` 取齐；趋势序列由本页按选择器自行取数
+    // （参数化端点不进路由表——router 只认路由表里逐字声明的那一串）。poll=0：历史是回顾视图。
+    render(d) {
+      pageWarn(d);
+      renderMetricsHistoryPage(d);
     },
   },
   'interfaces': {

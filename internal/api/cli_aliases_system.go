@@ -107,6 +107,42 @@ var statementAliasesSystem = []aliasRule{
 			}
 			return nil
 		}},
+	// system metrics history <interval|retention-days> <v> → MetricsHistoryConfig 扁平字段（决策 #356）
+	// 字段名与叶子名不同（interval ⇄ interval_seconds、retention-days ⇄ retention_days），
+	// 通用树遍历写不到模型；delete 即删键，回落默认值（默认值不在配置里写常数）。
+	{pattern: []string{"system", "metrics", "history", "*", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			hist := ensureObj(ensureObj(ensureObj(tree, "system"), "metrics"), "history")
+			key, err := metricsHistoryKey(t[3])
+			if err != nil {
+				return err
+			}
+			if !isSet {
+				delete(hist, key)
+				return nil
+			}
+			n, err := strconv.Atoi(t[4])
+			if err != nil {
+				return errString("须为整数: " + t[4])
+			}
+			hist[key] = n
+			return nil
+		}},
+	// delete system metrics history <interval|retention-days>（**无取值**，回落默认；
+	// 契约 §2.2 /《命令全表》的删除形态不带取值，故须单独一条 4-token 规则）→ 删键。
+	{pattern: []string{"system", "metrics", "history", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			if isSet {
+				return errString("metrics history 参数缺少取值: " + t[3])
+			}
+			hist := ensureObj(ensureObj(ensureObj(tree, "system"), "metrics"), "history")
+			key, err := metricsHistoryKey(t[3])
+			if err != nil {
+				return err
+			}
+			delete(hist, key)
+			return nil
+		}},
 	// system syslog host <ip> → remote_host（删除时一并清除该目标的其他参数）
 	{pattern: []string{"system", "syslog", "host", "*"},
 		apply: func(tree map[string]any, t []string, isSet bool) error {
@@ -215,4 +251,16 @@ var statementAliasesSystem = []aliasRule{
 			}
 			return nil
 		}},
+}
+
+// metricsHistoryKey 历史时序存储叶子名 → MetricsHistoryConfig 字段名（决策 #356）；
+// 未知叶子返回与 syslog 同风格的错误串。
+func metricsHistoryKey(leaf string) (string, error) {
+	switch leaf {
+	case "interval":
+		return "interval_seconds", nil
+	case "retention-days":
+		return "retention_days", nil
+	}
+	return "", errString("未知 metrics history 参数: " + leaf)
 }

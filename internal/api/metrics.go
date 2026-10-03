@@ -16,13 +16,22 @@ import (
 	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
-func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+// GatherSamples 采集当前**全部**指标样本。这是 `/metrics`（即时抓取）与历史采样器
+// （决策 #356）**共用的同一采集路径**：能 scrape 到的指标就是能画出趋势的指标，
+// 不维护第二套清单。返回顺序即各来源追加顺序；Renderer 自行按 name+labels 排序，
+// 故文本输出与抽取前逐字节一致。
+func (s *Server) GatherSamples(ctx context.Context) []metrics.Sample {
 	var samples []metrics.Sample
 	samples = append(samples, metrics.HostMetrics()...)
-	samples = append(samples, s.vppMetrics(r.Context())...)
+	samples = append(samples, s.vppMetrics(ctx)...)
 	samples = append(samples, s.configMetrics()...)
-	samples = append(samples, s.vnfMetrics(r.Context())...)
+	samples = append(samples, s.vnfMetrics(ctx)...)
 	samples = append(samples, s.alarmMetrics()...)
+	return samples
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	samples := s.GatherSamples(r.Context())
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

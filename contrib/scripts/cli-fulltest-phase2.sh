@@ -73,6 +73,12 @@ set system login password-policy complexity true
 set system login password-policy expire-days 90
 set system login password-policy lockout-threshold 5
 set system login password-policy lockout-minutes 15
+# —— system metrics history（§2.2；决策 #356）——
+# 值不在本节提交（独立会话），只验证解析/接线；真落库 → 回读 → 回落默认见下方提交往返。
+set system metrics history interval 30
+set system metrics history retention-days 14
+delete system metrics history interval
+delete system metrics history retention-days
 # —— protocols lldp（§2.2b）——
 set protocols lldp enable true
 set protocols lldp advertisement-interval 30
@@ -174,6 +180,20 @@ delete virtual-switches vs-l2 dns proxy server 10.0.0.53
 commit"
 run S2-dnsproxy "configure
 delete virtual-switches vs-l2 dns proxy server
+commit"
+
+# ---------- 历史时序存储：真落库 → 回读 → 回落默认（决策 #356）----------
+# 与横幅 / DNS 代理同理：只在独立会话里解析不够——要证「提交后采样间隔真的进了配置读视图、删得掉」。
+# 回读走 `show system metrics history` 概览的「采样间隔」行（生效值取自 committed 配置，与 REST
+# `GET /metrics/history` 同源）；提交后立即回落默认，不改变机器的长期现场（采样间隔/保留天数复位）。
+run S2-metricshist "configure
+set system metrics history interval 30
+set system metrics history retention-days 14
+commit"
+expect_out S2-metricshist "采样间隔:     30s" "show system metrics history"
+run S2-metricshist "configure
+delete system metrics history interval
+delete system metrics history retention-days
 commit"
 
 summary "阶段 2"

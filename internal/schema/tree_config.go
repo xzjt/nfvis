@@ -123,6 +123,14 @@ func ConfigPathTree() *Node {
 					K("max-size-mb", "容量上限（滚动覆盖）", V("uint", "MB")),
 				),
 			),
+			// 决策 #356：历史时序存储。字段缺省＝用默认值（不在配置里写常数），
+			// `delete system metrics history <字段>` 即回落默认；落点 system.metrics.history。
+			K("metrics", "历史时序存储（delete 该叶即回落默认值）",
+				K("history", "历史时序采样",
+					K("interval", "采样间隔（秒；缺省用默认 60，范围 10..3600）", V("uint", "秒")),
+					K("retention-days", "保留天数（缺省用默认 7，范围 1..365）", V("uint", "天")),
+				),
+			),
 			K("login", "本地用户与 class",
 				// 决策 #303：登录横幅。单行 + 512 字节上限是**校验口径**（model.Validate 在
 				// commit 拒绝超限/含换行的取值）——树里只声明取值类型，便于 ?/Tab 如实提示。

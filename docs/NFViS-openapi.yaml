@@ -1287,6 +1287,34 @@ paths:
             text/plain:
               schema: { type: string }
 
+  /metrics/history:
+    get:
+      tags: [system]
+      summary: 历史时序读视图（决策 #356）
+      description: |
+        `/metrics` 的**历史**读视图（运行数据，非即时快照）：来自独立 SQLite 库的采样序列。
+        与 `/metrics` 的差别有二：① **需要鉴权**（Bearer）——`/metrics` 无鉴权是为 Prometheus
+        抓取，而历史是给操作者/控制台用的；② 支持窗口与降采样参数。
+        `name` 省略时只回概览（存储状态、生效间隔/保留、库大小、序列/样本数、时间范围、
+        采样心跳与是否落后）与**已知指标名清单**（`metrics`），`series` 为空。
+        存储不可用（库打不开/采样器未启用）时**仍返回 200**，以 `available=false` + `reason`
+        如实说明——不编造、不静默省略。
+      parameters:
+        - { name: name, in: query, schema: { type: string }, description: 指标名（如 nfvis_system_cpu_utilization_ratio） }
+        - { name: last, in: query, schema: { type: string, example: 1h }, description: "回看窗口 <n><s|m|h|d>；默认 1h" }
+        - { name: since, in: query, schema: { type: integer }, description: 起始时间（unix 秒；给出时优先于 last） }
+        - { name: until, in: query, schema: { type: integer }, description: 结束时间（unix 秒，默认现在） }
+        - { name: step, in: query, schema: { type: string, example: 1m }, description: 降采样步长（取桶内最后一个样本）；省略=自动（目标 ≤120 点） }
+        - { name: limit, in: query, schema: { type: integer }, description: 每条序列最大点数（默认 500，上界 10000——越限夹取并置 truncated，保留最近的点） }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MetricsHistory" }
+        "400":
+          description: 参数非法（窗口/步长格式、name 未知等）
+
   /ui:
     get:
       tags: [system]
@@ -2505,6 +2533,25 @@ components:
             token_ttl_minutes: { type: integer }
             max_sessions: { type: integer }
         idle_timeout_minutes: { type: integer }
+        metrics:
+          type: object
+          description: |
+            历史时序存储（决策 #356）。未设置的字段＝用默认值（间隔 60s、保留 7 天）；
+            `delete system metrics history <字段>` 即回落默认（字段缺省，不在配置里写常数）。
+          properties:
+            history:
+              type: object
+              properties:
+                interval_seconds:
+                  type: integer
+                  minimum: 10
+                  maximum: 3600
+                  description: 采样间隔（秒，默认 60）；越短分辨率越高、存储占用越大
+                retention_days:
+                  type: integer
+                  minimum: 1
+                  maximum: 365
+                  description: 历史保留天数（默认 7）；另有 2,000,000 行的硬上限兜底
         kernel:
           type: object
           description: 内核启动基线（FR-SYS-014；大页/隔离核由 resource-pools 派生）
@@ -2760,6 +2807,56 @@ components:
           items: { type: string }
           description: "需重启才生效的差异（apply 时列出；**恒为数组**——apply 无差异或 rollback 时为空数组，不会发 null）"
         message: { type: string, description: "落地器给的一句话（rollback 时，条件出现）" }
+
+    MetricsHistory:
+      type: object
+      description: |
+        历史时序读视图（决策 #356）。`available=false` 时只保证 `available`/`reason` 有意义，
+        其余字段按可得性出现——不编造。
+      required: [available]
+      properties:
+        available: { type: boolean, description: "历史存储是否可用（库可打开且采样器已启用）" }
+        reason: { type: string, description: "available=false 时的原因（条件出现）" }
+        sample_interval_seconds: { type: integer, description: "生效的采样间隔（committed 配置；未设置=默认 60）" }
+        retention_days: { type: integer, description: "生效的保留天数（committed 配置；未设置=默认 7）" }
+        metrics:
+          type: array
+          items: { type: string }
+          description: 已知指标名清单（供选择与 CLI 动态补全）
+        series:
+          type: array
+          description: 命中的序列（按 name+labels 升序；未给 name 参数时为空）
+          items: { $ref: "#/components/schemas/MetricsHistorySeries" }
+        truncated: { type: boolean, description: "点集被 limit 真实截断（只保留最近的点；step 属常规降采样、不算截断）——条件出现" }
+        store:
+          type: object
+          description: 存储概览
+          properties:
+            path: { type: string, description: 库文件路径 }
+            enabled: { type: boolean, description: 采样器是否已启用（未配置库路径时为 false） }
+            size_bytes: { type: integer }
+            series: { type: integer, description: 已登记序列数 }
+            samples: { type: integer, description: 样本总行数 }
+            oldest_ts: { type: integer, description: "最旧样本时间（无数据时省略）" }
+            newest_ts: { type: integer, description: "最新样本时间（无数据时省略）" }
+            last_tick_ts: { type: integer, description: "采样器上次心跳时刻（无记录时省略）" }
+            stale: { type: boolean, description: "采样停滞（now - last_tick > max(3×间隔, 180s)）" }
+            last_error: { type: string, description: "上次整轮采样错误（条件出现）" }
+
+    MetricsHistorySeries:
+      type: object
+      description: 单条历史序列（name + 标签）
+      properties:
+        name: { type: string, example: nfvis_system_cpu_utilization_ratio }
+        labels: { type: object, additionalProperties: { type: string }, description: "标签集（无标签时为空对象）" }
+        points:
+          type: array
+          items:
+            type: object
+            required: [ts, value]
+            properties:
+              ts: { type: integer, description: "采样时刻（unix 秒）" }
+              value: { type: number, description: "采样瞬间值（计数器单调递增；速率由读侧差分）" }
 
     HugepagePools:
       type: object

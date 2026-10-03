@@ -54,7 +54,7 @@ func (x *cliExecutor) execShowSystemAPI(user, class string, t []string) string {
 
 func (x *cliExecutor) execShowSystemDiag(t []string) string {
 	if len(t) == 0 {
-		return "%% 语法: show system <uptime|cpu|memory|storage|hugepages|core-dumps|tech-support>\n"
+		return "%% 语法: show system <uptime|cpu|memory|storage|hugepages|metrics|core-dumps|tech-support>\n"
 	}
 	switch t[0] {
 	case "tech-support", "core-dumps":
@@ -67,12 +67,15 @@ func (x *cliExecutor) execShowSystemDiag(t []string) string {
 	case "hugepages":
 		// 决策 #329/#346：数字（声明/内核实际/在用/实际持有/无主占用）+ 可回收，与其他三面（REST/Web）同源。
 		return x.renderHugepagePools()
+	case "metrics":
+		// 决策 #356：历史时序读视图（`show system metrics history …`）。
+		return x.renderMetricsHistory(t[1:])
 	case "kernel":
 		return x.renderKernelBaseline()
 	case "hardware":
 		return x.renderHardware()
 	}
-	return fmt.Sprintf("%% 无效命令: show system %s（可用：uptime|cpu|memory|storage|hugepages|kernel|hardware|core-dumps|tech-support）\n", strings.Join(t, " "))
+	return fmt.Sprintf("%% 无效命令: show system %s（可用：uptime|cpu|memory|storage|hugepages|metrics history|kernel|hardware|core-dumps|tech-support）\n", strings.Join(t, " "))
 }
 
 func (x *cliExecutor) renderDiag(t []string) string {

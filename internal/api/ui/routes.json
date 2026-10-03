@@ -38,6 +38,8 @@
       "endpoints": ["/system/hardware", "/system/health/thresholds"], "poll": 30000 },
     { "path": "#/system/pools", "title": "资源池", "view": "pools", "breadcrumb": ["系统", "资源池"],
       "endpoints": ["/resource-pools", "/system/hugepages"], "poll": 5000 },
+    { "path": "#/system/metrics", "title": "历史趋势", "view": "metrics", "breadcrumb": ["系统", "历史趋势"],
+      "endpoints": ["/metrics/history?last=1h"], "poll": 0 },
     { "path": "#/system/interfaces", "title": "接口", "view": "interfaces", "breadcrumb": ["系统", "接口"],
       "endpoints": ["/interfaces"], "poll": 5000 },
     { "path": "#/system/interfaces/:name", "title": "接口详情", "view": "ifaceDetail", "detail": true, "breadcrumb": ["系统", "接口"],

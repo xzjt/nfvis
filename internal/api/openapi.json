@@ -1672,6 +1672,131 @@
         ],
         "type": "object"
       },
+      "MetricsHistory": {
+        "description": "历史时序读视图（决策 #356）。`available=false` 时只保证 `available`/`reason` 有意义，\n其余字段按可得性出现——不编造。\n",
+        "properties": {
+          "available": {
+            "description": "历史存储是否可用（库可打开且采样器已启用）",
+            "type": "boolean"
+          },
+          "metrics": {
+            "description": "已知指标名清单（供选择与 CLI 动态补全）",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "description": "available=false 时的原因（条件出现）",
+            "type": "string"
+          },
+          "retention_days": {
+            "description": "生效的保留天数（committed 配置；未设置=默认 7）",
+            "type": "integer"
+          },
+          "sample_interval_seconds": {
+            "description": "生效的采样间隔（committed 配置；未设置=默认 60）",
+            "type": "integer"
+          },
+          "series": {
+            "description": "命中的序列（按 name+labels 升序；未给 name 参数时为空）",
+            "items": {
+              "$ref": "#/components/schemas/MetricsHistorySeries"
+            },
+            "type": "array"
+          },
+          "store": {
+            "description": "存储概览",
+            "properties": {
+              "enabled": {
+                "description": "采样器是否已启用（未配置库路径时为 false）",
+                "type": "boolean"
+              },
+              "last_error": {
+                "description": "上次整轮采样错误（条件出现）",
+                "type": "string"
+              },
+              "last_tick_ts": {
+                "description": "采样器上次心跳时刻（无记录时省略）",
+                "type": "integer"
+              },
+              "newest_ts": {
+                "description": "最新样本时间（无数据时省略）",
+                "type": "integer"
+              },
+              "oldest_ts": {
+                "description": "最旧样本时间（无数据时省略）",
+                "type": "integer"
+              },
+              "path": {
+                "description": "库文件路径",
+                "type": "string"
+              },
+              "samples": {
+                "description": "样本总行数",
+                "type": "integer"
+              },
+              "series": {
+                "description": "已登记序列数",
+                "type": "integer"
+              },
+              "size_bytes": {
+                "type": "integer"
+              },
+              "stale": {
+                "description": "采样停滞（now - last_tick > max(3×间隔, 180s)）",
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "truncated": {
+            "description": "点集被 limit 真实截断（只保留最近的点；step 属常规降采样、不算截断）——条件出现",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "type": "object"
+      },
+      "MetricsHistorySeries": {
+        "description": "单条历史序列（name + 标签）",
+        "properties": {
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "标签集（无标签时为空对象）",
+            "type": "object"
+          },
+          "name": {
+            "example": "nfvis_system_cpu_utilization_ratio",
+            "type": "string"
+          },
+          "points": {
+            "items": {
+              "properties": {
+                "ts": {
+                  "description": "采样时刻（unix 秒）",
+                  "type": "integer"
+                },
+                "value": {
+                  "description": "采样瞬间值（计数器单调递增；速率由读侧差分）",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "ts",
+                "value"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "NatConfig": {
         "description": "NAT44-EI 配置。V1 语义（决策 #38/#52）：action.interface 必填（VPP outside 不支持自动推断）；\ninside 转发域由 rules[].virtual_switch（须为 L3 交换机）派生，outside 转发域由出接口所属 VRF 派生\n（出接口须为某 Vrf 的 l3-interface 且已配地址）；全部规则的 virtual-switch 必须一致、出接口必须同属一个 VRF；\nVPP NAT44 单实例仅一对 inside/outside VRF（两者可同表或跨 VRF）。\n",
         "properties": {
@@ -2187,6 +2312,29 @@
                 "description": "管理网卡名（如 ens160）；须保留内核驱动",
                 "example": "ens160",
                 "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "metrics": {
+            "description": "历史时序存储（决策 #356）。未设置的字段＝用默认值（间隔 60s、保留 7 天）；\n`delete system metrics history <字段>` 即回落默认（字段缺省，不在配置里写常数）。\n",
+            "properties": {
+              "history": {
+                "properties": {
+                  "interval_seconds": {
+                    "description": "采样间隔（秒，默认 60）；越短分辨率越高、存储占用越大",
+                    "maximum": 3600,
+                    "minimum": 10,
+                    "type": "integer"
+                  },
+                  "retention_days": {
+                    "description": "历史保留天数（默认 7）；另有 2,000,000 行的硬上限兜底",
+                    "maximum": 365,
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
               }
             },
             "type": "object"
@@ -4793,6 +4941,82 @@
         },
         "security": [],
         "summary": "Prometheus 指标",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/metrics/history": {
+      "get": {
+        "description": "`/metrics` 的**历史**读视图（运行数据，非即时快照）：来自独立 SQLite 库的采样序列。\n与 `/metrics` 的差别有二：① **需要鉴权**（Bearer）——`/metrics` 无鉴权是为 Prometheus\n抓取，而历史是给操作者/控制台用的；② 支持窗口与降采样参数。\n`name` 省略时只回概览（存储状态、生效间隔/保留、库大小、序列/样本数、时间范围、\n采样心跳与是否落后）与**已知指标名清单**（`metrics`），`series` 为空。\n存储不可用（库打不开/采样器未启用）时**仍返回 200**，以 `available=false` + `reason`\n如实说明——不编造、不静默省略。\n",
+        "parameters": [
+          {
+            "description": "指标名（如 nfvis_system_cpu_utilization_ratio）",
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "回看窗口 <n><s|m|h|d>；默认 1h",
+            "in": "query",
+            "name": "last",
+            "schema": {
+              "example": "1h",
+              "type": "string"
+            }
+          },
+          {
+            "description": "起始时间（unix 秒；给出时优先于 last）",
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "结束时间（unix 秒，默认现在）",
+            "in": "query",
+            "name": "until",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "降采样步长（取桶内最后一个样本）；省略=自动（目标 ≤120 点）",
+            "in": "query",
+            "name": "step",
+            "schema": {
+              "example": "1m",
+              "type": "string"
+            }
+          },
+          {
+            "description": "每条序列最大点数（默认 500，上界 10000——越限夹取并置 truncated，保留最近的点）",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsHistory"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "description": "参数非法（窗口/步长格式、name 未知等）"
+          }
+        },
+        "summary": "历史时序读视图（决策",
         "tags": [
           "system"
         ]

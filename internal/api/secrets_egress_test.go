@@ -263,6 +263,7 @@ var secretEgressRoutes = map[string]string{
 	"/interfaces":                       "接口视图 + 运行态，无秘密字段",
 	"/interfaces/{name}":                "同上（含 statistics）",
 	"/metrics":                          "Prometheus 宿主指标（无鉴权但只发运行态计数/容量）",
+	"/metrics/history":                  "历史时序读视图（#356）：只回指标名/标签/采样数值与存储元数据，不含配置或凭据；需 Bearer",
 	"/nat":                              "NAT 配置段视图（无秘密字段）",
 	"/nat/sessions":                     "NAT 会话运行态（五元组/计数）",
 	"/openapi.json":                     "规范文本（无秘密）",
