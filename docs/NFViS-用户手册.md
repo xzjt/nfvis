@@ -1701,6 +1701,12 @@ nfvis$ request system ntp sync                 # 手动触发一次 NTP 同步
 列表类端点支持分页（`limit`/`offset`）。CLI 脚本模式（§3.3）+ `| display json` 适合轻量自动化；
 大规模对接建议直接走 REST + events。
 
+**VNF 指标读法**：`nfvis_vnf_running` / `nfvis_vnf_vcpu_allocated` 是**按配置声明**的聚合计数——
+**先看 `nfvis_vnf_runtime_available{kind="vm"|"container"}` 再信这两个计数**：它为 1 表示对应编排
+（libvirt / Docker）可查询、计数可信；为 0（编排未接入或查询失败）时计数不可信（查询失败的对象不计入
+「运行中」）。逐对象运行态看 `nfvis_vnf_up{kind,name}`：1=运行中、0=已知非运行（exited/shut off/absent 等）；
+运行态不可查询时该对象序列**不出现**（宁缺不谎报 0），以 `nfvis_vnf_runtime_available` 说明。
+
 ### 10.11 软件升级、重启与关机
 
 ```bash
