@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"syscall"
@@ -26,6 +27,7 @@ import (
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/events"
 	"github.com/xzjt/nfvis/internal/images"
+	"github.com/xzjt/nfvis/internal/metricshist"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
 	"github.com/xzjt/nfvis/internal/orchestrator/compute"
@@ -69,8 +71,21 @@ func run() error {
 		extraParams   = flag.String("kernel-params", "", "附加内核参数（空格分隔）")
 		// libvirt AppArmor 放行（决策 #182）：同一实现供安装期脚本与运行期复核调用，避免双源。
 		ensureAA = flag.Bool("ensure-libvirt-apparmor", false, "确保 libvirt 的 AppArmor 助手放行 NFViS 镜像/VM 路径后退出（幂等）")
+		// 历史时序库（决策 #356）：缺省与配置库同目录的 metrics.db；**显式置空**则禁用历史采样。
+		metricsDB = flag.String("metrics-db", "", "历史时序库路径（缺省 <db 目录>/metrics.db；显式置空 = 禁用历史采样）")
 	)
 	flag.Parse()
+	// 决策 #356：路径缺省值随 -db 走（生产 /var/lib/nfvis/nfvis.db ⇒ /var/lib/nfvis/metrics.db）。
+	// flag 默认空无法区分「未给」与「显式置空」，故用 Visit 判定：未显式给出才套缺省。
+	metricsDBSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "metrics-db" {
+			metricsDBSet = true
+		}
+	})
+	if !metricsDBSet {
+		*metricsDB = filepath.Join(filepath.Dir(*dbPath), "metrics.db")
+	}
 	if *showVer {
 		fmt.Println("nfvisd", api.VersionStr)
 		return nil
@@ -159,6 +174,25 @@ func run() error {
 		return fmt.Errorf("打开存储: %w", err)
 	}
 	defer store.Close()
+
+	// 决策 #356：打开历史时序库（独立库，不与配置库竞争）。失败只告警、不阻塞启动——
+	// 读视图以 available=false + reason 如实说明（Options.MetricsHistory.Disabled），
+	// 数据面/管理面不受影响。
+	var metricsStore *metricshist.Store
+	var metricsDisabled string
+	if *metricsDB != "" {
+		ms, merr := metricshist.Open(*metricsDB)
+		if merr != nil {
+			log.Warn("历史时序存储打开失败，历史采样已禁用", "path", *metricsDB, "err", merr)
+			metricsDisabled = "历史时序库打开失败：" + merr.Error()
+		} else {
+			metricsStore = ms
+			defer func() { _ = ms.Close() }()
+			log.Info("历史时序存储已启用", "path", *metricsDB)
+		}
+	} else {
+		metricsDisabled = "历史时序存储已由 -metrics-db 显式禁用"
+	}
 
 	// M3：VPP 数据面连接管理（FR-SYS-007）先于事务引擎装配（引擎需要下发编排器）。
 	vppMgr := network.NewManager(network.Config{Socket: *vppSock, Log: log}, nil)
@@ -859,6 +893,8 @@ func run() error {
 		VppState:    &vppStateController{net: netProvider},      // 决策 #84：show 的运行态事实来源
 		Versions:    system.NewVersionProbe(),                   // R37-2 收口（决策 #118）：组件版本探测
 		LogSource:   nfvisdLogTail,
+		// 决策 #356：历史时序读视图（Store 为 nil 时以 Disabled 如实说明「为何没有历史」）。
+		MetricsHistory: &api.MetricsHistoryOptions{Store: metricsStore, Path: *metricsDB, Disabled: metricsDisabled},
 	})
 
 	srvErr := make(chan error, 1)
@@ -867,6 +903,10 @@ func run() error {
 	// FR-OPS-013：通知 systemd 就绪并按 WATCHDOG_USEC 喂看门狗（未由 systemd 管理时空操作）。
 	if err := systemd.Notify("READY=1"); err != nil {
 		log.Warn("sd_notify(READY=1) 失败", "err", err)
+	}
+	// 决策 #356：历史采样器在服务就绪后启动（不阻塞启动/READY；库未启用时为空操作）。
+	if metricsStore != nil {
+		go runMetricsHistory(ctx, metricsStore, engine, apiServer, log)
 	}
 	if iv, ok := systemd.WatchdogInterval(); ok {
 		go func() {

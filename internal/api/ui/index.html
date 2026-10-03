@@ -165,6 +165,39 @@
     </article>
     </section>
 
+    <section class="page" id="page-metrics" hidden>
+    <article class="card wide">
+      <h2>历史趋势 <span id="mh-note" class="muted small"></span></h2>
+      <p class="muted small">
+        取自本机历史时序库的采样序列——与 <code>/metrics</code> 同一份指标，与
+        <code>show system metrics history</code> / <code>GET /metrics/history</code> 同源（本页只读）。
+        历史点是<strong>采样瞬间</strong>的瞬时值 / 累计值，不是区间聚合；计数器（counter）单调递增，
+        速率需读侧自行差分——本页不伪造速率。存储不可用或窗口内无数据时如实说明，不编造。
+      </p>
+      <div id="mh-unavailable" class="error" hidden></div>
+      <dl id="mh-store" class="kv"></dl>
+    </article>
+
+    <article class="card wide">
+      <h2>趋势图</h2>
+      <div class="mh-controls">
+        <label for="mh-metric">指标</label>
+        <select id="mh-metric"></select>
+        <label for="mh-window">窗口</label>
+        <select id="mh-window">
+          <option value="1h">最近 1 小时</option>
+          <option value="6h">最近 6 小时</option>
+          <option value="24h">最近 24 小时</option>
+          <option value="7d">最近 7 天</option>
+        </select>
+        <button id="mh-refresh-btn" type="button" class="ghost small">刷新</button>
+      </div>
+      <p id="mh-series-note" class="muted small"></p>
+      <div id="mh-chart" class="mh-chart"></div>
+      <div id="mh-legend" class="mh-legend"></div>
+    </article>
+    </section>
+
     <section class="page" id="page-interfaces" hidden>
     <article class="card wide">
       <h2>接口 <span id="iface-note" class="muted small"></span></h2>

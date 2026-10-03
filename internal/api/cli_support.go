@@ -108,6 +108,20 @@ func (s *Server) dynamicValues(kind string) []string {
 		// 并集：`request interfaces <n> enable|bind-dpdk|unbind-dpdk` 的动作混合，
 		// 参数位置在动作之前、无法按动作区分来源，故两侧都给（决策 #83）。
 		return s.allIfnames()
+	case schema.DynMetricNames:
+		// 决策 #356：`show system metrics history name <metric>` 的候选＝历史库内已知指标名。
+		// 库未启用/打不开时返回 nil（补全优雅降级，不报错）；取列表失败同样如实回空。
+		if s.history == nil || s.history.Store == nil {
+			return nil
+		}
+		names, err := s.history.Store.MetricNames()
+		if err != nil {
+			return nil
+		}
+		if names == nil {
+			return []string{}
+		}
+		return names
 	}
 	cfg, err := s.engine.Committed()
 	if err != nil {

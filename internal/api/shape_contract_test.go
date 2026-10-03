@@ -68,6 +68,12 @@ var shapeConditional = map[string]map[string]string{
 		// 与 CLI 登录前）据此不渲染横幅块；端点也只回这一个字段。
 		"banner": "未设置横幅时省略该字段（不编造空串）；设置了就必须原样发出",
 	},
+	"GET /metrics/history": {
+		// 决策 #356：历史时序读视图。不可用时仍 200，以 available=false + reason 如实说明；
+		// 可用时省略 reason（不编造），点集被裁剪时才置 truncated。
+		"reason":    "仅当 available=false 时出现（如实说明不可用原因；可用时省略，不编造）",
+		"truncated": "仅当点集被 step/limit 裁剪时出现（未裁剪时省略）",
+	},
 }
 
 // TestResponseShapeMatchesContract 契约声明的响应字段必须出现在实际响应里。
@@ -105,6 +111,7 @@ func TestResponseShapeMatchesContract(t *testing.T) {
 		{"GET", "/system/api-tokens"},         // 决策 #301：活动会话清单（登录后恒有≥1 条，自己的会话）
 		{"GET", "/login-banner"},              // 决策 #303：登录横幅（未设置时走白名单省略）
 		{"GET", "/configuration/permissions"}, // 决策 #304：生效权限视图（调用者自己 class）
+		{"GET", "/metrics/history"},           // 决策 #356：历史时序读视图（不可用时仍 200 + available=false + reason）
 	} {
 		props := declaredProps(t, spec, ep.path, ep.method)
 		if len(props) == 0 {

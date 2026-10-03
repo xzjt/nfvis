@@ -41,6 +41,24 @@ func OperRoot() *Node {
 				K("memory", "内存与大页使用（池内/池外）"),
 				K("storage", "磁盘与镜像仓库占用"),
 				K("hugepages", "大页内核参数与池状态"),
+				// 决策 #356：历史时序读视图（`/metrics` 的历史底座，数据源＝需鉴权的
+				// `GET /metrics/history`——`/metrics` 无鉴权是为 Prometheus 抓取）。
+				// 省略参数＝概览：存储状态（可用/不可用 + 原因）、生效采样间隔与保留天数、库大小、
+				// 序列数、样本数、时间范围（最旧/最新）、上次采样时刻与是否停滞（stale）；
+				// `name <metric>` ＝该指标**各序列**（按标签分组）的时间点，指标名走动态候选
+				// （来源＝存储内已知指标名），`last <duration>`（如 1h/30m/2d，默认 1h）与
+				// `step <duration>`（降采样步长，省略=自动）是**具名查询的修饰项**——故挂在
+				// `<metric>` 之下（《命令全表》§1.1 同写 `name <metric> [last …] [step …]`，
+				// 「未收录形态」守护据此判定）。存储不可用/无数据时如实说明、不编造（v1 不设告警码）。
+				K("metrics", "历史时序存储读视图",
+					K("history", "历史时序（省略参数＝概览；数据源 GET /metrics/history）",
+						Opt(K("name", "指定指标（动态候选＝存储内已知指标名）",
+							P("<metric>", "指标名", DynMetricNames,
+								Opt(K("last", "时间窗（如 1h / 30m / 2d，默认 1h）", V("duration", "如 1h / 30m / 2d"))),
+								Opt(K("step", "降采样步长（省略=自动）", V("duration", "如 1m"))),
+							))),
+					),
+				),
 				K("kernel", "内核启动基线（cmdline / 运行实际 / 配置期望 三方对照）"),
 				K("hardware", "硬件健康：温度/风扇/电源/SMART"),
 				K("core-dumps", "崩溃转储清单（VPP/QEMU/nfvisd）"),

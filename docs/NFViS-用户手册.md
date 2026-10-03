@@ -1693,6 +1693,7 @@ nfvis$ request system ntp sync                 # 手动触发一次 NTP 同步
 | 端点 | 鉴权 | 用途 |
 |---|---|---|
 | `GET /api/v1/metrics` | 无 | Prometheus 指标（系统/资源池/VPP 等；向导与监控都从这里取事实） |
+| `GET /api/v1/metrics/history` | Bearer | 历史时序读视图（`/metrics` 的历史底座，见 §10.13） |
 | `GET /api/v1/events` | Bearer | SSE 事件流（配置提交、VM 状态变化、告警等） |
 | `GET /api/v1/alarms` | Bearer | 告警列表 |
 | `GET /api/v1/audit-logs` | Bearer | 审计日志（`limit`/`offset` 分页） |
@@ -1733,7 +1734,7 @@ nfvis$ request system shutdown
 *图 10.12-2　总览页：系统与组件版本、数据面状态、未解决告警、最近事件（时间一律 UTC）。*
 
 **怎么找东西（导航）**：顶栏按资源域分组，点一下就切页——总览 / 计算（虚拟机、容器、镜像）/
-网络（网络对象、虚拟交换机、LLDP）/ 系统（系统、硬件健康、资源池、接口、内核基线、用户与权限、证书）/
+网络（网络对象、虚拟交换机、LLDP）/ 系统（系统、硬件健康、资源池、历史趋势、接口、内核基线、用户与权限、证书）/
 配置（配置、提交历史、编辑锁会话）/ 运维（动作、审计、诊断、抓包）。页面右上角有面包屑（如「计算 › 虚拟机」）；
 再往右是实时通道状态、当前登录账号与「我的账号」（改自己的口令，见下）。
 
@@ -1965,6 +1966,58 @@ DPDK 没有独立版本来源（随 VPP 一起编译），同样显示「—」�
 - **取不到数据时**：先按 §11.1 确认服务在跑、地址与端口正确；页面右上角的
   「实时通道」会显示是否连着事件推送（连不上会自动退化为轮询，功能不受影响）。
 
+### 10.13 历史趋势（历史时序存储）
+
+`/metrics` 是**即时快照**（每次抓取都是当下的值），看不到"过去一小时 / 一天 CPU 怎么走"。历史时序存储
+就是它的**底座**：后台采样器按固定间隔把**与 `/metrics` 完全相同的序列**记进本机一个独立的 SQLite 库，
+供事后回溯与容量规划。
+
+- **存什么**：与 `GET /api/v1/metrics` 同一份指标——主机（CPU / 内存 / 磁盘 / 大页 / 运行时长）、
+  VPP（线程 / 内存 / buffer 池 / 逐接口收发包）、配置计数、VNF 与容器运行态及聚合计数、告警计数。
+  **能抓到的就能画**，不另立第二份指标清单；某轮某来源不可用（如 VPP 未连）时该来源当轮**不写**，
+  不补 0（宁缺不谎报）。
+- **存在哪**：`/var/lib/nfvis/metrics.db`（**独立库**，与配置库分开；不进配置备份 / 恢复语义，见下）。
+- **两个旋钮**（改了**无需重启**，采样器下个周期即按新值走；都要 `commit` 后生效）：
+
+  ```bash
+  nfvis$ set system metrics history interval 60        # 采样间隔（秒，10..3600；默认 60）
+  nfvis$ set system metrics history retention-days 7   # 保留天数（1..365；默认 7 天）
+  nfvis$ delete system metrics history interval        # 回落默认（两个字段同理）
+  ```
+
+  除时间窗外还有一条 **2,000,000 行硬上限**兜底（无论时间窗多大都按最旧裁剪，磁盘占用因此有界）；
+  间隔越短分辨率越高、占用越大。
+
+**怎么看**（三面同源，取同一份读视图）：
+
+```bash
+nfvis$ show system metrics history                 # 概览：可用性 / 库路径与大小 / 序列数 / 样本数 /
+                                                   #   时间范围 / 上次采样与是否停滞 / 生效间隔与保留
+nfvis$ show system metrics history name nfvis_system_cpu_utilization_ratio [last 1h] [step 1m]
+                                                   # 某指标各序列（按标签分组）的时间点；
+                                                   # 指标名支持 Tab / ? 动态补全（来自库内已知指标）
+```
+
+- **REST**：`GET /api/v1/metrics/history`（参数 `name` / `last` / `step` / `since` / `until` / `limit`）。
+  注意：与**无鉴权**的 `GET /api/v1/metrics` 不同，**这条需要 Bearer token**——`/metrics` 无鉴权是为
+  Prometheus 抓取，历史是给操作者 / 控制台用的运维读视图。
+- **Web 控制台**：「系统 · 历史趋势」页（`#/system/metrics`）——存储概览 + 指标 / 窗口选择器 + 内联折线图；
+  本页**只读**、**不轮询**（历史是回顾视图，不随总览的 5 秒刷新重采）。
+
+**几条如实口径**（不要拿它当别的东西用）：
+
+- **存储不可用会明说**：库打不开或采样器未启用时，读视图以「不可用 + 原因」如实说明，
+  **不编造、不摆空图冒充"没有数据"**；同样地，"窗口内无点"与"指标名未知"是两种不同提示。
+- **保留会裁剪**：超过 `retention-days` 或 2,000,000 行的最旧样本会被删掉；采样停滞（距上次采样过久）
+  在读视图里以「停滞 / stale」如实标出，不静默。
+- **历史点是"采样瞬间值"，不是区间聚合**：计数器（counter，如收发字节 / 包数）单调递增——**速率要在
+  读取侧自行对相邻两点差分**，本读视图不伪造 rate；gauge 类（如 CPU 使用率）就是那一刻的瞬时值。
+
+**它有意不是什么**：不引入外部 TSDB / 时序数据库；不做 SNMP 或流采样；不含阈值告警引擎
+（健康阈值告警仍走既有告警，见 §10.6）；不导出为文件、不按指标开关采集；**不进配置备份 / 恢复语义**
+（备份的是配置、不是运行数据）——`rm /var/lib/nfvis/metrics.db` 即回到"无历史"，不影响配置
+（`request system storage format-data` 清数据分区时会把它一并清掉，属既有语义）。
+
 ---
 
 ## 11. 故障排查
@@ -2031,6 +2084,7 @@ tail -n 100 /var/log/nfvis-provision.log     # 环境初始化（若用过 provi
 | `/usr/bin/nfvisd`、`/usr/bin/nfvis-cli` | 可执行文件 |
 | `/etc/systemd/system/nfvis.service` | systemd 单元（环境变量 `NFVIS_DB`/`NFVIS_LISTEN`/`NFVIS_VPP_SOCK`） |
 | `/var/lib/nfvis/nfvis.db` | 配置库（SQLite，committed 与历史快照；升级/purge 不动它） |
+| `/var/lib/nfvis/metrics.db` | 历史时序库（SQLite，`/metrics` 的采样序列；独立于配置库，不进备份/恢复，见 §10.13） |
 | `/var/lib/nfvis/images/` | 镜像仓库（qcow2 / 容器 tar），`index.json` 为元数据 |
 | `/var/lib/nfvis/backup/` | 配置备份归档（0600） |
 | `/var/lib/nfvis/captures/` | 导出的 pcap |

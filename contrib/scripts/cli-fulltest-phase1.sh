@@ -12,6 +12,11 @@ run S1 "show system cpu"
 run S1 "show system memory"
 run S1 "show system storage"
 run S1 "show system hugepages"
+# 历史时序读视图（决策 #356）：概览 + 某指标序列。指标名用恒存在的主机指标
+# （nfvis_system_cpu_utilization_ratio 来自主机采集，不依赖 VPP/VNF）。命令本身在存储不可用/
+# 窗口无点时也如实返回文本（非错误），故 run 只量「命令能不能用」；真值判定由语义/生命周期覆盖。
+run S1 "show system metrics history"
+run S1 "show system metrics history name nfvis_system_cpu_utilization_ratio"
 run S1 "show system kernel"
 run S1 "show system hardware"
 run S1 "show system core-dumps"

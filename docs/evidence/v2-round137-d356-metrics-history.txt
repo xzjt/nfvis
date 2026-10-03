@@ -1,0 +1,214 @@
+# round137 证据 · 决策 #356 历史时序存储 v1（收口 `docs/v2待做.md` 三.6）
+
+真机：nfvis-vm（Ubuntu 26.04）；构建 `feat/d356-metrics-history` → **2.0.0~dev54 → dev55 → dev56**
+（`SOURCE_DATE_EPOCH` 显式传入，`make deb` + `dpkg -i`）。四单元 active（nfvis/vpp/libvirtd/docker）。
+契约先行：附录 A #356、`AGENTS.md` 计数 257→258、openapi `/metrics/history` + `SystemConfig.metrics`、
+命令树设计 §1.1/§2.2、命令全表、用户手册 §10.13、设计文档
+`docs/superpowers/specs/2026-10-03-metrics-history-design.md`。`make check` RC=0。
+
+---
+
+## §1 作用效果（独立事实源＝直读 SQLite 库）
+
+默认间隔 60s，首轮采样后：
+
+```
+$ nfvis-cli -c "show system metrics history"
+历史时序存储: 已启用
+库路径:       /var/lib/nfvis/metrics.db（4.0 KiB）
+采样间隔:     60s（默认值；可用 set system metrics history interval <n> 调整）
+保留天数:     7 天（另有 2,000,000 行硬上限兜底）
+序列数:       50
+样本数:       50
+时间范围:     2026-10-03 10:50:45 ~ 2026-10-03 10:50:45
+上次采样:     2026-10-03 10:50:45（正常）
+已知指标（35）: nfvis_alarms_active, nfvis_config_container_functions, …
+```
+
+同一时刻**直读库**（python3 sqlite3，与产品代码无关的第二事实源）：
+
+```
+series: 50   samples: 50
+oldest/newest: (1791024645, 1791024645)
+meta: [('last_tick_ts', '1791024645'), ('last_error', '')]
+```
+
+CLI 的「序列数/样本数/时间范围/上次采样」与直读逐值吻合（50/50、ts 1791024645）；
+35 个指标名对应 50 条序列（逐接口 `interface=` 与逐 VNF `kind/name` 标签分列）。
+
+改造前（首轮尚未到时）概览如实报「序列数 0 / 时间范围（无数据）/ 上次采样（无记录：采样器尚未完成一次采集）」
+——**不编造**（这一态本身也是验证点）。
+
+逐指标序列（`name <metric>` 形态）：
+
+```
+$ nfvis-cli -c "show system metrics history name nfvis_system_uptime_seconds last 3m step 10s"
+指标 nfvis_system_uptime_seconds（窗口 3m0s、步长 10s）
+  序列 （无标签）：窗口 3m0s、步长 10s、点数 2
+  2026-10-03 10:50:45  47724.16
+  2026-10-03 10:51:45  47784.18
+```
+
+## §2 生命周期（重启/重放/配置漂移）
+
+**① 库跨 nfvisd 重启延续**（`systemctl restart nfvis`）：
+
+```
+重启前: (2750, min=1791024645, max=1791025299)
+重启后: (2950, min=1791024645, max=1791025343)      ← min 不变（最旧样本留存）、max 前进
+```
+
+重装 deb（dev54→dev55→dev56）后同样延续（样本数 2700→…→6250），说明历史库**不随进程生死存亡**。
+
+**② 改配置免重启即生效**：`configure / set system metrics history interval 10 / commit`
+（无需重启），直读采样点时间戳的**差分**随之改变：
+
+```
+deltas: [60, 61, 10, 10, 10, 10]
+```
+
+概览同步显示「采样间隔: 10s（已配置；…）」；改回默认即显示「（默认值；…）」。
+
+**③ 不阻塞启动**：journal 里「历史时序存储已启用」11:01:43.588 →「nfvisd 就绪」11:01:43.609
+（相隔 21ms）；采样器 goroutine 在 `systemd.Notify("READY=1")` **之后**才启动（沿用 #348/#351/#354 纪律）。
+
+## §3 跨对象组合（VNF/容器状态进历史）
+
+`request container-functions sem-ct start` → 25s → `… stop`，历史里
+`nfvis_vnf_up{kind="container",name="sem-ct"}`：
+
+```
+11:02:53 1   <== 变化 0->1（start）
+11:03:33 0   <== 变化 1->0（stop）
+```
+
+（同一序列里还能看到 11:01:16→11:01:39 的空档＝上一步 nfvis 重启，之后继续采样。）
+
+## §4 对抗性对照
+
+**① 同一物理量、两个事实源**：`/metrics`（无鉴权即时快照）与历史最新点都记 `uptime`，
+各自反推的**开机时刻**应一致：
+
+```
+live(/metrics): uptime=48443.42  现在=1791025365  → 开机 1790976921.6
+hist 最新点:    1791025363 48441.86              → 开机 1790976921.1
+两源差: 0.4 秒
+```
+
+**② 存储不可用如实报**（造现场：用**目录**占住库路径，可逆）：
+
+```
+journal: WARN 历史时序存储打开失败，历史采样已禁用
+         path=/var/lib/nfvis/metrics.db err=读取历史库 schema 版本: unable to open database file (14)
+CLI:     历史时序存储: 不可用（历史时序库打开失败：读取历史库 schema 版本: unable to open database file (14)）
+         提示: 存储不可用时不会编造历史数据；请确认 nfvisd 以 -metrics-db <路径> 启动且该库可打开。
+```
+
+还原后立刻恢复（样本 3400）。**注意与「窗口内无数据」的区别**：前者是「读不出来」，后者是「确实没有」，
+读视图与 CLI 文案分别表述。
+
+**③ 鉴权口径**：无 token `GET /metrics/history` → **401**；无 token `GET /metrics` → **200**
+（`/metrics` 的无鉴权契约**未变**，抓取方不受影响）。
+
+**④ 参数与边界**：`last=xx` → **400** + 可照做文案（`无效时长 "xx"（须为正整数 + 单位 s|m|h|d…）`）；
+`limit=999999` → 200（夹取到 10000，不报错，越限置 `truncated`）。
+
+**⑤ CLI 抗误用**（rc=1，均给可照做提示）：
+
+```
+%% 无效命令: show system metrics history last 1h（可用：history [name <metric> [last <duration>] [step <duration>]]；last/step 须跟在 name <metric> 之后）
+%% 无效命令: show system metrics foo（可用：history [name <metric> [last …] [step …]]）
+%% 无效命令: show system metrics history name a b（可用：name <metric> [last …] [step …]）
+未知指标 nfvis_no_such_metric：存储内尚无该指标。用 show system metrics history 概览可列出已知指标名。
+```
+
+## §5 三面同源（REST / CLI / Web）
+
+**REST**（Bearer）概览与序列：
+
+```json
+{"available":true,"sample_interval_seconds":10,"retention_days":7,
+ "store":{"enabled":true,"path":"/var/lib/nfvis/metrics.db","size_bytes":159744,
+          "series":50,"samples":3000,"oldest_ts":1791024645,"newest_ts":1791025353,
+          "last_tick_ts":1791025353,"stale":false},
+ "metrics":[35 项],"series":[]}
+```
+```json
+{"name":"nfvis_system_uptime_seconds","labels":{},"points":[{"ts":1791025196,"value":48274.69},
+ {"ts":1791025353,"value":48431.85}]}
+```
+
+**CLI 动态候选**：`?`/Tab 的取值来源＝库内已知指标名——
+`GET /cli/candidates?kind=metric-names` 回 35 项；按位置
+`tokens=show,system,metrics,history,name&partial=nfvis_system_mem` 回
+`nfvis_system_memory_available_bytes / nfvis_system_memory_total_bytes`（Desc=指标名）。
+
+**pty 交互**（决策 #81：交互行为必须在 pty 下验）：`show system metrics history name nfvis_system_cpu_util` + **Tab**
+→ 补全为 `nfvis_system_cpu_utilization_ratio `，行尾 `^M$`（raw 模式 CRLF，非裸 LF）；
+`show system metrics history ?` → 列出 `name  指定指标（动态候选＝存储内已知指标名）`。
+
+**Web（Browser Use 黑盒，决策 #141）**：入口
+`https://192.168.155.129/api/v1/ui/?v=20261003d356#/system/metrics`（**带查询串绕缓存**），
+登录后先核**当前构建**（页面内 `GET /system/version` → `nfvis: 2.0.0~dev56`）。页面：
+
+- 导航出现「历史趋势」；概览＝状态/库路径/库大小/序列数/样本数/时间范围/上次采样/采样间隔/保留天数；
+- 指标下拉（35 项，取自 `metrics`）+ 窗口下拉（1h/6h/24h/7d）；**切换指标后按其自身取数重绘**
+  （cpu 利用率：1 条序列 45 点、末值 0.18；alarms：4 条序列按 `severity` 分列、图例逐条给出点数与末值）；
+- 内联 SVG 折线，无外部库；空态分三种（不可用/指标未知/窗口无点）如实区分。
+- 截图 `docs/images/round137-web-metrics-history.png`。
+
+## §6 四套件复跑（对照 round132 基线）
+
+| 套件 | round132 基线 | 本轮 | 变化说明 |
+|---|---|---|---|
+| `cli-fulltest` | 231/0/13 | **240/0/13** | +9：阶段 1 新增 `show system metrics history`、`… name <metric>`（2）；阶段 2 新增 4 条 `set/delete system metrics history interval\|retention-days` 语句 + 1 条 `expect_out` 回读 + 2 段提交往返（7）。零失败。 |
+| `cli-semantic-check` | 26/0/3 | **26/0/3** | 无新增/移除项（本轮未改语义判据）；3 项不可判定＝S11（无 relay 现场）/S12 按设计 + 1。 |
+| `cli-lifecycle-check` | 22/0/3 | **22/0/3** | 零失败；3 项跳过＝L3-2（邻居表需 guest 先发流量）/L3-3、L2-2（本机无 NAT 配置）。 |
+| `cli-pty-smoke` | 10/10 | **10/10** | 全部通过。 |
+
+跑法：清场 → 停 sem-vm 让 1G 页 → `SRV=https://127.0.0.1:443 CLI_BIN=/usr/bin/nfvis-cli NFVIS_PASSWORD=… bash contrib/scripts/cli-*.sh`；
+语义套件先 `cli-semantic-fixture.sh up` 造流量现场。
+
+**lifecycle 的两档读数（如实登记，非本轮引入）**：夹具在场（有 VNF 对象）⇒ **22/0/3**；
+夹具 `down` 之后（无 VNF/NAT 对象）⇒ **21/0/3**（L3-1「vNIC 是否真接进交换机」因无对象转跳过）。
+两档都是零失败；差异只来自现场对象有无——与该套件历史波动（19~22）同源。
+上述 22/0/3 是**恢复语义夹具后**的读数（与 round132 同条件）。
+
+
+## §7 本轮修掉的问题（真机/复核实测暴露，均已回归）
+
+1. **概览「（默认）」注记恒真**——原实现把生效值同时当左右两侧比较（`historyIntervalDefault() == interval`），
+   现场 `interval=10` 仍显示「（默认）」。改为与**模型默认值**比较，并新增单测
+   `TestMetricsHistoryIntervalNote`（默认值→「（默认值」、改过→「（已配置」）。
+2. **`truncated` 用「点数 == limit」猜**——会把「正好这么多点」误报成被裁剪。
+   改为存储侧**真值**（`QueryResult.Truncated`：原始点数**超过** limit 才置位），
+   新增 `TestQueryTruncatedIsTruthful`（恰好等于 limit **不**置位）。
+3. **查询失败被答成「窗口内无数据」**——库可打开但该次查询出错时，原实现保持 `available=true` 且空 `series`，
+   与「确实没有」不可区分。改为 `available=false` + `reason="历史时序查询失败：…"`（读不出来 ≠ 没有）。
+4. **删空 `system.metrics.history` 留空壳**——`delete system metrics history interval|retention-days` 删光两个叶子后
+   配置里留 `{"history":{}}`，`show configuration | display set` 反推为空语句、**回放自校验报内部错误**
+   （与 round84 空 `nat` 同族）。`pruneEmptySingleton` 增一层剪枝（先剪内层 `history` 再判外层 `metrics`），
+   新增回归 `TestMetricsHistoryConfigRoundTripAndPrune` / `TestMetricsHistoryConfigZeroMeansDefault`。
+5. **Web 坐标轴浮点原始串**——直接 `String(v)` 会显示 `0.17999450927800728`（读不出、占满轴）。
+   压缩到 4 位有效数字（`_bytes` 仍走 `bytes()` 人读化）。Browser 复核实测：0.18 / 0.1799。
+6. **`limit` 无上界** → 夹取 `MaxQueryLimit=10000`（夹取而非报错；越限置 `truncated`）。
+7. **架构守护连带**：`internal/schema` 的 `K("metrics", "历史时序存储（决策 #356）")` 把决策号写进了
+   **操作者可见**的节点描述，被 `archtest/user_text_test.go` 正确拦下 → 描述串去掉决策号（注释里保留）。
+
+## §8 现场与环境（本轮结束时）
+
+- **语义夹具已恢复**（`cli-semantic-fixture.sh up`）：`sem-vs`（bvi0 + `vh-sem-vm-nic0`）、
+  `sem-vm` running、`sem-ct` Up —— 与 round132 基线现场一致；`dns-vs` 全程未动（一直在）。
+  ⚠️ 注意：`sem-vs/sem-vm/sem-ct` **就是** `cli-semantic-fixture.sh` 的现场对象，`… down` 会按设计删掉它们
+  （本轮拆夹具时确实如此），所以「跑完语义套件要 up 回来」是硬性收尾动作。
+- 采样间隔留在 **10s**（本轮为便于观察改小）；下一轮若要回落默认，`delete system metrics history interval` + commit。
+- 历史库 `/var/lib/nfvis/metrics.db` 持续增长（本轮结束 ≈ 6250+ 样本 / 50 序列 / 300 KB），无需清理即
+  由保留策略（7 天 + 2,000,000 行）兜底。
+
+## §9 未在本轮（如实登记）
+
+- **不新增告警码**：采样停滞只在读视图以 `stale` + `last_tick_ts` 如实呈现；「采样停滞告警」需与告警对账
+  口径一起设计，登记为后续。
+- **不含 rate**：历史点是采样瞬间值，计数器单调递增，速率由读侧差分（读视图与手册均明说，不伪造）。
+- **不进配置备份/恢复语义**：`metrics.db` 是运行数据，备份的是配置。
+- **`request system storage format-data`** 会清数据分区，历史随之清空——既有语义，未额外扩展。

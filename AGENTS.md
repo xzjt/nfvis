@@ -493,11 +493,27 @@
   `nfvis_vnf_up{kind,name}`（0/1；不可查询时**不发**该对象——宁缺不谎报）＋手册读法；聚合指标名/标签/取值
   逐字不变。真机三验：基线 up=1；容器起/停的 up 与计数双向同步；**停 libvirtd ⇒ available{vm}=0 且 vm
   逐对象消失**（对照修复前静默 0）、起回恢复（与 #354 复连联动）。证据 `v2-round136-d355-metrics-verified.txt`。
+- **round137（三.6 交付：#356 历史时序存储 v1，2026-10-03）**：清 `docs/v2待做.md` 三.6——
+  `/metrics` 是即时快照、Web 无趋势底座。**先评规模**（本机 ≈80 序列/次、60s 采样 ⇒ 4.6 MB/天、7 天 ≈32 MB，
+  数据分区 79 GB 可用）⇒ **SQLite 足够、不引外部 TSDB**。**#356**（PR #286）：采集侧把 `handleMetrics` 取数体抽成
+  `Server.GatherSamples`，`/metrics` 与后台采样器**共用同一路径**（不做第二套清单）；存储＝**独立库**
+  `/var/lib/nfvis/metrics.db`（不与配置库的事务/候选锁竞争、不进配置备份恢复语义）；保留＝时间窗（默认 7 天）
+  + **硬行顶 2,000,000** 双界；配置 `set/delete system metrics history interval|retention-days`（改配置**免重启**即生效）；
+  读视图**三面同源**（CLI `show system metrics history [name <metric> [last/step]]`、REST `GET /metrics/history`
+  **需 Bearer**（与无鉴权的 `/metrics` 有意不对称）、Web「系统 · 历史趋势」页内联 SVG）。**真机四维全过**：
+  ① CLI 概览与**直读 SQLite** 逐值吻合；② 重启 nfvis/重装 deb 后历史延续（min 不变）、间隔 60→10 免重启生效、
+  存储启用与「就绪」日志相隔 21ms（不阻塞启动）；③ 容器起/停 ⇒ `nfvis_vnf_up` 历史 0→1→0；④ `/metrics` 与历史
+  最新点反推开机时刻**差 0.4s**（同一内核 uptime）、库打不开时读视图如实报不可用+原因、无 token 401 / `/metrics` 仍 200。
+  **Browser Use 复核**（dev56）通过，截图 `docs/images/round137-web-metrics-history.png`。
+  **四套件**：fulltest **240/0/13**（231→240：新命令入套件 +9）、语义 **26/0/3**、lifecycle **22/0/3**、pty **10/10**。
+  **本轮实测修掉 7 处**（详见证据 §7）：概览「（默认）」注记恒真、`truncated` 用点数猜、查询失败被答成「无数据」、
+  删空留 `system.metrics` 空壳致 display set 回放报内部错误（`pruneEmptySingleton` 补一层）、Web 坐标轴浮点原始串、
+  `limit` 无上界、schema 节点描述里写了决策号（archtest 拦下）。证据 `docs/evidence/v2-round137-d356-metrics-history.txt`。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
-- 已定决策 257 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#355，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 258 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#356，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。

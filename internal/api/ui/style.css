@@ -288,6 +288,22 @@ body.role-readonly [data-write] { display: none !important; }
    由 :not() 放行；其余未带 data-op 的写入口对非 super-user 一律隐藏（缺省收紧，宁可少放）。 */
 body.role-nonsuper [data-write]:not([data-op]) { display: none !important; }
 
+/* 历史趋势页（#/system/metrics，决策 #356）：只读页——控件条、内联 SVG 折线与图例。
+   图表无外部库（免构建）：一条序列一条 polyline，配色循环取 --accent 系的近似色。 */
+.mh-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.mh-controls label { color: var(--muted); font-size: 12px; }
+.mh-controls select {
+  padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--fg); font-size: 13px; max-width: 340px;
+}
+.mh-chart { margin-top: 8px; }
+.mh-svg { width: 100%; height: auto; display: block; }
+.mh-axis { stroke: var(--line); stroke-width: 1; }
+.mh-tick { fill: var(--muted); font-size: 11px; }
+.mh-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; }
+.mh-legend-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.mh-swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+
 /* read-only 落在写页上（深链/收藏）时的说明条：讲清"为什么这页是空的、该找谁"。 */
 #role-notice { display: none; }
 body.role-readonly.role-notice-on #role-notice { display: block; }

@@ -39,7 +39,8 @@ type SystemConfig struct {
 	Syslog             *SyslogConfig     `json:"syslog,omitempty"`
 	API                *APIConfig        `json:"api,omitempty"`
 	IdleTimeoutMinutes int               `json:"idle_timeout_minutes,omitempty"`
-	Health             *HealthThresholds `json:"health,omitempty"` // 硬件健康告警阈值（FR-SYS-012）
+	Health             *HealthThresholds `json:"health,omitempty"`  // 硬件健康告警阈值（FR-SYS-012）
+	Metrics            *MetricsConfig    `json:"metrics,omitempty"` // 可观测性配置（决策 #356）
 }
 
 // HealthThresholds 硬件健康告警阈值（0 = 未设置该阈值，不产生告警）。
@@ -47,6 +48,53 @@ type HealthThresholds struct {
 	CPUTempCelsius  int `json:"cpu_temp_celsius,omitempty"`
 	DiskTempCelsius int `json:"disk_temp_celsius,omitempty"`
 	DiskUsedPercent int `json:"disk_used_percent,omitempty"`
+}
+
+// MetricsConfig 可观测性配置（决策 #356）。
+type MetricsConfig struct {
+	History *MetricsHistoryConfig `json:"history,omitempty"`
+}
+
+// MetricsHistoryConfig 历史时序存储（决策 #356）。字段缺省 = 用默认值
+// （默认值**不在配置里写常数**；`delete system metrics history <字段>` 即回落默认）。
+type MetricsHistoryConfig struct {
+	IntervalSeconds int `json:"interval_seconds,omitempty"` // 采样间隔（秒）
+	RetentionDays   int `json:"retention_days,omitempty"`   // 保留天数
+}
+
+// 历史时序存储的默认值与界（决策 #356）。**单一事实源**——其它任何处不得重定义；
+// 缺省/越界一律回落默认（生效值由下面的访问器给出）。
+const (
+	MetricsIntervalDefaultSeconds = 60   // 采样间隔默认（秒）
+	MetricsIntervalMinSeconds     = 10   // 采样间隔下界
+	MetricsIntervalMaxSeconds     = 3600 // 采样间隔上界
+	MetricsRetentionDaysDefault   = 7    // 保留天数默认
+	MetricsRetentionDaysMin       = 1    // 保留天数下界
+	MetricsRetentionDaysMax       = 365  // 保留天数上界
+)
+
+// MetricsHistoryIntervalSeconds 生效的采样间隔（秒）：配置值，缺省/越界回落默认。
+func (c *Config) MetricsHistoryIntervalSeconds() int {
+	if c == nil || c.System == nil || c.System.Metrics == nil || c.System.Metrics.History == nil {
+		return MetricsIntervalDefaultSeconds
+	}
+	n := c.System.Metrics.History.IntervalSeconds
+	if n < MetricsIntervalMinSeconds || n > MetricsIntervalMaxSeconds {
+		return MetricsIntervalDefaultSeconds
+	}
+	return n
+}
+
+// MetricsHistoryRetentionDays 生效的保留天数：配置值，缺省/越界回落默认。
+func (c *Config) MetricsHistoryRetentionDays() int {
+	if c == nil || c.System == nil || c.System.Metrics == nil || c.System.Metrics.History == nil {
+		return MetricsRetentionDaysDefault
+	}
+	n := c.System.Metrics.History.RetentionDays
+	if n < MetricsRetentionDaysMin || n > MetricsRetentionDaysMax {
+		return MetricsRetentionDaysDefault
+	}
+	return n
 }
 
 // SystemLogin 本地 AAA 配置：登录横幅/用户/class/口令策略，声明式存于配置文档

@@ -38,6 +38,18 @@ show system
   │                                                 #   **不可回收**（写 nr_hugepages 释放不了）；持有值取不到就如实说取不到；
   │                                                 #   1G 池「数据面占用 ≥1」时说明区给出「VNF 可起页数 = 空闲页数」
   │                                                 #   （VPP 主堆固定占 1 个 1G 页、无配置键可释放）
+  ├─ metrics history [name <metric>] [last <duration>] [step <duration>]
+  │                                                 # 历史时序读视图（决策 #356，R）：/metrics 的历史底座
+  │                                                 #   省略参数 = **概览**：存储状态（可用/不可用 + 原因）、
+  │                                                 #   生效采样间隔与保留天数、库大小、序列数、样本数、
+  │                                                 #   时间范围（最旧/最新）、上次采样时刻与是否停滞（stale）；
+  │                                                 #   `name <metric>` = 该指标**各序列**（按标签分组）的时间点，
+  │                                                 #   `<metric>` 走**动态候选**（来源＝存储内已知指标名）；
+  │                                                 #   `last <duration>`（`<n><s|m|h|d>`，默认 1h）、
+  │                                                 #   `step <duration>`（降采样步长，取桶内最后一个样本；省略=自动）。
+  │                                                 #   **同源**：`GET /metrics/history`（该端点**需鉴权**——
+  │                                                 #   `/metrics` 无鉴权是为 Prometheus 抓取，历史是运维读视图）。
+  │                                                 #   存储不可用/无数据时如实说明，不编造（v1 不设告警码）
   ├─ kernel                                         # 内核启动基线三方对照（cmdline/运行实际/配置期望，FR-SYS-014）
   ├─ hardware                                       # 硬件健康：CPU 温度/风扇/电源（IPMI/Redfish/lm-sensors）、磁盘 SMART
   ├─ core-dumps                                     # 崩溃转储清单（VPP/QEMU/nfvisd）
@@ -423,6 +435,13 @@ set syslog
       ├─ level <debug|info|warn|error>
       ├─ retention-days <uint>                # 本地日志保留天数（FR-SYS-013）
       └─ max-size-mb <uint>                   # 本地日志容量上限，滚动覆盖
+set metrics                              # 历史时序存储（决策 #356）
+  └─ history
+      ├─ interval <uint>                      # 采样间隔（秒，默认 60，范围 10..3600）；改配置**无需重启**即生效
+      └─ retention-days <uint>                # 保留天数（默认 7，范围 1..365）；另有 2,000,000 行硬顶兜底
+                                              #   `delete system metrics history interval|retention-days` = 回落默认
+                                              #   （字段缺省＝用默认值，不在配置里写常数）。落点 `system.metrics.history`；
+                                              #   采样器写独立库 `/var/lib/nfvis/metrics.db`（不在配置备份/恢复语义内）
 # 管理口地址/网关变更：commit 时若当前会话来自 SSH，强制要求使用
 # commit confirmed 并输出自锁警告（FR-CFG-012）
 set login                               # 权限：S（配置模式既有权限位，本节全部语句同）

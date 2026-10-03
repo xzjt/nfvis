@@ -342,6 +342,19 @@ func (v *validator) checkSystem(c Config) {
 	if s.Syslog != nil && s.Syslog.RemotePort != 0 && (s.Syslog.RemotePort < 1 || s.Syslog.RemotePort > 65535) {
 		v.errf("system.syslog.remote_port", "远程 syslog 端口 %d 超出 1-65535", s.Syslog.RemotePort)
 	}
+	// 决策 #356：历史时序存储的采样间隔/保留天数——仅在设置（非零）时校验范围；
+	// 0 = 未设置，用默认值（默认值见 model 常量，越界在此拒绝而不是静默回落）。
+	if s.Metrics != nil && s.Metrics.History != nil {
+		h := s.Metrics.History
+		if h.IntervalSeconds != 0 && (h.IntervalSeconds < MetricsIntervalMinSeconds || h.IntervalSeconds > MetricsIntervalMaxSeconds) {
+			v.errf("system.metrics.history.interval_seconds",
+				"采样间隔 %d 秒超出范围 %d-%d", h.IntervalSeconds, MetricsIntervalMinSeconds, MetricsIntervalMaxSeconds)
+		}
+		if h.RetentionDays != 0 && (h.RetentionDays < MetricsRetentionDaysMin || h.RetentionDays > MetricsRetentionDaysMax) {
+			v.errf("system.metrics.history.retention_days",
+				"保留天数 %d 超出范围 %d-%d", h.RetentionDays, MetricsRetentionDaysMin, MetricsRetentionDaysMax)
+		}
+	}
 	v.checkSystemLogin(s)
 }
 

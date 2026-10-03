@@ -116,6 +116,7 @@ const (
 	DynVppPlugins    = "vppplugins"     // VPP 插件名
 	DynAcls          = "acls"           // ACL 清单
 	DynQos           = "qos-policies"   // 限速策略清单
+	DynMetricNames   = "metric-names"   // 历史时序库内的指标名（决策 #356）
 )
 
 // PipeKeywords 通用管道关键字（FR-CLI-005，对一切 show 输出可用）。
