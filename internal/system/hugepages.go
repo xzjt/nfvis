@@ -30,7 +30,7 @@ package system
 //     如实说取不到（actual/free/in_use = -1、state=unreadable）；取不到持有值就 held/orphan = -1
 //     并给 note，**都不编造**。
 //   · 数据面归属（决策 #353，收口 #347）：持有汇总再按进程 `/proc/<pid>/comm` 拆出
-//     **数据面占用**（comm=vpp 的进程提交的页，实测）——VPP 主堆固定占 1 个 1G 页且无配置键
+//     **数据面占用**（comm 以 vpp 开头的进程提交的页，实测；真机 `vpp_main`）——VPP 主堆固定占 1 个 1G 页且无配置键
 //     可释放，「声明 2 却只能起 1 个 VNF」的困惑正源于此。1G 池该值 ≥1 时读视图的 note 追加
 //     可用性说明（VNF 可起页数 = 空闲页数）。**纯呈现，不改回收/对账/告警任何语义**。
 //   · 判占用者**不能按 maps 路径过滤**（round125 教训：既漏匿名 hugetlb、又把共享映射当成独立
@@ -184,16 +184,18 @@ func HugepageHeldPages(root string) (map[string]int, bool) {
 	return total, ok
 }
 
-// dataplaneComm 数据面进程名（`/proc/<pid>/comm` 的内容）：VPP。决策 #353 用它把持有页
+// dataplaneCommPrefix 数据面进程名前缀（`/proc/<pid>/comm` 的**主线程名**）：真机实测 VPP 为
+// `vpp_main`（worker 线程另名 `vpp_wk_*`，但 `/proc/<pid>/comm` 只反映主线程）——**用前缀
+// `vpp` 匹配**（round133 上机核对的实测值；勿写死 "vpp" 精确值）。决策 #353 用它把持有页
 // 归属出「数据面占用」。
-const dataplaneComm = "vpp"
+const dataplaneCommPrefix = "vpp"
 
-// HugepageHeldPagesDetail 在 HugepageHeldPages 的基础上，把「数据面（comm=vpp）提交的页」
+// HugepageHeldPagesDetail 在 HugepageHeldPages 的基础上，把「数据面（comm 以 vpp 开头，实测 vpp_main）提交的页」
 // 单独归属出来（决策 #353）。total 与 HugepageHeldPages 的返回值完全一致。
 //
 // 归属口径：
 //
-//	· 逐进程读 `/proc/<pid>/comm`，恰为 "vpp" 的进程**提交的页**计入 dataplane；comm 读不到
+//	· 逐进程读 `/proc/<pid>/comm`，**以 "vpp" 开头**（真机实测 `vpp_main`）的进程**提交的页**计入 dataplane；comm 读不到
 //	  （进程已退出 / 无权限 / 内核未提供）的进程**按非数据面计**——宁少不猜。
 //	· 共享页沿用同一个 seen 去重：一页全局只计一次，**归属取首个提交进程**。VPP 与 VNF
 //	  （qemu）共享同一个 1G 大页在本产品的数据面内存模型下不会发生（VPP 主堆/缓冲池独立，
@@ -224,7 +226,7 @@ func HugepageHeldPagesDetail(root string) (total, dataplane map[string]int, ok b
 			continue // 进程已退出 / 无权限：跳过（不因单个进程读不到就把整个池判为取不到）
 		}
 		readAny = true
-		isDataplane := readProcComm(pidDir) == dataplaneComm
+		isDataplane := strings.HasPrefix(readProcComm(pidDir), dataplaneCommPrefix)
 		counts := map[string]int{"1G": 0, "2M": 0}
 		scanSmapsHeld(b, counts, seen)
 		for _, size := range HugepageSizes {
@@ -330,7 +332,7 @@ type HugepagePoolView struct {
 	Free     int    `json:"free"`     // 内核空闲页数（不可读时 -1）
 	InUse    int    `json:"in_use"`   // 在用页数 = actual - free（不可读时 -1）
 	Held     int    `json:"held"`     // 实际持有页数（进程/inode 引用汇总；取不到时 -1）
-	// HeldByDataplane 其中数据面（comm=vpp，即 VPP 主堆/缓冲）提交的页数（实测；取不到时 -1）。
+	// HeldByDataplane 其中数据面（comm 以 vpp 开头，即 VPP 主堆/缓冲）提交的页数（实测；取不到时 -1）。
 	// 决策 #353：VPP 主堆固定占 1 个 1G 页且无配置键可释放——这列回答「池里的页算谁的」。
 	HeldByDataplane int    `json:"held_by_dataplane"`
 	Orphan          int    `json:"orphan"`      // 无主占用页数 = in_use - held（>=0；取不到时 -1）
@@ -342,7 +344,7 @@ type HugepagePoolView struct {
 // HugepagePoolViewFor 纯函数：由声明/实际/空闲/持有/数据面占用（+ 是否可读）产出读视图。
 //
 // heldOK=false 表示持有值取不到（/proc 不可读）——held/orphan 回 -1 并给 note，不编造。
-// dataplane/dataplaneOK 为「数据面（comm=vpp）提交的页数」及其可取性（决策 #353）——取不到时
+// dataplane/dataplaneOK 为「数据面（comm 以 vpp 开头）提交的页数」及其可取性（决策 #353）——取不到时
 // HeldByDataplane 回 -1；1G 池且实测占用 >=1 时 note 追加可用性说明（VNF 可起页数 = 空闲页数）。
 // 注意：无主占用（orphan）**只作可见性呈现**，不计入 Reclaimable（产品侧回收不动这类页）。
 func HugepagePoolViewFor(pageSize string, declared, actual, free int, readable bool,

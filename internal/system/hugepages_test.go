@@ -448,7 +448,7 @@ func TestHugepageHeldPagesDetailDataplaneAttribution(t *testing.T) {
 	writeSmaps(t, root, "100",
 		smapsBlock("7f0000000000", "7f0040000000", "00:0d", "42", 2*1048576, 1048576, true, "/dev/hugepages/vpp-heap")+
 			smapsBlock("7f1000000000", "7f1000600000", "00:0d", "77", 3*2048, 2048, true, "/dev/hugepages/vpp-buf"))
-	writeProcComm(t, root, "100", "vpp")
+	writeProcComm(t, root, "100", "vpp_main")
 	// pid 200（qemu）：与 vpp 共享 inode 42 的 2 页（应去重不计，归属仍是首个提交者 vpp）
 	// + 自己的 1G inode 55 共 1 页（非数据面）。
 	writeSmaps(t, root, "200",
@@ -493,7 +493,7 @@ func TestHugepagePoolViewsDataplaneField(t *testing.T) {
 	writeSmaps(t, root, "100",
 		smapsBlock("7f0000000000", "7f0040000000", "00:0d", "42", 1*1048576, 1048576, true, "/dev/hugepages/vpp-heap")+
 			smapsBlock("7f1000000000", "7f1000600000", "00:0d", "77", 3*2048, 2048, true, "/dev/hugepages/vpp-buf"))
-	writeProcComm(t, root, "100", "vpp")
+	writeProcComm(t, root, "100", "vpp_main")
 
 	views := HugepagePoolViews(root, map[string]int{"1G": 2, "2M": 768})
 	bySize := map[string]HugepagePoolView{}
