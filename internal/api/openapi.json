@@ -87,6 +87,7 @@
                   "type": "string"
                 },
                 "destination": {
+                  "description": "同 source（IPv4/IPv6 前缀或 any）",
                   "type": "string"
                 },
                 "destination_port": {
@@ -116,6 +117,7 @@
                   "type": "integer"
                 },
                 "source": {
+                  "description": "IPv4/IPv6 前缀或 any（决策 #352）：一条规则单族，any 跟随对侧家族（对侧 v6 即 ::/0），显式混族提交期拒绝",
                   "example": "10.0.0.0/8 或 any",
                   "type": "string"
                 },

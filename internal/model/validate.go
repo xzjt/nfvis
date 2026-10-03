@@ -95,10 +95,42 @@ func checkIP(s string) bool   { return net.ParseIP(s) != nil }
 func checkMAC(s string) bool  { _, err := net.ParseMAC(s); return err == nil }
 func checkVlan(n int) bool    { return n >= 1 && n <= 4094 }
 
-// checkIP4 严格 IPv4（决策 #335：dhcp-relay 的 server 与 BVI 中继源地址都只走 v4）。
+// checkIP4 严格 IPv4（决策 #335：dhcp-relay 的 server 与 BVI 中继源地址都只走 v4；
+// 决策 #352 扩展到 NAT44 的地址范围与静态映射——下发层 ParseIP4Address 严格 v4，
+// 校验层放行 v6 只会把失败推迟到 commit 期的 invalid IP4 address）。
 func checkIP4(s string) bool {
 	ip := net.ParseIP(s)
 	return ip != nil && ip.To4() != nil
+}
+
+// checkCIDR4 严格 IPv4 CIDR（决策 #352：NAT44 的 match-source 校验——网络地址须为 v4）。
+func checkCIDR4(s string) bool {
+	ip, _, err := net.ParseCIDR(s)
+	return err == nil && ip.To4() != nil
+}
+
+// prefixFamily 显式前缀的地址族："ipv4"/"ipv6"；any/空/无法解析返回 ""（不判族——
+// 非法值由 ip-prefix 校验单独报错，此处不重复计数）。
+// 决策 #352：ACL 规则的 any/空一侧由编排层跟随显式侧家族，校验层只拦「两侧都写明了、
+// 却一族 v4 一族 v6」的混族规则。
+func prefixFamily(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.EqualFold(s, "any") {
+		return ""
+	}
+	if ip, _, err := net.ParseCIDR(s); err == nil {
+		if ip.To4() != nil {
+			return "ipv4"
+		}
+		return "ipv6"
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		if ip.To4() != nil {
+			return "ipv4"
+		}
+		return "ipv6"
+	}
+	return ""
 }
 
 // gatewayHasV4 网关声明里是否带 IPv4 网关地址（dhcp-relay 的中继源取它）。
@@ -644,6 +676,12 @@ func (v *validator) checkAcls(c Config) {
 					v.errf(rp+"."+field, "%s %q 必须为 ip-prefix 或 any", field, val)
 				}
 			}
+			// 决策 #352：一条规则只匹配单一地址族——两侧都是显式前缀时必须同族
+			// （VPP 的 ACL 规则按单族下发；any/空一侧由编排层跟随显式侧家族）。
+			if srcFam, dstFam := prefixFamily(r.Source), prefixFamily(r.Destination); srcFam != "" && dstFam != "" && srcFam != dstFam {
+				v.errf(rp+".source", "source/destination 地址族不一致（%s 与 %s）：一条规则仅匹配单族，双族需两条规则",
+					r.Source, r.Destination)
+			}
 			switch r.Protocol {
 			case "", "tcp", "udp", "icmp", "any":
 			default:
@@ -691,17 +729,20 @@ func (v *validator) checkNat(c Config) {
 		if !v.checkName(pp, pool.Name, "NAT 池") {
 			continue
 		}
+		// 决策 #352：两端都严格 v4——下发层 ParseIP4Address 只收 v4，v6 在这里拒
+		// （而不是 commit 期的 invalid IP4 address）。
 		lo, hi, ok := strings.Cut(pool.AddressRange, " to ")
-		if !ok || !checkIP(strings.TrimSpace(lo)) || !checkIP(strings.TrimSpace(hi)) {
-			v.errf(pp+".address_range", "地址范围 %q 必须为 \"<ip> to <ip>\"", pool.AddressRange)
+		if !ok || !checkIP4(strings.TrimSpace(lo)) || !checkIP4(strings.TrimSpace(hi)) {
+			v.errf(pp+".address_range", "地址范围 %q 必须为 \"<IPv4> to <IPv4>\"（NAT44 仅支持 IPv4）", pool.AddressRange)
 		}
 	}
 	dupCheck(v, n.Rules, "nat.rules", func(r NatRule) string { return strconv.Itoa(r.Seq) }, "NAT 规则")
 	insideVS, outsideVRF := "", ""
 	for _, r := range n.Rules {
 		rp := fmt.Sprintf("nat.rules[%d]", r.Seq)
-		if !checkCIDR(r.MatchSource) {
-			v.errf(rp+".match_source", "匹配源 %q 必须是 ip-prefix（CIDR）", r.MatchSource)
+		// 决策 #352：match-source 严格 v4 CIDR（NAT44 下发层只收 v4）。
+		if !checkCIDR4(r.MatchSource) {
+			v.errf(rp+".match_source", "匹配源 %q 必须为 IPv4 CIDR（NAT44 仅支持 IPv4）", r.MatchSource)
 		}
 		// NAT 仅作用于 L3 交换机（规格书 §4.3）
 		if !v.l3vs[r.VirtualSwitch] {
@@ -761,12 +802,13 @@ func (v *validator) checkNat(c Config) {
 			}
 		}
 	}
+	// 决策 #352：静态映射两端严格 v4（NAT44 下发层只收 v4，v6 在校验期拒绝）。
 	for i, st := range n.Static {
-		if !checkIP(st.InsideIP) {
-			v.errf(fmt.Sprintf("nat.static[%d].inside_ip", i), "内部地址 %q 必须是有效 ip", st.InsideIP)
+		if !checkIP4(st.InsideIP) {
+			v.errf(fmt.Sprintf("nat.static[%d].inside_ip", i), "内部地址 %q 必须为 IPv4 地址（NAT44 仅支持 IPv4）", st.InsideIP)
 		}
-		if !checkIP(st.OutsideIP) {
-			v.errf(fmt.Sprintf("nat.static[%d].outside_ip", i), "外部地址 %q 必须是有效 ip", st.OutsideIP)
+		if !checkIP4(st.OutsideIP) {
+			v.errf(fmt.Sprintf("nat.static[%d].outside_ip", i), "外部地址 %q 必须为 IPv4 地址（NAT44 仅支持 IPv4）", st.OutsideIP)
 		}
 	}
 }

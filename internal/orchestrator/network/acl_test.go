@@ -187,6 +187,99 @@ func TestBuildACLRules(t *testing.T) {
 	}
 }
 
+// ---------- 决策 #352：五元组规则显式支持 IPv6（any 家族跟随 + icmp 家族映射 + 混族防御） ----------
+
+// any/空一侧跟随显式侧的地址族：显式 v6 ⇒ ::/0，其余维持 0.0.0.0/0 的既有 v4 行为；
+// icmp 协议随规则家族映射（v4=1 / v6=58）。
+func TestBuildACLRulesIPv6Family(t *testing.T) {
+	cases := []struct {
+		name      string
+		rule      model.AclRule
+		wantSrc   string
+		wantDst   string
+		wantProto uint8
+	}{
+		{"两侧显式 v6 原样透传", model.AclRule{Seq: 10, Action: "deny",
+			Source: "2001:db8::/64", Destination: "2001:db8:1::/48"}, "2001:db8::/64", "2001:db8:1::/48", 0},
+		{"source v6 + destination any 跟随 ::/0", model.AclRule{Seq: 10, Action: "deny",
+			Source: "2001:db8::/64", Destination: "any"}, "2001:db8::/64", "::/0", 0},
+		{"source 空 + destination v6 跟随 ::/0", model.AclRule{Seq: 10, Action: "deny",
+			Destination: "2001:db8:1::/48"}, "::/0", "2001:db8:1::/48", 0},
+		{"source any + destination v6 跟随 ::/0", model.AclRule{Seq: 10, Action: "deny",
+			Source: "any", Destination: "2001:db8:1::/48"}, "::/0", "2001:db8:1::/48", 0},
+		{"两侧 any 维持 v4 全零前缀", model.AclRule{Seq: 10, Action: "permit",
+			Source: "any", Destination: "any"}, "0.0.0.0/0", "0.0.0.0/0", 0},
+		{"v4 显式 + any 维持 v4 全零前缀", model.AclRule{Seq: 10, Action: "permit",
+			Source: "192.168.1.0/24", Destination: "any"}, "192.168.1.0/24", "0.0.0.0/0", 0},
+		{"icmp v4 规则 → 1", model.AclRule{Seq: 10, Action: "permit",
+			Source: "10.0.0.0/8", Destination: "any", Protocol: "icmp"}, "10.0.0.0/8", "0.0.0.0/0", 1},
+		{"icmp v6 规则 → 58", model.AclRule{Seq: 10, Action: "permit",
+			Source: "2001:db8::/64", Destination: "any", Protocol: "icmp"}, "2001:db8::/64", "::/0", 58},
+		{"icmp6 协议名恒 58", model.AclRule{Seq: 10, Action: "permit",
+			Source: "any", Destination: "any", Protocol: "icmp6"}, "0.0.0.0/0", "0.0.0.0/0", 58},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rules, err := BuildACLRules(model.Acl{Name: "v6", Rules: []model.AclRule{tc.rule}})
+			if err != nil {
+				t.Fatalf("BuildACLRules: %v", err)
+			}
+			if len(rules) != 1 {
+				t.Fatalf("规则数: %d", len(rules))
+			}
+			got := rules[0]
+			if got.Src != tc.wantSrc || got.Dst != tc.wantDst || got.Proto != tc.wantProto {
+				t.Fatalf("转换不符: want Src=%s Dst=%s Proto=%d, got %+v", tc.wantSrc, tc.wantDst, tc.wantProto, got)
+			}
+		})
+	}
+
+	// 混族规则 → BuildACLRules 返回 error（防御分支；校验层已拦截，理论不可达）
+	if _, err := BuildACLRules(model.Acl{Name: "mix", Rules: []model.AclRule{
+		{Seq: 10, Action: "permit", Source: "10.0.0.0/8", Destination: "2001:db8::/64"}}}); err == nil ||
+		!strings.Contains(err.Error(), "地址族不一致") {
+		t.Fatalf("混族规则应返回防御 error: %v", err)
+	}
+}
+
+// isExplicitV6 只回答「这一侧自己写明了 v6 吗」：any/空与解析失败的值都不是显式 v6。
+func TestIsExplicitV6(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"2001:db8::/64", true},
+		{"2001:db8::1", true},
+		{"::/0", true},
+		{"10.0.0.0/8", false},
+		{"0.0.0.0/0", false},
+		{"192.168.1.1", false},
+		{"any", false},
+		{"", false},
+		{"   ", false},
+		{"garbage", false},
+	}
+	for _, tc := range cases {
+		if got := isExplicitV6(tc.in); got != tc.want {
+			t.Fatalf("isExplicitV6(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// 混族 ACL 在 apply 路径被拒（防御分支上抛）且不下发任何消息。
+func TestAclApplyMixedFamilyRejected(t *testing.T) {
+	f := newFakeAcl()
+	p := NewAclProvider(f)
+	err := p.ApplyACL(context.Background(), model.Acl{Name: "mix",
+		Rules: []model.AclRule{{Seq: 10, Action: "permit", Source: "10.0.0.0/8", Destination: "2001:db8::/64"}}})
+	if err == nil || !strings.Contains(err.Error(), "地址族不一致") {
+		t.Fatalf("混族规则应在 apply 路径被拒: %v", err)
+	}
+	if len(f.added) != 0 {
+		t.Fatalf("被拒的 ACL 不得下发: %v", f.added)
+	}
+}
+
 func TestAclApplyReplaceAndDeleteUnbind(t *testing.T) {
 	f := newFakeAcl()
 	p := NewAclProvider(f)

@@ -514,6 +514,8 @@ set static-routes default next-hop <ip>
 
 ```
 [edit acls <name>]
+# 地址家族（决策 #352）：一条规则单族；source/destination 接受 v4/v6 前缀（显式混族提交期拒绝）；
+#   any 跟随对侧家族（对侧 v6 则 ::/0，否则 0.0.0.0/0，两侧 any 按 v4）；v6 规则的 icmp 指 ICMPv6(58)。
 set rule <seq> source <ip-prefix|any> destination <ip-prefix|any> \
     protocol <tcp|udp|icmp|any> [source-port <port|range>] [destination-port <port|range>] \
     action <permit|deny>
@@ -532,6 +534,7 @@ set rule <seq> direction <ingress|egress>
 
 [edit nat]
 set source-pool <name> address-range <ip> to <ip>    # 外部地址池（可选；未用时以出接口地址作外部地址）
+#                                                     # 仅 IPv4（决策 #352）：v6 值在校验期拒绝（NAT44 为 v4 专用形态）
 set rules <seq> match source <ip-prefix> virtual-switch <name> \
     action interface <ifname> [source-pool <name>]   # 出接口必填（决策 #38/#52）
 set static <inside-ip> to <outside-ip>               # 1:1 发布
