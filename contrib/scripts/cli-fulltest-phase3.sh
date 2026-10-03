@@ -33,14 +33,16 @@ set virtual-machine-functions cli-vm description cli-fulltest-vm
 commit"
 
 # 注意：下面的脚本块**逐行当命令执行**，块内不能写 `#` 注释（会被当成命令而中止整个脚本）。
-# `args -c "sleep 3600"` 是**必要的**：`sh` 无参会在 stdin 关闭时立刻退出，容器停在 exited 时
-# 阶段 4 的 exec 只能验「拒绝」、验不到「能执行」（正控缺失）。
+# `/bin/sleep 3600` 是**必要的**：容器跑完就退出，停在 exited 时阶段 4 的 exec 只能验「拒绝」、
+# 验不到「能执行」（正控缺失）。⚠️ 用 `/bin/sleep` + `args 3600`（**无引号**）而不是
+# `sh -c "sleep 3600"`：脚本块本身在 bash 双引号里，内层引号会被吃掉（实测退化成 `sh -c sleep`，
+# sleep 报缺操作数后容器立刻退出）。
 run S3 "configure
 set container-functions cli-ct2 image alpine:3.20
 set container-functions cli-ct2 vcpu count 1
 set container-functions cli-ct2 memory size-mb 128
-set container-functions cli-ct2 command /bin/sh
-set container-functions cli-ct2 args -c "sleep 3600"
+set container-functions cli-ct2 command /bin/sleep
+set container-functions cli-ct2 args 3600
 set bonds bond0 members 0 ens192
 commit"
 
