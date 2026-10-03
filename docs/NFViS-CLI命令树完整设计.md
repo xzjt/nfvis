@@ -213,6 +213,15 @@ request virtual-machine-functions <name>
 request container-functions <name>
   ├─ start | stop | restart
   ├─ log [last <n>]                                 # 容器 stdout/stderr
+  ├─ exec <command> [timeout <seconds>]             # S；在**运行中**的容器内执行命令（非交互，决策 #357）
+  │      # <command> 是**一个整体**（含空格请加引号），语义等价容器内 `sh -c`；返回 stdout/stderr 与退出码。
+  │      # 有界且如实：超时默认 30s（1..300）；stdout/stderr **各自**上限 256 KiB（超限置 truncated 并标注）；
+  │      #   ⚠️ 超时只中止**客户端等待**——Docker 不提供 exec 进程的中止接口，容器内进程**可能仍在运行**；
+  │      #   退出码未知时（超时/流中断）**不报**（不谎报 0）。
+  │      # 权限 **S**：与 VM 串口 console 的关键差别——console 进 guest 串口仍需 guest 凭据，
+  │      #   而 exec 是**免凭据的容器内命令执行**（等价 root）；operator 本不能创建容器（配置模式 S），
+  │      #   若 exec 为 O 即等于绕过该限制 ⇒ 与配置模式/删除同档。
+  │      # API: POST /container-functions/{name}:exec（body {command, timeout_seconds?}）
   └─ delete                                         # S；确认
 request images
   ├─ upload name <name> type <vm-image|container-image> file <path>

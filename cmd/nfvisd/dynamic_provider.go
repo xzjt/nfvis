@@ -24,6 +24,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/api"
 	"github.com/xzjt/nfvis/internal/model"
@@ -344,6 +345,14 @@ func (h *containerHolder) ContainerLogs(ctx context.Context, name string, tail i
 		return p.ContainerLogs(ctx, name, tail)
 	}
 	return "", errContainerNotConnected
+}
+
+// ContainerExec 未接入 ⇒ 与 containerLog nil 分支同文案的错误（决策 #357）。
+func (h *containerHolder) ContainerExec(ctx context.Context, name, command string, timeout time.Duration) (container.ExecResult, error) {
+	if p := h.current(); p != nil {
+		return p.ContainerExec(ctx, name, command, timeout)
+	}
+	return container.ExecResult{}, errContainerNotConnected
 }
 
 // EnsureConsistent 未接入 ⇒ 空结果（恢复收敛不产生噪声）。

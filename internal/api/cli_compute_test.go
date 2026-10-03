@@ -19,11 +19,13 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/images"
 	"github.com/xzjt/nfvis/internal/orchestrator"
+	"github.com/xzjt/nfvis/internal/orchestrator/container"
 	"github.com/xzjt/nfvis/internal/system"
 )
 
@@ -36,6 +38,12 @@ type fakeCLIContainer struct {
 	logs    string
 	logTail int
 	err     error
+
+	// 决策 #357：容器内执行命令的记账（命令原文、超时、注入结果）。
+	execCommand string
+	execTimeout time.Duration
+	execResult  container.ExecResult
+	execErr     error
 }
 
 func newFakeCLIContainer() *fakeCLIContainer {
@@ -66,6 +74,12 @@ func (f *fakeCLIContainer) ContainerState(_ context.Context, name string) (strin
 func (f *fakeCLIContainer) ContainerLogs(_ context.Context, name string, tail int) (string, error) {
 	f.logTail = tail
 	return f.logs, f.err
+}
+
+func (f *fakeCLIContainer) ContainerExec(_ context.Context, name, command string, timeout time.Duration) (container.ExecResult, error) {
+	f.actions = append(f.actions, "exec:"+name)
+	f.execCommand, f.execTimeout = command, timeout
+	return f.execResult, f.execErr
 }
 
 // ---------- show 族 ----------

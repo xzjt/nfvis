@@ -7,12 +7,37 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
 )
 
 // ErrVMNotFound 目标 VM/domain 未定义（生命周期动作返回，API 层映射 404）。
 var ErrVMNotFound = errors.New("VM 未定义")
+
+// ExecMaxStreamBytes 容器内执行命令时**单侧**（stdout / stderr 各自）的输出上限：256 KiB
+// （决策 #357）。定义在接口所在的本包：`container` 包反向依赖本包（Provider 接口在此），
+// 结果类型不能定义在那边（会成环），故以本包类型 + 别名复用（同 ErrIfaceUnavailable 先例）。
+const ExecMaxStreamBytes int64 = 256 << 10
+
+// ExecResult 容器内执行命令的结果（决策 #357）。
+//
+// 如实口径：`HasExitCode=false` 表示命令**没跑完**（超时/流中断）——此时 ExitCode 无意义，
+// 渲染层**不得**报 0；`TimedOut=true` 时容器内进程可能仍在运行（Docker 不提供 exec 进程的
+// 中止接口）。
+type ExecResult struct {
+	ExitCode    int
+	HasExitCode bool
+	Stdout      string
+	Stderr      string
+	Truncated   bool
+	TimedOut    bool
+	Duration    time.Duration
+}
+
+// ErrContainerNotRunning 目标容器未处于运行态——需要运行态的动作（如容器内执行命令，
+// 决策 #357）在容器 absent/exited/dead 时返回，API 层映射 409。
+var ErrContainerNotRunning = errors.New("容器未处于运行态")
 
 // ErrIfaceUnavailable 配置引用的接口在 VPP 中不存在（未由 DPDK 接管、或已被 DPDK
 // 接管但尚未加载进数据面、或被移除）。属**不可收敛项**：恢复收敛据此转 error 级告警
@@ -188,6 +213,9 @@ type ContainerProvider interface {
 	ContainerState(ctx context.Context, name string) (string, error)
 	// ContainerLogs 返回最近 tail 行 stdout/stderr。
 	ContainerLogs(ctx context.Context, name string, tail int) (string, error)
+	// ContainerExec 在**运行中**的容器内执行命令（决策 #357，非交互）；非运行态返回
+	// ErrContainerNotRunning、不存在返回 ErrVMNotFound。
+	ContainerExec(ctx context.Context, name, command string, timeout time.Duration) (ExecResult, error)
 	EnsureConsistent(ctx context.Context, cfg model.Config) []error
 	// CheckContainerAlarms 异常退出巡检（FR-CMP-022）：dead/非零退出 → critical 告警。
 	CheckContainerAlarms(ctx context.Context, cfg model.Config) []error
@@ -255,5 +283,11 @@ func (noopContainer) ContainerState(context.Context, string) (string, error) {
 	return CTStateAbsent, nil
 }
 func (noopContainer) ContainerLogs(context.Context, string, int) (string, error) { return "", nil }
+
+// ContainerExec 未接入的容器不执行任何命令：如实报错（不假装成功）。
+func (noopContainer) ContainerExec(context.Context, string, string, time.Duration) (ExecResult, error) {
+	return ExecResult{}, ErrContainerNotRunning
+}
+
 func (noopContainer) EnsureConsistent(context.Context, model.Config) []error     { return nil }
 func (noopContainer) CheckContainerAlarms(context.Context, model.Config) []error { return nil }

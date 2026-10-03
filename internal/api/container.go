@@ -13,18 +13,22 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
+	"github.com/xzjt/nfvis/internal/orchestrator/container"
 )
 
-// ContainerRuntime 容器生命周期与日志（Docker 编排器注入；nil = 503）。
+// ContainerRuntime 容器生命周期、日志与容器内执行（Docker 编排器注入；nil = 503）。
 type ContainerRuntime interface {
 	StartContainer(ctx context.Context, name string) error
 	StopContainer(ctx context.Context, name string) error
 	RestartContainer(ctx context.Context, name string) error
 	ContainerState(ctx context.Context, name string) (string, error)
 	ContainerLogs(ctx context.Context, name string, tail int) (string, error)
+	// ContainerExec 在运行中的容器内执行命令（决策 #357，非交互）。
+	ContainerExec(ctx context.Context, name, command string, timeout time.Duration) (container.ExecResult, error)
 }
 
 // containerResponse ContainerFunction + 运行态 state（契约 GET 视图）。
@@ -123,11 +127,101 @@ func (s *Server) dispatchContainerPost(w http.ResponseWriter, r *http.Request) {
 	}
 	switch action {
 	case "start", "stop", "restart":
+	case "exec":
+		// 决策 #357：在运行中的容器内执行命令（非交互）。形态与生命周期动作不同
+		// （带 body、回结果而非 202），单独走一条分支。
+		s.containerExec(w, r, name)
+		return
 	default:
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "未知的容器动作: "+action, nil)
 		return
 	}
 	s.containerAction(w, r, name, action)
+}
+
+// containerExec POST /container-functions/{name}:exec（决策 #357）。
+//
+// 权限：路由层已按 ClassSuperUser 鉴权（`request container-functions exec` 为 S 档）——
+// 与 VM 串口 console 的关键差别是「console 进 guest 串口仍需 guest 凭据，而 exec 是
+// **免凭据的容器内命令执行**（等价 root）」，operator 本不能创建容器，故不能经此绕过。
+//
+// 如实口径：命令跑完（哪怕非 0 退出码）⇒ 200，退出码是**结果**不是失败；超时 ⇒ 200 +
+// `timed_out`（**不带**退出码，容器内进程可能仍在运行）；不存在/非运行 ⇒ 404/409。
+func (s *Server) containerExec(w http.ResponseWriter, r *http.Request, name string) {
+	if s.containers == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "容器编排未接入（Docker 未装配）", nil)
+		return
+	}
+	var in struct {
+		Command        string `json:"command"`
+		TimeoutSeconds int    `json:"timeout_seconds"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	if strings.TrimSpace(in.Command) == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "command 必填（要执行的命令）", nil)
+		return
+	}
+	if in.TimeoutSeconds < 0 || in.TimeoutSeconds > 300 {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED",
+			"timeout_seconds 须在 1..300 之间（缺省 30）", nil)
+		return
+	}
+	timeout := 30 * time.Second
+	if in.TimeoutSeconds > 0 {
+		timeout = time.Duration(in.TimeoutSeconds) * time.Second
+	}
+	cfg, err := s.engine.Committed()
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	if _, ok := findContainer(cfg, name); !ok {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("容器 %s 不存在", name), nil)
+		return
+	}
+	res, err := s.containers.ContainerExec(r.Context(), name, in.Command, timeout)
+	user := "api"
+	if info, ok := Identity(r); ok {
+		user = info.User
+	}
+	if err != nil {
+		s.engine.Audit(user, "container.exec", fmt.Sprintf("exec %s: %v", name, err), "failure")
+		switch {
+		case errors.Is(err, orchestrator.ErrVMNotFound):
+			writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error(), nil)
+		case errors.Is(err, orchestrator.ErrContainerNotRunning):
+			writeError(w, http.StatusConflict, "CONFLICT",
+				err.Error()+"；先 request container-functions "+name+" start", nil)
+		default:
+			writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
+		}
+		return
+	}
+	// 审计记**命令原文**（操作可追溯），不记输出（可能很大）。
+	exit := "未知（未跑完）"
+	if res.HasExitCode {
+		exit = strconv.Itoa(res.ExitCode)
+	}
+	s.engine.Audit(user, "container.exec",
+		fmt.Sprintf("exec 容器 %s: %s（退出码 %s）", name, in.Command, exit), "success")
+	out := map[string]any{
+		"stdout":      res.Stdout,
+		"stderr":      res.Stderr,
+		"duration_ms": res.Duration.Milliseconds(),
+	}
+	if res.HasExitCode {
+		out["exit_code"] = res.ExitCode
+	}
+	if res.Truncated {
+		out["truncated"] = true
+	}
+	if res.TimedOut {
+		out["timed_out"] = true
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) containerAction(w http.ResponseWriter, r *http.Request, name, action string) {

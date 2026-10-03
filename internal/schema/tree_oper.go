@@ -231,6 +231,13 @@ func OperRoot() *Node {
 					K("log", "容器 stdout/stderr",
 						Opt(K("last", "最近 N 条", PT("<n>", "uint", "条数"))),
 					),
+					// 决策 #357：容器内执行命令（非交互）。**S 档**：与 VM 串口 console 的关键差别是
+					// console 进 guest 串口仍需 guest 凭据，而 exec 是免凭据的容器内命令执行（等价 root）；
+					// operator 本不能创建容器（配置模式 S），若 exec 为 O 即等于绕过该限制。
+					Su(K("exec", "在容器内执行命令（非交互；含空格请加引号）",
+						P("<command>", "命令", ""),
+						Opt(K("timeout", "超时秒数（1..300，缺省 30）", PT("<n>", "uint", "秒"))),
+					)),
 					Su(K("delete", "删除容器")),
 				),
 			),

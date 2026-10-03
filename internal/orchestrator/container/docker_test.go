@@ -2,9 +2,11 @@ package container
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
@@ -20,6 +22,12 @@ type mockDocker struct {
 	oomKilled map[string]bool
 	stateErr  error // State 查询失败注入（查询失败不清警的单测）
 	oomErr    error // OOMKilled 查询失败注入
+
+	// 决策 #357：容器内执行命令的记账与结果注入。
+	execCmd     string
+	execTimeout time.Duration
+	execResult  ExecResult
+	execErr     error
 }
 
 func newMockDocker() *mockDocker {
@@ -82,6 +90,12 @@ func (m *mockDocker) State(_ context.Context, name string) (string, bool, error)
 }
 func (m *mockDocker) Logs(_ context.Context, name string, tail int) (string, error) {
 	return m.logs, nil
+}
+
+func (m *mockDocker) Exec(_ context.Context, name, command string, timeout time.Duration) (ExecResult, error) {
+	m.calls = append(m.calls, "exec:"+name)
+	m.execCmd, m.execTimeout = command, timeout
+	return m.execResult, m.execErr
 }
 
 func ctFixture(name string) model.ContainerFunction {
@@ -480,5 +494,63 @@ func TestCheckContainerAlarmsNonZeroStillCritical(t *testing.T) {
 	}
 	if !strings.Contains(sink.details[0].message, "退出码 3") {
 		t.Fatalf("告警文案应带退出码: %q", sink.details[0].message)
+	}
+}
+
+// 决策 #357：容器内执行命令的前置判定与透传。
+func TestProviderContainerExec(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(Config{Socket: "/tmp/none.sock"}, m)
+	ctx := context.Background()
+
+	// ① 不存在 ⇒ ErrVMNotFound（API 映射 404）
+	if _, err := p.ContainerExec(ctx, "ghost", "echo hi", time.Second); !errors.Is(err, orchestrator.ErrVMNotFound) {
+		t.Fatalf("不存在应报 ErrVMNotFound，得 %v", err)
+	}
+
+	// ② 非运行态 ⇒ ErrContainerNotRunning（API 映射 409）；**不得**下发到 Docker
+	m.states["ct-a"] = orchestrator.CTStateExited
+	if _, err := p.ContainerExec(ctx, "ct-a", "echo hi", time.Second); !errors.Is(err, orchestrator.ErrContainerNotRunning) {
+		t.Fatalf("非运行态应报 ErrContainerNotRunning，得 %v", err)
+	}
+	for _, c := range m.calls {
+		if c == "exec:ct-a" {
+			t.Fatalf("非运行态不得下发 exec（调用记录 %v）", m.calls)
+		}
+	}
+
+	// ③ 空命令 ⇒ 拒绝（不猜）
+	m.states["ct-a"] = orchestrator.CTStateRunning
+	if _, err := p.ContainerExec(ctx, "ct-a", "   ", time.Second); err == nil {
+		t.Fatal("空命令应被拒")
+	}
+
+	// ④ 运行态 ⇒ 透传命令/超时与结果
+	m.execResult = ExecResult{ExitCode: 3, HasExitCode: true, Stdout: "ok\n"}
+	got, err := p.ContainerExec(ctx, "ct-a", "echo ok", 7*time.Second)
+	if err != nil {
+		t.Fatalf("运行态执行: %v", err)
+	}
+	if m.execCmd != "echo ok" || m.execTimeout != 7*time.Second {
+		t.Fatalf("命令/超时未透传: %q %v", m.execCmd, m.execTimeout)
+	}
+	if !got.HasExitCode || got.ExitCode != 3 || got.Stdout != "ok\n" {
+		t.Fatalf("结果未透传: %+v", got)
+	}
+
+	// ⑤ 超时结果如实透传（HasExitCode=false ⇒ 渲染层不得报 0）
+	m.execResult = ExecResult{Stdout: "partial", TimedOut: true}
+	got, err = p.ContainerExec(ctx, "ct-a", "sleep 60", time.Second)
+	if err != nil || !got.TimedOut || got.HasExitCode {
+		t.Fatalf("超时应如实透传（TimedOut 且无退出码）: %+v err=%v", got, err)
+	}
+
+	// ⑥ 默认超时：<=0 时回落 30s（不把 0 透传给底座）
+	m.execResult = ExecResult{ExitCode: 0, HasExitCode: true}
+	if _, err := p.ContainerExec(ctx, "ct-a", "true", 0); err != nil {
+		t.Fatalf("默认超时执行: %v", err)
+	}
+	if m.execTimeout != 30*time.Second {
+		t.Fatalf("timeout<=0 应回落 30s，得 %v", m.execTimeout)
 	}
 }

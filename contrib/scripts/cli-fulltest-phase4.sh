@@ -28,8 +28,15 @@ run S4 "request virtual-machine-functions cli-vm stop"
 run S4 "request container-functions cli-ct2 start"
 run S4 "show container-functions cli-ct2"
 run S4 "request container-functions cli-ct2 log"
+# 容器内执行命令（决策 #357，S 档）：运行中可执行；**退出码是结果不是失败**（非 0 也算本操作成功）。
+expect_out S4 "nfvis-exec-ok" 'request container-functions cli-ct2 exec "echo nfvis-exec-ok"'
+expect_out S4 "退出码: 0" 'request container-functions cli-ct2 exec "echo nfvis-exec-ok"'
+# 含空格不加引号 ⇒ 给可照做的提示（不得拼起来猜）
+expect_fail S4 "含空格请加引号" "request container-functions cli-ct2 exec ip addr"
 run S4 "request container-functions cli-ct2 restart"
 run S4 "request container-functions cli-ct2 stop"
+# 停机后执行 ⇒ 明确拒绝并指向 start（前置判定）
+expect_fail S4 "未处于运行态" 'request container-functions cli-ct2 exec "echo x"'
 
 # ---- 物理口 enable/disable ----
 run S4 "request interfaces ens224 enable"

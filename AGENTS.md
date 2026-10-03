@@ -509,11 +509,29 @@
   **本轮实测修掉 7 处**（详见证据 §7）：概览「（默认）」注记恒真、`truncated` 用点数猜、查询失败被答成「无数据」、
   删空留 `system.metrics` 空壳致 display set 回放报内部错误（`pruneEmptySingleton` 补一层）、Web 坐标轴浮点原始串、
   `limit` 无上界、schema 节点描述里写了决策号（archtest 拦下）。证据 `docs/evidence/v2-round137-d356-metrics-history.txt`。
+- **round138（一.9 交付：#357 容器 exec v1（非交互），2026-10-03）**：差别分析 §1-17「容器只有 log、
+  没有 exec」的 v1。**能力前提先核实**（#338 的教训）：真机直接打 Docker Engine API spike——非 TTY exec 的
+  `start` 回**多路复用流**（8 字节头 `01`=stdout / `02`=stderr + 长度，xxd 实证）、`GET /exec/{id}/json` 回
+  `ExitCode`、TTY 形态回 raw-stream；三者成立才动手。**#357**（PR #287）：`request container-functions
+  <name> exec <command> [timeout <seconds>]` + REST `POST /container-functions/{name}:exec` + Web 容器详情页
+  「执行命令」分栏（`data-write` 门禁）。**权限 S**（与 VM 串口 console 的关键差别：console 进 guest 仍需
+  guest 凭据，exec 是**免凭据的容器内命令执行**，operator 本不能创建容器故不能经此绕过）。**有界且如实**：
+  超时 30s（1..300）、stdout/stderr 各 256 KiB（超限置 truncated 并继续读掉）；⚠️ **超时只中止客户端等待**
+  （Docker 无 exec 中止接口，容器内进程可能仍在跑——真机 `docker exec ps` 实证 `sleep 60` 仍在）；
+  退出码未知时不报（不谎报 0）；**退出码是结果不是失败**（跑完即算本操作成功）。**真机四维全过**：
+  ① 与 `docker exec` 直跑**逐字一致**、退出码一致；② restart 后可用、停机如实拒绝并指向 start（CLI/REST 同款文案）；
+  ③ exec 内 `ps` 看到的是容器自己的进程视图；④ 超时/大输出/命令不存在(127)/忘加引号/超时越界各如实处理，
+  **operator 双面拒绕**（CLI `%% 无权限`、REST 403；对照读日志 200）。**Browser Use 复核**（dev60）通过，
+  截图 `docs/images/round138-web-container-exec.png`。**本轮实测修掉 3 处**（CLI 非运行态漏指向 start；
+  **Web「执行命令」分栏点了没反应——`CT_TABS` 常量漏加 `'exec'`，静态守护全看不见、Browser Use 真机点一遍才抓到**；
+  新增分栏一致性守护 `TestDetailTabsConsistentBetweenHTMLAndJS` 并自校准）。**环境事故（入册）**：换身份验证
+  忘了给 `-u`，失败登录计到 admin 头上触发**15 分钟锁号**（#76 策略按设计生效）——别拿真账号试口令。
+  证据 `docs/evidence/v2-round138-d357-container-exec.txt`。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
-- 已定决策 258 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#356，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 259 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#357，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。

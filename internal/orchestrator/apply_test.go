@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
 )
@@ -136,6 +137,9 @@ func (c recContainer) ContainerState(context.Context, string) (string, error) {
 	return CTStateAbsent, nil
 }
 func (c recContainer) ContainerLogs(context.Context, string, int) (string, error) { return "", nil }
+func (c recContainer) ContainerExec(context.Context, string, string, time.Duration) (ExecResult, error) {
+	return ExecResult{}, nil
+}
 func (c recContainer) CheckContainerAlarms(context.Context, model.Config) []error { return nil }
 
 func newRecApplier(netFail string) (Applier, *[]string) {

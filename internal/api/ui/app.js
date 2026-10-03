@@ -4762,7 +4762,9 @@ async function ctAction(name, action, label, msg) {
 // 对象头 + 两个 Tab（概览 / 日志）。日志复用 ctLogsLoad（tail=200，与 CLI 同源），
 // 且**进 Tab 或点「刷新」才拉**——大段文本不该跟着页面轮询反复下载。
 
-const CT_TABS = ['overview', 'logs'];
+// 容器详情页的分栏：新增分栏必须同时加到这里（`ctTabShow` 按它切换面板，
+// 漏加会让点击静默回落「概览」——静态守护看不见，只有真机点一遍才发现，决策 #141）。
+const CT_TABS = ['overview', 'logs', 'exec'];
 let ctTab = 'overview';
 let ctDetailName = '';
 let ctLogsName = '';
@@ -4782,6 +4784,73 @@ function ctTabShow(tab) {
 function ctTabClick(tab) {
   ctTabShow(tab);
   if (tab === 'logs') ctLogsOpen(ctDetailName);
+}
+
+// ---- 容器内执行命令（决策 #357，S 档）----
+// 入口是静态写控件（data-write），operator/只读由 body.role-nonsuper 的 CSS 隐藏（#145/#327 同一门禁）。
+// 如实口径：命令跑完（哪怕非 0 退出码）⇒ 成功，退出码是**结果**；超时只中止本页等待，
+// 此时**不报**退出码（容器内进程可能仍在运行，Docker 不提供中止接口）。
+
+function ctExecMsg(text, isErr) {
+  const p = $('ct-exec-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+// ctExecReset 换对象/重新执行前清干净，避免把上一台容器的输出留在页面上。
+function ctExecReset() {
+  ctExecMsg('', false);
+  const out = $('ct-exec-out');
+  out.textContent = '';
+  out.hidden = true;
+}
+
+function ctExecRender(d) {
+  const out = $('ct-exec-out');
+  const lines = [];
+  if (d.timed_out === true) {
+    lines.push('%% 命令未在超时前结束（已停止本页等待；容器内进程可能仍在运行，退出码未知）');
+  } else if (d.exit_code !== undefined && d.exit_code !== null) {
+    lines.push('退出码: ' + d.exit_code + '（耗时 ' + dash(d.duration_ms) + 'ms）');
+  }
+  lines.push('--- stdout ---');
+  lines.push(d.stdout ? String(d.stdout).replace(/\n+$/, '') : '（无输出）');
+  lines.push('--- stderr ---');
+  lines.push(d.stderr ? String(d.stderr).replace(/\n+$/, '') : '（无输出）');
+  if (d.truncated === true) lines.push('（输出已截断：stdout/stderr 至少一侧超过 256 KiB 上限）');
+  out.textContent = lines.join('\n');
+  out.hidden = false;
+}
+
+async function ctExecRun() {
+  const name = ctDetailName;
+  if (!name) return;
+  const cmd = ($('ct-exec-cmd').value || '').trim();
+  const tmo = Number($('ct-exec-timeout').value || 30);
+  if (!cmd) {
+    ctExecMsg('请先输入要执行的命令（含空格请整体输入，无需额外引号）。', true);
+    return;
+  }
+  if (!Number.isInteger(tmo) || tmo < 1 || tmo > 300) {
+    ctExecMsg('超时须为 1..300 的整数秒。', true);
+    return;
+  }
+  ctExecMsg('执行中…（最长 ' + tmo + ' 秒）', false);
+  const out = $('ct-exec-out');
+  out.textContent = '';
+  out.hidden = true;
+  try {
+    const d = await api('/container-functions/' + encodeURIComponent(name) + ':exec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: cmd, timeout_seconds: tmo }),
+    });
+    ctExecMsg('', false);
+    ctExecRender(d);
+  } catch (e) {
+    ctExecMsg('执行失败：' + apiErrText(e, '请确认容器处于运行中（先「启动」）'), true);
+  }
 }
 
 function ctdMsg(text, isErr) {
@@ -4858,7 +4927,7 @@ function renderContainerDetail(d, params) {
   const ok = ct && !ct.__err;
   const changed = ctDetailName !== name;
   ctDetailName = name;
-  if (changed) { ctdMsg('', false); ctLogsPoint(name); }
+  if (changed) { ctdMsg('', false); ctLogsPoint(name); ctExecReset(); }
 
   $('ctd-name').textContent = name;
   fill($('ctd-head'), ok ? ctDetailHead(ct) : [['读取失败', ct ? ct.__err : '未取到数据']]);
@@ -5641,6 +5710,9 @@ for (const b of $('vmd-tabs').querySelectorAll('button')) {
 for (const b of $('ctd-tabs').querySelectorAll('button')) {
   b.addEventListener('click', () => ctTabClick(b.dataset.tab));
 }
+// 容器内执行命令（决策 #357）：入口按 data-write 门禁，非 super-user 时按钮/输入被 CSS 隐藏。
+$('ct-exec-run').addEventListener('click', ctExecRun);
+$('ct-exec-cmd').addEventListener('keydown', (e) => { if (e.key === 'Enter') ctExecRun(); });
 
 // VRF 详情：路由表按需重拉
 $('vrd-routes-btn').addEventListener('click', () => vrfRoutesLoad($('vrd-name').textContent));

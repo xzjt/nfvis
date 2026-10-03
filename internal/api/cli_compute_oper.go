@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/images"
@@ -294,7 +295,7 @@ func (x *cliExecutor) requestContainer(user, class, source string, t []string) s
 	}
 	t, confirmed := splitConfirm(t)
 	if len(t) < 2 {
-		return "%% 语法: request container-functions <name> start|stop|restart|log [last <n>]|delete\n"
+		return "%% 语法: request container-functions <name> start|stop|restart|log [last <n>]|exec <command> [timeout <seconds>]|delete\n"
 	}
 	name, action := t[0], t[1]
 	cfg, err := x.engine.Committed()
@@ -327,6 +328,8 @@ func (x *cliExecutor) requestContainer(user, class, source string, t []string) s
 		return fmt.Sprintf("%s容器 %s 已受理\n", actionCN(action), name)
 	case "log":
 		return x.containerLog(name, t[2:])
+	case "exec":
+		return x.containerExec(user, name, t[2:])
 	case "delete":
 		if ask, ok := confirmOrAsk("Delete container", name, confirmed); !ok {
 			return ask
@@ -363,6 +366,106 @@ func (x *cliExecutor) containerLog(name string, rest []string) string {
 		out += "\n"
 	}
 	return out
+}
+
+// containerExec 在运行中的容器内执行命令（决策 #357，非交互）。
+//
+// 语法：`request container-functions <name> exec <command> [timeout <seconds>]`。
+// `<command>` 是**一个整体**（含空格请加引号）——词法器会去掉引号，故这里拿到的就是命令原文；
+// 多余 token 视为「忘了加引号」，给可照做的提示而不是拼起来猜。
+//
+// 如实口径（决策 #357）：命令跑完（哪怕非 0 退出码）⇒ 本操作**成功**，退出码是结果；
+// 超时/流中断 ⇒ 报失败（`%%`），且**不报**退出码（未知 ≠ 0）。
+func (x *cliExecutor) containerExec(user, name string, rest []string) string {
+	const syntax = "%% 语法: request container-functions <name> exec <command> [timeout <seconds>]\n"
+	if len(rest) == 0 {
+		return syntax
+	}
+	command := rest[0]
+	timeout := 30 * time.Second
+	switch {
+	case len(rest) == 1:
+	case len(rest) == 3 && rest[1] == "timeout":
+		n, err := numField(rest[2])
+		if err != nil {
+			return "%% timeout 须为整数（秒）\n"
+		}
+		secs := int(n.(float64))
+		if secs < 1 || secs > 300 {
+			return "%% timeout 须在 1..300 秒之间（缺省 30）\n"
+		}
+		timeout = time.Duration(secs) * time.Second
+	case rest[1] == "timeout":
+		return syntax
+	default:
+		return "%% 命令是一个整体：含空格请加引号（如 exec \"ip addr\"）；要加超时用 … <command> timeout <seconds>\n"
+	}
+	if strings.TrimSpace(command) == "" {
+		return "%% 命令不能为空\n"
+	}
+	if x.ct == nil {
+		return "%% 容器编排未接入（Docker 未装配），运行态不可用\n"
+	}
+	res, err := x.ct.ContainerExec(context.Background(), name, command, timeout)
+	if err != nil {
+		x.audit(user, "container.exec", fmt.Sprintf("exec %s: %v", name, err), err)
+		// 前置不满足要给**可照做**的下一步（与 REST 侧同一口径）：非运行态指向 start。
+		if errors.Is(err, orchestrator.ErrContainerNotRunning) {
+			return "%% " + err.Error() + "；先 request container-functions " + name + " start\n"
+		}
+		return "%% " + err.Error() + "\n"
+	}
+	exit := "未知（未跑完）"
+	if res.HasExitCode {
+		exit = strconv.Itoa(res.ExitCode)
+	}
+	x.audit(user, "container.exec",
+		fmt.Sprintf("exec 容器 %s: %s（退出码 %s）", name, command, exit), nil)
+
+	// 结构化输出（`| display json` / 管道用）。
+	st := map[string]any{
+		"stdout": res.Stdout, "stderr": res.Stderr, "duration_ms": res.Duration.Milliseconds(),
+	}
+	if res.HasExitCode {
+		st["exit_code"] = res.ExitCode
+	}
+	if res.Truncated {
+		st["truncated"] = true
+	}
+	if res.TimedOut {
+		st["timed_out"] = true
+	}
+	x.structured = st
+
+	var b strings.Builder
+	if res.TimedOut {
+		fmt.Fprintf(&b, "%%%% 命令在 %s 内未结束（已停止等待；容器内进程可能仍在运行，退出码未知）\n",
+			timeout.Round(time.Second))
+	} else {
+		fmt.Fprintf(&b, "退出码: %s（耗时 %s）\n", exit, res.Duration.Round(time.Millisecond))
+	}
+	b.WriteString("--- stdout ---\n")
+	if res.Stdout == "" {
+		b.WriteString("（无输出）\n")
+	} else {
+		b.WriteString(res.Stdout)
+		if !strings.HasSuffix(res.Stdout, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("--- stderr ---\n")
+	if res.Stderr == "" {
+		b.WriteString("（无输出）\n")
+	} else {
+		b.WriteString(res.Stderr)
+		if !strings.HasSuffix(res.Stderr, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	if res.Truncated {
+		b.WriteString("（输出已截断：stdout/stderr 至少一侧超过 256 KiB 上限，只显示前 256 KiB）\n")
+	}
+	return b.String()
 }
 
 // deleteContainer 删除容器（FR-CMP-013 同法：从 committed 移除并提交，级联由 applier 承担）。
