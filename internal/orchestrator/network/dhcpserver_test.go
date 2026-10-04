@@ -989,7 +989,10 @@ func hasSub(s, sub string) bool {
 // ---------- 租约持久化 ----------
 
 func TestDHCPServerLeaseFileRoundTripAndCorruption(t *testing.T) {
-	dir := t.TempDir()
+	// 租约目录给**尚不存在**的子路径：产品侧的 MkdirAll(0700) 才会真正创建它——权限断言
+	// 只对「产品创建的目录」有意义。⚠️ 不能直接断言 t.TempDir() 本身：testing 的每调用子目录
+	// 按 0777&^umask 创建（Linux 实测 0755），那是测试框架的语义、不是产品行为（round141 CI 假红）。
+	dir := filepath.Join(t.TempDir(), "leases")
 	c := newFakeDHCPServerClient()
 	fp := &fakePunt{}
 	factory := newTapFactory()
