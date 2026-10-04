@@ -338,12 +338,18 @@ func (x *cliExecutor) sessionStateKey(user, source, tokenID string) string {
 // 会话态键是「user@source#tokenID」，同一 token 可能在多个接入源下各有一条，故按键尾
 // 匹配删除；按 token 键控后逐次登录会各自留下条目，登出即会话结束，正是清理点。
 func (x *cliExecutor) DropSession(tokenID string) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	x.dropSessionLocked(tokenID)
+}
+
+// dropSessionLocked 是 DropSession 的无锁形态（调用方持 x.mu）——决策 #364 的 CLI 自吊销
+// 收尾在**命令执行期内**发生（ExecuteAs 已持 x.mu），不能再去取同一把锁（会自锁死）。
+func (x *cliExecutor) dropSessionLocked(tokenID string) {
 	if tokenID == "" {
 		return
 	}
 	suffix := "#" + tokenID
-	x.mu.Lock()
-	defer x.mu.Unlock()
 	for k := range x.sess {
 		if strings.HasSuffix(k, suffix) {
 			delete(x.sess, k)

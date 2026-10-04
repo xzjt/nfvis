@@ -562,7 +562,10 @@ func (e *Engine) Sessions() ([]SessionView, error) {
 // ---------- commit / confirmed / rollback / compare ----------
 
 // Commit 校验 + 下发底座 + 落库（FR-CFG-002/003/012）。失败时 candidate 保留。
-// 在途 confirmed 的隐式确认：任意新 commit 即确认（FR-CFG-004）。
+// 在途 confirmed 的隐式确认：**持有会话**的任意新 commit 即确认（FR-CFG-004）。
+//
+// 决策 #364（R142-9）：隐式确认移到持有者校验**之后**——被拒的 commit（无锁/错锁）既不该
+// 替在超时保护期内的变更「背书」，也不该把 `config.confirm` 审计记到被拒者名下。
 //
 // 返回值取具名（决策 #150）：高危档变更的意图行落库后，需要一个 defer 兜住
 // 「意图与结果必须成对」——它要读最终的错误值。
@@ -571,6 +574,10 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 	defer e.mu.Unlock()
 	e.sweepLocked()
 
+	if err := e.requireHolderLocked(sess); err != nil {
+		return res, err
+	}
+
 	if cf, err := e.store.GetConfirmed(); err != nil {
 		return res, err
 	} else if cf != nil {
@@ -578,10 +585,6 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 			Time: e.now(), User: sess.User, Action: "config.confirm",
 			Detail: "新 commit 隐式确认在途 confirmed", Result: "success",
 		})
-	}
-
-	if err := e.requireHolderLocked(sess); err != nil {
-		return res, err
 	}
 	rev, _, err := e.store.LatestRevision()
 	if err != nil {
@@ -738,10 +741,17 @@ func (e *Engine) CommitCheck(sess Session) ([]model.ValidateError, error) {
 }
 
 // ConfirmCommit 确认在途的 commit confirmed（FR-CFG-004）。
+//
+// 决策 #364（R142-9）：与 Rollback 同口径，须由**持锁会话**发起——confirmed 保护的是
+// 「变更后未确认即回滚」，此前任何登录会话都能确认别人的在途保护（越权背书）；跨会话确认
+// 现被拒（ErrNotEditing/ErrLockLost），需重新进入编辑态（空候选的 commit 也会隐式确认）。
 func (e *Engine) ConfirmCommit(sess Session) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.sweepLocked()
+	if err := e.requireHolderLocked(sess); err != nil {
+		return err
+	}
 	cf, err := e.store.GetConfirmed()
 	if err != nil {
 		return err

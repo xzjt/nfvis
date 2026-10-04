@@ -306,3 +306,75 @@ func TestCLIRevokeTokenScopeAndAudit(t *testing.T) {
 		t.Fatalf("缺参数应给语法提示: %q", out)
 	}
 }
+
+// TestCLIRevokeOwnTokenDropsSession 决策 #364（R142-8）：CLI 吊销**本会话自己**的 token
+// 等价于登出——按 token 稳定 ID 丢弃本会话 candidate 并释放编辑锁（与 REST 路径同走
+// discardOwnSession），并清掉执行器本地会话态；提示语如实写明这两件事。非自吊销不动本会话。
+func TestCLIRevokeOwnTokenDropsSession(t *testing.T) {
+	x, authz, engine := newCLITokenKit(t)
+
+	// 会话 1：进入配置态并产生变更（锁按 user@ssh#<token> 归属）
+	tok1, err := authz.Login("admin", "TestPassw0rd!")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	for _, line := range []string{"configure", "set system hostname locked-node"} {
+		if res := x.ExecuteAs("admin", aaa.ClassSuperUser, "ssh", tok1.ID, line); strings.Contains(res.Output, "%%") {
+			t.Fatalf("%q: %s", line, res.Output)
+		}
+	}
+	if views, _ := engine.Sessions(); len(views) != 1 || views[0].SessionID != tok1.ID {
+		t.Fatalf("前置：锁应由 tok1 会话持有: %+v", views)
+	}
+
+	// 自吊销：成功 + 提示语如实说明 candidate/锁的收尾
+	// （配置模式内经 `run` 委托执行操作命令——这正是操作者持锁时执行本命令的形态）
+	out := x.ExecuteAs("admin", aaa.ClassSuperUser, "ssh", tok1.ID, "run request system api token revoke "+tok1.ID).Output
+	if strings.Contains(out, "%%") || !strings.Contains(out, "已吊销当前会话") || !strings.Contains(out, "编辑锁已释放") {
+		t.Fatalf("自吊销应成功并如实说明锁已释放: %q", out)
+	}
+	// 引擎侧：锁确实释放（无持锁会话），本地会话态也已清掉
+	if views, _ := engine.Sessions(); len(views) != 0 {
+		t.Fatalf("自吊销后本会话的锁应已释放: %+v", views)
+	}
+	if _, ok := x.sess["admin@ssh#"+tok1.ID]; ok {
+		t.Fatalf("自吊销后执行器本地会话态应已清掉（键 admin@ssh#%s）", tok1.ID)
+	}
+	// token 本身确实被吊销（「下一个请求要求重新登录」的事实来源）
+	if _, err := authz.VerifyToken(tok1.Token); err == nil {
+		t.Fatalf("自吊销后 token 应失效")
+	}
+
+	// 对照 A：同用户新会话可**立即**取锁（修复前须等干净锁空闲回收）
+	tok2, err := authz.Login("admin", "TestPassw0rd!")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	for _, line := range []string{"configure", "set system hostname keep-lock"} {
+		if res := x.ExecuteAs("admin", aaa.ClassSuperUser, "ssh", tok2.ID, line); strings.Contains(res.Output, "%%") {
+			t.Fatalf("自吊销后同用户新会话应可立即取锁，%q: %s", line, res.Output)
+		}
+	}
+
+	// 对照 B：非自吊销（吊销的 id 不是本会话）不释放本会话的锁、提示语沿用原文案
+	tok3, err := authz.Login("admin", "TestPassw0rd!")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	out = x.ExecuteAs("admin", aaa.ClassSuperUser, "ssh", tok2.ID, "run request system api token revoke "+tok3.ID).Output
+	if strings.Contains(out, "%%") || strings.Contains(out, "编辑锁已释放") {
+		t.Fatalf("非自吊销不应报告锁释放: %q", out)
+	}
+	views, _ := engine.Sessions()
+	if len(views) != 1 || views[0].SessionID != tok2.ID {
+		t.Fatalf("非自吊销不得动本会话的锁: %+v", views)
+	}
+	if _, ok := x.sess["admin@ssh#"+tok2.ID]; !ok {
+		t.Fatalf("非自吊销不得清掉本会话的本地会话态")
+	}
+	// 本会话继续编辑不受影响（锁与本地态都在，CLI 模式仍是配置态）
+	res := x.ExecuteAs("admin", aaa.ClassSuperUser, "ssh", tok2.ID, "set system hostname still-editing")
+	if strings.Contains(res.Output, "%%") || res.Mode != "config" {
+		t.Fatalf("非自吊销后本会话应仍可编辑且保持配置态: mode=%q out=%q", res.Mode, res.Output)
+	}
+}

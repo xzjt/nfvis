@@ -437,6 +437,100 @@ func TestEngineNewCommitConfirmsPending(t *testing.T) {
 	}
 }
 
+// TestEngineRejectedCommitKeepsConfirmed 决策 #364（R142-9）：被拒的 commit（无锁/错锁会话）
+// 不得隐式确认在途 confirmed——受保护的 commit confirmed 只有**持有者**的新 commit 才能确认，
+// 否则任何登录会话都能替别人的超时回滚保护「背书」，且 config.confirm 审计记错人。
+func TestEngineRejectedCommitKeepsConfirmed(t *testing.T) {
+	k := newEngineKit(t)
+	k.edit(t, "admin", "ssh")
+
+	cfg := baseCommitted()
+	cfg.System.Hostname = "risky"
+	_ = k.engine.UpdateCandidate(Session{User: "admin", Source: "ssh"}, cfg)
+	if _, err := k.engine.Commit(context.Background(), Session{User: "admin", Source: "ssh"}, CommitOpts{ConfirmedMinutes: 10}); err != nil {
+		t.Fatalf("Commit confirmed: %v", err)
+	}
+
+	// 他会话（无锁）提交：被拒，且在途 confirmed 必须原样保留
+	if _, err := k.engine.Commit(context.Background(), Session{User: "netop", Source: "ssh"}, CommitOpts{}); !errors.Is(err, ErrNotEditing) {
+		t.Fatalf("非持锁会话 commit 应被拒（ErrNotEditing），实际 %v", err)
+	}
+	if cf, err := k.store.GetConfirmed(); err != nil || cf == nil {
+		t.Fatalf("被拒的 commit 不得隐式确认在途 confirmed: cf=%+v err=%v", cf, err)
+	}
+	// 审计里不得出现被拒者的 config.confirm 记录（记错人）
+	audit, err := k.store.ListAudit(20, 0)
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	for _, a := range audit {
+		if a.Action == "config.confirm" && a.User == "netop" {
+			t.Fatalf("被拒的 commit 不得写入被拒者名义的隐式确认审计: %+v", a)
+		}
+	}
+
+	// 持有者的确认仍然成立（在途保护未被短路）
+	if err := k.engine.ConfirmCommit(Session{User: "admin", Source: "ssh"}); err != nil {
+		t.Fatalf("持有者 ConfirmCommit: %v", err)
+	}
+	if cf, _ := k.store.GetConfirmed(); cf != nil {
+		t.Fatalf("确认后 confirmed 应清除: %+v", cf)
+	}
+	k.timers.FireAll()
+	if got, _ := k.engine.Committed(); hostnameOf(t, got) != "risky" {
+		t.Fatalf("确认后不应回滚: %s", hostnameOf(t, got))
+	}
+}
+
+// TestEngineConfirmCommitRequiresHolder 决策 #364（R142-9）：ConfirmCommit 与 Rollback 同口径，
+// 须由持锁会话发起——他会话（无锁 / 同用户另一会话）确认被拒且 confirmed 不被清掉；
+// 持有者确认成功、confirmed 清空、审计归持有者。
+func TestEngineConfirmCommitRequiresHolder(t *testing.T) {
+	k := newEngineKit(t)
+	k.edit(t, "admin", "ssh")
+
+	cfg := baseCommitted()
+	cfg.System.Hostname = "risky"
+	_ = k.engine.UpdateCandidate(Session{User: "admin", Source: "ssh"}, cfg)
+	if _, err := k.engine.Commit(context.Background(), Session{User: "admin", Source: "ssh"}, CommitOpts{ConfirmedMinutes: 10}); err != nil {
+		t.Fatalf("Commit confirmed: %v", err)
+	}
+
+	// 他会话（无锁）确认：被拒（既有哨兵可判）+ confirmed 仍在
+	if err := k.engine.ConfirmCommit(Session{User: "netop", Source: "ssh"}); !errors.Is(err, ErrNotEditing) {
+		t.Fatalf("无锁会话 ConfirmCommit 应返回 ErrNotEditing，实际 %v", err)
+	}
+	if cf, _ := k.store.GetConfirmed(); cf == nil {
+		t.Fatalf("被拒的确认不得清掉在途 confirmed")
+	}
+	// 同用户但另一会话（不同稳定 ID）：明确报 ErrLockLost（不冒充持有者），confirmed 仍在
+	if err := k.engine.ConfirmCommit(Session{User: "admin", Source: "ssh", ID: "other-session"}); !errors.Is(err, ErrLockLost) {
+		t.Fatalf("同用户它会话 ConfirmCommit 应返回 ErrLockLost，实际 %v", err)
+	}
+	if cf, _ := k.store.GetConfirmed(); cf == nil {
+		t.Fatalf("被拒的确认不得清掉在途 confirmed")
+	}
+
+	// 持有者确认成功：confirmed 清空、审计归持有者
+	if err := k.engine.ConfirmCommit(Session{User: "admin", Source: "ssh"}); err != nil {
+		t.Fatalf("持有者 ConfirmCommit: %v", err)
+	}
+	if cf, _ := k.store.GetConfirmed(); cf != nil {
+		t.Fatalf("持有者确认后 confirmed 应清除: %+v", cf)
+	}
+	audit, err := k.store.ListAudit(10, 0)
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	if len(audit) == 0 || audit[0].Action != "config.confirm" || audit[0].User != "admin" || audit[0].Result != "success" {
+		t.Fatalf("确认审计应归持有者 admin: %+v", audit)
+	}
+	k.timers.FireAll()
+	if got, _ := k.engine.Committed(); hostnameOf(t, got) != "risky" {
+		t.Fatalf("确认后不应回滚: %s", hostnameOf(t, got))
+	}
+}
+
 func TestEngineConfirmedPersistenceAcrossRestart(t *testing.T) {
 	store := openTestStore(t)
 	clock := newFakeClock()
