@@ -651,6 +651,30 @@
   10 分钟空闲回收，污染后续步骤）——旧行为依据 round142 代码级确认 + 单测红-绿；校验失败的 commit
   仍隐式确认（FR-CFG-004 既有语义，本轮只收口「被拒请求」）。证据
   `docs/evidence/v2-round147-d364-lock-confirmed.txt`；真机已装 2.0.0~dev75。
+- **round148（决策 #365：round142 体检的账目/契约/文档回填——收口 R142-13，2026-10-04）**：① **命令全表三族
+  回填**（#356/#357/#359 由「🚫 待真机」改 ✅ 并挂证据；汇总桶 ✅246→256、🚫20→10；§3 基线沿革改为
+  fulltest 254/0/18｜语义 26/0/3｜lifecycle 23/0/2｜pty 10/10）；② **openapi 三处如实化**：dhcp-leases 补 503
+  （未收敛 ≠ 409 未配置）、`/metrics/history` 的 400 只对**参数格式**（未知指标名不是 400：200+空 series，
+  概览给已知指标名清单）、`VSwitchPort` 写形状改**平铺** `trunk`/`native`（原 `vlan:{…}` 嵌套与实现不符、
+  照契约发送会被静默忽略）并删模型没有的 `state`；`openapi.json` 以 `--write` 同步。③ **format-data 定裁＝
+  补实现**：受管清单加入**运行态残留**——`metrics.db`（新增单文件清理分支）与 `/var/lib/nfvis/dhcp`
+  （`system.Config` 增 `MetricsDB`/`DHCPLeases`、`main.go` 传实际 `-metrics-db` 路径）；**真机旧/新 A/B**：
+  旧二进制跑 format-data 后 `metrics.db` 仍在（3,809,280 B）→ 新二进制**文件消失 + 租约目录清空**
+  （摘要「清理文件 2 个、释放 3,854,366 字节」），保留节（管理口/API/登录/物理口/DPDK）逐条核对、SSH 未断。
+  ④ **顺带根治 A4 同族**（真机暴露）：文件 unlink 后**运行中的采样连接仍持已删 inode**，读视图继续显示旧历史
+  （实测 60 序列/80,598 样本、`lsof` 12 个 deleted 句柄）——新增 `metricshist.Store.ReopenIfReplaced()`
+  （文件不存在 ⇒ 关旧连接释放 inode + 按路径重开空库），**采样 tick 与读视图入口都调用**；dev77 真机复验：
+  运行中 `rm metrics.db` 后读视图**立刻** 0/0（对照旧行为仍 48 样本）。⑤ 设计文档三处口径对齐实现、
+  `kernel.go` 注释改写为 #347 实测结论、手册补清理清单。**测试**：format-data 单测扩展（文件/目录/统计）
+  **+ 测试路径安全加固**（新增 `testManagerConfig` 把全部受管路径指向临时目录——此前若干用例零值 Config
+  缺省指向 `/var/lib/nfvis/…`，在真机上跑测试会误删现场）、`metricshist` 新增 `TestReopenIfReplaced`
+  （Windows 无法删被打开文件，该分支按 GOOS 跳过、Linux/真机覆盖）；`make check` RC=0（决策 266→267）。
+  **用户可见文本守护当场生效**：首版手册误写「（决策 #365…）」被 `user_text` 拦下改写。**环境如实登记**：
+  本轮**执行了真正的破坏性 format-data**——它会**按设计**清掉 `resource-pools`（1G 池/隔离核）与夹具/镜像，
+  需重声明资源池并重建夹具/重传镜像（本地 `/data/incoming` 上传恢复）；`dns-vs` 被清（重建命令见证据 §1.1）、
+  镜像条目 `alpine`（Refs 0）未恢复、历史样本从 0 重新累积。**四套件**：fulltest **254/0/18**、pty **10/10**
+  与基线一致；语义/lifecycle 首跑因夹具缺失多跳过（23/0/6、21/0/3），夹具重建后复跑见证据 §3。
+  证据 `docs/evidence/v2-round148-d365-ledger-backfill.txt`；真机已装 2.0.0~dev77。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。

@@ -1,0 +1,104 @@
+NFViS v2 round148 —— 决策 #365：round142 账目/契约/文档回填（含 format-data 清运行态残留定裁）真机验证
+====================================================================
+日期：2026-10-04；分支 `feat/d365-ledger-backfill`（base `v2 @ eebded8`）；决策 #365。
+真机 nfvis-vm：**dev75（旧行为对照）→ dev76（#365 清理清单）→ dev77（+ A4 同族根治）**。
+对照基线：round142 半程体检 `docs/evidence/v2-round142-midpoint-audit.txt` §3（账目/文档疏漏 7 条）
++ §2 簇 A 的 **A4**（「运行中 rm metrics.db 既不回到无历史也不释放空间（连接持旧 inode）」）。
+事实源：`ls`/`lsof`/文件大小、产品读视图（`show system metrics history`）、`show images`、
+`show configuration`（保留节）、CLI/REST 可达性（SSH 会话与命令本身）、单测。
+
+§0 结论
+- **R142-13 全部处置完成**：命令全表三族（#356/#357/#359）状态回填并同步基线沿革；openapi 三处如实化
+  （dhcp-leases 503、/metrics/history 未知 name 不报 400、VSwitchPort 平铺写形状 + 删 `state`）；
+  设计文档两处口径对齐实现；内核注释改写为 #347 实测结论。
+- **定裁＝补实现**：`format-data` 的受管数据清单加入运行态残留——`metrics.db`（单文件）与
+  `/var/lib/nfvis/dhcp`（租约目录）。**真机 A/B 实锤**：旧二进制（dev75）跑 format-data 后
+  `metrics.db` **仍在**（3,809,280 B、mtime 未变）；新二进制（dev76）跑同一操作后**文件消失**、
+  租约目录清空（摘要「清理文件 2 个、释放 3,854,366 字节」）。
+- **顺带收口 A4（同族）**：真机暴露——文件被 unlink 后，**运行中的采样连接仍持已删 inode**，
+  读视图继续显示旧历史（实测 60 序列/80,598 样本，`lsof` 12 个 `metrics.db (deleted)`），
+  即「format-data 看起来没清」。修法：`metricshist.Store.ReopenIfReplaced()`（文件不存在 ⇒ 关旧连接
+  释放 inode + 按路径重开空库），采样 tick 与**读视图入口**都调用。dev77 真机复验：
+  运行中 `rm metrics.db` 后**立刻**读视图 `序列数 0 / 样本数 0`（对照 dev76 同一场景仍显示 48 样本）。
+
+§1 真机验证
+
+1.1 format-data 清运行态残留（旧/新 A/B）
+  | 相位 | 前置 | 操作 | 结果 |
+  |---|---|---|---|
+  | 旧（dev75） | `metrics.db` 3,809,280 B；配置含 sem-vs/dns-vs/sem-vm/sem-ct、4 个镜像 | `request system storage format-data --yes --yes` | 摘要「删除对象 4 个…清理文件 88 个、释放 643,896,439 字节」；**`ls /var/lib/nfvis/metrics.db` 仍在（同大小同 mtime）**——旧实现清单不含它 |
+  | 新（dev76） | `metrics.db` 3,854,336 B + 手工造的 `/var/lib/nfvis/dhcp/vs-x.json` | 同上 | 摘要「清理文件 **2** 个、释放 **3,854,366** 字节（= 3,854,336 + 30）」；**文件消失、租约目录 0 项** |
+  - 保留面核对（两轮一致）：`show configuration` 只剩 `system.login`（用户/口令哈希在）、`interfaces ens192/ens224`、
+    `vpp.dpdk`——**管理面与物理口/DPDK 声明原样保留**；命令本身经 HTTPS 执行、SSH 会话未断
+    （「执行完仍可登录继续配置、不必重启」的手册承诺成立）。
+  - 清场与恢复（本轮**执行了破坏性操作**，如实登记）：镜像经 `/data/incoming` 本地重传恢复
+    （`alpine.qcow2`/`debian-12-generic-amd64.qcow2`/`alpine:3.20` 三条；原 `alpine` 一条（Refs 0）
+    未恢复）；夹具对象由 `cli-semantic-fixture.sh up` 重建；**`dns-vs`（L2 + BVI 192.168.77.1/24）
+    随本轮清掉**，重建命令：`set virtual-switches dns-vs type l2` + `set virtual-switches dns-vs
+    gateway ip 192.168.77.1/24`（原用途：数据面 DNS 代理的按域上游现场，round124）。
+
+1.2 A4 同族：删库后读视图必须回「无历史」（dev77）
+  - 前置：等一轮采样（60s）后读视图 `序列数 48 / 样本数 48`（库 4096 B）；
+  - 运行中 `rm /var/lib/nfvis/metrics.db`；
+  - **立刻**再读：`序列数 0 / 样本数 0`（「无历史」），且路径被重开（新文件 4096 B，schema 重建）；
+  - 对照（旧行为，dev76 的 format-data 现场）：文件已 unlink，读视图**仍报 60 序列/80,598 样本**
+    且时间范围一路到当下——旧连接在已删 inode 上继续读写。
+  - 该修复同时覆盖操作者手工 `rm`（A4 原文场景）与 format-data 两条路径（同一 `ReopenIfReplaced`）。
+
+1.3 文档/契约面（`make check` 守护复核）
+  - `docs/NFViS-openapi.yaml`：dhcp-leases 增 `503`（未收敛；与 409「未配置」区分）；
+    `/metrics/history` 的 400 改为「**参数格式**非法；未知指标名**不是** 400（200 + 空 series，
+    概览给已知指标名清单）」；`VSwitchPort` 写形状改**平铺** `trunk`/`native`（此前 `vlan:{…}` 嵌套与
+    实现/模型不符、照契约发送会被静默忽略）并删掉模型没有的 `state`；`internal/api/openapi.json`
+    以 `--write` 同步；`check_openapi_no_duplicate_keys.sh` 通过。
+  - `docs/NFViS-CLI命令全表.md`：#357 exec 行、#356 三行、#359 六行由「🚫 待真机」回填为
+    **✅ 真机四维验证**（含各自证据指针）；汇总桶 ✅ 246→**256**、🚫 20→**10**（余下为破坏性/需交互）；
+    §3 末尾基线改为 **fulltest 254/0/18 ｜ 语义 26/0/3 ｜ lifecycle 23/0/2 ｜ pty 10/10**（round147 实测）
+    并补逐轮沿革（#356 +9、#357 +4、#358 +1、#359 +12/+2；S8/S13；L3-2/L2-3 工具修复）。
+  - `docs/superpowers/specs/2026-10-03-metrics-history-design.md` 三处对齐实现：`last_error` 只由
+    **写库/事务失败**等整轮异常写入（`GatherSamples` 不返回整轮错误）；**不做**「估算占用」文字推算
+    （只给实测库大小/序列数/样本数/时间范围）；`truncated` 只标记**因 limit 裁剪**（step 只分桶不算裁剪）。
+  - `internal/system/kernel.go` 注释改写为 #347 实测结论（main heap 偏好最大可用页，1G 声明 N ⇒
+    VNF 可用 N−1 是明示边界）。
+  - 手册 §10.7：`format-data` 的清理清单补「历史时序库与 DHCP 租约目录」；§10.13 既有承诺（会清
+    metrics.db）自此为真。**用户可见文本不得写决策号**——首版误加「（决策 #365…）」被
+    `archtest.TestUserVisibleTextHasNoInternalRefs` 当场拦下并改写（守护有效）。
+
+§2 单元测试与自检
+  - `internal/system/formatdata_test.go`：受管清单含 metrics.db（单文件）与 dhcp 目录 ⇒ 清后断言
+    「文件删除、目录清空且本体保留」；统计 7 文件/4560 字节；**测试加固**：新增 `testManagerConfig`
+    把 format-data 的全部受管路径指向临时目录（此前若干用例用零值 Config，缺省指向 `/var/lib/nfvis/…`
+    ——在真机上跑测试会误删现场数据，本轮一并堵上）。
+  - `internal/metricshist/store_test.go`：`TestReopenIfReplaced`——文件在场时空操作、数据不动；
+    删除后重开为空库（0/0）、可继续写、文件重建（Windows 无法删除被打开的文件，该分支按 GOOS 跳过、
+    由 Linux/真机覆盖——已在 dev77 实证）。
+  - `GOFLAGS=-p=1 make check` RC=0（决策条数 267）。
+
+§3 四套件复跑（dev77）
+  - **首跑（夹具缺失现场）**：`cli-fulltest` **254/0/18**（与基线一致——套件自建对象，不依赖夹具）、
+    `cli-semantic-check` **23/0/6**（多出 3 项不可判定＝需要 sem-vs/sem-vm 现场的检查）、
+    `cli-lifecycle-check` **21/0/3**（同上）、`cli-pty-smoke` **10/10**。
+  - **夹具重建后复跑**：`cli-semantic-check` **26/0/3**（与基线一致）、`cli-lifecycle-check` **23/0/2**
+    （首跑 22/0/3 系 L3-2 正控未热，邻居条目在场时复跑即 `✓ L3-2 …（5/5 应答）`）、pty **10/10**；
+    fulltest 同值 254/0/18。
+  - **夹具为何首跑失败（环境如实登记，非产品缺陷）**：`format-data` **按设计**把配置重置为保留节最小形态
+    ——`resource-pools`（1G 池/隔离核）不在保留清单里（文档明写：`vpp.cpu`/`vpp.memory`/`resource-pools`
+    有意不保留，避免与保留的物理口/DPDK 声明自相矛盾），于是重建夹具时提交校验正确拒绝
+    （「页大小 1G 无对应资源池」「隔离核不足：需要 1，可用 0」）。恢复路径＝重新声明资源池
+    （`set resource-pools hugepages page-size 1G count 2` / `page-size 2M count 768` /
+    `cpu isolated-cores 1-4`，与内核实况一致）后 `cli-semantic-fixture.sh up` 即成功（RC=0）。
+
+§4 现场与清场
+  - 破坏性验证后的环境已恢复：三条镜像重传（`show images` 三条 ready）、夹具 `up` 重建
+    （sem-vs/sem-vm/sem-ct）、metrics.db 由采样器按新路径重建并继续采样；
+  - **如实登记的环境变化**：① `dns-vs` 被清（重建命令见 1.1）；② 镜像条目 `alpine`（Refs 0）
+    未恢复；③ 历史样本从 0 重新累积（旧库已按契约清除）；
+  - 告警仅常态 `HUGEPAGE_POOL_ORPHAN`。
+
+§5 如实边界（入册）
+  1. `ReopenIfReplaced` 只判「文件是否存在」，不做 inode 比较（跨平台无稳定口径）——「删除后立刻被
+     他人重建」的窗口检测不到；本产品的删除者只有 format-data 与操作者本人，如实登记。
+  2. 重建开发生在**下一次读/采样**时：format-data 之后若立刻读，读视图会先重开再报「无历史」
+     （实测即 0/0，无中间态）。
+  3. 本轮执行了真正的破坏性 format-data（这是 #365 的验收本体）——镜像/夹具的重建路径与耗时已登记，
+     供后续会话复用。
