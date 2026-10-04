@@ -92,11 +92,11 @@ func (p *ServicesProvider) ApplySpan(ctx context.Context, pm model.PortMirroring
 	return nil
 }
 
-// DeleteSpan 关闭 SPAN 会话。
+// DeleteSpan 关闭 SPAN 会话。登记=最后一个成功下发的状态（决策 #363）：
+// SpanDisable 成功才摘登记，失败保留（重试可再关；此前先摘登记，关失败后登记已丢、再也关不掉）。
 func (p *ServicesProvider) DeleteSpan(ctx context.Context, name string) error {
 	p.mu.Lock()
 	rec, ok := p.spans[name]
-	delete(p.spans, name)
 	p.mu.Unlock()
 	if !ok {
 		return nil
@@ -109,6 +109,9 @@ func (p *ServicesProvider) DeleteSpan(ctx context.Context, name string) error {
 	if err := c.SpanDisable(rec.from, rec.to); err != nil {
 		return fmt.Errorf("关闭 SPAN %s: %w", name, err)
 	}
+	p.mu.Lock()
+	delete(p.spans, name)
+	p.mu.Unlock()
 	return nil
 }
 
@@ -136,12 +139,16 @@ func (p *ServicesProvider) ApplyQos(ctx context.Context, q model.QosPolicy) erro
 }
 
 // DeleteQos 删除限速策略（先解绑再删；入向与出向绑定都要解，决策 #331）。
+// 登记按「最后一个成功下发的状态」逐口摘除（决策 #363）：某口解绑成功才摘该口登记，
+// 失败即返回且登记保留（重试会再解该口）；接口已不在 VPP 时按既有口径跳过（该口无从解绑，
+// 登记随摘除动作清掉）。全部解绑成功后才删 policer，成功才摘 policer 登记。
 func (p *ServicesProvider) DeleteQos(ctx context.Context, name string) error {
 	c, err := p.client()
 	if err != nil {
 		return err
 	}
 	defer c.Close()
+	// 锁内只读清单：两个方向的待解绑接口（VPP 调用一律在锁外）
 	p.mu.Lock()
 	var boundIn, boundOut []string
 	for ifname, pol := range p.bound {
@@ -154,36 +161,47 @@ func (p *ServicesProvider) DeleteQos(ctx context.Context, name string) error {
 			boundOut = append(boundOut, ifname)
 		}
 	}
-	for _, ifname := range boundIn {
-		delete(p.bound, ifname)
-	}
-	for _, ifname := range boundOut {
-		delete(p.boundEgress, ifname)
-	}
-	delete(p.policer, name)
 	p.mu.Unlock()
 	for _, ifname := range boundIn {
-		if idx, ok, err := c.SwInterfaceIndex(ifname); err == nil && ok {
-			if err := c.PolicerInput(idx, name, false); err != nil {
-				return fmt.Errorf("解绑接口 %s 的入向 policer %s: %w", ifname, name, err)
-			}
+		idx, ok, err := c.SwInterfaceIndex(ifname)
+		if err != nil || !ok {
+			// 既有容忍：接口已不存在时无从解绑，跳过该口的 VPP 调用；登记一并摘除——
+			// 接口都不在了、绑定不可能还挂在上面，留着陈旧登记会让同名接口复现后
+			// 的 ApplyInterface 误判「已在位」而静默跳过（决策 #363 要防的假成功）。
+			p.setBoundPolicy(ifname, "", false)
+			continue
 		}
+		if err := c.PolicerInput(idx, name, false); err != nil {
+			return fmt.Errorf("解绑接口 %s 的入向 policer %s: %w", ifname, name, err)
+		}
+		p.setBoundPolicy(ifname, "", false)
 	}
 	for _, ifname := range boundOut {
-		if idx, ok, err := c.SwInterfaceIndex(ifname); err == nil && ok {
-			if err := c.PolicerOutput(idx, name, false); err != nil {
-				return fmt.Errorf("解绑接口 %s 的出向 policer %s: %w", ifname, name, err)
-			}
+		idx, ok, err := c.SwInterfaceIndex(ifname)
+		if err != nil || !ok {
+			p.setBoundPolicy(ifname, "", true)
+			continue
 		}
+		if err := c.PolicerOutput(idx, name, false); err != nil {
+			return fmt.Errorf("解绑接口 %s 的出向 policer %s: %w", ifname, name, err)
+		}
+		p.setBoundPolicy(ifname, "", true)
 	}
 	if _, err := c.PolicerAddDel(name, 0, 0, false); err != nil {
 		return fmt.Errorf("删除 policer %s: %w", name, err)
 	}
+	p.mu.Lock()
+	delete(p.policer, name)
+	p.mu.Unlock()
 	return nil
 }
 
 // ApplyInterface 下发接口层配置：MTU、admin 状态，与 ingress-policy/egress-policy
 // （policer 入向/出向绑定，决策 #331：两方向可并存、各自独立增删）。
+// 绑定登记按「最后一个成功下发的状态」逐步骤推进（决策 #363）：解绑旧成功才清该向登记、
+// 绑新成功才写该向登记——任一步失败即返回且登记停在最后成功态。此前「先改登记再下发」
+// 会留下「登记说新、数据面是旧」的错位：重试因登记已是新值而静默跳过（假成功），
+// 补偿 ApplyInterface(旧值) 也因登记已是新值而不下发。两方向登记互不影响。
 func (p *ServicesProvider) ApplyInterface(ctx context.Context, iface model.InterfaceConfig) error {
 	c, err := p.client()
 	if err != nil {
@@ -207,32 +225,36 @@ func (p *ServicesProvider) ApplyInterface(ctx context.Context, iface model.Inter
 	if err := c.SetState(idx, up); err != nil {
 		return fmt.Errorf("设置接口 %s 状态 %v: %w", iface.Name, up, err)
 	}
-	prevIn, prevOut := p.swapBindings(iface)
 	// 入向（policer_input）
-	if prevIn != iface.IngressPolicy {
+	if prevIn := p.boundPolicy(iface.Name, false); prevIn != iface.IngressPolicy {
 		if prevIn != "" {
 			if err := c.PolicerInput(idx, prevIn, false); err != nil {
 				return fmt.Errorf("解绑接口 %s 原入向策略 %s: %w", iface.Name, prevIn, err)
 			}
+			// 解绑成功才清登记；失败时登记停在旧值，重试会重试解绑
+			p.setBoundPolicy(iface.Name, "", false)
 		}
 		if iface.IngressPolicy != "" {
 			// policer 须先由 ApplyQos 创建（apply 顺序保证）
 			if err := c.PolicerInput(idx, iface.IngressPolicy, true); err != nil {
 				return fmt.Errorf("绑定接口 %s 入向策略 %s: %w", iface.Name, iface.IngressPolicy, err)
 			}
+			p.setBoundPolicy(iface.Name, iface.IngressPolicy, false)
 		}
 	}
 	// 出向（policer_output，决策 #331）
-	if prevOut != iface.EgressPolicy {
+	if prevOut := p.boundPolicy(iface.Name, true); prevOut != iface.EgressPolicy {
 		if prevOut != "" {
 			if err := c.PolicerOutput(idx, prevOut, false); err != nil {
 				return fmt.Errorf("解绑接口 %s 原出向策略 %s: %w", iface.Name, prevOut, err)
 			}
+			p.setBoundPolicy(iface.Name, "", true)
 		}
 		if iface.EgressPolicy != "" {
 			if err := c.PolicerOutput(idx, iface.EgressPolicy, true); err != nil {
 				return fmt.Errorf("绑定接口 %s 出向策略 %s: %w", iface.Name, iface.EgressPolicy, err)
 			}
+			p.setBoundPolicy(iface.Name, iface.EgressPolicy, true)
 		}
 	}
 	return nil
@@ -251,27 +273,31 @@ func (p *ServicesProvider) InterfaceExists(ifname string) (bool, error) {
 	return ok, err
 }
 
-// swapBindings 更新进程内的入/出向绑定登记，返回**变更前**的两个绑定名（决策 #331）。
-// 入向与出向各自独立比较：同一接口上两者可并存，改一个不动另一个。
-func (p *ServicesProvider) swapBindings(iface model.InterfaceConfig) (prevIn, prevOut string) {
+// boundPolicy 读某接口某方向的绑定登记（egress=false 入向 / true 出向），锁内取值。
+// 登记语义=该方向**最后一个成功下发**的 policer 名（决策 #363）。
+func (p *ServicesProvider) boundPolicy(ifname string, egress bool) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	prevIn, prevOut = p.bound[iface.Name], p.boundEgress[iface.Name]
-	if prevIn != iface.IngressPolicy {
-		if iface.IngressPolicy != "" {
-			p.bound[iface.Name] = iface.IngressPolicy
-		} else {
-			delete(p.bound, iface.Name)
-		}
+	if egress {
+		return p.boundEgress[ifname]
 	}
-	if prevOut != iface.EgressPolicy {
-		if iface.EgressPolicy != "" {
-			p.boundEgress[iface.Name] = iface.EgressPolicy
-		} else {
-			delete(p.boundEgress, iface.Name)
-		}
+	return p.bound[ifname]
+}
+
+// setBoundPolicy 推进某接口某方向的绑定登记（空串=解绑成功、登记清空）。只在对应
+// VPP 调用成功后被调用，故登记恒为该方向最后一个成功下发的状态（决策 #363）。
+func (p *ServicesProvider) setBoundPolicy(ifname, pol string, egress bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	m := p.bound
+	if egress {
+		m = p.boundEgress
 	}
-	return prevIn, prevOut
+	if pol == "" {
+		delete(m, ifname)
+	} else {
+		m[ifname] = pol
+	}
 }
 
 func resolveIface(c SvcClient, ifname string) (uint32, error) {
