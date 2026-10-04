@@ -1,7 +1,8 @@
 package network
 
 // vpp_govpp.go 里两段**不依赖真 VPP** 的逻辑单测：
-//   1. connCache：取数失败即失效重连（R84-3：VPP 重启后 stats 连接陈旧，统计永久不可用）；
+//   1. connCache：取数失败即失效重连（R84-3：VPP 重启后 stats 连接陈旧，统计永久不可用）
+//      + 单次取数的硬上界（决策 #362：挂起读在上界内关闭句柄、清缓存，不重连重试）；
 //   2. govppNoiseWriter：重连路径上 govpp 的整条结构体 dump 被过滤，其余日志原样透传。
 // 句柄是假类型，故这些用例在开发机（Windows）也能跑——不必等真机集成测试。
 
@@ -199,6 +200,113 @@ func TestConnCacheUseIsSerialized(t *testing.T) {
 	wg.Wait()
 	if connects != 1 {
 		t.Errorf("并发下连接应只建立一次，实际 %d 次", connects)
+	}
+}
+
+// TestConnCacheUseBoundedTimeoutClosesAndDrops：阻塞读取（govpp statsclient 没有
+// 自己的超时）必须在 bound 内返回可辨识的超时错误，当前句柄被 closeFn 关闭、缓存被
+// 清（下次调用重建），且**不重连重试**（决策 #362；避免再叠一个上界）。
+func TestConnCacheUseBoundedTimeoutClosesAndDrops(t *testing.T) {
+	connects, closed := 0, 0
+	c := newConnCache(func() (*fakeConn, error) {
+		connects++
+		return &fakeConn{id: connects}, nil
+	}, func(*fakeConn) { closed++ })
+
+	release := make(chan struct{})
+	defer close(release) // 放行阻塞的 fn，避免测试结束仍挂着 goroutine
+
+	start := time.Now()
+	err := c.useBounded(100*time.Millisecond, func(*fakeConn) error {
+		<-release // 永不自行返回的读取
+		return nil
+	})
+	if err == nil {
+		t.Fatal("阻塞读取应在上界内报错")
+	}
+	if !errors.Is(err, errConnCacheTimeout) {
+		t.Fatalf("错误应可辨识为上界超时，实际: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("应在 100ms 上界附近返回，实际 %s", elapsed)
+	}
+	if closed != 1 {
+		t.Errorf("上界到应关闭当前句柄一次，实际 %d 次", closed)
+	}
+	if connects != 1 {
+		t.Errorf("上界路径不应重连重试，实际建立 %d 个连接", connects)
+	}
+
+	// 缓存已被清：下一次调用走 ensureLocked 重建
+	if err := c.useBounded(time.Second, func(h *fakeConn) error {
+		if h.id != 2 {
+			return fmt.Errorf("应重建连接（id=2），实际 id=%d", h.id)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("上界后下一次调用应重建并成功: %v", err)
+	}
+	if connects != 2 {
+		t.Errorf("缓存应被清空并重建，实际建立 %d 个连接", connects)
+	}
+}
+
+// TestConnCacheUseBoundedNormalPathUnchanged：正常读取不受硬上界影响；普通失败仍沿用
+// 既有「失效重连一次后重试」语义（R84-3）——硬上界只针对「挂住不返回」，不改存量策略。
+func TestConnCacheUseBoundedNormalPathUnchanged(t *testing.T) {
+	connects, closed := 0, 0
+	c := newConnCache(func() (*fakeConn, error) {
+		connects++
+		return &fakeConn{id: connects}, nil
+	}, func(*fakeConn) { closed++ })
+
+	if err := c.useBounded(time.Second, func(*fakeConn) error { return nil }); err != nil {
+		t.Fatalf("正常读取应成功: %v", err)
+	}
+	if connects != 1 || closed != 0 {
+		t.Errorf("正常路径应只建一次连接且不关闭，实际 connects=%d closed=%d", connects, closed)
+	}
+
+	seen := 0
+	err := c.useBounded(time.Second, func(h *fakeConn) error {
+		seen++
+		if h.id == 1 {
+			return errors.New("stats segment 已失效")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("普通失败应失效重连一次后重试成功: %v", err)
+	}
+	if connects != 2 || closed != 1 || seen != 2 {
+		t.Errorf("既有重连语义应保留（connects=2 closed=1 seen=2），实际 connects=%d closed=%d seen=%d",
+			connects, closed, seen)
+	}
+}
+
+// TestConnCacheUseBoundedNilCloseFnNoPanic：closeFn 为 nil 时上界路径不 panic，
+// 缓存同样被清（下次调用重建）。
+func TestConnCacheUseBoundedNilCloseFnNoPanic(t *testing.T) {
+	connects := 0
+	c := newConnCache(func() (*fakeConn, error) {
+		connects++
+		return &fakeConn{id: connects}, nil
+	}, nil)
+
+	release := make(chan struct{})
+	defer close(release)
+	err := c.useBounded(50*time.Millisecond, func(*fakeConn) error {
+		<-release
+		return nil
+	})
+	if err == nil || !errors.Is(err, errConnCacheTimeout) {
+		t.Fatalf("阻塞读取应返回上界超时错误，实际: %v", err)
+	}
+	if err := c.useBounded(time.Second, func(*fakeConn) error { return nil }); err != nil {
+		t.Fatalf("上界后下一次调用应重建并成功: %v", err)
+	}
+	if connects != 2 {
+		t.Errorf("缓存应被清空并重建，实际建立 %d 个连接", connects)
 	}
 }
 

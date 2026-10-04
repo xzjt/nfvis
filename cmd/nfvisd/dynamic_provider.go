@@ -132,8 +132,15 @@ const computeProbeVMName = "__nfvis_probe__"
 // VMState(ctx, 保留域名)：一次 DomainLookupByName（查无此域 ⇒ absent/nil，正常返回），
 // 与 Version() 同级开销、只读、无副作用。未接入态经 VMState 返回既有「未接入」错误，
 // 同样计为探活失败（防御性——探活只在已接入态被调用）。
+//
+// 决策 #362：连接**忙**（ErrConnBusy——探活没在 5s 上界内轮到执行，前面有合法长 RPC，
+// 如快照创建/回滚）不等于连接坏，按健康跳过本轮：既避免误判「连接中断」，也不打断
+// 正在执行的长操作。假死判定由「执行中超时」（compute.Conn.call 关连接）保证。
 func (h *dynamicCompute) Probe(ctx context.Context) error {
 	if _, err := h.VMState(ctx, computeProbeVMName); err != nil {
+		if errors.Is(err, compute.ErrConnBusy) {
+			return nil
+		}
 		return err
 	}
 	return nil

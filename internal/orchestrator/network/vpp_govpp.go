@@ -5,6 +5,7 @@ package network
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -140,18 +141,45 @@ func newConnCache[T any](connect func() (T, error), closeFn func(T)) *connCache[
 	return &connCache[T]{connect: connect, closeFn: closeFn}
 }
 
+// errConnCacheTimeout useBounded 的硬上界信号：某次 fn 在 bound 内没跑完，
+// 句柄已被关闭、缓存已清（错误里用 %w 包装它，调用方/单测可 errors.Is 辨识）。
+var errConnCacheTimeout = errors.New("连接读取超时")
+
 // use 在缓存连接上执行 fn；fn 失败视为连接陈旧，失效重连一次后重试。
 // 整段持锁：既避免并发重建连接，也避免半关闭的连接被并发使用。
 func (c *connCache[T]) use(fn func(T) error) error {
+	return c.useInternal(0, fn)
+}
+
+// useBounded 与 use 同语义，但**单次 fn 执行**另有硬上界（决策 #362）：
+// fn 放进 goroutine（缓冲结果通道），上界到即 closeFn 关闭当前句柄（中断可能永久
+// 挂起的读）+ 清缓存，并返回包装 errConnCacheTimeout 的错误。该路径**不重连重试**
+// ——上界语义优先，避免再叠一个上界；句柄已清，下一次调用走 ensureLocked 重建。
+//
+// fn 的普通失败仍沿用 use 的既有策略（R84-3：取数失败即失效重连一次再试），
+// 只是每段执行各受一个 bound 约束。bound<=0 表示不加硬上界（退回 use 语义）。
+//
+// 句柄类型参数化、不引用 govpp 具体类型，故本段逻辑在开发机（Windows）也能单测。
+func (c *connCache[T]) useBounded(bound time.Duration, fn func(T) error) error {
+	return c.useInternal(bound, fn)
+}
+
+// useInternal use/useBounded 的公共实现：run 负责在（可选）硬上界内执行一次 fn。
+// 整段持锁（含上界等待）：既保持既有串行，也保证清缓存/重建不与并发调用交错。
+func (c *connCache[T]) useInternal(bound time.Duration, fn func(T) error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	h, err := c.ensureLocked()
 	if err != nil {
 		return err
 	}
-	firstErr := fn(h)
+	firstErr := c.runBoundedLocked(h, bound, fn)
 	if firstErr == nil {
 		return nil
+	}
+	if errors.Is(firstErr, errConnCacheTimeout) {
+		// 上界已到：句柄已在 runBoundedLocked 内关闭并清缓存，不再重连重试。
+		return firstErr
 	}
 	c.dropLocked()
 	h2, err := c.ensureLocked()
@@ -159,7 +187,27 @@ func (c *connCache[T]) use(fn func(T) error) error {
 		// 重连也失败：两条错误一起上抛（调用方只判可用性，日志里能看到全貌）
 		return fmt.Errorf("连接重建失败: %w（首次失败：%v）", err, firstErr)
 	}
-	return fn(h2)
+	return c.runBoundedLocked(h2, bound, fn)
+}
+
+// runBoundedLocked 在 h 上执行一次 fn（调用方持锁）；bound>0 时 fn 在 goroutine 内
+// 执行并受硬上界约束。上界到 ⇒ 关闭并丢弃句柄（缓存清空，下次调用重建）并返回
+// 包装 errConnCacheTimeout 的错误；goroutine 的结果送带缓冲通道后退出（不阻塞、不泄漏）。
+func (c *connCache[T]) runBoundedLocked(h T, bound time.Duration, fn func(T) error) error {
+	if bound <= 0 {
+		return fn(h)
+	}
+	done := make(chan error, 1)
+	go func() { done <- fn(h) }()
+	t := time.NewTimer(bound)
+	defer t.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-t.C:
+		c.dropLocked()
+		return fmt.Errorf("读取 VPP 统计超时（%s）：已关闭并丢弃挂起连接，下次调用重建（%w）", bound, errConnCacheTimeout)
+	}
 }
 
 // ensureLocked 复用已建立的连接，没有则建立（调用方持锁）。

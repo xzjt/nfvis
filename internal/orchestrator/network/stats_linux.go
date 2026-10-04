@@ -59,10 +59,20 @@ func closeStatsConn(conn *core.StatsConnection) {
 	}
 }
 
+// statsReadTimeout 单次 stats 取数的硬上界（决策 #362）：stats segment 读取
+// （govpp statsclient）没有自己的超时，对「VPP 楔死/段不可用」会永久阻塞采集。
+// 取 2s：正常取数是本地毫秒级；一次 statsRead 内至多两段执行（陈旧失败后的重连
+// 重试各一段），合计 ≤4s，不超过采样侧的单轮采集上界 metricsGatherTimeout（5s，
+// cmd/nfvisd/metrics_history.go）——采集上界 ≥ 取数上界，采样线程不会被本层拖穿。
+const statsReadTimeout = 2 * time.Second
+
 // statsRead 在 stats 连接上取一次数：连接陈旧（典型是 VPP 刚重启）时由缓存失效重连后重试，
 // 重连后仍失败才报错——调用方据此降级为「统计不可用」。
+//
+// 单次执行另受 statsReadTimeout 硬上界（决策 #362）：到期即关闭并丢弃挂起连接、
+// 返回可辨识超时错误（上界路径不重连重试），下一次调用重建连接。
 func (m *Manager) statsRead(read func(*core.StatsConnection) error) error {
-	return m.statsConnRef().use(read)
+	return m.statsConnRef().useBounded(statsReadTimeout, read)
 }
 
 func (r *vppRuntime) InterfaceCounters(ctx context.Context, ifname string) (state.InterfaceCounters, bool) {
