@@ -23,6 +23,18 @@ type fakeSvc struct {
 	pouts    []string
 	closed   int
 	err      error
+
+	// 故障注入钩子（决策 #363 单测）：按方法/按调用粒度置错，nil 即不注入。
+	// 调用一律「先记录、后判错」，故失败尝试也在 pins/pouts 里可见（可断言确实下发了）。
+	pinErr        func(idx uint32, name string, apply bool) error
+	poutErr       func(idx uint32, name string, apply bool) error
+	policerAddErr func(name string, add bool) error
+	spanOffErr    func(from, to uint32) error
+	// 与 pins/pouts 一一对应的接口索引，用于区分绑同一策略名的不同接口（map 遍历顺序不定）。
+	pinIdx  []uint32
+	poutIdx []uint32
+	// PolicerAddDel 调用记录（name:add|del），用于断言重试真的重删了 policer。
+	addDel []string
 }
 
 func newFakeSvc() *fakeSvc {
@@ -69,12 +81,21 @@ func (f *fakeSvc) SpanDisable(from, to uint32) error {
 		return f.err
 	}
 	f.spanOff = append(f.spanOff, from)
+	if f.spanOffErr != nil {
+		return f.spanOffErr(from, to)
+	}
 	return nil
 }
 
 func (f *fakeSvc) PolicerAddDel(name string, cirKbps uint32, cb uint64, add bool) (uint32, error) {
 	if f.err != nil {
 		return 0, f.err
+	}
+	f.addDel = append(f.addDel, name+":"+map[bool]string{true: "add", false: "del"}[add])
+	if f.policerAddErr != nil {
+		if err := f.policerAddErr(name, add); err != nil {
+			return 0, err
+		}
 	}
 	if !add {
 		delete(f.policers, name)
@@ -90,6 +111,10 @@ func (f *fakeSvc) PolicerInput(swIfIndex uint32, name string, apply bool) error 
 		return f.err
 	}
 	f.pins = append(f.pins, name+":"+map[bool]string{true: "on", false: "off"}[apply])
+	f.pinIdx = append(f.pinIdx, swIfIndex)
+	if f.pinErr != nil {
+		return f.pinErr(swIfIndex, name, apply)
+	}
 	return nil
 }
 
@@ -98,6 +123,10 @@ func (f *fakeSvc) PolicerOutput(swIfIndex uint32, name string, apply bool) error
 		return f.err
 	}
 	f.pouts = append(f.pouts, name+":"+map[bool]string{true: "on", false: "off"}[apply])
+	f.poutIdx = append(f.poutIdx, swIfIndex)
+	if f.poutErr != nil {
+		return f.poutErr(swIfIndex, name, apply)
+	}
 	return nil
 }
 
@@ -236,6 +265,322 @@ func TestQosEgressBindUnbind(t *testing.T) {
 	}
 	if _, ok := f.policers["pol1"]; ok {
 		t.Fatalf("policer pol1 应删除: %v", f.policers)
+	}
+}
+
+// ---------- 决策 #363：QoS/SPAN 绑定的逐步骤登记（登记=最后成功下发态） ----------
+
+// svcRegs 读某接口的入/出向绑定登记快照（与 Provider 同包，锁内读）。
+func svcRegs(p *ServicesProvider, ifname string) (in, out string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.bound[ifname], p.boundEgress[ifname]
+}
+
+// svcPolicer 读 policer 是否仍在登记表里。
+func svcPolicer(p *ServicesProvider, name string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.policer[name]
+}
+
+// svcSpanTracked 读 SPAN 会话是否仍在登记表里。
+func svcSpanTracked(p *ServicesProvider, name string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.spans[name]
+	return ok
+}
+
+// countSeq 数 list 中等于 want 的元素个数。
+func countSeq(list []string, want string) int {
+	n := 0
+	for _, s := range list {
+		if s == want {
+			n++
+		}
+	}
+	return n
+}
+
+// TestApplyInterfaceBindFailKeepsLastState 绑新失败：旧策略已解绑成功 ⇒ 该向登记为空
+// （最后成功态）；重试必须**真的再次下发**新策略，而不是因登记已被改成就绪值而静默跳过。
+func TestApplyInterfaceBindFailKeepsLastState(t *testing.T) {
+	f := newFakeSvc()
+	p := NewServicesProvider(f)
+	ctx := context.Background()
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{Name: "ens192", IngressPolicy: "old"}); err != nil {
+		t.Fatalf("初次绑定: %v", err)
+	}
+	f.pinErr = func(_ uint32, name string, apply bool) error {
+		if name == "new" && apply {
+			return errors.New("vpp down")
+		}
+		return nil
+	}
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{Name: "ens192", IngressPolicy: "new"}); err == nil {
+		t.Fatal("绑新失败应上抛")
+	}
+	if in, _ := svcRegs(p, "ens192"); in != "" {
+		t.Fatalf("旧策略已解绑成功，入向登记应为空（最后成功态），实际 %q", in)
+	}
+	if len(f.pins) != 3 || f.pins[0] != "old:on" || f.pins[1] != "old:off" || f.pins[2] != "new:on" {
+		t.Fatalf("应依次：绑 old、解绑 old、下发 new（失败尝试也留痕）: %v", f.pins)
+	}
+	// 重试：登记为空 ⇒ 必须再次下发 new（旧实现登记已是 new，会静默跳过）
+	f.pinErr = nil
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{Name: "ens192", IngressPolicy: "new"}); err != nil {
+		t.Fatalf("重试绑定: %v", err)
+	}
+	if in, _ := svcRegs(p, "ens192"); in != "new" {
+		t.Fatalf("重试成功后登记应为 new，实际 %q", in)
+	}
+	if n := countSeq(f.pins, "new:on"); n != 2 {
+		t.Fatalf("失败尝试与重试成功后各下发一次 new:on（共 2 次），实际 %d: %v", n, f.pins)
+	}
+}
+
+// TestApplyInterfaceUnbindFailKeepsOldRegistration 解绑旧失败：该向登记保持旧值，
+// 并且不再往下绑新（数据面仍是旧策略，登记如实反映）。
+func TestApplyInterfaceUnbindFailKeepsOldRegistration(t *testing.T) {
+	f := newFakeSvc()
+	p := NewServicesProvider(f)
+	ctx := context.Background()
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{Name: "ens192", IngressPolicy: "old"}); err != nil {
+		t.Fatalf("初次绑定: %v", err)
+	}
+	f.pinErr = func(_ uint32, _ string, apply bool) error {
+		if !apply {
+			return errors.New("vpp down")
+		}
+		return nil
+	}
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{Name: "ens192", IngressPolicy: "new"}); err == nil {
+		t.Fatal("解绑旧失败应上抛")
+	}
+	if in, _ := svcRegs(p, "ens192"); in != "old" {
+		t.Fatalf("解绑失败，登记应保持旧值 old，实际 %q", in)
+	}
+	if n := countSeq(f.pins, "new:on"); n != 0 {
+		t.Fatalf("解绑未成功不应绑新: %v", f.pins)
+	}
+}
+
+// TestApplyInterfaceDirectionsIndependent 两向互不影响：入向已成功推进为 pin2，
+// 出向解绑失败 ⇒ 出向登记停在旧值 pout（#331 的独立性在失败路径同样成立）。
+func TestApplyInterfaceDirectionsIndependent(t *testing.T) {
+	f := newFakeSvc()
+	p := NewServicesProvider(f)
+	ctx := context.Background()
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{
+		Name: "ens192", IngressPolicy: "pin", EgressPolicy: "pout"}); err != nil {
+		t.Fatalf("初次绑定: %v", err)
+	}
+	f.poutErr = func(_ uint32, _ string, apply bool) error {
+		if !apply {
+			return errors.New("vpp down")
+		}
+		return nil
+	}
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{
+		Name: "ens192", IngressPolicy: "pin2", EgressPolicy: "pout2"}); err == nil {
+		t.Fatal("出向解绑失败应上抛")
+	}
+	if in, out := svcRegs(p, "ens192"); in != "pin2" || out != "pout" {
+		t.Fatalf("入向应推进为 pin2、出向应保持 pout，实际 %q/%q", in, out)
+	}
+}
+
+// TestApplyInterfaceCompensationRebindsOld 补偿路径：一次 apply 中入向已换成新策略
+// （登记已推进）、出向失败返回 ⇒ 补偿 ApplyInterface(旧值) 必须按登记差把入向解绑新、
+// 绑回旧（VPP 调用确实发生），否则登记与数据面会停在「半新」。
+func TestApplyInterfaceCompensationRebindsOld(t *testing.T) {
+	f := newFakeSvc()
+	p := NewServicesProvider(f)
+	ctx := context.Background()
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{Name: "ens192", IngressPolicy: "pol1"}); err != nil {
+		t.Fatalf("初次绑定: %v", err)
+	}
+	f.poutErr = func(_ uint32, name string, apply bool) error {
+		if name == "bad" && apply {
+			return errors.New("vpp down")
+		}
+		return nil
+	}
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{
+		Name: "ens192", IngressPolicy: "pol2", EgressPolicy: "bad"}); err == nil {
+		t.Fatal("出向绑新失败应上抛")
+	}
+	if in, out := svcRegs(p, "ens192"); in != "pol2" || out != "" {
+		t.Fatalf("失败后登记应为入向 pol2、出向空，实际 %q/%q", in, out)
+	}
+	// 补偿：把接口拉回旧声明（只有入向 pol1），登记差驱动下发
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{Name: "ens192", IngressPolicy: "pol1"}); err != nil {
+		t.Fatalf("补偿 ApplyInterface(旧值): %v", err)
+	}
+	if in, _ := svcRegs(p, "ens192"); in != "pol1" {
+		t.Fatalf("补偿后登记应回 pol1，实际 %q", in)
+	}
+	if n := countSeq(f.pins, "pol2:off"); n != 1 {
+		t.Fatalf("补偿应先解绑 pol2: %v", f.pins)
+	}
+	if n := countSeq(f.pins, "pol1:on"); n != 2 { // 初次绑定 + 补偿绑回
+		t.Fatalf("补偿应把 pol1 绑回（共 2 次 pol1:on），实际: %v", f.pins)
+	}
+}
+
+// TestDeleteQosUnbindFailKeepsPerIfaceRegistry 两个口绑同一策略：第二个口解绑失败 ⇒
+// 已成功解绑的口登记摘除、失败口保留；policer 登记保留；重试只重做失败口。
+// 注意 bound 是 map、遍历顺序不定，故按调用记录（pinIdx）动态确定哪个口是「第二个」。
+func TestDeleteQosUnbindFailKeepsPerIfaceRegistry(t *testing.T) {
+	f := newFakeSvc()
+	p := NewServicesProvider(f)
+	ctx := context.Background()
+	if err := p.ApplyQos(ctx, model.QosPolicy{Name: "pol1", Cir: 1000000}); err != nil {
+		t.Fatalf("ApplyQos: %v", err)
+	}
+	for _, name := range []string{"ens192", "ens224"} {
+		if err := p.ApplyInterface(ctx, model.InterfaceConfig{Name: name, IngressPolicy: "pol1"}); err != nil {
+			t.Fatalf("绑定 %s: %v", name, err)
+		}
+	}
+	f.pins, f.pinIdx = nil, nil // 只看删除阶段的解绑调用
+	offCalls := 0
+	f.pinErr = func(_ uint32, _ string, apply bool) error {
+		if !apply {
+			offCalls++
+			if offCalls == 2 { // 让第二个被遍历到的口解绑失败
+				return errors.New("vpp down")
+			}
+		}
+		return nil
+	}
+	if err := p.DeleteQos(ctx, "pol1"); err == nil {
+		t.Fatal("解绑失败应上抛")
+	}
+	if len(f.pins) != 2 || f.pins[0] != "pol1:off" || f.pins[1] != "pol1:off" {
+		t.Fatalf("两个口应各尝试解绑一次: %v", f.pins)
+	}
+	failedIdx := f.pinIdx[1] // 第二个尝试的即失败口
+	var failedName string
+	for name, idx := range f.ifaces {
+		if idx == failedIdx {
+			failedName = name
+		}
+	}
+	if failedName == "" {
+		t.Fatalf("找不到解绑失败的接口: idx=%d", failedIdx)
+	}
+	for _, name := range []string{"ens192", "ens224"} {
+		in, _ := svcRegs(p, name)
+		if name == failedName {
+			if in != "pol1" {
+				t.Fatalf("解绑失败的口 %s 登记应保留 pol1，实际 %q", name, in)
+			}
+		} else if in != "" {
+			t.Fatalf("已解绑成功的口 %s 登记应摘除，实际 %q", name, in)
+		}
+	}
+	if !svcPolicer(p, "pol1") || len(f.policers) != 1 {
+		t.Fatalf("解绑未全部完成，policer 登记与数据面实例都应保留: %v", f.policers)
+	}
+	// 重试：只重做失败口，全部成功后才删 policer
+	f.pinErr = nil
+	if err := p.DeleteQos(ctx, "pol1"); err != nil {
+		t.Fatalf("重试 DeleteQos: %v", err)
+	}
+	if len(f.pins) != 3 || f.pinIdx[2] != failedIdx {
+		t.Fatalf("重试应只重做失败口（idx %d），实际 %v / %v", failedIdx, f.pins, f.pinIdx)
+	}
+	if in, _ := svcRegs(p, failedName); in != "" {
+		t.Fatalf("重试成功后登记应摘除，实际 %q", in)
+	}
+	if svcPolicer(p, "pol1") {
+		t.Fatal("全部解绑成功后应摘 policer 登记")
+	}
+	if _, ok := f.policers["pol1"]; ok {
+		t.Fatal("policer 应从数据面删除")
+	}
+	if n := countSeq(f.addDel, "pol1:del"); n != 1 {
+		t.Fatalf("解绑未全部完成前不应删 policer（del 应恰好 1 次）: %v", f.addDel)
+	}
+}
+
+// TestDeleteQosPolicerDeleteFailKeepsRegistry 解绑都成功、PolicerAddDel(del) 失败 ⇒
+// 接口登记已摘、policer 登记保留；重试只重删 policer，不再发解绑。
+func TestDeleteQosPolicerDeleteFailKeepsRegistry(t *testing.T) {
+	f := newFakeSvc()
+	p := NewServicesProvider(f)
+	ctx := context.Background()
+	if err := p.ApplyQos(ctx, model.QosPolicy{Name: "pol1", Cir: 1000000}); err != nil {
+		t.Fatalf("ApplyQos: %v", err)
+	}
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{Name: "ens192", IngressPolicy: "pol1"}); err != nil {
+		t.Fatalf("绑定: %v", err)
+	}
+	f.policerAddErr = func(_ string, add bool) error {
+		if !add {
+			return errors.New("vpp down")
+		}
+		return nil
+	}
+	if err := p.DeleteQos(ctx, "pol1"); err == nil {
+		t.Fatal("删 policer 失败应上抛")
+	}
+	if in, _ := svcRegs(p, "ens192"); in != "" {
+		t.Fatalf("解绑已成功，接口登记应摘除，实际 %q", in)
+	}
+	if !svcPolicer(p, "pol1") {
+		t.Fatal("policer 删除失败，登记应保留（重试可再删）")
+	}
+	if _, ok := f.policers["pol1"]; !ok {
+		t.Fatal("PolicerAddDel 失败时数据面 policer 不应被算作已删")
+	}
+	pinN := len(f.pins)
+	f.policerAddErr = nil
+	if err := p.DeleteQos(ctx, "pol1"); err != nil {
+		t.Fatalf("重试 DeleteQos: %v", err)
+	}
+	if len(f.pins) != pinN {
+		t.Fatalf("接口登记已摘，重试不应再发解绑: %v", f.pins)
+	}
+	if svcPolicer(p, "pol1") {
+		t.Fatal("重试成功后 policer 登记应摘除")
+	}
+	if n := countSeq(f.addDel, "pol1:del"); n != 2 {
+		t.Fatalf("重试应重删 policer（共 2 次 del 调用）: %v", f.addDel)
+	}
+}
+
+// TestDeleteSpanFailKeepsRegistry SpanDisable 失败 ⇒ 登记保留、重试再关；成功才摘登记。
+func TestDeleteSpanFailKeepsRegistry(t *testing.T) {
+	f := newFakeSvc()
+	p := NewServicesProvider(f)
+	ctx := context.Background()
+	pm := model.PortMirroring{Name: "pm1",
+		Source: model.PMSource{Interface: "ens192", Direction: "ingress"}, Analyzer: "ens256"}
+	if err := p.ApplySpan(ctx, pm); err != nil {
+		t.Fatalf("ApplySpan: %v", err)
+	}
+	f.spanOffErr = func(_, _ uint32) error { return errors.New("vpp down") }
+	if err := p.DeleteSpan(ctx, "pm1"); err == nil {
+		t.Fatal("SpanDisable 失败应上抛")
+	}
+	if !svcSpanTracked(p, "pm1") {
+		t.Fatal("关闭失败，登记应保留（重试可再关）")
+	}
+	if len(f.spanOff) != 1 {
+		t.Fatalf("应已尝试关闭一次: %v", f.spanOff)
+	}
+	f.spanOffErr = nil
+	if err := p.DeleteSpan(ctx, "pm1"); err != nil {
+		t.Fatalf("重试 DeleteSpan: %v", err)
+	}
+	if svcSpanTracked(p, "pm1") {
+		t.Fatal("重试成功后登记应摘除")
+	}
+	if len(f.spanOff) != 2 || f.spanOff[1] != 1 {
+		t.Fatalf("重试应再次下发关闭（源口 1）: %v", f.spanOff)
 	}
 }
 
