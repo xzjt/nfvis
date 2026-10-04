@@ -1,0 +1,120 @@
+NFViS v2 round143 —— 决策 #360：DHCP server v1 三处收口（R142-3/R142-4）四维真机验证
+============================================================================
+日期：2026-10-04；分支 `feat/d360-dhcpserver-r142-closeout`（base `v2 @ 11c0d4b`）；决策 #360。
+真机 nfvis-vm：**dev70（旧行为对照）→ dev71（修复版，本分支构建并 dpkg 安装）**；四服务 active。
+对照基线：round142 半程体检 `docs/evidence/v2-round142-midpoint-audit.txt` §1-3/§1-4/§2 簇 C（R142-3/4）。
+验证方法：**同一注入脚本在旧/新两个二进制上各跑一遍**（A/B 对抗性对照），事实源均为独立通道
+（tcpdump 抓包 / vppctl / 内核 ip link / 产品读视图 / journal / 租约文件原文）。
+
+§0 结论（先说要点）
+- **P0 三处全部收口**：① OFFER/ACK 以太源恒为内核 tap MAC（幂等 Sync 不再清空）；② 停用回收顺序
+  「先确认 tap 删成、再清租约文件」（删除失败保留文件——单测钉住）；③ reset 清索引 + 删除一律按
+  HostIfName 核对身份；④ tap 一经解析/创建即登记（其后任何一步失败都不泄漏进端口视图）。
+- **泄漏场景做成了旧/新 A/B 实锤**（round142 只做了代码级确认）：同一注入（punt client socket 路径
+  不可绑定）下，dev70 端口视图出现 `tap0 runtime` 且租约报「尚未收敛」；dev71 端口视图干净、
+  租约表照常可用、错误如实上报，恢复后 15s 巡检自愈。
+- R142-3 两处取样 + R142-4 全项 + 生命周期（`request vpp restart` 不重启 nfvisd 的重建）均通过；
+  套件复跑结果见 §4。**未发现新缺陷**；两条如实边界见 §5。
+
+§1 真机四维验证
+
+1.1 作用效果 A/B：OFFER 以太源（R142-3，真机复现路径同 round142 §1-3）
+  环境：`sem-vs`（BVI 192.168.99.1/24, bd-id 314680）配 `dhcp-server pool 192.168.99.100 192.168.99.110
+  lease-time 300`；内置 tap 内核侧 `nfvisdhe80e75a8`（MAC 02:fe:54:2f:3f:53）；注入客户端＝临时 tap
+  （`vppctl create tap host-if-name spike-cli2` → 入 bd 314680 → up），宿主写原始帧注入 DISCOVER，
+  **tcpdump 在客户端 tap 上抓回程**（内置 tap 的 AF_PACKET 看不到自己发出的帧，故在客户端侧取独立事实源）。
+  **关键前置**：启用后先等 ≥1 轮 15s 巡检（幂等 Sync 走的就是出问题的路径）再注入。
+
+  - **A（dev70，旧）** 08:41:00.907：
+      00:00:00:00:00:00 > 52:54:00:ab:00:01, ethertype IPv4, length 316:
+        192.168.99.1.67 > 255.255.255.255.68: BOOTP/DHCP, Reply, length 274
+    ⇒ OFFER 以太源 = 全零（round142 §1-3 现场同款；BD 会学成 bogon 表项）。
+  - **B（dev71，修复版）** 08:43:56.727：
+      02:fe:54:2f:3f:53 > 52:54:00:ab:00:02, ethertype IPv4, length 316:
+        192.168.99.1.67 > 255.255.255.255.68: BOOTP/DHCP, Reply, length 274
+    且 `ip -o link show nfvisdhe80e75a8` 的 `link/ether 02:fe:54:2f:3f:53` 与抓包逐字相同。
+  - **二次取样（跨 VPP 重启后）**：`request vpp restart`（**不重启 nfvisd**）→ 恢复重放重建 tap
+    （内核侧新 MAC 02:fe:46:15:fd:9a）→ 再等一轮巡检 → 注入 → 08:51:05.295：
+      02:fe:46:15:fd:9a > 52:54:00:ab:00:21, … BOOTP/DHCP, Reply …
+    ⇒ 修复在「重建后的 tap + 幂等巡检」上同样成立（不是只对首建路径生效）。
+
+1.2 作用效果：端口视图与租约读视图（R142-4 泄漏场景旧/新对照）
+  注入手法：`/run/vpp/nfvis-dhcp.sock`（产品 punt 接收 socket 的绑定路径）**先放一个非空目录**
+  （`mkdir -p /run/vpp/nfvis-dhcp.sock/x`——空目录会被 `os.Remove` 删掉，注入无效，见 §5 教训），
+  然后 `systemctl stop nfvis` → `start`，令恢复重放的 Sync 在 punt 步骤失败；tap 此时已在 VPP 中。
+  - **A（dev70）** `show virtual-switches sem-vs ports`：
+      vh-sem-vm-nic0  vnf     up up …
+      bvi1            runtime up up …
+      tap0            runtime up up 11 21     ← **内置 tap 泄漏（用户删不掉）**
+    `show virtual-switches sem-vs dhcp-leases`：`% 交换机 sem-vs 的 DHCP 服务器尚未收敛
+      （数据面未连接或内置 tap 建立中），租约表暂不可用`
+    journal：`WARN 网络恢复收敛未收敛项 err="virtual-switches/sem-vs/dhcp-server: 绑定 DHCP punt socket
+      （/run/vpp/nfvis-dhcp.sock）: … bind: address already in use"` + 15s 巡检同款重复。
+  - **B（dev71，同注入）**：`ports` 只剩 `vh-sem-vm-nic0`/`bvi1`（**无 tap0**）；
+    `dhcp-leases` 照常可用且租约保留（2 条 active）；journal 同样如实上报（恢复收敛 + 巡检）；
+    `rm -rf /run/vpp/nfvis-dhcp.sock` 后 20s：journal **不再有新错误**（巡检自愈），
+    单播续租（`unicast_req.py spike-cli2 525400ab0005 192.168.99.101`）得到应答
+    （`REPLY … yiaddr=192.168.99.101 src=192.168.99.1`）⇒ punt 注册已重申成功。
+
+1.3 作用效果：停用回收（一次提交）
+  `delete virtual-switches sem-vs dhcp-server pool` + `commit`（revision 1561）后即刻核对：
+  - VPP 侧：内置 tap 消失（`vppctl show interface | grep tap` 只剩 spike 客户端 tap1）；
+  - 内核侧：`ip -o link show | grep nfvisdh` = 0；
+  - 租约文件：`/var/lib/nfvis/dhcp/` 为空（sem-vs.json 已清）；
+  - 端口读视图：无内置 tap（spike 客户端 tap1 照常显示为 `runtime`——foreign 成员口本来就该显示）；
+  - 注册注销的功能性证据：同一单播续租命令（此前有应答）此后**无任何应答**（punt 注册已撤、proxy 也不在场）。
+  注：punt client socket 文件 `/run/vpp/nfvis-dhcp.sock` 在 Close 后作为**空 socket 节点**留在原地
+  （Go `UnixConn.Close` 不 unlink；下次启用 `newUnixPuntTransport` 先 `os.Remove` 再 bind，自清）——
+  良性残渣、非 R142 范围，如实记录。
+
+1.4 生命周期与索引身份
+  - `request vpp restart`（不重启 nfvisd）→ 连接重置走 `reset()`（**清 tapIndex**）→ 恢复重放**按
+    HostIfName** 找到/重建 tap（实测 VPP 侧索引被复用：重建三次均为 idx 6——正是「不能信旧索引」的
+    现实土壤）、租约表保留（读视图 2 条 active 不变）、内核 tap 以新 MAC 重开；
+  - 重建后再停用（1.3 同款）按 HostIfName 删成——不依赖进程内登记的索引。
+
+§2 单元测试（补的正是漏网处；`internal/orchestrator/network/dhcpserver_test.go`，+7 项）
+  - `TestDHCPServerProviderIdempotentSyncKeepsTapMAC`：幂等 Sync（含连续 3 轮）后 OFFER 以太源 = tap MAC；
+  - `TestDHCPServerTeardownKeepsLeaseFileWhenTapDeleteFails`：TapDelete 失败 ⇒ 停用报错且**租约文件保留**
+    （错误文案含「租约文件保留」），修复注入后重试即回收；
+  - `TestDHCPServerResetClearsTapIndex`：`reset()` 后过滤集为空，停用按 HostIfName 删存量；
+  - `TestDHCPServerPuntRegisterFailureKeepsTapRegistered`：punt 失败 ⇒ tap 仍在过滤集、入 BD、内核
+    tap 不开；巡检重试成功即收敛（不重复建 tap）；
+  - `TestDHCPServerBridgeJoinFailureKeepsTapRegistered`：入 BD 失败**同样不得**留下未登记 tap（同族加固）；
+  - `TestDHCPServerProviderClose`（此前无覆盖）：关内核 tap + 注销注册恰一次 + 重复 Close 幂等；
+  - `TestDHCPServerProviderReconcile`（此前无覆盖）：幂等重收敛（不重建在场 tap、注册重申）、VPP 重启后
+    按 HostIfName 重建且租约保留、到期租约回收并落盘。
+  **红-绿验证**：把 `dhcpserver.go` 暂存回旧实现后逐项复跑，前 5 项全部按预期失败（如 R142-3 用例报
+  `OFFER 以太源 … 00:00:00:00:00:00（期望 02:fe:00:00:00:99）`），恢复修复版后全绿。
+  `GOFLAGS=-p=1 make check` RC=0（含决策条数 262、形状/路由/套件契约守护）。
+
+§3 套件复跑（dev71；跑前清场：停 sem-vm 让 1G 页、套件对象自清）
+  cli-fulltest **254/0/18**（与 round141 基线逐项一致：零失败、18 条预期报错；DHCP 语句块含
+  dhcp-server 的 set/delete 往返——本轮改的 teardown 回收路径在场，且套件收尾自清场正常）
+  cli-semantic-check **26/0/3**（与基线一致：S8 可判定并通过；S11/S12 按设计跳过 +1）
+  cli-lifecycle-check **23/0/2**（与基线一致。**首跑为 22/0/3**：L3-2「转发域连通性」因
+  `vr-sem-vs` 邻居表当刻没有任何主机而按设计跳过——该检查的正控要求邻居表里先有对端
+  （脚本原话「先让 guest 发一次流量，ARP 才会有它」），首跑紧跟语义套件之后、guest 的 ARP
+  还未刷新；待邻居表出现实测条目（`vppctl show ip neighbors`：`192.168.99.2 … bbi1`，age 5.5min）
+  后复跑即 `✓ L3-2 正向控制成立：经 bvi1 能 ping 通 192.168.99.2（5/5 应答）`。**属时序/现场
+  条件，非产品回归；不可判定项本轮未计入通过**）
+  cli-pty-smoke **10/10**
+  （脚本与现场：`cli-semantic-fixture.sh up` 复原夹具；fulltest 前 `request … sem-vm stop`。）
+
+§4 现场与清场
+  - 注入用临时 tap（tap1/spike-cli2）已删；内置 tap 随停用回收（VPP/内核/租约文件三空）；
+  - 配置回夹具形态（revision 1563：sem-vs 无 dhcp-server/relay）；告警仅常态 `HUGEPAGE_POOL_ORPHAN`；
+  - sem-vm 由套件跑法停/起（终态 running）；`/tmp/r142_*.pcap` 等临时物已删。
+
+§5 教训与如实边界（入册）
+  1. **故障注入先验证「注入真的生效」**：`newUnixPuntTransport` 绑定前会 `os.Remove(clientPath)`，
+     而 `os.Remove` 对**空目录**同样成功 ⇒ 首版注入（空目录）被自清、实验静默走成功路径；
+     改**非空目录**才稳定失败。与「防呆守卫要验证它真的触发」同族。
+  2. **residual 边界（如实登记，不在本轮范围）**：「teardown 成功之后、同一次提交的后序操作失败并回滚」
+     这一窗口内租约文件已被回收（回滚后客户端仍持旧地址）——根治需提交级生命周期钩子（成功才回收），
+     本轮只收口「tap 删不掉时不得先丢租约」这一条（round142 §1-4 点名的那条）。
+  3. VPP 的 sw_if_index **实测会被复用**（同一 tap 名三次重建都拿到 idx 6）——「按索引过滤/删除」的
+     旧路径本身就是隐患，本轮改为按 HostIfName 核对身份后，该现象不再影响正确性。
+  4. 观察项：spike 工具 `unicast_req.py` 的应答打印把 option **码**（53）当消息类型打
+     （`mt = p[240]`），不能用它区分 ACK/NAK；本轮的 ACK 判定以「租约转 active + 租约文件
+     `"state":"active"`」为准（工具缺陷，非产品）。
