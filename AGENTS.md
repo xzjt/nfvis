@@ -555,6 +555,17 @@
   relay 撤销后 UDP/67 的 proxy 处理残留、域内 DHCP 包被静默吞掉（重注册 punt 可夺回）。契约（**决策 #359**）已落
   附录 A/命令树/命令全表/openapi/手册口径与套件同步计划；**实现与真机四维验证待执行**。
   证据 `docs/evidence/v2-round140-dhcp-server-spike.txt`。
+- **round141（决策 #359 DHCP server v1 交付：四维真机 + Browser Use，2026-10-04）**：实现随本 PR 合并
+  （`set virtual-switches <vs> dhcp-server pool …` + `show … dhcp-leases` + REST + Web 块 + 池耗尽告警
+  `DHCP_POOL_EXHAUSTED`）。**四维全过**：真 guest 完整 DORA（`LEASED 192.168.99.100`）、租约表三面一致、
+  双向连通（网关 ping 租约地址 5/5）、VPP/nfvis 重启自愈（tap 按 HostIfName 复用重建、租约保留）、
+  relay 配过又删后 punt 重申仍有效（R140-1 回归）、双客户端并存、池耗尽告警建/消、四类非法池与 relay
+  并存全拒、operator 双面（CLI `%% 无权限` / REST 403）、Web 详情页块与租约表（Browser Use，先确认
+  dev70 当前构建）。**实测修两处**：广播双入径致双 ACK（→(chaddr,xid,类型) 3s 去重窗）、池校验文案空格；
+  **工具修复一处**：lifecycle L2-3「查不了」变体漏网（broken pipe）→ 判据按传输层失败签名分类 +
+  `--selftest` 并入 toolcheck。**四套件**：fulltest **254/0/18**、语义 **26/0/3**、lifecycle **23/0/2**、
+  pty **10/10**（增量构成见证据 §7）。证据 `docs/evidence/v2-round141-d359-dhcp-server-verified.txt` +
+  截图 `docs/images/round141-web-dhcp-server.png`；真机已装 2.0.0~dev70。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。

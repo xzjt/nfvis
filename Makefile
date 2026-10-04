@@ -83,6 +83,7 @@ docscheck:
 toolcheck:
 	bash contrib/scripts/cli-fulltest-selftest.sh
 	bash contrib/scripts/cli-semantic-selftest.sh
+	bash contrib/scripts/cli-lifecycle-check.sh --selftest
 	bash contrib/scripts/web-console-config-selftest.sh
 	bash contrib/scripts/web-console-confirm-selftest.sh
 	bash contrib/scripts/check_maint_scripts.sh

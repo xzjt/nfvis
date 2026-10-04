@@ -158,6 +158,59 @@ free_ports() {
   done
 }
 
+# ---------- L2-3 判据：把「未收敛」行分成「查到残渣」与「查不了」（可自校准）----------
+# round139 实测：重启窗口内 15s 巡检的**残渣对账**可能正落在 VPP 不可用的几秒，打出
+#   WARN 残渣对账未收敛项  err=… VPP 未连接 / connection refused / broken pipe …
+# ——那是「对账没跑成、下轮再来」，不是残渣判定；把它算成失败会让**干净的现场**偶发报红。
+# ⚠️ round141 复现（工具假红也是缺陷）：首版只认字面 `VPP 未连接`，而本轮现场是
+# **API 通道写失败**（`unable to process request: write unix @->/run/vpp/api.sock: write: broken pipe`）
+# ——「查不了」的**变体**漏网。现按**传输层失败签名**分类（下列任一即「查不了」）：
+l23_kind() { # stdin: 未收敛行 → stdout: unqueryable | finding
+  local pat='VPP 未连接|connection refused|broken pipe|transport is closing|connection reset|no such file or directory|i/o timeout|EOF'
+  while IFS= read -r ln; do
+    [ -z "$ln" ] && continue
+    if printf '%s' "$ln" | grep -Eq "$pat"; then
+      printf 'unqueryable\t%s\n' "$ln"
+    else
+      printf 'finding\t%s\n' "$ln"
+    fi
+  done
+}
+
+# `--selftest`：合成输入自校准（不碰真机；CI 可跑）——只有「查不了」⇒ 0 判定；
+# 真残渣行仍抓得到；混合输入两类各归各。判据回归时这里先红。
+if [ "${1:-}" = "--selftest" ]; then
+  fail=0
+  chk() { # chk <说明> <期望 finding 数> <期望 unqueryable 数> <<< 输入
+    local why="$1" want_f="$2" want_u="$3" out got_f got_u
+    out=$(l23_kind)
+    got_f=$(printf '%s\n' "$out" | grep -c '^finding' || true)
+    got_u=$(printf '%s\n' "$out" | grep -c '^unqueryable' || true)
+    if [ "$got_f" = "$want_f" ] && [ "$got_u" = "$want_u" ]; then
+      echo "  ✓ $why（finding=$got_f unqueryable=$got_u）"
+    else
+      echo "  ✗ $why：期望 finding=$want_f unqueryable=$want_u，实得 finding=$got_f unqueryable=$got_u"
+      fail=1
+    fi
+  }
+  echo "— cli-lifecycle-check 判据自校准（L2-3 分类）—"
+  chk "仅「查不了」（VPP 未连接变体）" 0 1 <<'EOF'
+nfvisd[1]: {"msg":"残渣对账未收敛项","err":"对账数据面 IP 表: VPP 未连接"}
+EOF
+  chk "仅「查不了」（broken pipe 变体，round141 现场）" 0 1 <<'EOF'
+nfvisd[6407]: {"msg":"残渣对账未收敛项","err":"对账数据面 IP 表: 列出 IP 表: unable to process request: write unix @->/run/vpp/api.sock: write: broken pipe"}
+EOF
+  chk "真残渣（读到结论）仍判 finding" 1 0 <<'EOF'
+nfvisd[1]: {"msg":"残渣对账未收敛项","err":"对账数据面 IP 表: 配置未声明却在数据面：表 [100]"}
+EOF
+  chk "混合输入两类分列" 1 2 <<'EOF'
+nfvisd[1]: {"msg":"残渣对账未收敛项","err":"对账数据面 IP 表: VPP 未连接"}
+nfvisd[1]: {"msg":"残渣对账未收敛项","err":"对账数据面 ACL: unable to process request: write unix @->/run/vpp/api.sock: write: broken pipe"}
+nfvisd[1]: {"msg":"残渣对账未收敛项","err":"对账数据面 bridge-domain: 配置未声明却在数据面：BD [314680]"}
+EOF
+  if [ "$fail" = 0 ]; then echo "全部符合预期"; exit 0; else echo "有不符合预期的用例"; exit 1; fi
+fi
+
 # ---------- 前置自检（缺一即明确退出，别让断言以空输出形式连片假红）----------
 if [ ! -x "$CLI_BIN" ]; then
   echo "✗ 找不到可执行的 CLI: $CLI_BIN（已装实例请给 CLI_BIN=/usr/bin/nfvis-cli）"
@@ -569,23 +622,20 @@ else
   fi
 
   # L2-3 日志：重启这段不许有未收敛项（顺序问题会在这里冒出来）。
-  #
-  # ⚠️ 判据要分清「查不了」与「查到残渣」（round139 实测到的**偶发假红**）：重启窗口内 15s 巡检的
-  # **残渣对账**可能正好落在 VPP 不可用的那几秒，于是打出
-  #   WARN 残渣对账未收敛项  err=… VPP 未连接 … connection refused …
-  # ——那是「对账没跑成、下轮再来」，**不是**残渣判定；把它算成失败会让**干净的现场**偶发报红
-  # （工具假红也是缺陷）。故：**只把能读出结论的行计入**，查不了的行单独如实报出（不隐藏）。
+  # 判据分类见 l23_kind（查不了 ≠ 查到残渣；变体覆盖见该函数的注释与 `--selftest`）。
   jall=$(journalctl -u "$NFVIS_UNIT" --since "$TS" --no-pager 2>/dev/null | grep 未收敛 || true)
+  jcls=$(printf '%s
+' "$jall" | l23_kind)
   junjudge=$(printf '%s
-' "$jall" | grep -c 'VPP 未连接' || true)
+' "$jcls" | grep -c '^unqueryable' || true)
   unc=$(printf '%s
-' "$jall" | grep -v 'VPP 未连接' | grep -c . || true)
+' "$jcls" | grep -c '^finding' || true)
   if [ "$unc" -eq 0 ]; then
     ok "L2-3 重启后日志无「未收敛」判定（0 条；另有 $junjudge 条属「对账时 VPP 不可用」= 查不了，不计）"
   else
     exp_act "0 条未收敛判定" "$unc 条"
     printf '%s
-' "$jall" | grep -v 'VPP 未连接' | head -3 | sed 's/^/      | /'
+' "$jcls" | grep '^finding' | cut -f2- | head -3 | sed 's/^/      | /'
     bad "L2-3 重启后日志有未收敛项"
   fi
   if [ "$junjudge" -gt 0 ]; then
