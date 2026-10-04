@@ -480,7 +480,14 @@ func run() error {
 	}
 
 	// M5-6：配置备份/恢复/恢复出厂（FR-OPS-004~007）
-	sysOps := system.NewManager(system.DefaultConfig(), engine, imagesStore, api.VersionStr)
+	sysCfg := system.DefaultConfig()
+	if *metricsDB != "" {
+		// 决策 #365：format-data 的受管数据清单含运行态残留（metrics.db）——把**实际**路径
+		// 交给管理器（`-db` 可改库目录，开发态/测试态的 metrics.db 与生产字面量不同）。
+		// 显式禁用（-metrics-db 置空）时保留缺省字面量：历史文件可能仍在，清数据分区要一并清掉。
+		sysCfg.MetricsDB = *metricsDB
+	}
+	sysOps := system.NewManager(sysCfg, engine, imagesStore, api.VersionStr)
 
 	// M5-3：数据面抓包（VPP pcap trace 经 CLI socket；FR-OPS-042）
 	// 注意：vppctl -s 需 CLI socket（/run/vpp/cli.sock），不是二进制 API socket；

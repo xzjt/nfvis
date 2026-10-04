@@ -4,7 +4,7 @@
 |---|---|
 | 用途 | **命令参考全表**：把 CLI 命令树逐条列出，附权限、落点与**真机实测状态** |
 | 来源 | 命令树取自实现（`internal/schema/tree_oper.go`、`internal/schema/tree_config.go`，即 `?` 补全与 `cli_bridge` 前置校验的真实来源）；契约见 `docs/NFViS-CLI命令树完整设计.md`；REST 落点对照见 `docs/NFViS-openapi.yaml` 与 `internal/api/server.go` 的路由注册 |
-| 实测状态 | 来自 **2026-09-29 round88 真机实测**（nfvis-vm，已装发布件走查 + 修复版复验）：`contrib/scripts/cli-fulltest.sh`（全功能 CLI 套件，**通过 195 / 失败 0 / 预期报错 12** —— `show vpp runtime` 已实现，全表**首次无失败**）+ `contrib/scripts/cli-pty-smoke.sh`（pty 交互冒烟，**通过 10 / 失败 0**）+ `cli-semantic-check.sh` **12 / 0 / 1**、`cli-lifecycle-check.sh` **21 / 0 / 3**。**更早轮次的状态已过期**，本表**上一轮（2026-09-14）的状态已过期**，本表一律以 round80 为准；**v2 开发线的当前基线见 §3 末尾**（决策 #319 后：fulltest 210/0/13（实测修正，round101）、语义 25/0/2（决策 #343 后，见 §3）、生命周期 21/0/3、pty 10/10，真机复跑待执行） |
+| 实测状态 | 来自 **2026-09-29 round88 真机实测**（nfvis-vm，已装发布件走查 + 修复版复验）：`contrib/scripts/cli-fulltest.sh`（全功能 CLI 套件，**通过 195 / 失败 0 / 预期报错 12** —— `show vpp runtime` 已实现，全表**首次无失败**）+ `contrib/scripts/cli-pty-smoke.sh`（pty 交互冒烟，**通过 10 / 失败 0**）+ `cli-semantic-check.sh` **12 / 0 / 1**、`cli-lifecycle-check.sh` **21 / 0 / 3**。**更早轮次的状态已过期**，本表**上一轮（2026-09-14）的状态已过期**，本表一律以 round80 为准；**v2 开发线的当前基线见 §3 末尾**（决策 #319 后逐轮累积：fulltest **254/0/18**、语义 **26/0/3**、生命周期 **23/0/2**、pty **10/10**；round147 复核同值，各轮增量与证据见 §3） |
 | 基线 | main（round88 修复版工作树）；决策 **201** 项 |
 
 ## 0. 阅读约定
@@ -161,7 +161,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request container-functions <n> stop` | 停止容器 | O | `POST /container-functions/{n}:stop` | ✅ |
 | `request container-functions <n> restart` | 重启容器 | O | `POST /container-functions/{n}:restart` | ✅ |
 | `request container-functions <n> log [last <n>]` | 容器 stdout/stderr | O | `GET /container-functions/{n}/logs` | ✅ |
-| `request container-functions <n> exec <command> [timeout <seconds>]` | 在**运行中**的容器内执行命令（非交互；`<command>` 是整体、含空格请加引号；等价容器内 `sh -c`）；超时默认 30s（1..300）、stdout/stderr 各自上限 256 KiB（超限置 truncated）；**超时只中止客户端等待**（Docker 无 exec 中止接口，容器内进程可能仍在跑）、退出码未知时不报（决策 #357） | S | `POST /container-functions/{n}:exec` | 🚫 本轮新增（决策 #357）：单测覆盖；已入 fulltest，真机复跑待执行 |
+| `request container-functions <n> exec <command> [timeout <seconds>]` | 在**运行中**的容器内执行命令（非交互；`<command>` 是整体、含空格请加引号；等价容器内 `sh -c`）；超时默认 30s（1..300）、stdout/stderr 各自上限 256 KiB（超限置 truncated）；**超时只中止客户端等待**（Docker 无 exec 中止接口，容器内进程可能仍在跑）、退出码未知时不报（决策 #357） | S | `POST /container-functions/{n}:exec` | 🚫 本轮新增（决策 #357）：单测覆盖；已入 fulltest；**真机四维验证（round138，含 Browser Use）**，证据 `docs/evidence/v2-round138-d357-container-exec.txt` |
 | `request container-functions <n> shell` | **交互式终端**：进容器里的 `sh`（TTY；Ctrl-] 退出）。与 VM 串口 console **同一套管线**（一次性 ticket + WebSocket + CLI raw 接管），底座是 Docker exec 的 TTY 形态；**断开只关产品侧桥接**（WS 断开后容器内 shell 进程**可能仍在**，真机实测；Docker 无 exec 中止接口）；不做窗口尺寸同步（决策 #358） | S | `POST /container-functions/{n}/shell` + `GET …/shell/ws?ticket=…` | 🚫 本轮新增（决策 #358）：单测覆盖；真机 pty 复验见证据 |
 | `request container-functions <n> delete` | 删除容器 | S | `DELETE /container-functions/{n}` | 🚫 交互确认 |
 | `request images upload name <n> type <t> file <path>` | 从 `/data/incoming/` 导入（成功自动清理源文件）；容器镜像读出 tar 内嵌 tag 并回显（决策 #312） | O | `POST /images` | ✅ |
@@ -283,9 +283,9 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set system login password-policy lockout-threshold <n>` | 连续失败锁定阈值 | 配置库 | ✅ |
 | `set system login password-policy lockout-minutes <n>` | 锁定时长（**独立语句**，决策 #76） | 配置库 | ✅ |
 | `set system idle-timeout-minutes <n>` | CLI 空闲超时（默认 10，FR-SEC-005） | 会话态 | ✅ |
-| `set system metrics history interval <n>` | 历史采样间隔（秒，默认 60，10..3600；改配置无需重启即生效，决策 #356） | 后台采样器 → `/var/lib/nfvis/metrics.db` | 🚫 本轮新增（决策 #356）：单测覆盖；已入 fulltest 阶段 2，真机复跑待执行（决策 #319） |
-| `set system metrics history retention-days <n>` | 历史保留天数（默认 7，1..365；另有 2,000,000 行硬顶兜底，决策 #356） | 后台采样器裁剪 | 🚫 本轮新增（决策 #356）：同上 |
-| `delete system metrics history interval\|retention-days` | 回落默认（字段缺省＝用默认值，决策 #356） | 配置库 | 🚫 本轮新增（决策 #356）：同上 |
+| `set system metrics history interval <n>` | 历史采样间隔（秒，默认 60，10..3600；改配置无需重启即生效，决策 #356） | 后台采样器 → `/var/lib/nfvis/metrics.db` | ✅ **真机四维验证（round137，含 Browser Use）**：CLI/REST/Web 三面同源 + 重启延续 + 免重启生效，证据 `docs/evidence/v2-round137-d356-metrics-history.txt`；已入 fulltest 阶段 2 |
+| `set system metrics history retention-days <n>` | 历史保留天数（默认 7，1..365；另有 2,000,000 行硬顶兜底，决策 #356） | 后台采样器裁剪 | ✅ **真机四维验证（round137，同上）**；已入 fulltest 阶段 2 |
+| `delete system metrics history interval\|retention-days` | 回落默认（字段缺省＝用默认值，决策 #356） | 配置库 | ✅ **真机四维验证（round137，同上）**；已入 fulltest 阶段 2 |
 
 ### 2.2b `protocols`（顶级层级，FR-NET-018）
 
@@ -322,12 +322,12 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-switches <n> gateway acl-in\|acl-out <acl>` | 网关 ACL | VPP acl | ⊘ **设计拒绝（decision #340）**：真机实证 VPP 26.06 不评估 BVI（网关）上的域内流量——既不拦截也不计数（round117 绑定登记可见但域内流量零评估；round118 复核），绑定给不出任何保护，故提交期硬拒。替代：`set virtual-switches <n> l3-interface <if> acl-in <acl>`（见下一行，已实证生效）。 |
 | `set virtual-switches <n> dhcp-relay server <ip>` | DHCP 中继（仅已 `set gateway ip` 的 L2 交换机可配；src 自动取 BVI 的 IPv4 网关地址，server 须在该转发域内可达） | VPP dhcp proxy | ✓（round113：配置/撤销/读视图/`vppctl show dhcp proxy` 对照 + pcap 转发签名实证；端到端租约因测试设备工具链受限未取得，见 `docs/evidence/v2-round113-*.txt`） |
 | `delete virtual-switches <n> dhcp-relay` | 撤销 DHCP 中继（`dhcp_proxy_config` IsAdd=false，幂等；随交换机删除一并撤） | VPP dhcp proxy | ✓（round113：撤销后 `show dhcp proxy` 清空、读视图同步；恢复重放存活经多次 VM/nfvis 重启实证） |
-| `set virtual-switches <n> dhcp-server pool <start> <end>` | DHCP 服务器启用（决策 #359；仅 L2 + 已 `set gateway ip` 可配；池须与 BVI 同子网、不含 BVI/网络/广播地址、≤4096 个；与 dhcp-relay 互斥） | nfvisd 用户态服务器 + 内置 L2 tap + UDP/67 punt | 🚫 已实现待真机（round140 spike 已证能力前提与真实客户端 DORA；命令本体真机复跑待执行，见 `docs/evidence/v2-round140-dhcp-server-spike.txt`） |
-| `set virtual-switches <n> dhcp-server lease-time <seconds>` | 租约时长（缺省 86400；60..2592000） | 同上 | 🚫 同上 |
-| `set virtual-switches <n> dhcp-server dns <ip>` | 下发给客户端的 DNS（option 6；缺省＝BVI 网关地址） | 同上 | 🚫 同上 |
-| `set virtual-switches <n> dhcp-server domain-name <name>` | 下发给客户端的域名（option 15，可省） | 同上 | 🚫 同上 |
-| `delete virtual-switches <n> dhcp-server [pool \| lease-time \| dns \| domain-name]` | 逐叶子撤销；**pool 的删除＝停用**（清池 + 回收内置 tap/punt/租约），与裸 delete 等价 | 同上 | 🚫 同上 |
-| `show virtual-switches <n> dhcp-leases` | DHCP 租约表（IP/MAC/状态 offered\|active\|declined/到期；未配置 dhcp-server 时如实报「未配置」） | nfvisd 租约表（`GET /virtual-switches/{n}/dhcp-leases` 同源） | 🚫 同上 |
+| `set virtual-switches <n> dhcp-server pool <start> <end>` | DHCP 服务器启用（决策 #359；仅 L2 + 已 `set gateway ip` 可配；池须与 BVI 同子网、不含 BVI/网络/广播地址、≤4096 个；与 dhcp-relay 互斥） | nfvisd 用户态服务器 + 内置 L2 tap + UDP/67 punt | ✅ **真机四维验证（round141）**：真 guest 完整 DORA（`LEASED 192.168.99.100`）、VPP/nfvis 重启自愈、池耗尽告警、与 relay 互斥全拒，证据 `docs/evidence/v2-round141-d359-dhcp-server-verified.txt`；round140 能力前提 spike 见 `docs/evidence/v2-round140-dhcp-server-spike.txt` |
+| `set virtual-switches <n> dhcp-server lease-time <seconds>` | 租约时长（缺省 86400；60..2592000） | 同上 | ✅ **真机四维验证（round141，同上）** |
+| `set virtual-switches <n> dhcp-server dns <ip>` | 下发给客户端的 DNS（option 6；缺省＝BVI 网关地址） | 同上 | ✅ **真机四维验证（round141，同上）** |
+| `set virtual-switches <n> dhcp-server domain-name <name>` | 下发给客户端的域名（option 15，可省） | 同上 | ✅ **真机四维验证（round141，同上）** |
+| `delete virtual-switches <n> dhcp-server [pool \| lease-time \| dns \| domain-name]` | 逐叶子撤销；**pool 的删除＝停用**（清池 + 回收内置 tap/punt/租约），与裸 delete 等价 | 同上 | ✅ **真机四维验证（round141，同上）** |
+| `show virtual-switches <n> dhcp-leases` | DHCP 租约表（IP/MAC/状态 offered\|active\|declined/到期；未配置 dhcp-server 时如实报「未配置」） | nfvisd 租约表（`GET /virtual-switches/{n}/dhcp-leases` 同源） | ✅ **真机四维验证（round141，同上）** |
 | `set virtual-switches <n> learn-limit <n>` | MAC 学习条数上限（仅 L2；环路/广播风暴缓解，**非阻断**；1-16777216，超限拒绝） | VPP `bridge_domain_set_learn_limit` | ✓（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
 | `delete virtual-switches <n> learn-limit` | 清 MAC 学习上限（恢复 VPP 默认 16777216，幂等） | VPP `bridge_domain_set_learn_limit` | ✓（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
 | `set virtual-switches <n> dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**按域上游**（决策 #345）：只对该交换机转发域（L2＝BVI；L3＝其 l3-interface）的入向查询生效；本域非空优先，否则回落全局；两者皆空则回 SERVFAIL | nfvisd punt socket + 宿主解析 | ✓（round124：能力前提与端到端数据面实证，见 `docs/evidence/v2-round124-*.txt`） |
@@ -462,11 +462,11 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 246 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。决策 #335 的两条 dhcp-relay 命令于 round113、决策 #337 的两条 learn-limit 命令于 round115 真机实测，均移入本桶。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶；`request system storage format-data` 由决策 #305 落地（原 🚫 破坏性、契约已登记延期），按「破坏性但已验」移入本桶。**决策 #340 把 `gateway acl-in\|acl-out` 一行改判为「设计拒绝」，故本桶 247→246**（该行 round117 由 ✅ 改标 ⚠️ 时未同步本表，属既有陈旧漂移，本轮按增量口径一并订正） |
+| ✅ 实测通过 | 256 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。决策 #335 的两条 dhcp-relay 命令于 round113、决策 #337 的两条 learn-limit 命令于 round115 真机实测，均移入本桶。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶；`request system storage format-data` 由决策 #305 落地（原 🚫 破坏性、契约已登记延期），按「破坏性但已验」移入本桶。**决策 #340 把 `gateway acl-in\|acl-out` 一行改判为「设计拒绝」，故本桶 247→246**（该行 round117 由 ✅ 改标 ⚠️ 时未同步本表，属既有陈旧漂移，本轮按增量口径一并订正） |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 设计拒绝（decision #340） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 20 | 破坏性（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`）、需交互者（VM/容器删除确认、改密），以及本轮新增、单测已覆盖、**已入 fulltest 套件但真机复跑待执行**的 10 行（`show system api tokens` 阶段 1、`request system api token revoke <token-id>` 阶段 4、`set system login banner <text>` 阶段 2；决策 #319。决策 #337 的 `set/delete virtual-switches <n> learn-limit …` 两条已入 fulltest 阶段 2、单测覆盖，真机复跑待执行；原 `set/delete virtual-switches <n> dhcp-relay …` 已于 round113 真机验证并移出本行（决策 #335）；决策 #345 的 5 行（`show dns proxy`、`set`/`delete system dns proxy server`、`set`/`delete virtual-switches <n> dns proxy server`）单测覆盖、真机复跑待执行） |
+| 🚫 本轮未执行 | 10 | **破坏性/需交互**（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`、VM/容器删除确认与改密）——这些命令的机制由单测/集成测试覆盖，真机按需执行。**决策 #365 把「已入套件但真机待跑」的 10 行移入 ✅ 桶**：`request container-functions <n> exec`（round138 四维）、`set/delete system metrics history …` 3 行（round137 四维）、`set/delete virtual-switches <n> dhcp-server …` 6 行（round141 四维）——此前标「🚫 待真机」与同 PR 证据矛盾（round142 体检 A9/C9 的账目漂移） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
@@ -480,19 +480,25 @@ round80 以来那条唯一 ✗ 归零。
 pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**；
 语义校验 **12 / 0 / 1**、生命周期与组合 **21 / 0 / 3**（有业务现场时跑）。
 
-**决策 #319 之后的基线（v2 开发线；数字为「旧基线 + 本轮增量」，真机复跑待执行）**：
-`cli-fulltest` **214 / 0 / 13**（旧 198/0/11；增量逐阶段 = 阶段 1 `+1` `show system api tokens`、
-阶段 2 `+4`（登录横幅语句 1 + 提交→回读→清除 3）、阶段 4 `+2`（`format-data` 结构检查、
-吊销不存在的 token id，两条都进「预期报错」桶 ⇒ 11→13）、**新增阶段 7** `+7`（CLI 脚本文件模式 `-f`）；
-决策 #337 再于阶段 2 `+2`：`set/delete virtual-switches <n> learn-limit <n>`）、
-`cli-semantic-check` **24 / 0 / 1**（旧 12/0/1；新增 **S10 配置编辑锁语义** 12 项，含 5 项正向控制，
-覆盖 #317/#318 的排他/接管/`ErrLockLost`/登出释放；**决策 #337 新增 S12**：产品读视图
-`learn_limit` ↔ `vppctl show bridge-domain <id> detail` 的 Learn-li，无配置如实报不可判定；
-**决策 #343 后为 25 / 0 / 2**——**无新增/移除项**，是既有 **S8** 由「不可判定」转「通过」（S8 正控由
-单次 3s 窗口改为窗口内增长周期计数，慢周期下不再整窗跨零 ⇒ 转可判定并通过，收口 R115-1），
-另 2 项不可判定为 S11/S12 按设计的「无配置跳过」）、
-`cli-lifecycle-check` **21 / 0 / 3**（不变）、
-`cli-pty-smoke` **10 / 10**（不变）。逐阶段差异与原因见规格书附录 A #319⑤；
+**当前基线（v2 开发线，round147 实测；逐轮累积与证据见下）**：
+`cli-fulltest` **254 / 0 / 18** ｜ `cli-semantic-check` **26 / 0 / 3** ｜ `cli-lifecycle-check` **23 / 0 / 2** ｜
+`cli-pty-smoke` **10 / 10**（真机 nfvis-vm 2.0.0~dev75，round147）。
+
+沿革（每一处变化都写明「哪条新增/移除、为什么」——决策 #304/#319 纪律）：
+- `cli-fulltest`：198/0/11 → **210/0/13**（round101 实测修正）→ **240/0/13**（round137：`#356` 历史时序命令 +9）
+  → **242/0/15**（round138：`#357` exec 断言 +4，其中 2 条入「预期报错」）→ **242/0/16**（round139：`#358`
+  shell 预期失败 +1）→ **254/0/18**（round141：`#359` dhcp-server 语句解析/提交往返/`show … dhcp-leases` +12 通过、
+  +2 预期报错）；round143~147 各轮复核同值（零失败）。
+- `cli-semantic-check`：12/0/1 → 24/0/1（S10 编辑锁 12 项）→ 25/0/2（**#343** S8 由不可判定转通过，无新增/移除项）
+  → **26/0/3**（**#345** DNS punt 实链 S13 +1）；round147 复核同值（不可判定为 S11/S12 按设计跳过 +1）。
+- `cli-lifecycle-check`：21/0/3 → **23/0/2**（**#334** L3-2 转可判定 + 历史最好档；**round141** 修 L2-3「查不了」
+  变体漏网的工具假红后复跑 23/0/2）；round143~147 复核同值（首跑偶见 22/0/3 系 L3-2 正控未热，复跑转正）。
+- `cli-pty-smoke`：10/10（round80 起不变）。
+- 证据索引：`docs/evidence/v2-round137-d356-metrics-history.txt`、`v2-round138-d357-container-exec.txt`、
+  `v2-round139-d358-container-shell.txt`、`v2-round141-d359-dhcp-server-verified.txt`、
+  `v2-round143-d360-dhcpserver-r142-3-4.txt`、`v2-round144-d361-l3-acl-unbind.txt`、
+  `v2-round145-d362-libvirt-rpc-bounds.txt`、`v2-round146-d363-qos-binding-order.txt`、
+  `v2-round147-d364-lock-confirmed.txt`。
 命令清单与契约的对账由 `contrib/scripts/check_suite_contract_sync.sh` 守护（`make check` 的 `toolcheck`）。
 
 ---

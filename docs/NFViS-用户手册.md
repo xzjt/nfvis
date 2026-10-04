@@ -1692,7 +1692,8 @@ nfvis$ request system configuration restore /var/lib/nfvis/backup/pre-change.jso
 # 恢复出厂（**双重确认**，不可逆；清配置库与数据，重启后重新引导 admin）：
 nfvis$ request system zeroize
 # 重置数据分区（**双重确认**，不可逆）：恢复出厂**数据状态**，但保留管理面可达——
-# 删全部受管 VNF/容器与网络配置对象、清镜像/备份/抓包/转储/诊断归档等受管数据，
+# 删全部受管 VNF/容器与网络配置对象、清镜像/备份/抓包/转储/诊断归档，以及运行态残留
+# （历史时序库 metrics.db、DHCP 租约文件）等受管数据，
 # 而管理口/API/登录用户配置与物理口/DPDK 声明保留，执行完仍可登录继续配置、不必重启：
 nfvis$ request system storage format-data
 ```
@@ -1704,6 +1705,9 @@ nfvis$ request system storage format-data
 > 执行结果会如实给出删除对象数、清理文件数与释放空间；**有清不掉的残留时它报失败并逐条列出**
 > （不会在没清干净时报成功）。重复执行安全，第二次会如实说明「已是出厂态」。
 > 两者都会清掉镜像与 VNF 磁盘，需要的镜像与备份请先取到本机之外。
+> `storage format-data` 清的是**数据分区**：除上列受管目录外，运行态残留——历史时序库
+> `/var/lib/nfvis/metrics.db`（清后 `/metrics` 仍可用、历史页如实报「无历史」）与 DHCP 租约目录
+> `/var/lib/nfvis/dhcp/`——也一并清掉（与本节上方「历史时序库」一节的说明一致）。
 
 > **`to <path>` 是「另存一份」**——导出不会改写既有文件。因此该命令要求：
 > 路径必须是**绝对路径**（相对路径会随工作目录漂移，故一律拒绝）、父目录**必须已存在**、

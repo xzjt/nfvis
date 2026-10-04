@@ -106,10 +106,27 @@ func fullDemoConfig() model.Config {
 
 // ---------- ① 保留节逐字段不变（保命条款） ----------
 
+// testManagerConfig 把 format-data 的**全部**受管数据路径指向临时目录。
+//
+// 单测绝不能触碰生产路径：FormatData 会真删这些路径下的内容，而 Config 的零值缺省指向
+// /var/lib/nfvis/…（含决策 #365 新增的 metrics.db 与 dhcp 租约目录）——在真机上跑测试
+// 会误删现场数据（本函数即为此前的隐患加固）。
+func testManagerConfig(root string) Config {
+	return Config{
+		Dir:         filepath.Join(root, "backup"),
+		Captures:    filepath.Join(root, "captures"),
+		CoreDumps:   filepath.Join(root, "coredumps"),
+		TechSupport: filepath.Join(root, "tech-support"),
+		VMs:         filepath.Join(root, "vms"),
+		DHCPLeases:  filepath.Join(root, "dhcp"),
+		MetricsDB:   filepath.Join(root, "metrics.db"),
+	}
+}
+
 func TestFormatDataKeepsReservedSectionsVerbatim(t *testing.T) {
 	before := fullDemoConfig()
 	eng := &fakeEngine{cfg: before}
-	m := NewManager(Config{Dir: t.TempDir()}, eng, nil, "test")
+	m := NewManager(testManagerConfig(t.TempDir()), eng, nil, "test")
 
 	if _, err := m.FormatData(context.Background(), "admin"); err != nil {
 		t.Fatalf("FormatData: %v", err)
@@ -168,6 +185,7 @@ func TestFormatDataPurgesManagedDataAndReportsStats(t *testing.T) {
 		"coredumps": filepath.Join(root, "coredumps"),
 		"tech":      filepath.Join(root, "tech-support"),
 		"vms":       filepath.Join(root, "vms"),
+		"dhcp":      filepath.Join(root, "dhcp"), // 决策 #365：运行态租约目录
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -187,6 +205,9 @@ func TestFormatDataPurgesManagedDataAndReportsStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	write(filepath.Join(dirs["vms"], "vnf-a", "disk.qcow2"), 0) // 目录里嵌套文件
+	write(filepath.Join(dirs["dhcp"], "vs-x.json"), 60)         // 决策 #365：DHCP 租约（目录）
+	metricsDB := filepath.Join(root, "metrics.db")
+	write(metricsDB, 500) // 决策 #365：历史时序库（**单文件**）
 
 	imgs := &fakeImages{metas: []images.Meta{
 		{Name: "alpine.qcow2", SizeBytes: 1000},
@@ -196,6 +217,7 @@ func TestFormatDataPurgesManagedDataAndReportsStats(t *testing.T) {
 	m := NewManager(Config{
 		Dir: dirs["backup"], Captures: dirs["captures"], CoreDumps: dirs["coredumps"],
 		TechSupport: dirs["tech"], VMs: dirs["vms"],
+		DHCPLeases: dirs["dhcp"], MetricsDB: metricsDB, // 决策 #365
 	}, eng, imgs, "test")
 
 	res, err := m.FormatData(context.Background(), "admin")
@@ -206,6 +228,13 @@ func TestFormatDataPurgesManagedDataAndReportsStats(t *testing.T) {
 		t.Fatalf("不应有残留: %v", res.Residuals)
 	}
 	// 统计：删除对象按类别、镜像数、清理文件数、释放字节。
+	// 决策 #365：运行态残留（单文件 metrics.db + DHCP 租约目录）一并清掉；目录本体保留。
+	if _, err := os.Stat(metricsDB); !os.IsNotExist(err) {
+		t.Errorf("metrics.db（单文件）应被删除: %v", err)
+	}
+	if ents, err := os.ReadDir(dirs["dhcp"]); err != nil || len(ents) != 0 {
+		t.Errorf("DHCP 租约目录应被清空且目录本体保留: %v/%d", err, len(ents))
+	}
 	if res.RemovedObjects.Containers != 1 || res.RemovedObjects.VMs != 1 ||
 		res.RemovedObjects.VirtualSwitches != 1 || res.RemovedObjects.VRFs != 1 ||
 		res.RemovedObjects.Routes != 1 || res.RemovedObjects.ACLs != 1 ||
@@ -217,10 +246,10 @@ func TestFormatDataPurgesManagedDataAndReportsStats(t *testing.T) {
 	if res.RemovedImages != 2 {
 		t.Errorf("应删除 2 个镜像，实得 %d（deleted=%v）", res.RemovedImages, imgs.deleted)
 	}
-	if res.PurgedFiles != 5 {
-		t.Errorf("应清理 5 个文件，实得 %d", res.PurgedFiles)
+	if res.PurgedFiles != 7 { // 5 个受管目录里的文件 + DHCP 租约 + metrics.db（决策 #365）
+		t.Errorf("应清理 7 个文件，实得 %d", res.PurgedFiles)
 	}
-	if want := int64(1000 + 2000 + 100 + 200 + 300 + 400); res.FreedBytes != want {
+	if want := int64(1000 + 2000 + 100 + 200 + 300 + 400 + 60 + 500); res.FreedBytes != want {
 		t.Errorf("释放字节应为 %d，实得 %d", want, res.FreedBytes)
 	}
 	for name, d := range dirs {
@@ -257,7 +286,7 @@ func TestFormatDataAlreadyFactoryWhenConfigMinimal(t *testing.T) {
 		Login:      &model.SystemLogin{Users: []model.LoginUserConfig{{Name: "admin", Class: "super-user", PasswordHash: "h"}}},
 	}}
 	eng := &fakeEngine{cfg: base}
-	m := NewManager(Config{Dir: t.TempDir()}, eng, nil, "test")
+	m := NewManager(testManagerConfig(t.TempDir()), eng, nil, "test")
 	res, err := m.FormatData(context.Background(), "admin")
 	if err != nil {
 		t.Fatalf("FormatData: %v", err)
@@ -278,7 +307,7 @@ func TestFormatDataPartialFailureReportsResiduals(t *testing.T) {
 		fail:  map[string]error{"stuck.qcow2": errStub("镜像被占用")},
 	}
 	eng := &fakeEngine{cfg: fullDemoConfig()}
-	m := NewManager(Config{Dir: t.TempDir()}, eng, imgs, "test")
+	m := NewManager(testManagerConfig(t.TempDir()), eng, imgs, "test")
 
 	res, err := m.FormatData(context.Background(), "admin")
 	if err == nil {

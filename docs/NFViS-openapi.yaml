@@ -409,7 +409,11 @@ paths:
                 items: { $ref: "#/components/schemas/DhcpLease" }
         "404": { $ref: "#/components/responses/Error404" }
         "409": { $ref: "#/components/responses/Error409" }
-
+        "503":
+          description: |
+            DHCP 服务器**尚未收敛**（数据面未连接或内置 tap 建立中）——租约表暂不可用。
+            与 409（未配置）区分：409 是「配置里没有 dhcp-server」，503 是「配了但此刻读不到」。
+            恢复收敛/15s 巡检补齐后自动可读（决策 #359；真机 round141 覆盖）。
   /vrfs:
     parameters:
       - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
@@ -1411,7 +1415,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/MetricsHistory" }
         "400":
-          description: 参数非法（窗口/步长格式、name 未知等）
+          description: |
+            **参数格式**非法（`last`/`step`/`since`/`until`/`limit` 无法解析或越界等）。
+            ⚠️ **未知指标名不是 400**：与「窗口内无点」一样返回 200（`series` 为空），
+            由读视图如实区分——省略 `name` 的概览返回**已知指标名清单**（`metrics`），
+            客户端据此判断名字是否已知；CLI 侧对未知名另给专门文案（决策 #356/#365）。
 
   /ui:
     get:
@@ -3211,11 +3219,13 @@ components:
         vnf_interface: { type: string }
         container: { type: string }
         container_interface: { type: string }
-        vlan:
-          type: object
-          properties:
-            trunk: { type: array, items: { type: integer } }
-            native: { type: integer }
+        trunk:
+          type: array
+          items: { type: integer }
+          description: |
+            trunk 模式 tagged VID 列表（**平铺键**，与读视图 `SwitchPortView` 一致；决策 #365 修正：
+            此前写成 `vlan: {trunk, native}` 嵌套，与实现/模型不符——照契约发送会被静默忽略）。
+        native: { type: integer, description: 'trunk native VID（平铺键；access 由交换机级 vlan-access 决定）' }
         acl_in:
           type: string
           description: |
@@ -3225,7 +3235,8 @@ components:
         acl_out:
           type: string
           description: '**不支持**（同 acl_in）：提交期拒绝（决策 #340）；ACL 请绑 L3 接口。'
-        state: { type: string, enum: [up, down], description: 运行态 }
+        # 决策 #365：删掉 `state`——写形状的模型（model.VSwitchPort）没有该字段，
+        # 契约多写会让客户端以为可以写入运行态（运行态在 SwitchPortView 的 admin/link 列）。
 
     # 决策 #326：交换机成员端口的**读视图**条目（GET /virtual-switches/{name}/ports 的响应）。
     # 与 VSwitchPort 同形，另带 source（来源）与 port（该端口在数据面 VPP 中的接口名，
