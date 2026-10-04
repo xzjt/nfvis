@@ -965,6 +965,11 @@ func (x *cliExecutor) requestSystem(user, class, source string, t []string) stri
 // systemTokenRevoke：request system api token revoke <token-id>（决策 #301）。
 // 权限与数据范围（super-user 吊销任意 / 其他 class 仅自己的、不泄露存在性）单源在
 // aaa.Service.RevokeToken；执行器负责入审计与把结果讲清楚。
+//
+// 决策 #364（R142-8）：吊销**本会话自己**的 token 等价于登出（规格书 #317 的既有承诺）——
+// 按 token 稳定 ID 丢弃本会话 candidate 并释放编辑锁（与 REST handleRevokeAPIToken 同走
+// discardOwnSession，不区分接入源），并清掉执行器本地会话态。此前只打印提示，锁继续以
+// user@ssh#<token> 被吊销者占着，同用户新会话要等空闲回收。非自吊销路径语义不变。
 func (x *cliExecutor) systemTokenRevoke(user, class, id string) string {
 	if x.tokens == nil {
 		return "%% 活动会话管理未接入\n"
@@ -975,7 +980,14 @@ func (x *cliExecutor) systemTokenRevoke(user, class, id string) string {
 		return "%% " + err.Error() + "\n"
 	}
 	if x.callerTokenID != "" && id == x.callerTokenID {
-		return "已吊销当前会话。本会话的下一个请求将要求重新登录。\n"
+		// 本命令在 ExecuteAs 内执行（已持 x.mu）：本地会话态走无锁清理，避免自锁死；
+		// 引擎锁按 token 稳定 ID 释放（未在编辑是常态，nil logger 即静默；x.engine 可能
+		// 未装配——单测注入的假执行器）。
+		if x.engine != nil {
+			discardOwnSession(x.engine, config.Session{User: user, ID: id}, nil)
+		}
+		x.dropSessionLocked(id)
+		return "已吊销当前会话：本会话的 candidate 已丢弃、编辑锁已释放，下一个请求将要求重新登录。\n"
 	}
 	return "已吊销会话 " + id + "。该会话的下一个请求将要求重新登录。\n"
 }
