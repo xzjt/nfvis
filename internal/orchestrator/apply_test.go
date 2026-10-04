@@ -74,6 +74,12 @@ func (n recNet) ApplyRoute(ctx context.Context, vrfName string, r model.Route) e
 func (n recNet) DeleteRoute(ctx context.Context, vrfName string, r model.Route) error {
 	return n.record("del-route:" + routeLabel(vrfName, r))
 }
+func (n recNet) UnbindL3IfaceACL(ctx context.Context, vrfName string, li model.L3Interface) error {
+	return n.record("l3-acl-unbind:" + vrfName + "/" + l3IfaceKeyOf(li))
+}
+func (n recNet) DeleteL3Interface(ctx context.Context, vrfName string, li model.L3Interface) error {
+	return n.record("del-l3-if:" + vrfName + "/" + l3IfaceKeyOf(li))
+}
 func (n recNet) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 	return n.record("nat")
 }
@@ -609,5 +615,198 @@ func TestApplyVnicDeleteAfterVrfThatReferencesIt(t *testing.T) {
 	}
 	if ifIdx < vrfIdx {
 		t.Fatalf("删除顺序错误：引用 vNIC 的 L3 交换机（del-vrf）必须先于 vNIC 删除（del-vnf-if）: %v", *calls)
+	}
+}
+
+// ---------- 决策 #361：L3 接口 ACL 绑定的撤销（差分纯函数与计划顺序） ----------
+//
+// 缺陷形态（round142 实测）：`delete … l3-interface <if> acl-in <acl>` 或整条删 l3-interface
+// 提交成功、读视图干净，而 VPP 侧绑定仍在（deny 继续拦）、口留原表、地址不摘。修法是提交编排
+// 按旧/新声明求差分，构造 l3-acl-unbind 与 del-l3-if 两类撤销操作。
+
+// l3if 构造一条 l3-interface 声明（aclIn 为空表示未绑定）。
+func l3if(ifname, aclIn string, addrs ...string) model.L3Interface {
+	return model.L3Interface{Interface: ifname, Addresses: addrs, AclIn: aclIn}
+}
+
+// ifaceKeys 取差分结果的接口身份（与 plan 的描述标签同源）。
+func ifaceKeys(ifs []model.L3Interface) []string {
+	out := make([]string, 0, len(ifs))
+	for _, li := range ifs {
+		out = append(out, l3IfaceKeyOf(li))
+	}
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestL3RevokeDiffs(t *testing.T) {
+	cases := []struct {
+		name        string
+		old, new    model.Vrf
+		wantRemoved []string // removedL3Ifaces（del-l3-if：整条回收）
+		wantUnbind  []string // l3ACLUnbinds（l3-acl-unbind：只撤绑定）
+	}{
+		{
+			name: "只改地址：两类撤销都不触发",
+			old:  model.Vrf{Name: "vs", L3Interfaces: []model.L3Interface{l3if("ens192", "web", "10.0.0.1/24")}},
+			new:  model.Vrf{Name: "vs", L3Interfaces: []model.L3Interface{l3if("ens192", "web", "10.0.0.2/24")}},
+		},
+		{
+			name: "acl-in 换成另一个非空：不触发解绑（绑定是替换语义，ApplyVRF 自己覆盖）",
+			old:  model.Vrf{Name: "vs", L3Interfaces: []model.L3Interface{l3if("ens192", "web")}},
+			new:  model.Vrf{Name: "vs", L3Interfaces: []model.L3Interface{l3if("ens192", "db")}},
+		},
+		{
+			name: "接口整条删除：只进回收集合（其 ACL 由回收路径一并解绑，不重复进解绑集合）",
+			old: model.Vrf{Name: "vs", L3Interfaces: []model.L3Interface{
+				l3if("ens192", "web"), l3if("ens224", "web")}},
+			new:         model.Vrf{Name: "vs", L3Interfaces: []model.L3Interface{l3if("ens192", "web")}},
+			wantRemoved: []string{"ens224"},
+		},
+		{
+			name:       "acl-in 被清（接口仍在）：进解绑集合",
+			old:        model.Vrf{Name: "vs", L3Interfaces: []model.L3Interface{l3if("ens192", "web")}},
+			new:        model.Vrf{Name: "vs", L3Interfaces: []model.L3Interface{l3if("ens192", "")}},
+			wantUnbind: []string{"ens192"},
+		},
+		{
+			name:        "旧声明绑了 ACL 且接口整条删：进回收集合",
+			old:         model.Vrf{Name: "vs", L3Interfaces: []model.L3Interface{l3if("ens192", "web")}},
+			new:         model.Vrf{Name: "vs"},
+			wantRemoved: []string{"ens192"},
+		},
+		{
+			name: "vlan 子接口按 vlan 区分身份：换 vlan 视作旧子接口被删",
+			old: model.Vrf{Name: "vs", L3Interfaces: []model.L3Interface{
+				{Interface: "ens192", Vlan: 100, AclIn: "web"}}},
+			new: model.Vrf{Name: "vs", L3Interfaces: []model.L3Interface{
+				{Interface: "ens192", Vlan: 200, AclIn: "web"}}},
+			wantRemoved: []string{"ens192.100"},
+		},
+		{
+			name: "去重且保持声明序",
+			old: model.Vrf{Name: "vs", L3Interfaces: []model.L3Interface{
+				l3if("ens224", "web"), l3if("ens192", "web"), l3if("ens224", "web")}},
+			new:         model.Vrf{Name: "vs"},
+			wantRemoved: []string{"ens224", "ens192"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ifaceKeys(removedL3Ifaces(tc.old, tc.new)); !equalStrings(got, tc.wantRemoved) {
+				t.Fatalf("removedL3Ifaces = %v, want %v", got, tc.wantRemoved)
+			}
+			if got := ifaceKeys(l3ACLUnbinds(tc.old, tc.new)); !equalStrings(got, tc.wantUnbind) {
+				t.Fatalf("l3ACLUnbinds = %v, want %v", got, tc.wantUnbind)
+			}
+		})
+	}
+}
+
+// 计划顺序：l3-acl-unbind / del-l3-if 排在**本 VRF 的 ApplyVRF 之后、删除段的 del-acl 之前**
+// （先解引用、后删被引用，#342 同族——否则删 ACL 会撞上仍指向它的陈旧绑定）。
+func TestApplyPlanL3RevokeBeforeDeleteACL(t *testing.T) {
+	calls := &[]string{}
+	oa, ok := NewApplier(recNet{calls: calls}, recCompute{calls: calls}, recContainer{calls: calls}).(*orchApplier)
+	if !ok {
+		t.Fatal("NewApplier 应返回 *orchApplier")
+	}
+	old := model.Config{
+		Acls: []model.Acl{{Name: "web", Rules: []model.AclRule{{Seq: 10, Action: "deny", Source: "any", Destination: "any"}}}},
+		Vrfs: []model.Vrf{{Name: "vs-l3", L3Interfaces: []model.L3Interface{
+			l3if("ens192", "web", "10.0.0.1/24"), // acl-in 被清
+			l3if("ens224", "web", "10.0.1.1/24"), // 整条被删
+		}}},
+	}
+	newCfg := model.Config{
+		Vrfs: []model.Vrf{{Name: "vs-l3", L3Interfaces: []model.L3Interface{
+			l3if("ens192", "", "10.0.0.1/24"),
+		}}},
+	}
+	ops := oa.plan(old, newCfg)
+	descs := make([]string, 0, len(ops))
+	for _, o := range ops {
+		descs = append(descs, o.desc)
+	}
+	pos := func(desc string) int {
+		for i, d := range descs {
+			if d == desc {
+				return i
+			}
+		}
+		return -1
+	}
+	vrfI, unbindI, delIfI, delAclI := pos("vrf[vs-l3]"), pos("l3-acl-unbind[vs-l3/ens192]"),
+		pos("del-l3-if[vs-l3/ens224]"), pos("del-acl[web]")
+	if vrfI < 0 || unbindI < 0 || delIfI < 0 || delAclI < 0 {
+		t.Fatalf("计划缺少预期操作（vrf=%d unbind=%d del-if=%d del-acl=%d）: %v",
+			vrfI, unbindI, delIfI, delAclI, descs)
+	}
+	if !(vrfI < unbindI && vrfI < delIfI) {
+		t.Fatalf("撤销应排在本 VRF 的 ApplyVRF 之后: %v", descs)
+	}
+	if !(unbindI < delAclI && delIfI < delAclI) {
+		t.Fatalf("解引用（解绑/回收）应先于删 ACL: %v", descs)
+	}
+}
+
+// 差分撤销真的接到 provider（run 接线与参数正确），执行顺序同计划断言。
+func TestApplyL3RevokeExecutesBeforeDeleteACL(t *testing.T) {
+	ap, calls := newRecApplier("")
+	old := model.Config{
+		Acls: []model.Acl{{Name: "web", Rules: []model.AclRule{{Seq: 10, Action: "deny", Source: "any", Destination: "any"}}}},
+		Vrfs: []model.Vrf{{Name: "vs-l3", L3Interfaces: []model.L3Interface{
+			l3if("ens192", "web", "10.0.0.1/24"),
+			l3if("ens224", "web", "10.0.1.1/24"),
+		}}},
+	}
+	newCfg := model.Config{
+		Vrfs: []model.Vrf{{Name: "vs-l3", L3Interfaces: []model.L3Interface{
+			l3if("ens192", "", "10.0.0.1/24"),
+		}}},
+	}
+	if err := ap.Apply(context.Background(), old, newCfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	find := func(want string) int {
+		for i, c := range *calls {
+			if c == want {
+				return i
+			}
+		}
+		return -1
+	}
+	unbindI := find("l3-acl-unbind:vs-l3/ens192")
+	delIfI := find("del-l3-if:vs-l3/ens224")
+	delAclI := find("del-acl:web")
+	if unbindI < 0 || delIfI < 0 || delAclI < 0 {
+		t.Fatalf("撤销操作未下发（unbind=%d del-if=%d del-acl=%d）: %v", unbindI, delIfI, delAclI, *calls)
+	}
+	if !(unbindI < delAclI && delIfI < delAclI) {
+		t.Fatalf("执行顺序错误：解引用应先于删 ACL: %v", *calls)
+	}
+}
+
+// 决策 #361：NetworkProvider 新增的两个撤销方法在 noopNetwork 上为空操作（M1/M2 过渡实现
+// 与接口必须同步——方法集由 NewNoopNetwork 的返回类型在编译期强制）。
+func TestNoopNetworkL3Revoke(t *testing.T) {
+	n := NewNoopNetwork()
+	li := model.L3Interface{Interface: "ens192", Addresses: []string{"10.0.0.1/24"}, AclIn: "web"}
+	if err := n.UnbindL3IfaceACL(context.Background(), "vs-l3", li); err != nil {
+		t.Fatalf("noop UnbindL3IfaceACL: %v", err)
+	}
+	if err := n.DeleteL3Interface(context.Background(), "vs-l3", li); err != nil {
+		t.Fatalf("noop DeleteL3Interface: %v", err)
 	}
 }

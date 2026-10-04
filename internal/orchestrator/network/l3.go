@@ -404,6 +404,164 @@ func (p *L3Provider) routeAddDel(ctx context.Context, vrfName string, r model.Ro
 	return nil
 }
 
+// UnbindL3IfaceACL 撤销一个 L3 接口的 acl-in 绑定与伴随 macip 白名单（决策 #361）。
+//
+// 为什么必须有这条单接口撤销：`AclProvider.BindIndex` 的「空绑定＝解绑」分支此前**没有任何
+// 生产调用者**——ApplyVRF 只对仍声明 AclIn 的接口下发绑定、对「新声明里不再有绑定」不复核，
+// 于是 `delete … l3-interface <if> acl-in <acl>`（只清绑定）提交成功、读视图干净，而 VPP 的
+// `show acl-plugin interface` 里绑定仍在、deny 规则继续拦（round142 真机实测）。
+//
+// 索引解析与恢复收敛同源（resolveRegistered）：先按名问运行态、再回退进程内登记。
+// **查不到且登记也没有**＝接口不在数据面，绑定随接口消失，属已达成（返回 nil）；
+// 查询本身失败照实上抛（不许把「问不出来」当成「已达成」）。
+func (p *L3Provider) UnbindL3IfaceACL(ctx context.Context, vrfName string, li model.L3Interface) error {
+	c, err := p.client()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	idx, ok, err := p.resolveRegistered(c, li)
+	if err != nil {
+		return fmt.Errorf("解析 VRF %s 的接口 %s（ACL 解绑）: %w", vrfName, li.Interface, err)
+	}
+	if !ok {
+		return nil
+	}
+	return p.unbindTableACLs([]uint32{idx})
+}
+
+// DeleteL3Interface 回收一个已从声明里删除的 L3 接口（决策 #361），顺序固定：
+//  1. 解析索引（与恢复收敛同源；查不到且无登记＝接口不在数据面，属已达成，只清登记后返回）；
+//  2. 清地址（delAll，-2 容错——接口可能已随其属主 VM/vNIC 删除而消失）；
+//  3. 解绑 IP ACL 与伴随 macip（BindIndex 的空绑定语义，登记门控幂等）；
+//  4. 移回默认表（v4/v6，-2 容错）——该口不再属于本 VRF 的转发域；
+//     **例外**：该口仍由本 VRF 的 VNF vNIC 声明留表时保持表归属（见 vnicHoldsTable）；
+//  5. 摘登记（只摘由本条 l3-interface 贡献的项，见 forgetL3Iface）。
+//
+// 为什么必须显式回收：声明里删掉 l3-interface 后它就不再进入 ApplyVRF 的处理范围，而
+// DeleteVRF 只在整台交换机被删时才跑——此前没有任何路径把口从原表摘出来、清地址、解 ACL，
+// 于是口留在原表（继续占着表、旧表删不掉）、地址与 deny 绑定原样生效（round142 §1-1b 实测）。
+func (p *L3Provider) DeleteL3Interface(ctx context.Context, vrfName string, li model.L3Interface) error {
+	c, err := p.client()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	idx, ok, err := p.resolveRegistered(c, li)
+	if err != nil {
+		return fmt.Errorf("解析 VRF %s 的接口 %s（回收）: %w", vrfName, li.Interface, err)
+	}
+	if !ok {
+		// 接口与登记都不在：可回收的数据面对象不存在（地址/绑定随接口一起消失），按已达成。
+		p.forgetL3Iface(vrfName, li, 0)
+		return nil
+	}
+	if err := c.SwInterfaceAddDelAddress(idx, "", false, true); err != nil && !isMissingIfaceErr(err) {
+		return fmt.Errorf("清理接口 %s 地址: %w", li.Interface, err)
+	}
+	if err := p.unbindTableACLs([]uint32{idx}); err != nil {
+		return err
+	}
+	// 4) 移回默认表（v4/v6，-2 容错）——该口不再属于本 VRF 的转发域。
+	// 例外（共存边界，决策 #361）：同一个口同时是本 VRF 的 **VNF vNIC**（vNIC 作 L3 接口，
+	// #172 的受支持形态，用户手册 §8.9）时**保持表归属**，只撤地址与绑定——vNIC 侧声明仍在，
+	// 把它移回默认表会让 guest 的转发域在下次重放前静默丢失（登记侧由 forgetL3Iface 的
+	// 同类守卫保持，两处口径一致）。
+	if !p.vnicHoldsTable(vrfName, li.Interface) {
+		for _, ip6 := range []bool{false, true} {
+			if err := c.SwInterfaceSetTable(idx, ip6, 0); err != nil && !isMissingIfaceErr(err) {
+				return fmt.Errorf("把接口 %s 移回默认表（%s）: %w", li.Interface, ipVerName(ip6), err)
+			}
+		}
+	}
+	p.forgetL3Iface(vrfName, li, idx)
+	return nil
+}
+
+// vnicHoldsTable 该接口是否仍由本 VRF 的 VNF vNIC 声明留在该表里（决策 #361 的共存边界判据）：
+// 是则删 l3-interface 叶子只撤地址/绑定，不动表归属。
+func (p *L3Provider) vnicHoldsTable(vrfName, ifname string) bool {
+	tableID := TableID(vrfName)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a, ok := p.vnfs[ifname]
+	return ok && a.tableID == tableID
+}
+
+// forgetL3Iface 摘除一条 l3-interface 的进程内登记（决策 #361 的单接口回收路径；调用方无须持锁）。
+//
+// 只摘**由这条声明贡献**的项，不误伤别的来源（决策 #361 的边界口径）：
+//   - ifaces/subifs[tableID]：该 sw_if_index 在本表下的成员登记（DeleteVRF 清地址/解绑的来源）；
+//   - ifaceTable/ifaceIdx：指向本 VRF 的该接口名（NAT outside 转发域解析的来源）；
+//   - idxSwitch：仅当登记指向本交换机——同一个 sw_if_index 可能是别的对象的转发域（预留判据）。
+//
+// 例外：该接口名同时是本表的 **VNF vNIC**（VNF 侧声明仍在，其转发域身份由 vNIC 侧承担）时
+// 整套登记保持——这些登记同时由 SetVnfTable 写入、由 ForgetVnfIface 维护，此处摘掉会让
+// DeleteVRF 漏清该口的地址/归属、NAT 解析答不出。idx==0（接口与登记都不在）时只清按名登记。
+func (p *L3Provider) forgetL3Iface(vrfName string, li model.L3Interface, idx uint32) {
+	tableID := TableID(vrfName)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a, ok := p.vnfs[li.Interface]; ok && a.tableID == tableID {
+		return // 本表的 vNIC 仍持有这些登记
+	}
+	dropIdx := func(m map[uint32][]uint32) {
+		list := m[tableID]
+		if len(list) == 0 {
+			return
+		}
+		out := list[:0]
+		for _, v := range list {
+			if v != idx {
+				out = append(out, v)
+			}
+		}
+		if len(out) == 0 {
+			delete(m, tableID)
+			return
+		}
+		m[tableID] = out
+	}
+	if idx != 0 {
+		dropIdx(p.ifaces)
+		dropIdx(p.subifs)
+	}
+	if t, ok := p.ifaceTable[li.Interface]; ok && t == tableID {
+		delete(p.ifaceTable, li.Interface)
+		delete(p.ifaceIdx, li.Interface)
+	}
+	if idx != 0 {
+		if name, ok := p.idxSwitch[idx]; ok && name == vrfName {
+			delete(p.idxSwitch, idx)
+		}
+	}
+}
+
+// unbindTableACLs 批量解绑一组 sw_if_index 上的 IP ACL 与伴随 macip（决策 #361 的共用路径：
+// 单接口回收与删整台交换机）。去重、幂等（BindIndex 的「空绑定」只在有登记时才动 VPP）；
+// p.acl 未注入（无 VPP 路径/单测）时空操作——与 ApplyVRF 绑定侧的 `p.acl == nil` 跳过对称。
+func (p *L3Provider) unbindTableACLs(idxs []uint32) error {
+	if p.acl == nil || len(idxs) == 0 {
+		return nil
+	}
+	ac, err := p.acl.client()
+	if err != nil {
+		return err
+	}
+	defer ac.Close()
+	seen := make(map[uint32]bool, len(idxs))
+	for _, idx := range idxs {
+		if seen[idx] {
+			continue
+		}
+		seen[idx] = true
+		if err := p.acl.BindIndex(ac, idx, "", ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // TableOfIface 返回接口所属 VRF 的 tableID（未归属任何 VRF 时 ok=false）。
 // 供 NAT44 outside 转发域解析（决策 #52）。
 func (p *L3Provider) TableOfIface(ifname string) (uint32, bool) {
@@ -449,7 +607,8 @@ var ErrVrfNotRemoved = orchestrator.ErrVrfNotRemoved
 const vrfDeleteStuckHint = "（表可能仍被数据面插件引用：NAT44 用过这张表后 VPP 不释放该引用，" +
 	"执行 request vpp restart 后自动清理）"
 
-// DeleteVRF 删除 VRF：清接口地址 → 解绑接口回默认表 → 删 v4/v6 table（路由随表删除）→ 读回核对。
+// DeleteVRF 删除 VRF：清接口地址 → 解绑接口上的 IP ACL/伴随 macip → 解绑接口回默认表 →
+// 删 v4/v6 table（路由随表删除）→ 读回核对。
 //
 // 解绑与删后读回都是 R84-29 补上的必需步骤：VPP 的 ip_table_add_del(del) 在表仍被接口
 // 占用时**返回 0 但实际不删**（表项继续留在 `show ip table` 里带 locks:[interface:…]，
@@ -490,6 +649,12 @@ func (p *L3Provider) DeleteVRF(ctx context.Context, name string) error {
 			}
 			return fmt.Errorf("清理子接口 %d 地址: %w", sub, err)
 		}
+	}
+	// 决策 #361：这些口上的 IP ACL 与伴随 macip 也要解绑——此前只清地址/表，绑定会留在
+	// 已被移回默认表的接口上（`show acl-plugin interface` 里 deny 继续生效），直到 VPP 重启。
+	// ACL 客户端与 L3 客户端是两类接口，此处各取一个（与 ApplyVRF 绑定侧同一写法）。
+	if err := p.unbindTableACLs(append(append([]uint32{}, idxs...), subs...)); err != nil {
+		return err
 	}
 	// 先解绑、再删表：接口还绑着该表时删表不生效（VPP 返回 0 却保住表）。子接口通常在
 	// ifaces 里已有一份，去重由 unbindTableIfaces 负责。

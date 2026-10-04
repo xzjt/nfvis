@@ -651,3 +651,59 @@ func TestDeleteACLMissingIfaceTolerated(t *testing.T) {
 		t.Fatalf("陈旧绑定登记应被清（此前须重启 nfvis 才能删掉）")
 	}
 }
+
+// ---------- 决策 #361：删 ACL 时伴随 macip 随「pair 全空」一并解绑 ----------
+
+// 接口的 in/out 都随本次删除清掉 ⇒ 伴随 macip 白名单一并解绑（round142 §1-1b 的残留到 VPP 重启）。
+func TestDeleteACLUnbindsCompanionMacipWhenPairEmpty(t *testing.T) {
+	f := newFakeAcl()
+	p := NewAclProvider(f)
+	if err := p.ApplyACL(context.Background(), model.Acl{Name: "web"}); err != nil {
+		t.Fatalf("ApplyACL: %v", err)
+	}
+	if err := p.BindIndex(f, 1, "web", ""); err != nil {
+		t.Fatalf("BindIndex: %v", err)
+	}
+	if len(f.macipBind) != 1 || f.macipBind[0][2] != 1 {
+		t.Fatalf("前置：伴随 macip 应已绑定: %v", f.macipBind)
+	}
+	if err := p.DeleteACL(context.Background(), "web"); err != nil {
+		t.Fatalf("DeleteACL: %v", err)
+	}
+	last := f.macipBind[len(f.macipBind)-1]
+	if last[0] != 1 || last[2] != 0 {
+		t.Fatalf("pair 全空时伴随 macip 应解绑: %v", f.macipBind)
+	}
+	if got := f.setCalls[len(f.setCalls)-1]; got != [3]uint32{1, 0, 0} {
+		t.Fatalf("IP ACL 绑定应清空: %v", f.setCalls)
+	}
+}
+
+// 另一方向仍绑着别的 ACL ⇒ pair 未全空，伴随 macip 保持（该方向仍要放行非 IP/ARP）。
+func TestDeleteACLKeepsCompanionMacipWhenOtherDirectionBound(t *testing.T) {
+	f := newFakeAcl()
+	p := NewAclProvider(f)
+	for _, n := range []string{"web", "db"} {
+		if err := p.ApplyACL(context.Background(), model.Acl{Name: n}); err != nil {
+			t.Fatalf("ApplyACL(%s): %v", n, err)
+		}
+	}
+	if err := p.BindIndex(f, 1, "web", "db"); err != nil {
+		t.Fatalf("BindIndex: %v", err)
+	}
+	binds := len(f.macipBind)
+	if binds != 1 || f.macipBind[0][2] != 1 {
+		t.Fatalf("前置：伴随 macip 应已绑定: %v", f.macipBind)
+	}
+	if err := p.DeleteACL(context.Background(), "web"); err != nil {
+		t.Fatalf("DeleteACL: %v", err)
+	}
+	if len(f.macipBind) != binds {
+		t.Fatalf("出向仍绑 ACL 时伴随 macip 不得解绑: %v", f.macipBind)
+	}
+	// 只清 in 向、保留 out 向
+	last := f.setCalls[len(f.setCalls)-1]
+	if last[0] != 1 || last[1] != 0 || last[2] == 0 {
+		t.Fatalf("应只清 in 向、保留 out 向: %v", f.setCalls)
+	}
+}

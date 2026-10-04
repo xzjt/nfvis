@@ -157,7 +157,8 @@ func (p *AclProvider) ApplyACL(ctx context.Context, acl model.Acl) error {
 	return nil
 }
 
-// DeleteACL 删除 ACL 并解绑引用它的接口。
+// DeleteACL 删除 ACL 并解绑引用它的接口；接口的 in/out 因此全空时，伴随 macip 白名单一并解绑
+// （决策 #361，见循环内注释）。
 func (p *AclProvider) DeleteACL(ctx context.Context, name string) error {
 	p.mu.Lock()
 	idx, ok := p.index[name]
@@ -200,6 +201,14 @@ func (p *AclProvider) DeleteACL(ctx context.Context, name string) error {
 				continue
 			}
 			return fmt.Errorf("解绑接口 %d 的 ACL %s: %w", swIf, name, err)
+		}
+		// 决策 #361：IP 绑定对随本次删除**全空**（in/out 都清了）时，伴随 macip 白名单一并解绑
+		// ——它只服务于「该接口上还有 IP ACL」这一前提，不解绑就会残留到 VPP 重启（round142 §1-1b）。
+		// pair 未全空则保持：另一方向仍要放行非 IP/ARP（#341 的伴随语义）。
+		if pair.in == "" && pair.out == "" {
+			if err := p.MacipDisallowNonIP(c, swIf); err != nil {
+				return err
+			}
 		}
 	}
 	if err := c.ACLDel(idx); err != nil {
