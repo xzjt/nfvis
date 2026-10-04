@@ -1124,6 +1124,8 @@ nfvis# commit
 >
 > 停止：`delete dhcp-server pool`（或裸 `delete dhcp-server`）——回收内置 tap 与注册、清租约；
 > 只想去掉某个可选叶子（如改回缺省 DNS）用 `delete dhcp-server dns` 等逐叶子形式。
+> 回收顺序：先删内置 tap，**确认删成后才清租约文件**（tap 删除失败时保留租约文件并在错误里说明——
+> 此时提交会回滚、服务器仍在服务，租约表不能先丢，否则客户端仍持旧地址而地址可被重复分配）。
 >
 > ⚠️ **DNS 选项的语义**：`set dhcp-server dns` 只负责把该地址**下发给客户端**；要让它真的能解析，
 > 还需为该域启用数据面 DNS 代理（`set dns proxy server <上游>`，见 §8.6）。缺省下发 BVI 地址而

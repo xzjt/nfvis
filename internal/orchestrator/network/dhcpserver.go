@@ -86,6 +86,9 @@ type dhcpLeaseFile struct {
 }
 
 // dhcpServerSpec 一台交换机已收敛的服务器规格（由 model 派生，Sync 时重算）。
+// **不含 tapMAC**：内核 tap 的 MAC 属运行态（见 dhcpServerRT.tapMAC）——它是「打开内核 tap」
+// 的产物、随 tap 关闭失效，放进每次 Sync 都重算的配置规格会在幂等 Sync 中被零值覆盖
+// （round142 R142-3 真机复现：OFFER 以太源变 00:00:00:00:00:00）。
 type dhcpServerSpec struct {
 	switchName string
 	bdID       uint32
@@ -97,29 +100,30 @@ type dhcpServerSpec struct {
 	mask       net.IPMask
 	dns        net.IP
 	domain     string
-	tapMAC     net.HardwareAddr
-}
-
-// replySpec 构造应答所需参数（含内核 tap MAC；tap 未打开时无法应答）。
-func (s dhcpServerSpec) replySpec() dhcpReplySpec {
-	return dhcpReplySpec{
-		serverMAC: s.tapMAC, bvi: s.bvi, mask: s.mask, dns: s.dns,
-		domain: s.domain, lease: int(s.lease / time.Second),
-	}
 }
 
 // dhcpServerRT 一台交换机的运行态（配置规格 + 租约表 + 内核 tap + 发送用参数）。
 type dhcpServerRT struct {
 	spec     dhcpServerSpec
-	tapIndex uint32 // VPP 侧 sw_if_index（0 = 未建立）
+	tapIndex uint32 // VPP 侧 sw_if_index（0 = 未建立/已失效）
 	leases   *dhcpLeaseTable
 	tap      dhcpTapTransport // nil = 未打开（VPP 重启后 reset / 首次 Sync 失败）
+	tapMAC   net.HardwareAddr // 内核侧 tap 的 MAC（服务器以太源）——运行态：与 tap 同生命期
 
 	// recent 记录最近应答过的 (chaddr|xid|消息类型) → 时刻：同一条客户端报文会经**两条入径**
 	// 各到一次（广播帧在 BD 里既洪泛到内置 tap、又经 BVI 进 UDP/67 的 punt——round141 真机实测
 	// 一 REQUEST 两 ACK），去重窗内只应答一次。窗长 3s：远小于客户端重传退避（RFC 2131 建议
 	// 首重试 ≥4s），不会吞掉真重传；entries 在每次查表时顺带清理。
 	recent map[string]time.Time
+}
+
+// replySpec 构造应答所需参数。serverMAC 取**运行态** tapMAC（与内核 tap 同生命期）——
+// tap 未打开时 rt.tap 为 nil、不会走到发送路径，故 MAC 缺失不构成假应答。
+func (rt *dhcpServerRT) replySpec() dhcpReplySpec {
+	return dhcpReplySpec{
+		serverMAC: rt.tapMAC, bvi: rt.spec.bvi, mask: rt.spec.mask, dns: rt.spec.dns,
+		domain: rt.spec.domain, lease: int(rt.spec.lease / time.Second),
+	}
 }
 
 // DHCPServerProvider 域内 DHCP 服务器编排（决策 #359）。
@@ -208,7 +212,7 @@ func (p *DHCPServerProvider) Close() error {
 	for _, rt := range p.servers {
 		if rt.tap != nil {
 			_ = rt.tap.Close()
-			rt.tap = nil
+			rt.tap, rt.tapMAC = nil, nil
 		}
 	}
 	p.mu.Unlock()
@@ -230,7 +234,9 @@ func (p *DHCPServerProvider) Close() error {
 }
 
 // reset 连接（重）建立时调用：VPP 侧 tap 与 punt 注册都已随 VPP 重启消失——关闭内核侧
-// tap（收包协程随之退出）、标记注册失效；**租约表保留**（服务器自己的状态，客户端续租不受
+// tap（收包协程随之退出）、**清 tapIndex**（旧索引已失效，且可能被 VPP 复用给别的接口：
+// 端口读视图不得再按它过滤、停用不得再按它删除；一律回到「按 HostIfName 核对身份」路径，
+// round142 R142-4）、标记注册失效；**租约表保留**（服务器自己的状态，客户端续租不受
 // VPP 重启影响，恢复重放会重建 tap/注册）。不在此时删 VPP 对象（VPP 已重启，删只会失败）。
 func (p *DHCPServerProvider) reset() {
 	p.opMu.Lock()
@@ -239,8 +245,9 @@ func (p *DHCPServerProvider) reset() {
 	for _, rt := range p.servers {
 		if rt.tap != nil {
 			_ = rt.tap.Close()
-			rt.tap = nil
+			rt.tap, rt.tapMAC = nil, nil
 		}
+		rt.tapIndex = 0
 	}
 	p.puntReg = false
 	p.mu.Unlock()
@@ -285,23 +292,12 @@ func (p *DHCPServerProvider) Sync(ctx context.Context, vs model.VirtualSwitch) e
 		}
 		tapIndex = idx
 	}
-	// 2) 入该交换机的 bridge-domain + 置 up（幂等；恢复重放与新建同路径）。
-	if err := c.SetL2Bridge(tapIndex, spec.bdID, true); err != nil {
-		c.Close()
-		return fmt.Errorf("把交换机 %s 的 DHCP 内置 tap 加入 bridge-domain: %w", vs.Name, err)
-	}
-	if err := c.SetState(tapIndex, true); err != nil {
-		c.Close()
-		return fmt.Errorf("置交换机 %s 的 DHCP 内置 tap 为 up: %w", vs.Name, err)
-	}
-	c.Close()
 
-	// 3) punt 注册重申（每次收敛都重注册；relay 的 proxy 会夺走 UDP/67——round140 R140-1）。
-	if err := p.assertPunt(); err != nil {
-		return err
-	}
-
-	// 4) 运行态装配：登记/更新规格与租约表（首次从文件恢复；池变更清越界条目）。
+	// 2) 运行态登记：登记/更新规格与租约表（首次从文件恢复；池变更清越界条目）。
+	// **登记先于入 BD、置 up 与 punt 注册**（round142 R142-4）：tap 一经解析/创建即归产品
+	// 自持——其后任何一步失败（入 BD/置 up/punt 注册/打开内核侧 tap）都必须让该 tap 留在
+	// TapIndexes 过滤集内，否则内置 tap 泄漏进用户端口视图（source=runtime 且用户删不掉、
+	// 与 #359 ⑦ 相反）。失败如实上报，由 15s 巡检（Reconcile）重试收敛。
 	p.mu.Lock()
 	rt := p.servers[vs.Name]
 	if rt == nil {
@@ -316,13 +312,29 @@ func (p *DHCPServerProvider) Sync(ctx context.Context, vs model.VirtualSwitch) e
 	stale := rt.tap != nil && rt.tapIndex != tapIndex
 	if stale {
 		_ = rt.tap.Close()
-		rt.tap = nil
+		rt.tap, rt.tapMAC = nil, nil
 	}
 	rt.spec, rt.tapIndex = spec, tapIndex
 	needTap := rt.tap == nil
 	p.mu.Unlock()
 
 	p.refreshPoolAlarm(vs.Name)
+
+	// 3) 入该交换机的 bridge-domain + 置 up（幂等；恢复重放与新建同路径）。
+	if err := c.SetL2Bridge(tapIndex, spec.bdID, true); err != nil {
+		c.Close()
+		return fmt.Errorf("把交换机 %s 的 DHCP 内置 tap 加入 bridge-domain: %w", vs.Name, err)
+	}
+	if err := c.SetState(tapIndex, true); err != nil {
+		c.Close()
+		return fmt.Errorf("置交换机 %s 的 DHCP 内置 tap 为 up: %w", vs.Name, err)
+	}
+	c.Close()
+
+	// 4) punt 注册重申（每次收敛都重注册；relay 的 proxy 会夺走 UDP/67——round140 R140-1）。
+	if err := p.assertPunt(); err != nil {
+		return err
+	}
 
 	if !needTap {
 		return nil
@@ -339,8 +351,7 @@ func (p *DHCPServerProvider) Sync(ctx context.Context, vs model.VirtualSwitch) e
 		_ = tr.Close()
 		return nil
 	}
-	rt.tap = tr
-	rt.spec.tapMAC = tr.MAC()
+	rt.tap, rt.tapMAC = tr, tr.MAC()
 	p.mu.Unlock()
 	go p.serveTap(vs.Name, tr)
 	return nil
@@ -367,16 +378,17 @@ func (p *DHCPServerProvider) teardown(name string) error {
 	if rt != nil && rt.tap != nil {
 		_ = rt.tap.Close()
 	}
-	known := uint32(0)
-	if rt != nil {
-		known = rt.tapIndex
-	}
-	errs = append(errs, p.deleteTap(name, known)...)
-	// 清租约文件（运行态，不属配置；停用即回收）——**不依赖进程内登记**：nfvisd 重启后
-	// 停用（servers 表为空、rt 为 nil）同样要清掉磁盘上的租约文件，否则孤儿文件滞留、
-	// 与「停用即回收」的契约不符。
-	if err := os.Remove(p.leasePath(name)); err != nil && !os.IsNotExist(err) {
-		errs = append(errs, fmt.Errorf("清除交换机 %s 的 DHCP 租约文件: %w", name, err))
+	errs = append(errs, p.deleteTap(name)...)
+	// 清租约文件（运行态，不属配置；停用即回收）——**先确认 VPP 侧 tap 已删成**（round142
+	// R142-4）：tap 删不掉 ⇒ teardown 失败、提交回滚、服务器仍要服务（客户端仍持旧地址），
+	// 此时租约表不能先丢（否则地址可被重复分配）；保留文件并在错误里说明，重试停用即回收。
+	// 文件清理**不依赖进程内登记**：nfvisd 重启后停用（servers 表为空、rt 为 nil）同样要清。
+	if len(errs) == 0 {
+		if err := os.Remove(p.leasePath(name)); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("清除交换机 %s 的 DHCP 租约文件: %w", name, err))
+		}
+	} else {
+		errs = append(errs, fmt.Errorf("交换机 %s 的内置 tap 未确认删除，租约文件保留（%s）——处理上述错误后重试停用即回收", name, p.leasePath(name)))
 	}
 	if remaining == 0 {
 		if tr != nil {
@@ -398,31 +410,29 @@ func (p *DHCPServerProvider) teardown(name string) error {
 	return nil
 }
 
-// deleteTap 回收该交换机的内置 tap（决策 #359：停用/删交换机即删）。known 是进程内登记的
-// sw_if_index（0 = 未登记——nfvisd 重启后先停用、或恢复收敛尚未跑到）：未登记时按内核侧名
-// （HostIfName）dump 找存量再删，与 Sync 的恢复查找**同一判据**（不用 tag 作查找键——
-// round140 实测 dump 不回 tag）。VPP 里本就没有（VPP 重启/从未建成）＝已达成，不报错。
-func (p *DHCPServerProvider) deleteTap(name string, known uint32) []error {
+// deleteTap 回收该交换机的内置 tap（决策 #359：停用/删交换机即删）。**按内核侧名（HostIfName）
+// 核对身份再删**——不信任进程内登记的 sw_if_index（round142 R142-4：VPP 重启/带外重建后索引
+// 可能已被 VPP 复用给别的接口，按旧索引删会误伤用户接口）。VPP 里本就没有（VPP 重启/从未建成）
+// ＝已达成，不报错。
+func (p *DHCPServerProvider) deleteTap(name string) []error {
 	c, err := p.client()
 	if err != nil {
 		return []error{fmt.Errorf("删除交换机 %s 的 DHCP 内置 tap: %w", name, err)}
 	}
 	defer c.Close()
-	idx := known
+	taps, err := c.TapDump()
+	if err != nil {
+		return []error{fmt.Errorf("查询交换机 %s 的 DHCP 内置 tap: %w", name, err)}
+	}
+	idx := uint32(0)
+	for _, t := range taps {
+		if t.HostIfName == DHCPServerTapName(name) {
+			idx = t.SwIfIndex
+			break
+		}
+	}
 	if idx == 0 {
-		taps, err := c.TapDump()
-		if err != nil {
-			return []error{fmt.Errorf("查询交换机 %s 的 DHCP 内置 tap: %w", name, err)}
-		}
-		for _, t := range taps {
-			if t.HostIfName == DHCPServerTapName(name) {
-				idx = t.SwIfIndex
-				break
-			}
-		}
-		if idx == 0 {
-			return nil // 数据面里没有该 tap：已达成
-		}
+		return nil // 数据面里没有该 tap：已达成
 	}
 	// tap 已不存在（VPP 重启/带外删）按已达成处理（isMissingIfaceErr，同 #342 容错口径）。
 	if err := c.TapDelete(idx); err != nil && !isMissingIfaceErr(err) {
@@ -561,7 +571,7 @@ func (p *DHCPServerProvider) handleMessage(name string, msg dhcpMessage) {
 	case dhcpDiscover:
 		if ip, ok := rt.leases.allocate(mac); ok {
 			changed = true
-			reply = buildDHCPReply(msg, dhcpOffer, net.ParseIP(ip), rt.spec.replySpec())
+			reply = buildDHCPReply(msg, dhcpOffer, net.ParseIP(ip), rt.replySpec())
 		} else {
 			// 池内无可用地址 ⇒ 不发 OFFER，且**当场**复核池耗尽告警（决策 #359：无可用地址
 			// 可应答 DISCOVER 时 raise；有地址释放/到期/扩容即消解——不等下一轮巡检）。
@@ -586,13 +596,13 @@ func (p *DHCPServerProvider) handleMessage(name string, msg dhcpMessage) {
 		case req == nil || req.IsUnspecified():
 			// 既无 option 50 也无 ciaddr：不是可判定的 REQUEST，静默忽略。
 		case !inPool:
-			reply = buildDHCPReply(msg, dhcpNak, nil, rt.spec.replySpec())
+			reply = buildDHCPReply(msg, dhcpNak, nil, rt.replySpec())
 		case rt.leases.ownerOf(req.String()) != nil && rt.leases.ownerOf(req.String()).MAC != mac:
-			reply = buildDHCPReply(msg, dhcpNak, nil, rt.spec.replySpec())
+			reply = buildDHCPReply(msg, dhcpNak, nil, rt.replySpec())
 		default:
 			rt.leases.commit(mac, req.String(), rt.spec.lease)
 			changed = true
-			reply = buildDHCPReply(msg, dhcpAck, req, rt.spec.replySpec())
+			reply = buildDHCPReply(msg, dhcpAck, req, rt.replySpec())
 		}
 	case dhcpRelease:
 		if rt.leases.release(mac) {
