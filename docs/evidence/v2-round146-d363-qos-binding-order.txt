@@ -1,0 +1,76 @@
+NFViS v2 round146 —— 决策 #363：QoS/SPAN 绑定的逐步骤登记（修 R142-6）真机验证
+====================================================================
+日期：2026-10-04；分支 `feat/d363-qos-binding-order`（base `v2 @ edf406e`）；决策 #363。
+真机 nfvis-vm：**2.0.0~dev74**（本分支构建并 dpkg 安装）；四服务 active；sem-vm running。
+对照基线：round142 半程体检 `docs/evidence/v2-round142-midpoint-audit.txt` §2 簇 D F4（代码级确认：
+`ApplyInterface` 先改登记后下发 ⇒ 失败漂移 + 重试静默跳过；`DeleteQos` 失败丢登记后解不掉；`DeleteSpan` 同序）。
+事实源：`vppctl`（policer 对象 / 接口特性弧）、产品读视图、commit 往返、单测（失败注入）。
+
+§0 结论
+- **R142-6 收口**：登记语义改为「**最后一个成功下发的状态**」，逐步骤推进（解绑旧成功才清登记、
+  绑新成功才写登记；`DeleteQos` 逐口解绑成功才摘、policer 删除成功才摘；`DeleteSpan` 同族）。
+  失败路径不再「登记说新、数据面是旧」，重试不再静默跳过，补偿能按登记差把数据面拉回旧态。
+- **真机四维**：三方一致（vppctl policer/特性弧 + 读视图 + 提交往返）；**两向独立**（换入向不动出向、
+  解绑出向不动入向）；`request vpp restart` 后按登记重放回来；清场一次提交干净（policer 计数 0）。
+- 失败注入路径（VPP 按需报错）真机无法确定性构造——由 7 项单测（含红-绿）钉死，如实登记。
+
+§1 真机验证
+
+1.1 作用效果（三方一致，rev 1725）
+  配置：`set qos policies pol-a cir 8000 cbs 1000` + `pol-b cir 16000 cbs 2000` +
+  `set interfaces ens224 ingress-policy pol-a` + `egress-policy pol-a` → commit。
+  - `vppctl show policer`：`Name "pol-a" type 1r2c cir 8 eir 0 cb 1000 eb 0`（kbps 换算与参数一致）；
+  - `vppctl show interface features ens224`：弧上同时有 `policer-input` 与 `policer-output`（含
+    `POLICER (l2-policer-input)/(l2-policer-output)` 节点链）；
+  - 产品读视图：`pol-a 8000 1000 ens224:in,ens224:out`、`pol-b … -`——与 vppctl 三方一致。
+
+1.2 跨对象：两向独立（#331 语义回归）
+  - 换入向 a→b（rev 1726）：读视图 `pol-b … ens224:in`、`pol-a … ens224:out`——**出向未被动**；
+  - 解绑出向（rev 1727）：`pol-a -`、`pol-b … ens224:in`——**入向未被动**。
+
+1.3 生命周期：`request vpp restart` 重放（rev 1728 重绑出向后重启）
+  - 重启 + 恢复收敛后：读视图两条绑定都回来；`vppctl show policer` 计数 2；`show interface features
+    ens224` 仍见 `policer-input`/`policer-output`——重放后数据面与配置一致（登记来源不动，重放全量重建）。
+
+1.4 清场（rev 1729）
+  - 一次提交「解两向绑定 + 删两条策略」→ `vppctl show policer` 计数 **0**、读视图
+    `（无 QoS 限速策略）`——回收干净、无残渣。
+
+§2 单元测试（失败路径的确定性证据；`internal/orchestrator/network/services_test.go`，+7 项）
+  - `TestApplyInterfaceBindFailKeepsLastState`：绑新失败 ⇒ 该向登记停在最后成功态（旧已解绑成功则为空），
+    **重试真的再次下发**（旧语义因登记已是新值而静默跳过——本用例即钉住该假成功不再出现）；
+  - `TestApplyInterfaceUnbindFailKeepsOldRegistration`：解绑旧失败 ⇒ 登记保持旧值、不绑新；
+  - `TestApplyInterfaceDirectionsIndependent`：入向推进成功、出向解绑失败 ⇒ 两向各自停在最后成功态；
+  - `TestApplyInterfaceCompensationRebindsOld`：半新态后补偿 `ApplyInterface(旧值)` 确实发出
+    `pol2:off` + `pol1:on`（把数据面拉回旧态）；
+  - `TestDeleteQosUnbindFailKeepsPerIfaceRegistry`：两口同策略、第二个口解绑失败 ⇒ 第一个口登记已摘、
+    第二个保留、policer 保留；重试只重做失败口（不依赖 map 遍历序）；
+  - `TestDeleteQosPolicerDeleteFailKeepsRegistry`：`PolicerAddDel(del)` 失败 ⇒ policer 登记保留、重试只重删；
+  - `TestDeleteSpanFailKeepsRegistry`：`SpanDisable` 失败保留登记、重试再关成功才摘（同族收口）。
+  **红-绿抽查**：把 `ApplyInterface` 暂时改回「先写新值」（旧 `swapBindings` 语义）⇒ 上述前三项按预期
+  失败；恢复实现后全绿。`GOFLAGS=-p=1 make check` RC=0（决策条数 265）。
+
+§3 四套件复跑（dev74；夹具 `cli-semantic-fixture.sh up`；fulltest 前停 sem-vm）
+  cli-fulltest **254/0/18**（与基线逐项一致：零失败、18 条预期报错；QoS 语句块在场）
+  cli-semantic-check **26/0/3**（与基线一致）
+  cli-lifecycle-check **23/0/2**（与基线一致。**前两跑为 22/0/3**：L3-2「转发域连通性」因
+  `vr-sem-vs` 邻居表当刻无对端条目按设计跳过（同 round143~145 的现场时序现象——guest 的 ARP
+  条目在 VPP 重启后面临过期/重建窗口；本轮第三次复跑（检查时 `show ip neighbors` 有实测条目、
+  age 13.7min）即 `✓ L3-2 …（5/5 应答）`。该次另有**登记 1**：L2-3 附注「3 条『未收敛』系对账时
+  VPP 不可用＝查不了」，为本会话多段 VPP 重启在日志窗口内的残留，工具按设计单列观察项、不计通过
+  ——非产品回归）
+  cli-pty-smoke **10/10**
+
+§4 现场与清场
+  - QoS 测试对象全部删除（rev 1729）：`vppctl show policer` 空、`show interface features ens224` 无
+    policer 弧、读视图空；ens224 保持 declared 状态（未动其本行声明）；
+  - sem-vm/sem-ct/sem-vs/dns-vs 回夹具态（套件流程）；告警仅常态 `HUGEPAGE_POOL_ORPHAN`。
+
+§5 如实边界（入册）
+  1. **失败注入真机不可确定性构造**（无法按需令 VPP 对 `policer_input/output(false)` 报错）——
+     失败路径由单测覆盖（含红-绿）；真机验证覆盖正常/换绑/解绑/重放/清场全链。
+  2. 「接口已从 VPP 消失」时 `DeleteQos` 按既有容忍跳过该口的 VPP 调用，并**一并摘除其陈旧登记**
+     （接口都不在了、绑定不可能还挂着；留着陈旧登记会让同名接口复现后的 `ApplyInterface` 误判
+     「已在位」而静默跳过——正是本决策要防的假成功）。
+  3. 登记的读-改-写非整体原子（读锁内、VPP 调用锁外、写锁内），与既有风格一致；编排层提交本就
+     串行，未新增暴露面（如实登记）。
