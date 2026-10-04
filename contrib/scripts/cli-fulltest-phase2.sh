@@ -120,6 +120,17 @@ delete virtual-switches vs-l2 dhcp-relay
 # —— virtual-switches learn-limit（§2.4；决策 #337，MAC 学习上限=环路缓解，不依赖网关）——
 set virtual-switches vs-l2 learn-limit 8192
 delete virtual-switches vs-l2 learn-limit
+# —— virtual-switches dhcp-server（§2.4；决策 #359，仅已配网关的 L2 交换机可配，与 dhcp-relay 互斥）——
+# pool 是启用要件（两值必须同时给）；本段只验证解析/接线，真落库 → 回读 → 停用见下方提交往返
+# （提交往返里才会收敛运行态：内置 tap + UDP/67 punt + 用户态服务器）。
+set virtual-switches vs-l2 dhcp-server pool 192.168.100.100 192.168.100.200
+delete virtual-switches vs-l2 dhcp-server pool
+set virtual-switches vs-l2 dhcp-server lease-time 7200
+delete virtual-switches vs-l2 dhcp-server lease-time
+set virtual-switches vs-l2 dhcp-server dns 192.168.100.2
+delete virtual-switches vs-l2 dhcp-server dns
+set virtual-switches vs-l2 dhcp-server domain-name cli.local
+delete virtual-switches vs-l2 dhcp-server domain-name
 # —— 数据面 DNS 代理（§2.2 全局 / §2.4 按域；决策 #345，自研转发器 + punt socket）——
 # 本段各条是**独立会话、不 commit**：因此 delete 一律用「无值形态」（清空整表 / 清本域），
 # 幂等且不要求值已落库；**带地址的 delete 只有在值已落库时才能匹配**，故它放在下方
@@ -195,5 +206,25 @@ run S2-metricshist "configure
 delete system metrics history interval
 delete system metrics history retention-days
 commit"
+
+# ---------- DHCP 服务器：真落库 → 回读 → 租约端点 → 停用（决策 #359）----------
+# 与横幅 / DNS 代理同理：只在独立会话里解析不够——要证「提交后真的进了配置、停得掉」。
+# pool 是启用要件，提交后产品收敛运行态（内置 tap 入 BD + UDP/67 punt 重申注册 + 用户态
+# 服务器 + 租约文件）；`show … dhcp-leases` 在已配置的交换机上必须可用（vs-l2 无客户端，
+# 应答「当前无租约」而非报错）；`delete … pool`＝停用（清 5 键并回收运行态），此后
+# dhcp-leases 如实报「未配置」（expect_fail 钉住该分支）。内置 tap 是否真建、租约是否
+# 真发放，由真机交付走查承担（tap 侧 sniffer + guest DORA 四方对照，套件不做流量）。
+run S2-dhcpserver "configure
+set virtual-switches vs-l2 dhcp-server pool 192.168.100.100 192.168.100.200
+set virtual-switches vs-l2 dhcp-server lease-time 7200
+set virtual-switches vs-l2 dhcp-server dns 192.168.100.2
+set virtual-switches vs-l2 dhcp-server domain-name cli.local
+commit"
+expect_out S2-dhcpserver "192.168.100.200" "show configuration"
+expect_out S2-dhcpserver "当前无租约" "show virtual-switches vs-l2 dhcp-leases"
+run S2-dhcpserver "configure
+delete virtual-switches vs-l2 dhcp-server pool
+commit"
+expect_fail S2-dhcpserver "未配置 DHCP 服务器" "show virtual-switches vs-l2 dhcp-leases"
 
 summary "阶段 2"

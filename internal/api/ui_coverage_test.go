@@ -142,6 +142,7 @@ var uiDynamicWired = map[string]string{
 	"/system/tech-support/{file}":                                     "renderArchives()：downloadFile('/system/tech-support/' + name, …)",
 	"/configuration/rollback/{n}":                                     "cfghTakeCandidate()：POST '/configuration/rollback/' + n（提交历史页的两段式回滚第一步，偏移由 Rev 相减算出）",
 	"/virtual-switches/{name}/mac-table":                              "vsdMacLoad()：api('/virtual-switches/' + name + '/mac-table?limit=' + n)——交换机详情页按需拉取，**不**进路由表 endpoints（大表不该随页面刷新反复下载）",
+	"/virtual-switches/{name}/dhcp-leases":                            "vsdDhcpLoad()：api('/virtual-switches/' + name + '/dhcp-leases')——交换机详情页「DHCP 服务器」卡的租约表按需拉取，**不**进路由表 endpoints；未配置时服务端 409，页面如实转述（不是空表）",
 
 	// —— 刀 4b 第二段：危险动作（逐个走分级确认；守卫留在服务端实现处，界面不绕过）——
 	"/interfaces/{name}/dpdk":                    "dpdkAct()：api('/interfaces/' + name + '/dpdk?confirm=true')（接口详情页的绑定/解绑；confirm 由界面带上，是服务端对「会中断该口流量」的显式要求，管理口守卫在服务端）",

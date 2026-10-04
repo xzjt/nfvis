@@ -47,6 +47,9 @@ run S5 "show virtual-switches vs-l2 detail"
 run S5 "show virtual-switches vs-l2 ports"
 run S5 "show virtual-switches vs-l2 mac-table"
 run S5 "show virtual-switches vs-l2 statistics"
+# DHCP 租约表（决策 #359）：vs-l2 的 dhcp-server 在阶段 2 的提交往返里已停用，
+# 此处预期**如实报未配置**（该命令的「未配置」分支；已配置分支见阶段 2 回合）。
+expect_fail S5 "未配置 DHCP 服务器" "show virtual-switches vs-l2 dhcp-leases"
 run S5 "show vrfs"
 run S5 "show vrfs vs-l3"
 run S5 "show vrfs vs-l3 routes"

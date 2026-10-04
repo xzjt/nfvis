@@ -962,7 +962,8 @@ nfvis$ show dns proxy                                             # 启用态 + 
 - **上游可达性是宿主路径**：解析请求由 nfvisd 用**宿主网络栈**发出（不是 VPP 数据面），因此配的是
   「管理/主机网络能到」的 DNS；产品不做可达性预检——上游不通时运行期如实回 SERVFAIL。
 - **客户端 resolver 由操作者/DHCP 指定**：域内 VM/容器把 `/etc/resolv.conf` 指向**产品自己的地址**
-  （该域的网关 BVI / L3 接口地址）才会经 NFViS 解析；自动经 DHCP option 6 下发不在本版范围。
+  （该域的网关 BVI / L3 接口地址）才会经 NFViS 解析；用产品自带的 DHCP 服务器时，
+  可由 `set dhcp-server dns`（option 6）自动下发（缺省即下发 BVI 地址，见 §8.3）。
 - **代价（如实告知）**：代理启用期间，指向产品地址的 **UDP/53** 由 nfvisd 独占处理——若 nfvisd 不在
   （崩溃/被停），这些包会被 VPP 丢弃，域内 DNS 中断；故停用请用 `delete … dns proxy server` 走注销路径。
   客户端用 **TCP** 查 DNS 不在覆盖内；本版不做缓存。
@@ -1098,6 +1099,37 @@ nfvis# commit
 > 表现为「relay 配置正确、客户端始终拿不到租约」。此时查 `vppctl show errors`：
 > 出现 `dhcp-proxy-to-client  DHCP option 82 missing` 即为该因，改用会回显 option 82 的
 > server（常见 DHCP 服务默认回显；自研/精简实现需自行保证）。
+
+**DHCP 服务器**（产品自带，域内客户端自动取址）：
+
+```bash
+nfvis# edit virtual-switches vs-dmz
+nfvis# set dhcp-server pool 192.168.100.100 192.168.100.200   # 启用（须已 set gateway ip）
+nfvis# set dhcp-server lease-time 86400                        # 可选：租约时长（秒，缺省 86400）
+nfvis# set dhcp-server dns 192.168.100.1                       # 可选：下发的 DNS（缺省＝BVI 地址）
+nfvis# set dhcp-server domain-name lab.local                   # 可选：域名（option 15）
+nfvis# top
+nfvis# commit
+```
+
+> 语义：产品在**该交换机内**运行 DHCP 服务器（用户态；每台启用的交换机自动创建一条内置
+> tap 成员口，**不出现在** `show virtual-switches <n> ports` 里）：域内客户端的广播
+> （DISCOVER / 重绑定）随交换机洪泛到服务器，拿到地址后的单播续租经网关地址（UDP/67）
+> 送达服务器；OFFER/ACK 由服务器直接发回客户端。server-id 与下发的网关均为 **BVI 地址**。
+> 池须与 BVI 同子网、不含 BVI 地址与网络/广播地址、最多 4096 个地址；**与 `dhcp-relay` 互斥**
+> （同一交换机二者只能配一个——两者争抢 UDP/67 的处理权）。
+>
+> 查看租约：`show virtual-switches vs-dmz dhcp-leases`；`show virtual-switches vs-dmz detail`
+> 的「DHCP 服务器」块给出池 / 租约时长 / DNS / 域名 / 在租数。
+>
+> 停止：`delete dhcp-server pool`（或裸 `delete dhcp-server`）——回收内置 tap 与注册、清租约；
+> 只想去掉某个可选叶子（如改回缺省 DNS）用 `delete dhcp-server dns` 等逐叶子形式。
+>
+> ⚠️ **DNS 选项的语义**：`set dhcp-server dns` 只负责把该地址**下发给客户端**；要让它真的能解析，
+> 还需为该域启用数据面 DNS 代理（`set dns proxy server <上游>`，见 §8.6）。缺省下发 BVI 地址而
+> 未启用代理时，客户端会拿到一个「不解析」的 DNS 地址。
+>
+> 池内地址耗尽时产生告警 `DHCP_POOL_EXHAUSTED`（warning；有地址释放/租约到期即自动消解）。
 
 ### 8.4 L3 虚拟交换机 + 静态路由
 
@@ -1642,6 +1674,7 @@ nfvis$ request alarms clear all
 > | `COMPUTE_UNAVAILABLE` | warning | 启动时**计算编排（libvirt）未接入**——连接失败或超时（libvirtd 未起/假死时，产品在 10 秒量级内放弃并降级，**不会拖住整机启动**）。VM 生命周期动作（创建/启动/快照/串口等）不可用，配置声明不受影响。**告警在场期间产品后台持续重试接入（约每 30 秒一次）**；**接入成功后连接若中断（如 libvirtd 重启），产品每 15 秒探活、自动复连并在成功后消解本告警**——无论启动期还是运行期都无需重启 nfvis。处置：`systemctl status libvirtd`、`virsh -c qemu:///system list`、`journalctl -u libvirtd` 查底座；底座长时间不恢复时先处理底座本身 |
 > | `CONTAINER_UNAVAILABLE` | warning | 启动时**容器编排（Docker）未接入**——探测失败或超时（dockerd 未起/假死时，产品在 10 秒量级内放弃并降级）。容器生命周期动作不可用，配置声明不受影响。**告警在场期间产品后台持续重试接入（约每 30 秒一次）**，接入成功后本告警**自动消解**、容器编排恢复，无需重启 nfvis。处置：`systemctl status docker`、`journalctl -u docker` 查底座 |
 > | `VPP_AUTOSTART_FAILED` | warning | nfvisd 启动时**未能确保数据面（VPP）运行**（拉起失败，或拉起后未在限定时间内就绪）。此时数据面不可用，依赖它的操作会失败。处置：`systemctl status vpp` / `journalctl -u vpp` 查因，或手工 `systemctl start vpp`，随后 `show vpp` 确认已连接。**VPP 恢复在线后自动消解** |
+> | `DHCP_POOL_EXHAUSTED` | warning | 该交换机内置 DHCP 服务器的**租约池耗尽**——无可用地址可应答新的 DISCOVER。来源=交换机名。处置：`show virtual-switches <n> dhcp-leases` 看在租明细，等租约到期/客户端释放，或扩大池（`set dhcp-server pool <start> <end>` 重新提交）；有地址释放（含租约到期）即自动消解 |
 >
 > 上面四条残渣告警的文案都会注明「由启动/巡检对账按数据面事实重建、原始提交不可回溯」——是哪次提交失败、是否被 NAT 引用，数据面看不出来，产品**不编造**。
 

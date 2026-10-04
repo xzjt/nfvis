@@ -564,6 +564,23 @@
         MAC 表是运行态（数据面实际学到的表项），可能很大，故不随页面自动刷新——
         要看最新就点「拉取 MAC 表」，只取前若干条；要按端口/名称查更细的表项，用命令行的 MAC 表查询。
       </p>
+
+      <h3>DHCP 服务器 <span id="vsd-dhcp-note" class="muted small"></span></h3>
+      <dl id="vsd-dhcp" class="kv"></dl>
+      <div class="cfg-actions">
+        <button id="vsd-dhcp-btn" type="button" class="ghost">拉取租约</button>
+        <button id="vsd-dhcp-clear-btn" type="button" class="ghost">清空</button>
+      </div>
+      <p id="vsd-dhcp-msg" class="muted small" hidden></p>
+      <table id="vsd-dhcp-lease-table">
+        <thead><tr><th>IP</th><th>MAC</th><th>状态</th><th>到期（秒）</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="muted small">
+        DHCP 服务器与租约表是运行态：池/租约时长/DNS/域名在配置里声明
+        （「set virtual-switches … dhcp-server …」，写候选并提交），未配置时上面如实显示「—」；
+        内置 tap 成员口由产品自管，不出现在上面的成员端口列表里。
+      </p>
     </article>
     </section>
 

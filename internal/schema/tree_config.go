@@ -226,6 +226,22 @@ func ConfigPathTree() *Node {
 				K("dhcp-relay", "DHCP 中继（仅已配网关的 L2 交换机）",
 					K("server", "DHCP 服务器地址（IPv4，须在该交换机转发域内可达）", V("ip", "如 192.168.100.2")),
 				),
+				// 决策 #359：DHCP 服务器（用户态服务器 + 每交换机一条内置 L2 tap）。
+				// pool 是启用要件（两位置值必须同时给；删除 pool＝整段停用）；可选叶子
+				// lease-time/dns/domain-name。与 dhcp-relay 互斥（争抢 UDP/67 处理权）。
+				// pool 的结束地址作为起始地址的子参数建模：`?` 在 pool 后先补 <start>、
+				// 给完一个值再补 <end>（与 tree 的「连续无子树参数按首参重复匹配」语义吻合，
+				// 补全位置与语句位置一一对应）；取值合法性由提交校验按 model 口径判定。
+				K("dhcp-server", "DHCP 服务器（用户态；仅已配网关的 L2 交换机；与 dhcp-relay 互斥）",
+					K("pool", "租约池（启用要件：须与 BVI 同子网、不含网关/网络/广播地址、≤4096 个）",
+						P("<start>", "池起始地址（IPv4，含）", "",
+							P("<end>", "池结束地址（IPv4，含；须 ≥ 起始地址）", ""),
+						),
+					),
+					K("lease-time", "租约时长（秒，缺省 86400；60-2592000）", V("uint", "如 86400")),
+					K("dns", "下发给客户端的 DNS（option 6；缺省＝BVI 网关地址）", V("ip", "如 192.168.100.1")),
+					K("domain-name", "下发给客户端的域名（option 15，可省）", V("string", "如 lab.local")),
+				),
 				// 决策 #337：MAC 学习条数上限（仅 L2）——VPP bridge_domain_set_learn_limit，
 				// 环路/广播风暴的缓解手段（非阻断），值必为正整数、上限 16777216（VPP 语义）。
 				K("learn-limit", "MAC 学习条数上限（仅 L2；环路缓解，1-16777216）", V("uint", "如 8192")),

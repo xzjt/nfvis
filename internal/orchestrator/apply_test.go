@@ -55,6 +55,9 @@ func (n recNet) DeleteBridgeDomain(ctx context.Context, name string) error {
 func (n recNet) ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) error {
 	return n.record("dhcp-relay:" + vs.Name)
 }
+func (n recNet) ApplyDHCPServer(ctx context.Context, vs model.VirtualSwitch) error {
+	return n.record("dhcp-server:" + vs.Name)
+}
 func (n recNet) ApplyDNSProxy(ctx context.Context, want DNSProxyUpstreams) error {
 	if n.dnsProxy != nil {
 		*n.dnsProxy = want
@@ -183,8 +186,9 @@ func TestApplyOrderNetworkBeforeCompute(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 	// 顺序：ACL 先于交换机（端口绑定引用 ACL），网络先于计算/容器（骨架 §3.3：网络→计算→容器）；
-	// dhcp-relay 是 bridge-domain 之后的伴随操作（决策 #335，先有 BVI 地址与表才有 relay）。
-	want := []string{"acl:acl-1", "bd:vs-1", "dhcp-relay:vs-1", "vrf:vrf-1", "vm:vm-1", "ct:ct-1"}
+	// dhcp-relay 与 dhcp-server 是 bridge-domain 之后的伴随操作（决策 #335/#359：
+	// 先有 BVI 地址与表才有 relay/server；server 的 tap 还要入 BD）。
+	want := []string{"acl:acl-1", "bd:vs-1", "dhcp-relay:vs-1", "dhcp-server:vs-1", "vrf:vrf-1", "vm:vm-1", "ct:ct-1"}
 	if len(*calls) != len(want) {
 		t.Fatalf("调用数不符: %v", *calls)
 	}

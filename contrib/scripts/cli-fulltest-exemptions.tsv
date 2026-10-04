@@ -92,3 +92,4 @@ set container-functions <n> args <s>	配置语句未逐条执行	同族 command 
 set container-functions <n> restart-policy <no|on-failure>	配置语句未逐条执行	Docker 重启策略；由 container 单测覆盖
 set container-functions <n> autostart <bool>	配置语句未逐条执行	随系统自启；由 container 单测覆盖
 set container-functions <n> description <s>	配置语句未逐条执行	描述字段；同族 set interfaces <ifname> description 已在阶段 2 执行
+delete virtual-switches <n> dhcp-server [pool | lease-time | dns | domain-name]	配置语句未逐条执行	全表把四个删除叶子并成一个可选组、其字面 token 序列无法与任一单行套件命令按序匹配；各叶子已逐条进套件——`delete … dhcp-server pool`（＝停用，阶段 2 提交往返：落库→回读→停用→dhcp-leases 报未配置）与 `delete … dhcp-server lease-time|dns|domain-name`（阶段 2 独立会话段逐叶子），互斥拒绝由 model 单测覆盖

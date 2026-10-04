@@ -583,3 +583,23 @@ func candidateHas(cs []Candidate, tok string) bool {
 	}
 	return false
 }
+
+// 决策 #359：dhcp-server 的 `?`/Tab 候选——pool 是两个连续位置值（先补 <start>、给完一个值
+// 再补 <end>，与语句位置一一对应）；dhcp-server 下列出全部四个叶子。
+func TestCandidatesDhcpServerPoolTwoPositionals(t *testing.T) {
+	root := ConfigRoot()
+	base := []string{"set", "virtual-switches", "vs1", "dhcp-server"}
+	if names := candidateNames(Candidates(root, base, "", testDyn)); !contains(names, "pool") {
+		t.Fatalf("dhcp-server 下应列出 pool: %v", names)
+	}
+	// pool 后先补 <start>
+	first := Candidates(root, append(append([]string{}, base...), "pool"), "", testDyn)
+	if names := candidateNames(first); len(names) != 1 || names[0] != "<start>" {
+		t.Fatalf("pool 后应只补 <start>: %v", names)
+	}
+	// 给了起始地址后补 <end>
+	second := Candidates(root, append(append([]string{}, base...), "pool", "192.168.100.10"), "", testDyn)
+	if names := candidateNames(second); len(names) != 1 || names[0] != "<end>" {
+		t.Fatalf("给完 <start> 后应只补 <end>: %v", names)
+	}
+}

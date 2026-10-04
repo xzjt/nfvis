@@ -85,15 +85,16 @@ type ConsoleRequest struct {
 
 // cliExecutor 守护进程侧 CLI 执行器。会话（模式/层级）按持有者+接入源隔离。
 type cliExecutor struct {
-	engine *config.Engine
-	authz  authorizer
-	diag   DiagRuntime        // 诊断命令（M3-9；nil = 报不可用）
-	state  *state.State       // 接口计数快照（monitor；nil = 报不可用）
-	l2     L2Runtime          // L2 运行态（mac-table；nil = 报未接入）
-	l3     L3Runtime          // L3 运行态（routes；nil = 报未接入）
-	lldp   LldpRuntime        // LLDP 邻居（nil = 报未接入）
-	natRT  NatSessionsRuntime // NAT 会话（nil = 报未接入）
-	alarms AlarmRuntime       // 告警表（nil = 报未接入）
+	engine  *config.Engine
+	authz   authorizer
+	diag    DiagRuntime        // 诊断命令（M3-9；nil = 报不可用）
+	state   *state.State       // 接口计数快照（monitor；nil = 报不可用）
+	l2      L2Runtime          // L2 运行态（mac-table；nil = 报未接入）
+	l3      L3Runtime          // L3 运行态（routes；nil = 报未接入）
+	lldp    LldpRuntime        // LLDP 邻居（nil = 报未接入）
+	natRT   NatSessionsRuntime // NAT 会话（nil = 报未接入）
+	alarms  AlarmRuntime       // 告警表（nil = 报未接入）
+	dhcpSrv DHCPServerRuntime  // DHCP 服务器运行态（决策 #359：dhcp-leases 与 detail 块；nil = 报未收敛）
 	// 计算/容器/镜像运行态（M4-12；nil = 对应命令报未接入，与 HTTP 端点 503 一致）
 	vm           VMRuntime
 	console      VMConsoleRuntime
@@ -257,6 +258,10 @@ func (x *cliExecutor) setRuntime(diag DiagRuntime, st *state.State) {
 func (x *cliExecutor) setNetRuntime(l2 L2Runtime, l3 L3Runtime, lldp LldpRuntime, nat NatSessionsRuntime, alarms AlarmRuntime) {
 	x.l2, x.l3, x.lldp, x.natRT, x.alarms = l2, l3, lldp, nat, alarms
 }
+
+// setDHCPServer 注入 DHCP 服务器运行态读物（决策 #359：`show virtual-switches <n>
+// dhcp-leases` 与 detail 的「DHCP 服务器」块；nil = 命令报未收敛）。
+func (x *cliExecutor) setDHCPServer(d DHCPServerRuntime) { x.dhcpSrv = d }
 
 // setComputeRuntime 注入计算/容器/镜像运行态（M4-12；契约 §1.1 show 与 §1.2 request
 // 的 VNF/容器/镜像命令，nil = 对应命令报“未接入”，与端点 503 语义一致）。

@@ -302,6 +302,7 @@ var secretEgressRoutes = map[string]string{
 	"/virtual-switches/{name}":                     "同上（含 statistics 运行态）",
 	"/virtual-switches/{name}/mac-table":           "MAC 学习表运行态",
 	"/virtual-switches/{name}/ports":               "端口读视图（#326）：配置/vnf/container/runtime，无秘密字段",
+	"/virtual-switches/{name}/dhcp-leases":         "DHCP 租约表运行态（#359）：客户端 IP/MAC 与租期，网络事实无凭据",
 	"/vpp/capture":                                 "抓包会话/文件清单元数据",
 	"/vpp/capture/{file}":                          "抓包导出（例外：数据面明文载荷，抓包本身的用途）",
 	"/vpp/config":                                  "vpp 配置段视图",

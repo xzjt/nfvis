@@ -66,6 +66,7 @@ type Options struct {
 	TLS            TlsRuntime              // 证书管理（M5-8；nil = 503）
 	Ports          PortInventory           // 运行态端口清单（决策 #83；nil = 接口名无动态候选）
 	VppState       VppStateRuntime         // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
+	DHCPServer     DHCPServerRuntime       // DHCP 服务器运行态读物（决策 #359；nil = 租约端点 503）
 	Versions       VersionsRuntime         // 组件版本探测（R37-2 收口，决策 #118；nil = 只回 NFViS 版本）
 	MetricsHistory *MetricsHistoryOptions  // 历史时序存储（决策 #356；nil = 未启用）
 }
@@ -88,6 +89,7 @@ type Server struct {
 	lldp         LldpRuntime
 	state        *state.State
 	vppState     VppStateRuntime        // VPP 运行态快照（决策 #84/#116：CLI show 与 REST 同源）
+	dhcpSrv      DHCPServerRuntime      // DHCP 服务器运行态读物（决策 #359：租约端点与 tap 过滤）
 	versions     VersionsRuntime        // 组件版本探测（R37-2 收口，决策 #118）
 	logs         func() ([]byte, error) // 服务端日志来源（决策 #123：GET /system/logs）
 	diag         DiagRuntime            // 诊断命令（决策 #123：/diagnostics/* 与清零统计）
@@ -141,6 +143,8 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.cliExec.setVppCtl(opts.VPP)        // 发现 #11：show vpp 的版本/连接/待重启
 	s.cliExec.setVppState(opts.VppState) // 决策 #84：show 的运行态事实来源
 	s.cliExec.setNetRuntime(opts.L2, opts.L3, opts.LLDP, opts.NAT, opts.Alarms)
+	s.dhcpSrv = opts.DHCPServer
+	s.cliExec.setDHCPServer(opts.DHCPServer) // 决策 #359：dhcp-leases 读命令与 detail 块同源
 	s.cliExec.setComputeRuntime(opts.VM, opts.VMConsole, opts.VMSnapshots, opts.Containers, opts.Images)
 	s.cliExec.setEventBus(opts.Events) // M5-1：CLI 直连动作也发布 vnf-state-changed
 	s.cliExec.setSystemOps(opts.SysOps)
@@ -399,6 +403,8 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/virtual-switches/{name}", s.auth(s.handleGetVSwitch, schema.ClassReadOnly, "show virtual-switches"))
 	mux.Handle("GET "+APIPrefix+"/virtual-switches/{name}/ports", s.auth(s.handleGetVSwitchPorts, schema.ClassReadOnly, "show virtual-switches"))
 	mux.Handle("GET "+APIPrefix+"/virtual-switches/{name}/mac-table", s.auth(s.handleGetMacTable, schema.ClassReadOnly, "show virtual-switches"))
+	// 决策 #359：DHCP 租约表（运行态；未配置 dhcp-server ⇒ 409）。
+	mux.Handle("GET "+APIPrefix+"/virtual-switches/{name}/dhcp-leases", s.auth(s.handleGetDHCPLeases, schema.ClassReadOnly, "show virtual-switches"))
 	mux.Handle("POST "+APIPrefix+"/virtual-switches", cfgAPI(s.handlePostVSwitch))
 	mux.Handle("DELETE "+APIPrefix+"/virtual-switches/{name}", cfgAPI(s.handleDeleteVSwitch))
 	mux.Handle("PUT "+APIPrefix+"/virtual-switches/{name}/ports", cfgAPI(s.handlePutVSwitchPorts))

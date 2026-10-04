@@ -38,6 +38,7 @@ var contractCLICommands = []string{
 	"show interfaces ens224", "show interfaces ens224 detail", "show interfaces ens224 statistics",
 	"show interfaces ens224 sriov", "show interfaces management",
 	"show virtual-switches", "show virtual-switches vs1", "show virtual-switches vs1 mac-table",
+	"show virtual-switches vs1 dhcp-leases", // 决策 #359：租约表（未配置分支的如实报错也在覆盖内）
 	"show vrfs", "show vrfs vr1", "show vrfs vr1 routes",
 	"show vpp", "show vpp threads", "show vpp buffers", "show vpp memory", "show vpp capture",
 	"show vpp runtime", "show vpp runtime thread 1",

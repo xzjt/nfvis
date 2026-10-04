@@ -40,7 +40,14 @@ const ifaceMissingHint = "（若该口由 DPDK 接管：重启数据面后才会
 	"否则请确认该口已由 DPDK 接管、且名称与数据面中的一致）"
 
 // SetAlarms 注入告警表（恢复收敛的失败项落点）；未注入时仅返回错误列表。
-func (n *L2Network) SetAlarms(a *AlarmStore) { n.alarms = a }
+// 同时转发给已装配的 DHCP 服务器 provider（决策 #359：池耗尽告警的落点——
+// 两处注入顺序无关，后到者补接）。
+func (n *L2Network) SetAlarms(a *AlarmStore) {
+	n.alarms = a
+	if n.dhcpServer != nil {
+		n.dhcpServer.SetAlarms(a)
+	}
+}
 
 // EnsureConsistent 恢复收敛（FR-OPS-010/011）：把 committed 配置全量重放到 VPP。
 // 返回未收敛项（调用方记日志即可，不据此拒绝服务）；不可收敛项同时进入告警表。
@@ -135,6 +142,17 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 		if n.dhcp != nil && vs.DhcpRelayServer != "" {
 			if err := n.dhcp.SyncRelay(ctx, vs); err != nil {
 				record("virtual-switches/"+vs.Name+"/dhcp-relay", err)
+			}
+		}
+		// 决策 #359：启用 dhcp-server 的交换机重放整套服务器运行态——VPP 重启后 **tap 与
+		// punt 注册全失**（round140 实测），不重放即静默丢域内 DHCP（与 L2-2/#335 同族教训）。
+		// Sync 自带幂等：按 HostIfName 找存量 tap、无则建，重入 BD/置 up，**每次都重申 punt
+		// 注册**（relay 的 proxy 会夺走 UDP/67——R140-1）；租约表在进程内保留、按文件恢复。
+		// 独立记源、失败不阻塞其余对象；未启用的交换机不摘除（只补齐，附录 A #35——
+		// 停用走提交编排的 teardown）。放在 ApplyBridgeDomain 之后：tap 要入的 BD 此刻已重建。
+		if n.dhcpServer != nil && vs.DHCPServerEnabled() {
+			if err := n.dhcpServer.Sync(ctx, vs); err != nil {
+				record("virtual-switches/"+vs.Name+"/dhcp-server", err)
 			}
 		}
 	}
@@ -282,6 +300,12 @@ func (n *L2Network) resetProviders() {
 	}
 	if n.dhcp != nil {
 		n.dhcp.reset()
+	}
+	// 决策 #359：VPP（重）连接后 tap 与 punt 注册全失（round140 实测）——关闭内核侧 tap 收包、
+	// 标记注册失效；租约表保留（服务器自己的状态，客户端续租不受 VPP 重启影响），随后的
+	// 恢复收敛/巡检 Sync 会按声明重建 tap、重申注册并重开内核侧 AF_PACKET。
+	if n.dhcpServer != nil {
+		n.dhcpServer.reset()
 	}
 	if n.dns != nil {
 		n.dns.reset()

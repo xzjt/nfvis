@@ -875,6 +875,38 @@
         },
         "type": "object"
       },
+      "DhcpLease": {
+        "description": "一条 DHCP 租约（决策 #359；**运行态**——用户态服务器的租约表，不属配置库、不进配置\n备份/恢复语义）。状态机：DISCOVER→`offered`、REQUEST/ACK 后→`active`、客户端 DECLINE\n→`declined`（隔离一个租期，防立即复用回环）；租期到或 RELEASE 即从表内移除。\n",
+        "properties": {
+          "expires_in_seconds": {
+            "description": "剩余有效秒数（declined 为隔离剩余时间；已到期条目不在表内）",
+            "type": "integer"
+          },
+          "ip": {
+            "description": "租约地址（池内）",
+            "type": "string"
+          },
+          "mac": {
+            "description": "客户端 MAC（chaddr，小写冒号分隔）",
+            "type": "string"
+          },
+          "state": {
+            "description": "租约状态",
+            "enum": [
+              "offered",
+              "active",
+              "declined"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "ip",
+          "mac",
+          "state"
+        ],
+        "type": "object"
+      },
       "DiagOutput": {
         "description": "诊断命令的原始回显（决策",
         "properties": {
@@ -2860,6 +2892,56 @@
           },
           "dhcp_relay_server": {
             "description": "DHCP 中继的服务器地址在**配置库/POST 请求体**里的存储键（与 dhcp_relay.server 同一声明，\n两种形状各司其职：GET 详情/列表回 dhcp_relay 对象，写入与 GET /configuration 用本键）。\n未配置时省略。\n",
+            "type": "string"
+          },
+          "dhcp_server": {
+            "description": "仅 L2 且已配网关：DHCP 服务器（决策 #359）。**读视图形状**（GET 响应）——用户态服务器 +\n每交换机一条内置 L2 tap（BD 成员口，按产品自持 sw_if_index 从端口读视图过滤）+\nUDP/67 punt（收单播续租）。配置了 pool 才存在；未配置时整个对象缺席（不编造）。\n与 dhcp-relay 互斥（同时配置提交期拒绝）。\n",
+            "properties": {
+              "active_leases": {
+                "description": "当前生效租约数（state=active；offered/declined 不计）",
+                "type": "integer"
+              },
+              "dns": {
+                "description": "下发给客户端的 DNS（option 6）；配置缺省＝BVI 网关地址",
+                "type": "string"
+              },
+              "domain_name": {
+                "description": "下发给客户端的域名（option 15）；未配置时缺席",
+                "type": "string"
+              },
+              "lease_time_seconds": {
+                "description": "租约时长（秒）；配置缺省 86400，读视图回生效值",
+                "type": "integer"
+              },
+              "pool_end": {
+                "description": "租约池结束 IPv4 地址（含）",
+                "type": "string"
+              },
+              "pool_start": {
+                "description": "租约池起始 IPv4 地址（含）",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "dhcp_server_dns": {
+            "description": "下发 DNS（option 6）的配置键。未配置时省略（生效值＝BVI 网关地址）。",
+            "type": "string"
+          },
+          "dhcp_server_domain_name": {
+            "description": "下发域名（option 15）的配置键。未配置时省略。",
+            "type": "string"
+          },
+          "dhcp_server_lease_time_seconds": {
+            "description": "租约时长（秒）的配置键；范围 60..2592000。未配置时省略（生效值＝缺省 86400）。",
+            "type": "integer"
+          },
+          "dhcp_server_pool_end": {
+            "description": "租约池结束地址的配置键（同 dhcp_server_pool_start）。未配置时省略。",
+            "type": "string"
+          },
+          "dhcp_server_pool_start": {
+            "description": "租约池起始地址在**配置库/POST 请求体**里的存储键（与 dhcp_server.pool_start 同一声明；\n两种形状各司其职：GET 详情回 dhcp_server 对象，写入与 GET /configuration 用本键）。未配置时省略。\n",
             "type": "string"
           },
           "dns_proxy_servers": {
@@ -7502,6 +7584,46 @@
           }
         },
         "summary": "详情",
+        "tags": [
+          "virtual-switches"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/virtual-switches/{name}/dhcp-leases": {
+      "get": {
+        "description": "DHCP 服务器的**运行态租约表**（用户态服务器的内存/持久化状态，不属配置库）：\n每项一条租约（IP/MAC/状态/到期）。状态 `offered`（已报 OFFER、尚未确认）、\n`active`（ACK 后生效）、`declined`（客户端声明冲突，隔离一个租期）。交换机**未配置\ndhcp-server** 时返回 409 并指明「未配置 DHCP 服务器」（不是空数组——空数组会误导为\n「配了但没租约」，决策 #359 的如实口径）。与 CLI `show virtual-switches <n> dhcp-leases` 同源。\n",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DhcpLease"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          }
+        },
+        "summary": "DHCP 租约表（决策",
         "tags": [
           "virtual-switches"
         ]

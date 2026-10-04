@@ -100,11 +100,20 @@ show virtual-switches <name>
                                                     #   配置了 dhcp-relay 才显示「DHCP 中继」行，与 REST
                                                     #   GET /virtual-switches/{n} 的 dhcp_relay 同源）、
                                                     #   MAC 学习上限（决策 #337：配置了 learn-limit 才显示
-                                                    #   「学习上限」行，与 REST 的 learn_limit 同源）
+                                                    #   「学习上限」行，与 REST 的 learn_limit 同源）、
+                                                    #   DHCP 服务器（决策 #359：配置了 dhcp-server 才显示
+                                                    #   「DHCP 服务器」块——池/租约时长/DNS/域名/在租数，
+                                                    #   与 REST 的 dhcp_server 同源）
   ├─ ports                                          # 成员端口及状态/计数：配置静态 ports ∪ VNF/容器声明派生，
                                                     #   逐条标注 source（config|vnf|container|runtime，附录 A #326）；
-                                                    #   与 REST GET /virtual-switches/{n}/ports 同源；派生条目只读
+                                                    #   与 REST GET /virtual-switches/{n}/ports 同源；派生条目只读。
+                                                    #   **内置口（DHCP server 的 tap，决策 #359）按产品自持
+                                                    #   sw_if_index 过滤、不出现**（用户不可见/不可删）
   ├─ mac-table                                      # MAC 学习表（仅 L2；govpp bridge-domain-dump）
+  ├─ dhcp-leases                                    # DHCP 租约表（决策 #359；配置了 dhcp-server 才有内容：
+                                                    #   IP/MAC/状态（offered|active|declined）/到期；
+                                                    #   GET /virtual-switches/{n}/dhcp-leases 同源；未配置时
+                                                    #   如实报「未配置 DHCP 服务器」而非误导性的「无租约」）
   └─ statistics                                     # 每端口收发计数（同 ports 的读视图）
 
 show vrfs                                           # GET /vrfs
@@ -536,6 +545,23 @@ set dhcp-relay server <ip>                           # DHCP 中继（决策 #335
                                                      #   server 必填、IPv4，且须在该转发域内可达（跨 VRF 的 server 不在 v1）
 delete dhcp-relay                                    # 撤销中继（发 dhcp_proxy_config IsAdd=false，幂等；
                                                      #   随交换机删除一并撤）
+set dhcp-server pool <start> <end>                   # DHCP 服务器（决策 #359）：为该交换机转发域内的客户端
+                                                     #   提供地址租约（v1＝域内租约池/状态机；用户态服务器 +
+                                                     #   每交换机一条内置 L2 tap，能力前提见 round140 spike）。
+                                                     #   前置校验：仅 L2 且已 `set gateway ip` 的交换机可配；
+                                                     #   池须与 BVI 的 IPv4 网关同子网、start ≤ end、不含 BVI
+                                                     #   地址与网络/广播地址、最多 4096 个地址（超限/越界提交期
+                                                     #   拒绝并说明）；**与 dhcp-relay 互斥**（同配二者提交期拒绝）。
+                                                     #   pool 是启用要件：配置即启动，删除即停用（见下 delete）。
+set dhcp-server lease-time <seconds>                 # 租约时长（缺省 86400；60..2592000）
+set dhcp-server dns <ip>                             # 下发给客户端的 DNS（option 6；缺省＝BVI 网关地址，
+                                                     #   即数据面 DNS 代理（决策 #345）的落点——未启用代理时该
+                                                     #   地址不解析，手册如实说明）
+set dhcp-server domain-name <name>                   # 下发给客户端的域名（option 15，可省）
+delete dhcp-server [pool | lease-time | dns | domain-name]
+                                                     # 逐叶子撤销；**pool 的删除＝停用**（服务器不可无池运行：
+                                                     #   清池并回收运行态——删内置 tap、注销 punt、清租约），
+                                                     #   与裸 `delete dhcp-server` 等价；随交换机删除一并撤
 set learn-limit <n>                                  # MAC 学习条数上限（决策 #337，仅 L2）：下发
                                                      #   bridge_domain_set_learn_limit，环路/广播风暴的
                                                      #   缓解手段（**只缓解不阻断**）。取值 1-16777216

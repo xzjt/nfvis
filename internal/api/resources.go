@@ -350,15 +350,17 @@ func (s *Server) handleGetVSwitches(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(cfg.VirtualSwitches))
 	for _, vs := range cfg.VirtualSwitches {
-		out = append(out, vswitchView(vs))
+		out = append(out, vswitchView(vs, s.dhcpActiveLeasesOf))
 	}
 	writeJSON(w, http.StatusOK, paginate(r, out))
 }
 
-// vswitchView 交换机的读视图形状（决策 #335）：配置库的 dhcp_relay_server 以
-// dhcp_relay:{server} 对象呈现（与 openapi VirtualSwitch.dhcp_relay 契约同源）；
-// 未配置时两者都缺席（不编造）。其余字段保持模型序列化原样。
-func vswitchView(vs model.VirtualSwitch) map[string]any {
+// vswitchView 交换机的读视图形状（决策 #335/#359）：配置库的 dhcp_relay_server 以
+// dhcp_relay:{server} 对象呈现、dhcp_server_* 5 个平铺键以 dhcp_server:{…} 对象呈现
+// （与 openapi VirtualSwitch.dhcp_relay/dhcp_server 契约同源；dhcp_server 的形状唯一实现
+// 见 dhcpserver.go）；未配置时两者都缺席（不编造）。其余字段保持模型序列化原样。
+// activeLeases 提供 dhcp_server.active_leases（nil/ok=false 时该字段缺席——不编造 0）。
+func vswitchView(vs model.VirtualSwitch, activeLeases func(string) (int, bool)) map[string]any {
 	b, _ := json.Marshal(vs)
 	var m map[string]any
 	if json.Unmarshal(b, &m) != nil {
@@ -368,7 +370,36 @@ func vswitchView(vs model.VirtualSwitch) map[string]any {
 		m["dhcp_relay"] = map[string]any{"server": vs.DhcpRelayServer}
 	}
 	delete(m, "dhcp_relay_server")
+	n, ok := 0, false
+	if activeLeases != nil {
+		n, ok = activeLeases(vs.Name)
+	}
+	if v := dhcpServerView(vs, n, ok); v != nil {
+		m["dhcp_server"] = v
+	}
+	delete(m, "dhcp_server_pool_start")
+	delete(m, "dhcp_server_pool_end")
+	delete(m, "dhcp_server_lease_time_seconds")
+	delete(m, "dhcp_server_dns")
+	delete(m, "dhcp_server_domain_name")
 	return m
+}
+
+// dhcpActiveLeasesOf 活跃租约数的 Server 级读物（决策 #359；nil provider 时 ok=false）。
+func (s *Server) dhcpActiveLeasesOf(name string) (int, bool) {
+	if s.dhcpSrv == nil {
+		return 0, false
+	}
+	return s.dhcpSrv.DHCPServerActiveLeases(name)
+}
+
+// dhcpInternalPorts 该交换机 BD 里产品自持的内置 DHCP tap 成员（决策 #359：按 sw_if_index
+// 过滤端口读视图——不用名字匹配）。provider 未装配时返回 nil（不过滤）。
+func (s *Server) dhcpInternalPorts() map[uint32]bool {
+	if s.dhcpSrv == nil {
+		return nil
+	}
+	return s.dhcpSrv.DHCPTapIndexes()
 }
 
 // handleGetVSwitch GET /api/v1/virtual-switches/{name}。
@@ -381,14 +412,14 @@ func (s *Server) handleGetVSwitch(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, vs := range cfg.VirtualSwitches {
 		if vs.Name == name {
+			view := vswitchView(vs, s.dhcpActiveLeasesOf)
 			// 契约 VirtualSwitch.statistics：运行态可用且该交换机在数据面时附带（FR-NET-016）
 			if st, ok := s.vswitchStatistics(r.Context(), name); ok {
-				m := vswitchView(vs)
-				m["statistics"] = st
-				writeJSON(w, http.StatusOK, m)
+				view["statistics"] = st
+				writeJSON(w, http.StatusOK, view)
 				return
 			}
-			writeJSON(w, http.StatusOK, vswitchView(vs))
+			writeJSON(w, http.StatusOK, view)
 			return
 		}
 	}
@@ -417,8 +448,12 @@ func (s *Server) vswitchStatistics(ctx context.Context, name string) (map[string
 		return nil, false
 	}
 	states, _ := s.vppState.InterfaceStates()
+	taps := s.dhcpInternalPorts() // 决策 #359：内置 DHCP tap 不进用户端口视图（按 sw_if_index）
 	ports := make([]any, 0, len(bd.Ports))
 	for _, p := range bd.Ports {
+		if taps[p.SwIfIndex] {
+			continue
+		}
 		row := map[string]any{"port": p.Name, "sw_if_index": p.SwIfIndex}
 		if st, ok := states[p.Name]; ok {
 			row["admin"], row["link"] = st.AdminUp, st.LinkUp
@@ -503,7 +538,9 @@ func (s *Server) handleGetVSwitchPorts(w http.ResponseWriter, r *http.Request) {
 		if vs.Name == name {
 			// 运行态成员（仅有 source=runtime 的补条目）：数据面未接入/该 BD 不在数据面时为空，
 			// 不编造。配置派生部分与 CLI `show virtual-switches <n> ports` 同源（switchPortViews）。
+			// 决策 #359：内置 DHCP tap 按 sw_if_index 过滤，不进端口读视图（用户不可见/不可删）。
 			var runtimePorts []string
+			taps := s.dhcpInternalPorts()
 			if s.vppState != nil {
 				if bds, err := s.vppState.BridgeDomains(); err == nil {
 					for _, bd := range bds {
@@ -511,6 +548,9 @@ func (s *Server) handleGetVSwitchPorts(w http.ResponseWriter, r *http.Request) {
 							continue
 						}
 						for _, p := range bd.Ports {
+							if taps[p.SwIfIndex] {
+								continue
+							}
 							runtimePorts = append(runtimePorts, p.Name)
 						}
 					}

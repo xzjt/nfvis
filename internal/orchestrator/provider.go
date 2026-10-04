@@ -112,6 +112,9 @@ type NetworkProvider interface {
 	// ApplyDhcpRelay 收敛一台交换机的 DHCP 中继声明（决策 #335；随 bridge-domain 之后的
 	// 伴随操作下发，声明未变时幂等跳过、清 relay 按登记撤销）。
 	ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) error
+	// ApplyDHCPServer 收敛一台交换机的 DHCP 服务器声明（决策 #359；随 bridge-domain 与
+	// dhcp-relay 之后的伴随操作下发，声明未变时幂等跳过、无池声明＝teardown 回收运行态）。
+	ApplyDHCPServer(ctx context.Context, vs model.VirtualSwitch) error
 	// ApplyDNSProxy 收敛数据面 DNS 代理声明（决策 #345）：全局或任一交换机非空 ⇒ 注册 punt socket
 	// 并起域内转发器；全空 ⇒ 注销（VPP 恢复默认处理）。声明未变时幂等跳过。
 	ApplyDNSProxy(ctx context.Context, want DNSProxyUpstreams) error
@@ -240,6 +243,7 @@ func (noopNetwork) DeleteACL(context.Context, string) error                     
 func (noopNetwork) ApplyBridgeDomain(context.Context, model.VirtualSwitch) error { return nil }
 func (noopNetwork) DeleteBridgeDomain(context.Context, string) error             { return nil }
 func (noopNetwork) ApplyDhcpRelay(context.Context, model.VirtualSwitch) error    { return nil }
+func (noopNetwork) ApplyDHCPServer(context.Context, model.VirtualSwitch) error   { return nil }
 func (noopNetwork) ApplyDNSProxy(context.Context, DNSProxyUpstreams) error       { return nil }
 func (noopNetwork) ApplyVRF(context.Context, model.Vrf) error                    { return nil }
 func (noopNetwork) DeleteVRF(context.Context, string) error                      { return nil }

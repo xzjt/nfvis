@@ -304,6 +304,127 @@ func TestValidateDhcpRelay(t *testing.T) {
 	mustErrContaining(t, Validate(c4), "vs-l3", "BVI")
 }
 
+func TestValidateDHCPServer(t *testing.T) {
+	// 合法：L2 + IPv4 BVI（192.168.100.1/24），池在子网内且不含 BVI/网络/广播地址
+	enabled := func(mut func(*VirtualSwitch)) Config {
+		c := validBase()
+		c.VirtualSwitches[0].DhcpServerPoolStart = "192.168.100.100"
+		c.VirtualSwitches[0].DhcpServerPoolEnd = "192.168.100.200"
+		mut(&c.VirtualSwitches[0])
+		return c
+	}
+	mustNoErr(t, Validate(enabled(func(*VirtualSwitch) {})))
+	// 只配可选叶子、未配 pool：不启用但合法（随 pool 生效；口径见 validate.go）
+	mustNoErr(t, Validate(enabled(func(s *VirtualSwitch) {
+		s.DhcpServerPoolStart, s.DhcpServerPoolEnd = "", ""
+		s.DhcpServerLeaseTimeSeconds = 600
+		s.DhcpServerDNS = "8.8.8.8"
+		s.DhcpServerDomainName = "lab.local"
+	})))
+
+	// 非法取值域：lease-time 越界、dns 非 v4、域名带空白
+	mustErrContaining(t, Validate(enabled(func(s *VirtualSwitch) { s.DhcpServerLeaseTimeSeconds = 59 })),
+		"dhcp_server_lease_time_seconds", "60")
+	mustErrContaining(t, Validate(enabled(func(s *VirtualSwitch) { s.DhcpServerLeaseTimeSeconds = 2592001 })),
+		"dhcp_server_lease_time_seconds", "2592000")
+	mustErrContaining(t, Validate(enabled(func(s *VirtualSwitch) { s.DhcpServerDNS = "2001:db8::1" })),
+		"dhcp_server_dns", "IPv4")
+	mustErrContaining(t, Validate(enabled(func(s *VirtualSwitch) { s.DhcpServerDomainName = "a b" })),
+		"dhcp_server_domain_name", "空白")
+
+	// 池端点必须同时给
+	mustErrContaining(t, Validate(enabled(func(s *VirtualSwitch) { s.DhcpServerPoolEnd = "" })),
+		"dhcp_server_pool_start", "同时给出")
+	mustErrContaining(t, Validate(enabled(func(s *VirtualSwitch) { s.DhcpServerPoolStart, s.DhcpServerPoolEnd = "", "192.168.100.200" })),
+		"dhcp_server_pool_start", "同时给出")
+
+	// start > end / 非法地址
+	mustErrContaining(t, Validate(enabled(func(s *VirtualSwitch) {
+		s.DhcpServerPoolStart, s.DhcpServerPoolEnd = "192.168.100.200", "192.168.100.100"
+	})),
+		"dhcp_server_pool_start", "start ≤ end")
+	mustErrContaining(t, Validate(enabled(func(s *VirtualSwitch) { s.DhcpServerPoolEnd = "not-an-ip" })),
+		"dhcp_server_pool_start", "合法 IPv4")
+
+	// 不同子网
+	mustErrContaining(t, Validate(enabled(func(s *VirtualSwitch) { s.DhcpServerPoolStart, s.DhcpServerPoolEnd = "192.168.101.1", "192.168.101.9" })),
+		"dhcp_server_pool_start", "同一子网")
+
+	// 含 BVI 地址 / 网络地址 / 广播地址
+	mustErrContaining(t, Validate(enabled(func(s *VirtualSwitch) { s.DhcpServerPoolStart, s.DhcpServerPoolEnd = "192.168.100.1", "192.168.100.9" })),
+		"dhcp_server_pool_start", "BVI 网关地址")
+	mustErrContaining(t, Validate(enabled(func(s *VirtualSwitch) { s.DhcpServerPoolStart, s.DhcpServerPoolEnd = "192.168.100.0", "192.168.100.9" })),
+		"dhcp_server_pool_start", "网络地址")
+	mustErrContaining(t, Validate(enabled(func(s *VirtualSwitch) {
+		s.DhcpServerPoolStart, s.DhcpServerPoolEnd = "192.168.100.250", "192.168.100.255"
+	})),
+		"dhcp_server_pool_start", "广播地址")
+
+	// 超上限：4096 个地址合法（含两端），4097 拒绝
+	mustNoErr(t, Validate(enabled(func(s *VirtualSwitch) { s.DhcpServerPoolStart, s.DhcpServerPoolEnd = "192.168.100.2", "192.168.100.2" })))
+	big := validBase()
+	big.VirtualSwitches[0].Gateway = &VSGateway{Addresses: []string{"10.0.0.1/19"}}
+	big.VirtualSwitches[0].DhcpServerPoolStart, big.VirtualSwitches[0].DhcpServerPoolEnd = "10.0.1.1", "10.0.17.1" // 4097 个
+	mustErrContaining(t, Validate(big), "dhcp_server_pool_start", "4096")
+	big.VirtualSwitches[0].DhcpServerPoolEnd = "10.0.17.0" // 恰 4096 个
+	mustNoErr(t, Validate(big))
+
+	// 前置：未配网关 / 仅 IPv6 网关 / type=l3 一律拒绝
+	noGW := enabled(func(s *VirtualSwitch) { s.Gateway = nil })
+	mustErrContaining(t, Validate(noGW), "dhcp_server_pool_start", "gateway ip")
+	v6GW := enabled(func(s *VirtualSwitch) { s.Gateway = &VSGateway{Addresses: []string{"2001:db8:100::1/64"}} })
+	mustErrContaining(t, Validate(v6GW), "dhcp_server_pool_start", "gateway ip")
+	l3 := validBase()
+	l3.VirtualSwitches = append(l3.VirtualSwitches, VirtualSwitch{
+		Name: "vs-l3", Type: "l3", DhcpServerPoolStart: "10.0.0.10", DhcpServerPoolEnd: "10.0.0.20"})
+	l3.Vrfs = append(l3.Vrfs, Vrf{Name: "vs-l3"})
+	mustErrContaining(t, Validate(l3), "vs-l3", "BVI")
+
+	// 与 dhcp-relay 互斥
+	mustErrContaining(t, Validate(enabled(func(s *VirtualSwitch) { s.DhcpRelayServer = "192.168.100.2" })),
+		"dhcp_server_pool_start", "UDP/67")
+}
+
+func TestDHCPServerPoolHelpers(t *testing.T) {
+	// 区间与规模（纯函数与校验/数据面共用，边界逐个钉住）
+	if lo, hi, ok := DHCPServerPoolRange("192.168.100.100", "192.168.100.200"); !ok || lo > hi {
+		t.Fatalf("合法池应解析成功: %v %v %v", lo, hi, ok)
+	}
+	if _, _, ok := DHCPServerPoolRange("192.168.100.200", "192.168.100.100"); ok {
+		t.Fatal("start>end 应解析失败")
+	}
+	if _, _, ok := DHCPServerPoolRange("not-an-ip", "192.168.100.100"); ok {
+		t.Fatal("非法地址应解析失败")
+	}
+	if got := DHCPServerPoolSize("192.168.100.100", "192.168.100.200"); got != 101 {
+		t.Fatalf("池规模应为 101，实得 %d", got)
+	}
+	if got := DHCPServerPoolSize("192.168.100.1", "192.168.100.1"); got != 1 {
+		t.Fatalf("单地址池规模应为 1，实得 %d", got)
+	}
+
+	// 生效取值：未配置回落缺省；配置优先
+	vs := VirtualSwitch{}
+	if vs.DHCPServerEnabled() {
+		t.Fatal("无 pool 不启用")
+	}
+	if vs.DHCPServerLeaseSeconds() != DefaultDHCPServerLeaseSeconds {
+		t.Fatalf("缺省租约时长应为 %d", DefaultDHCPServerLeaseSeconds)
+	}
+	vs.DhcpServerPoolStart, vs.DhcpServerPoolEnd = "10.0.0.10", "10.0.0.20"
+	vs.DhcpServerLeaseTimeSeconds = 600
+	if !vs.DHCPServerEnabled() || vs.DHCPServerLeaseSeconds() != 600 {
+		t.Fatalf("pool 齐备应启用且租约时长取配置值: %+v", vs)
+	}
+
+	// 网关 IPv4 取首个 v4 地址与网段（v6 在前的声明也要跳过）
+	vs.Gateway = &VSGateway{Addresses: []string{"2001:db8::1/64", "192.168.5.1/24"}}
+	ip, n, ok := vs.GatewayIPv4()
+	if !ok || ip.String() != "192.168.5.1" || n.String() != "192.168.5.0/24" {
+		t.Fatalf("GatewayIPv4 应取首个 v4 地址: %v %v %v", ip, n, ok)
+	}
+}
+
 func TestValidateLearnLimit(t *testing.T) {
 	// 未配置（0）合法；合法范围内的正整数合法
 	mustNoErr(t, Validate(validBase()))
