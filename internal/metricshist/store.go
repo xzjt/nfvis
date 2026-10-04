@@ -124,8 +124,7 @@ CREATE TABLE IF NOT EXISTS meta (
 // Open 打开（必要时创建）历史库。DSN 与配置库同口径：WAL + busy_timeout + 立即写锁。
 // 不创建父目录：目录不存在时如实报错（路径由装配层保证）。
 func Open(path string) (*Store, error) {
-	dsn := "file:" + path + "?_journal_mode=WAL&_busy_timeout=5000&_txlock=immediate"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", dsnFor(path))
 	if err != nil {
 		return nil, fmt.Errorf("打开历史时序库: %w", err)
 	}
@@ -136,6 +135,46 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// dsnFor 库 DSN（WAL + busy_timeout + 立即写锁，与配置库同口径）。
+func dsnFor(path string) string {
+	return "file:" + path + "?_journal_mode=WAL&_busy_timeout=5000&_txlock=immediate"
+}
+
+// ReopenIfReplaced 库文件已被删除/替换时重开（决策 #365；round142 体检 A4 的同族根治）。
+//
+// 背景（真机实证）：`request system storage format-data` 清数据分区、或操作者
+// `rm /var/lib/nfvis/metrics.db` 之后，**运行中的连接仍持有已删除的 inode**——读视图继续
+// 显示旧历史、磁盘空间也不释放（round148 真机：文件已 unlink，读视图仍报 80598 个样本、
+// `lsof` 12 个 `metrics.db (deleted)` 句柄）。采样器每轮 tick 与读视图入口都调用本方法：
+// 文件不存在 ⇒ 关旧连接（释放已删 inode）并按当前路径重开（Open 会重建 schema，读数回到
+// 「无历史」）；文件仍在 ⇒ 不动。
+//
+// 不做 inode 比较：跨平台无稳定口径，且本产品的删除者只有 format-data 与操作者本人
+// （「删除后立刻被他人重建」的窗口不适用，如实登记）。
+func (s *Store) ReopenIfReplaced() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := os.Stat(s.path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("检查历史库文件 %s: %w", s.path, err)
+	}
+	if s.db != nil {
+		_ = s.db.Close() // 释放已删 inode（空间随之回落）
+	}
+	db, err := sql.Open("sqlite", dsnFor(s.path))
+	if err != nil {
+		return fmt.Errorf("重开历史时序库: %w", err)
+	}
+	db.SetMaxOpenConns(4)
+	s.db, s.series = db, map[string]int64{}
+	if err := s.init(); err != nil {
+		_ = db.Close()
+		return err
+	}
+	return nil
 }
 
 func (s *Store) init() error {

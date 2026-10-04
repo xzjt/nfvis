@@ -40,6 +40,12 @@ type Config struct {
 	CoreDumps   string // core dump（DefaultCoreDir）
 	TechSupport string // 诊断归档（DefaultTechSupportDir）
 	VMs         string // VNF 磁盘与快照（compute.DefaultConfig().VMsDir）
+
+	// 决策 #365：运行态残留（format-data 一并清）——MetricsDB 是**文件**（单文件清理分支），
+	// DHCPLeases 是目录（决策 #359 的租约持久化落点）。缺省值见 DefaultConfig；
+	// main.go 会把实际 `-metrics-db` 路径传进来（开发态路径可被 -db 改）。
+	MetricsDB  string // 历史时序库（/var/lib/nfvis/metrics.db）
+	DHCPLeases string // DHCP 租约目录（network.DefaultDHCPLeaseDir）
 }
 
 // DefaultConfig 生产缺省。
@@ -54,6 +60,8 @@ func DefaultConfig() Config {
 		CoreDumps:   DefaultCoreDir,
 		TechSupport: DefaultTechSupportDir,
 		VMs:         "/var/lib/nfvis/vms",
+		MetricsDB:   "/var/lib/nfvis/metrics.db",
+		DHCPLeases:  "/var/lib/nfvis/dhcp",
 	}
 }
 
@@ -116,6 +124,13 @@ func NewManager(cfg Config, engine Engine, imgs ImageStore, ver string) *Manager
 	}
 	if cfg.TechSupport == "" {
 		cfg.TechSupport = def.TechSupport
+	}
+	// 决策 #365：运行态残留（metrics.db 单文件 / DHCP 租约目录）缺省值。
+	if cfg.MetricsDB == "" {
+		cfg.MetricsDB = def.MetricsDB
+	}
+	if cfg.DHCPLeases == "" {
+		cfg.DHCPLeases = def.DHCPLeases
 	}
 	if cfg.VMs == "" {
 		cfg.VMs = def.VMs

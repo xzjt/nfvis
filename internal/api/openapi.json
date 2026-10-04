@@ -2804,30 +2804,19 @@
             "description": "物理口名（与 vnf/container 三选一）",
             "type": "string"
           },
+          "native": {
+            "description": "trunk native VID（平铺键；access 由交换机级 vlan-access 决定）",
+            "type": "integer"
+          },
           "seq": {
             "type": "integer"
           },
-          "state": {
-            "description": "运行态",
-            "enum": [
-              "up",
-              "down"
-            ],
-            "type": "string"
-          },
-          "vlan": {
-            "properties": {
-              "native": {
-                "type": "integer"
-              },
-              "trunk": {
-                "items": {
-                  "type": "integer"
-                },
-                "type": "array"
-              }
+          "trunk": {
+            "description": "trunk 模式 tagged VID 列表（**平铺键**，与读视图 `SwitchPortView` 一致；决策 #365 修正：\n此前写成 `vlan: {trunk, native}` 嵌套，与实现/模型不符——照契约发送会被静默忽略）。\n",
+            "items": {
+              "type": "integer"
             },
-            "type": "object"
+            "type": "array"
           },
           "vnf": {
             "type": "string"
@@ -5292,7 +5281,7 @@
             "description": "OK"
           },
           "400": {
-            "description": "参数非法（窗口/步长格式、name 未知等）"
+            "description": "**参数格式**非法（`last`/`step`/`since`/`until`/`limit` 无法解析或越界等）。\n⚠️ **未知指标名不是 400**：与「窗口内无点」一样返回 200（`series` 为空），\n由读视图如实区分——省略 `name` 的概览返回**已知指标名清单**（`metrics`），\n客户端据此判断名字是否已知；CLI 侧对未知名另给专门文案（决策 #356/#365）。\n"
           }
         },
         "summary": "历史时序读视图（决策",
@@ -7621,6 +7610,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "503": {
+            "description": "DHCP 服务器**尚未收敛**（数据面未连接或内置 tap 建立中）——租约表暂不可用。\n与 409（未配置）区分：409 是「配置里没有 dhcp-server」，503 是「配了但此刻读不到」。\n恢复收敛/15s 巡检补齐后自动可读（决策 #359；真机 round141 覆盖）。\n"
           }
         },
         "summary": "DHCP 租约表（决策",

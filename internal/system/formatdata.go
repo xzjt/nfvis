@@ -126,23 +126,32 @@ func countRemoved(cur model.Config) FormatDataCounts {
 	return c
 }
 
-// purgeTarget 一个受管数据目录（清空其内容、保留目录本体与属主/权限）。
+// purgeTarget 一个受管数据项：目录（清空其内容、保留目录本体与属主/权限）或单文件
+// （决策 #365：metrics.db 是文件，不是目录——「清数据分区」必须把它也算上，与手册 §10.13
+// 的既有承诺一致）。
 type purgeTarget struct {
-	Label string
-	Path  string
+	Label  string
+	Path   string
+	IsFile bool
 }
 
-// purgeTargets format-data 清空的受管数据目录清单。
+// purgeTargets format-data 清空的受管数据清单（目录 + 运行态单文件）。
 // 注意：**不含** images（镜像经仓库 Delete 逐个删，索引与文件必须同步）；
 // **不含** /var/lib/nfvis 本身（只清其下受管子目录的内容）、nfvis.db、tls/、software/、
 // kernel-baseline.bak（决策 #305 ③ 的「不得删除」清单）。
+//
+// 决策 #365：**运行态残留一并清**——历史时序库 metrics.db（单文件）与 DHCP 租约目录
+// `/var/lib/nfvis/dhcp`（决策 #359）。它们是「数据分区」的运行数据，手册 §10.13 早已写明
+// format-data 会清 metrics.db；此前实现漏了这两项，属文档与实现相悖（round142 体检 A3/D7）。
 func (m *Manager) purgeTargets() []purgeTarget {
 	return []purgeTarget{
-		{"备份归档", m.cfg.Dir},
-		{"抓包文件", m.cfg.Captures},
-		{"core dump", m.cfg.CoreDumps},
-		{"诊断归档", m.cfg.TechSupport},
-		{"VNF 磁盘与快照", m.cfg.VMs},
+		{"备份归档", m.cfg.Dir, false},
+		{"抓包文件", m.cfg.Captures, false},
+		{"core dump", m.cfg.CoreDumps, false},
+		{"诊断归档", m.cfg.TechSupport, false},
+		{"VNF 磁盘与快照", m.cfg.VMs, false},
+		{"DHCP 租约", m.cfg.DHCPLeases, false},
+		{"历史时序库", m.cfg.MetricsDB, true},
 	}
 }
 
@@ -204,7 +213,12 @@ func (m *Manager) FormatData(ctx context.Context, user string) (FormatDataResult
 		}
 	}
 	for _, t := range m.purgeTargets() {
-		files, bytes, errs := purgeDir(t.Label, t.Path)
+		var files, bytes, errs = 0, int64(0), []string(nil)
+		if t.IsFile {
+			files, bytes, errs = purgeFile(t.Label, t.Path)
+		} else {
+			files, bytes, errs = purgeDir(t.Label, t.Path)
+		}
 		res.PurgedFiles += files
 		res.FreedBytes += bytes
 		res.Residuals = append(res.Residuals, errs...)
@@ -233,6 +247,26 @@ func (r FormatDataResult) Summary() string {
 		r.RemovedObjects.VirtualSwitches, r.RemovedObjects.VRFs, r.RemovedObjects.Routes,
 		r.RemovedObjects.ACLs, r.RemovedObjects.NATRules, r.RemovedImages,
 		r.PurgedFiles, r.FreedBytes, r.Revision, strings.Join(r.KeptSections, "/"))
+}
+
+// purgeFile 删除单个运行态文件（决策 #365：metrics.db）。文件不存在视为已清空（幂等）；
+// 删除失败逐条记残留（与 purgeDir 同口径，绝不把失败当成功）。目录误配为文件目标时也如实报错。
+func purgeFile(label, path string) (files int, bytes int64, errs []string) {
+	if path == "" {
+		return 0, 0, nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, []string{fmt.Sprintf("%s（%s）：读取失败: %v", label, path, err)}
+	}
+	size := info.Size()
+	if err := os.RemoveAll(path); err != nil {
+		return 0, 0, []string{fmt.Sprintf("%s（%s）：删除失败: %v", label, path, err)}
+	}
+	return 1, size, nil
 }
 
 // purgeDir 清空目录内容（保留目录本体与属主/权限），返回清理的文件数与释放字节数。

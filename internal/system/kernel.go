@@ -261,7 +261,9 @@ func GenerateBaseline(d KernelDesired) (grubFragment string, fstabLine string) {
 	// memory { default-hugepage-size / main-heap-page-size } 两个键都管不了它（实测：写 2M 也无用）。
 	// 旧的「1G 池 > 0 就写 default_hugepagesz=1G」会让 VPP 的 main heap 占 1 个 1G 页，
 	// 于是 1G 池声明 N 只能给 VNF N−1 页——第二个 VNF 起不来（round124 实测 Cannot allocate memory）。
-	// 改后 1G 池只给 VNF；VPP 的 main heap 改从 2M 池取页。
+	// 改 2M 后 2M 池成为 main heap 的**缺省**落点，但 round127 实测**更正**了「改后 1G 池只给 VNF」
+	// 的预期：main heap **偏好最大可用页尺寸**，1G 池有页时它仍取 1 个 1G 页（VPP 的两个配置键都
+	// 管不了，见附录 A #347）——故「1G 池声明 N ⇒ VNF 可用 N−1」是**明示边界**，本函数不消除它。
 	params = append(params, "default_hugepagesz=2M")
 	if d.Hugepages2M > 0 {
 		// 2M 池显式声明（hugepages= 归属其前最近的 hugepagesz=，与 1G 段同规则）。

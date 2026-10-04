@@ -135,6 +135,13 @@ func (s *Server) metricsHistoryView(name string, since, until, step int64, limit
 		return view
 	}
 
+	// 决策 #365：库文件被删/替换（format-data 或操作者 rm）时先重开——否则旧连接仍持已删
+	// inode，读视图会继续显示旧历史（真机实证），与「清数据分区」的承诺相悖。
+	if err := hist.Store.ReopenIfReplaced(); err != nil {
+		store["enabled"] = false
+		view["reason"] = "历史时序存储读取失败：" + err.Error()
+		return view
+	}
 	// 库可打开：概览读数如实取自库本身。
 	st, err := hist.Store.Stats()
 	if err != nil {

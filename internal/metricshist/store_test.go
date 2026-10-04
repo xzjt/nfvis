@@ -3,7 +3,9 @@ package metricshist
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -56,6 +58,55 @@ func TestOpenIdempotentAndVersionGuard(t *testing.T) {
 	_ = st2.Close()
 	if _, err := Open(path); err == nil {
 		t.Fatal("更高 schema 版本应被拒绝")
+	}
+}
+
+// TestReopenIfReplaced 决策 #365：库文件被删/替换后必须重开——否则旧连接仍持已删 inode，
+// 读视图继续显示旧历史、空间不释放（真机：format-data/rm 后 80598 样本仍在读数里）。
+func TestReopenIfReplaced(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metrics.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	if err := st.Append(100, []Sample{{Name: "m", Value: 1}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// 文件仍在：重开检查是空操作（数据不动）。
+	if err := st.ReopenIfReplaced(); err != nil {
+		t.Fatalf("文件在场时不应报错: %v", err)
+	}
+	if got := mustQuery(t, st, Query{Name: "m"}); len(got) != 1 {
+		t.Fatalf("文件在场时数据不应变化: %+v", got)
+	}
+
+	// 删除库文件（format-data / 操作者 rm 的等价动作）：重开后读数回到「无历史」。
+	// ⚠️ Windows 不允许删除被进程打开的文件（本用例在此平台无从模拟）——该路径由
+	// Linux/真机验证（round148：format-data 后文件 unlink、读视图回到「无历史」）。
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 无法删除被打开的文件；该路径在 Linux/真机验证")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("删除库文件: %v", err)
+	}
+	if err := st.ReopenIfReplaced(); err != nil {
+		t.Fatalf("文件被删后重开应成功: %v", err)
+	}
+	if got := mustQuery(t, st, Query{Name: "m"}); len(got) != 0 {
+		t.Fatalf("重开后应为空库（无历史）: %+v", got)
+	}
+	if stt, err := st.Stats(); err != nil || stt.Samples != 0 || stt.Series != 0 {
+		t.Fatalf("重开后统计应为 0: %+v/%v", stt, err)
+	}
+	// 新库可继续写（schema 已重建）。
+	if err := st.Append(200, []Sample{{Name: "m2", Value: 2}}); err != nil {
+		t.Fatalf("重开后 Append: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("重开后文件应被重建: %v", err)
 	}
 }
 

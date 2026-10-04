@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - **后台采样器**（`cmd/nfvisd`，进程生命周期 goroutine，启动**不阻塞 READY**——沿用 #348/#351/#354 纪律）：
   周期性 `GatherSamples` + 单事务批量写入；间隔取自 **committed 配置**（改配置**无需重启**即生效）。
 - **失败如实**：单次采集部分来源不可用（如 VPP 未连）时，可得的序列照写、不可得的序列**当轮不写**
-  （与 `/metrics` 同口径：宁缺不谎报）；整轮异常记入 `meta.last_error` 并按下一周期重试。
+  （与 `/metrics` 同口径：宁缺不谎报）；整轮异常（**写库/事务失败**等）记入 `meta.last_error` 并按下一周期重试
+  （决策 #365 口径更正：`GatherSamples` 本身不返回整轮错误，来源不可用由各序列自身缺项体现）。
 
 ## 4. 保留策略
 
@@ -80,7 +81,8 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - **裁剪节奏**：每 5 分钟一次（`DELETE FROM samples WHERE ts < cutoff`，再按行顶裁剪，最后回收孤立 `series`）。
   写成功 ≠ 收敛：裁剪后**回读**（count/最旧 ts）并反映到读视图。
 - **采集间隔**：默认 60s，可配 10..3600s（`set system metrics history interval`）。间隔越短分辨率越高、占用越大，
-  读视图给出「当前间隔 → 估算占用」的文字说明。
+  读视图给出**实测**库大小、序列数/样本数与时间范围（决策 #365 口径更正：v1 **不做**「当前间隔 → 估算占用」
+  的文字估算——按实测数值如实呈现，不编造推算值）。
 
 ## 5. 三面读视图（同源）
 
@@ -94,7 +96,7 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - **鉴权口径**：`/metrics` 保持**无鉴权**（Prometheus 抓取，契约 `security: []` 不变）；`/metrics/history` 是
   运维读视图（给控制台/CLI 用），**要求 Bearer**——抓取方不需要历史，操作者需要。
 - **降采样**：`step` 由服务端分桶（同桶取**桶内最后一个**样本，与「瞬时值」语义一致），默认自动
-  （目标 ≤120 点）；`truncated` 标记「因 step/limit 被裁剪」。
+  （目标 ≤120 点，**分桶不算裁剪**）；`truncated` 标记**因 `limit` 被裁剪**（保留最近的点；决策 #365 口径更正）。
 
 ## 6. 边界与不做（如实登记）
 
