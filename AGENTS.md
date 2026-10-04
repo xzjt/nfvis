@@ -583,6 +583,24 @@
   重建均为 idx 6），「按索引过滤/删除」本身即隐患。**如实边界**：成功 teardown 之后同提交后序失败回滚的
   租约窗口需提交级生命周期钩子，不在本轮范围。证据 `docs/evidence/v2-round143-d360-dhcpserver-r142-3-4.txt`；
   真机已装 2.0.0~dev71。
+- **round144（决策 #361：L3 接口 ACL 解绑族收口——修 round142 体检 R142-1，2026-10-04）**：P1 首项落地——
+  `AclProvider.BindIndex` 的「空绑定=解绑」分支此前**没有任何生产调用者**：`delete … l3-interface <if>
+  acl-in <acl>`（只清绑定）或整条删 `l3-interface` 提交成功、读视图干净，而 VPP 仍 `input acl(s)`
+  （deny 继续拦）；删 ACL 后**伴随 macip 残留**；删 `l3-interface` **不回收**（口留原表 + 地址不摘）。
+  修法：① 提交编排加 **L3 差分撤销**（`l3-acl-unbind[…]`/`del-l3-if[…]`，在 ApplyVRF 之后、删除段之前，
+  undo=ApplyVRF(old)）；② `DeleteL3Interface` 单接口回收（清地址→解绑 IP ACL+伴随 macip→移回默认表→
+  摘登记；**vNIC 同口共存时保持表归属**——#172 的受支持形态）；③ `DeleteVRF` 增补解绑；④ `DeleteACL`
+  在 in/out 全空时解绑伴随 macip。**真机四维（dev72）**：物理口 ens192 作 L3 接口 + deny icmp 规则绑定时
+  宿主 `ping` **3/3 全丢 + `acl-plugin-in-ip4-fa deny 3 / checked 3`** → **只清绑定一次提交（rev 1613）后
+  VPP 绑定与伴随 macip 均消失、`ping` 4/4 全通**（用户可见反转；对照 round142「配置干净但 deny 仍拦」）；
+  整条删 `l3-interface` 一次提交回收（地址摘、绑定清、读视图回 name/type）；同一提交「清绑定+删 ACL」⇒
+  `show acl-plugin acl` 空、macip 全 `-1`（1b 残留消除）；`request vpp restart` 不回潮、仍声明的口正常重放。
+  **13 项新单测 + 2 项红-绿抽查**（摘掉解绑调用/摘掉 macip 解绑各按预期失败）；`make check` RC=0
+  （决策条数 262→263）。**四套件**：fulltest **254/0/18**、语义 **26/0/3**、lifecycle **23/0/2**、
+  pty **10/10**（lifecycle 首两跑 22/0/3 系 L3-2 正控未热，邻居条目出现后复跑转正——与 round143 同因）。
+  **如实边界**：无 VPP 侧「接口 ACL 绑定 dump」能力，「配置无绑定且进程内登记也空」的极端窗口无法验证式
+  解绑（正常路径由恢复重放重建登记）；「口回默认表」真机 CLI 无读数（VPP 只对带地址的口显示 table-id），
+  由单测钉住调用序。证据 `docs/evidence/v2-round144-d361-l3-acl-unbind.txt`；真机已装 2.0.0~dev72。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。

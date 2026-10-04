@@ -1,0 +1,97 @@
+NFViS v2 round144 —— 决策 #361：L3 接口 ACL 解绑路径 + 删 l3-interface 回收 + 伴随 macip 解绑（修 R142-1）四维真机验证
+====================================================================
+日期：2026-10-04；分支 `feat/d361-l3-acl-unbind`（base `v2 @ 7e9cd0e`）；决策 #361。
+真机 nfvis-vm：**2.0.0~dev72**（本分支构建并 dpkg 安装）；宿主 Windows 作流量源（VMnet8）。
+对照基线：round142 半程体检 `docs/evidence/v2-round142-midpoint-audit.txt` §1-1a/§1-1b（R142-1 真机复现：
+配置删了、VPP 仍 `input acl(s)` 拦；删 ACL 后 macip 残留；删 l3-interface 不回收）。
+事实源：`vppctl`（ACL 绑定/本体/macip/接口地址/错误计数/table 列表）、宿主 ping、产品配置读视图、单测。
+
+§0 结论
+- **R142-1 三条（含同族 1b）全部收口并有真机证据**：
+  ① **只清绑定**（`delete … l3-interface <if> acl-in <acl>`）一次提交后：VPP 绑定消失、伴随 macip 一并解绑、
+  **宿主 ping 由 3/3 全丢转为 4/4 全通**（用户可见反转；对照 round142「配置读视图干净但 deny 继续拦」）；
+  ② **整条删 `l3-interface`** 一次提交即回收：地址摘、绑定/macip 解绑、配置读视图回 `name/type`；
+  ③ **同提交「清绑定 + 删 ACL」**：`show acl-plugin acl` 空、macip 全 `-1`、接口无 `input acl(s)`（1b 残留消除）。
+- **生命周期**：`request vpp restart` 后无回潮（配置已无绑定/ACL 则重放不绑）；仍声明的 l3-interface 正常重放。
+- 单测 13 项新增 + 2 项红-绿抽查；`make check` RC=0（决策条数 263）。
+
+§1 真机四维验证
+
+1.1 作用效果 + 对抗性（A/B，同一现场翻转）
+  配置（rev 1612）：
+    set acls r144 rule 10 source 192.168.155.1/32 destination any protocol icmp action deny
+    set virtual-switches acl-vs type l3
+    set virtual-switches acl-vs l3-interface ens192 ip address 192.168.155.230/24
+    set virtual-switches acl-vs l3-interface ens192 acl-in r144
+  形态：**物理口 ens192 作 L3 接口**（与 round133 的 ACL enforcement 同形态；宿主与 ens192 同在 VMnet8，
+  可直接 ping 该地址——deny→放行的翻转就是用户可见判定）。
+  - **相位 A（绑定在场，deny 生效）**：
+    · `vppctl show acl-plugin interface` → `sw_if_index 1: input acl(s): 0`（ens192，idx 1）；
+      `show acl-plugin macip interface` → `sw_if_index 1: 0`（#341 伴随白名单，ARP 得以通过）；
+      `show interface address` → `ens192: L3 192.168.155.230/24 ip4 table-id 13923525`。
+    · 宿主 `ping -n 3 192.168.155.230` → **已发送 3，已接收 0，丢失 3（100%）**；
+      `vppctl show errors` → `acl-plugin-in-ip4-fa  ACL deny packets 3` + `checked packets 3`
+      （两路独立证据：包真到了 ACL 弧且被逐包拒绝）。
+  - **相位 B（只清绑定，rev 1613：`delete … acl-in r144` + commit）**：
+    · `show acl-plugin interface` → **无 `input acl(s)`**；`show acl-plugin macip interface` → **`sw_if_index 1: -1`**
+      （伴随 macip 一并解绑）；接口地址/表归属不变（本步只撤绑定，符合语义）。
+    · 宿主 `ping -n 3` → 2/3 通（首包在 ARP 刷新），紧接着 `ping -n 4` → **已发送 4，已接收 4，丢失 0（0%）**；
+      `show errors` 的 ACL 计数**不再增长**（保持 3/3——绑定已不在，包不再经 ACL 弧）。
+    ⇒ **R142-1 的缺陷形态（配置删了、VPP 还在拦）不再存在**。
+
+1.2 整条删 l3-interface 的回收（rev 1615）
+  - 先重绑（rev 1614：`input acl(s): 0` 回来），再 `delete virtual-switches acl-vs l3-interface ens192` + commit：
+    · `show acl-plugin interface`：无 `input acl(s)`；`show acl-plugin macip interface`：`sw_if_index 1: -1`；
+    · `show interface address`：ens192 **无 L3 行**（地址已摘，round142 §1-1b 的「地址不摘」消除）；
+    · `show configuration`：`virtual-switches acl-vs { name acl-vs; type l3; }`（声明整条已清）。
+  - **如实登记**：「口回默认表（table 0）」在真机 CLI **没有读数**——VPP 只对**带地址**的接口显示
+    `table-id`（`show interface address`），无地址口无表归属展示（`show ip table` 只列表、不列成员）。
+    该项由单测断言调用序钉住（`SwInterfaceSetTable(idx, v4/v6, 0)` 必须在解绑之后、摘登记之前），
+    真机可见的后果是：旧表（13923525）不再带该口、接口可被重新归口（清场后 `delete … acl-vs` 删表成功即证）。
+
+1.3 对抗性组合：同一提交「清绑定 + 删 ACL」（rev 1617）
+  - 前置重绑（rev 1616：`input acl(s): 0`），随后一次提交同时 `delete … acl-in r144` + `delete acls r144`：
+    · `show acl-plugin acl` → **空**（ACL 本体已删）；
+    · `show acl-plugin macip interface` → `sw_if_index 0: -1`、`sw_if_index 1: -1`（无残留）；
+    · `show acl-plugin interface` → 无 `input acl(s)`。
+    ⇒ round142 §1-1b 的「删 ACL 后 macip 残留到 VPP 重启」消除（本路径经新增的 l3-acl-unbind 计划操作）。
+
+1.4 生命周期（`request vpp restart`，不重启 nfvisd）
+  - 重启后：ACL 绑定/本体**均无回潮**（配置已不声明则恢复重放不绑）；仍声明的 `l3-interface ens192
+    ip address …` **正常重放**（`show interface address` 的 L3 行回来、table-id 不变）。
+  - 清场：`delete virtual-switches acl-vs`（rev 1618）后 ens192 无地址、ACL/macip 无条目、IP 表只剩
+    默认表 + 两台夹具网关表；配置无 acl-vs；告警仅常态 `HUGEPAGE_POOL_ORPHAN`。
+
+§2 单元测试与自检
+  - 新增 13 用例：`l3_acl_unbind_test.go`（完整调用序、-2 全项容错+登记仍清、已达成/查询失败上抛、
+    vlan 子接口回收、**vNIC 同口共存边界保持表归属**、Unbind 三态、DeleteVRF 增补解绑、L2Network 空操作）；
+    `apply_test.go`（差分纯函数表驱动 7 例 + plan desc 顺序断言）；`acl_test.go`（pair 全空→macip 解绑 /
+    尚有 out→保持）。
+  - **红-绿抽查 2 项**：① 暂时摘掉 `DeleteL3Interface` 的 ACL 解绑调用 → `TestDeleteL3InterfaceFullSequence`
+    按预期失败；② 暂时摘掉 `DeleteACL` 的 macip 解绑 → `TestDeleteACLUnbindsCompanionMacipWhenPairEmpty`
+    按预期失败；恢复后全绿。
+  - `GOFLAGS=-p=1 make check` RC=0（决策条数 263、openapi/形状/路由/套件契约守护全过）。
+
+§3 四套件复跑（dev72；夹具 `cli-semantic-fixture.sh up`；fulltest 前停 sem-vm）
+  cli-fulltest **254/0/18**（与 round141/143 基线逐项一致：零失败、18 条预期报错；套件收尾清场正常）
+  cli-semantic-check **26/0/3**（与基线一致：S8 可判定并通过；S11/S12 按设计跳过 +1）
+  cli-lifecycle-check **23/0/2**（与基线一致。**首两跑为 22/0/3**：L3-2「转发域连通性」因 `vr-sem-vs`
+  邻居表当刻无对端条目而按设计跳过——同 round143 的时序现象（夹具 `up` 后 guest 需先起网发流量，
+  ARP 才落表；本轮首次复跑仍早于对端条目出现，`show ip neighbors` 实测 age 17.7min 时复跑即
+  `✓ L3-2 正向控制成立：经 bvi1 能 ping 通 192.168.99.2（5/5 应答）`）。**属现场时序、非产品回归**）
+  cli-pty-smoke **10/10**
+
+§4 现场与清场
+  - 测试对象 acl-vs / r144 / ens192 地址全部删除（rev 1618）；无 ACL/macip/接口地址残留；
+  - 宿主侧未改网络配置（v4 ping 无需静态邻居；ARP 由 macip 白名单放行，#341 机制顺带再证）；
+  - sem-vm/sem-ct/sem-vs/dns-vs 回夹具态（套件流程）。
+
+§5 如实边界（入册）
+  1. 无 VPP 侧「接口 ACL 绑定 dump」能力：若「配置无绑定**且**进程内登记也空」而 VPP 侧仍有绑定
+     （带外改动/进程重启后未重放），本实现无法验证式解绑——正常路径上恢复重放会按声明重建登记，
+     不落此窗口。ACL 本体残渣仍由既有 `ACL_LEFTOVER` 对账（#321）覆盖。
+  2. 「口回默认表」无真机 CLI 读数（见 1.2 如实登记），由单测钉住调用序。
+  3. `DeleteACL` 循环内先改登记后下发 VPP 是既有结构：若伴随 macip 解绑报真错误，重试时该接口已不在
+     rebind 列表（pair 已空）⇒ macip 解绑不会自动重试（换绑/再删该接口可再触发）。如实登记，未改结构。
+  4. `l3IfaceKeyOf` 含 vlan：同一物理口 `vlan 100 → 200` 判为「旧子接口删除 + 新子接口新增」，
+     旧子接口走完整回收（这正是残留族要修的行为）。
