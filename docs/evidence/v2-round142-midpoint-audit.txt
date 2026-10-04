@@ -1,0 +1,185 @@
+NFViS v2 半程体检（round142）—— v2 已交付功能深度审计 + 账目疏漏核对
+====================================================================
+日期：2026-10-04；环境 nfvis-vm 2.0.0~dev70（= v2 @ 18a8812 构建）；分支 v2。
+范围：**v2 决策 #300~#359 全部已交付功能** + `docs/v2已做.md` / `docs/v2待做.md` / 契约文档 / 代码四处对账。
+方法：**6 簇并行只读审计**（子智能体，以代码为准核对决策行承诺；不改任何文件）＋ **主会话真机复核 4 项关键发现**
+（独立事实源：vppctl / 注入帧 pcap / 告警与 journal / 进程信号）＋ 主会话账目核对。
+
+§0 结论（先说要点）
+- **没有整块「假功能」**：未发现任何已交付决策的机制整体不成立（对照 #338/#339/#350 那种撤回级问题）。
+- 但有 **3 项高危 + 一批中等缺陷**，且**其中 3 项正是本轮刚合并的 #359**：
+  ①【高】**L3 接口 ACL 解绑没有路径**——配置删了绑定、VPP 仍在拦（真机复现，silent divergence）；
+  ②【高（条件性）】**#354 运行期探活的上界没有落到阻塞点**——libvirt 楔死时状态机静默卡死：不告警、
+     不复连、运行态读取被拖到客户端超时（真机 SIGSTOP 复现；SIGCONT 后静默自愈）；
+  ③【中×3，#359】幂等 Sync 把应答以太源清成 `00:00:00:00:00:00`（真机复现）/ 停用与删除的回收顺序
+     （先删租约文件后确认 tap 删除成功）/ punt 注册失败留下「tap 已建但未登记」⇒ 内置 tap 泄漏进端口视图；
+- **账目疏漏**：命令全表三条命令族的实测状态未回填（#356/#357/#359，与同 PR 证据矛盾）、
+  手册与设计文档三处与实现/真机结论相悖（format-data 清不清 `metrics.db`、`truncated` 语义、
+  「估算占用」未实现）、`internal/system/kernel.go` 注释与 #347 实测结论相反、
+  openapi 三处缺口（租约端点 503 未声明 / 未知指标名承诺 400 实为 200 / `VSwitchPort` 写形状 `vlan` 嵌套与实现平铺键不一致）。
+- 完整发现清单见 §2（共 47 条，去重后）；真机复现的 4 项见 §1；账目见 §3；建议处置批次见 §4；现场见 §5。
+
+§1 真机复现确认（4 项，均独立事实源）
+1a【高】**L3 接口 ACL 解绑无路径（配置删了、数据面还在拦）**
+   - 复现：`set acls r142-acl rule 10 source 192.168.99.200/32 destination any protocol tcp action deny`（rev 1554）
+     → `set virtual-switches sem-vs l3-interface ens224 ip address 192.168.111.1/24` + `… acl-in r142-acl`（rev 1555）
+     → VPP 绑定生效：`show acl-plugin interface` = `sw_if_index 2: input acl(s): 0`、
+     `show acl-plugin macip interface` = `sw_if_index 2: 0`（#341 的伴随 macip 也在）。
+   - **只清绑定**：`delete virtual-switches sem-vs l3-interface ens224 acl-in r142-acl`（rev 1556）→
+     配置读视图已无 `acl_in`，**VPP 仍 `input acl(s): 0`**（deny 规则继续拦）。
+   - **整条删 l3-interface**（rev 1557）→ 同上仍拦；且 **ens224 仍留在表 314680 且带 `192.168.111.1/24`**
+     （接口未被回收）。
+   - 代码根因：`acl.go:243-268` 的「空绑定=解绑」分支**没有任何生产调用者**；`l3.go:197-205` 对
+     `AclIn==""` 直接 `continue`；`apply.go` 无 L3 接口/绑定的差分撤销计划。删除被引用 ACL 被校验拒绝，
+     所以「先清绑定、再删 ACL」是操作者撤销 ACL 的**主路径**，正好落在缺口上。
+   - 影响：撤销 ACL 后旧规则（含 deny）继续生效 —— 与 #340/#341/#342 的承诺（gateway/端口拒绝、
+     L3 形态可用、删除倒序容错）组合起来是「唯一可用形态的撤销路径缺失」。
+1b【低但同族】**删 ACL 只清 ACL 绑定，伴随 macip 残留**：紧接上面 `delete acls r142-acl`（rev 1558）→
+   `show acl-plugin acl` 空（ACL 本体已删、ACL 绑定已解），但 `show acl-plugin macip interface` 仍
+   `sw_if_index 2: 0`（`nfvis-nonip-permit` macip ACL 与绑定留下，直到 VPP 重启；残渣对账也不覆盖）。
+2【高（条件性）】**#354 探活上界不生效：libvirt 楔死 → 状态机静默卡死**
+   - 复现：`kill -STOP <libvirtd pid>`（socket 可连、零响应 = 与 round129 同族的楔死形态）→ 75s 后：
+     `show alarms active` **无 `COMPUTE_UNAVAILABLE`**、`systemctl is-active nfvis` = active（WatchdogSec=30 未触发）、
+     journal 90s 内**零**探活/中断/复连记录；期间 `show virtual-machine-functions sem-vm` **挂到
+     客户端 90s 超时**（实测 100s 被 `timeout` 杀掉）。`kill -CONT` 后立即恢复、仍无任何告警/日志。
+   - 代码根因：`async_connect.go:243-250` 的 `withTimeout` 是同步调用（只有被调方尊重 ctx 才有界）；
+     `conn_libvirt.go:253-265` 的 `StateReason` 只在入口查一次 `ctx.Err()`，随后 `DomainLookupByName` 无超时
+     阻塞（go-libvirt `getResponse` 裸等、全模块无 deadline）。对照：VPP 探针有 goroutine+timer 硬兜底
+     （`vpp.go:372-387`、`main.go:1130-1143`）——libvirt 探活两样都没有。
+   - 影响链：状态机永不返回 ⇒ 不探活/不复连/不告警；15s 巡检持 `recoveryMu` 永久阻塞 ⇒ VPP 恢复收敛与
+     commit 路径连带挂起；`/metrics` 与历史采样同族停摆；systemd 看门狗救不了（喂狗协程独立存活）。
+3【中，#359】**幂等 Sync 清空应答的以太源 MAC**
+   - 复现：启用 `dhcp-server`（rev 1552）后等一轮 15s 巡检 → 从第二 tap 注入 DISCOVER →
+     pcap 显示 OFFER 的以太源 = **`00:00:00:00:00:00`**（应为内核 tap MAC `02:fe:…`）。
+   - 代码根因：`dhcpserver.go:321` 每次 Sync 用配置规格覆盖 `rt.spec`（`tapMAC` 恒为零值），而
+     `rt.spec.tapMAC = tr.MAC()`（`:343`）只在**打开内核 tap 的那一次**执行（幂等 Sync 在 `:327` 早退）。
+   - 影响：投递不受影响（目的 MAC=chaddr），但 BD 会学到 `00:00:00:00:00:00` bogon 表项（实测有）；
+     任何做 L2 源过滤/端口安全的环境会丢帧；与决策行「服务器 L2 源用 tap MAC」不符。
+4【中，#359 + 观测】**停用/删除的回收顺序与索引身份**
+   - 已执行复现（子智能体故障注入）：`teardown` 先删内存登记、`deleteTap` 失败只记错误，随后**仍删租约文件**
+     （`dhcpserver.go:374-378`）⇒ 「同一次提交后序失败回滚」或「tap 删除失败」场景下租约表被抹、客户端仍用旧地址
+     ⇒ 地址可被重复分配（v1 无冲突检测），且无告警。
+   - `reset()` 不清 `tapIndex`（`:235-247`）⇒ VPP 重启后、下一次 Sync 成功前，端口读视图按**旧索引**过滤，
+     `teardown` 也按旧索引发 `TapDelete`（索引是否被复用属真机待验；若复用可能误删/误滤用户接口）。
+   - punt 注册失败时（`:300` 早退）tap 已建、已入 BD、但**未登记** ⇒ `TapIndexes()` 为空 ⇒ 内置 tap
+     出现在用户端口视图（`source=runtime`，且用户删不掉）——与决策 ⑦ 相反。
+
+§2 代码级确认发现（按簇；47 条，含上表 4 项）
+标注：`[严重度]`、`确认`＝读代码即断定 / `已复现`＝执行级复现 / `待真机`＝需现场。
+【簇 A 可观测性（#355/#356）】
+- A1 [中] `metricsGatherTimeout` 没有传到底座调用（libvirt/`vpp_runtime.Threads` 不尊重 ctx）⇒ 底座假死时采样永久卡死、
+  不写 `last_error`、无自动恢复（已复现：代码路径）。同族于 §1-2。
+- A2 [中] 采样间隔调小后读视图立即显示新值但睡眠不重排 + 触发**假 stale**（`metrics_history.go:74-88` vs 读视图按新间隔算阈值）（确认）。
+- A3 [中] `format-data`/`zeroize` **不清 `metrics.db`**，与手册 `:2078` 与设计文档明写相反；手册内部亦自相矛盾（确认）。
+- A4 [低] 运行中 `rm metrics.db` 既不「回到无历史」也不释放空间（连接持旧 inode；手册当清理手段）（待真机）。
+- A5 [低] 查询失败把 `store.enabled` 报成 false（契约语义=采样器是否启用）（确认）。
+- A6 [低] `MetricNames`/`Health` 读错误被吞 ⇒「查不了」渲染成「还没有数据」（确认）。
+- A7 [低] `last/step` 时长无上界，超大值溢出后给误导性结果（确认，算术可复算）。
+- A8 [低] `limit` 只裁返回点数、不限制载入内存（窗口全量读入；注释宣称防拉爆内存）（确认）。
+- A9 [低] 全表 `set/delete system metrics history` 状态列过期（🚫 待真机 vs round137 已验）（确认）。
+- A10 [低] engine 缺失/committed 读失败时 `nfvis_vnf_runtime_available` 整段消失（与「始终发出」措辞有差距）（确认）。
+【簇 B 容器与终端（#357/#358，交叉 #310/#311/#314）】
+- B1 [中] CLI `exec timeout 91..300` 实际用不了：客户端 `RequestTimeout=90s` 先到、命令仍在容器里跑；
+  重跑即重复执行（确认）。
+- B2 [中] exec 超时被三面当**成功**记账（审计 success + REST 200 + `timed_out`），与决策「超时按失败（REST 非 2xx）」相反；
+  测试把漂移固化（确认）。
+- B3 [中] Docker 侧 shell 读取无 deadline；非 101 错误体读取循环无长度/超时锚点 ⇒ 挂死 + goroutine/fd 泄漏
+  （代码级确认；哪条响应真挂住待真机）。
+- B4 [低] 未消费的一次性 ticket 永久驻留（ticket 表无 TTL 清扫，`-c` 脚本模式必经）（确认）。
+- B5 [低] CLI 在「签发凭证」时就记 `container.shell open … success` 审计 ⇒ 成功会话两条 / 脚本模式失败也记 success；
+  VM console 无此条（确认）。
+- B6 [低] #358 承诺的 `ContainerShell` 前置单测缺失；WS 双向桥接无自动化测试（确认）。
+- B7 [低] ctx 取消与超时不区分（统一 `TimedOut`）（确认）。
+- B8 [低] Docker 不可用/竞态错误落 500 INTERNAL（决策/契约写 503）（确认）。
+- B9 [低] 退出码读取失败会丢弃已捕获输出、整体按失败报（部分成功被当整体失败）（确认）。
+- B10 [低] SDK 层拨号错误文案写死「串口 console」（`pkg/cliclient/console.go:31,38,69`）（确认）。
+- B11 [低] Web 终端提示「Ctrl-C 可中断」在 Web 上做不到（输入框无法注入 0x03；VM 串口页同款既有文案）（确认）。
+【簇 C DHCP/DNS/relay（#359/#335/#345）】
+- C1/C2/C3/C4 = §1-3 / §1-4（三条）。
+- C5 [中] **跨交换机 relay+server 并存未校验**：同交换机已拒，但 UDP/67 归属是全局的（R140-1 同机理）
+  ⇒ A 域 relay 可能被 B 域 server 的 15s 重申静默打断（待真机对照）。
+- C6 [低] DECLINE 的「隔离一个租期」可被同一 MAC 用 REQUEST 直接夺回（已复现）。
+- C7 [低] 一条 DISCOVER 会把 active 租约降级为 offered/120s，地址之后可被发给别的客户端（已复现，重复地址风险）。
+- C8 [低] 租约端点会返回契约未声明的 503（未收敛态）。
+- C9 [低] 命令全表 #359 六行仍标「🚫 待真机」，与 round141 证据矛盾（同 A9 族）。
+- C10 [低] 应答未 padding 到 300 字节（RFC 未强制；**标准 DHCP 客户端（dhclient/networkd/Windows）从未验过**——
+  round141 用的是自研客户端，建议补验）。
+- C11 [低] 池耗尽告警在收包路径持 provider 锁做 syslog I/O（黑洞时可达秒级，影响低）。
+- 覆盖缺口：`p.Close()`/`p.Reconcile()`/收包循环无单测（C1-C4 漏网的直接原因）。
+【簇 D 启动/自愈/大页/系统（#348/#349/#351/#354/#329/#346/#347/#353/#305/#315）】
+- D1 = §1-2（高危）。
+- D2 [中] 换装期在写锁内 `Disconnect()`（先发 ConnectClose 且无超时）可挂住全部计算调用（机制确认，触发待真机）。
+- D3 [中] 大页「实际持有」页数取「首个扫描到的映射」（同 inode 多映射时读数随 /proc 顺序漂移、orphan 虚高可能误报）——round133b 的教训未覆盖页码字段（待真机）。
+- D4 [低] 大页 `managed` 与 `declared` 可自相矛盾（不可读分支提前 return；契约写明 managed=声明>0）（确认）。
+- D5 [低] `VPP_AUTOSTART_FAILED` 覆盖面：手册/注释写「拉起后未就绪也算」，实现只在发起失败时报（确认；二选一定裁）。
+- D6 [低] 有界性细节两处（libvirt 连接实际 ≤10s+2s drain；EnsureRunning 的 goroutine 残留到停机）（确认）。
+- D7 [低] `format-data` 受管清单不含 `/var/lib/nfvis/dhcp`（孤儿租约文件清不掉；与 A3 同族）（确认）。
+- D8 [低] `kernel.go:259-264` 注释与 #347 实测结论相反（「改后 1G 池只给 VNF」已被真机否决）（确认）。
+【簇 E 会话/AAA/CLI/Web（#317/#318/#324/#325/#327/#313/#309/#320/#336/#301/#303/#304/#319/#326/#323）】
+- E1 [中] CLI `request system api token revoke <自己的 token>` 不释放 candidate/编辑锁（REST 等价路径会释放；
+  规格书 #317 明写「吊销当前会话等价于登出」）⇒ 锁只能等 10 分钟空闲回收（确认）。
+- E2 [中] **被拒绝的 commit 仍会「隐式确认」在途 `commit confirmed`**，且 `commit:confirm` 不校验持有者/用户
+  （`engine.go:574-584` 先清 confirmed 后查锁；`:741-757` 无 `requireHolderLocked`）⇒ 失败的请求改了受保护状态、
+  审计记错人（确认；对照同区 `Rollback` 有校验）。
+- E3 [中] `/cli/execute` 的接入口来源由**客户端自述**（`cli_bridge.go:35-42`）⇒ `-source console` 可关掉 FR-CFG-012
+  的管理口自锁保护（手册已如实标注该开关；但服务端无独立事实源）（确认；产品口径需定裁）。
+- E4 [低] `execStart` 完全没有 class 判定（树里是 Su；当前是桩，无实际影响但属守卫漏域）（确认）。
+- E5 [低] ticket 表无过期清理（与 B4 同一条，合并计）。
+- E6 [低] `cliExecutor.sess` 无 TTL 清理（token 过期后条目常驻）（确认）。
+- E7 [低] `Engine.superseded` map 只增不减（确认）。
+- E8 [低] `internal/cli` 第二套引号扫描（不认转义）⇒ 补全上下文与执行语义漂移（`?`/Tab 层面）（确认）。
+- E9 [低] `-c ''` / `-f ''` 静默进交互模式（空脚本「假成功」形态；#309 已覆盖空文件，未覆盖空值）（确认）。
+- E10 [低] raw 模式下 `?` 不能作为字面字符输入（与 #313 多行引号值能力有张力）（确认）。
+- E11 [低] CLI 文本渲染脱敏不是单源（写死 `password-hash`，未用 `IsSensitiveKey` 6 键）（确认，潜在）。
+- E12 [低] 「不能删除当前登录用户」守卫只在 REST handler（CLI 可自删；有第二个 super-user 时）（确认）。
+- E13 [低] `Sessions()` 的 `confirmed_until` 归属漂移（挂到当前持锁会话行，非 `Holder`）（确认）。
+- E14 [中/观察] 全局 `cliExecutor.mu` 覆盖整条命令执行 ⇒ 长命令阻塞所有 CLI；客户端 90s 超时后命令**仍会执行**
+  （「幽灵执行」；#358 把上限提到 300s 放大）（确认）。
+【簇 F 网络特性/ACL/QoS/环路（#326/#330/#331/#332/#333/#337/#340/#341/#342/#344/#352/#321/#322）】
+- F1 = §1-1a（高危）。
+- F2 = §1-1b（macip 残留）。
+- F3 [中] 删除 L3 接口不回收（口留原表 + 地址不摘）——§1-4 的「整条删」复现部分。
+- F4 [中] QoS 绑定「先改登记后下发」⇒ 失败路径漂移、重试静默假成功；`DeleteQos` 失败丢登记后再也解不掉（确认）。
+- F5 [中] #333 复核漏三类子来源（`…/learn-limit|dhcp-relay|dhcp-server`）⇒ 交换机已删这三类告警也不消（确认）。
+- F6 [低] 兄弟删除路径仍会凭空建空端口（#326 只修了 vnf/container；ports `<seq> … native/trunk` 两条仍先建空壳）（确认）。
+- F7 [低] 端口成员删除不校验 owner（`delete … ports <seq> vnf <另一个 VM>` 会删掉现值，不核对）（确认）。
+- F8 [低] 删除被引用 QoS 策略：CLI 未共享 REST 的指引型检查（校验兜底，仍拒）（确认）。
+- F9 [低] #341 的「REST 同源说明」未落（`acl_in_note` 只进 CLI JSON）（确认）。
+- F10 [契约] `VSwitchPort` 写形状：openapi 写 `vlan:{trunk,native}` 嵌套，实现是平铺 `trunk`/`native`
+  ⇒ 按契约发送会被静默忽略（读形状 `SwitchPortView` 是平铺——两兄弟 schema 不一致）；`state` 字段契约有、模型无。
+
+§3 账目与文档疏漏（v2已做/待做 ↔ 契约文档 ↔ 代码）
+1. **命令全表实测状态未回填**（与同 PR 证据自相矛盾）：`#356` 行「🚫 真机复跑待执行」而 round137 已真机验证
+   （`v2-round137-d356-metrics-history.txt` §2/§6；fulltest 240/0/13）；`#357 exec` 行「待真机」而 round138 已四维
+   （242/0/15）；`#359` 六行「待真机」而 round141 已四维（254/0/18）。（A9/C9 同族）
+2. **手册 ↔ 实现矛盾**（`metrics.db` 清不清）：手册 `:2078-2079` 与设计文档写 `format-data`「会一并清掉」，
+   实现 `formatdata.go:134-149` 的 `purgeTargets` 不含它——需定裁（补实现 or 改文档）。
+3. **设计文档口径 vs 实现**（`docs/superpowers/specs/2026-10-03-metrics-history-design.md`）：
+   `truncated` 语义（文档「因 step/limit」vs openapi/实现「只按 limit」）；「读视图给出估算占用」未实现；
+   「整轮异常记 `meta.last_error`」分支不可达（`gather` 恒返回 nil）。
+4. **openapi 缺口三处**：`GET /virtual-switches/{n}/dhcp-leases` 未声明 503；`/metrics/history` 承诺未知 name 400
+   而实现回 200；`VSwitchPort` 写形状 `vlan` 嵌套（F10）。
+5. **注释与实测结论相反**：`internal/system/kernel.go:259-264`（1G/main heap）——#347 已真机否决，注释未改（D8）。
+6. `v2待做.md` 本身：**R140-1 已登记** ✓；本轮新缺陷将按 §4 批次登记（见下）。
+7. `AGENTS.md` 与 `v2已做.md` 的条数/基线在本轮结束前一致（261 / 四套件沿革）✓；`v2待做.md` 的
+   「未验证 6 条」与「新登记」无过期项（本次体检未发现反向漂移——即**没有**把已做的当未做、或反之）。
+
+§4 建议处置批次（不含本轮已做）
+- **P0（#359 三处，建议同一小 PR 立即修）**：C1 幂等 Sync 保 `tapMAC`（挪进 `dhcpServerRT` 或覆盖时保留）；
+  C3 filter/teardown 改「按 HostIfName 核对身份」+ `reset()` 清 `tapIndex`；C2 teardown 顺序（先确认 tap 删成再删租约文件）
+  ＋补 `p.Close()`/`Reconcile()`/重复 Sync 的单测（正是漏网处）。
+- **P1（用户可见的静默不一致，优先）**：F1/§1-1a ACL 解绑路径 + F3 l3-interface 回收 + F2 macip 解绑（同一族，
+  一条决策收口）；D1/§1-2 探活有界（照 VPP 探针的 goroutine+timer 兜底）；F4 QoS 登记顺序；E1/E2（锁与 confirmed 语义）。
+- **P2（契约/文档回填，可独立小 PR）**：§3 的 1-5（全表回填、手册-实现定裁、设计文档口径、openapi 三处、内核注释）。
+- **P3（低危/观测）**：E5-E14、A4-A10、B4-B11、C6-C11、D3-D7（其中 D3 大页归属建议照 round133b 的「独占归属」同一教训做页码聚合）。
+- 需真机补验项（登记后按需）：B3（Docker 挂死语义）、C5（跨交换机 relay+server 夺权）、C10（标准客户端 DHA/长度）、
+  D2（半死连接换装）、D3（多映射页码）、A4（运行中 rm）。
+
+§5 现场与清场（如实）
+- 本轮真机做 4 组复核实验：① DHCP（建 server → 注入 DISCOVER → pcap 看以太源）；② ACL（建 ACL → 绑 l3-interface →
+  只清绑定/整条删 → VPP 对照）；③ libvirt SIGSTOP 楔死 75s + 观测 + SIGCONT 恢复；④ 清理（`request vpp restart` 清
+  ACL/macip/地址残留）。
+- 终态核对：VPP 无 tap、`show acl-plugin acl|interface|macip` 无残留、ens224 无地址、config 回夹具形
+  （rev 1559：sem-vs 仅网关 + 2 端口；无 r142-acl/l3-interface/dhcp-server），sem-vm running，
+  告警仅常态 `HUGEPAGE_POOL_ORPHAN`（另：满配 syslog 未启用，C11 影响未实测）。
+- 审计**不改任何产品代码/契约**（只读 + 现场实验）；所有发现只登记，不修（用户口径：先体检）。
