@@ -1,0 +1,101 @@
+NFViS v2 round145 —— 决策 #362：libvirt 调用级硬上界（修 R142-2）四维真机验证
+====================================================================
+日期：2026-10-04；分支 `feat/d362-libvirt-rpc-bounds`（base `v2 @ 6227b2c`）；决策 #362。
+真机 nfvis-vm：**2.0.0~dev73**（本分支构建并 dpkg 安装）；四服务 active；sem-vm running。
+对照基线：round142 半程体检 `docs/evidence/v2-round142-midpoint-audit.txt` §1-2（R142-2 真机复现：
+`kill -STOP libvirtd` 后 75s：无 `COMPUTE_UNAVAILABLE`、journal 零探活/中断/复连记录、
+`show virtual-machine-functions` 挂到客户端 90s 超时；`kill -CONT` 后静默自愈）。
+事实源：journal（nfvisd 日志）、`show alarms active`、命令计时、`/metrics` 取值、Unix 信号。
+
+§0 结论
+- **R142-2 收口**：libvirt 楔死（socket 可连、零响应）不再让任何调用无界挂起——
+  ① 执行中的 RPC 到硬上界即**关闭自持 conn**（#349 同一中断手段）并如实报错；
+  ② 探活据此在阈值窗口内判「连接中断」→ `COMPUTE_UNAVAILABLE`（运行期文案）→ 有界复连；
+  ③ `kill -CONT`/底座恢复后自动复连、消警（#354 语义不变）；
+  ④ VPP 侧提交不被 libvirt 卡死连带；`/metrics` 有界返回并如实给 `runtime_available=0`。
+- **审查修正入册（重要）**：「上界一到无条件关连接」会**误杀合法长操作**（快照创建/回滚恰逢探活 =
+  连接被探活打断）——已改为**排队/执行两段分开判**：排队到期 = 连接只是忙（`ErrConnBusy`，探活按
+  健康跳过、**不关连接**）；执行中到期 = 判假死（关连接）。单测双向钉住（关 / 不关）。
+- **边界（如实）**：楔死检出延迟取决于「第一个撞上楔死的调用」的上界——实测两种：空闲时首受害者是
+  探活（5s 上界）≈ 35s 内出告警；首受害者是 30s 上界的巡检读 ≈ 70s。ctx 无 deadline 的读在楔死中
+  最多等前一个调用的上界（实测 22.7s）后快速失败——**有界**（对照修复前：无界，拖到客户端 90s）。
+
+§1 真机四维验证（三段 SIGSTOP 复现，均带时间戳）
+
+1.1 第一段：检出 + 告警 + 读取有界（10:12:26 STOP）
+  - STOP 前基线：`show virtual-machine-functions` 正常（sem-vm running）、告警仅常态 `HUGEPAGE_POOL_ORPHAN`。
+  - **10:13:10**（STOP 后 44s）journal：
+    `WARN VM 状态巡检 err="VM sem-vm 状态查询: libvirt 调用超时（执行中未在 30s 内返回，连接已关闭，
+     将由常驻状态机自动复连）: context deadline exceeded"` ⇒ **30s 硬上界真的落到了阻塞点**（修复前此
+     调用永不返回，巡检持 recoveryMu 卡死）。
+  - **10:13:35**（STOP 后 69s）：`show alarms active` 出现
+    `warning COMPUTE_UNAVAILABLE libvirt: libvirt 连接中断，正在自动重连：VM 生命周期动作暂时不可用，
+     已有配置声明不受影响（原因：查找 domain __nfvis_probe__ 失败: invalid argument）…每 15 秒探活、
+     连接未恢复时按有界尝试自动复连；重连成功后本告警自动消解，无需重启 nfvis…`
+    journal 同刻：`libvirt 连接中断，开始自动复连`；**10:14:07**：`自动复连未成功，告警保持；将继续按
+     接入节奏重试`（libvirtd 仍 STOP，复连按 #354 语义退回 30s 节奏、永不放弃）。
+  - 楔死中的读取：`show virtual-machine-functions sem-vm` 返回 `state -;`（运行态如实不可用）——
+    实测一次 0.4s（连接已被前序调用关闭后快速失败）、一次 22.7s（排在 30s 上界的巡检读之后，
+    **有界**失败；对照修复前：无界、拖到客户端 90s 超时）。
+  - 反例对照：STOP 期间 journal 的探活失败文案是「查找 domain __nfvis_probe__ 失败: invalid argument」
+    ——连接已被上界关闭后 go-libvirt 对死连接的即时错误（可辨识、非静默）。
+
+1.2 第二段：自愈（10:14:29 CONT）
+  - **10:14:37**（CONT 后 8s）：`INFO libvirt 连接已恢复（自动复连成功）`（#354 的 onReconnected：
+    换装 + 消警 + `EnsureConsistent` 补跑）。
+  - 告警核对：`show alarms active` 中 `COMPUTE_UNAVAILABLE` **计数 0**（自动消解）；
+    `show virtual-machine-functions sem-vm` 恢复可读；`/metrics` 的
+    `nfvis_vnf_runtime_available{kind="vm"}=1`。
+
+1.3 第三段：对抗性（/metrics 有界 + 错误不留「静默 0」）与跨对象（VPP 侧提交不被连带）
+  - 10:15:20 STOP；40s 后（仍楔死）`set interfaces ens224 description wedge-probe` + `commit`
+    **0.374s 成功**（revision 1674，随后 delete 1675）——libvirt 楔死**不连带** VPP 侧提交。
+  - 10:16:37 STOP；8s 后 `/metrics` **2.027s 返回**，取值
+    `nfvis_vnf_runtime_available{kind="vm"} 0`（查询不可用**如实置 0**，聚合 `nfvis_vnf_running{kind="vm"} 0`
+    配套「不可信」信号——不在看板上静默呈「全停」而无提示）。
+  - 同段读取：`show virtual-machine-functions sem-vm` 22.7s 后返回 `state -;`（有界，见 1.1）。
+  - CONT 后 ~1s：`libvirt 连接已恢复（自动复连成功）`；告警 `COMPUTE_UNAVAILABLE` 计数 0。
+
+1.4 无「误杀」观测（长操作保护）
+  - 三段楔死之外，当日窗口内**零次**非预期复连/告警（journal 无其它「连接中断/恢复」对）；
+  - 长 RPC 与探活交错时的「忙」路径由单测钉住：`TestCallQueuedTimeoutReportsBusyWithoutClosingConn`
+    （排队超时返回 `ErrConnBusy`、**不关连接**、前面正在执行的调用**不受影响**完成）——探活对它按健康
+    跳过（`dynamicCompute.Probe`），不再出现「快照创建恰逢探活 ⇒ 连接被关」的误杀。
+
+§2 单元测试与自检
+  - `internal/orchestrator/compute/conn_libvirt_bounded_test.go`：`call` 四例（**执行中**超时关自持 conn
+    ——net.Pipe 对端读到 EOF；**排队**超时不关连接（本轮新增，审查修正）；错误透传不误关；上界远大于
+    fn 耗时；`l==nil` 用既有文案）。
+  - `internal/orchestrator/network/vpp_govpp_test.go`：`useBounded` 三例（超时关句柄+清缓存、正常路径、
+    closeFn 为 nil）。`stats_linux.go` 的 `statsRead` 改用 `useBounded(statsReadTimeout=2s)`（一次
+    statsRead 两段各自受 2s 上界，合计 ≤4s ≤ 采集上界 5s）。
+  - **红-绿抽查**：暂时摘掉执行超时路径的 `interrupt()` ⇒ `TestCallHardBoundOnBlockedFnClosesSelfConn`
+    按预期失败；恢复后全绿。
+  - `GOFLAGS=-p=1 make check` RC=0（决策条数 264；含 linux 交叉构建 `GOOS=linux go build ./...`）。
+
+§3 四套件复跑（dev73；夹具 `cli-semantic-fixture.sh up`；fulltest 前停 sem-vm）
+  cli-fulltest **254/0/18**（与 round141/143/144 基线逐项一致：零失败、18 条预期报错）
+  cli-semantic-check **26/0/3**（与基线一致）
+  cli-lifecycle-check **23/0/2**（与基线一致。**首跑为 22/0/3 + 登记 1**：L3-2 因邻居表当刻无
+  对端条目按设计跳过（同 round143/144 的现场时序现象）；「登记 1」为 L2-3 的附注——日志窗口内含
+  本轮多段 VPP 重启/底座不可用期间产生的 3 条「未收敛」行，按「对账时 VPP 不可用＝查不了 ≠ 查到
+  残渣」如实登记为观察项（非产品回归）。邻居条目在场后复跑即 `✓ L3-2 …（5/5 应答）`、登记 0）
+  cli-pty-smoke **10/10**
+
+§4 现场与清场
+  - libvirtd 三段 STOP 均已 CONT（`systemctl is-active libvirtd`=active；virsh 可控）；
+  - 配置回夹具形态（ens224 description 测试项已删，revision 1675）；告警仅常态 `HUGEPAGE_POOL_ORPHAN`；
+  - sem-vm/sem-ct/sem-vs/dns-vs 回夹具态（套件流程）。
+
+§5 教训与边界（入册）
+  1. **「超时就关连接」必须先分清「排队」与「执行中」**：排队超时关连接会误杀前面正在执行的合法
+     长 RPC（审查抓到；快照创建/回滚恰逢 15s 探活即中招）。修正是两段分开 + `ErrConnBusy`，并由
+     探活按健康跳过——「连接忙 ≠ 连接坏」。**写契约时把这条边界写进了 #362 的处置 ④**。
+  2. **检出延迟如实登记**：硬上界保证「每个调用有界」，但楔死告警的延迟 = 首个受害者调用的上界 +
+     两轮探活（实测 35s~70s 两种）。若将来要求更短，方向是给巡检读也带上更短 ctx（本轮未做）。
+  3. **事故入册（本会话）**：审查期间用 `git checkout -- <file>` 误还原了子智能体**未提交**的实现
+     （当时只有契约提交在库里）——从子智能体会话记录（`~/.zcode/cli/rollout/model-io-sess_subagent_*.jsonl`
+     里 Write 工具参数的完整文件内容）找回并重打审查修正。**流程教训：子智能体产出先 commit（或至少
+     `git add`）再动任何 git 还原类命令**。
+  4. 非 unix 形态（qemu+tcp/tls，产品不支持）无自持 conn 可关，上界只能「返回失败」不能真中断——
+     与 #349 同口径，注释与证据均如实说明。
