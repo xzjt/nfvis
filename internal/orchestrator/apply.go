@@ -384,7 +384,7 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	}
 	for _, vrf := range new.Vrfs {
 		if o, ok := oldVRFs[vrf.Name]; !ok || !configEqual(o, vrf) {
-			op := applyOp(
+			vrfOp := applyOp(
 				VrfOpDesc(vrf.Name),
 				func(ctx context.Context) error { return a.net.ApplyVRF(ctx, vrf) },
 				vrf.Name, ok,
@@ -392,8 +392,39 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 				func(ctx context.Context) error { return a.net.DeleteVRF(ctx, vrf.Name) },
 			)
 			// 复合操作（建表 → 配地址 → 置表 → 下路由）：失败时可能已部分生效，需按旧配置复原。
-			op.compensateOnFail = true
-			ops = append(ops, op)
+			vrfOp.compensateOnFail = true
+			ops = append(ops, vrfOp)
+			// 决策 #361：L3 接口一级的差分撤销（与 removedRoutes 同一风格），紧跟本次 ApplyVRF
+			// 之后执行、且位于删除段之前——此前这两类撤销没有任何生产路径：ApplyVRF 只对仍声明
+			// AclIn 的接口下发绑定（对「不再声明」不复核），声明里删掉 l3-interface 也不回收
+			// （口留原表、地址不摘、deny 绑定继续拦；round142 真机实测）。
+			//   - l3-acl-unbind：接口仍在、acl-in 被清 ⇒ 只撤绑定与伴随 macip；
+			//   - del-l3-if：接口整条被删 ⇒ 回收（清地址/解绑/移回默认表/摘登记）。
+			// 顺序也是「先解引用、后删被引用」（#342 同族）：绑定撤销先于删除段里的 del-acl，
+			// 否则删 ACL 会撞上仍指向它的陈旧绑定。undo 与该 VRF 的 apply op 同源（ApplyVRF(old)），
+			// 回滚时把旧声明的接口与绑定整体复原。
+			if ok {
+				for _, li := range l3ACLUnbinds(o, vrf) {
+					li := li
+					ops = append(ops, op{
+						desc: fmt.Sprintf("l3-acl-unbind[%s/%s]", vrf.Name, l3IfaceKeyOf(li)),
+						run: func(ctx context.Context) error {
+							return a.net.UnbindL3IfaceACL(ctx, vrf.Name, li)
+						},
+						undo: func(ctx context.Context) error { return a.net.ApplyVRF(ctx, o) },
+					})
+				}
+				for _, li := range removedL3Ifaces(o, vrf) {
+					li := li
+					ops = append(ops, op{
+						desc: fmt.Sprintf("del-l3-if[%s/%s]", vrf.Name, l3IfaceKeyOf(li)),
+						run: func(ctx context.Context) error {
+							return a.net.DeleteL3Interface(ctx, vrf.Name, li)
+						},
+						undo: func(ctx context.Context) error { return a.net.ApplyVRF(ctx, o) },
+					})
+				}
+			}
 		}
 	}
 	// —— 新增/变更：数据面 DNS 代理（决策 #345，FR-NET-010）——
@@ -677,6 +708,66 @@ func removedRoutes(old, new model.Vrf) []model.Route {
 		}
 		seen[k] = true
 		out = append(out, r)
+	}
+	return out
+}
+
+// l3IfaceKeyOf 一条 l3-interface 在声明里的身份：接口名 + vlan 子接口。
+//
+// 刻意含 vlan：同一物理口按不同 vlan 声明的子接口在 VPP 侧是两个独立 sw_if_index，
+// 只按接口名做键会把「vlan 100 改成 vlan 200」判成「接口还在」——旧子接口的地址与 ACL
+// 绑定就留在了数据面（正是本决策在修的残留形态）。Vlan==0 时退化为接口名本身。
+func l3IfaceKeyOf(li model.L3Interface) string {
+	if li.Vlan > 0 {
+		return fmt.Sprintf("%s.%d", li.Interface, li.Vlan)
+	}
+	return li.Interface
+}
+
+// removedL3Ifaces 返回 old 里声明、new 里不再声明的 l3-interface（去重、保持声明序）：
+// 即「接口本身要被回收」的撤销集合，供 del-l3-if 计划操作调用 DeleteL3Interface
+// （清地址、解绑 ACL/伴随 macip、移回默认表、摘登记；决策 #361）。
+func removedL3Ifaces(old, new model.Vrf) []model.L3Interface {
+	keep := make(map[string]bool, len(new.L3Interfaces))
+	for _, li := range new.L3Interfaces {
+		keep[l3IfaceKeyOf(li)] = true
+	}
+	seen := make(map[string]bool, len(old.L3Interfaces))
+	var out []model.L3Interface
+	for _, li := range old.L3Interfaces {
+		k := l3IfaceKeyOf(li)
+		if keep[k] || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, li)
+	}
+	return out
+}
+
+// l3ACLUnbinds 返回「接口仍在声明里、acl-in 从有到无」的 l3-interface（去重、保持声明序）：
+// 只需撤销数据面绑定（UnbindL3IfaceACL），接口本身不回收。
+//
+// 接口被整条删掉的不进这里（由 removedL3Ifaces 的 del-l3-if 一并解绑）；
+// acl-in 由非空改成**另一个非空**同样不解绑（ApplyVRF 的绑定是替换语义，旧绑定随新绑定覆盖）。
+func l3ACLUnbinds(old, new model.Vrf) []model.L3Interface {
+	now := make(map[string]model.L3Interface, len(new.L3Interfaces))
+	for _, li := range new.L3Interfaces {
+		now[l3IfaceKeyOf(li)] = li
+	}
+	seen := make(map[string]bool, len(old.L3Interfaces))
+	var out []model.L3Interface
+	for _, li := range old.L3Interfaces {
+		k := l3IfaceKeyOf(li)
+		if li.AclIn == "" || seen[k] {
+			continue
+		}
+		nl, still := now[k]
+		if !still || nl.AclIn != "" {
+			continue
+		}
+		seen[k] = true
+		out = append(out, li)
 	}
 	return out
 }

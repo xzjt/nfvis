@@ -126,6 +126,14 @@ type NetworkProvider interface {
 	// ApplyVRF 只下发声明里的路由（只加不撤），DeleteVRF 依赖删表而 VPP 会保住仍被接口
 	// 占用的表——两条路径都不会让既有路由消失，故撤销只能由声明驱动的 diff 显式下发。
 	DeleteRoute(ctx context.Context, vrfName string, route model.Route) error
+	// UnbindL3IfaceACL 撤销一条 L3 接口的 acl-in 绑定与伴随 macip 白名单（决策 #361）：
+	// ApplyVRF 只对仍声明 AclIn 的接口绑定、对「不再声明」不复核，接口仍要显式解绑，
+	// 否则 VPP 侧 deny 继续生效而配置/读视图全干净。接口不在数据面＝已达成（不报错）。
+	UnbindL3IfaceACL(ctx context.Context, vrfName string, iface model.L3Interface) error
+	// DeleteL3Interface 回收一条已从声明里删除的 L3 接口（决策 #361）：清地址 → 解绑
+	// IP ACL 与伴随 macip → 移回默认表（v4/v6）→ 摘进程内登记。此前无任何路径回收，
+	// 口留在原表且地址/绑定原样生效。
+	DeleteL3Interface(ctx context.Context, vrfName string, iface model.L3Interface) error
 	ApplyNAT(ctx context.Context, nat model.NatConfig) error
 	ApplySpan(ctx context.Context, pm model.PortMirroring) error
 	DeleteSpan(ctx context.Context, name string) error
@@ -249,14 +257,20 @@ func (noopNetwork) ApplyVRF(context.Context, model.Vrf) error                   
 func (noopNetwork) DeleteVRF(context.Context, string) error                      { return nil }
 func (noopNetwork) ApplyRoute(context.Context, string, model.Route) error        { return nil }
 func (noopNetwork) DeleteRoute(context.Context, string, model.Route) error       { return nil }
-func (noopNetwork) ApplyNAT(context.Context, model.NatConfig) error              { return nil }
-func (noopNetwork) ApplySpan(context.Context, model.PortMirroring) error         { return nil }
-func (noopNetwork) DeleteSpan(context.Context, string) error                     { return nil }
-func (noopNetwork) ApplyQos(context.Context, model.QosPolicy) error              { return nil }
-func (noopNetwork) DeleteQos(context.Context, string) error                      { return nil }
-func (noopNetwork) ApplyVnfInterface(context.Context, VnfPort) error             { return nil }
-func (noopNetwork) DeleteVnfInterface(context.Context, string, string) error     { return nil }
-func (noopNetwork) EnsureConsistent(context.Context, model.Config) []error       { return nil }
+func (noopNetwork) UnbindL3IfaceACL(context.Context, string, model.L3Interface) error {
+	return nil
+}
+func (noopNetwork) DeleteL3Interface(context.Context, string, model.L3Interface) error {
+	return nil
+}
+func (noopNetwork) ApplyNAT(context.Context, model.NatConfig) error          { return nil }
+func (noopNetwork) ApplySpan(context.Context, model.PortMirroring) error     { return nil }
+func (noopNetwork) DeleteSpan(context.Context, string) error                 { return nil }
+func (noopNetwork) ApplyQos(context.Context, model.QosPolicy) error          { return nil }
+func (noopNetwork) DeleteQos(context.Context, string) error                  { return nil }
+func (noopNetwork) ApplyVnfInterface(context.Context, VnfPort) error         { return nil }
+func (noopNetwork) DeleteVnfInterface(context.Context, string, string) error { return nil }
+func (noopNetwork) EnsureConsistent(context.Context, model.Config) []error   { return nil }
 
 // NewNoopCompute 空计算编排（M4 替换为 libvirt 实现；M4-3 起真实实现接入 nfvisd）。
 func NewNoopCompute() ComputeProvider { return noopCompute{} }

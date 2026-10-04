@@ -553,6 +553,25 @@ func (n *L2Network) DeleteRoute(ctx context.Context, vrfName string, r model.Rou
 	return n.l3.DeleteRoute(ctx, vrfName, r)
 }
 
+// UnbindL3IfaceACL 撤销一条 L3 接口的 acl-in 绑定与伴随 macip（决策 #361）。调用时机：提交编排
+// 在「接口仍在声明里、acl-in 被清」时构造 l3-acl-unbind 计划操作（在本 VRF 的 ApplyVRF 之后、
+// 删除段之前）。未注入 L3 编排时为空操作（noop/无 VPP 路径）。
+func (n *L2Network) UnbindL3IfaceACL(ctx context.Context, vrfName string, li model.L3Interface) error {
+	if n.l3 == nil {
+		return nil
+	}
+	return n.l3.UnbindL3IfaceACL(ctx, vrfName, li)
+}
+
+// DeleteL3Interface 回收一条已从声明里删除的 L3 接口（决策 #361：清地址 → 解绑 ACL/伴随 macip
+// → 移回默认表 → 摘登记）。调用时机：提交编排的 del-l3-if 计划操作。未注入 L3 编排时空操作。
+func (n *L2Network) DeleteL3Interface(ctx context.Context, vrfName string, li model.L3Interface) error {
+	if n.l3 == nil {
+		return nil
+	}
+	return n.l3.DeleteL3Interface(ctx, vrfName, li)
+}
+
 // MACTable 供 /virtual-switches/{name}/mac-table 运行态查询（M3-3）。
 func (n *L2Network) MACTable(ctx context.Context, name string) ([]MACTableEntry, error) {
 	return n.l2.MACTable(ctx, name)
