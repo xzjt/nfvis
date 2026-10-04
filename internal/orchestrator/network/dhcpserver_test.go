@@ -16,6 +16,7 @@ package network
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -86,6 +87,12 @@ type fakeDHCPServerClient struct {
 	bridged map[string]bool   // "idx:bd" → 已入 bridge-domain
 	up      map[uint32]bool
 	deleted []uint32
+
+	// failDelete 注入 TapDelete 失败（R142-4：tap 删不掉时租约文件必须保留）。
+	// 错误文案不带 `-2`/`Invalid sw_if_index`（不得命中 isMissingIfaceErr 的「已达成」容错）。
+	failDelete bool
+	// failBridge 注入 SetL2Bridge 失败（R142-4 同族：tap 已建后任何一步失败都不得留下未登记 tap）。
+	failBridge bool
 }
 
 func newFakeDHCPServerClient() *fakeDHCPServerClient {
@@ -102,6 +109,9 @@ func (c *fakeDHCPServerClient) TapCreate(hostIfName, _ string) (uint32, error) {
 func (c *fakeDHCPServerClient) TapDelete(idx uint32) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.failDelete {
+		return fmt.Errorf("注入失败：删除 tap 未成功（VPP 不可用）")
+	}
 	if _, ok := c.taps[idx]; !ok {
 		return fmt.Errorf("tap_delete_v2 retval=-2（No such interface）")
 	}
@@ -121,6 +131,9 @@ func (c *fakeDHCPServerClient) TapDump() ([]TapInfo, error) {
 func (c *fakeDHCPServerClient) SetL2Bridge(idx, bd uint32, enable bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.failBridge && enable {
+		return fmt.Errorf("注入失败：加入 bridge-domain 未成功")
+	}
 	key := fmt.Sprintf("%d:%d", idx, bd)
 	if enable {
 		c.bridged[key] = true
@@ -182,7 +195,8 @@ func (f *tapFactory) open(name string) (dhcpTapTransport, error) {
 		f.fails--
 		return nil, fmt.Errorf("内核侧接口 %s 不存在（注入失败）", name)
 	}
-	if t := f.taps[name]; t != nil {
+	// 已关闭的旧 tap 不再复用（真实 AF_PACKET 重开会拿到新 fd；R142-4 的重放路径依赖这一点）。
+	if t := f.taps[name]; t != nil && !t.isClosed() {
 		return t, nil
 	}
 	t := &fakeDHCPTap{closed: make(chan struct{})}
@@ -1130,5 +1144,325 @@ func TestDHCPServerPuntPathIgnoresForeignPackets(t *testing.T) {
 	binary.BigEndian.PutUint16(v6[12:14], 0x86dd)
 	if _, ok := parseDHCPEtherFrame(v6); ok {
 		t.Fatal("IPv6 帧不应解析为 DHCP")
+	}
+}
+
+// ---------- R142-3 / R142-4 回归（round142 半程体检；决策 #360） ----------
+
+// TestDHCPServerProviderIdempotentSyncKeepsTapMAC R142-3 回归（round142 真机复现）：
+// 幂等 Sync（15s 巡检/重复提交走同一路径）不得清空应答的以太源——tapMAC 归运行态、与内核
+// tap 同生命期。修复前每次 Sync 用配置规格覆盖 rt.spec（无 MAC 字段 ⇒ 零值），OFFER 的
+// 以太源变 00:00:00:00:00:00（BD 学到 bogon 表项；做 L2 源过滤/端口安全的环境会丢帧）。
+func TestDHCPServerProviderIdempotentSyncKeepsTapMAC(t *testing.T) {
+	p, _, _, factory, _ := newEnabledProvider(t)
+	ctx := context.Background()
+	vs := vsDHCPServer()
+	if err := p.Sync(ctx, vs); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	tapName := DHCPServerTapName(vs.Name)
+	tapMAC := factory.get(tapName).MAC()
+	if len(tapMAC) == 0 || tapMAC.String() == "00:00:00:00:00:00" {
+		t.Fatalf("前置：假 tap 应给出非零 MAC: %v", tapMAC)
+	}
+	chaddr := mustMAC(t, "aa:bb:cc:dd:ee:01")
+
+	// 先过一轮幂等 Sync（真机现场：启用后 15s 巡检先跑过一轮，正是复现条件）
+	if err := p.Sync(ctx, vs); err != nil {
+		t.Fatalf("二次 Sync: %v", err)
+	}
+	p.handleTapFrame(vs.Name, dhcpClientFrame(chaddr, dhcpDiscover, nil, nil, nil))
+	sent := factory.get(tapName).frames()
+	if len(sent) != 1 {
+		t.Fatalf("应回 1 条 OFFER，实得 %d", len(sent))
+	}
+	if off := parseReplyFrame(t, sent[0]); string(off.ethSrc) != string(tapMAC) {
+		t.Fatalf("OFFER 以太源应为内核 tap MAC（幂等 Sync 后仍成立）: %s（期望 %s）", off.ethSrc, tapMAC)
+	}
+
+	// 再连续几轮（巡检节奏）：源 MAC 仍未漂移
+	for i := 0; i < 3; i++ {
+		if err := p.Sync(ctx, vs); err != nil {
+			t.Fatalf("第 %d 轮幂等 Sync: %v", i+3, err)
+		}
+	}
+	p.handleTapFrame(vs.Name, dhcpClientFrame(chaddr, dhcpDiscover, nil, nil, nil))
+	sent = factory.get(tapName).frames()
+	last := parseReplyFrame(t, sent[len(sent)-1])
+	if last.ethSrc.String() == "00:00:00:00:00:00" {
+		t.Fatal("多轮幂等 Sync 后 OFFER 以太源被清成零值（R142-3 回归）")
+	}
+	if string(last.ethSrc) != string(tapMAC) {
+		t.Fatalf("多轮幂等 Sync 后 OFFER 以太源漂移: %s（期望 %s）", last.ethSrc, tapMAC)
+	}
+}
+
+// TestDHCPServerTeardownKeepsLeaseFileWhenTapDeleteFails R142-4：停用回收顺序——
+// tap 删除失败 ⇒ teardown 失败、提交回滚、服务器仍要服务（客户端仍持旧地址）：租约文件必须
+// 保留，否则租约表被抹、地址可被重复分配（v1 无冲突检测）；修复后重试（tap 删除成功）即回收。
+func TestDHCPServerTeardownKeepsLeaseFileWhenTapDeleteFails(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "leases")
+	c := newFakeDHCPServerClient()
+	p, _ := newTestDHCPServer(t, c, &fakePunt{}, newTapFactory(), dir)
+	ctx := context.Background()
+	vs := vsDHCPServer()
+	name := vs.Name
+	path := filepath.Join(dir, name+".json")
+
+	if err := p.Sync(ctx, vs); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	p.handleTapFrame(name, dhcpClientFrame(mustMAC(t, "aa:bb:cc:dd:ee:09"), dhcpRequest,
+		net.ParseIP("192.168.100.10"), net.ParseIP("192.168.100.1"), nil))
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("前置：租约文件应存在: %v", err)
+	}
+
+	// tap 删除失败：停用必须失败并保留租约文件（错误里要说明原因）
+	c.failDelete = true
+	err := p.Sync(ctx, model.VirtualSwitch{Name: name})
+	if err == nil {
+		t.Fatal("tap 删除失败时停用应报错（提交将回滚、服务器仍要服务）")
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("tap 未删成时租约文件必须保留（否则回滚后地址可被重复分配）: %v", statErr)
+	}
+	if !hasSub(err.Error(), "租约文件保留") {
+		t.Fatalf("错误应说明租约文件保留: %v", err)
+	}
+
+	// 重试（VPP 恢复）：一次停用即回收
+	c.failDelete = false
+	if err := p.Sync(ctx, model.VirtualSwitch{Name: name}); err != nil {
+		t.Fatalf("重试停用: %v", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("重试成功后租约文件应被清除: %v", statErr)
+	}
+	if len(c.deleted) != 1 {
+		t.Fatalf("重试应删掉 VPP 侧 tap: %v", c.deleted)
+	}
+}
+
+// TestDHCPServerResetClearsTapIndex R142-4：VPP 重连 reset 后旧 sw_if_index 必须作废
+// （可能已被 VPP 复用给别的接口——端口读视图不得再按它过滤、停用不得再按它删除）；
+// 停用回收一律回到「按 HostIfName 核对身份」路径。
+func TestDHCPServerResetClearsTapIndex(t *testing.T) {
+	p, c, _, factory, _ := newEnabledProvider(t)
+	ctx := context.Background()
+	vs := vsDHCPServer()
+	if err := p.Sync(ctx, vs); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	tapName := DHCPServerTapName(vs.Name)
+	var idx uint32
+	for _, ti := range mustDump(t, c) {
+		if ti.HostIfName == tapName {
+			idx = ti.SwIfIndex
+		}
+	}
+	if idx == 0 || !p.TapIndexes()[idx] {
+		t.Fatalf("前置：应登记 VPP 侧索引 %d: %v", idx, p.TapIndexes())
+	}
+
+	p.reset() // VPP 重连
+	if got := p.TapIndexes(); len(got) != 0 {
+		t.Fatalf("reset 应清空登记索引（旧索引可能被 VPP 复用）: %v", got)
+	}
+	if !factory.get(tapName).isClosed() {
+		t.Fatal("reset 应关闭内核侧 tap")
+	}
+
+	// 停用：不按旧索引，按 HostIfName 找到存量再删（VPP 侧对象此时仍在）
+	if err := p.Sync(ctx, model.VirtualSwitch{Name: vs.Name}); err != nil {
+		t.Fatalf("reset 后停用: %v", err)
+	}
+	if len(c.deleted) != 1 || c.deleted[0] != idx {
+		t.Fatalf("停用应按 HostIfName 删掉存量 tap %d: %v", idx, c.deleted)
+	}
+}
+
+// TestDHCPServerPuntRegisterFailureKeepsTapRegistered R142-4：punt 注册失败不得留
+// 「未登记 tap」——tap 已建、已入 BD 就必须在 TapIndexes 过滤集内（否则泄漏进用户端口视图，
+// source=runtime 且用户删不掉，与 #359 ⑦ 相反）；注册失败如实报错、巡检重试重申成功后自愈。
+func TestDHCPServerPuntRegisterFailureKeepsTapRegistered(t *testing.T) {
+	p, c, fp, factory, _ := newEnabledProvider(t)
+	ctx := context.Background()
+	vs := vsDHCPServer()
+	tapName := DHCPServerTapName(vs.Name)
+
+	fp.regErr = fmt.Errorf("注入失败：punt 注册失败")
+	if err := p.Sync(ctx, vs); err == nil {
+		t.Fatal("punt 注册失败应报错（本机 DHCP 未收敛）")
+	}
+	dumps := mustDump(t, c)
+	if len(dumps) != 1 {
+		t.Fatalf("tap 应已建: %+v", dumps)
+	}
+	idx := dumps[0].SwIfIndex
+	if !p.TapIndexes()[idx] {
+		t.Fatalf("punt 失败时 tap 仍须登记（否则泄漏进用户端口视图）: %v", p.TapIndexes())
+	}
+	if !c.bridgedOK(idx, BDID(vs.Name)) {
+		t.Fatal("tap 应已入 BD")
+	}
+	if factory.get(tapName) != nil {
+		t.Fatal("punt 未成功时不应打开内核侧 tap（半功能不运行）")
+	}
+
+	// 巡检重试（注册恢复）：一次 Sync 收敛、打开内核侧 tap、不重复建 tap
+	fp.regErr = nil
+	if errs := p.Reconcile(ctx, model.Config{VirtualSwitches: []model.VirtualSwitch{vs}}); len(errs) != 0 {
+		t.Fatalf("重试应成功: %v", errs)
+	}
+	if !fp.registered {
+		t.Fatal("重试应完成 punt 注册")
+	}
+	if factory.get(tapName) == nil || factory.get(tapName).isClosed() {
+		t.Fatal("收敛后应打开内核侧 tap")
+	}
+	if len(mustDump(t, c)) != 1 {
+		t.Fatal("重试不应重复建 tap")
+	}
+}
+
+// TestDHCPServerBridgeJoinFailureKeepsTapRegistered R142-4（同族加固）：入 BD 失败同样不得
+// 留下未登记 tap（登记先于入 BD/置 up）；停用即按 HostIfName 回收。
+func TestDHCPServerBridgeJoinFailureKeepsTapRegistered(t *testing.T) {
+	p, c, _, _, _ := newEnabledProvider(t)
+	ctx := context.Background()
+	vs := vsDHCPServer()
+
+	c.failBridge = true
+	if err := p.Sync(ctx, vs); err == nil {
+		t.Fatal("入 BD 失败应报错")
+	}
+	dumps := mustDump(t, c)
+	if len(dumps) != 1 {
+		t.Fatalf("tap 应已建: %+v", dumps)
+	}
+	if !p.TapIndexes()[dumps[0].SwIfIndex] {
+		t.Fatalf("入 BD 失败时 tap 仍须登记（否则泄漏进用户端口视图）: %v", p.TapIndexes())
+	}
+
+	// 停用即回收（按 HostIfName；不依赖入 BD 是否成功过）
+	c.failBridge = false
+	if err := p.Sync(ctx, model.VirtualSwitch{Name: vs.Name}); err != nil {
+		t.Fatalf("停用: %v", err)
+	}
+	if len(c.deleted) != 1 {
+		t.Fatalf("停用应删掉 tap: %v", c.deleted)
+	}
+}
+
+// TestDHCPServerProviderClose Close 单测（此前无覆盖）：注销 UDP/67 注册 + 关内核侧 tap +
+// 关接收 socket；重复 Close 幂等（不得再发注销）。
+func TestDHCPServerProviderClose(t *testing.T) {
+	p, _, fp, factory, _ := newEnabledProvider(t)
+	ctx := context.Background()
+	vs := vsDHCPServer()
+	if err := p.Sync(ctx, vs); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if !fp.registered {
+		t.Fatal("前置：应已注册 punt")
+	}
+	deregBefore := fp.deregisters
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !factory.get(DHCPServerTapName(vs.Name)).isClosed() {
+		t.Fatal("Close 应关闭内核侧 tap")
+	}
+	if fp.registered {
+		t.Fatal("Close 应注销 punt 注册（否则留一个指向已消失 socket 的注册＝域内 DHCP 黑洞）")
+	}
+	if fp.deregisters != deregBefore+1 {
+		t.Fatalf("Close 应注销恰好一次: %d → %d", deregBefore, fp.deregisters)
+	}
+
+	if err := p.Close(); err != nil { // 幂等
+		t.Fatalf("重复 Close: %v", err)
+	}
+	if fp.deregisters != deregBefore+1 {
+		t.Fatalf("重复 Close 不应再注销: %d", fp.deregisters)
+	}
+}
+
+// TestDHCPServerProviderReconcile Reconcile 单测（此前无覆盖）：幂等重收敛（不重建在场
+// tap）、VPP 重启后按 HostIfName 补齐并保留租约、到期租约回收并落盘。
+func TestDHCPServerProviderReconcile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "leases")
+	c := newFakeDHCPServerClient()
+	fp := &fakePunt{}
+	factory := newTapFactory()
+	p, fc := newTestDHCPServer(t, c, fp, factory, dir)
+	ctx := context.Background()
+	vs := vsDHCPServer()
+	name := vs.Name
+	tapName := DHCPServerTapName(name)
+	cfg := model.Config{VirtualSwitches: []model.VirtualSwitch{vs}}
+
+	if err := p.Sync(ctx, vs); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	// 一条真实租约（REQUEST→commit→落盘）
+	p.handleTapFrame(name, dhcpClientFrame(mustMAC(t, "aa:bb:cc:dd:ee:09"), dhcpRequest,
+		net.ParseIP("192.168.100.10"), net.ParseIP("192.168.100.1"), nil))
+	if n, _ := p.ActiveLeases(name); n != 1 {
+		t.Fatalf("前置：应有 1 条在租: %d", n)
+	}
+
+	// ① 幂等重收敛：在场 tap 不重建（身份与成员关系保持）、注册重申
+	if errs := p.Reconcile(ctx, cfg); len(errs) != 0 {
+		t.Fatalf("Reconcile: %v", errs)
+	}
+	dumps := mustDump(t, c)
+	if len(dumps) != 1 {
+		t.Fatalf("在场 tap 不应被重建: %+v", dumps)
+	}
+	if dumps[0].HostIfName != tapName || !c.bridgedOK(dumps[0].SwIfIndex, BDID(name)) {
+		t.Fatalf("重收敛后 tap 身份/成员关系应保持: %+v", dumps)
+	}
+	if fp.registers != 2 {
+		t.Fatalf("巡检应重申注册: %+v", fp)
+	}
+
+	// ② VPP 重启后补齐：reset + 数据面清空 ⇒ Reconcile 按 HostIfName 重建 tap，租约保留
+	p.reset()
+	c.wipe()
+	if errs := p.Reconcile(ctx, cfg); len(errs) != 0 {
+		t.Fatalf("VPP 重启后 Reconcile: %v", errs)
+	}
+	dumps = mustDump(t, c)
+	if len(dumps) != 1 || dumps[0].HostIfName != tapName {
+		t.Fatalf("VPP 重启后应按声明重建 tap: %+v", dumps)
+	}
+	if n, ok := p.ActiveLeases(name); !ok || n != 1 {
+		t.Fatalf("租约表应随 reset 保留: %d/%v", n, ok)
+	}
+	if got := factory.get(tapName); got == nil || got.isClosed() {
+		t.Fatal("重放应重开内核侧 tap")
+	}
+
+	// ③ 到期回收：推进时钟过租期 ⇒ Reconcile 清租约并落盘
+	fc.advance(time.Duration(vs.DhcpServerLeaseTimeSeconds)*time.Second + time.Minute)
+	if errs := p.Reconcile(ctx, cfg); len(errs) != 0 {
+		t.Fatalf("到期后 Reconcile: %v", errs)
+	}
+	if n, _ := p.ActiveLeases(name); n != 0 {
+		t.Fatalf("到期租约应被回收: %d", n)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, name+".json"))
+	if err != nil {
+		t.Fatalf("回收后应重写租约文件: %v", err)
+	}
+	var f dhcpLeaseFile
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatalf("租约文件应可解析: %v", err)
+	}
+	if len(f.Leases) != 0 {
+		t.Fatalf("到期条目不应留在文件里: %+v", f.Leases)
 	}
 }
