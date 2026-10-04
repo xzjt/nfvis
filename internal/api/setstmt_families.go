@@ -448,6 +448,26 @@ func emitVirtualSwitchFamily(w *stmtWriter, node *schema.Node, val any, prefix, 
 		if v, ok := m["dhcp_relay_server"]; ok && v != "" {
 			w.add(toks(prefix, "dhcp-relay", "server", formatScalar(v)))
 		}
+		// DHCP 服务器（决策 #359）：模型 5 个平铺键，语句树是 dhcp-server <leaf> 两层关键字。
+		// pool 必须两键齐备才启用，反推为一行两值的 pool 语句；可选叶子各自一行。
+		// （平铺键删空后不留 `dhcp_server` 空壳，此处无需剪壳。）
+		poolStart, okStart := m["dhcp_server_pool_start"].(string)
+		poolEnd, okEnd := m["dhcp_server_pool_end"].(string)
+		if okStart && okEnd && poolStart != "" && poolEnd != "" {
+			w.add(toks(prefix, "dhcp-server", "pool", poolStart, poolEnd))
+		} else if (okStart && poolStart != "") || (okEnd && poolEnd != "") {
+			// 模型校验要求两键同时给，正常建不出此态；只给一个时如实说明无法反推。
+			w.note("virtual-switches %s：DHCP 服务器租约池只配置了一个端点（须同时给），无法反推语句", lastTok(prefix))
+		}
+		if v, ok := m["dhcp_server_lease_time_seconds"].(float64); ok && v != 0 {
+			w.add(toks(prefix, "dhcp-server", "lease-time", formatScalar(v)))
+		}
+		if v, ok := m["dhcp_server_dns"]; ok && v != "" {
+			w.add(toks(prefix, "dhcp-server", "dns", formatScalar(v)))
+		}
+		if v, ok := m["dhcp_server_domain_name"]; ok && v != "" {
+			w.add(toks(prefix, "dhcp-server", "domain-name", formatScalar(v)))
+		}
 		// MAC 学习条数上限（决策 #337）：模型单值整数，语句树是单层关键字 learn-limit <n>
 		if v, ok := m["learn_limit"].(float64); ok && v != 0 {
 			w.add(toks(prefix, "learn-limit", formatScalar(v)))

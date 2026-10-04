@@ -209,6 +209,13 @@ func run() error {
 	// 优雅退出必须注销 punt（否则留一个指向已消失 socket 的注册＝域内 DNS 黑洞）
 	defer func() { _ = dnsProxy.Close() }()
 	netProvider.SetDNSProxy(dnsProxy)
+	// 决策 #359：域内 DHCP 服务器（用户态服务器 + 每交换机一条内置 L2 tap + UDP/67 punt；
+	// 恢复重放含它）。租约持久化到 /var/lib/nfvis/dhcp（独立于配置库，不进备份/恢复语义）。
+	dhcpServer := network.NewDHCPServerProviderFunc(vppMgr.DHCPServerClientFunc(), vppMgr.PuntClientFunc())
+	// 优雅退出：关 punt 接收 socket 并注销 UDP/67 注册（与 dnsProxy 同理——留一个指向
+	// 已消失 socket 的注册＝域内 DHCP 黑洞）。
+	defer func() { _ = dhcpServer.Close() }()
+	netProvider.SetDHCPServer(dhcpServer)
 	netProvider.SetACL(network.NewAclProviderFunc(vppMgr.AclClientFunc()))
 	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
 	netProvider.SetBond(network.NewBondProviderFunc(vppMgr.BondClientFunc()))
@@ -682,6 +689,12 @@ func run() error {
 					for _, e := range netProvider.ReconcileRecoveryAlarms(ctx, cfg) {
 						log.Warn("恢复收敛告警复核", "err", e)
 					}
+					// 决策 #359：DHCP 服务器的巡检收敛——补齐带外丢失的 tap/注册（与提交/
+					// 恢复收敛同一段 Sync）、到期租约回收、池耗尽告警复核。与残渣对账同块，
+					// 不另造巡检。
+					for _, e := range netProvider.ReconcileDHCPServer(ctx, cfg) {
+						log.Warn("DHCP 服务器巡检", "err", e)
+					}
 				}
 				recoveryMu.Unlock()
 			}
@@ -856,11 +869,14 @@ func run() error {
 		VPP: &vppController{mgr: vppMgr, applier: startupApplier, engine: engine,
 			// socket 供起后健康探测用（与连接管理器同一套接字）
 			socket: *vppSock},
-		L2:    &l2Controller{net: netProvider},
-		L3:    &l3Controller{net: netProvider},
-		LLDP:  &lldpController{net: netProvider},
-		State: state.New(vppMgr.Runtime()),
-		SRIOV: sriovProvider,
+		L2: &l2Controller{net: netProvider},
+		L3: &l3Controller{net: netProvider},
+		// 决策 #359：DHCP 服务器运行态读物（租约端点 + 端口读视图过滤内置 tap）。
+		// *network.L2Network 自持三个读物方法，直接传入。
+		DHCPServer: netProvider,
+		LLDP:       &lldpController{net: netProvider},
+		State:      state.New(vppMgr.Runtime()),
+		SRIOV:      sriovProvider,
 		DPDK: &dpdkController{b: dpdkBinder, rec: dpdkBindings, logger: log, facts: mgmtFacts,
 			// 数据面占用探测（发现 #13）：解绑前问 VPP「这个口还在你手里吗」
 			dataplane: func(ifname string) (bool, error) {

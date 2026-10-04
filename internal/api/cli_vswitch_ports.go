@@ -54,10 +54,15 @@ func switchPortViews(cfg model.Config, name string, runtimePorts []string) []mod
 }
 
 // runtimeBDPortNames 运行态该 BD 的成员口名（运行态不可用/该 BD 不在数据面时返回 nil）。
+// 决策 #359：内置 DHCP tap 按 sw_if_index 过滤（用户不可见/不可删，不用名字匹配）。
 func (x *cliExecutor) runtimeBDPortNames(name string) []string {
 	bds, err := x.bdStates()
 	if err != nil {
 		return nil
+	}
+	var taps map[uint32]bool
+	if x.dhcpSrv != nil {
+		taps = x.dhcpSrv.DHCPTapIndexes()
 	}
 	for _, bd := range bds {
 		if bd.Name != name {
@@ -65,6 +70,9 @@ func (x *cliExecutor) runtimeBDPortNames(name string) []string {
 		}
 		out := make([]string, 0, len(bd.Ports))
 		for _, p := range bd.Ports {
+			if taps[p.SwIfIndex] {
+				continue
+			}
 			out = append(out, p.Name)
 		}
 		return out
@@ -158,7 +166,16 @@ func (x *cliExecutor) showRuntimeSwitchPorts(name string) string {
 	fmt.Fprintf(&b, "%-16s %-7s %-7s %-12s %-12s %s\n", "Port", "Admin", "Link", "RxPkts", "TxPkts", "Shg")
 	items := make([]any, 0, len(bd.Ports))
 	states, _ := x.ifaceStates()
+	var taps map[uint32]bool
+	if x.dhcpSrv != nil {
+		taps = x.dhcpSrv.DHCPTapIndexes() // 决策 #359：内置 DHCP tap 不进用户端口视图
+	}
+	shown := 0
 	for _, p := range bd.Ports {
+		if taps[p.SwIfIndex] {
+			continue
+		}
+		shown++
 		row := map[string]any{"port": p.Name, "sw_if_index": p.SwIfIndex, "shg": p.Shg}
 		admin, link, rx, tx := "-", "-", "-", "-"
 		if st, ok := states[p.Name]; ok {
@@ -174,7 +191,7 @@ func (x *cliExecutor) showRuntimeSwitchPorts(name string) string {
 		fmt.Fprintf(&b, "%-16s %-7s %-7s %-12s %-12s %d\n", p.Name, admin, link, rx, tx, p.Shg)
 		items = append(items, row)
 	}
-	if len(bd.Ports) == 0 {
+	if shown == 0 {
 		b.WriteString("（该 BD 无成员口）\n")
 	}
 	x.structured = map[string]any{"bd_id": bd.ID, "name": bd.Name, "ports": items}

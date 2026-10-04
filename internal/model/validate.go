@@ -565,6 +565,45 @@ func (v *validator) checkVirtualSwitches(c Config) {
 					"（中继源地址自动取 BVI 的 IPv4 网关地址）", s.Name)
 			}
 		}
+		// 决策 #359：DHCP 服务器（用户态服务器 + 每交换机一条内置 L2 tap）。仅 L2 且已配
+		// **IPv4** BVI 网关（服务器在网关域里收广播、以 BVI 地址作 server-id/下发网关与缺省 DNS）；
+		// pool 是启用要件，两键须同时给出。**与 dhcp-relay 互斥**：两者争抢 UDP/67 的处理权
+		// （round140 真机实测 relay 的 proxy 会夺走 punt 注册），同一交换机同时配二者必然互相踩。
+		if s.DhcpServerPoolStart != "" || s.DhcpServerPoolEnd != "" || s.DhcpServerLeaseTimeSeconds != 0 ||
+			s.DhcpServerDNS != "" || s.DhcpServerDomainName != "" {
+			switch {
+			case s.Type == "l3":
+				v.errf(p+".dhcp_server_pool_start", "type=l3 交换机没有 BVI 网关，DHCP 服务器仅支持已配置网关的 L2 交换机")
+			case !gatewayHasV4(s.Gateway):
+				v.errf(p+".dhcp_server_pool_start", "配置 DHCP 服务器前须先 set virtual-switches %s gateway ip <ip-prefix>"+
+					"（服务器以 BVI 地址作 server-id 与下发网关）", s.Name)
+			}
+			if (s.DhcpServerPoolStart == "") != (s.DhcpServerPoolEnd == "") {
+				v.errf(p+".dhcp_server_pool_start", "DHCP 服务器租约池的起始与结束地址必须同时给出"+
+					"（set virtual-switches %s dhcp-server pool <start> <end>）", s.Name)
+			}
+			if s.DhcpServerPoolStart != "" && s.DhcpServerPoolEnd != "" {
+				v.checkDHCPServerPool(p, s)
+			}
+			if s.DhcpServerLeaseTimeSeconds != 0 &&
+				(s.DhcpServerLeaseTimeSeconds < MinDHCPServerLeaseSeconds || s.DhcpServerLeaseTimeSeconds > MaxDHCPServerLeaseSeconds) {
+				v.errf(p+".dhcp_server_lease_time_seconds", "租约时长 %d 秒超出范围：须为 %d-%d 秒（缺省 %d）",
+					s.DhcpServerLeaseTimeSeconds, MinDHCPServerLeaseSeconds, MaxDHCPServerLeaseSeconds,
+					DefaultDHCPServerLeaseSeconds)
+			}
+			if s.DhcpServerDNS != "" && !checkIP4(s.DhcpServerDNS) {
+				v.errf(p+".dhcp_server_dns", "下发的 DNS 地址 %q 必须是 IPv4 地址", s.DhcpServerDNS)
+			}
+			if s.DhcpServerDomainName != "" {
+				if len(s.DhcpServerDomainName) > 255 || strings.ContainsAny(s.DhcpServerDomainName, " \t") {
+					v.errf(p+".dhcp_server_domain_name", "下发的域名 %q 非法：不超过 255 字节且不含空白字符", s.DhcpServerDomainName)
+				}
+			}
+			if s.DhcpServerPoolStart != "" && s.DhcpRelayServer != "" {
+				v.errf(p+".dhcp_server_pool_start", "同一交换机不能同时配置 DHCP 服务器与 DHCP 中继"+
+					"（两者争抢 UDP/67 的处理权，真机实测中继的代理会夺走注册）：请删除 dhcp-relay 或 dhcp-server 之一")
+			}
+		}
 		// 决策 #345：数据面 DNS 代理的**按域上游**——逐条须为合法 IP（v4/v6），空串拒绝；
 		// 条数不设上限（多上游即多备份，按声明序尝试）。L3 交换机的转发域是其 l3-interface，
 		// 故不要求 BVI 网关（与 dhcp-relay 不同）。
@@ -627,6 +666,53 @@ func (v *validator) checkVirtualSwitches(c Config) {
 					"既不拦截也不计数（真机实证），绑定给不出任何保护。入向过滤请改用 L3 接口形态："+
 					"set virtual-switches %s l3-interface <ifname> acl-in <acl>（该形态已实测生效）", s.Name)
 			}
+		}
+	}
+}
+
+// checkDHCPServerPool 校验租约池语义（决策 #359）：与 BVI 的 IPv4 地址**同子网**（按 BVI
+// 前缀长度）、start ≤ end、不含 BVI 地址与子网网络/广播地址、地址数 ≤ 4096（超限说明上限）。
+// 纯边界计算与数据面共用 model.DHCPServerPoolRange（单一事实源）。
+func (v *validator) checkDHCPServerPool(p string, s VirtualSwitch) {
+	start, end := s.DhcpServerPoolStart, s.DhcpServerPoolEnd
+	lo, hi, ok := DHCPServerPoolRange(start, end)
+	if !ok {
+		v.errf(p+".dhcp_server_pool_start", "租约池 %q-%q 非法：两端都必须是合法 IPv4 地址且 start ≤ end", start, end)
+		return
+	}
+	if size := int(hi-lo) + 1; size > MaxDHCPServerPoolSize {
+		v.errf(p+".dhcp_server_pool_start", "租约池 %q-%q 共 %d 个地址，超出上限：最多 %d 个地址（含两端）",
+			start, end, size, MaxDHCPServerPoolSize)
+	}
+	bvi, bviNet, hasBVI := s.GatewayIPv4()
+	if !hasBVI {
+		return // 网关前置缺失已由调用方报错，这里不重复
+	}
+	// 同子网（按 BVI 前缀长度）：两端都必须落在 BVI 地址所属网段内——池是连续区间，
+	// 两端都在网段内即整段都在（网段是连续范围）。
+	if !bviNet.Contains(Uint32ToIPv4(lo)) || !bviNet.Contains(Uint32ToIPv4(hi)) {
+		v.errf(p+".dhcp_server_pool_start", "租约池 %q-%q 与 BVI 网关地址 %s 不在同一子网（%s）：池须与网关同子网",
+			start, end, bvi.String(), bviNet.String())
+	}
+	// 池不含 BVI 地址与子网的网络/广播地址（服务器自身不能把网关/网络地址租出去）。
+	netAddr := bviNet.IP.To4()
+	if netAddr == nil {
+		return
+	}
+	netU := uint32(netAddr[0])<<24 | uint32(netAddr[1])<<16 | uint32(netAddr[2])<<8 | uint32(netAddr[3])
+	ones, bits := bviNet.Mask.Size()
+	if bits != 32 || ones < 0 {
+		return
+	}
+	bcastU := netU | (^uint32(0) >> uint(ones))
+	bviU32, _ := IPv4ToUint32(bvi.String())
+	for _, excl := range []struct {
+		v    uint32
+		name string
+	}{{bviU32, "BVI 网关地址"}, {netU, "子网网络地址"}, {bcastU, "子网广播地址"}} {
+		if excl.v >= lo && excl.v <= hi {
+			v.errf(p+".dhcp_server_pool_start", "租约池 %q-%q 包含 %s %s：请缩小池范围避开它",
+				start, end, excl.name, Uint32ToIPv4(excl.v).String())
 		}
 	}
 }

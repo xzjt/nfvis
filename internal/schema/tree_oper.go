@@ -98,6 +98,8 @@ func OperRoot() *Node {
 					K("detail", "类型、成员端口、VLAN/VRF 配置"),
 					K("ports", "成员端口及状态/计数"),
 					K("mac-table", "MAC 学习表（仅 L2）"),
+					// 决策 #359：DHCP 服务器租约表（运行态；未配置 dhcp-server 时如实报未配置）。
+					K("dhcp-leases", "DHCP 租约表（仅配置了 dhcp-server 的交换机）"),
 					K("statistics", "每端口收发计数"),
 				),
 			),

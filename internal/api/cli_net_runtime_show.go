@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/xzjt/nfvis/internal/model"
 )
 
 const errRuntimeUnavailable = "%% VPP 未接入（编排器未装配），运行态不可用\n"
@@ -27,6 +29,10 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 	// 与 REST GET /virtual-switches/{name}/ports 同源；交换机未在配置中声明时内部退回运行态。
 	if len(args) >= 2 && (args[1] == "ports" || args[1] == "statistics") {
 		return x.showVSwitchPorts(args[0])
+	}
+	// 决策 #359：DHCP 租约表（运行态；未配置 dhcp-server 时如实报「未配置」而非空表）。
+	if len(args) >= 2 && args[1] == "dhcp-leases" {
+		return x.showDHCPLeases(args[0])
 	}
 	bds, err := x.bdStates()
 	if err != nil {
@@ -50,6 +56,7 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 			if name == "" {
 				name = "-"
 			}
+			bd = x.withoutInternalPorts(bd) // 决策 #359：内置 DHCP tap 不进用户端口视图
 			fmt.Fprintf(&b, "%-10d %-22s %-6s %-6s %-6d %s\n", bd.ID, name,
 				yn(bd.Learn), yn(bd.Flood), len(bd.Ports), note)
 			items = append(items, bdView(bd))
@@ -70,6 +77,7 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 	}
 	// detail 及不带子命令：运行态（状态 + 成员口）叠加配置的类型信息。
 	// （ports/statistics 已在函数入口转给端口读视图，决策 #326。）
+	*bd = x.withoutInternalPorts(*bd) // 决策 #359：内置 DHCP tap 不进用户端口视图
 	m := bdView(*bd)
 	if cfg, err := x.engine.Committed(); err == nil {
 		for _, vs := range cfg.VirtualSwitches {
@@ -78,6 +86,13 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 				// 决策 #335：声明了 DHCP 中继才显示（与 REST 详情的 dhcp_relay 同源、同形状）
 				if vs.DhcpRelayServer != "" {
 					m["dhcp_relay"] = map[string]any{"server": vs.DhcpRelayServer}
+				}
+				// 决策 #359：配置了 DHCP 服务器才显示「DHCP 服务器」块（与 REST 详情的
+				// dhcp_server 同源、同形状；形状的唯一实现见 dhcpserver.go 的 dhcpServerView）。
+				// 在租数取不到（运行态不可用/尚未收敛）时省略该字段——不编造 0。
+				n, haveLeases := x.dhcpActiveLeases(name)
+				if v := dhcpServerView(vs, n, haveLeases); v != nil {
+					m["dhcp_server"] = v
 				}
 				// 决策 #337：声明了 MAC 学习上限才显示（与 REST 详情的 learn_limit 同源、同形状）
 				if vs.LearnLimit != 0 {
@@ -330,4 +345,82 @@ func (x *cliExecutor) execShowProtocols(args []string) string {
 		return x.showLLDPNeighbors("")
 	}
 	return fmt.Sprintf("%% 无效命令: show protocols %s（可用：show protocols lldp neighbors）\n", strings.Join(args, " "))
+}
+
+// ---------- 决策 #359：DHCP 服务器读视图（CLI 侧） ----------
+
+// withoutInternalPorts 从 BD 运行态副本中剔除产品自持的**内置 DHCP tap**（决策 #359）：
+// 按 sw_if_index 过滤（provider 登记的索引，不用 `tap` 名字匹配——用户口也可能是 tap 形态）。
+// 内置口是服务器收发用的管道，用户不可见/不可删；返回过滤后的副本，不改调用方切片。
+func (x *cliExecutor) withoutInternalPorts(bd BridgeDomainState) BridgeDomainState {
+	if x.dhcpSrv == nil {
+		return bd
+	}
+	taps := x.dhcpSrv.DHCPTapIndexes()
+	if len(taps) == 0 {
+		return bd
+	}
+	out := bd
+	out.Ports = make([]BridgeDomainPort, 0, len(bd.Ports))
+	for _, p := range bd.Ports {
+		if taps[p.SwIfIndex] {
+			continue
+		}
+		out.Ports = append(out.Ports, p)
+	}
+	return out
+}
+
+// dhcpActiveLeases 生效租约数（detail 的 dhcp_server.active_leases；运行态不可用时 ok=false，
+// 读视图据此省略该字段——不编造 0）。
+func (x *cliExecutor) dhcpActiveLeases(name string) (int, bool) {
+	if x.dhcpSrv == nil {
+		return 0, false
+	}
+	return x.dhcpSrv.DHCPServerActiveLeases(name)
+}
+
+// showDHCPLeases 渲染 DHCP 租约表（决策 #359；与 REST GET /virtual-switches/{n}/dhcp-leases
+// 同源——同一 provider 读视图）。三态如实：未配置 ⇒ 指引启用语句；配置了但服务器尚未收敛
+// ⇒ 说明原因；运行中 ⇒ 租约表（IP/MAC/状态/到期剩余），无租约时也如实说明。
+func (x *cliExecutor) showDHCPLeases(name string) string {
+	cfg, err := x.engine.Committed()
+	if err != nil {
+		return "%% " + err.Error() + "\n"
+	}
+	var vs *model.VirtualSwitch
+	for i := range cfg.VirtualSwitches {
+		if cfg.VirtualSwitches[i].Name == name {
+			vs = &cfg.VirtualSwitches[i]
+			break
+		}
+	}
+	if vs == nil {
+		return fmt.Sprintf("%% 虚拟交换机 %s 不存在\n", name)
+	}
+	if !vs.DHCPServerEnabled() {
+		return fmt.Sprintf("%% 交换机 %s 未配置 DHCP 服务器（set virtual-switches %s dhcp-server pool <start> <end> 启用）\n",
+			name, name)
+	}
+	if x.dhcpSrv == nil {
+		return "%% DHCP 服务器编排未装配，租约表不可用\n"
+	}
+	leases, ok := x.dhcpSrv.DHCPServerLeases(name)
+	if !ok {
+		return fmt.Sprintf("%% 交换机 %s 的 DHCP 服务器尚未收敛（数据面未连接或内置 tap 建立中），租约表暂不可用\n", name)
+	}
+	if len(leases) == 0 {
+		return "（当前无租约）\n"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-16s %-20s %-10s %s\n", "IP", "MAC", "State", "ExpiresIn(s)")
+	items := make([]any, 0, len(leases))
+	for _, l := range leases {
+		items = append(items, map[string]any{
+			"ip": l.IP, "mac": l.MAC, "state": l.State, "expires_in_seconds": l.ExpiresInSeconds,
+		})
+		fmt.Fprintf(&b, "%-16s %-20s %-10s %d\n", l.IP, l.MAC, l.State, l.ExpiresInSeconds)
+	}
+	x.structured = map[string]any{"name": name, "dhcp_leases": items}
+	return b.String()
 }

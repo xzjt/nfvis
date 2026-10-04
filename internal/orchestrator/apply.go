@@ -366,6 +366,20 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 					return a.net.ApplyDhcpRelay(ctx, model.VirtualSwitch{Name: vs.Name})
 				},
 			))
+			// 决策 #359：DHCP 服务器作为 bridge-domain（与 relay）之后的伴随操作收敛——
+			// tap 入 BD、server-id/下发网关都来自网关声明（先有 BVI 地址与 BD 才有 server）。
+			// 新配/变更收敛到新声明，停用（声明里无池）＝teardown（删内置 tap、注销 punt、
+			// 清租约文件）；undo 把服务器收敛回旧声明（新交换机的删除向=整体撤销，同 relay）。
+			// 校验层已保证：仅 L2 + 已配 IPv4 BVI 网关可配，且与 relay 互斥。
+			ops = append(ops, applyOp(
+				fmt.Sprintf("dhcp-server[%s]", vs.Name),
+				func(ctx context.Context) error { return a.net.ApplyDHCPServer(ctx, vs) },
+				vs.Name, ok,
+				func(ctx context.Context) error { return a.net.ApplyDHCPServer(ctx, o) },
+				func(ctx context.Context) error {
+					return a.net.ApplyDHCPServer(ctx, model.VirtualSwitch{Name: vs.Name})
+				},
+			))
 		}
 	}
 	for _, vrf := range new.Vrfs {

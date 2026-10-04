@@ -546,11 +546,31 @@
   **环境事故（第二次）**：admin 被口令策略**锁定**（阈值 5 次/按用户名），全量套件日志零「登录失败」
   ⇒ 非套件所致、来源未定位（如实登记）；处置是等窗口过期后复跑。证据
   `docs/evidence/v2-round139-d358-container-shell.txt`。
+- **round140（DHCP server 能力前提 spike + 决策 #359 契约，2026-10-04）**：按 #338/#357 的纪律**先核实能力前提**
+  （三.1 DHCP server 本体）。可行架构＝**用户态服务器 + 每交换机一条 L2 tap（BD 成员口）+ UDP/67 punt（收单播续租）**：
+  真实 guest 客户端完整 DORA 实证（`LEASED 192.168.99.55`）、广播入径经 BD 洪泛到 tap、单播入径经
+  `ip4-local→udp/67→punt`、回程写以太帧到 tap 由 BD 交换到客户端。**失败路线如实登记**：广播（255.255.255.255）
+  直投 punt 被 BVI 黑洞；relay 指向自身（src=本机地址被 `ip4 spoofed local-address packet drop` 拒、
+  换非本机 src 则 proxy 回环）；src=0.0.0.0 直投本机被 `ip4 source lookup miss` 拒。**顺带登记 R140-1**：
+  relay 撤销后 UDP/67 的 proxy 处理残留、域内 DHCP 包被静默吞掉（重注册 punt 可夺回）。契约（**决策 #359**）已落
+  附录 A/命令树/命令全表/openapi/手册口径与套件同步计划；**实现与真机四维验证待执行**。
+  证据 `docs/evidence/v2-round140-dhcp-server-spike.txt`。
+- **round141（决策 #359 DHCP server v1 交付：四维真机 + Browser Use，2026-10-04）**：实现随本 PR 合并
+  （`set virtual-switches <vs> dhcp-server pool …` + `show … dhcp-leases` + REST + Web 块 + 池耗尽告警
+  `DHCP_POOL_EXHAUSTED`）。**四维全过**：真 guest 完整 DORA（`LEASED 192.168.99.100`）、租约表三面一致、
+  双向连通（网关 ping 租约地址 5/5）、VPP/nfvis 重启自愈（tap 按 HostIfName 复用重建、租约保留）、
+  relay 配过又删后 punt 重申仍有效（R140-1 回归）、双客户端并存、池耗尽告警建/消、四类非法池与 relay
+  并存全拒、operator 双面（CLI `%% 无权限` / REST 403）、Web 详情页块与租约表（Browser Use，先确认
+  dev70 当前构建）。**实测修两处**：广播双入径致双 ACK（→(chaddr,xid,类型) 3s 去重窗）、池校验文案空格；
+  **工具修复一处**：lifecycle L2-3「查不了」变体漏网（broken pipe）→ 判据按传输层失败签名分类 +
+  `--selftest` 并入 toolcheck。**四套件**：fulltest **254/0/18**、语义 **26/0/3**、lifecycle **23/0/2**、
+  pty **10/10**（增量构成见证据 §7）。证据 `docs/evidence/v2-round141-d359-dhcp-server-verified.txt` +
+  截图 `docs/images/round141-web-dhcp-server.png`；真机已装 2.0.0~dev70。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
-- 已定决策 260 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#358，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 261 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#359，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。

@@ -217,6 +217,15 @@ type VirtualSwitch struct {
 	// DhcpRelayServer DHCP 中继的服务器地址（决策 #335）：仅已配网关（BVI）的 L2 交换机可配，
 	// 中继源地址自动取 BVI 的 IPv4 网关地址；读视图（REST 详情/列表）以 dhcp_relay:{server} 形状给出。
 	DhcpRelayServer string `json:"dhcp_relay_server,omitempty"`
+	// —— DHCP 服务器（决策 #359）：仅 L2 且已配 IPv4 BVI 网关的交换机可配，与 dhcp_relay_server 互斥。
+	// 5 个平铺键与 DhcpRelayServer 同族：pool 两键是启用要件（同时给才有效），其余为可选叶子；
+	// 读视图（REST 详情/列表）以 dhcp_server:{pool_start,pool_end,lease_time_seconds,dns,domain_name} 形状给出。
+	// 与 #356 的 metrics.db 同口径：租约是运行态，不进配置备份/恢复语义。
+	DhcpServerPoolStart        string `json:"dhcp_server_pool_start,omitempty"`
+	DhcpServerPoolEnd          string `json:"dhcp_server_pool_end,omitempty"`
+	DhcpServerLeaseTimeSeconds int    `json:"dhcp_server_lease_time_seconds,omitempty"` // 0=未配置（生效值 86400）
+	DhcpServerDNS              string `json:"dhcp_server_dns,omitempty"`                // 缺省下发 BVI 地址
+	DhcpServerDomainName       string `json:"dhcp_server_domain_name,omitempty"`
 	// LearnLimit MAC 学习条数上限（决策 #337）：仅 L2；>0 时下发 VPP
 	// `bridge_domain_set_learn_limit`（缓解环路/广播风暴的第二道防线，非阻断）。0=未配置（VPP 默认）。
 	LearnLimit int `json:"learn_limit,omitempty"`

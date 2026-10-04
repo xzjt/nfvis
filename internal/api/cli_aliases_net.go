@@ -61,6 +61,32 @@ var statementAliasesNet = []aliasRule{
 			return nil
 		}},
 
+	// virtual-switches <n> dhcp-server pool <start> <end>（决策 #359：DHCP 服务器，模型 5 个平铺键）。
+	// pool 两键是启用要件（必须同时给，与模型校验同口径——缺一个即明确报错，不落半套配置）；
+	// **delete 的 pool 形态＝停用**：清全部 5 键并回收运行态（服务器不可无池运行），与裸 delete 等价。
+	{pattern: []string{"virtual-switches", "*", "dhcp-server", "pool", "*", "*"},
+		apply: aliasVSDhcpServerPool},
+	{pattern: []string{"virtual-switches", "*", "dhcp-server", "pool", "*"},
+		apply: aliasVSDhcpServerPoolIncomplete},
+	{pattern: []string{"virtual-switches", "*", "dhcp-server", "pool"},
+		apply: aliasVSDhcpServerPoolBare},
+	// 可选叶子：lease-time / dns / domain-name（带值形态与无值形态各一条；delete 逐叶子）。
+	{pattern: []string{"virtual-switches", "*", "dhcp-server", "lease-time", "*"},
+		apply: aliasVSDhcpServerLeaseTime},
+	{pattern: []string{"virtual-switches", "*", "dhcp-server", "lease-time"},
+		apply: aliasVSDhcpServerLeafNoValue("lease-time", "dhcp_server_lease_time_seconds")},
+	{pattern: []string{"virtual-switches", "*", "dhcp-server", "dns", "*"},
+		apply: aliasVSDhcpServerLeaf("dns", "dhcp_server_dns")},
+	{pattern: []string{"virtual-switches", "*", "dhcp-server", "dns"},
+		apply: aliasVSDhcpServerLeafNoValue("dns", "dhcp_server_dns")},
+	{pattern: []string{"virtual-switches", "*", "dhcp-server", "domain-name", "*"},
+		apply: aliasVSDhcpServerLeaf("domain-name", "dhcp_server_domain_name")},
+	{pattern: []string{"virtual-switches", "*", "dhcp-server", "domain-name"},
+		apply: aliasVSDhcpServerLeafNoValue("domain-name", "dhcp_server_domain_name")},
+	// 裸 dhcp-server：delete ＝整段停用（清 5 键）；set 缺取值明确报错。
+	{pattern: []string{"virtual-switches", "*", "dhcp-server"},
+		apply: aliasVSDhcpServerBare},
+
 	// virtual-switches <n> dns proxy server <ip> [secondary <ip>]（决策 #345：按域上游，模型数组）。
 	// 与 system 级同名语句对偶：system 落 vpp.dns_proxy_servers（全局），本语句落该交换机元素的
 	// dns_proxy_servers（本域优先、回落全局）。更具体的形态须排在带通配的形态之前。
@@ -409,6 +435,120 @@ func aliasVSDhcpRelay(tree map[string]any, t []string, isSet bool) error {
 	}
 	vs["dhcp_relay_server"] = t[4]
 	return nil
+}
+
+// ---------- DHCP 服务器（决策 #359） ----------
+//
+// 模型是 VirtualSwitch 上的 5 个平铺键（dhcp_server_pool_start/pool_end/lease_time_seconds/
+// dns/domain_name），与 dhcp-relay 同族；pool 两键是启用要件。删除语义按契约：
+// **delete pool（与裸 delete 等价）＝整段停用**——把 5 个键一并删掉（服务器不可无池运行）。
+
+// vsDhcpServerClear 清掉 DHCP 服务器的全部 5 个键（整段停用）。
+// 平铺键不留空壳（不存在 `dhcp_server` 嵌套对象，与 #356 的教训同口径）。
+func vsDhcpServerClear(vs map[string]any) {
+	delete(vs, "dhcp_server_pool_start")
+	delete(vs, "dhcp_server_pool_end")
+	delete(vs, "dhcp_server_lease_time_seconds")
+	delete(vs, "dhcp_server_dns")
+	delete(vs, "dhcp_server_domain_name")
+}
+
+// aliasVSDhcpServerPool：virtual-switches <n> dhcp-server pool <start> <end>（决策 #359）。
+// set：写入两个池键（同时给，缺一即报错）；delete：整段停用（清 5 键，幂等）。
+func aliasVSDhcpServerPool(tree map[string]any, t []string, isSet bool) error {
+	vs, err := elemByID(tree, "virtual_switches", t[1])
+	if err != nil {
+		return err
+	}
+	if !isSet {
+		vsDhcpServerClear(vs)
+		return nil
+	}
+	if t[4] == "" || t[5] == "" {
+		return errString("配置不完整，缺少租约池的起始/结束地址: set virtual-switches " + t[1] +
+			" dhcp-server pool <start> <end>")
+	}
+	vs["dhcp_server_pool_start"] = t[4]
+	vs["dhcp_server_pool_end"] = t[5]
+	return nil
+}
+
+// aliasVSDhcpServerPoolIncomplete：只给了一个池端点（）——set 明确报错（不落半套配置），
+// delete 视同停用（与 delete pool 等价）。
+func aliasVSDhcpServerPoolIncomplete(tree map[string]any, t []string, isSet bool) error {
+	if isSet {
+		return errString("配置不完整，缺少租约池的起始/结束地址: set virtual-switches " + t[1] +
+			" dhcp-server pool <start> <end>")
+	}
+	return aliasVSDhcpServerPool(tree, append(append([]string{}, t...), ""), isSet)
+}
+
+// aliasVSDhcpServerPoolBare：`… dhcp-server pool`（无取值）。delete ＝停用；set 缺取值报错。
+func aliasVSDhcpServerPoolBare(tree map[string]any, t []string, isSet bool) error {
+	if isSet {
+		return errString("配置不完整，缺少租约池的起始/结束地址: set virtual-switches " + t[1] +
+			" dhcp-server pool <start> <end>")
+	}
+	return aliasVSDhcpServerPool(tree, append(append([]string{}, t...), "", ""), isSet)
+}
+
+// aliasVSDhcpServerBare：裸 `… dhcp-server`（无取值）。delete ＝整段停用；set 缺取值报错。
+func aliasVSDhcpServerBare(tree map[string]any, t []string, isSet bool) error {
+	if isSet {
+		return errString("配置不完整，缺少取值: set virtual-switches " + t[1] +
+			" dhcp-server pool <start> <end> [lease-time <seconds>] [dns <ip>] [domain-name <name>]")
+	}
+	return aliasVSDhcpServerPool(tree, append(append([]string{}, t...), "", ""), isSet)
+}
+
+// aliasVSDhcpServerLeaseTime：`… dhcp-server lease-time <seconds>`（模型单值整数，秒）。
+// set 取值必须为十进制正整数（与模型口径同口径，避免写出模型不认的值）；delete 清该键。
+func aliasVSDhcpServerLeaseTime(tree map[string]any, t []string, isSet bool) error {
+	vs, err := elemByID(tree, "virtual_switches", t[1])
+	if err != nil {
+		return err
+	}
+	if !isSet {
+		delete(vs, "dhcp_server_lease_time_seconds")
+		return nil
+	}
+	n, err := strconv.Atoi(t[4])
+	if err != nil || n < 1 {
+		return errString("租约时长须为正整数（秒）: " + t[4])
+	}
+	vs["dhcp_server_lease_time_seconds"] = float64(n)
+	return nil
+}
+
+// aliasVSDhcpServerLeaf：其它可选叶子（dns/domain-name）的 set/delete。
+// set 写入取值；delete 清该键（幂等）。
+func aliasVSDhcpServerLeaf(stmt, key string) func(map[string]any, []string, bool) error {
+	return func(tree map[string]any, t []string, isSet bool) error {
+		vs, err := elemByID(tree, "virtual_switches", t[1])
+		if err != nil {
+			return err
+		}
+		if !isSet {
+			delete(vs, key)
+			return nil
+		}
+		if t[4] == "" {
+			return errString("缺少取值: set virtual-switches " + t[1] + " dhcp-server " + stmt + " <value>")
+		}
+		vs[key] = t[4]
+		return nil
+	}
+}
+
+// aliasVSDhcpServerLeafNoValue：可选叶子的无值形态（delete 逐叶子清键；set 明确报错）。
+func aliasVSDhcpServerLeafNoValue(stmt, key string) func(map[string]any, []string, bool) error {
+	f := aliasVSDhcpServerLeaf(stmt, key)
+	return func(tree map[string]any, t []string, isSet bool) error {
+		if isSet {
+			return errString("缺少取值: set virtual-switches " + t[1] + " dhcp-server " + stmt + " <value>")
+		}
+		return f(tree, append(append([]string{}, t...), ""), isSet)
+	}
 }
 
 // aliasVSDNSProxyPair：virtual-switches <n> dns proxy server <ip> secondary <ip>（决策 #345）。

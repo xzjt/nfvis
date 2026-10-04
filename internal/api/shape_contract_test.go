@@ -16,6 +16,7 @@ import (
 	"net/http"
 
 	"github.com/xzjt/nfvis/internal/metrics"
+	"github.com/xzjt/nfvis/internal/orchestrator/network"
 	ksys "github.com/xzjt/nfvis/internal/system"
 	"reflect"
 	"sort"
@@ -575,4 +576,136 @@ func responseObject(t *testing.T, body []byte) map[string]any {
 // hasHostMetrics 宿主指标是否产出（Linux 才有）。
 func hasHostMetrics() bool {
 	return len(metrics.HostMetrics()) > 0
+}
+
+// fakeDHCPShapeRuntime DHCP 服务器运行态假实现（形状守护用；生产注入 *network.L2Network）。
+type fakeDHCPShapeRuntime struct {
+	leases []network.DHCPLease
+}
+
+func (f *fakeDHCPShapeRuntime) DHCPServerLeases(string) ([]network.DHCPLease, bool) {
+	return f.leases, true
+}
+func (f *fakeDHCPShapeRuntime) DHCPServerActiveLeases(string) (int, bool) {
+	return len(f.leases), true
+}
+func (f *fakeDHCPShapeRuntime) DHCPTapIndexes() map[uint32]bool { return nil }
+
+// componentProps 从内嵌契约取某 component schema 的属性名（解析结果为空即失败——
+// 排版/结构变了守护必须跟着改，而不是静默空转）。
+func componentProps(t *testing.T, spec map[string]any, name string) map[string]bool {
+	t.Helper()
+	components, _ := spec["components"].(map[string]any)
+	schemas, _ := components["schemas"].(map[string]any)
+	props, _ := schemas[name].(map[string]any)["properties"].(map[string]any)
+	if len(props) == 0 {
+		t.Fatalf("契约 components.schemas.%s 取不到 properties（解析规则失效或契约改动）", name)
+	}
+	out := make(map[string]bool, len(props))
+	for k := range props {
+		out[k] = true
+	}
+	return out
+}
+
+// schemaPropsAt 取某 schema 下对象型属性**自身**的 properties 字段名（嵌套对象用，
+// 如 VirtualSwitch.dhcp_server）。
+func schemaPropsAt(t *testing.T, spec map[string]any, schema, field string) map[string]bool {
+	t.Helper()
+	components, _ := spec["components"].(map[string]any)
+	schemas, _ := components["schemas"].(map[string]any)
+	node, _ := schemas[schema].(map[string]any)["properties"].(map[string]any)[field].(map[string]any)
+	props, _ := node["properties"].(map[string]any)
+	if len(props) == 0 {
+		t.Fatalf("契约 %s.%s 取不到 properties（解析规则失效或契约改动）", schema, field)
+	}
+	out := make(map[string]bool, len(props))
+	for k := range props {
+		out[k] = true
+	}
+	return out
+}
+
+// assertPropsExact 响应字段与契约声明的集合**双向相等**：契约声明了而响应发不出（客户端
+// 照契约取空）、或响应多出契约没有的字段（实现与契约漂移）都算失败。
+func assertPropsExact(t *testing.T, key string, got map[string]any, want map[string]bool) {
+	t.Helper()
+	for f := range want {
+		if _, ok := got[f]; !ok {
+			t.Errorf("%s：契约声明了 %s，响应里没有（照契约开发的客户端会取空）", key, f)
+		}
+	}
+	for f := range got {
+		if !want[f] {
+			t.Errorf("%s：响应里的 %s 不在契约中（实现与契约漂移，或漏改 openapi）", key, f)
+		}
+	}
+}
+
+// TestDHCPServerShapeMatchesContract DHCP 服务器**字段级**形状守护（决策 #359 测试清单；
+// 同 #332 的教训——路径级守护挡不住「端点对、字段错」）：① 详情响应的 dhcp_server 对象与
+// 契约 VirtualSwitch.dhcp_server 逐字段一致；② 租约端点元素与契约 DhcpLease 逐字段一致
+// ——REST 直接序列化 network.DHCPLease，漏 json tag 会按 Go 字段名输出（IP/MAC/…），
+// Web 与其它照契约写的客户端全部取空，本守护钉死该回归。
+func TestDHCPServerShapeMatchesContract(t *testing.T) {
+	ts := newTestServerOpts(t, Options{
+		DHCPServer: &fakeDHCPShapeRuntime{leases: []network.DHCPLease{{
+			IP: "192.168.100.10", MAC: "aa:bb:cc:dd:ee:01", State: "active", ExpiresInSeconds: 3600,
+		}}},
+	})
+	token := loginAdmin(t, ts)
+
+	// 种一台启用 dhcp-server 的 L2 交换机（校验前置：L2 + IPv4 BVI 网关；pool 两键同时给）。
+	status, _, body := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token,
+		map[string]any{
+			"system": map[string]any{
+				"hostname": "shape-dhcp",
+				"login":    map[string]any{"users": []map[string]any{superUserDoc()}},
+			},
+			"virtual_switches": []map[string]any{{
+				"name": "vs-dhcp", "type": "l2",
+				"gateway":                        map[string]any{"addresses": []string{"192.168.100.1/24"}},
+				"dhcp_server_pool_start":         "192.168.100.10",
+				"dhcp_server_pool_end":           "192.168.100.20",
+				"dhcp_server_lease_time_seconds": 3600,
+				"dhcp_server_dns":                "192.168.100.1",
+				"dhcp_server_domain_name":        "lab.local",
+			}},
+		},
+		map[string]string{"X-NFVIS-Auto-Commit": "true"})
+	if status != http.StatusOK {
+		t.Fatalf("种启用 dhcp-server 的交换机: %d %s", status, body)
+	}
+
+	spec := loadEmbeddedSpec(t)
+
+	// ① GET /virtual-switches/{name}：dhcp_server 对象字段与契约 VirtualSwitch.dhcp_server
+	//   双向一致（六字段全配置 + 假运行态在场 ⇒ 都应发得出来）。
+	status, _, body = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/virtual-switches/vs-dhcp", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /virtual-switches/vs-dhcp: %d %s", status, body)
+	}
+	resp := responseObject(t, body)
+	ds, ok := resp["dhcp_server"].(map[string]any)
+	if !ok {
+		t.Fatalf("详情响应缺 dhcp_server 对象（配置了 pool 就必须出现）: %s", body)
+	}
+	assertPropsExact(t, "GET /virtual-switches/{name}.dhcp_server", ds,
+		schemaPropsAt(t, spec, "VirtualSwitch", "dhcp_server"))
+
+	// ② GET /virtual-switches/{name}/dhcp-leases：元素字段与契约 DhcpLease 双向一致，
+	//   且值逐字对（防 json tag 错位映射——字段名对了值挂了同样取空/串号）。
+	status, _, body = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/virtual-switches/vs-dhcp/dhcp-leases", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /virtual-switches/vs-dhcp/dhcp-leases: %d %s", status, body)
+	}
+	lease := responseObject(t, body) // 数组响应取第一个元素
+	assertPropsExact(t, "GET /virtual-switches/{name}/dhcp-leases[]", lease,
+		componentProps(t, spec, "DhcpLease"))
+	if lease["ip"] != "192.168.100.10" || lease["state"] != "active" || lease["mac"] != "aa:bb:cc:dd:ee:01" {
+		t.Errorf("租约字段的值与注入的运行态不符（json tag 错位？）: %v", lease)
+	}
+	if v, ok := lease["expires_in_seconds"].(float64); !ok || v != 3600 {
+		t.Errorf("expires_in_seconds 应为数值 3600: %v", lease["expires_in_seconds"])
+	}
 }

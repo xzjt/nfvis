@@ -322,6 +322,12 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-switches <n> gateway acl-in\|acl-out <acl>` | 网关 ACL | VPP acl | ⊘ **设计拒绝（decision #340）**：真机实证 VPP 26.06 不评估 BVI（网关）上的域内流量——既不拦截也不计数（round117 绑定登记可见但域内流量零评估；round118 复核），绑定给不出任何保护，故提交期硬拒。替代：`set virtual-switches <n> l3-interface <if> acl-in <acl>`（见下一行，已实证生效）。 |
 | `set virtual-switches <n> dhcp-relay server <ip>` | DHCP 中继（仅已 `set gateway ip` 的 L2 交换机可配；src 自动取 BVI 的 IPv4 网关地址，server 须在该转发域内可达） | VPP dhcp proxy | ✓（round113：配置/撤销/读视图/`vppctl show dhcp proxy` 对照 + pcap 转发签名实证；端到端租约因测试设备工具链受限未取得，见 `docs/evidence/v2-round113-*.txt`） |
 | `delete virtual-switches <n> dhcp-relay` | 撤销 DHCP 中继（`dhcp_proxy_config` IsAdd=false，幂等；随交换机删除一并撤） | VPP dhcp proxy | ✓（round113：撤销后 `show dhcp proxy` 清空、读视图同步；恢复重放存活经多次 VM/nfvis 重启实证） |
+| `set virtual-switches <n> dhcp-server pool <start> <end>` | DHCP 服务器启用（决策 #359；仅 L2 + 已 `set gateway ip` 可配；池须与 BVI 同子网、不含 BVI/网络/广播地址、≤4096 个；与 dhcp-relay 互斥） | nfvisd 用户态服务器 + 内置 L2 tap + UDP/67 punt | 🚫 已实现待真机（round140 spike 已证能力前提与真实客户端 DORA；命令本体真机复跑待执行，见 `docs/evidence/v2-round140-dhcp-server-spike.txt`） |
+| `set virtual-switches <n> dhcp-server lease-time <seconds>` | 租约时长（缺省 86400；60..2592000） | 同上 | 🚫 同上 |
+| `set virtual-switches <n> dhcp-server dns <ip>` | 下发给客户端的 DNS（option 6；缺省＝BVI 网关地址） | 同上 | 🚫 同上 |
+| `set virtual-switches <n> dhcp-server domain-name <name>` | 下发给客户端的域名（option 15，可省） | 同上 | 🚫 同上 |
+| `delete virtual-switches <n> dhcp-server [pool \| lease-time \| dns \| domain-name]` | 逐叶子撤销；**pool 的删除＝停用**（清池 + 回收内置 tap/punt/租约），与裸 delete 等价 | 同上 | 🚫 同上 |
+| `show virtual-switches <n> dhcp-leases` | DHCP 租约表（IP/MAC/状态 offered\|active\|declined/到期；未配置 dhcp-server 时如实报「未配置」） | nfvisd 租约表（`GET /virtual-switches/{n}/dhcp-leases` 同源） | 🚫 同上 |
 | `set virtual-switches <n> learn-limit <n>` | MAC 学习条数上限（仅 L2；环路/广播风暴缓解，**非阻断**；1-16777216，超限拒绝） | VPP `bridge_domain_set_learn_limit` | ✓（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
 | `delete virtual-switches <n> learn-limit` | 清 MAC 学习上限（恢复 VPP 默认 16777216，幂等） | VPP `bridge_domain_set_learn_limit` | ✓（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
 | `set virtual-switches <n> dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**按域上游**（决策 #345）：只对该交换机转发域（L2＝BVI；L3＝其 l3-interface）的入向查询生效；本域非空优先，否则回落全局；两者皆空则回 SERVFAIL | nfvisd punt socket + 宿主解析 | ✓（round124：能力前提与端到端数据面实证，见 `docs/evidence/v2-round124-*.txt`） |

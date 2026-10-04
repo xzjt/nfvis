@@ -67,6 +67,9 @@ var roundTripAliasCases = [][]string{
 	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 gateway ip 192.168.100.1/24"},
 	// 决策 #335：dhcp-relay（模型单值字符串，语句树两层关键字）
 	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 gateway ip 192.168.100.1/24", "set virtual-switches vs1 dhcp-relay server 192.168.100.2"},
+	// 决策 #359：dhcp-server（5 个平铺键；pool 一行两值，可选叶子各一行）
+	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 gateway ip 192.168.100.1/24", "set virtual-switches vs1 dhcp-server pool 192.168.100.100 192.168.100.200"},
+	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 gateway ip 192.168.100.1/24", "set virtual-switches vs1 dhcp-server pool 192.168.100.100 192.168.100.200", "set virtual-switches vs1 dhcp-server lease-time 600", "set virtual-switches vs1 dhcp-server dns 8.8.8.8", "set virtual-switches vs1 dhcp-server domain-name lab.local"},
 	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 ports 1 interface ens192 trunk vlans 100,200"},
 	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 ports 1 vnf vnf-a interface eth0"},
 	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 ports 1 container ct1 interface memif0"},

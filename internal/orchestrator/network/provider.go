@@ -31,6 +31,7 @@ type L2Network struct {
 	bond                         *BondProvider
 	lldp                         *LldpProvider
 	dhcp                         *DhcpProvider          // 交换机 DHCP 中继（决策 #335，可空——未注入即无 relay 编排）
+	dhcpServer                   *DHCPServerProvider    // 域内 DHCP 服务器（决策 #359，可空——未注入即无 server 编排）
 	dns                          *DNSProxyProvider      // 数据面 DNS 代理（决策 #345，可空）
 	vhost                        *VhostUserProvider     // M4-4：VNF vNIC 接入
 	memif                        *MemifProvider         // M4-7：容器 vNIC 接入
@@ -103,6 +104,29 @@ func (n *L2Network) SetBond(p *BondProvider) { n.bond = p }
 // SetDhcp 追加交换机 DHCP 中继编排（决策 #335；未注入时 relay 语句在提交校验层仍可配，
 // 但数据面无下发路径——恢复收敛会如实记未收敛项，正常装配总是注入）。
 func (n *L2Network) SetDhcp(p *DhcpProvider) { n.dhcp = p }
+
+// SetDHCPServer 追加域内 DHCP 服务器编排（决策 #359；未注入时 dhcp-server 语句在提交校验层
+// 仍可配，但数据面无下发路径——恢复收敛会如实记未收敛项，正常装配总是注入）。
+// 注入的同时接上两样共享设施：
+//   - 「sw_if_index → 所属交换机」反查（L3Provider 的 ForwardDomainOf，BVI 已登记为转发域）：
+//     punt 单播路径按上行 desc.sw_if_index 派发到对应交换机的服务器；
+//   - 告警表（池耗尽告警 DHCP_POOL_EXHAUSTED 的落点；L2Network.SetAlarms 之后再注入也无妨，
+//     本方法只把已知的两样接过去，告警表单独经 p.SetAlarms 注入）。
+func (n *L2Network) SetDHCPServer(p *DHCPServerProvider) {
+	n.dhcpServer = p
+	if p == nil {
+		return
+	}
+	p.SetSwitchResolver(func(idx uint32) (string, bool) {
+		if n.l3 == nil {
+			return "", false
+		}
+		return n.l3.ForwardDomainOf(idx)
+	})
+	if n.alarms != nil {
+		p.SetAlarms(n.alarms)
+	}
+}
 
 // SetDNSProxy 追加数据面 DNS 代理编排（决策 #345；未注入时上游语句在提交校验层仍可配，
 // 但数据面无下发路径）。注入的同时把「sw_if_index → 所属交换机」的反查来源接上（L3Provider），
@@ -392,6 +416,13 @@ func (n *L2Network) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitc
 }
 
 func (n *L2Network) DeleteBridgeDomain(ctx context.Context, name string) error {
+	// 决策 #359：先回收该交换机的 DHCP 服务器——内置 tap 是 BD 成员口（先解引用、后删被引用，
+	// 与 #196/#342 同口径），且停用即清租约文件；未启用时幂等空操作。
+	if n.dhcpServer != nil {
+		if err := n.dhcpServer.Sync(ctx, model.VirtualSwitch{Name: name}); err != nil {
+			return err
+		}
+	}
 	// 决策 #335：先撤 DHCP 中继（proxy 引用该域的表与 BVI 地址），再拆网关与 BD——
 	// 与「先解引用、后删被引用」的删除顺序一致。无登记时幂等空操作。
 	if n.dhcp != nil {
@@ -418,6 +449,52 @@ func (n *L2Network) ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) 
 		return nil
 	}
 	return n.dhcp.SyncRelay(ctx, vs)
+}
+
+// ApplyDHCPServer 收敛一台交换机的 DHCP 服务器声明（决策 #359）。调用时机：
+// 提交编排把它作为 bridge-domain（与 dhcp-relay）**之后**的伴随操作（tap 入 BD、server-id/网关
+// 都来自网关声明，先有 BVI 地址与 BD 才有 server）；恢复收敛的重放走 recovery.go 的独立记源。
+// 未启用（无池）的声明＝teardown（删 tap/注销注册/清租约文件）。未注入 provider 时空操作。
+func (n *L2Network) ApplyDHCPServer(ctx context.Context, vs model.VirtualSwitch) error {
+	if n.dhcpServer == nil {
+		return nil
+	}
+	return n.dhcpServer.Sync(ctx, vs)
+}
+
+// DHCPServerLeases 某交换机的租约表读视图（决策 #359；供 API/CLI 运行态读物）。
+// ok=false = 该交换机没有运行中的服务器（未配置/未收敛）。
+func (n *L2Network) DHCPServerLeases(name string) ([]DHCPLease, bool) {
+	if n.dhcpServer == nil {
+		return nil, false
+	}
+	return n.dhcpServer.Leases(name)
+}
+
+// DHCPServerActiveLeases 生效租约数（state=active；ok=false 同 DHCPServerLeases）。
+func (n *L2Network) DHCPServerActiveLeases(name string) (int, bool) {
+	if n.dhcpServer == nil {
+		return 0, false
+	}
+	return n.dhcpServer.ActiveLeases(name)
+}
+
+// DHCPTapIndexes 产品自持的内置 DHCP tap 的 sw_if_index 集合（决策 #359：端口读视图按它
+// 过滤内置 tap——**不用名字匹配**，用户不可见/不可删）。
+func (n *L2Network) DHCPTapIndexes() map[uint32]bool {
+	if n.dhcpServer == nil {
+		return nil
+	}
+	return n.dhcpServer.TapIndexes()
+}
+
+// ReconcileDHCPServer DHCP 服务器的 15s 巡检收敛（决策 #359；供巡检与残渣对账同块调用）：
+// 对配置里启用的交换机做幂等 Sync（补齐带外丢失的 tap/注册）、到期租约回收与池耗尽告警复核。
+func (n *L2Network) ReconcileDHCPServer(ctx context.Context, cfg model.Config) []error {
+	if n.dhcpServer == nil {
+		return nil
+	}
+	return n.dhcpServer.Reconcile(ctx, cfg)
 }
 
 func (n *L2Network) ApplyVRF(ctx context.Context, vrf model.Vrf) error {

@@ -4590,6 +4590,13 @@ function renderSwitchDetail(vs, ports, params) {
   }));
   $('vsd-stat-note').textContent = !ok ? ''
     : (st ? '' : '（无运行态：该交换机当前不在数据面，或数据面未连接）');
+  // DHCP 服务器块：摘要随对象渲染；租约表换对象即清（同 MAC 表的防串台），配置了才自动拉一次。
+  const hasDhcp = ok && vsdDhcpRender(vs);
+  if (vsdDhcpFor !== name || !hasDhcp) {
+    vsdDhcpFor = '';
+    vsdDhcpClear('');
+  }
+  if (hasDhcp) { vsdDhcpLoad(); }
   // 换了对象：上一台的 MAC 表必须清掉（否则显示的是一台交换机的表、标题却是另一台）。
   if (vsdMacFor !== name) {
     vsdMacFor = '';
@@ -4614,6 +4621,56 @@ async function vsdMacLoad() {
   } catch (e) {
     vsdMacFor = '';
     vsdMacClear('读取失败：' + e.message, true);
+  }
+}
+
+// DHCP 服务器块与租约表：摘要来自 /virtual-switches/{name} 的 dhcp_server 读对象
+// （未配置时服务端整个缺席，页面如实「—」）；租约表按需拉取（运行态，未配置时
+// 服务端回 409 + 文案，页面如实显示未配置而非空表）。
+let vsdDhcpFor = '';
+
+function vsdDhcpMsg(text, isErr) {
+  const p = $('vsd-dhcp-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+function vsdDhcpClear(text, isErr) {
+  table($('vsd-dhcp-lease-table').querySelector('tbody'), 4, []);
+  $('vsd-dhcp-note').textContent = '';
+  vsdDhcpMsg(text || '', isErr === true);
+}
+
+// vsdDhcpRender 渲染「DHCP 服务器」摘要块；返回是否配置了 dhcp-server。
+function vsdDhcpRender(vs) {
+  const d = vs && vs.dhcp_server;
+  fill($('vsd-dhcp'), d ? [
+    ['租约池', (d.pool_start || '—') + ' ~ ' + (d.pool_end || '—')],
+    ['租约时长', d.lease_time_seconds != null ? d.lease_time_seconds + ' 秒' : undefined],
+    ['DNS', d.dns || undefined],
+    ['域名', d.domain_name || undefined],
+    ['在租数', d.active_leases != null ? d.active_leases : undefined],
+  ] : []);
+  return !!d;
+}
+
+// 按需拉取租约表：未配置（409）与尚未收敛（503）都如实转述服务端文案，不显示成空表。
+async function vsdDhcpLoad() {
+  const name = $('vsd-name').textContent;
+  if (!name) { vsdDhcpMsg('没有选中虚拟交换机。', true); return; }
+  vsdDhcpMsg('读取租约表…', false);
+  try {
+    const rows = rowsOf(await api('/virtual-switches/' + encodeURIComponent(name) + '/dhcp-leases'));
+    vsdDhcpFor = name;
+    table($('vsd-dhcp-lease-table').querySelector('tbody'), 4, rows.map((r) => [
+      r.ip, r.mac, r.state, r.expires_in_seconds,
+    ]));
+    $('vsd-dhcp-note').textContent = '（' + rows.length + ' 条）';
+    vsdDhcpMsg('', false);
+  } catch (e) {
+    vsdDhcpFor = '';
+    vsdDhcpClear(e.message, true);
   }
 }
 
@@ -5801,6 +5858,10 @@ $('vrd-routes-btn').addEventListener('click', () => vrfRoutesLoad($('vrd-name').
 // 虚拟交换机详情：MAC 学习表按需拉取（大表不进页面刷新）
 $('vsd-mac-btn').addEventListener('click', vsdMacLoad);
 $('vsd-mac-clear-btn').addEventListener('click', () => { vsdMacFor = ''; vsdMacClear(''); });
+
+// 虚拟交换机详情：DHCP 租约表按需拉取（运行态；未配置时服务端 409，页面如实转述）
+$('vsd-dhcp-btn').addEventListener('click', vsdDhcpLoad);
+$('vsd-dhcp-clear-btn').addEventListener('click', () => { vsdDhcpFor = ''; vsdDhcpClear(''); });
 
 // VM 快照
 $('vm-snap-refresh').addEventListener('click', () => vmSnapLoad());

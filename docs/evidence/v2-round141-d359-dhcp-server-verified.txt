@@ -1,0 +1,131 @@
+NFViS v2 真机验证记录 round141 —— 决策 #359 DHCP server v1：实现交付 + 四维真机验证
+====================================================================
+日期：2026-10-04；环境：nfvis-vm，2.0.0~dev69 → **2.0.0~dev70**；VPP 26.06-release；分支 v2。
+前置：能力前提与架构由 round140 spike 定形（`docs/evidence/v2-round140-dhcp-server-spike.txt`）；
+契约＝规格书附录 A #359 + 命令树/全表/openapi/手册（本分支提交 05093eb）；
+实现＝`internal/{model,orchestrator/network,schema,api}` 的 dhcpserver*（同一 PR）。
+
+§0 结论
+**四维验证全部达成**（环境插曲见 §6）：真 guest 完整 DORA、租约表三面一致、生命周期（VPP 重启 /
+nfvis 重启 / relay 残留）自愈、双客户端并存、池耗尽告警建/消、对抗校验全拒、Web 三面一致。
+**实现后实测修掉两处**（dev70）：① 广播双入径致一 REQUEST 两 ACK（tap 洪泛副本 + BVI→punt 副本）
+→ 按 (chaddr,xid,类型) 3s 去重窗只应答一次（决策行已补记口径）；② 池校验文案「包含BVI」缺空格。
+
+§1 现场
+- 交换机 `sem-vs`（L2，BVI 192.168.99.1/24，BD 314680，成员：bvi1 + sem-vm 的 vhost 口）；
+  客户端＝sem-vm（debian-12 cloud image，user-data 内置 raw-socket DHCP 客户端：DISCOVER→OFFER→
+  REQUEST→ACK→每 30s 续租，并把过程日志以 L2 广播发出——宿主从内置 tap 侧即可读 guest 状态）；
+  第二客户端＝临时 tap（vppctl create tap，宿主 AF_PACKET 注入合成客户端）。
+- 观测：tap 侧 AF_PACKET sniffer（独立事实源）+ 产品读视图 + VPP 计数器/pcap。
+
+§2 四维覆盖
+2.1 作用效果（真客户端 DORA）
+- 启用 `set virtual-switches sem-vs dhcp-server pool 192.168.99.100 192.168.99.110` +
+  `lease-time 300`（rev 1485）→ 内置 tap 建成（VPP 侧 tap0 idx 6 **up**、内核侧 `nfvisdhe80e75a8`
+  15 字符、入 BD 314680）、punt 注册 UDP/67 → `/run/vpp/nfvis-dhcp.sock`。
+- guest 启动后 **完整 DORA**（tap sniffer 逐帧可见 DISCOVER→OFFER→REQUEST→ACK）→
+  **`LEASED 192.168.99.100`**；租约表 `192.168.99.100 52:54:42:e6:31:0d active`（剩余秒数递减）。
+- 读视图三面同源：CLI detail 的「DHCP 服务器」块（池/租约时长/DNS=缺省 BVI/在租数）＝
+  REST `GET /virtual-switches/sem-vs` 的 `dhcp_server`（逐字段同契约）＝Web 详情页同块；
+  租约三面同值；**内置 tap 不出现在端口读视图**（CLI ports / REST / Web 均按产品自持
+  sw_if_index 过滤——实测 foreign 成员口照常显示、仅产品 tap 被滤）。
+- 双向连通：`ping 192.168.99.100 vrf vr-sem-vs` **5/5 0%**（网关↔租约地址，ARP 正常解析）。
+- 双客户端并存：guest（vhost 口，99.100）+ 注入客户端（第二 tap，99.105）同表各自 active。
+
+2.2 生命周期
+- **`request vpp restart`** → tap/punt 注册全失后**自动重建**（恢复重放按 HostIfName 复用/重建），
+  租约文件保留、客户端续租在重建后照常被应答（租约到期时间持续刷新）。
+- **`systemctl restart nfvis`** → 同样自愈：tap 按 HostIfName 复用（不重复建）、punt 重申、
+  租约从 `/var/lib/nfvis/dhcp/sem-vs.json`（0600/原子写）恢复，续租不断。
+- **停用/删除清理**：`delete virtual-switches sem-vs dhcp-server`（rev 1497）→ VPP 与内核侧
+  tap 消失、租约文件删除、端口视图无残留、CLI 报「未配置 DHCP 服务器（set … 启用）」、
+  REST `GET …/dhcp-leases` **409**（契约口径：空数组会误导）。
+- **重新启用不重启客户端**：server 回来后 guest 的下一次广播续租即被应答、租约恢复（rev 1498）。
+- **R140-1 回归**：`relay 配过又删（rev 1490/1491）→ 再启用 server（rev 1492）` 后，以太单播
+  REQUEST（真实续租形态：src=租约地址 → BVI:67）经 punt 被应答（ACK 可观测）——server 的
+  每次 Sync 重申注册（deregister+register）兑现。对照注入：relay 在位的域里单播请求不被
+  server 应答（proxy 拦截），与 spike 结论一致。
+- **环境顺带验证**：本轮机器发生一次整机重启（SSH 主机指纹变更、sem-vm shutoff）——
+  重启后四服务 active、恢复收敛完成日志在场（#348/#351/#354 链路再次自证）；
+  sem-vm 未自启是因为夹具未声明 autostart（#348 文档化行为，非缺陷）。
+
+2.3 跨对象组合
+- 同一交换机多客户端（vhost VNF + 第二 tap 注入客户端）各自取租约、互不串址（同 MAC 优先
+  续用、异 MAC 最小可用）。
+- 与 DNS 代理（#345）组合：option 6 缺省下发 BVI 地址后，guest 的 resolver 查询经 punt 到
+  nfvisd 转发器（`ip4-udp-punt-socket Socket TX` 持续增长即其痕迹）。
+- 容器侧如实登记：**受 T0-3（离线无自带 memif 客户端的镜像）限制，容器经 memif vNIC 取
+  DHCP 租约未验**——与既有「容器 memif 通流未验」同一口径，非本决策引入。
+
+2.4 对抗性
+- **池校验提交期拒绝**（文案逐条核对）：start>end（「两端都必须是合法 IPv4 地址且 start ≤ end」）、
+  含 BVI 地址（「包含 BVI 网关地址 …：请缩小池范围避开它」）、跨子网（「与 BVI 网关地址 … 不在
+  同一子网（192.168.99.0/24）」）、单端点（「起始与结束地址必须同时给出」）、**与 relay 并存**
+  （「两者争抢 UDP/67 的处理权…请删除 dhcp-relay 或 dhcp-server 之一」）。
+- **池耗尽告警**：池缩到单地址且被占 → 第三客户端 DISCOVER 无应答 +
+  **`DHCP_POOL_EXHAUSTED`**（warning，source=sem-vs，文案带池范围/在租数/扩池指引）；
+  扩池（rev 1496）→ 告警**自动消解**、下一 DISCOVER 正常获址。
+- **REST/CLI 未配置态**：409 + 指引文案（非空数组误导），CLI 同源。
+- operator 门禁：见 §5（用户不存在，补建临时 operator 双面核对后删除）。
+
+§4 Web（Browser Use 实机，决策 #141 口径）
+- 先确认页面加载当前构建：总览页组件版本 **NFViS 2.0.0~dev70** ✓。
+- 「虚拟交换机 → sem-vs 详情」：DHCP 服务器块（池 192.168.99.100 ~ 192.168.99.110 /
+  租约时长 300 秒 / DNS 192.168.99.1 / 域名 — / 在租数 1）+ 租约表（IP/MAC/状态/到期（秒））
+  与 CLI/REST 同值；「拉取租约」按钮实测刷新（到期秒数随续租前进）；成员端口列表**无内置 tap**；
+  说明文字如实（「内置 tap 成员口由产品自管，不出现在上面的成员端口列表里」）。
+  截图 `docs/images/round141-web-dhcp-server.png`。
+
+§5 operator 门禁（双面，临时用户 opcheck，核对后已删除）
+- CLI（显式 `-u opcheck`）：读 `show virtual-switches sem-vs dhcp-leases` → 「（当前无租约）」、
+  detail 可见 `dhcp-server` 块（`active-leases 0`）；写 `configure` →
+  **`%% 无权限进入配置模式（需 super-user）`**。
+- REST（opcheck token）：`GET …/dhcp-leases` **200 `[]`**、`GET /virtual-switches/sem-vs` 200；
+  配置写 `PUT …/ports` → **403** `{"code":"FORBIDDEN","message":"当前 class 无权执行该操作"}`。
+- 临时用户与临时 dhcp-server 已在同一次提交里删除（rev 1551），`show users` 仅剩 admin。
+
+§6 环境与清场（如实）
+- 本轮机器整机重启过一次（远程主机指纹变更；磁盘态保留、配置 rev 连续），接手时 sem-vm
+  shutoff/sem-ct 退出——已按需恢复（见 §2.2）。
+- **夹具复原口径**：把 user-data 换回夹具文件后 `start` 不会重跑 cloud-init（instance-id 是
+  「曾经处理过」的 ⇒ once-per-instance 跳过 runcmd，beat 不起）——与本仓红线 12 同因；
+  标准恢复路径是 `cli-semantic-fixture.sh up`（重建 VM → 新盘 → cloud-init 从头跑），
+  本轮即按它恢复（RC=0、正控就绪）。
+- 清场：spike 第二 tap（tap1/spike-cli2）删除、sem-vs 的 dhcp-server 删除（rev 1499/1551）、
+  sniffer 进程杀掉；终态：`vppctl show interface` 无 tap、内核无 nfvisdh*、punt 注册只剩产品的
+  UDP/53（67 随最后一台服务器停用而注销——已验证）、`show users` 仅 admin、
+  `show virtual-switches sem-vs` 回夹具形（网关 + 2 端口）；告警仅常态 HUGEPAGE_POOL_ORPHAN。
+
+§7 四套件（dev70；fulltest 前置=停 sem-vm 让 1G 页，语义前置=夹具 up）
+- `cli-fulltest` **254 / 0 / 18**（round139 基线 242/0/16，**+12 通过 / +2 预期报错**，零失败）：
+  增量＝阶段 2 的 dhcp-server 语句块（4 set + 4 delete 的独立会话解析段、提交往返块 4 set + 1 delete、
+  `show … dhcp-leases` 期望输出 1 条）与阶段 2/5 的两条 `show … dhcp-leases`「未配置」预期报错；
+  #323 自清场正常（「套件对象已清干净」）。
+- `cli-semantic-check` **26 / 0 / 3**（与 round139 基线一致；S11/S12 按设计不可判定）。
+- `cli-lifecycle-check` **23 / 0 / 2**（首跑 21/1/3：**工具假红**——见 §3 第 4 条，
+  判据修复后复跑转绿、与基线一致）。
+- `cli-pty-smoke` **10 / 10**。
+
+§3 实测发现与修正
+1. **一 REQUEST 两 ACK（已修，dev70）**：同一条客户端广播报文经「BD 洪泛到内置 tap」与「经 BVI
+   进 UDP/67 的 punt」各达一次 → 服务器应答两次（tap sniffer 同 xid 可见两条 ACK）。修法：按
+   (chaddr, xid, 消息类型) 的 **3s 去重窗**只应答一次（窗长远小于 RFC 2131 重传退避 ≥4s，
+   不吞真重传；决策行已补记该口径）；dev70 复验一 REQUEST 一 ACK。单测
+   `TestDHCPServerDedupeDualPath`；测试帧的 xid 改为逐帧递增（真实客户端语义）。
+2. 池校验文案「包含BVI」→「包含 BVI」（空格，dev70）。
+3. 观察项（不改行为，如实登记）：MAC 学习表里经内置 tap 学到的表项如实显示 `tapN`（真实
+   运行态事实，不过滤）；`expires_in_seconds` 显示下限钳 1（表内条目不显示 0）；OFFER 保持
+   时长 2 分钟（代码常量，非配置项）；foreign 成员口（非产品 tap）照常在端口视图显示。
+4. **lifecycle L2-3「查不了」变体漏网（工具假红，已修）**：round139 的修复只认字面
+   `VPP 未连接`，而本轮现场是 API 通道写失败
+   （`unable to process request: write unix @->/run/vpp/api.sock: write: broken pipe`）——
+   VPP 重启窗口内 15s 巡检打出的三条被算成「查到残渣」⇒ 干净现场偶发假红（首跑 21/1/3）。
+   修法：判据抽为 `l23_kind`（按**传输层失败签名**分类：`VPP 未连接|connection refused|broken pipe|
+   transport is closing|connection reset|no such file or directory|i/o timeout|EOF`）；
+   新增 `--selftest` 合成输入自校准（4 例：仅查不了⇒0 判定 / broken pipe 变体⇒0 判定 /
+   真残渣⇒1 判定 / 混合⇒分列），并挂进 `make check` 的 toolcheck（`make toolcheck`）。
+   复跑 lifecycle **23/0/2**、与基线一致。
+
+§8 补记
+- 终态核对（§6 末）、operator（§5）、套件（§7）均已完成；
+  `docs/v2已做.md` 决策表与套件沿革、`docs/v2待做.md` 三.1、`AGENTS.md` 已同步（本 PR）。
