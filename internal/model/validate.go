@@ -711,7 +711,7 @@ func (v *validator) checkDHCPServerPool(p string, s VirtualSwitch) {
 		name string
 	}{{bviU32, "BVI 网关地址"}, {netU, "子网网络地址"}, {bcastU, "子网广播地址"}} {
 		if excl.v >= lo && excl.v <= hi {
-			v.errf(p+".dhcp_server_pool_start", "租约池 %q-%q 包含%s %s：请缩小池范围避开它",
+			v.errf(p+".dhcp_server_pool_start", "租约池 %q-%q 包含 %s %s：请缩小池范围避开它",
 				start, end, excl.name, Uint32ToIPv4(excl.v).String())
 		}
 	}

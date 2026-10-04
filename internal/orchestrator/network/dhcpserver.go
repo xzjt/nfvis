@@ -32,6 +32,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -50,6 +51,10 @@ const (
 	// AlarmDHCPPoolExhausted 租约池耗尽（warning，source=交换机名）：池内无可用地址可应答
 	// 新的 DISCOVER；有地址释放/租约到期/扩容即自动消解。
 	AlarmDHCPPoolExhausted = "DHCP_POOL_EXHAUSTED"
+	// dhcpDedupeWindow 双入径去重窗（round141 实测后补）：同一条客户端广播报文会经「BD 洪泛
+	// 到内置 tap」与「经 BVI 进 UDP/67 的 punt」各达一次，窗内只应答一次。窗长 3s 远小于
+	// 客户端重传退避（RFC 2131 建议首重试 ≥4s），不会吞掉真重传。
+	dhcpDedupeWindow = 3 * time.Second
 	// dhcpTapTag 内置 tap 的 VPP 侧 tag（仅供人工排查；**不作查找键** —— round140 实测
 	// SwInterfaceTapV2Dump 不回 tag，恢复查找只能按 HostIfName）。
 	dhcpTapTagPrefix = "nfvis-dhcp:"
@@ -109,6 +114,12 @@ type dhcpServerRT struct {
 	tapIndex uint32 // VPP 侧 sw_if_index（0 = 未建立）
 	leases   *dhcpLeaseTable
 	tap      dhcpTapTransport // nil = 未打开（VPP 重启后 reset / 首次 Sync 失败）
+
+	// recent 记录最近应答过的 (chaddr|xid|消息类型) → 时刻：同一条客户端报文会经**两条入径**
+	// 各到一次（广播帧在 BD 里既洪泛到内置 tap、又经 BVI 进 UDP/67 的 punt——round141 真机实测
+	// 一 REQUEST 两 ACK），去重窗内只应答一次。窗长 3s：远小于客户端重传退避（RFC 2131 建议
+	// 首重试 ≥4s），不会吞掉真重传；entries 在每次查表时顺带清理。
+	recent map[string]time.Time
 }
 
 // DHCPServerProvider 域内 DHCP 服务器编排（决策 #359）。
@@ -294,7 +305,8 @@ func (p *DHCPServerProvider) Sync(ctx context.Context, vs model.VirtualSwitch) e
 	p.mu.Lock()
 	rt := p.servers[vs.Name]
 	if rt == nil {
-		rt = &dhcpServerRT{leases: newDHCPLeaseTable(spec.poolLo, spec.poolHi, p.now)}
+		rt = &dhcpServerRT{leases: newDHCPLeaseTable(spec.poolLo, spec.poolHi, p.now),
+			recent: map[string]time.Time{}}
 		rt.leases.restore(p.loadLeaseFile(vs.Name))
 		p.servers[vs.Name] = rt
 	} else {
@@ -529,6 +541,20 @@ func (p *DHCPServerProvider) handleMessage(name string, msg dhcpMessage) {
 		return
 	}
 	mac := macString(msg.chaddr)
+	// 双入径去重（round141 实测：广播帧既洪泛到 tap 又经 BVI 进 punt，一 REQUEST 两 ACK）——
+	// 同一 (chaddr, xid, 消息类型) 在去重窗内只应答一次；顺带清理过期条目。
+	dedupeKey := mac + "|" + strconv.FormatUint(uint64(msg.xid), 16) + "|" + string(rune(msg.msgType))
+	now := p.now()
+	for k, t := range rt.recent {
+		if now.Sub(t) > dhcpDedupeWindow {
+			delete(rt.recent, k)
+		}
+	}
+	if t, seen := rt.recent[dedupeKey]; seen && now.Sub(t) <= dhcpDedupeWindow {
+		p.mu.Unlock()
+		return
+	}
+	rt.recent[dedupeKey] = now
 	var reply []byte
 	changed := false
 	switch msg.msgType {

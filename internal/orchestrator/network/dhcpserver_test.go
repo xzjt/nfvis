@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -224,10 +225,15 @@ func vsDHCPServer() model.VirtualSwitch {
 
 // dhcpClientFrame 构造一条客户端 → 服务器的以太帧（IPv4/UDP/67 + BOOTREQUEST）。
 // opt50=option 50（requested IP）、opt54=option 54（server-id）、ciaddr=已配置地址（RENEW 形态）。
+// testFrameXID 让每条测试帧带**不同的 xid**：真实客户端每个交换（DISCOVER/每次续租）用新 xid，
+// 服务器的双入径去重（dhcpDedupeWindow）按 (chaddr,xid,类型) 判重——固定 xid 会让「同一测试里
+// 先 SELECTING REQUEST 再 punt 续租」这类序列被误判为重复（round141 实测后补的口径）。
+var testFrameXID atomic.Uint32
+
 func dhcpClientFrame(chaddr net.HardwareAddr, msgType byte, opt50, opt54, ciaddr net.IP) []byte {
 	body := make([]byte, 240)
 	body[0], body[1], body[2] = 1, 1, 6 // BOOTREQUEST / Ethernet / 6 字节硬件地址
-	binary.BigEndian.PutUint32(body[4:8], 0x12345678)
+	binary.BigEndian.PutUint32(body[4:8], 0x12345678+testFrameXID.Add(1))
 	copy(body[28:34], chaddr)
 	if ciaddr != nil {
 		copy(body[12:16], ciaddr.To4())
@@ -859,6 +865,43 @@ func TestDHCPServerRequestNAKRules(t *testing.T) {
 	p.handleTapFrame(name, dhcpClientFrame(mac2, dhcpRequest, net.ParseIP("192.168.100.11"), net.ParseIP("10.9.9.9"), nil))
 	if got := len(tap.frames()); got != n0+2 {
 		t.Fatalf("他方 server-id 的 REQUEST 应静默忽略，实得 %d 条应答", got-n0)
+	}
+}
+
+// TestDHCPServerDedupeDualPath 双入径去重（round141 真机实测后补的口径）：同一条客户端广播
+// 报文会经「BD 洪泛到内置 tap」与「经 BVI 进 UDP/67 的 punt」**各达一次**（真机一 REQUEST
+// 两 ACK），服务器须在去重窗内只应答一次；窗外的真重传（新 xid）照常应答。
+func TestDHCPServerDedupeDualPath(t *testing.T) {
+	p, _, _, factory, clk := newEnabledProvider(t)
+	ctx := context.Background()
+	vs := vsDHCPServer()
+	if err := p.Sync(ctx, vs); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	name := vs.Name
+	tap := factory.get(DHCPServerTapName(name))
+	chaddr := mustMAC(t, "aa:bb:cc:dd:ee:09")
+
+	// 同一条 DISCOVER 的两个副本（同一 xid，tap 与 punt 两路）→ 只回 1 条 OFFER
+	frame := dhcpClientFrame(chaddr, dhcpDiscover, nil, nil, nil)
+	p.SetSwitchResolver(func(idx uint32) (string, bool) { return name, true })
+	p.handleTapFrame(name, frame)
+	p.handlePuntPacket(dnsPuntDesc{swIfIndex: 42}, frame[14:])
+	if got := len(tap.frames()); got != 1 {
+		t.Fatalf("双入径副本应只回 1 条 OFFER，实得 %d", got)
+	}
+
+	// 窗内的相同报文再投递（模拟巡检间隙的重复）→ 仍只此一次，不多答
+	p.handleTapFrame(name, frame)
+	if got := len(tap.frames()); got != 1 {
+		t.Fatalf("去重窗内的重复报文不应再应答，实得累计 %d", got)
+	}
+
+	// 时钟推过去重窗 + 新 xid（真重传/新交换）→ 正常应答
+	clk.advance(2 * dhcpDedupeWindow)
+	p.handleTapFrame(name, dhcpClientFrame(chaddr, dhcpDiscover, nil, nil, nil))
+	if got := len(tap.frames()); got != 2 {
+		t.Fatalf("越窗后的新交换应正常应答，实得累计 %d", got)
 	}
 }
 
