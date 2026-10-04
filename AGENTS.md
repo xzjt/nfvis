@@ -635,6 +635,22 @@
   「查不了」附注）、pty **10/10**。**如实边界**：失败注入真机不可确定性构造（VPP 无法按需报错）——
   失败路径由单测覆盖；登记的读-改-写非整体原子（与既有风格一致，编排层提交本就串行）。证据
   `docs/evidence/v2-round146-d363-qos-binding-order.txt`；真机已装 2.0.0~dev74。
+- **round147（决策 #364：会话锁与 confirmed 的归属语义——修 round142 体检 R142-8/R142-9，2026-10-04）**：
+  ① **R142-8**：CLI `request system api token revoke <自己的 token>` 此前只吊销 token 不释放编辑锁
+  （REST 等价路径会释放），与 #317「吊销当前会话等价于登出」相悖——现自吊销成功即走同一套
+  `discardOwnSession`（不区分接入源）+ 清执行器本地态，提示语如实写明「candidate 已丢弃、编辑锁已释放」；
+  ② **R142-9**：`Engine.Commit` 的隐式确认**移到 `requireHolderLocked` 之后**（被拒的 commit 不再替
+  在途 `commit confirmed` 背书、审计不记错人）；`ConfirmCommit` 加 `requireHolderLocked`（与 Rollback
+  同口径——跨会话确认不再允许）。**真机旧/新 A/B 实锤**（dev74 → dev75）：无锁会话 `POST
+  /configuration/commit` 均 409，但旧版把在途 confirmed 清掉（140s 后 banner **未回滚**）、新版
+  **超时回滚照常**；无锁会话 `commit:confirm` 旧版 **200**（越权背书）、新版 **409**；CLI **pty** 内
+  自吊销后同用户新会话**立即**取锁提交成功（旧版会被 `admin@ssh#<已吊销 token>` 的脏锁挡到空闲回收）。
+  **3 项新单测 + 红-绿**（暂回旧实现逐项按预期失败）；`make check` RC=0（决策 265→266）。**四套件**：
+  fulltest **254/0/18**、语义 **26/0/3**、lifecycle **23/0/2**（首跑 22/0/3 系 L3-2 正控未热）、
+  pty **10/10**。**如实边界**：R142-8 的旧行为侧未再跑机器对照（会留下死 token 持有的脏锁、需等
+  10 分钟空闲回收，污染后续步骤）——旧行为依据 round142 代码级确认 + 单测红-绿；校验失败的 commit
+  仍隐式确认（FR-CFG-004 既有语义，本轮只收口「被拒请求」）。证据
+  `docs/evidence/v2-round147-d364-lock-confirmed.txt`；真机已装 2.0.0~dev75。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。

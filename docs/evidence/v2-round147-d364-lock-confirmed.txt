@@ -1,0 +1,78 @@
+NFViS v2 round147 —— 决策 #364：会话锁与 confirmed 的归属语义（修 R142-8/R142-9）真机验证
+====================================================================
+日期：2026-10-04；分支 `feat/d364-lock-confirmed`（base `v2 @ b3487cc`）；决策 #364。
+真机 nfvis-vm：**dev74（旧行为对照）→ dev75（修复版，本分支构建并 dpkg 安装）**；四服务 active。
+对照基线：round142 半程体检 `docs/evidence/v2-round142-midpoint-audit.txt` §2 簇 E（E1/E2，代码级确认）。
+事实源：CLI（pty 与 `-c`，含 `show system api tokens` 的「当前会话」标记）、REST（`POST /login` 取独立
+token；`/configuration/commit`、`/configuration/commit:confirm` 的状态码）、`show configuration` 回读、
+`show configuration sessions`、单测（红-绿）。
+
+§0 结论
+- **R142-8 收口**：CLI 会话**在仍存活时**自吊销自己的 token ⇒ 输出如实说明「candidate 已丢弃、编辑锁已
+  释放」，同用户新会话**立即**取得编辑锁并提交成功（对照修复前的语义：脏锁以 `admin@ssh#<已吊销 token>`
+  继续占着、新会话被挡到空闲回收）。提示语与本地会话态（config 模式）同步收尾。
+- **R142-9 收口（旧/新 A/B 实锤）**：
+  ① **被拒的 commit 不再隐式确认**——旧版：无锁会话 `POST /configuration/commit` 得 409，却把在途
+     `commit confirmed` 确认掉（140s 后 banner 仍在=未回滚）；新版：同样 409，**超时回滚照常发生**
+     （140s 后 banner 计数 0）。
+  ② **confirm 需持有编辑会话**——旧版：无锁会话 `POST /configuration/commit:confirm` 返回 **200**
+     （越权背书）；新版：**409**，confirmed 保持并在超时后回滚（banner 计数 0）。
+- 四维齐（REST 层 A/B + CLI pty 自吊销 + 生命周期回滚观测 + 单测红-绿）。
+
+§1 真机验证
+
+1.1 R142-9 对照（同一脚本 `/tmp/r1429.sh` 在两件二进制上各跑一遍；T2＝REST 独立登录、**不持锁**）
+  | 相位 | 步骤 | 旧（dev74） | 新（dev75） |
+  |---|---|---|---|
+  | Part1 被拒 commit | A：`set system login banner r1429-p1` + `commit confirmed 2`；T2：`POST /configuration/commit` | **409**（同一文案），140s 后 `banner r1429-p1` **计数=1**（被拒请求把 confirmed 确认掉、**未回滚**） | **409**，140s 后 **计数=0**（在途 confirmed 未被触碰、**超时回滚发生**） |
+  | Part2 无锁 confirm | A：`set … r1429-p2` + `commit confirmed 2`；T2：`POST /configuration/commit:confirm` | **HTTP 200** `{"status":"confirmed"}`，140s 后 `r1429-p2` **计数=1**（越权确认生效） | **HTTP 409**（「当前会话未持有 candidate」），140s 后 **计数=0**（confirmed 保持→超时回滚） |
+  - 409 文案与旧版逐字一致（`当前会话未持有 candidate（先 PUT /configuration/candidate）`）——REST
+    错误面不变；变的只是**受保护状态不再被被拒请求改动**。
+  - `show configuration sessions` 在 confirmed 窗口内可见持锁会话（`admin@ssh … Dirty=false`）。
+
+1.2 R142-8（dev75，pty + FIFO 驱动真实交互会话）
+  - 会话内 `show system api tokens` 的自有 token（`… 当前会话` 标记）：`a8982ce4-…`；
+  - 该会话 `configure` + `set system login banner r1428-probe`（**脏候选、持锁**）后自吊销：
+    `run request system api token revoke a8982ce4-…` ⇒
+    **「已吊销当前会话：本会话的 candidate 已丢弃、编辑锁已释放，下一个请求将要求重新登录。」**
+    提示符从配置态提示符回到操作态（本地会话态已清）；
+  - 随即（**同一时刻、同用户、新会话**）：`configure` + `set … r1428-probe2` + `commit`
+    **两次提交均成功**（revision 1796/1797）——锁未被已吊销 token 占着（旧行为下这里会被
+    `admin@ssh#<已吊销 token>` 的脏锁挡住，直到 10 分钟空闲回收）；
+  - 终态 `show configuration sessions` ⇒ `（无持锁会话）`；banner 已清回。
+  - **如实登记**：R142-8 的**旧行为侧**本轮未再跑一遍机器对照（旧版那一步会留下「死 token 持有的脏锁」，
+    需等 10 分钟空闲回收才能清场、会污染后续步骤）——旧行为依据为 round142 代码级确认 + 新增单测的
+    红-绿验证（暂回旧实现时 `TestCLIRevokeOwnTokenDropsSession` 按预期失败）。
+
+§2 单元测试与自检
+  - `internal/config/engine_test.go`：`TestEngineRejectedCommitKeepsConfirmed`（无锁会话 Commit 被拒 ⇒
+    confirmed 仍在、无其名下 `config.confirm` 审计；持有者随后 ConfirmCommit 成功）、
+    `TestEngineConfirmCommitRequiresHolder`（无锁/同用户它会话均被拒、confirmed 保留；持有者成功且
+    审计 User=admin）。
+  - `internal/api/aaa_tokens_test.go`：`TestCLIRevokeOwnTokenDropsSession`（真实 `*aaa.Service`；
+    `configure`+`set` 使锁归属 `admin@ssh#<token>` → 自吊销 → 锁释放、本地态清、token 失效、
+    提示语含「编辑锁已释放」；非自吊销路径不释放锁）。
+  - **红-绿验证**（子智能体执行）：临时回退三处生产改动 ⇒ 三个新测试全部按预期失败；恢复后全绿。
+  - `GOFLAGS=-p=1 make check` RC=0（决策条数 266）。
+
+§3 四套件复跑（dev75；夹具 `cli-semantic-fixture.sh up`；fulltest 前停 sem-vm）
+  cli-fulltest **254/0/18**（与基线逐项一致：零失败、18 条预期报错）
+  cli-semantic-check **26/0/3**（与基线一致）
+  cli-lifecycle-check **23/0/2**（与基线一致。**首跑 22/0/3**：L3-2 因邻居表当刻无对端条目按设计
+  跳过（同 round143~146 的现场时序现象）；邻居条目在场（age 20.5min）时复跑即
+  `✓ L3-2 …（5/5 应答）`、登记 0）
+  cli-pty-smoke **10/10**
+
+§4 现场与清场
+  - 测试 banner（r1429-p1/p2、r1428-probe*）全部清除（回读计数 0）、无持锁会话；
+  - REST 测试 token 到点自然过期（1 小时）；无进程/文件残留；
+  - sem-vm/sem-ct/sem-vs/dns-vs 回夹具态（套件流程）；告警仅常态 `HUGEPAGE_POOL_ORPHAN`。
+
+§5 如实边界（入册）
+  1. **语义变更点**：跨会话确认不再允许（另一会话/另一接入源不能确认或取消别人的 `commit confirmed`）
+     ——与 `Rollback` 同口径；恢复途径是重新进入编辑态后再 `commit`（空候选提交也会隐式确认，
+     属 FR-CFG-004 既有语义）。
+  2. 校验失败（validation error）的 commit 仍会隐式确认在途 confirmed（FR-CFG-004「任意新 commit
+     即确认」的既有语义；本轮只收口「被拒请求」这一条）——如需再收紧另立项。
+  3. CLI 自吊销的「新会话立即取锁」观测依赖会话**存活**（pty 驱动）；一次性 `-c` 脚本退出时客户端
+     本就走退出清理（#318 路径级释放），两种形态都不再存在「死 token 占锁」。
