@@ -89,6 +89,12 @@ func (r *metricsHistoryRunner) run(ctx context.Context) {
 
 // tick 一轮采集 + 落库 + 心跳。失败记 last_error（节流日志），循环继续。
 func (r *metricsHistoryRunner) tick(ctx context.Context) {
+	// 决策 #365：库文件被删/替换（format-data / rm）时重开空库——旧连接持已删 inode 会让
+	// 「已清掉」只停在 ls 层面（读数与空间都还在旧 inode 上）。
+	if err := r.store.ReopenIfReplaced(); err != nil {
+		r.reportError("重开历史库失败", err)
+		return
+	}
 	now := r.now()
 	gctx, cancel := context.WithTimeout(ctx, r.gatherTimeout)
 	samples, err := r.gather(gctx)
