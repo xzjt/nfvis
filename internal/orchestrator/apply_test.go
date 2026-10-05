@@ -552,18 +552,36 @@ func TestApplyRouteDeleteCompensatedOnFailure(t *testing.T) {
 }
 
 // 同一前缀换下一跳：旧下一跳那条 path 必须撤销（否则 FIB 里留下两条并行的等价路径）。
-func TestApplyRouteNextHopChangeRevolvesOldPath(t *testing.T) {
-	ap, calls := newRecApplier("")
-	old := model.Config{Vrfs: []model.Vrf{l3vrf("vs-l3", model.Route{Prefix: "10.99.89.0/24", NextHop: "10.99.89.2"})}}
-	newCfg := model.Config{Vrfs: []model.Vrf{l3vrf("vs-l3", model.Route{Prefix: "10.99.89.0/24", NextHop: "10.99.89.3"})}}
-	if err := ap.Apply(context.Background(), old, newCfg); err != nil {
-		t.Fatalf("Apply: %v", err)
+// 决策 #382（round163 真机暴露）：**同前缀改下一跳不得撤旧**——del-route 段在 ApplyVRF **之后**
+// 执行，会把刚下发的新路由删掉（真机实证：`10.99.1.0/24` 由 ECMP 两跳改回单跳后**不在任何表里**，
+// 而配置与读视图一切正常——数据面黑洞）。正确语义：VPP 对同前缀是**替换**，由 ApplyVRF 重新下发即可；
+// 只有**前缀**不再声明才发 del-route。旧行为（本用例此前断言「换下一跳时旧路径应撤销」）已按真机结论更正。
+func TestApplyRouteNextHopChangeKeepsRoute(t *testing.T) {
+	cases := []struct {
+		name   string
+		oldNH  string
+		newNH  string
+	}{
+		{"单值→单值（改地址）", "10.99.89.2", "10.99.89.3"},
+		{"单值→多值（转 ECMP）", "10.99.89.2", "10.99.89.2,10.99.89.3"},
+		{"多值→单值（收窄 ECMP）", "10.99.89.2,10.99.89.3", "10.99.89.2"},
+		{"多值增删", "10.99.89.2,10.99.89.3", "10.99.89.3,10.99.89.4"},
 	}
-	if !hasCall(*calls, "del-route:vs-l3 10.99.89.0/24 via 10.99.89.2") {
-		t.Fatalf("换下一跳时旧路径应撤销: %v", *calls)
-	}
-	if hasCall(*calls, "del-route:vs-l3 10.99.89.0/24 via 10.99.89.3") {
-		t.Fatalf("新声明的下一跳不得被撤销: %v", *calls)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ap, calls := newRecApplier("")
+			old := model.Config{Vrfs: []model.Vrf{l3vrf("vs-l3", model.Route{Prefix: "10.99.89.0/24", NextHop: c.oldNH})}}
+			newCfg := model.Config{Vrfs: []model.Vrf{l3vrf("vs-l3", model.Route{Prefix: "10.99.89.0/24", NextHop: c.newNH})}}
+			if err := ap.Apply(context.Background(), old, newCfg); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			if hasCall(*calls, "del-route:") {
+				t.Fatalf("同前缀改下一跳不得撤销路由（由 ApplyVRF 替换下发）: %v", *calls)
+			}
+			if !hasCall(*calls, "vrf:vs-l3") {
+				t.Fatalf("同前缀改下一跳仍应经 ApplyVRF 重下发: %v", *calls)
+			}
+		})
 	}
 }
 
