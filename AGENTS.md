@@ -771,6 +771,19 @@
   dns-vs 2 地址小池注入占满 ⇒ `DHCP_POOL_EXHAUSTED` 在册（文案逐字）→ 释放一条 ⇒ **消解**（计数 0）→ 清场干净。
   **四套件（dev94，v2 @ f7bc279）**：fulltest **254/0/18**、语义 **27/0/2**、lifecycle **23/0/2**、pty **10/10**。
   证据 `docs/evidence/v2-round156-d373-lock-hygiene-metrics-avail.txt`；真机已装 2.0.0~dev94。
+- **round157（round142 体检 API 层长期驻留/记账批次：决策 #374，2026-10-05）**：清掉体检 §2 簇 B/E 五项（B4/E5 同一条；PR #304）：
+  **B4/E5** `consoleTickets` 无清扫——未消费的一次性 ticket（如 `-c` 脚本模式申请了却不接管终端）**永久驻留**（TTL 只在消费时校验）
+  ⇒ `issue` **随访问清扫**过期条目（本仓既有 idiom，与 DHCP 去重窗同法、不新造定时器）；**B5** CLI 在**签发凭证时**即记
+  `container.shell open … success` ⇒ 成功会话**两条 open**、脚本模式（不接管终端）也记 success（VM 串口 console 路径无此条）
+  ⇒ **删除签发期审计**，审计只记真实会话事件（WS 建立 open / 断开 close / 失败 failure）；**E6** `cliExecutor.sess`（模式/层级显示态）
+  无 TTL ⇒ `cliSession` 增 `LastUsed`，`ExecuteAs` 随访问清扫空闲 >`cliSessIdleTTL`(24h) 条目（只清进程内显示态，不触碰引擎侧锁）；
+  **E7** `Engine.superseded`（「干净锁被谁接管」）只增不减 ⇒ `clearLockStateLocked` 收敛（删自身记录 + 指向自身的条目；
+  **顺序安全**：接管路径先 clear 后 set 新记录）。四项**逐一红-绿**。**测试自身缺陷两处如实入册**：E6 首版两会话都进配置模式、
+  第二个占着引擎锁且引擎时钟未假化 ⇒ 后续 `configure` 撞锁假红（改为进模式后 `exit` 释放锁）；E7 首版误用 `newKit`（应为 `newEngineKit`）。
+  **真机（dev95）**：① CLI 脚本模式签发 ⇒ `show log audit` 中 `container.shell` **0 条**（旧实现记 1 条 success）；
+  ② 真实 WS 会话（Origin+Upgrade 头）⇒ **恰 1 open + 1 close**（旧实现 2 条 open）。B4/E5/E6/E7 无真机读视图，**单测覆盖如实登记**。
+  **四套件（dev96，v2 @ 98a42b4）**：fulltest **254/0/18**、语义 **27/0/2**、lifecycle **23/0/2**、pty **10/10**。
+  证据 `docs/evidence/v2-round157-d374-api-hygiene.txt`；真机已装 2.0.0~dev96。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
