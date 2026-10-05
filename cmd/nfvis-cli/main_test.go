@@ -40,7 +40,7 @@ func (b *scriptBackend) DynamicCandidates(string) ([]string, error) { return nil
 func (b *scriptBackend) Logout() error                              { return nil }
 func (b *scriptBackend) MetricsText() (string, error)               { return "", nil }
 
-func (b *scriptBackend) DialConsole(string) (io.ReadWriteCloser, error) {
+func (b *scriptBackend) DialConsole(string, string) (io.ReadWriteCloser, error) {
 	return nil, errors.New("stub 不支持 console")
 }
 

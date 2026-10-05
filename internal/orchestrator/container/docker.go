@@ -11,6 +11,7 @@ package container
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -258,7 +259,7 @@ func (p *Provider) ContainerExec(ctx context.Context, name, command string, time
 	defer cancel()
 	state, exists, err := p.api.State(ectx, name)
 	if err != nil {
-		return ExecResult{}, wrapDockerTimeout(err)
+		return ExecResult{}, normalizeDockerErr(name, wrapDockerTimeout(err))
 	}
 	if !exists {
 		return ExecResult{}, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
@@ -266,7 +267,13 @@ func (p *Provider) ContainerExec(ctx context.Context, name, command string, time
 	if state != orchestrator.CTStateRunning {
 		return ExecResult{}, fmt.Errorf("%w: %s（当前 %s）", orchestrator.ErrContainerNotRunning, name, state)
 	}
-	return p.api.Exec(ctx, name, command, timeout)
+	res, err := p.api.Exec(ctx, name, command, timeout)
+	if err != nil {
+		// 归一：State 与 Exec 之间容器被删的竞态（docker 404）⇒ ErrVMNotFound；
+		// 底座不可达/无响应 ⇒ ErrContainerUnavailable（API 503）。已捕获的部分输出保留。
+		return res, normalizeDockerErr(name, err)
+	}
+	return res, nil
 }
 
 // ContainerShell 打开**运行中**容器的交互式终端（决策 #358）。
@@ -281,7 +288,7 @@ func (p *Provider) ContainerShell(ctx context.Context, name string) (io.ReadWrit
 	defer cancel()
 	state, exists, err := p.api.State(sctx, name)
 	if err != nil {
-		return nil, wrapDockerTimeout(err)
+		return nil, normalizeDockerErr(name, wrapDockerTimeout(err))
 	}
 	if !exists {
 		return nil, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
@@ -289,7 +296,32 @@ func (p *Provider) ContainerShell(ctx context.Context, name string) (io.ReadWrit
 	if state != orchestrator.CTStateRunning {
 		return nil, fmt.Errorf("%w: %s（当前 %s）", orchestrator.ErrContainerNotRunning, name, state)
 	}
-	return p.api.ExecShell(ctx, name)
+	stream, err := p.api.ExecShell(ctx, name)
+	if err != nil {
+		return nil, normalizeDockerErr(name, err)
+	}
+	return stream, nil
+}
+
+// normalizeDockerErr 把底座错误归一为编排层 sentinel（决策 #375，R142 B8）：
+//   - docker 404（State 与 Exec 之间容器被删的竞态）⇒ ErrVMNotFound（API 404）；
+//   - 调用方取消（ctx canceled）⇒ 原样透传（不是底座故障，也不该 503）；
+//   - 其余（底座不可达/无响应/超时、dockerd 侧异常）⇒ ErrContainerUnavailable（API 503），
+//     以 %v 保留原因文案（含 wrapDockerTimeout 的「Docker 未在 … 内响应…」）。
+//
+// 既有前置语义（exists=false ⇒ ErrVMNotFound、非 running ⇒ ErrContainerNotRunning）在本
+// 函数之前判定，不受影响。
+func normalizeDockerErr(name string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errDockerNotFound) {
+		return fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+	}
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
+	return fmt.Errorf("%w: %v", orchestrator.ErrContainerUnavailable, err)
 }
 
 // EnsureConsistent 恢复收敛（FR-OPS-010/012）：补建缺失容器；单对象失败不阻塞其余。

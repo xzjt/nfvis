@@ -31,7 +31,7 @@ func TestDialConsoleUsesPinnedCert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWithTLS: %v", err)
 	}
-	stream, err := c.DialConsole("/api/v1/virtual-machine-functions/vm/console/ws?ticket=x")
+	stream, err := c.DialConsole("/api/v1/virtual-machine-functions/vm/console/ws?ticket=x", "串口")
 	if err != nil {
 		t.Fatalf("证书固定后 wss 拨号应成功（修复前报 x509 unknown authority）: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestDialConsoleInsecureAlsoWorks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream, err := c.DialConsole("/console/ws?ticket=x")
+	stream, err := c.DialConsole("/console/ws?ticket=x", "容器终端")
 	if err != nil {
 		t.Fatalf("-insecure 下 wss 拨号应成功: %v", err)
 	}

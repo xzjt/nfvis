@@ -53,14 +53,19 @@ func (s *Server) handleContainerShellTicket(w http.ResponseWriter, r *http.Reque
 	sctx, cancel := context.WithTimeout(r.Context(), shellStateCheckTimeout)
 	defer cancel()
 	st, serr := s.containers.ContainerState(sctx, name)
-	switch {
-	case serr == nil && st != orchestrator.CTStateRunning:
+	// 决策 #375（R142 B8）：状态检查**任一错误**（不只 deadline）都不再继续签发 ticket——
+	// 否则操作者拿到一个「连上即断」的终端。底座不可用/无响应如实映射 503。
+	if serr != nil {
+		msg := serr.Error()
+		if errors.Is(serr, context.DeadlineExceeded) {
+			msg = "Docker 未在 10s 内响应（已中止等待；请确认 docker 服务状态）"
+		}
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", msg, nil)
+		return
+	}
+	if st != orchestrator.CTStateRunning {
 		writeError(w, http.StatusConflict, "CONFLICT",
 			fmt.Sprintf("容器 %s 未处于运行态（当前 %s）；先 request container-functions %s start", name, st, name), nil)
-		return
-	case errors.Is(serr, context.DeadlineExceeded):
-		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE",
-			"Docker 未在 10s 内响应（已中止等待；请确认 docker 服务状态）", nil)
 		return
 	}
 	user := "api"

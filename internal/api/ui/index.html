@@ -514,7 +514,7 @@
             <button id="vm-console-close" data-write type="button" class="ghost small">断开</button></h3>
           <pre id="vm-console-out" class="code console-out"></pre>
           <div class="cfg-actions">
-            <input id="vm-console-in" data-write type="text" placeholder="输入后回车发送（串口是行缓冲，Ctrl-C 可中断）">
+            <input id="vm-console-in" data-write type="text" placeholder="输入后回车发送（文本框不能发送控制字符；需要 Ctrl-C 请用 CLI 交互终端）">
             <button id="vm-console-send" data-write type="button" class="ghost">发送</button>
             <button id="vm-console-enter" data-write type="button" class="ghost">只发回车</button>
           </div>
@@ -683,7 +683,7 @@
             <button id="ct-shell-close" data-write type="button" class="ghost small">断开</button></h3>
           <pre id="ct-shell-out" class="code console-out"></pre>
           <div class="cfg-actions">
-            <input id="ct-shell-in" data-write type="text" placeholder="输入后回车发送（Ctrl-C 可中断）">
+            <input id="ct-shell-in" data-write type="text" placeholder="输入后回车发送（文本框不能发送控制字符；需要 Ctrl-C 请用 CLI 交互终端或「执行命令」）">
             <button id="ct-shell-send" data-write type="button" class="ghost">发送</button>
             <button id="ct-shell-enter" data-write type="button" class="ghost">只发回车</button>
           </div>

@@ -44,6 +44,15 @@ type ExecResult struct {
 // 决策 #357）在容器 absent/exited/dead 时返回，API 层映射 409。
 var ErrContainerNotRunning = errors.New("容器未处于运行态")
 
+// ErrContainerUnavailable 容器底座（Docker）**不可用/无响应**——连接被拒、dockerd 停、
+// 请求超时、dockerd 侧异常等（决策 #375，R142 B8）。API 层据此映射 **503 UNAVAILABLE**
+// （契约 #357/#358 写明「503 = Docker 不可用」；此前底座错误落 500）。
+//
+// 与 ErrVMNotFound（404）区分：后者是「容器已不在」的确定性事实（含 State 与 Exec 之间
+// 容器被删的竞态），前者是「问不到底座」。定义在接口所在的本包（依赖方向不允许
+// container 包反向依赖 API 层）。
+var ErrContainerUnavailable = errors.New("容器底座（Docker）不可用")
+
 // ErrIfaceUnavailable 配置引用的接口在 VPP 中不存在（未由 DPDK 接管、或已被 DPDK
 // 接管但尚未加载进数据面、或被移除）。属**不可收敛项**：恢复收敛据此转 error 级告警
 // （FR-OPS-010），提交阶段则据此判断能否**延后收敛**（决策 #100）。
