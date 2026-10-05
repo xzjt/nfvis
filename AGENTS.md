@@ -697,6 +697,22 @@
   逐环验证有界；③ 可自愈系统的**跨域资源归属**（UDP/67 全局单槽）要靠真机对照实验定性，代码推理会漏。
   证据 `docs/evidence/v2-round149-d366-exec-timeout-bounds.txt`、`v2-round150-d367-recovery-subsource.txt`、
   `v2-round151-d368-relay-server-coexistence.txt`；真机已装 2.0.0~dev84。
+- **round152（R142 体检最后一项收口：决策 #369，2026-10-05）**：**FR-CFG-012 管理口自锁保护的接入源事实化**
+  （收口 R142-11；PR #299）。**由来**：`/cli/execute` 的接入口来源由**客户端自述**（`-source ssh|console`），
+  声称 `console` 即可关掉自锁保护；体检判定「服务端无独立事实源，需产品口径定裁」。**架构核实**：物理 console
+  与 SSH 会话**都**是「本机 nfvis-cli → 127.0.0.1:443」——`RemoteAddr` 只能验证「是否来自本机」，
+  「物理 console vs SSH」无服务端可验证事实源（新增本地专用通道属架构改造）。**用户裁定按建议 a 推进**：
+  `console` 自述**只在连接源自本机回环时采信**（`cliSessionSource` + `loopbackOrigin`；远程声称 console
+  一律按 ssh）——远程伪造堵死、SSH 守卫与 console 救援路径均不变。**真机三态 A/B（dev85）**：
+  ① 宿主远程声称 `source=console` 改管理口 ⇒ **拒绝**（`%% 管理口地址/网关变更必须以 commit confirmed 提交`；
+  旁证：锁视图该会话记为 `admin@ssh`）；② 本机 SSH（不声称）⇒ 拒绝；③ 本机 console ⇒ 放行
+  （`commit 成功`，读视图显示声明值）→ console 删声明还原。11 项矩阵 + api 三态 A/B + 红-绿；
+  `make check` 全绿（决策 **271** 守护）。**顺带观察 R152-1（低，已登记）**：`delete system management ip address`
+  不带值报「无匹配配置: ip」，须带值（与 `… interface` 形态不一致）。**R142 体检 13 项至此全部收口**。
+  **四套件（dev86，v2 @ 071242d）**：fulltest **254/0/18**、语义 **26/0/3**、lifecycle **23/0/2**、pty **10/10**
+  ——与基线逐项一致。**教训/工具**：夹具 guest 的 beat 循环是 cloud-init 一次性 runcmd，**VM 重启后不重跑**
+  （L3-2 会如实跳过 ⇒ 22/0/3）；`vppctl ping <guest-ip> source <bvi>` 可从数据面侧确定性催生邻居条目。
+  证据 `docs/evidence/v2-round152-d369-cli-source-fact.txt`；真机已装 2.0.0~dev86。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
