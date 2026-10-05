@@ -1,0 +1,56 @@
+round152 · 决策 #369 —— 管理口自锁保护（FR-CFG-012）的接入源事实化（收口 R142-11）
+====================================================================
+日期：2026-10-05；分支 feat/d369-cli-source-fact（1f155f6 契约先行 → 84ccde8 实现）；
+真机 nfvis-vm 2.0.0~dev85（= v2 @ cdbd962 含 #366~#368 + 本分支）。
+来源：round142 半程体检 E3/R142-11（`/cli/execute` 接入口来源由客户端自述，声称 console 可关自锁保护）。
+
+§0 结论
+- R142-11 收口：`console` 自述**只在连接源自本机回环时采信**——远程连接物理上不可能是本地串口会话，
+  其 console 声明一律按网络会话（ssh）处理。远程伪造被堵死、SSH 语义与 console 救援路径均不变。
+- **R142 体检 13 项至此全部收口**（本项为最后一项）。
+
+§1 定裁与架构核实（round152）
+- 体检结论（E3）：服务端无独立事实源，需产品口径定裁。**用户裁定「按建议 a 推进」**。
+- **架构事实**（本轮核实）：物理 console 会话与 SSH 会话**都**是「本机 nfvis-cli → 127.0.0.1:443」——
+  `RemoteAddr` 能验证的事实是「连接是否来自本机」；「物理 console vs SSH」无服务端可验证事实源
+  （新增本地专用通道属架构改造，不在本轮）。故定裁落为：**把 console 自述的采信收敛到可验证事实**
+  （回环来源），既不削弱 FR 原文对 SSH 的守卫，又堵死远程伪造。
+
+§2 契约先行（1f155f6）
+- 附录 A 新增决策 #369（v2 线第 70 条）；AGENTS.md 决策条数 270→271。
+- **FR-CFG-012 原文**补判据事实化注（console 豁免只在连接源自本机回环时成立）。
+- 手册：`-source` 行 + 「哪些操作要求 commit confirmed」段（服务端可验证事实判定）。
+- 命令树设计：自锁注释补事实化口径。
+
+§3 实现（84ccde8）
+- `internal/api/cli_bridge.go`：`cliSessionSource(r, claimed)`——空/空白回落 ssh；`console` 且非回环 ⇒ **降级为 ssh**；
+  `loopbackOrigin(r)` 用 `RemoteAddr`（IPv4/IPv6 回环同判；无端口/取不到地址保守按非回环）。
+  `handleCLIExecute` 改用事实化来源（执行器与 `start shell` 权限同源受益）。
+- 引擎层判据（`Session.Source != "console"`）与 `commit confirmed` 机制**不改**（事实在接入层，纵深不变）。
+- 测试：11 项纯函数矩阵（回环/远程 × console/ssh/空 × IPv4/IPv6/无端口/空白）+ api 层三态 A/B
+  （远程声称 console ⇒ 被拒；本机 ssh ⇒ 被拒；本机 console ⇒ 放行）+ **红-绿**（临时摘除降级 ⇒ 用例失败）。
+
+§4 真机验证（dev85，三态 A/B）
+① **远程伪造**（宿主 `curl` 到 192.168.155.129，body 声称 `source=console`，改管理口 + commit）⇒
+   **拒绝**：`%% 管理口地址/网关变更必须以 commit confirmed 提交`——体检缺口关闭。
+   旁证：该远程会话在锁视图里记为 **`admin@ssh`**（`show configuration sessions`：Holder=admin@ssh、
+   Dirty=true）——降级真实发生（声称 console 实为网络会话）。
+② **本机 SSH**（不声称 console）⇒ **拒绝**（同上文案）——FR 原文对 SSH 的守卫不变。
+③ **本机 console**（`nfvis-cli -source console`）⇒ **放行**：`commit 成功 (revision 151)`，
+   读视图 `show interfaces management` 显示 `192.168.155.129/24 management(kernel)`——救援路径保留。
+④ **还原**：console 删声明 ⇒ `commit 成功 (revision 152)`，读视图回「未配置管理口」；现场干净。
+   管理口声明为**惰性配置**（无 applier 改写宿主网络，`mgmtAddressOf` 只供 #101 守卫），真机操作无断连风险。
+
+§5 顺带观察（如实登记，非本决策范围）
+- **观察 R152-1（低）**：管理口 delete 语句形态不一致——`delete system management interface`（不带值）可用，
+  而 `delete system management ip address`（不带值）报「无匹配配置: ip」，须写成
+  `delete system management ip address <prefix>`（带值才匹配别名 `{"system","management","ip","address","*"}`）。
+  已登记 `docs/v2待做.md`（二·新登记），修法方向＝让 delete 形态与 interface 一致（值可省）。
+- 吊销**他人**会话的 token 不释放其编辑锁（本轮实测脏锁滞留）——**设计如此**（#317 口径：他人会话的锁
+  由空闲巡检回收；#364 只覆盖自吊销），非缺陷；测试中被挡后以 `systemctl restart nfvis` 清进程内锁。
+- `delete` 与 `set` 的别名匹配差异属既有 CLI 细节，未改动。
+
+§6 make check 与套件
+- `make check` 全绿（决策 271 守护；api 包新增用例全过）。四套件不受本改动影响（无契约命令增删、
+  `/cli/execute` 行为对合法来源不变）——随本批账目统一复核为 dev84 基线（本决策改动仅接入层来源判定，
+  不回退套件）。

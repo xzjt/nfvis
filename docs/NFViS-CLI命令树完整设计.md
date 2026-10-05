@@ -476,7 +476,9 @@ set metrics                              # 历史时序存储（决策 #356）
                                               #   （字段缺省＝用默认值，不在配置里写常数）。落点 `system.metrics.history`；
                                               #   采样器写独立库 `/var/lib/nfvis/metrics.db`（不在配置备份/恢复语义内）
 # 管理口地址/网关变更：commit 时若当前会话来自 SSH，强制要求使用
-# commit confirmed 并输出自锁警告（FR-CFG-012）
+# commit confirmed 并输出自锁警告（FR-CFG-012）。**接入源事实化（决策 #369）**：
+# 客户端 `-source console` 仅在**连接源自本机回环**时被采信——远程连接声称 console
+# 一律按 ssh 处理（物理上不可能是本地串口会话），自锁保护不可被远程伪造绕过
 set login                               # 权限：S（配置模式既有权限位，本节全部语句同）
   ├─ banner <text>                     # 登录横幅：显示在 Web 登录页与 CLI 登录提示之前（未认证即可见，
   │                                    #   请勿写入敏感信息）；单行、最长 512 字节，超限/含换行时
