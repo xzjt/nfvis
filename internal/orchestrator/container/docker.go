@@ -219,7 +219,9 @@ func (p *Provider) RestartContainer(ctx context.Context, name string) error {
 func (p *Provider) ContainerState(ctx context.Context, name string) (string, error) {
 	state, exists, err := p.api.State(ctx, name)
 	if err != nil {
-		return "", err
+		// 决策 #375（R142 B8）：底座不可达/无响应归一为 ErrContainerUnavailable（API 503）；
+		// 调用方取消原样透传。容器不存在走 exists=false（CTStateAbsent）而非错误。
+		return "", normalizeDockerErr(name, wrapDockerTimeout(err))
 	}
 	if !exists {
 		return orchestrator.CTStateAbsent, nil

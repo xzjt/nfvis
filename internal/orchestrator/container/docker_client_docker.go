@@ -99,7 +99,7 @@ func (c *dockerClient) do(ctx context.Context, method, path string, body any, ou
 		if errors.Is(err, context.Canceled) {
 			return fmt.Errorf("docker %s %s: %w", method, path, err)
 		}
-		return fmt.Errorf("docker %s %s: %w: %w", method, path, errDockerUnavailable, err)
+		return fmt.Errorf("docker %s %s: %w", method, path, dockerUnavailableError{err})
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -120,7 +120,17 @@ var errDockerNotFound = fmt.Errorf("docker: not found")
 // errDockerUnavailable Docker 底座**不可达/无响应**（决策 #375，R142 B8）：连接被拒、dial
 // 失败、请求超时等。包级 sentinel，由 Provider 归一为 orchestrator.ErrContainerUnavailable
 // （API 层映射 503 UNAVAILABLE）。与 errDockerNotFound（404 竞态 ⇒ ErrVMNotFound）区分开。
-var errDockerUnavailable = fmt.Errorf("docker: unavailable")
+//
+// 用类型 dockerUnavailableError 承载（而非直接 `%w` 包 sentinel）：sentinel 文案不进**用户
+// 可见消息**（Error 只回原始错误文本），而 `errors.Is(err, errDockerUnavailable)` 仍成立。
+var errDockerUnavailable = errors.New("docker 底座不可达")
+
+// dockerUnavailableError 标记「底座不可达」并保留原始错误因果；Error 只回原始文本。
+type dockerUnavailableError struct{ err error }
+
+func (e dockerUnavailableError) Error() string        { return e.err.Error() }
+func (e dockerUnavailableError) Unwrap() error        { return e.err }
+func (e dockerUnavailableError) Is(target error) bool { return target == errDockerUnavailable }
 
 func (c *dockerClient) Create(ctx context.Context, name string, spec CreateSpec) error {
 	body := dockerCreateBody{
@@ -460,9 +470,9 @@ func (c *dockerClient) ExecShell(ctx context.Context, name string) (io.ReadWrite
 	d := net.Dialer{Timeout: 5 * time.Second}
 	conn, err := d.DialContext(ctx, "unix", c.socket)
 	if err != nil {
-		// 决策 #375（R142 B8）：拨号失败是「底座不可达」，带上 sentinel 供上层映射 503
+		// 决策 #375（R142 B8）：拨号失败是「底座不可达」，带上标记供上层映射 503
 		// （保留原始错误因果/文本）。Provider 归一里对调用方取消优先透传，故此处无需区分。
-		return nil, fmt.Errorf("连接 Docker socket: %w: %w", errDockerUnavailable, err)
+		return nil, fmt.Errorf("连接 Docker socket: %w", dockerUnavailableError{err})
 	}
 	return execShellHandshake(conn, created.ID)
 }

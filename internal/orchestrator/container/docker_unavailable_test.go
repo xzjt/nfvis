@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,5 +60,21 @@ func TestProviderNormalizesDockerUnavailable(t *testing.T) {
 	p5 := NewProvider(DefaultConfig(), m5)
 	if _, err := p5.ContainerExec(context.Background(), "ct", "echo x", time.Second); !errors.Is(err, context.Canceled) || errors.Is(err, orchestrator.ErrContainerUnavailable) {
 		t.Fatalf("调用方取消应原样透传（不 503），得 %v", err)
+	}
+}
+
+// dockerUnavailableError 承载 sentinel：errors.Is 成立，但 sentinel 文案不进用户可见消息
+// （旧实现用 `%w: %w` 直接包 sentinel，消息里会出现「docker: unavailable:」这类内部文本）。
+func TestDockerUnavailableErrorMarksWithoutLeakingText(t *testing.T) {
+	base := errors.New("dial unix /var/run/docker.sock: connect: connection refused")
+	err := fmt.Errorf("docker GET /x: %w", dockerUnavailableError{base})
+	if !errors.Is(err, errDockerUnavailable) {
+		t.Fatalf("应可判为底座不可达: %v", err)
+	}
+	if !errors.Is(err, base) {
+		t.Fatalf("应保留原始错误因果: %v", err)
+	}
+	if strings.Contains(err.Error(), errDockerUnavailable.Error()) {
+		t.Fatalf("sentinel 文案不得进用户可见消息: %v", err)
 	}
 }
