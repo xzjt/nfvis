@@ -592,12 +592,18 @@ func (p *DHCPServerProvider) handleMessage(name string, msg dhcpMessage) {
 			reqV, inPool = ipToU32(req.String())
 			inPool = inPool && rt.leases.inPool(reqV)
 		}
+		owner := rt.leases.ownerOf(req.String())
 		switch {
 		case req == nil || req.IsUnspecified():
 			// 既无 option 50 也无 ciaddr：不是可判定的 REQUEST，静默忽略。
 		case !inPool:
 			reply = buildDHCPReply(msg, dhcpNak, nil, rt.replySpec())
-		case rt.leases.ownerOf(req.String()) != nil && rt.leases.ownerOf(req.String()).MAC != mac:
+		case owner != nil && owner.State == dhcpLeaseDeclined:
+			// 决策 #371（R142 C6）：declined 地址在**隔离期内任何客户端**（含声明者本人）
+			// 都不得被重新授予——此前同一 MAC 的 REQUEST 因 owner.MAC==本机落进默认分支被
+			// commit 直接夺回，隔离语义被绕过。ownerOf 已 sweep：到期隔离自然解除。
+			reply = buildDHCPReply(msg, dhcpNak, nil, rt.replySpec())
+		case owner != nil && owner.MAC != mac:
 			reply = buildDHCPReply(msg, dhcpNak, nil, rt.replySpec())
 		default:
 			rt.leases.commit(mac, req.String(), rt.spec.lease)
