@@ -1,0 +1,54 @@
+round154 · 决策 #371 —— round142 体检 DHCP 租约状态机批次（C6/C7/C10）
+====================================================================
+日期：2026-10-05；分支 feat/d371-dhcp-lease-semantics（9706da1 契约先行 → 1ae80c4 实现）；
+真机 nfvis-vm 2.0.0~dev89（= v2 @ d015f7c 含 #366~#370 + 本分支）。
+来源：round142 半程体检 §2 簇 C 的三项（C7 为正确性风险：重复地址）。
+
+§0 结论
+- 三项收口，均三项红-绿 + **真机原始帧注入实证**（C7 状态不变、C6 declined 不可夺回 + NACK、C10 应答恰 300 字节）。
+- `make check` 全绿（决策 273 守护）。
+
+§1 契约先行（9706da1）
+- 附录 A 决策 #371（v2 线第 72 条）；AGENTS.md 273。
+- openapi `dhcp-leases` 状态语义细化（探测不改 active / declined 隔离期任何客户端不可取得 / 应答补零 300）；
+  `openapi.json` 同步；手册 DHCP 服务器段补同口径。C11（告警路径持锁做 I/O）与 C10 的「标准客户端实测」按报告保留登记。
+
+§2 实现（1ae80c4）
+1. **C7**（`dhcpserver_lease.go` `allocate`）：对 **active** 条目**原样返回**（不改 state/到期）——此前无条件改写成
+   `offered` + 2 分钟 OFFER 保持窗，一次 DISCOVER 即把生效租约降级、2 分钟后被 sweep 回收 ⇒ 地址可分配给别的
+   客户端（重复地址）。offered/其它非 active 条目仍按保持窗刷新。
+2. **C6**（`dhcpserver.go` REQUEST 分支）：先取 `owner := ownerOf(req)`，新增「owner 为 declined 且未到期 ⇒ **NAK**」
+   分支（在任何 MAC 相等判定之前）——此前同一 MAC 因 owner.MAC==本机落进默认分支被 `commit` 夺回；`ownerOf` 自带
+   sweep，到期隔离自然解除。
+3. **C10**（`dhcpserver_packet.go`）：DHCP 载荷按 BOOTP 下限**补零到 300 字节**（在 UDP 长度/校验和计算之前补；
+   零填充位于 END 之后）。
+
+§3 单测与红-绿
+- `TestDHCPLeaseTableAllocateKeepsActive`（C7：active 经 allocate 状态与到期均不变；对照 offered 仍刷新保持窗）；
+  `TestDHCPServerDeclinedNotReclaimableBySameMAC`（C6：DECLINE 后同 MAC REQUEST ⇒ NAK；他人 ⇒ NAK）；
+  `TestDHCPReplyPaddedTo300`（C10：OFFER/ACK 载荷 ≥300）。
+- 红-绿三项逐一：临时摘除各自修复 ⇒ 对应用例 rc=1（按预期失败），恢复即绿。
+
+§4 真机验证（dev89，dns-vs 启用 server + 原始帧注入）
+- **注入通道**：向交换机内置 tap（`nfvisdhfe341987`）以 `AF_PACKET` 原始帧注入 DHCP（自写 `dhcp_inject.py`，构造
+  Ethernet/IPv4/UDP/BOOTP+选项）；应答用 tcpdump 抓（客户端单播回帧需混杂/抓包器——**探针自身教训**：
+  AF_PACKET 非混杂模式收不到单播回帧，首轮「无应答」是探针问题而非产品问题，租约表同时已证明 server 处理成功）。
+- **C7（探测不降级）**：DISCOVER→REQUEST 得 `active`（ExpiresIn 86396）；再发一条**新 xid 的 DISCOVER** ⇒
+  租约仍 **active**、到期 86393（仅随时间流逝 3s，**未**被重置为 120s 保窗）——旧实现此处会变 offered+120s。
+- **C6（隔离不可夺回）**：DECLINE `.10` ⇒ 读视图 `declined`；**同 MAC** 再 REQUEST `.10` ⇒ 读视图**仍 declined**
+  （未被夺回）；**另一 MAC** REQUEST `.10` ⇒ tcpdump 抓到应答 **NACK**（`DHCP-Message (53): NACK`）。
+- **C10（补零）**：tcpdump 显示应答 `BOOTP/DHCP, Reply, length 300`、以太帧 `length 342`（= 14+20+8+300 恰为
+  BOOTP 下限）；客户端请求帧仍为 244/250（只补服务端应答，符合口径）。
+- 端到端：DISCOVER→Offer、REQUEST→ACK 全流程正常（tcpdump 双方向可见）。
+- **清场**：`delete dhcp-server`（rev 304）⇒ 无 tap、无 dhcp 配置、租约目录空、无 RECOVERY/池耗尽告警；注入脚本与抓包文件已删。
+
+§5 边界（如实）
+- C10 的「标准客户端实测」仍受限（环境无标准 DHCP 客户端镜像；本轮以原始帧注入 + tcpdump 帧长验证补零，
+  未跑 dhclient/networkd/Windows）。
+- C11（池耗尽告警在收包路径持 provider 锁做 syslog I/O）未在本批范围——仍按体检报告登记。
+- 注入探针为一次性脚本（已删），未入仓；复现步骤见本节描述。
+
+§6 make check 与套件
+- `make check` 全绿（决策 273 守护；network 包用例全过）。
+- 四套件随本批账目在 dev90 复核（语义 S11 现场需 relay 配置——本轮 dns-vs 的 server 已删、未配 relay，S11 按设计跳过；
+  其余与基线对照）。
