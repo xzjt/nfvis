@@ -3549,6 +3549,7 @@ components:
         stdout: { type: string, description: "标准输出（最多 256 KiB，超限置 truncated）" }
         stderr: { type: string, description: "标准错误（最多 256 KiB，超限置 truncated）" }
         truncated: { type: boolean, description: "stdout/stderr 至少一侧被上限裁剪（条件出现）" }
+        exit_code_note: { type: string, description: "退出码未能读取时的说明（条件出现；此时 exit_code 不出现，已捕获的 stdout/stderr 仍返回）" }
         duration_ms: { type: integer, description: "耗时（毫秒）" }
 
     ContainerFunction:
