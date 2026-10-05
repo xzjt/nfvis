@@ -186,8 +186,9 @@ func (p *DhcpProvider) DeleteRelay(ctx context.Context, name string) error {
 // 或该表数据面上多出声明之外的 server）逐个 ProxySet(IsAdd=false) 清除；清除失败如实返回。
 // 这是**不靠进程内登记**的安全网——带外改动/进程重启/旧版本残留的条目仍能被清掉。
 //
-// 如实边界：dump 失败即返回错误（调用方跳过本轮、不误撤）；relayTargetOf 报错的交换机**跳过**
-// （无法判定其表 ⇒ 不当成「未声明」去误删）；声明表里与声明一致的 server 不动。
+// 如实边界：dump 失败即返回错误（调用方跳过本轮、不误撤）；`relayTargetOf` 报错（网关无 IPv4）
+// 的交换机**不计入声明集**——它本也无法下发 relay，其表上的残留条目因此会被视为未声明而清除
+// （**无法判定即不能声称已声明**）；声明表里与声明一致的 server 不动。
 func (p *DhcpProvider) ReconcileProxy(declared []model.VirtualSwitch) error {
 	// 声明集：rx 表 id → 声明的 server。同一张表被多个交换机声明时以任一为准（产品语义同表同 server）。
 	want := map[uint32]string{}
@@ -197,7 +198,7 @@ func (p *DhcpProvider) ReconcileProxy(declared []model.VirtualSwitch) error {
 		}
 		tableID, _, err := relayTargetOf(vs)
 		if err != nil {
-			continue // 无法判定该交换机的表 ⇒ 不当成「未声明」去误删
+			continue // 网关无 IPv4 ⇒ 表不可判定；不计入声明集（见上「如实边界」）
 		}
 		want[tableID] = vs.DhcpRelayServer
 	}
