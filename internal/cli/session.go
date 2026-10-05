@@ -207,8 +207,8 @@ func (s *Session) completionContext(line string) (base, partial string, cs []sch
 //
 // 常规情形（未引用输入）与旧实现逐字相同：line 去掉尾随空白后剥掉 partial 后缀。
 // 引号/转义会让 partial 是**解码后**的文本（如 `"a\" b` 解为 `a" b`），字面后缀不再匹配，
-// 此时按 cliparse 的分词规则反推**最后一个 token 的内容起点**——base 保留开引号
-//（如 `set x desc "`），与「补全上下文 = 执行分词」的口径一致。
+// 此时用 `cliparse.SplitFieldsOffsets` 取**最后一个 token 的内容起点**——base 保留开引号
+//（如 `set x desc "`）。位置追踪与分词同源（决策 #377/E8），不另写引号规则。
 func baseBeforePartial(line, partial string) string {
 	trimmed := strings.TrimRight(line, " \t")
 	if partial == "" {
@@ -217,7 +217,11 @@ func baseBeforePartial(line, partial string) string {
 	if b, ok := strings.CutSuffix(trimmed, partial); ok {
 		return b
 	}
-	return line[:lastTokenContentStart(line)]
+	_, starts := cliparse.SplitFieldsOffsets(line)
+	if len(starts) == 0 {
+		return line
+	}
+	return line[:starts[len(starts)-1]]
 }
 
 // pipeSegment 返回行内最后一个未引用 `|` 之后的片段与是否存在。
@@ -249,37 +253,6 @@ func completionTokens(line string) ([]string, string) {
 	default:
 		return tokens[:len(tokens)-1], tokens[len(tokens)-1]
 	}
-}
-
-// lastTokenContentStart 返回最后一个 token 的**内容**在 line 中的起始字节位置：
-// 若该 token 以双引号开头，返回开引号后一位（base 保留开引号，与旧实现
-// `TrimSuffix(line, partial)` 的语义一致）；否则返回 token 首字符位置。
-// 分词规则与 cliparse.SplitFields 同源（尊重引号与 `\"`/`\\` 转义）；无 token 时返回 len(line)。
-func lastTokenContentStart(line string) int {
-	inQuote, started := false, false
-	pos := len(line)
-	for i := 0; i < len(line); i++ {
-		c := line[i]
-		switch {
-		case c == '\\' && i+1 < len(line) && (line[i+1] == '"' || line[i+1] == '\\'):
-			if !started {
-				started, pos = true, i
-			}
-			i++ // 转义对是内容的一部分
-		case c == '"':
-			if !started {
-				started, pos = true, i+1 // 开引号属于 base（保留）
-			}
-			inQuote = !inQuote
-		case (c == ' ' || c == '\t') && !inQuote:
-			started = false
-		default:
-			if !started {
-				started, pos = true, i
-			}
-		}
-	}
-	return pos
 }
 
 // rootForContext 依据首 token 与模式选择补全根：

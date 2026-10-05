@@ -20,34 +20,50 @@ import "strings"
 //
 // 与旧 internal/api.splitFieldsQuoted 逐字同义（决策 #313 收敛到本包）。
 func SplitFields(s string) []string {
-	var out []string
+	tokens, _ := SplitFieldsOffsets(s)
+	return tokens
+}
+
+// SplitFieldsOffsets 与 SplitFields **同规则**，另返回每个 token 的**内容起点**在 s 中的
+// 字节偏移（未引用 token = 首字符；引用 token = 开引号之后；转义对 = 反斜杠位置）。
+// 供补全上下文反推 base 用（决策 #377/E8）——位置追踪与分词同源，调用方不必再写一遍引号规则。
+func SplitFieldsOffsets(s string) (tokens []string, starts []int) {
 	var b strings.Builder
 	inQuote, started := false, false
+	start := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
 		case c == '\\' && i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\\'):
+			if !started {
+				started, start = true, i
+			}
 			b.WriteByte(s[i+1])
 			i++
-			started = true
 		case c == '"':
+			if !started {
+				started, start = true, i+1
+			}
 			inQuote = !inQuote
-			started = true
 		case (c == ' ' || c == '\t') && !inQuote:
 			if started {
-				out = append(out, b.String())
+				tokens = append(tokens, b.String())
+				starts = append(starts, start)
 				b.Reset()
 				started = false
 			}
 		default:
+			if !started {
+				started, start = true, i
+			}
 			b.WriteByte(c)
-			started = true
 		}
 	}
 	if started {
-		out = append(out, b.String())
+		tokens = append(tokens, b.String())
+		starts = append(starts, start)
 	}
-	return out
+	return tokens, starts
 }
 
 // SplitUnquoted 按 sep 拆分，**忽略双引号内的 sep**，并尊重 `\"`/`\\` 转义
