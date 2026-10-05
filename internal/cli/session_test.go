@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xzjt/nfvis/internal/cliparse"
 	"github.com/xzjt/nfvis/internal/schema"
 	"github.com/xzjt/nfvis/pkg/cliclient"
 )
@@ -207,6 +208,63 @@ func TestPipePositionCompletion(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("无管道行应回归命令树补全: %v", cs)
+	}
+}
+
+// TestCompletionLexerSingleSource（决策 #377/E8）：补全词法与执行路径同源（internal/cliparse）——
+// 引号内空白/`|` 不切分、`\"` 转义被识别；补全上下文与执行分词逐字一致。此前
+// completionTokens 用 strings.Fields（无视引号）、pipeSegment 自实现且不认转义，二者与执行语义漂移。
+func TestCompletionLexerSingleSource(t *testing.T) {
+	s := newTestSession("config")
+
+	// 引号内空白不切分：partial 为引号内整段，base 保留开引号
+	line := `set system hostname "a b`
+	base, partial, _ := s.completionContext(line)
+	if partial != "a b" {
+		t.Fatalf("引号内空白不应切分，partial=%q", partial)
+	}
+	if base != `set system hostname "` {
+		t.Fatalf("base 应保留开引号: %q", base)
+	}
+
+	// `\"` 转义被识别：partial 为解码后的 a" b，base 仍保留开引号
+	// （旧 strings.Fields 会切成 `a\` 与 `b`，上下文漂移）
+	line = `set system hostname "a\" b`
+	base, partial, _ = s.completionContext(line)
+	if partial != `a" b` {
+		t.Fatalf(`转义 \" 应解码，partial=%q`, partial)
+	}
+	if base != `set system hostname "` {
+		t.Fatalf(`转义场景 base=%q`, base)
+	}
+
+	// 与执行分词逐字一致：completionTokens 拼回的 token 序列 == cliparse.SplitFields
+	for _, l := range []string{
+		`set system hostname "a b`,
+		`set interfaces ens192 description "a\" | b"`,
+		`show configuration | display set`,
+	} {
+		toks, part := completionTokens(l)
+		got := append(append([]string{}, toks...), part)
+		want := cliparse.SplitFields(l)
+		if len(got) != len(want) {
+			t.Fatalf("分词数量与 cliparse 不一致 %q: %v vs %v", l, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("分词与 cliparse 不一致 %q: %v vs %v", l, got, want)
+			}
+		}
+	}
+
+	// 转义引号让 `|` 保持在引号内：不被当管道分隔（旧 pipeSegment 不认 `\"`，会误判）
+	pipeLine := `set interfaces ens192 description "a\" | b"`
+	if _, ok := pipeSegment(pipeLine); ok {
+		t.Fatalf("转义引号后的 | 仍在引号内，不应视为管道分隔")
+	}
+	// 对照：真正的管道仍被识别（段含前导空白，与原实现一致）
+	if seg, ok := pipeSegment("show configuration | display"); !ok || seg != " display" {
+		t.Fatalf("未引用 | 应识别为管道: %q %v", seg, ok)
 	}
 }
 

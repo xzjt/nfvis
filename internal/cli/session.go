@@ -10,6 +10,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/xzjt/nfvis/internal/cliparse"
 	"github.com/xzjt/nfvis/internal/schema"
 	"github.com/xzjt/nfvis/pkg/cliclient"
 )
@@ -184,48 +185,62 @@ func (s *Session) CompleteLine(line string) string {
 // completionContext 解析补全上下文：已完成 token、正在输入的前缀、候选列表。
 // 行内含未引用 `|` 时补全上下文切到**管道段**（§5 第 9 条）：候选来自
 // schema.PipeCandidates，base 保留 `|` 及其前的全部文本。
+//
+// 词法与执行路径**同一事实源**（决策 #377/E8）：分词与管道切分都委托 internal/cliparse，
+// 不再自实现引号扫描——引号内的空白/`|`、`\"`/`\\` 转义的判定与守护进程逐字一致。
 func (s *Session) completionContext(line string) (base, partial string, cs []schema.Candidate) {
 	if seg, ok := pipeSegment(line); ok {
 		tokens, partial := completionTokens(seg)
-		base = strings.TrimSuffix(strings.TrimRight(line, " \t"), partial)
+		base = baseBeforePartial(line, partial)
 		if strings.HasSuffix(base, "|") {
 			base += " " // `|match` 与 `| match` 都合法，补全统一带空格更好读
 		}
 		return base, partial, schema.PipeCandidates(tokens, partial)
 	}
 	tokens, partial := completionTokens(line)
-	base = strings.TrimSuffix(strings.TrimRight(line, " \t"), partial)
+	base = baseBeforePartial(line, partial)
 	return base, partial, schema.CandidatesFiltered(s.rootForContext(tokens), tokens, partial,
 		s.dynCandidates(), s.candidateFilter())
 }
 
-// pipeSegment 返回行内最后一个未引用 `|` 之后的片段与是否存在。
-// 引用语义与守护进程 splitPipes 一致：双引号内的 `|` 不是管道分隔。
-func pipeSegment(line string) (string, bool) {
-	inQuote, last := false, -1
-	for i := 0; i < len(line); i++ {
-		switch line[i] {
-		case '"':
-			inQuote = !inQuote
-		case '|':
-			if !inQuote {
-				last = i
-			}
-		}
+// baseBeforePartial 由整行与「正在输入的前缀」反推 base（补全时在 base 后追加候选）。
+//
+// 常规情形（未引用输入）与旧实现逐字相同：line 去掉尾随空白后剥掉 partial 后缀。
+// 引号/转义会让 partial 是**解码后**的文本（如 `"a\" b` 解为 `a" b`），字面后缀不再匹配，
+// 此时按 cliparse 的分词规则反推**最后一个 token 的内容起点**——base 保留开引号
+//（如 `set x desc "`），与「补全上下文 = 执行分词」的口径一致。
+func baseBeforePartial(line, partial string) string {
+	trimmed := strings.TrimRight(line, " \t")
+	if partial == "" {
+		return trimmed
 	}
-	if last < 0 {
+	if b, ok := strings.CutSuffix(trimmed, partial); ok {
+		return b
+	}
+	return line[:lastTokenContentStart(line)]
+}
+
+// pipeSegment 返回行内最后一个未引用 `|` 之后的片段与是否存在。
+// 委托 cliparse.SplitUnquoted（决策 #377/E8）：双引号内的 `|` 不是分隔，且认 `\"`/`\\` 转义，
+// 与守护进程的脚本切句同源。整行无未引用 `|` 时返回 ("", false)。
+func pipeSegment(line string) (string, bool) {
+	segs := cliparse.SplitUnquoted(line, '|')
+	if len(segs) <= 1 {
 		return "", false
 	}
-	return line[last+1:], true
+	return segs[len(segs)-1], true
 }
 
 // ---------- 内部 ----------
 
 // completionTokens 解析补全上下文：已完成 token 与正在输入的前缀。
 // 尾随空格表示正开新 token（前缀为空，§5.1）。
+//
+// 分词委托 cliparse.SplitFields（决策 #377/E8）：引号内的空白不切分、引号剥除、
+// `\"`/`\\` 转义解码——此前用 strings.Fields 完全无视引号，补全上下文与执行语义漂移。
 func completionTokens(line string) ([]string, string) {
 	trailingSpace := len(line) > 0 && (line[len(line)-1] == ' ' || line[len(line)-1] == '	')
-	tokens := strings.Fields(line)
+	tokens := cliparse.SplitFields(line)
 	switch {
 	case trailingSpace:
 		return tokens, ""
@@ -234,6 +249,37 @@ func completionTokens(line string) ([]string, string) {
 	default:
 		return tokens[:len(tokens)-1], tokens[len(tokens)-1]
 	}
+}
+
+// lastTokenContentStart 返回最后一个 token 的**内容**在 line 中的起始字节位置：
+// 若该 token 以双引号开头，返回开引号后一位（base 保留开引号，与旧实现
+// `TrimSuffix(line, partial)` 的语义一致）；否则返回 token 首字符位置。
+// 分词规则与 cliparse.SplitFields 同源（尊重引号与 `\"`/`\\` 转义）；无 token 时返回 len(line)。
+func lastTokenContentStart(line string) int {
+	inQuote, started := false, false
+	pos := len(line)
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case c == '\\' && i+1 < len(line) && (line[i+1] == '"' || line[i+1] == '\\'):
+			if !started {
+				started, pos = true, i
+			}
+			i++ // 转义对是内容的一部分
+		case c == '"':
+			if !started {
+				started, pos = true, i+1 // 开引号属于 base（保留）
+			}
+			inQuote = !inQuote
+		case (c == ' ' || c == '\t') && !inQuote:
+			started = false
+		default:
+			if !started {
+				started, pos = true, i
+			}
+		}
+	}
+	return pos
 }
 
 // rootForContext 依据首 token 与模式选择补全根：

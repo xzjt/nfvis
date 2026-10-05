@@ -543,3 +543,41 @@ func TestCLIDpdkDevDeleteForms(t *testing.T) {
 		t.Errorf("全局默认 rx-queues 应已删除: %+v", cfg.Vpp.DPDK.Dev)
 	}
 }
+
+// 决策 #377/E11：CLI 文本渲染的脱敏改用 model.IsSensitiveKey（单一事实源）。
+// 旧实现写死 `password-hash` ⇒ token/psk/secret 等其它敏感叶的值会**原样回显**（潜在泄漏）。
+func TestRenderMapRedactsAllSensitiveKeys(t *testing.T) {
+	m := map[string]any{
+		"password_hash": "PBKDF2-HASH-VALUE",
+		"token":         "TOKEN-VALUE",
+		"psk":           "PSK-VALUE",
+		"secret":        "SECRET-VALUE",
+		"private_key":   "PRIVATE-KEY-VALUE",
+		"password":      "PASSWORD-VALUE",
+		"hostname":      "node-a",
+	}
+	var b strings.Builder
+	renderMap(&b, m, 0)
+	out := b.String()
+
+	// 六个敏感叶一律脱敏为占位符，且值不得出现（renderMap 把 `_` 归一为 `-`）
+	for key, val := range map[string]string{
+		"password-hash": "PBKDF2-HASH-VALUE",
+		"token":         "TOKEN-VALUE",
+		"psk":           "PSK-VALUE",
+		"secret":        "SECRET-VALUE",
+		"private-key":   "PRIVATE-KEY-VALUE",
+		"password":      "PASSWORD-VALUE",
+	} {
+		if strings.Contains(out, val) {
+			t.Fatalf("敏感键 %s 的值不得回显: %q", key, out)
+		}
+		if !strings.Contains(out, key+" «已隐藏»;") {
+			t.Fatalf("敏感键 %s 应脱敏为占位符: %q", key, out)
+		}
+	}
+	// 非敏感叶照常渲染真实值（不误伤）
+	if !strings.Contains(out, "hostname node-a;") {
+		t.Fatalf("非敏感叶应照常渲染: %q", out)
+	}
+}
