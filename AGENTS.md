@@ -757,6 +757,20 @@
   **A8 真机不可观测**（按设计结果不变）由纯函数表 + 语义保持用例覆盖。**四套件（dev92，v2 @ 20bf762）**：fulltest **254/0/18**、
   语义 **27/0/2**（S8 现场流量新鲜转可判定）、lifecycle **23/0/2**、pty **10/10**。
   证据 `docs/evidence/v2-round155-d372-metrics-readview.txt`；真机已装 2.0.0~dev92。
+- **round156（round142 体检收尾：决策 #373，2026-10-05）**：清掉体检 §2 两项（PR #303），并核实 **C8/A9 已随 #365 收口**
+  （openapi 租约端点 503 已声明、命令全表 metrics history 行已 ✅）——一并从余项移除。**C11** DHCP 池耗尽告警的建/消
+  在**持 provider 锁**（`p.mu`，收包路径与巡检共用）时调 `AlarmStore.Raise/Resolve`（触发通知器 I/O）⇒ **决策与应用分离**：
+  锁内纯决策 `poolAlarmState`、解锁后 `applyPoolAlarm`，三个调用点（收包/巡检/助手）同步改造，告警码/严重度/文案/消解条件**逐字不变**；
+  **A10** `nfvis_vnf_runtime_available` 声称「始终发出」但 `vnfMetrics` 在 `engine==nil`/`Committed()` 读失败时整段 `return nil`
+  ⇒ 两路均发出两 kind 可用性 0 + 聚合 0。**实现期被既有用例 `TestDHCPServerProviderReconcile` 拦下一个真回归**：
+  抽出的 `poolAlarmState` 无条件调 `free()`（内含 `sweep()`），在 `Reconcile` 的 `Sync` 阶段就提前删除到期条目 ⇒
+  其后循环 `sweep()` 返回 false ⇒ **不落盘**（旧实现因 `alarms==nil` 先早退而从不触碰租约表）——修法：`poolAlarmState`
+  改方法返回 `ok`，`alarms==nil` 时不取决策。**教益入册**：抽纯函数要把**副作用边界**（`free()` 内的 `sweep()`）一起搬；
+  既有用例是这类回归最好的告警器。测试：C11 **真并发**用例（慢通知器阻塞时断言 provider 锁空闲，红-绿：还原持锁应用即失败）
+  + A10 两路（红-绿：还原 `return nil` 即失败）。**真机（dev93）**：`/metrics` 含两 kind 的 `runtime_available`（=1）；
+  dns-vs 2 地址小池注入占满 ⇒ `DHCP_POOL_EXHAUSTED` 在册（文案逐字）→ 释放一条 ⇒ **消解**（计数 0）→ 清场干净。
+  **四套件（dev94，v2 @ f7bc279）**：fulltest **254/0/18**、语义 **27/0/2**、lifecycle **23/0/2**、pty **10/10**。
+  证据 `docs/evidence/v2-round156-d373-lock-hygiene-metrics-avail.txt`；真机已装 2.0.0~dev94。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
