@@ -234,6 +234,10 @@ func (s *Server) containerExec(w http.ResponseWriter, r *http.Request, name stri
 	if res.Truncated {
 		out["truncated"] = true
 	}
+	// 决策 #370（R142 B9）：命令已跑完但退出码读不到 ⇒ 输出照常、如实说明（不谎报 0）。
+	if res.ExitCodeNote != "" {
+		out["exit_code_note"] = res.ExitCodeNote
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 

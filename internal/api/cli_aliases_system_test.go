@@ -46,3 +46,23 @@ func TestRollbackZeroPointsToDiscard(t *testing.T) {
 		t.Fatalf("应说明编号从 1 起: %s", out)
 	}
 }
+
+// 决策 #370（R142 E12）：CLI 与 REST 同判据——不能删除当前登录用户。
+func TestCLIDeleteSelfLoginUserRejected(t *testing.T) {
+	x, _ := newCLIKit(t)
+	// 先建一个第二账号（避免落进「最后一个 super-user」那条 commit 兜底，专测自删守卫）
+	run(t, x, "admin", "super-user", "ssh",
+		"configure", "set system login user netop2 password pbkdf2$sha256$1000$c2FsdA==$aGFzaA== class operator",
+		"commit")
+	// 自删：守卫拒绝（CLI 路径；此前只有 REST handler 有该守卫）
+	out := x.Execute("admin", "super-user", "ssh", "delete system login user admin").Output
+	if !strings.Contains(out, "不能删除当前登录用户") {
+		t.Fatalf("CLI 自删应被拒: %q", out)
+	}
+	// 删他人：不被该守卫拦（此处应进入正常删除路径：先进入配置模式）
+	x.Execute("admin", "super-user", "ssh", "configure")
+	out2 := x.Execute("admin", "super-user", "ssh", "delete system login user netop2").Output
+	if strings.Contains(out2, "不能删除当前登录用户") {
+		t.Fatalf("删他人不该命中自删守卫: %q", out2)
+	}
+}

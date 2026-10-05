@@ -1,0 +1,51 @@
+round153 · 决策 #370 —— round142 体检低危观测批次一（E9/B9/E12/D3）
+====================================================================
+日期：2026-10-05；分支 feat/d370-observation-batch（00fb10b 契约先行 → b7bbc85 实现）；
+真机 nfvis-vm 2.0.0~dev87（= v2 @ dd88ebb 含 #366~#369 + 本分支）。
+来源：round142 半程体检 §2 低危/观测簇（报告 §4 的 P3 列表）中根因清楚、可单测钉住、用户可见的四项。
+
+§0 结论
+- 四项收口：E9（空脚本「假成功」）、B9（退出码读失败丢弃输出）、E12（CLI 自删守卫缺口）、D3（大页持有页数随 /proc 顺序漂移）。
+- 四项均有红-绿（摘除修复 ⇒ 对应用例按预期失败）；`make check` 全绿（决策 272 守护）。
+
+§1 契约先行（00fb10b）
+- 附录 A 决策 #370（v2 线第 71 条）；AGENTS.md 272。
+- openapi：`ContainerExecResult.exit_code_note`（条件出现）+ `openapi.json` 同步；命令树 exec 注与 `delete system login user` 守卫注；手册 exec 段与用户管理段。
+- **范围修正（契约如实）**：E12 的「最后一个 super-user」半边**已由引擎 `CheckSuperUserPresent` 在 commit 兜底覆盖全路径**（决策 #152）——本轮只补**自删**（REST handler 的早期 409 保留）。
+
+§2 实现（b7bbc85）
+1. **E9**（`cmd/nfvis-cli/main.go`）：`resolveScript` 增 `cmdlineSet/fileSet`（`flag.Visit` 判定标志是否**显式出现**）——
+   `-c ''`/`-f ''`（给了空值）与空文件一样报错；两标志都没给才进交互模式；互斥判定改按「标志给出」而非「值非空」。
+2. **B9**（`provider.go` + `docker_client_docker.go` + `container.go` + `cli_compute_oper.go`）：`ExecResult` 增 `ExitCodeNote`；
+   退出码读取失败 ⇒ **保留已捕获 stdout/stderr**、`HasExitCode=false`、note 说明；REST 回 `exit_code_note`（无 `exit_code`）、CLI 打印 `⚠` 行。
+3. **E12**（`cliexec.go`）：`execSetDelete` 前置守卫——`delete system login user <name>` 且 name==调用者 ⇒ `%% 不能删除当前登录用户`（与 REST 同文案）。
+4. **D3**（`hugepages.go`）：同 dev:inode 多映射的页数/尺寸取**最大视图**（页数优先，平局按 `pageSizeRank` 1G>2M 确定性 tie-break）——与 /proc 扫描顺序无关。
+
+§3 单测与红-绿
+- 新增：`TestResolveScriptEmptyValues`（E9：空值/纯空白/互斥/未给⇒交互/空文件不回归）、
+  `TestContainerExecExitCodeNotePreservesOutput`（B9：输出保留 + 无 exit_code + note）、
+  `TestCLIDeleteSelfLoginUserRejected`（E12：自删拒、删他人不命中）、
+  `TestHugepageHeldPagesSameInodeMaxView`（D3：同 inode 视图 1 页 vs 2 页，两种 pid 顺序同值）。
+- 红-绿四项逐一执行：临时摘除各自修复 ⇒ 对应用例 rc=1（按预期失败），恢复即绿。
+
+§4 真机验证（dev87）
+- **E9**：`nfvis-cli -c ''` ⇒ `% -c 的脚本为空：没有任何命令可执行（要进交互模式请去掉 -c）`、**rc=1**（不经管道量退出码）；
+  `-f ''` 同款；`-c '' -f x` ⇒ 互斥文案；对照 `-c "show version"` 照常输出（dev87）。
+- **E12**：CLI `delete system login user admin`（以 admin 身份）⇒ `%% 不能删除当前登录用户`；
+  REST 对照 `DELETE /system/login-users/admin` ⇒ **409 + 同文案**（两侧同判据）。
+- **D3**：`show system hugepages` 连续三次取样**逐字一致**（1G：声明 2/实际 2/在用 2/持有 2/数据面 1；2M：持有 530/数据面 530）；
+  独立事实源 `/proc`：`vpp_main` 有 **2** 个 1G 页映射、`qemu-system-x86` 有 **1** 个，且两者**共享 inode 195763**（vhost-user 把 guest RAM 映射进 VPP）——
+  视图 held=2（两个不同 inode，共享页只计一次）、dp=1（仅 VPP 主堆为独占）与事实一致。
+  **如实边界**：本机两个映射的视图长度相同（各 1 页），「视图长度不同」的漂移场景由单测（两种扫描顺序）确定性覆盖；
+  真机侧以「三次取样一致 + 与 /proc 事实一致」佐证。
+- **B9**：无真机注入通道（需 Docker inspect 失败）——**如实登记：由单测覆盖**（API 层 + CLI 渲染各一条）。
+
+§5 顺带观察
+- deb 安装（dev87）过程中 SSH host key 发生轮换（`known_hosts` 需刷新；VM uptime 6:44 无重启）——
+  与交接中「快照重建后 host key 已换」同因，属产品 SSH host key 管理的既知行为，本轮按流程刷新 `known_hosts` 后继续，未影响验证。
+- 其余体检观测项（A2/A5~A10/B4/B5/B7/B8/B10/B11/C6~C11/D2/D5~D7/E5~E8/E10/E11/E13/E14）仍按报告 §2 登记，后续批次。
+
+§6 make check 与套件
+- `make check` 全绿（决策 272 守护、openapi 同步/无重复键、形状守护含新字段白名单）。
+- 四套件不受本改动影响（E9 只在「标志显式给空值」时行为变化；E12 只在自删时新增拒绝——套件均不触及；
+  B9/D3 不改既有正常路径）——随本批账目复核为 dev86 基线（#370 合并后如需以 dev88 复跑，按交接 §3 配方执行）。

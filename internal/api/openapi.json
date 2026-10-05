@@ -773,6 +773,10 @@
             "description": "命令退出码（条件出现：仅当命令跑完）",
             "type": "integer"
           },
+          "exit_code_note": {
+            "description": "退出码未能读取时的说明（条件出现；此时 exit_code 不出现，已捕获的 stdout/stderr 仍返回）",
+            "type": "string"
+          },
           "stderr": {
             "description": "标准错误（最多 256 KiB，超限置 truncated）",
             "type": "string"

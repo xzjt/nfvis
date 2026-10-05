@@ -44,7 +44,18 @@ func main() {
 	// 脚本来源（-c 字符串 / -f 文件或 stdin）收敛到同一入口：执行路径只有一条（runScript），
 	// 两种来源解析后的文本完全同义（决策 #309）。解析失败（互斥/缺文件/空文件）在此即退出，
 	// 不必先握手/登录取口令。
-	script, err := resolveScript(*cmdline, *scriptFile, os.Stdin)
+	// 决策 #370（R142 E9）：区分「未给标志」与「给了空值」——`-c ''`/`-f ''` 必须报错，
+	// 不能静默进交互模式（空脚本「假成功」）。
+	cSet, fSet := false, false
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "c":
+			cSet = true
+		case "f":
+			fSet = true
+		}
+	})
+	script, err := resolveScript(*cmdline, cSet, *scriptFile, fSet, os.Stdin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%% %v\n", err)
 		os.Exit(1)
@@ -117,21 +128,33 @@ func printLoginBanner(w io.Writer, script string, f cli.BannerFetcher) bool {
 }
 
 // resolveScript 把脚本来源（`-c` 字符串 / `-f` 文件或 stdin）收敛到**同一入口**，
-// 返回归一后的脚本文本；两者皆空表示交互模式（返回 ""）。
+// 返回归一后的脚本文本；**两个标志都没给**表示交互模式（返回 ""）。
 //
-// 契约（决策 #309）：
+// 契约（决策 #309；#370 补空值）：
 //   - `-c` 与 `-f` **互斥**，同时给出即报错（文案说清二者选一）；
-//   - `-f <file>` 文件不存在/不可读 ⇒ 报错含路径；去空白后为空 ⇒ 报错（空脚本静默退出 0 是假成功）；
+//   - 标志**显式给出**即须有非空脚本：`-c ”` / `-f ”`（空值）与空文件一样报错——
+//     此前空值会静默落进交互模式（空脚本「假成功」，R142 E9）；
+//   - `-f <file>` 文件不存在/不可读 ⇒ 报错含路径；去空白后为空 ⇒ 报错；
 //   - `-f -` 读 stdin（管道喂脚本的自动化形态）；
 //   - 两种来源都经 normalizeScriptText 归一，语义完全一致。
-func resolveScript(cmdline, file string, stdin io.Reader) (string, error) {
+//
+// cmdlineSet/fileSet = 对应标志是否在命令行**显式出现**（flag.Visit 判定）。
+func resolveScript(cmdline string, cmdlineSet bool, file string, fileSet bool, stdin io.Reader) (string, error) {
 	switch {
-	case cmdline != "" && file != "":
+	case cmdlineSet && fileSet:
 		return "", errors.New("-c 与 -f 只能选其一：-c 直接给命令串，-f 从文件读；请去掉其中之一")
-	case cmdline != "":
-		return normalizeScriptText(cmdline), nil
-	case file == "":
-		return "", nil
+	case cmdlineSet:
+		text := normalizeScriptText(cmdline)
+		if strings.TrimSpace(text) == "" {
+			return "", errors.New("-c 的脚本为空：没有任何命令可执行（要进交互模式请去掉 -c）")
+		}
+		return text, nil
+	case fileSet:
+		if file == "" {
+			return "", errors.New("-f 的脚本为空：没有任何命令可执行（要进交互模式请去掉 -f）")
+		}
+	default:
+		return "", nil // 两个标志都没给 ⇒ 交互模式
 	}
 	var data []byte
 	var err error

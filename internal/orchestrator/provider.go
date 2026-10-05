@@ -34,6 +34,10 @@ type ExecResult struct {
 	Truncated   bool
 	TimedOut    bool
 	Duration    time.Duration
+	// ExitCodeNote 命令**已跑完**但退出码未能读取时的说明（决策 #370/R142 B9）。
+	// 非空 ⇒ HasExitCode=false，但 stdout/stderr 是**有效的**（与「没跑完」不同：
+	// 此前读退出码失败会把已捕获输出整体按失败丢弃）。渲染层据此如实说明，不谎报 0。
+	ExitCodeNote string
 }
 
 // ErrContainerNotRunning 目标容器未处于运行态——需要运行态的动作（如容器内执行命令，

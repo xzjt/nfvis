@@ -246,9 +246,9 @@ func TestScriptSourcesSameFailFast(t *testing.T) {
 		t.Fatal(err)
 	}
 	sources := map[string]func() (string, error){
-		"-c":   func() (string, error) { return resolveScript(body, "", nil) },
-		"-f":   func() (string, error) { return resolveScript("", filePath, nil) },
-		"-f -": func() (string, error) { return resolveScript("", "-", strings.NewReader(body)) },
+		"-c":   func() (string, error) { return resolveScript(body, true, "", false, nil) },
+		"-f":   func() (string, error) { return resolveScript("", false, filePath, true, nil) },
+		"-f -": func() (string, error) { return resolveScript("", false, "-", true, strings.NewReader(body)) },
 	}
 	var wantOut string
 	for name, load := range sources {
@@ -338,7 +338,7 @@ func TestRunScriptStillRefusesConfirmPrompt(t *testing.T) {
 
 // TestResolveScriptMutualExclusion `-c` 与 `-f` 同时给出必须报错，且说清二者选一。
 func TestResolveScriptMutualExclusion(t *testing.T) {
-	_, err := resolveScript("show version", "cmds.txt", strings.NewReader(""))
+	_, err := resolveScript("show version", true, "cmds.txt", true, strings.NewReader(""))
 	if err == nil {
 		t.Fatal("-c 与 -f 同时给出必须报错")
 	}
@@ -351,7 +351,7 @@ func TestResolveScriptMutualExclusion(t *testing.T) {
 
 // TestResolveScriptInteractive 两者皆空＝交互模式：返回空文本、不报错。
 func TestResolveScriptInteractive(t *testing.T) {
-	s, err := resolveScript("", "", strings.NewReader("show version\n"))
+	s, err := resolveScript("", false, "", false, strings.NewReader("show version\n"))
 	if err != nil || s != "" {
 		t.Fatalf("两者皆空应回交互模式（空文本无错）：%q %v", s, err)
 	}
@@ -359,7 +359,7 @@ func TestResolveScriptInteractive(t *testing.T) {
 
 // TestResolveScriptFlagC `-c` 文本原样（仅归一换行）。
 func TestResolveScriptFlagC(t *testing.T) {
-	s, err := resolveScript("show version\nshow interfaces", "", nil)
+	s, err := resolveScript("show version\nshow interfaces", true, "", false, nil)
 	if err != nil {
 		t.Fatalf("-c 解析不应报错: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestResolveScriptFromFileNormalizesCRLFAndBOM(t *testing.T) {
 	if err := os.WriteFile(p, []byte("\ufeffconfigure\r\nset system hostname fw-01\r\ncommit\r\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s, err := resolveScript("", p, nil)
+	s, err := resolveScript("", false, p, true, nil)
 	if err != nil {
 		t.Fatalf("读取脚本文件失败: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestResolveScriptFromFileNormalizesCRLFAndBOM(t *testing.T) {
 // TestResolveScriptMissingFile 缺文件：报错须含路径、不静默。
 func TestResolveScriptMissingFile(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "nope.txt")
-	_, err := resolveScript("", p, nil)
+	_, err := resolveScript("", false, p, true, nil)
 	if err == nil {
 		t.Fatal("缺文件必须报错")
 	}
@@ -407,7 +407,7 @@ func TestResolveScriptEmptyFile(t *testing.T) {
 			if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := resolveScript("", p, nil); err == nil {
+			if _, err := resolveScript("", false, p, true, nil); err == nil {
 				t.Fatal("空/纯空白脚本必须报错（不静默成功）")
 			}
 		})
@@ -416,7 +416,7 @@ func TestResolveScriptEmptyFile(t *testing.T) {
 
 // TestResolveScriptStdin `-f -` 从 stdin 读脚本。
 func TestResolveScriptStdin(t *testing.T) {
-	s, err := resolveScript("", "-", strings.NewReader("show version\nshow vpp\n"))
+	s, err := resolveScript("", false, "-", true, strings.NewReader("show version\nshow vpp\n"))
 	if err != nil {
 		t.Fatalf("-f - 应读 stdin: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestRunScriptCRLFFileExecutesClean(t *testing.T) {
 	if err := os.WriteFile(p, []byte("configure\r\nset system dns server 8.8.8.8\r\ncommit\r\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	script, err := resolveScript("", p, nil)
+	script, err := resolveScript("", false, p, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,5 +584,43 @@ func TestRunScriptRejectsConsoleTakeover(t *testing.T) {
 		if len(be.executed) != 1 {
 			t.Fatalf("%s：应停在该行、其后语句不执行，实执行 %v", tc.cmd, be.executed)
 		}
+	}
+}
+
+// 决策 #370（R142 E9）：空脚本不再「假成功」——`-c ”`/`-f ”`（标志给了但值为空）报错；
+// 两个标志都没给才是交互模式。
+func TestResolveScriptEmptyValues(t *testing.T) {
+	// ① 空值必须报错（此前静默进交互模式）
+	if _, err := resolveScript("", true, "", false, nil); err == nil {
+		t.Fatal("-c '' 应报错（空脚本假成功）")
+	} else if !strings.Contains(err.Error(), "-c 的脚本为空") {
+		t.Fatalf("文案应指明 -c 为空: %v", err)
+	}
+	if _, err := resolveScript("", false, "", true, nil); err == nil {
+		t.Fatal("-f '' 应报错（空脚本假成功）")
+	} else if !strings.Contains(err.Error(), "-f 的脚本为空") {
+		t.Fatalf("文案应指明 -f 为空: %v", err)
+	}
+	// ② 纯空白同样算空
+	if _, err := resolveScript(strings.Repeat(" ", 3), true, "", false, nil); err == nil {
+		t.Fatal("-c 纯空白应报错")
+	}
+	// ③ 互斥：两个标志都给（哪怕一个为空）也报互斥
+	if _, err := resolveScript("show version", true, "", true, nil); err == nil {
+		t.Fatal("-c 与 -f 同时给出应报互斥")
+	} else if !strings.Contains(err.Error(), "只能选其一") {
+		t.Fatalf("互斥文案: %v", err)
+	}
+	// ④ 两个标志都没给 ⇒ 交互模式（空串、无错）
+	if s, err := resolveScript("", false, "", false, nil); err != nil || s != "" {
+		t.Fatalf("未给脚本标志应进交互模式（空串无错），得 %q %v", s, err)
+	}
+	// ⑤ 空文件仍报错（#309 既有口径不回归）
+	empty := filepath.Join(t.TempDir(), "empty.txt")
+	if err := os.WriteFile(empty, []byte(strings.Repeat(" ", 2)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveScript("", false, empty, true, nil); err == nil {
+		t.Fatal("空文件应报错")
 	}
 }

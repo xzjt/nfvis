@@ -241,6 +241,12 @@ func HugepageHeldPagesDetail(root string) (total, dataplane map[string]int, ok b
 			if !ok {
 				rec = &heldPage{size: pg.size, pages: pg.pages}
 				pages[pg.key] = rec
+			} else if pg.pages > rec.pages ||
+				(pg.pages == rec.pages && pageSizeRank(pg.size) > pageSizeRank(rec.size)) {
+				// 决策 #370（R142 D3）：同 inode 多映射取**最大视图**（页数，平局按页尺寸取大）——
+				// 读数与 /proc 扫描顺序无关。此前保留首个扫描到的映射，映射视图长度不同时
+				// 同一现场会随目录序漂移（round134 的教训只修了归属）。
+				rec.pages, rec.size = pg.pages, pg.size
 			}
 			if isDP {
 				rec.byDP = true
@@ -262,6 +268,17 @@ func HugepageHeldPagesDetail(root string) (total, dataplane map[string]int, ok b
 		}
 	}
 	return total, dataplane, true
+}
+
+// pageSizeRank 页尺寸的确定性排序（1G > 2M > 其它）——D3 的平局 tie-break 用。
+func pageSizeRank(size string) int {
+	switch size {
+	case "1G":
+		return 2
+	case "2M":
+		return 1
+	}
+	return 0
 }
 
 // readProcComm 读 `/proc/<pid>/comm`（进程名）；读不到返回 ""（按非数据面计——不猜）。
