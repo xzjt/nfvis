@@ -284,3 +284,34 @@ func TestCLIContainerExecRender(t *testing.T) {
 		t.Fatalf("operator 执行 exec 应被拒（S 档）: %s", res.Output)
 	}
 }
+
+// 决策 #370（R142 B9）：命令已跑完但退出码读不到 ⇒ 输出保留 + `exit_code_note`（不整体按失败）。
+func TestContainerExecExitCodeNotePreservesOutput(t *testing.T) {
+	ct := &execFakeCT{fakeCLIContainer: newFakeCLIContainer()}
+	ct.execRes = container.ExecResult{
+		Stdout: "partial-ok\n", Stderr: "",
+		ExitCodeNote: "退出码未能读取（输出已保留）: docker exec 读取退出码: boom",
+	}
+	ts := newTestServerOpts(t, Options{Containers: ct})
+	token := loginAdmin(t, ts)
+	seedContainerCommit(t, ts, token, "ct-a")
+
+	status, _, raw := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/container-functions/ct-a:exec", token,
+		map[string]any{"command": "echo x"}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("退出码读不到不应整体失败，得 %d %s", status, raw)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["stdout"] != "partial-ok\n" {
+		t.Fatalf("输出必须保留: %v", out["stdout"])
+	}
+	if _, has := out["exit_code"]; has {
+		t.Fatalf("退出码未知时不得出现 exit_code（不谎报 0）: %v", out)
+	}
+	if note, _ := out["exit_code_note"].(string); !strings.Contains(note, "退出码未能读取") {
+		t.Fatalf("应带 exit_code_note 如实说明: %v", out)
+	}
+}

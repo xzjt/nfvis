@@ -585,3 +585,33 @@ func (s *countingSetter) SetPoolPages(pageSize string, target int) error {
 	s.writes = append(s.writes, target)
 	return nil
 }
+
+// 决策 #370（R142 D3）：同 inode 多映射取**最大视图**——读数与 /proc 扫描顺序无关。
+// 构造同一 dev:inode（92）被两个进程映射且视图长度不同（1 页 vs 2 页），两种 pid 顺序
+// 必须同值（旧「首见」实现会随顺序在 1/2 间漂移）。
+func TestHugepageHeldPagesSameInodeMaxView(t *testing.T) {
+	for _, order := range []string{"small-first", "big-first"} {
+		t.Run(order, func(t *testing.T) {
+			root := t.TempDir()
+			small := smapsBlock("7f0000000000", "7f0040000000", "00:0d", "92", 1*1048576, 1048576, true, "/dev/hugepages/shared")
+			big := smapsBlock("7f1000000000", "7f1080000000", "00:0d", "92", 2*1048576, 1048576, true, "/dev/hugepages/shared")
+			if order == "small-first" {
+				writeSmaps(t, root, "100", small)
+				writeSmaps(t, root, "200", big)
+			} else {
+				writeSmaps(t, root, "100", big)
+				writeSmaps(t, root, "200", small)
+			}
+			writeProcComm(t, root, "100", "vpp_main")
+			writeProcComm(t, root, "200", "other-proc")
+
+			total, _, ok := HugepageHeldPagesDetail(root)
+			if !ok {
+				t.Fatal("ok=false，预期可读")
+			}
+			if total["1G"] != 2 {
+				t.Fatalf("同 inode 只计一次且取最大视图（2 页），得 %d（顺序 %s）", total["1G"], order)
+			}
+		})
+	}
+}

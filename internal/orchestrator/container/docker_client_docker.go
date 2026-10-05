@@ -378,7 +378,11 @@ func (c *dockerClient) Exec(ctx context.Context, name, command string, timeout t
 		ExitCode int `json:"ExitCode"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/exec/"+url.PathEscape(created.ID)+"/json", nil, &inspect); err != nil {
-		return res, fmt.Errorf("docker exec 读取退出码: %w", err)
+		// 决策 #370（R142 B9）：输出已完整捕获，只有退出码读不到——不再整体按失败丢弃
+		// （部分成功被当整体失败）。如实：HasExitCode=false + note，stdout/stderr 保留。
+		res.ExitCodeNote = fmt.Sprintf("退出码未能读取（输出已保留）: %v", err)
+		res.Duration = time.Since(started)
+		return res, nil
 	}
 	res.ExitCode = inspect.ExitCode
 	res.HasExitCode = true

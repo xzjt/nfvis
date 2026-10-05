@@ -474,6 +474,9 @@ func (x *cliExecutor) containerExec(user, name string, rest []string) string {
 	if res.TimedOut {
 		st["timed_out"] = true
 	}
+	if res.ExitCodeNote != "" {
+		st["exit_code_note"] = res.ExitCodeNote
+	}
 	x.structured = st
 
 	var b strings.Builder
@@ -482,6 +485,10 @@ func (x *cliExecutor) containerExec(user, name string, rest []string) string {
 			timeout.Round(time.Second))
 	} else {
 		fmt.Fprintf(&b, "退出码: %s（耗时 %s）\n", exit, res.Duration.Round(time.Millisecond))
+		if res.ExitCodeNote != "" {
+			// 决策 #370（R142 B9）：已跑完但退出码读不到——输出有效、如实说明（不整体报失败）。
+			fmt.Fprintf(&b, "⚠ %s\n", res.ExitCodeNote)
+		}
 	}
 	b.WriteString("--- stdout ---\n")
 	if res.Stdout == "" {

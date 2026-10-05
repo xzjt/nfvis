@@ -931,6 +931,12 @@ func (x *cliExecutor) execSetDelete(user, source string, s *cliSession, op strin
 	if len(full) == 0 {
 		return fmt.Sprintf("%% 语法: %s <path> [value]\n", op)
 	}
+	// 决策 #370（R142 E12）：CLI 与 REST 同判据——不能删除当前登录用户。
+	// （「最后一个 super-user」半边由引擎 CheckSuperUserPresent 在 commit 兜底覆盖全路径，不重复。）
+	if op == "delete" && len(full) == 4 &&
+		full[0] == "system" && full[1] == "login" && full[2] == "user" && full[3] == user {
+		return "%% 不能删除当前登录用户\n"
+	}
 	if _, _, err := schema.Match(schema.ConfigPathTree(), full); err != nil {
 		return "%% " + err.Error() + "\n"
 	}
