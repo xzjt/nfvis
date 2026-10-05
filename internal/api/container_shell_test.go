@@ -8,6 +8,7 @@ package api
 //  3. 前置：容器须运行中（409 并指向 start）；未接入 ⇒ 503；容器不存在 ⇒ 404。
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -107,6 +108,41 @@ func TestContainerShellTicketEndpoint(t *testing.T) {
 	if status != http.StatusServiceUnavailable {
 		t.Fatalf("编排未接入应 503，得 %d", status)
 	}
+}
+
+// 决策 #366（R142-12）：dockerd 假死时 ticket 端点的前置状态检查有界——
+// 10s（测试注入 100ms）内不答 ⇒ 503 且报错可照做，不挂到客户端超时。
+func TestContainerShellTicketStateCheckBounded(t *testing.T) {
+	old := shellStateCheckTimeout
+	shellStateCheckTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { shellStateCheckTimeout = old })
+
+	ct := &blockingStateCT{fakeCLIContainer: newFakeCLIContainer()}
+	ts := newTestServerOpts(t, Options{Containers: ct})
+	token := loginAdmin(t, ts)
+	seedContainerCommit(t, ts, token, "ct-a")
+
+	start := time.Now()
+	status, _, raw := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/container-functions/ct-a/shell", token, nil, nil)
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("状态检查应有界返回，实耗 %s", time.Since(start))
+	}
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("Docker 无响应应 503，得 %d %s", status, raw)
+	}
+	if !strings.Contains(string(raw), "Docker 未在") {
+		t.Fatalf("报错应可照做（Docker 未响应）: %s", raw)
+	}
+}
+
+// blockingStateCT ContainerState 阻塞到调用方 ctx 结束（模拟 dockerd 假死）。
+type blockingStateCT struct {
+	*fakeCLIContainer
+}
+
+func (b *blockingStateCT) ContainerState(ctx context.Context, name string) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
 }
 
 // WS 端点：无 ticket / 错 ticket ⇒ 401（不升级）。

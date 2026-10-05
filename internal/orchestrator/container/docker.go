@@ -270,9 +270,13 @@ func (p *Provider) ContainerExec(ctx context.Context, name, command string, time
 // 返回的全双工流由调用方（WS 桥接）持有；Close 只关产品侧流——容器内的 shell 进程可能仍在运行
 // （Docker 不提供 exec 进程的中止接口，round139 真机实测）。
 func (p *Provider) ContainerShell(ctx context.Context, name string) (io.ReadWriteCloser, error) {
-	state, exists, err := p.api.State(ctx, name)
+	// State 检查有界（决策 #366，R142-12）：dockerd 假死时这里是 shell 打开路径的
+	// 第一个挂点（真机 SIGSTOP 实测挂满观察窗口）——10s 内不答即如实报错。
+	sctx, cancel := context.WithTimeout(ctx, dockerCallTimeout)
+	defer cancel()
+	state, exists, err := p.api.State(sctx, name)
 	if err != nil {
-		return nil, err
+		return nil, wrapDockerTimeout(err)
 	}
 	if !exists {
 		return nil, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)

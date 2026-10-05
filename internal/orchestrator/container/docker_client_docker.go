@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -325,8 +326,10 @@ func (c *dockerClient) Exec(ctx context.Context, name, command string, timeout t
 		"Tty":          false,
 		"Cmd":          []string{"/bin/sh", "-c", command},
 	}
-	if err := c.do(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/exec", body, &created); err != nil {
-		return ExecResult{}, err
+	callCtx, cancel := cctx(ctx)
+	defer cancel()
+	if err := c.do(callCtx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/exec", body, &created); err != nil {
+		return ExecResult{}, wrapDockerTimeout(err)
 	}
 	if created.ID == "" {
 		return ExecResult{}, fmt.Errorf("docker exec: 未返回 exec 实例 id")
@@ -421,8 +424,10 @@ func (c *dockerClient) ExecShell(ctx context.Context, name string) (io.ReadWrite
 		"Tty":          true,
 		"Cmd":          []string{"/bin/sh"},
 	}
-	if err := c.do(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/exec", body, &created); err != nil {
-		return nil, err
+	callCtx, cancel := cctx(ctx)
+	defer cancel()
+	if err := c.do(callCtx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/exec", body, &created); err != nil {
+		return nil, wrapDockerTimeout(err)
 	}
 	if created.ID == "" {
 		return nil, fmt.Errorf("docker exec shell: 未返回 exec 实例 id")
@@ -439,6 +444,27 @@ func (c *dockerClient) ExecShell(ctx context.Context, name string) (io.ReadWrite
 // shellHandshakeTimeout exec shell 握手段（写请求 → 读状态行/头 → 分流）的硬上界
 // （决策 #366，R142-12）。包级 var 仅为测试可注入更小值；生产代码不得改写。
 var shellHandshakeTimeout = 10 * time.Second
+
+// dockerCallTimeout docker API 单次调用（State 检查 / exec·shell 的 create）的硬上界
+// （决策 #366，R142-12：真机 SIGSTOP 实测——dockerd 冻结时这些调用无超时、挂满整个
+// 观察窗口，是「dockerd 挂死即挂住」的真实挂点）。到期取消请求：未被读走的请求随连接
+// 关闭被 dockerd 丢弃，不留「底座恢复后幽灵执行」。包级 var 仅为测试可注入。
+var dockerCallTimeout = 10 * time.Second
+
+// wrapDockerTimeout 底座无响应的报错要**可照做**：裸 `context deadline exceeded`
+// 不说人话，包装成「Docker 未响应」并保留原错误。
+func wrapDockerTimeout(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("Docker 未在 %s 内响应（已中止等待；请确认 docker 服务状态）", dockerCallTimeout)
+	}
+	return err
+}
+
+// cctx 给调用方 ctx 加 dockerCallTimeout 硬上界（决策 #366）。exec 的 start 等待
+// 窗口另有自己的 wctx（= exec timeout），不经此包装。
+func cctx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, dockerCallTimeout)
+}
 
 // execShellHandshake 拨号后的握手段（可测，决策 #366）：
 //   - 开头给 conn 设 shellHandshakeTimeout deadline——三处曾经无界的读（状态行、
