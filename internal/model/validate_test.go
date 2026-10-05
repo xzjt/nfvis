@@ -107,6 +107,39 @@ func TestValidateEnumAndFormat(t *testing.T) {
 	mustErrContaining(t, Validate(c3), "bond0", "lacp")
 }
 
+// 决策 #381：静态路由多下一跳（ECMP）校验。
+//
+// 单值写法与语义不变（既有用例覆盖）；多值逐元素校验：空元素/坏 IP/重复/混族/超 8 拒绝。
+func TestValidateRouteMultiNextHop(t *testing.T) {
+	setNH := func(nh string) []ValidateError {
+		c := validBase()
+		c.Vrfs[0].Routes[0].NextHop = nh
+		return Validate(c)
+	}
+
+	// 逗号分隔的多值（同族 IPv4）通过。
+	mustNoErr(t, setNH("10.10.0.254,10.10.0.253"))
+
+	// 空元素（尾随逗号）拒绝。
+	mustErrContaining(t, setNH("10.10.0.254,"), "next_hop", "为空")
+
+	// 第 2 个不是有效 IP。
+	mustErrContaining(t, setNH("10.10.0.254,10.10.0.999"), "next_hop", "不是有效 ip")
+
+	// 重复下一跳。
+	mustErrContaining(t, setNH("10.10.0.254,10.10.0.254"), "next_hop", "重复")
+
+	// 混族（IPv4 与 IPv6 混用）。
+	mustErrContaining(t, setNH("10.10.0.254,2001:db8::1"), "next_hop", "不得混用")
+
+	// 超过 8 个。
+	mustErrContaining(t, setNH("10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4,10.0.0.5,10.0.0.6,10.0.0.7,10.0.0.8,10.0.0.9"),
+		"next_hop", "最多 8 个")
+
+	// 单值坏 IP：文案与既有等价（未引入逗号时的旧形态）。
+	mustErrContaining(t, setNH("10.10.0.999"), "next_hop", "必须是有效 ip")
+}
+
 func TestValidateVMRequiredFields(t *testing.T) {
 	c := validBase()
 	c.VirtualMachineFunctions[0].Image = ""

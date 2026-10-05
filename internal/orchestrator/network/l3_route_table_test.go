@@ -59,3 +59,59 @@ func TestRecursiveNextHopPathsRejectsBadAddress(t *testing.T) {
 		t.Fatal("非法下一跳必须报错")
 	}
 }
+
+// 决策 #381：静态路由多下一跳（ECMP）——nextHopPaths 按逗号切分构造 N 条递归路径。
+//
+// 单值 ⇒ N=1（与既有行为一致）；多值 ⇒ N 条、各自 Weight=1 等权、TableID 同表、
+// SwIfIndex=~0（递归解析）——TableID 必填是 round88 的教训，多路径同样不能省。
+func TestNextHopPathsECMP(t *testing.T) {
+	const tableID = uint32(9726253)
+
+	// 单值：N=1。
+	one, err := nextHopPaths(tableID, "192.168.155.2")
+	if err != nil {
+		t.Fatalf("单值构造: %v", err)
+	}
+	if len(one) != 1 {
+		t.Fatalf("单值应构造 1 条路径，得 %d", len(one))
+	}
+	if one[0].Weight != 1 {
+		t.Errorf("单值 Weight = %d，期望 1", one[0].Weight)
+	}
+	if one[0].TableID != tableID {
+		t.Errorf("单值 TableID = %d，期望 %d", one[0].TableID, tableID)
+	}
+
+	// 多值：N=2，逐条断言。
+	two, err := nextHopPaths(tableID, "192.168.155.2,192.168.155.3")
+	if err != nil {
+		t.Fatalf("多值构造: %v", err)
+	}
+	if len(two) != 2 {
+		t.Fatalf("两条下一跳应构造 2 条路径，得 %d", len(two))
+	}
+	want := []string{"192.168.155.2", "192.168.155.3"}
+	for i, p := range two {
+		if p.Weight != 1 {
+			t.Errorf("路径 %d Weight = %d，期望 1（等权 ECMP）", i, p.Weight)
+		}
+		if p.TableID != tableID {
+			t.Errorf("路径 %d TableID = %d，期望 %d（须在路由所属表内解析）", i, p.TableID, tableID)
+		}
+		if p.SwIfIndex != ^uint32(0) {
+			t.Errorf("路径 %d SwIfIndex = %d，期望 ^uint32(0)（经下一跳递归解析）", i, p.SwIfIndex)
+		}
+		if p.Proto != fib_types.FIB_API_PATH_NH_PROTO_IP4 {
+			t.Errorf("路径 %d Proto = %v，期望 IPv4", i, p.Proto)
+		}
+		if got := p.Nh.Address.GetIP4().String(); got != want[i] {
+			t.Errorf("路径 %d 下一跳 = %s，期望 %s", i, got, want[i])
+		}
+	}
+}
+
+func TestNextHopPathsRejectsBadElement(t *testing.T) {
+	if _, err := nextHopPaths(1, "10.0.0.1,不是地址"); err == nil {
+		t.Fatal("多下一跳中任一非法即须报错")
+	}
+}

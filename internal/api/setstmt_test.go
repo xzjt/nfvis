@@ -61,6 +61,9 @@ var roundTripAliasCases = [][]string{
 		"set virtual-switches vs-l3 l3-interface bvi0 acl-in acl1",
 		"set virtual-switches vs-l3 static-routes 0.0.0.0/0 next-hop 10.0.0.254",
 		"set virtual-switches vs-l3 static-routes 10.8.0.0/16 next-hop 10.0.0.1 distance 5"},
+	// 决策 #381：多下一跳（ECMP）——整串为单 token、逗号无空格，往返一致
+	{"set virtual-switches vs-l3 type l3",
+		"set virtual-switches vs-l3 static-routes 10.0.0.0/8 next-hop 10.0.0.1,10.0.0.2"},
 	// qos_policies 落点（根级回落发射器）
 	{"set qos policies p1 cir 100000000 cbs 2000"},
 	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 vlan access 100"},
@@ -148,6 +151,36 @@ func TestDisplaySetRoundTripBase(t *testing.T) {
 func TestDisplaySetRoundTripAliasFamilies(t *testing.T) {
 	for _, stmts := range roundTripAliasCases {
 		runDisplaySetRoundTrip(t, stmts)
+	}
+}
+
+// TestDisplaySetMultiNextHopSingleToken（决策 #381）：多下一跳整串必须是**单 token**
+// （逗号两侧无空格）——否则 display set 输出经分词器会变成两条语句、回放即不等。
+func TestDisplaySetMultiNextHopSingleToken(t *testing.T) {
+	var cfg model.Config
+	for _, line := range []string{
+		"set virtual-switches vs-l3 type l3",
+		"set virtual-switches vs-l3 static-routes 10.0.0.0/8 next-hop 10.0.0.1,10.0.0.2",
+	} {
+		if err := applyStatement(&cfg, splitFieldsQuoted(line)[1:]); err != nil {
+			t.Fatalf("fixture 回放失败: %v", err)
+		}
+	}
+	tree := toJSONTree(cfg)
+	lines, err := renderSetStatements(tree, nil)
+	if err != nil {
+		t.Fatalf("反推失败: %v", err)
+	}
+	joined := strings.Join(lines, "\n")
+	want := "set virtual-switches vs-l3 static-routes 10.0.0.0/8 next-hop 10.0.0.1,10.0.0.2"
+	if !strings.Contains(joined, want) {
+		t.Fatalf("display set 应输出单 token 多下一跳 %q:\n%s", want, joined)
+	}
+	if strings.Contains(joined, "10.0.0.1, 10.0.0.2") {
+		t.Fatalf("多下一跳整串不得被拆开（逗号后不应有空格）:\n%s", joined)
+	}
+	if got := cfg.Vrfs[0].Routes[0].NextHop; got != "10.0.0.1,10.0.0.2" {
+		t.Fatalf("回放取值 = %q，期望整串保留", got)
 	}
 }
 
