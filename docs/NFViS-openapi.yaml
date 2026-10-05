@@ -2923,11 +2923,11 @@ components:
     MetricsHistory:
       type: object
       description: |
-        历史时序读视图（决策 #356）。`available=false` 时只保证 `available`/`reason` 有意义，
+        历史时序读视图（决策 #356）。`last`/`step` 时长上界 **3650d**（超界/溢出即 400，决策 #372/R142 A7）。`available=false` 时只保证 `available`/`reason` 有意义，
         其余字段按可得性出现——不编造。
       required: [available]
       properties:
-        available: { type: boolean, description: "历史存储是否可用（库可打开且采样器已启用）" }
+        available: { type: boolean, description: "历史存储是否可用（库可打开且采样器已启用）。**注意**：`available=false` 可能是「未启用」也可能是「启用但本次读取失败」——以后者出现时 `store.enabled` 仍为 true 且 `store.error` 在场（决策 #372/R142 A5：查询失败不再把 enabled 翻成 false）" }
         reason: { type: string, description: "available=false 时的原因（条件出现）" }
         sample_interval_seconds: { type: integer, description: "生效的采样间隔（committed 配置；未设置=默认 60）" }
         retention_days: { type: integer, description: "生效的保留天数（committed 配置；未设置=默认 7）" }
@@ -2945,7 +2945,10 @@ components:
           description: 存储概览
           properties:
             path: { type: string, description: 库文件路径 }
-            enabled: { type: boolean, description: 采样器是否已启用（未配置库路径时为 false） }
+            enabled: { type: boolean, description: "存储是否已启用（未配置库路径时为 false）；**不因单次查询失败而翻 false**（决策 #372）" }
+            error: { type: string, description: "存储读取失败的原因（条件出现；此时 enabled 仍为 true）" }
+            metrics_error: { type: string, description: "指标名清单读取失败的原因（条件出现；区别于「还没有数据」）" }
+            health_error: { type: string, description: "采样心跳/错误元信息读取失败的原因（条件出现）" }
             size_bytes: { type: integer }
             series: { type: integer, description: 已登记序列数 }
             samples: { type: integer, description: 样本总行数 }

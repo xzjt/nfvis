@@ -1753,10 +1753,10 @@
         "type": "object"
       },
       "MetricsHistory": {
-        "description": "历史时序读视图（决策 #356）。`available=false` 时只保证 `available`/`reason` 有意义，\n其余字段按可得性出现——不编造。\n",
+        "description": "历史时序读视图（决策 #356）。`last`/`step` 时长上界 **3650d**（超界/溢出即 400，决策 #372/R142 A7）。`available=false` 时只保证 `available`/`reason` 有意义，\n其余字段按可得性出现——不编造。\n",
         "properties": {
           "available": {
-            "description": "历史存储是否可用（库可打开且采样器已启用）",
+            "description": "历史存储是否可用（库可打开且采样器已启用）。**注意**：`available=false` 可能是「未启用」也可能是「启用但本次读取失败」——以后者出现时 `store.enabled` 仍为 true 且 `store.error` 在场（决策 #372/R142 A5：查询失败不再把 enabled 翻成 false）",
             "type": "boolean"
           },
           "metrics": {
@@ -1789,8 +1789,16 @@
             "description": "存储概览",
             "properties": {
               "enabled": {
-                "description": "采样器是否已启用（未配置库路径时为 false）",
+                "description": "存储是否已启用（未配置库路径时为 false）；**不因单次查询失败而翻 false**（决策 #372）",
                 "type": "boolean"
+              },
+              "error": {
+                "description": "存储读取失败的原因（条件出现；此时 enabled 仍为 true）",
+                "type": "string"
+              },
+              "health_error": {
+                "description": "采样心跳/错误元信息读取失败的原因（条件出现）",
+                "type": "string"
               },
               "last_error": {
                 "description": "上次整轮采样错误（条件出现）",
@@ -1799,6 +1807,10 @@
               "last_tick_ts": {
                 "description": "采样器上次心跳时刻（无记录时省略）",
                 "type": "integer"
+              },
+              "metrics_error": {
+                "description": "指标名清单读取失败的原因（条件出现；区别于「还没有数据」）",
+                "type": "string"
               },
               "newest_ts": {
                 "description": "最新样本时间（无数据时省略）",
