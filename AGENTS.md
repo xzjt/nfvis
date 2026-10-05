@@ -727,6 +727,20 @@
   **现场配方修正（入册）**：夹具 `up` 复用同一磁盘（instance-id 不变）⇒ **cloud-init 不再重跑**、guest 无 IP、L3-2 如实跳过
   （22/0/3 非回归）；**改 user-data（内容须变化）→ commit → restart** 可确定性重跑 cloud-init 恢复 beat（实测 130s 应答）。
   证据 `docs/evidence/v2-round153-d370-observation-batch.txt`；真机已装 2.0.0~dev88。
+- **round154（round142 体检 DHCP 租约状态机批次：决策 #371，2026-10-05）**：清掉体检 §2 簇 C 三项（PR #301），其中 **C7 是正确性风险**：
+  `allocate()` 对**已 active** 的租约也改写为 `offered` + 2 分钟 OFFER 保持窗——一次 DISCOVER 即把生效租约降级、
+  2 分钟后被 sweep 回收 ⇒ **地址可被分配给别的客户端（重复地址）**；**C6** `decline()` 记录了声明者 MAC 后，
+  同一 MAC 的 REQUEST 因「owner.MAC==本机」落进默认分支被 `commit` **直接夺回**（隔离一个租期的语义被绕过）；
+  **C10** 应答未按 BOOTP 下限补零到 300 字节（RFC 2131 §2）。修法：**探测不改生效租约**（active 原样返回；
+  续租走 REQUEST→ACK）、**REQUEST 对 declined 且未到期一律 NAK**（任何客户端，判定在任何 MAC 相等之前）、
+  **DHCP 载荷补零到 300 字节**（UDP 长度/校验和计算之前）。三项**逐一红-绿**；`make check` 全绿（决策 **273** 守护）。
+  **真机（dev89）原始帧注入实证**（自写 `AF_PACKET` 注入器向内置 tap 发 DISCOVER/REQUEST/DECLINE + tcpdump 抓应答）：
+  DISCOVER→REQUEST 得 `active`，再发新 xid 的 DISCOVER ⇒ **仍 active 且到期不变**（仅随时间流逝；旧实现此处变 offered+120s）；
+  DECLINE `.10` 后**同 MAC** REQUEST ⇒ 读视图**仍 declined**（未夺回）、**他人** REQUEST ⇒ 抓到 **NACK**；
+  应答 `BOOTP/DHCP, Reply, length 300`（帧 342 = 14+20+8+300）。**探针教训**：AF_PACKET 非混杂模式收不到单播回帧
+  ——首轮「无应答」是探针问题（租约表同时已证明 server 处理成功），改用 tcpdump 取证。**四套件（dev90，v2 @ 89557d9）**：
+  fulltest **254/0/18**、语义 **27/0/2**（S8 现场流量新鲜转可判定 +1）、lifecycle **23/0/2**、pty **10/10**。
+  证据 `docs/evidence/v2-round154-d371-dhcp-lease-semantics.txt`；真机已装 2.0.0~dev90。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
