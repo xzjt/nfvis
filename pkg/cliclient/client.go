@@ -7,6 +7,7 @@ package cliclient
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -58,18 +59,26 @@ type Client struct {
 	tc *tls.Config
 }
 
-// RequestTimeout 单次请求上限。
+// RequestTimeout 单次请求的缺省等待上限（每请求 ctx deadline；不是全局 http.Client.Timeout，
+// 决策 #366）。
 //
 // 必须**大于**服务端同步阻塞命令的上限：VM stop 走 ACPI 等待后强杀，上限为
 // compute.StopTimeout（默认 30s）。若两者相等，任何走强杀路径的 stop 都会先触发客户端超时，
 // 用户看到「连接 nfvisd 失败」而实际已停成功（真机实测，决策 #76）。取 2 倍 + 裕量。
+//
+// 例外（决策 #366）：`cli/execute` 里的容器 exec 超时可配到 300s——全局上限会先于服务端
+// 截断 `timeout 91..300` 的 exec（用户看到「请求超时」，命令还在容器里跑），
+// 故等待时长按命令内容延长（requestDeadline）。
 const RequestTimeout = 90 * time.Second
 
 // New 构造客户端。server 形如 https://host:443 或 http://127.0.0.1:8443。
+//
+// hc **不带**全局 Timeout（决策 #366）：有界性改由每请求 ctx deadline 提供
+// （do/doWithDeadline），才能对长 exec 单独放宽等待。
 func New(server string) *Client {
 	return &Client{
 		base: server,
-		hc:   &http.Client{Timeout: RequestTimeout},
+		hc:   &http.Client{},
 	}
 }
 
@@ -87,7 +96,7 @@ type TLSOptions struct {
 // 故客户端必须能校验它：nfvis-cli 通常就运行在一体机上（规格 §3.1：sshd 的 shell 即 nfvis-cli），
 // 因此优先**固定守护进程自己的证书**（安全且零配置），而不是默认跳过校验。
 func NewWithTLS(server string, opts TLSOptions) (*Client, error) {
-	hc := &http.Client{Timeout: RequestTimeout}
+	hc := &http.Client{}
 	var tc *tls.Config
 	if strings.HasPrefix(server, "https://") {
 		tc = &tls.Config{MinVersion: tls.VersionTLS12}
@@ -181,6 +190,22 @@ func (c *Client) Execute(line, source string) (Result, error) {
 }
 
 func (c *Client) do(method, path string, body any, out any) error {
+	// 等待时长（决策 #366）：缺省 RequestTimeout；仅对 `cli/execute` 按命令内容识别
+	// 容器 exec 的超时提示并延长（超时 300 的 exec 若仍按 90s 等待，会先于服务端截断）。
+	d := RequestTimeout
+	if path == "/api/v1/cli/execute" {
+		if m, ok := body.(map[string]string); ok {
+			d = requestDeadline(m["line"])
+		}
+	}
+	return c.doWithDeadline(d, method, path, body, out)
+}
+
+// doWithDeadline 在给定等待上限内执行一次请求（决策 #366：有界性由每请求 ctx deadline
+// 提供，不再依赖 http.Client 全局 Timeout）。测试经它注入更小的 deadline 验证超时真生效。
+func (c *Client) doWithDeadline(d time.Duration, method, path string, body any, out any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
 	var rd *bytes.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -191,7 +216,7 @@ func (c *Client) do(method, path string, body any, out any) error {
 	} else {
 		rd = bytes.NewReader(nil)
 	}
-	req, err := http.NewRequest(method, c.base+path, rd)
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
 	if err != nil {
 		return err
 	}
@@ -212,7 +237,7 @@ func (c *Client) do(method, path string, body any, out any) error {
 			// 而超时也可能发生在接口/配置/运维动作上——对不上号的例子比不给还糟。
 			return fmt.Errorf("请求超时（%s）：操作可能已在服务端完成或仍在进行；"+
 				"请先用相关 show 命令核对实际状态，必要时看 nfvisd 日志（journalctl -u nfvis）: %w",
-				RequestTimeout, err)
+				d, err)
 		}
 		return fmt.Errorf("连接 nfvisd 失败: %w", err)
 	}
@@ -237,8 +262,13 @@ func (c *Client) do(method, path string, body any, out any) error {
 // MetricsText 拉取 /api/v1/metrics 的原始文本（无鉴权端点，M5-2）。
 // setup 向导读取主机事实（在线核数/内存总量）用：metrics 是机器可读格式，
 // 解析它不属于「解析 show 表格文本」的脆弱类（决策 #85 的教训）。
+//
+// 决策 #366：hc 不再有全局 Timeout，此处自带 ctx deadline 保住有界性（不走 do：
+// 响应是 Prometheus 文本不是 JSON）。
 func (c *Client) MetricsText() (string, error) {
-	req, err := http.NewRequest(http.MethodGet, c.base+"/api/v1/metrics", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/v1/metrics", nil)
 	if err != nil {
 		return "", err
 	}
