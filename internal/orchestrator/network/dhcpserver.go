@@ -567,6 +567,7 @@ func (p *DHCPServerProvider) handleMessage(name string, msg dhcpMessage) {
 	rt.recent[dedupeKey] = now
 	var reply []byte
 	changed := false
+	var alarm func() // 决策 #373：解锁后应用的告警动作（锁内只取决策）
 	switch msg.msgType {
 	case dhcpDiscover:
 		if ip, ok := rt.leases.allocate(mac); ok {
@@ -575,7 +576,10 @@ func (p *DHCPServerProvider) handleMessage(name string, msg dhcpMessage) {
 		} else {
 			// 池内无可用地址 ⇒ 不发 OFFER，且**当场**复核池耗尽告警（决策 #359：无可用地址
 			// 可应答 DISCOVER 时 raise；有地址释放/到期/扩容即消解——不等下一轮巡检）。
-			p.refreshPoolAlarmLocked(name, rt)
+			// 决策 #373（R142 C11）：锁内只取决策，告警应用放到解锁后（避免持 p.mu 做通知器 I/O）。
+			if ex, m, ok := p.poolAlarmState(rt); ok {
+				alarm = func() { p.applyPoolAlarm(name, ex, m) }
+			}
 		}
 	case dhcpRequest:
 		// 客户端选定了别的 server-id：静默忽略（不抢答，也不 NAK 干扰）。
@@ -632,10 +636,16 @@ func (p *DHCPServerProvider) handleMessage(name string, msg dhcpMessage) {
 	}
 	if changed {
 		p.persistLocked(name, rt)
-		p.refreshPoolAlarmLocked(name, rt)
+		// 决策 #373（R142 C11）：锁内只取决策，解锁后应用（同上）。
+		if ex, m, ok := p.poolAlarmState(rt); ok {
+			alarm = func() { p.applyPoolAlarm(name, ex, m) }
+		}
 	}
 	tap := rt.tap
 	p.mu.Unlock()
+	if alarm != nil {
+		alarm()
+	}
 	if len(reply) > 0 && tap != nil {
 		if err := tap.Send(reply); err != nil {
 			slog.Warn("DHCP 应答写入内置 tap 失败", "switch", name, "err", err)
@@ -644,29 +654,51 @@ func (p *DHCPServerProvider) handleMessage(name string, msg dhcpMessage) {
 }
 
 // refreshPoolAlarm 复核该交换机的池耗尽告警（有可用地址即消解）。
+// 决策 #373（R142 C11）：锁内只做**纯决策**，告警的建/消（含通知器 I/O）在**解锁后**执行。
 func (p *DHCPServerProvider) refreshPoolAlarm(name string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if rt := p.servers[name]; rt != nil {
-		p.refreshPoolAlarmLocked(name, rt)
+	rt := p.servers[name]
+	if rt == nil {
+		p.mu.Unlock()
+		return
+	}
+	exhausted, msg, ok := p.poolAlarmState(rt)
+	p.mu.Unlock()
+	if ok {
+		p.applyPoolAlarm(name, exhausted, msg)
 	}
 }
 
-// refreshPoolAlarmLocked 池耗尽告警的建/消（调用方持 p.mu）。
+// poolAlarmState 池耗尽告警的**纯决策**（调用方持 p.mu）：池内是否已无可用地址 + 告警文案。
 // 只按「池内是否还有可用地址」的事实；文案带池范围与在租数（不含内部引用）。
-func (p *DHCPServerProvider) refreshPoolAlarmLocked(name string, rt *dhcpServerRT) {
+// ok=false＝未接入告警存储——此时**不取决策**（`free()` 内部会 sweep 租约表，改造前在
+// `alarms==nil` 时根本不触碰租约表；若在此处无条件取决策会提前删除到期条目、
+// 让巡检的「sweep→落盘」判断落空——本批实现期被既有用例当场抓到）。
+func (p *DHCPServerProvider) poolAlarmState(rt *dhcpServerRT) (exhausted bool, msg string, ok bool) {
+	if p.alarms == nil {
+		return false, "", false
+	}
+	if rt.leases.free() {
+		return false, "", true
+	}
+	return true, fmt.Sprintf(
+		"交换机 %s 的 DHCP 租约池 %s-%s 已无可用地址（在租 %d 个）：新的客户端拿不到地址；"+
+			"地址释放或租约到期后自动恢复，也可扩大池（set virtual-switches %s dhcp-server pool <start> <end>）",
+		rt.spec.switchName, model.Uint32ToIPv4(rt.spec.poolLo).String(), model.Uint32ToIPv4(rt.spec.poolHi).String(),
+		rt.leases.activeCount(), rt.spec.switchName), true
+}
+
+// applyPoolAlarm 应用池耗尽告警的建/消（**不得持 p.mu**——Raise/Resolve 会触发通知器 I/O）。
+// 决策 #373（R142 C11）：告警码/严重度/文案/消解条件与改造前逐字一致。
+func (p *DHCPServerProvider) applyPoolAlarm(name string, exhausted bool, msg string) {
 	if p.alarms == nil {
 		return
 	}
-	if rt.leases.free() {
+	if !exhausted {
 		p.alarms.Resolve(dhcpServerScope, AlarmDHCPPoolExhausted, name)
 		return
 	}
-	p.alarms.Raise(dhcpServerScope, SeverityWarning, AlarmDHCPPoolExhausted, fmt.Sprintf(
-		"交换机 %s 的 DHCP 租约池 %s-%s 已无可用地址（在租 %d 个）：新的客户端拿不到地址；"+
-			"地址释放或租约到期后自动恢复，也可扩大池（set virtual-switches %s dhcp-server pool <start> <end>）",
-		name, model.Uint32ToIPv4(rt.spec.poolLo).String(), model.Uint32ToIPv4(rt.spec.poolHi).String(),
-		rt.leases.activeCount(), name), name)
+	p.alarms.Raise(dhcpServerScope, SeverityWarning, AlarmDHCPPoolExhausted, msg, name)
 }
 
 // Reconcile 15s 巡检：对配置里启用 dhcp-server 的交换机做幂等收敛（补齐 VPP 重启后丢失的
@@ -683,13 +715,24 @@ func (p *DHCPServerProvider) Reconcile(ctx context.Context, cfg model.Config) []
 	}
 	// 到期回收与告警复核（不依赖 VPP 可用性：租约是服务器自己的状态）。
 	p.mu.Lock()
+	type poolAlarmApply struct {
+		name      string
+		exhausted bool
+		msg       string
+	}
+	var applies []poolAlarmApply
 	for name, rt := range p.servers {
 		if rt.leases.sweep() {
 			p.persistLocked(name, rt)
 		}
-		p.refreshPoolAlarmLocked(name, rt)
+		if ex, m, ok := p.poolAlarmState(rt); ok { // 决策 #373：锁内只取决策
+			applies = append(applies, poolAlarmApply{name: name, exhausted: ex, msg: m})
+		}
 	}
 	p.mu.Unlock()
+	for _, a := range applies {
+		p.applyPoolAlarm(a.name, a.exhausted, a.msg)
+	}
 	return errs
 }
 

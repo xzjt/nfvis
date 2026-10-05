@@ -1,0 +1,47 @@
+round156 · 决策 #373 —— 锁卫生与可用性如实（C11/A10）
+====================================================================
+日期：2026-10-05；分支 feat/d373-lock-hygiene-metrics-avail（d69821a 契约先行 → c892bf6 实现）；
+真机 nfvis-vm 2.0.0~dev93（= v2 @ 7bd669e 含 #366~#372 + 本分支）。
+来源：round142 半程体检 §2 两项（C11 锁卫生、A10 可用性序列措辞差距）。**C8/A9 经核已随 #365 收口**（openapi 已声明租约端点 503；命令全表 metrics history 行已 ✅），本轮一并从余项移除。
+
+§0 结论
+- C11/A10 收口，两项**逐一红-绿**（C11 为**真并发**用例）；`make check` 全绿（决策 275 守护）。
+- 实现期被**既有用例当场抓到**一个真回归并修正（见 §3）——教训入册。
+
+§1 契约先行（d69821a）
+- 附录 A 决策 #373（v2 线第 74 条）；AGENTS.md 275。
+
+§2 实现（c892bf6）
+1. **C11**（`internal/orchestrator/network/dhcpserver.go`）：池耗尽告警**决策与应用分离**——`poolAlarmState`（纯决策：池是否耗尽 + 文案）
+   与 `applyPoolAlarm`（Raise/Resolve，**不得持 p.mu**）；三个调用点（收包路径 `handleMessage`、15s 巡检 `Reconcile`、`refreshPoolAlarm` 助手）
+   改为「锁内取决策、解锁后应用」。告警码/严重度/文案/消解条件**逐字不变**（行为等价，仅持锁范围收窄）。
+2. **A10**（`internal/api/metrics.go`）：`vnfMetrics` 在 `engine` 缺失或 `Committed()` 读失败时不再 `return nil`，
+   仍发出两 kind 的 `nfvis_vnf_runtime_available`（=0）与聚合计数（=0），与「编排不可用时不计入 running」口径一致。
+
+§3 实现期真回归与修正（教训入册）
+- **现象**：既有用例 `TestDHCPServerProviderReconcile`（③「到期回收并落盘」）失败——租约文件里仍留到期条目。
+- **定位**（诊断打印对照旧/新实现）：改造前的 `refreshPoolAlarmLocked` 在 `p.alarms == nil` 时**先早退**，
+  **从不调用** `rt.leases.free()`；我抽出的 `poolAlarmState` 无条件调 `free()`（内部 `sweep()`），
+  于是在 `Reconcile` 的 `Sync` 阶段就**提前删除**了到期条目 ⇒ 其后循环里的 `sweep()` 返回 false ⇒ **不落盘**。
+- **修法**：`poolAlarmState` 改方法并返回 `ok`——`alarms == nil` 时 `ok=false`、**不取决策**（不触碰租约表），
+  调用点据此跳过应用；既保持改造前行为，又保留「告警已接入时锁外应用」的收益。
+- **教益**：抽纯函数时要把**副作用边界**（此处 `free()` 内含 `sweep()`）一起搬过去——「纯」的假设不成立时，
+  既有用例就是最好的告警器（本次靠它拦住）。
+
+§4 测试与红-绿
+- **C11**（真并发）：`TestPoolAlarmIODoesNotHoldProviderLock`——注入**慢通知器**（前两次通知放行、第 3 次起阻塞），
+  占满池→释放→再占回（触发阻塞中的 Raise）；断言**告警 I/O 进行中 provider 锁空闲**（并发 `Leases` 立即返回，500ms 界）、
+  释放后收包路径正常返回、告警确在册。**红-绿**：还原「持锁应用」⇒ 用例失败。
+  （首版测试自身有缺陷：同步占满池时第 3 条 REQUEST 即触发告警、慢通知器卡死主 goroutine——已改为前两次放行 + 触发放 goroutine。）
+- **A10**：`TestVNFMetricsAvailabilityAlwaysEmitted`——engine 缺失与 committed 读失败（关库）两路均**发出**可用性 0 与聚合 0。
+  **红-绿**：还原 `return nil` ⇒ 用例失败。
+
+§5 真机验证（dev93）
+- **A10 ✓**：`curl /metrics` 含 `nfvis_vnf_runtime_available{kind="container"} 1` 与 `{kind="vm"} 1`（正常态；降级态由单测覆盖）。
+- **C11 ✓（行为不回归 + 告警照常）**：dns-vs 起 2 地址小池（rev 390）→ 原始帧注入占满 ⇒
+  `show alarms active` 出现 `DHCP_POOL_EXHAUSTED`（文案逐字：池范围 + 在租 2 个 + 处置路径）；释放一条 ⇒ **告警消解**（计数 0）；
+  `delete dhcp-server`（rev 391）清场 ⇒ 无 dhcp 配置、无内核 tap、无 RECOVERY/池耗尽告警。
+  （C11 的**锁空闲**性质由 §4 的并发用例钉住——真机无法构造「通知器慢 I/O」。）
+
+§6 make check
+- 全绿（决策 275 守护；宿主 errno=1455 内存压力下以 `GOFLAGS=-p=1` 串行跑通；提交用 `NO_VERIFY=1` 并已补跑）。
