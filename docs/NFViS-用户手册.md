@@ -1117,7 +1117,8 @@ nfvis# commit
 > （DISCOVER / 重绑定）随交换机洪泛到服务器，拿到地址后的单播续租经网关地址（UDP/67）
 > 送达服务器；OFFER/ACK 由服务器直接发回客户端。server-id 与下发的网关均为 **BVI 地址**。
 > 池须与 BVI 同子网、不含 BVI 地址与网络/广播地址、最多 4096 个地址；**与 `dhcp-relay` 互斥**
-> （同一交换机二者只能配一个——两者争抢 UDP/67 的处理权）。
+> （**任何交换机**上二者都不能并存——数据面对 UDP/67 的本地处理归属是全局的，
+> 服务器的注册会抢占中继域的 DHCP 包，跨交换机并存也会被提交期拒绝）。
 >
 > 查看租约：`show virtual-switches vs-dmz dhcp-leases`；`show virtual-switches vs-dmz detail`
 > 的「DHCP 服务器」块给出池 / 租约时长 / DNS / 域名 / 在租数。
