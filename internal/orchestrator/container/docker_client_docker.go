@@ -92,7 +92,14 @@ func (c *dockerClient) do(ctx context.Context, method, path string, body any, ou
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("docker %s %s: %w", method, path, err)
+		// 决策 #375（R142 B8）：底座不可达/无响应（dial 失败、连接被拒、deadline 等）要能被上层
+		// 识别为「Docker 不可用」并映射 503——带上包级 sentinel errDockerUnavailable（同时用
+		// 第二个 %w 保留原始错误因果与文本，便于排障）。**调用方取消**（ctx canceled）不算底座
+		// 故障，原样透传（不是 503）。
+		if errors.Is(err, context.Canceled) {
+			return fmt.Errorf("docker %s %s: %w", method, path, err)
+		}
+		return fmt.Errorf("docker %s %s: %w", method, path, dockerUnavailableError{err})
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -109,6 +116,21 @@ func (c *dockerClient) do(ctx context.Context, method, path string, body any, ou
 }
 
 var errDockerNotFound = fmt.Errorf("docker: not found")
+
+// errDockerUnavailable Docker 底座**不可达/无响应**（决策 #375，R142 B8）：连接被拒、dial
+// 失败、请求超时等。包级 sentinel，由 Provider 归一为 orchestrator.ErrContainerUnavailable
+// （API 层映射 503 UNAVAILABLE）。与 errDockerNotFound（404 竞态 ⇒ ErrVMNotFound）区分开。
+//
+// 用类型 dockerUnavailableError 承载（而非直接 `%w` 包 sentinel）：sentinel 文案不进**用户
+// 可见消息**（Error 只回原始错误文本），而 `errors.Is(err, errDockerUnavailable)` 仍成立。
+var errDockerUnavailable = errors.New("docker 底座不可达")
+
+// dockerUnavailableError 标记「底座不可达」并保留原始错误因果；Error 只回原始文本。
+type dockerUnavailableError struct{ err error }
+
+func (e dockerUnavailableError) Error() string        { return e.err.Error() }
+func (e dockerUnavailableError) Unwrap() error        { return e.err }
+func (e dockerUnavailableError) Is(target error) bool { return target == errDockerUnavailable }
 
 func (c *dockerClient) Create(ctx context.Context, name string, spec CreateSpec) error {
 	body := dockerCreateBody{
@@ -347,7 +369,10 @@ func (c *dockerClient) Exec(ctx context.Context, name, command string, timeout t
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		if wctx.Err() != nil {
+		// 决策 #375（R142 B7）：**只有等待窗口到期**才算超时；wctx 派生自调用方 ctx，故调用方
+		// 取消（客户端断开/上层取消）此前被一律谎报成 TimedOut。收紧为 DeadlineExceeded——
+		// 取消/其它失败按错误透传（不设 TimedOut）。
+		if errors.Is(wctx.Err(), context.DeadlineExceeded) {
 			return ExecResult{TimedOut: true, Duration: time.Since(started)}, nil
 		}
 		return ExecResult{}, fmt.Errorf("docker exec start: %w", err)
@@ -365,11 +390,16 @@ func (c *dockerClient) Exec(ctx context.Context, name, command string, timeout t
 		Truncated: truncated,
 	}
 	if derr != nil {
-		// 流中断：超时窗口到点 ⇒ 如实报「超时」（已读到的部分保留）；否则是真错。
-		if wctx.Err() != nil {
+		// 流中断：只有**等待窗口到期**才是超时（已读到的部分保留）；调用方取消/其它失败按错误
+		// 透传（决策 #375，R142 B7）——已捕获的 stdout/stderr 仍保留在返回的 ExecResult 里。
+		if errors.Is(wctx.Err(), context.DeadlineExceeded) {
 			res.TimedOut = true
 			res.Duration = time.Since(started)
 			return res, nil
+		}
+		if errors.Is(wctx.Err(), context.Canceled) {
+			res.Duration = time.Since(started)
+			return res, fmt.Errorf("docker exec 读取输出: %w", wctx.Err())
 		}
 		return res, fmt.Errorf("docker exec 读取输出: %w", derr)
 	}
@@ -440,7 +470,9 @@ func (c *dockerClient) ExecShell(ctx context.Context, name string) (io.ReadWrite
 	d := net.Dialer{Timeout: 5 * time.Second}
 	conn, err := d.DialContext(ctx, "unix", c.socket)
 	if err != nil {
-		return nil, fmt.Errorf("连接 Docker socket: %w", err)
+		// 决策 #375（R142 B8）：拨号失败是「底座不可达」，带上标记供上层映射 503
+		// （保留原始错误因果/文本）。Provider 归一里对调用方取消优先透传，故此处无需区分。
+		return nil, fmt.Errorf("连接 Docker socket: %w", dockerUnavailableError{err})
 	}
 	return execShellHandshake(conn, created.ID)
 }

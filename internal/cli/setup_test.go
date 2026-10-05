@@ -50,7 +50,7 @@ func (f *setupFake) Execute(line, source string) (cliclient.Result, error) {
 
 func (f *setupFake) DynamicCandidates(kind string) ([]string, error) { return nil, nil }
 func (f *setupFake) Logout() error                                   { return nil }
-func (f *setupFake) DialConsole(wsPath string) (io.ReadWriteCloser, error) {
+func (f *setupFake) DialConsole(wsPath, what string) (io.ReadWriteCloser, error) {
 	return nil, io.EOF
 }
 func (f *setupFake) MetricsText() (string, error) { return f.metrics, nil }

@@ -466,6 +466,11 @@ func TestContainerHolderDegradedSemantics(t *testing.T) {
 	if st, err := h.ContainerState(ctx, "ct-a"); err == nil || err.Error() != wantContainerBody || st != "" {
 		t.Fatalf("未接入 ContainerState 应报同文案错误: state=%q err=%v", st, err)
 	}
+	// 决策 #375（R142 B8）：未接入错误可被判为「底座不可用」——REST 层据此把容器 exec/shell
+	// 的 500 如实映射为 503（Docker 启动时即不可达的场景），且文案不变（CLI 逐字打印）。
+	if _, err := h.ContainerExec(ctx, "ct-a", "echo x", time.Second); !errors.Is(err, orchestrator.ErrContainerUnavailable) {
+		t.Fatalf("未接入错误应可判为 ErrContainerUnavailable: %v", err)
+	}
 }
 
 func TestContainerHolderForwardsAfterSwap(t *testing.T) {

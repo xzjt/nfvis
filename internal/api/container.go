@@ -200,6 +200,10 @@ func (s *Server) containerExec(w http.ResponseWriter, r *http.Request, name stri
 		case errors.Is(err, orchestrator.ErrContainerNotRunning):
 			writeError(w, http.StatusConflict, "CONFLICT",
 				err.Error()+"；先 request container-functions "+name+" start", nil)
+		case errors.Is(err, orchestrator.ErrContainerUnavailable):
+			// 决策 #375（R142 B8）：底座（Docker）不可用/无响应如实映射 503（契约 #357/#358
+			// 写明「503 = Docker 不可用」；此前落 500）。
+			writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", err.Error(), nil)
 		default:
 			writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
 		}

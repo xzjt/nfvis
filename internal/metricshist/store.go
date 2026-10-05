@@ -340,8 +340,11 @@ func (s *Store) points(seriesID int64, q Query) ([]Point, bool, error) {
 	//   · step>0：把窗口收窄到「最新 limit+1 个桶」（多留一桶做对齐余量，结果与全窗口+裁剪
 	//     逐点一致——更旧的点本来就会被裁掉）；
 	//   · step<=0：SQL 侧 ORDER BY ts DESC LIMIT limit+1 再反转（保留最新 limit 个）。
+	// 决策 #376：收窄的锚点必须是**窗口内最新样本**，而不是 q.Until（读视图 handler 恒把 until
+	// 设为墙钟 now）——否则 until 晚于最新样本超过一个 step 时，收窄窗口从 now 起算会丢掉本应
+	// 保留的旧点（与「全窗口+裁剪」不再逐点一致）。故 limit>0 且 step>0 时总是取 newestTS。
 	newest, hasNewest := int64(0), false
-	if q.Limit > 0 && q.Step > 0 && q.Until >= storeMaxUntil {
+	if q.Limit > 0 && q.Step > 0 {
 		newest, hasNewest = s.newestTS(seriesID, q.Until)
 	}
 	since, descLimit, truncated := planBoundedLoad(q, newest, hasNewest)
@@ -394,26 +397,25 @@ func (s *Store) points(seriesID int64, q Query) ([]Point, bool, error) {
 	return pts, truncated, nil
 }
 
-// planBoundedLoad 计算「载入有界」的查询计划（决策 #372/R142 A8）：
+// planBoundedLoad 计算「载入有界」的查询计划（决策 #372/R142 A8；锚点口径见决策 #376）：
 // 返回收窄后的 since、DESC 限行数（0=不限）、以及是否真值截断。
 //
-//	· step>0：窗口收窄到「最新 limit+1 个桶」（多留一桶做对齐余量；结果与全窗口+裁剪逐点一致）。
-//	  锚点：调用方给了 until 就用它；哨兵（未给）时以**最新样本** newest 为锚——直接按哨兵
-//	  收窄会得到「未来空窗」而返回空结果（测试当场抓到）。
+//	· step>0：窗口收窄到「**窗口内最新样本**起算的最新 limit+1 个桶」（多留一桶做对齐余量；
+//	  结果与全窗口+裁剪逐点一致——更旧的点本来就会被裁掉）。锚点＝newest（调用方给的
+//	  窗口内最新样本）；无样本（hasNewest=false）则**不收窄**（不猜）。
+//	  决策 #376 更正：此前用 q.Until 当锚——读视图的 until 是墙钟 now，晚于最新样本超过一个
+//	  step 时会把本应保留的旧点裁掉（收窄不再等价）。
 //	· step<=0：DESC + LIMIT limit+1（多取一行判定是否真被裁）。
 func planBoundedLoad(q Query, newest int64, hasNewest bool) (since int64, descLimit int, truncated bool) {
 	since = q.Since
 	switch {
 	case q.Limit > 0 && q.Step > 0:
-		anchor := q.Until
-		if anchor >= storeMaxUntil {
-			if !hasNewest {
-				break // 哨兵且无样本：没有可用的锚点，不收窄（不猜）
-			}
-			anchor = newest
+		if !hasNewest {
+			break // 窗口内无样本：没有可收窄的对象（不猜）
 		}
-		if w := int64(q.Limit+1) * q.Step; anchor-w > since {
-			since = anchor - w
+		// 锚点＝窗口内最新样本（决策 #376）。
+		if w := int64(q.Limit+1) * q.Step; newest-w > since {
+			since = newest - w
 			truncated = true // 窗口被收窄 ⇒ 更旧的点被排除（真值截断）
 		}
 	case q.Limit > 0:

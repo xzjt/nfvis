@@ -1,0 +1,121 @@
+round158 · 决策 #375 —— round142 体检容器/终端族观测批次一（B7/B8/B10/B11）
+====================================================================
+日期：2026-10-05；分支 v2-round158-b7b8b10b11（8348144 契约先行 → 920a8b1 实现 → 3e8605e/0ced27d/cfcd513 打磨与口径对齐）；
+真机 nfvis-vm 2.0.0~dev97（初版）→ dev98（底座错误归一打磨）→ **dev99（最终，含持有层修复）**。
+来源：round142 半程体检 §2 簇 B 四项（代码级确认，`docs/evidence/v2-round142-midpoint-audit.txt` §2）。
+PR：https://github.com/xzjt/nfvis/pull/305（base v2）。
+
+§0 结论
+- 四项收口：**B7** exec 的 ctx 取消与超时不再混淆；**B8** Docker 不可用/竞态错误按契约落 503/404/409
+  （含**两处**此前漏网：Provider 运行期不可达、持有层「未接入」）；**B10** SDK 拨号文案按会话种类；
+  **B11** Web 终端提示如实化。B7/B8/B10 逐项**红-绿**；`make check`（`GOFLAGS=-p=1`）RC=0。
+- **真机四维全过**（dev99）：停 docker.socket 后 exec/shell 如实 503、起回 ~30s 后台接入恢复；
+  exec 超时仍 504、调用方取消记 `context canceled`（**不再谎报超时**）；VM 串口/容器终端标签各自正确；
+  Web 两页 placeholder 如实（Browser Use 复核 + 截图）。
+
+§1 契约先行（8348144；0ced27d 口径对齐）
+- 附录 A 决策 #375（v2 线第 76 条）；`AGENTS.md` 决策条数 276→277（`check_decisions_count.sh` ✓）。
+- `docs/NFViS-openapi.yaml`：`/container-functions/{name}:exec`、`…/shell`、`…/shell/ws` 三处 503 描述
+  如实化为「容器编排未接入，**或 Docker 服务不可用（连接失败/无响应）**」；`openapi.json` 以 `--write` 同步
+  （`check_openapi_json_sync.sh` / `check_openapi_no_duplicate_keys.sh` ✓；**注**：flow-mapping 里含 `#375`
+  会被 YAML 当注释，须加引号——首版即踩此坑，当场修正）。
+- `docs/v2待做.md`：B7/B8/B10/B11 标为收口（余项更新为 D2/D5/D6 + E8/E10/E11/E13/E14）。
+
+§2 实现（920a8b1 + 打磨）
+1. **B7**（`internal/orchestrator/container/docker_client_docker.go` `Exec`，两处）：
+   判据由 `wctx.Err() != nil` 收紧为 `errors.Is(wctx.Err(), context.DeadlineExceeded)`——**只有等待窗口到期
+   才算超时**；`context.Canceled`（wctx 派生自调用方 ctx，客户端断开/上层取消）**透传为错误**，
+   demux 流中断分支保留已捕获的 stdout/stderr 并返回错误（不再设 `TimedOut`）。
+2. **B8**（三层）：
+   - `internal/orchestrator/provider.go`：新增 `ErrContainerUnavailable`（API 503）。
+   - `internal/orchestrator/container/docker_client_docker.go`：新增 `errDockerUnavailable` 哨兵；
+     **用类型 `dockerUnavailableError` 承载**（`Error()` 只回原始文本、`Is()` 归哨兵）——避免哨兵文案
+     泄漏进用户可见消息；`do()` 连接类失败（非 `context.Canceled`）与 `ExecShell` 拨号失败都带上它；
+     404 仍走 `errDockerNotFound`。
+   - `internal/orchestrator/container/docker.go`：新增 `normalizeDockerErr`——`errDockerNotFound`⇒`ErrVMNotFound`
+     （State 与 Exec 之间的**竞态**窗口）、`context.Canceled` 原样透传、其余⇒`ErrContainerUnavailable`；
+     `ContainerExec`/`ContainerShell`/`ContainerState` 的底座错误均过它。
+   - `cmd/nfvisd/dynamic_provider.go`：持有层「未接入」错误 `errContainerNotConnected` 改由类型
+     `notConnectedError` 承载——`Error()` 与 CLI 既有正文逐字一致（「容器编排未接入（Docker 未装配），
+     运行态不可用」），`Is()` 归 `orchestrator.ErrContainerUnavailable`（**Docker 启动时即不可达**的场景同样 503）。
+   - `internal/api/container.go`：`containerExec` 增 `ErrContainerUnavailable`⇒503；
+     `internal/api/container_shell.go`：`handleContainerShellTicket` 的 State 检查改为**任一错误⇒503、
+     不再照发 ticket**（此前非 deadline 错误会继续签发，操作者拿到「连上即断」的终端）。
+3. **B10**（`pkg/cliclient/console.go` + `internal/cli/console.go` + `internal/cli/session.go`）：
+   `DialConsole(wsPath string)` → `DialConsole(wsPath, what string)`——`what` 为**会话显示名**；
+   CLI 侧新增单源 `consoleKindName`（「串口」/「容器终端」），`consoleKindLabel` 由它派生（`" "+name`），
+   `runConsole` 传 `consoleKindName(req)`。SDK 不新造 kind→文案映射。同步 4 处测试桩签名。
+4. **B11**（`internal/api/ui/index.html`）：`#vm-console-in` / `#ct-shell-in` 两处 placeholder **删去
+   「Ctrl-C 可中断」**，改为「文本框不能发送控制字符；需要 Ctrl-C 请用 CLI 交互终端（容器页另提「执行命令」）」——
+   Web 文本框无法注入 0x03，原提示承诺了做不到的事。
+
+§3 测试与红-绿
+- `TestExecWaitWindowExpiryTimesOut` / `TestExecCallerCancelIsErrorNotTimeout`（start 请求分支）、
+  `TestExecStreamInterruptWindowExpiryTimesOut` / `TestExecStreamInterruptCallerCancelIsError`（demux 分支）：
+  用可注入的假 Docker HTTP 后端把「窗口到期⇒TimedOut」与「调用方取消⇒错误且不 TimedOut」两侧钉住。
+  **红-绿**：把判据改回 `wctx.Err() != nil` ⇒ 两个 cancel 用例按预期失败。
+- `TestProviderNormalizesDockerUnavailable`（Provider 归一五例：底座不可达/其它 dockerd 异常⇒503、
+  竞态 404⇒404、shell 拨号失败⇒503、调用方取消⇒透传）；
+  `TestDockerUnavailableErrorMarksWithoutLeakingText`（`errors.Is` 成立且哨兵文案不进消息）。
+- `TestContainerExecUnavailableMaps503` / `TestContainerShellTicketUnavailableMaps503`（API 状态码）。
+  **红-绿**：移除 `ErrContainerUnavailable` 分支 / 还原旧 shell switch ⇒ exec 得 500、shell 得 200 照发 ticket。
+- `TestContainerHolder...`（`cmd/nfvisd`）增断言：未接入错误 `errors.Is(…, ErrContainerUnavailable)`，
+  且文案仍与 `wantContainerBody` 逐字一致。
+- `TestWSURLEmptyMessageUsesSessionName`（B10 文案随会话名变化）+ `console_kind_test`。
+- **红-绿**：B10 还原旧文案 ⇒ 该用例失败。
+
+§4 真机验证（四维，dev99）
+① **作用效果（B8）**——`systemctl stop docker.socket docker` 后（socket 消失、连接被拒）：
+   - exec（REST）：`503` `{"code":"UNAVAILABLE","message":"容器底座（Docker）不可用: docker GET
+     /containers/sem-ct/json: Get \"http://docker/containers/sem-ct/json\": dial unix /var/run/docker.sock:
+     connect: connection refused"}`（对照修复前 500 INTERNAL）。
+   - shell ticket（REST）：`503`（**不再照发 ticket**）。
+   - **Docker 启动时即不可达**（装包时 docker 停着）⇒ 持有层未接入：exec/shell 均 `503`
+     `{"code":"UNAVAILABLE","message":"容器编排未接入（Docker 未装配），运行态不可用"}`（对照修复前 exec 500）；
+     CLI 侧文案逐字不变（`%% 容器编排未接入（Docker 未装配），运行态不可用`）。journal 警告同样带
+     `容器底座（Docker）不可用: … connection refused`（无 `docker: unavailable:` 哨兵文本泄漏）。
+   - **恢复**：`systemctl start docker` ⇒ ~30s 内 `容器编排已接入（后台）`（既有 #351 循环）⇒ `exec` 恢复成功。
+② **生命周期**——正常路径不回归：`exec "echo HELLO-DEV97; id -un"` ⇒ 退出码 0、stdout 正确；容器 `exited` 时
+   exec 如实 `409`（`容器未处于运行态: sem-ct（当前 exited）；先 … start`）；`request … start` 后恢复；
+   `request vpp restart`/重装 deb 后仍可用。
+③ **跨对象组合（B10）**——真 pty（`script -qec`，Ctrl-] 退出）：
+   - 容器：`[已进入 sem-ct 容器终端，Ctrl-] 退出]`
+   - VM：`[已进入 sem-vm 串口，Ctrl-] 退出]`
+   同一单源 `consoleKindName`，两类会话标签各自正确。（拨号失败文案由单测红-绿覆盖——真机难以在 CLI 侧
+   确定性制造握手失败；非 TTY 路径的既有文案走的是另一分支，未受影响。）
+④ **对抗性对照**：
+   - **B7 超时 vs 取消**：`exec sleep 30 timeout 3`（窗口到期）⇒ `504 EXEC_TIMEOUT` + 审计
+     `exec 容器 sem-ct: sleep 30（超时 3s，已停止等待…）`；客户端 1s 主动断开（`curl --max-time 1`，
+     exec timeout 30）⇒ 审计 `exec sem-ct: docker exec 读取输出: context canceled`——**记错误而非「超时」**
+     （修复前此处会 `TimedOut=true` ⇒ 504 + 记「超时」）。
+   - **B8 竞态**：State 与 Exec 之间容器被删 ⇒ 归一 `ErrVMNotFound`（404）由单测钉住（真机竞态窗口难确定性构造）。
+   - **B11**：Browser Use（IAB）实机复核——先确认页面加载的是**当前构建**（总览页显示 `NFViS 2.0.0~dev99`）；
+     容器详情页「交互终端」分栏连接后 `#ct-shell-in` `getComputedStyle.display=block`、`offsetParent` 真、
+     placeholder = 新文案（截图 `docs/images/round158-web-terminal-placeholder.png`，画面可见终端已连接、
+     输入框提示为新文案）；VM 详情页「串口」分栏连接后 `#vm-console-in` 同样为可见的新文案。
+     服务端下发的 `index.html` 与新文案一致，且旧文案 `Ctrl-C 可中断` 出现 0 次。
+
+§5 现场与清场（如实）
+- 本批真机实验**只动 docker 服务与容器生命周期**：为触发「底座不可达」停过 `docker.socket`/`docker` 数次、
+  起回；`sem-ct` 因 dockerd 停而退出后已 `start` 回 **running**。四服务 active；`sem-vm` 仍 running。
+- 配置库**未改**（无 set/delete）；告警仅常态 `HUGEPAGE_POOL_ORPHAN`；无遗留 dummy 接口/临时对象。
+- 真机构建：`git archive` → `/root/src.new`（`SOURCE_DATE_EPOCH=1791206714`）→ `make deb VERSION=2.0.0~dev99` → `dpkg -i`。
+- Browser Use 的 IAB 标签页保留（未关闭）。
+
+§6 未竟 / 边界（如实）- **B7 的取消侧**在真机上以「客户端断开」观测（审计记 `context canceled`）；「窗口到期」正向路径同场复验（504）。
+- **B8 的竞态 404**（State 与 Exec 之间容器被删）与 **B10 的拨号失败文案**在真机难以确定性构造，由单测覆盖（红-绿）。
+- **`containerAction`（start/stop/restart）与 `logs`** 的底座错误仍按既有映射（500）；契约未对这两个端点声明 503，
+  本轮**有意不改**（决策 #375 明文），如后续统一另立项。
+- **Docker 启动时即不可达**场景依赖既有 #351 后台接入循环（~30s）恢复；本批未改其节奏。
+- **教训入册**：真机验证**当场暴露了 B8 的另一半**——「Provider 运行期不可达 ⇒ 503」修好后，
+  「**Docker 启动时即不可达 ⇒ 持有层未接入 ⇒ 500**」才在真机（装包时 docker 停着）显现；
+  只读代码会漏掉持有层这一层。这与 round149~151 的「修复后仍失败要按链路逐环验证」同族。
+
+§7 四套件复跑（dev99）
+- `cli-fulltest` **254/0/18** ｜ `cli-semantic-check` **26/0/3** ｜ `cli-lifecycle-check` **22/0/3** ｜
+  `cli-pty-smoke` **10/10**——与基线逐项一致（语义 26/0/3：S13 现场在场已判定、S8 冷窗如实不可判定、
+  S11/S12 按设计；lifecycle 22/0/3：L3-2 正控未热，**非回归**）。
+- 跑法：夹具 `up` → 停 `sem-vm` 让 1G 页 → fulltest → 起 `sem-vm` → 设 S13 现场 → 语义 → lifecycle → pty；
+  收尾 `systemctl restart vpp && systemctl restart nfvis` 清残留拓扑。
+- ⚠️ 本轮 `make check` 首跑**偶发失败**（`TestMetricsHistoryTruncatedAndLimit`，隔离下 5/5 通过）——
+  定根为 #372 A8 的载入收窄锚点缺陷，另立**决策 #376** 修复（见 `v2-round158b-d376-metrics-narrowing-anchor.txt`）。

@@ -4321,7 +4321,7 @@
             "description": "容器非运行态（先 start）"
           },
           "503": {
-            "description": "容器编排未接入"
+            "description": "容器编排未接入，或 Docker 服务不可用（连接失败/无响应；决策 #375）"
           }
         },
         "summary": "申请容器交互式终端凭证（一次性 ticket；决策",
@@ -4341,7 +4341,7 @@
             "description": "ticket 无效、已过期或已消费"
           },
           "503": {
-            "description": "容器编排未接入"
+            "description": "容器编排未接入，或 Docker 服务不可用（连接失败/无响应；决策 #375）"
           }
         },
         "security": [],
@@ -4417,7 +4417,7 @@
             "description": "容器非运行态（先 start）"
           },
           "503": {
-            "description": "容器编排未接入"
+            "description": "容器编排未接入，或 Docker 服务不可用（连接失败/无响应；决策 #375）"
           },
           "504": {
             "description": "超时（命令未在 timeout_seconds 内跑完；容器内进程可能仍在运行）"

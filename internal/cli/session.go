@@ -26,8 +26,9 @@ type Backend interface {
 	Execute(line, source string) (cliclient.Result, error)
 	DynamicCandidates(kind string) ([]string, error)
 	Logout() error
-	// DialConsole 连接串口 WebSocket（M4-12，FR-CMP-014）；wsPath 来自 Result.Console。
-	DialConsole(wsPath string) (io.ReadWriteCloser, error)
+	// DialConsole 连接会话 WebSocket（M4-12，FR-CMP-014）；wsPath 来自 Result.Console，
+	// what 为会话显示名（「串口」/「容器终端」，决策 #375/R142 B10——同一函数被两类会话共用）。
+	DialConsole(wsPath, what string) (io.ReadWriteCloser, error)
 	// MetricsText 拉取 /api/v1/metrics 原始文本（setup 向导读主机事实，决策 #107）。
 	MetricsText() (string, error)
 }
@@ -125,9 +126,10 @@ func (s *Session) Teardown() []string {
 	return outs
 }
 
-// DialConsole 连接串口 WebSocket（M4-12，FR-CMP-014）；wsPath 来自 ExecuteFull 的接管请求。
-func (s *Session) DialConsole(wsPath string) (io.ReadWriteCloser, error) {
-	return s.client.DialConsole(wsPath)
+// DialConsole 连接会话 WebSocket（M4-12，FR-CMP-014）；wsPath 来自 ExecuteFull 的接管请求，
+// what 为会话显示名（决策 #375/R142 B10）。
+func (s *Session) DialConsole(wsPath, what string) (io.ReadWriteCloser, error) {
+	return s.client.DialConsole(wsPath, what)
 }
 
 // MetricsText 透传主机指标原始文本（setup 向导的事实源，决策 #107）。

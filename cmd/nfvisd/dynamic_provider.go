@@ -47,10 +47,23 @@ const (
 )
 
 var (
-	errComputeNotConnected   = errors.New(errComputeNotConnectedText)
-	errConsoleNotConnected   = errors.New(errConsoleNotConnectedText)
-	errContainerNotConnected = errors.New(errContainerNotConnectedText)
+	errComputeNotConnected = errors.New(errComputeNotConnectedText)
+	errConsoleNotConnected = errors.New(errConsoleNotConnectedText)
+	// errContainerNotConnected 未接入错误：Error() 与 CLI 既有正文逐字一致（CLI 直接打印
+	// err.Error()），同时可被 errors.Is(err, orchestrator.ErrContainerUnavailable) 判为
+	// 「底座不可用」——REST 层据此把容器 exec/shell 的 500 如实映射为 503（决策 #375/R142 B8）。
+	// 用类型承载（而非直接 errors.New）以保证 sentinel 文案不进用户可见消息。
+	errContainerNotConnected = notConnectedError{}
 )
+
+// notConnectedError 「编排未接入」错误（当前仅容器侧使用）：Error() 固定为 CLI 既有正文，
+// Is 把它归到 orchestrator.ErrContainerUnavailable（Docker 不可用 ⇒ API 503）。
+type notConnectedError struct{}
+
+func (notConnectedError) Error() string { return errContainerNotConnectedText }
+func (notConnectedError) Is(target error) bool {
+	return target == orchestrator.ErrContainerUnavailable
+}
 
 // computeFacade 持有层所持的 libvirt 编排能力集合：orchestrator.ComputeProvider 全部 9 法，
 // 加上 api 控制器消费的超集——StartVMChecked（决策 #311 的启动回读）、Console（M4-5）、

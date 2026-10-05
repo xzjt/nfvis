@@ -784,11 +784,31 @@
   ② 真实 WS 会话（Origin+Upgrade 头）⇒ **恰 1 open + 1 close**（旧实现 2 条 open）。B4/E5/E6/E7 无真机读视图，**单测覆盖如实登记**。
   **四套件（dev96，v2 @ 98a42b4）**：fulltest **254/0/18**、语义 **27/0/2**、lifecycle **23/0/2**、pty **10/10**。
   证据 `docs/evidence/v2-round157-d374-api-hygiene.txt`；真机已装 2.0.0~dev96。
+- **round158（round142 体检容器/终端族观测批次一 + 历史读视图收窄锚点修正，2026-10-05）**：清 round142 体检
+  §2 簇 B 四项（**B7/B8/B10/B11**，决策 **#375**）——**B7** exec 的 **ctx 取消与超时不区分**（`wctx.Err()!=nil`
+  一律报 `TimedOut`，而 `wctx` 派生自调用方 ctx ⇒ 客户端断开也被谎报超时；收紧为 `DeadlineExceeded`，
+  调用方取消透传为错误）；**B8** Docker 不可用/竞态错误落 **500**（契约写 503/404）——新增
+  `orchestrator.ErrContainerUnavailable` + `normalizeDockerErr`（404 竞态⇒404、底座⇒503），exec/shell ticket
+  如实 503/404/409、shell ticket 不再照发；**真机当场暴露 B8 的另一半**——**持有层「未接入」**（Docker 启动时
+  即不可达）也落 500，故 `notConnectedError` 亦满足该 sentinel（文案逐字不变）；**B10** SDK 拨号文案写死
+  「串口 console」（现被容器终端共用）⇒ `DialConsole(wsPath, what)` 按会话显示名（单源 `consoleKindName`）；
+  **B11** Web 终端提示「Ctrl-C 可中断」做不到 ⇒ 两处 placeholder 如实化。**真机四维**：停 `docker.socket` ⇒
+  exec/shell 503、docker 启动即不可达亦 503、`systemctl start docker` ⇒ ~30s 后台接入恢复；`exec sleep 30
+  timeout 3` ⇒ **504**（不回归）而客户端 1s 断开 ⇒ 审计记 `context canceled`（**不再谎报超时**）；真 pty 下
+  `[已进入 sem-ct 容器终端]` / `[已进入 sem-vm 串口]` 标签各自正确；Browser Use（IAB）复核 Web 两页文案
+  （先确认页面加载 dev99 当前构建；截图 `docs/images/round158-web-terminal-placeholder.png`）。**同轮修 #376**：
+  复跑 `make check` 时 `TestMetricsHistoryTruncatedAndLimit` **偶发失败**（隔离 5/5 通过）——定根为 **#372 A8**
+  的载入收窄**锚点取 `Query.Until`**（读视图恒为墙钟 now），`until` 晚于最新样本超过一个 `step` 时会丢掉本应保留
+  的旧点（收窄不再与「全窗口+裁剪」等价）；修法＝锚点改**窗口内最新样本**（无样本不收窄），回归用例**红-绿**、
+  偶发用例转确定性。**四套件（dev99）**：fulltest **254/0/18**、语义 **26/0/3**（S13 现场在场、S8 冷窗不可判定）、
+  lifecycle **22/0/3**（L3-2 正控未热，非回归）、pty **10/10**——与基线逐项一致；`make check`（`GOFLAGS=-p=1`）全绿。
+  证据 `docs/evidence/v2-round158-d375-container-terminal-observations.txt`、`v2-round158b-d376-metrics-narrowing-anchor.txt`；
+  真机已装 2.0.0~dev99。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
-- 已定决策 276 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#374，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 278 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#376，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。

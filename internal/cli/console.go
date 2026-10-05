@@ -33,7 +33,7 @@ func (r *REPL) runConsole(req *cliclient.ConsoleRequest) {
 		fmt.Fprintf(r.out, "%% 如需脚本接入：WebSocket %s（需一次性 ticket，请经 API 客户端连接）。\n", req.WSURL)
 		return
 	}
-	stream, err := r.session.DialConsole(req.WSURL)
+	stream, err := r.session.DialConsole(req.WSURL, consoleKindName(req))
 	if err != nil {
 		fmt.Fprintf(r.out, "%% %v\n", err)
 		return
@@ -52,13 +52,20 @@ func (r *REPL) runConsole(req *cliclient.ConsoleRequest) {
 	r.copyConsole(stream, os.Stdin, done, strings.TrimSpace(consoleKindLabel(req)))
 }
 
-// consoleKindLabel 会话种类后缀：VM 串口 / 容器终端（决策 #358）。
-// 两类会话走**同一条接管路径**，只有文案不同——故按 Kind 取词，不复制一套接管逻辑。
-func consoleKindLabel(req *cliclient.ConsoleRequest) string {
+// consoleKindName 会话种类**显示名**（无前后缀）：VM 串口 / 容器终端（决策 #358/#375）。
+// 单一来源：既供 SDK 拨号失败文案（决策 #375/R142 B10——同一函数被两类会话共用，写死
+// 「串口 console」会在容器终端上张冠李戴），也供下方 label 复用。
+func consoleKindName(req *cliclient.ConsoleRequest) string {
 	if req != nil && req.Kind == "container" {
-		return " 容器终端"
+		return "容器终端"
 	}
-	return " 串口"
+	return "串口"
+}
+
+// consoleKindLabel 会话种类后缀（带前导空格，用于提示语拼接）：VM 串口 / 容器终端。
+// 复用 consoleKindName 的同一映射，不新造第二套 kind→文案。
+func consoleKindLabel(req *cliclient.ConsoleRequest) string {
+	return " " + consoleKindName(req)
 }
 
 // consoleChunk 本地输入的一小片字节（data 非空）或结束信号（err 非 nil）。
