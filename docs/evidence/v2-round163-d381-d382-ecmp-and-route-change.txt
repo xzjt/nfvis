@@ -1,0 +1,78 @@
+round163 · 决策 #381（静态路由 ECMP）+ #382（路由改下一跳不再被同提交删除）
+====================================================================
+日期：2026-10-06；分支 v2-round163-ecmp（dac0423 契约先行 → 6835637 实现 #381 → 32d68e4 实现 #382）；
+真机 nfvis-vm 2.0.0~dev105（#381 的真机验证在 dev104 上做，暴露 #382 后于 dev105 复验）。
+来源：#381 = `docs/v2待做.md` 一.4（差距分析 §1-4）；#382 = round163 真机验证时暴露的既有缺陷。
+PR：https://github.com/xzjt/nfvis/pull/310（base v2）。
+
+§0 结论
+- **#381 静态路由 ECMP 交付**：`next-hop` 取值支持**逗号分隔多下一跳**（单值不变、REST 形状不变），
+  提交期校验（去重/同族/上限 8），下发为 N 个**等权**递归 FibPath。真机：`buckets:2` 两条路径。
+- **#382 根治一个既有缺陷**（#381 的真机验证当场暴露）：**同前缀改下一跳会把路由从 FIB 删掉**
+  （差分撤销按「前缀+下一跳」判删除，而 del-route 段在 ApplyVRF 之后执行）——真机实证「路由从 FIB 消失、
+  配置与读视图一切正常」的数据面黑洞。修法＝差分撤销**按前缀**判。真机：改下一跳后路由**仍在**。
+- 两项均**红-绿**；`make check` 全绿；四套件与基线逐项一致。
+
+§1 契约先行（dac0423）
+- 附录 A 决策 #381（v2 线第 82 条）、#382（第 83 条）；`AGENTS.md` 决策条数 281→284（两次：#381 →283、
+  #382 →284；`check_decisions_count.sh` ✓）。
+- `docs/v2待做.md` 一.4 标为收口；`docs/NFViS-openapi.yaml` 的 `Route.next_hop` 补多值说明（**类型/required 不变**，
+  `openapi.json` 以 `--write` 同步）。
+
+§2 能力前提核实（#338 纪律，实现前）
+- VPP `ip_route_add_del` 原生支持多路径（`IPRoute.NPaths` + `Paths []fib_types.FibPath`，每路径 `Weight uint8`）；
+  产品既有 `recursiveNextHopPaths`（递归下一跳 path 构造，含 round88「TableID 必填」教训）可直接复用
+  ⇒ **底座无需新能力**，不重蹈「先写实现再发现底座不成立」。
+
+§3 实现（6835637 + 32d68e4）
+1. **#381 校验**（`internal/model/validate.go`）：`checkRouteNextHops` —— 单值走原路径（文案逐字节不变）；
+   多值按 `,` 切分逐元素判：空 / 坏 IP / **重复** / **混族**（IPv4 与 IPv6 不得混） / **上限 8**。
+2. **#381 下发**（`internal/orchestrator/network/l3_govpp.go`）：`nextHopPaths` 对每个下一跳调
+   `recursiveNextHopPaths`，每条 path `Weight=1` 等权，`route.NPaths = len(paths)`；单值即 N=1。
+3. **#381 契约**：`tree_config.go` 的 `next-hop` 描述补「多个用逗号分隔＝ECMP」（`static-routes` 与 `default` 两处）；
+   `display set` 无需改（整串本就是**单 token**，回放自校验通过）。
+4. **#382 差分撤销按前缀判**（`internal/orchestrator/apply.go`）：`routeKeyOf` 由 `Prefix|NextHop` 收敛为
+   **`Prefix`**，`removedRoutes` 随之只在「new 里同前缀已不再声明」时撤销。注释写明机理（VPP 对同前缀是
+   **替换**语义；del-route 段在 ApplyVRF **之后**执行）与「同一推理此前只用在 distance 上、下一跳曾漏」。
+
+§4 测试与红-绿
+- #381：`TestValidateRouteMultiNextHop`（多值通过；空/坏 IP/重复/混族/超 8 各拒）；
+  `TestNextHopPathsECMP` / `TestNextHopPathsRejectsBadElement`（N=1/N=2 的 `NPaths`/`Paths`/`Weight`/`TableID`）；
+  `TestDisplaySetMultiNextHopSingleToken` + `roundTripAliasCases` 增加多下一跳用例。
+  **红-绿**：还原单值校验 ⇒ 多值被拒；`hops[:1]` ⇒ 「两条下一跳应构造 2 条路径，得 1」；
+  发射器拆两 token ⇒ 「生成语句回放失败（未知语句: "10.99.0.2"）」。
+- #382：`TestApplyRouteNextHopChangeKeepsRoute`（4 个子例：单→单 / 单→多 / 多→单 / 多值增删）——
+  断言**无 del-route** 且**仍有 vrf 重下发**；既有 `TestApplyRouteDistanceOnlyChangeDoesNotRevoke` /
+  `TestApplyDeleteRouteLeafRevolvesOnlyThatRoute` / `TestApplyDeleteL3SwitchRevolvesItsRoutes` 不回归。
+  **红-绿**：把 `routeKeyOf` 还原为 `Prefix|NextHop` ⇒ 四个子例全 FAIL，输出正是
+  `[vrf:vs-l3 del-route:vs-l3 10.99.89.0/24 via 10.99.89.2]`——**ApplyVRF 之后紧跟 del-route** 的顺序证据。
+
+§5 真机验证（dev104 造 #381 现场 / dev105 复验 #382）
+- 现场：`set virtual-switches vs-ecmp type l3` + `l3-interface ens224 ip address 10.99.0.1/24`
+  + `static-routes 10.99.1.0/24 next-hop …`（ens224 由 disable 启用为 DPDK 口）。
+① **#381 作用效果**——`next-hop 10.99.0.2,10.99.0.3` ⇒ `vppctl show ip fib table 6189928`：
+   `10.99.1.0/24 … dpo-load-balance … **buckets:2**`，两条等权路径
+   （`arp-ipv4: via 10.99.0.2 ens224` / `via 10.99.0.3 ens224`）。
+② **#382 作用效果**——改回 `next-hop 10.99.0.2`（单跳）⇒ **路由仍在**、`buckets:1`、一条路径
+   （**对照 dev104（修复前）：同一操作后路由不在任何表里**——`vppctl show ip fib` 全库查无，
+   而配置与读视图一切正常；恢复重放才会把它补齐，故缺陷被长期掩盖）。
+③ **校验**——混族 `next-hop 10.99.0.2,2001:db8::1` ⇒ 提交期拒绝
+   （`vrfs[vs-ecmp].routes[10.99.1.0/24].next_hop: 多下一跳不得混用 IPv4/IPv6（第 2 个 "2001:db8::1" 与前一跳不同族）`）；
+   9 个下一跳 ⇒ `多下一跳最多 8 个，实际 9 个`。
+④ **删除**——`delete virtual-switches vs-ecmp static-routes 10.99.1.0/24` ⇒ FIB 中该前缀计数 **0**。
+⑤ **display set 往返**——`set virtual-switches vs-ecmp static-routes 10.99.1.0/24 next-hop 10.99.0.2,10.99.0.3`
+   原样往返（单 token，无空格）。
+⑥ **清场**——删 `vs-ecmp`、ens224 还原 `disable`；配置中 `vs-ecmp|static-routes` 计数 **0**、
+   运行态回到 dns-vs/sem-vs；无残留告警（仅常态 `HUGEPAGE_POOL_ORPHAN`）。
+
+§6 如实边界 / 未竟
+- **#382 属既有缺陷**（由 distance 的既有注释可见，同一推理当初只用在了 distance 上）——非 #381 引入，
+  在本轮真机验证中暴露并当场根治；**教训**：「同一类误判只在某个字段上修过，换一个字段就漏」。
+- 真机建 L3 现场时观察到：**接口尚未进 VPP 时提交**，路由下发会被延后（#186 的延后收敛口径），
+  随后的「只改路由」提交也不会补下发（routes 的补齐依赖 ApplyVRF 的 VRF 变更判定 + 恢复重放）。
+  本轮以「删整台重建」绕开并完成验证；**该顺序敏感行为未深究**，如后续需要另登记。
+- 未做：ECMP 的**流量分布**实测（需流量发生器；VPP 侧 `buckets:2` 等权已足以证明多路径成立）。
+
+§7 四套件复跑（dev105）
+- `cli-fulltest` **254/0/18** ｜ `cli-semantic-check` **27/0/2**（S8 窗口热）｜ `cli-lifecycle-check` **22/0/3**
+  （L3-2 正控未热，非回归）｜ `cli-pty-smoke` **10/10**——与基线逐项一致。
