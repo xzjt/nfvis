@@ -436,26 +436,30 @@ func TestQueryLimitWithStepNarrowsWindowSameResult(t *testing.T) {
 	}
 }
 
-// 决策 #372（R142 A8）：载入有界计划的纯函数表——含「哨兵 until 以最新样本为锚」这条
-// （首版实现按哨兵收窄得到未来空窗、返回空结果，被同一用例当场抓到）。
+// 决策 #372（R142 A8）+ 决策 #376（锚点修正）：载入有界计划的纯函数表。
 func TestPlanBoundedLoad(t *testing.T) {
-	// step>0 + 给了 until：窗口收窄到「最新 limit+1 个桶」并置真值截断。
-	since, desc, tr := planBoundedLoad(Query{Since: 0, Until: 10000, Step: 30, Limit: 5}, 0, false)
+	// step>0 + 最新样本：窗口收窄到「最新样本起算的 limit+1 个桶」并置真值截断。
+	since, desc, tr := planBoundedLoad(Query{Since: 0, Until: 10000, Step: 30, Limit: 5}, 10000, true)
 	if since != 10000-6*30 || desc != 0 || !tr {
 		t.Fatalf("step>0 应收窄窗口并置截断：since=%d desc=%d tr=%v", since, desc, tr)
 	}
+	// 锚点＝**窗口内最新样本**而非 until（决策 #376 回归）：until 晚于最新样本超过一个 step 时，
+	// 不得把本应保留的旧点裁掉（旧实现锚 until=10000 ⇒ since=9996，会丢点）。
+	if since, _, tr := planBoundedLoad(Query{Since: 0, Until: 10000, Step: 1, Limit: 3}, 9996, true); since != 9996-4 || !tr {
+		t.Fatalf("锚点应为最新样本（不是 until）：since=%d tr=%v", since, tr)
+	}
 	// 窗口本来就在 limit+1 桶内：不收窄、不置截断。
-	if since, _, tr := planBoundedLoad(Query{Since: 9900, Until: 10000, Step: 30, Limit: 5}, 0, false); since != 9900 || tr {
+	if since, _, tr := planBoundedLoad(Query{Since: 9900, Until: 10000, Step: 30, Limit: 5}, 10000, true); since != 9900 || tr {
 		t.Fatalf("窗口已足够小不应收窄：since=%d tr=%v", since, tr)
 	}
-	// 哨兵 until：以最新样本为锚（否则收窄到未来空窗）。
+	// 哨兵 until + 最新样本：以最新样本为锚（否则收窄到未来空窗）。
 	since, _, tr = planBoundedLoad(Query{Since: 0, Until: storeMaxUntil, Step: 30, Limit: 5}, 5000, true)
 	if since != 5000-6*30 || !tr {
 		t.Fatalf("哨兵 until 应以最新样本为锚：since=%d tr=%v", since, tr)
 	}
-	// 哨兵且无样本：保持原 since（不猜）。
-	if since, _, _ := planBoundedLoad(Query{Since: 7, Until: storeMaxUntil, Step: 30, Limit: 5}, 0, false); since != 7 {
-		t.Fatalf("无样本时不应收窄：since=%d", since)
+	// 无样本（hasNewest=false）：保持原 since（不猜）。
+	if since, _, tr := planBoundedLoad(Query{Since: 7, Until: 10000, Step: 30, Limit: 5}, 0, false); since != 7 || tr {
+		t.Fatalf("无样本时不应收窄：since=%d tr=%v", since, tr)
 	}
 	// step<=0：DESC 限行 limit+1。
 	if since, desc, tr := planBoundedLoad(Query{Since: 0, Until: 100, Step: 0, Limit: 5}, 0, false); since != 0 || desc != 6 || tr {
