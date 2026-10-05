@@ -171,3 +171,36 @@ func TestConsoleWSRejectsBadTicket(t *testing.T) {
 		t.Fatal("无效 ticket 应拒绝握手")
 	}
 }
+
+// 决策 #374（R142 B4/E5）：ticket 表随访问清扫——未消费的一次性 ticket（如 -c 脚本模式
+// 申请了却不接管终端）此前永久驻留（TTL 只在消费时校验）。
+func TestConsoleTicketsPrunedOnIssue(t *testing.T) {
+	clk := time.Unix(1_700_000_000, 0)
+	tix := newConsoleTickets()
+	tix.now = func() time.Time { return clk }
+	tix.ttl = time.Minute
+
+	// 签发 3 张都不消费
+	for i := 0; i < 3; i++ {
+		if _, _, err := tix.issue(ctShellResource("ct-a"), "admin"); err != nil {
+			t.Fatalf("issue: %v", err)
+		}
+	}
+	tix.mu.Lock()
+	n := len(tix.m)
+	tix.mu.Unlock()
+	if n != 3 {
+		t.Fatalf("前置：应有 3 条：%d", n)
+	}
+	// 过期后再签发一张 ⇒ 旧条目应被清扫（只剩新的一张）
+	clk = clk.Add(2 * time.Minute)
+	if _, _, err := tix.issue(ctShellResource("ct-a"), "admin"); err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	tix.mu.Lock()
+	n = len(tix.m)
+	tix.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("过期条目应被清扫（旧实现永久驻留），实得 %d", n)
+	}
+}

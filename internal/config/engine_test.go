@@ -957,3 +957,35 @@ func TestImageMissingMessageIsActionable(t *testing.T) {
 		t.Errorf("VM 镜像不应套用容器口径: %v", msg)
 	}
 }
+
+// 决策 #374（R142 E7）：`superseded` 随会话生命周期收敛——被接管者登出（DiscardSession）后
+// 其「被接管」记录应清除（旧实现只增不减）。
+func TestSupersededClearedOnSessionDiscard(t *testing.T) {
+	k := newEngineKit(t)
+	oldSess := Session{User: "admin", Source: "ssh", ID: "old-1"}
+	newSess := Session{User: "admin", Source: "ssh", ID: "new-1"}
+
+	// old 取干净锁 → new 接管（干净锁可接管，决策 #318）
+	if err := k.engine.Edit(oldSess); err != nil {
+		t.Fatalf("old Edit: %v", err)
+	}
+	if err := k.engine.Edit(newSess); err != nil {
+		t.Fatalf("new 接管应成功: %v", err)
+	}
+	k.engine.mu.Lock()
+	n := len(k.engine.superseded)
+	k.engine.mu.Unlock()
+	if n == 0 {
+		t.Fatal("接管后应有 superseded 记录")
+	}
+	// new 释放锁 ⇒ 指向它的记录应随之清理
+	if err := k.engine.Release(newSess); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	k.engine.mu.Lock()
+	n = len(k.engine.superseded)
+	k.engine.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("释放后 superseded 应清空（旧实现只增不减），实得 %d", n)
+	}
+}

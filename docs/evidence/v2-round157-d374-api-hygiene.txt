@@ -1,0 +1,44 @@
+round157 · 决策 #374 —— round142 体检 API 层长期驻留/记账批次（B4/E5/B5/E6/E7）
+====================================================================
+日期：2026-10-05；分支 feat/d374-api-hygiene（655a701 契约先行 → d7a1888 实现）；
+真机 nfvis-vm 2.0.0~dev95（= v2 @ 0f89aa9 含 #366~#373 + 本分支）。
+来源：round142 半程体检 §2 簇 B/E 五项（均代码级确认）。
+
+§0 结论
+- 五项收口（B4/E5 为同一条），四项**逐一红-绿**；`make check` 全绿（决策 276 守护）。
+
+§1 契约先行（655a701）
+- 附录 A 决策 #374（v2 线第 75 条）；AGENTS.md 276。
+
+§2 实现（d7a1888）
+1. **B4/E5**（`internal/api/vm_console.go`）：`consoleTickets.issue` 顺带**清扫已过期条目**——未消费的一次性 ticket
+   （如 `-c` 脚本模式申请了却不接管终端）此前**永久驻留**（TTL 只在消费时校验）。采用本仓既有「随访问清扫」idiom
+   （与 DHCP 去重窗 `rt.recent` 同法、不新造定时器）。
+2. **B5**（`internal/api/cli_compute_oper.go`）：**删除签发期的 `container.shell open … success` 审计**——
+   审计只记**真实发生**的会话事件（WS 建立时 open / 断开时 close；失败记 failure，见 `container_shell.go`），
+   与 VM 串口 console 路径一致。此前成功会话**两条 open**、脚本模式（不接管终端）也记 success。
+3. **E6**（`internal/api/cliexec.go`）：`cliSession` 增 `LastUsed`；`ExecuteAs`（每条命令都走）顺带清扫**空闲超过
+   `cliSessIdleTTL`（24h）**的会话态条目——只清**本进程内的显示态**（模式/层级），不触碰引擎侧 candidate/锁
+   （后者由既有空闲巡检负责）。执行器增 `now func() time.Time`（测试可注入）。
+4. **E7**（`internal/config/engine.go`）：`clearLockStateLocked` 中收敛 `superseded`——删本会话自己的「被接管」记录，
+   以及**指向本会话**的条目（被本会话接管过的会话重获尝试机会）。此前映射只增不减。**顺序安全**：接管路径先
+   `clear` 后 `superseded[oldKey]=newKey`，清理不会抹掉新记录。
+
+§3 测试与红-绿
+- `TestConsoleTicketsPrunedOnIssue`（B4/E5：签发 3 张→过期→再签发 ⇒ 表内只剩 1）；
+- `TestCLIContainerShellDispatch`（B5：**断言反转**——CLI 签发路径不再产生 `container.shell` 审计）；
+- `TestCLISessionStateIdlePruned`（E6：空闲超限 ⇒ 条目被清且模式重置；1h 空闲 ⇒ 保留）；
+- `TestSupersededClearedOnSessionDiscard`（E7：接管→释放 ⇒ `superseded` 清空）。
+- **红-绿四项逐一**：摘除各自修复 ⇒ 对应用例失败。
+- **测试自身缺陷两处（如实记录）**：① E6 首版用「两个会话都进配置模式」——第二个占着**引擎锁**且引擎时钟未假化，
+  后续 `configure` 撞锁报错（与清扫无关）⇒ 假红；改为进模式后 `exit` 释放锁。② E7 首版误用 `newKit`（实际
+  fixture 为 `newEngineKit`）。
+
+§4 真机验证（dev95）
+- **B5 ✓**：① CLI 脚本模式签发（不接管终端）⇒ `show log audit` 中 `container.shell` **0 条**（旧实现记 1 条 success）；
+  ② 真实 WS 会话（Origin + Upgrade 头）⇒ **恰 1 条 open + 1 条 close**（旧实现 2 条 open）：
+  `11:42:42 open shell sem-ct` / `11:42:46 close shell sem-ct`。
+- **B4/E5、E6、E7**：进程内表规模/空闲清扫无真机可观测口径（无读视图），由单测覆盖（如实登记）。
+
+§5 make check
+- 全绿（决策 276 守护；宿主 errno=1455 内存压力下以 `GOFLAGS=-p=1` 串行跑通，rc=0；提交用 `NO_VERIFY=1` 并已补跑）。

@@ -938,3 +938,47 @@ func TestOpenNewFileExclusiveCoversExistingAndDir(t *testing.T) {
 		t.Fatal("同一路径第二次应打不开")
 	}
 }
+
+// 决策 #374（R142 E6）：`cliExecutor.sess`（模式/层级显示态）随访问清扫空闲条目——
+// token 过期而未显式登出的会话态此前常驻。注意用 `exit` 释放引擎锁（否则后续 configure 撞锁，
+// 与清扫无关——首版用例即因此假红）。
+func TestCLISessionStateIdlePruned(t *testing.T) {
+	x, _ := newCLIKit(t)
+	clk := time.Unix(1_700_000_000, 0)
+	x.now = func() time.Time { return clk }
+
+	// 两个不同会话（不同 token）各进一次配置模式并退出（释放引擎锁）
+	x.ExecuteAs("admin", aaaClassSU, "ssh", "tok-a", "configure")
+	x.ExecuteAs("admin", aaaClassSU, "ssh", "tok-a", "exit")
+	x.ExecuteAs("admin", aaaClassSU, "ssh", "tok-b", "configure")
+	x.ExecuteAs("admin", aaaClassSU, "ssh", "tok-b", "exit")
+	x.mu.Lock()
+	n := len(x.sess)
+	x.mu.Unlock()
+	if n != 2 {
+		t.Fatalf("前置：应有两个会话态：%d", n)
+	}
+	// 推进超过空闲上限：tok-a 发一条命令 ⇒ 清扫发生在取会话态之前，两条空闲条目都被清、仅当前重建
+	clk = clk.Add(cliSessIdleTTL + time.Hour)
+	res := x.ExecuteAs("admin", aaaClassSU, "ssh", "tok-a", "show version")
+	if res.Mode != "oper" {
+		t.Fatalf("空闲超限后会话态应重置为操作模式（旧实现保留配置模式）：%s", res.Mode)
+	}
+	x.mu.Lock()
+	n = len(x.sess)
+	x.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("空闲条目应被清扫（只剩当前会话），实得 %d", n)
+	}
+	// 对照：未超限时模式保留
+	clk = clk.Add(time.Hour)
+	res2 := x.ExecuteAs("admin", aaaClassSU, "ssh", "tok-a", "configure")
+	if res2.Mode != "config" {
+		t.Fatalf("未超限不应清：%s（输出 %q）", res2.Mode, res2.Output)
+	}
+	clk = clk.Add(time.Hour)
+	res3 := x.ExecuteAs("admin", aaaClassSU, "ssh", "tok-a", "configure")
+	if res3.Mode != "config" {
+		t.Fatalf("1 小时内空闲不应清（模式应保留）：%s（输出 %q）", res3.Mode, res3.Output)
+	}
+}

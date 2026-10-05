@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/cliparse"
@@ -127,6 +128,7 @@ type cliExecutor struct {
 	perms              permissionResolver          // 生效权限视图的 class 解析（决策 #304；nil = 命令报未接入）
 	mu                 sync.Mutex
 	sess               map[string]*cliSession
+	now                func() time.Time // 时钟（决策 #374/E6：会话态空闲清扫；测试可注入）
 	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
 	structured any
 	// structuredPath structured 在整配置中的绝对路径（display set 反推语句时作前缀，
@@ -155,10 +157,16 @@ type cliExecutor struct {
 type cliSession struct {
 	Mode string
 	Path []string
+	// LastUsed 最后使用时刻（决策 #374/R142 E6）：用于空闲清扫，防 token 过期后条目常驻。
+	LastUsed time.Time
 }
 
+// cliSessIdleTTL 会话态（模式/层级）的空闲上限（决策 #374/R142 E6）。只清**本进程内的显示态**，
+// 不触碰引擎侧 candidate/编辑锁（后者由既有空闲巡检负责，语义不变）。
+const cliSessIdleTTL = 24 * time.Hour
+
 func newCLIExecutor(e *config.Engine, a authorizer) *cliExecutor {
-	x := &cliExecutor{engine: e, authz: a, sess: map[string]*cliSession{}}
+	x := &cliExecutor{engine: e, authz: a, sess: map[string]*cliSession{}, now: time.Now}
 	// 决策 #301：装配方传入的 authorizer 就是 *aaa.Service——它同时实现 tokenAdmin，
 	// 直接同源接线（清单/吊销与授权共用同一个 AAA 服务，不出现第二份会话事实源）。
 	if ta, ok := a.(tokenAdmin); ok {
@@ -292,11 +300,19 @@ func (x *cliExecutor) ExecuteAs(user, class, source, tokenID, line string) CLIER
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	key := x.sessionStateKey(user, source, tokenID)
+	// 决策 #374（R142 E6）：顺带清扫空闲过久的会话态（随访问清扫，不新造定时器）。
+	now := x.now()
+	for k, cs := range x.sess {
+		if now.Sub(cs.LastUsed) > cliSessIdleTTL {
+			delete(x.sess, k)
+		}
+	}
 	s := x.sess[key]
 	if s == nil {
 		s = &cliSession{Mode: "oper"}
 		x.sess[key] = s
 	}
+	s.LastUsed = now
 
 	cmd, pipes, perr := splitPipes(strings.TrimSpace(line))
 	x.structured = nil

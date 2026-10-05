@@ -59,7 +59,16 @@ func (t *consoleTickets) issue(resource, user string) (string, int, error) {
 	tok := hex.EncodeToString(b)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.m[ticketKey(resource, tok)] = consoleTicket{resource: resource, user: user, expires: t.now().Add(t.ttl)}
+	// 决策 #374（R142 B4/E5）：随访问清扫已过期条目——未消费的一次性 ticket（如 `-c` 脚本模式
+	// 申请了却不接管终端）此前会**永久驻留**（TTL 只在消费时校验）；本仓既有 idiom：
+	// 随访问清扫、不新造定时器（与 DHCP 去重窗 rt.recent 同法）。
+	now := t.now()
+	for k, ct := range t.m {
+		if now.After(ct.expires) {
+			delete(t.m, k)
+		}
+	}
+	t.m[ticketKey(resource, tok)] = consoleTicket{resource: resource, user: user, expires: now.Add(t.ttl)}
 	return tok, int(t.ttl.Seconds()), nil
 }
 
