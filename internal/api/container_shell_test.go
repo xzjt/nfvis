@@ -186,8 +186,11 @@ func TestCLIContainerShellDispatch(t *testing.T) {
 	if gotName != "sbc-ct1" {
 		t.Fatalf("签发凭证的资源名错: %q", gotName)
 	}
-	if !auditHas(t, engine, "container.shell") {
-		t.Fatal("打开容器终端应入审计")
+	// 决策 #374（R142 B5）：**签发凭证不入审计**——审计只记真实会话事件（WS 建立时 open /
+	// 断开时 close，见 container_shell.go）。此前签发即记 success ⇒ 成功会话两条 open、
+	// 脚本模式（不接管终端）也记 success。
+	if auditHas(t, engine, "container.shell") {
+		t.Fatal("签发凭证不应入审计（审计只记真实会话事件）")
 	}
 
 	// 停机 ⇒ 拒绝并指向 start（不签发凭证）

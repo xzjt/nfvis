@@ -383,6 +383,18 @@ func (e *Engine) lockDirtyLocked(li *LockInfo) bool {
 
 // clearLockStateLocked 清空内存编辑态（不动存储；调用方持锁）。
 func (e *Engine) clearLockStateLocked() {
+	// 决策 #374（R142 E7）：`superseded`（「干净锁被谁接管」）随会话生命周期收敛——
+	// 清掉本会话自己的「被接管」记录，以及**指向本会话**的条目（被本会话接管过的会话
+	// 重获尝试机会）。此前映射只增不减（被接管者永不回来即永久驻留）。
+	// 注意顺序：接管路径先 clear 后 `superseded[oldKey]=newKey`，本清理不会抹掉新记录。
+	if e.sessionKey != "" {
+		delete(e.superseded, e.sessionKey)
+		for k, v := range e.superseded {
+			if v == e.sessionKey {
+				delete(e.superseded, k)
+			}
+		}
+	}
 	e.candidate = nil
 	e.holder = ""
 	e.sessionID = ""

@@ -393,7 +393,9 @@ func (x *cliExecutor) containerShell(user, name string, rest []string) string {
 		return "%% " + err.Error() + "\n"
 	}
 	x.consolePending = &ConsoleRequest{VM: name, WSURL: wsPath, Kind: "container"}
-	x.audit(user, "container.shell", fmt.Sprintf("open shell %s", name), nil)
+	// 决策 #374（R142 B5）：**不在签发期记审计**——审计只记真实发生的会话事件（WS 建立时 open、
+	// 断开时 close；失败记 failure，见 container_shell.go）。签发本身不产生会话；此前成功会话因此
+	// 有两条 open、脚本模式（不接管终端）也记 success，与 VM 串口 console 路径不一致。
 	return fmt.Sprintf("正在打开 %s 的容器终端（Ctrl-] 退出，%d 秒内有效）…\n", name, ttl)
 }
 
