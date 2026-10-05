@@ -385,6 +385,75 @@ func TestValidateDHCPServer(t *testing.T) {
 		"dhcp_server_pool_start", "UDP/67")
 }
 
+// 决策 #368（收口 R142-5）：DHCP relay 与 server 的**跨交换机全局互斥**。
+func TestValidateDHCPRelayServerCrossSwitchExclusive(t *testing.T) {
+	// twoSwitch 返回两台 L2 交换机（各自独立子网网关）：vs-app（192.168.100.1/24）与 vs-edge（192.168.200.1/24）。
+	twoSwitch := func() Config {
+		c := validBase()
+		c.VirtualSwitches = append(c.VirtualSwitches, VirtualSwitch{
+			Name: "vs-edge", Type: "l2",
+			Gateway: &VSGateway{Addresses: []string{"192.168.200.1/24"}},
+		})
+		return c
+	}
+
+	// ① A 域 relay + B 域 server → 拒绝，报错点名两侧交换机与全局归属机理
+	c1 := twoSwitch()
+	c1.VirtualSwitches[0].DhcpRelayServer = "192.168.100.2"
+	c1.VirtualSwitches[1].DhcpServerPoolStart, c1.VirtualSwitches[1].DhcpServerPoolEnd = "192.168.200.10", "192.168.200.20"
+	errs := Validate(c1)
+	if len(errs) != 1 {
+		t.Fatalf("跨交换机并存应恰好一条错误，得 %d: %v", len(errs), errs)
+	}
+	msg := errs[0].Error()
+	for _, want := range []string{"跨交换机", "vs-app", "vs-edge", "UDP/67", "留其一"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("错误文案应含 %q，实得: %s", want, msg)
+		}
+	}
+
+	// ② 反向（A 域 server + B 域 relay）同样拒绝
+	c2 := twoSwitch()
+	c2.VirtualSwitches[0].DhcpServerPoolStart, c2.VirtualSwitches[0].DhcpServerPoolEnd = "192.168.100.10", "192.168.100.20"
+	c2.VirtualSwitches[1].DhcpRelayServer = "192.168.200.2"
+	mustErrContaining(t, Validate(c2), "vs-edge", "跨交换机")
+
+	// ③ 同交换机双配 → 只报既有那条（#359 文案），不重复报跨交换机
+	c3 := validBase()
+	c3.VirtualSwitches[0].DhcpServerPoolStart, c3.VirtualSwitches[0].DhcpServerPoolEnd = "192.168.100.100", "192.168.100.200"
+	c3.VirtualSwitches[0].DhcpRelayServer = "192.168.100.2"
+	errs3 := Validate(c3)
+	if len(errs3) != 1 {
+		t.Fatalf("同交换机双配应恰好一条错误（不重复），得 %d: %v", len(errs3), errs3)
+	}
+	if strings.Contains(errs3[0].Error(), "跨交换机") {
+		t.Fatalf("同交换机双配不该报跨交换机文案: %s", errs3[0])
+	}
+	if !strings.Contains(errs3[0].Error(), "同一交换机不能同时配置") {
+		t.Fatalf("同交换机双配应报既有文案: %s", errs3[0])
+	}
+
+	// ④ relay-only 多域（两台都 relay）→ 放行（per-FIB 代理可并存）
+	c4 := twoSwitch()
+	c4.VirtualSwitches[0].DhcpRelayServer = "192.168.100.2"
+	c4.VirtualSwitches[1].DhcpRelayServer = "192.168.200.2"
+	mustNoErr(t, Validate(c4))
+
+	// ⑤ server-only 多域（两台都 server）→ 放行（共享同一 punt socket、按域 demux）
+	c5 := twoSwitch()
+	c5.VirtualSwitches[0].DhcpServerPoolStart, c5.VirtualSwitches[0].DhcpServerPoolEnd = "192.168.100.10", "192.168.100.20"
+	c5.VirtualSwitches[1].DhcpServerPoolStart, c5.VirtualSwitches[1].DhcpServerPoolEnd = "192.168.200.10", "192.168.200.20"
+	mustNoErr(t, Validate(c5))
+
+	// ⑥ 删一侧即放行（单向撤销的可照做路径）
+	c6 := twoSwitch()
+	c6.VirtualSwitches[0].DhcpRelayServer = "192.168.100.2"
+	c6.VirtualSwitches[1].DhcpServerPoolStart, c6.VirtualSwitches[1].DhcpServerPoolEnd = "192.168.200.10", "192.168.200.20"
+	mustErrContaining(t, Validate(c6), "vs-app", "留其一")
+	c6.VirtualSwitches[1].DhcpServerPoolStart, c6.VirtualSwitches[1].DhcpServerPoolEnd = "", ""
+	mustNoErr(t, Validate(c6))
+}
+
 func TestDHCPServerPoolHelpers(t *testing.T) {
 	// 区间与规模（纯函数与校验/数据面共用，边界逐个钉住）
 	if lo, hi, ok := DHCPServerPoolRange("192.168.100.100", "192.168.100.200"); !ok || lo > hi {
