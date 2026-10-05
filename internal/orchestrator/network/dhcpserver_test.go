@@ -1576,3 +1576,75 @@ func TestDHCPReplyPaddedTo300(t *testing.T) {
 		}
 	}
 }
+
+// 决策 #373（R142 C11）：池耗尽告警的建/消在**解锁后**执行——告警 I/O（通知器）进行中
+// provider 锁必须空闲（旧实现持 p.mu 调 Raise ⇒ 收包路径持锁做 I/O，此处会阻塞）。
+// 设计：前两次通知（建告警 / 消解）放行，第 3 次起阻塞——触发调用放 goroutine（否则主 goroutine 自身被卡）。
+func TestPoolAlarmIODoesNotHoldProviderLock(t *testing.T) {
+	p, _, _, _, _ := newEnabledProvider(t)
+	ctx := context.Background()
+	vs := vsDHCPServer() // 3 地址小池
+	if err := p.Sync(ctx, vs); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	alarms := NewAlarmStore()
+	var calls int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	alarms.SetNotifier(func(Alarm) {
+		if atomic.AddInt32(&calls, 1) <= 2 {
+			return // 建告警 / 消解：放行
+		}
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+	})
+	p.SetAlarms(alarms)
+
+	name := vs.Name
+	bvi := net.ParseIP("192.168.100.1")
+	macOf := func(i int) net.HardwareAddr { return mustMAC(t, fmt.Sprintf("aa:bb:cc:00:00:%02x", i)) }
+	// 占满池（.10/.11/.12）：第 3 条触发建告警（通知 #1，放行）
+	for i, ip := range []string{"192.168.100.10", "192.168.100.11", "192.168.100.12"} {
+		p.handleTapFrame(name, dhcpClientFrame(macOf(i+1), dhcpRequest, net.ParseIP(ip), bvi, nil))
+	}
+	// 释放一个（消解告警，通知 #2，放行）→ 再 DISCOVER 占回（重新建告警，通知 #3：阻塞）
+	p.handleTapFrame(name, dhcpClientFrame(macOf(3), dhcpRelease, nil, bvi, net.ParseIP("192.168.100.12")))
+	done := make(chan struct{})
+	go func() {
+		p.handleTapFrame(name, dhcpClientFrame(macOf(4), dhcpDiscover, nil, nil, nil))
+		close(done)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("告警通知器未被触发（池耗尽告警应已 raise）")
+	}
+	// 告警 I/O 进行中：provider 锁应空闲——Leases 立即返回
+	leaseDone := make(chan struct{})
+	go func() { _, _ = p.Leases(name); close(leaseDone) }()
+	select {
+	case <-leaseDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("告警 I/O 期间 provider 锁被持有（C11 回归：收包路径持锁做 I/O）")
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("告警应用后收包路径应正常返回")
+	}
+	// 行为不回归：告警确在册
+	found := false
+	for _, a := range alarms.List("active") {
+		if a.Code == AlarmDHCPPoolExhausted && a.Source == name {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("池耗尽告警应在册（C11 只改持锁范围，行为不变）")
+	}
+}

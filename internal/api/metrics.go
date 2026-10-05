@@ -131,14 +131,28 @@ func (s *Server) configMetrics() []metrics.Sample {
 // `nfvis_vnf_up`（1/0；运行态不可查询时不发该对象，宁缺不谎报 0）——聚合计数在编排不可用时
 // 仍沿用既有行为（不计入 running），但外部可凭可用性序列判定「计数不可信」。
 func (s *Server) vnfMetrics(ctx context.Context) []metrics.Sample {
+	const upHelp = "VNF 是否运行中（1=运行中，0=已知非运行；运行态不可查询时该对象不出现，见 nfvis_vnf_runtime_available）"
+	// 决策 #373（R142 A10）：可用性序列**始终发出**——engine 缺失或 committed 读失败时不再整段
+	// 消失（此前 `return nil` 与「始终发出」的措辞有差距）；此时两 kind 可用性=0、聚合计数=0
+	// （与「编排不可用时不计入 running」的既有口径一致），外部仍可判定「计数不可信」。
+	unavailable := func() []metrics.Sample {
+		const availHelp = "VNF 运行态是否可查询（1=可查询，计数可信；0=编排未接入或查询失败）"
+		return []metrics.Sample{
+			{Name: "nfvis_vnf_runtime_available", Help: availHelp, Type: "gauge", Labels: map[string]string{"kind": "vm"}, Value: 0},
+			{Name: "nfvis_vnf_runtime_available", Help: availHelp, Type: "gauge", Labels: map[string]string{"kind": "container"}, Value: 0},
+			{Name: "nfvis_vnf_running", Help: "运行中的 VNF 数", Type: "gauge", Labels: map[string]string{"kind": "vm"}, Value: 0},
+			{Name: "nfvis_vnf_running", Help: "运行中的 VNF 数", Type: "gauge", Labels: map[string]string{"kind": "container"}, Value: 0},
+			{Name: "nfvis_vnf_vcpu_allocated", Help: "已分配的 vCPU 数（按配置）", Type: "gauge", Labels: map[string]string{"kind": "vm"}, Value: 0},
+			{Name: "nfvis_vnf_vcpu_allocated", Help: "已分配的 vCPU 数（按配置）", Type: "gauge", Labels: map[string]string{"kind": "container"}, Value: 0},
+		}
+	}
 	if s.engine == nil {
-		return nil
+		return unavailable()
 	}
 	cfg, err := s.engine.Committed()
 	if err != nil {
-		return nil
+		return unavailable()
 	}
-	const upHelp = "VNF 是否运行中（1=运行中，0=已知非运行；运行态不可查询时该对象不出现，见 nfvis_vnf_runtime_available）"
 	var out []metrics.Sample
 	var vmsRunning, ctsRunning, vcpuVM, vcpuCT float64
 	vmAvail, ctAvail := float64(1), float64(1)

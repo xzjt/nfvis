@@ -259,3 +259,31 @@ func TestVNFMetricsRenderNewSeries(t *testing.T) {
 		}
 	}
 }
+
+// 决策 #373（R142 A10）：可用性序列**始终发出**——engine 缺失 / committed 读失败时
+// 不再整段消失（旧实现 `return nil`，与「始终发出」的措辞有差距）；此时两 kind 可用性=0、
+// 聚合计数=0（与「编排不可用时不计入 running」既有口径一致）。
+func TestVNFMetricsAvailabilityAlwaysEmitted(t *testing.T) {
+	// ① engine 缺失
+	s := &Server{}
+	samples := s.vnfMetrics(context.Background())
+	assertMetric(t, samples, "nfvis_vnf_runtime_available", map[string]string{"kind": "vm"}, 0)
+	assertMetric(t, samples, "nfvis_vnf_runtime_available", map[string]string{"kind": "container"}, 0)
+	assertMetric(t, samples, "nfvis_vnf_running", map[string]string{"kind": "vm"}, 0)
+	assertMetric(t, samples, "nfvis_vnf_vcpu_allocated", map[string]string{"kind": "container"}, 0)
+
+	// ② committed 读失败（关库）
+	store, err := config.OpenStore(filepath.Join(t.TempDir(), "nfvis.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	eng, err := config.NewEngine(store, orchestrator.NewNoopApplier(), config.Options{})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	_ = store.Close()
+	s2 := &Server{engine: eng}
+	samples = s2.vnfMetrics(context.Background())
+	assertMetric(t, samples, "nfvis_vnf_runtime_available", map[string]string{"kind": "vm"}, 0)
+	assertMetric(t, samples, "nfvis_vnf_runtime_available", map[string]string{"kind": "container"}, 0)
+}
