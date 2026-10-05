@@ -676,6 +676,27 @@
   lifecycle **23/0/2**、pty **10/10**——与基线逐项一致（首跑因夹具缺失多跳过：语义 23/0/6、lifecycle 21/0/3；
   夹具失败的真因是 format-data **按设计**清掉了 `resource-pools`，重新声明后即成功，见证据 §3）。
   证据 `docs/evidence/v2-round148-d365-ledger-backfill.txt`；真机已装 2.0.0~dev77。
+- **round149~151（R142 体检 P3 余项收口：决策 #366~#368，2026-10-05）**：接 round143~148 的 R142 批次，
+  清掉体检 P3 四项（**R142-10/12/7/5**）——**R142 体检 P0~P3 至此全部收口**（余 R142-11 待产品口径定裁）。
+  **#366（PR #296）容器 exec/shell 超时三面与打开路径全链有界**：超时按失败归一（CLI `%%` + REST **504
+  EXEC_TIMEOUT** + 审计 failure；200 删 `timed_out`）；客户端等待随 `exec timeout <n>` 延长（`execTimeoutHint`
+  引号感知扫描 ⇒ 91..300 端到端可用，真机 `sleep 100 timeout 120` 实测 1m40.5s 退出码 0 跨过旧 90s 截断）；
+  **打开路径全链 10s 级有界**（真机 SIGSTOP 实测定形：挂点在 docker API 调用——`State` 检查与 create 的
+  HTTP 客户端无超时，比裸握手段更早；修法＝握手 10s deadline + `dockerCallTimeout=10s` 罩 State/两处 create/
+  ticket 端点，到期取消连接不留幽灵执行；复验中又抓到 `ContainerExec` 的 State 漏网并补口）。
+  **#367（PR #297）恢复告警子来源消解**：#333 复核扩到子对象粒度——`virtual-switches/<n>/learn-limit|dhcp-relay|
+  dhcp-server` 在交换机删或子特性删时一个 15s 周期内消解（判据与恢复重放逐字同源）；真机以**内核名占位注入**
+  造出真实在册告警并验证消解。**#368（PR #298）DHCP relay/server 跨交换机全局互斥**：真机**定性成立**
+  （并存后 `ip4-udp-punt-socket Socket TX error` 从 0 持续增长、server 零租约零帧——server 的全局 punt 注册
+  接管 relay 域 DHCP 包），按 #340 口径提交期硬拒（点名两侧 + 机理 + 留其一）；同交换机双配仍走 #359 既有检查。
+  **四套件（dev84，v2 @ cdbd962）**：fulltest **254/0/18**、语义 **26/0/3**、lifecycle **23/0/2**、pty **10/10**
+  ——与基线逐项一致（语义规范读数需先造 S13 现场 `set system dns proxy server <ip>`；该配置会被 fulltest
+  自清场清掉，缺现场时 S13 如实转「不可判定」得 25/0/4，非回归）。**教训入册**：① 故障注入可能被产品自愈
+  吃掉——「注入生效」必须对着失败路径的日志/计数确认（本轮第一次删内核 tap 被 15s 巡检静默重建、第二次
+  占名要与删除同一条 shell 原子完成）；② 「修复后仍失败」要区分「修复没用」与「挂点在更早一环」——按链路
+  逐环验证有界；③ 可自愈系统的**跨域资源归属**（UDP/67 全局单槽）要靠真机对照实验定性，代码推理会漏。
+  证据 `docs/evidence/v2-round149-d366-exec-timeout-bounds.txt`、`v2-round150-d367-recovery-subsource.txt`、
+  `v2-round151-d368-relay-server-coexistence.txt`；真机已装 2.0.0~dev84。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
