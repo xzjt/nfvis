@@ -76,6 +76,27 @@ func TestExecShellCreateBoundedUnderDeadBackend(t *testing.T) {
 	}
 }
 
+func TestContainerExecStateCheckBounded(t *testing.T) {
+	shortDockerCallTimeout(t, 200*time.Millisecond)
+	p := &Provider{api: &blockingStateAPI{}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.ContainerExec(context.Background(), "ct", "echo x", 5*time.Second)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("State 挂死时 ContainerExec 应有界失败")
+		}
+		if !strings.Contains(err.Error(), "Docker 未在") {
+			t.Fatalf("报错应可照做（Docker 未响应），得: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("State 挂死时 ContainerExec 挂住未归（有界缺失）")
+	}
+}
+
 // blockingStateAPI State 阻塞到调用方 ctx 结束（模拟 dockerd 假死）。
 type blockingStateAPI struct {
 	dockerAPI

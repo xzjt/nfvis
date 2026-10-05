@@ -251,9 +251,14 @@ func (p *Provider) ContainerExec(ctx context.Context, name, command string, time
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	state, exists, err := p.api.State(ctx, name)
+	// State 检查有界（决策 #366，R142-12 同族）：dockerd 假死时 exec 的第一个挂点。
+	// 真机 SIGSTOP 实测：漏掉这里，CLI 面（调用方 context.Background()）的 exec 会
+	// 挂到底座恢复后幽灵完成（审计记 success）。
+	ectx, cancel := context.WithTimeout(ctx, dockerCallTimeout)
+	defer cancel()
+	state, exists, err := p.api.State(ectx, name)
 	if err != nil {
-		return ExecResult{}, err
+		return ExecResult{}, wrapDockerTimeout(err)
 	}
 	if !exists {
 		return ExecResult{}, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
