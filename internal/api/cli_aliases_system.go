@@ -8,6 +8,7 @@ package api
 //   - `system api tls cert-file|key-file|self-signed …` → SystemConfig.API（M5-8 使用）
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -27,6 +28,19 @@ var statementAliasesSystem = []aliasRule{
 				return nil
 			}
 			mgmt["interface"] = t[3]
+			return nil
+		}},
+	// `delete system management ip address`（**不带值**，与 interface/gateway 的 delete 形态一致）：
+	// 树里 `ip address` 比模型多一层 `ip`（模型是 `management.address`），无值形态若落回通用树遍历
+	// 会去找不存在的 `system.management.ip` ⇒ 报「无匹配配置: ip」（决策 #379/R152-1）。
+	// patternMatches 按长度精确匹配，故与下面的 5-token 带值形态互不干扰。
+	{pattern: []string{"system", "management", "ip", "address"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			if isSet {
+				return fmt.Errorf("缺少取值：set system management ip address <prefix>")
+			}
+			mgmt := ensureObj(ensureObj(tree, "system"), "management")
+			delete(mgmt, "address")
 			return nil
 		}},
 	{pattern: []string{"system", "management", "ip", "address", "*"},
