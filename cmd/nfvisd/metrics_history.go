@@ -31,6 +31,10 @@ const (
 	metricsPruneEvery = 5 * time.Minute
 	// metricsErrorLogEvery 采样错误日志节流窗口（避免 journal 刷屏；读视图始终能查到 last_error）。
 	metricsErrorLogEvery = 5 * time.Minute
+
+	// metricsSleepSlice 睡眠分片上限（决策 #372，R142 A2）：采样循环按 ≤1s 片段睡眠并在每片重读
+	// 生效间隔——间隔改小在下一片内生效（不再等整段旧睡眠结束而让读视图按新间隔误判 stale）。
+	metricsSleepSlice = time.Second
 )
 
 // runMetricsHistory 后台历史采样循环（决策 #356）。ctx 取消即优雅退出（睡眠可被中断）。
@@ -71,14 +75,28 @@ type metricsHistoryRunner struct {
 	lastErrLog time.Time
 }
 
-// run 循环：每轮先读生效间隔并按其睡眠（可被 ctx 中断），再采集；到点裁剪。
+// run 循环：按 ≤metricsSleepSlice 的分片睡眠，**每片重读生效间隔**（决策 #372，R142 A2）——
+// 间隔改小在下一片内生效并重新计时，不再等整段旧睡眠结束；睡眠可被 ctx 中断；到点采集、到点裁剪。
 func (r *metricsHistoryRunner) run(ctx context.Context) {
 	lastPrune := r.now()
+	var elapsed time.Duration
 	for {
-		interval := r.intervalSeconds()
-		if !r.sleep(ctx, time.Duration(interval)*time.Second) {
+		interval := time.Duration(r.intervalSeconds()) * time.Second
+		slice := metricsSleepSlice
+		if interval > 0 && interval < slice {
+			slice = interval
+		}
+		if slice <= 0 {
+			slice = metricsSleepSlice
+		}
+		if !r.sleep(ctx, slice) {
 			return // ctx 取消
 		}
+		elapsed += slice
+		if interval > 0 && elapsed < interval {
+			continue // 未到点：下一片重读间隔（可重排）
+		}
+		elapsed = 0
 		r.tick(ctx)
 		if r.now().Sub(lastPrune) >= r.pruneEvery {
 			r.prune()

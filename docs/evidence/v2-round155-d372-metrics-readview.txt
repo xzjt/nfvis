@@ -1,0 +1,55 @@
+round155 · 决策 #372 —— round142 体检可观测性读视图批次（A2/A5/A6/A7/A8）
+====================================================================
+日期：2026-10-05；分支 feat/d372-metrics-readview（774c675 契约先行 → ff4c1e3 实现）；
+真机 nfvis-vm 2.0.0~dev91（= v2 @ ae8164b 含 #366~#371 + 本分支）。
+来源：round142 半程体检 §2 簇 A 五项（均代码级确认）。
+
+§0 结论
+- 四项落地并红-绿（A2 睡眠可重排 / A5 enabled 语义与读失败如实 / A7 时长上界防溢出 / A8 载入有界）；
+  **A6 按「不留假字段」收敛为 A5 的同一路径**（原计划的细粒度 `metrics_error`/`health_error` **撤除**——单连接下不可构造、
+  `Health` 对坏值本就容错；整体读失败已在 `Stats` 处早退并以 `reason`+`store.error` 如实说明）。决策行已按此改写（契约如实）。
+- `make check` 全绿（决策 274 守护；宿主内存压力下以 `GOFLAGS=-p=1` 串行跑通）。
+
+§1 契约先行（774c675）
+- 附录 A 决策 #372（v2 线第 73 条）；AGENTS.md 274。
+- openapi：`MetricsHistory.available` 语义注（false 可能是「未启用」也可能是「读取失败」——后者 `store.enabled` 仍 true 且 `store.error` 在场）、
+  `store.enabled` 注（不因单次查询失败翻 false）+ 新增 `store.error`；history 端点 `last`/`step` 上界 3650d 注；`openapi.json` 同步。
+- 手册：历史趋势段的时长上界与「存储是否可用 ≠ 本次读取是否成功」；命令树：`last/step` 上界注。
+
+§2 实现（ff4c1e3）
+1. **A2**（`cmd/nfvisd/metrics_history.go`）：采样循环睡眠切成 ≤`metricsSleepSlice`(1s) 片段、**每片重读生效间隔**并按累计时长判断 tick——
+   间隔改小在下一片内生效并重新计时（不再等整段旧睡眠结束）。
+2. **A5**（`internal/api/metrics_history.go`）：`store.enabled` 先置 true（语义＝存储已启用），`ReopenIfReplaced`/`Stats` 失败时
+   **不翻 false**，如实写 `store.error` + `reason`（渲染给出「读取失败」而非「未启用」）。
+3. **A6**（同上，收敛口径）：不新增不可达字段；整体读失败经 `reason`/`store.error` 呈现（渲染的不可用分支已打印 reason）。
+4. **A7**（`parseHistoryDuration`，CLI 与 REST 同源）：`historyMaxDuration = 3650d` 上界 + 溢出防护（`d <= 0 || d > 上界` 即报错）。
+5. **A8**（`internal/metricshist/store.go`）：抽出纯函数 `planBoundedLoad` 计算有界载入计划——`step>0` 把窗口收窄到
+   「最新 limit+1 个桶」（**锚点**：给了 until 用它；哨兵=未给时以最新样本为锚；无样本则不收窄），`step<=0` 走 SQL `DESC LIMIT limit+1` 再反转；
+   `Truncated` 为真值。
+
+§3 单测与红-绿
+- A2：三个既有 runner 用例按分片语义改写（每片 ≤1s、N 片一 tick）+ **新增** `TestMetricsHistoryRunnerReschedulesOnIntervalShrink`
+  （3600s 改 10s ⇒ **首个采集在改后 ≤10s**，旧实现 +3600s）。
+- A5：`TestMetricsHistoryReadFailureKeepsEnabledAndReports`（关库 ⇒ available=false + reason「读取失败」+ **enabled 仍 true** + store.error）。
+- A7：`TestParseHistoryDuration` 扩展（3650d 恰好通过；3651d / 999999999999d / 9999999999999999999d / 999999999999h 全拒）。
+- A8：`TestPlanBoundedLoad`（收窄/不收窄/哨兵锚点/无样本不收窄/DESC 限行/无 limit 原样）+ `TestQueryLimitWithStepNarrowsWindowSameResult`
+  （收窄结果与全窗口+裁剪**逐点一致**、truncated 真值）。
+- **红-绿四项逐一**：A2（还原整段睡眠 ⇒ reschedule 用例失败）、A5（还原 enabled=false ⇒ 用例失败）、A7（摘除上界 ⇒ 用例失败）、
+  A8（摘除收窄 ⇒ 计划用例失败）。
+- **实现期真缺陷（测试当场抓到）**：A8 首版按哨兵 `until` 收窄 ⇒ 得到「未来空窗」返回空结果；修法＝哨兵时以最新样本为锚（并补无样本不收窄）。
+
+§4 真机验证（dev91）
+- **A7 ✓**：`last 999999999999d` / `last 3651d` ⇒ `%% 时长 "…" 超界：上限 3650d（超界或溢出不会给出误导性窗口）`；
+  对照 `last 30m` 正常出图（窗口 30m0s、步长 60s）。
+- **A2 ✓**：`set system metrics history interval 10` + commit（rev 346，免重启）⇒ 改后两次取样相隔 12s，`上次采样` 恰前进 10s
+  （09:56:59 → 09:57:09，采样间隔显示 10s、状态「正常」）——新节奏即刻生效、无假 stale；随后 `delete … interval` 回默认 60s（rev 347）。
+- **A5/A6：真机注入两次未达（如实登记）**：① 库路径换成目录 ⇒ #365 的 `ReopenIfReplaced` 未判为「被替换」（旧 inode 连接照常服务、
+  读视图仍 available=true）——**观察项**（非现实运维场景，未登记为缺陷）；② 就地破坏库前 64KiB ⇒ SQLite **页缓存**掩盖、查询仍成功。
+  故 A5 的读失败路径由**单测**覆盖（关库＝与生产同一代码路径）；真机侧顺带实证**自愈**：删损坏库后 13s 内重开空库、样本从 0 重新累积（#365 机制）。
+- **A8：真机不可观测（如实登记）**——按设计结果逐点不变（内存有界是内部性质），由纯函数表 + 语义保持用例覆盖。
+- 现场：`show system metrics history` 正常（间隔 60s 默认、采样「正常」、无 RECOVERY/指标类告警）；
+  **环境变化如实登记**：历史库在本轮注入后重建（样本从 0 重新累积）。
+
+§5 make check
+- 全绿（决策 274 守护、openapi 同步/无重复键、形状守护含新字段、archtest、套件契约同步）。
+  宿主内存压力（errno=1455）下以 `GOFLAGS=-p=1` 串行执行；提交用 `NO_VERIFY=1`（hook 记载的已知场景），make check 已补跑通过。
