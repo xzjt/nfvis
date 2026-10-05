@@ -2277,9 +2277,10 @@ func renderValue(b *strings.Builder, display string, v any, depth int, pad strin
 			fmt.Fprintf(b, "%s}\n", pad)
 		}
 	default:
-		if display == "password-hash" {
-			// FR-SEC-007：口令哈希在 show 输出中脱敏
-			fmt.Fprintf(b, "%s%s «已隐藏»;\n", pad, display)
+		if model.IsSensitiveKey(display) {
+			// FR-SEC-007：敏感叶（口令/口令哈希/令牌等，见 model.IsSensitiveKey）在 show 输出中脱敏。
+			// 决策 #377/E11：改用单一事实源——此前写死 password-hash，新增敏感叶会漏脱敏。
+			fmt.Fprintf(b, "%s%s %s;\n", pad, display, model.RedactedPlaceholder)
 			return
 		}
 		fmt.Fprintf(b, "%s%s %s;\n", pad, display, scalarStringOf(v))

@@ -989,3 +989,74 @@ func TestSupersededClearedOnSessionDiscard(t *testing.T) {
 		t.Fatalf("释放后 superseded 应清空（旧实现只增不减），实得 %d", n)
 	}
 }
+
+// 决策 #377/E13：Sessions() 的 confirmed_until 归属到 **Holder 匹配的会话行**——
+// 此前挂列表首行（当前持锁会话），多会话时会把在途 confirmed 记到别人的行上。
+func TestEngineSessionsConfirmedBelongsToHolder(t *testing.T) {
+	// 场景一：持锁会话 admin@ssh，在途 confirmed 的 Holder 是另一会话 ops@api
+	k := newEngineKit(t)
+	k.edit(t, "admin", "ssh")
+	deadline := k.clock.Now().Add(5 * time.Minute)
+	if err := k.store.SetConfirmed(1, deadline, "ops@api"); err != nil {
+		t.Fatalf("SetConfirmed: %v", err)
+	}
+	views, err := k.engine.Sessions()
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	var adminRow, opsRow *SessionView
+	for i := range views {
+		switch views[i].Holder {
+		case "admin@ssh":
+			adminRow = &views[i]
+		case "ops@api":
+			opsRow = &views[i]
+		}
+	}
+	if adminRow == nil {
+		t.Fatalf("持锁会话行缺失: %+v", views)
+	}
+	if opsRow == nil {
+		t.Fatalf("confirmed Holder 无匹配行时应如实追加一行: %+v", views)
+	}
+	if opsRow.ConfirmedUntil == nil || !opsRow.ConfirmedUntil.Equal(deadline) {
+		t.Fatalf("confirmed_until 应挂在 Holder 行: %+v", opsRow)
+	}
+	if opsRow.User != "ops" {
+		t.Fatalf("追加行 User 应为 ops: %+v", opsRow)
+	}
+	if adminRow.ConfirmedUntil != nil {
+		t.Fatalf("持锁行不得背负别人的 confirmed（旧实现挂首行）: %+v", adminRow)
+	}
+
+	// 场景二：Holder 与持锁会话相同 ⇒ 挂在持锁行（与旧行为一致）
+	k2 := newEngineKit(t)
+	k2.edit(t, "admin", "ssh")
+	dl2 := k2.clock.Now().Add(3 * time.Minute)
+	if err := k2.store.SetConfirmed(1, dl2, "admin@ssh"); err != nil {
+		t.Fatalf("SetConfirmed: %v", err)
+	}
+	vs2, err := k2.engine.Sessions()
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	if len(vs2) != 1 || vs2[0].Holder != "admin@ssh" ||
+		vs2[0].ConfirmedUntil == nil || !vs2[0].ConfirmedUntil.Equal(dl2) {
+		t.Fatalf("同 Holder 应挂在持锁行: %+v", vs2)
+	}
+
+	// 场景三：无持锁会话、仅有在途 confirmed ⇒ 仍如实追加一行
+	k3 := newEngineKit(t)
+	dl3 := k3.clock.Now().Add(2 * time.Minute)
+	if err := k3.store.SetConfirmed(1, dl3, "ops@api"); err != nil {
+		t.Fatalf("SetConfirmed: %v", err)
+	}
+	vs3, err := k3.engine.Sessions()
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	if len(vs3) != 1 || vs3[0].Holder != "ops@api" ||
+		vs3[0].ConfirmedUntil == nil || !vs3[0].ConfirmedUntil.Equal(dl3) {
+		t.Fatalf("无持锁会话时 confirmed 行应如实给出: %+v", vs3)
+	}
+}

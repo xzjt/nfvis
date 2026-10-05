@@ -37,6 +37,29 @@ func TestSplitFieldsQuotes(t *testing.T) {
 	}
 }
 
+// TestSplitFieldsOffsets 位置追踪与分词**同源**（决策 #377/E8）：tokens 与 SplitFields 逐字一致，
+// starts[i] 指向第 i 个 token 的**内容起点**（引用 token = 开引号之后；未引用/转义 = 首字符）。
+func TestSplitFieldsOffsets(t *testing.T) {
+	cases := []struct {
+		in     string
+		starts []int
+	}{
+		{"set x y fw", []int{0, 4, 6, 8}},
+		{`set x y "a b"`, []int{0, 4, 6, 9}}, // 开引号后一位
+		{`set x y "a\"b`, []int{0, 4, 6, 9}}, // 引用 token 内含转义，内容仍自开引号后
+		{`set x y a\"b`, []int{0, 4, 6, 8}},  // 未引用 token 含转义 ⇒ 自首字符
+	}
+	for _, c := range cases {
+		toks, starts := SplitFieldsOffsets(c.in)
+		if !reflect.DeepEqual(toks, SplitFields(c.in)) {
+			t.Fatalf("SplitFieldsOffsets(%q) tokens=%#v 与 SplitFields 不一致", c.in, toks)
+		}
+		if !reflect.DeepEqual(starts, c.starts) {
+			t.Fatalf("SplitFieldsOffsets(%q) starts=%#v，期望 %#v", c.in, starts, c.starts)
+		}
+	}
+}
+
 // TestSplitUnquotedPipe 管道切分只在**未引用**位置发生（决策 #155 补充三 / #313）。
 func TestSplitUnquotedPipe(t *testing.T) {
 	cases := []struct {

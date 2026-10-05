@@ -804,11 +804,28 @@
   lifecycle **22/0/3**（L3-2 正控未热，非回归）、pty **10/10**——与基线逐项一致；`make check`（`GOFLAGS=-p=1`）全绿。
   证据 `docs/evidence/v2-round158-d375-container-terminal-observations.txt`、`v2-round158b-d376-metrics-narrowing-anchor.txt`；
   真机已装 2.0.0~dev99。
+- **round159（round142 体检会话/CLI 族观测批次，2026-10-05）**：清体检 §2 簇 E 五项（决策 **#377**）——
+  **E8** `internal/cli` 的**第二套引号扫描**（`pipeSegment` 不认 `\"`/`\\` 转义、`completionTokens` 用
+  `strings.Fields` 完全无视引号）⇒ 补全词法改用 `cliparse`（`SplitFields` / `SplitUnquoted`），位置追踪下沉为
+  新增的 **`cliparse.SplitFieldsOffsets`**（分词 + token 内容起点偏移，**单源**），删除自实现扫描；
+  **E10** raw 模式下 `?` **恒**触发候选列举 ⇒ 无法输入字面 `?`——现「行停在未闭合双引号内则按字面插入、
+  引号外仍是补全键」；**E11** CLI 文本渲染脱敏**写死 `password-hash`** ⇒ 改用 `model.IsSensitiveKey` +
+  `model.RedactedPlaceholder`（单源，现有输出逐字不变）；**E13** `Engine.Sessions()` 把 `confirmed_until`
+  挂**列表首行**（当前持锁会话）⇒ 改为挂 **`Holder` 匹配行**、无匹配则如实追加；**E14** `cliExecutor.mu`
+  全局串行 + 客户端超时不取消 ⇒ **如实登记 + 手册**（不改并发模型）。**真机四维（dev100）**：pty 引号内 `?`
+  字面插入（无候选）、引号外 `show ver?` 照常列候选；`show configuration` ⇒ `password-hash «已隐藏»`、
+  明文 `pbkdf2` 0 次；多会话（`admin@console` 持锁 + `admin@ssh` confirmed 在途）⇒ `confirmed_until` 归属到
+  `admin@ssh` **独立行**（旧版挂首行）——**教益**：`holder = user@source`（不含 token），同一 user+source
+  两会话在视图里本就同行，归属漂移只在**跨接入源/跨用户**时显形（首版用两个 ssh 会话看不到差异，改 console 源才复现）。
+  **四套件（dev100）**：fulltest **254/0/18**、语义 **27/0/2**（S8 窗口热）、lifecycle **22/0/3**（L3-2 正控未热）、
+  pty **10/10**；`make check`（`GOFLAGS=-p=1`）全绿。**配方更正入册**：脚本语句用 `-f -` **未引用换行**切句
+  （`-c "a; b; c"` 会被当成一条无效命令——`;` 不是分隔符）。证据 `docs/evidence/v2-round159-d377-session-cli-observations.txt`；
+  真机已装 2.0.0~dev100。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
-- 已定决策 278 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#376，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 279 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#377，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。

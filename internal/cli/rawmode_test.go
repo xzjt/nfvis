@@ -195,6 +195,65 @@ func TestQuestionMarkRingsWhenNoCandidates(t *testing.T) {
 	}
 }
 
+// 决策 #377/E10：当前行停在**未闭合双引号**内时，`?` 是字面字符而非补全键——
+// 引号值（含多行 user-data）可以含任意文本。引号外的 `?` 仍是补全键（见上一条用例）。
+func TestQuestionMarkLiteralInsideOpenQuote(t *testing.T) {
+	cs := []schema.Candidate{{Token: "version", Desc: "版本汇总"}}
+	e, out, w := newRawTestEditor(t, fixedCompleter(`set user-data "abc`, cs))
+	done := make(chan string, 1)
+	go func() {
+		line, _ := e.ReadLine("nfvis> ")
+		done <- line
+	}()
+	// 引号未闭合，`?` 应按字面插入行文本；随后回车提交
+	if _, err := w.WriteString("set user-data \"abc?\r"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case line := <-done:
+		if line != `set user-data "abc?` {
+			t.Fatalf("引号内 ? 应按字面进入行文本: %q", line)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("回车后 ReadLine 未返回")
+	}
+	if strings.Contains(out.String(), "版本汇总") {
+		t.Fatalf("引号内 ? 不应列出候选: %q", out.String())
+	}
+}
+
+// 引号内 `?` 与引号外 `?` 的边界：`"a" ?`（引号已闭合）仍是补全键。
+func TestQuestionMarkCompletesAfterClosedQuote(t *testing.T) {
+	cs := []schema.Candidate{{Token: "version", Desc: "版本汇总"}}
+	e, out, w := newRawTestEditor(t, fixedCompleter(`set user-data "abc" `, cs))
+	done := make(chan string, 1)
+	go func() {
+		line, _ := e.ReadLine("nfvis> ")
+		done <- line
+	}()
+	if _, err := w.WriteString("set user-data \"abc\" ?"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(out.String(), "版本汇总") {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !strings.Contains(out.String(), "版本汇总") {
+		t.Fatalf("引号闭合后的 ? 应照常列候选: %q", out.String())
+	}
+	if _, err := w.WriteString("\r"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case line := <-done:
+		if line != `set user-data "abc" ` {
+			t.Fatalf("引号外的 ? 不应进入行文本: %q", line)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("回车后 ReadLine 未返回")
+	}
+}
+
 // REPL 输出必须与行编辑器共用同一流，raw 期间才由 crlfWriter 负责换行（决策 #81①）。
 func TestREPLOutGoesThroughEditorWriter(t *testing.T) {
 	rp := NewREPL(New(stubClient{}, "ssh"), NewHistory(), NewIdleGuard(0, nil))

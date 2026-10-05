@@ -563,10 +563,20 @@ func (e *Engine) Sessions() ([]SessionView, error) {
 	}
 	if cf != nil {
 		deadline := cf.Deadline
-		if len(out) == 0 {
-			out = append(out, SessionView{Holder: cf.Holder, User: userOfHolder(cf.Holder)})
+		// 决策 #377/E13：在途 confirmed 归属到 **Holder 匹配的会话行**——此前挂在列表首行
+		//（当前持锁会话），多会话时会把别人的 confirmed 记错行。无匹配行则如实追加一行。
+		idx := -1
+		for i := range out {
+			if out[i].Holder == cf.Holder {
+				idx = i
+				break
+			}
 		}
-		out[0].ConfirmedUntil = &deadline
+		if idx < 0 {
+			out = append(out, SessionView{Holder: cf.Holder, User: userOfHolder(cf.Holder)})
+			idx = len(out) - 1
+		}
+		out[idx].ConfirmedUntil = &deadline
 	}
 	return out, nil
 }

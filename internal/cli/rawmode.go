@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/xzjt/nfvis/internal/cliparse"
 	"github.com/xzjt/nfvis/internal/schema"
 )
 
@@ -140,7 +141,13 @@ func (e *Editor) ReadLine(prompt string) (string, error) {
 		case b == '\t':
 			e.completeLine(prompt)
 		case b == '?':
-			e.helpLine(prompt) // 按键即时列出候选，不进入行文本（§5.1）
+			// 决策 #377/E10：当前行停在未闭合双引号内时，`?` 是**字面字符**（引号值可含任意
+			// 文本，如多行 user-data）；引号外仍是补全键，按键即时列候选、不进入行文本（§5.1）。
+			if cliparse.OpenQuote(string(e.line)) {
+				e.insertRune('?', prompt)
+			} else {
+				e.helpLine(prompt)
+			}
 		default:
 			if r, ok := e.accum.feed(b); ok {
 				e.insertRune(r, prompt)

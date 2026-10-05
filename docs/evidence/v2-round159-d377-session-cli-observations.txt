@@ -1,0 +1,84 @@
+round159 · 决策 #377 —— round142 体检会话/CLI 族观测批次（E8/E10/E11/E13/E14）
+====================================================================
+日期：2026-10-05；分支 v2-round159-e8e10e11e13e14（243890d 契约先行 → fb56ce4 实现 → e4011ba E8 位置追踪下沉）；
+真机 nfvis-vm 2.0.0~dev100。
+来源：round142 半程体检 §2 簇 E 五项（代码级确认，`docs/evidence/v2-round142-midpoint-audit.txt` §2）。
+PR：https://github.com/xzjt/nfvis/pull/306（base v2）。
+
+§0 结论
+- 五项收口：**E8** 补全词法收敛到 `cliparse`（单源，删自实现引号扫描）；**E10** raw 模式引号内 `?` 按字面插入；
+  **E11** 文本渲染脱敏改用 `model.IsSensitiveKey`（单源）；**E13** `confirmed_until` 归属到 Holder 行；
+  **E14** 全局串行/客户端超时不取消——**如实登记 + 手册**（不改并发模型）。E8/E10/E11/E13 逐项**红-绿**；
+  `make check`（`GOFLAGS=-p=1`）全绿。
+
+§1 契约先行（243890d）
+- 附录 A 决策 #377（v2 线第 78 条）；`AGENTS.md` 决策条数 278→279（`check_decisions_count.sh` ✓）。
+- `docs/v2待做.md`：E8/E10/E11/E13/E14 标为收口（余项更新为 D2/D5/D6）。
+
+§2 实现（fb56ce4 + e4011ba）
+1. **E8**（`internal/cli/session.go` + `internal/cliparse/lex.go`）：`completionTokens` 由 `strings.Fields`
+   改为 `cliparse.SplitFields`（引号内空白不切分、`\"`/`\\` 解码）；`pipeSegment` 自实现循环删除，改委托
+   `cliparse.SplitUnquoted(line,'|')`；base 反推新增 `baseBeforePartial`——常规输入仍走 `TrimSuffix`（逐字不变），
+   引号/转义导致字面后缀不匹配时用 **`cliparse.SplitFieldsOffsets`**（新增：分词 + 每个 token 内容起点的偏移，
+   与 `SplitFields` 同规则）取最后一个 token 的内容起点。**位置追踪与分词同源**，`internal/cli` 不再有第二套引号规则。
+2. **E10**（`internal/cli/rawmode.go`）：`case b == '?'` 改为——`cliparse.OpenQuote(string(e.line))` 为真（停在
+   未闭合双引号内）则 `insertRune('?')`（字面），否则 `helpLine`（列候选，§5.1 不变）。
+3. **E11**（`internal/api/cliexec.go` `renderMap`）：`if display == "password-hash"` 改为
+   `if model.IsSensitiveKey(display)`，占位用 `model.RedactedPlaceholder`（不再写死 `«已隐藏»`）。
+4. **E13**（`internal/config/engine.go` `Sessions()`）：遍历 `out` 找 `Holder == cf.Holder` 的行挂
+   `ConfirmedUntil`；无匹配行则追加 `SessionView{Holder: cf.Holder, User: userOfHolder(cf.Holder), ConfirmedUntil: ...}`
+   （此前恒挂 `out[0]`＝当前持锁会话行）。
+5. **E14**（`docs/NFViS-用户手册.md`）：新增操作者口径——CLI 命令在设备侧**全局串行**执行、长命令排队等待、
+   客户端断开/超时**不取消**已开始执行的命令（无需求/决策编号）。
+
+§3 测试与红-绿
+- E8 `TestCompletionLexerSingleSource`：`completionTokens` 回退 `strings.Fields` ⇒ `引号内空白不应切分` FAIL；
+  `pipeSegment` 回退旧循环 ⇒ `转义引号后的 | 仍在引号内` FAIL。另 `cliparse.TestSplitFieldsOffsets`
+  钉住位置与分词同源（tokens 与 `SplitFields` 逐字一致 + 起点偏移）。
+- E10 `TestQuestionMarkLiteralInsideOpenQuote`：恒 `helpLine` ⇒ `引号内 ? 应按字面进入行文本` FAIL。
+- E11 `TestRenderMapRedactsAllSensitiveKeys`：写死 `password-hash` ⇒ `敏感键 psk 的值不得回显` FAIL（token/secret 同）。
+- E13 `TestEngineSessionsConfirmedBelongsToHolder`：挂 `out[0]` ⇒ `confirmed Holder 无匹配行时应如实追加一行` FAIL。
+
+§4 真机验证（dev100）
+① **E10（作用效果）**——真 pty（`script -qec`）：
+   - 引号内：`configure` 后输入 `set system login banner "a?`（不回车）⇒ 行文本为 `nfvis# set system login banner "a?`，
+     **无候选行**（该窗口候选行数 0）——`?` 按字面插入。
+   - 引号外：`show ver?` ⇒ 列出候选 `version 版本汇总（nfvis/ubuntu/vpp/…）`，`?` 不进入行文本（候选行数 1）。
+② **E11（脱敏不回归）**——`show configuration` ⇒ `password-hash «已隐藏»`；输出中 `pbkdf2` 明文出现 **0** 次。
+   （模型当前唯一敏感叶仍是 `password-hash`；其余六键由单测覆盖——真机无对应配置叶，**如实登记**。）
+③ **E13（归属，对照旧版）**——构造「A 提交 confirmed 后释放锁、B 取锁」且 **A/B 的 `user@source` 不同**：
+   A=ssh 侧 `configure; set system login banner "E13B-TEST"; commit confirmed 5`（revision 521，回滚 15:08:50）；
+   B=console 侧 pty `configure`（持锁，holder=`admin@console`）；REST `GET /system/configuration/sessions`：
+   ```json
+   [ {"holder":"admin@console","session_id":"e477b287-…","confirmed_until": 无},
+     {"holder":"admin@ssh","session_id":"","confirmed_until":"2026-10-05T15:08:50.090366559Z"} ]
+   ```
+   ⇒ `confirmed_until` 挂在 **`admin@ssh` 独立行**（旧实现挂 `out[0]`＝`admin@console` 行）。
+   **教益**：`holder = user@source`（不含 token）——同一 user+source 的两会话在视图里**本就同行**，
+   归属漂移只在跨接入源/跨用户时显形（首版用两个 ssh 会话，看不到差异，改用 console 源才复现）。
+④ **E8（真机观测受限，如实登记）**——补全上下文与执行分词一致由单测（含与 `cliparse` 逐字对照）覆盖；
+   真机 pty 冒烟（`cli-pty-smoke` 的 `?`/Tab 用例）通过，未构造「引号内转义 + Tab」的专门现场。
+⑤ **E14**——手册口径（无代码行为可测）。
+
+§5 现场与清场（如实）
+- 真机实验只动配置库的 `system login banner`：实验后 `delete system login banner` + commit（revision 522），
+  `show configuration | display set` 中 banner 出现 0 次；无持锁会话；告警仅常态 `HUGEPAGE_POOL_ORPHAN`。
+- 真机构建：`git archive` → `/root/src.new`（`SOURCE_DATE_EPOCH=1791211734`）→ `make deb VERSION=2.0.0~dev100` → `dpkg -i`。
+- 临时脚本已清（/tmp/e13*.sh、/tmp/e10*.raw）。
+
+§6 未竟 / 边界（如实）
+- **E14 不改并发模型**：`cliExecutor.mu` 的全局串行与「客户端超时不取消」是同步串行执行的固有性质；
+  改为并发需要把执行器级的 per-command 可变状态（`structured`/`consolePending`/…）迁入 per-session 结构，
+  风险大、收益小，本轮按「如实登记 + 手册」处置（决策 #377 明文）。
+- **E11 真机只覆盖 `password-hash`**（模型当前唯一敏感叶）；其余五键由单测红-绿覆盖。
+
+§7 四套件复跑（dev100）
+- `cli-fulltest` **254/0/18** ｜ `cli-semantic-check` **27/0/2**（S8 窗口热转可判定；不可判定＝S11 无 relay 现场 +
+  S12 按设计）｜ `cli-lifecycle-check` **22/0/3**（L3-2 正控未热，**非回归**）｜ `cli-pty-smoke` **10/10**。
+- 跑法：夹具 `up` → 停 `sem-vm` → fulltest → 起 `sem-vm` → 设 S13 现场 → 语义 → lifecycle → pty；
+  收尾 `systemctl restart vpp && systemctl restart nfvis` 清残留拓扑。
+- ⚠️ **配方更正（入册）**：脚本语句**必须用未引用换行切句**（`printf '…\n…' | nfvis-cli -f -`）——
+  `-c`/`-f` 按 `cliparse.SplitStatements`（**未引用换行**）切，**不是** `;`；写成 `-c "a; b; c"` 会被当成
+  一条无效命令（本轮实测：`-c "configure; set …; commit confirmed 5"` 报「无效命令」，改 `-f -` 多行即成功）。
+  本轮 S13 现场即用 `-f -` 设置，S13 判定通过（`enabled=true` + VPP `punt ip4 UDP port 53 to socket
+  /run/vpp/nfvis-dns.sock` 在场）。
