@@ -821,6 +821,22 @@
   pty **10/10**；`make check`（`GOFLAGS=-p=1`）全绿。**配方更正入册**：脚本语句用 `-f -` **未引用换行**切句
   （`-c "a; b; c"` 会被当成一条无效命令——`;` 不是分隔符）。证据 `docs/evidence/v2-round159-d377-session-cli-observations.txt`；
   真机已装 2.0.0~dev100。
+- **round160（round142 体检启动自愈族观测批次，2026-10-05）**：清体检 §2 簇 D 三项（决策 **#378**）——
+  **D2**（中，真修）`dynamicCompute.Swap`/`Close` 在**持有写锁**时调 `conn.Close()`（其内部
+  `libvirt.Disconnect()` 先发 ConnectClose、**无超时**，对假死守护进程可挂起）⇒ 期间**所有计算调用
+  （`current()` 取读锁）全部阻塞**；修法＝**锁外关闭旧连接**（`Swap` 锁内换装、解锁后关旧 conn；
+  `Close()` 锁内取走并置空、解锁后关），`conn` 抽成最小接口 `connCloser` 以便单测注入「阻塞的 Close」；
+  **不改** `compute.Conn.Close()` 语义（#362 停机路径不动）。**D5**（低）手册与 `alarm.go` 写
+  `VPP_AUTOSTART_FAILED` 覆盖「拉起失败**或拉起后未就绪**」，实现只在**发起失败/被取消**时报 ⇒
+  **文档/注释对齐实现**（#348 明文不等待就绪）。**D6**（低）注释如实化：接入/复连「10s 上界」补
+  「+ 最多 2s 清理 drain ⇒ 实际 ≤12s」；`EnsureRunning`/`probeOnce` 协程口径改「只在**等待**上有界、
+  随底层调用返回而结束」。**真机（dev101）**：`systemctl restart libvirtd` ⇒ 中断判定 → **~20s 自动复连
+  换装** → `sem-vm` 可见、无残留告警（D2 换装路径不回归）；对抗性（假死 libvirtd 下 `Disconnect` 挂起
+  而换装不连带阻塞）真机**难构造**（同一 socket 下旧连接通常能立即返回），由**单测红-绿**（`blockingCloser`）
+  钉住、**如实登记**。**四套件（dev101）**：fulltest **254/0/18**、语义 **27/0/2**（S8 窗口热）、
+  lifecycle **22/0/3**（L3-2 正控未热）、pty **10/10**；`make check`（`GOFLAGS=-p=1`）全绿。
+  **R142 体检低危观测簇（A/B/C/D/E 五簇）至此全部收口**。证据
+  `docs/evidence/v2-round160-d378-startup-selfheal-observations.txt`；真机已装 2.0.0~dev101。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。

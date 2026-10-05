@@ -1,0 +1,66 @@
+round160 · 决策 #378 —— round142 体检启动自愈族观测批次（D2/D5/D6）
+====================================================================
+日期：2026-10-05；分支 v2-round160-d2d5d6（f6dbc4b 契约先行 → 7117e3d 实现）；真机 nfvis-vm 2.0.0~dev101。
+来源：round142 半程体检 §2 簇 D 三项（代码级确认，`docs/evidence/v2-round142-midpoint-audit.txt` §2）。
+PR：https://github.com/xzjt/nfvis/pull/307（base v2）。
+
+§0 结论
+- 三项收口：**D2**（中，真修）换装期锁外关闭旧连接，不再阻塞编排调用；**D5**（低）`VPP_AUTOSTART_FAILED`
+  覆盖面——文档/注释对齐实现；**D6**（低）两处有界性注释如实化。D2 **红-绿**；`make check`（`GOFLAGS=-p=1`）全绿。
+- **round142 体检低危观测簇至此全部收口**（A/B/C/D/E 五簇；见 `docs/v2待做.md` 二·R142 段）。
+
+§1 契约先行（f6dbc4b）
+- 附录 A 决策 #378（v2 线第 79 条）；`AGENTS.md` 决策条数 279→280（`check_decisions_count.sh` ✓）。
+- `docs/v2待做.md`：D2/D5/D6 标为收口（R142 观测簇余项清空）。
+
+§2 实现（7117e3d）
+1. **D2**（`cmd/nfvisd/dynamic_provider.go`）：新增最小接口 `connCloser interface{ Close() error }`，
+   `dynamicCompute.conn` 与 `Swap` 形参改为它（`*compute.Conn` 满足；`main.go` 两处调用点无需改）。
+   `Swap`：锁内完成换装（记旧 conn、写 `h.p`/`h.conn`），**解锁后** `old.Close()`；
+   `Close()`：锁内取走 conn 并置空，**解锁后** `return conn.Close()`（幂等）。
+   **不改** `compute.Conn.Close()` 语义（#362：停机路径不动，`Disconnect` 可能挂起、由 systemd 强杀兜底）。
+2. **D5**（`internal/orchestrator/network/alarm.go` + `docs/NFViS-用户手册.md`）：`VPP_AUTOSTART_FAILED`
+   口径由「拉起失败**或拉起后未在限定时间内就绪**」改为「未能**发起**拉起 VPP（发起动作失败或被取消）」，
+   并写明就绪由连接重试循环接管（未就绪时 `show vpp` 显示未连接）。**与实现对齐**（#348 明文不等待就绪）。
+3. **D6**（`cmd/nfvisd/async_connect.go` + `internal/orchestrator/network/vpp.go` + `cmd/nfvisd/main.go` 注释）：
+   ① 接入/复连「10s 上界」补注「+ 最多 2s 清理 drain（`compute.handshakeDrain`）⇒ 实际 ≤12s」；
+   ② `EnsureRunning`/`probeOnce`/`probeWithin` 的协程口径改为「只在**等待**上有界；协程随底层调用返回
+   而结束，不承诺在超时点立即结束」（govpp 连接路径自带约 7s 超时；`systemctl` 发起动作异常时可挂到停机）。
+   **不改任何有界时长取值。**
+
+§3 测试与红-绿
+- D2 `TestDynamicComputeSwapClosesOldConnOutsideLock` / `TestDynamicComputeCloseClosesConnOutsideLock`：
+  注入 `blockingCloser`（`Close` 阻塞在 channel），断言换装/关闭**进行中** `Connected()`/`VMState`
+  **不被阻塞**（旧实现持写锁关闭 ⇒ 阻塞），且换装原子（阻塞期间新实现已可见）；`t.Cleanup` 放行、不挂死。
+  **红-绿**：临时还原「写锁内 Close」⇒ 两条均失败（`Swap 期间 Connected 被阻塞（旧实现持写锁关闭连接）`）。
+- D5/D6 为文档/注释改动，由 `archtest`（用户可见文本守护）与 `docscheck` 覆盖。
+
+§4 真机验证（dev101）
+① **D2 生命周期/作用效果**——`systemctl restart libvirtd` ⇒ journal 依次出现
+   `libvirt 连接中断，开始自动复连`（`err=查找 domain __nfvis_probe__ 失败: invalid argument`）→
+   `libvirt 连接已恢复（自动复连成功）`（**~20s**，即换装路径执行）；复连后 `show virtual-machine-functions`
+   ⇒ `sem-vm running` 可见；告警仅常态 `HUGEPAGE_POOL_ORPHAN`（无 `COMPUTE_UNAVAILABLE` 残留）——
+   即 D2 的换装路径**不回归**（#354 复连换装照常）。
+② **D2 对抗性（受限，如实登记）**——「假死 libvirtd 下 `Disconnect` 挂起、换装不连带阻塞计算调用」
+   这一现场**真机难构造**（复连成功时旧连接通常能立即 `Disconnect` 返回；要挂起需旧连接指向**楔死**守护
+   进程、同时新连接成功——同一 socket 下不可得）。该语义由**单测红-绿**钉住（`blockingCloser` 注入），
+   **如实登记为单测覆盖**。
+③ **D5**——手册告警表 `VPP_AUTOSTART_FAILED` 行文本如实（无需求/决策编号，`user_text` 守护通过）。
+④ **D6**——注释口径修正（无运行时行为可测）。
+
+§5 现场与清场（如实）
+- 真机实验只 `systemctl restart libvirtd` 一次（触发 #354 复连换装）；无配置改动；无遗留对象。
+- 四服务 active；`sem-vm`/`sem-ct` running；告警仅常态 `HUGEPAGE_POOL_ORPHAN`。
+- 真机构建：`git archive` → `/root/src.new`（`SOURCE_DATE_EPOCH=1791214392`）→ `make deb VERSION=2.0.0~dev101` → `dpkg -i`。
+
+§6 未竟 / 边界（如实）
+- D2 的「挂起 `Disconnect`」现场真机不可构造 ⇒ 单测覆盖（红-绿）；换装**可见性**（锁内完成）与
+  **关闭解耦**（锁外）由单测钉住。
+- `compute.Conn.Close()` 本身仍可能挂起（#362 明确不动）；本决策只保证它**不再阻塞编排调用**，
+  停机时仍由 systemd 强杀兜底。
+
+§7 四套件复跑（dev101）
+- `cli-fulltest` **254/0/18** ｜ `cli-semantic-check` **27/0/2**（S8 窗口热；不可判定＝S11 + S12 按设计）｜
+  `cli-lifecycle-check` **22/0/3**（L3-2 正控未热，**非回归**）｜ `cli-pty-smoke` **10/10**——与基线逐项一致。
+- 跑法：夹具 `up` → 停 `sem-vm` → fulltest → 起 `sem-vm` → 设 S13 现场（`-f -` 多行）→ 语义 → lifecycle → pty；
+  收尾 `systemctl restart vpp && systemctl restart nfvis`。
