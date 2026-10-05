@@ -85,25 +85,35 @@ type containerFacade interface {
 	orchestrator.ContainerProvider
 }
 
+// connCloser 持有层记账的连接所需的最小能力（决策 #378/D2）：只为单测能注入「会阻塞的
+// Close」以验证换装/关闭发生在锁外。生产路径持有的仍是 *compute.Conn（满足此接口）。
+type connCloser interface{ Close() error }
+
 // dynamicCompute libvirt 编排的动态持有层。零值即「未接入」——按语义表应答；
 // Swap 后全部方法转发真实实现。
 type dynamicCompute struct {
 	mu   sync.RWMutex
 	p    computeFacade
-	conn *compute.Conn // 持有层记账的 libvirt 连接（进程优雅停机时统一关闭）
+	conn connCloser // 持有层记账的 libvirt 连接（进程优雅停机时统一关闭）
 }
 
 func newDynamicCompute() *dynamicCompute { return &dynamicCompute{} }
 
 // Swap 原子换装：写入真实 Provider 并接管其连接的记账（含关闭职责）。生产路径换装
 // 至多一次（本决策只服务「从未接入」状态）；防御性地先关旧连接，避免覆盖泄漏。
-func (h *dynamicCompute) Swap(p computeFacade, conn *compute.Conn) {
+//
+// 决策 #378/D2：换装在**锁内**完成（记下旧 conn、写 h.p/h.conn），被替换的旧连接在
+// **解锁后**才关闭——compute.Conn.Close 内部 libvirt.Disconnect 先发 ConnectClose RPC
+// 且无超时，对假死守护进程可挂起；若持写锁关闭，所有计算调用（current/Connected 取
+// 读锁）会连带阻塞。换装可见性与关闭职责因此解耦。
+func (h *dynamicCompute) Swap(p computeFacade, conn connCloser) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.conn != nil {
-		_ = h.conn.Close()
-	}
+	old := h.conn
 	h.p, h.conn = p, conn
+	h.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
 }
 
 // Connected 是否已接入真实编排。
@@ -115,15 +125,18 @@ func (h *dynamicCompute) Connected() bool {
 
 // Close 关闭持有层记账的 libvirt 连接（同步接入与后台接入两条路统一由此关闭，
 // 取代原先只在同步成功路径上的 defer libvirtConn.Close()）。未接入时无连接，返回 nil。
+//
+// 决策 #378/D2：先在锁内取走 conn 并置空（保证换装/关闭互斥、幂等），**解锁后**再关闭
+// ——理由同 Swap：compute.Conn.Close 可能挂起，持锁关闭会阻塞计算调用。
 func (h *dynamicCompute) Close() error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.conn == nil {
+	conn := h.conn
+	h.conn = nil
+	h.mu.Unlock()
+	if conn == nil {
 		return nil
 	}
-	err := h.conn.Close()
-	h.conn = nil
-	return err
+	return conn.Close()
 }
 
 // current 取当前实现（nil = 未接入）。各方法经它取读锁快照，保证与 Swap 互斥。
