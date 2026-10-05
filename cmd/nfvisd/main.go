@@ -702,6 +702,12 @@ func run() error {
 					for _, e := range netProvider.ReconcileDHCPServer(ctx, cfg) {
 						log.Warn("DHCP 服务器巡检", "err", e)
 					}
+					// 决策 #380：DHCP 中继 proxy 对账自愈——用 VPP 实际条目与配置声明比对，
+					// 清除未声明/陈旧的多余 proxy（不靠进程内登记，跨 nfvisd 重启仍有效）。
+					// 与残渣对账同块，不另造巡检。
+					for _, e := range netProvider.ReconcileProxy(ctx, cfg) {
+						log.Warn("DHCP relay proxy 对账未收敛项", "err", e)
+					}
 				}
 				recoveryMu.Unlock()
 			}

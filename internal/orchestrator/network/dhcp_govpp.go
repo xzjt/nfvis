@@ -61,3 +61,26 @@ func (g *govppDhcpClient) ProxySet(rxVrfID, serverVrfID uint32, isAdd bool, serv
 	}
 	return nil
 }
+
+// ProxyDump 列出 VPP 里实际的 DHCP proxy 条目（决策 #380 对账用）。走 dhcp_proxy_dump /
+// dhcp_proxy_details 的 multi-request（参照同包 SwInterfaceNames 的读法），读到 stop 为止；
+// 地址用 ip_types.Address.String()（与 nat_govpp 等回读路径同源）。产品只用 v4，IsIP6 留默认 false。
+func (g *govppDhcpClient) ProxyDump() ([]ProxyEntry, error) {
+	reqCtx := g.ch.SendMultiRequest(&dhcp.DHCPProxyDump{})
+	out := make([]ProxyEntry, 0, 4)
+	for {
+		d := &dhcp.DHCPProxyDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return nil, err
+		}
+		if stop {
+			return out, nil
+		}
+		e := ProxyEntry{RxVrfID: d.RxVrfID, Src: d.DHCPSrcAddress.String()}
+		for _, s := range d.Servers {
+			e.Servers = append(e.Servers, ProxyServer{VrfID: s.ServerVrfID, Server: s.DHCPServer.String()})
+		}
+		out = append(out, e)
+	}
+}
