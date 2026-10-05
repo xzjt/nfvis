@@ -499,6 +499,35 @@ func (v *validator) checkBonds(c Config) {
 
 func (v *validator) checkVirtualSwitches(c Config) {
 	dupCheck(v, c.VirtualSwitches, "virtual-switches", func(s VirtualSwitch) string { return s.Name }, "虚拟交换机")
+	// 决策 #368（收口 R142-5）：DHCP 中继与服务器的**跨交换机全局互斥**。
+	// UDP/67 的本地处理归属是全局单槽资源：server 的 punt 注册（全局、每 15s 重申）与
+	// relay 的 per-FIB 代理共用同一个 UDP/67 查找钩子，跨交换机并存会使 relay 域的
+	// DHCP 包被 server 的注册静默接管（round150 真机定性：并存后 punt-socket TX error
+	// 持续增长、relay 域包被黑洞、server 侧零租约）。按 #340 口径硬拒、不给 force 出口。
+	// 同交换机双配由下方 #359 的既有检查负责——本预检只在两侧**不同交换机**时补报，避免重复。
+	relays, servers := []string{}, []string{}
+	for _, s := range c.VirtualSwitches {
+		if s.DhcpRelayServer != "" {
+			relays = append(relays, s.Name)
+		}
+		if s.DhcpServerPoolStart != "" {
+			servers = append(servers, s.Name)
+		}
+	}
+	crossConflict := false
+	for _, r := range relays {
+		for _, sv := range servers {
+			if r != sv {
+				crossConflict = true
+			}
+		}
+	}
+	if crossConflict {
+		v.errf(fmt.Sprintf("virtual-switches[%s].dhcp_relay_server", relays[0]),
+			"跨交换机不能同时配置 DHCP 中继（%s）与 DHCP 服务器（%s）：UDP/67 的本地处理归属是全局的，"+
+				"服务器的注册会接管中继域的 DHCP 包（真机实测静默黑洞）——请两者留其一",
+			strings.Join(relays, "、"), strings.Join(servers, "、"))
+	}
 	for _, s := range c.VirtualSwitches {
 		p := fmt.Sprintf("virtual-switches[%s]", s.Name)
 		if !v.checkName(p, s.Name, "虚拟交换机") {

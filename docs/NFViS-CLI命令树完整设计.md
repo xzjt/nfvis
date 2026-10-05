@@ -547,7 +547,9 @@ set dhcp-relay server <ip>                           # DHCP 中继（决策 #335
                                                      #   前置校验：仅 L2 且已 `set gateway ip` 的交换机可配——
                                                      #   src 地址自动取 BVI 的 IPv4 网关地址（用户不填），
                                                      #   未配网关/无 IPv4 网关地址即拒绝并指向 `set gateway ip`；
-                                                     #   server 必填、IPv4，且须在该转发域内可达（跨 VRF 的 server 不在 v1）
+                                                     #   server 必填、IPv4，且须在该转发域内可达（跨 VRF 的 server 不在 v1）；
+                                                     #   **与 dhcp-server 全局互斥**（决策 #368：任一交换机启用了
+                                                     #   服务器即拒绝中继——UDP/67 本地处理归属全局，见 server 行）
 delete dhcp-relay                                    # 撤销中继（发 dhcp_proxy_config IsAdd=false，幂等；
                                                      #   随交换机删除一并撤）
 set dhcp-server pool <start> <end>                   # DHCP 服务器（决策 #359）：为该交换机转发域内的客户端
@@ -556,7 +558,11 @@ set dhcp-server pool <start> <end>                   # DHCP 服务器（决策 #
                                                      #   前置校验：仅 L2 且已 `set gateway ip` 的交换机可配；
                                                      #   池须与 BVI 的 IPv4 网关同子网、start ≤ end、不含 BVI
                                                      #   地址与网络/广播地址、最多 4096 个地址（超限/越界提交期
-                                                     #   拒绝并说明）；**与 dhcp-relay 互斥**（同配二者提交期拒绝）。
+                                                     #   拒绝并说明）；**与 dhcp-relay 全局互斥**（同配二者提交期拒绝；
+                                                     #   #368 收口 R142-5：UDP/67 的本地处理归属是全局的——服务器的
+                                                     #   punt 注册（全局单槽、15s 重申）会抢占中继的 per-FIB 代理，
+                                                     #   跨交换机并存使中继域的 DHCP 包被静默接管/黑洞，真机定性
+                                                     #   round150）。
                                                      #   pool 是启用要件：配置即启动，删除即停用（见下 delete）。
 set dhcp-server lease-time <seconds>                 # 租约时长（缺省 86400；60..2592000）
 set dhcp-server dns <ip>                             # 下发给客户端的 DNS（option 6；缺省＝BVI 网关地址，

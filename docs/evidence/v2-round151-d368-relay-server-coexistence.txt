@@ -1,0 +1,61 @@
+round151 · 决策 #368 —— DHCP 中继与服务器的跨交换机全局互斥（收口 R142-5）
+====================================================================
+日期：2026-10-05；分支 feat/d368-relay-server-global-exclusive（28d54c5 契约先行 → 5c336bb 实现）；
+真机 nfvis-vm 2.0.0~dev83（= v2 @ c094b09 含 #366/#367 + 本分支）。
+来源：round142 半程体检 C5（R142-5，「跨交换机 relay+server 并存未校验」，待真机对照实验定性）。
+
+§0 结论
+- 体检的假设**成立**：跨交换机 relay+server 并存会使 relay 域 DHCP 包被 server 的**全局**
+  punt 注册静默接管/黑洞。按「不留假功能 / 静默失效一律硬拒」口径，提交期**全局互斥**收口。
+- 定性证据为**真机对照实验**（非仅代码推理）：并存前 punt-socket 错误计数为 0，并存后持续增长。
+
+§1 真机定性实验（dev82，如实记录）
+1. **校验缺口实证**：`sem-vs` 配 `dhcp-relay server 192.168.155.1` + `dns-vs` 配
+   `dhcp-server pool 192.168.77.10 192.168.77.20` —— 同一提交**被接受**（rev 78）。
+2. **状态对照（T0/T1/T2）**：
+   - `vppctl show dhcp proxy`：relay 条目在册（RX FIB 1445873 → 155.1），跨 90s+ 的 server
+     15s 重申**不被改写**（配置/状态层面 relay 条目保留）；
+   - `vppctl show errors`：`ip4-udp-punt-socket Socket TX error` 在**并存前 grep 为 0**、
+     并存后从 1 持续增长（≈1 次/33s，与 sem-vm 的 DHCP 重试周期吻合；T0=1 → T1=2 → 3 → 6 → 9）；
+   - server 侧：`show virtual-switches dns-vs dhcp-leases` 全程零租约；`tcpdump -i <tap> 100s`
+     零 DHCP 帧；tap rx 计数增长说明 server 曾应答过部分包（offered 条目 120s 后清扫，与空表吻合）。
+3. **机制**：UDP/67 的本地查找钩子是**全局单槽**——relay 用 per-FIB udp 代理（`show dhcp proxy`
+   的 RX FIB 条目），server 用全局 punt socket 注册（`punt.socket_register`，每 15s 先撤再注）。
+   两者共用同一查找点：server 的注册生效后，relay 域的 DHCP 包被 punt 节点接走且投递失败
+   （TX error）——relay 域 DHCP 静默失效（黑洞）。这正是体检 C5 与 R140-1 同机理的实锤。
+4. **撤销残留再证 R140-1**：删 relay 后 `show dhcp proxy` 仍显示条目，`request vpp restart` 才清
+   （与 round142 记录一致；R140-1 仍为开放登记，server 侧已按每次 Sync 重申规避）。
+5. 现场已还原：`delete` relay/server 后 config grep dhcp=0、proxy 残留=0（重启后）、
+   kernel tap 不存在；`show alarms active` 无 RECOVERY 项。
+
+§2 契约先行（28d54c5）
+- 附录 A 新增决策 #368（v2 线第 69 条）；AGENTS.md 决策条数 269→270。
+- `docs/NFViS-CLI命令树完整设计.md`：relay/server 两行互斥措辞扩为**全局互斥**（含机理与真机定性）。
+- `docs/NFViS-用户手册.md`：DHCP 服务器互斥段改写（任何交换机上二者都不能并存；说明全局归属）。
+
+§3 实现（5c336bb）
+- `internal/model/validate.go` `checkVirtualSwitches` 顶部**全局预检**：收集 relay 集合与 server 集合，
+  存在**跨不同交换机**的冲突即拒绝（报错点名两侧交换机 + 全局归属机理 + 「请两者留其一」）；
+  同交换机双配仍由 #359 的既有检查负责（本预检只在两侧不同交换机时补报，避免重复）。
+- 测试（6 项新单测）：A relay+B server 拒绝（点名两侧）/ 反向拒绝 / 同交换机只报既有文案且不重复 /
+  relay-only 多域放行 / server-only 多域放行 / 删一侧即放行；**红-绿**：临时置 `crossConflict=false`
+  ⇒ 新用例按预期失败，恢复即绿。
+- `make check` 全绿（决策 270 守护；`check_decisions_count.sh` 通过）。
+
+§4 真机验证（dev83，五条）
+① 跨交换机并存（R142-5 原形态）⇒ **提交期拒绝**，文案：`virtual-switches[sem-vs].dhcp_relay_server:
+   跨交换机不能同时配置 DHCP 中继（sem-vs）与 DHCP 服务器（dns-vs）：UDP/67 的本地处理归属是全局的，
+   服务器的注册会接管中继域的 DHCP 包（真机实测静默黑洞）——请两者留其一`；
+② **反向顺序**（先 server 后 relay）同样拒绝；
+③ **relay-only**（多域中继）提交成功（rev 81）——既有合法形态不受影响；
+④ **server-only**（多域服务器）提交成功（rev 82）；
+⑤ **同交换机双配** ⇒ 只报既有那条（`同一交换机不能同时配置…`），无重复的跨交换机文案。
+清场后基线：config grep dhcp=0、proxy 残留=0、tap 不存在（rev 83）。
+
+§5 边界与后续（如实）
+- 本决策不改 relay/server 的运行态实现，只把「并存」这一未定义形态在提交期挡住；
+  R140-1（relay 撤销后 proxy 残留吞包）仍开放——本实验第 4 条再次实证其存在，修法方向仍见
+  `docs/v2待做.md`（relay 自身残留，server 侧已规避）。
+- 端到端「A 域客户端在并存下拿不到租约」未做 guest 级复现（环境无 guest exec、容器仅 memif 且离线
+  无 memif 镜像）——但 punt TX error 从 0 起的持续增长 + server 零租约/零帧已足以定性；
+  guest 级对照作为环境受限项如实登记。
