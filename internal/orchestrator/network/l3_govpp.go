@@ -5,6 +5,7 @@ package network
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"go.fd.io/govpp/api"
 	"go.fd.io/govpp/binapi/fib_types"
@@ -154,11 +155,11 @@ func (g *govppL3Client) IPRouteAddDel(tableID uint32, prefix, nextHop string, ad
 	}
 	route := ip.IPRoute{TableID: tableID, Prefix: p}
 	if nextHop != "" {
-		paths, err := recursiveNextHopPaths(tableID, nextHop)
+		paths, err := nextHopPaths(tableID, nextHop)
 		if err != nil {
 			return err
 		}
-		route.NPaths = 1
+		route.NPaths = uint8(len(paths))
 		route.Paths = paths
 	}
 	reply := &ip.IPRouteAddDelReply{}
@@ -197,6 +198,28 @@ func recursiveNextHopPaths(tableID uint32, nextHop string) ([]fib_types.FibPath,
 		Proto:     proto,
 		Nh:        fib_types.FibPathNh{Address: nh},
 	}}, nil
+}
+
+// nextHopPaths 按逗号分隔的多下一跳（ECMP，决策 #381）构造 FIB 路径列表：
+// 每个下一跳一条递归路径、Weight=1 等权。单值即 1 条（与既有行为一致）。
+//
+// 各路径的解析语义完全交给 recursiveNextHopPaths（表内递归、SwIfIndex=~0、TableID 必填）。
+// 元素级合法性（非空/有效 IP/去重/同族/上限）由提交期 model.Validate 保证，此处只负责构造；
+// 解析失败（含空元素）时错误文案含**完整** nextHop 串，便于定位整条语句。
+func nextHopPaths(tableID uint32, nextHop string) ([]fib_types.FibPath, error) {
+	hops := strings.Split(nextHop, ",")
+	paths := make([]fib_types.FibPath, 0, len(hops))
+	for _, nh := range hops {
+		ps, err := recursiveNextHopPaths(tableID, nh)
+		if err != nil {
+			return nil, fmt.Errorf("下一跳 %q（整串 %q）: %w", nh, nextHop, err)
+		}
+		for _, p := range ps {
+			p.Weight = 1 // 等权 ECMP；单路径时权重无影响
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
 }
 
 // fibNhString 从 FIB path 解析下一跳文本（IPv4/IPv6）。

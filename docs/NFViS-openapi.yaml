@@ -3312,7 +3312,11 @@ components:
       required: [prefix, next_hop]
       properties:
         prefix: { type: string, example: "0.0.0.0/0" }
-        next_hop: { type: string }
+        next_hop:
+          type: string
+          description: |
+            下一跳地址；可**逗号分隔多个**（如 `10.0.0.1,10.0.0.2`）表示等价多路径（ECMP），
+            各下一跳等权；单个值时语义与形状不变（字段仍为字符串）。
         distance: { type: integer, default: 1 }
 
     Acl:

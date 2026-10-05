@@ -771,13 +771,53 @@ func (v *validator) checkVrfs(c Config) {
 			if rt.Prefix == "" || !checkCIDR(rt.Prefix) {
 				v.errf(rp+".prefix", "路由前缀 %q 必须是 ip-prefix（CIDR）", rt.Prefix)
 			}
-			if !checkIP(rt.NextHop) {
-				v.errf(rp+".next_hop", "下一跳 %q 必须是有效 ip", rt.NextHop)
-			}
+			v.checkRouteNextHops(rp+".next_hop", rt.NextHop)
 			if rt.Distance < 0 || rt.Distance > 255 {
 				v.errf(rp+".distance", "distance %d 必须在 0-255", rt.Distance)
 			}
 		}
+	}
+}
+
+// maxRouteNextHops 静态路由多下一跳的数量上限（决策 #381：防误配；单值不受影响）。
+const maxRouteNextHops = 8
+
+// checkRouteNextHops 校验静态路由的下一跳（决策 #381：逗号分隔的多下一跳＝ECMP）。
+//
+// 单值写法与语义完全不变——单元素时沿用既有文案（逐字节等价），只做有效 IP 校验。
+// 多值时按 `,` 切分后**逐元素**校验：非空、有效 IP、去重、同族（不得混 IPv4/IPv6）、
+// 数量上限 maxRouteNextHops。路径仍为 rp+".next_hop"（错误定位到该路由字段）。
+func (v *validator) checkRouteNextHops(path, spec string) {
+	hops := strings.Split(spec, ",")
+	if len(hops) == 1 {
+		if !checkIP(hops[0]) {
+			v.errf(path, "下一跳 %q 必须是有效 ip", spec)
+		}
+		return
+	}
+	if len(hops) > maxRouteNextHops {
+		v.errf(path, "多下一跳最多 %d 个，实际 %d 个", maxRouteNextHops, len(hops))
+	}
+	seen := make(map[string]bool, len(hops))
+	family := ""
+	for i, h := range hops {
+		if h == "" {
+			v.errf(path, "第 %d 个下一跳为空", i+1)
+			continue
+		}
+		if !checkIP(h) {
+			v.errf(path, "第 %d 个下一跳 %q 不是有效 ip", i+1, h)
+			continue
+		}
+		if f := prefixFamily(h); family == "" {
+			family = f
+		} else if f != family {
+			v.errf(path, "多下一跳不得混用 IPv4/IPv6（第 %d 个 %q 与前一跳不同族）", i+1, h)
+		}
+		if seen[h] {
+			v.errf(path, "下一跳重复 %q", h)
+		}
+		seen[h] = true
 	}
 }
 

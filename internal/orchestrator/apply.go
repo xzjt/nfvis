@@ -677,12 +677,16 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	return ops
 }
 
-// routeKeyOf 一条静态路由在 FIB 里的身份（前缀 + 下一跳）。
+// routeKeyOf 一条静态路由在**声明差分**里的身份：**前缀**（决策 #382 收敛）。
 //
-// 刻意不含 distance：VPP 侧下发并不携带该字段（l3_govpp.go 的 IPRouteAddDel 只用
-// 前缀与下一跳），带它参与 diff 会把「只改 distance」判成「旧路由消失 + 新路由出现」，
-// 于是本次提交先补下发再撤销，把仍在声明的路由从 FIB 里误撤掉。
-func routeKeyOf(r model.Route) string { return r.Prefix + "|" + r.NextHop }
+// 为什么只是前缀：VPP 侧对同一前缀是**替换**语义——`ip_route_add_del(is_add=true)` 用新路径集
+// 覆盖该前缀（l3_govpp.go），故「同前缀的下一跳变更（含单值↔多值、多值增删）」的正确处理是
+// **由 ApplyVRF 重新下发**，而不是发 del-route：del-route 段在 ApplyVRF **之后**执行，会把刚
+// 下发的新路由删掉（真机实证：改下一跳后路由从 FIB 消失、配置与读视图一切正常——数据面黑洞）。
+//
+// 同一推理此前只用在 distance 上（key 不含 distance，避免「只改 distance」被判成
+// 「旧路由消失 + 新路由出现」而误撤）；下一跳曾漏，本决策一并收敛。
+func routeKeyOf(r model.Route) string { return r.Prefix }
 
 // routeLabel 路由的展示标签（计划操作的描述与错误文案，如 vs-l3 10.0.0.0/24 via 10.0.0.254）。
 func routeLabel(vrfName string, r model.Route) string {
