@@ -4941,9 +4941,9 @@ function ctExecReset() {
 function ctExecRender(d) {
   const out = $('ct-exec-out');
   const lines = [];
-  if (d.timed_out === true) {
-    lines.push('%% 命令未在超时前结束（已停止本页等待；容器内进程可能仍在运行，退出码未知）');
-  } else if (d.exit_code !== undefined && d.exit_code !== null) {
+  // 决策 #366：超时不再以 200+timed_out 返回——超时走 504，由 catch 分支渲染服务端错误
+  // message（「命令在 N 内未结束…」）；此处只渲染跑完的 200 结果。
+  if (d.exit_code !== undefined && d.exit_code !== null) {
     lines.push('退出码: ' + d.exit_code + '（耗时 ' + dash(d.duration_ms) + 'ms）');
   }
   lines.push('--- stdout ---');

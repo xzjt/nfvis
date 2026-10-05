@@ -2,8 +2,9 @@ package api
 
 // 决策 #357：容器内执行命令（`POST /container-functions/{name}:exec`）的端点契约回归。
 //
-// 如实口径（与决策行一致）：命令跑完（哪怕非 0 退出码）⇒ 200，退出码是**结果**不是失败；
-// 超时 ⇒ 200 + `timed_out` 且**不带** `exit_code`（未知 ≠ 0）；不存在 ⇒ 404、非运行 ⇒ 409、
+// 如实口径（#366 收口 R142-10 的记账漂移）：命令跑完（哪怕非 0 退出码）⇒ 200，
+// 退出码是**结果**不是失败；超时 ⇒ **504**（决策原文「超时/流中断 ⇒ REST 非 2xx」，
+// 不再以 200+timed_out 记成功；审计同面记 failure）；不存在 ⇒ 404、非运行 ⇒ 409、
 // 参数非法 ⇒ 400、编排未接入 ⇒ 503。
 
 import (
@@ -73,14 +74,40 @@ func TestContainerExecEndpoint(t *testing.T) {
 		t.Fatalf("未超时不该出现 timed_out: %v", out)
 	}
 
-	// ② 超时：200 + timed_out，且**不得**出现 exit_code（未知 ≠ 0）
+	// ② 超时 ⇒ **504**（决策 #366：超时按失败，不再 200+timed_out 记成功）
+	before := auditRows(t, ts, token)
 	ct.execRes = container.ExecResult{Stdout: "partial", TimedOut: true, Duration: time.Second}
 	status, out = post(map[string]any{"command": "sleep 60", "timeout_seconds": 1})
-	if status != http.StatusOK || out["timed_out"] != true {
-		t.Fatalf("超时应 200 + timed_out，得 %d %v", status, out)
+	if status != http.StatusGatewayTimeout {
+		t.Fatalf("超时应 504（按失败），得 %d %v", status, out)
+	}
+	if out["code"] != "EXEC_TIMEOUT" {
+		t.Fatalf("超时错误码应 EXEC_TIMEOUT: %v", out)
+	}
+	if msg, _ := out["message"].(string); !strings.Contains(msg, "未结束") || !strings.Contains(msg, "可能仍在运行") {
+		t.Fatalf("超时错误应说明已停止等待且进程可能仍在运行: %v", out)
+	}
+	// 504 是标准错误体：不得带部分输出，也不得带退出码
+	if _, has := out["stdout"]; has {
+		t.Fatalf("504 不得携带部分输出: %v", out)
 	}
 	if _, has := out["exit_code"]; has {
-		t.Fatalf("超时时不得报退出码（未知 ≠ 0）: %v", out)
+		t.Fatalf("超时不得报退出码（未知 ≠ 0）: %v", out)
+	}
+	// 审计同面记 failure（三面记账归一：CLI/REST/审计）
+	added := newRows(t, before, auditRows(t, ts, token))
+	foundFailure := false
+	for _, r := range added {
+		if r.Action == "container.exec" && r.Result == "failure" &&
+			strings.Contains(r.Detail, "超时") && strings.Contains(r.Detail, "容器内进程可能仍在运行") {
+			foundFailure = true
+		}
+		if r.Action == "container.exec" && r.Result == "success" {
+			t.Fatalf("超时不得再记 success 审计: %+v", r)
+		}
+	}
+	if !foundFailure {
+		t.Fatalf("超时应记 failure 审计（detail 含超时时长与「容器内进程可能仍在运行」）: %+v", added)
 	}
 
 	// ③ 截断如实上报
@@ -185,7 +212,7 @@ func TestCLIContainerExecRender(t *testing.T) {
 		t.Fatalf("应如实回显退出码: %s", res.Output)
 	}
 
-	// ③ 超时：报失败且**不报**退出码（未知 ≠ 0）
+	// ③ 超时：报失败且**不报**退出码（未知 ≠ 0）；审计同面记 failure（决策 #366 三面归一）
 	ct.execResult = container.ExecResult{Stdout: "partial", TimedOut: true, Duration: 3 * time.Second}
 	res = x.Execute("admin", aaa.ClassSuperUser, "ssh", `request container-functions sbc-ct1 exec "sleep 60" timeout 3`)
 	if !strings.Contains(res.Output, "%%") || !strings.Contains(res.Output, "未结束") {
@@ -199,6 +226,29 @@ func TestCLIContainerExecRender(t *testing.T) {
 	}
 	if ct.execTimeout != 3*time.Second {
 		t.Fatalf("timeout 3 应透传，得 %v", ct.execTimeout)
+	}
+	// 结构化视图（x.structured，display json 用）保留 timed_out（CLI 进程内视图，非 REST 契约）
+	if st, ok := x.structured.(map[string]any); !ok {
+		t.Fatalf("超时后应有结构化快照: %#v", x.structured)
+	} else if v := st["timed_out"]; v != true {
+		t.Fatalf("CLI 结构化视图应保留 timed_out: %#v", st)
+	}
+	// 审计：最新一条 container.exec 应是 failure（此前漂移为 success）
+	entries, err := engine.AuditTrail(50, 0)
+	if err != nil {
+		t.Fatalf("读取审计: %v", err)
+	}
+	for _, e := range entries {
+		if e.Action != "container.exec" {
+			continue
+		}
+		if e.Result != "failure" {
+			t.Fatalf("超时的 container.exec 审计应记 failure，实得 %+v", e)
+		}
+		if !strings.Contains(e.Detail, "超时 3s") || !strings.Contains(e.Detail, "容器内进程可能仍在运行") {
+			t.Fatalf("failure 审计应带超时时长与运行中说明: %+v", e)
+		}
+		break // AuditTrail 倒序：最新在前
 	}
 
 	// ④ 截断如实标注

@@ -148,8 +148,10 @@ func (s *Server) dispatchContainerPost(w http.ResponseWriter, r *http.Request) {
 // 与 VM 串口 console 的关键差别是「console 进 guest 串口仍需 guest 凭据，而 exec 是
 // **免凭据的容器内命令执行**（等价 root）」，operator 本不能创建容器，故不能经此绕过。
 //
-// 如实口径：命令跑完（哪怕非 0 退出码）⇒ 200，退出码是**结果**不是失败；超时 ⇒ 200 +
-// `timed_out`（**不带**退出码，容器内进程可能仍在运行）；不存在/非运行 ⇒ 404/409。
+// 如实口径（决策 #366 收口 R142-10 的记账漂移）：命令跑完（哪怕非 0 退出码）⇒ 200，
+// 退出码是**结果**不是失败；超时 ⇒ 504（决策原文「超时/流中断 ⇒ REST 非 2xx」，
+// 不再以 200+timed_out 记成功；不带部分输出，容器内进程可能仍在运行）；
+// 不存在/非运行 ⇒ 404/409。
 func (s *Server) containerExec(w http.ResponseWriter, r *http.Request, name string) {
 	if s.containers == nil {
 		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "容器编排未接入（Docker 未装配）", nil)
@@ -204,9 +206,20 @@ func (s *Server) containerExec(w http.ResponseWriter, r *http.Request, name stri
 		return
 	}
 	// 审计记**命令原文**（操作可追溯），不记输出（可能很大）。
-	exit := "未知（未跑完）"
-	if res.HasExitCode {
-		exit = strconv.Itoa(res.ExitCode)
+	// 超时按失败记账（决策 #366）：决策 #357 原文「只有没跑完（超时/流中断/前置不满足）
+	// 才按失败处理」——此前超时记 success 是实现漂移，三面（CLI/REST/审计）归一。
+	if res.TimedOut {
+		s.engine.Audit(user, "container.exec",
+			fmt.Sprintf("exec 容器 %s: %s（超时 %s，已停止等待；容器内进程可能仍在运行）",
+				name, in.Command, timeout.Round(time.Second)), "failure")
+		writeError(w, http.StatusGatewayTimeout, "EXEC_TIMEOUT",
+			fmt.Sprintf("命令在 %s 内未结束（已停止等待；容器内进程可能仍在运行，退出码未知）",
+				timeout.Round(time.Second)), nil)
+		return
+	}
+	exit := strconv.Itoa(res.ExitCode)
+	if !res.HasExitCode {
+		exit = "未知（未跑完）"
 	}
 	s.engine.Audit(user, "container.exec",
 		fmt.Sprintf("exec 容器 %s: %s（退出码 %s）", name, in.Command, exit), "success")
@@ -220,9 +233,6 @@ func (s *Server) containerExec(w http.ResponseWriter, r *http.Request, name stri
 	}
 	if res.Truncated {
 		out["truncated"] = true
-	}
-	if res.TimedOut {
-		out["timed_out"] = true
 	}
 	writeJSON(w, http.StatusOK, out)
 }

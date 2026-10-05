@@ -763,7 +763,7 @@
         "type": "object"
       },
       "ContainerExecResult": {
-        "description": "容器 exec 结果（决策 #357）。退出码未知时不发该字段（超时/流中断 ⇒ 不谎报 0）；\n`truncated` 仅在被上限裁剪时出现；`timed_out` 仅在超时时出现。\n",
+        "description": "容器 exec 结果（决策 #357；超时语义由 #366 收口：超时回 504，200 只在命令跑完时返回）。\n退出码未知时（流中断）不发该字段（不谎报 0）；`truncated` 仅在被上限裁剪时出现。\n",
         "properties": {
           "duration_ms": {
             "description": "耗时（毫秒）",
@@ -780,10 +780,6 @@
           "stdout": {
             "description": "标准输出（最多 256 KiB，超限置 truncated）",
             "type": "string"
-          },
-          "timed_out": {
-            "description": "已超时（条件出现；此时 exit_code 不出现）",
-            "type": "boolean"
           },
           "truncated": {
             "description": "stdout/stderr 至少一侧被上限裁剪（条件出现）",
@@ -4378,7 +4374,7 @@
         }
       ],
       "post": {
-        "description": "在**运行中**的容器内执行一条命令并返回 stdout/stderr 与退出码（等价容器内 `sh -c`）。\n权限：**super-user only**（`request container-functions <name> exec` 为 S 档）——与 VM 串口\n`console` 的关键差别是「console 进 guest 串口仍需 guest 凭据，而 exec 是**免凭据的容器内\n命令执行**（等价 root）」，operator 本不能创建容器，故不能经此绕过。\n有界且如实：超时默认 30s（可配 1..300），超时**只中止客户端等待**——Docker 不提供 exec\n进程的中止接口，容器内进程**可能仍在运行**；stdout/stderr **各自**上限 256 KiB，超限置\n`truncated`；退出码未知时（超时/流中断）该字段**不出现**（不谎报 0）。\n",
+        "description": "在**运行中**的容器内执行一条命令并返回 stdout/stderr 与退出码（等价容器内 `sh -c`）。\n权限：**super-user only**（`request container-functions <name> exec` 为 S 档）——与 VM 串口\n`console` 的关键差别是「console 进 guest 串口仍需 guest 凭据，而 exec 是**免凭据的容器内\n命令执行**（等价 root）」，operator 本不能创建容器，故不能经此绕过。\n有界且如实：超时默认 30s（可配 1..300），超时**只中止服务端等待**——Docker 不提供 exec\n进程的中止接口，容器内进程**可能仍在运行**；stdout/stderr **各自**上限 256 KiB，超限置\n`truncated`；退出码未知时（超时/流中断）该字段**不出现**（不谎报 0）。\n**超时按失败**（决策原文「超时/流中断 ⇒ REST 非 2xx」；#366 收口 R142-10 的记账漂移）：\n超时回 **504**（标准错误体，不带部分输出；CLI 侧仍有进程内结构化视图），审计记 failure。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -4398,7 +4394,7 @@
                 }
               }
             },
-            "description": "OK（命令已执行完或已超时；结果形状见 ContainerExecResult）"
+            "description": "OK（命令已执行完；超时回 504，不再以 200+`timed_out` 记成功）"
           },
           "400": {
             "$ref": "#/components/responses/Error400"
@@ -4414,6 +4410,9 @@
           },
           "503": {
             "description": "容器编排未接入"
+          },
+          "504": {
+            "description": "超时（命令未在 timeout_seconds 内跑完；容器内进程可能仍在运行）"
           }
         },
         "summary": "在运行中的容器内执行命令（非交互；决策",

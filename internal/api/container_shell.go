@@ -14,14 +14,21 @@ package api
 // 一类会话的 ticket 开不了另一类会话。
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"golang.org/x/net/websocket"
 
 	"github.com/xzjt/nfvis/internal/orchestrator"
 )
+
+// shellStateCheckTimeout shell ticket 端点前置状态检查的硬上界（决策 #366，R142-12）：
+// dockerd 假死时不应让申请挂到客户端超时。包级 var 仅为测试可注入；生产代码不得改写。
+var shellStateCheckTimeout = 10 * time.Second
 
 // handleContainerShellTicket POST /api/v1/container-functions/{name}/shell
 // 申请容器交互式终端凭证（一次性 ticket）。
@@ -42,9 +49,18 @@ func (s *Server) handleContainerShellTicket(w http.ResponseWriter, r *http.Reque
 	}
 	// 前置：容器须运行中。在这里就判（而不是等 WS 升级后才发现）——操作者拿到的是一句
 	// 能照做的错误，而不是一个「连上了但立刻断开」的终端。编排层还会再判一次（纵深防御）。
-	if st, serr := s.containers.ContainerState(r.Context(), name); serr == nil && st != orchestrator.CTStateRunning {
+	// 状态检查有界（决策 #366，R142-12）：dockerd 假死时不应让申请挂到客户端超时（90s）。
+	sctx, cancel := context.WithTimeout(r.Context(), shellStateCheckTimeout)
+	defer cancel()
+	st, serr := s.containers.ContainerState(sctx, name)
+	switch {
+	case serr == nil && st != orchestrator.CTStateRunning:
 		writeError(w, http.StatusConflict, "CONFLICT",
 			fmt.Sprintf("容器 %s 未处于运行态（当前 %s）；先 request container-functions %s start", name, st, name), nil)
+		return
+	case errors.Is(serr, context.DeadlineExceeded):
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE",
+			"Docker 未在 10s 内响应（已中止等待；请确认 docker 服务状态）", nil)
 		return
 	}
 	user := "api"

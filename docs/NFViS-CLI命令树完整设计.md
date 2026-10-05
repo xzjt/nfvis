@@ -225,8 +225,11 @@ request container-functions <name>
   ├─ exec <command> [timeout <seconds>]             # S；在**运行中**的容器内执行命令（非交互，决策 #357）
   │      # <command> 是**一个整体**（含空格请加引号），语义等价容器内 `sh -c`；返回 stdout/stderr 与退出码。
   │      # 有界且如实：超时默认 30s（1..300）；stdout/stderr **各自**上限 256 KiB（超限置 truncated 并标注）；
-  │      #   ⚠️ 超时只中止**客户端等待**——Docker 不提供 exec 进程的中止接口，容器内进程**可能仍在运行**；
-  │      #   退出码未知时（超时/流中断）**不报**（不谎报 0）。
+  │      #   ⚠️ 超时只中止**服务端等待**——Docker 不提供 exec 进程的中止接口，容器内进程**可能仍在运行**；
+  │      #   退出码未知时（超时/流中断）**不报**（不谎报 0）；超时按失败记账（CLI `%%`、审计 failure）。
+  │      #   REST 侧超时回 **504**（非 2xx，#366 收口 R142-10——原 200+`timed_out` 与决策原文相悖）。
+  │      #   客户端（nfvis-cli）对带 `timeout <n>` 的 exec 自动按 n+裕量延长单请求等待——
+  │      #   91..300 秒的超时**端到端可用**，不再被客户端 90s 上限先截断（#366 收口 R142-10）。
   │      # 权限 **S**：与 VM 串口 console 的关键差别——console 进 guest 串口仍需 guest 凭据，
   │      #   而 exec 是**免凭据的容器内命令执行**（等价 root）；operator 本不能创建容器（配置模式 S），
   │      #   若 exec 为 O 即等于绕过该限制 ⇒ 与配置模式/删除同档。
@@ -235,6 +238,8 @@ request container-functions <name>
   │      # 与 VM 串口 `console` **同一套管线**：一次性 ticket + WebSocket 桥接 + CLI raw 接管 + Ctrl-]
   │      #   退出（前端体验一致），底座换成 Docker exec 的 TTY 形态（`Tty:true` + `Upgrade: tcp`
   │      #   ⇒ `101 UPGRADED` 全双工裸流，round139 真机实证）。
+  │      # 打开握手**有界**（#366 收口 R142-12）：dockerd 不响应/非 101 时在秒级如实报错，
+  │      #   不挂起会话（升级成功后的交互流不受限——空闲是常态）。
   │      # 权限 **S**（同 exec：免凭据的容器内命令执行＝等价 root）；前置：容器须 **running**（否则拒绝并指向 start）。
   │      # ⚠️ **断开只关产品侧桥接**（真机实测更正）——WS 断开 ⇒ 关流，但容器内 shell 进程**可能仍在**
   │      #   （Docker 无 exec 中止接口；对照实验：会话结束后容器内仍有 /bin/sh）。需清理时 exec 杀进程或重启容器。

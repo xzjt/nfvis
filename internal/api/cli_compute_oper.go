@@ -444,12 +444,22 @@ func (x *cliExecutor) containerExec(user, name string, rest []string) string {
 		}
 		return "%% " + err.Error() + "\n"
 	}
+	// 超时按失败记账（决策 #366 收口 R142-10 的记账漂移）：决策 #357 原文「只有没跑完
+	// （超时/流中断/前置不满足）才按失败处理（CLI 报 %%、REST 非 2xx）」——此前 %% 报了
+	// 失败而审计记 success，三面（CLI/REST/审计）归一。%% 输出与 x.structured 的
+	// timed_out 字段保留（CLI 进程内结构化视图，非 REST 契约）。
 	exit := "未知（未跑完）"
 	if res.HasExitCode {
 		exit = strconv.Itoa(res.ExitCode)
 	}
-	x.audit(user, "container.exec",
-		fmt.Sprintf("exec 容器 %s: %s（退出码 %s）", name, command, exit), nil)
+	if res.TimedOut {
+		x.engine.Audit(user, "container.exec",
+			fmt.Sprintf("exec 容器 %s: %s（超时 %s，已停止等待；容器内进程可能仍在运行）",
+				name, command, timeout.Round(time.Second)), "failure")
+	} else {
+		x.audit(user, "container.exec",
+			fmt.Sprintf("exec 容器 %s: %s（退出码 %s）", name, command, exit), nil)
+	}
 
 	// 结构化输出（`| display json` / 管道用）。
 	st := map[string]any{

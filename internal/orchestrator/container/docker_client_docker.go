@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -325,8 +326,10 @@ func (c *dockerClient) Exec(ctx context.Context, name, command string, timeout t
 		"Tty":          false,
 		"Cmd":          []string{"/bin/sh", "-c", command},
 	}
-	if err := c.do(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/exec", body, &created); err != nil {
-		return ExecResult{}, err
+	callCtx, cancel := cctx(ctx)
+	defer cancel()
+	if err := c.do(callCtx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/exec", body, &created); err != nil {
+		return ExecResult{}, wrapDockerTimeout(err)
 	}
 	if created.ID == "" {
 		return ExecResult{}, fmt.Errorf("docker exec: 未返回 exec 实例 id")
@@ -405,6 +408,11 @@ func (h *hijackedStream) Close() error                { return h.conn.Close() }
 //
 // 真机 spike 实证（round139）：升级后写入 `echo SHELL-OK; id -u` 能读到 shell 回显；
 // 这正是「不用 WebSocket 也能双向」的那条路——与 CLI/Web 的 WS 桥接在 API 层相接。
+//
+// 决策 #366（R142-12）：拨号后的**整段握手**（写请求 → 状态行 → 头 → 分流）有硬上界
+// shellHandshakeTimeout——此前状态行 `ReadString('\n')`、非 101 错误体的 `ReadByte` 循环
+// （无锚点）、响应头循环三处都可能因 dockerd 假死永久挂起。握手成功即清 deadline
+// （交互流空闲是常态，不得带握手限）。
 func (c *dockerClient) ExecShell(ctx context.Context, name string) (io.ReadWriteCloser, error) {
 	var created struct {
 		ID string `json:"Id"`
@@ -416,8 +424,10 @@ func (c *dockerClient) ExecShell(ctx context.Context, name string) (io.ReadWrite
 		"Tty":          true,
 		"Cmd":          []string{"/bin/sh"},
 	}
-	if err := c.do(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/exec", body, &created); err != nil {
-		return nil, err
+	callCtx, cancel := cctx(ctx)
+	defer cancel()
+	if err := c.do(callCtx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/exec", body, &created); err != nil {
+		return nil, wrapDockerTimeout(err)
 	}
 	if created.ID == "" {
 		return nil, fmt.Errorf("docker exec shell: 未返回 exec 实例 id")
@@ -428,10 +438,48 @@ func (c *dockerClient) ExecShell(ctx context.Context, name string) (io.ReadWrite
 	if err != nil {
 		return nil, fmt.Errorf("连接 Docker socket: %w", err)
 	}
+	return execShellHandshake(conn, created.ID)
+}
+
+// shellHandshakeTimeout exec shell 握手段（写请求 → 读状态行/头 → 分流）的硬上界
+// （决策 #366，R142-12）。包级 var 仅为测试可注入更小值；生产代码不得改写。
+var shellHandshakeTimeout = 10 * time.Second
+
+// dockerCallTimeout docker API 单次调用（State 检查 / exec·shell 的 create）的硬上界
+// （决策 #366，R142-12：真机 SIGSTOP 实测——dockerd 冻结时这些调用无超时、挂满整个
+// 观察窗口，是「dockerd 挂死即挂住」的真实挂点）。到期取消请求：未被读走的请求随连接
+// 关闭被 dockerd 丢弃，不留「底座恢复后幽灵执行」。包级 var 仅为测试可注入。
+var dockerCallTimeout = 10 * time.Second
+
+// wrapDockerTimeout 底座无响应的报错要**可照做**：裸 `context deadline exceeded`
+// 不说人话，包装成「Docker 未响应」并保留原错误。
+func wrapDockerTimeout(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("Docker 未在 %s 内响应（已中止等待；请确认 docker 服务状态）", dockerCallTimeout)
+	}
+	return err
+}
+
+// cctx 给调用方 ctx 加 dockerCallTimeout 硬上界（决策 #366）。exec 的 start 等待
+// 窗口另有自己的 wctx（= exec timeout），不经此包装。
+func cctx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, dockerCallTimeout)
+}
+
+// execShellHandshake 拨号后的握手段（可测，决策 #366）：
+//   - 开头给 conn 设 shellHandshakeTimeout deadline——三处曾经无界的读（状态行、
+//     非 101 错误体、响应头）都由它兜底；
+//   - 非 101：按行读头解析 Content-Length（缺省/非法按 0），按锚点读 min(CL, 8 KiB)
+//     正文作错误摘录（不再是无锚点的 ReadByte 循环）；
+//   - 101：读完头**清 deadline** 再返回流（TTY 交互空闲是常态）。
+//
+// 任何失败路径都关 conn。
+func execShellHandshake(conn net.Conn, execID string) (io.ReadWriteCloser, error) {
+	_ = conn.SetDeadline(time.Now().Add(shellHandshakeTimeout))
 	startBody := `{"Detach":false,"Tty":true}`
 	req := fmt.Sprintf("POST /exec/%s/start HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\n"+
 		"Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: %d\r\n\r\n%s",
-		url.PathEscape(created.ID), len(startBody), startBody)
+		url.PathEscape(execID), len(startBody), startBody)
 	if _, err := conn.Write([]byte(req)); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("docker exec shell 请求: %w", err)
@@ -444,17 +492,10 @@ func (c *dockerClient) ExecShell(ctx context.Context, name string) (io.ReadWrite
 	}
 	if !strings.Contains(statusLine, " 101 ") {
 		// 非升级响应：把可读到的正文带上（Docker 的报错在正文里），便于定位。
-		rest := make([]byte, 0, 512)
-		for len(rest) < 4096 {
-			b, rerr := br.ReadByte()
-			if rerr != nil {
-				break
-			}
-			rest = append(rest, b)
-		}
+		body := readUpgradeRejectBody(br)
 		_ = conn.Close()
 		return nil, fmt.Errorf("docker exec shell: 未升级为裸流（%s：%s）",
-			strings.TrimSpace(statusLine), strings.TrimSpace(string(rest)))
+			strings.TrimSpace(statusLine), strings.TrimSpace(body))
 	}
 	for { // 读掉响应头（空行即止；其后即 TTY 字节流）
 		line, lerr := br.ReadString('\n')
@@ -466,5 +507,42 @@ func (c *dockerClient) ExecShell(ctx context.Context, name string) (io.ReadWrite
 			break
 		}
 	}
+	// 决策 #366：握手完成即清 deadline——返回的流是交互 TTY，空闲等待是常态，
+	// 绝不能带着握手限去读（否则用户停在提示符 shellHandshakeTimeout 后必断）。
+	_ = conn.SetDeadline(time.Time{})
 	return &hijackedStream{conn: conn, r: br}, nil
+}
+
+// readUpgradeRejectBody 非 101 响应的错误正文摘录：按行读头解析 Content-Length
+// （缺省/非法按 0 ⇒ 不读正文），按锚点读 min(ContentLength, 8 KiB)。读取都受握手
+// deadline 兜底；连接提前关闭时读到多少算多少。
+func readUpgradeRejectBody(br *bufio.Reader) string {
+	cl := 0
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			break
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			break
+		}
+		if v, ok := strings.CutPrefix(strings.ToLower(line), "content-length:"); ok {
+			if n, perr := strconv.Atoi(strings.TrimSpace(v)); perr == nil && n > 0 {
+				cl = n
+			}
+		}
+	}
+	if cl > 8<<10 {
+		cl = 8 << 10
+	}
+	rest := make([]byte, 0, min(cl, 512))
+	for len(rest) < cl {
+		b, rerr := br.ReadByte()
+		if rerr != nil {
+			break
+		}
+		rest = append(rest, b)
+	}
+	return string(rest)
 }
