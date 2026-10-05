@@ -102,8 +102,7 @@ PR：https://github.com/xzjt/nfvis/pull/305（base v2）。
 - 真机构建：`git archive` → `/root/src.new`（`SOURCE_DATE_EPOCH=1791206714`）→ `make deb VERSION=2.0.0~dev99` → `dpkg -i`。
 - Browser Use 的 IAB 标签页保留（未关闭）。
 
-§6 未竟 / 边界（如实）
-- **B7 的取消侧**在真机上以「客户端断开」观测（审计记 `context canceled`）；「窗口到期」正向路径同场复验（504）。
+§6 未竟 / 边界（如实）- **B7 的取消侧**在真机上以「客户端断开」观测（审计记 `context canceled`）；「窗口到期」正向路径同场复验（504）。
 - **B8 的竞态 404**（State 与 Exec 之间容器被删）与 **B10 的拨号失败文案**在真机难以确定性构造，由单测覆盖（红-绿）。
 - **`containerAction`（start/stop/restart）与 `logs`** 的底座错误仍按既有映射（500）；契约未对这两个端点声明 503，
   本轮**有意不改**（决策 #375 明文），如后续统一另立项。
@@ -111,3 +110,12 @@ PR：https://github.com/xzjt/nfvis/pull/305（base v2）。
 - **教训入册**：真机验证**当场暴露了 B8 的另一半**——「Provider 运行期不可达 ⇒ 503」修好后，
   「**Docker 启动时即不可达 ⇒ 持有层未接入 ⇒ 500**」才在真机（装包时 docker 停着）显现；
   只读代码会漏掉持有层这一层。这与 round149~151 的「修复后仍失败要按链路逐环验证」同族。
+
+§7 四套件复跑（dev99）
+- `cli-fulltest` **254/0/18** ｜ `cli-semantic-check` **26/0/3** ｜ `cli-lifecycle-check` **22/0/3** ｜
+  `cli-pty-smoke` **10/10**——与基线逐项一致（语义 26/0/3：S13 现场在场已判定、S8 冷窗如实不可判定、
+  S11/S12 按设计；lifecycle 22/0/3：L3-2 正控未热，**非回归**）。
+- 跑法：夹具 `up` → 停 `sem-vm` 让 1G 页 → fulltest → 起 `sem-vm` → 设 S13 现场 → 语义 → lifecycle → pty；
+  收尾 `systemctl restart vpp && systemctl restart nfvis` 清残留拓扑。
+- ⚠️ 本轮 `make check` 首跑**偶发失败**（`TestMetricsHistoryTruncatedAndLimit`，隔离下 5/5 通过）——
+  定根为 #372 A8 的载入收窄锚点缺陷，另立**决策 #376** 修复（见 `v2-round158b-d376-metrics-narrowing-anchor.txt`）。

@@ -1,0 +1,40 @@
+round158b · 决策 #376 —— 历史时序读视图「载入收窄」锚点修正（修 #372 的 A8 等价性缺陷）
+====================================================================
+日期：2026-10-05；分支 v2-round158-b7b8b10b11（与 #375 同分支）；真机 nfvis-vm 2.0.0~dev99。
+来源：round158 复跑 `make check` 时 `TestMetricsHistoryTruncatedAndLimit` **偶发失败**（隔离下 5/5 通过）。
+PR：https://github.com/xzjt/nfvis/pull/305（base v2）。
+
+§0 结论
+- 定根为 #372 的 A8「载入有界」优化**不满足其声称的等价性**：收窄锚点取 `Query.Until`（读视图 handler 恒设为
+  墙钟 now），当 `until` 晚于**窗口内最新样本**超过一个 `step` 时，收窄窗口从 now 起算 ⇒ **丢掉本应保留的旧点**。
+  用户可见：`last=1h&step=1s&limit=3` 可能只返回 2 个最新点（窗口内有 5 个）。
+- 修法：收窄锚点改为**窗口内最新样本**。修复后该集成用例由**偶发**转为**确定性**；`make check` 全绿。
+
+§1 契约先行
+- 附录 A 决策 #376（v2 线第 77 条）；`AGENTS.md` 决策条数 277→278（`check_decisions_count.sh` ✓）。
+- `docs/v2待做.md` 无对应条目（本条是 #372 的等价性修正，非清单项）。
+
+§2 实现（`internal/metricshist/store.go`）
+- 调用方：`limit>0 && step>0` 时**总是**取 `newestTS(seriesID, q.Until)`（此前**只在哨兵 `until` 时**取——
+  故读视图的 `until=now` 从不取最新样本，锚点落在墙钟上）。
+- `planBoundedLoad`：`anchor := q.Until`（哨兵时才换 `newest`）⇒ 改为**锚点恒为 `newest`**；无样本
+  （`hasNewest=false`）则**不收窄**（不猜，保持原 `since`）。
+- 语义不变：`step` 分桶（桶内取最后一个）、`truncated` 语义、`limit` 缺省、端点/参数/响应形状、CLI/REST/Web 口径。
+
+§3 测试与红-绿
+- `TestPlanBoundedLoad` 更新：锚点＝最新样本；新增回归用例
+  `planBoundedLoad(Query{Since:0, Until:10000, Step:1, Limit:3}, newest=9996, hasNewest=true)` ⇒ 期望 `since=9992`。
+  **红-绿**：把锚点改回 `q.Until`（条件与赋值两处）⇒ 该用例按预期失败
+  （`锚点应为最新样本（不是 until）：since=9996 tr=true`）。
+- `TestMetricsHistoryTruncatedAndLimit`：修复前依赖「请求须在样本写入后 1s 内到达」（墙钟敏感、负载下偶发）；
+  修复后锚点＝最新样本、与请求墙钟无关 ⇒ **确定性通过**（`-count=3` 稳定）。
+
+§4 真机验证（dev99）
+- 四套件复跑与基线逐项一致（fulltest 254/0/18、语义 26/0/3、lifecycle 22/0/3、pty 10/10）——
+  本修复只动历史读视图的**载入计划**，不改端点/形状，套件无涉。
+- 读视图语义由单测钉住（`TestPlanBoundedLoad` 纯函数表 + 集成用例）；真机未构造「until 落后于最新样本」的
+  专门现场（该现场依赖亚秒级时序，正是原用例偶发的成因）——**如实登记为单测覆盖**。
+
+§5 边界（如实）
+- 本修复**只**修正收窄锚点；#372 的其余口径（睡眠重排、enabled 语义、时长上界、DESC 限行）不动。
+- 该缺陷是 round158 `make check` 偶发失败定根而来——**「套件偶发」也要定根**，不能当噪声放过。
