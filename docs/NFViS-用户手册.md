@@ -1124,6 +1124,9 @@ nfvis# commit
 >
 > 查看租约：`show virtual-switches vs-dmz dhcp-leases`；`show virtual-switches vs-dmz detail`
 > 的「DHCP 服务器」块给出池 / 租约时长 / DNS / 域名 / 在租数。
+> 租约状态语义：`offered`（已报 OFFER、待确认）/ `active`（ACK 生效）/ `declined`（客户端声明冲突）。
+> **探测不改变生效租约**——同一客户端的 DISCOVER 不会把它的 `active` 租约降级（续租由 REQUEST→ACK 完成）；
+> **`declined` 地址在隔离期内谁都拿不回**（含声明冲突的那台客户端本身），隔离期为一个租期时长。
 >
 > 停止：`delete dhcp-server pool`（或裸 `delete dhcp-server`）——回收内置 tap 与注册、清租约；
 > 只想去掉某个可选叶子（如改回缺省 DNS）用 `delete dhcp-server dns` 等逐叶子形式。

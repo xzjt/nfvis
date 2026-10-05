@@ -7593,7 +7593,7 @@
     },
     "/virtual-switches/{name}/dhcp-leases": {
       "get": {
-        "description": "DHCP 服务器的**运行态租约表**（用户态服务器的内存/持久化状态，不属配置库）：\n每项一条租约（IP/MAC/状态/到期）。状态 `offered`（已报 OFFER、尚未确认）、\n`active`（ACK 后生效）、`declined`（客户端声明冲突，隔离一个租期）。交换机**未配置\ndhcp-server** 时返回 409 并指明「未配置 DHCP 服务器」（不是空数组——空数组会误导为\n「配了但没租约」，决策 #359 的如实口径）。与 CLI `show virtual-switches <n> dhcp-leases` 同源。\n",
+        "description": "DHCP 服务器的**运行态租约表**（用户态服务器的内存/持久化状态，不属配置库）：\n每项一条租约（IP/MAC/状态/到期）。状态 `offered`（已报 OFFER、尚未确认）、\n`active`（ACK 后生效）、`declined`（客户端声明冲突，隔离一个租期）。**状态语义（决策 #371）**：\n`active` 租约**不因 DISCOVER 降级**（探测/续租探测不改生效租约的地址与到期——续租走 REQUEST→ACK）；\n`declined` 地址在隔离期内**任何客户端**（含声明者本人）都不得被重新授予（REQUEST 一律 NAK）；\n应答报文按 BOOTP 下限**补零到 300 字节**（RFC 2131 §2 兼容老旧/标准客户端）。交换机**未配置\ndhcp-server** 时返回 409 并指明「未配置 DHCP 服务器」（不是空数组——空数组会误导为\n「配了但没租约」，决策 #359 的如实口径）。与 CLI `show virtual-switches <n> dhcp-leases` 同源。\n",
         "responses": {
           "200": {
             "content": {
