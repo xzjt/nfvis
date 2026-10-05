@@ -837,6 +837,18 @@
   lifecycle **22/0/3**（L3-2 正控未热）、pty **10/10**；`make check`（`GOFLAGS=-p=1`）全绿。
   **R142 体检低危观测簇（A/B/C/D/E 五簇）至此全部收口**。证据
   `docs/evidence/v2-round160-d378-startup-selfheal-observations.txt`；真机已装 2.0.0~dev101。
+- **round161（管理口 delete 形态一致，2026-10-05）**：收口 **R152-1**（决策 **#379**）——
+  `delete system management ip address`（**不带值**）此前报「无匹配配置: ip」（树里 `ip address` 比模型
+  `management.address` 多一层 `ip`；别名表只有 5-token 带值形态，无值形态落回通用树遍历去找不存在的
+  `system.management.ip`），与 `delete system management interface`（不带值，走树路径直接删叶子）形态不一致。
+  修法＝新增 **4-token 别名规则** `{"system","management","ip","address"}`：delete 清 `management.address`
+  （值可省，与 `interface`/`gateway` 一致）、set 如实报「缺少取值」；既有 5-token 带值规则不动
+  （`patternMatches` 按长度精确匹配）。**红-绿**：临时使规则长度不符 ⇒ 用例报「无匹配配置: ip」（与体检记录
+  逐字一致）。**真机 A/B（候选内、不提交——守管理口红线）**：dev101 复现「无匹配配置: ip」→ dev102 delete
+  成功（「已删除 system management ip address（未提交）」）、set 缺值报「缺少取值」、`interface` 形态不回归；
+  试验后 `management` 已提交配置计数 0、无持锁会话、SSH 正常。**四套件（dev102）**：fulltest **254/0/18**、
+  语义 **27/0/2**、lifecycle **22/0/3**、pty **10/10**；`make check` 全绿。证据
+  `docs/evidence/v2-round161-d379-management-delete-form.txt`；真机已装 2.0.0~dev102。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。

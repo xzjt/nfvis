@@ -1,0 +1,55 @@
+round161 · 决策 #379 —— 管理口 `delete` 语句形态一致（R152-1 收口）
+====================================================================
+日期：2026-10-05；分支 v2-round161-r152-1（bae6e09 契约先行 → ccbb832 实现）；真机 nfvis-vm 2.0.0~dev102。
+来源：R152-1（round152 真机观察，登记于 `docs/v2待做.md` 二·新登记）。
+PR：https://github.com/xzjt/nfvis/pull/308（base v2）。
+
+§0 结论
+- R152-1 收口：`delete system management ip address`（**不带值**）不再报「无匹配配置: ip」，与 `interface`/`gateway`
+  的 delete 形态一致（值可省）；`set … ip address` 缺值如实报「缺少取值」。**红-绿**；`make check` 全绿；
+  真机 A/B（dev101 复现 → dev102 修复）**候选内**完成、**全程未提交任何管理口改动**（守红线）。
+
+§1 契约先行（bae6e09）
+- 附录 A 决策 #379（v2 线第 80 条）；`AGENTS.md` 决策条数 280→281（`check_decisions_count.sh` ✓）。
+- `docs/v2待做.md`：R152-1 标为收口。
+
+§2 实现（ccbb832）
+- `internal/api/cli_aliases_system.go`：新增 **4-token 别名规则** `{"system","management","ip","address"}`——
+  delete（`isSet=false`）清 `management.address`；set（`isSet=true`）返回 `缺少取值：set system management
+  ip address <prefix>`。既有 5-token 带值规则 `{…,"address","*"}` 不动（`patternMatches` 按长度精确匹配，互不干扰）。
+- **根因**：树里 `ip address` 比模型多一层 `ip`（模型是 `management.address`）；别名表只有带值形态，无值形态落回
+  通用树遍历去找不存在的 `system.management.ip` ⇒ 报「无匹配配置: ip」。`delete` 分派**先过 `matchAlias`**
+  （`cliexec.go:1236`），故补一条 4-token 规则即修好。
+
+§3 测试与红-绿
+- `TestCLIManagementIPAddressDeleteValueOptional`：4-token delete 清 `address`；4-token set 报「缺少取值」；
+  5-token 带值形态仍能设；`interface` delete 不回归。
+- **红-绿**：把 4-token 规则的 pattern 临时改成长度不符（`__red__`）⇒ 用例失败，报
+  `命令 "delete system management ip address" 失败: %% 无匹配配置: ip`——**与体检记录逐字一致**；还原即通过。
+- 既有 `TestCLIManagementStatements` / `TestCLIManagementIsolationEnforced` 不回归。
+
+§4 真机验证（A/B，候选内、不提交——守「管理口红线」）
+- **dev101（旧）复现**：候选内 `configure` → `set system management interface ens160` →
+  `set system management ip address 192.168.155.129/24` → `delete system management ip address`（不带值）
+  ⇒ **`%% 无匹配配置: ip`**（脚本停在该行）。
+- **dev102（新）修复**：同序列 ⇒ delete 行输出 **`已删除 system management ip address（未提交）`**（无错误）。
+- **set 缺值**：dev102 下 `set system management ip address`（无值）⇒ **`%% 缺少取值：set system management
+  ip address <prefix>`**（不静默）。
+- **interface 形态不回归**：dev102 下 `delete system management interface`（不带值）照常成功。
+- **红线核对**：每次试验后 `show configuration | display set` 中 `management` 出现 **0** 次、
+  `show configuration sessions` 为「无持锁会话」、`systemctl is-active nfvis` active（SSH 未受影响）——
+  **候选随脚本会话结束释放，管理口已提交配置全程未动**。
+
+§5 现场与清场（如实）
+- 真机实验**只在候选内**做管理口语句试验，**无一次 commit**；`-f -` 脚本结束即释放候选（实测无残留锁）。
+- 已提交配置 `management` 计数 0；告警仅常态 `HUGEPAGE_POOL_ORPHAN`；四服务 active。
+- 真机构建：`git archive` → `/root/src.new`（`SOURCE_DATE_EPOCH=1791217965`）→ `make deb VERSION=2.0.0~dev102` → `dpkg -i`。
+
+§6 未竟 / 边界（如实）
+- `discard` 在「刚 configure + set 后」报「当前会话未持有 candidate」——本轮以「脚本会话结束即释放」完成清场，
+  **未深究该 `discard` 行为**（与 R152-1 无关；如后续需要另登记）。
+- 本项只改 CLI 别名；REST 侧无对应语句（管理口经 REST 走强类型字段），不受影响。
+
+§7 四套件复跑（dev102）
+- `cli-fulltest` **254/0/18** ｜ `cli-semantic-check` **27/0/2**（S8 窗口热）｜ `cli-lifecycle-check` **22/0/3**
+  （L3-2 正控未热，非回归）｜ `cli-pty-smoke` **10/10**——与基线逐项一致。
