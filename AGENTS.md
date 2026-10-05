@@ -849,6 +849,21 @@
   试验后 `management` 已提交配置计数 0、无持锁会话、SSH 正常。**四套件（dev102）**：fulltest **254/0/18**、
   语义 **27/0/2**、lifecycle **22/0/3**、pty **10/10**；`make check` 全绿。证据
   `docs/evidence/v2-round161-d379-management-delete-form.txt`；真机已装 2.0.0~dev102。
+- **round162（R140-1 根治，2026-10-06）**：**真机复现出可复现变体**（决策 **#380**）——`DhcpProvider.SyncRelay`
+  只在**转发域（表）变化**时撤旧 proxy 条目；**改 server（同域）**时只 `IsAdd=true` 下发新条目、**不撤旧的**
+  ⇒ `vppctl show dhcp proxy` 出现**两条**；此后**删除 relay** 只按进程内登记里的**最新** server 撤 ⇒
+  **旧条目永久残留**、该 FIB 仍带 `DHCP:` 锁、UDP/67 仍被 dhcp-proxy 节点按 `no dhcp server configured` 吞掉
+  （**R140-1 的实质**；也解释了 round140「删除后仍吞包」与 round151「删除后条目仍在」两种记录）。
+  **修法两层**：① **变更撤旧**——`SyncRelay` 撤旧条件由 `had && rec.tableID != tableID` 改为 **`had`**
+  （值未变的幂等已早退，到达即「记录已变」），同域改 server 也先撤旧再下发；② **对账自愈**——新增
+  `DhcpProvider.ReconcileProxy`，用 VPP **`dhcp_proxy_dump`** 取**数据面实际**条目与「配置声明的 relay 集合」
+  比对，**未声明/陈旧**条目逐个 `ProxySet(IsAdd=false)` 清除；**不靠进程内登记**（跨 nfvisd 重启仍有效）；
+  接入既有 **15s 巡检**（与残渣对账同块，不新造定时器）；dump 失败即跳过本轮（**零删除**）、清除失败如实返回。
+  **真机决定性 A/B（dev103）**：旧构建（dev102r = round161 源码重建）确定性造残留（改 server 两条 → 删除后
+  残留 `155.1` + FIB `DHCP:2`）→ 装 dev103 **后立即仍残留（1 条）** → **+22s 消失**（0 条、FIB 无 DHCP 锁）
+  ⇒ **确为 15s 对账清除**（非重启所致）；(A) 变更撤旧同场实证（改 server ⇒ `show dhcp proxy` 只 1 条、删除 ⇒ 0 条）。
+  **四套件（dev103）**：fulltest **254/0/18**、语义 **27/0/2**、lifecycle **22/0/3**、pty **10/10**；`make check` 全绿。
+  证据 `docs/evidence/v2-round162-d380-dhcp-relay-proxy-reconcile.txt`；真机已装 2.0.0~dev103。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
