@@ -174,3 +174,69 @@ func TestReconcileRecoveryAlarmsDoesNotTouchOtherCodes(t *testing.T) {
 		t.Fatal("残渣码不得被恢复复核触碰")
 	}
 }
+
+// —— 决策 #367（收口 R142-7）：三段子来源 virtual-switches/<sw>/<leaf> 的消解矩阵 ——
+
+// ⑦a 交换机已删：三类子来源（learn-limit/dhcp-relay/dhcp-server）都应消解。
+func TestReconcileRecoveryAlarmsSubSourceSwitchDeleted(t *testing.T) {
+	f := newRecoveryFixture()
+	raiseRecovery(f, AlarmUnconverged, "virtual-switches/vs-gone/learn-limit")
+	raiseRecovery(f, AlarmUnconverged, "virtual-switches/vs-gone/dhcp-relay")
+	raiseRecovery(f, AlarmUnconverged, "virtual-switches/vs-gone/dhcp-server")
+
+	if errs := f.net.ReconcileRecoveryAlarms(context.Background(), model.Config{}); len(errs) != 0 {
+		t.Fatalf("不应有查询错误: %v", errs)
+	}
+	if got := recoveryActive(f); len(got) != 0 {
+		t.Fatalf("交换机已删，三类子来源告警都应消解: %v", got)
+	}
+}
+
+// ⑦b 交换机在但子特性已删 → 消解（恢复重放不会再碰它）。
+func TestReconcileRecoveryAlarmsSubSourceFeatureDeleted(t *testing.T) {
+	f := newRecoveryFixture()
+	raiseRecovery(f, AlarmUnconverged, "virtual-switches/vs-a/learn-limit")
+	raiseRecovery(f, AlarmUnconverged, "virtual-switches/vs-a/dhcp-relay")
+	raiseRecovery(f, AlarmUnconverged, "virtual-switches/vs-a/dhcp-server")
+	cfg := model.Config{VirtualSwitches: []model.VirtualSwitch{{Name: "vs-a", Type: "l2"}}}
+
+	if errs := f.net.ReconcileRecoveryAlarms(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("不应有查询错误: %v", errs)
+	}
+	if got := recoveryActive(f); len(got) != 0 {
+		t.Fatalf("子特性声明已删，告警应消解: %v", got)
+	}
+}
+
+// ⑦c 交换机在、子特性仍声明 → 保留（UNCONVERGED 无法廉价证实「现在能 apply 成功」）。
+func TestReconcileRecoveryAlarmsSubSourceStillDeclared(t *testing.T) {
+	f := newRecoveryFixture()
+	raiseRecovery(f, AlarmUnconverged, "virtual-switches/vs-a/learn-limit")
+	raiseRecovery(f, AlarmUnconverged, "virtual-switches/vs-a/dhcp-relay")
+	raiseRecovery(f, AlarmUnconverged, "virtual-switches/vs-a/dhcp-server")
+	cfg := model.Config{VirtualSwitches: []model.VirtualSwitch{{Name: "vs-a", Type: "l2",
+		LearnLimit: 100, DhcpRelayServer: "192.168.99.10",
+		DhcpServerPoolStart: "192.168.99.100", DhcpServerPoolEnd: "192.168.99.110"}}}
+
+	if errs := f.net.ReconcileRecoveryAlarms(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("不应有查询错误: %v", errs)
+	}
+	if got := recoveryActive(f); len(got) != 3 {
+		t.Fatalf("子特性仍声明，三条都应保留: %v", got)
+	}
+}
+
+// ⑦d 未知 leaf / 超过三段 → 保守保留（不猜测）。
+func TestReconcileRecoveryAlarmsSubSourceUnknownLeaf(t *testing.T) {
+	f := newRecoveryFixture()
+	raiseRecovery(f, AlarmUnconverged, "virtual-switches/vs-a/some-future")
+	raiseRecovery(f, AlarmUnconverged, "virtual-switches/vs-a/learn-limit/extra")
+	cfg := model.Config{VirtualSwitches: []model.VirtualSwitch{{Name: "vs-a", Type: "l2"}}}
+
+	if errs := f.net.ReconcileRecoveryAlarms(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("不应有查询错误: %v", errs)
+	}
+	if got := recoveryActive(f); len(got) != 2 {
+		t.Fatalf("未知/过深子来源应保守保留: %v", got)
+	}
+}
