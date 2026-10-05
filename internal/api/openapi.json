@@ -1793,11 +1793,7 @@
                 "type": "boolean"
               },
               "error": {
-                "description": "存储读取失败的原因（条件出现；此时 enabled 仍为 true）",
-                "type": "string"
-              },
-              "health_error": {
-                "description": "采样心跳/错误元信息读取失败的原因（条件出现）",
+                "description": "存储读取失败的原因（条件出现；此时 enabled 仍为 true。整体读失败即在此说明「读取失败」，与「还没有数据」区分）",
                 "type": "string"
               },
               "last_error": {
@@ -1807,10 +1803,6 @@
               "last_tick_ts": {
                 "description": "采样器上次心跳时刻（无记录时省略）",
                 "type": "integer"
-              },
-              "metrics_error": {
-                "description": "指标名清单读取失败的原因（条件出现；区别于「还没有数据」）",
-                "type": "string"
               },
               "newest_ts": {
                 "description": "最新样本时间（无数据时省略）",

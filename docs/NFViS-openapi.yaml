@@ -2946,9 +2946,7 @@ components:
           properties:
             path: { type: string, description: 库文件路径 }
             enabled: { type: boolean, description: "存储是否已启用（未配置库路径时为 false）；**不因单次查询失败而翻 false**（决策 #372）" }
-            error: { type: string, description: "存储读取失败的原因（条件出现；此时 enabled 仍为 true）" }
-            metrics_error: { type: string, description: "指标名清单读取失败的原因（条件出现；区别于「还没有数据」）" }
-            health_error: { type: string, description: "采样心跳/错误元信息读取失败的原因（条件出现）" }
+            error: { type: string, description: "存储读取失败的原因（条件出现；此时 enabled 仍为 true。整体读失败即在此说明「读取失败」，与「还没有数据」区分）" }
             size_bytes: { type: integer }
             series: { type: integer, description: 已登记序列数 }
             samples: { type: integer, description: 样本总行数 }

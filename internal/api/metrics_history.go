@@ -38,17 +38,25 @@ func parseHistoryDuration(s string) (time.Duration, error) {
 	if err != nil || n <= 0 {
 		return 0, fmt.Errorf("无效时长 %q（须为正整数 + 单位 s|m|h|d，如 30s / 5m / 1h / 2d）", s)
 	}
+	var d time.Duration
 	switch unit {
 	case 's':
-		return time.Duration(n) * time.Second, nil
+		d = time.Duration(n) * time.Second
 	case 'm':
-		return time.Duration(n) * time.Minute, nil
+		d = time.Duration(n) * time.Minute
 	case 'h':
-		return time.Duration(n) * time.Hour, nil
+		d = time.Duration(n) * time.Hour
 	case 'd':
-		return time.Duration(n) * 24 * time.Hour, nil
+		d = time.Duration(n) * 24 * time.Hour
+	default:
+		return 0, fmt.Errorf("无效时长 %q（单位须为 s|m|h|d，如 30s / 5m / 1h / 2d）", s)
 	}
-	return 0, fmt.Errorf("无效时长 %q（单位须为 s|m|h|d，如 30s / 5m / 1h / 2d）", s)
+	// 决策 #372（R142 A7）：上界 + 防溢出——大 n 的乘法会溢出 int64（变成负数或小值），
+	// 窗口算术据此给出误导性结果。超界/溢出即报错，不给「看起来对」的窗口。
+	if d <= 0 || d > historyMaxDuration {
+		return 0, fmt.Errorf("时长 %q 超界：上限 3650d（超界或溢出不会给出误导性窗口）", s)
+	}
+	return d, nil
 }
 
 // historyIntervalSeconds 生效的采样间隔（committed 配置；读不到时回落模型默认）。
@@ -89,6 +97,9 @@ func autoHistoryStep(interval int, since, until int64) int64 {
 	}
 	return step
 }
+
+// historyMaxDuration `last`/`step` 时长的上界（3650d；决策 #372/R142 A7 的防溢出界）。
+const historyMaxDuration = 3650 * 24 * time.Hour
 
 // historyStaleThreshold 采样停滞判据：now - last_tick > max(3×间隔, 180s)。
 func historyStaleThreshold(intervalSeconds int) int64 {
@@ -137,20 +148,22 @@ func (s *Server) metricsHistoryView(name string, since, until, step int64, limit
 
 	// 决策 #365：库文件被删/替换（format-data 或操作者 rm）时先重开——否则旧连接仍持已删
 	// inode，读视图会继续显示旧历史（真机实证），与「清数据分区」的承诺相悖。
+	// 决策 #372（R142 A5）：`enabled` 的语义是「存储已启用」，**不因单次读取失败翻 false**——
+	// 读取失败如实进 reason 与 store.error（此前会把「启用但读不到」说成「未启用」）。
+	store["enabled"] = true
 	if err := hist.Store.ReopenIfReplaced(); err != nil {
-		store["enabled"] = false
+		store["error"] = err.Error()
 		view["reason"] = "历史时序存储读取失败：" + err.Error()
 		return view
 	}
 	// 库可打开：概览读数如实取自库本身。
 	st, err := hist.Store.Stats()
 	if err != nil {
-		store["enabled"] = false
+		store["error"] = err.Error()
 		view["reason"] = "历史时序存储读取失败：" + err.Error()
 		return view
 	}
 	view["available"] = true
-	store["enabled"] = true
 	store["size_bytes"] = st.SizeBytes
 	store["series"] = st.Series
 	store["samples"] = st.Samples
@@ -161,6 +174,9 @@ func (s *Server) metricsHistoryView(name string, since, until, step int64, limit
 		store["newest_ts"] = st.NewestTS
 	}
 	// 采样器心跳：仅当曾有过一次心跳才报「上次采样/是否停滞」（无记录不编造时刻）。
+	// 决策 #372（R142 A6，如实口径）：整体读失败在 Stats 处即早退（reason + store.error 说明
+	// 「读取失败」，enabled 不翻 false）——单连接下「Stats 可读而心跳读失败」不可构造，
+	// 故**不新增**不可达的细粒度错误字段（不留假字段）。
 	if lastTick, lastErr, herr := hist.Store.Health(); herr == nil {
 		if lastTick != 0 {
 			store["last_tick_ts"] = lastTick
@@ -411,7 +427,6 @@ func (x *cliExecutor) renderMetricsHistoryOverview() string {
 	if lastErr := viewString(store, "last_error"); lastErr != "" {
 		fmt.Fprintf(&b, "上次采样错误: %s\n", lastErr)
 	}
-
 	names := viewStrings(view, "metrics")
 	if len(names) == 0 {
 		b.WriteString("已知指标:     （无：采样器尚未写入任何指标，可用 show system metrics history 稍后重试）\n")

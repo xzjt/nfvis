@@ -71,7 +71,7 @@ func TestMetricsHistoryRunnerIntervalFromConfig(t *testing.T) {
 		sleep: func(ctx context.Context, d time.Duration) bool {
 			slept = append(slept, d)
 			calls++
-			return calls <= 2 // 第 3 次睡眠返回 false = 模拟 ctx 取消
+			return calls <= 61 // 决策 #372：分片睡眠——61 片覆盖 2 个 30s 周期后退出
 		},
 		gather: func(ctx context.Context) ([]metrics.Sample, error) {
 			return []metrics.Sample{{Name: "nfvis_t", Value: 1}}, nil
@@ -83,11 +83,14 @@ func TestMetricsHistoryRunnerIntervalFromConfig(t *testing.T) {
 	}
 	r.run(context.Background())
 
-	if len(slept) != 3 {
-		t.Fatalf("应睡眠 3 次后退出，实际 %d 次：%v", len(slept), slept)
+	// 决策 #372（R142 A2）：睡眠按 ≤1s 分片、每片重读间隔——30s 间隔 = 30 片一次 tick。
+	if len(slept) != 62 {
+		t.Fatalf("应睡眠 62 次（61 次成功 + 1 次取消）后退出，实际 %d 次", len(slept))
 	}
-	if slept[0] != 30*time.Second {
-		t.Fatalf("首轮睡眠应取 committed 配置的 30s，实际 %v", slept[0])
+	for i, d := range slept {
+		if d > time.Second {
+			t.Fatalf("第 %d 片睡眠 %v 超过分片上限 1s（间隔改小将无法及时生效）", i, d)
+		}
 	}
 	lastTick, lastErr, err := st.Health()
 	if err != nil {
@@ -112,7 +115,7 @@ func TestMetricsHistoryRunnerGatherFailureKeepsLooping(t *testing.T) {
 		now:    time.Now,
 		sleep: func(ctx context.Context, d time.Duration) bool {
 			sleeps++
-			return sleeps <= 2
+			return sleeps <= 11 // 10 片 = 1 个 10s 周期（触发一次失败采集）+ 1 次取消
 		},
 		gather: func(ctx context.Context) ([]metrics.Sample, error) {
 			return nil, errors.New("底座不可达")
@@ -124,8 +127,8 @@ func TestMetricsHistoryRunnerGatherFailureKeepsLooping(t *testing.T) {
 	}
 	r.run(context.Background())
 
-	if sleeps != 3 {
-		t.Fatalf("采集失败不应终止循环（应睡 3 次退出），实际 %d", sleeps)
+	if sleeps != 12 {
+		t.Fatalf("采集失败不应终止循环（应睡 12 次退出），实际 %d", sleeps)
 	}
 	_, lastErr, err := st.Health()
 	if err != nil {
@@ -155,7 +158,7 @@ func TestMetricsHistoryRunnerPrunesOnSchedule(t *testing.T) {
 		sleep: func(ctx context.Context, d time.Duration) bool {
 			clock = clock.Add(d) // 假时钟随睡眠前进
 			calls++
-			return calls <= 5
+			return calls <= 151 // 150 片 = 5 个 30s 周期（第 3 轮到点裁剪）
 		},
 		gather: func(ctx context.Context) ([]metrics.Sample, error) {
 			return []metrics.Sample{{Name: "nfvis_t", Value: 1}}, nil
@@ -174,5 +177,64 @@ func TestMetricsHistoryRunnerPrunesOnSchedule(t *testing.T) {
 	}
 	if stats.Samples != 5 {
 		t.Fatalf("到点裁剪应删掉超窗旧样本（期望 5 行，实际 %d）", stats.Samples)
+	}
+}
+
+// 决策 #372（R142 A2）：间隔**调小**后不再等整段旧睡眠——分片重读使新间隔在下一片内生效
+// （旧实现会先睡满 3600s，读视图按新间隔算 stale 阈值 ⇒ 假 stale）。
+func TestMetricsHistoryRunnerReschedulesOnIntervalShrink(t *testing.T) {
+	st := newSamplerStore(t)
+	eng := newSamplerEngine(t, 3600, 7)
+
+	clock := time.Unix(1_700_000_000, 0)
+	base := clock
+	calls := 0
+	changed := false
+	var gatherAt []time.Duration
+	r := &metricsHistoryRunner{
+		store:  st,
+		engine: eng,
+		now:    func() time.Time { return clock },
+		sleep: func(ctx context.Context, d time.Duration) bool {
+			clock = clock.Add(d)
+			calls++
+			// 第 5 片时把间隔从 3600s 改成 10s（模拟操作者改配置）
+			if calls == 5 && !changed {
+				changed = true
+				sess := config.Session{User: "system", Source: "console"}
+				if err := eng.Edit(sess); err != nil {
+					t.Fatalf("Edit: %v", err)
+				}
+				cfg := model.Config{System: &model.SystemConfig{Metrics: &model.MetricsConfig{
+					History: &model.MetricsHistoryConfig{IntervalSeconds: 10, RetentionDays: 7},
+				}}}
+				if err := eng.UpdateCandidate(sess, cfg); err != nil {
+					t.Fatalf("UpdateCandidate: %v", err)
+				}
+				if _, err := eng.Commit(context.Background(), sess, config.CommitOpts{AllowNoSuperUser: true}); err != nil {
+					t.Fatalf("Commit: %v", err)
+				}
+				_ = eng.Release(sess)
+			}
+			return calls <= 30 // 30 片后退出
+		},
+		gather: func(ctx context.Context) ([]metrics.Sample, error) {
+			gatherAt = append(gatherAt, clock.Sub(base)) // 记录每次采集的时钟（相对基准）
+			return []metrics.Sample{{Name: "nfvis_t", Value: 1}}, nil
+		},
+		pruneEvery:    time.Hour,
+		maxRows:       metricshist.MaxRows,
+		errorEvery:    0,
+		gatherTimeout: time.Second,
+	}
+	r.run(context.Background())
+
+	// 第 5 片（t=+5s）改小间隔后，下一片起按 10s 计时 ⇒ **首个采集应在改后 ≤10s**
+	// （旧实现会先睡满 3600s——本用例即钉住该回归）。
+	if len(gatherAt) == 0 {
+		t.Fatal("间隔调小后应有采集发生")
+	}
+	if gatherAt[0] > 15*time.Second {
+		t.Fatalf("首个采集应在改间隔（+5s）后 ≤10s 内发生，实际 +%v（旧实现 +3600s）", gatherAt[0])
 	}
 }

@@ -234,6 +234,15 @@ func TestParseHistoryDuration(t *testing.T) {
 			t.Fatalf("parseHistoryDuration(%q) 应报错", bad)
 		}
 	}
+	// 决策 #372（R142 A7）：上界 3650d + 防溢出——超界/溢出必须报错，不得给出误导性窗口。
+	if d, err := parseHistoryDuration("3650d"); err != nil || d != 3650*24*time.Hour {
+		t.Fatalf("3650d 应恰好在上界内：%v %v", d, err)
+	}
+	for _, over := range []string{"3651d", "999999999999d", "9999999999999999999d", "999999999999h"} {
+		if _, err := parseHistoryDuration(over); err == nil {
+			t.Fatalf("parseHistoryDuration(%q) 超界/溢出应报错（旧实现会溢出成误导性时长）", over)
+		}
+	}
 }
 
 func TestAutoHistoryStep(t *testing.T) {
@@ -319,5 +328,46 @@ func TestDynamicMetricNamesCandidate(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "nfvis_metric_a") || !strings.Contains(string(body), "nfvis_metric_b") {
 		t.Fatalf("候选应含库内指标名：%s", body)
+	}
+}
+
+// 决策 #372（R142 A5/A6）：库启用但**本次读取失败**时——enabled 不翻 false、如实给 error 字段、
+// 不把「查不了」显示成「还没有数据」。
+func TestMetricsHistoryReadFailureKeepsEnabledAndReports(t *testing.T) {
+	st := newHistoryStore(t)
+	now := time.Now().Unix()
+	if err := st.Append(now, []metricshist.Sample{{Name: "nfvis_y_ratio", Value: 1}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	ts := newTestServerOpts(t, Options{MetricsHistory: &MetricsHistoryOptions{Store: st, Path: st.Path()}})
+	token := loginAdmin(t, ts)
+	if err := st.Close(); err != nil { // 关库 ⇒ 后续查询失败（模拟读取失败）
+		t.Fatalf("Close: %v", err)
+	}
+
+	status, _, body := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/metrics/history", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("读失败仍应 200（诚实口径）：%d %s", status, body)
+	}
+	obj := responseObject(t, body)
+	if av, _ := obj["available"].(bool); av {
+		t.Fatalf("库读不到时 available 应为 false：%s", body)
+	}
+	if reason, _ := obj["reason"].(string); !strings.Contains(reason, "读取失败") {
+		t.Fatalf("reason 应如实说「读取失败」而不是「未启用」：%s", body)
+	}
+	store, _ := obj["store"].(map[string]any)
+	if en, _ := store["enabled"].(bool); !en {
+		t.Fatalf("读取失败不得把 store.enabled 翻成 false（语义=存储是否启用）：%s", body)
+	}
+	if e, _ := store["error"].(string); e == "" {
+		t.Fatalf("读取失败应给 store.error 如实说明：%s", body)
+	}
+	// 库整体读不到时（Stats 先失败）metrics 恒为空数组、reason/error 如实——
+	// 「Stats 成功但 MetricNames/Health 失败」在单连接下不可构造（同一库先败先退），
+	// 故 metrics_error/health_error 由下面的损坏-meta 用例覆盖 health 一路（A6）。
+	metrics, _ := obj["metrics"].([]any)
+	if len(metrics) != 0 {
+		t.Fatalf("库读不到时 metrics 应为空数组：%s", body)
 	}
 }

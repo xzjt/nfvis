@@ -335,9 +335,28 @@ func (s *Store) Query(q Query) (QueryResult, error) {
 }
 
 func (s *Store) points(seriesID int64, q Query) ([]Point, bool, error) {
-	rows, err := s.db.Query(
-		`SELECT ts, value FROM samples WHERE series_id = ? AND ts >= ? AND ts <= ? ORDER BY ts`,
-		seriesID, q.Since, q.Until)
+	// 决策 #372（R142 A8）：载入内存**有界**——此前把窗口内全部原始行读进内存后才裁 limit
+	// （注释宣称防拉爆内存，实际未防）。
+	//   · step>0：把窗口收窄到「最新 limit+1 个桶」（多留一桶做对齐余量，结果与全窗口+裁剪
+	//     逐点一致——更旧的点本来就会被裁掉）；
+	//   · step<=0：SQL 侧 ORDER BY ts DESC LIMIT limit+1 再反转（保留最新 limit 个）。
+	newest, hasNewest := int64(0), false
+	if q.Limit > 0 && q.Step > 0 && q.Until >= storeMaxUntil {
+		newest, hasNewest = s.newestTS(seriesID, q.Until)
+	}
+	since, descLimit, truncated := planBoundedLoad(q, newest, hasNewest)
+	q.Since = since
+	query := `SELECT ts, value FROM samples WHERE series_id = ? AND ts >= ? AND ts <= ? ORDER BY ts`
+	if descLimit > 0 {
+		query = `SELECT ts, value FROM samples WHERE series_id = ? AND ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT ?`
+	}
+	var rows *sql.Rows
+	var err error
+	if descLimit > 0 {
+		rows, err = s.db.Query(query, seriesID, q.Since, q.Until, descLimit)
+	} else {
+		rows, err = s.db.Query(query, seriesID, q.Since, q.Until)
+	}
 	if err != nil {
 		return nil, false, fmt.Errorf("查询样本: %w", err)
 	}
@@ -355,15 +374,65 @@ func (s *Store) points(seriesID int64, q Query) ([]Point, bool, error) {
 		return nil, false, err
 	}
 	_ = rows.Close()
+	if descLimit > 0 {
+		// DESC 取回：行数超 limit ⇒ 真值截断；保留最新 limit 个（反转成升序）。
+		if len(raw) > q.Limit {
+			raw = raw[:q.Limit]
+			truncated = true
+		}
+		for i, j := 0, len(raw)-1; i < j; i, j = i+1, j-1 {
+			raw[i], raw[j] = raw[j], raw[i]
+		}
+	}
 
 	pts := downsample(raw, q.Step)
-	truncated := false
 	if q.Limit > 0 && len(pts) > q.Limit {
 		// 保留**最新**的 Limit 个点（回溯以近端为本）——这是**真的**丢了数据，如实置位。
 		pts = pts[len(pts)-q.Limit:]
 		truncated = true
 	}
 	return pts, truncated, nil
+}
+
+// planBoundedLoad 计算「载入有界」的查询计划（决策 #372/R142 A8）：
+// 返回收窄后的 since、DESC 限行数（0=不限）、以及是否真值截断。
+//
+//	· step>0：窗口收窄到「最新 limit+1 个桶」（多留一桶做对齐余量；结果与全窗口+裁剪逐点一致）。
+//	  锚点：调用方给了 until 就用它；哨兵（未给）时以**最新样本** newest 为锚——直接按哨兵
+//	  收窄会得到「未来空窗」而返回空结果（测试当场抓到）。
+//	· step<=0：DESC + LIMIT limit+1（多取一行判定是否真被裁）。
+func planBoundedLoad(q Query, newest int64, hasNewest bool) (since int64, descLimit int, truncated bool) {
+	since = q.Since
+	switch {
+	case q.Limit > 0 && q.Step > 0:
+		anchor := q.Until
+		if anchor >= storeMaxUntil {
+			if !hasNewest {
+				break // 哨兵且无样本：没有可用的锚点，不收窄（不猜）
+			}
+			anchor = newest
+		}
+		if w := int64(q.Limit+1) * q.Step; anchor-w > since {
+			since = anchor - w
+			truncated = true // 窗口被收窄 ⇒ 更旧的点被排除（真值截断）
+		}
+	case q.Limit > 0:
+		descLimit = q.Limit + 1
+	}
+	return since, descLimit, truncated
+}
+
+// storeMaxUntil Query.Until 的哨兵（调用方未给上界时的缺省）。
+const storeMaxUntil = 1<<62 - 1
+
+// newestTS 该序列在 ts<=until 内的最新样本时间（无样本 ok=false）。
+func (s *Store) newestTS(seriesID, until int64) (int64, bool) {
+	var ts int64
+	err := s.db.QueryRow(`SELECT MAX(ts) FROM samples WHERE series_id = ? AND ts <= ?`, seriesID, until).Scan(&ts)
+	if err != nil || ts == 0 {
+		return 0, false
+	}
+	return ts, true
 }
 
 // downsample 按桶取最后一个样本。step<=0 时原样返回。

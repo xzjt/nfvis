@@ -399,3 +399,70 @@ func TestQueryTruncatedIsTruthful(t *testing.T) {
 		t.Fatalf("应保留最近 4 点: %+v", pts)
 	}
 }
+
+// 决策 #372（R142 A8）：step>0 时载入窗口被收窄到「最新 limit+1 个桶」——结果必须与
+// 「全窗口降采样 + 裁 limit」逐点一致（更旧的点本来就会被裁掉），且 truncated 为真值。
+func TestQueryLimitWithStepNarrowsWindowSameResult(t *testing.T) {
+	st := openTemp(t)
+	// 每 10s 一点，共 100 点（ts 1000..1990）。
+	for i := 0; i < 100; i++ {
+		if err := st.Append(int64(1000+i*10), []Sample{{Name: "m", Value: float64(i)}}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	const step, limit = int64(30), 5
+	// 参考：不做 limit（全窗口降采样）后再手工取最新 limit 点。
+	full := mustQuery(t, st, Query{Name: "m", Step: step, Limit: 0})
+	ref := full[0].Points
+	if len(ref) <= limit {
+		t.Fatalf("参考点数应大于 limit（构造前提）：%d", len(ref))
+	}
+	ref = ref[len(ref)-limit:]
+	res, err := st.Query(Query{Name: "m", Step: step, Limit: limit})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	pts := res.Series[0].Points
+	if len(pts) != len(ref) {
+		t.Fatalf("收窄后点数应与参考一致：%d vs %d", len(pts), len(ref))
+	}
+	for i := range pts {
+		if pts[i].TS != ref[i].TS {
+			t.Fatalf("第 %d 点与参考不一致（收窄改变了结果）：%+v vs %+v", i, pts[i], ref[i])
+		}
+	}
+	if !res.Truncated {
+		t.Fatalf("窗口被收窄（真值丢数据）时 truncated 应为 true")
+	}
+}
+
+// 决策 #372（R142 A8）：载入有界计划的纯函数表——含「哨兵 until 以最新样本为锚」这条
+// （首版实现按哨兵收窄得到未来空窗、返回空结果，被同一用例当场抓到）。
+func TestPlanBoundedLoad(t *testing.T) {
+	// step>0 + 给了 until：窗口收窄到「最新 limit+1 个桶」并置真值截断。
+	since, desc, tr := planBoundedLoad(Query{Since: 0, Until: 10000, Step: 30, Limit: 5}, 0, false)
+	if since != 10000-6*30 || desc != 0 || !tr {
+		t.Fatalf("step>0 应收窄窗口并置截断：since=%d desc=%d tr=%v", since, desc, tr)
+	}
+	// 窗口本来就在 limit+1 桶内：不收窄、不置截断。
+	if since, _, tr := planBoundedLoad(Query{Since: 9900, Until: 10000, Step: 30, Limit: 5}, 0, false); since != 9900 || tr {
+		t.Fatalf("窗口已足够小不应收窄：since=%d tr=%v", since, tr)
+	}
+	// 哨兵 until：以最新样本为锚（否则收窄到未来空窗）。
+	since, _, tr = planBoundedLoad(Query{Since: 0, Until: storeMaxUntil, Step: 30, Limit: 5}, 5000, true)
+	if since != 5000-6*30 || !tr {
+		t.Fatalf("哨兵 until 应以最新样本为锚：since=%d tr=%v", since, tr)
+	}
+	// 哨兵且无样本：保持原 since（不猜）。
+	if since, _, _ := planBoundedLoad(Query{Since: 7, Until: storeMaxUntil, Step: 30, Limit: 5}, 0, false); since != 7 {
+		t.Fatalf("无样本时不应收窄：since=%d", since)
+	}
+	// step<=0：DESC 限行 limit+1。
+	if since, desc, tr := planBoundedLoad(Query{Since: 0, Until: 100, Step: 0, Limit: 5}, 0, false); since != 0 || desc != 6 || tr {
+		t.Fatalf("step<=0 应走 DESC 限行：since=%d desc=%d tr=%v", since, desc, tr)
+	}
+	// 无 limit：原样（调用方要全窗口）。
+	if since, desc, tr := planBoundedLoad(Query{Since: 3, Until: 100, Step: 30, Limit: 0}, 0, false); since != 3 || desc != 0 || tr {
+		t.Fatalf("无 limit 应原样：since=%d desc=%d tr=%v", since, desc, tr)
+	}
+}
