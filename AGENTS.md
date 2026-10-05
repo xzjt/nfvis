@@ -713,6 +713,20 @@
   ——与基线逐项一致。**教训/工具**：夹具 guest 的 beat 循环是 cloud-init 一次性 runcmd，**VM 重启后不重跑**
   （L3-2 会如实跳过 ⇒ 22/0/3）；`vppctl ping <guest-ip> source <bvi>` 可从数据面侧确定性催生邻居条目。
   证据 `docs/evidence/v2-round152-d369-cli-source-fact.txt`；真机已装 2.0.0~dev86。
+- **round153（round142 体检低危观测批次一：决策 #370，2026-10-05）**：清掉体检 §2 低危/观测簇中根因清楚、可单测钉住、
+  用户可见的四项（PR #300）：**E9** `-c ''`/`-f ''`（标志显式给空值）静默进交互模式（空脚本「假成功」）⇒ 报错退出
+  （`resolveScript` 增 `cmdlineSet/fileSet`，由 `flag.Visit` 判定；两标志都没给才进交互）；**B9** exec 退出码读取失败
+  丢弃已捕获输出、整体按失败报 ⇒ `ExecResult.ExitCodeNote`（输出保留 + REST `exit_code_note` / CLI ⚠ 行，`exit_code` 不出现）；
+  **E12** 「不能删除当前登录用户」守卫只在 REST handler ⇒ CLI 同判据同文案（**super-user 归零半边已由引擎
+  `CheckSuperUserPresent` 在 commit 兜底**，不重复）；**D3** 大页「实际持有」页数取首个扫描到的映射（随 /proc 顺序漂移）
+  ⇒ 同 inode 取**最大视图**（页数优先、平局按页尺寸确定性 tie-break）。四项**逐一红-绿**；`make check` 全绿（决策 **272** 守护）。
+  **真机（dev87）**：E9 空值报错 **rc=1**（不经管道量退出码）+ 互斥 + 正常脚本对照；E12 CLI 自删被拒 + REST 409 同文案；
+  D3 `show system hugepages` 三次取样逐字一致、与 `/proc`（vpp 2 个 1G 映射含与 qemu **共享 inode**、qemu 1 个）一致；
+  B9 无真机注入通道（需 Docker inspect 失败）——**如实登记由单测覆盖**。**四套件（dev88，v2 @ cf3bc1e）**：
+  fulltest **254/0/18**、语义 **26/0/3**、lifecycle **23/0/2**、pty **10/10**——与基线逐项一致。
+  **现场配方修正（入册）**：夹具 `up` 复用同一磁盘（instance-id 不变）⇒ **cloud-init 不再重跑**、guest 无 IP、L3-2 如实跳过
+  （22/0/3 非回归）；**改 user-data（内容须变化）→ commit → restart** 可确定性重跑 cloud-init 恢复 beat（实测 130s 应答）。
+  证据 `docs/evidence/v2-round153-d370-observation-batch.txt`；真机已装 2.0.0~dev88。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
