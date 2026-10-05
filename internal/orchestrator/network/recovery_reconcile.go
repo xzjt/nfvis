@@ -8,6 +8,13 @@ package network
 // 对象事实变化（配置声明已删、接口已出现在 VPP）之后告警不消解，与决策 #188/#321
 // 的「告警随对象消失/状态恢复自动消解」口径不符。
 //
+// 决策 #367（收口 R142-7）：#333 的复核漏了三类**三段**子来源——
+// `virtual-switches/<n>/learn-limit|dhcp-relay|dhcp-server`（recovery.go 的独立记源）。
+// 它们的名字含 `/`，旧判据整类保守保留：交换机（或子特性）删除后告警不消，
+// 只能等下次 VPP 重连的全量重放重估。修法＝把 #333 的「来源对象已不在 committed 配置 →
+// 消解」原则落到**子对象粒度**：交换机已不在声明集，或交换机在而该子特性已不在声明
+// （与恢复重放的触发条件逐字同源）即消解；其余多段/未知来源仍保守保留。
+//
 // 处置（决策 #333 明确**不做周期性全量重放**——重，且会把暂时性错误刷成告警抖动），
 // 15s 巡检只做按来源的廉价复核：
 //  1. 来源对象已不在 committed 配置 → 消解（失败前提已消失；数据面残渣另由残渣对账负责）；
@@ -66,6 +73,39 @@ func (n *L2Network) ReconcileRecoveryAlarms(ctx context.Context, cfg model.Confi
 		case strings.HasPrefix(a.Source, "qos/policies/"):
 			// qos 族是两段家族名（qos/policies/<name>），先于通用解析处理。
 			if name := strings.TrimPrefix(a.Source, "qos/policies/"); name != "" && !qos[name] {
+				n.alarms.Resolve(recoveryScope, a.Code, a.Source)
+			}
+		case strings.HasPrefix(a.Source, "virtual-switches/") &&
+			strings.Contains(strings.TrimPrefix(a.Source, "virtual-switches/"), "/"):
+			// 三段子来源（决策 #367，收口 R142-7）：virtual-switches/<sw>/<leaf>，
+			// leaf ∈ {learn-limit, dhcp-relay, dhcp-server}（recovery.go 的独立记源）。
+			// 消解判据与恢复重放**同一口径**：重放根本不会再碰它（交换机已删，或子特性
+			// 已不在声明）⇒ 告警前提已消失 ⇒ 消解。未知 leaf / 超过三段保守保留。
+			sw, leaf, ok := strings.Cut(strings.TrimPrefix(a.Source, "virtual-switches/"), "/")
+			if !ok || sw == "" || leaf == "" || strings.Contains(leaf, "/") {
+				continue
+			}
+			if !switches[sw] {
+				n.alarms.Resolve(recoveryScope, a.Code, a.Source)
+				continue
+			}
+			known, declared := false, false
+			for i := range cfg.VirtualSwitches {
+				if cfg.VirtualSwitches[i].Name != sw {
+					continue
+				}
+				vs := cfg.VirtualSwitches[i]
+				switch leaf {
+				case "learn-limit":
+					known, declared = true, vs.LearnLimit > 0
+				case "dhcp-relay":
+					known, declared = true, vs.DhcpRelayServer != ""
+				case "dhcp-server":
+					known, declared = true, vs.DHCPServerEnabled()
+				}
+				break
+			}
+			if known && !declared {
 				n.alarms.Resolve(recoveryScope, a.Code, a.Source)
 			}
 		default:
