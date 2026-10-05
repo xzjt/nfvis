@@ -637,8 +637,10 @@ type proxyCall struct {
 }
 
 type fakeDhcp struct {
-	calls []proxyCall
-	err   error
+	calls   []proxyCall
+	err     error
+	dump    []ProxyEntry
+	dumpErr error
 }
 
 func (f *fakeDhcp) ProxySet(rxVrfID, serverVrfID uint32, isAdd bool, server, src string) error {
@@ -647,6 +649,13 @@ func (f *fakeDhcp) ProxySet(rxVrfID, serverVrfID uint32, isAdd bool, server, src
 	}
 	f.calls = append(f.calls, proxyCall{rx: rxVrfID, srvVrf: serverVrfID, isAdd: isAdd, server: server, src: src})
 	return nil
+}
+
+func (f *fakeDhcp) ProxyDump() ([]ProxyEntry, error) {
+	if f.dumpErr != nil {
+		return nil, f.dumpErr
+	}
+	return f.dump, nil
 }
 
 func (f *fakeDhcp) Close() {}
@@ -705,14 +714,29 @@ func TestDhcpRelayChangeServerAndGatewayDomain(t *testing.T) {
 	if err := p.SyncRelay(context.Background(), vs); err != nil {
 		t.Fatalf("初次 apply: %v", err)
 	}
+	tableA := TableID(GatewayVRFName("vs-a"))
 
-	// 改 server：同域重发 IsAdd=true（覆盖）
+	// 改 server（同域）：必须先撤旧（IsAdd=false 旧 server）后加新（决策 #380/R140-1；
+	// 旧实现只 add ⇒ VPP 里两条残留、删除只撤最新一条）。
 	vs.DhcpRelayServer = "10.0.0.99"
 	if err := p.SyncRelay(context.Background(), vs); err != nil {
 		t.Fatalf("改 server: %v", err)
 	}
-	if len(f.calls) != 2 || !f.calls[1].isAdd || f.calls[1].server != "10.0.0.99" {
-		t.Fatalf("改 server 应重发 proxy: %v", f.calls)
+	if len(f.calls) != 3 {
+		t.Fatalf("改 server 应先撤旧后加新，实际 %v", f.calls)
+	}
+	if f.calls[1].isAdd || f.calls[1].rx != tableA || f.calls[1].server != "192.168.100.2" || f.calls[1].src != "192.168.100.1" {
+		t.Fatalf("改 server 第 1 步应按旧值撤旧: %+v", f.calls[1])
+	}
+	if !f.calls[2].isAdd || f.calls[2].rx != tableA || f.calls[2].server != "10.0.0.99" || f.calls[2].src != "192.168.100.1" {
+		t.Fatalf("改 server 第 2 步应下发新值: %+v", f.calls[2])
+	}
+	// 声明未变：幂等重跑不产生任何调用。
+	if err := p.SyncRelay(context.Background(), vs); err != nil {
+		t.Fatalf("改 server 后幂等重跑: %v", err)
+	}
+	if len(f.calls) != 3 {
+		t.Fatalf("声明未变不应重复下发/撤销: %v", f.calls)
 	}
 
 	// 网关换域（gateway.vrf）：先撤旧域 proxy，再下发新域
@@ -720,15 +744,15 @@ func TestDhcpRelayChangeServerAndGatewayDomain(t *testing.T) {
 	if err := p.SyncRelay(context.Background(), vs); err != nil {
 		t.Fatalf("换网关域: %v", err)
 	}
-	if len(f.calls) != 4 {
+	if len(f.calls) != 5 {
 		t.Fatalf("换域应先撤旧再下发新，实际 %v", f.calls)
 	}
-	oldID, newID := TableID(GatewayVRFName("vs-a")), TableID("vs-mgmt")
-	if f.calls[2].isAdd || f.calls[2].rx != oldID || f.calls[2].server != "10.0.0.99" {
-		t.Fatalf("第 3 步应撤旧域: %+v", f.calls[2])
+	newID := TableID("vs-mgmt")
+	if f.calls[3].isAdd || f.calls[3].rx != tableA || f.calls[3].server != "10.0.0.99" {
+		t.Fatalf("换域第 1 步应撤旧域: %+v", f.calls[3])
 	}
-	if !f.calls[3].isAdd || f.calls[3].rx != newID || f.calls[3].src != "10.10.0.1" || f.calls[3].server != "10.0.0.99" {
-		t.Fatalf("第 4 步应在新域下发: %+v", f.calls[3])
+	if !f.calls[4].isAdd || f.calls[4].rx != newID || f.calls[4].src != "10.10.0.1" || f.calls[4].server != "10.0.0.99" {
+		t.Fatalf("换域第 2 步应在新域下发: %+v", f.calls[4])
 	}
 }
 
@@ -767,6 +791,100 @@ func TestDhcpRelayDeleteAndErrors(t *testing.T) {
 		model.VirtualSwitch{Name: "vs-b", Type: "l2", DhcpRelayServer: "10.0.0.1"}); err == nil ||
 		!strings.Contains(err.Error(), "gateway ip") {
 		t.Fatalf("无网关应报错并指向 gateway ip: %v", err)
+	}
+}
+
+// TestDhcpRelayReconcileProxy 决策 #380：对账 VPP 实际 proxy 与配置声明，只清未声明/陈旧条目。
+func TestDhcpRelayReconcileProxy(t *testing.T) {
+	tableA := TableID(GatewayVRFName("vs-a"))
+	tableB := TableID(GatewayVRFName("vs-b"))
+	vsA := model.VirtualSwitch{Name: "vs-a", Type: "l2",
+		Gateway:         &model.VSGateway{Addresses: []string{"192.168.100.1/24"}},
+		DhcpRelayServer: "192.168.100.2"}
+	vsB := model.VirtualSwitch{Name: "vs-b", Type: "l2",
+		Gateway:         &model.VSGateway{Addresses: []string{"192.168.200.1/24"}},
+		DhcpRelayServer: "192.168.200.20"}
+	// vs-c 声明了 relay 但网关缺失（relayTargetOf 报错）⇒ 无法判定其表，应跳过、不当成「未声明」误删。
+	vsC := model.VirtualSwitch{Name: "vs-c", Type: "l2", DhcpRelayServer: "10.0.0.1"}
+
+	f := &fakeDhcp{dump: []ProxyEntry{
+		// ① 未声明表（残留）：应清除
+		{RxVrfID: 99999, Src: "10.9.9.1", Servers: []ProxyServer{{VrfID: 99999, Server: "10.9.9.2"}}},
+		// ② 声明表（vs-a）上的陈旧 server：与声明不符，应清除
+		{RxVrfID: tableA, Src: "192.168.100.1", Servers: []ProxyServer{{VrfID: tableA, Server: "10.0.0.99"}}},
+		// ③ 声明表（vs-b）上与声明一致的 server：不动
+		{RxVrfID: tableB, Src: "192.168.200.1", Servers: []ProxyServer{{VrfID: tableB, Server: "192.168.200.20"}}},
+	}}
+	p := NewDhcpProvider(f)
+	if err := p.ReconcileProxy([]model.VirtualSwitch{vsA, vsB, vsC}); err != nil {
+		t.Fatalf("对账应成功: %v", err)
+	}
+	if len(f.calls) != 2 {
+		t.Fatalf("应只清①②两条，实际 %v", f.calls)
+	}
+	got := map[string]proxyCall{}
+	for _, c := range f.calls {
+		if c.isAdd {
+			t.Fatalf("对账只应发撤销: %+v", c)
+		}
+		got[c.server] = c
+	}
+	if c, ok := got["10.9.9.2"]; !ok || c.rx != 99999 || c.srvVrf != 99999 || c.src != "10.9.9.1" {
+		t.Fatalf("未声明表条目应被清除: %+v", f.calls)
+	}
+	if c, ok := got["10.0.0.99"]; !ok || c.rx != tableA || c.srvVrf != tableA || c.src != "192.168.100.1" {
+		t.Fatalf("声明表的陈旧 server 应被清除: %+v", f.calls)
+	}
+	if _, ok := got["192.168.200.20"]; ok {
+		t.Fatalf("与声明一致的 server 不应被清除: %+v", f.calls)
+	}
+}
+
+// TestDhcpRelayReconcileProxyBoundaries 决策 #380 边界：dump 失败跳过不误撤；清除失败如实报错。
+func TestDhcpRelayReconcileProxyBoundaries(t *testing.T) {
+	// dump 失败 ⇒ 返回错误且零删除
+	f := &fakeDhcp{dumpErr: errors.New("dump boom")}
+	p := NewDhcpProvider(f)
+	if err := p.ReconcileProxy(nil); err == nil {
+		t.Fatal("dump 失败应返回错误")
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("dump 失败时不得删除: %v", f.calls)
+	}
+
+	// ProxySet(false) 失败 ⇒ 如实返回错误
+	f2 := &fakeDhcp{err: errors.New("proxy boom"), dump: []ProxyEntry{
+		{RxVrfID: 99999, Src: "10.9.9.1", Servers: []ProxyServer{{VrfID: 99999, Server: "10.9.9.2"}}},
+	}}
+	p2 := NewDhcpProvider(f2)
+	if err := p2.ReconcileProxy(nil); err == nil {
+		t.Fatal("清除失败应如实返回错误")
+	}
+}
+
+// TestL2NetworkReconcileProxy 决策 #380：L2Network 从 cfg 取「声明了 relay」的集合转发给 provider。
+func TestL2NetworkReconcileProxy(t *testing.T) {
+	f := &fakeDhcp{dump: []ProxyEntry{
+		{RxVrfID: 99999, Src: "10.9.9.1", Servers: []ProxyServer{{VrfID: 99999, Server: "10.9.9.2"}}},
+	}}
+	n := NewL2Network(nil, nil)
+	n.SetDhcp(NewDhcpProvider(f))
+	cfg := model.Config{VirtualSwitches: []model.VirtualSwitch{{
+		Name: "vs-a", Type: "l2",
+		Gateway:         &model.VSGateway{Addresses: []string{"192.168.100.1/24"}},
+		DhcpRelayServer: "192.168.100.2",
+	}}}
+	if errs := n.ReconcileProxy(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("对账应成功: %v", errs)
+	}
+	if len(f.calls) != 1 || f.calls[0].isAdd || f.calls[0].rx != 99999 {
+		t.Fatalf("应清除未声明表条目: %v", f.calls)
+	}
+
+	// 未注入 provider ⇒ 空操作（不 panic）
+	nn := NewL2Network(nil, nil)
+	if errs := nn.ReconcileProxy(context.Background(), cfg); errs != nil {
+		t.Fatalf("未注入 provider 应返回 nil: %v", errs)
 	}
 }
 

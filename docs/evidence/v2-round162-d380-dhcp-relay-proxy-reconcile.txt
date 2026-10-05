@@ -1,0 +1,79 @@
+round162 · 决策 #380 —— R140-1 根治：DHCP relay 变更撤旧 + proxy 对账自愈
+====================================================================
+日期：2026-10-06；分支 v2-round162-r140-1（48b4ec7 契约先行 → 89b6b2a 实现 → 注释对齐）；
+真机 nfvis-vm 2.0.0~dev103（A/B 对照用旧构建 dev102r = round161 源码重建）。
+来源：R140-1（round140 登记，round142 体检复核）。
+PR：https://github.com/xzjt/nfvis/pull/309（base v2）。
+
+§0 结论
+- **R140-1 真机复现出可复现变体并根治**：`SyncRelay` 只在**转发域（表）变化**时撤旧 proxy 条目——
+  **改 server（同域）**时只 add 新条目 ⇒ `show dhcp proxy` 两条；此后删除 relay 只按登记里的**最新**
+  server 撤 ⇒ **旧条目永久残留**、FIB 仍 `DHCP:2` 锁、UDP/67 仍被 proxy 节点吞掉（正是 R140-1）。
+- 修法两层：**变更撤旧**（修直接成因）+ **对账自愈**（`dhcp_proxy_dump` 与声明集合比对，接入 15s 巡检、
+  不靠进程内登记）。**红-绿** + **真机决定性 A/B**（旧构建造残留 → 新构建对账清除）+ (A) 变更撤旧实证。
+- `make check` 全绿。
+
+§1 契约先行（48b4ec7）
+- 附录 A 决策 #380（v2 线第 81 条）；`AGENTS.md` 决策条数 281→282（`check_decisions_count.sh` ✓）。
+- `docs/v2待做.md`：R140-1 标为根治（原条目留档）。
+
+§2 复现（round162 spike，dev102）
+- 配 `set virtual-switches dns-vs dhcp-relay server 192.168.155.1` → commit ⇒ `show dhcp proxy`
+  `4860925  192.168.77.1  4860925,192.168.155.1`。
+- 改 `server 192.168.155.2`（**同域**）→ commit ⇒ `show dhcp proxy`
+  `4860925  192.168.77.1  4860925,192.168.155.1  4860925,192.168.155.2`（**两条**：旧条目未撤）。
+- `delete virtual-switches dns-vs dhcp-relay` → commit ⇒ `show dhcp proxy` 仍留
+  `4860925,192.168.155.1`（**残留**）、`show ip fib table 4860925` 的 `locks:` 仍含 **`DHCP:2`**
+  ⇒ 该 FIB 上 UDP/67 仍被 dhcp-proxy 节点接走（`no dhcp server configured` 丢弃）——R140-1 的实质。
+- **对照（简单路径本就干净）**：relay 直接删（未改过 server）⇒ `show dhcp proxy` 空、FIB 无 DHCP 锁；
+  relay → `systemctl restart nfvis` → 删 ⇒ 同样干净（恢复重放重建登记）。故 R140-1 的**可复现成因是
+  「同域改 server」**（round140 记的「删除后仍吞包」与 round151 记的「删除后条目仍在」由此统一解释）。
+
+§3 实现（89b6b2a）
+1. **变更撤旧**（`internal/orchestrator/network/dhcp.go` `SyncRelay`）：撤旧条件由
+   `had && rec.tableID != tableID` 改为 **`had`**（值未变的幂等已在前面早退，到达此处必是「记录已变」）——
+   同域改 server 也先按**旧记录**发 `ProxySet(IsAdd=false)`，再下发新条目。
+2. **对账自愈**：
+   - `dhcp.go`：`DhcpClient` 接口加 `ProxyDump() ([]ProxyEntry, error)`；新增 `ProxyEntry{RxVrfID, Src, Servers[]}`
+     与 `ProxyServer{VrfID, Server}`；新增 `(*DhcpProvider).ReconcileProxy(declared []model.VirtualSwitch) error`
+     ——由 `relayTargetOf` 推出「表 → server」声明集（网关无 IPv4 的交换机不计入，其表上残留会被视为未声明而清除），
+     dump 后逐条逐 server：**未声明表**或**声明表上声明之外的 server** ⇒ `ProxySet(IsAdd=false)` 清除；
+     dump 失败即返回错误（调用方跳过、**零删除**）；清除失败如实返回。
+   - `dhcp_govpp.go`：`ProxyDump` 走 `dhcp.DHCPProxyDump`/`DHCPProxyDetails`（multi-request，照 `l2_govpp.go`
+     的 `SwInterfaceNames` 写法）；地址用 `ip_types.Address.String()`（与既有回读同源）。
+   - `provider.go`：`(*L2Network).ReconcileProxy(ctx, cfg) []error` 从 `cfg.VirtualSwitches` 取声明集转发；
+     `dhcp == nil` 时空操作。
+   - `cmd/nfvisd/main.go`：接入既有 **15s 巡检**（`ReconcileResidue`/`ReconcileDHCPServer` 同块），
+     未新造定时器。
+
+§4 测试与红-绿
+- `TestDhcpRelayChangeServerAndGatewayDomain`：改 server 断言**先撤旧（IsAdd=false 旧值）后加新**；
+  幂等重跑 0 调用；换域 5 次调用不回归。**红-绿**：还原 ⇒ FAIL（`改 server 应先撤旧后加新，实际 [add 新]`）。
+- `TestDhcpRelayReconcileProxy`（dump 出①未声明表②声明表陈旧 server③声明表正确 server ⇒ 只清①②）、
+  `TestDhcpRelayReconcileProxyBoundaries`（dump 失败 ⇒ 报错且**零删除**；`ProxySet(false)` 失败 ⇒ 如实报错）、
+  `TestL2NetworkReconcileProxy`（转发 + 未注入时空操作）。**红-绿**：短路 `ReconcileProxy` ⇒ 三条全 FAIL。
+- `fakeDhcp` 增 `ProxyDump`（记录 dump 返回值与调用）。
+
+§5 真机验证（dev103）
+① **决定性 A/B（对账自愈）**——用**旧构建 dev102r**（round161 源码重建）确定性造残留：
+   `relay A → relay B → delete` ⇒ `show dhcp proxy` 留 `155.1`、FIB `locks:[…, DHCP:2]`；
+   `dpkg -i` 装 **dev103** ⇒ **装后立即（17:28:12）残留仍在（1 条）** ⇒ **+22s（17:28:34）消失**
+   （0 条、`locks:[interface:1, API:1]`）⇒ **确为 15s 对账清除**（排除「重启顺带清掉」）。
+② **(A) 变更撤旧**——dev103 下：配 `server 155.1` ⇒ 条目 `…,155.1`；改 `server 155.2` ⇒ 条目
+   **`…,155.2`（只一条，旧条目已撤）**；`delete relay` ⇒ **0 条**、FIB 无 `DHCP:` 锁。
+③ **生命周期**——relay 删除后无残留；对账**不依赖进程内登记**（① 的场景里 config 本就没有 relay，
+   全靠 dump 对账清除——跨 nfvisd 重启仍有效）。
+④ **现场清场**：config `dhcp-relay` 计数 0、`show dhcp proxy` 空、FIB 无 DHCP 锁、无 pg/tap 残留；
+   告警仅常态 `HUGEPAGE_POOL_ORPHAN`。
+
+§6 未竟 / 边界（如实）
+- 对账的**口径取舍**：对「声明表上多出的 server」（旧残留与新 server 同表共存 `[old,new]`）只清
+  **非声明**的 server、保留声明的——比「清整条条目」更安全（不误清正在生效的声明条目）。
+- 对账**只在数据面可查时**做（dump 失败跳过本轮、不猜）；`relayTargetOf` 报错（网关无 IPv4）的交换机
+  不计入声明集——**无法判定即不能声称已声明**，其表上的残留会被清除。
+- 未做：UDP/67 包的 guest 级端到端复现（环境受限，见既有登记）；本项以「`show dhcp proxy` 条目 +
+  FIB `DHCP:` 锁」为独立事实源定性。
+
+§7 四套件复跑（dev103）
+- `cli-fulltest` **254/0/18** ｜ `cli-semantic-check` **27/0/2**（S8 窗口热）｜ `cli-lifecycle-check` **22/0/3**
+  （L3-2 正控未热，非回归）｜ `cli-pty-smoke` **10/10**——与基线逐项一致。

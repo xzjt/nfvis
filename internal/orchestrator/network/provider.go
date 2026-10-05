@@ -497,6 +497,25 @@ func (n *L2Network) ReconcileDHCPServer(ctx context.Context, cfg model.Config) [
 	return n.dhcpServer.Reconcile(ctx, cfg)
 }
 
+// ReconcileProxy DHCP 中继 proxy 的巡检对账（决策 #380/R140-1；供 15s 巡检与残渣对账同块调用）：
+// 从 cfg.VirtualSwitches 取「声明了 relay」的集合，交给 DhcpProvider 与 VPP 实际条目比对，
+// 清除未声明/陈旧的多余 proxy 条目（不靠进程内登记，跨 nfvisd 重启仍有效）。未注入 provider 时空操作。
+func (n *L2Network) ReconcileProxy(ctx context.Context, cfg model.Config) []error {
+	if n.dhcp == nil {
+		return nil
+	}
+	var declared []model.VirtualSwitch
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.DhcpRelayServer != "" {
+			declared = append(declared, vs)
+		}
+	}
+	if err := n.dhcp.ReconcileProxy(declared); err != nil {
+		return []error{err}
+	}
+	return nil
+}
+
 func (n *L2Network) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 	if n.l3 == nil {
 		return nil
