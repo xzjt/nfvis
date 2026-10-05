@@ -1,0 +1,100 @@
+round149 · 决策 #366 —— 容器 exec/shell 的超时三面语义与有界握手（收口 R142-10 + R142-12）
+====================================================================
+日期：2026-10-05；分支 feat/d366-exec-shell-bounds（120bd8b 契约先行 → 9af50a8 实现 →
+e6952c5 打开路径全链有界扩展 → 8cff424 ContainerExec State 有界补口）；真机 nfvis-vm 2.0.0~dev81。
+来源：round142 半程体检 B1/B2/B3（docs/evidence/v2-round142-midpoint-audit.txt §2 簇 B）。
+
+§0 结论
+- R142-10（exec 超时三面记账 + 客户端 90s 截断）与 R142-12（Docker shell 读取无界）收口，
+  且 R142-12 按「不留假功能」扩展为 **shell/exec 打开路径全链有界**（真机实测定形：挂点不止握手段）。
+- 四套件回归与本批账目见 §6；本地 make check rc=0（决策 268 项守护通过）。
+
+§1 契约先行（commit 120bd8b）
+- 附录 A 新增决策 #366（v2 线第 67 条）；AGENTS.md 决策条数 267→268。
+- openapi：exec 端点补 **504** 响应；`ContainerExecResult` **删 `timed_out`**（200 只在命令跑完时
+  返回）；`internal/api/openapi.json` 以 --write 同步。
+- 命令树设计 §1.2：exec 行补「超时按失败记账（CLI %%/审计 failure；REST 504）」「客户端等待随
+  超时延长，91..300 端到端可用」；shell 行补「打开握手有界」。
+- 用户手册：exec 超时语义（超时=失败、REST 504、91..300 可用满）+ shell 打开有界（不带内部编号，
+  user_text 守护通过）。
+
+§2 实现要点（9af50a8 + e6952c5 + 8cff424）
+1. 超时三面归一（对齐 #357 原文「没跑完 ⇒ 失败」）：
+   - REST `containerExec`：TimedOut ⇒ **504 + EXEC_TIMEOUT**（标准错误体，不带部分输出）+ 审计 failure；
+     200 成功路径不再含 timed_out。
+   - CLI 执行器：TimedOut ⇒ 审计 failure（此前 %% 报失败而审计记 success）；%% 输出与
+     x.structured 的 timed_out 保留（CLI 进程内结构化视图，非 REST 契约）。
+2. 客户端等待随 exec 超时延长（R142-10b）：
+   - pkg/cliclient 去掉全局 http.Client.Timeout，改**每请求 ctx deadline**（缺省 RequestTimeout=90s）；
+     `execTimeoutHint`（引号感知 token 扫描）对 `/cli/execute` 里「exec + timeout 1..300」的命令
+     把等待提到 **n+15s 裕量**；MetricsText 自包 RequestTimeout；console WS 独立拨号不受影响。
+   - 扫描只是等待时长提示：误命中只延长等待、漏判回落 90s 现状；语义权威在服务端。
+3. 打开路径全链有界（R142-12，真机扩展）：
+   - `execShellHandshake`（从 ExecShell 抽出）：10s 握手 deadline 覆盖状态行/响应头/错误体读取；
+     非 101 按 Content-Length 锚点读（cap 8KiB）；升级成功**清 deadline**（交互流空闲是常态）。
+   - **dockerCallTimeout=10s**（真机扩展，e6952c5/8cff424）：shell 的 State 检查、shell/exec 的
+     create 调用、exec 的 State 检查、shell ticket 端点的 ContainerState 各加硬上界，超时报错
+     「Docker 未在 10s 内响应（已中止等待；请确认 docker 服务状态）」；到期取消连接——未被读走的
+     请求随连接关闭被 dockerd 丢弃，不留「底座恢复后幽灵执行」。
+4. app.js：exec 卡删掉引用已删字段 timed_out 的死分支；fetch 错误分支本就渲染服务端 message。
+
+§3 红-绿验证（单测）
+- REST 超时：临时还原 200+timed_out ⇒ `container_exec_test.go:82 超时应 504（按失败），得 200
+  map[… timed_out:true]`（红）→ 正确实现变绿。
+- CLI 审计：临时还原 success ⇒ `超时的 container.exec 审计应记 failure，实得 …Result:success`（红）→ 绿。
+- State 有界（docker.go）：临时摘除 sctx 包装 ⇒ TestContainerShellStateCheckBounded 在 3s 守护处
+  FAIL（红，3.061s）→ 恢复变绿。
+- 新测试 17 条：deadline_hint_test.go（TestExecTimeoutHint 15 子例/TestRequestDeadline/
+  TestDoWithDeadlineTimesOut/TestDoUsesDeadlineHint/TestMetricsTextBoundedNormalPath/
+  TestDeadlineExceededIsTimeoutError）；docker_exec_shell_handshake_test.go（6 条，net.Pipe 无
+  AF_UNIX 依赖）；docker_bounded_open_test.go（Exec create/ExecShell create/ContainerShell State/
+  ContainerExec State 四条有界，含 blocked fake 与睡死 httptest 后端）；
+  TestContainerShellTicketStateCheckBounded（api 层，注入 100ms）。
+
+§4 真机四维验证（dev79 三面/长超时 + dev80/81 打开路径有界）
+① 作用效果（dev79）：
+  - CLI：`exec "sleep 8" timeout 3` ⇒ `%% 命令在 3s 内未结束（已停止等待；容器内进程可能仍在运行，
+    退出码未知）`；成功对照 `exec "echo cli-ok"` ⇒ `退出码: 0（耗时 50ms）`。
+  - REST：超时 ⇒ **HTTP 504 耗时 3.019s** `{"code":"EXEC_TIMEOUT","message":"命令在 3s 内未结束…"}`；
+    成功 ⇒ 200 `{"duration_ms":48,"exit_code":0,…,"stdout":"rest-ok\n"}` **无 timed_out 键**。
+  - 审计：两个超时（CLI 面/REST 面）各记 failure（`超时 3s，已停止等待；…`），echo 记 success——
+    三面（CLI/REST/审计）行为一致。
+② 生命周期（dev79）：
+  - `exec "sleep 100" timeout 120` ⇒ **1m40.5s 返回退出码 0**（旧版客户端 90s 先截断、命令仍在跑、
+    重跑即重复执行——本例实测跨越 90s 边界不截断；timeout 300 与 120 走同一 hint 路径，未重复占时）。
+  - `restart` 后 exec 照常（退出码 0）。
+③ 跨对象组合（dev79）：`exec "sleep 300" timeout 2` 超时后 `exec "ps"` 显示 `sleep 300`（PID 13）
+  仍在容器内——「超时只中止等待」与真实进程视图互证；`exec "pkill sleep"` 清理后消失。
+④ 对抗性（dev80/dev81，dockerd SIGSTOP；窗口内 STAT=Tsl + `docker ps` timeout rc=124 双证冻结生效）：
+  - 冻结期 ticket 申请 ⇒ **503 @ 10.007s**（`Docker 未在 10s 内响应…`）——修复前此调用无界挂起。
+  - 冻结期 WS shell（预取 ticket）⇒ 101 即时（WS 升级在 x/net 层不碰 docker），**10.1s** 后流内
+    收到 `shell 打开失败: Docker 未在 10s 内响应…` 并断开；审计 `open shell sem-ct: Docker 未在
+    10s 内响应…` failure。
+  - 冻结期 CLI exec ⇒ `%% Docker 未在 10s 内响应…`；审计 `exec sem-ct: Docker 未在 10s 内响应…`
+    failure；**CONT 后无幽灵执行**（对照 dev80 复验抓到的漏网：State 检查未加界时同一实验里
+    冻结期 exec 在 CONT 后幽灵完成并记 success——8cff424 补口后消除）。
+  - 恢复（SIGCONT）后 exec/shell 照常（退出码 0）。
+
+§5 过程事实（如实）
+- 探针坑两次：① curl 默认协商 HTTP/2，WS 升级必须 --http1.1；② x/net/websocket 的
+  websocket.Handler 默认 `Handshake: checkOrigin`——**缺 Origin 头的非浏览器客户端一律裸 403**
+  （浏览器与 CLI raw 路径都带 Origin，生产不受影响；本批 curl 探针补 Origin 后走通）。
+- 第一次 SIGSTOP 实验「冻结窗口内 open success」的反常由第二次带 STAT/docker ps 双证的实验定形：
+  101 后挂住的是 docker API 调用（State/create，无超时），CONT 后 3s 才完成——据此把有界从握手段
+  扩展到打开全路径（e6952c5），并在复验中抓到 ContainerExec State 漏网（8cff424）。
+- 教益（入册）：**「修复后仍失败」的实验要区分「修复没用」与「挂点在更早的一环」**——按链路逐环
+  验证有界，而不是只验最后一环；SIGSTOP 类故障注入要同时注入「冻结确实生效」的独立证据。
+
+§6 make check 与套件
+- 本地 make check rc=0（全量 go test + vet + 覆盖率 7 包 ≥79.4% + 决策 268 守护 + openapi 同步/
+  无重复键 + 三套件自校准 + Web 自校准 + 套件契约同步：契约命令 279/套件 348/豁免 73，缺口 0）。
+- 四套件真机回归：随本批收尾统一执行（见 round149 汇总证据/交接），无契约命令增删
+  （fulltest 预期维持 254/0/18——exec/shell 断言均不受本次改动影响）。
+
+§7 未竟/边界（如实）
+- exec 超时后容器内进程可能仍在运行（Docker 无中止接口）——既有口径不变，本次审计/读视图如实呈现。
+- CLI 执行器对 exec 的全局执行锁（E14，低/观察）不在本批范围；冻结期 exec 的幽灵执行已由
+  打开路径有界消除（create 10s 内不答即中止且请求被丢弃），但「命令已在跑、客户端提前断开」的
+  通用幽灵窗口（与 Docker 无关的其它长命令）仍属 E14 既有登记。
+- WS 升级后的**会话中段** dockerd 冻结：流读取无 deadline 是有意设计（交互空闲是常态），
+  断开即回收；「会话中段数据面失效的自动检测」未立项。
