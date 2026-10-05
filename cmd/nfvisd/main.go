@@ -1133,7 +1133,8 @@ func (c *vppController) waitHealthy(ctx context.Context, since uint64) error {
 
 // probeWithin 执行一次探测，最多等 limit：探测本身是不可取消的阻塞调用
 // （govpp 连接路径自带超时，最坏约 7 秒），用协程兜底，保证整体等待不超过上限。
-// 超时后探测协程自行结束（其内部路径有界），不会泄漏。
+// 有界性口径（决策 #378/D6）：只在「等待」上有界；探测协程随底层调用返回而结束
+// （其内部路径通常有界），不承诺在超时点立即结束。
 func probeWithin(ctx context.Context, probe vppProbeFunc, limit time.Duration) error {
 	done := make(chan error, 1)
 	go func() { done <- probe(ctx) }()

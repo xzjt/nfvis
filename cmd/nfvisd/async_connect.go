@@ -10,13 +10,13 @@ package main
 //
 // #354 把驱动扩展为常驻状态机（每个底座一个进程生命周期 goroutine）：
 //
-//	未接入 ──每 30s 一次有界接入尝试（10s 上界，失败静默）──▶ 接入成功
+//	未接入 ──每 30s 一次有界接入尝试（10s 上界，失败静默；见下「实际 ≤12s」）──▶ 接入成功
 //	                                                        │ 换装 + onFirstConnected
 //	                                                        ▼
 //	已接入 ◀──每 15s 探活（5s 上界）；成功清零失败计数──┬── 连续 2 次失败 ⇒ 判连接中断
 //	                                                   │     onLost（运行期告警，同码）
 //	                                                   ▼
-//	                                          复连段：≤3 次尝试（10s 上界、1s 退避）
+//	                                          复连段：≤3 次尝试（10s 上界、1s 退避；实际 ≤12s）
 //	                                            成功 ⇒ 换装 + onReconnected（消警+Ensure）
 //	                                            失败 ⇒ 告警保持，退回「未接入」态继续
 //	                                                   30s 节奏（此后一直如此，永不放弃）
@@ -40,9 +40,13 @@ import (
 //
 // 未接入态沿用 #351 的三个取值（asyncConnectInterval 即契约里的“未接入重试节奏”）；
 // 已接入态与中断处置的取值来自决策 #354 契约②③。
+//
+// 有界性口径（决策 #378/D6）：attemptTimeout 是**尝试**的上界；超时后关闭 conn 还有一段
+// 有界清理 drain（compute 包 handshakeDrain = 2s，等握手 goroutine 退出）⇒ 单次接入/复连
+// 实际 ≤ attemptTimeout + 2s（生产取值即 ≤12s）。
 const (
-	// 未接入态：每 30s 一次接入尝试、每次 10s 上界；接入成功后回调的 ctx 给 30s
-	// （与 runRecovery 的收敛上界一致）。
+	// 未接入态：每 30s 一次接入尝试、每次 10s 上界（+ 最多 2s 清理 drain ⇒ 实际 ≤12s）；
+	// 接入成功后回调的 ctx 给 30s（与 runRecovery 的收敛上界一致）。
 	asyncConnectInterval       = 30 * time.Second
 	asyncConnectAttemptTimeout = 10 * time.Second
 	asyncConnectEnsureTimeout  = 30 * time.Second
@@ -53,7 +57,7 @@ const (
 	probeTimeout           = 5 * time.Second
 	probeFailThreshold     = 2
 
-	// 复连段：既有有界尝试口径（10s × 至多 3 次、尝试间 1s 退避）。
+	// 复连段：既有有界尝试口径（10s × 至多 3 次、尝试间 1s 退避；每次实际 ≤12s）。
 	asyncConnectAttempts = 3
 	asyncConnectBackoff  = 1 * time.Second
 )

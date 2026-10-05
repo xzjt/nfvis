@@ -333,6 +333,10 @@ func (m *Manager) SetEnsureProbe(fn func(context.Context) error) { m.ensureProbe
 // （defaultEnsureProbeTimeout / defaultEnsureStartTimeout），即便探针或 systemctl 卡住也在
 // 上限内返回。本方法只保证「已在线」或「已发起拉起」，不建立连接、不改动连接状态、不谎称
 // 数据面可用（可用性由连接状态体现）；发起失败时如实返回错误（带手查路径）供上层告警。
+//
+// 有界性口径（决策 #378/D6）：**只在「等待」上有界**——探测/发起各自跑在独立 goroutine
+// 里，本方法在上限内返回；该 goroutine 的存续取决于底层调用自身是否返回（govpp 连接路径
+// 自带约 7s 超时；systemctl 发起动作异常时可挂到停机），本方法**不承诺它立即结束**。
 func (m *Manager) EnsureRunning(ctx context.Context) error {
 	if m.State() == StateConnected {
 		return nil // 已有可用连接：不滥拉
@@ -369,6 +373,8 @@ func (m *Manager) EnsureRunning(ctx context.Context) error {
 
 // probeOnce 做一次「VPP 是否已在运行」探测，硬超时上限 defaultEnsureProbeTimeout（可注入）：
 // 探测即使卡住（govpp 连接路径不接收 context）也在此上限内返回——启动序列不被拖住。
+// 有界性口径（决策 #378/D6）：只在「等待」上有界；探测 goroutine 随底层调用返回而结束，
+// 不承诺在超时点立即结束。
 func (m *Manager) probeOnce(ctx context.Context) error {
 	pt := m.ensureProbeTimeout
 	if pt <= 0 {

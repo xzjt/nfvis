@@ -427,6 +427,136 @@ func TestDynamicComputeCloseClosesTrackedConn(t *testing.T) {
 	}
 }
 
+// blockingCloser 测试用的「会阻塞的 Close」（决策 #378/D2）：Close 进入即通知 entered，
+// 直到 release 关闭才返回。用于验证换装/关闭在锁外进行——旧实现持写锁关闭会阻塞计算调用。
+type blockingCloser struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingCloser() *blockingCloser {
+	return &blockingCloser{entered: make(chan struct{}, 1), release: make(chan struct{})}
+}
+
+func (b *blockingCloser) Close() error {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-b.release
+	return nil
+}
+
+// releaseAll 幂等放行（t.Cleanup 兜底，保证测试不挂死）。
+func (b *blockingCloser) releaseAll() { b.once.Do(func() { close(b.release) }) }
+
+// TestDynamicComputeSwapClosesOldConnOutsideLock 决策 #378/D2 红-绿：Swap 在锁内完成换装、
+// 锁外关闭被替换的旧连接。旧连接 Close 阻塞期间，计算调用（Connected/VMState）必须立即可用，
+// 且新实现已可见（换装原子性）——旧实现在写锁内 Close，这些调用会全部阻塞。
+func TestDynamicComputeSwapClosesOldConnOutsideLock(t *testing.T) {
+	h := newDynamicCompute()
+	old := newBlockingCloser()
+	defer old.releaseAll()
+	h.Swap(&fakeCompute{}, old) // 换入旧连接（此时无旧连接可关）
+
+	swapDone := make(chan struct{})
+	go func() {
+		h.Swap(&fakeCompute{stateVal: orchestrator.VMStateRunning}, nil)
+		close(swapDone)
+	}()
+
+	// 等 Swap 走到锁外、旧连接的 Close 已开始阻塞。
+	select {
+	case <-old.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Swap 未开始关闭旧连接")
+	}
+
+	// 此刻旧连接 Close 仍阻塞：换装应已可见（新实现）。
+	connected := make(chan bool, 1)
+	go func() { connected <- h.Connected() }()
+	select {
+	case ok := <-connected:
+		if !ok {
+			t.Fatal("Swap 期间应已可见新实现（换装原子性）")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Swap 期间 Connected 被阻塞（旧实现持写锁关闭连接）")
+	}
+
+	// 另一条计算调用（读锁路径）同样应立即返回。
+	stateCh := make(chan error, 1)
+	go func() {
+		_, err := h.VMState(context.Background(), "vm-a")
+		stateCh <- err
+	}()
+	select {
+	case err := <-stateCh:
+		if err != nil {
+			t.Fatalf("Swap 期间 VMState 应转发成功: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Swap 期间 VMState 被阻塞（旧实现持写锁关闭连接）")
+	}
+
+	old.releaseAll()
+	select {
+	case <-swapDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("放行后 Swap 未返回")
+	}
+}
+
+// TestDynamicComputeCloseClosesConnOutsideLock 决策 #378/D2 红-绿：Close 先在锁内取走 conn
+// 并置空、锁外关闭。阻塞的 Close 期间：计算调用不被阻塞、且并发 Close 幂等立即返回 nil。
+func TestDynamicComputeCloseClosesConnOutsideLock(t *testing.T) {
+	h := newDynamicCompute()
+	old := newBlockingCloser()
+	defer old.releaseAll()
+	h.Swap(&fakeCompute{}, old)
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- h.Close() }()
+
+	select {
+	case <-old.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close 未开始关闭连接")
+	}
+
+	// Close 阻塞在旧连接的 Close 上：Connected 不应被阻塞。
+	connected := make(chan bool, 1)
+	go func() { connected <- h.Connected() }()
+	select {
+	case <-connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close 期间 Connected 被阻塞（旧实现持写锁关闭连接）")
+	}
+
+	// 幂等：conn 已在锁内置空，并发 Close 应立即返回 nil（不被前一次的阻塞关闭挡住）。
+	idem := make(chan error, 1)
+	go func() { idem <- h.Close() }()
+	select {
+	case err := <-idem:
+		if err != nil {
+			t.Fatalf("并发 Close 应幂等返回 nil: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close 不幂等（第二次调用被第一次的阻塞关闭挡住）")
+	}
+
+	old.releaseAll()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close 返回错误: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("放行后 Close 未返回")
+	}
+}
+
 func TestContainerHolderDegradedSemantics(t *testing.T) {
 	h := newContainerHolder()
 	if h.Connected() {
