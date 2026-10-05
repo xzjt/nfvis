@@ -20,6 +20,9 @@ import (
 
 // DHCP 常量（端口与消息类型；RFC 2131）。
 const (
+	// dhcpMinMessageBytes BOOTP/DHCP 报文下限（RFC 2131 §2；不足补零，决策 #371）。
+	dhcpMinMessageBytes = 300
+
 	dhcpServerPort  = 67
 	dhcpClientPort  = 68
 	dhcpMagicCookie = 0x63825363
@@ -212,6 +215,13 @@ func buildDHCPReply(m dhcpMessage, msgType byte, yiaddr net.IP, spec dhcpReplySp
 	}
 	opts = append(opts, dhcpOptEnd)
 	body = append(body, opts...)
+
+	// 决策 #371（R142 C10）：按 RFC 2131 §2 的 BOOTP 下限把 DHCP 载荷补零到 300 字节
+	// （零填充在 END 之后；必须在 UDP 长度/校验和计算之前补）。部分标准/老旧客户端
+	// 要求报文达到该长度。
+	if len(body) < dhcpMinMessageBytes {
+		body = append(body, make([]byte, dhcpMinMessageBytes-len(body))...)
+	}
 
 	// UDP + IPv4（校验和如实计算，与 dnsproxy.go 同一套核心）。
 	udpLen := 8 + len(body)

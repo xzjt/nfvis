@@ -1466,3 +1466,113 @@ func TestDHCPServerProviderReconcile(t *testing.T) {
 		t.Fatalf("到期条目不应留在文件里: %+v", f.Leases)
 	}
 }
+
+// 决策 #371（R142 C7）：**探测不改生效租约**——active 条目经 DISCOVER（allocate）后
+// 状态与到期都不变；旧实现会降级为 offered+2 分钟保持窗（随后被 sweep 回收 ⇒ 重复地址风险）。
+func TestDHCPLeaseTableAllocateKeepsActive(t *testing.T) {
+	fc := newFakeClock(time.Unix(1_000_000, 0))
+	lo, hi := poolOf(t, "192.168.100.10", "192.168.100.12")
+	tt := newDHCPLeaseTable(lo, hi, fc.now)
+
+	const mac = "aa:aa:aa:aa:aa:01"
+	ip, ok := tt.allocate(mac)
+	if !ok {
+		t.Fatal("首个 DISCOVER 应分配成功")
+	}
+	tt.commit(mac, ip, time.Hour) // REQUEST→ACK：active，租期 1h
+	activeExpiry := tt.byMAC[mac].ExpiresAt
+
+	fc.advance(10 * time.Minute)
+	if ip2, ok2 := tt.allocate(mac); !ok2 || ip2 != ip {
+		t.Fatalf("active 客户端的 DISCOVER 应得同一地址，实得 %v/%v", ip2, ok2)
+	}
+	l := tt.byMAC[mac]
+	if l.State != dhcpLeaseActive {
+		t.Fatalf("DISCOVER 不得把 active 降级（旧实现 offered）：%s", l.State)
+	}
+	if !l.ExpiresAt.Equal(activeExpiry) {
+		t.Fatalf("DISCOVER 不得改动 active 的到期（旧实现缩到 2 分钟保持窗）：%v vs %v", l.ExpiresAt, activeExpiry)
+	}
+	// 对照：offered（未 active）经 DISCOVER 仍按保持窗刷新
+	mac2 := "aa:aa:aa:aa:aa:02"
+	ipB, _ := tt.allocate(mac2)
+	fc.advance(30 * time.Second)
+	before := tt.byMAC[mac2].ExpiresAt
+	if _, ok := tt.allocate(mac2); !ok {
+		t.Fatal("第二个客户端应能拿到地址")
+	}
+	if !tt.byMAC[mac2].ExpiresAt.After(before) {
+		t.Fatalf("offered 条目经 DISCOVER 应刷新保持窗：%v vs %v", tt.byMAC[mac2].ExpiresAt, before)
+	}
+	_ = ipB
+}
+
+// 决策 #371（R142 C6）：declined 地址在隔离期内**任何客户端**（含声明者本人）都不得取得——
+// 旧实现同一 MAC 的 REQUEST 会落进默认分支被 commit 夺回。
+func TestDHCPServerDeclinedNotReclaimableBySameMAC(t *testing.T) {
+	p, _, _, factory, _ := newEnabledProvider(t)
+	ctx := context.Background()
+	vs := vsDHCPServer()
+	if err := p.Sync(ctx, vs); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	name := vs.Name
+	bvi := net.ParseIP("192.168.100.1")
+	mac1 := mustMAC(t, "aa:bb:cc:dd:ee:01")
+	tap := factory.get(DHCPServerTapName(name))
+
+	// mac1 租下 .10（active）
+	p.handleTapFrame(name, dhcpClientFrame(mac1, dhcpRequest, net.ParseIP("192.168.100.10"), bvi, nil))
+	n0 := len(tap.frames())
+
+	// mac1 声明该地址冲突（DECLINE：option 50 = .10）
+	p.handleTapFrame(name, dhcpClientFrame(mac1, dhcpDecline, net.ParseIP("192.168.100.10"), bvi, nil))
+	if got := len(tap.frames()); got != n0 {
+		t.Fatalf("DECLINE 不应产生应答，实得 %d 条", got-n0)
+	}
+
+	// mac1 再用 REQUEST 要回同一地址 ⇒ 必须 NAK（隔离期内任何人不得取得）
+	p.handleTapFrame(name, dhcpClientFrame(mac1, dhcpRequest, net.ParseIP("192.168.100.10"), bvi, nil))
+	sent := tap.frames()
+	if len(sent) != n0+1 {
+		t.Fatal("隔离期内同 MAC 的 REQUEST 应回 1 条 NAK")
+	}
+	nr := parseReplyFrame(t, sent[n0])
+	if mt := findOption(t, nr.body, dhcpOptMsgType); mt[0] != dhcpNak {
+		t.Fatalf("隔离期内同 MAC REQUEST 应 NAK（旧实现 ACK 夺回），实得 msgType=%d", mt[0])
+	}
+	// 另一台客户端同样 NAK（隔离对所有人成立）
+	mac2 := mustMAC(t, "aa:bb:cc:dd:ee:02")
+	p.handleTapFrame(name, dhcpClientFrame(mac2, dhcpRequest, net.ParseIP("192.168.100.10"), nil, nil))
+	if got := len(tap.frames()); got != n0+2 {
+		t.Fatal("他人请求隔离地址也应 NAK")
+	}
+}
+
+// 决策 #371（R142 C10）：应答按 BOOTP 下限补零到 300 字节（RFC 2131 §2）。
+func TestDHCPReplyPaddedTo300(t *testing.T) {
+	p, _, _, factory, _ := newEnabledProvider(t)
+	ctx := context.Background()
+	vs := vsDHCPServer()
+	if err := p.Sync(ctx, vs); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	name := vs.Name
+	bvi := net.ParseIP("192.168.100.1")
+	mac := mustMAC(t, "aa:bb:cc:dd:ee:09")
+	tap := factory.get(DHCPServerTapName(name))
+
+	// DISCOVER → OFFER；REQUEST → ACK；两者都须 ≥300 字节
+	p.handleTapFrame(name, dhcpClientFrame(mac, dhcpDiscover, nil, nil, nil))
+	p.handleTapFrame(name, dhcpClientFrame(mac, dhcpRequest, net.ParseIP("192.168.100.10"), bvi, nil))
+	frames := tap.frames()
+	if len(frames) < 2 {
+		t.Fatalf("应有 OFFER 与 ACK，实得 %d 条", len(frames))
+	}
+	for i, f := range frames {
+		nr := parseReplyFrame(t, f)
+		if len(nr.body) < dhcpMinMessageBytes {
+			t.Fatalf("第 %d 条应答载荷 %d 字节 < %d（未补零）", i+1, len(nr.body), dhcpMinMessageBytes)
+		}
+	}
+}

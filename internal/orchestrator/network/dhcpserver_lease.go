@@ -117,8 +117,14 @@ func (t *dhcpLeaseTable) allocate(mac string) (string, bool) {
 	if l := t.byMAC[mac]; l != nil && l.State != dhcpLeaseDeclined {
 		v, ok := ipToU32(l.IP)
 		if ok && t.inPool(v) {
-			l.State = dhcpLeaseOffered
-			l.ExpiresAt = now.Add(dhcpOfferHold)
+			// 决策 #371（R142 C7）：**探测不改生效租约**——active 条目原样返回（不改 state/到期），
+			// 续租仍走 REQUEST→ACK 的 commit。此前无条件改写成 offered+2 分钟保持窗，
+			// 一次 DISCOVER 即把生效租约降级、2 分钟后被 sweep 回收 ⇒ 地址可被分配给别的
+			// 客户端（重复地址）。
+			if l.State != dhcpLeaseActive {
+				l.State = dhcpLeaseOffered
+				l.ExpiresAt = now.Add(dhcpOfferHold)
+			}
 			return l.IP, true
 		}
 	}
