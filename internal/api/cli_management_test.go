@@ -76,6 +76,47 @@ func TestCLIManagementStatements(t *testing.T) {
 	}
 }
 
+// 决策 #379（R152-1）：`delete system management ip address` **不带值**应与 interface/gateway 形态一致
+// （清 management.address）；带值形态不变；`set … ip address` 缺值如实报「缺少取值」。
+func TestCLIManagementIPAddressDeleteValueOptional(t *testing.T) {
+	x, eng := newCLIKit(t)
+	run(t, x, "admin", "super-user", "ssh",
+		"configure",
+		"set system management interface ens160",
+		"set system management ip address 192.168.1.10/24")
+	if res := x.Execute("admin", "super-user", "ssh", "commit confirmed 10"); res.Output == "" {
+		t.Fatalf("commit confirmed 应有输出")
+	}
+	if cfg, _ := eng.Committed(); cfg.System.Management == nil || cfg.System.Management.Address != "192.168.1.10/24" {
+		t.Fatalf("前置：address 未落模型: %+v", cfg.System.Management)
+	}
+
+	// 不带值删除（决策 #379）：此前无 4-token 规则，落通用树路径报「无匹配配置: ip」。
+	// run 在输出含「%%」时即判失败 ⇒ 这里能通过就证明不再报错。
+	run(t, x, "admin", "super-user", "ssh", "configure", "delete system management ip address")
+	if res := x.Execute("admin", "super-user", "ssh", "commit confirmed 10"); res.Output == "" {
+		t.Fatalf("删除后 commit confirmed 应有输出")
+	}
+	if cfg, _ := eng.Committed(); cfg.System.Management.Address != "" {
+		t.Fatalf("不带值删除应清 address: %+v", cfg.System.Management)
+	}
+
+	// set 缺值：如实报「缺少取值」（不静默建空壳）
+	run(t, x, "admin", "super-user", "ssh", "configure")
+	if res := x.Execute("admin", "super-user", "ssh", "set system management ip address"); !strings.Contains(res.Output, "缺少取值") {
+		t.Fatalf("set 缺值应如实报错: %s", res.Output)
+	}
+
+	// 带值形态不变（既有 5-token 规则）：仍能设、仍能按值删
+	run(t, x, "admin", "super-user", "ssh", "set system management ip address 192.168.1.20/24")
+	if res := x.Execute("admin", "super-user", "ssh", "commit confirmed 10"); res.Output == "" {
+		t.Fatalf("带值 set 后 commit confirmed 应有输出")
+	}
+	if cfg, _ := eng.Committed(); cfg.System.Management.Address != "192.168.1.20/24" {
+		t.Fatalf("带值形态应照常生效: %+v", cfg.System.Management)
+	}
+}
+
 // 管理网卡被数据面引用 → commit 必须失败并逐条列出（FR-NET-002）。
 func TestCLIManagementIsolationEnforced(t *testing.T) {
 	x, _ := newCLIKit(t)
