@@ -1,0 +1,55 @@
+round150 · 决策 #367 —— 恢复收敛告警的子来源消解（收口 R142-7）
+====================================================================
+日期：2026-10-05；分支 feat/d367-recovery-subsource（1d5bda6 契约先行 → 3cc7087 实现）；
+真机 nfvis-vm 2.0.0~dev82（= v2 含 #366 squash 合并 9e550cf + 本分支）。
+来源：round142 半程体检 F5（docs/evidence/v2-round142-midpoint-audit.txt §2 簇 F）。
+
+§0 结论
+- #333 的按来源廉价复核补上**子对象粒度**：`virtual-switches/<n>/learn-limit|dhcp-relay|dhcp-server`
+  三类三段子来源，在交换机已删或子特性声明已删时，由 15s 巡检在一个周期内消解——
+  不再只能等下次 VPP 重连的全量重放。真机以「内核名占位注入 + 恢复重放」取得真实在册
+  告警并验证消解。
+
+§1 契约先行（1d5bda6）
+- 附录 A 新增决策 #367（v2 线第 68 条）；AGENTS.md 决策条数 268→269。
+- 口径：消解判据与恢复重放**逐字同源**——重放根本不会再碰它（交换机不在声明集 /
+  子特性不在声明：`LearnLimit > 0` / `DhcpRelayServer != ""` / `DHCPServerEnabled()`）⇒ 消解；
+  未知 leaf 与其余多段来源保守保留；IFACE_MISSING 既有语义不变。
+
+§2 实现（3cc7087）
+- `internal/orchestrator/network/recovery_reconcile.go`：在 qos 族之后新增 `virtual-switches/<sw>/<leaf>`
+  分支——交换机不在 `switches` 集即消解；在则按 leaf 查子特性声明（known/declared 双标志，
+  **未知 leaf 保守保留不消解**——单测当场抓到「未知 leaf 被当未声明消解」的实现偏差并修正）。
+- 测试：4 项新单测（⑦a 交换机删→三类全消；⑦b 交换机在子特性删→消；⑦c 全声明→三条保留；
+  ⑦d 未知 leaf/超三段→保留）；红-绿：临时摘除分支 ⇒ ⑦b 等按预期失败（告警滞留），恢复即绿。
+- 既有 8 项 #333 用例全部不受影响（两段 `virtual-switches/<n>` 仍走 default 分支）。
+
+§3 真机验证（dev82，注入定形过程如实记录）
+- **注入演进（教训：故障注入要先验证「注入真的生效」——本轮再次应验且加倍）**：
+  ① 删内核 tap（`ip link del nfvisdhfe341987`）→ **无效**：15s 巡检（Reconcile→Sync）自愈重建
+  （tap 双端随内核删除消亡 → TapDump 找不到 → TapCreate 重建，journal 无错误）——自愈设计
+  正确，注入不成立；
+  ② 直接加同名 dummy → **无效**：名字被自愈后的真 tap 占用（RTNETLINK File exists）；
+  ③ **一条命令内「删真 tap + 即刻同名 dummy 占位」**（不给巡检窗口）→ TapCreate 必然失败
+  （内核名被占，System call error）→ 注入稳定生效（journal 每 15s 一条
+  「DHCP 服务器巡检 err: 创建交换机 dns-vs 的 DHCP 内置 tap …(-13)」）。
+- **造告警**：注入在场 ⇒ `request vpp restart` → 恢复重放 → `show alarms active` 出现
+  `warning RECOVERY_UNCONVERGED virtual-switches/dns-vs/dhcp-server 04:24:34
+  创建交换机 dns-vs 的 DHCP 内置 tap（内核侧名 nfvisdhfe341987）: VPPApiError: System call error #3 (-13)`
+  ——三段子来源告警**真实在册**（此前该形态只能靠代码级确认）。
+- **对照（声明仍在 ⇒ 保留）**：告警在册期间跨多个 15s 巡检周期持续存在（04:24:34 至删除前），
+  巡检只重试不消解、不猜测——与 #333 的保守口径一致。
+- **消解（本决策主体）**：`delete virtual-switches dns-vs dhcp-server`（rev 77，**注入障碍仍在场**）
+  → 20s（一个以上巡检周期）→ `show alarms active` RECOVERY 计数 = **0**——不依赖任何重放/
+  重启，15s 复核按「重放不会再碰它」消解。修复前该告警会一直滞留到下次 VPP 重连。
+- **清场（留痕）**：dummy 已删；`/var/lib/nfvis/dhcp/` 空；VPP 无 tap；dns-vs 回基线
+  （`type l2 + gateway ip 192.168.77.1/24`）；`show alarms active` 仅常态 HUGEPAGE_POOL_ORPHAN。
+
+§4 make check
+- 全量通过（pre-commit 即 `go test ./...`：#333 既有 8 用例 + 新 4 用例全绿；决策 269 守护）。
+
+§5 教训（入册）
+1. **注入可能被产品自愈吃掉**：可自愈系统里「注入生效」必须对着失败路径的**日志证据**确认，
+   而不是假设删了就坏（本轮第一次注入被 15s 巡检静默修复，实验差点假通过/假失败两开花）。
+2. **占名注入要和删除同一条 shell 原子完成**：自愈窗口 15s，人工两步操作必被吃掉。
+3. 单测先行的价值再现：⑦d 在真机之前抓到「未知 leaf 被误消解」的实现偏差。
