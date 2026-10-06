@@ -286,7 +286,7 @@ func sortedKeys(m map[string]uint32) []string {
 // ---------- 向量构造（纯函数） ----------
 
 // TestStormVectorsMaskAndMatch：两类掩码/匹配向量的形状是本实现的**契约形状**
-//（真机已按 show classify tables 核对：ff×6 与 01 两种掩码）。
+// （真机已按 show classify tables 核对：ff×6 与 01 两种掩码）。
 func TestStormVectorsMaskAndMatch(t *testing.T) {
 	bMask := stormMask(StormKindBroadcast)
 	bMatch := stormMatch(StormKindBroadcast)

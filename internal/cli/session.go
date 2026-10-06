@@ -208,7 +208,7 @@ func (s *Session) completionContext(line string) (base, partial string, cs []sch
 // 常规情形（未引用输入）与旧实现逐字相同：line 去掉尾随空白后剥掉 partial 后缀。
 // 引号/转义会让 partial 是**解码后**的文本（如 `"a\" b` 解为 `a" b`），字面后缀不再匹配，
 // 此时用 `cliparse.SplitFieldsOffsets` 取**最后一个 token 的内容起点**——base 保留开引号
-//（如 `set x desc "`）。位置追踪与分词同源（决策 #377/E8），不另写引号规则。
+// （如 `set x desc "`）。位置追踪与分词同源（决策 #377/E8），不另写引号规则。
 func baseBeforePartial(line, partial string) string {
 	trimmed := strings.TrimRight(line, " \t")
 	if partial == "" {
