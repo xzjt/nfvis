@@ -1019,8 +1019,11 @@ nfvis$ show system firewall                              # 默认策略/规则�
   普通 `commit` 会被拒绝并给出照做路径。confirmed 提交后若在超时时间内没有再次 `commit` 确认，
   配置会**自动回滚到上一份**，管理访问随之恢复。
 - 极端情况下连回滚窗口也错过了：用**虚拟化平台的虚拟机控制台**或**物理串口**本地登录
-  （本地 console 会话不受该限制，也豁免 confirmed 要求），把防火墙配置改回来，或执行
-  `request system configuration restore <归档路径>` 恢复上一份配置备份。
+  （本地 console 会话不受该限制，也豁免 confirmed 要求），把防火墙配置改回来；也可以执行
+  `request system configuration restore <归档路径>` 直接恢复上一份配置备份——**恢复动作本身
+  不受 confirmed 限制**（它是一次性的救援动作，把整份配置换回归档里的版本，不需要也不能用
+  `commit confirmed`）。注意恢复会把**当前全部配置**（含管理口与防火墙）替换成归档里的版本，
+  请先确认归档就是你要回退到的那一份。
 - 建议顺序：先加好放行规则（如 `accept source <你的管理网段> protocol tcp port 22`），**最后**再把
   默认策略改成 `drop`，并且始终用 `commit confirmed`。
 
@@ -1930,6 +1933,11 @@ nfvis$ request system zeroize
 # 而管理口/API/登录用户配置与物理口/DPDK 声明保留，执行完仍可登录继续配置、不必重启：
 nfvis$ request system storage format-data
 ```
+
+> **`configuration restore` 是整份配置的救援式恢复**：它把当前配置整体替换为归档里的版本
+> （含管理口与防火墙），**不受**「管理口/防火墙变更需 commit confirmed」的限制——管理面被自己
+> 改锁之后，可以用它一次把配置换回已知可用的那一份（不需要也不能用 `commit confirmed`）。
+> 恢复前请确认归档内容就是你要回退到的版本。
 
 > **`zeroize` 与 `storage format-data` 的区别**：两者都**不可撤销**且都删业务对象，但
 > `zeroize` 连同账号表一起复位（重启后进入初始化状态，需带外/控制台重新初始化）；

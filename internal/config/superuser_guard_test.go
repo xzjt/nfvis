@@ -209,3 +209,45 @@ func TestSuperUserGuardSurvivesCustomValidateChain(t *testing.T) {
 		t.Fatal("自定义校验链把校验换掉了，但自锁兜底仍须生效（决策 #152：守卫不走 Validate 链）")
 	}
 }
+
+// 决策 #392：确认守卫豁免内部维护/救援动作——**管理口守卫矩阵**。
+//
+// 三类合成来源（恢复出厂 SourceZeroize / 恢复配置 SourceRestore / 重置数据分区
+// SourceFormatData）各自有操作级双重确认（破坏性闸门），且 Restore 本身就是「管理口/防火墙
+// 自锁」的救援路径，故在管理口变更下**放行**（不要求 commit confirmed）；用户会话
+// （ssh / api）判据不变（仍拒），本地串口（console）豁免不变（FR-CFG-012 原有口径）。
+func TestMgmtConfirmGuardExemptsInternalMaintenanceSources(t *testing.T) {
+	cases := []struct {
+		source string
+		reject bool
+	}{
+		{"ssh", true},
+		{"api", true},
+		{"console", false},
+		{SourceZeroize, false},
+		{SourceRestore, false},
+		{SourceFormatData, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.source, func(t *testing.T) {
+			k := newEngineKit(t) // 基线自带管理口（地址+网关）与 super-user
+			sess := Session{User: "admin", Source: tc.source}
+			k.edit(t, "admin", tc.source)
+			cfg := baseCommitted()
+			cfg.System.Management.Address = "192.168.1.99/24" // 管理口地址变更
+			if err := k.engine.UpdateCandidate(sess, cfg); err != nil {
+				t.Fatalf("UpdateCandidate: %v", err)
+			}
+			_, err := k.engine.Commit(context.Background(), sess, CommitOpts{})
+			if tc.reject {
+				if !errors.Is(err, ErrConfirmRequired) {
+					t.Fatalf("source=%s 变更管理口应要求 commit confirmed，得到 %v", tc.source, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("source=%s 应被豁免（不要求 confirmed），得到 %v", tc.source, err)
+			}
+		})
+	}
+}
