@@ -1,0 +1,78 @@
+round165 · 决策 #384 —— GPU / 通用 PCI 设备直通（配置面 + 降级路径）
+====================================================================
+日期：2026-10-06；分支 v2-round165-pci（7eb93b2 契约先行 → d14ee36 实现）；真机 nfvis-vm 2.0.0~dev108。
+来源：`docs/v2待做.md` 一.8（差距分析 §1-15「GPU 及通用 PCI 设备直通——0 命中」）。
+PR：https://github.com/xzjt/nfvis/pull/312（base v2）。
+
+§0 结论
+- **交付**：`set virtual-machine-functions <n> pci-device <bdf>`（**追加**；`delete … pci-device [<bdf>]` 去一条/清空）
+  ⇒ 域 XML 追加 `<hostdev mode='subsystem' type='pci' managed='yes'>`（**复用 SR-IOV 的同一 libvirt 结构**）；
+  提交期校验（BDF 语法/归一、同 VM 去重、**跨 VM 冲突**）+ **编排层存在性检查**（查 `/sys/bus/pci/devices`，
+  不存在即如实拒绝并给照做路径）；三面读视图。
+- **真机四维通过**；`make check` 全绿；四套件与基线逐项一致。
+- **如实边界**：真机**未**做「直通后 guest 可见设备」的端到端——宿主（VMware guest）无 IOMMU 直通能力，
+  只做**配置面 + 降级路径**（定义域可核对、启动失败可读）。
+
+§1 契约先行（7eb93b2）
+- 附录 A 决策 #384（v2 线第 85 条）；`AGENTS.md` 决策条数 285→286；`docs/v2待做.md` 一.8 收口。
+- `docs/NFViS-openapi.yaml`（`VMFunction.pci_devices` + 校验/边界如实说明，`--write` 同步 `openapi.json`）；
+  `docs/NFViS-CLI命令全表.md`（新语句 + 如实边界）；`docs/NFViS-用户手册.md` §9.5（BDF 写法、**vfio 预绑定由操作者负责**、
+  **实际直通取决于宿主 IOMMU 能力**；无需求/决策编号）。
+
+§2 实现（d14ee36）
+1. **模型/校验**（`model.go` + `validate.go`）：`VMFunction.PCIDevices []string`（`pci_devices`）；纯函数 `NormalizeBDF`
+   （接受 `[domain:]bus:slot.function`、省略 domain、短写、大小写、`0x` 前缀；按真实 PCI 位宽收口
+   domain≤4/bus≤2/slot≤0x1f/func≤7；输出小写定宽 `dddd:bb:ss.f`）+ 同 VM 去重 + **跨 VM 冲突**（报错点名两台 VM 与设备）。
+2. **语句/别名/反推**：树加 `pci-device` 叶子；别名实现**追加**（同值幂等 → 既有 `noChangeError` 口径）、
+   去一条（按归一匹配，不存在报「无匹配配置」）、清空；`set … pci-device`（缺值）**显式报「配置不完整」**
+   （防借清空语义静默得逞）；display-set 反推为每设备一条，**回放自校验通过**。
+3. **域 XML + 编排层**：`DomainSpec.PCIDevices`；`BuildDomain` 在 SR-IOV hostdev **之后**追加同结构 hostdev
+   （`NormalizeBDF` → 复用 `ParsePCI`，其语义未改）；`DefineVM` 前 `checkPCIDevices`（`NewSysfsPCIDeviceChecker`）
+   ——**未注入检查器且声明了设备 ⇒ 明确报错**（不静默放行）；sysfs 目录不可读与设备不存在**分开**如实报告；
+   文案给照做路径（`lspci` / `ls /sys/bus/pci/devices`；被数据面占用时先 `request interfaces <ifname|pci> unbind-dpdk`）。
+4. **读视图**：`show virtual-machine-functions <n> detail` 增「直通 PCI 设备（BDF）」块（配置值 + 实测态
+   「已在系统中／未在系统中（提交期会拒绝）／无法核对（原因）」——查不到不猜）；REST `VMFunction.pci_devices`；
+   Web VM 详情「概览」只读行。
+
+§3 测试与红-绿
+- 模型：`TestValidatePCIDeviceDuplicateInVM / CrossVMConflict / SyntaxRejected`。**红-绿**：摘除校验块 ⇒ 三条全 FAIL
+  （重复/冲突/非法全部放行）；恢复 ⇒ ok。
+- 编排：`TestDefineVM_PCIDevice…`（不存在即拒绝、检查器被调用、无检查器不放行）。**红-绿**：摘除 `checkPCIDevices` 调用
+  ⇒ 三条 FAIL；恢复 ⇒ 8/8 PASS。
+- 域 XML 构建断言（数量/地址/`managed=yes`、与 SR-IOV hostdev 并存且 SR-IOV 在前）；
+  display-set 反推回放自校验（含多条/省略 domain 两用例）；形状守护 + `check_suite_contract_sync.sh`（2 条豁免登记 + 理由）。
+- compute 包覆盖率 86.7%（门槛 70%）。
+
+§4 真机验证（dev108）
+① **作用效果**——建一次性 VNF `pci-vm` 并声明**真实** BDF `0000:00:0f.0`（**只 define、不 start**，避免真去 detach 宿主设备）：
+   `virsh -c qemu:///system dumpxml pci-vm` 里出现
+   `<hostdev mode='subsystem' type='pci' managed='yes'><source><address domain='0x0000' bus='0x00' slot='0x0f' function='0x0'/>`
+   ——地址与 `managed` 逐字对；读视图 `show virtual-machine-functions pci-vm detail` 显示
+   `直通 PCI 设备（BDF）: 0000:00:0f.0   已在系统中`。
+② **生命周期**——`delete … pci-device 0000:00:0f.0` 后重新 define ⇒ `dumpxml` 里 hostdev 计数 **0**；
+   删 `pci-vm` ⇒ `virsh list --all` 回到仅 sem-vm。
+③ **对抗性**——**bogus BDF** `0000:ff:1f.7` ⇒ 提交期**如实拒绝**：
+   `VM pci-vm: 直通 PCI 设备 0000:ff:1f.7 不在本机（/sys/bus/pci/devices/0000:ff:1f.7 不存在）——请用 lspci 或
+   ls /sys/bus/pci/devices 核对设备地址；若该设备已被数据面占用，先 request interfaces <ifname|pci> unbind-dpdk 释放后再试`
+   （**已补偿**，无残域）；**跨 VM 冲突** ⇒ `PCI 设备 0000:00:0f.0 已声明给 VM sem-vm：同一设备不能同时直通给两台 VM
+   （sem-vm 与 pci-a）`（点名两台）。
+④ **并存不回归**——给 sem-vm 一个**不同** BDF（`0000:00:07.7`）⇒ 提交成功、`dumpxml sem-vm` 的 hostdev 地址正确，
+   与既有声明并存。
+⑤ **清场**——去 sem-vm 的 `pci-device`、删 `pci-a`、起回 sem-vm；配置 `pci-device|pci-a` 计数 **0**、
+   `dumpxml sem-vm` hostdev 计数 **0**、`virsh list --all` 仅 sem-vm running；停/起期的瞬态 `VNF_PORT_DOWN`
+   **自动消解**，告警仅常态 `HUGEPAGE_POOL_ORPHAN`。
+
+§5 如实边界 / 未竟（契约已写明）
+- 不做：设备**热插拔**；vfio **驱动的绑定/解绑**（预绑定由操作者/安装器负责）；GPU 专用特性（vGPU/图形输出/显存切分）；
+  IOMMU 分组校验。
+- **未验证**：直通后 guest 内**实际可见/可用该设备**（宿主为 VMware guest、无 IOMMU 直通能力）——**只做配置面 + 降级路径**，
+  与条目原文「本机无硬件，只能做降级路径」一致。
+- 真机顺带观察（非缺陷）：声明新 VNF 会受**隔离核/1G 页**资源校验约束（本机隔离核 4 个、VPP 占 3），
+  两台以上新 VNF 会被资源校验先行拒绝——这解释了排查「跨 VM 冲突」时先撞到资源错误的原因（改用「给已声明的
+  sem-vm 加同一 BDF」两 VM 场景才命中冲突校验）。
+- 命令全表 §3 的**存量统计漂移**（表内数字与文件实际行数不符）系既有问题，本轮只按该表既有口径更新与 +2 直接相关的数字，
+  未全面重修（建议后续单独对账）。
+
+§6 四套件复跑（dev108）
+- `cli-fulltest` **254/0/18** ｜ `cli-semantic-check` **26/0/3**（**S8 冷窗**；S11/S12 按设计）｜
+  `cli-lifecycle-check` **22/0/3**（L3-2 正控未热，非回归）｜ `cli-pty-smoke` **10/10**——与基线逐项一致。
