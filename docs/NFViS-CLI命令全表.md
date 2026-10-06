@@ -314,9 +314,9 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set interfaces <ifname> storm-control broadcast <kbps>` | 入向**广播**风暴抑制（决策 #385，FR-NET-019）：目的 MAC 精确匹配 `ff:ff:ff:ff:ff:ff`，超速**丢弃**；单位 **kbps**（不做 pps 换算）；接口须已声明 | VPP policer（1R2C）+ L2 classify 表挂接口入向 | ✅（真机四维 + 定量对照（round167，dev110）：对照组 l2-flood 2000 vs 实验组 15/16；类别独立/表链/删除清查/重启重放；**能力前提 spike** 见 `docs/evidence/v2-round166-storm-control-spike.txt`） |
 | `set interfaces <ifname> storm-control multicast <kbps>` | 入向**组播**风暴抑制（决策 #385）：目的 MAC 的 I/G 位=1（掩码「匹配位」写法；按该口径广播帧也满足此位——两类同配时广播走自己的精确表，只配组播时广播按组播速率限） | 同上 | ✅（同上；掩码「匹配位」写法与两类表链（广播表经 `NextTableIndex` 链组播表）已按 `show classify tables` 真机核对） |
 | `delete interfaces <ifname> storm-control [broadcast \| multicast]` | 逐类撤销（detach → 删 session/表 → 删 policer）；**裸 delete ＝两类都清**（幂等：不存在按已达成） | 同上 | ✅（同上；删除一次提交全清、重启重放不翻倍——两处实测缺陷的修复复验） |
-| `set interfaces <ifname> port-security mac <mac>` | 端口安全白名单（决策 #389）：**追加**语义；MAC 归一小写、重复拒绝、每接口上限 32 条；**白名单非空即启用**——该口入向（L2）只放行白名单源 MAC，其余丢弃；接口须已声明且为某 L2 交换机成员（移出交换机/删交换机/删接口 ⇒ 提交期拒绝）；与 L3 接口 ACL 的 macip 绑定槽互斥 | VPP macip ACL（tag `nfvis-port-sec-<if>`；每 MAC 两条 permit + **显式 deny-all**——macip 无匹配默认＝放行，真机实证）绑接口入向 | 🚫 待真机（实现随本轮交付；真机四维验证待执行） |
-| `delete interfaces <ifname> port-security mac <mac>` | 按值删一条（大小写不敏感比较；不存在报「无匹配配置」） | 同上（变更＝整体替换，幂等） | 🚫 待真机（同上） |
-| `delete interfaces <ifname> port-security` | 清空整段＝停用（解绑；macip 无 delete 消息，ACL 对象残留在数据面直到重启——如实登记） | 同上 | 🚫 待真机（同上） |
+| `set interfaces <ifname> port-security mac <mac>` | 端口安全白名单（决策 #389）：**追加**语义；MAC 归一小写、重复拒绝、每接口上限 32 条；**白名单非空即启用**——该口入向（L2）只放行白名单源 MAC，其余丢弃；接口须已声明且为某 L2 交换机成员（移出交换机/删交换机/删接口 ⇒ 提交期拒绝）；与 L3 接口 ACL 的 macip 绑定槽互斥 | VPP macip ACL（tag `nfvis-port-sec-<if>`；每 MAC 两条 permit + **显式 deny-all**——macip 无匹配默认＝放行，真机实证）绑接口入向 | ✅ 真机四维验证（round170，dev113）：产品路径下发后 macip ACL 逐字对（tag `nfvis-port-sec-ens192`、4 规则＝v4/v6 permit + v4/v6 显式 deny）；**A/B 注入（独立事实源 `l2-flood`）：白名单源 +2000（放行）/ 伪造源 +0（丢弃）**；清空后伪造源恢复 +2000（行为反转）；加 MAC 同索引整体替换（4→6）、restart nfvis tag 复用不重复建、移出交换机守卫拒绝、非法/重复/超限/非成员全拒——证据 `docs/evidence/v2-round170-d389-port-security.txt` |
+| `delete interfaces <ifname> port-security mac <mac>` | 按值删一条（大小写不敏感比较；不存在报「无匹配配置」） | 同上（变更＝整体替换，幂等） | ✅（round170：同索引整体替换 4→6；重放 tag 复用——同左） |
+| `delete interfaces <ifname> port-security` | 清空整段＝停用（解绑；macip 无 delete 消息，ACL 对象残留在数据面直到重启——如实登记） | 同上 | ✅（round170：清空＝解绑、伪造源恢复放行（行为反转）；残留 ACL 对象随 `request vpp restart` 归零——同左） |
 | `set bonds <name> members [<seq>] <ifname>` | 聚合成员 | VPP bonding | ✅ |
 | `set bonds <name> lacp mode <active\|passive> [interval <fast\|slow>]` | LACP 模式 | VPP bonding | ✅ |
 | `set bonds <name> lacp disable` | 关闭 LACP（转静态聚合） | VPP bonding | ✅ |
@@ -478,11 +478,11 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 282 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）、**主机防火墙 5 行（#388，round169）**——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，按增量口径一并订正 |
+| ✅ 实测通过 | 285 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）、**主机防火墙 5 行（#388，round169）**——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，按增量口径一并订正 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 设计拒绝（decision #340） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 未在 v2 轮次执行 | 14 | **破坏性/需交互（11）**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、`kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）。机制由单测/集成测试覆盖；破坏性动作按其交付说明单独走查（部分动作在 v1 收尾轮有真机走查记录，见各轮证据）。**新落地待真机（3，决策 #389 端口安全）**：`set/delete interfaces <if> port-security …` 三条语句——实现随本轮交付、已入套件与单测，**真机四维验证待执行**。round168 一度在此桶挂过 #388 的 5 条待真机行，round169 真机四维通过后移入 ✅ |
+| 🚫 未在 v2 轮次执行 | 11 | **破坏性/需交互**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、`kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）。机制由单测/集成测试覆盖；破坏性动作按其交付说明单独走查（部分动作在 v1 收尾轮有真机走查记录，见各轮证据）。round168/170 一度在此桶挂过 #388 的 5 条与 #389 的 3 条待真机行，真机四维通过后均已移入 ✅ |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
@@ -496,11 +496,10 @@ round80 以来那条唯一 ✗ 归零。
 pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**；
 语义校验 **12 / 0 / 1**、生命周期与组合 **21 / 0 / 3**（有业务现场时跑）。
 
-**当前基线（v2 开发线，round169 实测；逐轮累积与证据见下）**：
-`cli-fulltest` **272 / 0 / 20** ｜ `cli-semantic-check` **27 / 0 / 2**（S8 冷窗时 26/0/3）｜
-`cli-lifecycle-check` **22 / 0 / 3**（L3-2 可判定时 23/0/2）｜ `cli-pty-smoke` **10 / 10**
-（真机 nfvis-vm 2.0.0~dev112，round169）。fulltest 258→272＝**#388 主机防火墙 16 项入套件**（+14 通过、
-+2 预期报错＝plain commit 被拒与「至少一条匹配条件」两条负例）。
+**当前基线（v2 开发线，round170 实测；逐轮累积与证据见下）**：
+`cli-fulltest` **273 / 0 / 20** ｜ `cli-semantic-check` **27 / 0 / 2**（S8 冷窗时 26/0/3）｜
+`cli-lifecycle-check` **22 / 0 / 3**（L3-2 可判定时 **23/0/2 + 登记 1**）｜ `cli-pty-smoke` **10 / 10**
+（真机 nfvis-vm 2.0.0~dev113，round170）。fulltest 沿革：258→**272**（round169＝#388 主机防火墙 16 项入套件，+14 通过 / +2 预期报错）→**273**（round170＝#389 端口安全四条语句**同会话往返块** +1；套件首跑抓出的 2 项红系编排问题——严格 delete 与逐条独立会话不匹配，修套件不改产品语义）。
 
 > 注（决策 #388，主机防火墙）：本轮新增 **5 行**（`show system firewall` + 4 条 `set/delete system firewall …`
 > 语句，均标 🚫 待真机——实现随本轮交付、**真机四维验证待执行**），全表由 **293 行增至 298 行**
