@@ -107,7 +107,8 @@ function pct(ratio) {
 }
 
 // stormControlText：接口入向风暴抑制的只读摘要（决策 #385）。只列已配置的类
-// （字段缺省＝该类未配置）；两类都没配时回 undefined，行不显示（不编造「0 kbps」）。
+// （字段缺省＝该类未配置）；两类都没配时回 undefined ⇒ 该行如实显示「—」
+// （与同页「入向/出向限速策略」等未配置项一致），不编造「0 kbps」。
 function stormControlText(sc) {
   if (!sc || typeof sc !== 'object') return undefined;
   const parts = [];
