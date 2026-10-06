@@ -416,6 +416,16 @@ func emitInterfacesFamily(w *stmtWriter, node *schema.Node, val any, prefix, key
 					}
 				}
 			}
+			// 端口安全（决策 #389）：port_security 是 []string 数组而语句树按
+			// `port-security mac <mac>` 关键字两层建模，机械逆走解不出，显式发射；
+			// 按声明序逐条发射即还原原序（回放经别名表按序追加，往返自校验据此对账）。
+			if ps, ok := m["port_security"].([]any); ok {
+				for _, v := range ps {
+					if s, ok := v.(string); ok && s != "" {
+						w.add(toks(prefix, "port-security", "mac", s))
+					}
+				}
+			}
 		}
 	}
 	return emitMechanicalInner(w, node, val, prefix, keyPath)

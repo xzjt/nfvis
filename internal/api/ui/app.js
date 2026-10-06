@@ -106,6 +106,13 @@ function pct(ratio) {
   return (Number(ratio) * 100).toFixed(1) + '%';
 }
 
+// portSecText：接口端口安全白名单的只读摘要（决策 #389）。白名单非空即启用；
+// 未配置（空/缺省）回 undefined ⇒ 该行如实显示「—」（与同页其它未配置项一致）。
+function portSecText(ps) {
+  if (!Array.isArray(ps) || ps.length === 0) return undefined;
+  return ps.length + ' 条：' + ps.join(' ') + '（白名单外源 MAC 丢弃）';
+}
+
 // stormControlText：接口入向风暴抑制的只读摘要（决策 #385）。只列已配置的类
 // （字段缺省＝该类未配置）；两类都没配时回 undefined ⇒ 该行如实显示「—」
 // （与同页「入向/出向限速策略」等未配置项一致），不编造「0 kbps」。
@@ -745,6 +752,7 @@ function renderIfaceDetail(iface, ifaces, params) {
     ['入向限速策略', iface.ingress_policy],
     ['出向限速策略', iface.egress_policy],
     ['风暴抑制', stormControlText(iface.storm_control)],
+    ['端口安全', portSecText(iface.port_security)],
     ['SR-IOV VF 数（配置）', iface.sriov ? iface.sriov.vf_count : undefined],
     ['VF 占用', iface.sriov && Array.isArray(iface.sriov.vfs) && iface.sriov.vfs.length
       ? iface.sriov.vfs.map((v) => v.vf_id + (v.assigned_vnf ? '→' + v.assigned_vnf : '（空闲）')).join('；')

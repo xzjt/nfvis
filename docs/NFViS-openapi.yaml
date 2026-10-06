@@ -2739,6 +2739,14 @@ components:
         description: { type: string }
         ingress_policy: { type: string, description: "入向限速策略绑定（决策 #331）" }
         egress_policy: { type: string, description: "出向限速策略绑定（VPP policer output，决策 #331）" }
+        port_security:
+          type: array
+          description: |
+            端口安全的允许源 MAC 白名单（决策 #389）。**非空即启用**：该接口入向（L2）只放行白名单
+            源 MAC（IP 帧与非 IP 帧 alike），其余丢弃。条目为归一小写形态（服务端解码层归一）。
+            前置：接口须已声明且为某 L2 交换机成员；与 L3 接口 ACL 的 macip 绑定槽互斥；
+            每接口上限 32 条；重复条目提交期拒绝。macip ACL 无逐规则命中计数（读视图不提供命中数）。
+          items: { type: string }
         storm_control:
           type: object
           description: |
@@ -2792,6 +2800,14 @@ components:
             vf_count: { type: integer }
         ingress_policy: { type: string, description: 入向限速策略绑定（命令树 §2.5） }
         egress_policy: { type: string, description: "出向限速策略绑定（命令树 §2.5；VPP policer output，决策 #331）" }
+        port_security:
+          type: array
+          description: |
+            端口安全的允许源 MAC 白名单（决策 #389）。**非空即启用**：该接口入向（L2）只放行白名单
+            源 MAC（IP 帧与非 IP 帧 alike），其余丢弃。条目为归一小写形态（服务端解码层归一）。
+            前置：接口须已声明且为某 L2 交换机成员；与 L3 接口 ACL 的 macip 绑定槽互斥；
+            每接口上限 32 条；重复条目提交期拒绝。macip ACL 无逐规则命中计数（读视图不提供命中数）。
+          items: { type: string }
         storm_control:
           type: object
           description: |

@@ -72,6 +72,11 @@ type validator struct {
 	vnicNames  map[string]bool // 配置已声明 vNIC 的 VPP 侧确定性名（vh-/mf-，见 ifacename.go）
 	hpSizes    map[string]bool
 	macOwner   map[string]string // MAC -> 首个占用者（③：跨全部 VNF 的 MAC 命名空间）
+
+	// 端口安全（决策 #389）的成员账本（collect 填充，见该处注释）
+	l2Members     map[string]bool
+	bondMembers   map[string]bool
+	portSecIfaces map[string]bool
 }
 
 func (v *validator) errf(path, format string, args ...any) {
@@ -268,6 +273,32 @@ func (v *validator) collect(c Config) {
 	if c.ResourcePools != nil {
 		for _, hp := range c.ResourcePools.Hugepages {
 			v.hpSizes[hp.PageSize] = true
+		}
+	}
+	// 端口安全（决策 #389）的三份成员账本：
+	//   - l2Members：L2 交换机的**静态**端口成员（白名单是 L2 入向语义，前置条件以此为准；
+	//     VNF/容器 vNIC 派生成员不在此列——端口安全语句只作用于已声明的物理口）；
+	//   - bondMembers：bond 成员口（聚合口不支持端口安全，配在 bond 上是 v1 的有意取舍）；
+	//   - portSecIfaces：配了白名单的接口（L3 接口 ACL 的 macip 绑定槽互斥反向检查用）。
+	v.l2Members, v.bondMembers, v.portSecIfaces = map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for _, s := range c.VirtualSwitches {
+		if s.Type != "l2" {
+			continue
+		}
+		for _, pt := range s.Ports {
+			if pt.Interface != "" {
+				v.l2Members[pt.Interface] = true
+			}
+		}
+	}
+	for _, b := range c.Bonds {
+		for _, m := range b.Members {
+			v.bondMembers[m] = true
+		}
+	}
+	for _, i := range c.Interfaces {
+		if len(i.PortSecurity) > 0 {
+			v.portSecIfaces[i.Name] = true
 		}
 	}
 }
@@ -568,6 +599,62 @@ func (v *validator) checkInterfaces(c Config) {
 			}
 			if sc.MulticastKbps != 0 && !checkStormKbps(sc.MulticastKbps) {
 				v.errf(p+".storm_control.multicast_kbps", "组播抑制 %d 超出范围：须为 1-100000000（kbps）", sc.MulticastKbps)
+			}
+		}
+		v.checkPortSecurity(c, p, i)
+	}
+}
+
+// maxPortSecMACs 每接口的端口安全白名单上限（决策 #389）。
+const maxPortSecMACs = 32
+
+// checkPortSecurity 端口安全白名单校验（决策 #389）。
+//
+// 条目：合法 MAC（net.ParseMAC；归一小写由 PortSecMAC 解码层保证，此处按小写比较）；
+// 重复大小写不敏感地拒绝；上限 32 条。前置（白名单是 L2 入向语义，缺一即拒）：
+//   - 接口须是某 L2 交换机的**静态**成员端口——「把带白名单的口移出交换机」「删所在
+//     交换机」后新配置里该口不再有 L2 成员身份，同被此处拒绝（引用守卫同族：指向先删
+//     白名单）。整条删除接口元素时白名单随元素消失，而交换机端口对「接口已声明」的
+//     既有校验（ports 引用 anyIface）使该路径本就不可达，无需另设守卫；
+//   - bond 成员口拒绝（聚合口的白名单语义不在 v1 范围；照 storm-control 同例不做）；
+//   - macip 绑定槽互斥（正向）：该口已作为某 VRF 的 l3-interface 绑定 ACL 时拒绝——
+//     同一接口只能有一个 macip 绑定，L3 接口 ACL 的伴随 macip（放行非 IP 帧）与白名单
+//     争同一槽位。反向检查在 checkVrfs。
+func (v *validator) checkPortSecurity(c Config, p string, i InterfaceConfig) {
+	if len(i.PortSecurity) == 0 {
+		return
+	}
+	if len(i.PortSecurity) > maxPortSecMACs {
+		v.errf(p+".port_security", "白名单最多 %d 条 MAC，实际 %d 条（先 delete interfaces %s port-security mac <mac> 移除多余的）",
+			maxPortSecMACs, len(i.PortSecurity), i.Name)
+	}
+	seen := map[string]int{}
+	for j, m := range i.PortSecurity {
+		pp := fmt.Sprintf("%s.port_security[%d]", p, j)
+		hw, err := net.ParseMAC(string(m))
+		if err != nil {
+			v.errf(pp, "白名单 MAC %q 非法：%v（形如 b0:b0:00:00:00:01）", string(m), err)
+			continue
+		}
+		norm := strings.ToLower(hw.String())
+		if prev, dup := seen[norm]; dup {
+			v.errf(pp, "白名单 MAC %q 重复（与第 %d 条相同，大小写不敏感）", string(m), prev+1)
+		}
+		seen[norm] = j
+	}
+	if !v.l2Members[i.Name] {
+		v.errf(p+".port_security", "接口 %s 不是任何 L2 交换机的静态成员端口：端口安全是 L2 入向语义——"+
+			"先 set virtual-switches <交换机> ports <序号> interface %s 把该口挂进交换机；"+
+			"若要移出口或删交换机，请先删除该口的白名单再提交", i.Name, i.Name)
+	}
+	if v.bondMembers[i.Name] {
+		v.errf(p+".port_security", "接口 %s 是 bond 成员口，不支持端口安全（聚合口的白名单不在本版本范围）", i.Name)
+	}
+	for _, r := range c.Vrfs {
+		for _, li := range r.L3Interfaces {
+			if li.Interface == i.Name && li.AclIn != "" {
+				v.errf(p+".port_security", "接口 %s 已作为 VRF %s 的 L3 接口绑定 ACL（acl-in %s）：同一接口只有一个 macip 绑定槽，"+
+					"端口安全白名单与 L3 接口 ACL 不能并存——请两者留其一", i.Name, r.Name, li.AclIn)
 			}
 		}
 	}
@@ -873,6 +960,13 @@ func (v *validator) checkVrfs(c Config) {
 				}
 			}
 			v.checkACLRef(lp+".acl_in", li.AclIn)
+			// 端口安全白名单与 L3 接口 ACL 的 macip 绑定槽互斥——**反向**（给 l3-interface
+			// 绑 ACL 时查白名单；正向在 checkPortSecurity）。同一接口只能有一个 macip 绑定：
+			// 白名单与 L3 ACL 的伴随 macip（放行非 IP 帧）争同一槽位，并存必然互相顶掉。
+			if li.AclIn != "" && v.portSecIfaces[li.Interface] {
+				v.errf(lp+".acl_in", "接口 %s 已配置端口安全白名单：同一接口只有一个 macip 绑定槽，"+
+					"L3 接口 ACL 与白名单不能并存——请两者留其一", li.Interface)
+			}
 		}
 		for _, rt := range r.Routes {
 			rp := fmt.Sprintf("%s.routes[%s]", p, rt.Prefix)

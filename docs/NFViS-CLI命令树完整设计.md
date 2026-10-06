@@ -549,6 +549,18 @@ set interface <ifname> enable <bool>    # 按接口覆盖（基于 VPP lldp plug
 set <ifname> description <string> | disable | mtu <uint>
 set <ifname> sriov vf-count <uint>                   # 创建 VF（S）
 delete <ifname> [sriov vf-count]
+set <ifname> storm-control broadcast|multicast <kbps>   # 入向风暴抑制（决策 #385）：按目的 MAC
+                                                     #   分类限速、超速丢弃；两类各自独立；unknown-unicast
+                                                     #   不支持（L2 掩码表达不了「目的 MAC 未学习」，提交期拒绝）
+delete <ifname> storm-control [broadcast|multicast]  # 裸 delete＝两类都清
+set <ifname> port-security mac <mac>                 # 端口安全白名单（决策 #389）：**追加**语义（每条一句），
+                                                     #   归一小写、重复拒绝、每接口上限 32 条；白名单非空即启用——
+                                                     #   该口入向（L2）只放行白名单源 MAC，其余丢弃
+delete <ifname> port-security mac <mac>              # 按值删一条（大小写不敏感比较）
+delete <ifname> port-security                        # 清空整段＝停用
+# 端口安全前置与边界（决策 #389）：接口须已声明且为某 L2 交换机成员（带白名单的口移出交换机/
+#   删交换机/删接口 ⇒ 提交期拒绝，先删白名单）；与 L3 接口 ACL 的 macip 绑定槽互斥（双向拒绝）；
+#   bond 成员口拒绝（配在 bond 上）；macip 无逐规则计数（读视图不提供命中数，如实说明）。
 # 说明：驱动接管/解管由安装器与 recovery 维护，运行期不提供（避免管理面失联）
 
 [edit bonds <name>]                                  # 链路聚合（VPP bonding plugin）

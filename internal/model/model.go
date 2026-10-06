@@ -5,6 +5,12 @@
 // 语义校验见 validate.go，配置 diff 见 diff.go。
 package model
 
+import (
+	"encoding/json"
+	"net"
+	"strings"
+)
+
 // Config 整份配置文档（OpenAPI ConfigDocument）。
 // 单例子结构用指针以区分「未配置」与零值。
 type Config struct {
@@ -230,6 +236,36 @@ type InterfaceConfig struct {
 	// StormControl 入向广播/组播风暴抑制（FR-NET-019，决策 #385）：按目的 MAC 分类限速，
 	// 超速丢弃；nil = 未配置。unknown-unicast 有意不做（L2 掩码表达不了「目的 MAC 未学习」）。
 	StormControl *StormControl `json:"storm_control,omitempty"`
+	// PortSecurity 端口安全的允许源 MAC 白名单（决策 #389）：**非空即启用**——该接口入向
+	// （L2）只放行白名单源 MAC（IP 帧与非 IP 帧 alike），其余丢弃。元素是归一小写形态
+	// （PortSecMAC 在解码层归一，CLI/REST/候选合并等一切 JSON 写路径经同一入口）。
+	// 前置与互斥的校验口径见 model.Validate（L2 交换机静态成员、bond 成员拒绝、
+	// 与 L3 接口 ACL 的 macip 绑定槽互斥）。
+	PortSecurity []PortSecMAC `json:"port_security,omitempty"`
+}
+
+// PortSecMAC 端口安全白名单里的一条源 MAC（决策 #389）。
+//
+// 归一化放在**模型解码入口**而不是只做在 CLI 别名层：REST PUT /interfaces/{name}、候选
+// 整体写入与 CLI 语句树回放走的是同一份 JSON 解码——只在别名层归一，大写形态会从 REST
+// 落库，`| display set` 的回放自校验（语句层恒产出小写）随即对不上账。可解析的取值一律
+// 归一为小写冒号形式；**不可解析的原样保留**，交由 model.Validate 给出带路径的报错
+// （解码层不报错——单一报错出口比 JSON 解码错误更可操作）。
+type PortSecMAC string
+
+// UnmarshalJSON 实现 json.Unmarshaler：可解析即归一小写（net.HardwareAddr.String() 的
+// 形式即 `aa:bb:cc:dd:ee:ff`），不可解析原样保留（Validate 兜底报错）。
+func (m *PortSecMAC) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	if hw, err := net.ParseMAC(strings.TrimSpace(s)); err == nil {
+		*m = PortSecMAC(hw.String())
+	} else {
+		*m = PortSecMAC(s)
+	}
+	return nil
 }
 
 // StormControl 接口的入向风暴抑制声明（决策 #385）。

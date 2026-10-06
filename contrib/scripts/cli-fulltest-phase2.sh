@@ -159,6 +159,17 @@ set resource-pools cpu numa node 0 cores 1-4
 set system login banner 本机为套件测试实例，请勿用于生产
 EOF
 
+# ---------- 端口安全白名单：同一会话内 追加 → 按值删 → 再追加 → 裸 delete 清空（决策 #389）----------
+# 必须同会话：本族 delete 是**严格语义**（值不存在报「无匹配配置」——与
+# `delete system management ip address` 同口径），而上面的逐条循环每次都是独立会话、
+# 对着 committed 基线跑，严格 delete 无对象可删。白名单生效的功能对照（白名单源放行/
+# 伪造源丢弃）由真机四维承担——套件内注入流量不便。
+run S2-portsec "configure
+set interfaces ens224 port-security mac b0:b0:00:00:00:01
+delete interfaces ens224 port-security mac b0:b0:00:00:00:01
+set interfaces ens224 port-security mac b0:b0:00:00:00:02
+delete interfaces ens224 port-security"
+
 # ---------- 登录横幅：真落库 → 回读 → 清除（决策 #303）----------
 # 单条语句只在独立会话里解析不够——横幅的价值在「提交后真的进了配置、删得掉」。
 # 这是一次真实提交往返（值含中文与连字符），提交后立即删除，不改变机器的长期现场。

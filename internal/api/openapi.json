@@ -1623,6 +1623,13 @@
           "numa_node": {
             "type": "integer"
           },
+          "port_security": {
+            "description": "端口安全的允许源 MAC 白名单（决策 #389）。**非空即启用**：该接口入向（L2）只放行白名单\n源 MAC（IP 帧与非 IP 帧 alike），其余丢弃。条目为归一小写形态（服务端解码层归一）。\n前置：接口须已声明且为某 L2 交换机成员；与 L3 接口 ACL 的 macip 绑定槽互斥；\n每接口上限 32 条；重复条目提交期拒绝。macip ACL 无逐规则命中计数（读视图不提供命中数）。\n",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "speed_mbps": {
             "type": "integer"
           },
@@ -1731,6 +1738,13 @@
           "name": {
             "description": "接口名",
             "type": "string"
+          },
+          "port_security": {
+            "description": "端口安全的允许源 MAC 白名单（决策 #389）。**非空即启用**：该接口入向（L2）只放行白名单\n源 MAC（IP 帧与非 IP 帧 alike），其余丢弃。条目为归一小写形态（服务端解码层归一）。\n前置：接口须已声明且为某 L2 交换机成员；与 L3 接口 ACL 的 macip 绑定槽互斥；\n每接口上限 32 条；重复条目提交期拒绝。macip ACL 无逐规则命中计数（读视图不提供命中数）。\n",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "sriov": {
             "description": "SR-IOV VF 配置（FR-NET-004，命令树 §2.3）",

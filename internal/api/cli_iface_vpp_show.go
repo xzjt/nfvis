@@ -382,6 +382,14 @@ func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool, ifc mod
 			entry["storm_control_runtime"] = rt
 		}
 	}
+	// 端口安全（决策 #389）：配置 + 数据面实况（macip tag 反查 + 绑定实况）三面同源。
+	if declared && len(ifc.PortSecurity) > 0 {
+		txt, ps := x.portSecBlock(ifc)
+		b.WriteString(txt)
+		if rt, ok := ps["port_security_runtime"].(map[string]any); ok {
+			entry["port_security_runtime"] = rt
+		}
+	}
 	if stErr != nil {
 		b.WriteString("%% 注: VPP 运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
 	}

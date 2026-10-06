@@ -69,6 +69,7 @@ type Options struct {
 	DHCPServer     DHCPServerRuntime              // DHCP 服务器运行态读物（决策 #359；nil = 租约端点 503）
 	Vxlan          VxlanRuntime                   // VXLAN 隧道运行态读物（决策 #383；nil = 读视图如实报未接入）
 	Storm          StormRuntime                   // 接口风暴抑制数据面实况（决策 #385；nil = detail 块如实报未接入）
+	PortSec        PortSecRuntime                 // 接口端口安全数据面实况（决策 #389；nil = detail 块如实报未接入）
 	Firewall       FirewallRuntime                // 主机防火墙数据面读数（决策 #388；nil = 读视图如实报未接入）
 	PCIExists      func(bdf string) (bool, error) // 通用 PCI 直通设备存在性（FR-CMP-023；nil = detail 如实说无法核对）
 	Versions       VersionsRuntime                // 组件版本探测（R37-2 收口，决策 #118；nil = 只回 NFViS 版本）
@@ -154,6 +155,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.vxlan = opts.Vxlan
 	s.cliExec.setVxlan(opts.Vxlan)        // 决策 #383：show vxlan tunnels 与 GET /vxlan-tunnels 同源
 	s.cliExec.setStorm(opts.Storm)        // 决策 #385：show interfaces <if> detail 的 storm-control 块
+	s.cliExec.setPortSec(opts.PortSec)    // 决策 #389：show interfaces <if> detail 的端口安全块
 	s.firewall = opts.Firewall            // 决策 #388：GET /system/firewall 的数据面读数
 	s.cliExec.setFirewall(s.firewallView) // 决策 #388：CLI 渲染与 REST 同一读视图
 	s.cliExec.pciExists = opts.PCIExists  // FR-CMP-023：VM detail 的直通设备实测态（nil = 如实说无法核对）

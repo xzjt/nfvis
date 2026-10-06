@@ -1,0 +1,80 @@
+round170 · 决策 #389 —— 端口安全 v1（per-port 允许 MAC 白名单：能力前提 spike + 契约先行 + 实现 + 真机四维）
+====================================================================
+日期：2026-10-06；分支 v2-round170-portsec（cc1af94 契约决策行 → a476b59 实现）；
+真机 nfvis-vm **2.0.0~dev113**。
+来源：`docs/v2待做.md` 一.5 余量（差距分析 §1-5 的 port security 半边）。
+PR：https://github.com/xzjt/nfvis/pull/317（base v2）。
+
+§0 结论
+- **端口安全 v1 交付并真机四维验证通过**：`set interfaces <if> port-security mac <mac>`（追加，上限 32）
+  + delete 家族 ⇒ VPP **macip ACL**（tag `nfvis-port-sec-<if>`：每条白名单 MAC 两条 permit（v4/v6 any +
+  MAC 精确）+ **显式 deny-all**）绑接口入向；白名单外源 MAC 一律丢弃。
+- **真机功能对照（产品路径、独立事实源 `l2-flood`）**：白名单源注入 2000 帧 ⇒ **+2000**（放行泛洪）；
+  伪造源 2000 帧 ⇒ **+0**（丢弃）；清空白名单后伪造源恢复 **+2000**（行为反转，解绑确实生效）。
+- 生命周期：加 MAC ⇒ **同索引整体替换**（4→6 规则）；`restart nfvis` ⇒ tag 反查复用、**不重复建**（acls=1）；
+  清空 ⇒ 解绑；移出交换机守卫（拒绝并给照做路径）；解绑后 ACL 对象残留随 `request vpp restart` 归零（4→0）。
+- 四套件：fulltest **273/0/20**（+1 块＝端口安全四条语句同会话往返）、语义 **26/0/3**（S8 冷窗）、
+  lifecycle **23/0/2 + 登记 1**（L3-2 转可判定，历史最好档；登记＝已知 L2-3 附注）、pty **10/10**。
+
+§1 能力前提 spike（先于契约；binapi 直连 /run/vpp/api.sock）
+- 用 govpp `macip_acl_add_replace` + `macip_acl_interface_add_del` 把「permit(白名单 MAC 精确, v4/v6)
+  + deny(任意)」绑到 `ens192`（临时入 sem-vs），注入对照（各 2000 帧、观测 `l2-flood`）：
+  **白名单源 +2000 ／ 伪造源 +0** ⇒ 机制成立。
+- ⚠️ **macip 无匹配默认＝放行**——对照实验（只发 permit、不带显式 deny 的 ACL）伪造源**照样 +2000**；
+  故白名单语义**必须显式追加 deny-all**（产品实现按此落地）。
+- ⚠️ **逐规则计数不可读**：acl_plugin 的 err 族为空、macip 无 counter 发布 ⇒ 读视图不给命中数（如实说明）。
+- 工具坑：`vppctl` 的 `set acl-plugin macip acl …` 逗号多规则语法**不可靠**（多条只落 1 条、tag 丢失），
+  spike 与实现均走 **binapi**（产品本就走 govpp）。
+
+§2 实现（cc1af94 契约 + a476b59 实现）
+- 模型：`InterfaceConfig.PortSecurity []PortSecMAC`（解码层归一小写、不可解析原样保留交校验报错）。
+- 校验：合法 MAC/大小写不敏感去重/上限 32；前置＝已声明且为某 L2 交换机**静态成员**（含「移出交换机/
+  删交换机」守卫：文案指向先删白名单）；bond 成员拒绝；与 L3 接口 ACL 的 **macip 绑定槽互斥**（双向；
+  纵深防御——角色互斥本已令两者不可达，任何将来放宽都要先过此检查）。
+- 数据面（`portsec.go`/`portsec_govpp.go`）：整体替换（tag 反查复用索引）+ 绑定；登记＝最后一个成功下发的
+  状态（#363 口径：绑定失败不写成已绑定，重试会重跑）；恢复重放（EnsureConsistent 逐接口，tag 复用）；
+  vpp 重启登记清空后按声明全量重放。
+- 读视图三面同源：`show interfaces <if> detail` 端口安全块（白名单 + ACL 在场/规则数/绑定实况 +
+  「不提供命中数」如实说明）；REST `InterfaceConfig.port_security`；Web 接口详情页一行。
+- 契约面：命令树/命令全表/手册 §8.15/openapi(+json)/v2待做；单测（规则形状/幂等/绑定失败登记不谎/
+  读视图如实 + 模型校验表 + 形状白名单）；套件 phase2 一条同会话往返块。
+- 过程如实：实现由子智能体起头（模型/校验/别名/树/数据面主体），**配额中断**后由主会话补完
+  （接线/读视图/UI/文档/单测/套件）并逐点审查。
+
+§3 真机四维（dev113；ens192 临时入 sem-vs 作第 4 端口）
+- **① 作用效果**：`set interfaces ens192 port-security mac b0:b0:00:00:00:99` 提交后——
+  `show acl-plugin macip acl`：`acl_index 3, count 4, tag {nfvis-port-sec-ens192}`，规则逐字＝
+  v4 permit / v6 permit（MAC 精确）+ v4 deny / v6 deny（全零掩码）；读视图：白名单 1 条 + 「ACL 在场
+  （索引 3，规则 4 条）；接口已绑定」+ 计数口径说明；REST `port_security: ["b0:b0:00:00:00:99"]`。
+  **A/B 注入（l2-flood 增量）**：白名单源 6245→**8245**（+2000）；伪造源 8245→**8245**（+0）。
+- **② 生命周期**：加第二条 MAC ⇒ 同索引 3、规则 4→6（整体替换）；`systemctl restart nfvis` ⇒
+  macip ACL 计数仍 **1**（tag 复用、不重复建）、读视图「2 条 / 索引 3 / 规则 6 条 / 已绑定」；
+  清空（`delete interfaces ens192 port-security`）⇒ 解绑，**伪造源恢复 +2000**（8247→10247，行为反转）；
+  解绑后 ACL 对象残留（实测 macip acl 计数 4 含历史）随 `request vpp restart` **归零**（重启后 0）。
+- **③ 跨对象**：白名单在配时 `delete virtual-switches sem-vs ports 4` ⇒ **提交期拒绝**（文案点名
+  「先删除该口的白名单再提交」）；清空后同一操作成功；同口 L3 ACL 互斥由单测钉住（本机无该形态现场，
+  如实登记）；其余接口/交换机与数据面（VPP/VM）不受影响。
+- **④ 对抗**：非法 MAC ⇒ 语句层即时拒绝（含示例格式）；重复（大小写不同）⇒ 提交期拒绝并点名条目序号；
+  33 条 ⇒ 「最多 32 条」拒绝；非 L2 成员口（ens224）⇒ 拒绝并给挂端口照做路径；operator 语句级拒绝随
+  全配置族（round169 已验「无权限进入配置模式」，本族同机制不重复真机）。
+
+§4 套件（dev113）
+- fulltest **273/0/20**（round169 的 272 +1：端口安全四条语句的**同会话往返块**——追加→按值删→
+  再追加→裸 delete 清空）。
+- **套件首跑抓到编排缺陷（非产品缺陷）**：三条语句按逐条独立会话放解析循环里时，严格语义的 delete
+  （「无匹配配置」）无对象可删 ⇒ 2 项红。产品语义与 `delete system management ip address` 同口径（正确），
+  修的是**套件编排**：改为同一会话块（顺带成为严格 delete 的回归）。教训：解析循环的每行是独立会话、
+  对着 committed 基线跑——**有前置依赖（先 set 后 delete）的语句必须同会话成块**。
+- 语义 **26/0/3**（S13 现场在场；S8 **冷窗**如实不可判定——夹具刚起、窗口内无流量，非回归）；
+- lifecycle **23/0/2 + 登记 1**（L3-2 转可判定＝历史最好档；登记＝已知 L2-3「查不了」附注）；
+- pty **10/10**；`GOFLAGS=-p=1 make check` RC=0（决策计数 291）。
+
+§5 现场与清场（如实）
+- `ens192` 已移出 sem-vs（BD 回到 bvi1 + vh-sem-vm-nic0）；配置 `port_security`=0；VPP macip ACL=0
+  （含 spike 期遗留对象，随 `request vpp restart` 清）；临时 pcap/脚本已删；sem-vm 处于 stopped
+  （fulltest 前置；夹具曾拉起，收尾已停）。
+- 环境：真机 **2.0.0~dev113**；四服务 active；仅常态 `HUGEPAGE_POOL_ORPHAN` 告警。
+
+§6 门禁
+- `make check` RC=0（决策条数 291 ✓ / openapi 同步 ✓ / 套件—契约同步缺口 0 ✓ / UI·形状·秘密出口守护 ✓）。
+- PR #317 squash 合并（合并提交见交接 §0）。
