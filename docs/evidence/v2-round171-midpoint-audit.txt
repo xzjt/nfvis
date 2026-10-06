@@ -1,0 +1,438 @@
+NFViS v2 半程体检（round171）—— #360~#389 增量深度审计 + 账目疏漏核对
+====================================================================
+日期：2026-10-06；环境 nfvis-vm 2.0.0~dev113（= v2 @ 47f107e 构建）；分支 v2。
+范围：上次体检（round142，报告 `v2-round142-midpoint-audit.txt`）的审计点 **18a8812（决策 #359）→ HEAD**
+      的**全部增量**——203 文件 / 约 19,778 行：修复批次 **#360~#379** + 新特性/定裁 **#380~#389**
+      （DHCP relay 对账、静态路由 ECMP、路由改下一跳、VXLAN、PCI 直通、storm control、主机防火墙、端口安全）。
+方法：**7 簇只读代码审计**（子智能体；因环境并发限制按 2 并发分 4 批执行）＋ **主会话账目核对**
+      （守护脚本 + 文档↔git/证据逐项比对）＋ **主会话真机复核 5 项**（独立事实源：`vppctl` 数据面对象 /
+      FIB 路径 / 配置与读视图；每项实验后清场，终态基线已恢复，见 §5）。
+纪律：**审计不改任何产品代码/契约**（只读 + 现场实验）；所有发现**只登记、不修**（用户口径：先体检）。
+
+§0 结论（先说要点）
+- **没有撤回级「整块假功能」**：8 项新特性（#381/#382/#383/#384/#385/#388/#389 + #380）的机制在真机与
+  代码层面均成立；上一轮 round142 登记的 P0~P3 缺陷修复**未发现整体性回退**。
+- 但发现 **3 项高危 + 17 项中危 + 一批低危/契约/观测项**，其中 **6 项已在真机复现**（§1）：
+  ①【高】ACL/macip 绑定的**撤销盲区**（R142-1 同族、新形态）：**同一次提交里删交换机并把其 L3 接口改挂到
+     另一台交换机** ⇒ 旧 IP ACL 与伴随 macip 留在数据面继续拦（真机 rev1139 复现）；同族另有两条
+     （L2↔L3 角色交接、删接口元素后 storm/portsec 残留，均真机复现）。
+  ②【高】DHCP **declined 租约泄漏**：`sweep()` 只遍历 `byMAC`，MAC 为空的 byIP-only 条目**永不过期**
+     ⇒ 地址永久回不了池、假「池耗尽」不消解、读视图恒显示「剩 1 秒」（代码级确认，纯函数可推演）。
+  ③【高】**确认守卫把三条内部维护/救援路径整体挡死**：`zeroize` / `configuration restore` / `storage
+     format-data` 自带非 console 合成来源且不传 `ConfirmedMinutes`，而它们相对当前 committed 恰是
+     管理口/防火墙变更 ⇒ 恒被 `ErrConfirmRequired`/`ErrFirewallConfirmRequired` 拒。**手册写明的
+     「防火墙自锁后 restore 归档救援」因此不可用**（代码级确认，引擎守卫与三个调用点均已复核）。
+- 中危集中区：**ECMP 读视图只显示首跳**、**前缀/下一跳混族未校验 ⇒ 提交成功但 FIB 装 dpo-drop 静默黑洞**
+  （均已真机复现）、**历史读视图 `step` 稀疏时丢点 + 谎报截断**（真机复现）、`forgetL3Iface` 误摘新登记、
+  `DeleteQos` 把「查询失败」当「接口不存在」、storm 无巡检复核、storm 可配在 bond 成员口、DHCP `SyncRelay`
+  失败后登记漂移、`Sync` 按 `sw_if_index` 判身份、15s 巡检读一次性 stale 快照、**被守卫拒绝的 commit 仍隐式
+  确认在途 `commit confirmed`**、防火墙 `applied=true` 可为假（不比 `iifname` 作用域）、format-data 保留
+  Interfaces 成悬挂引用、libvirt `call` 把调用方更长 deadline 硬封顶 30s、Docker 侧大量调用仍无界
+  （可达提交路径）。
+- **账目疏漏（用户点名）**：`v2待做.md` 8 处（含 2 处「已做完仍写待执行」、R142 残留 bullet、孤儿片段、
+  范围/计数过期）；`v2已做.md` 2 处（头部范围写「#300~#385」、§四证据索引缺 round168~170）；`命令全表`
+  2 处（round169 的「待真机」注块未随 round170 更新、沿革缺 round170 的 +1）；ECMP 的用户面文档
+  （手册/全表/树设计）**未落逗号多下一跳**（只有 openapi 与 CLI 帮助有）。详见 §3。
+- 守护脚本全绿：决策条数 **291** 一致、`openapi.json` 与 YAML 同步、四套件计数守护——**漂移都发生在
+  未进守护的账目/文档面**（正是本轮体检要抓的那一层）。
+- **四套件本轮未复跑**（体检为只读 + 现场实验；套件会写现场，且与「只登记不修」口径冲突）——如实登记（§5）。
+
+§1 真机复现确认（6 项，均独立事实源、已清场）
+标注：`[高]`/`[中]`＝严重度；每项给出提交 rev 与关键读数。
+
+1.1 [高] **删交换机 + 同提交把其 L3 接口改挂到另一台交换机 ⇒ 旧 IP ACL 与伴随 macip 静默残留**
+   （＝§2 簇 C1b F1）
+   - 步骤：`request interfaces ens224 enable`（rev1137）→ 单会话提交 `set acls f1acl rule 10 source
+     10.99.9.9/32 destination any protocol icmp action deny` + `set virtual-switches vs-a type l3` +
+     `… l3-interface ens224 ip address 10.99.3.1/24` + `… acl-in f1acl`（**rev1138**）。
+     绑定就位：`show acl-plugin interface` = `sw_if_index 2: input acl(s): 0`、`show acl-plugin macip
+     interface` = `2: 0`（#341 伴随 macip 在）。
+   - **触发**：单会话提交 `delete virtual-switches vs-a` + `set virtual-switches vs-b type l3` +
+     `… l3-interface ens224 ip address 10.99.4.1/24`（**无 acl-in**）（**rev1139，提交成功**）。
+   - 结果：配置读视图 `show vrfs` 只有 vs-b、无任何 ACL 声明；而 **VPP 仍 `sw_if_index 2: input acl(s): 0`
+     与 macip `2: 0`** ⇒ deny 规则继续生效、域内 ARP 仍被伴随 macip 之外的非 IP 规则影响。
+   - 代码根因（主会话复核）：`internal/orchestrator/apply.go:407` 的 `if ok { … l3ACLUnbinds/del-l3-if }`
+     只在 `new.Vrfs` 里生成解绑计划（被删的 VRF 不在其中）；`network/l3.go:211` 的 `ApplyVRF(vs-b)` 经
+     `reassignLocked`（`l3.go:248-273`）把 ens224 从 vs-a 的 `ifaces/subifs` 登记里摘掉；删除段的
+     `DeleteVRF(vs-a)`（`l3.go:630`）只按登记取解绑清单 ⇒ 空清单、不解绑。
+   - 依据：决策 #361 ③ 明文「删整台交换机时对其声明的 L3 接口逐个解绑」；属修复同族漏网（R142-1 形态）。
+   - 清场：rev1140 删 vs-b + f1acl（顺带实证 `DeleteVRF(vs-b)` 能清该残留绑定）、rev1141 停 ens224、
+     末次 `request vpp restart` 清 macip 对象 → 基线（§5）。
+
+1.2 [中] **一次提交内 L2→L3 角色交接 ⇒ #341 的伴随 macip 未绑定（域内非 IP/ARP 静默被丢）**
+   （＝§2 簇 C1a F4，原标「待真机」）
+   - 步骤：`set virtual-switches vs-h type l2` + `ports 1 interface ens224` + `set interfaces ens224
+     port-security mac b0:b0:00:00:00:77` + `set acls f2acl … deny`（**rev1155**）。就位：macip ACL 0
+     `tag {nfvis-port-sec-ens224}` `applied on sw_if_index 2`。
+   - **触发**：单会话提交 `delete virtual-switches vs-h` + `delete interfaces ens224 port-security` +
+     `set virtual-switches vs-g type l3` + `… l3-interface ens224 ip address 10.99.9.1/24` +
+     `… acl-in f2acl`（**rev1156，提交成功**）。
+   - 结果：`show acl-plugin interface` = `sw_if_index 2: input acl(s): 0`（f2acl 绑上了）；
+     **`show acl-plugin macip interface` = `2: -1`（伴随 macip 未绑定）**；`show acl-plugin macip acl`
+     里 `nfvis-nonip-permit` 存在但 `applied on sw_if_index(s):` 为空 ⇒ 正是 #341 修掉的失败形态
+     （绑 L3 ACL 后域内 ARP/非 IP 被 ACL 插件丢弃）。根因：VRF 段先绑伴随 macip、接口段的 portsec
+     teardown 后解同槽（提交计划顺序 `apply.go:392` 早于 `apply.go:530`）。
+   - 清场：rev1157 删 vs-g + f2acl、rev1158 停 ens224 + `request vpp restart` → 基线。
+
+1.3 [中] **删接口元素（含其 DPDK 声明）后 storm policer / L2 分类表残留**
+   （＝§2 簇 C1a F1；validator 论证「不可达」的路径在「同提交删 DPDK 声明+接口元素」下可达）
+   - 步骤：`set interfaces ens224 storm-control broadcast 1000`（**rev1151**）⇒ `show policer`
+     `nfvis-storm-ens224-broadcast … cir 1000`、`show classify tables` TableIdx 0 Sessions 1。
+   - **触发**：单会话提交 `delete vpp dpdk dev ens224` + `delete interfaces ens224`（**rev1152，提交成功**，
+     提示「vpp 变更需 request vpp restart 后生效」）。配置里 ens224 引用计数 **0**；而 **VPP 仍保留
+     policer、分类表（1 session）与 ens224 接口**（残留限速继续挂在数据面上）。
+   - 根因：`apply.go:533` 只遍历 `new.Interfaces`，**删除段没有 `del-interface` 计划**；storm 的下发/撤销
+     只挂在 `L2Network.ApplyInterface`（`network/provider.go:430/437`），元素被删则永不调用 ⇒ 不 teardown。
+   - 清场：rev1153 恢复 `interfaces ens224` + `disable` + `vpp dpdk dev ens224`、`request vpp restart`
+     清 policer/分类表 → 基线。
+
+1.4 [中] **ECMP 运行态读视图只显示首跳；`distance` 列恒 0（且从未下发数据面）**
+   （＝§2 簇 C1b F4）
+   - 步骤：`set virtual-switches vs-e type l3` + `l3-interface ens224 ip address 10.99.5.1/24` +
+     `static-routes 10.99.6.0/24 next-hop 10.99.5.2,10.99.5.3`（**rev1143**）。
+   - 数据面正确：`vppctl show ip fib table 2680365` 的 `10.99.6.0/24 … buckets:2`，两条 `arp-ipv4`
+     路径（10.99.5.2 / 10.99.5.3）。配置视图 `show configuration | display set` 显示完整逗号串。
+   - **运行态读视图不完整**：`show vrfs vs-e routes` 的 `10.99.6.0/24` 行 **NextHop 只有 `10.99.5.2`**、
+     Distance `0` ⇒ 用户看不出 ECMP 生效（同名字段两读视图不一致）。根因 `l3_govpp.go:249-252`
+     `e.NextHop = fibNhString(d.Route.Paths[0])`；`distance` 在 `l3_govpp.go:151` 的 `IPRouteAddDel` 无参数、
+     `FibPath.Preference` 未用（属既有问题，但 #381/#382 为「只改 distance」专门写了 diff 保护，投入与
+     无效字段矛盾）。
+   - 清场：rev1144 删 vs-e、rev1145 停 ens224；FIB/表无残留。
+
+1.5 [中] **路由前缀与下一跳地址族混用未校验 ⇒ 提交成功、数据面装 dpo-drop 静默黑洞**
+   （＝§2 簇 C1b F5，原标「低·待真机」→ 真机结果升级为**中**）
+   - 步骤：`set virtual-switches vs-f type l3` + `l3-interface ens224 ip address 10.99.7.1/24` +
+     `static-routes 10.99.8.0/24 next-hop 2001:db8::1`（v4 前缀 + v6 下一跳）（**rev1147，提交成功**，
+     无任何校验报错）。
+   - 结果：`vppctl show ip fib table 2680365` 的 `10.99.8.0/24 … [@0]: dpo-drop ip4`（**静默黑洞**；
+     对照同子网合法下一跳显示 `arp-ipv4: via … ens224`）。校验层只比「多个下一跳彼此同族」
+     （`model/validate.go:1003-1022`），未比「前缀与下一跳同族」（单值分支 `:992-1002` 只 `checkIP`）。
+   - 影响：手滑写出混族路由即「命令成功、配置正常、读视图正常、数据面全丢」——与项目史上最严重的
+     「数据面黑洞」家族同类；应升为中危并补提交期校验。
+   - 清场：rev1148 删 vs-f、rev1149 停 ens224；表/FIB 无残留。
+
+1.6 [中] **历史读视图在「step 小于采样间隔」时丢点并谎报截断**（＝§2 簇 C5 F1）
+   - 现场：历史库 60 序列 / 82,366 样本 / 采样间隔 60s（`show system metrics history` 概览）。
+   - 对照：`show system metrics history name nfvis_system_uptime_seconds last 1h step 1m` ⇒ **点数 60、无截断**；
+     `… last 1h step 1s` ⇒ **点数 9（已被 limit 截断：只保留最近的点）**；`… last 30m step 1s` ⇒ 同样 **9 点**。
+   - 事实：该 1h 窗口内有 60 个 60s 间隔的样本（`step 1m` 已证），`step 1s` 的稀疏桶本应同样返回 60 点；收窄判据
+     按时间宽度 `(limit+1)*step` 截窗口（`metricshist/store.go:409-425`）⇒ 丢点 + 假 `truncated`，且 `last 30m`
+     的窗口也被无视（两次结果相同）。
+   - 影响：`step` 是文档化参数（#372/#376 反复以 `last 1h step 1s` 为例），用户会看到「数据被截断」的假象并丢点。
+   - 清场：只读查询，无现场变更。
+
+1.7 现场与清场：见 §5（终态 `display set` 34 行＝基线；VPP 无 macip/classify/policer/ACL 绑定残留；
+   四服务 active）。
+
+§2 代码级发现（按簇；含严重度/置信/file:line/依据/影响）
+标注：`[严重度]`；`确认`＝读码即定（必要时主会话复核）／`待真机`＝需现场注入。
+
+【簇 C1b：路由 / L3 / ACL / QoS / 删除编排】（决策 #361/#363/#381/#382）
+- **F1 [高·确认·已真机复现（§1.1）]** 删交换机 + 同提交把其 L3 接口改挂他机 ⇒ 旧 IP ACL/伴随 macip
+  不解绑（`apply.go:407` / `l3.go:211,248-273,630`）。数据面继续拦、配置与读视图全干净。
+- **F2 [中·确认]** `forgetL3Iface` 按「接口名+表」摘登记、**不校验索引**（`l3.go:529-532`）⇒ 同一 VRF 内
+  vlan 变更（旧 100→新 200）时 `del-l3-if`(旧) 把**新**子接口登记一并删掉 ⇒ `TableOfIface` 落空、
+  NAT outside 转发域解析缺项（`nat.go:421-425` 落回表 0）。与 #361「只摘本条贡献的项」相悖。
+- **F3 [中·确认]** `DeleteQos` 把「查询失败」当「接口不存在」（`services.go:167,181`：`err != nil || !ok`
+  一并 `setBoundPolicy("")`+`continue`）⇒ 单次 `SwInterfaceIndex` 失败即摘登记、重试不再解绑、VPP 绑定
+  残留到重启；与 #363「登记=最后成功下发状态」及本仓「查不出来不许当已达成」（`l3.go:416`）相悖；
+  `services_test.go` 无「查询返回 err」用例（守护盲区）。
+- **F4 [中·确认·已真机复现（§1.4）]** ECMP 运行态读视图只显示首跳（`l3_govpp.go:249-252`）；`distance`
+  恒 0 且从未下发（`l3_govpp.go:151`）。
+- **F5 [中·确认·已真机复现（§1.5）]** 前缀/下一跳混族未校验（`validate.go:992-1022`）⇒ 提交成功但 FIB
+  dpo-drop 静默黑洞。
+- **F6 [低·确认]** 「新声明接口」的接口层 op undo 是空操作（`apply.go:534-540`）⇒ 旧配置无该接口时，
+  同提交绑 policer 后失败回滚，绑定残留（静默限速、配置查不到）。#363 的补偿承诺只在「有旧声明」时成立。
+- **F7 [低·契约]** 静态路由无重复前缀校验（`validate.go:945-980`；L3 接口有 dupCheck，routes 没有）⇒ REST
+  可写两条同前缀；叠加 #382 前缀键后：读视图两条、FIB 只留最后一条、删一条不产生 del-route。
+- **F8 [低·守护盲区]** 四套件无 ACL 绑定/QoS 数据面 oracle（`l3_acl_unbind_test.go` 只测直接调用序）⇒
+  F1/F2 这类回归不会被 CI 拦；建议 lifecycle 增一条 `l3-interface acl-in` 绑定/解绑数据面项。
+- 待真机/未覆盖（如实登记）：ECMP 多路径状态下的**直删**（round163 是在改回单跳后删的）；round163 §6
+  自登记的「接口未进 VPP 时提交、只改路由不补」窗口；**ACL 绑定残渣无任何对账/告警覆盖**
+  （`ReconcileResidue` 只认 ACL 对象、不认绑定）。
+
+【簇 C1a：VXLAN / storm control / 端口安全】（决策 #383/#385/#389）
+- **F1 [中·确认·已真机复现（§1.3）]** 接口元素整条删除路径不触发 storm/portsec 撤销；validator
+  （`validate.go:617`）论证「不可达」只覆盖「端口仍被交换机引用」，漏了同提交两处一起删。
+- **F2 [中·确认]** 决策 #385 ④「巡检按登记复核（幂等）」**无实现**：`cmd/nfvisd/main.go:707-735` 的 15s
+  巡检无任何 storm 调用、`StormProvider` 无 Reconcile ⇒ 带外删 policer/表后不自愈（登记 `applyDone`
+  仍为真），直到 VPP 重连全量重放；期间防护静默缺失（读视图能看出未在数据面，但无告警）。
+- **F3 [中·确认（校验缺口）]** storm-control 允许配在 **bond 成员口**（`validate.go:592-606` 无成员口检查）
+  且能 attach；而同一文件 `:1697` 写明「成员口入向被 bond-input 吃掉」⇒ 保护假象；与 portsec 明确拒绝
+  成员口（`:650`）不一致（portsec 注释还自称「照 storm-control 同例」）。
+- **F4 [中·确认·已真机复现（§1.2）]** portsec↔L3 ACL 的 **macip 同槽交接次序**未覆盖：一次提交
+  「删白名单 + 改挂 L3 acl-in」⇒ 伴随 macip 先绑后被 portsec teardown 解掉，非 IP/ARP 静默被丢。
+  双向校验只保证「不共存」，不保证交接次序（单测/真机均未覆盖）。
+- **F5 [低·确认]** QoS 策略名可与 storm policer 名空间碰撞（storm 名 `nfvis-storm-<if>-<kind>`
+  `storm.go:95-97`，teardown 按名删 `:398-405`；QoS 直接以策略名建 policer `services.go:132`，`checkName`
+  无保留前缀）⇒ storm 撤销可能删掉同名 QoS policer（限速静默失效）；`storm.go:94` 注释「命名空间独立」
+  不成立。
+- **F6 [低·确认]** portsec 读视图用 `BoundIndex != 0` 区分「槽被他人占用」/「未绑定」（`api/portsec.go:88-94`），
+  而索引 0 是合法 ACL（`acl_govpp.go:128`）⇒ 槽上是索引 0 的他方 macip ACL 时误报「未收敛」。
+- **F7 [低·确认]** portsec 的 CLI 结构化输出丢配置数组（`cli_iface_vpp_show.go:386-391` 只放
+  `port_security_runtime`、丢弃 `port_security`）；`cli_mapping_test.go` 的语句清单含 storm/vxlan 但
+  **无 port-security**（与其「未映射即失败」的自我定位相悖），`internal/api` 下亦无 portsec 读视图单测。
+- **F8 [低·确认]** VXLAN 改名（同元组）单提交必失败（新名先建撞 VPP -75，`apply.go:437` 早于 `:584`），
+  报错文案却指向「带外建立/`request vpp restart`」（会清掉所有隧道）；two-commit 路径正常；无改名用例。
+- **F9 [契约·低]** 决策 #385 ③ 写「每接口**一张** L2 classify 表」与实现/真机（**每类一张 + 广播表
+  `NextTableIndex` 链组播表**，`storm.go:12-24,470-483`）不符；契约文档已按实现，**决策正文未回写**。
+- 已核对无问题：VXLAN 身份/tag/改元组撤旧/BD 归属/删除段顺序/undo 对偶/读视图三态；storm 掩码与链表/
+  幂等/失败回滚/重放不重复建表/unknown-unicast 拒绝；portsec 规则形状/整体替换/上限/互斥/守卫/读视图
+  不编造命中数。
+
+【簇 C2：DHCP server/relay、DNS 转发、恢复对账/告警】（决策 #360/#367/#368/#371/#373/#380）
+- **F1（＝A）[高·确认]** **declined 租约泄漏**：`sweep()` 只遍历 `byMAC`（`dhcpserver_lease.go:74-85`），而
+  `decline()` 对无记录地址建 `&dhcpLease{IP: ip}` 只挂 `byIP`（`:171-191`）、`allocate()` 同 MAC 再分配时
+  覆盖 `byMAC` 令旧 declined 只剩 `byIP`（`:114-139`）⇒ **MAC 为空的条目永不过期**；`lowestFree()` 按
+  `byIP[...] == nil` 判空闲（`:100-109`）、`setPool()` 也只遍历 `byMAC`（`:62-71`）⇒ 该地址在本进程内
+  **永不回池**；`free()`=false ⇒ 之后任何 DISCOVER 失败、`DHCP_POOL_EXHAUSTED` 建立且 15s 巡检反复确认，
+  直到进程重启；`Leases()`（`dhcpserver.go:741-758`）把已过期条目按 `left<1 → 1` 恒显示「剩 1 秒」
+  （三面读视图均不诚实）。触发路径：① 客户端/攻击者对池内任意地址发 DECLINE（池 ≤4096 ⇒ 可永久打死该域
+  DHCP）；② 现测试 `TestDHCPServerProviderDORA` 的 DECLINE 后同 MAC 再 DISCOVER 即产生 byIP-only 条目。
+- **F2（＝B）[中·确认]** `SyncRelay` 变更「先撤旧、后加新」失败时旧条目已撤而登记仍称「已下发」
+  （`dhcp.go:143-158`：add 失败即 return，`p.relays` 仍旧值），随后「值未变」早退（`:135-137`）——
+  包括提交失败补偿与操作者改回旧值再提交；`ReconcileProxy` **只删不补**（`:192-228`）⇒ 该域 DHCP 静默
+  失中继直到 VPP/nfvisd 重启。与 #363 同族，DhcpProvider 是漏网；该 op 未置 `compensateOnFail`
+  （`apply.go:230-235`）。
+- **F3（＝C）[中·待真机]** `Sync` 的 stale 判据按 `sw_if_index` 相等（`dhcpserver.go:311-318`）⇒ 带外重建
+  内核 tap 且 VPP 复用同索引（round143 §1.4 实测同 tap 三次重建均 idx 6）时 `stale=false、needTap=false`
+  ⇒ 旧 AF_PACKET socket（内核已解绑）既不关也不重开，收包循环静默空转、应答写死 socket 只留 WARN；
+  无错误/告警、读视图显示「已收敛」，只有重启才恢复。#360 已把身份核对修到 `deleteTap`，Sync 仍信索引。
+- **F4（＝D）[中·待真机]** 15s 巡检读**一次性 stale `cfg`** 且与提交路径**无互斥**（`main.go:692-694` 一次
+  `Committed()` 快照用于四个 reconcile；`recoveryMu` 提交路径不取）⇒ 可「复活」刚被提交删除的 DHCP
+  server（孤儿 tap 被 `TapIndexes()` 过滤、用户不可见不可删、punt 全局注册仍在），或误删刚提交的 relay
+  proxy（因 F2 早退不补）。
+- **F5（＝E）[低-中·确认]** `ReconcileRecoveryAlarms` 的声明集映射未覆盖 #367 之后新增来源
+  `vxlan-tunnels/<n>`（`recovery.go:172`）、`vpp/dns-proxy`（`:225`），而文件头自称「一一对应」
+  （`recovery_reconcile.go:28-29`）⇒ 删一条未收敛过的隧道/清空 DNS 上游后告警滞留到下次 VPP 重连。
+- **F6（＝F）[低·确认]** #373 只分离了**告警** I/O；**租约文件** I/O 仍在 `p.mu` 内（`dhcpserver.go:637-638`
+  `persistLocked`、`:811-845` 含 fsync、`:301-307` Sync 锁内读）⇒ 磁盘抖动时收包与读视图被连带阻塞。
+- **F7（＝G）[低·确认]** DNS 转发器无 15s 重申/自愈（巡检无 DNS 项）、单协程串行转发（慢上游 HOL 阻塞
+  整个队列，`dnsproxy.go:260-273,322-330`）、上游应答不校验事务 ID/question（`:384-400`）。
+- **F8（＝H）[低·确认]** `ReconcileProxy` 按「一表一 server」折叠 want（`dhcp.go:193-204`）⇒ 两交换机显式
+  共享 gateway VRF 且各配不同 relay server 时，每 15s 删掉其中一个；校验层（`validate.go:759-761`）不禁止
+  该组合。
+- **F9（＝I）[低·确认]** `teardown` 失败仍无条件消解池耗尽告警（`dhcpserver.go:404-406`，≤15s 假消解）；
+  `Deregister` 错误被 `_ =` 吞（`:393-402,226-231`）。
+- 已核对无问题：#360 四项修复完整；#371 C6/C7/C10 逐条落实；#373 C11/A10 落实；#368 校验矩阵完整；
+  #367 子来源消解与恢复触发同源；收包路径去重/NAK 次序/300B 补零；relay 的 assertPunt 每 Sync 重申、
+  ReconcileProxy 不依赖进程内登记；读视图三态；未见 goroutine/fd 泄漏。
+
+【簇 C3：主机防火墙 / 配置引擎（锁·确认）/ 系统层】（决策 #388/#364/#365/#329/#346/#353/#370）
+- **F1 [高·确认（主会话复核引擎守卫与三个调用点）]** **确认守卫挡死三条内部维护/救援路径**：
+  `engine.go:652-654`（mgmt）/`:659-662`（firewall）判 `sess.Source != "console" && ConfirmedMinutes <= 0`，
+  而 `Zeroize`（`backup.go:251,263-266`：`SourceZeroize`、无 `ConfirmedMinutes`、提交空配置 ⇒ mgmtChanged
+  真）、`Restore`（`backup.go:224,232`：`SourceRestore`、无 confirmed；归档 mgmt/firewall 与现状不同即拒）、
+  `format-data`（`formatdata.go:184,194-196`：`SourceFormatData`、无 confirmed；保留节不含 Firewall
+  `:92-98` ⇒ 只要现有防火墙段即拒）三条全部恒被拒。**手册 §988-1022 明写防火墙自锁的救援＝restore 归档**，
+  该路径失效（内部来源不继承 console 身份）；`zeroize` 是 #121 把判据从 `== "ssh"` 改为 `!= "console"`
+  时的**回归**（`superuser_guard_test.go:24-27` 注释自己承认「空配置相对带管理口的基线正是管理口变更」，
+  故测试基线故意不含管理口；真机从未跑过 zeroize）。非交互探测 `request system zeroize`（不带 `--yes`）
+  在**交互确认**处即被拒（未到守卫），带 `--yes` 才会撞守卫——本轮未做（会真执行的风险），故为代码级确认。
+- **F2 [中·确认]** 被守卫拒绝的 commit **仍隐式确认**在途 `commit confirmed`（`engine.go:604-616` 隐式确认在
+  `requireHolderLocked` 之后、但两条守卫 `:652-663` **之前**）⇒ confirmed 窗口内再发一次普通 commit（被守卫
+  拒）会把危险变更静默转永久。#364 只收了「锁拒绝」半边，守卫拒绝仍背书（同类不一致）。
+- **F3 [中·确认]** `applied=true` 可为假：回读只核对表/链/策略/保留项**条数=4**/comment seq 集合
+  （`system/firewall.go:463-500`），`nftRuleJSON`（`:389-395`）只留 comment+counter、**expr 内容不比**
+  ⇒ `set system management interface ens161`（不存在的口）confirmed 提交成功后 `Apply` 拒绝（`:289-292`）
+  但旧表原样保留（仍 `iifname != "ens160"`），`Read` 见表在/策略同/seq 同即报 `applied=true`、读视图显示
+  新管理口「已收敛」并带计数——实际新口**零过滤**、旧口仍在被过滤（管理面保护假象）。
+- **F4 [中·确认]** `format-data` 保留的 Interfaces 与被删对象成**悬挂引用**（`formatdata.go:87` 逐字段保留
+  含 `IngressPolicy/EgressPolicy/PortSecurity`，但 QoS 策略与 VirtualSwitches 被删）⇒ 凡有物理口绑了 QoS
+  策略（#331）或有 portsec 白名单（#389）的现场，`format-data` 直接失败且报错自相矛盾；两个 formatdata
+  单测用 `fakeEngine`（不过校验）故全绿。
+- **F5 [低-中·确认]** 下发失败真因只进日志（`main.go:1772-1774`），三面读视图给不出「未收敛原因」
+  （`firewall.go:324-325` 把「表不存在」一律答成「尚未下发或已被手工删除」）。
+- **F6 [低·确认]** `applied=false` 时仍显示逐规则计数（`firewall.go:337-341` 保留 Counters；`api/firewall.go:78-81`
+  与 CLI 渲染不按 `Applied` 收窄）⇒ 新配置规则挂上旧表规则的 counts。
+- **F7 [低·确认·round142 D4 仍未修]** 大页 `managed` 与 `declared` 可自相矛盾（`hugepages.go:403-412`
+  不可读分支提前 return，未执行 `:416 v.Managed = declared > 0`；契约 `openapi.yaml:3195` 明写 managed=声明>0）。
+- **F8 [低·待真机]** D3「同 inode 取最大视图」边界：匿名 `MAP_HUGETLB` 映射头 `00:00 0` 全部落到同一键
+  （`hugepages.go:232-245,300-320`）⇒ 只取最大视图（非求和）⇒ `held` 低估、`orphan` 虚高、可能误报
+  `HUGEPAGE_POOL_ORPHAN`；真机现场（VPP/qemu 走 hugetlbfs 文件）不触发。
+- **F9 [低·确认]** 防火墙「重复规则」判据是原文比较（`validate.go:444-454`）⇒ `10.0.0.1` 与 `10.0.0.1/32`
+  渲染成相同 nft 匹配却不判重（第二条死规则）。
+- 观察（不计入）：启动期 confirmed 过期回滚的 goroutine 可能撞 `eng==nil` 早退（被启动下发覆盖）；
+  `ReconcileHugepages` verify_failed 路径不回填 `res.Free`（呈现瑕疵）；fulltest 防火墙解析块不提交。
+- 已核对无问题：#388 渲染全分支/下发原子性与指纹幂等/回收表/applied 判定（除 F3 内容比对）/
+  **confirmed 超时回滚 P0 修复在册且红-绿**；守卫覆盖面（所有写路径汇到 `Engine.Commit`、无旁路）；
+  #364 其余；#365 受管清单与路径安全；大页 #329/#346/#353/#370 有界性与三面同源。
+
+【簇 C4：计算编排（libvirt/动态接入/PCI）+ 容器】（决策 #351/#354/#362/#366/#375/#384）
+- **F1 [中·确认]** `call` 执行段把调用方**更长的** deadline 硬封顶 30s（`conn_libvirt.go:248-253`：`bound`
+  只取更小值），与注释「调用方 deadline 优先」相悖；而 `ErrConnBusy` 注释自己把「快照创建/回滚、大 xml 定义」
+  列为合法长 RPC ⇒ 这类 RPC 在执行中超 30s 即被 `interrupt()` 关连接（`:276-287`），libvirt 侧作业可能仍在跑；
+  round145 的「无误杀」只在常规窗口内观测。
+- **F2 [中·确认]** Docker 侧「同族未修」：除 5 处显式包裹（exec/shell 的 State 与 create、ticket State）外，
+  仍由调用方 ctx 决定，而 CLI 路径全是 `context.Background()`——漏网：exec 收尾 `GET /exec/{id}/json`
+  （`docker_client_docker.go:410`）、`ContainerState`/`ContainerLogs`（`docker.go:219-243`，被
+  `cli_compute_show.go:220,246`、`cli_compute_oper.go:360,387`（**shell 的 CLI 前置 State，先于有界的 ticket**）
+  调用）、容器 start/stop/restart（`cli_compute_oper.go:314-316`）在 `p.mu` 内（`docker.go:164-206`，挂死即
+  **永久持有 ⇒ 提交/收敛路径一起阻塞**）、镜像 remove/load（`main.go:352-357`）；服务端无 WriteTimeout
+  （`server.go:442-446`）⇒ dockerd 假死时服务端无界挂起。直接违背 #366「CLI 面不再无界挂起」的承诺面。
+- **F3 [低-中·确认]** `call` 首段 select 的「排队超时 vs 已取得互斥」竞态（`conn_libvirt.go:269-288`）：
+  `started` 与 `ctx.Done` 同时就绪时随机选中 Done 返回 `ErrConnBusy`，但 goroutine 已进 `fn(c.l)` 且**执行
+  计时器未建立** ⇒ 若 fn 卡在假死连接上则连接/互斥永不释放；而 `dynamicCompute.Probe` 把 `ErrConnBusy`
+  当健康（`dynamic_provider.go:165-173`）⇒ 永不判中断、永不复连，直到重启进程。
+- **F4 [低·确认]** `wrapDockerTimeout` 丢因果（`docker_client_docker.go:492-497` 无 `%w`；`docker.go:326` 用
+  `%v`）⇒ `container_shell.go:60` 的 `errors.Is(serr, DeadlineExceeded)` 生产路径恒 false（死代码/注释漂移，
+  用户文案已由 wrapDockerTimeout 提供，无用户影响）。
+- **F5 [低·确认]** 容器在 Docker 侧不存在（竞态）时 shell ticket 返回 **409**「未处于运行态（当前 absent）；
+  先 … start」（`docker.go:226-229`+`container_shell.go:66-69`），而 exec 同场景 **404**（`docker.go:266-267`）；
+  openapi 两处都声明「404=容器不存在」；文案指向的 `start` 本身会 404。
+- **F6 [低·确认]** 启动期 libvirt 连接错误残留「systemctl restart nfvis 即恢复接入」（`conn_libvirt.go:151-153`
+  经 `main.go:2016-2021` 进 `COMPUTE_UNAVAILABLE` 正文），与手册 1909「无论启动期还是运行期都无需重启 nfvis」
+  矛盾（陈旧提示）。
+- **F7 [低·确认]** #378 边界：`Swap` 仍**同步等** `old.Close()`（`dynamic_provider.go:109-117`）⇒ 假死守护进程
+  下 `Disconnect()` 挂起会**永久卡死常驻 watch goroutine**（此后不再探活/复连）；决策只承诺「不阻塞编排调用」。
+- **F8 [低·待真机]** PCI 跨 VM 冲突只覆盖 `pci_devices` 之间（`validate.go:1536-1554`），未覆盖 `sriov vf`
+  解析出的 VF BDF（应用层才解析，`provider.go:598-602`）⇒ 同一物理设备以 VF 给 VM-A、以 pci-device 给 VM-B
+  可通过校验（后起 VM 启动失败）。
+- **F9 [低·确认]** 容器无周期对账：`container.go:394` absent 静默 `continue`；`EnsureConsistent` 只在容器
+  首次后台接入/VPP OnConnect/提交时跑，15s 巡检不跑 ⇒ dockerd 重启后（restart-policy=no）停在 exited、
+  `classifyExit` 视为正常停止 ⇒ 无告警、无收敛（VM 有重连语义，容器按 #354 无）。
+- 已核对无问题：`call` 排队/执行两段语义与单测；状态机节奏/阈值/换装原子性/回调恰一次/重设 VF·PCI·Alarms；
+  动态持有层 15+11 方法齐全（编译期断言）；#366 超时三面归一、`execTimeoutHint` 引号感知、握手三态有界、
+  demux 截断/退出码 note；#375 B7/B8/B10 与 ticket 键隔离/TTL；#384 BDF 归一/hostdev 形状/sysfs 检查；
+  未见明显 goroutine/fd 泄漏。
+
+【簇 C5：CLI / API / 会话 / 指标历史】（决策 #364/#370/#372/#374/#376/#377/#379）
+- **F1 [中·确认·已真机复现（§1.6）]** `planBoundedLoad` 的「载入收窄」按**时间宽度** `(limit+1)*step` 截窗口
+  （`metricshist/store.go:409-425`），只在桶稠密（step ≥ 采样间隔）时与「全窗口+裁剪」等价；**显式 step <
+  采样间隔**时稀疏桶会**丢掉本应保留的旧点并置假 `truncated`**。真机（60s 采样）：`show system metrics history
+  name nfvis_system_uptime_seconds last 1h step 1s` ⇒ **9 点 + 「已被 limit 截断」**（对照 `step 1m` = 60 点、
+  无截断）；`last 30m step 1s` 同样 9 点（窗口被无视）。可达路径正是 #376 自己推荐的命令形态与 REST `?step=1s`；
+  Web 不传 step（`autoHistoryStep ≥ interval`）故安全；现有 `TestPlanBoundedLoad`/
+  `TestQueryLimitWithStepNarrowsWindowSameResult` 全用连续等距数据、覆盖不到该缺口。
+- **F2 [低·确认·契约漂移]** 查询失败仍把 `store.enabled` 翻 false 且不落 `store.error`
+  （`api/metrics_history.go:206-216`，第 211 行）——#372 A5 已把 `ReopenIfReplaced`/`Stats` 两处同款改掉并在
+  openapi 写明「不因单次查询失败而翻 false」，此处是**同族漏网**（契约与代码直接冲突）。
+- **F3 [中·确认]** `#366` 承诺「`dockerCallTimeout` 罩 State」不成立：`Provider.ContainerState`/`ContainerLogs`
+  未在底座层加界（`docker.go:219-230,233`；`docker_client_docker.go:241,291` 经裸 `do`、`http.Client{}` 无全局
+  Timeout），`cctx` 只用于 Exec/Shell create 与 REST ticket；仍无界的调用方含 **shell 的 CLI 前置 State**
+  （`cli_compute_oper.go:387-388` `context.Background()`）、`ContainerLogs`（`:360`）、`ctStateOf`
+  （`cli_compute_show.go:220,246`）；`cli_bridge.go:74` 的 `ExecuteAs` 不接请求 ctx 且全程持 `cliExecutor.mu`
+  ⇒ dockerd 假死时**阻塞所有 CLI 会话**。（与 C4-F3 同族，合并计 R171-16。）
+- **F4 [低·确认]** `parseHistoryDuration` 的「防溢出」是**乘法之后**检查（`api/metrics_history.go:41-58`），存在
+  n 使 `time.Duration(n)*unit` 回绕成 `(0,3650d]` 内的正值 ⇒ 被当合法时长；与注释/#372「乘法前防溢出」口径不符。
+- **F5 [低·确认]** #372 A2 的分片睡眠引入**每秒一次** `engine.Committed()`（`cmd/nfvisd/metrics_history.go:80-99`
+  → `engine.go:537-541`/`:1036` 做 DB 读 + 全配置 JSON 反序列化，**持 `engine.mu`**）⇒ 与所有 CLI/API 配置操作
+  互斥的读放大（性能/锁竞争回归，非正确性）。
+- **F6 [信息·候选清单]** E14「客户端 90s 超时后命令仍在服务端无界执行」的其它长命令（#377 已如实登记，此处补全）：
+  镜像导入/下载、software add/rollback、reboot/shutdown、ntp sync、tech-support 生成（**完全无 ctx**）、core dump
+  导出、备份/恢复、zeroize、format-data、capture start/stop、vpp restart、commit 下发、VM 生命周期、容器
+  logs/shell 前置 State——全部走 `context.Background()` 且 `ExecuteAs` 持全局锁同步执行。
+- 已核对无问题：#364（自吊销同源、隐式确认移序、`ConfirmCommit` 持有者校验、全部 `ClearConfirmed` 路径）；
+  #370 E9/E12；#374 B4/E5/B5/E6/E7；#377 E8/E10/E11/E13；#379 4/5-token 别名互不干扰；#356 背景的
+  `ReopenIfReplaced`/并发/`MaxQueryLimit`/`autoHistoryStep`。
+
+【簇 C6：契约 / 模型 / UI 横切】（决策 #381~#389 契约面 + #319/#324/#325/#327/#344）
+（本簇由**主会话自查**完成——派出的子智能体因环境账号并发限制两次失败；覆盖面与结论如下。）
+- 已核对、未发现裂缝的各面：
+  · **命令树设计**：firewall（L484-511）、storm/portsec（L552-560）、pci-device（L719-720）、vxlan 均有语句叶子；
+  · **命令全表**：新特性行齐（firewall 5 行 ✅/round169、storm 3 行 ✅/round167、portsec 3 行 ✅/round170、
+    vxlan 2 行 ✅/round164、pci-device 2 行 ✅/round165、static-routes/next-hop ✅）；
+  · **display-set 反推**：`setstmt_families.go` 有 firewall（:237）、storm_control（:392-418）、port_security
+    （:419-…）、pci_devices（:1036-1045）、vxlan_tunnels（:1150-1180）的逆走实现；CLI 别名族对应
+    （`cli_aliases_vxlan.go` 等）；`cli_mapping_test.go` 含 storm/vxlan 的 set/delete 语句清单；
+  · **openapi**：`openapi.json` 与 YAML 同步（守护 ✓），新字段（port_security/storm_control/firewall/vxlan/
+    pci_device 等，20 处）在册；
+  · **Web**：新特性全是**只读卡**——app.js:524 明确「本页不加写控件——写路径走 CLI/REST」；storm/portsec 在接口
+    详情只读行（:754-755）、VXLAN 卡（:5408-5455）、PCI 在 VM 详情（:4265）⇒ **无新写控件**需门禁
+    （ui_ops_writes_gating/coverage 守护不含新特性，与设计一致）；
+  · **秘密出口矩阵**：`secrets_egress_test.go` 已把 `/system/firewall`、`/system/hugepages`、`/vxlan-tunnels`、
+    `/virtual-switches/{n}/dhcp-leases`、`/metrics/history` 逐条分类（无秘密字段）；
+  · **套件同步**：`check_suite_contract_sync.sh` 通过（契约 295 / 套件 389 / 豁免 78，**缺口 0**）；#383 VXLAN 与
+    #384 PCI 的语句**不在 fulltest**但已按 #319 在 `cli-fulltest-exemptions.tsv`（L96-100）逐条登记（理由与覆盖
+    入口齐全）；storm/portsec/firewall 已入套件（phase 脚本命中 4/4/13 次）。
+- **F1 [契约·低]** `set virtual-switches <n> ports [<seq>] interface <if>` 的 **`[<seq>]` 可选写法与实现不符**：
+  树定义是**必填**位置 token（`tree_config.go:296` `PT("<seq>","uint",…)`），且无别名兜底（`cli_aliases_*.go`
+  无 `ports` 的 seq-可选 pattern）。**真机实测**：`configure` + `set virtual-switches vs-h ports interface ens224`
+  ⇒ `%% 未知命令: "ens224"`；带 seq（`ports 1 interface ens224`）成功。命令树设计 L633-635 与命令全表 L347-349
+  都写 `[<seq>]`，会误导操作者。建议二选一：文档去掉 `[]`，或实现补 seq 可选（自动分配）。
+- **F2 [契约·低]** 模型校验矩阵的跨特性缺口（不在本簇重复展开，指向对应簇）：storm 与 bond 成员（C1a-F3）、
+  PCI 与 SR-IOV VF BDF（C4-F8）、静态路由前缀↔下一跳同族与重复前缀（C1b-F5/F7）；其余组合（portsec↔L3 ACL
+  双向、portsec 的 L2 成员前置与移出守卫、VXLAN 被引用交换机不可删、firewall 未声明管理口拒绝、DHCP
+  relay/server 全局互斥）均有提交期校验。
+- 未执行：Go 侧守护测试（`go test ./internal/api/`）在本机因宿主分页文件不足无法运行（0xC0000142 / errno 1455），
+  「路径级/字段级守护在 HEAD 全绿」以 CI 为准（本仓 PR 合入门槛）；shell 守护已在本轮实跑通过。
+
+§3 账目与文档疏漏（v2已做 / v2待做 / 命令全表 / 手册 ↔ 事实）
+事实源优先级：代码与 git 提交 > 证据 > 规格书附录 A > 账目文档。以下均**未修**（只登记）。
+
+`docs/v2待做.md`：
+1. L3 头部：「已完成事项（决策 **#300~#344**…）」——过期（应为 #300~#389）。
+2. L12 一节标题：「账面欠款：…至今未做（**9 条**；…第 2/4/7/8/9 条已收口…）」——计数自相矛盾
+   （9 条中已标 ✅ 5 条；实际未做＝一.1 动态路由、一.3 VRRP 与一.5 余量）。
+3. L21（一.5）：「**storm control v1 已立项（决策 #385…实现与真机四维待执行）**」——**已完成**（round167
+   真机四维，证据 `v2-round167-d385-storm-control.txt`）；同条后半已写「port security 已收口 #389」，
+   同一 bullet 内自相矛盾。
+4. L44（一.7 防火墙）：「…**真机四维验证待执行**」——**已完成**（round169，证据 `v2-round169-d388-host-firewall.txt`）。
+5. L89（R142-5 bullet）：「A 域 relay 可能被 B 域 server…（**待真机对照实验定性**）」——已由 #368 收口
+   （round151 真机定性），bullet 未删（上方 L82-86 已写「R142-5 已收口」）。
+6. L111-112：R152-1 条目附近的**孤儿残片**——L112「（goroutine/fd 泄漏）；`/metrics`、`format-data`、
+   大页归属等其余…见报告 §2 的 A4~A10、D3~D7。」是从被替换旧条目遗留的半句。
+7. L159-165：`---` 后一段**无 bullet 头**的悬空文本（大页「实际持有/无主占用」）＋结尾又一个 `---`。
+8. L254（第 5 批）：「一.5 storm control v1（#385；**port security 白名单留待做**）」——#389 已交付（round170），
+   与同文件 L21 矛盾。
+9. L261（附）：「已完成：见 v2已做.md（决策总表 **#300~#344**…）」——过期。
+
+`docs/v2已做.md`：
+10. L3 头部：「…决策 **#300~#385** 与各轮真机验证」——过期（总表实际到 #389，L10 已写 #300~#389）。
+11. §四 证据索引**缺 round168/169/170**（末条为 round167）：应补 `v2-round168-d386-d387-route-rulings.txt`、
+    `v2-round168-storm-ipv6-and-web-review.txt`、`v2-round169-d388-host-firewall.txt`、
+    `v2-round170-d389-port-security.txt`（§五基线沿革里已有 round168~170，索引与沿革不一致）。
+12. （轻微）§一 决策总表末段行序非数值序（…#384 → #389 → #385 → #382 → #386 → #387 → #388），
+    易误读为缺号（90 行齐全、无缺号）。
+
+`docs/NFViS-CLI命令全表.md`：
+13. L504-506「注（决策 #388，主机防火墙）」**未随 round170 更新**：仍写「均标 🚫 待真机——真机四维验证
+    待执行」「全表由 293 行增至 298 行（状态分布 277/0/5/16）」，与上方 L499-502 的当前基线
+    （273/0/20、301 行、285/0/5/11）及 L73/291-294 的 ✅ 行直接矛盾。
+14. L509-512 沿革：`cli-fulltest` 末尾停在 **272/0/20（round169）**，缺 round170 的 **273**（+1，L502 已写）。
+
+用户面文档（ECMP #381 契约面）：
+15. **逗号分隔多下一跳**只落在 `docs/NFViS-openapi.yaml`（`Route.next_hop` 描述）与 `tree_config.go`
+    （CLI 帮助）——**用户手册、命令全表、命令树设计三处均无**（`grep 逗号` 零命中；手册 §静态路由示例
+    仍只有单跳）。#381 决策行的「契约面」只列了 openapi，但与本仓 #388/#389 的「命令树/全表/手册同步」
+    惯例不一致（用户看不到该能力）。
+
+已核实无误（抽样）：决策条数 **291**（附录 A 表行数＝`AGENTS.md` 计数，守护脚本 ✓）；`openapi.json` 与
+YAML 同步（守护 ✓）；命令全表 §3 的 301 行 / 285-0-5-11 分布与实测 `grep` 一致（`⊘`/`⚠️` 的额外命中在
+描述文本内，非状态列）；`v2-交接-2026-10-06d.md` 的 291 项 / dev113 / 四套件数字与证据一致；`AGENTS.md`
+round 记录覆盖到 round170 与 #389。
+
+§4 建议处置批次（编号与 `docs/v2待做.md`「新登记（round171）」一致；不含本轮已做）
+- **P0（安全/数据面静默，建议优先）**：
+  · **R171-1** ACL/macip 撤销盲区族（C1b-F1 ＋ C1a-F1/F4 三形态同族）：补「被删/迁移 VRF 的解绑」与「接口
+    元素删除的 teardown」计划；交接次序按「先解旧槽、后绑新槽」；并给 ACL 绑定加对账/告警（当前无覆盖）。
+  · **R171-2** DHCP declined 泄漏（C2-A）：`sweep/setPool/restore` 按 byIP∪byMAC 清理（或 decline 不建无边
+    条目）；**纯函数，可红-绿单测复现**。
+  · **R171-3** 内部维护/救援路径被守卫挡死（C3-F1）：先定裁「合成来源豁免」规则（或给 `CommitOpts` 显式
+    通道），再验证 restore 救援路径恢复可用。
+- **P1（用户可见的静默不一致/契约违背）**：**R171-4** 混族校验（前缀↔下一跳同族）；**R171-5** ECMP 读视图
+  （多条下一跳如实显示）；**R171-17** 历史读视图 `step` 稀疏收窄（#376 同函数）；**R171-6** `forgetL3Iface`
+  索引校验；**R171-7** `DeleteQos` 查询失败语义；**R171-8** storm 巡检复核；**R171-9** storm bond 成员拒绝；
+  **R171-10** `SyncRelay` 登记漂移；**R171-11** tap 身份按 HostIfName；**R171-12** 巡检快照新鲜/互斥；
+  **R171-13** 守卫拒绝不隐式确认；**R171-14** 防火墙 applied 内容比对；**R171-15** format-data 保留节悬挂
+  引用；**R171-16** `call` 上界分层 + Docker 调用内部硬上界。
+- **P2（契约/文档回填，可独立小 PR）**：§3 全部（v2待做/已做/命令全表/ECMP 手册）；C1a-F9（决策 #385 ③
+  描述）；C1b-F7（静态路由重复前缀——定裁「拒绝」或「last-wins 写明」）；C3-F9（重复规则判据）；
+  C6-F1（`ports [<seq>]` 文档与实现不符）；C5-F2（`store.enabled` 查询失败翻 false）。
+- **P3（低危/观测）**：C1b-F6/F8、C1a-F5/F6/F7/F8、C2-F5~F9、C3-F5~F8、C4-F2/F4~F9、C5-F4/F5。
+- 需真机补验（登记后按需）：C2-F3（带外重建 tap 复用索引）、C2-F4（巡检/提交竞态）、C3-F8（匿名大页映射）、
+  C4-F1/F2/F8、ECMP 两跳直删、round163 §6 的延后窗口。
+
+§5 现场与清场（如实）
+- 本轮真机做 6 组复核实验（§1）：① ACL/交换机迁移（rev1137~1141）；② storm 接口元素删除（rev1150~1153）；
+  ③ portsec↔L3 交接（rev1154~1157）；④ ECMP 读视图（rev1142~1145）；⑤ 混族路由（rev1146~1149）；
+  ⑥ 历史读视图 `step` 稀疏桶（只读查询，无配置变更、无 rev）。
+- 终态核对（末次 `request vpp restart` 后，rev1158）：`show configuration | display set` **34 条 set 行＝基线**
+  （含 `set interfaces ens224 disable`、`set vpp dpdk dev ens224`；无 vs-a/vs-b/vs-e/vs-f/vs-g/vs-h/f1acl/f2acl/
+  port-security/static-routes）；`vppctl show acl-plugin interface` 空、`show acl-plugin macip acl` 空、
+  `show classify tables` = `No classifier tables configured`、`show policer` 空、无 10.99.x 表/FIB 残留；
+  四服务 active。
+- 实验期间新增的配置修订（rev1137~1158）与审计条目按产品设计留档；无对象残留。
+- **四套件本轮未复跑**（体检口径：只读 + 现场实验；跑套件会写现场）。基线沿用 round170（dev113）：
+  fulltest **273/0/20** ｜ 语义 **26/0/3**（S8 冷窗）～**27/0/2** ｜ lifecycle **23/0/2 + 登记 1** ｜ pty **10/10**。
+- 审计**不改任何产品代码/契约**（只读 + 现场实验）；所有发现只登记、不修（用户口径：先体检）。
