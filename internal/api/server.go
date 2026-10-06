@@ -439,6 +439,13 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 		addr = ":443"
 	}
 	s.mux = mux
+	// 决策 #396：**不加** WriteTimeout（明确登记不做，理由如下）。本 http.Server 同时承载
+	// 两条**长驻流**——`GET /events`（SSE，心跳 20s、连接可能数小时）与 console/容器 shell
+	// 的 WebSocket 升级；WriteTimeout 是对**整次响应写**的总时限，一旦设置，SSE 会在到期时
+	// 被静默掐断（WebSocket 升级后虽由 hijack 接管、但升级前的写仍受限）。因此这里只保留
+	// ReadHeaderTimeout（10s，防慢头攻击）。「dockerd/libvirt 假死时服务端不再无界挂起」的
+	// 承诺改由**底座层**保证：compute.Conn.call 的上界分层（#396 ①）与 dockerClient 的内部
+	// 硬上界（#396 ②）——即挂点在编排层就被有界化，不需要也不适合用连接级写超时兜底。
 	s.http = &http.Server{
 		Addr:              addr,
 		Handler:           s.Handler(),

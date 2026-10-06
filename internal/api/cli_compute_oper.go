@@ -288,6 +288,19 @@ func (x *cliExecutor) requestVMConsole(user, name string, confirmed bool) string
 
 // ---------- request container-functions ----------
 
+// containerCallTimeout CLI 侧容器运行态/生命周期调用的**整次操作**上界（决策 #396）。
+// 底座层（dockerClient 的内部硬上界）已对每次 Docker API 调用给上界；这里再给调用点一个
+// 总上界，覆盖多步调用叠加、以及 provider 层未包裹的路径（如 show container-functions 的
+// ctStateOf），使 CLI 面在 dockerd 假死时不再无界挂起（#366 承诺面的补齐）。
+//
+// 声明为 var 仅为单测可注入更小值（红-绿需要）；生产代码从不改写。
+var containerCallTimeout = 30 * time.Second
+
+// containerCallCtx 返回容器 CLI 调用点的有界 ctx（决策 #396）。调用方负责 cancel。
+func containerCallCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), containerCallTimeout)
+}
+
 func (x *cliExecutor) requestContainer(user, class, source string, t []string) string {
 	if !x.allowTokens(class, mustNode(schema.OperRoot(), "request", "container-functions"),
 		append([]string{"request", "container-functions"}, t...)...) {
@@ -311,7 +324,9 @@ func (x *cliExecutor) requestContainer(user, class, source string, t []string) s
 		if x.ct == nil {
 			return "%% 容器编排未接入（Docker 未装配），运行态不可用\n"
 		}
-		ctx := context.Background()
+		// 决策 #396：调用点传有界 ctx（此前 Background ⇒ dockerd 假死即无界挂起）。
+		ctx, cancel := containerCallCtx()
+		defer cancel()
 		switch action {
 		case "start":
 			err = x.ct.StartContainer(ctx, name)
@@ -357,7 +372,10 @@ func (x *cliExecutor) containerLog(name string, rest []string) string {
 		}
 		last = int(n.(float64))
 	}
-	out, err := x.ct.ContainerLogs(context.Background(), name, last)
+	// 决策 #396：调用点传有界 ctx（此前 Background ⇒ dockerd 假死即无界挂起）。
+	ctx, cancel := containerCallCtx()
+	defer cancel()
+	out, err := x.ct.ContainerLogs(ctx, name, last)
 	if err != nil {
 		return "%% " + err.Error() + "\n"
 	}
@@ -384,8 +402,12 @@ func (x *cliExecutor) containerShell(user, name string, rest []string) string {
 	if x.issueShell == nil {
 		return "%% 容器终端凭证不可用（服务未装配 ticket 签发）\n"
 	}
-	ctx := context.Background()
-	if st, err := x.ct.ContainerState(ctx, name); err == nil && st != orchestrator.CTStateRunning {
+	// 决策 #396：shell 前置 State 传有界 ctx（此前 Background；这是打开路径的第一个挂点，
+	// 先于有界的 ticket 签发）。
+	sctx, scancel := containerCallCtx()
+	st, serr := x.ct.ContainerState(sctx, name)
+	scancel()
+	if serr == nil && st != orchestrator.CTStateRunning {
 		return fmt.Sprintf("%% 容器 %s 未处于运行态（当前 %s）；先 request container-functions %s start\n", name, st, name)
 	}
 	wsPath, ttl, err := x.issueShell(name, user)

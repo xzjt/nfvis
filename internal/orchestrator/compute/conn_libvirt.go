@@ -22,13 +22,17 @@ const DefaultURI = "qemu:///system"
 // 的 defaultSocket 同一取值（路径规则见 libvirtSocketPath）。
 const defaultLibvirtSocket = "/var/run/libvirt/libvirt-sock"
 
-// defaultRPCTimeout 单次 RPC 的缺省硬上界（决策 #362）：调用方 ctx 自带 deadline
-// 时以调用方的为准；无 deadline 的调用（Version/HypervisorVersion 等元数据/版本类）
-// 用此值。取 30s 的理由：正常 RPC 是本地 unix socket 上的毫秒级往返，即便过载也远
-// 不至于到 30s；而对「socket 可连、守护进程零响应」的假死现场，它把无界挂起收敛成
-// 有界失败。常驻探活另有更短的 5s 上界（cmd/nfvisd/async_connect.go），会先于本上界
+// defaultRPCTimeout 只读/元数据类 RPC 的缺省硬上界（决策 #362；#396 起为「上界分层」
+// 中只读一档的上限）。取 30s 的理由：正常 RPC 是本地 unix socket 上的毫秒级往返，即便
+// 过载也远不至于到 30s；而对「socket 可连、守护进程零响应」的假死现场，它把无界挂起收敛
+// 成有界失败。常驻探活另有更短的 5s 上界（cmd/nfvisd/async_connect.go），会先于本上界
 // 到期并关闭连接，读路径因此也提前失败，而不是拖到客户端的 90s 超时。
-const defaultRPCTimeout = 30 * time.Second
+//
+// 决策 #396：作业类 RPC（快照创建/回滚、大 xml 定义、DomainCreate 等待等）**不再被本值
+// 封顶**——按调用方 ctx 的 deadline 放宽（见 callBound）；无 deadline 时仍回落本值作兜底。
+//
+// 声明为 var 仅为单测可注入更小值（红-绿需要）；生产代码从不改写。
+var defaultRPCTimeout = 30 * time.Second
 
 // handshakeDrain 超时关闭 conn 后等待握手 goroutine 退出的有界时长。conn 关闭后
 // go-libvirt 的解除路径（listen 退出 → waitAndDisconnect → deregisterAll 解除挂起
@@ -225,7 +229,41 @@ func (c *Conn) interrupt() {
 	}
 }
 
-// call 在硬上界内执行一次 libvirt RPC（决策 #362）。
+// callBound 计算一次 RPC 执行段的硬上界（决策 #396「上界分层」）。
+//
+//   - job=false（只读/元数据类：Version、State、DumpXML、SnapshotList 等）：缺省
+//     defaultRPCTimeout 是**上限**，调用方 deadline 更短则取更短。
+//   - job=true（作业类：快照创建/回滚、大 xml 定义、DomainCreate 等待等）：调用方
+//     deadline **优先且不封顶**——这类 RPC 是 libvirt 侧的真实作业，可能远超 30s，把
+//     调用方给的更长上界硬压到 30s 会在作业执行中关连接（libvirt 侧作业可能仍在跑）。
+//     调用方未给 deadline 时回落 defaultRPCTimeout 作兜底（保留「执行中到期即关连接」
+//     的中断语义，不至于彻底无界）。
+//
+// 无论哪一档，都保留「执行中到期即 interrupt 关连接中断挂起 RPC」与「排队中
+// ErrConnBusy」两条既有语义（见 callMode）。
+func callBound(ctx context.Context, job bool) time.Duration {
+	bound := defaultRPCTimeout
+	if dl, ok := ctx.Deadline(); ok {
+		if left := time.Until(dl); job || left < bound {
+			bound = left
+		}
+	}
+	return bound
+}
+
+// call 在硬上界内执行一次**只读/元数据类** libvirt RPC（决策 #362；#396 分层后为只读档）。
+func (c *Conn) call(ctx context.Context, fn func(l *libvirt.Libvirt) error) error {
+	return c.callMode(ctx, false, fn)
+}
+
+// callJob 在硬上界内执行一次**作业类** libvirt RPC（决策 #396）：上界按调用方 deadline
+// 放宽、不再被 defaultRPCTimeout 封顶（见 callBound）。适用于快照创建/回滚、大 xml 定义、
+// DomainCreate 等待等可能在 libvirt 侧执行较久的调用。
+func (c *Conn) callJob(ctx context.Context, fn func(l *libvirt.Libvirt) error) error {
+	return c.callMode(ctx, true, fn)
+}
+
+// callMode 在硬上界内执行一次 libvirt RPC（决策 #362 起；#396 增 job 分层）。
 //
 // 为什么需要它：go-libvirt 的单次 RPC 没有 per-call deadline（request → getResponse
 // 裸等响应通道），对「socket 可连、零响应」的假死 libvirtd，仅靠调用方 ctx 加 deadline
@@ -240,17 +278,13 @@ func (c *Conn) interrupt() {
 //   - 排队阶段（还没轮到执行）到期 ⇒ 连接只是**忙**：返回 ErrConnBusy、**不关连接**
 //     —— 前面可能有合法地耗时较长的 RPC（快照创建/回滚）正在执行，关连接即误杀。
 //
-// 无 deadline 的 ctx 套 defaultRPCTimeout（缺省硬上界，仅约束执行段）。
-func (c *Conn) call(ctx context.Context, fn func(l *libvirt.Libvirt) error) error {
+// 无 deadline 的 ctx 套 defaultRPCTimeout（缺省硬上界，仅约束执行段）；作业类（job=true）
+// 按调用方 deadline 放宽（#396）。
+func (c *Conn) callMode(ctx context.Context, job bool, fn func(l *libvirt.Libvirt) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	bound := defaultRPCTimeout
-	if dl, ok := ctx.Deadline(); ok {
-		if left := time.Until(dl); left < bound {
-			bound = left
-		}
-	}
+	bound := callBound(ctx, job)
 	// 结果通道带缓冲（size 1）：上界路径即便不收结果，goroutine 发完也能退出。
 	done := make(chan error, 1)
 	started := make(chan struct{})
@@ -320,8 +354,11 @@ func (c *Conn) HypervisorVersion() (string, error) {
 }
 
 // Define 定义（或按名重定义）domain。
+//
+// 作业类（决策 #396）：大 xml 的 domain 定义在 libvirt 侧可能耗时较久（写元数据/落盘），
+// 上界按调用方 deadline 放宽、不被 30s 封顶。
 func (c *Conn) Define(ctx context.Context, xml string) error {
-	return c.call(ctx, func(l *libvirt.Libvirt) error {
+	return c.callJob(ctx, func(l *libvirt.Libvirt) error {
 		if _, err := l.DomainDefineXML(xml); err != nil {
 			return fmt.Errorf("定义 domain 失败: %w", err)
 		}
@@ -377,9 +414,10 @@ func (c *Conn) StateReason(ctx context.Context, name string) (int, int, bool, er
 	return out.state, out.reason, out.exists, nil
 }
 
-// Start 启动域。
+// Start 启动域。作业类（决策 #396）：DomainCreate 可能等待 libvirt 侧启动作业，上界按
+// 调用方 deadline 放宽。
 func (c *Conn) Start(ctx context.Context, name string) error {
-	return c.withDomain(ctx, name, func(l *libvirt.Libvirt, dom libvirt.Domain) error { return l.DomainCreate(dom) })
+	return c.withDomainMode(ctx, true, name, func(l *libvirt.Libvirt, dom libvirt.Domain) error { return l.DomainCreate(dom) })
 }
 
 // Shutdown ACPI 优雅关机。
@@ -430,7 +468,11 @@ func (c *Conn) DumpXML(ctx context.Context, name string) (string, error) {
 }
 
 func (c *Conn) withDomain(ctx context.Context, name string, fn func(l *libvirt.Libvirt, dom libvirt.Domain) error) error {
-	return c.call(ctx, func(l *libvirt.Libvirt) error {
+	return c.withDomainMode(ctx, false, name, fn)
+}
+
+func (c *Conn) withDomainMode(ctx context.Context, job bool, name string, fn func(l *libvirt.Libvirt, dom libvirt.Domain) error) error {
+	return c.callMode(ctx, job, func(l *libvirt.Libvirt) error {
 		dom, err := l.DomainLookupByName(name)
 		if err != nil {
 			if libvirt.IsNotFound(err) {
@@ -451,8 +493,10 @@ func (c *Conn) DumpDomainXML(ctx context.Context, name string) (string, error) {
 }
 
 // SnapshotCreate 创建域快照（XML 由 BuildSnapshotXML 生成，qcow2 内部快照）。
+// 作业类（决策 #396）：快照创建是 libvirt 侧的真实作业，可能远超 30s，上界按调用方
+// deadline 放宽。
 func (c *Conn) SnapshotCreate(ctx context.Context, name, snapshotXML string) error {
-	return c.call(ctx, func(l *libvirt.Libvirt) error {
+	return c.callJob(ctx, func(l *libvirt.Libvirt) error {
 		dom, err := l.DomainLookupByName(name)
 		if err != nil {
 			if libvirt.IsNotFound(err) {
@@ -506,22 +550,24 @@ func (c *Conn) SnapshotList(ctx context.Context, name string) ([]SnapshotInfo, e
 	return out, nil
 }
 
-// SnapshotRevert 回滚到指定快照。
+// SnapshotRevert 回滚到指定快照。作业类（决策 #396）：回滚可能在 libvirt 侧执行较久，
+// 上界按调用方 deadline 放宽。
 func (c *Conn) SnapshotRevert(ctx context.Context, name, snapshot string) error {
-	return c.withSnapshot(ctx, name, snapshot, func(l *libvirt.Libvirt, s libvirt.DomainSnapshot) error {
+	return c.withSnapshotMode(ctx, true, name, snapshot, func(l *libvirt.Libvirt, s libvirt.DomainSnapshot) error {
 		return l.DomainRevertToSnapshot(s, 0)
 	})
 }
 
-// SnapshotDelete 删除指定快照（含其元数据）。
+// SnapshotDelete 删除指定快照（含其元数据）。作业类（决策 #396，与创建/回滚同族）：
+// 删除含 blockcommit/元数据回收，可能执行较久，上界按调用方 deadline 放宽。
 func (c *Conn) SnapshotDelete(ctx context.Context, name, snapshot string) error {
-	return c.withSnapshot(ctx, name, snapshot, func(l *libvirt.Libvirt, s libvirt.DomainSnapshot) error {
+	return c.withSnapshotMode(ctx, true, name, snapshot, func(l *libvirt.Libvirt, s libvirt.DomainSnapshot) error {
 		return l.DomainSnapshotDelete(s, 0)
 	})
 }
 
-func (c *Conn) withSnapshot(ctx context.Context, domain, snapshot string, fn func(l *libvirt.Libvirt, s libvirt.DomainSnapshot) error) error {
-	return c.call(ctx, func(l *libvirt.Libvirt) error {
+func (c *Conn) withSnapshotMode(ctx context.Context, job bool, domain, snapshot string, fn func(l *libvirt.Libvirt, s libvirt.DomainSnapshot) error) error {
+	return c.callMode(ctx, job, func(l *libvirt.Libvirt) error {
 		dom, err := l.DomainLookupByName(domain)
 		if err != nil {
 			if libvirt.IsNotFound(err) {
