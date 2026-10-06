@@ -1226,6 +1226,10 @@ nfvis# commit
 
 核对：`show vrfs`、`show vrfs vs-wan`、`show vrfs vs-wan routes`（FIB 运行态）。
 
+多下一跳（等价多路径）：`next-hop` 可以逗号分隔写多个等价下一跳（如 `set static-routes 10.0.0.0/8 next-hop 192.168.1.1,192.168.1.2`，最多 8 个）；**前缀与每个下一跳必须同族**（IPv4 前缀配 IPv6 下一跳会在提交时被拒绝），运行态读视图会列出全部下一跳。
+
+说明：`distance` 目前只记录在配置里、**不参与选路**（数据面不下发该值），运行态读视图不给出具体距离。
+
 ### 8.5 ACL
 
 ```bash

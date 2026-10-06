@@ -344,14 +344,14 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `delete virtual-switches <n> learn-limit` | 清 MAC 学习上限（恢复 VPP 默认 16777216，幂等） | VPP `bridge_domain_set_learn_limit` | ✅（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
 | `set virtual-switches <n> dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**按域上游**（决策 #345）：只对该交换机转发域（L2＝BVI；L3＝其 l3-interface）的入向查询生效；本域非空优先，否则回落全局；两者皆空则回 SERVFAIL | nfvisd punt socket + 宿主解析 | ✅（round124：能力前提与端到端数据面实证，见 `docs/evidence/v2-round124-*.txt`） |
 | `delete virtual-switches <n> dns proxy server [<ip> \| secondary <ip>]` | 撤销本域上游（不带取值即清空本域；回落全局） | nfvisd punt socket | ✅（round124：见 `docs/evidence/v2-round124-*.txt`） |
-| `set virtual-switches <n> ports [<seq>] interface <if> [trunk vlans <l>\|native <v>]` | 物理口成员 | VPP BD | ✅ |
-| `set virtual-switches <n> ports [<seq>] vnf <vm> interface <vnic> [trunk vlans <l>]` | vhost-user 成员 | VPP + libvirt | ✅ |
-| `set virtual-switches <n> ports [<seq>] container <ct> interface <vnic>` | 容器 memif 成员 | VPP + Docker | ✅ |
+| `set virtual-switches <n> ports <seq> interface <if> [trunk vlans <l>\|native <v>]` | 物理口成员（`<seq>` 为必填端口序号） | VPP BD | ✅ |
+| `set virtual-switches <n> ports <seq> vnf <vm> interface <vnic> [trunk vlans <l>]` | vhost-user 成员（`<seq>` 必填） | VPP + libvirt | ✅ |
+| `set virtual-switches <n> ports <seq> container <ct> interface <vnic>` | 容器 memif 成员（`<seq>` 必填） | VPP + Docker | ✅ |
 | `set virtual-switches <n> cross-connect <a> <b>` | 两端口直通（与 ports/gateway 互斥） | VPP | ✅（决策 #79 修复：置 `cross_connect` 并校验两端口已声明） |
 | `set virtual-switches <n> l3-interface <if> ip address <p>` | L3 接口地址（v4/v6 多条） | VPP | ✅ |
 | `set virtual-switches <n> l3-interface <if> acl-in <acl>` | L3 接口 ACL 绑定 | VPP acl | ✅ 已实证生效（round118：vNIC/物理口作 L3 接口时 ACL 确实在拦；绑定时产品**自动伴随**一条放行全部非 IP（含 ARP）的 macip 白名单——决策 #341，故对端无需预置静态邻居；IP 流量仍受 ACL） |
-| `set virtual-switches <n> static-routes <prefix> next-hop <ip> [distance <n>]` | 静态路由（v4/v6） | VPP FIB | ✅ |
-| `set virtual-switches <n> static-routes default next-hop <ip>` | 默认路由 | VPP FIB | ✅ |
+| `set virtual-switches <n> static-routes <prefix> next-hop <ip> [distance <n>]` | 静态路由（v4/v6）；`next-hop` 可**逗号分隔多下一跳＝ECMP**（≤8，**前缀与每个下一跳须同族**，混族提交期拒绝）；`distance` 仅记录、不参与选路（运行态读视图不给出该值） | VPP FIB | ✅ |
+| `set virtual-switches <n> static-routes default next-hop <ip>` | 默认路由（`next-hop` 同上的多下一跳/同族规则） | VPP FIB | ✅ |
 
 ### 2.5 高级网络功能（§2.5）
 
@@ -501,15 +501,16 @@ pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**
 `cli-lifecycle-check` **22 / 0 / 3**（L3-2 可判定时 **23/0/2 + 登记 1**）｜ `cli-pty-smoke` **10 / 10**
 （真机 nfvis-vm 2.0.0~dev113，round170）。fulltest 沿革：258→**272**（round169＝#388 主机防火墙 16 项入套件，+14 通过 / +2 预期报错）→**273**（round170＝#389 端口安全四条语句**同会话往返块** +1；套件首跑抓出的 2 项红系编排问题——严格 delete 与逐条独立会话不匹配，修套件不改产品语义）。
 
-> 注（决策 #388，主机防火墙）：本轮新增 **5 行**（`show system firewall` + 4 条 `set/delete system firewall …`
-> 语句，均标 🚫 待真机——实现随本轮交付、**真机四维验证待执行**），全表由 **293 行增至 298 行**
-> （§1.1 +1、§2.2 +4；状态分布 277/0/5/16）。四套件基线随后续真机复跑更新。
+> 注（决策 #388，主机防火墙）：本轮新增 **5 行**（`show system firewall` + 4 条 `set/delete system firewall …`），
+> 全表由 **293 行增至 298 行**（§1.1 +1、§2.2 +4）。该 5 行已随 **round169 真机四维**
+> （证据 `docs/evidence/v2-round169-d388-host-firewall.txt`）移入 ✅ 桶；#389 端口安全 3 行入套件后全表共 **301 行**
+> （状态分布 285/0/5/11，见上方「按实测状态分布」）。
 
 沿革（每一处变化都写明「哪条新增/移除、为什么」——决策 #304/#319 纪律）：
 - `cli-fulltest`：198/0/11 → **210/0/13**（round101 实测修正）→ **240/0/13**（round137：`#356` 历史时序命令 +9）
   → **242/0/15**（round138：`#357` exec 断言 +4，其中 2 条入「预期报错」）→ **242/0/16**（round139：`#358`
   shell 预期失败 +1）→ **254/0/18**（round141：`#359` dhcp-server 语句解析/提交往返/`show … dhcp-leases` +12 通过、
-  +2 预期报错）→ **258/0/18**（round167：`#385` storm-control 4 条语句入套件，+4）→ **272/0/20**（round169：`#388` 主机防火墙 16 项入套件——解析块 3 条 + 负例/confirmed 正例/回读/清理 13 项，+14 通过、+2 预期报错）；其余各轮复核同值（零失败）。
+  +2 预期报错）→ **258/0/18**（round167：`#385` storm-control 4 条语句入套件，+4）→ **272/0/20**（round169：`#388` 主机防火墙 16 项入套件——解析块 3 条 + 负例/confirmed 正例/回读/清理 13 项，+14 通过、+2 预期报错）→ **273/0/20**（round170：`#389` 端口安全四条语句同会话往返块 +1）；其余各轮复核同值（零失败）。
 - `cli-semantic-check`：12/0/1 → 24/0/1（S10 编辑锁 12 项）→ 25/0/2（**#343** S8 由不可判定转通过，无新增/移除项）
   → **26/0/3**（**#345** DNS punt 实链 S13 +1）；此后在 **26/0/3（S8 冷窗）～27/0/2（S8 窗口热）** 两档间
   （不可判定＝S11「无 relay 现场」/ S12「按设计」；S8 是否可判定取决于现场窗口内有无实时流量）。
