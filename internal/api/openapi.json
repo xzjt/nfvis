@@ -1022,6 +1022,160 @@
         },
         "type": "object"
       },
+      "FirewallConfig": {
+        "description": "管理面主机防火墙（决策 #388）：宿主 nftables **独立表**（`table inet nfvis-firewall`）、\n只作用于管理口**入向**（数据面 VPP/Docker/libvirt 不受影响）。需要\n`system.management.interface` 已声明（否则提交期拒绝并给照做路径）。\n配置全空（无规则且默认策略未设/accept）＝未配置＝不下发/回收表。\n",
+        "properties": {
+          "default_policy": {
+            "description": "默认策略（缺省 accept；drop＝白名单模式）",
+            "enum": [
+              "accept",
+              "drop"
+            ],
+            "type": "string"
+          },
+          "rules": {
+            "description": "规则（按 seq 升序**首命中生效**；完全重复的规则提交期拒绝）",
+            "items": {
+              "$ref": "#/components/schemas/FirewallRule"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "FirewallRule": {
+        "description": "主机防火墙规则：**至少给一条匹配条件**（source/protocol/port 之一，防手滑写出裸 action 规则）；\n`port` 仅 tcp/udp 可配（目的端口）；`source` 为 v4/v6 前缀（裸 IP 按 /32、/128 归一）；\n`protocol` 省略/any＝任意（icmp 随 source 族取 ICMP/ICMPv6，无 source 时二者皆匹配）。\n",
+        "properties": {
+          "action": {
+            "enum": [
+              "accept",
+              "drop"
+            ],
+            "type": "string"
+          },
+          "port": {
+            "description": "目的端口（仅 tcp/udp）",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "protocol": {
+            "enum": [
+              "tcp",
+              "udp",
+              "icmp",
+              "any"
+            ],
+            "type": "string"
+          },
+          "seq": {
+            "description": "规则序号（唯一）",
+            "maximum": 9999,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "source": {
+            "description": "来源前缀（省略＝任意来源）",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "action"
+        ],
+        "type": "object"
+      },
+      "FirewallStatus": {
+        "description": "主机防火墙读视图（决策 #388；与 CLI `show system firewall` 同一实现）。\n`applied` 表示数据面与配置一致；不一致时 `error` 如实说明原因（表缺失/规则集合不一致/\n检测到手工修改/nft 不可用等）。计数由数据面（nftables）统计、自本表最近一次下发起；\n防火墙配置变更会重建表并清零。\n",
+        "properties": {
+          "applied": {
+            "description": "数据面与配置是否一致（未配置 ⇒ 无表；已配置 ⇒ 表存在且默认策略/规则集合一致）",
+            "type": "boolean"
+          },
+          "counters_note": {
+            "description": "计数口径说明",
+            "type": "string"
+          },
+          "default_policy": {
+            "description": "生效默认策略（未配置时按缺省 accept 呈现）",
+            "enum": [
+              "accept",
+              "drop"
+            ],
+            "type": "string"
+          },
+          "enabled": {
+            "description": "是否已配置（有规则或默认策略为 drop）",
+            "type": "boolean"
+          },
+          "error": {
+            "description": "applied=false 的原因（一致时省略；读不出来不答成「没有」）",
+            "type": "string"
+          },
+          "mgmt_interface": {
+            "description": "管理口名（取自 system.management.interface；未声明时省略）",
+            "type": "string"
+          },
+          "reserved": {
+            "description": "保留项说明（用户规则不可覆盖；读视图列明）",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "rules": {
+            "description": "规则表（按 seq 升序；packets/bytes 仅在该规则计数可读时出现）",
+            "items": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "accept",
+                    "drop"
+                  ],
+                  "type": "string"
+                },
+                "bytes": {
+                  "description": "该规则在数据面的命中字节数（仅可读时出现）",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "packets": {
+                  "description": "该规则在数据面的命中包数（仅可读时出现）",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "port": {
+                  "type": "integer"
+                },
+                "protocol": {
+                  "type": "string"
+                },
+                "seq": {
+                  "type": "integer"
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "seq",
+                "action"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "enabled",
+          "default_policy",
+          "applied",
+          "rules",
+          "reserved",
+          "counters_note"
+        ],
+        "type": "object"
+      },
       "FormatDataRemoved": {
         "description": "按类别统计的删除对象数（配置里除保留节之外的一切）。",
         "properties": {
@@ -2284,6 +2438,9 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "firewall": {
+            "$ref": "#/components/schemas/FirewallConfig"
           },
           "hostname": {
             "type": "string"
@@ -6156,6 +6313,27 @@
           }
         },
         "summary": "导出 core dump 清单到 URL（宿主操作）",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/system/firewall": {
+      "get": {
+        "description": "配置面（committed 的 `system.firewall`）与数据面（宿主 nftables 的独立表\n`table inet nfvis-firewall`）的对照读视图，与 CLI `show system firewall` **同一实现**。\n`applied` 表示数据面与配置一致（未配置 ⇒ 无表；已配置 ⇒ 表存在且默认策略/规则集合一致）；\n表缺失、规则集合不一致、检测到非本产品规则、nft 不可执行/权限不足等一律\napplied=false 并在 `error` 里如实说明（**不把「读不出来」答成「没有」**）。\n`packets`/`bytes` 仅在该规则的数据面计数可读时出现；计数由数据面统计、自本表最近一次\n下发起（防火墙配置变更会重建表并清零）。作用面＝**管理口入向**，数据面不受影响。\n",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FirewallStatus"
+                }
+              }
+            },
+            "description": "OK（未配置/未接入/未收敛均如实呈现）"
+          }
+        },
+        "summary": "主机防火墙读视图（默认策略/规则与逐规则计数/applied，决策",
         "tags": [
           "system"
         ]

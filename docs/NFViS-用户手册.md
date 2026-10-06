@@ -985,6 +985,67 @@ nfvis$ show dns proxy                                             # 启用态 + 
 `api tls cert-file <p> key-file <p>`（装外部证书，立即生效）、`api tls self-signed regenerate`
 （重签自签）、`set protocols lldp …`（见 §8.10）。
 
+#### 主机防火墙（管理面）
+
+给**管理口入向**加一层主机防火墙：按来源/协议/目的端口决定放行或丢弃，防止管理面被非授权访问。
+它只作用于管理网卡（SSH/管理 API 走的那张卡）的入向流量，**不影响数据面**（VPP/虚拟机/容器转发不受它管）。
+
+```bash
+nfvis# set system management interface ens160            # 前置：先声明管理口（未声明时提交会被拒）
+nfvis# set system firewall default-policy drop           # 默认丢弃（白名单模式）
+nfvis# set system firewall rule 10 action accept source 192.168.1.0/24 protocol tcp port 22
+nfvis# commit confirmed 5                                # 非 console 会话必须走 confirmed（见下）
+nfvis# commit                                              # 5 分钟内确认，不再自动回滚
+nfvis$ show system firewall                              # 默认策略/规则表/逐规则计数/保留项/下发状态
+```
+
+**语义**
+
+- 规则按 `seq` 升序**首命中生效**；`action` 为 `accept`（放行）或 `drop`（丢弃）。
+- 匹配条件可组合：`source <prefix>`（来源前缀，IPv4/IPv6；省略＝任意来源，写单个 IP 会按 /32、/128 处理）、
+  `protocol <tcp|udp|icmp|any>`（省略＝任意；`icmp` 随来源地址族匹配 ICMP 或 ICMPv6，不写来源时两者都匹配）、
+  `port <1..65535>`（**目的端口**，仅 `protocol tcp`/`udp` 可配）。
+- 每条规则**至少给一条匹配条件**（来源/协议/端口之一）——只写动作的规则没有意义，会被直接拒绝。
+- 完全重复的规则（匹配条件与动作全同）提交期拒绝；`seq` 取值 1..9999 且唯一。
+- 默认策略缺省为 `accept`（不丢任何管理口入向流量）；配成 `drop` 即白名单模式：没被规则放行的入向流量一律丢弃。
+- **默认放行的保留项**（用户规则不能覆盖，`show system firewall` 会列出来）：
+  ① 非管理口的入向流量不参与本防火墙；② 已建立/相关的连接（含当前登录会话）继续放行；
+  ③ 必要的 ICMP/ICMPv6（IPv4 的差错报文；IPv6 的差错报文与邻居发现）——少放行它们会把 IPv6 邻居发现都切断。
+
+**自锁风险与救援（务必先读）**
+
+- 防火墙改错（例如把默认策略改成 `drop` 却没放行 SSH）会**切断你自己的管理路径**。
+- 因此：**非 console 会话的任何防火墙变更（规则/默认策略）都必须用 `commit confirmed <分钟>` 提交**，
+  普通 `commit` 会被拒绝并给出照做路径。confirmed 提交后若在超时时间内没有再次 `commit` 确认，
+  配置会**自动回滚到上一份**，管理访问随之恢复。
+- 极端情况下连回滚窗口也错过了：用**虚拟化平台的虚拟机控制台**或**物理串口**本地登录
+  （本地 console 会话不受该限制，也豁免 confirmed 要求），把防火墙配置改回来，或执行
+  `request system restore` 恢复上一份配置。
+- 建议顺序：先加好放行规则（如 `accept source <你的管理网段> protocol tcp port 22`），**最后**再把
+  默认策略改成 `drop`，并且始终用 `commit confirmed`。
+
+**撤销与恢复**
+
+```bash
+nfvis# delete system firewall rule 10                    # 删整条规则
+nfvis# delete system firewall rule 10 action             # 只清一个叶子（action/source/protocol/port）
+nfvis# delete system firewall default-policy             # 默认策略回落 accept
+```
+
+全部删完（无规则、默认策略回落 `accept`）＝回到「主机不做任何过滤」——产品会回收那张过滤表。
+
+**如实边界**
+
+- 只做管理口**入向**：没有出向/转发规则，也不做 NAT、限速、日志动作与时间窗。
+- 防火墙配置全空（无规则且默认 `accept`）时**不下发**过滤表；从「有配置」改成全空会回收该表。
+- 数据面的过滤表由本产品单独维护（独立命名空间），**不触碰**系统上其它既有防火墙规则。
+- 配置变更会**重建**过滤表，因此逐规则的命中计数（`packets/bytes`）**清零并从头累计**；
+  计数不跨重启累计。
+- 主机重启到服务完成下发之间存在一个短暂的**未过滤窗口**（此期间按无过滤运行，属 fail-open）。
+- 读视图读不到数据面时**如实说明原因**（如「表不存在（尚未下发）」「检测到手工修改」），
+  不会把「读不出来」显示成「零命中」。
+- 本功能需要管理口已声明（`set system management interface <ifname>`）；未声明时提交会被拒绝并提示该语句。
+
 ### 8.2 资源池与 VPP 运行时
 
 ```bash
