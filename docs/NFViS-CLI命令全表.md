@@ -404,6 +404,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set … cloud-init ssh-key <key>` | SSH 公钥（可多条；**用双引号包住含空格的公钥**） | seed ISO | ✅（决策 #79 修复：引号感知切分 + `ssh_keys[]`） |
 | `set … cloud-init hostname <s>` | guest 主机名 | seed ISO | ✅ |
 | `set … serial console enable` | 串口控制台（默认启用） | libvirt | ✅ |
+| `set virtual-machine-functions <n> pci-device <bdf>` | 通用 PCI 直通设备（BDF，可多条、追加语义；同值幂等；FR-CMP-023） | libvirt（hostdev） | 🚫 待真机（配置/校验/域 XML 由单测覆盖；真机按交付步骤以一次性 VNF 只 define 不 start 走查） |
+| `delete virtual-machine-functions <n> pci-device [<bdf>]` | 去掉一条直通设备；不带 BDF 清空（FR-CMP-023） | libvirt（hostdev） | 🚫 同上 |
 | `set … autostart <bool>` | 随系统自启 | libvirt | ✅ |
 | `set … description <s>` | 描述 | 配置库 | ✅ |
 
@@ -446,8 +448,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request` | 46 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/系统/告警） |
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
-| 配置模式 | 131 | §2.1 余下 13 行 + §2.2~§2.9 共 118 行 |
-| **合计** | **266** | 不含管道则为 **257**；按 ` / ` 拆开后 **270 条** |
+| 配置模式 | 133 | §2.1 余下 13 行 + §2.2~§2.9 共 120 行（含 FR-CMP-023 的 2 条 `pci-device` 语句） |
+| **合计** | **268** | 不含管道则为 **259**；按 ` / ` 拆开后 **272 条** |
 
 **分节**（行数）：
 
@@ -458,10 +460,10 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 19 |
 | §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 9 |
 | §2.2 `system` | 37 | §2.6 `resource-pools` | 3 |
-| §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 20 |
-| §2.9 `container-functions` | 10 | **合计** | **271** |
+| §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 22 |
+| §2.9 `container-functions` | 10 | **合计** | **273** |
 
-**按实测状态分布**（共 271 行）：
+**按实测状态分布**（共 273 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
@@ -469,7 +471,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 设计拒绝（decision #340） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 10 | **破坏性/需交互**（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`、VM/容器删除确认与改密）——这些命令的机制由单测/集成测试覆盖，真机按需执行。**决策 #365 把「已入套件但真机待跑」的 10 行移入 ✅ 桶**：`request container-functions <n> exec`（round138 四维）、`set/delete system metrics history …` 3 行（round137 四维）、`set/delete virtual-switches <n> dhcp-server …` 6 行（round141 四维）——此前标「🚫 待真机」与同 PR 证据矛盾（round142 体检 A9/C9 的账目漂移） |
+| 🚫 本轮未执行 | 12 | **破坏性/需交互**（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`、VM/容器删除确认与改密）——这些命令的机制由单测/集成测试覆盖，真机按需执行。**决策 #365 把「已入套件但真机待跑」的 10 行移入 ✅ 桶**：`request container-functions <n> exec`（round138 四维）、`set/delete system metrics history …` 3 行（round137 四维）、`set/delete virtual-switches <n> dhcp-server …` 6 行（round141 四维）——此前标「🚫 待真机」与同 PR 证据矛盾（round142 体检 A9/C9 的账目漂移）。**FR-CMP-023 的 2 条 `pci-device` 语句**（新增）为「待真机」：解析/校验/域 XML/反推由单测覆盖，真机按交付步骤走查（一次性 VNF 只 define 不 start；**实际直通端到端未验**——宿主无 IOMMU 直通能力，如实登记） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、

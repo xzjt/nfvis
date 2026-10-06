@@ -1224,8 +1224,85 @@ func (v *validator) checkProtocols(c Config) {
 	}
 }
 
+// NormalizeBDF 校验 PCI 地址（BDF）语法并归一为 `dddd:bb:ss.f`（小写、定宽）——
+// 通用 PCI 直通（FR-CMP-023）配置值的语法与归一单源：
+//   - 接受 `[domain:]bus:slot.function`（domain 可省略，缺省 0000），各段十六进制、
+//     大小写不敏感，可带 0x/0X 前缀（与 compute.ParsePCI 的接受形态一致）；
+//   - 长度/范围约束：domain ≤ 4 位（≤0xffff）、bus ≤ 2 位（≤0xff）、slot ≤ 2 位且 ≤ 0x1f、
+//     function 1 位且 ≤ 7（真实 PCI 的位宽，8-15 不是合法 function）；
+//   - 归一结果恒为 `%04x:%02x:%02x.%x`——sysfs 目录名（/sys/bus/pci/devices/<BDF>）
+//     与 libvirt 地址都以此为准，便于去重与存在性检查。
+//
+// 与 compute.ParsePCI 的关系：本函数是**纯语法**校验（model 不 import compute，保持依赖方向），
+// 接受形态与 ParsePCI 一致并**额外接受**「省略 domain」的写法；同时按真实 PCI 位宽收紧了部分
+// 长度/范围（如 function 0-7）——超界写法在此即拒，不会推迟到组装层。归一后的字符串可被
+// ParsePCI 原样解析（ParsePCI 的两个语义未变）。设备的**存在性**检查不在 model 层——属计算
+// 编排层（apply/define 前查 /sys/bus/pci/devices/<归一BDF>）。
+func NormalizeBDF(bdf string) (string, error) {
+	parts := strings.Split(strings.TrimSpace(bdf), ":")
+	var domainPart, busPart, slotFnPart string
+	switch len(parts) {
+	case 2: // 省略 domain：bus:slot.function
+		busPart, slotFnPart = parts[0], parts[1]
+	case 3: // domain:bus:slot.function
+		domainPart, busPart, slotFnPart = parts[0], parts[1], parts[2]
+	default:
+		return "", fmt.Errorf("PCI 地址 %q 格式非法（应为 [domain:]bus:slot.function，如 0000:03:00.0）", bdf)
+	}
+	slotFn := strings.Split(slotFnPart, ".")
+	if len(slotFn) != 2 {
+		return "", fmt.Errorf("PCI 地址 %q 的 slot.function 非法（应为 slot.function，如 00.0）", bdf)
+	}
+	var domain uint64
+	if domainPart != "" {
+		v, err := parseBDFHex(domainPart, 4)
+		if err != nil {
+			return "", fmt.Errorf("PCI 地址 %q 的 domain 非法（%v）", bdf, err)
+		}
+		domain = v
+	}
+	bus, err := parseBDFHex(busPart, 2)
+	if err != nil {
+		return "", fmt.Errorf("PCI 地址 %q 的 bus 非法（%v）", bdf, err)
+	}
+	slot, err := parseBDFHex(slotFn[0], 2)
+	if err != nil {
+		return "", fmt.Errorf("PCI 地址 %q 的 slot 非法（%v）", bdf, err)
+	}
+	if slot > 0x1f {
+		return "", fmt.Errorf("PCI 地址 %q 的 slot 非法（须在 00-1f）", bdf)
+	}
+	fn, err := parseBDFHex(slotFn[1], 1)
+	if err != nil {
+		return "", fmt.Errorf("PCI 地址 %q 的 function 非法（%v）", bdf, err)
+	}
+	if fn > 7 {
+		return "", fmt.Errorf("PCI 地址 %q 的 function 非法（须在 0-7）", bdf)
+	}
+	return fmt.Sprintf("%04x:%02x:%02x.%x", domain, bus, slot, fn), nil
+}
+
+// parseBDFHex 解析 BDF 的一段十六进制（可带 0x/0X 前缀）：非空、≤maxDigits 位。
+func parseBDFHex(s string, maxDigits int) (uint64, error) {
+	raw := strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X")
+	if raw == "" {
+		return 0, fmt.Errorf("不能为空")
+	}
+	if len(raw) > maxDigits {
+		return 0, fmt.Errorf("应为 ≤%d 位十六进制", maxDigits)
+	}
+	v, err := strconv.ParseUint(raw, 16, 32)
+	if err != nil {
+		return 0, fmt.Errorf("非十六进制")
+	}
+	return v, nil
+}
+
 func (v *validator) checkVMFunctions(c Config) {
 	dupCheck(v, c.VirtualMachineFunctions, "virtual-machine-functions", func(m VMFunction) string { return m.Name }, "VM")
+	// pciOwner 归一 BDF → 首个声明者 VM 名（FR-CMP-023 跨 VM 冲突：同一 PCI 设备不能
+	// 同时直通给两台 VM——否则第二台域定义/启动必失败）。
+	pciOwner := map[string]string{}
 	for _, m := range c.VirtualMachineFunctions {
 		p := fmt.Sprintf("virtual-machine-functions[%s]", m.Name)
 		if !v.checkName(p, m.Name, "VM") {
@@ -1252,6 +1329,27 @@ func (v *validator) checkVMFunctions(c Config) {
 			if (d.SizeGB > 0) == (d.Image != "") {
 				v.errf(fmt.Sprintf("%s.disks[%s]", p, d.Name), "数据盘必须且只能指定 size-gb 或 image 之一")
 			}
+		}
+		// FR-CMP-023：通用 PCI 直通设备（BDF）——语法、同 VM 去重、跨 VM 冲突。
+		// 归一后比较（`03:00.0` 与 `0000:03:00.0` 是同一设备）；存在性属编排层。
+		seenPCI := map[string]bool{}
+		for i, bdf := range m.PCIDevices {
+			dp := fmt.Sprintf("%s.pci_devices[%d]", p, i)
+			norm, err := NormalizeBDF(bdf)
+			if err != nil {
+				v.errf(dp, "%v", err)
+				continue
+			}
+			if seenPCI[norm] {
+				v.errf(dp, "PCI 设备 %s 在本 VM 内重复声明", norm)
+				continue
+			}
+			seenPCI[norm] = true
+			if owner, taken := pciOwner[norm]; taken {
+				v.errf(dp, "PCI 设备 %s 已声明给 VM %s：同一设备不能同时直通给两台 VM（%s 与 %s）", norm, owner, owner, m.Name)
+				continue
+			}
+			pciOwner[norm] = m.Name
 		}
 		dupCheck(v, m.Interfaces, p+".interfaces", func(n VnfInterface) string { return n.Name }, "vNIC")
 		for _, nic := range m.Interfaces {

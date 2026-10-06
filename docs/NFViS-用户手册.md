@@ -1617,6 +1617,40 @@ nfvis$ request container-functions ct-1 delete
 > - 控制台（Web）的容器详情页有对应的「交互终端」分栏，形态与 VM 串口页一致（纯文本终端，不引入终端模拟器）。
 > - 想进容器里交互操作，用 `request container-functions <名> shell`（见下）。
 
+### 9.5 GPU / 通用 PCI 设备直通（配置面）
+
+把宿主的一块 PCI 设备（GPU、加速卡或普通控制器等）整块直通给某台 VM。语法是按 **BDF
+（PCI 地址）**逐条声明：
+
+```bash
+nfvis$ configure
+nfvis# edit virtual-machine-functions fw-vm
+nfvis# set pci-device 0000:03:00.0      # 可多条；同一 VM 内不可重复
+nfvis# set pci-device 04:1f.7           # 省略 domain：等价 0000:04:1f.7
+nfvis# top
+nfvis# commit                            # 提交时核对设备确实在本机
+```
+
+- **BDF 写法**：`[domain:]bus:slot.function`，各段十六进制、大小写不敏感、可带 `0x` 前缀；
+  `domain` 可省略（缺省 `0000`）。用 `lspci` 或 `ls /sys/bus/pci/devices` 查看本机设备地址。
+- **提交期检查**：地址语法；同一 VM 内重复；**同一设备不能同时给两台 VM**（后提交者被拒绝，
+  错误会点名两台 VM 与设备）。此外组装域定义前逐设备核对**设备确实存在于本机**——不存在时
+  如实拒绝，并提示用 `lspci` 核对；若该设备已被数据面（DPDK）占用，先
+  `request interfaces <ifname|pci> unbind-dpdk` 释放后再提交。
+- **删除**：`delete virtual-machine-functions fw-vm pci-device 0000:03:00.0` 去掉一条；
+  不带地址则清空该 VM 的全部直通设备。
+- **读视图**：`show virtual-machine-functions fw-vm detail` 逐条列出设备并附实测态
+  （「已在系统中 / 未在系统中」；取不到设备清单时如实说无法核对）；Web 控制台 VM 详情页的
+  「概览」也显示该列表。
+- **驱动预绑定由操作者负责**：产品**不**替你做 vfio 驱动的绑定/解绑，也不做热插拔或设备热迁移。
+  直通前通常需要把该设备预先绑定到 `vfio-pci`（由操作者/安装器用宿主工具完成）。产品只做两件事：
+  校验设备存在，并把设备写进域的 hostdev 定义（`managed=yes`，实际附着发生在 VM 启动时）。
+- **实际能否直通取决于宿主**：设备能否真正直通由宿主机的 IOMMU 能力决定——内核需启用 IOMMU
+  （交付基线已含 `intel_iommu=on iommu=pt`），且设备应处于可用的 IOMMU 分组。产品**不做** IOMMU
+  分组校验，也不在 guest 内验证设备可用性；宿主能力不足时可能「域定义成功、启动失败或 guest 里
+  看不到设备」。投入生产前先在 guest 内用 `lspci` 确认设备出现，必要时检查宿主
+  `dmesg | grep -i iommu` 与设备所用驱动。
+
 ---
 
 ## 10. 日常运维

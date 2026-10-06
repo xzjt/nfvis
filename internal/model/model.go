@@ -487,16 +487,19 @@ type LldpInterface struct {
 
 // VMFunction VM VNF（FR-CMP-010~019）。
 type VMFunction struct {
-	Name          string         `json:"name"`
-	Description   string         `json:"description,omitempty"`
-	Image         string         `json:"image"`
-	VCPU          VMCpu          `json:"vcpu"`
-	Memory        VMMemory       `json:"memory"`
-	Disks         []VMDisk       `json:"disks,omitempty"`
-	Interfaces    []VnfInterface `json:"interfaces,omitempty"`
-	CloudInit     *CloudInit     `json:"cloud_init,omitempty"`
-	SerialConsole *bool          `json:"serial_console,omitempty"` // 缺省启用
-	Autostart     bool           `json:"autostart,omitempty"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Image       string         `json:"image"`
+	VCPU        VMCpu          `json:"vcpu"`
+	Memory      VMMemory       `json:"memory"`
+	Disks       []VMDisk       `json:"disks,omitempty"`
+	Interfaces  []VnfInterface `json:"interfaces,omitempty"`
+	// PCIDevices 直通给该 VM 的通用 PCI 设备地址（BDF，如 0000:03:00.0，可多条；FR-CMP-023）。
+	// 语法校验见 NormalizeBDF；**归一后**由计算编排层用于 hostdev 组装与存在性检查。
+	PCIDevices    []string   `json:"pci_devices,omitempty"`
+	CloudInit     *CloudInit `json:"cloud_init,omitempty"`
+	SerialConsole *bool      `json:"serial_console,omitempty"` // 缺省启用
+	Autostart     bool       `json:"autostart,omitempty"`
 }
 
 type VMCpu struct {

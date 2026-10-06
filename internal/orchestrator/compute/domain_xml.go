@@ -76,6 +76,9 @@ type DomainSpec struct {
 	DataDisks  []DataDiskSpec
 
 	Interfaces []InterfaceSpec
+	// PCIDevices 通用 PCI 直通设备（BDF，FR-CMP-023）：每设备一个 hostdev，
+	// 排在 SR-IOV hostdev 之后。存在性检查在编排层（apply/define 前）完成，本层只做组装。
+	PCIDevices []string
 
 	Emulator string // 缺省 DefaultEmulator
 	Machine  string // 缺省 q35
@@ -225,6 +228,15 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 		}
 	}
 
+	// 通用 PCI 直通（FR-CMP-023）：与 SR-IOV 同结构，**排在 SR-IOV hostdev 之后**。
+	for _, bdf := range spec.PCIDevices {
+		hostdev, err := buildPCIHostdev(vm.Name, bdf)
+		if err != nil {
+			return nil, err
+		}
+		d.Devices.Hostdevs = append(d.Devices.Hostdevs, hostdev)
+	}
+
 	if serialConsoleEnabled(vm) {
 		d.Devices.Serials = []libvirtxml.DomainSerial{{
 			Source: &libvirtxml.DomainChardevSource{Pty: &libvirtxml.DomainChardevSourcePty{}},
@@ -352,6 +364,26 @@ func buildSriovHostdev(vmName string, is InterfaceSpec) (libvirtxml.DomainHostde
 	addr, err := ParsePCI(is.VFPCI)
 	if err != nil {
 		return libvirtxml.DomainHostdev{}, fmt.Errorf("VM %s: vNIC %s: %w", vmName, is.Name, err)
+	}
+	return libvirtxml.DomainHostdev{
+		Managed: "yes",
+		SubsysPCI: &libvirtxml.DomainHostdevSubsysPCI{
+			Source: &libvirtxml.DomainHostdevSubsysPCISource{Address: addr},
+		},
+	}, nil
+}
+
+// buildPCIHostdev 通用 PCI 设备直通（FR-CMP-023）：与 SR-IOV VF **同结构**的 hostdev。
+// 地址先经 model.NormalizeBDF 归一（接受省略 domain/短写形态），再复用 ParsePCI 组装；
+// 设备是否真在本机（/sys/bus/pci/devices）由编排层在 define 前检查，本层不查。
+func buildPCIHostdev(vmName, bdf string) (libvirtxml.DomainHostdev, error) {
+	norm, err := model.NormalizeBDF(bdf)
+	if err != nil {
+		return libvirtxml.DomainHostdev{}, fmt.Errorf("VM %s: %w", vmName, err)
+	}
+	addr, err := ParsePCI(norm)
+	if err != nil {
+		return libvirtxml.DomainHostdev{}, fmt.Errorf("VM %s: PCI 设备 %s: %w", vmName, bdf, err)
 	}
 	return libvirtxml.DomainHostdev{
 		Managed: "yes",
