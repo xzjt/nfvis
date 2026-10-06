@@ -1,0 +1,77 @@
+round174 · 决策 #396/#397/#398 —— round171 体检 P1 余项修复（契约先行 + 3 并发实现 + 真机验证）
+====================================================================
+日期：2026-10-07；分支 `v2-round174-p1b`（含 worktree 分支 `v2-round174-fix397` / `v2-round174-fix398`）；
+真机 nfvis-vm 升级到 **2.0.0~dev117**（= 本分支构建）。
+来源：`docs/evidence/v2-round171-midpoint-audit.txt` 的 P1 余项（R171-16 / R171-17 / R171-9）。
+方法：契约先行（决策 #396/#397/#398，决策计数 297→300）→ **3 并发**实现（#397/#398 各在独立 worktree）→
+主会话关键点审查（含两处收口：#398 文案去掉不可达选项、#397 定裁入契约行）→ 合并 → `make check`（RC=0）→
+真机验证 → 账目同步。**P1 至此全部收口。**
+
+§0 结论
+- 三项均已实现并验证：单测**红-绿**齐备；真机：#397（`step` 稀疏收窄 + 溢出拒绝）与 #396（底座内部硬上界）
+  **通过**；#398 按环境受限**如实登记为单测覆盖**。
+- `make check`：串行（`GOFLAGS=-p=1 GOMAXPROCS=2`）**RC=0**。
+
+§1 交付
+**决策 #396（libvirt 调用上界分层 + Docker 调用内部硬上界）**——提交 `940d4c7`：
+- ① `compute/conn_libvirt.go` 新增 `callBound(ctx, job)`/`callMode`：`call`＝只读档（30s 上限）；新增 `callJob`＝
+  作业档（按调用方 deadline 放宽、不封顶，无 deadline 回落 30s），接线 `Define`/`Start`/`SnapshotCreate`/
+  `SnapshotRevert`/`SnapshotDelete`；「执行中到期关连接中断」「排队中 `ErrConnBusy`」语义不变；
+- ② `container/docker_client_docker.go` 新增 `boundedCtx`（调用方有 deadline 以其为准，否则 `dockerCallTimeout`=10s），
+  接入 `do`（State/ExitCode/OOMKilled/Create/Start/Stop/Restart/Remove/RemoveImage/tag/Exec 收尾 GET）与不经 `do`
+  的 `Logs`、`LoadImage`；`Logs`/`LoadImage` 传输错误按既有口径标 `dockerUnavailableError`（映射 503）；
+- ③ `api/cli_compute_oper.go`/`cli_compute_show.go` 新增 `containerCallCtx()`（30s 整次操作上界），接入
+  start/stop/restart、`log`、shell 前置 State、容器列表/详情的 `ctStateOf`；
+- ④ 服务端兜底 **定裁：不做 WriteTimeout**（同一 `http.Server` 承载 `GET /events`(SSE) 与 console/容器 shell 的
+  WebSocket，WriteTimeout 会静默掐断长驻流）；「不再无界挂起」由底座层（①②）保证。
+- 如实边界：未做请求 ctx 全链贯通（`cli_bridge.ExecuteAs` 仍持全局锁、不接请求 ctx）；`docker.go` 未改
+  （Provider 层仅转发，底座层有界即达成）；作业档无 deadline 时仍回落 30s（保留中断兜底）。
+
+**决策 #397（历史读视图 `step` 稀疏收窄修正 + 同族如实）**——提交 `f41b401`：
+- ① `metricshist/store.go` **定裁：按「最新 limit+1 个有值桶」收窄**——新增 `narrowSinceByBuckets`
+  （SQL `SELECT DISTINCT ts/? … ORDER BY 1 DESC LIMIT limit+1` 求第 limit+1 个最旧有值桶起点作新 `since`；
+  桶号判据与 `downsample` 的 `p.TS/step` 同源 ⇒ 与「全窗口+降采样+裁 limit」**逐点等价**），`truncated` 仅当确有
+  >limit 个有值桶时为真；删除旧 `planBoundedLoad`/`newestTS`/`storeMaxUntil`；
+- ② `api/metrics_history.go`：查询失败不再把 `store.enabled` 翻 false，改如实给 `store.error` + 原因；
+- ③ `parseHistoryDuration` 防溢出改**乘法前**判（`n > historyMaxDuration/u` 即拒），乘法后保留防御性上界；
+- ④ `cmd/nfvisd/metrics_history.go` **定裁：缓存 + 5s 降频**（`metricsIntervalRefreshEvery=5s`、`effectiveInterval(now)`），
+  不再每秒做全配置反序列化；间隔改小生效延迟 ≤5s（远小于停滞阈值）。
+
+**决策 #398（storm control 在 bond 成员口提交期拒绝）**——提交 `e38ec5e`（+ 主会话文案收口）：
+- `model/validate.go`：`checkInterfaces` 的 storm 分支补 `v.bondMembers[i.Name]` 判据（与 portsec 一致），提交期拒绝；
+  文案点名 bond 并给**可照做**的一步：`先 delete bonds <bond> members <if> 把该口移出聚合再配`。
+  **主会话收口**：初版文案含「或把风暴抑制改配到聚合口本身」——核实 bond 在模型里**没有 storm 字段**（无该语句），
+  该选项不可达，已删（契约行同步更正）；新增 `validator.bondOf`（成员口→bond 名）供文案点名。
+
+§2 关键点审查（主会话）
+- #396：分层只放宽**作业类**（只读仍 30s）、中断/排队语义未动；Docker 上界落在**客户端内部**（不按调用点选择性包裹）；
+  第 4 项定裁（不加 WriteTimeout）理由成立（SSE/WS 同端口）。
+- #397：收窄桶号判据与降采样同源（等价性靠此保证）；`truncated` 只在真裁时置位；防溢出移到乘法前。
+- #398：判据与 portsec 同源；文案可达性收口（见 §1）。
+
+§3 验证
+3.1 **#397 真机通过（重放 §1.6）**（dev117，60s 采样现场）：
+  - `show system metrics history name nfvis_system_uptime_seconds last 1h step 1m` ⇒ **点数 58**；
+    `… step 1s` ⇒ **点数 58**（与 1m 一致）、**无「已被 limit 截断」**。对照 round171 §1.6（不修版）：`step 1s` 只回 **9 点**并谎报截断。
+  - 溢出：`… last 18446744074s` ⇒ `%% 时长 "18446744074s" 超界：上限 3650d（超界或溢出不会给出误导性窗口）`（对照不修版会回绕成毫秒级窗口）。
+3.2 **#396 真机关键判据通过**（dev117）：`kill -STOP dockerd` ⇒
+  - REST `GET /api/v1/container-functions`（**无 CLI 侧 ctx**）**10s 返回**（HTTP 200，state 降级）——证明**底座内部硬上界**生效（对照修复前无界）；
+  - CLI `show container-functions` 31s、`request container-functions sem-ct log` 30s（多调用累加 + CLI 侧 30s 上界）——**不再无界**（对照修复前会拖到客户端 90s 超时）。
+  - `kill -CONT` 后服务自然恢复（docker active）。
+3.3 **#398：真机按环境受限登记为单测覆盖**——本机业务口仅 `ens192`/`ens224` 两个，建 bond 会与既有现场
+  （交换机/NAT）冲突（触发「同一网口角色互斥」等正确校验），无法在不破坏现场的前提下构造「bond 成员口 + storm」提交；
+  判据是纯配置层接口名匹配、无数据面路径改动（与 portsec 的 bond 拒绝同例）。红-绿：临时去掉判据 ⇒
+  `TestValidateStormControlBondMember` 按预期失败；还原后通过；既有 storm 拒绝（空声明/kbps 越界）不变。
+3.4 全量：`make check` **RC=0**；各子智能体另跑 `go build ./...` / `go vet ./...` / 串行 `go test ./...` 均通过。
+
+§4 现场与清场（如实）
+- 真机升级：源码 `git archive v2-round174-p1b` → `/root/src.new` → `make deb VERSION=2.0.0~dev117` → `dpkg -i`；
+  `show version` = **2.0.0~dev117**。
+- 终态：`display set` **34 行＝基线**；docker/nfvis/vpp/libvirtd 四服务 active（dockerd 已 `CONT`）；无新增对象残留。
+- **四套件未复跑**（本轮为定向真机验证；基线沿用 round170）。
+
+§5 账目同步
+- 附录 A：决策 #396/#397/#398（含 #397 的落地定裁与 #398 的文案收口）；`AGENTS.md` 决策计数 297→**300**、范围 `#300~#398`、加 round174 记录。
+- `docs/v2待做.md`：R171-9/16/17 标为**已收口**——**P1 至此全部收口**（P0 见 round172；P1 批次一~三见 round173）。
+- `docs/v2已做.md`：决策总表补 #396/#397/#398；§四 证据索引补 round174。
+- 余项：**P2 契约/账目收尾**（ECMP 逗号多下一跳补进手册/全表/树设计、命令全表 round169 注块、`ports [<seq>]` 文档与实现不符、openapi `Route.distance` 描述）——登记为下一批。

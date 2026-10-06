@@ -1023,6 +1023,17 @@
   在真实 `nft -j` 形状下假阴性（`ct state` 右值是**普通数组**，解析器只认 `{"set":…}`）→ `3d5377b` 兼容四种形状
   + 真机形状回归用例。`make check` **RC=0**；真机 **2.0.0~dev116**。证据
   `docs/evidence/v2-round173-d393-d394-d395-p1-fixes.txt`。
+- **round174（体检 P1 余项修复：决策 #396/#397/#398，2026-10-07）**：**#396** libvirt 调用**上界分层**
+  （只读档 30s / 作业档按调用方 deadline 放宽：快照/Define/Start）+ Docker 客户端**内部硬上界**（默认 10s，
+  覆盖 State/Logs/Create/Start/Stop/Restart/Remove/镜像 load·remove/exec 收尾）+ CLI 调用点传有界 ctx；
+  服务端 WriteTimeout **定裁不做**（同一 `http.Server` 承载 SSE/WS，会掐断长驻流）→ 真机：`kill -STOP dockerd`
+  ⇒ REST `GET /container-functions` **10s 返回**（底座内部上界生效，对照修复前无界）。**#397** 历史读视图
+  `step` 稀疏收窄改「按最新 limit+1 个**有值桶**」（与「全窗口+裁剪」逐点等价）+ `store.enabled` 语义
+  （查询失败不翻 false）+ `parseHistoryDuration` **乘法前**防溢出 + 采样间隔读取**缓存 + 5s 降频**
+  → 真机：`last 1h step 1s` 与 `step 1m` **点数一致（58=58）、无假截断**（对照修复前 9 点 + 谎报）、
+  `last 18446744074s` **报超界**（不再回绕）。**#398** storm control 在 **bond 成员口**提交期拒绝
+  （与 portsec 同判据；文案给「先移出聚合」照做路径）→ 红-绿单测（真机按环境受限登记为单测覆盖）。
+  `make check` **RC=0**；真机 **2.0.0~dev117**。证据 `docs/evidence/v2-round174-d396-d397-d398-p1-remainder.txt`。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。

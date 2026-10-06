@@ -601,8 +601,8 @@ func (v *validator) checkInterfaces(c Config) {
 		if sc := i.StormControl; sc != nil {
 			if v.bondMembers[i.Name] {
 				v.errf(p+".storm_control", "接口 %s 是 bond %s 的成员口，不支持风暴抑制（成员口入向被 bond-input 吃掉，"+
-					"挂上的 policer 不会被查到）——先 delete bonds %s members %s 把该口移出聚合再配，"+
-					"或把风暴抑制改配到聚合口本身", i.Name, v.bondOf[i.Name], v.bondOf[i.Name], i.Name)
+					"挂上的 policer 不会被查到）——先 delete bonds %s members %s 把该口移出聚合再配",
+					i.Name, v.bondOf[i.Name], v.bondOf[i.Name], i.Name)
 			}
 			if sc.BroadcastKbps == 0 && sc.MulticastKbps == 0 {
 				v.errf(p+".storm_control",
