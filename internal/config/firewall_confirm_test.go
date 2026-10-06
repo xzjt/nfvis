@@ -200,3 +200,43 @@ func TestConfirmedTimeoutRollbackNotifiesOnCommit(t *testing.T) {
 		t.Fatalf("回滚后 committed 不应再含防火墙段")
 	}
 }
+
+// 决策 #392：确认守卫豁免内部维护/救援动作——**防火墙守卫矩阵**。
+//
+// 三类合成来源（恢复出厂 SourceZeroize / 恢复配置 SourceRestore / 重置数据分区
+// SourceFormatData）各自有操作级双重确认（破坏性闸门），且 Restore 本身就是「防火墙自锁」的
+// 救援路径，故在防火墙变更下**放行**（不要求 commit confirmed）；用户会话（ssh / api）
+// 判据不变（仍拒），本地串口（console）豁免不变（决策 #388 原有口径）。
+func TestFirewallConfirmGuardExemptsInternalMaintenanceSources(t *testing.T) {
+	cases := []struct {
+		source string
+		reject bool
+	}{
+		{"ssh", true},
+		{"api", true},
+		{"console", false},
+		{SourceZeroize, false},
+		{SourceRestore, false},
+		{SourceFormatData, false},
+	}
+	fw := &model.FirewallConfig{Rules: []model.FirewallRule{
+		{Seq: 100, Action: "accept", Source: "192.0.2.0/24", Protocol: "tcp", Port: 9999},
+	}}
+	for _, tc := range cases {
+		t.Run(tc.source, func(t *testing.T) {
+			eng := fwEngine(t)
+			sess := Session{User: "admin", Source: tc.source}
+			setFirewall(t, eng, sess, fw)
+			_, err := eng.Commit(context.Background(), sess, CommitOpts{})
+			if tc.reject {
+				if !errors.Is(err, ErrFirewallConfirmRequired) {
+					t.Fatalf("source=%s 防火墙变更应要求 commit confirmed，得到 %v", tc.source, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("source=%s 应被豁免（不要求 confirmed），得到 %v", tc.source, err)
+			}
+		})
+	}
+}

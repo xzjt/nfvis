@@ -40,6 +40,28 @@ const (
 	SourceFormatData = "system-format-data" // 决策 #305：request system storage format-data
 )
 
+// IsInternalMaintenanceSource 报告该提交会话来源是否属于**内部维护/救援动作**：
+// 恢复出厂（Zeroize）、恢复配置（Restore）、重置数据分区（FormatData）。
+//
+// 为什么单独成函数（决策 #392）：这三类动作各自有**操作级双重确认**（破坏性闸门，
+// 见 internal/api 的操作级助手），且 Restore 本身就是「管理口/防火墙自锁」的救援路径；
+// 它们提交的配置（空配置 / 归档配置 / 保留节最小配置）会与现状产生管理口或防火墙差异，
+// 若走用户会话那两条「改管理口/防火墙需 commit confirmed」守卫（engine.go），
+// 就会被整体挡死——救援路径反而不可用。故三类来源豁免那两条守卫。
+//
+// 这是**单一事实源**：既供 engine.go 的守卫豁免判定，也供 highRiskConfigIntent 的高危
+// 意图去重判定——两处必须同源，避免"哪里算内部动作"出现第二份口径。
+//
+// 边界（有意）：只认这三类来源；用户会话（ssh / api / console）一律返回 false，
+// 其守卫判据与文案完全不变。
+func IsInternalMaintenanceSource(source string) bool {
+	switch source {
+	case SourceZeroize, SourceRestore, SourceFormatData:
+		return true
+	}
+	return false
+}
+
 // AuditResultIntent 审计 result 字段的「意图」取值（决策 #150）：动作开始执行之前落库的
 // 那条记录用它标记；动作结束后仍是 success / failure。
 //
@@ -50,7 +72,7 @@ const AuditResultIntent = "intent"
 //
 // prev / next 是 committed 与候选配置，source 是提交会话来源。
 func highRiskConfigIntent(prev, next model.Config, source string) string {
-	if source == SourceZeroize || source == SourceRestore || source == SourceFormatData {
+	if IsInternalMaintenanceSource(source) {
 		return "" // 这几个动作由操作级助手记两行，不重复
 	}
 	p, n := loginOf(prev), loginOf(next)
