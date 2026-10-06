@@ -1037,10 +1037,11 @@ func (v *validator) checkQos(c Config) {
 
 // checkVxlanTunnels 校验 VXLAN 隧道（FR-NET-019，决策 #383）。
 //
-// 口径（与数据面实现同源）：name 走既有命名规则；vni 1..16777215；
-// local/remote 为**有效 IPv4**（v1 不做 IPv6 下垫层）且不相等（VPP 的 encap 查找不允许
-// 自环）；dst-port 0/缺省视为 4789、否则 1..65535；name、vni、(vni,local,remote) 三元组重复拒绝；
-// virtual-switch 给了就必须**存在且为 L2**（L3 交换机没有 BD，隧道口无处可入）。
+// 口径（与数据面实现同源）：name 走既有命名规则（且 `nfvis-vxlan:<名>` 须装进数据面接口
+// tag 的 63 字节上限）；vni 1..16777215；local/remote 为**有效 IPv4**（v1 不做 IPv6 下垫层）
+// 且不相等（VPP 的 encap 查找不允许自环）；dst-port 0/缺省视为 4789、否则 1..65535；
+// name、vni、(vni,local,remote) 三元组重复拒绝；virtual-switch 给了就必须**存在且为 L2**
+// （L3 交换机没有 BD，隧道口无处可入）。
 //
 // 「被隧道引用的交换机不得删除」由本检查的引用缺失分支承担（与既有「先解引用、后删被引用」
 // 口径一致）：交换机被删后仍留在配置里的隧道会命中 virtual-switch 不存在，报错并给出照做路径。
@@ -1071,6 +1072,13 @@ func (v *validator) checkVxlanTunnels(c Config) {
 		}
 		if t.DstPort != 0 && (t.DstPort < 1 || t.DstPort > 65535) {
 			v.errf(p+".dst_port", "目的端口 %d 超出范围：须为 1-65535（缺省 %d）", t.DstPort, VxlanDefaultDstPort)
+		}
+		// 数据面身份是接口 tag（"nfvis-vxlan:<名>"，sw_interface_tag_add_del 的 string[64] 含
+		// NUL 至多 63 字节）——超长会被**静默截断**、读回对不上（运行态识别失灵），
+		// 故在提交期按数据面上限拒绝（与运行态判存量的实现同源）。
+		if tag := t.DataPlaneTag(); len(tag) > VxlanTagMaxLen {
+			v.errf(p+".name", "隧道名过长：数据面接口标记 %q 须不超过 %d 字节（当前 %d 字节，名字最长 %d 字节）",
+				tag, VxlanTagMaxLen, len(tag), VxlanTagMaxLen-len(VxlanTagPrefix))
 		}
 		if t.Local != "" && t.Remote != "" {
 			key := fmt.Sprintf("%d|%s|%s", t.Vni, t.Local, t.Remote)

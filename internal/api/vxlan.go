@@ -7,10 +7,11 @@ package api
 //   · REST `GET /vxlan-tunnels`
 //   · Web  控制台网络对象页「VXLAN 隧道」卡（只读）
 //
-// 口径：**配置声明 × 数据面实况**逐条对照——配置给名/VNI/下垫地址/端口/交换机，
-// 运行态按 (vni, local, remote, dst_port) 元组键与 `vxlan_tunnel_dump` 匹配（不依赖
-// VPP 接口名——接口名由 instance 生成、产品不用它）。运行态不可用（数据面未连接/未装配）
-// 时如实报「运行态不可用」，**不**把 in_vpp 报成 false 冒充「未收敛」。
+// 口径：**配置声明 × 数据面实况**逐条对照——配置给名/VNI/下垫地址/端口/交换机；运行态按
+// **接口 tag**（平台打的 `nfvis-vxlan:<名>`，`sw_interface_dump` 回读）识别「该名字的隧道口
+// 在不在数据面」。**如实边界**：底座（VPP 26.06）的 vxlan dump 恒空，没有可回读隧道参数的
+// 清单——**VNI/下垫地址/端口以配置为准**，本视图不声称从数据面读到了它们。运行态不可用
+// （数据面未连接/未装配）时如实报「运行态不可用」，不把「说不清」报成「未收敛」。
 
 import (
 	"context"
@@ -25,11 +26,14 @@ import (
 // VxlanRuntime VXLAN 隧道运行态读物（决策 #383；编排器装配注入，nil = 读视图如实报未接入）。
 // *network.L2Network 天然满足本接口（装配处直接传入）；单测注入假实现。
 type VxlanRuntime interface {
-	// VxlanStates 实际存在的隧道，按元组键（network.VxlanTupleKey）索引。
+	// VxlanStates 数据面上实际存在（带平台标记）的隧道口，按**隧道名**索引。
 	VxlanStates(ctx context.Context) (map[string]network.VxlanState, error)
 }
 
 // vxlanTunnelView 一条隧道的读视图（配置 + 运行态）。
+//
+// 配置字段（name/vni/local/remote/dst_port/virtual_switch）以**配置声明**为准；
+// 运行态只给「该名字的隧道口在不在数据面」与接口索引/接口名（底座无 dump 可核对参数）。
 type vxlanTunnelView struct {
 	Name          string `json:"name"`
 	Vni           int    `json:"vni"`
@@ -37,11 +41,12 @@ type vxlanTunnelView struct {
 	Remote        string `json:"remote"`
 	DstPort       int    `json:"dst_port"`
 	VirtualSwitch string `json:"virtual_switch,omitempty"`
-	// RuntimeAvailable=false 时 InVPP/SwIfIndex/Instance 不可信（运行态不可用，不是「不在 VPP」）。
+	// RuntimeAvailable=false 时 InVPP/SwIfIndex/InterfaceName 不可信（运行态不可用，
+	// 不是「不在数据面」）。
 	RuntimeAvailable bool   `json:"runtime_available"`
 	InVPP            bool   `json:"in_vpp"`
 	SwIfIndex        uint32 `json:"sw_if_index,omitempty"`
-	Instance         uint32 `json:"instance,omitempty"`
+	InterfaceName    string `json:"interface_name,omitempty"`
 }
 
 // vxlanTunnelsView 列表读视图：tunnels 恒为数组（空时为空数组，不发 null）。
@@ -56,14 +61,13 @@ type vxlanTunnelsView struct {
 func vxlanTunnelsViewOf(cfg model.Config, states map[string]network.VxlanState, runtimeOK bool, reason string) vxlanTunnelsView {
 	view := vxlanTunnelsView{Tunnels: []vxlanTunnelView{}, RuntimeAvailable: runtimeOK, RuntimeReason: reason}
 	for _, t := range cfg.VxlanTunnels {
-		port := t.EffectiveDstPort()
 		v := vxlanTunnelView{
-			Name: t.Name, Vni: t.Vni, Local: t.Local, Remote: t.Remote, DstPort: port,
+			Name: t.Name, Vni: t.Vni, Local: t.Local, Remote: t.Remote, DstPort: t.EffectiveDstPort(),
 			VirtualSwitch: t.VirtualSwitch, RuntimeAvailable: runtimeOK,
 		}
 		if runtimeOK {
-			if st, ok := states[network.VxlanTupleKey(uint32(t.Vni), t.Local, t.Remote, uint16(port))]; ok {
-				v.InVPP, v.SwIfIndex, v.Instance = true, st.SwIfIndex, st.Instance
+			if st, ok := states[t.Name]; ok {
+				v.InVPP, v.SwIfIndex, v.InterfaceName = true, st.SwIfIndex, st.InterfaceName
 			}
 		}
 		view.Tunnels = append(view.Tunnels, v)
@@ -82,7 +86,7 @@ func (s *Server) handleGetVxlanTunnels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, vxlanTunnelsViewOf(cfg, states, ok, reason))
 }
 
-// vxlanStates 服务端取一次运行态（REST 与 CLI 的 CLI 侧共用同一口径）。
+// vxlanStates 服务端取一次运行态（REST 与 CLI 的 CLI 侧同一口径）。
 func (s *Server) vxlanStates(ctx context.Context) (map[string]network.VxlanState, bool, string) {
 	if s.vxlan == nil {
 		return nil, false, "VXLAN 编排未接入（数据面未连接或编排器未装配）"
@@ -107,6 +111,10 @@ func (x *cliExecutor) vxlanStates() (map[string]network.VxlanState, bool, string
 }
 
 // execShowVxlan：`show vxlan tunnels`（操作树里只有 tunnels 一条）。
+//
+// 状态列如实分三态：运行态不可用（附原因）/ 已在 VPP（接口 <名>）/ 未收敛（数据面无该名字
+// 的隧道口）。附一行说明运行态的识别口径与边界（参数以配置为准）——底座没有可回读隧道
+// 参数的清单，不能让操作者以为 VNI/地址/端口是从数据面核对过的。
 func (x *cliExecutor) execShowVxlan(args []string) string {
 	if len(args) != 1 || args[0] != "tunnels" {
 		return "%% 语法: show vxlan tunnels\n"
@@ -130,17 +138,19 @@ func (x *cliExecutor) execShowVxlan(args []string) string {
 		if vs == "" {
 			vs = "-"
 		}
-		state := "未收敛（数据面中不存在）"
+		state := "未收敛（数据面无该名字的隧道口）"
 		switch {
 		case !view.RuntimeAvailable:
 			state = "运行态不可用（" + view.RuntimeReason + "）"
 		case t.InVPP:
-			state = fmt.Sprintf("已在 VPP（sw_if_index %d，instance %d）", t.SwIfIndex, t.Instance)
+			state = fmt.Sprintf("已在 VPP（接口 %s）", t.InterfaceName)
 		}
 		items = append(items, anyToTree(t))
 		fmt.Fprintf(&b, "%-14s %-9d %-16s %-16s %-6d %-12s %s\n",
 			t.Name, t.Vni, t.Local, t.Remote, t.DstPort, vs, state)
 	}
+	b.WriteString("说明: 运行态按平台打在隧道口上的标记（" + model.VxlanTagPrefix + "<名>）识别；\n")
+	b.WriteString("      底座没有可回读隧道参数的清单，VNI/下垫地址/端口以配置为准。\n")
 	x.structured = map[string]any{"tunnels": items}
 	return b.String()
 }

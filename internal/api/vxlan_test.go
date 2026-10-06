@@ -2,9 +2,9 @@ package api
 
 // 决策 #383：VXLAN overlay v1 的语句 → 模型 → 读视图（CLI/REST 同源）与 display set 反推。
 //
-// 运行态用假读物注入（不依赖数据面）：按元组键命中/未命中两种行态都要能如实呈现，
-// 读数不可用时**不得**把 in_vpp 报成 false 冒充「未收敛」（与 GET /vxlan-tunnels 的
-// runtime_available 同口径）。
+// 运行态用假读物注入（不依赖数据面）：运行态按**隧道名**的接口标记识别（真机实证底座
+// vxlan dump 恒空），命中/未命中两种行态都要能如实呈现；读数不可用时**不得**把 in_vpp
+// 报成 false 冒充「未收敛」（与 GET /vxlan-tunnels 的 runtime_available 同口径）。
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
-// fakeVxlanRuntime 假运行态读物：states 为「实际存在」的隧道（元组键索引）。
+// fakeVxlanRuntime 假运行态读物：states 为「实际存在」的隧道口（按**隧道名**索引）。
 type fakeVxlanRuntime struct {
 	states map[string]network.VxlanState
 	err    error
@@ -64,22 +64,26 @@ func TestCLIVxlanStatementAndView(t *testing.T) {
 		t.Fatalf("未注入运行态时应如实报不可用:\n%s", out)
 	}
 
-	// 注入假运行态：tun-a 命中（元组含缺省端口 4789），tun-b 未命中 ⇒ 未收敛
+	// 注入假运行态：tun-a 命中（数据面有该名字的隧道口），tun-b 未命中 ⇒ 未收敛
 	x.vxlan = fakeVxlanRuntime{states: map[string]network.VxlanState{
-		network.VxlanTupleKey(100, "10.99.0.1", "10.99.0.2", 4789): {Instance: 0, SwIfIndex: 6},
+		"tun-a": {SwIfIndex: 6, InterfaceName: "vxlan_tunnel0"},
 	}}
 	out = x.Execute("admin", aaaClassSU, "ssh", "show vxlan tunnels").Output
-	if !strings.Contains(out, "已在 VPP") || !strings.Contains(out, "sw_if_index 6") {
-		t.Fatalf("命中元组的隧道应显示已在 VPP:\n%s", out)
+	if !strings.Contains(out, "已在 VPP（接口 vxlan_tunnel0）") {
+		t.Fatalf("命中名字的隧道应显示已在 VPP 与接口名:\n%s", out)
 	}
-	if !strings.Contains(out, "未收敛（数据面中不存在）") {
+	if !strings.Contains(out, "未收敛（数据面无该名字的隧道口）") {
 		t.Fatalf("未命中的隧道应如实报未收敛:\n%s", out)
+	}
+	// 说明行必须写明识别口径与边界（参数以配置为准），不能让操作者误以为参数被回读核对过
+	if !strings.Contains(out, model.VxlanTagPrefix) || !strings.Contains(out, "以配置为准") {
+		t.Fatalf("输出应说明运行态识别口径与参数边界:\n%s", out)
 	}
 
 	// 读数失败：同样如实报运行态不可用（不把自己说不清的事报成未收敛）
 	x.vxlan = fakeVxlanRuntime{err: errors.New("数据面连接不可用")}
 	out = x.Execute("admin", aaaClassSU, "ssh", "show vxlan tunnels").Output
-	if !strings.Contains(out, "运行态不可用") || strings.Contains(out, "未收敛（数据面中不存在）") {
+	if !strings.Contains(out, "运行态不可用") || strings.Contains(out, "未收敛（数据面无该名字的隧道口）") {
 		t.Fatalf("读数失败时应报运行态不可用而不是未收敛:\n%s", out)
 	}
 
@@ -103,7 +107,7 @@ func TestCLIVxlanStatementAndView(t *testing.T) {
 
 func TestRESTVxlanTunnelsView(t *testing.T) {
 	rt := fakeVxlanRuntime{states: map[string]network.VxlanState{
-		network.VxlanTupleKey(100, "10.99.0.1", "10.99.0.2", 4789): {Instance: 2, SwIfIndex: 7},
+		"tun-a": {SwIfIndex: 7, InterfaceName: "vxlan_tunnel3"},
 	}}
 	ts := newTestServerOpts(t, Options{Vxlan: rt})
 	token := loginAdmin(t, ts)
@@ -132,10 +136,10 @@ func TestRESTVxlanTunnelsView(t *testing.T) {
 		t.Fatalf("读视图头不符: %+v", got)
 	}
 	a, b := got.Tunnels[0], got.Tunnels[1]
-	if a.Name != "tun-a" || !a.InVPP || a.SwIfIndex != 7 || a.Instance != 2 || a.DstPort != 4789 {
-		t.Fatalf("命中元组应带运行态: %+v", a)
+	if a.Name != "tun-a" || !a.InVPP || a.SwIfIndex != 7 || a.InterfaceName != "vxlan_tunnel3" || a.DstPort != 4789 {
+		t.Fatalf("命中名字应带运行态接口信息: %+v", a)
 	}
-	if b.Name != "tun-b" || b.InVPP || b.DstPort != 5789 {
+	if b.Name != "tun-b" || b.InVPP || b.DstPort != 5789 || b.InterfaceName != "" {
 		t.Fatalf("未命中应为未收敛且端口取声明值: %+v", b)
 	}
 	// /configuration 同步包含 vxlan_tunnels
@@ -218,7 +222,7 @@ func TestVxlanViewFieldsMatchContract(t *testing.T) {
 	// CLI `show vxlan tunnels` 与 Web 卡消费的字段（改卡/改 CLI 时必须与契约同源）。
 	for _, f := range []string{
 		"name", "vni", "local", "remote", "dst_port", "virtual_switch",
-		"runtime_available", "in_vpp", "sw_if_index", "instance",
+		"runtime_available", "in_vpp", "sw_if_index", "interface_name",
 	} {
 		if _, ok := elem[f]; !ok {
 			t.Errorf("tunnels[] 元素 schema 缺少界面消费的字段 %s（端点对、字段错＝界面恒显示「—」）", f)

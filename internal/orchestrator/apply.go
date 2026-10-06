@@ -430,19 +430,30 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	}
 	// —— 新增/变更：VXLAN 隧道（决策 #383，FR-NET-019）——
 	// 放在交换机（L2 BD）与 VRF **之后**：声明了 virtual-switch 的隧道口要加入该交换机的 BD，
-	// BD 必须先在。变更撤旧由 provider 内部按**已下发登记的旧元组**完成（同 #380 的教训：
-	// 改 local/remote/vni/dst-port 时先撤旧再建新）；undo 把隧道收敛回旧声明（收敛失败时会
-	// 自行撤掉新元组——ApplyVxlan 的撤旧基于登记，回滚路径同样成立）。
+	// BD 必须先在。**变更撤旧由 provider 按这里传进去的旧声明完成**——旧元组就在旧配置里
+	// （不依赖数据面 dump，真机实证 26.06 的 vxlan dump 恒空；同 #380 的教训：只 add 不撤会
+	// 留下旧条目继续可达）。undo 与 run 对偶：把隧道收敛回旧声明（并据此撤掉新元组），
+	// 新建的删除向＝DeleteVxlan。
 	for _, vx := range new.VxlanTunnels {
-		if o, ok := oldVxlan[vx.Name]; !ok || !configEqual(o, vx) {
-			ops = append(ops, applyOp(
-				fmt.Sprintf("vxlan[%s]", vx.Name),
-				func(ctx context.Context) error { return a.net.ApplyVxlan(ctx, vx) },
-				vx.Name, ok,
-				func(ctx context.Context) error { return a.net.ApplyVxlan(ctx, o) },
-				func(ctx context.Context) error { return a.net.DeleteVxlan(ctx, vx) },
-			))
+		o, inOld := oldVxlan[vx.Name]
+		if inOld && configEqual(o, vx) {
+			continue
 		}
+		vx, o := vx, o
+		var prev *model.VxlanTunnel
+		if inOld {
+			prev = &o
+		}
+		ops = append(ops, op{
+			desc: fmt.Sprintf("vxlan[%s]", vx.Name),
+			run:  func(ctx context.Context) error { return a.net.ApplyVxlan(ctx, vx, prev) },
+			undo: func(ctx context.Context) error {
+				if inOld {
+					return a.net.ApplyVxlan(ctx, o, &vx) // 收敛回旧声明，并撤掉新元组
+				}
+				return a.net.DeleteVxlan(ctx, vx)
+			},
+		})
 	}
 
 	// —— 新增/变更：数据面 DNS 代理（决策 #345，FR-NET-010）——
@@ -568,7 +579,8 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	//
 	// VXLAN 隧道在删除段**最前**：隧道口是 bridge-domain 的成员口，BD 还有成员时 VPP 拒绝
 	// 删除（-120）；配置里消失的隧道必须在此显式撤销——只从配置移除会留下隧道条目与该 BD
-	// 归属。身份取 `Name`（#382 的教训：差分键要能反映「同一对象」）。
+	// 归属。身份取 `Name`（#382 的教训：差分键要能反映「同一对象」）；undo 按**该旧声明**
+	// 重建（prev=nil：重放路径按接口标记判存量，不会与既有条目重复建）。
 	for _, vx := range old.VxlanTunnels {
 		if _, ok := newVxlanNames(new)[vx.Name]; ok {
 			continue
@@ -577,7 +589,7 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 		ops = append(ops, op{
 			desc: fmt.Sprintf("del-vxlan[%s]", vx.Name),
 			run:  func(ctx context.Context) error { return a.net.DeleteVxlan(ctx, vx) },
-			undo: func(ctx context.Context) error { return a.net.ApplyVxlan(ctx, vx) },
+			undo: func(ctx context.Context) error { return a.net.ApplyVxlan(ctx, vx, nil) },
 		})
 	}
 	for _, acl := range old.Acls {

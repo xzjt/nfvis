@@ -1391,7 +1391,7 @@ nfvis> show vxlan tunnels              # 名/VNI/本地/远端/端口/交换机 
 
 | 语句 | 说明 |
 |---|---|
-| `set vxlan tunnels <name> vni <id> local <ip> remote <ip> [dst-port <n>] [virtual-switch <vs>]` | 建/改隧道。`vni` 取值 1-16777215；`local`/`remote` 为 **IPv4** 且不得相同；`dst-port` 缺省 4789；`virtual-switch` 给了就把隧道口加入该 **L2** 交换机的 bridge-domain |
+| `set vxlan tunnels <name> vni <id> local <ip> remote <ip> [dst-port <n>] [virtual-switch <vs>]` | 建/改隧道。`vni` 取值 1-16777215；`local`/`remote` 为 **IPv4** 且不得相同；`dst-port` 缺省 4789；`virtual-switch` 给了就把隧道口加入该 **L2** 交换机的 bridge-domain；名字最长 51 字符（数据面标记长度上限） |
 | `delete vxlan tunnels <name>` | 删整条隧道（同时摘掉它的 bridge-domain 归属） |
 | `delete vxlan tunnels <name> [vni \| local \| remote \| dst-port \| virtual-switch]` | 只清一个叶子（`vni`/`local`/`remote` 是三件必填叶子，清掉后提交会被校验拒绝——要撤就整条删） |
 
@@ -1401,12 +1401,15 @@ nfvis> show vxlan tunnels              # 名/VNI/本地/远端/端口/交换机 
   旧隧道继续可达。
 - 隧道口默认置为 up；给了 `virtual-switch` 才加入 bridge-domain。**被隧道引用的交换机不能删**：
   先 `delete vxlan tunnels <name> virtual-switch` 解引用，再删交换机。
-- 设备 `instance` 由平台自动分配（同一台机器上唯一），数据面接口名（如 `vxlan_tunnel0`）
-  由数据面按 instance 生成，**配置与读视图都不依赖它**。
+- 数据面接口名（如 `vxlan_tunnel0`）由数据面自己分配，**配置与读视图都不依赖它**；平台在建隧
+  后会在隧道口上打一个自己的标记，运行态就按这个标记识别「这条隧道的口在不在」。
 - 重启数据面（`request vpp restart`）或重启 nfvis 后，平台按 committed 配置自动重放隧道
-  （按 VNI/本地/远端/端口 匹配存量，已存在则不重复建）。
+  （数据面已有该名字的隧道口就不重复建）。
 - `show vxlan tunnels`（或 Web 控制台「网络对象」页的 VXLAN 隧道卡）逐条给出「是否已在数据面」；
   数据面连接不可用时如实显示「运行态不可用」，而不是把说不清的状态显示成「未收敛」。
+- **运行态识别的边界**：当前底座没有可回读隧道参数的清单，读视图只能确认「该名字的隧道口在不在
+  数据面」——**VNI、下垫地址、端口以配置为准**（产品不会声称从数据面核对过这些参数）。
+  同元组的隧道若已由带外命令建过，提交会明确报错并给出处理路径。
 
 **当前版本边界（务必知悉）**：
 

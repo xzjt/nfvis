@@ -349,11 +349,11 @@ type QosPolicy struct {
 
 // VxlanTunnel VXLAN overlay 隧道（单播 remote；v1 只做 L2 成员）。
 //
-// Name 是产品侧标识——VPP 接口名由 VPP 按 instance 生成，产品**不依赖其名**：
-// 恢复重放按 (vni, local, remote, dst_port) 元组在 VPP 里查找存量（与 DHCP tap 按
-// HostIfName 复用的教训同族）。VirtualSwitch 可选：给了就把隧道口加入该 L2 交换机的 BD。
-// v1 边界（如实）：不做组播/BUM 复制、ARP/ND 代理与 Bypass、VXLAN-GPE、IPv6 下垫层、
-// dst-port 以外的封装参数、隧道作 L3 接口、跨 VRF 建隧。
+// Name 是产品侧标识——VPP 分配的接口名与 instance 产品**都不依赖**；数据面身份是平台打在
+// 隧道口上的**接口 tag**（DataPlaneTag()，见下）：VPP 26.06 的 vxlan dump 恒空（真机实证），
+// 恢复重放按 tag 判存量、变更撤旧按**旧声明的元组**（不靠 dump）。VirtualSwitch 可选：
+// 给了就把隧道口加入该 L2 交换机的 BD。v1 边界（如实）：不做组播/BUM 复制、ARP/ND 代理与
+// Bypass、VXLAN-GPE、IPv6 下垫层、dst-port 以外的封装参数、隧道作 L3 接口、跨 VRF 建隧。
 type VxlanTunnel struct {
 	Name          string `json:"name"`
 	Vni           int    `json:"vni"`
@@ -369,6 +369,25 @@ const (
 	VxlanMaxVni         = 16777215 // 24 位
 	VxlanDefaultDstPort = 4789     // IANA 分配的 VXLAN UDP 端口
 )
+
+// 数据面接口 tag：隧道身份（`sw_interface_tag_add_del` 打标、`sw_interface_dump` 的 tag 字段
+// 回读）。VPP 26.06 的 vxlan dump 恒空（真机实证），故不依赖它、也不依赖 VPP 分配的接口名
+// ——与 DHCP tap 按 HostIfName 识别同族。tag 是固定宽度 string[64]（含 NUL 至多 63 字节），
+// 超长会被静默截断、读回对不上，校验层据此拒绝过长的隧道名。
+const (
+	VxlanTagPrefix = "nfvis-vxlan:"
+	VxlanTagMaxLen = 63
+)
+
+// DataPlaneTag 该隧道在数据面上的接口 tag（"nfvis-vxlan:<name>"）。
+func (t VxlanTunnel) DataPlaneTag() string { return VxlanTagPrefix + t.Name }
+
+// SameTuple 两条声明的**数据面元组**是否相同（vni/local/remote/dst_port）。
+// name 不参与：改名的语义是「删旧建新」，由调用方以新旧两条声明给出（提交 diff 里都有）。
+func (t VxlanTunnel) SameTuple(o VxlanTunnel) bool {
+	return t.Vni == o.Vni && t.Local == o.Local && t.Remote == o.Remote &&
+		t.EffectiveDstPort() == o.EffectiveDstPort()
+}
 
 // EffectiveDstPort 生效的目的端口：缺省（0/未配置）回落 4789。
 func (t VxlanTunnel) EffectiveDstPort() int {

@@ -5345,13 +5345,13 @@ const NET_OBJECT_VIEWS = [
     s.name, list(s.sources || s.source), s.destination,
   ], '#/network/span/'],
   // VXLAN 隧道（决策 #383）：读 GET /vxlan-tunnels（配置声明 × 数据面实况，与 CLI
-  // `show vxlan tunnels` 同源）。「状态」列取 `in_vpp`（按 (vni, local, remote, dst_port)
-  // 元组与数据面比对）；运行态不可用时逐条如实标「运行态不可用」——此时 in_vpp 不可信，
-  // 不把「说不清」当「未收敛」。
+  // `show vxlan tunnels` 同源）。「状态」列取 `in_vpp`（数据面上有没有**该名字**的隧道口——
+  // 按平台打在接口上的标记识别；底座没有可回读隧道参数的清单，VNI/地址/端口以配置为准）。
+  // 运行态不可用时逐条如实标「运行态不可用」——此时 in_vpp 不可信，不把「说不清」当「未收敛」。
   ['VXLAN 隧道', 'vxlan', ['名称', 'VNI', '本地 → 远端', '端口', '交换机', '状态'], (t) => [
     t.name, t.vni, (t.local || '—') + ' → ' + (t.remote || '—'), t.dst_port, t.virtual_switch,
     t.runtime_available === false ? '运行态不可用'
-      : (t.in_vpp ? '已在 VPP（sw_if_index ' + dash(t.sw_if_index) + '）' : '未收敛'),
+      : (t.in_vpp ? '已在 VPP（接口 ' + dash(t.interface_name) + '）' : '未收敛'),
   ]],
 ];
 

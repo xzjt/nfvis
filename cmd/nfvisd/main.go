@@ -217,7 +217,8 @@ func run() error {
 	defer func() { _ = dhcpServer.Close() }()
 	netProvider.SetDHCPServer(dhcpServer)
 	// 决策 #383：VXLAN overlay（VPP vxlan plugin；单播 remote、IPv4 下垫层、L2 成员）。
-	// 恢复重放按 dump 的 (vni, src, dst, dst_port) 元组匹配存量（不靠进程内登记/接口名）。
+	// 身份＝接口 tag（`nfvis-vxlan:<名>`）：VPP 26.06 的 vxlan dump 恒空（真机实证），恢复重放
+	// 按 tag 判存量、变更撤旧按旧配置的元组——不靠进程内登记、也不靠 VPP 分配的接口名。
 	netProvider.SetVxlan(network.NewVxlanProviderFunc(vppMgr.VxlanClientFunc()))
 	netProvider.SetACL(network.NewAclProviderFunc(vppMgr.AclClientFunc()))
 	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))

@@ -4,6 +4,7 @@ package model
 // 各拒绝并给出可照做的下一步。
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -125,4 +126,31 @@ func TestValidateVxlanAfterUnbindSwitchDelete(t *testing.T) {
 	c.VirtualSwitches = []VirtualSwitch{{Name: "vs-l3", Type: "l3"}}
 	c.VxlanTunnels = []VxlanTunnel{{Name: "tun-a", Vni: 100, Local: "10.99.0.1", Remote: "10.99.0.2"}} // virtual-switch 已解引用
 	mustNoErr(t, Validate(c))
+}
+
+// 数据面身份是接口 tag（固定宽度 64 字节、含 NUL 至多 63）——超长会被静默截断、读回对不上，
+// 故按数据面上限在提交期拒绝（名字最长 = 63 − len("nfvis-vxlan:")）。
+func TestValidateVxlanTagLength(t *testing.T) {
+	maxName := VxlanTagMaxLen - len(VxlanTagPrefix)
+	if got := (VxlanTunnel{Name: strings.Repeat("a", maxName)}).DataPlaneTag(); len(got) != VxlanTagMaxLen {
+		t.Fatalf("边界名字的 tag 长度 = %d，期望 %d", len(got), VxlanTagMaxLen)
+	}
+	c := vxlanBase()
+	c.VxlanTunnels = []VxlanTunnel{{Name: strings.Repeat("a", maxName), Vni: 100, Local: "10.99.0.1", Remote: "10.99.0.2"}}
+	mustNoErr(t, Validate(c))
+
+	c = vxlanBase()
+	c.VxlanTunnels = []VxlanTunnel{{Name: strings.Repeat("a", maxName+1), Vni: 100, Local: "10.99.0.1", Remote: "10.99.0.2"}}
+	mustErrContaining(t, Validate(c), "].name", "过长")
+}
+
+// DataPlaneTag 的形状（平台前缀 + 名；识别与打标两侧同源）。
+func TestVxlanDataPlaneTag(t *testing.T) {
+	tun := VxlanTunnel{Name: "tun-a"}
+	if got, want := tun.DataPlaneTag(), "nfvis-vxlan:tun-a"; got != want {
+		t.Fatalf("DataPlaneTag = %q，期望 %q", got, want)
+	}
+	if !strings.HasPrefix(tun.DataPlaneTag(), VxlanTagPrefix) {
+		t.Fatal("tag 必须带平台前缀（运行态按前缀过滤）")
+	}
 }
