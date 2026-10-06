@@ -6,6 +6,7 @@ package config
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -129,5 +130,73 @@ func TestUnrelatedCommitNotGatedByFirewall(t *testing.T) {
 	}
 	if _, err := eng.Commit(context.Background(), sess, CommitOpts{}); err != nil {
 		t.Fatalf("防火墙未变时不应要求 confirmed: %v", err)
+	}
+}
+
+// TestConfirmedTimeoutRollbackNotifiesOnCommit（决策 #388 真机验证 round169 抓到的缺口）：
+// confirmed 超时自动回滚改变了 committed 配置，却只落库、不走 OnCommitted ⇒ 宿主侧重收敛
+// （防火墙/TLS/syslog/日志保留）不触发——防火墙场景的真机实锤是「配置已回滚、nft 表仍是
+// policy drop」，管理面被锁死到重启。回滚必须与 Commit 走同一「已提交变更」通知。
+func TestConfirmedTimeoutRollbackNotifiesOnCommit(t *testing.T) {
+	var calls []string // "rev:user"
+	store := openTestStore(t)
+	clock := newFakeClock()
+	if _, err := store.AppendRevision(mustJSON(baseCommitted()), clock.Now(), "初始基线", "admin"); err != nil {
+		t.Fatalf("预置基线: %v", err)
+	}
+	e, err := NewEngine(store, &mockApplier{}, Options{
+		Now:       clock.Now,
+		AfterFunc: newTimerSink().after,
+		OnCommitted: func(rev int, user string) {
+			calls = append(calls, fmt.Sprintf("%d:%s", rev, user))
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	// console 预置管理口（豁免路径，与 fwEngine 同口径）。
+	con := Session{User: "admin", Source: "console"}
+	if err := e.Edit(con); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := e.Candidate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.System.Management.Interface = "ens160"
+	if err := e.UpdateCandidate(con, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Commit(context.Background(), con, CommitOpts{}); err != nil {
+		t.Fatalf("预置管理口: %v", err)
+	}
+	// ssh 会话的防火墙变更，confirmed 提交（不确认 → 走超时回滚）。
+	sess := Session{User: "admin", Source: "ssh"}
+	setFirewall(t, e, sess, &model.FirewallConfig{Rules: []model.FirewallRule{
+		{Seq: 100, Action: "accept", Source: "192.0.2.0/24", Protocol: "tcp", Port: 9999},
+	}})
+	if _, err := e.Commit(context.Background(), sess, CommitOpts{ConfirmedMinutes: 2}); err != nil {
+		t.Fatalf("confirmed 提交: %v", err)
+	}
+	cf, err := store.GetConfirmed()
+	if err != nil || cf == nil {
+		t.Fatalf("在途 confirmed 应在场: %v", err)
+	}
+	// 与定时器同一路径的超时回滚（fakeClock 未到 deadline，直接调 doConfirmedRollback）。
+	e.doConfirmedRollback(cf)
+
+	// 断言：预置(1) + 防火墙提交(2) + 超时回滚(3) —— 第三次必须来自回滚（user=system）。
+	if len(calls) != 3 {
+		t.Fatalf("OnCommitted 应触发 3 次（含回滚一次），实际 %d 次：%v", len(calls), calls)
+	}
+	if !strings.HasSuffix(calls[2], ":system") {
+		t.Fatalf("回滚的 OnCommitted 应以 system 身份通知，实际 %q", calls[2])
+	}
+	got, err := e.Committed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.System.Firewall != nil {
+		t.Fatalf("回滚后 committed 不应再含防火墙段")
 	}
 }

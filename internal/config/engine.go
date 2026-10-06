@@ -974,8 +974,9 @@ func (e *Engine) doConfirmedRollback(cf *ConfirmedInfo) {
 		return
 	}
 	now := e.now()
-	if _, err := e.store.AppendRevision(baseJSON, now,
-		fmt.Sprintf("commit confirmed 超时，自动回滚到 rev %d", cf.BaseRev), "system"); err != nil {
+	newRev, err := e.store.AppendRevision(baseJSON, now,
+		fmt.Sprintf("commit confirmed 超时，自动回滚到 rev %d", cf.BaseRev), "system")
+	if err != nil {
 		e.emit(EventConfirmedTimeout, fmt.Sprintf("自动回滚落库失败: %v", err))
 		return
 	}
@@ -997,6 +998,14 @@ func (e *Engine) doConfirmedRollback(cf *ConfirmedInfo) {
 			e.candidate = &cfg
 			e.dirty = true
 		}
+	}
+
+	// 决策 #388 真机验证（round169）抓到的缺口：回滚改变了 committed 配置，却只落库、
+	// 不走 OnCommitted ⇒ 宿主侧重收敛（防火墙/TLS/syslog/日志保留）不触发——防火墙场景
+	// 的真机实锤是「配置已回滚、nft 表仍是 policy drop」，管理面锁死到重启。回滚与
+	// Commit 一样是「已提交配置变更」，必须走同一通知（M5-1 事件 + 宿主侧再收敛）。
+	if e.onCommit != nil {
+		e.onCommit(newRev, "system")
 	}
 }
 
