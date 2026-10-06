@@ -58,26 +58,60 @@ func newDHCPLeaseTable(lo, hi uint32, now func() time.Time) *dhcpLeaseTable {
 // inPool 报告地址是否在池内（含两端）。
 func (t *dhcpLeaseTable) inPool(v uint32) bool { return v >= t.poolLo && v <= t.poolHi }
 
+// forget 从两张表移除该条目：删 byIP 时同步清 byMAC 中指向**同一条目**的键，反之亦然。
+// 以指针同一性校验（cur == l）——同 MAC/同 IP 上可能已经更新为另一条租约（决策 #391：
+// decline 后同 MAC 再分配会让旧 declined 条目只剩 byIP，且其 MAC 字段仍指向新租约的键），
+// 盲目按键删除会误删有效租约。
+func (t *dhcpLeaseTable) forget(l *dhcpLease) {
+	if cur, ok := t.byIP[l.IP]; ok && cur == l {
+		delete(t.byIP, l.IP)
+	}
+	if l.MAC != "" {
+		if cur, ok := t.byMAC[l.MAC]; ok && cur == l {
+			delete(t.byMAC, l.MAC)
+		}
+	}
+}
+
 // setPool 换池：范围外的租约直接移除（它们已不可能续租）；范围内未到期的保留。
+// 决策 #391：以 byIP 为准遍历（所有条目都在其中，含 MAC 为空的 declined 幽灵）——
+// 此前只遍历 byMAC，MAC 为空的池外条目永不清理。
 func (t *dhcpLeaseTable) setPool(lo, hi uint32) {
 	t.poolLo, t.poolHi = lo, hi
+	for _, l := range t.byIP {
+		v, ok := ipToU32(l.IP)
+		if !ok || !t.inPool(v) {
+			t.forget(l)
+		}
+	}
+	// 防御：只登记在 byMAC 的条目（正常路径不应存在）同样按池范围移除。
 	for mac, l := range t.byMAC {
 		v, ok := ipToU32(l.IP)
 		if !ok || !t.inPool(v) {
 			delete(t.byMAC, mac)
-			delete(t.byIP, l.IP)
 		}
 	}
 }
 
 // sweep 清理已到期条目（含 declined），返回是否有变化。
+// 决策 #391：以 byIP 为准遍历——MAC 为空的 declined 幽灵条目同样按 ExpiresAt 回收
+// （此前只遍历 byMAC，这类条目永不过期 ⇒ 地址永久回不了池、假「池耗尽」不消解）。
 func (t *dhcpLeaseTable) sweep() bool {
 	now := t.now()
 	changed := false
+	for _, l := range t.byIP {
+		if !l.ExpiresAt.After(now) {
+			t.forget(l)
+			changed = true
+		}
+	}
+	// 防御：只登记在 byMAC 的条目（正常路径不应存在）同样按到期回收。
 	for mac, l := range t.byMAC {
 		if !l.ExpiresAt.After(now) {
 			delete(t.byMAC, mac)
-			delete(t.byIP, l.IP)
+			if cur, ok := t.byIP[l.IP]; ok && cur == l {
+				delete(t.byIP, l.IP)
+			}
 			changed = true
 		}
 	}
@@ -184,8 +218,13 @@ func (t *dhcpLeaseTable) decline(ip string, lease time.Duration) bool {
 		return false
 	}
 	l.State, l.ExpiresAt = dhcpLeaseDeclined, t.now().Add(lease)
+	// 保持「地址为主体」的记录语义（不冒认客户端身份）：只在 byMAC 槽空闲或本就指向该条目时登记。
+	// 若该 MAC 已属于另一条有效租约（本条是旧地址遗留的 byIP-only 幽灵），不得覆盖它——
+	// 否则会把新租约挤成只挂 byIP 的悬挂条目（决策 #391 两表一致性）。
 	if l.MAC != "" {
-		t.byMAC[l.MAC] = l
+		if cur, ok := t.byMAC[l.MAC]; !ok || cur == l {
+			t.byMAC[l.MAC] = l
+		}
 	}
 	return true
 }
@@ -223,7 +262,7 @@ func (t *dhcpLeaseTable) snapshot() []dhcpLease {
 	return out
 }
 
-// restore 从持久化数据恢复（只收池内、未到期的条目；同 IP 冲突时保前者）。
+// restore 从持久化数据恢复（只收池内、未到期的条目；同 IP/同 MAC 冲突时保前者）。
 func (t *dhcpLeaseTable) restore(leases []dhcpLease) {
 	now := t.now()
 	for _, l := range leases {
@@ -236,7 +275,11 @@ func (t *dhcpLeaseTable) restore(leases []dhcpLease) {
 		default:
 			continue
 		}
+		// 决策 #391：同 IP 或同 MAC 任一已被占用即跳过（避免只挂一张表的悬挂条目）。
 		if t.byIP[l.IP] != nil {
+			continue
+		}
+		if l.MAC != "" && t.byMAC[l.MAC] != nil {
 			continue
 		}
 		c := l

@@ -280,6 +280,7 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	oldVMs := nameMap(old.VirtualMachineFunctions, func(x model.VMFunction) string { return x.Name })
 	oldCTs := nameMap(old.ContainerFunctions, func(x model.ContainerFunction) string { return x.Name })
 	oldIfaces := nameMap(old.Interfaces, func(x model.InterfaceConfig) string { return x.Name })
+	newIfaceNames := nameMap(new.Interfaces, func(x model.InterfaceConfig) string { return x.Name })
 	oldBonds := nameMap(old.Bonds, func(x model.Bond) string { return x.Name })
 	oldPMs := nameMap(old.PortMirroring, func(x model.PortMirroring) string { return x.Name })
 	oldQoS := nameMap(old.QosPolicies, func(x model.QosPolicy) string { return x.Name })
@@ -381,6 +382,40 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 					return a.net.ApplyDHCPServer(ctx, model.VirtualSwitch{Name: vs.Name})
 				},
 			))
+		}
+	}
+	// —— 决策 #390①：被删 VRF 的 L3 接口 ACL/macip 解绑（**按旧声明**，先于新建/迁移段）——
+	// 旧槽先释放、新声明再绑。此前只为 new.Vrfs 生成解绑：接口从旧交换机迁到新交换机时，
+	// ApplyVRF(新) 经 reassignLocked 先把该口从旧表的 ifaces/subifs 登记摘掉，删除段的
+	// DeleteVRF(旧) 只按登记取解绑清单 ⇒ 空清单、不解绑，旧 IP ACL 与伴随 macip 留在接口上
+	// 继续拦（round171 §1.1 真机复现）。故这里按 old 声明（不依赖运行时登记）为被删 VRF 生成：
+	//   - l3-acl-unbind：接口仍在新配置的某台 L3 交换机里（迁移）且旧声明 acl-in != "" ⇒ 只撤绑定；
+	//   - del-l3-if：接口在新配置里整条消失且旧声明 acl-in != "" ⇒ 回收（清地址/解绑/移回默认表）。
+	for _, ov := range old.Vrfs {
+		if _, still := newVRFs[ov.Name]; still {
+			continue
+		}
+		ov := ov
+		unbind, reclaim := deletedVrfL3Revokes(ov, new)
+		for _, li := range unbind {
+			li := li
+			ops = append(ops, op{
+				desc: fmt.Sprintf("l3-acl-unbind[%s/%s]", ov.Name, l3IfaceKeyOf(li)),
+				run: func(ctx context.Context) error {
+					return a.net.UnbindL3IfaceACL(ctx, ov.Name, li)
+				},
+				undo: func(ctx context.Context) error { return a.net.ApplyVRF(ctx, ov) },
+			})
+		}
+		for _, li := range reclaim {
+			li := li
+			ops = append(ops, op{
+				desc: fmt.Sprintf("del-l3-if[%s/%s]", ov.Name, l3IfaceKeyOf(li)),
+				run: func(ctx context.Context) error {
+					return a.net.DeleteL3Interface(ctx, ov.Name, li)
+				},
+				undo: func(ctx context.Context) error { return a.net.ApplyVRF(ctx, ov) },
+			})
 		}
 	}
 	for _, vrf := range new.Vrfs {
@@ -581,6 +616,24 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	// 删除（-120）；配置里消失的隧道必须在此显式撤销——只从配置移除会留下隧道条目与该 BD
 	// 归属。身份取 `Name`（#382 的教训：差分键要能反映「同一对象」）；undo 按**该旧声明**
 	// 重建（prev=nil：重放路径按接口标记判存量，不会与既有条目重复建）。
+	//
+	// —— 决策 #390③：接口元素的**接口级删除计划**（storm/portsec/QoS 绑定 teardown）——
+	// 「新增/变更」段只遍历 new.Interfaces，从声明里删除的接口元素不会再调用 ApplyInterface，
+	// 其 storm policer/L2 分类表、portsec macip、QoS policer 绑定因此残留到数据面重启
+	// （round171 §1.3：storm policer 与分类表残留、限速继续挂在口上）。删除段对差集里的接口
+	// 逐个 teardown——此时接口仍在 VPP 里（删元素只改配置；真正移除在 request vpp restart 的
+	// startup.conf 重生成），故按名能解析到索引。undo 按旧声明重建接口级配置。
+	for _, oi := range old.Interfaces {
+		if _, ok := newIfaceNames[oi.Name]; ok {
+			continue
+		}
+		oi := oi
+		ops = append(ops, op{
+			desc: fmt.Sprintf("del-interface[%s]", oi.Name),
+			run:  func(ctx context.Context) error { return a.net.TeardownInterface(ctx, oi) },
+			undo: func(ctx context.Context) error { return a.net.ApplyInterface(ctx, oi) },
+		})
+	}
 	for _, vx := range old.VxlanTunnels {
 		if _, ok := newVxlanNames(new)[vx.Name]; ok {
 			continue
@@ -792,6 +845,41 @@ func removedL3Ifaces(old, new model.Vrf) []model.L3Interface {
 		out = append(out, li)
 	}
 	return out
+}
+
+// deletedVrfL3Revokes 返回一台**被删** VRF 需要撤销的 L3 接口（决策 #390①）：
+// 按 old 声明决定，**不依赖运行时登记**——ApplyVRF(新交换机) 经 reassignLocked 会把该口
+// 从旧表的 ifaces/subifs 登记摘掉，删除段的 DeleteVRF(旧) 因此拿不到解绑清单（round171 §1.1）。
+//
+//   - unbind：接口仍出现在 new 配置的某台 L3 交换机里（迁移到别处），旧声明 acl-in != "" ⇒ 只撤绑定；
+//   - reclaim：接口在 new 配置里整条消失，旧声明 acl-in != "" ⇒ 回收（清地址/解绑/移回默认表）。
+//
+// 只覆盖 acl-in != "" 的接口：没有 ACL 绑定的接口，其地址/表归属由删除段的 DeleteVRF(旧)
+// 按登记清理即可（它们未迁移，登记仍在），无需在此重复处理。
+func deletedVrfL3Revokes(oldVrf model.Vrf, newCfg model.Config) (unbind, reclaim []model.L3Interface) {
+	inNew := make(map[string]bool)
+	for _, vrf := range newCfg.Vrfs {
+		for _, li := range vrf.L3Interfaces {
+			inNew[l3IfaceKeyOf(li)] = true
+		}
+	}
+	seen := make(map[string]bool, len(oldVrf.L3Interfaces))
+	for _, li := range oldVrf.L3Interfaces {
+		if li.AclIn == "" {
+			continue
+		}
+		k := l3IfaceKeyOf(li)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		if inNew[k] {
+			unbind = append(unbind, li)
+		} else {
+			reclaim = append(reclaim, li)
+		}
+	}
+	return unbind, reclaim
 }
 
 // l3ACLUnbinds 返回「接口仍在声明里、acl-in 从有到无」的 l3-interface（去重、保持声明序）：

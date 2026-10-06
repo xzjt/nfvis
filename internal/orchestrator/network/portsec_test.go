@@ -163,6 +163,59 @@ func TestPortSecApplyBindFailureKeepsRegistrationHonest(t *testing.T) {
 	}
 }
 
+// TestPortSecTeardownOnlyOwnSlot：决策 #390②——teardown 只解自己那个槽。
+// 正例：槽上正是本接口端口安全 ACL ⇒ 解绑。负例：同提交「删白名单 + 改挂 L3 acl-in」时
+// #341 伴随 macip 先绑（槽上是他方 ACL）⇒ 不得解绑（否则域内非 IP/ARP 被静默丢弃，
+// round171 §1.2 真机复现的失败形态）。
+func TestPortSecTeardownOnlyOwnSlot(t *testing.T) {
+	iface := model.InterfaceConfig{Name: "ens224", PortSecurity: []model.PortSecMAC{"b0:b0:00:00:00:01"}}
+
+	// 正例：槽上是自己的 ACL ⇒ 解绑。
+	f := newFakePortSec()
+	p := NewPortSecProvider(f)
+	if err := p.ApplyInterface(context.Background(), iface); err != nil {
+		t.Fatal(err)
+	}
+	ownIdx := f.byTag[PortSecTag("ens224")]
+	if f.bound[4] != ownIdx || ownIdx == 0 {
+		t.Fatalf("前置：应已绑定自己的端口安全 ACL: %v", f.bound)
+	}
+	if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens224"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, bound := f.bound[4]; bound {
+		t.Fatalf("槽上是自己的 ACL：应解绑")
+	}
+
+	// 负例：槽被他方 macip ACL（如 #341 伴随）占用 ⇒ 不动作，且登记仍要清。
+	f2 := newFakePortSec()
+	p2 := NewPortSecProvider(f2)
+	if err := p2.ApplyInterface(context.Background(), iface); err != nil {
+		t.Fatal(err)
+	}
+	f2.bound[4] = 99 // 伴随 macip（他方）占用同一槽
+	f2.calls = nil
+	if err := p2.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens224"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f2.bound[4]; got != 99 {
+		t.Fatalf("槽上是他方 ACL：不得解绑（应保持 99，实际 %d）", got)
+	}
+	for _, c := range f2.calls {
+		if c == "bind" {
+			t.Fatalf("槽上是他方 ACL：不得产生任何 macip 绑定/解绑调用: %v", f2.calls)
+		}
+	}
+	// 登记应已清空（portsec 已停用）：再次空声明幂等零调用。
+	before := len(f2.calls)
+	if err := p2.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens224"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f2.calls) != before {
+		t.Fatalf("登记应已清空（幂等零调用）: %v", f2.calls[before:])
+	}
+}
+
 // TestPortSecDataplaneHonest：tag 不在场/绑定槽被别的 ACL 占用时如实呈现（不编造）。
 func TestPortSecDataplaneHonest(t *testing.T) {
 	f := newFakePortSec()

@@ -649,15 +649,18 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 	// 判据取"**该会话是否经网络接入**"：ssh 与 api（REST / Web 控制台）都依赖管理网连通性，
 	// 改管理口可能切断自己的管理路径，故都要求确认；本地串口（console）不依赖管理网，
 	// 保持豁免。首次声明也算变更（发现 #12(a)：nil 与空配置等价处理）。
+	// 决策 #392：内部维护/救援动作（恢复出厂/恢复配置/重置数据分区，见 confirmGuardExempt）
+	// 一并豁免——它们各有操作级双重确认，且 restore 就是自锁救援路径。
 	mgmtChanged := sysMgmtChanged(committed.System, newCfg.System)
-	if mgmtChanged && sess.Source != "console" && opts.ConfirmedMinutes <= 0 {
+	if mgmtChanged && !confirmGuardExempt(sess.Source) && opts.ConfirmedMinutes <= 0 {
 		return res, ErrConfirmRequired
 	}
 	// 决策 #388：防火墙变更与上一条同族（FR-CFG-012 的判据 sess.Source != "console" 一致）——
 	// 改错默认策略/规则会把当前管理路径切断，非 console 会话必须 commit confirmed；
 	// console 会话（带外、不依赖管理网）豁免。两条判据分开、各自给原因，便于操作者照做。
+	// 决策 #392：内部维护/救援动作（同上）一并豁免。
 	fwChanged := sysFirewallChanged(committed.System, newCfg.System)
-	if fwChanged && sess.Source != "console" && opts.ConfirmedMinutes <= 0 {
+	if fwChanged && !confirmGuardExempt(sess.Source) && opts.ConfirmedMinutes <= 0 {
 		return res, ErrFirewallConfirmRequired
 	}
 
@@ -1213,6 +1216,19 @@ func formatValidateErrors(verrs []model.ValidateError) string {
 		out += "\n  - " + ve.Error()
 	}
 	return out
+}
+
+// confirmGuardExempt 报告该提交会话来源是否豁免「改管理口/防火墙需 commit confirmed」两条守卫。
+//
+// 两类来源豁免（决策 #392）：
+//   - 本地串口（console）：带外、不依赖管理网连通性，改管理口/防火墙切不断自己（FR-CFG-012 原口径）；
+//   - 内部维护/救援动作（恢复出厂 / 恢复配置 / 重置数据分区，判定见 IsInternalMaintenanceSource）：
+//     它们各自有操作级双重确认（破坏性闸门），且 restore 本身就是「管理口/防火墙自锁」的救援路径。
+//
+// 用户会话（ssh / api）不豁免——判据与拒绝文案完全不变。豁免判定只有这一处，
+// 两条守卫共用同一函数，避免"哪类来源豁免"出现第二份口径。
+func confirmGuardExempt(source string) bool {
+	return source == "console" || IsInternalMaintenanceSource(source)
 }
 
 // sysMgmtChanged 判定管理口是否被变更（FR-CFG-012）：地址/网关/网卡名任一不同（含删除）即为 true。

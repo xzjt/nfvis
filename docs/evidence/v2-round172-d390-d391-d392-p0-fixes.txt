@@ -1,0 +1,111 @@
+round172 · 决策 #390/#391/#392 —— round171 半程体检 P0 三项修复（契约先行 + 3 并发实现 + 真机验证）
+====================================================================
+日期：2026-10-06；分支 `v2-round172-fixp0`（含 worktree 分支 `v2-round172-fix391` / `v2-round172-fix392`）；
+真机 nfvis-vm 升级到 **2.0.0~dev114**（= 本分支构建）。
+来源：`docs/evidence/v2-round171-midpoint-audit.txt`（round171 半程体检）的 P0 三项：R171-1 / R171-2 / R171-3。
+方法：契约先行（决策 #390/#391/#392 入附录 A，决策计数 291→294）→ **3 并发**实现（子智能体；#391/#392 各在独立
+git worktree，避免同树提交冲突）→ 主会话关键点审查 → 合并 → `make check` → 真机验证 → 账目同步。
+
+§0 结论
+- 三项均**已实现并验证**：单测**红-绿**齐备（旧行为下按预期失败、修复后全绿），真机三条静默残留场景与
+  「restore 被守卫拒」场景均**转为正确行为**（对照 round171 的复现读数）。
+- 真机验证覆盖：**#390 三形态全部真机通过**（§3.1~§3.3）；**#392 restore 真机通过 + 用户会话守卫回归对照**（§3.4）；
+  **#391 由单测红-绿覆盖**（原始帧注入未执行，如实登记，§3.5）。
+- `make check`：本机串行（`GOFLAGS=-p=1 GOMAXPROCS=2`）**RC=0**（宿主偶发内存/分页压力，与仓内既有记录同族）。
+
+§1 交付（三项）
+**决策 #390（ACL/macip 绑定的撤销盲区族，三形态）**——提交 `d05ed9c`：
+- ① `internal/orchestrator/apply.go` 在「新建/迁移段」**之前**新增一段：遍历 `old.Vrfs` 中不在 `new.Vrfs` 的 VRF，
+  按 **old 声明**（不依赖运行时登记）生成 `l3-acl-unbind`（接口迁移到别的 L3 交换机）/ `del-l3-if`（接口整条消失，
+  仅 `acl-in != ""` 者）；解绑 op 先于 `vrf[新]`，旧槽先释放、新声明再绑。助手 `deletedVrfL3Revokes`。
+- ② `network/portsec.go` 的 teardown 改经 `unbindOwnSlot`：按 tag 反查本接口 portsec ACL 索引、再读槽上实况
+  （`MacipBoundACL`），**不一致则不解绑**（不得清掉 #341 的伴随 macip / 他方 ACL）；tag 不在场退回登记索引，
+  仍不符则不动（无凭据证明槽属于自己，宁可不解）。
+- ③ 删除段新增 `del-interface[<name>]` 计划（`old.Interfaces` 中不在 `new.Interfaces` 者）：`run=TeardownInterface`、
+  `undo=ApplyInterface(旧)`；`orchestrator/provider.go` 新增 `NetworkProvider.TeardownInterface`（含 `noopNetwork` 实现）；
+  `network/provider.go` 的 `L2Network.TeardownInterface` 复用 storm/portsec 的「空声明＝teardown」路径；
+  `network/services.go` 新增 `ServicesProvider.TeardownInterface`（只解 QoS 两向绑定，不碰 MTU/状态）。
+- ④ `model/validate.go` 的「该路径不可达」注释按 round171 §1.3 实测更正为**可达**（其 macip 撤销由 ③ 负责）。
+- 与契约的偏差（如实）：`network/l3.go` 未改——契约列的「声明驱动解绑入口」`UnbindL3IfaceACL` 已存在且天然
+  声明驱动（入参即旧声明 `li`），缺口纯在**计划生成**；`reclaim` 只覆盖 `acl-in != ""` 的接口（其余由删除段
+  `DeleteVRF(旧)` 按登记清理，未扩范围）。
+
+**决策 #391（DHCP declined 租约泄漏）**——提交 `3241f09`：
+- `network/dhcpserver_lease.go`：新增 `forget(l)` 助手——按**指针同一性**（`cur == l`）从 `byIP`/`byMAC` 两表移除
+  同一条目（防止误删已被新租约占用的同键）；`sweep()` 与 `setPool()` 改为**以 `byIP` 为准**遍历（MAC 为空的
+  declined 幽灵同样按 `ExpiresAt` 回收 / 按池范围移除），各留一条防御性 `byMAC` 遍历兜底；`decline()` 的 byMAC
+  写入加守卫（槽空闲或本就指向该条目才登记，不覆盖他人有效租约）；`restore()` 增加「同 IP **或**同 MAC 已占用
+  即跳过」，避免恢复出只挂一张表的悬挂条目。读视图链路（`Leases()`→`snapshot()`→`sweep()`）下幽灵在渲染前回收，
+  不再出现恒「剩 1 秒」。
+- 未改：收包路径、去重窗、NAK 次序、300B 补零、租约文件格式/持久化语义、#371 三条口径。
+
+**决策 #392（确认守卫豁免内部维护/救援动作）**——提交 `f919b6e`：
+- `config/audit_highrisk.go` 新增**单一事实源** `IsInternalMaintenanceSource(source)`（仅
+  `SourceZeroize`/`SourceRestore`/`SourceFormatData` 为真），并让 `highRiskConfigIntent` 复用（消除重复口径）；
+  `config/engine.go` 新增 `confirmGuardExempt(source)`（`console` ∪ 三类内部来源），两条守卫
+  （管理口 / 防火墙）改用它；**用户会话（ssh/api/console）判据与文案逐字不变**。
+- 无需改 `backup.go`/`formatdata.go`：三条内部动作本就以各自 `config.Source*` 合成来源提交，豁免随来源生效
+  （避免「显式通道」第二份口径）。
+- `docs/NFViS-用户手册.md`：更正救援表述——`configuration restore` **不受** confirmed 限制（整份配置救援式恢复）；
+  文字经 `user_text` 守护（无 FR 编号/决策号/内部路径）。
+
+§2 关键点审查（主会话）
+- 计划序核对：`apply.go` 中被删 VRF 的解绑段位于 `for _, vrf := range new.Vrfs`（L421）**之前**（L387 起）；
+  `del-interface` 段位于删除段内（L610 之后，L620 起）。
+- 槽归属核对：`portsec.unbindOwnSlot` 先 tag 反查、再比 `MacipBoundACL`，不符即 return nil（不动作）。
+- 单一事实源：守卫豁免与高危意图去重共用 `IsInternalMaintenanceSource`。
+- 接口方法新增（`TeardownInterface`）无遗漏实现者：`go vet ./...`（含全部测试文件编译）退出码 0。
+
+§3 验证
+3.1 **#390 形态①（删交换机 + 迁移 L3 接口）真机通过**（dev114）：
+  前置 rev1159 启用 ens224；rev1160 建 `f1acl` + `vs-a`（`l3-interface ens224 acl-in f1acl`）——
+  `show acl-plugin interface` = `sw_if_index 2: input acl(s): 0`、`show acl-plugin macip interface` = `2: 0`。
+  **触发**（单会话）rev1161：`delete virtual-switches vs-a` + `set virtual-switches vs-b type l3` +
+  `… l3-interface ens224 ip address 10.99.4.1/24`（无 acl-in）→ 提交成功；
+  **断言**：`show acl-plugin interface` 的 `sw_if_index 2` **无 `input acl(s)`**、`macip interface` = `2: -1`。
+  对照 round171 §1.1（不修版）：仍 `input acl(s): 0` + `2: 0`（静默残留）。
+3.2 **#390 形态②（L2→L3 角色交接）真机通过**：rev1163 建 `vs-h`(L2)+`ports 1 ens224`+portsec 白名单+`f2acl`
+  （portsec macip ACL `applied on sw_if_index 2`）；**触发** rev1164（单会话：删 vs-h + 删白名单 + 建 `vs-g` L3
+  + `acl-in f2acl`）→ 提交成功；**断言**：`show acl-plugin interface` = `sw_if_index 2: input acl(s): 0`（f2acl 绑上）
+  **且** `macip interface` = `2: 0`、`nfvis-nonip-permit` 的 `applied on sw_if_index(s): 2`（伴随 macip **已绑**）。
+  对照 round171 §1.2（不修版）：`2: -1`（域内非 IP/ARP 静默被丢）。
+3.3 **#390 形态③（删接口元素）真机通过**：rev1166 `set interfaces ens224 storm-control broadcast 1000` →
+  `show policer` = `nfvis-storm-ens224-broadcast … cir 1000`、`show classify tables` TableIdx 0 Sessions 1；
+  **触发** rev1167（单会话：`delete vpp dpdk dev ens224` + `delete interfaces ens224`）→ 提交成功；
+  **断言**：`show policer` **空**、`show classify tables` = `No classifier tables configured`。
+  对照 round171 §1.3（不修版）：policer 与分类表残留、限速仍挂在口上。
+3.4 **#392 restore 真机通过 + 守卫回归对照**：
+  - 备份：`request system configuration backup to /root/r172-pre.tar.gz`（3,462 B）→ 制造差异：
+    `set system firewall rule 1 action accept source 192.0.2.0/24` + `commit confirmed 3`（rev1169；读视图显示
+    「已配置…已收敛」，规则在册）。
+  - **回归对照（用户会话守卫不变）**：同规则以 **ssh 来源 plain `commit`** 提交 → **被拒**（脚本在该行停止、含错误标记）。
+  - **修复验证**：`request system configuration restore /root/r172-pre.tar.gz --yes` → **已恢复（revision 1170）**
+    （修复前该路径会被「防火墙变更必须以 commit confirmed 提交」拒死）；恢复后 `display set` 34 行＝基线、
+    `show system firewall` = 未配置、四服务 active。
+3.5 **#391：单测红-绿覆盖（真机原始帧注入未执行，如实登记）**：
+  - 新增 5 用例（`TestDHCPLeaseTableDeclineGhost` / `TestDHCPLeaseTableSetPoolRemovesGhost` /
+    `TestDHCPLeaseTableDeclineDoesNotClobber` / `TestDHCPServerLeasesReclaimsExpiredDeclinedGhost` 等）。
+  - **红**（临时还原旧行为：sweep/setPool 按 byMAC-only、去掉 decline 守卫）5 项全 FAIL，签名含
+    `隔离到期后 MAC 为空的幽灵条目应被回收` / `换池后池外 byIP-only 幽灵应被移除` /
+    `decline 不得覆盖新租约的 byMAC 槽` / `到期后读视图应为空: [{… State:declined ExpiresInSeconds:1}]`
+    （最后一条正是「恒剩 1 秒」缺陷）；**绿**（还原修复）同命令 5 项全 PASS，全包 `ok`。
+  - **未做真机**：需 AF_PACKET 定向注入 DHCP DECLINE/DISCOVER（round154 的注入器未留存，且注入方向与服务端
+    收包过滤存在不确定性）——按项目惯例如实登记为**单测覆盖**（与 round153 B9「无真机注入通道」同例）。
+3.6 全量测试：`make check`（串行）RC=0；各实现子智能体另跑 `go build ./...` / `go vet ./...` /
+  `GOFLAGS=-p=1 go test ./... -count=1` 均通过。
+
+§4 现场与清场（如实）
+- 真机升级：源码 `git archive v2-round172-fixp0` 同步 `/root/src.new` → `make deb VERSION=2.0.0~dev114
+  SOURCE_DATE_EPOCH=1791298074` → `dpkg -i`；`show version` = **2.0.0~dev114**。
+- 实验配置修订：rev1159~1170（启用/停用 ens224、三形态现场、防火墙 confirmed 规则、restore）。
+- 终态：`display set` **34 行＝基线**；`vppctl show acl-plugin interface` 空、`show acl-plugin macip acl` 空、
+  `show classify tables` = `No classifier tables configured`、`show policer` 空；`show system firewall` = 未配置；
+  四服务 active；`/root/r172-pre.tar.gz` 备份留存（未删，供复查）。
+- **四套件未复跑**（本轮为修复交付 + 定向真机验证；套件复跑按惯例在合并前/后单独执行，基线沿用 round170：
+  fulltest 273/0/20 ｜ 语义 26/0/3 ～27/0/2 ｜ lifecycle 23/0/2+登记1 ｜ pty 10/10）。
+
+§5 账目同步
+- 附录 A：决策 #390/#391/#392 三行；`AGENTS.md` 决策计数 291→**294**、范围 `#300~#392`。
+- `docs/v2待做.md`：R171-1/R171-2/R171-3 标为**已收口（决策 #390/#391/#392）**。
+- `docs/v2已做.md`：决策总表补 #390/#391/#392；范围表述与 §四 证据索引一并回填。
+- 体检报告与登记：`docs/evidence/v2-round171-midpoint-audit.txt`、`docs/v2待做.md`「新登记（round171）」。

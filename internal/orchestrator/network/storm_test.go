@@ -796,3 +796,70 @@ func TestStormCountersFromDump(t *testing.T) {
 		t.Fatal("不存在的 policer 应 ok=false（不返回零值当真值）")
 	}
 }
+
+// 决策 #390③：L2Network.TeardownInterface 的接线——接口元素被删时，storm/portsec/QoS
+// 三者的接口级绑定都要撤掉（复用各自「空声明＝teardown」的既有路径）。
+func TestL2NetworkTeardownInterface(t *testing.T) {
+	ctx := context.Background()
+
+	sf := newFakeStormClient()
+	sf.ifidx["ens224"] = 9
+	storm := NewStormProvider(sf)
+	if err := storm.ApplyInterface(ctx, model.InterfaceConfig{
+		Name: "ens224", StormControl: &model.StormControl{BroadcastKbps: 1000}}); err != nil {
+		t.Fatalf("前置 storm 下发: %v", err)
+	}
+	if _, ok := sf.pols["nfvis-storm-ens224-broadcast"]; !ok {
+		t.Fatalf("前置：storm policer 应在: %v", sf.pols)
+	}
+
+	pf := newFakePortSec()
+	portsec := NewPortSecProvider(pf)
+	if err := portsec.ApplyInterface(ctx, model.InterfaceConfig{
+		Name: "ens224", PortSecurity: []model.PortSecMAC{"b0:b0:00:00:00:01"}}); err != nil {
+		t.Fatalf("前置 portsec 下发: %v", err)
+	}
+	if _, bound := pf.bound[4]; !bound {
+		t.Fatalf("前置：portsec macip 应已绑: %v", pf.bound)
+	}
+
+	svcf := newFakeSvc()
+	svc := NewServicesProvider(svcf)
+	if err := svc.ApplyInterface(ctx, model.InterfaceConfig{Name: "ens224", IngressPolicy: "pin"}); err != nil {
+		t.Fatalf("前置 QoS 绑定: %v", err)
+	}
+
+	n := NewL2Network(nil, nil)
+	n.SetStorm(storm)
+	n.SetPortSec(portsec)
+	n.SetServices(svc)
+
+	svcf.pins, svcf.pouts = nil, nil // 只保留 teardown 自身的调用
+	if err := n.TeardownInterface(ctx, model.InterfaceConfig{Name: "ens224"}); err != nil {
+		t.Fatalf("TeardownInterface: %v", err)
+	}
+	if _, ok := sf.pols["nfvis-storm-ens224-broadcast"]; ok {
+		t.Fatalf("storm policer 应删除: %v", sf.pols)
+	}
+	if _, bound := pf.bound[4]; bound {
+		t.Fatalf("portsec macip 应解绑: %v", pf.bound)
+	}
+	if len(svcf.pins) != 1 || svcf.pins[0] != "pin:off" {
+		t.Fatalf("QoS 入向应解绑: %v", svcf.pins)
+	}
+
+	// 接口已从 VPP 消失（ErrIfaceUnavailable）按已达成，不阻断提交。
+	sf3 := newFakeStormClient()
+	sf3.ifidx["ens224"] = 9
+	storm3 := NewStormProvider(sf3)
+	if err := storm3.ApplyInterface(ctx, model.InterfaceConfig{
+		Name: "ens224", StormControl: &model.StormControl{BroadcastKbps: 1000}}); err != nil {
+		t.Fatal(err)
+	}
+	delete(sf3.ifidx, "ens224")
+	n3 := NewL2Network(nil, nil)
+	n3.SetStorm(storm3)
+	if err := n3.TeardownInterface(ctx, model.InterfaceConfig{Name: "ens224"}); err != nil {
+		t.Fatalf("接口已不在 VPP 时 teardown 应按已达成（不阻断）: %v", err)
+	}
+}

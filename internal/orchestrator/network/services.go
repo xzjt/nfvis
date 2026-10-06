@@ -260,6 +260,50 @@ func (p *ServicesProvider) ApplyInterface(ctx context.Context, iface model.Inter
 	return nil
 }
 
+// TeardownInterface 解绑一条已从声明里删除的接口元素的 QoS policer 绑定（入向/出向，决策 #390③）。
+// 只动绑定、不碰 MTU/状态（接口即将随数据面重启消失，不应对它做接口层设置）。
+// 登记按「最后一个成功下发的状态」逐向摘除（决策 #363 口径）：某向解绑成功才清该向登记；
+// 接口已不在 VPP 时按既有容忍跳过并摘陈旧登记（同 DeleteQos）。
+func (p *ServicesProvider) TeardownInterface(ctx context.Context, ifname string) error {
+	prevIn := p.boundPolicy(ifname, false)
+	prevOut := p.boundPolicy(ifname, true)
+	if prevIn == "" && prevOut == "" {
+		return nil
+	}
+	c, err := p.client()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	idx, ok, err := c.SwInterfaceIndex(ifname)
+	if err != nil {
+		return fmt.Errorf("解析接口 %s: %w", ifname, err)
+	}
+	if !ok {
+		// 接口已不在 VPP：绑定随接口消失，摘陈旧登记（同 DeleteQos 的既有容忍）。
+		if prevIn != "" {
+			p.setBoundPolicy(ifname, "", false)
+		}
+		if prevOut != "" {
+			p.setBoundPolicy(ifname, "", true)
+		}
+		return nil
+	}
+	if prevIn != "" {
+		if err := c.PolicerInput(idx, prevIn, false); err != nil {
+			return fmt.Errorf("解绑接口 %s 的入向 policer %s: %w", ifname, prevIn, err)
+		}
+		p.setBoundPolicy(ifname, "", false)
+	}
+	if prevOut != "" {
+		if err := c.PolicerOutput(idx, prevOut, false); err != nil {
+			return fmt.Errorf("解绑接口 %s 的出向 policer %s: %w", ifname, prevOut, err)
+		}
+		p.setBoundPolicy(ifname, "", true)
+	}
+	return nil
+}
+
 // InterfaceExists 查询接口当前是否存在于 VPP（决策 #333：恢复收敛告警的按来源廉价复核用，
 // 与 ApplyInterface 判 ok 同一条 SwInterfaceIndex，dump 级代价；复用本 Provider 的既有
 // 客户端工厂，不新建 VPP 连接通道）。
