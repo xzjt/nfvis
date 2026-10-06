@@ -66,6 +66,10 @@ var roundTripAliasCases = [][]string{
 		"set virtual-switches vs-l3 static-routes 10.0.0.0/8 next-hop 10.0.0.1,10.0.0.2"},
 	// qos_policies 落点（根级回落发射器）
 	{"set qos policies p1 cir 100000000 cbs 2000"},
+	// 决策 #383：vxlan_tunnels 落点（根级回落发射器）——必填三叶一行给全，
+	// dst-port/virtual-switch 为可选叶子（含两者的形态一并往返）。
+	{"set vxlan tunnels tun1 vni 100 local 10.99.0.1 remote 10.99.0.2"},
+	{"set virtual-switches vs1 type l2", "set vxlan tunnels tun1 vni 100 local 10.99.0.1 remote 10.99.0.2 dst-port 5789 virtual-switch vs1"},
 	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 vlan access 100"},
 	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 gateway ip 192.168.100.1/24"},
 	// 决策 #335：dhcp-relay（模型单值字符串，语句树两层关键字）

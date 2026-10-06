@@ -94,6 +94,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show acls` | ACL 列表 | `GET /acls` | ✅ |
 | `show acls <name> detail` | 规则与绑定详情 | `GET /acls/{name}` | ✅ |
 | `show nat` | NAT 池/规则/转换会话计数 | `GET /nat` | ✅ |
+| `show vxlan tunnels` | VXLAN 隧道读视图：名/VNI/本地下垫/远端下垫/端口/交换机 + **是否已在 VPP**（sw_if_index 与 instance）；按 `(vni, local, remote, dst_port)` 元组与数据面比对（不依赖 VPP 接口名）；运行态不可用时如实说明（不把「说不清」报成「未收敛」） | `GET /vxlan-tunnels` | 🚫 待真机（实现已就位：govpp `vxlan_tunnel_v2_dump` 读视图 + CLI/REST 同源；round164 spike 已实证 `vppctl show vxlan tunnel` 的字段与元组口径） |
 | `show port-mirroring` | SPAN 会话状态 | `GET /port-mirroring` | ✅ |
 | `show qos policies` | 限速策略与绑定 | `GET /qos/policies` | ✅ |
 | `show dns proxy` | 数据面 DNS 代理（启用态 + 全局上游 + 各域覆盖；决策 #345） | `GET /dns/proxy` | ✓（round124：启用态/上游读视图三面同源；数据面路径见 round124 证据——punt socket 转发器） |
@@ -354,6 +355,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set port-mirroring <n> source vnf <vm> interface <vnic> direction <…>` | SPAN 源（vNIC） | VPP span | ✅ |
 | `set port-mirroring <n> analyzer interface <if>` | 分析口 | VPP span | ✅ |
 | `set qos policies <n> cir <n> cbs <n>` | 限速策略（bps/bytes） | VPP policer | ✅ |
+| `set vxlan tunnels <n> vni <id> local <ip> remote <ip> [dst-port <n>] [virtual-switch <vs>]` | VXLAN overlay 隧道（单播 remote、IPv4 下垫层）：建/改；`virtual-switch` 给了就把隧道口加入该 **L2** 交换机的 bridge-domain；改 `vni/local/remote/dst-port` 时**先撤旧条目再建新**（不给旧隧道留残留）；`dst-port` 缺省 4789 | VPP vxlan plugin（`vxlan_add_del_tunnel_v3` + 置 up + 入 BD） | 🚫 待真机（实现与单测就位；round164 spike 已实证 `create vxlan tunnel` 建出 `vxlan_tunnel0` 与 dump 字段） |
+| `delete vxlan tunnels <n> [vni \| local \| remote \| dst-port \| virtual-switch]` | 撤销隧道：裸 delete ＝删整条（摘 BD 归属 + 撤回隧道条目）；逐叶子只清该叶子（`vni/local/remote` 是必填叶子，清掉后提交校验会拒绝——按契约语义只应整体删除） | VPP vxlan plugin | 🚫 待真机（同上） |
 
 ### 2.6 `resource-pools`（§2.6，FR-CMP-001/005、FR-SYS-002/003）
 

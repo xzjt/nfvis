@@ -40,6 +40,7 @@ func Validate(c Config) []ValidateError {
 	v.checkNat(c)
 	v.checkPortMirroring(c)
 	v.checkQos(c)
+	v.checkVxlanTunnels(c)
 	v.checkResourcePools(c)
 	v.checkVpp(c)
 	v.checkProtocols(c)
@@ -1030,6 +1031,67 @@ func (v *validator) checkQos(c Config) {
 		}
 		if q.Cbs <= 0 {
 			v.errf(p+".cbs", "cbs 必须大于 0")
+		}
+	}
+}
+
+// checkVxlanTunnels 校验 VXLAN 隧道（FR-NET-019，决策 #383）。
+//
+// 口径（与数据面实现同源）：name 走既有命名规则；vni 1..16777215；
+// local/remote 为**有效 IPv4**（v1 不做 IPv6 下垫层）且不相等（VPP 的 encap 查找不允许
+// 自环）；dst-port 0/缺省视为 4789、否则 1..65535；name、vni、(vni,local,remote) 三元组重复拒绝；
+// virtual-switch 给了就必须**存在且为 L2**（L3 交换机没有 BD，隧道口无处可入）。
+//
+// 「被隧道引用的交换机不得删除」由本检查的引用缺失分支承担（与既有「先解引用、后删被引用」
+// 口径一致）：交换机被删后仍留在配置里的隧道会命中 virtual-switch 不存在，报错并给出照做路径。
+func (v *validator) checkVxlanTunnels(c Config) {
+	dupCheck(v, c.VxlanTunnels, "vxlan-tunnels", func(t VxlanTunnel) string { return t.Name }, "VXLAN 隧道")
+	seenVni := map[int]string{}
+	seenTuple := map[string]string{}
+	for _, t := range c.VxlanTunnels {
+		p := fmt.Sprintf("vxlan-tunnels[%s]", t.Name)
+		if !v.checkName(p, t.Name, "VXLAN 隧道") {
+			continue
+		}
+		if t.Vni < VxlanMinVni || t.Vni > VxlanMaxVni {
+			v.errf(p+".vni", "VNI %d 超出范围：须为 %d-%d", t.Vni, VxlanMinVni, VxlanMaxVni)
+		} else if prev, dup := seenVni[t.Vni]; dup {
+			v.errf(p+".vni", "VNI %d 已被隧道 %q 使用：同一 VNI 只能有一条隧道", t.Vni, prev)
+		} else {
+			seenVni[t.Vni] = t.Name
+		}
+		if !checkIP4(t.Local) {
+			v.errf(p+".local", "本地下垫地址 %q 必须是 IPv4 地址（当前版本不支持 IPv6 下垫层）", t.Local)
+		}
+		if !checkIP4(t.Remote) {
+			v.errf(p+".remote", "远端下垫地址 %q 必须是 IPv4 单播地址（当前版本不支持 IPv6 下垫层与组播 remote）", t.Remote)
+		}
+		if t.Local == t.Remote && t.Local != "" {
+			v.errf(p+".remote", "本地下垫地址与远端下垫地址不能相同（%s）", t.Local)
+		}
+		if t.DstPort != 0 && (t.DstPort < 1 || t.DstPort > 65535) {
+			v.errf(p+".dst_port", "目的端口 %d 超出范围：须为 1-65535（缺省 %d）", t.DstPort, VxlanDefaultDstPort)
+		}
+		if t.Local != "" && t.Remote != "" {
+			key := fmt.Sprintf("%d|%s|%s", t.Vni, t.Local, t.Remote)
+			if prev, dup := seenTuple[key]; dup {
+				v.errf(p, "与隧道 %q 的 (vni, local, remote) 相同：同一元组只能声明一条隧道", prev)
+			} else {
+				seenTuple[key] = t.Name
+			}
+		}
+		if t.VirtualSwitch != "" {
+			switch {
+			case !v.vsNames[t.VirtualSwitch]:
+				// 交换机被删而隧道仍引用它——「被隧道引用的交换机不得删除」的落点：
+				// 拒绝提交并给出照做路径（先解引用、再删被引用）。
+				v.errf(p+".virtual_switch", "虚拟交换机 %q 不存在：若刚删除该交换机，"+
+					"它仍被本 VXLAN 隧道引用——请先解引用（delete vxlan tunnels %s virtual-switch），再删交换机",
+					t.VirtualSwitch, t.Name)
+			case !v.l2vs[t.VirtualSwitch]:
+				v.errf(p+".virtual_switch", "虚拟交换机 %q 是 L3 交换机（没有 bridge-domain）：隧道口只能加入 L2 交换机",
+					t.VirtualSwitch)
+			}
 		}
 	}
 }

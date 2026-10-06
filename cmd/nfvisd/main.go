@@ -216,6 +216,9 @@ func run() error {
 	// 已消失 socket 的注册＝域内 DHCP 黑洞）。
 	defer func() { _ = dhcpServer.Close() }()
 	netProvider.SetDHCPServer(dhcpServer)
+	// 决策 #383：VXLAN overlay（VPP vxlan plugin；单播 remote、IPv4 下垫层、L2 成员）。
+	// 恢复重放按 dump 的 (vni, src, dst, dst_port) 元组匹配存量（不靠进程内登记/接口名）。
+	netProvider.SetVxlan(network.NewVxlanProviderFunc(vppMgr.VxlanClientFunc()))
 	netProvider.SetACL(network.NewAclProviderFunc(vppMgr.AclClientFunc()))
 	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
 	netProvider.SetBond(network.NewBondProviderFunc(vppMgr.BondClientFunc()))
@@ -887,9 +890,11 @@ func run() error {
 		// 决策 #359：DHCP 服务器运行态读物（租约端点 + 端口读视图过滤内置 tap）。
 		// *network.L2Network 自持三个读物方法，直接传入。
 		DHCPServer: netProvider,
-		LLDP:       &lldpController{net: netProvider},
-		State:      state.New(vppMgr.Runtime()),
-		SRIOV:      sriovProvider,
+		// 决策 #383：VXLAN 运行态读物（GET /vxlan-tunnels 与 CLI 同源）。*network.L2Network 自持。
+		Vxlan: netProvider,
+		LLDP:  &lldpController{net: netProvider},
+		State: state.New(vppMgr.Runtime()),
+		SRIOV: sriovProvider,
 		DPDK: &dpdkController{b: dpdkBinder, rec: dpdkBindings, logger: log, facts: mgmtFacts,
 			// 数据面占用探测（发现 #13）：解绑前问 VPP「这个口还在你手里吗」
 			dataplane: func(ifname string) (bool, error) {

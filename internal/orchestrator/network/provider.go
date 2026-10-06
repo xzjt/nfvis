@@ -33,6 +33,7 @@ type L2Network struct {
 	dhcp                         *DhcpProvider          // 交换机 DHCP 中继（决策 #335，可空——未注入即无 relay 编排）
 	dhcpServer                   *DHCPServerProvider    // 域内 DHCP 服务器（决策 #359，可空——未注入即无 server 编排）
 	dns                          *DNSProxyProvider      // 数据面 DNS 代理（决策 #345，可空）
+	vxlan                        *VxlanProvider         // VXLAN 隧道（决策 #383，可空——未注入即无隧道编排）
 	vhost                        *VhostUserProvider     // M4-4：VNF vNIC 接入
 	memif                        *MemifProvider         // M4-7：容器 vNIC 接入
 	vhostDir                     string                 // vhost-user socket 目录（恢复收敛重放用）
@@ -151,6 +152,37 @@ func (n *L2Network) ApplyDNSProxy(ctx context.Context, want orchestrator.DNSProx
 		return nil
 	}
 	return n.dns.Sync(ctx, want)
+}
+
+// SetVxlan 追加 VXLAN 隧道编排（决策 #383；未注入时隧道语句在提交校验层仍可配，
+// 但数据面无下发路径——恢复收敛会如实记未收敛项，正常装配总是注入）。
+func (n *L2Network) SetVxlan(p *VxlanProvider) { n.vxlan = p }
+
+// ApplyVxlan 收敛一条 VXLAN 隧道声明（决策 #383）。调用时机：提交编排把它放在交换机/BD
+// **之后**（入 BD 要 BD 已在）；恢复收敛的重放走 recovery.go 的独立记源。未注入时空操作。
+func (n *L2Network) ApplyVxlan(ctx context.Context, t model.VxlanTunnel) error {
+	if n.vxlan == nil {
+		return nil
+	}
+	return n.vxlan.ApplyVxlan(ctx, t)
+}
+
+// DeleteVxlan 撤销一条 VXLAN 隧道（决策 #383）：配置里被整条删除的隧道由此回收
+// （先摘 BD 归属、再按元组撤条目）。未注入时空操作。
+func (n *L2Network) DeleteVxlan(ctx context.Context, t model.VxlanTunnel) error {
+	if n.vxlan == nil {
+		return nil
+	}
+	return n.vxlan.DeleteVxlan(ctx, t)
+}
+
+// VxlanStates VXLAN 隧道运行态读视图（决策 #383；供 API/CLI 读物，按元组键索引）。
+// ok=false（错误）＝数据面不可用/未装配——读视图据此如实报「未收敛」而不是编造。
+func (n *L2Network) VxlanStates(ctx context.Context) (map[string]VxlanState, error) {
+	if n.vxlan == nil {
+		return nil, ErrL2Unavailable
+	}
+	return n.vxlan.VxlanStates(ctx)
 }
 
 // SetLldp 追加 LLDP 编排（M3-6）。

@@ -152,6 +152,13 @@ type NetworkProvider interface {
 	DeleteSpan(ctx context.Context, name string) error
 	ApplyQos(ctx context.Context, q model.QosPolicy) error
 	DeleteQos(ctx context.Context, name string) error
+	// ApplyVxlan 收敛一条 VXLAN 隧道声明（决策 #383）：建/改（变更时先按已下发登记的旧元组
+	// 撤、再建新——同 #380 的教训）、接口置 up、声明了 virtual-switch 时把隧道口加入该
+	// **L2** 交换机的 BD；元组在 VPP 里已存在则复用（幂等，恢复重放同路径）。
+	ApplyVxlan(ctx context.Context, t model.VxlanTunnel) error
+	// DeleteVxlan 撤销一条 VXLAN 隧道（配置里被整条删除的隧道由此回收：先摘 BD 归属、
+	// 再按元组撤条目；条目本就不在 VPP＝已达成）。
+	DeleteVxlan(ctx context.Context, t model.VxlanTunnel) error
 
 	// ApplyVnfInterface 建立 VNF vNIC 的接入（FR-NET-020/021/023）：vhost-user 时
 	// 在 VPP 侧建 socket 接口并命名（交换机端口随后按名挂接）；sriov-vf 不经 VPP。
@@ -281,6 +288,8 @@ func (noopNetwork) ApplySpan(context.Context, model.PortMirroring) error     { r
 func (noopNetwork) DeleteSpan(context.Context, string) error                 { return nil }
 func (noopNetwork) ApplyQos(context.Context, model.QosPolicy) error          { return nil }
 func (noopNetwork) DeleteQos(context.Context, string) error                  { return nil }
+func (noopNetwork) ApplyVxlan(context.Context, model.VxlanTunnel) error      { return nil }
+func (noopNetwork) DeleteVxlan(context.Context, model.VxlanTunnel) error     { return nil }
 func (noopNetwork) ApplyVnfInterface(context.Context, VnfPort) error         { return nil }
 func (noopNetwork) DeleteVnfInterface(context.Context, string, string) error { return nil }
 func (noopNetwork) EnsureConsistent(context.Context, model.Config) []error   { return nil }

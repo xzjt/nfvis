@@ -1374,6 +1374,47 @@ nfvis# delete virtual-switches vs-dmz learn-limit    # 清除：恢复 VPP 默�
 - **STP/RSTP 未做**（属 v3）；cross-connect 直通无 MAC 学习，本检测对其无效（见 §8.11）。
 - 检测状态在 nfvisd 进程内，**重启后从零重新积累轮次**再判定（学习上限这类单轮判据不受影响）。
 
+### 8.13 VXLAN overlay（隧道）
+
+用 VXLAN 把两台机器上的二层域打通：本机建一条单播隧道，把隧道口加入某个 **L2 交换机**的
+bridge-domain，对端桥接同一 VNI 即可在同一二层域内互通。
+
+```bash
+nfvis# set vxlan tunnels vx-a vni 100 local 10.99.0.1 remote 10.99.0.2
+nfvis# set vxlan tunnels vx-a vni 100 local 10.99.0.1 remote 10.99.0.2 virtual-switch vs-app
+nfvis# commit
+
+nfvis> show vxlan tunnels              # 名/VNI/本地/远端/端口/交换机 + 是否已在数据面
+```
+
+**语句**：
+
+| 语句 | 说明 |
+|---|---|
+| `set vxlan tunnels <name> vni <id> local <ip> remote <ip> [dst-port <n>] [virtual-switch <vs>]` | 建/改隧道。`vni` 取值 1-16777215；`local`/`remote` 为 **IPv4** 且不得相同；`dst-port` 缺省 4789；`virtual-switch` 给了就把隧道口加入该 **L2** 交换机的 bridge-domain |
+| `delete vxlan tunnels <name>` | 删整条隧道（同时摘掉它的 bridge-domain 归属） |
+| `delete vxlan tunnels <name> [vni \| local \| remote \| dst-port \| virtual-switch]` | 只清一个叶子（`vni`/`local`/`remote` 是三件必填叶子，清掉后提交会被校验拒绝——要撤就整条删） |
+
+**行为与护栏**：
+
+- 修改 `vni`/`local`/`remote`/`dst-port` 时，平台**先撤掉旧隧道条目再建新的**——不会留下
+  旧隧道继续可达。
+- 隧道口默认置为 up；给了 `virtual-switch` 才加入 bridge-domain。**被隧道引用的交换机不能删**：
+  先 `delete vxlan tunnels <name> virtual-switch` 解引用，再删交换机。
+- 设备 `instance` 由平台自动分配（同一台机器上唯一），数据面接口名（如 `vxlan_tunnel0`）
+  由数据面按 instance 生成，**配置与读视图都不依赖它**。
+- 重启数据面（`request vpp restart`）或重启 nfvis 后，平台按 committed 配置自动重放隧道
+  （按 VNI/本地/远端/端口 匹配存量，已存在则不重复建）。
+- `show vxlan tunnels`（或 Web 控制台「网络对象」页的 VXLAN 隧道卡）逐条给出「是否已在数据面」；
+  数据面连接不可用时如实显示「运行态不可用」，而不是把说不清的状态显示成「未收敛」。
+
+**当前版本边界（务必知悉）**：
+
+- **只做单播 remote**：不做组播/BUM（广播、未知单播、组播）复制，两端需两两建隧；
+- **只做 IPv4 下垫层**：`local`/`remote` 不接受 IPv6 地址；
+- **只做 L2 成员**：隧道口不能当三层接口用，也不能跨 VRF 建隧；
+- 封装参数只支持改目的端口，VXLAN-GPE、ARP/ND 代理与 Bypass 均未提供。
+
 ---
 
 ## 9. 计算负载：VM 与容器

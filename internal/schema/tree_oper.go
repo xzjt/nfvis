@@ -114,6 +114,10 @@ func OperRoot() *Node {
 				),
 			),
 			K("nat", "NAT 池、规则与转换会话计数"),
+			// 决策 #383：VXLAN 隧道读视图（配置声明 × 数据面实况，与 GET /vxlan-tunnels 同源）。
+			K("vxlan", "VXLAN overlay",
+				K("tunnels", "隧道读视图（名/VNI/下垫地址/端口/交换机/是否已在 VPP）"),
+			),
 			K("port-mirroring", "SPAN 会话状态"),
 			// 决策 #345：数据面 DNS 代理读视图（启用态 + 全局上游 + 各域覆盖，与 GET /dns/proxy 同源）。
 			K("dns", "DNS",

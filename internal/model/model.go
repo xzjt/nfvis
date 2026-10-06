@@ -17,6 +17,7 @@ type Config struct {
 	Nat                     *NatConfig          `json:"nat,omitempty"`
 	PortMirroring           []PortMirroring     `json:"port_mirroring,omitempty"`
 	QosPolicies             []QosPolicy         `json:"qos_policies,omitempty"`
+	VxlanTunnels            []VxlanTunnel       `json:"vxlan_tunnels,omitempty"`
 	ResourcePools           *ResourcePool       `json:"resource_pools,omitempty"`
 	Vpp                     *VppConfig          `json:"vpp,omitempty"`
 	Protocols               *ProtocolsConfig    `json:"protocols,omitempty"`
@@ -344,6 +345,37 @@ type QosPolicy struct {
 	Name string `json:"name"`
 	Cir  int    `json:"cir"` // bps
 	Cbs  int    `json:"cbs"` // bytes
+}
+
+// VxlanTunnel VXLAN overlay 隧道（单播 remote；v1 只做 L2 成员）。
+//
+// Name 是产品侧标识——VPP 接口名由 VPP 按 instance 生成，产品**不依赖其名**：
+// 恢复重放按 (vni, local, remote, dst_port) 元组在 VPP 里查找存量（与 DHCP tap 按
+// HostIfName 复用的教训同族）。VirtualSwitch 可选：给了就把隧道口加入该 L2 交换机的 BD。
+// v1 边界（如实）：不做组播/BUM 复制、ARP/ND 代理与 Bypass、VXLAN-GPE、IPv6 下垫层、
+// dst-port 以外的封装参数、隧道作 L3 接口、跨 VRF 建隧。
+type VxlanTunnel struct {
+	Name          string `json:"name"`
+	Vni           int    `json:"vni"`
+	Local         string `json:"local"`  // 本地下垫地址（IPv4）
+	Remote        string `json:"remote"` // 远端下垫地址（IPv4，单播）
+	DstPort       int    `json:"dst_port,omitempty"`
+	VirtualSwitch string `json:"virtual_switch,omitempty"`
+}
+
+// VXLAN 取值域与缺省（校验与数据面共用，单一事实源）。
+const (
+	VxlanMinVni         = 1
+	VxlanMaxVni         = 16777215 // 24 位
+	VxlanDefaultDstPort = 4789     // IANA 分配的 VXLAN UDP 端口
+)
+
+// EffectiveDstPort 生效的目的端口：缺省（0/未配置）回落 4789。
+func (t VxlanTunnel) EffectiveDstPort() int {
+	if t.DstPort == 0 {
+		return VxlanDefaultDstPort
+	}
+	return t.DstPort
 }
 
 // ResourcePool 全局资源池（FR-CMP-001）。count 为配置项；total/allocated/free 为运行态视图。

@@ -676,6 +676,13 @@
               "$ref": "#/components/schemas/Vrf"
             },
             "type": "array"
+          },
+          "vxlan_tunnels": {
+            "description": "VXLAN overlay 隧道（FR-NET-019，决策",
+            "items": {
+              "$ref": "#/components/schemas/VxlanTunnel"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -3360,6 +3367,97 @@
         },
         "required": [
           "name"
+        ],
+        "type": "object"
+      },
+      "VxlanTunnel": {
+        "description": "VXLAN overlay 隧道（FR-NET-019，决策 #383）。`name` 是产品侧标识——VPP 接口名由 VPP 按\n`instance` 生成，产品**不依赖其名**：恢复重放按 `(vni, local, remote, dst_port)` 元组在\n数据面查找存量。`virtual-switch` 可选，给了就把隧道口加入该 **L2** 交换机的\nbridge-domain。v1 边界（如实）：单播 remote（不做组播/BUM 复制）、IPv4 下垫层、\nL2 成员（隧道作 L3 接口、跨 VRF 建隧、VXLAN-GPE 均不做），`dst_port` 以外的封装参数不做。\n",
+        "properties": {
+          "dst_port": {
+            "description": "目的 UDP 端口（读视图给**生效值**：未配置回落 4789；写入时 1-65535，省略即 4789）",
+            "type": "integer"
+          },
+          "local": {
+            "description": "本地下垫地址（IPv4）",
+            "type": "string"
+          },
+          "name": {
+            "description": "隧道名（产品侧标识；≤64 字符，字母数字与 -_.）",
+            "type": "string"
+          },
+          "remote": {
+            "description": "远端下垫地址（IPv4 单播；不得与 local 相同）",
+            "type": "string"
+          },
+          "virtual_switch": {
+            "description": "加入该 L2 交换机的 bridge-domain（必须是已声明的 L2 交换机；被隧道引用的交换机不得删除——先解引用）",
+            "type": "string"
+          },
+          "vni": {
+            "description": "VXLAN Network Identifier（1-16777215；同 VNI 只能有一条隧道）",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "vni",
+          "local",
+          "remote",
+          "dst_port"
+        ],
+        "type": "object"
+      },
+      "VxlanTunnelsView": {
+        "description": "VXLAN 隧道读视图（`GET /vxlan-tunnels`；与 CLI `show vxlan tunnels` 同源，决策 #383）。\n按 `(vni, local, remote, dst_port)` 元组与数据面 `vxlan_tunnel_dump` 逐条比对（不依赖\nVPP 接口名）；运行态不可用时 `runtime_available=false` 并给出原因——此时各条的\n`in_vpp` **不可信**（不是「不在数据面」，是「说不清」）。\n",
+        "properties": {
+          "runtime_available": {
+            "description": "数据面运行态是否可用（false 时逐条 in_vpp 不可信，原因见 runtime_reason）",
+            "type": "boolean"
+          },
+          "runtime_reason": {
+            "description": "运行态不可用的原因（可用时不出现）",
+            "type": "string"
+          },
+          "tunnels": {
+            "description": "配置声明的隧道（按声明序；未声明时为空数组，不发 null）",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/VxlanTunnel"
+                },
+                {
+                  "properties": {
+                    "in_vpp": {
+                      "description": "该元组的隧道是否已在数据面（runtime_available=false 时不可信）",
+                      "type": "boolean"
+                    },
+                    "instance": {
+                      "description": "产品分配的设备 instance（即 VPP 接口名的序号来源；仅 in_vpp=true 时给出）",
+                      "type": "integer"
+                    },
+                    "runtime_available": {
+                      "description": "本条所在读视图的运行态是否可用（false 时 in_vpp 不可信）",
+                      "type": "boolean"
+                    },
+                    "sw_if_index": {
+                      "description": "数据面 sw_if_index（仅 in_vpp=true 时给出）",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "runtime_available",
+                    "in_vpp"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tunnels",
+          "runtime_available"
         ],
         "type": "object"
       }
@@ -8121,6 +8219,27 @@
         "summary": "全量替换静态路由",
         "tags": [
           "vrfs"
+        ]
+      }
+    },
+    "/vxlan-tunnels": {
+      "get": {
+        "description": "v1 只做**单播 remote、IPv4 下垫层、L2 成员**（隧道口可加入某 L2 交换机的 bridge-domain）。\n运行态按 `(vni, local, remote, dst_port)` 元组与数据面 `vxlan_tunnel_dump` 匹配——\n**不依赖 VPP 接口名**（接口名由产品分配的 `instance` 生成）。配置变更（改 vni/local/remote/\ndst-port）在提交期先撤旧条目再建新；`request vpp restart`/`systemctl restart nfvis` 后按\ncommitted 配置重放（元组已存在即复用，不重复建）。运行态不可用时 `runtime_available=false`\n并给出原因，各条 `in_vpp` 不可信（不把「说不清」报成「未收敛」）。\n",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VxlanTunnelsView"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "VXLAN 隧道读视图（配置声明 × 数据面实况；FR-NET-019，决策",
+        "tags": [
+          "network"
         ]
       }
     }

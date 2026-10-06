@@ -95,6 +95,7 @@ var cliRESTCoverage = map[string]string{
 	"show port-mirroring":                          "GET /port-mirroring",
 	"show dns proxy":                               "GET /dns/proxy",
 	"show qos policies":                            "GET /qos/policies",
+	"show vxlan tunnels":                           "GET /vxlan-tunnels",
 	"show vpp":                                     "GET /vpp/status",
 	"show vpp threads":                             "GET /vpp/status",
 	"show vpp buffers":                             "GET /vpp/status",

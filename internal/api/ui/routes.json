@@ -15,7 +15,7 @@
     { "path": "#/compute/images/:name", "title": "镜像详情", "view": "imageDetail", "detail": true, "breadcrumb": ["计算", "镜像"],
       "endpoints": ["/images/{name}"], "poll": 0 },
     { "path": "#/network", "title": "网络对象", "view": "network", "breadcrumb": ["网络", "网络对象"],
-      "endpoints": ["/vrfs", "/acls", "/nat", "/bonds", "/qos/policies", "/port-mirroring"], "poll": 5000 },
+      "endpoints": ["/vrfs", "/acls", "/nat", "/bonds", "/qos/policies", "/port-mirroring", "/vxlan-tunnels"], "poll": 5000 },
     { "path": "#/network/vrfs/:name", "title": "VRF 详情", "view": "vrfDetail", "detail": true, "breadcrumb": ["网络", "网络对象"],
       "endpoints": ["/vrfs/{name}", "/vrfs/{name}/routes"], "poll": 0 },
     { "path": "#/network/acls/:name", "title": "ACL 详情", "view": "aclDetail", "detail": true, "breadcrumb": ["网络", "网络对象"],

@@ -1059,6 +1059,46 @@ func sortedKeys(m map[string]any) []string {
 func init() {
 	rootFallbackEmitters["vrfs"] = emitVrfsFallback
 	rootFallbackEmitters["qos_policies"] = emitQosFallback
+	rootFallbackEmitters["vxlan_tunnels"] = emitVxlanFallback
+}
+
+// emitVxlanFallback 把 vxlan_tunnels[] 反推为 `vxlan tunnels <名> vni <n> local <ip> remote <ip>
+// [dst-port <n>] [virtual-switch <vs>]`（决策 #383）。
+//
+// 与 qos_policies 同族：树顶层关键字是 `vxlan`、模型键是 vxlan_tunnels，通用逆走在根层
+// 查不到 "vxlan" 键即跳过，故由根层回落钩子接管（别名 cli_aliases_vxlan.go 的对偶）。
+// vni/local/remote 是模型必填（校验要求齐备），一行给全；可选叶子仅在非零值时输出
+// （零值＝未配置，回放后序列化逐字节相同）。virtual-switch 语句回放要求该交换机已存在
+// ——交换机关键字先于根层回落发射，顺序与本文件既有约定一致。
+func emitVxlanFallback(w *stmtWriter, val any) error {
+	arr, ok := val.([]any)
+	if !ok {
+		return nil
+	}
+	for _, el := range arr {
+		t, ok := el.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := t["name"].(string)
+		vni, hasVni := t["vni"]
+		local, _ := t["local"].(string)
+		remote, _ := t["remote"].(string)
+		if name == "" || !hasVni || local == "" || remote == "" {
+			// vni/local/remote 是校验要求的必填项，正常建不出缺项配置；缺项时如实跳过
+			// （回放自校验会把缺语报告出来，而不是猜一个值）。
+			continue
+		}
+		line := []string{"vxlan", "tunnels", name, "vni", formatScalar(vni), "local", local, "remote", remote}
+		if p, ok := t["dst_port"].(float64); ok && p != 0 {
+			line = append(line, "dst-port", formatScalar(p))
+		}
+		if vs, ok := t["virtual_switch"].(string); ok && vs != "" {
+			line = append(line, "virtual-switch", vs)
+		}
+		w.add(line)
+	}
+	return nil
 }
 
 // emitVrfsFallback 把 vrfs[]（L3 数据落点，VRF 名 = 同名虚拟交换机）反推为
