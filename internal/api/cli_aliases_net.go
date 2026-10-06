@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 )
@@ -196,6 +197,20 @@ var statementAliasesNet = []aliasRule{
 		apply: ifaceStormClearAlias("multicast_kbps")},
 	{pattern: []string{"interfaces", "*", "storm-control"},
 		apply: ifaceStormBareAlias},
+
+	// interfaces <if> port-security mac <mac>（决策 #389：端口安全白名单）。
+	// set＝追加（模型 []string 数组）；delete mac <mac>＝按值删一条（大小写不敏感——
+	// 解码层已归一小写，按值删仍做归一比较，容忍操作者用大写指认同一条）；
+	// 裸 delete port-security＝清空整段＝停用。**接口须已声明**（elemByID 查不到即报错
+	// 并给照做指引——白名单只作用于已声明物理口，不允许由本语句顺带建出口声明）。
+	// MAC 合法性在语句层即时校验（给了可照做的报错）；重复/超限/前置（L2 成员等）
+	// 由提交校验统一拒绝（提交期才看得到整份配置的成员关系）。
+	{pattern: []string{"interfaces", "*", "port-security", "mac", "*"},
+		apply: ifacePortSecMacAlias},
+	{pattern: []string{"interfaces", "*", "port-security", "mac"},
+		apply: ifacePortSecMacClearAlias},
+	{pattern: []string{"interfaces", "*", "port-security"},
+		apply: ifacePortSecBareAlias},
 
 	// protocols lldp enable <bool> | advertisement-interval <n> | interface <if> enable <bool>
 	{pattern: []string{"protocols", "lldp", "enable", "*"},
@@ -1338,6 +1353,83 @@ func unsupportedStormKindMsg(op string, tokens []string) string {
 	return op + " interfaces " + tokens[1] + " storm-control unknown-unicast …：本版本不支持" +
 		" unknown-unicast 风暴抑制——判定「目的 MAC 未学习」不是以太头里的可匹配位，" +
 		"按目的 MAC 掩码只能表达广播（broadcast，ff:ff:ff:ff:ff:ff）与组播（multicast，I/G 位=1）两类"
+}
+
+// ---------- 接口端口安全（决策 #389） ----------
+
+// ifacePortSecMissing 接口未声明时的统一报错（set 与 delete 同一条）：给能照做的一步，
+// 而不是 elemByID 的「无匹配配置」（契约口径：端口安全只配在**已声明**的物理口上，
+// 本语句不代建声明——与 storm-control 同一分工）。
+func ifacePortSecMissing(ifname string) error {
+	return errString("接口 " + ifname + " 未在配置中声明：先执行 set interfaces " + ifname +
+		" description <说明> 声明该口，再配 port-security")
+}
+
+// ifacePortSecMacAlias：`set interfaces <if> port-security mac <mac>`（追加）/ 同形 delete（按值删）。
+//
+// 追加语义：同一 MAC 写两遍不会覆盖——重复由提交校验按「重复（大小写不敏感）」拒绝，
+// 不在语句层静默去重（静默去重会让「值未变化」吞掉操作者的笔误）。
+// MAC 合法性在语句层即时校验并归一小写（PortSecMAC 解码层还会再归一一次，两处同形；
+// 语句层先做是为了给「哪个 token 错了」的可操作报错）。
+func ifacePortSecMacAlias(tree map[string]any, t []string, isSet bool) error {
+	ifc, err := elemByID(tree, "interfaces", t[1])
+	if err != nil {
+		return ifacePortSecMissing(t[1])
+	}
+	hw, perr := net.ParseMAC(strings.TrimSpace(t[4]))
+	if perr != nil {
+		return errString("白名单 MAC \"" + t[4] + "\" 非法: " + perr.Error() + "（形如 b0:b0:00:00:00:01）")
+	}
+	mac := strings.ToLower(hw.String())
+	cur, _ := ifc["port_security"].([]any)
+	if !isSet {
+		out := make([]any, 0, len(cur))
+		for _, el := range cur {
+			if s, ok := el.(string); ok && strings.EqualFold(s, mac) {
+				continue // 按值删（大小写不敏感）
+			}
+			out = append(out, el)
+		}
+		if len(out) == len(cur) {
+			return errString("无匹配配置: port_security " + mac)
+		}
+		if len(out) == 0 {
+			delete(ifc, "port_security") // 清空后不留空壳（display set 反推不出空数组）
+			return nil
+		}
+		ifc["port_security"] = out
+		return nil
+	}
+	ifc["port_security"] = append(cur, mac)
+	return nil
+}
+
+// ifacePortSecMacClearAlias：`delete interfaces <if> port-security mac`（缺取值）。
+// set 缺取值明确报错，不落半套配置。
+func ifacePortSecMacClearAlias(tree map[string]any, t []string, isSet bool) error {
+	if isSet {
+		return errString("缺少取值: set interfaces " + t[1] + " port-security mac <mac>")
+	}
+	return errString("缺少取值: delete interfaces " + t[1] + " port-security mac <mac>（按值删一条；" +
+		"清空整段用 delete interfaces " + t[1] + " port-security）")
+}
+
+// ifacePortSecBareAlias：`interfaces <if> port-security`（无取值）。delete ＝清空整段
+// （＝停用端口安全）；set 缺取值明确报错并给出正确写法。
+func ifacePortSecBareAlias(tree map[string]any, t []string, isSet bool) error {
+	ifc, err := elemByID(tree, "interfaces", t[1])
+	if err != nil {
+		return ifacePortSecMissing(t[1])
+	}
+	if isSet {
+		return errString("缺少取值: set interfaces " + t[1] + " port-security mac <mac>（追加一条白名单 MAC）")
+	}
+	_, ok := ifc["port_security"]
+	if !ok {
+		return errString("无匹配配置: port_security")
+	}
+	delete(ifc, "port_security")
+	return nil
 }
 
 // aliasLldpEnable：protocols lldp enable <bool>。

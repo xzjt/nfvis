@@ -225,6 +225,8 @@ func run() error {
 	stormProvider := network.NewStormProviderFunc(vppMgr.StormClientFunc())
 	stormProvider.SetCountersReader(vppMgr)
 	netProvider.SetStorm(stormProvider)
+	// 决策 #389：接口端口安全白名单（VPP macip ACL 绑接口入向；tag 反查 + 随接口声明重放）。
+	netProvider.SetPortSec(network.NewPortSecProviderFunc(vppMgr.PortSecClientFunc()))
 	netProvider.SetACL(network.NewAclProviderFunc(vppMgr.AclClientFunc()))
 	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
 	netProvider.SetBond(network.NewBondProviderFunc(vppMgr.BondClientFunc()))
@@ -913,6 +915,8 @@ func run() error {
 		// 决策 #385：接口风暴抑制的数据面实况读物（CLI `show interfaces <if> detail` 的
 		// storm-control 块）。*network.L2Network 自持（StormDataplane）。
 		Storm: netProvider,
+		// 决策 #389：端口安全数据面实况（同族：接口 detail 的端口安全块）。
+		PortSec: netProvider,
 		// 决策 #388：主机防火墙数据面读数（CLI `show system firewall` 与
 		// `GET /system/firewall` 同一读视图；同一落地器负责下发/回读）。
 		Firewall: fwApplier,

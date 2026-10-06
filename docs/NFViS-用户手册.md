@@ -1529,6 +1529,31 @@ nfvis# delete interfaces ens192 storm-control                # 两类都清
 - 与 §8.12 的环路防护**各自独立、互不替代**：学习上限管的是「学多少」，风暴抑制管的是「放多少」，
   两者可同时配置。
 
+### 8.15 端口安全（per-port 允许源 MAC 白名单）
+
+给一个 L2 端口定一份**源 MAC 白名单**：白名单内的源 MAC 放行，**其余一律丢弃**（含 IP 与非 IP 帧）。
+
+```bash
+nfvis# set interfaces ens224 port-security mac b0:b0:00:00:00:01     # 追加一条（可多条）
+nfvis# set interfaces ens224 port-security mac b0:b0:00:00:00:02
+nfvis# delete interfaces ens224 port-security mac b0:b0:00:00:00:02  # 按值删一条
+nfvis# delete interfaces ens224 port-security                        # 清空＝停用
+```
+
+- **非空即启用**：白名单一旦有条目，该口入向只放行名单内的源 MAC；删空即停用（恢复放行）。
+- 每接口**上限 32 条**；MAC 写大小写均可（读回统一为小写）；重复条目会被拒绝。
+- **前置**：接口须已**声明**，且已是某个 **L2 交换机**的成员端口（端口安全是二层入向语义）。
+  把带白名单的口移出交换机、删所在交换机或删该口都会在提交时被拒绝——先删白名单再动。
+- **与 L3 接口 ACL 互斥**：同一接口只能占用一个「macip 绑定槽」——该口已作为 L3 接口绑定 ACL
+  （或其自动伴随的非 IP 放行）时不能再配端口安全，反之亦然；提交期会双向拒绝并说明。
+- **bond 成员口不接受**白名单（配在 bond 上，见 §8.4）。
+- 读视图：`show interfaces <if> detail` 的「端口安全」块给出配置白名单与数据面实况
+  （ACL 在不在、接口绑没绑上）。**不提供命中计数**——底层 macip 机制不发布该类计数，
+  产品如实说明、不显示 0 冒充。REST 同字段见 `GET /interfaces/{name}` 的 `port_security`；
+  Web 控制台接口详情页同字段（只读）。
+- 数据面重启（`request vpp restart`）或重启 nfvis 后按配置自动重建白名单并重新绑定。
+- 边界：只做**丢弃**这一种违例动作；不做粘滞学习/动态白名单、不做 802.1X；不区分 VLAN。
+
 ---
 
 ## 9. 计算负载：VM 与容器

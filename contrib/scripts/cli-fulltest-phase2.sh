@@ -99,6 +99,11 @@ set interfaces ens224 storm-control broadcast 100000
 set interfaces ens224 storm-control multicast 200000
 delete interfaces ens224 storm-control broadcast
 delete interfaces ens224 storm-control
+# 端口安全白名单：追加一条 + 按值删 + 裸 delete 清空（决策 #389；解析/接线，
+# 白名单生效的功能对照由真机四维承担——套件跑流量注入不便）
+set interfaces ens224 port-security mac b0:b0:00:00:00:01
+delete interfaces ens224 port-security mac b0:b0:00:00:00:01
+delete interfaces ens224 port-security
 set bonds bond0 members 0 ens192
 set bonds bond0 lacp mode active interval fast
 set bonds bond0 mtu 9000

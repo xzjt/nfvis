@@ -329,6 +329,11 @@ func (n *L2Network) resetProviders() {
 	if n.storm != nil {
 		n.storm.reset()
 	}
+	// 决策 #389：VPP（重）连接后 macip ACL 与绑定全失——清空端口安全登记，恢复收敛
+	// 按接口声明全量重放（tag 反查复用索引，幂等）。
+	if n.portSec != nil {
+		n.portSec.reset()
+	}
 	if n.lldp != nil {
 		n.lldp.reset()
 	}

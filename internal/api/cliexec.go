@@ -98,6 +98,7 @@ type cliExecutor struct {
 	dhcpSrv DHCPServerRuntime  // DHCP 服务器运行态（决策 #359：dhcp-leases 与 detail 块；nil = 报未收敛）
 	vxlan   VxlanRuntime       // VXLAN 隧道运行态（决策 #383：show vxlan tunnels；nil = 报未接入）
 	storm   StormRuntime       // 接口风暴抑制数据面实况（决策 #385：show interfaces <if> detail 的 storm-control 块）
+	portSec PortSecRuntime     // 接口端口安全数据面实况（决策 #389：show interfaces <if> detail 的端口安全块）
 	// pciExists 通用 PCI 直通设备的存在性事实源（FR-CMP-023：detail 的「已在系统中」实测态；
 	// nil = 如实说无法核对——不猜）。与计算编排层 define 前用的是**同一个** sysfs 检查实现。
 	pciExists func(bdf string) (bool, error)

@@ -215,6 +215,14 @@ func ConfigPathTree() *Node {
 					K("broadcast", "广播抑制（目的 MAC ff:ff:ff:ff:ff:ff）", V("uint", "kbps")),
 					K("multicast", "组播抑制（目的 MAC I/G 位=1 的帧；广播帧也满足该位）", V("uint", "kbps")),
 				),
+				// 决策 #389：端口安全（per-port 允许源 MAC 白名单，L2 入向；非空即启用）。
+				// set 是**追加**语义（每条 MAC 一句；非法/重复/超限由提交校验拒绝），
+				// delete mac <mac> 按值删一条，裸 delete 清空＝停用。执行语义在别名表
+				// （模型是 []string 数组而语句树是关键字+值两层，机械逆走解不出——同
+				// storm_control 显式发射），树只供 ?/Tab 候选与路径匹配。
+				K("port-security", "端口安全（per-port 允许源 MAC 白名单；非空即启用）",
+					K("mac", "白名单源 MAC（追加；每接口上限 32 条）", P("<mac>", "MAC 地址（形如 b0:b0:00:00:00:01）", "")),
+				),
 			),
 		),
 		K("bonds", "链路聚合（bond 名可如物理口般引用）",

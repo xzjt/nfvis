@@ -35,6 +35,7 @@ type L2Network struct {
 	dns                          *DNSProxyProvider      // 数据面 DNS 代理（决策 #345，可空）
 	vxlan                        *VxlanProvider         // VXLAN 隧道（决策 #383，可空——未注入即无隧道编排）
 	storm                        *StormProvider         // 接口入向风暴抑制（决策 #385，可空）+ 读视图
+	portSec                      *PortSecProvider       // 接口端口安全白名单（决策 #389，可空）+ 读视图
 	vhost                        *VhostUserProvider     // M4-4：VNF vNIC 接入
 	memif                        *MemifProvider         // M4-7：容器 vNIC 接入
 	vhostDir                     string                 // vhost-user socket 目录（恢复收敛重放用）
@@ -162,6 +163,9 @@ func (n *L2Network) SetVxlan(p *VxlanProvider) { n.vxlan = p }
 // SetStorm 追加接口入向风暴抑制编排（决策 #385；未注入时 storm-control 语句在提交校验层
 // 仍可配，但数据面无下发路径——恢复收敛会如实记未收敛项，正常装配总是注入）。
 func (n *L2Network) SetStorm(p *StormProvider) { n.storm = p }
+
+// SetPortSec 注入端口安全白名单编排（决策 #389；可空——未注入即读视图如实报未接入）。
+func (n *L2Network) SetPortSec(p *PortSecProvider) { n.portSec = p }
 
 // ApplyVxlan 收敛一条 VXLAN 隧道声明（决策 #383）。prev 为提交 diff 里的旧声明（nil = 新建/
 // 恢复重放）：旧元组与本次不同时先按旧元组撤、再按新元组建 + 打平台标记 + 置 up + 入 BD。
@@ -427,7 +431,28 @@ func (n *L2Network) ApplyInterface(ctx context.Context, iface model.InterfaceCon
 			return err
 		}
 	}
+	// 端口安全白名单（决策 #389）：接口层之后下发——macip ACL 要绑在已存在的接口上；
+	// 白名单非空＝建/替换 + 绑、空＝解绑（停用）；随接口注册重放（恢复收敛逐接口调用）。
+	if n.portSec != nil {
+		if err := n.portSec.ApplyInterface(ctx, iface); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// PortSecDataplane 读某接口端口安全的数据面实况（决策 #389；读视图三面同源：
+// CLI `show interfaces <if> detail` 的端口安全块经它取数）。未注入 provider 时
+// ok=false（调用方如实说明未接入，不编造）。
+func (n *L2Network) PortSecDataplane(ctx context.Context, ifname string) (PortSecDataplane, bool) {
+	if n.portSec == nil {
+		return PortSecDataplane{Reason: "端口安全编排未接入"}, false
+	}
+	dp, err := n.portSec.Dataplane(ctx, ifname)
+	if err != nil {
+		return PortSecDataplane{Reason: err.Error()}, false
+	}
+	return dp, true
 }
 
 // StormDataplane 读某接口风暴抑制的数据面实况（决策 #385；读视图三面同源：

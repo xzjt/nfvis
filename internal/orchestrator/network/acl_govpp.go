@@ -150,30 +150,54 @@ func (g *govppAclClient) ACLInterfaceSet(swIfIndex, inAcl, outAcl uint32, inSet,
 	return nil
 }
 
-// MacipACLAddReplace 创建/替换伴随的 macip ACL（决策 #341）。
+// MacipACLAddReplace 创建/替换伴随的 macip ACL（决策 #341）——薄封装：
+// 单规则集（permit 任意 ip/mac，mask 0）经 MacipACLAddReplaceRules 下发，行为不变。
 //
 // 唯一规则：`permit ip 0.0.0.0/0 mac 00:00:00:00:00:00 mask 0`——mask 0 表示不比较 MAC、
 // 前缀 0.0.0.0/0 表示任意源，等价于「放行全部非 IP 帧」。round120 实验室验证（vppctl 同语句）
 // 加在绑 ACL 的 L3 接口上后 ARP 立即通、drops 停止增长。本 ACL 只作用于非 IP 帧，
 // IPv4/IPv6 仍走已绑的 IP ACL，故 IP 过滤语义不受影响。
 func (g *govppAclClient) MacipACLAddReplace(index uint32, tag string) (uint32, error) {
-	mac, err := ethernet_types.ParseMacAddress("00:00:00:00:00:00")
-	if err != nil {
-		return 0, fmt.Errorf("macip 通配 MAC: %w", err)
+	return g.MacipACLAddReplaceRules(index, tag, []MacipRuleSpec{{
+		Permit:     true,
+		SrcPrefix:  "0.0.0.0/0",
+		SrcMAC:     "00:00:00:00:00:00",
+		SrcMACMask: "00:00:00:00:00:00", // mask 0：不比较 MAC（permit 任意）
+	}})
+}
+
+// MacipACLAddReplaceRules 创建/整体替换一张**自定义规则集**的 macip ACL（决策 #389：
+// 把 #341 的单规则伴随 ACL 泛化为任意规则集——端口安全白名单用它下发）。
+// index=aclIndexNew（~0）新建，否则按索引整体替换；返回实际索引。
+func (g *govppAclClient) MacipACLAddReplaceRules(index uint32, tag string, rules []MacipRuleSpec) (uint32, error) {
+	binRules := make([]acl_types.MacipACLRule, 0, len(rules))
+	for i, r := range rules {
+		src, err := ip_types.ParsePrefix(r.SrcPrefix)
+		if err != nil {
+			return 0, fmt.Errorf("macip 规则 %d 源前缀 %q: %w", i, r.SrcPrefix, err)
+		}
+		mac, err := ethernet_types.ParseMacAddress(r.SrcMAC)
+		if err != nil {
+			return 0, fmt.Errorf("macip 规则 %d 源 MAC %q: %w", i, r.SrcMAC, err)
+		}
+		mask, err := ethernet_types.ParseMacAddress(r.SrcMACMask)
+		if err != nil {
+			return 0, fmt.Errorf("macip 规则 %d MAC 掩码 %q: %w", i, r.SrcMACMask, err)
+		}
+		action := acl_types.ACL_ACTION_API_DENY
+		if r.Permit {
+			action = acl_types.ACL_ACTION_API_PERMIT
+		}
+		binRules = append(binRules, acl_types.MacipACLRule{
+			IsPermit:   action,
+			SrcMac:     mac,
+			SrcMacMask: mask,
+			SrcPrefix:  src,
+		})
 	}
-	src, err := ip_types.ParsePrefix("0.0.0.0/0")
-	if err != nil {
-		return 0, fmt.Errorf("macip 通配前缀: %w", err)
-	}
-	rules := []acl_types.MacipACLRule{{
-		IsPermit:   acl_types.ACL_ACTION_API_PERMIT,
-		SrcMac:     mac,
-		SrcMacMask: mac, // mask 0：不比较 MAC（permit 任意）
-		SrcPrefix:  src,
-	}}
 	reply := &acl.MacipACLAddReplaceReply{}
 	if err := g.ch.SendRequest(&acl.MacipACLAddReplace{
-		ACLIndex: index, Tag: tag, Count: uint32(len(rules)), R: rules,
+		ACLIndex: index, Tag: tag, Count: uint32(len(binRules)), R: binRules,
 	}).ReceiveReply(reply); err != nil {
 		return 0, err
 	}
@@ -203,9 +227,40 @@ func (g *govppAclClient) MacipACLInterfaceAddDel(swIfIndex, aclIndex uint32, isA
 // MacipACLIndexByTag 经 macip_acl_dump（~0 = 全量）按 tag 反查已存在 macip ACL 的索引。
 // 恢复收敛用：nfvisd 重启后登记表为空，但 VPP 侧可能已有伴随 macip ACL，据此复用而非重复创建。
 func (g *govppAclClient) MacipACLIndexByTag(tag string) (uint32, bool, error) {
+	idx, _, found, err := g.MacipACLByTag(tag)
+	return idx, found, err
+}
+
+// MacipACLByTag 经 macip_acl_dump（~0 = 全量）按 tag 反查：返回索引、**实测规则数**与是否在场。
+// 规则数供端口安全的读视图展示（决策 #389；macip 无逐规则命中计数，规则数是 dump 能给出的
+// 全部实况）。
+func (g *govppAclClient) MacipACLByTag(tag string) (uint32, int, bool, error) {
 	reqCtx := g.ch.SendMultiRequest(&acl.MacipACLDump{ACLIndex: ^uint32(0)})
 	for {
 		d := &acl.MacipACLDetails{}
+		stop, err := reqCtx.ReceiveReply(d)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		if stop {
+			return 0, 0, false, nil
+		}
+		if d.Tag == tag {
+			return d.ACLIndex, int(d.Count), true, nil
+		}
+	}
+}
+
+// MacipBoundACL 读接口当前绑定的 macip ACL 索引（macip_acl_interface_list_dump，
+// **绑定实况的唯一事实源**——登记只做增量判据，同 storm 的 AttachedL2Table 口径）。
+// macip 每接口只有一个绑定槽；count=0/无应答返回 ok=false——这不区分「本就没绑」与
+// 「查询被拒」（两者对本层的动作相同，真出错会在随后的绑定上暴露，不静默）。
+func (g *govppAclClient) MacipBoundACL(swIfIndex uint32) (uint32, bool, error) {
+	reqCtx := g.ch.SendMultiRequest(&acl.MacipACLInterfaceListDump{
+		SwIfIndex: interface_types.InterfaceIndex(swIfIndex),
+	})
+	for {
+		d := &acl.MacipACLInterfaceListDetails{}
 		stop, err := reqCtx.ReceiveReply(d)
 		if err != nil {
 			return 0, false, err
@@ -213,8 +268,8 @@ func (g *govppAclClient) MacipACLIndexByTag(tag string) (uint32, bool, error) {
 		if stop {
 			return 0, false, nil
 		}
-		if d.Tag == tag {
-			return d.ACLIndex, true, nil
+		if len(d.Acls) > 0 {
+			return d.Acls[0], true, nil
 		}
 	}
 }
