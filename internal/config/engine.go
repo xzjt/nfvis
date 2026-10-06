@@ -604,20 +604,18 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 		return res, err
 	}
 
-	if cf, err := e.store.GetConfirmed(); err != nil {
-		return res, err
-	} else if cf != nil {
-		e.clearConfirmedLocked(AuditEntry{
-			Time: e.now(), User: sess.User, Action: "config.confirm",
-			Detail: "新 commit 隐式确认在途 confirmed", Result: "success",
-		})
-	}
 	rev, _, err := e.store.LatestRevision()
 	if err != nil {
 		return res, err
 	}
 	if !e.dirty {
-		res.Revision = rev // 无变更 commit 不产生新修订
+		// 无变更 commit：仍是持有者的**成功**提交（候选与 committed 一致，无从被校验/守卫
+		// 拒绝），照 FR-CFG-004 隐式确认在途 confirmed——这正是「commit confirmed N 之后再用
+		// 空 commit 确认」的 CLI 主路径。无变更不产生新修订。
+		if err := e.implicitConfirmLocked(sess); err != nil {
+			return res, err
+		}
+		res.Revision = rev
 		return res, nil
 	}
 
@@ -674,6 +672,13 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 			})
 			return res, &ValidationError{Errors: verrs}
 		}
+	}
+
+	// 决策 #395（R171-13）：隐式确认移到「校验与守卫**都通过**、即将生效」处——被校验或
+	// 守卫（管理口/防火墙自锁，见上）拒绝的 commit 不再替在途 confirmed 背书、不改受保护
+	// 状态、审计不记错主体；与 #364 的「锁拒绝」口径统一（锁拒绝在其上一步）。
+	if err := e.implicitConfirmLocked(sess); err != nil {
+		return res, err
 	}
 
 	// 生效提示（FR-SYS-009 / FR-SYS-002）
@@ -1034,6 +1039,24 @@ func (e *Engine) clearConfirmedLocked(audit AuditEntry) {
 		e.confirmStop = nil
 	}
 	e.appendAudit(audit)
+}
+
+// implicitConfirmLocked 持有者的新 commit 隐式确认在途 confirmed（FR-CFG-004）。
+//
+// 决策 #395（R171-13）：调用点只在「校验与守卫都通过、即将生效」处（以及无变更 commit 的
+// 成功路径）——被拒的 commit 不得替在途 confirmed 背书、不记错审计主体。
+func (e *Engine) implicitConfirmLocked(sess Session) error {
+	cf, err := e.store.GetConfirmed()
+	if err != nil {
+		return err
+	}
+	if cf != nil {
+		e.clearConfirmedLocked(AuditEntry{
+			Time: e.now(), User: sess.User, Action: "config.confirm",
+			Detail: "新 commit 隐式确认在途 confirmed", Result: "success",
+		})
+	}
+	return nil
 }
 
 func (e *Engine) committedLocked() (model.Config, error) {

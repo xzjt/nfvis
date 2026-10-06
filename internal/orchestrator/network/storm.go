@@ -311,6 +311,82 @@ func (p *StormProvider) ApplyInterface(ctx context.Context, iface model.Interfac
 	return p.build(c, iface.Name, idx, want)
 }
 
+// Reconcile 15s 巡检的按登记复核（决策 #385 ④ 的兑现 / #394①）：对配置里声明了 storm-control 的
+// 接口，**以数据面实况为准**核对声明是否在场——接口 L2 槽上的分类表或各声明类的 policer（按名）
+// 缺任一项即重放（先清本接口登记，使 ApplyInterface 不因「登记说已下发」而早退，再按实况重建）。
+//
+// 沿用「实况优先、登记兜底」：登记只用于读视图与增量判据，**在不在场以实况为准**。
+// **只补不猜**：声明为空/未声明的接口一律不动（撤除走提交编排）；接口不在数据面时不报错
+// （由接口层的 RECOVERY_IFACE_MISSING 告警负责——风暴抑制无法在无接口时收敛，此处不制造重复告警）。
+func (p *StormProvider) Reconcile(ctx context.Context, cfg model.Config) []error {
+	var errs []error
+	for _, iface := range cfg.Interfaces {
+		want := stormDesired(iface.StormControl)
+		if len(want) == 0 {
+			continue
+		}
+		present, inDataplane, err := p.declaredPresent(iface.Name, want)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("interfaces/%s/storm-control: %w", iface.Name, err))
+			continue
+		}
+		if !inDataplane || present {
+			continue
+		}
+		// 数据面缺项：清本接口登记（登记＝最后成功下发态，清空即「按实况重建」），再重放。
+		p.clearIface(iface.Name)
+		if err := p.ApplyInterface(ctx, iface); err != nil {
+			errs = append(errs, fmt.Errorf("interfaces/%s/storm-control: %w", iface.Name, err))
+		}
+	}
+	return errs
+}
+
+// declaredPresent 以数据面实况核对声明的 storm 抑制是否在场（决策 #394①）：
+// 接口 L2 槽挂着分类表，且各声明类的 policer 按名存在 ⇒ present=true。
+// inDataplane=false = 接口不在数据面（无从核对，调用方跳过）。
+func (p *StormProvider) declaredPresent(ifname string, want map[string]uint32) (present, inDataplane bool, err error) {
+	c, err := p.client()
+	if err != nil {
+		return false, false, err
+	}
+	defer c.Close()
+	idx, ok, err := c.SwInterfaceIndex(ifname)
+	if err != nil {
+		return false, false, fmt.Errorf("解析接口 %s: %w", ifname, err)
+	}
+	if !ok {
+		return false, false, nil
+	}
+	if _, attached, err := c.AttachedL2Table(idx); err != nil {
+		return false, true, fmt.Errorf("读取接口 %s 的 L2 分类槽: %w", ifname, err)
+	} else if !attached {
+		return false, true, nil
+	}
+	pols, err := c.PolicerDump()
+	if err != nil {
+		return false, true, fmt.Errorf("读取数据面 policer 清单: %w", err)
+	}
+	names := map[string]bool{}
+	for _, pl := range pols {
+		names[pl.Name] = true
+	}
+	for kind := range want {
+		if !names[stormPolicerName(ifname, kind)] {
+			return false, true, nil
+		}
+	}
+	return true, true, nil
+}
+
+// clearIface 清空某接口的进程内登记（Reconcile 的「按实况重建」前调用：清空即让 ApplyInterface
+// 不因登记说已下发而早退）。
+func (p *StormProvider) clearIface(ifname string) {
+	p.mu.Lock()
+	delete(p.rt, ifname)
+	p.mu.Unlock()
+}
+
 // teardown 撤掉该接口已下发的风暴抑制对象，并清理本产品的孤儿分类表（幂等：不存在即已达成）。
 //
 // 判据与顺序（真机实测修正）：

@@ -975,6 +975,7 @@ func (v *validator) checkVrfs(c Config) {
 				v.errf(rp+".prefix", "路由前缀 %q 必须是 ip-prefix（CIDR）", rt.Prefix)
 			}
 			v.checkRouteNextHops(rp+".next_hop", rt.NextHop)
+			v.checkRouteNextHopFamily(rp+".next_hop", rt.Prefix, rt.NextHop)
 			if rt.Distance < 0 || rt.Distance > 255 {
 				v.errf(rp+".distance", "distance %d 必须在 0-255", rt.Distance)
 			}
@@ -1021,6 +1022,28 @@ func (v *validator) checkRouteNextHops(path, spec string) {
 			v.errf(path, "下一跳重复 %q", h)
 		}
 		seen[h] = true
+	}
+}
+
+// checkRouteNextHopFamily 校验静态路由的**前缀与每个下一跳同族**（决策 #393）。
+//
+// 此前只比「多个下一跳彼此同族」（checkRouteNextHops），前缀与下一跳的族不查——
+// `static-routes 10.0.0.0/24 next-hop 2001:db8::1`（v4 前缀 + v6 下一跳）提交成功、
+// 读视图正常，而 VPP FIB 里该前缀装成 `dpo-drop`（静默黑洞；round171 §1.5 真机复现），
+// 与项目史上最严重的「命令成功、数据面全丢」家族同类。此处补提交期拒绝，文案点名前缀与
+// **首个**异族跳。任一侧无法判族（any/空/非法 IP）时不判——非法值由 prefix/ip 校验单独
+// 报错，不重复计数（与 #352 ACL 混族校验同口径）。
+func (v *validator) checkRouteNextHopFamily(path, prefix, spec string) {
+	pf := prefixFamily(prefix)
+	if pf == "" {
+		return
+	}
+	for _, h := range strings.Split(spec, ",") {
+		nf := prefixFamily(h)
+		if nf != "" && nf != pf {
+			v.errf(path, "前缀 %q 与下一跳 %q 不同族（IPv4/IPv6 混用；数据面会装成 dpo-drop 静默黑洞）", prefix, h)
+			return
+		}
 	}
 }
 

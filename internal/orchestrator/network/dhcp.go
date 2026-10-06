@@ -107,6 +107,10 @@ func relayTargetOf(vs model.VirtualSwitch) (uint32, string, error) {
 //   - 声明了 server：与登记一致则幂等空操作；记录发生变化（新配/改 server/换网关域）先按旧记录
 //     撤掉 VPP 里的旧条目（IsAdd=false 幂等）再下发新条目——同域改 server 也必须撤旧（决策 #380）；
 //   - 未声明（清 relay）：按登记发 IsAdd=false（幂等；无登记即无事可做）。
+//
+// 登记语义（决策 #394②）＝**最后一个成功下发的状态**，逐步骤推进：撤旧**成功才清**登记、
+// 加新**成功才写**登记；任一步失败即返回，登记停在最后成功态（失败不会把登记带到「谎称已下发」
+// 的位置，重试/对账因此能补齐）。
 func (p *DhcpProvider) SyncRelay(ctx context.Context, vs model.VirtualSwitch) error {
 	p.mu.Lock()
 	rec, had := p.relays[vs.Name]
@@ -132,7 +136,8 @@ func (p *DhcpProvider) SyncRelay(ctx context.Context, vs model.VirtualSwitch) er
 	if err != nil {
 		return err
 	}
-	if had && rec == (dhcpRelay{tableID: tableID, server: vs.DhcpRelayServer, src: src}) {
+	want := dhcpRelay{tableID: tableID, server: vs.DhcpRelayServer, src: src}
+	if had && rec == want {
 		return nil
 	}
 	c, err := p.client()
@@ -146,15 +151,24 @@ func (p *DhcpProvider) SyncRelay(ctx context.Context, vs model.VirtualSwitch) er
 		// （`vppctl show dhcp proxy` 出现两条，此后删除 relay 只撤最新一条，旧条目永久残留、该 FIB
 		// 仍被 proxy 节点吞包——决策 #380/R140-1 真机复现）。此处只可能是「记录已变」：
 		// 值未变的幂等情形已在上面早退。
+		//
+		// 决策 #394②：登记＝**最后一个成功下发的状态**，逐步骤推进——**撤旧成功才清登记**。
+		// 撤旧失败即返回、登记保留旧值，重试会再次尝试撤旧（不会因「登记说已下发」而静默跳过）；
+		// 撤旧成功后登记清空，此时数据面上已无该条目，即便随后加新失败，登记也不再谎称「旧值在场」，
+		// 操作者改回旧值再提交时 `had=false` 会如实重新下发（旧实现此处登记仍为旧值，
+		// 「值未变」早退导致数据面永久失中继——round171 C2-F2）。
 		if err := c.ProxySet(rec.tableID, rec.tableID, false, rec.server, rec.src); err != nil {
 			return fmt.Errorf("撤销交换机 %s 原 DHCP 中继: %w", vs.Name, err)
 		}
+		p.mu.Lock()
+		delete(p.relays, vs.Name)
+		p.mu.Unlock()
 	}
 	if err := c.ProxySet(tableID, tableID, true, vs.DhcpRelayServer, src); err != nil {
 		return fmt.Errorf("配置交换机 %s 的 DHCP 中继（server %s）: %w", vs.Name, vs.DhcpRelayServer, err)
 	}
 	p.mu.Lock()
-	p.relays[vs.Name] = dhcpRelay{tableID: tableID, server: vs.DhcpRelayServer, src: src}
+	p.relays[vs.Name] = want
 	p.mu.Unlock()
 	return nil
 }
@@ -179,28 +193,32 @@ func (p *DhcpProvider) DeleteRelay(ctx context.Context, name string) error {
 	return nil
 }
 
-// ReconcileProxy 对账 VPP 里实际的 DHCP proxy 与配置声明（决策 #380/R140-1）。
+// ReconcileProxy 对账 VPP 里实际的 DHCP proxy 与配置声明（决策 #380/R140-1；补齐一侧见 #394②）。
 //
 // declared 为**声明了 relay** 的交换机集合（rx 表 → server 由 relayTargetOf 推出）。
-// 用 VPP `dhcp_proxy_dump` 取数据面实际条目，与声明比对：**未声明**的 server（rx 表不在声明集，
-// 或该表数据面上多出声明之外的 server）逐个 ProxySet(IsAdd=false) 清除；清除失败如实返回。
-// 这是**不靠进程内登记**的安全网——带外改动/进程重启/旧版本残留的条目仍能被清掉。
+// 用 VPP `dhcp_proxy_dump` 取数据面实际条目，与声明**双向**比对：
+//   - **补**（决策 #394②）：声明了却没有 ⇒ ProxySet(IsAdd=true) 下发（数据面实况为准，不靠进程内
+//     登记——提交失败补偿、操作者改回旧值、进程重启等场景都能自愈）；
+//   - **清**：未声明表上的条目、或声明表上声明之外的陈旧 server ⇒ 逐个 ProxySet(IsAdd=false) 清除。
 //
-// 如实边界：dump 失败即返回错误（调用方跳过本轮、不误撤）；`relayTargetOf` 报错（网关无 IPv4）
+// 清除失败/补发失败均如实返回。这是**不靠进程内登记**的安全网——带外改动/进程重启/旧版本残留的
+// 条目仍能被清掉，声明了却被带外删除/失败残留的条目也能被补回。
+//
+// 如实边界：dump 失败即返回错误（调用方跳过本轮、不误撤不误补）；`relayTargetOf` 报错（网关无 IPv4）
 // 的交换机**不计入声明集**——它本也无法下发 relay，其表上的残留条目因此会被视为未声明而清除
 // （**无法判定即不能声称已声明**）；声明表里与声明一致的 server 不动。
 func (p *DhcpProvider) ReconcileProxy(declared []model.VirtualSwitch) error {
-	// 声明集：rx 表 id → 声明的 server。同一张表被多个交换机声明时以任一为准（产品语义同表同 server）。
-	want := map[uint32]string{}
+	// 声明集：rx 表 id → 声明的 proxy。同一张表被多个交换机声明时以任一为准（产品语义同表同 server）。
+	want := map[uint32]dhcpRelay{}
 	for _, vs := range declared {
 		if vs.DhcpRelayServer == "" {
 			continue
 		}
-		tableID, _, err := relayTargetOf(vs)
+		tableID, src, err := relayTargetOf(vs)
 		if err != nil {
 			continue // 网关无 IPv4 ⇒ 表不可判定；不计入声明集（见上「如实边界」）
 		}
-		want[tableID] = vs.DhcpRelayServer
+		want[tableID] = dhcpRelay{tableID: tableID, server: vs.DhcpRelayServer, src: src}
 	}
 
 	c, err := p.client()
@@ -212,11 +230,33 @@ func (p *DhcpProvider) ReconcileProxy(declared []model.VirtualSwitch) error {
 	if err != nil {
 		return fmt.Errorf("读取 DHCP proxy 运行态: %w", err)
 	}
+	// 数据面实况：rx 表 id → 在场的 server 集合（补/清两侧共用同一份事实）。
+	present := map[uint32]map[string]bool{}
 	for _, e := range entries {
-		server, declaredTable := want[e.RxVrfID]
+		set := present[e.RxVrfID]
+		if set == nil {
+			set = map[string]bool{}
+			present[e.RxVrfID] = set
+		}
 		for _, s := range e.Servers {
-			// 声明表且 server 与声明相符 ⇒ 保留；其余（未声明表 / 声明表上的陈旧或多余 server）清除。
-			if declaredTable && s.Server == server {
+			set[s.Server] = true
+		}
+	}
+	// ① 补：声明了却没有 ⇒ 下发。字段与 SyncRelay 同源（rx=server=表 id、src 取网关 BVI 的 v4 地址）。
+	for tableID, w := range want {
+		if present[tableID][w.server] {
+			continue
+		}
+		if err := c.ProxySet(w.tableID, w.tableID, true, w.server, w.src); err != nil {
+			return fmt.Errorf("补发声明的 DHCP proxy（rx_vrf=%d, server=%s）: %w", tableID, w.server, err)
+		}
+	}
+	// ② 清：未声明表 / 声明表上的陈旧或多余 server。
+	for _, e := range entries {
+		w, declaredTable := want[e.RxVrfID]
+		for _, s := range e.Servers {
+			// 声明表且 server 与声明相符 ⇒ 保留；其余清除。
+			if declaredTable && s.Server == w.server {
 				continue
 			}
 			if err := c.ProxySet(e.RxVrfID, s.VrfID, false, s.Server, e.Src); err != nil {

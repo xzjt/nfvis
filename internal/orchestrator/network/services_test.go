@@ -30,6 +30,9 @@ type fakeSvc struct {
 	poutErr       func(idx uint32, name string, apply bool) error
 	policerAddErr func(name string, add bool) error
 	spanOffErr    func(from, to uint32) error
+	// idxErr：仅让 SwInterfaceIndex 返回错误（决策 #393 的查询失败注入）。与全局 err 不同——
+	// 后者会连带让 PolicerAddDel 等失败，无法区分「查询失败」与「下发失败」。
+	idxErr func(ifname string) error
 	// 与 pins/pouts 一一对应的接口索引，用于区分绑同一策略名的不同接口（map 遍历顺序不定）。
 	pinIdx  []uint32
 	poutIdx []uint32
@@ -47,6 +50,11 @@ func (f *fakeSvc) Close() { f.closed++ }
 func (f *fakeSvc) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	if f.err != nil {
 		return 0, false, f.err
+	}
+	if f.idxErr != nil {
+		if err := f.idxErr(ifname); err != nil {
+			return 0, false, err
+		}
 	}
 	idx, ok := f.ifaces[ifname]
 	return idx, ok, nil
@@ -552,6 +560,83 @@ func TestDeleteQosPolicerDeleteFailKeepsRegistry(t *testing.T) {
 	}
 }
 
+// TestDeleteQosQueryFailKeepsRegistry 决策 #393（收口 round171 R171-6）：DeleteQos 的
+// SwInterfaceIndex **查询失败**（err != nil）必须照实上抛并**保留**登记（可重试）；仅
+// **确认接口不存在**（ok=false）才摘登记。此前 `err != nil || !ok` 一并摘，偶发查询失败即
+// 抹掉绑定登记、重试不再解绑、VPP 绑定残留到重启——与 #363「登记=最后成功下发状态」相悖。
+func TestDeleteQosQueryFailKeepsRegistry(t *testing.T) {
+	ctx := context.Background()
+
+	// 入向与出向各绑一个策略，两向都要覆盖。
+	f := newFakeSvc()
+	p := NewServicesProvider(f)
+	for _, pol := range []string{"pol-in", "pol-out"} {
+		if err := p.ApplyQos(ctx, model.QosPolicy{Name: pol, Cir: 1000000}); err != nil {
+			t.Fatalf("ApplyQos(%s): %v", pol, err)
+		}
+	}
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{
+		Name: "ens192", IngressPolicy: "pol-in", EgressPolicy: "pol-out"}); err != nil {
+		t.Fatalf("绑定: %v", err)
+	}
+
+	// 注入：SwInterfaceIndex 查询失败（接口其实还在）。
+	f.idxErr = func(string) error { return errors.New("vpp 查询失败") }
+	if err := p.DeleteQos(ctx, "pol-in"); err == nil {
+		t.Fatal("查询失败应上抛（不得当成接口不存在）")
+	}
+	if in, _ := svcRegs(p, "ens192"); in != "pol-in" {
+		t.Fatalf("查询失败不得摘入向登记，实际 %q", in)
+	}
+	if !svcPolicer(p, "pol-in") {
+		t.Fatal("查询失败时 policer 登记应保留")
+	}
+	if err := p.DeleteQos(ctx, "pol-out"); err == nil {
+		t.Fatal("出向查询失败同样应上抛")
+	}
+	if _, out := svcRegs(p, "ens192"); out != "pol-out" {
+		t.Fatalf("查询失败不得摘出向登记，实际 %q", out)
+	}
+
+	// 恢复查询、重试：解绑成功并摘登记。
+	f.idxErr = nil
+	if err := p.DeleteQos(ctx, "pol-in"); err != nil {
+		t.Fatalf("重试 DeleteQos(pol-in): %v", err)
+	}
+	if in, _ := svcRegs(p, "ens192"); in != "" {
+		t.Fatalf("重试成功后入向登记应摘除，实际 %q", in)
+	}
+	if svcPolicer(p, "pol-in") {
+		t.Fatal("重试成功后 policer 登记应摘除")
+	}
+	if err := p.DeleteQos(ctx, "pol-out"); err != nil {
+		t.Fatalf("重试 DeleteQos(pol-out): %v", err)
+	}
+	if _, out := svcRegs(p, "ens192"); out != "" {
+		t.Fatalf("重试成功后出向登记应摘除，实际 %q", out)
+	}
+
+	// 对照：接口**确认不存在**（ok=false）仍按既有口径摘登记并继续（可完成删除）。
+	f2 := newFakeSvc()
+	p2 := NewServicesProvider(f2)
+	if err := p2.ApplyQos(ctx, model.QosPolicy{Name: "pol2", Cir: 1000000}); err != nil {
+		t.Fatalf("ApplyQos(pol2): %v", err)
+	}
+	if err := p2.ApplyInterface(ctx, model.InterfaceConfig{Name: "ens192", IngressPolicy: "pol2"}); err != nil {
+		t.Fatalf("绑定 pol2: %v", err)
+	}
+	delete(f2.ifaces, "ens192") // 接口确认不存在
+	if err := p2.DeleteQos(ctx, "pol2"); err != nil {
+		t.Fatalf("接口确认不存在时应跳过解绑并完成删除: %v", err)
+	}
+	if in, _ := svcRegs(p2, "ens192"); in != "" {
+		t.Fatalf("接口不存在时陈旧登记应摘除，实际 %q", in)
+	}
+	if svcPolicer(p2, "pol2") {
+		t.Fatal("接口不存在时 policer 应正常删除")
+	}
+}
+
 // TestDeleteSpanFailKeepsRegistry SpanDisable 失败 ⇒ 登记保留、重试再关；成功才摘登记。
 func TestDeleteSpanFailKeepsRegistry(t *testing.T) {
 	f := newFakeSvc()
@@ -794,7 +879,8 @@ func TestDhcpRelayDeleteAndErrors(t *testing.T) {
 	}
 }
 
-// TestDhcpRelayReconcileProxy 决策 #380：对账 VPP 实际 proxy 与配置声明，只清未声明/陈旧条目。
+// TestDhcpRelayReconcileProxy 决策 #380 + #394②：对账 VPP 实际 proxy 与配置声明——**双向**：
+// 清未声明/陈旧条目，并**补**声明了却缺失的条目。
 func TestDhcpRelayReconcileProxy(t *testing.T) {
 	tableA := TableID(GatewayVRFName("vs-a"))
 	tableB := TableID(GatewayVRFName("vs-b"))
@@ -810,7 +896,7 @@ func TestDhcpRelayReconcileProxy(t *testing.T) {
 	f := &fakeDhcp{dump: []ProxyEntry{
 		// ① 未声明表（残留）：应清除
 		{RxVrfID: 99999, Src: "10.9.9.1", Servers: []ProxyServer{{VrfID: 99999, Server: "10.9.9.2"}}},
-		// ② 声明表（vs-a）上的陈旧 server：与声明不符，应清除
+		// ② 声明表（vs-a）上的陈旧 server：与声明不符，应清除；且声明的 server 缺失，应补发
 		{RxVrfID: tableA, Src: "192.168.100.1", Servers: []ProxyServer{{VrfID: tableA, Server: "10.0.0.99"}}},
 		// ③ 声明表（vs-b）上与声明一致的 server：不动
 		{RxVrfID: tableB, Src: "192.168.200.1", Servers: []ProxyServer{{VrfID: tableB, Server: "192.168.200.20"}}},
@@ -819,23 +905,33 @@ func TestDhcpRelayReconcileProxy(t *testing.T) {
 	if err := p.ReconcileProxy([]model.VirtualSwitch{vsA, vsB, vsC}); err != nil {
 		t.Fatalf("对账应成功: %v", err)
 	}
-	if len(f.calls) != 2 {
-		t.Fatalf("应只清①②两条，实际 %v", f.calls)
+	if len(f.calls) != 3 {
+		t.Fatalf("应补①声明缺失 1 条 + 清②/③两条陈旧，实际 %v", f.calls)
 	}
-	got := map[string]proxyCall{}
+	adds := map[string]proxyCall{}
+	dels := map[string]proxyCall{}
 	for _, c := range f.calls {
 		if c.isAdd {
-			t.Fatalf("对账只应发撤销: %+v", c)
+			adds[c.server] = c
+		} else {
+			dels[c.server] = c
 		}
-		got[c.server] = c
 	}
-	if c, ok := got["10.9.9.2"]; !ok || c.rx != 99999 || c.srvVrf != 99999 || c.src != "10.9.9.1" {
+	// 补：vs-a 声明的 server 缺失 ⇒ 按声明字段下发（rx=server=表 id、src 取网关 v4）。
+	if c, ok := adds["192.168.100.2"]; !ok || c.rx != tableA || c.srvVrf != tableA || c.src != "192.168.100.1" {
+		t.Fatalf("声明缺失的 proxy 应被补发: %+v", f.calls)
+	}
+	if len(adds) != 1 {
+		t.Fatalf("应只补发 1 条（vs-b 已一致、vs-c 不可判定）: %+v", f.calls)
+	}
+	// 清：未声明表条目 + 声明表上的陈旧 server。
+	if c, ok := dels["10.9.9.2"]; !ok || c.rx != 99999 || c.srvVrf != 99999 || c.src != "10.9.9.1" {
 		t.Fatalf("未声明表条目应被清除: %+v", f.calls)
 	}
-	if c, ok := got["10.0.0.99"]; !ok || c.rx != tableA || c.srvVrf != tableA || c.src != "192.168.100.1" {
+	if c, ok := dels["10.0.0.99"]; !ok || c.rx != tableA || c.srvVrf != tableA || c.src != "192.168.100.1" {
 		t.Fatalf("声明表的陈旧 server 应被清除: %+v", f.calls)
 	}
-	if _, ok := got["192.168.200.20"]; ok {
+	if _, ok := dels["192.168.200.20"]; ok {
 		t.Fatalf("与声明一致的 server 不应被清除: %+v", f.calls)
 	}
 }
@@ -862,7 +958,8 @@ func TestDhcpRelayReconcileProxyBoundaries(t *testing.T) {
 	}
 }
 
-// TestL2NetworkReconcileProxy 决策 #380：L2Network 从 cfg 取「声明了 relay」的集合转发给 provider。
+// TestL2NetworkReconcileProxy 决策 #380/#394②：L2Network 从 cfg 取「声明了 relay」的集合转发给
+// provider——双向对账（补声明缺失 + 清未声明）。
 func TestL2NetworkReconcileProxy(t *testing.T) {
 	f := &fakeDhcp{dump: []ProxyEntry{
 		{RxVrfID: 99999, Src: "10.9.9.1", Servers: []ProxyServer{{VrfID: 99999, Server: "10.9.9.2"}}},
@@ -877,8 +974,19 @@ func TestL2NetworkReconcileProxy(t *testing.T) {
 	if errs := n.ReconcileProxy(context.Background(), cfg); len(errs) != 0 {
 		t.Fatalf("对账应成功: %v", errs)
 	}
-	if len(f.calls) != 1 || f.calls[0].isAdd || f.calls[0].rx != 99999 {
-		t.Fatalf("应清除未声明表条目: %v", f.calls)
+	// 声明了 relay 但数据面没有 ⇒ 补发；数据面上未声明的表 ⇒ 清除。
+	tableA := TableID(GatewayVRFName("vs-a"))
+	var added, removed bool
+	for _, c := range f.calls {
+		switch {
+		case c.isAdd && c.rx == tableA && c.server == "192.168.100.2":
+			added = true
+		case !c.isAdd && c.rx == 99999:
+			removed = true
+		}
+	}
+	if !added || !removed {
+		t.Fatalf("应补声明缺失并清未声明表条目，实际 %v", f.calls)
 	}
 
 	// 未注入 provider ⇒ 空操作（不 panic）

@@ -591,8 +591,9 @@ func (n *L2Network) ReconcileDHCPServer(ctx context.Context, cfg model.Config) [
 }
 
 // ReconcileProxy DHCP 中继 proxy 的巡检对账（决策 #380/R140-1；供 15s 巡检与残渣对账同块调用）：
-// 从 cfg.VirtualSwitches 取「声明了 relay」的集合，交给 DhcpProvider 与 VPP 实际条目比对，
-// 清除未声明/陈旧的多余 proxy 条目（不靠进程内登记，跨 nfvisd 重启仍有效）。未注入 provider 时空操作。
+// 从 cfg.VirtualSwitches 取「声明了 relay」的集合，交给 DhcpProvider 与 VPP 实际条目**双向**比对，
+// 清除未声明/陈旧的多余 proxy、补齐声明了却被带外删除/失败残留的条目（不靠进程内登记，跨 nfvisd
+// 重启仍有效）。未注入 provider 时空操作。
 func (n *L2Network) ReconcileProxy(ctx context.Context, cfg model.Config) []error {
 	if n.dhcp == nil {
 		return nil
@@ -607,6 +608,16 @@ func (n *L2Network) ReconcileProxy(ctx context.Context, cfg model.Config) []erro
 		return []error{err}
 	}
 	return nil
+}
+
+// ReconcileStorm 接口风暴抑制的 15s 巡检按登记复核（决策 #385 ④ 的兑现 / #394①；供巡检与残渣
+// 对账同块调用）：以数据面实况为准核对声明，缺项即重放（只补不猜，撤除走提交编排）。
+// 未注入 provider 时空操作。
+func (n *L2Network) ReconcileStorm(ctx context.Context, cfg model.Config) []error {
+	if n.storm == nil {
+		return nil
+	}
+	return n.storm.Reconcile(ctx, cfg)
 }
 
 func (n *L2Network) ApplyVRF(ctx context.Context, vrf model.Vrf) error {

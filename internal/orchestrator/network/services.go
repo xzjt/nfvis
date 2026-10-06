@@ -142,6 +142,12 @@ func (p *ServicesProvider) ApplyQos(ctx context.Context, q model.QosPolicy) erro
 // 登记按「最后一个成功下发的状态」逐口摘除（决策 #363）：某口解绑成功才摘该口登记，
 // 失败即返回且登记保留（重试会再解该口）；接口已不在 VPP 时按既有口径跳过（该口无从解绑，
 // 登记随摘除动作清掉）。全部解绑成功后才删 policer，成功才摘 policer 登记。
+//
+// 查询失败与「接口不存在」必须分开（决策 #393，收口 round171 R171-6）：此前 `err != nil || !ok`
+// 一并摘登记，`SwInterfaceIndex` 偶发失败即把绑定登记抹掉、重试不再解绑、VPP 绑定残留到重启；
+// 与 #363「登记＝最后成功下发状态」及本仓「查不出来不许当已达成」（l3.go 的 resolveRegistered）
+// 相悖。现口径：查询**失败**（err != nil）照实上抛并**保留**登记（可重试）；仅**确认接口不存在**
+// （ok==false）才摘登记。
 func (p *ServicesProvider) DeleteQos(ctx context.Context, name string) error {
 	c, err := p.client()
 	if err != nil {
@@ -164,8 +170,12 @@ func (p *ServicesProvider) DeleteQos(ctx context.Context, name string) error {
 	p.mu.Unlock()
 	for _, ifname := range boundIn {
 		idx, ok, err := c.SwInterfaceIndex(ifname)
-		if err != nil || !ok {
-			// 既有容忍：接口已不存在时无从解绑，跳过该口的 VPP 调用；登记一并摘除——
+		if err != nil {
+			// 查询失败 ≠ 接口不存在：保留登记、照实上抛，重试会再解该口（决策 #393）。
+			return fmt.Errorf("解析接口 %s（解绑入向 policer %s）: %w", ifname, name, err)
+		}
+		if !ok {
+			// 确认接口已不存在：无从解绑，跳过该口的 VPP 调用；登记一并摘除——
 			// 接口都不在了、绑定不可能还挂在上面，留着陈旧登记会让同名接口复现后
 			// 的 ApplyInterface 误判「已在位」而静默跳过（决策 #363 要防的假成功）。
 			p.setBoundPolicy(ifname, "", false)
@@ -178,7 +188,10 @@ func (p *ServicesProvider) DeleteQos(ctx context.Context, name string) error {
 	}
 	for _, ifname := range boundOut {
 		idx, ok, err := c.SwInterfaceIndex(ifname)
-		if err != nil || !ok {
+		if err != nil {
+			return fmt.Errorf("解析接口 %s（解绑出向 policer %s）: %w", ifname, name, err)
+		}
+		if !ok {
 			p.setBoundPolicy(ifname, "", true)
 			continue
 		}

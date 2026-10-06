@@ -20,6 +20,10 @@ import (
 )
 
 // RouteEntry 一条 FIB 路由（运行态）。
+//
+// NextHop：**全部**下一跳以逗号串呈现（ECMP；与配置/`display set` 同形，单跳逐字不变；决策 #393）。
+// Distance：v1 不下发也不回读（VPP ip_route_add_del 无该参数），恒 0；读视图据此如实标注
+// 「未下发」而非打印假值（决策 #393；下发能力不在本条）。
 type RouteEntry struct {
 	Prefix   string `json:"prefix"`
 	NextHop  string `json:"next_hop"`
@@ -498,6 +502,11 @@ func (p *L3Provider) vnicHoldsTable(vrfName, ifname string) bool {
 // 例外：该接口名同时是本表的 **VNF vNIC**（VNF 侧声明仍在，其转发域身份由 vNIC 侧承担）时
 // 整套登记保持——这些登记同时由 SetVnfTable 写入、由 ForgetVnfIface 维护，此处摘掉会让
 // DeleteVRF 漏清该口的地址/归属、NAT 解析答不出。idx==0（接口与登记都不在）时只清按名登记。
+//
+// 按名登记（ifaceTable/ifaceIdx）另须**核对索引**（决策 #393）：同 VRF 内 vlan 变更
+// （旧 100→新 200）时新旧声明同名（li.Interface 都是父口名）而索引不同，按名无条件删会把
+// **新**子接口的登记一并摘掉，致 TableOfIface 落空、NAT outside 解析缺项（nat.go 落回表 0）。
+// 只摘「登记索引 == 本次摘除索引」的项。
 func (p *L3Provider) forgetL3Iface(vrfName string, li model.L3Interface, idx uint32) {
 	tableID := TableID(vrfName)
 	p.mu.Lock()
@@ -527,8 +536,12 @@ func (p *L3Provider) forgetL3Iface(vrfName string, li model.L3Interface, idx uin
 		dropIdx(p.subifs)
 	}
 	if t, ok := p.ifaceTable[li.Interface]; ok && t == tableID {
-		delete(p.ifaceTable, li.Interface)
-		delete(p.ifaceIdx, li.Interface)
+		// 只摘「本条声明贡献的项」：登记索引须与本次摘除的索引一致（决策 #393）。
+		// idx==0（接口与登记都不在）时无索引可核，仍按名清（此时不存在同名的新登记）。
+		if idx == 0 || p.ifaceIdx[li.Interface] == idx {
+			delete(p.ifaceTable, li.Interface)
+			delete(p.ifaceIdx, li.Interface)
+		}
 	}
 	if idx != 0 {
 		if name, ok := p.idxSwitch[idx]; ok && name == vrfName {

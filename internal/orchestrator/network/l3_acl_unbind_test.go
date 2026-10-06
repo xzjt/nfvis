@@ -247,6 +247,44 @@ func TestDeleteL3InterfaceVlanSubif(t *testing.T) {
 	}
 }
 
+// 决策 #393：forgetL3Iface 摘按名登记（ifaceTable/ifaceIdx）前须核对索引——只摘「本条声明
+// 贡献的项」。同 VRF 内 vlan 变更（旧 100→新 200）时新旧声明同名（父口名）而索引不同，
+// 按名无条件删会把**新**子接口登记一并摘掉，致 TableOfIface 落空、NAT outside 解析缺项
+// （nat.go 落回表 0）。此前只比「接口名+表」，不校验索引。
+func TestForgetL3IfaceKeepsRegistrationForDifferentIndex(t *testing.T) {
+	p := NewL3Provider(newFakeL3())
+	table := TableID("vs-x")
+
+	// 模拟「新声明（vlan 200）已登记」：同名 ens192 现指向新索引 22。
+	p.mu.Lock()
+	p.ifaceTable["ens192"] = table
+	p.ifaceIdx["ens192"] = 22
+	p.ifaces[table] = []uint32{22}
+	p.subifs[table] = []uint32{22}
+	p.mu.Unlock()
+
+	// 回收旧声明（vlan 100，索引 11）：索引不符，不得摘新登记。
+	p.forgetL3Iface("vs-x", model.L3Interface{Interface: "ens192", Vlan: 100}, 11)
+	if _, ok := p.TableOfIface("ens192"); !ok {
+		t.Fatal("索引不符时不得摘新子接口的按名登记（TableOfIface 落空会让 NAT outside 解析缺项）")
+	}
+	if idx, ok := p.ifaceIdx["ens192"]; !ok || idx != 22 {
+		t.Fatalf("新登记索引应保持 22，实际 (%d,%v)", idx, ok)
+	}
+	if got := p.AttachedIfaces("vs-x"); len(got) != 1 || got[0] != 22 {
+		t.Fatalf("新索引的转发域登记应保持: %v", got)
+	}
+
+	// 正控：登记索引 == 本次摘除索引时才摘（回收新声明）。
+	p.forgetL3Iface("vs-x", model.L3Interface{Interface: "ens192", Vlan: 200}, 22)
+	if _, ok := p.TableOfIface("ens192"); ok {
+		t.Fatal("索引相符时按名登记应摘除")
+	}
+	if got := p.AttachedIfaces("vs-x"); len(got) != 0 {
+		t.Fatalf("索引相符时转发域登记应摘除: %v", got)
+	}
+}
+
 // vNIC 作 L3 接口（#172 受支持形态，用户手册 §8.9）：删 l3-interface 叶子只撤地址与绑定，
 // **不得把口移回默认表**——vNIC 侧声明仍在，口要继续留在该 VRF 的转发域里；登记也保持
 // （vnfs 由 vNIC 侧维护，误摘会让 guest 转发域与 NAT 解析同时失去依据）。

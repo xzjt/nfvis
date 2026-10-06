@@ -52,6 +52,17 @@ var FirewallReserved = []string{
 	"必要 ICMP/ICMPv6（v4 差错；v6 差错与邻居发现）",
 }
 
+// 保留项字面（渲染脚本与回读内容比对**共用同一来源**，决策 #395/R171-14）——回读时必须逐字
+// 核对，否则「保留项 4 条」计数相同也判不出内容被换掉（如 ct 规则被替换成一条裸 accept）。
+var (
+	firewallReservedCTState = "established,related"
+	firewallReservedICMPv4  = []string{"destination-unreachable", "time-exceeded"}
+	firewallReservedICMPv6  = []string{
+		"destination-unreachable", "packet-too-big", "time-exceeded", "parameter-problem",
+		"nd-router-solicit", "nd-router-advert", "nd-neighbor-solicit", "nd-neighbor-advert",
+	}
+)
+
 // FirewallCounter 一条规则在数据面的计数读数。
 type FirewallCounter struct {
 	Packets uint64
@@ -89,9 +100,9 @@ func RenderFirewallScript(cfg model.Config) (string, bool, error) {
 	fmt.Fprintf(&b, "\t\ttype filter hook input priority filter; policy %s;\n", fw.FirewallPolicy())
 	// 非管理口入向不参与（iifname 反匹配）；随后是与数据面冲突无关的三条保留项。
 	fmt.Fprintf(&b, "\t\tiifname != %q accept\n", mgmt)
-	b.WriteString("\t\tct state established,related accept\n")
-	b.WriteString("\t\ticmp type { destination-unreachable, time-exceeded } accept\n")
-	b.WriteString("\t\ticmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept\n")
+	fmt.Fprintf(&b, "\t\tct state %s accept\n", firewallReservedCTState)
+	fmt.Fprintf(&b, "\t\ticmp type { %s } accept\n", strings.Join(firewallReservedICMPv4, ", "))
+	fmt.Fprintf(&b, "\t\ticmpv6 type { %s } accept\n", strings.Join(firewallReservedICMPv6, ", "))
 	for _, r := range rules {
 		fmt.Fprintf(&b, "\t\t%s counter %s comment \"%s%d\"\n", firewallMatch(r), r.Action, firewallCommentPrefix, r.Seq)
 	}
@@ -334,11 +345,16 @@ func (a *FirewallApplier) Read(ctx context.Context, cfg model.Config) FirewallSt
 		return FirewallState{Applied: false,
 			Error: "配置未启用主机防火墙但数据面仍有 " + firewallTableSpec + " 表（等待下发回收，或该表由手工创建）"}
 	}
-	st := FirewallState{Applied: true, Counters: tbl.counters()}
+	st := FirewallState{}
 	if err := compareFirewallTable(cfg, tbl); err != nil {
+		// 决策 #395（R171-14/F6）：未收敛时**不展示**逐规则计数——表内容与配置不一致时，
+		// 旧表规则的 counts 会张冠李戴到新配置的规则上（读视图误导）。
 		st.Applied = false
 		st.Error = err.Error()
+		return st
 	}
+	st.Applied = true
+	st.Counters = tbl.counters()
 	return st
 }
 
@@ -354,6 +370,18 @@ type firewallTableRule struct {
 	Comment    string
 	Counter    FirewallCounter
 	HasCounter bool
+	Facts      firewallRuleFacts // 内容比对用（决策 #395）
+}
+
+// firewallRuleFacts 从一条回读规则的表达式里抽取的语义事实（决策 #395）。
+// 只覆盖本产品脚本会渲染出的匹配种类；未识别的表达式不参与事实比对（但规则条数/comment
+// 集合仍照比，故「多出来/被换掉」的规则不会被漏掉）。
+type firewallRuleFacts struct {
+	HasIifname bool   // 存在 `meta iifname` 匹配
+	Iifname    string // 其匹配值（作用面）
+	CTState    string // `ct state` 匹配值（"" = 无）
+	ICMPv4Type string // `icmp type` 集合（规范化逗号拼接；"" = 无）
+	ICMPv6Type string // `icmpv6 type` 集合（规范化逗号拼接；"" = 无）
 }
 
 func (t *firewallTable) counters() map[int]FirewallCounter {
@@ -399,6 +427,133 @@ type nftCounterJSON struct {
 	Bytes   uint64 `json:"bytes"`
 }
 
+// 回读表达式的极简形状（`nft -j` 的 expr 元素；只声明内容比对要读的字段）。
+type nftMatchJSON struct {
+	Op    string          `json:"op"`
+	Left  nftMatchLeft    `json:"left"`
+	Right json.RawMessage `json:"right"`
+}
+
+type nftMatchLeft struct {
+	Meta    *nftMetaKey    `json:"meta"`
+	Payload *nftPayloadKey `json:"payload"`
+	// 真实形状（真机 dev115 实证）：`ct state` 的 key 在 match.left.ct，右值是**普通 JSON 数组**
+	// `["established","related"]`（不是 {"set":…}）。
+	CT *nftCTKey `json:"ct"`
+}
+
+type nftMetaKey struct {
+	Key string `json:"key"`
+}
+
+type nftPayloadKey struct {
+	Protocol string `json:"protocol"`
+	Field    string `json:"field"`
+}
+
+type nftCTKey struct {
+	Key string `json:"key"`
+}
+
+// nftCTJSON 顶层 `ct` 表达式（部分 nft 版本/形态：值在 match 字段里）；保留兼容。
+type nftCTJSON struct {
+	Key   string `json:"key"`
+	Match string `json:"match"`
+}
+
+// nftRightValues 解析 nft 匹配右值的取值（决策 #395 修正，真机 dev115 实证）——`right` 有四种
+// 已知形态，**顺序无关的集合规范化**由调用方负责：
+//   - 普通字符串（iifname 的 "ens160"）；
+//   - 普通 JSON 数组（ct state 的 ["established","related"]）；
+//   - `{"set":[…]}`（icmp/icmpv6 type 集合）；
+//   - `{"match":"a,b"}`（部分版本的 ct state）。
+//
+// 返回 nil 表示形状不认识——不参与该项比对（其余判据仍在，不会因此放行）。
+func nftRightValues(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var arr []string
+	if json.Unmarshal(raw, &arr) == nil {
+		return arr
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return []string{s}
+	}
+	var set struct {
+		Set []string `json:"set"`
+	}
+	if json.Unmarshal(raw, &set) == nil && set.Set != nil {
+		return set.Set
+	}
+	var m struct {
+		Match string `json:"match"`
+	}
+	if json.Unmarshal(raw, &m) == nil && m.Match != "" {
+		return strings.FieldsFunc(m.Match, func(r rune) bool { return r == ',' || r == ' ' })
+	}
+	return nil
+}
+
+// firewallRuleFactsOf 抽取一条规则的内容事实（决策 #395；见 firewallRuleFacts 说明）。
+//
+// 兼容真实 `nft -j` 形状（真机 dev115）：`ct state` 是 `match.left.ct` + 数组右值，
+// icmp/icmpv6 type 是 `match.left.payload` + `{"set":…}`，iifname 是 `match.left.meta` + 字符串。
+func firewallRuleFactsOf(exprs []map[string]json.RawMessage) firewallRuleFacts {
+	var f firewallRuleFacts
+	for _, e := range exprs {
+		// 顶层 ct 表达式（兼容形态）：值在 match 字段。
+		if raw, ok := e["ct"]; ok {
+			var ct nftCTJSON
+			if json.Unmarshal(raw, &ct) == nil && ct.Key == "state" {
+				f.CTState = ct.Match
+			}
+			continue
+		}
+		raw, ok := e["match"]
+		if !ok {
+			continue
+		}
+		var m nftMatchJSON
+		if json.Unmarshal(raw, &m) != nil {
+			continue
+		}
+		if m.Left.Meta != nil && m.Left.Meta.Key == "iifname" {
+			if vals := nftRightValues(m.Right); len(vals) > 0 {
+				f.HasIifname, f.Iifname = true, vals[0]
+			}
+		}
+		if m.Left.CT != nil && m.Left.CT.Key == "state" {
+			f.CTState = strings.Join(nftRightValues(m.Right), ",")
+		}
+		if m.Left.Payload != nil && m.Left.Payload.Field == "type" {
+			joined := strings.Join(nftRightValues(m.Right), ",")
+			switch m.Left.Payload.Protocol {
+			case "icmp":
+				f.ICMPv4Type = joined
+			case "icmpv6":
+				f.ICMPv6Type = joined
+			}
+		}
+	}
+	return f
+}
+
+// normalizeFirewallTypeSet 规范化 type 集合文本（去空白、排序、逗号拼接）——nft 回读的集合
+// 顺序不保证与脚本一致，按集合语义比较。
+func normalizeFirewallTypeSet(s string) string {
+	if s == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' })
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
 // parseFirewallTableJSON 解析 `nft -j list table inet nfvis-firewall` 的输出
 // （真机形状：`{"nftables":[{"metainfo":…},{"table":…},{"chain":…},{"rule":…},…]}`）。
 func parseFirewallTableJSON(raw string) (*firewallTable, error) {
@@ -429,6 +584,7 @@ func parseFirewallTableJSON(raw string) (*firewallTable, error) {
 				continue
 			}
 			r := firewallTableRule{Comment: rl.Comment}
+			r.Facts = firewallRuleFactsOf(rl.Expr)
 			for _, e := range rl.Expr {
 				rawCounter, ok := e["counter"]
 				if !ok {
@@ -480,9 +636,27 @@ func compareFirewallTable(cfg model.Config, tbl *firewallTable) error {
 	sort.Ints(wantSeqs)
 	var reserved int
 	var gotSeqs []int
+	// 决策 #395（R171-14）：保留项**内容**比对——只比条数判不出「ct 规则被换成裸 accept」
+	// 这类内容替换；iifname 作用面更要单独核对（管理口改名 apply 失败时旧表原样保留，
+	// 条数/策略/seq 全同 ⇒ 此前误报「已收敛」）。
+	var facts firewallRuleFacts
+	var hasIifnameRule bool
 	for _, r := range tbl.Rules {
 		if r.Comment == "" {
 			reserved++
+			if r.Facts.HasIifname {
+				hasIifnameRule = true
+				facts.Iifname = r.Facts.Iifname
+			}
+			if r.Facts.CTState != "" {
+				facts.CTState = r.Facts.CTState
+			}
+			if r.Facts.ICMPv4Type != "" {
+				facts.ICMPv4Type = r.Facts.ICMPv4Type
+			}
+			if r.Facts.ICMPv6Type != "" {
+				facts.ICMPv6Type = r.Facts.ICMPv6Type
+			}
 			continue
 		}
 		seq, ok := firewallCommentSeq(r.Comment)
@@ -496,6 +670,23 @@ func compareFirewallTable(cfg model.Config, tbl *firewallTable) error {
 	}
 	if !slices.Equal(gotSeqs, wantSeqs) {
 		return fmt.Errorf("规则集合与配置不一致：数据面 %v、配置 %v", gotSeqs, wantSeqs)
+	}
+	// iifname 作用面：数据面必须恰按配置的管理口过滤（管理口变更后下发失败时，旧表仍按旧口）。
+	wantMgmt := cfg.MgmtInterfaceOf()
+	if !hasIifnameRule {
+		return fmt.Errorf("保留项与配置不符：数据面缺 iifname 作用面匹配（期望按管理口 %q 过滤）", wantMgmt)
+	}
+	if facts.Iifname != wantMgmt {
+		return fmt.Errorf("作用面与配置不符：数据面按管理口 %q 过滤、配置为 %q（管理口变更可能未下发成功）", facts.Iifname, wantMgmt)
+	}
+	if got, want := normalizeFirewallTypeSet(facts.CTState), normalizeFirewallTypeSet(firewallReservedCTState); got != want {
+		return fmt.Errorf("保留项与配置不符：ct state 数据面 %q、期望 %q", facts.CTState, firewallReservedCTState)
+	}
+	if got, want := normalizeFirewallTypeSet(facts.ICMPv4Type), normalizeFirewallTypeSet(strings.Join(firewallReservedICMPv4, ",")); got != want {
+		return fmt.Errorf("保留项与配置不符：icmp type 集合数据面 %q、期望 %q", got, want)
+	}
+	if got, want := normalizeFirewallTypeSet(facts.ICMPv6Type), normalizeFirewallTypeSet(strings.Join(firewallReservedICMPv6, ",")); got != want {
+		return fmt.Errorf("保留项与配置不符：icmpv6 type 集合数据面 %q、期望 %q", got, want)
 	}
 	return nil
 }

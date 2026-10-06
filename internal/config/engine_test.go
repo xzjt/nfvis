@@ -482,6 +482,40 @@ func TestEngineRejectedCommitKeepsConfirmed(t *testing.T) {
 	}
 }
 
+// TestEngineGuardRejectedCommitKeepsConfirmed 决策 #395（R171-13）：持有者的 commit 若被
+// **守卫**拒绝（管理口变更未带 confirmed），不得隐式确认在途 confirmed——否则 confirmed 窗口内
+// 再发一次被拒的普通 commit 会把危险变更静默转永久（#364 只收了「锁拒绝」半边）。
+func TestEngineGuardRejectedCommitKeepsConfirmed(t *testing.T) {
+	k := newEngineKit(t)
+	k.edit(t, "admin", "ssh")
+
+	cfg := baseCommitted()
+	cfg.System.Hostname = "risky"
+	_ = k.engine.UpdateCandidate(Session{User: "admin", Source: "ssh"}, cfg)
+	if _, err := k.engine.Commit(context.Background(), Session{User: "admin", Source: "ssh"}, CommitOpts{ConfirmedMinutes: 10}); err != nil {
+		t.Fatalf("Commit confirmed: %v", err)
+	}
+
+	// 同一持有者再改**管理口**并普通 commit：被守卫拒绝，在途 confirmed 必须原样保留。
+	cfg2 := cfg
+	cfg2.System.Management.Interface = "ens199"
+	if err := k.engine.UpdateCandidate(Session{User: "admin", Source: "ssh"}, cfg2); err != nil {
+		t.Fatalf("UpdateCandidate: %v", err)
+	}
+	if _, err := k.engine.Commit(context.Background(), Session{User: "admin", Source: "ssh"}, CommitOpts{}); !errors.Is(err, ErrConfirmRequired) {
+		t.Fatalf("管理口变更未带 confirmed 应被守卫拒绝（ErrConfirmRequired），实际 %v", err)
+	}
+	if cf, err := k.store.GetConfirmed(); err != nil || cf == nil {
+		t.Fatalf("被守卫拒绝的 commit 不得隐式确认在途 confirmed: cf=%+v err=%v", cf, err)
+	}
+	// 超时仍按原保护回滚——危险变更未被转永久。
+	k.clock.Advance(10 * time.Minute)
+	k.timers.FireAll()
+	if got, _ := k.engine.Committed(); hostnameOf(t, got) != "nfvis-node1" {
+		t.Fatalf("被拒的 commit 不得把危险变更转永久，应回滚到基线: %s", hostnameOf(t, got))
+	}
+}
+
 // TestEngineConfirmCommitRequiresHolder 决策 #364（R142-9）：ConfirmCommit 与 Rollback 同口径，
 // 须由持锁会话发起——他会话（无锁 / 同用户另一会话）确认被拒且 confirmed 不被清掉；
 // 持有者确认成功、confirmed 清空、审计归持有者。

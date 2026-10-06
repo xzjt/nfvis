@@ -140,6 +140,49 @@ func TestValidateRouteMultiNextHop(t *testing.T) {
 	mustErrContaining(t, setNH("10.10.0.999"), "next_hop", "必须是有效 ip")
 }
 
+// 决策 #393：静态路由**前缀与下一跳同族**校验（此前只查多下一跳彼此同族）。
+// 真机 round171 §1.5：v4 前缀 + v6 下一跳提交成功、读视图正常，而 VPP FIB 装 dpo-drop
+// （静默黑洞）——须在提交期拒绝，文案点名前缀与首个异族跳。
+func TestValidateRoutePrefixNextHopFamily(t *testing.T) {
+	set := func(prefix, nh string) []ValidateError {
+		c := validBase()
+		c.Vrfs[0].Routes[0].Prefix = prefix
+		c.Vrfs[0].Routes[0].NextHop = nh
+		return Validate(c)
+	}
+
+	// 同族通过：v4/v4、v6/v6、默认路由、多跳同族。
+	mustNoErr(t, set("10.0.0.0/24", "10.0.0.1"))
+	mustNoErr(t, set("2001:db8::/64", "2001:db8::1"))
+	mustNoErr(t, set("0.0.0.0/0", "10.0.0.1"))
+	mustNoErr(t, set("::/0", "2001:db8::1"))
+	mustNoErr(t, set("10.0.0.0/24", "10.0.0.1,10.0.0.2"))
+	mustNoErr(t, set("2001:db8::/64", "2001:db8::1,2001:db8::2"))
+
+	// v4 前缀 + v6 下一跳（真机黑洞形态）拒绝。
+	mustErrContaining(t, set("10.0.0.0/24", "2001:db8::1"), "next_hop", "不同族")
+	// v6 前缀 + v4 下一跳 拒绝。
+	mustErrContaining(t, set("2001:db8::/64", "10.0.0.1"), "next_hop", "不同族")
+	// 默认 v4 路由 + v6 下一跳 拒绝。
+	mustErrContaining(t, set("0.0.0.0/0", "2001:db8::1"), "next_hop", "不同族")
+
+	// 多跳全 v6 + v4 前缀：只报**首个**异族跳（2001:db8::1），不重复报第二个。
+	errs := set("10.0.0.0/24", "2001:db8::1,2001:db8::2")
+	mustErrContaining(t, errs, "next_hop", "不同族")
+	n := 0
+	for _, e := range errs {
+		if strings.Contains(e.Message, "不同族") {
+			n++
+			if !strings.Contains(e.Message, "2001:db8::1") {
+				t.Errorf("应点名前缀与首个异族跳，实际: %s", e.Message)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("前缀↔下一跳混族应只报一条（首个异族跳），实际 %d 条", n)
+	}
+}
+
 func TestValidateVMRequiredFields(t *testing.T) {
 	c := validBase()
 	c.VirtualMachineFunctions[0].Image = ""
