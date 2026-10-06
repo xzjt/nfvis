@@ -215,6 +215,10 @@ func (s *Server) handleGetMacTable(w http.ResponseWriter, r *http.Request) {
 }
 
 // RouteRow /vrfs/{name}/routes 一行（契约 Route）。
+//
+// NextHop：**全部**下一跳以逗号串呈现（ECMP；与配置同形，单跳逐字不变；决策 #393）。
+// Distance：v1 不下发也不回读（VPP ip_route_add_del 无该参数），恒 0；`omitempty` 使其在
+// 响应中**不出现**——不编造值（决策 #393，与 CLI 的「未下发」标注同口径）。
 type RouteRow struct {
 	Prefix   string `json:"prefix"`
 	NextHop  string `json:"next_hop"`

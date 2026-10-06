@@ -248,7 +248,17 @@ func (g *govppL3Client) Routes(tableID uint32, isIP6 bool) ([]RouteEntry, error)
 		}
 		e := RouteEntry{Prefix: d.Route.Prefix.String()}
 		if len(d.Route.Paths) > 0 {
-			e.NextHop = fibNhString(d.Route.Paths[0])
+			// 决策 #393：如实呈现**全部**下一跳。此前只取 Paths[0]，ECMP 路由在运行态
+			// 读视图里只显示首跳（真机 round171 §1.4：FIB `buckets:2` 而读视图单跳），
+			// 用户看不出等价多路径已生效。多跳以逗号串呈现，与配置/`display set` 同形；
+			// 单跳时逐字不变。非 IP 路径（如 dpo-drop）无下一跳文本，跳过。
+			nhs := make([]string, 0, len(d.Route.Paths))
+			for _, p := range d.Route.Paths {
+				if s := fibNhString(p); s != "" {
+					nhs = append(nhs, s)
+				}
+			}
+			e.NextHop = strings.Join(nhs, ",")
 		}
 		out = append(out, e)
 	}

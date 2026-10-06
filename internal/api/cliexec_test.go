@@ -508,6 +508,32 @@ func TestCLIShowVrfRoutesValidatesExistence(t *testing.T) {
 	}
 }
 
+// 决策 #393：运行态路由读视图如实——ECMP 显示**全部**下一跳（逗号串，与配置同形），
+// distance 不打印假 0 而标注「未下发」（v1 的 VPP 路由 API 不接收该参数）。
+func TestCLIShowVrfRoutesECMPAndDistanceTruthful(t *testing.T) {
+	x, _ := newCLIKit(t)
+	x.setNetRuntime(nil, &fakeL3Runtime{rows: []RouteRow{
+		{Prefix: "10.99.6.0/24", NextHop: "10.99.5.2,10.99.5.3"}, // ECMP 两条
+		{Prefix: "10.99.7.0/24", NextHop: "10.99.5.4"},           // 单跳
+	}}, nil, nil, nil)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-l3 type l3",
+		"commit",
+		"exit",
+	)
+	out := x.Execute("admin", aaaClassSU, "ssh", "show vrfs vs-l3 routes").Output
+	if !strings.Contains(out, "10.99.5.2,10.99.5.3") {
+		t.Fatalf("ECMP 应显示全部下一跳（逗号串），实际:\n%s", out)
+	}
+	if !strings.Contains(out, "10.99.5.4") {
+		t.Fatalf("单跳应逐字显示，实际:\n%s", out)
+	}
+	if !strings.Contains(out, "未下发") {
+		t.Fatalf("distance 应如实标注「未下发」（不打印假 0），实际:\n%s", out)
+	}
+}
+
 // TestCLIDpdkDevDeleteForms 覆盖契约 §2.9 的三种 delete 形式。
 // 回归背景（决策 #76）：5-token 的「单网卡单项」`delete vpp dpdk dev <ifname> <参数>`
 // 与「全局默认」`delete vpp dpdk dev <参数>` **同为 5 token**，我新增的别名规则

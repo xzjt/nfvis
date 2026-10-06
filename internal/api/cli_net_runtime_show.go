@@ -8,6 +8,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/model"
@@ -260,13 +261,26 @@ func (x *cliExecutor) showVrfRoutes(name string) string {
 	}
 	items := make([]any, 0, len(rows))
 	var b strings.Builder
+	// 决策 #393：Distance 列**如实标注**。v1 的路由下发（VPP ip_route_add_del）不接收
+	// distance 参数、读回也不带该值（RouteEntry.Distance 恒 0），故读视图不打印假的 0，
+	// 而标注为「未下发」（配置里的 distance 仅记录、不参与选路；下发能力不在本条）。
 	fmt.Fprintf(&b, "%-20s %-20s %s\n", "Prefix", "NextHop", "Distance")
 	for _, r := range rows {
 		items = append(items, anyToTree(r))
-		fmt.Fprintf(&b, "%-20s %-20s %d\n", r.Prefix, r.NextHop, r.Distance)
+		fmt.Fprintf(&b, "%-20s %-20s %s\n", r.Prefix, r.NextHop, routeDistanceText(r.Distance))
 	}
+	b.WriteString("（Distance 未下发：VPP 路由 API 不接收该参数，v1 不显示具体值）\n")
 	x.structured = map[string]any{"routes": items}
 	return b.String()
+}
+
+// routeDistanceText 运行态路由 distance 的读值（决策 #393）：0（未下发）→「未下发」，
+// 其余原样（供将来真的下发 distance 时显示）。当前 govpp 侧恒 0，故列值恒「未下发」。
+func routeDistanceText(d int) string {
+	if d == 0 {
+		return "未下发"
+	}
+	return strconv.Itoa(d)
 }
 
 // execShowNat：show nat [sessions]（运行态，VPP nat44 会话表）。

@@ -30,6 +30,9 @@ type fakeSvc struct {
 	poutErr       func(idx uint32, name string, apply bool) error
 	policerAddErr func(name string, add bool) error
 	spanOffErr    func(from, to uint32) error
+	// idxErr：仅让 SwInterfaceIndex 返回错误（决策 #393 的查询失败注入）。与全局 err 不同——
+	// 后者会连带让 PolicerAddDel 等失败，无法区分「查询失败」与「下发失败」。
+	idxErr func(ifname string) error
 	// 与 pins/pouts 一一对应的接口索引，用于区分绑同一策略名的不同接口（map 遍历顺序不定）。
 	pinIdx  []uint32
 	poutIdx []uint32
@@ -47,6 +50,11 @@ func (f *fakeSvc) Close() { f.closed++ }
 func (f *fakeSvc) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	if f.err != nil {
 		return 0, false, f.err
+	}
+	if f.idxErr != nil {
+		if err := f.idxErr(ifname); err != nil {
+			return 0, false, err
+		}
 	}
 	idx, ok := f.ifaces[ifname]
 	return idx, ok, nil
@@ -549,6 +557,83 @@ func TestDeleteQosPolicerDeleteFailKeepsRegistry(t *testing.T) {
 	}
 	if n := countSeq(f.addDel, "pol1:del"); n != 2 {
 		t.Fatalf("重试应重删 policer（共 2 次 del 调用）: %v", f.addDel)
+	}
+}
+
+// TestDeleteQosQueryFailKeepsRegistry 决策 #393（收口 round171 R171-6）：DeleteQos 的
+// SwInterfaceIndex **查询失败**（err != nil）必须照实上抛并**保留**登记（可重试）；仅
+// **确认接口不存在**（ok=false）才摘登记。此前 `err != nil || !ok` 一并摘，偶发查询失败即
+// 抹掉绑定登记、重试不再解绑、VPP 绑定残留到重启——与 #363「登记=最后成功下发状态」相悖。
+func TestDeleteQosQueryFailKeepsRegistry(t *testing.T) {
+	ctx := context.Background()
+
+	// 入向与出向各绑一个策略，两向都要覆盖。
+	f := newFakeSvc()
+	p := NewServicesProvider(f)
+	for _, pol := range []string{"pol-in", "pol-out"} {
+		if err := p.ApplyQos(ctx, model.QosPolicy{Name: pol, Cir: 1000000}); err != nil {
+			t.Fatalf("ApplyQos(%s): %v", pol, err)
+		}
+	}
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{
+		Name: "ens192", IngressPolicy: "pol-in", EgressPolicy: "pol-out"}); err != nil {
+		t.Fatalf("绑定: %v", err)
+	}
+
+	// 注入：SwInterfaceIndex 查询失败（接口其实还在）。
+	f.idxErr = func(string) error { return errors.New("vpp 查询失败") }
+	if err := p.DeleteQos(ctx, "pol-in"); err == nil {
+		t.Fatal("查询失败应上抛（不得当成接口不存在）")
+	}
+	if in, _ := svcRegs(p, "ens192"); in != "pol-in" {
+		t.Fatalf("查询失败不得摘入向登记，实际 %q", in)
+	}
+	if !svcPolicer(p, "pol-in") {
+		t.Fatal("查询失败时 policer 登记应保留")
+	}
+	if err := p.DeleteQos(ctx, "pol-out"); err == nil {
+		t.Fatal("出向查询失败同样应上抛")
+	}
+	if _, out := svcRegs(p, "ens192"); out != "pol-out" {
+		t.Fatalf("查询失败不得摘出向登记，实际 %q", out)
+	}
+
+	// 恢复查询、重试：解绑成功并摘登记。
+	f.idxErr = nil
+	if err := p.DeleteQos(ctx, "pol-in"); err != nil {
+		t.Fatalf("重试 DeleteQos(pol-in): %v", err)
+	}
+	if in, _ := svcRegs(p, "ens192"); in != "" {
+		t.Fatalf("重试成功后入向登记应摘除，实际 %q", in)
+	}
+	if svcPolicer(p, "pol-in") {
+		t.Fatal("重试成功后 policer 登记应摘除")
+	}
+	if err := p.DeleteQos(ctx, "pol-out"); err != nil {
+		t.Fatalf("重试 DeleteQos(pol-out): %v", err)
+	}
+	if _, out := svcRegs(p, "ens192"); out != "" {
+		t.Fatalf("重试成功后出向登记应摘除，实际 %q", out)
+	}
+
+	// 对照：接口**确认不存在**（ok=false）仍按既有口径摘登记并继续（可完成删除）。
+	f2 := newFakeSvc()
+	p2 := NewServicesProvider(f2)
+	if err := p2.ApplyQos(ctx, model.QosPolicy{Name: "pol2", Cir: 1000000}); err != nil {
+		t.Fatalf("ApplyQos(pol2): %v", err)
+	}
+	if err := p2.ApplyInterface(ctx, model.InterfaceConfig{Name: "ens192", IngressPolicy: "pol2"}); err != nil {
+		t.Fatalf("绑定 pol2: %v", err)
+	}
+	delete(f2.ifaces, "ens192") // 接口确认不存在
+	if err := p2.DeleteQos(ctx, "pol2"); err != nil {
+		t.Fatalf("接口确认不存在时应跳过解绑并完成删除: %v", err)
+	}
+	if in, _ := svcRegs(p2, "ens192"); in != "" {
+		t.Fatalf("接口不存在时陈旧登记应摘除，实际 %q", in)
+	}
+	if svcPolicer(p2, "pol2") {
+		t.Fatal("接口不存在时 policer 应正常删除")
 	}
 }
 

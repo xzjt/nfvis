@@ -13,7 +13,10 @@ package network
 import (
 	"testing"
 
+	"go.fd.io/govpp/api"
 	"go.fd.io/govpp/binapi/fib_types"
+	"go.fd.io/govpp/binapi/ip"
+	"go.fd.io/govpp/binapi/ip_types"
 )
 
 func TestRecursiveNextHopPathsResolveInOwnTable(t *testing.T) {
@@ -113,5 +116,59 @@ func TestNextHopPathsECMP(t *testing.T) {
 func TestNextHopPathsRejectsBadElement(t *testing.T) {
 	if _, err := nextHopPaths(1, "10.0.0.1,不是地址"); err == nil {
 		t.Fatal("多下一跳中任一非法即须报错")
+	}
+}
+
+// 决策 #393：运行态读视图（govppL3Client.Routes）必须如实呈现**全部**下一跳。
+// 真机 round171 §1.4：FIB `buckets:2`（ECMP 已生效），而读视图只取 Paths[0] 显示首跳，
+// 用户看不出等价多路径生效。多跳以逗号串呈现（与配置/`display set` 同形），单跳逐字不变。
+func TestGovppRoutesECMPAllNextHops(t *testing.T) {
+	mkPath := func(s string) fib_types.FibPath {
+		a, err := ip_types.ParseAddress(s)
+		if err != nil {
+			t.Fatalf("解析下一跳 %s: %v", s, err)
+		}
+		return fib_types.FibPath{Proto: fib_types.FIB_API_PATH_NH_PROTO_IP4,
+			Nh: fib_types.FibPathNh{Address: a.Un}}
+	}
+	mkPrefix := func(s string) ip_types.Prefix {
+		p, err := ip_types.ParsePrefix(s)
+		if err != nil {
+			t.Fatalf("解析前缀 %s: %v", s, err)
+		}
+		return p
+	}
+	routes := []ip.IPRoute{
+		// ECMP：两条等价下一跳。
+		{TableID: 1, Prefix: mkPrefix("10.99.6.0/24"),
+			Paths: []fib_types.FibPath{mkPath("10.99.5.2"), mkPath("10.99.5.3")}, NPaths: 2},
+		// 单跳：回归——读值逐字不变。
+		{TableID: 1, Prefix: mkPrefix("10.99.7.0/24"),
+			Paths: []fib_types.FibPath{mkPath("10.99.5.4")}, NPaths: 1},
+	}
+	ch := &fakeAPIChannel{multiByReq: func(api.Message) func(api.Message) bool {
+		i := 0
+		return func(msg api.Message) bool {
+			if i >= len(routes) {
+				return false
+			}
+			msg.(*ip.IPRouteDetails).Route = routes[i]
+			i++
+			return true
+		}
+	}}
+	rows, err := (&govppL3Client{ch: ch}).Routes(1, false)
+	if err != nil {
+		t.Fatalf("Routes: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.Prefix] = r.NextHop
+	}
+	if got["10.99.6.0/24"] != "10.99.5.2,10.99.5.3" {
+		t.Errorf("ECMP 应呈现全部下一跳（逗号串），实际 %q", got["10.99.6.0/24"])
+	}
+	if got["10.99.7.0/24"] != "10.99.5.4" {
+		t.Errorf("单跳读值应逐字不变，实际 %q", got["10.99.7.0/24"])
 	}
 }
