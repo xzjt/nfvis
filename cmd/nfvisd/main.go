@@ -349,12 +349,19 @@ func run() error {
 	if ierr != nil {
 		log.Warn("镜像仓库初始化失败", "err", ierr)
 	} else {
+		// 决策 #396：镜像 remove/load 经 Docker 的调用点传有界 ctx（此前 Background ⇒
+		// dockerd 假死即无界挂起）。remove 短上界；load 是**长操作**（大 tar 落盘），给宽松
+		// 上界——dockerClient 内部硬上界会按此调用方 deadline 放宽（不被 10s 缺省截断）。
 		imagesStore.SetDockerRemover(func(ref string) error {
-			return ctProvider.RemoveImage(context.Background(), ref)
+			ctx, cancel := context.WithTimeout(context.Background(), imageRemoveTimeout)
+			defer cancel()
+			return ctProvider.RemoveImage(ctx, ref)
 		})
 		// 容器镜像导入：docker save 归档经 `image load` 入 Docker 分层存储（FR-CMP-030/031）。
 		imagesStore.SetDockerLoader(func(path, name string) error {
-			return ctProvider.LoadImage(context.Background(), path, name)
+			ctx, cancel := context.WithTimeout(context.Background(), imageLoadTimeout)
+			defer cancel()
+			return ctProvider.LoadImage(ctx, path, name)
 		})
 		// M5-1：镜像导入进度/状态事件
 		imagesStore.SetProgressSink(func(name string, written, total int64) {
@@ -1114,6 +1121,13 @@ func (c *vppController) Restart(ctx context.Context, _ *model.VppConfig) error {
 const (
 	vppHealthTimeout  = 15 * time.Second
 	vppHealthInterval = 500 * time.Millisecond
+)
+
+// 镜像 remove/load 经 Docker 的调用上界（决策 #396）。remove 短；load 是长操作（大 tar），
+// 给宽松上界以免被 dockerClient 的 10s 缺省上界误杀。
+const (
+	imageRemoveTimeout = 30 * time.Second
+	imageLoadTimeout   = 10 * time.Minute
 )
 
 // vppProbeFunc 一次起后健康探测：返回 nil 表示 binary API 可连（VPP 真的起来了）。

@@ -75,6 +75,12 @@ type dockerCreateBody struct {
 }
 
 func (c *dockerClient) do(ctx context.Context, method, path string, body any, out any) error {
+	// 决策 #396：底座层给**每次调用**硬上界（不再按调用点选择性包裹）。调用方 ctx 无
+	// deadline（CLI 路径的 context.Background()）时套 dockerCallTimeout；调用方给了
+	// deadline（长操作，如镜像 load）则以其为准放宽。这样 State/start/stop/restart/
+	// remove/镜像 remove 等所有经 do 的调用都不再因 dockerd 假死而无界挂起。
+	ctx, cancel := c.boundedCtx(ctx)
+	defer cancel()
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -181,6 +187,11 @@ func (c *dockerClient) RemoveImage(ctx context.Context, ref string) error {
 // `<name>:latest`（决策 #160）：tar 内嵌 tag 必含冒号（如 alpine:3.20）而容器引用的
 // 是目录项名（白名单禁冒号），不重打标签则 docker create 解析不到镜像。
 func (c *dockerClient) LoadImage(ctx context.Context, path, name string) error {
+	// 决策 #396：镜像载入是**长操作**（大 tar），不经 do（流式 body）。上界按调用方 ctx
+	// 放宽——调用方（镜像导入路径）给宽松 deadline；若调用方未给（Background），仍套缺省
+	// 上界兜底（不再无界挂起）。真正的宽松上界由调用方给出（见 cmd/nfvisd/main.go）。
+	ctx, cancel := c.boundedCtx(ctx)
+	defer cancel()
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("打开镜像归档 %s: %w", path, err)
@@ -193,7 +204,12 @@ func (c *dockerClient) LoadImage(ctx context.Context, path, name string) error {
 	req.Header.Set("Content-Type", "application/x-tar")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("docker image load: %w", err)
+		// 与 do 同口径（决策 #375/#396）：底座不可达/无响应（含内部硬上界到期）标记为
+		// errDockerUnavailable 供上层映射 503；调用方取消原样透传。
+		if errors.Is(err, context.Canceled) {
+			return fmt.Errorf("docker image load: %w", err)
+		}
+		return fmt.Errorf("docker image load: %w", dockerUnavailableError{err})
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -289,6 +305,10 @@ func (c *dockerClient) OOMKilled(ctx context.Context, name string) (bool, bool, 
 }
 
 func (c *dockerClient) Logs(ctx context.Context, name string, tail int) (string, error) {
+	// 决策 #396：日志读取不经 do（流式响应），内部同样加硬上界——dockerd 假死时
+	// `request container-functions <n> log` 与 `show container-functions` 不再无界挂起。
+	ctx, cancel := c.boundedCtx(ctx)
+	defer cancel()
 	path := "/containers/" + url.PathEscape(name) + "/logs?stdout=1&stderr=1&tail=" + strconv.Itoa(tail)
 	var sb strings.Builder
 	// 日志为流式（带 8 字节头或 TTY 原始）；此处直接取文本并清理帧头。
@@ -298,7 +318,12 @@ func (c *dockerClient) Logs(ctx context.Context, name string, tail int) (string,
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", err
+		// 与 do 同口径（决策 #375）：底座不可达/无响应（含内部硬上界到期）标记为
+		// errDockerUnavailable 供上层映射 503；调用方取消原样透传。
+		if errors.Is(err, context.Canceled) {
+			return "", fmt.Errorf("docker logs: %w", err)
+		}
+		return "", fmt.Errorf("docker logs: %w", dockerUnavailableError{err})
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -348,7 +373,7 @@ func (c *dockerClient) Exec(ctx context.Context, name, command string, timeout t
 		"Tty":          false,
 		"Cmd":          []string{"/bin/sh", "-c", command},
 	}
-	callCtx, cancel := cctx(ctx)
+	callCtx, cancel := c.boundedCtx(ctx)
 	defer cancel()
 	if err := c.do(callCtx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/exec", body, &created); err != nil {
 		return ExecResult{}, wrapDockerTimeout(err)
@@ -458,7 +483,7 @@ func (c *dockerClient) ExecShell(ctx context.Context, name string) (io.ReadWrite
 		"Tty":          true,
 		"Cmd":          []string{"/bin/sh"},
 	}
-	callCtx, cancel := cctx(ctx)
+	callCtx, cancel := c.boundedCtx(ctx)
 	defer cancel()
 	if err := c.do(callCtx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/exec", body, &created); err != nil {
 		return nil, wrapDockerTimeout(err)
@@ -481,10 +506,13 @@ func (c *dockerClient) ExecShell(ctx context.Context, name string) (io.ReadWrite
 // （决策 #366，R142-12）。包级 var 仅为测试可注入更小值；生产代码不得改写。
 var shellHandshakeTimeout = 10 * time.Second
 
-// dockerCallTimeout docker API 单次调用（State 检查 / exec·shell 的 create）的硬上界
-// （决策 #366，R142-12：真机 SIGSTOP 实测——dockerd 冻结时这些调用无超时、挂满整个
-// 观察窗口，是「dockerd 挂死即挂住」的真实挂点）。到期取消请求：未被读走的请求随连接
-// 关闭被 dockerd 丢弃，不留「底座恢复后幽灵执行」。包级 var 仅为测试可注入。
+// dockerCallTimeout Docker API **单次调用**的缺省硬上界（决策 #366 起用于 State 检查 /
+// exec·shell 的 create；决策 #396 起为**客户端内部**所有调用（State/Logs/start/stop/
+// restart/remove/镜像 remove/load…，经 boundedCtx）的缺省上界）。真机 SIGSTOP 实测：
+// dockerd 冻结时这些调用无超时、挂满整个观察窗口，是「dockerd 挂死即挂住」的真实挂点。
+// 到期取消请求：未被读走的请求随连接关闭被 dockerd 丢弃，不留「底座恢复后幽灵执行」。
+// 调用方自带更长 deadline 时按调用方放宽（长操作，如镜像 load——见 boundedCtx）。
+// 包级 var 仅为测试可注入。
 var dockerCallTimeout = 10 * time.Second
 
 // wrapDockerTimeout 底座无响应的报错要**可照做**：裸 `context deadline exceeded`
@@ -496,9 +524,16 @@ func wrapDockerTimeout(err error) error {
 	return err
 }
 
-// cctx 给调用方 ctx 加 dockerCallTimeout 硬上界（决策 #366）。exec 的 start 等待
-// 窗口另有自己的 wctx（= exec timeout），不经此包装。
-func cctx(ctx context.Context) (context.Context, context.CancelFunc) {
+// boundedCtx 给单次 Docker API 调用加**客户端内部硬上界**（决策 #396）。
+//
+// 调用方 ctx 已带 deadline 时以其为准（长操作——如镜像 load——由调用方给宽松上界，
+// 不被 10s 缺省截断）；无 deadline 时套 dockerCallTimeout。这是「不再按调用点选择性
+// 包裹」的落点：State/Logs/start/stop/restart/remove/镜像 remove/load 等一律经此有界。
+// 返回的 cancel 必须调用。
+func (c *dockerClient) boundedCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return context.WithCancel(ctx)
+	}
 	return context.WithTimeout(ctx, dockerCallTimeout)
 }
 

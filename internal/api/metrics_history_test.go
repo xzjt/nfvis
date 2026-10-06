@@ -6,6 +6,7 @@ package api
 // 采样停滞（stale）计算、时长解析（含 400）。
 
 import (
+	"database/sql"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -243,6 +244,18 @@ func TestParseHistoryDuration(t *testing.T) {
 			t.Fatalf("parseHistoryDuration(%q) 超界/溢出应报错（旧实现会溢出成误导性时长）", over)
 		}
 	}
+	// 决策 #397（R171-17）：乘法**之后**判溢出存在漏网——`18446744074s` 的
+	// `time.Duration(n)*time.Second` 回绕成 290448384ns（≈290ms，落在 (0,3650d] 内），
+	// 旧实现会当合法时长接受。改为乘法前判后必须拒绝。
+	if d, err := parseHistoryDuration("18446744074s"); err == nil {
+		t.Fatalf("回绕成区间内正值的时长必须拒绝（旧实现会接受成 %v）", d)
+	}
+	// 各单位的超界/回绕同样拒绝。
+	for _, wrap := range []string{"18446744073709551m", "184467440737h", "184467440737095516d"} {
+		if d, err := parseHistoryDuration(wrap); err == nil {
+			t.Fatalf("parseHistoryDuration(%q) 超界时长必须拒绝，实得 %v", wrap, d)
+		}
+	}
 }
 
 func TestAutoHistoryStep(t *testing.T) {
@@ -369,5 +382,49 @@ func TestMetricsHistoryReadFailureKeepsEnabledAndReports(t *testing.T) {
 	metrics, _ := obj["metrics"].([]any)
 	if len(metrics) != 0 {
 		t.Fatalf("库读不到时 metrics 应为空数组：%s", body)
+	}
+}
+
+// 决策 #397（R171-17，#372 A5 同族漏网）：库**已启用**但**本次查询失败**时——store.enabled
+// 不得翻 false（语义＝存储是否启用）、如实给 store.error + reason（「查不了」≠「没启用」）。
+//
+// 构造：Stats 只读 series/samples 的**计数列**（COUNT(*)/MIN(ts)/MAX(ts)），而 Query 的 points
+// 读 samples.value —— 用独立连接把 value 列改名，即令 Stats/MetricNames 成功、Query 失败。
+func TestMetricsHistoryQueryFailureKeepsEnabled(t *testing.T) {
+	st := newHistoryStore(t)
+	now := time.Now().Unix()
+	if err := st.Append(now, []metricshist.Sample{{Name: "nfvis_x", Value: 1}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	ts := newTestServerOpts(t, Options{MetricsHistory: &MetricsHistoryOptions{Store: st, Path: st.Path()}})
+	token := loginAdmin(t, ts)
+
+	db, err := sql.Open("sqlite", "file:"+st.Path()+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("打开库: %v", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE samples RENAME COLUMN value TO value_hidden`); err != nil {
+		_ = db.Close()
+		t.Skipf("当前 SQLite 不支持 RENAME COLUMN（无法构造本用例）：%v", err)
+	}
+	_ = db.Close()
+
+	status, _, body := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/metrics/history?name=nfvis_x", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("查询失败仍应 200（诚实口径）：%d %s", status, body)
+	}
+	obj := responseObject(t, body)
+	if av, _ := obj["available"].(bool); av {
+		t.Fatalf("查询失败时 available 应为 false：%s", body)
+	}
+	if reason, _ := obj["reason"].(string); !strings.Contains(reason, "查询失败") {
+		t.Fatalf("reason 应如实说「查询失败」：%s", body)
+	}
+	store, _ := obj["store"].(map[string]any)
+	if en, _ := store["enabled"].(bool); !en {
+		t.Fatalf("查询失败不得把 store.enabled 翻成 false（语义=存储是否启用）：%s", body)
+	}
+	if e, _ := store["error"].(string); e == "" {
+		t.Fatalf("查询失败应给 store.error 如实说明：%s", body)
 	}
 }

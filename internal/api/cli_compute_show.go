@@ -213,11 +213,15 @@ func (x *cliExecutor) execShowContainers(args []string) string {
 		return "%% " + err.Error() + "\n"
 	}
 	if len(args) == 0 { // 列表：名称/状态/vCPU/镜像
+		// 决策 #396：运行态查询传有界 ctx（此前 Background ⇒ dockerd 假死时
+		// `show container-functions` 无界挂起）。
+		sctx, scancel := containerCallCtx()
+		defer scancel()
 		items := make([]any, 0, len(cfg.ContainerFunctions))
 		var b strings.Builder
 		fmt.Fprintf(&b, "%-16s %-10s %-6s %-16s %s\n", "Name", "State", "vCPU", "Image", "Restart")
 		for _, ct := range cfg.ContainerFunctions {
-			st := x.ctStateOf(context.Background(), ct.Name)
+			st := x.ctStateOf(sctx, ct.Name)
 			row, _ := anyToTree(ct).(map[string]any)
 			row["state"] = st
 			items = append(items, row)
@@ -243,7 +247,10 @@ func (x *cliExecutor) execShowContainers(args []string) string {
 	switch sub {
 	case "", "detail":
 		m, _ := anyToTree(ct).(map[string]any)
-		m["state"] = x.ctStateOf(context.Background(), name)
+		// 决策 #396：运行态查询传有界 ctx（同上）。
+		dctx, dcancel := containerCallCtx()
+		m["state"] = x.ctStateOf(dctx, name)
+		dcancel()
 		x.structured = m
 		return RenderConfigJSON(m) + "\n"
 	case "interfaces":

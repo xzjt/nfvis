@@ -337,17 +337,27 @@ func (s *Store) Query(q Query) (QueryResult, error) {
 func (s *Store) points(seriesID int64, q Query) ([]Point, bool, error) {
 	// 决策 #372（R142 A8）：载入内存**有界**——此前把窗口内全部原始行读进内存后才裁 limit
 	// （注释宣称防拉爆内存，实际未防）。
-	//   · step>0：把窗口收窄到「最新 limit+1 个桶」（多留一桶做对齐余量，结果与全窗口+裁剪
-	//     逐点一致——更旧的点本来就会被裁掉）；
+	//   · step>0：把窗口收窄到「最新 limit+1 个**有值桶**」的起点（决策 #397 更正判据），
+	//     与「全窗口 + 降采样 + 裁 limit」**逐点等价**——更旧的桶本来就会被裁掉；
 	//   · step<=0：SQL 侧 ORDER BY ts DESC LIMIT limit+1 再反转（保留最新 limit 个）。
-	// 决策 #376：收窄的锚点必须是**窗口内最新样本**，而不是 q.Until（读视图 handler 恒把 until
-	// 设为墙钟 now）——否则 until 晚于最新样本超过一个 step 时，收窄窗口从 now 起算会丢掉本应
-	// 保留的旧点（与「全窗口+裁剪」不再逐点一致）。故 limit>0 且 step>0 时总是取 newestTS。
-	newest, hasNewest := int64(0), false
-	if q.Limit > 0 && q.Step > 0 {
-		newest, hasNewest = s.newestTS(seriesID, q.Until)
+	//
+	// 决策 #376 的锚点教训（不再需要单独取 newestTS）：收窄必须以**窗口内真实存在的桶**为锚，
+	// 不能拿 q.Until（读视图的 until 恒为墙钟 now）当锚。
+	// 决策 #397（R171-17）更正：此前按**时间宽度** (limit+1)*step 收窄，只在桶稠密
+	// （step ≥ 采样间隔）时等价；step 比采样间隔细时（真机 60s 采样 + step 1s）窗口只覆盖
+	// 少数几个桶，会**丢掉本应保留的旧点并谎报 truncated**（`last 1h step 1s` 只回 9 点）。
+	since, descLimit, truncated := q.Since, 0, false
+	if q.Limit > 0 {
+		if q.Step > 0 {
+			var err error
+			since, truncated, err = s.narrowSinceByBuckets(seriesID, q)
+			if err != nil {
+				return nil, false, err
+			}
+		} else {
+			descLimit = q.Limit + 1
+		}
 	}
-	since, descLimit, truncated := planBoundedLoad(q, newest, hasNewest)
 	q.Since = since
 	query := `SELECT ts, value FROM samples WHERE series_id = ? AND ts >= ? AND ts <= ? ORDER BY ts`
 	if descLimit > 0 {
@@ -397,44 +407,45 @@ func (s *Store) points(seriesID int64, q Query) ([]Point, bool, error) {
 	return pts, truncated, nil
 }
 
-// planBoundedLoad 计算「载入有界」的查询计划（决策 #372/R142 A8；锚点口径见决策 #376）：
-// 返回收窄后的 since、DESC 限行数（0=不限）、以及是否真值截断。
+// narrowSinceByBuckets 决策 #397（R171-17）：step>0 且有 limit 时，按「最新 limit+1 个
+// **有值桶**」求收窄下界——与「全窗口 + 降采样 + 裁 limit」逐点等价（更旧的桶本来就会被裁掉）。
 //
-//	· step>0：窗口收窄到「**窗口内最新样本**起算的最新 limit+1 个桶」（多留一桶做对齐余量；
-//	  结果与全窗口+裁剪逐点一致——更旧的点本来就会被裁掉）。锚点＝newest（调用方给的
-//	  窗口内最新样本）；无样本（hasNewest=false）则**不收窄**（不猜）。
-//	  决策 #376 更正：此前用 q.Until 当锚——读视图的 until 是墙钟 now，晚于最新样本超过一个
-//	  step 时会把本应保留的旧点裁掉（收窄不再等价）。
-//	· step<=0：DESC + LIMIT limit+1（多取一行判定是否真被裁）。
-func planBoundedLoad(q Query, newest int64, hasNewest bool) (since int64, descLimit int, truncated bool) {
-	since = q.Since
-	switch {
-	case q.Limit > 0 && q.Step > 0:
-		if !hasNewest {
-			break // 窗口内无样本：没有可收窄的对象（不猜）
-		}
-		// 锚点＝窗口内最新样本（决策 #376）。
-		if w := int64(q.Limit+1) * q.Step; newest-w > since {
-			since = newest - w
-			truncated = true // 窗口被收窄 ⇒ 更旧的点被排除（真值截断）
-		}
-	case q.Limit > 0:
-		descLimit = q.Limit + 1
+// 返回 (since, truncated, err)：
+//   - 窗口内有值桶数 ≤ limit：不收窄（since 原样）、truncated=false（没被裁）；
+//   - 有值桶数 > limit：truncated=true（真值截断），since 收窄到第 limit+1 个（最旧）有值桶的
+//     起点——桶号 b 的最小 ts 为 b*step，取 ts ≥ b*step 恰好完整包含该桶、排除更旧桶；若窗口
+//     起点本就更晚（cut ≤ q.Since）则原样，但截断仍为真。
+//
+// 桶号用 SQL 整数除法 ts/step 计算，与 downsample 的 p.TS/step 是**同一判据**（单一真源）；
+// 结果行数被 LIMIT limit+1 界定，且 DISTINCT 结果随 ts 单调（ts/step 随 ts 非减），故载入有界。
+func (s *Store) narrowSinceByBuckets(seriesID int64, q Query) (int64, bool, error) {
+	rows, err := s.db.Query(
+		`SELECT DISTINCT ts / ? FROM samples WHERE series_id = ? AND ts >= ? AND ts <= ? ORDER BY 1 DESC LIMIT ?`,
+		q.Step, seriesID, q.Since, q.Until, q.Limit+1)
+	if err != nil {
+		return 0, false, fmt.Errorf("统计窗口内有值桶: %w", err)
 	}
-	return since, descLimit, truncated
-}
-
-// storeMaxUntil Query.Until 的哨兵（调用方未给上界时的缺省）。
-const storeMaxUntil = 1<<62 - 1
-
-// newestTS 该序列在 ts<=until 内的最新样本时间（无样本 ok=false）。
-func (s *Store) newestTS(seriesID, until int64) (int64, bool) {
-	var ts int64
-	err := s.db.QueryRow(`SELECT MAX(ts) FROM samples WHERE series_id = ? AND ts <= ?`, seriesID, until).Scan(&ts)
-	if err != nil || ts == 0 {
-		return 0, false
+	defer func() { _ = rows.Close() }()
+	buckets := make([]int64, 0, q.Limit+1)
+	for rows.Next() {
+		var b int64
+		if err := rows.Scan(&b); err != nil {
+			return 0, false, err
+		}
+		buckets = append(buckets, b)
 	}
-	return ts, true
+	if err := rows.Err(); err != nil {
+		return 0, false, err
+	}
+	if len(buckets) <= q.Limit {
+		return q.Since, false, nil // 有值桶数未超 limit：不裁、不收窄
+	}
+	// buckets 按桶号降序；末位＝第 limit+1 个（最旧）有值桶。cut 为该桶的起点 ts。
+	oldest := buckets[len(buckets)-1]
+	if cut := oldest * q.Step; cut > q.Since {
+		return cut, true, nil
+	}
+	return q.Since, true, nil // 窗口起点已晚于该桶起点：无需收窄，但截断为真
 }
 
 // downsample 按桶取最后一个样本。step<=0 时原样返回。

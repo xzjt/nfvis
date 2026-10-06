@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -307,5 +308,160 @@ func TestCallClosedConnUsesExistingError(t *testing.T) {
 	c := &Conn{} // Close 之后的状态：l 为 nil
 	if err := c.Define(context.Background(), "<domain/>"); !errors.Is(err, errLibvirtConnClosed) {
 		t.Fatalf("应返回既有「连接已关闭」错误，实际: %v", err)
+	}
+}
+
+// ---- 决策 #396：call 上界分层（只读/元数据 30s；作业类按调用方 deadline 放宽）----
+
+// shortDefaultRPCTimeout 临时调小 defaultRPCTimeout（用完还原）。红-绿需要把「缺省上界」
+// 压到测试可观测的量级，否则作业类的「放宽」要等 30s 才可辨。
+func shortDefaultRPCTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := defaultRPCTimeout
+	defaultRPCTimeout = d
+	t.Cleanup(func() { defaultRPCTimeout = old })
+}
+
+// TestCallBoundLayering callBound 的分层语义（纯函数）：无 deadline 两档同缺省；调用方
+// deadline 更短两档都取更短；调用方 deadline 更长时只读档被缺省封顶、作业档放宽。
+func TestCallBoundLayering(t *testing.T) {
+	// 无 deadline：两档均回落缺省上界。
+	if got := callBound(context.Background(), false); got != defaultRPCTimeout {
+		t.Fatalf("只读档无 deadline 应为缺省 %s，得 %s", defaultRPCTimeout, got)
+	}
+	if got := callBound(context.Background(), true); got != defaultRPCTimeout {
+		t.Fatalf("作业档无 deadline 应回落缺省 %s，得 %s", defaultRPCTimeout, got)
+	}
+
+	// 调用方 deadline 更短：两档都取调用方。
+	short, cancelShort := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShort()
+	if got := callBound(short, false); got > 5*time.Second || got <= 0 {
+		t.Fatalf("只读档应取更短的调用方 deadline（≈5s），得 %s", got)
+	}
+	if got := callBound(short, true); got > 5*time.Second || got <= 0 {
+		t.Fatalf("作业档应取更短的调用方 deadline（≈5s），得 %s", got)
+	}
+
+	// 调用方 deadline 更长：只读档被缺省封顶，作业档放宽到调用方。
+	long, cancelLong := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancelLong()
+	if got := callBound(long, false); got != defaultRPCTimeout {
+		t.Fatalf("只读档应被缺省上界封顶为 %s，得 %s", defaultRPCTimeout, got)
+	}
+	if got := callBound(long, true); got <= defaultRPCTimeout || got > 5*time.Minute {
+		t.Fatalf("作业档应放宽到调用方 deadline（> %s 且 ≤ 5m），得 %s", defaultRPCTimeout, got)
+	}
+}
+
+// TestCallJobNotCappedByDefaultBound 作业类 RPC：调用方给了更长 deadline 时，不得被缺省
+// 上界截断（红：旧行为只取更小值 ⇒ 150ms 即中断并关连接）。fn 睡 600ms——超过缺省 150ms、
+// 但在调用方 3s deadline 内——应正常完成且连接未被关。
+func TestCallJobNotCappedByDefaultBound(t *testing.T) {
+	shortDefaultRPCTimeout(t, 150*time.Millisecond)
+	c, peer := newPipeConn()
+	defer c.raw.Close()
+	defer peer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := c.callJob(ctx, func(*libvirt.Libvirt) error {
+		time.Sleep(600 * time.Millisecond)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("作业类应按调用方 deadline 放宽（不被缺省上界截断），实际: %v（耗时 %s）", err, time.Since(start))
+	}
+	assertPipeOpen(t, peer) // 未到期 ⇒ 不关连接
+}
+
+// TestCallReadOnlyStillCappedByDefaultBound 只读类 RPC：即使调用方 deadline 更长，缺省
+// 上界仍是上限（守卫：分层不能把只读档也一起放宽）。
+func TestCallReadOnlyStillCappedByDefaultBound(t *testing.T) {
+	shortDefaultRPCTimeout(t, 150*time.Millisecond)
+	c, peer := newPipeConn()
+	defer peer.Close()
+	release := make(chan struct{})
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := c.call(ctx, func(*libvirt.Libvirt) error { <-release; return nil })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("只读类超缺省上界应包装 DeadlineExceeded，实际: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("只读类应在缺省上界（150ms）附近返回，实耗 %s", elapsed)
+	}
+	assertPipeClosed(t, peer)
+}
+
+// TestCallJobHonorsCallerDeadlineAndInterrupts 作业类仍保留「执行中到期即关连接中断挂起
+// RPC」的兜底：调用方 deadline 到期（此处 200ms，短于缺省）时按它中断。
+func TestCallJobHonorsCallerDeadlineAndInterrupts(t *testing.T) {
+	c, peer := newPipeConn()
+	defer peer.Close()
+	release := make(chan struct{})
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := c.callJob(ctx, func(*libvirt.Libvirt) error { <-release; return nil })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("作业类调用方 deadline 到期应包装 DeadlineExceeded，实际: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("应在调用方 deadline（200ms）附近返回，实耗 %s", elapsed)
+	}
+	assertPipeClosed(t, peer)
+}
+
+// TestJobTierWiring 接线守护（源码扫描）：分层语义由上面的纯函数/行为用例覆盖，本用例补
+// 「哪些方法走哪一档」的接线——避免日后有人把作业类方法改回 call（或把只读类改成 callJob）
+// 而无察觉。判据：作业类经 callJob / withDomainMode(…, true …) / withSnapshotMode(…, true …)；
+// 只读类不得出现 callJob。
+func TestJobTierWiring(t *testing.T) {
+	src, err := os.ReadFile("conn_libvirt.go")
+	if err != nil {
+		t.Fatalf("读取 conn_libvirt.go: %v", err)
+	}
+	text := string(src)
+	body := func(name string) string {
+		marker := "func (c *Conn) " + name + "("
+		i := strings.Index(text, marker)
+		if i < 0 {
+			t.Fatalf("未找到方法 %s", name)
+		}
+		rest := text[i+len(marker):]
+		if j := strings.Index(rest, "\nfunc "); j >= 0 {
+			return rest[:j]
+		}
+		return rest
+	}
+
+	// 作业档：快照创建/回滚、大 xml 定义、DomainCreate 等待。
+	if b := body("Define"); !strings.Contains(b, "callJob(") {
+		t.Fatal("Define（大 xml 定义）应走作业档 callJob")
+	}
+	if b := body("SnapshotCreate"); !strings.Contains(b, "callJob(") {
+		t.Fatal("SnapshotCreate（快照创建）应走作业档 callJob")
+	}
+	if b := body("Start"); !strings.Contains(b, "withDomainMode(ctx, true") {
+		t.Fatal("Start（DomainCreate 等待）应走作业档 withDomainMode(…, true …)")
+	}
+	for _, m := range []string{"SnapshotRevert", "SnapshotDelete"} {
+		if b := body(m); !strings.Contains(b, "withSnapshotMode(ctx, true") {
+			t.Fatalf("%s（快照作业）应走作业档 withSnapshotMode(…, true …)", m)
+		}
+	}
+
+	// 只读/元数据类不得误用作业档。
+	for _, m := range []string{"State", "StateReason", "DumpXML", "SnapshotList", "Shutdown", "Destroy", "Reboot"} {
+		if b := body(m); strings.Contains(b, "callJob(") {
+			t.Fatalf("%s 是只读/元数据类，不得走作业档 callJob", m)
+		}
 	}
 }

@@ -35,6 +35,12 @@ const (
 	// metricsSleepSlice 睡眠分片上限（决策 #372，R142 A2）：采样循环按 ≤1s 片段睡眠并在每片重读
 	// 生效间隔——间隔改小在下一片内生效（不再等整段旧睡眠结束而让读视图按新间隔误判 stale）。
 	metricsSleepSlice = time.Second
+
+	// metricsIntervalRefreshEvery 生效间隔的**缓存刷新节奏**（决策 #397，R171-17 收口 #372 A2 的
+	// 读放大）：分片睡眠每片都 `engine.Committed()`（持 engine.mu 做 DB 读 + 全配置反序列化）
+	// 与所有 CLI/API 配置操作互斥。改为**缓存 + 降频**：至多每 5s 重读一次，其余片直接用缓存。
+	// 间隔改小的生效延迟 ≤5s，远小于停滞阈值（max(3×间隔,180s)），#372 A2 的「假 stale」不受影响。
+	metricsIntervalRefreshEvery = 5 * time.Second
 )
 
 // runMetricsHistory 后台历史采样循环（决策 #356）。ctx 取消即优雅退出（睡眠可被中断）。
@@ -72,16 +78,26 @@ type metricsHistoryRunner struct {
 	errorEvery    time.Duration
 	gatherTimeout time.Duration
 
+	// intervalFn 生效采样间隔的来源（决策 #397）：nil = 读 engine.Committed()；测试注入计数用。
+	intervalFn func() int
+
+	// 间隔缓存（决策 #397）：至多每 metricsIntervalRefreshEvery 重读一次，其余片直接用缓存。
+	cachedInterval int
+	intervalAt     time.Time
+	intervalValid  bool
+
 	lastErrLog time.Time
 }
 
-// run 循环：按 ≤metricsSleepSlice 的分片睡眠，**每片重读生效间隔**（决策 #372，R142 A2）——
-// 间隔改小在下一片内生效并重新计时，不再等整段旧睡眠结束；睡眠可被 ctx 中断；到点采集、到点裁剪。
+// run 循环：按 ≤metricsSleepSlice 的分片睡眠，**间隔经缓存、至多每 metricsIntervalRefreshEvery
+// 重读一次**（决策 #397；此前每片都读 committed 配置＝每秒一次 DB 读 + 全配置反序列化）。
+// 间隔改小仍在 ≤5s 内生效并重新计时（#372 A2 的「假 stale」不受影响）；睡眠可被 ctx 中断；
+// 到点采集、到点裁剪。
 func (r *metricsHistoryRunner) run(ctx context.Context) {
 	lastPrune := r.now()
 	var elapsed time.Duration
 	for {
-		interval := time.Duration(r.intervalSeconds()) * time.Second
+		interval := time.Duration(r.effectiveInterval(r.now())) * time.Second
 		slice := metricsSleepSlice
 		if interval > 0 && interval < slice {
 			slice = interval
@@ -153,9 +169,23 @@ func (r *metricsHistoryRunner) reportError(stage string, err error) {
 	r.log.Warn("历史采样未完成（下轮重试；用 show system metrics history 可查上次错误）", "stage", stage, "err", err)
 }
 
-// intervalSeconds 生效的采样间隔（committed 配置；读不到回落模型默认）——每轮重读，
-// 故改配置无需重启即生效。
+// effectiveInterval 生效采样间隔（带缓存，决策 #397）：距上次重读不足 metricsIntervalRefreshEvery
+// 时直接用缓存值，否则重读并刷新缓存。分片睡眠的每一片都调用本方法，但**不再每片**做
+// engine.Committed()——把每秒一次的全配置反序列化降为至多每 5s 一次。
+func (r *metricsHistoryRunner) effectiveInterval(now time.Time) int {
+	if r.intervalValid && now.Sub(r.intervalAt) < metricsIntervalRefreshEvery {
+		return r.cachedInterval
+	}
+	v := r.intervalSeconds()
+	r.cachedInterval, r.intervalAt, r.intervalValid = v, now, true
+	return v
+}
+
+// intervalSeconds 生效的采样间隔（committed 配置；读不到回落模型默认）。
 func (r *metricsHistoryRunner) intervalSeconds() int {
+	if r.intervalFn != nil {
+		return r.intervalFn()
+	}
 	if r.engine == nil {
 		return model.MetricsIntervalDefaultSeconds
 	}

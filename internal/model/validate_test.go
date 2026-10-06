@@ -615,6 +615,54 @@ func TestValidateStormControl(t *testing.T) {
 	mustErrContaining(t, Validate(multi), "interfaces[ens2f1].storm_control.multicast_kbps", "1-100000000")
 }
 
+// 决策 #398（R171-9）：storm-control 配在 bond 成员口提交期拒绝（与 portsec 同判据）。
+// 成员口入向被 bond-input 吃掉，挂上去的 L2 分类表/policer 不会被查到（保护假象），
+// 故提交期拒绝并给照做路径（点名所属 bond，先移出聚合）。既有拒绝（空声明/值域越界）
+// 不受影响：bond 判定与它们是并列的独立错误，互不遮蔽。
+func TestValidateStormControlBondMember(t *testing.T) {
+	// bond 成员口配 storm ⇒ 拒绝，点名所属 bond 与照做路径。
+	bonded := validBase()
+	bonded.Bonds = []Bond{{Name: "bond0", Members: []string{"ens2f0"}}}
+	bonded.VirtualSwitches[0].Ports = nil // 去掉端口，让 bond 判定成为唯一前置错误
+	bonded.Interfaces[0].StormControl = &StormControl{BroadcastKbps: 1000}
+	errs := Validate(bonded)
+	mustErrContaining(t, errs, "interfaces[ens2f0].storm_control", "bond0")
+	mustErrContaining(t, errs, "interfaces[ens2f0].storm_control", "bond-input")
+	mustErrContaining(t, errs, "interfaces[ens2f0].storm_control", "delete bonds bond0 members ens2f0")
+
+	// 值域越界仍照报（bond 判定与值域判定互不遮蔽，两条都在）。
+	both := validBase()
+	both.Bonds = []Bond{{Name: "bond0", Members: []string{"ens2f0"}}}
+	both.VirtualSwitches[0].Ports = nil
+	both.Interfaces[0].StormControl = &StormControl{MulticastKbps: 100000001}
+	errs = Validate(both)
+	mustErrContaining(t, errs, "interfaces[ens2f0].storm_control.multicast_kbps", "1-100000000")
+	mustErrContaining(t, errs, "interfaces[ens2f0].storm_control", "bond0")
+
+	// 空声明在 bond 成员口上：bond 拒绝与空声明两条并存。
+	empty := validBase()
+	empty.Bonds = []Bond{{Name: "bond0", Members: []string{"ens2f0"}}}
+	empty.VirtualSwitches[0].Ports = nil
+	empty.Interfaces[0].StormControl = &StormControl{}
+	errs = Validate(empty)
+	mustErrContaining(t, errs, "interfaces[ens2f0].storm_control", "bond0")
+	mustErrContaining(t, errs, "interfaces[ens2f0].storm_control", "至少给一个")
+
+	// 非 bond 成员口（普通声明口）配 storm 仍合法——既有行为不变。
+	plain := validBase()
+	plain.Interfaces[0].StormControl = &StormControl{BroadcastKbps: 1000}
+	mustNoErr(t, Validate(plain))
+
+	// 配在 bond 非成员的另一口上仍合法（bond 判定按接口名精确匹配）。
+	other := validBase()
+	other.Bonds = []Bond{{Name: "bond0", Members: []string{"ens2f0"}}}
+	other.VirtualSwitches[0].Ports = nil
+	enabled := true
+	other.Interfaces = append(other.Interfaces, InterfaceConfig{Name: "ens2f1", Enabled: &enabled,
+		StormControl: &StormControl{BroadcastKbps: 1000}})
+	mustNoErr(t, Validate(other))
+}
+
 func TestValidateLearnLimit(t *testing.T) {
 	// 未配置（0）合法；合法范围内的正整数合法
 	mustNoErr(t, Validate(validBase()))

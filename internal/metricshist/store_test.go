@@ -436,37 +436,108 @@ func TestQueryLimitWithStepNarrowsWindowSameResult(t *testing.T) {
 	}
 }
 
-// 决策 #372（R142 A8）+ 决策 #376（锚点修正）：载入有界计划的纯函数表。
-func TestPlanBoundedLoad(t *testing.T) {
-	// step>0 + 最新样本：窗口收窄到「最新样本起算的 limit+1 个桶」并置真值截断。
-	since, desc, tr := planBoundedLoad(Query{Since: 0, Until: 10000, Step: 30, Limit: 5}, 10000, true)
-	if since != 10000-6*30 || desc != 0 || !tr {
-		t.Fatalf("step>0 应收窄窗口并置截断：since=%d desc=%d tr=%v", since, desc, tr)
+// 决策 #397（R171-17）：step 比采样间隔**细**（稀疏桶）时，收窄必须与「全窗口 + 降采样 +
+// 裁 limit」逐点等价，且 truncated 只在**真被裁**时置位。真机复现场景：60s 等距采样、
+// `last 1h step 1s` —— 旧实现按时间宽度 (limit+1)*step 收窄，只回 9 点并谎报截断。
+func TestQuerySparseBucketsStepBelowInterval(t *testing.T) {
+	st := openTemp(t)
+	const interval = int64(60)
+	const n = int64(60) // 60 点 = 1h @60s
+	base := int64(1_700_000_000)
+	for i := int64(0); i < n; i++ {
+		if err := st.Append(base+i*interval, []Sample{{Name: "m", Value: float64(i)}}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
 	}
-	// 锚点＝**窗口内最新样本**而非 until（决策 #376 回归）：until 晚于最新样本超过一个 step 时，
-	// 不得把本应保留的旧点裁掉（旧实现锚 until=10000 ⇒ since=9996，会丢点）。
-	if since, _, tr := planBoundedLoad(Query{Since: 0, Until: 10000, Step: 1, Limit: 3}, 9996, true); since != 9996-4 || !tr {
-		t.Fatalf("锚点应为最新样本（不是 until）：since=%d tr=%v", since, tr)
+	until := base + (n-1)*interval // 窗口内最新样本
+	since := until - 3600 + 1      // 覆盖全部 60 点
+
+	// step 1s（远细于 60s 采样间隔）：应收**全部 60 点**、无截断。
+	res, err := st.Query(Query{Name: "m", Since: since, Until: until, Step: 1, Limit: 500})
+	if err != nil {
+		t.Fatalf("Query(step=1): %v", err)
 	}
-	// 窗口本来就在 limit+1 桶内：不收窄、不置截断。
-	if since, _, tr := planBoundedLoad(Query{Since: 9900, Until: 10000, Step: 30, Limit: 5}, 10000, true); since != 9900 || tr {
-		t.Fatalf("窗口已足够小不应收窄：since=%d tr=%v", since, tr)
+	if len(res.Series) != 1 {
+		t.Fatalf("应有 1 条序列: %+v", res)
 	}
-	// 哨兵 until + 最新样本：以最新样本为锚（否则收窄到未来空窗）。
-	since, _, tr = planBoundedLoad(Query{Since: 0, Until: storeMaxUntil, Step: 30, Limit: 5}, 5000, true)
-	if since != 5000-6*30 || !tr {
-		t.Fatalf("哨兵 until 应以最新样本为锚：since=%d tr=%v", since, tr)
+	pts := res.Series[0].Points
+	if len(pts) != int(n) {
+		t.Fatalf("step 1s 应收全部 %d 点（旧实现只回 9 点），实得 %d", n, len(pts))
 	}
-	// 无样本（hasNewest=false）：保持原 since（不猜）。
-	if since, _, tr := planBoundedLoad(Query{Since: 7, Until: 10000, Step: 30, Limit: 5}, 0, false); since != 7 || tr {
-		t.Fatalf("无样本时不应收窄：since=%d tr=%v", since, tr)
+	if res.Truncated {
+		t.Fatalf("limit 500 > %d 点：不得谎报截断", n)
 	}
-	// step<=0：DESC 限行 limit+1。
-	if since, desc, tr := planBoundedLoad(Query{Since: 0, Until: 100, Step: 0, Limit: 5}, 0, false); since != 0 || desc != 6 || tr {
-		t.Fatalf("step<=0 应走 DESC 限行：since=%d desc=%d tr=%v", since, desc, tr)
+
+	// step 1m（= 采样间隔）：应与 step 1s 完全一致（契约要求两形态点数相同、均无假截断）。
+	res2, err := st.Query(Query{Name: "m", Since: since, Until: until, Step: 60, Limit: 500})
+	if err != nil {
+		t.Fatalf("Query(step=60): %v", err)
 	}
-	// 无 limit：原样（调用方要全窗口）。
-	if since, desc, tr := planBoundedLoad(Query{Since: 3, Until: 100, Step: 30, Limit: 0}, 0, false); since != 3 || desc != 0 || tr {
-		t.Fatalf("无 limit 应原样：since=%d desc=%d tr=%v", since, desc, tr)
+	pts2 := res2.Series[0].Points
+	if len(pts2) != int(n) || res2.Truncated {
+		t.Fatalf("step 1m 应与 step 1s 一致（%d 点、无截断），实得 %d 点 truncated=%v", n, len(pts2), res2.Truncated)
+	}
+	for i := range pts {
+		if pts[i].TS != pts2[i].TS {
+			t.Fatalf("step 1s 与 step 1m 第 %d 点不一致：%+v vs %+v", i, pts[i], pts2[i])
+		}
+	}
+}
+
+// 决策 #397：稀疏桶 + 小 limit 时，收窄必须与「全窗口 + 降采样 + 裁 limit」逐点等价，
+// 且 truncated 为真值（此处确有 60 > 10 个有值桶 ⇒ 真被裁）。
+func TestQuerySparseBucketsEquivWithTrim(t *testing.T) {
+	st := openTemp(t)
+	base := int64(1_700_000_000)
+	for i := int64(0); i < 60; i++ {
+		if err := st.Append(base+int64(i)*60, []Sample{{Name: "m", Value: float64(i)}}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	q := Query{Name: "m", Since: base - 100, Until: base + 59*60, Step: 1, Limit: 10}
+	// 参考：全窗口降采样（不裁）后取最新 10 点。
+	full := mustQuery(t, st, Query{Name: q.Name, Since: q.Since, Until: q.Until, Step: q.Step, Limit: 0})
+	ref := full[0].Points
+	if len(ref) <= q.Limit {
+		t.Fatalf("参考点数应大于 limit（构造前提）：%d", len(ref))
+	}
+	ref = ref[len(ref)-q.Limit:]
+
+	res, err := st.Query(q)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	pts := res.Series[0].Points
+	if len(pts) != len(ref) {
+		t.Fatalf("收窄后点数应与全窗口裁剪一致：%d vs %d", len(pts), len(ref))
+	}
+	for i := range pts {
+		if pts[i].TS != ref[i].TS || pts[i].Value != ref[i].Value {
+			t.Fatalf("第 %d 点与参考不一致（收窄改变了结果）：%+v vs %+v", i, pts[i], ref[i])
+		}
+	}
+	if !res.Truncated {
+		t.Fatalf("确有超过 limit 个有值桶 ⇒ truncated 应为 true")
+	}
+}
+
+// 决策 #397：有值桶数**恰好等于** limit 时不得置截断（真值判据——点数刚好等于 limit ≠ 被裁）。
+func TestQuerySparseBucketsExactlyLimitNotTruncated(t *testing.T) {
+	st := openTemp(t)
+	base := int64(1_700_000_000)
+	for i := int64(0); i < 12; i++ {
+		if err := st.Append(base+int64(i)*60, []Sample{{Name: "m", Value: float64(i)}}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	res, err := st.Query(Query{Name: "m", Since: base - 10, Until: base + 11*60, Step: 1, Limit: 12})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Series[0].Points) != 12 {
+		t.Fatalf("应有 12 点：%+v", res.Series[0].Points)
+	}
+	if res.Truncated {
+		t.Fatalf("有值桶数恰好等于 limit：不得报截断")
 	}
 }
