@@ -968,6 +968,24 @@
   对外服务新增攻击面；如需则先改 FR 再立项，实现路线与工作量已评估入册）；**#387** ACL 逐规则命中计数 = **维持依赖底座**，
   「err 族回退」因粒度是**全局节点总量**（无法归属到规则/接口）**不采用**（误导性读数），重启条件＝底座递增或明确需求。
   证据 `docs/evidence/v2-round168-storm-ipv6-and-web-review.txt`、`docs/evidence/v2-round168-d386-d387-route-rulings.txt`。
+- **round169（管理面主机防火墙 v1 交付：spike→契约→实现→真机四维，含一处 P0 当场修复，2026-10-06）**：
+  **#388 交付**（差距分析 §1-12 收口；PR #316）——`[edit system]` 下 `set system firewall default-policy <accept|drop>`
+  与 `set system firewall rule <seq> action …[source][protocol][port]`（+ delete 家族）⇒ 宿主 nftables **独立表**
+  `table inet nfvis-firewall`（`nft -f -` 原子批内重建；**绝不触碰 iptables-nft/docker/libvirt 的六张既有表**）；
+  保留项（非管理口 accept / established,related / 必要 ICMP·ICMPv6 与 ND）不可被用户规则覆盖；幂等＝脚本指纹+表存在性
+  （配置未变不重建、**计数连续**）；**非 console 会话的防火墙变更强制 `commit confirmed`**（FR-CFG-012 同族判据）；
+  三面读视图（`show system firewall` / `GET /system/firewall` / Web 系统页只读卡）带**逐规则真实计数**
+  （与 VPP ACL 计数相反，这条路有读数）。**能力前提 spike（真机）**：同 hook base chain 相互独立、drop 全局生效
+  （高优先 accept 豁免不了别处 drop）；established 放行让既有会话在 drop-all 下存活；计数真实递增。
+  **真机四维当场抓出并修复一处 P0**（68865fb）：confirmed 超时自动回滚只落库不走 OnCommitted ⇒ 配置已回滚而
+  nft 表残留 policy drop（SSH 锁死，经 vmrun 带外复位恢复）；修法＝回滚落库后补发 onCommit（同族 TLS/syslog/日志保留
+  一并受益）；红-绿 + dev112 重验：超时回滚后**表即回收、访问自动恢复**。真机四维全过：规则与表逐字对、
+  drop ICMP ⇒ Windows ping 3/3 丢而 SSH 通、计数 3 包/180 字节、restart nfvis 幂等跳过（3→6 连续）、删空回收表、
+  未声明管理口拒、plain commit 拒（文案含照做路径）、operator 双面拒（CLI 拒/REST 403）；跨对象（VPP/libvirt/docker）不受影响。
+  **四套件（dev112）**：fulltest **272/0/20**（**258→272＝#388 的 16 项入套件**）、语义 **27/0/2**、lifecycle **22/0/3**、pty **10/10**；
+  `make check` RC=0。**环境变化**：`system.management.interface ens160` 本轮新声明（防火墙前置，confirmed 两步式）；
+  真机 **2.0.0~dev112**；sem-vm 的 libvirt autostart 实为 disable（重启不自启，交接环境节更正）。
+  证据 `docs/evidence/v2-round169-d388-host-firewall.txt`。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
