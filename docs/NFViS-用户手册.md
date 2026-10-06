@@ -1020,7 +1020,7 @@ nfvis$ show system firewall                              # 默认策略/规则�
   配置会**自动回滚到上一份**，管理访问随之恢复。
 - 极端情况下连回滚窗口也错过了：用**虚拟化平台的虚拟机控制台**或**物理串口**本地登录
   （本地 console 会话不受该限制，也豁免 confirmed 要求），把防火墙配置改回来，或执行
-  `request system restore` 恢复上一份配置。
+  `request system configuration restore <归档路径>` 恢复上一份配置备份。
 - 建议顺序：先加好放行规则（如 `accept source <你的管理网段> protocol tcp port 22`），**最后**再把
   默认策略改成 `drop`，并且始终用 `commit confirmed`。
 
