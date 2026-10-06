@@ -80,6 +80,9 @@ func (n recNet) UnbindL3IfaceACL(ctx context.Context, vrfName string, li model.L
 func (n recNet) DeleteL3Interface(ctx context.Context, vrfName string, li model.L3Interface) error {
 	return n.record("del-l3-if:" + vrfName + "/" + l3IfaceKeyOf(li))
 }
+func (n recNet) TeardownInterface(ctx context.Context, iface model.InterfaceConfig) error {
+	return n.record("del-interface:" + iface.Name)
+}
 func (n recNet) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
 	return n.record("nat")
 }
@@ -891,5 +894,158 @@ func TestApplyVxlanPlan(t *testing.T) {
 	dvx, dbd := find(*calls, "del-vxlan:tun-1"), find(*calls, "del-bd:vs-1")
 	if dvx < 0 || dbd < 0 || dvx > dbd {
 		t.Fatalf("删隧应排在删交换机之前: %v", *calls)
+	}
+}
+
+// —— 决策 #390：ACL/macip 绑定的撤销盲区族（三形态）——
+
+// planDescs 返回 plan 的操作描述序列（计划序断言用）。
+func planDescs(t *testing.T, oa *orchApplier, old, newCfg model.Config) []string {
+	t.Helper()
+	ops := oa.plan(old, newCfg)
+	out := make([]string, 0, len(ops))
+	for _, o := range ops {
+		out = append(out, o.desc)
+	}
+	return out
+}
+
+// indexOf 返回 s 在 list 中的下标（不存在 -1）。
+func indexOf(list []string, s string) int {
+	for i, v := range list {
+		if v == s {
+			return i
+		}
+	}
+	return -1
+}
+
+// 形态①：同一提交「删 L3 交换机 vs-a + 把其 L3 接口 ens224 改挂到 vs-b」——
+// 按旧声明生成 l3-acl-unbind，且排在迁移段（vrf[vs-b]）之前（旧槽先释放、新声明再绑）。
+func TestApplyDeletedVrfUnbindsMigratingL3Iface(t *testing.T) {
+	ap, calls := newRecApplier("")
+	oa := ap.(*orchApplier)
+	old := model.Config{
+		Acls: []model.Acl{{Name: "web", Rules: []model.AclRule{{Seq: 10, Action: "deny", Source: "any", Destination: "any"}}}},
+		Vrfs: []model.Vrf{{Name: "vs-a", L3Interfaces: []model.L3Interface{
+			l3if("ens224", "web", "10.0.3.1/24"),
+		}}},
+	}
+	newCfg := model.Config{
+		Acls: old.Acls,
+		Vrfs: []model.Vrf{{Name: "vs-b", L3Interfaces: []model.L3Interface{
+			l3if("ens224", "", "10.0.4.1/24"),
+		}}},
+	}
+	descs := planDescs(t, oa, old, newCfg)
+	unbindI, migrateI := indexOf(descs, "l3-acl-unbind[vs-a/ens224]"), indexOf(descs, "vrf[vs-b]")
+	if unbindI < 0 {
+		t.Fatalf("被删 VRF 的迁移接口应生成 l3-acl-unbind（按旧声明）: %v", descs)
+	}
+	if migrateI < 0 {
+		t.Fatalf("计划缺少迁移段 vrf[vs-b]: %v", descs)
+	}
+	if unbindI > migrateI {
+		t.Fatalf("解绑应排在新建/迁移段之前（旧槽先释放、新声明再绑）: %v", descs)
+	}
+	// 执行序同计划序。
+	if err := ap.Apply(context.Background(), old, newCfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	eUnbind, eMigrate := indexOf(*calls, "l3-acl-unbind:vs-a/ens224"), indexOf(*calls, "vrf:vs-b")
+	if eUnbind < 0 || eMigrate < 0 || eUnbind > eMigrate {
+		t.Fatalf("执行顺序错误：解绑应先于迁移: %v", *calls)
+	}
+}
+
+// 形态①（回收向）：被删 VRF 的接口在 new 配置里整条消失且旧声明带 acl-in ⇒ del-l3-if 回收。
+func TestApplyDeletedVrfReclaimsRemovedL3Iface(t *testing.T) {
+	ap, calls := newRecApplier("")
+	oa := ap.(*orchApplier)
+	old := model.Config{
+		Acls: []model.Acl{{Name: "web", Rules: []model.AclRule{{Seq: 10, Action: "deny", Source: "any", Destination: "any"}}}},
+		Vrfs: []model.Vrf{{Name: "vs-a", L3Interfaces: []model.L3Interface{
+			l3if("ens224", "web", "10.0.3.1/24"),
+		}}},
+	}
+	newCfg := model.Config{Acls: old.Acls}
+	descs := planDescs(t, oa, old, newCfg)
+	if indexOf(descs, "del-l3-if[vs-a/ens224]") < 0 {
+		t.Fatalf("整条消失的 L3 接口应生成 del-l3-if 回收: %v", descs)
+	}
+	if indexOf(descs, "l3-acl-unbind[vs-a/ens224]") >= 0 {
+		t.Fatalf("整条回收的接口不应再进解绑集合（回收路径已一并解绑）: %v", descs)
+	}
+	if err := ap.Apply(context.Background(), old, newCfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if indexOf(*calls, "del-l3-if:vs-a/ens224") < 0 {
+		t.Fatalf("回收操作未下发: %v", *calls)
+	}
+}
+
+// 形态①（边界）：被删 VRF 的接口**未绑 ACL** ⇒ 不生成解绑/回收 op（地址/表归属由
+// 删除段的 DeleteVRF 按登记清理；不扩大改动范围）。
+func TestApplyDeletedVrfNoAclNoRevoke(t *testing.T) {
+	ap, _ := newRecApplier("")
+	oa := ap.(*orchApplier)
+	old := model.Config{
+		Vrfs: []model.Vrf{{Name: "vs-a", L3Interfaces: []model.L3Interface{
+			l3if("ens224", "", "10.0.3.1/24"),
+		}}},
+	}
+	newCfg := model.Config{
+		Vrfs: []model.Vrf{{Name: "vs-b", L3Interfaces: []model.L3Interface{
+			l3if("ens224", "", "10.0.4.1/24"),
+		}}},
+	}
+	descs := planDescs(t, oa, old, newCfg)
+	for _, d := range descs {
+		if strings.HasPrefix(d, "l3-acl-unbind[vs-a/") || strings.HasPrefix(d, "del-l3-if[vs-a/") {
+			t.Fatalf("未绑 ACL 的接口不应生成解绑/回收 op: %v", descs)
+		}
+	}
+	if indexOf(descs, "del-vrf[vs-a]") < 0 {
+		t.Fatalf("被删 VRF 仍应由删除段的 del-vrf 清理（地址/表归属按登记）: %v", descs)
+	}
+}
+
+// 形态③：同提交「删 vpp dpdk dev + 删 interfaces 元素」——删除段生成 del-interface，
+// 接线到 provider 的接口级 teardown（storm/portsec/QoS 绑定）。
+func TestApplyInterfaceElementTeardownPlan(t *testing.T) {
+	ap, calls := newRecApplier("")
+	oa := ap.(*orchApplier)
+	old := model.Config{
+		Interfaces: []model.InterfaceConfig{
+			{Name: "ens224", StormControl: &model.StormControl{BroadcastKbps: 1000}},
+		},
+	}
+	newCfg := model.Config{}
+	descs := planDescs(t, oa, old, newCfg)
+	if indexOf(descs, "del-interface[ens224]") < 0 {
+		t.Fatalf("被删接口元素应生成 del-interface: %v", descs)
+	}
+	if err := ap.Apply(context.Background(), old, newCfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if indexOf(*calls, "del-interface:ens224") < 0 {
+		t.Fatalf("接口级 teardown 未下发: %v", *calls)
+	}
+}
+
+// 形态③（边界）：接口元素只是**变更**（未被删）⇒ 走既有 interface[<n>] 应用段，不生成 del-interface。
+func TestApplyInterfaceElementChangedNoTeardown(t *testing.T) {
+	ap, _ := newRecApplier("")
+	oa := ap.(*orchApplier)
+	old := model.Config{Interfaces: []model.InterfaceConfig{{Name: "ens224"}}}
+	newCfg := model.Config{Interfaces: []model.InterfaceConfig{
+		{Name: "ens224", MTU: 9000},
+	}}
+	descs := planDescs(t, oa, old, newCfg)
+	if indexOf(descs, "del-interface[ens224]") >= 0 {
+		t.Fatalf("变更（未删）的接口不应生成 del-interface: %v", descs)
+	}
+	if indexOf(descs, "interface[ens224]") < 0 {
+		t.Fatalf("变更应走既有 interface[<n>] 段: %v", descs)
 	}
 }

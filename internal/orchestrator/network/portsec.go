@@ -243,6 +243,11 @@ func (p *PortSecProvider) apply(c PortSecClient, ifname string, swIf uint32, wan
 // teardown 解绑接口的端口安全白名单（清空＝停用）。幂等：无登记＝本进程从未下发过，
 // 无对象可解（边界见文件头）；解绑方向的「本就不在/接口已消失」按已达成处理（同
 // MacipDisallowNonIP / #342 口径）。
+//
+// 决策 #390②：**只解自己那个槽**。同一接口的 macip 绑定槽只有一个，而 #341 的 L3 接口 ACL
+// 会在同一次提交里先绑上**伴随 macip**（VRF 段早于接口段）；若此处不核对就按登记解绑，
+// 会把伴随 macip 解掉，域内非 IP/ARP 被 ACL 插件静默丢弃（round171 §1.2 真机复现）。
+// 故解绑前核对槽上当前绑定的 macip ACL 是否正是本接口端口安全 ACL（tag 反查所得的索引）。
 func (p *PortSecProvider) teardown(c PortSecClient, ifname string, swIf uint32) error {
 	p.mu.Lock()
 	rt := p.rt[ifname]
@@ -251,13 +256,41 @@ func (p *PortSecProvider) teardown(c PortSecClient, ifname string, swIf uint32) 
 		return nil
 	}
 	if rt.bound {
-		if err := c.MacipACLInterfaceAddDel(swIf, rt.aclIndex, false); err != nil {
-			if !vppErrIs(err, vppNoSuchEntry, vppValueExist) && !isMissingIfaceErr(err) {
-				return err
-			}
+		if err := p.unbindOwnSlot(c, ifname, swIf, rt.aclIndex); err != nil {
+			return err
 		}
 	}
 	p.clearRT(ifname)
+	return nil
+}
+
+// unbindOwnSlot 解绑本接口端口安全 ACL 占用的 macip 槽——**仅当槽上当前绑定的正是它**（决策 #390②）。
+//
+// 身份核对：先按 tag 反查本接口端口安全 ACL 的索引（数据面事实），再读槽上实况
+// （MacipBoundACL）；两者不一致 = 槽被他人占用（如 #341 伴随 macip、别的 macip 对象），
+// **不动作**。tag 不在场时退回登记索引（登记＝最后一个成功下发的状态）；仍与实况不符则不动作
+// ——无凭据证明槽属于自己，宁可不解（不得清掉他方/伴随 macip）。
+func (p *PortSecProvider) unbindOwnSlot(c PortSecClient, ifname string, swIf, rtIdx uint32) error {
+	idx, _, found, err := c.MacipACLByTag(PortSecTag(ifname))
+	if err != nil {
+		return err
+	}
+	if !found {
+		idx = rtIdx
+	}
+	bound, ok, err := c.MacipBoundACL(swIf)
+	if err != nil {
+		return err
+	}
+	if !ok || bound != idx {
+		return nil // 槽上不是本产品的端口安全 ACL：不动作
+	}
+	if err := c.MacipACLInterfaceAddDel(swIf, idx, false); err != nil {
+		// 解绑方向：对象本就不在 / 已是目标状态按成功；接口已不存在（-2）绑定随接口消失，同属已达成。
+		if !vppErrIs(err, vppNoSuchEntry, vppValueExist) && !isMissingIfaceErr(err) {
+			return err
+		}
+	}
 	return nil
 }
 

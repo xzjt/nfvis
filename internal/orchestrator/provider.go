@@ -147,6 +147,13 @@ type NetworkProvider interface {
 	// IP ACL 与伴随 macip → 移回默认表（v4/v6）→ 摘进程内登记。此前无任何路径回收，
 	// 口留在原表且地址/绑定原样生效。
 	DeleteL3Interface(ctx context.Context, vrfName string, iface model.L3Interface) error
+	// TeardownInterface 回收一条已从声明里删除的**接口元素**的接口级绑定（决策 #390③）：
+	// storm policer/L2 分类表、portsec macip、QoS policer 入/出向绑定。接口元素从配置消失后
+	// ApplyInterface 不再被调用（apply 的「新增/变更」段只遍历 new.Interfaces），这些绑定
+	// 此前会残留到数据面重启（round171 §1.3：storm policer 与分类表残留、限速继续挂在口上）。
+	// 必须在接口仍存在于 VPP 时调用：删接口元素只改配置，真正从 VPP 移除发生在
+	// request vpp restart 的 startup.conf 重生成；接口已不在 VPP 时按已达成（无对象可撤）。
+	TeardownInterface(ctx context.Context, iface model.InterfaceConfig) error
 	ApplyNAT(ctx context.Context, nat model.NatConfig) error
 	ApplySpan(ctx context.Context, pm model.PortMirroring) error
 	DeleteSpan(ctx context.Context, name string) error
@@ -283,11 +290,12 @@ func (noopNetwork) UnbindL3IfaceACL(context.Context, string, model.L3Interface) 
 func (noopNetwork) DeleteL3Interface(context.Context, string, model.L3Interface) error {
 	return nil
 }
-func (noopNetwork) ApplyNAT(context.Context, model.NatConfig) error      { return nil }
-func (noopNetwork) ApplySpan(context.Context, model.PortMirroring) error { return nil }
-func (noopNetwork) DeleteSpan(context.Context, string) error             { return nil }
-func (noopNetwork) ApplyQos(context.Context, model.QosPolicy) error      { return nil }
-func (noopNetwork) DeleteQos(context.Context, string) error              { return nil }
+func (noopNetwork) TeardownInterface(context.Context, model.InterfaceConfig) error { return nil }
+func (noopNetwork) ApplyNAT(context.Context, model.NatConfig) error                { return nil }
+func (noopNetwork) ApplySpan(context.Context, model.PortMirroring) error           { return nil }
+func (noopNetwork) DeleteSpan(context.Context, string) error                       { return nil }
+func (noopNetwork) ApplyQos(context.Context, model.QosPolicy) error                { return nil }
+func (noopNetwork) DeleteQos(context.Context, string) error                        { return nil }
 func (noopNetwork) ApplyVxlan(context.Context, model.VxlanTunnel, *model.VxlanTunnel) error {
 	return nil
 }

@@ -4,6 +4,7 @@ package network
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -681,6 +682,36 @@ func (n *L2Network) DeleteL3Interface(ctx context.Context, vrfName string, li mo
 		return nil
 	}
 	return n.l3.DeleteL3Interface(ctx, vrfName, li)
+}
+
+// TeardownInterface 回收一条已从声明里删除的接口元素的**接口级绑定**（决策 #390③）：
+// storm policer/L2 分类表、portsec macip、QoS policer 入/出向绑定。调用时机：提交编排的
+// del-interface 计划操作（删除段；此时接口仍在 VPP 里）。
+//
+// 复用各 Provider 的「空声明＝teardown」路径，不另造一套解绑逻辑：
+//   - storm/portsec 的 ApplyInterface 传空声明即撤除（want 为空 → teardown）；
+//   - QoS 绑定经 ServicesProvider.TeardownInterface 逐向解绑（只动绑定，不碰 MTU/状态）。
+//
+// 接口已不在 VPP（ErrIfaceUnavailable）按已达成：无对象可撤，不阻断提交（删接口元素本就
+// 允许「该口还没进数据面」的现场）。
+func (n *L2Network) TeardownInterface(ctx context.Context, iface model.InterfaceConfig) error {
+	empty := model.InterfaceConfig{Name: iface.Name}
+	if n.storm != nil {
+		if err := n.storm.ApplyInterface(ctx, empty); err != nil && !errors.Is(err, ErrIfaceUnavailable) {
+			return err
+		}
+	}
+	if n.portSec != nil {
+		if err := n.portSec.ApplyInterface(ctx, empty); err != nil && !errors.Is(err, ErrIfaceUnavailable) {
+			return err
+		}
+	}
+	if n.svc != nil {
+		if err := n.svc.TeardownInterface(ctx, iface.Name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // MACTable 供 /virtual-switches/{name}/mac-table 运行态查询（M3-3）。

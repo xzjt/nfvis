@@ -1018,3 +1018,52 @@ func TestLearnLimitApplyResetIdempotent(t *testing.T) {
 		t.Fatalf("无登记时再清不应下发: %v", f.calls)
 	}
 }
+
+// 决策 #390③：接口元素的接口级 teardown——解绑该口入/出向 QoS policer，只动绑定、
+// 不碰 MTU/状态（接口即将随数据面重启消失）。无绑定 = 空操作（幂等）。
+func TestServicesTeardownInterface(t *testing.T) {
+	f := newFakeSvc()
+	p := NewServicesProvider(f)
+	ctx := context.Background()
+	if err := p.ApplyQos(ctx, model.QosPolicy{Name: "pin", Cir: 1000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ApplyQos(ctx, model.QosPolicy{Name: "pout", Cir: 2000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ApplyInterface(ctx, model.InterfaceConfig{
+		Name: "ens192", MTU: 9000, IngressPolicy: "pin", EgressPolicy: "pout"}); err != nil {
+		t.Fatal(err)
+	}
+	if in, out := svcRegs(p, "ens192"); in != "pin" || out != "pout" {
+		t.Fatalf("前置：应已登记两向绑定: in=%q out=%q", in, out)
+	}
+	f.pins, f.pouts = nil, nil
+	f.mtu = map[uint32]uint32{}
+
+	if err := p.TeardownInterface(ctx, "ens192"); err != nil {
+		t.Fatalf("TeardownInterface: %v", err)
+	}
+	if len(f.pins) != 1 || f.pins[0] != "pin:off" {
+		t.Fatalf("入向应解绑 pin: %v", f.pins)
+	}
+	if len(f.pouts) != 1 || f.pouts[0] != "pout:off" {
+		t.Fatalf("出向应解绑 pout: %v", f.pouts)
+	}
+	if in, out := svcRegs(p, "ens192"); in != "" || out != "" {
+		t.Fatalf("解绑成功后登记应清空: in=%q out=%q", in, out)
+	}
+	// 只动绑定：不得重设 MTU / 状态。
+	if _, ok := f.mtu[1]; ok {
+		t.Fatalf("teardown 不应设置 MTU: %v", f.mtu)
+	}
+
+	// 幂等：无绑定登记时零调用。
+	f.pins, f.pouts = nil, nil
+	if err := p.TeardownInterface(ctx, "ens192"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.pins) != 0 || len(f.pouts) != 0 {
+		t.Fatalf("无绑定应零调用: pins=%v pouts=%v", f.pins, f.pouts)
+	}
+}
