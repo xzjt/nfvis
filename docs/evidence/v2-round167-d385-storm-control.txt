@@ -1,0 +1,83 @@
+round167 · 决策 #385 —— storm control v1 实现 + 真机四维（含两处实现缺陷的当场收口）
+====================================================================
+日期：2026-10-06；分支 v2-round167-storm（f514929 实现 → 2f3f66e 真机实测缺陷修复）；
+真机 nfvis-vm 2.0.0~dev109（首验，暴露两缺陷）→ **dev110（最终）**。
+来源：决策 #385（round166 spike 定形）；PR：https://github.com/xzjt/nfvis/pull/314（base v2）。
+
+§0 结论
+- **storm control v1 交付并真机功能验证**：`set interfaces <if> storm-control broadcast|multicast <kbps>`
+  （入向按目的 MAC 分类限速、超速丢弃、单位 kbps）⇒ VPP `policer_add_del` + **L2 classify 表** +
+  `policer_classify_set_interface` 挂接口入向；三面读视图（CLI detail 含 policer 实测计数口径、REST、Web）。
+- **功能定量对照（独立事实源 = VPP 自己的 `l2-flood` 计数）**：`interface ens192` 注入 2000 个 64B 广播帧（rx=ens192）——
+  对照组（无 storm control）**l2-flood 2000**；实验组（broadcast 1 kbps）**l2-flood 15/16**（限速确实生效）。
+  **两类独立 + 表链成立**：只配 broadcast 时组播注入 **2000**（不限）；再配 multicast ⇒ 组播 **15**；两类都配时广播仍 **15**。
+- **真机当场抓出并收口两处实现缺陷**（见 §4）：重建路径重复建表（4 张）与「按陈旧登记解绑」致删除提交失败
+  （`No such table (-65)`）——修后 dev110 上：乱现场自动收敛回 2 张表、再重启不翻倍、删除一次提交全清。
+- `make check` 全绿；四套件与基线逐项一致。
+
+§1 实现（f514929 + 2f3f66e）
+1. **模型/校验**：`InterfaceConfig.StormControl{BroadcastKbps, MulticastKbps}`（kbps；0＝未配该类）；值域 1..100000000。
+2. **语句/别名/反推**：`interfaces <if> storm-control broadcast|multicast <kbps>`（逐叶子 set/delete、裸 delete 清两类）；
+   **unknown-unicast 树里不建**，执行期给能照做的报错（「判定『目的 MAC 未学习』不是以太头里的可匹配位…」）；
+   display-set 反推每类一条、回放自校验通过。
+3. **数据面**（`network/storm.go` + `storm_govpp.go` + `storm_stats.go`）：policer 名 `nfvis-storm-<if>-<kind>`、
+   **`Cb` 非 0**（8 秒 CIR 字节数，spike 踩坑）、L2 掩码 broadcast＝前 6 字节 ff / multicast＝首字节 `0x01`（I/G 位）；
+   **每类一张表**（接口 L2 policer-classify 槽只收一张表）——两类并存时**广播表经 `NextTableIndex` 链到组播表**
+   （广播精确命中；其余组播未命中广播表、经链进组播表）；session 的 `hit_next_index` 与 `opaque_index` 同写 policer index。
+4. **读视图**：`show interfaces <if> detail` 的 storm-control 块（配置 + 数据面实况 + 计数；**计数不可读如实说明**——
+   `policer_details` 无 conform/violate 字段，改从 stats segment `/net/policer/*` 读，读不到即报原因，不显示 0）。
+
+§2 真机结构验证（dev109）
+- broadcast 8 kbps ⇒ `show policer` `nfvis-storm-ens192-broadcast type 1r2c cir 8 cb 8000`；
+  `show classify tables` TableIdx 1 mask `ffffffffffff00000000000000000000`（前 6 字节 ff）、`NextTbl 0`；
+  表 0 mask `0100…`；接口在 sem-vs 的 BD 内（L2 路径成立）。
+- 读视图：`Storm control: 广播 8 kbps / 组播 16 kbps …` + `分类表 #1（掩码 ff…）/ #0（掩码 01…）` +
+  `计数: 广播 不可读（stats segment 未返回该 policer 的计数路径（/net/policer/*））`——**如实不猜**。
+
+§3 真机功能验证（**A/B 定量对照**，独立事实源）
+- 注入方式：`vppctl packet-generator`（`data { hex … }` 语法；**默认 disabled**，须 `packet-generator enable <名>`；
+  16 字节帧会被当 runt 丢弃——须补足 64 字节整帧；**rx 接口必须与 storm control 所在接口一致**，用 pg-1 作 rx 时不受策略）。
+- 观测点选择：`l2-flood: L2 flood packets`（VPP 错误计数）——**注意 BVI 上的 flooded 副本会因非法载荷以太类型被丢**，
+  故看 bvi1 的 rx 会得到「无变化」的假结论；`l2-flood` 才是直接量。
+- 结果（rx=ens192、2000 帧、64B）：对照组 **2000**；实验组（broadcast 1 kbps）**15**（dev109）/ **16**（dev110）。
+- 两类独立/表链：只配 broadcast ⇒ 组播注入 **2000**；加配 multicast ⇒ 组播 **15**；两类都在 ⇒ 广播 **15**。
+
+§4 真机暴露的两处实现缺陷与修复（f514929 → 2f3f66e）
+- **① 重建路径重复建表**：`request vpp restart`（VPP 清空 → 重放）后再 `systemctl restart nfvis`（登记丢失 → 又走重建）
+  ⇒ `show classify tables` **4 张**（两对相同掩码），policer 因按名幂等仍 2 个。
+  **根因**：重建路径的「数据面实况」判据用了 **`policer_classify_dump`——本底座返回不了绑定**（同 vxlan dump 一族的底座缺口），
+  于是看不到已挂的表 ⇒ 漏认既有表。
+  **修法**：绑定唯一事实源改为 **`classify_table_by_interface`**；`policer_classify_dump` 相关代码整体删除。
+- **② 删除按陈旧登记解绑 ⇒ 提交失败**：`解绑接口 ens192 的风暴抑制分类表 3: VPPApiError: No such table (-65)`
+  （登记说挂了 3，实况不是）＋ attach 方向曾**容忍** `VALUE_EXIST` 类错误（登记与实况脱节的温床）。
+  **修法**：teardown 改为「**实况优先 + 登记兜底 + 孤儿表清扫**」——先读实况绑定并核掩码形状（属本产品才认，外来表不动、如实报错）
+  → 按实况索引解绑 → 带 `DelChain` 删表（两类并存时另一张在链上）→ 按登记兜底补删；解绑方向的 `-65/-6/-81` 归一为
+  `ErrStormAbsent` 由 Provider 按「已达成」容错；**挂上方向不再容错**（槽被占时静默吞掉就是假成功）；
+  最后孤儿清扫（`classify_table_ids` 全量 + 保护集＝逐接口实况绑定及其链表 ⇒ 只删「掩码形状属本产品且没挂在任何接口上」的表；
+  任一实况查询不可得 ⇒ **放弃清扫**，宁可不扫不误删）。
+- **红-绿**：摘掉实况解绑/删表步 + 让 attach 容忍覆盖 ⇒ `TestStormRebuildNoDuplicateTables` 失败并报出真机同形现场
+  （`tables=4 … attached=map[7:3]`）；`stormAbsentOK` 恒 false ⇒ `TestStormDeleteByFactsCleansDuplicates` 失败
+  （`解绑…登记分类表 3: 数据面对象不存在`）。另加孤儿清扫保护集/放弃两用例。
+- **dev110 复验（保留乱现场）**：装后自动收敛 4→**2 张表**；再 `restart nfvis` 仍 **2**；`delete … storm-control`
+  ⇒ **commit 成功**、表 0、policer 0、读视图无 storm 行；功能复检对照 2000 vs 实验 16。
+
+§5 现场与清场（如实）
+- 测试拓扑：`ens224`（VMware 侧无链路，down，不适用）→ 改用 **`ens192`**（up）临时加入 `sem-vs` 作第 4 端口；
+  跑完已移除（`delete virtual-switches sem-vs ports 4`）、`pg-1` 移出 BD、pg 流删除。
+- 收尾：storm 配置 0、`show policer` 0、`show classify tables` 0；夹具回到 sem-vs（2 口）/dns-vs。
+- dev109→dev110 两次 `dpkg -i` 期间的四服务 active；无残留告警（仅常态 `HUGEPAGE_POOL_ORPHAN`）。
+
+§6 如实边界 / 未竟
+- **unknown-unicast 不做**（L2 掩码无法表达「目的 MAC 未学习」）——CLI 明确拒绝并说明；pps 换算 / 出向 /
+  port security 白名单不在 v1（契约边界）。
+- **计数路径**：`/net/policer/*` 在本机读不到 ⇒ 读视图如实报「不可读（原因）」；**未伪造 0**。若将来底座可读，
+  改一处即可显示 conform/violate。
+- 孤儿清扫依赖 `classify_table_ids` 与 `sw_interface_dump` 两个查询；**均不可得时静默放弃清扫**（本接口清理不受影响）——
+  如实边界（本轮未引入日志通道）。
+- 未做 Web 卡的 Browser Use 复核（读视图三面已在 CLI/REST 验证；Web 为只读行）——如实登记。
+- 真机未做「组播地址族全覆盖」（只测了一类组播 MAC `01:00:5e:00:00:01`；IPv6 组播 `33:33:…` 按掩码 `0x01` 同覆盖，
+  未单独实测）。
+
+§7 四套件复跑（dev110）
+- `cli-fulltest` **254/0/18** ｜ `cli-semantic-check` **27/0/2**（S8 窗口热）｜ `cli-lifecycle-check` **22/0/3**
+  （L3-2 正控未热，非回归）｜ `cli-pty-smoke` **10/10**——与基线逐项一致。

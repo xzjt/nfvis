@@ -306,6 +306,9 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set interfaces <ifname> sriov vf-count <n>` | 创建/回收 VF（FR-NET-004） | sysfs `sriov_numvfs` | ⊘ 无 PF/VF 时 commit 明确报错（不再静默无效，决策 #70） |
 | `set interfaces <ifname> ingress-policy <name>` | 入向限速策略绑定 | VPP policer input | ✅ |
 | `set interfaces <ifname> egress-policy <name>` | 出向限速策略绑定（决策 #331；VPP policer output，可与入向并存） | VPP policer output | ✅ |
+| `set interfaces <ifname> storm-control broadcast <kbps>` | 入向**广播**风暴抑制（决策 #385，FR-NET-019）：目的 MAC 精确匹配 `ff:ff:ff:ff:ff:ff`，超速**丢弃**；单位 **kbps**（不做 pps 换算）；接口须已声明 | VPP policer（1R2C）+ L2 classify 表挂接口入向 | 🚫 待真机（实现随本轮交付：建两类对 `show policer`/`show classify tables` 逐字核对 + 实验组/对照组定量对照；单测覆盖调用序与向量构造。**能力前提 spike**：`docs/evidence/v2-round166-storm-control-spike.txt`） |
+| `set interfaces <ifname> storm-control multicast <kbps>` | 入向**组播**风暴抑制（决策 #385）：目的 MAC 的 I/G 位=1（掩码「匹配位」写法；按该口径广播帧也满足此位——两类同配时广播走自己的精确表，只配组播时广播按组播速率限） | 同上 | 🚫 同上（掩码/session 形状需真机按 `show classify tables` 核对） |
+| `delete interfaces <ifname> storm-control [broadcast \| multicast]` | 逐类撤销（detach → 删 session/表 → 删 policer）；**裸 delete ＝两类都清**（幂等：不存在按已达成） | 同上 | 🚫 同上 |
 | `set bonds <name> members [<seq>] <ifname>` | 聚合成员 | VPP bonding | ✅ |
 | `set bonds <name> lacp mode <active\|passive> [interval <fast\|slow>]` | LACP 模式 | VPP bonding | ✅ |
 | `set bonds <name> lacp disable` | 关闭 LACP（转静态聚合） | VPP bonding | ✅ |
@@ -434,10 +437,10 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 > **复核方法**（下面每个数字都可这样复算）：
 >
 > ```bash
-> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 265（§1/§2 的命令行 263 行 + §3 本表的 `show`、`request` 两行）
+> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 268（§1/§2 的命令行 266 行 + §3 本表的 `show`、`request` 两行）
 > ```
 >
-> 即 §1/§2 合计 **263 行**；把 ` / ` 并列的写法各拆成一条后为 **267 条**命令
+> 即 §1/§2 合计 **266 行**；把 ` / ` 并列的写法各拆成一条后为 **270 条**命令
 > （`exit` / `quit` +1；§2.1 的 `edit <path>` / `up` / `top` / `exit` +3）。
 
 **分族**（族 = 该行**首个 token**；§2.1 的裸 `show` 与 `show | display set` 因此计入 `show` 族，`help` 计入其余操作）：
@@ -448,22 +451,22 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request` | 46 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/系统/告警） |
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
-| 配置模式 | 133 | §2.1 余下 13 行 + §2.2~§2.9 共 120 行（含 FR-CMP-023 的 2 条 `pci-device` 语句） |
-| **合计** | **268** | 不含管道则为 **259**；按 ` / ` 拆开后 **272 条** |
+| 配置模式 | 136 | §2.1 余下 13 行 + §2.2~§2.9 共 123 行（含 FR-CMP-023 的 2 条 `pci-device` 语句、决策 #385 的 3 条 storm-control 语句） |
+| **合计** | **271** | 不含管道则为 **262**；按 ` / ` 拆开后 **275 条** |
 
 **分节**（行数）：
 
 | 节 | 行数 | 节 | 行数 |
 |---|---|---|---|
 | §1.1 `show`（含通用管道 9） | 77 | §2.2b `protocols` | 3 |
-| §1.2 `request` | 47 | §2.3 `interfaces` 与 `bonds` | 10 |
+| §1.2 `request` | 47 | §2.3 `interfaces` 与 `bonds` | 13 |
 | §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 19 |
 | §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 9 |
 | §2.2 `system` | 37 | §2.6 `resource-pools` | 3 |
 | §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 22 |
-| §2.9 `container-functions` | 10 | **合计** | **273** |
+| §2.9 `container-functions` | 10 | **合计** | **276** |
 
-**按实测状态分布**（共 273 行）：
+**按实测状态分布**（共 276 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
@@ -471,7 +474,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 设计拒绝（decision #340） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 12 | **破坏性/需交互**（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`、VM/容器删除确认与改密）——这些命令的机制由单测/集成测试覆盖，真机按需执行。**决策 #365 把「已入套件但真机待跑」的 10 行移入 ✅ 桶**：`request container-functions <n> exec`（round138 四维）、`set/delete system metrics history …` 3 行（round137 四维）、`set/delete virtual-switches <n> dhcp-server …` 6 行（round141 四维）——此前标「🚫 待真机」与同 PR 证据矛盾（round142 体检 A9/C9 的账目漂移）。**FR-CMP-023 的 2 条 `pci-device` 语句**（新增）为「待真机」：解析/校验/域 XML/反推由单测覆盖，真机按交付步骤走查（一次性 VNF 只 define 不 start；**实际直通端到端未验**——宿主无 IOMMU 直通能力，如实登记） |
+| 🚫 本轮未执行 | 15 | **破坏性/需交互**（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`、VM/容器删除确认与改密）——这些命令的机制由单测/集成测试覆盖，真机按需执行。**决策 #365 把「已入套件但真机待跑」的 10 行移入 ✅ 桶**：`request container-functions <n> exec`（round138 四维）、`set/delete system metrics history …` 3 行（round137 四维）、`set/delete virtual-switches <n> dhcp-server …` 6 行（round141 四维）——此前标「🚫 待真机」与同 PR 证据矛盾（round142 体检 A9/C9 的账目漂移）。**FR-CMP-023 的 2 条 `pci-device` 语句**（新增）为「待真机」：解析/校验/域 XML/反推由单测覆盖，真机按交付步骤走查（一次性 VNF 只 define 不 start；**实际直通端到端未验**——宿主无 IOMMU 直通能力，如实登记）。**决策 #385 的 3 条 storm-control 语句**为「待真机」：解析/校验/别名/反推与建改删调用序由单测覆盖，真机按契约的四维验证走查（对象逐字对 + 定量对照 + 改值撤旧 + 重启重放 + 删除清查 + 对抗） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、

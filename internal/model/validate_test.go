@@ -527,6 +527,51 @@ func TestDHCPServerPoolHelpers(t *testing.T) {
 	}
 }
 
+// 决策 #385：接口入向风暴抑制（storm control）的值域与空声明。
+// 值域 1-100000000 kbps；字段只在已声明的接口上（字段挂在 InterfaceConfig 上，天然如此）；
+// 对象出现但两类都没给值＝无效配置（不下发任何限速，却会被读视图当成已配置）。
+func TestValidateStormControl(t *testing.T) {
+	// 未配置（nil）合法
+	mustNoErr(t, Validate(validBase()))
+
+	// 单类合法（边界值 1 与 100000000）
+	c := validBase()
+	c.Interfaces[0].StormControl = &StormControl{BroadcastKbps: 8000}
+	mustNoErr(t, Validate(c))
+	low := validBase()
+	low.Interfaces[0].StormControl = &StormControl{BroadcastKbps: 1}
+	mustNoErr(t, Validate(low))
+	high := validBase()
+	high.Interfaces[0].StormControl = &StormControl{BroadcastKbps: 100000000}
+	mustNoErr(t, Validate(high))
+
+	// 两类并存合法
+	both := validBase()
+	both.Interfaces[0].StormControl = &StormControl{BroadcastKbps: 8000, MulticastKbps: 20000}
+	mustNoErr(t, Validate(both))
+
+	// 负数与越界（每类各自判定；错误路径点名到具体叶子）
+	neg := validBase()
+	neg.Interfaces[0].StormControl = &StormControl{BroadcastKbps: -1}
+	mustErrContaining(t, Validate(neg), "storm_control.broadcast_kbps", "1-100000000")
+	over := validBase()
+	over.Interfaces[0].StormControl = &StormControl{MulticastKbps: 100000001}
+	mustErrContaining(t, Validate(over), "storm_control.multicast_kbps", "1-100000000")
+
+	// 空声明（对象在、两类皆缺省）= 无效配置
+	empty := validBase()
+	empty.Interfaces[0].StormControl = &StormControl{}
+	mustErrContaining(t, Validate(empty), "storm_control", "至少给一个")
+
+	// 两个接口各自配置互不影响（字段在声明口上，接口名进错误路径）
+	multi := validBase()
+	multi.Interfaces = append(multi.Interfaces, InterfaceConfig{Name: "ens2f1", StormControl: &StormControl{BroadcastKbps: 500}})
+	mustNoErr(t, Validate(multi))
+	multi.Interfaces[1].StormControl.BroadcastKbps = 0
+	multi.Interfaces[1].StormControl.MulticastKbps = 200000000
+	mustErrContaining(t, Validate(multi), "interfaces[ens2f1].storm_control.multicast_kbps", "1-100000000")
+}
+
 func TestValidateLearnLimit(t *testing.T) {
 	// 未配置（0）合法；合法范围内的正整数合法
 	mustNoErr(t, Validate(validBase()))

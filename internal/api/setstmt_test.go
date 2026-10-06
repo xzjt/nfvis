@@ -108,6 +108,10 @@ var roundTripAliasCases = [][]string{
 	{"set vpp dpdk dev ens192", "set vpp dpdk dev ens224"},
 	{"set resource-pools cpu numa node 0 cores 4,5", "set resource-pools cpu isolated-cores 4,5"},
 	{"set interfaces ens192 ingress-policy p1"},
+	// 接口风暴抑制（决策 #385）：接口须先声明；两类各一条语句（回放自校验覆盖发射器）
+	{"set interfaces ens192 description sd",
+		"set interfaces ens192 storm-control broadcast 8000",
+		"set interfaces ens192 storm-control multicast 20000"},
 }
 
 // runDisplaySetRoundTrip 单组语句的往返：apply → toJSONTree → 反推 → 再 apply → 深比较。

@@ -46,6 +46,7 @@ var shapeConditional = map[string]map[string]string{
 		"taken_over":     "决策 #302：VPP 运行态不可判定（未接入/查询失败）时省略，不编造",
 		"ingress_policy": "决策 #331：未绑定入向限速策略时省略（配置对象 omitempty；不编造空串）",
 		"egress_policy":  "决策 #331：未绑定出向限速策略时省略（配置对象 omitempty；不编造空串）",
+		"storm_control":  "决策 #385：未配置入向风暴抑制时省略（配置对象 omitempty；不编造空对象）",
 	},
 	"GET /system/version": {
 		// R37-2 已收口（决策 #118）：ubuntu/libvirt/qemu/docker 经 VersionProbe 探测、

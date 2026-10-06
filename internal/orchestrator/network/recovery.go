@@ -324,6 +324,11 @@ func (n *L2Network) resetProviders() {
 	}
 	// 决策 #383：VPP（重）连接后隧道条目全失（接口与平台标记一并消失）——VxlanProvider 不持
 	// 进程内登记，恢复收敛直接按接口 tag 判存量（在则不动、不在则按配置建），故此处无需失效。
+	// 决策 #385：VPP（重）连接后 policer 与 classify 表全失——清空风暴抑制登记，恢复收敛按
+	// 接口声明全量重放（幂等；登记=最后一个成功下发状态，清空即「按实况重建」）。
+	if n.storm != nil {
+		n.storm.reset()
+	}
 	if n.lldp != nil {
 		n.lldp.reset()
 	}

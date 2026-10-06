@@ -48,6 +48,9 @@ var contractStatements = []string{
 	"set port-mirroring span-a analyzer interface ens192",
 	"set qos policies lim-a cir 1000000 cbs 100000",
 	"set interfaces ens192 ingress-policy lim-a",
+	// 风暴抑制（决策 #385）：两类各一条（接口须已声明——前置见下方 pre 分支）
+	"set interfaces ens192 storm-control broadcast 8000",
+	"set interfaces ens192 storm-control multicast 20000",
 	// LLDP（FR-NET-018）
 	"set protocols lldp enable true",
 	"set protocols lldp advertisement-interval 30",
@@ -150,6 +153,10 @@ func TestCLIStatementMappingGuard(t *testing.T) {
 			if strings.Contains(stmt, "vxlan tunnels") && strings.Contains(stmt, "virtual-switch") {
 				pre = append(pre, "set virtual-switches vs-a type l2")
 			}
+			// 风暴抑制只配在**已声明**的接口上（语句期校验），故先声明被引用的口。
+			if strings.Contains(stmt, "storm-control") {
+				pre = append(pre, "set interfaces ens192 description p", "set interfaces ens224 description p")
+			}
 			// cross-connect 引用的是**已声明的端口序号**（模型只有 cross_connect bool，
 			// 端口身份由 ports 列表承担），故须先声明两个端口。
 			if strings.Contains(stmt, "cross-connect") {
@@ -205,6 +212,19 @@ func TestCLIStatementMappingDelete(t *testing.T) {
 			"delete qos policies lim-b"},
 		{[]string{"set interfaces ens192 ingress-policy lim-b"},
 			"delete interfaces ens192 ingress-policy"},
+		// 风暴抑制（决策 #385）：逐类删除与裸删除都要落模型（裸删除＝两类都清）；
+		// 接口须先声明（语句期校验）。
+		{[]string{"set interfaces ens192 description p",
+			"set interfaces ens192 storm-control broadcast 8000",
+			"set interfaces ens192 storm-control multicast 20000"},
+			"delete interfaces ens192 storm-control broadcast"},
+		{[]string{"set interfaces ens192 description p",
+			"set interfaces ens192 storm-control broadcast 8000",
+			"set interfaces ens192 storm-control multicast 20000"},
+			"delete interfaces ens192 storm-control"},
+		{[]string{"set interfaces ens192 description p",
+			"set interfaces ens192 storm-control multicast 20000"},
+			"delete interfaces ens192 storm-control multicast 20000"},
 		{[]string{"set protocols lldp enable true"},
 			"delete protocols lldp enable"},
 		// M4 计算/容器删除形态（M4-12：同样必须落模型）

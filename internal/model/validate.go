@@ -467,8 +467,27 @@ func (v *validator) checkInterfaces(c Config) {
 		if i.EgressPolicy != "" && !v.qosNames[i.EgressPolicy] {
 			v.errf(p+".egress_policy", "限速策略 %q 不存在", i.EgressPolicy)
 		}
+		// 入向风暴抑制（决策 #385，FR-NET-019）：值域 1-100000000 kbps；对象出现但两类
+		// 都没给值等于「配了个空声明」——它不下发任何限速，却会让读视图/display set 把它
+		// 当成已配置，按无效配置拒绝（不静默留空壳）。
+		if sc := i.StormControl; sc != nil {
+			if sc.BroadcastKbps == 0 && sc.MulticastKbps == 0 {
+				v.errf(p+".storm_control",
+					"风暴抑制未给出任何类别：broadcast_kbps / multicast_kbps 至少给一个（两类各自独立，单位 kbps）")
+			}
+			if sc.BroadcastKbps != 0 && !checkStormKbps(sc.BroadcastKbps) {
+				v.errf(p+".storm_control.broadcast_kbps", "广播抑制 %d 超出范围：须为 1-100000000（kbps）", sc.BroadcastKbps)
+			}
+			if sc.MulticastKbps != 0 && !checkStormKbps(sc.MulticastKbps) {
+				v.errf(p+".storm_control.multicast_kbps", "组播抑制 %d 超出范围：须为 1-100000000（kbps）", sc.MulticastKbps)
+			}
+		}
 	}
 }
+
+// checkStormKbps 风暴抑制取值域（决策 #385）：1 kbps..100000000 kbps（100 Gbps 量级）。
+// 上界与物理口线速相称——再大只可能是笔误（与 learn-limit 的「上界即无意义值」同一取舍）。
+func checkStormKbps(n int) bool { return n >= 1 && n <= 100000000 }
 
 func (v *validator) checkBonds(c Config) {
 	dupCheck(v, c.Bonds, "bonds", func(b Bond) string { return b.Name }, "bond")

@@ -371,6 +371,17 @@ func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool, ifc mod
 		}
 		fmt.Fprintf(&b, "QoS: 入向 %s / 出向 %s\n", in, out)
 	}
+	// 入向风暴抑制（决策 #385）：配置 + 数据面实测（policer/分类表/计数）三面同源。
+	if declared && ifc.StormControl != nil && (ifc.StormControl.BroadcastKbps > 0 || ifc.StormControl.MulticastKbps > 0) {
+		txt, sc := x.stormControlBlock(ifc)
+		b.WriteString(txt)
+		if cfg, ok := sc["storm_control"].(map[string]any); ok && len(cfg) > 0 {
+			entry["storm_control"] = cfg
+		}
+		if rt, ok := sc["storm_control_runtime"]; ok {
+			entry["storm_control_runtime"] = rt
+		}
+	}
 	if stErr != nil {
 		b.WriteString("%% 注: VPP 运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
 	}

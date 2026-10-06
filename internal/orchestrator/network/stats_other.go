@@ -34,3 +34,8 @@ func (r *vppRuntime) Memory(ctx context.Context) (state.Memory, bool) {
 func (r *vppRuntime) RuntimeStats(ctx context.Context) (state.RuntimeStats, bool) {
 	return state.RuntimeStats{Reason: "stats segment 仅在 Linux 可用"}, false
 }
+
+// StormCounters 非 Linux 桩（决策 #385）：如实报不可读原因，读视图据此显示「不可读」。
+func (m *Manager) StormCounters(ctx context.Context, policerIndex uint32, policerName string) (StormCounters, bool, string) {
+	return StormCounters{}, false, "stats segment 仅在 Linux 可用"
+}

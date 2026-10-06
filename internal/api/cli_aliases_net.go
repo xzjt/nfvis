@@ -182,6 +182,21 @@ var statementAliasesNet = []aliasRule{
 	{pattern: []string{"interfaces", "*", "egress-policy"},
 		apply: ifacePolicyClearAlias("egress_policy")},
 
+	// interfaces <if> storm-control broadcast|multicast <kbps>（决策 #385：入向风暴抑制）。
+	// 模型是单对象（storm_control.{broadcast_kbps,multicast_kbps}），逐叶子 set/delete；
+	// 裸 delete 清两类；**接口须已声明**（elemByID 查不到即报错并给照做指引——风暴抑制只
+	// 作用于已声明物理口，不允许由本语句顺带建出一个只有 storm_control 的口声明）。
+	{pattern: []string{"interfaces", "*", "storm-control", "broadcast", "*"},
+		apply: ifaceStormAlias("broadcast_kbps")},
+	{pattern: []string{"interfaces", "*", "storm-control", "broadcast"},
+		apply: ifaceStormClearAlias("broadcast_kbps")},
+	{pattern: []string{"interfaces", "*", "storm-control", "multicast", "*"},
+		apply: ifaceStormAlias("multicast_kbps")},
+	{pattern: []string{"interfaces", "*", "storm-control", "multicast"},
+		apply: ifaceStormClearAlias("multicast_kbps")},
+	{pattern: []string{"interfaces", "*", "storm-control"},
+		apply: ifaceStormBareAlias},
+
 	// protocols lldp enable <bool> | advertisement-interval <n> | interface <if> enable <bool>
 	{pattern: []string{"protocols", "lldp", "enable", "*"},
 		apply: aliasLldpEnable},
@@ -1212,6 +1227,117 @@ func ifacePolicyClearAlias(field string) func(map[string]any, []string, bool) er
 		delete(ifc, field)
 		return nil
 	}
+}
+
+// ---------- 接口入向风暴抑制（决策 #385） ----------
+
+// ifaceStormMissing 接口未声明时的统一报错（set 与 delete 同一条）：给能照做的一步，
+// 而不是 elemByID 的「无匹配配置」（契约口径：storm-control 只配在**已声明**的物理口上，
+// 本语句不代建声明）。
+func ifaceStormMissing(ifname string) error {
+	return errString("接口 " + ifname + " 未在配置中声明：先执行 set interfaces " + ifname +
+		" description <说明> 声明该口，再配 storm-control")
+}
+
+// ifaceStormObj 取（或按需建）接口元素里的 storm_control 对象（删除路径的「空壳」清理
+// 由 ifaceStormPrune 承担）：留下的空对象既反推不出语句（display set 回放自校验会报内部
+// 错误），又让「配过又删光」与「从未配置」不可区分（与 pruneEmptySingleton 的
+// management/nat/metrics 同因）。
+func ifaceStormObj(ifc map[string]any) map[string]any {
+	obj, _ := ifc["storm_control"].(map[string]any)
+	if obj == nil {
+		obj = map[string]any{}
+		ifc["storm_control"] = obj
+	}
+	return obj
+}
+
+// ifaceStormPrune 两类皆空时删掉 storm_control 键（空壳不留）。
+func ifaceStormPrune(ifc map[string]any) {
+	obj, _ := ifc["storm_control"].(map[string]any)
+	if obj == nil {
+		return
+	}
+	for _, v := range obj {
+		if n, ok := v.(float64); !ok || n != 0 {
+			return // 还有非零取值（或未知键）：保留，宁可不剪
+		}
+	}
+	delete(ifc, "storm_control")
+}
+
+// ifaceStormAlias：`set interfaces <if> storm-control <broadcast|multicast> <kbps>`（决策 #385）。
+// 取值须为正整数（上界由模型校验在提交期拒绝，与 learn-limit 同一分工）。
+func ifaceStormAlias(field string) func(map[string]any, []string, bool) error {
+	return func(tree map[string]any, t []string, isSet bool) error {
+		ifc, err := elemByID(tree, "interfaces", t[1])
+		if err != nil {
+			return ifaceStormMissing(t[1])
+		}
+		if !isSet {
+			if obj, ok := ifc["storm_control"].(map[string]any); ok {
+				delete(obj, field)
+				ifaceStormPrune(ifc)
+			}
+			return nil
+		}
+		n, err := strconv.Atoi(t[4])
+		if err != nil || n < 1 {
+			return errString("风暴抑制速率须为大于 0 的整数（kbps）: " + t[4])
+		}
+		ifaceStormObj(ifc)[field] = float64(n)
+		return nil
+	}
+}
+
+// ifaceStormClearAlias：`delete interfaces <if> storm-control <broadcast|multicast>`
+// （该叶子形态不带取值）。set 缺取值明确报错，不落半套配置。
+func ifaceStormClearAlias(field string) func(map[string]any, []string, bool) error {
+	f := ifaceStormAlias(field)
+	return func(tree map[string]any, t []string, isSet bool) error {
+		if isSet {
+			return errString("缺少取值: set interfaces " + t[1] + " storm-control " +
+				strings.TrimSuffix(field, "_kbps") + " <kbps>")
+		}
+		return f(tree, append(append([]string{}, t...), ""), isSet)
+	}
+}
+
+// ifaceStormBareAlias：`interfaces <if> storm-control`（无取值）。delete ＝两类都清；
+// set 缺取值明确报错并给出两类写法。
+func ifaceStormBareAlias(tree map[string]any, t []string, isSet bool) error {
+	ifc, err := elemByID(tree, "interfaces", t[1])
+	if err != nil {
+		return ifaceStormMissing(t[1])
+	}
+	if isSet {
+		return errString("缺少取值: set interfaces " + t[1] +
+			" storm-control <broadcast|multicast> <kbps>（单位 kbps；两类可分别配置）")
+	}
+	delete(ifc, "storm_control")
+	return nil
+}
+
+// unsupportedStormKindMsg 本版本**有意不支持**的 storm-control 类别的执行期报错（决策 #385）。
+//
+// unknown-unicast 要判「目的 MAC 是否已在转发表中学到」，而以太头里没有这个可匹配位——
+// 产品的数据面按目的 MAC 掩码分类（VPP classify），表达不了它，故语句树里不建该叶子。
+// 但「未知命令」给不出原因，用户只会反复试写法；这里在派发前识别该类别，给一条能照做的
+// 报错（说明为什么不支持 + 可用的替代）。返回 ""＝不涉及。
+func unsupportedStormKindMsg(op string, tokens []string) string {
+	if len(tokens) < 3 || tokens[0] != "interfaces" {
+		return ""
+	}
+	// 关键字允许无歧义前缀（storm-c / storm-cont…），按前缀识别（≥ "storm"）
+	if !strings.HasPrefix("storm-control", tokens[2]) || len(tokens[2]) < 5 {
+		return ""
+	}
+	if len(tokens) < 4 || tokens[3] != "unknown-unicast" {
+		return ""
+	}
+	return op + " interfaces " + tokens[1] + " storm-control unknown-unicast …：本版本不支持" +
+		" unknown-unicast 风暴抑制——判定「目的 MAC 未学习」不是以太头里的可匹配位，" +
+		"按目的 MAC 掩码只能表达广播（broadcast，ff:ff:ff:ff:ff:ff）与组播（multicast，I/G 位=1）两类"
 }
 
 // aliasLldpEnable：protocols lldp enable <bool>。

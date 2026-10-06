@@ -34,6 +34,7 @@ type L2Network struct {
 	dhcpServer                   *DHCPServerProvider    // 域内 DHCP 服务器（决策 #359，可空——未注入即无 server 编排）
 	dns                          *DNSProxyProvider      // 数据面 DNS 代理（决策 #345，可空）
 	vxlan                        *VxlanProvider         // VXLAN 隧道（决策 #383，可空——未注入即无隧道编排）
+	storm                        *StormProvider         // 接口入向风暴抑制（决策 #385，可空）+ 读视图
 	vhost                        *VhostUserProvider     // M4-4：VNF vNIC 接入
 	memif                        *MemifProvider         // M4-7：容器 vNIC 接入
 	vhostDir                     string                 // vhost-user socket 目录（恢复收敛重放用）
@@ -157,6 +158,10 @@ func (n *L2Network) ApplyDNSProxy(ctx context.Context, want orchestrator.DNSProx
 // SetVxlan 追加 VXLAN 隧道编排（决策 #383；未注入时隧道语句在提交校验层仍可配，
 // 但数据面无下发路径——恢复收敛会如实记未收敛项，正常装配总是注入）。
 func (n *L2Network) SetVxlan(p *VxlanProvider) { n.vxlan = p }
+
+// SetStorm 追加接口入向风暴抑制编排（决策 #385；未注入时 storm-control 语句在提交校验层
+// 仍可配，但数据面无下发路径——恢复收敛会如实记未收敛项，正常装配总是注入）。
+func (n *L2Network) SetStorm(p *StormProvider) { n.storm = p }
 
 // ApplyVxlan 收敛一条 VXLAN 隧道声明（决策 #383）。prev 为提交 diff 里的旧声明（nil = 新建/
 // 恢复重放）：旧元组与本次不同时先按旧元组撤、再按新元组建 + 打平台标记 + 置 up + 入 BD。
@@ -406,10 +411,37 @@ func (n *L2Network) ApplyInterface(ctx context.Context, iface model.InterfaceCon
 			return fmt.Errorf("接口 %s 设置 VF 数量 %d: %w", iface.Name, iface.Sriov.VFCount, err)
 		}
 	}
+	var err error
 	if n.svc == nil {
-		return n.NetworkProvider.ApplyInterface(ctx, iface)
+		err = n.NetworkProvider.ApplyInterface(ctx, iface)
+	} else {
+		err = n.svc.ApplyInterface(ctx, iface)
 	}
-	return n.svc.ApplyInterface(ctx, iface)
+	if err != nil {
+		return err
+	}
+	// 入向风暴抑制（决策 #385）：接口层（MTU/状态/绑定）之后下发——policer/分类表要挂在
+	// 已 up 的接口上；随接口注册重放（恢复收敛逐接口调用本方法，VPP 重启后按声明重建）。
+	if n.storm != nil {
+		if err := n.storm.ApplyInterface(ctx, iface); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// StormDataplane 读某接口风暴抑制的数据面实况（决策 #385；读视图三面同源：
+// CLI `show interfaces <if> detail` 的 storm-control 块经它取数）。未注入 provider 时
+// ok=false（调用方如实说明未接入，不编造）。
+func (n *L2Network) StormDataplane(ctx context.Context, ifname string) (StormDataplane, bool) {
+	if n.storm == nil {
+		return StormDataplane{Reason: "风暴抑制编排未接入"}, false
+	}
+	dp, err := n.storm.Dataplane(ctx, ifname)
+	if err != nil {
+		return StormDataplane{Reason: err.Error()}, false
+	}
+	return dp, true
 }
 
 func (n *L2Network) ApplySpan(ctx context.Context, pm model.PortMirroring) error {
