@@ -112,6 +112,13 @@ var roundTripAliasCases = [][]string{
 	{"set interfaces ens192 description sd",
 		"set interfaces ens192 storm-control broadcast 8000",
 		"set interfaces ens192 storm-control multicast 20000"},
+	// 主机防火墙（决策 #388）：default_policy 平铺 + 规则数组（JSON 键 rules ⇄ 树关键字 rule，
+	// 单复数不一致，须显式发射器）；含声明序 ≠ seq 序的数组（数组声明序必须原样还原）。
+	{"set system firewall default-policy drop",
+		"set system firewall rule 100 action accept source 192.168.1.0/24 protocol tcp port 22"},
+	{"set system firewall rule 200 action drop protocol icmp",
+		"set system firewall rule 100 action accept source 2001:db8::/32 protocol udp"},
+	{"set system firewall rule 10 action accept source 10.0.0.1"}, // 裸 IP 原样落库（渲染时按 /32 归一）
 }
 
 // runDisplaySetRoundTrip 单组语句的往返：apply → toJSONTree → 反推 → 再 apply → 深比较。
@@ -256,6 +263,36 @@ func TestDisplaySetLevelPrefix(t *testing.T) {
 	}
 	for _, l := range lines {
 		if !strings.HasPrefix(l, "set interfaces ens192") {
+			t.Fatalf("层级反推的语句应带绝对路径前缀: %q", l)
+		}
+	}
+}
+
+// TestDisplaySetFirewallLevelPrefix（决策 #388）：`edit system firewall` 层级的反推
+// 带绝对路径前缀（与顶层同源、走家族发射器的同一分支）。
+func TestDisplaySetFirewallLevelPrefix(t *testing.T) {
+	var cfg model.Config
+	for _, line := range []string{
+		"set system firewall default-policy drop",
+		"set system firewall rule 100 action accept source 10.0.0.0/8",
+	} {
+		if err := applyStatement(&cfg, splitFieldsQuoted(line)[1:]); err != nil {
+			t.Fatalf("fixture 回放失败: %v", err)
+		}
+	}
+	sub, err := navigateJSON(toJSONTree(cfg), []string{"system", "firewall"})
+	if err != nil {
+		t.Fatalf("导航失败: %v", err)
+	}
+	lines, err := renderSetStatements(sub.(map[string]any), []string{"system", "firewall"})
+	if err != nil {
+		t.Fatalf("反推失败: %v", err)
+	}
+	if len(lines) == 0 {
+		t.Fatal("防火墙层级反推出 0 条语句")
+	}
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "set system firewall") {
 			t.Fatalf("层级反推的语句应带绝对路径前缀: %q", l)
 		}
 	}

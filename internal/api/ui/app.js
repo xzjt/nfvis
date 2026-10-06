@@ -493,7 +493,7 @@ function renderSystem(st, ver) {
 // 系统域一级页（#/system）：状态与版本（与总览同源）+ **已生效配置**的系统段只读回显。
 // 系统段里口令哈希这类敏感叶子由服务端脱敏后才发出来（界面拿不到原文，也不回显）。
 // 改字段仍在「配置」页的系统段表单里做（只写候选、提交后生效）——本页不提供第二个写入口。
-function renderSystemPage(st, ver, sysCfg, dnsProxy) {
+function renderSystemPage(st, ver, sysCfg, dnsProxy, fw) {
   $('sysp-note').textContent = st && st.hostname ? '（' + st.hostname + '）' : '';
   const pairs = st && st.__err ? [['读取失败', st.__err]] : systemPairs(st);
   // 决策 #345：数据面 DNS 代理（只读两行，与 `show dns proxy` / GET /dns/proxy 同源）。
@@ -510,6 +510,43 @@ function renderSystemPage(st, ver, sysCfg, dnsProxy) {
   $('sysp-cfg').textContent = sysCfg && sysCfg.__err
     ? '读取失败：' + sysCfg.__err
     : JSON.stringify(sysCfg || {}, null, 2);
+  renderFirewallCard(fw);
+}
+
+// 主机防火墙只读卡（决策 #388）：默认策略 / 规则表（含逐规则命中计数）/ 保留项 / 计数口径，
+// 与 `show system firewall` 和 `GET /system/firewall` 同源。本页不加写控件——写路径走
+// 「配置」页与命令行（非本地串口会话的防火墙变更须用 commit confirmed 提交）。
+// 读数取不到时如实显示「未收敛（原因）」或「读取失败」，不编造（计数缺席显示 -）。
+function renderFirewallCard(fw) {
+  fw = fw || {};
+  const failed = !!fw.__err;
+  $('fw-note').textContent = failed ? '（读取失败：' + fw.__err + '）' : '';
+  fill($('fw-list'), failed ? [] : [
+    ['状态', fw.enabled ? '已配置' : '未配置（管理口入向不做过滤）'],
+    ['默认策略', fw.default_policy === 'drop' ? 'drop（白名单模式）' : 'accept（缺省放行）'],
+    ['管理口', fw.mgmt_interface],
+    ['下发状态', fw.applied ? '已收敛' : ('未收敛（' + (fw.error || '原因未给出') + '）')],
+  ]);
+  const tbody = $('fw-table').querySelector('tbody');
+  tbody.textContent = '';
+  const rules = failed ? [] : (Array.isArray(fw.rules) ? fw.rules : []);
+  if (!rules.length) {
+    tbody.appendChild(el('tr', {}, [el('td', { colspan: '6', class: 'muted',
+      text: failed ? '读取失败' : (fw.enabled ? '（无规则：仅默认策略与保留项生效）' : '（未配置）') })]));
+  } else {
+    rules.forEach((r) => tbody.appendChild(el('tr', {}, [
+      el('td', { text: String(dash(r.seq)) }),
+      el('td', { text: String(dash(r.action)) }),
+      el('td', { text: String(dash(r.source)) }),
+      el('td', { text: String(dash(r.protocol)) }),
+      el('td', { text: String(dash(r.port)) }),
+      el('td', { text: r.packets !== undefined ? (r.packets + ' / ' + r.bytes) : '-' }),
+    ])));
+  }
+  const reserved = Array.isArray(fw.reserved) ? fw.reserved : [];
+  $('fw-reserved').textContent = failed ? ''
+    : ('保留项（用户规则不可覆盖）：' + (reserved.length ? reserved.join('；') : '（未提供）'));
+  $('fw-counters').textContent = failed ? '' : (fw.counters_note || '');
 }
 
 
@@ -1179,7 +1216,10 @@ export const VIEWS = {
     render(d, params) { pageWarn(d); renderIfaceDetail(d['/interfaces/{name}'], d['/interfaces'], params); },
   },
   'system': {
-    render(d) { pageWarn(d); renderSystemPage(d['/system/status'], d['/system/version'], d['/system'], d['/dns/proxy']); },
+    render(d) {
+      pageWarn(d);
+      renderSystemPage(d['/system/status'], d['/system/version'], d['/system'], d['/dns/proxy'], d['/system/firewall']);
+    },
   },
   'kernel': {
     render(d) { pageWarn(d); renderKernel(d['/system/kernel']); },

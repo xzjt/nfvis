@@ -107,6 +107,9 @@ func mapEngineError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error(), nil)
 	case errors.Is(err, config.ErrConfirmRequired):
 		writeError(w, http.StatusBadRequest, "CONFIRM_REQUIRED", err.Error(), nil)
+	case errors.Is(err, config.ErrFirewallConfirmRequired):
+		// 决策 #388：防火墙变更的自锁保护（与上一条同族、同状态码语义）。
+		writeError(w, http.StatusBadRequest, "CONFIRM_REQUIRED", err.Error(), nil)
 	default:
 		var ve *config.ValidationError
 		if errors.As(err, &ve) {

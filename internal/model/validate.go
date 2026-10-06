@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"regexp"
 	"slices"
 	"strconv"
@@ -31,6 +32,7 @@ func Validate(c Config) []ValidateError {
 	v := &validator{}
 	v.collect(c)
 	v.checkSystem(c)
+	v.checkFirewall(c)
 	v.checkHealth(c)
 	v.checkInterfaces(c)
 	v.checkBonds(c)
@@ -357,6 +359,92 @@ func (v *validator) checkSystem(c Config) {
 		}
 	}
 	v.checkSystemLogin(s)
+}
+
+// checkFirewall 校验管理面主机防火墙（决策 #388）：序号/动作/来源/协议/端口/至少一条匹配条件/
+// 重复规则/默认策略，以及「配置了防火墙但未声明管理口」这条前置。
+//
+// 为什么「未声明管理口」在提交期拒绝而不是下发期报错：防火墙的作用面就是管理口入向——
+// 管理口未声明时规则没有锚点，静默接受只会留下「配置说在过滤、实际无从生效」的假保护。
+func (v *validator) checkFirewall(c Config) {
+	fw := c.FirewallOf()
+	if fw == nil {
+		return
+	}
+	switch fw.DefaultPolicy {
+	case "", "accept", "drop":
+	default:
+		v.errf("system.firewall.default_policy", "默认策略必须为 accept|drop（缺省 accept）")
+	}
+	dupCheck(v, fw.Rules, "system.firewall.rules", func(r FirewallRule) string { return strconv.Itoa(r.Seq) }, "规则")
+	seen := map[string]int{}
+	for _, r := range fw.Rules {
+		p := fmt.Sprintf("system.firewall.rules[%d]", r.Seq)
+		if r.Seq < 1 || r.Seq > 9999 {
+			v.errf(p, "规则序号 %d 超出范围 1-9999", r.Seq)
+		}
+		switch r.Action {
+		case "accept", "drop":
+		default:
+			v.errf(p+".action", "action 必须为 accept 或 drop")
+		}
+		if r.Source != "" && !firewallSourceOK(r.Source) {
+			v.errf(p+".source", "来源 %q 必须为 IPv4/IPv6 前缀（也接受单个 IP，按 /32、/128 处理）", r.Source)
+		}
+		proto := r.Protocol
+		switch proto {
+		case "", "tcp", "udp", "icmp", "any":
+		default:
+			v.errf(p+".protocol", "protocol 必须为 tcp|udp|icmp|any")
+		}
+		if r.Port != 0 {
+			if proto != "tcp" && proto != "udp" {
+				v.errf(p+".port", "port 仅 tcp/udp 规则可配（当前 protocol=%s）", orUnset(proto))
+			}
+			if r.Port < 1 || r.Port > 65535 {
+				v.errf(p+".port", "端口 %d 超出 1-65535", r.Port)
+			}
+		}
+		// 至少一条匹配条件：防手滑写出「裸 action」规则（那种规则会匹配全部管理口入向流量）。
+		// protocol 的 ""、any 都表示「任意协议」，不算匹配条件。
+		if r.Source == "" && (proto == "" || proto == "any") && r.Port == 0 {
+			v.errf(p, "规则至少给一条匹配条件（source/protocol/port 之一）；只写 action 的规则会匹配全部管理入向流量")
+		}
+		// 完全重复规则（匹配条件与动作全同，含 any⇄未设的归一）拒绝——seq 不同但语义全同的
+		// 重复项只会掩盖「我以为改了」的编辑失误。
+		normProto := proto
+		if normProto == "any" {
+			normProto = ""
+		}
+		key := fmt.Sprintf("%s\x00%s\x00%s\x00%d", r.Action, r.Source, normProto, r.Port)
+		if prev, dup := seen[key]; dup {
+			v.errf(p, "与规则 %d 完全重复（匹配条件与动作相同），请删除其一或改为不同的匹配条件", prev)
+		} else {
+			seen[key] = r.Seq
+		}
+	}
+	if fw.FirewallEnabled() && c.MgmtInterfaceOf() == "" {
+		v.errf("system.firewall", "配置主机防火墙前请先声明管理口：set system management interface <ifname>（防火墙作用于管理口入向，未声明管理口时规则没有作用对象）")
+	}
+}
+
+// firewallSourceOK 来源取值：v4/v6 前缀（本渲染按前缀下发）或**单个 IP**（渲染时按 /32、/128 归一）。
+// 与 ACL 的「必须 ip-prefix」相比有意放宽一档：写单个主机地址是最常见的意图，nft 的前缀语义对
+// 裸地址与 /32 完全一致，拒绝它只会让操作者多写几位而没有任何安全增益。
+func firewallSourceOK(s string) bool {
+	if _, err := netip.ParsePrefix(s); err == nil {
+		return true
+	}
+	_, err := netip.ParseAddr(s)
+	return err == nil
+}
+
+// orUnset 空值的人读占位（错误文案用；避免出现 "protocol=" 这种半截话）。
+func orUnset(s string) string {
+	if s == "" {
+		return "未设置"
+	}
+	return s
 }
 
 // ClassSuperUser 预置最高权限 class（与 aaa.ClassSuperUser 同值；model 是最内层，

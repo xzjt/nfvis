@@ -283,6 +283,7 @@ var secretEgressRoutes = map[string]string{
 	"/system/core-dumps":                "core dump 清单（文件名/大小/时间），不含转储正文",
 	"/system/hardware":                  "硬件健康运行态",
 	"/system/health/thresholds":         "阈值配置段视图",
+	"/system/firewall":                  "主机防火墙读视图（#388）：默认策略/规则匹配条件/保留项说明/逐规则命中计数，无秘密字段",
 	"/system/kernel":                    "内核基线配置段视图",
 	"/system/hugepages":                 "大页池读视图（#329）：声明/内核实际/在用页数，无秘密字段",
 	"/system/login-users":               "用户列表：只投影 name/class（口令哈希在 model 层就被移除）",

@@ -217,6 +217,23 @@ _before_has_image() {
   [ -r "$SUITE_BEFORE_IMG" ] || { echo 2; return; }
   grep -qE "^$1([[:space:]]|$)" "$SUITE_BEFORE_IMG" && echo 0 || echo 1
 }
+# _before_has_fw_rule：开始前快照里是否已有套件的防火墙特征源（0=有 1=无 2=快照缺失）。
+# 判据用「特征源 192.0.2.0/24」（阶段 2 写入的套件规则专用前缀）而不是整个 firewall 段——
+# 用户自己的防火墙策略里没有它，据此只清本轮新增的规则，绝不误删用户策略。
+_before_has_fw_rule() {
+  [ -r "$SUITE_BEFORE_CFG" ] || { echo 2; return; }
+  grep -q '192.0.2.0/24' "$SUITE_BEFORE_CFG" && echo 0 || echo 1
+}
+
+# _fw_cleanup：清除套件的防火墙规则（异常中断后的兜底；正常流程在阶段 2 内已清）。
+# 删除规则属「防火墙变更」⇒ 非 console 会话须 commit confirmed（两步：confirmed + 确认）。
+_fw_cleanup() {
+  _clean_run "清除套件的主机防火墙规则（rule 100）" "configure
+delete system firewall rule 100
+commit confirmed 5"
+  _clean_run "确认防火墙清场提交" "configure
+commit"
+}
 
 # _iface_desc <ifname>：从 committed 配置渲染里取该接口的 description（无则空）。
 _iface_desc() {
@@ -292,6 +309,16 @@ delete interfaces $ifd description
 commit"
     fi
   done
+
+  # 主机防火墙（决策 #388）：套件规则带特征源 192.0.2.0/24——只在**本轮新增**时清
+  # （开始前快照里已有该源 = 非本轮创建，一律不动，不误删用户策略）。
+  if printf '%s\n' "$SUITE_CFG" | grep -q '192.0.2.0/24'; then
+    case "$(_before_has_fw_rule)" in
+      1) _fw_cleanup;;
+      2) printf '  ⊘ 快照缺失，跳过主机防火墙清场（不误删用户策略）\n';;
+      *) printf '  ⊘ 防火墙规则 192.0.2.0/24 在套件开始前已存在，保留（非本轮创建）\n';;
+    esac
+  fi
 
   # 镜像：固定名恒删（幂等）；alpine:3.20 仅当本轮导入（开始前不存在）才删。
   local img all_imgs

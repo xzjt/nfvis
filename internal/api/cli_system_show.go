@@ -74,8 +74,11 @@ func (x *cliExecutor) execShowSystemDiag(t []string) string {
 		return x.renderKernelBaseline()
 	case "hardware":
 		return x.renderHardware()
+	case "firewall":
+		// 决策 #388：主机防火墙读视图（与 GET /system/firewall 同源）。
+		return x.renderSystemFirewall()
 	}
-	return fmt.Sprintf("%% 无效命令: show system %s（可用：uptime|cpu|memory|storage|hugepages|metrics history|kernel|hardware|core-dumps|tech-support）\n", strings.Join(t, " "))
+	return fmt.Sprintf("%% 无效命令: show system %s（可用：uptime|cpu|memory|storage|hugepages|metrics history|kernel|hardware|firewall|core-dumps|tech-support）\n", strings.Join(t, " "))
 }
 
 func (x *cliExecutor) renderDiag(t []string) string {

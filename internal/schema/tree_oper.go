@@ -61,6 +61,9 @@ func OperRoot() *Node {
 				),
 				K("kernel", "内核启动基线（cmdline / 运行实际 / 配置期望 三方对照）"),
 				K("hardware", "硬件健康：温度/风扇/电源/SMART"),
+				// 决策 #388：管理面主机防火墙读视图（配置 × 数据面实况 × 逐规则计数，
+				// 与 GET /system/firewall 同源）。写路径在配置模式（candidate→commit）。
+				K("firewall", "主机防火墙（管理面入向；默认策略/规则/逐规则计数/下发状态）"),
 				K("core-dumps", "崩溃转储清单（VPP/QEMU/nfvisd）"),
 				K("tech-support", "诊断归档清单"),
 				// 决策 #301：活动会话 / API Token 清单——super-user 见全部、其他 class 仅自己的

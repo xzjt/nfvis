@@ -33,7 +33,7 @@
     { "path": "#/network/lldp", "title": "LLDP", "view": "lldp", "breadcrumb": ["网络", "LLDP"],
       "endpoints": ["/protocols/lldp", "/protocols/lldp/neighbors"], "poll": 5000 },
     { "path": "#/system", "title": "系统", "view": "system", "breadcrumb": ["系统"],
-      "endpoints": ["/system/status", "/system/version", "/system", "/dns/proxy"], "poll": 5000 },
+      "endpoints": ["/system/status", "/system/version", "/system", "/dns/proxy", "/system/firewall"], "poll": 5000 },
     { "path": "#/system/hardware", "title": "硬件健康", "view": "hardware", "breadcrumb": ["系统", "硬件健康"],
       "endpoints": ["/system/hardware", "/system/health/thresholds"], "poll": 30000 },
     { "path": "#/system/pools", "title": "资源池", "view": "pools", "breadcrumb": ["系统", "资源池"],

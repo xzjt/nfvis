@@ -25,6 +25,7 @@ package api
 //     qos_policies，通用逆走在根层查不到 "qos" 键即跳过，同上无注册键可达。
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -233,10 +234,58 @@ func emitSystemFamily(w *stmtWriter, node *schema.Node, val any, prefix, keyPath
 			w.add(toks(prefix, "retention-days", formatScalar(v)))
 		}
 		return nil
+	case "system firewall":
+		// 管理面主机防火墙（决策 #388）：default_policy 与规则的字段名虽与树关键字同形，
+		// 但规则数组的 JSON 键是 `rules`、树关键字是 `rule`（单复数不一致，机械逆走查不到）；
+		// 显式发射。规则按**数组声明序**发射（不按 seq 排序）——回放按语句序重建数组，
+		// 声明序才能还原原数组（seq 升序只是数据面生效序，见 RenderFirewallScript 的排序）。
+		m, ok := val.(map[string]any)
+		if !ok {
+			return nil
+		}
+		if v, ok := m["default_policy"]; ok && v != "" {
+			w.add(toks(prefix, "default-policy", formatScalar(v)))
+		}
+		arr, _ := m["rules"].([]any)
+		for _, e := range arr {
+			em, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			if err := emitFirewallRuleStmt(w, em, prefix); err != nil {
+				return err
+			}
+		}
+		return nil
 	default:
 		// system kernel（全机械）、system login password-policy（值叶子机械）等
 		return emitMechanicalInner(w, node, val, prefix, keyPath)
 	}
+}
+
+// emitFirewallRuleStmt 发射单条主机防火墙规则（决策 #388）：字段序固定
+// （action → source → protocol → port），回放由别名解析、与数组声明序一一对应。
+func emitFirewallRuleStmt(w *stmtWriter, em map[string]any, prefix []string) error {
+	seq, ok := em["seq"]
+	if !ok {
+		return nil
+	}
+	action, ok := em["action"]
+	if !ok || action == "" {
+		return fmt.Errorf("display set 内部错误：防火墙规则 seq=%v 缺少 action（提交校验本应拦下）", seq)
+	}
+	t := toks(prefix, "rule", formatScalar(seq), "action", formatScalar(action))
+	if v, ok := em["source"]; ok && v != "" {
+		t = append(t, "source", formatScalar(v))
+	}
+	if v, ok := em["protocol"]; ok && v != "" {
+		t = append(t, "protocol", formatScalar(v))
+	}
+	if v, ok := em["port"]; ok {
+		t = append(t, "port", formatScalar(v))
+	}
+	w.add(t)
+	return nil
 }
 
 // emitSystemLogin users/classes 数组（单复数不一致，机械不可达）+ password_policy 机械委托。
