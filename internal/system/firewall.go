@@ -437,6 +437,9 @@ type nftMatchJSON struct {
 type nftMatchLeft struct {
 	Meta    *nftMetaKey    `json:"meta"`
 	Payload *nftPayloadKey `json:"payload"`
+	// 真实形状（真机 dev115 实证）：`ct state` 的 key 在 match.left.ct，右值是**普通 JSON 数组**
+	// `["established","related"]`（不是 {"set":…}）。
+	CT *nftCTKey `json:"ct"`
 }
 
 type nftMetaKey struct {
@@ -448,19 +451,59 @@ type nftPayloadKey struct {
 	Field    string `json:"field"`
 }
 
+type nftCTKey struct {
+	Key string `json:"key"`
+}
+
+// nftCTJSON 顶层 `ct` 表达式（部分 nft 版本/形态：值在 match 字段里）；保留兼容。
 type nftCTJSON struct {
 	Key   string `json:"key"`
 	Match string `json:"match"`
 }
 
-type nftSetJSON struct {
-	Set []string `json:"set"`
+// nftRightValues 解析 nft 匹配右值的取值（决策 #395 修正，真机 dev115 实证）——`right` 有四种
+// 已知形态，**顺序无关的集合规范化**由调用方负责：
+//   - 普通字符串（iifname 的 "ens160"）；
+//   - 普通 JSON 数组（ct state 的 ["established","related"]）；
+//   - `{"set":[…]}`（icmp/icmpv6 type 集合）；
+//   - `{"match":"a,b"}`（部分版本的 ct state）。
+//
+// 返回 nil 表示形状不认识——不参与该项比对（其余判据仍在，不会因此放行）。
+func nftRightValues(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var arr []string
+	if json.Unmarshal(raw, &arr) == nil {
+		return arr
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return []string{s}
+	}
+	var set struct {
+		Set []string `json:"set"`
+	}
+	if json.Unmarshal(raw, &set) == nil && set.Set != nil {
+		return set.Set
+	}
+	var m struct {
+		Match string `json:"match"`
+	}
+	if json.Unmarshal(raw, &m) == nil && m.Match != "" {
+		return strings.FieldsFunc(m.Match, func(r rune) bool { return r == ',' || r == ' ' })
+	}
+	return nil
 }
 
 // firewallRuleFactsOf 抽取一条规则的内容事实（决策 #395；见 firewallRuleFacts 说明）。
+//
+// 兼容真实 `nft -j` 形状（真机 dev115）：`ct state` 是 `match.left.ct` + 数组右值，
+// icmp/icmpv6 type 是 `match.left.payload` + `{"set":…}`，iifname 是 `match.left.meta` + 字符串。
 func firewallRuleFactsOf(exprs []map[string]json.RawMessage) firewallRuleFacts {
 	var f firewallRuleFacts
 	for _, e := range exprs {
+		// 顶层 ct 表达式（兼容形态）：值在 match 字段。
 		if raw, ok := e["ct"]; ok {
 			var ct nftCTJSON
 			if json.Unmarshal(raw, &ct) == nil && ct.Key == "state" {
@@ -477,21 +520,20 @@ func firewallRuleFactsOf(exprs []map[string]json.RawMessage) firewallRuleFacts {
 			continue
 		}
 		if m.Left.Meta != nil && m.Left.Meta.Key == "iifname" {
-			var v string
-			if json.Unmarshal(m.Right, &v) == nil {
-				f.HasIifname, f.Iifname = true, v
+			if vals := nftRightValues(m.Right); len(vals) > 0 {
+				f.HasIifname, f.Iifname = true, vals[0]
 			}
 		}
+		if m.Left.CT != nil && m.Left.CT.Key == "state" {
+			f.CTState = strings.Join(nftRightValues(m.Right), ",")
+		}
 		if m.Left.Payload != nil && m.Left.Payload.Field == "type" {
-			var s nftSetJSON
-			if json.Unmarshal(m.Right, &s) == nil {
-				joined := strings.Join(s.Set, ",")
-				switch m.Left.Payload.Protocol {
-				case "icmp":
-					f.ICMPv4Type = joined
-				case "icmpv6":
-					f.ICMPv6Type = joined
-				}
+			joined := strings.Join(nftRightValues(m.Right), ",")
+			switch m.Left.Payload.Protocol {
+			case "icmp":
+				f.ICMPv4Type = joined
+			case "icmpv6":
+				f.ICMPv6Type = joined
 			}
 		}
 	}
@@ -637,7 +679,7 @@ func compareFirewallTable(cfg model.Config, tbl *firewallTable) error {
 	if facts.Iifname != wantMgmt {
 		return fmt.Errorf("作用面与配置不符：数据面按管理口 %q 过滤、配置为 %q（管理口变更可能未下发成功）", facts.Iifname, wantMgmt)
 	}
-	if facts.CTState != firewallReservedCTState {
+	if got, want := normalizeFirewallTypeSet(facts.CTState), normalizeFirewallTypeSet(firewallReservedCTState); got != want {
 		return fmt.Errorf("保留项与配置不符：ct state 数据面 %q、期望 %q", facts.CTState, firewallReservedCTState)
 	}
 	if got, want := normalizeFirewallTypeSet(facts.ICMPv4Type), normalizeFirewallTypeSet(strings.Join(firewallReservedICMPv4, ",")); got != want {

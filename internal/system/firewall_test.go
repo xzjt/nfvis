@@ -237,14 +237,17 @@ func TestApplyEnabledRejectsMissingMgmtIface(t *testing.T) {
 
 // realShapeJSON 真机形状样例（决策 #388 契约里给出的形态：reserved 无 comment、
 // 用户规则带 comment 与 counter）。保留项字面须与渲染脚本一致——决策 #395 起回读按内容比对。
+//
+// ct state 采用**真机 dev115 实证**的真实形状：`match.left.ct` + 数组右值
+// `["established","related"]`（不是 {"set":…}）——旧解析只认后者会假报未收敛。
 const realShapeJSON = `{"nftables":[
 {"metainfo":{"version":"1.1.6","release_name":"x"}},
 {"table":{"family":"inet","name":"nfvis-firewall"}},
 {"chain":{"family":"inet","table":"nfvis-firewall","name":"input","type":"filter","hook":"input","prio":0,"policy":"drop"}},
-{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"neq","left":{"meta":{"key":"iifname"}},"right":"ens160"}},{"accept":null}]}},
-{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"ct":{"key":"state","match":"established,related"}},{"accept":null}]}},
-{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"in","left":{"payload":{"protocol":"icmp","field":"type"}},"right":{"set":["destination-unreachable","time-exceeded"]}}},{"accept":null}]}},
-{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"in","left":{"payload":{"protocol":"icmpv6","field":"type"}},"right":{"set":["destination-unreachable","packet-too-big","time-exceeded","parameter-problem","nd-router-solicit","nd-router-advert","nd-neighbor-solicit","nd-neighbor-advert"]}}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"!=","left":{"meta":{"key":"iifname"}},"right":"ens160"}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":["established","related"]}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"icmp","field":"type"}},"right":{"set":["destination-unreachable","time-exceeded"]}}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"icmpv6","field":"type"}},"right":{"set":["destination-unreachable","packet-too-big","time-exceeded","parameter-problem","nd-router-solicit","nd-router-advert","nd-neighbor-solicit","nd-neighbor-advert"]}}},{"accept":null}]}},
 {"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","comment":"nfvis-rule-100","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":22}},{"counter":{"packets":3,"bytes":180}},{"accept":null}]}}
 ]}`
 
@@ -259,6 +262,36 @@ func TestReadAppliedWithCounters(t *testing.T) {
 	c, ok := st.Counters[100]
 	if !ok || c.Packets != 3 || c.Bytes != 180 {
 		t.Fatalf("逐规则计数应解析: %+v", st.Counters)
+	}
+}
+
+// realMachineShapeJSON 真机 dev115 的 `nft -j` 形状（用户规则 `source 192.0.2.0/24`）——
+// ct state 右值是**数组**、icmp/icmpv6 是 `{"set":…}`、iifname 是字符串、saddr 是 `{"prefix":…}`。
+// 这是「真机形状」守护：旧解析只认 ct state 的 {"set":…}/{"match":…}，数组形态抽成空串 ⇒ 假未收敛。
+const realMachineShapeJSON = `{"nftables":[
+{"metainfo":{"version":"1.1.6","release_name":"x"}},
+{"table":{"family":"inet","name":"nfvis-firewall"}},
+{"chain":{"family":"inet","table":"nfvis-firewall","name":"input","type":"filter","hook":"input","prio":0,"policy":"accept"}},
+{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"!=","left":{"meta":{"key":"iifname"}},"right":"ens160"}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":["established","related"]}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"icmp","field":"type"}},"right":{"set":["destination-unreachable","time-exceeded"]}}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"icmpv6","field":"type"}},"right":{"set":["destination-unreachable","packet-too-big","time-exceeded","parameter-problem","nd-router-solicit","nd-router-advert","nd-neighbor-solicit","nd-neighbor-advert"]}}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","comment":"nfvis-rule-1","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},"right":{"prefix":{"addr":"192.0.2.0","len":24}}}},{"counter":{"packets":0,"bytes":0}},{"accept":null}]}}
+]}`
+
+// TestReadAppliedRealNftShape 决策 #395 修正回归：**真机形状**下正常配置不得被误判未收敛
+// （旧解析把 ct state 数组右值抽成空串 ⇒ 「保留项与配置不符：ct state 数据面 ""」假未收敛）。
+func TestReadAppliedRealNftShape(t *testing.T) {
+	f := &fakeNft{readOut: realMachineShapeJSON}
+	a := newFwApplier(t, f)
+	cfg := fwCfg([]model.FirewallRule{{Seq: 1, Action: "accept", Source: "192.0.2.0/24"}}, "accept")
+	st := a.Read(context.Background(), cfg)
+	if !st.Applied || st.Error != "" {
+		t.Fatalf("真机形状的正常配置应 applied=true，实得 %+v", st)
+	}
+	c, ok := st.Counters[1]
+	if !ok || c.Packets != 0 || c.Bytes != 0 {
+		t.Fatalf("逐规则计数应可见（真机 packets 0 / bytes 0）: %+v", st.Counters)
 	}
 }
 
@@ -293,7 +326,7 @@ func TestReadDetectsManualEdits(t *testing.T) {
 		part string
 	}{
 		{"外来规则", strings.Replace(realShapeJSON, `"comment":"nfvis-rule-100"`, `"comment":"manual-rule"`, 1), "手工修改"},
-		{"保留项条数不符", strings.Replace(realShapeJSON, `{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"ct":{"key":"state","match":"established,related"}},{"accept":null}]}},`, "", 1), "保留项"},
+		{"保留项条数不符", strings.Replace(realShapeJSON, `{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":["established","related"]}},{"accept":null}]}},`, "", 1), "保留项"},
 		{"规则集合不一致", strings.Replace(realShapeJSON, `"comment":"nfvis-rule-100"`, `"comment":"nfvis-rule-999"`, 1), "规则集合与配置不一致"},
 		{"默认策略不一致", strings.Replace(realShapeJSON, `"policy":"drop"`, `"policy":"accept"`, 1), "默认策略不一致"},
 	}
@@ -342,7 +375,7 @@ func TestReadDetectsReservedContentMismatch(t *testing.T) {
 	cfg := fwCfg([]model.FirewallRule{{Seq: 100, Action: "accept", Source: "192.168.1.0/24", Protocol: "tcp", Port: 22}}, "drop")
 	// 把 ct 规则换成裸 accept（仍是无 comment 的保留项，条数不变）。
 	edited := strings.Replace(realShapeJSON,
-		`{"ct":{"key":"state","match":"established,related"}},{"accept":null}`, `{"accept":null}`, 1)
+		`{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":["established","related"]}},{"accept":null}`, `{"accept":null}`, 1)
 	f := &fakeNft{readOut: edited}
 	a := newFwApplier(t, f)
 	st := a.Read(context.Background(), cfg)
