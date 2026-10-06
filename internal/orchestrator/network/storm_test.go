@@ -1,9 +1,15 @@
 package network
 
-// 决策 #385：接口入向风暴抑制的单测（向量构造纯函数 + 建/改/删/重放的调用序 + 读视图）。
+// 决策 #385：接口入向风暴抑制的单测（向量构造纯函数 + 建/改/删/重放的调用序 + 读视图 +
+// 真机修复轮的两个场景：重建不重复建表、删除按实况解绑并清干净）。
 //
 // 假客户端是一台**小型状态机**（记表/会话/policer/绑定），因此除调用序外还能断言
-// 「撤旧之后不留残渣」与「登记丢失（nfvisd 重启）后按数据面实况重建」。
+// 「撤旧之后不留残渣」「登记丢失后按数据面实况重建」与「孤儿表清扫」。
+//
+// 与真机的口径对齐（真机实测，2026-10-06）：
+//   - 绑定只能按 `classify_table_by_interface` 读（`policer_classify_dump` 返回不了绑定）；
+//   - 接口 L2 槽挂表**不容错**（槽已有表时不覆盖——真机由此出现「登记说新、实况是旧」）；
+//   - 解绑未挂在接口上的表 ⇒ `No such table (-65)`（客户端归一为 ErrStormAbsent）。
 
 import (
 	"bytes"
@@ -18,16 +24,16 @@ import (
 )
 
 type fakeStormClient struct {
-	calls        []string
-	ifidx        map[string]uint32
-	tables       map[uint32]StormTableInfo
-	sessions     map[uint32]int
-	pols         map[string]uint32
-	attached     map[uint32]uint32
-	nextTable    uint32
-	nextPolicer  uint32
-	failOn       string // 命中该调用前缀即报错（失败注入）
-	setIfaceFail bool
+	calls       []string
+	ifidx       map[string]uint32
+	tables      map[uint32]StormTableInfo
+	sessions    map[uint32]int
+	pols        map[string]uint32
+	attached    map[uint32]uint32
+	nextTable   uint32
+	nextPolicer uint32
+	failOn      string // 命中该调用前缀即报错（失败注入）
+	failListing string // 命中该「实况查询」调用即报错（孤儿清扫的安全边界用例）
 }
 
 func newFakeStormClient() *fakeStormClient {
@@ -53,9 +59,6 @@ func (f *fakeStormClient) Close() {}
 
 func (f *fakeStormClient) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	f.calls = append(f.calls, "sw-index:"+ifname)
-	if f.setIfaceFail {
-		return 0, false, fmt.Errorf("索引查询失败")
-	}
 	idx, ok := f.ifidx[ifname]
 	return idx, ok, nil
 }
@@ -69,11 +72,14 @@ func (f *fakeStormClient) PolicerAddDel(name string, cirKbps uint32, cb uint64, 
 		return 0, err
 	}
 	if !add {
-		delete(f.pols, name) // 不存在即已达成（与适配器同口径）
+		if _, ok := f.pols[name]; !ok {
+			return 0, ErrStormAbsent // 本就不在（客户端归一给 Provider 决定）
+		}
+		delete(f.pols, name)
 		return 0, nil
 	}
 	if _, ok := f.pols[name]; ok {
-		return 0, fmt.Errorf("VALUE_EXIST: %s", name) // 适配器不吞：新增时不该存在
+		return 0, fmt.Errorf("VALUE_EXIST: %s", name) // 新增方向不容错
 	}
 	idx := f.nextPolicer
 	f.nextPolicer++
@@ -97,7 +103,7 @@ func (f *fakeStormClient) ClassifyDelTable(tableIndex uint32, delChain bool) err
 	}
 	ti, ok := f.tables[tableIndex]
 	if !ok {
-		return nil
+		return ErrStormAbsent
 	}
 	delete(f.tables, tableIndex)
 	delete(f.sessions, tableIndex)
@@ -123,6 +129,9 @@ func (f *fakeStormClient) ClassifyDelSession(tableIndex uint32, match []byte) er
 	if err := f.log("session-del:%d:match=%x", tableIndex, match); err != nil {
 		return err
 	}
+	if _, ok := f.tables[tableIndex]; !ok {
+		return ErrStormAbsent
+	}
 	if f.sessions[tableIndex] > 0 {
 		f.sessions[tableIndex]--
 	}
@@ -138,10 +147,18 @@ func (f *fakeStormClient) PolicerClassifySetInterface(swIfIndex, l2TableIndex ui
 		return err
 	}
 	if add {
+		// 挂上方向不容错：槽已被别的表占用 ⇒ 报错（真机实测：VPP 不给覆盖；静默吞掉会留下
+		// 「登记说新、实况是旧」的错位）
+		if cur, ok := f.attached[swIfIndex]; ok && cur != l2TableIndex {
+			return fmt.Errorf("VALUE_EXIST: 接口 %d 的 L2 槽已挂表 %d", swIfIndex, cur)
+		}
 		f.attached[swIfIndex] = l2TableIndex
-	} else {
-		delete(f.attached, swIfIndex)
+		return nil
 	}
+	if cur, ok := f.attached[swIfIndex]; !ok || cur != l2TableIndex {
+		return ErrStormAbsent // 真机实测：解绑未挂在接口上的表得到 No such table (-65)
+	}
+	delete(f.attached, swIfIndex)
 	return nil
 }
 
@@ -161,6 +178,9 @@ func (f *fakeStormClient) PolicerDump() ([]StormPolicer, error) {
 
 func (f *fakeStormClient) AttachedL2Table(swIfIndex uint32) (uint32, bool, error) {
 	f.calls = append(f.calls, "attached:"+fmt.Sprint(swIfIndex))
+	if f.failListing != "" && strings.HasPrefix(f.calls[len(f.calls)-1], f.failListing) {
+		return 0, false, fmt.Errorf("注入失败: %s", f.calls[len(f.calls)-1])
+	}
 	t, ok := f.attached[swIfIndex]
 	return t, ok, nil
 }
@@ -175,11 +195,59 @@ func (f *fakeStormClient) ClassifyTableInfo(tableIndex uint32) (StormTableInfo, 
 	return ti, true, nil
 }
 
+func (f *fakeStormClient) ClassifyTableIDs() ([]uint32, error) {
+	f.calls = append(f.calls, "table-ids")
+	if f.listingFails() {
+		return nil, fmt.Errorf("注入失败: table-ids")
+	}
+	ids := make([]uint32, 0, len(f.tables))
+	for id := range f.tables {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids, nil
+}
+
+func (f *fakeStormClient) AllInterfaceIndexes() ([]uint32, error) {
+	f.calls = append(f.calls, "iface-indexes")
+	if f.listingFails() {
+		return nil, fmt.Errorf("注入失败: iface-indexes")
+	}
+	seen := map[uint32]bool{}
+	out := make([]uint32, 0, len(f.ifidx))
+	for _, i := range f.ifidx {
+		if !seen[i] {
+			seen[i] = true
+			out = append(out, i)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+// listingFails 最后一次调用是否命中失败注入（孤儿清扫的安全边界用例用）。
+func (f *fakeStormClient) listingFails() bool {
+	if f.failListing == "" || len(f.calls) == 0 {
+		return false
+	}
+	return strings.HasPrefix(f.calls[len(f.calls)-1], f.failListing)
+}
+
 func unsetU32(v uint32) string {
 	if v == ^uint32(0) {
 		return "unset"
 	}
 	return fmt.Sprint(v)
+}
+
+// seedStormTable 直接往「数据面」塞一张本产品形状的分类表（模拟历史缺陷/上次进程留下的现场；
+// 修好之后 Provider 自己不会再产生这种状态）。
+func (f *fakeStormClient) seedStormTable(kind string, next uint32) uint32 {
+	idx := f.nextTable
+	f.nextTable++
+	f.tables[idx] = StormTableInfo{Index: idx, Mask: fmt.Sprintf("%x", stormMask(kind)), NextTableIndex: next}
+	f.sessions[idx] = 1
+	return idx
 }
 
 // snapshot 数据面当前状态（断言「不留残渣」用）。
@@ -202,6 +270,10 @@ func (f *fakeStormClient) snapshot() string {
 	return b.String()
 }
 
+func (f *fakeStormClient) clean() bool {
+	return len(f.tables) == 0 && len(f.pols) == 0 && len(f.attached) == 0
+}
+
 func sortedKeys(m map[string]uint32) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -214,7 +286,7 @@ func sortedKeys(m map[string]uint32) []string {
 // ---------- 向量构造（纯函数） ----------
 
 // TestStormVectorsMaskAndMatch：两类掩码/匹配向量的形状是本实现的**契约形状**
-//（真机按 show classify tables 核对）。
+//（真机已按 show classify tables 核对：ff×6 与 01 两种掩码）。
 func TestStormVectorsMaskAndMatch(t *testing.T) {
 	bMask := stormMask(StormKindBroadcast)
 	bMatch := stormMatch(StormKindBroadcast)
@@ -237,12 +309,18 @@ func TestStormVectorsMaskAndMatch(t *testing.T) {
 	}
 	for i := 1; i < 16; i++ {
 		if mMask[i] != 0 || mMatch[i] != 0 {
-			t.Fatalf("组播掩码/匹配的其余字节应为 0: mask=%x match=%x", mMask, mMatch)
+			t.Fatalf("组播掩码/匹配的第 %d 字节应为 0: mask=%x match=%x", i, mMask, mMatch)
 		}
 	}
 	// 两类掩码必须不同（一张表只有一个掩码，故必须两张表——文件头说明 2）
 	if bytes.Equal(bMask, mMask) {
 		t.Fatal("广播与组播掩码必须不同")
+	}
+	if !stormMaskKnown(fmt.Sprintf("%x", bMask)) || !stormMaskKnown(fmt.Sprintf("%x", mMask)) {
+		t.Fatal("两类掩码都应被 stormMaskKnown 认作本产品形状")
+	}
+	if stormMaskKnown("deadbeef") {
+		t.Fatal("外来掩码不得被认作本产品形状")
 	}
 }
 
@@ -280,9 +358,10 @@ func TestStormApplyBroadcastOnly(t *testing.T) {
 	}
 	want := []string{
 		"sw-index:ens192",
-		// 登记为空 ⇒ 按数据面实况先撤旧（干净现场：查了但什么都没删）
+		// 撤旧：先查接口 L2 槽实况（干净现场：没挂）、再按名看 policer、再扫孤儿表（无表）
 		"attached:7",
 		"policer-dump",
+		"table-ids",
 		// 建新
 		"policer-add:nfvis-storm-ens192-broadcast:8000:cb=8000000",
 		"table-add:mask=ffffffffffff00000000000000000000:next=unset",
@@ -310,6 +389,7 @@ func TestStormApplyBothKindsChain(t *testing.T) {
 		"sw-index:ens192",
 		"attached:7",
 		"policer-dump",
+		"table-ids",
 		// 组播表先建（表 0），广播表引用它（表 1，next=0）
 		"policer-add:nfvis-storm-ens192-multicast:20000:cb=20000000",
 		"table-add:mask=01000000000000000000000000000000:next=unset",
@@ -327,7 +407,7 @@ func TestStormApplyBothKindsChain(t *testing.T) {
 	}
 }
 
-// TestStormChangeReplacesOldFirst：改＝先撤旧（detach → 删 session/表/policer）后建新。
+// TestStormChangeReplacesOldFirst：改＝先撤旧（按实况解绑 → 删表（含链）→ 删 policer）后建新。
 func TestStormChangeReplacesOldFirst(t *testing.T) {
 	c := newFakeStormClient()
 	p := NewStormProvider(c)
@@ -341,11 +421,19 @@ func TestStormChangeReplacesOldFirst(t *testing.T) {
 	got := strings.Join(c.calls, "\n")
 	want := []string{
 		"sw-index:ens192",
-		// 撤旧（登记路径：不查数据面，按登记精确删）
+		// ① 实况：接口 L2 槽挂着表 0（掩码形状核对通过）⇒ 按实况解绑 + 带链删表
+		"attached:7",
+		"table-info:0",
 		"detach:if=7:table=0",
+		"table-del:0:chain=true",
+		// ② 登记里的表（与实况同一张，删除幂等——已不在 ⇒ 按已达成容忍）
 		"session-del:0:match=ffffffffffff00000000000000000000",
 		"table-del:0:chain=false",
+		// ③ 按名清 policer
+		"policer-dump",
 		"policer-del:nfvis-storm-ens192-broadcast:0:cb=0",
+		// ④ 孤儿清扫（无孤儿）
+		"table-ids",
 		// 建新
 		"policer-add:nfvis-storm-ens192-broadcast:9000:cb=9000000",
 		"table-add:mask=ffffffffffff00000000000000000000:next=unset",
@@ -355,12 +443,13 @@ func TestStormChangeReplacesOldFirst(t *testing.T) {
 	if got != strings.Join(want, "\n") {
 		t.Fatalf("改值的调用序不符（应先撤旧后建新）：\n got:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
 	}
-	if len(c.tables) != 1 || len(c.pols) != 1 {
-		t.Fatalf("改值后不得有残渣: %s", c.snapshot())
+	// 旧对象清干净、只剩新建的一对（表 1 + policer 1 + 绑定 1）
+	if len(c.tables) != 1 || len(c.pols) != 1 || c.sessions[1] != 1 || c.attached[7] != 1 {
+		t.Fatalf("改值后应只剩新建的一对（无残渣）: %s", c.snapshot())
 	}
 }
 
-// TestStormDeleteAll：声明清空＝detach → 逐类删 session/表/policer（顺序固定：广播先）。
+// TestStormDeleteAll：声明清空＝按实况解绑 → 逐类删（幂等）→ 清 policer → 扫孤儿。
 func TestStormDeleteAll(t *testing.T) {
 	c := newFakeStormClient()
 	p := NewStormProvider(c)
@@ -374,20 +463,25 @@ func TestStormDeleteAll(t *testing.T) {
 	got := strings.Join(c.calls, "\n")
 	want := []string{
 		"sw-index:ens192",
+		"attached:7",
+		"table-info:1",
 		"detach:if=7:table=1",
+		"table-del:1:chain=true", // 链上还有组播表 0，一并删
+		"table-del:0:chain=true", // 链上那张的删除（由 DelChain 递归）
 		"session-del:1:match=ffffffffffff00000000000000000000",
 		"table-del:1:chain=false",
-		"policer-del:nfvis-storm-ens192-broadcast:0:cb=0",
 		"session-del:0:match=01000000000000000000000000000000",
 		"table-del:0:chain=false",
+		"policer-dump",
+		"policer-del:nfvis-storm-ens192-broadcast:0:cb=0",
 		"policer-del:nfvis-storm-ens192-multicast:0:cb=0",
+		"table-ids",
 	}
 	if got != strings.Join(want, "\n") {
 		t.Fatalf("清空的调用序不符：\n got:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
 	}
-	if s := c.snapshot(); !strings.Contains(s, "tables=0") || !strings.Contains(s, "pols=0") ||
-		!strings.Contains(s, "attached=map[]") {
-		t.Fatalf("清空后不得留残渣: %s", s)
+	if !c.clean() {
+		t.Fatalf("清空后不得留残渣: %s", c.snapshot())
 	}
 	// 清空后收到同样的清空声明：零调用（幂等）
 	c.calls = nil
@@ -415,50 +509,167 @@ func TestStormIdempotentNoCalls(t *testing.T) {
 	}
 }
 
-// TestStormRegistryLostRebuildByFacts：**登记丢失但数据面对象还在**（nfvisd 重启而 VPP 未重启的
-// 形态）：按数据面实况撤旧（摘绑定 + DelChain 删表 + 按名删 policer）再重建，不留残渣。
-func TestStormRegistryLostRebuildByFacts(t *testing.T) {
+// TestStormRebuildNoDuplicateTables（真机修复轮 ①）：**VPP 里已有本接口的一对表、进程登记为空**
+// （nfvisd 重启而 VPP 未重启）时重建，必须**先按实况认出并清掉既有表**再建——否则会重复建表
+// （真机实测：重放后 nfvis 重启 ⇒ 4 张表、policer 仍 2 个）。
+//
+// 红：把「实况解绑/删表」这一步摘掉（模拟旧实现按不可靠来源判实况）⇒ 表数变 4，本用例失败。
+func TestStormRebuildNoDuplicateTables(t *testing.T) {
+	c := newFakeStormClient()
+	// 现场：上一轮重放建的一对表 + 两个 policer，接口槽挂着广播表；本进程登记为空
+	mIdx := c.seedStormTable(StormKindMulticast, ^uint32(0))
+	bIdx := c.seedStormTable(StormKindBroadcast, mIdx)
+	c.attached[7] = bIdx
+	c.pols["nfvis-storm-ens192-broadcast"] = 0
+	c.pols["nfvis-storm-ens192-multicast"] = 1
+
+	p := NewStormProvider(c)
+	if err := p.ApplyInterface(context.Background(), stormCfg(8000, 20000)); err != nil {
+		t.Fatalf("重建 Apply: %v", err)
+	}
+	if n := len(c.tables); n != 2 {
+		t.Fatalf("重建后应恰有 2 张表（不重复建），实际 %d 张: %s", n, c.snapshot())
+	}
+	if len(c.pols) != 2 {
+		t.Fatalf("policer 应仍为 2 个（按名幂等）: %s", c.snapshot())
+	}
+	if got := c.attached[7]; got == mIdx || got == bIdx {
+		t.Fatalf("接口应挂新建的表，实际仍挂旧表 %d: %s", got, c.snapshot())
+	}
+	// 旧的一对表确实被清掉了（新的一对是新索引）
+	if _, ok := c.tables[mIdx]; ok {
+		t.Fatalf("旧组播表 %d 未被清理: %s", mIdx, c.snapshot())
+	}
+	if _, ok := c.tables[bIdx]; ok {
+		t.Fatalf("旧广播表 %d 未被清理: %s", bIdx, c.snapshot())
+	}
+}
+
+// TestStormDeleteByFactsCleansDuplicates（真机修复轮 ②）：残留 4 张表（历史重复对）+ 登记陈旧
+// （登记说挂表 3、实况挂的是 1）时删除，必须：按**实况**解绑（不是登记）→ 陈旧解绑按已达成容忍
+// （真机 `No such table (-65)`）→ 全部本接口的表/policer 清光（含重复对）。
+//
+// 红：不做实况解绑（用陈旧登记索引解绑）且不容错 ⇒ 真机那条 `No such table (-65)` 让整次提交失败。
+func TestStormDeleteByFactsCleansDuplicates(t *testing.T) {
 	c := newFakeStormClient()
 	p := NewStormProvider(c)
 	if err := p.ApplyInterface(context.Background(), stormCfg(8000, 20000)); err != nil {
 		t.Fatalf("首次 Apply: %v", err)
 	}
-	p.reset() // = resetProviders（VPP 重连/进程重启后的登记失效）
+	// 复刻真机现场：历史缺陷留下第二对表（2=组播、3=广播，广播表链着组播表），且**登记指向
+	// 第二对**（3）而接口 L2 槽实际仍挂着第一对的广播表（1）——即「attach 未生效但登记已推进」。
+	m2 := c.seedStormTable(StormKindMulticast, ^uint32(0))
+	b3 := c.seedStormTable(StormKindBroadcast, m2)
+	p.mu.Lock()
+	p.rt["ens192"].kinds[StormKindBroadcast].tableIdx = b3
+	p.rt["ens192"].kinds[StormKindMulticast].tableIdx = m2
+	p.rt["ens192"].attachTable = b3
+	p.mu.Unlock()
+	if len(c.tables) != 4 || c.attached[7] != 1 {
+		t.Fatalf("现场构造失败: %s", c.snapshot())
+	}
 	c.calls = nil
-	if err := p.ApplyInterface(context.Background(), stormCfg(8000, 20000)); err != nil {
-		t.Fatalf("重建 Apply: %v", err)
+	if err := p.ApplyInterface(context.Background(), stormCfg(0, 0)); err != nil {
+		t.Fatalf("按实况解绑 + 容错的删除不应失败: %v", err)
+	}
+	if !c.clean() {
+		t.Fatalf("删除后应清光全部表/policer/绑定（含重复对）: %s", c.snapshot())
 	}
 	got := strings.Join(c.calls, "\n")
-	want := []string{
-		"sw-index:ens192",
-		// 实况撤旧：广播表挂在口上（掩码核对通过）⇒ 摘绑定 + 带链删表（组播表随之删）
-		"attached:7",
-		"table-info:1",
-		"detach:if=7:table=1",
-		"table-del:1:chain=true",
-		"table-del:0:chain=true",
-		// 按名清两类 policer
-		"policer-dump",
-		"policer-del:nfvis-storm-ens192-broadcast:0:cb=0",
-		"policer-del:nfvis-storm-ens192-multicast:0:cb=0",
-		// 重建（组播表先建）
-		"policer-add:nfvis-storm-ens192-multicast:20000:cb=20000000",
-		"table-add:mask=01000000000000000000000000000000:next=unset",
-		"session-add:2:match=01000000000000000000000000000000:policer=2",
-		"policer-add:nfvis-storm-ens192-broadcast:8000:cb=8000000",
-		"table-add:mask=ffffffffffff00000000000000000000:next=2",
-		"session-add:3:match=ffffffffffff00000000000000000000:policer=3",
-		"attach:if=7:table=3",
+	// 先按实况（表 1）解绑：这是真机失败点（旧实现按登记传 3 ⇒ No such table）
+	if !strings.Contains(got, "detach:if=7:table=1") {
+		t.Fatalf("应按实况表 1 解绑: %s", got)
 	}
-	if got != strings.Join(want, "\n") {
-		t.Fatalf("登记丢失后的重建调用序不符：\n got:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+	if !strings.Contains(got, "detach:if=7:table=3") {
+		t.Fatalf("陈旧登记的表 3 也要尝试解绑（拿到 -65 按已达成）: %s", got)
 	}
-	if s := c.snapshot(); !strings.Contains(s, "tables=2") || !strings.Contains(s, "pols=2") {
-		t.Fatalf("重建后应为「两张表 + 两个 policer」且无孤儿: %s", s)
+	if idx := strings.Index(got, "detach:if=7:table=1"); idx > strings.Index(got, "detach:if=7:table=3") {
+		t.Fatalf("实况解绑必须排在陈旧登记解绑之前: %s", got)
 	}
 }
 
-// TestStormForeignTableInSlot：接口 L2 槽被非本产品对象占用（掩码形状不符）⇒ 如实报错且不动它。
+// TestStormSweepProtectsOtherInterfacesTables：孤儿清扫只清「没挂在任何接口上」的表——
+// 另一个接口仍挂着的表必须原样保留（宁可不扫，也不误删）。
+func TestStormSweepProtectsOtherInterfacesTables(t *testing.T) {
+	c := newFakeStormClient()
+	c.ifidx["ens224"] = 9
+	p := NewStormProvider(c)
+	if err := p.ApplyInterface(context.Background(), stormCfg(8000, 0)); err != nil {
+		t.Fatalf("首次 Apply: %v", err)
+	}
+	// 另一个接口（ens224）合法持有的一对表 + 一个孤儿对（没挂在任何接口上）
+	otherM := c.seedStormTable(StormKindMulticast, ^uint32(0))
+	otherB := c.seedStormTable(StormKindBroadcast, otherM)
+	c.attached[9] = otherB
+	orphanM := c.seedStormTable(StormKindMulticast, ^uint32(0))
+	orphanB := c.seedStormTable(StormKindBroadcast, orphanM)
+
+	if err := p.ApplyInterface(context.Background(), stormCfg(9000, 0)); err != nil {
+		t.Fatalf("改值 Apply: %v", err)
+	}
+	if _, ok := c.tables[otherB]; !ok {
+		t.Fatalf("别的接口挂着的表不得被清: %s", c.snapshot())
+	}
+	if _, ok := c.tables[otherM]; !ok {
+		t.Fatalf("别的接口挂着的链上表不得被清: %s", c.snapshot())
+	}
+	if _, ok := c.tables[orphanB]; ok {
+		t.Fatalf("孤儿表应被清: %s", c.snapshot())
+	}
+	if _, ok := c.tables[orphanM]; ok {
+		t.Fatalf("孤儿链表应被清: %s", c.snapshot())
+	}
+	if c.attached[9] != otherB {
+		t.Fatalf("别的接口的绑定不得被动: %s", c.snapshot())
+	}
+}
+
+// TestStormSweepGivesUpWhenFactsUnavailable：孤儿清扫的安全边界——表清单/接口清单/绑定查询
+// 任一不可得 ⇒ **放弃清扫**（宁可不扫，也不误删别的接口的表），本接口自身的清理照常完成。
+func TestStormSweepGivesUpWhenFactsUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		failOn string
+	}{
+		{"表清单查询失败", "table-ids"},
+		{"接口清单查询失败", "iface-indexes"},
+		{"保护集查询失败（另一个接口）", "attached:9"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			c := newFakeStormClient()
+			c.ifidx["ens224"] = 9
+			p := NewStormProvider(c)
+			if err := p.ApplyInterface(context.Background(), stormCfg(8000, 0)); err != nil {
+				t.Fatalf("首次 Apply: %v", err)
+			}
+			// 另一个接口合法持有的一对表（清扫里要保护的对象）
+			otherM := c.seedStormTable(StormKindMulticast, ^uint32(0))
+			otherB := c.seedStormTable(StormKindBroadcast, otherM)
+			c.attached[9] = otherB
+			c.failListing = tc.failOn
+			if err := p.ApplyInterface(context.Background(), stormCfg(0, 0)); err != nil {
+				t.Fatalf("清扫放弃不应让删除失败: %v", err)
+			}
+			c.failListing = ""
+			if _, ok := c.tables[otherB]; !ok {
+				t.Fatalf("放弃清扫时不得误删别的接口的表: %s", c.snapshot())
+			}
+			if c.attached[9] != otherB {
+				t.Fatalf("别的接口的绑定不得动: %s", c.snapshot())
+			}
+			// 本接口自身的清理照常完成：policer 清光、ens192 的绑定已摘
+			if len(c.pols) != 0 {
+				t.Fatalf("本接口自身的 policer 应已清理: %s", c.snapshot())
+			}
+			if _, ok := c.attached[7]; ok {
+				t.Fatalf("本接口的绑定应已摘掉: %s", c.snapshot())
+			}
+		})
+	}
+}
+
+// TestStormAttachOccupiedSlotFailsLoudly：接口 L2 槽被占且不是我们的形状 ⇒ 如实报错（不动它）。
 func TestStormForeignTableInSlot(t *testing.T) {
 	c := newFakeStormClient()
 	c.tables[5] = StormTableInfo{Index: 5, Mask: "deadbeef", NextTableIndex: ^uint32(0)}
@@ -496,7 +707,7 @@ func TestStormBuildFailureRollsBack(t *testing.T) {
 	if err := p.ApplyInterface(context.Background(), stormCfg(8000, 0)); err == nil {
 		t.Fatal("建会话失败应报错")
 	}
-	if c.snapshot(); !strings.Contains(c.snapshot(), "tables=0") || !strings.Contains(c.snapshot(), "pols=0") {
+	if !c.clean() {
 		t.Fatalf("失败后应回滚已建对象: %s", c.snapshot())
 	}
 	c.failOn, c.calls = "", nil
@@ -538,7 +749,7 @@ func TestStormDataplaneFacts(t *testing.T) {
 	p.reset()
 	dp2, _ := p.Dataplane(context.Background(), "ens192")
 	b2 := dp2.Kinds[StormKindBroadcast]
-	if b2.Table == nil || b2.Table.Mask != string(c.tables[1].Mask) || b2.CountersReason == "" {
+	if b2.Table == nil || b2.Table.Mask != c.tables[1].Mask || b2.CountersReason == "" {
 		t.Fatalf("登记丢失后应按掩码认表并如实给计数原因: %+v", b2)
 	}
 	// 未接入计数读数 ⇒ 如实给原因（不是 0）

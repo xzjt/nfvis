@@ -42,6 +42,8 @@ const (
 	vppFeatureAlreadyEnabled  int32 = -170
 	// 对象本就不在位（重复删除、接口/会话已消失）
 	vppNoSuchEntry int32 = -6
+	// 分类表不存在（真机实测：对已不在/未挂在接口上的分类表做解绑，VPP 报 `No such table (-65)`）
+	vppNoSuchTable int32 = -65
 )
 
 // natRemovalBenignCode 判断 NAT44 系列**移除方向**的返回码是否表示「已是目标状态」，

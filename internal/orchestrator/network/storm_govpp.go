@@ -11,6 +11,7 @@ import (
 
 	"go.fd.io/govpp/api"
 	"go.fd.io/govpp/binapi/classify"
+	ifapi "go.fd.io/govpp/binapi/interface"
 	"go.fd.io/govpp/binapi/interface_types"
 	"go.fd.io/govpp/binapi/policer"
 	"go.fd.io/govpp/binapi/policer_types"
@@ -54,14 +55,14 @@ func (g *govppStormClient) PolicerAddDel(name string, cirKbps uint32, cb uint64,
 		ExceedAction:  policer_types.Sse2QosAction{Type: policer_types.SSE2_QOS_ACTION_API_DROP},
 	}).ReceiveReply(reply)
 	if err != nil {
-		if !add && vppErrIs(err, vppNoSuchEntry, vppValueExist) { // 删方向：本就不在＝已达成
-			return 0, nil
+		if !add && stormAbsentCode(err) { // 删方向：本就不在 ⇒ ErrStormAbsent（Provider 按已达成）
+			return 0, ErrStormAbsent
 		}
 		return 0, err
 	}
 	if reply.Retval != 0 {
-		if !add && vppErrIs(api.RetvalToVPPApiError(reply.Retval), vppNoSuchEntry, vppValueExist) {
-			return 0, nil
+		if !add && stormAbsentCode(api.RetvalToVPPApiError(reply.Retval)) {
+			return 0, ErrStormAbsent
 		}
 		return 0, fmt.Errorf("policer_add_del(%s,add=%v) retval=%d", name, add, reply.Retval)
 	}
@@ -91,8 +92,15 @@ func (g *govppStormClient) ClassifyAddTable(mask []byte, nextTableIndex uint32) 
 	return reply.NewTableIndex, nil
 }
 
+// stormAbsentCode 删除方向的 VPP 错误码 → 是否表示「对象本就不在」（由 Provider 决定是否按
+// 「已达成」继续）：-6 No such entry / -65 No such table（真机实测：解绑未挂在接口上的表）/
+// -81 VALUE_EXIST（历史实现即以此判 del 幂等）。
+func stormAbsentCode(err error) bool {
+	return vppErrIs(err, vppNoSuchEntry, vppNoSuchTable, vppValueExist)
+}
+
 // ClassifyDelTable 删表；delChain=true 连同表链上的后续表一并删（两类并存时广播表链着
-// 组播表，按数据面实况清理只有链根可循）；表不存在按「已达成」处理（幂等）。
+// 组播表，按数据面实况清理只有链根可循）；表不存在返回 ErrStormAbsent。
 func (g *govppStormClient) ClassifyDelTable(tableIndex uint32, delChain bool) error {
 	reply := &classify.ClassifyAddDelTableReply{}
 	err := g.ch.SendRequest(&classify.ClassifyAddDelTable{
@@ -101,14 +109,14 @@ func (g *govppStormClient) ClassifyDelTable(tableIndex uint32, delChain bool) er
 		TableIndex: tableIndex,
 	}).ReceiveReply(reply)
 	if err != nil {
-		if vppErrIs(err, vppNoSuchEntry, vppValueExist) {
-			return nil
+		if stormAbsentCode(err) {
+			return ErrStormAbsent
 		}
 		return err
 	}
 	if reply.Retval != 0 {
-		if vppErrIs(api.RetvalToVPPApiError(reply.Retval), vppNoSuchEntry, vppValueExist) {
-			return nil
+		if stormAbsentCode(api.RetvalToVPPApiError(reply.Retval)) {
+			return ErrStormAbsent
 		}
 		return fmt.Errorf("classify_add_del_table(del,%d) retval=%d", tableIndex, reply.Retval)
 	}
@@ -143,22 +151,24 @@ func (g *govppStormClient) ClassifyDelSession(tableIndex uint32, match []byte) e
 		Match:      match,
 	}).ReceiveReply(reply)
 	if err != nil {
-		if vppErrIs(err, vppNoSuchEntry, vppValueExist) {
-			return nil
+		if stormAbsentCode(err) {
+			return ErrStormAbsent
 		}
 		return err
 	}
 	if reply.Retval != 0 {
-		if vppErrIs(api.RetvalToVPPApiError(reply.Retval), vppNoSuchEntry, vppValueExist) {
-			return nil
+		if stormAbsentCode(api.RetvalToVPPApiError(reply.Retval)) {
+			return ErrStormAbsent
 		}
 		return fmt.Errorf("classify_add_del_session(del,table=%d) retval=%d", tableIndex, reply.Retval)
 	}
 	return nil
 }
 
-// PolicerClassifySetInterface 挂/摘该接口 L2 槽的分类表（入向）。
-// 摘除时 l2_table_index 传登记里的表索引（VPP 按该值核对要摘的是哪张）。
+// PolicerClassifySetInterface 挂上/摘掉该接口 L2 槽的分类表（入向）。
+// 摘除时 l2_table_index 传**实况读到的当前绑定**（`AttachedL2Table`）——真机实测按陈旧登记
+// 解绑会被 VPP 以 `No such table (-65)` 拒（归一到 ErrStormAbsent 由 Provider 按已达成处理）；
+// **挂上方向不容错**：槽已被别的表占用时静默吞错会留下「登记说新、实况是旧」的错位。
 func (g *govppStormClient) PolicerClassifySetInterface(swIfIndex, l2TableIndex uint32, add bool) error {
 	reply := &classify.PolicerClassifySetInterfaceReply{}
 	err := g.ch.SendRequest(&classify.PolicerClassifySetInterface{
@@ -169,14 +179,14 @@ func (g *govppStormClient) PolicerClassifySetInterface(swIfIndex, l2TableIndex u
 		IsAdd:         add,
 	}).ReceiveReply(reply)
 	if err != nil {
-		if vppErrIs(err, vppNoSuchEntry, vppValueExist) {
-			return nil
+		if !add && stormAbsentCode(err) {
+			return ErrStormAbsent
 		}
 		return err
 	}
 	if reply.Retval != 0 {
-		if vppErrIs(api.RetvalToVPPApiError(reply.Retval), vppNoSuchEntry, vppValueExist) {
-			return nil
+		if !add && stormAbsentCode(api.RetvalToVPPApiError(reply.Retval)) {
+			return ErrStormAbsent
 		}
 		return fmt.Errorf("policer_classify_set_interface(if=%d,table=%d,add=%v) retval=%d",
 			swIfIndex, l2TableIndex, add, reply.Retval)
@@ -203,27 +213,55 @@ func (g *govppStormClient) PolicerDump() ([]StormPolicer, error) {
 	return out, nil
 }
 
-// AttachedL2Table 读接口当前挂的 L2 policer-classify 表（逐表 dump 后按 sw_if_index 过滤；
-// 未挂返回 ok=false）。
+// AttachedL2Table 读接口 L2 槽**当前实际挂着**的表：用 `classify_table_by_interface`
+// （请求/应答）。**绑定一律以本方法为准**——真机实测 `policer_classify_dump` 在本底座返回不了
+// 绑定（曾按该 dump 判实况，导致重放后重复建表）。
+// 无绑定（retval 非 0，或 l2_table_id = ~0 的「空槽」约定）返回 ok=false；这不区分「本就没挂」
+// 与「查询被拒」——两者对本层的动作相同（不解绑、不删表），真出错会在随后的挂表上暴露，不静默。
 func (g *govppStormClient) AttachedL2Table(swIfIndex uint32) (uint32, bool, error) {
-	req := g.ch.SendMultiRequest(&classify.PolicerClassifyDump{
-		Type:      classify.POLICER_CLASSIFY_API_TABLE_L2,
-		SwIfIndex: ^interface_types.InterfaceIndex(0),
-	})
+	reply := &classify.ClassifyTableByInterfaceReply{}
+	if err := g.ch.SendRequest(&classify.ClassifyTableByInterface{
+		SwIfIndex: interface_types.InterfaceIndex(swIfIndex),
+	}).ReceiveReply(reply); err != nil {
+		if stormAbsentCode(err) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if reply.Retval != 0 || reply.L2TableID == ^uint32(0) {
+		return 0, false, nil
+	}
+	return reply.L2TableID, true, nil
+}
+
+// ClassifyTableIDs 列出全部 classify 表索引（孤儿清扫用）。
+func (g *govppStormClient) ClassifyTableIDs() ([]uint32, error) {
+	reply := &classify.ClassifyTableIdsReply{}
+	if err := g.ch.SendRequest(&classify.ClassifyTableIds{}).ReceiveReply(reply); err != nil {
+		return nil, err
+	}
+	if reply.Retval != 0 {
+		return nil, fmt.Errorf("classify_table_ids retval=%d", reply.Retval)
+	}
+	return reply.Ids, nil
+}
+
+// AllInterfaceIndexes 列出全部接口索引（孤儿清扫的保护集计算用）。
+func (g *govppStormClient) AllInterfaceIndexes() ([]uint32, error) {
+	req := g.ch.SendMultiRequest(&ifapi.SwInterfaceDump{})
+	var out []uint32
 	for {
-		d := &classify.PolicerClassifyDetails{}
+		d := &ifapi.SwInterfaceDetails{}
 		stop, err := req.ReceiveReply(d)
 		if err != nil {
-			return 0, false, err
+			return nil, err
 		}
 		if stop {
 			break
 		}
-		if uint32(d.SwIfIndex) == swIfIndex {
-			return d.TableIndex, true, nil
-		}
+		out = append(out, uint32(d.SwIfIndex))
 	}
-	return 0, false, nil
+	return out, nil
 }
 
 // ClassifyTableInfo 读一张分类表的实测属性（掩码/会话数/表链；表不存在返回 ok=false）。
