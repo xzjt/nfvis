@@ -94,10 +94,10 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show acls` | ACL 列表 | `GET /acls` | ✅ |
 | `show acls <name> detail` | 规则与绑定详情 | `GET /acls/{name}` | ✅ |
 | `show nat` | NAT 池/规则/转换会话计数 | `GET /nat` | ✅ |
-| `show vxlan tunnels` | VXLAN 隧道读视图：名/VNI/本地下垫/远端下垫/端口/交换机 + **是否已在 VPP**（数据面接口名与 sw_if_index）；运行态按平台打在隧道口上的**接口标记**（`nfvis-vxlan:<名>`）识别「该名字的隧道口在不在」——**不依赖 vxlan dump**（VPP 26.06 的两版 dump 恒空，真机实证：CRC 与本仓 binapi 逐一吻合、govpp 按 V1/V2 发都零条目而 vppctl 看得到隧道，属底座缺口）；**VNI/下垫地址/端口以配置为准**（无参数清单可回读），输出说明行如实写明该边界；运行态不可用时如实说明（不把「说不清」报成「未收敛」） | `GET /vxlan-tunnels` | ✓ 建隧已真机实证（产品 commit 后 `vppctl show vxlan tunnel` 列出 instance/src/dst/vni）；tag 口径读视图的真机复核待执行 |
+| `show vxlan tunnels` | VXLAN 隧道读视图：名/VNI/本地下垫/远端下垫/端口/交换机 + **是否已在 VPP**（数据面接口名与 sw_if_index）；运行态按平台打在隧道口上的**接口标记**（`nfvis-vxlan:<名>`）识别「该名字的隧道口在不在」——**不依赖 vxlan dump**（VPP 26.06 的两版 dump 恒空，真机实证：CRC 与本仓 binapi 逐一吻合、govpp 按 V1/V2 发都零条目而 vppctl 看得到隧道，属底座缺口）；**VNI/下垫地址/端口以配置为准**（无参数清单可回读），输出说明行如实写明该边界；运行态不可用时如实说明（不把「说不清」报成「未收敛」） | `GET /vxlan-tunnels` | ✅（round164 真机四维：建隧/BD 成员/读视图「已在 VPP」、改 remote 撤旧、restart nfvis 不重复建、vpp restart 重放、对抗双拒、删隧清场；tag 口径即该轮定形——`docs/evidence/v2-round164-d383-vxlan.txt`） |
 | `show port-mirroring` | SPAN 会话状态 | `GET /port-mirroring` | ✅ |
 | `show qos policies` | 限速策略与绑定 | `GET /qos/policies` | ✅ |
-| `show dns proxy` | 数据面 DNS 代理（启用态 + 全局上游 + 各域覆盖；决策 #345） | `GET /dns/proxy` | ✓（round124：启用态/上游读视图三面同源；数据面路径见 round124 证据——punt socket 转发器） |
+| `show dns proxy` | 数据面 DNS 代理（启用态 + 全局上游 + 各域覆盖；决策 #345） | `GET /dns/proxy` | ✅（round124：启用态/上游读视图三面同源；数据面路径见 round124 证据——punt socket 转发器） |
 | `show vpp` | 数据面概览：**版本/连接/待重启**/线程/buffer/内存 | `GET /vpp/status` | ✅（发现 #11 补齐前三项） |
 | `show vpp threads` | main/worker 线程清单与绑核 | 运行态（govpp threads） | ✅ |
 | `show vpp runtime [thread <id>]` | **线程级**运行态：每线程向量率/主循环速率 + 整机向量率 + 工作线程数 + 数据面运行时长 | 运行态（stats segment，经 `vpp_get_stats` 解码，与 buffer/接口计数同源） | ✅（决策 #200；按节点明细无结构化来源，CLI 如实说明需 `vppctl show runtime`） |
@@ -124,7 +124,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show log audit [last <n>]` | 审计日志 | `GET /audit-logs` | ✅ |
 | `show log vnf <name> [last <n>]` | VNF 控制台/事件日志 | 运行态 | ✅ |
 | `show users` | 本地用户与 class | `GET /system/login-users` | ✅ |
-| `show system api tokens` | 活动会话 / API Token 清单：token-id、用户、权限类、签发时间、过期时间、是否当前会话（super-user 列**全部用户**的会话，其他 class 只列自己的；token 为内存态，重启后清空） | `GET /system/api-tokens` | 🚫 本轮新增（决策 #301）：单测覆盖；已入 fulltest（`show system api tokens` 见阶段 1；吊销不存在的 id 见阶段 4）与 semantic S10-8（吊销真实会话 ⇒ 其下一个请求 401），真机复跑待执行（决策 #319） |
+| `show system api tokens` | 活动会话 / API Token 清单：token-id、用户、权限类、签发时间、过期时间、是否当前会话（super-user 列**全部用户**的会话，其他 class 只列自己的；token 为内存态，重启后清空） | `GET /system/api-tokens` | ✅（真机：`docs/evidence/v2-dev1-d301-real-machine-verification.txt`——CLI/REST/Web 三方 + 审计独立事实源；已入 fulltest 阶段 1/4 与 semantic S10-8） |
 | `show configuration [permissions <class> [detail]]` | 省略子命令 = 当前 committed 配置（JunOS 风格）；`permissions <class>` = 该 class 的**生效权限视图**（决策 #304）——按顶层命令族列出**允许路径** + 末行汇总（class、来源＝预置/自定义、允许/拒绝条数），`detail` 逐路径附判定依据（预置等级满足 / allow 前缀命中 / deny 前缀命中 / 默认拒绝）；判定单源在 `internal/aaa`，与运行期授权同一实现（不在 show 层另写一套） | 省略子命令：`GET /configuration`（committed 视图）；`permissions <class>`：`GET /configuration/permissions?class=<name>` | ✅ 本轮落地（决策 #304）：默认/detail/display set 三形态；R 类，read-only 仅可查自己所属 class，非 super-user 查他人拒绝、未知 class 报错。单测覆盖；真机覆盖已在 fulltest 阶段 5（三种形态各一条），真机复跑待执行（决策 #319） |
 | `show configuration candidate` | 当前持锁会话的 candidate | `GET /configuration/candidate` | ✅ |
 | `show configuration history` | 提交历史快照列表：rev/时间/用户/注释/是否当前（**不含配置正文**） | `GET /configuration/history` | ✅ |
@@ -162,8 +162,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request container-functions <n> stop` | 停止容器 | O | `POST /container-functions/{n}:stop` | ✅ |
 | `request container-functions <n> restart` | 重启容器 | O | `POST /container-functions/{n}:restart` | ✅ |
 | `request container-functions <n> log [last <n>]` | 容器 stdout/stderr | O | `GET /container-functions/{n}/logs` | ✅ |
-| `request container-functions <n> exec <command> [timeout <seconds>]` | 在**运行中**的容器内执行命令（非交互；`<command>` 是整体、含空格请加引号；等价容器内 `sh -c`）；超时默认 30s（1..300）、stdout/stderr 各自上限 256 KiB（超限置 truncated）；**超时只中止客户端等待**（Docker 无 exec 中止接口，容器内进程可能仍在跑）、退出码未知时不报（决策 #357） | S | `POST /container-functions/{n}:exec` | 🚫 本轮新增（决策 #357）：单测覆盖；已入 fulltest；**真机四维验证（round138，含 Browser Use）**，证据 `docs/evidence/v2-round138-d357-container-exec.txt` |
-| `request container-functions <n> shell` | **交互式终端**：进容器里的 `sh`（TTY；Ctrl-] 退出）。与 VM 串口 console **同一套管线**（一次性 ticket + WebSocket + CLI raw 接管），底座是 Docker exec 的 TTY 形态；**断开只关产品侧桥接**（WS 断开后容器内 shell 进程**可能仍在**，真机实测；Docker 无 exec 中止接口）；不做窗口尺寸同步（决策 #358） | S | `POST /container-functions/{n}/shell` + `GET …/shell/ws?ticket=…` | 🚫 本轮新增（决策 #358）：单测覆盖；真机 pty 复验见证据 |
+| `request container-functions <n> exec <command> [timeout <seconds>]` | 在**运行中**的容器内执行命令（非交互；`<command>` 是整体、含空格请加引号；等价容器内 `sh -c`）；超时默认 30s（1..300）、stdout/stderr 各自上限 256 KiB（超限置 truncated）；**超时只中止客户端等待**（Docker 无 exec 中止接口，容器内进程可能仍在跑）、退出码未知时不报（决策 #357） | S | `POST /container-functions/{n}:exec` | ✅（真机四维（round138，含 Browser Use）；已入 fulltest——`docs/evidence/v2-round138-d357-container-exec.txt`） |
+| `request container-functions <n> shell` | **交互式终端**：进容器里的 `sh`（TTY；Ctrl-] 退出）。与 VM 串口 console **同一套管线**（一次性 ticket + WebSocket + CLI raw 接管），底座是 Docker exec 的 TTY 形态；**断开只关产品侧桥接**（WS 断开后容器内 shell 进程**可能仍在**，真机实测；Docker 无 exec 中止接口）；不做窗口尺寸同步（决策 #358） | S | `POST /container-functions/{n}/shell` + `GET …/shell/ws?ticket=…` | ✅（真机 pty 四维 + Browser Use（round139）——`docs/evidence/v2-round139-d358-container-shell.txt`） |
 | `request container-functions <n> delete` | 删除容器 | S | `DELETE /container-functions/{n}` | 🚫 交互确认 |
 | `request images upload name <n> type <t> file <path>` | 从 `/data/incoming/` 导入（成功自动清理源文件）；容器镜像读出 tar 内嵌 tag 并回显（决策 #312） | O | `POST /images` | ✅ |
 | `request images download name <n> type <t> url <u> sha256 <hex>` | 从 HTTP(S) 拉取；**`sha256` 必填**（键值形态，非可选——校验层在受理前同步强制，缺省即拒） | O | `POST /images` | ✅（FR-SEC-004） |
@@ -183,9 +183,9 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request system reboot` | 重启系统 | S | `POST /system:reboot` | 🚫 破坏性 |
 | `request system shutdown` | 关机 | S | `POST /system:shutdown` | 🚫 破坏性 |
 | `request system poweroff` | 断电 | S | `POST /system:shutdown` | 🚫 破坏性 |
-| `request system kernel apply` | 写入 GRUB 内核基线（需重启生效） | S | `POST /system/kernel:apply` | 🚫 会改启动项，本轮不执行 |
+| `request system kernel apply` | 写入 GRUB 内核基线（需重启生效） | S | `POST /system/kernel:apply` | 🚫 未在 v2 轮次执行（会改启动项；机制由单测/集成测试覆盖） |
 | `request system kernel rollback` | 回退内核基线 | S | `POST /system/kernel:rollback` | 🚫 同上 |
-| `request system hugepages reclaim` | 回收**空闲**的多余大页，收敛到声明值（决策 #329）；**在用页一律不动**、**不改声明值**、写后回读确认（未收敛/无变化如实报，含谁在占用）；⚠️ **无主占用页不在回收范围**（决策 #346 真机实测撤回：多为 DPDK 预留页，写 nr_hugepages 释放不了，需从预留者一侧释放） | S | `POST /system/hugepages:reclaim`（与 REST 同源） | 🚫 会改宿主大页池（只动空闲多余页）；真机按交付说明单独走查（造「实际>声明且空闲」现场再回收），纯函数与命令/端点由单测覆盖；fulltest 登记豁免（决策 #319） |
+| `request system hugepages reclaim` | 回收**空闲**的多余大页，收敛到声明值（决策 #329）；**在用页一律不动**、**不改声明值**、写后回读确认（未收敛/无变化如实报，含谁在占用）；⚠️ **无主占用页不在回收范围**（决策 #346 真机实测撤回：多为 DPDK 预留页，写 nr_hugepages 释放不了，需从预留者一侧释放） | S | `POST /system/hugepages:reclaim`（与 REST 同源） | ✅（真机（round108：造「实际 > 声明且空闲」现场回收 + Web 动作）——`docs/evidence/v2-round108-d329-hugepage-reclaim-verified.txt`；只动空闲多余页，无主占用页不在范围见 #346） |
 | `request system configuration backup [to <path>]` | 导出 committed 配置归档（`to <path>` 是另存一份：须绝对路径、目标不得已存在、父目录须已存在；已存在即如实拒绝） | S | `POST /system/backup`（生成归档；只读清单是 `GET /system/backup`） | ✅ |
 | `request system configuration restore <path>` | 导入归档为 candidate 并提交 | S | `POST /system/restore`（与 REST 同源，高危档审计两条，决策 #150） | 🚫 会覆盖现网配置 |
 | `request system tech-support generate` | 生成诊断归档 tar.gz（归档里的配置是**脱敏视图**：口令哈希等已隐藏，不能用于恢复；要可恢复的完整配置用 `configuration backup`） | O | `POST /system/tech-support` | ✅ |
@@ -193,7 +193,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request system core-dumps delete [file <n>]` | 删除转储 | O | `DELETE /system/core-dumps` | ✅（**决策 #76⑨** 修错误文案） |
 | `request system zeroize` | 恢复出厂（双重确认） | S | `POST /system:zeroize` | 🚫 破坏性 |
 | `request system api tls regenerate` | 重签自签证书 | S | `POST /system/tls:regenerate` | ✅ |
-| `request system api token revoke <token-id>` | 吊销指定会话（O；范围按身份裁定——super-user 可吊销任意会话，其他 class 仅自己的；不存在的/他人的 id 统一报「会话不存在或无权操作」，不泄露存在性。token-id 见 `show system api tokens`。request 域以 O 为基线，read-only 的自助结束会话走 POST /logout；REST 侧同能力对全部登录 class 开放） | O | `POST /system/api-tokens/{id}:revoke` | 🚫 本轮新增（决策 #301）：单测覆盖；已入 fulltest（`show system api tokens` 见阶段 1；吊销不存在的 id 见阶段 4）与 semantic S10-8（吊销真实会话 ⇒ 其下一个请求 401），真机复跑待执行（决策 #319） |
+| `request system api token revoke <token-id>` | 吊销指定会话（O；范围按身份裁定——super-user 可吊销任意会话，其他 class 仅自己的；不存在的/他人的 id 统一报「会话不存在或无权操作」，不泄露存在性。token-id 见 `show system api tokens`。request 域以 O 为基线，read-only 的自助结束会话走 POST /logout；REST 侧同能力对全部登录 class 开放） | O | `POST /system/api-tokens/{id}:revoke` | ✅（真机：`docs/evidence/v2-dev1-d301-real-machine-verification.txt`——CLI/REST/Web 三方 + 审计独立事实源；已入 fulltest 阶段 1/4 与 semantic S10-8） |
 | `request system ssh host-key regenerate` | 重新生成 SSH host key | S | `POST /system/ssh-host-key:regenerate` | ✅ |
 | `request system password change` | 登录者自助改密（验证旧口令） | O | `POST /system/login-users/{n}:change-password`（与 REST 同源） | 🚫 需交互输入（契约已登记延期） |
 | `request system storage format-data` | 恢复出厂数据状态（保留管理面可达）：收敛删全部受管 VNF/容器与网络对象、清受管数据目录、配置库重置为保留节（决策 #305） | S | `POST /system:format-data`（宿主编排；双确认照搬 zeroize） | ✅ 破坏性但已验（决策 #305 落地：收敛/保留/清数据与 zeroize 同一确认与审计口径，单测逐条覆盖；真机按交付报告步骤在测试机执行）。**fulltest 侧只做结构检查**（阶段 4：非交互下必须被双重确认问询挡住——命令已接线且破坏性闸门在位，**不真执行**），并在 `contrib/scripts/cli-fulltest-exemptions.tsv` 登记豁免（决策 #319） |
@@ -251,8 +251,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set system timezone <tz>` | 时区 | 宿主 timedatectl | ✅ |
 | `set system ntp server <ip\|host> [prefer]` | NTP 服务器（`prefer` 为无值 flag） | 宿主 NTP | ✅（**决策 #76②** 修复） |
 | `set system dns server <ip> [secondary <ip>]` | DNS（主/备） | 宿主 resolv | ✅（**决策 #76⑥** 修复 secondary） |
-| `set system dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**全局上游**（决策 #345）：域内 VNF/容器指向网关即可解析；上游为**宿主侧可达**（非 VPP FIB），nfvisd 内自研转发器经 `punt socket` 收包、解析后按原域回注 | nfvisd punt socket + 宿主解析 | ✓（round124：能力前提与端到端数据面实证，见 `docs/evidence/v2-round124-*.txt`） |
-| `delete system dns proxy server [<ip> \| secondary <ip>]` | 撤销全局上游；不带取值即清空（全空则停用并注销 punt，VPP 恢复默认处理） | nfvisd punt socket | ✓（round124：见 `docs/evidence/v2-round124-*.txt`） |
+| `set system dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**全局上游**（决策 #345）：域内 VNF/容器指向网关即可解析；上游为**宿主侧可达**（非 VPP FIB），nfvisd 内自研转发器经 `punt socket` 收包、解析后按原域回注 | nfvisd punt socket + 宿主解析 | ✅（round124：能力前提与端到端数据面实证，见 `docs/evidence/v2-round124-*.txt`） |
+| `delete system dns proxy server [<ip> \| secondary <ip>]` | 撤销全局上游；不带取值即清空（全空则停用并注销 punt，VPP 恢复默认处理） | nfvisd punt socket | ✅（round124：见 `docs/evidence/v2-round124-*.txt`） |
 | `set system api port <n>` | HTTPS 端口（默认 443） | nfvisd | ✅ |
 | `set system api token-ttl-minutes <n>` | Token 有效期（默认 60） | nfvisd | ✅ |
 | `set system api max-sessions <n>` | 并发会话上限（真限流） | nfvisd | ✅（决策 #71） |
@@ -274,7 +274,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set system syslog local level <lvl>` | 本地日志级别 | 宿主日志 | ✅ |
 | `set system syslog local retention-days <n>` | 日志保留天数（FR-SYS-013） | 宿主 logrotate | ✅ |
 | `set system syslog local max-size-mb <n>` | 日志容量上限 | 宿主 logrotate | ✅ |
-| `set system login banner <text>` | 登录横幅（显示在 Web 登录页与 CLI 登录提示之前，未认证即可见；单行，最长 512 字节，超限/含换行拒绝；`delete system login banner` 清除） | 配置库 | 🚫 本轮新增（决策 #303）：单测覆盖；已入 fulltest 阶段 2（`set`/`delete` 语句 + 提交→回读→清除往返，回读用内容断言），真机复跑待执行（决策 #319） |
+| `set system login banner <text>` | 登录横幅（显示在 Web 登录页与 CLI 登录提示之前，未认证即可见；单行，最长 512 字节，超限/含换行拒绝；`delete system login banner` 清除） | 配置库 | ✅（真机（round90）：CLI/REST/Web 黑盒三面——未设置时端点省略字段、设置后未认证回显；已入 fulltest 阶段 2） |
 | `set system login user <n> password <s> class <c>` | 本地用户（口令**加盐哈希**落库、回显脱敏） | 配置库（PBKDF2） | ✅（决策 #79 修复；**`<n>` 不可省**，把 `password`/`class` 写在名字位会被拒并提示正确写法，决策 #82） |
 | `set system login class <n> allow <path>` | 自定义 class 允许项（可多条） | 配置库 | ✅（决策 #79 修复） |
 | `set system login class <n> deny <path>` | 自定义 class 拒绝项（可多条） | 配置库 | ✅（决策 #79 修复） |
@@ -306,9 +306,9 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set interfaces <ifname> sriov vf-count <n>` | 创建/回收 VF（FR-NET-004） | sysfs `sriov_numvfs` | ⊘ 无 PF/VF 时 commit 明确报错（不再静默无效，决策 #70） |
 | `set interfaces <ifname> ingress-policy <name>` | 入向限速策略绑定 | VPP policer input | ✅ |
 | `set interfaces <ifname> egress-policy <name>` | 出向限速策略绑定（决策 #331；VPP policer output，可与入向并存） | VPP policer output | ✅ |
-| `set interfaces <ifname> storm-control broadcast <kbps>` | 入向**广播**风暴抑制（决策 #385，FR-NET-019）：目的 MAC 精确匹配 `ff:ff:ff:ff:ff:ff`，超速**丢弃**；单位 **kbps**（不做 pps 换算）；接口须已声明 | VPP policer（1R2C）+ L2 classify 表挂接口入向 | 🚫 待真机（实现随本轮交付：建两类对 `show policer`/`show classify tables` 逐字核对 + 实验组/对照组定量对照；单测覆盖调用序与向量构造。**能力前提 spike**：`docs/evidence/v2-round166-storm-control-spike.txt`） |
-| `set interfaces <ifname> storm-control multicast <kbps>` | 入向**组播**风暴抑制（决策 #385）：目的 MAC 的 I/G 位=1（掩码「匹配位」写法；按该口径广播帧也满足此位——两类同配时广播走自己的精确表，只配组播时广播按组播速率限） | 同上 | 🚫 同上（掩码/session 形状需真机按 `show classify tables` 核对） |
-| `delete interfaces <ifname> storm-control [broadcast \| multicast]` | 逐类撤销（detach → 删 session/表 → 删 policer）；**裸 delete ＝两类都清**（幂等：不存在按已达成） | 同上 | 🚫 同上 |
+| `set interfaces <ifname> storm-control broadcast <kbps>` | 入向**广播**风暴抑制（决策 #385，FR-NET-019）：目的 MAC 精确匹配 `ff:ff:ff:ff:ff:ff`，超速**丢弃**；单位 **kbps**（不做 pps 换算）；接口须已声明 | VPP policer（1R2C）+ L2 classify 表挂接口入向 | ✅（真机四维 + 定量对照（round167，dev110）：对照组 l2-flood 2000 vs 实验组 15/16；类别独立/表链/删除清查/重启重放；**能力前提 spike** 见 `docs/evidence/v2-round166-storm-control-spike.txt`） |
+| `set interfaces <ifname> storm-control multicast <kbps>` | 入向**组播**风暴抑制（决策 #385）：目的 MAC 的 I/G 位=1（掩码「匹配位」写法；按该口径广播帧也满足此位——两类同配时广播走自己的精确表，只配组播时广播按组播速率限） | 同上 | ✅（同上；掩码「匹配位」写法与两类表链（广播表经 `NextTableIndex` 链组播表）已按 `show classify tables` 真机核对） |
+| `delete interfaces <ifname> storm-control [broadcast \| multicast]` | 逐类撤销（detach → 删 session/表 → 删 policer）；**裸 delete ＝两类都清**（幂等：不存在按已达成） | 同上 | ✅（同上；删除一次提交全清、重启重放不翻倍——两处实测缺陷的修复复验） |
 | `set bonds <name> members [<seq>] <ifname>` | 聚合成员 | VPP bonding | ✅ |
 | `set bonds <name> lacp mode <active\|passive> [interval <fast\|slow>]` | LACP 模式 | VPP bonding | ✅ |
 | `set bonds <name> lacp disable` | 关闭 LACP（转静态聚合） | VPP bonding | ✅ |
@@ -324,18 +324,18 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-switches <n> gateway ip <ip-prefix>` | BVI 三层网关（可多条） | VPP BVI | ✅ |
 | `set virtual-switches <n> gateway vrf <name>` | 网关所属 VRF | VPP | ✅ |
 | `set virtual-switches <n> gateway acl-in\|acl-out <acl>` | 网关 ACL | VPP acl | ⊘ **设计拒绝（decision #340）**：真机实证 VPP 26.06 不评估 BVI（网关）上的域内流量——既不拦截也不计数（round117 绑定登记可见但域内流量零评估；round118 复核），绑定给不出任何保护，故提交期硬拒。替代：`set virtual-switches <n> l3-interface <if> acl-in <acl>`（见下一行，已实证生效）。 |
-| `set virtual-switches <n> dhcp-relay server <ip>` | DHCP 中继（仅已 `set gateway ip` 的 L2 交换机可配；src 自动取 BVI 的 IPv4 网关地址，server 须在该转发域内可达） | VPP dhcp proxy | ✓（round113：配置/撤销/读视图/`vppctl show dhcp proxy` 对照 + pcap 转发签名实证；端到端租约因测试设备工具链受限未取得，见 `docs/evidence/v2-round113-*.txt`） |
-| `delete virtual-switches <n> dhcp-relay` | 撤销 DHCP 中继（`dhcp_proxy_config` IsAdd=false，幂等；随交换机删除一并撤） | VPP dhcp proxy | ✓（round113：撤销后 `show dhcp proxy` 清空、读视图同步；恢复重放存活经多次 VM/nfvis 重启实证） |
+| `set virtual-switches <n> dhcp-relay server <ip>` | DHCP 中继（仅已 `set gateway ip` 的 L2 交换机可配；src 自动取 BVI 的 IPv4 网关地址，server 须在该转发域内可达） | VPP dhcp proxy | ✅（round113：配置/撤销/读视图/pcap 转发签名；**端到端租约已补验（round131：完整 DORA + 客户端实际使用；option 82 回程要求进手册）**——`docs/evidence/v2-round113-*.txt`、`v2-round131-d335-relay-lease-verified.txt`） |
+| `delete virtual-switches <n> dhcp-relay` | 撤销 DHCP 中继（`dhcp_proxy_config` IsAdd=false，幂等；随交换机删除一并撤） | VPP dhcp proxy | ✅（round113：撤销后 `show dhcp proxy` 清空、读视图同步；恢复重放存活经多次 VM/nfvis 重启实证） |
 | `set virtual-switches <n> dhcp-server pool <start> <end>` | DHCP 服务器启用（决策 #359；仅 L2 + 已 `set gateway ip` 可配；池须与 BVI 同子网、不含 BVI/网络/广播地址、≤4096 个；与 dhcp-relay 互斥） | nfvisd 用户态服务器 + 内置 L2 tap + UDP/67 punt | ✅ **真机四维验证（round141）**：真 guest 完整 DORA（`LEASED 192.168.99.100`）、VPP/nfvis 重启自愈、池耗尽告警、与 relay 互斥全拒，证据 `docs/evidence/v2-round141-d359-dhcp-server-verified.txt`；round140 能力前提 spike 见 `docs/evidence/v2-round140-dhcp-server-spike.txt` |
 | `set virtual-switches <n> dhcp-server lease-time <seconds>` | 租约时长（缺省 86400；60..2592000） | 同上 | ✅ **真机四维验证（round141，同上）** |
 | `set virtual-switches <n> dhcp-server dns <ip>` | 下发给客户端的 DNS（option 6；缺省＝BVI 网关地址） | 同上 | ✅ **真机四维验证（round141，同上）** |
 | `set virtual-switches <n> dhcp-server domain-name <name>` | 下发给客户端的域名（option 15，可省） | 同上 | ✅ **真机四维验证（round141，同上）** |
 | `delete virtual-switches <n> dhcp-server [pool \| lease-time \| dns \| domain-name]` | 逐叶子撤销；**pool 的删除＝停用**（清池 + 回收内置 tap/punt/租约），与裸 delete 等价 | 同上 | ✅ **真机四维验证（round141，同上）** |
 | `show virtual-switches <n> dhcp-leases` | DHCP 租约表（IP/MAC/状态 offered\|active\|declined/到期；未配置 dhcp-server 时如实报「未配置」） | nfvisd 租约表（`GET /virtual-switches/{n}/dhcp-leases` 同源） | ✅ **真机四维验证（round141，同上）** |
-| `set virtual-switches <n> learn-limit <n>` | MAC 学习条数上限（仅 L2；环路/广播风暴缓解，**非阻断**；1-16777216，超限拒绝） | VPP `bridge_domain_set_learn_limit` | ✓（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
-| `delete virtual-switches <n> learn-limit` | 清 MAC 学习上限（恢复 VPP 默认 16777216，幂等） | VPP `bridge_domain_set_learn_limit` | ✓（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
-| `set virtual-switches <n> dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**按域上游**（决策 #345）：只对该交换机转发域（L2＝BVI；L3＝其 l3-interface）的入向查询生效；本域非空优先，否则回落全局；两者皆空则回 SERVFAIL | nfvisd punt socket + 宿主解析 | ✓（round124：能力前提与端到端数据面实证，见 `docs/evidence/v2-round124-*.txt`） |
-| `delete virtual-switches <n> dns proxy server [<ip> \| secondary <ip>]` | 撤销本域上游（不带取值即清空本域；回落全局） | nfvisd punt socket | ✓（round124：见 `docs/evidence/v2-round124-*.txt`） |
+| `set virtual-switches <n> learn-limit <n>` | MAC 学习条数上限（仅 L2；环路/广播风暴缓解，**非阻断**；1-16777216，超限拒绝） | VPP `bridge_domain_set_learn_limit` | ✅（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
+| `delete virtual-switches <n> learn-limit` | 清 MAC 学习上限（恢复 VPP 默认 16777216，幂等） | VPP `bridge_domain_set_learn_limit` | ✅（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
+| `set virtual-switches <n> dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**按域上游**（决策 #345）：只对该交换机转发域（L2＝BVI；L3＝其 l3-interface）的入向查询生效；本域非空优先，否则回落全局；两者皆空则回 SERVFAIL | nfvisd punt socket + 宿主解析 | ✅（round124：能力前提与端到端数据面实证，见 `docs/evidence/v2-round124-*.txt`） |
+| `delete virtual-switches <n> dns proxy server [<ip> \| secondary <ip>]` | 撤销本域上游（不带取值即清空本域；回落全局） | nfvisd punt socket | ✅（round124：见 `docs/evidence/v2-round124-*.txt`） |
 | `set virtual-switches <n> ports [<seq>] interface <if> [trunk vlans <l>\|native <v>]` | 物理口成员 | VPP BD | ✅ |
 | `set virtual-switches <n> ports [<seq>] vnf <vm> interface <vnic> [trunk vlans <l>]` | vhost-user 成员 | VPP + libvirt | ✅ |
 | `set virtual-switches <n> ports [<seq>] container <ct> interface <vnic>` | 容器 memif 成员 | VPP + Docker | ✅ |
@@ -358,8 +358,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set port-mirroring <n> source vnf <vm> interface <vnic> direction <…>` | SPAN 源（vNIC） | VPP span | ✅ |
 | `set port-mirroring <n> analyzer interface <if>` | 分析口 | VPP span | ✅ |
 | `set qos policies <n> cir <n> cbs <n>` | 限速策略（bps/bytes） | VPP policer | ✅ |
-| `set vxlan tunnels <n> vni <id> local <ip> remote <ip> [dst-port <n>] [virtual-switch <vs>]` | VXLAN overlay 隧道（单播 remote、IPv4 下垫层）：建/改；`virtual-switch` 给了就把隧道口加入该 **L2** 交换机的 bridge-domain；改 `vni/local/remote/dst-port` 时**先按旧配置的元组撤旧、再建新**（不给旧隧道留残留；旧元组来自提交 diff，不依赖 vxlan dump）；建隧后打平台接口标记（`nfvis-vxlan:<名>`）——恢复重放按它判存量；`dst-port` 缺省 4789 | VPP vxlan plugin（`vxlan_add_del_tunnel_v3` + 打标 + 置 up + 入 BD） | ✓ 建隧已真机实证（commit 后 `vppctl show vxlan tunnel` 列出 instance 0/src/dst/vni 100/sw-if-idx）；改/撤与重放的真机复核待执行 |
-| `delete vxlan tunnels <n> [vni \| local \| remote \| dst-port \| virtual-switch]` | 撤销隧道：裸 delete ＝删整条（摘 BD 归属 + 撤回隧道条目）；逐叶子只清该叶子（`vni/local/remote` 是必填叶子，清掉后提交校验会拒绝——按契约语义只应整体删除） | VPP vxlan plugin | 🚫 待真机（删除按旧配置的元组撤、以接口标记判在否；单测覆盖） |
+| `set vxlan tunnels <n> vni <id> local <ip> remote <ip> [dst-port <n>] [virtual-switch <vs>]` | VXLAN overlay 隧道（单播 remote、IPv4 下垫层）：建/改；`virtual-switch` 给了就把隧道口加入该 **L2** 交换机的 bridge-domain；改 `vni/local/remote/dst-port` 时**先按旧配置的元组撤旧、再建新**（不给旧隧道留残留；旧元组来自提交 diff，不依赖 vxlan dump）；建隧后打平台接口标记（`nfvis-vxlan:<名>`）——恢复重放按它判存量；`dst-port` 缺省 4789 | VPP vxlan plugin（`vxlan_add_del_tunnel_v3` + 打标 + 置 up + 入 BD） | ✅（round164 真机四维：建隧逐字对（`vppctl show vxlan tunnel`）/改 remote 撤旧/restart nfvis 不重复建/vpp restart 重放/对抗双拒——`docs/evidence/v2-round164-d383-vxlan.txt`） |
+| `delete vxlan tunnels <n> [vni \| local \| remote \| dst-port \| virtual-switch]` | 撤销隧道：裸 delete ＝删整条（摘 BD 归属 + 撤回隧道条目）；逐叶子只清该叶子（`vni/local/remote` 是必填叶子，清掉后提交校验会拒绝——按契约语义只应整体删除） | VPP vxlan plugin | ✅（round164：删除按旧声明元组撤、以接口标记判在否；裸 delete 一次清（BD 归属摘除）、删隧清场——`docs/evidence/v2-round164-d383-vxlan.txt`） |
 
 ### 2.6 `resource-pools`（§2.6，FR-CMP-001/005、FR-SYS-002/003）
 
@@ -407,8 +407,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set … cloud-init ssh-key <key>` | SSH 公钥（可多条；**用双引号包住含空格的公钥**） | seed ISO | ✅（决策 #79 修复：引号感知切分 + `ssh_keys[]`） |
 | `set … cloud-init hostname <s>` | guest 主机名 | seed ISO | ✅ |
 | `set … serial console enable` | 串口控制台（默认启用） | libvirt | ✅ |
-| `set virtual-machine-functions <n> pci-device <bdf>` | 通用 PCI 直通设备（BDF，可多条、追加语义；同值幂等；FR-CMP-023） | libvirt（hostdev） | 🚫 待真机（配置/校验/域 XML 由单测覆盖；真机按交付步骤以一次性 VNF 只 define 不 start 走查） |
-| `delete virtual-machine-functions <n> pci-device [<bdf>]` | 去掉一条直通设备；不带 BDF 清空（FR-CMP-023） | libvirt（hostdev） | 🚫 同上 |
+| `set virtual-machine-functions <n> pci-device <bdf>` | 通用 PCI 直通设备（BDF，可多条、追加语义；同值幂等；FR-CMP-023） | libvirt（hostdev） | ✅（真机（round165）：一次性 VNF 只 define 不 start——hostdev 逐字对/去声明消失/双拒；**实际直通端到端未验**（宿主无 IOMMU 直通能力，如实登记）——`docs/evidence/v2-round165-d384-pci-passthrough.txt`） |
+| `delete virtual-machine-functions <n> pci-device [<bdf>]` | 去掉一条直通设备；不带 BDF 清空（FR-CMP-023） | libvirt（hostdev） | ✅（同上；去一条/清空与跨 VM 冲突拒绝均真机核对） |
 | `set … autostart <bool>` | 随系统自启 | libvirt | ✅ |
 | `set … description <s>` | 描述 | 配置库 | ✅ |
 
@@ -437,44 +437,44 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 > **复核方法**（下面每个数字都可这样复算）：
 >
 > ```bash
-> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 268（§1/§2 的命令行 266 行 + §3 本表的 `show`、`request` 两行）
+> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 295（§1/§2 的命令行 293 行 + §3 本表的 `show`、`request` 两行）
 > ```
 >
-> 即 §1/§2 合计 **266 行**；把 ` / ` 并列的写法各拆成一条后为 **270 条**命令
-> （`exit` / `quit` +1；§2.1 的 `edit <path>` / `up` / `top` / `exit` +3）。
+> 即 §1/§2 合计 **293 行**；把两处 ` / ` 并列写法各拆成一条后为 **297 条**命令
+> （§1.3 的 `exit` / `quit` +1；§2.1 的 `edit <path>` / `up` / `top` / `exit` +3）。
 
 **分族**（族 = 该行**首个 token**；§2.1 的裸 `show` 与 `show | display set` 因此计入 `show` 族，`help` 计入其余操作）：
 
 | 族 | 行数 | 明细 |
 |---|---|---|
-| `show` | 68 | §1.1 show 表 66 行 + §2.1 的 `show`、`show \| display set` 2 行 |
-| `request` | 46 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/系统/告警） |
+| `show` | 73 | §1.1 show 表 70 行 + §2.1 的 `show`、`show \| display set` 2 行 + §2.4 的 `show virtual-switches <n> dhcp-leases` 1 行 |
+| `request` | 49 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/系统/告警） |
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
-| 配置模式 | 136 | §2.1 余下 13 行 + §2.2~§2.9 共 123 行（含 FR-CMP-023 的 2 条 `pci-device` 语句、决策 #385 的 3 条 storm-control 语句） |
-| **合计** | **271** | 不含管道则为 **262**；按 ` / ` 拆开后 **275 条** |
+| 配置模式 | 151 | §2.1 余下 13 行 + §2.2~§2.9 共 138 行（§2.4 的 `dhcp-leases` 读行计入 `show` 族；含 FR-CMP-023 的 2 条 `pci-device`、决策 #383 的 2 条 vxlan、决策 #385 的 3 条 storm-control 语句） |
+| **合计** | **293** | 不含管道则为 **284**；按 ` / ` 拆开后 **297 条** |
 
 **分节**（行数）：
 
 | 节 | 行数 | 节 | 行数 |
 |---|---|---|---|
-| §1.1 `show`（含通用管道 9） | 77 | §2.2b `protocols` | 3 |
-| §1.2 `request` | 47 | §2.3 `interfaces` 与 `bonds` | 13 |
-| §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 19 |
-| §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 9 |
-| §2.2 `system` | 37 | §2.6 `resource-pools` | 3 |
+| §1.1 `show`（含通用管道 9） | 80 | §2.2b `protocols` | 3 |
+| §1.2 `request` | 49 | §2.3 `interfaces` 与 `bonds` | 14 |
+| §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 25 |
+| §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 11 |
+| §2.2 `system` | 40 | §2.6 `resource-pools` | 3 |
 | §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 22 |
-| §2.9 `container-functions` | 10 | **合计** | **276** |
+| §2.9 `container-functions` | 10 | **合计** | **293** |
 
-**按实测状态分布**（共 276 行）：
+**按实测状态分布**（共 293 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 256 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用上一轮真机结论，本轮按代码与单测复核（无回归）。决策 #335 的两条 dhcp-relay 命令于 round113、决策 #337 的两条 learn-limit 命令于 round115 真机实测，均移入本桶。`show configuration [permissions <class> [detail]]` 由决策 #304 落地（原「已知缺口」），移入本桶；`request system storage format-data` 由决策 #305 落地（原 🚫 破坏性、契约已登记延期），按「破坏性但已验」移入本桶。**决策 #340 把 `gateway acl-in\|acl-out` 一行改判为「设计拒绝」，故本桶 247→246**（该行 round117 由 ✅ 改标 ⚠️ 时未同步本表，属既有陈旧漂移，本轮按增量口径一并订正） |
+| ✅ 实测通过 | 277 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，本轮按增量口径一并订正 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 设计拒绝（decision #340） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 本轮未执行 | 15 | **破坏性/需交互**（`reboot`/`shutdown`/`poweroff`/`zeroize`/`software add`/`configuration restore`/`kernel apply`/`kernel rollback`/`hugepages reclaim`、VM/容器删除确认与改密）——这些命令的机制由单测/集成测试覆盖，真机按需执行。**决策 #365 把「已入套件但真机待跑」的 10 行移入 ✅ 桶**：`request container-functions <n> exec`（round138 四维）、`set/delete system metrics history …` 3 行（round137 四维）、`set/delete virtual-switches <n> dhcp-server …` 6 行（round141 四维）——此前标「🚫 待真机」与同 PR 证据矛盾（round142 体检 A9/C9 的账目漂移）。**FR-CMP-023 的 2 条 `pci-device` 语句**（新增）为「待真机」：解析/校验/域 XML/反推由单测覆盖，真机按交付步骤走查（一次性 VNF 只 define 不 start；**实际直通端到端未验**——宿主无 IOMMU 直通能力，如实登记）。**决策 #385 的 3 条 storm-control 语句**为「待真机」：解析/校验/别名/反推与建改删调用序由单测覆盖，真机按契约的四维验证走查（对象逐字对 + 定量对照 + 改值撤旧 + 重启重放 + 删除清查 + 对抗） |
+| 🚫 未在 v2 轮次执行 | 11 | **破坏性/需交互**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、`kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）。机制由单测/集成测试覆盖；破坏性动作按其交付说明单独走查（部分动作在 v1 收尾轮有真机走查记录，见各轮证据） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
@@ -488,25 +488,30 @@ round80 以来那条唯一 ✗ 归零。
 pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**；
 语义校验 **12 / 0 / 1**、生命周期与组合 **21 / 0 / 3**（有业务现场时跑）。
 
-**当前基线（v2 开发线，round147 实测；逐轮累积与证据见下）**：
-`cli-fulltest` **254 / 0 / 18** ｜ `cli-semantic-check` **26 / 0 / 3** ｜ `cli-lifecycle-check` **23 / 0 / 2** ｜
-`cli-pty-smoke` **10 / 10**（真机 nfvis-vm 2.0.0~dev75，round147）。
+**当前基线（v2 开发线，round167 实测；逐轮累积与证据见下）**：
+`cli-fulltest` **258 / 0 / 18** ｜ `cli-semantic-check` **27 / 0 / 2**（S8 冷窗时 26/0/3）｜
+`cli-lifecycle-check` **22 / 0 / 3**（L3-2 可判定时 23/0/2）｜ `cli-pty-smoke` **10 / 10**
+（真机 nfvis-vm 2.0.0~dev110，round167）。
 
 沿革（每一处变化都写明「哪条新增/移除、为什么」——决策 #304/#319 纪律）：
 - `cli-fulltest`：198/0/11 → **210/0/13**（round101 实测修正）→ **240/0/13**（round137：`#356` 历史时序命令 +9）
   → **242/0/15**（round138：`#357` exec 断言 +4，其中 2 条入「预期报错」）→ **242/0/16**（round139：`#358`
   shell 预期失败 +1）→ **254/0/18**（round141：`#359` dhcp-server 语句解析/提交往返/`show … dhcp-leases` +12 通过、
-  +2 预期报错）；round143~147 各轮复核同值（零失败）。
+  +2 预期报错）→ **258/0/18**（round167：`#385` storm-control 4 条语句入套件，+4）；round143~166 各轮复核同值（零失败）。
 - `cli-semantic-check`：12/0/1 → 24/0/1（S10 编辑锁 12 项）→ 25/0/2（**#343** S8 由不可判定转通过，无新增/移除项）
-  → **26/0/3**（**#345** DNS punt 实链 S13 +1）；round147 复核同值（不可判定为 S11/S12 按设计跳过 +1）。
+  → **26/0/3**（**#345** DNS punt 实链 S13 +1）；此后在 **26/0/3（S8 冷窗）～27/0/2（S8 窗口热）** 两档间
+  （不可判定＝S11「无 relay 现场」/ S12「按设计」；S8 是否可判定取决于现场窗口内有无实时流量）。
 - `cli-lifecycle-check`：21/0/3 → **23/0/2**（**#334** L3-2 转可判定 + 历史最好档；**round141** 修 L2-3「查不了」
-  变体漏网的工具假红后复跑 23/0/2）；round143~147 复核同值（首跑偶见 22/0/3 系 L3-2 正控未热，复跑转正）。
+  变体漏网的工具假红后复跑 23/0/2）；round143~167 复核 **22/0/3（L3-2 正控未热）～23/0/2**（首跑偶见 22/0/3 系
+  L3-2 正控未热，复跑转正；round165 起偶带「登记 1」＝已知 L2-3「查不了」附注，非回归）。
 - `cli-pty-smoke`：10/10（round80 起不变）。
 - 证据索引：`docs/evidence/v2-round137-d356-metrics-history.txt`、`v2-round138-d357-container-exec.txt`、
   `v2-round139-d358-container-shell.txt`、`v2-round141-d359-dhcp-server-verified.txt`、
   `v2-round143-d360-dhcpserver-r142-3-4.txt`、`v2-round144-d361-l3-acl-unbind.txt`、
   `v2-round145-d362-libvirt-rpc-bounds.txt`、`v2-round146-d363-qos-binding-order.txt`、
-  `v2-round147-d364-lock-confirmed.txt`。
+  `v2-round147-d364-lock-confirmed.txt`、`v2-round148-d365-ledger-backfill.txt`、
+  `v2-round164-d383-vxlan.txt`、`v2-round165-d384-pci-passthrough.txt`、
+  `v2-round166-storm-control-spike.txt`、`v2-round167-d385-storm-control.txt`。
 命令清单与契约的对账由 `contrib/scripts/check_suite_contract_sync.sh` 守护（`make check` 的 `toolcheck`）。
 
 ---

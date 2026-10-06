@@ -1,0 +1,90 @@
+round168（其一） · 命令全表 §3 存量对账 + storm control IPv6 组播实测 + 新功能 Web 卡 Browser Use 复核
+====================================================================
+日期：2026-10-06；分支 v2（**无二进制变更**——真机仍 2.0.0~dev110；本批只改文档/证据 + 一处 UI 注释）。
+关联：决策 #385（storm v1）、#383（vxlan）、#384（PCI 直通）；本文件是其如实边界补验与账目对账。
+
+§0 结论
+- **命令全表 §3 存量统计对账完成**：按**文件实际行数**重算全部数字（295 / 293 / 297；状态分布 ✅277 / ⊘5 / 🚫11），
+  并把 12 行「证据已俱但仍标 🚫」订正为 ✅、11 行 `✓` 统一为 `✅`；🚫 桶重定义为「未在 v2 轮次执行（破坏性/需交互）」。
+- **storm control 的 IPv6 组播实测成立**：目的 MAC `33:33:` 被组播表（掩码首字节 `0x01`＝I/G 位）覆盖——
+  四相位定量对照：对照组 **+2000** ／ multicast 1 kbps ⇒ **+15** ／ 仅 broadcast 负对照（IPv6 组播不被广播表覆盖）⇒ **+2000** ／
+  两类同配（链式）⇒ **+15**；链式下广播帧仍 **+15**（两类各归其表）。
+- **vxlan / storm 的 Web 卡 Browser Use 复核通过**（round164/167 的待办）：两张卡与 CLI/REST 三方一致、空态如实；
+  实测抓出并修正一处**注释与行为不符**（R168-1，低，无行为变更）。
+
+§1 命令全表 §3 对账（docs-only，可复算）
+- **复核方法**：`grep -c '^| \`' docs/NFViS-CLI命令全表.md` = **295**（§1/§2 命令 293 行 + §3 本表 2 行）；
+  两处 ` / ` 并列写法拆开 ⇒ **297 条**。
+- **分族**（首 token）：`show` 73 ／ `request` 49 ／ 其余操作 11 ／ 通用管道 9 ／ 配置模式 151 ＝ 293。
+- **分节**：§1.1 80 ／ §1.2 49 ／ §1.3 10 ／ §2.1 15 ／ §2.2 40 ／ §2.2b 3 ／ §2.3 14 ／ §2.4 25 ／ §2.5 11 ／ §2.6 3 ／
+  §2.7 11 ／ §2.8 22 ／ §2.9 10 ＝ 293。
+- **按实测状态分布**（共 293）：✅ 实测通过 **277** ／ ⚠️ 已知缺口 0 ／ ⊘ 设计拒绝 1 + ⊘ 预期报错 4 ／
+  🚫 未在 v2 轮次执行 **11**。
+- **行级订正（12 行 🚫→✅，证据已俱者按增量口径订正）**：`show vxlan tunnels`、`set vxlan tunnels …`、`delete vxlan tunnels …`
+  （round164 四维）、`set/delete … pci-device`（round165）、`set/delete interfaces … storm-control …`（round167）、
+  `request container-functions … exec|shell`（round138/139）、`request system hugepages reclaim`（round108）、
+  `set system login banner`（round90）、`show system api tokens`、`request system api token revoke`（v2-dev1 轮）、
+  `set/delete … dhcp-relay …`（round113 + round131 端到端租约补验）。另统一 **11 行 `✓` → `✅`**（记号归一：数据面 DNS 代理 ×4、
+  dhcp-relay ×2、learn-limit ×2、`show dns proxy` ×1、vxlan 读行 ×2）。
+- **🚫 桶（11 行，重定义）**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、
+  `kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）
+  ——「未在 **v2 真机轮次**执行」；机制由单测/集成测试覆盖（部分动作 v1 收尾轮有真机走查记录）。
+- **原漂移样例（定根记录）**：旧表写「§1/§2 合计 266 行、总计 271、分节合计 276、✅256 / 🚫15」——与文件实际
+  （293 / 293 / 293、✅277 / 🚫11）长期不符；本轮全部按实际重算，并把「复核方法」写成可直接复算的命令。
+- **守护与回归**：`go test ./internal/api/ -run 'TestCommandTable|TestRequestClassMatchesCommandTable|TestCLIREST|TestContractCLI'` 通过；
+  `contrib/scripts/check_suite_contract_sync.sh` 缺口 0、登记问题 0；`make check` 全绿（§5）。
+
+§2 storm control 的 IPv6 组播实测（#385 的如实边界补验）
+- **现场**：`ens192` 临时加入 `sem-vs` 作第 4 端口（与 round167 同法；`show bridge-domain 314680 detail` 里
+  bvi1 / ens192 / vh-sem-vm-nic0 三成员）；**rx 必须是被测接口 ens192**；观测点＝VPP `l2-flood` 计数增量（独立事实源，与 round167 同）。
+- **帧**（64 字节整帧，Python 精确构造，写为 pcap 载荷）：目的 MAC `33:33:00:00:00:01`（IPv6 组播）、
+  源 MAC `02:00:00:00:00:99`、以太类型 `0x86dd`、IPv6 头 `60 00 00 00 | 00 0a | 11 | 40 | 2001:db8::1 | ff02::1`、余 10 字节载荷。
+- **注入通道（如实登记一处工具差异）**：本底座的 `packet-generator new { … data { hex … } }` 内联 hex **需要 `0x` 前缀**
+  （`data { hex 0x… }` 可建流；无前缀报 `failed to parse packet data from …`、空格分隔亦不被接受；单参数与 stdin 多行、
+  带 `node`/`interface` 各组合均复现——**round167 记录只写了 `data { hex … }`，本记录补齐前缀要求**）。本轮功能对照改用
+  **pcap 载荷**：`packet-generator new { name <n> interface ens192 pcap /tmp/ipv6mcast.pcap limit 2000 }` + `enable <n>`；
+  两种通道注入的是同一帧、观测同一计数，不影响结论。
+- **四相位结果**（每相位 2000 帧；基线/增量逐相位记录）：
+
+  | 相位 | storm 配置 | 注入帧 | l2-flood 增量 |
+  |---|---|---|---|
+  | 对照 | 无 | IPv6 组播 ×2000 | **+2000**（基线 54 → 2054） |
+  | 实验 | `multicast 1` kbps | IPv6 组播 ×2000 | **+15**（2054 → 2069） |
+  | 负对照 | `broadcast 1` kbps | IPv6 组播 ×2000 | **+2000**（2076 → 4076；广播表掩码 `ff…ff` 不覆盖 33:33） |
+  | 链式 | `broadcast 1` + `multicast 1` | IPv6 组播 ×2000 | **+15**（4076 → 4091；广播表 miss → `NextTableIndex` → 组播表 hit） |
+  | 链式·广播路径 | `broadcast 1` + `multicast 1` | 广播 `ff:ff:…` ×2000 | **+15**（4091 → 4106；两类各归其表） |
+
+- **数据面形状对照**：`show classify tables` 掩码＝组播 `0100…` / 广播 `ffffffffffff…`；policer `nfvis-storm-ens192-multicast
+  type 1r2c cir 1 kbps`（与 #385 round167 记录一致）。
+- **结论**：**IPv6 组播 MAC（`33:33:`）确被组播类覆盖**（首字节 `0x33` 的 I/G 位=1 ⇒ 掩码命中），
+  #385 声称的「按掩码 `0x01` 同覆盖」由此从推定变为**实测**（对照 2000 vs 实验 15）。
+
+§3 Web 卡 Browser Use 复核（#383 VXLAN / #385 storm；round164/167 的待办）
+- **方法与现场**：IAB 浏览器加载 `https://192.168.155.129/api/v1/ui/`（登录 admin；页面状态即当前构建 dev110 的产物），
+  现场＝`set vxlan tunnels vx-web vni 100 local 192.168.155.129 remote 192.168.155.3 virtual-switch dns-vs`
+  + `set interfaces ens192 storm-control broadcast 8` + `… multicast 16`（commit rev 942）。
+- **VXLAN 卡**（网络对象页 `#/network`）：行 = `vx-web | 100 | 192.168.155.129 → 192.168.155.3 | 4789 | dns-vs |
+  已在 VPP（接口 vxlan_tunnel0）`——与 CLI `show vxlan tunnels`、REST `GET /vxlan-tunnels`
+  （`in_vpp=true, sw_if_index=7, interface_name=vxlan_tunnel0`）**三方一致**；截图
+  `docs/images/round168-web-vxlan-storm-cards.png`。
+- **风暴抑制行**（接口详情页 `#/system/interfaces/ens192`）：`广播 8 kbps / 组播 16 kbps（入向，超速丢弃）`——
+  与 CLI `show interfaces ens192 detail`、REST `GET /interfaces/ens192`（`storm_control{broadcast_kbps:8,multicast_kbps:16}`）
+  **三方一致**；截图 `docs/images/round168-web-storm-iface-detail.png`。
+- **空态复核**（清场后 reload）：VXLAN 卡如实「（无）」；风暴抑制行显示「—」（与同页「入向/出向限速策略」等未配置项一致）。
+- **R168-1（低，本轮已修）**：`stormControlText` 的注释称「两类都没配时回 undefined，行不显示」，而实测 `fill()`
+  使该行**显示「—」**——**渲染本身无误**（与同页未配置项口径一致）、仅**注释与行为不符** ⇒ 按行为修正注释
+  （`internal/api/ui/app.js`；无行为变更、无契约影响、不影响守护）。
+- **观感项（如实登记，非缺陷）**：窄视口下 VXLAN 卡「端口/交换机」列内换行（如 `4789` 显示为两行）——数值正确，
+  列宽自适应所致。
+
+§4 现场与清场（如实）
+- storm 测试：`ens192` 已移出 `sem-vs`（BD 成员回到 bvi1 + vh-sem-vm-nic0）；`delete interfaces ens192 storm-control` 已提交；
+  VPP 侧 `show classify tables` 无表、`show policer` 空、pg 流 0；临时 pcap/脚本已删（`/tmp/pg*`、`/tmp/*.pcap` 均无残留）。
+- Web 现场：`delete vxlan tunnels vx-web`（VPP `show vxlan tunnel` 0 条）+ 风暴配置删除，commit rev 943；配置 grep `vxlan|storm` = 0。
+- 全程**未动管理口与既有场景**（sem-vs 2 口 / dns-vs / sem-vm running / sem-ct running 原样）；告警仍仅常态 `HUGEPAGE_POOL_ORPHAN`。
+
+§5 门禁与回归
+- 本批**无功能代码变更**（仅 `internal/api/ui/app.js` 注释一行 + 文档/证据）；`make check` 全绿（含 archtest/toolcheck/docscheck；
+  宿主内存紧时以 `GOFLAGS=-p=1` 串行跑）。
+- 四套件基线**沿用 round167（dev110）**：fulltest 258/0/18 ｜ 语义 27/0/2 ｜ lifecycle 22/0/3 ｜ pty 10/10
+  ——本批无二进制变更，**未复跑**（如实登记）。

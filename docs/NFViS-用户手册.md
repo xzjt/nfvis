@@ -977,6 +977,9 @@ nfvis$ show dns proxy                                             # 启用态 + 
   客户端用 **TCP** 查 DNS 不在覆盖内；本版不做缓存。
 - 只读视图：CLI `show dns proxy`、REST `GET /dns/proxy`（`{enabled, servers, switches}`）与 Web 系统页同源。
 - **覆盖范围**：本版覆盖 **IPv4/UDP/53**（punt 注册按地址族）；IPv6 的域名解析尚未覆盖（待 v6 注册与回注路径真机验证后启用）。
+- **管理网侧的「对外解析」不在产品范围**：NFViS **不**向管理网络上的其他主机提供 DNS 解析服务——管理网卡专用于设备
+  操作通道（SSH/管理 API/日志转发/Prometheus），设备自身的解析走上表的「宿主解析器」；域内 VNF/容器的解析走上表的
+  数据面代理。需要解析的管理网客户端请使用既有的 DNS 基础设施。
 
 其他系统级语句：`set system api port <uint>`、`token-ttl-minutes`、`max-sessions`、
 `api tls cert-file <p> key-file <p>`（装外部证书，立即生效）、`api tls self-signed regenerate`
