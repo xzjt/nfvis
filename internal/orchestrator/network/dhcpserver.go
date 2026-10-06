@@ -278,7 +278,9 @@ func (p *DHCPServerProvider) Sync(ctx context.Context, vs model.VirtualSwitch) e
 	}
 	tapIndex := uint32(0)
 	found := false
+	nameOfIndex := make(map[uint32]string, len(taps))
 	for _, t := range taps {
+		nameOfIndex[t.SwIfIndex] = t.HostIfName
 		if t.HostIfName == spec.tapName {
 			tapIndex, found = t.SwIfIndex, true
 			break
@@ -308,8 +310,15 @@ func (p *DHCPServerProvider) Sync(ctx context.Context, vs model.VirtualSwitch) e
 	} else {
 		rt.leases.setPool(spec.poolLo, spec.poolHi)
 	}
-	// VPP 侧索引变了（tap 被带外删后重建 / VPP 重启）：旧内核 tap 已不可用，关了重开。
-	stale := rt.tap != nil && rt.tapIndex != tapIndex
+	// 内核侧 tap 身份核对（决策 #394③）：**不信任可能被复用的 sw_if_index**——按 HostIfName
+	// 判定登记里的 tap 是否仍是本交换机的 tap。三种「身份不符」都视为 stale（关旧、重开内核 tap
+	// 与 AF_PACKET）：
+	//   - 本次解析到的索引与登记不同（tap 被重建到别的索引 / VPP 重启后 reset 已清 tapIndex）；
+	//   - 本次是**新建**（found=false）：内核侧 tap 必是新 netdev——即使 VPP 复用了同一索引
+	//     （round143 §1.4 实测同 tap 三次重建均 idx 6），旧 AF_PACKET socket 也已绑定到已消失的
+	//     内核接口，不重开则收包静默空转（round171 C2-F3）；
+	//   - 登记索引在本次 dump 里已不对应本交换机名（索引被别的 tap 复用）。
+	stale := rt.tap != nil && (rt.tapIndex != tapIndex || !found || nameOfIndex[rt.tapIndex] != spec.tapName)
 	if stale {
 		_ = rt.tap.Close()
 		rt.tap, rt.tapMAC = nil, nil

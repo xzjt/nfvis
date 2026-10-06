@@ -684,53 +684,70 @@ func run() error {
 	go func() {
 		tk := time.NewTicker(15 * time.Second)
 		defer tk.Stop()
+		// 一轮巡检的复核步骤。**每个步骤在边界重新读当次 committed 快照**（决策 #394④），
+		// 不再把一次快照喂给全部步骤——旧快照会把已删对象复活为孤儿 DHCP tap，或误删刚提交的
+		// relay proxy（round171 C2-F4）。取快照失败即跳过该步并记日志，不猜。
+		steps := []reconcileStep{
+			// M4-10：VM 崩溃 / 容器异常退出告警。
+			{"compute-alarms", func(ctx context.Context, cfg model.Config) {
+				for _, e := range computeProvider.CheckVMAlarms(ctx, cfg) {
+					log.Warn("VM 状态巡检", "err", e)
+				}
+				for _, e := range containerProvider.CheckContainerAlarms(ctx, cfg) {
+					log.Warn("容器状态巡检", "err", e)
+				}
+			}},
+			// M4-4/#73：vNIC 断连与物理业务口链路状态告警。
+			{"vnf-ports", func(ctx context.Context, cfg model.Config) {
+				for _, e := range netProvider.CheckVnfPorts(ctx, cfg) {
+					log.Warn("vNIC 状态巡检", "err", e)
+				}
+				for _, e := range netProvider.CheckInterfaceLinks(ctx, cfg) {
+					log.Warn("物理口链路巡检", "err", e)
+				}
+			}},
+			// 决策 #192：删表延后项的复核（表一旦不在数据面就清登记并消警）。
+			{"deferred-vrf", func(ctx context.Context, cfg model.Config) {
+				netProvider.RetryDeferredVRFDeletes(ctx, cfg)
+			}},
+			// 决策 #321：残渣对账（IP 表 ∪ ACL ∪ bridge-domain）。
+			{"residue", func(ctx context.Context, cfg model.Config) {
+				for _, e := range netProvider.ReconcileResidue(ctx, cfg) {
+					log.Warn("残渣对账未收敛项", "err", e)
+				}
+			}},
+			// 决策 #333：恢复收敛告警族的按来源廉价复核。
+			{"recovery-alarms", func(ctx context.Context, cfg model.Config) {
+				for _, e := range netProvider.ReconcileRecoveryAlarms(ctx, cfg) {
+					log.Warn("恢复收敛告警复核", "err", e)
+				}
+			}},
+			// 决策 #359：DHCP 服务器的巡检收敛（补齐带外丢失的 tap/注册、到期租约回收、告警复核）。
+			{"dhcp-server", func(ctx context.Context, cfg model.Config) {
+				for _, e := range netProvider.ReconcileDHCPServer(ctx, cfg) {
+					log.Warn("DHCP 服务器巡检", "err", e)
+				}
+			}},
+			// 决策 #380/#394②：DHCP 中继 proxy 的双向对账自愈（清多余 + 补声明了却缺失的）。
+			{"dhcp-relay-proxy", func(ctx context.Context, cfg model.Config) {
+				for _, e := range netProvider.ReconcileProxy(ctx, cfg) {
+					log.Warn("DHCP relay proxy 对账未收敛项", "err", e)
+				}
+			}},
+			// 决策 #385④/#394①：接口风暴抑制的按登记复核（数据面缺 policer/分类表即重放，只补不猜）。
+			{"storm-control", func(ctx context.Context, cfg model.Config) {
+				for _, e := range netProvider.ReconcileStorm(ctx, cfg) {
+					log.Warn("风暴抑制巡检未收敛项", "err", e)
+				}
+			}},
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-tk.C:
 				recoveryMu.Lock()
-				cfg, err := engine.Committed()
-				if err == nil {
-					for _, e := range computeProvider.CheckVMAlarms(ctx, cfg) {
-						log.Warn("VM 状态巡检", "err", e)
-					}
-					for _, e := range containerProvider.CheckContainerAlarms(ctx, cfg) {
-						log.Warn("容器状态巡检", "err", e)
-					}
-					for _, e := range netProvider.CheckVnfPorts(ctx, cfg) {
-						log.Warn("vNIC 状态巡检", "err", e)
-					}
-					for _, e := range netProvider.CheckInterfaceLinks(ctx, cfg) {
-						log.Warn("物理口链路巡检", "err", e)
-					}
-					// 决策 #192：删表延后项的复核（表一旦不在数据面就清登记并消警，
-					// 不依赖「恰好又发生了一次 VPP 重连」）。
-					netProvider.RetryDeferredVRFDeletes(ctx, cfg)
-					// 决策 #321：残渣对账（IP 表 ∪ ACL ∪ bridge-domain）——按数据面实况逐次
-					// 重建/消解 *LEFTOVER 告警，并把已复原对象的提交期补偿告警一并消解。
-					for _, e := range netProvider.ReconcileResidue(ctx, cfg) {
-						log.Warn("残渣对账未收敛项", "err", e)
-					}
-					// 决策 #333：恢复收敛告警族的按来源廉价复核（不做全量重放）——来源对象
-					// 已不在 committed 配置即消解；RECOVERY_IFACE_MISSING 的口已出现在 VPP
-					// 即消解；其余（UNCONVERGED 等）保守保留，权威重放仍只在 VPP 重连。
-					for _, e := range netProvider.ReconcileRecoveryAlarms(ctx, cfg) {
-						log.Warn("恢复收敛告警复核", "err", e)
-					}
-					// 决策 #359：DHCP 服务器的巡检收敛——补齐带外丢失的 tap/注册（与提交/
-					// 恢复收敛同一段 Sync）、到期租约回收、池耗尽告警复核。与残渣对账同块，
-					// 不另造巡检。
-					for _, e := range netProvider.ReconcileDHCPServer(ctx, cfg) {
-						log.Warn("DHCP 服务器巡检", "err", e)
-					}
-					// 决策 #380：DHCP 中继 proxy 对账自愈——用 VPP 实际条目与配置声明比对，
-					// 清除未声明/陈旧的多余 proxy（不靠进程内登记，跨 nfvisd 重启仍有效）。
-					// 与残渣对账同块，不另造巡检。
-					for _, e := range netProvider.ReconcileProxy(ctx, cfg) {
-						log.Warn("DHCP relay proxy 对账未收敛项", "err", e)
-					}
-				}
+				runReconcileCycle(ctx, engine.Committed, steps, log)
 				recoveryMu.Unlock()
 			}
 		}
@@ -2052,4 +2069,30 @@ func errReason(err error) string {
 		return "未知"
 	}
 	return err.Error()
+}
+
+// reconcileStep 一轮 15s 巡检里的一个复核步骤（名称用于日志，动作接收当次配置快照）。
+type reconcileStep struct {
+	name string
+	run  func(context.Context, model.Config)
+}
+
+// runReconcileCycle 执行一轮巡检（决策 #394④）：**每个步骤在边界重新读取当次 committed 快照**，
+// 而不是把一次快照喂给全部步骤——缩小「巡检持旧快照 + 提交并发删除」的窗口。旧行为用一次
+// 快照覆盖全部步骤：快照读完后对象被提交删除，巡检仍按旧快照把它「复活」（孤儿 DHCP tap 不可见
+// 不可删、punt 注册仍在），或按旧声明误删刚提交的 relay proxy（round171 C2-F4）。
+// 取快照失败即跳过该步并如实记日志（不猜、不沿用上一次快照）。
+//
+// 定裁说明（契约给二选一）：此处取「每个 reconcile 用当次快照」，不改提交路径——提交与巡检
+// 共用同一互斥需要把锁引入提交调用链（在 api/config 层），超出本决策落点；按快照逐步骤刷新已
+// 足以消除「一次旧快照喂四处」的结构性问题。
+func runReconcileCycle(ctx context.Context, snap func() (model.Config, error), steps []reconcileStep, log *slog.Logger) {
+	for _, st := range steps {
+		cfg, err := snap()
+		if err != nil {
+			log.Warn("巡检读取 committed 配置失败，跳过本项", "task", st.name, "err", err)
+			continue
+		}
+		st.run(ctx, cfg)
+	}
 }

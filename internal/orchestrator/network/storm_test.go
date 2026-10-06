@@ -863,3 +863,75 @@ func TestL2NetworkTeardownInterface(t *testing.T) {
 		t.Fatalf("接口已不在 VPP 时 teardown 应按已达成（不阻断）: %v", err)
 	}
 }
+
+// TestStormReconcileReplaysAfterOutOfBandDelete（决策 #394①）：带外删除 policer 与接口 L2 槽上的
+// 分类表后，巡检的按登记复核应在**一个周期内**按数据面实况重放——登记 `applyDone` 仍为真也不跳过。
+func TestStormReconcileReplaysAfterOutOfBandDelete(t *testing.T) {
+	ctx := context.Background()
+	c := newFakeStormClient()
+	p := NewStormProvider(c)
+	if err := p.ApplyInterface(ctx, stormCfg(8000, 0)); err != nil {
+		t.Fatalf("前置 Apply: %v", err)
+	}
+	// 带外删除：policer 与接口 L2 槽上的分类表都没了（数据面丢失），进程内登记仍称已下发。
+	delete(c.pols, "nfvis-storm-ens192-broadcast")
+	delete(c.attached, 7)
+	c.calls = nil
+	// 前提：幂等重跑 ApplyInterface 会因 applyDone 为真而早退（正是旧行为下永不恢复的根因）。
+	if err := p.ApplyInterface(ctx, stormCfg(8000, 0)); err != nil {
+		t.Fatalf("ApplyInterface(幂等): %v", err)
+	}
+	if len(c.calls) != 0 {
+		t.Fatalf("登记一致时 ApplyInterface 应早退（前提校验）: %v", c.calls)
+	}
+	// 巡检复核：实况缺项 ⇒ 重放（清登记后按实况重建）。
+	cfg := model.Config{Interfaces: []model.InterfaceConfig{stormCfg(8000, 0)}}
+	if errs := p.Reconcile(ctx, cfg); len(errs) != 0 {
+		t.Fatalf("Reconcile: %v", errs)
+	}
+	if _, ok := c.pols["nfvis-storm-ens192-broadcast"]; !ok {
+		t.Fatalf("巡检应重放 policer: %s", c.snapshot())
+	}
+	tbl, ok := c.attached[7]
+	if !ok || c.sessions[tbl] != 1 {
+		t.Fatalf("巡检应重建分类表并挂接口: %s", c.snapshot())
+	}
+}
+
+// TestStormReconcileNoopWhenPresent：数据面齐备时巡检只做实况核对、零重放（幂等，不重复建表）。
+func TestStormReconcileNoopWhenPresent(t *testing.T) {
+	ctx := context.Background()
+	c := newFakeStormClient()
+	p := NewStormProvider(c)
+	if err := p.ApplyInterface(ctx, stormCfg(8000, 0)); err != nil {
+		t.Fatalf("前置 Apply: %v", err)
+	}
+	c.calls = nil
+	cfg := model.Config{Interfaces: []model.InterfaceConfig{stormCfg(8000, 0)}}
+	if errs := p.Reconcile(ctx, cfg); len(errs) != 0 {
+		t.Fatalf("Reconcile: %v", errs)
+	}
+	for _, line := range c.calls {
+		if strings.HasPrefix(line, "policer-add") || strings.HasPrefix(line, "table-add") ||
+			strings.HasPrefix(line, "attach:") || strings.HasPrefix(line, "session-add") {
+			t.Fatalf("数据面齐备时不应重放: %v", c.calls)
+		}
+	}
+	if _, ok := c.pols["nfvis-storm-ens192-broadcast"]; !ok || c.attached[7] != 0 || c.sessions[0] != 1 {
+		t.Fatalf("巡检不应破坏既有数据面: %s", c.snapshot())
+	}
+}
+
+// TestL2NetworkReconcileStorm：L2Network 接线（未注入 provider 时为空操作）。
+func TestL2NetworkReconcileStorm(t *testing.T) {
+	c := newFakeStormClient()
+	n := NewL2Network(nil, nil)
+	if errs := n.ReconcileStorm(context.Background(), model.Config{}); errs != nil {
+		t.Fatalf("未注入 provider 应返回 nil: %v", errs)
+	}
+	n.SetStorm(NewStormProvider(c))
+	cfg := model.Config{Interfaces: []model.InterfaceConfig{stormCfg(0, 0)}}
+	if errs := n.ReconcileStorm(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("无声明应无事可做: %v", errs)
+	}
+}
