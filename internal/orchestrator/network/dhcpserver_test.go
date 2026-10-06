@@ -492,6 +492,130 @@ func TestDHCPLeaseTableSetPoolAndRestore(t *testing.T) {
 	}
 }
 
+// 决策 #391（R171-2）：对**无记录**地址 DECLINE 会建 MAC 为空的 byIP-only 条目；
+// 到期后该地址必须回池、free() 恢复（旧实现 sweep 只遍历 byMAC ⇒ 幽灵永不过期、假「池耗尽」）。
+func TestDHCPLeaseTableDeclineGhostExpires(t *testing.T) {
+	fc := newFakeClock(time.Unix(1_000_000, 0))
+	lo, hi := poolOf(t, "192.168.100.10", "192.168.100.10") // 单地址池：一条幽灵即打满
+	tt := newDHCPLeaseTable(lo, hi, fc.now)
+
+	if !tt.decline("192.168.100.10", time.Hour) {
+		t.Fatal("decline 无记录地址应记录（防立即复用回环）")
+	}
+	if l := tt.ownerOf("192.168.100.10"); l == nil || l.State != dhcpLeaseDeclined || l.MAC != "" {
+		t.Fatalf("无记录地址 DECLINE 应建 MAC 为空的 declined 条目: %+v", l)
+	}
+	if tt.free() {
+		t.Fatal("隔离期内 free() 应为 false")
+	}
+	if _, ok := tt.allocate("aa:aa:aa:aa:aa:01"); ok {
+		t.Fatal("隔离期内不应再分配该地址")
+	}
+
+	fc.advance(time.Hour + time.Minute)
+	if l := tt.ownerOf("192.168.100.10"); l != nil {
+		t.Fatalf("隔离到期后 MAC 为空的幽灵条目应被回收: %+v", l)
+	}
+	if !tt.free() {
+		t.Fatal("隔离到期后 free() 应恢复（旧实现永不过期）")
+	}
+	if ip, ok := tt.allocate("aa:aa:aa:aa:aa:01"); !ok || ip != "192.168.100.10" {
+		t.Fatalf("隔离到期后地址应可再分配，实得 %s/%v", ip, ok)
+	}
+}
+
+// 决策 #391（R171-2）：DECLINE 后同 MAC 再 DISCOVER ⇒ 旧 declined 条目被覆盖、只剩 byIP
+// （其 MAC 字段仍指向已被新租约占用的键）；到期后旧幽灵必须被回收，且**不得误删**新租约
+// （forget 的指针同一性校验）。
+func TestDHCPLeaseTableDeclineGhostReclaimedAfterReallocate(t *testing.T) {
+	fc := newFakeClock(time.Unix(1_000_000, 0))
+	lo, hi := poolOf(t, "192.168.100.10", "192.168.100.12")
+	tt := newDHCPLeaseTable(lo, hi, fc.now)
+
+	const mac = "aa:aa:aa:aa:aa:01"
+	ip, _ := tt.allocate(mac)
+	tt.commit(mac, ip, time.Hour) // .10 active
+	if !tt.decline("192.168.100.10", 30*time.Minute) {
+		t.Fatal("decline 已 active 地址应成功")
+	}
+	// 同 MAC 再 DISCOVER：拿别的地址 ⇒ 旧 declined 条目只剩 byIP（MAC 字段仍为 mac）
+	got, ok := tt.allocate(mac)
+	if !ok || got == "192.168.100.10" {
+		t.Fatalf("隔离期内不应再分配 .10，实得 %s/%v", got, ok)
+	}
+	tt.commit(mac, got, time.Hour) // 新租约 active@.11
+	// 断言旧条目确实已脱离 byMAC（byMAC[mac] 指向新租约）
+	if tt.byMAC[mac] == nil || tt.byMAC[mac].IP != got {
+		t.Fatalf("byMAC 应指向新租约: %+v", tt.byMAC[mac])
+	}
+	if tt.byIP["192.168.100.10"] == tt.byMAC[mac] {
+		t.Fatal("前置不成立：旧 declined 应已脱离 byMAC 只留 byIP")
+	}
+
+	// 推进过旧 declined 的隔离期（30m），新租约（1h）仍在
+	fc.advance(31 * time.Minute)
+	if l := tt.ownerOf("192.168.100.10"); l != nil {
+		t.Fatalf("旧 declined 幽灵条目应被回收: %+v", l)
+	}
+	// 新租约不得被误删
+	if l := tt.lookupMAC(mac); l == nil || l.IP != got || l.State != dhcpLeaseActive {
+		t.Fatalf("新租约不得被幽灵回收误删: %+v", l)
+	}
+	if !tt.free() {
+		t.Fatal("池内仍有空闲地址（.10/.12），free() 应为 true")
+	}
+}
+
+// 决策 #391（R171-2）：换池时 MAC 为空的 byIP-only 幽灵同样按池范围移除（旧实现只遍历 byMAC）。
+func TestDHCPLeaseTableSetPoolRemovesGhost(t *testing.T) {
+	fc := newFakeClock(time.Unix(1_000_000, 0))
+	lo, hi := poolOf(t, "192.168.100.10", "192.168.100.30")
+	tt := newDHCPLeaseTable(lo, hi, fc.now)
+
+	if !tt.decline("192.168.100.30", time.Hour) {
+		t.Fatal("decline 应记录")
+	}
+	if tt.ownerOf("192.168.100.30") == nil {
+		t.Fatal("前置：应有 declined 幽灵条目")
+	}
+
+	lo2, hi2 := poolOf(t, "192.168.100.10", "192.168.100.12")
+	tt.setPool(lo2, hi2)
+	if l := tt.ownerOf("192.168.100.30"); l != nil {
+		t.Fatalf("换池后池外 byIP-only 幽灵应被移除: %+v", l)
+	}
+	if n := len(tt.snapshot()); n != 0 {
+		t.Fatalf("换池后快照应为空: %+v", tt.snapshot())
+	}
+}
+
+// 决策 #391：decline 不得覆盖指向另一条有效租约的 byMAC 槽（两表一致性）。
+// 构造「旧地址条目只挂 byIP（MAC 字段陈旧）、同 MAC 的新租约已占用 byMAC」的状态
+// （旧版本持久化文件里同 MAC 两条即可造成），DECLINE 旧地址时不得把新租约挤出 byMAC。
+func TestDHCPLeaseTableDeclineDoesNotClobberNewLease(t *testing.T) {
+	fc := newFakeClock(time.Unix(1_000_000, 0))
+	lo, hi := poolOf(t, "192.168.100.10", "192.168.100.12")
+	tt := newDHCPLeaseTable(lo, hi, fc.now)
+	const mac = "aa:aa:aa:aa:aa:01"
+	now := fc.now()
+
+	old := &dhcpLease{MAC: mac, IP: "192.168.100.10", State: dhcpLeaseActive, ExpiresAt: now.Add(time.Hour)}
+	newer := &dhcpLease{MAC: mac, IP: "192.168.100.11", State: dhcpLeaseActive, ExpiresAt: now.Add(time.Hour)}
+	tt.byIP[old.IP] = old // 旧条目只剩 byIP
+	tt.byIP[newer.IP] = newer
+	tt.byMAC[mac] = newer
+
+	if !tt.decline("192.168.100.10", time.Hour) {
+		t.Fatal("DECLINE 旧地址应成功")
+	}
+	if l := tt.byMAC[mac]; l == nil || l.IP != "192.168.100.11" || l.State != dhcpLeaseActive {
+		t.Fatalf("decline 不得覆盖新租约的 byMAC 槽: %+v", l)
+	}
+	if l := tt.byIP["192.168.100.10"]; l == nil || l.State != dhcpLeaseDeclined {
+		t.Fatalf("旧地址应被标记 declined: %+v", l)
+	}
+}
+
 // ---------- 报文 ----------
 
 func TestDHCPDiscoverOfferRoundTrip(t *testing.T) {
@@ -832,6 +956,53 @@ func TestDHCPServerProviderDORA(t *testing.T) {
 		if l.State != "declined" {
 			t.Fatalf("RELEASE 后残留的应只有 declined 隔离条目: %+v", rows)
 		}
+	}
+}
+
+// 决策 #391（R171-2）：读视图（Leases）对已过期条目不再显示为恒「剩 1 秒」——
+// 复现「DECLINE 后同 MAC 再 DISCOVER」产生 byIP-only 幽灵，推进过租期后幽灵被回收、
+// 读视图为空（旧实现把过期条目按 left<1→1 恒显示「剩 1 秒」）。
+func TestDHCPServerLeasesReclaimsExpiredDeclinedGhost(t *testing.T) {
+	dir := t.TempDir()
+	p, fc := newTestDHCPServer(t, newFakeDHCPServerClient(), &fakePunt{}, newTapFactory(), dir)
+	ctx := context.Background()
+	vs := vsDHCPServer()
+	name := vs.Name
+	if err := p.Sync(ctx, vs); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	mac := mustMAC(t, "aa:bb:cc:dd:ee:01")
+	bvi := net.ParseIP("192.168.100.1")
+	// 客户端租下 .10（active）→ DECLINE .10 → 同 MAC 再 DISCOVER（拿 .11）⇒ 旧 declined 只剩 byIP
+	p.handleTapFrame(name, dhcpClientFrame(mac, dhcpRequest, net.ParseIP("192.168.100.10"), bvi, nil))
+	p.handleTapFrame(name, dhcpClientFrame(mac, dhcpDecline, net.ParseIP("192.168.100.10"), nil, nil))
+	p.handleTapFrame(name, dhcpClientFrame(mac, dhcpDiscover, nil, nil, nil))
+
+	rows, ok := p.Leases(name)
+	if !ok {
+		t.Fatal("Leases 应可用")
+	}
+	if len(rows) == 0 {
+		t.Fatal("前置：DECLINE 后应仍有 declined/offered 条目")
+	}
+
+	// 推进过一个租期（7200s）＋余量：declined 隔离期与 offered 保持窗均到期
+	fc.advance(time.Duration(vs.DhcpServerLeaseTimeSeconds)*time.Second + time.Minute)
+	rows, ok = p.Leases(name)
+	if !ok {
+		t.Fatal("Leases 应可用")
+	}
+	if len(rows) != 0 {
+		t.Fatalf("到期后读视图应为空（幽灵条目被回收，旧实现恒「剩 1 秒」）: %+v", rows)
+	}
+	// 池可用性恢复：新客户端应能拿到最小地址
+	p.handleTapFrame(name, dhcpClientFrame(mustMAC(t, "aa:bb:cc:dd:ee:02"), dhcpDiscover, nil, nil, nil))
+	rows, _ = p.Leases(name)
+	if len(rows) != 1 || rows[0].State != "offered" || rows[0].IP != "192.168.100.10" {
+		t.Fatalf("到期后新客户端应能拿到最小地址 .10: %+v", rows)
+	}
+	if rows[0].ExpiresInSeconds < 1 {
+		t.Fatalf("剩余秒数不应为恒 1 的假值: %+v", rows[0])
 	}
 }
 
