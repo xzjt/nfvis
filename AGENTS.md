@@ -927,6 +927,27 @@
   白名单不在 v1。**实现与真机四维（含「实验组 vs 对照组以 vppctl 计数为独立事实源」的定量对照）待执行**。
   spike 现场已清（删 spike 程序 + `request vpp restart` ⇒ policer/classify 0 残留，未动产品配置）。
   证据 `docs/evidence/v2-round166-storm-control-spike.txt`；真机仍 2.0.0~dev108。
+- **round167（storm control v1 实现 + 真机四维 + 两处实测缺陷收口，2026-10-06）**：**#385 交付**——
+  `set interfaces <if> storm-control broadcast|multicast <kbps>`（入向按目的 MAC 分类限速、超速丢弃、单位 kbps）
+  ⇒ `policer_add_del`（policer 名 `nfvis-storm-<if>-<kind>`、**Cb 非 0**）+ **L2 classify 表**（broadcast 掩码
+  前 6 字节 ff / multicast 首字节 `0x01`＝I/G 位）+ `policer_classify_set_interface` 挂接口入向；
+  **每类一张表**——接口 L2 policer-classify 槽只收一张表，两类并存时**广播表经 `NextTableIndex` 链到组播表**
+  （round166 spike 未验、**round167 真机验证成立**）；三面读视图（CLI detail / REST / Web）；
+  **unknown-unicast 明确拒绝**（L2 掩码无法表达）并给照做说明。
+  **真机功能定量对照（独立事实源＝VPP 自己的 `l2-flood` 计数）**：rx=ens192 注入 2000 个 64B 广播帧 ⇒
+  对照组 **2000**、实验组（broadcast 1 kbps）**15/16**（**限速确实生效**）；只配 broadcast 时组播 **2000**（不限）、
+  加配 multicast ⇒ 组播 **15**、两类都在 ⇒ 广播仍 **15**（**两类独立 + 表链成立**）。
+  **真机当场抓出并收口两处实现缺陷**（f514929 → 2f3f66e）：① **重建路径重复建表**（VPP 重启重放后 nfvis 重启
+  ⇒ **4 张表**；根因＝「数据面实况」判据用了 **`policer_classify_dump`——本底座返回不了绑定**，与 vxlan dump
+  同族的底座缺口 ⇒ 看不到已挂的表）——修法：绑定事实源改 **`classify_table_by_interface`**；
+  ② **删除按陈旧登记解绑 ⇒ 提交失败**（`No such table (-65)`）＋ attach 曾容忍 `VALUE_EXIST`（登记与实况脱节的温床）
+  ——修法：teardown「**实况优先 + 登记兜底 + 孤儿表清扫**」、解绑方向 `-65/-6/-81` 归一为「已达成」容错、
+  **挂上方向不再容忍**、实况不可得则**放弃清扫**（不误删）。**dev110 在保留的乱现场上自动收敛 4→2 张表、
+  再重启不翻倍、删除一次提交全清**。**四套件（dev110）**：fulltest **258/0/18**（**254→258＝#385 的 4 条
+  storm-control 语句入套件**，`contrib/scripts/cli-fulltest-phase2.sh`）、语义 **27/0/2**、lifecycle **22/0/3**、
+  pty **10/10**；`make check` 全绿。**如实边界**：计数路径 `/net/policer/*` 本机读不到 ⇒ 读视图报「不可读（原因）」
+  不伪造 0；pps 换算/出向/port security 白名单不在 v1；Web 卡 Browser Use 复核待办；IPv6 组播 MAC 未单独实测。
+  证据 `docs/evidence/v2-round167-d385-storm-control.txt`；真机已装 2.0.0~dev110。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
