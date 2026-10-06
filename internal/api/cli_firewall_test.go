@@ -221,3 +221,53 @@ func TestFirewallRESTViewNotWired(t *testing.T) {
 		t.Fatalf("应如实说明未接入: %v", view)
 	}
 }
+
+// 决策 #395（R171-14/F6）：applied=false 时读视图**不展示**逐规则计数——即便运行态误带了
+// counts（旧表规则的计数张冠李戴到新配置规则上），读视图也不得暴露。
+func TestFirewallRESTViewHidesCountersWhenUnapplied(t *testing.T) {
+	rt := &fakeFirewallRuntime{state: ksys.FirewallState{
+		Applied:  false,
+		Error:    "作用面与配置不符：数据面按管理口 \"ens160\" 过滤、配置为 \"ens161\"",
+		Counters: map[int]ksys.FirewallCounter{100: {Packets: 3, Bytes: 180}}, // 误带的 counts 也不得展示
+	}}
+	ts := newTestServerOpts(t, Options{Firewall: rt})
+	token := loginAdmin(t, ts)
+
+	doc := map[string]any{"system": map[string]any{
+		"management": map[string]any{"interface": "ens160"},
+		"login":      map[string]any{"users": []map[string]any{superUserDoc()}},
+		"firewall": map[string]any{"default_policy": "drop", "rules": []map[string]any{
+			{"seq": 100, "action": "accept", "source": "192.168.1.0/24", "protocol": "tcp", "port": 22},
+		}},
+	}}
+	if status, _, body := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token, doc, nil); status != http.StatusOK {
+		t.Fatalf("写候选: %d %s", status, body)
+	}
+	if status, _, body := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/configuration/commit", token,
+		map[string]any{"confirmed_minutes": 5}, nil); status != http.StatusOK {
+		t.Fatalf("confirmed 提交: %d %s", status, body)
+	}
+	if status, _, body := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/configuration/commit:confirm", token, nil, nil); status != http.StatusOK {
+		t.Fatalf("确认: %d %s", status, body)
+	}
+
+	status, _, body := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/system/firewall", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /system/firewall: %d %s", status, body)
+	}
+	view := responseObject(t, body)
+	if view["applied"] != false {
+		t.Fatalf("应 applied=false: %v", view)
+	}
+	rules, _ := view["rules"].([]any)
+	if len(rules) != 1 {
+		t.Fatalf("rules 应有 1 条: %v", view["rules"])
+	}
+	r0, _ := rules[0].(map[string]any)
+	if _, ok := r0["packets"]; ok {
+		t.Fatalf("未收敛时不得展示逐规则计数: %v", r0)
+	}
+	if _, ok := r0["bytes"]; ok {
+		t.Fatalf("未收敛时不得展示逐规则计数: %v", r0)
+	}
+}

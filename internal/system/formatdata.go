@@ -83,8 +83,21 @@ type FormatDataResult struct {
 // 逐字段摘取，不重建结构——保留的字段与原文同一份值，单测断言前后逐字段相等。
 func keptConfig(cur model.Config) model.Config {
 	out := model.Config{}
-	// 物理口声明（set interfaces …）：口名/描述/MTU/启停/SR-IOV/ingress-policy 全保留。
-	out.Interfaces = cur.Interfaces
+	// 物理口声明（set interfaces …）：口名/描述/MTU/启停/SR-IOV/风暴抑制全保留；但**悬挂引用**
+	// 清掉（决策 #395/R171-15）：QoS 绑定（ingress/egress-policy）指向的 QosPolicies、端口安全
+	// 白名单依赖的 L2 交换机成员身份都在本次一并删除（两者不在保留节），原样保留会让最小保留
+	// 配置自身过不了提交校验（「限速策略不存在」「不是任何 L2 交换机的静态成员端口」）。
+	// 只清引用、不改对象保留语义。空切片保持 nil（幂等判定用 reflect.DeepEqual，nil 与
+	// 空切片不等价）。
+	if len(cur.Interfaces) > 0 {
+		out.Interfaces = make([]model.InterfaceConfig, len(cur.Interfaces))
+		copy(out.Interfaces, cur.Interfaces)
+		for i := range out.Interfaces {
+			out.Interfaces[i].IngressPolicy = ""
+			out.Interfaces[i].EgressPolicy = ""
+			out.Interfaces[i].PortSecurity = nil
+		}
+	}
 	// DPDK 声明（set vpp dpdk dev …）：只保留 vpp.dpdk 子节，不带 cpu/memory（见文件头 ②）。
 	if cur.Vpp != nil && cur.Vpp.DPDK != nil {
 		out.Vpp = &model.VppConfig{DPDK: cur.Vpp.DPDK}

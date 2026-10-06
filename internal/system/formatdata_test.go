@@ -143,8 +143,19 @@ func TestFormatDataKeepsReservedSectionsVerbatim(t *testing.T) {
 	if !reflect.DeepEqual(got.System.Login, before.System.Login) {
 		t.Errorf("login 节被改动:\n  before=%+v\n  after =%+v", before.System.Login, got.System.Login)
 	}
-	if !reflect.DeepEqual(got.Interfaces, before.Interfaces) {
-		t.Errorf("物理口声明被改动:\n  before=%+v\n  after =%+v", before.Interfaces, got.Interfaces)
+	// 物理口声明：口名/描述/MTU/启停/SR-IOV 逐字段保留；**悬挂引用**（QoS 绑定/端口安全白名单）
+	// 按决策 #395/R171-15 清掉——它们指向本次一并删除的 QosPolicies/VirtualSwitches，
+	// 原样保留会让最小保留配置自身过不了提交校验。
+	wantIfaces := make([]model.InterfaceConfig, len(before.Interfaces))
+	copy(wantIfaces, before.Interfaces)
+	for i := range wantIfaces {
+		wantIfaces[i].IngressPolicy = ""
+		wantIfaces[i].EgressPolicy = ""
+		wantIfaces[i].PortSecurity = nil
+	}
+	if !reflect.DeepEqual(got.Interfaces, wantIfaces) {
+		t.Errorf("物理口声明（清悬挂引用后）被改动:\n  before=%+v\n  want  =%+v\n  after =%+v",
+			before.Interfaces, wantIfaces, got.Interfaces)
 	}
 	if got.Vpp == nil || !reflect.DeepEqual(got.Vpp.DPDK, before.Vpp.DPDK) {
 		t.Errorf("vpp.dpdk 声明被改动: after=%+v", got.Vpp)
@@ -328,3 +339,43 @@ func TestFormatDataPartialFailureReportsResiduals(t *testing.T) {
 type errStub string
 
 func (e errStub) Error() string { return string(e) }
+
+// ---------- ⑤ 保留节悬挂引用收敛（决策 #395/R171-15） ----------
+
+// TestKeptConfigPassesValidationWithDanglingRefs：保留节最小配置必须**自身可过提交校验**——
+// 有 QoS 绑定（ingress/egress-policy）或端口安全白名单（依赖 L2 交换机成员身份）的现场，
+// 这些引用指向本次一并删除的 QosPolicies/VirtualSwitches；保留节若原样照搬，最小配置自身就
+// 过不了校验（「限速策略不存在」「不是任何 L2 交换机的静态成员端口」）。
+func TestKeptConfigPassesValidationWithDanglingRefs(t *testing.T) {
+	up := true
+	cur := model.Config{
+		System: &model.SystemConfig{
+			Management: &model.MgmtConfig{Interface: "ens160"},
+			Login: &model.SystemLogin{Users: []model.LoginUserConfig{
+				{Name: "admin", Class: model.ClassSuperUser, PasswordHash: "h"},
+			}},
+		},
+		Interfaces: []model.InterfaceConfig{
+			{Name: "ens192", Enabled: &up,
+				IngressPolicy: "pol-in", EgressPolicy: "pol-out",
+				PortSecurity: []model.PortSecMAC{"b0:b0:00:00:00:01"}},
+		},
+		QosPolicies: []model.QosPolicy{{Name: "pol-in", Cir: 1000, Cbs: 1000}, {Name: "pol-out", Cir: 1000, Cbs: 1000}},
+		VirtualSwitches: []model.VirtualSwitch{{Name: "vs-app", Type: "l2", VlanAccess: 100,
+			Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens192"}}}},
+	}
+	// 前置：原配置合法（绑定存在、白名单挂在 L2 成员口上）。
+	if errs := model.Validate(cur); len(errs) != 0 {
+		t.Fatalf("前置配置应合法: %v", errs)
+	}
+	kept := keptConfig(cur)
+	if errs := model.Validate(kept); len(errs) != 0 {
+		t.Fatalf("最小保留配置应过提交校验（悬挂引用须清掉）: %v", errs)
+	}
+	// 只清引用、不改对象保留语义：物理口其余字段逐字段保留。
+	if len(kept.Interfaces) != 1 || kept.Interfaces[0].Name != "ens192" ||
+		kept.Interfaces[0].IngressPolicy != "" || kept.Interfaces[0].EgressPolicy != "" ||
+		kept.Interfaces[0].PortSecurity != nil {
+		t.Fatalf("接口应保留但清掉悬挂引用: %+v", kept.Interfaces)
+	}
+}
