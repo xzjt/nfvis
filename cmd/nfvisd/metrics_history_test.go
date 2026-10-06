@@ -180,7 +180,40 @@ func TestMetricsHistoryRunnerPrunesOnSchedule(t *testing.T) {
 	}
 }
 
-// 决策 #372（R142 A2）：间隔**调小**后不再等整段旧睡眠——分片重读使新间隔在下一片内生效
+// 决策 #397（R171-17）：采样循环**不得每秒**读一次 committed 配置——旧实现分片睡眠每片都
+// engine.Committed()（持 engine.mu 做 DB 读 + 全配置反序列化），与所有 CLI/API 配置操作互斥。
+// 用注入的 intervalFn 计数：30 片（30s）内重读应 ≤8 次（约每 5s 一次），旧实现会读 31 次。
+func TestMetricsHistoryRunnerDoesNotReadIntervalEverySecond(t *testing.T) {
+	st := newSamplerStore(t)
+	clock := time.Unix(1_700_000_000, 0)
+	calls, reads := 0, 0
+	r := &metricsHistoryRunner{
+		store: st,
+		now:   func() time.Time { return clock },
+		sleep: func(ctx context.Context, d time.Duration) bool {
+			clock = clock.Add(d)
+			calls++
+			return calls <= 30 // 30 片 = 30s
+		},
+		intervalFn: func() int { reads++; return 3600 },
+		gather: func(ctx context.Context) ([]metrics.Sample, error) {
+			return []metrics.Sample{{Name: "nfvis_t", Value: 1}}, nil
+		},
+		pruneEvery:    time.Hour,
+		maxRows:       metricshist.MaxRows,
+		errorEvery:    0,
+		gatherTimeout: time.Second,
+	}
+	r.run(context.Background())
+
+	if reads == 0 {
+		t.Fatal("间隔至少应读取一次")
+	}
+	if reads > 8 {
+		t.Fatalf("30 片内间隔重读 %d 次（旧实现每秒一次=31）；降频后应 ≤8", reads)
+	}
+}
+
 // （旧实现会先睡满 3600s，读视图按新间隔算 stale 阈值 ⇒ 假 stale）。
 func TestMetricsHistoryRunnerReschedulesOnIntervalShrink(t *testing.T) {
 	st := newSamplerStore(t)

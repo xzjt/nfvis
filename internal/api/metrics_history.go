@@ -38,21 +38,27 @@ func parseHistoryDuration(s string) (time.Duration, error) {
 	if err != nil || n <= 0 {
 		return 0, fmt.Errorf("无效时长 %q（须为正整数 + 单位 s|m|h|d，如 30s / 5m / 1h / 2d）", s)
 	}
-	var d time.Duration
+	var u time.Duration
 	switch unit {
 	case 's':
-		d = time.Duration(n) * time.Second
+		u = time.Second
 	case 'm':
-		d = time.Duration(n) * time.Minute
+		u = time.Minute
 	case 'h':
-		d = time.Duration(n) * time.Hour
+		u = time.Hour
 	case 'd':
-		d = time.Duration(n) * 24 * time.Hour
+		u = 24 * time.Hour
 	default:
 		return 0, fmt.Errorf("无效时长 %q（单位须为 s|m|h|d，如 30s / 5m / 1h / 2d）", s)
 	}
-	// 决策 #372（R142 A7）：上界 + 防溢出——大 n 的乘法会溢出 int64（变成负数或小值），
-	// 窗口算术据此给出误导性结果。超界/溢出即报错，不给「看起来对」的窗口。
+	// 决策 #372（R142 A7）+ 决策 #397（R171-17）：上界 + **乘法前**防溢出。
+	// 此前在乘法之后判 d（`time.Duration(n) * u` 会回绕）——存在 n 使乘积回绕成 (0, 3650d]
+	// 内的正值（真机：18446744074s 回绕成 290ms），被当合法时长、给出误导性窗口。
+	// 现在先按上界夹取：n 超过 上界/u 即拒绝，不做会溢出的乘法。
+	if n > int(historyMaxDuration/u) {
+		return 0, fmt.Errorf("时长 %q 超界：上限 3650d（超界或溢出不会给出误导性窗口）", s)
+	}
+	d := time.Duration(n) * u
 	if d <= 0 || d > historyMaxDuration {
 		return 0, fmt.Errorf("时长 %q 超界：上限 3650d（超界或溢出不会给出误导性窗口）", s)
 	}
@@ -206,9 +212,11 @@ func (s *Server) metricsHistoryView(name string, since, until, step int64, limit
 	if qerr != nil {
 		// 库可打开但查询失败：**不得**答成「窗口内无数据」——那会把「读不出来」说成「没有」。
 		// 如实降级为 available=false + reason（本视图这一次不可信），series 保持空数组。
+		// 决策 #397（R171-17，#372 A5 同族漏网）：`enabled` 语义＝**存储是否启用**，查询失败
+		// **不翻 false**（否则把「启用但读不到」说成「未启用」）；读取失败如实进 reason 与 store.error。
 		view["available"] = false
 		view["reason"] = "历史时序查询失败：" + qerr.Error()
-		store["enabled"] = false
+		store["error"] = qerr.Error()
 		if s.log != nil {
 			s.log.Warn("历史时序查询失败", "name", name, "err", qerr)
 		}
