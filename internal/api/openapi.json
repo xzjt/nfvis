@@ -2336,7 +2336,7 @@
       "Route": {
         "properties": {
           "distance": {
-            "default": 1,
+            "description": "管理距离：**当前版本仅记录在配置里、不参与选路**（数据面路由 API 不接收该参数），\n运行态读视图不给出该值；未设置时字段省略。\n",
             "type": "integer"
           },
           "next_hop": {

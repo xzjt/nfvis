@@ -630,13 +630,13 @@ set learn-limit <n>                                  # MAC 学习条数上限（
                                                      #   （超限拒绝并说明；VPP 默认 16777216 即不设限）。
                                                      #   候选为取值（无枚举）；校验在模型 validate。
 delete learn-limit                                   # 清上限（恢复 VPP 默认 16777216，幂等）
-set ports [<seq>] interface <ifname> [trunk vlans <vlan-list> | native <vlan>]
-set ports [<seq>] vnf <vm-name> interface <vnic-name> [trunk vlans <vlan-list>]
-set ports [<seq>] container <ct-name> interface <vnic-name>
+set ports <seq> interface <ifname> [trunk vlans <vlan-list> | native <vlan>]
+set ports <seq> vnf <vm-name> interface <vnic-name> [trunk vlans <vlan-list>]
+set ports <seq> container <ct-name> interface <vnic-name>    # <seq> 为必填端口序号（实现如此，无省略写法）
 set cross-connect <port-a> <port-b>                  # 两端口直通模式（与 ports/gateway 互斥）
 # —— L3 ——
 set l3-interface <ifname|vlan <v>> ip address <ip-prefix>    # IPv4/IPv6，可配多条
-set static-routes <ip-prefix> next-hop <ip> [distance <uint>]  # 目的与下一跳支持 v4/v6
+set static-routes <ip-prefix> next-hop <ip> [distance <uint>]  # 目的与下一跳支持 v4/v6；多个用逗号分隔＝ECMP（≤8，前缀与下一跳须同族）；distance 仅记录、不参与选路
 set static-routes default next-hop <ip>
 ```
 
