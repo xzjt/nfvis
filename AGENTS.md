@@ -914,6 +914,19 @@
   **如实边界**：不做热插拔 / vfio 绑定解绑 / GPU 专用特性 / IOMMU 分组校验；**实际直通端到端未验**
   （宿主为 VMware guest、无 IOMMU 直通能力，只做配置面 + 降级路径）。证据
   `docs/evidence/v2-round165-d384-pci-passthrough.txt`；真机已装 2.0.0~dev108。
+- **round166（storm control 能力前提 spike + 契约先行，2026-10-06）**：按纪律**先 spike 后实现**——
+  VPP 26.06 **无 `storm` 命名 API**，但**有等价原语且整链真机跑通**：`policer_add_del`（1r2c/kbps）
+  + `classify_add_del_table`（**L2 掩码**：16 字节向量前 6 字节 `0xff`＝目的 MAC、`skip_n_vectors=0`/`match_n_vectors=1`）
+  + `classify_add_del_session`（match＝广播 MAC；**`opaque_index` = policer index**）
+  + **`policer_classify_set_interface`**（`l2_table_index` 挂该接口**入向**路径）——实测 `show policer`
+  与 `show classify tables` 均按预期出现（`SPIKE-RESULT: chain OK`）。⚠️ **`Cb` 必须非 0**（`Cb: 0` 报
+  `Invalid value (-7)`，踩坑入册）。**契约（决策 #385）已落**：`set interfaces <if> storm-control
+  broadcast|multicast <kbps>`（入向、超速丢弃、**单位 kbps 不换算**、每接口一张 L2 表、
+  policer 名 `nfvis-storm-<if>-<kind>`、**变更先撤旧后建新**、随接口注册重放、三面读视图含 policer 实测计数）；
+  **如实边界**：**unknown-unicast 不做**（L2 掩码无法表达「目的 MAC 未学习」）、pps 换算/出向/port security
+  白名单不在 v1。**实现与真机四维（含「实验组 vs 对照组以 vppctl 计数为独立事实源」的定量对照）待执行**。
+  spike 现场已清（删 spike 程序 + `request vpp restart` ⇒ policer/classify 0 残留，未动产品配置）。
+  证据 `docs/evidence/v2-round166-storm-control-spike.txt`；真机仍 2.0.0~dev108。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
