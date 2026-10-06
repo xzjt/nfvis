@@ -161,6 +161,18 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 			record("vrfs/"+vrf.Name, err)
 		}
 	}
+	// VXLAN 隧道（决策 #383）：VPP 重启后隧道条目全失（接口与 BD 归属一并消失），不重放即
+	// 静默丢 overlay（与 L2-2/#335 同族教训）。放在交换机/VRF **之后**：声明了 virtual-switch
+	// 的隧道要入该 L2 交换机的 BD，BD 此刻已重建。走 ApplyVxlan 的**按 tag 判存量**路径
+	// （prev=nil；不靠进程内登记/接口名——VPP 26.06 的 vxlan dump 恒空），tag 在则不重复建。
+	// 只补齐不摘除（附录 A #35）：删隧道走提交编排。
+	if n.vxlan != nil {
+		for _, t := range cfg.VxlanTunnels {
+			if err := n.ApplyVxlan(ctx, t, nil); err != nil {
+				record("vxlan-tunnels/"+t.Name, err)
+			}
+		}
+	}
 	// L3 侧登记重建：恢复收敛开头已失效全部进程内登记，而 NAT 的 inside/outside 解析只读 L3 侧
 	// 三张表（ifaces / ifaceTable / vnfs）——登记缺项会让 NAT 认为「该口不该有特性」而下发删除，
 	// 登记整体为空时更会把插件当作「没有 NAT 配置」直接关掉：真机实测 `systemctl restart vpp`
@@ -310,6 +322,8 @@ func (n *L2Network) resetProviders() {
 	if n.dns != nil {
 		n.dns.reset()
 	}
+	// 决策 #383：VPP（重）连接后隧道条目全失（接口与平台标记一并消失）——VxlanProvider 不持
+	// 进程内登记，恢复收敛直接按接口 tag 判存量（在则不动、不在则按配置建），故此处无需失效。
 	if n.lldp != nil {
 		n.lldp.reset()
 	}

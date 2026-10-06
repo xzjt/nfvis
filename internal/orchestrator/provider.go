@@ -152,6 +152,13 @@ type NetworkProvider interface {
 	DeleteSpan(ctx context.Context, name string) error
 	ApplyQos(ctx context.Context, q model.QosPolicy) error
 	DeleteQos(ctx context.Context, name string) error
+	// ApplyVxlan 收敛一条 VXLAN 隧道声明（决策 #383）：prev 为提交 diff 里的**旧声明**
+	// （nil = 新建/恢复重放）——旧元组与本次不同时先按旧元组撤、再按新元组建 + 打平台标记 +
+	// 置 up + 入 BD；同元组且数据面已有该名字的隧道口（接口 tag 识别）时不重复建。
+	ApplyVxlan(ctx context.Context, t model.VxlanTunnel, prev *model.VxlanTunnel) error
+	// DeleteVxlan 撤销一条 VXLAN 隧道（传入被删掉的**旧声明**）：按它的元组撤条目、按它的
+	// virtual-switch 摘 BD 归属；该名字的隧道口不在数据面＝已达成。
+	DeleteVxlan(ctx context.Context, t model.VxlanTunnel) error
 
 	// ApplyVnfInterface 建立 VNF vNIC 的接入（FR-NET-020/021/023）：vhost-user 时
 	// 在 VPP 侧建 socket 接口并命名（交换机端口随后按名挂接）；sriov-vf 不经 VPP。
@@ -276,11 +283,15 @@ func (noopNetwork) UnbindL3IfaceACL(context.Context, string, model.L3Interface) 
 func (noopNetwork) DeleteL3Interface(context.Context, string, model.L3Interface) error {
 	return nil
 }
-func (noopNetwork) ApplyNAT(context.Context, model.NatConfig) error          { return nil }
-func (noopNetwork) ApplySpan(context.Context, model.PortMirroring) error     { return nil }
-func (noopNetwork) DeleteSpan(context.Context, string) error                 { return nil }
-func (noopNetwork) ApplyQos(context.Context, model.QosPolicy) error          { return nil }
-func (noopNetwork) DeleteQos(context.Context, string) error                  { return nil }
+func (noopNetwork) ApplyNAT(context.Context, model.NatConfig) error      { return nil }
+func (noopNetwork) ApplySpan(context.Context, model.PortMirroring) error { return nil }
+func (noopNetwork) DeleteSpan(context.Context, string) error             { return nil }
+func (noopNetwork) ApplyQos(context.Context, model.QosPolicy) error      { return nil }
+func (noopNetwork) DeleteQos(context.Context, string) error              { return nil }
+func (noopNetwork) ApplyVxlan(context.Context, model.VxlanTunnel, *model.VxlanTunnel) error {
+	return nil
+}
+func (noopNetwork) DeleteVxlan(context.Context, model.VxlanTunnel) error     { return nil }
 func (noopNetwork) ApplyVnfInterface(context.Context, VnfPort) error         { return nil }
 func (noopNetwork) DeleteVnfInterface(context.Context, string, string) error { return nil }
 func (noopNetwork) EnsureConsistent(context.Context, model.Config) []error   { return nil }

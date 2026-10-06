@@ -879,11 +879,30 @@
   现场已清（vs-ecmp 删、ens224 还原 disable）。**四套件（dev105）**：fulltest **254/0/18**、语义 **27/0/2**、
   lifecycle **22/0/3**、pty **10/10**；`make check` 全绿。证据
   `docs/evidence/v2-round163-d381-d382-ecmp-and-route-change.txt`；真机已装 2.0.0~dev105。
+- **round164（VXLAN overlay v1，2026-10-06）**：**#383 交付**（收口 `docs/v2待做.md` 一.2）——
+  `set vxlan tunnels <name> vni <id> local <ip> remote <ip> [dst-port <n>] [virtual-switch <vs>]`
+  → VPP `vxlan_add_del_tunnel_v3` 建隧 + 打 **tag** + 置 up + 入 **L2** BD；提交期校验（vni 域 / IPv4 同族 /
+  去重 / 同 VNI / **被隧道引用的交换机不得删**）；三面读视图（CLI / REST / Web）。
+  **底座缺口当场定形（#338/#357 纪律再次兑现）**：**VPP 26.06 的 `vxlan_tunnel_dump`/`vxlan_tunnel_v2_dump`
+  实测恒空**——govpp spike 直连 VPP 分别按 V1/V2 发 dump 都立即 `<stop>`、零条目，而 `vppctl show vxlan tunnel`
+  有条目；两版 dump 的 CRC 同为 `f9e6675e`、与 VPP 自带 `vxlan.api.json` 及本仓 binapi **逐一吻合**
+  ⇒ **不是版本不符，是底座 dump 恒空**（与 #339「ACL 计数只注册不写」同类）。**身份改用接口 tag**
+  （`nfvis-vxlan:<name>`；`sw_interface_tag_add_del` 打标、`sw_interface_dump` 的 `tag` 回读；与 #359 tap 按
+  HostIfName 同族）；变更撤旧/删除按**旧声明的元组**（提交 diff 里拿得到，**不依赖 dump**，同 #380 的教训）；
+  重放按 tag 判存量（在则不动、不在则建）；实例号**交 VPP 自动分配**（传 ~0）；读视图**如实标注**
+  「参数以配置为准」（底座无 dump 可回读）。**真机四维（dev107）**：建隧 ⇒ `show vxlan tunnel` 逐字对 +
+  BD 成员（`show bridge-domain <id> detail` 里 `vxlan_tunnel0` 与 `bvi0` 并列）+ 读视图「已在 VPP（接口
+  vxlan_tunnel0）」（**两个此前未验证的 tag API 一并定形**）；改 remote ⇒ 只余新的一条；`restart nfvis`
+  （VPP 未重启）⇒ **不重复建**；`request vpp restart` ⇒ 重放重建；对抗（删被引用交换机 / 同 VNI）双双拒绝
+  并给照做路径；删隧 ⇒ VPP 0 条 + BD 成员 0；现场已清。**四套件（dev107）**：fulltest **254/0/18**、
+  语义 **26/0/3**（**S8 冷窗**——本轮夹具起来后窗口内无流量；S11/S12 按设计，**非回归**）、lifecycle **22/0/3**、
+  pty **10/10**；`make check` 全绿。**如实登记**：Web 卡 Browser Use 复核待办；跨宿主隧道端到端未做（无对端）。
+  证据 `docs/evidence/v2-round164-d383-vxlan.txt`；真机已装 2.0.0~dev107。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
-- 已定决策 284 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#382，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 285 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#383，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。

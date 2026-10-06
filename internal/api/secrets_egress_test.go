@@ -296,6 +296,7 @@ var secretEgressRoutes = map[string]string{
 	"/ui/":                              "同上",
 	"/virtual-machine-functions":        "资源列表（配置视图），无秘密字段",
 	"/virtual-machine-functions/{name}": "同上（cloud_init.user_data 属已知例外）",
+	"/vxlan-tunnels":                    "VXLAN 隧道读视图（配置声明 + 数据面 sw_if_index/instance），无秘密字段",
 	"/virtual-machine-functions/{name}/console/ws": "串口 console（一次性 ticket 鉴权；guest 内容，例外同容器日志）",
 	"/virtual-machine-functions/{name}/snapshots":  "快照清单元数据",
 	"/virtual-switches":                            "配置段视图",

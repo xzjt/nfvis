@@ -283,6 +283,7 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	oldBonds := nameMap(old.Bonds, func(x model.Bond) string { return x.Name })
 	oldPMs := nameMap(old.PortMirroring, func(x model.PortMirroring) string { return x.Name })
 	oldQoS := nameMap(old.QosPolicies, func(x model.QosPolicy) string { return x.Name })
+	oldVxlan := nameMap(old.VxlanTunnels, func(x model.VxlanTunnel) string { return x.Name })
 
 	var ops []op
 	if err := vnicSwitchRefErr(newRefErrs); err != nil {
@@ -427,6 +428,34 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			}
 		}
 	}
+	// —— 新增/变更：VXLAN 隧道（决策 #383，FR-NET-019）——
+	// 放在交换机（L2 BD）与 VRF **之后**：声明了 virtual-switch 的隧道口要加入该交换机的 BD，
+	// BD 必须先在。**变更撤旧由 provider 按这里传进去的旧声明完成**——旧元组就在旧配置里
+	// （不依赖数据面 dump，真机实证 26.06 的 vxlan dump 恒空；同 #380 的教训：只 add 不撤会
+	// 留下旧条目继续可达）。undo 与 run 对偶：把隧道收敛回旧声明（并据此撤掉新元组），
+	// 新建的删除向＝DeleteVxlan。
+	for _, vx := range new.VxlanTunnels {
+		o, inOld := oldVxlan[vx.Name]
+		if inOld && configEqual(o, vx) {
+			continue
+		}
+		vx, o := vx, o
+		var prev *model.VxlanTunnel
+		if inOld {
+			prev = &o
+		}
+		ops = append(ops, op{
+			desc: fmt.Sprintf("vxlan[%s]", vx.Name),
+			run:  func(ctx context.Context) error { return a.net.ApplyVxlan(ctx, vx, prev) },
+			undo: func(ctx context.Context) error {
+				if inOld {
+					return a.net.ApplyVxlan(ctx, o, &vx) // 收敛回旧声明，并撤掉新元组
+				}
+				return a.net.DeleteVxlan(ctx, vx)
+			},
+		})
+	}
+
 	// —— 新增/变更：数据面 DNS 代理（决策 #345，FR-NET-010）——
 	// vpp 段 + 各交换机段的伴随操作：全局或任一交换机非空 ⇒ 注册 punt socket 并起域内转发器；
 	// 全空 ⇒ 注销（VPP 恢复默认处理）。声明未变时 Sync 内部按状态幂等跳过；undo 收敛回旧声明。
@@ -547,6 +576,22 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	// 网络（bd/vrf → span/qos），与新增顺序相反（决策 #342，同 #196「先解引用、后删被引用」）。
 	// ACL 删除内含「解绑引用它的接口」，若接口先被交换机/VM 删除，解绑必然撞 VPP -2 并整次回滚
 	// （真机 round117/119/120 四次复现）。故 ACL 排在容器/VM/bd/vrf 之前。
+	//
+	// VXLAN 隧道在删除段**最前**：隧道口是 bridge-domain 的成员口，BD 还有成员时 VPP 拒绝
+	// 删除（-120）；配置里消失的隧道必须在此显式撤销——只从配置移除会留下隧道条目与该 BD
+	// 归属。身份取 `Name`（#382 的教训：差分键要能反映「同一对象」）；undo 按**该旧声明**
+	// 重建（prev=nil：重放路径按接口标记判存量，不会与既有条目重复建）。
+	for _, vx := range old.VxlanTunnels {
+		if _, ok := newVxlanNames(new)[vx.Name]; ok {
+			continue
+		}
+		vx := vx
+		ops = append(ops, op{
+			desc: fmt.Sprintf("del-vxlan[%s]", vx.Name),
+			run:  func(ctx context.Context) error { return a.net.DeleteVxlan(ctx, vx) },
+			undo: func(ctx context.Context) error { return a.net.ApplyVxlan(ctx, vx, nil) },
+		})
+	}
 	for _, acl := range old.Acls {
 		if _, ok := newACLNames(new)[acl.Name]; !ok {
 			acl := acl
@@ -880,6 +925,14 @@ func newQoSNames(c model.Config) map[string]bool {
 	m := map[string]bool{}
 	for _, q := range c.QosPolicies {
 		m[q.Name] = true
+	}
+	return m
+}
+
+func newVxlanNames(c model.Config) map[string]bool {
+	m := map[string]bool{}
+	for _, t := range c.VxlanTunnels {
+		m[t.Name] = true
 	}
 	return m
 }

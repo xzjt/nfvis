@@ -1521,6 +1521,28 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DnsProxyView" }
+  /vxlan-tunnels:
+    get:
+      tags: [network]
+      summary: VXLAN 隧道读视图（配置声明 × 数据面实况；FR-NET-019，决策 #383）
+      description: |
+        v1 只做**单播 remote、IPv4 下垫层、L2 成员**（隧道口可加入某 L2 交换机的 bridge-domain）。
+        运行态按**接口 tag**（平台在隧道口上打的 `nfvis-vxlan:<名>`，经 `sw_interface_dump` 的
+        tag 字段回读）识别「该名字的隧道口在不在数据面」——**不依赖 vxlan dump、也不依赖 VPP
+        分配的接口名**：真机实证 VPP 26.06 的 `vxlan_tunnel_dump` / `vxlan_tunnel_v2_dump`
+        恒空（CRC 与本仓 binapi 逐一吻合、govpp 按 V1/V2 发都零条目，而 vppctl 看得到隧道），
+        属底座缺口。**如实边界**：本视图只能回答「该名字的隧道口在不在」；VNI/下垫地址/端口
+        **以配置为准**（底座没有可回读隧道参数的清单），不声称从数据面核对过它们。
+        配置变更（改 vni/local/remote/dst-port）在提交期按**旧配置的元组**先撤旧条目再建新；
+        `request vpp restart`/`systemctl restart nfvis` 后按 committed 配置重放（接口标记已在
+        即不重复建）。运行态不可用时 `runtime_available=false` 并给出原因，各条 `in_vpp` 不可信
+        （不把「说不清」报成「未收敛」）。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VxlanTunnelsView" }
   /vpp/capture:
     get:
       tags: [system]
@@ -2821,6 +2843,75 @@ components:
               name: { type: string }
               servers: { type: array, items: { type: string } }
 
+    VxlanTunnel:
+      type: object
+      description: |
+        VXLAN overlay 隧道（FR-NET-019，决策 #383）。`name` 是产品侧标识——数据面身份是平台
+        打在隧道口上的接口 tag（`nfvis-vxlan:<名>`），VPP 分配的接口名与 instance 产品都不依赖：
+        恢复重放按 tag 判存量、变更撤旧按**旧配置的元组**（真机实证 VPP 26.06 的 vxlan dump
+        恒空，没有可回读隧道参数的清单）。`virtual-switch` 可选，给了就把隧道口加入该 **L2**
+        交换机的 bridge-domain。v1 边界（如实）：单播 remote（不做组播/BUM 复制）、IPv4 下垫层、
+        L2 成员（隧道作 L3 接口、跨 VRF 建隧、VXLAN-GPE 均不做），`dst_port` 以外的封装参数不做。
+      required: [name, vni, local, remote, dst_port]
+      properties:
+        name:
+          type: string
+          description: 隧道名（产品侧标识；字母数字与 -_.；最长 51 字符——数据面接口 tag 的 63 字节上限减去平台前缀）
+        vni:
+          type: integer
+          description: VXLAN Network Identifier（1-16777215；同 VNI 只能有一条隧道）
+        local:
+          type: string
+          description: 本地下垫地址（IPv4）
+        remote:
+          type: string
+          description: 远端下垫地址（IPv4 单播；不得与 local 相同）
+        dst_port:
+          type: integer
+          description: 目的 UDP 端口（读视图给**生效值**：未配置回落 4789；写入时 1-65535，省略即 4789）
+        virtual_switch:
+          type: string
+          description: 加入该 L2 交换机的 bridge-domain（必须是已声明的 L2 交换机；被隧道引用的交换机不得删除——先解引用）
+
+    VxlanTunnelsView:
+      type: object
+      description: |
+        VXLAN 隧道读视图（`GET /vxlan-tunnels`；与 CLI `show vxlan tunnels` 同源，决策 #383）。
+        运行态按**接口 tag**（`sw_interface_dump` 的 tag 字段）逐条识别「该名字的隧道口在不在
+        数据面」——**不依赖 vxlan dump、也不依赖 VPP 分配的接口名**（26.06 的 dump 恒空，
+        属底座缺口）。**如实边界**：本视图只能回答「该名字的隧道口在不在」；VNI/下垫地址/端口
+        **以配置为准**，不声称从数据面回读/核对过它们。运行态不可用时 `runtime_available=false`
+        并给出原因——此时各条的 `in_vpp` **不可信**（不是「不在数据面」，是「说不清」）。
+      required: [tunnels, runtime_available]
+      properties:
+        tunnels:
+          type: array
+          description: 配置声明的隧道（按声明序；未声明时为空数组，不发 null）
+          items:
+            allOf:
+              - $ref: "#/components/schemas/VxlanTunnel"
+              - type: object
+                required: [runtime_available, in_vpp]
+                properties:
+                  runtime_available:
+                    type: boolean
+                    description: 本条所在读视图的运行态是否可用（false 时 in_vpp 不可信）
+                  in_vpp:
+                    type: boolean
+                    description: 该名字的隧道口是否已在数据面（按接口 tag 识别；runtime_available=false 时不可信）
+                  sw_if_index:
+                    type: integer
+                    description: 数据面 sw_if_index（仅 in_vpp=true 时给出）
+                  interface_name:
+                    type: string
+                    description: 数据面接口名（由 VPP 分配，仅供展示与对照；仅 in_vpp=true 时给出）
+        runtime_available:
+          type: boolean
+          description: 数据面运行态是否可用（false 时逐条 in_vpp 不可信，原因见 runtime_reason）
+        runtime_reason:
+          type: string
+          description: 运行态不可用的原因（可用时不出现）
+
     CaptureFile:
       type: object
       description: 已导出的 pcap 文件
@@ -3687,6 +3778,10 @@ components:
         qos_policies:
           type: array
           items: { $ref: "#/components/schemas/QosPolicy" }
+        vxlan_tunnels:
+          type: array
+          description: VXLAN overlay 隧道（FR-NET-019，决策 #383；单播 remote、IPv4 下垫层、L2 成员）
+          items: { $ref: "#/components/schemas/VxlanTunnel" }
         resource_pools: { $ref: "#/components/schemas/ResourcePool" }
         vpp:
           $ref: "#/components/schemas/VppConfig"

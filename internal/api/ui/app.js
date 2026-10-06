@@ -419,15 +419,16 @@ async function loadVSwitchStats(vss) {
 // LLDP 不在这一页：它的开关状态与邻居表有自己的页面（#/network/lldp）——本页只取路由表声明的端点。
 async function loadNetworkObjects(pre) {
   const pick = (path, fetchIt) => (pre && pre[path] !== undefined ? pre[path] : fetchIt());
-  const [vrfs, acls, nat, bonds, qos, span] = await Promise.all([
+  const [vrfs, acls, nat, bonds, qos, span, vxlan] = await Promise.all([
     pick('/vrfs', () => soft(api('/vrfs'))),
     pick('/acls', () => soft(api('/acls'))),
     pick('/nat', () => soft(api('/nat'))),
     pick('/bonds', () => soft(api('/bonds'))),
     pick('/qos/policies', () => soft(api('/qos/policies'))),
     pick('/port-mirroring', () => soft(api('/port-mirroring'))),
+    pick('/vxlan-tunnels', () => soft(api('/vxlan-tunnels'))),
   ]);
-  return { vrfs, acls, nat, bonds, qos, span };
+  return { vrfs, acls, nat, bonds, qos, span, vxlan };
 }
 
 // 逐口取统计（列表端点只有配置字段；收发包数在 /interfaces/<name> 上）。
@@ -5343,6 +5344,15 @@ const NET_OBJECT_VIEWS = [
   ['端口镜像（SPAN）', 'span', ['名称', '源', '目的'], (s) => [
     s.name, list(s.sources || s.source), s.destination,
   ], '#/network/span/'],
+  // VXLAN 隧道（决策 #383）：读 GET /vxlan-tunnels（配置声明 × 数据面实况，与 CLI
+  // `show vxlan tunnels` 同源）。「状态」列取 `in_vpp`（数据面上有没有**该名字**的隧道口——
+  // 按平台打在接口上的标记识别；底座没有可回读隧道参数的清单，VNI/地址/端口以配置为准）。
+  // 运行态不可用时逐条如实标「运行态不可用」——此时 in_vpp 不可信，不把「说不清」当「未收敛」。
+  ['VXLAN 隧道', 'vxlan', ['名称', 'VNI', '本地 → 远端', '端口', '交换机', '状态'], (t) => [
+    t.name, t.vni, (t.local || '—') + ' → ' + (t.remote || '—'), t.dst_port, t.virtual_switch,
+    t.runtime_available === false ? '运行态不可用'
+      : (t.in_vpp ? '已在 VPP（接口 ' + dash(t.interface_name) + '）' : '未收敛'),
+  ]],
 ];
 
 // natRows 把 NAT 配置对象摊平成行（池 / 规则 / 静态映射各一行）。
@@ -5353,6 +5363,15 @@ function natRows(nat) {
   (nat.rules || []).forEach((r) => rows.push({ kind: '规则 ' + (r.seq != null ? r.seq : ''), summary: (r.match_source || '') + ' → ' + (r.virtual_switch || '') }));
   (nat.static || nat.static_mappings || []).forEach((m) => rows.push({ kind: '静态映射', summary: (m.external || '') + ' → ' + (m.internal || '') }));
   return rows;
+}
+
+// vxlanRows：GET /vxlan-tunnels 的响应是 {tunnels, runtime_available, runtime_reason}
+// 的对象（不是裸数组），卡片取其中的 tunnels；读取失败/形状不符时返回空表（如实显示「无」）。
+// 运行态不可用时把 runtime_available=false 透传到每一行（渲染的「状态」列据此如实标注）。
+function vxlanRows(vx) {
+  if (!vx || vx.__err || !Array.isArray(vx.tunnels)) return [];
+  const ok = vx.runtime_available !== false;
+  return vx.tunnels.map((t) => Object.assign({}, t, { runtime_available: ok }));
 }
 
 function renderNetworkObjects(nets) {
@@ -5371,7 +5390,8 @@ function renderNetworkObjects(nets) {
       box.appendChild(wrap);
       return;
     }
-    const rows = key === 'nat' ? natRows(data) : (Array.isArray(data) ? data : (data ? [data] : []));
+    const rows = key === 'nat' ? natRows(data)
+      : (key === 'vxlan' ? vxlanRows(data) : (Array.isArray(data) ? data : (data ? [data] : [])));
     const t = el('table');
     const thead = el('thead');
     const htr = el('tr');

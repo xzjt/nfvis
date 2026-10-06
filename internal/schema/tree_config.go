@@ -381,6 +381,20 @@ func ConfigPathTree() *Node {
 				),
 			),
 		),
+		// 决策 #383：VXLAN overlay v1（VPP vxlan plugin）。单播 remote、IPv4 下垫层；
+		// 可选 virtual-switch 把隧道口加入该 **L2** 交换机的 bridge-domain（与端口同级语义，
+		// L3 交换机没有 BD 故提交期拒绝）。模型落点 vxlan_tunnels（别名 cli_aliases_vxlan.go）。
+		K("vxlan", "VXLAN overlay（VPP vxlan plugin；单播 remote）",
+			K("tunnels", "VXLAN 隧道（v1 只做 L2 成员）",
+				P("<name>", "隧道名", "",
+					K("vni", "VNI（1-16777215）", V("uint", "1-16777215")),
+					K("local", "本地下垫地址（IPv4）", V("ip", "地址")),
+					K("remote", "远端下垫地址（IPv4，单播）", V("ip", "地址")),
+					Opt(K("dst-port", "目的端口（缺省 4789）", V("uint", "1-65535"))),
+					Opt(K("virtual-switch", "加入该 L2 交换机的 BD", SPD("<name>", "virtual_switch", "交换机名", DynVSwitches))),
+				),
+			),
+		),
 
 		// —— resource-pools（§2.6，FR-CMP-001/005、FR-SYS-002/003）——
 		K("resource-pools", "全局资源池（变更需 reboot，commit 时提示）",

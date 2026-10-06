@@ -75,6 +75,10 @@ var shapeConditional = map[string]map[string]string{
 		"reason":    "仅当 available=false 时出现（如实说明不可用原因；可用时省略，不编造）",
 		"truncated": "仅当点集被 step/limit 裁剪时出现（未裁剪时省略）",
 	},
+	"GET /vxlan-tunnels": {
+		// 决策 #383：运行态不可用（未注入/数据面未连接）时给出原因；可用时省略（不编造）。
+		"runtime_reason": "仅当 runtime_available=false 时出现（如实说明不可用原因；可用时省略，不编造）",
+	},
 }
 
 // TestResponseShapeMatchesContract 契约声明的响应字段必须出现在实际响应里。
@@ -113,6 +117,7 @@ func TestResponseShapeMatchesContract(t *testing.T) {
 		{"GET", "/login-banner"},              // 决策 #303：登录横幅（未设置时走白名单省略）
 		{"GET", "/configuration/permissions"}, // 决策 #304：生效权限视图（调用者自己 class）
 		{"GET", "/metrics/history"},           // 决策 #356：历史时序读视图（不可用时仍 200 + available=false + reason）
+		{"GET", "/vxlan-tunnels"},             // 决策 #383：VXLAN 隧道读视图（运行态不可用时仍 200 + runtime_available=false + reason）
 	} {
 		props := declaredProps(t, spec, ep.path, ep.method)
 		if len(props) == 0 {

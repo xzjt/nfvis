@@ -108,6 +108,10 @@ var contractStatements = []string{
 	"set container-functions sbc-ct1 env TEST_KEY test_value",
 	// 内核基线（决策 #105）：低延迟参数组的显式开关（bool 叶子，落 model.System.Kernel.LowLatency）
 	"set system kernel low-latency true",
+	// VXLAN overlay（决策 #383，§2.5 高级网络功能）：三件必填 + 可选 dst-port/virtual-switch
+	"set vxlan tunnels tun-a vni 100 local 10.99.0.1 remote 10.99.0.2",
+	"set vxlan tunnels tun-a vni 100 local 10.99.0.1 remote 10.99.0.2 dst-port 5789",
+	"set vxlan tunnels tun-a vni 100 local 10.99.0.1 remote 10.99.0.2 virtual-switch vs-a",
 }
 
 func TestCLIStatementMappingGuard(t *testing.T) {
@@ -139,6 +143,10 @@ func TestCLIStatementMappingGuard(t *testing.T) {
 			}
 			if strings.Contains(stmt, "ports 2 container sbc-ct1") {
 				pre = append(pre, "set container-functions sbc-ct1 image alpine:3.20")
+			}
+			// VXLAN 隧道的 virtual-switch 引用 L2 交换机（提交期校验要求存在且为 L2）。
+			if strings.Contains(stmt, "vxlan tunnels") && strings.Contains(stmt, "virtual-switch") {
+				pre = append(pre, "set virtual-switches vs-a type l2")
 			}
 			// cross-connect 引用的是**已声明的端口序号**（模型只有 cross_connect bool，
 			// 端口身份由 ports 列表承担），故须先声明两个端口。
@@ -215,6 +223,13 @@ func TestCLIStatementMappingDelete(t *testing.T) {
 			"set virtual-machine-functions fw-vm image base.qcow2",
 			"set virtual-switches vs-a ports 1 vnf fw-vm interface eth0"},
 			"delete virtual-switches vs-a ports 1 vnf fw-vm"},
+		// VXLAN（决策 #383）：逐叶子删除（值 token 容错）与整条删除
+		{[]string{"set vxlan tunnels tun-b vni 100 local 10.99.0.1 remote 10.99.0.2 dst-port 5789"},
+			"delete vxlan tunnels tun-b dst-port"},
+		{[]string{"set vxlan tunnels tun-b vni 100 local 10.99.0.1 remote 10.99.0.2 dst-port 5789"},
+			"delete vxlan tunnels tun-b dst-port 5789"},
+		{[]string{"set vxlan tunnels tun-b vni 100 local 10.99.0.1 remote 10.99.0.2"},
+			"delete vxlan tunnels tun-b"},
 	}
 	for _, c := range cases {
 		c := c

@@ -96,6 +96,7 @@ type cliExecutor struct {
 	natRT   NatSessionsRuntime // NAT 会话（nil = 报未接入）
 	alarms  AlarmRuntime       // 告警表（nil = 报未接入）
 	dhcpSrv DHCPServerRuntime  // DHCP 服务器运行态（决策 #359：dhcp-leases 与 detail 块；nil = 报未收敛）
+	vxlan   VxlanRuntime       // VXLAN 隧道运行态（决策 #383：show vxlan tunnels；nil = 报未接入）
 	// 计算/容器/镜像运行态（M4-12；nil = 对应命令报未接入，与 HTTP 端点 503 一致）
 	vm           VMRuntime
 	console      VMConsoleRuntime
@@ -270,6 +271,9 @@ func (x *cliExecutor) setNetRuntime(l2 L2Runtime, l3 L3Runtime, lldp LldpRuntime
 // setDHCPServer 注入 DHCP 服务器运行态读物（决策 #359：`show virtual-switches <n>
 // dhcp-leases` 与 detail 的「DHCP 服务器」块；nil = 命令报未收敛）。
 func (x *cliExecutor) setDHCPServer(d DHCPServerRuntime) { x.dhcpSrv = d }
+
+// setVxlan 注入 VXLAN 隧道运行态读物（决策 #383：`show vxlan tunnels`；nil = 如实报未接入）。
+func (x *cliExecutor) setVxlan(v VxlanRuntime) { x.vxlan = v }
 
 // setComputeRuntime 注入计算/容器/镜像运行态（M4-12；契约 §1.1 show 与 §1.2 request
 // 的 VNF/容器/镜像命令，nil = 对应命令报“未接入”，与端点 503 语义一致）。
@@ -640,6 +644,9 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 		return x.execShowVrfs(t[1:])
 	case len(t) >= 1 && t[0] == "nat":
 		return x.execShowNat(t[1:])
+	case len(t) >= 1 && t[0] == "vxlan":
+		// 决策 #383：VXLAN 隧道读视图（与 GET /vxlan-tunnels 同源）。操作树里只有 vxlan tunnels 一条。
+		return x.execShowVxlan(t[1:])
 	case len(t) >= 1 && t[0] == "protocols":
 		return x.execShowProtocols(t[1:])
 	case len(t) >= 1 && t[0] == "alarms":
@@ -676,7 +683,7 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 	if len(t) >= 2 && t[0] == "vpp" && t[1] == "capture" {
 		return x.execShowVppCapture() // M5-3：抓包会话状态与已导出 pcap 清单
 	}
-	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class> [detail]|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|metrics history [name <metric> [last <duration>] [step <duration>]]|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | port-mirroring | dns proxy | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions | system api tokens\n"
+	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class> [detail]|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|metrics history [name <metric> [last <duration>] [step <duration>]]|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | vxlan tunnels | port-mirroring | dns proxy | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions | system api tokens\n"
 }
 
 // invalidShowConfiguration：`show configuration <未知/多余 token>` 的统一报错
@@ -1293,7 +1300,7 @@ func matchAlias(tokens []string) *aliasRule {
 
 // allAliasRules 汇总别名规则（顺序即匹配优先级）。
 func allAliasRules() []*aliasRule {
-	out := make([]*aliasRule, 0, len(statementAliases)+len(statementAliasesNet)+len(statementAliasesCompute)+len(statementAliasesSystem)+len(statementAliasesArray)+len(statementAliasesAuth))
+	out := make([]*aliasRule, 0, len(statementAliases)+len(statementAliasesNet)+len(statementAliasesCompute)+len(statementAliasesSystem)+len(statementAliasesArray)+len(statementAliasesAuth)+len(statementAliasesVxlan))
 	for i := range statementAliases {
 		out = append(out, &statementAliases[i])
 	}
@@ -1311,6 +1318,9 @@ func allAliasRules() []*aliasRule {
 	}
 	for i := range statementAliasesAuth {
 		out = append(out, &statementAliasesAuth[i])
+	}
+	for i := range statementAliasesVxlan {
+		out = append(out, &statementAliasesVxlan[i])
 	}
 	return out
 }

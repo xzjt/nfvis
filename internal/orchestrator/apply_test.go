@@ -95,6 +95,16 @@ func (n recNet) ApplyQos(ctx context.Context, q model.QosPolicy) error {
 func (n recNet) DeleteQos(ctx context.Context, name string) error {
 	return n.record("del-qos:" + name)
 }
+func (n recNet) ApplyVxlan(ctx context.Context, t model.VxlanTunnel, prev *model.VxlanTunnel) error {
+	// prev 非空 = 变更：把旧元组记进调用串，测试据此断言「旧声明被传给了 provider」。
+	if prev != nil {
+		return n.record("vxlan:" + t.Name + ":from:" + prev.Remote)
+	}
+	return n.record("vxlan:" + t.Name)
+}
+func (n recNet) DeleteVxlan(ctx context.Context, t model.VxlanTunnel) error {
+	return n.record("del-vxlan:" + t.Name)
+}
 func (n recNet) EnsureConsistent(ctx context.Context, cfg model.Config) []error { return nil }
 func (n recNet) ApplyVnfInterface(ctx context.Context, port VnfPort) error {
 	return n.record("vnf-if:" + port.VM + "/" + port.Interface)
@@ -558,9 +568,9 @@ func TestApplyRouteDeleteCompensatedOnFailure(t *testing.T) {
 // 只有**前缀**不再声明才发 del-route。旧行为（本用例此前断言「换下一跳时旧路径应撤销」）已按真机结论更正。
 func TestApplyRouteNextHopChangeKeepsRoute(t *testing.T) {
 	cases := []struct {
-		name   string
-		oldNH  string
-		newNH  string
+		name  string
+		oldNH string
+		newNH string
 	}{
 		{"单值→单值（改地址）", "10.99.89.2", "10.99.89.3"},
 		{"单值→多值（转 ECMP）", "10.99.89.2", "10.99.89.2,10.99.89.3"},
@@ -826,5 +836,60 @@ func TestNoopNetworkL3Revoke(t *testing.T) {
 	}
 	if err := n.DeleteL3Interface(context.Background(), "vs-l3", li); err != nil {
 		t.Fatalf("noop DeleteL3Interface: %v", err)
+	}
+}
+
+// 决策 #383：VXLAN 隧道的声明差分——新建在交换机（BD）之后、变更走 provider 内部撤旧
+// （不产生 del 计划操作）、从配置消失有撤销 op 且排在删交换机之前。
+func TestApplyVxlanPlan(t *testing.T) {
+	vsL2 := model.VirtualSwitch{Name: "vs-1", Type: "l2"}
+	tunOld := model.VxlanTunnel{Name: "tun-1", Vni: 100, Local: "10.0.0.1", Remote: "10.0.0.2"}
+	tunNew := tunOld
+	tunNew.Remote = "10.0.0.3"
+	find := func(calls []string, want string) int {
+		for i, c := range calls {
+			if c == want {
+				return i
+			}
+		}
+		return -1
+	}
+
+	// ① 新建：建隧在 BD 之后（入 BD 要 BD 先在）
+	ap, calls := newRecApplier("")
+	if err := ap.Apply(context.Background(), model.Config{}, model.Config{
+		VirtualSwitches: []model.VirtualSwitch{vsL2},
+		VxlanTunnels:    []model.VxlanTunnel{tunOld},
+	}); err != nil {
+		t.Fatalf("新建 Apply: %v", err)
+	}
+	if bd, vx := find(*calls, "bd:vs-1"), find(*calls, "vxlan:tun-1"); bd < 0 || vx < 0 || bd > vx {
+		t.Fatalf("建隧应排在 BD 之后: %v", *calls)
+	}
+
+	// ② 变更 remote：只发一次 vxlan op，且**旧声明被传给 provider**（撤旧按旧元组完成，不发 del）——
+	// 真机实证底座 vxlan dump 恒空，旧元组只能来自提交 diff 的旧配置（decision #383）。
+	ap, calls = newRecApplier("")
+	if err := ap.Apply(context.Background(),
+		model.Config{VirtualSwitches: []model.VirtualSwitch{vsL2}, VxlanTunnels: []model.VxlanTunnel{tunOld}},
+		model.Config{VirtualSwitches: []model.VirtualSwitch{vsL2}, VxlanTunnels: []model.VxlanTunnel{tunNew}},
+	); err != nil {
+		t.Fatalf("变更 Apply: %v", err)
+	}
+	if find(*calls, "vxlan:tun-1:from:10.0.0.2") < 0 || find(*calls, "del-vxlan:tun-1") >= 0 {
+		t.Fatalf("变更应走 ApplyVxlan 且携带旧声明（撤旧在 provider 内部按旧元组）：%v", *calls)
+	}
+
+	// ③ 从配置消失：有 del-vxlan 撤销 op，且排在删交换机（del-bd）之前
+	ap, calls = newRecApplier("")
+	if err := ap.Apply(context.Background(),
+		model.Config{VirtualSwitches: []model.VirtualSwitch{vsL2}, VxlanTunnels: []model.VxlanTunnel{tunOld}},
+		model.Config{},
+	); err != nil {
+		t.Fatalf("删除 Apply: %v", err)
+	}
+	dvx, dbd := find(*calls, "del-vxlan:tun-1"), find(*calls, "del-bd:vs-1")
+	if dvx < 0 || dbd < 0 || dvx > dbd {
+		t.Fatalf("删隧应排在删交换机之前: %v", *calls)
 	}
 }
