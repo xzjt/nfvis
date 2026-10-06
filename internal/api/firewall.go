@@ -75,9 +75,11 @@ func (s *Server) firewallView() map[string]any {
 		if r.Port != 0 {
 			item["port"] = r.Port
 		}
-		if c, ok := state.Counters[r.Seq]; ok { // 仅计数可读时出现（不编造 0）
-			item["packets"] = c.Packets
-			item["bytes"] = c.Bytes
+		if state.Applied { // 决策 #395：未收敛时不展示逐规则计数（旧表 counts 会张冠李戴）
+			if c, ok := state.Counters[r.Seq]; ok { // 仅计数可读时出现（不编造 0）
+				item["packets"] = c.Packets
+				item["bytes"] = c.Bytes
+			}
 		}
 		items = append(items, item)
 	}

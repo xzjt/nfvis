@@ -236,7 +236,7 @@ func TestApplyEnabledRejectsMissingMgmtIface(t *testing.T) {
 // ---------- 回读（Read）----------
 
 // realShapeJSON 真机形状样例（决策 #388 契约里给出的形态：reserved 无 comment、
-// 用户规则带 comment 与 counter）。
+// 用户规则带 comment 与 counter）。保留项字面须与渲染脚本一致——决策 #395 起回读按内容比对。
 const realShapeJSON = `{"nftables":[
 {"metainfo":{"version":"1.1.6","release_name":"x"}},
 {"table":{"family":"inet","name":"nfvis-firewall"}},
@@ -244,7 +244,7 @@ const realShapeJSON = `{"nftables":[
 {"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"neq","left":{"meta":{"key":"iifname"}},"right":"ens160"}},{"accept":null}]}},
 {"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"ct":{"key":"state","match":"established,related"}},{"accept":null}]}},
 {"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"in","left":{"payload":{"protocol":"icmp","field":"type"}},"right":{"set":["destination-unreachable","time-exceeded"]}}},{"accept":null}]}},
-{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"in","left":{"payload":{"protocol":"icmpv6","field":"type"}},"right":{"set":["destination-unreachable"]}}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","expr":[{"match":{"op":"in","left":{"payload":{"protocol":"icmpv6","field":"type"}},"right":{"set":["destination-unreachable","packet-too-big","time-exceeded","parameter-problem","nd-router-solicit","nd-router-advert","nd-neighbor-solicit","nd-neighbor-advert"]}}},{"accept":null}]}},
 {"rule":{"family":"inet","table":"nfvis-firewall","chain":"input","comment":"nfvis-rule-100","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":22}},{"counter":{"packets":3,"bytes":180}},{"accept":null}]}}
 ]}`
 
@@ -315,5 +315,41 @@ func TestReadDisabledButTablePresent(t *testing.T) {
 	st := a.Read(context.Background(), model.Config{})
 	if st.Applied || !strings.Contains(st.Error, "仍有") {
 		t.Fatalf("未配置但表还在应如实报未收敛: %+v", st)
+	}
+}
+
+// 决策 #395（R171-14/F3）：iifname 作用面内容比对——管理口改名后 apply 失败、旧表原样保留
+// （条数/策略/seq 全同），回读必须如实报未收敛，而不是「已收敛」。
+func TestReadDetectsMgmtScopeMismatch(t *testing.T) {
+	// 表仍按 ens160 过滤，配置已改为 ens161（apply 失败、旧表留存）。
+	cfg := fwCfg([]model.FirewallRule{{Seq: 100, Action: "accept", Source: "192.168.1.0/24", Protocol: "tcp", Port: 22}}, "drop")
+	cfg.System.Management.Interface = "ens161"
+	f := &fakeNft{readOut: realShapeJSON}
+	a := newFwApplier(t, f)
+	a.IfaceExists = func(string) bool { return true }
+	st := a.Read(context.Background(), cfg)
+	if st.Applied || !strings.Contains(st.Error, "作用面与配置不符") {
+		t.Fatalf("管理口作用面不符应如实报未收敛: %+v", st)
+	}
+	// 未收敛时**不展示**逐规则计数（旧表 counts 会张冠李戴）。
+	if len(st.Counters) != 0 {
+		t.Fatalf("未收敛时不应带逐规则计数: %+v", st.Counters)
+	}
+}
+
+// 决策 #395：保留项**内容**比对——条数仍是 4，但 ct 规则被换成一条裸 accept 也要判出。
+func TestReadDetectsReservedContentMismatch(t *testing.T) {
+	cfg := fwCfg([]model.FirewallRule{{Seq: 100, Action: "accept", Source: "192.168.1.0/24", Protocol: "tcp", Port: 22}}, "drop")
+	// 把 ct 规则换成裸 accept（仍是无 comment 的保留项，条数不变）。
+	edited := strings.Replace(realShapeJSON,
+		`{"ct":{"key":"state","match":"established,related"}},{"accept":null}`, `{"accept":null}`, 1)
+	f := &fakeNft{readOut: edited}
+	a := newFwApplier(t, f)
+	st := a.Read(context.Background(), cfg)
+	if st.Applied || !strings.Contains(st.Error, "保留项与配置不符") {
+		t.Fatalf("保留项内容被换掉应如实报未收敛: %+v", st)
+	}
+	if len(st.Counters) != 0 {
+		t.Fatalf("未收敛时不应带逐规则计数: %+v", st.Counters)
 	}
 }
