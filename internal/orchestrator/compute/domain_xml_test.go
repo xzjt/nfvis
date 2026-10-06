@@ -200,6 +200,39 @@ func TestBuildDomainXML_SriovHostdev(t *testing.T) {
 	assertNotContains(t, xml, "vhostuser")
 }
 
+// FR-CMP-023：通用 PCI 直通 hostdev——地址/managed 与 SR-IOV 同结构，
+// 且与 SR-IOV hostdev 并存（SR-IOV 在前、pci-device 按声明序在后）。
+func TestBuildDomainXML_PCIHostdevs(t *testing.T) {
+	spec := baseSpec()
+	spec.Interfaces = []InterfaceSpec{{Name: "eth1", Type: IfaceSriovVF, VFPCI: "0000:0b:10.1"}}
+	spec.PCIDevices = []string{"0000:03:00.0", "04:1f.7"} // 第二条为省略 domain + 短写
+	xml := mustXML(t, spec)
+	assertContains(t, xml,
+		`<hostdev mode="subsystem" type="pci" managed="yes">`,
+		`<address domain="0x0000" bus="0x0b" slot="0x10" function="0x1">`, // SR-IOV VF
+		`<address domain="0x0000" bus="0x03" slot="0x00" function="0x0">`,
+		`<address domain="0x0000" bus="0x04" slot="0x1f" function="0x7">`, // 归一后写入
+	)
+	if n := strings.Count(xml, `<hostdev mode="subsystem" type="pci" managed="yes">`); n != 3 {
+		t.Fatalf("应有 1 个 SR-IOV + 2 个通用 PCI hostdev，实际 %d 个:\n%s", n, xml)
+	}
+	sriovAt := strings.Index(xml, `bus="0x0b"`)
+	dev1At := strings.Index(xml, `bus="0x03"`)
+	dev2At := strings.Index(xml, `bus="0x04"`)
+	if sriovAt < 0 || dev1At < sriovAt || dev2At < dev1At {
+		t.Fatalf("hostdev 顺序应为 SR-IOV 在前、pci-device 按声明序在后: sriov=%d dev1=%d dev2=%d", sriovAt, dev1At, dev2At)
+	}
+}
+
+// 非法 BDF 在组装层如实报错（防御绕过 model 校验的调用路径）。
+func TestBuildDomainXML_PCIInvalidAddress(t *testing.T) {
+	spec := baseSpec()
+	spec.PCIDevices = []string{"0000:zz:00.0"}
+	if _, err := BuildDomainXML(spec); err == nil || !strings.Contains(err.Error(), "PCI 地址") {
+		t.Fatalf("非法 BDF 应报错并说明 PCI 地址：%v", err)
+	}
+}
+
 // MAC 重复不在此层拦截（FR-CFG-011③ 在 M4-2/3 校验），此处仅确认两网卡都落 XML。
 func TestBuildDomainXML_MultipleVhostUser(t *testing.T) {
 	spec := baseSpec()

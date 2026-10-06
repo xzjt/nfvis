@@ -35,6 +35,10 @@ type Provider struct {
 	// vfPCI 解析 SR-IOV VF 的 PCI 地址（M4-4 注入 sysfs 实现）；nil = 明确报不支持。
 	vfPCI func(pf string, vfID int) (string, error)
 
+	// pciDeviceExists 通用 PCI 直通设备的存在性检查（FR-CMP-023，注入 sysfs 实现）；
+	// nil = 明确报「未提供检查」（声明了设备就不静默放行，与 vfPCI 同口径）。
+	pciDeviceExists func(bdf string) (bool, error)
+
 	// alarms 恢复收敛告警落点（可空）。
 	alarms orchestrator.AlarmSink
 
@@ -85,6 +89,10 @@ func (p *Provider) SetAlarms(a orchestrator.AlarmSink) { p.alarms = a }
 // SetVFResolver 注入 SR-IOV VF PCI 解析（M4-4）。
 func (p *Provider) SetVFResolver(f func(pf string, vfID int) (string, error)) { p.vfPCI = f }
 
+// SetPCIDeviceChecker 注入通用 PCI 直通设备的存在性检查（FR-CMP-023；生产见
+// NewSysfsPCIDeviceChecker）。nil 且声明了设备时 define 明确报错，不静默放行。
+func (p *Provider) SetPCIDeviceChecker(f func(bdf string) (bool, error)) { p.pciDeviceExists = f }
+
 // Config 返回生效配置（只读）。
 func (p *Provider) Config() Config { return p.cfg }
 
@@ -94,6 +102,11 @@ func (p *Provider) DefineVM(ctx context.Context, vm model.VMFunction, alloc mode
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// FR-CMP-023：直通 PCI 设备的存在性检查（define/apply 前）——不存在的设备
+	// 如实拒绝（否则 libvirt 定义会“成功”、启动才失败，且报错点离配置很远）。
+	if err := p.checkPCIDevices(vm); err != nil {
+		return err
+	}
 	spec, err := p.specFor(vm, alloc)
 	if err != nil {
 		return err
@@ -120,6 +133,43 @@ func (p *Provider) DefineVM(ctx context.Context, vm model.VMFunction, alloc mode
 			if err := p.api.Start(ctx, vm.Name); err != nil {
 				return fmt.Errorf("按 autostart 启动 VM %s: %w", vm.Name, err)
 			}
+		}
+	}
+	return nil
+}
+
+// checkPCIDevices 直通 PCI 设备的存在性检查（FR-CMP-023，define/apply 前）。
+//
+// 逐设备查 sysfs（经 SetPCIDeviceChecker 注入的单一事实源）：不存在 ⇒ 如实拒绝并给
+// 照做路径（lspci / ls /sys/bus/pci/devices 核对；若被数据面占用先 unbind-dpdk 释放）。
+// **不做** vfio 绑定/解绑——预绑定由操作者/安装器负责（用户手册 §9.2）。
+// 未注入检查器（nil）而声明了设备 ⇒ 明确报错，不静默放行（与 vfPCI 同口径）。
+func (p *Provider) checkPCIDevices(vm model.VMFunction) error {
+	if len(vm.PCIDevices) == 0 {
+		return nil
+	}
+	if p.pciDeviceExists == nil {
+		return fmt.Errorf("VM %s: 声明了直通 PCI 设备，但当前环境未提供存在性检查（需要 %s）", vm.Name, PCIDevicesDir)
+	}
+	seen := map[string]bool{}
+	for _, raw := range vm.PCIDevices {
+		norm, err := model.NormalizeBDF(raw)
+		if err != nil {
+			return fmt.Errorf("VM %s: %w", vm.Name, err)
+		}
+		if seen[norm] {
+			// 模型校验已拦「同 VM 重复」；此处防御 REST/直接调用等绕过校验的路径。
+			return fmt.Errorf("VM %s: 直通 PCI 设备 %s 重复声明", vm.Name, norm)
+		}
+		seen[norm] = true
+		ok, err := p.pciDeviceExists(norm)
+		if err != nil {
+			return fmt.Errorf("VM %s: 检查直通 PCI 设备 %s 失败: %w", vm.Name, norm, err)
+		}
+		if !ok {
+			return fmt.Errorf("VM %s: 直通 PCI 设备 %s 不在本机（%s/%s 不存在）——"+
+				"请用 lspci 或 ls %s 核对设备地址；若该设备已被数据面占用，先 request interfaces <ifname|pci> unbind-dpdk 释放后再试",
+				vm.Name, norm, PCIDevicesDir, norm, PCIDevicesDir)
 		}
 	}
 	return nil
@@ -519,6 +569,7 @@ func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) 
 		Emulator:     p.cfg.Emulator,
 		Machine:      p.cfg.Machine,
 		CPUMode:      p.cfg.CPUMode,
+		PCIDevices:   append([]string(nil), vm.PCIDevices...), // FR-CMP-023（存在性检查在 DefineVM 前完成）
 	}
 	if vm.CloudInit != nil {
 		spec.SeedISO = layout.SeedISO

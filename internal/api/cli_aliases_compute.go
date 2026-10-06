@@ -1,6 +1,11 @@
 package api
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/xzjt/nfvis/internal/model"
+)
 
 // 计算/容器类语句别名表（cli_aliases_compute.go，M4-12）。
 //
@@ -160,6 +165,77 @@ var statementAliasesCompute = []aliasRule{
 		apply: func(tree map[string]any, t []string, _ bool) error {
 			return aliasPortContainerMember(tree, append(append([]string{}, t...), ""), false)
 		}},
+
+	// virtual-machine-functions <n> pci-device <bdf> → VMFunction.PCIDevices（FR-CMP-023）：
+	// 树为具名数组容器（P<vnic> 同形），通用遍历会写出 [{"name": …}] 与模型的 []string
+	// 不符 → 显式映射为**追加**（同值幂等；已声明含省略 domain/大小写不同写法即视为同值）。
+	{pattern: []string{"virtual-machine-functions", "*", "pci-device", "*"},
+		apply: aliasVMPCIDevice},
+	// delete virtual-machine-functions <n> pci-device（不带值）→ 清空该 VM 的全部直通设备；
+	// set 形态缺取值是**语法不完整**（不能借清空语义静默得逞）。
+	{pattern: []string{"virtual-machine-functions", "*", "pci-device"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			if isSet {
+				return fmt.Errorf("配置不完整，缺少取值: virtual-machine-functions %s pci-device <bdf>", t[1])
+			}
+			vm, err := elemByID(tree, "virtual_machine_functions", t[1])
+			if err != nil {
+				return err
+			}
+			delete(vm, "pci_devices")
+			return nil
+		}},
+}
+
+// aliasVMPCIDevice：VM 的通用 PCI 直通设备列表（VMFunction.PCIDevices，FR-CMP-023）。
+// t = ["virtual-machine-functions", <vm>, "pci-device", <bdf>]。
+//
+// 语法即时报错（model.NormalizeBDF 与提交期校验同源）；删除按**归一 BDF** 匹配
+// （`03:00.0` 与 `0000:03:00.0` 是同一设备）；删除不存在的一条如实报「无匹配配置」。
+func aliasVMPCIDevice(tree map[string]any, t []string, isSet bool) error {
+	vm, err := elemByID(tree, "virtual_machine_functions", t[1])
+	if err != nil {
+		return err
+	}
+	raw := t[3]
+	norm, err := model.NormalizeBDF(raw)
+	if err != nil {
+		return err
+	}
+	arr, _ := vm["pci_devices"].([]any)
+	sameBDF := func(el any) bool {
+		s, ok := el.(string)
+		if !ok {
+			return false
+		}
+		n, err := model.NormalizeBDF(s)
+		return err == nil && n == norm
+	}
+	if !isSet {
+		out := make([]any, 0, len(arr))
+		for _, el := range arr {
+			if !sameBDF(el) {
+				out = append(out, el)
+			}
+		}
+		if len(out) == len(arr) {
+			return fmt.Errorf("无匹配配置: virtual-machine-functions %s pci-device %s", t[1], raw)
+		}
+		if len(out) == 0 {
+			delete(vm, "pci_devices")
+		} else {
+			vm["pci_devices"] = out
+		}
+		return nil
+	}
+	for _, el := range arr {
+		if sameBDF(el) {
+			// 同一设备（含不同写法）已在声明中：空操作提示，不重复追加。
+			return &noChangeError{stmt: strings.Join(t, " ")}
+		}
+	}
+	vm["pci_devices"] = append(arr, raw)
+	return nil
 }
 
 // aliasPortVnfMember：交换机端口的 VM vNIC 成员（VSwitchPort.Vnf/VnfInterface）。

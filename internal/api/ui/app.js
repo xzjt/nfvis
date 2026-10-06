@@ -4202,6 +4202,7 @@ function vmDetailInfo(vm) {
       (d.size_gb ? '（' + d.size_gb + ' GB）' : '') +
       (d.image ? '（来自 ' + d.image + '）' : '')).join('；') : undefined],
     ['vNIC', (vm.interfaces || []).length],
+    ['直通 PCI 设备', (vm.pci_devices || []).length ? vm.pci_devices.join('；') : undefined],
     ['串口', vm.serial_console === false ? '未启用' : '已启用'],
     ['开机自启', vm.autostart === undefined || vm.autostart === null ? undefined : (vm.autostart ? '是' : '否')],
   ];

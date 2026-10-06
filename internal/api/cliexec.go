@@ -97,6 +97,9 @@ type cliExecutor struct {
 	alarms  AlarmRuntime       // 告警表（nil = 报未接入）
 	dhcpSrv DHCPServerRuntime  // DHCP 服务器运行态（决策 #359：dhcp-leases 与 detail 块；nil = 报未收敛）
 	vxlan   VxlanRuntime       // VXLAN 隧道运行态（决策 #383：show vxlan tunnels；nil = 报未接入）
+	// pciExists 通用 PCI 直通设备的存在性事实源（FR-CMP-023：detail 的「已在系统中」实测态；
+	// nil = 如实说无法核对——不猜）。与计算编排层 define 前用的是**同一个** sysfs 检查实现。
+	pciExists func(bdf string) (bool, error)
 	// 计算/容器/镜像运行态（M4-12；nil = 对应命令报未接入，与 HTTP 端点 503 一致）
 	vm           VMRuntime
 	console      VMConsoleRuntime

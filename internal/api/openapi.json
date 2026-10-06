@@ -2721,6 +2721,13 @@
           "name": {
             "type": "string"
           },
+          "pci_devices": {
+            "description": "直通给该 VM 的通用 PCI 设备地址（BDF，如 0000:03:00.0，可多条；FR-CMP-023）。\n写法 `[domain:]bus:slot.function`（十六进制、大小写不敏感、domain 可省略缺省 0000）。\n提交期校验：地址语法、同一 VM 内去重、跨 VM 冲突（同一设备不能同时给两台 VM）；\n组装域定义前逐设备核对 /sys/bus/pci/devices（不存在即如实拒绝）。\n驱动预绑定（vfio-pci）与 IOMMU 分组由操作者/宿主负责，产品不做（不热插拔、不绑定/解绑驱动）；\n实际直通可用性取决于宿主 IOMMU 能力。\n",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "serial_console": {
             "default": true,
             "type": "boolean"

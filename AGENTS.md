@@ -898,11 +898,27 @@
   语义 **26/0/3**（**S8 冷窗**——本轮夹具起来后窗口内无流量；S11/S12 按设计，**非回归**）、lifecycle **22/0/3**、
   pty **10/10**；`make check` 全绿。**如实登记**：Web 卡 Browser Use 复核待办；跨宿主隧道端到端未做（无对端）。
   证据 `docs/evidence/v2-round164-d383-vxlan.txt`；真机已装 2.0.0~dev107。
+- **round165（GPU / 通用 PCI 直通，2026-10-06）**：**#384 交付**（收口 `docs/v2待做.md` 一.8）——
+  `set virtual-machine-functions <n> pci-device <bdf>`（**追加**）／`delete … pci-device [<bdf>]`（去一条/清空）
+  ⇒ 域 XML 追加 `<hostdev mode='subsystem' type='pci' managed='yes'>`（**复用 SR-IOV 的同一 libvirt 结构**，
+  排在 SR-IOV hostdev 之后）。**校验**：`NormalizeBDF` 纯语法归一（按真实 PCI 位宽收口）+ 同 VM 去重 +
+  **跨 VM 冲突**（点名两台）；**降级路径**：编排层 `checkPCIDevices` 查 `/sys/bus/pci/devices`，不存在即如实拒绝
+  并给照做路径（`lspci`/`ls /sys/bus/pci/devices`；被数据面占用时 `request interfaces <ifname|pci> unbind-dpdk`），
+  **未注入检查器且声明了设备 ⇒ 明确报错**（不静默放行）；**三面读视图**（CLI detail 配置值 + 实测态
+  「已在系统中/未在系统中/无法核对」、REST `VMFunction.pci_devices`、Web 概览行）。**真机四维（dev108）**：
+  一次性 VNF **只 define 不 start**（避免真去 detach 宿主设备）⇒ `virsh dumpxml` 出现 hostdev（地址/`managed`
+  逐字对）；去声明后 hostdev 计数 0；**bogus BDF 提交期拒绝**（文案含照做路径且已补偿）；**跨 VM 同 BDF 拒绝**
+  （点名两台）；不同 BDF 与既有声明并存；现场已清（配置 0 残留、sem-vm 无 hostdev、停/起瞬态 `VNF_PORT_DOWN`
+  自动消解）。**四套件（dev108）**：fulltest **254/0/18**、语义 **27/0/2**、lifecycle **22/0/3 + 登记 1**
+  （已知 L2-3「查不了」附注；L3-2 正控未热）、pty **10/10**；`make check` 全绿。
+  **如实边界**：不做热插拔 / vfio 绑定解绑 / GPU 专用特性 / IOMMU 分组校验；**实际直通端到端未验**
+  （宿主为 VMware guest、无 IOMMU 直通能力，只做配置面 + 降级路径）。证据
+  `docs/evidence/v2-round165-d384-pci-passthrough.txt`；真机已装 2.0.0~dev108。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
-- 已定决策 285 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#383，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- 已定决策 286 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#384，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。

@@ -490,6 +490,7 @@ func ConfigPathTree() *Node {
 						),
 					),
 				),
+				K("pci-device", "直通 PCI 设备（BDF，可多条）", P("<bdf>", "PCI 地址（如 0000:03:00.0）", "")),
 				K("cloud-init", "初始化注入",
 					K("user-data", "user-data（YAML 文本或文件）", V("string", "内容/路径")),
 					K("ssh-key", "SSH 公钥（可多条）", SPA("<key>", "ssh_keys", "公钥")),

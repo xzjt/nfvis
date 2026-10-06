@@ -38,38 +38,39 @@ type Options struct {
 	TLSCert        string // TLS 证书路径（FR-API-001，HTTPS；与 TLSKey 成对）
 	TLSKey         string // TLS 私钥路径；二者为空 = 明文 HTTP（仅限开发/测试）
 	Log            *slog.Logger
-	VPP            VppController           // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
-	L2             L2Runtime               // L2 运行态查询（M3-3；nil = mac-table 503）
-	L3             L3Runtime               // L3 运行态查询（M3-4；nil = routes 503）
-	LLDP           LldpRuntime             // LLDP 邻居（M3-6；nil = 503）
-	State          *state.State            // 运行态聚合（M3-7；nil = 省略运行态字段）
-	SRIOV          SRIOVSetter             // SR-IOV VF 数量（M3-7；nil = 503）
-	DPDK           DPDKSetter              // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72；nil = 503）
-	Kernel         ksys.KernelApplier      // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
-	Hugepages      ksys.HugepagePoolSetter // 大页池回收（FR-SYS-002，决策 #329；nil = 命令/端点报未接入）
-	HugepageRoot   string                  // 大页池 sysfs 根（决策 #329；空 = "/"，测试注入临时目录）
-	NAT            NatSessionsRuntime      // NAT 会话（M3-7；nil = 503）
-	Alarms         AlarmRuntime            // 告警列表（M3-8；nil = 503）
-	Diag           DiagRuntime             // CLI 诊断命令（M3-9；nil = 命令报不可用）
-	VM             VMRuntime               // VM 生命周期（M4-3；nil = 生命周期动作 503、状态省略）
-	VMConsole      VMConsoleRuntime        // VM 串口 console（M4-5；nil = console 端点 503）
-	VMSnapshots    VMSnapshotRuntime       // VM 快照（M4-6；nil = 快照端点 503）
-	Containers     ContainerRuntime        // 容器生命周期/日志（M4-7；nil = 503）
-	Images         ImagesRuntime           // 镜像仓库（M4-8；nil = 503）
-	Events         *events.Bus             // 事件总线（M5-1；nil = /events 503）
-	SysOps         SystemOpsRuntime        // 备份/恢复/恢复出厂（M5-6；nil = 503）
-	DiagOps        DiagOpsRuntime          // 诊断归档/core dump（M5-4；nil = 503）
-	LogSource      func() ([]byte, error)  // 系统日志来源（M5-9 show log system；nil = 报不可用）
-	Capture        CaptureRuntime          // 数据面抓包（M5-3；nil = 503）
-	Software       SoftwareRuntime         // 软件升级/电源/NTP（M5-7；nil = 503）
-	Hardware       HardwareRuntime         // 硬件健康采集（M5-5；nil = 503）
-	TLS            TlsRuntime              // 证书管理（M5-8；nil = 503）
-	Ports          PortInventory           // 运行态端口清单（决策 #83；nil = 接口名无动态候选）
-	VppState       VppStateRuntime         // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
-	DHCPServer     DHCPServerRuntime       // DHCP 服务器运行态读物（决策 #359；nil = 租约端点 503）
-	Vxlan          VxlanRuntime            // VXLAN 隧道运行态读物（决策 #383；nil = 读视图如实报未接入）
-	Versions       VersionsRuntime         // 组件版本探测（R37-2 收口，决策 #118；nil = 只回 NFViS 版本）
-	MetricsHistory *MetricsHistoryOptions  // 历史时序存储（决策 #356；nil = 未启用）
+	VPP            VppController                  // VPP 数据面控制（M3-2；nil = /vpp/* 返回 503）
+	L2             L2Runtime                      // L2 运行态查询（M3-3；nil = mac-table 503）
+	L3             L3Runtime                      // L3 运行态查询（M3-4；nil = routes 503）
+	LLDP           LldpRuntime                    // LLDP 邻居（M3-6；nil = 503）
+	State          *state.State                   // 运行态聚合（M3-7；nil = 省略运行态字段）
+	SRIOV          SRIOVSetter                    // SR-IOV VF 数量（M3-7；nil = 503）
+	DPDK           DPDKSetter                     // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72；nil = 503）
+	Kernel         ksys.KernelApplier             // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
+	Hugepages      ksys.HugepagePoolSetter        // 大页池回收（FR-SYS-002，决策 #329；nil = 命令/端点报未接入）
+	HugepageRoot   string                         // 大页池 sysfs 根（决策 #329；空 = "/"，测试注入临时目录）
+	NAT            NatSessionsRuntime             // NAT 会话（M3-7；nil = 503）
+	Alarms         AlarmRuntime                   // 告警列表（M3-8；nil = 503）
+	Diag           DiagRuntime                    // CLI 诊断命令（M3-9；nil = 命令报不可用）
+	VM             VMRuntime                      // VM 生命周期（M4-3；nil = 生命周期动作 503、状态省略）
+	VMConsole      VMConsoleRuntime               // VM 串口 console（M4-5；nil = console 端点 503）
+	VMSnapshots    VMSnapshotRuntime              // VM 快照（M4-6；nil = 快照端点 503）
+	Containers     ContainerRuntime               // 容器生命周期/日志（M4-7；nil = 503）
+	Images         ImagesRuntime                  // 镜像仓库（M4-8；nil = 503）
+	Events         *events.Bus                    // 事件总线（M5-1；nil = /events 503）
+	SysOps         SystemOpsRuntime               // 备份/恢复/恢复出厂（M5-6；nil = 503）
+	DiagOps        DiagOpsRuntime                 // 诊断归档/core dump（M5-4；nil = 503）
+	LogSource      func() ([]byte, error)         // 系统日志来源（M5-9 show log system；nil = 报不可用）
+	Capture        CaptureRuntime                 // 数据面抓包（M5-3；nil = 503）
+	Software       SoftwareRuntime                // 软件升级/电源/NTP（M5-7；nil = 503）
+	Hardware       HardwareRuntime                // 硬件健康采集（M5-5；nil = 503）
+	TLS            TlsRuntime                     // 证书管理（M5-8；nil = 503）
+	Ports          PortInventory                  // 运行态端口清单（决策 #83；nil = 接口名无动态候选）
+	VppState       VppStateRuntime                // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
+	DHCPServer     DHCPServerRuntime              // DHCP 服务器运行态读物（决策 #359；nil = 租约端点 503）
+	Vxlan          VxlanRuntime                   // VXLAN 隧道运行态读物（决策 #383；nil = 读视图如实报未接入）
+	PCIExists      func(bdf string) (bool, error) // 通用 PCI 直通设备存在性（FR-CMP-023；nil = detail 如实说无法核对）
+	Versions       VersionsRuntime                // 组件版本探测（R37-2 收口，决策 #118；nil = 只回 NFViS 版本）
+	MetricsHistory *MetricsHistoryOptions         // 历史时序存储（决策 #356；nil = 未启用）
 }
 
 // MetricsHistoryOptions 历史时序存储的装配信息（决策 #356）。Store 为空时仍如实回报路径与原因。
@@ -148,7 +149,8 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.dhcpSrv = opts.DHCPServer
 	s.cliExec.setDHCPServer(opts.DHCPServer) // 决策 #359：dhcp-leases 读命令与 detail 块同源
 	s.vxlan = opts.Vxlan
-	s.cliExec.setVxlan(opts.Vxlan) // 决策 #383：show vxlan tunnels 与 GET /vxlan-tunnels 同源
+	s.cliExec.setVxlan(opts.Vxlan)       // 决策 #383：show vxlan tunnels 与 GET /vxlan-tunnels 同源
+	s.cliExec.pciExists = opts.PCIExists // FR-CMP-023：VM detail 的直通设备实测态（nil = 如实说无法核对）
 	s.cliExec.setComputeRuntime(opts.VM, opts.VMConsole, opts.VMSnapshots, opts.Containers, opts.Images)
 	s.cliExec.setEventBus(opts.Events) // M5-1：CLI 直连动作也发布 vnf-state-changed
 	s.cliExec.setSystemOps(opts.SysOps)

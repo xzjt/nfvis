@@ -96,3 +96,5 @@ delete virtual-switches <n> dhcp-server [pool | lease-time | dns | domain-name]	
 show vxlan tunnels	由其他套件或单测覆盖	隧道读视图（配置 × 数据面实况，按接口标记判在否）；CLI 渲染/REST 读视图/三面同源由 internal/api 单测覆盖，tag 判存量/按旧元组撤旧/恢复重放由 network provider 单测覆盖；真机步骤（建隧 → vppctl 对照 → VPP/nfvis 重启重放 → 删隧）按交付说明单独走查
 set vxlan tunnels <n> vni <id> local <ip> remote <ip> [dst-port <n>] [virtual-switch <vs>]	配置语句未逐条执行	VXLAN overlay 隧道（单播 remote、IPv4 下垫层、L2 成员）；解析/落库由 cli_mapping 守护与 setstmt 往返自校验覆盖，建隧/打平台标记/入 BD/按旧元组撤旧由 network provider 单测覆盖；数据面下发真机按交付说明单独走查
 delete vxlan tunnels <n> [vni | local | remote | dst-port | virtual-switch]	配置语句未逐条执行	同上（裸 delete ＝删整条；逐叶子与整条两种形态由 cli_mapping 删除用例与别名单测覆盖）
+set virtual-machine-functions <n> pci-device <bdf>	配置语句未逐条执行	通用 PCI 直通设备声明（追加语义）；解析/别名/同值幂等/display set 往返由 cli_mapping 与 setstmt 守护覆盖，语法与跨 VM 冲突由 model 单测覆盖，hostdev 组装与存在性检查由 compute 单测覆盖；真机按交付步骤以一次性 VNF（只 define 不 start）走查，实际直通端到端未验（宿主无 IOMMU 直通能力）
+delete virtual-machine-functions <n> pci-device [<bdf>]	配置语句未逐条执行	同上（去一条/清空两形态；按归一 BDF 匹配由 api 单测覆盖）

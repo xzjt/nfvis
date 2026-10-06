@@ -671,6 +671,8 @@ set interfaces <vnic-name>
   ├─ mac <mac>                                       # 可选，缺省自动生成
   ├─ vlan <vlan>                                     # 可选 tag
   └─ virtual-switch <name>                           # 引用 L2 交换机；sriov-vf 时仅做登记
+set pci-device <bdf>                                 # 通用 PCI 直通设备（BDF，可多条；追加语义，FR-CMP-023）
+delete pci-device [<bdf>]                            # 去掉一条；不带 BDF 清空
 set cloud-init
   ├─ user-data <path|string>                         # YAML 文本或文件
   ├─ ssh-key <string>                                # 可多条

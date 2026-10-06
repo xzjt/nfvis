@@ -305,9 +305,10 @@ func run() error {
 		log.Warn("计算编排未接入（libvirt 连接失败），VM 生命周期不可用", "uri", computeCfg.URI, "err", cerr)
 		computeUnavailableAlarm(alarms, computeCfg.URI, cerr)
 	} else {
-		p.SetVFResolver(network.NewSysfsVFResolver()) // SR-IOV VF PCI 解析（FR-NET-021）
-		p.SetAlarms(alarms)                           // M4-9：计算收敛告警落点
-		computeProvider.Swap(p, conn)                 // 快路径接入：与既有直接接线同行为
+		p.SetVFResolver(network.NewSysfsVFResolver())             // SR-IOV VF PCI 解析（FR-NET-021）
+		p.SetPCIDeviceChecker(compute.NewSysfsPCIDeviceChecker()) // 通用 PCI 直通存在性检查（FR-CMP-023）
+		p.SetAlarms(alarms)                                       // M4-9：计算收敛告警落点
+		computeProvider.Swap(p, conn)                             // 快路径接入：与既有直接接线同行为
 		log.Info("计算编排已接入", "uri", computeCfg.URI)
 	}
 
@@ -734,6 +735,7 @@ func run() error {
 				return err
 			}
 			p.SetVFResolver(network.NewSysfsVFResolver())
+			p.SetPCIDeviceChecker(compute.NewSysfsPCIDeviceChecker())
 			p.SetAlarms(alarms)
 			computeProvider.Swap(p, conn) // 换装：旧连接关闭、新连接记账（首接与复连同一路径）
 			return nil
@@ -893,9 +895,12 @@ func run() error {
 		DHCPServer: netProvider,
 		// 决策 #383：VXLAN 运行态读物（GET /vxlan-tunnels 与 CLI 同源）。*network.L2Network 自持。
 		Vxlan: netProvider,
-		LLDP:  &lldpController{net: netProvider},
-		State: state.New(vppMgr.Runtime()),
-		SRIOV: sriovProvider,
+		// FR-CMP-023：VM detail 的直通 PCI 设备实测态——与计算编排层 define 前
+		// 存在性检查**同一个** sysfs 实现（单一事实源）。
+		PCIExists: compute.NewSysfsPCIDeviceChecker(),
+		LLDP:      &lldpController{net: netProvider},
+		State:     state.New(vppMgr.Runtime()),
+		SRIOV:     sriovProvider,
 		DPDK: &dpdkController{b: dpdkBinder, rec: dpdkBindings, logger: log, facts: mgmtFacts,
 			// 数据面占用探测（发现 #13）：解绑前问 VPP「这个口还在你手里吗」
 			dataplane: func(ifname string) (bool, error) {

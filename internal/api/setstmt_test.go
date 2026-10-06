@@ -86,6 +86,9 @@ var roundTripAliasCases = [][]string{
 	{"set virtual-machine-functions vnf-a vcpu count 2", "set virtual-machine-functions vnf-a memory size-mb 512", "set virtual-machine-functions vnf-a memory numa node 0"},
 	{"set virtual-machine-functions vnf-a vcpu count 2", "set virtual-machine-functions vnf-a interfaces eth0 virtual-switch vs1"},
 	{"set virtual-machine-functions vnf-a vcpu count 2", "set virtual-machine-functions vnf-a serial console enable"},
+	// FR-CMP-023：通用 PCI 直通设备（pci_devices 数组 ⇄ pci-device 关键字，末尾追加发射器）
+	{"set virtual-machine-functions vnf-a vcpu count 2", "set virtual-machine-functions vnf-a pci-device 0000:03:00.0", "set virtual-machine-functions vnf-a pci-device 0000:04:1f.7"},
+	{"set virtual-machine-functions vnf-a vcpu count 2", "set virtual-machine-functions vnf-a pci-device 03:00.0"},
 	// container-functions（vcpu/memory/env/args/interfaces）
 	{"set container-functions ct1 image alpine:3.20", "set container-functions ct1 vcpu count 2", "set container-functions ct1 memory size-mb 512"},
 	{"set container-functions ct1 image alpine:3.20", "set container-functions ct1 env KEY value", "set container-functions ct1 env PATH /usr/bin"},

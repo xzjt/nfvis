@@ -60,7 +60,11 @@ func (x *cliExecutor) execShowVMs(args []string) string {
 		m, _ := anyToTree(vm).(map[string]any)
 		m["state"] = x.vmStateOf(context.Background(), name)
 		x.structured = m
-		return RenderConfigJSON(m) + "\n"
+		out := RenderConfigJSON(m)
+		if len(vm.PCIDevices) > 0 {
+			out += "\n" + x.vmPCIDevicesView(vm.PCIDevices)
+		}
+		return out + "\n"
 	case "interfaces":
 		items := make([]any, 0, len(vm.Interfaces))
 		var b strings.Builder
@@ -82,6 +86,36 @@ func (x *cliExecutor) execShowVMs(args []string) string {
 	}
 	return fmt.Sprintf("%% 无效命令: show virtual-machine-functions %s %s（可用：detail|interfaces|statistics|snapshots）\n",
 		name, sub)
+}
+
+// vmPCIDevicesView 直通 PCI 设备的配置值 + 实测态（FR-CMP-023）：
+// 配置面值逐条列出（上方 pci-devices 已给 JSON 形态）；能查到 /sys/bus/pci/devices 时
+// 附「已在系统中 / 未在系统中」实测态，查不到如实说查不到（不猜、不静默省略）。
+func (x *cliExecutor) vmPCIDevicesView(devs []string) string {
+	var b strings.Builder
+	b.WriteString("直通 PCI 设备（BDF）:\n")
+	for _, raw := range devs {
+		state := "无法核对（未接入设备事实源）"
+		norm, err := model.NormalizeBDF(raw)
+		switch {
+		case err != nil:
+			state = "配置值非法（" + err.Error() + "）"
+		case x.pciExists == nil:
+			// 保持上面的「未接入设备事实源」
+		default:
+			ok, e := x.pciExists(norm)
+			switch {
+			case e != nil:
+				state = "无法核对（" + e.Error() + "）"
+			case ok:
+				state = "已在系统中"
+			default:
+				state = "未在系统中（提交期存在性检查会拒绝）"
+			}
+		}
+		fmt.Fprintf(&b, "  %-18s %s\n", raw, state)
+	}
+	return b.String()
 }
 
 // vmStateOf 查询 VM 运行态，未装配/出错时返回 "-"（列表仍可用）。

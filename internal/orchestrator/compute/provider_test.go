@@ -401,6 +401,72 @@ func TestDefineVM_SriovWithResolver(t *testing.T) {
 	}
 }
 
+// ---------- 通用 PCI 直通（FR-CMP-023） ----------
+
+// 不存在的设备：define 前如实拒绝、不定义域，文案给照做路径（归一后的 BDF 传给检查器）。
+func TestDefineVM_PCIDeviceMissingRejected(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProvider(api, newMockStorage("/images/img.qcow2"), nil)
+	var checked []string
+	p.SetPCIDeviceChecker(func(bdf string) (bool, error) {
+		checked = append(checked, bdf)
+		return false, nil
+	})
+	vm := vmFixture("fw-vm")
+	vm.PCIDevices = []string{"FF:1F.7"}
+	err := p.DefineVM(context.Background(), vm, model.AllocatedResources{HugepageSize: "1G"})
+	if err == nil {
+		t.Fatal("不存在的 PCI 设备应被拒绝")
+	}
+	if len(checked) != 1 || checked[0] != "0000:ff:1f.7" {
+		t.Fatalf("检查器应收到归一 BDF: %v", checked)
+	}
+	for _, want := range []string{"0000:ff:1f.7", "lspci", "/sys/bus/pci/devices", "unbind-dpdk"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("拒绝文案应含照做路径 %q: %v", want, err)
+		}
+	}
+	if len(api.defined) != 0 {
+		t.Fatalf("拒绝时不得定义域: %v", api.defined)
+	}
+}
+
+// 存在的设备：define 成功（检查器按声明序收到归一 BDF）。
+func TestDefineVM_PCIDevicePresentDefines(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProvider(api, newMockStorage("/images/img.qcow2"), nil)
+	var checked []string
+	p.SetPCIDeviceChecker(func(bdf string) (bool, error) {
+		checked = append(checked, bdf)
+		return true, nil
+	})
+	vm := vmFixture("fw-vm")
+	vm.PCIDevices = []string{"0000:03:00.0", "04:1f.7"}
+	if err := p.DefineVM(context.Background(), vm, model.AllocatedResources{HugepageSize: "1G"}); err != nil {
+		t.Fatalf("设备存在时应成功: %v", err)
+	}
+	if len(api.defined) != 1 || api.defined[0] != "fw-vm" {
+		t.Fatalf("应定义 fw-vm: %v", api.defined)
+	}
+	if fmt.Sprint(checked) != "[0000:03:00.0 0000:04:1f.7]" {
+		t.Fatalf("检查器收到的归一 BDF 不符: %v", checked)
+	}
+}
+
+// 未注入检查器而声明了设备：明确报错，不静默放行（与 vfPCI 同口径）。
+func TestDefineVM_PCIDeviceCheckerUnavailable(t *testing.T) {
+	p := newTestProvider(newMockLibvirt(), newMockStorage("/images/img.qcow2"), nil)
+	vm := vmFixture("fw-vm")
+	vm.PCIDevices = []string{"0000:03:00.0"}
+	err := p.DefineVM(context.Background(), vm, model.AllocatedResources{HugepageSize: "1G"})
+	if err == nil || !strings.Contains(err.Error(), "未提供存在性检查") {
+		t.Fatalf("无检查器应明确报错: %v", err)
+	}
+	if err := p.DefineVM(context.Background(), vmFixture("fw-vm"), model.AllocatedResources{HugepageSize: "1G"}); err != nil {
+		t.Fatalf("无设备的 VM 不受影响: %v", err)
+	}
+}
+
 // ---------- DeleteVM ----------
 
 func TestDeleteVM_CascadeActiveDomain(t *testing.T) {

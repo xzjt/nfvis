@@ -957,7 +957,22 @@ func emitVMFamily(w *stmtWriter, node *schema.Node, val any, prefix, keyPath []s
 				w.note("virtual-machine-functions %s：serial console 关闭态没有 set 语句形态，不入 display set", lastTok(prefix))
 			}
 		}
-		return emitMechanicalInner(w, node, withoutZeroScalars(m), prefix, keyPath)
+		if err := emitMechanicalInner(w, node, withoutZeroScalars(m), prefix, keyPath); err != nil {
+			return err
+		}
+		// PCIDevices：JSON 键 pci_devices、树关键字 pci-device，机械逆走按同名键查不到，
+		// 这里**末尾追加**按声明序逐条发射——回放走别名追加语义，保持同一顺序，
+		// 深比较才不会因数组顺序不同而失败（FR-CMP-023）。
+		if arr, ok := m["pci_devices"].([]any); ok {
+			for _, el := range arr {
+				s, ok := el.(string)
+				if !ok || s == "" {
+					continue
+				}
+				w.add(toks(prefix, "pci-device", s))
+			}
+		}
+		return nil
 	case "virtual-machine-functions memory":
 		m, ok := val.(map[string]any)
 		if !ok {
