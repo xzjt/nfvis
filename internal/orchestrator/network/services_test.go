@@ -794,7 +794,8 @@ func TestDhcpRelayDeleteAndErrors(t *testing.T) {
 	}
 }
 
-// TestDhcpRelayReconcileProxy 决策 #380：对账 VPP 实际 proxy 与配置声明，只清未声明/陈旧条目。
+// TestDhcpRelayReconcileProxy 决策 #380 + #394②：对账 VPP 实际 proxy 与配置声明——**双向**：
+// 清未声明/陈旧条目，并**补**声明了却缺失的条目。
 func TestDhcpRelayReconcileProxy(t *testing.T) {
 	tableA := TableID(GatewayVRFName("vs-a"))
 	tableB := TableID(GatewayVRFName("vs-b"))
@@ -810,7 +811,7 @@ func TestDhcpRelayReconcileProxy(t *testing.T) {
 	f := &fakeDhcp{dump: []ProxyEntry{
 		// ① 未声明表（残留）：应清除
 		{RxVrfID: 99999, Src: "10.9.9.1", Servers: []ProxyServer{{VrfID: 99999, Server: "10.9.9.2"}}},
-		// ② 声明表（vs-a）上的陈旧 server：与声明不符，应清除
+		// ② 声明表（vs-a）上的陈旧 server：与声明不符，应清除；且声明的 server 缺失，应补发
 		{RxVrfID: tableA, Src: "192.168.100.1", Servers: []ProxyServer{{VrfID: tableA, Server: "10.0.0.99"}}},
 		// ③ 声明表（vs-b）上与声明一致的 server：不动
 		{RxVrfID: tableB, Src: "192.168.200.1", Servers: []ProxyServer{{VrfID: tableB, Server: "192.168.200.20"}}},
@@ -819,23 +820,33 @@ func TestDhcpRelayReconcileProxy(t *testing.T) {
 	if err := p.ReconcileProxy([]model.VirtualSwitch{vsA, vsB, vsC}); err != nil {
 		t.Fatalf("对账应成功: %v", err)
 	}
-	if len(f.calls) != 2 {
-		t.Fatalf("应只清①②两条，实际 %v", f.calls)
+	if len(f.calls) != 3 {
+		t.Fatalf("应补①声明缺失 1 条 + 清②/③两条陈旧，实际 %v", f.calls)
 	}
-	got := map[string]proxyCall{}
+	adds := map[string]proxyCall{}
+	dels := map[string]proxyCall{}
 	for _, c := range f.calls {
 		if c.isAdd {
-			t.Fatalf("对账只应发撤销: %+v", c)
+			adds[c.server] = c
+		} else {
+			dels[c.server] = c
 		}
-		got[c.server] = c
 	}
-	if c, ok := got["10.9.9.2"]; !ok || c.rx != 99999 || c.srvVrf != 99999 || c.src != "10.9.9.1" {
+	// 补：vs-a 声明的 server 缺失 ⇒ 按声明字段下发（rx=server=表 id、src 取网关 v4）。
+	if c, ok := adds["192.168.100.2"]; !ok || c.rx != tableA || c.srvVrf != tableA || c.src != "192.168.100.1" {
+		t.Fatalf("声明缺失的 proxy 应被补发: %+v", f.calls)
+	}
+	if len(adds) != 1 {
+		t.Fatalf("应只补发 1 条（vs-b 已一致、vs-c 不可判定）: %+v", f.calls)
+	}
+	// 清：未声明表条目 + 声明表上的陈旧 server。
+	if c, ok := dels["10.9.9.2"]; !ok || c.rx != 99999 || c.srvVrf != 99999 || c.src != "10.9.9.1" {
 		t.Fatalf("未声明表条目应被清除: %+v", f.calls)
 	}
-	if c, ok := got["10.0.0.99"]; !ok || c.rx != tableA || c.srvVrf != tableA || c.src != "192.168.100.1" {
+	if c, ok := dels["10.0.0.99"]; !ok || c.rx != tableA || c.srvVrf != tableA || c.src != "192.168.100.1" {
 		t.Fatalf("声明表的陈旧 server 应被清除: %+v", f.calls)
 	}
-	if _, ok := got["192.168.200.20"]; ok {
+	if _, ok := dels["192.168.200.20"]; ok {
 		t.Fatalf("与声明一致的 server 不应被清除: %+v", f.calls)
 	}
 }
@@ -862,7 +873,8 @@ func TestDhcpRelayReconcileProxyBoundaries(t *testing.T) {
 	}
 }
 
-// TestL2NetworkReconcileProxy 决策 #380：L2Network 从 cfg 取「声明了 relay」的集合转发给 provider。
+// TestL2NetworkReconcileProxy 决策 #380/#394②：L2Network 从 cfg 取「声明了 relay」的集合转发给
+// provider——双向对账（补声明缺失 + 清未声明）。
 func TestL2NetworkReconcileProxy(t *testing.T) {
 	f := &fakeDhcp{dump: []ProxyEntry{
 		{RxVrfID: 99999, Src: "10.9.9.1", Servers: []ProxyServer{{VrfID: 99999, Server: "10.9.9.2"}}},
@@ -877,8 +889,19 @@ func TestL2NetworkReconcileProxy(t *testing.T) {
 	if errs := n.ReconcileProxy(context.Background(), cfg); len(errs) != 0 {
 		t.Fatalf("对账应成功: %v", errs)
 	}
-	if len(f.calls) != 1 || f.calls[0].isAdd || f.calls[0].rx != 99999 {
-		t.Fatalf("应清除未声明表条目: %v", f.calls)
+	// 声明了 relay 但数据面没有 ⇒ 补发；数据面上未声明的表 ⇒ 清除。
+	tableA := TableID(GatewayVRFName("vs-a"))
+	var added, removed bool
+	for _, c := range f.calls {
+		switch {
+		case c.isAdd && c.rx == tableA && c.server == "192.168.100.2":
+			added = true
+		case !c.isAdd && c.rx == 99999:
+			removed = true
+		}
+	}
+	if !added || !removed {
+		t.Fatalf("应补声明缺失并清未声明表条目，实际 %v", f.calls)
 	}
 
 	// 未注入 provider ⇒ 空操作（不 panic）

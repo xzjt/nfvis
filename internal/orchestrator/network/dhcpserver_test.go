@@ -860,6 +860,57 @@ func TestDHCPServerProviderResetThenReplay(t *testing.T) {
 	}
 }
 
+// TestDHCPServerSyncReopensTapWhenIndexReused（决策 #394③）：带外删除内置 tap（VPP+内核）后由巡检
+// 重建、VPP 复用同一 sw_if_index 时，Sync 必须按 HostIfName 判「身份不符」并重开内核 tap——旧实现
+// 只比索引（rt.tapIndex == tapIndex）⇒ stale=false、needTap=false，旧 AF_PACKET socket 静默空转。
+func TestDHCPServerSyncReopensTapWhenIndexReused(t *testing.T) {
+	p, c, _, factory, _ := newEnabledProvider(t)
+	ctx := context.Background()
+	vs := vsDHCPServer()
+	tapName := DHCPServerTapName(vs.Name)
+	if err := p.Sync(ctx, vs); err != nil {
+		t.Fatalf("首次 Sync: %v", err)
+	}
+	first := factory.get(tapName)
+	if first == nil {
+		t.Fatal("首次应打开内核 tap")
+	}
+	var idx uint32
+	for i := range c.taps {
+		idx = i
+	}
+	// 带外删除该 tap（内核 tap 随之消失）。
+	if err := c.TapDelete(idx); err != nil {
+		t.Fatalf("带外删除: %v", err)
+	}
+	// 让下一次 TapCreate 复用同一索引（round143 §1.4 实测同 tap 三次重建均 idx 6）。
+	c.mu.Lock()
+	c.next = idx - 1
+	c.mu.Unlock()
+
+	// 巡检 Sync：识别身份不符（本次是新建、索引被复用）⇒ 关旧、重开内核 tap。
+	if err := p.Sync(ctx, vs); err != nil {
+		t.Fatalf("巡检 Sync: %v", err)
+	}
+	again := factory.get(tapName)
+	if again == first {
+		t.Fatal("索引被复用时应重开内核 tap（旧实现误判为同一 tap、复用已解绑的 socket）")
+	}
+	if !first.isClosed() {
+		t.Fatal("旧内核 tap 传输应被关闭")
+	}
+	var newIdx uint32
+	for i := range c.taps {
+		newIdx = i
+	}
+	if newIdx != idx {
+		t.Fatalf("前置假设：VPP 应复用同一索引（%d → %d）", idx, newIdx)
+	}
+	if !c.bridgedOK(newIdx, BDID(vs.Name)) || !c.up[newIdx] {
+		t.Fatal("重开的 tap 应重新入 BD 并置 up")
+	}
+}
+
 // ---------- 消息处理（状态机接入） ----------
 
 func TestDHCPServerProviderDORA(t *testing.T) {
