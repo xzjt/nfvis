@@ -77,6 +77,8 @@ type validator struct {
 	l2Members     map[string]bool
 	bondMembers   map[string]bool
 	portSecIfaces map[string]bool
+	// bondOf：成员口 -> 所属 bond 名（决策 #398；storm-control 拒绝 bond 成员时给照做路径要点名 bond）
+	bondOf map[string]string
 }
 
 func (v *validator) errf(path, format string, args ...any) {
@@ -281,6 +283,7 @@ func (v *validator) collect(c Config) {
 	//   - bondMembers：bond 成员口（聚合口不支持端口安全，配在 bond 上是 v1 的有意取舍）；
 	//   - portSecIfaces：配了白名单的接口（L3 接口 ACL 的 macip 绑定槽互斥反向检查用）。
 	v.l2Members, v.bondMembers, v.portSecIfaces = map[string]bool{}, map[string]bool{}, map[string]bool{}
+	v.bondOf = map[string]string{}
 	for _, s := range c.VirtualSwitches {
 		if s.Type != "l2" {
 			continue
@@ -294,6 +297,9 @@ func (v *validator) collect(c Config) {
 	for _, b := range c.Bonds {
 		for _, m := range b.Members {
 			v.bondMembers[m] = true
+			if _, dup := v.bondOf[m]; !dup {
+				v.bondOf[m] = b.Name
+			}
 		}
 	}
 	for _, i := range c.Interfaces {
@@ -589,7 +595,15 @@ func (v *validator) checkInterfaces(c Config) {
 		// 入向风暴抑制（决策 #385，FR-NET-019）：值域 1-100000000 kbps；对象出现但两类
 		// 都没给值等于「配了个空声明」——它不下发任何限速，却会让读视图/display set 把它
 		// 当成已配置，按无效配置拒绝（不静默留空壳）。
+		// bond 成员口拒绝（决策 #398，R171-9）：成员口入向被 bond-input 吃掉（见本文件
+		// checkPortRoleExclusivity 注释与用户手册 §8.9），挂上去的 L2 分类表/policer 不会被
+		// 查到 ⇒ 保护假象。与 portsec 同判据；此处额外给照做路径（点名 bond，便于先移出）。
 		if sc := i.StormControl; sc != nil {
+			if v.bondMembers[i.Name] {
+				v.errf(p+".storm_control", "接口 %s 是 bond %s 的成员口，不支持风暴抑制（成员口入向被 bond-input 吃掉，"+
+					"挂上的 policer 不会被查到）——先 delete bonds %s members %s 把该口移出聚合再配，"+
+					"或把风暴抑制改配到聚合口本身", i.Name, v.bondOf[i.Name], v.bondOf[i.Name], i.Name)
+			}
 			if sc.BroadcastKbps == 0 && sc.MulticastKbps == 0 {
 				v.errf(p+".storm_control",
 					"风暴抑制未给出任何类别：broadcast_kbps / multicast_kbps 至少给一个（两类各自独立，单位 kbps）")
