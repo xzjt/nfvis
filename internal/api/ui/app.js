@@ -106,6 +106,16 @@ function pct(ratio) {
   return (Number(ratio) * 100).toFixed(1) + '%';
 }
 
+// stormControlText：接口入向风暴抑制的只读摘要（决策 #385）。只列已配置的类
+// （字段缺省＝该类未配置）；两类都没配时回 undefined，行不显示（不编造「0 kbps」）。
+function stormControlText(sc) {
+  if (!sc || typeof sc !== 'object') return undefined;
+  const parts = [];
+  if (sc.broadcast_kbps) parts.push('广播 ' + sc.broadcast_kbps + ' kbps');
+  if (sc.multicast_kbps) parts.push('组播 ' + sc.multicast_kbps + ' kbps');
+  return parts.length ? parts.join(' / ') + '（入向，超速丢弃）' : undefined;
+}
+
 function mb(n) {
   if (n === undefined || n === null) return undefined;
   return Number(n) >= 1024 ? (Number(n) / 1024).toFixed(1) + ' GB' : n + ' MB';
@@ -696,6 +706,7 @@ function renderIfaceDetail(iface, ifaces, params) {
     // 已在头部「管理状态」呈现——原先那行标着「启用（配置）」会把运行态值说成配置值。
     ['入向限速策略', iface.ingress_policy],
     ['出向限速策略', iface.egress_policy],
+    ['风暴抑制', stormControlText(iface.storm_control)],
     ['SR-IOV VF 数（配置）', iface.sriov ? iface.sriov.vf_count : undefined],
     ['VF 占用', iface.sriov && Array.isArray(iface.sriov.vfs) && iface.sriov.vfs.length
       ? iface.sriov.vfs.map((v) => v.vf_id + (v.assigned_vnf ? '→' + v.assigned_vnf : '（空闲）')).join('；')

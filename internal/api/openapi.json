@@ -1533,6 +1533,20 @@
             },
             "type": "object"
           },
+          "storm_control": {
+            "description": "入向风暴抑制（FR-NET-019）。**单位 kbps**（底座 policer 的 1R2C 即 kbps，不做 pps 换算），\n超速**丢弃**；按目的 MAC 分类，仅两类：broadcast（ff:ff:ff:ff:ff:ff 精确匹配）与\nmulticast（目的 MAC 的 I/G 位=1；按掩码口径广播帧也满足该位）。unknown-unicast\n**不支持**（「目的 MAC 未学习」不是以太头里的可匹配位）。未配置时省略该字段；\n对象出现则至少给一类（两键皆缺省/0 属无效配置，提交期拒绝）。\n",
+            "properties": {
+              "broadcast_kbps": {
+                "description": "广播限速（kbps；1-100000000）",
+                "type": "integer"
+              },
+              "multicast_kbps": {
+                "description": "组播限速（kbps；1-100000000）",
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
           "taken_over": {
             "description": "数据面（VPP）是否已接管该口（决策 #302，首装接口可见性）。true = 该口已出现在\nVPP 运行态；false = 内核侧网卡、VPP 未接管（首装 bind-dpdk 前的事实状态，此类口\n也会出现在本清单，kind 仍为 physical）。VPP 运行态不可判定（未接入/查询失败）时\n省略该字段——不编造。\n",
             "type": "boolean"
@@ -1568,6 +1582,20 @@
             "description": "SR-IOV VF 配置（FR-NET-004，命令树 §2.3）",
             "properties": {
               "vf_count": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "storm_control": {
+            "description": "入向风暴抑制（命令树 §2.3，FR-NET-019）：`set interfaces <if> storm-control broadcast|multicast <kbps>`，\n`delete interfaces <if> storm-control [broadcast|multicast]`（裸 delete 清两类）。单位 kbps、超速丢弃；\n仅 broadcast / multicast 两类（unknown-unicast 不支持：L2 掩码表达不了「目的 MAC 未学习」）。\n同一接口的同一类只有一条声明（对象形态：重复配置即覆盖该键的值，不会产生多条）；提交期校验值域 1-100000000。\n",
+            "properties": {
+              "broadcast_kbps": {
+                "description": "广播限速（kbps；1-100000000）",
+                "type": "integer"
+              },
+              "multicast_kbps": {
+                "description": "组播限速（kbps；1-100000000）",
                 "type": "integer"
               }
             },

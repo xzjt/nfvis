@@ -174,6 +174,18 @@ type InterfaceConfig struct {
 	Sriov         *InterfaceSriov `json:"sriov,omitempty"`          // FR-NET-004
 	IngressPolicy string          `json:"ingress_policy,omitempty"` // 入向 QoS 绑定（命令树 §2.5，决策 #331 前后并存）
 	EgressPolicy  string          `json:"egress_policy,omitempty"`  // 出向 QoS 绑定（决策 #331；VPP policer output）
+	// StormControl 入向广播/组播风暴抑制（FR-NET-019，决策 #385）：按目的 MAC 分类限速，
+	// 超速丢弃；nil = 未配置。unknown-unicast 有意不做（L2 掩码表达不了「目的 MAC 未学习」）。
+	StormControl *StormControl `json:"storm_control,omitempty"`
+}
+
+// StormControl 接口的入向风暴抑制声明（决策 #385）。
+//
+// 单位 **kbps**（底座 policer 的 1R2C 即 kbps；不做 pps 换算），0/缺省 = 未配置该类。
+// 两类各自独立：只配一类时另一类不限。语义与数据面结构见 network.StormProvider。
+type StormControl struct {
+	BroadcastKbps int `json:"broadcast_kbps,omitempty"` // 广播（目的 MAC ff:ff:ff:ff:ff:ff）
+	MulticastKbps int `json:"multicast_kbps,omitempty"` // 组播（目的 MAC I/G 位 = 1，含广播之外的组播）
 }
 
 // InterfaceSriov 物理口上的 SR-IOV VF 数量配置。

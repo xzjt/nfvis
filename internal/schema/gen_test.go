@@ -134,6 +134,8 @@ func TestStatementPathsExist(t *testing.T) {
 		{"interfaces", "ens2f0", "mtu", "9000"},
 		{"interfaces", "ens2f0", "sriov", "vf-count", "4"},
 		{"interfaces", "ens2f0", "ingress-policy", "pol-1"},
+		{"interfaces", "ens2f0", "storm-control", "broadcast", "8000"},
+		{"interfaces", "ens2f0", "storm-control", "multicast", "20000"},
 		{"bonds", "bond0", "members", "1", "ens2f0"},
 		{"bonds", "bond0", "lacp", "mode", "active", "interval", "fast"},
 		{"bonds", "bond0", "lacp", "disable"},

@@ -97,6 +97,7 @@ type cliExecutor struct {
 	alarms  AlarmRuntime       // 告警表（nil = 报未接入）
 	dhcpSrv DHCPServerRuntime  // DHCP 服务器运行态（决策 #359：dhcp-leases 与 detail 块；nil = 报未收敛）
 	vxlan   VxlanRuntime       // VXLAN 隧道运行态（决策 #383：show vxlan tunnels；nil = 报未接入）
+	storm   StormRuntime       // 接口风暴抑制数据面实况（决策 #385：show interfaces <if> detail 的 storm-control 块）
 	// pciExists 通用 PCI 直通设备的存在性事实源（FR-CMP-023：detail 的「已在系统中」实测态；
 	// nil = 如实说无法核对——不猜）。与计算编排层 define 前用的是**同一个** sysfs 检查实现。
 	pciExists func(bdf string) (bool, error)
@@ -962,6 +963,11 @@ func (x *cliExecutor) execSetDelete(user, source string, s *cliSession, op strin
 	if op == "delete" && len(full) == 4 &&
 		full[0] == "system" && full[1] == "login" && full[2] == "user" && full[3] == user {
 		return "%% 不能删除当前登录用户\n"
+	}
+	// 决策 #385：语句树里**有意不建**的 storm-control 类别（unknown-unicast）在派发前
+	// 给能照做的报错——不这么拦只会得到「未知命令」，用户反复试写法也得不到原因。
+	if msg := unsupportedStormKindMsg(op, full); msg != "" {
+		return "%% " + msg + "\n"
 	}
 	if _, _, err := schema.Match(schema.ConfigPathTree(), full); err != nil {
 		return "%% " + err.Error() + "\n"

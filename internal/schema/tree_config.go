@@ -188,6 +188,15 @@ func ConfigPathTree() *Node {
 				),
 				K("ingress-policy", "入向限速策略绑定", P("<name>", "策略名", DynQos)),
 				K("egress-policy", "出向限速策略绑定", P("<name>", "策略名", DynQos)),
+				// 决策 #385：入向风暴抑制（按目的 MAC 分类限速，单位 kbps，超速丢弃）。
+				// 只做 broadcast / multicast 两类；**unknown-unicast 有意不建该叶子**——
+				// L2 掩码表达不了「目的 MAC 未学习」（它不是以太头里的可匹配位），用户写到
+				// 它时由执行期给一条能照做的报错（见 cli_aliases_net.go 的
+				// unsupportedStormKindMsg）。
+				K("storm-control", "入向风暴抑制（单位 kbps；超速丢弃）",
+					K("broadcast", "广播抑制（目的 MAC ff:ff:ff:ff:ff:ff）", V("uint", "kbps")),
+					K("multicast", "组播抑制（目的 MAC I/G 位=1 的帧；广播帧也满足该位）", V("uint", "kbps")),
+				),
 			),
 		),
 		K("bonds", "链路聚合（bond 名可如物理口般引用）",

@@ -220,6 +220,11 @@ func run() error {
 	// 身份＝接口 tag（`nfvis-vxlan:<名>`）：VPP 26.06 的 vxlan dump 恒空（真机实证），恢复重放
 	// 按 tag 判存量、变更撤旧按旧配置的元组——不靠进程内登记、也不靠 VPP 分配的接口名。
 	netProvider.SetVxlan(network.NewVxlanProviderFunc(vppMgr.VxlanClientFunc()))
+	// 决策 #385：接口入向风暴抑制（VPP policer + L2 classify 表挂接口入向；随接口声明重放）。
+	// 计数读数注入 Manager（stats segment 经 vpp_get_stats；读不到时读视图如实说明原因）。
+	stormProvider := network.NewStormProviderFunc(vppMgr.StormClientFunc())
+	stormProvider.SetCountersReader(vppMgr)
+	netProvider.SetStorm(stormProvider)
 	netProvider.SetACL(network.NewAclProviderFunc(vppMgr.AclClientFunc()))
 	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
 	netProvider.SetBond(network.NewBondProviderFunc(vppMgr.BondClientFunc()))
@@ -895,6 +900,9 @@ func run() error {
 		DHCPServer: netProvider,
 		// 决策 #383：VXLAN 运行态读物（GET /vxlan-tunnels 与 CLI 同源）。*network.L2Network 自持。
 		Vxlan: netProvider,
+		// 决策 #385：接口风暴抑制的数据面实况读物（CLI `show interfaces <if> detail` 的
+		// storm-control 块）。*network.L2Network 自持（StormDataplane）。
+		Storm: netProvider,
 		// FR-CMP-023：VM detail 的直通 PCI 设备实测态——与计算编排层 define 前
 		// 存在性检查**同一个** sysfs 实现（单一事实源）。
 		PCIExists: compute.NewSysfsPCIDeviceChecker(),

@@ -2719,6 +2719,17 @@ components:
         description: { type: string }
         ingress_policy: { type: string, description: "入向限速策略绑定（决策 #331）" }
         egress_policy: { type: string, description: "出向限速策略绑定（VPP policer output，决策 #331）" }
+        storm_control:
+          type: object
+          description: |
+            入向风暴抑制（FR-NET-019）。**单位 kbps**（底座 policer 的 1R2C 即 kbps，不做 pps 换算），
+            超速**丢弃**；按目的 MAC 分类，仅两类：broadcast（ff:ff:ff:ff:ff:ff 精确匹配）与
+            multicast（目的 MAC 的 I/G 位=1；按掩码口径广播帧也满足该位）。unknown-unicast
+            **不支持**（「目的 MAC 未学习」不是以太头里的可匹配位）。未配置时省略该字段；
+            对象出现则至少给一类（两键皆缺省/0 属无效配置，提交期拒绝）。
+          properties:
+            broadcast_kbps: { type: integer, description: "广播限速（kbps；1-100000000）" }
+            multicast_kbps: { type: integer, description: "组播限速（kbps；1-100000000）" }
         sriov:
           type: object
           description: |
@@ -2761,6 +2772,16 @@ components:
             vf_count: { type: integer }
         ingress_policy: { type: string, description: 入向限速策略绑定（命令树 §2.5） }
         egress_policy: { type: string, description: "出向限速策略绑定（命令树 §2.5；VPP policer output，决策 #331）" }
+        storm_control:
+          type: object
+          description: |
+            入向风暴抑制（命令树 §2.3，FR-NET-019）：`set interfaces <if> storm-control broadcast|multicast <kbps>`，
+            `delete interfaces <if> storm-control [broadcast|multicast]`（裸 delete 清两类）。单位 kbps、超速丢弃；
+            仅 broadcast / multicast 两类（unknown-unicast 不支持：L2 掩码表达不了「目的 MAC 未学习」）。
+            同一接口的同一类只有一条声明（对象形态：重复配置即覆盖该键的值，不会产生多条）；提交期校验值域 1-100000000。
+          properties:
+            broadcast_kbps: { type: integer, description: "广播限速（kbps；1-100000000）" }
+            multicast_kbps: { type: integer, description: "组播限速（kbps；1-100000000）" }
 
     VppConfig:
       type: object

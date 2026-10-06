@@ -167,6 +167,25 @@ func (r *vppRuntime) RuntimeStats(ctx context.Context) (state.RuntimeStats, bool
 	return out, true
 }
 
+// StormCounters 读某 policer 的计数（决策 #385；StormCountersReader 的真机实现）。
+// 走同版本工具 vpp_get_stats 的组合计数（policer 计数不在 binary API 里）；读不到时
+// 返回可读的原因串（调用方在 CLI/读视图里如实显示，不编造数字）。
+func (m *Manager) StormCounters(ctx context.Context, policerIndex uint32, policerName string) (StormCounters, bool, string) {
+	tool := m.statsTool
+	if tool == nil {
+		return StormCounters{}, false, "无同版本统计工具回退源（vpp_get_stats）"
+	}
+	text, err := tool.DumpMachine(ctx, stormPolicerStatsPattern)
+	if err != nil {
+		return StormCounters{}, false, err.Error()
+	}
+	c, ok := StormCountersFromDump(text, policerIndex, policerName)
+	if !ok {
+		return StormCounters{}, false, "stats segment 未返回该 policer 的计数路径（" + stormPolicerStatsPattern + "）"
+	}
+	return c, true, ""
+}
+
 func (r *vppRuntime) Memory(ctx context.Context) (state.Memory, bool) {
 	var ms api.MemoryStats
 	if err := r.m.statsRead(func(conn *core.StatsConnection) error {

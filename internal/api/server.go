@@ -68,6 +68,7 @@ type Options struct {
 	VppState       VppStateRuntime                // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
 	DHCPServer     DHCPServerRuntime              // DHCP 服务器运行态读物（决策 #359；nil = 租约端点 503）
 	Vxlan          VxlanRuntime                   // VXLAN 隧道运行态读物（决策 #383；nil = 读视图如实报未接入）
+	Storm          StormRuntime                   // 接口风暴抑制数据面实况（决策 #385；nil = detail 块如实报未接入）
 	PCIExists      func(bdf string) (bool, error) // 通用 PCI 直通设备存在性（FR-CMP-023；nil = detail 如实说无法核对）
 	Versions       VersionsRuntime                // 组件版本探测（R37-2 收口，决策 #118；nil = 只回 NFViS 版本）
 	MetricsHistory *MetricsHistoryOptions         // 历史时序存储（决策 #356；nil = 未启用）
@@ -150,6 +151,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.cliExec.setDHCPServer(opts.DHCPServer) // 决策 #359：dhcp-leases 读命令与 detail 块同源
 	s.vxlan = opts.Vxlan
 	s.cliExec.setVxlan(opts.Vxlan)       // 决策 #383：show vxlan tunnels 与 GET /vxlan-tunnels 同源
+	s.cliExec.setStorm(opts.Storm)       // 决策 #385：show interfaces <if> detail 的 storm-control 块
 	s.cliExec.pciExists = opts.PCIExists // FR-CMP-023：VM detail 的直通设备实测态（nil = 如实说无法核对）
 	s.cliExec.setComputeRuntime(opts.VM, opts.VMConsole, opts.VMSnapshots, opts.Containers, opts.Images)
 	s.cliExec.setEventBus(opts.Events) // M5-1：CLI 直连动作也发布 vnf-state-changed

@@ -340,7 +340,9 @@ func emitLldpFamily(w *stmtWriter, node *schema.Node, val any, prefix, keyPath [
 //
 // ingress_policy / egress_policy 是字符串而语句树按「具名数组容器」建模
 // （ingress-policy <name> / egress-policy <name>，决策 #331 加出向），机械逆走按数组解容器
-// 失败即跳过；sriov 子对象机械可达（经委托再入本发射器后委托）。
+// 失败即跳过；storm_control 是单对象而模型键是 broadcast_kbps/multicast_kbps（关键字
+// broadcast/multicast 机械逆走查不到，决策 #385），同样显式发射；sriov 子对象机械可达
+// （经委托再入本发射器后委托）。
 
 func emitInterfacesFamily(w *stmtWriter, node *schema.Node, val any, prefix, keyPath []string) error {
 	if kpOf(keyPath) == "interfaces" {
@@ -351,6 +353,18 @@ func emitInterfacesFamily(w *stmtWriter, node *schema.Node, val any, prefix, key
 			} {
 				if v, ok := m[p.key]; ok && v != "" {
 					w.add(toks(prefix, p.kw, formatScalar(v)))
+				}
+			}
+			// 风暴抑制（决策 #385）：每类一条语句；固定顺序 broadcast → multicast
+			//（与声明序无关，保证同配置两次生成逐字相同）。
+			if sc, ok := m["storm_control"].(map[string]any); ok {
+				for _, p := range []struct{ key, kw string }{
+					{"broadcast_kbps", "broadcast"},
+					{"multicast_kbps", "multicast"},
+				} {
+					if v, ok := sc[p.key].(float64); ok && v != 0 {
+						w.add(toks(prefix, "storm-control", p.kw, formatScalar(v)))
+					}
 				}
 			}
 		}

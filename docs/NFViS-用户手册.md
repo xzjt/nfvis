@@ -1418,6 +1418,51 @@ nfvis> show vxlan tunnels              # 名/VNI/本地/远端/端口/交换机 
 - **只做 L2 成员**：隧道口不能当三层接口用，也不能跨 VRF 建隧；
 - 封装参数只支持改目的端口，VXLAN-GPE、ARP/ND 代理与 Bypass 均未提供。
 
+### 8.14 风暴抑制（storm control，入向）
+
+给物理口配**入向**的广播/组播限速：超过设定速率的这类帧**被丢弃**，防止一台机器的广播/组播
+风暴把整条链路与交换域打满。
+
+```bash
+nfvis# set interfaces ens192 storm-control broadcast 8000    # 广播 ≤ 8000 kbps
+nfvis# set interfaces ens192 storm-control multicast 20000   # 组播 ≤ 20000 kbps
+nfvis# commit
+nfvis> show interfaces ens192 detail                         # 配置 + 数据面实测（限速器/分类表/计数）
+
+nfvis# delete interfaces ens192 storm-control broadcast      # 只清广播一类
+nfvis# delete interfaces ens192 storm-control                # 两类都清
+```
+
+**语义与口径**：
+
+- **只做入向**：按**目的 MAC** 分类限速，超速帧**丢弃**（不整形、不排队延时）。
+- **单位是 kbps**（千比特/秒），直接对应数据面的令牌桶速率，**不做「包/秒」换算**——同一 kbps 下
+  平均包长越小、能过的包越多，这是该口径的固有性质。
+- 两类各自独立，可只配一类；都不配＝不限速（删掉语句即恢复）。
+- 速率取值 **1-100000000 kbps**；`set` 只能配在**已声明**的接口上（先 `set interfaces <if> description …`
+  或其它接口语句声明该口）——配在未声明接口上会被明确拒绝并给出声明写法。
+- **multicast 的判据是目的 MAC 的 I/G 位**（组播帧首字节最低位＝1）：按这个口径**广播帧也算组播**，
+  故**只配 multicast 时广播也按该速率限**；两类同配时广播帧走 broadcast 自己的精确匹配
+  （ff:ff:ff:ff:ff:ff）。
+- 读视图（`show interfaces <if> detail` 的 Storm control 块）给三样：**配置**（两类 kbps）、
+  **数据面实测**（该类限速器在不在、实测速率、分类表掩码与会话数）、**计数**（conform/violate；
+  取不到时**如实写明原因**，不显示 0 冒充「没有超速」）。REST 同字段见 `GET /interfaces/{name}` 的
+  `storm_control`；Web 控制台接口详情页同字段（只读）。
+- 改速率是**先撤旧后建新**（旧限速器/分类表不残留）；重启数据面（`request vpp restart`）或重启
+  nfvis 后按配置自动重建。
+
+**不支持的类别（务必知悉）**：
+
+- **unknown-unicast 不支持**：写了会得到一条明确的拒绝并说明原因——它要判「这个目的 MAC 有没有
+  在转发表里学到」，而**以太头里没有这个可匹配位**；数据面按目的 MAC 掩码分类，掩码只能表达广播
+  （目的 MAC 全 ff）与组播（I/G 位）两类。要防未知单播泛洪，可先用 §8.12 的学习上限与环路告警
+  组合缓解（注意该节已写明：只告警、不阻断），或在上游做端口/ACL 侧收紧。
+- **出向不限速**：只做入向（同一份风暴不在上行方向再放大一次）。需要出向限速请用 §8.6 的 QoS
+  策略（`egress-policy`，按整口速率、不区分类别）。
+- **不做按 VLAN / 按端口的白名单粒度**（属端口安全范畴）。
+- 与 §8.12 的环路防护**各自独立、互不替代**：学习上限管的是「学多少」，风暴抑制管的是「放多少」，
+  两者可同时配置。
+
 ---
 
 ## 9. 计算负载：VM 与容器

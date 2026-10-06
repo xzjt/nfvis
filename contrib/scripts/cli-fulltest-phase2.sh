@@ -86,6 +86,11 @@ set protocols lldp interface ens224 enable true
 # —— interfaces / bonds（§2.3）——
 set interfaces ens224 mtu 9000
 set interfaces ens224 disable
+# 入向风暴抑制：两类各一条 + 逐类撤 + 裸 delete 清两类（ens224 已在 S2-pre 提交里声明）
+set interfaces ens224 storm-control broadcast 100000
+set interfaces ens224 storm-control multicast 200000
+delete interfaces ens224 storm-control broadcast
+delete interfaces ens224 storm-control
 set bonds bond0 members 0 ens192
 set bonds bond0 lacp mode active interval fast
 set bonds bond0 mtu 9000
