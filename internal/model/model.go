@@ -40,8 +40,9 @@ type SystemConfig struct {
 	Syslog             *SyslogConfig     `json:"syslog,omitempty"`
 	API                *APIConfig        `json:"api,omitempty"`
 	IdleTimeoutMinutes int               `json:"idle_timeout_minutes,omitempty"`
-	Health             *HealthThresholds `json:"health,omitempty"`  // 硬件健康告警阈值（FR-SYS-012）
-	Metrics            *MetricsConfig    `json:"metrics,omitempty"` // 可观测性配置（决策 #356）
+	Health             *HealthThresholds `json:"health,omitempty"`   // 硬件健康告警阈值（FR-SYS-012）
+	Metrics            *MetricsConfig    `json:"metrics,omitempty"`  // 可观测性配置（决策 #356）
+	Firewall           *FirewallConfig   `json:"firewall,omitempty"` // 管理面主机防火墙（决策 #388）
 }
 
 // HealthThresholds 硬件健康告警阈值（0 = 未设置该阈值，不产生告警）。
@@ -163,6 +164,58 @@ type APIConfig struct {
 	CertFile        string `json:"cert_file,omitempty"`       // 外部证书 PEM 路径（FR-SYS-011）
 	KeyFile         string `json:"key_file,omitempty"`        // 外部私钥 PEM 路径
 	TLSSelfSigned   bool   `json:"tls_self_signed,omitempty"` // 声明使用自签证书（缺证书时由 nfvisd 生成）
+}
+
+// FirewallConfig 管理面主机防火墙（FR-NET-002/FR-SEC-001，决策 #388）。
+//
+// 作用面＝**管理口（system.management.interface）入向**：由 nfvisd 渲染成宿主 nftables 的
+// 独立表 `table inet nfvis-firewall`（不动系统上任何其它表）；数据面（VPP/Docker/libvirt）不受影响。
+// 配置全空（无规则且默认策略未设/accept）＝未配置＝不下发过滤表。
+type FirewallConfig struct {
+	// DefaultPolicy 默认策略：""/"accept" = accept（缺省）、"drop" = 白名单模式。
+	DefaultPolicy string         `json:"default_policy,omitempty"`
+	Rules         []FirewallRule `json:"rules,omitempty"`
+}
+
+// FirewallRule 一条主机防火墙规则（按 Seq 升序首命中生效）。
+//
+// 至少给一条匹配条件（Source/Protocol/Port 之一）；Port 仅 tcp/udp 可设（目的端口）；
+// Source 为 v4/v6 前缀（裸 IP 在渲染时按 /32、/128 归一）。
+type FirewallRule struct {
+	Seq      int    `json:"seq"`
+	Action   string `json:"action"` // accept|drop
+	Source   string `json:"source,omitempty"`
+	Protocol string `json:"protocol,omitempty"` // tcp|udp|icmp|any（""/any = 任意）
+	Port     int    `json:"port,omitempty"`     // 目的端口，仅 tcp/udp
+}
+
+// FirewallEnabled 防火墙是否处于启用态：有规则，或默认策略为 drop（决策 #388 的启用判据，单一事实源）。
+func (f *FirewallConfig) FirewallEnabled() bool {
+	return f != nil && (len(f.Rules) > 0 || f.DefaultPolicy == "drop")
+}
+
+// FirewallPolicy 生效默认策略（缺省 accept）。
+func (f *FirewallConfig) FirewallPolicy() string {
+	if f != nil && f.DefaultPolicy == "drop" {
+		return "drop"
+	}
+	return "accept"
+}
+
+// FirewallOf 取配置的防火墙段（可能为 nil；nil 安全）。
+func (c *Config) FirewallOf() *FirewallConfig {
+	if c == nil || c.System == nil {
+		return nil
+	}
+	return c.System.Firewall
+}
+
+// MgmtInterfaceOf 管理口名（未声明返回空串）。
+func (c *Config) MgmtInterfaceOf() string {
+	if c == nil || c.System == nil || c.System.Management == nil {
+		return ""
+	}
+	return c.System.Management.Interface
 }
 
 // InterfaceConfig 物理网卡的配置视图（OpenAPI InterfaceUpdate，契约补全后含 name/sriov/ingress_policy/egress_policy）。

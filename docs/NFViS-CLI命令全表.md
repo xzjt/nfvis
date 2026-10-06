@@ -70,6 +70,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show system metrics history` | 历史时序**概览**（决策 #356）：存储状态（可用/不可用 + 原因）、生效采样间隔与保留天数、库大小、序列数、样本数、时间范围（最旧/最新）、上次采样时刻与是否停滞（stale）。数据源＝独立 SQLite 库 `/var/lib/nfvis/metrics.db`（`/metrics` 的历史底座） | `GET /metrics/history` | ✅ |
 | `show system metrics history name <metric> [last <duration>] [step <duration>]` | 某指标**各序列**（按标签分组）的时间点；`<metric>` 走动态候选（来源＝存储内已知指标名）；`last` 默认 1h、`step` 省略=自动降采样（取桶内最后一个样本）；存储不可用/无数据时如实说明，不编造 | `GET /metrics/history?name=…` | ✅ |
 | `show system hardware` | 硬件健康：温度/风扇/电源/SMART（FR-SYS-012） | `GET /system/hardware` | ✅（本机无 IPMI/传感器，走降级路径） |
+| `show system firewall` | 主机防火墙（管理面入向）读视图（决策 #388）：默认策略 / 规则表（seq/动作/来源/协议/端口 + **逐规则 packets/bytes 计数**）/ 保留项说明 / `applied` 状态与未收敛原因（表缺失、规则集合不一致、检测到手工修改、nft 不可用等如实说明）/ 计数口径；未配置时如实报「未配置」并给前置提示（写路径走配置模式 candidate→commit） | `GET /system/firewall` | ✅ 真机四维验证（round169，dev112）：规则与 `nft list table inet nfvis-firewall` 逐字对、drop ICMP 后宿主 ping 断而 SSH 存活、逐规则计数递增可读（3 包/180 字节）、restart nfvis 幂等跳过（计数 3→6 连续）、删空回收表、未声明管理口拒绝、plain commit 被拒且文案含照做路径、operator 双面拒（CLI 拒/REST 403）；自锁-回滚场景抓出并修复一处真缺陷（confirmed 超时回滚不触发宿主侧重收敛 ⇒ 表残留 drop，修后回滚即回收表、访问自动恢复）——证据 `docs/evidence/v2-round169-d388-host-firewall.txt` |
 | `show system core-dumps` | 崩溃转储清单（VPP/QEMU/nfvisd） | `GET /system/core-dumps` | ✅ |
 | `show system tech-support` | 诊断归档清单 | `GET /system/tech-support` | ✅ |
 | `show system configuration sessions` | candidate 持锁会话列表（FR-CFG-009）；列 Holder/Session/User/Acquired/Last-Activity/Dirty（会话标识与所属用户，决策 #317） | `GET /system/configuration/sessions` | ✅ |
@@ -287,6 +288,10 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set system metrics history interval <n>` | 历史采样间隔（秒，默认 60，10..3600；改配置无需重启即生效，决策 #356） | 后台采样器 → `/var/lib/nfvis/metrics.db` | ✅ **真机四维验证（round137，含 Browser Use）**：CLI/REST/Web 三面同源 + 重启延续 + 免重启生效，证据 `docs/evidence/v2-round137-d356-metrics-history.txt`；已入 fulltest 阶段 2 |
 | `set system metrics history retention-days <n>` | 历史保留天数（默认 7，1..365；另有 2,000,000 行硬顶兜底，决策 #356） | 后台采样器裁剪 | ✅ **真机四维验证（round137，同上）**；已入 fulltest 阶段 2 |
 | `delete system metrics history interval\|retention-days` | 回落默认（字段缺省＝用默认值，决策 #356） | 配置库 | ✅ **真机四维验证（round137，同上）**；已入 fulltest 阶段 2 |
+| `set system firewall default-policy <accept\|drop>` | 管理面主机防火墙默认策略（决策 #388；缺省 accept，drop＝白名单模式）。作用面＝**管理口入向**（宿主 `nft -f -` 独立表 `table inet nfvis-firewall`，数据面不受影响）；前置：须先声明管理口（未声明提交期拒绝并给照做路径）；非 console 会话的防火墙变更须 `commit confirmed` | 宿主 nftables（管理口入向独立表） | ✅ 真机四维验证（round169，dev112）：规则与 `nft list table inet nfvis-firewall` 逐字对、drop ICMP 后宿主 ping 断而 SSH 存活、逐规则计数递增可读（3 包/180 字节）、restart nfvis 幂等跳过（计数 3→6 连续）、删空回收表、未声明管理口拒绝、plain commit 被拒且文案含照做路径、operator 双面拒（CLI 拒/REST 403）；自锁-回滚场景抓出并修复一处真缺陷（confirmed 超时回滚不触发宿主侧重收敛 ⇒ 表残留 drop，修后回滚即回收表、访问自动恢复）——证据 `docs/evidence/v2-round169-d388-host-firewall.txt` |
+| `set system firewall rule <seq> action <accept\|drop> [source <prefix>] [protocol <tcp\|udp\|icmp\|any>] [port <1..65535>]` | 主机防火墙规则（决策 #388）：按 seq 升序**首命中生效**；`port`＝目的端口（仅 tcp/udp 可配）；`source` 为 v4/v6 前缀（裸 IP 按 /32、/128 归一）；`icmp` 随 source 族取 ICMP/ICMPv6；**至少给一条匹配条件**（source/protocol/port 之一）；完全重复规则提交期拒绝；seq 唯一 1..9999 | 同上 | ✅ 真机四维验证（round169，dev112）：规则与 `nft list table inet nfvis-firewall` 逐字对、drop ICMP 后宿主 ping 断而 SSH 存活、逐规则计数递增可读（3 包/180 字节）、restart nfvis 幂等跳过（计数 3→6 连续）、删空回收表、未声明管理口拒绝、plain commit 被拒且文案含照做路径、operator 双面拒（CLI 拒/REST 403）；自锁-回滚场景抓出并修复一处真缺陷（confirmed 超时回滚不触发宿主侧重收敛 ⇒ 表残留 drop，修后回滚即回收表、访问自动恢复）——证据 `docs/evidence/v2-round169-d388-host-firewall.txt` |
+| `delete system firewall rule <seq> [action\|source\|protocol\|port]` | 逐叶子删除；裸 delete＝整条规则删除 | 同上（改配置即重建表、计数清零） | ✅ 真机四维验证（round169，dev112）：规则与 `nft list table inet nfvis-firewall` 逐字对、drop ICMP 后宿主 ping 断而 SSH 存活、逐规则计数递增可读（3 包/180 字节）、restart nfvis 幂等跳过（计数 3→6 连续）、删空回收表、未声明管理口拒绝、plain commit 被拒且文案含照做路径、operator 双面拒（CLI 拒/REST 403）；自锁-回滚场景抓出并修复一处真缺陷（confirmed 超时回滚不触发宿主侧重收敛 ⇒ 表残留 drop，修后回滚即回收表、访问自动恢复）——证据 `docs/evidence/v2-round169-d388-host-firewall.txt` |
+| `delete system firewall default-policy` | 清除默认策略（回落缺省 accept；防火墙全空时回收表） | 同上 | ✅ 真机四维验证（round169，dev112）：规则与 `nft list table inet nfvis-firewall` 逐字对、drop ICMP 后宿主 ping 断而 SSH 存活、逐规则计数递增可读（3 包/180 字节）、restart nfvis 幂等跳过（计数 3→6 连续）、删空回收表、未声明管理口拒绝、plain commit 被拒且文案含照做路径、operator 双面拒（CLI 拒/REST 403）；自锁-回滚场景抓出并修复一处真缺陷（confirmed 超时回滚不触发宿主侧重收敛 ⇒ 表残留 drop，修后回滚即回收表、访问自动恢复）——证据 `docs/evidence/v2-round169-d388-host-firewall.txt` |
 
 ### 2.2b `protocols`（顶级层级，FR-NET-018）
 
@@ -437,44 +442,44 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 > **复核方法**（下面每个数字都可这样复算）：
 >
 > ```bash
-> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 295（§1/§2 的命令行 293 行 + §3 本表的 `show`、`request` 两行）
+> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 300（§1/§2 的命令行 298 行 + §3 本表的 `show`、`request` 两行）
 > ```
 >
-> 即 §1/§2 合计 **293 行**；把两处 ` / ` 并列写法各拆成一条后为 **297 条**命令
+> 即 §1/§2 合计 **298 行**；把两处 ` / ` 并列写法各拆成一条后为 **302 条**命令
 > （§1.3 的 `exit` / `quit` +1；§2.1 的 `edit <path>` / `up` / `top` / `exit` +3）。
 
 **分族**（族 = 该行**首个 token**；§2.1 的裸 `show` 与 `show | display set` 因此计入 `show` 族，`help` 计入其余操作）：
 
 | 族 | 行数 | 明细 |
 |---|---|---|
-| `show` | 73 | §1.1 show 表 70 行 + §2.1 的 `show`、`show \| display set` 2 行 + §2.4 的 `show virtual-switches <n> dhcp-leases` 1 行 |
+| `show` | 74 | §1.1 show 表 71 行 + §2.1 的 `show`、`show \| display set` 2 行 + §2.4 的 `show virtual-switches <n> dhcp-leases` 1 行 |
 | `request` | 49 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/系统/告警） |
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
-| 配置模式 | 151 | §2.1 余下 13 行 + §2.2~§2.9 共 138 行（§2.4 的 `dhcp-leases` 读行计入 `show` 族；含 FR-CMP-023 的 2 条 `pci-device`、决策 #383 的 2 条 vxlan、决策 #385 的 3 条 storm-control 语句） |
-| **合计** | **293** | 不含管道则为 **284**；按 ` / ` 拆开后 **297 条** |
+| 配置模式 | 155 | §2.1 余下 13 行 + §2.2~§2.9 共 142 行（§2.4 的 `dhcp-leases` 读行计入 `show` 族；含 FR-CMP-023 的 2 条 `pci-device`、决策 #383 的 2 条 vxlan、决策 #385 的 3 条 storm-control、决策 #388 的 4 条 firewall 语句） |
+| **合计** | **298** | 不含管道则为 **289**；按 ` / ` 拆开后 **302 条** |
 
 **分节**（行数）：
 
 | 节 | 行数 | 节 | 行数 |
 |---|---|---|---|
-| §1.1 `show`（含通用管道 9） | 80 | §2.2b `protocols` | 3 |
+| §1.1 `show`（含通用管道 9） | 81 | §2.2b `protocols` | 3 |
 | §1.2 `request` | 49 | §2.3 `interfaces` 与 `bonds` | 14 |
 | §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 25 |
 | §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 11 |
-| §2.2 `system` | 40 | §2.6 `resource-pools` | 3 |
+| §2.2 `system` | 44 | §2.6 `resource-pools` | 3 |
 | §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 22 |
-| §2.9 `container-functions` | 10 | **合计** | **293** |
+| §2.9 `container-functions` | 10 | **合计** | **298** |
 
-**按实测状态分布**（共 293 行）：
+**按实测状态分布**（共 298 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 277 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，本轮按增量口径一并订正 |
+| ✅ 实测通过 | 282 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）、**主机防火墙 5 行（#388，round169）**——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，按增量口径一并订正 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 设计拒绝（decision #340） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 未在 v2 轮次执行 | 11 | **破坏性/需交互**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、`kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）。机制由单测/集成测试覆盖；破坏性动作按其交付说明单独走查（部分动作在 v1 收尾轮有真机走查记录，见各轮证据） |
+| 🚫 未在 v2 轮次执行 | 11 | **破坏性/需交互**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、`kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）。机制由单测/集成测试覆盖；破坏性动作按其交付说明单独走查（部分动作在 v1 收尾轮有真机走查记录，见各轮证据）。round168 一度在此桶挂过 #388 的 5 条待真机行，round169 真机四维通过后移入 ✅ |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
@@ -488,16 +493,21 @@ round80 以来那条唯一 ✗ 归零。
 pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**；
 语义校验 **12 / 0 / 1**、生命周期与组合 **21 / 0 / 3**（有业务现场时跑）。
 
-**当前基线（v2 开发线，round167 实测；逐轮累积与证据见下）**：
-`cli-fulltest` **258 / 0 / 18** ｜ `cli-semantic-check` **27 / 0 / 2**（S8 冷窗时 26/0/3）｜
+**当前基线（v2 开发线，round169 实测；逐轮累积与证据见下）**：
+`cli-fulltest` **272 / 0 / 20** ｜ `cli-semantic-check` **27 / 0 / 2**（S8 冷窗时 26/0/3）｜
 `cli-lifecycle-check` **22 / 0 / 3**（L3-2 可判定时 23/0/2）｜ `cli-pty-smoke` **10 / 10**
-（真机 nfvis-vm 2.0.0~dev110，round167）。
+（真机 nfvis-vm 2.0.0~dev112，round169）。fulltest 258→272＝**#388 主机防火墙 16 项入套件**（+14 通过、
++2 预期报错＝plain commit 被拒与「至少一条匹配条件」两条负例）。
+
+> 注（决策 #388，主机防火墙）：本轮新增 **5 行**（`show system firewall` + 4 条 `set/delete system firewall …`
+> 语句，均标 🚫 待真机——实现随本轮交付、**真机四维验证待执行**），全表由 **293 行增至 298 行**
+> （§1.1 +1、§2.2 +4；状态分布 277/0/5/16）。四套件基线随后续真机复跑更新。
 
 沿革（每一处变化都写明「哪条新增/移除、为什么」——决策 #304/#319 纪律）：
 - `cli-fulltest`：198/0/11 → **210/0/13**（round101 实测修正）→ **240/0/13**（round137：`#356` 历史时序命令 +9）
   → **242/0/15**（round138：`#357` exec 断言 +4，其中 2 条入「预期报错」）→ **242/0/16**（round139：`#358`
   shell 预期失败 +1）→ **254/0/18**（round141：`#359` dhcp-server 语句解析/提交往返/`show … dhcp-leases` +12 通过、
-  +2 预期报错）→ **258/0/18**（round167：`#385` storm-control 4 条语句入套件，+4）；round143~166 各轮复核同值（零失败）。
+  +2 预期报错）→ **258/0/18**（round167：`#385` storm-control 4 条语句入套件，+4）→ **272/0/20**（round169：`#388` 主机防火墙 16 项入套件——解析块 3 条 + 负例/confirmed 正例/回读/清理 13 项，+14 通过、+2 预期报错）；其余各轮复核同值（零失败）。
 - `cli-semantic-check`：12/0/1 → 24/0/1（S10 编辑锁 12 项）→ 25/0/2（**#343** S8 由不可判定转通过，无新增/移除项）
   → **26/0/3**（**#345** DNS punt 实链 S13 +1）；此后在 **26/0/3（S8 冷窗）～27/0/2（S8 窗口热）** 两档间
   （不可判定＝S11「无 relay 现场」/ S12「按设计」；S8 是否可判定取决于现场窗口内有无实时流量）。

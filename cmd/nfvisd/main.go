@@ -385,6 +385,11 @@ func run() error {
 		return string(out), err
 	}
 
+	// 决策 #388：管理面主机防火墙落地器（宿主 nftables 独立表 `table inet nfvis-firewall`）。
+	// 启动时与每次提交后各下发一次（`applyFirewallSettings`）；下发失败只告警、不阻塞启动/提交，
+	// 读视图（show system firewall / GET /system/firewall）以 applied=false 如实呈现。
+	fwApplier := system.NewFirewallApplier()
+
 	// M5-8 / FR-SEC-004（决策 #72）：证书管理（FR-SYS-011）。未显式给 -tls-cert 时：
 	// 已装管理证书 → 直接用；否则**自动生成自签证书**（FR-API-001「REST over HTTPS（自签证书，可换）」）。
 	// 仅显式 -allow-plaintext（开发/测试）才退化为明文——此前缺省即明文，与规格相反。
@@ -439,6 +444,9 @@ func run() error {
 			applyTLSSettings(cfg, tlsMgr, log)
 			// V1 收尾（决策 #69）：日志级别与远程 syslog 转发随配置热更新
 			applySyslogSettings(cfg, logLevel, syslogFwd, log)
+			// 决策 #388：主机防火墙随配置热更新（幂等；失败只告警——提交已经成功，
+			// 数据面实况由读视图如实呈现，不把下发失败倒灌成提交失败）
+			applyFirewallSettings(cfg, fwApplier, log)
 			if cfg.System != nil && cfg.System.Syslog != nil {
 				if path, err := system.ApplyLogRetention(context.Background(), runCmd,
 					cfg.System.Syslog.RetentionDays, cfg.System.Syslog.MaxSizeMB); err != nil {
@@ -459,6 +467,8 @@ func run() error {
 	// FR-OPS-030 / FR-SYS-004（决策 #69）：按 committed 配置初始化日志级别与远程转发
 	if cfg, err := engine.Committed(); err == nil {
 		applySyslogSettings(cfg, logLevel, syslogFwd, log)
+		// 决策 #388：按 committed 配置下发管理面主机防火墙（幂等；失败只告警，不阻塞启动）。
+		applyFirewallSettings(cfg, fwApplier, log)
 		// FR-SEC-001（决策 #72）：管理面仅监听管理网卡——通配监听收敛到管理口地址
 		if addr, note := system.ResolveListenAddr(*listen, mgmtAddressOf(cfg), system.LocalAddrChecker()); note != "" {
 			log.Info(note, "listen", addr)
@@ -903,6 +913,9 @@ func run() error {
 		// 决策 #385：接口风暴抑制的数据面实况读物（CLI `show interfaces <if> detail` 的
 		// storm-control 块）。*network.L2Network 自持（StormDataplane）。
 		Storm: netProvider,
+		// 决策 #388：主机防火墙数据面读数（CLI `show system firewall` 与
+		// `GET /system/firewall` 同一读视图；同一落地器负责下发/回读）。
+		Firewall: fwApplier,
 		// FR-CMP-023：VM detail 的直通 PCI 设备实测态——与计算编排层 define 前
 		// 存在性检查**同一个** sysfs 实现（单一事实源）。
 		PCIExists: compute.NewSysfsPCIDeviceChecker(),
@@ -1740,6 +1753,20 @@ func applySyslogSettings(cfg model.Config, level *slog.LevelVar, fwd *system.Sys
 		log.Info("远程 syslog 转发已配置",
 			"host", remote.Host, "port", remote.Port,
 			"facility", remote.Facility, "severity", remote.Severity)
+	}
+}
+
+// applyFirewallSettings 按 committed 配置下发/回收管理面主机防火墙（决策 #388）。
+//
+// 幂等（同配置不重建，计数连续）；**失败只记日志、不阻塞启动也不回灌提交**——宿主防火墙
+// 下发失败不得让 nfvisd 起不来，数据面实况由读视图（show system firewall / GET /system/firewall）
+// 以 applied=false + 原因如实呈现。cfg 未配置防火墙时 Apply 会回收残留表（若在）。
+func applyFirewallSettings(cfg model.Config, fw *system.FirewallApplier, log *slog.Logger) {
+	if fw == nil {
+		return
+	}
+	if err := fw.Apply(context.Background(), cfg); err != nil {
+		log.Warn("主机防火墙下发失败（读视图会如实显示未收敛）", "err", err)
 	}
 }
 

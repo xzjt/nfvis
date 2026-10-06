@@ -117,6 +117,11 @@ var contractStatements = []string{
 	"set vxlan tunnels tun-a vni 100 local 10.99.0.1 remote 10.99.0.2",
 	"set vxlan tunnels tun-a vni 100 local 10.99.0.1 remote 10.99.0.2 dst-port 5789",
 	"set vxlan tunnels tun-a vni 100 local 10.99.0.1 remote 10.99.0.2 virtual-switch vs-a",
+	// 主机防火墙（决策 #388，§2.2）：默认策略 + 规则（键值对组合；至少一条匹配条件）
+	"set system firewall default-policy drop",
+	"set system firewall rule 100 action accept source 192.0.2.0/24 protocol tcp port 9999",
+	"set system firewall rule 200 action drop protocol icmp",
+	"set system firewall rule 300 action accept source 2001:db8::/32 protocol udp",
 }
 
 func TestCLIStatementMappingGuard(t *testing.T) {
@@ -252,6 +257,16 @@ func TestCLIStatementMappingDelete(t *testing.T) {
 			"delete vxlan tunnels tun-b dst-port 5789"},
 		{[]string{"set vxlan tunnels tun-b vni 100 local 10.99.0.1 remote 10.99.0.2"},
 			"delete vxlan tunnels tun-b"},
+		// 主机防火墙（决策 #388）：裸 delete＝整条、带叶子＝只清该叶子、默认策略回落缺省
+		{[]string{"set system firewall default-policy drop",
+			"set system firewall rule 10 action accept source 10.0.0.0/8"},
+			"delete system firewall rule 10"},
+		{[]string{"set system firewall rule 10 action accept source 10.0.0.0/8 protocol tcp port 22"},
+			"delete system firewall rule 10 source"},
+		{[]string{"set system firewall rule 10 action accept source 10.0.0.0/8 protocol tcp port 22"},
+			"delete system firewall rule 10 port"},
+		{[]string{"set system firewall default-policy drop"},
+			"delete system firewall default-policy"},
 	}
 	for _, c := range cases {
 		c := c

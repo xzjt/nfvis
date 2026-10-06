@@ -99,6 +99,23 @@
         改这些字段在<a href="#/config">配置</a>页的系统段表单里做（只写候选，提交后生效）。
       </p>
     </article>
+
+    <article class="card wide">
+      <h2>主机防火墙 <span id="fw-note" class="muted small"></span></h2>
+      <p class="muted small">
+        管理口<strong>入向</strong>的主机过滤（数据面 VPP/虚拟机/容器不受影响）。本卡是只读读视图，
+        与 <code>show system firewall</code> / <code>GET /system/firewall</code> 同源；写路径在
+        <a href="#/config">配置</a>页与命令行。⚠️ 改错策略/规则可能切断管理访问——非本地串口会话的防火墙
+        变更须用 <code>commit confirmed</code> 提交（超时未确认会自动回滚恢复访问）。
+      </p>
+      <dl id="fw-list" class="kv"></dl>
+      <table id="fw-table">
+        <thead><tr><th>序号</th><th>动作</th><th>来源</th><th>协议</th><th>端口</th><th>命中（packets/bytes）</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p id="fw-reserved" class="muted small"></p>
+      <p id="fw-counters" class="muted small"></p>
+    </article>
     </section>
 
     <section class="page" id="page-hardware" hidden>

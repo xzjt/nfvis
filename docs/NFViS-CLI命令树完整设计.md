@@ -52,6 +52,11 @@ show system
   │                                                 #   存储不可用/无数据时如实说明，不编造（v1 不设告警码）
   ├─ kernel                                         # 内核启动基线三方对照（cmdline/运行实际/配置期望，FR-SYS-014）
   ├─ hardware                                       # 硬件健康：CPU 温度/风扇/电源（IPMI/Redfish/lm-sensors）、磁盘 SMART
+  ├─ firewall                                       # 主机防火墙（管理面入向）读视图（决策 #388，R）：
+  │                                                 #   默认策略 / 规则表（含**逐规则 packets/bytes 计数**）/
+  │                                                 #   保留项说明 / `applied` 与未收敛原因 / 计数口径；
+  │                                                 #   未配置时如实报「未配置」并给前置提示；
+  │                                                 #   API: GET /system/firewall（同源字段）
   ├─ core-dumps                                     # 崩溃转储清单（VPP/QEMU/nfvisd）
   ├─ tech-support                                   # 诊断归档清单
   ├─ api tokens                                     # 活动会话 / API Token 清单（R；决策 #301）：token-id、
@@ -476,6 +481,34 @@ set metrics                              # 历史时序存储（决策 #356）
                                               #   `delete system metrics history interval|retention-days` = 回落默认
                                               #   （字段缺省＝用默认值，不在配置里写常数）。落点 `system.metrics.history`；
                                               #   采样器写独立库 `/var/lib/nfvis/metrics.db`（不在配置备份/恢复语义内）
+set firewall                                  # 管理面主机防火墙 v1（决策 #388）：宿主 nftables 独立表
+  │                                           #   `table inet nfvis-firewall`，**只作用于管理口入向**；数据面
+  │                                           #   （VPP/Docker/libvirt）不受影响。前置：须先声明管理口
+  │                                           #   （`set system management interface <ifname>`），否则提交期拒绝
+  │                                           #   并给照做路径。
+  ├─ default-policy <accept|drop>             # 默认策略（缺省 accept）；drop＝白名单模式
+  └─ rule <seq> action <accept|drop> [source <prefix>] [protocol <tcp|udp|icmp|any>] [port <1..65535>]
+                                              # 规则按 seq 升序**首命中生效**；port＝目的端口（仅 tcp/udp 可配）；
+                                              #   source 为 v4/v6 前缀，裸 IP 按 /32、/128 归一；
+                                              #   protocol 可省＝任意（icmp 随 source 族取 ICMP/ICMPv6，
+                                              #   无 source 时二者皆匹配）；**至少给一条匹配条件**
+                                              #   （source/protocol/port 之一，防手滑写出裸 action 规则）；
+                                              #   完全重复的规则（匹配与动作全同）提交期拒绝；seq 唯一 1..9999。
+                                              # 作用面与保留项（用户规则**不可覆盖**，读视图列明）：
+                                              #   ① 非管理口入向流量不参与本防火墙；② 已建立/相关连接
+                                              #   （含当前会话）；③ 必要 ICMP/ICMPv6（v4 差错；
+                                              #   v6 差错与邻居发现）。
+                                              # 下发：`nft -f -` 原子整表重建（幂等：配置未变不重建、计数因此
+                                              #   连续；变更则重建、**计数清零并如实说明**）；配置全空
+                                              #   （无规则且默认 accept）⇒ 回收表（未配置＝无过滤）；
+                                              #   nfvisd 启动时按 committed 配置下发（重启后恢复）。
+                                              # ⚠️ **非 console 会话的任何防火墙变更（规则/默认策略）必须
+                                              #   `commit confirmed`**（与 FR-CFG-012 管理口自锁保护同族、同一判据：
+                                              #   改错可能切断管理访问）；console 会话豁免（带外、不依赖管理网）。
+                                              # 读视图：CLI `show system firewall` / REST `GET /system/firewall` /
+                                              #   Web 系统页只读卡三面同源（写路径仍走 candidate→commit）。
+delete firewall rule <seq> [action|source|protocol|port]   # 逐叶子删除；裸 delete＝整条
+delete firewall default-policy                             # 回落缺省 accept
 # 管理口地址/网关变更：commit 时若当前会话来自 SSH，强制要求使用
 # commit confirmed 并输出自锁警告（FR-CFG-012）。**接入源事实化（决策 #369）**：
 # 客户端 `-source console` 仅在**连接源自本机回环**时被采信——远程连接声称 console

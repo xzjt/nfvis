@@ -1,0 +1,93 @@
+round169 · 决策 #388 —— 管理面主机防火墙 v1（能力前提 spike + 契约先行 + 实现 + 真机四维 + 一处 P0 缺陷当场修复）
+====================================================================
+日期：2026-10-06；分支 v2-round169-firewall（d77f7ee 契约决策行 → 4acb6a1 契约文档 → e3152d8/4b24a66 实现
+→ 68865fb 真机验证抓出的 P0 修复）；真机 nfvis-vm **2.0.0~dev112**。
+来源：`docs/v2待做.md` 一.7（差距分析 §1-12「管理面主机防火墙策略配置——0 命中」；规格书 §12 V2 候选）。
+PR：https://github.com/xzjt/nfvis/pull/316（base v2）。
+
+§0 结论
+- **主机防火墙 v1 交付并真机四维验证通过**：`set system firewall default-policy <accept|drop>` 与
+  `set system firewall rule <seq> action … [source] [protocol] [port]`（+ delete 家族）⇒ 宿主 nftables
+  **独立表** `table inet nfvis-firewall`（`nft -f -` 原子批内重建）；保留项（非管理口 accept /
+  established,related / 必要 ICMP·ICMPv6 与 ND）不可被用户规则覆盖；**逐规则计数真实可读**；三面读视图。
+- **安全口径**：非 console 会话的防火墙变更**必须 `commit confirmed`**（与 FR-CFG-012 同判据）；console 豁免。
+- **真机四维当场抓出并修复一处 P0 缺陷**：confirmed 超时自动回滚**只回滚配置、不触发宿主侧重收敛**
+  ⇒ 「配置已回滚、nft 表仍是 policy drop」→ 管理面锁死（真机实锤：SSH 新连接超时，经 vmrun 带外复位恢复）。
+  修法＝回滚落库后补发 `OnCommitted`（与 Commit 同一「已提交变更」通知；同族受益者含 TLS/syslog/日志保留）；
+  红-绿用例 + dev112 重验：**超时回滚后表即被回收、访问自动恢复、无需人工**。
+- 四套件：fulltest **272/0/20**（258→272：#388 的 16 项入套件）、语义 **27/0/2**、lifecycle **22/0/3**、pty **10/10**。
+
+§1 能力前提 spike（本会话真机，先于契约）
+- `nft` v1.1.6 可用；宿主既有六张表（ip/ip6 × filter/nat/mangle）**全由 iptables-nft（docker/libvirt）管理**
+  （`nft list ruleset` 自带「managed by iptables-nft, do not touch」警告）⇒ 产品只建独立 `inet` 表、绝不触碰其它表。
+- **同 hook 的 base chain 相互独立、drop 全局生效**：在另一张表以更高优先级（-10）accept tcp/22，
+  本表 drop-all 仍把新 SSH 连接拦死——「高优先 accept 不能豁免别处 drop」。
+- **保留 `ct state established,related accept` 让既有会话在 drop-all 下存活**：长会话全程存活、新连接超时。
+- **逐规则计数真实递增可读**（`icmp type echo-request counter` 3 包/180 字节）——与 VPP ACL 计数（#339 撤回）
+  相反，这条路能给出读数。
+- 救援通道盘点：open-vm-tools active（vmrun 带电源控制可用、**免 guest 凭据**）；VMware 控制台为操作者带外通道；
+  VM 无串口（vmx 无 serial0）；本会话的 Computer Use 能力不可用（SDK 报 unavailable）——故验证保险采用
+  **同会话兜底还原 + vmrun 复位**两级，均未依赖 GUI。
+
+§2 实现（4acb6a1 契约文档 + e3152d8/4b24a66 实现；实现由子智能体承担、主会话逐点审查）
+- 模型/校验：`SystemConfig.Firewall{DefaultPolicy, Rules[]}`；seq 唯一 1..9999、action 必填、source 裸 IP 归一
+  /32//128、port 仅 tcp/udp、**至少一条匹配条件**、重复规则拒绝、**firewall 已配置而管理口未声明 ⇒ 提交期拒绝**
+  （文案给照做路径 `set system management interface <ifname>`）。
+- 数据面（`internal/system/firewall.go` + `_linux/_other`）：渲染纯函数（保留项固定顺序、用户规则按 seq 升序、
+  匹配 family 分支、`comment "nfvis-rule-<seq>"` 身份标记）+ `Apply`（指纹 sha256 + 表存在性 ⇒ 幂等跳过；
+  重建走「delete table + 建表」同批 `nft -f -` 单事务、无无过滤窗口；配置全空 ⇒ 回收表）+ `Read`
+  （`nft -j` 按 comment 映射计数；applied 判定含「外来 comment＝检测到手工修改」；**不可读不得报 0**）。
+- 守卫：`sysFirewallChanged` + `ErrFirewallConfirmRequired`（与 FR-CFG-012 同位同判据；#364 隐式确认序未动）。
+- 接线：main.go OnCommitted + 启动各一次；失败只告警不阻塞（读视图 applied=false 如实呈现）。
+- 读视图：CLI `show system firewall` / REST `GET /system/firewall` / Web 系统页只读卡（同源）。
+- 套件：fulltest 阶段 2 新增 16 项（解析块 3 + 负例 plain-commit 被拒 + 负例「至少一条匹配条件」+
+  confirmed 正例/确认/回读/清理 13 项；TEST-NET `192.0.2.0/24` 特征源、异常中断有兜底清理）。
+
+§3 真机四维（dev111 首验 → dev112 修复后重验）
+- **① 作用效果**：`rule 100 accept source 192.0.2.0/24 tcp port 9999` 提交后 `nft list table inet nfvis-firewall`
+  与渲染逐字对（保留 4 条 + 用户规则带 comment）；`rule 200 drop protocol icmp` 生效后 **Windows 侧 ping 3/3 全丢、
+  新 SSH 正常**；**计数实读 `nfvis-rule-200: 3 包/180 字节`**（恰为 3 个 echo-request；rule 100 无流量如实 0）。
+- **② 生命周期**：改规则（200→210）⇒ 重建、新规则计数从 0 起（3/180）；`systemctl restart nfvis` ⇒
+  **幂等跳过、计数连续（3/180 → 6/360，跨重启继续增长）**；删空（100+210）⇒ **表回收**（`nft list tables` 0）、
+  读视图回「未配置」、ping 恢复。
+- **③ 跨对象**：防火墙 drop ICMP 生效期间——VPP `show version` 正常（数据面不 traverse 宿主 input）、
+  libvirt/sem-vm 正常、`docker run --rm alpine:3.20 true` rc=0（桥接转发不经过本表）；仅管理口入向 ICMP 被拦。
+- **④ 对抗**：未声明管理口 ⇒ 提交期拒绝（文案含照做路径）；plain `commit`（ssh 会话）⇒
+  `%% 防火墙变更可能切断管理访问：必须以 commit confirmed <分钟> 提交（超时未确认将自动回滚、恢复访问）`；
+  operator ⇒ CLI `%% 无权限进入配置模式（需 super-user）`、REST PUT candidate **403**（读视图可读）；
+  非法输入（只写 action / port 配 any / 重复规则 / seq 越界）提交期全拒。
+- **② 自锁-回滚场景（P0 所在，见 §4）**。
+
+§4 真机抓出的 P0 缺陷与修复（68865fb；dev111 抓到 → dev112 重验通过）
+- **现象**：`set system firewall default-policy drop` + `commit confirmed 2`（不确认）——窗口内新 SSH 超时
+  （预期）；**2 分钟超时后配置自动回滚（读视图回「未配置」）但 nft 表没有被回收（`policy drop` 残留）**，
+  新 SSH 依旧被锁——**管理面锁死到重启**。经 `vmrun reset soft`（免凭据带外复位）恢复；
+  复位后 nfvisd 启动下发把表回收（顺带实证「启动下发回收表」路径）。
+- **根因**：`doConfirmedRollback` 只 `store.AppendRevision` 落库，**不走 `Commit`/`OnCommitted`** ⇒
+  宿主侧重收敛（防火墙/TLS/syslog/日志保留，全在 main.go 的 OnCommitted 里）不触发。
+- **修法**：回滚落库成功后补发 `e.onCommit(newRev, "system")`——回滚与 Commit 同为「已提交配置变更」，
+  必须走同一通知；**同族受益者**：TLS 证书/syslog 转发/日志保留在 confirmed 超时回滚后同样会重新收敛
+  （此前它们也有同款「回滚后不还原」缺口，一并修掉）。
+- **红-绿**：新用例 `TestConfirmedTimeoutRollbackNotifiesOnCommit`（修前 OnCommitted 触发 2 次、
+  修后 3 次且第三次 user=system）；dev112 重验 §4 场景：**窗口内锁死 → 超时 → 配置回滚 + 表回收 +
+  访问自动恢复（G4 兜底核查输出「无需手动」）**。
+- **如实登记**：`system.management.interface ens160` 的声明为本轮新写入的常驻配置（rev 944，confirmed 两步式
+  提交，顺带验证管理口守卫）；软复位后 sem-vm 未自启系 libvirt autostart=**disable**（既成环境状态，非缺陷）。
+
+§5 四套件（dev112）
+- fulltest **272/0/20**（258→272：#388 的 16 项入套件——+14 通过、+2 预期报错；套件自清场未清项 0）；
+- 语义 **27/0/2**（S13 现场 `set system dns proxy server 192.168.155.1` 在场；S8 窗口热）；
+- lifecycle **22/0/3**（L3-2 正控未热族，非回归）；pty **10/10**。
+- `GOFLAGS=-p=1 make check` RC=0（P0 修复提交前后各一遍全绿）。
+
+§6 现场与清场（如实）
+- 测试规则（100/200/210）与 default-policy 试验全部删除确认（读视图「未配置」、`nft list tables` 无 nfvis-firewall）；
+- fulltest 自清场未清项 0；套件特征源 192.0.2.0/24 无残留；
+- 环境变化（有意、已入册）：① `system.management.interface ens160` 新声明（防火墙前置，也是本机应有的正确配置）；
+  ② 真机版本 dev110 → **dev112**；③ sem-vm 由语义夹具拉起（running）、其 libvirt autostart 标记为 disable
+  （此前轮次遗留，重启不自启——交接环境节已更正）；④ S13 现场 `set system dns proxy server 192.168.155.1` 在场；
+  ⑤ 本机 known_hosts 因 VM 重启换 host key 有一次告警（StrictHostKeyChecking=no 放行，无碍）。
+
+§7 门禁
+- `make check` RC=0；决策条数 290 ✓；openapi 同步 ✓；套件—契约同步缺口 0 ✓；UI 覆盖/形状/秘密出口守护 ✓。
+- PR #316 squash 合并（合并提交见交接 §0）。

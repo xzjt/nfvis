@@ -131,6 +131,24 @@ func ConfigPathTree() *Node {
 					K("retention-days", "保留天数（缺省用默认 7，范围 1..365）", V("uint", "天")),
 				),
 			),
+			// 决策 #388：管理面主机防火墙（宿主 nftables 独立表 `table inet nfvis-firewall`，
+			// 只作用于**管理口入向**；数据面不受影响）。树只声明语法与候选——前缀族/协议与端口
+			// 组合/至少一条匹配条件/重复规则/未声明管理口等语义由提交校验逐条判定（文案带照做路径）。
+			K("firewall", "主机防火墙（管理面入向；宿主 nftables 独立表）",
+				K("default-policy", "默认策略（缺省 accept；drop 即白名单模式）",
+					VE("policy", "accept|drop", "accept", "drop")),
+				K("rule", "防火墙规则（按序号升序首命中生效）",
+					PT("<seq>", "uint", "规则序号（1-9999，唯一）",
+						K("action", "动作", VE("action", "accept|drop", "accept", "drop")),
+						Opt(K("source", "来源前缀（v4/v6，可省＝任意来源）", V("ip-prefix", "如 192.168.1.0/24"))),
+						// 注意（#91 的教训）：`action` 的取值叶子与 source/protocol/port 是**同级关键字**，
+						// 取值叶子消耗一个 token 后回到 rule 的子级继续匹配，故任意顺序都能解析。
+						Opt(K("protocol", "协议（可省/any＝任意；icmp 随来源族取 ICMP/ICMPv6）",
+							VE("protocol", "tcp|udp|icmp|any", "tcp", "udp", "icmp", "any"))),
+						Opt(K("port", "目的端口（仅 tcp/udp 可配）", V("uint", "1-65535"))),
+					),
+				),
+			),
 			K("login", "本地用户与 class",
 				// 决策 #303：登录横幅。单行 + 512 字节上限是**校验口径**（model.Validate 在
 				// commit 拒绝超限/含换行的取值）——树里只声明取值类型，便于 ?/Tab 如实提示。

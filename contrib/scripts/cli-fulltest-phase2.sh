@@ -79,6 +79,14 @@ set system metrics history interval 30
 set system metrics history retention-days 14
 delete system metrics history interval
 delete system metrics history retention-days
+# —— system firewall（§2.2；决策 #388）——
+# 独立会话、不 commit：只验证解析/接线（default-policy 的 set/delete 两形态在此覆盖；
+# 规则的裸 delete 与逐叶子 delete 在下方「真落库 → 回读 → 清理」的提交往返里覆盖——
+# 未落库时按「无匹配配置」拒绝是正确行为，不能放在本段）。「至少一条匹配条件」的即时拒绝
+# 由下方 expect_fail 钉住。
+set system firewall default-policy drop
+delete system firewall default-policy
+set system firewall rule 100 action accept source 192.0.2.0/24 protocol tcp port 9999
 # —— protocols lldp（§2.2b）——
 set protocols lldp enable true
 set protocols lldp advertisement-interval 30
@@ -231,5 +239,41 @@ run S2-dhcpserver "configure
 delete virtual-switches vs-l2 dhcp-server pool
 commit"
 expect_fail S2-dhcpserver "未配置 DHCP 服务器" "show virtual-switches vs-l2 dhcp-leases"
+
+# ---------- 主机防火墙：负例 → 正例（confirmed）→ 回读 → 清理（决策 #388）----------
+# 前置：本机管理口须已声明（防火墙作用面＝管理口入向；未声明时提交期会正确拒绝并给照做路径）。
+# 负例：普通 commit（非 console 会话）必须被自锁保护拒绝，文案含照做路径 commit confirmed。
+expect_fail S2-fw "commit confirmed" "configure
+set system firewall rule 100 action accept source 192.0.2.0/24 protocol tcp port 9999
+commit"
+# 语句层的即时拒绝：「至少一条匹配条件」（只写 action 的规则会匹配全部管理入向流量）。
+expect_fail S2-fw "至少给一条匹配条件" "configure
+set system firewall rule 300 action accept"
+# 正例：confirmed 提交 → 立即确认（超出窗口会自动回滚，测试后续步骤依赖该规则在场）。
+run S2-fw "configure
+set system firewall rule 100 action accept source 192.0.2.0/24 protocol tcp port 9999
+commit confirmed 5"
+run S2-fw "configure
+commit"
+# 回读：规则真的进了 committed 配置且读视图能读出（只看命令成功＝假绿）。
+expect_out S2-fw "192.0.2.0/24" "show system firewall"
+# 清理：逐叶子与裸 delete 两形态各一次（规则在场才可删）；同样属防火墙变更 ⇒ confirmed + 确认。
+run S2-fw "configure
+delete system firewall rule 100 source
+commit confirmed 5"
+run S2-fw "configure
+commit"
+run S2-fw "configure
+set system firewall rule 100 source 192.0.2.0/24
+commit confirmed 5"
+run S2-fw "configure
+commit"
+run S2-fw "configure
+delete system firewall rule 100
+commit confirmed 5"
+run S2-fw "configure
+commit"
+# 读视图回到「未配置」（不留下防火墙配置——套件自清场纪律）。
+expect_out S2-fw "未配置" "show system firewall"
 
 summary "阶段 2"

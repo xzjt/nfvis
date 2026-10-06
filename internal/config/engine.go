@@ -27,6 +27,10 @@ var (
 	// 静默地以为「锁还是我的」。与 ErrNotEditing（压根没进入过配置模式）区分开。
 	ErrLockLost        = errors.New("本会话已失去 candidate 编辑权（编辑锁由同一用户的另一会话持有，可能已被接管；请重新进入配置模式）")
 	ErrConfirmRequired = errors.New("管理口地址/网关变更必须以 commit confirmed 提交")
+	// ErrFirewallConfirmRequired 决策 #388：非 console 会话的**防火墙变更**必须 commit confirmed——
+	// 与 FR-CFG-012 管理口自锁保护同族（改错默认策略/规则会把当前管理路径切断），文案写明
+	// 原因与照做路径（超时未确认自动回滚即恢复访问）。
+	ErrFirewallConfirmRequired = errors.New("防火墙变更可能切断管理访问：必须以 commit confirmed <分钟> 提交（超时未确认将自动回滚、恢复访问）")
 )
 
 // 事件类型（经 Options.OnEvent 上报，M5 事件总线接入）。
@@ -649,6 +653,13 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 	if mgmtChanged && sess.Source != "console" && opts.ConfirmedMinutes <= 0 {
 		return res, ErrConfirmRequired
 	}
+	// 决策 #388：防火墙变更与上一条同族（FR-CFG-012 的判据 sess.Source != "console" 一致）——
+	// 改错默认策略/规则会把当前管理路径切断，非 console 会话必须 commit confirmed；
+	// console 会话（带外、不依赖管理网）豁免。两条判据分开、各自给原因，便于操作者照做。
+	fwChanged := sysFirewallChanged(committed.System, newCfg.System)
+	if fwChanged && sess.Source != "console" && opts.ConfirmedMinutes <= 0 {
+		return res, ErrFirewallConfirmRequired
+	}
 
 	// FR-CFG-011⑤：镜像存在性与类型匹配（依赖仓库，注入接口）
 	if e.images != nil {
@@ -963,8 +974,9 @@ func (e *Engine) doConfirmedRollback(cf *ConfirmedInfo) {
 		return
 	}
 	now := e.now()
-	if _, err := e.store.AppendRevision(baseJSON, now,
-		fmt.Sprintf("commit confirmed 超时，自动回滚到 rev %d", cf.BaseRev), "system"); err != nil {
+	newRev, err := e.store.AppendRevision(baseJSON, now,
+		fmt.Sprintf("commit confirmed 超时，自动回滚到 rev %d", cf.BaseRev), "system")
+	if err != nil {
 		e.emit(EventConfirmedTimeout, fmt.Sprintf("自动回滚落库失败: %v", err))
 		return
 	}
@@ -986,6 +998,14 @@ func (e *Engine) doConfirmedRollback(cf *ConfirmedInfo) {
 			e.candidate = &cfg
 			e.dirty = true
 		}
+	}
+
+	// 决策 #388 真机验证（round169）抓到的缺口：回滚改变了 committed 配置，却只落库、
+	// 不走 OnCommitted ⇒ 宿主侧重收敛（防火墙/TLS/syslog/日志保留）不触发——防火墙场景
+	// 的真机实锤是「配置已回滚、nft 表仍是 policy drop」，管理面锁死到重启。回滚与
+	// Commit 一样是「已提交配置变更」，必须走同一通知（M5-1 事件 + 宿主侧再收敛）。
+	if e.onCommit != nil {
+		e.onCommit(newRev, "system")
 	}
 }
 
@@ -1213,6 +1233,23 @@ func sysMgmtChanged(old, new *model.SystemConfig) bool {
 		return false
 	}
 	return !configEq(om, nm)
+}
+
+// sysFirewallChanged 判定系统防火墙段是否被变更（决策 #388）：规则/默认策略任一不同
+// （含整段新增与删除）即为 true。nil 与 nil 等价；nil 与「显式写入」不同——首次配置同样
+// 算变更（与 sysMgmtChanged 的发现 #12(a) 同口径）。
+func sysFirewallChanged(old, new *model.SystemConfig) bool {
+	var of, nf *model.FirewallConfig
+	if old != nil {
+		of = old.Firewall
+	}
+	if new != nil {
+		nf = new.Firewall
+	}
+	if of == nil && nf == nil {
+		return false
+	}
+	return !configEq(of, nf)
 }
 
 // configEq JSON 语义比较：typed-nil 序列化为 "null"，与未设置/已设置天然区分。

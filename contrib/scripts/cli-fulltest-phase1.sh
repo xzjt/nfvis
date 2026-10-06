@@ -19,6 +19,8 @@ run S1 "show system metrics history"
 run S1 "show system metrics history name nfvis_system_cpu_utilization_ratio"
 run S1 "show system kernel"
 run S1 "show system hardware"
+# 主机防火墙读视图（决策 #388）：未配置时如实报「未配置」；真机收敛判定由阶段 2 的提交往返覆盖。
+run S1 "show system firewall"
 run S1 "show system core-dumps"
 run S1 "show system tech-support"
 run S1 "show system configuration sessions"

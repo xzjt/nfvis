@@ -265,6 +265,19 @@ var statementAliasesSystem = []aliasRule{
 			}
 			return nil
 		}},
+	// system firewall default-policy <accept|drop>（决策 #388）：裸 delete 回落缺省 accept。
+	{pattern: []string{"system", "firewall", "default-policy", "*"},
+		apply: aliasFirewallDefaultPolicy},
+	{pattern: []string{"system", "firewall", "default-policy"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			if isSet {
+				return errString("缺少取值: set system firewall default-policy <accept|drop>")
+			}
+			return aliasFirewallDefaultPolicy(tree, append(append([]string{}, t...), ""), false)
+		}},
+	// system firewall rule <seq> <键值对…>（决策 #388；set/delete 共用，见 aliasFirewallRule）。
+	{pattern: []string{"system", "firewall", "rule", "**"},
+		apply: aliasFirewallRule},
 }
 
 // metricsHistoryKey 历史时序存储叶子名 → MetricsHistoryConfig 字段名（决策 #356）；
@@ -277,4 +290,139 @@ func metricsHistoryKey(leaf string) (string, error) {
 		return "retention_days", nil
 	}
 	return "", errString("未知 metrics history 参数: " + leaf)
+}
+
+// aliasFirewallDefaultPolicy：set 落 default_policy；delete 删键（回落缺省 accept）。
+func aliasFirewallDefaultPolicy(tree map[string]any, t []string, isSet bool) error {
+	fw := ensureObj(ensureObj(tree, "system"), "firewall")
+	if !isSet {
+		delete(fw, "default_policy")
+		return nil
+	}
+	switch t[3] {
+	case "accept", "drop":
+	default:
+		return errString("默认策略必须为 accept|drop: " + t[3])
+	}
+	fw["default_policy"] = t[3]
+	return nil
+}
+
+// aliasFirewallRule：system firewall rule <seq> <键值对…>（决策 #388，set/delete 共用）。
+//
+// set：键值对可任意顺序（action 必填，source/protocol/port 可选）；写完后整条规则必须至少
+// 有一条匹配条件——只写 action 的规则会匹配**全部**管理口入向流量，属手滑，就地拒绝
+// （提交校验同判据；这里能给出更贴语句的提示）。port 只允许 tcp/udp（与提交校验同口径）。
+// delete：无尾随键＝整条删除；带一个叶子名＝只清该叶子（取值 token 容忍——操作者常把 set 行
+// 原样换成 delete，与 nat rules 的既有口径一致）。
+func aliasFirewallRule(tree map[string]any, t []string, isSet bool) error {
+	rest := t[3:]
+	if len(rest) == 0 {
+		return errString("配置不完整，缺少取值: " + joinTokens(t))
+	}
+	seq := rest[0]
+	if !isSet {
+		sys, _ := tree["system"].(map[string]any)
+		fw := objOrNil(sys, "firewall")
+		if fw == nil {
+			return errString("无匹配配置: system firewall")
+		}
+		arr, _ := fw["rules"].([]any)
+		if len(rest) == 1 { // 裸 delete＝整条规则删除
+			out := make([]any, 0, len(arr))
+			hit := false
+			for _, e := range arr {
+				if em, ok := e.(map[string]any); ok && scalarEq(em["seq"], seq) {
+					hit = true
+					continue
+				}
+				out = append(out, e)
+			}
+			if !hit {
+				return errString("无匹配配置: rule " + seq)
+			}
+			if len(out) == 0 {
+				delete(fw, "rules")
+			} else {
+				fw["rules"] = out
+			}
+			return nil
+		}
+		rule, _ := selectElement(arr, "seq", seq)
+		if rule == nil {
+			return errString("无匹配配置: rule " + seq)
+		}
+		leaf := rest[1]
+		switch leaf {
+		case "action", "source", "protocol", "port":
+		default:
+			return errString("未知 system firewall rule 参数: " + leaf)
+		}
+		if _, ok := rule[leaf]; !ok || rule[leaf] == "" {
+			return errString("无匹配配置: rule " + seq + " " + leaf)
+		}
+		delete(rule, leaf)
+		return nil
+	}
+	fw := ensureObj(ensureObj(tree, "system"), "firewall")
+	rule := elemByField(fw, "rules", "seq", seq)
+	for i := 1; i < len(rest); i += 2 {
+		if i+1 >= len(rest) {
+			return errString("语句不完整: " + rest[i] + " 缺少取值")
+		}
+		key, val := rest[i], rest[i+1]
+		switch key {
+		case "action":
+			switch val {
+			case "accept", "drop":
+			default:
+				return errString("action 必须为 accept|drop: " + val)
+			}
+			rule[key] = val
+		case "source":
+			rule[key] = val
+		case "protocol":
+			switch val {
+			case "tcp", "udp", "icmp", "any":
+			default:
+				return errString("protocol 必须为 tcp|udp|icmp|any: " + val)
+			}
+			rule[key] = val
+		case "port":
+			n, err := strconv.Atoi(val)
+			if err != nil {
+				return errString("端口须为整数: " + val)
+			}
+			if n < 1 || n > 65535 {
+				return errString("端口超出 1-65535: " + val)
+			}
+			rule[key] = float64(n)
+		default:
+			return errString("未知 system firewall rule 参数: " + key)
+		}
+	}
+	if _, ok := rule["action"]; !ok {
+		return errString("规则缺少 action（形如 set system firewall rule <seq> action <accept|drop> …）")
+	}
+	// port 仅 tcp/udp 可配（与模型提交校验同口径）；protocol 未设/any 时给了 port 也拒绝
+	// ——那会落成一条「端口写了、协议没写」的规则，语义不是操作者想要的。
+	proto, _ := rule["protocol"].(string)
+	_, hasSource := rule["source"]
+	_, hasPort := rule["port"]
+	if hasPort && proto != "tcp" && proto != "udp" {
+		return errString("port 仅 tcp/udp 规则可配（当前 protocol=" + orUnsetAlias(proto) + "）")
+	}
+	// 至少一条匹配条件（与模型提交校验同判据；protocol 的 ""/any 不算匹配条件）。
+	if !hasSource && !hasPort && (proto == "" || proto == "any") {
+		return errString("规则至少给一条匹配条件（source/protocol/port 之一）；只写 action 的规则会匹配全部管理口入向流量")
+	}
+	return nil
+}
+
+// orUnsetAlias 空值的人读占位（错误文案用）。
+func orUnsetAlias(s string) string {
+	if s == "" {
+		return "未设置"
+	}
+	return s
 }

@@ -32,6 +32,7 @@ var contractCLICommands = []string{
 	// §1.1 show 族
 	"show version", "show system uptime", "show system cpu", "show system memory",
 	"show system storage", "show system hugepages", "show system hardware",
+	"show system firewall",
 	"show system core-dumps", "show system tech-support", "show system configuration sessions",
 	"show system api tokens",
 	"show interfaces", "show interfaces physical", "show interfaces physical ens224",

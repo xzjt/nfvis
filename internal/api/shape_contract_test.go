@@ -80,6 +80,12 @@ var shapeConditional = map[string]map[string]string{
 		// 决策 #383：运行态不可用（未注入/数据面未连接）时给出原因；可用时省略（不编造）。
 		"runtime_reason": "仅当 runtime_available=false 时出现（如实说明不可用原因；可用时省略，不编造）",
 	},
+	"GET /system/firewall": {
+		// 决策 #388：未声明管理口时省略；applied=false 时给原因（未接入运行态/未配置残留表/
+		// 未收敛等），一致时省略（不编造）。
+		"mgmt_interface": "未声明管理口时省略（防火墙的前置是管理口已声明；测试服务基线未声明）",
+		"error":          "仅当 applied=false 时出现（如实说明原因；一致时省略，不编造）",
+	},
 }
 
 // TestResponseShapeMatchesContract 契约声明的响应字段必须出现在实际响应里。
@@ -119,6 +125,7 @@ func TestResponseShapeMatchesContract(t *testing.T) {
 		{"GET", "/configuration/permissions"}, // 决策 #304：生效权限视图（调用者自己 class）
 		{"GET", "/metrics/history"},           // 决策 #356：历史时序读视图（不可用时仍 200 + available=false + reason）
 		{"GET", "/vxlan-tunnels"},             // 决策 #383：VXLAN 隧道读视图（运行态不可用时仍 200 + runtime_available=false + reason）
+		{"GET", "/system/firewall"},           // 决策 #388：主机防火墙读视图（未接入/未配置恒 200 + applied=false + error）
 	} {
 		props := declaredProps(t, spec, ep.path, ep.method)
 		if len(props) == 0 {

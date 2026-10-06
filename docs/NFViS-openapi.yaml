@@ -1915,6 +1915,25 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/HardwareHealth" }
 
+  /system/firewall:
+    get:
+      tags: [system]
+      summary: 主机防火墙读视图（默认策略/规则与逐规则计数/applied，决策 #388）
+      description: |
+        配置面（committed 的 `system.firewall`）与数据面（宿主 nftables 的独立表
+        `table inet nfvis-firewall`）的对照读视图，与 CLI `show system firewall` **同一实现**。
+        `applied` 表示数据面与配置一致（未配置 ⇒ 无表；已配置 ⇒ 表存在且默认策略/规则集合一致）；
+        表缺失、规则集合不一致、检测到非本产品规则、nft 不可执行/权限不足等一律
+        applied=false 并在 `error` 里如实说明（**不把「读不出来」答成「没有」**）。
+        `packets`/`bytes` 仅在该规则的数据面计数可读时出现；计数由数据面统计、自本表最近一次
+        下发起（防火墙配置变更会重建表并清零）。作用面＝**管理口入向**，数据面不受影响。
+      responses:
+        "200":
+          description: OK（未配置/未接入/未收敛均如实呈现）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FirewallStatus" }
+
   /system/tls:
     get:
       tags: [system]
@@ -2686,6 +2705,7 @@ components:
                   minimum: 1
                   maximum: 365
                   description: 历史保留天数（默认 7）；另有 2,000,000 行的硬上限兜底
+        firewall: { $ref: "#/components/schemas/FirewallConfig" }
         kernel:
           type: object
           description: 内核启动基线（FR-SYS-014；大页/隔离核由 resource-pools 派生）
@@ -3082,6 +3102,68 @@ components:
             properties:
               ts: { type: integer, description: "采样时刻（unix 秒）" }
               value: { type: number, description: "采样瞬间值（计数器单调递增；速率由读侧差分）" }
+
+    FirewallConfig:
+      type: object
+      description: |
+        管理面主机防火墙（决策 #388）：宿主 nftables **独立表**（`table inet nfvis-firewall`）、
+        只作用于管理口**入向**（数据面 VPP/Docker/libvirt 不受影响）。需要
+        `system.management.interface` 已声明（否则提交期拒绝并给照做路径）。
+        配置全空（无规则且默认策略未设/accept）＝未配置＝不下发/回收表。
+      properties:
+        default_policy: { type: string, enum: [accept, drop], description: "默认策略（缺省 accept；drop＝白名单模式）" }
+        rules:
+          type: array
+          description: 规则（按 seq 升序**首命中生效**；完全重复的规则提交期拒绝）
+          items: { $ref: "#/components/schemas/FirewallRule" }
+
+    FirewallRule:
+      type: object
+      required: [seq, action]
+      description: |
+        主机防火墙规则：**至少给一条匹配条件**（source/protocol/port 之一，防手滑写出裸 action 规则）；
+        `port` 仅 tcp/udp 可配（目的端口）；`source` 为 v4/v6 前缀（裸 IP 按 /32、/128 归一）；
+        `protocol` 省略/any＝任意（icmp 随 source 族取 ICMP/ICMPv6，无 source 时二者皆匹配）。
+      properties:
+        seq: { type: integer, minimum: 1, maximum: 9999, description: 规则序号（唯一） }
+        action: { type: string, enum: [accept, drop] }
+        source: { type: string, description: "来源前缀（省略＝任意来源）" }
+        protocol: { type: string, enum: [tcp, udp, icmp, any] }
+        port: { type: integer, minimum: 1, maximum: 65535, description: "目的端口（仅 tcp/udp）" }
+
+    FirewallStatus:
+      type: object
+      description: |
+        主机防火墙读视图（决策 #388；与 CLI `show system firewall` 同一实现）。
+        `applied` 表示数据面与配置一致；不一致时 `error` 如实说明原因（表缺失/规则集合不一致/
+        检测到手工修改/nft 不可用等）。计数由数据面（nftables）统计、自本表最近一次下发起；
+        防火墙配置变更会重建表并清零。
+      required: [enabled, default_policy, applied, rules, reserved, counters_note]
+      properties:
+        enabled: { type: boolean, description: "是否已配置（有规则或默认策略为 drop）" }
+        default_policy: { type: string, enum: [accept, drop], description: "生效默认策略（未配置时按缺省 accept 呈现）" }
+        mgmt_interface: { type: string, description: "管理口名（取自 system.management.interface；未声明时省略）" }
+        applied: { type: boolean, description: "数据面与配置是否一致（未配置 ⇒ 无表；已配置 ⇒ 表存在且默认策略/规则集合一致）" }
+        error: { type: string, description: "applied=false 的原因（一致时省略；读不出来不答成「没有」）" }
+        rules:
+          type: array
+          description: 规则表（按 seq 升序；packets/bytes 仅在该规则计数可读时出现）
+          items:
+            type: object
+            required: [seq, action]
+            properties:
+              seq: { type: integer }
+              action: { type: string, enum: [accept, drop] }
+              source: { type: string }
+              protocol: { type: string }
+              port: { type: integer }
+              packets: { type: integer, format: int64, description: "该规则在数据面的命中包数（仅可读时出现）" }
+              bytes: { type: integer, format: int64, description: "该规则在数据面的命中字节数（仅可读时出现）" }
+        reserved:
+          type: array
+          items: { type: string }
+          description: "保留项说明（用户规则不可覆盖；读视图列明）"
+        counters_note: { type: string, description: 计数口径说明 }
 
     HugepagePools:
       type: object

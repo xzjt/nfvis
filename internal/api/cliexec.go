@@ -125,15 +125,18 @@ type cliExecutor struct {
 	// 与 REST `GET /metrics/history` **同一实现**（三面同源）。由 Server.New 注入；nil = 未接入
 	// （测试可省略），此时命令如实报「历史时序存储未启用」。
 	metricsHistoryView func(name string, since, until, step int64, limit int) map[string]any
-	tlsR               TlsRuntime                  // 证书管理（M5-8；nil = 报未接入）
-	vppRestart         func(context.Context) error // request vpp restart（M5-9；nil = 报未接入）
-	events             *events.Bus                 // 事件总线（M5-1；nil = 不发布）
-	versions           VersionsRuntime             // 组件版本探测（R37-2 收口，决策 #118；nil = show version 只印 NFViS）
-	tokens             tokenAdmin                  // 活动会话清单/逐 token 吊销（决策 #301；nil = 命令报未接入）
-	perms              permissionResolver          // 生效权限视图的 class 解析（决策 #304；nil = 命令报未接入）
-	mu                 sync.Mutex
-	sess               map[string]*cliSession
-	now                func() time.Time // 时钟（决策 #374/E6：会话态空闲清扫；测试可注入）
+	// firewallView 主机防火墙读视图（决策 #388）：`show system firewall` 的文本渲染与 REST
+	// `GET /system/firewall` **同一实现**。由 Server.New 注入；nil = 未接入（如实说明）。
+	firewallView func() map[string]any
+	tlsR         TlsRuntime                  // 证书管理（M5-8；nil = 报未接入）
+	vppRestart   func(context.Context) error // request vpp restart（M5-9；nil = 报未接入）
+	events       *events.Bus                 // 事件总线（M5-1；nil = 不发布）
+	versions     VersionsRuntime             // 组件版本探测（R37-2 收口，决策 #118；nil = show version 只印 NFViS）
+	tokens       tokenAdmin                  // 活动会话清单/逐 token 吊销（决策 #301；nil = 命令报未接入）
+	perms        permissionResolver          // 生效权限视图的 class 解析（决策 #304；nil = 命令报未接入）
+	mu           sync.Mutex
+	sess         map[string]*cliSession
+	now          func() time.Time // 时钟（决策 #374/E6：会话态空闲清扫；测试可注入）
 	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
 	structured any
 	// structuredPath structured 在整配置中的绝对路径（display set 反推语句时作前缀，
@@ -687,7 +690,7 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 	if len(t) >= 2 && t[0] == "vpp" && t[1] == "capture" {
 		return x.execShowVppCapture() // M5-3：抓包会话状态与已导出 pcap 清单
 	}
-	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class> [detail]|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|metrics history [name <metric> [last <duration>] [step <duration>]]|hardware|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | vxlan tunnels | port-mirroring | dns proxy | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions | system api tokens\n"
+	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class> [detail]|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|metrics history [name <metric> [last <duration>] [step <duration>]]|hardware|firewall|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | vpp [threads|buffers|memory|capture] | acls | bonds | nat | vxlan tunnels | port-mirroring | dns proxy | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions | system api tokens\n"
 }
 
 // invalidShowConfiguration：`show configuration <未知/多余 token>` 的统一报错
@@ -1189,6 +1192,11 @@ func pruneEmptySingleton(tree map[string]any) {
 			if isEmptyShell(met) {
 				delete(sys, "metrics")
 			}
+		}
+		// 防火墙（决策 #388）：逐叶子删空后不留空壳——空壳在 display set 回放时会因
+		// 「树里没有可发射的语句」而还原不出，自校验如实报内部错误（与 metrics 同因）。
+		if fw, ok := sys["firewall"].(map[string]any); ok && isEmptyShell(fw) {
+			delete(sys, "firewall")
 		}
 	}
 	if nat, ok := tree["nat"].(map[string]any); ok && isEmptyShell(nat) {
