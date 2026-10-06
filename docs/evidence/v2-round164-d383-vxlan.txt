@@ -1,0 +1,85 @@
+round164 · 决策 #383 —— VXLAN overlay v1（含底座缺口定形：vxlan dump 恒空 ⇒ 身份改 tag）
+====================================================================
+日期：2026-10-06；分支 v2-round164-vxlan（5de998d 契约先行 → 26df8af 实现 → cf3707d tag 口径重修 → 7ca5e27 措辞对齐）；
+真机 nfvis-vm 2.0.0~dev106（首版，暴露缺口）→ **dev107（最终，tag 口径）**。
+来源：`docs/v2待做.md` 一.2（差距分析 §1-2「VXLAN overlay——全 0 命中」）。
+PR：https://github.com/xzjt/nfvis/pull/311（base v2）。
+
+§0 结论
+- **VXLAN overlay v1 交付**：`set vxlan tunnels <name> vni <id> local <ip> remote <ip> [dst-port <n>] [virtual-switch <vs>]`
+  → VPP `vxlan_add_del_tunnel_v3` 建隧 + 打 **tag** + 置 up + 入 L2 BD；恢复重放按 tag 判存量；
+  三面读视图（CLI/REST/Web）；提交期校验（vni 域/地址族/去重/同 VNI/引用守卫）。
+- **底座缺口当场定形（#338/#357 纪律的又一次兑现）**：**VPP 26.06 的 `vxlan_tunnel_dump` / `vxlan_tunnel_v2_dump`
+  实测恒空**（两版 dump 的 CRC 同为 `f9e6675e`、与 VPP 自带 `vxlan.api.json` **逐一吻合**；用 govpp 分别按
+  V1/V2 发 dump 都立即 `<stop>`、零条目，而 `vppctl show vxlan tunnel` 有条目）——与 **#339**（ACL 计数只注册不写）
+  同类的底座缺口。**身份改用接口 tag**（`nfvis-vxlan:<name>`；`sw_interface_tag_add_del` 打标、
+  `sw_interface_dump` 的 `tag` 回读），与 #359 tap 按 HostIfName 同族。
+- 真机四维通过；`make check` 全绿；四套件与基线逐项一致。
+
+§1 契约先行（5de998d）
+- 附录 A 决策 #383（v2 线第 84 条）；`AGENTS.md` 决策条数 284→285。
+- `docs/v2待做.md` 一.2 标为收口；`docs/NFViS-openapi.yaml`（路径 + `VxlanTunnel`/`VxlanTunnelsView` +
+  `/configuration` 的 `vxlan_tunnels`，`--write` 同步 `openapi.json`）；`docs/NFViS-CLI命令全表.md`；
+  `docs/NFViS-用户手册.md` §8.13（无需求/决策编号）。
+
+§2 实现（26df8af + cf3707d）
+1. 模型/校验：`VxlanTunnel{Name, Vni, Local, Remote, DstPort, VirtualSwitch}`；`checkVxlanTunnels`——name 走 `checkName`
+   **且长度 ≤51**（tag 是 `string[64]`，超长会被静默截断 ⇒ 提交期拒绝）；`vni` 1..16777215；`local`/`remote` 有效
+   **IPv4** 且不相等；`dst-port` 0=4789、否则 1..65535；`name`/`vni`/`(vni,local,remote)` 重复拒绝；`virtual-switch`
+   必须存在且为 **L2**；**被隧道引用的交换机不得删除**（提交期拒绝 + 指向 `delete vxlan tunnels <name> virtual-switch`）。
+2. 数据面（`vxlan.go` + `vxlan_govpp.go`）：建/撤走 `vxlan_add_del_tunnel_v3`（CRC `0x0072b037` 与 26.06 吻合）；
+   **实例号交 VPP 自动分配**（传 ~0，与 vppctl 同款——26.06 无 dump 可枚举已用 instance）；建后
+   `sw_interface_tag_add_del` 打 `nfvis-vxlan:<name>`、`sw_interface_set_flags(up)`、（有交换机时）`sw_interface_set_l2_bridge`；
+   **变更撤旧**（`ApplyVxlan(t, prev)`：先按 `prev` 元组 `is_add=false` 撤、再建新——**同 #380 的教训**）；
+   tag 已在且元组未变 ⇒ **不重复建**；`DeleteVxlan(t)` 按传入元组撤 + 摘 BD；`EnsureConsistent` **按 tag 判存量**
+   （在则不动、不在则建）；`VxlanStates` 返回 name → {sw_if_index, interface_name}，**注释如实写明底座无 dump、
+   参数以配置为准**。
+3. 计划/接线：`apply.go`（变更把**旧声明**传给 provider、undo 与新声明对偶；删除段在删交换机之前）；
+   `NetworkProvider` 接口 + noop；`recovery.go` 重放（BD/VRF 之后）。
+4. 三面：CLI `show vxlan tunnels`（状态列「已在 VPP（接口 x）」/「未收敛（数据面无该名字的隧道口）」+ 识别口径说明）；
+   REST `GET /vxlan-tunnels`；Web 网络对象页「VXLAN 隧道」卡。
+
+§3 测试与红-绿
+- 校验表（vni 越界/非法或同址/端口越界/name·vni·元组重复/virtual-switch 不存在或 L3/**删被引用交换机**各拒）。
+- **红-绿**：① 摘掉 `checkVxlanTunnels` ⇒ 6 处红；② 停用 VXLAN apply 差分 ⇒ `建隧应排在 BD 之后` 失败；
+  ③ 令 `changed=false`（不撤旧）⇒ `第一步应为按旧元组撤旧，实际 [tunnel:true…]` 失败；
+  ④ 摘掉 display-set 家族发射器 ⇒ 回放路径炸；⑤ 令 `exists=false`（强制重建）⇒ 重放被 `ErrVxlanExists` 顶回。
+- display-set 反推回放自校验、形状/字段级守护、路由契约守护、`check_suite_contract_sync.sh`（3 条新命令入豁免登记 + 理由）。
+
+§4 真机验证（dev106 暴露缺口 → dev107 定形）
+① **#383 首版（dev106）暴露底座缺口**：产品路径 commit 成功、`vppctl show vxlan tunnel` 有条目
+   （`instance 0 src 10.99.0.1 dst 10.99.0.2 vni 100 sw-if-idx 6`），但**读视图报「未收敛（数据面中不存在）」**。
+   定位：**govpp spike 直连 `/run/vpp/api.sock`** 分别发 V1/V2 dump ⇒ **两者都立即 `<stop>`、零条目**；
+   对照 VPP 自带 `/usr/share/vpp/api/plugins/vxlan.api.json` 的 CRC（建撤 v3 `0x0072b037`、dump `0xf9e6675e`×2、
+   details `0xc3916cb1`/`0xd3bdd4d9`）**与本仓 binapi 完全一致** ⇒ **不是版本不符，是底座 dump 恒空**。
+   （另：首版删除路径也被 dump 拖累——`delete` 提交成功但 VPP 隧道仍在，因「dump 查无 ⇒ 视为已达成」。）
+② **dev107（tag 口径）四维全过**：
+   - **作用效果**：建隧 ⇒ `show vxlan tunnel` 列出（vni/src/dst/port 逐字对）；**BD 成员**确认
+     （`show bridge-domain 1200404 detail` 里 `vxlan_tunnel0 idx 6` 与 `bvi0` 并列）；读视图
+     **「已在 VPP（接口 vxlan_tunnel0）」**（tag 匹配成功 ⇒ `sw_interface_tag_add_del`/`sw_interface_dump.tag`
+     两个此前未验证的 API 一并定形）。
+   - **生命周期**：改 `remote .2→.3` ⇒ **只余 dst .3 一条**（撤旧建新）；`systemctl restart nfvis`（VPP 未重启）
+     ⇒ **仍 1 条、不重复建**；`request vpp restart` ⇒ 重放**重建 1 条**（dst .3）。
+   - **对抗性**：删被隧道引用的 `dns-vs` ⇒ **提交期拒绝**（文案点名隧道与照做路径）；同 VNI 第二条 ⇒
+     `VNI 100 已被隧道 "vx-1" 使用`。
+   - **清场**：`delete vxlan tunnels vx-1` ⇒ VPP 隧道 0 条、BD 成员 0、读视图「（无 VXLAN 隧道）」；
+     配置 `vxlan` 计数 0、交换机回到 dns-vs/sem-vs。
+③ **Web 卡**：本轮未做 Browser Use 复核（**如实登记**为待办；卡为只读卡、字段与 CLI 同源，由字段级/形状守护覆盖）。
+
+§5 如实边界（v1 不做，已在契约/手册/openapi 写明）
+- 组播/BUM 复制（只做单播 remote）；ARP/ND 代理与 Bypass；多 VNI 路由（VXLAN-GPE）；IPv6 下垫层；
+  `dst-port` 以外的封装参数；隧道作 **L3 接口**；跨 VRF 建隧。
+- **读视图的诚实口径**：底座无 dump ⇒ 运行态只能证明「该名字的隧道口在」，**VNI/下垫地址/端口以配置为准**
+  （读视图固定输出该说明行，不声称从 VPP 回读了参数）。
+- 迁移边界（如实）：**上一版（dev106）建出的无 tag 隧道**在新版的「按 tag 判存量」下会被判为「不在」而尝试重建，
+  撞 `Tunnel already exists (-75)`（`ErrVxlanExists`）——本机以 `request vpp restart` 清场后重建；正式升级路径
+  无此问题（VPP 重启即清隧道，重放按 tag 重建）。
+
+§6 未竟
+- Web 卡的 Browser Use 复核（§4③）。
+- 真机未做**跨宿主 VXLAN 隧道端到端流量**（需第二个 VXLAN 对端；本机无 Windows 侧 VXLAN 端点）。
+- `vxlan_tunnel_dump` 恒空是**底座缺口**——如将来 VPP 修好，可按原设计改回按元组回读（改 `vxlan_govpp.go` 一处）。
+
+§7 四套件复跑（dev107）
+- `cli-fulltest` **254/0/18** ｜ `cli-semantic-check` **27/0/2**（S8 窗口热）｜ `cli-lifecycle-check` **22/0/3**
+  （L3-2 正控未热，非回归）｜ `cli-pty-smoke` **10/10**——与基线逐项一致。
