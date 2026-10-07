@@ -132,7 +132,15 @@
 - M3 验收现状（`docs/M3-人工演示记录.md`）：D1/D2/D3/D6/D8 真机通过；**D4 NAT 已在本轮 M5 补齐并真机端到端通过**
   （决策 #52 跨 VRF：inside=virtual-switch 的 VRF、outside=出接口所属 VRF，VPP 单实例仅一对）；**D5 SPAN 抓包已在 T0-7 实证通过**；
   D7 LLDP 仍环境受限（无对端），启用与命令均正常、M3 的 internal error 未复现。
-- 验证环境 nfvis-vm 当前状态（**2026-09-27 round85 又恢复过一次干净快照**，此后按 round85 流程重装并配置；
+- ⚠️ **nfvis-vm 已于 2026-10-07 再次恢复为「干净」快照，并按 v3 round1 重建**（详见
+  `docs/evidence/v3-round1-clean-snapshot-datapath-switch.txt` §1/§7）。**该轮现状**：Ubuntu 26.04.1（内核
+  7.0.0-34）、apt 源 USTC、代理 `192.168.155.1:2333` 可用；已装 `make`/`golang-go 1.26`/`sshpass` 与
+  libvirt/docker/qemu 全栈；**nfvis 3.0.1（v3 提交 `2c157e6` 构建，数据面 `vpp`）**、VPP 26.06 运行中
+  （`vppctl` 可查）。⚠️ **本轮改过一处环境**：`/etc/netplan/00-installer-config.yaml` 里 ens192/ens224 的
+  `activation-mode` 由 `off` 改为 **`manual`**（原值让 systemd-networkd 把它们 `always-down`，内核数据面
+  无法把它们置 up）；备份在 `/root/netplan.bak`。**未重建**：`alpine.qcow2` 等夹具镜像、`docker alpine:3.20`。
+  ⚠️ 快照再次恢复后本节全部作废，需按上面路径重做。
+- 验证环境 nfvis-vm 历史状态（**2026-09-27 round85 又恢复过一次干净快照**，此后按 round85 流程重装并配置；
   快照恢复会清掉全部现场，
   重建路径见 `docs/evidence/v1-closeout-round32-install-iso.txt` §4e——该轮的 ISO 交付已按决策 #111 废除，
   文档仅作历史记录）：
