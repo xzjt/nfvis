@@ -18,11 +18,14 @@ import (
 func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []error {
 	p.SetConfig(cfg)
 	var errs []error
+	// 转发前置条件（IPv4 转发开关 + 数据面之间的 forward 放行）先于一切下发：
+	// 内核数据面下产品自己就是那台路由器，这两条不成立时所有"下发成功"都换不来一个转发的包。
 	collect := func(path string, err error) {
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", path, err))
 		}
 	}
+	collect("forwarding", p.EnsureForwarding(ctx, cfg))
 	// 绑定族对象先于接口/三层接口重放：接口声明里只写策略名，解析需要策略本体
 	// （与提交编排 plan 的段序一致：ACL → 镜像 → QoS → 接口）。
 	for _, acl := range cfg.Acls {
@@ -49,8 +52,12 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 	for _, vx := range cfg.VxlanTunnels {
 		collect("vxlan/"+vx.Name, p.ApplyVxlan(ctx, vx, nil))
 	}
+	// NAT：声明为空时也调用一次——ApplyNAT 对空声明做的是**回收整张表**（不是留空表），
+	// 这样 `delete nat` 之后残留的空表会被下一次收敛清掉。
+	natCfg := model.NatConfig{}
 	if cfg.Nat != nil {
-		collect("nat", p.ApplyNAT(ctx, *cfg.Nat))
+		natCfg = *cfg.Nat
 	}
+	collect("nat", p.ApplyNAT(ctx, natCfg))
 	return errs
 }

@@ -339,8 +339,8 @@ func TestKernelDataPlaneRealNAT(t *testing.T) {
 	if err := p.ApplyNAT(ctx, modelNatEmpty()); err != nil {
 		t.Fatalf("ApplyNAT（空声明）: %v", err)
 	}
-	out = ztRun(t, "nft", "list", "table", "inet", natTable)
-	if strings.Contains(out, "192.168.99.0/24") {
-		t.Errorf("清空声明后规则仍在（全量重建失效）：\n%s", out)
+	// 声明整体清空 ⇒ 整张表应被回收（不留空表：`delete nat` 之后宿主上不该长期留着它）。
+	if leftover, err := exec.Command("nft", "list", "table", "inet", natTable).CombinedOutput(); err == nil {
+		t.Errorf("清空声明后表应被回收，实际仍在：\n%s", leftover)
 	}
 }

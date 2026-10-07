@@ -45,6 +45,11 @@ func (p *Provider) nftTolerant(ctx context.Context, args ...string) error {
 // 或 `snat ip to <地址池>`；静态映射 → prerouting 链的 `ip daddr <外部地址> dnat ip to <内部地址>`。
 // 出接口/地址池两者按声明取一（校验层保证互斥）。
 func (p *Provider) ApplyNAT(ctx context.Context, nat model.NatConfig) error {
+	// 声明**整体为空** ⇒ 回收整张表（不是留一张空表）：`delete nat` 之后宿主上不该长期留着
+	// 一张本产品的空表（真机走查核对残留时看到过它）。这与「全量重建」是同一口径的收尾。
+	if len(nat.Rules) == 0 && len(nat.SourcePools) == 0 && len(nat.Static) == 0 {
+		return p.nftTolerant(ctx, "delete", "table", natFamilyName, natTable)
+	}
 	if err := p.nftIdem(ctx, "add", "table", natFamilyName, natTable); err != nil {
 		return err
 	}

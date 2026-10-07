@@ -29,7 +29,14 @@ func (p *Provider) RetryDeferredVRFDeletes(context.Context, model.Config) []stri
 
 // ReconcileResidue / ReconcileRecoveryAlarms / ReconcileDHCPServer / ReconcileProxy /
 // ReconcileStorm 均为 VPP 侧登记型对账；内核数据面无登记、无对应族，空操作。
-func (p *Provider) ReconcileResidue(context.Context, model.Config) []error        { return nil }
+func (p *Provider) ReconcileResidue(ctx context.Context, cfg model.Config) []error {
+	// 内核数据面下本方法承担的不是"残渣对账"（那是 VPP 侧的登记型语义），而是**转发前置条件**
+	// 的周期性对账：数据面设备集合随提交变化，放行链要跟着重建；转发开关也可能被宿主改掉。
+	if err := p.EnsureForwarding(ctx, cfg); err != nil {
+		return []error{err}
+	}
+	return nil
+}
 func (p *Provider) ReconcileRecoveryAlarms(context.Context, model.Config) []error { return nil }
 func (p *Provider) ReconcileDHCPServer(context.Context, model.Config) []error     { return nil }
 func (p *Provider) ReconcileProxy(context.Context, model.Config) []error          { return nil }

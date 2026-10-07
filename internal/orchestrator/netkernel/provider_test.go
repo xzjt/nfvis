@@ -534,11 +534,12 @@ func TestVPPIfnamesOnlyReturnsDeclaredProductDevices(t *testing.T) {
 // ---------- 恢复收敛 ----------
 
 func TestEnsureConsistentReplaysAndCollectsErrors(t *testing.T) {
-	f := &fakeRunner{replies: []fakeReply{{
-		prefix: "ip link set dev bad0 master vs-lan",
-		out:    "Cannot find device \"bad0\"",
-		err:    errors.New("exit status 1"),
-	}}}
+	f := &fakeRunner{replies: []fakeReply{
+		// 转发前置条件（内核数据面下先于一切下发）：IPv4 转发开关已为 1。
+		{prefix: "sysctl -n net.ipv4.ip_forward", out: "1\n"},
+		{prefix: "ip link set dev bad0 master vs-lan",
+			out: "Cannot find device \"bad0\"", err: errors.New("exit status 1")},
+	}}
 	p := New(f)
 	cfg := model.Config{
 		Interfaces: []model.InterfaceConfig{{Name: "ens192", MTU: 1500}},
@@ -644,5 +645,70 @@ func TestDeleteBridgeDomainReclaimsGatewayVRF(t *testing.T) {
 	}
 	if !f.has("ip link del vs-lan") || !f.has("ip link del vr-vs-lan") {
 		t.Fatalf("应同时删除 bridge 与其派生的网关 VRF；实际：\n%s", f.joined())
+	}
+}
+
+// 内核数据面的转发前置条件（真机走查抓到：产品此前两条都不管，转发会**静默**全丢）。
+func TestEnsureForwardingSetsSysctlAndAcceptsOnlyDataplaneDevices(t *testing.T) {
+	// 转发开关的读值要**先 0 后 1**（写前关着、写后回读为 1），故用一个带状态的小 Runner。
+	r := &sysctlFlipRunner{}
+	p := New(r)
+	cfg := model.Config{
+		VirtualSwitches: []model.VirtualSwitch{
+			{Name: "vs-lan", Type: "l2", Gateway: &model.VSGateway{Addresses: []string{"192.168.99.1/24"}}},
+			{Name: "vs-l3", Type: "l3"},
+		},
+		Vrfs: []model.Vrf{{Name: "vs-l3", L3Interfaces: []model.L3Interface{{Interface: "ens224"}}}},
+	}
+	if err := p.EnsureForwarding(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !r.has("sysctl -w net.ipv4.ip_forward=1") {
+		t.Fatalf("转发开关为 0 时应写入 1；实际：\n%s", r.joined())
+	}
+	joined := r.joined()
+	for _, want := range []string{
+		"nft add table inet nfvis-forward",
+		"hook forward priority -10",
+		"iifname { ens224, vr-vs-lan, vs-l3, vs-lan }",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("缺少 %q；实际：\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "ens160") {
+		t.Fatalf("放行链不得包含管理口；实际：\n%s", joined)
+	}
+}
+
+// sysctlFlipRunner `sysctl -n net.ipv4.ip_forward` 先答 0、写入后再答 1（其余转给 fakeRunner）。
+type sysctlFlipRunner struct {
+	fakeRunner
+	reads int
+}
+
+func (r *sysctlFlipRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	if name == "sysctl" && len(args) == 2 && args[0] == "-n" && args[1] == "net.ipv4.ip_forward" {
+		r.calls = append(r.calls, name+" "+strings.Join(args, " "))
+		r.reads++
+		if r.reads == 1 {
+			return "0\n", nil
+		}
+		return "1\n", nil
+	}
+	return r.fakeRunner.Run(ctx, name, args...)
+}
+
+// 转发开关写不动时如实报错（不静默放过——内核数据面下它意味着一个包都转不出去）。
+func TestEnsureForwardingReportsUnwritableSysctl(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{
+		{prefix: "sysctl -n net.ipv4.ip_forward", out: "0\n"},
+		{prefix: "sysctl -w net.ipv4.ip_forward=1",
+			out: "sysctl: permission denied", err: errors.New("exit status 255")},
+	}}
+	p := New(f)
+	err := p.EnsureForwarding(context.Background(), model.Config{})
+	if err == nil || !strings.Contains(err.Error(), "ip_forward") {
+		t.Fatalf("写入失败应如实上报并点名开关，得到 %v", err)
 	}
 }
