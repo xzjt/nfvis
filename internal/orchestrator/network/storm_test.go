@@ -763,6 +763,37 @@ func TestStormDataplaneFacts(t *testing.T) {
 	}
 }
 
+// TestStormDataplaneSlotHeldByForeignTable（决策 #401，R176-2）：进程内登记说两类表都已下发，
+// 但接口 L2 槽实际挂着**别的**表（如 port-security 的 macip 表，掩码形状与两类风暴掩码都不符）
+// ⇒ 读视图必须如实报两类「未挂」（Table==nil），不再以进程内登记充当在位证据。
+// 修复前：`case e != nil` 直接按登记报 `e.tableIdx` 的表 ⇒ 报「在位」，限速静默不生效却显示已生效。
+func TestStormDataplaneSlotHeldByForeignTable(t *testing.T) {
+	c := newFakeStormClient()
+	p := NewStormProvider(c)
+	if err := p.ApplyInterface(context.Background(), stormCfg(8000, 20000)); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	// 同接口被 port-security 抢走 L2 槽：槽上换成一张非本产品形状的表（macip 白名单掩码），
+	// 而进程内登记仍认为广播/组播表已下发（policer 也仍在数据面）。
+	c.tables[24] = StormTableInfo{Index: 24, Mask: "000000000000ffffffffffffffff0000", NextTableIndex: ^uint32(0)}
+	c.attached[7] = 24
+	dp, err := p.Dataplane(context.Background(), "ens192")
+	if err != nil {
+		t.Fatalf("Dataplane: %v", err)
+	}
+	if !dp.Available || !dp.Attached || dp.AttachedL2Table != 24 {
+		t.Fatalf("应实测到槽挂着外来表 24: %+v", dp)
+	}
+	if !dp.Kinds[StormKindBroadcast].PolicerPresent {
+		t.Fatalf("前提：广播 policer 仍在数据面（本用例针对「在位」失真）: %+v", dp.Kinds[StormKindBroadcast])
+	}
+	for _, kind := range []string{StormKindBroadcast, StormKindMulticast} {
+		if kd := dp.Kinds[kind]; kd.Table != nil {
+			t.Fatalf("槽被外来表占用时 %s 不得报「在位」: %+v", kind, kd)
+		}
+	}
+}
+
 type fakeStormCounters struct {
 	cnt    StormCounters
 	ok     bool

@@ -663,6 +663,26 @@ func TestValidateStormControlBondMember(t *testing.T) {
 	mustNoErr(t, Validate(other))
 }
 
+// 决策 #401（R176-2）：同接口「风暴抑制 × 端口安全白名单」的 L2 入向分类槽互斥（storm 侧）。
+// 两者都绑接口唯一的 L2 入向分类槽（storm 走 classify、portsec 走 macip），并存会静默失效并
+// 让先配者的删除撞「槽被占用」；按 #340/#389 的互斥先例提交期硬拒（反向在 checkPortSecurity）。
+func TestValidateStormControlPortSecMutex(t *testing.T) {
+	both := validBase()
+	both.Interfaces[0].StormControl = &StormControl{BroadcastKbps: 8000}
+	both.Interfaces[0].PortSecurity = []PortSecMAC{"b0:b0:00:00:00:01"}
+	errs := Validate(both)
+	// 错误落在 storm 侧字段路径，点名两者 + 机理 + 两条照做路径。
+	mustErrContaining(t, errs, "interfaces[ens2f0].storm_control", "端口安全")
+	mustErrContaining(t, errs, "interfaces[ens2f0].storm_control", "L2 入向分类槽")
+	mustErrContaining(t, errs, "interfaces[ens2f0].storm_control", "delete interfaces ens2f0 storm-control")
+	mustErrContaining(t, errs, "interfaces[ens2f0].storm_control", "delete interfaces ens2f0 port-security")
+
+	// 只留风暴抑制（无白名单）：合法——互斥只针对并存。
+	onlyStorm := validBase()
+	onlyStorm.Interfaces[0].StormControl = &StormControl{BroadcastKbps: 8000}
+	mustNoErr(t, Validate(onlyStorm))
+}
+
 func TestValidateLearnLimit(t *testing.T) {
 	// 未配置（0）合法；合法范围内的正整数合法
 	mustNoErr(t, Validate(validBase()))

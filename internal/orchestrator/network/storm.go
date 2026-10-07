@@ -708,12 +708,21 @@ func (p *StormProvider) Dataplane(ctx context.Context, ifname string) (StormData
 	if t, ok, err := c.AttachedL2Table(idx); err == nil && ok {
 		out.AttachedL2Table, out.Attached = t, true
 	}
-	// 接口 L2 槽上那张表的实测属性（登记丢失时它仍能证明「哪类的表挂在口上」——按掩码认类）。
-	var attachedInfo *StormTableInfo
-	if out.Attached {
-		if ti, ok, err := c.ClassifyTableInfo(out.AttachedL2Table); err == nil && ok {
-			attachedInfo = &ti
+	// 实况表链：接口 L2 槽挂着的那张表 + 沿 next_table_index 链上的表（两类并存时另一类只在
+	// 链上，见 build 的表链说明）。读视图的「在位」只能落在这个**实况**集合里——进程内登记只补
+	// policer 索引/计数，不再充当表在位的证据（决策 #401：登记有、槽被别的对象占用时必须如实报
+	// 未挂，否则限速静默不生效却显示「在位」）。逐张取属性；取不到即止，上限防环。
+	var liveChain []StormTableInfo
+	for cur, depth := out.AttachedL2Table, 0; out.Attached && depth < 4; depth++ {
+		ti, ok, err := c.ClassifyTableInfo(cur)
+		if err != nil || !ok {
+			break
 		}
+		liveChain = append(liveChain, ti)
+		if ti.NextTableIndex == ^uint32(0) || ti.NextTableIndex == cur {
+			break
+		}
+		cur = ti.NextTableIndex
 	}
 	for _, kind := range stormKinds {
 		kd := StormKindDataplane{}
@@ -722,15 +731,15 @@ func (p *StormProvider) Dataplane(ctx context.Context, ifname string) (StormData
 		if pl, ok := byName[name]; ok {
 			kd.PolicerPresent, kd.CirKbps = true, pl.CirKbps
 		}
-		switch {
-		case e != nil:
+		if e != nil {
 			kd.PolicerIndex = e.policerIdx
-			if ti, ok, err := c.ClassifyTableInfo(e.tableIdx); err == nil && ok {
-				kd.Table = &ti
+		}
+		// 表「在位」按实况：实况链里掩码与本类风暴掩码一致的表才算（登记丢失时同样成立）。
+		for i := range liveChain {
+			if liveChain[i].Mask == hexMask(stormMask(kind)) {
+				kd.Table = &liveChain[i]
+				break
 			}
-		case attachedInfo != nil && attachedInfo.Mask == hexMask(stormMask(kind)):
-			// 登记丢失（nfvisd 重启等）但表还挂在口上：按掩码形状认作该类的表（实测事实）
-			kd.Table = attachedInfo
 		}
 		if e != nil {
 			if p.counters == nil {

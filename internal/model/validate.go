@@ -604,6 +604,16 @@ func (v *validator) checkInterfaces(c Config) {
 					"挂上的 policer 不会被查到）——先 delete bonds %s members %s 把该口移出聚合再配",
 					i.Name, v.bondOf[i.Name], v.bondOf[i.Name], i.Name)
 			}
+			// 与端口安全白名单的 L2 入向分类槽互斥（决策 #401，R176-2）：storm 走 classify、
+			// portsec 走 macip，底座同一接口只有一个 L2 入向分类槽——并存时后挂者胜、另一项
+			// 静默不生效（限速假象），且先配者的删除会撞上「槽被占用」而失败。按 #340/#389 的
+			// 互斥先例提交期硬拒、双向校验（反向在 checkPortSecurity），文案点名两者 + 机理 + 照做路径。
+			if len(i.PortSecurity) > 0 {
+				v.errf(p+".storm_control", "接口 %s 同时配了风暴抑制与端口安全白名单：两者都绑该口唯一的 L2 入向分类槽"+
+					"（风暴抑制走 classify、端口安全走 macip，单槽互斥），不能并存——请两者留其一："+
+					"delete interfaces %s storm-control 或 delete interfaces %s port-security",
+					i.Name, i.Name, i.Name)
+			}
 			if sc.BroadcastKbps == 0 && sc.MulticastKbps == 0 {
 				v.errf(p+".storm_control",
 					"风暴抑制未给出任何类别：broadcast_kbps / multicast_kbps 至少给一个（两类各自独立，单位 kbps）")
@@ -664,6 +674,16 @@ func (v *validator) checkPortSecurity(c Config, p string, i InterfaceConfig) {
 	}
 	if v.bondMembers[i.Name] {
 		v.errf(p+".port_security", "接口 %s 是 bond 成员口，不支持端口安全（聚合口的白名单不在本版本范围）", i.Name)
+	}
+	// 与风暴抑制的 L2 入向分类槽互斥（决策 #401，R176-2）：portsec 走 macip、storm 走 classify，
+	// 底座同一接口只有一个 L2 入向分类槽——并存时后挂者胜、另一项静默不生效（白名单假象），
+	// 且先配者的删除会撞上「槽被占用」而失败。与上面 macip 槽互斥同口径：提交期硬拒、双向校验
+	// （反向在 checkInterfaces 的 storm-control 段），文案点名两者 + 机理 + 照做路径。
+	if i.StormControl != nil {
+		v.errf(p+".port_security", "接口 %s 同时配了端口安全白名单与风暴抑制：两者都绑该口唯一的 L2 入向分类槽"+
+			"（端口安全走 macip、风暴抑制走 classify，单槽互斥），不能并存——请两者留其一："+
+			"delete interfaces %s port-security 或 delete interfaces %s storm-control",
+			i.Name, i.Name, i.Name)
 	}
 	for _, r := range c.Vrfs {
 		for _, li := range r.L3Interfaces {
