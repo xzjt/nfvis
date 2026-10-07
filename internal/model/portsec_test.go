@@ -98,3 +98,23 @@ func TestValidatePortSecurityMacipSlotExclusion(t *testing.T) {
 	// （底座确实只有一个 macip 绑定槽；将来任何放宽角色互斥的改动都必须先过这道检查）。
 	// 因该不可达性，「无 acl-in 且不冲突」的反例无合法现场可构造，故意省略（不留假用例）。
 }
+
+// 决策 #401（R176-2）：同接口「端口安全白名单 × 风暴抑制」的 L2 入向分类槽互斥（portsec 侧）。
+// 与 L3-ACL 的 macip 槽互斥同族：两者都绑接口唯一的 L2 入向分类槽（portsec 走 macip、storm 走
+// classify），并存会静默失效并让先配者的删除撞「槽被占用」；提交期硬拒（反向在 checkInterfaces）。
+func TestValidatePortSecurityStormMutex(t *testing.T) {
+	both := validBase()
+	both.Interfaces[0].PortSecurity = []PortSecMAC{"b0:b0:00:00:00:01"}
+	both.Interfaces[0].StormControl = &StormControl{BroadcastKbps: 8000}
+	errs := Validate(both)
+	// 错误落在 portsec 侧字段路径，点名两者 + 机理 + 两条照做路径。
+	mustErrContaining(t, errs, "interfaces[ens2f0].port_security", "风暴抑制")
+	mustErrContaining(t, errs, "interfaces[ens2f0].port_security", "L2 入向分类槽")
+	mustErrContaining(t, errs, "interfaces[ens2f0].port_security", "delete interfaces ens2f0 port-security")
+	mustErrContaining(t, errs, "interfaces[ens2f0].port_security", "delete interfaces ens2f0 storm-control")
+
+	// 只留白名单（无风暴抑制）：合法——互斥只针对并存。
+	only := validBase()
+	only.Interfaces[0].PortSecurity = []PortSecMAC{"b0:b0:00:00:00:01"}
+	mustNoErr(t, Validate(only))
+}

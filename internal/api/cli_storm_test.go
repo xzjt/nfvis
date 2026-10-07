@@ -126,6 +126,32 @@ func TestCLIStormControlStatementAndView(t *testing.T) {
 	}
 }
 
+// 决策 #401（R176-2）：policer 在、但接口 L2 槽上没有本类分类表（实况未挂，例如被
+// port-security 的 macip 表占用）时，读视图如实报「未挂」，不再笼统报「登记缺失」。
+func TestCLIStormControlReadViewNotAttached(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set interfaces ens224 description storm-port",
+		"set interfaces ens224 storm-control broadcast 8000",
+		"commit",
+		"exit",
+	)
+	x.setStorm(fakeStormRuntime{ok: true, dp: network.StormDataplane{
+		Available: true, Attached: true, AttachedL2Table: 24,
+		Kinds: map[string]network.StormKindDataplane{
+			network.StormKindBroadcast: {PolicerPresent: true, CirKbps: 8000},
+		},
+	}})
+	out := x.Execute("admin", aaaClassSU, "ssh", "show interfaces ens224 detail").Output
+	if !strings.Contains(out, "分类表未挂") {
+		t.Fatalf("槽上无本类表时应如实报「未挂」:\n%s", out)
+	}
+	if strings.Contains(out, "分类表 #") {
+		t.Fatalf("实况未挂时不得报「在位」（分类表 #N）:\n%s", out)
+	}
+}
+
 // 未声明接口 / unknown-unicast / 值域三类拒绝（各给能照做的报错或明确的校验错误）。
 func TestCLIStormControlRejections(t *testing.T) {
 	// 未声明接口：语句期拒绝并给出声明写法（不允许本语句代建声明）

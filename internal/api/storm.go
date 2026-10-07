@@ -101,7 +101,9 @@ func (x *cliExecutor) stormControlBlock(ifc model.InterfaceConfig) (string, map[
 				one["table"] = kd.Table
 				line += fmt.Sprintf("；分类表 #%d（掩码 %s，会话 %d）", kd.Table.Index, kd.Table.Mask, kd.Table.Sessions)
 			} else {
-				line += "；分类表不可读（登记缺失——接口未重放或查询失败）"
+				// 表不在实况链上（决策 #401）：不再笼统报「登记缺失」——登记可能在，只是该口 L2
+				// 槽上无本类分类表（被其它对象占用，或该类表未收敛）。
+				line += "；分类表未挂（接口 L2 槽上无本类分类表——可能被其它对象占用或未收敛）"
 			}
 			kindLines = append(kindLines, line)
 		}
