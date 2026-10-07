@@ -106,6 +106,7 @@ var uiOpsFamilyControls = map[string]map[string]uiPageControl{
 		"diag-host":      {uiClassOp, "POST /diagnostics/ping"},              // ping/traceroute 目标（O）
 		"diag-count":     {uiClassOp, "POST /diagnostics/ping"},              // ping 次数（O）
 		"diag-source":    {uiClassOp, "POST /diagnostics/ping"},              // ping 源地址（O）
+		"diag-vrf":       {uiClassOp, "POST /diagnostics/ping"},              // ping VRF（O，#402）
 		"diag-ipv6":      {uiClassOp, "POST /diagnostics/ping"},              // IPv6 选择（O，#330）
 		"diag-ping-btn":  {uiClassOp, "POST /diagnostics/ping"},              // 执行 ping（O）
 		"diag-trace-btn": {uiClassOp, "POST /diagnostics/traceroute"},        // 执行 traceroute（O）

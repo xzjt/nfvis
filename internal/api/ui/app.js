@@ -572,6 +572,8 @@ function renderVPP(vpp) {
 }
 
 // 资源池卡（大页池 + 隔离核分配）。
+// 决策 #403：首表列名语义自明——「空闲」在此表指**未分配给 VNF 的声明量**（配置口径），
+// 与下方「大页池」段的「空闲」= **内核空闲页**（sysfs 口径）含义不同，故改名并加一行说明。
 function renderPools(pools) {
   const p = $('pools');
   p.textContent = '';
@@ -580,7 +582,7 @@ function renderPools(pools) {
   } else {
     const hp = (pools && pools.hugepages) || [];
     p.appendChild(el('table', {}, [
-      el('thead', {}, [el('tr', {}, ['页大小', '总数', '已分配', '空闲'].map((h) => el('th', { text: h })))]),
+      el('thead', {}, [el('tr', {}, ['页大小', '总数（声明）', '已分配（VNF）', '可分配（VNF）'].map((h) => el('th', { text: h })))]),
       el('tbody', {}, hp.length ? hp.map((h) => el('tr', {}, [
         el('td', { text: String(dash(h.page_size)) }),
         el('td', { text: String(dash(h.total)) }),
@@ -588,6 +590,8 @@ function renderPools(pools) {
         el('td', { text: String(dash(h.free)) }),
       ])) : [el('tr', {}, [el('td', { colspan: '4', class: 'muted', text: '（无）' })])]),
     ]));
+    p.appendChild(el('p', { class: 'muted small', text: '本表是配置口径：「可分配（VNF）」= 声明总数 − 已分配给 VNF 的页数；' +
+      '与下方「大页池」段的「空闲」（内核空闲页，取自 sysfs，含被数据面缓冲占用而无法再分配的部分）口径不同，两处数字不必相等。' }));
     const cpu = (pools && pools.cpu) || {};
     fill(p.appendChild(el('dl', { class: 'kv' })), [
       ['隔离核', list(cpu.isolated_cores)],
@@ -3803,11 +3807,16 @@ function fmtTimeOpt(ts) {
 
 // pingBody 组请求体：源地址留空则不传（服务端按目标自动选路）；IPv6 勾选则 ipv6=true
 // （决策 #330：ping 走 v6 平面、traceroute 走宿主侧 ICMPv6，与 CLI `ping/traceroute ipv6` 同源）。
-function pingBody(host, count) {
+// withVrf：仅 ping 带 vrf（决策 #402）——traceroute 的 vrf 维持不支持（REST 明文拒绝），故不传。
+function pingBody(host, count, withVrf) {
   const body = { host };
   if (count) body.count = count;
   const src = $('diag-source').value.trim();
   if (src) body.source = src;
+  if (withVrf) {
+    const vrf = $('diag-vrf').value.trim();
+    if (vrf) body.vrf = vrf; // 目标在 VRF 内（VNF/交换机域）时必填，否则服务端 no egress interface
+  }
   const v6 = $('diag-ipv6');
   if (v6 && v6.checked) body.ipv6 = true;
   return body;
@@ -3827,7 +3836,7 @@ async function diagPing() {
     const res = await fetch(API + '/diagnostics/ping', {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify(pingBody(host, count)),
+      body: JSON.stringify(pingBody(host, count, true)),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -6366,7 +6375,7 @@ $('diag-trace-btn').addEventListener('click', async () => {
     const res = await fetch(API + '/diagnostics/traceroute', {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify(pingBody(host, 0)),
+      body: JSON.stringify(pingBody(host, 0, false)),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
