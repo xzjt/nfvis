@@ -1,0 +1,112 @@
+NFViS v2 · round176 交付记录（决策 #400~#403：round176 干净快照走查四条收口）
+================================================================================
+日期：2026-10-07
+真机：nfvis-vm（192.168.155.129）——**恢复为「干净」快照**后装 `nfvis-v2.0.0.run`（自检 18/18），
+      本轮验证构建 **2.0.0~dev176**（源码构建实装：`/usr/bin/nfvisd`、`/usr/bin/nfvis-cli` 换新，
+      原二进制备份为 `*.bak-2.0.0`）。
+由来：`docs/evidence/v2-fresh-install-walkthrough-2026-10-07.txt`（round176 走查）新登记 R176-1~4。
+契约：规格书附录 A **#400~#403**；`AGENTS.md` 决策计数 **301→305**。
+
+--------------------------------------------------------------------------------
+§1 实现落点（3 个子智能体并行，各自 worktree 隔离）
+--------------------------------------------------------------------------------
+- **#400（R176-1/R176-4）pending_restart 语义修正**
+  · `internal/model/model.go`：新增 `VppStartupKey` + `(*VppConfig).StartupKey()`——**进入 startup.conf
+    的字段子集**（cpu/memory/dpdk/plugins），**排除 `DNSProxyServers`**。
+  · `internal/orchestrator/network/startup.go`：`VppSectionHash` 改哈希 `StartupKey()` + 生成器
+    **输出形状哨兵** `startupShapeSentinel`（把 #345 的 punt 盐技法一般化；形状变化即改哨兵 ⇒ 保留
+    #345「升级到输出形状不同的新版本，首启如实提示一次待重启」的语义）。
+  · `internal/orchestrator/network/applied_store.go`（新）：已应用哈希的**持久落点**
+    `/var/lib/nfvis/vpp-applied.hash`（本机运行态，不入配置/备份语义，与 `dpdk-bindings.json` 同口径）。
+  · `internal/orchestrator/network/vpp.go`：`SetAppliedStore`/`LoadApplied`/`SetAppliedHash`；
+    `SetApplied` 落盘；`PendingRestart` 对 nil 配置恒 false。
+  · `cmd/nfvisd/main.go`：启动装配载入持久哈希（失败仅告警、不阻塞启动）。
+  · `internal/config/engine.go`：提交期「vpp 变更需 request vpp restart」提示改按 `StartupKey()` 判定。
+  · 实现定裁（写进附录 A #400 行）：取「持久化已应用哈希」而非「启动比对磁盘文本」——后者需在启动期
+    解析 PCI（口已交 DPDK 时只能靠绑定记录），不如持久哈希确定。
+- **#401（R176-2）storm-control × port-security 同接口互斥 + storm 读视图按实况**
+  · `internal/model/validate.go`：**双向**提交期拒绝（storm 侧看 `PortSecurity`、portsec 侧看
+    `StormControl`），文案点名两者 + 机理（同一 L2 入向分类槽）+ 照做路径（留其一）。
+  · `internal/orchestrator/network/storm.go`：`Dataplane` 的「在位」判据改**实况表链**（接口 L2 槽挂着
+    的表 + 其 `next_table_index` 链），掩码认类；进程内登记只补 policer 索引/计数，不再充当在位证据。
+  · `internal/api/storm.go`：未挂文案改「分类表未挂（接口 L2 槽上无本类分类表——可能被其它对象占用或未收敛）」。
+- **#402/#403（R176-3 + 观察）Web 控制台**
+  · `internal/api/ui/index.html` + `app.js`：诊断页 ping 表单**增 `vrf` 输入**（`diag-vrf`，走既有
+    `data-write data-op` 门禁），`pingBody(host,count,withVrf)` 仅在 ping 时带 vrf（traceroute 不带，
+    REST 亦明文拒绝）；资源池页首表列名改「总数（声明）/已分配（VNF）/可分配（VNF）」并加一行口径说明。
+  · UI 守护测试（`ui_ops_writes_gating_test.go`、`ui_operator_gating_test.go`）同步控件清单。
+
+--------------------------------------------------------------------------------
+§2 真机四维验证（**逐条，独立事实源**）
+--------------------------------------------------------------------------------
+【#400】pending_restart（构建 2.0.0~dev176）
+  ① 建立已应用态：`request vpp restart` → 落点 `/var/lib/nfvis/vpp-applied.hash` 生成
+     （`4fa54788…`）、`show vpp` → `pending_restart: no`。
+  ② **整机重启后**（关键项）：`show vpp` → `pending_restart: **no**`；
+     **独立事实源** `show vpp threads` → `vpp_main core 4 / vpp_wk_0 core 3`，与 committed
+     （`set vpp cpu main-core 4` / `corelist-workers 3`）**逐项一致** ⇒ VPP 确在跑 committed 配置。
+     （修复前：同一现场恒报 `yes`，三次复现。）
+  ③ 仅改 DNS 代理：`set system dns proxy server 223.5.5.5` + commit → **无**「vpp 变更需 request vpp
+     restart」警告、`pending_restart` 保持 **no**（对照修复前会误报）。
+  ④ 真实 vpp 段变更：`set vpp cpu main-core 4 / corelist-workers 3` + commit → 提交输出**有**警告、
+     `pending_restart: **yes**`；`request vpp restart` 后 → **no**（方向正确，未变成恒 no）。
+  ⑤ 单元：`TestPendingRestartFalseAfterReboot` / `…IgnoresDNSProxyOnlyChange` /
+     `…OnRealVppSectionChange` / `…OnGeneratorShapeChange`（保 #345）+ `TestAppliedStoreRoundTrip` +
+     `TestEngineCommitNoVppRestartWarningForDNSProxyOnly`；红-绿（暂回旧实现逐项按预期失败）。
+
+【#401】storm × portsec 互斥与读视图
+  ① 前置：`set virtual-switches vs-t type l2` + `ports 1 interface ens192`（rev 101）。
+  ② **同一提交**同时配 storm + portsec ⇒ 提交期拒绝，**两条**错误同时给出（storm 侧 + portsec 侧），
+     文案含两者、机理与照做路径。
+  ③ storm 单独提交 ⇒ 成功（rev 102）；随后**再加** portsec ⇒ 第二次提交被拒（rev 未推进）。
+  ④ 删 storm ⇒ **一次提交成功（rev 103）**——对照修复前必撞「L2 分类槽被非本产品对象占用（表 24…）」
+     （占用者是产品自己的 portsec macip 表）而整批失败。
+  ⑤ portsec 单独提交 ⇒ 成功（rev 104）。
+  ⑥ 单元：`TestValidateStormControlPortSecMutex` / `TestValidatePortSecurityStormMutex` /
+     `TestStormDataplaneSlotHeldByForeignTable` / `TestCLIStormControlReadViewNotAttached`；红-绿逐项。
+
+【#402】Web 诊断页 ping 带 vrf（Browser Use）
+  ① 前置：`vs-lan`（l2 + BVI 192.168.99.1/24 + port ens224）+ VNF `vnf-b`（vhost-user 挂 vs-lan，
+     user-data 置静态 192.168.99.5）→ 邻居表出现 `192.168.99.5`、CLI `ping 192.168.99.5 vrf vr-vs-lan`
+     **3/3 通**。
+  ② Web 诊断页出现 `VRF（可选，目标在 VRF 内时必填其名，如 vr-vs-lan）` 输入框（`diag-vrf`）。
+  ③ 填 目标 `192.168.99.5` + VRF `vr-vs-lan` + 次数 3 → 执行 ping →
+     **`3 sent, 3 received, 0% packet loss`**（回显 `116 bytes from 192.168.99.5 … ttl=64`）。
+     对照修复前：同一目标在 Web 上只能报 `Failed: no egress interface`（0 发包）。
+  ④ `traceroute` 仍不传 vrf（REST 明文拒绝、不静默降级）。
+
+【#403】资源池页「空闲」语义
+  Browser Use 打开 `#/system/pools`：首表列头 = **`页大小 / 总数（声明） / 已分配（VNF） / 可分配（VNF）`**，
+  表下出现口径说明行「本表是配置口径：「可分配（VNF）」= 声明总数 − 已分配给 VNF 的页数；与下方「大页池」段
+  的「空闲」（内核空闲页…）口径不同，两处数字不必相等」——与下方「大页池」段的 sysfs 口径不再同名混淆。
+
+--------------------------------------------------------------------------------
+§3 测试与守护
+--------------------------------------------------------------------------------
+- `make check`：**RC=0**（vet / test / 覆盖率门槛 / 依赖方向 / 决策条数 305 项 / openapi 同步可解析无重复键 /
+  用户文本守护 / 套件契约同步 / 工具自检 / 原型全绿）。
+  · **过程如实**：首次 `make check` 曾因**我把内部决策号写进用户手册**（`docs/NFViS-用户手册.md` 三处
+    「（决策 #401/#402）」）被 `internal/archtest` 的用户文本守护拦下——按守护要求改写为不带决策号的表述后
+    转绿（守护生效，非误报）。
+  · 宿主内存压力下并行 `go test ./...` 偶发失败（既有已知现象），串行 `GOFLAGS=-p=1` 全绿。
+- 单测红-绿：见 §2 各条（子智能体逐项做「暂回旧实现 ⇒ 失败 ⇒ 还原 ⇒ 通过」）。
+
+--------------------------------------------------------------------------------
+§4 如实边界 / 未覆盖
+--------------------------------------------------------------------------------
+- **不做表链共存**（#401）：VPP classify 与 macip 单槽，链式共存风险高，另立项才做；本轮取「提交期双向拒绝」。
+- **#400 的形状哨兵是人工约定**：将来生成器新增/删除 startup.conf 段时须同步改 `startupShapeSentinel`
+  （注释已写明；若忘记，升级后不会提示首次重启）。
+- **#402 的 guest 前置插曲（非本轮缺陷）**：运行中的 VNF 改 `cloud-init user-data` 后**不重定义 domain**
+  （seed ISO 未挂），须 **stop → start** 才生效；本轮据此调整操作顺序后 guest 正常。此为既有行为，
+  未在本轮登记为新缺陷，**如实记录**供后续评估。
+- 四套件**未在本轮 dev176 构建上复跑**（本轮为定向修复 + 逐条真机四维；发布前四套件基线沿用 round176 走查的
+  2.0.0 结果：fulltest 273/0/20、语义 26/0/3、lifecycle 21/0/3、pty 10/10）。
+
+--------------------------------------------------------------------------------
+§5 账目
+--------------------------------------------------------------------------------
+- 附录 A #400~#403（含 #400/#401 的「实现定裁」）；`AGENTS.md` 决策计数 301→305。
+- `docs/v2待做.md`：R176-1~4 标为已收口（决策 #400~#403）。
+- 命令全表：storm-control 与 port-security 两行补「同接口互斥」；用户手册 §8.14/§8.15 与诊断页小节同步
+  （用户面不写决策号）。

@@ -1034,6 +1034,23 @@
   `last 18446744074s` **报超界**（不再回绕）。**#398** storm control 在 **bond 成员口**提交期拒绝
   （与 portsec 同判据；文案给「先移出聚合」照做路径）→ 红-绿单测（真机按环境受限登记为单测覆盖）。
   `make check` **RC=0**；真机 **2.0.0~dev117**。证据 `docs/evidence/v2-round174-d396-d397-d398-p1-remainder.txt`。
+- **round176（干净快照从零安装 + 拟人化全功能走查 → 四条修复，2026-10-07）**：在**恢复为「干净」快照**的
+  nfvis-vm 上装 GitHub Release 的 `nfvis-v2.0.0.run`（sha256 逐字对，一步装齐 **18/18**）→ wizard（真 pty，
+  并**正确警示** 1G 池 1 页时 VNF 起不来）→ 重启 → **CLI + Web（Browser Use）全链走查**：真 guest 的
+  内置 DHCP 租约 + 双向 ping、VNF 串口/快照、容器 exec/交互 shell、L2/L3/ACL/QoS/VXLAN/storm/portsec
+  均以 `vppctl` 为独立事实源；四套件在发布件上 **0 失败**（pty 10/10、语义 26/0/3、lifecycle 21/0/3、
+  fulltest 273/0/20——fulltest 首跑 21 红**全为环境缺夹具** `/var/lib/nfvis/images/alpine.qcow2`，补齐后归零）。
+  新登记 **R176-1~4**（证据 `docs/evidence/v2-fresh-install-walkthrough-2026-10-07.txt`）并**当轮收口**
+  （决策 **#400~#403**，3 个子智能体 worktree 并行实现、逐条红-绿；真机四维证据
+  `docs/evidence/v2-round176-d400-d403-fixes.txt`）：**#400** `pending_restart` **重启后假阳性**（appliedHash
+  进程内、启动不 SetApplied）+ **仅改 DNS 代理误报**（DNSProxyServers 不进 startup.conf）——改「哈希只取
+  进入 startup.conf 的字段子集 + 生成器输出形状哨兵」并把**已应用哈希持久化**（`/var/lib/nfvis/vpp-applied.hash`）
+  启动载入，**保留 #345 升级首启提示语义**；**#401** storm-control 与 port-security **同接口 L2 入向分类槽
+  冲突未检测**（限速静默不生效、删 storm 报「槽被非本产品对象占用」——占用者是产品自己的 portsec macip）——
+  提交期**双向拒绝** + storm 读视图改**按实况表链**报表；**#402** Web 诊断页 ping **缺 `vrf`**（REST/CLI 都有）
+  → 表单补 `diag-vrf`（真机 Web ping 域内 guest **3/3 通**，对照修复前 `no egress interface`）；
+  **#403** Web 资源池页两处「空闲」同名异义 → 列名语义化 + 口径说明行。`make check` **RC=0**
+  （过程如实：首跑被**用户文本守护**拦下——手册误写决策号，改写后转绿）；真机 **2.0.0~dev176**。
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
