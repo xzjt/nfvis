@@ -138,7 +138,10 @@
   libvirt/docker/qemu 全栈；**nfvis 3.0.1（v3 提交 `2c157e6` 构建，数据面 `vpp`）**、VPP 26.06 运行中
   （`vppctl` 可查）。⚠️ **本轮改过一处环境**：`/etc/netplan/00-installer-config.yaml` 里 ens192/ens224 的
   `activation-mode` 由 `off` 改为 **`manual`**（原值让 systemd-networkd 把它们 `always-down`，内核数据面
-  无法把它们置 up）；备份在 `/root/netplan.bak`。**未重建**：`alpine.qcow2` 等夹具镜像、`docker alpine:3.20`。
+  无法把它们置 up）；备份在 `/root/netplan.bak`。**夹具**：`alpine.qcow2` **已放回镜像仓库**
+  （`/var/lib/nfvis/images/alpine.qcow2`，178.1 MB，alpine 3.20.3 nocloud BIOS cloudinit；**下载务必核对
+  大小/摘要**——直连会被静默截断，而 `request images upload` 照常报成功）；`docker alpine:3.20` **仍未重建**。
+  **现场**：dataplane 仍为 `kernel`，nfvis active；产品对象/内核链路/nft 表/libvirt 域均为 0（round1 验证后已清场）。
   ⚠️ 快照再次恢复后本节全部作废，需按上面路径重做。
 - 验证环境 nfvis-vm 历史状态（**2026-09-27 round85 又恢复过一次干净快照**，此后按 round85 流程重装并配置；
   快照恢复会清掉全部现场，
