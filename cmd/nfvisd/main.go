@@ -197,6 +197,13 @@ func run() error {
 	// M3：VPP 数据面连接管理（FR-SYS-007）先于事务引擎装配（引擎需要下发编排器）。
 	vppMgr := network.NewManager(network.Config{Socket: *vppSock, Log: log}, nil)
 	defer vppMgr.Close()
+	// 决策 #400：appliedHash 是进程内字段，整机重启后丢失 ⇒ pending_restart 恒报「是」（真机三次复现）。
+	// 启动时从持久落点载入上次应用态，使「重启后 VPP 正按 committed 配置运行」如实为「否」。
+	// 载入失败只告警（保守回退到旧行为，不阻塞启动）。
+	vppMgr.SetAppliedStore(network.NewAppliedStore(network.DefaultAppliedHashPath))
+	if err := vppMgr.LoadApplied(); err != nil {
+		log.Warn("载入已应用 vpp 配置哈希失败（重启后可能误报待重启）", "err", err)
+	}
 	l2Provider := network.NewL2ProviderFunc(vppMgr.L2ClientFunc())
 	l3Provider := network.NewL3ProviderFunc(vppMgr.L3ClientFunc())
 	netProvider := network.NewL2Network(orchestrator.NewNoopNetwork(), l2Provider)

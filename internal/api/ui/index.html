@@ -1021,6 +1021,8 @@
           <input id="diag-count" data-write data-op type="text" value="5">
           <label for="diag-source">源地址（可选，如 192.168.100.1）</label>
           <input id="diag-source" data-write data-op type="text" placeholder="留空则按目标自动选路">
+          <label for="diag-vrf">VRF（可选，目标在 VRF 内时必填其名，如 vr-vs-lan）</label>
+          <input id="diag-vrf" data-write data-op type="text" placeholder="与 CLI ping … vrf 同源；traceroute 不支持">
           <label for="diag-ipv6"><input id="diag-ipv6" data-write data-op type="checkbox"> IPv6（ping 走自身 v6 平面 / traceroute 走宿主侧 ICMPv6）</label>
           <div class="cfg-actions">
             <button id="diag-ping-btn" data-write data-op type="button">执行 ping</button>
@@ -1034,7 +1036,7 @@
           <div class="cfg-actions"><button id="diag-clear-btn" data-write type="button" class="ghost">清零统计</button></div>
         </fieldset>
       </div>
-      <p class="muted small">ping 只覆盖数据面（VPP）——管理口在内核平面，请在宿主机上 ping。traceroute 走宿主侧 ICMP/ICMPv6，可测管理口；其 vrf 参数不支持（要经 VRF 测请用 ping vrf）。勾选 IPv6 后 ping 走 v6 平面、traceroute 走宿主侧 ICMPv6。</p>
+      <p class="muted small">ping 只覆盖数据面（VPP）——管理口在内核平面，请在宿主机上 ping。目标在 VRF 内时（如 VNF/交换机域）须在上方填该 VRF 名，否则会报 no egress interface（与 CLI <code>ping … vrf</code> 同源）。traceroute 走宿主侧 ICMP/ICMPv6，可测管理口；其 vrf 参数不支持（要经 VRF 测请用 ping vrf）。勾选 IPv6 后 ping 走 v6 平面、traceroute 走宿主侧 ICMPv6。</p>
       <pre id="diag-out" class="code" hidden></pre>
       <div class="cfg-actions"><button id="diag-log-btn" type="button" class="ghost">刷新服务端日志（末 100 行）</button></div>
       <pre id="diag-log" class="code" hidden></pre>

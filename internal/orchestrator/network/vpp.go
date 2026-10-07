@@ -132,7 +132,10 @@ type Manager struct {
 	version     string
 	lastErr     error
 	appliedHash string // 最近一次落地/重启所依据的 vpp 配置段哈希（pending_restart 判定）
-	onConnect   func(version string)
+	// appliedStore 已应用哈希的持久落点（决策 #400；nil = 不持久化，仅进程内）。
+	// 整机重启后 appliedHash 会丢，启动时从它载入即可避免「重启后恒报待重启」。
+	appliedStore *AppliedStore
+	onConnect    func(version string)
 	// gen 成功建立连接的世代：首次连接与每次重连各 +1（决策 #315）。
 	// 判据用途：`state == StateConnected` 可能来自**陈旧会话**（VPP 重启后 govpp 尚未
 	// 报出断连的那段窗口），世代前进才说明管理器已换成新连接、查询路径可用。
@@ -196,11 +199,45 @@ type StatusView struct {
 	LastError      string `json:"last_error,omitempty"`
 }
 
+// SetAppliedStore 注入已应用哈希的持久落点（决策 #400；启动装配时调用一次）。
+func (m *Manager) SetAppliedStore(s *AppliedStore) { m.appliedStore = s }
+
+// LoadApplied 从持久落点载入已应用哈希（启动时调用一次；决策 #400）。
+// 文件缺失（首启）视为尚未应用过——不改动 appliedHash（保持空）。
+func (m *Manager) LoadApplied() error {
+	if m.appliedStore == nil {
+		return nil
+	}
+	hash, err := m.appliedStore.Load()
+	if err != nil {
+		return err
+	}
+	if hash == "" {
+		return nil
+	}
+	m.mu.Lock()
+	m.appliedHash = hash
+	m.mu.Unlock()
+	return nil
+}
+
+// SetAppliedHash 记录已应用哈希并落盘（决策 #400：SetApplied 与启动载入共用同一落点）。
+// 落盘失败只告警——本次会话内 appliedHash 已生效，重启后可能误报待重启。
+func (m *Manager) SetAppliedHash(hash string) {
+	m.mu.Lock()
+	m.appliedHash = hash
+	store := m.appliedStore
+	m.mu.Unlock()
+	if store != nil {
+		if err := store.Save(hash); err != nil {
+			m.cfg.Log.Warn("持久化已应用 vpp 配置哈希失败（重启后可能误报待重启）", "err", err)
+		}
+	}
+}
+
 // SetApplied 记录已应用到 startup.conf 的 vpp 配置段（清除 pending_restart）。
 func (m *Manager) SetApplied(vpp *model.VppConfig) {
-	m.mu.Lock()
-	m.appliedHash = VppSectionHash(vpp)
-	m.mu.Unlock()
+	m.SetAppliedHash(VppSectionHash(vpp))
 }
 
 // AppliedHash 已应用的 vpp 配置段哈希（空 = 尚未应用过）。
@@ -212,13 +249,17 @@ func (m *Manager) AppliedHash() string {
 
 // PendingRestart committed vpp 段与已应用段不一致时为 true（FR-SYS-009）。
 // 尚未应用过（appliedHash 为空）且存在 vpp 配置时也视为待重启。
+// 无 committed vpp 段（nil）时恒为 false：没有可重启项（也避免持久化的旧哈希在配置被清后误报）。
 func (m *Manager) PendingRestart(vpp *model.VppConfig) bool {
+	if vpp == nil {
+		return false
+	}
 	m.mu.Lock()
 	applied := m.appliedHash
 	m.mu.Unlock()
 	current := VppSectionHash(vpp)
 	if applied == "" {
-		return vpp != nil && current != VppSectionHash(nil)
+		return current != VppSectionHash(nil)
 	}
 	return applied != current
 }
