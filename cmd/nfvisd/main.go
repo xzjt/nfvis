@@ -1159,8 +1159,10 @@ func (c *vppController) lastConnErr() error {
 
 func (c *vppController) Status(vpp *model.VppConfig) api.VppStatus {
 	v := c.mgr.StatusView(vpp)
+	// Mode 恒报当前数据面：两种数据面下 `show vpp` 都能一眼看出在用哪一套
+	// （内核数据面由 kernelVppController 报 kernel，这里报 vpp）。
 	return api.VppStatus{Version: v.Version, Connected: v.Connected,
-		PendingRestart: v.PendingRestart, LastError: v.LastError}
+		PendingRestart: v.PendingRestart, LastError: v.LastError, Mode: model.DataPlaneVPP}
 }
 
 // Restart 按 committed 配置重生成 startup.conf 并重启 VPP（FR-SYS-009）。

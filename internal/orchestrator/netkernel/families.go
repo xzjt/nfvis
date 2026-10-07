@@ -28,10 +28,17 @@ type spanBinding struct {
 	direction   string
 }
 
-// 族管理器的惰性构造与两处进程内登记（QoS 策略参数、SPAN 会话 → 端口）。
+// 族管理器的惰性构造与三处进程内登记。
+//
+// 为什么必须登记而不是只读配置快照：提交编排**先下发族对象、再下发引用它的绑定**
+// （ACL → 三层接口；QoS 策略 → 接口），而下发发生在一次提交之内——此刻 `p.config()`
+// 还是上一次收敛的快照，刚建的 ACL/策略不在里面。真机走查实测过这个缺陷：
+// 建 ACL 并在同一次提交里绑到三层接口，报「绑定了未下发的 ACL」。
+// 三处登记都由恢复收敛的声明重放重建（EnsureConsistent 按同一段序重放）。
 var (
 	famMu       sync.Mutex
 	qosPolicies map[string]model.QosPolicy
+	aclDefs     map[string]model.Acl
 	spanNames   map[string]spanBinding
 )
 
@@ -72,14 +79,30 @@ func (p *Provider) portSecMgr() *portSecManager {
 
 // ---------- ACL ----------
 
-// ApplyACL 收敛一条 ACL（own nftables 表；绑定另行由 ApplyVRF 的 acl-in 下发）。
+// ApplyACL 收敛一条 ACL（own nftables 表；绑定另行由 ApplyVRF 的 acl-in 下发），
+// 并登记规则体供同一次提交里的绑定解析。
 func (p *Provider) ApplyACL(ctx context.Context, acl model.Acl) error {
-	return p.aclMgr().Apply(ctx, acl)
+	if err := p.aclMgr().Apply(ctx, acl); err != nil {
+		return err
+	}
+	famMu.Lock()
+	if aclDefs == nil {
+		aclDefs = map[string]model.Acl{}
+	}
+	aclDefs[acl.Name] = acl
+	famMu.Unlock()
+	return nil
 }
 
 // DeleteACL 撤销一条 ACL。仍被接口绑定时报错（不留下悬空的 jump）。
 func (p *Provider) DeleteACL(ctx context.Context, name string) error {
-	return p.aclMgr().Delete(ctx, name)
+	if err := p.aclMgr().Delete(ctx, name); err != nil {
+		return err
+	}
+	famMu.Lock()
+	delete(aclDefs, name)
+	famMu.Unlock()
+	return nil
 }
 
 // UnbindL3IfaceACL 撤销一条 L3 接口的 acl-in 绑定（策略对象保留，接口不再受其约束）。
@@ -102,11 +125,18 @@ func (p *Provider) bindL3IfaceACL(ctx context.Context, iface model.L3Interface) 
 	return p.aclMgr().Bind(ctx, l3DeviceName(iface), acl)
 }
 
-// aclByName 从最近一次收敛的配置快照里取 ACL（绑定只写名字，需要规则体）。
+// aclByName 取 ACL 的规则体（绑定只写名字）。先查本次提交已下发的登记，再回落配置快照
+// （恢复收敛路径下两者一致；提交路径下只有前者有）。
 func (p *Provider) aclByName(name string) (model.Acl, bool) {
-	for _, a := range p.config().Acls {
-		if a.Name == name {
-			return a, true
+	famMu.Lock()
+	a, ok := aclDefs[name]
+	famMu.Unlock()
+	if ok {
+		return a, true
+	}
+	for _, x := range p.config().Acls {
+		if x.Name == name {
+			return x, true
 		}
 	}
 	return model.Acl{}, false

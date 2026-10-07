@@ -100,7 +100,11 @@ func (p *Provider) BridgeDomains() ([]network.BDRuntime, error) {
 	}
 	out := make([]network.BDRuntime, 0, len(bds))
 	for _, bd := range bds {
-		st := network.BDRuntime{ID: bd.ID, Name: bd.Name}
+		// Learn/Flood 是 VPP bridge-domain 的概念；内核 bridge 默认就学习并洪泛未知单播/广播，
+		// 故如实填 true——**不能**留零值：读视图会把 false 渲染成「down」，看起来像交换机坏了
+		// （真机走查实测：`show virtual-switches` 的 Learn/Flood 两列显示 down）。
+		// 端口安全关掉的是**单个端口**的学习（per-port learning off），不影响交换机级这一列。
+		st := network.BDRuntime{ID: bd.ID, Name: bd.Name, Learn: true, Flood: true}
 		for _, port := range bd.Ports {
 			st.Ports = append(st.Ports, network.BDRuntimePort{Name: port.Name, Shg: port.Shg})
 		}

@@ -44,7 +44,7 @@ func (p *Provider) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch
 		if err := p.ipReq(ctx, "link", "set", "dev", name, "master", br); err != nil {
 			return err
 		}
-		if err := p.ipReq(ctx, "link", "set", "dev", name, "up"); err != nil {
+		if err := p.ensureLinkUp(ctx, name); err != nil {
 			return err
 		}
 		if err := p.applyPortVlans(ctx, name, vs, port); err != nil {
@@ -65,7 +65,7 @@ func (p *Provider) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch
 			return err
 		}
 	}
-	return p.ipReq(ctx, "link", "set", "dev", br, "up")
+	return p.ensureLinkUp(ctx, br)
 }
 
 // vlanFilteringValue 是否需要打开 bridge 的 VLAN 过滤。
@@ -161,7 +161,15 @@ func (p *Provider) applyGateway(ctx context.Context, vs model.VirtualSwitch, br 
 	return nil
 }
 
-// DeleteBridgeDomain 删除内核 bridge（成员口由内核自动释放）。
+// DeleteBridgeDomain 删除内核 bridge（成员口由内核自动释放），并回收**它自己创建的**网关 VRF。
+//
+// 网关 VRF 由 ApplyBridgeDomain 按需创建（无显式 vrf 声明时用派生的 `vr-<交换机名>`）——
+// 删交换机时必须一并回收，否则内核里长期留一张空 VRF（真机走查实测的残留：
+// 删了 vs-lan，`vr-vs-lan` 还在）。显式声明的 `gateway vrf <名>` 不在此删除：
+// 那是操作者自己的对象，生命周期不由本交换机决定。
 func (p *Provider) DeleteBridgeDomain(ctx context.Context, name string) error {
-	return p.ipBest(ctx, "link", "del", LinkName(name))
+	if err := p.ipBest(ctx, "link", "del", LinkName(name)); err != nil {
+		return err
+	}
+	return p.ipBest(ctx, "link", "del", GatewayVRFName(name))
 }

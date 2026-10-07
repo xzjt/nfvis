@@ -12,7 +12,7 @@ import (
 func TestPortSecApplyDisablesLearningAndAddsIngressDropRule(t *testing.T) {
 	f := &fakeRunner{replies: []fakeReply{
 		{prefix: "ip -j -d link show dev ens192",
-			out: `[{"ifname":"ens192","master":"br0","linkinfo":{"info_slave_data":{"learning":true}}}]`},
+			out: `[{"ifname":"ens192","master":"br0","linkinfo":{"info_slave_kind":"bridge","info_slave_data":{"learning":true}}}]`},
 	}}
 	m := newPortSecManager(f)
 	macs := []model.PortSecMAC{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}
@@ -41,7 +41,7 @@ func TestPortSecApplyDisablesLearningAndAddsIngressDropRule(t *testing.T) {
 func TestPortSecApplyEmptyTearsDownAndRestoresLearning(t *testing.T) {
 	f := &fakeRunner{replies: []fakeReply{
 		{prefix: "ip -j -d link show dev ens192",
-			out: `[{"ifname":"ens192","master":"br0","linkinfo":{"info_slave_data":{"learning":true}}}]`},
+			out: `[{"ifname":"ens192","master":"br0","linkinfo":{"info_slave_kind":"bridge","info_slave_data":{"learning":true}}}]`},
 		{prefix: "nft list table netdev nfvis-portsec",
 			out: "table netdev nfvis-portsec {}"},
 	}}
@@ -83,7 +83,7 @@ func TestPortSecTeardownKeepsTableWhenOtherChainsRemain(t *testing.T) {
 func TestPortSecApplyPropagatesLearningError(t *testing.T) {
 	f := &fakeRunner{replies: []fakeReply{
 		{prefix: "ip -j -d link show dev ens192",
-			out: `[{"ifname":"ens192","master":"br0","linkinfo":{"info_slave_data":{"learning":true}}}]`},
+			out: `[{"ifname":"ens192","master":"br0","linkinfo":{"info_slave_kind":"bridge","info_slave_data":{"learning":true}}}]`},
 		{prefix: "bridge link set dev ens192 learning off",
 			out: "RTNETLINK answers: Operation not supported",
 			err: errors.New("exit status 255")},
@@ -194,12 +194,14 @@ func portSecTestCallIndex(f *fakeRunner, substr string) int {
 // `Operation not supported`——那不是失败，而是"没有学习可恢复"。
 func TestPortSecNonBridgeMemberIsRejectedOnApplyAndToleratedOnTeardown(t *testing.T) {
 	f := &fakeRunner{replies: []fakeReply{
-		{prefix: "ip -j -d link show dev ens192", out: `[{"ifname":"ens192"}]`},
+		// master 非空但 slave_kind=vrf：三层接口的 VRF 从属口，**不是** bridge 成员。
+		{prefix: "ip -j -d link show dev ens192",
+			out: `[{"ifname":"ens192","master":"vs-l3","linkinfo":{"info_slave_kind":"vrf"}}]`},
 		{prefix: "nft list table netdev nfvis-portsec", out: "table netdev nfvis-portsec {}"},
 	}}
 	m := newPortSecManager(f)
 	err := m.Apply(context.Background(), "ens192", []model.PortSecMAC{"aa:bb:cc:dd:ee:01"})
-	if err == nil || !strings.Contains(err.Error(), "二层交换机成员口") {
+	if err == nil || !strings.Contains(err.Error(), "二层交换机（bridge）的成员口") {
 		t.Fatalf("非桥成员口应被拒并说明原因，得到 %v", err)
 	}
 	if f.has("bridge link set") {

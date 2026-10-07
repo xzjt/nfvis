@@ -59,7 +59,7 @@ func (p *Provider) applyL3Interface(ctx context.Context, vrfName string, li mode
 	// 基口必须先 up：vlan 子接口的 carrier 跟随基口，基口 down 时 `ip link set <子接口> up`
 	// 会直接报 `RTNETLINK answers: Network is down`（真机实测）。三层接口本就要求可用，
 	// 故这里显式置 up（幂等；这条口径写进设计文档与用户手册）。
-	if err := p.ipReq(ctx, "link", "set", "dev", base, "up"); err != nil {
+	if err := p.ensureLinkUp(ctx, base); err != nil {
 		return err
 	}
 	if li.Vlan > 0 {
@@ -75,7 +75,7 @@ func (p *Provider) applyL3Interface(ctx context.Context, vrfName string, li mode
 			return err
 		}
 	}
-	return p.ipReq(ctx, "link", "set", "dev", dev, "up")
+	return p.ensureLinkUp(ctx, dev)
 }
 
 // l3DeviceName l3-interface 对应的内核设备名。

@@ -415,14 +415,40 @@ func TestUnsupportedFamiliesReportError(t *testing.T) {
 	// ACL / QoS / 端口镜像 / 风暴抑制 / 端口安全已实现，不再在此列。
 	cases := map[string]error{
 		"LLDP":     p.ApplyLLDP(ctx, &model.LldpConfig{}),
-		"中继":       p.ApplyDhcpRelay(ctx, model.VirtualSwitch{Name: "vs"}),
-		"DHCP 服务器": p.ApplyDHCPServer(ctx, model.VirtualSwitch{Name: "vs"}),
+		"中继":       p.ApplyDhcpRelay(ctx, model.VirtualSwitch{Name: "vs", DhcpRelayServer: "10.0.0.1"}),
+		"DHCP 服务器": p.ApplyDHCPServer(ctx, model.VirtualSwitch{Name: "vs", DhcpServerPoolStart: "10.0.0.10"}),
 		"DNS 代理":   p.ApplyDNSProxy(ctx, orchestrator.DNSProxyUpstreams{Global: []string{"8.8.8.8"}}),
 	}
 	for name, err := range cases {
 		if !errors.Is(err, ErrUnsupported) {
 			t.Fatalf("%s 应报 ErrUnsupported，得到 %v", name, err)
 		}
+	}
+}
+
+// 未实现族在**未声明**时必须是空操作：提交编排把它们当 bridge-domain 的伴随操作调用
+// （每台 L2 交换机都走一次），若一律报「不支持」，任何一次普通提交都会被挡住
+// ——真机走查实测过：只建一台 L2 交换机，提交却报 `dhcp-relay[vs-lan] 不受支持`。
+func TestUnimplementedFamiliesAreNoopWhenUndeclared(t *testing.T) {
+	p := New(&fakeRunner{})
+	ctx := context.Background()
+	empty := model.VirtualSwitch{Name: "vs"}
+	if err := p.ApplyDhcpRelay(ctx, empty); err != nil {
+		t.Fatalf("未声明 DHCP 中继应空操作，得到 %v", err)
+	}
+	if err := p.ApplyDHCPServer(ctx, empty); err != nil {
+		t.Fatalf("未声明 DHCP 服务器应空操作，得到 %v", err)
+	}
+	if err := p.ApplyDNSProxy(ctx, orchestrator.DNSProxyUpstreams{}); err != nil {
+		t.Fatalf("全局与各域都空时 DNS 代理应空操作，得到 %v", err)
+	}
+	if err := p.ApplyLLDP(ctx, nil); err != nil {
+		t.Fatalf("未声明 LLDP 应空操作，得到 %v", err)
+	}
+	// 每交换机一次 DNS 代理伴随调用（按域上游为空列表）同样空操作。
+	if err := p.ApplyDNSProxy(ctx, orchestrator.DNSProxyUpstreams{
+		PerSwitch: map[string][]string{"vs": nil}}); err != nil {
+		t.Fatalf("按域上游为空列表时应空操作，得到 %v", err)
 	}
 }
 
@@ -556,5 +582,67 @@ func TestDiagPingAndVRFScope(t *testing.T) {
 	}
 	if err := d.ClearInterfaceStats(context.Background(), "ens192"); !errors.Is(err, ErrStatsClearUnsupported) {
 		t.Fatalf("清零统计应如实报不支持，得到 %v", err)
+	}
+}
+
+// 同一次提交内的绑定：ACL 与 QoS 策略先由 ApplyACL/ApplyQos 下发，随后 ApplyVRF/
+// ApplyInterface 才引用它们——此时 `p.config()` 仍是上一次收敛的快照，**不能**用它解析。
+// 真机走查实测过：建 ACL 并在同一次提交里绑到三层接口，报「绑定了未下发的 ACL」。
+func TestBindingResolvesFromSameCommitNotConfigSnapshot(t *testing.T) {
+	f := &fakeRunner{}
+	p := New(f)
+	ctx := context.Background()
+	// 配置快照刻意留空（模拟"本次提交新建的对象"）。
+	p.SetConfig(model.Config{})
+
+	acl := model.Acl{Name: "acl-new", Rules: []model.AclRule{
+		{Seq: 10, Source: "any", Destination: "any", Action: "permit"},
+	}}
+	if err := p.ApplyACL(ctx, acl); err != nil {
+		t.Fatalf("ApplyACL: %v", err)
+	}
+	if err := p.ApplyVRF(ctx, model.Vrf{
+		Name:         "vs-l3",
+		L3Interfaces: []model.L3Interface{{Interface: "ens224", AclIn: "acl-new"}},
+	}); err != nil {
+		t.Fatalf("同一次提交里绑定刚下发的 ACL 应成功，得到 %v", err)
+	}
+	if !f.has("jump") {
+		t.Fatalf("应下发到 ACL 链的跳转；实际：\n%s", f.joined())
+	}
+
+	// QoS 同族：策略先 ApplyQos，接口再引用。
+	f2 := &fakeRunner{}
+	p2 := New(f2)
+	p2.SetConfig(model.Config{})
+	if err := p2.ApplyQos(ctx, model.QosPolicy{Name: "pol-new", Cir: 8000, Cbs: 1000}); err != nil {
+		t.Fatalf("ApplyQos: %v", err)
+	}
+	if err := p2.ApplyInterface(ctx, model.InterfaceConfig{Name: "ens192", IngressPolicy: "pol-new"}); err != nil {
+		t.Fatalf("同一次提交里绑定刚下发的 QoS 策略应成功，得到 %v", err)
+	}
+	if !f2.has("police") {
+		t.Fatalf("应下发限速 policer；实际：\n%s", f2.joined())
+	}
+
+	// 真正未下发的名字仍要如实报错（不能因为"登记表里可能有"就放过）。
+	if err := p.ApplyVRF(ctx, model.Vrf{
+		Name:         "vs-l3b",
+		L3Interfaces: []model.L3Interface{{Interface: "ens240", AclIn: "acl-nope"}},
+	}); err == nil {
+		t.Fatalf("绑定未下发的 ACL 应报错")
+	}
+}
+
+// 删 L2 交换机必须一并回收它自己创建的网关 VRF，否则内核里长期留一张空 VRF
+// （真机走查实测的残留：删了 vs-lan，`vr-vs-lan` 还在）。
+func TestDeleteBridgeDomainReclaimsGatewayVRF(t *testing.T) {
+	f := &fakeRunner{}
+	p := New(f)
+	if err := p.DeleteBridgeDomain(context.Background(), "vs-lan"); err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("ip link del vs-lan") || !f.has("ip link del vr-vs-lan") {
+		t.Fatalf("应同时删除 bridge 与其派生的网关 VRF；实际：\n%s", f.joined())
 	}
 }

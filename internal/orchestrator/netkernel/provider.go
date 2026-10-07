@@ -2,8 +2,11 @@ package netkernel
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
@@ -101,6 +104,57 @@ func (p *Provider) ipIdem(ctx context.Context, args ...string) error {
 //
 // 用于「声明要求对象存在」的下发路径（置 MTU、enslave 成员口、加地址、下发路由）——
 // 这里容错会把「口名写错/口不存在」变成静默成功，正是本仓库反复强调要避免的假成功。
+// ensureLinkUp 把设备置 up 并**回读确认**——写成功 ≠ 已生效。
+//
+// 真机教训（干净快照走查实测）：`ip link set dev <口> up` 可能返回 0 却**不生效**，因为宿主侧
+// 有策略在把它压回去（该现场是 netplan 的 `activation-mode: off` → systemd-networkd
+// `ActivationPolicy=always-down`）。此时若按"命令成功"继续，后面下发路由会报
+// `Nexthop has invalid gateway`——**根因被埋在下游**，操作者从错误里看不出是链路没起来。
+// 故这里回读确认、有限重试，仍不生效就**如实报出**并给出可照做的原因。
+func (p *Provider) ensureLinkUp(ctx context.Context, dev string) error {
+	const attempts = 3
+	for i := 0; i < attempts; i++ {
+		if err := p.ipReq(ctx, "link", "set", "dev", dev, "up"); err != nil {
+			return err
+		}
+		up, err := p.linkAdminUp(ctx, dev)
+		if err != nil {
+			return nil // 读不回来就不阻塞（读视图另有如实呈现），不把"读不到"当"没起来"
+		}
+		if up {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("接口 %s 置 up 未生效（重试 %d 次后内核仍为 down）；"+
+		"常见原因：宿主侧链路策略把它压回 down（如 systemd-networkd 的 ActivationPolicy=always-down、"+
+		"netplan 的 activation-mode: off）或虚拟网卡未连接——请先解除该策略再提交", dev, attempts)
+}
+
+// linkAdminUp 设备的管理态是否已 up（IFF_UP）。读不到返回错误（与"确认为 down"区分开）。
+func (p *Provider) linkAdminUp(ctx context.Context, dev string) (bool, error) {
+	out, err := p.ip(ctx, "-j", "link", "show", "dev", dev)
+	if err != nil {
+		return false, err
+	}
+	var rows []struct {
+		Flags []string `json:"flags"`
+	}
+	if json.Unmarshal([]byte(out), &rows) != nil || len(rows) == 0 {
+		return false, fmt.Errorf("解析 %s 的链路状态失败", dev)
+	}
+	for _, f := range rows[0].Flags {
+		if strings.EqualFold(f, "UP") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (p *Provider) ipReq(ctx context.Context, args ...string) error {
 	out, err := p.ip(ctx, args...)
 	if err == nil {
@@ -139,14 +193,13 @@ func (p *Provider) ApplyInterface(ctx context.Context, iface model.InterfaceConf
 			return err
 		}
 	}
-	if iface.Enabled != nil {
-		state := "up"
-		if !*iface.Enabled {
-			state = "down"
-		}
-		if err := p.ipReq(ctx, "link", "set", "dev", iface.Name, state); err != nil {
+	// 与 VPP 侧同口径：Enabled 缺省视为启用（数据口必须显式 up 才转发）。
+	if iface.Enabled == nil || *iface.Enabled {
+		if err := p.ensureLinkUp(ctx, iface.Name); err != nil {
 			return err
 		}
+	} else if err := p.ipReq(ctx, "link", "set", "dev", iface.Name, "down"); err != nil {
+		return err
 	}
 	// 声明式 VF 数量：与数据面无关的 sysfs 能力，两种数据面共用同一实现。
 	if iface.Sriov != nil {
@@ -248,22 +301,54 @@ func unsupported(feature string) error {
 	return fmt.Errorf("%w：%s", ErrUnsupported, feature)
 }
 
-// ApplyLLDP LLDP 邻居：内核侧需 lldpd 守护进程对接，属独立立项，本期如实报不支持。
-func (p *Provider) ApplyLLDP(context.Context, *model.LldpConfig) error {
+// ---------- 未实现族：只在**确有声明**时报不支持 ----------
+//
+// 关键口径（真机走查抓到）：提交编排把这些族当作 bridge-domain/VRF 的**伴随操作**调用——
+// 每台 L2 交换机都会走一次 `ApplyDhcpRelay`/`ApplyDHCPServer`，DNS 代理则按全局+按域上游
+// 汇总后调用。**未声明时必须是空操作**，否则任何一次普通提交都会被"未实现"挡住（现场：
+// 只建了一台 L2 交换机，提交却报 `dhcp-relay[vs-lan] 不受支持`）。
+// 提交期校验已拒绝在内核数据面下**声明**这些族，故下面这些分支是纵深防御。
+
+// ApplyLLDP LLDP 邻居：内核侧需 lldpd 守护进程对接，属独立立项；未声明即空操作。
+func (p *Provider) ApplyLLDP(_ context.Context, lldp *model.LldpConfig) error {
+	if lldp == nil {
+		return nil
+	}
 	return unsupported("LLDP（内核数据面尚未实现，请改用 VPP 数据面）")
 }
 
-// ApplyDhcpRelay 交换机 DHCP 中继：内核侧对应 dhcrelay，属独立立项，本期如实报不支持。
-func (p *Provider) ApplyDhcpRelay(context.Context, model.VirtualSwitch) error {
+// ApplyDhcpRelay 交换机 DHCP 中继：内核侧对应 dhcrelay，属独立立项；未声明即空操作。
+func (p *Provider) ApplyDhcpRelay(_ context.Context, vs model.VirtualSwitch) error {
+	if vs.DhcpRelayServer == "" {
+		return nil
+	}
 	return unsupported("DHCP 中继（内核数据面尚未实现，请改用 VPP 数据面）")
 }
 
-// ApplyDHCPServer 域内 DHCP 服务器：内核侧对应 dnsmasq/kea，属独立立项，本期如实报不支持。
-func (p *Provider) ApplyDHCPServer(context.Context, model.VirtualSwitch) error {
+// ApplyDHCPServer 域内 DHCP 服务器：内核侧对应 dnsmasq/kea，属独立立项；未声明即空操作。
+func (p *Provider) ApplyDHCPServer(_ context.Context, vs model.VirtualSwitch) error {
+	if vs.DhcpServerPoolStart == "" && vs.DhcpServerPoolEnd == "" {
+		return nil
+	}
 	return unsupported("DHCP 服务器（内核数据面尚未实现，请改用 VPP 数据面）")
 }
 
-// ApplyDNSProxy 数据面 DNS 代理：内核侧对应 dnsmasq，属独立立项，本期如实报不支持。
-func (p *Provider) ApplyDNSProxy(context.Context, orchestrator.DNSProxyUpstreams) error {
+// ApplyDNSProxy 数据面 DNS 代理：内核侧对应 dnsmasq，属独立立项；无任何上游即空操作。
+//
+// 启用判据与 VPP 侧**逐字同源**（network.DNSProxyProvider.Sync）：先丢掉空的按域条目
+// （每台交换机都会带一条、未配时是空列表），再判「全局或任一域非空」。
+func (p *Provider) ApplyDNSProxy(_ context.Context, want orchestrator.DNSProxyUpstreams) error {
+	enabled := len(want.Global) > 0
+	if !enabled {
+		for _, ups := range want.PerSwitch {
+			if len(ups) > 0 {
+				enabled = true
+				break
+			}
+		}
+	}
+	if !enabled {
+		return nil
+	}
 	return unsupported("数据面 DNS 代理（内核数据面尚未实现，请改用 VPP 数据面）")
 }

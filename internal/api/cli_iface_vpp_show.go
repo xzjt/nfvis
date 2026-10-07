@@ -192,7 +192,7 @@ func (x *cliExecutor) showVppOverview() string {
 			fmt.Fprintf(&b, "  %-10s used=%.0f available=%.0f cached=%.0f\n", pl.Name, pl.Used, pl.Available, pl.Cached)
 		}
 	} else {
-		fmt.Fprintf(&b, "buffers: 运行态不可用（%s）\n", bufUnavailableReason(buf))
+		fmt.Fprintf(&b, "buffers: 运行态不可用（%s）\n", bufUnavailableReason(buf, x.dpMode()))
 	}
 	if hasMem {
 		fmt.Fprintf(&b, "memory: total=%d used=%d free=%d\n", mem.Total, mem.Used, mem.Free)
@@ -212,6 +212,11 @@ func writeVppConnLines(b *strings.Builder, vpp VppController, eng *config.Engine
 		return
 	}
 	st := vpp.Status(cfg.Vpp)
+	// 当前生效的数据面实现（v3 决策 #404）：内核数据面下这组读数整体不适用，先如实点明数据面，
+	// 避免操作者把 `connected: no` 读成「VPP 该起来却没起来」。
+	if st.Mode != "" {
+		fmt.Fprintf(b, "dataplane: %s\n", st.Mode)
+	}
 	version := st.Version
 	if version == "" {
 		version = "(未知)"
@@ -629,7 +634,7 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 				fmt.Fprintf(&b, "  %-10s used=%.0f available=%.0f cached=%.0f\n", pl.Name, pl.Used, pl.Available, pl.Cached)
 			}
 		} else {
-			fmt.Fprintf(&b, "buffers: 运行态不可用（%s）\n", bufUnavailableReason(buf))
+			fmt.Fprintf(&b, "buffers: 运行态不可用（%s）\n", bufUnavailableReason(buf, x.dpMode()))
 		}
 		if hasMem {
 			fmt.Fprintf(&b, "memory: total=%d used=%d free=%d\n", mem.Total, mem.Used, mem.Free)
@@ -640,7 +645,7 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 	case "buffers":
 		buf, ok := x.state.Buffers(ctx)
 		if !ok {
-			return fmt.Sprintf("%% buffer 池运行态不可用：%s\n", bufUnavailableReason(buf))
+			return fmt.Sprintf("%% buffer 池运行态不可用：%s\n", bufUnavailableReason(buf, x.dpMode()))
 		}
 		x.structured = anyToTree(buf)
 		var b strings.Builder
@@ -687,7 +692,7 @@ func (x *cliExecutor) execShowVppRuntime(ctx context.Context, rest []string) str
 
 	rs, ok := x.state.RuntimeStats(ctx)
 	if !ok {
-		return fmt.Sprintf("%% VPP runtime 运行态不可用：%s\n", runtimeUnavailableReason(rs))
+		return fmt.Sprintf("%% VPP runtime 运行态不可用：%s\n", runtimeUnavailableReason(rs, x.dpMode()))
 	}
 	// 线程名/绑核能从 show_threads 拿到就带上（best-effort：取不到不影响本命令）
 	meta := map[uint32]state.Thread{}
@@ -728,7 +733,10 @@ func (x *cliExecutor) execShowVppRuntime(ctx context.Context, rest []string) str
 }
 
 // runtimeUnavailableReason 取不可用原因（与 bufUnavailableReason 同口径：不静默省略）。
-func runtimeUnavailableReason(rs state.RuntimeStats) string {
+func runtimeUnavailableReason(rs state.RuntimeStats, mode string) string {
+	if mode == model.DataPlaneKernel {
+		return "当前数据面为 Linux 内核网络，无 VPP 运行态读数"
+	}
 	if rs.Reason != "" {
 		return rs.Reason
 	}
@@ -851,9 +859,25 @@ func invalidShowLldp(rest string) string {
 
 // bufUnavailableReason buffer 池统计不可用的原因（决策 #68：不静默省略，
 // 无具体原因时给通用说明）。
-func bufUnavailableReason(buf state.Buffers) string {
+func bufUnavailableReason(buf state.Buffers, mode string) string {
+	// 内核数据面下本就没有 VPP 运行态可读：如实说清，别报成"解码失败"把人引向 VPP 排查。
+	if mode == model.DataPlaneKernel {
+		return "当前数据面为 Linux 内核网络，无 VPP 运行态读数"
+	}
 	if buf.Reason != "" {
 		return buf.Reason
 	}
 	return "statsclient 解码失败或 stats segment 未启用"
+}
+
+// dpMode 当前生效的数据面实现（读 committed 配置；读不到按 vpp，与装配口径一致）。
+func (x *cliExecutor) dpMode() string {
+	if x.engine == nil {
+		return model.DataPlaneVPP
+	}
+	cfg, err := x.engine.Committed()
+	if err != nil {
+		return model.DataPlaneVPP
+	}
+	return cfg.DataPlaneMode()
 }

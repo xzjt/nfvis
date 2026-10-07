@@ -1,0 +1,207 @@
+NFViS v3 round1：干净快照上的数据面可切换（VPP / Linux 内核网络）端到端验证
+================================================================================
+日期：2026-10-07
+分支：v3（提交 8061cb7 + 本轮修复）
+环境：nfvis-vm（**已恢复为「干净」快照**）——Ubuntu 26.04.1 LTS / 内核 7.0.0-34-generic / 6 核 / 7 GB
+      干净快照基线：无 go/make/sshpass/qemu-img/virsh/docker/vppctl；有 git/dpkg-deb/curl/python3；
+      VPP 26.06 的 9 个 deb 在 /root/vpp-v26.06-deb/；apt 源为 USTC（实测可用）；
+      代理 http://192.168.155.1:2333 可用（Go 模块拉取与 apt 均走它）。
+证据采集方式：每一步都有**独立事实源**（内核 `ip`/`bridge`/`nft`/`tc`、`dpkg`、`systemctl`、`vppctl`），
+              不复用被测代码自己的读视图。
+
+--------------------------------------------------------------------------------
+§1 环境重建（干净快照 → 可验证）
+--------------------------------------------------------------------------------
+1.1 快照状态核对（独立事实源）
+    $ for c in go make git dpkg-deb curl sshpass qemu-img virsh docker ip nft tc bridge vppctl; do
+        printf "%-10s %s\n" "$c" "$(command -v $c || echo MISSING)"; done
+    → go/make/sshpass/qemu-img/virsh/docker/vppctl 均 MISSING；ip/nft/tc/bridge/git/dpkg-deb/curl 在位。
+    $ ls /root/vpp-v26.06-deb/*.deb | wc -l   → 9
+    $ dpkg-query -W nfvis                     → no packages found（未安装）
+    $ curl -sI https://mirrors.ustc.edu.cn/ubuntu/ -o /dev/null -w '%{http_code}'  → 200
+    $ curl -s -x http://192.168.155.1:2333 -o /dev/null -w '%{http_code}' https://proxy.golang.org/ → 200
+
+1.2 工具链重建
+    $ apt-get install -y make golang-go sshpass
+    → go1.26.0 linux/amd64 / GNU Make 4.4.1 / sshpass 1.10
+
+1.3 运行时底座（安装器自检需要 libvirtd/docker）
+    $ apt-get install -y libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils \
+        cloud-image-utils genisoimage docker.io chrony tcpdump curl ca-certificates
+    → libvirtd active / docker active
+
+--------------------------------------------------------------------------------
+§2 内核数据面：9 条真机集成用例（全部用真 ip/bridge/nft/tc，断言只读内核事实）
+--------------------------------------------------------------------------------
+    $ cd /root/src && go test -tags integration -count=1 -run "TestKernel" -v ./internal/orchestrator/netkernel/
+    --- PASS: TestKernelACLRealKernel (4.53s)
+    --- PASS: TestKernelDataPlaneRealKernel (1.06s)
+    --- PASS: TestKernelDataPlaneRealNAT (0.23s)
+    --- PASS: TestKernelQoSBindIndependenceAndUnbind (0.36s)
+    --- PASS: TestKernelSpanMirrorAndDelete (0.64s)
+    --- PASS: TestKernelQoSPoliceDropsTraffic (5.50s)     ← 限速行为实证
+    --- PASS: TestKernelStormRealKernel (0.39s)
+    --- PASS: TestKernelPortSecRealKernel (0.58s)
+    --- PASS: TestKernelDataPlaneBindingsRealKernel (1.38s) ← 声明 → Provider → 内核全链
+    ok  github.com/xzjt/nfvis/internal/orchestrator/netkernel  14.673s
+
+    对照上轮（内核 7.0.0-38）：同一套用例在同一份代码上全绿 ⇒ 结论不依赖单一内核构建。
+
+--------------------------------------------------------------------------------
+§3 安装：--dataplane kernel（干净快照，首次引导）
+--------------------------------------------------------------------------------
+3.1 构建与载荷
+    $ cd /root/src && make deb VERSION=3.0.0-dev8 SOURCE_DATE_EPOCH=1791377100
+    $ /root/payload = { install.sh, VERSION, SHA256SUMS, debs/{nfvis_3.0.0-dev8_amd64.deb, 9 个 VPP deb},
+                        debs/Packages }   （28 MB / 10 个 deb）
+
+3.2 安装（首次引导）
+    $ ./install.sh --payload /root/payload -y --dataplane kernel --admin-password '<pw>'
+    · 载荷完整性：SHA256SUMS 逐文件一致
+    · 本地源索引：10 个候选包
+    · 计划：0 upgraded, 6 newly installed
+    [通过] apt 安装完成（6 个包完成配置）／dpkg 审计：无半装/未配置项
+    · VPP 已安装并设为开机不自启（本次数据面为 kernel，未启动；切回 vpp 时由 nfvis 拉起）
+    · 已写入数据面配置：system.dataplane = kernel；重启服务使其生效
+    [通过] 内核数据面已生效（服务重启后控制面恢复）
+    自检：**通过 17 / 失败 0 / 不可判定 2**
+
+    ⚠️ **决策 #406 的验收点**：本次数据面是 kernel，而 VPP **照样被装上**——自检里
+    `[通过] VPP 已安装（版本 26.06-release），可随时切回 vpp 数据面` 即该口径的独立事实源。
+
+3.3 独立事实源核对
+    $ dpkg-query -W -f='${Status}|${Version}' vpp     → install ok installed|26.06-release
+    $ systemctl is-enabled vpp / is-active vpp        → disabled / inactive（按设计）
+    $ systemctl is-active nfvis                       → active
+    $ nfvis-cli … -c 'show configuration | display set' | grep dataplane
+                                                      → set system dataplane kernel
+
+--------------------------------------------------------------------------------
+§4 内核数据面：经**产品**下发（不是直接调 Provider）
+--------------------------------------------------------------------------------
+4.1 配置（CLI 脚本，一次提交）
+    configure
+    set system management interface ens160
+    set interfaces ens192 description l2-port
+    set interfaces ens224 description l3-port
+    set virtual-switches vs-lan type l2
+    set virtual-switches vs-lan vlan access 100
+    set virtual-switches vs-lan gateway ip 192.168.99.1/24
+    set virtual-switches vs-lan ports 1 interface ens192
+    set virtual-switches vs-l3 type l3
+    set virtual-switches vs-l3 l3-interface ens224 ip address 10.99.0.1/24
+    set virtual-switches vs-l3 static-routes 10.99.99.0/24 next-hop 10.99.0.2
+    set acls acl-test rule 10 source any destination any protocol icmp action deny
+    set acls acl-test rule 20 source any destination any action permit
+    set virtual-switches vs-l3 l3-interface ens224 acl-in acl-test
+    commit / exit
+    → commit 成功 (revision 4)
+
+4.2 内核事实（逐条独立核对）
+    $ ip -o link show vs-lan                  → <BROADCAST,MULTICAST,UP,LOWER_UP>，master vr-vs-lan
+    $ bridge vlan show dev ens192             → ens192  100 PVID Egress Untagged
+    $ ip -o -4 addr show dev vs-lan           → 192.168.99.1/24
+    $ ip -o link show vr-vs-lan               → <NOARP,MASTER,UP,LOWER_UP>
+    $ ip -d link show vs-l3                   → vrf table 625570517
+    $ ip -o -4 addr show dev ens224           → 10.99.0.1/24
+    $ ip route show table all | grep 10.99.99 → 10.99.99.0/24 via 10.99.0.2 dev ens224 table 625570517
+    $ nft list table netdev nfvis-acl
+        chain acl_acl_test_d18a { ip protocol icmp drop; accept; drop }
+        chain bind_ens224 { type filter hook ingress device "ens224" priority filter; policy accept;
+                            meta protocol != { ip, ip6 } accept
+                            jump acl_acl_test_d18a comment "acl-test" }
+    ⇒ L2 交换机=内核 bridge（含 VLAN 与网关 VRF）、L3 交换机=内核 VRF、静态路由进 VRF 表、
+      ACL=nftables（隐式拒绝 + 非 IP 放行）**全部落到位**。
+
+4.3 读视图与内核一致
+    $ show virtual-switches        → vs-lan / Learn up / Flood up / Ports 1
+    $ show vrfs vs-l3 routes       → 10.99.99.0/24  10.99.0.2
+    $ show vpp                     → dataplane: kernel / connected: no /
+                                     last_error: 当前数据面为 Linux 内核网络，未使用 VPP；…
+
+4.4 删除回收（独立核对）
+    $ delete virtual-switches vs-t（含 gateway ip）→ 建后 vr-vs-t 与 vs-t 均在；删后**两者均已回收**
+
+--------------------------------------------------------------------------------
+§5 切回 vpp：只改配置 + 重启，**不重新安装**（决策 #406 的正面验收）
+--------------------------------------------------------------------------------
+5.1 操作
+    configure / set system dataplane vpp / commit / exit
+    → commit 成功 (revision 9)
+    → 警告: 数据面实现已改为 vpp，需重启服务（systemctl restart nfvis）后生效；重启前数据面仍按原实现运行
+    $ systemctl restart nfvis.service
+
+5.2 独立事实源
+    $ systemctl is-active vpp        → active     （由 nfvisd 按 #348 拉起，无需人工 systemctl start）
+    $ systemctl is-enabled vpp       → disabled   （开机自启仍关闭，交由 nfvis 管理）
+    $ systemctl is-active nfvis      → active
+    $ vppctl show version            → vpp v26.06-release built by root on 4bf4caa1c4e5 at 2026-06-24T09:27:07
+    $ show vpp                       → version: 26.06-release / connected: yes / pending_restart: no /
+                                       threads: 1 / buffers: pools=1 source=vpp_get_stats
+    ⇒ **VPP 数据面在没有任何二次安装的前提下恢复可用**。
+
+--------------------------------------------------------------------------------
+§6 本轮真机验证抓出并修掉的缺陷（11 条，全部有真机证据）
+--------------------------------------------------------------------------------
+编号  现象/根因（真机现场）                                       修复
+----  -------------------------------------------------------  --------------------------------------------
+V3-1  安装器 `apply_dataplane` 用 `;` 分隔语句 → `无效命令`，     改用 `-f <临时脚本>`（CLI 脚本模式按
+      数据面配置**根本没写进库**（首装时静默）                    **换行**切句，见 cliparse.SplitStatements）
+V3-2  自检在「读不到 committed 配置」（升级/重装未给口令）时      无口令/无 CLI ⇒ `skip`（不可判定）
+      报**失败**，把「读不到」误报成「配错了」
+V3-3  `show vpp` 缺 `dataplane:` 行（内核数据面下看不出在用哪套） 补上（并让 vpp 侧也恒报 Mode，两侧对称）
+V3-4  内核数据面下 buffers/memory 报「statsclient 解码失败或       改为「当前数据面为 Linux 内核网络，
+      stats segment 未启用」——把操作者引向 VPP 排查              无 VPP 运行态读数」
+V3-5  未实现族（DHCP 中继/服务器、DNS 代理、LLDP）在**未声明**时  只在确有声明时报不支持；未声明即空操作
+      也报不支持——而提交编排把它们当 bridge-domain 的伴随操作
+      调用 ⇒ **任何一次普通提交都被挡住**
+V3-6  同一次提交里「建 ACL → 绑到三层接口」报「绑定了未下发的     ACL 规则体改从**本次已下发的登记**解析
+      ACL」——绑定从 `p.config()`（上一次收敛的快照）解析         （与 QoS 策略同法），快照仅作回落
+V3-7  `ip link set dev <口> up` 返回 0 却**不生效**（宿主 netplan  置 up 后**回读确认** + 有限重试；
+      `activation-mode: off` → networkd `ActivationPolicy=         仍不生效则**如实报出**并点名常见原因
+      always-down` 把它压回去）⇒ 后续路由报 `Nexthop has         （不再让根因埋在下游）
+      invalid gateway`，根因被埋在下游
+V3-8  端口安全把**VRF 从属口**当成 bridge 成员（判据只看           判据改 `linkinfo.info_slave_kind == "bridge"`
+      `master != ""`）⇒ `bridge link set … learning on` 报
+      `Operation not supported`，把整个提交打挂
+V3-9  `show virtual-switches` 的 Learn/Flood 两列在内核数据面下    内核 bridge 默认学习并洪泛 ⇒ 如实填 true
+      显示 **down**（VPP 概念取零值）——看起来像交换机坏了          （并注明端口安全关的是单端口学习）
+V3-10 路由读视图的「Distance 未下发：VPP 路由 API 不接收该参数」   该注记只在 VPP 数据面下打印
+      在内核数据面下**是错的**（内核侧 distance = ip route metric，
+      真的下发了）
+V3-11 `delete virtual-switches` 回收了 bridge，却把它创建的网关     删除时一并回收**派生的** `vr-<交换机名>`
+      VRF `vr-vs-lan` **留成残留**（真机实测残留）                （显式声明的 gateway vrf 不动）
+
+--------------------------------------------------------------------------------
+§7 环境发现（不是产品缺陷，但会挡住内核数据面）
+--------------------------------------------------------------------------------
+干净快照的 netplan 配置把两张业务网卡设为**永久 down**：
+    /etc/netplan/00-installer-config.yaml
+        ens192: { dhcp4: false, dhcp6: false, activation-mode: off }
+        ens224: { dhcp4: false, dhcp6: false, activation-mode: off }
+    ⇒ /run/systemd/network/10-netplan-ens224.network: [Link] ActivationPolicy=always-down
+    ⇒ journal: `systemd-networkd: ens224: Activation policy is "always-down", forcing link down.`
+后果：内核数据面要把声明口置 up 时会被 networkd 立即压回 down（`ip link set up` 返回 0 但无效）。
+处置（本轮验证用的环境改动，已留备份与自动回滚安全网）：
+    activation-mode: off → manual（netplan 只接受 manual|off），`netplan apply`；
+    改后 ens192/ens224 均 UP,LOWER_UP，管理口 ens160 地址/默认路由不变。
+说明：VPP 数据面下这两张口交 DPDK（内核里已无 netdev），networkd 的策略自然失效，故此前各轮未暴露。
+      内核数据面下口留在内核，该策略就会与产品冲突——**产品侧已按 V3-7 如实报出根因**，
+      环境侧需放开（或改用 `Unmanaged=yes`）。
+
+--------------------------------------------------------------------------------
+§8 结果与边界
+--------------------------------------------------------------------------------
+通过：
+  · 干净快照从零重建 → 内核数据面 9 条真机集成用例全绿（另一内核构建上复现同样结论）
+  · `--dataplane kernel` 整机安装：**通过 17 / 失败 0 / 不可判定 2**；VPP 按 #406 照样装上
+  · 内核数据面经**产品**下发：bridge/VLAN/网关 VRF/VRF/静态路由/ACL 全部落到位（独立事实源逐条核对）
+  · 切回 vpp：**一次提交 + 一次重启，无二次安装** → VPP 拉起、connected: yes、版本 26.06-release
+
+未验证（如实登记）：
+  · VM 侧 virtio + vhost-net 接入的连通性（域定义已按 `<interface type='bridge'>` + `<driver name='vhost'/>`
+    生成，但本轮未真起一台 VM）
+  · 未实现族的真机逐族提交期拒绝（仅单测覆盖；本轮只实测了「未声明时不再误挡提交」）
+  · `.run` 自解压包的**完整闭环**：本轮用的是等价载荷目录（install.sh + debs + Packages + SHA256SUMS，
+    与 .run 解包后的结构一致），未跑 `build-offline-run.sh` 的打包与自解压路径
+  · 内核数据面的**真实转发**（域内 ping 通、NAT 出网）——需要第二台机器或宿主侧配合，本轮未做

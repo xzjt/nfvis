@@ -185,8 +185,16 @@ apply_dataplane() {
         info "没有可用口令，跳过数据面配置写入（可稍后登录 CLI 执行 set system dataplane kernel）"
         return 0
     fi
-    local out
-    out=$("$(command -v nfvis-cli)" -server https://127.0.0.1 -u admin -p "$pw" -source console         -c 'configure; set system dataplane kernel; commit; exit' 2>&1 | grep -v '^连接' || true)
+    # CLI 的脚本模式按**换行**切句（分号会被当成一条命令 → `无效命令`），故写成多行脚本文件
+    # 交给 `-f`（`-f <文件>` 不占用 stdin，口令仍走 -p）。
+    local script out
+    script=$(mktemp /var/tmp/nfvis-dataplane.XXXXXX.cli) || {
+        info "无法创建脚本文件，跳过数据面配置写入（可稍后登录 CLI 执行 set system dataplane kernel）"
+        return 0
+    }
+    printf '%s\n' configure 'set system dataplane kernel' commit exit > "$script"
+    out=$("$(command -v nfvis-cli)" -server https://127.0.0.1 -u admin -p "$pw" -source console         -f "$script" 2>&1 | grep -v '^连接' || true)
+    rm -f "$script"
     if cli_is_err "$out"; then
         info "写入数据面配置未成功（见下方输出）；可稍后登录 CLI 执行 set system dataplane kernel"
         printf '%s
@@ -332,9 +340,16 @@ run_checks() {
         else
             bad "内核网络工具缺失（ip 或 nft 不在 PATH；内核数据面需要 iproute2 与 nftables）"
         fi
-        if have nfvis-cli; then
-            local dpout
-            dpout=$("$(command -v nfvis-cli)" -server https://127.0.0.1 -u admin -p "$CLI_PW" -source console                 -c 'show configuration | display set' 2>/dev/null | grep '^set system dataplane' || true)
+        # 读 committed 配置需要口令：没有口令时**不可判定**，不能报失败——升级/重装（配置库已存在、
+        # 未给 --admin-password）正是这种情形，报失败会把「读不到」误报成「配错了」。
+        local dpout pw
+        pw="${ADMIN_PW:-$CLI_PW}"
+        if ! have nfvis-cli; then
+            skip "committed 配置的数据面核对（未找到 nfvis-cli）"
+        elif [ -z "$pw" ]; then
+            skip "committed 配置的数据面核对（本机未提供口令，读不到 committed 配置）"
+        else
+            dpout=$("$(command -v nfvis-cli)" -server https://127.0.0.1 -u admin -p "$pw" -source console                 -c 'show configuration | display set' 2>/dev/null | grep '^set system dataplane' || true)
             if [ "$dpout" = "set system dataplane kernel" ]; then
                 ok "committed 配置的数据面为 kernel（CLI 独立事实源）"
             else

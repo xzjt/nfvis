@@ -29,7 +29,7 @@ func (p *Provider) ApplyVxlan(ctx context.Context, t model.VxlanTunnel, prev *mo
 		"local", t.Local, "remote", t.Remote, "dstport", fmt.Sprint(port)); err != nil {
 		return err
 	}
-	if err := p.ipReq(ctx, "link", "set", "dev", dev, "up"); err != nil {
+	if err := p.ensureLinkUp(ctx, dev); err != nil {
 		return err
 	}
 	if t.VirtualSwitch != "" {

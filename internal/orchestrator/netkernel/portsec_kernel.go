@@ -58,7 +58,8 @@ func (m *portSecManager) Apply(ctx context.Context, dev string, macs []model.Por
 	if member, err := m.isBridgeMember(ctx, dev); err != nil {
 		return err
 	} else if !member {
-		return fmt.Errorf("接口 %s 不是二层交换机成员口，端口安全需要它先挂到交换机上", dev)
+		return fmt.Errorf("接口 %s 不是二层交换机（bridge）的成员口，端口安全需要它先挂到交换机上"+
+			"（当前可能是三层接口的 VRF 从属口）", dev)
 	}
 	if err := bridgeReq(ctx, m.run, "link", "set", "dev", dev, "learning", "off"); err != nil {
 		return err
@@ -97,8 +98,12 @@ func (m *portSecManager) Teardown(ctx context.Context, dev string) error {
 	return bridgeBest(ctx, m.run, "link", "set", "dev", dev, "learning", "on")
 }
 
-// isBridgeMember 该设备当前是否挂在某个 bridge 下（`ip -j -d link show` 的 master 字段）。
-// 设备不存在 ⇒ (false, nil)（"不是成员"）；读取失败 ⇒ 如实报错。
+// isBridgeMember 该设备当前是否是**bridge** 的成员口。
+//
+// 判据取 `linkinfo.info_slave_kind == "bridge"`，**不能**只看 `master != ""`：三层接口会
+// 被 enslave 到 **VRF**（master 也非空），而 `bridge link set` 对 VRF 从属口报
+// `RTNETLINK answers: Operation not supported`——真机走查实测过：给一个 L3 接口做端口安全
+// 撤除时，把整个提交打挂。设备不存在 ⇒ (false, nil)；读取失败 ⇒ 如实报错。
 func (m *portSecManager) isBridgeMember(ctx context.Context, dev string) (bool, error) {
 	out, err := m.run.Run(ctx, "ip", "-j", "-d", "link", "show", "dev", dev)
 	if err != nil {
@@ -108,12 +113,15 @@ func (m *portSecManager) isBridgeMember(ctx context.Context, dev string) (bool, 
 		return false, fmt.Errorf("ip -j -d link show dev %s: %w（%s）", dev, err, trimOut(out))
 	}
 	var rows []struct {
-		Master string `json:"master"`
+		LinkInfo *struct {
+			SlaveKind string `json:"info_slave_kind"`
+		} `json:"linkinfo"`
 	}
 	if json.Unmarshal([]byte(out), &rows) != nil {
 		return false, fmt.Errorf("解析 ip -j -d link show 输出失败：%s", trimOut(out))
 	}
-	return len(rows) > 0 && rows[0].Master != "", nil
+	return len(rows) > 0 && rows[0].LinkInfo != nil &&
+		strings.EqualFold(rows[0].LinkInfo.SlaveKind, "bridge"), nil
 }
 
 // Dataplane 读该接口端口安全的内核实况：白名单规则是否在场、桥口学习是否已关闭。

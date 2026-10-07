@@ -269,7 +269,11 @@ func (x *cliExecutor) showVrfRoutes(name string) string {
 		items = append(items, anyToTree(r))
 		fmt.Fprintf(&b, "%-20s %-20s %s\n", r.Prefix, r.NextHop, routeDistanceText(r.Distance))
 	}
-	b.WriteString("（Distance 未下发：VPP 路由 API 不接收该参数，v1 不显示具体值）\n")
+	// 这条注记只对 VPP 数据面成立（VPP 的路由 API 不接收 distance）。内核数据面下 distance
+	// 就是 `ip route` 的 metric，**真的下发了**，再挂这条注记就是错的（真机走查实测）。
+	if x.dpMode() != model.DataPlaneKernel {
+		b.WriteString("（Distance 未下发：VPP 路由 API 不接收该参数，v1 不显示具体值）\n")
+	}
 	x.structured = map[string]any{"routes": items}
 	return b.String()
 }
