@@ -1,0 +1,191 @@
+NFViS v2.0.0 干净快照「从零安装 + 拟人化全功能走查」记录
+==========================================================
+日期：2026-10-07
+环境：nfvis-vm（192.168.155.129，VMware 虚机，SSH 密钥免密）—— **已恢复为「干净」快照**
+      宿主侧代理：http://192.168.155.1:2333（下载与 docker pull 用）
+产品：nfvis-v2.0.0.run（GitHub Release v2.0.0 资产）
+      期望 sha256 a9f73b73f29156423f683941a884ab2373840f423d1c4d2ecc11919efd150034
+
+------------------------------------------------------------------
+§1 干净快照基线（安装前实测）
+------------------------------------------------------------------
+- 无 nfvis 包、无 /root/src、VPP 未安装（/root/vpp-v26.06-deb/ 只有 9 个 26.06 deb）。
+- 内核 cmdline 为发行版默认（**无** hugepages/isolcpus/IOMMU 参数）；无大页池。
+- 工具：git/dpkg-deb/curl/jq/nft 有；make/go/sshpass/socat/qemu-img/cloud-localds/virsh/docker 均无。
+- 网口：ens160（管理，192.168.155.129/24）、ens192（DOWN）、ens224（DOWN）。
+- 磁盘：/ 96G，可用 85G。
+
+§1.1 下载安装包（经代理，VM 侧直连）
+  curl -sSL -x http://192.168.155.1:2333 -o /root/nfvis-v2.0.0.run \
+    https://github.com/xzjt/nfvis/releases/download/v2.0.0/nfvis-v2.0.0.run
+  → 179,193,784 字节；sha256 与 Release 资产**逐字一致**（a9f73b73…）。
+
+------------------------------------------------------------------
+§2 一键安装（sh nfvis-v2.0.0.run -y）
+------------------------------------------------------------------
+- 载荷：238 个候选包；计划 4 upgraded / 57 newly installed；62 个包完成配置；dpkg 审计无未收敛项。
+- 自检 **18/18 通过、0 失败、0 不可判定**；退出码 0。
+  · nfvis 2.0.0 已装、四服务（nfvis/vpp/libvirtd/docker）active、VPP 26.06 运行、控制台 200、
+    AppArmor 放行、内核基线片段已写（/etc/default/grub.d/99-nfvis.cfg）。
+  · 首次引导一次性口令（仅此一处）：0Cgwf_NSEHldALLa@Aa1
+  · 自检已指出：1G 池 0 页 / 2M 池 1024 页；大页参数需重启生效。
+
+------------------------------------------------------------------
+§3 首次引导向导（wizard，真 pty）
+------------------------------------------------------------------
+- 安装器已提示先重启使内核基线生效；重启后 `show system kernel` 三方一致。
+- wizard 于真 pty 下运行（ssh -tt；脚本模式按设计给指引不挂起）。问答与默认值：
+  隔离核 2-5 / VPP 主核 5 / 工作核 4 / 1G 池 1 / 2M 池 768 / 低延迟 false → commit（rev 3）
+  → `request system kernel apply`（写 GRUB 片段）→ 重启生效。
+- **向导正确给出警示**：`⚠ 1G 池仅 1 页：数据面占 1，无法再起 VNF（若 VNF 建议 ≥2）`
+  （本机 7GB RAM，默认 min(RAM/4,8)=1）。按提示将 1G 提到 3（1 给数据面 + 2 给 VNF）后重启，
+  `show system hugepages` 显示 1G 3/在用 1/空闲 2。
+- 重跑 wizard 幂等（相同值显示「跳过…值已是该值」，决策 #190 口径）。
+
+------------------------------------------------------------------
+§4 数据面与计算面拟人化走查（CLI）
+------------------------------------------------------------------
+数据面接线（全按手册顺序）：
+- `set system management interface ens160`（commit confirmed 两步式，rev 5）✓
+- `request interfaces ens192|ens224 bind-dpdk --yes`（vfio-pci）→ 声明 + `set vpp dpdk dev` →
+  `request vpp restart` → `show interfaces physical` 两口 up/dpdk；`vppctl show interface` 独立核对 ✓
+
+L2 交换机 + BVI + DHCP 服务器：
+- vs-lan（l2、port ens192、gateway 192.168.99.1/24、dhcp-server 池 .100-.200）→
+  VPP 侧 BD 14615916、bvi0 带 192.168.99.1/24、成员 ens192/tap0 ✓
+- **真 guest 端到端**：Debian 12 cloud image 起 VNF（1G 大页 1024MB，vhost-user）后，
+  guest 经内置 DHCP 服务器取得 **192.168.99.100（active）**；
+  `vppctl ping 192.168.99.100 source bvi0` **5/5 0% 丢包**；
+  `ping 192.168.99.100 vrf vr-vs-lan`（产品 CLI）**3/3 0% 丢包**；
+  `show virtual-switches vs-lan dhcp-leases` 与 VPP 邻居表三方一致。
+
+L3 / 路由 / ECMP：
+- vs-wan（l3、l3-interface ens224 203.0.113.2/29、静态路由 + 默认路由**双下一跳 ECMP**）→
+  `vppctl show ip fib` 独立核对：198.51.100.0/24 → arp-ipv4 via .1；
+  0.0.0.0/0 → dpo-load-balance 两条（via .1 / via .3）✓
+
+ACL / QoS：
+- acl-web（rule 10 permit tcp/443、rule 20 deny any）绑 vs-wan l3-interface ens224 acl-in →
+  `vppctl show acl-plugin acl` tag {acl-web}、applied inbound sw_if_index 2 ✓
+- **#341 自动伴随 macip**（放行非 IP/ARP）：`show acl-plugin macip` tag {nfvis-nonip-permit}
+  绑同一口 ✓
+- qos pol-1g（cir 1e9）绑 ens224 in+out → `vppctl show policer` pol-1g（1r2c）+ 读视图
+  `pol-1g 1000000000 ens224:in,ens224:out` ✓
+
+VXLAN / 风暴抑制 / 端口安全：
+- vxlan vx-a（vni 100，local 203.0.113.2，remote 203.0.113.3 → vs-lan）→
+  `vppctl show vxlan tunnel` 逐字对 ✓
+- `set interfaces ens192 storm-control broadcast 8000` → `vppctl show policer` 出现
+  nfvis-storm-ens192-broadcast（cir 8000）+ classify 表（广播掩码）✓
+- `set interfaces ens192 port-security mac b0:b0:00:00:00:01` → 读视图「ACL 在场（索引 1，规则 4 条）；
+  接口已绑定」（tag nfvis-port-sec-ens192）✓
+- **⚠ 见 §7 发现 2：两者同接口冲突未检测**。
+
+计算面：
+- 镜像导入：`request images upload`（vm-image debian-12-generic-amd64.qcow2 427.4MiB；
+  container-image alpine:3.20 3.6MiB，回显内嵌 tag 并按目录名重打标签）✓
+- VNF 生命周期：create（rev 13）→ start（virsh running）→ **串口 console**（真 pty 出现
+  `vnf-a login:`，Ctrl-] 退出）→ stop → **快照 create/rollback/delete**（`show … snapshots` 列名/时间）
+  → start 复原 ✓
+- 容器生命周期：create+start（docker ps 在列）→ **exec**（id=root、env 可见、退出码 0/127 正确、
+  stdout/stderr 分列）→ **交互式 shell**（真 pty 进容器 `id`=root、`hostname`=容器 ID、
+  `echo` 正常、Ctrl-] 退出）→ stop ✓
+- 诊断：`traceroute`（宿主侧 ICMP）✓；`request system ntp sync`（chronyc makestep 200 OK）✓
+
+配置管理：
+- 多次 configure/set/commit；`show configuration | display set` 反推、`show log audit` 逐条、
+  `show system api tokens`、`show configuration sessions` ✓
+
+------------------------------------------------------------------
+§5 Web 控制台走查（Browser Use / ZCode 内置浏览器）
+------------------------------------------------------------------
+入口 https://192.168.155.129/api/v1/ui/?v=1#/ —— admin 登录成功（顶栏显示 super-user）。
+逐页打开并核对（均正常渲染、数据与 CLI/REST 一致）：
+  总览（系统/组件版本/数据面/告警）· 虚拟机（列表 + 详情：概览/接口/快照/串口 分栏、
+  vhost-user 口计数）· 容器（列表 + 详情）· 镜像（2 条 + 导入区）· 网络对象（VRF/ACL/NAT/聚合/QoS/镜像）·
+  虚拟交换机（含成员口运行态计数）· 系统：硬件健康/资源池/历史趋势/接口/内核基线/用户与权限/证书 ·
+  配置（committed rev、编辑表单、原始 JSON）· 提交历史（13 版、看差异/回滚）· 编辑锁会话（只读）·
+  运维：运维动作/审计日志/诊断/抓包。
+写路径实测：配置页「开始编辑」→ 新增 NTP 服务器 192.168.155.1 → 「保存到 candidate」
+  （提示「已保存到 candidate（有未提交变更）」）→ 「提交」→ 确认对话框「提交配置」→
+  **提交成功（revision 14）**；CLI `show configuration | display set` 复核含 `set system ntp server 192.168.155.1`，
+  随后 CLI 删除（rev 15）。**Web 写路径（candidate → commit）端到端可用**。
+按钮门禁：VM/容器列表的动作按钮按当前状态禁用（running 时「启动」disabled）✓
+**⚠ 见 §7 发现 3：诊断页 ping 无 vrf 字段**。
+
+------------------------------------------------------------------
+§6 四套件（发布件 2.0.0 上复跑）
+------------------------------------------------------------------
+- cli-pty-smoke：**10 / 0**（全部通过）。
+- cli-semantic-check（先 fixture up）：**26 / 0 / 3**（S8 正控通过：CLI 2 条 / VPP l2fib 2 条一致；
+  不可判定 = S11 无 relay / S12 无 learn-limit / S13 无 DNS 代理——均「无对象可对照」，与基线同口径）。
+- cli-lifecycle-check：**21 / 0 / 3**（跳过 = L3-1 无 VNF / L3-3、L2-2 无 NAT——现场无对应对象；
+  0 失败，含 VPP 重启后统计/重放一致性）。
+- cli-fulltest：首跑 **254 / 21 / 18**（21 项失败**全部**级联自环境缺夹具
+  `/var/lib/nfvis/images/alpine.qcow2`——干净快照丢失；阶段 3 的 `cp … alpine.qcow2` 静默失败 ⇒
+  cli-test/cli-del 镜像上传失败 ⇒ cli-vm 及其全部生命周期项连锁失败）。
+  恢复夹具（cp debian 镜像为 alpine.qcow2）后**复跑 273 / 0 / 20 —— 与基线逐项一致、零失败**。
+- 套件自清场正常（fulltest 结束「未清项 0」；语义/生命周期终态与开工前逐字节一致）。
+
+------------------------------------------------------------------
+§7 本轮发现（**新登记，均未修**）
+------------------------------------------------------------------
+【发现 1（中）】`pending_restart` 重启后假阳性
+  现象：**每次整机重启后**，`show vpp` / `GET /vpp/status` / Web 总览「待重启生效」均报 **是**，
+        而 VPP 实际正按 committed 配置运行。三次复现（向导后重启、改 1G 后重启、本轮专测重启）。
+  独立事实源：同一时刻 `grep main-core /etc/vpp/startup.conf` = 5、`corelist-workers 4`；
+        `show vpp threads` = vpp_main core 5 / vpp_wk_0 core 4；`vppctl show memory` 主堆 2M。
+        即配置**已生效**，只有手动 `request vpp restart` 才把它清成 no。
+  根因（代码级）：`internal/orchestrator/network/vpp.go` 的 `Manager.appliedHash` 是**进程内**字段；
+        `PendingRestart` 在 `appliedHash==""` 时把「有 vpp 配置」一律判为待重启。
+        启动路径 `cmd/nfvisd/main.go` 只 `vppMgr.EnsureRunning`（拉起已存在的 startup.conf），
+        **不调用 `SetApplied`** ⇒ 重启后 appliedHash 恒空 ⇒ 恒报待重启。
+  影响：误导操作者做无谓的 `request vpp restart`（数据面中断）；CLI 与 Web 两面可见。
+  建议方向：启动/接入成功后，若磁盘 startup.conf 与 committed vpp 段一致则 `SetApplied`（或持久化 applied 哈希）。
+
+【发现 2（中）】storm-control 与 port-security 同接口冲突未检测（L2 分类槽争用）
+  现象：同一接口（ens192，已是某 L2 交换机成员）同时配 `storm-control broadcast` 与
+        `port-security mac` —— **提交被接受**（rev 11），读视图 `show interfaces ens192 detail`
+        两者都显示「在数据面」（storm 报「分类表 #6」、portsec 报「ACL 在场且已绑定」）；
+        但接口 L2 入向分类槽**实际只挂着 portsec 的 macip 表**（掩码 `000000000000ffffffffffffffff…`）。
+  暴露路径：随后删 `storm-control` 提交报
+        `%% 底座下发失败（已补偿）: 接口 ens192 的 L2 分类槽被非本产品对象占用（表 24，掩码 …）：
+          风暴抑制无法收敛，请先清除该占用（例如 VPP 侧的其它分类表绑定）` —— 占用者其实是**产品自己**
+        port-security 的 macip 表。**先删 port-security 再删 storm-control，则两者都干净删除**（rev 16/17）。
+  根因（代码级）：`internal/model/validate.go` 的 `checkPortSecurity` 只校验「与 L3 接口 ACL 的 macip 槽互斥」，
+        **不校验与 storm-control 的 L2 分类槽争用**；两者在 VPP 侧都绑接口 L2 入向分类槽
+        （storm 走 classify，portsec 走 macip，单槽互斥）。`internal/orchestrator/network/storm.go` 的
+        `Dataplane` 读视图按**进程内登记** `e.tableIdx` 报表，不核对该表是否真的挂在槽上 ⇒ 读视图失真。
+  影响：限速（安全相关）静默不生效；删除时给出去向错误的报错文案。
+  建议方向：提交期**双向拒绝**（同接口 storm-control 与 port-security 不能并存，照 #340/#389 的互斥先例），
+        或按 VPP 能力改为表链共存；读视图按实况（AttachedL2Table）而非登记报表。
+
+【发现 3（低）】Web 诊断页 ping 缺 `vrf` 参数（与 CLI/REST 不对称）
+  现象：Web「诊断」页 ping 表单只有 目标/次数/源地址/IPv6，**没有 vrf**；
+        对 VRF 内目标（如 guest 192.168.99.100）执行即 `Failed: no egress interface`（0 发包）。
+  对照：同一目标 `POST /diagnostics/ping {"host":"192.168.99.100","vrf":"vr-vs-lan"}` **3/3 通**；
+        CLI `ping … vrf vr-vs-lan` 亦通。即 REST 与 CLI 都支持 vrf，**只有 Web 表单未暴露**。
+  影响：Web 用户无法 ping 任何 VRF 内对象（VNF/交换机域——最常见场景），且错误文案未提示 vrf 选项。
+  建议方向：诊断页表单加 vrf 输入（REST 契约已具备，纯前端接线）。
+
+【发现 4（低）】`set system dns proxy server` 触发「vpp 变更需 request vpp restart」与 pending_restart
+  现象：仅改数据面 DNS 代理（`set system dns proxy server <ip>`，DNSProxyServers 属 `cfg.Vpp`）
+        即报 `警告: vpp 变更需 request vpp restart` 并置 pending_restart=yes。
+  对照：生成器输出的 startup.conf **恒含** `punt { socket /run/vpp/punt.sock }`（决策 #345），
+        全新安装首启即在场 ⇒ 启用/停用代理**并不需要**重启 VPP。
+  影响：误导性重启提示（同发现 1 的观感面）。决策 #345 的用意是升级首启提示，但在新装实例上是假阳性。
+
+【观察 5（低）】资源池页两个「空闲」数字语义不同、同名并列
+  现象：Web「资源池」页首表 `页大小/总数/已分配/空闲` 显示 2M `768/0/768`，而同页「大页池」段
+        （与 `show system hugepages` 同源）显示 2M `空闲 235`（VPP 缓冲占用 533）。
+        两处「空闲」含义不同（前者=未分配给 VNF 的声明量，后者=内核空闲页），易误读。
+
+------------------------------------------------------------------
+§8 结论
+------------------------------------------------------------------
+- 干净快照 → `.run` 一步安装（18/18）→ wizard → 重启 → 数据面/计算面/Web 全链走查：**主链路全部可用**，
+  真 guest 的 DHCP 租约、双向 ping、串口、快照、容器 exec/shell 均端到端成立。
+- 四套件在发布件 2.0.0 上 **0 失败**：pty 10/10、语义 26/0/3、lifecycle 21/0/3、fulltest 273/0/20
+  （fulltest 首跑 21 红全为环境缺夹具，恢复后归零）。
+- 本轮**新登记 4 条缺陷 + 1 条观察**（§7），其中「pending_restart 重启假阳性」与
+  「storm×portsec 同接口静默冲突」为中等、用户可见；均**未修**，交后续批次（契约先行）处置。
