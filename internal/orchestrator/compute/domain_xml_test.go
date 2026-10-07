@@ -396,3 +396,42 @@ func TestFormatLibVersion(t *testing.T) {
 		}
 	}
 }
+
+// 内核数据面（v3 决策 #404）：vNIC 走 virtio 网卡 + 宿主 tap + vhost-net，
+// 域定义用 `<interface type='bridge'>` 指向交换机对应的内核 bridge，且**不置共享内存**
+// （没有共享内存对端，tap 在内核侧）。
+func TestBuildDomainXML_KernelDataPlaneUsesBridgeAndVhostNet(t *testing.T) {
+	spec := baseSpec()
+	spec.KernelDataPlane = true
+	spec.Interfaces = []InterfaceSpec{{
+		Name:   "eth0",
+		Type:   IfaceVhostUser,
+		Bridge: "vs-lan",
+		VLAN:   100,
+		Queues: 2,
+	}}
+	xml := mustXML(t, spec)
+
+	assertContains(t, xml,
+		`<interface type="bridge">`,         // 由 libvirtxml 依据 Source.Bridge 生成 type
+		`<source bridge="vs-lan"></source>`, // 接入交换机对应的内核 bridge
+		`<driver name="vhost" queues="2">`,  // 内核 vhost-net 加速
+		`<model type="virtio">`,
+		`<vlan>`,
+		`<tag id="100">`,
+	)
+	// 不建 vhost-user socket、不置共享内存
+	assertNotContains(t, xml, "vhostuser")
+	assertNotContains(t, xml, `mode="shared"`)
+	assertNotContains(t, xml, ".sock")
+}
+
+// 内核数据面下 vNIC 缺虚拟交换机（定位不到 bridge）时如实报错，不生成半成品域。
+func TestBuildDomainXML_KernelDataPlaneRequiresVirtualSwitch(t *testing.T) {
+	spec := baseSpec()
+	spec.KernelDataPlane = true
+	spec.Interfaces = []InterfaceSpec{{Name: "eth0", Type: IfaceVhostUser}}
+	if _, err := BuildDomainXML(spec); err == nil {
+		t.Fatal("缺虚拟交换机时应报错")
+	}
+}

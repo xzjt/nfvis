@@ -205,3 +205,88 @@ V3-11 `delete virtual-switches` 回收了 bridge，却把它创建的网关     
   · `.run` 自解压包的**完整闭环**：本轮用的是等价载荷目录（install.sh + debs + Packages + SHA256SUMS，
     与 .run 解包后的结构一致），未跑 `build-offline-run.sh` 的打包与自解压路径
   · 内核数据面的**真实转发**（域内 ping 通、NAT 出网）——需要第二台机器或宿主侧配合，本轮未做
+
+================================================================================
+§9 追加：内核数据面的**真实转发**验证（宿主 Windows 作为对端）
+================================================================================
+前提（先探明拓扑）：`D:\Virtual Machines\nfvis\nfvis.vmx` 里三块网卡
+    ethernet0/1/2 全部 `connectionType = "nat"` ⇒ ens160/ens192/ens224 与宿主
+    的 VMnet8（192.168.155.1）**在同一个二层**。故宿主可直接作为对端做真实流量验证。
+    宿主临时加两个测试网段的次地址（用完全部删除，见 §9.7）：
+        192.168.99.10/24（对 bridge 网关）与 192.168.98.10/24（对 VRF 三层口）
+
+9.1 拓扑（经产品 CLI 下发，dataplane=kernel）
+    vs-lan  type l2  gateway ip 192.168.99.1/24  ports 1 interface ens192
+    vs-l3   type l3  l3-interface ens224 ip address 192.168.98.1/24
+    内核事实：vs-lan <UP,LOWER_UP> 带 192.168.99.1/24；ens224 带 192.168.98.1/24
+
+9.2 基础连通（宿主 → 内核数据面）
+    $ ping -n 4 192.168.99.1   → 已发送 4，已接收 4，丢失 0（0% 丢失）  ← 内核 bridge 网关
+    $ ping -n 4 192.168.98.1   → 已发送 4，已接收 4，丢失 0（0% 丢失）  ← 内核 VRF 三层接口
+    ⇒ 二层桥接 + 三层编址**在真实链路上通**。
+
+9.3 ACL 强制（真实对端，A/B 对照）
+    实验组：`set acls acl-icmp-deny rule 10 … protocol icmp action deny` + 绑到
+            `l3-interface ens224 acl-in acl-icmp-deny`，commit (revision 12)
+        nft 事实：chain bind_ens224 { type filter hook ingress device "ens224" …;
+                                      meta protocol != { ip, ip6 } accept;
+                                      jump acl_acl_icmp_deny_be78 comment "acl-icmp-deny" }
+        $ ping -n 4 192.168.98.1 → **已接收 0，丢失 4（100% 丢失）**
+    对照组：`delete … l3-interface ens224 acl-in acl-icmp-deny`，commit (revision 13)
+        $ ping -n 4 192.168.98.1 → 已接收 4，丢失 0（0% 丢失）
+    ⇒ 唯一变量是绑定状态；且 ARP 仍通（非 IP 放行生效）。
+
+9.4 QoS 限速（真实流量，A/B 对照）
+    实验组：`set qos policies pol-8k cir 8000 cbs 1000` + `set interfaces ens224 ingress-policy pol-8k`
+        tc 事实：`police 0x1 rate 8Kbit burst 1000b action drop`
+        $ ping -n 10 -l 20000 192.168.98.1 → **100% 丢失**
+        $ tc -s filter show dev ens224 ingress
+            Sent 203258 bytes 147 pkt (**dropped 130, overlimits 130** requeues 0)
+    对照组：`delete interfaces ens224 ingress-policy pol-8k`
+        $ ping -n 10 -l 20000 192.168.98.1 → 已接收 10，丢失 0（0% 丢失）
+        tc 事实：filter 里 police 计数 0
+    ⇒ 限速在真实流量上生效，且**计数与丢包一一对应**。
+
+9.5 端口安全（真实对端，A/B 对照）
+    实验组：`set interfaces ens192 port-security mac aa:bb:cc:dd:ee:ff`（白名单不含宿主 MAC）
+        nft 事实：chain ps_ens192 { type filter hook ingress device "ens192" …;
+                                    ether saddr != aa:bb:cc:dd:ee:ff drop }
+        $ ping -n 4 192.168.99.1 → **100% 丢失**（宿主 MAC 00:50:56:c0:00:08 被丢）
+    对照组：白名单加入宿主 MAC
+        nft 事实：ether saddr != { 00:50:56:c0:00:08, aa:bb:cc:dd:ee:ff } drop
+        $ ping -n 4 192.168.99.1 → 已接收 4，丢失 0（0% 丢失）
+    ⇒ 白名单**按源 MAC 真的在拦**，且桥口学习关闭不阻断白名单内主机。
+
+9.6 风暴抑制（真实广播洪水，A/B 对照）
+    实验组：`set interfaces ens192 storm-control broadcast 8`（8 kbit/s）
+        tc 事实：flower dst_mac ff:ff:ff:ff:ff:ff + `police rate 8Kbit burst 8000b action drop`
+        宿主发 20×60KB 广播（`ping -n 20 -l 60000 192.168.99.255`）
+        $ tc -s filter show dev ens192 ingress
+            Sent 1216560 bytes 820 pkt (**dropped 796, overlimits 796** requeues 0)
+    对照组：`delete interfaces ens192 storm-control broadcast 8`
+        $ tc -s filter show dev ens192 ingress → 无 police filter、无丢包记录
+    说明：广播 ping 本身**不会被应答**（100% 丢失是正常现象），故这里的独立事实源是
+          **tc 的丢包计数**（796/820），不是 ping 的回包率。
+    另记一次**无效实验**（如实登记）：首版用 `storm-control broadcast 8000`（8 Mbit/s），
+          实测 offered 远低于门限 ⇒ `dropped 0`——**这是正确行为**，是实验设计错了
+          （门限要低于 offered 才有对照意义）。
+
+9.7 清理（全部回收，已核对）
+    · 产品侧：删除 vs-lan / vs-l3 / acl-icmp-deny / interfaces ens192|ens224，
+      最终 commit (revision 22)
+      核对：内核里 `^(vs-|vr-)` 链路 **0** 条；本产品 nft 表 **0** 张；dataplane 仍为 kernel
+    · VPP：`systemctl stop vpp` → inactive / disabled（内核数据面下按设计不运行）
+    · 宿主：`Remove-NetIPAddress 192.168.99.10 / 192.168.98.10` → VMnet8 只剩 192.168.155.1
+
+9.8 本轮仍**未**验证的（如实登记，含原因）
+    · **NAT 的真实转发**：本拓扑下 VM 的三块网卡与宿主在**同一个二层**，任何目标地址
+      宿主都能直接 ARP 到，没有需要「转发」的流量 ⇒ 无法构造 postrouting 路径。
+      nft 规则的**生成与全量重建语义**由集成用例 `TestKernelDataPlaneRealNAT` 覆盖
+      （独立事实源 `nft list`），但「真实 NAT 转换」未验。
+    · **VM 侧 virtio + vhost-net 接入**：需要一块可引导的云镜像（快照恢复后
+      `alpine.qcow2` 已丢失）＋资源池/隔离核声明（需重启）＋ guest 内静态编址
+      （内核数据面下 DHCP 服务器尚未实现）。本轮改为**单测钉住域定义**：
+      `TestBuildDomainXML_KernelDataPlaneUsesBridgeAndVhostNet` 断言
+      `<interface type="bridge">` + `<source bridge="vs-lan">` + `<driver name="vhost" queues="2">`
+      + `<vlan><tag id="100">`，且**不出现** `vhostuser` / `mode="shared"` / `.sock`；
+      另一条断言缺虚拟交换机时如实报错。**真机连通性仍未验。**
