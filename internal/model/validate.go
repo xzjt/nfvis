@@ -1745,8 +1745,12 @@ func (v *validator) checkVMFunctions(c Config) {
 			}
 			switch nic.Type {
 			case "vhost-user":
-				// FR-CFG-011①：vhost-user 必须大页内存
-				if m.Memory.Backing == "normal" {
+				// FR-CFG-011①：vhost-user 要求大页内存——因为 VPP 的 vhost-user 是**共享内存**
+				// 形态（guest RAM 与 VPP 共享，必须大页）。**内核数据面下该约束不成立**：
+				// 同名类型落成 virtio 网卡 + 宿主 tap + vhost-net，没有共享内存对端，普通内存
+				// 即可（真机走查暴露：内核数据面下想用 backing normal 建 VNF 会被这条挡住，
+				// 而它本不需要大页 ⇒ 被迫声明资源池 + 重启）。
+				if m.Memory.Backing == "normal" && c.DataPlaneMode() != DataPlaneKernel {
 					v.errf(p, "vhost-user vNIC 要求 memory backing=hugepage，当前为 normal")
 				}
 			case "sriov-vf":

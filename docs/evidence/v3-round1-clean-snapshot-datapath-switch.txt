@@ -290,3 +290,66 @@ V3-11 `delete virtual-switches` 回收了 bridge，却把它创建的网关     
       `<interface type="bridge">` + `<source bridge="vs-lan">` + `<driver name="vhost" queues="2">`
       + `<vlan><tag id="100">`，且**不出现** `vhostuser` / `mode="shared"` / `.sock`；
       另一条断言缺虚拟交换机时如实报错。**真机连通性仍未验。**
+
+================================================================================
+§10 追加：VM 侧 virtio + vhost-net 接入（内核数据面）真机验证
+================================================================================
+10.1 前置：可引导云镜像
+    · 首次下载**被截断**（直连 13.5 MB / 上游 Content-Length 178,777,600 字节）——
+      症状很隐蔽：`request images upload` 成功、域也起得来，但 guest **不引导**
+      （`cpu.time` 0.65s、overlay 盘 0 字节增长、FIFO 无学习记录）。
+    · 直连速率仅 ~18 KB/s（178 MB 要 2.7 小时）；**经代理 `http://192.168.155.1:2333`
+      实测 ~3.5 MB/s**（12s 拉 41.6 MB）⇒ 改走代理，178.1 MB 拉齐。
+    · 教训入册：**镜像下载必须核对大小/摘要**（上游 `Content-Length` 或 `.sha256`），
+      否则「导入成功」与「能用」之间隔着一次静默截断。
+
+10.2 内核数据面下的 VNF（普通内存 + 不绑核 ⇒ 无需资源池、无需重启）
+    ⚠️ **本轮修掉的一处产品缺陷**：`vhost-user` 型 vNIC 曾被**无条件**要求
+    `memory backing=hugepage`（FR-CFG-011①）。该约束的由来是 VPP 的 vhost-user 是
+    **共享内存**形态；而**内核数据面下同名类型落成 virtio + 宿主 tap + vhost-net，
+    没有共享内存对端**，普通内存即可。原判据会让内核数据面下建 VNF 被迫声明资源池 + 重启。
+    修法：判据加数据面条件（`c.DataPlaneMode() != DataPlaneKernel`），并补单测
+    `TestKernelDataPlaneAllowsNormalMemoryWithVhostUserNic`（内核放行 / VPP 仍拒，红-绿双向）。
+
+10.3 域定义与底座事实（逐条独立核对）
+    $ virsh -c qemu:///system dumpxml vnf1
+        <interface type='bridge'>
+          <mac address='52:54:6c:77:6a:83'/>
+          <source bridge='vs-lan'/>        ← 接入交换机对应的**内核 bridge**
+          <target dev='vnet2'/>
+          <model type='virtio'/>           ← virtio 网卡（不是 vhostuser）
+    $ ps -eo args | grep -o '{"type":"tap",...,"vhost":true,...}'
+        {"type":"tap","fds":"33:35","vhost":true,"vhostfds":"36:37","id":"hostnet0"}
+        ⇒ **vhost-net 加速已启用**（内核态 virtio 数据面，不经 QEMU 用户态）
+    $ bridge link show dev vnet2
+        92: vnet2: <UP,LOWER_UP> mtu 1500 **master vs-lan state forwarding**
+        ⇒ libvirt 自建的 tap 已被 enslavement 到内核 bridge
+    $ bridge fdb show dev vnet2 → 52:54:6c:77:6a:83 master vs-lan（guest MAC 已学习）
+    $ cat /sys/class/net/vs-lan/statistics/{rx,tx}_packets → 77 / 22（bridge 上真实过包）
+    $ virsh dumpxml --inactive vnf1 | grep seed → 挂载 seed.iso（卷标 `cidata`，NoCloud 合规）
+
+10.4 端到端连通（宿主作对端）
+    guest 侧编址由产品下发的 cloud-init user-data 完成（内核数据面下 DHCP 服务器未实现，
+    故用静态地址；`set virtual-machine-functions vnf1 cloud-init user-data /root/ud.yaml`）：
+        #cloud-config
+        runcmd:
+          - [ sh, -c, "ip link set eth0 up && ip addr add 192.168.99.50/24 dev eth0" ]
+    $ ping -n 5  192.168.99.50 → 已接收 4，丢失 1（首包 ARP 未收敛）
+    $ ping -n 20 192.168.99.50 → **已接收 20，丢失 0（0% 丢失）**，往返 0-1ms
+    ⇒ 宿主 → 内核 bridge(vs-lan) → tap(vnet2) → vhost-net → **guest**，**双向通**。
+
+    ⚠️ **一处操作口径（不是缺陷，入册）**：改 cloud-init 后 `request … restart` 只是
+    **重启运行中的域**（沿用旧的内存态定义），seed 不会挂上；必须 `stop` + `start`
+    才会按新定义重建（持久定义里 seed 已在，`dumpxml --inactive` 可核对）。
+
+10.5 清理（已核对）
+    · 删 VNF（`--yes`）→ 删交换机/接口 → 内核产品链路 **0**、本产品 nft 表 **0**、
+      libvirt 域 **0**；**镜像 alpine.qcow2（178.1 MB）保留**在镜像仓库（后续轮次可复用，
+      AGENTS.md 里「快照恢复后 alpine.qcow2 丢失」这条由此消除）。
+    · 宿主 VMnet8 次地址已删（只剩 192.168.155.1）。
+    · dataplane 仍为 kernel、nfvis active。
+
+10.6 至此 v3 数据面可切换的**未验证项只剩两条**（均与环境有关，非产品路径缺失）
+    · **NAT 的真实转发**：VM 三块网卡与宿主同二层，构造不出需要转发的流量（见 §9.8）。
+    · **`.run` 自解压包的完整闭环**：本轮用等价载荷目录（install.sh + debs + Packages +
+      SHA256SUMS，结构与解包后一致），未跑 `build-offline-run.sh` 的打包与自解压路径。

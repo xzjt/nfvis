@@ -403,7 +403,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-machine-functions <n> memory size-mb <n>` | 内存（大页池分配） | libvirt | ✅ |
 | `set virtual-machine-functions <n> memory hugepage-size <2M\|1G>` | 页大小 | libvirt | ✅ |
 | `set virtual-machine-functions <n> memory numa node <n>` | NUMA 亲和 | libvirt | ✅ |
-| `set virtual-machine-functions <n> memory backing <hugepage\|normal>` | 内存类型（normal 禁 vhost-user） | libvirt | ✅ |
+| `set virtual-machine-functions <n> memory backing <hugepage\|normal>` | 内存类型（**VPP 数据面下 normal 禁 vhost-user**——共享内存形态必须大页；**内核数据面下该约束不成立**：同名类型落成 virtio+宿主 tap+vhost-net，无共享内存对端，normal 可用） | libvirt | ✅ |
 | `set virtual-machine-functions <n> disks <d> size-gb <n>` | 附加空数据盘（FR-CMP-018） | libvirt | ✅ |
 | `set virtual-machine-functions <n> disks <d> image <img>` | 从镜像克隆数据盘 | libvirt | ✅ |
 | `delete virtual-machine-functions <n> disks <d>` | 删除数据盘 | libvirt | ✅ |

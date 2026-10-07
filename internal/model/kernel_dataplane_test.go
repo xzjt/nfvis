@@ -156,3 +156,34 @@ func TestKernelDataPlaneLinkNameLength(t *testing.T) {
 		t.Fatalf("VPP 数据面不应受内核接口名长度限制，得到 %s", errText(errs))
 	}
 }
+
+// 内核数据面下 `vhost-user` 型 vNIC 落成 virtio + 宿主 tap + vhost-net（无共享内存对端），
+// 故「vhost-user 必须大页」这条约束不成立：backing normal 应放行。
+// 真机走查暴露：想用普通内存建 VNF 会被这条挡住，而它本不需要大页（被迫声明资源池 + 重启）。
+func TestKernelDataPlaneAllowsNormalMemoryWithVhostUserNic(t *testing.T) {
+	mk := func(mode string) Config {
+		return Config{
+			System:          &SystemConfig{DataPlane: mode},
+			VirtualSwitches: []VirtualSwitch{{Name: "vs-lan", Type: "l2"}},
+			VirtualMachineFunctions: []VMFunction{{
+				Name: "vnf1", Image: "alpine.qcow2",
+				VCPU:   VMCpu{Count: 1},
+				Memory: VMMemory{SizeMB: 256, Backing: "normal"},
+				Interfaces: []VnfInterface{{
+					Name: "nic0", Type: "vhost-user", VirtualSwitch: "vs-lan",
+				}},
+			}},
+		}
+	}
+	if errs := Validate(mk(DataPlaneKernel)); len(errs) != 0 {
+		t.Fatalf("内核数据面下 backing normal + vhost-user 型 vNIC 应放行，得到：\n%s", errText(errs))
+	}
+	// VPP 数据面下约束照旧（共享内存形态必须大页）。
+	errs := Validate(mk(DataPlaneVPP))
+	if len(errs) == 0 {
+		t.Fatal("VPP 数据面下 backing normal + vhost-user 应被拒（FR-CFG-011①）")
+	}
+	if !strings.Contains(errText(errs), "hugepage") {
+		t.Fatalf("报错应指向大页要求，得到：%s", errText(errs))
+	}
+}
