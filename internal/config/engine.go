@@ -685,7 +685,9 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 	if mgmtChanged {
 		res.Warnings = append(res.Warnings, "警告: 管理口地址/网关已变更，注意连通性")
 	}
-	if !configEq(committed.Vpp, newCfg.Vpp) {
+	// 决策 #400：DNSProxyServers 不进 startup.conf（决策 #345）⇒ 只改它不需要重启数据面，
+	// 按 startup-affecting 子集判定，避免误导性重启提示。
+	if !configEq(committed.Vpp.StartupKey(), newCfg.Vpp.StartupKey()) {
 		res.Warnings = append(res.Warnings, "警告: vpp 变更需 request vpp restart（或整机 reboot）后生效")
 	}
 	if !configEq(committed.ResourcePools, newCfg.ResourcePools) {

@@ -60,18 +60,25 @@ func GenerateStartup(cfg *model.Config, pciOf PCIResolver) (string, error) {
 	return b.String(), nil
 }
 
+// startupShapeSentinel 生成器**输出形状**哨兵（决策 #400，沿用 #345 的 punt 盐技法）：
+// GenerateStartup 的段集合（unix/api-segment/socksvr/punt/cpu/memory/buffers/dpdk/plugins 的
+// 固定底座行）每变化一次就把本值改一次。它与 startup-affecting 字段一起进哈希 ⇒「升级到输出
+// 形状不同的新版本」对同一 vpp 配置得到不同哈希，从而在升级后首启如实提示一次待重启
+// （保留决策 #345 的语义）。现值 = #345 引入 punt 段后的形状。
+const startupShapeSentinel = "punt:" + PuntSocketPath
+
 // VppSectionHash 计算 vpp 配置段的稳定哈希（用于 pending_restart 判定：
 // 已应用哈希 ≠ 当前 committed 哈希；与 PCI 解析等运行态无关）。
+// 只纳入**进入 startup.conf 的字段**（决策 #400）：DNSProxyServers 不进 startup.conf，
+// 改它不需要重启数据面，故不参与判定。
 func VppSectionHash(vpp *model.VppConfig) string {
-	if vpp == nil {
-		vpp = &model.VppConfig{}
-	}
-	b, _ := json.Marshal(vpp)
-	// 决策 #345：punt 段（DNS 转发器前置）由生成器常驻输出，但它是**底座**配置、不在 VppConfig 里。
-	// 把它混入哈希，使「升级到含 punt 段的新版本」对同一 vpp 配置得到不同哈希 ⇒ 既有的
-	// pending-restart 语义如实提示「首次需 request vpp restart」，让新 startup.conf 的 punt 段生效
-	// （无需另造机制）。
-	sum := sha256.Sum256(append(b, []byte("\x00punt:"+PuntSocketPath)...))
+	return vppSectionHash(vpp, startupShapeSentinel)
+}
+
+// vppSectionHash 按指定「输出形状」计算哈希（形状哨兵参与哈希的接缝；决策 #400 测试用）。
+func vppSectionHash(vpp *model.VppConfig, shape string) string {
+	b, _ := json.Marshal(vpp.StartupKey())
+	sum := sha256.Sum256(append(b, []byte("\x00shape:"+shape)...))
 	return hex.EncodeToString(sum[:])
 }
 

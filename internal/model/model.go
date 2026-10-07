@@ -532,6 +532,24 @@ type VppConfig struct {
 	DNSProxyServers []string `json:"dns_proxy_servers,omitempty"`
 }
 
+// VppStartupKey vpp 配置段中**真正进入 startup.conf** 的字段子集（决策 #400）。
+// DNSProxyServers 不属于其中：它只影响 nfvisd 侧自研 DNS 转发器（决策 #345），生成器不输出它
+// ⇒ 改它不需要重启数据面。pending_restart 与提交期「需重启」提示都按本子集判定。
+type VppStartupKey struct {
+	CPU     *VppCPU     `json:"cpu,omitempty"`
+	Memory  *VppMemory  `json:"memory,omitempty"`
+	DPDK    *VppDPDK    `json:"dpdk,omitempty"`
+	Plugins []VppPlugin `json:"plugins,omitempty"`
+}
+
+// StartupKey 提取影响 startup.conf 的字段子集（nil 安全；决策 #400）。
+func (v *VppConfig) StartupKey() VppStartupKey {
+	if v == nil {
+		return VppStartupKey{}
+	}
+	return VppStartupKey{CPU: v.CPU, Memory: v.Memory, DPDK: v.DPDK, Plugins: v.Plugins}
+}
+
 type VppCPU struct {
 	MainCore        int    `json:"main_core,omitempty"`
 	CorelistWorkers string `json:"corelist_workers,omitempty"` // 如 "5,7,9-11"
