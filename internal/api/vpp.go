@@ -12,8 +12,12 @@ import (
 
 // VppStatus /vpp/status 响应（契约 components/schemas/VppStatus）。
 type VppStatus struct {
-	Version        string          `json:"version"`
-	Connected      bool            `json:"connected"`
+	Version   string `json:"version"`
+	Connected bool   `json:"connected"`
+	// Mode 当前生效的数据面实现（vpp|kernel，v3 决策 #404）。内核数据面下 Connected 恒 false
+	// 且 LastError 说明「当前数据面为内核网络，未使用 VPP」——读视图据此明确回答，
+	// 而不是让操作者以为「VPP 该起来却没起来」。
+	Mode           string          `json:"dataplane,omitempty"`
 	ConfigRevision int             `json:"config_revision,omitempty"`
 	PendingRestart bool            `json:"pending_restart"`
 	LastError      string          `json:"last_error,omitempty"`

@@ -51,6 +51,8 @@ func ConfigPathTree() *Node {
 	root := K("", "root",
 		// —— system（§2.2，FR-SYS-001/004/011/012/013、FR-SEC-003/008）——
 		K("system", "系统配置",
+			K("dataplane", "数据面实现（vpp = VPP 数据面；kernel = Linux 内核网络数据面；变更需重启服务生效）",
+				VE("dataplane", "vpp|kernel", "vpp", "kernel")),
 			K("hostname", "主机名", V("string", "名称")),
 			K("timezone", "时区", V("string", "如 Asia/Shanghai")),
 			K("ntp", "NTP",

@@ -1,0 +1,196 @@
+package netkernel
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator"
+	"github.com/xzjt/nfvis/internal/orchestrator/network"
+)
+
+// 本文件把内核数据面接到「提交编排 + 恢复巡检 + 运行态读视图」所需的**同一套**方法面上
+// （VPP 实现在 internal/orchestrator/network 的 *L2Network 上）。装配处因此无需按数据面
+// 分叉：换的是实现，不是调用方。
+//
+// 口径（v3 决策 #404）：内核数据面**不维护进程内登记**，内核即事实源——故 VPP 侧的
+// 「登记失效」「残渣对账」「延后删表复核」等维护动作在内核侧是**无对象可做的空操作**；
+// 读视图能给出内核等价物的（MAC 表、路由、bridge 成员、接口状态、端口清单）给出真值，
+// VPP 专有的（LLDP 邻居、NAT 会话、DHCP 租约、风暴/端口安全实况）**如实报不可用**。
+
+// SetSocketDirs 内核数据面不用 socket 目录（vNIC 走 virtio + tap，容器 vNIC 未支持）。
+func (p *Provider) SetSocketDirs(string, string) {}
+
+// InvalidateRuntimeState 无进程内登记可失效（内核是事实源，读视图直查内核）。
+func (p *Provider) InvalidateRuntimeState() {}
+
+// RetryDeferredVRFDeletes 无「延后删表」语义（内核 VRF 删除即时生效），无对象可复核。
+func (p *Provider) RetryDeferredVRFDeletes(context.Context, model.Config) []string { return nil }
+
+// ReconcileResidue / ReconcileRecoveryAlarms / ReconcileDHCPServer / ReconcileProxy /
+// ReconcileStorm 均为 VPP 侧登记型对账；内核数据面无登记、无对应族，空操作。
+func (p *Provider) ReconcileResidue(context.Context, model.Config) []error        { return nil }
+func (p *Provider) ReconcileRecoveryAlarms(context.Context, model.Config) []error { return nil }
+func (p *Provider) ReconcileDHCPServer(context.Context, model.Config) []error     { return nil }
+func (p *Provider) ReconcileProxy(context.Context, model.Config) []error          { return nil }
+func (p *Provider) ReconcileStorm(context.Context, model.Config) []error          { return nil }
+
+// CheckVnfPorts vNIC 断连检测：内核数据面下宿主 tap 由 libvirt 创建并挂 bridge，
+// 产品侧没有可靠的 tap 名映射，故不做判定（如实不报，避免误报）。
+func (p *Provider) CheckVnfPorts(context.Context, model.Config) []error { return nil }
+
+// CheckLoop L2 环路检测：VPP 侧的分类表判据在内核数据面无对应物，不做判定（如实不报）。
+func (p *Provider) CheckLoop(context.Context, model.Config) []error { return nil }
+
+// CheckInterfaceLinks 物理业务口链路状态检查（内核数据面：直读 netdev operstate）。
+//
+// 只对**已声明**的物理口判定：未声明的口不管（与 VPP 侧同口径）。
+func (p *Provider) CheckInterfaceLinks(ctx context.Context, cfg model.Config) []error {
+	states, err := p.rt().InterfaceStates(ctx)
+	if err != nil {
+		return []error{fmt.Errorf("读取接口状态失败: %w", err)}
+	}
+	var errs []error
+	for _, iface := range cfg.Interfaces {
+		st, ok := states[iface.Name]
+		if !ok {
+			continue
+		}
+		if st.AdminUp && !st.LinkUp {
+			errs = append(errs, fmt.Errorf("接口 %s 已启用但链路未 up", iface.Name))
+		}
+	}
+	return errs
+}
+
+// rt 惰性构造运行态读物（复用同一个 Runner，便于测试注入）。
+func (p *Provider) rt() *Runtime { return NewRuntime(p.run) }
+
+// MACTable 一台 L2 交换机（内核 bridge）的 MAC 表。
+func (p *Provider) MACTable(ctx context.Context, name string) ([]network.MACTableEntry, error) {
+	rows, err := p.rt().MACTable(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]network.MACTableEntry, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, network.MACTableEntry{MAC: r.MAC, Port: r.Port, VLAN: r.VLAN})
+	}
+	return out, nil
+}
+
+// Routes 一台 L3 交换机（内核 VRF 表）的静态路由。
+func (p *Provider) Routes(ctx context.Context, name string) ([]network.RouteEntry, error) {
+	rows, err := p.rt().Routes(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]network.RouteEntry, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, network.RouteEntry{Prefix: r.Prefix, NextHop: r.NextHop, Distance: r.Distance})
+	}
+	return out, nil
+}
+
+// BridgeDomains 全部内核 bridge 的运行态（含成员口）。
+func (p *Provider) BridgeDomains() ([]network.BDRuntime, error) {
+	bds, err := p.rt().BridgeDomains(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]network.BDRuntime, 0, len(bds))
+	for _, bd := range bds {
+		st := network.BDRuntime{ID: bd.ID, Name: bd.Name}
+		for _, port := range bd.Ports {
+			st.Ports = append(st.Ports, network.BDRuntimePort{Name: port.Name, Shg: port.Shg})
+		}
+		out = append(out, st)
+	}
+	return out, nil
+}
+
+// InterfaceStates 全部内核接口的运行态。
+func (p *Provider) InterfaceStates() (map[string]network.SwIfInfo, error) {
+	states, err := p.rt().InterfaceStates(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]network.SwIfInfo, len(states))
+	for name, st := range states {
+		out[name] = network.SwIfInfo{
+			Name: name, AdminUp: st.AdminUp, LinkUp: st.LinkUp,
+			LinkSpeed: st.LinkSpeed, DevType: st.DevType, Mtu: st.MTU,
+		}
+	}
+	return out, nil
+}
+
+// VPPIfnames 内核数据面下「已交数据面的口」＝产品按配置自持的虚拟设备
+// （bridge/VRF/vxlan/bond/vlan 子接口）。
+//
+// 与 VPP 侧同名方法的语义对齐（返回数据面端口名），只是来源从 VPP dump 换成内核设备。
+// 判据取**配置声明集合**而不是设备类型：宿主机上 virbr0/docker0 也是 bridge，
+// 按类型选会把它们当成产品端口。
+func (p *Provider) VPPIfnames() ([]string, error) {
+	return p.rt().DataplaneIfnames(context.Background(), p.config())
+}
+
+// KernelIfnames 内核侧物理口名（与 VPP 侧同一份 sysfs 口径）。
+func (p *Provider) KernelIfnames() ([]string, error) { return network.KernelIfnamesAll() }
+
+// KernelIfFacts 内核侧物理口事实（与 VPP 侧同一份 sysfs 口径）。
+func (p *Provider) KernelIfFacts() ([]network.KernelIfFacts, error) {
+	return network.KernelIfFactsAll()
+}
+
+// LldpNeighbors LLDP 邻居：内核数据面尚未实现（如实报不可用，不返回空表冒充「无邻居」）。
+func (p *Provider) LldpNeighbors(context.Context) ([]network.LldpNeighbor, error) {
+	return nil, unsupported("LLDP 邻居")
+}
+
+// NATSessions NAT 会话：内核数据面的会话表在 conntrack，尚未接入读视图（如实报不可用）。
+func (p *Provider) NATSessions(context.Context) ([]network.NATSession, error) {
+	return nil, unsupported("NAT 会话表")
+}
+
+// VxlanStates VXLAN 运行态：内核 vxlan 设备的存量由 EnsureConsistent 的声明重放保证，
+// 读视图尚未接入（如实报不可用，避免把「查不到」显示成「不存在」）。
+func (p *Provider) VxlanStates(context.Context) (map[string]network.VxlanState, error) {
+	return nil, unsupported("VXLAN 运行态")
+}
+
+// DHCPServerLeases / DHCPServerActiveLeases / DHCPTapIndexes：DHCP 服务器在内核数据面未实现。
+func (p *Provider) DHCPServerLeases(string) ([]network.DHCPLease, bool) { return nil, false }
+func (p *Provider) DHCPServerActiveLeases(string) (int, bool)           { return 0, false }
+func (p *Provider) DHCPTapIndexes() map[uint32]bool                     { return nil }
+
+// 编译期断言：内核数据面满足装配层使用的完整方法面。
+var _ interface {
+	orchestrator.NetworkProvider
+	SetSocketDirs(string, string)
+	InvalidateRuntimeState()
+	RetryDeferredVRFDeletes(context.Context, model.Config) []string
+	CheckVnfPorts(context.Context, model.Config) []error
+	CheckInterfaceLinks(context.Context, model.Config) []error
+	ReconcileResidue(context.Context, model.Config) []error
+	ReconcileRecoveryAlarms(context.Context, model.Config) []error
+	ReconcileDHCPServer(context.Context, model.Config) []error
+	ReconcileProxy(context.Context, model.Config) []error
+	ReconcileStorm(context.Context, model.Config) []error
+	CheckLoop(context.Context, model.Config) []error
+	MACTable(context.Context, string) ([]network.MACTableEntry, error)
+	Routes(context.Context, string) ([]network.RouteEntry, error)
+	BridgeDomains() ([]network.BDRuntime, error)
+	InterfaceStates() (map[string]network.SwIfInfo, error)
+	VPPIfnames() ([]string, error)
+	KernelIfnames() ([]string, error)
+	KernelIfFacts() ([]network.KernelIfFacts, error)
+	LldpNeighbors(context.Context) ([]network.LldpNeighbor, error)
+	NATSessions(context.Context) ([]network.NATSession, error)
+	VxlanStates(context.Context) (map[string]network.VxlanState, error)
+	DHCPServerLeases(string) ([]network.DHCPLease, bool)
+	DHCPServerActiveLeases(string) (int, bool)
+	DHCPTapIndexes() map[uint32]bool
+	StormDataplane(context.Context, string) (network.StormDataplane, bool)
+	PortSecDataplane(context.Context, string) (network.PortSecDataplane, bool)
+} = (*Provider)(nil)

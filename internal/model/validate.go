@@ -328,6 +328,13 @@ func (v *validator) checkSystem(c Config) {
 	if s.Hostname != "" {
 		v.checkName("system.hostname", s.Hostname, "主机")
 	}
+	// 数据面实现（v3 决策 #404）：只认 vpp|kernel；空 = 未配置（回落 vpp）。
+	if s.DataPlane != "" && s.DataPlane != DataPlaneVPP && s.DataPlane != DataPlaneKernel {
+		v.errf("system.dataplane", "数据面必须为 vpp|kernel（当前 %q）；vpp = VPP 数据面，kernel = Linux 内核网络数据面", s.DataPlane)
+	}
+	if s.DataPlane == DataPlaneKernel {
+		v.checkKernelDataPlane(c)
+	}
 	for i, n := range s.Ntp {
 		if n.Server == "" {
 			v.errf(fmt.Sprintf("system.ntp[%d].server", i), "NTP 服务器地址缺失")
@@ -396,6 +403,126 @@ func (v *validator) checkSystem(c Config) {
 		}
 	}
 	v.checkSystemLogin(s)
+}
+
+// checkKernelDataPlane 内核数据面（system.dataplane = kernel）下**提交期拒绝**的配置。
+//
+// 口径（v3 决策 #404）：内核数据面尚不实现的族一律在**提交期拒绝**，不留「配置在、数据面不生效」
+// 的假功能——尤其是安全相关的 ACL（拒规则不生效＝静默放行）。拒绝文案点名对象与替代路径。
+// VPP 调优配置（vpp 段）不拒绝：它在内核数据面下不生效，但读视图会如实报出当前数据面，
+// 且它是「切回 vpp 时立刻可用」的既有配置，故只在提交时给提示（见 config 引擎的告警）。
+func (v *validator) checkKernelDataPlane(c Config) {
+	const alt = "；如需该能力请先切换回 VPP 数据面（set system dataplane vpp）"
+	// 已实现（不下发拒绝）：ACL、QoS 端口限速、端口镜像、风暴抑制、端口安全——
+	// 内核侧分别落在 nftables（独立表）与 tc（clsact + police/mirred）上。
+	if c.Protocols != nil && c.Protocols.LLDP != nil {
+		v.errf("protocols.lldp", "当前数据面为 Linux 内核网络，LLDP 尚未实现%s", alt)
+	}
+	for _, vs := range c.VirtualSwitches {
+		path := "virtual_switches[" + vs.Name + "]"
+		if vs.DhcpRelayServer != "" {
+			v.errf(path+".dhcp_relay_server", "当前数据面为 Linux 内核网络，DHCP 中继尚未实现%s", alt)
+		}
+		if vs.DhcpServerPoolStart != "" || vs.DhcpServerPoolEnd != "" {
+			v.errf(path+".dhcp_server_pool_start", "当前数据面为 Linux 内核网络，DHCP 服务器尚未实现%s", alt)
+		}
+		if len(vs.DNSProxyServers) > 0 {
+			v.errf(path+".dns_proxy_servers", "当前数据面为 Linux 内核网络，数据面 DNS 代理尚未实现%s", alt)
+		}
+		if vs.LearnLimit > 0 {
+			v.errf(path+".learn_limit", "当前数据面为 Linux 内核网络，MAC 学习条数上限尚未实现%s", alt)
+		}
+		// 网关/端口 ACL 绑定与数据面无关地一律拒绝（VPP 26.06 不评估 BVI 域内流量，
+		// 内核侧沿用同一口径以保持"同一份配置、同一语义"）：唯一可用的绑定点是三层接口。
+		if vs.Gateway != nil && (vs.Gateway.AclIn != "" || vs.Gateway.AclOut != "") {
+			v.errf(path+".gateway.acl_in", "当前数据面为 Linux 内核网络，网关 ACL 尚未实现%s", alt)
+		}
+		for _, p := range vs.Ports {
+			if p.AclIn != "" || p.AclOut != "" {
+				v.errf(path+".ports", "当前数据面为 Linux 内核网络，端口 ACL 尚未实现%s", alt)
+			}
+			if p.Container != "" {
+				v.errf(path+".ports", "当前数据面为 Linux 内核网络，容器 vNIC 接入尚未实现%s", alt)
+			}
+		}
+	}
+	// 端口镜像：内核侧以 tc mirred 实现，但**源不能是 VNF 虚拟网卡**——宿主 tap 由 libvirt
+	// 在域启动时创建，产品侧没有可靠的 tap 名映射。
+	for _, pm := range c.PortMirroring {
+		if pm.Source.Vnf != "" {
+			v.errf("port_mirroring["+pm.Name+"]", "当前数据面为 Linux 内核网络，镜像源不能是 VNF 虚拟网卡（请改用物理口或 bond）%s", alt)
+		}
+	}
+	// 三层接口：ACL 绑定已支持；「vNIC 作三层接口」仍不支持（要把宿主 tap 挂进 VRF，
+	// 而 tap 由 libvirt 在域启动时创建，产品侧没有可靠的挂载时点）。
+	vnics := vnicNames(c)
+	for _, vrf := range c.Vrfs {
+		for _, li := range vrf.L3Interfaces {
+			if vnics[li.Interface] {
+				v.errf("vrfs["+vrf.Name+"].l3_interfaces["+li.Interface+"]",
+					"当前数据面为 Linux 内核网络，VNF 虚拟网卡不能直接作为三层接口；请改为接入一台已配网关的二层交换机%s", alt)
+			}
+		}
+	}
+	for _, vm := range c.VirtualMachineFunctions {
+		for _, nic := range vm.Interfaces {
+			if nic.Type == "memif" {
+				v.errf("virtual_machine_functions["+vm.Name+"].interfaces["+nic.Name+"]",
+					"当前数据面为 Linux 内核网络，memif 接入尚未实现；VM 请用 virtio 网卡（宿主 tap + vhost-net）%s", alt)
+			}
+		}
+	}
+	for _, ct := range c.ContainerFunctions {
+		if len(ct.Interfaces) > 0 {
+			v.errf("container_functions["+ct.Name+"].interfaces",
+				"当前数据面为 Linux 内核网络，容器 vNIC（memif）接入尚未实现%s", alt)
+		}
+	}
+	// 内核接口名上限 15 字符（IFNAMSIZ-1）：交换机/bond/隧道/L3 交换机名直接用作内核设备名，
+	// 超长会被内核拒绝，故在提交期就拦下（VPP 侧没有这个限制）。
+	for _, vs := range c.VirtualSwitches {
+		v.checkKernelLinkName("virtual_switches["+vs.Name+"]", vs.Name)
+	}
+	for _, b := range c.Bonds {
+		v.checkKernelLinkName("bonds["+b.Name+"]", b.Name)
+	}
+	for _, vx := range c.VxlanTunnels {
+		v.checkKernelLinkName("vxlan_tunnels["+vx.Name+"]", vx.Name)
+	}
+	for _, vrf := range c.Vrfs {
+		v.checkKernelLinkName("vrfs["+vrf.Name+"]", vrf.Name)
+	}
+}
+
+// checkKernelLinkName 内核数据面下对象名直接用作内核接口名，须满足内核的长度限制。
+func (v *validator) checkKernelLinkName(path, name string) {
+	if len(name) > kernelLinkNameMax {
+		v.errf(path, "当前数据面为 Linux 内核网络，对象名 %q 超过内核接口名上限 %d 个字符，请缩短",
+			name, kernelLinkNameMax)
+	}
+}
+
+// kernelLinkNameMax 内核接口名上限（IFNAMSIZ-1）。
+const kernelLinkNameMax = 15
+
+// vnicNames 收集配置里所有 VNF 虚拟网卡名（用于判定 l3-interface 是否引用了 vNIC）。
+func vnicNames(c Config) map[string]bool {
+	out := map[string]bool{}
+	for _, vm := range c.VirtualMachineFunctions {
+		for _, nic := range vm.Interfaces {
+			if nic.Name != "" {
+				out[nic.Name] = true
+			}
+		}
+	}
+	for _, ct := range c.ContainerFunctions {
+		for _, nic := range ct.Interfaces {
+			if nic.Name != "" {
+				out[nic.Name] = true
+			}
+		}
+	}
+	return out
 }
 
 // checkFirewall 校验管理面主机防火墙（决策 #388）：序号/动作/来源/协议/端口/至少一条匹配条件/

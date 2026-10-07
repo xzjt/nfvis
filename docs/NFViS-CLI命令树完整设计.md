@@ -420,6 +420,16 @@ discard | exit                    # discard 丢弃 candidate；exit 有未提交
 
 ```
 [edit system]
+set dataplane <vpp|kernel>                           # 数据面实现（决策 #404）：vpp = VPP 数据面（DPDK 接管物理口、
+                                                     #   vhost-user/memif 接入 VNF/容器）；kernel = Linux 内核网络数据面
+                                                     #   （内核 bridge/VRF/nftables/vxlan；VNF 用 virtio 网卡 + 宿主 tap +
+                                                     #   vhost-net 接入）。**整机单数据面**：同一时刻只启用一种，变更需
+                                                     #   重启服务（systemctl restart nfvis）生效；缺省（未配置）= vpp，
+                                                     #   与引入该开关之前的行为一致。内核数据面下 ACL/QoS/端口镜像/
+                                                     #   DHCP 中继与服务器/DNS 代理/风暴抑制/端口安全/LLDP/memif
+                                                     #   尚未实现，**提交期直接拒绝**（不留「配了不生效」的假功能）；
+                                                     #   另有两条内核侧约束在提交期校验：对象名 ≤15 字符、VNF 虚拟网卡
+                                                     #   不能直接作三层接口（改用「接入已配网关的二层交换机」）。
 set hostname <string>
 set timezone <tz>
 set ntp server <ip|host> [prefer]

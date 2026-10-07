@@ -16,6 +16,8 @@
 #       --admin-password P  预置 admin 口令（至少 8 个字符）。不给则由 nfvisd 生成随机一次性口令，
 #                           首次启动后由本脚本从日志里取出来打印。
 #       --no-start          只安装，不起服务（服务相关自检转为不可判定）
+#       --dataplane MODE    数据面实现：vpp（缺省）| kernel（Linux 内核网络）。
+#                          两种数据面的软件包都会安装，以便之后随时切换（切换＝改配置 + 重启服务）
 #       --verify            只体检（假定已安装；不安装）
 #       --keep              保留解包目录（排查用；缺省成功即清理）
 #       --payload DIR       载荷目录（.run 头部自动传；手工执行时指明）
@@ -29,6 +31,10 @@ EXPECT_VPP=${NFVIS_EXPECT_VPP:-26.06}
 
 PAYLOAD=${NFVIS_PAYLOAD:-$(cd "$(dirname "$0")" && pwd)}
 ASSUME_YES=0; DO_START=1; DO_INSTALL=1; KEEP=0; ADMIN_PW=""
+# 数据面实现（v3 决策 #404）：vpp = 用 VPP；kernel = 用 Linux 内核网络。
+# 两种数据面的软件包**都装**（决策 #406）——`--dataplane` 只决定这次用哪一套跑。
+# 安装期选择落在 committed 配置的 system.dataplane（产品内唯一事实源），安装完成后写库并重启生效。
+DATAPLANE=${NFVIS_DATAPLANE:-vpp}
 CLI_PW=""; OTP=""; PW_SRC=""; PW_CONFIRMED=0
 NFVIS_DB=${NFVIS_DB:-/var/lib/nfvis/nfvis.db}
 FRESH_DB=1 # 配置库尚不存在 = 首次引导（--admin-password 与一次性口令都只在这种情况下出现）
@@ -48,9 +54,20 @@ die()  { printf '错误：%s\n' "$*" >&2; exit 2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # 随包内置的安装清单：与规格书/用户手册的底座清单一致，缺一个就装不出可用的一体机。
-PKGS_INSTALL="nfvis vpp vpp-plugin-core vpp-plugin-dpdk vpp-drivers
+#
+# **两种数据面的软件包都装**（含 VPP 及其插件）——`--dataplane` 只决定"这次用哪一套跑"，
+# 不决定"装什么"。理由：切换数据面是运行期动作（改配置 + 重启服务），若当时机器没有另一套
+# 数据面的软件包，切换就变成"得先联网/再找安装包"，气隙场景直接做不到。装齐一次，之后
+# 随时可切（VPP 只占磁盘，不在内核数据面下运行）。
+PKGS_COMMON="nfvis
 libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils cloud-image-utils
 genisoimage docker.io chrony tcpdump curl ca-certificates"
+PKGS_VPP="vpp vpp-plugin-core vpp-plugin-dpdk vpp-drivers"
+
+pkgs_install() {
+    printf '%s
+%s' "$PKGS_COMMON" "$PKGS_VPP"
+}
 
 usage() {
     cat <<'EOF'
@@ -58,6 +75,8 @@ usage() {
   -y, --yes               跳过确认（自动化；非交互场景必给）
       --admin-password P  预置 admin 口令（至少 8 个字符，仅限字母数字与 @._+=-）
       --no-start          只安装，不起服务（服务相关自检转为不可判定）
+      --dataplane MODE    数据面实现：vpp（缺省）| kernel（Linux 内核网络）。
+                          两种数据面的软件包都会安装，以便之后随时切换（切换＝改配置 + 重启服务）
       --verify            只体检（假定已安装；不安装）
       --keep              保留解包目录（排查用；缺省成功即清理）
       --payload DIR       载荷目录（.run 头部自动传；手工执行时指明）
@@ -156,6 +175,29 @@ apt_local() {
         "$@"
 }
 
+# apply_dataplane 把安装期选择写进 committed 配置（产品内唯一事实源）并重启服务生效。
+# 缺省 vpp 时若配置里本就没有该字段，不写（保持「未配置 = vpp」的既有语义，避免无谓的库变更）。
+apply_dataplane() {
+    [ "$DATAPLANE" = "kernel" ] || return 0
+    have nfvis-cli || { info "未找到 nfvis-cli，跳过数据面配置写入（可稍后用 wizard 选择）"; return 0; }
+    local pw="${ADMIN_PW:-$CLI_PW}"
+    if [ -z "$pw" ]; then
+        info "没有可用口令，跳过数据面配置写入（可稍后登录 CLI 执行 set system dataplane kernel）"
+        return 0
+    fi
+    local out
+    out=$("$(command -v nfvis-cli)" -server https://127.0.0.1 -u admin -p "$pw" -source console         -c 'configure; set system dataplane kernel; commit; exit' 2>&1 | grep -v '^连接' || true)
+    if cli_is_err "$out"; then
+        info "写入数据面配置未成功（见下方输出）；可稍后登录 CLI 执行 set system dataplane kernel"
+        printf '%s
+' "$out"
+        return 0
+    fi
+    info "已写入数据面配置：system.dataplane = kernel；重启服务使其生效"
+    systemctl restart nfvis.service >/dev/null 2>&1 || info "重启 nfvis.service 失败（见自检项）"
+    if wait_for 60 test "$(ui_code)" = 200; then ok "内核数据面已生效（服务重启后控制面恢复）"; else info "重启后控制面未就绪（见自检项）"; fi
+}
+
 do_install() {
     hdr "安装依赖与产品包（本地源，离线）"
     DEBIAN_FRONTEND=noninteractive apt_local update > "$WORK/apt-update.log" 2>&1 ||
@@ -163,11 +205,11 @@ do_install() {
     ok "本地源索引：$(grep -c '^Package: ' "$WORK/lists"/*Packages 2>/dev/null | head -1) 个候选包"
 
     # shellcheck disable=SC2086
-    PLAN=$(DEBIAN_FRONTEND=noninteractive apt_local -s install $PKGS_INSTALL 2>&1 | grep -E '^[0-9]+ upgraded|^E:' | tail -3)
+    PLAN=$(DEBIAN_FRONTEND=noninteractive apt_local -s install $(pkgs_install) 2>&1 | grep -E '^[0-9]+ upgraded|^E:' | tail -3)
     [ -n "$PLAN" ] && info "计划：$(printf '%s' "$PLAN" | tr '\n' ' ')"
 
     # shellcheck disable=SC2086
-    if DEBIAN_FRONTEND=noninteractive apt_local install $PKGS_INSTALL > "$WORK/apt-install.log" 2>&1; then
+    if DEBIAN_FRONTEND=noninteractive apt_local install $(pkgs_install) > "$WORK/apt-install.log" 2>&1; then
         ok "apt 安装完成（$(grep -cE '^Setting up ' "$WORK/apt-install.log") 个包完成配置）"
     else
         printf '\n---- 安装日志尾部 ----\n' >&2
@@ -209,13 +251,23 @@ start_services() {
     hdr "启服务"
     # VPP：安装时保持"开机不自启"（发行版默认 startup.conf 只保证 VPP 起来，业务口的配置由
     # nfvisd 在 `request vpp restart` 时生成并接管）；这里手工起一次，让 nfvisd 立刻连上。
-    if systemctl list-unit-files vpp.service >/dev/null 2>&1; then
+    # 内核数据面下**不启动** VPP，但把它设为开机不自启并**留着软件包**——之后切回 vpp 数据面
+    # 时 nfvisd 会按需拉起（无需重新安装）。
+    if [ "$DATAPLANE" = "kernel" ]; then
+        if systemctl list-unit-files vpp.service >/dev/null 2>&1; then
+            systemctl disable vpp.service >/dev/null 2>&1 && info "VPP 已安装并设为开机不自启（本次数据面为 kernel，未启动；切回 vpp 时由 nfvis 拉起）"
+        else
+            info "未找到 vpp.service（本次数据面为 kernel，不影响使用）"
+        fi
+    elif systemctl list-unit-files vpp.service >/dev/null 2>&1; then
         systemctl disable vpp.service >/dev/null 2>&1 && info "vpp.service 已设为开机不自启（由 nfvis 管理）"
         systemctl start vpp.service >/dev/null 2>&1 || info "VPP 启动失败（见自检项）"
     fi
     systemctl enable --now nfvis.service >/dev/null 2>&1 || info "nfvis.service 启动失败（见自检项）"
-    log "等待 VPP 数据面套接字 ..."
-    if wait_for 30 test -S /run/vpp/api.sock; then ok "VPP API 套接字就绪：/run/vpp/api.sock"; else info "VPP 套接字未就绪（见自检项）"; fi
+    if [ "$DATAPLANE" != "kernel" ]; then
+        log "等待 VPP 数据面套接字 ..."
+        if wait_for 30 test -S /run/vpp/api.sock; then ok "VPP API 套接字就绪：/run/vpp/api.sock"; else info "VPP 套接字未就绪（见自检项）"; fi
+    fi
     log "等待 nfvisd 控制面就绪 ..."
     if wait_for 60 test "$(ui_code)" = 200; then ok "控制面已监听且响应（HTTP 200）"; else info "控制面未就绪（见自检项）"; fi
 }
@@ -264,12 +316,39 @@ run_checks() {
         bad "nfvis.service 状态异常（active=$(systemctl is-active nfvis.service 2>/dev/null)、enabled=$(systemctl is-enabled nfvis.service 2>/dev/null)）"
     fi
 
-    if have vppctl && vppctl show version 2>/dev/null | grep -q "$EXPECT_VPP"; then
+    if [ "$DATAPLANE" = "kernel" ]; then
+        skip "VPP 运行态检查（本次数据面为内核网络，VPP 按设计未启动）"
+        # VPP 仍须**已安装**：它是"随时切回 vpp"的前提（独立事实源取 dpkg，不依赖它是否在跑）。
+        local vppver
+        vppver=$(dpkg-query -W -f='${Status}|${Version}' vpp 2>/dev/null || echo "|")
+        if [ "${vppver%%|*}" = "install ok installed" ]; then
+            ok "VPP 已安装（版本 ${vppver##*|}），可随时切回 vpp 数据面"
+        else
+            bad "VPP 未安装（切回 vpp 数据面将无法进行；请安装 vpp 及其插件包）"
+        fi
+        # 内核数据面的独立事实源：工具在不在 + 运行中的服务是否真的按内核数据面装配。
+        if have ip && have nft; then
+            ok "内核网络工具就绪（ip / nft 可用）"
+        else
+            bad "内核网络工具缺失（ip 或 nft 不在 PATH；内核数据面需要 iproute2 与 nftables）"
+        fi
+        if have nfvis-cli; then
+            local dpout
+            dpout=$("$(command -v nfvis-cli)" -server https://127.0.0.1 -u admin -p "$CLI_PW" -source console                 -c 'show configuration | display set' 2>/dev/null | grep '^set system dataplane' || true)
+            if [ "$dpout" = "set system dataplane kernel" ]; then
+                ok "committed 配置的数据面为 kernel（CLI 独立事实源）"
+            else
+                bad "committed 配置的数据面不是 kernel（实际：${dpout:-未配置}）"
+            fi
+        fi
+    elif have vppctl && vppctl show version 2>/dev/null | grep -q "$EXPECT_VPP"; then
         ok "VPP 运行中（vppctl 独立事实源，版本含 $EXPECT_VPP）"
     else
         bad "VPP 未运行或版本不含 $EXPECT_VPP（vppctl show version 失败）"
     fi
-    if [ -S /run/vpp/api.sock ]; then ok "VPP API 套接字：/run/vpp/api.sock"; else bad "VPP API 套接字缺失"; fi
+    if [ "$DATAPLANE" != "kernel" ]; then
+        if [ -S /run/vpp/api.sock ]; then ok "VPP API 套接字：/run/vpp/api.sock"; else bad "VPP API 套接字缺失"; fi
+    fi
 
     local code
     code=$(ui_code)
@@ -413,6 +492,7 @@ main() {
             -y | --yes) ASSUME_YES=1 ;;
             --admin-password) shift; ADMIN_PW="${1:-}"; [ -n "$ADMIN_PW" ] || die "--admin-password 需要值" ;;
             --no-start) DO_START=0 ;;
+            --dataplane) shift; DATAPLANE="${1:-}"; [ -n "$DATAPLANE" ] || die "--dataplane 需要值" ;;
             --verify) DO_INSTALL=0 ;;
             --keep) KEEP=1 ;;
             --payload) shift; PAYLOAD="${1:-}"; [ -n "$PAYLOAD" ] || die "--payload 需要目录" ;;
@@ -422,6 +502,10 @@ main() {
         esac
         shift
     done
+    case "$DATAPLANE" in
+        vpp | kernel) ;;
+        *) die "--dataplane 只接受 vpp|kernel（当前：$DATAPLANE）" ;;
+    esac
     if [ -n "$ADMIN_PW" ]; then
         [ "${#ADMIN_PW}" -ge 8 ] ||
             die "--admin-password 至少 8 个字符（短于 8 会被 nfvisd 的口令策略拒绝、守护进程起不来）"
@@ -454,6 +538,7 @@ EOF
         fi
         if [ "$DO_START" = 1 ]; then
             start_services
+            apply_dataplane
             if [ -n "$ADMIN_PW" ] && [ "$FRESH_DB" = 1 ]; then
                 rm -f /etc/systemd/system/nfvis.service.d/10-offline-init-password.conf
                 rmdir /etc/systemd/system/nfvis.service.d 2>/dev/null || true

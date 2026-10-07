@@ -8,6 +8,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"github.com/xzjt/nfvis/internal/orchestrator"
 	"github.com/xzjt/nfvis/internal/orchestrator/compute"
 	"github.com/xzjt/nfvis/internal/orchestrator/container"
+	"github.com/xzjt/nfvis/internal/orchestrator/netkernel"
 	"github.com/xzjt/nfvis/internal/orchestrator/network"
 	"github.com/xzjt/nfvis/internal/state"
 	"github.com/xzjt/nfvis/internal/system"
@@ -194,79 +196,108 @@ func run() error {
 		metricsDisabled = "历史时序存储已由 -metrics-db 显式禁用"
 	}
 
-	// M3：VPP 数据面连接管理（FR-SYS-007）先于事务引擎装配（引擎需要下发编排器）。
-	vppMgr := network.NewManager(network.Config{Socket: *vppSock, Log: log}, nil)
-	defer vppMgr.Close()
-	// 决策 #400：appliedHash 是进程内字段，整机重启后丢失 ⇒ pending_restart 恒报「是」（真机三次复现）。
-	// 启动时从持久落点载入上次应用态，使「重启后 VPP 正按 committed 配置运行」如实为「否」。
-	// 载入失败只告警（保守回退到旧行为，不阻塞启动）。
-	vppMgr.SetAppliedStore(network.NewAppliedStore(network.DefaultAppliedHashPath))
-	if err := vppMgr.LoadApplied(); err != nil {
-		log.Warn("载入已应用 vpp 配置哈希失败（重启后可能误报待重启）", "err", err)
+	// 数据面实现的选择（v3 决策 #404）：由 committed 配置的 system.dataplane 决定装配哪一套
+	// 网络编排实现。**整机单数据面**，切换需重启 nfvisd；读不到配置时回落 vpp（与引入该开关
+	// 之前的行为逐字一致）。
+	dpMode := committedDataPlaneMode(store)
+	log.Info("数据面实现", "mode", dpMode)
+
+	// netProvider 是装配层使用的完整网络编排方法面（提交编排 + 恢复巡检 + 运行态读视图）；
+	// VPP 与内核两种实现都满足它（见 netRuntime 的说明）。
+	var (
+		netProvider   netRuntime
+		l2net         *network.L2Network // VPP 数据面专用（nil = 内核数据面）
+		vppMgr        *network.Manager   // VPP 数据面专用
+		dpdkBinder    *network.DPDKBinder
+		dpdkBindings  *network.Bindings
+		sriovProvider *network.SRIOVProvider
+	)
+	if dpMode == model.DataPlaneKernel {
+		// 内核数据面：不连 VPP、不拉起 VPP、不做 DPDK 接管与 startup.conf 管理。
+		kp := netkernel.New(nil)
+		netProvider = kp
+		log.Info("已选择 Linux 内核网络数据面（内核 bridge/VRF/nftables/vxlan）")
+	} else {
+		// M3：VPP 数据面连接管理（FR-SYS-007）先于事务引擎装配（引擎需要下发编排器）。
+		vppMgr = network.NewManager(network.Config{Socket: *vppSock, Log: log}, nil)
+		defer vppMgr.Close()
+		// 决策 #400：appliedHash 是进程内字段，整机重启后丢失 ⇒ pending_restart 恒报「是」（真机三次复现）。
+		// 启动时从持久落点载入上次应用态，使「重启后 VPP 正按 committed 配置运行」如实为「否」。
+		// 载入失败只告警（保守回退到旧行为，不阻塞启动）。
+		vppMgr.SetAppliedStore(network.NewAppliedStore(network.DefaultAppliedHashPath))
+		if err := vppMgr.LoadApplied(); err != nil {
+			log.Warn("载入已应用 vpp 配置哈希失败（重启后可能误报待重启）", "err", err)
+		}
+		l2Provider := network.NewL2ProviderFunc(vppMgr.L2ClientFunc())
+		l3Provider := network.NewL3ProviderFunc(vppMgr.L3ClientFunc())
+		l2net = network.NewL2Network(orchestrator.NewNoopNetwork(), l2Provider)
+		l2net.SetL3(l3Provider)
+		l2net.SetServices(network.NewServicesProviderFunc(vppMgr.SvcClientFunc()))
+		// 决策 #335：交换机 DHCP 中继（VPP dhcp proxy；恢复重放含 relay）
+		l2net.SetDhcp(network.NewDhcpProviderFunc(vppMgr.DhcpClientFunc()))
+		// 决策 #345：数据面 DNS 代理（自研域内转发器，punt socket；恢复重放含它）
+		dnsProxy := network.NewDNSProxyProviderFunc(vppMgr.PuntClientFunc())
+		// 优雅退出必须注销 punt（否则留一个指向已消失 socket 的注册＝域内 DNS 黑洞）
+		defer func() { _ = dnsProxy.Close() }()
+		l2net.SetDNSProxy(dnsProxy)
+		// 决策 #359：域内 DHCP 服务器（用户态服务器 + 每交换机一条内置 L2 tap + UDP/67 punt；
+		// 恢复重放含它）。租约持久化到 /var/lib/nfvis/dhcp（独立于配置库，不进备份/恢复语义）。
+		dhcpServer := network.NewDHCPServerProviderFunc(vppMgr.DHCPServerClientFunc(), vppMgr.PuntClientFunc())
+		// 优雅退出：关 punt 接收 socket 并注销 UDP/67 注册（与 dnsProxy 同理——留一个指向
+		// 已消失 socket 的注册＝域内 DHCP 黑洞）。
+		defer func() { _ = dhcpServer.Close() }()
+		l2net.SetDHCPServer(dhcpServer)
+		// 决策 #383：VXLAN overlay（VPP vxlan plugin；单播 remote、IPv4 下垫层、L2 成员）。
+		// 身份＝接口 tag（`nfvis-vxlan:<名>`）：VPP 26.06 的 vxlan dump 恒空（真机实证），恢复重放
+		// 按 tag 判存量、变更撤旧按旧配置的元组——不靠进程内登记、也不靠 VPP 分配的接口名。
+		l2net.SetVxlan(network.NewVxlanProviderFunc(vppMgr.VxlanClientFunc()))
+		// 决策 #385：接口入向风暴抑制（VPP policer + L2 classify 表挂接口入向；随接口声明重放）。
+		// 计数读数注入 Manager（stats segment 经 vpp_get_stats；读不到时读视图如实说明原因）。
+		stormProvider := network.NewStormProviderFunc(vppMgr.StormClientFunc())
+		stormProvider.SetCountersReader(vppMgr)
+		l2net.SetStorm(stormProvider)
+		// 决策 #389：接口端口安全白名单（VPP macip ACL 绑接口入向；tag 反查 + 随接口声明重放）。
+		l2net.SetPortSec(network.NewPortSecProviderFunc(vppMgr.PortSecClientFunc()))
+		l2net.SetACL(network.NewAclProviderFunc(vppMgr.AclClientFunc()))
+		l2net.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
+		l2net.SetBond(network.NewBondProviderFunc(vppMgr.BondClientFunc()))
+		l2net.SetLldp(network.NewLldpProviderFunc(vppMgr.LldpClientFunc()))
+		// M4-4：VNF vNIC（vhost-user）接入
+		l2net.SetVhostUser(network.NewVhostUserProviderFunc(vppMgr.VhostUserClientFunc()))
+		// M4-7：容器 memif 接入
+		l2net.SetMemif(network.NewMemifProviderFunc(vppMgr.MemifClientFunc()))
+		// V1 收尾（决策 #70）：声明式 interfaces[].sriov.vf_count 落地（同一实例亦供 API 命令式路径）
+		l2net.SetSRIOV(sriovProvider)
+		// FR-NET-001（决策 #72）：网卡 DPDK 驱动接管（sysfs driver_override/bind/unbind）
+		dpdkBinder = network.NewDPDKBinder()
+		// 决策 #100（发现 #8）：绑定记录（口名 → PCI）。口一旦交 DPDK，内核就没有它的 netdev 了，
+		// 而 startup.conf 的 dev 段以 PCI 为键——记录是「绑定那一刻」留下的唯一映射来源，
+		// 也是「按口名解绑」的依据。不入 committed 配置（决策 #30：PCI 不随配置走）。
+		dpdkBindings = network.NewBindings(network.DefaultBindingsPath)
+		dpdkBinder.Bindings = dpdkBindings
+		// 迁移：把当前部署的 startup.conf 里 dev <pci> { name <口> } 的映射并入记录，
+		// 使「照旧手册带外播种」的存量安装不必重绑就能转由产品维护。
+		if n, err := dpdkBindings.ImportStartupConf(network.DefaultStartupPath); err != nil {
+			log.Warn("导入现有 startup.conf 的 DPDK 端口映射失败（可在数据面重启前重试）", "err", err)
+		} else if n > 0 {
+			log.Info("已从现有 startup.conf 导入 DPDK 端口映射", "count", n, "path", dpdkBindings.Path)
+		}
+		netProvider = l2net
 	}
-	l2Provider := network.NewL2ProviderFunc(vppMgr.L2ClientFunc())
-	l3Provider := network.NewL3ProviderFunc(vppMgr.L3ClientFunc())
-	netProvider := network.NewL2Network(orchestrator.NewNoopNetwork(), l2Provider)
-	netProvider.SetL3(l3Provider)
-	netProvider.SetServices(network.NewServicesProviderFunc(vppMgr.SvcClientFunc()))
-	// 决策 #335：交换机 DHCP 中继（VPP dhcp proxy；恢复重放含 relay）
-	netProvider.SetDhcp(network.NewDhcpProviderFunc(vppMgr.DhcpClientFunc()))
-	// 决策 #345：数据面 DNS 代理（自研域内转发器，punt socket；恢复重放含它）
-	dnsProxy := network.NewDNSProxyProviderFunc(vppMgr.PuntClientFunc())
-	// 优雅退出必须注销 punt（否则留一个指向已消失 socket 的注册＝域内 DNS 黑洞）
-	defer func() { _ = dnsProxy.Close() }()
-	netProvider.SetDNSProxy(dnsProxy)
-	// 决策 #359：域内 DHCP 服务器（用户态服务器 + 每交换机一条内置 L2 tap + UDP/67 punt；
-	// 恢复重放含它）。租约持久化到 /var/lib/nfvis/dhcp（独立于配置库，不进备份/恢复语义）。
-	dhcpServer := network.NewDHCPServerProviderFunc(vppMgr.DHCPServerClientFunc(), vppMgr.PuntClientFunc())
-	// 优雅退出：关 punt 接收 socket 并注销 UDP/67 注册（与 dnsProxy 同理——留一个指向
-	// 已消失 socket 的注册＝域内 DHCP 黑洞）。
-	defer func() { _ = dhcpServer.Close() }()
-	netProvider.SetDHCPServer(dhcpServer)
-	// 决策 #383：VXLAN overlay（VPP vxlan plugin；单播 remote、IPv4 下垫层、L2 成员）。
-	// 身份＝接口 tag（`nfvis-vxlan:<名>`）：VPP 26.06 的 vxlan dump 恒空（真机实证），恢复重放
-	// 按 tag 判存量、变更撤旧按旧配置的元组——不靠进程内登记、也不靠 VPP 分配的接口名。
-	netProvider.SetVxlan(network.NewVxlanProviderFunc(vppMgr.VxlanClientFunc()))
-	// 决策 #385：接口入向风暴抑制（VPP policer + L2 classify 表挂接口入向；随接口声明重放）。
-	// 计数读数注入 Manager（stats segment 经 vpp_get_stats；读不到时读视图如实说明原因）。
-	stormProvider := network.NewStormProviderFunc(vppMgr.StormClientFunc())
-	stormProvider.SetCountersReader(vppMgr)
-	netProvider.SetStorm(stormProvider)
-	// 决策 #389：接口端口安全白名单（VPP macip ACL 绑接口入向；tag 反查 + 随接口声明重放）。
-	netProvider.SetPortSec(network.NewPortSecProviderFunc(vppMgr.PortSecClientFunc()))
-	netProvider.SetACL(network.NewAclProviderFunc(vppMgr.AclClientFunc()))
-	netProvider.SetNAT(network.NewNatProviderFunc(vppMgr.NatClientFunc()))
-	netProvider.SetBond(network.NewBondProviderFunc(vppMgr.BondClientFunc()))
-	netProvider.SetLldp(network.NewLldpProviderFunc(vppMgr.LldpClientFunc()))
-	// M4-4：VNF vNIC（vhost-user）接入
-	netProvider.SetVhostUser(network.NewVhostUserProviderFunc(vppMgr.VhostUserClientFunc()))
-	// M4-7：容器 memif 接入
-	netProvider.SetMemif(network.NewMemifProviderFunc(vppMgr.MemifClientFunc()))
-	// V1 收尾（决策 #70）：声明式 interfaces[].sriov.vf_count 落地（同一实例亦供 API 命令式路径）
-	sriovProvider := network.NewSRIOVProvider()
-	netProvider.SetSRIOV(sriovProvider)
-	// FR-NET-001（决策 #72）：网卡 DPDK 驱动接管（sysfs driver_override/bind/unbind）
-	dpdkBinder := network.NewDPDKBinder()
-	// 决策 #100（发现 #8）：绑定记录（口名 → PCI）。口一旦交 DPDK，内核就没有它的 netdev 了，
-	// 而 startup.conf 的 dev 段以 PCI 为键——记录是「绑定那一刻」留下的唯一映射来源，
-	// 也是「按口名解绑」的依据。不入 committed 配置（决策 #30：PCI 不随配置走）。
-	dpdkBindings := network.NewBindings(network.DefaultBindingsPath)
-	dpdkBinder.Bindings = dpdkBindings
-	// 迁移：把当前部署的 startup.conf 里 dev <pci> { name <口> } 的映射并入记录，
-	// 使「照旧手册带外播种」的存量安装不必重绑就能转由产品维护。
-	if n, err := dpdkBindings.ImportStartupConf(network.DefaultStartupPath); err != nil {
-		log.Warn("导入现有 startup.conf 的 DPDK 端口映射失败（可在数据面重启前重试）", "err", err)
-	} else if n > 0 {
-		log.Info("已从现有 startup.conf 导入 DPDK 端口映射", "count", n, "path", dpdkBindings.Path)
-	}
+	// V1 收尾（决策 #70）：SR-IOV VF 数量是 sysfs 实现，与数据面无关——两种数据面都装配
+	// （内核数据面下 VF 直通本就是内核能力）。
+	sriovProvider = network.NewSRIOVProvider()
+
 	// M3-8：恢复收敛的不可收敛项落点（GET /alarms）
 	alarms := network.NewAlarmStore()
 	// NFR-006：告警也带「记录时时钟是否已同步」三态标记，探针与审计侧取同一个
 	// system.ClockSynced（单源），未注入即未知（决策 #307）。
 	alarms.SetClockProbe(system.ClockSynced)
-	netProvider.SetAlarms(alarms)
-	// 决策 #337 判据③：成员口 rx 计数读物（复用 #326 的运行态读数路径，不新造 VPP 查询）。
-	netProvider.SetCounters(vppMgr.Runtime())
+	if l2net != nil {
+		l2net.SetAlarms(alarms)
+		// 决策 #337 判据③：成员口 rx 计数读物（复用 #326 的运行态读数路径，不新造 VPP 查询）。
+		l2net.SetCounters(vppMgr.Runtime())
+	}
 	// M5-1：事件总线（FR-API-006 / FR-OPS-020~022）。所有事件源经此汇聚，
 	// 由 GET /events（SSE）推送；告警变更同时进入总线。
 	bus := events.New()
@@ -296,19 +327,28 @@ func run() error {
 	// 决策 #314：启动路径的数据面前置判定。复用连接管理器的既有状态视图（与 /vpp/status 同源），
 	// 不另写探测——VPP 未连接时 start/restart(off→start) 立即失败，不进入会阻塞的 vhost-user
 	// 准备阶段（round95 真机：该阶段会一直等到客户端超时且留下 paused 残域）。
-	computeCfg.DataPlaneProbe = func() error {
-		v := vppMgr.StatusView(nil)
-		if v.Connected {
-			return nil
+	//
+	// 内核数据面（v3 决策 #404）**不设该前置**：VM 走 virtio 网卡 + 宿主 tap + vhost-net，
+	// 不依赖任何数据面进程，故不存在「数据面没起来就必然起不来」这回事。
+	if dpMode == model.DataPlaneVPP {
+		computeCfg.DataPlaneProbe = func() error {
+			v := vppMgr.StatusView(nil)
+			if v.Connected {
+				return nil
+			}
+			if v.LastError != "" {
+				return errors.New(v.LastError)
+			}
+			return fmt.Errorf("VPP 连接状态为 %s", vppMgr.State())
 		}
-		if v.LastError != "" {
-			return errors.New(v.LastError)
-		}
-		return fmt.Errorf("VPP 连接状态为 %s", vppMgr.State())
 	}
-	// vhost-user socket 目录须存在且可被 QEMU/VPP 访问（M4-P0 记录 §5）。
-	if err := os.MkdirAll(computeCfg.VhostDir, 0o755); err != nil {
-		log.Warn("创建 vhost-user socket 目录失败", "dir", computeCfg.VhostDir, "err", err)
+	// 计算编排按数据面决定 vNIC 的落地形态（VPP：vhost-user socket；内核：virtio + 宿主 tap + vhost-net）。
+	computeCfg.DataPlane = dpMode
+	// vhost-user socket 目录须存在且可被 QEMU/VPP 访问（M4-P0 记录 §5）。内核数据面不用它。
+	if dpMode == model.DataPlaneVPP {
+		if err := os.MkdirAll(computeCfg.VhostDir, 0o755); err != nil {
+			log.Warn("创建 vhost-user socket 目录失败", "dir", computeCfg.VhostDir, "err", err)
+		}
 	}
 	libvirtCtx, libvirtCancel := context.WithTimeout(context.Background(), asyncConnectAttemptTimeout)
 	p, conn, cerr := compute.NewConnectedProvider(libvirtCtx, computeCfg)
@@ -528,15 +568,23 @@ func run() error {
 	// M5-3：数据面抓包（VPP pcap trace 经 CLI socket；FR-OPS-042）
 	// 注意：vppctl -s 需 CLI socket（/run/vpp/cli.sock），不是二进制 API socket；
 	// 传空由 vppctl 取缺省（同 diagController 的做法）。
-	captureProvider := network.NewCaptureProvider(network.NewVppctlShell(""),
-		func(name string) (uint32, bool, error) {
-			c, err := vppMgr.L2ClientFunc()()
-			if err != nil {
-				return 0, false, err
-			}
-			defer c.Close()
-			return c.SwInterfaceIndex(name)
-		}, network.DefaultCaptureDir)
+	// 内核数据面下抓包尚未接入（如实以「未接入」呈现，不静默返回空结果）。
+	var captureProvider *network.CaptureProvider
+	var captureAPI api.CaptureRuntime
+	if l2net != nil {
+		captureProvider = network.NewCaptureProvider(network.NewVppctlShell(""),
+			func(name string) (uint32, bool, error) {
+				c, err := vppMgr.L2ClientFunc()()
+				if err != nil {
+					return 0, false, err
+				}
+				defer c.Close()
+				return c.SwInterfaceIndex(name)
+			}, network.DefaultCaptureDir)
+		// 包装成 API 契约形状；内核数据面下保持 nil（未接入 ⇒ 端点如实回 503），
+		// 而不是把一个内部为 nil 的控制器塞进接口（那样一调用就 panic）。
+		captureAPI = &captureController{p: captureProvider}
+	}
 
 	// M5-7：软件升级/回退、电源、NTP（FR-OPS-001~003）
 	swMgr := system.NewSoftwareManager(system.DefaultSoftwareDir,
@@ -557,19 +605,32 @@ func run() error {
 
 	// M5-4：诊断归档（tech-support）与 core dump 管理（FR-OPS-040/041）
 	coreDumps := system.NewCoreDumps("", 0)
+	// 数据面运行态来源：VPP 数据面取连接管理器状态视图；内核数据面**如实报当前数据面为内核**
+	// （不编造一个「VPP 已连接」的视图）。
+	dpStatus := func() any {
+		if vppMgr == nil {
+			return map[string]any{"mode": model.DataPlaneKernel, "connected": false,
+				"note": "当前数据面为 Linux 内核网络，不使用 VPP"}
+		}
+		return vppMgr.StatusView(nil)
+	}
 	techSupport := system.NewTechSupport("", system.TechSupportSources{
 		Version: func() any {
 			host, _ := os.Hostname()
-			view := vppMgr.StatusView(nil)
+			vppVersion, vppConnected := "", false
+			if vppMgr != nil {
+				view := vppMgr.StatusView(nil)
+				vppVersion, vppConnected = view.Version, view.Connected
+			}
 			return map[string]any{
-				"nfvis": api.VersionStr, "hostname": host,
-				"vpp": view.Version, "vpp_connected": view.Connected,
+				"nfvis": api.VersionStr, "hostname": host, "dataplane": dpMode,
+				"vpp": vppVersion, "vpp_connected": vppConnected,
 				"kernel": kernelRelease(),
 			}
 		},
 		Config: func() (any, error) { return engine.Committed() },
 		Audit:  func() (any, error) { return engine.AuditTrail(500, 0) },
-		Status: func() (any, error) { return vppMgr.StatusView(nil), nil },
+		Status: func() (any, error) { return dpStatus(), nil },
 		Logs:   nfvisdLogTail,
 		Cores:  coreDumps.List,
 	}, api.VersionStr)
@@ -898,29 +959,42 @@ func run() error {
 		}
 	}()
 
-	// 决策 #348：nfvisd 启动时确保 VPP 运行（重启后数据面自动恢复）。只在此处（连接管理 Run
-	// 之前）调用一次，且是**发起式、不等待**：VPP 已在运行则不做动作；未运行则发起拉起
-	// （systemctl start --no-block vpp）后立即返回，就绪由既有连接重试循环接管（不在这里等）。
-	// 发起失败如实告警但**不阻塞启动**；VPP 是否真的可用由连接状态体现（不谎称可用）。
-	// 注意：发起成功 ≠ 已在线，故这里**不消解**告警——VPP 连接成功时由 runRecovery 消解。
-	if err := vppMgr.EnsureRunning(ctx); err != nil {
-		log.Warn("启动时发起确保 VPP 运行未成功，数据面可能暂不可用（就绪由连接重试循环接管）", "err", err)
-		vppAutostartAlarms(alarms, err)
-	}
-	vppMgr.OnConnect(func(version string) { go runRecovery() })
-	go func() {
-		if err := vppMgr.Run(ctx); err != nil {
-			log.Error("VPP 连接管理退出", "err", err)
+	// 数据面启动（v3 决策 #404）：VPP 数据面走连接管理器的拉起/重连/恢复收敛；
+	// 内核数据面无连接可管，启动后直接做一次恢复收敛（幂等重放声明）。
+	var startupApplier *network.Applier
+	if l2net != nil {
+		// 决策 #348：nfvisd 启动时确保 VPP 运行（重启后数据面自动恢复）。只在此处（连接管理 Run
+		// 之前）调用一次，且是**发起式、不等待**：VPP 已在运行则不做动作；未运行则发起拉起
+		// （systemctl start --no-block vpp）后立即返回，就绪由既有连接重试循环接管（不在这里等）。
+		// 发起失败如实告警但**不阻塞启动**；VPP 是否真的可用由连接状态体现（不谎称可用）。
+		// 注意：发起成功 ≠ 已在线，故这里**不消解**告警——VPP 连接成功时由 runRecovery 消解。
+		if err := vppMgr.EnsureRunning(ctx); err != nil {
+			log.Warn("启动时发起确保 VPP 运行未成功，数据面可能暂不可用（就绪由连接重试循环接管）", "err", err)
+			vppAutostartAlarms(alarms, err)
 		}
-	}()
-	startupApplier := &network.Applier{Mgr: vppMgr,
-		// 解析顺序：先系统事实（sysfs），netdev 已因 DPDK 接管而消失时再回退到绑定记录（决策 #100）
-		PCI:      network.PCIResolverWithBindings(network.NewSysfsPCIResolver(), dpdkBindings),
-		Bindings: dpdkBindings,
-		// 掉口风险等处置只落日志：告警表按「恢复收敛」语义建/消（决策 #35），
-		// 目前没有它的生命周期，硬塞进去只会留下永不消退的告警。
-		Warn:      func(msg string) { log.Warn(msg) },
-		Restarter: network.NewSystemctlRestarter(), RestartOnApply: true}
+		vppMgr.OnConnect(func(version string) { go runRecovery() })
+		go func() {
+			if err := vppMgr.Run(ctx); err != nil {
+				log.Error("VPP 连接管理退出", "err", err)
+			}
+		}()
+		startupApplier = &network.Applier{Mgr: vppMgr,
+			// 解析顺序：先系统事实（sysfs），netdev 已因 DPDK 接管而消失时再回退到绑定记录（决策 #100）
+			PCI:      network.PCIResolverWithBindings(network.NewSysfsPCIResolver(), dpdkBindings),
+			Bindings: dpdkBindings,
+			// 掉口风险等处置只落日志：告警表按「恢复收敛」语义建/消（决策 #35），
+			// 目前没有它的生命周期，硬塞进去只会留下永不消退的告警。
+			Warn:      func(msg string) { log.Warn(msg) },
+			Restarter: network.NewSystemctlRestarter(), RestartOnApply: true}
+	} else {
+		// 内核数据面：无连接事件可等，启动即收敛一次（声明式重放，幂等）。
+		if cfg, err := engine.Committed(); err == nil {
+			if kp, ok := netProvider.(*netkernel.Provider); ok {
+				kp.SetConfig(cfg)
+			}
+		}
+		go runRecovery()
+	}
 
 	// M4-4：VM 生命周期动作后刷新 vNIC 断连告警（FR-NET-023）。
 	// 决策 #351：持有层常驻接线（未接入 = Noop 语义）——API 控制器不再按 nil 分支降级，
@@ -933,21 +1007,19 @@ func run() error {
 		TLSCert: *tlsCert,
 		TLSKey:  *tlsKey,
 		Log:     log,
-		VPP: &vppController{mgr: vppMgr, applier: startupApplier, engine: engine,
-			// socket 供起后健康探测用（与连接管理器同一套接字）
-			socket: *vppSock},
-		L2: &l2Controller{net: netProvider},
-		L3: &l3Controller{net: netProvider},
-		// 决策 #359：DHCP 服务器运行态读物（租约端点 + 端口读视图过滤内置 tap）。
-		// *network.L2Network 自持三个读物方法，直接传入。
+		// VPP 专有控制面（v3 决策 #404）：内核数据面下换成一个**如实报当前数据面**的实现，
+		// 使 `show vpp` / `GET /vpp/status` / `request vpp restart` 明确回答「当前数据面为内核网络」，
+		// 而不是「VPP 未连接」那种会误导排查的措辞。
+		VPP: vppControllerFor(dpMode, vppMgr, startupApplier, engine, *vppSock),
+		L2:  &l2Controller{net: netProvider},
+		L3:  &l3Controller{net: netProvider},
+		// 决策 #359/#383/#385/#389/#345/#383 的运行态读物：两种数据面实现都满足同一方法面——
+		// VPP 侧给出真值，内核侧对未实现族**如实报不可用**（Available=false + 原因），
+		// 装配处因此不分叉。
 		DHCPServer: netProvider,
-		// 决策 #383：VXLAN 运行态读物（GET /vxlan-tunnels 与 CLI 同源）。*network.L2Network 自持。
-		Vxlan: netProvider,
-		// 决策 #385：接口风暴抑制的数据面实况读物（CLI `show interfaces <if> detail` 的
-		// storm-control 块）。*network.L2Network 自持（StormDataplane）。
-		Storm: netProvider,
-		// 决策 #389：端口安全数据面实况（同族：接口 detail 的端口安全块）。
-		PortSec: netProvider,
+		Vxlan:      netProvider,
+		Storm:      netProvider,
+		PortSec:    netProvider,
 		// 决策 #388：主机防火墙数据面读数（CLI `show system firewall` 与
 		// `GET /system/firewall` 同一读视图；同一落地器负责下发/回读）。
 		Firewall: fwApplier,
@@ -955,24 +1027,16 @@ func run() error {
 		// 存在性检查**同一个** sysfs 实现（单一事实源）。
 		PCIExists: compute.NewSysfsPCIDeviceChecker(),
 		LLDP:      &lldpController{net: netProvider},
-		State:     state.New(vppMgr.Runtime()),
-		SRIOV:     sriovProvider,
-		DPDK: &dpdkController{b: dpdkBinder, rec: dpdkBindings, logger: log, facts: mgmtFacts,
-			// 数据面占用探测（发现 #13）：解绑前问 VPP「这个口还在你手里吗」
-			dataplane: func(ifname string) (bool, error) {
-				c, err := vppMgr.SvcClientFunc()()
-				if err != nil {
-					return false, err
-				}
-				defer c.Close()
-				_, ok, err := c.SwInterfaceIndex(ifname)
-				return ok, err
-			}},
+		// 运行态聚合：VPP 数据面取 stats segment；内核数据面无对应读数（nil 即安全返回空）。
+		State: state.New(stateRuntimeFor(dpMode, vppMgr)),
+		SRIOV: sriovProvider,
+		// DPDK 接管是 VPP 数据面专有（内核数据面物理口留在内核）；内核侧如实报不可用。
+		DPDK:        dpdkSetterFor(dpMode, dpdkBinder, dpdkBindings, log, mgmtFacts, vppMgr),
 		Kernel:      system.NewBaselineApplier(),
 		Hugepages:   system.NewSysfsHugepageSetter(), // 决策 #329：大页池回收（按页尺寸写 sysfs）
 		NAT:         &natSessionsController{net: netProvider},
 		Alarms:      &alarmController{store: alarms},
-		Diag:        &diagController{diag: vppMgr.Diagnostics()},
+		Diag:        diagRuntimeFor(dpMode, vppMgr),
 		VM:          vmAPI,
 		VMConsole:   computeProvider, // M4-5：串口 console（libvirt 域串口 ↔ WebSocket；持有层常驻）
 		VMSnapshots: vmSnaps,
@@ -981,7 +1045,7 @@ func run() error {
 		Events:      bus,
 		SysOps:      sysOps,
 		DiagOps:     &diagOpsController{tech: techSupport, cores: coreDumps},
-		Capture:     &captureController{p: captureProvider},
+		Capture:     captureAPI,
 		Software:    &softwareController{m: swMgr},
 		Hardware:    &hardwareController{p: hwProvider},
 		TLS:         &tlsController{m: tlsMgr},
@@ -1324,8 +1388,61 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// netRuntime 装配层使用的完整网络编排方法面：提交编排 + 恢复巡检 + 运行态读视图。
+//
+// VPP 实现（*network.L2Network）与内核实现（*netkernel.Provider）都满足它——换的是实现，
+// 不是调用方，故装配处与恢复巡检不必按数据面分叉。
+type netRuntime interface {
+	orchestrator.NetworkProvider
+	SetSocketDirs(vhostDir, memifDir string)
+	InvalidateRuntimeState()
+	RetryDeferredVRFDeletes(ctx context.Context, cfg model.Config) []string
+	CheckVnfPorts(ctx context.Context, cfg model.Config) []error
+	CheckInterfaceLinks(ctx context.Context, cfg model.Config) []error
+	ReconcileResidue(ctx context.Context, cfg model.Config) []error
+	ReconcileRecoveryAlarms(ctx context.Context, cfg model.Config) []error
+	ReconcileDHCPServer(ctx context.Context, cfg model.Config) []error
+	ReconcileProxy(ctx context.Context, cfg model.Config) []error
+	ReconcileStorm(ctx context.Context, cfg model.Config) []error
+	CheckLoop(ctx context.Context, cfg model.Config) []error
+	MACTable(ctx context.Context, name string) ([]network.MACTableEntry, error)
+	Routes(ctx context.Context, name string) ([]network.RouteEntry, error)
+	BridgeDomains() ([]network.BDRuntime, error)
+	InterfaceStates() (map[string]network.SwIfInfo, error)
+	VPPIfnames() ([]string, error)
+	KernelIfnames() ([]string, error)
+	KernelIfFacts() ([]network.KernelIfFacts, error)
+	LldpNeighbors(ctx context.Context) ([]network.LldpNeighbor, error)
+	NATSessions(ctx context.Context) ([]network.NATSession, error)
+	VxlanStates(ctx context.Context) (map[string]network.VxlanState, error)
+	DHCPServerLeases(name string) ([]network.DHCPLease, bool)
+	DHCPServerActiveLeases(name string) (int, bool)
+	DHCPTapIndexes() map[uint32]bool
+	StormDataplane(ctx context.Context, ifname string) (network.StormDataplane, bool)
+	PortSecDataplane(ctx context.Context, ifname string) (network.PortSecDataplane, bool)
+}
+
+// 编译期断言：VPP 实现满足同一方法面（内核实现的断言在 netkernel 包内）。
+var _ netRuntime = (*network.L2Network)(nil)
+
+// committedDataPlaneMode 读取 committed 配置里的数据面实现（启动装配用）。
+//
+// 读不到配置（首次启动、库异常、JSON 不可解析）时一律回落 vpp——**不因读失败换数据面**：
+// 既有安装升级到本版本后必须继续跑 VPP，直到操作者显式改配置并重启。
+func committedDataPlaneMode(store *config.Store) string {
+	_, raw, err := store.LatestRevision()
+	if err != nil || len(raw) == 0 {
+		return model.DataPlaneVPP
+	}
+	var cfg model.Config
+	if json.Unmarshal(raw, &cfg) != nil {
+		return model.DataPlaneVPP
+	}
+	return cfg.DataPlaneMode()
+}
+
 // l2Controller 装配 api.L2Runtime（M3-3）：把编排器 MAC 表返回转换为 API 契约结构。
-type l2Controller struct{ net *network.L2Network }
+type l2Controller struct{ net netRuntime }
 
 func (c *l2Controller) MACTable(ctx context.Context, swName string) ([]api.MACTableRow, error) {
 	rows, err := c.net.MACTable(ctx, swName)
@@ -1341,7 +1458,7 @@ func (c *l2Controller) MACTable(ctx context.Context, swName string) ([]api.MACTa
 
 // portInventoryController 装配 api.PortInventory（决策 #83）：运行态端口清单。
 // `<ifname>` 的候选与 `show interfaces physical` 的空态同源，取自真实端口而非已配置的接口名。
-type portInventoryController struct{ net *network.L2Network }
+type portInventoryController struct{ net netRuntime }
 
 func (c *portInventoryController) VPPIfnames() ([]string, error) { return c.net.VPPIfnames() }
 
@@ -1354,7 +1471,7 @@ func (c *portInventoryController) KernelIfFacts() ([]network.KernelIfFacts, erro
 
 // vppStateController 装配 api.VppStateRuntime（决策 #84）：bridge-domain 与接口的运行态，
 // 供 `show virtual-switches`（列表/成员口/计数）与 `show interfaces physical`（链接状态/速率/驱动）。
-type vppStateController struct{ net *network.L2Network }
+type vppStateController struct{ net netRuntime }
 
 func (c *vppStateController) BridgeDomains() ([]api.BridgeDomainState, error) {
 	bds, err := c.net.BridgeDomains()
@@ -1391,7 +1508,7 @@ func (c *vppStateController) InterfaceStates() (map[string]api.InterfaceState, e
 }
 
 // l3Controller 装配 api.L3Runtime（M3-4）：VRF 运行态 FIB。
-type l3Controller struct{ net *network.L2Network }
+type l3Controller struct{ net netRuntime }
 
 func (c *l3Controller) Routes(ctx context.Context, vrfName string) ([]api.RouteRow, error) {
 	rows, err := c.net.Routes(ctx, vrfName)
@@ -1406,7 +1523,7 @@ func (c *l3Controller) Routes(ctx context.Context, vrfName string) ([]api.RouteR
 }
 
 // lldpController 装配 api.LldpRuntime（M3-6）：LLDP 邻居表。
-type lldpController struct{ net *network.L2Network }
+type lldpController struct{ net netRuntime }
 
 func (c *lldpController) Neighbors(ctx context.Context) ([]api.LldpNeighborRow, error) {
 	rows, err := c.net.LldpNeighbors(ctx)
@@ -1422,7 +1539,7 @@ func (c *lldpController) Neighbors(ctx context.Context) ([]api.LldpNeighborRow, 
 }
 
 // natSessionsController 装配 api.NatSessionsRuntime（M3-7）。
-type natSessionsController struct{ net *network.L2Network }
+type natSessionsController struct{ net netRuntime }
 
 func (c *natSessionsController) Sessions(ctx context.Context) ([]api.NatSessionRow, error) {
 	rows, err := c.net.NATSessions(ctx)
@@ -1477,7 +1594,7 @@ func (c *diagController) ClearInterfaceStats(ctx context.Context, ifname string)
 // 未接入」，后台接入成功后无须重启即转发真实实现。
 type vmController struct {
 	Provider *dynamicCompute
-	net      *network.L2Network
+	net      netRuntime
 	engine   *config.Engine
 	log      *slog.Logger
 }

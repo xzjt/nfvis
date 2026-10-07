@@ -161,15 +161,16 @@ func TestRunWizardFullFlow(t *testing.T) {
 		committed: committedEmpty,
 	}
 	sess := New(f, "ssh")
-	// 问答输入：隔离核默认(回车)、VPP 主/工作默认(回车×2)、1G 默认(回车)、2M 默认(回车)、
-	// 低延迟 false(回车)、确认默认 yes(回车)
+	// 问答输入：数据面默认 vpp(回车)、隔离核默认(回车)、VPP 主/工作默认(回车×2)、
+	// 1G 默认(回车)、2M 默认(回车)、低延迟 false(回车)、确认默认 yes(回车)
 	var out strings.Builder
-	if err := RunWizard(sess, true, strings.NewReader("\n\n\n\n\n\n\n"), &out); err != nil {
+	if err := RunWizard(sess, true, strings.NewReader("\n\n\n\n\n\n\n\n"), &out); err != nil {
 		t.Fatalf("全流程: %v", err)
 	}
 	joined := strings.Join(f.lines, "\n")
 	for _, want := range []string{
 		"configure",
+		"set system dataplane vpp",
 		"set resource-pools hugepages page-size 1G count 1",
 		"set resource-pools hugepages page-size 2M count 768",
 		"set resource-pools cpu isolated-cores 2-5",
@@ -207,7 +208,7 @@ func TestRunWizardCancelAndFailure(t *testing.T) {
 	f2 := &setupFake{metrics: "nfvis_system_cpu_online_count 6\n", committed: committedEmpty, failOn: "commit"}
 	sess2 := New(f2, "ssh")
 	out2 := &strings.Builder{}
-	err := RunWizard(sess2, true, strings.NewReader("\n\n\n\n\n\n\n"), out2)
+	err := RunWizard(sess2, true, strings.NewReader("\n\n\n\n\n\n\n\n"), out2)
 	if err == nil || !strings.Contains(err.Error(), "commit") {
 		t.Fatalf("commit 失败应上抛: %v", err)
 	}
@@ -225,7 +226,7 @@ func TestRunWizardDetectsSinglePercentError(t *testing.T) {
 	}
 	sess := New(f, "ssh")
 	var out strings.Builder
-	err := RunWizard(sess, true, strings.NewReader("\n\n\n\n\n\n\n"), &out)
+	err := RunWizard(sess, true, strings.NewReader("\n\n\n\n\n\n\n\n"), &out)
 	if err == nil {
 		t.Fatalf("单 %% 错误应上抛，实际返回成功；输出：\n%s", out.String())
 	}
@@ -265,7 +266,7 @@ func TestRunWizardWarnsSingleHP1G(t *testing.T) {
 	// 默认 1G = 1（7GB 内存按 min(RAM/4,8)）：问句带 N−1 提示、计划预览给告警行。
 	f := newFake()
 	var out strings.Builder
-	if err := RunWizard(New(f, "ssh"), true, strings.NewReader("\n\n\n\n\n\n\n"), &out); err != nil {
+	if err := RunWizard(New(f, "ssh"), true, strings.NewReader("\n\n\n\n\n\n\n\n"), &out); err != nil {
 		t.Fatalf("全流程: %v", err)
 	}
 	if !strings.Contains(out.String(), "数据面固定占用其中 1 页 ⇒ 可起 VNF 数 ≈ N−1") {
@@ -277,7 +278,7 @@ func TestRunWizardWarnsSingleHP1G(t *testing.T) {
 	// 显式声明 2 页：无告警行，问句仍在（口径统一）。
 	f2 := newFake()
 	var out2 strings.Builder
-	if err := RunWizard(New(f2, "ssh"), true, strings.NewReader("\n\n\n2\n\n\n\n"), &out2); err != nil {
+	if err := RunWizard(New(f2, "ssh"), true, strings.NewReader("\n\n\n\n2\n\n\n\n"), &out2); err != nil {
 		t.Fatalf("2 页全流程: %v", err)
 	}
 	if strings.Contains(out2.String(), "⚠ 1G 池仅") {
@@ -323,7 +324,7 @@ func TestRunWizardSkipsNoChangeByWarningMark(t *testing.T) {
 	}
 	sess := New(f, "ssh")
 	var out strings.Builder
-	if err := RunWizard(sess, true, strings.NewReader("\n\n\n\n\n\n\n"), &out); err != nil {
+	if err := RunWizard(sess, true, strings.NewReader("\n\n\n\n\n\n\n\n"), &out); err != nil {
 		t.Fatalf("空操作（值未变化）不算失败：%v", err)
 	}
 	if !strings.Contains(out.String(), "[跳过] set vpp cpu main-core") {
@@ -364,5 +365,61 @@ func TestOutputFailedJudgement(t *testing.T) {
 				t.Fatalf("OutputFailed(%q) = %v，期望 %v", tc.out, got, tc.want)
 			}
 		})
+	}
+}
+
+// 内核数据面路径（v3 决策 #404）：选 kernel 后跳过 VPP 线程问答、不产生任何 vpp 语句，
+// 但隔离核与大页池照常规划（VM 仍需要它们）。
+func TestRunWizardKernelDataPlane(t *testing.T) {
+	f := &setupFake{
+		metrics:   "nfvis_system_cpu_online_count 6\nnfvis_system_memory_total_bytes 7516192768\n",
+		committed: committedEmpty,
+	}
+	sess := New(f, "ssh")
+	// 问答输入：数据面 kernel、其余全部默认。
+	var out strings.Builder
+	if err := RunWizard(sess, true, strings.NewReader("kernel\n\n\n\n\n\n"), &out); err != nil {
+		t.Fatalf("内核数据面全流程: %v", err)
+	}
+	joined := strings.Join(f.lines, "\n")
+	if !strings.Contains(joined, "set system dataplane kernel") {
+		t.Fatalf("应提交数据面语句：\n%s", joined)
+	}
+	for _, unwanted := range []string{"set vpp cpu", "set vpp memory"} {
+		if strings.Contains(joined, unwanted) {
+			t.Fatalf("内核数据面不应产生 %q 语句：\n%s", unwanted, joined)
+		}
+	}
+	if !strings.Contains(joined, "set resource-pools cpu isolated-cores 2-5") {
+		t.Fatalf("隔离核仍应规划（VM 绑核用）：\n%s", joined)
+	}
+	if !strings.Contains(joined, "set resource-pools hugepages page-size 1G count 1") {
+		t.Fatalf("大页池仍应规划（VM 内存用）：\n%s", joined)
+	}
+	// 预览里不该出现 VPP 线程问句
+	if strings.Contains(out.String(), "VPP 主线程核") {
+		t.Fatalf("内核数据面不应问 VPP 线程：\n%s", out.String())
+	}
+	// 收尾提示改为内核口径（不再提示 bind-dpdk / request vpp restart）
+	if strings.Contains(out.String(), "bind-dpdk") {
+		t.Fatalf("内核数据面不应提示绑定 DPDK：\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "内核数据面") {
+		t.Fatalf("收尾应说明内核数据面口径：\n%s", out.String())
+	}
+}
+
+// 非法数据面取值在向导阶段即被拒（与提交期校验同口径）。
+func TestRunWizardRejectsBadDataPlane(t *testing.T) {
+	f := &setupFake{metrics: "nfvis_system_cpu_online_count 6\n", committed: committedEmpty}
+	var out strings.Builder
+	err := RunWizard(New(f, "ssh"), true, strings.NewReader("dpdk\n\n\n\n\n\n\n"), &out)
+	if err == nil || !strings.Contains(err.Error(), "vpp|kernel") {
+		t.Fatalf("非法数据面应被拒: %v", err)
+	}
+	for _, ln := range f.lines {
+		if strings.HasPrefix(ln, "configure") || strings.HasPrefix(ln, "set ") {
+			t.Fatalf("被拒时不应执行变更语句: %v", f.lines)
+		}
 	}
 }

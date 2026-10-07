@@ -74,6 +74,12 @@ type Config struct {
 	// 空取 DefaultLibvirtLogDir；读不到只如实说「未取到」，不编造内容。
 	LibvirtLogDir string
 
+	// DataPlane 数据面实现（vpp|kernel，v3 决策 #404）：决定 vNIC 的落地形态——
+	// vpp 走 vhost-user socket（QEMU 作 client 连 VPP），kernel 走 virtio 网卡 + 宿主 tap +
+	// vhost-net（libvirt 按 `<interface type='bridge'>` 自建 tap 并挂内核 bridge）。
+	// 缺省（空）= vpp，与引入该字段之前的行为逐字一致。
+	DataPlane string
+
 	// DataPlaneProbe 数据面（VPP）可用性前置判定（决策 #314）：返回 nil = 可用；返回 error =
 	// 不可用（error 文本作为原因透出）。由装配层注入、复用**既有**的 VPP 连接状态查询
 	// （cmd/nfvisd 用 network.Manager.StatusView，与 /vpp/status 同源）——本包不另写探测，

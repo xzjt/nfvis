@@ -703,6 +703,7 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 	}
 	res.Warnings = append(res.Warnings, crossConnectPortWarnings(newCfg)...)
 	res.Warnings = append(res.Warnings, e.numaWarnings(committed, newCfg)...)
+	res.Warnings = append(res.Warnings, dataPlaneWarnings(committed, newCfg)...)
 
 	// FR-CFG-011⑤：镜像检查需要 committed 之后的候选配置
 
@@ -1111,6 +1112,26 @@ func (e *Engine) checkImages(cfg *model.Config) []model.ValidateError {
 		}
 	}
 	return errs
+}
+
+// dataPlaneWarnings 数据面实现相关的提交提示（v3 决策 #404）。
+//
+// 两条口径：
+//   - **切换生效时机**：数据面是整机单实例、在 nfvisd 启动时装配，故改它必须重启服务才生效——
+//     必须在提交输出里说清，否则操作者会以为「改完就切过去了」。
+//   - **vpp 段在内核数据面下不生效**：不拒绝（切回 vpp 时它立刻可用），但要如实提示，
+//     避免「配置里写着 vpp 调参、实际跑的是内核网络」这种看不见的错配。
+func dataPlaneWarnings(old, new model.Config) []string {
+	var out []string
+	if old.DataPlaneMode() != new.DataPlaneMode() {
+		out = append(out, fmt.Sprintf(
+			"警告: 数据面实现已改为 %s，需重启服务（systemctl restart nfvis）后生效；"+
+				"重启前数据面仍按原实现运行", new.DataPlaneMode()))
+	}
+	if new.DataPlaneMode() == model.DataPlaneKernel && new.Vpp != nil {
+		out = append(out, "警告: 当前数据面为 Linux 内核网络，vpp 段配置不生效（切回 vpp 数据面后即可用）")
+	}
+	return out
 }
 
 // crossConnectPortWarnings 报出「cross-connect 交换机端口数不足（<2）」的提交提示。

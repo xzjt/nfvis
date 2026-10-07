@@ -248,6 +248,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 命令 | 说明 | 落点 | 实测 |
 |---|---|---|---|
+| `set system dataplane <vpp\|kernel>` | 数据面实现（vpp = VPP；kernel = Linux 内核网络；**变更需重启服务生效**） | committed 配置（启动装配读它选数据面） | 🚫 待真机（v3 决策 #404；未实现族提交期拒绝） |
 | `set system hostname <s>` | 主机名 | 宿主 hostname | ✅ |
 | `set system timezone <tz>` | 时区 | 宿主 timedatectl | ✅ |
 | `set system ntp server <ip\|host> [prefer]` | NTP 服务器（`prefer` 为无值 flag） | 宿主 NTP | ✅（**决策 #76②** 修复） |

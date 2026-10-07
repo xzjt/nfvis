@@ -561,15 +561,16 @@ func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) 
 		diskPath, diskFormat = p.imagePath(vm.Image), "iso"
 	}
 	spec := DomainSpec{
-		VM:           vm,
-		Cores:        alloc.Cores,
-		HugepageSize: alloc.HugepageSize,
-		DiskPath:     diskPath,
-		DiskFormat:   diskFormat,
-		Emulator:     p.cfg.Emulator,
-		Machine:      p.cfg.Machine,
-		CPUMode:      p.cfg.CPUMode,
-		PCIDevices:   append([]string(nil), vm.PCIDevices...), // FR-CMP-023（存在性检查在 DefineVM 前完成）
+		VM:              vm,
+		KernelDataPlane: p.kernelDataPlane(),
+		Cores:           alloc.Cores,
+		HugepageSize:    alloc.HugepageSize,
+		DiskPath:        diskPath,
+		DiskFormat:      diskFormat,
+		Emulator:        p.cfg.Emulator,
+		Machine:         p.cfg.Machine,
+		CPUMode:         p.cfg.CPUMode,
+		PCIDevices:      append([]string(nil), vm.PCIDevices...), // FR-CMP-023（存在性检查在 DefineVM 前完成）
 	}
 	if vm.CloudInit != nil {
 		spec.SeedISO = layout.SeedISO
@@ -581,9 +582,17 @@ func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) 
 		})
 	}
 	for _, nic := range vm.Interfaces {
-		is := InterfaceSpec{Name: nic.Name, MAC: nic.MAC, Type: nic.Type}
+		is := InterfaceSpec{Name: nic.Name, MAC: nic.MAC, Type: nic.Type,
+			Bridge: nic.VirtualSwitch, VLAN: nic.Vlan}
 		switch nic.Type {
 		case IfaceVhostUser:
+			// 内核数据面：接入交换机对应的内核 bridge（名字即交换机名），不建 vhost-user socket。
+			if p.kernelDataPlane() {
+				if is.Queues == 0 {
+					is.Queues = DefaultVhostUserQueues
+				}
+				break
+			}
 			is.Socket = VhostSocketPath(p.cfg.VhostDir, vm.Name, nic.Name)
 			if is.Queues == 0 {
 				is.Queues = DefaultVhostUserQueues
@@ -607,6 +616,10 @@ func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) 
 	}
 	return spec, nil
 }
+
+// kernelDataPlane 数据面是否为 Linux 内核网络（v3 决策 #404）：vNIC 走 virtio + 宿主 tap +
+// vhost-net（`<interface type='bridge'>`），而非 VPP 的 vhost-user socket。
+func (p *Provider) kernelDataPlane() bool { return p.cfg.DataPlane == model.DataPlaneKernel }
 
 func (p *Provider) imagePath(image string) string { return path.Join(p.cfg.ImagesDir, image) }
 

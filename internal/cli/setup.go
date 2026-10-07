@@ -37,6 +37,8 @@ type SetupFacts struct {
 
 // SetupPlan 向导推导出的计划（含将要提交的语句清单）。
 type SetupPlan struct {
+	// DataPlane 数据面实现（vpp|kernel，v3 决策 #404）；kernel 时不配置 vpp 线程与偏好。
+	DataPlane     string
 	IsolatedCores string
 	VPPMain       int // 0 = 不设 vpp cpu
 	VPPWorker     int // 0 = 不设工作线程
@@ -49,6 +51,8 @@ type SetupPlan struct {
 
 // setupAnswers 操作者在问答里给出的原始输入（已解析；零值 = 采用默认）。
 type setupAnswers struct {
+	// DataPlane 数据面实现（"" = 用默认 vpp）。
+	DataPlane  string
 	Isolated   string // "" = 用默认
 	VPPMain    *int
 	VPPWorker  *int
@@ -169,6 +173,16 @@ func parseCoreListText(s string) ([]int, error) {
 // （commit 校验 FR-CMP-001）。错误在向导阶段就给可读原因，不等 commit 才报。
 func deriveSetupPlan(f SetupFacts, a setupAnswers) (SetupPlan, error) {
 	p := SetupPlan{}
+	// —— 数据面实现（v3 决策 #404）：缺省 vpp（与既有安装行为一致）——
+	switch a.DataPlane {
+	case "":
+		p.DataPlane = "vpp"
+	case "vpp", "kernel":
+		p.DataPlane = a.DataPlane
+	default:
+		return p, fmt.Errorf("数据面 %q 不合法（vpp|kernel）", a.DataPlane)
+	}
+	kernel := p.DataPlane == "kernel"
 
 	// —— 隔离核 ——
 	isoText := a.Isolated
@@ -195,15 +209,15 @@ func deriveSetupPlan(f SetupFacts, a setupAnswers) (SetupPlan, error) {
 	p.IsolatedCores = compressCoreText(iso)
 	p.HP1G, p.HP2M = f.Pools["1G"], f.Pools["2M"]
 
-	// —— VPP 线程：默认取隔离范围最大的两核（主=最大、工作=次大），须在隔离核内 ——
-	if a.VPPMain != nil {
+	// —— VPP 线程：仅 VPP 数据面需要（内核数据面不用 VPP，整段跳过） ——
+	if !kernel && a.VPPMain != nil {
 		p.VPPMain = *a.VPPMain
-	} else if len(iso) > 0 {
+	} else if !kernel && len(iso) > 0 {
 		p.VPPMain = iso[len(iso)-1]
 	}
-	if a.VPPWorker != nil {
+	if !kernel && a.VPPWorker != nil {
 		p.VPPWorker = *a.VPPWorker
-	} else if len(iso) > 1 {
+	} else if !kernel && len(iso) > 1 {
 		p.VPPWorker = iso[len(iso)-2]
 	}
 	inISO := func(c int) bool {
@@ -214,13 +228,13 @@ func deriveSetupPlan(f SetupFacts, a setupAnswers) (SetupPlan, error) {
 		}
 		return false
 	}
-	if p.VPPMain != 0 && !inISO(p.VPPMain) {
+	if !kernel && p.VPPMain != 0 && !inISO(p.VPPMain) {
 		return p, fmt.Errorf("VPP 主线程核 %d 不在隔离核 %s 内（commit 校验同样会拒绝）", p.VPPMain, p.IsolatedCores)
 	}
-	if p.VPPWorker != 0 && !inISO(p.VPPWorker) {
+	if !kernel && p.VPPWorker != 0 && !inISO(p.VPPWorker) {
 		return p, fmt.Errorf("VPP 工作线程核 %d 不在隔离核 %s 内（commit 校验同样会拒绝）", p.VPPWorker, p.IsolatedCores)
 	}
-	if p.VPPWorker != 0 && p.VPPWorker == p.VPPMain {
+	if !kernel && p.VPPWorker != 0 && p.VPPWorker == p.VPPMain {
 		return p, fmt.Errorf("VPP 工作线程核 %d 与主线程相同", p.VPPWorker)
 	}
 
@@ -240,11 +254,13 @@ func deriveSetupPlan(f SetupFacts, a setupAnswers) (SetupPlan, error) {
 	}
 
 	// —— preference 须与池一致（commit 校验 FR-CMP-001）：有 2M 池用 2M（1G 页让给 VM），否则 1G ——
-	switch {
-	case p.HP2M > 0:
-		p.HugepagePref = "2M"
-	case p.HP1G > 0:
-		p.HugepagePref = "1G"
+	if !kernel {
+		switch {
+		case p.HP2M > 0:
+			p.HugepagePref = "2M"
+		case p.HP1G > 0:
+			p.HugepagePref = "1G"
+		}
 	}
 
 	if a.LowLatency != nil {
@@ -301,6 +317,9 @@ func compressCoreText(cores []int) string {
 func planStatements(p SetupPlan) []string {
 	var out []string
 	out = append(out, "configure")
+	if p.DataPlane != "" {
+		out = append(out, "set system dataplane "+p.DataPlane)
+	}
 	if p.HP1G > 0 {
 		out = append(out, fmt.Sprintf("set resource-pools hugepages page-size 1G count %d", p.HP1G))
 	}
@@ -353,16 +372,35 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 		fmt.Fprintln(out, "本机事实不可用（/metrics 读取失败），以下问题需显式输入。")
 	}
 
-	// —— 1/4 隔离核 ——
-	def := defaultIsolatedCores(f.OnlineCPUs)
-	fmt.Fprintf(out, "\n1/4 隔离核（供 VPP 与 VM 使用，宿主/管理面保留其余至少 2 个） [默认 %s]： ", orNone(def))
+	// —— 1/5 数据面实现 ——
+	fmt.Fprintln(out, "\n1/5 数据面实现：vpp = VPP 数据面（DPDK 接管物理口）；kernel = Linux 内核网络数据面")
+	fmt.Fprintln(out, "    （内核 bridge/VRF/nftables；VNF 用 virtio 网卡 + 宿主 tap + vhost-net）。变更需重启服务生效。")
+	fmt.Fprintf(out, "    数据面 [默认 vpp]： ")
 	line := ask(rd)
 	if line == "q" {
 		fmt.Fprintln(out, "已中止（未做任何变更）。")
 		return nil
 	}
-	// —— 2/4 VPP 线程（默认值依赖隔离核答案，先解析隔离核再问） ——
-	ans := setupAnswers{Isolated: line}
+	ans := setupAnswers{DataPlane: line}
+
+	// —— 2/5 隔离核（两种数据面都用于 VM 绑核） ——
+	def := defaultIsolatedCores(f.OnlineCPUs)
+	fmt.Fprintf(out, "2/5 隔离核（供数据面与 VM 使用，宿主/管理面保留其余至少 2 个） [默认 %s]： ", orNone(def))
+	line = ask(rd)
+	if line == "q" {
+		fmt.Fprintln(out, "已中止（未做任何变更）。")
+		return nil
+	}
+	ans.Isolated = line
+	if line != "" && line != "vpp" && line != "kernel" {
+		return fmt.Errorf("数据面 %q 不合法（vpp|kernel）", line)
+	}
+	// 内核数据面不用 VPP：跳过 VPP 线程问答（deriveSetupPlan 同样整段跳过）。
+	if ans.DataPlane == "kernel" {
+		return finishWizard(sess, f, ans, rd, out)
+	}
+
+	// —— 3/5 VPP 线程（默认值依赖隔离核答案，先解析隔离核再问） ——
 	iso, err := parseCoreListText(orDefault(line, def))
 	if err != nil {
 		return err
@@ -374,7 +412,7 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 	if len(iso) > 1 {
 		workerDef = iso[len(iso)-2]
 	}
-	fmt.Fprintf(out, "2/4 VPP 主线程核 [默认 %s]（输入 - 表示不配置 VPP CPU）： ", orInt(mainDef))
+	fmt.Fprintf(out, "3/5 VPP 主线程核 [默认 %s]（输入 - 表示不配置 VPP CPU）： ", orInt(mainDef))
 	line = ask(rd)
 	if line == "q" {
 		fmt.Fprintln(out, "已中止（未做任何变更）。")
@@ -408,12 +446,12 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 			ans.VPPWorker = &v
 		}
 	}
-	// —— 3/4 大页 ——
+	// —— 4/5 大页 ——
 	hp1Def := f.Pools["1G"]
 	if hp1Def == 0 {
 		hp1Def = defaultHP1G(f.MemTotalGB)
 	}
-	fmt.Fprintf(out, "3/4 1G 大页数量（VM 内存从 1G 池分配；数据面固定占用其中 1 页 ⇒ 可起 VNF 数 ≈ N−1） [默认 %s]： ", orInt(hp1Def))
+	fmt.Fprintf(out, "4/5 1G 大页数量（VM 内存从 1G 池分配；数据面固定占用其中 1 页 ⇒ 可起 VNF 数 ≈ N−1） [默认 %s]： ", orInt(hp1Def))
 	line = ask(rd)
 	if line == "q" {
 		fmt.Fprintln(out, "已中止（未做任何变更）。")
@@ -443,8 +481,8 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 		}
 		ans.HP2M = &v
 	}
-	// —— 4/4 低延迟 ——
-	fmt.Fprintln(out, "4/4 低延迟参数组（mitigations=off 等：降低安全缓解与可诊断性；虚拟机上自动省略 idle=poll/tsc=reliable） [默认 false]：")
+	// —— 5/5 低延迟 ——
+	fmt.Fprintln(out, "5/5 低延迟参数组（mitigations=off 等：降低安全缓解与可诊断性；虚拟机上自动省略 idle=poll/tsc=reliable） [默认 false]：")
 	fmt.Fprintf(out, "    启用？true/false [默认 false]： ")
 	line = ask(rd)
 	if line == "q" {
@@ -459,6 +497,11 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 		ans.LowLatency = &v
 	}
 
+	return finishWizard(sess, f, ans, rd, out)
+}
+
+// finishWizard 计划的预览、确认与逐条执行（两种数据面共用；VPP 专属的重启后动作按数据面区分）。
+func finishWizard(sess *Session, f SetupFacts, ans setupAnswers, rd *bufio.Scanner, out io.Writer) error {
 	plan, err := deriveSetupPlan(f, ans)
 	if err != nil {
 		return err
@@ -471,7 +514,7 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 		fmt.Fprintln(out, "  "+w)
 	}
 	fmt.Fprintf(out, "确认提交？[yes/no]（默认 yes）： ")
-	line = ask(rd)
+	line := ask(rd)
 	if line == "q" || strings.EqualFold(line, "no") {
 		fmt.Fprintln(out, "已中止（未做任何变更）。")
 		return nil
@@ -500,6 +543,11 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 		}
 	}
 	fmt.Fprintln(out, "\n向导完成。内核基线需重启生效：request system reboot。")
+	if plan.DataPlane == "kernel" {
+		fmt.Fprintln(out, "内核数据面（Linux 内核网络）：重启后直接 set virtual-switches / set vrfs 即可，")
+		fmt.Fprintln(out, "无需绑定 DPDK，也无需拉起数据面进程。")
+		return nil
+	}
 	fmt.Fprintln(out, "重启后的固定动作（数据口绑定不跨重启）：request interfaces <数据口> bind-dpdk --yes → request vpp restart。")
 	fmt.Fprintln(out, "（vfio 模块由绑定命令自动加载并持久化开机加载，无需手工 modprobe）")
 	fmt.Fprintln(out, "数据口的声明（set interfaces / set vpp dpdk dev）不在向导范围内，见用户手册「3.2 业务网卡交 DPDK」。")

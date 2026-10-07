@@ -51,10 +51,15 @@ type DataDiskSpec struct {
 // InterfaceSpec 已解析的 vNIC 接入参数（FR-NET-020/021）。
 // socket 路径与 VF PCI 地址由编排层解析后传入——本层是纯函数，不查 sysfs/VPP。
 type InterfaceSpec struct {
-	Name      string // vNIC 名（配置 interfaces[].name）
-	Type      string // vhost-user | sriov-vf
-	MAC       string // 为空时按 DefaultMAC 确定性生成
-	Socket    string // vhost-user：VPP 侧监听 socket（QEMU 作 client 连接）
+	Name   string // vNIC 名（配置 interfaces[].name）
+	Type   string // vhost-user | sriov-vf
+	MAC    string // 为空时按 DefaultMAC 确定性生成
+	Socket string // vhost-user：VPP 侧监听 socket（QEMU 作 client 连接）
+	// Bridge 内核数据面下该 vNIC 接入的 L2 交换机（内核 bridge 名，v3 决策 #404）：
+	// 域定义改用 `<interface type='bridge'>`，libvirt 自建宿主 tap 并挂上该 bridge，
+	// 配合 `<driver name='vhost'/>` 由内核 vhost-net 加速 virtio 数据面。
+	Bridge    string
+	VLAN      int    // vNIC 的 VLAN（内核数据面：libvirt 侧给 tap 打标）
 	VFPCI     string // sriov-vf：VF 的 PCI 地址，如 0000:0b:10.1
 	Queues    uint   // virtio 队列数（0 = 不写 driver）
 	TargetDev string // 为空时按 vnet<序号> 生成
@@ -76,6 +81,9 @@ type DomainSpec struct {
 	DataDisks  []DataDiskSpec
 
 	Interfaces []InterfaceSpec
+	// KernelDataPlane 数据面为 Linux 内核网络（v3 决策 #404）：vNIC 走 virtio + 宿主 tap +
+	// vhost-net（`<interface type='bridge'>`），而不是 VPP 的 vhost-user socket。
+	KernelDataPlane bool
 	// PCIDevices 通用 PCI 直通设备（BDF，FR-CMP-023）：每设备一个 hostdev，
 	// 排在 SR-IOV hostdev 之后。存在性检查在编排层（apply/define 前）完成，本层只做组装。
 	PCIDevices []string
@@ -185,7 +193,8 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 			MemoryLocked: &libvirtxml.DomainMemoryLocked{},
 		}
 		// vhost-user 要求 VM 内存与 VPP 共享（FR-NET-020）：显式置 shared。
-		if hasVhostUser(spec.Interfaces) {
+		// 内核数据面无共享内存对端（tap + vhost-net 在内核侧），不置 shared。
+		if !spec.KernelDataPlane && hasVhostUser(spec.Interfaces) {
 			d.MemoryBacking.MemoryAccess = &libvirtxml.DomainMemoryAccess{Mode: "shared"}
 		}
 	}
@@ -212,6 +221,14 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 	for i, is := range spec.Interfaces {
 		switch is.Type {
 		case IfaceVhostUser:
+			if spec.KernelDataPlane {
+				// 内核数据面：virtio 网卡 + 宿主 tap + vhost-net，挂到交换机对应的内核 bridge。
+				if strings.TrimSpace(is.Bridge) == "" {
+					return nil, fmt.Errorf("VM %s: vNIC %s 缺少接入的虚拟交换机（内核数据面需要它定位 bridge）", vm.Name, is.Name)
+				}
+				d.Devices.Interfaces = append(d.Devices.Interfaces, buildBridgeIface(vm.Name, is, i))
+				break
+			}
 			if strings.TrimSpace(is.Socket) == "" {
 				return nil, fmt.Errorf("VM %s: vNIC %s（vhost-user）缺少 socket 路径", vm.Name, is.Name)
 			}
@@ -351,6 +368,41 @@ func buildVhostUserIface(vmName string, is InterfaceSpec, idx int) libvirtxml.Do
 	}
 	if is.Queues > 0 {
 		iface.Driver = &libvirtxml.DomainInterfaceDriver{Queues: is.Queues}
+	}
+	return iface
+}
+
+// buildBridgeIface 内核数据面的 vNIC：virtio 网卡由 libvirt 以 `<interface type='bridge'>`
+// 接入宿主内核 bridge——libvirt 自建 tap 设备并 enslave 到该 bridge，`<driver name='vhost'/>`
+// 让内核 vhost-net 处理 virtio 环（数据面不经 QEMU 用户态）。
+//
+// VLAN：声明了 vlan 时用 libvirt 的 `<vlan><tag id='n'/></vlan>`（tap 侧自动打标），
+// 与 VPP 侧「vNIC 带 vlan」的语义一致。
+func buildBridgeIface(vmName string, is InterfaceSpec, idx int) libvirtxml.DomainInterface {
+	mac := is.MAC
+	if mac == "" {
+		mac = DefaultMAC(vmName, is.Name)
+	}
+	target := is.TargetDev
+	if target == "" {
+		target = fmt.Sprintf("vnet%d", idx)
+	}
+	// 注意：`type="bridge"` 属性由 libvirtxml 依据 Source.Bridge 自动生成，不手写。
+	iface := libvirtxml.DomainInterface{
+		MAC:    &libvirtxml.DomainInterfaceMAC{Address: mac},
+		Source: &libvirtxml.DomainInterfaceSource{Bridge: &libvirtxml.DomainInterfaceSourceBridge{Bridge: is.Bridge}},
+		Model:  &libvirtxml.DomainInterfaceModel{Type: "virtio"},
+		Target: &libvirtxml.DomainInterfaceTarget{Dev: target},
+		// vhost-net：把 virtio 数据面下沉到内核，与 VPP 的 vhost-user 位置对应。
+		Driver: &libvirtxml.DomainInterfaceDriver{Name: "vhost"},
+	}
+	if is.Queues > 0 {
+		iface.Driver.Queues = is.Queues
+	}
+	if is.VLAN > 0 {
+		iface.VLan = &libvirtxml.DomainInterfaceVLan{
+			Tags: []libvirtxml.DomainInterfaceVLanTag{{ID: uint(is.VLAN)}},
+		}
 	}
 	return iface
 }

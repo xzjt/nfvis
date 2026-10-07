@@ -34,9 +34,33 @@ type Config struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
+// 数据面实现的选择（system.dataplane，v3 决策 #404）。
+//
+// 缺省（未配置）= DataPlaneVPP：v3 之前的产品只有 VPP 一种数据面，未配置必须落到既有行为，
+// 不能让既有安装「升级后换个数据面跑」。变更需重启 nfvisd 生效（整机单数据面）。
+const (
+	DataPlaneVPP    = "vpp"    // VPP（DPDK 接管物理口；vhost-user/memif 接入 VNF/容器）
+	DataPlaneKernel = "kernel" // Linux 内核网络（bridge/VRF/nftables/tc；virtio+vhost-net+tap 接入 VNF）
+)
+
+// DataPlaneMode 生效的数据面实现：配置值，缺省/未配置回落 vpp（单一事实源）。
+// 非法取值在提交期由 Validate 拒绝，这里只做兜底（不把非法值当 kernel 用）。
+func (c *Config) DataPlaneMode() string {
+	if c == nil || c.System == nil {
+		return DataPlaneVPP
+	}
+	if c.System.DataPlane == DataPlaneKernel {
+		return DataPlaneKernel
+	}
+	return DataPlaneVPP
+}
+
 // SystemConfig 对应 OpenAPI SystemConfig。
 type SystemConfig struct {
-	Kernel             *KernelConfig     `json:"kernel,omitempty"` // 内核启动基线（FR-SYS-014）
+	Kernel *KernelConfig `json:"kernel,omitempty"` // 内核启动基线（FR-SYS-014）
+	// DataPlane 数据面实现（FR-NET-001，v3 决策 #404）：vpp|kernel，缺省 vpp。
+	// 决定 nfvisd 装配哪一套网络编排实现，以及 VPP 专有命令是否可用；变更需重启 nfvisd 生效。
+	DataPlane          string            `json:"dataplane,omitempty"`
 	Hostname           string            `json:"hostname,omitempty"`
 	Timezone           string            `json:"timezone,omitempty"`
 	Ntp                []NtpServer       `json:"ntp,omitempty"`

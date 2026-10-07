@@ -2551,6 +2551,13 @@ components:
       type: object
       description: VPP 数据面状态（FR-SYS-007 版本锁定、FR-SYS-009 pending-restart、运行态线程）
       properties:
+        dataplane:
+          type: string
+          enum: [vpp, kernel]
+          description: |
+            当前生效的数据面实现（v3 决策 #404）。`kernel` 时本组读数整体不适用：
+            `connected` 恒 false、`last_error` 说明「当前数据面为内核网络，未使用 VPP」——
+            读视图据此明确回答，而不是让操作者以为「VPP 该起来却没起来」。
         version: { type: string, example: "26.06-release", description: 探测到的 VPP 版本 }
         connected: { type: boolean, description: 当前是否已连接 }
         config_revision: { type: integer, description: 当前 committed 配置版本（供判断数据面是否落后于配置） }
@@ -2603,6 +2610,17 @@ components:
     SystemConfig:
       type: object
       properties:
+        dataplane:
+          type: string
+          enum: [vpp, kernel]
+          default: vpp
+          description: |
+            数据面实现（FR-NET-001，v3 决策 #404）。`vpp` = VPP 数据面（DPDK 接管物理口，
+            vhost-user/memif 接入 VNF/容器）；`kernel` = Linux 内核网络数据面（内核 bridge/VRF/
+            nftables/vxlan，VNF 用 virtio 网卡 + 宿主 tap + vhost-net 接入）。
+            **整机单数据面**：同一时刻只启用一种，变更需重启服务生效。缺省（未配置）= `vpp`
+            （与引入该字段之前的行为一致）。内核数据面下 ACL/QoS/端口镜像/DHCP 中继与服务器/
+            DNS 代理/风暴抑制/端口安全/LLDP/memif 尚未实现，提交期直接拒绝（支持矩阵见决策 #404）。
         hostname: { type: string }
         timezone: { type: string, example: "Asia/Shanghai" }
         ntp:

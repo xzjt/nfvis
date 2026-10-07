@@ -55,7 +55,11 @@ func (n *L2Network) VPPIfnames() ([]string, error) {
 // KernelIfnames 内核网卡名（物理口）：仅取含 `device` 链接的条目——lo/docker0/virbr0
 // 这类虚拟接口没有 `device`，据此自然排除。已由 DPDK 接管的口在内核中已无 netdev，
 // 故不会出现在这里。
-func (n *L2Network) KernelIfnames() ([]string, error) {
+func (n *L2Network) KernelIfnames() ([]string, error) { return KernelIfnamesAll() }
+
+// KernelIfnamesAll 内核网卡名（物理口）——包级入口，供内核数据面实现复用**同一份** sysfs 口径
+// （避免两套「什么算物理口」的判据漂移）。
+func KernelIfnamesAll() ([]string, error) {
 	entries, err := os.ReadDir(sysfsNetRoot)
 	if err != nil {
 		return nil, err
@@ -86,8 +90,11 @@ type KernelIfFacts struct {
 }
 
 // KernelIfFacts 内核侧物理口事实清单（顺序与 KernelIfnames 一致：按名排序去重）。
-func (n *L2Network) KernelIfFacts() ([]KernelIfFacts, error) {
-	names, err := n.KernelIfnames()
+func (n *L2Network) KernelIfFacts() ([]KernelIfFacts, error) { return KernelIfFactsAll() }
+
+// KernelIfFactsAll 内核侧物理口事实的包级入口（内核数据面实现复用同一份 sysfs 读法）。
+func KernelIfFactsAll() ([]KernelIfFacts, error) {
+	names, err := KernelIfnamesAll()
 	if err != nil {
 		return nil, err
 	}

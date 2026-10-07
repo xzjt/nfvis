@@ -50,6 +50,7 @@ discard	本地模式命令	脚本模式收尾自动丢弃候选（阶段 6 反�
 # —— 由其他套件或单测覆盖 ——
 request vpp restart	由其他套件或单测覆盖	重启数据面会中断业务（fulltest 不执行）；重放/收敛由 cli-lifecycle-check.sh 的 L2 段覆盖（systemctl restart vpp + 恢复断言）
 show configuration candidate	由其他套件或单测覆盖	需**持锁会话**才能在配置模式内读（脚本模式每行独立会话）；阶段 6 的 configure 到 show 覆盖同一读物
+set system dataplane <vpp|kernel>	破坏性不执行	切换数据面会改变整机运行形态且需重启 nfvisd 才生效；套件自身会创建 VPP 专有配置（ACL/QoS 等），切到 kernel 提交期必被拒。由 internal/model 的提交期校验单测、internal/cli 的向导用例与 internal/orchestrator/netkernel 的下发/幂等单测覆盖
 set system login user <n> password <s> class <c>	由其他套件或单测覆盖	口令落库/加盐哈希/回显脱敏由 internal/api 单测与 cli_mapping 守护覆盖；套件不宜反复改写登录用户
 set system login class <n> allow <path>	由其他套件或单测覆盖	自定义 class 的生效权限视图由 show configuration permissions（阶段 5）与 aaa 单测覆盖
 set system login class <n> deny <path>	由其他套件或单测覆盖	同上（deny 优先语义由 aaa 单测覆盖）

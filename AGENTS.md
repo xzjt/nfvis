@@ -1054,8 +1054,44 @@
 - **v2 清单分册（2026-10-02 整理）**：**已完成**（决策 #300~#344、已收口的缺陷与特性）见 `docs/v2已做.md`；
   **未做**见 `docs/v2待做.md`（**只列未做**，保留原编号便于交叉引用；原「二·29 条登记缺陷」已全部收口，
   索引在 `v2已做.md` §二）。立项前先看 `v2待做.md`、查「这条是不是已经做过」看 `v2已做.md`。
-- 已定决策 305 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
-  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线已有 #300~#403，其中 #350 撤回）——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+- **v3 线开篇（决策 #404，2026-10-07，分支 `v3`）**：**数据面实现可切换（VPP / Linux 内核网络）+ 安装与向导开关**。
+  **用户裁定四条口径**：① **整机单数据面**，同一时刻只启用一种，切换需重启 nfvisd；② 安装器 `--dataplane vpp|kernel`、
+  首次初始化向导问句、运行期 `set system dataplane <vpp|kernel>` **三处写同一事实源**（committed 配置
+  `system.dataplane`）；③ **缺省 = vpp**（未配置回落 VPP，既有安装升级后行为逐字不变）；④ **不留假功能**——
+  内核数据面未实现的族**提交期直接拒绝**、命令与读数**如实报不支持**（不用「VPP 未连接」这类误导措辞）。
+  **架构**：装配层读一次 committed 的 `system.dataplane`，据此装配 `*network.L2Network`（VPP）或**新增**
+  `internal/orchestrator/netkernel`（`ip`/`bridge`/`nft`）；两者实现**同一方法面**（`main.netRuntime`），
+  装配处与恢复巡检**不分叉**，「方法面一致」由编译期断言钉住。内核数据面不创建/不拉起 VPP、不做 DPDK 接管与
+  startup.conf 管理；`show vpp` 换成一个如实回报「当前数据面为内核网络」的控制器（`VppStatus.Mode`）。
+  **能力映射（第一期，已实现）**：物理口（留在内核，`ip link` 管 MTU/描述/管理状态）；bond（无 lacp → `balance-xor`、
+  有 → `802.3ad`）；L2 交换机 → 内核 bridge（`vlan_filtering` + `bridge vlan`）；交换机网关 → 地址落在 bridge、
+  bridge 入网关 VRF `vr-<交换机名>`；L3 交换机 → 内核 VRF（**表号由名字 FNV-1a 确定性派生**）；l3-interface
+  （含 vlan 子接口）→ `ip link type vlan` + `ip addr`；静态路由 → `ip route`；NAT44 → nftables 独立表
+  `table inet nfvis-nat`（声明式全量重建）；VXLAN → 内核 vxlan 设备；**VNF vNIC → virtio 网卡 + 宿主 tap +
+  vhost-net**（`<interface type='bridge'>` 指向交换机对应的内核 bridge，`<driver name='vhost'/>`）；诊断
+  ping/traceroute 走宿主网络栈（`ip vrf exec` 提供 VRF 作用域）。**未实现（提交期拒绝，登记 `docs/v3待做.md`）**：
+  ACL、QoS、端口镜像、DHCP 中继与服务器、DNS 代理、风暴抑制、端口安全、LLDP、memif、MAC 学习上限、
+  DPDK 接管与大页池数据面口径——ACL 尤其不能静默（拒规则不生效＝静默放行）。**内核侧真实约束**（提交期校验）：
+  对象名 ≤15 字符；VNF 虚拟网卡不能直接作三层接口（改用「接入已配网关的 L2 交换机」）。**切换语义**：不做在线
+  迁移——内核侧靠 `EnsureConsistent` 声明式重放（所有下发方法幂等），VPP 侧靠连接事件的恢复收敛；切回 vpp 时
+  `vpp` 段配置仍在、立即可用（切到内核时提交输出提示它不生效）。设计文档 `docs/v3-数据面可切换-设计.md`。
+  **第二批（决策 #405）**：ACL / QoS 端口限速 / 端口镜像 / 风暴抑制 / 端口安全五族落到内核原语
+  （nftables 独立表 + tc clsact/mirred/police + 桥口 learning），并**首次拿到内核数据面的真机证据**
+  （nfvis-vm：内核 7.0 / iproute2 6.19 / nftables 1.1.6）——`internal/orchestrator/netkernel/` 下
+  **9 条集成用例**全绿（真 `ip`/`bridge`/`nft`/`tc`，断言只读内核事实），含 enforcement 实证
+  （deny ICMP → ping 100% 丢且 ARP 仍通；8 kbit/s policer 下丢包 83.5%、对照组 0%）与
+  「声明 → Provider → 内核」全链用例。**真机抓出并修掉六条单元测试看不见的缺陷**：`ip vlan` 不存在
+  （要用 `bridge vlan`）、`ip addr add` 不幂等（改 `replace`）、vlan 子接口要求基口先 up、
+  「不存在」文案多种多样、非桥成员口设 `learning` 报 `Operation not supported`、
+  **`clsact` 的 pref 撞号让一族撤除删掉另一族的过滤器**（pref 已收进 `tc.go` 单一真源）。
+  **安装期两套数据面的包都装（决策 #406）**：`--dataplane` 只决定"这次用哪一套跑"，不决定"装什么"——
+  恒装 VPP 及其插件（内核数据面下只把 `vpp.service` 设为开机不自启、不启动），否则气隙场景里"切回 vpp"
+  就得先找到安装包。自检的内核分支新增「VPP 已安装（版本 X），可随时切回 vpp 数据面」（独立事实源取 dpkg）。
+  **仍未验证（如实登记）**：VM 侧 virtio+vhost-net 接入的连通性、安装器 `--dataplane kernel` 的整机流程
+  （含 #406 的「装齐 + 切回 vpp 无需二次安装」）、未实现族的真机逐族拒绝。
+- 已定决策 308 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线 #300~#403（其中 #350 撤回）、
+  **v3 线自 #404 起**（分支 `v3`，已有 #404~#406））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。

@@ -171,6 +171,8 @@ usage() {
   -y, --yes               跳过确认（自动化；非交互场景必给）
       --admin-password P  预置 admin 口令（至少 8 个字符，仅限字母数字与 @._+=-）
       --no-start          只安装，不起服务
+      --dataplane MODE    数据面实现：vpp（缺省）| kernel（Linux 内核网络）。
+                          两种数据面的软件包都会安装，以便之后随时切换
       --verify            只体检（假定已安装；不安装）
       --keep              保留解包目录（排查用）
       --extract DIR       只把载荷解到 DIR，不安装
