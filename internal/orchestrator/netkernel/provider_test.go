@@ -509,6 +509,100 @@ func TestApplyBondKeepsMatchingAttributes(t *testing.T) {
 	}
 }
 
+// 真机（3.0.5~dev4）缺陷：内核 bonding **不允许 enslave 处于 up 的成员**
+// （`Error: Device can not be enslaved while up.`）——成员必须先是 down 的。
+// 修复前 `set bonds b0 members 1 ens192`（口是 up 的）提交直接失败并补偿。
+func TestApplyBondEnslavesMembersWhileDown(t *testing.T) {
+	r := newBondKernelRunner("ens192", "ens224") // 现场：两个口都是 up 的
+	p := New(r)
+	bond := model.Bond{Name: "b0", Members: []string{"ens192", "ens224"}}
+	if err := p.ApplyBond(context.Background(), bond); err != nil {
+		t.Fatalf("成员先 down 再 enslave 应成功（修复前这里是内核实测报错）：%v", err)
+	}
+	for _, m := range []string{"ens192", "ens224"} {
+		iDown := r.callIndex("ip link set dev " + m + " down")
+		iMaster := r.callIndex("ip link set dev " + m + " master b0")
+		if iDown < 0 || iMaster < 0 || iDown > iMaster {
+			t.Fatalf("成员 %s 必须先 down 再 enslave；实际：\n%s", m, r.joined())
+		}
+		iUp := r.callIndex("ip link set dev " + m + " up")
+		if iUp < r.callIndex("ip link set dev b0 up") {
+			t.Fatalf("成员 %s 应在 bond 自身 up 之后再置 up（从属口也要 up 才有流量）；实际：\n%s", m, r.joined())
+		}
+	}
+	// 幂等重放：已 enslave 的成员不再被反复 down/up（重放不得抖动 LAG），且不报错。
+	before := len(r.calls)
+	if err := p.ApplyBond(context.Background(), bond); err != nil {
+		t.Fatalf("重复 apply 应幂等：%v", err)
+	}
+	second := strings.Join(r.calls[before:], "\n")
+	for _, m := range []string{"ens192", "ens224"} {
+		if strings.Contains(second, "dev "+m+" down") {
+			t.Fatalf("重放不得把已在位的成员 down 掉（会抖动 LAG）：\n%s", second)
+		}
+	}
+}
+
+// bondKernelRunner 模拟内核对 bonding 成员的既定行为：**up 的成员不能被 enslave**
+// （`Error: Device can not be enslaved while up.`）；维护 admin 状态与归属，命令逐条记录，
+// 供断言 down → master → （bond up）→ 成员 up 的次序。
+type bondKernelRunner struct {
+	fakeRunner
+	up     map[string]bool
+	slaves map[string]string // 成员 → master
+}
+
+func newBondKernelRunner(upDevs ...string) *bondKernelRunner {
+	r := &bondKernelRunner{up: map[string]bool{}, slaves: map[string]string{}}
+	for _, d := range upDevs {
+		r.up[d] = true
+	}
+	return r
+}
+
+func (r *bondKernelRunner) callIndex(sub string) int { return strings.Index(r.joined(), sub) }
+
+func (r *bondKernelRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	if name == "ip" && len(args) >= 3 && args[0] == "link" && args[1] == "set" && args[2] == "dev" {
+		dev := args[3]
+		if len(args) == 5 { // ip link set dev X up|down
+			switch args[4] {
+			case "up":
+				r.up[dev] = true
+			case "down":
+				r.up[dev] = false
+			}
+		}
+		if len(args) == 6 && args[4] == "master" { // ip link set dev X master B
+			r.calls = append(r.calls, name+" "+strings.Join(args, " "))
+			if r.up[dev] {
+				return "Error: Device can not be enslaved while up.", errors.New("exit status 2")
+			}
+			r.slaves[dev] = args[5]
+			return "", nil
+		}
+	}
+	// 任一 link show 形态（`-j`/`-d` 任意组合）：按模拟状态回读。
+	if name == "ip" && len(args) >= 5 {
+		for i := range args {
+			if args[i] == "dev" && i+1 < len(args) {
+				dev := args[i+1]
+				r.calls = append(r.calls, name+" "+strings.Join(args, " "))
+				flags, master, slaveKind := "[]", "", ""
+				if r.up[dev] {
+					flags = `["UP","LOWER_UP"]`
+				}
+				if m := r.slaves[dev]; m != "" {
+					master, slaveKind = fmt.Sprintf(`,"master":%q`, m), `,"linkinfo":{"info_slave_kind":"bond"}`
+				}
+				return fmt.Sprintf(`[{"ifname":%q,"flags":%s,"operstate":"up"%s%s}]`,
+					dev, flags, master, slaveKind), nil
+			}
+		}
+	}
+	return r.fakeRunner.Run(ctx, name, args...)
+}
+
 // R2-13①：成员按声明收敛——已从声明里删掉的成员必须放开（旧实现只 enslave、从不释放，
 // 该口永久留在 LAG，而 bond 没有运行态读视图可发现）。
 func TestApplyBondReleasesRemovedMembers(t *testing.T) {

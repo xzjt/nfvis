@@ -348,7 +348,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-switches <n> ports <seq> interface <if> [trunk vlans <l>\|native <v>]` | 物理口成员（`<seq>` 为必填端口序号） | VPP BD | ✅ |
 | `set virtual-switches <n> ports <seq> vnf <vm> interface <vnic> [trunk vlans <l>]` | vhost-user 成员（`<seq>` 必填） | VPP + libvirt | ✅ |
 | `set virtual-switches <n> ports <seq> container <ct> interface <vnic>` | 容器 memif 成员（`<seq>` 必填） | VPP + Docker | ✅ |
-| `set virtual-switches <n> cross-connect <a> <b>` | 两端口直通（与 ports/gateway 互斥） | VPP | ✅（决策 #79 修复：置 `cross_connect` 并校验两端口已声明） |
+| `set virtual-switches <n> cross-connect <bool>` | 两端口直通开关（与 ports/gateway 互斥；端口取该交换机的 `ports`，恰好两个——数据面取前两个，>2 提交期拒绝、<2 提交期提示） | VPP | ✅（决策 #79：置 `cross_connect`；`delete virtual-switches <n> cross-connect` 清键） |
 | `set virtual-switches <n> l3-interface <if> ip address <p>` | L3 接口地址（v4/v6 多条） | VPP | ✅ |
 | `set virtual-switches <n> l3-interface <if> acl-in <acl>` | L3 接口 ACL 绑定 | VPP acl | ✅ 已实证生效（round118：vNIC/物理口作 L3 接口时 ACL 确实在拦；绑定时产品**自动伴随**一条放行全部非 IP（含 ARP）的 macip 白名单——决策 #341，故对端无需预置静态邻居；IP 流量仍受 ACL） |
 | `set virtual-switches <n> static-routes <prefix> next-hop <ip> [distance <n>]` | 静态路由（v4/v6）；`next-hop` 可**逗号分隔多下一跳＝ECMP**（≤8，**前缀与每个下一跳须同族**，混族提交期拒绝）；`distance` 仅记录、不参与选路（运行态读视图不给出该值） | VPP FIB | ✅ |
@@ -565,7 +565,7 @@ pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**
 | 1 | `set system api tls cert-file <p> key-file <p>` | CLI 多一层 `tls`、模型扁平 → 7-token 别名 |
 | 2 | `set system login user <n> password <s> class <c>` | 三层键名不一致（`user/class/password` vs `users/classes/password_hash`）且口令**必须哈希** → 别名 + `aaa.HashPassword`/`CheckPasswordPolicy`（与 REST 同源），回显脱敏为 `«已隐藏»` |
 | 3/4 | `set system login class <n> allow\|deny <path>` | 模型是 `[]string`，原先写标量 → 按值追加/删除 |
-| 5 | `set virtual-switches <n> cross-connect <a> <b>` | 模型只有 `cross_connect bool`（端口身份由 `ports` 承担）→ **保持模型不变**，置位 + 校验被引用端口已声明且恰为两个 |
+| 5 | `set virtual-switches <n> cross-connect <bool>` | 模型只有 `cross_connect bool`（端口身份由 `ports` 承担）→ **保持模型不变**：语句与模型同源为显式取值开关（`true|false`，`delete` 清键），端口数由该交换机的 `ports` 决定（数据面取前两个） |
 | 6 | `set virtual-machine-functions <n> interfaces <vnic> vlan <n>` | ParamType `vlan` 让值保持字符串、模型是 `int` → `valueTransforms` 转数值 |
 | 7 | `set … cloud-init ssh-key <key>` | SSH 公钥必含空格，`strings.Fields` 会拆开 → 解析入口改**引号感知切分** + `SPA(ssh_keys)` |
 | 8 | 容器 `interfaces … type memif virtual-switch …` / `env <k> <v>` | 前者：取值关键字后的同级关键字不可达 → 解析器**就近向上回退**（`Node.parent`）+ vNIC 改 `SPD`；后者：模型是 map → 别名直接落 map |

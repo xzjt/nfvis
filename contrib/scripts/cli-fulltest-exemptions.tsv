@@ -67,7 +67,7 @@ set virtual-switches <n> gateway acl-in|acl-out <acl>	设计拒绝	网关 ACL �
 set virtual-switches <n> ports <seq> interface <if> [trunk vlans <l>|native <v>]	配置语句未逐条执行	端口成员需占用物理口（阶段 2 的口位已被 vs-l3/bond0 占满）；由 lifecycle L1 的建删对象覆盖
 set virtual-switches <n> ports <seq> vnf <vm> interface <vnic> [trunk vlans <l>]	配置语句未逐条执行	vNIC 成员需 VNF（阶段 3 才建）；由 lifecycle L3-1 的 BD 成员断言覆盖
 set virtual-switches <n> ports <seq> container <ct> interface <vnic>	配置语句未逐条执行	容器 memif 成员；本机无自带 memif 的容器镜像（T0-3 环境受限）
-set virtual-switches <n> cross-connect <a> <b>	配置语句未逐条执行	二层直通需两个空闲口且不能同广播域；由 network 单测与交付步骤覆盖
+set virtual-switches <n> cross-connect <bool>	配置语句未逐条执行	二层直通需两个空闲口且不能同广播域；由 network 单测与交付步骤覆盖
 set virtual-switches <n> l3-interface <if> acl-in <acl>	配置语句未逐条执行	L3 口 ACL 绑定；同族 set virtual-switches <n> l3-interface <if> ip address 已在阶段 2 执行
 set nat rules <seq> match source <p> virtual-switch <n> action interface <if> [source-pool <n>]	配置语句未逐条执行	NAT 规则需出接口与转发域齐备；由 lifecycle L3-3 的会话对账与真机 NAT 走查覆盖
 set port-mirroring <n> source vnf <vm> interface <vnic> direction <…>	配置语句未逐条执行	SPAN 源为 vNIC（需 VNF + 两个口）；物理口源形态已在阶段 2 覆盖

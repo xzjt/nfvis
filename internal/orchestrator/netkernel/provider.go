@@ -288,7 +288,8 @@ func (p *Provider) TeardownInterface(ctx context.Context, iface model.InterfaceC
 //
 // 映射：无 lacp 声明 → `balance-xor`（静态聚合，与 VPP 静态 bond 同义）；有 lacp →
 // `802.3ad`，lacp_rate 由 interval 映射（fast=1、slow=0）。成员口按声明收敛：
-// 声明里的 enslave、已从声明里删掉的释放。
+// 声明里的 enslave（**先 down 再 enslave**，内核 bonding 拒绝 enslave 处于 up 的成员）、
+// 已从声明里删掉的释放；收尾把成员逐个置 up（从属口也要 up 才有流量）。
 //
 // 属性变更（mode/xmit_hash_policy/lacp_rate）不能原地改：已在场的 bond 与声明不一致时
 // **删掉重建**（与 VPP 侧「lacp 变则重建」同法）。旧实现把 `File exists` 一吞了之，
@@ -329,11 +330,24 @@ func (p *Provider) ApplyBond(ctx context.Context, bond model.Bond) error {
 	declared := map[string]bool{}
 	for _, m := range bond.Members {
 		declared[m] = true
+		// 已在位的成员（master 就是本 bond）不重复 down/enslave：重放（恢复收敛/每次提交）都会
+		// 走到这里，反复 down/up 会抖动 LAG 的成员表——而内核 bonding 的既定行为是
+		// **不允许 enslave 处于 up 的成员**（真机实测：`Error: Device can not be enslaved while up.`，
+		// 3.0.5~dev4 上 `set bonds b0 members 1 ens192` 提交直接失败并补偿）。
+		// 故新成员/迁移来的成员一律：先 down、再 enslave、最后由下面的收尾统一置 up。
+		if cur, _, ok := p.linkMaster(ctx, m); ok && cur == bond.Name {
+			continue
+		}
+		if err := p.ipReq(ctx, "link", "set", "dev", m, "down"); err != nil {
+			return err
+		}
 		if err := p.ipReq(ctx, "link", "set", "dev", m, "master", bond.Name); err != nil {
 			return err
 		}
 	}
 	// 释放已从声明里删掉的成员：只放开**确实挂在本 bond 上的**（转作其它角色的口不动）。
+	// 被释放的口这里不置 up：它若仍声明在 interfaces 里，up 由 ApplyInterface 负责（各管各的）；
+	// 内核释放从属口也不要求它是 down，故不额外多管。
 	for _, cur := range p.linkMembers(ctx, bond.Name) {
 		if declared[cur] {
 			continue
@@ -342,7 +356,17 @@ func (p *Provider) ApplyBond(ctx context.Context, bond model.Bond) error {
 			return err
 		}
 	}
-	return p.ipReq(ctx, "link", "set", "dev", bond.Name, "up")
+	if err := p.ipReq(ctx, "link", "set", "dev", bond.Name, "up"); err != nil {
+		return err
+	}
+	// 成员收尾置 up（enslave 时被压 down 的那批）：从属口自身也要 up 才有流量；
+	// ensureLinkUp 回读确认，避免「命令成功、口还是 down」（宿主链路策略压回去的现场）。
+	for _, m := range bond.Members {
+		if err := p.ensureLinkUp(ctx, m); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // bondInfoData `ip -d -j link show` 里 bond 的属性（linkinfo.info_data）。

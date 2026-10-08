@@ -77,10 +77,27 @@ func TestMatchValuesAndOptional(t *testing.T) {
 	if err != nil || depth != 3 || n.Kind != Value {
 		t.Fatalf("值消耗: node=%+v depth=%d err=%v", n, depth, err)
 	}
-	// 连续参数（cross-connect <port-a> <port-b>）
-	n, depth, err = Match(ConfigPathTree(), []string{"virtual-switches", "vs1", "cross-connect", "p1", "p2"})
+	// 连续位置参数（bonds … members [<seq>] <ifname>）按首参重复匹配——
+	// 这条机制仍被 bonds members / dhcp-server pool 等形态使用
+	// （历史用例是 cross-connect <a> <b>，该叶子已与模型 bool 对齐为显式取值开关）。
+	n, depth, err = Match(ConfigPathTree(), []string{"bonds", "bond0", "members", "1", "ens2f0"})
 	if err != nil || depth != 5 {
 		t.Fatalf("连续参数: node=%+v depth=%d err=%v", n, depth, err)
+	}
+	// cross-connect 是**单个取值叶子**：值位置就是树的中枢（?/Tab 在此列 true|false），
+	// 不再有两个位置参数（曾与模型 bool 不一致，见 tree_config.go 注释）。
+	cc, _, err := Match(ConfigPathTree(), []string{"virtual-switches", "vs1", "cross-connect"})
+	if err != nil || cc.Kind != Keyword || cc.singleValue() == nil || cc.singleValue().ParamType != "bool" {
+		t.Fatalf("cross-connect 应是带 bool 取值叶子的关键字: node=%+v err=%v", cc, err)
+	}
+	for _, c := range cc.Children {
+		if c.Kind == Param {
+			t.Fatalf("cross-connect 不应再挂位置参数: %+v", c)
+		}
+	}
+	toks := candidateNames(Candidates(ConfigPathTree(), []string{"virtual-switches", "vs1", "cross-connect"}, "", testDyn))
+	if !contains(toks, "true") || !contains(toks, "false") {
+		t.Fatalf("cross-connect 值位置候选应为 true|false: %v", toks)
 	}
 	// commit confirmed [minutes] 可选值
 	if _, _, err := Match(ConfigRoot(), []string{"commit", "confirmed"}); err != nil {

@@ -12,7 +12,8 @@
 //
 // 匹配语义：值叶子与无子树参数消耗一个 token 后回到父关键字层继续匹配
 // （如 `static-routes <prefix> next-hop <ip> distance <n>`）；连续无子树参数
-// （cross-connect <a> <b>）按首参重复匹配，参数个数与取值合法性由执行期校验。
+// （如 `bonds <name> members [<seq>] <ifname>` 与 `dhcp-server pool <start> <end>`）
+// 按首参重复匹配，参数个数与取值合法性由执行期校验。
 package schema
 
 import (
@@ -340,7 +341,7 @@ func (n *Node) singleValue() *Node {
 
 // consumesToken 报告节点消耗一个 token 后是否需要回退到父级继续匹配
 // （值叶子与无子树参数：语句在该 token 后对父级关键字层开放，如
-// `next-hop <ip> distance <n>` 的 distance 与 `cross-connect <a> <b>` 的 <b>）。
+// `next-hop <ip> distance <n>` 的 distance 与 `members [<seq>] <ifname>` 的 <ifname>）。
 func (n *Node) consumesToken() bool {
 	return n.Kind == Value || (n.Kind == Param && len(n.Children) == 0)
 }
@@ -620,8 +621,8 @@ func candidatesAt(n *Node, partial string, dyn DynamicValues, allow CandidateFil
 // keywordCandidatesUpward 从「已消耗 token 的无子树参数」向上找**最近的一层关键字**：
 // 层级由结构决定（先按 partial 过滤会让层级选择随输入漂移），取到该层后再按 partial 过滤。
 // 排除来路（cameFrom），否则 `management interface ens160 ` 会把 `interface` 自己再列一遍。
-// 只列关键字、不列同级参数：`cross-connect <a> <b>` 那种连续位置参数此处仍列不出 <b>
-// ——如实登记为已知局限（附录 A #90），不靠猜把它补成噪声。
+// 只列关键字、不列同级参数：`bonds <name> members [<seq>] <ifname>` 那种连续位置参数
+// 此处仍列不出第二个 <ifname> ——如实登记为已知局限（附录 A #90），不靠猜把它补成噪声。
 func keywordCandidatesUpward(n *Node, partial string, allow CandidateFilter) []Candidate {
 	var out []Candidate
 	cameFrom := n

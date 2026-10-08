@@ -80,7 +80,9 @@ var roundTripAliasCases = [][]string{
 	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 ports 1 interface ens192 trunk vlans 100,200"},
 	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 ports 1 vnf vnf-a interface eth0"},
 	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 ports 1 container ct1 interface memif0"},
-	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 ports 1 interface ens192", "set virtual-switches vs1 ports 2 interface ens224", "set virtual-switches vs1 cross-connect 1 2"},
+	// cross-connect 是开关（模型 bool，树为显式取值叶子）：反推 `cross-connect true`，
+	// 端口不再入语句（由该交换机的 ports 承担）
+	{"set virtual-switches vs1 type l2", "set virtual-switches vs1 ports 1 interface ens192", "set virtual-switches vs1 ports 2 interface ens224", "set virtual-switches vs1 cross-connect true"},
 	// virtual-machine-functions（vcpu/memory/interfaces/serial）
 	{"set virtual-machine-functions vnf-a vcpu count 2", "set virtual-machine-functions vnf-a vcpu count 2 pin true"},
 	{"set virtual-machine-functions vnf-a vcpu count 2", "set virtual-machine-functions vnf-a memory size-mb 512", "set virtual-machine-functions vnf-a memory numa node 0"},

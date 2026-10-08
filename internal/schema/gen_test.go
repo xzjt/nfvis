@@ -147,7 +147,7 @@ func TestStatementPathsExist(t *testing.T) {
 		{"virtual-switches", "vs-app", "ports", "1", "interface", "ens2f0", "trunk", "vlans", "100,200"},
 		{"virtual-switches", "vs-app", "ports", "2", "vnf", "fw-vm", "interface", "eth0"},
 		{"virtual-switches", "vs-app", "ports", "3", "container", "sbc-ct1", "interface", "eth0"},
-		{"virtual-switches", "vs-app", "cross-connect", "1", "2"},
+		{"virtual-switches", "vs-app", "cross-connect", "true"},
 		{"virtual-switches", "vs-l3", "l3-interface", "vlan100", "ip", "address", "10.10.0.1/24"},
 		{"virtual-switches", "vs-l3", "static-routes", "0.0.0.0/0", "next-hop", "10.10.0.254"},
 		{"virtual-switches", "vs-l3", "static-routes", "0.0.0.0/0", "distance", "1"},
@@ -266,5 +266,38 @@ func TestDeleteUsesSamePathTree(t *testing.T) {
 				t.Fatalf("%s 第 %d 个分支不符: %s != %s", cmd, i, c.Name, path.Children[i].Name)
 			}
 		}
+	}
+}
+
+// TestCrossConnectLeafMatchesModelBool：cross-connect ⇄ 模型 `CrossConnect bool` 同源。
+//
+// 由来（round2 现场）：树曾把它声明成两个位置参数（`cross-connect <port-a> <port-b>`），
+// 而模型字段是 bool（OpenAPI 同为 boolean）、端口身份由该交换机的 `ports` 列表承担。
+// 值个数不匹配的写法因此落到通用遍历、写出数组，用户看到的是 JSON 解码的内部报错
+// （`cannot unmarshal array into … cross_connect of type bool`），display set 反推也只能
+// 照旧形态发射。修法**改树、不改模型**：按本树布尔叶子惯例（VE("bool", …)，同
+// `set system kernel low-latency true`）声明成显式取值开关。
+// 红态：旧树形态下本用例在第 2 段（叶子类型）即失败。
+func TestCrossConnectLeafMatchesModelBool(t *testing.T) {
+	// 模型侧：VirtualSwitch.CrossConnect 必须是 bool（本缺陷只许改树）
+	f, ok := reflect.TypeOf(model.VirtualSwitch{}).FieldByName("CrossConnect")
+	if !ok || f.Type.Kind() != reflect.Bool {
+		t.Fatalf("VirtualSwitch.CrossConnect 应是 bool: %+v", f)
+	}
+	// 树侧：cross-connect 下只有**一个取值叶子**（bool，枚举 true|false），
+	// 不再是两个位置参数（Match 不带取值 token 时停在关键字节点上，取值在 singleValue）。
+	n, _, err := Match(ConfigPathTree(), []string{"virtual-switches", "vs1", "cross-connect"})
+	if err != nil {
+		t.Fatalf("`virtual-switches <n> cross-connect` 路径不可解析: %v", err)
+	}
+	vn := n.singleValue()
+	if n.Kind != Keyword || vn == nil || vn.ParamType != "bool" || !reflect.DeepEqual(vn.Enum, []string{"true", "false"}) {
+		t.Fatalf("cross-connect 应是带 bool 取值叶子的关键字（红态：旧树是两个位置参数）: node=%+v value=%+v", n, vn)
+	}
+	if len(n.Children) != 1 {
+		t.Fatalf("cross-connect 只应有取值叶子一个子节点（旧形态是两个位置参数）: %+v", n.Children)
+	}
+	if _, _, err := Match(ConfigPathTree(), []string{"virtual-switches", "vs1", "cross-connect", "true"}); err != nil {
+		t.Fatalf("`cross-connect true` 应可解析: %v", err)
 	}
 }

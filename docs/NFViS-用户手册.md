@@ -1505,7 +1505,9 @@ nfvis# commit
 ```bash
 nfvis# edit virtual-switches vs-xc
 nfvis# set type l2
-nfvis# set cross-connect 1 2          # 端口 1 与 2 直通（与 ports/gateway 互斥）
+nfvis# set ports 1 interface ens224   # 直通的两端＝本交换机的两个成员端口
+nfvis# set ports 2 interface ens225   #   （须属不同广播域，见下方警告）
+nfvis# set cross-connect true         # 置直通开关（与 ports/gateway 互斥）
 nfvis# top
 nfvis# commit
 ```

@@ -288,3 +288,116 @@ func TestSwitchPortsResponseShapeMatchesContract(t *testing.T) {
 		}
 	}
 }
+
+// ---------- 删端口叶子后的空壳回收（round2 现场） ----------
+
+// portSeqOf 取交换机某端口序号的条目（不存在返回 nil）。
+func portSeqOf(t *testing.T, engine interface {
+	Candidate() (model.Config, bool, error)
+}, vsName string, seq int) *model.VSwitchPort {
+	t.Helper()
+	cfg, _, err := engine.Candidate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range cfg.VirtualSwitches {
+		if cfg.VirtualSwitches[i].Name != vsName {
+			continue
+		}
+		for j := range cfg.VirtualSwitches[i].Ports {
+			if cfg.VirtualSwitches[i].Ports[j].Seq == seq {
+				p := cfg.VirtualSwitches[i].Ports[j]
+				return &p
+			}
+		}
+	}
+	return nil
+}
+
+// TestDeleteSwitchPortLeafReclaimsEmptyEntry：删掉端口条目的成员叶子（interface/vnf/container）
+// 之后，条目必须被**回收**——否则 candidate 里留下 ports[<seq>]={seq}（或只剩 trunk/native
+// 残值）这种空壳端口，后续 commit 被模型校验
+// 「virtual-switches[...].ports[<seq>]: 端口必须且只能指定 interface/vnf/container 之一」
+// 打断（操作者须再整条 `delete … ports <seq>` 才干净）。
+func TestDeleteSwitchPortLeafReclaimsEmptyEntry(t *testing.T) {
+	x, engine := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-lan type l2",
+		"set virtual-switches vs-lan ports 2 interface ens224 trunk vlans 100",
+	)
+	if out := run(t, x, "admin", aaaClassSU, "ssh",
+		"delete virtual-switches vs-lan ports 2 interface ens224"); strings.Contains(out, "%%") {
+		t.Fatalf("删除叶子应成功: %s", out)
+	}
+	if p := portSeqOf(t, engine, "vs-lan", 2); p != nil {
+		t.Fatalf("端口条目被删空后应回收，实际仍在: %+v", *p)
+	}
+	// 提交不再被空壳端口打断（回收后该交换机只剩 name/type，可提交）
+	if out := run(t, x, "admin", aaaClassSU, "ssh", "commit"); !strings.Contains(out, "commit 成功") {
+		t.Fatalf("回收空壳端口后提交应成功:\n%s", out)
+	}
+}
+
+// TestDeleteSwitchPortPartialLeafKeepsEntry：只删端口的**非成员叶子**（trunk vlans）
+// 不得回收条目——条目仍在用（interface 还在），回收会把用户配置误删。
+func TestDeleteSwitchPortPartialLeafKeepsEntry(t *testing.T) {
+	x, engine := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-lan type l2",
+		"set virtual-switches vs-lan ports 2 interface ens224 trunk vlans 100",
+		"delete virtual-switches vs-lan ports 2 interface ens224 trunk vlans 100",
+	)
+	p := portSeqOf(t, engine, "vs-lan", 2)
+	if p == nil {
+		t.Fatal("只删 trunk 叶子不得回收端口条目（成员 interface 仍在用）")
+	}
+	if p.Interface != "ens224" || len(p.TrunkVlans) != 0 {
+		t.Fatalf("应只清 trunk 取值、成员与条目保留: %+v", *p)
+	}
+}
+
+// TestSetPathKeepsBarePortShell：`set … ports <seq>` 单独成句是**分步构建的中间态**
+// （树允许、display set 也按此反推；`edit` 层级式配置就是这个节奏），
+// 故 set 路径不得回收空壳——否则用户刚建的端口会被后续任意一条 set 语句吞掉。
+func TestSetPathKeepsBarePortShell(t *testing.T) {
+	x, engine := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-lan type l2",
+		"set virtual-switches vs-lan ports 2",
+		"set virtual-switches vs-lan vlan access 100",
+	)
+	if p := portSeqOf(t, engine, "vs-lan", 2); p == nil {
+		t.Fatal("set 路径不得回收端口空壳（分步构建的中间态）")
+	}
+	// 补上成员叶子后端口即完整（中间态不残留：同一 candidate 内可继续编辑）
+	if out := run(t, x, "admin", aaaClassSU, "ssh",
+		"set virtual-switches vs-lan ports 2 interface ens224"); strings.Contains(out, "%%") {
+		t.Fatalf("补成员叶子应成功: %s", out)
+	}
+	p := portSeqOf(t, engine, "vs-lan", 2)
+	if p == nil || p.Interface != "ens224" {
+		t.Fatalf("补成员后端口应完整: %+v", p)
+	}
+}
+
+// TestDeleteSwitchPortVNFResidueReclaimed：vnf 成员只留 vm 名、丢了 vNIC 名同样是
+// 「提交必被拒」的残壳（校验报「VNF "x" 的 vNIC "" 不存在」），一并回收。
+func TestDeleteSwitchPortVNFResidueReclaimed(t *testing.T) {
+	x, engine := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-lan type l2",
+		"set virtual-machine-functions fw-vm image base.qcow2",
+		"set virtual-switches vs-lan ports 1 vnf fw-vm interface eth0",
+	)
+	if out := run(t, x, "admin", aaaClassSU, "ssh",
+		"delete virtual-switches vs-lan ports 1 vnf fw-vm interface eth0"); strings.Contains(out, "%%") {
+		t.Fatalf("删除 vNIC 叶子应成功: %s", out)
+	}
+	if p := portSeqOf(t, engine, "vs-lan", 1); p != nil {
+		t.Fatalf("vnf 残壳（只剩 vm 名）应回收，实际仍在: %+v", *p)
+	}
+}

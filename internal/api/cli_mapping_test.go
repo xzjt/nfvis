@@ -102,9 +102,7 @@ var contractStatements = []string{
 	"set system login class c1 allow show",
 	"set system login class c1 deny request",
 	"set virtual-switches vs-xc type l2",
-	"set virtual-switches vs-xc ports 1 interface ens224",
-	"set virtual-switches vs-xc ports 2 interface ens192",
-	"set virtual-switches vs-xc cross-connect 1 2",
+	"set virtual-switches vs-xc cross-connect true",
 	"set virtual-machine-functions fw-vm interfaces eth0 vlan 100",
 	"set virtual-machine-functions fw-vm cloud-init ssh-key \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY nfvis@test\"",
 	// FR-CMP-023：通用 PCI 直通设备（追加语义；树为具名数组容器、模型为 []string，走别名）
@@ -162,14 +160,10 @@ func TestCLIStatementMappingGuard(t *testing.T) {
 			if strings.Contains(stmt, "storm-control") {
 				pre = append(pre, "set interfaces ens192 description p", "set interfaces ens224 description p")
 			}
-			// cross-connect 引用的是**已声明的端口序号**（模型只有 cross_connect bool，
-			// 端口身份由 ports 列表承担），故须先声明两个端口。
+			// cross-connect 是显式取值开关（模型 bool），语句里不带端口号——端口身份由
+			// 该交换机的 ports 列表承担（VPP 侧取前两个），故只需先建出交换机元素。
 			if strings.Contains(stmt, "cross-connect") {
-				pre = append(pre,
-					"set virtual-switches vs-xc type l2",
-					"set virtual-switches vs-xc ports 1 interface ens224",
-					"set virtual-switches vs-xc ports 2 interface ens192",
-				)
+				pre = append(pre, "set virtual-switches vs-xc type l2")
 			}
 			for _, s := range pre {
 				if res := x.Execute("admin", aaa.ClassSuperUser, "ssh", s); strings.Contains(res.Output, "%%") {
@@ -250,6 +244,10 @@ func TestCLIStatementMappingDelete(t *testing.T) {
 			"set virtual-machine-functions fw-vm image base.qcow2",
 			"set virtual-switches vs-a ports 1 vnf fw-vm interface eth0"},
 			"delete virtual-switches vs-a ports 1 vnf fw-vm"},
+		// cross-connect 是开关：`set … true` 置位、`delete …`（不带取值）清键，两侧都要落模型
+		{[]string{"set virtual-switches vs-xc type l2",
+			"set virtual-switches vs-xc cross-connect true"},
+			"delete virtual-switches vs-xc cross-connect"},
 		// VXLAN（决策 #383）：逐叶子删除（值 token 容错）与整条删除
 		{[]string{"set vxlan tunnels tun-b vni 100 local 10.99.0.1 remote 10.99.0.2 dst-port 5789"},
 			"delete vxlan tunnels tun-b dst-port"},

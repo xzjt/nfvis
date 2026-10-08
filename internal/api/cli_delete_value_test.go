@@ -83,10 +83,13 @@ func TestDeleteValueLeafArrayPerValue(t *testing.T) {
 
 func TestDeleteScalarParamWithValueToken(t *testing.T) {
 	var cfg model.Config
-	// 交换机端口成员：ports <seq> interface <if> 是 SP 标量参数（branch 2a）
+	// 交换机端口成员：ports <seq> interface <if> 是 SP 标量参数（branch 2a）。
+	// 配两个端口：删掉其中一条的成员叶子后既能看出「删的是取值、不是反向写入」，
+	// 也能看出被掏空的那一条会被回收（pruneEmptySwitchPorts），未被影响的另一条不动。
 	for _, line := range []string{
 		"set virtual-switches vs1 type l2",
 		"set virtual-switches vs1 ports 1 interface ens224",
+		"set virtual-switches vs1 ports 2 interface ens192",
 	} {
 		toks := splitFieldsQuoted(line)
 		if err := applyStatement(&cfg, toks[1:]); err != nil {
@@ -95,9 +98,15 @@ func TestDeleteScalarParamWithValueToken(t *testing.T) {
 	}
 	tree := deleteTree(t, cfg, "delete virtual-switches vs1 ports 1 interface ens224")
 	vs := tree["virtual_switches"].([]any)[0].(map[string]any)
-	ports := vs["ports"].([]any)
+	ports, _ := vs["ports"].([]any)
+	if len(ports) != 1 {
+		t.Fatalf("被删空的端口条目应回收、另一条保留: %v", ports)
+	}
 	p0 := ports[0].(map[string]any)
-	if _, ok := p0["interface"]; ok {
-		t.Fatalf("delete 标量参数带取值应删除字段: %v", p0)
+	if p0["interface"] == "ens224" {
+		t.Fatalf("delete 标量参数带取值应删除字段（不得反向写入）: %v", p0)
+	}
+	if p0["interface"] != "ens192" || p0["seq"] != float64(2) {
+		t.Fatalf("保留的应是未受影响的端口 2: %v", p0)
 	}
 }

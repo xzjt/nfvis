@@ -138,6 +138,31 @@ NFViS v3 round2 修复轮：体检发现的实现级收口 + 真机复核
       `nft list table netdev nfvis-acl` 的规则链为 **`ip saddr 0.0.0.0/0 accept`**（显式 v4 限定；
       修复前是裸 `accept`，对 v6 同样命中 ⇒ 与手册「两侧都是 any 按 v4」相反、可致 v6 策略被绕过）。
 
+3.9 收尾追加复核（3.0.5~dev4 重打重装；体检之外的两条已登记缺陷 + 剩余"未真机"项）
+    · **R2-25（501）通过**：内核数据面下 `GET /nat/sessions`、`GET /protocols/lldp/neighbors`、
+      `POST /vpp/restart`、`POST /interfaces:clear-statistics` 四条均 **501 + NOT_IMPLEMENTED**，
+      文案各自点名数据面（修复前 500/502）。
+    · **R2-8（向导）通过（真 pty）**：`wizard` 经真 pty 驱动，1/5 输 `kernel`、2/5 输 **`2-5`（核列表）**
+      ——不再出现「数据面 "2-5" 不合法」，直接给出内核数据面计划
+      （`set system dataplane kernel` + 1G=1/2M=768 + `isolated-cores 2-5` + `request system kernel apply`），
+      并在确认处中止（未做任何变更）；同时可见向导在内核路径**跳过了 VPP 问答**。
+    · **R2-17（Web 渲染）通过（浏览器黑盒）**：ZCode 内置浏览器打开 `https://…/api/v1/ui/`、
+      admin 登录后，总览页「数据面」卡显示 **当前数据面：Linux 内核网络（未使用 VPP）／版本 —／
+      连接状态：不适用（未使用 VPP）**，组件版本 `NFViS 3.0.5~dev4`、`VPP —`、`DPDK —`，
+      告警卡「（无未解决告警）」；截图入仓 `docs/images/v3-round2fix-web-dataplane-card.png`。
+    · **§7-1（cross-connect CLI 形态）通过**：`set virtual-switches vs-xc cross-connect true` 返回 `[ok]`，
+      提交被**内核侧** cross-connect 拒绝（不再是 `cannot unmarshal array into … of type bool`）。
+    · **§7-2（空壳端口）通过**：建交换机+端口 → `delete … ports 1 interface ens192` → 一次 `commit 成功`
+      （修复前被「端口必须且只能指定 interface/vnf/container 之一」拒绝）。
+    · **新抓一条（bond，见 §7-6）——已在 `3.0.5~dev5` 真机复核通过**：同一份声明
+      （`interfaces ens192/ens224` + `bonds b0 members 1/2`）提交成功，`/sys/class/net/b0/bonding/slaves`
+      = `ens192 ens224` 且成员 operstate 均 up（修复前：`ip link set … master b0` 报
+      `Error: Device can not be enslaved while up.` 并整次补偿）；**属性变更**：加 `lacp mode active interval fast`
+      后 `ip -d link show b0` 由 `mode balance-xor / lacp_rate slow` 变为 `mode 802.3ad / lacp_rate fast`
+      （兑现 R2-13 的「可证不同即重建」）；**成员释放**：`delete bonds b0 members 2 ens224` 后 slaves = `ens192`
+      （该 delete 形态需带 `[<seq>] <ifname>`，不带序号会报「无匹配配置」——属语句形态细节，未登记为缺陷）。
+      清场后残留核对：链路 0 / 本产品 nft 表 0 / clsact 0 / 告警 0。
+
 --------------------------------------------------------------------------------
 §4 安装器真机复核（#416 / #413 的装配回归）
 --------------------------------------------------------------------------------
@@ -163,13 +188,12 @@ NFViS v3 round2 修复轮：体检发现的实现级收口 + 真机复核
 §5 未做真机复核（如实登记；均有红-绿单测或桩测试覆盖）
 --------------------------------------------------------------------------------
 1. R2-7 SR-IOV：环境无 PF，未做真机（源码级顺序守护 + 注入断言）。
-2. R2-8 向导：未用真 pty 走一遍（单测覆盖 2/5 输入核列表的路径）。
-3. R2-13 bond/vxlan 的属性重建：未在真机造「属性已存在但与声明不同」的现场（单测覆盖；
-   解析不到字段时不重建，不会引发重建风暴）。
-4. R2-20 的「切换已提交未重启」窗口：需要 vpp→kernel 的往返现场，未做（单测红-绿覆盖）。
-5. R2-25 的 501：只做了单测与契约同步，未在真机敲 REST 端点。
-6. Web 渲染（数据面卡）：只做了字段级守护与 REST 字段核对，**未做浏览器可视复核**。
-7. `.run` 自解压完整闭环、规模/吞吐基线：与前几轮一致，仍未做。
+2. R2-13 bond/vxlan 的属性重建：未在真机造「属性已存在但与声明不同」的现场（单测覆盖；
+   解析不到字段时不重建，不会引发重建风暴）。**注**：同族的「bond 成员 enslave」在真机上另抓到
+   一条缺陷（§7-6），其修复的真机复核在 dev5（§3.9）。
+3. R2-20 的「切换已提交未重启」窗口：需要 vpp→kernel 的往返现场，未做（单测红-绿覆盖）。
+4. `.run` 自解压完整闭环、规模/吞吐基线：与前几轮一致，仍未做。
+（原列的 R2-8 向导真 pty、R2-25 的 501、Web 渲染三项已在 §3.9 补齐真机/浏览器复核，移出本清单。）
 
 --------------------------------------------------------------------------------
 §6 环境与收尾（如实登记）
@@ -192,7 +216,9 @@ NFViS v3 round2 修复轮：体检发现的实现级收口 + 真机复核
       整表，见 §7-5），并在 `3.0.5~dev3` 上**真机复核通过**：升级 + 一个巡检周期后
       `nft list tables` 中**无任何 `nfvis*` 表**，`show alarms` 无 active。
     · 版本：`3.0.5~dev1`（首装）→ `3.0.5~dev2`（重打重装，含 R2-4/R2-15① 回修）→ `3.0.5~dev3`
-      （重打重装，含空表回收回修）；三版均为内核数据面、服务 active。
+      （重打重装，含空表回收回修）→ `3.0.5~dev4`（含 cross-connect CLI 形态与空壳端口回收）→
+      `3.0.5~dev5`（含 bond 成员先 down 再 enslave 回修）；各版均为内核数据面、服务 active、
+      每轮跑完即清场（残留核对 0）。
 
 --------------------------------------------------------------------------------
 §7 本轮新发现（体检报告未列；已处理或登记）
@@ -214,3 +240,9 @@ NFViS v3 round2 修复轮：体检发现的实现级收口 + 真机复核
 5. **清场后仍留一张空 `inet nfvis-forward` 表**（R2-16 幂等重建的副产物）：与 #410 F3 判为缺陷的
    「`delete nat` 留空表」同类。已回修为「无数据面设备时回收整表、有设备时 flush + 重写」，
    并补红-绿单测；真机复核见 §6.1。
+6. **内核数据面 bond 成员 enslave 失败（真机 dev4 抓到，P1 级）**：声明 `interfaces ens192` +
+   `bonds b0 members 1 ens192` 后提交，底座补偿报
+   `ip link set dev ens192 master b0: … Error: Device can not be enslaved while up.`
+   ——内核 bonding **要求成员先 down**（VPP 数据面无此约束，故此前各轮未暴露）。
+   修法：`ApplyBond` 对每个成员 **先 down → enslave**，全部 enslave 完、bond `up` 之后**成员再 up**
+   （回读确认）；属性重建路径同受益。已回修（红-绿单测断言命令序列），真机复核见 §3.9。

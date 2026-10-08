@@ -6,13 +6,13 @@
 // qcow2 标记扇区，而宿主直写会破坏 qcow2 内部快照的 L1/refcount，因此**不能**用于证明
 // 「内容真的回滚了」。本测试改在 **guest 内**写文件：
 //
-//   1. 引导云镜像；cloud-init `write_files` 在 guest 根盘写下 KNOWN 内容，
-//      并用 `chpasswd` 给 root 设口令以便串口控制台登录（镜像内 root 口令为 `!*` 锁定）；
-//   2. 串口登录 guest，把文件改成 LATER（这一步证明「guest 内写盘」链路可用）；
-//   3. 关机，创建快照（此刻磁盘内容 = LATER）；决策 #75 起 create/rollback 需关机态；
-//   4. 启动 guest，串口把文件改成 CHANGED（快照后写入）；
-//   5. 关机，回滚到快照；
-//   6. 启动 guest 使磁盘内容可见，串口回读 → 应为 LATER（既非 CHANGED 也非 KNOWN）。
+//  1. 引导云镜像；cloud-init `write_files` 在 guest 根盘写下 KNOWN 内容，
+//     并用 `chpasswd` 给 root 设口令以便串口控制台登录（镜像内 root 口令为 `!*` 锁定）；
+//  2. 串口登录 guest，把文件改成 LATER（这一步证明「guest 内写盘」链路可用）；
+//  3. 关机，创建快照（此刻磁盘内容 = LATER）；决策 #75 起 create/rollback 需关机态；
+//  4. 启动 guest，串口把文件改成 CHANGED（快照后写入）；
+//  5. 关机，回滚到快照；
+//  6. 启动 guest 使磁盘内容可见，串口回读 → 应为 LATER（既非 CHANGED 也非 KNOWN）。
 //
 // 为什么必须关机再回滚/重启：回滚直接改磁盘，而运行中 guest 的内存/页缓存仍是旧内容；
 // 只有重引导后读到的才**只能是磁盘内容**，此时 LATER 才能排除「内存残留」与「写未生效」两种假阳性。

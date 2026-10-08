@@ -320,9 +320,18 @@ func ConfigPathTree() *Node {
 						),
 					),
 				),
-				K("cross-connect", "两端口直通模式（与 ports/gateway 互斥）",
-					P("<port-a>", "端口 A 序号", ""),
-					P("<port-b>", "端口 B 序号", ""),
+				// cross-connect 是**开关**：模型字段 VirtualSwitch.CrossConnect 是 bool
+				//（OpenAPI 同为 boolean），两个端口的「身份」由该交换机的 `ports` 列表承担
+				// （VPP 侧 desiredMembers 取前两个端口做点对点直通）。
+				// 此前树把它声明成两个位置参数（`<port-a> <port-b>`），与模型 bool 不一致：
+				// 值个数不匹配的写法会落到通用遍历、写出数组，再在 JSON 解码时报
+				// `cannot unmarshal array into … cross_connect of type bool`——一个用户读不懂的
+				// 内部错误，且 display set 反推只能照旧形态发射、与树不同源。
+				// 现按本树既有的布尔叶子惯例声明成显式取值开关（同 `set system kernel low-latency
+				// true`、`set … autostart true`）：`set … cross-connect true|false` 置位/清位，
+				// `delete … cross-connect` 清除（值由模型 bool 决定，端口数校验在提交期/数据面）。
+				K("cross-connect", "两端口直通模式（与 ports/gateway 互斥；端口取该交换机的 ports，恰好两个）",
+					VE("bool", "开关", "true", "false"),
 				),
 				K("l3-interface", "三层接口（仅 L3）",
 					P("<ifname|vlan>", "物理口/bond 或 vlan <v>", DynVppIfnames,

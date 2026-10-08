@@ -492,9 +492,8 @@ func emitVirtualSwitchFamily(w *stmtWriter, node *schema.Node, val any, prefix, 
 		if v, ok := m["vlan_access"].(float64); ok && v != 0 {
 			w.add(toks(prefix, "vlan", "access", formatScalar(v)))
 		}
-		// ports 先于 gateway/cross-connect：端口成员语句经身份消费建出交换机元素，
-		// gateway 别名（elemByID）与 cross-connect 校验都要求元素与端口已存在
-		var seqs []string
+		// ports 先于 gateway：端口成员语句经身份消费建出交换机元素（若该元素在裸声明里
+		// 还没建出来），gateway 的别名发射器（elemByID）要求元素已存在
 		if arr, ok := m["ports"].([]any); ok {
 			for _, e := range arr {
 				em, ok := e.(map[string]any)
@@ -505,9 +504,7 @@ func emitVirtualSwitchFamily(w *stmtWriter, node *schema.Node, val any, prefix, 
 				if !ok {
 					continue
 				}
-				seq := formatScalar(seqv)
-				seqs = append(seqs, seq)
-				emitVSPort(w, em, toks(prefix, "ports", seq))
+				emitVSPort(w, em, toks(prefix, "ports", formatScalar(seqv)))
 			}
 		}
 		if gw, ok := m["gateway"].(map[string]any); ok {
@@ -552,12 +549,11 @@ func emitVirtualSwitchFamily(w *stmtWriter, node *schema.Node, val any, prefix, 
 				w.add(toks(prefix, "dns", "proxy", "server", formatScalar(ip)))
 			}
 		}
+		// 两端口直通开关：模型 bool，语句树同形（`cross-connect <true|false>` 显式取值叶子）。
+		// 端口不入语句——它们由该交换机的 ports 列表承担（VPP 侧取前两个），
+		// 因此这里既有形态可直接机械反推，无需端口就绪前置。
 		if cc, ok := m["cross_connect"].(bool); ok && cc {
-			if len(seqs) == 2 {
-				w.add(toks(prefix, "cross-connect", seqs[0], seqs[1]))
-			} else { // 别名 apply 校验端口恰两个且已声明，正常建不出此态
-				w.note("virtual-switches %s：cross-connect 需要恰好两个已声明端口，无法反推语句", lastTok(prefix))
-			}
+			w.add(toks(prefix, "cross-connect", "true"))
 		}
 		return nil
 	case "virtual-switches gateway":

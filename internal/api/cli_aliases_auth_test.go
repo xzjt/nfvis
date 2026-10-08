@@ -127,37 +127,89 @@ func TestTLSCombinedCertAndKey(t *testing.T) {
 	}
 }
 
-// TestCrossConnectRequiresTwoDeclaredPorts：cross-connect 引用已声明端口，
-// 且必须恰为两个——否则 applier 取不到前两个端口会**静默什么都不做**（FR-NET-012）。
-func TestCrossConnectRequiresTwoDeclaredPorts(t *testing.T) {
+// TestCrossConnectStatementLandsBool：cross-connect 是**开关**，语句形态与模型同源。
+//
+// 由来（round2 现场）：命令树曾把它声明成两个位置参数（`cross-connect <port-a> <port-b>`），
+// 而模型字段是 bool（OpenAPI 同为 boolean）——值个数不匹配的写法落到通用遍历写出数组，
+// 用户看到的是一句 `cannot unmarshal array into … cross_connect of type bool` 的内部报错；
+// 端口身份本由该交换机 `ports` 列表承担（VPP 侧取前两个），语句里带端口号是多余的契约面。
+// 现在语句是显式取值叶子（同 `set system kernel low-latency true`）：置位 true、清位 false、
+// `delete … cross-connect` 清键，取值只认 true|false（其余在语句层给出可照做的报错）。
+func TestCrossConnectStatementLandsBool(t *testing.T) {
 	x, engine := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh", "configure", "set virtual-switches xc type l2")
+	crossConnectOf := func() bool {
+		t.Helper()
+		cfg, _, err := engine.Candidate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, vs := range cfg.VirtualSwitches {
+			if vs.Name == "xc" {
+				return vs.CrossConnect
+			}
+		}
+		t.Fatal("交换机 xc 不在 candidate 里")
+		return false
+	}
+	// 置位：不带端口号（端口由 ports 承担）
+	if out := run(t, x, "admin", aaaClassSU, "ssh", "set virtual-switches xc cross-connect true"); strings.Contains(out, "%%") {
+		t.Fatalf("cross-connect true 应成功: %s", out)
+	}
+	if !crossConnectOf() {
+		t.Fatalf("语句成功但配置里 cross_connect 不为 true")
+	}
+	// 缺取值 / 非法取值都在**语句层**报可照做的错（不得落到 JSON 解码的内部报错）
+	for _, bad := range []string{
+		"set virtual-switches xc cross-connect",
+		"set virtual-switches xc cross-connect 1",
+		"set virtual-switches xc cross-connect 1 2", // 旧的两端口形态：取值不合法即拒
+	} {
+		out := x.Execute("admin", aaaClassSU, "ssh", bad).Output
+		if !strings.Contains(out, "%%") {
+			t.Fatalf("非法形态应报错 %q: %s", bad, out)
+		}
+		if strings.Contains(out, "cannot unmarshal") {
+			t.Fatalf("不应把 JSON 解码内部报错抛给用户 %q: %s", bad, out)
+		}
+	}
+	if !crossConnectOf() {
+		t.Fatalf("被拒语句不得改动配置（cross_connect 应为 true）")
+	}
+	// 清位：false 与 delete 两种形态都落模型
+	if out := run(t, x, "admin", aaaClassSU, "ssh", "set virtual-switches xc cross-connect false"); strings.Contains(out, "%%") {
+		t.Fatalf("cross-connect false 应成功: %s", out)
+	}
+	if crossConnectOf() {
+		t.Fatalf("cross-connect false 后 cross_connect 应回 false")
+	}
+	run(t, x, "admin", aaaClassSU, "ssh", "set virtual-switches xc cross-connect true")
+	out := run(t, x, "admin", aaaClassSU, "ssh", "delete virtual-switches xc cross-connect")
+	if strings.Contains(out, "%%") {
+		t.Fatalf("delete … cross-connect 应成功: %s", out)
+	}
+	if crossConnectOf() {
+		t.Fatalf("delete … cross-connect 后 cross_connect 应回 false")
+	}
+}
+
+// TestCrossConnectDisplaySetRoundTrip：display set 反推与树同源——`cross-connect true`
+// 能反推、能回放（回放自校验在 generateSetStmts 内；反推失败会报「display set 内部错误」）。
+func TestCrossConnectDisplaySetRoundTrip(t *testing.T) {
+	x, _ := newCLIKit(t)
 	run(t, x, "admin", aaaClassSU, "ssh",
 		"configure",
 		"set virtual-switches xc type l2",
-		"set virtual-switches xc ports 1 interface ens224",
-	)
-	// 缺端口 2 → 明确报错（而不是静默无效）
-	out := x.Execute("admin", aaaClassSU, "ssh", "set virtual-switches xc cross-connect 1 2").Output
-	if !strings.Contains(out, "未声明") {
-		t.Fatalf("端口未声明应报错:\n%s", out)
+		"set virtual-switches xc cross-connect true")
+	out := x.Execute("admin", aaaClassSU, "ssh", "show configuration candidate | display set").Output
+	if strings.Contains(out, "内部错误") {
+		t.Fatalf("display set 反推/回放失败: %s", out)
 	}
-	run(t, x, "admin", aaaClassSU, "ssh", "set virtual-switches xc ports 2 interface ens192")
-	out = run(t, x, "admin", aaaClassSU, "ssh", "set virtual-switches xc cross-connect 1 2")
-	if strings.Contains(out, "%%") {
-		t.Fatalf("两个端口就绪后应成功: %s", out)
+	if !strings.Contains(out, "set virtual-switches xc cross-connect true") {
+		t.Fatalf("display set 应反推出新形态语句:\n%s", out)
 	}
-	cfg, _, err := engine.Candidate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, vs := range cfg.VirtualSwitches {
-		if vs.Name == "xc" {
-			found = vs.CrossConnect
-		}
-	}
-	if !found {
-		t.Fatal("cross_connect 未置位")
+	if strings.Contains(out, "cross-connect 1") || strings.Contains(out, "cross-connect 2") {
+		t.Fatalf("不得再反推旧的两端口形态:\n%s", out)
 	}
 }
 

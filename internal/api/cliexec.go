@@ -1268,8 +1268,88 @@ func deleteStatement(cfg *model.Config, tokens []string) error {
 	// 收尾与 pruneEmptySingleton 同属「别名表/通用树遍历两条路径共用的合流点」：
 	// 整节点删除虚拟交换机须一并删同名 Vrf（与 REST 一致；只修一条路径会漏）。
 	pruneVSwitchVrf(vswitches, tree)
-	pruneEmptySingleton(tree) // 发现 #12(b)：删空后不留空壳（两条路径都要走）
+	pruneEmptySwitchPorts(tree) // 删叶子掏空的端口条目要回收（见函数注释；不含 set 路径）
+	pruneEmptySingleton(tree)   // 发现 #12(b)：删空后不留空壳（两条路径都要走）
 	return commitTree(cfg, tree, before, tokens)
+}
+
+// pruneEmptySwitchPorts 回收被「删叶子」掏空的交换机端口条目。
+//
+// 由来（round2 现场）：`delete virtual-switches vs-lan ports 2 interface ens224` 只清掉
+// interface 叶，`ports[2]` 仍在却没有 interface/vnf/container——后续 commit 被
+// 「virtual-switches[vs-lan].ports[2]: 端口必须且只能指定 interface/vnf/container 之一」
+// 打断，操作者须再补一条 `delete … ports 2` 才干净（叶子删除看起来成功、提交却失败）。
+//
+// 判据与模型校验同口径：条目的 interface / vnf / container 三者都没有**可用**取值即回收。
+// vnf/container 还要看配套的 vnf_interface/container_interface——只留 `vnf` 却没有 vNIC 名
+// 同样是「提交必被拒」的残壳（校验报「VNF "x" 的 vNIC "" 不存在」），一并回收。
+// 条目的 seq 不进判据、也不重排：seq 是端口身份的声明值（可由操作者自选），
+// 删掉中间一条不要求后续条目改号（模型只校验不重复，与 ports 的可选 `[<seq>]` 语义一致）。
+//
+// 只在**删除路径**（deleteStatement）调用：`set … ports <seq>` 单独成句是分步构建的
+// 中间态（树允许、display set 也按此反推），在 set 路径上回收会把用户正在建的口误删。
+// 取舍如实登记：判据是**扫描式**（同 pruneEmptySingleton），故「先 `set … ports <seq>` 建壳、
+// 再跑一条与端口无关的 delete」也会把壳收走——空壳本就提交不过（模型校验必拒），
+// 收走只影响提交前的中间形态，不会让任何可提交的配置变样。
+// 与 pruneEmptySingleton 一样放在两条删除路径（别名表/通用树遍历）的**合流点**——只修一条会漏。
+func pruneEmptySwitchPorts(tree map[string]any) {
+	arr, ok := tree["virtual_switches"].([]any)
+	if !ok {
+		return
+	}
+	for _, e := range arr {
+		vs, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		ports, ok := vs["ports"].([]any)
+		if !ok || len(ports) == 0 {
+			continue
+		}
+		out := make([]any, 0, len(ports))
+		for _, p := range ports {
+			pm, ok := p.(map[string]any)
+			if !ok { // 非对象条目（正常流程建不出来）宁可不剪
+				out = append(out, p)
+				continue
+			}
+			if switchPortEntryUsed(pm) {
+				out = append(out, pm)
+			}
+		}
+		switch {
+		case len(out) == 0:
+			delete(vs, "ports") // 端口容器空了：连键一起删（同 pruneEmptySingleton 口径）
+		case len(out) != len(ports):
+			vs["ports"] = out
+		}
+	}
+}
+
+// switchPortEntryUsed 端口条目是否有可用成员（判据见 pruneEmptySwitchPorts）。
+func switchPortEntryUsed(pm map[string]any) bool {
+	if portMemberValue(pm["interface"]) {
+		return true
+	}
+	if portMemberValue(pm["vnf"]) && portMemberValue(pm["vnf_interface"]) {
+		return true
+	}
+	if portMemberValue(pm["container"]) && portMemberValue(pm["container_interface"]) {
+		return true
+	}
+	return false
+}
+
+// portMemberValue 成员取值是否「有内容」：nil / 空串算没有；其余形态（对象/数组/数字等，
+// 正常流程建不出来）保守算**有内容**——宁可不剪，也不误删用户在编辑中的条目。
+func portMemberValue(v any) bool {
+	if v == nil {
+		return false
+	}
+	if s, ok := v.(string); ok {
+		return s != ""
+	}
+	return true
 }
 
 // commitTree JSON 树 → 强类型配置，并要求语句确实产生了变更。
@@ -2124,6 +2204,10 @@ var valueTransforms = map[string]func(string) (any, error){
 	// 内核基线（FR-SYS-014）：nmi-watchdog 需写真实 bool（JSON 目标为 *bool）
 	"nmi_watchdog": func(s string) (any, error) { return boolField(s) },
 	"low_latency":  func(s string) (any, error) { return boolField(s) },
+	// cross-connect（VirtualSwitch.CrossConnect 为 bool）：取值只认 true|false，
+	// 否则 typedScalar 会把 `1`/`yes` 一类原样写进树，用户看到的是 JSON 解码的内部报错
+	// （`cannot unmarshal … into … of type bool`）——这里在语句层给出可照做的口径。
+	"cross_connect": func(s string) (any, error) { return boolField(s) },
 	// VLAN ID：模型字段一律为 int（VnfInterface.Vlan / VSwitchPort.NativeVlan）；
 	// ParamType 为 "vlan" 时 scalarForNode 会保持字符串 → 类型不符（决策 #79）。
 	"vlan":   func(s string) (any, error) { return numField(s) },
