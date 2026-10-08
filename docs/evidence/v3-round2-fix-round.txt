@@ -181,6 +181,29 @@ NFViS v3 round2 修复轮：体检发现的实现级收口 + 真机复核
       （该 delete 形态需带 `[<seq>] <ifname>`，不带序号会报「无匹配配置」——属语句形态细节，未登记为缺陷）。
       清场后残留核对：链路 0 / 本产品 nft 表 0 / clsact 0 / 告警 0。
 
+3.11 四套真机套件在 v3 构建上复跑（`3.0.5~dev5`，**VPP 数据面**——套件的设计环境；v3 线首次）
+    · **结果**：`cli-fulltest` **273 / 0 / 20**、`cli-semantic-check` **23 / 0 / 6**、
+      `cli-lifecycle-check` **21 / 0 / 3**、`cli-pty-smoke` **10 / 10**。
+      除语义的 3 项外与 v2 线基线（273/0/20、26/0/3、21/0/3、10/10）**逐项一致**；语义的 6 项不可判定
+      全是「缺现场/无对象」（S8 交换机无成员口、S9 VM 与容器列表两侧皆空、S11 relay、S12 learn-limit、
+      S13 DNS 代理——套件自带的造现场指引逐条可照做），其中 S13 为**已知效应**（其配置会被 fulltest
+      自清场清掉），非回归。
+    · **前两轮的失败均已判明为夹具问题（如实登记）**：run1 **270/4/19**——1G 大页池只有 1 页，
+      被 VPP 主堆固定占用（读视图实测「数据面占用 1 / 空闲 0」）⇒ `cli-vm`（1024MB/1G）起不来
+      （`unable to map backing store for guest RAM`），第 4 条为其级联；把池声明调到 **1G=3**
+      （`request system kernel apply` + 重启）后 run2 的 VM 段全过。run2 **262/14/17**——容器镜像夹具
+      缺口：套件从 `/data/incoming/ct.tar` 上传容器镜像，而上一轮收尾把 docker 镜像删了（产品删镜像条目
+      即 `docker rmi`），该文件不再存在 ⇒ phase 3 的 commit 校验失败并整体回滚，11 条容器检查 +
+      `show bonds bond0 detail`（同 phase 的级联）受牵连；**每轮前备好 `docker alpine:3.20`** 后
+      run3 即 **273/0/20**。
+    · **复跑前须知（本轮实测，已写入 AGENTS.md）**：1G 池 ≥3（VPP 主堆固定占 1、cli-vm 用 1）；
+      docker `alpine:3.20` 每轮前在场（经宿主代理 `192.168.155.1:2333` 拉取）；**主机重启后
+      两业务口回到 vmxnet3，须重绑 DPDK**（产品不持久化、读视图如实报「已声明未生效」）；
+      管理口首次声明需 `commit confirmed`；`request interfaces <n> bind-dpdk` 非交互需 `--yes`。
+    · 顺带复核：重启使内核基线生效（cmdline 出现 `default_hugepagesz=2M hugepages=768
+      hugepagesz=1G hugepages=1 isolcpus=2-5 intel_iommu=on iommu=pt`，池 1G=3/2M=768 与声明一致）、
+      启动期「恢复收敛完成」、无告警。
+
 --------------------------------------------------------------------------------
 §4 安装器真机复核（#416 / #413 的装配回归）
 --------------------------------------------------------------------------------
