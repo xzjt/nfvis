@@ -143,6 +143,12 @@
   大小/摘要**——直连会被静默截断，而 `request images upload` 照常报成功）；`docker alpine:3.20` **仍未重建**。
   **现场**：dataplane 仍为 `kernel`，nfvis active；产品对象/内核链路/nft 表/libvirt 域均为 0（round1 验证后已清场）。
   ⚠️ 快照再次恢复后本节全部作废，需按上面路径重做。
+  ⚠️ **现状更新（2026-10-08 round2 发版后）**：VM 装 **3.0.5**（发布件，vpp 数据面；两业务口在 VPP、
+  池 1G=3 声明 / 2M=768）；docker `alpine:3.20` + `/data/incoming/ct.tar` 就位、`alpine.qcow2` 在镜像仓库；
+  无残留无告警；**配置库本轮重建过**（首装路径验证），原件备份
+  `/root/nfvis-db-backup-20261008-0421-v3round2fix.db`，管理口令为预置的 `V3Fix2026@nfvis`；
+  四套件复跑前须知（1G 池空闲页 / 每轮前备 docker 镜像 / 重启后重绑 DPDK / 管理口首次 declared confirmed /
+  `bind-dpdk --yes` / 夹具缺口会级联）见 `docs/v3-交接-2026-10-08.md` §2。
 - 验证环境 nfvis-vm 历史状态（**2026-09-27 round85 又恢复过一次干净快照**，此后按 round85 流程重装并配置；
   快照恢复会清掉全部现场，
   重建路径见 `docs/evidence/v1-closeout-round32-install-iso.txt` §4e——该轮的 ISO 交付已按决策 #111 废除，
@@ -1183,6 +1189,12 @@
   命令树与设计文档的拒绝清单同步）；② 内核 **tc 的 QoS/风暴计数保持如实不映射**（不把 dropped 猜成 exceed）；
   ③ **DPDK 接管不跨主机重启保留现状**（手册 §5.3/§5.4 已文档化「重启后的固定动作」；启动期自愈重绑与
   点名告警不实施，如需自愈按新立项评估）。
+  **已发布 v3.0.5（2026-10-08）**：tag `v3.0.5` → **`v3 0f6d1d2`**（v3 线发布点）；
+  `SOURCE_DATE_EPOCH=1791444802`，deb `c22a69b0…`（10,000,848 字节）与 `.run` `b113590c…`
+  （179,315,110 字节，载荷 238 deb / 172M）**两打逐字节一致**；`.run` 自检 18/0、升级实装 18/0/0；
+  **发布件上 fulltest 273/0/20**；服务端资产摘要与本地逐字一致 + **回下载逐字节一致**；
+  发版记录 `docs/v3-发版记录.md`。如实边界：SR-IOV（无 PF）、规模/吞吐基准、纯 `.run` 首装（全新机器）
+  未做。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。
