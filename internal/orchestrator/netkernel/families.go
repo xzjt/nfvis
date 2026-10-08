@@ -277,27 +277,59 @@ func (p *Provider) applyInterfacePortSec(ctx context.Context, iface model.Interf
 // ---------- 与既有装配面的对接 ----------
 
 // StormDataplane 接口 detail 的风暴抑制实况块（读内核，不读进程内登记）。
+//
+// 内核事实要落进**消费方真正读的字段**（R2-15②）：internal/api/storm.go 在 Available=true 时
+// 只看 Kinds（Reason 只在"不可核对"时打印）——Kinds 留空会把"tc 过滤器正在位限速"报成
+// "policer 未在数据面（未收敛）"。逐类给 PolicerPresent + 实测 CIR；读不到实测速率的类不出现
+// 在 Kinds 里（调用方按"该类未在位"渲染，不编造 0）。
 func (p *Provider) StormDataplane(ctx context.Context, ifname string) (network.StormDataplane, bool) {
-	attached, detail, err := p.stormMgr().Dataplane(ctx, LinkName(ifname))
+	fact, err := p.stormMgr().Dataplane(ctx, LinkName(ifname))
 	if err != nil {
 		return network.StormDataplane{Available: false, Reason: err.Error()}, false
 	}
-	if !attached {
-		return network.StormDataplane{Available: true, Reason: detail}, false
+	if !fact.Attached {
+		return network.StormDataplane{Available: true, Reason: fact.Detail}, false
 	}
-	// Kinds 由 stormManager 的 detail 文本承载（哪几类在限速），这里按「在位」给空表——
-	// 逐类明细由 detail 说明，避免编造读数。
-	return network.StormDataplane{Available: true, Reason: detail, Attached: true}, true
+	kinds := map[string]network.StormKindDataplane{}
+	for kind, kbps := range map[string]int{
+		network.StormKindBroadcast: fact.BroadcastKbps,
+		network.StormKindMulticast: fact.MulticastKbps,
+	} {
+		if kbps < 0 {
+			continue // 该类过滤器不在位（不是"限速 0"）
+		}
+		kinds[kind] = network.StormKindDataplane{
+			PolicerPresent: true,
+			CirKbps:        uint32(kbps),
+			// 内核 tc 的 police 计数是 dropped/overlimits 两项，与 VPP 的 conform/exceed/violate
+			// 三档不对应——如实说明（消费方会把它渲染成"该类计数不可读（原因）"），不映射、不编 0。
+			CountersReason: "内核 tc 的 police 计数为 dropped/overlimits，与 conform/exceed/violate 三档语义不对应，如实不映射",
+		}
+	}
+	return network.StormDataplane{
+		Available: true, Reason: fact.Detail, Attached: true, Kinds: kinds,
+	}, len(kinds) > 0
 }
 
 // PortSecDataplane 接口 detail 的端口安全实况块（读内核）。
+//
+// 同 R2-15②：消费方 internal/api/portsec.go 在 Available=true 时只读 TagPresent/Tag/RuleCount/
+// ACLIndex/Bound。内核侧没有 macip ACL 索引这回事（ACLIndex 恒 0——不是"读到索引 0"，故 Reason
+// 里把这条说明白），白名单按 nftables 链定位，规则条数照实给（整段白名单一条规则）。
 func (p *Provider) PortSecDataplane(ctx context.Context, ifname string) (network.PortSecDataplane, bool) {
-	attached, detail, err := p.portSecMgr().Dataplane(ctx, LinkName(ifname))
+	fact, err := p.portSecMgr().Dataplane(ctx, LinkName(ifname))
 	if err != nil {
 		return network.PortSecDataplane{Available: false, Reason: err.Error()}, false
 	}
-	if !attached {
-		return network.PortSecDataplane{Available: true, Reason: detail}, false
-	}
-	return network.PortSecDataplane{Available: true, Reason: detail, Bound: true}, true
+	// Reason 只在"不可核对"时打印；正常的在位/不在位由上面那些字段表达。
+	reason := fmt.Sprintf("内核侧无 ACL 索引概念（白名单规则落在 nftables 链 %s 上）；%s", fact.ChainName, fact.Detail)
+	return network.PortSecDataplane{
+		Available: true,
+		Reason:    reason,
+		// Tag 是内核侧的对象标识（VPP 侧是 macip ACL 的 tag）：链名带上前缀，读视图直接可读。
+		Tag:        "内核 nftables 链 " + fact.ChainName,
+		TagPresent: fact.ChainPresent,
+		RuleCount:  fact.RuleCount,
+		Bound:      fact.Bound,
+	}, fact.Attached
 }

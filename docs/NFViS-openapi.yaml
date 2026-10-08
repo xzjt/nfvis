@@ -168,9 +168,13 @@ paths:
         只看①不够：VPP 重启后 govpp 报断连前，管理器仍持有旧会话，「重启返回后立即查询」
         会撞 `write: broken pipe`（round34/35 现象）。任一判定在窗口内未满足则返回 500 并
         说明「VPP 已起来 / VPP 未起来」与「数据面连接在重启窗口内不可用」及下一步指引。
+
+        当前数据面为 Linux 内核网络时没有 VPP 可重启：返回 **501**（message 指明数据面与
+        切回 VPP 的路径），不是 500——这不是执行故障，而是该能力在本数据面不存在。
       responses:
         "202": { $ref: "#/components/responses/ConfigAccepted" }
         "409": { $ref: "#/components/responses/Error409" }
+        "501": { $ref: "#/components/responses/Error501" }
         "500":
           description: |
             VPP 未起来（大页池被清空/启动失败等）或 **数据面连接未在窗口内恢复**（决策 #315）；
@@ -542,6 +546,9 @@ paths:
     get:
       tags: [nat]
       summary: NAT44 会话表（运行态，空表返回 []）
+      description: |
+        当前数据面为 Linux 内核网络时该能力未实现：返回 501（message 指明数据面与替代
+        路径），而不是 500——内核侧没有 VPP nat44 会话表这条事实源。
       responses:
         "200":
           description: OK
@@ -559,6 +566,7 @@ paths:
                     protocol: { type: integer }
                     bytes: { type: integer, format: int64 }
                     packets: { type: integer, format: int64 }
+        "501": { $ref: "#/components/responses/Error501" }
 
   /nat:
     get:
@@ -1547,12 +1555,16 @@ paths:
     get:
       tags: [system]
       summary: 抓包会话状态与已导出 pcap 清单（单会话；导出文件落 /var/lib/nfvis/captures）
+      description: |
+        当前数据面为 Linux 内核网络时抓包尚未实现：返回 501（message 指明数据面与切回
+        VPP 的路径），不是 503——VPP 数据面下的「抓包模块未接入（编排器未装配）」才是 503。
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CaptureStatus" }
+        "501": { $ref: "#/components/responses/Error501" }
     post:
       tags: [system]
       summary: 开始数据面抓包（达到 count 自动停止）
@@ -1578,6 +1590,7 @@ paths:
       responses:
         "202": { description: 已开始 }
         "409": { $ref: "#/components/responses/Error409" }   # 已有会话进行中
+        "501": { $ref: "#/components/responses/Error501" }
     delete:
       tags: [system]
       summary: 停止抓包（`?export=true` 时同时导出 pcap）
@@ -1597,6 +1610,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CaptureFile" }
+        "501": { $ref: "#/components/responses/Error501" }
   /vpp/capture/{file}:
     parameters: [{ name: file, in: path, required: true, schema: { type: string } }]
     get:
@@ -1608,6 +1622,7 @@ paths:
           content:
             application/octet-stream:
               schema: { type: string, format: binary }
+        "501": { $ref: "#/components/responses/Error501" }
 
   /bonds:
     parameters:
@@ -1889,6 +1904,9 @@ paths:
     get:
       tags: [interfaces]
       summary: LLDP 邻居表（运行态）
+      description: |
+        当前数据面为 Linux 内核网络时该能力未实现：返回 501（message 指明数据面与替代
+        路径），而不是 500——内核侧没有 LLDP 邻居表这条事实源。
       responses:
         "200":
           description: OK
@@ -1903,6 +1921,7 @@ paths:
                     chassis_id: { type: string, description: "按 subtype 解码；MAC 型（chassis=4）格式化为 aa:bb:cc:dd:ee:ff（决策 #70）" }
                     port_id: { type: string, description: "按 subtype 解码；MAC 型（port=3）格式化为 aa:bb:cc:dd:ee:ff" }
                     ttl: { type: integer }
+        "501": { $ref: "#/components/responses/Error501" }
 
   /system/hardware:
     get:
@@ -2168,6 +2187,9 @@ paths:
     post:
       tags: [interfaces]
       summary: 清零接口统计计数（与 CLI `clear interfaces statistics` 同源）
+      description: |
+        当前数据面为 Linux 内核网络时该能力未实现（清零内核计数需要重建接口，代价与
+        影响面过大）：返回 501（message 指明数据面），而不是 502/503。
       requestBody:
         content:
           application/json:
@@ -2178,6 +2200,7 @@ paths:
       responses:
         "204": { description: 已清零 }
         "400": { $ref: "#/components/responses/Error400" }
+        "501": { $ref: "#/components/responses/Error501" }
         "503": { description: 未接入（编排器未装配对应运行时） }
 
   /system/tech-support:
@@ -2408,6 +2431,7 @@ components:
     Error403: { description: 无权限或账号锁定, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     Error404: { description: 资源不存在, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     Error409: { description: 冲突（引用存在/配额不足/会话锁占用）, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Error501: { description: "该能力在**当前数据面**下未实现（如 Linux 内核网络下的抓包、NAT 会话表、LLDP 邻居、接口清零统计、VPP 重启）；message 说明数据面与替代路径（换数据面或换命令）。与 500 的分工：501 = 这条路在当前数据面不存在，500 = 执行出故障", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
   schemas:
     Error:
@@ -2498,6 +2522,15 @@ components:
         系统状态摘要。数据源与 CLI 的 `show system uptime|cpu|memory|storage` **同源**
         （`internal/metrics.HostMetrics()`，Linux 采集），`hugepages` 与 `/resource-pools` 同源。
       properties:
+        dataplane:
+          type: string
+          enum: [vpp, kernel]
+          description: |
+            当前生效的数据面实现（**装配事实**：本进程实际装配的数据面实现，与
+            `/vpp/status.dataplane` 同源）。`kernel`（Linux 内核网络）时宿主读数照旧，
+            但数据面类读数（VPP 线程/buffer/内存、抓包、NAT 会话表、LLDP 邻居等）
+            整体不适用——客户端据此分流，而不是把 `connected: false` 读成「VPP 该起来
+            却没起来」。读视图以装配事实为准：committed 可能已改而服务未重启。
         hostname: { type: string, description: 配置声明的 system.hostname 优先；未声明时回退主机实际主机名（os.Hostname）；两者都取不到时为空串（不编造） }
         uptime_seconds: { type: integer, description: 主机运行时长（/proc/uptime，与 CLI `show system uptime` 同源；非 Linux 取不到时退回守护进程运行时长） }
         config_ready: { type: boolean, description: 配置库可用（已建库且可读 committed） }

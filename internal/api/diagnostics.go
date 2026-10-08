@@ -157,8 +157,14 @@ func detailOf(out string) []ErrorDetail {
 	return detail
 }
 
-// mapDiagError 诊断类错误 → 响应（不可用 503、其余 502：诊断命令执行失败）。
+// mapDiagError 诊断类错误 → 响应（能力不受支持 501、超时 502、其余 502：诊断命令执行失败）。
 func mapDiagError(w http.ResponseWriter, err error) {
+	if unsupportedCapabilityErr(err) {
+		// 「当前数据面没有实现该能力」（如内核数据面下的清零统计）：501，指向换数据面/换路径，
+		// 不当成执行故障 502——否则监控会把「能力不存在」记成服务异常。
+		writeUnsupported(w, err)
+		return
+	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		writeError(w, http.StatusBadGateway, "DIAG_TIMEOUT", err.Error(), nil)
 		return

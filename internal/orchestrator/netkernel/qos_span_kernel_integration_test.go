@@ -104,6 +104,11 @@ func TestKernelQoSBindIndependenceAndUnbind(t *testing.T) {
 	if !zqosHasFilter(t, zqosDevA, "ingress") {
 		t.Fatal("ingress filter 未落到内核")
 	}
+	// R2-3：判决必须是"超限丢、未超限继续"（真机实测：不写 conform-exceed 时 police 对合规包
+	// 返回 OK(0)，会把同 hook 上排在后面的族整族静默屏蔽）。
+	if out, _ := exec.Command("tc", "filter", "show", "dev", zqosDevA, "ingress").CombinedOutput(); !strings.Contains(string(out), "drop/continue") {
+		t.Fatalf("ingress police 判决不是 conform-exceed drop/continue（会短路同 hook 的其它族）：\n%s", out)
+	}
 	if zqosHasFilter(t, zqosDevA, "egress") {
 		t.Fatal("只绑 ingress 时 egress 不应有 filter")
 	}
@@ -179,6 +184,10 @@ func TestKernelSpanMirrorAndDelete(t *testing.T) {
 	}
 	if !zspanHasMirror(t, zspanSrc, "ingress", zspanAna) {
 		t.Fatal("ingress 未装到分析口的 mirred filter")
+	}
+	// R2-3：mirred 必须尾随 `continue`（真机实测：默认 pipe 判决 ≥0 会短路同 hook 的后续 filter）。
+	if out, _ := exec.Command("tc", "filter", "show", "dev", zspanSrc, "ingress").CombinedOutput(); !strings.Contains(string(out), "continue") {
+		t.Fatalf("ingress mirred 未尾随 continue（会短路同 hook 的其它族）：\n%s", out)
 	}
 	if !zspanHasMirror(t, zspanSrc, "egress", zspanAna) {
 		t.Fatal("egress 未装到分析口的 mirred filter")

@@ -248,7 +248,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 命令 | 说明 | 落点 | 实测 |
 |---|---|---|---|
-| `set system dataplane <vpp\|kernel>` | 数据面实现（vpp = VPP；kernel = Linux 内核网络；**变更需重启服务生效**） | committed 配置（启动装配读它选数据面） | 🚫 待真机（v3 决策 #404；未实现族提交期拒绝） |
+| `set system dataplane <vpp\|kernel>` | 数据面实现（vpp = VPP；kernel = Linux 内核网络；**变更需重启服务生效**） | committed 配置（启动装配读它选数据面） | ✅ 真机两次切换（干净快照：`--dataplane kernel` 整机安装 → 内核数据面经产品下发（bridge/VLAN/网关 VRF/VRF/静态路由/ACL 逐条内核事实核对）→ 一次提交 + 一次重启切回 vpp、VPP 自动拉起且版本正确；内核数据面未实现族与语义不同的形态在提交期直接拒绝——`docs/evidence/v3-round1-clean-snapshot-datapath-switch.txt` §4/§5） |
 | `set system hostname <s>` | 主机名 | 宿主 hostname | ✅ |
 | `set system timezone <tz>` | 时区 | 宿主 timedatectl | ✅ |
 | `set system ntp server <ip\|host> [prefer]` | NTP 服务器（`prefer` 为无值 flag） | 宿主 NTP | ✅（**决策 #76②** 修复） |
@@ -312,10 +312,10 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set interfaces <ifname> sriov vf-count <n>` | 创建/回收 VF（FR-NET-004） | sysfs `sriov_numvfs` | ⊘ 无 PF/VF 时 commit 明确报错（不再静默无效，决策 #70） |
 | `set interfaces <ifname> ingress-policy <name>` | 入向限速策略绑定 | VPP policer input | ✅ |
 | `set interfaces <ifname> egress-policy <name>` | 出向限速策略绑定（决策 #331；VPP policer output，可与入向并存） | VPP policer output | ✅ |
-| `set interfaces <ifname> storm-control broadcast <kbps>` | 入向**广播**风暴抑制（决策 #385，FR-NET-019）：目的 MAC 精确匹配 `ff:ff:ff:ff:ff:ff`，超速**丢弃**；单位 **kbps**（不做 pps 换算）；接口须已声明；**与端口安全白名单（`port-security`）同接口互斥**（两者都绑该口唯一的 L2 入向分类槽——风暴走 classify、端口安全走 macip，决策 #401：提交期**双向拒绝**，留其一） | VPP policer（1R2C）+ L2 classify 表挂接口入向 | ✅（真机四维 + 定量对照（round167，dev110）：对照组 l2-flood 2000 vs 实验组 15/16；类别独立/表链/删除清查/重启重放；**能力前提 spike** 见 `docs/evidence/v2-round166-storm-control-spike.txt`；互斥由决策 #401 补：真机实测并存时槽被 portsec 占用致限速静默不生效、删 storm 报「槽被非本产品对象占用」——证据 `docs/evidence/v2-round176-*.txt`） |
+| `set interfaces <ifname> storm-control broadcast <kbps>` | 入向**广播**风暴抑制（决策 #385，FR-NET-019）：目的 MAC 精确匹配 `ff:ff:ff:ff:ff:ff`，超速**丢弃**；单位 **kbps**（不做 pps 换算）；接口须已声明；**与端口安全白名单（`port-security`）同接口互斥**（两者都绑该口唯一的 L2 入向分类槽——风暴走 classify、端口安全走 macip，提交期**双向拒绝**，留其一） | VPP policer（1R2C）+ L2 classify 表挂接口入向 | ✅（真机四维 + 定量对照（round167，dev110）：对照组 l2-flood 2000 vs 实验组 15/16；类别独立/表链/删除清查/重启重放；**能力前提 spike** 见 `docs/evidence/v2-round166-storm-control-spike.txt`；互斥为后续补强：真机实测并存时槽被 portsec 占用致限速静默不生效、删 storm 报「槽被非本产品对象占用」——证据 `docs/evidence/v2-round176-*.txt`） |
 | `set interfaces <ifname> storm-control multicast <kbps>` | 入向**组播**风暴抑制（决策 #385）：目的 MAC 的 I/G 位=1（掩码「匹配位」写法；按该口径广播帧也满足此位——两类同配时广播走自己的精确表，只配组播时广播按组播速率限） | 同上 | ✅（同上；掩码「匹配位」写法与两类表链（广播表经 `NextTableIndex` 链组播表）已按 `show classify tables` 真机核对） |
 | `delete interfaces <ifname> storm-control [broadcast \| multicast]` | 逐类撤销（detach → 删 session/表 → 删 policer）；**裸 delete ＝两类都清**（幂等：不存在按已达成） | 同上 | ✅（同上；删除一次提交全清、重启重放不翻倍——两处实测缺陷的修复复验） |
-| `set interfaces <ifname> port-security mac <mac>` | 端口安全白名单（决策 #389）：**追加**语义；MAC 归一小写、重复拒绝、每接口上限 32 条；**白名单非空即启用**——该口入向（L2）只放行白名单源 MAC，其余丢弃；接口须已声明且为某 L2 交换机成员（移出交换机/删交换机/删接口 ⇒ 提交期拒绝）；与 L3 接口 ACL 的 macip 绑定槽互斥；**与风暴抑制（`storm-control`）同接口互斥**（两者都绑该口唯一的 L2 入向分类槽——端口安全走 macip、风暴走 classify，决策 #401：提交期**双向拒绝**，留其一） | VPP macip ACL（tag `nfvis-port-sec-<if>`；每 MAC 两条 permit + **显式 deny-all**——macip 无匹配默认＝放行，真机实证）绑接口入向 | ✅ 真机四维验证（round170，dev113）：产品路径下发后 macip ACL 逐字对（tag `nfvis-port-sec-ens192`、4 规则＝v4/v6 permit + v4/v6 显式 deny）；**A/B 注入（独立事实源 `l2-flood`）：白名单源 +2000（放行）/ 伪造源 +0（丢弃）**；清空后伪造源恢复 +2000（行为反转）；加 MAC 同索引整体替换（4→6）、restart nfvis tag 复用不重复建、移出交换机守卫拒绝、非法/重复/超限/非成员全拒——证据 `docs/evidence/v2-round170-d389-port-security.txt`；与 storm 的互斥由决策 #401 补（同左） |
+| `set interfaces <ifname> port-security mac <mac>` | 端口安全白名单（决策 #389）：**追加**语义；MAC 归一小写、重复拒绝、每接口上限 32 条；**白名单非空即启用**——该口入向（L2）只放行白名单源 MAC，其余丢弃；接口须已声明且为某 L2 交换机成员（移出交换机/删交换机/删接口 ⇒ 提交期拒绝）；与 L3 接口 ACL 的 macip 绑定槽互斥；**与风暴抑制（`storm-control`）同接口互斥**（两者都绑该口唯一的 L2 入向分类槽——端口安全走 macip、风暴走 classify，提交期**双向拒绝**，留其一） | VPP macip ACL（tag `nfvis-port-sec-<if>`；每 MAC 两条 permit + **显式 deny-all**——macip 无匹配默认＝放行，真机实证）绑接口入向 | ✅ 真机四维验证（round170，dev113）：产品路径下发后 macip ACL 逐字对（tag `nfvis-port-sec-ens192`、4 规则＝v4/v6 permit + v4/v6 显式 deny）；**A/B 注入（独立事实源 `l2-flood`）：白名单源 +2000（放行）/ 伪造源 +0（丢弃）**；清空后伪造源恢复 +2000（行为反转）；加 MAC 同索引整体替换（4→6）、restart nfvis tag 复用不重复建、移出交换机守卫拒绝、非法/重复/超限/非成员全拒——证据 `docs/evidence/v2-round170-d389-port-security.txt`；与 storm 的互斥为后续补强（同左） |
 | `delete interfaces <ifname> port-security mac <mac>` | 按值删一条（大小写不敏感比较；不存在报「无匹配配置」） | 同上（变更＝整体替换，幂等） | ✅（round170：同索引整体替换 4→6；重放 tag 复用——同左） |
 | `delete interfaces <ifname> port-security` | 清空整段＝停用（解绑；macip 无 delete 消息，ACL 对象残留在数据面直到重启——如实登记） | 同上 | ✅（round170：清空＝解绑、伪造源恢复放行（行为反转）；残留 ACL 对象随 `request vpp restart` 归零——同左） |
 | `set bonds <name> members [<seq>] <ifname>` | 聚合成员 | VPP bonding | ✅ |
@@ -446,10 +446,10 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 > **复核方法**（下面每个数字都可这样复算）：
 >
 > ```bash
-> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 303（§1/§2 的命令行 301 行 + §3 本表的 `show`、`request` 两行）
+> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 304（§1/§2 的命令行 302 行 + §3 本表的 `show`、`request` 两行）
 > ```
 >
-> 即 §1/§2 合计 **301 行**；把两处 ` / ` 并列写法各拆成一条后为 **305 条**命令
+> 即 §1/§2 合计 **302 行**；把两处 ` / ` 并列写法各拆成一条后为 **306 条**命令
 > （§1.3 的 `exit` / `quit` +1；§2.1 的 `edit <path>` / `up` / `top` / `exit` +3）。
 
 **分族**（族 = 该行**首个 token**；§2.1 的裸 `show` 与 `show | display set` 因此计入 `show` 族，`help` 计入其余操作）：
@@ -460,8 +460,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request` | 49 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/系统/告警） |
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
-| 配置模式 | 158 | §2.1 余下 13 行 + §2.2~§2.9 共 145 行（§2.4 的 `dhcp-leases` 读行计入 `show` 族；含 FR-CMP-023 的 2 条 `pci-device`、决策 #383 的 2 条 vxlan、决策 #385 的 3 条 storm-control、决策 #388 的 4 条 firewall、决策 #389 的 3 条 port-security 语句） |
-| **合计** | **301** | 不含管道则为 **292**；按 ` / ` 拆开后 **305 条** |
+| 配置模式 | 159 | §2.1 余下 13 行 + §2.2~§2.9 共 146 行（§2.4 的 `dhcp-leases` 读行计入 `show` 族；含 FR-CMP-023 的 2 条 `pci-device`、决策 #383 的 2 条 vxlan、决策 #385 的 3 条 storm-control、决策 #388 的 4 条 firewall、决策 #389 的 3 条 port-security 语句、v3 的 `set system dataplane` 1 条） |
+| **合计** | **302** | 不含管道则为 **293**；按 ` / ` 拆开后 **306 条** |
 
 **分节**（行数）：
 
@@ -471,19 +471,19 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | §1.2 `request` | 49 | §2.3 `interfaces` 与 `bonds` | 17 |
 | §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 25 |
 | §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 11 |
-| §2.2 `system` | 44 | §2.6 `resource-pools` | 3 |
+| §2.2 `system` | 45 | §2.6 `resource-pools` | 3 |
 | §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 22 |
-| §2.9 `container-functions` | 10 | **合计** | **301** |
+| §2.9 `container-functions` | 10 | **合计** | **302** |
 
-**按实测状态分布**（共 301 行）：
+**按实测状态分布**（共 302 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 285 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）、**主机防火墙 5 行（#388，round169）**——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，按增量口径一并订正 |
+| ✅ 实测通过 | 286 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）、**主机防火墙 5 行（#388，round169）**、**`set system dataplane`（v3 round1：干净快照两次切换 + 切回 vpp 实证，`docs/evidence/v3-round1-clean-snapshot-datapath-switch.txt` §4/§5）**——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，按增量口径一并订正 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
-| ⊘ 设计拒绝（decision #340） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
+| ⊘ 设计拒绝（网关 ACL 绑定） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 未在 v2 轮次执行 | 11 | **破坏性/需交互**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、`kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）。机制由单测/集成测试覆盖；破坏性动作按其交付说明单独走查（部分动作在 v1 收尾轮有真机走查记录，见各轮证据）。round168/170 一度在此桶挂过 #388 的 5 条与 #389 的 3 条待真机行，真机四维通过后均已移入 ✅ |
+| 🚫 未在 v2 轮次执行 | 11 | **破坏性/需交互**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、`kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）。机制由单测/集成测试覆盖；破坏性动作按其交付说明单独走查（部分动作在 v1 收尾轮有真机走查记录，见各轮证据）。round168/170 一度在此桶挂过 #388 的 5 条与 #389 的 3 条待真机行，真机四维通过后均已移入 ✅；v3 的 `set system dataplane` 亦同（真机两次切换后移入 ✅） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
@@ -504,8 +504,9 @@ pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**
 
 > 注（决策 #388，主机防火墙）：本轮新增 **5 行**（`show system firewall` + 4 条 `set/delete system firewall …`），
 > 全表由 **293 行增至 298 行**（§1.1 +1、§2.2 +4）。该 5 行已随 **round169 真机四维**
-> （证据 `docs/evidence/v2-round169-d388-host-firewall.txt`）移入 ✅ 桶；#389 端口安全 3 行入套件后全表共 **301 行**
-> （状态分布 285/0/5/11，见上方「按实测状态分布」）。
+> （证据 `docs/evidence/v2-round169-d388-host-firewall.txt`）移入 ✅ 桶；#389 端口安全 3 行入套件后全表共 **301 行**；
+> **v3 增 1 行**（`set system dataplane <vpp|kernel>`，干净快照真机两次切换后移入 ✅）后**全表共 302 行**
+> （状态分布 286/0/5/11，见上方「按实测状态分布」）。
 
 沿革（每一处变化都写明「哪条新增/移除、为什么」——决策 #304/#319 纪律）：
 - `cli-fulltest`：198/0/11 → **210/0/13**（round101 实测修正）→ **240/0/13**（round137：`#356` 历史时序命令 +9）

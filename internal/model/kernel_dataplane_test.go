@@ -187,3 +187,348 @@ func TestKernelDataPlaneAllowsNormalMemoryWithVhostUserNic(t *testing.T) {
 		t.Fatalf("报错应指向大页要求，得到：%s", errText(errs))
 	}
 }
+
+// 跨转发域的 NAT（inside 交换机派生的 VRF ≠ 出接口所属 VRF）：内核侧 nft 规则不区分转发域、
+// 也没有跨表 leaking（规则在场、一个包不命中），故提交期拒绝并点名两侧转发域与替代。
+// 红-绿：修复前同一配置在内核数据面下零报错（「规则在场、一个包不通」）。
+func TestKernelDataPlaneRejectsNATCrossVRF(t *testing.T) {
+	base := func() Config {
+		return Config{
+			System:          &SystemConfig{DataPlane: DataPlaneKernel},
+			Interfaces:      []InterfaceConfig{{Name: "ens192"}, {Name: "ens224"}},
+			VirtualSwitches: []VirtualSwitch{{Name: "vs-in", Type: "l3"}, {Name: "vs-out", Type: "l3"}},
+			Vrfs: []Vrf{
+				{Name: "vs-in", L3Interfaces: []L3Interface{{Interface: "ens192", Addresses: []string{"10.0.0.1/24"}}}},
+				{Name: "vs-out", L3Interfaces: []L3Interface{{Interface: "ens224", Addresses: []string{"203.0.113.1/24"}}}},
+			},
+			Nat: &NatConfig{Rules: []NatRule{{Seq: 10, MatchSource: "10.0.0.0/24", VirtualSwitch: "vs-in",
+				Action: NatAction{Interface: "ens224"}}}},
+		}
+	}
+	// 跨域：inside=vs-in，出接口 ens224 属 vs-out ⇒ 拒绝，文案须点名两域与机理。
+	errs := Validate(base())
+	if len(errs) == 0 {
+		t.Fatalf("跨转发域的 NAT 规则应提交期拒绝（内核侧规则不会命中任何包）")
+	}
+	txt := errText(errs)
+	if !strings.Contains(txt, "跨转发域") || !strings.Contains(txt, "vs-in") || !strings.Contains(txt, "vs-out") {
+		t.Fatalf("报错应点名两侧转发域与机理，得到：\n%s", txt)
+	}
+	if !strings.Contains(txt, "set system dataplane vpp") {
+		t.Fatalf("报错应给出替代路径（切回 VPP），得到：\n%s", txt)
+	}
+	// 同域：出接口换成 vs-in 自己的 l3 接口 ⇒ 放行。
+	same := base()
+	same.Nat.Rules[0].Action.Interface = "ens192"
+	if errs := Validate(same); len(errs) != 0 {
+		t.Fatalf("同转发域的 NAT 应放行，得到：\n%s", errText(errs))
+	}
+	// VPP 数据面不受该限制（跨 VRF 是其受支持形态）。
+	vpp := base()
+	vpp.System = &SystemConfig{DataPlane: DataPlaneVPP}
+	if errs := Validate(vpp); len(errs) != 0 {
+		t.Fatalf("VPP 数据面下跨转发域 NAT 应放行，得到：\n%s", errText(errs))
+	}
+}
+
+// R2-11 的判据单测：两侧都为「默认表/未归属 VRF」（空串）视为一致，只有两侧都具名且不同才算跨域。
+func TestKernelNATDomainCriterion(t *testing.T) {
+	cases := []struct {
+		inside, outside string
+		cross           bool
+	}{
+		{"", "", false},
+		{"vs-in", "", false},
+		{"", "vs-out", false},
+		{"vs-in", "vs-in", false},
+		{"vs-in", "vs-out", true},
+	}
+	for _, tc := range cases {
+		if got := kernelNatDomainsCross(tc.inside, tc.outside); got != tc.cross {
+			t.Fatalf("kernelNatDomainsCross(%q,%q) = %v，期望 %v", tc.inside, tc.outside, got, tc.cross)
+		}
+	}
+}
+
+// cross-connect（无学习点对点直通）内核侧没有对应物：静默按普通 bridge 处理会改变语义
+// （学习/泛洪/VLAN），故提交期拒绝并指向 L2 交换机 + 端口。红-绿：修复前零报错。
+func TestKernelDataPlaneRejectsCrossConnect(t *testing.T) {
+	mk := func(mode string) Config {
+		return Config{
+			System:     &SystemConfig{DataPlane: mode},
+			Interfaces: []InterfaceConfig{{Name: "ens192"}, {Name: "ens224"}},
+			VirtualSwitches: []VirtualSwitch{{Name: "vs-cc", Type: "l2", CrossConnect: true,
+				Ports: []VSwitchPort{{Seq: 1, Interface: "ens192"}, {Seq: 2, Interface: "ens224"}}}},
+		}
+	}
+	errs := Validate(mk(DataPlaneKernel))
+	if len(errs) == 0 {
+		t.Fatalf("内核数据面下 cross-connect 应提交期拒绝")
+	}
+	txt := errText(errs)
+	if !strings.Contains(txt, "virtual_switches[vs-cc].cross_connect") || !strings.Contains(txt, "cross-connect") {
+		t.Fatalf("报错应点名该交换机的 cross_connect，得到：\n%s", txt)
+	}
+	if !strings.Contains(txt, "L2 交换机") {
+		t.Fatalf("报错应给出替代（L2 交换机 + 端口），得到：\n%s", txt)
+	}
+	if errs := Validate(mk(DataPlaneVPP)); len(errs) != 0 {
+		t.Fatalf("VPP 数据面下 cross-connect 应放行，得到：\n%s", errText(errs))
+	}
+}
+
+// 静态路由的多下一跳（ECMP）：内核侧未实现（`via a,b` 会被 iproute2 当非法参数），
+// 提交期拒绝并给「拆成多条单跳路由」的替代。红-绿：修复前零报错（失败落到下发期）。
+func TestKernelDataPlaneRejectsRouteECMP(t *testing.T) {
+	mk := func(mode string) Config {
+		return Config{
+			System:     &SystemConfig{DataPlane: mode},
+			Interfaces: []InterfaceConfig{{Name: "ens192"}},
+			Vrfs: []Vrf{{Name: "vs-l3", L3Interfaces: []L3Interface{{Interface: "ens192"}},
+				Routes: []Route{{Prefix: "0.0.0.0/0", NextHop: "10.0.0.254,10.0.0.253"}}}},
+		}
+	}
+	errs := Validate(mk(DataPlaneKernel))
+	if len(errs) == 0 {
+		t.Fatalf("内核数据面下多下一跳（ECMP）应提交期拒绝")
+	}
+	txt := errText(errs)
+	if !strings.Contains(txt, "ECMP") || !strings.Contains(txt, "vrfs[vs-l3].routes[0.0.0.0/0].next_hop") {
+		t.Fatalf("报错应点名 ECMP 与该路由字段，得到：\n%s", txt)
+	}
+	if errs := Validate(mk(DataPlaneVPP)); len(errs) != 0 {
+		t.Fatalf("VPP 数据面下 ECMP 应放行（#381 已支持），得到：\n%s", errText(errs))
+	}
+	// 单跳不受影响（两个数据面都放行）。
+	one := mk(DataPlaneKernel)
+	one.Vrfs[0].Routes[0].NextHop = "10.0.0.254"
+	if errs := Validate(one); len(errs) != 0 {
+		t.Fatalf("单跳路由应放行，得到：\n%s", errText(errs))
+	}
+}
+
+// vNIC 接入 type=l3 的交换机：内核侧 L3 交换机不建 bridge，域定义的 tap 无处可挂
+// （提交期全绿、起 VM 时才失败）⇒ 提交期拒绝。红-绿：修复前零报错。
+func TestKernelDataPlaneRejectsVnicOnL3Switch(t *testing.T) {
+	mk := func(mode string) Config {
+		return Config{
+			System:          &SystemConfig{DataPlane: mode},
+			VirtualSwitches: []VirtualSwitch{{Name: "vs-l3", Type: "l3"}},
+			Vrfs:            []Vrf{{Name: "vs-l3", L3Interfaces: []L3Interface{{Interface: "ens192"}}}},
+			Interfaces:      []InterfaceConfig{{Name: "ens192"}},
+			VirtualMachineFunctions: []VMFunction{{
+				Name: "vm1", Image: "alpine.qcow2",
+				VCPU: VMCpu{Count: 1}, Memory: VMMemory{SizeMB: 512},
+				Interfaces: []VnfInterface{{Name: "nic0", Type: "vhost-user", VirtualSwitch: "vs-l3"}},
+			}},
+		}
+	}
+	errs := Validate(mk(DataPlaneKernel))
+	if len(errs) == 0 {
+		t.Fatalf("内核数据面下 vNIC 接入 type=l3 交换机应提交期拒绝")
+	}
+	txt := errText(errs)
+	if !strings.Contains(txt, "virtual_machine_functions[vm1].interfaces[nic0].virtual_switch") {
+		t.Fatalf("报错应点名该 vNIC 的 virtual_switch，得到：\n%s", txt)
+	}
+	if !strings.Contains(txt, "vs-l3") || !strings.Contains(txt, "L2 交换机") {
+		t.Fatalf("报错应点名交换机并给替代（已配网关的 L2 交换机），得到：\n%s", txt)
+	}
+	if errs := Validate(mk(DataPlaneVPP)); len(errs) != 0 {
+		t.Fatalf("VPP 数据面下该形态应放行（vNIC 作 L3 接口进同名 VRF），得到：\n%s", errText(errs))
+	}
+}
+
+// vlan 子接口的派生名（`<接口名>.<vid>`）直接用作内核设备名，超过 IFNAMSIZ-1 时下发必失败：
+// 提交期拒绝（点名对象与折算后的长度）。红-绿：修复前零报错（失败落到 ip link add）。
+func TestKernelDataPlaneRejectsLongVlanSubifName(t *testing.T) {
+	mk := func(mode, iface string) Config {
+		return Config{
+			System:          &SystemConfig{DataPlane: mode},
+			Interfaces:      []InterfaceConfig{{Name: iface}},
+			VirtualSwitches: []VirtualSwitch{{Name: "vs-l3", Type: "l3"}},
+			Vrfs: []Vrf{{Name: "vs-l3", L3Interfaces: []L3Interface{{Interface: iface, Vlan: 100,
+				Addresses: []string{"10.0.0.1/24"}}}}},
+		}
+	}
+	// ens192.100 = 10 字符 ⇒ 放行；派生名折算后的长度（15 + 1 + 3）超限 ⇒ 拒绝。
+	if errs := Validate(mk(DataPlaneKernel, "ens192")); len(errs) != 0 {
+		t.Fatalf("短接口名的 vlan 子接口应放行，得到：\n%s", errText(errs))
+	}
+	errs := Validate(mk(DataPlaneKernel, "this-name-is-way-too-long"))
+	if len(errs) == 0 {
+		t.Fatalf("派生接口名超过 15 字符的 vlan 子接口应提交期拒绝")
+	}
+	txt := errText(errs)
+	if !strings.Contains(txt, "this-name-is-way-too-long") || !strings.Contains(txt, "15") {
+		t.Fatalf("报错应点名对象与内核接口名上限，得到：\n%s", txt)
+	}
+	if !strings.Contains(txt, "vlan 子接口") {
+		t.Fatalf("报错应说明是 vlan 子接口的派生名，得到：\n%s", txt)
+	}
+	// VPP 数据面没有内核接口名约束（同名对象在 VPP 侧照常）。
+	if errs := Validate(mk(DataPlaneVPP, "this-name-is-way-too-long")); len(errs) != 0 {
+		t.Fatalf("VPP 数据面不应受内核接口名长度限制，得到：\n%s", errText(errs))
+	}
+}
+
+// 派生设备名互撞：内核设备名全局唯一，两个对象（或对象与派生的网关 VRF 名）撞进同一个名字时
+// 提交期拒绝——否则先下发的占住设备、后下发的直接失败，配置与数据面从此错位。
+//
+// 已知可达形态：交换机 lan 的网关 VRF 派生名是 `vr-lan`，而一个**名叫 vr-lan** 的交换机
+// （/bond/隧道/L3 交换机）内核设备名也是 `vr-lan`。
+//
+// 红-绿：修复前同一配置在内核数据面下零报错（失败落到 `ip link add`，报错只有设备名）。
+func TestKernelDataPlaneRejectsDerivedDeviceNameCollision(t *testing.T) {
+	// 交换机 lan（带网关 ⇒ 会建派生 VRF `vr-lan`）+ 交换机 vr-lan（设备名也是 vr-lan）。
+	mk := func(mode string, order ...string) Config {
+		c := Config{System: &SystemConfig{DataPlane: mode}}
+		gw := VirtualSwitch{Name: "lan", Type: "l2",
+			Gateway: &VSGateway{Addresses: []string{"192.168.99.1/24"}}}
+		other := VirtualSwitch{Name: "vr-lan", Type: "l2"}
+		if len(order) > 0 && order[0] == "reversed" {
+			c.VirtualSwitches = []VirtualSwitch{other, gw}
+		} else {
+			c.VirtualSwitches = []VirtualSwitch{gw, other}
+		}
+		return c
+	}
+
+	errs := Validate(mk(DataPlaneKernel))
+	if len(errs) == 0 {
+		t.Fatalf("派生网关 VRF 名与同名交换机的设备名撞名，应提交期拒绝")
+	}
+	txt := errText(errs)
+	// 文案必须点名**两个配置对象**（只报设备名操作者对不上是哪个声明），并给替代（改名）。
+	for _, want := range []string{"lan", "vr-lan", "内核设备名", "改名"} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("报错应含 %q，得到：\n%s", want, txt)
+		}
+	}
+	if !strings.Contains(txt, "交换机 \"lan\" 的网关 VRF") || !strings.Contains(txt, "交换机 \"vr-lan\"") {
+		t.Fatalf("报错应点名两个配置对象与派生来源，得到：\n%s", txt)
+	}
+	if !strings.Contains(txt, "virtual_switches[vr-lan]") {
+		t.Fatalf("报错定位应指向冲突对象，得到：\n%s", txt)
+	}
+	// 声明顺序不影响判定（两类对象在同一集合里比对）。
+	if errs := Validate(mk(DataPlaneKernel, "reversed")); len(errs) == 0 {
+		t.Fatalf("调换声明顺序同样应被拒绝")
+	}
+	// VPP 数据面没有内核设备名这回事：同名对象照常共存。
+	if errs := Validate(mk(DataPlaneVPP)); len(errs) != 0 {
+		t.Fatalf("VPP 数据面不应受派生设备名撞名限制，得到：\n%s", errText(errs))
+	}
+
+	// 没有网关（不建派生 VRF）时不撞：lan 是 bridge、vr-lan 也是 bridge，两个名字互不相同。
+	noGW := mk(DataPlaneKernel)
+	noGW.VirtualSwitches[0].Gateway = nil
+	if errs := Validate(noGW); len(errs) != 0 {
+		t.Fatalf("未配网关的交换机不建派生 VRF，不应报撞名，得到：\n%s", errText(errs))
+	}
+	// 只有 IPv6 网关地址同样会建派生 VRF（判据是"声明了网关地址"而非地址族）。
+	v6gw := mk(DataPlaneKernel)
+	v6gw.VirtualSwitches[0].Gateway = &VSGateway{Addresses: []string{"2001:db8::1/64"}}
+	if errs := Validate(v6gw); len(errs) == 0 {
+		t.Fatalf("IPv6 网关同样会建派生 VRF，撞名应被拒绝")
+	}
+	// 跨类撞名（交换机 × bond 同名 ⇒ 同一内核设备名）同样被拦下。
+	cross := Config{
+		System:          &SystemConfig{DataPlane: DataPlaneKernel},
+		Interfaces:      []InterfaceConfig{{Name: "ens192"}, {Name: "ens224"}},
+		VirtualSwitches: []VirtualSwitch{{Name: "zx", Type: "l2"}},
+		Bonds:           []Bond{{Name: "zx", Members: []string{"ens192", "ens224"}}},
+	}
+	if errs := Validate(cross); len(errs) == 0 {
+		t.Fatalf("交换机与 bond 同名会派生同一个内核设备名，应提交期拒绝")
+	} else {
+		txt = errText(errs)
+		if !strings.Contains(txt, "交换机 \"zx\"") || !strings.Contains(txt, "bond \"zx\"") {
+			t.Fatalf("跨类撞名的报错应点名两个对象（含类型），得到：\n%s", txt)
+		}
+	}
+	if errs := Validate(func() Config { c := cross; c.System = &SystemConfig{DataPlane: DataPlaneVPP}; return c }()); len(errs) != 0 {
+		t.Fatalf("VPP 数据面下跨类同名不受内核设备名约束（既有口径），得到：\n%s", errText(errs))
+	}
+
+	// l3 交换机与同名 vrfs 条目是**同一个对象**（附录 B 映射）：不能自撞。
+	self := Config{
+		System:          &SystemConfig{DataPlane: DataPlaneKernel},
+		VirtualSwitches: []VirtualSwitch{{Name: "vs-l3", Type: "l3"}},
+		Vrfs:            []Vrf{{Name: "vs-l3"}},
+	}
+	if errs := Validate(self); len(errs) != 0 {
+		t.Fatalf("L3 交换机与承载它的同名 vrfs 条目不应报撞名，得到：\n%s", errText(errs))
+	}
+}
+
+// 哈希截断派生出的撞名同样要拦：13~15 字符的交换机名会让 `vr-<名>` 超过 15，走
+// 「前缀 + 8 位哈希」截断；而截断结果本身是个合法（≤15 字符）的对象名——于是
+// 「一台 15 字符交换机 + 一个恰好叫该派生名的交换机」是**离线可构造**的撞名形态（R2-21 家族）。
+// 本用例同时钉住 model 侧对 LinkName/GatewayVRFName 的复刻确实走了截断分支（不是"短名恰好相等"）。
+func TestKernelDataPlaneRejectsHashedDerivedNameCollision(t *testing.T) {
+	sw := "abcdefghijklmno" // 15 字符：`vr-` 前缀后共 18 字符 ⇒ 必然走哈希截断
+	dev := kernelDerivedGatewayVRFName(sw)
+	if len(sw) != kernelLinkNameMax || dev == "vr-"+sw || len(dev) > kernelLinkNameMax {
+		t.Fatalf("前提不成立：%q 的派生网关 VRF 名 %q 应走哈希截断且 ≤%d 字符", sw, dev, kernelLinkNameMax)
+	}
+	mk := func(mode, other string) Config {
+		return Config{
+			System: &SystemConfig{DataPlane: mode},
+			VirtualSwitches: []VirtualSwitch{
+				{Name: sw, Type: "l2", Gateway: &VSGateway{Addresses: []string{"192.168.99.1/24"}}},
+				{Name: other, Type: "l2"},
+			},
+		}
+	}
+	// 对方名字恰好等于派生设备名 ⇒ 撞名必被拦。
+	errs := Validate(mk(DataPlaneKernel, dev))
+	if len(errs) == 0 {
+		t.Fatalf("交换机 %q 的网关 VRF 派生名 %q 与同名交换机撞名，应提交期拒绝", sw, dev)
+	}
+	if txt := errText(errs); !strings.Contains(txt, dev) || !strings.Contains(txt, "内核设备名") {
+		t.Fatalf("报错应点名派生设备名与机理，得到：\n%s", txt)
+	}
+	// 对照组：同前缀、名字差一个字符 ⇒ 哈希不同 ⇒ 派生设备名不同，必须放行（判据不能过宽）。
+	other := kernelDerivedGatewayVRFName("abcdefghijklmnp")
+	if other == dev {
+		t.Skip("对照组派生名与实验组相同（前缀/哈希规则变化），跳过")
+	}
+	if errs := Validate(mk(DataPlaneKernel, other)); len(errs) != 0 {
+		t.Fatalf("派生设备名不同的长名不应报撞名，得到：\n%s", errText(errs))
+	}
+}
+
+// protocol icmp + 端口字段：两个数据面语义不同（VPP 按 ICMP type/code 解读，内核忽略端口
+// 字段）——内核侧提交期拒绝，让用户显式选择。红-绿：修复前零报错（字段被静默忽略）。
+func TestKernelDataPlaneRejectsIcmpPorts(t *testing.T) {
+	mk := func(mode, proto, dport string) Config {
+		return Config{
+			System: &SystemConfig{DataPlane: mode},
+			Acls: []Acl{{Name: "acl1", Rules: []AclRule{{Seq: 10, Source: "any", Destination: "any",
+				Protocol: proto, DestinationPort: dport, Action: "permit"}}}},
+		}
+	}
+	errs := Validate(mk(DataPlaneKernel, "icmp", "8"))
+	if len(errs) == 0 {
+		t.Fatalf("内核数据面下 protocol icmp + 端口字段应提交期拒绝")
+	}
+	txt := errText(errs)
+	if !strings.Contains(txt, "acls[acl1].rules[10]") || !strings.Contains(txt, "icmp") {
+		t.Fatalf("报错应点名该 ACL 规则与 icmp 语义分歧，得到：\n%s", txt)
+	}
+	if !strings.Contains(txt, "端口") || !strings.Contains(txt, "set system dataplane vpp") {
+		t.Fatalf("报错应说明端口字段会被忽略并给出替代，得到：\n%s", txt)
+	}
+	// tcp 带端口不受影响（内核侧端口匹配是正常语义）；无端口的 icmp 规则也放行。
+	if errs := Validate(mk(DataPlaneKernel, "tcp", "443")); len(errs) != 0 {
+		t.Fatalf("tcp 带端口应放行，得到：\n%s", errText(errs))
+	}
+	if errs := Validate(mk(DataPlaneKernel, "icmp", "")); len(errs) != 0 {
+		t.Fatalf("不带端口的 icmp 规则应放行，得到：\n%s", errText(errs))
+	}
+	// VPP 数据面照旧（端口即 ICMP type/code）。
+	if errs := Validate(mk(DataPlaneVPP, "icmp", "8")); len(errs) != 0 {
+		t.Fatalf("VPP 数据面下 icmp + 端口应放行，得到：\n%s", errText(errs))
+	}
+}

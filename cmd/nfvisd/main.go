@@ -206,8 +206,9 @@ func run() error {
 	// VPP 与内核两种实现都满足它（见 netRuntime 的说明）。
 	var (
 		netProvider   netRuntime
-		l2net         *network.L2Network // VPP 数据面专用（nil = 内核数据面）
-		vppMgr        *network.Manager   // VPP 数据面专用
+		l2net         *network.L2Network  // VPP 数据面专用（nil = 内核数据面）
+		kernelNet     *netkernel.Provider // 内核数据面专用（nil = VPP）：读视图要接 committed 来源
+		vppMgr        *network.Manager    // VPP 数据面专用
 		dpdkBinder    *network.DPDKBinder
 		dpdkBindings  *network.Bindings
 		sriovProvider *network.SRIOVProvider
@@ -215,6 +216,7 @@ func run() error {
 	if dpMode == model.DataPlaneKernel {
 		// 内核数据面：不连 VPP、不拉起 VPP、不做 DPDK 接管与 startup.conf 管理。
 		kp := netkernel.New(nil)
+		kernelNet = kp
 		netProvider = kp
 		log.Info("已选择 Linux 内核网络数据面（内核 bridge/VRF/nftables/vxlan）")
 	} else {
@@ -266,8 +268,6 @@ func run() error {
 		l2net.SetVhostUser(network.NewVhostUserProviderFunc(vppMgr.VhostUserClientFunc()))
 		// M4-7：容器 memif 接入
 		l2net.SetMemif(network.NewMemifProviderFunc(vppMgr.MemifClientFunc()))
-		// V1 收尾（决策 #70）：声明式 interfaces[].sriov.vf_count 落地（同一实例亦供 API 命令式路径）
-		l2net.SetSRIOV(sriovProvider)
 		// FR-NET-001（决策 #72）：网卡 DPDK 驱动接管（sysfs driver_override/bind/unbind）
 		dpdkBinder = network.NewDPDKBinder()
 		// 决策 #100（发现 #8）：绑定记录（口名 → PCI）。口一旦交 DPDK，内核就没有它的 netdev 了，
@@ -284,9 +284,10 @@ func run() error {
 		}
 		netProvider = l2net
 	}
-	// V1 收尾（决策 #70）：SR-IOV VF 数量是 sysfs 实现，与数据面无关——两种数据面都装配
-	// （内核数据面下 VF 直通本就是内核能力）。
-	sriovProvider = network.NewSRIOVProvider()
+	// V1 收尾（决策 #70）+ v3 R2-7：SR-IOV VF 数量是 sysfs 实现，与数据面无关——两种数据面都
+	// 装配（内核数据面下 VF 直通本就是内核能力）。构造与注入**一体**（attachSRIOV）：此前先注入
+	// 后构造，VPP（缺省）数据面拿到 nil，声明式 `interfaces … sriov vf-count` 变成硬失败（v2 回归）。
+	sriovProvider = attachSRIOV(l2net)
 
 	// M3-8：恢复收敛的不可收敛项落点（GET /alarms）
 	alarms := network.NewAlarmStore()
@@ -297,6 +298,10 @@ func run() error {
 		l2net.SetAlarms(alarms)
 		// 决策 #337 判据③：成员口 rx 计数读物（复用 #326 的运行态读数路径，不新造 VPP 查询）。
 		l2net.SetCounters(vppMgr.Runtime())
+	} else if kp, ok := netProvider.(*netkernel.Provider); ok {
+		// v3 R2-6：内核数据面同样要有告警落点——恢复未收敛项与物理口链路此前只进 journal，
+		// `show alarms`/Web 总览/诊断包/`/events` 全查不到（与 #191/#321/#333 的纪律冲突）。
+		kp.SetAlarms(alarms)
 	}
 	// M5-1：事件总线（FR-API-006 / FR-OPS-020~022）。所有事件源经此汇聚，
 	// 由 GET /events（SSE）推送；告警变更同时进入总线。
@@ -519,6 +524,12 @@ func run() error {
 	}
 	eng = engine
 	defer engine.Close()
+
+	// 真机 3.0.5~dev1 回归：内核数据面的读视图按**当前 committed 配置**枚举产品对象，而提交路径
+	// 不经过 Provider（Apply* 只拿到单个对象）、快照只在装配/恢复收敛时写入 ⇒ 新建对象的读视图
+	// 会滞留旧快照（提交成功、`show virtual-switches` 恒空）。来源接线必须在这里——Provider 先于
+	// 引擎构造，此刻才拿得到 committed。
+	attachConfigSource(kernelNet, engine)
 
 	// FR-OPS-030 / FR-SYS-004（决策 #69）：按 committed 配置初始化日志级别与远程转发
 	if cfg, err := engine.Committed(); err == nil {

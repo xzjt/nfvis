@@ -13,26 +13,52 @@ import (
 //
 // 与 VPP 侧（policer + L2 分类表）语义对齐，底座换成 tc：
 //   - 接口入向挂 clsact qdisc，按**目的 MAC 分类**加 flower 过滤器；
-//   - 每类一个 `action police`（rate 即 kbps；conform 放行、exceed 丢弃）。
+//   - 每类一个 `action police`（rate 即 kbps；超限丢弃；未超限"要不要继续遍历后续 filter"
+//     按档不同，见 stormVerdictBroadcast / stormVerdictMulticast）。
 //
 // 分类口径（真机实测，见交付说明）：
 //   - 广播 = 目的 MAC 精确 `ff:ff:ff:ff:ff:ff`；
 //   - 组播 = 目的 MAC 的 I/G 位（首字节最低位）= 1，用掩码写法 `01:00:00:00:00:00/01:...`。
-//     tc 分类**首个命中即终止**，故两类并存时广播过滤器优先级更高（pref 小）：广播帧先被广播
-//     过滤器命中、不再落到组播过滤器——与 VPP 侧「两类同配时广播走自己的精确表」一致。只配
-//     组播时广播帧会命中 I/G 过滤器（I/G 口径包含广播）——同样与 VPP 侧的如实口径一致。
+//     广播过滤器 pref 更小（先评估）且判决是**裸 `drop`（终止遍历）**：广播帧只落广播档，不被
+//     组播（I/G）过滤器二次计量——与 VPP 侧「两类各有独立分类表、广播帧只落广播档」同一语义
+//     （判决取舍与前提见 stormVerdictBroadcast 的注释）。只配组播档时广播帧会命中 I/G 过滤器
+//     （I/G 口径包含广播）——与 VPP 侧没有广播档时的行为一致。
 //
 // 幂等：Apply 一律「先删本接口自己的过滤器（pref 10/20）、再按声明加」；Teardown 删过滤器，
 // 且本接口 ingress/egress 都不再有过滤器时才回收 clsact qdisc（clsact 与 QoS/镜像等族共用，
 // 贸然删除会连带清掉别的族挂在同一条链上的过滤器）。
 
 const (
-	// 过滤器优先级：数值小者先评估（广播在前，见文件头「首个命中即终止」）。
+	// 过滤器优先级：数值小者先评估（广播在前）。
 	stormPrefBroadcast = tcPrefStormBcast
 	stormPrefMulticast = tcPrefStormMcast
 	// 目的 MAC 匹配写法（flower dst_mac；组播用掩码写法表达 I/G 位）。
 	stormBroadcastMAC = "ff:ff:ff:ff:ff:ff"
 	stormMulticastMAC = "01:00:00:00:00:00/01:00:00:00:00:00"
+)
+
+// 两档的 police 判决（单一真源：argv 在 stormVerdict* 里定；读视图的 tcPoliceDrops 恰好认
+// 这两种形态——同一接口上两档会同时出现 `action drop` 与 `action drop/continue` 两种打印）。
+//
+// stormVerdictBroadcast 广播档（pref 30，本族第一条）：裸 `drop`——超限丢，且**终止遍历**，
+// 故意**不写** `conform-exceed drop/continue`。三条理由：
+//
+//	① 本族两条是 pref 最大的两条，广播档短路只会影响紧随其后的组播档，不会饿死别的族
+//	   （QoS pref 10 / 镜像 pref 20 都排在它之前，已各自用"不吞包"的判决让包走到这里）；
+//	② VPP 侧广播与组播是两套独立分类表、广播帧只落广播档——内核侧让广播帧在此终止遍历，
+//	   才做到「同一份配置、同一语义」；
+//	③ 若不终止（写成 drop/continue），`broadcast 10000 + multicast 8` 会把广播帧未超广播档时
+//	   继续交给组播档再量一次，实际压到 8 kbps（比配置更紧）——是可观察的语义差。
+//
+// ⚠ 前提：本档短路只对"排在它之后的族"有影响。若将来在 pref 40 之后再挂族（新增族要按
+// tc.go 的 pref 表取号段），需要重新审视这条判决——那时广播档会变成新族的隐形墙。
+//
+// stormVerdictMulticast 组播档（pref 40，本族最后一条）：`conform-exceed drop/continue`
+// （超限丢、未超限继续遍历同 hook 的后续 filter）——本族后面当前没有别的过滤器，语义与裸 drop
+// 等效；用 slash 形态避免它成为未来更高 pref 族的隐形墙（与 QoS/镜像的"不吞包"口径一致）。
+var (
+	stormVerdictBroadcast = []string{"drop"}
+	stormVerdictMulticast = []string{"conform-exceed", "drop/continue"}
 )
 
 // stormManager 接口入向风暴抑制的内核下发与读视图。
@@ -71,14 +97,15 @@ func (m *stormManager) Apply(ctx context.Context, dev string, sc *model.StormCon
 	if err := m.delOwnFilters(ctx, dev); err != nil {
 		return err
 	}
-	// 广播在前（pref 小）：首个命中即终止，保证广播不被组播 I/G 过滤器二次命中。
+	// 广播在前（pref 小）：判决是裸 drop（终止遍历），保证广播帧不被组播 I/G 过滤器二次计量
+	// ——与 VPP 侧「广播帧只落广播档」同一语义（取舍见 stormVerdictBroadcast 的注释）。
 	if sc.BroadcastKbps > 0 {
-		if err := m.addFilter(ctx, dev, stormPrefBroadcast, stormBroadcastMAC, sc.BroadcastKbps); err != nil {
+		if err := m.addFilter(ctx, dev, stormPrefBroadcast, stormBroadcastMAC, sc.BroadcastKbps, stormVerdictBroadcast); err != nil {
 			return err
 		}
 	}
 	if sc.MulticastKbps > 0 {
-		if err := m.addFilter(ctx, dev, stormPrefMulticast, stormMulticastMAC, sc.MulticastKbps); err != nil {
+		if err := m.addFilter(ctx, dev, stormPrefMulticast, stormMulticastMAC, sc.MulticastKbps, stormVerdictMulticast); err != nil {
 			return err
 		}
 	}
@@ -96,31 +123,63 @@ func (m *stormManager) Teardown(ctx context.Context, dev string) error {
 	return m.dropClsactIfIdle(ctx, dev)
 }
 
-// Dataplane 读该接口风暴抑制的内核实况：是否存在本产品的入向限速过滤器，以及各类的实测速率。
-// err != nil 表示「读不到实况」（例如设备不存在），而不是「未下发」。
-func (m *stormManager) Dataplane(ctx context.Context, dev string) (attached bool, detail string, err error) {
+// stormDataplaneFact 风暴抑制的内核实况（读视图用）。
+//
+// 为什么单独给一份结构而不是只给一段文本（R2-15②）：消费方 internal/api/storm.go 在
+// Available=true 时**只读 Kinds**（Reason 只在"不可核对"时打印）——把事实写成一句话塞进
+// Reason，读视图就会把"tc 过滤器在位工作"报成"policer 未在数据面（未收敛）"。
+// 各类速率取 -1 表示该类过滤器不在位（不是 0——0 会被当成一个真实的限速值）。
+type stormDataplaneFact struct {
+	Attached      bool
+	Detail        string
+	BroadcastKbps int
+	MulticastKbps int
+}
+
+// Dataplane 读该接口风暴抑制的内核实况：入向是否挂着本产品的限速过滤器，以及各类的实测速率。
+// err != nil 表示「读不到实况」（例如设备不存在、过滤器在但速率解析不出来），而不是「未下发」——
+// 读不到速率时如实报错，不猜一个值（猜出来的 CIR 会掩盖"数据面与配置不一致"）。
+func (m *stormManager) Dataplane(ctx context.Context, dev string) (stormDataplaneFact, error) {
 	out, err := tcRun(ctx, m.run, "filter", "show", "dev", dev, "ingress")
 	if err != nil {
-		return false, "", fmt.Errorf("tc filter show dev %s ingress: %w（%s）", dev, err, trimOut(out))
+		return stormDataplaneFact{}, fmt.Errorf("tc filter show dev %s ingress: %w（%s）", dev, err, trimOut(out))
 	}
+	fact := stormDataplaneFact{BroadcastKbps: -1, MulticastKbps: -1}
 	var kinds []string
-	for _, block := range stormFilterBlocks(out) {
-		// 只有带 police 动作、且目的 MAC 是本产品两类之一的块才算我们的过滤器
-		// （同一条链上可能有别的族挂的 flower 过滤器）。
-		if !strings.Contains(block, "police") {
+	for _, block := range tcFilterBlocks(out) {
+		// 只有带 police 动作、超限丢弃判决、且目的 MAC 是本产品两类之一的块才算我们的过滤器
+		// （同一条链上可能有别的族挂的 flower 过滤器）。判决的两种打印写法都认，且**必须都认**：
+		// 本产品的广播档是裸 drop（打印 `action drop`）、组播档是 slash 形态（打印
+		// `action drop/continue`）——同一接口上两档会同时出现两种形态（见 tcPoliceDrops）。
+		if !tcPoliceDrops(block) {
 			continue
 		}
 		switch {
 		case strings.Contains(block, stormBroadcastMAC):
-			kinds = append(kinds, "广播"+stormRateSuffix(block))
+			kbps := stormParseRateKbps(block)
+			if kbps < 0 {
+				return stormDataplaneFact{}, fmt.Errorf(
+					"广播入向过滤器在位，但读不到它的限速速率（tc 输出形态无法解析）：%s", trimOut(block))
+			}
+			fact.BroadcastKbps = kbps
+			kinds = append(kinds, fmt.Sprintf("广播 %d kbps", kbps))
 		case strings.Contains(block, stormMulticastMAC):
-			kinds = append(kinds, "组播"+stormRateSuffix(block))
+			kbps := stormParseRateKbps(block)
+			if kbps < 0 {
+				return stormDataplaneFact{}, fmt.Errorf(
+					"组播入向过滤器在位，但读不到它的限速速率（tc 输出形态无法解析）：%s", trimOut(block))
+			}
+			fact.MulticastKbps = kbps
+			kinds = append(kinds, fmt.Sprintf("组播 %d kbps", kbps))
 		}
 	}
 	if len(kinds) == 0 {
-		return false, "未下发入向限速", nil
+		fact.Detail = "未下发入向限速"
+		return fact, nil
 	}
-	return true, strings.Join(kinds, "、") + "（入向 tc 限速）", nil
+	fact.Attached = true
+	fact.Detail = strings.Join(kinds, "、") + "（入向 tc 限速）"
+	return fact, nil
 }
 
 // ensureClsact 确保接口挂上 clsact qdisc（幂等：已在则不动）。
@@ -138,14 +197,21 @@ func (m *stormManager) ensureClsact(ctx context.Context, dev string) error {
 	return tcReq(ctx, m.run, "qdisc", "add", "dev", dev, "clsact")
 }
 
-// addFilter 加一条按目的 MAC 分类的入向限速过滤器。
-func (m *stormManager) addFilter(ctx context.Context, dev string, pref int, dstMAC string, kbps int) error {
-	return tcReq(ctx, m.run,
+// addFilter 加一条按目的 MAC 分类的入向限速过滤器；判决由调用方按档给出（stormVerdictBroadcast /
+// stormVerdictMulticast，取舍见那里的注释）。
+//
+// 共同背景（R2-3，真机 spike 实测）：同一条 clsact hook 上内核**按 pref 升序评估、首个判决 ≥0
+// 的 filter 命中即返回**；不写判决时 police 对合规包返回 TC_ACT_OK(0)，会把排在后面的整族静默
+// 屏蔽。故每一档的判决都要明确写出来（"要不要让包继续走"是有语义的一步，不能靠默认）。
+func (m *stormManager) addFilter(ctx context.Context, dev string, pref int, dstMAC string, kbps int, verdict []string) error {
+	args := []string{
 		"filter", "add", "dev", dev, "ingress", "protocol", "all",
 		"pref", strconv.Itoa(pref),
 		"flower", "dst_mac", dstMAC,
 		"action", "police", "rate", fmt.Sprintf("%dkbit", kbps),
-		"burst", strconv.Itoa(stormBurstBytes(kbps)), "drop")
+		"burst", strconv.Itoa(stormBurstBytes(kbps)),
+	}
+	return tcReq(ctx, m.run, append(args, verdict...)...)
 }
 
 // delOwnFilters 删掉本接口自己的两类过滤器（幂等：本就不在按已达成）。
@@ -189,38 +255,6 @@ func (m *stormManager) dropClsactIfIdle(ctx context.Context, dev string) error {
 	// clsact 是本包各绑定族共用的：判据必须是"设备上再无任何 filter"，而不是"没有本族的
 	// filter"（后者会把别的族正在用的 hook 连带撤掉）。
 	return tcDropClsactIfIdle(ctx, m.run, dev)
-}
-
-// stormHasFilters 判断 `tc filter show` 输出里是否有过滤器条目。
-func stormHasFilters(out string) bool { return strings.Contains(out, "filter protocol") }
-
-// stormFilterBlocks 把 `tc filter show` 输出按过滤器切成块（每块含 dst_mac 与 police 速率），
-// 供读视图逐块判定「是不是本产品的风暴抑制过滤器」。
-func stormFilterBlocks(out string) []string {
-	var blocks []string
-	var cur []string
-	flush := func() {
-		if len(cur) > 0 {
-			blocks = append(blocks, strings.Join(cur, "\n"))
-			cur = nil
-		}
-	}
-	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "filter protocol") {
-			flush()
-		}
-		cur = append(cur, line)
-	}
-	flush()
-	return blocks
-}
-
-// stormRateSuffix 渲染该过滤器块的实测速率后缀（` 1000 kbps`）；解析不到就留空。
-func stormRateSuffix(block string) string {
-	if kbps := stormParseRateKbps(block); kbps >= 0 {
-		return fmt.Sprintf(" %d kbps", kbps)
-	}
-	return ""
 }
 
 // stormParseRateKbps 从一块 tc 输出里解析 police 的速率（`rate <n><unit>`）为 kbps；

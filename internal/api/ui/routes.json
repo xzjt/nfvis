@@ -61,7 +61,7 @@
     { "path": "#/ops/audit", "title": "审计日志", "view": "audit", "breadcrumb": ["运维", "审计"],
       "endpoints": ["/audit-logs?limit=50"], "poll": 5000 },
     { "path": "#/ops/diagnostics", "title": "诊断", "view": "diagnostics", "breadcrumb": ["运维", "诊断"],
-      "endpoints": ["/system/logs"], "poll": 0 },
+      "endpoints": ["/system/logs", "/system/status"], "poll": 0 },
     { "path": "#/ops/capture", "title": "抓包", "view": "capture", "breadcrumb": ["运维", "抓包"],
       "endpoints": ["/vpp/capture"], "poll": 0, "write": true }
   ]

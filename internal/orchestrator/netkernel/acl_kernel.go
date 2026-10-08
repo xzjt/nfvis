@@ -34,6 +34,10 @@ import (
 // 规则翻译（真机实测过的语法）：
 //
 //	source/destination → `ip saddr`/`ip daddr`（v4）或 `ip6 saddr`/`ip6 daddr`（v6）；any/空省略
+//	两侧皆 any         → 规则体补 `ip saddr 0.0.0.0/0` 把规则按 **v4** 落（手册「地址家族」段与
+//	                    VPP 侧同口径：`any` 跟随对侧家族，两侧都 any 按 v4 处理；要同时过滤
+//	                    v4 与 v6 写两条规则）。不补限定时 nft 会同时命中两个家族——见 aclRuleArgs
+//	                    的注释（v6 策略被整体绕过的形态）
 //	tcp/udp           → `meta l4proto tcp|udp` + `tcp sport`/`tcp dport`（写了端口才加）
 //	icmp              → v4 `ip protocol icmp`；v6 `ip6 nexthdr ipv6-icmp`
 //	协议未声明但写了端口 → `meta l4proto { tcp, udp }` + `th sport`/`th dport`
@@ -406,6 +410,19 @@ func aclRuleArgs(r model.AclRule) ([]string, error) {
 			args = append(args, aclPortArgs("th", "dport", r.DestinationPort)...)
 		}
 	}
+	// 两侧皆 any：`any` 跟随对侧家族 ⇒ **两侧都 any 按 v4**（手册「地址家族」段与 VPP 侧同口径：
+	// VPP 的 prefixOrAny 把 any 落成 0.0.0.0/0，v6 由「本族无规则 ⇒ 隐式拒绝」兜底）。
+	// 这条规则体里没有任何地址字段，**必须显式落 v4**：不写限定时 nft 同时命中 v4 与 v6——
+	// `permit any/any` 连 v6 一起放行，排在其后的 v6 deny 永不达（seq 小的先命中）⇒ **v6 策略被
+	// 整体绕过**（安全面）。补 `ip saddr 0.0.0.0/0`（全 v4 任意地址，与 VPP 的 any→0.0.0.0/0
+	// 同形；`ip` 表达式自带"以太网类型 = IPv4"的协议依赖，v6 帧不会命中）。
+	// 有显式地址的一侧已经带来家族限定（上面 aclAddrArgs 写过 ip/ip6），故只在"两侧都 any 且规则体
+	// 里还没有任何 ip/ip6 限定"时补；icmp 分支的 `ip protocol icmp` 已自带限定，不会重复补。
+	// 放在生成之后统一判（而不按协议分支分情况）：将来新增协议分支忘了家族限定时这条兜底仍生效。
+	// 要同时过滤 v4 与 v6 写两条规则（本条只覆盖 v4 一侧）。
+	if !v6 && aclIsAnyAddr(r.Source) && aclIsAnyAddr(r.Destination) && !aclArgsHaveFamily(args) {
+		args = append([]string{"ip", "saddr", "0.0.0.0/0"}, args...)
+	}
 	switch strings.ToLower(strings.TrimSpace(r.Action)) {
 	case "permit":
 		args = append(args, "accept")
@@ -415,6 +432,19 @@ func aclRuleArgs(r model.AclRule) ([]string, error) {
 		return nil, fmt.Errorf("action 必须为 permit 或 deny，实际 %q", r.Action)
 	}
 	return args, nil
+}
+
+// aclArgsHaveFamily 规则参数里是否已出现地址家族限定（`ip` / `ip6` 作为独立关键字）。
+//
+// 只认关键字本身：地址/协议/端口取值都不可能是这两串（地址由提交期校验为 ip-prefix、协议为
+// tcp|udp|icmp|any、端口为数字/数字段），故不会误判。
+func aclArgsHaveFamily(args []string) bool {
+	for _, a := range args {
+		if a == "ip" || a == "ip6" {
+			return true
+		}
+	}
+	return false
 }
 
 // aclAddrArgs 地址匹配（`ip saddr <prefix>` / `ip6 daddr <prefix>`）。

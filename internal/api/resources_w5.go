@@ -417,6 +417,9 @@ func (s *Server) handleGetSystemStatus(w http.ResponseWriter, r *http.Request) {
 		"hostname":       hostname,
 		"uptime_seconds": uptimeSec,
 		"config_ready":   true,
+		// dataplane 当前生效的数据面实现（装配事实，与 /vpp/status.dataplane 同源）：
+		// 客户端据此区分「读数是 VPP 的」与「内核数据面下这组读数整体不适用」。
+		"dataplane": dataPlaneModeAssembled(s.vpp, cfg),
 	}
 	// 决策 #116：契约声明了 cpu/memory/hugepages/storage，此前只回上面三项（响应形状与契约
 	// 不符，照契约开发的客户端一律取空）。这里补齐，且**数据源与 CLI 同源**：

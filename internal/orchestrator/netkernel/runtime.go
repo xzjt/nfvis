@@ -149,7 +149,10 @@ func (r *Runtime) DataplaneIfnames(ctx context.Context, cfg model.Config) ([]str
 		add(vrf.Name)
 		for _, li := range vrf.L3Interfaces {
 			if li.Vlan > 0 {
-				managed[VlanSubifName(LinkName(li.Interface), li.Vlan)] = true
+				// 派生名超长（>15）的声明下不到数据面，读视图也没有它可报（不编造名字）。
+				if dev, err := VlanSubifName(LinkName(li.Interface), li.Vlan); err == nil {
+					managed[dev] = true
+				}
 			}
 		}
 	}

@@ -19,7 +19,7 @@ func TestSpanApplyIngressCommands(t *testing.T) {
 		"ip link set dev ens256 up",
 		"tc filter del dev ens192 ingress pref 20",
 		"tc filter del dev ens192 egress pref 20",
-		"tc filter add dev ens192 ingress pref 20 matchall action mirred egress mirror dev ens256",
+		"tc filter add dev ens192 ingress pref 20 matchall action mirred egress mirror dev ens256 continue",
 	} {
 		if !f.has(want) {
 			t.Fatalf("缺少命令 %q：\n%s", want, f.joined())
@@ -37,7 +37,7 @@ func TestSpanApplyBothInstallsBothHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, dir := range []string{"ingress", "egress"} {
-		if !f.has("tc filter add dev ens192 " + dir + " pref 20 matchall action mirred egress mirror dev ens256") {
+		if !f.has("tc filter add dev ens192 " + dir + " pref 20 matchall action mirred egress mirror dev ens256 continue") {
 			t.Fatalf("both 应在 %s 上装 filter：\n%s", dir, f.joined())
 		}
 	}
@@ -129,6 +129,22 @@ func TestSpanDeleteKeepsQdiscWhenOtherFamilyBound(t *testing.T) {
 }
 
 func TestSpanBoundParsesAnalyzer(t *testing.T) {
+	// 新写法（修复 R2-3 后下发的形态）：mirred 尾随 `continue`（镜像后继续遍历同 hook 的后续
+	// filter）。解析只取括号里的分析口名，判决词不参与匹配。
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "tc filter show dev ens192 ingress",
+		out: "filter protocol all pref 20 matchall chain 0 \n" +
+			"\taction order 1: mirred (Egress Mirror to device ens256) continue\n",
+	}}}
+	m := newSpanManager(f)
+	dev, ok := m.Bound(context.Background(), "ens192")
+	if !ok || dev != "ens256" {
+		t.Fatalf("应解析出分析口 ens256，得到 %q ok=%v", dev, ok)
+	}
+}
+
+// 旧写法（默认判决 `pipe`，修复 R2-3 前的现场）：升级后读旧现场同样要认。
+func TestSpanBoundToleratesLegacyPipeForm(t *testing.T) {
 	f := &fakeRunner{replies: []fakeReply{{
 		prefix: "tc filter show dev ens192 ingress",
 		out: "filter protocol all pref 20 matchall chain 0 \n" +
@@ -137,7 +153,7 @@ func TestSpanBoundParsesAnalyzer(t *testing.T) {
 	m := newSpanManager(f)
 	dev, ok := m.Bound(context.Background(), "ens192")
 	if !ok || dev != "ens256" {
-		t.Fatalf("应解析出分析口 ens256，得到 %q ok=%v", dev, ok)
+		t.Fatalf("旧写法应照常解析出分析口 ens256，得到 %q ok=%v", dev, ok)
 	}
 }
 

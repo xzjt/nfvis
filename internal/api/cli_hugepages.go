@@ -72,7 +72,10 @@ func hugepagePoolsView(root string, cfg model.Config) map[string]any {
 // hugepageOccupants 返回某页尺寸池「谁在占用」的**可查证据**（决策 #329 的诚实性要求：
 // 无法回收时必须说清谁在占用与该怎么做）。证据源：已生效配置的账本、VPP 页尺寸偏好、
 // 内核 hugetlbfs 挂载点。查不到具体持有者时如实说明（内核只给总量与空闲数）。
-func hugepageOccupants(cfg model.Config, pageSize string) []string {
+//
+// mode 是**装配事实**（当前生效的数据面实现）：内核数据面下没有 VPP 参与，第二条证据
+// 整条不列——把 VPP 写成占用者会把排查引向一个根本不在场的进程。
+func hugepageOccupants(cfg model.Config, pageSize, mode string) []string {
 	var out []string
 
 	// ① 配置账本：哪些 VNF 声明用该页尺寸的大页（声明即占用意图）。
@@ -99,20 +102,27 @@ func hugepageOccupants(cfg model.Config, pageSize string) []string {
 		out = append(out, fmt.Sprintf("virtual-machine-functions[%s] 声明使用 %s 大页 %d 页", u.name, pageSize, u.pages))
 	}
 
-	// ② VPP 数据面：页尺寸偏好（未声明时 VPP 默认 2M）。
-	vppPref := "2M"
-	if cfg.Vpp != nil && cfg.Vpp.Memory != nil && cfg.Vpp.Memory.HugepagePreference != "" {
-		vppPref = cfg.Vpp.Memory.HugepagePreference
-	}
-	if pageSize == vppPref {
-		out = append(out, fmt.Sprintf("VPP 数据面（default-hugepage-size / main-heap-page-size 取 %s）", pageSize))
+	// ② VPP 数据面：页尺寸偏好（未声明时 VPP 默认 2M）。内核数据面下 VPP 不在场
+	// （也不吃大页池），整条不列——不把 VPP 报成占用者。
+	if mode != model.DataPlaneKernel {
+		vppPref := "2M"
+		if cfg.Vpp != nil && cfg.Vpp.Memory != nil && cfg.Vpp.Memory.HugepagePreference != "" {
+			vppPref = cfg.Vpp.Memory.HugepagePreference
+		}
+		if pageSize == vppPref {
+			out = append(out, fmt.Sprintf("VPP 数据面（default-hugepage-size / main-heap-page-size 取 %s）", pageSize))
+		}
 	}
 
 	// ③ 内核侧：hugetlbfs 挂载（/proc/mounts，按 pagesize= 匹配）。
 	out = append(out, hugetlbfsMounts(pageSize)...)
 
 	if len(out) == 0 {
-		out = append(out, "未能从配置/VPP/挂载点确定具体持有者（内核只给池总量与空闲数，不编造）")
+		if mode == model.DataPlaneKernel {
+			out = append(out, "未能从配置/挂载点确定具体持有者（内核只给池总量与空闲数，不编造；当前数据面为 Linux 内核网络，未使用 VPP）")
+		} else {
+			out = append(out, "未能从配置/VPP/挂载点确定具体持有者（内核只给池总量与空闲数，不编造）")
+		}
 	}
 	return out
 }
@@ -218,7 +228,7 @@ func (x *cliExecutor) renderHugepagePools() string {
 	for _, p := range pools {
 		if p.State == ksys.HugepageStateInUse && p.Reclaimable == 0 {
 			b.WriteString(fmt.Sprintf("  - %s 多余页全部在用，占用者（可查到的证据）：\n", p.PageSize))
-			for _, bk := range hugepageOccupants(cfg, p.PageSize) {
+			for _, bk := range hugepageOccupants(cfg, p.PageSize, x.dpMode()) {
 				b.WriteString("      · " + bk + "\n")
 			}
 			b.WriteString("    处置：停掉持页的 VNF 后再回收，或调整声明值（set resource-pools hugepages page-size " +
@@ -240,7 +250,7 @@ func (x *cliExecutor) requestHugepagesReclaim(user string) string {
 		return "%% " + err.Error() + "\n"
 	}
 	res := ksys.ReconcileHugepages(hugepageRoot(x.hugepageRoot), hugepageDeclared(cfg), x.hugepages,
-		func(size string, inUse int) []string { return hugepageOccupants(cfg, size) })
+		func(size string, inUse int) []string { return hugepageOccupants(cfg, size, x.dpMode()) })
 
 	var b strings.Builder
 	b.WriteString("大页池回收（只回收空闲的多余页，收敛到声明值；在用/预留页一律不动）：\n")
@@ -362,9 +372,14 @@ func hugepageActionResult(p ksys.HugepagePoolResult) string {
 // REST `POST /system/hugepages:reclaim` 与巡检三处共用同一份派生（声明值）与同一份
 // 回收实现（ksys.ReconcileHugepages），不存在"巡检一套、命令一套"。
 // 调用方负责记日志与维护告警（本函数只做对账 + 回收，不新造定时器）。
+//
+// 数据面口径：本入口（巡检）拿不到装配句柄，占用者证据按 committed 的 `system.dataplane`
+// 取值；CLI/REST 两条路径都用**装配事实**（`dataPlaneMode`/`dpMode`）。切换数据面但未重启的
+// 窗口里，巡检侧的占用者证据可能少列/多列 VPP 一条——只影响告警文字，不影响回收动作。
 func HugepageReconcile(root string, cfg model.Config, set ksys.HugepagePoolSetter) ksys.HugepageReconcileResult {
+	mode := cfg.DataPlaneMode()
 	return ksys.ReconcileHugepages(hugepageRoot(root), hugepageDeclared(cfg), set,
-		func(size string, inUse int) []string { return hugepageOccupants(cfg, size) })
+		func(size string, inUse int) []string { return hugepageOccupants(cfg, size, mode) })
 }
 
 // handleGetHugepages GET /api/v1/system/hugepages：大页池三方数字（声明/内核实际/在用）
@@ -394,7 +409,7 @@ func (s *Server) handleHugepagesReclaim(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	res := ksys.ReconcileHugepages(hugepageRoot(s.hugepageRoot), hugepageDeclared(cfg), s.hugepage,
-		func(size string, inUse int) []string { return hugepageOccupants(cfg, size) })
+		func(size string, inUse int) []string { return hugepageOccupants(cfg, size, s.dataPlaneMode()) })
 	user := "api"
 	if info, ok := Identity(r); ok {
 		user = info.User

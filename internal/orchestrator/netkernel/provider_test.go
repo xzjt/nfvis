@@ -9,6 +9,7 @@ import (
 
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
+	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
 // fakeRunner 记录命令并按「命令前缀 → 输出」返回预置结果（单测不触碰宿主内核）。
@@ -101,7 +102,13 @@ func TestPoolRangeConversion(t *testing.T) {
 // ---------- 接口与 bond ----------
 
 func TestApplyInterfaceSetsMTUDescriptionAndState(t *testing.T) {
-	f := &fakeRunner{}
+	// 接口级绑定族的收尾会走一次端口安全 Teardown（未声明=撤除）：它要读桥成员状态决定是否
+	// 恢复学习（R2-22 起读失败会如实上抛），故这里给一条正常的 `ip -j -d link show` 事实。
+	// 该口不是桥成员：没有学习可恢复，撤除照常按已达成。
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -j -d link show dev ens192",
+		out:    `[{"ifname":"ens192","linkinfo":{}}]`,
+	}}}
 	p := New(f)
 	enabled := true
 	err := p.ApplyInterface(context.Background(), model.InterfaceConfig{
@@ -203,10 +210,13 @@ func TestApplyBridgeDomainSkipsL3Switch(t *testing.T) {
 
 func TestApplyBridgeDomainReleasesRemovedMembers(t *testing.T) {
 	// 现状：bridge 上挂着 ens224（配置里已删），apply 后应把它摘掉。
-	f := &fakeRunner{replies: []fakeReply{{
-		prefix: "bridge -j link show master vs-lan",
-		out:    `[{"ifname":"ens192","master":"vs-lan"},{"ifname":"ens224","master":"vs-lan"}]`,
-	}}}
+	f := &fakeRunner{replies: []fakeReply{
+		{prefix: "bridge -j link show master vs-lan",
+			out: `[{"ifname":"ens192","master":"vs-lan"},{"ifname":"ens224","master":"vs-lan"}]`},
+		// 物理桥口：linkinfo 里只有 info_slave_kind（没有 info_kind）——属产品可释放的成员。
+		{prefix: "ip -d -j link show dev ens224",
+			out: `[{"ifname":"ens224","master":"vs-lan","linkinfo":{"info_slave_kind":"bridge"}}]`},
+	}}
 	p := New(f)
 	err := p.ApplyBridgeDomain(context.Background(), model.VirtualSwitch{
 		Name: "vs-lan", Type: "l2",
@@ -255,6 +265,44 @@ func TestDeleteBridgeDomainDeletesLink(t *testing.T) {
 	}
 }
 
+// R2-1（P0）：释放循环只摘「本产品自己 enslave 的成员」——libvirt 自建的 VM tap（vnetN，
+// linkinfo.info_kind=tun）与 ApplyVxlan 自管的隧道口（vxlan）绝不能摘：服务重启、升级、
+// 甚至「给同一台交换机再加一个端口」的提交都会触发整台重放，摘掉后 VM 仍在跑、产品零报错，
+// 宿主到 guest 的 L2 静默断流。
+func TestApplyBridgeDomainKeepsLibvirtTapAndVxlanMembers(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{
+		{prefix: "bridge -j link show master vs-lan", out: `[
+			{"ifname":"ens192","master":"vs-lan"},
+			{"ifname":"ens224","master":"vs-lan"},
+			{"ifname":"vnet2","master":"vs-lan"},
+			{"ifname":"vxlan7","master":"vs-lan"}]`},
+		// 物理口：无 linkinfo（仍允许释放——它是本产品会 enslave 的那类）。
+		{prefix: "ip -d -j link show dev ens224", out: `[{"ifname":"ens224","master":"vs-lan"}]`},
+		// VM tap：libvirt 自建，产品从不由 ApplyBridgeDomain enslave。
+		{prefix: "ip -d -j link show dev vnet2",
+			out: `[{"ifname":"vnet2","master":"vs-lan","linkinfo":{"info_kind":"tun"}}]`},
+		// vxlan：由 ApplyVxlan 自管归属，交换机重放不碰。
+		{prefix: "ip -d -j link show dev vxlan7",
+			out: `[{"ifname":"vxlan7","master":"vs-lan","linkinfo":{"info_kind":"vxlan"}}]`},
+	}}
+	p := New(f)
+	err := p.ApplyBridgeDomain(context.Background(), model.VirtualSwitch{
+		Name: "vs-lan", Type: "l2",
+		Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens192"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("ip link set dev ens224 nomaster") {
+		t.Fatalf("已从声明里删除的物理成员口应被释放；实际：\n%s", f.joined())
+	}
+	for _, keep := range []string{"vnet2", "vxlan7"} {
+		if f.has("ip link set dev " + keep + " nomaster") {
+			t.Fatalf("%s 不是本产品 enslave 的成员，不得被摘除；实际：\n%s", keep, f.joined())
+		}
+	}
+}
+
 // ---------- L3 交换机（内核 VRF） ----------
 
 func TestApplyVRFCreatesVRFInterfacesAndRoutes(t *testing.T) {
@@ -285,7 +333,10 @@ func TestApplyVRFCreatesVRFInterfacesAndRoutes(t *testing.T) {
 }
 
 func TestDeleteL3InterfaceRemovesAddressesAndVlanDevice(t *testing.T) {
-	f := &fakeRunner{}
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -d -j link show dev ens192.100",
+		out:    `[{"ifname":"ens192.100","master":"vs-l3","linkinfo":{"info_kind":"vlan","info_slave_kind":"vrf"}}]`,
+	}}}
 	p := New(f)
 	err := p.DeleteL3Interface(context.Background(), "vs-l3", model.L3Interface{
 		Interface: "ens192", Vlan: 100, Addresses: []string{"10.0.0.1/24"},
@@ -304,11 +355,45 @@ func TestDeleteL3InterfaceRemovesAddressesAndVlanDevice(t *testing.T) {
 	}
 }
 
+// R2-14：口当前挂在 VRF 上时才摘归属（正常撤销路径）。
+func TestDeleteL3InterfaceDetachesVRFMaster(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -d -j link show dev ens224",
+		out:    `[{"ifname":"ens224","master":"vs-l3","linkinfo":{"info_kind":"veth","info_slave_kind":"vrf"}}]`,
+	}}}
+	p := New(f)
+	if err := p.DeleteL3Interface(context.Background(), "vs-l3",
+		model.L3Interface{Interface: "ens224"}); err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("ip link set dev ens224 nomaster") {
+		t.Fatalf("口在 VRF 上时应摘除归属；实际：\n%s", f.joined())
+	}
+}
+
+// R2-14：迁移形态——口已被交换机（bridge）接管时不摘（否则把刚挂上的归属摘掉）。
+func TestDeleteL3InterfaceKeepsForeignMaster(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -d -j link show dev ens224",
+		out:    `[{"ifname":"ens224","master":"vs-lan","linkinfo":{"info_kind":"veth","info_slave_kind":"bridge"}}]`,
+	}}}
+	p := New(f)
+	if err := p.DeleteL3Interface(context.Background(), "vs-l3",
+		model.L3Interface{Interface: "ens224"}); err != nil {
+		t.Fatal(err)
+	}
+	if f.has("ip link set dev ens224 nomaster") {
+		t.Fatalf("口已被 bridge 接管，删除 l3-interface 不得摘掉归属；实际：\n%s", f.joined())
+	}
+}
+
 func TestDeleteVRFCleansMembersThenDeletesDevice(t *testing.T) {
 	f := &fakeRunner{replies: []fakeReply{
 		{prefix: "ip -j link show master vs-l3", out: `[{"ifname":"ens192.100"}]`},
 		{prefix: "ip -j addr show dev ens192.100",
 			out: `[{"addr_info":[{"local":"10.0.0.1","prefixlen":24}]}]`},
+		{prefix: "ip -d -j link show dev ens192.100",
+			out: `[{"ifname":"ens192.100","master":"vs-l3","linkinfo":{"info_kind":"vlan","info_slave_kind":"vrf"}}]`},
 	}}
 	p := New(f)
 	if err := p.DeleteVRF(context.Background(), "vs-l3"); err != nil {
@@ -316,6 +401,9 @@ func TestDeleteVRFCleansMembersThenDeletesDevice(t *testing.T) {
 	}
 	if !f.has("ip addr del 10.0.0.1/24 dev ens192.100") {
 		t.Fatalf("成员口地址应先清；实际：\n%s", f.joined())
+	}
+	if !f.has("ip link set dev ens192.100 nomaster") {
+		t.Fatalf("成员口应先出 VRF；实际：\n%s", f.joined())
 	}
 	if !f.has("ip link del ens192.100") {
 		t.Fatalf("vlan 子接口应被回收；实际：\n%s", f.joined())
@@ -367,6 +455,124 @@ func TestApplyNATBuildsTableChainsAndRules(t *testing.T) {
 		if !f.has(want) {
 			t.Fatalf("缺少命令 %q；实际：\n%s", want, f.joined())
 		}
+	}
+}
+
+// R2-13①：bond 已在场但属性与声明不同时**必须重建**——内核 bonding 的 mode/lacp_rate/
+// xmit_hash_policy 不能原地改，旧实现把 `File exists` 一吞了之，于是 `set bonds b0 …
+// lacp mode active` 提交成功、内核仍是 balance-xor（无运行态读视图可发现）。
+func TestApplyBondRebuildsOnAttributeChange(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -d -j link show dev bond0",
+		out: `[{"ifname":"bond0","linkinfo":{"info_kind":"bond",
+		        "info_data":{"mode":"balance-xor","xmit_hash_policy":"layer2","lacp_rate":"slow"}}}]`,
+	}}}
+	p := New(f)
+	err := p.ApplyBond(context.Background(), model.Bond{
+		Name: "bond0", Members: []string{"ens192"},
+		Lacp: &model.Lacp{Mode: "active", Interval: "fast"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("ip link del bond0") {
+		t.Fatalf("属性与声明不同应重建 bond；实际：\n%s", f.joined())
+	}
+	if !f.has("type bond mode 802.3ad") || !f.has("lacp_rate fast") {
+		t.Fatalf("应按声明重建为 802.3ad + lacp_rate fast；实际：\n%s", f.joined())
+	}
+	if idx := strings.Index(f.joined(), "ip link del bond0"); idx > strings.Index(f.joined(), "type bond mode 802.3ad") {
+		t.Fatalf("必须先删后建；实际：\n%s", f.joined())
+	}
+	if !f.has("ip link set dev ens192 master bond0") {
+		t.Fatalf("重建后仍要 enslave 成员；实际：\n%s", f.joined())
+	}
+}
+
+// R2-13①：属性一致时不得重建（幂等重放/恢复收敛会反复走这条路径）。
+func TestApplyBondKeepsMatchingAttributes(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -d -j link show dev bond0",
+		out: `[{"ifname":"bond0","linkinfo":{"info_kind":"bond",
+		        "info_data":{"mode":"802.3ad","xmit_hash_policy":"layer3+4","lacp_rate":"fast"}}}]`,
+	}}}
+	p := New(f)
+	err := p.ApplyBond(context.Background(), model.Bond{
+		Name: "bond0", Members: []string{"ens192"},
+		Lacp: &model.Lacp{Mode: "active", Interval: "fast"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.has("ip link del bond0") {
+		t.Fatalf("属性一致时不得重建；实际：\n%s", f.joined())
+	}
+}
+
+// R2-13①：成员按声明收敛——已从声明里删掉的成员必须放开（旧实现只 enslave、从不释放，
+// 该口永久留在 LAG，而 bond 没有运行态读视图可发现）。
+func TestApplyBondReleasesRemovedMembers(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{
+		{prefix: "ip -j link show master bond0",
+			out: `[{"ifname":"ens192","master":"bond0"},{"ifname":"ens224","master":"bond0"}]`},
+		{prefix: "ip -d -j link show dev ens224",
+			out: `[{"ifname":"ens224","master":"bond0","linkinfo":{"info_kind":"veth","info_slave_kind":"bond"}}]`},
+	}}
+	p := New(f)
+	err := p.ApplyBond(context.Background(), model.Bond{Name: "bond0", Members: []string{"ens192"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("ip link set dev ens224 nomaster") {
+		t.Fatalf("已从声明里删除的成员应被释放；实际：\n%s", f.joined())
+	}
+	if f.has("ip link set dev ens192 nomaster") {
+		t.Fatalf("仍声明的成员不应被释放；实际：\n%s", f.joined())
+	}
+}
+
+// R2-13②：恢复/备份恢复路径（prev=nil）下，本地 vxlan 设备元组与声明不同时必须重建——
+// 旧实现把 `File exists` 一吞了之，隧道保持旧 VNI/remote，配置与数据面不一致且无提示。
+func TestApplyVxlanRebuildsOnLocalTupleMismatch(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -d -j link show dev vx1",
+		out: `[{"ifname":"vx1","linkinfo":{"info_kind":"vxlan",
+		        "info_data":{"id":100,"local":"10.0.0.1","remote":"10.0.0.2","dstport":4789}}}]`,
+	}}}
+	p := New(f)
+	err := p.ApplyVxlan(context.Background(), model.VxlanTunnel{
+		Name: "vx1", Vni: 200, Local: "10.0.0.1", Remote: "10.0.0.2", VirtualSwitch: "vs-lan",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("ip link del vx1") {
+		t.Fatalf("本地元组与声明不同应重建隧道；实际：\n%s", f.joined())
+	}
+	if !f.has("id 200") {
+		t.Fatalf("应按新元组重建；实际：\n%s", f.joined())
+	}
+	if strings.Index(f.joined(), "ip link del vx1") > strings.Index(f.joined(), "id 200") {
+		t.Fatalf("必须先删后建；实际：\n%s", f.joined())
+	}
+}
+
+// R2-13②：元组一致时不重建（重放幂等）。
+func TestApplyVxlanKeepsMatchingLocalDevice(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -d -j link show dev vx1",
+		out: `[{"ifname":"vx1","linkinfo":{"info_kind":"vxlan",
+		        "info_data":{"id":100,"local":"10.0.0.1","remote":"10.0.0.2","dstport":4789}}}]`,
+	}}}
+	p := New(f)
+	err := p.ApplyVxlan(context.Background(), model.VxlanTunnel{
+		Name: "vx1", Vni: 100, Local: "10.0.0.1", Remote: "10.0.0.2",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.has("ip link del vx1") {
+		t.Fatalf("元组一致时不得重建；实际：\n%s", f.joined())
 	}
 }
 
@@ -535,8 +741,9 @@ func TestVPPIfnamesOnlyReturnsDeclaredProductDevices(t *testing.T) {
 
 func TestEnsureConsistentReplaysAndCollectsErrors(t *testing.T) {
 	f := &fakeRunner{replies: []fakeReply{
-		// 转发前置条件（内核数据面下先于一切下发）：IPv4 转发开关已为 1。
+		// 转发前置条件（内核数据面下先于一切下发）：IPv4/IPv6 转发开关已为 1。
 		{prefix: "sysctl -n net.ipv4.ip_forward", out: "1\n"},
+		{prefix: "sysctl -n net.ipv6.conf.all.forwarding", out: "1\n"},
 		{prefix: "ip link set dev bad0 master vs-lan",
 			out: "Cannot find device \"bad0\"", err: errors.New("exit status 1")},
 	}}
@@ -561,6 +768,176 @@ func TestEnsureConsistentReplaysAndCollectsErrors(t *testing.T) {
 	if got := p.config().VirtualSwitches; len(got) != 1 {
 		t.Fatalf("收敛时应记录配置快照")
 	}
+}
+
+// R2-6：内核数据面也要有告警落点——恢复未收敛项此前只进 journal，`show alarms`/Web 总览/
+// 诊断包/`/events` 全查不到（与 #191/#321/#333「未收敛项必须事后可查」的纪律冲突）。
+// 收敛成功的项由 Sync 按同一 source 自动消解。
+func TestEnsureConsistentRaisesAndResolvesRecoveryAlarms(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{
+		{prefix: "sysctl -n", out: "1\n"},
+		{prefix: "ip link set dev bad0 master vs-lan",
+			out: `Cannot find device "bad0"`, err: errors.New("exit status 1")},
+	}}
+	p := New(f)
+	store := network.NewAlarmStore()
+	p.SetAlarms(store)
+	bad := model.Config{VirtualSwitches: []model.VirtualSwitch{{
+		Name: "vs-lan", Type: "l2",
+		Ports: []model.VSwitchPort{{Seq: 1, Interface: "bad0"}},
+	}}}
+	if errs := p.EnsureConsistent(context.Background(), bad); len(errs) == 0 {
+		t.Fatalf("不可收敛项应逐条报出")
+	}
+	active := store.List("active")
+	if len(active) != 1 || active[0].Source != "virtual-switches/vs-lan" {
+		t.Fatalf("未收敛项应进告警（带对象路径），得到 %+v", active)
+	}
+	// 「设备不存在」按 VPP 侧同码族映射为 RECOVERY_IFACE_MISSING（error）。
+	if active[0].Code != network.AlarmIfaceMissing || active[0].Severity != network.SeverityError {
+		t.Fatalf("设备不存在应记 %s/error，得到 %+v", network.AlarmIfaceMissing, active[0])
+	}
+
+	// 同一声明改好（口存在）后再次收敛：同一 source 的告警自动消解。
+	f2 := &fakeRunner{replies: []fakeReply{{prefix: "sysctl -n", out: "1\n"}}}
+	p2 := New(f2)
+	p2.SetAlarms(store)
+	good := model.Config{VirtualSwitches: []model.VirtualSwitch{{
+		Name: "vs-lan", Type: "l2",
+		Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens192"}},
+	}}}
+	if errs := p2.EnsureConsistent(context.Background(), good); len(errs) != 0 {
+		t.Fatalf("修好后不应再有未收敛项：%v", errs)
+	}
+	if got := store.List("active"); len(got) != 0 {
+		t.Fatalf("收敛成功后告警应消解，得到 %+v", got)
+	}
+}
+
+// R2-6：物理业务口链路告警（FR-NET-003）在内核数据面下必须成立（此前恒 nil）。
+func TestCheckInterfaceLinksRaisesAndResolvesAlarms(t *testing.T) {
+	down := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -d -j link show",
+		out: `[{"ifname":"ens192","flags":["UP"],"operstate":"down","mtu":1500},
+		       {"ifname":"ens224","flags":["UP","LOWER_UP"],"operstate":"up","mtu":1500}]`,
+	}}}
+	p := New(down)
+	store := network.NewAlarmStore()
+	p.SetAlarms(store)
+	cfg := model.Config{Interfaces: []model.InterfaceConfig{{Name: "ens192"}, {Name: "ens224"}}}
+	errs := p.CheckInterfaceLinks(context.Background(), cfg)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "ens192") {
+		t.Fatalf("链路 down 的口应逐条报出，得到 %v", errs)
+	}
+	active := store.List("active")
+	if len(active) != 1 || active[0].Code != network.AlarmIfaceLinkDown || active[0].Source != "ens192" {
+		t.Fatalf("应记 %s 告警，得到 %+v", network.AlarmIfaceLinkDown, active)
+	}
+
+	// 链路恢复：同 source 消解；从配置里删掉的口其滞留告警同样清掉。
+	up := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -d -j link show",
+		out: `[{"ifname":"ens192","flags":["UP","LOWER_UP"],"operstate":"up","mtu":1500},
+		       {"ifname":"ens224","flags":["UP","LOWER_UP"],"operstate":"up","mtu":1500}]`,
+	}}}
+	p2 := New(up)
+	p2.SetAlarms(store)
+	if errs := p2.CheckInterfaceLinks(context.Background(), model.Config{
+		Interfaces: []model.InterfaceConfig{{Name: "ens192"}},
+	}); len(errs) != 0 {
+		t.Fatalf("链路恢复后不应再报：%v", errs)
+	}
+	if got := store.List("active"); len(got) != 0 {
+		t.Fatalf("链路恢复后告警应消解，得到 %+v", got)
+	}
+}
+
+// R2-6：显式禁用的口不发链路告警（用户意图，与 VPP 侧同口径）。
+func TestCheckInterfaceLinksSkipsExplicitlyDisabled(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -d -j link show",
+		out:    `[{"ifname":"ens192","flags":[],"operstate":"down","mtu":1500}]`,
+	}}}
+	p := New(f)
+	store := network.NewAlarmStore()
+	p.SetAlarms(store)
+	disabled := false
+	errs := p.CheckInterfaceLinks(context.Background(), model.Config{
+		Interfaces: []model.InterfaceConfig{{Name: "ens192", Enabled: &disabled}},
+	})
+	if len(errs) != 0 || len(store.List("active")) != 0 {
+		t.Fatalf("显式禁用的口不应报链路告警：errs=%v alarms=%+v", errs, store.List("active"))
+	}
+}
+
+// R2-5：恢复重放的段序必须是**依赖序**——「交换机 + 端口安全」要在一次收敛内成功。
+// 旧段序 interfaces 在 virtual-switches 之前，而端口安全要求该口已是 bridge 成员
+// （portsec 会如实拒绝：`需先挂到交换机上`），于是主机重启后白名单必然不下发（安全特性
+// 静默失效），要「再提交一次」才好转——非确定性症状。bond 源镜像同族（镜像源要在 bonds 之后）。
+func TestEnsureConsistentConvergesSwitchPortSecurityInOnePass(t *testing.T) {
+	r := newOrderingRunner()
+	p := New(r)
+	cfg := model.Config{
+		Interfaces: []model.InterfaceConfig{{
+			Name: "ens192", PortSecurity: []model.PortSecMAC{"aa:bb:cc:dd:ee:ff"},
+		}},
+		VirtualSwitches: []model.VirtualSwitch{{
+			Name: "vs-lan", Type: "l2",
+			Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens192"}},
+		}},
+	}
+	if errs := p.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("交换机 + 端口安全应一次收敛成功；实际未收敛项：%v", errs)
+	}
+	for _, want := range []string{
+		"ip link set dev ens192 master vs-lan",
+		"bridge link set dev ens192 learning off",
+	} {
+		if !r.has(want) {
+			t.Fatalf("缺少命令 %q；实际：\n%s", want, r.joined())
+		}
+	}
+	// 段序真的是依赖序（而不是碰巧成功）：成员归属必须在端口安全之前下发。
+	joined := r.joined()
+	if strings.Index(joined, "ip link set dev ens192 master vs-lan") >
+		strings.Index(joined, "bridge link set dev ens192 learning off") {
+		t.Fatalf("bridge 成员归属必须先于端口安全；实际：\n%s", joined)
+	}
+}
+
+// orderingRunner 维护「口挂在哪个 master 下」的模拟内核状态：只有
+// `ip link set dev <口> master <master>` 执行过，后续 `ip -j -d link show dev <口>`
+// 才报 `info_slave_kind=bridge`（portsec 的前置判据据此判定）——段序错了就必然失败。
+// 其余命令转给 fakeRunner（sysctl 一律视为已就绪）。
+type orderingRunner struct {
+	fakeRunner
+	bridged map[string]string // dev → master
+}
+
+func newOrderingRunner() *orderingRunner {
+	return &orderingRunner{bridged: map[string]string{}}
+}
+
+func (r *orderingRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	switch {
+	case name == "sysctl" && len(args) == 2 && args[0] == "-n":
+		r.calls = append(r.calls, name+" "+strings.Join(args, " "))
+		return "1\n", nil
+	case name == "ip" && len(args) == 6 && args[0] == "link" && args[1] == "set" &&
+		args[2] == "dev" && args[4] == "master":
+		r.calls = append(r.calls, name+" "+strings.Join(args, " "))
+		r.bridged[args[3]] = args[5]
+		return "", nil
+	case name == "ip" && len(args) >= 5 && args[3] == "show" && args[4] == "dev":
+		dev := args[5]
+		r.calls = append(r.calls, name+" "+strings.Join(args, " "))
+		if master, ok := r.bridged[dev]; ok {
+			return fmt.Sprintf(`[{"ifname":%q,"master":%q,"flags":["UP","LOWER_UP"],"operstate":"up",`+
+				`"linkinfo":{"info_slave_kind":"bridge"}}]`, dev, master), nil
+		}
+		return fmt.Sprintf(`[{"ifname":%q,"flags":["UP","LOWER_UP"],"operstate":"up"}]`, dev), nil
+	}
+	return r.fakeRunner.Run(ctx, name, args...)
 }
 
 // ---------- 诊断 ----------
@@ -613,7 +990,11 @@ func TestBindingResolvesFromSameCommitNotConfigSnapshot(t *testing.T) {
 	}
 
 	// QoS 同族：策略先 ApplyQos，接口再引用。
-	f2 := &fakeRunner{}
+	// 接口收尾的端口安全 Teardown 会读桥成员状态（R2-22 起读失败如实上抛），给一条正常事实。
+	f2 := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -j -d link show dev ens192",
+		out:    `[{"ifname":"ens192","linkinfo":{}}]`,
+	}}}
 	p2 := New(f2)
 	p2.SetConfig(model.Config{})
 	if err := p2.ApplyQos(ctx, model.QosPolicy{Name: "pol-new", Cir: 8000, Cbs: 1000}); err != nil {
@@ -651,7 +1032,7 @@ func TestDeleteBridgeDomainReclaimsGatewayVRF(t *testing.T) {
 // 内核数据面的转发前置条件（真机走查抓到：产品此前两条都不管，转发会**静默**全丢）。
 func TestEnsureForwardingSetsSysctlAndAcceptsOnlyDataplaneDevices(t *testing.T) {
 	// 转发开关的读值要**先 0 后 1**（写前关着、写后回读为 1），故用一个带状态的小 Runner。
-	r := &sysctlFlipRunner{}
+	r := newSysctlStateRunner()
 	p := New(r)
 	cfg := model.Config{
 		VirtualSwitches: []model.VirtualSwitch{
@@ -663,8 +1044,12 @@ func TestEnsureForwardingSetsSysctlAndAcceptsOnlyDataplaneDevices(t *testing.T) 
 	if err := p.EnsureForwarding(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	if !r.has("sysctl -w net.ipv4.ip_forward=1") {
-		t.Fatalf("转发开关为 0 时应写入 1；实际：\n%s", r.joined())
+	// R2-10：内核数据面下产品是路由器，v4/v6 都要打开（Ubuntu 缺省 v6 转发为 0，
+	// v6 三层/路由/ACL 都「下发成功」却一个包不转发）。
+	for _, key := range []string{"net.ipv4.ip_forward", "net.ipv6.conf.all.forwarding"} {
+		if !r.has("sysctl -w " + key + "=1") {
+			t.Fatalf("转发开关 %s 为 0 时应写入 1；实际：\n%s", key, r.joined())
+		}
 	}
 	joined := r.joined()
 	for _, want := range []string{
@@ -681,22 +1066,199 @@ func TestEnsureForwardingSetsSysctlAndAcceptsOnlyDataplaneDevices(t *testing.T) 
 	}
 }
 
-// sysctlFlipRunner `sysctl -n net.ipv4.ip_forward` 先答 0、写入后再答 1（其余转给 fakeRunner）。
-type sysctlFlipRunner struct {
+// sysctlStateRunner 维护一张 sysctl 取值表：`-n <key>` 读当前值、`-w <key>=<v>` 写入。
+// 用于验证「读 → 写 → 回读确认」这条路径（初值全为 0）。
+type sysctlStateRunner struct {
 	fakeRunner
-	reads int
+	values map[string]string
 }
 
-func (r *sysctlFlipRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
-	if name == "sysctl" && len(args) == 2 && args[0] == "-n" && args[1] == "net.ipv4.ip_forward" {
+func newSysctlStateRunner() *sysctlStateRunner {
+	return &sysctlStateRunner{values: map[string]string{
+		"net.ipv4.ip_forward":          "0",
+		"net.ipv6.conf.all.forwarding": "0",
+	}}
+}
+
+func (r *sysctlStateRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	if name == "sysctl" {
 		r.calls = append(r.calls, name+" "+strings.Join(args, " "))
-		r.reads++
-		if r.reads == 1 {
-			return "0\n", nil
+		switch {
+		case len(args) == 2 && args[0] == "-n":
+			if v, ok := r.values[args[1]]; ok {
+				return v + "\n", nil
+			}
+			return "", errors.New("exit status 255")
+		case len(args) == 2 && args[0] == "-w":
+			kv := strings.SplitN(args[1], "=", 2)
+			if len(kv) == 2 {
+				r.values[kv[0]] = kv[1]
+				return kv[0] + " = " + kv[1] + "\n", nil
+			}
 		}
-		return "1\n", nil
 	}
 	return r.fakeRunner.Run(ctx, name, args...)
+}
+
+// R2-10：v6 转发开关写不动时如实报错（与 v4 同口径，点名开关）。
+func TestEnsureForwardingReportsUnwritableIPv6Sysctl(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{
+		{prefix: "sysctl -n net.ipv4.ip_forward", out: "1\n"},
+		{prefix: "sysctl -n net.ipv6.conf.all.forwarding", out: "0\n"},
+		{prefix: "sysctl -w net.ipv6.conf.all.forwarding=1",
+			out: "sysctl: permission denied", err: errors.New("exit status 255")},
+	}}
+	p := New(f)
+	err := p.EnsureForwarding(context.Background(), model.Config{})
+	if err == nil || !strings.Contains(err.Error(), "net.ipv6.conf.all.forwarding") {
+		t.Fatalf("写入失败应如实上报并点名 v6 开关，得到 %v", err)
+	}
+}
+
+// 真机收尾回归：数据面设备被清空后（配置里已无交换机/接口/VRF）必须**回收**本产品的表——
+// 旧行为（含 R2-16 的幂等重建）在无设备时保留空表/空链，`nft list tables` 长期留一张
+// `inet nfvis-forward`，属 #410 F3 判定的同一类「留着空表」（同口径：`delete nat` 后整表回收）。
+func TestEnsureForwardingReclaimsTableWhenNoDevices(t *testing.T) {
+	r := newSysctlStateRunner()
+	r.values["net.ipv4.ip_forward"] = "1"
+	r.values["net.ipv6.conf.all.forwarding"] = "1"
+	p := New(r)
+	cfg := model.Config{}    // 已无任何数据面设备
+	for i := 0; i < 2; i++ { // 幂等：重复收敛同样只删不建
+		if err := p.EnsureForwarding(context.Background(), cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	joined := r.joined()
+	if !strings.Contains(joined, "nft delete table inet nfvis-forward") {
+		t.Fatalf("无数据面设备时应回收本产品的表；实际：\n%s", joined)
+	}
+	for _, forbidden := range []string{
+		"nft add table inet nfvis-forward",
+		"nft add chain inet nfvis-forward",
+		"nft flush chain inet nfvis-forward",
+	} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("无数据面设备时不得再建/改该表（%q）；实际：\n%s", forbidden, joined)
+		}
+	}
+	// 15s 巡检同样走这条回收路径（ReconcileResidue → EnsureForwarding），无设备时能自愈。
+	r2 := newSysctlStateRunner()
+	r2.values["net.ipv4.ip_forward"] = "1"
+	r2.values["net.ipv6.conf.all.forwarding"] = "1"
+	p2 := New(r2)
+	if errs := p2.ReconcileResidue(context.Background(), model.Config{}); len(errs) != 0 {
+		t.Fatalf("巡检回收空表不应报错：%v", errs)
+	}
+	if !r2.has("nft delete table inet nfvis-forward") {
+		t.Fatalf("巡检（15s 路径）也应回收空表；实际：\n%s", r2.joined())
+	}
+}
+
+// R2-16：15s 巡检每次调用不得「删表→重建」（旧实现每轮 `nft delete table` 再建，
+// 有一段表不存在的窗口，且 15s 一次地扰动）。改为表/链在位 + flush + 按当前设备集重写。
+func TestEnsureForwardingRebuildsWithoutDeletingTable(t *testing.T) {
+	r := newSysctlStateRunner()
+	r.values["net.ipv4.ip_forward"] = "1"
+	r.values["net.ipv6.conf.all.forwarding"] = "1"
+	p := New(r)
+	cfg := model.Config{VirtualSwitches: []model.VirtualSwitch{{Name: "vs-lan", Type: "l2"}}}
+	for i := 0; i < 2; i++ {
+		if err := p.EnsureForwarding(context.Background(), cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	joined := r.joined()
+	if strings.Contains(joined, "nft delete table") {
+		t.Fatalf("重建不得删表（窗口 + 无谓扰动）；实际：\n%s", joined)
+	}
+	if !strings.Contains(joined, "nft add table inet nfvis-forward") {
+		t.Fatalf("应确保表在位；实际：\n%s", joined)
+	}
+	if strings.Count(joined, "nft flush chain inet nfvis-forward accept-dp") != 2 {
+		t.Fatalf("每轮应按当前设备集重写规则（flush 后重加）；实际：\n%s", joined)
+	}
+}
+
+// R2-2：宿主 FORWARD 链策略为 DROP 时，自建链的 accept **不能**豁免它（同 hook 的 base chain
+// 相互独立，本仓库 internal/system/firewall.go 与 v2-round169 真机 A/B 已证）——检测到就落
+// warning 告警并给照做命令；策略不再是 DROP 时同 source 消解。
+func TestEnsureForwardingAlarmsWhenHostForwardPolicyDrops(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{
+		{prefix: "sysctl -n", out: "1\n"},
+		{prefix: "iptables -S FORWARD", out: "-P FORWARD DROP\n-A FORWARD -j DOCKER-USER\n"},
+	}}
+	p := New(f)
+	store := network.NewAlarmStore()
+	p.SetAlarms(store)
+	cfg := model.Config{
+		VirtualSwitches: []model.VirtualSwitch{{Name: "vs-lan", Type: "l2"}},
+		Vrfs:            []model.Vrf{{Name: "vs-l3"}},
+	}
+	if err := p.EnsureForwarding(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	active := store.List("active")
+	if len(active) != 1 || active[0].Code != AlarmForwardPolicyDrop ||
+		active[0].Severity != network.SeverityWarning {
+		t.Fatalf("宿主 FORWARD 策略 DROP 应落 warning 告警 %s，得到 %+v", AlarmForwardPolicyDrop, active)
+	}
+	msg := active[0].Message
+	for _, want := range []string{"iptables -I FORWARD 1 -i vs-lan -o vs-l3 -j ACCEPT", "nft insert rule"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("告警文案应给照做命令（含 %q）：%s", want, msg)
+		}
+	}
+
+	// 策略恢复 ACCEPT：同一 source 消解。
+	f2 := &fakeRunner{replies: []fakeReply{
+		{prefix: "sysctl -n", out: "1\n"},
+		{prefix: "iptables -S FORWARD", out: "-P FORWARD ACCEPT\n"},
+	}}
+	p2 := New(f2)
+	p2.SetAlarms(store)
+	if err := p2.EnsureForwarding(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.List("active"); len(got) != 0 {
+		t.Fatalf("策略不再是 DROP 应消解告警，得到 %+v", got)
+	}
+}
+
+// R2-2：无 iptables 时回落到 `nft -j list chain ip filter FORWARD` 的 policy；
+// 两条路径都读不到时**保持现状**（不猜、不误消）。
+func TestEnsureForwardingForwardPolicyReadFallbacks(t *testing.T) {
+	cfg := model.Config{VirtualSwitches: []model.VirtualSwitch{{Name: "vs-lan", Type: "l2"}}}
+	nftDrop := &fakeRunner{replies: []fakeReply{
+		{prefix: "sysctl -n", out: "1\n"},
+		{prefix: "iptables -S FORWARD", out: "iptables: command not found", err: errors.New("exit status 127")},
+		{prefix: "nft -j list chain ip filter FORWARD",
+			out: `{"nftables":[{"metainfo":{}},{"chain":{"family":"ip","table":"filter","name":"FORWARD","policy":"drop"}}]}`},
+	}}
+	p := New(nftDrop)
+	store := network.NewAlarmStore()
+	p.SetAlarms(store)
+	if err := p.EnsureForwarding(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if active := store.List("active"); len(active) != 1 || active[0].Code != AlarmForwardPolicyDrop {
+		t.Fatalf("iptables 缺失时应按 nft 的 policy 判定并告警，得到 %+v", active)
+	}
+
+	// 两条路径都读不到：不动（既有告警保持——不猜、也不误消）。
+	unknown := &fakeRunner{replies: []fakeReply{
+		{prefix: "sysctl -n", out: "1\n"},
+		{prefix: "iptables -S FORWARD", err: errors.New("exit status 127")},
+		{prefix: "nft -j list chain ip filter FORWARD", err: errors.New("exit status 1")},
+	}}
+	p2 := New(unknown)
+	p2.SetAlarms(store)
+	if err := p2.EnsureForwarding(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if active := store.List("active"); len(active) != 1 {
+		t.Fatalf("读不到策略时应保持既有告警不变，得到 %+v", active)
+	}
 }
 
 // 转发开关写不动时如实报错（不静默放过——内核数据面下它意味着一个包都转不出去）。

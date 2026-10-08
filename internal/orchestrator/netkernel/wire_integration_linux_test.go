@@ -100,12 +100,17 @@ func TestKernelDataPlaneBindingsRealKernel(t *testing.T) {
 	if got := zwOut(t, "ip", "-j", "-d", "link", "show", "dev", zwC0); !strings.Contains(got, `"learning":false`) {
 		t.Errorf("端口安全的桥口学习未关闭：%s", got)
 	}
-	// 读视图与内核实况一致
+	// 读视图与内核实况一致（消费方真正读的字段：storm 的 Kinds、portsec 的 TagPresent/RuleCount
+	// ——R2-15②：事实只塞进 Reason 时，detail 会把"在位工作"报成"未收敛"）。
 	if sd, ok := p.StormDataplane(ctx, zwA0); !ok || !strings.Contains(sd.Reason, "广播") {
 		t.Errorf("风暴抑制读视图与实况不符：ok=%v reason=%q", ok, sd.Reason)
+	} else if kd := sd.Kinds["broadcast"]; !kd.PolicerPresent || kd.CirKbps != 8000 {
+		t.Errorf("风暴抑制读视图的逐类速率与配置不符（期望 broadcast/8000）：%+v", sd.Kinds)
 	}
 	if pd, ok := p.PortSecDataplane(ctx, zwC0); !ok {
 		t.Errorf("端口安全读视图应报在位：%+v", pd)
+	} else if !pd.TagPresent || pd.RuleCount != 1 || !pd.Bound {
+		t.Errorf("端口安全读视图字段与内核实况不符（链在场/1 条规则/已绑定）：%+v", pd)
 	}
 
 	// —— 3) ACL：ApplyACL + 三层接口 acl-in 绑定 ——

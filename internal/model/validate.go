@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net"
 	"net/netip"
 	"regexp"
@@ -420,6 +421,13 @@ func (v *validator) checkKernelDataPlane(c Config) {
 	}
 	for _, vs := range c.VirtualSwitches {
 		path := "virtual_switches[" + vs.Name + "]"
+		// cross-connect（无学习点对点直通）：VPP 侧是 SwInterfaceSetL2Xconnect（点对点，
+		// >2 端口即报错），内核侧只有 bridge 一种 L2 形态——按普通 bridge 静默处理会**改变语义**
+		// （学习/泛洪/VLAN 语义不同，端口数也不校验）。属「命令成功、语义变了」一类，提交期拒绝。
+		if vs.CrossConnect {
+			v.errf(path+".cross_connect", "当前数据面为 Linux 内核网络，cross-connect（无学习点对点直通）尚未实现；"+
+				"内核侧只有学习/泛洪形态的桥。请改用 L2 交换机 + 端口%s", alt)
+		}
 		if vs.DhcpRelayServer != "" {
 			v.errf(path+".dhcp_relay_server", "当前数据面为 Linux 内核网络，DHCP 中继尚未实现%s", alt)
 		}
@@ -462,6 +470,18 @@ func (v *validator) checkKernelDataPlane(c Config) {
 				v.errf("vrfs["+vrf.Name+"].l3_interfaces["+li.Interface+"]",
 					"当前数据面为 Linux 内核网络，VNF 虚拟网卡不能直接作为三层接口；请改为接入一台已配网关的二层交换机%s", alt)
 			}
+			// vlan 子接口的派生名（`<接口名>.<vid>`）同样直接用作内核设备名：总长超过
+			// IFNAMSIZ-1 时 `ip link add … type vlan` 必失败（VPP 侧没有这个限制）。
+			v.checkKernelVlanSubif("vrfs["+vrf.Name+"].l3_interfaces["+li.Interface+"]", li)
+		}
+		// 静态路由的多下一跳（ECMP，`next-hop a,b`）：内核侧未实现——`via a,b` 会被 iproute2
+		// 当成非法参数，整次提交以原始报错收场（文案不指向「ECMP 未实现」）。提交期拒绝。
+		for _, rt := range vrf.Routes {
+			if !strings.Contains(rt.NextHop, ",") {
+				continue
+			}
+			v.errf(fmt.Sprintf("vrfs[%s].routes[%s].next_hop", vrf.Name, rt.Prefix),
+				"当前数据面为 Linux 内核网络，多下一跳（ECMP）尚未实现；请拆成多条单跳路由（各条给 distance 决定优先级）%s", alt)
 		}
 	}
 	for _, vm := range c.VirtualMachineFunctions {
@@ -469,6 +489,15 @@ func (v *validator) checkKernelDataPlane(c Config) {
 			if nic.Type == "memif" {
 				v.errf("virtual_machine_functions["+vm.Name+"].interfaces["+nic.Name+"]",
 					"当前数据面为 Linux 内核网络，memif 接入尚未实现；VM 请用 virtio 网卡（宿主 tap + vhost-net）%s", alt)
+			}
+			// vNIC 接入 type=l3 的交换机：VPP 侧是受支持形态（vNIC 作 L3 接口进同名 VRF），
+			// 内核侧 L3 交换机**不建 bridge**（只有 VRF 设备）⇒ 域定义把 tap 指向不存在的桥，
+			// 提交期全绿、**起 VM 时才失败**。接入点应为已配网关的 L2 交换机。
+			if nic.VirtualSwitch != "" && v.l3vs[nic.VirtualSwitch] {
+				v.errf("virtual_machine_functions["+vm.Name+"].interfaces["+nic.Name+"].virtual_switch",
+					"当前数据面为 Linux 内核网络，VNF 虚拟网卡不能接入 type=l3 的交换机 %q："+
+						"内核侧 L3 交换机不建桥，tap 无处可挂（直到起 VM 才会失败）。"+
+						"请改为接入一台已配网关的 L2 交换机%s", nic.VirtualSwitch, alt)
 			}
 		}
 	}
@@ -492,6 +521,87 @@ func (v *validator) checkKernelDataPlane(c Config) {
 	for _, vrf := range c.Vrfs {
 		v.checkKernelLinkName("vrfs["+vrf.Name+"]", vrf.Name)
 	}
+	// 派生设备名互撞：两个不同对象（或对象与派生的网关 VRF 名）映射到同一个内核设备名时
+	// 提交期拒绝——内核设备名全局唯一，撞名的代价是后者下发失败/配置与数据面错位。
+	v.checkKernelDerivedNameCollisions(c)
+	// NAT 跨转发域（inside 交换机派生的 VRF ≠ 出接口所属 VRF）：内核侧的 nft 规则**不区分
+	// 转发域**（`ip saddr … oifname … masquerade` 对所有表生效），也没有跨表 leaking——规则在
+	// 场却一个包都不命中（`ping` 零通、计数零），反向还会把别的 VRF 里的同源前缀一并 NAT
+	// （VPP 侧按 inside 转发域作用域）。故对「两侧都落在具名 VRF 且不同」的形态提交期拒绝；
+	// 两侧都为「默认表/未归属 VRF」时视为一致（不在此判）。
+	if c.Nat != nil {
+		for _, r := range c.Nat.Rules {
+			inside := r.VirtualSwitch
+			outside := vrfOfInterface(c, r.Action.Interface)
+			if !kernelNatDomainsCross(inside, outside) {
+				continue
+			}
+			v.errf(fmt.Sprintf("nat.rules[%d]", r.Seq),
+				"当前数据面为 Linux 内核网络，NAT 规则不支持跨转发域：inside 交换机 %q 的转发域与出接口 %q 所属转发域 %q 不一致"+
+					"（内核侧 NAT 不区分转发域、也没有跨域 leaking，规则不会命中任何包）。"+
+					"请改为同一转发域（inside 交换机即出接口所属的 L3 交换机）%s", inside, r.Action.Interface, outside, alt)
+		}
+	}
+	// ACL 的 `protocol icmp` + 端口字段：两个数据面语义不同——VPP 侧把端口当 **ICMP type/code**
+	// 解读，内核侧（nftables）没有对应表达、端口字段会被静默忽略 ⇒ 规则看着在、匹配范围却不是
+	// 用户写的意思。提交期拒绝，让用户显式选择（删掉端口字段，或切回 VPP）。
+	for _, acl := range c.Acls {
+		for _, r := range acl.Rules {
+			if r.Protocol != "icmp" || (r.SourcePort == "" && r.DestinationPort == "") {
+				continue
+			}
+			v.errf(fmt.Sprintf("acls[%s].rules[%d]", acl.Name, r.Seq),
+				"当前数据面为 Linux 内核网络，protocol icmp 的端口字段（source-port/destination-port）会被忽略："+
+					"内核侧端口匹配不了 ICMP type/code（VPP 侧按 type/code 解读）。请删掉端口字段%s", alt)
+		}
+	}
+}
+
+// checkKernelVlanSubif 内核数据面下 vlan 子接口的派生名（`<接口名>.<vid>`）直接用作内核设备名，
+// 总长超过 IFNAMSIZ-1 时下发必失败（VPP 侧无此限制），故在提交期拦下。
+//
+// 名字长度按编排层 netkernel.LinkName 的同一条规则折算（model 不能 import 编排层）：
+// ≤15 字节原样，超长一律映射成 15 字节（截断 + 派生后缀）——故这里只关心映射后的**长度**。
+func (v *validator) checkKernelVlanSubif(path string, li L3Interface) {
+	if li.Vlan <= 0 {
+		return
+	}
+	derivedLen := kernelLinkNameLen(li.Interface) + 1 + len(strconv.Itoa(li.Vlan))
+	if derivedLen > kernelLinkNameMax {
+		v.errf(path, "当前数据面为 Linux 内核网络，vlan 子接口的派生接口名（%q + vlan %d ⇒ %d 个字符）"+
+			"超过内核接口名上限 %d 个字符：请缩短接口名或改用更小的 vlan id",
+			li.Interface, li.Vlan, derivedLen, kernelLinkNameMax)
+	}
+}
+
+// kernelLinkNameLen 编排层 netkernel.LinkName 映射后的名字长度：≤15 字节原样，超长映射成 15 字节。
+func kernelLinkNameLen(name string) int {
+	if n := len(strings.TrimSpace(name)); n <= kernelLinkNameMax {
+		return n
+	}
+	return kernelLinkNameMax
+}
+
+// vrfOfInterface 接口名（l3-interface 的 interface 字段值）所属的 VRF 名；未归属任何 VRF 返回 ""。
+func vrfOfInterface(c Config, iface string) string {
+	if iface == "" {
+		return ""
+	}
+	owner := ""
+	for _, vrf := range c.Vrfs {
+		for _, li := range vrf.L3Interfaces {
+			if li.Interface == iface {
+				owner = vrf.Name
+			}
+		}
+	}
+	return owner
+}
+
+// kernelNatDomainsCross 两侧转发域是否跨域：都落在**具名** VRF 且不同才算跨域；
+// 「默认表/未归属 VRF」（空串）视为一致——不在此判（其合法性由 checkNat 的其它规则负责）。
+func kernelNatDomainsCross(inside, outside string) bool {
+	return inside != "" && outside != "" && inside != outside
 }
 
 // checkKernelLinkName 内核数据面下对象名直接用作内核接口名，须满足内核的长度限制。
@@ -502,8 +612,136 @@ func (v *validator) checkKernelLinkName(path, name string) {
 	}
 }
 
+// kernelDevNameOwner 内核数据面下"一个内核设备名"及归属它的配置对象。
+type kernelDevNameOwner struct {
+	dev  string // 本配置会创建的内核设备名（派生名）
+	path string // 配置对象路径（errf 的定位）
+	what string // 对象描述（报错文案要点名**配置对象**，只给设备名操作者对不上是哪个声明）
+	// explicitGW 该设备名来自**显式**的 `gateway vrf <名>` 引用，而不是按对象名派生的。
+	// 多个网关显式引用同一台 VRF 是受支持形态（编排侧 ensureVRF 幂等、内核允许多个 bridge
+	// 入同一 VRF）：两边都是显式引用时不算冲突；与其它对象/派生名撞名仍要报。
+	explicitGW bool
+}
+
+// checkKernelDerivedNameCollisions 内核数据面下**派生设备名互撞**的提交期拒绝。
+//
+// 为什么必须在提交期拦：内核设备名全局唯一（`ip link add` 撞名报 `File exists`），而本产品的
+// 设备名由用户对象名派生——两个不同对象撞进同一个名字时，先下发的对象占住设备、后下发的直接
+// 失败（或更糟：把前者当成"已存在"复用），配置与数据面从此错位，而失败文案只给设备名、指不回
+// 是哪个声明。已知可达形态：交换机 `lan` 的网关 VRF 派生名是 `vr-lan`，而一个**名叫 `vr-lan`
+// 的交换机/bond/隧道/VRF** 的内核设备名也是 `vr-lan`。
+//
+// 集合口径与编排层一致（netkernel 的 dataplaneDevices / runtime 设备集合）：只收**本配置会
+// 创建**的设备——网关 VRF 仅在交换机声明了网关地址时才建；设备名按 netkernel.LinkName 的同一
+// 条映射规则折算（model 不能 import 编排层，规则与 netkernel/naming.go 单源同步）。
+func (v *validator) checkKernelDerivedNameCollisions(c Config) {
+	first := map[string]kernelDevNameOwner{}
+	for _, o := range kernelDerivedNameOwners(c) {
+		prev, dup := first[o.dev]
+		if !dup {
+			first[o.dev] = o
+			continue
+		}
+		if prev.explicitGW && o.explicitGW {
+			continue // 两台网关显式引用同一台 VRF：受支持形态，不算冲突
+		}
+		v.errf(o.path, "当前数据面为 Linux 内核网络：%s 与 %s 会派生同一个内核设备名 %q"+
+			"（内核设备名全局唯一，先下发的对象占住设备、后下发的直接失败，配置与数据面从此不一致）。"+
+			"请把其中一个对象改名", prev.what, o.what, o.dev)
+	}
+}
+
+// kernelDerivedNameOwners 归集内核数据面下本配置会创建的设备名及归属对象（顺序固定，报错可复现）。
+func kernelDerivedNameOwners(c Config) []kernelDevNameOwner {
+	var out []kernelDevNameOwner
+	for _, vs := range c.VirtualSwitches {
+		// type=l3 的交换机**不建** bridge（它的设备是 vrfs 条目那条 VRF，见下）——两处都收会
+		// 把同一个 L3 交换机报成撞名自己。
+		if vs.Type == "l3" {
+			continue
+		}
+		out = append(out, kernelDevNameOwner{
+			dev:  kernelDerivedLinkName(vs.Name),
+			path: "virtual_switches[" + vs.Name + "]",
+			what: fmt.Sprintf("交换机 %q", vs.Name),
+		})
+		// 网关 VRF：仅在声明了网关地址时才创建（与编排层同一判据）。
+		if vs.Gateway == nil || len(vs.Gateway.Addresses) == 0 {
+			continue
+		}
+		o := kernelDevNameOwner{path: "virtual_switches[" + vs.Name + "].gateway.vrf"}
+		if vs.Gateway.Vrf != "" {
+			o.dev, o.explicitGW = kernelDerivedLinkName(vs.Gateway.Vrf), true
+			o.what = fmt.Sprintf("交换机 %q 网关显式引用的 VRF %q", vs.Name, vs.Gateway.Vrf)
+		} else {
+			o.dev = kernelDerivedGatewayVRFName(vs.Name)
+			o.what = fmt.Sprintf("交换机 %q 的网关 VRF（派生名 %s）", vs.Name, o.dev)
+		}
+		out = append(out, o)
+	}
+	for _, b := range c.Bonds {
+		out = append(out, kernelDevNameOwner{
+			dev:  kernelDerivedLinkName(b.Name),
+			path: "bonds[" + b.Name + "]",
+			what: fmt.Sprintf("bond %q", b.Name),
+		})
+	}
+	for _, t := range c.VxlanTunnels {
+		out = append(out, kernelDevNameOwner{
+			dev:  kernelDerivedLinkName(t.Name),
+			path: "vxlan_tunnels[" + t.Name + "]",
+			what: fmt.Sprintf("隧道 %q", t.Name),
+		})
+	}
+	for _, vrf := range c.Vrfs {
+		out = append(out, kernelDevNameOwner{
+			dev:  kernelDerivedLinkName(vrf.Name),
+			path: "vrfs[" + vrf.Name + "]",
+			what: fmt.Sprintf("L3 交换机 %q", vrf.Name),
+		})
+		for _, li := range vrf.L3Interfaces {
+			if li.Vlan <= 0 {
+				continue
+			}
+			dev := fmt.Sprintf("%s.%d", kernelDerivedLinkName(li.Interface), li.Vlan)
+			if len(dev) > kernelLinkNameMax {
+				continue // 派生名超长的已由 checkKernelVlanSubif 报错（下不到数据面，不参与撞名）
+			}
+			out = append(out, kernelDevNameOwner{
+				dev:  dev,
+				path: fmt.Sprintf("vrfs[%s].l3_interfaces[%s]", vrf.Name, li.Interface),
+				what: fmt.Sprintf("三层接口 %q 的 VLAN %d 子接口", li.Interface, li.Vlan),
+			})
+		}
+	}
+	return out
+}
+
+// kernelDerivedLinkName 编排层 netkernel.LinkName 的等价映射（model 不能 import 编排层）：
+// ≤15 字节原样；超长按「前缀 + FNV-1a 32 位全宽哈希（8 位十六进制）」截断，前缀也占长度预算。
+// ⚠ 单一真源在 internal/orchestrator/netkernel/naming.go，那边改了必须同步这里。
+func kernelDerivedLinkName(name string) string {
+	name = strings.TrimSpace(name)
+	if len(name) <= kernelLinkNameMax {
+		return name
+	}
+	sum := fnv.New32a()
+	_, _ = sum.Write([]byte(name))
+	prefix := strings.TrimRight(name[:kernelLinkNameMax-1-kernelLinkNameHashDigits], "-")
+	return fmt.Sprintf("%s-%08x", prefix, sum.Sum32())
+}
+
+// kernelDerivedGatewayVRFName 编排层 netkernel.GatewayVRFName 的等价映射：
+// L2 交换机无显式网关 VRF 时的专属 VRF 设备名（`vr-<交换机名>` 再走同一套映射）。
+func kernelDerivedGatewayVRFName(swName string) string {
+	return kernelDerivedLinkName("vr-" + swName)
+}
+
 // kernelLinkNameMax 内核接口名上限（IFNAMSIZ-1）。
 const kernelLinkNameMax = 15
+
+// kernelLinkNameHashDigits 截断名里的哈希位数（与编排层 netkernel 的 linkNameHashDigits 同步）。
+const kernelLinkNameHashDigits = 8
 
 // vnicNames 收集配置里所有 VNF 虚拟网卡名（用于判定 l3-interface 是否引用了 vNIC）。
 func vnicNames(c Config) map[string]bool {

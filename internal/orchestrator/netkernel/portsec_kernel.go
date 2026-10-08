@@ -90,9 +90,16 @@ func (m *portSecManager) Teardown(ctx context.Context, dev string) error {
 	}
 	// 恢复学习：只在设备**确实还是 bridge 成员**时才设——非成员口上 `bridge link set`
 	// 会报 `RTNETLINK answers: Operation not supported`（真机实测：接口声明早于交换机下发
-	// 时必然走到这里），那不是失败，而是"没有学习可恢复"。设备已不在时同样跳过。
+	// 时必然走到这里），那不是失败，而是"没有学习可恢复"。
+	//
+	// 读桥成员失败（不是"设备不存在"——那条路径 isBridgeMember 返回 (false,nil)）时**如实上抛**：
+	// 把"读不到"当成"不是成员"，会在读取故障下静默留下 learning off 残渣（该口的 MAC 学习从
+	// 此不再恢复），而操作者看不到任何迹象（R2-22）。撤销不完整必须报出来。
 	member, err := m.isBridgeMember(ctx, dev)
-	if err != nil || !member {
+	if err != nil {
+		return err
+	}
+	if !member {
 		return nil
 	}
 	return bridgeBest(ctx, m.run, "link", "set", "dev", dev, "learning", "on")
@@ -124,27 +131,48 @@ func (m *portSecManager) isBridgeMember(ctx context.Context, dev string) (bool, 
 		strings.EqualFold(rows[0].LinkInfo.SlaveKind, "bridge"), nil
 }
 
-// Dataplane 读该接口端口安全的内核实况：白名单规则是否在场、桥口学习是否已关闭。
+// portSecDataplaneFact 端口安全的内核实况（读视图用）。
+//
+// 为什么单独给一份结构而不是只给一段文本（R2-15②）：消费方 internal/api/portsec.go 在
+// Available=true 时**只读 TagPresent/Tag/RuleCount/ACLIndex/Bound**（Reason 只在"不可核对"时
+// 打印）——把事实写成一句话塞进 Reason，读视图就会把"白名单规则正在闸"报成"ACL 未在数据面
+// （未收敛）"，并接着自相矛盾地打一句"接口已绑定"。
+type portSecDataplaneFact struct {
+	ChainPresent bool   // nftables 链是否在场（= 白名单已下发）
+	ChainName    string // 链名（内核侧的对象标识；内核没有 macip ACL 索引这回事）
+	RuleCount    int    // 链内实际规则条数（内核形态固定 1 条：`ether saddr != { … } drop`）
+	Bound        bool   // 链是否已绑在该设备上（netdev ingress 链按定义就绑在 device 上；链在即绑定在）
+	Attached     bool   // 端口安全是否**完整生效**（白名单规则在位 且 桥口学习已关闭）
+	Detail       string // 人读摘要（完整生效/未完全生效的原因）
+}
+
+// Dataplane 读该接口端口安全的内核实况：白名单规则是否在场、链内规则条数、桥口学习是否已关闭。
 // err != nil 表示「读不到实况」（例如设备不存在），而不是「未下发」。
-func (m *portSecManager) Dataplane(ctx context.Context, dev string) (attached bool, detail string, err error) {
-	rulePresent, macCount, err := m.chainState(ctx, dev)
+func (m *portSecManager) Dataplane(ctx context.Context, dev string) (portSecDataplaneFact, error) {
+	fact := portSecDataplaneFact{ChainName: portSecChainName(dev)}
+	rulePresent, macCount, ruleCount, err := m.chainState(ctx, dev)
 	if err != nil {
-		return false, "", err
+		return portSecDataplaneFact{}, err
 	}
+	fact.ChainPresent = rulePresent
+	fact.RuleCount = ruleCount
+	fact.Bound = rulePresent
 	learningOff, err := m.learningOff(ctx, dev)
 	if err != nil {
-		return false, "", err
+		return portSecDataplaneFact{}, err
 	}
 	switch {
 	case rulePresent && learningOff:
-		return true, fmt.Sprintf("白名单 %d 条源 MAC；桥口学习已关闭（入向丢弃白名单外源 MAC）", macCount), nil
+		fact.Attached = true
+		fact.Detail = fmt.Sprintf("白名单 %d 条源 MAC；桥口学习已关闭（入向丢弃白名单外源 MAC）", macCount)
 	case rulePresent:
-		return false, fmt.Sprintf("白名单 %d 条源 MAC 已下发，但桥口学习未关闭（端口安全未完全生效）", macCount), nil
+		fact.Detail = fmt.Sprintf("白名单 %d 条源 MAC 已下发，但桥口学习未关闭（端口安全未完全生效）", macCount)
 	case learningOff:
-		return false, "桥口学习已关闭，但白名单规则不在（端口安全未完全生效）", nil
+		fact.Detail = "桥口学习已关闭，但白名单规则不在（端口安全未完全生效）"
 	default:
-		return false, "未下发端口安全", nil
+		fact.Detail = "未下发端口安全"
 	}
+	return fact, nil
 }
 
 // dropTableIfEmpty 本产品的表里没有别的接口的链时回收整张表。
@@ -165,21 +193,22 @@ func (m *portSecManager) dropTableIfEmpty(ctx context.Context) error {
 	return nftBestOn(ctx, m.run, "delete", "table", portSecTableFamily, portSecTableName)
 }
 
-// chainState 读该接口 nft 链的实况：白名单规则是否存在、白名单条数。
+// chainState 读该接口 nft 链的实况：白名单规则是否存在、白名单条数（链里每 MAC 一条）、
+// 链内规则条数（读视图的 rule_count——内核形态是整段白名单一条规则）。
 // 链（或表）不存在 = 未下发（不是错误）；其余 nft 失败如实上报。
-func (m *portSecManager) chainState(ctx context.Context, dev string) (present bool, macCount int, err error) {
+func (m *portSecManager) chainState(ctx context.Context, dev string) (present bool, macCount, ruleCount int, err error) {
 	out, err := nftRunOn(ctx, m.run, "list", "chain", portSecTableFamily, portSecTableName, portSecChainName(dev))
 	if err != nil {
 		if notFound(out, err) {
-			return false, 0, nil
+			return false, 0, 0, nil
 		}
-		return false, 0, fmt.Errorf("nft list chain %s %s %s: %w（%s）",
+		return false, 0, 0, fmt.Errorf("nft list chain %s %s %s: %w（%s）",
 			portSecTableFamily, portSecTableName, portSecChainName(dev), err, trimOut(out))
 	}
 	if !strings.Contains(out, "ether saddr") || !strings.Contains(out, "drop") {
-		return false, 0, nil
+		return false, 0, 0, nil
 	}
-	return true, portSecRuleMACCount(out), nil
+	return true, portSecRuleMACCount(out), portSecRuleCount(out), nil
 }
 
 // learningOff 读该桥口是否已关闭学习（`ip -j -d link show` 的 bridge_slave.learning）。
@@ -244,6 +273,26 @@ func portSecRuleMACCount(chainOut string) int {
 		if strings.TrimSpace(part) != "" {
 			n++
 		}
+	}
+	return n
+}
+
+// portSecRuleCount 数出链内**规则条数**（读视图的 rule_count 用；与"白名单 MAC 条数"是两回事：
+// 内核形态整段白名单就是一条规则 `ether saddr != { … } drop`）。
+//
+// 判据：链体里既不是表/链头部（`table … {` / `chain … {`）、也不是链声明行（`type … ;`）、
+// 也不是空行或单独的花括号，就算一条规则。多函数的手工规则同样计入——如实反映链里有什么。
+func portSecRuleCount(chainOut string) int {
+	n := 0
+	for _, ln := range strings.Split(chainOut, "\n") {
+		t := strings.TrimSpace(ln)
+		switch {
+		case t == "", t == "}", t == "{":
+			continue
+		case strings.HasPrefix(t, "table "), strings.HasPrefix(t, "chain "), strings.HasPrefix(t, "type "):
+			continue
+		}
+		n++
 	}
 	return n
 }

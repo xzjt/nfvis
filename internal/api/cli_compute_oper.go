@@ -213,6 +213,13 @@ func (x *cliExecutor) deleteVM(user, source, name string) string {
 	if err != nil {
 		return "%% " + err.Error() + "\n"
 	}
+	// 删除成功文案按**装配事实**分叉：内核数据面下不产生 VPP 端口，vNIC 的宿主 tap 由
+	// libvirt 随域回收（无产品侧对象需撤销），快照随域定义一并删除——别把 VPP 的级联清理
+	// 说成内核现场发生过的事。
+	if x.dpMode() == model.DataPlaneKernel {
+		return fmt.Sprintf("VNF %s 已删除（当前数据面为 Linux 内核网络：快照随域定义级联删除，"+
+			"vNIC 的宿主 tap 由 libvirt 随域回收，无 VPP 端口需清理）\n", name) + changed
+	}
 	return fmt.Sprintf("VNF %s 已删除（运行态 vNIC/VPP 端口/快照级联清理）\n", name) + changed
 }
 
@@ -560,6 +567,11 @@ func (x *cliExecutor) deleteContainer(user, source, name string) string {
 	if err != nil {
 		return "%% " + err.Error() + "\n"
 	}
+	// 同上按装配事实分叉：内核数据面下容器 vNIC 的 memif 接入**提交期即被拒绝**，现场不可能
+	// 存在 memif/VPP 端口，删除时自然也没有它们需要清理。
+	if x.dpMode() == model.DataPlaneKernel {
+		return fmt.Sprintf("容器 %s 已删除（当前数据面为 Linux 内核网络：容器 vNIC 的 memif 接入不受支持，无 VPP 端口需清理）\n", name) + changed
+	}
 	return fmt.Sprintf("容器 %s 已删除（运行态 memif/VPP 端口级联清理）\n", name) + changed
 }
 
@@ -827,6 +839,9 @@ func (x *cliExecutor) requestVPP(user string, t []string) string {
 	switch t[0] {
 	case "restart":
 		if x.vppRestart == nil {
+			if x.dpMode() == model.DataPlaneKernel {
+				return "%% 当前数据面为 Linux 内核网络，无 VPP 可重启（未使用 VPP，也无需重启数据面）\n"
+			}
 			return errRuntimeUnavailable
 		}
 		// 注入的 restart 实现负责「重启 + 起后健康校验」：只有确认 binary API 可连才返回 nil。
@@ -844,10 +859,20 @@ func (x *cliExecutor) requestVPP(user string, t []string) string {
 	return "%% 语法: request vpp restart | trace start|stop|export\n"
 }
 
+// captureUnavailableText 抓包不可用的**数据面感知**文案：内核数据面下抓包尚未实现
+// （不是「VPP 未接入（编排器未装配）」——那条会把操作者引向查装配，而真实原因是
+// 本数据面没有该能力）；VPP 数据面下才是装配缺口，维持原文案。
+func (x *cliExecutor) captureUnavailableText() string {
+	if x.dpMode() == model.DataPlaneKernel {
+		return "%% 当前数据面为 Linux 内核网络，抓包尚未实现（如需请改回 VPP 数据面并重启服务）\n"
+	}
+	return errRuntimeUnavailable
+}
+
 // requestVppTrace：request vpp trace start interface <if> [count <n>] | stop | export [name <n>]
 func (x *cliExecutor) requestVppTrace(user string, t []string) string {
 	if x.capture == nil {
-		return errRuntimeUnavailable
+		return x.captureUnavailableText()
 	}
 	if len(t) == 0 {
 		return "%% 语法: request vpp trace start interface <if> [count <n>] | stop | export [name <n>]\n"
@@ -903,7 +928,7 @@ func (x *cliExecutor) requestVppTrace(user string, t []string) string {
 // execShowVppCapture：show vpp capture（抓包会话状态 + 已导出 pcap 清单）。
 func (x *cliExecutor) execShowVppCapture() string {
 	if x.capture == nil {
-		return errRuntimeUnavailable
+		return x.captureUnavailableText()
 	}
 	active, files := x.capture.Status()
 	var b strings.Builder

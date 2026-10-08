@@ -89,17 +89,26 @@ func TestHugepageOccupantsEvidence(t *testing.T) {
 	cfg.VirtualMachineFunctions = []model.VMFunction{
 		{Name: "vnf-a", Memory: model.VMMemory{SizeMB: 2048}},
 	}
-	got := strings.Join(hugepageOccupants(cfg, "1G"), "\n")
+	got := strings.Join(hugepageOccupants(cfg, "1G", model.DataPlaneVPP), "\n")
 	if !strings.Contains(got, "vnf-a") || !strings.Contains(got, "2 页") {
 		t.Errorf("1G 占用者证据应列出 vnf-a 与其页数：%s", got)
 	}
 	// 2M 池：VPP 偏好 2M → 应出现 VPP；不应出现用 1G 的 vnf-a。
-	got2M := strings.Join(hugepageOccupants(cfg, "2M"), "\n")
+	got2M := strings.Join(hugepageOccupants(cfg, "2M", model.DataPlaneVPP), "\n")
 	if !strings.Contains(got2M, "VPP") {
 		t.Errorf("2M 占用者证据应包含 VPP：%s", got2M)
 	}
 	if strings.Contains(got2M, "vnf-a") {
 		t.Errorf("2M 池不该把用 1G 的 VNF 算进来：%s", got2M)
+	}
+	// 内核数据面：VPP 不在场（也不吃大页池），占用者证据不得把它列成占用者
+	// （R2-18；说明里可以出现"未使用 VPP"的字样，判据认的是「VPP 数据面（…）」这条证据）。
+	gotK := strings.Join(hugepageOccupants(cfg, "2M", model.DataPlaneKernel), "\n")
+	if strings.Contains(gotK, "VPP 数据面（") {
+		t.Errorf("内核数据面下不得把 VPP 列为占用者：%s", gotK)
+	}
+	if !strings.Contains(gotK, "Linux 内核网络") {
+		t.Errorf("内核数据面下应如实说明数据面：%s", gotK)
 	}
 }
 

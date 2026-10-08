@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/xzjt/nfvis/internal/model"
 )
 
 // InterfaceState 接口运行态（与 api.InterfaceState 同形）。
@@ -20,6 +22,8 @@ type InterfaceState struct {
 
 // BridgeDomainState bridge-domain 运行态（与 api.BridgeDomainState 同形）。
 type BridgeDomainState struct {
+	// ID 恒为 0：内核 bridge 没有 BD-ID 这个概念（VPP 专有），内核数据面**不使用**该字段
+	// （旧实现填枚举序号，读视图会把它当成一个真实存在的数据面标识）。
 	ID    uint32
 	Name  string
 	Ports []BridgeDomainPort
@@ -44,8 +48,11 @@ type ipLinkStateRow struct {
 }
 
 // InterfaceStates 全部内核接口的运行态（接口名 → 状态）。
+//
+// 必须带 **-d**：`ip -j link show`（不带 -d）不输出 `linkinfo`，DevType 会恒得「physical」
+// （R2-24：真机实测 bridge/vrf/vlan/bond/veth 全都没有该键）。
 func (r *Runtime) InterfaceStates(ctx context.Context) (map[string]InterfaceState, error) {
-	out, err := r.run.Run(ctx, "ip", "-j", "link", "show")
+	out, err := r.run.Run(ctx, "ip", "-d", "-j", "link", "show")
 	if err != nil {
 		return nil, err
 	}
@@ -93,8 +100,47 @@ func readLinkSpeedKbps(ifname string) uint32 {
 	return uint32(mbps) * 1000
 }
 
-// BridgeDomains 全部内核 bridge 的运行态（含成员口）。
-func (r *Runtime) BridgeDomains(ctx context.Context) ([]BridgeDomainState, error) {
+// BridgeDomains 全部**配置声明**的 L2 交换机的运行态（含成员口）。
+//
+// 枚举以声明为准（R2-15①）：`bridge -j link show` 以端口为行，零成员的交换机根本不进列表
+// ——旧实现据此对真实存在的交换机回「在数据面中不存在」。逐台按内核实况判定：设备的
+// `linkinfo.info_kind=bridge` 存在才进列表（**配置声明了、内核没有**的如实不出现，
+// 不编造空壳）；成员口取 `bridge -j link show` 的实况。
+//
+// 只报声明内的交换机（不报 virbr0/docker0 这类宿主自建 bridge）：内核没有「产品自持」标记，
+// 与 VPPIfnames 同一判据（**配置声明集合**是唯一事实源）。
+func (r *Runtime) BridgeDomains(ctx context.Context, cfg model.Config) ([]BridgeDomainState, error) {
+	rows, err := r.bridgeLinkRows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	members := map[string][]BridgeDomainPort{}
+	for _, row := range rows {
+		if row.Master == "" || row.Ifname == "" {
+			continue
+		}
+		members[row.Master] = append(members[row.Master], BridgeDomainPort{Name: row.Ifname})
+	}
+	bridges, err := r.kernelBridges(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res := make([]BridgeDomainState, 0, len(cfg.VirtualSwitches))
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.Type == "l3" {
+			continue // L3 交换机在内核侧是 VRF 设备，不是 bridge
+		}
+		br := LinkName(vs.Name)
+		if !bridges[br] {
+			continue
+		}
+		res = append(res, BridgeDomainState{Name: br, Ports: members[br]})
+	}
+	return res, nil
+}
+
+// bridgeLinkRows `bridge -j link show` 的全部行（失败如实返回错误）。
+func (r *Runtime) bridgeLinkRows(ctx context.Context) ([]bridgeLinkRow, error) {
 	out, err := r.run.Run(ctx, "bridge", "-j", "link", "show")
 	if err != nil {
 		return nil, err
@@ -103,25 +149,24 @@ func (r *Runtime) BridgeDomains(ctx context.Context) ([]BridgeDomainState, error
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
 		return nil, err
 	}
-	order := []string{}
-	byName := map[string]*BridgeDomainState{}
+	return rows, nil
+}
+
+// kernelBridges 内核里现存的 bridge 设备名集合（`ip -d -j link show` 的 info_kind=bridge）。
+func (r *Runtime) kernelBridges(ctx context.Context) (map[string]bool, error) {
+	out, err := r.run.Run(ctx, "ip", "-d", "-j", "link", "show")
+	if err != nil {
+		return nil, err
+	}
+	var rows []ipLinkStateRow
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		return nil, err
+	}
+	bridges := map[string]bool{}
 	for _, row := range rows {
-		if row.Master == "" {
-			continue
+		if row.Ifname != "" && row.LinkInfo != nil && row.LinkInfo.InfoKind == "bridge" {
+			bridges[row.Ifname] = true
 		}
-		bd, ok := byName[row.Master]
-		if !ok {
-			bd = &BridgeDomainState{Name: row.Master}
-			byName[row.Master] = bd
-			order = append(order, row.Master)
-		}
-		bd.Ports = append(bd.Ports, BridgeDomainPort{Name: row.Ifname})
 	}
-	res := make([]BridgeDomainState, 0, len(order))
-	for i, name := range order {
-		bd := byName[name]
-		bd.ID = uint32(i + 1)
-		res = append(res, *bd)
-	}
-	return res, nil
+	return bridges, nil
 }

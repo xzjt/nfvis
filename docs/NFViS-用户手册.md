@@ -124,7 +124,19 @@ sudo ./nfvis-v1.1.47.run --verify                            # 只体检（装�
 自检项**每项都有独立事实源**（`dpkg` 记录与审计、`systemctl` 服务状态、`vppctl` 直读的 VPP 版本、
 控制台 HTTP、经 nfvisd 的 CLI 通路、libvirt/Docker 就绪、AppArmor 放行、内核基线片段与大页池）；
 任一项失败即以非零退出码收场——**不把「装上了」当「能用了」**。缺正向控制的项单列「不可判定」、
-不计入通过。装完的下一步：
+不计入通过。
+
+> **`--dataplane` 与 `--no-start` / `--verify` 的相互作用**（两个数据面的软件包**都会装**，
+> `--dataplane` 只决定这次用哪一套跑）：
+> - `--dataplane vpp|kernel`（缺省 `vpp`）：安装器把选择写进产品配置（`system.dataplane`）并重启服务生效。
+>   `kernel` 下产品**不再管理 VPP**——若首次引导时 nfvisd 已按缺省把 VPP 拉起，安装器在写入成功后
+>   **会停掉 VPP**（与「本次数据面为 kernel」的文案一致）；切回 `vpp` 时由 nfvisd 按需拉起。
+> - `--no-start`（只装不起服务）与 `--dataplane` **同给时数据面选择不写库、也不生效**：安装器会明确提示
+>   「未写库 / 未生效」（不静默丢弃），服务起来后自行登录提交 `set system dataplane kernel`。
+> - `--verify` **按 `--dataplane` 做检查**：在 kernel 机器上请带 `--dataplane kernel`
+>   （此时检查 `show vpp` 如实反映 `dataplane: kernel`，而不是要求出现 VPP 版本号）；不带则按缺省 vpp 检查。
+
+装完的下一步：
 
 1. 重启一次，让安装期写入的内核启动基线生效（大页/IOMMU）：`systemctl reboot`；
 2. 登录 CLI 规划资源与业务口：`nfvis-cli` → `wizard`（§5）；
@@ -798,10 +810,17 @@ nfvis$ request system kernel apply
 | VXLAN | VPP vxlan 插件 | 内核 vxlan 设备 |
 | VNF 虚拟网卡 | vhost-user（共享内存） | **virtio 网卡 + 宿主 tap + vhost-net** |
 | 容器虚拟网卡 | memif | 尚不支持 |
-| ACL（`l3-interface acl-in`） | acl 插件 | nftables（规则语义同：末尾隐式拒绝；非 IP/ARP 自动放行） |
+| ACL（`l3-interface acl-in`） | acl 插件 | nftables（规则语义同：末尾隐式拒绝；非 IP/ARP 自动放行；**`protocol icmp` 带端口字段在提交期拒绝**——内核侧表达不了 ICMP type/code） |
 | QoS 端口限速（入/出向） | policer 特性 | tc policer（`cir` bps / `cbs` 字节） |
 | 端口镜像 | span 插件 | tc mirred（源不能是 VNF 虚拟网卡） |
 | 风暴抑制 / 端口安全 | policer+classify / macip | tc 按目的 MAC 分类 / 桥口关学习 + nftables 源 MAC 白名单 |
+| 静态路由多下一跳（ECMP） | 支持（等权多路径） | **尚不支持**（提交期直接拒绝；内核数据面请拆成多条单跳路由） |
+| NAT 跨转发域（inside 与出接口不在同一转发域） | 支持（按 inside 转发域作用） | **尚不支持**（提交期直接拒绝；请改为同一转发域） |
+| VNF 虚拟网卡接入 `type l3` 交换机 | 支持（vNIC 可作三层接口） | **尚不支持**（提交期直接拒绝；请接入一台已配网关的 L2 交换机） |
+| MAC 学习上限（`learn-limit`） | 支持 | **尚不支持**（提交期直接拒绝） |
+| cross-connect（直通） | 支持 | **尚不支持**（提交期直接拒绝；请改用 L2 交换机 + 端口） |
+| 抓包（pcap trace） | 支持 | **尚不支持**（相关命令如实报不可用） |
+| IPv6 三层/转发（静态路由 v4+v6） | 支持 | **支持**（转发开关 v4/v6 一并置位并回读；v6 地址/静态路由/ACL 按各自语义下发） |
 | DHCP 中继与服务器 / DNS 代理 / LLDP | 支持 | **尚不支持**（提交期直接拒绝） |
 
 三处都能选，写的是同一个配置项 `system.dataplane`：
@@ -826,9 +845,20 @@ exit
 在提交时就报错并给出替代路径**（不会出现「配了却不生效」），`show vpp` 会明确显示
 `dataplane: kernel`。
 
-内核数据面另有两条约束（提交期校验）：对象名（交换机/bond/隧道/L3 交换机）**不超过 15 个字符**
-（内核接口名上限）；VNF 虚拟网卡**不能直接作三层接口**——把它接入一台**已配网关的 L2 交换机**
-即可达到同样效果。
+内核数据面另有约束（提交期校验）：对象名（交换机/bond/隧道/L3 交换机）**不超过 15 个字符**
+（内核接口名上限）；两个对象**不能派生同一个内核设备名**（报错会点名是哪两条声明在撞）；
+vlan 子接口的派生名同样受限；VNF 虚拟网卡**不能直接作三层接口**、也**不能接入 `type l3` 的交换机**——
+把它接入一台**已配网关的 L2 交换机**即可达到同样效果。
+
+> **内核数据面转发的前置条件（"接口都起来了、路由也下了、ping 全丢"先查这两条）**：
+> ① **转发开关**：产品会置 `net.ipv4.ip_forward=1` 与 `net.ipv6.conf.all.forwarding=1` 并**回读确认**
+> （写不动 / 回读不为 1 会如实报错）；
+> ② **宿主 `FORWARD` 链策略**：若为 **DROP**（libvirt/Docker 常见），数据面设备之间的转发会被**整体丢掉**——
+> netfilter 语义里同一 hook 的多条 base chain 相互独立，产品自建链（`inet nfvis-forward`）里的 accept
+> **不能豁免**宿主那条链的 drop。产品会检测并在 `show alarms` 落 `FORWARD_POLICY_DROP` 告警（见 §10.6），
+> **但不代改宿主规则**；照做：`iptables -I FORWARD 1 -i <设备A> -o <设备B> -j ACCEPT`（每一对数据面设备、
+> **两个方向都要**；nft 等价写法 `nft insert rule ip filter FORWARD iifname <A> oifname <B> accept`）。
+> 策略恢复后告警自动消解。
 
 ### 7.1 管理口守卫（产品会直接拒绝）
 
@@ -1026,6 +1056,10 @@ nfvis$ show dns proxy                                             # 启用态 + 
 - **管理网侧的「对外解析」不在产品范围**：NFViS **不**向管理网络上的其他主机提供 DNS 解析服务——管理网卡专用于设备
   操作通道（SSH/管理 API/日志转发/Prometheus），设备自身的解析走上表的「宿主解析器」；域内 VNF/容器的解析走上表的
   数据面代理。需要解析的管理网客户端请使用既有的 DNS 基础设施。
+- **内核数据面下「数据面 DNS 代理」尚未实现**：**按域**语句（`set virtual-switches <vs> dns proxy server`）
+  在提交期被直接拒绝；**全局上游**（`set system dns proxy server`）属 vpp 段配置——提交会给出
+  「当前数据面为 Linux 内核网络，vpp 段配置不生效」的警告，这套代理在该数据面下不提供服务。
+  该数据面请用上表的**宿主解析器**，或在域内部署自备解析器。
 
 其他系统级语句：`set system api port <uint>`、`token-ttl-minutes`、`max-sessions`、
 `api tls cert-file <p> key-file <p>`（装外部证书，立即生效）、`api tls self-signed regenerate`
@@ -1257,6 +1291,9 @@ nfvis# commit
 > 未启用代理时，客户端会拿到一个「不解析」的 DNS 地址。
 >
 > 池内地址耗尽时产生告警 `DHCP_POOL_EXHAUSTED`（warning；有地址释放/租约到期即自动消解）。
+>
+> **内核数据面下 DHCP 中继与 DHCP 服务器尚未实现**（`set dhcp-relay server` 与 DHCP 服务器的启用语句
+> `set dhcp-server pool …` 都会在提交期被直接拒绝）——该数据面请使用外部 DHCP 服务，或在 VNF/容器内静态编址。
 
 ### 8.4 L3 虚拟交换机 + 静态路由
 
@@ -1272,7 +1309,7 @@ nfvis# commit
 
 核对：`show vrfs`、`show vrfs vs-wan`、`show vrfs vs-wan routes`（FIB 运行态）。
 
-多下一跳（等价多路径）：`next-hop` 可以逗号分隔写多个等价下一跳（如 `set static-routes 10.0.0.0/8 next-hop 192.168.1.1,192.168.1.2`，最多 8 个）；**前缀与每个下一跳必须同族**（IPv4 前缀配 IPv6 下一跳会在提交时被拒绝），运行态读视图会列出全部下一跳。
+多下一跳（等价多路径）：`next-hop` 可以逗号分隔写多个等价下一跳（如 `set static-routes 10.0.0.0/8 next-hop 192.168.1.1,192.168.1.2`，最多 8 个）；**前缀与每个下一跳必须同族**（IPv4 前缀配 IPv6 下一跳会在提交时被拒绝），运行态读视图会列出全部下一跳。**内核数据面下 ECMP 尚未实现**（多下一跳在提交期被直接拒绝）——请拆成多条单跳路由，用 `distance` 决定优先级。
 
 说明：`distance` 目前只记录在配置里、**不参与选路**（数据面不下发该值），运行态读视图不给出具体距离。
 
@@ -1296,6 +1333,10 @@ nfvis# commit
 > 前缀（显式两侧须同族，混族在提交期拒绝并指明两侧家族）；`any` **跟随对侧家族**（对侧是 v6 即
 > `::/0`，否则 `0.0.0.0/0`；两侧都是 any 按 v4 处理）。`protocol icmp` 在 v6 规则中指 **ICMPv6**（58），
 > v4 规则中指 ICMPv4（1）。要同时过滤 v4 与 v6，写两条规则。
+>
+> **`protocol icmp` 不接受端口字段**：VPP 数据面把 `source-port`/`destination-port` 按 **ICMP
+> type/code** 解读；**内核数据面下带端口的 icmp 规则会在提交期直接拒绝**（内核侧表达不了 type/code，
+> 端口字段会被静默忽略）——请删掉端口字段，或把该规则留在 VPP 数据面。
 
 绑定 ACL 有三条务必注意：
 
@@ -1336,6 +1377,13 @@ nfvis# commit
 核对：`show qos policies`（读视图逐条标注方向绑定：`接口:in` / `接口:out`）。
 两个方向各自独立——改/删一向不影响另一向；策略被任一方向引用时删除策略会被拒绝。
 
+> **两个数据面都支持**：VPP 侧是 policer 特性，内核侧是 tc policer（`cir` bps / `cbs` 字节），配置语义一致。
+>
+> **同一接口与其他族共存的口径**：限速、风暴抑制与端口镜像可以配在同一接口上。判决是**先到先判**——
+> 被限速**丢弃**的包不会再进入后续族（风暴抑制/镜像都看不到它）；未超限的包继续按后续各族的规则处理。
+> 风暴抑制自身的广播档与组播档划分见 §8.14（广播帧只落广播档；只配组播档时广播帧按目的 MAC 的
+> I/G 位落入组播档）。
+
 ### 8.7 SPAN（端口镜像）
 
 ```bash
@@ -1345,6 +1393,9 @@ nfvis# set analyzer interface ens192
 nfvis# top
 nfvis# commit
 ```
+
+> **内核数据面下的差别**：镜像落在 tc mirred 上；**源不能是 VNF 虚拟网卡**（提交期直接拒绝——
+> 宿主 tap 由 libvirt 在域启动时创建，产品没有可靠的名字映射），请改用物理口或 bond。
 
 ### 8.8 NAT44
 
@@ -1363,6 +1414,10 @@ nfvis# commit
 >
 > **NAT44 仅支持 IPv4**：地址池、匹配源、静态映射的地址都必须是 IPv4，v6 值在**提交校验期**即被拒绝
 > （NAT44 是 IPv4 专用的 NAT 形态；VPP 自带的 NAT66/NAT64 插件产品尚未接入）。
+>
+> **内核数据面下 NAT 规则不支持跨转发域**：inside 交换机与出接口不在同一转发域时在**提交期直接拒绝**
+> ——内核侧的 NAT 不区分转发域、也没有跨表 leaking，规则不会命中任何包。请改为同一转发域
+> （inside 交换机即出接口所属的 L3 交换机）。`set nat static` 的跨域用法语义尚未定裁，请按同一转发域使用。
 
 核对：`show nat`。
 
@@ -1443,6 +1498,8 @@ nfvis# commit
 
 核对：`show lldp neighbors`（需对端也启用 LLDP；无对端时为空属正常）。
 
+> **内核数据面下 LLDP 尚未实现**（`set protocols lldp …` 会在提交期被直接拒绝）——该数据面请在上游交换机侧查看邻居，或使用 VPP 数据面。
+
 ### 8.11 cross-connect（直通，慎用）
 
 ```bash
@@ -1456,6 +1513,9 @@ nfvis# commit
 > ⚠️ **直通是二层裸对连：无 MAC 学习、无环路保护**。两端若处于同一广播域会形成物理环路/
 > 广播风暴——实测导致整机 load 飙升、soft lockup、网络完全不可达。**两端必须属于不同广播域**；
 > 出现风暴时先断开其一再改配置。
+>
+> **内核数据面下 cross-connect 尚未实现**（提交期直接拒绝——内核侧只有学习/泛洪形态的桥，
+> 静默降级会改变语义）；该数据面请改用 L2 交换机 + 端口。
 
 ### 8.12 环路防护（缓解 + 检测，v2）
 
@@ -1475,6 +1535,11 @@ nfvis# delete virtual-switches vs-dmz learn-limit    # 清除：恢复 VPP 默�
 
 读视图：`show virtual-switches vs-dmz detail` 的「学习上限」行、REST `GET /virtual-switches/vs-dmz`
 的 `learn_limit` 字段、Web 控制台交换机详情页同字段（未配置时都省略/显示「—」，不编造）。
+
+> **内核数据面下的边界**：`learn-limit` 尚未实现（提交期直接拒绝——内核 bridge 没有学习条数上限
+> 原语）；同时**本节「检测」在内核数据面下不运行**（其判据依赖 VPP 数据面的 MAC 学习表/分类表事实，
+> 内核侧无对应物——产品如实不报，而不是假装已在检测）。需要环路防护请切回 VPP 数据面使用，
+> 或在上游做端口/ACL 侧收紧。
 
 **检测（采样式告警）**：平台每 60 秒对每个 L2 交换机读一次 MAC 学习表，与上一轮快照比较：
 
@@ -1715,6 +1780,12 @@ nfvis$ request virtual-machine-functions fw-vm delete   # super-user；交互确
 > guest 内要有 getty 监听串口（云镜像一般自带 `console=ttyS0`）才能在 console 里看到登录提示。
 > 串口正常退出用 `Ctrl-]`；若**服务端/串口断开**（如 VM 被停、nfvisd 重启）或本地输入 EOF，
 > console 会**自动退出并回到提示符，无需再按键**。
+>
+> **内核数据面下的 vNIC 形态**：同名 vNIC 类型落成 **virtio 网卡 + 宿主 tap + vhost-net**（不经
+> vhost-user socket），`set interfaces <vnic> virtual-switch <L2 交换机>` 照常可用；因此
+> `set memory backing normal` 在该数据面下**允许**（没有共享内存对端）。两条约束在提交期校验：
+> vNIC **不能接入 `type l3` 的交换机**（内核侧不建桥、tap 无处可挂），也不能直接作三层接口——
+> 把它接入一台**已配网关的 L2 交换机**即可达到同样效果。
 
 **③ cloud-init 注意事项**：
 
@@ -1903,6 +1974,12 @@ nfvis$ traceroute ipv6 2001:db8::1           # 宿主侧 ICMPv6
 > `ping <管理口网关>` 必然失败，请改用宿主 `ping` 或 `traceroute`。IPv4/IPv6 同一口径；
 > `traceroute` 的 vrf 对 v4/v6 都不支持并给出替代（不静默降级）。
 
+> **内核数据面下的差别**：`ping` 与 `traceroute` 都走**宿主网络栈**（不经 VPP FIB），`vrf` 经
+> `ip vrf exec` 进入该转发域——上表 vrf 列的 ❌ 只适用于 VPP 数据面。两条共同的边界：**内部超时
+> 上界**（ping 30 秒 / traceroute 60 秒）；`count` 上界 **100**（越界报可读错误、不静默截断）；
+> 目标 / 源地址 / VRF 名**以 `-` 开头直接拒绝**（这些值原样交给底层 ping/traceroute，否则会被
+> 当成命令行选项解析）。
+
 ### 10.3 实时监控与统计清零
 
 ```bash
@@ -1910,6 +1987,9 @@ nfvis$ monitor interfaces ens224 interval 2   # 实时刷新计数，Ctrl-C 退�
 nfvis$ monitor vnf fw-vm                      # 跟踪 VM 状态/事件，Ctrl-C 退出
 nfvis$ clear interfaces statistics ens224     # 清零（super-user）
 ```
+
+> **内核数据面下 `clear interfaces statistics` 不支持**（清零内核接口计数需要重建接口，代价与影响面过大）
+> ——命令会如实拒绝；接口计数仍可在 `show interfaces <口> statistics` 里查看。
 
 ### 10.4 抓包（VPP pcap trace）
 
@@ -1920,6 +2000,9 @@ nfvis$ request vpp trace export name my-capture                # 导出（隐含
 # 下载：GET /api/v1/vpp/capture/<file>
 nfvis$ request vpp trace stop                                  # 停止且不导出
 ```
+
+> **内核数据面下抓包尚未实现**（上述命令如实报不可用）——需要在 NFViS 里抓包请切回 VPP 数据面；
+> 也可以在上游交换机/对端侧做镜像或抓包。
 
 ### 10.5 日志与审计
 
@@ -1966,6 +2049,7 @@ nfvis$ request alarms clear all
 > | `BRIDGE_DOMAIN_LEFTOVER` | warning | 数据面存在**配置未声明**的 bridge-domain（BD-Tag 不在配置里，同上）。处置与上面两条一致；**跨 nfvisd 重启仍可见** |
 > | `HUGEPAGE_POOL_SURPLUS` | warning | 大页池**内核实际页数高于声明值**且收敛不掉（多出的页正被占用，回收**不动在用页**）。按内核实况重建、跨 nfvisd 重启仍可见。处置：`show system hugepages` 看谁在占用（声明用该页池的 VNF / 数据面页尺寸偏好 / 大页挂载点）；停掉持页的 VNF 后再 `request system hugepages reclaim`，或调整资源池声明值（`set resource-pools hugepages … count <n>`，需重启）。收敛后自动消警 |
 > | `HUGEPAGE_POOL_ORPHAN` | warning | 大页池存在**无主占用页**（在用 > 实际持有：分配了却无任何进程/inode 引用）——表现为“池看着满、却没空页”，新 VNF 会 `Cannot allocate memory`。**这类页多为被进程预留（reserve）但尚未使用的大页**（例如数据面 DPDK 预留），**不在空闲链表上**，产品侧写 `nr_hugepages` **释放不了**：`request system hugepages reclaim` **不会动它们**。按内核实况重建、跨 nfvisd 重启可见、收敛后自动消解。处置：`show system hugepages` 看「在用 / 持有 / 无主」三列定位；要释放需**从预留者一侧**入手（如停/重启数据面或释放其预留） |
+> | `FORWARD_POLICY_DROP` | warning | **宿主 `FORWARD` 链策略为 DROP**，内核数据面下数据面设备之间的转发会被整体丢掉（接口/路由都对、ping 全丢）——netfilter 语义里同一 hook 的多条 base chain 相互独立，产品自建链里的 accept **不能豁免**宿主策略的 drop。**产品不代改宿主规则**；处置：按本告警文案里的照做命令把放行写进宿主真正生效的 FORWARD 链（逐对、双向：`iptables -I FORWARD 1 -i <设备A> -o <设备B> -j ACCEPT`；nft 等价写法 `nft insert rule ip filter FORWARD iifname <A> oifname <B> accept`）。策略改回 ACCEPT 或放行到位后**自动消解** |
 > | `COMPUTE_UNAVAILABLE` | warning | 启动时**计算编排（libvirt）未接入**——连接失败或超时（libvirtd 未起/假死时，产品在 10 秒量级内放弃并降级，**不会拖住整机启动**）。VM 生命周期动作（创建/启动/快照/串口等）不可用，配置声明不受影响。**告警在场期间产品后台持续重试接入（约每 30 秒一次）**；**接入成功后连接若中断（如 libvirtd 重启），产品每 15 秒探活、自动复连并在成功后消解本告警**——无论启动期还是运行期都无需重启 nfvis。处置：`systemctl status libvirtd`、`virsh -c qemu:///system list`、`journalctl -u libvirtd` 查底座；底座长时间不恢复时先处理底座本身 |
 > | `CONTAINER_UNAVAILABLE` | warning | 启动时**容器编排（Docker）未接入**——探测失败或超时（dockerd 未起/假死时，产品在 10 秒量级内放弃并降级）。容器生命周期动作不可用，配置声明不受影响。**告警在场期间产品后台持续重试接入（约每 30 秒一次）**，接入成功后本告警**自动消解**、容器编排恢复，无需重启 nfvis。处置：`systemctl status docker`、`journalctl -u docker` 查底座 |
 > | `VPP_AUTOSTART_FAILED` | warning | nfvisd 启动时**未能发起拉起数据面（VPP）**（发起动作失败或被取消）。此时数据面不可用、依赖它的操作会失败；**就绪由连接重试循环接管**（未就绪时 `show vpp` 显示未连接）。处置：`systemctl status vpp` / `journalctl -u vpp` 查因，或手工 `systemctl start vpp`，随后 `show vpp` 确认已连接。**VPP 恢复在线后自动消解** |

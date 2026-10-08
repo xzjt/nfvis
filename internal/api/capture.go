@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
@@ -41,6 +42,13 @@ type CaptureRuntime interface {
 
 func (s *Server) requireCapture(w http.ResponseWriter) bool {
 	if s.capture == nil {
+		// 「抓包模块未接入」有两种成因，分开如实回答：内核数据面下抓包尚未实现——
+		// 这是**能力不存在**（501），并点名数据面与替代路径，不让操作者去查装配问题；
+		// VPP 数据面下才是装配缺口（503）。
+		if s.dataPlaneMode() == model.DataPlaneKernel {
+			writeUnsupported(w, errors.New("当前数据面为 Linux 内核网络，抓包尚未实现（如需请改回 VPP 数据面并重启服务）"))
+			return false
+		}
 		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "抓包模块未接入", nil)
 		return false
 	}

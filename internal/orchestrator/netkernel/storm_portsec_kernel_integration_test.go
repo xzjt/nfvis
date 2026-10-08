@@ -127,6 +127,9 @@ func TestKernelStormRealKernel(t *testing.T) {
 		"dst_mac ff:ff:ff:ff:ff:ff",
 		"dst_mac 01:00:00:00:00:00/01:00:00:00:00:00",
 		"police",
+		// R2-3：判决必须是"超限丢、未超限继续"——否则同 hook 上排在后面的族会被整族短路
+		// （真机实测：不带 conform-exceed 时后续 filter 一个包都收不到）。
+		"drop/continue",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("tc ingress 过滤器缺 %q：\n%s", want, out)
@@ -147,13 +150,15 @@ func TestKernelStormRealKernel(t *testing.T) {
 		}
 	}
 
-	// 读视图（与上面独立事实源互为对照）。
-	if attached, detail, err := m.Dataplane(ctx, zstm0); err != nil {
+	// 读视图（与上面独立事实源互为对照）。逐类速率必须落在消费方真正读的字段上（R2-15②）。
+	if fact, err := m.Dataplane(ctx, zstm0); err != nil {
 		t.Errorf("Dataplane: %v", err)
-	} else if !attached {
-		t.Errorf("Dataplane 应报已下发，得到 attached=false（%s）", detail)
+	} else if !fact.Attached {
+		t.Errorf("Dataplane 应报已下发，得到 attached=false（%s）", fact.Detail)
+	} else if fact.BroadcastKbps != 1000 || fact.MulticastKbps != 2000 {
+		t.Errorf("Dataplane 逐类速率应与下发一致（broadcast=1000/multicast=2000），得到 %+v", fact)
 	} else {
-		t.Logf("风暴抑制读视图：%s", detail)
+		t.Logf("风暴抑制读视图：%s", fact.Detail)
 	}
 
 	// 幂等：同一声明再下一次不应报错。
@@ -171,9 +176,9 @@ func TestKernelStormRealKernel(t *testing.T) {
 	if q := ztRun(t, "tc", "qdisc", "show", "dev", zstm0); strings.Contains(q, "clsact") {
 		t.Errorf("Teardown 后 clsact 未回收：\n%s", q)
 	}
-	if attached, _, err := m.Dataplane(ctx, zstm0); err != nil {
+	if fact, err := m.Dataplane(ctx, zstm0); err != nil {
 		t.Errorf("Dataplane（Teardown 后）: %v", err)
-	} else if attached {
+	} else if fact.Attached {
 		t.Errorf("Teardown 后 Dataplane 仍报已下发")
 	}
 }
@@ -227,13 +232,16 @@ func TestKernelPortSecRealKernel(t *testing.T) {
 		t.Errorf("桥口学习未关闭：\n%s", l)
 	}
 
-	// 读视图。
-	if attached, detail, err := m.Dataplane(ctx, zpsc0); err != nil {
+	// 读视图。消费方真正读的字段（R2-15②）必须与内核实况一致：链在场/链名/规则条数/绑定在。
+	if fact, err := m.Dataplane(ctx, zpsc0); err != nil {
 		t.Errorf("Dataplane: %v", err)
-	} else if !attached {
-		t.Errorf("Dataplane 应报已下发，得到 attached=false（%s）", detail)
+	} else if !fact.Attached {
+		t.Errorf("Dataplane 应报已下发，得到 attached=false（%s）", fact.Detail)
+	} else if !fact.ChainPresent || fact.ChainName != portSecChainName(zpsc0) ||
+		fact.RuleCount != 1 || !fact.Bound {
+		t.Errorf("Dataplane 消费方字段与内核事实不符：%+v", fact)
 	} else {
-		t.Logf("端口安全读视图：%s", detail)
+		t.Logf("端口安全读视图：%s", fact.Detail)
 	}
 
 	// 幂等：同一声明再下一次不应报错。
@@ -251,9 +259,9 @@ func TestKernelPortSecRealKernel(t *testing.T) {
 	if l := ztRun(t, "ip", "-j", "-d", "link", "show", "dev", zpsc0); !strings.Contains(l, `"learning":true`) {
 		t.Errorf("Teardown 后学习未恢复：\n%s", l)
 	}
-	if attached, _, err := m.Dataplane(ctx, zpsc0); err != nil {
+	if fact, err := m.Dataplane(ctx, zpsc0); err != nil {
 		t.Errorf("Dataplane（Teardown 后）: %v", err)
-	} else if attached {
+	} else if fact.Attached {
 		t.Errorf("Teardown 后 Dataplane 仍报已下发")
 	}
 }

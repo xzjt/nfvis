@@ -100,3 +100,41 @@ func diagRuntimeFor(mode string, mgr *network.Manager) api.DiagRuntime {
 	}
 	return &diagController{diag: mgr.Diagnostics()}
 }
+
+// attachSRIOV 构造 SR-IOV VF 数量编排并注入 VPP 侧网络实现（v3 round2 体检 R2-7）。
+//
+// 构造与注入**一体**是刻意的：旧装配在 VPP 分支里先 `l2net.SetSRIOV(sriovProvider)`
+// （此时变量还是 nil），到 if/else 之后才 `sriovProvider = network.NewSRIOVProvider()`
+// ——VPP（缺省）数据面拿到 nil，声明式 `interfaces … sriov vf-count N` 从「可下发」变成
+// 硬失败并回滚（v2 回归）。收敛到本函数后「先构造后注入」由控制流保证，装配处不再有裸调用。
+//
+// l2net 为 nil（内核数据面）时只返回实例：API 层的命令式 VF 路径与内核 Provider 共用同一
+// sysfs 实现（VF 数量与数据面无关，内核数据面下 VF 直通本就是内核能力）。
+func attachSRIOV(l2net *network.L2Network) *network.SRIOVProvider {
+	p := network.NewSRIOVProvider()
+	if l2net != nil {
+		l2net.SetSRIOV(p)
+	}
+	return p
+}
+
+// configSource 「当前 committed 配置」的来源（*config.Engine 的 Committed 即实现）。
+type configSource interface {
+	Committed() (model.Config, error)
+}
+
+// attachConfigSource 把当前 committed 配置的来源接到内核 Provider 的读视图上（真机 3.0.5~dev1 回归）。
+//
+// 内核数据面的读视图（BridgeDomains / VPPIfnames / 产品自持设备判定）按**配置声明**枚举，
+// 而进程内快照只在装配与恢复收敛时写入——提交路径不经过 Provider（Apply* 只拿到单个对象），
+// 于是提交后的读视图滞留旧快照：新建交换机提交成功、`show virtual-switches` 恒空，15s 巡检
+// 也不刷新（它只更新 EnsureForwarding 的入参）。接上来源后每次读视图都取当前 committed。
+//
+// 调用点必须在**引擎构造之后**：Provider 先于引擎创建，此前无处取 committed。
+// 来源读失败时 Provider 回落自己的快照（不把「读不到配置」显示成「没有配置」）。
+func attachConfigSource(kp *netkernel.Provider, src configSource) {
+	if kp == nil || src == nil {
+		return
+	}
+	kp.SetConfigSource(src.Committed)
+}

@@ -42,6 +42,9 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 	}
 	if len(args) == 0 {
 		if len(bds) == 0 {
+			if x.dpMode() == model.DataPlaneKernel {
+				return "（Linux 内核网络中无虚拟交换机）\n"
+			}
 			return "（VPP 中无 bridge-domain）\n"
 		}
 		cfgNames := x.vswitchConfigNames()
@@ -74,7 +77,7 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 		}
 	}
 	if bd == nil {
-		return fmt.Sprintf("%% 虚拟交换机 %s 在 VPP 中不存在（show virtual-switches 看运行态列表）\n", name)
+		return fmt.Sprintf("%% 虚拟交换机 %s 在 %s中不存在（show virtual-switches 看运行态列表）\n", name, x.dpRuntimeName())
 	}
 	// detail 及不带子命令：运行态（状态 + 成员口）叠加配置的类型信息。
 	// （ports/statistics 已在函数入口转给端口读视图，决策 #326。）

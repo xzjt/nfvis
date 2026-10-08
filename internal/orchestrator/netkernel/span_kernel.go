@@ -31,6 +31,11 @@ func newSpanManager(run Runner) *spanManager {
 //
 // 幂等且能改向：先把本族在两 hook 上的 filter 都摘掉，再按声明重建——方向由 both 改单边时
 // 旧的那半边也必须撤掉，只 add 会留下过期的镜像（数据面照旧复制，配置却已改小）。
+//
+// mirred 尾随的 `continue`（R2-3，真机 spike 实测）：同一条 clsact hook 上各族共用
+// （QoS pref 10 / 镜像 20 / 风暴抑制 30/40），内核**首个返回判决 ≥0 的 filter 命中即返回**——
+// mirred 默认判决是 `pipe`(3) ≥ 0，会把排在后面的风暴抑制整族静默屏蔽（镜像在复制、抑制计数
+// 恒 0）。`continue` 让包判完镜像后继续遍历后续 filter，镜像本身照常发生。
 func (m *spanManager) Apply(ctx context.Context, srcDev, analyzerDev, direction string) error {
 	if srcDev == "" || analyzerDev == "" {
 		return fmt.Errorf("镜像源接口与分析口都不能为空")
@@ -55,7 +60,8 @@ func (m *spanManager) Apply(ctx context.Context, srcDev, analyzerDev, direction 
 	for _, d := range dirs {
 		if err := tcReq(ctx, m.run, "filter", "add", "dev", srcDev, d,
 			"pref", strconv.Itoa(spanFilterPref),
-			"matchall", "action", "mirred", "egress", "mirror", "dev", analyzerDev); err != nil {
+			"matchall", "action", "mirred", "egress", "mirror", "dev", analyzerDev,
+			"continue"); err != nil {
 			return err
 		}
 	}
@@ -81,6 +87,9 @@ func (m *spanManager) Delete(ctx context.Context, srcDev, direction string) erro
 // Bound 源口上是否已装本族镜像，返回分析口名。
 //
 // 读内核事实（`tc filter show`），不读进程内登记；读不到或不是本族的绑定一律如实返回未绑定。
+// 解析只认"mirred 到某设备的镜像"这一动作本身，**不看尾随的判决词**：默认 `pipe`（修复前的
+// 写法，会短路同 hook 的后续 filter）与显式 `continue`（修复后，镜像后继续遍历）都算本族绑定
+// ——判决词只是执行语义的一部分（见 Apply 的注释），不影响"有没有这条镜像"这个事实。
 func (m *spanManager) Bound(ctx context.Context, srcDev string) (string, bool) {
 	if srcDev == "" {
 		return "", false
@@ -118,7 +127,12 @@ func spanDirections(direction string) ([]string, error) {
 
 // spanMirredRe 从 `tc filter show` 输出里取出镜像分析口名。
 //
-// tc 输出行形如：`action order 1: mirred (Egress Mirror to device zspa1) pipe`。
+// tc 输出行形如（尾随的判决词随写法变：修复前默认 `pipe`，修复后显式 `continue`）：
+//
+//	action order 1: mirred (Egress Mirror to device zspa1) pipe
+//	action order 1: mirred (Egress Mirror to device zspa1) continue
+//
+// 只取括号里的分析口名，判决词不在匹配范围内（两种写法都认）。
 var spanMirredRe = regexp.MustCompile(`mirred \(Egress Mirror to device (\S+)\)`)
 
 // spanMirrorAnalyzer 解析出镜像分析口名。

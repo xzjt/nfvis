@@ -72,7 +72,7 @@ func (x *cliExecutor) execShowVMs(args []string) string {
 		for _, nic := range vm.Interfaces {
 			items = append(items, anyToTree(nic))
 			fmt.Fprintf(&b, "%-10s %-12s %-18s %-18s %s\n",
-				nic.Name, nic.Type, nic.VirtualSwitch, nic.MAC, nicSocketOrVF(name, nic))
+				nic.Name, nic.Type, nic.VirtualSwitch, nic.MAC, x.nicSocketOrVF(name, nic))
 		}
 		if len(items) == 0 {
 			return "（无 vNIC）\n"
@@ -142,6 +142,12 @@ func (x *cliExecutor) showVMStatistics(name string) string {
 	vm, ok := findVM(cfg, name)
 	if !ok {
 		return fmt.Sprintf("%% VNF %s 不存在\n", name)
+	}
+	if x.dpMode() == model.DataPlaneKernel {
+		// 内核数据面下 vNIC 由 libvirt 以 virtio + vhost-net + 宿主 tap 承载，不是 VPP 的
+		// vhost-user 口：既没有 `vh-*` 读名，也没有 VPP 逐口计数通道——按数据面如实说明，
+		// 不让操作者以为「VM 起了就该有这张表」。
+		return "%% vNIC 统计不可用：当前数据面为 Linux 内核网络（vNIC 由 libvirt 以 vhost-net tap 承载，无 VPP vhost-user 口计数）\n"
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%-10s %-24s %12s %12s %14s %14s\n",
@@ -423,9 +429,15 @@ func serialEnabled(vm model.VMFunction) bool {
 }
 
 // nicSocketOrVF vNIC 的 socket 路径或 VF 绑定展示（vhost-user / sriov-vf / memif）。
-func nicSocketOrVF(vmName string, nic model.VnfInterface) string {
+// 内核数据面下 vhost-user 声明的 vNIC 由 libvirt 以 virtio + vhost-net + 宿主 tap 承载
+// （没有 VPP，也就没有 vhost-user socket）——按数据面如实说明，不给出一条数据面里
+// 并不存在的 socket 路径。
+func (x *cliExecutor) nicSocketOrVF(vmName string, nic model.VnfInterface) string {
 	switch {
 	case nic.Type == "vhost-user":
+		if x.dpMode() == model.DataPlaneKernel {
+			return "（内核数据面：libvirt 自建 vhost-net tap，无 vhost-user socket）"
+		}
 		return orchestrator.VnfSocketPath(orchestrator.DefaultVhostDir, vmName, nic.Name)
 	case nic.Sriov != nil:
 		return fmt.Sprintf("%s vf%d", nic.Sriov.PhysicalInterface, nic.Sriov.VFID)

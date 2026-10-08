@@ -94,9 +94,10 @@ func (x *cliExecutor) showInterfaceList(cfg model.Config) string {
 		}
 	}
 	sort.Strings(names)
+	dpNameSp := x.dpRuntimeName()
 	if len(names) == 0 {
 		if stErr != nil || !invOK {
-			return "（无接口；VPP 运行态不可用，清单可能不完整）\n"
+			return fmt.Sprintf("（无接口；%s运行态不可用，清单可能不完整）\n", dpNameSp)
 		}
 		return "（无接口）\n"
 	}
@@ -126,10 +127,10 @@ func (x *cliExecutor) showInterfaceList(cfg model.Config) string {
 		fmt.Fprintf(&b, ifaceListRowFmt, name, admin, link, speed, driver, rx, tx, desc, source)
 	}
 	if stErr != nil {
-		// 运行态不可用：明确说明状态列为何是 "-"
-		b.WriteString("%% 注: VPP 运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
+		// 运行态不可用：明确说明状态列为何是 "-"（按数据面点名，内核下不写「VPP 运行态」）
+		b.WriteString("%% 注: " + dpNameSp + "运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
 	} else if !invOK {
-		b.WriteString("%% 注: VPP 端口清单不可用，清单不含 VPP 运行态口（内核侧未接管口照列）\n")
+		b.WriteString(fmt.Sprintf("%% 注: %s端口清单不可用，清单不含 %s运行态口（内核侧未接管口照列）\n", dpNameSp, dpNameSp))
 	}
 	x.structured = map[string]any{"interfaces": items}
 	return b.String()
@@ -177,7 +178,12 @@ func (x *cliExecutor) showVppOverview() string {
 	if out == nil {
 		out = map[string]any{}
 	}
-	out["threads"] = len(threads)
+	// 内核数据面下没有 VPP 线程/主堆可读：不要把「没读数」渲染成 `threads: 0`（假读数，
+	// 会被读成「VPP 起来了却一个线程都没有」）——按数据面点名不可用，结构化输出也不带该字段。
+	kernel := x.dpMode() == model.DataPlaneKernel
+	if !kernel {
+		out["threads"] = len(threads)
+	}
 	if hasBuf {
 		out["buffers"] = anyToTree(buf)
 	}
@@ -185,7 +191,11 @@ func (x *cliExecutor) showVppOverview() string {
 		out["memory"] = anyToTree(mem)
 	}
 	x.structured = out
-	fmt.Fprintf(&b, "threads: %d\n", len(threads))
+	if kernel {
+		fmt.Fprintf(&b, "threads: 不适用（%s）\n", kernelNoVppRuntime)
+	} else {
+		fmt.Fprintf(&b, "threads: %d\n", len(threads))
+	}
 	if hasBuf {
 		fmt.Fprintf(&b, "buffers: pools=%d source=%s\n", len(buf.Pools), buf.Source)
 		for _, pl := range buf.Pools {
@@ -196,6 +206,8 @@ func (x *cliExecutor) showVppOverview() string {
 	}
 	if hasMem {
 		fmt.Fprintf(&b, "memory: total=%d used=%d free=%d\n", mem.Total, mem.Used, mem.Free)
+	} else if kernel {
+		fmt.Fprintf(&b, "memory: 运行态不可用（%s）\n", kernelNoVppRuntime)
 	} else {
 		fmt.Fprintln(&b, "memory: 运行态不可用")
 	}
@@ -294,7 +306,7 @@ func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) strin
 		// 未声明且不在 VPP 清单（决策 #154：清单查询成功才可判「不在」）
 		names, ok := x.vppIfaceNamesSafe()
 		if ok && !ifaceInList(names, name) {
-			return errIfaceUnknown(name)
+			return x.errIfaceUnknown(name)
 		}
 		// 清单未接入或查询失败：无从核对运行态，维持既有文案（只陈述「未声明」，不否认存在）
 		return fmt.Sprintf("%% 接口 %s 未在配置中声明\n", name)
@@ -306,11 +318,19 @@ func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) strin
 			}
 		}
 		// 未接管的内核口没有数据面统计（决策 #302）：如实区分于「连接未就绪」。
+		kernel := x.dpMode() == model.DataPlaneKernel
 		if _, ok := x.kernelIfaceFacts(name); ok {
+			if kernel {
+				return fmt.Sprintf("（接口 %s 未被数据面接管（当前数据面为 Linux 内核网络），无数据面统计）\n", name)
+			}
 			return fmt.Sprintf("（接口 %s 未被 VPP 接管，无数据面统计）\n", name)
 		}
 		// 如实描述：stats 是接入了的，取不到数是**这一刻连接没就绪/读取失败**
-		// （VPP 重启后连接陈旧即属此列，取数路径会自行重连重试）。
+		// （VPP 重启后连接陈旧即属此列，取数路径会自行重连重试）。内核数据面下根本没有
+		// VPP stats 通道，按数据面点名，别把人引去排查「stats 连接」。
+		if kernel {
+			return fmt.Sprintf("%% 接口 %s 统计暂不可用（%s）\n", name, kernelNoVppRuntime)
+		}
 		return fmt.Sprintf("%% 接口 %s 统计暂不可用（stats 连接未就绪）\n", name)
 	case "sriov":
 		if !declared {
@@ -362,7 +382,7 @@ func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool, ifc mod
 	case !declared:
 		fmt.Fprintf(&b, "（接口 %s 未在配置中声明，以下为运行态视图）\n", name)
 	case !inStates && !inInv:
-		fmt.Fprintf(&b, "（接口 %s 已声明，未在 VPP 运行态出现，状态列显示 -）\n", name)
+		fmt.Fprintf(&b, "（接口 %s 已声明，未在 %s运行态出现，状态列显示 -）\n", name, x.dpRuntimeName())
 	}
 	fmt.Fprintf(&b, ifaceRowFmt, "Interface", "Admin", "Link", "Speed", "MTU", "Driver", "RxPkts", "TxPkts", "Description")
 	fmt.Fprintf(&b, ifaceRowFmt, name, admin, link, speed, mtuCol, driver, rx, tx, desc)
@@ -396,7 +416,7 @@ func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool, ifc mod
 		}
 	}
 	if stErr != nil {
-		b.WriteString("%% 注: VPP 运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
+		b.WriteString("%% 注: " + x.dpRuntimeName() + "运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
 	}
 	x.structured = map[string]any{"interfaces": []any{entry}}
 	return b.String(), true
@@ -430,7 +450,13 @@ func (x *cliExecutor) kernelIfaceView(name string) (string, bool) {
 		mtu = fmt.Sprintf("%d", f.MTU)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "（接口 %s 未被 VPP 接管，以下为内核侧视图）\n", name)
+	if x.dpMode() == model.DataPlaneKernel {
+		// 内核数据面下这个口不是「未被 VPP 接管」——数据面就是内核网络，它只是未进
+		// 数据面端口清单；按数据面点名，同时保留「以内核事实作答」的本意。
+		fmt.Fprintf(&b, "（接口 %s 未被数据面接管（当前数据面为 Linux 内核网络），以下为内核侧视图）\n", name)
+	} else {
+		fmt.Fprintf(&b, "（接口 %s 未被 VPP 接管，以下为内核侧视图）\n", name)
+	}
 	fmt.Fprintf(&b, ifaceRowFmt, "Interface", "Admin", "Link", "Speed", "MTU", "Driver", "RxPkts", "TxPkts", "Description")
 	fmt.Fprintf(&b, ifaceRowFmt, name, admin, link, speed, mtu, orDash(f.Driver), "-", "-", "-")
 	if f.MAC != "" {
@@ -478,10 +504,12 @@ func ifaceInList(names []string, name string) bool {
 	return false
 }
 
-// errIfaceUnknown 接口名既不在配置、也不在 VPP 运行态清单（清单查询成功才可判）的
+// errIfaceUnknown 接口名既不在配置、也不在当前数据面运行态清单（清单查询成功才可判）的
 // 统一文案——LLDP 过滤与 show interfaces 共用，防两处漂移（决策 #154）。
-func errIfaceUnknown(name string) string {
-	return fmt.Sprintf("%% 接口 %s 未在配置中声明、也不在 VPP 接口清单中（show interfaces physical 看运行态清单）\n", name)
+// 「不在 VPP 接口清单中」按数据面措辞：内核数据面下不存在 VPP 清单。
+func (x *cliExecutor) errIfaceUnknown(name string) string {
+	return fmt.Sprintf("%% 接口 %s 未在配置中声明、也不在 %s接口清单中（show interfaces physical 看运行态清单）\n",
+		name, x.dpRuntimeName())
 }
 
 // ifaceRowFmt 接口运行态表的行格式（表头与数据行共用；单口视图含 MTU 列，
@@ -591,6 +619,8 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 		return x.execShowVppCapture()
 	}
 	if sub == "" {
+		// `show vpp` 概览的**唯一实现**（曾在此处另有一份 `case ""` 副本——两份渲染
+		// 必然漂移，已删；数据面感知的线程/内存行以 showVppOverview 为准）。
 		return x.showVppOverview()
 	}
 	if x.state == nil {
@@ -601,6 +631,11 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 	case "threads":
 		threads := x.state.Threads(ctx)
 		if len(threads) == 0 {
+			// 内核数据面下「无线程」不是 VPP 的空读数，而是根本没有 VPP 运行态可读：
+			// 如实点名数据面，不打印会被读成「VPP 在线但无工作线程」的空表。
+			if x.dpMode() == model.DataPlaneKernel {
+				return "%% VPP 线程运行态不可用：" + kernelNoVppRuntime + "\n"
+			}
 			return "（无线程运行态）\n"
 		}
 		items := make([]any, 0, len(threads))
@@ -611,36 +646,6 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 			fmt.Fprintf(&b, "%-10s %-12s %-8d %d\n", th.Name, th.Type, th.Core, th.ID)
 		}
 		x.structured = map[string]any{"threads": items}
-		return b.String()
-	case "":
-		// show vpp：概览（连接/版本/待重启 + 线程数 + buffer + 内存）
-		threads := x.state.Threads(ctx)
-		buf, hasBuf := x.state.Buffers(ctx)
-		mem, hasMem := x.state.Memory(ctx)
-		out := map[string]any{"threads": len(threads)}
-		if hasBuf {
-			out["buffers"] = anyToTree(buf)
-		}
-		if hasMem {
-			out["memory"] = anyToTree(mem)
-		}
-		x.structured = out
-		var b strings.Builder
-		writeVppConnLines(&b, x.vpp, x.engine)
-		fmt.Fprintf(&b, "threads: %d\n", len(threads))
-		if hasBuf {
-			fmt.Fprintf(&b, "buffers: pools=%d source=%s\n", len(buf.Pools), buf.Source)
-			for _, pl := range buf.Pools {
-				fmt.Fprintf(&b, "  %-10s used=%.0f available=%.0f cached=%.0f\n", pl.Name, pl.Used, pl.Available, pl.Cached)
-			}
-		} else {
-			fmt.Fprintf(&b, "buffers: 运行态不可用（%s）\n", bufUnavailableReason(buf, x.dpMode()))
-		}
-		if hasMem {
-			fmt.Fprintf(&b, "memory: total=%d used=%d free=%d\n", mem.Total, mem.Used, mem.Free)
-		} else {
-			fmt.Fprintln(&b, "memory: 运行态不可用")
-		}
 		return b.String()
 	case "buffers":
 		buf, ok := x.state.Buffers(ctx)
@@ -657,6 +662,9 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 	case "memory":
 		mem, ok := x.state.Memory(ctx)
 		if !ok {
+			if x.dpMode() == model.DataPlaneKernel {
+				return "%% VPP 内存运行态不可用：" + kernelNoVppRuntime + "\n"
+			}
 			return "%% 内存运行态不可用\n"
 		}
 		x.structured = anyToTree(mem)
@@ -732,10 +740,14 @@ func (x *cliExecutor) execShowVppRuntime(ctx context.Context, rest []string) str
 	return b.String()
 }
 
+// kernelNoVppRuntime 内核数据面下「VPP 运行态读数」不可用的统一原因（buffer/runtime/
+// 线程/内存几处共用同一句，避免各写一份漂移）。
+const kernelNoVppRuntime = "当前数据面为 Linux 内核网络，无 VPP 运行态读数"
+
 // runtimeUnavailableReason 取不可用原因（与 bufUnavailableReason 同口径：不静默省略）。
 func runtimeUnavailableReason(rs state.RuntimeStats, mode string) string {
 	if mode == model.DataPlaneKernel {
-		return "当前数据面为 Linux 内核网络，无 VPP 运行态读数"
+		return kernelNoVppRuntime
 	}
 	if rs.Reason != "" {
 		return rs.Reason
@@ -782,7 +794,7 @@ func (x *cliExecutor) showLLDPNeighbors(ifname string) string {
 		if !x.interfaceKnown(ifname) {
 			// 名字本身不存在（配置里没声明、也不在 VPP 接口清单中）——不能与「该口无邻居」混为一谈：
 			// 前者是敲错了名字，后者是这个口就是没有对端。
-			return errIfaceUnknown(ifname)
+			return x.errIfaceUnknown(ifname)
 		}
 		return fmt.Sprintf("（接口 %s 无 LLDP 邻居）\n", ifname)
 	}
@@ -862,7 +874,7 @@ func invalidShowLldp(rest string) string {
 func bufUnavailableReason(buf state.Buffers, mode string) string {
 	// 内核数据面下本就没有 VPP 运行态可读：如实说清，别报成"解码失败"把人引向 VPP 排查。
 	if mode == model.DataPlaneKernel {
-		return "当前数据面为 Linux 内核网络，无 VPP 运行态读数"
+		return kernelNoVppRuntime
 	}
 	if buf.Reason != "" {
 		return buf.Reason
@@ -870,7 +882,21 @@ func bufUnavailableReason(buf state.Buffers, mode string) string {
 	return "statsclient 解码失败或 stats segment 未启用"
 }
 
-// dpMode 当前生效的数据面实现（读 committed 配置；读不到按 vpp，与装配口径一致）。
+// dpRuntimeName 当前数据面运行态的称呼（**带尾随空格**，模板里直接后接中文词即可）：
+// VPP 数据面叫「VPP 」、内核数据面叫「Linux 内核网络」。「运行态不可用」「在 … 中不存在」
+// 这类注记一律按它措辞——内核数据面下再点名 VPP 会把操作者引向一条不存在的路径。
+func (x *cliExecutor) dpRuntimeName() string {
+	if x.dpMode() == model.DataPlaneKernel {
+		return "Linux 内核网络"
+	}
+	return "VPP "
+}
+
+// dpMode 当前生效的数据面实现。**按装配事实**：VppController 由装配处按数据面注入并
+// 如实自报 Status().Mode（内核数据面报 kernel、VPP 数据面报 vpp）。committed 配置可能
+// 已改而服务未重启，读视图若按 committed 作答就会与数据面实况相反（例如已 `set system
+// dataplane kernel` 但进程仍装着 VPP：所有运行态读数实际来自 VPP）。控制器未装配或
+// 未自报（旧装配/单测）时回落 committed；都取不到按 vpp。
 func (x *cliExecutor) dpMode() string {
 	if x.engine == nil {
 		return model.DataPlaneVPP
@@ -879,5 +905,5 @@ func (x *cliExecutor) dpMode() string {
 	if err != nil {
 		return model.DataPlaneVPP
 	}
-	return cfg.DataPlaneMode()
+	return dataPlaneModeAssembled(x.vpp, cfg)
 }

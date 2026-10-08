@@ -68,6 +68,16 @@
           }
         },
         "description": "冲突（引用存在/配额不足/会话锁占用）"
+      },
+      "Error501": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "该能力在**当前数据面**下未实现（如 Linux 内核网络下的抓包、NAT 会话表、LLDP 邻居、接口清零统计、VPP 重启）；message 说明数据面与替代路径（换数据面或换命令）。与 500 的分工：501 = 这条路在当前数据面不存在，500 = 执行出故障"
       }
     },
     "schemas": {
@@ -2754,6 +2764,14 @@
             },
             "type": "object"
           },
+          "dataplane": {
+            "description": "当前生效的数据面实现（**装配事实**：本进程实际装配的数据面实现，与\n`/vpp/status.dataplane` 同源）。`kernel`（Linux 内核网络）时宿主读数照旧，\n但数据面类读数（VPP 线程/buffer/内存、抓包、NAT 会话表、LLDP 邻居等）\n整体不适用——客户端据此分流，而不是把 `connected: false` 读成「VPP 该起来\n却没起来」。读视图以装配事实为准：committed 可能已改而服务未重启。\n",
+            "enum": [
+              "vpp",
+              "kernel"
+            ],
+            "type": "string"
+          },
           "hostname": {
             "description": "配置声明的 system.hostname 优先；未声明时回退主机实际主机名（os.Hostname）；两者都取不到时为空串（不编造）",
             "type": "string"
@@ -5404,6 +5422,7 @@
     },
     "/interfaces:clear-statistics": {
       "post": {
+        "description": "当前数据面为 Linux 内核网络时该能力未实现（清零内核计数需要重建接口，代价与\n影响面过大）：返回 501（message 指明数据面），而不是 502/503。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -5425,6 +5444,9 @@
           },
           "400": {
             "$ref": "#/components/responses/Error400"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
           },
           "503": {
             "description": "未接入（编排器未装配对应运行时）"
@@ -5662,6 +5684,7 @@
     },
     "/nat/sessions": {
       "get": {
+        "description": "当前数据面为 Linux 内核网络时该能力未实现：返回 501（message 指明数据面与替代\n路径），而不是 500——内核侧没有 VPP nat44 会话表这条事实源。\n",
         "responses": {
           "200": {
             "content": {
@@ -5700,6 +5723,9 @@
               }
             },
             "description": "OK"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
           }
         },
         "summary": "NAT44 会话表（运行态，空表返回 []）",
@@ -5862,6 +5888,7 @@
     },
     "/protocols/lldp/neighbors": {
       "get": {
+        "description": "当前数据面为 Linux 内核网络时该能力未实现：返回 501（message 指明数据面与替代\n路径），而不是 500——内核侧没有 LLDP 邻居表这条事实源。\n",
         "responses": {
           "200": {
             "content": {
@@ -5891,6 +5918,9 @@
               }
             },
             "description": "OK"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
           }
         },
         "summary": "LLDP 邻居表（运行态）",
@@ -8130,6 +8160,9 @@
           },
           "204": {
             "description": "已停止（未导出）"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
           }
         },
         "summary": "停止抓包（`?export=true` 时同时导出 pcap）",
@@ -8138,6 +8171,7 @@
         ]
       },
       "get": {
+        "description": "当前数据面为 Linux 内核网络时抓包尚未实现：返回 501（message 指明数据面与切回\nVPP 的路径），不是 503——VPP 数据面下的「抓包模块未接入（编排器未装配）」才是 503。\n",
         "responses": {
           "200": {
             "content": {
@@ -8148,6 +8182,9 @@
               }
             },
             "description": "OK"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
           }
         },
         "summary": "抓包会话状态与已导出 pcap 清单（单会话；导出文件落 /var/lib/nfvis/captures）",
@@ -8189,6 +8226,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
           }
         },
         "summary": "开始数据面抓包（达到 count 自动停止）",
@@ -8210,6 +8250,9 @@
               }
             },
             "description": "application/octet-stream"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
           }
         },
         "summary": "下载 pcap 文件",
@@ -8251,7 +8294,7 @@
     },
     "/vpp/restart": {
       "post": {
-        "description": "返回成功**即代表数据面可查询**（决策 #315）：本端点返回前完成两项有界判定——\n①裸 binary API socket 可连（VPP 进程真的活着，避免「重启动作被接受」被报成成功）；\n②nfvisd 连接管理器的**自身会话已换成新连接**（与 `/vpp/status` 同一事实源）。\n只看①不够：VPP 重启后 govpp 报断连前，管理器仍持有旧会话，「重启返回后立即查询」\n会撞 `write: broken pipe`（round34/35 现象）。任一判定在窗口内未满足则返回 500 并\n说明「VPP 已起来 / VPP 未起来」与「数据面连接在重启窗口内不可用」及下一步指引。\n",
+        "description": "返回成功**即代表数据面可查询**（决策 #315）：本端点返回前完成两项有界判定——\n①裸 binary API socket 可连（VPP 进程真的活着，避免「重启动作被接受」被报成成功）；\n②nfvisd 连接管理器的**自身会话已换成新连接**（与 `/vpp/status` 同一事实源）。\n只看①不够：VPP 重启后 govpp 报断连前，管理器仍持有旧会话，「重启返回后立即查询」\n会撞 `write: broken pipe`（round34/35 现象）。任一判定在窗口内未满足则返回 500 并\n说明「VPP 已起来 / VPP 未起来」与「数据面连接在重启窗口内不可用」及下一步指引。\n\n当前数据面为 Linux 内核网络时没有 VPP 可重启：返回 **501**（message 指明数据面与\n切回 VPP 的路径），不是 500——这不是执行故障，而是该能力在本数据面不存在。\n",
         "responses": {
           "202": {
             "$ref": "#/components/responses/ConfigAccepted"
@@ -8268,6 +8311,9 @@
               }
             },
             "description": "VPP 未起来（大页池被清空/启动失败等）或 **数据面连接未在窗口内恢复**（决策 #315）；\nmessage 含成因与指引（`show vpp` / `request vpp restart` / `journalctl -u vpp`）。\n"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
           }
         },
         "summary": "按 committed 配置重建 startup.conf 并重启 VPP（FR-SYS-009，super-user）",

@@ -15,7 +15,8 @@
 #   -y, --yes               跳过确认（自动化；非交互场景必给）
 #       --admin-password P  预置 admin 口令（至少 8 个字符）。不给则由 nfvisd 生成随机一次性口令，
 #                           首次启动后由本脚本从日志里取出来打印。
-#       --no-start          只安装，不起服务（服务相关自检转为不可判定）
+#       --no-start          只安装，不起服务（服务相关自检转为不可判定；
+#                           数据面选择不写入配置——起来后自行 set system dataplane）
 #       --dataplane MODE    数据面实现：vpp（缺省）| kernel（Linux 内核网络）。
 #                          两种数据面的软件包都会安装，以便之后随时切换（切换＝改配置 + 重启服务）
 #       --verify            只体检（假定已安装；不安装）
@@ -35,6 +36,13 @@ ASSUME_YES=0; DO_START=1; DO_INSTALL=1; KEEP=0; ADMIN_PW=""
 # 两种数据面的软件包**都装**（决策 #406）——`--dataplane` 只决定这次用哪一套跑。
 # 安装期选择落在 committed 配置的 system.dataplane（产品内唯一事实源），安装完成后写库并重启生效。
 DATAPLANE=${NFVIS_DATAPLANE:-vpp}
+# DATAPLANE_EXPLICIT：这个取值是「用户显式给的」（--dataplane 或 NFVIS_DATAPLANE）还是缺省 vpp。
+# 只影响提示：--no-start 时数据面选择不写库（R2-19①），显式给过就必须点名，不能静默丢弃。
+DATAPLANE_EXPLICIT=0
+[ -n "${NFVIS_DATAPLANE:-}" ] && DATAPLANE_EXPLICIT=1
+# DATAPLANE_APPLIED：本次是否真把 system.dataplane=kernel 写进了 committed 配置（产品内唯一事实源）。
+# 只有写成功才允许停 VPP（R2-19②）——写失败时机器仍按缺省 vpp 运行，停 VPP 会把正在用的数据面打瘸。
+DATAPLANE_APPLIED=0
 CLI_PW=""; OTP=""; PW_SRC=""; PW_CONFIRMED=0
 NFVIS_DB=${NFVIS_DB:-/var/lib/nfvis/nfvis.db}
 FRESH_DB=1 # 配置库尚不存在 = 首次引导（--admin-password 与一次性口令都只在这种情况下出现）
@@ -74,7 +82,8 @@ usage() {
 用法：nfvis-v<版本>.run [选项]
   -y, --yes               跳过确认（自动化；非交互场景必给）
       --admin-password P  预置 admin 口令（至少 8 个字符，仅限字母数字与 @._+=-）
-      --no-start          只安装，不起服务（服务相关自检转为不可判定）
+      --no-start          只安装，不起服务（服务相关自检转为不可判定；
+                          数据面选择不写入配置——起来后自行 set system dataplane）
       --dataplane MODE    数据面实现：vpp（缺省）| kernel（Linux 内核网络）。
                           两种数据面的软件包都会安装，以便之后随时切换（切换＝改配置 + 重启服务）
       --verify            只体检（假定已安装；不安装）
@@ -201,9 +210,40 @@ apply_dataplane() {
 ' "$out"
         return 0
     fi
+    # 写成功 = 产品内的事实源已是 kernel。后续是否停 VPP 以此为准（R2-19②），
+    # 不随后续 restart/就绪检测的成败改变。
+    DATAPLANE_APPLIED=1
     info "已写入数据面配置：system.dataplane = kernel；重启服务使其生效"
     systemctl restart nfvis.service >/dev/null 2>&1 || info "重启 nfvis.service 失败（见自检项）"
     if wait_for 60 test "$(ui_code)" = 200; then ok "内核数据面已生效（服务重启后控制面恢复）"; else info "重启后控制面未就绪（见自检项）"; fi
+}
+
+# stop_vpp_for_kernel 让「本次数据面为 kernel」的现场与文案一致（R2-19②）。
+#
+# 由来：首装时配置库还是空的 ⇒ nfvisd 按缺省（vpp）装配并会把 VPP 拉起来；而切到 kernel 后
+# 产品**不再管理 VPP**，若不显式停掉，机器上会长期留着一个运行中、却不参与任何转发的 VPP
+# （与 start_services 里「未启动」的文案相反）。best-effort：成功/失败都如实打一行。
+# 写库未成功时**不停**——那时机器仍以缺省 vpp 运行，停 VPP 会把正在用的数据面打瘸。
+stop_vpp_for_kernel() {
+    [ "$DATAPLANE" = "kernel" ] || return 0
+    if [ "$DATAPLANE_APPLIED" != 1 ]; then
+        info "数据面配置未写入成功（本次仍按缺省 vpp 运行），不停 VPP；切到 kernel 后请执行 systemctl stop vpp.service"
+        return 0
+    fi
+    if ! systemctl list-unit-files vpp.service >/dev/null 2>&1; then
+        info "未找到 vpp.service，无需停止 VPP"
+        return 0
+    fi
+    if [ "$(systemctl is-active vpp.service 2>/dev/null)" != "active" ]; then
+        info "VPP 未在运行，无需停止（systemctl is-active vpp.service ≠ active）"
+        return 0
+    fi
+    if systemctl stop vpp.service >/dev/null 2>&1 &&
+        [ "$(systemctl is-active vpp.service 2>/dev/null)" != "active" ]; then
+        info "VPP 已停止：首次引导时 nfvisd 按缺省（vpp）把它拉起过；本机数据面已切到 kernel，产品不再管理 VPP"
+    else
+        info "VPP 停止失败（systemctl stop vpp.service 未生效）——它不参与 kernel 数据面转发；请手工执行 systemctl stop vpp.service"
+    fi
 }
 
 do_install() {
@@ -263,7 +303,7 @@ start_services() {
     # 时 nfvisd 会按需拉起（无需重新安装）。
     if [ "$DATAPLANE" = "kernel" ]; then
         if systemctl list-unit-files vpp.service >/dev/null 2>&1; then
-            systemctl disable vpp.service >/dev/null 2>&1 && info "VPP 已安装并设为开机不自启（本次数据面为 kernel，未启动；切回 vpp 时由 nfvis 拉起）"
+            systemctl disable vpp.service >/dev/null 2>&1 && info "VPP 已安装并设为开机不自启（本次数据面为 kernel，本脚本不主动启动它；首次引导时 nfvisd 可能按缺省 vpp 把它拉起——写完 kernel 配置后本脚本会停掉，见后续输出）"
         else
             info "未找到 vpp.service（本次数据面为 kernel，不影响使用）"
         fi
@@ -325,7 +365,14 @@ run_checks() {
     fi
 
     if [ "$DATAPLANE" = "kernel" ]; then
-        skip "VPP 运行态检查（本次数据面为内核网络，VPP 按设计未启动）"
+        skip "VPP 运行态检查（本次数据面为内核网络，VPP 不参与转发）"
+        # 现场与文案一致性的独立读数（R2-19②）：内核数据面下 VPP 不该在跑。装了没跑=正常；
+        # 仍在跑则如实点出（不判失败——闲置的 VPP 不影响 kernel 数据面，只是不该留下）。
+        if [ "$(systemctl is-active vpp.service 2>/dev/null)" = "active" ]; then
+            info "vpp.service 仍在运行（不参与转发；如需停掉：systemctl stop vpp.service）"
+        else
+            info "vpp.service 未运行（systemctl is-active vpp.service ≠ active）"
+        fi
         # VPP 仍须**已安装**：它是"随时切回 vpp"的前提（独立事实源取 dpkg，不依赖它是否在跑）。
         local vppver
         vppver=$(dpkg-query -W -f='${Status}|${Version}' vpp 2>/dev/null || echo "|")
@@ -415,18 +462,19 @@ run_checks() {
     # 口令来源与可靠性：
     #   · 首次引导（配置库尚不存在）：--admin-password 或本次生成的随机一次性口令 —— 可靠，
     #     此时登录失败是真失败；
-    #   · 升级/重装：配置库里已有用户，那个口令不适用；只能用日志里的**历史**一次性口令试试
-    #     （可能早被改过）—— 因此登录失败记不可判定，不拿它判"失败"（工具假红同样有害）。
+    #   · 升级/重装（`--verify` 常走的路径）：--admin-password 不对产品生效（只用于首次引导），
+    #     但它是操作者**明确给的凭据**，优先拿它试读；其次才是日志里的**历史**一次性口令
+    #     （可能早被改过）——两者都不可靠：登录失败记不可判定，不判"失败"（工具假红同样有害）。
     PW_RELIABLE=0
     if [ -n "$ADMIN_PW" ] && [ "$FRESH_DB" = 1 ]; then
         CLI_PW="$ADMIN_PW"; PW_SRC="本次预置的口令"; PW_RELIABLE=1
+    elif [ -n "$ADMIN_PW" ]; then
+        CLI_PW="$ADMIN_PW"; PW_SRC="本机提供的口令（--admin-password，升级/重装路径）"
+        info "配置库已存在：--admin-password 不对产品生效（只用于首次引导），本次只拿它试读 CLI（失败记不可判定）"
     elif grab_otp; then
         CLI_PW="$OTP"
         if [ "$FRESH_DB" = 1 ]; then PW_SRC="本次首次启动的一次性口令"; PW_RELIABLE=1
         else PW_SRC="日志里的历史一次性口令"; fi
-    elif [ -n "$ADMIN_PW" ]; then
-        PW_SRC=""
-        info "配置库已存在（升级/重装）：本次未用 --admin-password 做自检，它只对首次引导生效"
     fi
     if [ -z "$CLI_PW" ]; then
         skip "CLI 经产品路径的读写检查（本机未提供口令且日志中无可用口令）"
@@ -457,6 +505,16 @@ run_checks() {
     out=$(cli nfvis-cli "$CLI_PW" "show vpp")
     if cli_is_err "$out"; then
         bad "CLI show vpp 报错：$(printf '%s' "$out" | head -2 | tr '\n' ' ')"
+    elif [ "$DATAPLANE" = "kernel" ]; then
+        # 内核数据面下 `show vpp` **按设计**不报 VPP 版本（如实回 `dataplane: kernel / version: (未知) /
+        # connected: no`，见 cmd/nfvisd/dataplane.go 的 kernelVppController）——拿 VPP 版本号当判据
+        # 在 kernel 机器上必然假红（R2-9：首装给口令 ⇒ PW_RELIABLE=1，必判失败、退出码 1）。
+        # 这里改断言它**如实反映内核数据面**。
+        if printf '%s' "$out" | grep -q 'dataplane: kernel'; then
+            ok "CLI show vpp：如实反映内核数据面（dataplane: kernel；内核下不报 VPP 版本属设计行为）"
+        else
+            bad "CLI show vpp 未如实反映内核数据面（原文：$(printf '%s' "$out" | head -4 | tr '\n' ' ')）"
+        fi
     elif printf '%s' "$out" | grep -q "$EXPECT_VPP"; then
         ok "CLI show vpp：nfvisd 已连上 VPP（$EXPECT_VPP）"
     else
@@ -486,7 +544,8 @@ summary() {
     printf '自检：通过 %d / 失败 %d / 不可判定 %d\n' "$PASS" "$FAILED" "$SKIPPED"
     if [ "$FAILED" -gt 0 ]; then
         printf '失败项：%s\n' "$FAILED_ITEMS"
-        printf '\n未通过——请按上方失败项处理后重跑：./nfvis-*.run --verify\n'
+        # 补救命令要带上本次的数据面：--verify 缺省按 vpp 判据体检，kernel 机器上会再次假红（R2-9）。
+        printf '\n未通过——请按上方失败项处理后重跑：./nfvis-*.run --verify --dataplane %s\n' "$DATAPLANE"
         return 1
     fi
     cat <<'EOF'
@@ -507,7 +566,7 @@ main() {
             -y | --yes) ASSUME_YES=1 ;;
             --admin-password) shift; ADMIN_PW="${1:-}"; [ -n "$ADMIN_PW" ] || die "--admin-password 需要值" ;;
             --no-start) DO_START=0 ;;
-            --dataplane) shift; DATAPLANE="${1:-}"; [ -n "$DATAPLANE" ] || die "--dataplane 需要值" ;;
+            --dataplane) shift; DATAPLANE="${1:-}"; [ -n "$DATAPLANE" ] || die "--dataplane 需要值"; DATAPLANE_EXPLICIT=1 ;;
             --verify) DO_INSTALL=0 ;;
             --keep) KEEP=1 ;;
             --payload) shift; PAYLOAD="${1:-}"; [ -n "$PAYLOAD" ] || die "--payload 需要目录" ;;
@@ -554,6 +613,7 @@ EOF
         if [ "$DO_START" = 1 ]; then
             start_services
             apply_dataplane
+            stop_vpp_for_kernel
             if [ -n "$ADMIN_PW" ] && [ "$FRESH_DB" = 1 ]; then
                 rm -f /etc/systemd/system/nfvis.service.d/10-offline-init-password.conf
                 rmdir /etc/systemd/system/nfvis.service.d 2>/dev/null || true
@@ -562,6 +622,11 @@ EOF
         fi
     else
         info "只体检模式（不安装、不起服务）"
+    fi
+    # R2-19①：--no-start 时数据面选择既不写配置、也不起服务去应用它——显式给过就必须点名，
+    # 不能静默丢弃（否则安装器报成功、机器仍以缺省 vpp 运行，用户以为已经是 kernel）。
+    if [ "$DO_START" != 1 ] && [ "$DATAPLANE_EXPLICIT" = 1 ]; then
+        info "本次不写数据面配置（--dataplane $DATAPLANE 未生效）：--no-start 只安装不起服务；服务起来后请用 nfvis-cli 登录提交 set system dataplane $DATAPLANE"
     fi
     run_checks
     summary || return 1

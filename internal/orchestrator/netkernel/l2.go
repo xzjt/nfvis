@@ -55,6 +55,20 @@ func (p *Provider) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch
 		if declared[cur] {
 			continue
 		}
+		// 只摘**本产品 enslave 的成员**：libvirt 自建的 VM tap（vnetN，`info_kind=tun`）与
+		// ApplyVxlan 自管的隧道口（vxlan）不由本方法 enslave，一律不碰——旧实现按内核实况
+		// 全量摘除，任何一次交换机重放（服务重启/升级/给同台交换机加端口）都会把运行中 VM 的
+		// tap 从 bridge 摘掉：VM 仍在跑、产品零报错，宿主到 guest 的 L2 静默断流（R2-1，P0）。
+		// 物理口/子接口没有 info_kind（不是虚拟设备），属正常可释放成员。
+		row, ok := p.linkDetail(ctx, cur)
+		if !ok {
+			// 读不到设备详情：不猜、不摘（保守）——摘错的代价是运行中 VM 的 L2 静默断流，
+			// 留下的陈旧成员至少是读视图可见的（且该口转作其它角色时归属会被自然改走）。
+			continue
+		}
+		if row.LinkInfo != nil && (row.LinkInfo.InfoKind == "tun" || row.LinkInfo.InfoKind == "vxlan") {
+			continue
+		}
 		if err := p.ipBest(ctx, "link", "set", "dev", cur, "nomaster"); err != nil {
 			return err
 		}

@@ -31,6 +31,15 @@ func newQoSManager(run Runner) *qosManager {
 //
 // 幂等：先删本方向已有的 filter 再 add——tc 的 filter add 不报错但会**重复追加**（真机实测），
 // 只 add 会叠出多条计量器；重复绑定必须收敛成一条。
+//
+// 判决为什么写成 `conform-exceed drop/continue`（R2-3，真机 spike 实测）：
+// 同一 clsact hook 上各族共用（QoS pref 10 / 镜像 20 / 风暴抑制 30/40），内核按 pref 升序评估，
+// **首个返回判决 ≥0 的 filter 一命中就返回、后续 filter 不再被评估**。police 不写判决时
+// 合规包返回 TC_ACT_OK(0) ⇒ 低 pref 的 QoS 会把高 pref 的风暴抑制/镜像**整族静默屏蔽**
+// （两条命令都成功、filter 都在位、被屏蔽那边计数恒 0）。`drop/continue` 的语义是
+// **超限丢、未超限继续遍历**（slash 前 = 超限判决，后 = 未超限判决），既保住限速本身，
+// 又把未超限的包放给同 hook 的其它族。反向写法 `continue/drop`（超限继续、未超限被丢）
+// 语义相反，不要用。
 func (m *qosManager) Bind(ctx context.Context, dev, dir string, cirBps, cbsBytes int) error {
 	if dev == "" {
 		return fmt.Errorf("限速接口名不能为空")
@@ -54,7 +63,7 @@ func (m *qosManager) Bind(ctx context.Context, dev, dir string, cirBps, cbsBytes
 		"matchall", "action", "police",
 		"rate", strconv.Itoa(cirBps)+"bit",
 		"burst", strconv.Itoa(cbsBytes),
-		"drop")
+		"conform-exceed", "drop/continue")
 }
 
 // Unbind 摘除某方向的限速计量器。
@@ -86,7 +95,22 @@ func (m *qosManager) Bound(ctx context.Context, dev, dir string) (bool, error) {
 		}
 		return false, fmt.Errorf("tc filter show dev %s %s: %w（%s）", dev, dir, err, trimOut(out))
 	}
-	return qosHasPref(out, qosFilterPref), nil
+	return qosBoundAt(out, qosFilterPref), nil
+}
+
+// qosBoundAt 输出里"本族的限速过滤器"是否在位：按 pref 定位本族的块，且该块的 police 判决是
+// **超限丢弃**（新写法 `action drop/continue` 与旧写法 `action drop` 都认，见 tcPoliceDrops）。
+//
+// 为什么按块而不是整个输出做包含判断：同一条 hook 上可能挂着别的族的 police（风暴抑制）。
+// 为什么还要求"超限丢弃"判决：判决被改成"超限继续"（或成为别的族的非丢弃过滤器）时，
+// 报"已绑定"就是谎报——限速并没有在拦包。
+func qosBoundAt(out string, pref int) bool {
+	for _, block := range tcFilterBlocks(out) {
+		if qosHasPref(block, pref) && tcPoliceDrops(block) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- 与 tc/clsact 打交道的共用底座（本包 QoS 与端口镜像族共用） ----------

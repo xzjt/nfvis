@@ -391,10 +391,11 @@ func RunWizard(sess *Session, interactive bool, in io.Reader, out io.Writer) err
 		fmt.Fprintln(out, "已中止（未做任何变更）。")
 		return nil
 	}
+	// 本问题的答案就是**核列表**（如 `2-5`）：这里只记录，解析与校验一律交给
+	// `parseCoreListText` / `deriveSetupPlan`（下一问与计划推导处）。此处不得再放
+	// 「数据面取值」一类校验——v3 曾把数据面校验拷到这里，于是按提示语输入核列表
+	// 立即报「数据面 "2-5" 不合法」，只有空行能过。
 	ans.Isolated = line
-	if line != "" && line != "vpp" && line != "kernel" {
-		return fmt.Errorf("数据面 %q 不合法（vpp|kernel）", line)
-	}
 	// 内核数据面不用 VPP：跳过 VPP 线程问答（deriveSetupPlan 同样整段跳过）。
 	if ans.DataPlane == "kernel" {
 		return finishWizard(sess, f, ans, rd, out)

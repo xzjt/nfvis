@@ -558,8 +558,27 @@ function renderFirewallCard(fw) {
 
 
 // 数据面卡。
+// `dataplane` 是**装配事实**（本进程实际装了哪套数据面实现）：kernel 下 VPP 整组读数
+// 都不适用——先如实点明当前数据面，其余行按内核口径呈现，不显示「未连接」（那会被读成
+// 「VPP 该起来却没起来」，把人引向一条无效路径）；读数取不到一律显示「—」。
 function renderVPP(vpp) {
-  fill($('vpp-list'), vpp && vpp.__err ? [['读取失败', vpp.__err]] : [
+  const l = $('vpp-list');
+  if (vpp && vpp.__err) {
+    fill(l, [['读取失败', vpp.__err]]);
+    return;
+  }
+  const dp = vpp && vpp.dataplane;
+  if (dp === 'kernel') {
+    fill(l, [
+      ['当前数据面', 'Linux 内核网络（未使用 VPP）'],
+      ['版本', vpp && vpp.version],
+      ['连接状态', '不适用（未使用 VPP）'],
+      ['说明', vpp && vpp.last_error],
+    ]);
+    return;
+  }
+  fill(l, [
+    ['当前数据面', dp === 'vpp' ? 'VPP' : undefined],
     ['版本', vpp && vpp.version],
     ['连接状态', vpp && vpp.connected === true ? '已连接' : (vpp && vpp.connected === false ? '未连接' : undefined)],
     ['待重启生效', vpp && (vpp.pending_restart ? '是' : '否')],
@@ -1266,7 +1285,9 @@ export const VIEWS = {
   'diagnostics': {
     // 诊断页是动作面板：ping / traceroute / 清零 / 看服务端日志都按需执行（点按钮才拉），
     // 进页面不自动拉日志——大段文本不该跟着页面刷新反复下载。
-    render() {},
+    // 页面说明按**当前数据面**（/system/status.dataplane，装配事实）切换：内核数据面下
+    // ping 走宿主网络栈，不能沿用「只覆盖数据面（VPP）」的说法。
+    render(d) { renderDiagPlaneNote(d['/system/status']); },
   },
   'capture': {
     render(d) { pageWarn(d); renderCapture(d['/vpp/capture']); },
@@ -3820,6 +3841,18 @@ function pingBody(host, count, withVrf) {
   const v6 = $('diag-ipv6');
   if (v6 && v6.checked) body.ipv6 = true;
   return body;
+}
+
+// 诊断页说明按**当前数据面**（装配事实）切换：VPP 数据面下 ping 只覆盖数据面（管理口在
+// 内核平面，要到宿主机上 ping）；内核数据面下 ping 由宿主网络栈发出（管理口可直接测）。
+// 数据面取不到时保留静态文案（VPP 口径，也是缺省数据面）。
+function renderDiagPlaneNote(st) {
+  const note = $('diag-plane-note');
+  if (!note) return;
+  const kernel = !!(st && st.dataplane === 'kernel');
+  note.textContent = kernel
+    ? '内核数据面下 ping 由宿主网络栈发出（可测管理口与 VRF 内目标）。目标在 VRF 内时（如 VNF/交换机域）须在上方填该 VRF 名，否则会报 no egress interface（与 CLI ping … vrf 同源）。traceroute 走宿主侧 ICMP/ICMPv6，可测管理口；其 vrf 参数不支持（要经 VRF 测请用 ping vrf）。勾选 IPv6 后 ping 走 v6 平面、traceroute 走宿主侧 ICMPv6。'
+    : 'ping 只覆盖数据面（VPP）——管理口在内核平面，请在宿主机上 ping。目标在 VRF 内时（如 VNF/交换机域）须在上方填该 VRF 名，否则会报 no egress interface（与 CLI ping … vrf 同源）。traceroute 走宿主侧 ICMP/ICMPv6，可测管理口；其 vrf 参数不支持（要经 VRF 测请用 ping vrf）。勾选 IPv6 后 ping 走 v6 平面、traceroute 走宿主侧 ICMPv6。';
 }
 
 async function diagPing() {

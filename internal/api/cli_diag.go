@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/schema"
 )
 
@@ -32,6 +33,11 @@ func (x *cliExecutor) execPing(class string, t []string) string {
 		return "%% 无权限执行 ping\n"
 	}
 	if x.diag == nil {
+		// 兜底文案按**装配事实**分叉：生产装配在内核数据面下注入的是内核 Diag（走宿主网络栈），
+		// 这里命中即诊断运行时确实没接上——内核下不能把原因写成「VPP 未接入」（VPP 本就不在场）。
+		if x.dpMode() == model.DataPlaneKernel {
+			return "%% ping 不可用（诊断运行时未接入；当前数据面为 Linux 内核网络，ping 由宿主网络栈发出）\n"
+		}
 		return "%% ping 不可用（VPP 未接入）\n"
 	}
 	var host, source, vrf string
@@ -148,6 +154,10 @@ func (x *cliExecutor) execMonitor(class string, t []string) string {
 		// 如实描述（与 `show interfaces <n> statistics` 同口径）：stats 是接入了的，
 		// 取不到数是**这一刻连接没就绪/读取失败**（VPP 重启后连接陈旧即属此列，
 		// 取数路径会自行重连重试）；另一种成因是接口名本身不在数据面。
+		// 内核数据面下没有 VPP stats 通道，按数据面点名（不让人去查「stats 连接」）。
+		if x.dpMode() == model.DataPlaneKernel {
+			return fmt.Sprintf("%% 接口 %s 统计暂不可用（当前数据面为 Linux 内核网络，无 VPP 运行态读数）\n", ifname)
+		}
 		return fmt.Sprintf("%% 接口 %s 统计暂不可用（不存在或 stats 连接未就绪）\n", ifname)
 	}
 	var b strings.Builder
@@ -170,6 +180,10 @@ func (x *cliExecutor) execClear(class string, t []string) string {
 		return "%% 语法: clear interfaces statistics [<ifname>]\n"
 	}
 	if x.diag == nil {
+		// 同上：内核数据面下没有 VPP 计数可清零，兜底文案点名数据面（不写「VPP 未接入」）。
+		if x.dpMode() == model.DataPlaneKernel {
+			return "%% clear 不可用（诊断运行时未接入；当前数据面为 Linux 内核网络，无 VPP 计数可清零）\n"
+		}
 		return "%% clear 不可用（VPP 未接入）\n"
 	}
 	ifname := ""

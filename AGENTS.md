@@ -1120,11 +1120,43 @@
   100% 丢失、解绑恢复；**QoS** 8 kbit/s 下 `tc -s` 记 dropped 130/147、解绑恢复；**端口安全**白名单外 MAC
   100% 丢失、加入宿主 MAC 后恢复；**风暴抑制** 8 kbit/s 下 dropped 796/820、撤除后 0。顺带补齐内核数据面
   **域定义单测**（`<interface type='bridge'>` + `<driver name='vhost'>` + VLAN，且不出现 vhostuser/shared/.sock）
-  ——此前 `buildBridgeIface` 零覆盖。**仍未验证**：NAT 的真实转发（同二层构造不出转发流量）、
-  VM 侧 virtio+vhost-net 连通性（缺云镜像/资源池需重启）、未实现族真机逐族拒绝、`.run` 自解压完整闭环。
-- 已定决策 313 项见规格书附录 A（main/1.x 线 #1~#201；本仓库当前在 **v2/2.x 开发线**，决策自 **#300** 起、
+  ——此前 `buildBridgeIface` 零覆盖。**上述四条未验证项随后关闭两条**（NAT 真实转发见 #410、vhost-net 连通性见 #409）；
+  未实现族真机逐族拒绝与 `.run` 自解压完整闭环仍未做（见 `docs/v3待做.md`）。
+- **内核数据面 VNF 接入真机验证（决策 #409，virtio + 宿主 tap + vhost-net）**：先修掉一处错误约束——`vhost-user` 型
+  vNIC 曾被**无条件**要求大页（该约束源自 VPP 的共享内存形态；内核数据面下同名类型落成 virtio + 宿主 tap +
+  vhost-net，没有共享内存对端），判据加数据面条件后普通内存即可建 VNF。真机逐条核对：域定义
+  `<interface type='bridge'>` + `<source bridge='vs-lan'>` + `<model type='virtio'>`；QEMU 侧
+  `{"type":"tap",...,"vhost":true,...}`（vhost-net 已启用）；`bridge link show dev vnet2` 显示
+  `master vs-lan state forwarding`；guest 由产品 cloud-init 静态编址，宿主 `ping -n 20` **20/20、0% 丢失**
+  （宿主 → 内核 bridge → tap → vhost-net → guest 双向通）。顺带入册两条教训：**镜像下载必须核对大小/摘要**
+  （直连被静默截断而 `request images upload` 照常报成功、guest 不引导）；改 cloud-init 后 `request … restart`
+  只是重启运行中的域，须 `stop` + `start` 才按新定义重建（`dumpxml --inactive` 可核对）。证据
+  `docs/evidence/v3-round1-clean-snapshot-datapath-switch.txt` §10。
+- **NAT 真实转发验证 + 转发前置条件三条收口（决策 #410）**：把内网侧放进 netns+veth（挂在产品的 L3 交换机
+  VRF 里）后在**转发方向**抓包取证——实验组源被 masquerade 改写为 `192.168.99.1`、对照组保持 `10.99.0.3`。
+  两次弯路如实登记（对 reply 方向期望 SNAT；用「宿主 ping 内网地址」当 forwarded 流）：**先想清楚这条流走
+  INPUT/OUTPUT/FORWARD 与 conntrack 的哪个方向**再设计对照。顺带修掉三条「命令成功、包全丢」缺陷：F1 产品从不设
+  `net.ipv4.ip_forward`（干净快照上的 1 是 Docker 顺手开的）；F2 宿主 `FORWARD` 策略 DROP 吃掉数据面流量；
+  F3 `delete nat` 残留空 `inet nfvis-nat` 表。**⚠️ F2 的首次归因已由 #413 更正（真机四态 A/B 证伪）**：自建
+  `-10` 链的 accept **不能**豁免宿主策略 drop（同 hook 各 base chain 相互独立、drop 全局生效）；真正的处置是
+  检测 + 告警（`FORWARD_POLICY_DROP`）+ 照做指引，见 #413。证据同文件 §11。
+- **v3 round2 半程体检与修复批次（决策 #412~#418，2026-10-08）**：对 v3 全部改动（#404~#411，63 文件 / ~8.7k 行）
+  做了 7 路只读审计 + 主会话逐条自证（必要时取内核/iproute2 上游源码作外部事实源；tc 判决语义与 nft 转发语义
+  另在 nfvis-vm 上跑了五轮能力 spike），产出体检报告 `docs/evidence/v3-round2-midpoint-audit.txt`
+  （25 条发现 + 9 条账目疏漏）。**修复族**：**#412** 内核对象所有权与重放（交换机重放不再误摘 libvirt tap/vxlan
+  口；恢复段序改依赖序；bond/vxlan 属性变更不再被「已存在」吞掉；解绑只在归属确为该对象时进行；零成员交换机
+  进列表、不再编造 BD-ID；接口类型判定补 `-d`；派生名加宽哈希 + 提交期拒撞名）；**#413** 转发前置条件如实化
+  （归因更正 + 宿主 FORWARD 策略检测告警 + IPv6 转发开关 + 链重建幂等 + 内核侧告警落点；顺带修复 `SetSRIOV`
+  装配顺序回归）；**#414** 同接口多族共存（police 改 `conform-exceed drop/continue`、mirred 尾随 `continue`、
+  风暴广播档保持裸 `drop`；实况读视图按消费方字段填内核事实）；**#415** 提交期校验补齐（NAT 跨转发域 /
+  cross_connect / ECMP / vNIC 接入 l3 交换机 / icmp 带端口 / 派生名超长与撞名；内核诊断有界）；
+  **#416** 安装器（内核分支 `show vpp` 自检分叉、`--no-start` 不再静默丢弃 `--dataplane`、内核写库后停 VPP、
+  离线自检包清单提取不再空转假绿）；**#417** 用户可见面如实化（读视图取**装配事实**、Web 总览「数据面」卡、
+  `/system/status.dataplane`、一批内核口径文案、REST 能力不支持→501）；**#418** 账目回填（本段即其一）。
+  真机复核证据 `docs/evidence/v3-round2-fix-round.txt`。
+- 已定决策 320 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线 #300~#403（其中 #350 撤回）、
-  **v3 线自 #404 起**（分支 `v3`，已有 #404~#411））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+  **v3 线自 #404 起**（分支 `v3`，已有 #404~#418））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。

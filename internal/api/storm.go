@@ -76,7 +76,10 @@ func (x *cliExecutor) stormControlBlock(ifc model.InterfaceConfig) (string, map[
 		return b.String(), out
 	}
 	rt := map[string]any{"available": true, "attached": dp.Attached}
-	if dp.Attached {
+	// VPP 的"接口 L2 槽上挂哪张分类表"是 VPP 侧概念：内核数据面（tc 过滤器）没有这层结构，
+	// 不发射这个字段，避免读视图出现一个恒 0 的假读数（R2-15②）。
+	kernel := x.dpMode() == model.DataPlaneKernel
+	if dp.Attached && !kernel {
 		rt["attached_l2_table"] = dp.AttachedL2Table
 	}
 	// 数据面实况：逐类（配置的类必须给读数或如实说明；未配置的类不列）。
@@ -97,10 +100,15 @@ func (x *cliExecutor) stormControlBlock(ifc model.InterfaceConfig) (string, map[
 		default:
 			one["cir_kbps"] = kd.CirKbps
 			line := fmt.Sprintf("%s policer 在（cir %d kbps）", label, kd.CirKbps)
-			if kd.Table != nil {
+			switch {
+			case kd.Table != nil:
 				one["table"] = kd.Table
 				line += fmt.Sprintf("；分类表 #%d（掩码 %s，会话 %d）", kd.Table.Index, kd.Table.Mask, kd.Table.Sessions)
-			} else {
+			case kernel:
+				// 内核数据面没有 VPP 的"分类表 / 接口 L2 槽"（限速就是 tc 过滤器本身）：
+				// 不套用 VPP 话术，否则会把"正在限速"描述成"分类表未挂（未收敛）"。
+				line += "；限速落在内核 tc 入向过滤器上"
+			default:
 				// 表不在实况链上（决策 #401）：不再笼统报「登记缺失」——登记可能在，只是该口 L2
 				// 槽上无本类分类表（被其它对象占用，或该类表未收敛）。
 				line += "；分类表未挂（接口 L2 槽上无本类分类表——可能被其它对象占用或未收敛）"

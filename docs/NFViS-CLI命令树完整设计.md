@@ -374,6 +374,8 @@ help [command]
 > | `traceroute <host>` | 宿主侧 raw ICMP | ✅ | ✅（`traceroute ipv6`） | ❌ 明确拒绝 + 替代（`ping … vrf`） | 需 root/CAP_NET_RAW；可测管理口 |
 >
 > 三面同源：CLI（`?` 候选含 `ipv6`）、REST（`POST /diagnostics/ping|traceroute` 请求体 `ipv6` 布尔）、Web 诊断页（`diag-ipv6` 勾选，走既有 `data-write data-op` 门禁）。
+>
+> **内核数据面下的差别**：`ping`/`traceroute` 都走**宿主网络栈**（不经 VPP FIB），`vrf` 经 `ip vrf exec` 进入该转发域（因此经 VRF 的 traceroute 与经 VRF 的 ping 一样可用）。两条共同的边界：**内部超时上界**（ping 30 s / traceroute 60 s，与 VPP 侧同档）、**`count` 上界 100**（越界报可读错误、不静默截断）、**目标 / 源地址 / VRF 名以 `-` 开头直接拒绝**（这些值原样进 argv，会被底层 ping/traceroute 当选项解析）。
 
 ---
 
@@ -420,16 +422,23 @@ discard | exit                    # discard 丢弃 candidate；exit 有未提交
 
 ```
 [edit system]
-set dataplane <vpp|kernel>                           # 数据面实现（决策 #404）：vpp = VPP 数据面（DPDK 接管物理口、
+set dataplane <vpp|kernel>                           # 数据面实现：vpp = VPP 数据面（DPDK 接管物理口、
                                                      #   vhost-user/memif 接入 VNF/容器）；kernel = Linux 内核网络数据面
                                                      #   （内核 bridge/VRF/nftables/vxlan；VNF 用 virtio 网卡 + 宿主 tap +
                                                      #   vhost-net 接入）。**整机单数据面**：同一时刻只启用一种，变更需
                                                      #   重启服务（systemctl restart nfvis）生效；缺省（未配置）= vpp，
-                                                     #   与引入该开关之前的行为一致。内核数据面下 ACL/QoS/端口镜像/
-                                                     #   DHCP 中继与服务器/DNS 代理/风暴抑制/端口安全/LLDP/memif
-                                                     #   尚未实现，**提交期直接拒绝**（不留「配了不生效」的假功能）；
-                                                     #   另有两条内核侧约束在提交期校验：对象名 ≤15 字符、VNF 虚拟网卡
-                                                     #   不能直接作三层接口（改用「接入已配网关的二层交换机」）。
+                                                     #   与引入该开关之前的行为一致。
+                                                     #   **内核侧已实现**：物理口/bond/L2 交换机/L3 交换机/静态路由/
+                                                     #   NAT44/VXLAN/诊断、ACL、QoS 端口限速、端口镜像、风暴抑制、
+                                                     #   端口安全（五族同接口可共存）。
+                                                     #   **未实现、提交期直接拒绝**：DHCP 中继、DHCP 服务器、数据面
+                                                     #   DNS 代理、LLDP、memif 容器接入、MAC 学习上限、抓包；以及语义
+                                                     #   不同的形态：cross-connect、静态路由多下一跳（ECMP）、NAT 跨
+                                                     #   转发域、ACL protocol icmp 带端口字段、VNF 虚拟网卡接入
+                                                     #   type=l3 交换机、镜像源为 VNF 虚拟网卡。
+                                                     #   内核侧约束（提交期校验）：对象名 ≤15 字符、派生内核设备名不得
+                                                     #   互撞、vlan 子接口派生名 ≤15 字符、VNF 虚拟网卡不能直接作三层
+                                                     #   接口（改用「接入已配网关的二层交换机」）。
 set hostname <string>
 set timezone <tz>
 set ntp server <ip|host> [prefer]

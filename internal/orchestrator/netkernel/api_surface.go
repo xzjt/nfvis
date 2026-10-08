@@ -51,21 +51,47 @@ func (p *Provider) CheckLoop(context.Context, model.Config) []error { return nil
 
 // CheckInterfaceLinks 物理业务口链路状态检查（内核数据面：直读 netdev operstate）。
 //
-// 只对**已声明**的物理口判定：未声明的口不管（与 VPP 侧同口径）。
+// 语义与 VPP 侧同一口径：只检查**已声明且未显式禁用**的物理口；admin/link 任一未起即
+// warning 告警（`INTERFACE_LINK_DOWN`），恢复 up 后自动消警；口不在内核里则跳过
+// （缺口由恢复收敛的未收敛告警负责，不重复报）。R2-6：此前内核侧只返回错误、无告警落点。
 func (p *Provider) CheckInterfaceLinks(ctx context.Context, cfg model.Config) []error {
 	states, err := p.rt().InterfaceStates(ctx)
 	if err != nil {
 		return []error{fmt.Errorf("读取接口状态失败: %w", err)}
 	}
 	var errs []error
+	expect := map[string]bool{}
 	for _, iface := range cfg.Interfaces {
+		if iface.Enabled != nil && !*iface.Enabled {
+			continue // 显式禁用：用户意图，不告警
+		}
 		st, ok := states[iface.Name]
 		if !ok {
 			continue
 		}
-		if st.AdminUp && !st.LinkUp {
-			errs = append(errs, fmt.Errorf("接口 %s 已启用但链路未 up", iface.Name))
+		expect[iface.Name] = true
+		if st.AdminUp && st.LinkUp {
+			if p.alarms != nil {
+				p.alarms.Resolve(alarmScopeIfaceLink, network.AlarmIfaceLinkDown, iface.Name)
+			}
+			continue
 		}
+		reason := "链路 down（对端/网线/交换机端口）"
+		switch {
+		case !st.AdminUp && !st.LinkUp:
+			reason = "管理态未启用且链路 down"
+		case !st.AdminUp:
+			reason = "管理态未启用（set interfaces " + iface.Name + " disable 或下发未生效）"
+		}
+		errs = append(errs, fmt.Errorf("接口 %s 未就绪：%s", iface.Name, reason))
+		if p.alarms != nil {
+			p.alarms.Raise(alarmScopeIfaceLink, network.SeverityWarning, network.AlarmIfaceLinkDown,
+				fmt.Sprintf("物理口 %s 未就绪：%s", iface.Name, reason), iface.Name)
+		}
+	}
+	// 对账清警：口已从配置删除/显式禁用时，其滞留告警一并消解（round86 口径）。
+	if p.alarms != nil {
+		orchestrator.ResolveStale(p.alarms, alarmScopeIfaceLink, expect)
 	}
 	return errs
 }
@@ -99,9 +125,9 @@ func (p *Provider) Routes(ctx context.Context, name string) ([]network.RouteEntr
 	return out, nil
 }
 
-// BridgeDomains 全部内核 bridge 的运行态（含成员口）。
+// BridgeDomains 全部**配置声明**的 L2 交换机的运行态（含成员口；按内核实况判定存在性）。
 func (p *Provider) BridgeDomains() ([]network.BDRuntime, error) {
-	bds, err := p.rt().BridgeDomains(context.Background())
+	bds, err := p.rt().BridgeDomains(context.Background(), p.config())
 	if err != nil {
 		return nil, err
 	}

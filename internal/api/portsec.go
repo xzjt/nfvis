@@ -65,37 +65,67 @@ func (x *cliExecutor) portSecBlock(ifc model.InterfaceConfig) (string, map[strin
 		out["port_security_runtime"] = map[string]any{"available": false, "reason": dp.Reason}
 		return b.String(), out
 	}
+	// 内核数据面（nftables 链）与 VPP（macip ACL）是两套形态：期望规则条数、命名与索引的有无
+	// 都不同，按数据面口径分叉渲染，避免拿 VPP 的账去对内核的现场（R2-15②）。
+	kernel := x.dpMode() == model.DataPlaneKernel
 	rt := map[string]any{
-		"available":           true,
-		"tag":                 dp.Tag,
-		"tag_present":         dp.TagPresent,
-		"expected_rule_count": 2*len(macs) + 2, // 每 MAC 两条 permit + 显式 deny-all 两条
+		"available":   true,
+		"tag":         dp.Tag,
+		"tag_present": dp.TagPresent,
+	}
+	if kernel {
+		// 内核侧整段白名单就是**一条** nftables 规则（`ether saddr != { … } drop`）：
+		// 期望条数按内核形态给（套 VPP 的 2×白名单+2 会凭空报出"少了 4 条规则"的假错位）。
+		rt["expected_rule_count"] = 1
+	} else {
+		rt["expected_rule_count"] = 2*len(macs) + 2 // 每 MAC 两条 permit + 显式 deny-all 两条
 	}
 	line := "端口安全 数据面: "
 	switch {
 	case !dp.TagPresent:
-		line += "ACL 未在数据面（未收敛）"
+		if kernel {
+			line += "白名单链未在场（未收敛）"
+		} else {
+			line += "ACL 未在数据面（未收敛）"
+		}
 	default:
-		rt["acl_index"] = dp.ACLIndex
 		rt["rule_count"] = dp.RuleCount
-		line += fmt.Sprintf("ACL 在场（索引 %d，规则 %d 条）", dp.ACLIndex, dp.RuleCount)
+		if kernel {
+			// 内核侧没有 macip ACL 索引这回事（ACLIndex 恒 0 不是"读到索引 0"）：不打印索引，
+			// 用链名定位对象。
+			line += fmt.Sprintf("%s 在场（规则 %d 条）", dp.Tag, dp.RuleCount)
+		} else {
+			rt["acl_index"] = dp.ACLIndex
+			line += fmt.Sprintf("ACL 在场（索引 %d，规则 %d 条）", dp.ACLIndex, dp.RuleCount)
+		}
 	}
 	if dp.Bound {
 		rt["bound"] = true
-		rt["bound_index"] = dp.BoundIndex
-		line += "；接口已绑定"
+		if kernel {
+			line += "；白名单链已挂在接口上"
+		} else {
+			rt["bound_index"] = dp.BoundIndex
+			line += "；接口已绑定"
+		}
 	} else {
 		rt["bound"] = false
-		if dp.BoundIndex != 0 {
+		switch {
+		case kernel:
+			line += "；白名单链未挂上（未收敛）"
+		case dp.BoundIndex != 0:
 			rt["bound_index"] = dp.BoundIndex
 			line += fmt.Sprintf("；接口**未绑定**（绑定槽上是其它 macip ACL 索引 %d——与 L3 接口 ACL 的槽冲突需处置）", dp.BoundIndex)
-		} else {
+		default:
 			line += "；接口**未绑定**（未收敛）"
 		}
 	}
 	b.WriteString(line + "\n")
-	// macip 无逐规则命中计数：如实说明（插件不提供；不显示 0 冒充）。
-	b.WriteString("端口安全 计数: 不提供命中数（macip ACL 无逐规则计数，插件不发布该类计数——如实说明）\n")
+	// 命中计数：两套数据面都没有可读的逐规则计数——如实说明，不显示 0 冒充。
+	if kernel {
+		b.WriteString("端口安全 计数: 不读命中数（内核 nftables 白名单规则未挂 counter，如实不编造 0）\n")
+	} else {
+		b.WriteString("端口安全 计数: 不提供命中数（macip ACL 无逐规则计数，插件不发布该类计数——如实说明）\n")
+	}
 
 	out["port_security"] = structCfg
 	out["port_security_runtime"] = rt

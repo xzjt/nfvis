@@ -1,0 +1,216 @@
+NFViS v3 round2 修复轮：体检发现的实现级收口 + 真机复核
+================================================================================
+日期：2026-10-08
+分支：v3（工作树基线 07b43e2 + 本轮改动）
+依据：`docs/evidence/v3-round2-midpoint-audit.txt`（半程体检：25 条发现 + 9 条账目疏漏）
+决策：#412~#418（附录 A）；`AGENTS.md` 计数 313 → 320
+环境：nfvis-vm（Ubuntu 26.04 / 内核 7.0.0-34 / tc 6.19 / nftables 1.1.6），经 SSH（专用密钥）操作；
+      本轮的**真机运行态为全新首装**：`3.0.5~dev1` + `--dataplane kernel`（配置库重建并已备份，
+      见 §6）；测试对象收尾已清理（§6）。
+
+--------------------------------------------------------------------------------
+§0 摘要
+--------------------------------------------------------------------------------
+· 五轮**能力 spike** 在真机上钉死了两处此前只有推理的语义：① 同一 clsact hook 低 pref 的 filter
+  判决 ≥0 会**短路**后续 filter（police 默认 0 / mirred 默认 pipe），`conform-exceed drop/continue`
+  才是「超限丢、未超限继续遍历」；② nftables 同 hook 各 base chain 相互独立，**accept 不能豁免**
+  别处 drop（含宿主 `-P FORWARD DROP`）——#410 F2 的修法被证伪并更正为「检测 + 告警 + 照做指引」。
+· 逐条实现 #412~#418（netkernel 核心 / 五族共存 / 提交期校验 / 安装器 / Web 与 API / 账目），
+  单测全部红-绿；关键路径做了真机复核（§3、§4）。
+· **真机抓到我们自己的一处新缺陷**（R2-15① 修复引入）：交换机读视图改按配置声明枚举后取的是
+  **陈旧进程内快照**，提交后立刻 `show virtual-switches` 为空 → 已回修（改为按需读 committed）。
+
+--------------------------------------------------------------------------------
+§1 方式
+--------------------------------------------------------------------------------
+① 静态：7 路只读审计 + 主会话逐条自证（读实现、对照 VPP 侧、对照手册/契约，必要时取上游源码）；
+② 能力前提：先在 nfvis-vm 上用**只碰 dummy/veth/netns** 的夹具跑 spike（不动产品对象与管理口），
+   把「要改的语义」在真机上定死，再动代码（#338/#357 的纪律：先核实能力前提）；
+③ 实现：五路实现子智能体（netkernel 核心 / 五族 / 校验与入口 / 安装器 / Web 与 API），逐条红-绿；
+④ 复核：本机全量守护 + 真机按「干净首装 → 产品路径下发 → 内核事实独立核对」走一遍。
+
+--------------------------------------------------------------------------------
+§2 能力 spike（真机；五轮，全部只碰 dummy/veth/netns，跑完清理核对残留=0）
+--------------------------------------------------------------------------------
+2.1 tc 判决矩阵（veth 夹具；收包侧 clsact，pref10 被测、pref30 探针）
+    · `police ... drop`（无 continue）：pref10 `Sent 305`、pref30 `Sent 0` ⇒ **短路成立**。
+    · `police ... drop continue` / `police ... continue` / `conform-exceed continue/drop`：
+      **探针仍 0**（前两者只改「超限动作」，后者语义相反：超限继续、未超限被丢）。
+    · `police ... conform-exceed drop/continue`：1kbit/burst 1000 下 pref10
+      `Sent 301 (dropped 285, overlimits 285)`、pref30 探针 `Sent 16`（=未超限的那些）；
+      10gbit 下 pref10 `dropped 0`、探针 `Sent 300` ⇒ **超限丢、未超限继续遍历**（正是 QoS 所需）。
+    · `mirred egress mirror dev X continue`：语法被接受、**镜像仍发生**（对端 veth rx 增量 293，
+      对照组默认 pipe 303）、后续 filter 可收到包（探针 300）⇒ 镜像族用它解除短路。
+2.2 nft 转发四态（两 netns + 两条 veth；该机 `iptables -S FORWARD` 首行即 `-P FORWARD DROP`）
+    · 策略 ACCEPT ⇒ 转发 **通**；策略恢复 DROP ⇒ **不通**；
+    · 策略 DROP + 产品式 `-10` accept 链（`iifname/oifname` 集合）在场 ⇒ 仍**不通**；
+    · 策略 DROP + 只加**单向** accept 规则 ⇒ 仍不通（回程方向被丢）。
+    ⇒ 结论：`-10` accept **不能**豁免同 hook 其余链的策略 drop；要真放行必须写进**真正生效**的链
+      （且双向）——产品按「不碰宿主规则」口径改为检测 + 告警 + 照做指引。
+2.3 `ip -j link show` 的 `linkinfo`（bridge/vrf/vlan/bond/veth 五类逐条）
+    · **不带 `-d` 时 `linkinfo` 键不存在**（info_kind=None）⇒ 修复前 `DevType` 恒 `physical`；
+    · 带 `-d` 时 info_kind 正确（bridge/vrf/vlan/bond/veth）⇒ `state.go` 补 `-d` 的依据。
+2.4 `bridge -j link show master <br>` 与 `/sys/class/net/<tap>/statistics` 语义、宿主与 VM 同二层
+    拓扑（前几轮已证）沿用。
+
+--------------------------------------------------------------------------------
+§3 修复族与真机复核（逐条）
+--------------------------------------------------------------------------------
+3.1 #412 内核对象所有权与重放收敛
+    · **R2-1（P0）交换机重放误摘 libvirt tap/vxlan 口——真机复核通过**：
+      现场：`ip tuntap add dev vnet-test mode tap` + `ip link set vnet-test master vs-lan`，
+      随后 `systemctl restart nfvis`（内核数据面恢复重放会对每台交换机跑 `ApplyBridgeDomain`）。
+      真机事实：重启前后 `bridge -j link show master vs-lan` 成员均为
+      `['ens192', 'vnet-test']`（**tap 未被摘**）；修复前该循环会按内核实况把非声明成员
+      `nomaster`（单测 `TestApplyBridgeDomainKeepsLibvirtTapAndVxlanMembers` 红-绿钉住）。
+    · **R2-5（P1）恢复段序——真机复核通过**：配置 `interfaces ens192 port-security mac aa:bb:cc:dd:ee:ff`
+      后 `systemctl restart nfvis`，`nft list table netdev nfvis-portsec` 的链数由 1 → **重启后仍 1**
+      （修复前：端口安全要求口已在 bridge，而 interfaces 段排在 virtual-switches 之前 ⇒ 必然不收敛）。
+    · **R2-14（P2）迁移不误摘——真机复核通过**：同一提交
+      `delete virtual-switches vs-l3 l3-interface ens224` + `set virtual-switches vs-lan ports 2 interface ens224`
+      ⇒ commit 成功（revision 8），成员 `['ens192', 'ens224', 'vnet-test']`（**ens224 未被收尾 nomaster 摘掉**），
+      ens224 的地址 0 条（已如实摘除）。
+    · R2-13（bond 属性/成员、vxlan 元组变更不再被「已存在」吞）、R2-15①（零成员交换机）、
+      R2-21（派生名加宽哈希 + 提交期拒撞名）、R2-24（`-d` 判 DevType）见 §3.6/§3.7 与单测。
+3.2 #413 转发前置条件如实化 + 告警落点
+    · **R2-2（P1）——真机复核通过（告警侧）**：该机 FORWARD 策略为 DROP，配置数据面设备后 15s 内
+      `show alarms` 出现 `FORWARD_POLICY_DROP`（warning，source `host-forward-policy`），正文含机理
+      与**逐对双向**的照做命令（`iptables -I FORWARD 1 -i <a> -o <b> -j ACCEPT`，本例列出 12 对）+ nft 等价写法。
+      （「accept 不能豁免」的四态 A/B 见 §2.2；真实转发被宿主策略丢掉这一事实在改后仍然成立，
+      产品**如实告警**而不是假装修好。）
+    · **R2-10（P1）IPv6 转发——真机复核通过**：内核数据面收敛后
+      `sysctl -n net.ipv4.ip_forward` = 1、`sysctl -n net.ipv6.conf.all.forwarding` = **1**
+      （修复前 v6 恒 0：v6 三层「配得进、转不出」）。
+    · **R2-6（P1）内核侧告警落点——真机复核通过**：`ip link set ens192 down` 后一个巡检周期内
+      `show alarms` 出现 `INTERFACE_LINK_DOWN`（source `ens192`，文案「物理口 ens192 未就绪：管理态未启用且链路 down」）；
+      `ip link set ens192 up` 后消解。修复前内核数据面下这族告警**不可能出现**（只进 journal）。
+    · R2-7（VPP 数据面 sriov 装配顺序回归）由 `cmd/nfvisd/sriov_wiring_test.go` 的源码级顺序守护 +
+      注入断言钉住（真机无 PF，未做真机）。
+    · R2-16（自建链重建改幂等：`flush chain` + 重写，不再每 15s 删表）由单测
+      `TestEnsureForwardingRebuildsWithoutDeletingTable` 钉住。
+3.3 #414 五族共存与实况读视图
+    · **R2-3（P1）——真机复核通过（配置侧）**：同口 `interfaces ens192 ingress-policy pol-hi`（10 Mbit）
+      + `interfaces ens192 storm-control broadcast 8`（8 kbit）后
+      `tc -s filter show dev ens192 ingress`：
+      `pref 10 matchall ... action drop/continue`（QoS）与 `pref 30 flower ... action drop`（风暴广播）
+      **两条同时在位**（修复前只会存在 pref 10，风暴永不被评估——spike 实测 305/0）。
+    · **R2-15②（P2）——真机复核通过**：`show interfaces ens192 detail` 的实况块如实报
+      「Storm control 数据面: 广播 policer 在（cir 8 kbps）；限速落在内核 tc 入向过滤器上」，
+      计数如实说明「不映射（内核 tc 的 dropped/overlimits 与 conform/exceed/violate 三档语义不对应）」
+      ——修复前这里会报「policer 未在数据面（未收敛）」。
+    · R2-22（端口安全 Teardown 读失败如实上抛）由单测
+      `TestPortSecTeardownPropagatesBridgeMemberReadFailure` 钉住；ACL 链重建的毫秒窗口如实登记待改进。
+3.4 #415 提交期校验补齐——**真机逐条复核通过**（全部为提交期拒绝，原文摘录）
+    · R2-12② ECMP：`vrfs[vs-l3].routes[10.0.0.0/24].next_hop: 当前数据面为 Linux 内核网络，
+      多下一跳（ECMP）尚未实现；请拆成多条单跳路由（各条给 distance 决定优先级）；…`
+    · R2-22 icmp 带端口：`acls[acl-icmp].rules[10]: …protocol icmp 的端口字段（source-port/destination-port）
+      会被忽略：内核侧端口匹配不了 ICMP type/code（VPP 侧按 type/code 解读）…`
+    · R2-11 NAT 跨转发域：`nat.rules[10]: …NAT 规则不支持跨转发域：inside 交换机 "vs-lan" 的转发域与
+      出接口 "ens224" 所属转发域 "vs-l3" 不一致（内核侧 NAT 不区分转发域、也没有跨域 leaking，
+      规则不会命中任何包）…`
+    · R2-12① cross_connect（该语句 CLI 叶子与模型不一致，见 §7-1；经 REST candidate 复核）：
+      `virtual_switches[vs-empty].cross_connect: 当前数据面为 Linux 内核网络，cross-connect
+      （无学习点对点直通）尚未实现；内核侧只有学习/泛洪形态的桥。请改用 L2 交换机 + 端口；…`
+    · R2-21 派生名撞名：`virtual_switches[vr-lan]: 当前数据面为 Linux 内核网络：交换机 "lan" 的网关 VRF
+      （派生名 vr-lan） 与 交换机 "vr-lan" 会派生同一个内核设备名 "vr-lan"…请把其中一个对象改名`
+    · R2-23 诊断上界：`%% ping count 200 超出上限 100（不静默截断）：请改为不超过 100 的值`；
+      `ping -I ens160 127.0.0.1` 被参数守卫拒绝（回显语法行，未执行任何宿主命令）。
+    · R2-8 向导 2/5：单测 `TestRunWizardAcceptsCoreListAtIsolatedQuestion`（红-绿；真机 pty 未做）。
+    · R2-12③ vNIC 接入 l3 类型交换机：按真实可达路径实现（`virtual_machine_functions[].interfaces[].virtual_switch`
+      指向 type=l3 交换机；报告里写的 `virtual-switches[type=l3].ports[].vnf` 早已被结构性拒绝），单测红-绿。
+3.5 #416 安装器与离线工具——见 §4。
+3.6 #417 用户可见面如实化——**真机复核通过**
+    · REST（Bearer）：`GET /api/v1/system/status` → `dataplane = kernel`（**新增字段**）；
+      `GET /api/v1/vpp/status` → `dataplane = kernel`、`connected = false`（如实，不是「未连接」误导）。
+    · CLI：`show vpp` 首行 `dataplane: kernel`，`last_error` 为「当前数据面为 Linux 内核网络，未使用 VPP…」。
+    · R2-20（读视图取装配事实而非 committed）由 `TestCLIDpModeFollowsAssemblyFactNotCommitted` 红-绿钉住；
+      Web 总览「数据面」卡与 `/system/status` 字段由字段级守护 + 501 分支对照片住（**浏览器可视复核未做**）。
+3.7 #412 其余与单测覆盖（真机未逐条）
+    · R2-13 bond/vxlan 变更触发重建、R2-15① 零成员交换机进列表、R2-21 命名加宽与撞名拒绝、
+      R2-24 DevType 读 `-d`、R2-16 幂等重建、R2-22 portsec 读失败上抛、R2-8 向导、R2-18 文案分叉、
+      R2-25 501 映射、R2-6 告警建/消 —— 均有红-绿单测；其中 R2-15① 在真机上另外暴露了一个
+      「取陈旧快照」的缺陷（见 §7-2），已回修并补单测，**其真机复核见 §3.8**。
+3.8 回修后的补充真机复核（3.0.5~dev2 重打重装；R2-15① 与 R2-4）——**两项均通过**
+    · **R2-15① 通过**：`3.0.5~dev2` 升级 + 重启后，`show virtual-switches` 列出**零成员交换机**：
+      `BD-ID 0 / vs-empty / Learn up / Flood up / Ports 0`（另有 `vs-lan / Ports 2`）——修复前
+      该命令返回「（…无虚拟交换机）」（真机首轮抓到，见 §7-2）。
+    · **R2-4 通过**：`set acls acl-any rule 10 source any destination any action permit` 绑定三层接口后，
+      `nft list table netdev nfvis-acl` 的规则链为 **`ip saddr 0.0.0.0/0 accept`**（显式 v4 限定；
+      修复前是裸 `accept`，对 v6 同样命中 ⇒ 与手册「两侧都是 any 按 v4」相反、可致 v6 策略被绕过）。
+
+--------------------------------------------------------------------------------
+§4 安装器真机复核（#416 / #413 的装配回归）
+--------------------------------------------------------------------------------
+4.1 **干净首装（新脚本，`--dataplane kernel`，`--admin-password` 预置）——通过**
+    · 载荷：`/root/payload-fix`（install.sh=VPS-3.0.5~dev1 构建的安装器 + nfvis_3.0.5~dev1 +
+      9 个 VPP deb；Packages/SHA256SUMS 现生成）→ 载荷完整性逐文件一致、本地源 10 个候选包。
+    · 自检 **通过 19 / 失败 0 / 不可判定 1**、**退出码 0**（修复前：内核机器上 `CLI show vpp` 必判失败 ⇒
+      首装以「失败 1 + 退出码 1」收场，且补救命令 `--verify` 同样失败）。
+    · 关键两行（新口径）：
+      `[通过] CLI show vpp：如实反映内核数据面（dataplane: kernel；内核下不报 VPP 版本属设计行为）`
+      `· VPP 已停止：首次引导时 nfvisd 按缺省（vpp）把它拉起过；本机数据面已切到 kernel，产品不再管理 VPP`
+      ⇒ **R2-19② 真机成立**（首装期间 VPP 确实被缺省装配拉起过，新安装器在写库成功后把它停了；
+        `systemctl is-active vpp.service` = inactive）。
+    · `--no-start` × `--dataplane` 的显式提示由本地桩测试覆盖（真机未跑该组合）。
+4.2 R2-9 的判据 A/B：同一台 kernel 机器上，同一脚本的 **vpp 分支**（旧判据）会因
+    `show vpp` 不含 VPP 版本而判失败——即修复前内核机器上的行为；新内核分支断言 `dataplane: kernel` 通过。
+    两向都在自检输出里可见（§4.1）。
+4.3 R2-19③（离线自检脚本包清单）：本地合成载荷验证——旧提取器在真实 install.sh 上得到空清单却
+    打印「共 1 个」判通过（空转假绿）；新提取器取 `PKGS_COMMON`+`PKGS_VPP` 并集 16 个，删空即判失败。
+    （真机 §C 未跑：需 dpkg-deb/root，见 §5。）
+
+--------------------------------------------------------------------------------
+§5 未做真机复核（如实登记；均有红-绿单测或桩测试覆盖）
+--------------------------------------------------------------------------------
+1. R2-7 SR-IOV：环境无 PF，未做真机（源码级顺序守护 + 注入断言）。
+2. R2-8 向导：未用真 pty 走一遍（单测覆盖 2/5 输入核列表的路径）。
+3. R2-13 bond/vxlan 的属性重建：未在真机造「属性已存在但与声明不同」的现场（单测覆盖；
+   解析不到字段时不重建，不会引发重建风暴）。
+4. R2-20 的「切换已提交未重启」窗口：需要 vpp→kernel 的往返现场，未做（单测红-绿覆盖）。
+5. R2-25 的 501：只做了单测与契约同步，未在真机敲 REST 端点。
+6. Web 渲染（数据面卡）：只做了字段级守护与 REST 字段核对，**未做浏览器可视复核**。
+7. `.run` 自解压完整闭环、规模/吞吐基线：与前几轮一致，仍未做。
+
+--------------------------------------------------------------------------------
+§6 环境与收尾（如实登记）
+--------------------------------------------------------------------------------
+· 为验证「首装路径」（与口令可用性），本轮在 nfvis-vm 上做了**全新首装**：
+  原配置库已备份到 `/root/nfvis-db-backup-20261008-0421-v3round2fix.db` 后删除；
+  现役口令为本轮预置（install.sh 的 `--admin-password`，建议后续会话按需改回/记录）；
+  装机版本 **3.0.5~dev1**（内核数据面），后经回修重打为 <pending 版本>。
+· 测试对象（vs-empty / vs-lan / vs-l3 / acl-any / pol-hi / interfaces 声明 / nat 现场 / vnet-test tap）
+  在收尾时删除并核对内核残留为 0（见 §6.1）。
+· `-I FORWARD` 等宿主侧无改动；VMnet8 次地址未使用（本轮的限速/风暴真实流量对照未执行，见 §5）。
+· 宿主 FORWARD 策略 DROP 是本机现状（docker/libvirt 设的），本轮未改——它正是 R2-2 告警的真实现场。
+
+§6.1 收尾核对（`3.0.5~dev2` 现场，清场后）
+    · 配置余量：`set interfaces|virtual-switches|acls|qos|vrfs` 语句数 **0**；
+    · 内核：产品链路（`vs-*`/`vr-*`）**0**、tc `clsact` **0**、netns **0**、测试 tap **0**；
+    · 告警：清场 **20s 后自动消解**（`show alarms` 无 active——`FORWARD_POLICY_DROP` 随「无数据面设备」
+      消解，与设计一致）；
+    · nft：本产品 NAT 表已回收；`inet nfvis-forward` 清场后曾**仍留一张空表**——已回修（无设备时回收
+      整表，见 §7-5），并在 `3.0.5~dev3` 上**真机复核通过**：升级 + 一个巡检周期后
+      `nft list tables` 中**无任何 `nfvis*` 表**，`show alarms` 无 active。
+    · 版本：`3.0.5~dev1`（首装）→ `3.0.5~dev2`（重打重装，含 R2-4/R2-15① 回修）→ `3.0.5~dev3`
+      （重打重装，含空表回收回修）；三版均为内核数据面、服务 active。
+
+--------------------------------------------------------------------------------
+§7 本轮新发现（体检报告未列；已处理或登记）
+--------------------------------------------------------------------------------
+1. **`cross-connect` 的 CLI 叶子与模型不一致**：命令树把 `virtual-switches <n> cross-connect`
+   声明为两个位置参数（`<port-a> <port-b>`），而模型字段是 `bool` ⇒ CLI 语句**不可用**
+   （`set virtual-switches vs-empty cross-connect ens192 ens224` 会报
+   `cannot unmarshal array into Go struct field … cross_connect of type bool`）；只有 REST 可达。
+   本轮的内核拒绝因此经 REST 验证（§3.4）。建议：定裁 cross-connect 的 CLI 形态（bool 还是两端口对）
+   并修树/模型之一 + 补覆盖守护。已登记 `docs/v3待做.md`。
+2. **删除交换机端口的叶子后留「空壳端口」**：`delete virtual-switches <n> ports 2 interface ens224`
+   只清叶子，ports[2] 仍在且违反「端口必须且只能指定 interface/vnf/container 之一」，
+   后续提交被这条打断；应整条删 `delete virtual-switches <n> ports 2`（或让叶子删除回收空壳，
+   与 `pruneEmptySingleton` 同口径）。已登记。
+3. **R2-3 的读视图计数口径**（内核 tc 的 dropped/overlimits 与 conform/exceed/violate 不对应）：
+   如实不映射并在 detail 里说明（见 §3.3）；若要给三档计数需重做语义，登记待定裁。
+4. **风暴两档并存的边界**：广播档（pref 30）保持裸 `drop` 终止遍历，广播帧只落广播档；
+   只配组播档时广播帧按 I/G 位落入组播档（与 VPP 无广播档时一致）。已写进代码注释与手册。
+5. **清场后仍留一张空 `inet nfvis-forward` 表**（R2-16 幂等重建的副产物）：与 #410 F3 判为缺陷的
+   「`delete nat` 留空表」同类。已回修为「无数据面设备时回收整表、有设备时 flush + 重写」，
+   并补红-绿单测；真机复核见 §6.1。

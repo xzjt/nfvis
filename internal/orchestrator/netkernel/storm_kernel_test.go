@@ -28,10 +28,12 @@ func TestStormApplyBothClassesEmitsClsactAndTwoPoliceFilters(t *testing.T) {
 	}
 	for _, want := range []string{
 		"tc qdisc add dev ens192 clsact",
+		// 广播档：裸 drop（终止遍历，广播帧不再落组播档——与 VPP 侧「广播帧只落广播档」对齐）；
+		// 组播档：slash 形态（超限丢、未超限继续遍历）。两档判决不同的取舍见 stormVerdictBroadcast。
 		"tc filter add dev ens192 ingress protocol all pref 30 flower dst_mac ff:ff:ff:ff:ff:ff " +
 			"action police rate 1000kbit burst 1000000 drop",
 		"tc filter add dev ens192 ingress protocol all pref 40 flower dst_mac 01:00:00:00:00:00/01:00:00:00:00:00 " +
-			"action police rate 2000kbit burst 2000000 drop",
+			"action police rate 2000kbit burst 2000000 conform-exceed drop/continue",
 	} {
 		if !f.has(want) {
 			t.Fatalf("缺少命令 %q；实际：\n%s", want, f.joined())
@@ -164,6 +166,9 @@ func TestStormApplyPropagatesQdiscError(t *testing.T) {
 }
 
 func TestStormDataplaneReportsClassesAndRates(t *testing.T) {
+	// 真机形态：同一接口上两档的打印**本来就不一样**——广播档是裸 drop（`action drop`）、
+	// 组播档是 slash 形态（`action drop/continue`）。读视图必须两种都认（见 tcPoliceDrops），
+	// 否则"在位限速"会被报成"未下发"。
 	f := &fakeRunner{replies: []fakeReply{{
 		prefix: "tc filter show dev ens192 ingress",
 		out: "filter protocol all pref 30 flower chain 0 \n" +
@@ -172,20 +177,80 @@ func TestStormDataplaneReportsClassesAndRates(t *testing.T) {
 			"\taction order 1:  police 0x1 rate 1Mbit burst 1000000b mtu 2Kb action drop overhead 0b \n" +
 			"filter protocol all pref 40 flower chain 0 \n" +
 			"  dst_mac 01:00:00:00:00:00/01:00:00:00:00:00\n" +
-			"\taction order 1:  police 0x2 rate 1500Kbit burst 2000000b mtu 2Kb action drop overhead 0b ",
+			"\taction order 1:  police 0x2 rate 1500Kbit burst 2000000b mtu 2Kb action drop/continue overhead 0b ",
 	}}}
 	m := newStormManager(f)
-	attached, detail, err := m.Dataplane(context.Background(), "ens192")
+	fact, err := m.Dataplane(context.Background(), "ens192")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !attached {
-		t.Fatalf("应报已下发，detail=%q", detail)
+	if !fact.Attached {
+		t.Fatalf("应报已下发，detail=%q", fact.Detail)
 	}
 	for _, want := range []string{"广播 1000 kbps", "组播 1500 kbps"} {
-		if !strings.Contains(detail, want) {
-			t.Fatalf("detail 缺 %q，得到 %q", want, detail)
+		if !strings.Contains(fact.Detail, want) {
+			t.Fatalf("detail 缺 %q，得到 %q", want, fact.Detail)
 		}
+	}
+	// 消费方真正读的是逐类速率（api 的 Kinds）——真话必须落在这里（R2-15②）。
+	if fact.BroadcastKbps != 1000 || fact.MulticastKbps != 1500 {
+		t.Fatalf("逐类实测速率不符：broadcast=%d multicast=%d", fact.BroadcastKbps, fact.MulticastKbps)
+	}
+}
+
+// 广播档（裸 drop）与升级前的旧现场：`… burst <n> drop` 打印成 `action drop`——读视图照常认
+// （不能报成"未下发"）。广播档当前就是这个形态；组播档在修复前的旧现场同样可能打印它。
+func TestStormDataplaneToleratesPlainDropForm(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "tc filter show dev ens192 ingress",
+		out: "filter protocol all pref 30 flower chain 0 \n" +
+			"  dst_mac ff:ff:ff:ff:ff:ff\n" +
+			"\taction order 1:  police 0x1 rate 1Mbit burst 1000000b mtu 2Kb action drop overhead 0b \n" +
+			"filter protocol all pref 40 flower chain 0 \n" +
+			"  dst_mac 01:00:00:00:00:00/01:00:00:00:00:00\n" +
+			"\taction order 1:  police 0x2 rate 2Mbit burst 2000000b mtu 2Kb action drop overhead 0b ",
+	}}}
+	m := newStormManager(f)
+	fact, err := m.Dataplane(context.Background(), "ens192")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fact.Attached || fact.BroadcastKbps != 1000 || fact.MulticastKbps != 2000 {
+		t.Fatalf("裸 drop 形态应照常认作在位（广播 1000 / 组播 2000 kbps），得到 %+v", fact)
+	}
+}
+
+// 反向写法（`action continue/drop`：超限继续、未超限被丢）不是本产品的形态：认了会把
+// "限速失效的过滤器"报成在位。这里钉住"不认"。
+func TestStormDataplaneRejectsReversedVerdictForm(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "tc filter show dev ens192 ingress",
+		out: "filter protocol all pref 30 flower chain 0 \n" +
+			"  dst_mac ff:ff:ff:ff:ff:ff\n" +
+			"\taction order 1:  police 0x1 rate 1Mbit burst 1000000b mtu 2Kb action continue/drop overhead 0b ",
+	}}}
+	m := newStormManager(f)
+	fact, err := m.Dataplane(context.Background(), "ens192")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fact.Attached {
+		t.Fatalf("反向判决不应算作本产品的风暴抑制：%+v", fact)
+	}
+}
+
+// 过滤器在、但速率解析不出来：如实报「读不到实况」，不猜一个速率（猜出来的 CIR 会掩盖
+// "数据面与配置不一致"）。消费方据此渲染成"不可核对（原因）"而不是"未收敛"。
+func TestStormDataplaneRateUnparsableIsReadFailure(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "tc filter show dev ens192 ingress",
+		out: "filter protocol all pref 30 flower chain 0 \n" +
+			"  dst_mac ff:ff:ff:ff:ff:ff\n" +
+			"\taction order 1:  police 0x1 burst 1000000b action drop/continue\n",
+	}}}
+	m := newStormManager(f)
+	if _, err := m.Dataplane(context.Background(), "ens192"); err == nil {
+		t.Fatalf("速率读不到应如实报错，而不是猜一个值")
 	}
 }
 
@@ -195,12 +260,12 @@ func TestStormDataplaneNotAttachedWhenNoOwnFilters(t *testing.T) {
 		out:    "filter protocol all pref 30 flower chain 0 \n  dst_mac 02:00:00:00:00:01\n\taction order 1: gact action drop",
 	}}}
 	m := newStormManager(f)
-	attached, detail, err := m.Dataplane(context.Background(), "ens192")
+	fact, err := m.Dataplane(context.Background(), "ens192")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if attached {
-		t.Fatalf("别的族的过滤器不应算作风暴抑制，detail=%q", detail)
+	if fact.Attached {
+		t.Fatalf("别的族的过滤器不应算作风暴抑制，detail=%q", fact.Detail)
 	}
 }
 
@@ -211,7 +276,7 @@ func TestStormDataplanePropagatesReadError(t *testing.T) {
 		err:    errors.New("exit status 1"),
 	}}}
 	m := newStormManager(f)
-	if _, _, err := m.Dataplane(context.Background(), "ens192"); err == nil {
+	if _, err := m.Dataplane(context.Background(), "ens192"); err == nil {
 		t.Fatalf("读不到实况应返回错误")
 	}
 }

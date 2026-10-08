@@ -423,3 +423,52 @@ func TestRunWizardRejectsBadDataPlane(t *testing.T) {
 		}
 	}
 }
+
+// R2-8：2/5（隔离核）的答案就是**核列表**——按提示语与默认值输入 `2-5` 必须能继续。
+// 红-绿：修复前该问题里错位地放了一段「数据面取值」校验，输入核列表立即报
+// 「数据面 "2-5" 不合法（vpp|kernel）」，只有空行能过；而输入 `vpp`/`kernel` 反被放行到
+// parseCoreListText 才报错。核列表的解析与校验只应发生在第 3 问与 deriveSetupPlan。
+func TestRunWizardAcceptsCoreListAtIsolatedQuestion(t *testing.T) {
+	f := &setupFake{
+		metrics:   "nfvis_system_cpu_online_count 6\nnfvis_system_memory_total_bytes 7516192768\n",
+		committed: committedEmpty,
+	}
+	// 问答输入：数据面默认 vpp(回车)、隔离核显式 2-5、VPP 主/工作默认(回车×2)、
+	// 1G 默认(回车)、2M 默认(回车)、低延迟默认(回车)、确认默认(回车)
+	var out strings.Builder
+	if err := RunWizard(New(f, "ssh"), true, strings.NewReader("\n2-5\n\n\n\n\n\n\n"), &out); err != nil {
+		t.Fatalf("2/5 输入核列表应能继续，实际报错: %v", err)
+	}
+	joined := strings.Join(f.lines, "\n")
+	if !strings.Contains(joined, "set resource-pools cpu isolated-cores 2-5") {
+		t.Fatalf("应按 2/5 的核列表作答下发隔离核：\n%s", joined)
+	}
+	if !strings.Contains(joined, "set vpp cpu main-core 5") || !strings.Contains(joined, "set vpp cpu corelist-workers 4") {
+		t.Fatalf("VPP 线程默认应取自隔离核答案（2-5 末两核 = 5/4）：\n%s", joined)
+	}
+	if strings.Contains(out.String(), "数据面 \"2-5\" 不合法") {
+		t.Fatalf("核列表答案不得被当成数据面取值校验：\n%s", out.String())
+	}
+}
+
+// R2-8 的反面：2/5 也不是「数据面取值」的入口——输 `kernel` 必须被判为**核列表**不合法
+// （修复前它恰好能过 2/5，改由 parseCoreListText 报错），且不产生任何变更语句。
+func TestRunWizardCoreListQuestionRejectsDataPlaneWord(t *testing.T) {
+	f := &setupFake{metrics: "nfvis_system_cpu_online_count 6\n", committed: committedEmpty}
+	var out strings.Builder
+	err := RunWizard(New(f, "ssh"), true, strings.NewReader("\nkernel\n\n\n\n\n\n\n"), &out)
+	if err == nil {
+		t.Fatalf("2/5 输数据面词应报核列表不合法，实际成功；输出：\n%s", out.String())
+	}
+	if strings.Contains(err.Error(), "vpp|kernel") {
+		t.Fatalf("2/5 的答案不参与数据面取值校验，不该报「数据面 … 不合法」: %v", err)
+	}
+	if !strings.Contains(err.Error(), "kernel") {
+		t.Fatalf("报错应点名不合法输入: %v", err)
+	}
+	for _, ln := range f.lines {
+		if strings.HasPrefix(ln, "configure") || strings.HasPrefix(ln, "set ") {
+			t.Fatalf("被拒时不应执行变更语句: %v", f.lines)
+		}
+	}
+}

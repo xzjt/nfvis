@@ -1,13 +1,17 @@
 package api
 
 // M3-2：VPP 数据面状态与重启（FR-SYS-007/009）。
-// 具体连接/启动配置由编排器实现，经 Options.VPP 注入，本层不 import orchestrator。
+// 具体连接/启动配置由编排器实现，经 Options.VPP 注入；本层只读取装配方自报的运行态，
+// 不自己驱动底座。唯一例外是 netkernel 的**错误哨兵**（能力不受支持类错误的分类，
+// 与 capture.go 引用 network 的抓包哨兵同一做法），据此把「能力不存在」如实映射为 501。
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator/netkernel"
 )
 
 // VppStatus /vpp/status 响应（契约 components/schemas/VppStatus）。
@@ -60,6 +64,48 @@ type VppController interface {
 	// Version 最近一次成功连接探测到的 VPP 版本（与 /vpp/status.version 同源；
 	// R37-2 收口后 /system/version 的 vpp 键也取这里——决策 #118）。
 	Version() string
+}
+
+// dataPlaneModeAssembled 本进程**实际装配**的数据面实现（"vpp"|"kernel"）。
+//
+// 数据面事实有两个来源：装配事实（VppController 由装配处按数据面注入，如实自报
+// Status().Mode）与 committed 配置（可能已改而服务未重启）。**读视图一律以装配事实为准**：
+// committed 已切 kernel 但进程仍装着 VPP 时，报 kernel 会与数据面实况相反。
+// 控制器未装配或未自报（旧装配/单测）时回落 committed；两者都取不到按 vpp。
+func dataPlaneModeAssembled(vpp VppController, cfg model.Config) string {
+	if vpp != nil {
+		if m := vpp.Status(cfg.Vpp).Mode; m != "" {
+			return m
+		}
+	}
+	return cfg.DataPlaneMode()
+}
+
+// dataPlaneMode 同 dataPlaneModeAssembled，供 REST 处理器使用（配置从引擎现读；
+// 引擎不可用或读不到时按 vpp，与装配口径一致）。
+func (s *Server) dataPlaneMode() string {
+	if s.engine == nil {
+		return model.DataPlaneVPP
+	}
+	cfg, err := s.engine.Committed()
+	if err != nil {
+		return model.DataPlaneVPP
+	}
+	return dataPlaneModeAssembled(s.vpp, cfg)
+}
+
+// unsupportedCapabilityErr 错误是否为「当前数据面没有实现该能力」类（能力不存在，
+// 不是执行故障）。判据是数据面提供者自己打的哨兵（netkernel 经 %w 包装），
+// REST 据此返回 501 Not Implemented 而不是 500——客户端要能区分「这条路走不通，
+// 换数据面/换路径」与「执行出故障，去查日志」。
+func unsupportedCapabilityErr(err error) bool {
+	return errors.Is(err, netkernel.ErrUnsupported) || errors.Is(err, netkernel.ErrStatsClearUnsupported)
+}
+
+// writeUnsupported 501：能力在当前数据面下不受支持（message 保留提供者的原始文案，
+// 含数据面与替代路径说明）。
+func writeUnsupported(w http.ResponseWriter, err error) {
+	writeError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", err.Error(), nil)
 }
 
 // handleGetVppStatus GET /api/v1/vpp/status：连接状态与 pending_restart。
@@ -148,6 +194,10 @@ func (s *Server) handleGetNatSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.natSessions.Sessions(r.Context())
 	if err != nil {
+		if unsupportedCapabilityErr(err) {
+			writeUnsupported(w, err)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
 		return
 	}
@@ -183,6 +233,12 @@ func (s *Server) handlePostVppRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.vpp.Restart(r.Context(), cfg.Vpp); err != nil {
+		// 内核数据面下没有 VPP 可重启：这是「能力不存在」（501），不是执行故障（500）。
+		// 该错误的提供者在本层之外，故按**装配事实**判定数据面，而不是靠错误类型嗅探。
+		if s.dataPlaneMode() == model.DataPlaneKernel || unsupportedCapabilityErr(err) {
+			writeUnsupported(w, err)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
 		return
 	}
@@ -263,6 +319,10 @@ func (s *Server) handleGetLldpNeighbors(w http.ResponseWriter, r *http.Request) 
 	}
 	rows, err := s.lldp.Neighbors(r.Context())
 	if err != nil {
+		if unsupportedCapabilityErr(err) {
+			writeUnsupported(w, err)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
 		return
 	}

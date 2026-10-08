@@ -237,7 +237,10 @@ func TestKernelDataPlaneRealKernel(t *testing.T) {
 	if err := p.ApplyVRF(ctx, vrf); err != nil {
 		t.Fatalf("ApplyVRF: %v", err)
 	}
-	subif := VlanSubifName(ztVethB, 10)
+	subif, err := VlanSubifName(ztVethB, 10)
+	if err != nil {
+		t.Fatalf("VlanSubifName: %v", err)
+	}
 	if !ztLinkExists(t, subif) {
 		t.Fatalf("vlan 子接口 %s 未创建", subif)
 	}

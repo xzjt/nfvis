@@ -160,7 +160,7 @@ func (x *cliExecutor) showRuntimeSwitchPorts(name string) string {
 		}
 	}
 	if bd == nil {
-		return fmt.Sprintf("%% 虚拟交换机 %s 在 VPP 中不存在（show virtual-switches 看运行态列表）\n", name)
+		return fmt.Sprintf("%% 虚拟交换机 %s 在 %s中不存在（show virtual-switches 看运行态列表）\n", name, x.dpRuntimeName())
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%-16s %-7s %-7s %-12s %-12s %s\n", "Port", "Admin", "Link", "RxPkts", "TxPkts", "Shg")
