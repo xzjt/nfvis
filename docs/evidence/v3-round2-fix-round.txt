@@ -125,11 +125,17 @@ NFViS v3 round2 修复轮：体检发现的实现级收口 + 真机复核
     · CLI：`show vpp` 首行 `dataplane: kernel`，`last_error` 为「当前数据面为 Linux 内核网络，未使用 VPP…」。
     · R2-20（读视图取装配事实而非 committed）由 `TestCLIDpModeFollowsAssemblyFactNotCommitted` 红-绿钉住；
       Web 总览「数据面」卡与 `/system/status` 字段由字段级守护 + 501 分支对照片住（**浏览器可视复核未做**）。
-3.7 #412 其余与单测覆盖（真机未逐条）
+3.7 #412 其余与单测覆盖
     · R2-13 bond/vxlan 变更触发重建、R2-15① 零成员交换机进列表、R2-21 命名加宽与撞名拒绝、
       R2-24 DevType 读 `-d`、R2-16 幂等重建、R2-22 portsec 读失败上抛、R2-8 向导、R2-18 文案分叉、
       R2-25 501 映射、R2-6 告警建/消 —— 均有红-绿单测；其中 R2-15① 在真机上另外暴露了一个
       「取陈旧快照」的缺陷（见 §7-2），已回修并补单测，**其真机复核见 §3.8**。
+    · **R2-13 的 vxlan 半边已在 `3.0.5~dev5` 真机复核通过**：建隧道
+      （`set vxlan tunnels vx-a vni 100 local 10.99.0.1 remote 10.99.0.2 virtual-switch vs-l2`）后
+      `ip -d link show vx-a` = `id 100 / local 10.99.0.1 / remote 10.99.0.2 / dstport 4789` 且隧道口
+      在 vs-l2 成员里；改 `remote`（.2 → .3）与改 `vni`（100 → 200）**均触发重建**（改后分别读到
+      `remote 10.99.0.3`、`id 200`）——修复前 `File exists` 被吞，隧道会保持旧元组。
+      （bond 半边见 §3.9 末条。）
 3.8 回修后的补充真机复核（3.0.5~dev2 重打重装；R2-15① 与 R2-4）——**两项均通过**
     · **R2-15① 通过**：`3.0.5~dev2` 升级 + 重启后，`show virtual-switches` 列出**零成员交换机**：
       `BD-ID 0 / vs-empty / Learn up / Flood up / Ports 0`（另有 `vs-lan / Ports 2`）——修复前
@@ -195,6 +201,22 @@ NFViS v3 round2 修复轮：体检发现的实现级收口 + 真机复核
 4.3 R2-19③（离线自检脚本包清单）：本地合成载荷验证——旧提取器在真实 install.sh 上得到空清单却
     打印「共 1 个」判通过（空转假绿）；新提取器取 `PKGS_COMMON`+`PKGS_VPP` 并集 16 个，删空即判失败。
     （真机 §C 未跑：需 dpkg-deb/root，见 §5。）
+4.4 **`.run` 离线一键包完整闭环（随后一轮补做；发版待办里自 v1.1.47 起挂着的一条）**
+    · 闭包：以「产品包 + VPP 9 个 deb + 安装清单的运行时包（libvirt/qemu/docker/curl…）」为种子全量抓取，
+      自洽校验 **238 个 deb / 837 条依赖声明 / 312 个提供名 / 172M**——与 v3.0.0 发版记录**逐项吻合**
+      （独立复核了发版闭包口径）。
+    · 打包：`build-offline-run.sh --debs … --version 3.0.5~dev5 --epoch 1791438184` **连打两次
+      逐字节一致**（sha256 `f3448bb9358ffded52c44f5abebb9ea30cfdbc4808c655dd47c29cc6fb4d6def`，
+      179,313,351 字节）。
+    · 产物自检：`offline-installer-selftest.sh --run` **18/0**（含「安装清单里的每个包名都在载荷内
+      （共 16 个）」——这条正是 §4.3 修好的那条；**首版闭包只按 Depends 抓、缺 11 个运行时包时它如实判红**，
+      证明不再是空转假绿）。
+    · 自解压与安装：真走 `.run` 头部 `--extract`（解出 238 deb）→ 用解出载荷 `install.sh --verify
+      --dataplane kernel` 通过（13/0/1，内核分支）→ `bash nfvis-full-a.run -y --dataplane kernel
+      --admin-password …` 在真机**升级实装**通过（自检 **19/0/1**、退出码 0、服务 active）。
+    · **如实边界**：本次装的是「已有配置库」的机器（升级/重装路径）；**纯 `.run` 首装（含首次引导口令）
+      未在一台全新机器上跑**——干净快照上的首装此前以等价载荷目录验证（round1 §3），两者相加覆盖了
+      该交付件的主路径。
 
 --------------------------------------------------------------------------------
 §5 未做真机复核（如实登记；均有红-绿单测或桩测试覆盖）

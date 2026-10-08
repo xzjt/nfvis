@@ -1121,7 +1121,9 @@
   100% 丢失、加入宿主 MAC 后恢复；**风暴抑制** 8 kbit/s 下 dropped 796/820、撤除后 0。顺带补齐内核数据面
   **域定义单测**（`<interface type='bridge'>` + `<driver name='vhost'>` + VLAN，且不出现 vhostuser/shared/.sock）
   ——此前 `buildBridgeIface` 零覆盖。**上述四条未验证项随后关闭两条**（NAT 真实转发见 #410、vhost-net 连通性见 #409）；
-  未实现族真机逐族拒绝与 `.run` 自解压完整闭环仍未做（见 `docs/v3待做.md`）。
+  未实现族真机逐族拒绝仍未做（登记 `docs/v3待做.md`）；**`.run` 自解压完整闭环已随后补做**
+  （全量闭包 238 deb / 172M、两打逐字节一致、自检 18/0、真自解压 + 解出载荷 `--verify` + `.run -y
+  --dataplane kernel` 升级实装 19/0/1；纯 `.run` 首装未在全新机器上跑）。
 - **内核数据面 VNF 接入真机验证（决策 #409，virtio + 宿主 tap + vhost-net）**：先修掉一处错误约束——`vhost-user` 型
   vNIC 曾被**无条件**要求大页（该约束源自 VPP 的共享内存形态；内核数据面下同名类型落成 virtio + 宿主 tap +
   vhost-net，没有共享内存对端），判据加数据面条件后普通内存即可建 VNF。真机逐条核对：域定义
