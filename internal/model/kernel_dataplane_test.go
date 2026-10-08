@@ -1,6 +1,7 @@
 package model
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -530,5 +531,123 @@ func TestKernelDataPlaneRejectsIcmpPorts(t *testing.T) {
 	// VPP 数据面照旧（端口即 ICMP type/code）。
 	if errs := Validate(mk(DataPlaneVPP, "icmp", "8")); len(errs) != 0 {
 		t.Fatalf("VPP 数据面下 icmp + 端口应放行，得到：\n%s", errText(errs))
+	}
+}
+
+// `nat static` 没有转发域字段（模型只有 inside/outside 地址），内核侧 dnat 规则无作用域
+// （不区分域）——配置里存在**多于一个具名转发域**时静态映射作用域不明（同一对地址可能落在
+// 任一域），提交期拒绝并点名涉及的域；单域/全默认表（≤1 个具名域）无歧义，放行。
+//
+// 红-绿：修复前同一配置在内核数据面下零报错（「配了就是启用、作用域不明」）。
+func TestKernelDataPlaneRejectsNatStaticWithMultipleDomains(t *testing.T) {
+	// 两个具名域：两台 type=l3 交换机（名字即承载 L3 配置的 VRF 设备名，落点是同名 vrfs 条目）。
+	mk := func(mode string, withStatic bool) Config {
+		c := Config{
+			System:          &SystemConfig{DataPlane: mode},
+			Interfaces:      []InterfaceConfig{{Name: "ens192"}, {Name: "ens224"}},
+			VirtualSwitches: []VirtualSwitch{{Name: "vs-a", Type: "l3"}, {Name: "vs-b", Type: "l3"}},
+			Vrfs: []Vrf{
+				{Name: "vs-a", L3Interfaces: []L3Interface{{Interface: "ens192", Addresses: []string{"10.0.0.1/24"}}}},
+				{Name: "vs-b", L3Interfaces: []L3Interface{{Interface: "ens224", Addresses: []string{"203.0.113.1/24"}}}},
+			},
+		}
+		if withStatic {
+			c.Nat = &NatConfig{Static: []NatStatic{{InsideIP: "10.0.0.5", OutsideIP: "203.0.113.9"}}}
+		}
+		return c
+	}
+	// 两个具名域 + static ⇒ 拒绝（点名 nat.static、涉及的域与替代）。
+	errs := Validate(mk(DataPlaneKernel, true))
+	if len(errs) == 0 {
+		t.Fatalf("两个具名转发域下的 nat static 应提交期拒绝（作用域不明）")
+	}
+	txt := errText(errs)
+	if !strings.Contains(txt, "nat.static") || !strings.Contains(txt, "转发域") {
+		t.Fatalf("报错应点名 nat.static 与转发域，得到：\n%s", txt)
+	}
+	if !strings.Contains(txt, "vs-a") || !strings.Contains(txt, "vs-b") {
+		t.Fatalf("报错应点名涉及的域（vs-a、vs-b），得到：\n%s", txt)
+	}
+	if !strings.Contains(txt, "单域") || !strings.Contains(txt, "set system dataplane vpp") {
+		t.Fatalf("报错应给替代（改为单域使用 / 切回 VPP），得到：\n%s", txt)
+	}
+	// 单个具名域 ⇒ 放行（static 的作用域无歧义）。
+	one := mk(DataPlaneKernel, true)
+	one.VirtualSwitches = one.VirtualSwitches[:1]
+	one.Vrfs = one.Vrfs[:1]
+	if errs := Validate(one); len(errs) != 0 {
+		t.Fatalf("单具名域下的 nat static 应放行，得到：\n%s", errText(errs))
+	}
+	// 零具名域（全默认表）⇒ 放行。
+	none := Config{System: &SystemConfig{DataPlane: DataPlaneKernel},
+		Nat: &NatConfig{Static: []NatStatic{{InsideIP: "10.0.0.5", OutsideIP: "203.0.113.9"}}}}
+	if errs := Validate(none); len(errs) != 0 {
+		t.Fatalf("全默认表下（零具名域）nat static 应放行，得到：\n%s", errText(errs))
+	}
+	// 两个具名域但没有 nat static ⇒ 放行（域数量本身不是错误，不误伤）。
+	if errs := Validate(mk(DataPlaneKernel, false)); len(errs) != 0 {
+		t.Fatalf("无 nat static 的多域配置应放行，得到：\n%s", errText(errs))
+	}
+	// VPP 数据面不受该限制（1:1 静态映射是 VPP 的原生能力）。
+	if errs := Validate(mk(DataPlaneVPP, true)); len(errs) != 0 {
+		t.Fatalf("VPP 数据面下多域 + nat static 应放行，得到：\n%s", errText(errs))
+	}
+}
+
+// 转发域判据（纯函数）表：显式 `gateway vrf` 按该名计入；派生网关 VRF 与同名条目去重（同一
+// VRF 设备名 = 同一个域）；L3 族以 `vrfs` 条目为准（与同名 l3 交换机不重复计数，裸条目也计入）；
+// l2 无网关不计入；顺序按声明序（报错可复现）。
+func TestKernelNamedDomainsCriterion(t *testing.T) {
+	gw := func(vrf string) *VSGateway {
+		return &VSGateway{Addresses: []string{"192.168.99.1/24"}, Vrf: vrf}
+	}
+	cases := []struct {
+		name string
+		cfg  Config
+		want []string
+	}{
+		{"零域（全默认表）", Config{}, nil},
+		{"l2 无网关不计", Config{VirtualSwitches: []VirtualSwitch{{Name: "lan", Type: "l2"}}}, nil},
+		{"l2 有网关 ⇒ 派生的网关 VRF 计入",
+			Config{VirtualSwitches: []VirtualSwitch{{Name: "lan", Type: "l2", Gateway: gw("")}}},
+			[]string{"vr-lan"}},
+		{"显式 gateway vrf 用它",
+			Config{VirtualSwitches: []VirtualSwitch{{Name: "lan", Type: "l2", Gateway: gw("vr-custom")}}},
+			[]string{"vr-custom"}},
+		{"vrfs 条目与同名 l3 交换机 ⇒ 同一域（不重复计数）",
+			Config{
+				VirtualSwitches: []VirtualSwitch{{Name: "vs-l3", Type: "l3"}},
+				Vrfs:            []Vrf{{Name: "vs-l3"}},
+			},
+			[]string{"vs-l3"}},
+		{"只有裸 vrfs 条目（无同名 l3 交换机）也计入",
+			Config{Vrfs: []Vrf{{Name: "vs-bare"}}},
+			[]string{"vs-bare"}},
+		{"显式名与派生名撞同 ⇒ 同一域（去重）",
+			Config{VirtualSwitches: []VirtualSwitch{
+				{Name: "lan", Type: "l2", Gateway: gw("")},
+				{Name: "other", Type: "l2", Gateway: gw("vr-lan")},
+			}},
+			[]string{"vr-lan"}},
+		{"vrfs 名与另一台的派生网关名同 ⇒ 同一域（去重）",
+			Config{
+				VirtualSwitches: []VirtualSwitch{{Name: "lan", Type: "l2", Gateway: gw("")}},
+				Vrfs:            []Vrf{{Name: "vr-lan"}},
+			},
+			[]string{"vr-lan"}},
+		{"多域按声明序（vrfs 条目 + l2 网关）",
+			Config{
+				VirtualSwitches: []VirtualSwitch{
+					{Name: "vs-a", Type: "l3"},
+					{Name: "lan", Type: "l2", Gateway: gw("")},
+				},
+				Vrfs: []Vrf{{Name: "vs-a"}},
+			},
+			[]string{"vs-a", "vr-lan"}},
+	}
+	for _, tc := range cases {
+		if got := kernelNamedDomains(tc.cfg); !slices.Equal(got, tc.want) {
+			t.Fatalf("%s：kernelNamedDomains = %v，期望 %v", tc.name, got, tc.want)
+		}
 	}
 }

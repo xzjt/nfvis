@@ -542,6 +542,27 @@ func (v *validator) checkKernelDataPlane(c Config) {
 					"请改为同一转发域（inside 交换机即出接口所属的 L3 交换机）%s", inside, r.Action.Interface, outside, alt)
 		}
 	}
+	// `nat static` 的跨域语义（v3 定裁）：模型只有 inside/outside 地址、**没有转发域字段**，
+	// 内核侧的 dnat 规则无作用域（不区分域）——配置里存在**多于一个具名转发域**时，同一对
+	// inside/outside 地址可能落在任一域，静态映射的作用域不明（既不报错也不定向，属
+	// 「配了就是启用、作用域靠猜」）。按「不留假功能」口径提交期拒绝并点名涉及的域；
+	// 单域或全默认表（≤1 个具名域）时作用域无歧义，放行（VPP 侧不受影响：该检查整体只在
+	// 内核数据面下执行，1:1 静态映射是 VPP 的原生能力）。
+	if c.Nat != nil && len(c.Nat.Static) > 0 {
+		domains := kernelNamedDomains(c)
+		if len(domains) > 1 {
+			shown := domains
+			if len(shown) > 4 {
+				shown = shown[:4]
+			}
+			list := strings.Join(shown, "、")
+			if len(shown) < len(domains) {
+				list += " 等"
+			}
+			v.errf("nat.static", "当前数据面为 Linux 内核网络，`nat static` 未声明转发域，而本配置存在 %d 个转发域（%s），"+
+				"静态映射作用域不明；请改为单域使用该能力（或删掉多余转发域）%s", len(domains), list, alt)
+		}
+	}
 	// ACL 的 `protocol icmp` + 端口字段：两个数据面语义不同——VPP 侧把端口当 **ICMP type/code**
 	// 解读，内核侧（nftables）没有对应表达、端口字段会被静默忽略 ⇒ 规则看着在、匹配范围却不是
 	// 用户写的意思。提交期拒绝，让用户显式选择（删掉端口字段，或切回 VPP）。
@@ -735,6 +756,49 @@ func kernelDerivedLinkName(name string) string {
 // L2 交换机无显式网关 VRF 时的专属 VRF 设备名（`vr-<交换机名>` 再走同一套映射）。
 func kernelDerivedGatewayVRFName(swName string) string {
 	return kernelDerivedLinkName("vr-" + swName)
+}
+
+// kernelNamedDomains 本配置在内核数据面下会形成的**具名转发域**（按内核 VRF 设备名去重，
+// 顺序按声明序固定——报错文案可复现）。判据只依赖配置本身，不查运行态。
+//
+// 一处具名域的两个来源（v3 定裁：`nat static` 的跨域语义）：
+//   - **每个 `vrfs` 条目**（L3 族）：条目名就是承载 L3 配置的内核 VRF 设备名。以 vrfs 条目
+//     为单一真源而不是数 type=l3 交换机名——CLI 的 `set virtual-switches <n> type l3` 会派生
+//     同名 vrfs 条目（两族天然成对、同名去重即可），而 REST/整文档写入可以直建**裸 vrfs
+//     条目**（无同名交换机）；只数交换机名会漏掉后者，`nat static` 的歧义判据随即放空；
+//   - L2 交换机**声明了网关地址**（gateway.addresses 非空）时，网关所在 VRF 就是它的转发域
+//     （与 applyGateway / kernelDerivedNameOwners 同一要件：只有带地址才建该 VRF）；
+//     显式 `gateway.vrf <名>` 用该名的设备映射，否则用派生名 `vr-<交换机名>`
+//     （kernelDerivedGatewayVRFName，与编排层 netkernel.GatewayVRFName 同规则，
+//     由 netkernel 的跨包一致性测试钉住同步）。
+//
+// 未声明网关的 L2 交换机不构成具名域（流量走默认表）；bond/隧道/物理口都不是域的身份来源。
+// 去重按**内核设备名**（kernelDerivedLinkName 映射后比较）：显式引用、vrfs 条目与派生名撞进
+// 同一设备名时是同一个域（正是派生名撞名校验覆盖的已知形态）。
+func kernelNamedDomains(c Config) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(name string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	for _, vrf := range c.Vrfs {
+		add(kernelDerivedLinkName(vrf.Name))
+	}
+	for _, vs := range c.VirtualSwitches {
+		if vs.Type != "l2" || vs.Gateway == nil || len(vs.Gateway.Addresses) == 0 {
+			continue
+		}
+		if vs.Gateway.Vrf != "" {
+			add(kernelDerivedLinkName(vs.Gateway.Vrf))
+		} else {
+			add(kernelDerivedGatewayVRFName(vs.Name))
+		}
+	}
+	return out
 }
 
 // kernelLinkNameMax 内核接口名上限（IFNAMSIZ-1）。

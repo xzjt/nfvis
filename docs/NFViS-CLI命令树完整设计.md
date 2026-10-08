@@ -434,7 +434,8 @@ set dataplane <vpp|kernel>                           # 数据面实现：vpp = V
                                                      #   **未实现、提交期直接拒绝**：DHCP 中继、DHCP 服务器、数据面
                                                      #   DNS 代理、LLDP、memif 容器接入、MAC 学习上限、抓包；以及语义
                                                      #   不同的形态：cross-connect、静态路由多下一跳（ECMP）、NAT 跨
-                                                     #   转发域、ACL protocol icmp 带端口字段、VNF 虚拟网卡接入
+                                                     #   转发域、`nat static` 在多转发域配置下（静态映射无域字段、
+                                                     #   作用域不明）、ACL protocol icmp 带端口字段、VNF 虚拟网卡接入
                                                      #   type=l3 交换机、镜像源为 VNF 虚拟网卡。
                                                      #   内核侧约束（提交期校验）：对象名 ≤15 字符、派生内核设备名不得
                                                      #   互撞、vlan 子接口派生名 ≤15 字符、VNF 虚拟网卡不能直接作三层
