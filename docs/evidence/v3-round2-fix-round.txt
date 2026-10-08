@@ -138,7 +138,7 @@ NFViS v3 round2 修复轮：体检发现的实现级收口 + 真机复核
       `nft list table netdev nfvis-acl` 的规则链为 **`ip saddr 0.0.0.0/0 accept`**（显式 v4 限定；
       修复前是裸 `accept`，对 v6 同样命中 ⇒ 与手册「两侧都是 any 按 v4」相反、可致 v6 策略被绕过）。
 
-3.9 收尾追加复核（3.0.5~dev4 重打重装；体检之外的两条已登记缺陷 + 剩余"未真机"项）
+3.9 收尾追加复核（`3.0.5~dev4` 重打重装；体检之外的两条已登记缺陷 + 剩余"未真机"项）
     · **R2-25（501）通过**：内核数据面下 `GET /nat/sessions`、`GET /protocols/lldp/neighbors`、
       `POST /vpp/restart`、`POST /interfaces:clear-statistics` 四条均 **501 + NOT_IMPLEMENTED**，
       文案各自点名数据面（修复前 500/502）。
@@ -154,6 +154,18 @@ NFViS v3 round2 修复轮：体检发现的实现级收口 + 真机复核
       提交被**内核侧** cross-connect 拒绝（不再是 `cannot unmarshal array into … of type bool`）。
     · **§7-2（空壳端口）通过**：建交换机+端口 → `delete … ports 1 interface ens192` → 一次 `commit 成功`
       （修复前被「端口必须且只能指定 interface/vnf/container 之一」拒绝）。
+
+3.10 再补两项（`3.0.5~dev5` 现场；R2-20 窗口 + 补偿残渣受控复现）
+    · **R2-20（切换已提交未重启的窗口）通过**：kernel（装配）→ `set system dataplane vpp` + 重启 ⇒
+      CLI `show vpp` 与 REST `/vpp/status` 都报 **vpp**；随后 `set system dataplane kernel`（**不重启**）
+      ⇒ 两端仍报 **vpp**（**装配事实**，修复前会按 committed 说成 kernel）；再重启 ⇒ 回到 kernel。
+      窗口期被拉起的 VPP 已手工 `systemctl stop`（内核数据面下产品不管理 VPP，属既有边界）。
+    · **补偿残渣的受控复现未成立（观察项降级）**：用「apply 期确定性失败」造现场——L3 交换机 + 接口地址 +
+      `static-routes 10.77.0.0/24 next-hop 203.0.113.9`（不可达下一跳）⇒ 底座报
+      `ip route replace … Error: Nexthop has invalid gateway.` 并**已补偿**；失败后残留核对
+      **链路 0 / ens192 地址 0 / 本产品 nft 表 0**，`show alarms` 无 active（无 `COMMIT_COMPENSATION_FAILED`）。
+      即通用补偿路径干净；原观察（失败 bond 提交清场时见到的空 `b0`）**未能受控复现**，且其触发路径
+      （成员 up 触发 enslave 失败）已随 §7-6 的修复消失——`docs/v3待做.md` 内该条按「未复现」更新。
     · **新抓一条（bond，见 §7-6）——已在 `3.0.5~dev5` 真机复核通过**：同一份声明
       （`interfaces ens192/ens224` + `bonds b0 members 1/2`）提交成功，`/sys/class/net/b0/bonding/slaves`
       = `ens192 ens224` 且成员 operstate 均 up（修复前：`ip link set … master b0` 报

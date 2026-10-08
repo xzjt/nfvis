@@ -1153,7 +1153,12 @@
   **#416** 安装器（内核分支 `show vpp` 自检分叉、`--no-start` 不再静默丢弃 `--dataplane`、内核写库后停 VPP、
   离线自检包清单提取不再空转假绿）；**#417** 用户可见面如实化（读视图取**装配事实**、Web 总览「数据面」卡、
   `/system/status.dataplane`、一批内核口径文案、REST 能力不支持→501）；**#418** 账目回填（本段即其一）。
-  真机复核证据 `docs/evidence/v3-round2-fix-round.txt`。
+  真机复核证据 `docs/evidence/v3-round2-fix-round.txt`。**随后一轮收口**（同两条提交）：cross-connect
+  的 CLI 叶子与模型不一致（语句原不可用）改为 `cross-connect true|false` 并同步文档；删端口叶子留的
+  「空壳端口」在删除路径回收；**内核 bond 成员 enslave 需先 down**（真机新抓：`Device can not be
+  enslaved while up.`）改为「先 down → enslave → bond up 后成员回读置 up」；并补做 R2-20 切换窗口、
+  REST 501、向导真 pty、Web 总览数据面卡（浏览器黑盒，截图入仓）四项真机/浏览器复核——dev1~dev5 逐轮
+  重打重装，`make check` 全绿。
 - 已定决策 320 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线 #300~#403（其中 #350 撤回）、
   **v3 线自 #404 起**（分支 `v3`，已有 #404~#418））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
