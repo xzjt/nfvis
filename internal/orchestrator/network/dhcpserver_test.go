@@ -188,7 +188,7 @@ type tapFactory struct {
 }
 
 func newTapFactory() *tapFactory { return &tapFactory{taps: map[string]*fakeDHCPTap{}} }
-func (f *tapFactory) open(name string) (dhcpTapTransport, error) {
+func (f *tapFactory) open(name string) (TapTransport, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fails > 0 {
@@ -213,10 +213,12 @@ func (f *tapFactory) get(name string) *fakeDHCPTap {
 func newTestDHCPServer(t *testing.T, c *fakeDHCPServerClient, fp *fakePunt, factory *tapFactory, leaseDir string) (*DHCPServerProvider, *fakeClock) {
 	t.Helper()
 	p := NewDHCPServerProviderFunc(
-		func() (DHCPServerClient, error) { return c, nil },
+		// 客户端工厂收下交换机声明（内核侧实现要按它派生 bridge/服务 VLAN；VPP 侧假实现忽略）——
+		// apply 路径不得回读配置引擎（提交期自死锁的根源）。
+		func(model.VirtualSwitch) (DHCPServerClient, error) { return c, nil },
 		func() (PuntClient, error) { return fp, nil },
 	)
-	p.SetPuntTransport(func() (dnsPuntTransport, error) {
+	p.SetPuntTransport(func() (PuntTransport, error) {
 		return &fakeTransport{}, nil // Recv 立即 ErrClosed：serve 协程直接退出，单测直调 handle*
 	})
 	p.SetTapOpen(factory.open)
@@ -967,7 +969,7 @@ func TestDHCPServerProviderDORA(t *testing.T) {
 
 	// 续租（单播 punt 入径，ciaddr 形态、无 option 50/54）→ ACK；反查 miss 时忽略（不猜测）
 	ipPkt := dhcpClientFrame(chaddr, dhcpRequest, nil, nil, offered)[14:]
-	p.handlePuntPacket(dnsPuntDesc{swIfIndex: 42}, ipPkt)
+	p.handlePuntPacket(PuntDesc{SwIfIndex: 42}, ipPkt)
 	if got := len(tap.frames()); got != 2 {
 		t.Fatalf("反查未接线时 punt 上行应被忽略，实得 %d 条应答", got)
 	}
@@ -977,7 +979,7 @@ func TestDHCPServerProviderDORA(t *testing.T) {
 		}
 		return "", false
 	})
-	p.handlePuntPacket(dnsPuntDesc{swIfIndex: 42}, ipPkt)
+	p.handlePuntPacket(PuntDesc{SwIfIndex: 42}, ipPkt)
 	sent = tap.frames()
 	if len(sent) != 3 {
 		t.Fatalf("punt 续租应回 1 条 ACK，实得累计 %d", len(sent))
@@ -1122,7 +1124,7 @@ func TestDHCPServerDedupeDualPath(t *testing.T) {
 	frame := dhcpClientFrame(chaddr, dhcpDiscover, nil, nil, nil)
 	p.SetSwitchResolver(func(idx uint32) (string, bool) { return name, true })
 	p.handleTapFrame(name, frame)
-	p.handlePuntPacket(dnsPuntDesc{swIfIndex: 42}, frame[14:])
+	p.handlePuntPacket(PuntDesc{SwIfIndex: 42}, frame[14:])
 	if got := len(tap.frames()); got != 1 {
 		t.Fatalf("双入径副本应只回 1 条 OFFER，实得 %d", got)
 	}
@@ -1358,7 +1360,7 @@ func TestDHCPServerPuntPathIgnoresForeignPackets(t *testing.T) {
 	tap := factory.get(DHCPServerTapName(name))
 	n0 := len(tap.frames())
 
-	p.handlePuntPacket(dnsPuntDesc{swIfIndex: 7}, dhcpClientFrame(mac, dhcpDiscover, nil, nil, nil)[14:])
+	p.handlePuntPacket(PuntDesc{SwIfIndex: 7}, dhcpClientFrame(mac, dhcpDiscover, nil, nil, nil)[14:])
 	if got := len(tap.frames()); got != n0 {
 		t.Fatal("反查 miss 的 punt 上行应被忽略")
 	}

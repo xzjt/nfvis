@@ -68,6 +68,17 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 		}
 		collect("virtual-switches/"+vs.Name+"/dhcp-relay", p.ApplyDhcpRelay(ctx, vs))
 	}
+	// 决策 #438：DHCP 服务器的恢复重放——**恢复重放必须含它**（与 VPP 侧同纪律）：
+	// 单播接收 socket 活在 nfvisd 进程内（进程重启后必然不在），内置 tap 是内核对象（按名复用，
+	// 带外删了就重建）。放在交换机段之后：socket 要绑 bridge 的 BVI 地址、tap 要 enslave 到
+	// 该 bridge（ApplyBridgeDomain 已把地址与 bridge 落下）。声明未变时 Sync 幂等；起不来
+	// 按未收敛项落告警（如实，不静默）。
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.Type == "l3" || !vs.DHCPServerEnabled() {
+			continue
+		}
+		collect("virtual-switches/"+vs.Name+"/dhcp-server", p.ApplyDHCPServer(ctx, vs))
+	}
 	for _, iface := range cfg.Interfaces {
 		collect("interfaces/"+iface.Name, p.enrichHeldPortErr(iface.Name, p.ApplyInterface(ctx, iface)))
 	}

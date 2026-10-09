@@ -4,7 +4,7 @@ package network
 //
 // 形态（取代已撤回的 #338「VPP 内置 dns 插件」）：VPP 经 **punt socket** 把「目的地址 ∈ VPP
 // 本机」的 UDP/53 交给 nfvisd，nfvisd 用**宿主网络栈**向上游解析后按原转发域回注
-// （desc.action = PUNT_IP4_ROUTED）。底座语义与真机结论见
+// （desc.Action = PUNT_IP4_ROUTED）。底座语义与真机结论见
 // `docs/evidence/v2-round124-d345-dns-punt-spike.txt`，实现严格照此：
 //
 //   - 注册/注销：govpp binapi `punt`（`punt_socket_register/deregister`，见 dnsproxy_govpp.go）。
@@ -77,25 +77,32 @@ type PuntClient interface {
 	Close()
 }
 
-// dnsPuntDesc 上行/回注的 8 字节描述符（u32 sw_if_index + u32 action，小端）。
-type dnsPuntDesc struct {
-	swIfIndex uint32
-	action    uint32
+// PuntDesc 上行/回注的 8 字节描述符（u32 sw_if_index + u32 action，小端）。
+//
+// 导出（v3 决策 #438）：内核数据面要在 netkernel 包里实现同一 seam（单播续租的接收面），
+// 接口的方法签名里出现描述符类型，故类型与字段必须可命名；VPP 侧语义与实现**逐字不变**。
+type PuntDesc struct {
+	// SwIfIndex 上行包所属转发域（VPP 侧 = 域 BVI 的 sw_if_index；内核侧 = 该交换机内核
+	// bridge 的 ifindex）——provider 用它经 SetSwitchResolver 派发到对应交换机。
+	SwIfIndex uint32
+	// Action 回注动作（VPP 侧语义；内核侧不用回注，恒 0）。
+	Action uint32
 }
 
-// dnsPuntTransport 上行收包与回注的传输层（真实实现 = AF_UNIX SOCK_DGRAM；单测注入内存实现）。
-type dnsPuntTransport interface {
+// PuntTransport 上行收包与回注的传输层（真实实现 = AF_UNIX SOCK_DGRAM；单测注入内存实现；
+// 内核数据面 = UDP/67 socket 汇聚，见 internal/orchestrator/netkernel 的同名实现）。
+type PuntTransport interface {
 	// Recv 收一个上行包：返回 desc 与**原始包体**（可能带 L2 前导；解析时按 IP 版本 nibble 定位）。
-	Recv() (dnsPuntDesc, []byte, error)
+	Recv() (PuntDesc, []byte, error)
 	// Send 回注一个包：8 字节 desc（含 action/sw_if_index）+ 裸 IP 包。
-	Send(desc dnsPuntDesc, ipPacket []byte) error
+	Send(desc PuntDesc, ipPacket []byte) error
 	Close() error
 }
 
 // DNSProxyProvider 数据面 DNS 代理（自研域内转发器）编排。
 type DNSProxyProvider struct {
 	client    func() (PuntClient, error)
-	transport func() (dnsPuntTransport, error)
+	transport func() (PuntTransport, error)
 	upstream  func(server string, query []byte) ([]byte, error)
 	switchOf  func(uint32) (string, bool) // sw_if_index → 所属交换机名（按域上游选择）
 
@@ -105,8 +112,8 @@ type DNSProxyProvider struct {
 	mu         sync.Mutex
 	global     []string
 	perSwitch  map[string][]string
-	registered bool             // VPP 侧 punt 注册是否在场
-	tr         dnsPuntTransport // 运行中的转发器传输（nil = 未起）
+	registered bool          // VPP 侧 punt 注册是否在场
+	tr         PuntTransport // 运行中的转发器传输（nil = 未起）
 
 	servfail uint64 // 回 SERVFAIL 计数（原子；如实计数，不预检上游可达性）
 	answered uint64 // 成功转发计数（原子）
@@ -117,7 +124,7 @@ type DNSProxyProvider struct {
 func NewDNSProxyProviderFunc(f func() (PuntClient, error)) *DNSProxyProvider {
 	return &DNSProxyProvider{
 		client:     f,
-		transport:  func() (dnsPuntTransport, error) { return newUnixPuntTransport(DNSProxyClientSock, DNSProxyServerSock) },
+		transport:  func() (PuntTransport, error) { return newUnixPuntTransport(DNSProxyClientSock, DNSProxyServerSock) },
 		upstream:   hostUDPQuery,
 		clientSock: DNSProxyClientSock,
 		serverSock: DNSProxyServerSock,
@@ -125,10 +132,10 @@ func NewDNSProxyProviderFunc(f func() (PuntClient, error)) *DNSProxyProvider {
 }
 
 // NewDNSProxyProvider 以固定组件构造（单测）：punt 客户端/传输/上游查询/路径均可注入。
-func NewDNSProxyProvider(c PuntClient, tr dnsPuntTransport, up func(server string, query []byte) ([]byte, error), clientSock, serverSock string) *DNSProxyProvider {
+func NewDNSProxyProvider(c PuntClient, tr PuntTransport, up func(server string, query []byte) ([]byte, error), clientSock, serverSock string) *DNSProxyProvider {
 	return &DNSProxyProvider{
 		client:     func() (PuntClient, error) { return c, nil },
-		transport:  func() (dnsPuntTransport, error) { return tr, nil },
+		transport:  func() (PuntTransport, error) { return tr, nil },
 		upstream:   up,
 		clientSock: clientSock,
 		serverSock: serverSock,
@@ -139,7 +146,7 @@ func NewDNSProxyProvider(c PuntClient, tr dnsPuntTransport, up func(server strin
 func (p *DNSProxyProvider) SetSwitchResolver(fn func(uint32) (string, bool)) { p.switchOf = fn }
 
 // SetTransport/SetUpstream 覆盖传输与上游查询实现（单测用；生产走默认）。
-func (p *DNSProxyProvider) SetTransport(fn func() (dnsPuntTransport, error)) { p.transport = fn }
+func (p *DNSProxyProvider) SetTransport(fn func() (PuntTransport, error)) { p.transport = fn }
 func (p *DNSProxyProvider) SetUpstream(fn func(server string, query []byte) ([]byte, error)) {
 	p.upstream = fn
 }
@@ -257,7 +264,7 @@ func (p *DNSProxyProvider) applyState(enabled bool) error {
 }
 
 // serve 收包循环（转发器主循环）。传输被 Close 即退出；单次收包错误不静默中止（计数后继续）。
-func (p *DNSProxyProvider) serve(tr dnsPuntTransport) {
+func (p *DNSProxyProvider) serve(tr PuntTransport) {
 	for {
 		desc, raw, err := tr.Recv()
 		if err != nil {
@@ -273,7 +280,7 @@ func (p *DNSProxyProvider) serve(tr dnsPuntTransport) {
 }
 
 // handle 处理一个上行包：解析 → 选上游 → 转发 → 回注（失败回 SERVFAIL）。
-func (p *DNSProxyProvider) handle(tr dnsPuntTransport, desc dnsPuntDesc, raw []byte) {
+func (p *DNSProxyProvider) handle(tr PuntTransport, desc PuntDesc, raw []byte) {
 	ipPkt, ok := extractIP(raw)
 	if !ok {
 		return // 非 IP 包（不该出现）：不构造应答
@@ -282,7 +289,7 @@ func (p *DNSProxyProvider) handle(tr dnsPuntTransport, desc dnsPuntDesc, raw []b
 	if !ok {
 		return // 非「指向 :53 的 IPv4/UDP」：不在覆盖内（注册只该收到这类包）
 	}
-	servers := p.serversFor(desc.swIfIndex)
+	servers := p.serversFor(desc.SwIfIndex)
 	var resp []byte
 	if len(servers) == 0 {
 		resp = buildServfail(q.payload)
@@ -299,7 +306,7 @@ func (p *DNSProxyProvider) handle(tr dnsPuntTransport, desc dnsPuntDesc, raw []b
 	reply := buildReplyIP4(q, resp)
 	// 对称回注：action=PUNT_IP4_ROUTED、sw_if_index 取上行 desc 原值 ⇒ 按该接口所属表路由回客户端。
 	// 回注失败如实计数（不静默吞掉）。
-	if err := tr.Send(dnsPuntDesc{swIfIndex: desc.swIfIndex, action: dnsPuntActionIP4Routed}, reply); err != nil {
+	if err := tr.Send(PuntDesc{SwIfIndex: desc.SwIfIndex, Action: dnsPuntActionIP4Routed}, reply); err != nil {
 		atomic.AddUint64(&p.sendFail, 1)
 	}
 }
@@ -351,26 +358,26 @@ func newUnixPuntTransport(clientPath, serverPath string) (*unixPuntTransport, er
 	return &unixPuntTransport{conn: conn, serverPath: serverPath}, nil
 }
 
-func (t *unixPuntTransport) Recv() (dnsPuntDesc, []byte, error) {
+func (t *unixPuntTransport) Recv() (PuntDesc, []byte, error) {
 	buf := make([]byte, 65535)
 	n, _, err := t.conn.ReadFromUnix(buf)
 	if err != nil {
-		return dnsPuntDesc{}, nil, err
+		return PuntDesc{}, nil, err
 	}
 	if n < 8 {
-		return dnsPuntDesc{}, nil, fmt.Errorf("上行包过短（%d 字节，缺 8 字节描述符）", n)
+		return PuntDesc{}, nil, fmt.Errorf("上行包过短（%d 字节，缺 8 字节描述符）", n)
 	}
-	desc := dnsPuntDesc{
-		swIfIndex: binary.LittleEndian.Uint32(buf[0:4]),
-		action:    binary.LittleEndian.Uint32(buf[4:8]),
+	desc := PuntDesc{
+		SwIfIndex: binary.LittleEndian.Uint32(buf[0:4]),
+		Action:    binary.LittleEndian.Uint32(buf[4:8]),
 	}
 	return desc, append([]byte{}, buf[8:n]...), nil
 }
 
-func (t *unixPuntTransport) Send(desc dnsPuntDesc, ipPacket []byte) error {
+func (t *unixPuntTransport) Send(desc PuntDesc, ipPacket []byte) error {
 	buf := make([]byte, 8+len(ipPacket))
-	binary.LittleEndian.PutUint32(buf[0:4], desc.swIfIndex)
-	binary.LittleEndian.PutUint32(buf[4:8], desc.action)
+	binary.LittleEndian.PutUint32(buf[0:4], desc.SwIfIndex)
+	binary.LittleEndian.PutUint32(buf[4:8], desc.Action)
 	copy(buf[8:], ipPacket)
 	if _, err := t.conn.WriteToUnix(buf, &net.UnixAddr{Name: t.serverPath, Net: "unixgram"}); err != nil {
 		return fmt.Errorf("回注到 %s: %w", t.serverPath, err)

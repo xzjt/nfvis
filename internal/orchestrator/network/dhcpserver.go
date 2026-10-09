@@ -107,7 +107,7 @@ type dhcpServerRT struct {
 	spec     dhcpServerSpec
 	tapIndex uint32 // VPP 侧 sw_if_index（0 = 未建立/已失效）
 	leases   *dhcpLeaseTable
-	tap      dhcpTapTransport // nil = 未打开（VPP 重启后 reset / 首次 Sync 失败）
+	tap      TapTransport     // nil = 未打开（VPP 重启后 reset / 首次 Sync 失败）
 	tapMAC   net.HardwareAddr // 内核侧 tap 的 MAC（服务器以太源）——运行态：与 tap 同生命期
 
 	// recent 记录最近应答过的 (chaddr|xid|消息类型) → 时刻：同一条客户端报文会经**两条入径**
@@ -128,10 +128,14 @@ func (rt *dhcpServerRT) replySpec() dhcpReplySpec {
 
 // DHCPServerProvider 域内 DHCP 服务器编排（决策 #359）。
 type DHCPServerProvider struct {
-	client     func() (DHCPServerClient, error)
+	// client 以**交换机声明**为参数构造客户端（sw 来自调用点 Sync/teardown 的 vs）：
+	// 内核侧实现要按它派生 bridge 名 / 服务 VLAN 等交换机事实，而**不得**在 apply 路径回读
+	// 配置引擎——提交期发动机锁由本次提交自己持有，重入读取即自死锁（真机 SIGQUIT 实证）。
+	// VPP 侧实现在签名里收下同一份声明但只用 bdID/sw_if_index，行为**逐字不变**。
+	client     func(sw model.VirtualSwitch) (DHCPServerClient, error)
 	punt       func() (PuntClient, error)
-	transport  func() (dnsPuntTransport, error)
-	tapOpen    func(name string) (dhcpTapTransport, error)
+	transport  func() (PuntTransport, error)
+	tapOpen    func(name string) (TapTransport, error)
 	clientSock string
 	leaseDir   string
 	now        func() time.Time
@@ -141,19 +145,19 @@ type DHCPServerProvider struct {
 	// mu 保护 servers / puntTr / puntReg 与各运行态的租约表（收包与读视图共用）。
 	mu      sync.Mutex
 	servers map[string]*dhcpServerRT
-	puntTr  dnsPuntTransport // 共享的 punt 接收 socket（存在启用中的服务器期间）
-	puntReg bool             // VPP 侧 UDP/67 注册是否在场（reset 置 false）
+	puntTr  PuntTransport // 共享的 punt 接收 socket（存在启用中的服务器期间）
+	puntReg bool          // VPP 侧 UDP/67 注册是否在场（reset 置 false）
 
 	switchOf func(uint32) (string, bool) // sw_if_index(域 BVI) → 交换机名（punt 路径派发）
 	alarms   *AlarmStore
 }
 
 // NewDHCPServerProviderFunc 以客户端工厂构造（连接可重连）；传输/内核 tap 用真实实现。
-func NewDHCPServerProviderFunc(client func() (DHCPServerClient, error), punt func() (PuntClient, error)) *DHCPServerProvider {
+func NewDHCPServerProviderFunc(client func(sw model.VirtualSwitch) (DHCPServerClient, error), punt func() (PuntClient, error)) *DHCPServerProvider {
 	return &DHCPServerProvider{
 		client: client,
 		punt:   punt,
-		transport: func() (dnsPuntTransport, error) {
+		transport: func() (PuntTransport, error) {
 			return newUnixPuntTransport(DHCPServerClientSock, DHCPServerServerSock)
 		},
 		tapOpen:    openDHCPTap,
@@ -178,14 +182,14 @@ func (p *DHCPServerProvider) SetLeaseDir(dir string) {
 }
 
 // SetTapOpen 设置内核侧 tap 打开器（单测注入内存实现；生产走平台默认 AF_PACKET）。
-func (p *DHCPServerProvider) SetTapOpen(fn func(string) (dhcpTapTransport, error)) {
+func (p *DHCPServerProvider) SetTapOpen(fn func(string) (TapTransport, error)) {
 	if fn != nil {
 		p.tapOpen = fn
 	}
 }
 
 // SetPuntTransport 设置 punt 接收传输（单测注入内存实现；生产走 AF_UNIX SOCK_DGRAM）。
-func (p *DHCPServerProvider) SetPuntTransport(fn func() (dnsPuntTransport, error)) {
+func (p *DHCPServerProvider) SetPuntTransport(fn func() (PuntTransport, error)) {
 	if fn != nil {
 		p.transport = fn
 	}
@@ -267,7 +271,9 @@ func (p *DHCPServerProvider) Sync(ctx context.Context, vs model.VirtualSwitch) e
 
 	// 1) tap 生命期：按内核侧名（HostIfName）找存量；无则建。**不用 tag 作查找键**
 	//（round140 实测 SwInterfaceTapV2Dump 不回 tag）。
-	c, err := p.client()
+	// 客户端带上**本次调用点的交换机声明**：内核侧实现靠它派生 bridge 名/服务 VLAN，
+	// 不必（也不得）在 apply 路径回读配置引擎（那会与本次提交持有的发动机锁自死锁）。
+	c, err := p.client(vs)
 	if err != nil {
 		return err
 	}
@@ -424,7 +430,8 @@ func (p *DHCPServerProvider) teardown(name string) error {
 // 可能已被 VPP 复用给别的接口，按旧索引删会误伤用户接口）。VPP 里本就没有（VPP 重启/从未建成）
 // ＝已达成，不报错。
 func (p *DHCPServerProvider) deleteTap(name string) []error {
-	c, err := p.client()
+	// 回收路径只需要交换机名（该实现的两个调用只按名核对身份）；无交换机声明可传，如实传名。
+	c, err := p.client(model.VirtualSwitch{Name: name})
 	if err != nil {
 		return []error{fmt.Errorf("删除交换机 %s 的 DHCP 内置 tap: %w", name, err)}
 	}
@@ -491,7 +498,7 @@ func (p *DHCPServerProvider) assertPunt() error {
 }
 
 // serveTap 内核侧 tap 收包协程（一台交换机一个；tap 关闭即退出）。
-func (p *DHCPServerProvider) serveTap(name string, tr dhcpTapTransport) {
+func (p *DHCPServerProvider) serveTap(name string, tr TapTransport) {
 	for {
 		frame, err := tr.Recv()
 		if err != nil {
@@ -516,7 +523,7 @@ func (p *DHCPServerProvider) handleTapFrame(name string, frame []byte) {
 }
 
 // servePunt punt 收包协程（所有交换机共用；socket 关闭即退出）。
-func (p *DHCPServerProvider) servePunt(tr dnsPuntTransport) {
+func (p *DHCPServerProvider) servePunt(tr PuntTransport) {
 	for {
 		desc, raw, err := tr.Recv()
 		if err != nil {
@@ -531,11 +538,11 @@ func (p *DHCPServerProvider) servePunt(tr dnsPuntTransport) {
 }
 
 // handlePuntPacket 处理一个 punt 上行包（单播续租/释放）：按 sw_if_index（域 BVI）找交换机。
-func (p *DHCPServerProvider) handlePuntPacket(desc dnsPuntDesc, raw []byte) {
+func (p *DHCPServerProvider) handlePuntPacket(desc PuntDesc, raw []byte) {
 	if p.switchOf == nil {
 		return
 	}
-	name, ok := p.switchOf(desc.swIfIndex)
+	name, ok := p.switchOf(desc.SwIfIndex)
 	if !ok {
 		return // 不属于任何已知交换机（不该出现）：不猜测
 	}

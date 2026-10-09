@@ -713,12 +713,13 @@ func TestUnsupportedFamiliesReportError(t *testing.T) {
 	p := New(&fakeRunner{})
 	ctx := context.Background()
 	// ACL / QoS / 端口镜像 / 风暴抑制 / 端口安全已实现，不再在此列；DHCP 中继也已实现
-	// （决策 #437：nfvisd 内的用户态中继实例）——它不再报 ErrUnsupported，声明不完整时按
-	// 如实错误上报（见 TestApplyDhcpRelayWithoutV4GatewayIsHonest）。
+	// （决策 #437：nfvisd 内的用户态中继实例），DHCP 服务器同样已实现（决策 #438：每交换机
+	// 一条内核 tap + 绑 BVI 地址的 UDP/67 单播接收，复用与 VPP 侧同一份服务器核心）——二者
+	// 不再报 ErrUnsupported，声明不完整时按如实错误上报（见 TestApplyDhcpRelayWithoutV4GatewayIsHonest
+	// 与 TestKernelDHCPServerWithoutGatewayIsHonest）。
 	cases := map[string]error{
-		"LLDP":     p.ApplyLLDP(ctx, &model.LldpConfig{}),
-		"DHCP 服务器": p.ApplyDHCPServer(ctx, model.VirtualSwitch{Name: "vs", DhcpServerPoolStart: "10.0.0.10"}),
-		"DNS 代理":   p.ApplyDNSProxy(ctx, orchestrator.DNSProxyUpstreams{Global: []string{"8.8.8.8"}}),
+		"LLDP":   p.ApplyLLDP(ctx, &model.LldpConfig{}),
+		"DNS 代理": p.ApplyDNSProxy(ctx, orchestrator.DNSProxyUpstreams{Global: []string{"8.8.8.8"}}),
 	}
 	for name, err := range cases {
 		if !errors.Is(err, ErrUnsupported) {
@@ -765,8 +766,10 @@ func TestUnsupportedReadViewsAreHonest(t *testing.T) {
 	if _, err := p.VxlanStates(ctx); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("VXLAN 运行态读视图应如实报不可用，得到 %v", err)
 	}
+	// DHCP 租约读视图（决策 #438）**不是**「不支持」：它是与 VPP 侧同一份服务器核心的运行态，
+	// 该交换机尚未收敛（未配置/未 Sync 过）时 ok=false —— 如实「查不到」，不是「没有租约」。
 	if _, ok := p.DHCPServerLeases("vs-lan"); ok {
-		t.Fatalf("DHCP 租约读视图应如实报不可用")
+		t.Fatalf("未收敛的交换机不应报有租约表")
 	}
 	// 风暴抑制与端口安全已实现：读视图改为**查内核**（空内核 ⇒ 未挂载，而不是"不支持"）。
 	if sd, ok := p.StormDataplane(ctx, "ens192"); ok {

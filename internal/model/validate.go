@@ -423,6 +423,10 @@ func (v *validator) checkKernelDataPlane(c Config) {
 	// 请求 → 源地址重写为 BVI 的 v4 网关地址 → 单播 server:67，giaddr=0；应答按「请求期
 	// xid → 客户端 MAC」登记表回注），故这里不再拒绝（通用段仍要求 L2 + v4 网关 + 与
 	// dhcp-server 互斥，见本文件后面的校验）。
+	// DHCP 服务器同样已实现（决策 #438）：内核侧每交换机一条内核 tap（enslave 到该交换机的
+	// 内核 bridge）+ 绑 BVI 网关地址的 UDP/67 socket（收单播续租），复用与 VPP 侧同一份
+	// 用户态服务器核心（池/租约/报文/池耗尽告警），故这里也不再拒绝（同上，通用段要求
+	// L2 + v4 网关 + 与 dhcp-relay 互斥）。
 	if c.Protocols != nil && c.Protocols.LLDP != nil {
 		v.errf("protocols.lldp", "当前数据面为 Linux 内核网络，LLDP 尚未实现%s", alt)
 	}
@@ -434,9 +438,6 @@ func (v *validator) checkKernelDataPlane(c Config) {
 		if vs.CrossConnect {
 			v.errf(path+".cross_connect", "当前数据面为 Linux 内核网络，cross-connect（无学习点对点直通）尚未实现；"+
 				"内核侧只有学习/泛洪形态的桥。请改用 L2 交换机 + 端口%s", alt)
-		}
-		if vs.DhcpServerPoolStart != "" || vs.DhcpServerPoolEnd != "" {
-			v.errf(path+".dhcp_server_pool_start", "当前数据面为 Linux 内核网络，DHCP 服务器尚未实现%s", alt)
 		}
 		if len(vs.DNSProxyServers) > 0 {
 			v.errf(path+".dns_proxy_servers", "当前数据面为 Linux 内核网络，数据面 DNS 代理尚未实现%s", alt)

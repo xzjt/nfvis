@@ -15,8 +15,9 @@ import (
 //
 // 口径（v3 决策 #404）：内核数据面**不维护进程内登记**，内核即事实源——故 VPP 侧的
 // 「登记失效」「残渣对账」「延后删表复核」等维护动作在内核侧是**无对象可做的空操作**；
-// 读视图能给出内核等价物的（MAC 表、路由、bridge 成员、接口状态、端口清单）给出真值，
-// VPP 专有的（LLDP 邻居、NAT 会话、DHCP 租约、风暴/端口安全实况）**如实报不可用**。
+// 读视图能给出内核等价物的（MAC 表、路由、bridge 成员、接口状态、端口清单、DHCP 租约——
+// 决策 #438 复用与 VPP 侧同一份服务器核心）给出真值，VPP 专有的（LLDP 邻居、NAT 会话、
+// 风暴/端口安全实况）**如实报不可用**。
 
 // SetSocketDirs 内核数据面不用 socket 目录（vNIC 走 virtio + tap，容器 vNIC 未支持）。
 func (p *Provider) SetSocketDirs(string, string) {}
@@ -27,8 +28,10 @@ func (p *Provider) InvalidateRuntimeState() {}
 // RetryDeferredVRFDeletes 无「延后删表」语义（内核 VRF 删除即时生效），无对象可复核。
 func (p *Provider) RetryDeferredVRFDeletes(context.Context, model.Config) []string { return nil }
 
-// ReconcileResidue / ReconcileRecoveryAlarms / ReconcileDHCPServer / ReconcileStorm 均为
+// ReconcileResidue / ReconcileRecoveryAlarms / ReconcileStorm 均为
 // VPP 侧登记型对账；内核数据面无登记、无对应族，空操作。
+// ReconcileDHCPServer 不在此列：内核侧有真实现（单播 socket 对账 + 复用的服务器核心巡检，
+// 见 dhcpserver.go 的同名方法）。
 func (p *Provider) ReconcileResidue(ctx context.Context, cfg model.Config) []error {
 	// 内核数据面下本方法承担的不是"残渣对账"（那是 VPP 侧的登记型语义），而是**转发前置条件**
 	// 的周期性对账：数据面设备集合随提交变化，放行链要跟着重建；转发开关也可能被宿主改掉。
@@ -38,7 +41,6 @@ func (p *Provider) ReconcileResidue(ctx context.Context, cfg model.Config) []err
 	return nil
 }
 func (p *Provider) ReconcileRecoveryAlarms(context.Context, model.Config) []error { return nil }
-func (p *Provider) ReconcileDHCPServer(context.Context, model.Config) []error     { return nil }
 
 // ReconcileProxy 内核数据面下没有 VPP 的 dhcp proxy，但有**同一族**的用户态中继实例需要周期性
 // 对账（决策 #437）：声明了却没在跑的实例补启（启动失败、运行期收包失败被停等都能自愈）、
@@ -169,6 +171,12 @@ func (p *Provider) BridgeDomains() ([]network.BDRuntime, error) {
 		// 端口安全关掉的是**单个端口**的学习（per-port learning off），不影响交换机级这一列。
 		st := network.BDRuntime{ID: bd.ID, Name: bd.Name, Learn: true, Flood: true}
 		for _, port := range bd.Ports {
+			// 决策 #438：内置 DHCP tap（bridge 成员口，名形如 nfvisdh+8 位十六进制）不进用户
+			// 端口视图——它与 VPP 侧按 sw_if_index 过滤的内置 tap 同一语义（用户不可见/不可删）；
+			// 内核侧端口清单是**按名**枚举的，故这里按名过滤（严格字符集，不误伤用户接口）。
+			if isProductDHCPTapName(port.Name) {
+				continue
+			}
 			st.Ports = append(st.Ports, network.BDRuntimePort{Name: port.Name, Shg: port.Shg})
 		}
 		out = append(out, st)
@@ -226,10 +234,25 @@ func (p *Provider) VxlanStates(context.Context) (map[string]network.VxlanState, 
 	return nil, unsupported("VXLAN 运行态")
 }
 
-// DHCPServerLeases / DHCPServerActiveLeases / DHCPTapIndexes：DHCP 服务器在内核数据面未实现。
-func (p *Provider) DHCPServerLeases(string) ([]network.DHCPLease, bool) { return nil, false }
-func (p *Provider) DHCPServerActiveLeases(string) (int, bool)           { return 0, false }
-func (p *Provider) DHCPTapIndexes() map[uint32]bool                     { return nil }
+// DHCPServerLeases / DHCPServerActiveLeases / DHCPTapIndexes：DHCP 服务器的读视图（决策 #438）。
+//
+// 内核数据面下这三处**不是**「未接入的空实现」——它们接到与 VPP 侧**同一份**服务器核心
+// （network.DHCPServerProvider）的运行态上：
+//   - 租约表/生效租约数：进程内状态，与传输面无关（ok=false = 该交换机尚未收敛）；
+//   - TapIndexes：产品自持的内置 tap 的内核 ifindex 集合（端口读视图按它过滤；内核侧端口
+//     视图是**按名**枚举的，故另有按名过滤，见 BridgeDomains）。
+func (p *Provider) DHCPServerLeases(name string) ([]network.DHCPLease, bool) {
+	srv, _ := p.dhcpComponents()
+	return srv.Leases(name)
+}
+func (p *Provider) DHCPServerActiveLeases(name string) (int, bool) {
+	srv, _ := p.dhcpComponents()
+	return srv.ActiveLeases(name)
+}
+func (p *Provider) DHCPTapIndexes() map[uint32]bool {
+	srv, _ := p.dhcpComponents()
+	return srv.TapIndexes()
+}
 
 // 编译期断言：内核数据面满足装配层使用的完整方法面。
 var _ interface {

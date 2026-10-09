@@ -820,7 +820,28 @@ func (p *Provider) DHCPRelayState(name string) (network.DHCPRelayState, bool) {
 	return p.relayMgr().State(name)
 }
 
-// Close 进程优雅退出：停掉全部 DHCP 中继实例（socket/goroutine 不残留）。幂等。
+// Close 进程优雅退出：停掉全部 DHCP 中继实例，并关闭 DHCP 服务器的单播接收 socket 与内置 tap
+// 的收发协程（决策 #438；socket/goroutine 不残留——tap 是内核对象，保留给下次启动按名复用）。
+// 幂等。
 func (p *Provider) Close() error {
-	return p.relayMgr().Close()
+	var errs []error
+	if err := p.relayMgr().Close(); err != nil {
+		errs = append(errs, err)
+	}
+	p.dhcpMu.Lock()
+	srv, hub := p.dhcpSrv, p.dhcpHub
+	p.dhcpMu.Unlock()
+	if srv != nil {
+		// 关内核侧 tap 的 AF_PACKET 收发并注销（内核侧注册是空操作）——与 main 里 VPP 侧的
+		// `defer dhcpServer.Close()` 同义。
+		if err := srv.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if hub != nil {
+		if err := hub.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }

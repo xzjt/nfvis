@@ -238,7 +238,11 @@ func run() error {
 			log.Info("已从现有 startup.conf 导入 DPDK 端口映射", "count", n, "path", dpdkBindings.Path)
 		}
 		kp.SetHeldPortProbe(dpdkHeldPortProbe(dpdkBinder, network.KernelIfnamesAll))
-		// 决策 #437：进程优雅退出停掉全部 DHCP 中继实例（socket/收发协程不残留）。
+		// 决策 #438：域内 DHCP 服务器（每交换机一条内核 tap + 绑 BVI 地址的 UDP/67 单播接收）
+		// 由 Provider 内部惰性装配——装配层无需显式接线，随 ApplyDHCPServer/Sync 与恢复重放收敛；
+		// 池耗尽告警经下面的 SetAlarms 注入（与 VPP 侧同一口径），租约读视图经 DHCPServer 选项接上。
+		// 决策 #437：进程优雅退出停掉全部 DHCP 中继实例（socket/收发协程不残留），
+		// 并关闭 DHCP 服务器的单播 socket 与内置 tap 收发协程（决策 #438；tap 对象保留复用）。
 		defer func() { _ = kp.Close() }()
 		log.Info("已选择 Linux 内核网络数据面（内核 bridge/VRF/nftables/vxlan）")
 	} else {

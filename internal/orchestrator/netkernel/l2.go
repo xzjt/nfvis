@@ -182,6 +182,16 @@ func (p *Provider) applyGateway(ctx context.Context, vs model.VirtualSwitch, br 
 // 删了 vs-lan，`vr-vs-lan` 还在）。显式声明的 `gateway vrf <名>` 不在此删除：
 // 那是操作者自己的对象，生命周期不由本交换机决定。
 func (p *Provider) DeleteBridgeDomain(ctx context.Context, name string) error {
+	// 决策 #438：先停该交换机的 DHCP 服务器——内置 tap 是 bridge 成员口、单播接收 socket 绑在
+	// bridge 的 BVI 地址上（reference 先解、被引用者后删，与 #437 relay/#196/#342 的删除倒序一致）。
+	// 未启用/从未收敛时幂等空操作。
+	srv, hub := p.dhcpComponents()
+	if err := hub.Stop(name); err != nil {
+		return err
+	}
+	if err := srv.Sync(ctx, model.VirtualSwitch{Name: name}); err != nil {
+		return err
+	}
 	// 决策 #437：先停该交换机的 DHCP 中继实例（它引用 bridge 的收发路径与 BVI 地址）——
 	// 先解引用、后删被引用，与 #196/#342 的删除倒序一致。无实例/未声明时幂等空操作。
 	if err := p.relayMgr().Stop(name); err != nil {

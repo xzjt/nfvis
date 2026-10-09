@@ -822,7 +822,8 @@ nfvis$ request system kernel apply
 | 抓包 | 支持（pcap trace） | 支持（`tcpdump`；命令/端点同名同语义，见 §10.4） |
 | IPv6 三层/转发（静态路由 v4+v6） | 支持 | **支持**（转发开关 v4/v6 一并置位并回读；v6 地址/静态路由/ACL 按各自语义下发） |
 | DHCP 中继 | 支持（VPP dhcp proxy，按 rx-VRF） | **支持**（nfvisd 内的**用户态中继实例**：收 bridge 上的 DHCP 请求 → 源地址重写为 BVI 的 IPv4 网关地址 → 单播 `server:67`，giaddr=0；应答按「请求期 xid → 客户端 MAC」登记表回注以太帧，不依赖 option 82；运行态见详情页的中继说明行） |
-| DHCP 服务器 / DNS 代理 / LLDP | 支持 | **尚不支持**（提交期直接拒绝） |
+| DHCP 服务器 | 支持（VPP dhcp 插件侧的用户态服务器 + 内置 L2 tap + UDP/67 punt） | **支持**（同一份用户态服务器核心，只换传输面：每交换机一条**内核 tap**（TUN/TAP，enslave 到该交换机的内核 bridge，不进用户端口视图；由产品打开 `/dev/net/tun` 认领持有以保证 carrier）+ **绑 BVI 网关地址的 UDP/67 socket** 收单播续租；server-id/下发网关/缺省 DNS 同为 BVI 地址，租约文件与状态语义、池耗尽告警与 VPP 侧一致，机制与边界见 §8.3） |
+| DNS 代理 / LLDP | 支持 | **尚不支持**（提交期直接拒绝） |
 
 三处都能选，写的是同一个配置项 `system.dataplane`：
 
@@ -1378,9 +1379,22 @@ nfvis# commit
 >
 > 池内地址耗尽时产生告警 `DHCP_POOL_EXHAUSTED`（warning；有地址释放/租约到期即自动消解）。
 >
-> **内核数据面下 DHCP 服务器尚未实现**（启用语句 `set dhcp-server pool …` 会在提交期被直接拒绝；
-> DHCP **中继**在该数据面**已支持**，机制与边界见上）——需要产品自带服务器时请切换回 `vpp` 数据面，
-> 或使用外部 DHCP 服务、在 VNF/容器内静态编址。
+> **内核数据面下 DHCP 服务器已支持**（两数据面同一语句 `set dhcp-server pool …`；机制与 VPP 侧
+> **同一份用户态服务器核心**，只换传输面）：每台启用的交换机建**一条内核 tap**（TUN/TAP netdev，
+> enslave 到该交换机的内核 bridge，**不出现在** `show virtual-switches <n> ports` 里；设备由产品
+> 打开 `/dev/net/tun` 认领并**长期持有**——TUN/TAP 的 carrier 来自持有者，不持有则 bridge 不会把
+> 洪泛帧投给它，服务器收不到客户端）——域内广播随 bridge 洪泛到该 tap；**单播续租**（RENEW/RELEASE）由绑到该交换机 **BVI 网关地址的 UDP/67
+> socket** 接收。server-id、下发的网关与缺省 DNS 均为 **BVI 地址**；租约文件/租约状态语义/池耗尽
+> 告警/与 `dhcp-relay` 的互斥与 VPP 侧**完全一致**。
+> 如实边界（与 VPP 侧相同的部分不再重复）：内置 tap 是内核对象，`nfvisd` 重启后**按名复用**
+> （被带外删掉会在 15s 巡检内重建）；单播接收 socket 活在进程内，重启后由恢复重放重建；
+> 起不来（交换机 bridge 尚未收敛 / tap 建不出 / BVI 地址未下发或 67 端口被占）时**提交失败并
+> 回滚**、恢复收敛落未收敛告警，不静默。
+> 交换机声明了 VLAN（`vlan-access` / 端口 `native-vlan` / `trunk-vlans`）时，内置 tap 会自动**钉到该交换机的
+> 服务 VLAN**（`bridge vlan` 的 PVID 取 access VLAN，否则第一个 native VLAN）——否则内核 bridge 的广播
+> 只在同一 VID 内洪泛、客户端的 DISCOVER 到不了服务器。**如实边界**：**纯 trunk**（声明了 VLAN 却没有
+> access/native VLAN）时服务域无法确定，会在**提交期报错**并给出照做路径；**多 VLAN**（access + trunk）
+> 时服务器只服务 access/native 那一档，其余 VLAN 的客户端不受理（这两点仅内核数据面，VPP 数据面不受限）。
 
 ### 8.4 L3 虚拟交换机 + 静态路由
 
@@ -2644,6 +2658,7 @@ nfvis$ show system metrics history name nfvis_system_cpu_utilization_ratio [last
 | 内核数据面下 `bind-dpdk` 报「不支持 bind-dpdk」 | 有意拒绝：内核数据面不使用 DPDK 接管，绑定会把网卡从内核里拿走 | 需要 DPDK 请切回 `vpp` 数据面（§7.0）；把网卡交还内核用 `unbind-dpdk`（同节清单） |
 | 内核数据面下配了 DHCP 中继但客户端拿不到租约 | 方向性排查：① `show virtual-switches <n> detail` 的「DHCP 中继说明」行看中继实例是否「运行中」、计数是否在涨（起不来会给出原因，并进未收敛告警、15 秒巡检自动重试）；② 该行同时给出「已转发 / 已回注 / 因找不到客户端丢弃」——已转发在涨而客户端仍无租约，问题多在 server 侧（server 须把应答**单播回中继源地址**即 BVI 地址，且须在该域内可达）；③ 宿主 `ss -lunp \| grep :67` 可看中继的 UDP 67 是否绑在 BVI 地址上（`tcpdump -i <交换机名>` 看三跳报文） | 本数据面**不依赖 server 回显 option 82**（该要点只适用 VPP 数据面）；server 与客户端同处一个二层域时应直连、不经中继 |
 | 内核数据面下 `unbind-dpdk` 报「接口仍被内核数据面使用」 | 该口是 bridge/bond/VRF 的成员口或带 IP 地址，仍被数据面转发使用 | 先在配置里删掉引用它的声明并提交，再解绑（报错文案里有照做路径） |
+| 内核数据面下配了 DHCP 服务器但客户端拿不到租约 | 方向性排查：① `show virtual-switches <n> dhcp-leases` 能出表＝服务器已收敛（未收敛时该命令如实报「尚未收敛」并给原因方向）；② 内置 tap 是产品自持设备、**不出现在** `show virtual-switches <n> ports`，看内核事实用 `ip -d link show type tun`（须 enslave 到该交换机同名 bridge、UP 且 **不带 NO-CARRIER**——tap 的 carrier 来自「谁持有它」，`nfvisd` 会打开 `/dev/net/tun` 认领持有；若显示 NO-CARRIER 说明持有没建立，服务日志会有认领失败的原因）；③ 宿主 `ss -lunp | grep :67` 看单播接收 socket 是否绑在交换机 BVI 地址上（`tcpdump -i <交换机名> udp port 67` 可看四跳） | 起不来（bridge 未收敛 / BVI 地址未下发 / 67 端口被占 / tap 建不出）时**提交会失败并回滚**、恢复收敛期落未收敛告警并 15 秒自动重试；控制器网段 ARP 与客户端寻址都发生在交换机域内，`show virtual-switches <n> detail` 的网关/池是否同子网也值得先核对 |
 | 同上但报「拒绝操作管理口」 | 该口被判为管理路径（配置声明/默认路由/监听口）——有意拒绝 | 换业务口；确需变更用带外方式 B |
 | commit 报 `接口在 VPP 中不存在: ensX（若该口由 DPDK 接管…）` | 该口尚未进数据面（刚声明/刚接管的过渡态），或未绑 vfio、或口名不对 | `request vpp restart`；仍失败按 §7.2 核对（`ip link` 里没有 = 已被接管） |
 | 日志报 `以下已由 DPDK 接管的物理口未在配置中声明…` | 该口没在 committed 里声明为 DPDK 口 | 补 `set vpp dpdk dev <口>`（并确认 `set interfaces <口>`）再重启 |

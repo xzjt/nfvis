@@ -42,7 +42,7 @@ func (f *fakePunt) Deregister(port uint16) error {
 func (f *fakePunt) Close() {}
 
 type fakePacket struct {
-	desc dnsPuntDesc
+	desc PuntDesc
 	pkt  []byte
 }
 
@@ -52,10 +52,10 @@ type fakeTransport struct {
 	closed bool
 }
 
-func (t *fakeTransport) Recv() (dnsPuntDesc, []byte, error) {
-	return dnsPuntDesc{}, nil, net.ErrClosed // 单测直接调 handle，不走 serve 循环
+func (t *fakeTransport) Recv() (PuntDesc, []byte, error) {
+	return PuntDesc{}, nil, net.ErrClosed // 单测直接调 handle，不走 serve 循环
 }
-func (t *fakeTransport) Send(desc dnsPuntDesc, pkt []byte) error {
+func (t *fakeTransport) Send(desc PuntDesc, pkt []byte) error {
 	t.mu.Lock()
 	t.sent = append(t.sent, fakePacket{desc, append([]byte{}, pkt...)})
 	t.mu.Unlock()
@@ -227,7 +227,7 @@ func TestDNSProxyForwardUsesPerDomainAndReplies(t *testing.T) {
 	})
 
 	q := mkUDPQuery([4]byte{192, 168, 99, 2}, [4]byte{192, 168, 99, 1}, 34567, 53, dnsQueryBytes(0x1234), true)
-	p.handle(tr, dnsPuntDesc{swIfIndex: 5, action: 0}, q)
+	p.handle(tr, PuntDesc{SwIfIndex: 5, Action: 0}, q)
 
 	if gotServer != "10.0.0.53" {
 		t.Fatalf("应优先用按域上游: got %q", gotServer)
@@ -239,7 +239,7 @@ func TestDNSProxyForwardUsesPerDomainAndReplies(t *testing.T) {
 	if !ok {
 		t.Fatal("应回注一个包")
 	}
-	if out.desc.swIfIndex != 5 || out.desc.action != dnsPuntActionIP4Routed {
+	if out.desc.SwIfIndex != 5 || out.desc.Action != dnsPuntActionIP4Routed {
 		t.Fatalf("回注 desc 应为 action=1 且 sw_if_index 取上行原值: %+v", out.desc)
 	}
 	// 回注包应为裸 IPv4：源=网关(99.1:53)、目的=客户端(99.2:34567)、载荷=上游应答
@@ -277,7 +277,7 @@ func TestDNSProxyFallbackToGlobal(t *testing.T) {
 		PerSwitch: map[string][]string{"vs-a": {"10.0.0.53"}},
 	})
 	q := mkUDPQuery([4]byte{10, 0, 0, 2}, [4]byte{10, 0, 0, 1}, 40000, 53, dnsQueryBytes(1), false)
-	p.handle(tr, dnsPuntDesc{swIfIndex: 9}, q)
+	p.handle(tr, PuntDesc{SwIfIndex: 9}, q)
 	if used != "8.8.8.8" {
 		t.Fatalf("无按域上游应回落全局: got %q", used)
 	}
@@ -296,7 +296,7 @@ func TestDNSProxyServfailWhenNoUpstream(t *testing.T) {
 	p.mu.Unlock()
 
 	q := mkUDPQuery([4]byte{10, 0, 0, 2}, [4]byte{10, 0, 0, 1}, 40000, 53, dnsQueryBytes(0xBEEF), false)
-	p.handle(tr, dnsPuntDesc{swIfIndex: 3}, q)
+	p.handle(tr, PuntDesc{SwIfIndex: 3}, q)
 	out, ok := tr.last()
 	if !ok {
 		t.Fatal("无上游也应回 SERVFAIL（不得静默丢弃）")

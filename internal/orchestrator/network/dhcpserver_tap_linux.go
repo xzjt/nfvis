@@ -19,8 +19,13 @@ import (
 	"time"
 )
 
-// dhcpTapTransport 内核侧 tap 的以太帧收发（真实=AF_PACKET；单测注入内存实现）。
-type dhcpTapTransport interface {
+// TapTransport 内核侧 tap 的以太帧收发（真实=AF_PACKET；单测注入内存实现）。
+//
+// 导出（v3 决策 #438）：内核数据面复用同一个 provider 核心，装配/测试需要按接口注入传输
+// （内核侧注入的是**持有底座**：打开 /dev/net/tun + TUNSETIFF 后读写该 fd，见
+// netkernel.SetDHCPServerTapLayer 与 netkernel/dhcpserver_tap.go；VPP 侧仍走本文件的 AF_PACKET，
+// 语义与实现**逐字不变**）。
+type TapTransport interface {
 	Recv() ([]byte, error) // 一个完整以太帧；Close 后返回 net.ErrClosed
 	Send(frame []byte) error
 	MAC() net.HardwareAddr // 内核侧 tap 的 MAC（服务器以太源）
@@ -37,7 +42,7 @@ type packetTap struct {
 
 // openDHCPTap 打开（绑定）内核侧 tap。tap 由 VPP 刚创建时内核 netdev 可能稍晚出现，
 // 故按 200ms × 最多 15 次重试（有界，失败如实报错）。
-func openDHCPTap(name string) (dhcpTapTransport, error) {
+func openDHCPTap(name string) (TapTransport, error) {
 	var (
 		iface *net.Interface
 		err   error

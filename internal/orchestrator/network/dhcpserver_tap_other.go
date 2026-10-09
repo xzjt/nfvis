@@ -11,14 +11,16 @@ import (
 	"net"
 )
 
-// dhcpTapTransport 内核侧 tap 的以太帧收发（真实=AF_PACKET[linux]；单测注入内存实现）。
-type dhcpTapTransport interface {
+// TapTransport 内核侧 tap 的以太帧收发（真实=AF_PACKET[linux]；单测注入内存实现）。
+//
+// 导出（v3 决策 #438）：内核数据面复用同一个 provider 核心（见 dhcpserver.go 的说明）。
+type TapTransport interface {
 	Recv() ([]byte, error) // 一个完整以太帧；Close 后返回 net.ErrClosed
 	Send(frame []byte) error
 	MAC() net.HardwareAddr // 内核侧 tap 的 MAC（服务器以太源）
 	Close() error
 }
 
-func openDHCPTap(name string) (dhcpTapTransport, error) {
+func openDHCPTap(name string) (TapTransport, error) {
 	return nil, fmt.Errorf("DHCP 服务器的内置 tap 收发仅支持 Linux（内核侧 AF_PACKET）：当前平台不可用")
 }

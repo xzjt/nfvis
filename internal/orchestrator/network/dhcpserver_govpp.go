@@ -14,6 +14,7 @@ package network
 import (
 	"fmt"
 
+	"github.com/xzjt/nfvis/internal/model"
 	"go.fd.io/govpp/api"
 	ifapi "go.fd.io/govpp/binapi/interface"
 	"go.fd.io/govpp/binapi/interface_types"
@@ -28,7 +29,11 @@ type TapInfo struct {
 	HostMAC    string
 }
 
-// DHCPServerClient VPP 侧 DHCP 服务器所需的最小能力集（govpp 适配 / 单测假实现）。
+// DHCPServerClient DHCP 服务器传输面所需的最小能力集（govpp 适配 / 内核侧实现 / 单测假实现）。
+//
+// 接口面向**每交换机一次收敛**的调用形态：实现由 `client(sw)` 工厂按该交换机的声明构造
+// （内核侧实现用它派生 bridge 名/服务 VLAN 等事实，见 network/dhcpserver.go 的字段说明），
+// 方法本身仍只收发 sw_if_index/bdID。
 type DHCPServerClient interface {
 	// TapCreate 创建一个 tap，返回 VPP 侧 sw_if_index（内核侧名 hostIfName、tag 仅写不改）。
 	TapCreate(hostIfName, tag string) (uint32, error)
@@ -44,8 +49,10 @@ type DHCPServerClient interface {
 }
 
 // DHCPServerClientFunc 返回随当前连接获取 DHCP 服务器客户端的工厂（断线重连自动换 channel）。
-func (m *Manager) DHCPServerClientFunc() func() (DHCPServerClient, error) {
-	return func() (DHCPServerClient, error) {
+// 入参 sw 是本次收敛的交换机声明：VPP 侧只需要 bdID/sw_if_index（BD 天然与所有端口同域，
+// 没有内核 bridge 那类「服务 VLAN」问题），故收下但**不使用**——行为与改造前逐字一致。
+func (m *Manager) DHCPServerClientFunc() func(sw model.VirtualSwitch) (DHCPServerClient, error) {
+	return func(_ model.VirtualSwitch) (DHCPServerClient, error) {
 		ch, err := m.APIChannel()
 		if err != nil {
 			return nil, err

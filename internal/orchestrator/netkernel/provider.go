@@ -42,6 +42,18 @@ type Provider struct {
 	relayMu sync.Mutex
 	relay   *relayManager
 
+	// DHCP 服务器（决策 #438；惰性构造，见 dhcpserver.go）：hub = 每交换机的单播接收
+	// UDP/67 socket 与「内核 bridge ifindex → 交换机」反查；srv = **复用**的
+	// network.DHCPServerProvider（与 VPP 侧同一份服务器核心：租约池/报文状态机/池耗尽告警）。
+	// dhcpTapLayer / dhcpSockLayer 是单测注入的传输面（生产 nil = 平台默认：/dev/net/tun 持有
+	// 内置 tap + UDP/67 绑 BVI 地址）。
+	dhcpMu        sync.Mutex
+	dhcpHub       *dhcpUnicastManager
+	dhcpSrv       *network.DHCPServerProvider
+	dhcpTapLayer  dhcpTapLayer
+	dhcpSockLayer dhcpUnicastLayer
+	dhcpLeaseDir  string
+
 	// capture 抓包实现（惰性构造；与 Provider 共用同一个 Runner 与配置来源）。
 	capture *Capture
 
@@ -85,7 +97,16 @@ const (
 )
 
 // SetAlarms 注入告警表（恢复收敛未收敛项、物理口链路、转发前置条件的落点；可空）。
-func (p *Provider) SetAlarms(a *network.AlarmStore) { p.alarms = a }
+// 同时转发给已装配的 DHCP 服务器 provider（决策 #438：池耗尽告警 DHCP_POOL_EXHAUSTED 的
+// 落点——两处注入顺序无关，后到者补接；与 VPP 侧 L2Network.SetAlarms 同一口径）。
+func (p *Provider) SetAlarms(a *network.AlarmStore) {
+	p.alarms = a
+	p.dhcpMu.Lock()
+	if p.dhcpSrv != nil {
+		p.dhcpSrv.SetAlarms(a)
+	}
+	p.dhcpMu.Unlock()
+}
 
 // SetHeldPortProbe 注入「该口仍被 DPDK 驱动占用」的探测（决策 #426③；nil = 不判定）。
 //
@@ -497,13 +518,9 @@ func (p *Provider) ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) e
 	return p.relayMgr().Sync(ctx, vs)
 }
 
-// ApplyDHCPServer 域内 DHCP 服务器：内核侧对应 dnsmasq/kea，属独立立项；未声明即空操作。
-func (p *Provider) ApplyDHCPServer(_ context.Context, vs model.VirtualSwitch) error {
-	if vs.DhcpServerPoolStart == "" && vs.DhcpServerPoolEnd == "" {
-		return nil
-	}
-	return unsupported("DHCP 服务器（内核数据面尚未实现，请改用 VPP 数据面）")
-}
+// ApplyDHCPServer 域内 DHCP 服务器的实现在 dhcpserver.go（决策 #438：每交换机一条内核 tap
+// + 绑 BVI 地址的 UDP/67 单播接收，复用与 VPP 侧同一份服务器核心）。此前这里是「未实现」的
+// 如实空操作/拒绝，内核侧接通后整体移除——本注释保留在此处指向新实现，避免后来者按旧认知查找。
 
 // ApplyDNSProxy 数据面 DNS 代理：内核侧对应 dnsmasq，属独立立项；无任何上游即空操作。
 //
