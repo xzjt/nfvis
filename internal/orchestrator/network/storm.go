@@ -37,6 +37,10 @@ package network
 //     如实进读视图与巡检未收敛项；只有实况回读确实可用（取到阳性绑定）才允许删。
 //     分类表随 VPP 重启自然消失——孤儿是瞬态，删的价值远小于误删代价。
 //
+//     同族的**孤儿 policer**（决策 #433）：登记丢失后残留的 `nfvis-storm-*` policer 没有自动
+//     清理路径，保护集同样不可证 ⇒ **只做只读识别**（policer 有名字，识别可靠），进读视图与
+//     巡检未收敛项，绝不删除（按名清理仍只走 teardown 的既定路径）。
+//
 //     为什么必须有中间态：本底座（VPP 26.06）**两个 API 都读不到 policer-classify 绑定**——
 //     `classify_table_by_interface` 对 policer-classify 绑定恒回 l2_table_id=NONE（0xFFFFFFFF）、
 //     `policer_classify_dump`（L2/IP4/IP6 三档）恒 0 条目（自建 govpp 探针实测，原始输出见
@@ -73,6 +77,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -124,9 +129,15 @@ func stormMatch(kind string) []byte {
 	return stormMask(kind) // 两类「掩码位 = 匹配值」同形；分两个函数是为了让语义各自成文
 }
 
+// stormPolicerPrefix 本产品风暴抑制 policer 的名字前缀（命名空间独立于 QoS 策略）。
+//
+// 为什么要一个具名常量：孤儿 policer 的只读识别按**前缀**认领本产品对象（决策 #433）——
+// policer 有名字，识别可靠；前缀是「这是我们的」的唯一线索（policer_dump 里没有别的标记）。
+const stormPolicerPrefix = "nfvis-storm-"
+
 // stormPolicerName 该类在该接口上的 policer 名（命名空间独立于 QoS 策略：前缀不同）。
 func stormPolicerName(ifname, kind string) string {
-	return "nfvis-storm-" + ifname + "-" + kind
+	return stormPolicerPrefix + ifname + "-" + kind
 }
 
 // StormPolicer 数据面 policer 的**实测**视图（读视图用；取自 policer_dump——该 dump 的
@@ -221,7 +232,10 @@ type StormDataplane struct {
 	// OrphanCandidates 数据面存在、形状属本产品却不被任何绑定/登记/认领覆盖的分类表索引
 	//（只识别不删；来自最近一次巡检/清扫的只读识别，见 scanStormOrphans）。
 	OrphanCandidates []uint32
-	Kinds            map[string]StormKindDataplane
+	// OrphanPolicers 数据面存在 `nfvis-storm-` 前缀、却不被任何声明/登记/自认领覆盖的 policer 名
+	//（决策 #433；与孤儿分类表同族——只识别不删，来自最近一次巡检的只读识别，见 scanOrphanPolicers）。
+	OrphanPolicers []string
+	Kinds          map[string]StormKindDataplane
 }
 
 // ErrStormAbsent 目标对象在数据面不存在（解绑/删除方向的「已是目标状态」）。
@@ -532,6 +546,9 @@ type StormProvider struct {
 	// orphans 最近一次孤儿扫描识别出的候选（形状属本产品、却不被任何绑定/登记/认领覆盖的
 	// 分类表索引）。**只识别不删**：进读视图如实呈现（见 scanStormOrphans）。
 	orphans []uint32
+	// orphanPols 最近一次识别出的孤儿 policer 名（数据面存在 `nfvis-storm-` 前缀、却不被任何
+	// 声明/登记/自认领覆盖）。**只识别不删**（决策 #433；见 scanOrphanPolicers）。
+	orphanPols []string
 }
 
 // NewStormProvider 以固定客户端构造（测试）。
@@ -555,7 +572,8 @@ func (p *StormProvider) SetCountersReader(r StormCountersReader) { p.counters = 
 func (p *StormProvider) reset() {
 	p.mu.Lock()
 	p.rt = map[string]*stormIfaceRT{}
-	p.orphans = nil // 候选是数据面实况的读视图：连接失效后旧读数一并作废
+	p.orphans = nil    // 候选是数据面实况的读视图：连接失效后旧读数一并作废
+	p.orphanPols = nil // 同上（孤儿 policer 的识别结果）
 	p.mu.Unlock()
 }
 
@@ -685,12 +703,22 @@ func (p *StormProvider) Reconcile(ctx context.Context, cfg model.Config) []error
 	if p.stormInUse(cfg) {
 		if c, err := p.client(); err == nil {
 			sc := p.scanStormOrphans(c)
+			// 孤儿 policer 的只读识别（决策 #433）：与分类表同族，**只识别不删**——事实不可得
+			// （清单读不到）即放弃（polsOK=false：不误报、不删）。读视图与未收敛项同源呈现。
+			orphanPols, polsOK := p.scanOrphanPolicers(c, cfg)
 			c.Close()
 			if sc.OK {
 				p.setOrphanCandidates(sc.Candidates)
 				if len(sc.Candidates) > 0 {
 					errs = append(errs, fmt.Errorf("数据面存在未被绑定或登记覆盖的本产品形状分类表（只识别不删）: %s",
 						stormIDsText(sc.Candidates)))
+				}
+			}
+			if polsOK {
+				p.setOrphanPolicers(orphanPols)
+				if len(orphanPols) > 0 {
+					errs = append(errs, fmt.Errorf("数据面存在未被声明或登记覆盖的风暴抑制 policer（只识别不删）: %s",
+						strings.Join(orphanPols, "、")))
 				}
 			}
 		}
@@ -1202,6 +1230,48 @@ func (p *StormProvider) scanStormOrphans(c StormClient) stormOrphanScan {
 	return sc
 }
 
+// scanOrphanPolicers 只读识别孤儿 policer（决策 #433；与孤儿分类表同族）：
+// 数据面存在 `nfvis-storm-` 前缀的 policer，但其名字**既不被任何接口声明覆盖**
+// （cfg.Interfaces 的 storm-control 要的 policer 名），**也不被本进程任何登记覆盖**
+// （含自认领：登记里的各类 policerName）。
+//
+// 为什么只识别不删：与分类表同族的纪律——登记丢失（nfvisd 重启而 VPP 未重启）后残留的
+// 孤儿 policer 没有自动清理路径（`applyDone` 在「无声明 + 无登记」时早退 ⇒ teardown 的
+// 「按名清 policer」不被调用），而保护集在绑定不可回读时不可证 ⇒ 任何删除都可能删到正在
+// 生效的对象。故识别如实进读视图与巡检未收敛项，**绝不删除**——按名清理仍只走 teardown
+// 的既定路径（决策 #421/#429 口径不变）。
+//
+// 事实不可得（policer 清单读不到）即放弃本轮识别（ok=false：不误报、不删），
+// 与 stormOrphanScan.OK 那套「不可得就放弃」同口径。
+func (p *StormProvider) scanOrphanPolicers(c StormClient, cfg model.Config) ([]string, bool) {
+	pols, err := c.PolicerDump()
+	if err != nil {
+		return nil, false // 清单不可得：放弃本轮识别（不误报）
+	}
+	covered := map[string]bool{}
+	for _, iface := range cfg.Interfaces {
+		for kind := range stormDesired(iface.StormControl) {
+			covered[stormPolicerName(iface.Name, kind)] = true
+		}
+	}
+	for _, reg := range p.regSnapshotAll() {
+		for _, e := range reg.kinds {
+			if e != nil {
+				covered[e.policerName] = true
+			}
+		}
+	}
+	var out []string
+	for _, pl := range pols {
+		if !strings.HasPrefix(pl.Name, stormPolicerPrefix) || covered[pl.Name] {
+			continue
+		}
+		out = append(out, pl.Name)
+	}
+	sort.Strings(out) // 输出确定（读视图/未收敛项文案不随 map/遍历序漂移）
+	return out, true
+}
+
 // protectStormChain 把表 t 及其沿 `NextTableIndex` 的表链放进保护集（两类并存时另一张只在
 // 链上；深度上限 4 防环）。
 func (p *StormProvider) protectStormChain(c StormClient, bound map[uint32]bool, t uint32) {
@@ -1372,6 +1442,24 @@ func (p *StormProvider) orphanCandidates() []uint32 {
 	return append([]uint32(nil), p.orphans...)
 }
 
+// setOrphanPolicers 记录最近一次识别的孤儿 policer 名（读视图用；**只识别不删**，决策 #433）。
+func (p *StormProvider) setOrphanPolicers(names []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(names) == 0 {
+		p.orphanPols = nil
+		return
+	}
+	p.orphanPols = append([]string(nil), names...)
+}
+
+// orphanPolicers 最近一次识别的孤儿 policer 名（读视图用）。
+func (p *StormProvider) orphanPolicers() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.orphanPols...)
+}
+
 // Dataplane 读该接口风暴抑制的数据面实况（读视图用，全部为实测值）：
 //   - policer 是否存在与实测 CIR（policer_dump，按名找）；
 //   - **绑定事实四态**（决策 #421①，收口后 +自认领）：实况回读（权威）/按登记（本底座该绑定
@@ -1382,7 +1470,9 @@ func (p *StormProvider) orphanCandidates() []uint32 {
 //     索引取自本 Provider 登记——登记是「最后一次成功下发」，是产品知道自建表索引的唯一来源）；
 //   - 计数（stats segment；读不到给出原因，不猜）；
 //   - **孤儿候选**（只读识别的形状相符却不被绑定/登记覆盖的表，见 scanStormOrphans；
-//     只识别不删，来自最近一次巡检/清扫的识别结果）。
+//     只识别不删，来自最近一次巡检/清扫的识别结果）；
+//   - **孤儿 policer**（只读识别的 `nfvis-storm-` 前缀却不被任何声明/登记覆盖的 policer 名，
+//     见 scanOrphanPolicers；只识别不删，来自最近一次巡检的识别结果，决策 #433）。
 func (p *StormProvider) Dataplane(ctx context.Context, ifname string) (StormDataplane, error) {
 	c, err := p.client()
 	if err != nil {
@@ -1421,6 +1511,7 @@ func (p *StormProvider) Dataplane(ctx context.Context, ifname string) (StormData
 		out.Binding, out.AdoptedTable = StormBindingAdopted, bound
 	}
 	out.OrphanCandidates = p.orphanCandidates()
+	out.OrphanPolicers = p.orphanPolicers()
 	// 实况表链：接口 L2 槽挂着的那张表 + 沿 next_table_index 链上的表（两类并存时另一类只在
 	// 链上，见 build 的表链说明）。「实况在位」只能落在这个**实况**集合里——进程内登记只补
 	// policer 索引/计数，不再充当表在位的证据（决策 #401：登记有、槽被别的对象占用时必须如实报

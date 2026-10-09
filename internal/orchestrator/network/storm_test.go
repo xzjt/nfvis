@@ -40,6 +40,8 @@ type fakeStormClient struct {
 	blindAttached bool
 	// livePin 钉住「实况回读」的结果（解绑后仍读到绑定——真机上「删了表而槽仍指向它」的形态）。
 	livePin map[uint32]uint32
+	// failPolicerDump 让 PolicerDump 报错（孤儿 policer 识别的「事实不可得即放弃」用例）。
+	failPolicerDump bool
 }
 
 func newFakeStormClient() *fakeStormClient {
@@ -173,6 +175,9 @@ func (f *fakeStormClient) PolicerClassifySetInterface(swIfIndex, l2TableIndex ui
 
 func (f *fakeStormClient) PolicerDump() ([]StormPolicer, error) {
 	f.calls = append(f.calls, "policer-dump")
+	if f.failPolicerDump {
+		return nil, fmt.Errorf("注入失败: policer-dump")
+	}
 	names := make([]string, 0, len(f.pols))
 	for n := range f.pols {
 		names = append(names, n)
@@ -1489,6 +1494,97 @@ func TestStormOrphanCandidatesReportedNotDeleted(t *testing.T) {
 	}
 	if dp, _ := p.Dataplane(ctx, "ens192"); len(dp.OrphanCandidates) != 0 {
 		t.Fatalf("候选消解后读视图不得再列: %+v", dp.OrphanCandidates)
+	}
+}
+
+// ---------- 孤儿 policer 的只读识别（决策 #433） ----------
+//
+// 由来（R3-10）：登记丢失后残留的 `nfvis-storm-*` policer 没有自动清理路径（`applyDone` 在
+// 「无声明 + 无登记」时早退 ⇒ teardown 的「按名清 policer」不被调用）。与孤儿分类表同族——
+// 保护集不可证 ⇒ **只识别不删**：识别如实进读视图（OrphanPolicers）与巡检未收敛项，
+// 绝不删除（按名清理仍只走 teardown 的既定路径）。
+
+// TestStormOrphanPolicersIdentifiedNotDeleted（决策 #433）：被声明/登记覆盖的 policer 不进候选；
+// 数据面存在 `nfvis-storm-` 前缀却不被任何声明/登记覆盖的 policer **如实识别**（未收敛项 + 读视图），
+// 且**一个都不删**；孤儿消失后读视图消解。
+func TestStormOrphanPolicersIdentifiedNotDeleted(t *testing.T) {
+	ctx := context.Background()
+	cfg := model.Config{Interfaces: []model.InterfaceConfig{stormCfg(8000, 20000)}}
+	c, p := adoptedFixture(t) // 数据面已有 ens192 的一对 policer，登记为空（等价 nfvisd 重启）
+	if errs := p.Reconcile(ctx, cfg); len(errs) != 0 {
+		t.Fatalf("自认领应先成立: %v", errs)
+	}
+	// 被声明/登记覆盖的 policer（ens192 broadcast/multicast）不得进候选。
+	dp0, err := p.Dataplane(ctx, "ens192")
+	if err != nil {
+		t.Fatalf("Dataplane: %v", err)
+	}
+	if len(dp0.OrphanPolicers) != 0 {
+		t.Fatalf("被声明/登记覆盖的 policer 不得进候选: %+v", dp0.OrphanPolicers)
+	}
+	// 孤儿 policer：数据面存在、任何声明/登记都不覆盖（登记丢失后的残留形态）。
+	c.pols["nfvis-storm-ghost-broadcast"] = 42
+	c.polCir["nfvis-storm-ghost-broadcast"] = 1000
+	before := c.snapshot()
+	c.calls = nil
+	errs := p.Reconcile(ctx, cfg)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "nfvis-storm-ghost-broadcast") ||
+		!strings.Contains(errs[0].Error(), "只识别不删") {
+		t.Fatalf("孤儿 policer 应如实回报（未收敛项含名字）: %v", errs)
+	}
+	dp, err := p.Dataplane(ctx, "ens192")
+	if err != nil {
+		t.Fatalf("Dataplane: %v", err)
+	}
+	if len(dp.OrphanPolicers) != 1 || dp.OrphanPolicers[0] != "nfvis-storm-ghost-broadcast" {
+		t.Fatalf("读视图应给孤儿 policer: %+v", dp.OrphanPolicers)
+	}
+	if bad := stormDestructiveCalls(c); len(bad) != 0 {
+		t.Fatalf("只识别不删：不得有任何改动调用: %v", bad)
+	}
+	if _, ok := c.pols["nfvis-storm-ghost-broadcast"]; !ok {
+		t.Fatalf("孤儿 policer 不得被删: %s", c.snapshot())
+	}
+	if c.snapshot() != before {
+		t.Fatalf("巡检不得改动数据面: before=%s after=%s", before, c.snapshot())
+	}
+	// 孤儿随数据面消失（如数据面重启）而消解：识别结果同源刷新，不再虚报。
+	delete(c.pols, "nfvis-storm-ghost-broadcast")
+	delete(c.polCir, "nfvis-storm-ghost-broadcast")
+	if errs := p.Reconcile(ctx, cfg); len(errs) != 0 {
+		t.Fatalf("孤儿消失后不应再报未收敛: %v", errs)
+	}
+	if dp, _ := p.Dataplane(ctx, "ens192"); len(dp.OrphanPolicers) != 0 {
+		t.Fatalf("孤儿消解后读视图不得再列: %+v", dp.OrphanPolicers)
+	}
+}
+
+// TestStormOrphanPolicersGivesUpWhenDumpFails（决策 #433）：policer 清单不可得 ⇒ **放弃本轮识别**
+// （不误报、不删）——与 stormOrphanScan.OK 那套「不可得就放弃」同口径。
+func TestStormOrphanPolicersGivesUpWhenDumpFails(t *testing.T) {
+	ctx := context.Background()
+	cfg := model.Config{Interfaces: []model.InterfaceConfig{stormCfg(8000, 0)}}
+	c := newFakeStormClient()
+	c.blindAttached = true
+	// 数据面里放一个「本该被识别为孤儿」的 policer，但清单读不到 ⇒ 不得凭残缺信息误报。
+	c.pols["nfvis-storm-ghost-broadcast"] = 42
+	c.polCir["nfvis-storm-ghost-broadcast"] = 1000
+	c.failPolicerDump = true
+	p := NewStormProvider(c)
+	// Reconcile 会因 declaredPresent 读不到清单而如实报接口未收敛（此处不关心），
+	// 关键是**识别路径**放弃（不误报候选）。
+	if _, ok := p.scanOrphanPolicers(c, cfg); ok {
+		t.Fatalf("policer 清单不可得时应放弃识别（ok=false）")
+	}
+	p.Reconcile(ctx, cfg)
+	if got := p.orphanPolicers(); len(got) != 0 {
+		t.Fatalf("policer 清单不可得时不得误报候选: %+v", got)
+	}
+	if bad := stormDestructiveCalls(c); len(bad) != 0 {
+		t.Fatalf("不可得时不得做任何改动: %v", bad)
+	}
+	if _, ok := c.pols["nfvis-storm-ghost-broadcast"]; !ok {
+		t.Fatalf("不得删任何 policer: %s", c.snapshot())
 	}
 }
 

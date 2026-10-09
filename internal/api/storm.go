@@ -60,7 +60,7 @@ func stormKindLabel(kind string) string {
 // 时给出原因串（不显示 0 冒充「没有超速」）；绑定事实按四态分列（实况回读 / 按登记 / 自认领 /
 // 未挂，见文件头），结构化输出同源给 binding / binding_basis / declared_l2_table /
 // adopted_l2_table / table_declared / table_adopted / table_source，另有只识别不删的
-// 分类表候选（orphan_candidates）。
+// 分类表候选（orphan_candidates）与 policer 候选（orphan_policers）。
 func (x *cliExecutor) stormControlBlock(ifc model.InterfaceConfig) (string, map[string]any) {
 	sc := ifc.StormControl
 	structCfg := map[string]any{}
@@ -111,6 +111,11 @@ func (x *cliExecutor) stormControlBlock(ifc model.InterfaceConfig) (string, map[
 	// 的表——本数据面版本不可回读绑定、保护集不可证，故如实列出而不删（随数据面重启自然消失）。
 	if !kernel && len(dp.OrphanCandidates) > 0 {
 		rt["orphan_candidates"] = dp.OrphanCandidates
+	}
+	// policer 候选（只识别不删，决策 #433）：数据面存在 `nfvis-storm-` 前缀、却不被任何声明/
+	// 登记/自认领覆盖的 policer——与分类表候选同族（保护集不可证），如实列出而不删。
+	if !kernel && len(dp.OrphanPolicers) > 0 {
+		rt["orphan_policers"] = dp.OrphanPolicers
 	}
 	// 数据面实况：逐类（配置的类必须给读数或如实说明；未配置的类不列）。
 	kindLines := make([]string, 0, 2)
@@ -181,6 +186,10 @@ func (x *cliExecutor) stormControlBlock(ifc model.InterfaceConfig) (string, map[
 		fmt.Fprintf(&b, "Storm control 分类表候选: %s（未被绑定或登记覆盖；本数据面版本不可回读绑定，只识别不删）\n",
 			stormIDsLine(dp.OrphanCandidates))
 	}
+	if !kernel && len(dp.OrphanPolicers) > 0 {
+		fmt.Fprintf(&b, "Storm control policer 候选: %s（未被声明或登记覆盖；本数据面版本不可回读绑定，只识别不删）\n",
+			stormNamesLine(dp.OrphanPolicers))
+	}
 	return b.String(), out
 }
 
@@ -191,4 +200,9 @@ func stormIDsLine(ids []uint32) string {
 		parts = append(parts, fmt.Sprintf("#%d", id))
 	}
 	return strings.Join(parts, "、")
+}
+
+// stormNamesLine policer 名列表渲染成「name、name」（候选行用；仿 stormIDsLine）。
+func stormNamesLine(names []string) string {
+	return strings.Join(names, "、")
 }

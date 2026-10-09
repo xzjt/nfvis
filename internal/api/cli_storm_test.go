@@ -275,6 +275,55 @@ func TestCLIStormControlReadViewAdoptedAndCandidates(t *testing.T) {
 	}
 }
 
+// TestCLIStormControlReadViewOrphanPolicers（决策 #433）：只识别不删的孤儿 policer 候选如实列出
+// （文本行 + 结构化 orphan_policers）；无候选时不发射该字段（与 orphan_candidates 同口径）。
+func TestCLIStormControlReadViewOrphanPolicers(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set interfaces ens224 description storm-port",
+		"set interfaces ens224 storm-control broadcast 8000",
+		"commit",
+		"exit",
+	)
+	x.setStorm(fakeStormRuntime{ok: true, dp: network.StormDataplane{
+		Available: true, Binding: network.StormBindingAdopted, AdoptedTable: 1,
+		OrphanPolicers: []string{"nfvis-storm-ghost-broadcast", "nfvis-storm-ghost-multicast"},
+		Kinds: map[string]network.StormKindDataplane{
+			network.StormKindBroadcast: {PolicerPresent: true, CirKbps: 8000,
+				TableAdopted: &network.StormTableInfo{Index: 1, Mask: "ffffffffffff00000000000000000000", Sessions: 1}},
+		},
+	}})
+	out := x.Execute("admin", aaaClassSU, "ssh", "show interfaces ens224 detail").Output
+	if !strings.Contains(out, "Storm control policer 候选: nfvis-storm-ghost-broadcast、nfvis-storm-ghost-multicast") {
+		t.Fatalf("detail 应列出孤儿 policer 候选（只识别）:\n%s", out)
+	}
+	if !strings.Contains(out, "未被声明或登记覆盖") || !strings.Contains(out, "只识别不删") {
+		t.Fatalf("候选行应写明依据（未被声明或登记覆盖 / 只识别不删）:\n%s", out)
+	}
+	rt := detailEntryOf(t, x, "ens224")["storm_control_runtime"].(map[string]any)
+	names, ok := rt["orphan_policers"].([]string)
+	if !ok || len(names) != 2 || names[0] != "nfvis-storm-ghost-broadcast" || names[1] != "nfvis-storm-ghost-multicast" {
+		t.Fatalf("结构化应给 orphan_policers：%v", rt["orphan_policers"])
+	}
+	// 无候选时不发射该字段。
+	x.setStorm(fakeStormRuntime{ok: true, dp: network.StormDataplane{
+		Available: true, Binding: network.StormBindingAdopted, AdoptedTable: 1,
+		Kinds: map[string]network.StormKindDataplane{
+			network.StormKindBroadcast: {PolicerPresent: true, CirKbps: 8000,
+				TableAdopted: &network.StormTableInfo{Index: 1, Mask: "ffffffffffff00000000000000000000", Sessions: 1}},
+		},
+	}})
+	out2 := x.Execute("admin", aaaClassSU, "ssh", "show interfaces ens224 detail").Output
+	if strings.Contains(out2, "policer 候选") {
+		t.Fatalf("无候选时不得发射候选行:\n%s", out2)
+	}
+	rt2 := detailEntryOf(t, x, "ens224")["storm_control_runtime"].(map[string]any)
+	if _, ok := rt2["orphan_policers"]; ok {
+		t.Fatalf("无候选时不得发射 orphan_policers：%v", rt2)
+	}
+}
+
 // 未声明接口 / unknown-unicast / 值域三类拒绝（各给能照做的报错或明确的校验错误）。
 func TestCLIStormControlRejections(t *testing.T) {
 	// 未声明接口：语句期拒绝并给出声明写法（不允许本语句代建声明）
