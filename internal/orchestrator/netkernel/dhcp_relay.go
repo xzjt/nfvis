@@ -822,7 +822,8 @@ func (p *Provider) DHCPRelayState(name string) (network.DHCPRelayState, bool) {
 
 // Close 进程优雅退出：停掉全部 DHCP 中继实例，并关闭 DHCP 服务器的单播接收 socket 与内置 tap
 // 的收发协程（决策 #438；socket/goroutine 不残留——tap 是内核对象，保留给下次启动按名复用），
-// 以及 DNS 代理的全部域落点 socket（决策 #439；socket 与收包协程不残留）。幂等。
+// 以及 DNS 代理的全部域落点 socket（决策 #439）、LLDP 自研收发代理的全部接口 socket
+// （决策 #440）——socket 与收发协程都不残留。幂等。
 func (p *Provider) Close() error {
 	var errs []error
 	if err := p.relayMgr().Close(); err != nil {
@@ -848,6 +849,15 @@ func (p *Provider) Close() error {
 	p.dnsProxyMu.Unlock()
 	if dnsMgr != nil {
 		if err := dnsMgr.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	// LLDP：只关**已构造**的管理器（它没被用过就没有 socket/协程可关——不为退出再构造一次）。
+	p.lldpMu.Lock()
+	lldpMgr := p.lldp
+	p.lldpMu.Unlock()
+	if lldpMgr != nil {
+		if err := lldpMgr.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}

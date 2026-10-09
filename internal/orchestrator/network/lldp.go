@@ -122,18 +122,22 @@ func (p *LldpProvider) Neighbors(ctx context.Context) ([]LldpNeighbor, error) {
 // lldpIDString 解码 LLDP 标识字节串（去尾部 NUL）。
 //
 // 仅适用于「文本型」标识（interface alias/name、chassis component、locally assigned）。
-// MAC/网络地址型标识是二进制的，必须走 lldpIDBySubtype——真实交换机绝大多数用
+// MAC/网络地址型标识是二进制的，必须走 LldpIDBySubtype——真实交换机绝大多数用
 // MAC 型 chassis-ID，直接当字符串输出会得到乱码（决策 #70）。
 func lldpIDString(b []byte) string {
 	return strings.TrimRight(string(b), "\x00")
 }
 
-// lldpIDBySubtype 按 subtype 解码 LLDP 标识（IEEE 802.1AB §8.5/§8.6）。
+// LldpIDBySubtype 按 subtype 解码 LLDP 标识（IEEE 802.1AB §8.5/§8.6）。
 //
 // 注意 chassis 与 port 的 subtype 编号不同：chassis MAC = 4、port MAC = 3，
 // 故 macSubtype 由调用方按 CHASSIS_ID_SUBTYPE_MAC_ADDR / PORT_ID_SUBTYPE_MAC_ADDR 传入。
 // 二进制型标识格式化为 MAC 或十六进制，避免把二进制字节直接当字符串输出。
-func lldpIDBySubtype(subtype, macSubtype uint32, b []byte) string {
+//
+// 导出共享（决策 #440）：内核数据面的自研 LLDP 收发代理复用本函数渲染邻居标识——
+// 两种数据面共用**同一份**标识渲染（同 subtype 语义：chassis MAC = 4、port MAC = 3），
+// 读视图不会各说各话。
+func LldpIDBySubtype(subtype, macSubtype uint32, b []byte) string {
 	raw := bytes.TrimRight(b, "\x00")
 	if len(raw) == 0 {
 		return ""

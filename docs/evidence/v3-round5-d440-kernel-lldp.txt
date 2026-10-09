@@ -1,0 +1,114 @@
+NFViS v3 · round5：决策 #440 内核数据面 LLDP（自研收发代理，零外部依赖）+ 真机抓出并修掉 R4-3
+=================================================================================================
+
+日期/分支：2026-10-09，`v3`（起点 HEAD `c22f290`，即 round4/#439 提交）
+决策：规格书附录 A #440（`docs/NFViS-系统产品需求与目标架构规格书.md`）、设计文档 §3.2e
+账目：`docs/v3待做.md` 三.4 收口（LLDP 从「整族未实现」移出；余 memif 容器接入）
+
+§0 状态一句话
+-------------
+内核数据面下 `protocols.lldp` 不再提交期拒绝：nfvisd 内起**自研 LLDP 收发代理**（每启用接口一个
+AF_PACKET socket，ethertype 0x88CC）——收＝解析基础 TLV 建邻居表（对端 TTL 过期移除），发＝按
+`advertisement-interval`（缺省 30s）向保留组播 `01:80:c2:00:00:0e` 发广告（TTL＝4×interval，与
+VPP 侧 txHold=4 同口径）。读视图（`show lldp neighbors [interface <if>]` / `show protocols lldp
+neighbors` / `GET /protocols/lldp/neighbors`）两数据面同形；ID 渲染复用 VPP 侧同一份
+`network.LldpIDBySubtype`（单一真源）。
+
+§1 环境与测试拓扑
+-----------------
+- nfvis-vm（Ubuntu 26.04.1），换装二进制上机（`/root/bin-orig/*.pre439` 仍为发布件备份；本轮覆盖
+  安装两次——先 S5 交付版验证，再 R4-3 修复版复验）。
+- 数据面切内核（照交接 §7 配方）；业务口解绑 DPDK 交还 vmxnet3。
+- **测试拓扑（宿主侧独立取证）**：`ip link add lldp-dut type veth peer name lldp-peer`，对端
+  `lldp-peer` 移入 netns `lldptest` 并 up；产品侧声明 `set interfaces lldp-dut`，LLDP 配
+  `set protocols lldp enable true` / `advertisement-interval 3`（3s，便于观察）/ `interface lldp-dut enable true`。
+- 对端脚本：`/tmp/lldp_rx.py`（AF_PACKET 绑 `lldp-peer` 收帧并逐 TLV 解码）、`/tmp/lldp_tx.py`
+  （造 LLDP 帧发给产品）、`/tmp/lldp_count.py`（N 秒内计数）。
+
+§2 逐项验证（每条都有独立事实源）
+---------------------------------
+① **发送（对端独立抓包 + 逐 TLV 解码）**：两帧、间隔 3s（23:07:47 / 23:07:50）：
+   `dst=01:80:c2:00:00:0e`、`src=3e:0c:b6:90:cf:26`（该口当时 MAC，与 `/sys/class/net/lldp-dut/address`
+   一致）、`ethertype=0x88cc`、`len=60`；TLV：`chassis subtype=7 value=b'nfvis-lab'`、
+   `port subtype=5 value=b'lldp-dut'`、`ttl=12`（＝4×3）、`sysname='nfvis-lab'`、`end` —— 与契约逐项吻合。
+② **接收（两读视图同源）**：对端自造帧（chassis subtype 7 `peer-sw`、port subtype 5 `port-9`、TTL 10）⇒
+   CLI `show lldp neighbors`：`lldp-dut  peer-sw  port-9  10`；REST
+   `{"local_interface":"lldp-dut","chassis_id":"peer-sw","port_id":"port-9","ttl":10,"last_heard":2.7…}`。
+③ **同键刷新不新增**：同内容连发两帧 ⇒ 仍一行（TTL 刷新），不产生重复条目。
+④ **TTL 过期**：TTL=3 的一帧后等 5s ⇒ `（无 LLDP 邻居）`（按**对端** TTL 移除）。
+⑤ **开关**：`set … interface lldp-dut enable false`（rev 280）⇒ 对端 7s **零帧** + 邻居清空；
+   `enable true`（rev 281）⇒ 7s 内 2 帧（恢复）。全局 `delete protocols lldp enable`（rev 282）⇒
+   零帧 + 邻居清空。**未声明接口**（`interface foo0 enable true`）⇒ 提交期拒绝：
+   `protocols.lldp.interfaces[foo0]: 接口 "foo0" 不是物理口`。
+⑥ **接口过滤读视图**：`show lldp neighbors interface lldp-dut` 正常出该口邻居（复用既有过滤判据）。
+⑦ **恢复重放**：`systemctl restart nfvis` 后 7s 内 2 帧（socket/收发协程重建、广告续发）、
+   对端再发帧 ⇒ 邻居表可用（TTL 30 一行）。
+
+§3 真机当场发现（单测挡不住的形状）
+-----------------------------------
+**R4-3（已修，跨族通用缺陷）：删光 LLDP 留下空壳 ⇒ `show configuration | display set` 报内部错误。**
+- 现象：清理测试配置时 `delete protocols lldp` 后，`display set` 返回
+  `%% display set 内部错误：生成语句未能完整还原配置——请改用 show configuration / | display json 并报告缺陷`
+  （`display json` 仍可读；运维会**突然读不到配置**）。
+- 两种空壳形态（本地单测两形态均先红后绿）：
+  · 逐叶子删光 ⇒ `protocols.lldp = {}`（模型 `Protocols: &ProtocolsConfig{LLDP: &LldpConfig{}}`）；
+  · 整节点删（通用遍历路径）⇒ `protocols = {}`（模型 `Protocols: &ProtocolsConfig{}`）。
+  空壳里没有可发射的语句，回放自校验（`internal/api/setstmt.go` 的 `verifySetStatements`）还原不出。
+- 同因先例：NAT（R84-26）、system.metrics（#356）、防火墙（#388）——处置同一：**删除合流点不留空壳**
+  （`pruneEmptySingleton`，别名表与通用遍历两条路径共用）。
+- 修法：`pruneEmptySingleton` 按**既有登记制口径**补 `protocols` **内外两层**（先剪空 `lldp`、再判空 `protocols`）——
+  与 management/metrics/firewall/nat 同一形态、同一落点（`isEmptyShell` 判据不变：只认 nil 与空数组，
+  出现任何取值/嵌套对象一律视为有内容）。**未取「任意顶层空壳通用兜底」**：既有守护
+  `TestPruneEmptySingletonScope` 明确钉着「未登记的容器不动（登记制而非通用扫描）」的口径，
+  通用兜底与该口径冲突（首版即被它拦下，`go test ./internal/api` 如实报红）——本轮按登记制收口，
+  并把 protocols 的两形态补进该守护（登记集合：management/metrics/firewall/nat/protocols）。
+- 守护：`internal/api/lldp_delete_test.go` 两形态（逐叶子/整节点），修复前两条用例**均按预期失败**
+  （分别报 `{LLDP:0x…}` 与 `{LLDP:<nil>}` 残留），修复后全绿；既有 NAT/防火墙/metrics 用例不回归。
+- **真机复验（修复版二进制）**：① 修复前复现内部错误；② `set protocols lldp enable true` + commit
+  ⇒ `display set` 恢复（1 条 lldp 语句）；③ `delete protocols lldp` + commit（rev 286）⇒
+  `display set` 成功、`display json` 顶层**不再有 `protocols`**（keys = interfaces/resource_pools/system/vpp）。
+
+**观察（如实登记，非缺陷）**：广告源 MAC 在 socket 打开时读取。真机里 veth 被系统（networkd）采用时
+MAC 由 76:e2:… 变为 3e:0c:…，产品随后按**新** MAC 发送（建立期之后的变化不影响）；但若外部在**运行期**
+改 MAC，广告源地址会陈旧到下一次重建——v1 边界，已写进设计 §3.2e。
+
+§4 边界（不做/未做，如实）
+--------------------------
+- 只解析 802.1AB **基础 TLV**（chassis/port/TTL/system name/END；未知 TLV 跳过）；**不解析**
+  LLDP-MED/DCBX/管理地址/系统描述；只收**无 VLAN 标签**帧；发送内容固定（主机名/接口名/接口 MAC），
+  不提供自定义 sysname（与 VPP 侧一致）；不做 SNMP MIB 与收发计数读视图。
+- Web 控制面复用同一 REST 读物（未单做浏览器复核）。
+- **memif 容器接入**仍为「整族未实现」（`docs/v3待做.md` 三，余项）。
+
+§5 清场与环境恢复
+------------------
+- 配置：`delete protocols lldp` + `delete interfaces lldp-dut`（rev 283）→ R4-3 修复后又经
+  「填回→整节点删」（rev 285/286）把空壳清干净；当前 committed = 基线 26 条 `set` 语句
+  （interfaces ens192/ens224、vpp dpdk/cpu/memory、resource-pools、system 各段），
+  `display set` 正常、`display json` 顶层无 `protocols`。
+- 内核对象：veth `lldp-dut`/`lldp-peer` 与 netns `lldptest` 已删；`ip link show lldp-dut` → 不存在。
+- 数据面切回 **vpp**：`set system dataplane vpp` + restart + `bind-dpdk` ×2 + `request vpp restart` ⇒
+  `dataplane: vpp / version 26.06-release / connected: yes / pending_restart: no`；业务口 `dpdk` 在位。
+- 告警：仅既有的 `HUGEPAGE_POOL_ORPHAN`（交接文档已登记的历史项），无本轮新增。
+- 预先存在的孤儿内核对象（非本轮产生，未动）：bridge `vs-lan`（成员 `vx-a`）、`vs-dmz`、`srvsw`、
+  VRF `vr-srvsw`。
+
+§6 代码/测试面（本轮）
+----------------------
+- 内核实现：`netkernel/lldp.go`（TLV 编解码 + 邻居表 + 收发管理器 + 生命周期）、`lldp_linux.go`
+  （AF_PACKET 0x88CC，镜像 DHCP 中继的底座写法）、`lldp_other.go`（非 Linux 兜底）；
+  `provider.go`（ApplyLLDP 真实现 + 注入底座）、`recovery.go`（接口段后重放）、
+  `api_surface.go`（LldpNeighbors 真读数 + ReconcileLLDP + 编译期断言）、`dhcp_relay.go`（Close 关停）、
+  `cmd/nfvisd/main.go`（15s 巡检步骤）。
+- 共享：`network/lldp.go` 导出 `LldpIDBySubtype`（VPP 侧行为逐字不变，调用点同步）。
+- 校验：`model/validate.go` 删内核侧拒绝（通用段「接口须为已声明物理口」不变）+ 两数据面用例。
+- R4-3 修复：`api/cliexec.go` 的 `pruneEmptySingleton`（protocols 内外两层，登记制）+ `api/lldp_delete_test.go`
+  （两形态守护）+ `api/nat_delete_test.go`（登记集合补 protocols，并保留「未登记容器不动」的既有口径）。
+- 测试与红-绿：S5 三变异（TLV 子类型互换 / 摘掉 TTL 过期 / 忽略逐口 false）先红后绿；主会话对
+  R4-3 两形态先红后绿（见 §3）。源码级扫描（apply 路径禁读配置发动机）纳入 `lldp.go`。
+- `make check` 七项全绿（决策计数 **342**；覆盖率门槛包全过；archtest/user_text/openapi 同步/套件契约
+  同步均过）。
+
+§7 提交
+-------
+（见 `git log` 的 `feat: 决策 #440 …` 提交信息——含真机验证要点与 R4-3 的修复说明。）

@@ -64,6 +64,13 @@ type Provider struct {
 	dnsProxy      *dnsProxyManager
 	dnsProxyLayer dnsProxyLayer
 
+	// LLDP 自研收发代理（决策 #440；惰性构造，见 lldp.go）：每个启用接口一个 AF_PACKET socket
+	// （ethertype 0x88CC）+ 收/发协程 + 进程内邻居表。lldpLayer 是单测注入的传输面
+	// （生产 nil = 平台默认：AF_PACKET 绑该口）。
+	lldpMu    sync.Mutex
+	lldp      *lldpManager
+	lldpLayer lldpLayer
+
 	// alarms 告警落点（R2-6）：内核数据面此前没有任何告警——恢复未收敛项与物理口链路
 	// 只进 journal，`show alarms`/Web 总览/诊断包/`/events` 全查不到，与 #191/#321/#333
 	// 建立的「未收敛项必须事后可查」纪律冲突。装配期注入，未注入即只返回错误（测试/工具场景）。
@@ -509,22 +516,25 @@ func unsupported(feature string) error {
 	return fmt.Errorf("%w：%s", ErrUnsupported, feature)
 }
 
-// ---------- 未实现族：只在**确有声明**时报不支持 ----------
+// ---------- 伴随操作族：只在**确有声明**时动作 ----------
 //
 // 关键口径（真机走查抓到）：提交编排把这些族当作 bridge-domain/VRF 的**伴随操作**调用——
 // 每台交换机都会走一次 `ApplyLLDP`/`ApplyDHCPServer`/`ApplyDNSProxy`。**未声明时必须是空操作**，
 // 否则任何一次普通提交都会被"未实现"挡住（现场：只建了一台 L2 交换机，提交却报
 // `dhcp-relay[vs-lan] 不受支持`）。
 //
-// 本段现只剩 **LLDP** 是「未实现」：DHCP 中继/服务器与 DNS 代理均已接通（见各自文件的真实现），
-// 它们的「未声明＝空操作/teardown」语义由实现自身承担，不再是这里的纵深防御分支。
+// 本段族**已全部接通**：DHCP 中继/服务器（#437/#438）、DNS 代理（#439）、LLDP（#440 自研
+// 收发代理）都有真实现；「未声明＝空操作/teardown」语义由实现自身承担，这里不再有「未实现」
+// 的纵深防御分支。
 
-// ApplyLLDP LLDP 邻居：内核侧需 lldpd 守护进程对接，属独立立项；未声明即空操作。
-func (p *Provider) ApplyLLDP(_ context.Context, lldp *model.LldpConfig) error {
-	if lldp == nil {
-		return nil
-	}
-	return unsupported("LLDP（内核数据面尚未实现）")
+// ApplyLLDP LLDP（决策 #440）：内核侧由 nfvisd 内的**自研收发代理**承担（每启用接口一个
+// AF_PACKET socket：收 LLDPDU 建邻居表 + 按 advertisement-interval 发广告；零外部依赖，
+// 不引入 lldpd）。实现与生命周期口径见 lldp.go。
+//
+// 未声明（nil/Enabled=false）＝全部关闭（socket 关、停发、邻居表清空，幂等）；起不来
+// （接口不存在/权限不足）**如实返回错误**（提交失败并回滚 / 恢复未收敛项），不静默。
+func (p *Provider) ApplyLLDP(ctx context.Context, lldp *model.LldpConfig) error {
+	return p.lldpMgr().Sync(ctx, lldp)
 }
 
 // ApplyDhcpRelay 交换机 DHCP 中继（决策 #437）：内核数据面下由 nfvisd 内的**用户态中继实例**
@@ -592,4 +602,30 @@ func (p *Provider) DNSProxyState() (network.DNSProxyState, bool) {
 		return network.DNSProxyState{}, false
 	}
 	return mgr.State(), true
+}
+
+// lldpMgr 惰性构造 LLDP 收发管理器（真实现 = AF_PACKET 绑该口收发 LLDP 帧）。
+func (p *Provider) lldpMgr() *lldpManager {
+	p.lldpMu.Lock()
+	defer p.lldpMu.Unlock()
+	if p.lldp == nil {
+		p.lldp = newLLDPManager(p.lldpLayerOrDefault())
+	}
+	return p.lldp
+}
+
+// SetLLDPLayer 注入 LLDP 收发底座（**单测专用**：不依赖真 socket 与内核口；须在任何 LLDP
+// 收敛之前调用——管理器在首次收敛时惰性构造并取用本底座）。nil = 恢复真实现（平台默认）。
+func (p *Provider) SetLLDPLayer(l lldpLayer) {
+	p.lldpMu.Lock()
+	defer p.lldpMu.Unlock()
+	p.lldpLayer = l
+}
+
+// lldpLayerOrDefault 生效的收发底座（未注入 = 平台默认；见 lldp_{linux,other}.go）。
+func (p *Provider) lldpLayerOrDefault() lldpLayer {
+	if p.lldpLayer != nil {
+		return p.lldpLayer
+	}
+	return defaultLLDPLayer()
 }

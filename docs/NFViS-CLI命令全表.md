@@ -108,7 +108,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show vpp capture` | **兼容别名**（与 `show capture` 同一实现、同一端点，旧脚本不破） | 同上 | ✅ |
 | `show bonds` | 链路聚合列表 | `GET /bonds` | ✅ |
 | `show bonds <name> detail` | 成员口 link/LACP actor-partner | `GET /bonds/{name}` | ✅ |
-| `show lldp neighbors [interface <ifname>]` | LLDP 邻居表；`interface <ifname>` **按口过滤真的生效**（本轮起）：无匹配给「接口 X 无 LLDP 邻居」、接口未知给明确报错，都不再回全量表 | `GET /protocols/lldp/neighbors` | ✅（本机无对端 → 空表/无匹配文案） |
+| `show lldp neighbors [interface <ifname>]` | LLDP 邻居表；`interface <ifname>` **按口过滤真的生效**（本轮起）：无匹配给「接口 X 无 LLDP 邻居」、接口未知给明确报错，都不再回全量表。**内核数据面**（决策 #440）读自研代理的邻居表（形状与 VPP 侧逐字不变：interface/chassis_id/port_id/ttl/last_heard） | `GET /protocols/lldp/neighbors` | ✅（VPP 侧本机无对端 → 空表/无匹配文案；**内核侧 round5 真机：对端自造帧 ⇒ 邻居出现、TTL 过期消失**，证据 `docs/evidence/v3-round5-d440-kernel-lldp.txt`） |
 | `show protocols lldp neighbors` | **等价写法**（与上一条**同一读物、同一实现**，输出逐字相同） | 同上 | ✅ |
 | `show virtual-machine-functions` | VM 列表 | `GET /virtual-machine-functions` | ✅ |
 | `show virtual-machine-functions <name> detail` | 域 XML 摘要/资源分配/NUMA | `GET /virtual-machine-functions/{name}` | ✅ |
@@ -302,9 +302,9 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 命令 | 说明 | 落点 | 实测 |
 |---|---|---|---|
-| `set protocols lldp enable <bool>` | LLDP 全局启停 | VPP lldp 插件 | ✅ |
-| `set protocols lldp advertisement-interval <n>` | 通告间隔 | VPP lldp 插件 | ✅ |
-| `set protocols lldp interface <ifname> enable <bool>` | 按接口覆盖 | VPP lldp 插件 | ✅ |
+| `set protocols lldp enable <bool>` | LLDP 全局启停 | VPP：lldp 插件；内核：自研收发代理全局开关（关＝停广告 + 关 socket + 清邻居表，决策 #440） | ✅（内核侧 round5 真机：对端零帧 + 邻居清空） |
+| `set protocols lldp advertisement-interval <n>` | 通告间隔（缺省 30s；内核侧广告 TTL＝4×interval，与 VPP txHold=4 同口径） | VPP：lldp 插件；内核：自研代理的发送节奏（变更只改节奏与 TTL、不重建 socket，决策 #440） | ✅（内核侧 round5 真机：3s 间隔逐帧解码） |
+| `set protocols lldp interface <ifname> enable <bool>` | 按接口覆盖（接口须为已声明物理口，两数据面一致） | VPP：lldp 插件逐口开关；内核：该口开/关 AF_PACKET 收发扬声器（决策 #440） | ✅（内核侧 round5 真机：关⇒零帧+邻居清空，开⇒恢复） |
 
 ### 2.3 `interfaces` 与 `bonds`（§2.3）
 

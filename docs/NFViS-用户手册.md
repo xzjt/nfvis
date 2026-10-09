@@ -824,7 +824,7 @@ nfvis$ request system kernel apply
 | DHCP 中继 | 支持（VPP dhcp proxy，按 rx-VRF） | **支持**（nfvisd 内的**用户态中继实例**：收 bridge 上的 DHCP 请求 → 源地址重写为 BVI 的 IPv4 网关地址 → 单播 `server:67`，giaddr=0；应答按「请求期 xid → 客户端 MAC」登记表回注以太帧，不依赖 option 82；运行态见详情页的中继说明行） |
 | DHCP 服务器 | 支持（VPP dhcp 插件侧的用户态服务器 + 内置 L2 tap + UDP/67 punt） | **支持**（同一份用户态服务器核心，只换传输面：每交换机一条**内核 tap**（TUN/TAP，enslave 到该交换机的内核 bridge，不进用户端口视图；由产品打开 `/dev/net/tun` 认领持有以保证 carrier）+ **绑 BVI 网关地址的 UDP/67 socket** 收单播续租；server-id/下发网关/缺省 DNS 同为 BVI 地址，租约文件与状态语义、池耗尽告警与 VPP 侧一致，机制与边界见 §8.3） |
 | DNS 代理 | 支持（nfvisd 内自研转发器 + punt socket；上游经宿主网络栈） | **支持**（**同一份解析核心**，只换传输面：在每个域落点（L2 的 IPv4 网关地址、L3 的 l3-interface IPv4 地址）上绑 **UDP/53 socket**，按域优先、回落全局上游；无上游/上游失败回 SERVFAIL。读视图附运行态块，机制与边界见 §8.6） |
-| LLDP | 支持 | **尚不支持**（提交期直接拒绝） |
+| LLDP | 支持（lldp 插件：收发广告 + 邻居表） | **支持**（自研收发代理，零外部依赖：每启用接口一个链路层套接字——收基础 TLV 建邻居表、按通告间隔发本机广告（TTL＝4×间隔）；语义与读视图与 VPP 侧一致，边界见 §8.10） |
 
 三处都能选，写的是同一个配置项 `system.dataplane`：
 
@@ -1629,7 +1629,12 @@ nfvis# commit
 
 核对：`show lldp neighbors`（需对端也启用 LLDP；无对端时为空属正常）。
 
-> **内核数据面下 LLDP 尚未实现**（`set protocols lldp …` 会在提交期被直接拒绝）——该数据面请在上游交换机侧查看邻居，或使用 VPP 数据面。
+> **内核数据面（Linux 内核网络）同样支持**：由 nfvisd 内的**自研 LLDP 收发代理**承担——每个启用接口
+> 一个链路层套接字：**收**对端广告建邻居表（按对端 TTL 过期移除），**发**本机广告（内容＝主机名 +
+> 接口名 + 接口 MAC；TTL＝4×通告间隔）。语义与 VPP 数据面一致：全局开关、按接口开关、通告间隔
+> （缺省 30s），`show lldp neighbors` / `GET /protocols/lldp/neighbors` 两数据面同一读物、同形输出。
+> 边界（如实告知）：只解析 802.1AB 的**基础 TLV**（LLDP-MED/DCBX 等扩展不解析）、只收**无 VLAN 标签**
+> 的帧、不提供自定义系统名、不做 SNMP MIB 与收发统计。
 
 ### 8.11 cross-connect（直通，慎用）
 

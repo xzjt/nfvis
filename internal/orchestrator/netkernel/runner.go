@@ -14,9 +14,9 @@
 //	bond           → ip link type bond（内核 bonding 驱动）
 //
 // 数据面命令一律经 Runner 执行（不直接 exec），单测注入假 Runner 校验命令生成，
-// 使本包在任意平台可测。VPP 专有族（ACL/QoS/SPAN/DHCP 中继与服务器/DNS 代理/
-// 风暴抑制/端口安全/LLDP/memif）在内核数据面没有对应物，一律**如实报不支持**
-// （ErrUnsupported），不静默成功。
+// 使本包在任意平台可测。族级能力大多已接通（ACL/QoS/SPAN/DHCP 中继与服务器/DNS 代理/
+// 风暴抑制/端口安全/LLDP 都有内核侧真实现）；仍在内核数据面没有对应物的（memif 容器接入、
+// NAT 会话等 VPP 专有读视图）一律**如实报不支持**（ErrUnsupported），不静默成功。
 package netkernel
 
 import (

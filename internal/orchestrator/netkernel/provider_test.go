@@ -707,31 +707,34 @@ func TestApplyVxlanRebuildsOnTupleChange(t *testing.T) {
 	}
 }
 
-// ---------- 未实现族如实报错 ----------
+// ---------- 伴随操作族：起不来如实报错（原「未实现族」——LLDP 落地后内核侧已无整族未实现） ----------
 
-func TestUnsupportedFamiliesReportError(t *testing.T) {
+// 内核侧不再有「整族未实现」的声明式对象（LLDP 由自研收发代理落地，决策 #440）——本用例守住
+// 这一族的共同口径：**声明了却收敛不了必须如实报错、不得静默成功**，且一条失败不吞掉其它条目
+// （提交失败并回滚 / 恢复未收敛项）。
+func TestDeclaredFamiliesReportErrorsHonestly(t *testing.T) {
 	p := New(&fakeRunner{})
+	lay := newLLDPFakeLayer()
+	lay.setFail("nfvis-no-such-if", errors.New("内核接口不存在（注入）"))
+	p.SetLLDPLayer(lay)
 	ctx := context.Background()
-	// ACL / QoS / 端口镜像 / 风暴抑制 / 端口安全已实现，不再在此列；DHCP 中继也已实现
-	// （决策 #437：nfvisd 内的用户态中继实例），DHCP 服务器同样已实现（决策 #438：每交换机
-	// 一条内核 tap + 绑 BVI 地址的 UDP/67 单播接收，复用与 VPP 侧同一份服务器核心）——二者
-	// 不再报 ErrUnsupported，声明不完整时按如实错误上报（见 TestApplyDhcpRelayWithoutV4GatewayIsHonest
-	// 与 TestKernelDHCPServerWithoutGatewayIsHonest）。DNS 代理也已实现（决策 #439：域落点
-	// UDP/53 socket，见 dnsproxy_test.go），同样不在本表。
-	cases := map[string]error{
-		"LLDP": p.ApplyLLDP(ctx, &model.LldpConfig{}),
+	err := p.ApplyLLDP(ctx, &model.LldpConfig{Enabled: true,
+		Interfaces: []model.LldpInterface{{Interface: "nfvis-no-such-if", Enabled: true}}})
+	if err == nil {
+		t.Fatal("声明了口却起不来必须如实报错（不得静默成功）")
 	}
-	for name, err := range cases {
-		if !errors.Is(err, ErrUnsupported) {
-			t.Fatalf("%s 应报 ErrUnsupported，得到 %v", name, err)
-		}
+	if !strings.Contains(err.Error(), "nfvis-no-such-if") {
+		t.Fatalf("错误应点名接口：%v", err)
 	}
 }
 
-// 未实现族在**未声明**时必须是空操作：提交编排把它们当 bridge-domain 的伴随操作调用
-// （每台 L2 交换机都走一次），若一律报「不支持」，任何一次普通提交都会被挡住
-// ——真机走查实测过：只建一台 L2 交换机，提交却报 `dhcp-relay[vs-lan] 不受支持`。
-func TestUnimplementedFamiliesAreNoopWhenUndeclared(t *testing.T) {
+// ---------- 伴随操作族：未声明时必须是空操作 ----------
+
+// 提交编排把这些族当 bridge-domain 的伴随操作调用（每台交换机都走一次），若未声明也一律报
+// 「不支持」，任何一次普通提交都会被挡住——真机走查实测过：只建一台 L2 交换机，提交却报
+// `dhcp-relay[vs-lan] 不受支持`。LLDP 落地后（决策 #440）本组已全部是真实现：未声明＝
+// 空操作/teardown 由实现自身承担。
+func TestUndeclaredFamiliesAreNoop(t *testing.T) {
 	p := New(&fakeRunner{})
 	ctx := context.Background()
 	empty := model.VirtualSwitch{Name: "vs"}
@@ -757,8 +760,11 @@ func TestUnimplementedFamiliesAreNoopWhenUndeclared(t *testing.T) {
 func TestUnsupportedReadViewsAreHonest(t *testing.T) {
 	p := New(&fakeRunner{})
 	ctx := context.Background()
-	if _, err := p.LldpNeighbors(ctx); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("LLDP 邻居读视图应如实报不可用，得到 %v", err)
+	// LLDP 邻居读视图（决策 #440）**不是**「不支持」：内核侧读自研收发代理的邻居表；管理器尚未
+	// 装配时是**空表 + nil**（内核数据面支持 LLDP，「没装配」＝「没有邻居」）。
+	rows, err := p.LldpNeighbors(ctx)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("未装配时 LLDP 邻居应为空表且不报错，得到 %v / %v", rows, err)
 	}
 	if _, err := p.NATSessions(ctx); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("NAT 会话读视图应如实报不可用，得到 %v", err)

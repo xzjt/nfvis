@@ -249,11 +249,19 @@ func TestPruneEmptySingletonScope(t *testing.T) {
 	if _, ok := tree["system"].(map[string]any)["management"]; ok {
 		t.Fatalf("system.management 空壳应照旧回收: %v", tree)
 	}
-	// 未登记的容器不动（本轮只收敛 nat；其它家族的空壳行为不在范围内）
+	// 未登记的容器不动（本函数只收敛**逐个登记**的容器：management/metrics/firewall/nat/protocols；
+	// 其它家族的空壳行为不在范围内——登记制而非通用扫描，避免误剪将来可能引入的
+	// 「显式空 = 有意义」的容器）
 	tree = map[string]any{"vpp": map[string]any{}}
 	pruneEmptySingleton(tree)
 	if _, ok := tree["vpp"]; !ok {
 		t.Fatalf("未登记的容器不应被剪: %v", tree)
+	}
+	// 已登记：protocols 空壳（LLDP 删光，决策 #440）——外层与内层空 lldp 都回收
+	tree = map[string]any{"protocols": map[string]any{"lldp": map[string]any{"interfaces": []any{}}}}
+	pruneEmptySingleton(tree)
+	if _, ok := tree["protocols"]; ok {
+		t.Fatalf("已登记的 protocols 空壳应被剪: %v", tree)
 	}
 }
 

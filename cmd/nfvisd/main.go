@@ -927,6 +927,17 @@ func run() error {
 					log.Warn("DNS 代理巡检未收敛项", "err", e)
 				}
 			}},
+			// 决策 #440：内核数据面 LLDP 自研收发代理的巡检对账（起失败/带外丢失的接口 socket
+			// 补起、已不声明的关掉、过期邻居回收；失败如实进未收敛项）。VPP 侧由 lldp 插件承担、
+			// 无此巡检——kernelNet 为 nil 时空操作（不动 VPP 侧行为）。
+			{"lldp", func(ctx context.Context, cfg model.Config) {
+				if kernelNet == nil {
+					return
+				}
+				for _, e := range kernelNet.ReconcileLLDP(ctx, cfg) {
+					log.Warn("LLDP 巡检未收敛项", "err", e)
+				}
+			}},
 		}
 		for {
 			select {

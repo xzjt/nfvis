@@ -17,7 +17,8 @@ import (
 // nfvisd 重启后读视图直接查内核，也不需要靠重放重建进程内登记。
 //
 // 段序（R2-5，与提交编排 plan 的依赖序一致）：**转发前置 → 绑定族 → bond → 交换机 →
-// 接口 → 镜像 → VRF → vxlan → dns-proxy → NAT**。旧段序把 interfaces/bonds 排在 virtual-switches 之前：
+// dhcp-relay → dhcp-server → 接口 → lldp → 镜像 → VRF → vxlan → dns-proxy → NAT**。
+// 旧段序把 interfaces/bonds 排在 virtual-switches 之前：
 // 端口安全要求口已是 bridge 成员（否则如实拒绝），主机重启后必然失败、白名单静默不下发；
 // 镜像源可以是 bond，同理要在 bonds 之后。症状是「重启后没了、再提交一次又好了」。
 //
@@ -83,6 +84,11 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 	for _, iface := range cfg.Interfaces {
 		collect("interfaces/"+iface.Name, p.enrichHeldPortErr(iface.Name, p.ApplyInterface(ctx, iface)))
 	}
+	// 决策 #440：内核数据面 LLDP 自研收发代理的恢复重放——**恢复重放必须含它**：AF_PACKET
+	// socket 与收/发协程活在 nfvisd 进程内（进程重启后必然不在），不重放即静默丢 LLDP。放在
+	// 接口段之后：口要先存在/已 up（否则收不到、发不出）；声明为空＝teardown（Sync 关全部
+	// socket 并清邻居表，幂等；未声明过的机器只是空操作）。
+	collect("lldp", p.ApplyLLDP(ctx, lldpOf(cfg)))
 	// 镜像在交换机/接口之后：源口（物理口/bond）此刻已存在且已 up（ApplySpan 会置分析口 up）。
 	for _, pm := range cfg.PortMirroring {
 		collect("port-mirroring/"+pm.Name, p.ApplySpan(ctx, pm))

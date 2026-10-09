@@ -3,6 +3,7 @@ package netkernel
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
@@ -16,8 +17,8 @@ import (
 // 口径（v3 决策 #404）：内核数据面**不维护进程内登记**，内核即事实源——故 VPP 侧的
 // 「登记失效」「残渣对账」「延后删表复核」等维护动作在内核侧是**无对象可做的空操作**；
 // 读视图能给出内核等价物的（MAC 表、路由、bridge 成员、接口状态、端口清单、DHCP 租约——
-// 决策 #438 复用与 VPP 侧同一份服务器核心）给出真值，VPP 专有的（LLDP 邻居、NAT 会话、
-// 风暴/端口安全实况）**如实报不可用**。
+// 决策 #438 复用与 VPP 侧同一份服务器核心；LLDP 邻居——决策 #440 自研收发代理的进程内表）
+// 给出真值，VPP 专有的（NAT 会话、风暴/端口安全实况）**如实报不可用**。
 
 // SetSocketDirs 内核数据面不用 socket 目录（vNIC 走 virtio + tap，容器 vNIC 未支持）。
 func (p *Provider) SetSocketDirs(string, string) {}
@@ -32,7 +33,8 @@ func (p *Provider) RetryDeferredVRFDeletes(context.Context, model.Config) []stri
 // VPP 侧登记型对账；内核数据面无登记、无对应族，空操作。
 // ReconcileDHCPServer 不在此列：内核侧有真实现（单播 socket 对账 + 复用的服务器核心巡检，
 // 见 dhcpserver.go 的同名方法）；ReconcileDNSProxy 同样不在此列（域落点 socket 对账，
-// 见 dnsproxy.go/下方实现）。
+// 见 dnsproxy.go/下方实现）；ReconcileLLDP 也不在此列（自研收发代理的 socket 对账，
+// 见 lldp.go/下方实现）。
 func (p *Provider) ReconcileResidue(ctx context.Context, cfg model.Config) []error {
 	// 内核数据面下本方法承担的不是"残渣对账"（那是 VPP 侧的登记型语义），而是**转发前置条件**
 	// 的周期性对账：数据面设备集合随提交变化，放行链要跟着重建；转发开关也可能被宿主改掉。
@@ -106,6 +108,41 @@ func (p *Provider) ReconcileDNSProxy(ctx context.Context, cfg model.Config) []er
 	}
 	const src = "dns-proxy"
 	err := p.dnsProxyMgr().Sync(ctx, want)
+	if err == nil {
+		if p.alarms != nil {
+			p.alarms.Resolve(alarmScopeRecovery, network.AlarmUnconverged, src)
+		}
+		return nil
+	}
+	if p.alarms != nil {
+		p.alarms.Raise(alarmScopeRecovery, network.SeverityWarning, network.AlarmUnconverged, err.Error(), src)
+	}
+	return []error{err}
+}
+
+// ReconcileLLDP 内核数据面 LLDP 自研收发代理的 15s 巡检对账（决策 #440）：按配置重放
+// 各接口 socket 的收敛——起失败/带外丢失的补起、已不声明的关掉、过期邻居回收（Sync 幂等
+// 全量收敛）。
+//
+// 「未声明且从未装配」⇒ 空操作：功能没被用过的机器不必因巡检常驻构造管理器（无对象可对账）；
+// 一旦装配过（提交/恢复重放碰过它），空声明也走 Sync——把带外残留的 socket 收干净。
+//
+// 失败**如实进未收敛项**：返回错误（15s 巡检日志）之外，按 EnsureConsistent 的同一
+// scope/code/source 建/消告警——`show alarms` 事后可查；下一轮成功即自动消解。
+func (p *Provider) ReconcileLLDP(ctx context.Context, cfg model.Config) []error {
+	declared := lldpOf(cfg)
+	if declared == nil || !declared.Enabled {
+		p.lldpMu.Lock()
+		mgr := p.lldp
+		p.lldpMu.Unlock()
+		if mgr == nil {
+			return nil
+		}
+	}
+	const src = "lldp"
+	mgr := p.lldpMgr()
+	err := mgr.Sync(ctx, declared)
+	mgr.expire(time.Now()) // 过期邻居随巡检回收（读视图之外也回收，内存不随历史邻居增长）
 	if err == nil {
 		if p.alarms != nil {
 			p.alarms.Resolve(alarmScopeRecovery, network.AlarmUnconverged, src)
@@ -262,9 +299,21 @@ func (p *Provider) KernelIfFacts() ([]network.KernelIfFacts, error) {
 	return network.KernelIfFactsAll()
 }
 
-// LldpNeighbors LLDP 邻居：内核数据面尚未实现（如实报不可用，不返回空表冒充「无邻居」）。
+// LldpNeighbors LLDP 邻居表（决策 #440）：内核侧读自研收发代理的进程内邻居表，形状与 VPP 侧
+// **逐字不变**（interface/chassis_id/port_id/ttl/last_heard；ID 渲染与 VPP 侧同一份
+// network.LldpIDBySubtype）。
+//
+// 管理器尚未装配（功能从未收敛/重放过）⇒ 空表 + nil：内核数据面**支持** LLDP，「没装配」的
+// 语义是「没有邻居」而不是「能力缺失」（与 NAT 会话等真不支持的读视图区分开）。管理器在但
+// 没有任何口启用，同样是空表（由表本身给出，不是这里造特殊分支）。
 func (p *Provider) LldpNeighbors(context.Context) ([]network.LldpNeighbor, error) {
-	return nil, unsupported("LLDP 邻居")
+	p.lldpMu.Lock()
+	mgr := p.lldp
+	p.lldpMu.Unlock()
+	if mgr == nil {
+		return []network.LldpNeighbor{}, nil
+	}
+	return mgr.Neighbors(time.Now()), nil
 }
 
 // NATSessions NAT 会话：内核数据面的会话表在 conntrack，尚未接入读视图（如实报不可用）。
@@ -310,6 +359,7 @@ var _ interface {
 	ReconcileRecoveryAlarms(context.Context, model.Config) []error
 	ReconcileDHCPServer(context.Context, model.Config) []error
 	ReconcileDNSProxy(context.Context, model.Config) []error
+	ReconcileLLDP(context.Context, model.Config) []error
 	ReconcileProxy(context.Context, model.Config) []error
 	ReconcileStorm(context.Context, model.Config) []error
 	CheckLoop(context.Context, model.Config) []error

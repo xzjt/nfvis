@@ -1193,6 +1193,11 @@ func (x *cliExecutor) cfgRollback(user, source string, args []string) string {
 // system.metrics（决策 #356）同理：`delete system metrics history interval|retention-days`
 // 删光两个叶子后留下 `system.metrics.history = {}`，反推不出语句、回放自校验报内部错误。
 // 它比 management 还多一层（空壳在 history 上、容器 metrics 因此在），故先剪内层再判外层。
+//
+// protocols（LLDP，决策 #440 真机暴露）：同样两形态——逐叶子删光留下 `protocols.lldp = {}`
+// （内层空壳），整节点删（`delete protocols lldp`，通用遍历路径）留下 `protocols = {}`
+// （外层空壳）；两者都让 display set 回放自校验还原不出、如实报内部错误（运维突然读不到配置）。
+// 先剪内层 lldp、再判外层 protocols（与 metrics/history 同法）。
 func pruneEmptySingleton(tree map[string]any) {
 	if sys, ok := tree["system"].(map[string]any); ok {
 		if mgmt, ok := sys["management"].(map[string]any); ok && len(mgmt) == 0 {
@@ -1212,9 +1217,20 @@ func pruneEmptySingleton(tree map[string]any) {
 			delete(sys, "firewall")
 		}
 	}
+	if p, ok := tree["protocols"].(map[string]any); ok {
+		if l, ok := p["lldp"].(map[string]any); ok && isEmptyShell(l) {
+			delete(p, "lldp")
+		}
+		if isEmptyShell(p) {
+			delete(tree, "protocols")
+		}
+	}
 	if nat, ok := tree["nat"].(map[string]any); ok && isEmptyShell(nat) {
 		delete(tree, "nat")
 	}
+	// 登记制（既有口径）：本函数只收敛**逐个登记**的容器——未登记容器（如 `vpp`）的空壳行为
+	// 不在范围内（`TestPruneEmptySingletonScope` 钉着这条，避免通用扫描误剪将来可能引入的
+	// 「显式空 = 有意义」的容器）。新增登记时连测试一起补。
 }
 
 // isEmptyShell 容器是否已无内容：所有子键都是空数组或 nil。

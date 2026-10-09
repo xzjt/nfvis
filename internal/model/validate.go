@@ -448,9 +448,9 @@ func (v *validator) checkKernelDataPlane(c Config) {
 	// L2 + v4 网关 + 与 dhcp-relay 互斥）。
 	// 数据面 DNS 代理同样已实现（决策 #439）：内核侧的域的 IPv4 地址就是内核的**本机地址**，
 	// 每个落点一个绑该地址的 UDP/53 socket（详见下方的落点要求）。
-	if c.Protocols != nil && c.Protocols.LLDP != nil {
-		v.errf("protocols.lldp", "当前数据面为 Linux 内核网络，LLDP 尚未实现%s", alt)
-	}
+	// LLDP 也已实现（决策 #440）：内核侧是 nfvisd 内的**自研收发代理**（每启用接口一个
+	// AF_PACKET socket：收 LLDPDU 建邻居表 + 按 advertisement-interval 发广告），故这里
+	// 不再拒绝；通用段仍要求 LLDP 接口必须是已声明的物理口（见 checkProtocols）。
 	for _, vs := range c.VirtualSwitches {
 		path := "virtual_switches[" + vs.Name + "]"
 		// cross-connect（无学习点对点直通）：VPP 侧是 SwInterfaceSetL2Xconnect（点对点，

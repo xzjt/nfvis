@@ -55,7 +55,8 @@ func TestKernelDataPlaneRejectsUnimplementedFamilies(t *testing.T) {
 
 	// 每一项都是一个「内核数据面下会静默不生效」的配置，必须提交期拒绝。
 	cases := map[string]func(*Config){
-		"LLDP": func(c *Config) { c.Protocols = &ProtocolsConfig{LLDP: &LldpConfig{}} },
+		// LLDP 不再属于本表：内核侧已实现（自研收发代理：每启用接口一个 AF_PACKET socket，
+		// 收 LLDPDU 建邻居表 + 按间隔发广告）——见 TestKernelDataPlaneLLDPAcceptedWhenInterfaceDeclared。
 		// DNS 代理不再属于本表：内核侧已实现（域内转发管理器 + 域内 IPv4 地址上的 UDP/53
 		// socket），改由「按域上游须有 IPv4 服务落点」的要求约束——
 		// 见 TestKernelDataPlaneDNSProxyLandingRequirement。
@@ -95,6 +96,36 @@ func TestKernelDataPlaneRejectsUnimplementedFamilies(t *testing.T) {
 		if errs := Validate(c); len(errs) == 0 {
 			t.Fatalf("%s：内核数据面下应提交期拒绝", name)
 		}
+	}
+}
+
+// 决策 #440：内核数据面下 LLDP **不再**一律拒绝——内核侧由 nfvisd 内的自研收发代理承担
+// （每启用接口一个 AF_PACKET socket：收 LLDPDU 建邻居表 + 按 advertisement-interval 发广告）。
+// 既有通用校验不变：LLDP 接口必须是**已声明的物理口**（两数据面一致）。
+//
+// 红-绿：把 validate.go 的旧拒绝（内核数据面任何 protocols.lldp 一律拒）加回来，本用例的
+// 放行项即失败。
+func TestKernelDataPlaneLLDPAcceptedWhenInterfaceDeclared(t *testing.T) {
+	mk := func(mode string, declareIface bool) Config {
+		c := Config{System: &SystemConfig{DataPlane: mode}}
+		if declareIface {
+			c.Interfaces = []InterfaceConfig{{Name: "ens192"}}
+		}
+		c.Protocols = &ProtocolsConfig{LLDP: &LldpConfig{Enabled: true, AdvertisementInterval: 30,
+			Interfaces: []LldpInterface{{Interface: "ens192", Enabled: true}}}}
+		return c
+	}
+	// 内核 + 接口已声明 ⇒ 放行（内核侧自研代理承担）。
+	if errs := Validate(mk(DataPlaneKernel, true)); len(errs) != 0 {
+		t.Fatalf("内核数据面 + LLDP（接口已声明）应放行，得到：%+v", errs)
+	}
+	// 内核 + 接口未声明 ⇒ 仍拒绝（通用校验：LLDP 接口必须是已声明的物理口）。
+	if errs := Validate(mk(DataPlaneKernel, false)); len(errs) == 0 {
+		t.Fatal("内核数据面 + LLDP（接口未声明）应被拒绝（不是物理口）")
+	}
+	// VPP 侧既有口径不变。
+	if errs := Validate(mk(DataPlaneVPP, true)); len(errs) != 0 {
+		t.Fatalf("VPP 数据面 + LLDP（接口已声明）应放行，得到：%+v", errs)
 	}
 }
 
