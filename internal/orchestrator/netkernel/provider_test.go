@@ -716,10 +716,10 @@ func TestUnsupportedFamiliesReportError(t *testing.T) {
 	// （决策 #437：nfvisd 内的用户态中继实例），DHCP 服务器同样已实现（决策 #438：每交换机
 	// 一条内核 tap + 绑 BVI 地址的 UDP/67 单播接收，复用与 VPP 侧同一份服务器核心）——二者
 	// 不再报 ErrUnsupported，声明不完整时按如实错误上报（见 TestApplyDhcpRelayWithoutV4GatewayIsHonest
-	// 与 TestKernelDHCPServerWithoutGatewayIsHonest）。
+	// 与 TestKernelDHCPServerWithoutGatewayIsHonest）。DNS 代理也已实现（决策 #439：域落点
+	// UDP/53 socket，见 dnsproxy_test.go），同样不在本表。
 	cases := map[string]error{
-		"LLDP":   p.ApplyLLDP(ctx, &model.LldpConfig{}),
-		"DNS 代理": p.ApplyDNSProxy(ctx, orchestrator.DNSProxyUpstreams{Global: []string{"8.8.8.8"}}),
+		"LLDP": p.ApplyLLDP(ctx, &model.LldpConfig{}),
 	}
 	for name, err := range cases {
 		if !errors.Is(err, ErrUnsupported) {

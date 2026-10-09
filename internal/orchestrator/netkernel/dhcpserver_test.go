@@ -960,7 +960,7 @@ func TestKernelDHCPServerApplyNeverReadsCommittedConfig(t *testing.T) {
 // 覆盖内核 DHCP 服务器与其巡检、以及 L3 接口/ACL 绑定所在的族文件（R3-11：`aclByName` 的兜底
 // 曾回落读活配置，与 #438 同型）。解码为「去掉行注释后逐行扫」，故注释里提到该调用不会误报。
 func TestKernelApplyPathSourceHasNoEngineConfigRead(t *testing.T) {
-	for _, file := range []string{"dhcpserver.go", "dhcp_relay.go", "families.go"} {
+	for _, file := range []string{"dhcpserver.go", "dhcp_relay.go", "families.go", "dnsproxy.go"} {
 		b, err := os.ReadFile(file)
 		if err != nil {
 			t.Fatalf("读取 %s: %v", file, err)

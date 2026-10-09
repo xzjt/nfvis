@@ -944,11 +944,67 @@
         "type": "object"
       },
       "DnsProxyView": {
-        "description": "数据面 DNS 代理读视图（`GET /dns/proxy`；与 CLI `show dns proxy` 同源，决策",
+        "description": "数据面 DNS 代理读视图（`GET /dns/proxy`；与 CLI `show dns proxy` 同源，决策 #345）。\n配置视图（enabled/servers/switches）两数据面共用、行为不变；**内核数据面**另附\n`runtime` 运行态块（决策 #439）。\n",
         "properties": {
           "enabled": {
             "description": "全局或任一交换机配了上游即 true（启用判据）；为 false 时**未注册 punt**，\n指向产品地址的 UDP/53 仍由 VPP 按默认处理（不致中断）。\n",
             "type": "boolean"
+          },
+          "runtime": {
+            "description": "**内核数据面**的运行态块（决策 #439）：内核侧 nfvisd 内的自研转发器为每个服务落点\n（L2 交换机 IPv4 网关地址 / L3 交换机 l3-interface IPv4 地址）绑一个 UDP/53 socket，\n本块如实回报各落点与计数。**仅在内核数据面、代理已启用且运行态可读时出现**；\nVPP 数据面（形态是 punt socket + 按域回注）与未启用/读不到时**省略该字段**（不发 null）。\n",
+            "properties": {
+              "answered": {
+                "description": "已应答的查询数（累计，进程内计数）",
+                "format": "int64",
+                "type": "integer"
+              },
+              "domains": {
+                "description": "服务落点（按声明序；起不来/未收敛的落点带 error 如实说明）",
+                "items": {
+                  "properties": {
+                    "addresses": {
+                      "description": "该域绑定的 IPv4 落点地址（声明序、已去重）",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "error": {
+                      "description": "该落点未收敛时的原因（地址未就绪/VRF 设备不存在/53 端口被占等）；收敛时不出现",
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "域（交换机/VRF）名",
+                      "type": "string"
+                    },
+                    "upstreams": {
+                      "description": "该域生效上游（按域优先、回落全局；为空 = 无可用上游，该域查询回 SERVFAIL）",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "vrf_device": {
+                      "description": "该域的内核 VRF 设备名（socket 按 SO_BINDTODEVICE 绑它，l3mdev 语义）",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "send_fail": {
+                "description": "回包失败的次数（应答写回客户端 socket 失败）",
+                "format": "int64",
+                "type": "integer"
+              },
+              "servfail": {
+                "description": "已回 SERVFAIL 的查询数（无可用上游或上游全部失败）",
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "type": "object"
           },
           "servers": {
             "description": "全局上游（按声明序；未配置时为空数组，不发 null）",
@@ -5112,7 +5168,7 @@
     },
     "/dns/proxy": {
       "get": {
-        "description": "域内 VNF/容器把 resolver 指向**产品自己的地址**（交换机网关 BVI / L3 接口地址）即可解析。\n产品侧实现为**自研域内转发器**：VPP 经 `punt socket` 把「目的地址 ∈ VPP 本机」的 UDP/53\n交给 nfvisd，nfvisd 用**宿主网络栈**向上游解析后按原域回注（VPP `PUNT_IP4_ROUTED`）。\n上游取来源域（按交换机）配置，未配则回落全局；两者皆空时对该域查询回 **SERVFAIL**\n（不静默超时）。纯 UDP 转发：不缓存、不解析内容；客户端用 **TCP** 查 DNS 不在覆盖内。\n本端点只读产品自身配置声明；与宿主解析器 `set system dns server`\n（`SystemConfig.dns_servers`）是两回事。**覆盖范围**：本版注册的是 **IPv4/UDP/53**\n（punt 按地址族注册）——IPv6 的解析查询尚未覆盖（待 v6 注册与回注路径真机验证后启用）。\n",
+        "description": "域内 VNF/容器把 resolver 指向**产品自己的地址**（交换机网关 BVI / L3 接口地址）即可解析。\n产品侧实现为**自研域内转发器**：VPP 经 `punt socket` 把「目的地址 ∈ VPP 本机」的 UDP/53\n交给 nfvisd，nfvisd 用**宿主网络栈**向上游解析后按原域回注（VPP `PUNT_IP4_ROUTED`）。\n上游取来源域（按交换机）配置，未配则回落全局；两者皆空时对该域查询回 **SERVFAIL**\n（不静默超时）。纯 UDP 转发：不缓存、不解析内容；客户端用 **TCP** 查 DNS 不在覆盖内。\n本端点只读产品自身配置声明；与宿主解析器 `set system dns server`\n（`SystemConfig.dns_servers`）是两回事。**覆盖范围**：本版注册的是 **IPv4/UDP/53**\n（punt 按地址族注册）——IPv6 的解析查询尚未覆盖（待 v6 注册与回注路径真机验证后启用）。\n上面的形态描述是 **VPP 数据面**；**内核数据面**下的转发器形态不同（服务落点＝各域\nIPv4 地址上的 UDP/53 socket，见 `DnsProxyView.runtime`）——`runtime` 运行态块\n**只在装配为内核数据面且代理已启用、运行态可读时出现**，VPP 数据面下该字段缺席。\n",
         "responses": {
           "200": {
             "content": {

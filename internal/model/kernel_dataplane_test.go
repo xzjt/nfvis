@@ -56,9 +56,9 @@ func TestKernelDataPlaneRejectsUnimplementedFamilies(t *testing.T) {
 	// 每一项都是一个「内核数据面下会静默不生效」的配置，必须提交期拒绝。
 	cases := map[string]func(*Config){
 		"LLDP": func(c *Config) { c.Protocols = &ProtocolsConfig{LLDP: &LldpConfig{}} },
-		"DNS 代理": func(c *Config) {
-			c.VirtualSwitches = []VirtualSwitch{{Name: "vs", Type: "l2", DNSProxyServers: []string{"8.8.8.8"}}}
-		},
+		// DNS 代理不再属于本表：内核侧已实现（域内转发管理器 + 域内 IPv4 地址上的 UDP/53
+		// socket），改由「按域上游须有 IPv4 服务落点」的要求约束——
+		// 见 TestKernelDataPlaneDNSProxyLandingRequirement。
 		"网关 ACL": func(c *Config) {
 			c.VirtualSwitches = []VirtualSwitch{{Name: "vs", Type: "l2",
 				Gateway: &VSGateway{Addresses: []string{"10.0.0.1/24"}, AclIn: "acl"}}}
@@ -94,6 +94,95 @@ func TestKernelDataPlaneRejectsUnimplementedFamilies(t *testing.T) {
 		mutate(&c)
 		if errs := Validate(c); len(errs) == 0 {
 			t.Fatalf("%s：内核数据面下应提交期拒绝", name)
+		}
+	}
+}
+
+// 决策 #439：内核数据面下按域 DNS 代理**不再**一律拒绝——内核侧由 nfvisd 内的域内转发管理器
+// 承担（域的 IPv4 地址就是内核的本机地址，每个落点一个绑该地址的 UDP/53 socket）。
+// 新的提交期要求：配按域上游的交换机**至少有一个 IPv4 服务落点**（L2＝IPv4 网关地址；
+// type=l3＝同名 VRF 的 l3-interface 至少一条 IPv4 地址），否则内核侧该域没有任何可被查询的
+// 本机地址（死配置）。VPP 侧不受此限（既有口径：按域上游不要求网关）。
+//
+// 红-绿：把 validate.go 的旧拒绝（任何按域上游一律拒）加回来，本用例的放行项即失败。
+func TestKernelDataPlaneDNSProxyLandingRequirement(t *testing.T) {
+	l2 := func(mode string, addrs ...string) Config {
+		vs := VirtualSwitch{Name: "vs-dns", Type: "l2", DNSProxyServers: []string{"8.8.8.8"}}
+		if len(addrs) > 0 {
+			vs.Gateway = &VSGateway{Addresses: addrs}
+		}
+		return Config{System: &SystemConfig{DataPlane: mode}, VirtualSwitches: []VirtualSwitch{vs}}
+	}
+	l3 := func(mode string, addrs ...string) Config {
+		return Config{
+			System:          &SystemConfig{DataPlane: mode},
+			Interfaces:      []InterfaceConfig{{Name: "ens192"}},
+			VirtualSwitches: []VirtualSwitch{{Name: "vs-l3", Type: "l3", DNSProxyServers: []string{"8.8.8.8"}}},
+			Vrfs: []Vrf{{Name: "vs-l3",
+				L3Interfaces: []L3Interface{{Interface: "ens192", Addresses: addrs}}}},
+		}
+	}
+
+	cases := []struct {
+		name   string
+		cfg    Config
+		reject bool
+		want   []string // 拒绝时文案须包含的片段（含照做路径）
+	}{
+		{
+			name: "内核 L2 + IPv4 网关 ⇒ 放行",
+			cfg:  l2(DataPlaneKernel, "192.168.99.1/24"),
+		},
+		{
+			name:   "内核 L2 无网关 ⇒ 拒绝",
+			cfg:    l2(DataPlaneKernel),
+			reject: true,
+			want: []string{"virtual_switches[vs-dns].dns_proxy_servers", "死配置",
+				"set virtual-switches vs-dns gateway ip <ip-prefix>"},
+		},
+		{
+			name:   "内核 L2 仅 IPv6 网关 ⇒ 拒绝",
+			cfg:    l2(DataPlaneKernel, "2001:db8::1/64"),
+			reject: true,
+			want: []string{"内核侧该域没有任何可被查询的本机地址",
+				"set virtual-switches vs-dns gateway ip <ip-prefix>"},
+		},
+		{
+			name: "内核 L3 同名 VRF 有 IPv4 三层接口地址 ⇒ 放行",
+			cfg:  l3(DataPlaneKernel, "2001:db8::1/64", "10.0.0.1/24"),
+		},
+		{
+			name:   "内核 L3 同名 VRF 仅有 IPv6 地址 ⇒ 拒绝",
+			cfg:    l3(DataPlaneKernel, "2001:db8::1/64"),
+			reject: true,
+			want: []string{"virtual_switches[vs-l3].dns_proxy_servers", "死配置",
+				"set virtual-switches vs-l3 l3-interface <ifname> ip address <ip-prefix>"},
+		},
+		{
+			name: "VPP 数据面同一配置不受限（L2 无网关）",
+			cfg:  l2(DataPlaneVPP),
+		},
+		{
+			name: "VPP 数据面同一配置不受限（L3 仅 IPv6）",
+			cfg:  l3(DataPlaneVPP, "2001:db8::1/64"),
+		},
+	}
+	for _, tc := range cases {
+		errs := Validate(tc.cfg)
+		if !tc.reject {
+			if len(errs) != 0 {
+				t.Fatalf("%s：应放行，得到：\n%s", tc.name, errText(errs))
+			}
+			continue
+		}
+		if len(errs) == 0 {
+			t.Fatalf("%s：应提交期拒绝", tc.name)
+		}
+		txt := errText(errs)
+		for _, w := range tc.want {
+			if !strings.Contains(txt, w) {
+				t.Fatalf("%s：报错应含 %q，得到：\n%s", tc.name, w, txt)
+			}
 		}
 	}
 }

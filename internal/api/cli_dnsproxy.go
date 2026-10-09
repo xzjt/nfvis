@@ -11,6 +11,9 @@ package api
 // 按域）——不解析 `vppctl` 文本，也不去回读 VPP 运行态。`enabled` 由「全局或任一所声明交换机非空」
 // 推导，与数据面的启用判据同口径（全局或任一交换机非空 ⇒ 注册 punt 并起转发器；全空 ⇒ 注销）。
 //
+// 决策 #439：内核数据面下**另加运行态块**（机制 + 每落点一行 + 计数）——读物由装配处注入
+// （Options.DNSProxy，VPP 侧恒 nil），CLI 与 REST 同一实现、同一措辞；VPP 数据面读视图逐字不变。
+//
 // 边界（如实登记，不编造）：
 //   · **纯 UDP 转发**——客户端用 TCP 查 DNS 不生效（punt 只注册 UDP 53；TCP 查询不在覆盖内）；
 //   · **不缓存**——每个查询都直接转发上游，无本地缓存；
@@ -28,6 +31,7 @@ import (
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
 // dnsProxySwitchView 一台交换机的按域上游（只列**已声明且真配了上游**的交换机）。
@@ -42,6 +46,9 @@ type dnsProxyViewShape struct {
 	Enabled  bool                 `json:"enabled"`
 	Servers  []string             `json:"servers"`
 	Switches []dnsProxySwitchView `json:"switches"`
+	// Runtime 内核数据面的运行态块（决策 #439）：仅在读物已注入、可读、且代理启用时出现；
+	// VPP 数据面/未启用/读不到时**省略该字段**（不发 null，不编造）。
+	Runtime *network.DNSProxyState `json:"runtime,omitempty"`
 }
 
 // dnsProxyView 从配置声明构建读视图（与数据面启用判据同口径）。
@@ -64,13 +71,21 @@ func dnsProxyView(cfg model.Config) dnsProxyViewShape {
 }
 
 // handleGetDNSProxy GET /api/v1/dns/proxy：数据面 DNS 代理的启用态、全局上游与各域覆盖（决策 #345）。
+// 决策 #439：内核数据面下再附运行态块（读物可读、代理启用、且本进程确为内核装配时出现；
+// VPP 数据面/未启用 ⇒ 字段缺席，不发 null）。
 func (s *Server) handleGetDNSProxy(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.engine.Committed()
 	if err != nil {
 		mapEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, dnsProxyView(cfg))
+	view := dnsProxyView(cfg)
+	if view.Enabled && s.dataPlaneMode() == model.DataPlaneKernel {
+		if st, ok := s.dnsProxyState(); ok {
+			view.Runtime = &st
+		}
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 // renderDNSProxy `show dns proxy`：启用态 + 全局上游 + 各域覆盖（与 GET /dns/proxy 同源）。
@@ -96,11 +111,38 @@ func (x *cliExecutor) renderDNSProxy() string {
 			writeServerList(&b, sw.Servers)
 		}
 	}
-	b.WriteString("说明: 本视图只读产品配置声明。边界：纯 UDP 转发（客户端用 TCP 查 DNS 不生效）；不缓存；\n")
-	b.WriteString("      不预检上游可达性（上游不可达/超时运行期回 SERVFAIL 并计数）；启用期间指向产品地址的\n")
-	b.WriteString("      UDP/53 由 nfvisd 独占，nfvisd 不在时这些包被 VPP punt 节点丢弃（域内 DNS 中断）；\n")
-	b.WriteString("      覆盖 IPv4/UDP/53（IPv6 的解析查询尚未覆盖——punt 注册按地址族）。\n")
+	// 决策 #439：内核数据面下把 VPP 专有的说明块换成内核口径（服务落点＝各域 IPv4 地址上的
+	// UDP/53 socket；没有 punt/独占那套机制）。数据面判据按**装配事实**（与 dhcp_relay_note /
+	// learn_limit_note 同法：committed 已改而进程未重启时读视图不谎报）；VPP 数据面逐字不变。
+	kernelDP := x.dpMode() == model.DataPlaneKernel
+	if kernelDP {
+		b.WriteString("说明: 本视图只读产品配置声明。内核数据面（Linux 内核网络）：服务落点＝各域内的 IPv4 地址\n")
+		b.WriteString("      （L2 交换机网关地址、L3 交换机 l3-interface 地址）上的 UDP/53；按域优先、回落全局，\n")
+		b.WriteString("      皆空回 SERVFAIL；上游经宿主网络栈发起；不缓存、纯 UDP（TCP 查 DNS 不生效）。\n")
+	} else {
+		b.WriteString("说明: 本视图只读产品配置声明。边界：纯 UDP 转发（客户端用 TCP 查 DNS 不生效）；不缓存；\n")
+		b.WriteString("      不预检上游可达性（上游不可达/超时运行期回 SERVFAIL 并计数）；启用期间指向产品地址的\n")
+		b.WriteString("      UDP/53 由 nfvisd 独占，nfvisd 不在时这些包被 VPP punt 节点丢弃（域内 DNS 中断）；\n")
+		b.WriteString("      覆盖 IPv4/UDP/53（IPv6 的解析查询尚未覆盖——punt 注册按地址族）。\n")
+	}
+	// 决策 #439：内核数据面的运行态块（读物注入、可读、代理启用，且本进程确为内核装配时出现；
+	// VPP 数据面/未启用/读不到 ⇒ 不出现，读视图逐字不变）。
+	if kernelDP && view.Enabled {
+		if st, ok := x.dnsProxyState(); ok {
+			writeDNSProxyRuntime(&b, kernelDNSProxyNote(st))
+		}
+	}
 	return b.String()
+}
+
+// writeDNSProxyRuntime 渲染内核数据面 DNS 代理的运行态块：首行接 "运行态: "，续行按说明块的
+// 缩进风格（6 空格）对齐；块的内容由 kernelDNSProxyNote 单一给出（CLI 与 REST 同一措辞）。
+func writeDNSProxyRuntime(b *strings.Builder, note string) {
+	lines := strings.Split(note, "\n")
+	b.WriteString("运行态: " + lines[0] + "\n")
+	for _, l := range lines[1:] {
+		b.WriteString("      " + l + "\n")
+	}
 }
 
 // writeServerList 打印一份上游列表（空时如实「（无）」，不省略）。

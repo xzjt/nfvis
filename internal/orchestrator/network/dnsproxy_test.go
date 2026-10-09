@@ -339,9 +339,9 @@ func TestParseDNSQueryRejectsNon53(t *testing.T) {
 	}
 }
 
-func TestBuildServfailEchoesQuestion(t *testing.T) {
+func TestDNSServfailEchoesQuestion(t *testing.T) {
 	query := dnsQueryBytes(0x0102)
-	sf := buildServfail(query)
+	sf := DNSServfail(query)
 	end, ok := dnsQuestionEnd(query)
 	if !ok {
 		t.Fatal("question 段应可解析")

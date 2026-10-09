@@ -1,0 +1,146 @@
+NFViS v3 · round4：决策 #439 内核数据面 DNS 代理（复用自研转发核心，落点＝域内 IPv4 地址的 UDP/53 socket）
+====================================================================================================
+
+日期/分支：2026-10-09，`v3`（起点 HEAD `f4b8fa1`）
+决策：规格书附录 A #439（`docs/NFViS-系统产品需求与目标架构规格书.md`）、设计文档 §3.2d
+账目：`docs/v3待做.md` 三.3 收口（"数据面 DNS 代理"从"整族未实现"移出）
+前序：内核自研族 #433~#438 + R3-11（交接 `docs/v3-交接-2026-10-09-内核自研族.md`）
+
+§0 状态一句话
+-------------
+内核数据面下 `set virtual-switches <vs> dns proxy server …` 不再提交期拒绝；全局上游
+（`set system dns proxy server …`，属 vpp 段、数据面中立）在该数据面下**同样生效**。实现＝
+nfvisd 内的**域内转发管理器**：每个域落点（L2 的 IPv4 网关地址 ∪ 各 VRF 的 l3-interface IPv4
+地址）一个绑**具体地址**的 UDP/53 socket（`SO_BINDTODEVICE` 绑该域 VRF）；按域优先、回落
+全局上游经**宿主网络栈**转发，皆空/失败回 SERVFAIL。DNS 报文级核心（SERVFAIL 构造与
+question 回显、上游去重、宿主栈查询）从 `network` 包共享导出（VPP 侧改调同一实现、行为逐字不变）。
+
+§1 环境与配方
+-------------
+- nfvis-vm（Ubuntu 26.04.1）：本轮以**换装二进制**上机（`GOOS` 原生构建 + `install` 覆盖
+  `/usr/bin/nfvisd|nfvis-cli`，原 3.0.6 二进制备份在 `/root/bin-orig/*.pre439`）。
+- 数据面切换（照交接文档 §7 配方）：`set system dataplane kernel` + `systemctl restart nfvis` →
+  `request interfaces ens192 bind-dpdk --yes` 反向流程遇到"内核未自动重探原生驱动"，按提示补
+  `request interfaces 0000:0b:00.0 unbind-dpdk to-driver vmxnet3 --yes`（ens224 同）。
+- 测试拓扑（"宿主作对端"，与决策 #408 同法）：`dns-vs`（L2）网关 `192.168.99.1/24` 落在内核
+  bridge `dns-vs` 上、bridge 入 `vr-dns-vs`；ens192 为**成员口**。宿主 Windows 的 VMnet8 网卡
+  （与 ens192 同一虚拟交换机）上有 `192.168.99.10/24`（round131 遗留，本轮直接用作域内客户端）。
+- 上游：`223.5.5.5`（VM 侧 `dig @223.5.5.5` 实测可达）。
+
+§2 逐项验证（每条都有独立事实源）
+---------------------------------
+① **落点与绑定**（独立事实源：`ss` / `ip`）
+   - `ss -lunp | grep :53` → `UNCONN 0 0 192.168.99.1%vr-dns-vs:53 … users:(("nfvisd",pid=207656,fd=15))`
+     （绑具体地址 + 域 VRF 设备；与 DHCP 服务器单播 socket 同一绑定法）。
+   - `ip -br addr show dns-vs` → `192.168.99.1/24`；`ls /sys/class/net/dns-vs/brif/` → `ens192`；
+     `ip -br link show type vrf` → `vr-dns-vs UP`。
+② **端到端解析**（独立事实源：宿主客户端 + `tcpdump -i any` 四跳 + 计数器）
+   - 宿主 `Resolve-DnsName -Server 192.168.99.1 -Name example.com -Type A` → 拿到
+     `104.20.23.154 / 172.66.147.243`（与 VM 侧 `dig @223.5.5.5` 的答案一致）。
+   - 抓包（`tcpdump -i any -n udp port 53`，一处采样）：
+     `ens192 In  192.168.99.10.49735 > 192.168.99.1.53: 3118+ A? example.com` →
+     `ens160 Out 192.168.155.129.51471 > 223.5.5.5.53: 3118+ A? example.com` →
+     `ens160 In  223.5.5.5.53 > 192.168.155.129.51471: 3118 2/0/0 A …` →
+     `dns-vs Out 192.168.99.1.53 > 192.168.99.10.49735: 3118 2/0/0 A …`（查询进、转发出、
+     应答回、回包出——四跳齐全；一次查询端到端 26ms）。
+   - 读视图（CLI，与 REST 同源）：
+     `域 dns-vs（vr-dns-vs）：192.168.99.1 ← 上游 223.5.5.5` / `已应答 N / 已回 SERVFAIL M / 回包失败 0`；
+     REST `GET /dns/proxy` → `{"enabled":true,"servers":["223.5.5.5"],"switches":[],
+     "runtime":{"domains":[{"name":"dns-vs","addresses":["192.168.99.1"],"upstreams":["223.5.5.5"],
+     "vrf_device":"vr-dns-vs"}],"answered":…,"servfail":…,"send_fail":0}}`。
+③ **按域优先 + SERVFAIL**（独立事实源：客户端 rcode + 计数器 + 读视图）
+   - `set virtual-switches dns-vs dns proxy server 192.0.2.9`（不可达）→ 读视图该域上游变为
+     `192.0.2.9`（按域覆盖全局）；宿主查询 ~3.5s 后无应答，**计数器 `已回 SERVFAIL` +1**。
+   - 域内客户端视角（`ip vrf exec vr-dns-vs dig +tries=1 +time=8 @192.168.99.1 example.com A`）：
+     `;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: …` / `flags: qr rd ad; QUERY: 1,
+     ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 0` ——**回的是 SERVFAIL 而不是静默丢弃**，question 段回显。
+   - 删该按域上游 → 回落全局，查询恢复。观察（如实登记）：自造 SERVFAIL 未置 RA 位，
+     dig 会附一句 `WARNING: recursion requested but not available`——与 VPP 侧**同一份实现**
+     （共享 `DNSServfail`），非本轮新增差异。
+④ **生命周期**（独立事实源：`ss` / 客户端查询）
+   - `systemctl restart nfvis` → 20s 内 socket 由**恢复重放**重建（同一地址 + VRF，新 pid），
+     随后连续 3 次查询全部命中（`已应答 1→2→3`、SERVFAIL 保持 0）。
+   - 停用（`delete system dns proxy server` + commit）→ socket 消失（`ss` 无该行）；
+     再启用 → 立即重新绑定，3 次查询即刻可用（4→6）。
+   - 删交换机 → bridge/VRF/socket 全消失（见 §5 清场）。
+⑤ **对抗与如实失败**
+   - **53 端口被占**（域 VRF 内 python 先绑 `192.168.99.1:53`）→ 提交
+     `%% 底座下发失败（已补偿）: … 落点 192.168.99.1:53（VRF vr-dns-vs）绑定失败:
+     listen udp4 192.168.99.1:53: bind: address already in use；该地址是否已下发…`，
+     配置**未生效**（补偿回滚）；释放端口后重提交即成功。旁证：产品持有期间第三方绑同一
+     地址/端口会得到 `OSError: [Errno 98] Address already in use`。
+   - **按域上游但无 IPv4 落点**（内核数据面，L2 无网关）→ **提交期拒绝**：
+     `virtual_switches[dns-nogw].dns_proxy_servers: 当前数据面为 Linux 内核网络，按域 DNS 代理
+     上游需要该交换机至少一个 IPv4 服务落点…（死配置）。请先配置 IPv4 网关：
+     set virtual-switches dns-nogw gateway ip <ip-prefix>`（候选随会话结束释放）。
+   - **operator 只读**：未做真机复核——本机 op1 口令不可得，按 round139 教训（口令试错触发
+     15 分钟锁号）**不试口令**；`show dns proxy` 的服务端 class 判定（ClassReadOnly）与
+     运行态块均为既有口径继承，未改动（如实登记，不声称已验证）。
+⑥ **提交提示收窄（#439 ④）**（独立事实源：commit 输出）
+   - 清掉 vpp 调参（dpdk/cpu/memory）后（vpp 段内容上只剩 DNS 全局上游）→ 提交**不再**提示
+     「vpp 段配置不生效」；恢复 vpp 调参后提交 → 提示**照旧出现**。
+
+§3 真机当场发现（单测挡不住的形状）
+-----------------------------------
+**R4-1（已修）：vpp 段"空壳"骗过提交提示的收窄判据。** 首版 `vppSectionOnlyDNSProxyUpstreams`
+拿整段与空结构做逐字节比较；真机上 CLI 删完 `set vpp dpdk dev …`/`cpu …`/`memory …` 后，
+vpp 段留下**非 nil 空壳** `{cpu:{},memory:{},dpdk:{dev:{}}}`（`display set` 已不再反映任何 vpp
+配置，`GET /vpp/config` 亦如此），逐字节比较遂把空壳当"有配置"⇒ 刚从 vpp 切到内核数据面的机器
+（恰是常见路径）**看不到收窄生效**（实测复现）。修法＝判据改按**内容**（逐字段空值判定）；
+守护测试按**真机形状**（空壳 + 另加"空壳之上有真值仍提示"两例）入 `commit_warning_vpp_test.go`，
+并做红-绿（把判据改回"非 nil 即内容"→ 空壳用例按预期失败；恢复后全绿）。真机复验：§2⑥ 两向都过。
+
+**R4-2（如实登记，未复现）：首次启用的头两条上游查询超时。** 首次（提交后第一次查询）观测到
+两条 SERVFAIL：抓包显示两条上游转发与**上游应答都在线上**，但等待 socket 3s 超时；此后
+**12+ 次查询（含重启、停/启用、按域覆盖等各阶段）全部命中**，`nstat` 的
+`UdpInErrors/RcvbufErrors/InCsumErrors` 全程为 0，未能复现。判定为**一次性环境瞬态**（该 VM
+三块网卡同挂 VMnet8、测试期桥口处于混杂/抓包状态，管理侧帧的投递路径异常是既往轮次已记录过的
+环境特征）；即使真丢一条应答，产品行为也**符合契约**（超时 ⇒ SERVFAIL + 计数，不静默）。
+如实登记，不下"已修/无此问题"的结论。
+
+§4 边界（不做/未做，如实）
+--------------------------
+- 纯 UDP：TCP 查 DNS 不在覆盖（与 VPP 侧同边界）；不缓存；IPv6 查询的**落点**不服务
+  （内核侧只绑 IPv4 落点——与 VPP 侧"punt 覆盖 IPv4/UDP/53"同口径；上游本身可为 v6 地址）。
+- 上游可达性要求＝**宿主网络栈**可达（不是域内 FIB），与 VPP 侧逐字同口径。
+- 无网关的 L2 交换机、只有 IPv6 落点的域：**没有可服务的本机地址** ⇒ 按域上游提交期拒绝；
+  全局上游下这些域不参与（读视图运行态块如实列出服务中的落点）。
+- LLDP、memif 容器接入仍为"整族未实现"（`docs/v3待做.md` 三）；本决策不动它们。
+
+§5 清场与环境恢复
+------------------
+- 测试对象已删：`delete virtual-switches dns-vs` + `delete system dns proxy server`（一次提交，
+  rev 276）→ 内核侧 `dns-vs` bridge / `vr-dns-vs` / `192.168.99.1` 地址 / socket **全消失**。
+- 数据面已切回 **vpp**：`set system dataplane vpp` + restart + `bind-dpdk`（ens192/ens224 回
+  vfio-pci）+ `request vpp restart` → `show vpp`：`dataplane: vpp / version 26.06-release /
+  connected: yes / pending_restart: no`；`show interfaces physical` 两口 `dpdk` 在位。
+- 配置还原：vpp 段调参（dpdk dev ×2、cpu corelist-workers 2、main-core 1、memory
+  hugepage-preference 2M）与 `idle-timeout-minutes 14` 均回原值；告警 0 条。
+- **预先存在的孤儿内核对象（非本轮产生，未动，留给下一轮定裁）**：bridge `vs-lan`（成员 `vx-a`）、
+  `vs-dmz`、`srvsw`、VRF `vr-srvsw`——来自更早轮次的内核数据面试验，配置里并无对应声明。
+
+§6 代码/测试面（本轮）
+----------------------
+- 共享 seam：`internal/orchestrator/provider.go`（`DNSProxyDomain` + `Domains`）、`apply.go`
+  （`DNSProxyUpstreamsOf` 派生落点，调用点传入）、`internal/model/kernel_names.go`（导出两条命名
+  映射，规则仍在 validate.go，由 netkernel 跨包一致性测试钉住）、`network/dnsproxy.go`（导出
+  `DNSServfail/DNSServersDedupe/DNSHostUDPQuery/DNSQueryUpstreams`，VPP 行为逐字不变）、
+  `network/dnsproxy_state.go`（读视图类型）。
+- 内核实现：`netkernel/dnsproxy.go|_linux.go|_other.go`（域 socket 管理器 + 真绑定）、
+  `provider.go`（ApplyDNSProxy/DNSProxyState）、`recovery.go`（恢复重放）、`api_surface.go`
+  （ReconcileDNSProxy + 编译期断言）、`dhcp_relay.go`（Close 关停）。
+- 校验/提示：`model/validate.go`（删"尚未实现"拒绝 + 新增落点要求）、`config/engine.go`
+  （vpp 段提示按内容收窄 + R4-1 修复）。
+- 读视图三面同源：`api/dnsproxy_runtime.go` + `cli_dnsproxy.go` + `server.go` + `ui/app.js`
+  运行态一行；`cmd/nfvisd/main.go`（巡检步骤 + 读物装配）；openapi（`GET /dns/proxy` 的 runtime）。
+- 测试：`DNSProxyUpstreams.Domains` 派生表（v4/v6/多地址/去重/确定性）、内核管理器 12 例
+  （开关/换绑/增删/上游选择/SERVFAIL 载荷/Open 失败重试/Close 等待/State 顺序）、
+  apply 路径源码扫描纳入 `dnsproxy.go`、命名映射跨包一致性、vpp 段提示含真机空壳形状、
+  READ/REST 运行态块（VPP 侧逐字节不变的金样）、校验表。子智能体红-绿：S1 三变异、S2 两变异、
+  S3 三变异、S4 三变异，全部先红后绿并恢复（详见各批交付说明）；主会话对 R4-1 追加一组红-绿。
+- `make check` 七项全绿（决策计数 341；覆盖率门槛包全过；archtest/user_text/openapi 同步/套件契约
+  同步均过）。
+
+§7 提交
+-------
+（见 `git log` 的 `feat: 决策 #439 …` 提交信息——含真机验证要点与 R4-1 的修复说明。）

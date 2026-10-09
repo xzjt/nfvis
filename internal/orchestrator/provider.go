@@ -100,6 +100,15 @@ var ErrDataPlaneUnavailable = errors.New("数据面（VPP）当前不可用")
 // 数据面重启后的恢复收敛完成，残渣进告警留痕。
 var ErrVrfNotRemoved = errors.New("VRF 对应的 IP 表删除后仍存在于 VPP（未收敛）")
 
+// DNSProxyDomain 内核数据面（决策 #439）的**域落点**事实：由调用点（提交编排从目标配置派生）
+// 传入——apply 路径禁读配置发动机（提交期该锁由本次提交自己持有，重入＝自死锁）。
+// VPP 侧忽略本字段（punt 注册天然覆盖所有本机地址，行为逐字不变）。
+type DNSProxyDomain struct {
+	Name      string   // 交换机/VRF 名（按域上游的键）
+	Addresses []string // 落点 IPv4 地址（不带前缀，声明序、已去重）
+	VRFDevice string   // 该域的内核 VRF 设备名（socket 的 SO_BINDTODEVICE 作用域）
+}
+
 // DNSProxyUpstreams 数据面 DNS 代理的期望上游（决策 #345，FR-NET-010）。
 //
 // Global 是全局上游（VppConfig.DNSProxyServers）；PerSwitch 是各交换机的按域上游
@@ -109,6 +118,11 @@ var ErrVrfNotRemoved = errors.New("VRF 对应的 IP 表删除后仍存在于 VPP
 type DNSProxyUpstreams struct {
 	Global    []string
 	PerSwitch map[string][]string
+
+	// Domains 内核数据面的服务落点（决策 #439）：L2 交换机的全部 IPv4 网关地址 +
+	// 各 VRF 的 l3-interface 全部 IPv4 地址。VPP 侧不使用（行为不变）；由调用点派生、
+	// 按配置声明序确定性排列（old/new 比较与巡检复现依赖它）。
+	Domains []DNSProxyDomain
 }
 
 // NetworkProvider VPP 侧编排接口。L2 虚拟交换机 → bridge domain，

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator"
 	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
@@ -16,7 +17,7 @@ import (
 // nfvisd 重启后读视图直接查内核，也不需要靠重放重建进程内登记。
 //
 // 段序（R2-5，与提交编排 plan 的依赖序一致）：**转发前置 → 绑定族 → bond → 交换机 →
-// 接口 → 镜像 → VRF → vxlan → NAT**。旧段序把 interfaces/bonds 排在 virtual-switches 之前：
+// 接口 → 镜像 → VRF → vxlan → dns-proxy → NAT**。旧段序把 interfaces/bonds 排在 virtual-switches 之前：
 // 端口安全要求口已是 bridge 成员（否则如实拒绝），主机重启后必然失败、白名单静默不下发；
 // 镜像源可以是 bond，同理要在 bonds 之后。症状是「重启后没了、再提交一次又好了」。
 //
@@ -92,6 +93,11 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 	for _, vx := range cfg.VxlanTunnels {
 		collect("vxlan/"+vx.Name, p.ApplyVxlan(ctx, vx, nil))
 	}
+	// 决策 #439：数据面 DNS 代理的恢复重放——**恢复重放必须含它**：域落点 socket 活在 nfvisd
+	// 进程内（进程重启后必然不在），不重放即静默丢域内解析。放在交换机/VRF 段之后：落点地址
+	// （L2 的 BVI 网关 / L3 的 l3-interface）必须已下发，socket 才绑得上；声明为空＝teardown
+	// （Sync 关掉全部 socket，幂等）。
+	collect("dns-proxy", p.ApplyDNSProxy(ctx, orchestrator.DNSProxyUpstreamsOf(cfg)))
 	// NAT：声明为空时也调用一次——ApplyNAT 对空声明做的是**回收整张表**（不是留空表），
 	// 这样 `delete nat` 之后残留的空表会被下一次收敛清掉。它要所有设备/VRF 先就位。
 	natCfg := model.NatConfig{}

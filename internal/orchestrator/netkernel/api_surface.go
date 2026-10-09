@@ -31,7 +31,8 @@ func (p *Provider) RetryDeferredVRFDeletes(context.Context, model.Config) []stri
 // ReconcileResidue / ReconcileRecoveryAlarms / ReconcileStorm 均为
 // VPP 侧登记型对账；内核数据面无登记、无对应族，空操作。
 // ReconcileDHCPServer 不在此列：内核侧有真实现（单播 socket 对账 + 复用的服务器核心巡检，
-// 见 dhcpserver.go 的同名方法）。
+// 见 dhcpserver.go 的同名方法）；ReconcileDNSProxy 同样不在此列（域落点 socket 对账，
+// 见 dnsproxy.go/下方实现）。
 func (p *Provider) ReconcileResidue(ctx context.Context, cfg model.Config) []error {
 	// 内核数据面下本方法承担的不是"残渣对账"（那是 VPP 侧的登记型语义），而是**转发前置条件**
 	// 的周期性对账：数据面设备集合随提交变化，放行链要跟着重建；转发开关也可能被宿主改掉。
@@ -73,6 +74,49 @@ func (p *Provider) ReconcileProxy(ctx context.Context, cfg model.Config) []error
 }
 
 func (p *Provider) ReconcileStorm(context.Context, model.Config) []error { return nil }
+
+// ReconcileDNSProxy 内核数据面 DNS 代理的 15s 巡检对账（决策 #439）：按配置重放域落点
+// socket 的收敛——起失败/带外丢失的补起、已不声明的关掉（Sync 幂等全量收敛）。
+//
+// 「未启用且从未装配」⇒ 空操作：功能没被用过的机器不必因巡检常驻构造管理器（无对象可对账）；
+// 一旦装配过（提交/恢复重放碰过它），空声明也走 Sync——把带外残留的 socket 收干净。
+// 启用判据与 VPP 侧**逐字同源**（先按域去空、再判全局或任一域非空），实现是共享的
+// network.DNSServersDedupe（单一真源）。
+//
+// 失败**如实进未收敛项**：返回错误（15s 巡检日志）之外，按 EnsureConsistent 的同一
+// scope/code/source 建/消告警——`show alarms` 事后可查；下一轮成功即自动消解。
+func (p *Provider) ReconcileDNSProxy(ctx context.Context, cfg model.Config) []error {
+	want := orchestrator.DNSProxyUpstreamsOf(cfg)
+	enabled := len(network.DNSServersDedupe(want.Global)) > 0
+	if !enabled {
+		for _, ups := range want.PerSwitch {
+			if len(network.DNSServersDedupe(ups)) > 0 {
+				enabled = true
+				break
+			}
+		}
+	}
+	if !enabled {
+		p.dnsProxyMu.Lock()
+		mgr := p.dnsProxy
+		p.dnsProxyMu.Unlock()
+		if mgr == nil {
+			return nil
+		}
+	}
+	const src = "dns-proxy"
+	err := p.dnsProxyMgr().Sync(ctx, want)
+	if err == nil {
+		if p.alarms != nil {
+			p.alarms.Resolve(alarmScopeRecovery, network.AlarmUnconverged, src)
+		}
+		return nil
+	}
+	if p.alarms != nil {
+		p.alarms.Raise(alarmScopeRecovery, network.SeverityWarning, network.AlarmUnconverged, err.Error(), src)
+	}
+	return []error{err}
+}
 
 // CheckVnfPorts vNIC 断连检测：内核数据面下宿主 tap 由 libvirt 创建并挂 bridge，
 // 产品侧没有可靠的 tap 名映射，故不做判定（如实不报，避免误报）。
@@ -265,6 +309,7 @@ var _ interface {
 	ReconcileResidue(context.Context, model.Config) []error
 	ReconcileRecoveryAlarms(context.Context, model.Config) []error
 	ReconcileDHCPServer(context.Context, model.Config) []error
+	ReconcileDNSProxy(context.Context, model.Config) []error
 	ReconcileProxy(context.Context, model.Config) []error
 	ReconcileStorm(context.Context, model.Config) []error
 	CheckLoop(context.Context, model.Config) []error
@@ -281,6 +326,7 @@ var _ interface {
 	DHCPServerLeases(string) ([]network.DHCPLease, bool)
 	DHCPServerActiveLeases(string) (int, bool)
 	DHCPTapIndexes() map[uint32]bool
+	DNSProxyState() (network.DNSProxyState, bool)
 	StormDataplane(context.Context, string) (network.StormDataplane, bool)
 	PortSecDataplane(context.Context, string) (network.PortSecDataplane, bool)
 } = (*Provider)(nil)

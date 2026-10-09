@@ -159,6 +159,25 @@ func gatewayHasV4(gw *VSGateway) bool {
 	return false
 }
 
+// vrfHasIPv4Address 同名 VRF 条目里是否至少有一条 IPv4 的 l3-interface 地址。
+// 判据与编排层的落点派生同源：内核侧按域 DNS 代理的服务落点＝L2 的 IPv4 网关地址 ∪
+// 各 VRF l3-interface 的 IPv4 地址（type=l3 交换机的域就是同名 VRF 条目）。
+func vrfHasIPv4Address(c Config, name string) bool {
+	for _, vrf := range c.Vrfs {
+		if vrf.Name != name {
+			continue
+		}
+		for _, li := range vrf.L3Interfaces {
+			for _, a := range li.Addresses {
+				if ip, _, err := net.ParseCIDR(a); err == nil && ip.To4() != nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func (v *validator) anyIface(n string) bool { return v.ifaceNames[n] || v.bondNames[n] }
 
 // l3IfaceExists 判断 L3 接口引用：物理口/bond、物理口上的 VLAN 子接口（如 ens2f0.100），
@@ -427,6 +446,8 @@ func (v *validator) checkKernelDataPlane(c Config) {
 	// 内核 bridge）+ 绑 BVI 网关地址的 UDP/67 socket（收单播续租），复用与 VPP 侧同一份
 	// 用户态服务器核心（池/租约/报文/池耗尽告警），故这里也不再拒绝（同上，通用段要求
 	// L2 + v4 网关 + 与 dhcp-relay 互斥）。
+	// 数据面 DNS 代理同样已实现（决策 #439）：内核侧的域的 IPv4 地址就是内核的**本机地址**，
+	// 每个落点一个绑该地址的 UDP/53 socket（详见下方的落点要求）。
 	if c.Protocols != nil && c.Protocols.LLDP != nil {
 		v.errf("protocols.lldp", "当前数据面为 Linux 内核网络，LLDP 尚未实现%s", alt)
 	}
@@ -439,8 +460,28 @@ func (v *validator) checkKernelDataPlane(c Config) {
 			v.errf(path+".cross_connect", "当前数据面为 Linux 内核网络，cross-connect（无学习点对点直通）尚未实现；"+
 				"内核侧只有学习/泛洪形态的桥。请改用 L2 交换机 + 端口%s", alt)
 		}
+		// 数据面 DNS 代理已实现（内核侧，见上方注释），故不拒绝；但按域上游要求该交换机
+		// **至少有一个 IPv4 服务落点**——L2＝IPv4 网关地址，type=l3＝同名 VRF 的 l3-interface
+		// 至少一条 IPv4 地址（内核侧在域的 IPv4 地址上收 DNS 查询）。没有落点时该域没有任何
+		// 可被查询的本机地址（死配置），提交期拒绝并给照做路径。VPP 侧不受此限（既有口径：
+		// 按域上游不要求网关）。
 		if len(vs.DNSProxyServers) > 0 {
-			v.errf(path+".dns_proxy_servers", "当前数据面为 Linux 内核网络，数据面 DNS 代理尚未实现%s", alt)
+			switch vs.Type {
+			case "l2":
+				if !gatewayHasV4(vs.Gateway) {
+					v.errf(path+".dns_proxy_servers", "当前数据面为 Linux 内核网络，按域 DNS 代理上游需要该交换机至少一个 IPv4 服务落点"+
+						"（内核侧在域的 IPv4 地址上收 DNS 查询）：交换机 %s 没有任何 IPv4 网关地址，"+
+						"内核侧该域没有任何可被查询的本机地址（死配置）。请先配置 IPv4 网关："+
+						"set virtual-switches %s gateway ip <ip-prefix>", vs.Name, vs.Name)
+				}
+			case "l3":
+				if !vrfHasIPv4Address(c, vs.Name) {
+					v.errf(path+".dns_proxy_servers", "当前数据面为 Linux 内核网络，按域 DNS 代理上游需要该交换机（type=l3）的同名 VRF 至少一条 IPv4 三层接口地址"+
+						"（内核侧在域的 IPv4 地址上收 DNS 查询）：同名 VRF 里没有 IPv4 地址，"+
+						"内核侧该域没有任何可被查询的本机地址（死配置）。请先配置三层接口 IPv4 地址："+
+						"set virtual-switches %s l3-interface <ifname> ip address <ip-prefix>", vs.Name)
+				}
+			}
 		}
 		// learn-limit 在内核数据面下**不拒绝**（决策 #435）：内核 bridge 没有「学习条数上限」原语，
 		// 产品把它实现为「fdb 计数 + 阈值告警」（BRIDGE_FDB_LIMIT_REACHED），读视图如实注明

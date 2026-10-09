@@ -125,7 +125,7 @@ func NewDNSProxyProviderFunc(f func() (PuntClient, error)) *DNSProxyProvider {
 	return &DNSProxyProvider{
 		client:     f,
 		transport:  func() (PuntTransport, error) { return newUnixPuntTransport(DNSProxyClientSock, DNSProxyServerSock) },
-		upstream:   hostUDPQuery,
+		upstream:   DNSHostUDPQuery,
 		clientSock: DNSProxyClientSock,
 		serverSock: DNSProxyServerSock,
 	}
@@ -179,10 +179,10 @@ func (p *DNSProxyProvider) Close() error {
 //
 // 声明内容每次更新（转发器按最新声明选上游）；注册/传输只在「启用↔停用」切换时动作（幂等）。
 func (p *DNSProxyProvider) Sync(ctx context.Context, want orchestrator.DNSProxyUpstreams) error {
-	global := dedupeServers(want.Global)
+	global := DNSServersDedupe(want.Global)
 	perSwitch := map[string][]string{}
 	for name, s := range want.PerSwitch {
-		if d := dedupeServers(s); len(d) > 0 {
+		if d := DNSServersDedupe(s); len(d) > 0 {
 			perSwitch[name] = d
 		}
 	}
@@ -292,12 +292,12 @@ func (p *DNSProxyProvider) handle(tr PuntTransport, desc PuntDesc, raw []byte) {
 	servers := p.serversFor(desc.SwIfIndex)
 	var resp []byte
 	if len(servers) == 0 {
-		resp = buildServfail(q.payload)
+		resp = DNSServfail(q.payload)
 		atomic.AddUint64(&p.servfail, 1)
 	} else {
 		resp = p.queryUpstreams(servers, q.payload)
 		if resp == nil {
-			resp = buildServfail(q.payload)
+			resp = DNSServfail(q.payload)
 			atomic.AddUint64(&p.servfail, 1)
 		} else {
 			atomic.AddUint64(&p.answered, 1)
@@ -326,9 +326,19 @@ func (p *DNSProxyProvider) serversFor(swIfIndex uint32) []string {
 }
 
 // queryUpstreams 按声明序尝试各上游（宿主网络栈）；全部失败返回 nil（调用方回 SERVFAIL）。
+// 实现即共享的 DNSQueryUpstreams（单一真源）——VPP 侧行为逐字不变。
 func (p *DNSProxyProvider) queryUpstreams(servers []string, query []byte) []byte {
+	return DNSQueryUpstreams(servers, query, p.upstream)
+}
+
+// DNSQueryUpstreams 按声明序逐条尝试上游（`upstream` 每次返回一个上游的查询结果），
+// 首个 `err == nil && len(resp) > 0` 即返回；全部失败/空应答返回 nil（调用方回 SERVFAIL）。
+//
+// 共享实现（决策 #439）：VPP 侧（*DNSProxyProvider 的转发器）与内核数据面（netkernel 的
+// 域落点转发器）共用本函数——上游选择语义单一真源，两侧行为逐字同源；VPP 侧行为不变。
+func DNSQueryUpstreams(servers []string, query []byte, upstream func(string, []byte) ([]byte, error)) []byte {
 	for _, s := range servers {
-		resp, err := p.upstream(s, query)
+		resp, err := upstream(s, query)
 		if err == nil && len(resp) > 0 {
 			return resp
 		}
@@ -387,8 +397,11 @@ func (t *unixPuntTransport) Send(desc PuntDesc, ipPacket []byte) error {
 
 func (t *unixPuntTransport) Close() error { return t.conn.Close() }
 
-// hostUDPQuery 用宿主网络栈向上游发一次 UDP 查询（不是 VPP FIB）。超时/失败返回错误。
-func hostUDPQuery(server string, query []byte) ([]byte, error) {
+// DNSHostUDPQuery 用宿主网络栈向上游发一次 UDP 查询（不是 VPP FIB）。超时/失败返回错误。
+//
+// 共享实现（决策 #439）：VPP 侧转发器与内核数据面（netkernel 的域落点转发器）共用本函数，
+// 上游可达性口径一致（宿主侧可达，非域内 FIB）；VPP 侧行为逐字不变。
+func DNSHostUDPQuery(server string, query []byte) ([]byte, error) {
 	conn, err := net.DialTimeout("udp", net.JoinHostPort(server, "53"), dnsProxyUpstreamTimeout)
 	if err != nil {
 		return nil, err
@@ -536,9 +549,12 @@ func udpChecksum(src, dst, seg []byte) uint16 {
 	return 0xffff
 }
 
-// buildServfail 由查询报文构造一个 SERVFAIL 应答（快速失败，不静默丢弃）：
+// DNSServfail 由查询报文构造一个 SERVFAIL 应答（快速失败，不静默丢弃）：
 // 翻转 QR、置 RCODE=SERVFAIL，清空 AN/NS/AR 计数，回显 question 段（transaction ID 原样）。
-func buildServfail(query []byte) []byte {
+//
+// 共享实现（决策 #439）：VPP 侧转发器与内核数据面（netkernel 的域落点转发器）共用本函数，
+// SERVFAIL 形状单一真源；VPP 侧行为逐字不变。
+func DNSServfail(query []byte) []byte {
 	resp := make([]byte, 12)
 	if len(query) >= 12 {
 		copy(resp, query[:12])
@@ -591,8 +607,11 @@ func dnsQuestionEnd(msg []byte) (int, bool) {
 	return pos, true
 }
 
-// dedupeServers 去重并剔除空串（保持声明序）。
-func dedupeServers(in []string) []string {
+// DNSServersDedupe 去重并剔除空串（保持声明序）。
+//
+// 共享实现（决策 #439）：VPP 侧转发器与内核数据面（netkernel 的域落点转发器）共用本函数，
+// 上游去重口径单一真源；VPP 侧行为逐字不变。
+func DNSServersDedupe(in []string) []string {
 	if len(in) == 0 {
 		return nil
 	}

@@ -1128,10 +1128,43 @@ func dataPlaneWarnings(old, new model.Config) []string {
 			"警告: 数据面实现已改为 %s，需重启服务（systemctl restart nfvis）后生效；"+
 				"重启前数据面仍按原实现运行", new.DataPlaneMode()))
 	}
-	if new.DataPlaneMode() == model.DataPlaneKernel && new.Vpp != nil {
+	if new.DataPlaneMode() == model.DataPlaneKernel && new.Vpp != nil && !vppSectionOnlyDNSProxyUpstreams(new.Vpp) {
 		out = append(out, "警告: 当前数据面为 Linux 内核网络，vpp 段配置不生效（切回 vpp 数据面后即可用）")
 	}
 	return out
+}
+
+// vppSectionOnlyDNSProxyUpstreams 判断 vpp 段是否**只**含数据面 DNS 代理的全局上游
+// （其余「进入 startup.conf 的字段」全为空）。用于收窄上面「vpp 段配置不生效」的提示（决策 #439）。
+//
+// 由来：`VppConfig.DNSProxyServers` 是**数据面中立**配置——它不进 startup.conf
+// （决策 #400），内核数据面下同样生效（域内转发管理器的全局上游：按域优先、回落它），
+// 故 vpp 段里只有它时提示「不生效」是错的；只要存在别的字段（CPU/内存/DPDK/插件）
+// 就仍要提示。
+//
+// 判据按**内容**、不按结构体：CLI 删叶子后 vpp 段会留下非 nil 的空壳结构
+// （真机实证：删完 `set vpp dpdk dev …`/`cpu …`/`memory …` 后剩余 `{cpu:{},memory:{},dpdk:{dev:{}}}`，
+// `display set` 已不再反映任何 vpp 配置）——拿整段做逐字节比较会把「空壳」误判成「有配置」，
+// 于是刚从 vpp 切到内核数据面的机器（恰是常见路径）看不到本收窄生效。
+func vppSectionOnlyDNSProxyUpstreams(v *model.VppConfig) bool {
+	if v == nil {
+		return false
+	}
+	if len(v.Plugins) > 0 {
+		return false
+	}
+	if v.CPU != nil && (v.CPU.MainCore != 0 || v.CPU.CorelistWorkers != "" || v.CPU.WorkersPerNuma != 0) {
+		return false
+	}
+	if v.Memory != nil && (v.Memory.MainHeapSize != "" || v.Memory.BuffersPerNuma != 0 || v.Memory.HugepagePreference != "") {
+		return false
+	}
+	if v.DPDK != nil {
+		if len(v.DPDK.PerDev) > 0 || v.DPDK.UIODriver != "" || v.DPDK.Dev != (model.VppDevDefault{}) {
+			return false
+		}
+	}
+	return true
 }
 
 // crossConnectPortWarnings 报出「cross-connect 交换机端口数不足（<2）」的提交提示。

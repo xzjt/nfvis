@@ -98,7 +98,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show vxlan tunnels` | VXLAN 隧道读视图：名/VNI/本地下垫/远端下垫/端口/交换机 + **是否已在 VPP**（数据面接口名与 sw_if_index）；运行态按平台打在隧道口上的**接口标记**（`nfvis-vxlan:<名>`）识别「该名字的隧道口在不在」——**不依赖 vxlan dump**（VPP 26.06 的两版 dump 恒空，真机实证：CRC 与本仓 binapi 逐一吻合、govpp 按 V1/V2 发都零条目而 vppctl 看得到隧道，属底座缺口）；**VNI/下垫地址/端口以配置为准**（无参数清单可回读），输出说明行如实写明该边界；运行态不可用时如实说明（不把「说不清」报成「未收敛」） | `GET /vxlan-tunnels` | ✅（round164 真机四维：建隧/BD 成员/读视图「已在 VPP」、改 remote 撤旧、restart nfvis 不重复建、vpp restart 重放、对抗双拒、删隧清场；tag 口径即该轮定形——`docs/evidence/v2-round164-d383-vxlan.txt`） |
 | `show port-mirroring` | SPAN 会话状态 | `GET /port-mirroring` | ✅ |
 | `show qos policies` | 限速策略与绑定 | `GET /qos/policies` | ✅ |
-| `show dns proxy` | 数据面 DNS 代理（启用态 + 全局上游 + 各域覆盖；决策 #345） | `GET /dns/proxy` | ✅（round124：启用态/上游读视图三面同源；数据面路径见 round124 证据——punt socket 转发器） |
+| `show dns proxy` | 数据面 DNS 代理（启用态 + 全局上游 + 各域覆盖；决策 #345。**内核数据面**另附**运行态块**：各域落点（地址/生效上游/状态）+ 已应答/已回 SERVFAIL/回包失败计数——决策 #439） | `GET /dns/proxy`（内核数据面响应附 `runtime`） | ✅（VPP 侧 round124；**内核侧 round4 真机**：域内客户端经网关解析成功（四跳抓包 + 计数器）、SERVFAIL rcode 实证，证据 `docs/evidence/v3-round4-d439-kernel-dns-proxy.txt`） |
 | `show vpp` | 数据面概览：**版本/连接/待重启**/线程/buffer/内存 | `GET /vpp/status` | ✅（发现 #11 补齐前三项） |
 | `show vpp threads` | main/worker 线程清单与绑核 | 运行态（govpp threads） | ✅ |
 | `show vpp runtime [thread <id>]` | **线程级**运行态：每线程向量率/主循环速率 + 整机向量率 + 工作线程数 + 数据面运行时长 | 运行态（stats segment，经 `vpp_get_stats` 解码，与 buffer/接口计数同源） | ✅（决策 #200；按节点明细无结构化来源，CLI 如实说明需 `vppctl show runtime`） |
@@ -257,8 +257,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set system timezone <tz>` | 时区 | 宿主 timedatectl | ✅ |
 | `set system ntp server <ip\|host> [prefer]` | NTP 服务器（`prefer` 为无值 flag） | 宿主 NTP | ✅（**决策 #76②** 修复） |
 | `set system dns server <ip> [secondary <ip>]` | DNS（主/备） | 宿主 resolv | ✅（**决策 #76⑥** 修复 secondary） |
-| `set system dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**全局上游**（决策 #345）：域内 VNF/容器指向网关即可解析；上游为**宿主侧可达**（非 VPP FIB），nfvisd 内自研转发器经 `punt socket` 收包、解析后按原域回注 | nfvisd punt socket + 宿主解析 | ✅（round124：能力前提与端到端数据面实证，见 `docs/evidence/v2-round124-*.txt`） |
-| `delete system dns proxy server [<ip> \| secondary <ip>]` | 撤销全局上游；不带取值即清空（全空则停用并注销 punt，VPP 恢复默认处理） | nfvisd punt socket | ✅（round124：见 `docs/evidence/v2-round124-*.txt`） |
+| `set system dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**全局上游**（决策 #345）：域内 VNF/容器指向网关即可解析；上游为**宿主侧可达**（非数据面 FIB），VPP 侧经 `punt socket` 收包、解析后按原域回注。**内核数据面同样生效**（决策 #439：数据面中立的全局上游，不再给「vpp 段不生效」提示） | VPP：nfvisd punt socket + 宿主解析；内核：各域 IPv4 落点上的 UDP/53 socket + 宿主解析（决策 #439） | ✅（VPP 侧 round124 见 `docs/evidence/v2-round124-*.txt`；**内核侧 round4 真机**见 `docs/evidence/v3-round4-d439-kernel-dns-proxy.txt`） |
+| `delete system dns proxy server [<ip> \| secondary <ip>]` | 撤销全局上游；不带取值即清空（全空则停用并注销，恢复数据面默认处理） | VPP：注销 punt；内核：关域落点 socket（决策 #439） | ✅（round124：见 `docs/evidence/v2-round124-*.txt`） |
 | `set system api port <n>` | HTTPS 端口（默认 443） | nfvisd | ✅ |
 | `set system api token-ttl-minutes <n>` | Token 有效期（默认 60） | nfvisd | ✅ |
 | `set system api max-sessions <n>` | 并发会话上限（真限流） | nfvisd | ✅（决策 #71） |
@@ -347,8 +347,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show virtual-switches <n> dhcp-leases` | DHCP 租约表（IP/MAC/状态 offered\|active\|declined/到期；未配置 dhcp-server 时如实报「未配置」；**两数据面同源**——内核数据面接入后 `GET /virtual-switches/{n}/dhcp-leases` 的「尚未收敛」503 只在真未收敛时出现） | nfvisd 租约表（`GET /virtual-switches/{n}/dhcp-leases` 同源；两数据面同一份服务器核心） | ✅ **真机四维验证（round141，同上）** |
 | `set virtual-switches <n> learn-limit <n>` | MAC 学习条数上限（仅 L2；环路/广播风暴缓解，**非阻断**；1-16777216，超限拒绝）。**内核数据面**下为**阈值告警**（内核 bridge 没有「学习条数上限」原语）：`bridge fdb` 已学条目 ≥ 阈值时产生 `BRIDGE_FDB_LIMIT_REACHED`（warning），**不强制限制学习**；读视图如实注明「阈值告警、非强制上限」 | VPP `bridge_domain_set_learn_limit`；内核数据面＝fdb 计数 + 阈值告警（决策 #435） | ✅（VPP 侧 round115：下发/回默认与读视图三面真机验证，见 `docs/evidence/v2-round115-*.txt`；内核侧决策 #435） |
 | `delete virtual-switches <n> learn-limit` | 清 MAC 学习上限（VPP 恢复默认 16777216、幂等；内核数据面下停止 fdb 阈值巡检并自动消解告警） | VPP `bridge_domain_set_learn_limit`；内核数据面＝fdb 计数 + 阈值告警（决策 #435） | ✅（VPP 侧 round115：见 `docs/evidence/v2-round115-*.txt`；内核侧决策 #435） |
-| `set virtual-switches <n> dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**按域上游**（决策 #345）：只对该交换机转发域（L2＝BVI；L3＝其 l3-interface）的入向查询生效；本域非空优先，否则回落全局；两者皆空则回 SERVFAIL | nfvisd punt socket + 宿主解析 | ✅（round124：能力前提与端到端数据面实证，见 `docs/evidence/v2-round124-*.txt`） |
-| `delete virtual-switches <n> dns proxy server [<ip> \| secondary <ip>]` | 撤销本域上游（不带取值即清空本域；回落全局） | nfvisd punt socket | ✅（round124：见 `docs/evidence/v2-round124-*.txt`） |
+| `set virtual-switches <n> dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**按域上游**（决策 #345）：只对该交换机转发域（L2＝BVI；L3＝其 l3-interface）的入向查询生效；本域非空优先，否则回落全局；两者皆空则回 SERVFAIL。**内核数据面**（决策 #439）下按域上游要求该交换机**至少一个 IPv4 落点**（L2＝IPv4 网关、L3＝l3-interface IPv4 地址），否则提交期拒绝（内核侧无处可收） | VPP：nfvisd punt socket + 宿主解析；内核：该域 IPv4 落点上的 UDP/53 socket + 宿主解析（决策 #439） | ✅（VPP 侧 round124 见 `docs/evidence/v2-round124-*.txt`；**内核侧 round4 真机**见 `docs/evidence/v3-round4-d439-kernel-dns-proxy.txt`） |
+| `delete virtual-switches <n> dns proxy server [<ip> \| secondary <ip>]` | 撤销本域上游（不带取值即清空本域；回落全局） | VPP：注销 punt；内核：关该域落点 socket、回落全局（决策 #439） | ✅（round124：见 `docs/evidence/v2-round124-*.txt`） |
 | `set virtual-switches <n> ports <seq> interface <if> [trunk vlans <l>\|native <v>]` | 物理口成员（`<seq>` 为必填端口序号） | VPP BD | ✅ |
 | `set virtual-switches <n> ports <seq> vnf <vm> interface <vnic> [trunk vlans <l>]` | vhost-user 成员（`<seq>` 必填） | VPP + libvirt | ✅ |
 | `set virtual-switches <n> ports <seq> container <ct> interface <vnic>` | 容器 memif 成员（`<seq>` 必填） | VPP + Docker | ✅ |

@@ -6,6 +6,8 @@ package netkernel
 //
 // 这里用**本包的真映射**（LinkName / GatewayVRFName）造出"必撞 / 必不撞"两组配置，交叉核对
 // model.Validate 的判定：判定与映射一致才算通过，规则漂移即失败。
+// 另（决策 #439）逐名交叉核对 model 的**设备名导出入口**（KernelGatewayVRFDevice /
+// KernelVRFDevice，提交编排派生域落点时用）与本包真映射——两处必须同名。
 
 import (
 	"strings"
@@ -90,5 +92,50 @@ func TestModelKernelNameCollisionMatchesLinkNameMapping(t *testing.T) {
 	}
 	if errs := model.Validate(mkLong(other)); len(errs) != 0 {
 		t.Fatalf("映射到不同设备名的长名不应报撞名，得到：\n%s", kernelValidateErrText(errs))
+	}
+}
+
+// 设备名映射的跨包一致性（决策 #439）：内核数据面 DNS 代理的**域落点**派生在提交编排侧
+// （internal/orchestrator 的 DNSProxyUpstreamsOf）用 model 的导出入口
+// （model.KernelGatewayVRFDevice / model.KernelVRFDevice）算内核 VRF 设备名，而本包（netkernel）
+// 实际下发 socket 时用 GatewayVRFName / LinkName 算——两条路径必须映射到**同一个**设备名，
+// 否则 socket 会绑到一个不存在的设备（起不来）或绑错域（静默服务错域）。
+//
+// 逐名交叉核对本包真映射与模型导出入口（含短名、15 字符上限边界、超长哈希截断、显式 gateway
+// vrf 两形态）；任一侧规则漂移即失败。防「两侧一起错」另加两条边界抽样（短名不截断 / 超长真截断）。
+func TestModelKernelDeviceNamesMatchNetkernelMapping(t *testing.T) {
+	names := []string{
+		"lan",              // 短名：原样
+		"abcdefghijklmno",  // 15 字符：IFNAMSIZ 上限边界，原样
+		"abcdefghijklmnop", // 16 字符：哈希截断
+		strings.Repeat("x", 40),
+	}
+	for _, n := range names {
+		if got, want := model.KernelVRFDevice(n), LinkName(n); got != want {
+			t.Errorf("model.KernelVRFDevice(%q) = %q，本包映射是 %q（两侧规则漂移）", n, got, want)
+		}
+		if got, want := model.KernelGatewayVRFDevice(n, ""), GatewayVRFName(n); got != want {
+			t.Errorf("model.KernelGatewayVRFDevice(%q, \"\") = %q，本包映射是 %q（两侧规则漂移）", n, got, want)
+		}
+		// 显式 gateway vrf：本包按 LinkName(显式名) 算（见 dhcpPlanOf 的派生），模型侧同一口径。
+		for _, explicit := range []string{"vr-custom", "abcdefghijklmnop", strings.Repeat("y", 40)} {
+			if got, want := model.KernelGatewayVRFDevice(n, explicit), LinkName(explicit); got != want {
+				t.Errorf("model.KernelGatewayVRFDevice(%q, %q) = %q，本包映射是 %q（两侧规则漂移）",
+					n, explicit, got, want)
+			}
+		}
+	}
+	// 边界抽样（防两侧同时改错、把「一起错」当一致）：
+	if got := LinkName("lan"); got != "lan" {
+		t.Fatalf("前提不成立：短名应原样作设备名，本包映射得到 %q", got)
+	}
+	if got := GatewayVRFName("lan"); got != "vr-lan" {
+		t.Fatalf("前提不成立：短名派生的网关 VRF 应为 vr-lan，本包映射得到 %q", got)
+	}
+	if got := LinkName("abcdefghijklmno"); got != "abcdefghijklmno" {
+		t.Fatalf("前提不成立：15 字符应原样（不截断），本包映射得到 %q", got)
+	}
+	if got := LinkName("abcdefghijklmnop"); got == "abcdefghijklmnop" || len(got) > ifnameMax {
+		t.Fatalf("前提不成立：16 字符应哈希截断且不超过 %d 字符，本包映射得到 %q", ifnameMax, got)
 	}
 }

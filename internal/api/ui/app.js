@@ -511,6 +511,13 @@ function renderSystemPage(st, ver, sysCfg, dnsProxy, fw) {
     pairs.push(['数据面 DNS 代理', dnsProxy.enabled ? '启用' : '未配置']);
     pairs.push(['全局上游', dnsProxy.enabled ? (list(dnsProxy.servers) || '（无）') : undefined]);
     pairs.push(['按域上游', dnsProxy.enabled ? perDomain : undefined]);
+    // 决策 #439：内核数据面下服务端另发运行态块（服务落点数 + 计数）——只读一行；
+    // VPP 数据面/未启用时该字段不发（omitempty），这里据其有无如实决定是否成行。
+    if (dnsProxy.runtime) {
+      const dm = Array.isArray(dnsProxy.runtime.domains) ? dnsProxy.runtime.domains.length : 0;
+      pairs.push(['运行态', '服务中 ' + dm + ' 个落点 / 已应答 ' + dash(dnsProxy.runtime.answered) +
+        ' / SERVFAIL ' + dash(dnsProxy.runtime.servfail)]);
+    }
   }
   fill($('sysp-list'), pairs);
   fill($('sysp-ver'), ver && ver.__err ? [['读取失败', ver.__err]] : versionPairs(ver));

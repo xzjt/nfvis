@@ -97,6 +97,7 @@ type cliExecutor struct {
 	alarms    AlarmRuntime       // 告警表（nil = 报未接入）
 	dhcpSrv   DHCPServerRuntime  // DHCP 服务器运行态（决策 #359：dhcp-leases 与 detail 块；nil = 报未收敛）
 	dhcpRelay DHCPRelayRuntime   // 内核数据面 DHCP 中继实例运行态（决策 #437：detail 的 dhcp_relay_note；nil = 不出现）
+	dnsProxy  DNSProxyRuntime    // 内核数据面 DNS 代理转发器运行态（决策 #439：show dns proxy 的运行态块；nil = 不出现）
 	vxlan     VxlanRuntime       // VXLAN 隧道运行态（决策 #383：show vxlan tunnels；nil = 报未接入）
 	storm     StormRuntime       // 接口风暴抑制数据面实况（决策 #385：show interfaces <if> detail 的 storm-control 块）
 	portSec   PortSecRuntime     // 接口端口安全数据面实况（决策 #389：show interfaces <if> detail 的端口安全块）
@@ -284,6 +285,10 @@ func (x *cliExecutor) setDHCPServer(d DHCPServerRuntime) { x.dhcpSrv = d }
 // setDHCPRelay 注入内核数据面 DHCP 中继实例的运行态读物（决策 #437：detail 的 dhcp_relay_note；
 // nil = 命令不出现该注记）。
 func (x *cliExecutor) setDHCPRelay(r DHCPRelayRuntime) { x.dhcpRelay = r }
+
+// setDNSProxy 注入内核数据面 DNS 代理转发器的运行态读物（决策 #439：`show dns proxy` 的运行态块
+// 与 REST GET /dns/proxy 的 runtime 字段**同一读物、同一措辞**；nil = 读视图不出现该块）。
+func (x *cliExecutor) setDNSProxy(r DNSProxyRuntime) { x.dnsProxy = r }
 
 // setVxlan 注入 VXLAN 隧道运行态读物（决策 #383：`show vxlan tunnels`；nil = 如实报未接入）。
 func (x *cliExecutor) setVxlan(v VxlanRuntime) { x.vxlan = v }

@@ -57,6 +57,13 @@ type Provider struct {
 	// capture 抓包实现（惰性构造；与 Provider 共用同一个 Runner 与配置来源）。
 	capture *Capture
 
+	// DNS 代理（决策 #439；惰性构造，见 dnsproxy.go）：全局/按域上游的域落点 UDP/53 socket
+	// 集合。dnsProxyLayer 是单测注入的传输面（生产 nil = 平台默认：UDP/53 绑具体地址 +
+	// 该域 VRF 设备）。
+	dnsProxyMu    sync.Mutex
+	dnsProxy      *dnsProxyManager
+	dnsProxyLayer dnsProxyLayer
+
 	// alarms 告警落点（R2-6）：内核数据面此前没有任何告警——恢复未收敛项与物理口链路
 	// 只进 journal，`show alarms`/Web 总览/诊断包/`/events` 全查不到，与 #191/#321/#333
 	// 建立的「未收敛项必须事后可查」纪律冲突。装配期注入，未注入即只返回错误（测试/工具场景）。
@@ -507,8 +514,10 @@ func unsupported(feature string) error {
 // 关键口径（真机走查抓到）：提交编排把这些族当作 bridge-domain/VRF 的**伴随操作**调用——
 // 每台交换机都会走一次 `ApplyLLDP`/`ApplyDHCPServer`/`ApplyDNSProxy`。**未声明时必须是空操作**，
 // 否则任何一次普通提交都会被"未实现"挡住（现场：只建了一台 L2 交换机，提交却报
-// `dhcp-relay[vs-lan] 不受支持`）。提交期校验已拒绝在内核数据面下**声明**这些族，
-// 故下面这些分支是纵深防御。
+// `dhcp-relay[vs-lan] 不受支持`）。
+//
+// 本段现只剩 **LLDP** 是「未实现」：DHCP 中继/服务器与 DNS 代理均已接通（见各自文件的真实现），
+// 它们的「未声明＝空操作/teardown」语义由实现自身承担，不再是这里的纵深防御分支。
 
 // ApplyLLDP LLDP 邻居：内核侧需 lldpd 守护进程对接，属独立立项；未声明即空操作。
 func (p *Provider) ApplyLLDP(_ context.Context, lldp *model.LldpConfig) error {
@@ -534,22 +543,53 @@ func (p *Provider) ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) e
 // + 绑 BVI 地址的 UDP/67 单播接收，复用与 VPP 侧同一份服务器核心）。此前这里是「未实现」的
 // 如实空操作/拒绝，内核侧接通后整体移除——本注释保留在此处指向新实现，避免后来者按旧认知查找。
 
-// ApplyDNSProxy 数据面 DNS 代理：内核侧对应 dnsmasq，属独立立项；无任何上游即空操作。
+// ApplyDNSProxy 数据面 DNS 代理（决策 #439）：内核侧由**域落点 UDP/53 socket**承担
+// （每个域的 BVI 网关 / l3-interface IPv4 地址一个 socket，绑该域 VRF 设备；上游按域优先、
+// 回落全局，两者皆空 ⇒ 对该查询回 SERVFAIL）。实现与生命周期口径见 dnsproxy.go。
 //
-// 启用判据与 VPP 侧**逐字同源**（network.DNSProxyProvider.Sync）：先丢掉空的按域条目
-// （每台交换机都会带一条、未配时是空列表），再判「全局或任一域非空」。
-func (p *Provider) ApplyDNSProxy(_ context.Context, want orchestrator.DNSProxyUpstreams) error {
-	enabled := len(want.Global) > 0
-	if !enabled {
-		for _, ups := range want.PerSwitch {
-			if len(ups) > 0 {
-				enabled = true
-				break
-			}
-		}
+// 域落点事实（地址 + VRF 设备名）由调用点从目标配置派生后经 want.Domains 传入——
+// apply 路径**绝不回读配置发动机**（提交期发动机锁由本次提交自己持有，重入＝自死锁）。
+// 未声明（全局与按域皆空）＝空操作（Sync 关掉全部 socket，幂等）；起不来如实返回错误。
+func (p *Provider) ApplyDNSProxy(ctx context.Context, want orchestrator.DNSProxyUpstreams) error {
+	return p.dnsProxyMgr().Sync(ctx, want)
+}
+
+// dnsProxyMgr 惰性构造 DNS 代理管理器（真实现 = UDP/53 绑具体地址 + 该域 VRF 设备）。
+func (p *Provider) dnsProxyMgr() *dnsProxyManager {
+	p.dnsProxyMu.Lock()
+	defer p.dnsProxyMu.Unlock()
+	if p.dnsProxy == nil {
+		p.dnsProxy = newDNSProxyManager(p.dnsProxyLayerOrDefault())
 	}
-	if !enabled {
-		return nil
+	return p.dnsProxy
+}
+
+// SetDNSProxyLayer 注入域落点 socket 的底座（**单测专用**：不依赖真 socket 与 VRF；
+// 须在任何 DNS 代理收敛之前调用——管理器在首次收敛时惰性构造并取用本底座）。
+// nil = 恢复真实现（平台默认）。与 SetDHCPServerSocketLayer 同一口径：只记底座、不抢造管理器
+// （DNSProxyState 的 ok=false 语义＝「尚未装配」，注入底座本身不算装配）。
+func (p *Provider) SetDNSProxyLayer(l dnsProxyLayer) {
+	p.dnsProxyMu.Lock()
+	defer p.dnsProxyMu.Unlock()
+	p.dnsProxyLayer = l
+}
+
+// dnsProxyLayerOrDefault 生效的域落点 socket 底座（未注入 = 平台默认；见 dnsproxy_{linux,other}.go）。
+func (p *Provider) dnsProxyLayerOrDefault() dnsProxyLayer {
+	if p.dnsProxyLayer != nil {
+		return p.dnsProxyLayer
 	}
-	return unsupported("数据面 DNS 代理（内核数据面尚未实现，请改用 VPP 数据面）")
+	return defaultDNSProxyLayer()
+}
+
+// DNSProxyState 内核数据面 DNS 代理的运行态读数（读视图；ok=false = 尚未装配管理器——
+// 内核侧恢复重放总会构造它，未构造即该数据面没在跑本功能）。
+func (p *Provider) DNSProxyState() (network.DNSProxyState, bool) {
+	p.dnsProxyMu.Lock()
+	mgr := p.dnsProxy
+	p.dnsProxyMu.Unlock()
+	if mgr == nil {
+		return network.DNSProxyState{}, false
+	}
+	return mgr.State(), true
 }

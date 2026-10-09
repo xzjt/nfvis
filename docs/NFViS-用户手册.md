@@ -823,7 +823,8 @@ nfvis$ request system kernel apply
 | IPv6 三层/转发（静态路由 v4+v6） | 支持 | **支持**（转发开关 v4/v6 一并置位并回读；v6 地址/静态路由/ACL 按各自语义下发） |
 | DHCP 中继 | 支持（VPP dhcp proxy，按 rx-VRF） | **支持**（nfvisd 内的**用户态中继实例**：收 bridge 上的 DHCP 请求 → 源地址重写为 BVI 的 IPv4 网关地址 → 单播 `server:67`，giaddr=0；应答按「请求期 xid → 客户端 MAC」登记表回注以太帧，不依赖 option 82；运行态见详情页的中继说明行） |
 | DHCP 服务器 | 支持（VPP dhcp 插件侧的用户态服务器 + 内置 L2 tap + UDP/67 punt） | **支持**（同一份用户态服务器核心，只换传输面：每交换机一条**内核 tap**（TUN/TAP，enslave 到该交换机的内核 bridge，不进用户端口视图；由产品打开 `/dev/net/tun` 认领持有以保证 carrier）+ **绑 BVI 网关地址的 UDP/67 socket** 收单播续租；server-id/下发网关/缺省 DNS 同为 BVI 地址，租约文件与状态语义、池耗尽告警与 VPP 侧一致，机制与边界见 §8.3） |
-| DNS 代理 / LLDP | 支持 | **尚不支持**（提交期直接拒绝） |
+| DNS 代理 | 支持（nfvisd 内自研转发器 + punt socket；上游经宿主网络栈） | **支持**（**同一份解析核心**，只换传输面：在每个域落点（L2 的 IPv4 网关地址、L3 的 l3-interface IPv4 地址）上绑 **UDP/53 socket**，按域优先、回落全局上游；无上游/上游失败回 SERVFAIL。读视图附运行态块，机制与边界见 §8.6） |
+| LLDP | 支持 | **尚不支持**（提交期直接拒绝） |
 
 三处都能选，写的是同一个配置项 `system.dataplane`：
 
@@ -1105,27 +1106,34 @@ nfvis# commit
 nfvis$ show dns proxy                                             # 启用态 + 全局上游 + 各域覆盖
 ```
 
-- **启用判据**：全局或任一交换机配了上游即启用（注册 VPP punt socket + 起转发器）；全空即停用并**注销**
-  ——不会留下「启用但无上游」的坏态。
+- **启用判据**：全局或任一交换机配了上游即启用（VPP 数据面＝注册 punt socket + 起转发器；内核数据面
+  ＝在各域 IPv4 落点上起 UDP/53 socket）；全空即停用并**注销**——不会留下「启用但无上游」的坏态。
 - **优先级**：来源域（该交换机的转发域）配了 → 用按域；否则回落全局；两者皆空 → 该域查询回 **SERVFAIL**
   （快速失败，不静默超时）。
-- **上游可达性是宿主路径**：解析请求由 nfvisd 用**宿主网络栈**发出（不是 VPP 数据面），因此配的是
-  「管理/主机网络能到」的 DNS；产品不做可达性预检——上游不通时运行期如实回 SERVFAIL。
+- **上游可达性是宿主路径**：解析请求由 nfvisd 用**宿主网络栈**发出（不是数据面转发路径——VPP 侧不经
+  VPP 的 FIB、内核侧不经域内转发表），因此配的是「管理/主机网络能到」的 DNS；产品不做可达性预检
+  ——上游不通时运行期如实回 SERVFAIL。
 - **客户端 resolver 由操作者/DHCP 指定**：域内 VM/容器把 `/etc/resolv.conf` 指向**产品自己的地址**
   （该域的网关 BVI / L3 接口地址）才会经 NFViS 解析；用产品自带的 DHCP 服务器时，
   可由 `set dhcp-server dns`（option 6）自动下发（缺省即下发 BVI 地址，见 §8.3）。
 - **代价（如实告知）**：代理启用期间，指向产品地址的 **UDP/53** 由 nfvisd 独占处理——若 nfvisd 不在
-  （崩溃/被停），这些包会被 VPP 丢弃，域内 DNS 中断；故停用请用 `delete … dns proxy server` 走注销路径。
+  （崩溃/被停），域内 DNS 中断（VPP 数据面：这些包被 punt 节点丢弃；内核数据面：监听 socket 随进程
+  消失、查询无应答）；故停用请用 `delete … dns proxy server` 走注销路径。
   客户端用 **TCP** 查 DNS 不在覆盖内；本版不做缓存。
-- 只读视图：CLI `show dns proxy`、REST `GET /dns/proxy`（`{enabled, servers, switches}`）与 Web 系统页同源。
-- **覆盖范围**：本版覆盖 **IPv4/UDP/53**（punt 注册按地址族）；IPv6 的域名解析尚未覆盖（待 v6 注册与回注路径真机验证后启用）。
+- 只读视图：CLI `show dns proxy`、REST `GET /dns/proxy`（`{enabled, servers, switches}`；内核数据面
+  另附 `runtime` 运行态块）与 Web 系统页同源。
+- **覆盖范围**：本版覆盖 **IPv4/UDP/53**（VPP 侧 punt 注册按地址族；内核侧只绑 IPv4 落点）；
+  IPv6 的域名解析尚未覆盖。
 - **管理网侧的「对外解析」不在产品范围**：NFViS **不**向管理网络上的其他主机提供 DNS 解析服务——管理网卡专用于设备
   操作通道（SSH/管理 API/日志转发/Prometheus），设备自身的解析走上表的「宿主解析器」；域内 VNF/容器的解析走上表的
   数据面代理。需要解析的管理网客户端请使用既有的 DNS 基础设施。
-- **内核数据面下「数据面 DNS 代理」尚未实现**：**按域**语句（`set virtual-switches <vs> dns proxy server`）
-  在提交期被直接拒绝；**全局上游**（`set system dns proxy server`）属 vpp 段配置——提交会给出
-  「当前数据面为 Linux 内核网络，vpp 段配置不生效」的警告，这套代理在该数据面下不提供服务。
-  该数据面请用上表的**宿主解析器**，或在域内部署自备解析器。
+- **内核数据面（Linux 内核网络）同样支持**：同一套代理由 nfvisd 内的**域内转发器**承担——在**每个域落点**
+  （L2 交换机的 **IPv4 网关地址**、L3 交换机同名 VRF 的 **l3-interface IPv4 地址**）上绑一个 **UDP/53 socket**
+  （绑定具体地址、不接管主机上其它地址），按域优先、回落全局上游经宿主网络栈转发（与 VPP 数据面**同一份
+  解析核心与优先级规则**）。**全局上游同样生效**：它不进 VPP 启动配置，是数据面中立配置（提交时不再误报
+  「vpp 段配置不生效」）。**按域上游要求该交换机至少有一个 IPv4 落点**——没有可被查询的本机地址＝死配置，
+  提交期直接拒绝并给出照做语句（`gateway ip` / `l3-interface … ip address …`）。读视图在内核数据面下
+  另附**运行态块**（每个落点的域/地址/生效上游/状态 + 已应答 / 已回 SERVFAIL / 回包失败计数）。
 
 其他系统级语句：`set system api port <uint>`、`token-ttl-minutes`、`max-sessions`、
 `api tls cert-file <p> key-file <p>`（装外部证书，立即生效）、`api tls self-signed regenerate`

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"strings"
 
@@ -495,8 +496,8 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	// vpp 段 + 各交换机段的伴随操作：全局或任一交换机非空 ⇒ 注册 punt socket 并起域内转发器；
 	// 全空 ⇒ 注销（VPP 恢复默认处理）。声明未变时 Sync 内部按状态幂等跳过；undo 收敛回旧声明。
 	// 放在交换机/VRF 之后：启用只依赖注册，但按域上游的转发域（BVI/L3 接口索引）此刻才就绪。
-	oldDNS := dnsProxyUpstreamsOf(old)
-	newDNS := dnsProxyUpstreamsOf(new)
+	oldDNS := DNSProxyUpstreamsOf(old)
+	newDNS := DNSProxyUpstreamsOf(new)
 	if !reflect.DeepEqual(oldDNS, newDNS) {
 		ops = append(ops, op{
 			desc: "dns-proxy",
@@ -1040,9 +1041,24 @@ func configEqualPtr[T any](a, b *T) bool {
 	return configEqual(*a, *b)
 }
 
-// dnsProxyUpstreamsOf 从配置提取数据面 DNS 代理的期望上游（决策 #345）：全局 + 各交换机按域。
+// DNSProxyUpstreamsOf 从配置提取数据面 DNS 代理的期望上游（决策 #345）：全局 + 各交换机按域。
 // 只收**真配了上游**的交换机（空声明不入 PerSwitch，与「全空即停用」判据一致）。
-func dnsProxyUpstreamsOf(cfg model.Config) DNSProxyUpstreams {
+//
+// 另派生内核数据面（决策 #439）的**域落点**（Domains）：由本函数在提交期从**目标配置**算出并
+// 随声明传入——apply 路径禁读配置发动机（提交期该锁由本次提交自己持有，回读＝重入自死锁）。
+// 落点口径（VPP 侧忽略 Domains、行为逐字不变）：
+//   - L2 交换机：BVI 网关的**全部 IPv4 地址**（IPv6 不在覆盖内——内核侧落点是 IPv4 UDP/53
+//     socket；IPv6-only 网关没有可服务落点，不入 Domains）；域设备取网关 VRF（显式
+//     gateway vrf 优先，否则派生的 vr-<交换机名>）；
+//   - L3（vrfs[] 条目，含 type=l3 交换机同名条目）：各 l3-interface 的**全部 IPv4 地址**；
+//     域设备取条目名的内核映射。
+//
+// 顺序确定性：L2 域按 VirtualSwitches 声明序在前，L3 域按 Vrfs 声明序在后；地址按声明序
+// 首次出现去重（plan 的 old/new 比较与巡检复现都依赖这一确定性）。
+//
+// 导出入口（决策 #439）：内核 provider 的**恢复重放**（netkernel 的 EnsureConsistent）直接调
+// 本函数从 committed 派生域落点并重放 socket；VPP 侧恢复仍按自己的内联派生（行为不变）。
+func DNSProxyUpstreamsOf(cfg model.Config) DNSProxyUpstreams {
 	want := DNSProxyUpstreams{}
 	if cfg.Vpp != nil {
 		want.Global = append([]string{}, cfg.Vpp.DNSProxyServers...)
@@ -1056,7 +1072,60 @@ func dnsProxyUpstreamsOf(cfg model.Config) DNSProxyUpstreams {
 		}
 		want.PerSwitch[vs.Name] = append([]string{}, vs.DNSProxyServers...)
 	}
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.Type != "l2" || vs.Gateway == nil {
+			continue
+		}
+		addrs := ipv4AddrsOfPrefixes(vs.Gateway.Addresses)
+		if len(addrs) == 0 {
+			continue
+		}
+		want.Domains = append(want.Domains, DNSProxyDomain{
+			Name:      vs.Name,
+			Addresses: addrs,
+			VRFDevice: model.KernelGatewayVRFDevice(vs.Name, vs.Gateway.Vrf),
+		})
+	}
+	for _, vrf := range cfg.Vrfs {
+		var prefixes []string
+		for _, li := range vrf.L3Interfaces {
+			prefixes = append(prefixes, li.Addresses...)
+		}
+		addrs := ipv4AddrsOfPrefixes(prefixes)
+		if len(addrs) == 0 {
+			continue
+		}
+		want.Domains = append(want.Domains, DNSProxyDomain{
+			Name:      vrf.Name,
+			Addresses: addrs,
+			VRFDevice: model.KernelVRFDevice(vrf.Name),
+		})
+	}
 	return want
+}
+
+// ipv4AddrsOfPrefixes 从 ip-prefix 列表取全部 IPv4 落点：非 CIDR 条目与纯 IPv6 跳过，
+// 地址去掉前缀、按声明序去重（保留首次出现位置）。L2 网关与 L3 l3-interface 共用。
+func ipv4AddrsOfPrefixes(prefixes []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range prefixes {
+		ip, _, err := net.ParseCIDR(p)
+		if err != nil {
+			continue
+		}
+		v4 := ip.To4()
+		if v4 == nil {
+			continue
+		}
+		s := v4.String()
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 func jsonKey(v any) any {

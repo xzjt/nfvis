@@ -916,6 +916,17 @@ func run() error {
 					log.Warn("MAC 学习上限阈值巡检", "err", e)
 				}
 			}},
+			// 决策 #439：内核数据面 DNS 代理的巡检对账（起失败/带外丢失的域落点 socket 补起、
+			// 已不声明的关掉；失败如实进未收敛项）。VPP 侧由 punt 注册与转发器承担、无此巡检——
+			// kernelNet 为 nil 时空操作（不动 VPP 侧行为）。
+			{"dns-proxy", func(ctx context.Context, cfg model.Config) {
+				if kernelNet == nil {
+					return
+				}
+				for _, e := range kernelNet.ReconcileDNSProxy(ctx, cfg) {
+					log.Warn("DNS 代理巡检未收敛项", "err", e)
+				}
+			}},
 		}
 		for {
 			select {
@@ -1106,6 +1117,14 @@ func run() error {
 	vmAPI := &vmController{Provider: computeProvider, net: netProvider, engine: engine, log: log}
 	vmSnaps := &snapshotController{p: computeProvider}
 
+	// 决策 #439：内核数据面 DNS 代理的运行态读物（VPP 数据面恒 nil——/dns/proxy 不发 runtime、
+	// CLI `show dns proxy` 不发运行态块）。kernelNet 是具体指针、VPP 分支下为 nil，直接塞进接口
+	// 会得到「非空接口 + 空指针」（调用即炸），故按需装配。
+	var dnsProxyRuntime api.DNSProxyRuntime
+	if kernelNet != nil {
+		dnsProxyRuntime = kernelNet
+	}
+
 	apiServer := api.New(engine, aaaSvc, api.Options{
 		Addr:    *listen,
 		TLSCert: *tlsCert,
@@ -1124,9 +1143,12 @@ func run() error {
 		// 决策 #437：内核数据面 DHCP 中继实例的运行态（交换机详情的 dhcp_relay_note；
 		// VPP 侧恒「不适用」——中继在 VPP 内运行、无进程内实例）。
 		DHCPRelay: netProvider,
-		Vxlan:     netProvider,
-		Storm:     netProvider,
-		PortSec:   netProvider,
+		// 决策 #439：内核数据面 DNS 代理的运行态（`/dns/proxy` 的 runtime 块与
+		// `show dns proxy` 的运行态块同源；VPP 侧 nil = 不出现，行为不变）。
+		DNSProxy: dnsProxyRuntime,
+		Vxlan:    netProvider,
+		Storm:    netProvider,
+		PortSec:  netProvider,
 		// 决策 #388：主机防火墙数据面读数（CLI `show system firewall` 与
 		// `GET /system/firewall` 同一读视图；同一落地器负责下发/回读）。
 		Firewall: fwApplier,
