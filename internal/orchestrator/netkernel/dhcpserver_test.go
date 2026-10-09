@@ -185,7 +185,16 @@ func (h *dhcpFakeHost) Run(_ context.Context, name string, args ...string) (stri
 		delete(h.links, dev)
 		return "", nil
 	case strings.HasPrefix(line, "ip link del "):
-		dev := strings.Fields(line)[3]
+		// 两种合法形态都收：`ip link del <dev>` 与 `ip link del dev <dev>`（真 ip 亦然）。
+		fields := strings.Fields(line)
+		idx := 3
+		if len(fields) > 4 && fields[3] == "dev" {
+			idx = 4
+		}
+		if idx >= len(fields) {
+			return "", fmt.Errorf("bad link del: %s", line)
+		}
+		dev := fields[idx]
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if _, ok := h.links[dev]; !ok {
@@ -789,7 +798,7 @@ func TestKernelDHCPServerTapDeleteByIdentity(t *testing.T) {
 	if !f.host.has("ens192") {
 		t.Fatal("绝不能按旧索引删掉用户接口")
 	}
-	if f.host.countCmd("ip tuntap del") != 0 {
+	if f.host.hasCmd("ip link del dev ens192") {
 		t.Fatal("身份不符时不应删任何设备")
 	}
 	// 2) 索引已不存在（带外删/内核重启）：按已达成处理、不报错。
@@ -804,8 +813,10 @@ func TestKernelDHCPServerTapDeleteByIdentity(t *testing.T) {
 	if f.host.has(tapNameOf(vs)) {
 		t.Fatal("内置 tap 应已删除")
 	}
-	if !f.host.hasCmd("ip tuntap del dev " + tapNameOf(vs)) {
-		t.Fatalf("应按名删除；实际：\n%s", strings.Join(f.host.lastCmds(), "\n"))
+	// 删除走 **rtnetlink 删设备**（`ip link del`）：`ip tuntap del` 是 TUNSETIFF detach 语义，
+	// 设备仍被本进程持有时会 EBUSY（真机实证；见 TapDelete 注释）。
+	if !f.host.hasCmd("ip link del dev " + tapNameOf(vs)) {
+		t.Fatalf("应按名以 `ip link del` 删除；实际：\n%s", strings.Join(f.host.lastCmds(), "\n"))
 	}
 }
 

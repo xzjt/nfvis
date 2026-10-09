@@ -260,7 +260,13 @@ func (c *kernelDHCPServerClient) TapDelete(swIfIndex uint32) error {
 			"ifindex", swIfIndex, "ifname", row.Ifname)
 		return nil
 	}
-	return c.p.ipBest(ctx, "tuntap", "del", "dev", row.Ifname, "mode", "tap")
+	// **删除走 rtnetlink 删设备（`ip link del`），不用 `ip tuntap del`**：后者是 TUNSETIFF 的
+	// detach 语义，设备仍被本进程持有时会失败——而本产品按设计**长期持有**该 tap（决策 #438：
+	// carrier 来自持有者），于是「DHCP 服务器服务过客户端后删交换机」时它确定性 EBUSY
+	// （真机实证：`ioctl(TUNSETIFF): Device or resource busy`，重试不恢复；对照实验：同状态
+	// `ip link del dev <tap>` 成功，之后产品删除一次提交通过）。rtnetlink 删设备不受持有影响；
+	// 设备消失后持有者的 fd 由 teardown 的 Close 释放（下次启用按名重建/复用）。
+	return c.p.ipBest(ctx, "link", "del", "dev", row.Ifname)
 }
 
 // TapDump 产品自持的内核 DHCP tap 存量（识别＝名字形如 nfvisdh+8 位十六进制；类型可读且不是
