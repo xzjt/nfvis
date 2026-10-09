@@ -3,6 +3,7 @@ package netkernel
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -155,8 +156,43 @@ func TestACLRuleArgsRejectsMixedFamilyAndBadAction(t *testing.T) {
 
 // ---------- Apply ----------
 
+// batchCaptureRunner 在真实调用 `nft -f <path>` 的**那一刻**读取该文件内容并留存：
+// 实现用 defer 删除批量文件，调用结束后文件已不存在，故只能在 Run 里取内容。
+// 同时记录 -f 的文件路径，供「调用后文件确实被删除」的断言使用。
+type batchCaptureRunner struct {
+	fakeRunner
+	batches []string
+	paths   []string
+	readErr error
+}
+
+func (r *batchCaptureRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	if name == "nft" && len(args) >= 2 && args[0] == "-f" {
+		r.paths = append(r.paths, args[1])
+		data, err := os.ReadFile(args[1])
+		if err != nil {
+			r.readErr = err
+		} else {
+			r.batches = append(r.batches, string(data))
+		}
+	}
+	return r.fakeRunner.Run(ctx, name, args...)
+}
+
+// singleBatch 断言恰好读到一份批量内容并返回它（读不到/多份即失败）。
+func (r *batchCaptureRunner) singleBatch(t *testing.T) string {
+	t.Helper()
+	if r.readErr != nil {
+		t.Fatalf("调用 nft -f 时批量文件应存在且可读，读取失败：%v", r.readErr)
+	}
+	if len(r.batches) != 1 {
+		t.Fatalf("应恰好读到一份批量文件内容，实得 %d；调用：\n%s", len(r.batches), r.joined())
+	}
+	return r.batches[0]
+}
+
 func TestACLApplyEmitsRulesInSeqOrderAndImplicitDeny(t *testing.T) {
-	f := &fakeRunner{}
+	f := &batchCaptureRunner{}
 	m := newACLManager(f)
 	acl := model.Acl{Name: "web", Rules: []model.AclRule{
 		{Seq: 20, Protocol: "tcp", DestinationPort: "443", Action: "permit"},
@@ -165,25 +201,122 @@ func TestACLApplyEmitsRulesInSeqOrderAndImplicitDeny(t *testing.T) {
 	if err := m.Apply(context.Background(), acl); err != nil {
 		t.Fatal(err)
 	}
+	// 表/链的确保仍是独立命令（幂等，不涉及「链为空」窗口）。
 	joined := f.joined()
 	for _, want := range []string{
 		"nft add table netdev nfvis-acl",
 		"nft add chain netdev nfvis-acl acl_web",
-		"nft flush chain netdev nfvis-acl acl_web",
-		// 两条规则未写地址（两侧 any）⇒ 各补一条 v4 限定（R2-4：不补会同时命中 v6）。
-		"nft add rule netdev nfvis-acl acl_web ip saddr 0.0.0.0/0 meta l4proto tcp tcp dport 80 accept",
-		"nft add rule netdev nfvis-acl acl_web ip saddr 0.0.0.0/0 meta l4proto tcp tcp dport 443 accept",
-		// 链尾无条件 drop：规则本身没有匹配条件（"全匹配"的兜底），不需要（也不应）加地址限定。
-		"nft add rule netdev nfvis-acl acl_web drop",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("缺少命令 %q；实际：\n%s", want, joined)
 		}
 	}
-	// Seq 顺序即匹配顺序：Seq=10 必须先于 Seq=20 下发。
-	i80, i443 := strings.Index(joined, "tcp dport 80"), strings.Index(joined, "tcp dport 443")
-	if i80 < 0 || i443 < 0 || i80 > i443 {
-		t.Fatalf("规则未按 Seq 顺序下发：\n%s", joined)
+	// flush + 全部规则 + 链尾 drop 在**一次** nft -f 的批量文件里，按 Seq 顺序。
+	content := f.singleBatch(t)
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	want := []string{
+		"flush chain netdev nfvis-acl acl_web",
+		// 两条规则未写地址（两侧 any）⇒ 各补一条 v4 限定（R2-4：不补会同时命中 v6）。
+		"add rule netdev nfvis-acl acl_web ip saddr 0.0.0.0/0 meta l4proto tcp tcp dport 80 accept",
+		"add rule netdev nfvis-acl acl_web ip saddr 0.0.0.0/0 meta l4proto tcp tcp dport 443 accept",
+		// 链尾无条件 drop：规则本身没有匹配条件（"全匹配"的兜底），不需要（也不应）加地址限定。
+		"add rule netdev nfvis-acl acl_web drop",
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("批量应恰好 %d 行（flush + 规则 + 兜底 drop），实得 %d：\n%s", len(want), len(lines), content)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Fatalf("批量第 %d 行不符：\n期望 %q\n实得 %q\n完整内容：\n%s", i+1, want[i], lines[i], content)
+		}
+	}
+	if !strings.HasSuffix(content, "\n") {
+		t.Fatalf("批量文件应以换行结尾（每行一条命令）：\n%q", content)
+	}
+}
+
+// TestACLApplyIsSingleAtomicBatch 断言 Apply 的「清空 + 重建 + 兜底 drop」只经**一次**
+// `nft -f` 批量下发，不再有独立的 `nft flush chain` / `nft add rule` 调用（那正是
+// 「flush 与首条规则之间链为空」的 fail-open 窗口来源，决策 #434）。
+//
+// 红-绿：把 Apply 改回逐条路径 ⇒「应恰好一次 nft -f，实得 0」判红。
+func TestACLApplyIsSingleAtomicBatch(t *testing.T) {
+	f := &batchCaptureRunner{}
+	m := newACLManager(f)
+	acl := model.Acl{Name: "web", Rules: []model.AclRule{
+		{Seq: 10, Protocol: "tcp", DestinationPort: "80", Action: "permit"},
+		{Seq: 20, Protocol: "icmp", Action: "deny"},
+	}}
+	if err := m.Apply(context.Background(), acl); err != nil {
+		t.Fatal(err)
+	}
+	// 恰好一次 nft -f。
+	var fcount int
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "nft -f ") {
+			fcount++
+		}
+	}
+	if fcount != 1 {
+		t.Fatalf("应恰好一次 nft -f，实得 %d；调用：\n%s", fcount, f.joined())
+	}
+	// 不得再有独立的 flush / add rule 调用。
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "nft flush chain ") {
+			t.Fatalf("不应再有独立的 flush 调用（fail-open 窗口来源）；调用：\n%s", f.joined())
+		}
+		if strings.HasPrefix(c, "nft add rule ") {
+			t.Fatalf("不应再有独立的 add rule 调用（fail-open 窗口来源）；调用：\n%s", f.joined())
+		}
+	}
+	// 批量内容与逐条路径逐字等价。
+	content := f.singleBatch(t)
+	if !strings.HasPrefix(content, "flush chain netdev nfvis-acl acl_web\n") {
+		t.Fatalf("批量应以 flush 开头：\n%s", content)
+	}
+	if !strings.HasSuffix(content, "add rule netdev nfvis-acl acl_web drop\n") {
+		t.Fatalf("批量应以链尾无条件 drop 结尾：\n%s", content)
+	}
+}
+
+// TestACLApplyRemovesBatchFile 断言批量临时文件在 Apply 返回后已被删除（不留残渣）。
+func TestACLApplyRemovesBatchFile(t *testing.T) {
+	f := &batchCaptureRunner{}
+	m := newACLManager(f)
+	if err := m.Apply(context.Background(), model.Acl{Name: "web", Rules: []model.AclRule{
+		{Seq: 10, Action: "deny"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.paths) != 1 {
+		t.Fatalf("应记录一个批量文件路径，实得 %d", len(f.paths))
+	}
+	if _, err := os.Stat(f.paths[0]); !os.IsNotExist(err) {
+		t.Fatalf("批量临时文件 %s 应在 Apply 后删除，Stat 得到 err=%v", f.paths[0], err)
+	}
+	if !strings.Contains(f.paths[0], "nfvis-acl-") {
+		t.Fatalf("批量临时文件名应带 nfvis-acl- 前缀便于排查，实得 %q", f.paths[0])
+	}
+}
+
+// TestACLApplyBatchFailureDoesNotFallBack 断言 `nft -f` 失败时如实返回错误，**不回退**逐条路径
+// （宁可拒绝，也不静默引入窗口）。
+func TestACLApplyBatchFailureDoesNotFallBack(t *testing.T) {
+	f := &batchCaptureRunner{fakeRunner: fakeRunner{replies: []fakeReply{{
+		prefix: "nft -f ",
+		out:    "Error: Could not process rule",
+		err:    errors.New("exit status 1"),
+	}}}}
+	err := newACLManager(f).Apply(context.Background(), model.Acl{Name: "web", Rules: []model.AclRule{
+		{Seq: 10, Action: "deny"},
+	}})
+	if err == nil {
+		t.Fatalf("nft -f 失败应如实返回错误")
+	}
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "nft flush chain ") || strings.HasPrefix(c, "nft add rule ") {
+			t.Fatalf("失败后不得回退逐条路径；调用：\n%s", f.joined())
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net"
+	"os"
 	"sort"
 	"strings"
 
@@ -112,6 +113,11 @@ func aclSortedRules(rules []model.AclRule) []model.AclRule {
 // Apply 收敛一条 ACL 的规则：先清空本链再按 Seq 顺序重建，链尾补无条件 drop（幂等）。
 //
 // 同名重放/规则变化都从干净态重建；已绑定的接口仍 jump 到同一条链，规则随之生效。
+//
+// 「清空 + 重建 + 链尾兜底 drop」收进**一次** `nft -f` 批量（原子提交，决策 #434）：逐条路径
+// 在 flush 与首条规则之间链是空的（毫秒级 fail-open 窗口，此间该接口流量不被 ACL 过滤，安全面）。
+// 批量由内核按批次提交，不再有「链为空」的中间态；批量内容与逐条路径逐字等价（同样的 flush、
+// 同样的规则顺序、同样的链尾 drop）。
 func (m *aclManager) Apply(ctx context.Context, acl model.Acl) error {
 	if acl.Name == "" {
 		return fmt.Errorf("ACL 名不能为空")
@@ -123,21 +129,60 @@ func (m *aclManager) Apply(ctx context.Context, acl model.Acl) error {
 	if err := nftIdemOn(ctx, m.run, "add", "chain", aclTableFamily, aclTableName, chain); err != nil {
 		return err
 	}
-	if err := nftReqOn(ctx, m.run, "flush", "chain", aclTableFamily, aclTableName, chain); err != nil {
+	batch, err := aclApplyBatch(acl, chain)
+	if err != nil {
 		return err
 	}
+	return m.aclRunBatch(ctx, acl.Name, batch)
+}
+
+// aclApplyBatch 生成 Apply 的 nft 批量脚本（每行一条 nft 命令、行尾换行）。
+//
+// 行内参数以空格分隔（`joinArgs`），与逐条路径的 argv 等价：本函数的所有取值都来自
+// 提交期已校验的字段——链名由 `aclSanitize` 收敛到 `[A-Za-z0-9_]`、地址为 ip-prefix、
+// 端口为 `<port>`/`<low>-<high>`、协议与 action 为枚举——**不含空格/引号/特殊字符**，
+// 故无需引用（批量文件里不会因取值被再分词而改变语义）。
+func aclApplyBatch(acl model.Acl, chain string) (string, error) {
+	var b strings.Builder
+	b.WriteString(joinArgs([]string{"flush", "chain", aclTableFamily, aclTableName, chain}))
+	b.WriteByte('\n')
 	for _, r := range aclSortedRules(acl.Rules) {
 		args, err := aclRuleArgs(r)
 		if err != nil {
-			return fmt.Errorf("ACL %s 规则 %d: %w", acl.Name, r.Seq, err)
+			return "", fmt.Errorf("ACL %s 规则 %d: %w", acl.Name, r.Seq, err)
 		}
 		full := append([]string{"add", "rule", aclTableFamily, aclTableName, chain}, args...)
-		if err := nftReqOn(ctx, m.run, full...); err != nil {
-			return err
-		}
+		b.WriteString(joinArgs(full))
+		b.WriteByte('\n')
 	}
 	// 链尾无条件 drop：VPP 的 ACL 在规则用尽后隐式拒绝，内核侧用显式兜底 drop 对齐。
-	return nftReqOn(ctx, m.run, "add", "rule", aclTableFamily, aclTableName, chain, "drop")
+	b.WriteString(joinArgs([]string{"add", "rule", aclTableFamily, aclTableName, chain, "drop"}))
+	b.WriteByte('\n')
+	return b.String(), nil
+}
+
+// aclRunBatch 把批量内容写入临时文件并**只调用一次** `nft -f <文件>`（临时文件用后即删）。
+//
+// 不回退到逐条路径：批量文件写不出 / `nft -f` 失败都如实返回错误——宁可拒绝，也不静默
+// 引入「链为空」的窗口。
+func (m *aclManager) aclRunBatch(ctx context.Context, aclName, batch string) error {
+	f, err := os.CreateTemp("", "nfvis-acl-*.nft")
+	if err != nil {
+		return fmt.Errorf("ACL %s: 创建 nft 批量文件失败: %w", aclName, err)
+	}
+	path := f.Name()
+	defer func() { _ = os.Remove(path) }()
+	if _, err := f.WriteString(batch); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("ACL %s: 写入 nft 批量文件 %s 失败: %w", aclName, path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("ACL %s: 关闭 nft 批量文件 %s 失败: %w", aclName, path, err)
+	}
+	if out, err := nftRunOn(ctx, m.run, "-f", path); err != nil {
+		return fmt.Errorf("nft -f %s: %w（%s）", path, err, trimOut(out))
+	}
+	return nil
 }
 
 // Delete 删除 ACL 链；仍被接口绑定时**拒绝**（不静默留下悬空 jump）。
