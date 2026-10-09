@@ -71,6 +71,15 @@ type Provider struct {
 	lldp      *lldpManager
 	lldpLayer lldpLayer
 
+	// 容器 vNIC 宿主端 veth（决策 #441；惰性构造，见 container_veth.go）：每个容器 vNIC 一对
+	// veth（宿主端 `nfvisct`+8hex 入交换机内核 bridge，容器端 `nfviscp`+8hex 在容器 start 后
+	// 移入其 netns）。管理器本身不持内核状态（内核是事实源），只有「owner/vNIC → 名字」的
+	// 进程内簿记；ctVethLayer 是单测注入的底座（生产 nil = 平台默认：`ip link` + `nsenter`，
+	// 见 container_veth_{linux,other}.go）。
+	ctVethMu    sync.Mutex
+	ctVeth      *ctVethManager
+	ctVethLayer ctVethLayer
+
 	// alarms 告警落点（R2-6）：内核数据面此前没有任何告警——恢复未收敛项与物理口链路
 	// 只进 journal，`show alarms`/Web 总览/诊断包/`/events` 全查不到，与 #191/#321/#333
 	// 建立的「未收敛项必须事后可查」纪律冲突。装配期注入，未注入即只返回错误（测试/工具场景）。
@@ -495,20 +504,69 @@ func (p *Provider) DeleteBond(ctx context.Context, name string) error {
 	return p.ipBest(ctx, "link", "del", name)
 }
 
-// ---------- VNF vNIC ----------
+// ---------- VNF vNIC / 容器 vNIC ----------
 
-// ApplyVnfInterface 建立 VNF vNIC 接入。
+// ApplyVnfInterface 建立 vNIC 接入。
 //
-// 内核数据面下 VM 侧就是 virtio 网卡：libvirt 按 `<interface type='bridge'>` 自行创建
-// 宿主 tap（vhost-net 加速）并挂到交换机对应的内核 bridge，产品不需要也不应该预先创建 tap
-// （预建会与 libvirt 的创建冲突）。故本方法是**如实空操作**——接入由计算编排的域定义完成，
-// 交换机侧（bridge 及其成员）由 ApplyBridgeDomain 收敛。
-//
-// sriov-vf 不经软件交换机，同样无动作；memif 在内核数据面无对应物（提交期已拒绝）。
-func (p *Provider) ApplyVnfInterface(context.Context, orchestrator.VnfPort) error { return nil }
+// 内核数据面下两条路径各自的形态（如实说明）：
+//   - **vhost-user / sriov-vf**（VM 侧）：如实空操作——VM 的 virtio 网卡由 libvirt 按
+//     `<interface type='bridge'>` 自行创建宿主 tap（vhost-net 加速）并挂到交换机对应的内核
+//     bridge，产品不需要也不应该预先创建 tap（预建会与 libvirt 的创建冲突）；sriov-vf 不经
+//     软件交换机，同样无动作。交换机侧（bridge 及其成员）由 ApplyBridgeDomain 收敛。
+//   - **memif**（容器 vNIC）：内核侧没有 memif，落地为**产品自持的 veth 对**——宿主端接口
+//     由本方法建立（建对 + up），**入桥与 VLAN 由 bridge-domain 段的成员处理完成**
+//     （先建接口、后入域，l2.go 的 memberLinkName 把容器端口映射到宿主端名）；
+//     容器端由容器编排在容器 start 后移入其 netns（见 container_veth.go 与 Attach）。
+func (p *Provider) ApplyVnfInterface(ctx context.Context, port orchestrator.VnfPort) error {
+	if port.Type == "memif" {
+		return p.ApplyContainerVeth(ctx, port)
+	}
+	return nil
+}
 
-// DeleteVnfInterface vNIC 删除：tap 随域销毁由 libvirt 回收，无产品侧对象需要撤销。
-func (p *Provider) DeleteVnfInterface(context.Context, string, string) error { return nil }
+// DeleteVnfInterface vNIC 删除：
+//   - **vhost-user / sriov-vf**（VM 侧）：宿主 tap 随域销毁由 libvirt 回收，无产品侧对象需要
+//     撤销（如实空操作）；
+//   - **memif**（容器 vNIC）：宿主端 veth 是**产品自持**的内核对象，必须由产品删——veth 成对
+//     同生共死，删宿主端即整对消失（否则 vNIC 移除/容器删除会在内核里留下孤儿 veth）。
+//
+// 判据是「**这一对是不是产品为容器 vNIC 建的**」：名字由哈希派生、单看名字无法区分「容器 vNIC」
+// 与「同名的 VM vNIC」（编排对两类 vNIC 的删除走同一入口），故按簿记（本进程 Ensure 过）与
+// 进程内配置快照（nfvisd 重启后的声明来源）判归属——都不是 ⇒ 如实空操作，不碰（真正的带外
+// 残留由 15s 巡检按声明集合清，见 ReconcileContainerVeth）。纯按名存在性去删会误伤同名的 VM。
+func (p *Provider) DeleteVnfInterface(ctx context.Context, owner, iface string) error {
+	host, _ := orchestrator.ContainerVethNames(owner, iface)
+	if !isProductContainerVethName(host) {
+		return nil // 构造上不可能；纵深防御（非产品名一律不碰）
+	}
+	if !p.containerVethDeclared(owner, iface) {
+		return nil
+	}
+	return p.DeleteContainerVeth(ctx, owner, iface)
+}
+
+// containerVethDeclared 该（属主, vNIC）是否是产品声明的容器 vNIC：簿记（本进程 Ensure 过，
+// 含声明已从 committed 删掉的对象）或进程内配置快照（p.configSnapshot()，nfvisd 重启后的
+// 声明来源；apply 路径不得读配置发动机，见 configSnapshot 注释）。
+func (p *Provider) containerVethDeclared(owner, iface string) bool {
+	p.ctVethMu.Lock()
+	mgr := p.ctVeth
+	p.ctVethMu.Unlock()
+	if mgr != nil && mgr.has(ctVethKey{owner: owner, iface: iface}) {
+		return true
+	}
+	for _, ct := range p.configSnapshot().ContainerFunctions {
+		if ct.Name != owner {
+			continue
+		}
+		for _, nic := range ct.Interfaces {
+			if nic.Type == "memif" && nic.Name == iface {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // ---------- 内核数据面无对应物的族（如实报不支持） ----------
 
@@ -628,4 +686,46 @@ func (p *Provider) lldpLayerOrDefault() lldpLayer {
 		return p.lldpLayer
 	}
 	return defaultLLDPLayer()
+}
+
+// ctVethMgr 惰性构造容器 vNIC 宿主端管理器（真实现 = `ip link` + `nsenter`；见 container_veth.go）。
+func (p *Provider) ctVethMgr() *ctVethManager {
+	p.ctVethMu.Lock()
+	defer p.ctVethMu.Unlock()
+	if p.ctVeth == nil {
+		p.ctVeth = newCtVethManager(p, p.ctVethLayerOrDefault())
+	}
+	return p.ctVeth
+}
+
+// SetContainerVethLayer 注入容器 vNIC 宿主端的底座（**单测专用**：不依赖真内核/网络命名空间；
+// 须在任何容器 vNIC 收敛之前调用——管理器在首次收敛时惰性构造并取用本底座）。nil = 恢复真实现
+// （平台默认：`ip link` + `nsenter`，见 container_veth_{linux,other}.go）。
+func (p *Provider) SetContainerVethLayer(l ctVethLayer) {
+	p.ctVethMu.Lock()
+	defer p.ctVethMu.Unlock()
+	p.ctVethLayer = l
+}
+
+// ctVethLayerOrDefault 生效的容器 vNIC 宿主端底座（未注入 = 平台默认）。
+func (p *Provider) ctVethLayerOrDefault() ctVethLayer {
+	if p.ctVethLayer != nil {
+		return p.ctVethLayer
+	}
+	return defaultCtVethLayer(p)
+}
+
+// containerVethHostEnds 产品自持的容器 vNIC 宿主端名集合（读视图过滤用）。
+//
+// 优先取编排簿记（「这个桥口是产品为哪个容器建的」只有产品知道，是本侧最精确的判据）；
+// 管理器尚未装配（nfvisd 刚起/从未收敛过容器 vNIC）时返回空——过滤方按**严格前缀**兜底
+// （见 api_surface.go 的 BridgeDomains）。
+func (p *Provider) containerVethHostEnds() map[string]bool {
+	p.ctVethMu.Lock()
+	mgr := p.ctVeth
+	p.ctVethMu.Unlock()
+	if mgr == nil {
+		return nil
+	}
+	return mgr.bookkeptHosts()
 }

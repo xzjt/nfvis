@@ -1237,7 +1237,18 @@
   报内部错误；修在删除合流点 `pruneEmptySingleton`——protocols 内外两层（**登记制**：未取通用兜底，
   既有守护 `TestPruneEmptySingletonScope` 钉着「未登记容器不动」，首版通用兜底被它拦下）；两条守护
   用例红-绿 + 真机「填回→再删」复验）；证据 `docs/evidence/v3-round5-d440-kernel-lldp.txt`。
-  **仍未做**：memif 容器接入（`docs/v3待做.md` 三）。
+  **再其后**：内核 **容器 vNIC 接入**（决策 **#441**，内核侧「整族未实现」至此全部收口）＝ **veth + bridge**
+  （每 vNIC 一对 veth：宿主端 `nfvisct…` 由网络编排建、**bridge-domain 段**作为成员口入交换机内核 bridge
+  ——接口先建、桥段 enslave，与 VPP「先建 memif、再入 BD」同构；容器端 `nfviscp…` 在容器 start/restart
+  成功后经钩子移入其 netns）。**真机（内核数据面，alpine 容器）**：**一次提交**（交换机+网关+DHCP 池+
+  容器 vNIC）收敛、容器内取到产品 DHCP 租约（192.168.99.100，与产品租约表/MAC 三方一致）、**ping 网关
+  0% 丢包**、`bridge fdb` 学到容器 MAC；生命周期六态（stop 后 veth 成对随 netns 消失、巡检 ≤15s 按声明
+  补回；start/restart 重新 attach；**nfvisd 重启网络不中断**（容器端 ifindex 不变）；delete 无残留）。
+  实现期修两条（未出厂）：**R5-0** 宿主端入桥从 vnf-if 段移到 bridge-domain 段（否则「同一提交新建
+  交换机 + 容器 vNIC」必失败；恢复重放同步调序 + 交换机段改 SwitchMembersOf）；**R5-2** 契约修正——
+  veth 成对、停容器整对消失（内核语义），宿主端由网络侧按声明幂等补建。**R5-1 如实登记**：派生端口
+  条目显示逻辑名 `mf-<容器>-<vNIC>`，内核实际成员是 `nfvisct…`（显示名增强候选，未修）。
+  证据 `docs/evidence/v3-round6-d441-container-veth.txt`。
   **v3 线新会话交接**：`docs/v3-交接-2026-10-08.md`（本轮全量：半程体检 → 修复批 #412~#418 → 收口与补验 →
   四套件复跑；含环境现状/复跑前须知/待定裁三项/本轮教训/工作方式）。**三条待定裁已定裁并落地（#419/#420，
   用户裁定采纳推荐）**：① **`nat static`** 在内核数据面下**多转发域配置即提交期拒绝**（判据 = `vrfs[]`

@@ -315,6 +315,23 @@ func (c *dockerClient) ExitCode(ctx context.Context, name string) (int, bool, er
 	return out.State.ExitCode, true, nil
 }
 
+// ContainerPID 容器主进程 PID（容器 vNIC 接入用，决策 #441）。
+//
+// 字段位置按 #432 的真机教训核对：`Pid` 在 inspect 应答的 **State** 里（与 RestartCount 不同
+// ——那个在顶层）；未运行的容器该值为 0，调用方据此如实报错、不猜。
+func (c *dockerClient) ContainerPID(ctx context.Context, name string) (int, error) {
+	var out struct {
+		State struct {
+			Pid int `json:"Pid"`
+		} `json:"State"`
+	}
+	err := c.do(ctx, http.MethodGet, "/containers/"+url.PathEscape(name)+"/json", nil, &out)
+	if err != nil {
+		return 0, err
+	}
+	return out.State.Pid, nil
+}
+
 // OOMKilled 返回容器是否因内存超限被终止（State.OOMKilled）。
 func (c *dockerClient) OOMKilled(ctx context.Context, name string) (bool, bool, error) {
 	var out struct {

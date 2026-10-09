@@ -351,7 +351,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `delete virtual-switches <n> dns proxy server [<ip> \| secondary <ip>]` | 撤销本域上游（不带取值即清空本域；回落全局） | VPP：注销 punt；内核：关该域落点 socket、回落全局（决策 #439） | ✅（round124：见 `docs/evidence/v2-round124-*.txt`） |
 | `set virtual-switches <n> ports <seq> interface <if> [trunk vlans <l>\|native <v>]` | 物理口成员（`<seq>` 为必填端口序号） | VPP BD | ✅ |
 | `set virtual-switches <n> ports <seq> vnf <vm> interface <vnic> [trunk vlans <l>]` | vhost-user 成员（`<seq>` 必填） | VPP + libvirt | ✅ |
-| `set virtual-switches <n> ports <seq> container <ct> interface <vnic>` | 容器 memif 成员（`<seq>` 必填） | VPP + Docker | ✅ |
+| `set virtual-switches <n> ports <seq> container <ct> interface <vnic>` | 容器 vNIC 成员（`<seq>` 必填） | VPP：memif；内核：veth 宿主端入交换机内核 bridge（决策 #441） | ✅ |
 | `set virtual-switches <n> cross-connect <bool>` | 两端口直通开关（与 ports/gateway 互斥；端口取该交换机的 `ports`，恰好两个——数据面取前两个，>2 提交期拒绝、<2 提交期提示） | VPP | ✅（决策 #79：置 `cross_connect`；`delete virtual-switches <n> cross-connect` 清键） |
 | `set virtual-switches <n> l3-interface <if> ip address <p>` | L3 接口地址（v4/v6 多条） | VPP | ✅ |
 | `set virtual-switches <n> l3-interface <if> acl-in <acl>` | L3 接口 ACL 绑定 | VPP acl | ✅ 已实证生效（round118：vNIC/物理口作 L3 接口时 ACL 确实在拦；绑定时产品**自动伴随**一条放行全部非 IP（含 ARP）的 macip 白名单——决策 #341，故对端无需预置静态邻居；IP 流量仍受 ACL） |
@@ -432,7 +432,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set container-functions <n> image <img>` | 引用 container-image（候选名 = 导入时按目录项名重打标签的名字，决策 #312） | Docker | ✅ |
 | `set container-functions <n> vcpu count <n>` | cgroup CPU 限制 | Docker | ✅ |
 | `set container-functions <n> memory size-mb <n>` | cgroup 内存限制 | Docker | ✅ |
-| `set container-functions <n> interfaces <vnic> type memif virtual-switch <n> [mac <m>] [vlan <v>]` | memif vNIC | VPP + Docker | ✅（决策 #79 修复） |
+| `set container-functions <n> interfaces <vnic> type memif virtual-switch <n> [mac <m>] [vlan <v>]` | 容器 vNIC（`type memif` 两数据面同一语句；**vNIC 级 `vlan` 两数据面同口径不单独处理**——VLAN 由交换机/端口声明落；`mac` 内核侧设在**容器端**） | VPP：memif endpoint + socket 挂载；内核：**veth 对**（宿主端 `nfvisct…` 入交换机内核 bridge、容器端 `nfviscp…` 在容器 start/restart 成功后移入其 netns，容器内名＝`<vnic>`；决策 #441） | ✅（内核侧 round6 真机：一次提交收敛 + 容器取租约 + ping 网关 0% 丢包 + 生命周期六态，证据 `docs/evidence/v3-round6-d441-container-veth.txt`） |
 | `set container-functions <n> env <key> <value>` | 环境变量（多条，模型为 map） | Docker | ✅（决策 #79 修复） |
 | `set container-functions <n> command <s>` | 入口命令 | Docker | ✅ |
 | `set container-functions <n> args <s>` | 命令参数 | Docker | ✅ |

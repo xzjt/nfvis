@@ -92,6 +92,9 @@ type dockerAPI interface {
 	Inspect(ctx context.Context, name string) (ContainerFacts, bool, error)
 	// ExitCode 返回容器退出码（不存在 exists=false）。
 	ExitCode(ctx context.Context, name string) (code int, exists bool, err error)
+	// ContainerPID 容器主进程 PID（Docker inspect 的 State.Pid；未运行的容器为 0）。
+	// 容器 vNIC 接入按它把容器端接口移入容器 netns（决策 #441）；不存在 ⇒ errDockerNotFound。
+	ContainerPID(ctx context.Context, name string) (int, error)
 	// OOMKilled 返回容器是否因内存超限被终止（Docker State.OOMKilled；不存在 exists=false）。
 	// 用它与退出码共同判定「异常退出」：docker stop 的正常结果是 137/143，不以此为故障。
 	OOMKilled(ctx context.Context, name string) (killed bool, exists bool, err error)
@@ -110,6 +113,13 @@ type Provider struct {
 	mu  sync.Mutex
 
 	alarms orchestrator.AlarmSink // 恢复收敛告警落点（M4-9，可空）
+
+	// nicHook 容器侧 vNIC 接入钩子（决策 #441；SetNICHook 注入，内核数据面接内核网络 Provider）。
+	// VPP 数据面恒 nil ⇒ 本包所有接入路径空操作，memif 路径逐字不变。见 nic.go。
+	nicHook ContainerNICHook
+	// cfgSrc 「当前 committed 配置」来源（决策 #441；SetConfigSource 注入）：start/restart 只带
+	// 容器名，声明的 vNIC 从配置取（单一真源）。可空——nicHook 为 nil 时不会被读取。
+	cfgSrc func() (model.Config, error)
 
 	// restartSeen 上次巡检观察到的重启次数（容器 → 次数，决策 #432）。判据要的是「连续两次
 	// 巡检间有增长」，故必须记住上一次读数；只记在内存里（重启 nfvisd 后重新起算，不编造历史）。
@@ -163,6 +173,11 @@ func (p *Provider) ApplyContainer(ctx context.Context, ct model.ContainerFunctio
 		if err := p.api.Start(ctx, ct.Name); err != nil {
 			return fmt.Errorf("按 autostart 启动容器 %s: %w", ct.Name, err)
 		}
+		// 容器 vNIC 接入（决策 #441）：autostart 的启动也是一次 start，netns 刚建好——
+		// 与 StartContainer 同一步接入（容器声明在手，无需再查配置；钩子为 nil 时空操作）。
+		if err := p.attachAfterStart(ctx, ct); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -176,10 +191,20 @@ func (p *Provider) DeleteContainer(ctx context.Context, name string) error {
 		return err
 	}
 	if !exists {
+		// 容器已不在：宿主端可能残留（上次删除中断/容器被带外删掉）——仍按名清一次
+		//（决策 #441；钩子的 Delete 幂等，缺失的 veth 不算错）。
+		if err := p.detachNICs(ctx, name); err != nil {
+			return fmt.Errorf("清理容器 %s 的宿主端 vNIC: %w", name, err)
+		}
 		return nil
 	}
 	if err := p.api.Remove(ctx, name, true); err != nil {
 		return fmt.Errorf("删除容器 %s: %w", name, err)
+	}
+	// 宿主端清理失败如实上报：容器已删掉，残留的宿主端（挂交换机 bridge 的 veth）必须让
+	// 操作者知道（巡检会继续清理），不能报成功。
+	if err := p.detachNICs(ctx, name); err != nil {
+		return fmt.Errorf("容器 %s 已删除，但宿主端 vNIC 清理失败（巡检会继续清理）: %w", name, err)
 	}
 	return nil
 }
@@ -201,10 +226,17 @@ func (p *Provider) StartContainer(ctx context.Context, name string) error {
 	if err := p.api.Start(ctx, name); err != nil {
 		return fmt.Errorf("启动容器 %s: %w", name, err)
 	}
-	return nil
+	return p.attachDeclaredNICs(ctx, name)
 }
 
 // StopContainer 停止（已停止幂等）。
+//
+// 容器 vNIC 口径：**停容器不删宿主端**（宿主端随声明存在、随声明消失）——容器端随 netns
+// 销毁自然消失，宿主端 veth 保留在原地；下一次 start 的 Attach 会幂等地把重新创建的容器端
+// 移回 netns（这也消除了「start 恰好落在两轮巡检之间」时 ≤15s 的断网窗口，并与网络侧
+// 「按声明确保宿主端」的巡检不再互相建/删抖动）。宿主端只在容器对象删除（DeleteContainer）
+// 或容器已不存在（CheckContainerNICs 的「已不存在」分支）时清。钩子未注入（VPP）时空操作，
+// 路径逐字不变。
 func (p *Provider) StopContainer(ctx context.Context, name string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -236,7 +268,12 @@ func (p *Provider) RestartContainer(ctx context.Context, name string) error {
 	if err := p.api.Restart(ctx, name); err != nil {
 		return fmt.Errorf("重启容器 %s: %w", name, err)
 	}
-	return nil
+	// 容器 restart 会重建 netns（决策 #441）：旧容器端已随旧 netns 消失、宿主端留着旧对端
+	// （按名复用接不通），故**先删宿主端、再按声明重新接入**——先删后接，顺序即语义。
+	if err := p.detachNICs(ctx, name); err != nil {
+		return fmt.Errorf("容器 %s 已重启，但旧宿主端 vNIC 清理失败（巡检会继续清理）: %w", name, err)
+	}
+	return p.attachDeclaredNICs(ctx, name)
 }
 
 // ContainerState 契约枚举（absent=不存在）。
@@ -367,6 +404,14 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 	var errs []error
 	for _, ct := range cfg.ContainerFunctions {
 		err := p.ApplyContainer(ctx, ct)
+		if err == nil {
+			// 容器 vNIC 接入的重放（决策 #441）：只对**运行中**容器补一次幂等 Attach——
+			// nfvisd 重启不重建容器（netns 未变，重复 Attach 幂等），但可修复「宿主端被带外
+			// 删掉/上次接入半途失败」的现场；宿主端 veth 是内核对象，重放按名核对/复用、
+			// 绝不重建（重建会打断运行中容器的网络）。放在 ApplyContainer 之后：此时容器
+			// 若刚按 autostart 拉起，netns 已就绪。
+			err = p.attachRunningNICs(ctx, ct)
+		}
 		if p.alarms != nil {
 			if err != nil {
 				p.alarms.Raise(orchestrator.RecoveryScopeContainer, "warning", orchestrator.RecoveryUnconverged,

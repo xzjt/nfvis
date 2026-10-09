@@ -957,11 +957,11 @@ func TestKernelDHCPServerApplyNeverReadsCommittedConfig(t *testing.T) {
 }
 
 // 源码级第二道守护：**应用路径上不得再引入 `p.config()`**（＝读 committed 配置 ⇒ 提交期自死锁）。
-// 覆盖内核 DHCP 服务器与其巡检、L3 接口/ACL 绑定所在的族文件、DNS 代理与 LLDP 自研收发代理
-// （R3-11：`aclByName` 的兜底曾回落读活配置，与 #438 同型）。解码为「去掉行注释后逐行扫」，
-// 故注释里提到该调用不会误报。
+// 覆盖内核 DHCP 服务器与其巡检、L3 接口/ACL 绑定所在的族文件、DNS 代理、LLDP 自研收发代理与
+// 容器 vNIC 宿主端 veth（R3-11：`aclByName` 的兜底曾回落读活配置，与 #438 同型）。解码为
+// 「去掉行注释后逐行扫」，故注释里提到该调用不会误报。
 func TestKernelApplyPathSourceHasNoEngineConfigRead(t *testing.T) {
-	for _, file := range []string{"dhcpserver.go", "dhcp_relay.go", "families.go", "dnsproxy.go", "lldp.go"} {
+	for _, file := range []string{"dhcpserver.go", "dhcp_relay.go", "families.go", "dnsproxy.go", "lldp.go", "container_veth.go"} {
 		b, err := os.ReadFile(file)
 		if err != nil {
 			t.Fatalf("读取 %s: %v", file, err)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 // ApplyBridgeDomain 收敛一台 L2 虚拟交换机为内核 bridge。
@@ -36,8 +37,8 @@ func (p *Provider) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch
 	for _, port := range vs.Ports {
 		name, ok := memberLinkName(port)
 		if !ok {
-			// vNIC 成员由 libvirt 的 bridge 接入自行 enslave（见 ApplyVnfInterface）；
-			// 容器 vNIC 在内核数据面无对应物，提交期已拒绝。
+			// VM vNIC 成员由 libvirt 的 bridge 接入自行 enslave（见 ApplyVnfInterface）；
+			// 容器 vNIC 的宿主端由 vnf-if 段先建，此处与普通成员口同一处理（见 memberLinkName）。
 			continue
 		}
 		declared[name] = true
@@ -102,6 +103,16 @@ func memberLinkName(port model.VSwitchPort) (string, bool) {
 		return LinkName(port.Interface), true
 	case port.Vnf != "":
 		return "", false // libvirt 自建 tap 并挂 bridge
+	case port.Container != "":
+		// 容器 vNIC：内核侧是**产品自持的 veth 对**（决策 #441）——宿主端由网络编排在提交编排的
+		// vnf-if 段**先建**（ApplyContainerVeth：建对 + 置 up；**先建接口、后入域**，与 VPP 侧
+		// 「先建 memif 接口、BD 段按名把端口挂进 BD」同一架构），本段作为 bridge-domain 的成员
+		// 处理负责把它 enslave 到该交换机的内核 bridge、置 up，并随成员一起落 VLAN
+		// （applyPortVlans：交换机/端口声明，与 VPP 侧同口径——vNIC 级的 vlan 字段不单独处理）。
+		// 名字走 orchestrator.ContainerVethNames 单一真源（与 ApplyContainerVeth、容器端接入、
+		// 读视图过滤、15s 巡检同一份派生）。
+		host, _ := orchestrator.ContainerVethNames(port.Container, port.ContainerInterface)
+		return host, true
 	default:
 		return "", false
 	}

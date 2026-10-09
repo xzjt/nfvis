@@ -68,10 +68,8 @@ func TestKernelDataPlaneRejectsUnimplementedFamilies(t *testing.T) {
 			c.VirtualSwitches = []VirtualSwitch{{Name: "vs", Type: "l2",
 				Ports: []VSwitchPort{{Seq: 1, Interface: "ens192", AclIn: "acl"}}}}
 		},
-		"容器 vNIC": func(c *Config) {
-			c.VirtualSwitches = []VirtualSwitch{{Name: "vs", Type: "l2",
-				Ports: []VSwitchPort{{Seq: 1, Container: "ct1"}}}}
-		},
+		// 容器 vNIC 不再属于本表：内核侧已实现（veth + bridge），改由「接入点须为 L2 交换机」
+		// 的判据约束——见 TestKernelDataPlaneContainerNICAcceptedOnL2Only。
 		"vNIC 作 L3 接口": func(c *Config) {
 			c.VirtualMachineFunctions = []VMFunction{{Name: "vm1",
 				Interfaces: []VnfInterface{{Name: "nic0", Type: "vhost-user"}}}}
@@ -84,10 +82,6 @@ func TestKernelDataPlaneRejectsUnimplementedFamilies(t *testing.T) {
 		"镜像源为 vNIC": func(c *Config) {
 			c.PortMirroring = []PortMirroring{{Name: "m", Analyzer: "ens224",
 				Source: PMSource{Vnf: "vm1", VnfInterface: "nic0"}}}
-		},
-		"容器网卡": func(c *Config) {
-			c.ContainerFunctions = []ContainerFunction{{Name: "ct1",
-				Interfaces: []VnfInterface{{Name: "nic0", Type: "memif"}}}}
 		},
 	}
 	for name, mutate := range cases {
@@ -126,6 +120,53 @@ func TestKernelDataPlaneLLDPAcceptedWhenInterfaceDeclared(t *testing.T) {
 	// VPP 侧既有口径不变。
 	if errs := Validate(mk(DataPlaneVPP, true)); len(errs) != 0 {
 		t.Fatalf("VPP 数据面 + LLDP（接口已声明）应放行，得到：%+v", errs)
+	}
+}
+
+// 决策 #441：内核数据面下容器 vNIC **不再**一律拒绝——内核侧由 veth + bridge 承担
+// （宿主端入交换机内核 bridge、容器端在容器 start 后移入其 netns）。留下的判据与 VNF vNIC 同源：
+// 接入点必须是 **L2** 交换机（type=l3 的内核交换机不建桥，veth 无处可挂）。
+//
+// 红-绿：把 validate.go 的旧拒绝（内核数据面任何容器 vNIC 一律拒）加回来，本用例的放行项即失败。
+func TestKernelDataPlaneContainerNICAcceptedOnL2Only(t *testing.T) {
+	mk := func(mode, swName, swType string) Config {
+		c := Config{System: &SystemConfig{DataPlane: mode}}
+		c.VirtualSwitches = []VirtualSwitch{{Name: swName, Type: swType}}
+		if swType == "l2" {
+			c.VirtualSwitches[0].Gateway = &VSGateway{Addresses: []string{"192.168.99.1/24"}}
+		} else {
+			// type=l3 需要同名 VRF 条目承载三层配置（既有校验）。
+			c.Vrfs = []Vrf{{Name: swName}}
+		}
+		c.ContainerFunctions = []ContainerFunction{{Name: "ct1", Image: "alpine:3.20",
+			Interfaces: []VnfInterface{{Name: "eth0", Type: "memif", VirtualSwitch: swName}}}}
+		return c
+	}
+	// 内核 + L2 交换机 ⇒ 放行（veth + bridge 承载）。
+	if errs := Validate(mk(DataPlaneKernel, "vs-l2", "l2")); len(errs) != 0 {
+		t.Fatalf("内核数据面 + 容器 vNIC 接入 L2 交换机应放行，得到：%+v", errs)
+	}
+	// 内核 + type=l3 交换机 ⇒ 仍拒绝（不建桥，veth 无处可挂）——与 VNF vNIC 同一判据。
+	errs := Validate(mk(DataPlaneKernel, "vs-l3", "l3"))
+	if len(errs) == 0 {
+		t.Fatal("内核数据面 + 容器 vNIC 接入 type=l3 交换机应被拒绝")
+	}
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Path, "container_functions[ct1].interfaces[eth0]") &&
+			strings.Contains(e.Message, "不能接入 type=l3") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("拒绝文案应点名容器 vNIC 与 type=l3（得到 %+v）", errs)
+	}
+	// VPP 侧既有口径不变（L2/L3 都放行）。
+	if errs := Validate(mk(DataPlaneVPP, "vs-l2", "l2")); len(errs) != 0 {
+		t.Fatalf("VPP 数据面 + 容器 vNIC（L2）应放行，得到：%+v", errs)
+	}
+	if errs := Validate(mk(DataPlaneVPP, "vs-l3", "l3")); len(errs) != 0 {
+		t.Fatalf("VPP 数据面 + 容器 vNIC（L3，既有受支持形态）应放行，得到：%+v", errs)
 	}
 }
 

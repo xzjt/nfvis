@@ -11,12 +11,13 @@
 //	NAT44          → nftables（table inet nfvis-nat；snat/masquerade/dnat）
 //	VXLAN          → ip link type vxlan
 //	VNF vNIC       → virtio + vhost-net + tap（宿主侧 tap 挂 bridge；VM 侧由计算编排下发）
+//	容器 vNIC      → veth 对（宿主端由网络编排建、交换机段入 bridge；容器端在容器 start 后移入其 netns）
 //	bond           → ip link type bond（内核 bonding 驱动）
 //
 // 数据面命令一律经 Runner 执行（不直接 exec），单测注入假 Runner 校验命令生成，
 // 使本包在任意平台可测。族级能力大多已接通（ACL/QoS/SPAN/DHCP 中继与服务器/DNS 代理/
-// 风暴抑制/端口安全/LLDP 都有内核侧真实现）；仍在内核数据面没有对应物的（memif 容器接入、
-// NAT 会话等 VPP 专有读视图）一律**如实报不支持**（ErrUnsupported），不静默成功。
+// 风暴抑制/端口安全/LLDP/容器 vNIC 都有内核侧真实现）；仍在内核数据面没有对应物的
+// （NAT 会话等 VPP 专有读视图）一律**如实报不支持**（ErrUnsupported），不静默成功。
 package netkernel
 
 import (

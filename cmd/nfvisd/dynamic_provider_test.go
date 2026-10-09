@@ -185,6 +185,11 @@ type fakeContainer struct {
 	// 决策 #432：运行态读数（状态 + 重启次数）。
 	restartVal   int
 	restartKnown bool
+
+	// 决策 #441：容器 vNIC 接入的注入面与巡检记账。
+	nicHook container.ContainerNICHook
+	cfgSrc  func() (model.Config, error)
+	nicRuns []model.Config
 }
 
 func (f *fakeContainer) ApplyContainer(_ context.Context, ct model.ContainerFunction) error {
@@ -264,6 +269,32 @@ func (f *fakeContainer) CheckContainerAlarms(_ context.Context, cfg model.Config
 	f.alarmRuns = append(f.alarmRuns, cfg)
 	return nil
 }
+
+// 决策 #441：容器 vNIC 接入注入面与巡检的记账（持有层换装转发断言用）。
+func (f *fakeContainer) SetNICHook(h container.ContainerNICHook) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nicHook = h
+}
+
+func (f *fakeContainer) SetConfigSource(src func() (model.Config, error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cfgSrc = src
+}
+
+func (f *fakeContainer) CheckContainerNICs(_ context.Context, cfg model.Config) []error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nicRuns = append(f.nicRuns, cfg)
+	return nil
+}
+
+// fakeNICHook 满足 container.ContainerNICHook 的空实现（只用于持有层转发断言）。
+type fakeNICHook struct{}
+
+func (fakeNICHook) Attach(context.Context, string, []model.VnfInterface, int) error { return nil }
+func (fakeNICHook) Delete(context.Context, string) error                            { return nil }
 
 func TestDynamicComputeDegradedSemantics(t *testing.T) {
 	h := newDynamicCompute()
@@ -590,6 +621,10 @@ func TestContainerHolderDegradedSemantics(t *testing.T) {
 	if errs := h.CheckContainerAlarms(ctx, model.Config{}); len(errs) != 0 {
 		t.Fatalf("未接入 CheckContainerAlarms 应为空: %v", errs)
 	}
+	// 决策 #441：容器 vNIC 接入巡检同样为空结果（降级期不产生噪声）。
+	if errs := h.CheckContainerNICs(ctx, model.Config{}); len(errs) != 0 {
+		t.Fatalf("未接入 CheckContainerNICs 应为空: %v", errs)
+	}
 	// 生命周期/日志：与 nil 分支同文案的错误。
 	for name, fn := range map[string]func() error{
 		"StartContainer":   func() error { return h.StartContainer(ctx, "ct-a") },
@@ -660,8 +695,32 @@ func TestContainerHolderForwardsAfterSwap(t *testing.T) {
 	if errs := h.CheckContainerAlarms(ctx, model.Config{}); len(errs) != 0 {
 		t.Fatalf("CheckContainerAlarms 转发失败: %v", errs)
 	}
+	if errs := h.CheckContainerNICs(ctx, model.Config{}); len(errs) != 0 || len(fake.nicRuns) != 1 {
+		t.Fatalf("CheckContainerNICs 转发失败: errs=%v runs=%d", errs, len(fake.nicRuns))
+	}
 	if len(fake.started) != 1 || fake.started[0] != "ct-a" {
 		t.Fatalf("StartContainer 参数未到达实现: %v", fake.started)
+	}
+}
+
+// 决策 #441：注入面在换装时转发——装配层只注入一次，后台接入新建的 Provider 也必须拿到
+// 钩子与配置来源（不转发的话后台接入后容器起得来、网络却不接）。
+func TestContainerHolderPropagatesNICHookOnSwap(t *testing.T) {
+	h := newContainerHolder()
+	hook := fakeNICHook{}
+	h.SetNICHook(hook)
+	h.SetConfigSource(func() (model.Config, error) { return model.Config{}, nil })
+
+	// 注入时未接入 ⇒ 只记住；随后的换装（含后台接入路径）转交给新实现。
+	first := &fakeContainer{}
+	h.Swap(first)
+	if first.nicHook == nil || first.cfgSrc == nil {
+		t.Fatalf("Swap 应把注入面转发给新实现: hook=%v src=%v", first.nicHook, first.cfgSrc != nil)
+	}
+	second := &fakeContainer{}
+	h.Swap(second) // 第二次换装（后台接入）：同样必须带上
+	if second.nicHook == nil || second.cfgSrc == nil {
+		t.Fatalf("第二次 Swap 也应转发注入面: hook=%v src=%v", second.nicHook, second.cfgSrc != nil)
 	}
 }
 

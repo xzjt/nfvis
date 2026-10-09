@@ -80,12 +80,21 @@ type computeFacade interface {
 }
 
 // containerFacade 容器侧同理（orchestrator.ContainerProvider 的 9 法已含
-// api.ContainerRuntime 的其余方法，本接口只补运行态读数一条）。
+// api.ContainerRuntime 的其余方法，本接口补运行态读数与容器 vNIC 接入的三条）。
 type containerFacade interface {
 	orchestrator.ContainerProvider
 	// ContainerStatus 容器运行态读数（契约状态 + 重启次数，同一次 inspect；api.ContainerRuntime
 	// 消费该方法，持有层须一并转发）。
 	ContainerStatus(ctx context.Context, name string) (state string, restartCount int, restartCountKnown bool, err error)
+	// SetNICHook 注入容器侧 vNIC 接入钩子（决策 #441；持有层在换装时转发给新实现，
+	// 后台接入新建的 Provider 不得丢钩子）。
+	SetNICHook(h container.ContainerNICHook)
+	// SetConfigSource 注入「当前 committed 配置」来源（决策 #441；start/restart 的声明 vNIC
+	// 从配置取；持有层在换装时转发）。
+	SetConfigSource(src func() (model.Config, error))
+	// CheckContainerNICs 容器 vNIC 接入的 15s 巡检对账（决策 #441；数据面无关调用点——
+	// 钩子未注入时 Provider 内空操作）。
+	CheckContainerNICs(ctx context.Context, cfg model.Config) []error
 }
 
 // connCloser 持有层记账的连接所需的最小能力（决策 #378/D2）：只为单测能注入「会阻塞的
@@ -302,15 +311,54 @@ func (h *dynamicCompute) CheckVMAlarms(ctx context.Context, cfg model.Config) []
 type containerHolder struct {
 	mu sync.RWMutex
 	p  containerFacade
+
+	// nicHook / cfgSrc 装配期注入的容器 vNIC 接入钩子与配置来源（决策 #441）。装配层只注入
+	// 一次，持有层记住它们并在**每次换装**时转发——后台接入循环会新建 Provider 再 Swap，
+	// 不转发的话后台接入成功后钩子/来源会丢（容器起得来、网络却不接）。
+	nicHook container.ContainerNICHook
+	cfgSrc  func() (model.Config, error)
 }
 
 func newContainerHolder() *containerHolder { return &containerHolder{} }
 
-// Swap 原子换装（同 dynamicCompute.Swap 的口径；容器侧无连接记账）。
+// SetNICHook 注入容器侧 vNIC 接入钩子（决策 #441；装配处：内核数据面接内核网络 Provider，
+// VPP 数据面不调用）。持有层在换装时转交给当前实现。
+func (h *containerHolder) SetNICHook(hook container.ContainerNICHook) {
+	h.mu.Lock()
+	h.nicHook = hook
+	h.mu.Unlock()
+	if p := h.current(); p != nil && hook != nil {
+		p.SetNICHook(hook)
+	}
+}
+
+// SetConfigSource 注入「当前 committed 配置」来源（决策 #441；装配处接 engine.Committed）。
+// 持有层在换装时转交（后台接入新建的 Provider 同样需要——否则此前换上的实现会丢来源）。
+func (h *containerHolder) SetConfigSource(src func() (model.Config, error)) {
+	h.mu.Lock()
+	h.cfgSrc = src
+	h.mu.Unlock()
+	if p := h.current(); p != nil && src != nil {
+		p.SetConfigSource(src)
+	}
+}
+
+// Swap 原子换装（同 dynamicCompute.Swap 的口径；容器侧无连接记账）。注入面（钩子/配置来源）
+// 在换装后转发给新实现（决策 #441）——后台接入的 Provider 与首接走同一条路。
 func (h *containerHolder) Swap(p containerFacade) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.p = p
+	hook, src := h.nicHook, h.cfgSrc
+	h.mu.Unlock()
+	if p == nil {
+		return
+	}
+	if hook != nil {
+		p.SetNICHook(hook)
+	}
+	if src != nil {
+		p.SetConfigSource(src)
+	}
 }
 
 // Connected 是否已接入真实编排。
@@ -420,6 +468,15 @@ func (h *containerHolder) EnsureConsistent(ctx context.Context, cfg model.Config
 func (h *containerHolder) CheckContainerAlarms(ctx context.Context, cfg model.Config) []error {
 	if p := h.current(); p != nil {
 		return p.CheckContainerAlarms(ctx, cfg)
+	}
+	return nil
+}
+
+// CheckContainerNICs 未接入 ⇒ 空结果（同 CheckContainerAlarms：巡检在降级期不产生噪声）。
+// 接入后转发给当前实现；钩子未注入（VPP 数据面）时实现内同样空操作（决策 #441）。
+func (h *containerHolder) CheckContainerNICs(ctx context.Context, cfg model.Config) []error {
+	if p := h.current(); p != nil {
+		return p.CheckContainerNICs(ctx, cfg)
 	}
 	return nil
 }

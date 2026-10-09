@@ -495,9 +495,8 @@ func (v *validator) checkKernelDataPlane(c Config) {
 			if p.AclIn != "" || p.AclOut != "" {
 				v.errf(path+".ports", "当前数据面为 Linux 内核网络，端口 ACL 尚未实现%s", alt)
 			}
-			if p.Container != "" {
-				v.errf(path+".ports", "当前数据面为 Linux 内核网络，容器 vNIC 接入尚未实现%s", alt)
-			}
+			// 容器 vNIC 接入已实现（决策 #441）：内核侧是 veth 对（宿主端入交换机内核 bridge +
+			// 容器端在容器 start 后移入其 netns），故这里不再拒绝（通用段仍要求容器与 vNIC 存在）。
 		}
 	}
 	// 端口镜像：内核侧以 tc mirred 实现，但**源不能是 VNF 虚拟网卡**——宿主 tap 由 libvirt
@@ -547,10 +546,17 @@ func (v *validator) checkKernelDataPlane(c Config) {
 			}
 		}
 	}
+	// 容器 vNIC 接入已实现（决策 #441）：内核侧是 veth 对（宿主端入交换机内核 bridge、容器端在
+	// 容器 start 后移入其 netns），故不再一律拒绝。留下的判据与 VNF vNIC 同源：接入的交换机必须是
+	// **L2**（type=l3 的内核交换机不建桥，veth 无处可挂）。
 	for _, ct := range c.ContainerFunctions {
-		if len(ct.Interfaces) > 0 {
-			v.errf("container_functions["+ct.Name+"].interfaces",
-				"当前数据面为 Linux 内核网络，容器 vNIC（memif）接入尚未实现%s", alt)
+		for _, nic := range ct.Interfaces {
+			if nic.VirtualSwitch != "" && v.l3vs[nic.VirtualSwitch] {
+				v.errf("container_functions["+ct.Name+"].interfaces["+nic.Name+"].virtual_switch",
+					"当前数据面为 Linux 内核网络，容器 vNIC 不能接入 type=l3 的交换机 %q："+
+						"内核侧 L3 交换机不建桥，veth 无处可挂（直到起容器才会失败）。"+
+						"请改为接入一台已配网关的 L2 交换机%s", nic.VirtualSwitch, alt)
+			}
 		}
 	}
 	// 内核接口名上限 15 字符（IFNAMSIZ-1）：交换机/bond/隧道/L3 交换机名直接用作内核设备名，

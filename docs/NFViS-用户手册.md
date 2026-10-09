@@ -809,7 +809,7 @@ nfvis$ request system kernel apply
 | 静态路由 / NAT44 | VPP FIB / nat44 插件 | `ip route` / nftables |
 | VXLAN | VPP vxlan 插件 | 内核 vxlan 设备 |
 | VNF 虚拟网卡 | vhost-user（共享内存） | **virtio 网卡 + 宿主 tap + vhost-net** |
-| 容器虚拟网卡 | memif | 尚不支持 |
+| 容器虚拟网卡 | memif（共享内存） | **veth + bridge**（每个 vNIC 一对 veth：宿主端入交换机内核 bridge、容器端在容器启动后移入其网络命名空间；`command`/`args`/中断语义不变，见 §14） |
 | ACL（`l3-interface acl-in`） | acl 插件 | nftables（规则语义同：末尾隐式拒绝；非 IP/ARP 自动放行；**`protocol icmp` 带端口字段在提交期拒绝**——内核侧表达不了 ICMP type/code） |
 | QoS 端口限速（入/出向） | policer 特性 | tc policer（`cir` bps / `cbs` 字节） |
 | 端口镜像 | span 插件（源可为物理口/bond 或 VNF vNIC） | tc mirred（源不能是 VNF 虚拟网卡，提交期拒绝） |
@@ -1994,6 +1994,16 @@ nfvis$ request container-functions ct-1 shell           # 交互式终端（Ctrl
 nfvis$ request container-functions ct-1 stop
 nfvis$ request container-functions ct-1 delete
 ```
+
+> **内核数据面（Linux 内核网络）下的容器 vNIC**：同一句 `set interfaces <vnic> type memif virtual-switch <vs>`
+> 由 **veth + bridge** 承载——每个 vNIC 一对 veth：**宿主端**（`nfvisct…`）由产品建并作为成员口入该交换机的
+> 内核 bridge（与物理口同列，但**不进用户端口视图**，端口清单以 `来源=container` 的派生条目呈现）；
+> **容器端**（`nfviscp…`）在容器**启动/重启成功后**移入其网络命名空间（容器内名字就是你声明的 `<vnic>`）。
+> 语义与 VPP 数据面一致：`mac` 设在容器看到的接口上；**vNIC 级 `vlan` 两数据面都不单独处理**（VLAN 由
+> 交换机/端口的 access/trunk/native 声明决定）；IP 仍由域内 DHCP（可用产品自带 DHCP 服务器）或容器自身
+> 配置获得。**如实告知**：停止容器会连同宿主端一起消失（veth 是成对设备，容器网络命名空间销毁时两端
+> 一起回收），产品会在下一次巡检（≤15 秒）按声明把宿主端补回并重新入桥；容器**重启后**产品会自动重新
+> 接入（容器网络命名空间会重建）；`nfvisd` 重启**不打断**运行中容器的网络（veth 按名复用、不重建）。
 
 > **容器内执行命令（`exec`，仅 super-user）**：在**运行中**的容器里执行一条命令并回显 stdout/stderr
 > 与退出码，语义等价容器内 `sh -c "<命令>"`。`<命令>` 是**一个整体**，含空格请用引号包起来。

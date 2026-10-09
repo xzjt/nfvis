@@ -1,0 +1,117 @@
+NFViS v3 · round6：决策 #441 内核数据面容器 vNIC 接入（veth + bridge，替代 memif）
+=================================================================================
+
+日期/分支：2026-10-10，`v3`（起点 HEAD `6650d2a`＝#441 立项提交）
+决策：规格书附录 A #441、设计文档 §3.2f
+账目：`docs/v3待做.md` 三.5 收口（内核侧「整族未实现」至此全部收口）
+
+§0 状态一句话
+-------------
+内核数据面下容器 vNIC 不再提交期拒绝：每个 vNIC 一对 **veth**——宿主端（`nfvisct`+8hex）由网络编排
+建并由 **bridge-domain 段**作为成员口入交换机内核 bridge（先建接口、后入域，与 VPP「先建 memif 接口、
+再入 BD」同构）；容器端（`nfviscp`+同 8hex）在容器 **start/restart 成功后**由容器编排经钩子移入其
+netns（容器内名＝声明的 vNIC 名，可选 MAC 设在容器端）。**真机端到端**：alpine 容器经 veth → bridge →
+**产品 DHCP 服务器**取到租约（192.168.99.100）并 **ping 网关 2/2 0% 丢包**。
+
+§1 环境与拓扑
+-------------
+- nfvis-vm（Ubuntu 26.04.1），换装二进制上机；数据面切内核（业务口交还 vmxnet3）。
+- **一次提交**建全套：`ct-vs`（L2 + 网关 192.168.99.1/24 + 端口 ens192 + dhcp-server 池
+  192.168.99.100-120）+ 容器 `ct-a`（image `alpine:3.20`、`command /bin/sleep`、`args 3600`、
+  `interfaces eth0 type memif virtual-switch ct-vs`）——rev 288 一次成功（应用顺序修复的验证点）。
+- 容器内验证用 `request container-functions ct-a exec "…"`（等价容器内 `sh -c`）。
+
+§2 逐项验证（每条都有独立事实源）
+---------------------------------
+① **一次提交收敛**（rev 288）：宿主端 `nfvisct7246f7c0` 已建并**在 bridge 里**
+   （`ls /sys/class/net/ct-vs/brif/` → `ens192 nfvisct7246f7c0 nfvisdhd19219f7`——修复前
+   同一提交会因「桥还没建」而整次回滚）。
+② **容器端接入**：容器内 `ip link show eth0` → `eth0@if69 … UP,LOWER_UP`（容器端已移入 netns 并
+   改名；MAC 与 veth 对一致）。
+③ **域内租约（产品 DHCP 服务器）**：容器内 `udhcpc -i eth0 -n -q` →
+   `lease of 192.168.99.100 obtained from 192.168.99.1, lease time 86400`；产品侧
+   `show virtual-switches ct-vs dhcp-leases` → `192.168.99.100 72:bd:be:ca:b2:77 active 86390`
+   （地址与 MAC 与容器内一致——**两套独立事实源交叉吻合**）。
+④ **双向连通**：容器内 `ping -c 2 -W 2 192.168.99.1` → **2/2，0% 丢包**，RTT 0.07~1.6ms。
+   旁证 `bridge fdb show br ct-vs` → `72:bd:be:ca:b2:77 dev nfvisct7246f7c0 master ct-vs`
+   （容器 MAC 学在产品的宿主端上＝帧确实过桥）。
+⑤ **读视图（#326 派生条目）**：`show virtual-switches ct-vs ports` → `ens192(config)` +
+   `mf-ct-a-eth0(container)`（只读，附「在容器侧删除」指引）；REST
+   `GET /virtual-switches/ct-vs/ports` 同源（`source=container, container=ct-a,
+   container_interface=eth0`）；**宿主端不进用户端口视图**（按簿记/前缀过滤，与 DHCP tap 同法）。
+⑥ **生命周期**：
+   - **stop**：容器端随 netns 销毁——**veth 成对，一端消失即整对消失（内核语义）** ⇒ 宿主端也随之消失；
+     一个巡检周期（~15s）内**网络侧巡检按声明把宿主端补回并重新入 bridge**（实测：`nfvisct7246f7c0`
+     回来且在 `brif` 列表里；不反复建/删、不抖动）。
+   - **start / restart**：attach 前先确保宿主端在位，再移入新 netns（容器内 ifindex 变化＝netns 重建的
+     事实；重新 `udhcpc` 拿到新租约 .101；`ping` 0% 丢包）。
+   - **nfvisd 重启**：容器**网络不中断**——重启前后容器内 `eth0` 的 ifindex **同为 74**（容器端未被
+     动过＝宿主端 veth **按名复用、未重建**），`ping` 仍 **0% 丢包**。
+   - **delete 容器**：`delete container-functions ct-a` + commit ⇒ 宿主端消失（`ip -br link` 无
+     `nfvisct*`、不在 `brif`）——无孤儿。
+   - 删交换机（`delete virtual-switches ct-vs`）⇒ bridge/网关/租约路径全清。
+⑦ **失败注入（单测覆盖）**：容器端 attach 失败（PID 不可得/移动失败）如实报错、其余 vNIC 照常收敛；
+   宿主端建失败如实报错并按声明重试（子智能体红-绿三组 + 两处对齐修复红-绿，见 §6）。
+
+§3 真机与实现期发现
+--------------------
+**R5-0（实现期修，未出厂）**：首版把「宿主端入 bridge」放在 vnf-if 段 ⇒ **同一次提交「新建交换机 +
+容器 vNIC」必然失败**（此刻 bridge 还不存在）。修法＝**接口先建、桥段 enslave**：`memberLinkName`
+认 `port.Container` → 宿主端名（bridge-domain 段按普通成员口处理 master/up/VLAN）；恢复重放的容器
+veth 段同步**移到交换机段之前**，且交换机段改用 `SwitchMembersOf(cfg,…)`（单一真源）——否则「释放
+不再声明的成员」会把运行中容器的宿主端从 bridge 上摘掉。真机复验：一次提交成功（§2①）。
+
+**R5-1（如实登记，未修）**：派生端口条目在**两种数据面**上都显示逻辑名 `mf-<容器>-<vNIC>`，而内核里
+实际成员是 `nfvisct…`——只是显示名（来源/属主正确、条目只读），排障时可能让人找错设备
+（`ip -br link | grep nfvisct` 可核对）。按数据面渲染属读视图增强候选，未在本轮范围（也影响 Web 控制台）。
+
+**R5-2（契约修正，真机实证）**：veth 是**成对设备**——一端随 netns 销毁而消失时**整对一起消失**，
+故「停容器而宿主端留着」在内核里做不到；正确口径＝「宿主端随**声明**由网络侧幂等补建（应用/恢复/
+巡检三条路径），随**声明消失/容器删除**清空」（已回写附录 A #441 与设计 §3.2f）。
+
+**观察（非缺陷，语义提醒）**：`args` 是**单个参数元素**（`args "sleep 3600"` 会以整串 exec 而报
+`executable file not found`）；跑长命令用 `command /bin/sleep` + `args 3600`（或 `command /bin/sh` +
+`args "-c ..."`）。这是既有语义（VPP 侧同样），本轮未改；手册有「args」条目，如实登记以免误判。
+
+§4 边界（不做/未做，如实）
+--------------------------
+- vNIC 级 `vlan` 与 VPP 侧同口径**不单独处理**（核对 `network/memif.go`：memif 路径只建接口 + 设 MAC
+  + up；VLAN 由交换机/端口声明经既有端口处理落）——内核侧宿主端入桥后走同一形态。
+- MAC 语义一致：声明了 `mac` 时设在**容器端**（容器内看到的接口）。
+- 不做容器 memif 共享内存端点、不做容器 SR-IOV 直通；不在容器内下发 IP（IP 由域内 DHCP 或容器自身
+  配置获得，与 VPP 侧一致；DHCP 客户端须由镜像/声明提供——本轮用 `exec udhcpc` 演示）。
+- Web 控制面沿用同一 REST 读物（未单做浏览器复核）。
+
+§5 清场与环境恢复
+------------------
+- 删除容器与测试交换机（见 §2⑥ 末尾）；`ip -br link` 无 `nfvisct*`/`ct-vs` 残留。
+- 数据面切回 **vpp**：`set system dataplane vpp` + restart + `bind-dpdk` ×2 + `request vpp restart` ⇒
+  `dataplane: vpp / version 26.06-release / connected: yes`；业务口 `dpdk` 在位。
+- 预先存在的孤儿内核对象（非本轮产生，未动）：bridge `vs-lan`（成员 `vx-a`）、`vs-dmz`、`srvsw`、
+  VRF `vr-srvsw`。
+
+§6 代码/测试面（本轮）
+----------------------
+- 命名单一真源：`orchestrator.ContainerVethNames`（`nfvisct`/`nfviscp` + FNV-1a 8hex，各 15 字符）。
+- 网络侧：`netkernel/container_veth.go`（管理器 + 假底座缝隙 + 残渣清理 + 巡检 + 报警接
+  `recovery/UNCONVERGED/container-veth`）、`container_veth_linux.go`（`ip`/`nsenter` 真实现、单命令
+  15s 有界）、`container_veth_other.go`（非 Linux 兜底）；`l2.go` 的 `memberLinkName` 认 Container；
+  `provider.go`（ApplyVnfInterface/DeleteVnfInterface 的 memif 分支）、`recovery.go`（宿主端重放先于
+  交换机段 + SwitchMembersOf）、`api_surface.go`（读数/巡检/断言 + BridgeDomains 过滤）。
+- 容器侧：`container/nic.go`（`ContainerNICHook` + 生命周期驱动 + `CheckContainerNICs` 巡检 +
+  `recovery/UNCONVERGED/container-nics` 告警）、`docker.go`（start/restart 后 attach、delete 清宿主端、
+  stop 不动宿主端——内核语义由 veth 自身承担）、`docker_client_docker.go`（`ContainerPID`：`State.Pid`）、
+  `cmd/nfvisd/{main.go,dynamic_provider.go}`（钩子装配含后台换装转发、`container-veth`/`container-nics`
+  两条 15s 巡检步骤）。
+- 校验：`model/validate.go` 删两处「尚未实现」拒绝；留下「接入点须为 L2」判据（与 VNF vNIC 同源），
+  `kernel_dataplane_test.go` 新用例两数据面四态 + 红-绿。
+- 测试：netkernel 13 例（命名/收敛序/attach 幂等与部分失败/删除属主范围/巡检补建与清残渣/读视图过滤/
+  恢复重放不重建）、container 8 例（钩子 nil 零调用/PID 缺失如实报错/stop 不清/delete 清/restart 顺序/
+  巡检三分支/告警建消）、`memberLinkName` 桥段用例。红-绿共 7 组（S7 三 + S8 两 + 两处对齐修复各一），
+  全部先红后绿并 sha256 校验恢复。
+- `make check` 七项全绿（决策计数 **343**；覆盖率门槛包全过；archtest/user_text/openapi/套件契约同步
+  均过）。
+
+§7 提交
+-------
+（见 `git log` 的 `feat: 决策 #441 …` 提交信息。）

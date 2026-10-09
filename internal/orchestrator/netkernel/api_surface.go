@@ -20,7 +20,8 @@ import (
 // 决策 #438 复用与 VPP 侧同一份服务器核心；LLDP 邻居——决策 #440 自研收发代理的进程内表）
 // 给出真值，VPP 专有的（NAT 会话、风暴/端口安全实况）**如实报不可用**。
 
-// SetSocketDirs 内核数据面不用 socket 目录（vNIC 走 virtio + tap，容器 vNIC 未支持）。
+// SetSocketDirs 内核数据面不用 socket 目录（VM vNIC 走 virtio + libvirt 自建 tap，容器 vNIC
+// 走 veth 对——都不需要 VPP 侧那种 socket 路径，故 vhost/memif 目录内核侧不消费）。
 func (p *Provider) SetSocketDirs(string, string) {}
 
 // InvalidateRuntimeState 无进程内登记可失效（内核是事实源，读视图直查内核）。
@@ -258,6 +259,14 @@ func (p *Provider) BridgeDomains() ([]network.BDRuntime, error) {
 			if isProductDHCPTapName(port.Name) {
 				continue
 			}
+			// 决策 #441：容器 vNIC 的宿主端 veth（名形如 nfvisct+8 位十六进制）同样不进用户
+			// 端口视图（用户不可见/不可删）。判据**优先编排簿记**（这个桥口是产品为哪个容器
+			// 的哪个 vNIC 建的，只有产品知道），簿记尚未建立时按**严格前缀**兜底；容器 vNIC 在
+			// 端口视图里的呈现走既有的**派生条目**（source=container，来自容器声明，见
+			// orchestrator.SwitchMembersOf），故这里隐藏不丢信息。
+			if p.isProductContainerVethPort(port.Name) {
+				continue
+			}
 			st.Ports = append(st.Ports, network.BDRuntimePort{Name: port.Name, Shg: port.Shg})
 		}
 		out = append(out, st)
@@ -360,6 +369,7 @@ var _ interface {
 	ReconcileDHCPServer(context.Context, model.Config) []error
 	ReconcileDNSProxy(context.Context, model.Config) []error
 	ReconcileLLDP(context.Context, model.Config) []error
+	ReconcileContainerVeth(context.Context, model.Config) []error
 	ReconcileProxy(context.Context, model.Config) []error
 	ReconcileStorm(context.Context, model.Config) []error
 	CheckLoop(context.Context, model.Config) []error

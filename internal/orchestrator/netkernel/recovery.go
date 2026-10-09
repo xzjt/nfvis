@@ -16,8 +16,10 @@ import (
 // `ip addr add`/`ip route replace`/`nft flush+重建` 幂等），重放的结果与内核实况一致；
 // nfvisd 重启后读视图直接查内核，也不需要靠重放重建进程内登记。
 //
-// 段序（R2-5，与提交编排 plan 的依赖序一致）：**转发前置 → 绑定族 → bond → 交换机 →
-// dhcp-relay → dhcp-server → 接口 → lldp → 镜像 → VRF → vxlan → dns-proxy → NAT**。
+// 段序（R2-5，与提交编排 plan 的依赖序一致）：**转发前置 → 绑定族 → bond → 容器 vNIC 宿主端
+// → 交换机 → dhcp-relay → dhcp-server → 接口 → lldp → 镜像 → VRF → vxlan → dns-proxy → NAT**。
+// vNIC 接入排在交换机**之前**是「先建接口、后入域」的依赖序（与 VPP 侧 network/recovery.go
+// 同一口径，决策 #170/#441）：接口不在，桥段的成员处理无处可挂。
 // 旧段序把 interfaces/bonds 排在 virtual-switches 之前：
 // 端口安全要求口已是 bridge 成员（否则如实拒绝），主机重启后必然失败、白名单静默不下发；
 // 镜像源可以是 bond，同理要在 bonds 之后。症状是「重启后没了、再提交一次又好了」。
@@ -56,8 +58,27 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 	for _, bond := range cfg.Bonds {
 		collect("bonds/"+bond.Name, p.ApplyBond(ctx, bond))
 	}
+	// 决策 #441：容器 vNIC 宿主端 veth 的恢复重放——**先建接口、后入域**（与 VPP 侧同一依赖序，
+	// 见 network/recovery.go）：宿主端必须先在内核里，下面的交换机段（成员处理）才能把它
+	// enslave 进该 vNIC 声明的 bridge。宿主端是**内核对象**、按名复用，故这里只做
+	// 「按名核对 + 缺失补建」——**绝不重建**（重建会打断已运行容器的网络；容器端在容器自己的
+	// netns 里不受 nfvisd 重启影响）。声明序确定（containerVethSpecsOf 按容器名、vNIC 名升序）；
+	// 未声明任何容器 vNIC 时循环体为空、不构造管理器、不下发任何内核命令。
+	for _, spec := range containerVethSpecsOf(cfg) {
+		collect("container-functions/"+spec.owner+"/interfaces/"+spec.iface,
+			p.ctVethMgr().sync(ctx, spec))
+	}
 	// 交换机先于接口：接口层的端口安全要求该口已是 bridge 成员（R2-5）。
-	for _, vs := range cfg.VirtualSwitches {
+	//
+	// 声明集取 **SwitchMembersOf**（单一真源，决策 #170 同款口径）：交换机侧声明 ∪ VNF/容器侧
+	// vNIC 声明——只用 cfg.VirtualSwitches 的话，容器 vNIC 的宿主端不在声明集里，本段的
+	// 「释放不再声明的成员」会把它们从 bridge 上摘掉（运行中容器静默断网）。socket 目录只为
+	// 构造合法的 VnfPort（内核侧不消费，SetSocketDirs 是空操作）。无法归位的声明进未收敛项。
+	switches, refErrs := orchestrator.SwitchMembersOf(cfg, orchestrator.DefaultVhostDir, orchestrator.DefaultMemifDir)
+	for _, err := range refErrs {
+		collect("virtual-switches", err)
+	}
+	for _, vs := range switches {
 		collect("virtual-switches/"+vs.Name, p.ApplyBridgeDomain(ctx, vs))
 	}
 	// 决策 #437：DHCP 中继用户态实例的恢复重放——**恢复重放必须含 relay**（与 VPP 侧同纪律）：

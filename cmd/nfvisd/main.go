@@ -402,6 +402,14 @@ func run() error {
 	ctCfg := container.DefaultConfig()
 	ctCfg.Socket = envOr("NFVIS_DOCKER_HOST", ctCfg.Socket)
 	containerProvider := newContainerHolder()
+	// 决策 #441：内核数据面把容器 vNIC 接入钩子交给容器编排——容器侧接入（按容器 PID 把容器端
+	// 接口移入其 netns、restart 换 netns 后重接、stop/delete 清宿主端）由容器编排在生命周期里
+	// 驱动；宿主端 veth 与交换机 bridge 由内核网络编排实现（同一 Provider 即钩子）。VPP 数据面
+	// **不注入**——钩子为 nil 时 memif 路径逐字不变。持有层记住它并在换装（含后台接入新建的
+	// provider）时转发，不丢注入面。
+	if kernelNet != nil {
+		containerProvider.SetNICHook(kernelNet)
+	}
 	ctProvider := container.NewConnectedProvider(ctCfg)
 	// 探测有界（决策 #349）：dockerClient 的请求构造已全程 NewRequestWithContext，
 	// 但调用方此前传的是 Background ⇒ dockerd 假死同样永久卡启动。只改调用方 ctx
@@ -576,6 +584,11 @@ func run() error {
 	// 会滞留旧快照（提交成功、`show virtual-switches` 恒空）。来源接线必须在这里——Provider 先于
 	// 引擎构造，此刻才拿得到 committed。
 	attachConfigSource(kernelNet, engine)
+
+	// 决策 #441：容器编排的运行态动作（start/restart）只带容器名——该容器声明的 vNIC 从
+	// committed 配置取（与内核读视图同一来源的单一真源；钩子未注入的 VPP 数据面**不会被读**，
+	// 零行为变化）。持有层记住并在换装时转发：后台接入循环会新建 Provider 再 Swap。
+	containerProvider.SetConfigSource(engine.Committed)
 
 	// FR-OPS-030 / FR-SYS-004（决策 #69）：按 committed 配置初始化日志级别与远程转发
 	if cfg, err := engine.Committed(); err == nil {
@@ -936,6 +949,27 @@ func run() error {
 				}
 				for _, e := range kernelNet.ReconcileLLDP(ctx, cfg) {
 					log.Warn("LLDP 巡检未收敛项", "err", e)
+				}
+			}},
+			// 决策 #441：容器 vNIC 接入的巡检对账（运行中容器缺接入 ⇒ 幂等补接——容器 restart
+			// 换 netns/宿主端被带外删掉都能自愈；容器**已不存在** ⇒ 清宿主端残留；已停/已创建
+			// （对象还在、只是没跑）⇒ 宿主端保留，随声明存在；失败如实进未收敛项）。数据面无关的
+			// 调用点：钩子未注入（VPP 数据面）时 Provider 内空操作，memif 路径不变。
+			{"container-nics", func(ctx context.Context, cfg model.Config) {
+				for _, e := range containerProvider.CheckContainerNICs(ctx, cfg) {
+					log.Warn("容器 vNIC 接入巡检未收敛项", "err", e)
+				}
+			}},
+			// 决策 #441：容器 veth **宿主端**的巡检对账（网络侧）——按声明核对宿主端在位并仍在
+			// 声明的交换机内核 bridge 里（缺失/带外被移出 ⇒ 补），清掉不属于任何声明的产品宿主端
+			// 残渣（容器已删、声明已撤）；失败如实进未收敛项。只在内核数据面装配（VPP 侧走 memif，
+			// kernelNet 为 nil 时空操作）。
+			{"container-veth", func(ctx context.Context, cfg model.Config) {
+				if kernelNet == nil {
+					return
+				}
+				for _, e := range kernelNet.ReconcileContainerVeth(ctx, cfg) {
+					log.Warn("容器 vNIC 宿主端巡检未收敛项", "err", e)
 				}
 			}},
 		}

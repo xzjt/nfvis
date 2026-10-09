@@ -41,12 +41,16 @@ type mockDocker struct {
 	// 决策 #358：交互式终端（返回的流与注入错误）。
 	shell    io.ReadWriteCloser
 	shellErr error
+
+	// 决策 #441：容器主进程 PID 注入（容器 vNIC 接入；缺省 0 = 未运行/未给该字段）。
+	pids   map[string]int
+	pidErr error
 }
 
 func newMockDocker() *mockDocker {
 	return &mockDocker{states: map[string]string{}, specs: map[string]CreateSpec{}, exitCodes: map[string]int{},
 		oomKilled: map[string]bool{}, rawStates: map[string]string{}, restartCounts: map[string]int{},
-		restartUnknown: map[string]bool{}}
+		restartUnknown: map[string]bool{}, pids: map[string]int{}}
 }
 
 func (m *mockDocker) Create(_ context.Context, name string, spec CreateSpec) error {
@@ -125,6 +129,18 @@ func (m *mockDocker) Inspect(_ context.Context, name string) (ContainerFacts, bo
 }
 func (m *mockDocker) Logs(_ context.Context, name string, tail int) (string, error) {
 	return m.logs, nil
+}
+
+// ContainerPID 容器主进程 PID（State.Pid；决策 #441）。不存在的容器按 404 同款错误
+// （与真实客户端一致：dockerClient.ContainerPID 直透 errDockerNotFound）。
+func (m *mockDocker) ContainerPID(_ context.Context, name string) (int, error) {
+	if m.pidErr != nil {
+		return 0, m.pidErr
+	}
+	if _, ok := m.states[name]; !ok {
+		return 0, errDockerNotFound
+	}
+	return m.pids[name], nil
 }
 
 func (m *mockDocker) Exec(_ context.Context, name, command string, timeout time.Duration) (ExecResult, error) {
