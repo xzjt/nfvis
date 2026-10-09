@@ -1296,7 +1296,7 @@ export const VIEWS = {
     render(d) { renderDiagPlaneNote(d['/system/status']); },
   },
   'capture': {
-    render(d) { pageWarn(d); renderCapture(d['/vpp/capture']); },
+    render(d) { pageWarn(d); renderCapture(d['/capture']); },
   },
 };
 
@@ -5799,7 +5799,7 @@ function renderAudit(audit) {
     : (rows.length ? '（最近 ' + Math.min(rows.length, 50) + ' 条）' : '');
 }
 
-// ---------- 抓包（数据面 pcap trace）----------
+// ---------- 抓包（数据面无关：VPP pcap trace / 内核 tcpdump，端点同源 /capture）----------
 
 function capMsg(text, isErr) {
   const p = $('cap-msg');
@@ -5833,7 +5833,7 @@ function renderCapture(cap) {
     });
     const cell = el('td', { class: 'actions' });
     const btn = wbtn({ type: 'button', class: 'ghost small', text: '下载' });
-    btn.addEventListener('click', () => downloadFile('/vpp/capture/' + encodeURIComponent(f.name), f.name, capMsg));
+    btn.addEventListener('click', () => downloadFile('/capture/' + encodeURIComponent(f.name), f.name, capMsg));
     cell.appendChild(btn);
     tr.appendChild(cell);
     tbody.appendChild(tr);
@@ -6045,10 +6045,10 @@ $('cap-start-btn').addEventListener('click', () => {
   const count = Number($('cap-count').value) || 0;
   return opsRun('开始抓包', {
     tier: 'low',
-    paragraphs: ['在接口 ' + ifname + ' 上开始数据面抓包' + (count ? '（缓冲深度 ' + count + ' 包）' : '') +
+    paragraphs: ['在接口 ' + ifname + ' 上开始数据面抓包' + (count ? '（报文数 ' + count + '）' : '') +
       '？抓包会占用少量数据面开销，用完请停止或导出。'],
-    cli: 'request vpp trace start interface ' + ifname + (count ? ' count ' + count : ''),
-  }, () => api('/vpp/capture', {
+    cli: 'request capture start interface ' + ifname + (count ? ' count ' + count : ''),
+  }, () => api('/capture', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(count ? { interface: ifname, count } : { interface: ifname }),
   })).then(() => capMsg('抓包已开始：' + ifname, false));
@@ -6056,18 +6056,18 @@ $('cap-start-btn').addEventListener('click', () => {
 $('cap-stop-btn').addEventListener('click', () => opsRun('停止抓包（丢弃）', {
   tier: 'low',
   paragraphs: ['停止抓包并丢弃已捕获的报文？不导出文件，缓冲区内容不会留下。'],
-  cli: 'request vpp trace stop',
+  cli: 'request capture stop',
 }, async () => {
-  await api('/vpp/capture', { method: 'DELETE' });
+  await api('/capture', { method: 'DELETE' });
   capMsg('已停止（未导出）。', false);
   return '';
 }));
 $('cap-export-btn').addEventListener('click', () => opsRun('停止并导出 pcap', {
   tier: 'low',
   paragraphs: ['停止抓包并把缓冲区导出为 pcap 文件？导出后可在本页下载。'],
-  cli: 'request vpp trace export',
+  cli: 'request capture export',
 }, async () => {
-  const r = await api('/vpp/capture?export=true', { method: 'DELETE' });
+  const r = await api('/capture?export=true', { method: 'DELETE' });
   capMsg(r && r.exported ? '已导出：' + r.name + '（' + bytes(r.size_bytes) + '）'
     : (r && r.message) || '未捕获到报文，无文件导出', false);
   return '';

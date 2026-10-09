@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 阶段 5：操作模式其余命令 + show 管道 + vpp trace 正确时序
+# 阶段 5：操作模式其余命令 + show 管道 + 抓包正确时序（含旧名兼容）
 set -u
 source "$(cd "$(dirname "$0")" && pwd)/cli-fulltest-lib.sh"
 
@@ -30,13 +30,14 @@ run S5 "show configuration | display json"
 run S5 "show interfaces | display json"
 run S5 "show interfaces | begin system"
 
-# ---- vpp trace 正确时序：start → export（会话进行中）→ stop ----
-# trace：export 隐含 stop，故「start → export → 再 start → stop」验证两个方向
-run S5 "request vpp trace start interface ens192 count 50"
-run S5 "request vpp trace export name cli-trace2"
-run S5 "show vpp capture"
-run S5 "request vpp trace start interface ens192 count 50"
-run S5 "request vpp trace stop"
+# ---- 抓包正确时序：start → export（会话进行中）→ stop ----
+# export 隐含 stop，故「start → export → 再 start → stop」验证两个方向；
+# 末两条用**旧名**跑同样的序列——兼容别名必须仍可用（同一实现）。
+run S5 "request capture start interface ens192 count 50"
+run S5 "request capture export name cli-trace2"
+run S5 "show capture"
+run S5 "request vpp trace start interface ens192 count 50"   # 旧名兼容
+run S5 "request vpp trace stop"                               # 旧名兼容
 
 # ---- 各 show 的二级子命令（契约 §1.1 全量）----
 run S5 "show interfaces ens224 detail"

@@ -104,7 +104,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show vpp runtime [thread <id>]` | **线程级**运行态：每线程向量率/主循环速率 + 整机向量率 + 工作线程数 + 数据面运行时长 | 运行态（stats segment，经 `vpp_get_stats` 解码，与 buffer/接口计数同源） | ✅（决策 #200；按节点明细无结构化来源，CLI 如实说明需 `vppctl show runtime`） |
 | `show vpp buffers` | buffer 池（每 NUMA）用量；打印统计来源 | 运行态（statsclient ‖ `vpp_get_stats`，决策 #68） | ✅ |
 | `show vpp memory` | main-heap 与 hugepage 占用 | 运行态 | ✅ |
-| `show vpp capture` | 抓包会话状态与已导出 pcap 清单 | `GET /vpp/capture` | ✅ |
+| `show capture` | 抓包会话状态与已导出 pcap 清单（**数据面无关**：VPP 走 pcap trace、内核走 tcpdump） | `GET /capture` | ✅（同一实现的历史真机结论（VPP pcap trace 轮次）；**新名拼写**的真机复跑待执行——已入 fulltest 阶段 1/4/5） |
+| `show vpp capture` | **兼容别名**（与 `show capture` 同一实现、同一端点，旧脚本不破） | 同上 | ✅ |
 | `show bonds` | 链路聚合列表 | `GET /bonds` | ✅ |
 | `show bonds <name> detail` | 成员口 link/LACP actor-partner | `GET /bonds/{name}` | ✅ |
 | `show lldp neighbors [interface <ifname>]` | LLDP 邻居表；`interface <ifname>` **按口过滤真的生效**（本轮起）：无匹配给「接口 X 无 LLDP 邻居」、接口未知给明确报错，都不再回全量表 | `GET /protocols/lldp/neighbors` | ✅（本机无对端 → 空表/无匹配文案） |
@@ -176,9 +177,12 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request sriov create-vfs <ifname> count <n>` | 创建 VF | O | `PUT /interfaces/{n}/sriov` | ⊘ 本机无 PF/VF，明确报错（round80 实测：报「不支持 SR-IOV」，未静默成功） |
 | `request sriov delete-vfs <ifname> vf <n>` | 回收 VF | O | `PUT /interfaces/{n}/sriov` | ⊘ 同上（另：`vf <n>` 不参与定位——按数量回收，回显已明确说明，附录 A #94） |
 | `request vpp restart` | 按 committed 配置重建数据面 + 恢复收敛 | S | `POST /vpp/restart` | ✅（返回成功即代表数据面可查询：等 VPP 起来**且**连接管理器换成新连接才返回；未重建则如实报「数据面连接在重启窗口内不可用」+ 指引，附录 A #315） |
-| `request vpp trace start interface <if> [count <n>] [filter <acl>]` | 开始抓包 | S | `POST /vpp/capture` | ✅ |
-| `request vpp trace stop` | 停止抓包（不导出） | S | `DELETE /vpp/capture` | ✅ |
-| `request vpp trace export [name <n>]` | 导出 pcap（**隐含 stop**） | S | `DELETE /vpp/capture` | ✅ |
+| `request capture start interface <if> [count <n>] [filter <acl>]` | 开始数据面抓包（**数据面无关**：VPP 走 pcap trace、内核走 tcpdump）。`count` 语义随数据面：VPP 为 pcap trace 缓冲深度（环形、不自动停，需显式 stop/export），内核为 tcpdump `-c`（**达到报文数即自动停止**）；`filter <acl>` **两数据面都不支持**（避免过滤语义分叉）。只接受**数据面设备**：VPP 中的端口，或内核侧的产品自持虚拟设备（虚拟交换机 bridge/VRF/bond/VXLAN）与已声明且在内核里的业务口——管理口与未声明的口一律如实拒绝 | S | `POST /capture` | ✅（同一实现的历史真机结论（VPP pcap trace 轮次）；**新名拼写**的真机复跑待执行——已入 fulltest 阶段 1/4/5） |
+| `request capture stop` | 停止抓包（不导出；内核侧终止 tcpdump 进程并删掉工作文件） | S | `DELETE /capture` | ✅（同一实现的历史真机结论（VPP pcap trace 轮次）；**新名拼写**的真机复跑待执行——已入 fulltest 阶段 1/4/5） |
+| `request capture export [name <n>]` | 导出 pcap（**隐含 stop**；内核侧把 tcpdump 的工作文件搬入导出目录，未捕获到报文时如实说明「无文件」） | S | `DELETE /capture` | ✅（同一实现的历史真机结论（VPP pcap trace 轮次）；**新名拼写**的真机复跑待执行——已入 fulltest 阶段 1/4/5） |
+| `request vpp trace start interface <if> [count <n>] [filter <acl>]` | **兼容别名**（与 `request capture start` 同一实现，旧脚本不破） | S | 同上 | ✅ |
+| `request vpp trace stop` | **兼容别名**（同 `request capture stop`） | S | 同上 | ✅ |
+| `request vpp trace export [name <n>]` | **兼容别名**（同 `request capture export`） | S | 同上 | ✅ |
 | `request system software add <deb\|url> [sha256 <hex>]` | 安装升级包（校验→升级→重启 nfvisd） | S | `POST /system/software` | 🚫 破坏性 |
 | `request system software rollback [to <v>]` | 回退版本 | S | `POST /system/software:rollback` | ✅ |
 | `request system reboot` | 重启系统 | S | `POST /system:reboot` | 🚫 破坏性 |
@@ -449,37 +453,37 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 > grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 304（§1/§2 的命令行 302 行 + §3 本表的 `show`、`request` 两行）
 > ```
 >
-> 即 §1/§2 合计 **302 行**；把两处 ` / ` 并列写法各拆成一条后为 **306 条**命令
+> 即 §1/§2 合计 **306 行**；把两处 ` / ` 并列写法各拆成一条后为 **310 条**命令
 > （§1.3 的 `exit` / `quit` +1；§2.1 的 `edit <path>` / `up` / `top` / `exit` +3）。
 
 **分族**（族 = 该行**首个 token**；§2.1 的裸 `show` 与 `show | display set` 因此计入 `show` 族，`help` 计入其余操作）：
 
 | 族 | 行数 | 明细 |
 |---|---|---|
-| `show` | 74 | §1.1 show 表 71 行 + §2.1 的 `show`、`show \| display set` 2 行 + §2.4 的 `show virtual-switches <n> dhcp-leases` 1 行 |
-| `request` | 49 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/系统/告警） |
+| `show` | 75 | §1.1 show 表 72 行 + §2.1 的 `show`、`show \| display set` 2 行 + §2.4 的 `show virtual-switches <n> dhcp-leases` 1 行 |
+| `request` | 52 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/抓包/系统/告警） |
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
 | 配置模式 | 159 | §2.1 余下 13 行 + §2.2~§2.9 共 146 行（§2.4 的 `dhcp-leases` 读行计入 `show` 族；含 FR-CMP-023 的 2 条 `pci-device`、决策 #383 的 2 条 vxlan、决策 #385 的 3 条 storm-control、决策 #388 的 4 条 firewall、决策 #389 的 3 条 port-security 语句、v3 的 `set system dataplane` 1 条） |
-| **合计** | **302** | 不含管道则为 **293**；按 ` / ` 拆开后 **306 条** |
+| **合计** | **306** | 不含管道则为 **297**；按 ` / ` 拆开后 **310 条** |
 
 **分节**（行数）：
 
 | 节 | 行数 | 节 | 行数 |
 |---|---|---|---|
-| §1.1 `show`（含通用管道 9） | 81 | §2.2b `protocols` | 3 |
-| §1.2 `request` | 49 | §2.3 `interfaces` 与 `bonds` | 17 |
+| §1.1 `show`（含通用管道 9） | 82 | §2.2b `protocols` | 3 |
+| §1.2 `request` | 52 | §2.3 `interfaces` 与 `bonds` | 17 |
 | §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 25 |
 | §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 11 |
 | §2.2 `system` | 45 | §2.6 `resource-pools` | 3 |
 | §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 22 |
-| §2.9 `container-functions` | 10 | **合计** | **302** |
+| §2.9 `container-functions` | 10 | **合计** | **306** |
 
-**按实测状态分布**（共 302 行）：
+**按实测状态分布**（共 306 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 285 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）、**主机防火墙 5 行（#388，round169）**、**`set system dataplane`（v3 round1：干净快照两次切换 + 切回 vpp 实证，`docs/evidence/v3-round1-clean-snapshot-datapath-switch.txt` §4/§5）**——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，按增量口径一并订正。**本桶较上一版 -1**：`set port-mirroring <n> source vnf …`（vNIC 源）此前标 ✅ 但实为下发期拒绝，v3 round3 走查后按实现口径重写并移入 🚫 桶（真机复验待执行） |
+| ✅ 实测通过 | 289 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）、**主机防火墙 5 行（#388，round169）**、**`set system dataplane`（v3 round1：干净快照两次切换 + 切回 vpp 实证，`docs/evidence/v3-round1-clean-snapshot-datapath-switch.txt` §4/§5）**——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，按增量口径一并订正。**本桶较上一版 -1**：`set port-mirroring <n> source vnf …`（vNIC 源）此前标 ✅ 但实为下发期拒绝，v3 round3 走查后按实现口径重写并移入 🚫 桶（真机复验待执行）。**本桶 +4**：抓包族改数据面中立命名（`show capture` / `request capture start|stop|export`）新增 4 行，与 3 行兼容别名（`show vpp capture` / `request vpp trace …`）**同一实现**——别名行的历史真机结论适用，新名拼写的真机复跑见各行实测注 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 设计拒绝（网关 ACL 绑定） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |

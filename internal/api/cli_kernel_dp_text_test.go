@@ -121,23 +121,42 @@ func TestCLIShowVppKernelDataplaneHonest(t *testing.T) {
 	}
 }
 
-// 抓包三形态（show vpp capture / request vpp trace start|export）在内核数据面下
-// 不再报「VPP 未接入（编排器未装配）」，而是点名数据面与替代路径。
-func TestCLICaptureKernelDataplaneText(t *testing.T) {
-	x := kernelDPKit(t)
-	for _, line := range []string{
+// 抓包：两种数据面**都有实现**（VPP 走 pcap trace、内核走 tcpdump），故两边的兜底文案
+// 都只剩「装配缺口」一种成因——不再出现「该数据面没有该能力」的错误指向。
+// 新名（show capture / request capture …）与旧名（show vpp capture / request vpp trace …）
+// 是同一实现，文案逐字相同；`request vpp restart` 仍按数据面点名（它是 VPP 专有动作）。
+func TestCLICaptureWiringGapTwoPlanes(t *testing.T) {
+	captureCmd := []string{
+		"show capture",
 		"show vpp capture",
+		"request capture start interface ens192",
 		"request vpp trace start interface ens192",
+		"request capture export",
 		"request vpp trace export",
-		"request vpp restart",
-	} {
+	}
+	// 内核数据面（未装配抓包 Provider）：点明是装配缺口，不谎称「该数据面尚未实现」。
+	x := kernelDPKit(t)
+	for _, line := range captureCmd {
 		got := x.Execute("admin", aaaClassSU, "ssh", line).Output
-		if !strings.Contains(got, "Linux 内核网络") {
-			t.Fatalf("%s 在内核数据面下应点名数据面：%s", line, got)
+		if !strings.Contains(got, "抓包不可用（编排器未装配抓包 Provider）") {
+			t.Fatalf("%s 应如实报装配缺口：%s", line, got)
 		}
-		if strings.Contains(got, "编排器未装配") {
-			t.Fatalf("%s 内核数据面下不得再报「编排器未装配」：%s", line, got)
+		if strings.Contains(got, "尚未实现") || strings.Contains(got, "改回 VPP 数据面") {
+			t.Fatalf("%s 不得再宣称内核数据面没有抓包能力：%s", line, got)
 		}
+	}
+	// VPP 数据面同款（缺省 committed）：同一文案，不按数据面分叉。
+	x2, _ := newCLIKit(t)
+	for _, line := range captureCmd {
+		got := x2.Execute("admin", aaaClassSU, "ssh", line).Output
+		if !strings.Contains(got, "抓包不可用（编排器未装配抓包 Provider）") {
+			t.Fatalf("VPP 数据面下 %s 应报同一装配缺口：%s", line, got)
+		}
+	}
+	// `request vpp restart` 是 VPP 专有动作：内核数据面下仍点名数据面。
+	rst := x.Execute("admin", aaaClassSU, "ssh", "request vpp restart").Output
+	if !strings.Contains(rst, "Linux 内核网络") {
+		t.Fatalf("request vpp restart 在内核数据面下应点名数据面：%s", rst)
 	}
 }
 

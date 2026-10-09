@@ -145,9 +145,9 @@ func TestSecretEgressMatrixClassified(t *testing.T) {
 			probe: func(t *testing.T) string { return restAny(t, "/system/backup/nosuch.json") },
 		},
 		{
-			name: "GET /vpp/capture/{file}（抓包导出）", expected: "exception",
+			name: "GET /capture/{file}（抓包导出；旧名 /vpp/capture/{file} 与它同一 handler）", expected: "exception",
 			reason: "抓包是**数据面明文载荷**的按需导出（操作者自己选的时窗与接口），其中可能含未加密业务凭据；" +
-				"这是抓包本身的用途，产品脱敏会破坏其证据价值。权限 show vpp capture（read-only），导出件在受管目录。",
+				"这是抓包本身的用途，产品脱敏会破坏其证据价值。权限 show capture（read-only），导出件在受管目录。",
 			probe: func(t *testing.T) string { return "" }, // 无抓包运行时，占位（分类由路由守护保证）
 		},
 		{
@@ -305,8 +305,10 @@ var secretEgressRoutes = map[string]string{
 	"/virtual-switches/{name}/mac-table":           "MAC 学习表运行态",
 	"/virtual-switches/{name}/ports":               "端口读视图（#326）：配置/vnf/container/runtime，无秘密字段",
 	"/virtual-switches/{name}/dhcp-leases":         "DHCP 租约表运行态（#359）：客户端 IP/MAC 与租期，网络事实无凭据",
-	"/vpp/capture":                                 "抓包会话/文件清单元数据",
-	"/vpp/capture/{file}":                          "抓包导出（例外：数据面明文载荷，抓包本身的用途）",
+	"/capture":                                     "抓包会话/文件清单元数据",
+	"/capture/{file}":                              "抓包导出（例外：数据面明文载荷，抓包本身的用途）",
+	"/vpp/capture":                                 "抓包会话/文件清单元数据（兼容别名，与 /capture 同一 handler）",
+	"/vpp/capture/{file}":                          "抓包导出（兼容别名；例外同 /capture/{file}）",
 	"/vpp/config":                                  "vpp 配置段视图",
 	"/vpp/status":                                  "VPP 运行态（版本/连接/线程/内存）",
 	"/vrfs":                                        "配置段视图",

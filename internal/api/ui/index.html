@@ -1048,10 +1048,10 @@
       <h2>抓包 <span id="cap-note" class="muted small"></span></h2>
       <div class="cfg-forms">
         <fieldset>
-          <legend>开始抓包（数据面 pcap trace）</legend>
+          <legend>开始抓包（数据面无关：VPP 抓 pcap trace、内核抓 tcpdump）</legend>
           <label for="cap-iface">接口</label>
           <input id="cap-iface" data-write type="text" placeholder="ens192">
-          <label for="cap-count">缓冲深度（包）</label>
+          <label for="cap-count">报文数（VPP：缓冲深度；内核：达到即停）</label>
           <input id="cap-count" data-write type="text" value="1000">
           <div class="cfg-actions">
             <button id="cap-start-btn" data-write type="button">开始抓包</button>
@@ -1061,8 +1061,9 @@
         </fieldset>
       </div>
       <p class="muted small">
-        抓包是<strong>环形缓冲</strong>：超出深度丢最旧；停止并导出后文件落在服务端，可从下面下载。
-        抓包会占用少量数据面开销，用完请停止。
+        抓包与数据面无关：VPP 下是<strong>环形缓冲</strong>（超出深度丢最旧，不会自动停），
+        内核下达到上面填的报文数<strong>自动停止</strong>；停止并导出后文件落在服务端，可从下面下载。
+        只抓数据面设备（管理口与未声明的口会被拒绝）。抓包会占用少量数据面开销，用完请停止。
       </p>
       <p id="cap-msg" class="muted small" hidden></p>
       <div id="cap-active"></div>

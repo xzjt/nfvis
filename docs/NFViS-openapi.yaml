@@ -1551,23 +1551,24 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VxlanTunnelsView" }
-  /vpp/capture:
+  /capture:
     get:
       tags: [system]
       summary: 抓包会话状态与已导出 pcap 清单（单会话；导出文件落 /var/lib/nfvis/captures）
       description: |
-        当前数据面为 Linux 内核网络时抓包尚未实现：返回 501（message 指明数据面与切回
-        VPP 的路径），不是 503——VPP 数据面下的「抓包模块未接入（编排器未装配）」才是 503。
+        抓包与数据面无关（VPP 走 pcap trace、内核走 tcpdump），故端点用这一中立名；
+        `/vpp/capture` 是同一批 handler 的兼容别名。数据面下**都有实现**，只有装配缺口
+        （编排器未装配抓包 Provider）才返回 503。
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CaptureStatus" }
-        "501": { $ref: "#/components/responses/Error501" }
+        "503": { description: 抓包模块未接入（编排器未装配抓包 Provider） }
     post:
       tags: [system]
-      summary: 开始数据面抓包（达到 count 自动停止）
+      summary: 开始数据面抓包（VPP 下缓冲达深度丢最旧；内核下达到 count 自动停止）
       requestBody:
         required: true
         content:
@@ -1576,27 +1577,33 @@ paths:
               type: object
               required: [interface]
               properties:
-                interface: { type: string }
+                interface:
+                  type: string
+                  description: |
+                    抓包接口（数据面设备）：VPP 数据面 = VPP 中的端口；内核数据面 = 产品自持的
+                    虚拟设备（虚拟交换机 bridge / VRF / bond / VXLAN）或配置声明且在内核中的业务口。
+                    不在数据面（含管理口、被 DPDK 接管而未交还的口）一律**如实拒绝**（400）。
                 count:
                   type: integer
                   default: 1000
                   description: |
-                    VPP 抓包缓冲深度（环形，超出丢最旧）。注意：VPP 26.06 的 pcap trace 以
-                    max_packets 作为缓冲深度且无“已抓包计数”接口，故非“达到 count 自动停止”；
-                    需显式 stop/export（契约语义按实测调整，见附录 A #59）。
+                    VPP 数据面：pcap trace 缓冲深度（环形，超出丢最旧；VPP 26.06 无「已抓包计数」
+                    接口，故不自动停止，需显式 stop/export）。内核数据面：tcpdump `-c`，**达到该
+                    报文数即自动停止**（进程退出后状态里的 captured 取 tcpdump 摘要）。
                 filter_acl:
                   type: string
-                  description: "V1 不支持：VPP 26.06 pcap trace 无 ACL 过滤（仅支持按 error），非空返回 400"
+                  description: "不支持：两数据面都不接 ACL/BPF 过滤，非空返回 400"
       responses:
         "202": { description: 已开始 }
         "409": { $ref: "#/components/responses/Error409" }   # 已有会话进行中
-        "501": { $ref: "#/components/responses/Error501" }
+        "503": { description: 抓包模块未接入（编排器未装配抓包 Provider） }
     delete:
       tags: [system]
       summary: 停止抓包（`?export=true` 时同时导出 pcap）
       description: |
         缺省只停止（丢弃缓冲）；`?export=true` 表示**停止并导出**——与 CLI
-        `request vpp trace export` 同义（此前只有 CLI 能导出，REST 侧无法表达，界面因此接不上）。
+        `request capture export` 同义。内核数据面下导出＝把 tcpdump 的工作文件搬入导出目录
+        （同一目录改名），未捕获到报文时如实回「无文件导出」，不返回不存在的文件。
       parameters:
         - name: export
           in: query
@@ -1610,8 +1617,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CaptureFile" }
-        "501": { $ref: "#/components/responses/Error501" }
-  /vpp/capture/{file}:
+        "503": { description: 抓包模块未接入（编排器未装配抓包 Provider） }
+  /capture/{file}:
     parameters: [{ name: file, in: path, required: true, schema: { type: string } }]
     get:
       tags: [system]
@@ -1622,7 +1629,78 @@ paths:
           content:
             application/octet-stream:
               schema: { type: string, format: binary }
-        "501": { $ref: "#/components/responses/Error501" }
+        "503": { description: 抓包模块未接入（编排器未装配抓包 Provider） }
+  /vpp/capture:
+    get:
+      tags: [system]
+      summary: 抓包会话状态与已导出 pcap 清单（**兼容别名**；等价于 GET /capture）
+      description: |
+        旧名保留为兼容别名（既有脚本/集成不破），与 `/capture` 是**同一批 handler**：
+        语义、状态码、导出目录与文件名口径逐字相同。新集成请用 `/capture`。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CaptureStatus" }
+        "503": { description: 抓包模块未接入（编排器未装配抓包 Provider） }
+    post:
+      tags: [system]
+      summary: 开始数据面抓包（**兼容别名**；等价于 POST /capture）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [interface]
+              properties:
+                interface: { type: string }
+                count:
+                  type: integer
+                  default: 1000
+                  description: |
+                    抓包报文数（语义同 `POST /capture`）：VPP 数据面为 pcap trace 缓冲深度
+                    （环形、不自动停止）；内核数据面为 tcpdump `-c`（达到即自动停止）。
+                filter_acl:
+                  type: string
+                  description: "不支持：两数据面都不接 ACL/BPF 过滤，非空返回 400"
+      responses:
+        "202": { description: 已开始 }
+        "409": { $ref: "#/components/responses/Error409" }   # 已有会话进行中
+        "503": { description: 抓包模块未接入（编排器未装配抓包 Provider） }
+    delete:
+      tags: [system]
+      summary: 停止抓包（**兼容别名**；`?export=true` 时同时导出 pcap，等价于 DELETE /capture）
+      description: |
+        旧名保留为兼容别名（与 `/capture` 同一 handler）：缺省只停止（丢弃），`?export=true`
+        表示**停止并导出**——与 CLI `request capture export` 同义。
+      parameters:
+        - name: export
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: true = 停止并导出 pcap 到 /var/lib/nfvis/captures
+      responses:
+        "204": { description: 已停止（未导出） }
+        "200":
+          description: 已停止并导出（返回导出的文件）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CaptureFile" }
+        "503": { description: 抓包模块未接入（编排器未装配抓包 Provider） }
+  /vpp/capture/{file}:
+    parameters: [{ name: file, in: path, required: true, schema: { type: string } }]
+    get:
+      tags: [system]
+      summary: 下载 pcap 文件（**兼容别名**；等价于 GET /capture/{file}）
+      responses:
+        "200":
+          description: application/octet-stream
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "503": { description: 抓包模块未接入（编排器未装配抓包 Provider） }
 
   /bonds:
     parameters:
@@ -2437,7 +2515,7 @@ components:
     Error403: { description: 无权限或账号锁定, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     Error404: { description: 资源不存在, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     Error409: { description: 冲突（引用存在/配额不足/会话锁占用）, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
-    Error501: { description: "该能力在**当前数据面**下未实现（如 Linux 内核网络下的抓包、NAT 会话表、LLDP 邻居、接口清零统计、VPP 重启）；message 说明数据面与替代路径（换数据面或换命令）。与 500 的分工：501 = 这条路在当前数据面不存在，500 = 执行出故障", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Error501: { description: "该能力在**当前数据面**下未实现（如 Linux 内核网络下的 NAT 会话表、LLDP 邻居、接口清零统计、VPP 重启）；message 说明数据面与替代路径（换数据面或换命令）。与 500 的分工：501 = 这条路在当前数据面不存在，500 = 执行出故障", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
   schemas:
     Error:
@@ -2534,9 +2612,11 @@ components:
           description: |
             当前生效的数据面实现（**装配事实**：本进程实际装配的数据面实现，与
             `/vpp/status.dataplane` 同源）。`kernel`（Linux 内核网络）时宿主读数照旧，
-            但数据面类读数（VPP 线程/buffer/内存、抓包、NAT 会话表、LLDP 邻居等）
+            但**VPP 专有**的数据面读数（VPP 线程/buffer/内存、NAT 会话表、LLDP 邻居等）
             整体不适用——客户端据此分流，而不是把 `connected: false` 读成「VPP 该起来
-            却没起来」。读视图以装配事实为准：committed 可能已改而服务未重启。
+            却没起来」。抓包不在此列：两种数据面都有实现（`/capture` 与 CLI `show capture`
+            / `request capture …` 同名同语义，换的是底座：pcap trace / tcpdump）。
+            读视图以装配事实为准：committed 可能已改而服务未重启。
         hostname: { type: string, description: 配置声明的 system.hostname 优先；未声明时回退主机实际主机名（os.Hostname）；两者都取不到时为空串（不编造） }
         uptime_seconds: { type: integer, description: 主机运行时长（/proc/uptime，与 CLI `show system uptime` 同源；非 Linux 取不到时退回守护进程运行时长） }
         config_ready: { type: boolean, description: 配置库可用（已建库且可读 committed） }
@@ -3042,8 +3122,18 @@ components:
           nullable: true
           properties:
             interface: { type: string }
-            captured: { type: integer }
+            captured:
+              type: integer
+              description: |
+                已抓包数。VPP 数据面取不到该读数（26.06 无「已抓包计数」接口）恒为 0；
+                内核数据面在 tcpdump 自行退出（达到 count）后取它的摘要计数，进行中为 0
+                （读数未知，不谎报计数）。
             started_at: { type: string, format: date-time }
+            max_depth:
+              type: integer
+              description: |
+                会话开始时给的 count：VPP 数据面为 pcap trace 缓冲深度（环形、不自动停止）；
+                内核数据面为 tcpdump `-c`（达到即自动停止）。
         files:
           type: array
           items:

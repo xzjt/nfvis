@@ -227,6 +227,13 @@ func TestOperPathsExist(t *testing.T) {
 		{"request", "interfaces", "ens2f0", "disable"},
 		{"request", "sriov", "create-vfs", "ens2f0", "count", "4"},
 		{"request", "vpp", "trace", "start", "interface", "ens2f0", "count", "1000"},
+		// 抓包的数据面中立命名（新名）与兼容别名（旧名）都在树里——两族都必须解析得到
+		{"show", "capture"},
+		{"show", "vpp", "capture"},
+		{"request", "capture", "start", "interface", "ens2f0", "count", "100"},
+		{"request", "capture", "start", "interface", "vs-l2", "filter", "acl1"},
+		{"request", "capture", "stop"},
+		{"request", "capture", "export", "name", "cap1"},
 		{"request", "system", "software", "add", "/tmp/nfvis.deb", "sha256", "ff00"},
 		{"request", "system", "configuration", "backup", "to", "/var/backup"},
 		{"request", "system", "zeroize"},

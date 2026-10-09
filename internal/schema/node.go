@@ -99,25 +99,30 @@ func (c Class) Covers(required Class) bool { return required <= c }
 //     `set interfaces <n>` 的声明位候选：首装（VPP 未接管、配置未声明）也能补全到
 //     内核网卡名（round81 F1）；声明名在「已绑定 + VPP 未起」等生命周期各态里
 //     可能暂时缺席另两份清单，故三源取并。
+//   - DynDataplaneIfnames：**当前数据面可抓包的设备**——抓包与数据面无关（同一命令名、
+//     数据面换实现），候选必须与执行器的设备解析同一判据：VPP 数据面 = VPP 中的端口；
+//     内核数据面 = 产品自持的虚拟设备（bridge/VRF/bond/隧道）∪ 配置声明且此刻在内核里的
+//     业务口。管理口、未声明的内核口都不是候选（执行器会如实拒绝它们）。
 //
 // 此前三者共用一个「已写进配置的接口名」来源：既漏掉未声明的 DPDK 口（内核里没有），
 // 又会列出根本不存在的名字（set 阶段不校验、commit 才失败）。
 const (
-	DynIfnames       = "ifnames"        // 接口清单（VPP ∪ 内核；动作混合节点用）
-	DynVppIfnames    = "vpp-ifnames"    // VPP 接口（= 已被 DPDK 接管的数据面端口）
-	DynKernelIfnames = "kernel-ifnames" // 内核网卡（未被接管的物理口）
-	DynAllIfnames    = "all-ifnames"    // 内核未接管 ∪ 配置已声明 ∪ VPP 运行态（set interfaces 用，决策 #302）
-	DynVSwitches     = "vswitches"      // 虚拟交换机清单
-	DynVrfs          = "vrfs"           // VRF（L3 交换机）清单
-	DynVMs           = "vmnames"        // VM VNF 清单
-	DynContainers    = "ctnames"        // 容器 VNF 清单
-	DynImages        = "images"         // 镜像清单
-	DynClasses       = "classes"        // login class 清单
-	DynRevisions     = "revisions"      // 配置快照编号
-	DynVppPlugins    = "vppplugins"     // VPP 插件名
-	DynAcls          = "acls"           // ACL 清单
-	DynQos           = "qos-policies"   // 限速策略清单
-	DynMetricNames   = "metric-names"   // 历史时序库内的指标名（决策 #356）
+	DynIfnames          = "ifnames"           // 接口清单（VPP ∪ 内核；动作混合节点用）
+	DynVppIfnames       = "vpp-ifnames"       // VPP 接口（= 已被 DPDK 接管的数据面端口）
+	DynKernelIfnames    = "kernel-ifnames"    // 内核网卡（未被接管的物理口）
+	DynAllIfnames       = "all-ifnames"       // 内核未接管 ∪ 配置已声明 ∪ VPP 运行态（set interfaces 用，决策 #302）
+	DynDataplaneIfnames = "dataplane-ifnames" // 当前数据面可抓包的设备（抓包命令用）
+	DynVSwitches        = "vswitches"         // 虚拟交换机清单
+	DynVrfs             = "vrfs"              // VRF（L3 交换机）清单
+	DynVMs              = "vmnames"           // VM VNF 清单
+	DynContainers       = "ctnames"           // 容器 VNF 清单
+	DynImages           = "images"            // 镜像清单
+	DynClasses          = "classes"           // login class 清单
+	DynRevisions        = "revisions"         // 配置快照编号
+	DynVppPlugins       = "vppplugins"        // VPP 插件名
+	DynAcls             = "acls"              // ACL 清单
+	DynQos              = "qos-policies"      // 限速策略清单
+	DynMetricNames      = "metric-names"      // 历史时序库内的指标名（决策 #356）
 )
 
 // PipeKeywords 通用管道关键字（FR-CLI-005，对一切 show 输出可用）。

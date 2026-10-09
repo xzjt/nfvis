@@ -254,6 +254,7 @@ var coverArgGroupParents = map[string]bool{
 	"request sriov create-vfs":    true,
 	"request sriov delete-vfs":    true,
 	"request vpp trace start":     true,
+	"request capture start":       true, // 抓包的数据面中立名（与 request vpp trace start 同一实现）
 	"request system software add": true,
 	// 容器内执行命令（决策 #357）：`exec <command> [timeout <n>]` 同属「必填位置参数 + 可选开关」。
 	// 不登记的话枚举器会把带 `timeout` 的那条形态渲染成**丢掉 `<command>`** 的短形态，覆盖判定必然假红。

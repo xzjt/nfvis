@@ -344,13 +344,13 @@ function ok(name, cond, detail) {
 //   req ：确认后必须发出的那一条请求（取消时则必须一条都没有）。
 const ACTIONS = [
   // —— 低危：单对象、可回退 ——
-  { id: 'cap-start-btn', title: '开始抓包', tier: 'low', cli: /request vpp trace start interface ens192 count 1000/,
-    req: { method: 'POST', url: /\/vpp\/capture$/ },
+  { id: 'cap-start-btn', title: '开始抓包', tier: 'low', cli: /request capture start interface ens192 count 1000/,
+    req: { method: 'POST', url: /\/capture$/ },
     pre: (ctx) => { nodeOf(ctx, 'cap-iface').value = 'ens192'; nodeOf(ctx, 'cap-count').value = '1000'; } },
-  { id: 'cap-stop-btn', title: '停止抓包（丢弃）', tier: 'low', cli: /request vpp trace stop$/,
-    req: { method: 'DELETE', url: /\/vpp\/capture$/ } },
-  { id: 'cap-export-btn', title: '停止并导出 pcap', tier: 'low', cli: /request vpp trace export$/,
-    req: { method: 'DELETE', url: /\/vpp\/capture\?export=true$/ } },
+  { id: 'cap-stop-btn', title: '停止抓包（丢弃）', tier: 'low', cli: /request capture stop$/,
+    req: { method: 'DELETE', url: /\/capture$/ } },
+  { id: 'cap-export-btn', title: '停止并导出 pcap', tier: 'low', cli: /request capture export$/,
+    req: { method: 'DELETE', url: /\/capture\?export=true$/ } },
   { id: 'ops-backup-btn', title: '生成配置备份', tier: 'low', cli: /request system configuration backup$/,
     req: { method: 'POST', url: /\/system\/backup$/ } },
   { id: 'ops-techsupport-btn', title: '生成 tech-support 归档', tier: 'low', cli: /request system tech-support generate$/,

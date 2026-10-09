@@ -49,14 +49,14 @@ run S4 "request interfaces ens224 disable"
 # ---- SR-IOV（环境无 PF/VF：**预期明确报错**，不得静默成功/崩溃）----
 expect_fail S4 "不支持 SR-IOV" "request sriov create-vfs ens224 count 2"
 
-# ---- VPP 抓包 ----
-# 注意时序：export 内部即 Stop(export=true)（见 api.requestVppTrace），
-# 故 export 之后不应再 stop（会正确地报「当前无抓包会话」）。
-run S4 "request vpp trace start interface ens192 count 10"
-run S4 "request vpp trace stop"
-run S4 "request vpp trace start interface ens192 count 10"
-run S4 "request vpp trace export name cli-trace"
-run S4 "show vpp capture"
+# ---- 数据面抓包（新名；旧名 `request vpp trace …` 的兼容用例在阶段 5）----
+# 注意时序：export 内部即 Stop(export=true)，故 export 之后不应再 stop
+# （会正确地报「当前无抓包会话」）。
+run S4 "request capture start interface ens192 count 10"
+run S4 "request capture stop"
+run S4 "request capture start interface ens192 count 10"
+run S4 "request capture export name cli-trace"
+run S4 "show capture"
 
 # ---- 系统运维（非破坏性）----
 run S4 "request system tech-support generate"

@@ -150,6 +150,22 @@ func (r *Runtime) DataplaneIfnames(ctx context.Context, cfg model.Config) ([]str
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
 		return nil, err
 	}
+	managed := managedDeviceNames(cfg)
+	var names []string
+	for _, row := range rows {
+		if row.Ifname != "" && managed[row.Ifname] {
+			names = append(names, row.Ifname)
+		}
+	}
+	return names, nil
+}
+
+// managedDeviceNames 产品按配置**自持**的内核设备名集合（数据面设备）。
+//
+// 判据取配置声明集合而不是设备类型：宿主机上 virbr0/docker0 同样是 bridge，
+// 按类型选会把它们当成产品端口。消费方两处：`DataplaneIfnames`（端口读视图/候选）与
+// 抓包设备解析（`Capture.resolveDevice`——抓包只认数据面设备，管理口因此天然被挡在外面）。
+func managedDeviceNames(cfg model.Config) map[string]bool {
 	managed := map[string]bool{}
 	add := func(n string) { managed[LinkName(n)] = true }
 	for _, vs := range cfg.VirtualSwitches {
@@ -183,13 +199,7 @@ func (r *Runtime) DataplaneIfnames(ctx context.Context, cfg model.Config) ([]str
 	for _, vx := range cfg.VxlanTunnels {
 		add(vx.Name)
 	}
-	var names []string
-	for _, row := range rows {
-		if row.Ifname != "" && managed[row.Ifname] {
-			names = append(names, row.Ifname)
-		}
-	}
-	return names, nil
+	return managed
 }
 
 // IfaceInUse 判定某网口此刻是否正被内核数据面使用（决策 #426②的解绑前守卫）。

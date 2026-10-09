@@ -100,7 +100,7 @@ REST 侧现状（本轮复核）：
 | `show port-mirroring`（1） / `show qos policies`（1） | `GET /port-mirroring` / `GET /qos/policies` |
 | `show dns proxy`（1，v2 决策 #345） | `GET /dns/proxy`（启用态 + 全局上游 + 各域覆盖；与宿主解析器 `set system dns server` 两回事） |
 | `show vpp` / `threads` / `buffers` / `memory`（4） | `GET /vpp/status` |
-| `show vpp capture`（1） | `GET /vpp/capture`（导出文件下载 `GET /vpp/capture/{file}`） |
+| `show capture`（1；`show vpp capture` 为**兼容别名**，同一实现） | `GET /capture`（导出文件下载 `GET /capture/{file}`；`/vpp/capture*` 为兼容别名，同一 handler） |
 | `show bonds`（1） / `show bonds <name> detail`（1） | `GET /bonds` / `GET /bonds/{name}` |
 | `show lldp neighbors [interface <ifname>]`（1） | `GET /protocols/lldp/neighbors`（round80 起按口过滤真的生效） |
 | `show protocols lldp neighbors`（1，**round80 等价写法**：同一读物、同一实现） | 同上 |
@@ -136,7 +136,7 @@ REST 侧现状（本轮复核）：
 | `request interfaces <n> bind-dpdk\|unbind-dpdk`（2） | `PUT /interfaces/{name}/dpdk`（body `bound` 布尔；`confirm=true`） |
 | `request sriov create-vfs\|delete-vfs`（2） | `PUT /interfaces/{name}/sriov`（设 VF 数量即创建 / 回收） |
 | `request vpp restart`（1） | `POST /vpp/restart` |
-| `request vpp trace start\|stop\|export`（3） | `POST /vpp/capture`、`DELETE /vpp/capture`（`export=true` 时同时导出 pcap）、`GET /vpp/capture/{file}` |
+| `request capture start\|stop\|export`（3；`request vpp trace …` 为**兼容别名**，同一实现） | `POST /capture`、`DELETE /capture`（`export=true` 时同时导出 pcap）、`GET /capture/{file}`（`/vpp/capture*` 为兼容别名） |
 | `request system software add\|rollback`（2） | `POST /system/software`、`POST /system/software:rollback` |
 | `request system reboot\|shutdown\|poweroff`（3） | `POST /system:reboot`、`POST /system:shutdown`（契约注明含 poweroff） |
 | `request system kernel apply\|rollback`（2） | `POST /system/kernel:apply\|:rollback` |

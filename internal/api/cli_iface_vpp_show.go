@@ -675,7 +675,7 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 	}
 	// capture 走抓包运行态（M5-3），不依赖 state
 	if sub == "capture" {
-		return x.execShowVppCapture()
+		return x.execShowCapture()
 	}
 	if sub == "" {
 		// `show vpp` 概览的**唯一实现**（曾在此处另有一份 `case ""` 副本——两份渲染
@@ -731,7 +731,7 @@ func (x *cliExecutor) execShowVpp(args []string) string {
 	case "runtime":
 		return x.execShowVppRuntime(ctx, args[1:])
 	case "capture":
-		return x.execShowVppCapture()
+		return x.execShowCapture()
 	}
 	return fmt.Sprintf("%% 无效命令: show vpp %s（可用：threads|buffers|memory|runtime|capture）\n", sub)
 }

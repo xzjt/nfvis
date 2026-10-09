@@ -141,7 +141,9 @@ show vpp buffers                                    # buffer 池（每 NUMA）�
                                                     #   （statsclient | vpp_get_stats，决策 #68），
                                                     #   不可用时打印来源与原因（不静默省略）
 show vpp memory                                     # main-heap 与 hugepage 占用
-show vpp capture                                    # 抓包会话状态与已导出 pcap 清单
+show capture                                        # 抓包会话状态与已导出 pcap 清单（**数据面无关**：
+                                                    #   VPP 走 pcap trace、内核走 tcpdump）
+show vpp capture                                    # **兼容别名**（与 show capture 同一实现）
 
 show bonds                                          # 链路聚合列表（成员口、LACP 状态、聚合口聚合状态）
 show bonds <name> detail                            # 成员口各自 link/LACP actor-partner 信息
@@ -284,10 +286,19 @@ request vpp restart                                 # S；确认。按 committed
                                                     # 随后 recovery 收敛重放网络配置、vhost-user 重连（影响业务转发）
                                                     # nfvisd 启动时会自动确保 VPP 运行（未运行即发起拉起、不阻塞自身启动）并按 committed 配置重放——重启后数据面自动恢复；
                                                     # 但 VNF/容器需在配置里声明 `autostart true` 才会随系统自启，未声明则需手工 request … start
-request vpp trace
-  ├─ start interface <ifname> [count <n>] [filter <acl>]   # 开始数据面抓包（达到报文数自动停止）
-  ├─ stop                                            # 停止抓包
-  └─ export [name <name>]                            # 导出 pcap 到诊断目录，供 API 下载
+request capture                                     # S。抓包与数据面无关，命令名数据面中立：
+  ├─ start interface <ifname> [count <n>] [filter <acl>]   #   开始抓包（VPP 走 pcap trace、内核走 tcpdump）
+  │                                                 #   `count` 语义随数据面：VPP = 环形缓冲深度（不自动停）；
+  │                                                 #   内核 = tcpdump `-c`（达到报文数即自动停止）。
+  │                                                 #   接口限**数据面设备**（VPP 端口 / 内核 bridge、VRF、
+  │                                                 #   bond、VXLAN、已声明且在内核里的业务口）；管理口
+  │                                                 #   与未声明的口如实拒绝。`filter <acl>` 两数据面都不支持。
+  ├─ stop                                            # 停止抓包（不导出；内核侧终止 tcpdump 进程）
+  └─ export [name <name>]                            # 导出 pcap 到诊断目录（隐含 stop），供 API 下载
+request vpp trace                                   # **兼容别名**（与 request capture 同一实现，旧脚本不破）
+  ├─ start interface <ifname> [count <n>] [filter <acl>]
+  ├─ stop
+  └─ export [name <name>]
 request system
   ├─ software add <deb包/URL> [sha256 <hex>]        # S；确认。校验→升级→重启 nfvisd→报告
   ├─ software rollback [to <version>]
@@ -928,9 +939,10 @@ virtual-machine-functions {
 
    | kind | 含义 | 用它的位置 |
    |---|---|---|
-   | `vpp-ifnames` | VPP 中的接口 = **已被 DPDK 接管的数据面端口** | `show interfaces physical <ifname>`、`show interfaces <ifname>`（`physical` 可省的等价写法）、`virtual-switches … l3-interface`、`set vpp dpdk dev <ifname>`、`request vpp trace start interface <ifname>`、`monitor interfaces <ifname>`、`clear interfaces statistics [<ifname>]`、`set protocols lldp interface <ifname>`、`show lldp neighbors interface <ifname>` |
+   | `vpp-ifnames` | VPP 中的接口 = **已被 DPDK 接管的数据面端口** | `show interfaces physical <ifname>`、`show interfaces <ifname>`（`physical` 可省的等价写法）、`virtual-switches … l3-interface`、`set vpp dpdk dev <ifname>`、`request vpp trace start interface <ifname>`（兼容别名）、`monitor interfaces <ifname>`、`clear interfaces statistics [<ifname>]`、`set protocols lldp interface <ifname>`、`show lldp neighbors interface <ifname>` |
    | `kernel-ifnames` | 内核网卡（**未被接管**的物理口；有 `/sys/class/net/<n>/device` 的才算） | `set system management interface <ifname>`、`request interfaces <ifname> bind-dpdk`、`request sriov create-vfs/delete-vfs <ifname>` |
    | `ifnames` | 两者**并集** | `request interfaces <ifname> enable\|disable\|bind-dpdk\|unbind-dpdk`（动作混合、参数位置在动作之前，无法按动作区分来源） |
+   | `dataplane-ifnames` | **当前数据面可抓包的设备**（与抓包实现的设备解析同一判据：VPP 数据面 = VPP 中的端口；内核数据面 = 产品自持的虚拟设备 ∪ 配置声明且此刻在内核里的业务口） | `request capture start interface <ifname>`（抓包只认数据面设备：管理口与未声明的口不在候选里，执行器也会如实拒绝它们） |
    | `all-ifnames` | **内核未接管 ∪ 配置已声明 ∪ VPP 运行态**（决策 #302） | `set interfaces <ifname>`（声明是接管流程的第一步，首装在接管前也能补全到内核网卡名；声明口在「已绑定 + VPP 未起」等生命周期各态都可能暂时缺席其它清单，故三源取并） |
 
    实现：`internal/orchestrator/network/port_inventory.go`（VPP 侧 `sw_interface_dump`、内核侧 sysfs），

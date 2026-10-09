@@ -95,11 +95,11 @@ var uiOpsFamilyControls = map[string]map[string]uiPageControl{
 	},
 	// #/ops/capture 抓包
 	"page-capture": {
-		"cap-iface":      {uiClassHide, "POST /vpp/capture"},   // 抓包接口（S）
-		"cap-count":      {uiClassHide, "POST /vpp/capture"},   // 缓冲深度（S）
-		"cap-start-btn":  {uiClassHide, "POST /vpp/capture"},   // 开始抓包（S）
-		"cap-stop-btn":   {uiClassHide, "DELETE /vpp/capture"}, // 停止（丢弃）（S）
-		"cap-export-btn": {uiClassHide, "DELETE /vpp/capture"}, // 停止并导出 pcap（S）
+		"cap-iface":      {uiClassHide, "POST /capture"},   // 抓包接口（S）
+		"cap-count":      {uiClassHide, "POST /capture"},   // 报文数（S）
+		"cap-start-btn":  {uiClassHide, "POST /capture"},   // 开始抓包（S）
+		"cap-stop-btn":   {uiClassHide, "DELETE /capture"}, // 停止（丢弃）（S）
+		"cap-export-btn": {uiClassHide, "DELETE /capture"}, // 停止并导出 pcap（S）
 	},
 	// #/ops/diagnostics 诊断
 	"page-diagnostics": {

@@ -38,6 +38,9 @@ type Provider struct {
 	storm   *stormManager
 	portSec *portSecManager
 
+	// capture 抓包实现（惰性构造；与 Provider 共用同一个 Runner 与配置来源）。
+	capture *Capture
+
 	// alarms 告警落点（R2-6）：内核数据面此前没有任何告警——恢复未收敛项与物理口链路
 	// 只进 journal，`show alarms`/Web 总览/诊断包/`/events` 全查不到，与 #191/#321/#333
 	// 建立的「未收敛项必须事后可查」纪律冲突。装配期注入，未注入即只返回错误（测试/工具场景）。

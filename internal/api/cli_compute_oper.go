@@ -70,6 +70,10 @@ func (x *cliExecutor) execRequest(user, class, source string, t []string) string
 		return x.requestAlarms(user, t[1:])
 	case "vpp":
 		return x.requestVPP(user, t[1:])
+	case "capture":
+		// 抓包是数据面无关能力（VPP pcap trace / 内核 tcpdump），命令名数据面中立；
+		// 旧写法 `request vpp trace …` 保留为兼容别名（requestVPP 的 trace 分支转发到同一实现）。
+		return x.requestCapture(user, t[1:])
 	case "interfaces":
 		return x.requestInterfaces(user, source, t[1:])
 	case "sriov":
@@ -832,6 +836,9 @@ func (x *cliExecutor) requestAlarms(user string, rest []string) string {
 // ---------- request vpp（M5-3/M5-9） ----------
 
 // requestVPP 分发 `request vpp restart|trace start|stop|export`。
+//
+// `trace` 是抓包族的**旧写法**：抓包与数据面无关（VPP 走 pcap trace、内核走 tcpdump），
+// 命令名因此是数据面中立的 `request capture …`；这里保留转发，既有脚本不破。
 func (x *cliExecutor) requestVPP(user string, t []string) string {
 	if len(t) == 0 {
 		return "%% 语法: request vpp restart | trace start interface <if> [count <n>] | trace stop | trace export\n"
@@ -854,34 +861,34 @@ func (x *cliExecutor) requestVPP(user string, t []string) string {
 		x.audit(user, "vpp.restart", "重启数据面（按 committed 配置，binary API 已连通）", nil)
 		return "已按 committed 配置重启 VPP（binary API 已连通）并触发恢复收敛。\n"
 	case "trace":
-		return x.requestVppTrace(user, t[1:])
+		return x.requestCapture(user, t[1:])
 	}
 	return "%% 语法: request vpp restart | trace start|stop|export\n"
 }
 
-// captureUnavailableText 抓包不可用的**数据面感知**文案：内核数据面下抓包尚未实现
-// （不是「VPP 未接入（编排器未装配）」——那条会把操作者引向查装配，而真实原因是
-// 本数据面没有该能力）；VPP 数据面下才是装配缺口，维持原文案。
-func (x *cliExecutor) captureUnavailableText() string {
-	if x.dpMode() == model.DataPlaneKernel {
-		return "%% 当前数据面为 Linux 内核网络，抓包尚未实现（如需请改回 VPP 数据面并重启服务）\n"
-	}
-	return errRuntimeUnavailable
-}
+// captureWiringGapText 抓包能力**未接入**（编排器未装配 Provider）。
+//
+// 两种数据面都有抓包实现（VPP pcap trace / 内核 tcpdump），故这里只剩装配缺口这一种成因——
+// 不再按数据面分叉，也不给「该数据面没有该能力」的错误指向。
+const captureWiringGapText = "%% 抓包不可用（编排器未装配抓包 Provider）\n"
 
-// requestVppTrace：request vpp trace start interface <if> [count <n>] | stop | export [name <n>]
-func (x *cliExecutor) requestVppTrace(user string, t []string) string {
+// requestCapture `request capture start interface <if> [count <n>] [filter <acl>] | stop | export [name <n>]`。
+//
+// 数据面中立（与 ping/traceroute 的「同一命令名、数据面换实现」同口径）：VPP 数据面走 pcap trace、
+// 内核数据面走 tcpdump，读视图与导出契约相同。`request vpp trace …` 是同一实现的兼容别名
+// （由 requestVPP 的 trace 分支转发进来）。
+func (x *cliExecutor) requestCapture(user string, t []string) string {
+	const syntax = "%% 语法: request capture start interface <if> [count <n>] [filter <acl>] | stop | export [name <n>]\n"
 	if x.capture == nil {
-		return x.captureUnavailableText()
+		return captureWiringGapText
 	}
 	if len(t) == 0 {
-		return "%% 语法: request vpp trace start interface <if> [count <n>] | stop | export [name <n>]\n"
+		return syntax
 	}
 	switch t[0] {
 	case "start":
-		// request vpp trace start interface <if> [count <n>] [filter <acl>]
 		if len(t) < 3 || t[1] != "interface" {
-			return "%% 语法: request vpp trace start interface <if> [count <n>] [filter <acl>]\n"
+			return "%% 语法: request capture start interface <if> [count <n>] [filter <acl>]\n"
 		}
 		ifname, count, acl := t[2], 0, ""
 		for i := 3; i+1 < len(t); i += 2 {
@@ -899,36 +906,48 @@ func (x *cliExecutor) requestVppTrace(user string, t []string) string {
 			}
 		}
 		if err := x.capture.Start(context.Background(), ifname, count, acl); err != nil {
-			x.audit(user, "vpp.capture.start", "开始抓包 "+ifname, err)
+			x.audit(user, "capture.start", "开始抓包 "+ifname, err)
 			return "%% " + err.Error() + "\n"
 		}
-		x.audit(user, "vpp.capture.start", "开始抓包 "+ifname, nil)
-		return fmt.Sprintf("已开始抓包（接口 %s，缓冲深度 %d）。停止/导出：request vpp trace stop|export\n", ifname, count)
+		x.audit(user, "capture.start", "开始抓包 "+ifname, nil)
+		return fmt.Sprintf("已开始抓包（接口 %s，count %s）。停止/导出：request capture stop|export\n",
+			ifname, countNote(x.dpMode(), count))
 	case "stop":
 		if _, err := x.capture.Stop(context.Background(), false); err != nil {
 			return "%% " + err.Error() + "\n"
 		}
-		x.audit(user, "vpp.capture.stop", "停止抓包（不导出）", nil)
+		x.audit(user, "capture.stop", "停止抓包（不导出）", nil)
 		return "已停止抓包（未导出）。\n"
 	case "export":
 		f, err := x.capture.Stop(context.Background(), true)
 		if err != nil {
-			x.audit(user, "vpp.capture.export", "导出 pcap", err)
+			x.audit(user, "capture.export", "导出 pcap", err)
 			return "%% " + err.Error() + "\n"
 		}
-		x.audit(user, "vpp.capture.export", "导出 pcap "+f.Name, nil)
+		x.audit(user, "capture.export", "导出 pcap "+f.Name, nil)
 		if f.Name == "" {
 			return "已停止抓包：未捕获到报文，无文件导出。\n"
 		}
-		return fmt.Sprintf("已导出 pcap: %s（%s）。下载：API GET /vpp/capture/%s\n", f.Name, humanSize(f.SizeBytes), f.Name)
+		return fmt.Sprintf("已导出 pcap: %s（%s）。下载：API GET /capture/%s\n", f.Name, humanSize(f.SizeBytes), f.Name)
 	}
-	return "%% 语法: request vpp trace start interface <if> [count <n>] | stop | export\n"
+	return syntax
 }
 
-// execShowVppCapture：show vpp capture（抓包会话状态 + 已导出 pcap 清单）。
-func (x *cliExecutor) execShowVppCapture() string {
+// countNote 抓包 count 的数据面口径说明：VPP 的 max 是**环形缓冲深度**（不自动停），
+// 内核 tcpdump 的 `-c` 是**达到报文数即停止**——两数据面语义不同，输出如实区分。
+func countNote(dpMode string, count int) string {
+	if dpMode == model.DataPlaneKernel {
+		return fmt.Sprintf("%d（达到该报文数自动停止）", count)
+	}
+	return fmt.Sprintf("%d（环形缓冲深度，超出丢最旧）", count)
+}
+
+// execShowCapture：show capture（抓包会话状态 + 已导出 pcap 清单）。
+//
+// 旧写法 `show vpp capture` 走同一实现（execShowVpp 的 capture 分支）。
+func (x *cliExecutor) execShowCapture() string {
 	if x.capture == nil {
-		return x.captureUnavailableText()
+		return captureWiringGapText
 	}
 	active, files := x.capture.Status()
 	var b strings.Builder

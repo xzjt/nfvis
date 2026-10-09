@@ -63,6 +63,6 @@
     { "path": "#/ops/diagnostics", "title": "诊断", "view": "diagnostics", "breadcrumb": ["运维", "诊断"],
       "endpoints": ["/system/logs", "/system/status"], "poll": 0 },
     { "path": "#/ops/capture", "title": "抓包", "view": "capture", "breadcrumb": ["运维", "抓包"],
-      "endpoints": ["/vpp/capture"], "poll": 0, "write": true }
+      "endpoints": ["/capture"], "poll": 0, "write": true }
   ]
 }

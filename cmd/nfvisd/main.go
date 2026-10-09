@@ -619,25 +619,32 @@ func run() error {
 	}
 	sysOps := system.NewManager(sysCfg, engine, imagesStore, api.VersionStr)
 
-	// M5-3：数据面抓包（VPP pcap trace 经 CLI socket；FR-OPS-042）
+	// M5-3 / v3：数据面抓包（FR-OPS-042）——**两数据面共用同一命令面与契约形状**，
+	// 按数据面选择实现：VPP 走 pcap trace（经 CLI socket），内核走宿主 tcpdump。
 	// 注意：vppctl -s 需 CLI socket（/run/vpp/cli.sock），不是二进制 API socket；
 	// 传空由 vppctl 取缺省（同 diagController 的做法）。
-	// 内核数据面下抓包尚未接入（如实以「未接入」呈现，不静默返回空结果）。
-	var captureProvider *network.CaptureProvider
 	var captureAPI api.CaptureRuntime
-	if l2net != nil {
-		captureProvider = network.NewCaptureProvider(network.NewVppctlShell(""),
-			func(name string) (uint32, bool, error) {
-				c, err := vppMgr.L2ClientFunc()()
-				if err != nil {
-					return 0, false, err
-				}
-				defer c.Close()
-				return c.SwInterfaceIndex(name)
-			}, network.DefaultCaptureDir)
-		// 包装成 API 契约形状；内核数据面下保持 nil（未接入 ⇒ 端点如实回 503），
-		// 而不是把一个内部为 nil 的控制器塞进接口（那样一调用就 panic）。
-		captureAPI = &captureController{p: captureProvider}
+	{
+		var backend captureBackend
+		switch {
+		case l2net != nil:
+			backend = network.NewCaptureProvider(network.NewVppctlShell(""),
+				func(name string) (uint32, bool, error) {
+					c, err := vppMgr.L2ClientFunc()()
+					if err != nil {
+						return 0, false, err
+					}
+					defer c.Close()
+					return c.SwInterfaceIndex(name)
+				}, network.DefaultCaptureDir)
+		case kernelNet != nil:
+			backend = kernelNet.CaptureProvider()
+		}
+		// 两种数据面都应有后端；都没有才是装配缺口（端点如实回 503，而不是把一个内部为 nil
+		// 的控制器塞进接口——那样一调用就 panic）。
+		if backend != nil {
+			captureAPI = &captureController{p: backend}
+		}
 	}
 
 	// M5-7：软件升级/回退、电源、NTP（FR-OPS-001~003）
@@ -1878,8 +1885,25 @@ func journalctlHasNoEntries(out []byte) bool {
 	return bytes.Contains(out, []byte("No entries"))
 }
 
+// captureBackend 抓包后端（按数据面选择：VPP pcap trace 或内核 tcpdump）。
+//
+// 两种实现的方法面与返回类型完全一致（都是 network 包的契约形状 CaptureSession/CaptureFile），
+// 故适配成 api.CaptureRuntime 的方式只有一套（captureController），不按数据面分叉。
+type captureBackend interface {
+	Status() (*network.CaptureSession, []network.CaptureFile)
+	Start(ctx context.Context, ifname string, count int, filterACL string) error
+	Stop(ctx context.Context, export bool) (network.CaptureFile, error)
+	Path(name string) (string, error)
+}
+
+// 编译期断言：两数据面的抓包实现都满足后端方法面（换实现不换调用方）。
+var (
+	_ captureBackend = (*network.CaptureProvider)(nil)
+	_ captureBackend = (*netkernel.Capture)(nil)
+)
+
 // captureController 装配 api.CaptureRuntime（M5-3）。
-type captureController struct{ p *network.CaptureProvider }
+type captureController struct{ p captureBackend }
 
 func (c *captureController) Status() (*api.CaptureSessionRow, []api.CaptureFileRow) {
 	active, files := c.p.Status()

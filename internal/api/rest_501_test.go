@@ -113,26 +113,37 @@ func TestRESTVppFaultsStay500AndUnwired503(t *testing.T) {
 	}
 }
 
-// 抓包：内核数据面下是「尚未实现」（501 + 数据面感知文案），不是「模块未接入」（503）。
-func TestCaptureKernelDataplaneIs501(t *testing.T) {
-	ts := newTestServerOpts(t, Options{VPP: fakeVppCtl{st: VppStatus{Mode: model.DataPlaneKernel}}})
-	token := loginAdmin(t, ts)
-	for _, ep := range []struct{ method, path string }{
-		{http.MethodGet, "/vpp/capture"},
-		{http.MethodPost, "/vpp/capture"},
-		{http.MethodDelete, "/vpp/capture"},
-		{http.MethodGet, "/vpp/capture/x.pcap"},
-	} {
-		var payload any
-		if ep.method == http.MethodPost {
-			payload = map[string]any{"interface": "ens192"}
-		}
-		status, _, body := cfgRequest(t, ep.method, ts.URL+APIPrefix+ep.path, token, payload, nil)
-		if status != http.StatusNotImplemented {
-			t.Fatalf("%s %s 在内核数据面下应 501，得到 %d %s", ep.method, ep.path, status, body)
-		}
-		if !strings.Contains(string(body), "Linux 内核网络") {
-			t.Fatalf("%s %s 文案应点名数据面：%s", ep.method, ep.path, body)
+// 抓包：两种数据面**都有实现**（VPP 走 pcap trace、内核走 tcpdump），故未装配 Provider
+// 只剩「模块未接入」这一种成因——503，且不再按数据面分叉（没有「该数据面没有该能力」的指向）。
+// 新名 `/capture` 与兼容别名 `/vpp/capture` 走同一 handler，两者行为逐字相同。
+func TestCaptureWiringGapIs503Not501(t *testing.T) {
+	for _, mode := range []string{model.DataPlaneVPP, model.DataPlaneKernel} {
+		ts := newTestServerOpts(t, Options{VPP: fakeVppCtl{st: VppStatus{Mode: mode}}})
+		token := loginAdmin(t, ts)
+		for _, ep := range []struct{ method, path string }{
+			{http.MethodGet, "/capture"},
+			{http.MethodPost, "/capture"},
+			{http.MethodDelete, "/capture"},
+			{http.MethodGet, "/capture/x.pcap"},
+			{http.MethodGet, "/vpp/capture"},        // 兼容别名
+			{http.MethodPost, "/vpp/capture"},       // 兼容别名
+			{http.MethodDelete, "/vpp/capture"},     // 兼容别名
+			{http.MethodGet, "/vpp/capture/x.pcap"}, // 兼容别名
+		} {
+			var payload any
+			if ep.method == http.MethodPost {
+				payload = map[string]any{"interface": "ens192"}
+			}
+			status, _, body := cfgRequest(t, ep.method, ts.URL+APIPrefix+ep.path, token, payload, nil)
+			if status != http.StatusServiceUnavailable {
+				t.Fatalf("%s %s（数据面 %s）未装配抓包应 503，得到 %d %s", ep.method, ep.path, mode, status, body)
+			}
+			if !strings.Contains(string(body), "抓包模块未接入") {
+				t.Fatalf("%s %s 应如实报「抓包模块未接入」：%s", ep.method, ep.path, body)
+			}
+			if strings.Contains(string(body), "尚未实现") {
+				t.Fatalf("%s %s 不得再报「尚未实现」（两数据面都有实现）：%s", ep.method, ep.path, body)
+			}
 		}
 	}
 }

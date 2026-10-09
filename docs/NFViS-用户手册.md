@@ -819,7 +819,7 @@ nfvis$ request system kernel apply
 | VNF 虚拟网卡接入 `type l3` 交换机 | 支持（vNIC 可作三层接口） | **尚不支持**（提交期直接拒绝；请接入一台已配网关的 L2 交换机） |
 | MAC 学习上限（`learn-limit`） | 支持（硬性上限：`bridge_domain_set_learn_limit`） | **阈值告警**（内核 bridge 无学习条数上限原语：`bridge fdb` 已学条目 ≥ 阈值即产生 `BRIDGE_FDB_LIMIT_REACHED`，**不强制限制学习**） |
 | cross-connect（直通） | 支持 | **尚不支持**（提交期直接拒绝；请改用 L2 交换机 + 端口） |
-| 抓包（pcap trace） | 支持 | **尚不支持**（相关命令如实报不可用） |
+| 抓包 | 支持（pcap trace） | 支持（`tcpdump`；命令/端点同名同语义，见 §10.4） |
 | IPv6 三层/转发（静态路由 v4+v6） | 支持 | **支持**（转发开关 v4/v6 一并置位并回读；v6 地址/静态路由/ACL 按各自语义下发） |
 | DHCP 中继与服务器 / DNS 代理 / LLDP | 支持 | **尚不支持**（提交期直接拒绝） |
 
@@ -2094,18 +2094,36 @@ nfvis$ clear interfaces statistics ens224     # 清零（super-user）
 > **内核数据面下 `clear interfaces statistics` 不支持**（清零内核接口计数需要重建接口，代价与影响面过大）
 > ——命令会如实拒绝；接口计数仍可在 `show interfaces <口> statistics` 里查看。
 
-### 10.4 抓包（VPP pcap trace）
+### 10.4 抓包（数据面抓包）
+
+抓包命令与数据面无关：VPP 数据面走 pcap trace，内核数据面走 tcpdump（宿主需装 tcpdump）——
+命令名、导出目录与下载路径两面相同。
 
 ```bash
-nfvis$ request vpp trace start interface ens224 count 100     # 达到报文数自动停止
-nfvis$ show vpp capture                                        # 会话状态 + 已导出 pcap 清单
-nfvis$ request vpp trace export name my-capture                # 导出（隐含停止）
-# 下载：GET /api/v1/vpp/capture/<file>
-nfvis$ request vpp trace stop                                  # 停止且不导出
+nfvis$ request capture start interface ens224 count 100      # 开始抓包
+nfvis$ show capture                                          # 会话状态 + 已导出 pcap 清单
+nfvis$ request capture export name my-capture                # 导出（隐含停止）
+# 下载：GET /api/v1/capture/<file>
+nfvis$ request capture stop                                  # 停止且不导出
 ```
 
-> **内核数据面下抓包尚未实现**（上述命令如实报不可用）——需要在 NFViS 里抓包请切回 VPP 数据面；
-> 也可以在上游交换机/对端侧做镜像或抓包。
+> 旧写法 `request vpp trace …` / `show vpp capture` 与旧端点 `/api/v1/vpp/capture` 仍可用
+> （同一实现的兼容别名），新脚本请用上面的写法。
+
+几条口径（两数据面一致的地方与**不同**的地方）：
+
+- **只抓数据面设备**：VPP 数据面是 VPP 里的端口；内核数据面是虚拟交换机（内核 bridge）、
+  L3 交换机、bond、VXLAN 或**已声明且在内核里**的业务口。管理口与未声明的内核口会**被如实拒绝**
+  （不静默换成别的设备）；被 DPDK 接管过、尚未交还内核的口，报错里会给出「先
+  `request interfaces <口> unbind-dpdk`」的照做路径。
+- **同一时刻只允许一个抓包会话**（第二次开始会被拒，提示已有会话的接口）。
+- **`count` 的语义随数据面不同**：VPP 下是**环形缓冲深度**（超出丢最旧，不会自动停，需显式
+  停止/导出）；内核下是 tcpdump 的 `-c`——**达到该报文数即自动停止**。
+- **`filter <acl>` 不支持**（两个数据面都不接 ACL/BPF 过滤），会给明确报错。
+- 导出文件落在 `/var/lib/nfvis/captures`（文件名 `nfvis-cap-<接口>-<UTC>.pcap`），可下载；
+  若一个包也没抓到，「停止并导出」会如实说明**没有文件**，不会给你一个空文件。
+- 状态里的「已抓包数」：内核数据面在 tcpdump 自行停止后给出它的摘要计数，进行中不显示
+  （读数未知）；VPP 数据面取不到该读数，恒为 0。
 
 ### 10.5 日志与审计
 

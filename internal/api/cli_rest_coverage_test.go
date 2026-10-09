@@ -101,7 +101,8 @@ var cliRESTCoverage = map[string]string{
 	"show vpp threads":                                 "GET /vpp/status",
 	"show vpp buffers":                                 "GET /vpp/status",
 	"show vpp memory":                                  "GET /vpp/status",
-	"show vpp capture":                                 "GET /vpp/capture + GET /vpp/capture/{file}",
+	"show capture":                                     "GET /capture + GET /capture/{file}",
+	"show vpp capture":                                 "GET /vpp/capture + GET /vpp/capture/{file}", // 兼容别名（同一 handler）
 	"show bonds":                                       "GET /bonds",
 	"show bonds <name> detail":                         "GET /bonds/{name}",
 	"show lldp neighbors":                              "GET /protocols/lldp/neighbors",
@@ -156,9 +157,12 @@ var cliRESTCoverage = map[string]string{
 	"request sriov create-vfs <ifname> count <n>":             "PUT /interfaces/{name}/sriov",
 	"request sriov delete-vfs <ifname> vf <n>":                "PUT /interfaces/{name}/sriov",
 	"request vpp restart":                                     "POST /vpp/restart",
-	"request vpp trace start":                                 "POST /vpp/capture",
-	"request vpp trace stop":                                  "DELETE /vpp/capture",
-	"request vpp trace export":                                "DELETE /vpp/capture + GET /vpp/capture/{file}",
+	"request capture start interface <ifname> count <n>":      "POST /capture",
+	"request capture stop":                                    "DELETE /capture",
+	"request capture export":                                  "DELETE /capture + GET /capture/{file}",
+	"request vpp trace start":                                 "POST /vpp/capture",                             // 兼容别名
+	"request vpp trace stop":                                  "DELETE /vpp/capture",                           // 兼容别名
+	"request vpp trace export":                                "DELETE /vpp/capture + GET /vpp/capture/{file}", // 兼容别名
 	"request system software add":                             "POST /system/software",
 	"request system software rollback":                        "POST /system/software:rollback",
 	"request system reboot":                                   "POST /system:reboot",

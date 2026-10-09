@@ -65,6 +65,10 @@ var contractCLICommands = []string{
 	"request system api token revoke 0b8fd6a2-1c67-4f83-9b3e-2b6f5e7ad910",
 	"request system ssh host-key regenerate",
 	"request alarms clear all", "request vpp restart", "request vpp trace stop",
+	// 抓包的数据面中立命名（新名）与兼容别名（旧名）——两者同一实现、都不得落回通用 fallback
+	"show capture", "request capture start interface ens224 count 100",
+	"request capture stop", "request capture export",
+	"show vpp capture", "request vpp trace export",
 	// §1.3 其余
 	"ping 192.0.2.1", "traceroute 192.0.2.1", "monitor interfaces ens224", "monitor vnf vm1",
 	"clear interfaces statistics", "help", "help show", "start shell",

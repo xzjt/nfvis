@@ -365,11 +365,16 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	// 决策 #305：重置数据分区（恢复出厂数据状态，保留管理面可达）。与 zeroize 同权限档（S）。
 	mux.Handle("POST "+APIPrefix+"/system:format-data", cfgAPI(s.handleFormatData))
 
-	// M5-3：数据面抓包（FR-OPS-042）
-	mux.Handle("GET "+APIPrefix+"/vpp/capture", s.auth(s.handleGetCapture, schema.ClassReadOnly, "show vpp capture"))
+	// 数据面抓包（FR-OPS-042）：抓包与数据面无关，端点用中立的新名 `/capture`；
+	// `/vpp/capture` 保留为兼容别名（同一批 handler，语义/状态码/导出目录逐字相同）。
+	mux.Handle("GET "+APIPrefix+"/capture", s.auth(s.handleGetCapture, schema.ClassReadOnly, "show capture"))
+	mux.Handle("POST "+APIPrefix+"/capture", cfgAPI(s.handlePostCapture))
+	mux.Handle("DELETE "+APIPrefix+"/capture", cfgAPI(s.handleDeleteCapture))
+	mux.Handle("GET "+APIPrefix+"/capture/{file}", s.auth(s.handleDownloadCapture, schema.ClassReadOnly, "show capture"))
+	mux.Handle("GET "+APIPrefix+"/vpp/capture", s.auth(s.handleGetCapture, schema.ClassReadOnly, "show capture"))
 	mux.Handle("POST "+APIPrefix+"/vpp/capture", cfgAPI(s.handlePostCapture))
 	mux.Handle("DELETE "+APIPrefix+"/vpp/capture", cfgAPI(s.handleDeleteCapture))
-	mux.Handle("GET "+APIPrefix+"/vpp/capture/{file}", s.auth(s.handleDownloadCapture, schema.ClassReadOnly, "show vpp capture"))
+	mux.Handle("GET "+APIPrefix+"/vpp/capture/{file}", s.auth(s.handleDownloadCapture, schema.ClassReadOnly, "show capture"))
 
 	// M5-8：TLS 证书（FR-SYS-011）
 	mux.Handle("GET "+APIPrefix+"/system/tls", s.auth(s.handleGetTLS, schema.ClassReadOnly, "show system"))

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/aaa"
+	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/schema"
 )
 
@@ -108,6 +109,26 @@ func (s *Server) dynamicValues(kind string) []string {
 		// 并集：`request interfaces <n> enable|bind-dpdk|unbind-dpdk` 的动作混合，
 		// 参数位置在动作之前、无法按动作区分来源，故两侧都给（决策 #83）。
 		return s.allIfnames()
+	case schema.DynDataplaneIfnames:
+		// 抓包接口候选＝**当前数据面可抓的设备**（与执行器的设备解析同一判据，候选里不出现
+		// 会被拒的名字）：VPP 数据面 = VPP 中的端口；内核数据面 = 产品自持的虚拟设备
+		// （bridge/VRF/bond/隧道，即 VPPIfnames 的内核等价物）∪ 配置声明且此刻在内核里的业务口
+		// （已交 DPDK 的口内核里没有它，不作为候选——执行器会给出「先解绑」的照做路径）。
+		out := s.vppIfnames()
+		if s.dataPlaneMode() == model.DataPlaneKernel {
+			live := map[string]bool{}
+			for _, n := range s.kernelIfnames() {
+				live[n] = true
+			}
+			if cfg, err := s.engine.Committed(); err == nil {
+				for _, ifc := range cfg.Interfaces {
+					if live[ifc.Name] {
+						out = append(out, ifc.Name)
+					}
+				}
+			}
+		}
+		return dedupeStrings(out)
 	case schema.DynMetricNames:
 		// 决策 #356：`show system metrics history name <metric>` 的候选＝历史库内已知指标名。
 		// 库未启用/打不开时返回 nil（补全优雅降级，不报错）；取列表失败同样如实回空。

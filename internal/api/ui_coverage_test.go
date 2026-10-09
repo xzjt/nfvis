@@ -30,12 +30,16 @@ import (
 // 但**都只是入口**——守卫（管理口守卫、会话锁、口令策略、引用计数）仍在服务端实现处。
 var uiNotWired = map[string]string{
 	// —— by design：非界面读物 ——
-	"/metrics":        "Prometheus 文本格式，界面改读 /system/status 的同源字段",
-	"/openapi.json":   "契约自查用，界面不消费",
-	"/ui":             "302 到 /ui/，由浏览器自行跟随",
-	"/ui/":            "页面本体",
-	"/cli/execute":    "x-internal：CLI 执行通道，界面只走类型化端点",
-	"/cli/candidates": "x-internal：补全候选，界面用表单替代",
+	"/metrics":      "Prometheus 文本格式，界面改读 /system/status 的同源字段",
+	"/openapi.json": "契约自查用，界面不消费",
+	"/ui":           "302 到 /ui/，由浏览器自行跟随",
+	"/ui/":          "页面本体",
+	"/cli/execute":  "x-internal：CLI 执行通道，界面只走类型化端点",
+	// 抓包端点的**兼容别名**：界面已改走中立新名 /capture（同一批 handler），
+	// 旧名保留给既有脚本/集成，界面不再消费。
+	"/vpp/capture":        "兼容别名：与 /capture 同一 handler（界面走 /capture）",
+	"/vpp/capture/{file}": "兼容别名：与 /capture/{file} 同一 handler（界面走 /capture/{file}）",
+	"/cli/candidates":     "x-internal：补全候选，界面用表单替代",
 }
 
 // uiUsedPaths 从**前端源码**提取路径字面量：api('/x')、fetch(API + '/x')。
@@ -137,7 +141,7 @@ var uiDynamicWired = map[string]string{
 	"/virtual-machine-functions/{name}/snapshots/{snapshot}":          "vmSnapAct()：DELETE …/snapshots/{snapshot}",
 	"/virtual-machine-functions/{name}/snapshots/{snapshot}:rollback": "vmSnapAct()：POST …:rollback",
 	"/virtual-machine-functions/{name}/console/ws":                    "同上的 WebSocket：new WebSocket(… + res.ws_url)（ws_url 由该端点返回）",
-	"/vpp/capture/{file}":                                             "renderCapture()：downloadFile('/vpp/capture/' + name, …)",
+	"/capture/{file}":                                                 "renderCapture()：downloadFile('/capture/' + name, …)",
 	"/system/backup/{file}":                                           "renderArchives()：downloadFile('/system/backup/' + name, …)",
 	"/system/tech-support/{file}":                                     "renderArchives()：downloadFile('/system/tech-support/' + name, …)",
 	"/configuration/rollback/{n}":                                     "cfghTakeCandidate()：POST '/configuration/rollback/' + n（提交历史页的两段式回滚第一步，偏移由 Rev 相减算出）",

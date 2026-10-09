@@ -10,6 +10,8 @@ func testDyn(kind string) []string {
 	switch kind {
 	case DynIfnames:
 		return []string{"ens2f0", "ens2f1"}
+	case DynDataplaneIfnames:
+		return []string{"ens2f0", "vs-l2"}
 	case DynVSwitches:
 		return []string{"vs-app", "vs-underlay"}
 	case DynVrfs:

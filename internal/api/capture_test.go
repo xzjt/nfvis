@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,8 @@ type fakeCapture struct {
 	last     string
 	stopped  bool
 	exported bool
+	// pathFn 覆盖 Path 解析（缺省只认 .pcap 后缀、返回不存在的 /tmp 路径）。
+	pathFn func(name string) (string, error)
 }
 
 func (f *fakeCapture) Status() (*CaptureSessionRow, []CaptureFileRow) { return f.active, f.files }
@@ -44,6 +48,9 @@ func (f *fakeCapture) Stop(_ context.Context, export bool) (CaptureFileRow, erro
 	return row, nil
 }
 func (f *fakeCapture) Path(name string) (string, error) {
+	if f.pathFn != nil {
+		return f.pathFn(name)
+	}
 	if !strings.HasSuffix(name, ".pcap") {
 		return "", network.ErrCaptureNotFound
 	}
@@ -222,5 +229,166 @@ func TestCLISoftwarePowerNTP(t *testing.T) {
 	out = run(t, x, "admin", "super-user", "ssh", "request system ntp sync")
 	if !strings.Contains(out, "NTP 同步已触发") || !fs.ntp {
 		t.Fatalf("ntp sync: %s", out)
+	}
+}
+
+// ---------- 抓包：数据面中立命名 + 兼容别名（新名/旧名同一实现） ----------
+
+// CLI：新名 `show capture` / `request capture start|stop|export` 与旧名
+// `show vpp capture` / `request vpp trace …` 是**同一实现**——输出逐字相同（别名不破）。
+func TestCLICaptureNamesAndAliases(t *testing.T) {
+	fc := &fakeCapture{}
+	x, _ := newCLIKit(t)
+	x.setCapture(fc)
+
+	// 旧名 start，新名看状态：两队名字指的是同一次会话
+	out := run(t, x, "admin", "super-user", "ssh", "request vpp trace start interface ens2f0 count 100")
+	if !strings.Contains(out, "已开始抓包") || fc.last != "ens2f0" {
+		t.Fatalf("旧名 start: %s", out)
+	}
+	oldShow := run(t, x, "admin", "super-user", "ssh", "show vpp capture")
+	newShow := run(t, x, "admin", "super-user", "ssh", "show capture")
+	if !strings.Contains(newShow, "capturing: interface ens2f0") || newShow != oldShow {
+		t.Fatalf("show capture 应与 show vpp capture 逐字一致：\n新名 %s\n旧名 %s", newShow, oldShow)
+	}
+	// 新名 export（旧名 stop 等价路径）
+	out = run(t, x, "admin", "super-user", "ssh", "request capture export")
+	if !strings.Contains(out, "已导出 pcap") || !fc.exported {
+		t.Fatalf("新名 export: %s", out)
+	}
+	if !strings.Contains(out, "GET /capture/") || strings.Contains(out, "/vpp/capture/") {
+		t.Fatalf("导出提示应指向中立端点 /capture：%s", out)
+	}
+	// 新名 stop
+	run(t, x, "admin", "super-user", "ssh", "request capture start interface ens2f0")
+	out = run(t, x, "admin", "super-user", "ssh", "request capture stop")
+	if !strings.Contains(out, "已停止抓包") || fc.exported {
+		t.Fatalf("新名 stop: %s", out)
+	}
+	// 参数错误与未知参数两支都要在（两族名字同一解析）
+	if got := x.Execute("admin", "super-user", "ssh", "request capture start"); !strings.Contains(got.Output, "语法") {
+		t.Fatalf("新名缺参数应报语法: %s", got.Output)
+	}
+	if got := x.Execute("admin", "super-user", "ssh", "request capture start interface ens2f0 nope x"); !strings.Contains(got.Output, "未知参数") {
+		t.Fatalf("新名未知参数应报错: %s", got.Output)
+	}
+	if got := x.Execute("admin", "super-user", "ssh", "request vpp trace start interface ens2f0 nope x"); !strings.Contains(got.Output, "未知参数") {
+		t.Fatalf("旧名未知参数应报错: %s", got.Output)
+	}
+}
+
+// REST：新名 `/capture` 与兼容别名 `/vpp/capture` 走同一 handler（状态/开始/停止/下载四态逐字相同）。
+func TestCaptureEndpointsBothPaths(t *testing.T) {
+	fc := &fakeCapture{}
+	ts := newTestServerOpts(t, Options{Capture: fc})
+	token := loginAdmin(t, ts)
+
+	paths := []string{"/capture", "/vpp/capture"}
+	for _, p := range paths {
+		if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+p, token,
+			map[string]any{"interface": "ens2f0", "count": 100},
+			map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusAccepted {
+			t.Fatalf("POST %s 开始抓包: %d %s", p, status, data)
+		}
+	}
+
+	// 状态：两条路径读到同一次会话
+	bodies := map[string]string{}
+	for _, p := range paths {
+		status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+p, token, nil, nil)
+		if status != http.StatusOK || !strings.Contains(string(data), `"interface":"ens2f0"`) {
+			t.Fatalf("GET %s 抓包状态: %d %s", p, status, data)
+		}
+		bodies[p] = string(data)
+	}
+	if bodies["/capture"] != bodies["/vpp/capture"] {
+		t.Fatalf("两条路径的状态响应应逐字相同：\n/capture %s\n/vpp/capture %s", bodies["/capture"], bodies["/vpp/capture"])
+	}
+
+	// 冲突与校验错误在两族路径上同码
+	fc.startErr = network.ErrCaptureActive
+	for _, p := range paths {
+		if status, _, _ := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+p, token,
+			map[string]any{"interface": "ens2f0"}, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusConflict {
+			t.Fatalf("POST %s 活动会话应 409，实际 %d", p, status)
+		}
+	}
+	fc.startErr = network.ErrCaptureFilterUnsupported
+	for _, p := range paths {
+		if status, _, _ := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+p, token,
+			map[string]any{"interface": "ens2f0", "filter_acl": "a1"}, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusBadRequest {
+			t.Fatalf("POST %s filter_acl 应 400，实际 %d", p, status)
+		}
+	}
+	fc.startErr = nil
+
+	// 停止并导出：两条路径都能导出（各自先起一次会话），且下载路径两条都通
+	for _, p := range paths {
+		if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+p, token,
+			map[string]any{"interface": "ens2f0", "count": 10},
+			map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusAccepted {
+			t.Fatalf("POST %s 起会话: %d %s", p, status, data)
+		}
+		status, _, data := cfgRequest(t, http.MethodDelete, ts.URL+APIPrefix+p+"?export=true", token, nil,
+			map[string]string{"X-NFVIS-Auto-Commit": "true"})
+		if status != http.StatusOK || !strings.Contains(string(data), `"exported":true`) {
+			t.Fatalf("DELETE %s?export=true: %d %s", p, status, data)
+		}
+	}
+	// 无会话再停 → 409（两条路径同码）
+	for _, p := range paths {
+		if status, _, _ := cfgRequest(t, http.MethodDelete, ts.URL+APIPrefix+p, token, nil,
+			map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusConflict {
+			t.Fatalf("DELETE %s 无会话应 409，实际 %d", p, status)
+		}
+	}
+	// 下载：两条路径都到同一个 handler——渲染真实导出件（临时目录里造一个 .pcap）
+	pcapPath := filepath.Join(t.TempDir(), "x.pcap")
+	if err := os.WriteFile(pcapPath, []byte("pcap-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fc.pathFn = func(name string) (string, error) {
+		if name != "x.pcap" {
+			return "", network.ErrCaptureNotFound
+		}
+		return pcapPath, nil
+	}
+	for _, p := range []string{"/capture/x.pcap", "/vpp/capture/x.pcap"} {
+		status, headers, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+p, token, nil, nil)
+		if status != http.StatusOK || string(data) != "pcap-bytes" {
+			t.Fatalf("GET %s 应下载导出件：%d %s", p, status, data)
+		}
+		if ct := headers.Get("Content-Type"); !strings.Contains(ct, "octet-stream") {
+			t.Fatalf("GET %s Content-Type 应为 octet-stream：%s", p, ct)
+		}
+	}
+	for _, p := range []string{"/capture/x.txt", "/vpp/capture/x.txt"} {
+		if status, _, _ := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+p, token, nil, nil); status != http.StatusNotFound {
+			t.Fatalf("GET %s 非导出件应 404，实际 %d", p, status)
+		}
+	}
+}
+
+// 抓包接口候选：只列**当前数据面可抓的设备**（新名命令的候选来源 dataplane-ifnames），
+// 不是「VPP ∪ 内核」的并集——否则会把管理口列进候选、敲下去才被拒。
+func TestCaptureInterfaceCandidates(t *testing.T) {
+	ts := newTestServerOpts(t, Options{Ports: fakePorts{
+		vpp:    []string{"ens192", "vs-l2"},
+		kernel: []string{"ens160", "ens192"}, // ens160 是管理口（不在数据面）
+	}})
+	token := loginAdmin(t, ts)
+
+	toks := cliCandidateTokens(t, ts, token, "request,capture,start,interface")
+	if !hasTok(toks, "ens192") || !hasTok(toks, "vs-l2") {
+		t.Fatalf("抓包接口候选应含数据面设备：%v", toks)
+	}
+	if hasTok(toks, "ens160") {
+		t.Fatalf("管理口（内核有、数据面没有）不应出现在抓包候选里：%v", toks)
+	}
+
+	// 旧名（兼容别名）仍用 VPP 端口候选（与旧契约一致，不因新名而改）
+	oldToks := cliCandidateTokens(t, ts, token, "request,vpp,trace,start,interface")
+	if !hasTok(oldToks, "ens192") {
+		t.Fatalf("旧名抓包接口候选应含 VPP 端口：%v", oldToks)
 	}
 }

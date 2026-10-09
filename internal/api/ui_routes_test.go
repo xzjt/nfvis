@@ -186,7 +186,7 @@ func TestUIConsoleRoleGating(t *testing.T) {
 		"#/system/tls":    "证书上传/重签",
 		"#/system/kernel": "内核基线写入/回退",
 		"#/ops/actions":   "运维动作（备份/升级/恢复/重启/关机/恢复出厂）",
-		"#/ops/capture":   "抓包（request vpp trace 为 super-user 级）",
+		"#/ops/capture":   "抓包（request capture 为 super-user 级）",
 	}
 	got := map[string]bool{}
 	for _, r := range routes {

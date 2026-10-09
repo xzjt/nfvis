@@ -136,8 +136,11 @@ func OperRoot() *Node {
 				),
 				K("buffers", "buffer 池（每 NUMA）使用量"),
 				K("memory", "main-heap 与 hugepage 占用"),
-				K("capture", "抓包会话状态与已导出 pcap 清单"),
+				K("capture", "抓包会话状态与已导出 pcap 清单（兼容别名；等价于 show capture）"),
 			),
+			// 抓包与数据面无关（VPP 走 pcap trace、内核走 tcpdump），故读视图挂在顶层
+			// `show capture`（命令名数据面中立）；`show vpp capture` 是同一实现的兼容别名。
+			K("capture", "抓包会话状态与已导出 pcap 清单"),
 			K("bonds", "链路聚合列表",
 				P("<name>", "bond 名", "",
 					K("detail", "成员口各自 link/LACP actor-partner 信息"),
@@ -301,7 +304,7 @@ func OperRoot() *Node {
 			),
 			Su(K("vpp", "VPP 数据面操作",
 				K("restart", "按 committed 配置重建数据面并恢复收敛"),
-				K("trace", "数据面抓包",
+				K("trace", "数据面抓包（兼容别名；等价于 request capture）",
 					K("start", "开始抓包",
 						K("interface", "抓包接口", P("<ifname>", "接口名", DynVppIfnames)),
 						Opt(K("count", "达到报文数自动停止", PT("<n>", "uint", "报文数"))),
@@ -310,6 +313,17 @@ func OperRoot() *Node {
 					K("stop", "停止抓包"),
 					K("export", "导出 pcap 到诊断目录", Opt(K("name", "文件名", PT("<name>", "name", "名称")))),
 				),
+			)),
+			// 数据面中立命名（VPP 走 pcap trace、内核走 tcpdump；与 ping/traceroute 的
+			// 「同一命令名、数据面换实现」同口径）。S 档：写数据面运行态、占用少量转发开销。
+			Su(K("capture", "数据面抓包（VPP 走 pcap trace、内核走 tcpdump）",
+				K("start", "开始抓包",
+					K("interface", "抓包接口", P("<ifname>", "接口名", DynDataplaneIfnames)),
+					Opt(K("count", "达到报文数自动停止", PT("<n>", "uint", "报文数"))),
+					Opt(K("filter", "ACL 过滤", P("<acl>", "ACL 名", DynAcls))),
+				),
+				K("stop", "停止抓包（不导出）"),
+				K("export", "导出 pcap 到诊断目录（隐含 stop）", Opt(K("name", "文件名", PT("<name>", "name", "名称")))),
 			)),
 			K("system", "系统操作",
 				// 决策 #146：kernel apply/rollback 会改写 GRUB 启动参数（需重启生效）——命令树契约

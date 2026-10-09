@@ -15,6 +15,7 @@
 show interfaces physical <ifname> statistics	等价写法	与 `show interfaces <ifname> statistics` 同一实现（决策 #155），后者已在阶段 5 执行
 show interfaces physical <ifname> sriov	等价写法	与 `show interfaces <ifname> sriov` 同一实现（决策 #155），后者已在阶段 5 执行
 show | display set	等价写法	管道形态；反推与回放自校验由 cli-semantic-check.sh 的 S7 覆盖（阶段 6 的 `show` 与 `| display json` 覆盖同族其它管道）
+request vpp trace export [name <n>]	等价写法	抓包族的**兼容别名**（新名 `request capture export [name <n>]` 已在阶段 4/5 执行，同一实现）；别名本身还由 `request vpp trace start` / `stop` 两条真机用例（阶段 5）与 internal/api 的单测（新名/旧名同断言）覆盖，不再重复跑一次导出
 # —— 环境受限（真机现场不具备条件，报错即正确行为）——
 request sriov delete-vfs <ifname> vf <n>	环境受限	本机无 PF/VF；`request sriov create-vfs` 已在阶段 4 以 expect_fail 覆盖同族守卫
 set interfaces <ifname> sriov vf-count <n>	环境受限	同上（无 PF/VF，commit 必被正确拒绝）
