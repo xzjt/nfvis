@@ -726,6 +726,9 @@ else
 import json, sys
 try:
     cfg = json.load(sys.stdin)
+    # GET /configuration 把配置放在顶层 "configuration" 键下（外层还有 revision）；兼容「已解包」
+    # 的旧形状——取不到就按顶层用（此前只看顶层 ⇒ S11 恒报「没有 relay 配置」、本项永不可判定）。
+    cfg = cfg.get("configuration", cfg) if isinstance(cfg, dict) else {}
 except Exception:
     sys.exit(0)
 for vs in (cfg.get("virtual_switches") or []):
@@ -754,10 +757,16 @@ for vs in (cfg.get("virtual_switches") or []):
       [ -n "$vsn" ] || continue
       echo "    对象: $vsn  server=$srv  src=$src"
       rv=$(curl_api "$SRV/api/v1/virtual-switches/$vsn" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
-      if printf '%s' "$rv" | grep -q '"dhcp_relay" *"server" *: *"[^"]*'$srv'"'; then
+      # 读视图里 relay 是**嵌套对象** `"dhcp_relay":{"server":"…"}`（不是扁平的 "dhcp_relay" "server"）；
+      # 用 python 按路径取值，免得再被 JSON 形状变化坑（此前按扁平正则匹配 ⇒ 恒判「缺 server」）。
+      got_srv=$(printf '%s' "$rv" | python3 -c 'import json,sys
+try: v=json.load(sys.stdin)
+except Exception: print(""); sys.exit(0)
+print((v.get("dhcp_relay") or {}).get("server",""))')
+      if [ "$got_srv" = "$srv" ]; then
         ok "S11 $vsn 产品读视图带 dhcp_relay.server=$srv"
       else
-        bad "S11 $vsn 产品读视图缺 dhcp_relay.server（或值非 $srv）：$(printf '%s' "$rv" | head -c 160)"
+        bad "S11 $vsn 产品读视图缺 dhcp_relay.server（或值非 $srv，实为「$got_srv」）：$(printf '%s' "$rv" | head -c 160)"
       fi
       if printf '%s
 ' "$vpp_proxy" | grep -q "$src" &&
@@ -783,8 +792,14 @@ fi
 # 的整数（CRLF 行尾先剥）。⚠️ binapi v0.13.0 的 bridge_domain_details 没有 learn_limit 字段，
 # 故这条 vppctl oracle 是「产品真下发到数据面」的**唯一独立事实源**。
 vpp_bd_learn_limit() { # <BD-ID> → vppctl 报告的 MAC 学习上限（取不到回空 ⇒ 判不可判定）
-  vppctl show bridge-domain "$1" detail 2>/dev/null | tr -d '\r' \
-    | awk 'tolower($0) ~ /learn.?li/ {for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) {print $i; exit}}'
+  # ⚠️ 不能用「含 learn 字样的行里找数字」——表头行有 "Learn-li" 却没有数字、数据行有数字却没有
+  # "learn" 字样（两者不同行），旧实现因此**恒取不到**。正确做法：按表头定位 "Learn-li" 列号，
+  # 再取该 BD-ID 数据行的该列（列表视图 `show bridge-domain` 即带这一列）。
+  local col
+  col=$(vppctl show bridge-domain 2>/dev/null | tr -d '\r' \
+    | awk 'NR==1 {for (i = 1; i <= NF; i++) if ($i == "Learn-li") {print i; exit}}')
+  [ -n "$col" ] || return 0
+  vppctl show bridge-domain 2>/dev/null | tr -d '\r' | awk -v bd="$1" -v c="$col" '$1 == bd {print $c; exit}'
 }
 hdr "S12 MAC 学习上限：产品读视图 learn_limit ↔ vppctl show bridge-domain detail 的 Learn-li"
 ll_cfg=$(curl_api "$SRV/api/v1/configuration" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
@@ -797,6 +812,8 @@ else
 import json, sys
 try:
     cfg = json.load(sys.stdin)
+    # 同 S11：配置在顶层 "configuration" 键下（此前只看顶层 ⇒ S12 恒报「没有 learn-limit 配置」）。
+    cfg = cfg.get("configuration", cfg) if isinstance(cfg, dict) else {}
 except Exception:
     sys.exit(0)
 for vs in (cfg.get("virtual_switches") or []):

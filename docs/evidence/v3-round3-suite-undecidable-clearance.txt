@@ -1,0 +1,61 @@
+================================================================================
+v3 线 · 语义/生命周期套件「不可判定清零」复跑（含 3 处套件缺陷修复）
+日期：2026-10-09
+主机：nfvis-vm（装发布件 3.0.6；vpp 数据面）
+套件脚本：工作树 contrib/scripts/*.sh 同步到 VM /root/src/contrib/scripts/
+原始日志：VM /root/min-fulltest.log、min-semantic3.log、min-lifecycle3.log、rel-pty.log
+================================================================================
+
+§1 结果（造现场后复跑）
+--------------------------------------------------------------------------------
+  cli-fulltest       通过 273 / 失败 0 / 预期报错 20   （不变；「预期报错」为设计内，非不可判定）
+  cli-semantic-check 通过  31 / 失败 0 / 不可判定 0     （基线 23/0/6 → 6 项全部转可判定并通过）
+  cli-lifecycle-check 通过 23 / 失败 0 / 跳过 2         （基线 21/0/3 → L3-1/L3-2 转可判定）
+  cli-pty-smoke      通过  10 / 失败 0                  （不变）
+
+  ⇒ 语义「不可判定」6 → 0；生命周期「跳过」3 → 2（余下 2 项均与 NAT 有关，原因见 §4）。
+
+§2 造的现场（各套件要求）
+--------------------------------------------------------------------------------
+  · cli-semantic-fixture.sh up（FIXTURE_IMAGE=debian12.qcow2）：sem-vs（L2 + BVI 192.168.99.1/24）、
+    sem-vm（debian12 云镜像，vNIC nic0 挂 sem-vs，1G 大页）、sem-ct（alpine:3.20）。
+    guest cloud-init 持续 ping 网关 ⇒ 成员口 vh-sem-vm-nic0 真的收帧、l2fib 学到 guest MAC ⇒ S8 可判定；
+    libvirt/Docker 各一对象 ⇒ S9 可判定。
+  · S11：set virtual-switches sem-vs dhcp-relay server 192.168.99.10
+        （oracle `vppctl show dhcp proxy` 同一行含 src=192.168.99.1 与 server）。
+  · S12：set virtual-switches sem-vs learn-limit 1000（oracle VPP `Learn-li`）。
+  · S13：set system dns proxy server 223.5.5.5（oracle VPP punt 注册 /run/vpp/nfvis-dns.sock）。
+  · 生命周期 L3-1/L3-2：同一夹具的 VNF vNIC（vh-sem-vm-nic0 在 sem-vs 的 BD 里；BVI ping guest 通）。
+
+§3 顺带修掉 3 处套件缺陷（S11/S12 此前**永不可判定**——产品侧无问题，是套件解析/断言写错）
+--------------------------------------------------------------------------------
+  ① S11/S12 读配置用了 `cfg.get("virtual_switches")`（顶层），而 `GET /api/v1/configuration`
+     把配置放在顶层 `configuration` 键下（外层还有 revision）⇒ 恒取不到 ⇒ 恒报「没有 relay /
+     learn-limit 配置」。修法：先解包 `cfg = cfg.get("configuration", cfg)`（兼容已解包旧形状）。
+  ② S11 的读视图断言用**扁平**正则 `"dhcp_relay" *"server"`，而读视图实际是**嵌套**
+     `{"dhcp_relay":{"server":"…"}}` ⇒ 恒判「缺 server」。修法：用 python 按路径取值后比较。
+  ③ S12 的 oracle 用「含 learn 字样的行里找数字」——但**表头行**有 "Learn-li" 却没有数字、
+     **数据行**有数字却没有 "learn" 字样（两者不同行）⇒ 恒取不到。修法：按表头定位 "Learn-li"
+     列号，再取该 BD-ID 数据行的该列（列表视图 `show bridge-domain` 即带该列）。
+  —— 三处修复后 S11/S12 均可判定并通过（§1）。**产品侧未改**，改动仅在 contrib/scripts/cli-semantic-check.sh。
+
+§4 仍未可判定（如实登记）
+--------------------------------------------------------------------------------
+  · 生命周期 **L3-3（NAT 会话对账）**：需现场有 NAT 会话（inside 主机发包产生），而本机两个业务口
+    要留给套件的「自由口」检查（L1-1/L1-2/L1-3/L2），NAT 的 inside/outside 又都必须是某 L3 交换机
+    的 l3-interface ⇒ **把 NAT 放物理口会把 L1-*/L2 从「可判定」变「跳过」**（实测 5/0/5，净负）；
+    放 vNIC 则需再加一台 1G 大页 VNF（当前 1G 池 2 页、空闲 1，加不下）。故本轮**不造 NAT 现场**。
+  · 生命周期 **L2-2（NAT 重放）**：同因（需 NAT 配置，其接口会占掉自由口）。
+
+§5 观察项（如实登记，非本轮修复范围）
+--------------------------------------------------------------------------------
+  · 一次异常中断的 lifecycle 复跑（现场被上一轮挂起的请求污染）曾让 nfvisd 卡在
+    `config.Engine.Committed`——SIGQUIT 全栈实证：handleLogin → aaa.Service.Login →
+    config.Engine.Committed 阻塞；期间 `/login` 无响应（未认证路由仍回 401）。SIGQUIT 触发
+    进程退出 + systemd 拉起后恢复。**干净重跑未复现**（23/0/2、零超时）。登记为观察项，未定位根因。
+
+§6 环境（收尾）
+--------------------------------------------------------------------------------
+  · 夹具已拆（sem-vs/sem-vm/sem-ct 全清）、dns-proxy 现场已清；无残留对象；服务 active；
+    告警仅剩既有 HUGEPAGE_POOL_ORPHAN。1G 池 2 页 / 空闲 1。
+  · 套件脚本改动：contrib/scripts/cli-semantic-check.sh（§3 三处）。
