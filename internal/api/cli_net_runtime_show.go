@@ -83,6 +83,7 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 	// （ports/statistics 已在函数入口转给端口读视图，决策 #326。）
 	*bd = x.withoutInternalPorts(*bd) // 决策 #359：内置 DHCP tap 不进用户端口视图
 	m := bdView(*bd)
+	learnLimit := 0
 	if cfg, err := x.engine.Committed(); err == nil {
 		for _, vs := range cfg.VirtualSwitches {
 			if vs.Name == name {
@@ -101,17 +102,37 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 				// 决策 #337：声明了 MAC 学习上限才显示（与 REST 详情的 learn_limit 同源、同形状）
 				if vs.LearnLimit != 0 {
 					m["learn_limit"] = vs.LearnLimit
+					learnLimit = vs.LearnLimit
 				}
 			}
 		}
 	}
+	// 已学条数（运行态，取自该交换机 bridge 的 fdb；取不到时省略该字段——不编造 0）。
+	count, countOK := 0, false
 	if x.l2 != nil {
 		if rows, err := x.l2.MACTable(context.Background(), name); err == nil {
-			m["mac_table_entries"] = len(rows)
+			count, countOK = len(rows), true
+			m["mac_table_entries"] = count
 		}
+	}
+	// 决策 #435：内核数据面下 learn-limit 是阈值告警、非强制上限（内核 bridge 没有学习条数上限
+	// 原语）。如实给出「已学条数 / 声明上限」并注明口径，避免操作者误以为已限速。VPP 侧不加该
+	// 注记（VPP 是硬性上限，读视图行为逐字不变）。
+	if learnLimit > 0 && x.dpMode() == model.DataPlaneKernel {
+		m["learn_limit_note"] = kernelLearnLimitNote(learnLimit, count, countOK)
 	}
 	x.structured = m
 	return RenderConfigJSON(m) + "\n"
+}
+
+// kernelLearnLimitNote 内核数据面下 learn-limit 的读视图注记（决策 #435）：如实给出「已学条数 /
+// 声明上限」，并注明这是**阈值告警、非强制上限**；计数取不到时如实说不可读（不编造 0）。
+// CLI 与 REST 详情共用同一措辞（三面同源）。
+func kernelLearnLimitNote(limit, count int, countOK bool) string {
+	if !countOK {
+		return fmt.Sprintf("内核数据面下为阈值告警、非强制上限：已学条数不可读（内核数据面计数取不到）；声明上限 %d", limit)
+	}
+	return fmt.Sprintf("内核数据面下为阈值告警、非强制上限：已学 %d 条 / 声明上限 %d（≥ 上限时产生 BRIDGE_FDB_LIMIT_REACHED 告警）", count, limit)
 }
 
 // bdView BD 运行态的对外形态（structured 快照与 detail 渲染共用）。

@@ -39,12 +39,31 @@ type RouteRow struct {
 }
 
 // fdbRow `bridge -j fdb show` 的一行。
+//
+// ⚠️ 键名随 iproute2 版本变化（真机实测）：成员口键**旧版是 `dev`、新版是 `ifname`**；
+// permanent/self 这类状态**旧版在 `flags` 数组、新版是 `state` 字符串**。只认旧键会让
+// **整张 MAC 表恒为空**（真机：`bridge -j fdb` 出 21 行，按旧键解析后 0 行）。两套都收。
 type fdbRow struct {
 	MAC    string   `json:"mac"`
 	Dev    string   `json:"dev"`
+	Ifname string   `json:"ifname"`
 	VLAN   int      `json:"vlan"`
 	Master string   `json:"master"`
 	Flags  []string `json:"flags"`
+	State  string   `json:"state"`
+}
+
+// devName 成员口名（兼容 dev / ifname 两个键）。
+func (r fdbRow) devName() string {
+	if r.Dev != "" {
+		return r.Dev
+	}
+	return r.Ifname
+}
+
+// isSelf 该条目是否为 bridge 自身（self）：旧版在 flags、新版在 state。
+func (r fdbRow) isSelf() bool {
+	return hasFlag(r.Flags, "self") || strings.EqualFold(r.State, "self")
 }
 
 // MACTable 返回一台 L2 交换机（内核 bridge）的 MAC 表。
@@ -60,13 +79,14 @@ func (r *Runtime) MACTable(ctx context.Context, swName string) ([]MACTableRow, e
 	}
 	res := make([]MACTableRow, 0, len(rows))
 	for _, row := range rows {
-		if row.MAC == "" || row.Dev == "" || row.Dev == br {
+		dev := row.devName()
+		if row.MAC == "" || dev == "" || dev == br {
 			continue // 跳过 bridge 自身条目（非学习到的成员口表项）
 		}
-		if hasFlag(row.Flags, "self") {
+		if row.isSelf() {
 			continue
 		}
-		res = append(res, MACTableRow{MAC: row.MAC, Port: row.Dev, VLAN: row.VLAN})
+		res = append(res, MACTableRow{MAC: row.MAC, Port: dev, VLAN: row.VLAN})
 	}
 	return res, nil
 }

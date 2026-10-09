@@ -341,8 +341,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-switches <n> dhcp-server domain-name <name>` | 下发给客户端的域名（option 15，可省） | 同上 | ✅ **真机四维验证（round141，同上）** |
 | `delete virtual-switches <n> dhcp-server [pool \| lease-time \| dns \| domain-name]` | 逐叶子撤销；**pool 的删除＝停用**（清池 + 回收内置 tap/punt/租约），与裸 delete 等价 | 同上 | ✅ **真机四维验证（round141，同上）** |
 | `show virtual-switches <n> dhcp-leases` | DHCP 租约表（IP/MAC/状态 offered\|active\|declined/到期；未配置 dhcp-server 时如实报「未配置」） | nfvisd 租约表（`GET /virtual-switches/{n}/dhcp-leases` 同源） | ✅ **真机四维验证（round141，同上）** |
-| `set virtual-switches <n> learn-limit <n>` | MAC 学习条数上限（仅 L2；环路/广播风暴缓解，**非阻断**；1-16777216，超限拒绝） | VPP `bridge_domain_set_learn_limit` | ✅（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
-| `delete virtual-switches <n> learn-limit` | 清 MAC 学习上限（恢复 VPP 默认 16777216，幂等） | VPP `bridge_domain_set_learn_limit` | ✅（round115：learn-limit 下发/回默认与读视图三面已真机验证，见 `docs/evidence/v2-round115-*.txt`） |
+| `set virtual-switches <n> learn-limit <n>` | MAC 学习条数上限（仅 L2；环路/广播风暴缓解，**非阻断**；1-16777216，超限拒绝）。**内核数据面**下为**阈值告警**（内核 bridge 没有「学习条数上限」原语）：`bridge fdb` 已学条目 ≥ 阈值时产生 `BRIDGE_FDB_LIMIT_REACHED`（warning），**不强制限制学习**；读视图如实注明「阈值告警、非强制上限」 | VPP `bridge_domain_set_learn_limit`；内核数据面＝fdb 计数 + 阈值告警（决策 #435） | ✅（VPP 侧 round115：下发/回默认与读视图三面真机验证，见 `docs/evidence/v2-round115-*.txt`；内核侧决策 #435） |
+| `delete virtual-switches <n> learn-limit` | 清 MAC 学习上限（VPP 恢复默认 16777216、幂等；内核数据面下停止 fdb 阈值巡检并自动消解告警） | VPP `bridge_domain_set_learn_limit`；内核数据面＝fdb 计数 + 阈值告警（决策 #435） | ✅（VPP 侧 round115：见 `docs/evidence/v2-round115-*.txt`；内核侧决策 #435） |
 | `set virtual-switches <n> dns proxy server <ip> [secondary <ip>]` | 数据面 DNS 代理——**按域上游**（决策 #345）：只对该交换机转发域（L2＝BVI；L3＝其 l3-interface）的入向查询生效；本域非空优先，否则回落全局；两者皆空则回 SERVFAIL | nfvisd punt socket + 宿主解析 | ✅（round124：能力前提与端到端数据面实证，见 `docs/evidence/v2-round124-*.txt`） |
 | `delete virtual-switches <n> dns proxy server [<ip> \| secondary <ip>]` | 撤销本域上游（不带取值即清空本域；回落全局） | nfvisd punt socket | ✅（round124：见 `docs/evidence/v2-round124-*.txt`） |
 | `set virtual-switches <n> ports <seq> interface <if> [trunk vlans <l>\|native <v>]` | 物理口成员（`<seq>` 为必填端口序号） | VPP BD | ✅ |

@@ -4680,7 +4680,7 @@ function renderSwitchDetail(vs, ports, params) {
   });
   rt.forEach((p) => { if (p && p.port != null && !seen[p.port]) rows.push({ label: p.port, source: 'runtime', rt: p }); });
   $('vsd-name').textContent = name;
-  fill($('vsd-head'), ok ? [
+  const vsdHead = [
     ['类型', vs.type],
     ['成员端口', rows.length],
     ['数据面 BD', st ? st.bd_id : undefined],
@@ -4688,7 +4688,11 @@ function renderSwitchDetail(vs, ports, params) {
     ['DHCP 中继', vs.dhcp_relay && vs.dhcp_relay.server ? vs.dhcp_relay.server : undefined],
     // 决策 #337：MAC 学习上限（读视图 learn_limit；未配置如实「—」，不编造）
     ['学习上限', vs.learn_limit !== undefined && vs.learn_limit !== 0 ? vs.learn_limit : undefined],
-  ] : [['读取失败', vs ? vs.__err : notFoundText(name, '虚拟交换机')]]);
+  ];
+  // 决策 #435：内核数据面下 learn-limit 为阈值告警、非强制上限（读视图 learn_limit_note；
+  // VPP 下无该字段——VPP 是硬性上限）。仅在服务端给出该字段时渲染一行，不编造。
+  if (vs.learn_limit_note) vsdHead.push(['学习上限说明', vs.learn_limit_note]);
+  fill($('vsd-head'), ok ? vsdHead : [['读取失败', vs ? vs.__err : notFoundText(name, '虚拟交换机')]]);
   table($('vsd-port-table').querySelector('tbody'), 6, rows.map((r) => {
     const q = r.rt || {};
     return [

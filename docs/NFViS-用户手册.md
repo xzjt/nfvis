@@ -817,7 +817,7 @@ nfvis$ request system kernel apply
 | 静态路由多下一跳（ECMP） | 支持（等权多路径） | **尚不支持**（提交期直接拒绝；内核数据面请拆成多条单跳路由） |
 | NAT 跨转发域（inside 与出接口不在同一转发域） | 支持（按 inside 转发域作用） | **尚不支持**（提交期直接拒绝；请改为同一转发域） |
 | VNF 虚拟网卡接入 `type l3` 交换机 | 支持（vNIC 可作三层接口） | **尚不支持**（提交期直接拒绝；请接入一台已配网关的 L2 交换机） |
-| MAC 学习上限（`learn-limit`） | 支持 | **尚不支持**（提交期直接拒绝） |
+| MAC 学习上限（`learn-limit`） | 支持（硬性上限：`bridge_domain_set_learn_limit`） | **阈值告警**（内核 bridge 无学习条数上限原语：`bridge fdb` 已学条目 ≥ 阈值即产生 `BRIDGE_FDB_LIMIT_REACHED`，**不强制限制学习**） |
 | cross-connect（直通） | 支持 | **尚不支持**（提交期直接拒绝；请改用 L2 交换机 + 端口） |
 | 抓包（pcap trace） | 支持 | **尚不支持**（相关命令如实报不可用） |
 | IPv6 三层/转发（静态路由 v4+v6） | 支持 | **支持**（转发开关 v4/v6 一并置位并回读；v6 地址/静态路由/ACL 按各自语义下发） |
@@ -1624,10 +1624,13 @@ nfvis# delete virtual-switches vs-dmz learn-limit    # 清除：恢复 VPP 默�
 读视图：`show virtual-switches vs-dmz detail` 的「学习上限」行、REST `GET /virtual-switches/vs-dmz`
 的 `learn_limit` 字段、Web 控制台交换机详情页同字段（未配置时都省略/显示「—」，不编造）。
 
-> **内核数据面下的边界**：`learn-limit` 尚未实现（提交期直接拒绝——内核 bridge 没有学习条数上限
-> 原语）；同时**本节「检测」在内核数据面下不运行**（其判据依赖 VPP 数据面的 MAC 学习表/分类表事实，
-> 内核侧无对应物——产品如实不报，而不是假装已在检测）。需要环路防护请切回 VPP 数据面使用，
-> 或在上游做端口/ACL 侧收紧。
+> **内核数据面下的语义（务必知悉）**：内核 bridge **没有**「学习条数上限」原语，故 `learn-limit`
+> 在内核数据面下实现为**阈值告警**——平台每 15 秒对声明了 `learn-limit` 的 L2 交换机
+> 数一次 `bridge fdb` 已学条目数，**≥ 阈值**时产生告警 `BRIDGE_FDB_LIMIT_REACHED`（warning），
+> **不强制限制学习**（不会因为越限就丢弃/停止学习），也不伪造「已限速」。读视图如实给出「已学条数 /
+> 声明上限」并注明这一口径；条目回落到阈值以下、或声明/对象删除即**自动消解**。需要硬性上限请切回
+> VPP 数据面。同时**本节「检测」在内核数据面下不运行**（其判据依赖 VPP 数据面的 MAC 学习表/分类表
+> 事实，内核侧无对应物——产品如实不报，而不是假装已在检测）。
 
 **检测（采样式告警）**：平台每 60 秒对每个 L2 交换机读一次 MAC 学习表，与上一轮快照比较：
 
@@ -2156,6 +2159,7 @@ nfvis$ request alarms clear all
 > | `DHCP_POOL_EXHAUSTED` | warning | 该交换机内置 DHCP 服务器的**租约池耗尽**——无可用地址可应答新的 DISCOVER。来源=交换机名。处置：`show virtual-switches <n> dhcp-leases` 看在租明细，等租约到期/客户端释放，或扩大池（`set dhcp-server pool <start> <end>` 重新提交）；有地址释放（含租约到期）即自动消解 |
 > | `CONTAINER_RESTART_LOOP` | warning | 容器**反复重启**：Docker 状态停在 `restarting`，而重启次数在两次巡检之间还在增长、累计已 ≥3 次。状态读数按既有口径把 `restarting` 并入 `running`，所以这条告警是「容器起不来」的可见入口（来源=容器名）。处置：`show container-functions <名>` 看 `restart-count`，`request container-functions <名> log` 与宿主 `docker inspect <名>` 看崩溃原因——多为命令/参数/镜像配置写错，修正后需**删除重建**才对既有容器生效（`request container-functions <名> delete --yes` → 重新声明 → `start`）。容器不再重启（`restarting` 结束）或对象从配置删除后**自动消解** |
 > | `SYSTEM_BASELINE_APPLY_FAILED` | warning | **系统基线（主机名 / 时区 / NTP / DNS）有一项或多项没能落到宿主**——如 `hostnamectl` / `timedatectl` 失败、chrony 重载失败、systemd-resolved 重启失败。控制台显示的是配置值，宿主实况可能仍是旧值；不阻断提交与启动。文案**逐项**给出项名、原因与自查命令（`hostnamectl hostname`、`timedatectl`、`chronyc sources`、`resolvectl status`）。处置：按文案排查修正后**再次提交**（或重启 nfvis 触发复核）即重新应用；**应用成功、或对应声明被删空后自动消解**，跨 nfvisd 重启按重试结果重建 |
+> | `BRIDGE_FDB_LIMIT_REACHED` | warning | **仅内核数据面**：某 L2 交换机的 MAC 学习表已学条目数**达到/超过**声明的 `learn-limit`（来源=交换机名）。内核 bridge 没有「学习条数上限」原语，该上限在内核侧实现为**阈值告警、非强制上限**——**不强制限制学习**，只是提醒学习表已到量。处置：`show virtual-switches <n> detail` 看「学习上限说明」行的已学/上限（自查 `bridge fdb show br <交换机名>`）；条目回落到阈值以下、或删除 `learn-limit` 声明即**自动消解** |
 >
 > 上面四条残渣告警的文案都会注明「由启动/巡检对账按数据面事实重建、原始提交不可回溯」——是哪次提交失败、是否被 NAT 引用，数据面看不出来，产品**不编造**。
 

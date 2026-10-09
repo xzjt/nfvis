@@ -440,9 +440,9 @@ func (v *validator) checkKernelDataPlane(c Config) {
 		if len(vs.DNSProxyServers) > 0 {
 			v.errf(path+".dns_proxy_servers", "当前数据面为 Linux 内核网络，数据面 DNS 代理尚未实现%s", alt)
 		}
-		if vs.LearnLimit > 0 {
-			v.errf(path+".learn_limit", "当前数据面为 Linux 内核网络，MAC 学习条数上限尚未实现%s", alt)
-		}
+		// learn-limit 在内核数据面下**不拒绝**（决策 #435）：内核 bridge 没有「学习条数上限」原语，
+		// 产品把它实现为「fdb 计数 + 阈值告警」（BRIDGE_FDB_LIMIT_REACHED），读视图如实注明
+		// 「阈值告警、非强制上限」。故这里不再拒绝（取值域校验仍在通用段，两数据面共用）。
 		// 网关/端口 ACL 绑定与数据面无关地一律拒绝（VPP 26.06 不评估 BVI 域内流量，
 		// 内核侧沿用同一口径以保持"同一份配置、同一语义"）：唯一可用的绑定点是三层接口。
 		if vs.Gateway != nil && (vs.Gateway.AclIn != "" || vs.Gateway.AclOut != "") {

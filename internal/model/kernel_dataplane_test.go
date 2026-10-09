@@ -65,9 +65,6 @@ func TestKernelDataPlaneRejectsUnimplementedFamilies(t *testing.T) {
 		"DNS 代理": func(c *Config) {
 			c.VirtualSwitches = []VirtualSwitch{{Name: "vs", Type: "l2", DNSProxyServers: []string{"8.8.8.8"}}}
 		},
-		"学习上限": func(c *Config) {
-			c.VirtualSwitches = []VirtualSwitch{{Name: "vs", Type: "l2", LearnLimit: 100}}
-		},
 		"网关 ACL": func(c *Config) {
 			c.VirtualSwitches = []VirtualSwitch{{Name: "vs", Type: "l2",
 				Gateway: &VSGateway{Addresses: []string{"10.0.0.1/24"}, AclIn: "acl"}}}
@@ -104,6 +101,27 @@ func TestKernelDataPlaneRejectsUnimplementedFamilies(t *testing.T) {
 		if errs := Validate(c); len(errs) == 0 {
 			t.Fatalf("%s：内核数据面下应提交期拒绝", name)
 		}
+	}
+}
+
+// 决策 #435：内核数据面下 learn-limit **不再**提交期拒绝——内核 bridge 没有「学习条数上限」
+// 原语，产品把它实现为「fdb 计数 + 阈值告警」（BRIDGE_FDB_LIMIT_REACHED），读视图如实注明
+// 「阈值告警、非强制上限」。红-绿：把 validate.go 的内核侧拒绝加回来，本用例即失败。
+func TestKernelDataPlaneAcceptsLearnLimit(t *testing.T) {
+	ok := Config{
+		System:          &SystemConfig{DataPlane: DataPlaneKernel},
+		VirtualSwitches: []VirtualSwitch{{Name: "vs-ll", Type: "l2", LearnLimit: 100}},
+	}
+	if errs := Validate(ok); len(errs) != 0 {
+		t.Fatalf("内核数据面下 learn-limit 应被接受，得到：\n%s", errText(errs))
+	}
+	// 取值域校验两数据面共用：越界仍拒绝（保留 VPP 侧 1-16777216 的通用校验）。
+	bad := Config{
+		System:          &SystemConfig{DataPlane: DataPlaneKernel},
+		VirtualSwitches: []VirtualSwitch{{Name: "vs-ll", Type: "l2", LearnLimit: 16777217}},
+	}
+	if errs := Validate(bad); len(errs) == 0 {
+		t.Fatalf("越界 learn-limit 应被拒绝")
 	}
 }
 

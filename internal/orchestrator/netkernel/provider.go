@@ -60,12 +60,21 @@ const (
 	alarmScopeRecovery   = "recovery"
 	alarmScopeIfaceLink  = "interface-link"
 	alarmScopeForwarding = "forwarding"
+	// alarmScopeLearnLimit 内核数据面 learn-limit 的阈值告警作用域（决策 #435）。独立 scope：
+	// 它由 fdb 计数巡检（CheckLearnLimits）按阈值对账，与恢复收敛（Sync）/接口链路/转发前置
+	// 的作用域各自收敛——混用会让别的巡检误消本告警（Sync 只收敛自己作用域）。
+	alarmScopeLearnLimit = "learn-limit"
 
 	// AlarmForwardPolicyDrop 宿主 FORWARD 链策略为 DROP（R2-2）：同 hook 的 base chain 相互独立，
 	// 本产品自建链的 accept **不能**豁免它，内核数据面下数据面设备之间的转发会被整体丢掉。
 	AlarmForwardPolicyDrop = "FORWARD_POLICY_DROP"
 	// forwardPolicySource 该告警的固定 source（它描述的是宿主策略本身，不随某个对象变化）。
 	forwardPolicySource = "host-forward-policy"
+	// AlarmBridgeFdbLimitReached 内核数据面下 L2 交换机的 MAC 学习表条目数已达/超过声明的
+	// learn-limit 阈值（决策 #435）。内核 bridge 没有「学习条数上限」原语，产品把它实现为
+	// **阈值告警**（不强制限制学习、也不伪造「已限速」）；计数回落到阈值以下、或声明/对象消失
+	// 即自动消解。source = 交换机名。
+	AlarmBridgeFdbLimitReached = "BRIDGE_FDB_LIMIT_REACHED"
 )
 
 // SetAlarms 注入告警表（恢复收敛未收敛项、物理口链路、转发前置条件的落点；可空）。

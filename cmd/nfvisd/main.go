@@ -892,6 +892,17 @@ func run() error {
 					log.Warn("风暴抑制巡检未收敛项", "err", e)
 				}
 			}},
+			// 决策 #435：内核数据面 learn-limit 的 fdb 阈值巡检（内核 bridge 无学习条数上限原语，
+			// 产品实现为「计数 ≥ 阈值建 BRIDGE_FDB_LIMIT_REACHED、回落即消解」）。VPP 数据面由
+			// VPP 硬性上限承担、无此告警——kernelNet 为 nil 时空操作（不动 VPP 侧行为）。
+			{"learn-limit-fdb", func(ctx context.Context, cfg model.Config) {
+				if kernelNet == nil {
+					return
+				}
+				for _, e := range kernelNet.CheckLearnLimits(ctx, cfg) {
+					log.Warn("MAC 学习上限阈值巡检", "err", e)
+				}
+			}},
 		}
 		for {
 			select {

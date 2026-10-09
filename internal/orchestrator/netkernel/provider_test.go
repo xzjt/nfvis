@@ -794,6 +794,30 @@ func TestMACTableParsesKernelFdb(t *testing.T) {
 	}
 }
 
+// 决策 #435 顺带修复：iproute2 新版的 `bridge -j fdb` 用 `ifname`（成员口）与 `state`
+// （permanent/self），**旧版才是 `dev`/`flags`**——只认旧键会让**整张 MAC 表恒为空**
+// （真机实测：`bridge -j fdb` 出 21 行，按旧键解析后 0 行，`show … mac-table` 恒「表为空」）。
+// 本用例钉住新形状（红-绿：把解析改回只认 `dev`/`flags` ⇒ 本用例得 0 条而失败）。
+func TestMACTableParsesKernelFdbNewShape(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "bridge -j fdb show br vs-lan",
+		out: `[{"mac":"00:50:56:c0:00:08","ifname":"ens192","flags":[],"master":"vs-lan","state":""},
+		       {"mac":"00:0c:29:a9:61:8e","ifname":"ens192","vlan":1,"flags":[],"master":"vs-lan","state":"permanent"},
+		       {"mac":"33:33:00:00:00:01","ifname":"ens192","flags":[],"master":"vs-lan","state":"self"}]`,
+	}}}
+	rt := NewRuntime(f)
+	rows, err := rt.MACTable(context.Background(), "vs-lan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("新形状应解析出 2 条（bridge 自身条目与 state=self 条目被过滤）：%+v", rows)
+	}
+	if rows[0].MAC != "00:50:56:c0:00:08" || rows[0].Port != "ens192" {
+		t.Fatalf("新形状成员口应取 ifname=ens192：%+v", rows[0])
+	}
+}
+
 func TestRoutesReadsVRFTable(t *testing.T) {
 	f := &fakeRunner{replies: []fakeReply{{
 		prefix: "ip -j route show table ",

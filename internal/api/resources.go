@@ -413,6 +413,8 @@ func (s *Server) handleGetVSwitch(w http.ResponseWriter, r *http.Request) {
 	for _, vs := range cfg.VirtualSwitches {
 		if vs.Name == name {
 			view := vswitchView(vs, s.dhcpActiveLeasesOf)
+			// 决策 #435：内核数据面下 learn-limit 的读视图注记（与 CLI 详情同源、同措辞）。
+			s.annotateLearnLimit(r.Context(), view, vs, name)
 			// 契约 VirtualSwitch.statistics：运行态可用且该交换机在数据面时附带（FR-NET-016）
 			if st, ok := s.vswitchStatistics(r.Context(), name); ok {
 				view["statistics"] = st
@@ -424,6 +426,23 @@ func (s *Server) handleGetVSwitch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeError(w, http.StatusNotFound, "NOT_FOUND", "虚拟交换机 "+name+" 不存在", nil)
+}
+
+// annotateLearnLimit 内核数据面下给交换机详情加 learn-limit 读视图注记（决策 #435，与 CLI 详情
+// **同源同措辞**）：如实给出「已学条数 / 声明上限」并注明「阈值告警、非强制上限」（内核 bridge
+// 没有学习条数上限原语）。VPP 侧不加该注记（VPP 是硬性上限，读视图行为逐字不变）。未声明
+// learn-limit 时也不加（不编造）。
+func (s *Server) annotateLearnLimit(ctx context.Context, view map[string]any, vs model.VirtualSwitch, name string) {
+	if vs.LearnLimit <= 0 || s.dataPlaneMode() != model.DataPlaneKernel {
+		return
+	}
+	count, ok := 0, false
+	if s.l2 != nil {
+		if rows, err := s.l2.MACTable(ctx, name); err == nil {
+			count, ok = len(rows), true
+		}
+	}
+	view["learn_limit_note"] = kernelLearnLimitNote(vs.LearnLimit, count, ok)
 }
 
 // vswitchStatistics 取该交换机在 VPP 中的成员口收发计数，与 CLI

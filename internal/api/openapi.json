@@ -3219,6 +3219,10 @@
             "description": "仅 L2：MAC 学习条数上限（决策 #337）。读视图与配置库**同一键、同值**（不像 dhcp_relay\n那样换形状）；下发 VPP `bridge_domain_set_learn_limit`，是环路/广播风暴的**缓解**手段\n（只告警不阻断，非 STP）。取值 1-16777216（超出拒绝）。未配置时省略（VPP 默认不设限）。\n",
             "type": "integer"
           },
+          "learn_limit_note": {
+            "description": "内核数据面下 learn-limit 的**口径说明**（决策 #435）：内核 bridge 没有「学习条数上限」\n原语，故内核侧实现为**阈值告警**（`BRIDGE_FDB_LIMIT_REACHED`）——说明里给出已学条数 /\n声明上限，并注明「阈值告警、非强制上限」。仅在**内核数据面且声明了 learn_limit** 时出现；\nVPP 侧不出现（VPP 侧是真限制，见 learn_limit 的说明）。\n",
+            "type": "string"
+          },
           "name": {
             "type": "string"
           },
