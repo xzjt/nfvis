@@ -127,6 +127,11 @@ func (p *Provider) bindL3IfaceACL(ctx context.Context, iface model.L3Interface) 
 
 // aclByName 取 ACL 的规则体（绑定只写名字）。先查本次提交已下发的登记，再回落配置快照
 // （恢复收敛路径下两者一致；提交路径下只有前者有）。
+//
+// ⚠️ 兜底必须读**非阻塞快照**（`configSnapshot()`），**不能**读 `config()`——本函数在
+// `ApplyL3Interface` 的**应用路径**上，而提交期间配置发动机的锁由这次提交自己持有，
+// 读活配置即**重入自死锁**（决策 #438 真机实证；R3-11）。快照与登记都没有时，
+// 如实按「找不到该 ACL」返回（即「绑定了未下发的 ACL」），而不是去读活配置。
 func (p *Provider) aclByName(name string) (model.Acl, bool) {
 	famMu.Lock()
 	a, ok := aclDefs[name]
@@ -134,7 +139,7 @@ func (p *Provider) aclByName(name string) (model.Acl, bool) {
 	if ok {
 		return a, true
 	}
-	for _, x := range p.config().Acls {
+	for _, x := range p.configSnapshot().Acls {
 		if x.Name == name {
 			return x, true
 		}

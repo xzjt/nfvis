@@ -143,6 +143,18 @@ func (p *Provider) SetConfigSource(src func() (model.Config, error)) {
 	p.cfgMu.Unlock()
 }
 
+// configSnapshot 只读**进程内快照**（`cfg`），绝不回落到 `cfgSrc`。
+//
+// ⚠️ **应用路径（Apply*/Sync/提交编排内）一律用它，不得用 `config()`**：`config()` 在注入了
+// 来源时去读**当前 committed**（要取配置发动机的锁），而**提交期间那把锁由这次提交自己持有**
+// ⇒ 同一提交内回头读它就是**重入自死锁**，整个管理面会卡死（决策 #438 真机 SIGQUIT 全栈实证）。
+// 快照由装配处与每次恢复收敛（`SetConfig`）刷新，对「应用期兜底查询」足够新。
+func (p *Provider) configSnapshot() model.Config {
+	p.cfgMu.RLock()
+	defer p.cfgMu.RUnlock()
+	return p.cfg
+}
+
 // config 当前配置：**优先读来源**（每次取实时值），失败回落最近一次快照。
 //
 // 读视图（BridgeDomains/VPPIfnames/产品自持设备判定）按配置声明枚举对象，而提交路径不经过本
