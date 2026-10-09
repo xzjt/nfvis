@@ -4692,6 +4692,9 @@ function renderSwitchDetail(vs, ports, params) {
   // 决策 #435：内核数据面下 learn-limit 为阈值告警、非强制上限（读视图 learn_limit_note；
   // VPP 下无该字段——VPP 是硬性上限）。仅在服务端给出该字段时渲染一行，不编造。
   if (vs.learn_limit_note) vsdHead.push(['学习上限说明', vs.learn_limit_note]);
+  // 决策 #437：内核数据面下 DHCP 中继的运行态说明（读视图 dhcp_relay_note——机制 + 客户端
+  // 寻址依据 + 运行态/计数；VPP 下无该字段）。仅在服务端给出该字段时渲染一行，不编造。
+  if (vs.dhcp_relay_note) vsdHead.push(['DHCP 中继说明', vs.dhcp_relay_note]);
   fill($('vsd-head'), ok ? vsdHead : [['读取失败', vs ? vs.__err : notFoundText(name, '虚拟交换机')]]);
   table($('vsd-port-table').querySelector('tbody'), 6, rows.map((r) => {
     const q = r.rt || {};

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
 const errRuntimeUnavailable = "%% VPP 未接入（编排器未装配），运行态不可用\n"
@@ -91,6 +92,14 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 				// 决策 #335：声明了 DHCP 中继才显示（与 REST 详情的 dhcp_relay 同源、同形状）
 				if vs.DhcpRelayServer != "" {
 					m["dhcp_relay"] = map[string]any{"server": vs.DhcpRelayServer}
+					// 决策 #437：内核数据面下补**运行态注记**（与 REST 详情同一实现、同一措辞）
+					// ——机制、客户端寻址依据（请求期 xid → 客户端 MAC 登记表）与运行态/计数。
+					// VPP 数据面不加（中继在 VPP 内运行，无进程内实例；读视图行为逐字不变）。
+					if x.dpMode() == model.DataPlaneKernel {
+						if st, ok := x.dhcpRelayState(name); ok {
+							m["dhcp_relay_note"] = kernelDHCPRelayNote(st)
+						}
+					}
 				}
 				// 决策 #359：配置了 DHCP 服务器才显示「DHCP 服务器」块（与 REST 详情的
 				// dhcp_server 同源、同形状；形状的唯一实现见 dhcpserver.go 的 dhcpServerView）。
@@ -411,6 +420,15 @@ func (x *cliExecutor) withoutInternalPorts(bd BridgeDomainState) BridgeDomainSta
 		out.Ports = append(out.Ports, p)
 	}
 	return out
+}
+
+// dhcpRelayState 该交换机 DHCP 中继实例的运行态（内核数据面 detail 的 dhcp_relay_note；
+// 未注入读物/该数据面无实例时 ok=false——此时不出现该注记，不编造）。
+func (x *cliExecutor) dhcpRelayState(name string) (network.DHCPRelayState, bool) {
+	if x.dhcpRelay == nil {
+		return network.DHCPRelayState{}, false
+	}
+	return x.dhcpRelay.DHCPRelayState(name)
 }
 
 // dhcpActiveLeases 生效租约数（detail 的 dhcp_server.active_leases；运行态不可用时 ok=false，

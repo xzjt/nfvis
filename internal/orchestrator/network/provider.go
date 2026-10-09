@@ -544,6 +544,13 @@ func (n *L2Network) ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) 
 	return n.dhcp.SyncRelay(ctx, vs)
 }
 
+// DHCPRelayState VPP 数据面下的中继运行态：中继是 VPP 内置 dhcp proxy（没有进程内实例可报），
+// 故恒「不适用」（ok=false）——读视图的 dhcp_relay_note 注记只在有用户态实例的数据面出现
+// （内核数据面，见 netkernel.Provider.DHCPRelayState；决策 #437）。
+func (n *L2Network) DHCPRelayState(string) (DHCPRelayState, bool) {
+	return DHCPRelayState{}, false
+}
+
 // ApplyDHCPServer 收敛一台交换机的 DHCP 服务器声明（决策 #359）。调用时机：
 // 提交编排把它作为 bridge-domain（与 dhcp-relay）**之后**的伴随操作（tap 入 BD、server-id/网关
 // 都来自网关声明，先有 BVI 地址与 BD 才有 server）；恢复收敛的重放走 recovery.go 的独立记源。

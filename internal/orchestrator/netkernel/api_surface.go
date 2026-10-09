@@ -27,8 +27,8 @@ func (p *Provider) InvalidateRuntimeState() {}
 // RetryDeferredVRFDeletes 无「延后删表」语义（内核 VRF 删除即时生效），无对象可复核。
 func (p *Provider) RetryDeferredVRFDeletes(context.Context, model.Config) []string { return nil }
 
-// ReconcileResidue / ReconcileRecoveryAlarms / ReconcileDHCPServer / ReconcileProxy /
-// ReconcileStorm 均为 VPP 侧登记型对账；内核数据面无登记、无对应族，空操作。
+// ReconcileResidue / ReconcileRecoveryAlarms / ReconcileDHCPServer / ReconcileStorm 均为
+// VPP 侧登记型对账；内核数据面无登记、无对应族，空操作。
 func (p *Provider) ReconcileResidue(ctx context.Context, cfg model.Config) []error {
 	// 内核数据面下本方法承担的不是"残渣对账"（那是 VPP 侧的登记型语义），而是**转发前置条件**
 	// 的周期性对账：数据面设备集合随提交变化，放行链要跟着重建；转发开关也可能被宿主改掉。
@@ -39,8 +39,38 @@ func (p *Provider) ReconcileResidue(ctx context.Context, cfg model.Config) []err
 }
 func (p *Provider) ReconcileRecoveryAlarms(context.Context, model.Config) []error { return nil }
 func (p *Provider) ReconcileDHCPServer(context.Context, model.Config) []error     { return nil }
-func (p *Provider) ReconcileProxy(context.Context, model.Config) []error          { return nil }
-func (p *Provider) ReconcileStorm(context.Context, model.Config) []error          { return nil }
+
+// ReconcileProxy 内核数据面下没有 VPP 的 dhcp proxy，但有**同一族**的用户态中继实例需要周期性
+// 对账（决策 #437）：声明了却没在跑的实例补启（启动失败、运行期收包失败被停等都能自愈）、
+// 已不声明的停掉（交换机删除走 DeleteBridgeDomain，这里兜底）。与 VPP 侧
+// network.L2Network.ReconcileProxy 的语义同构、方法名同源。
+//
+// 失败**如实进未收敛项**：返回错误（15s 巡检日志）之外，按 EnsureConsistent 的同一
+// scope/code/source 建/消该交换机的告警——`show alarms` 事后可查；下一轮成功即自动消解。
+func (p *Provider) ReconcileProxy(ctx context.Context, cfg model.Config) []error {
+	var errs []error
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.Type == "l3" || vs.DhcpRelayServer == "" {
+			continue
+		}
+		src := "virtual-switches/" + vs.Name + "/dhcp-relay"
+		err := p.relayMgr().Sync(ctx, vs)
+		if err == nil {
+			if p.alarms != nil {
+				p.alarms.Resolve(alarmScopeRecovery, network.AlarmUnconverged, src)
+			}
+			continue
+		}
+		errs = append(errs, err)
+		if p.alarms != nil {
+			p.alarms.Raise(alarmScopeRecovery, network.SeverityWarning, network.AlarmUnconverged, err.Error(), src)
+		}
+	}
+	errs = append(errs, p.relayMgr().StopUndeclared(cfg)...)
+	return errs
+}
+
+func (p *Provider) ReconcileStorm(context.Context, model.Config) []error { return nil }
 
 // CheckVnfPorts vNIC 断连检测：内核数据面下宿主 tap 由 libvirt 创建并挂 bridge，
 // 产品侧没有可靠的 tap 名映射，故不做判定（如实不报，避免误报）。

@@ -238,6 +238,8 @@ func run() error {
 			log.Info("已从现有 startup.conf 导入 DPDK 端口映射", "count", n, "path", dpdkBindings.Path)
 		}
 		kp.SetHeldPortProbe(dpdkHeldPortProbe(dpdkBinder, network.KernelIfnamesAll))
+		// 决策 #437：进程优雅退出停掉全部 DHCP 中继实例（socket/收发协程不残留）。
+		defer func() { _ = kp.Close() }()
 		log.Info("已选择 Linux 内核网络数据面（内核 bridge/VRF/nftables/vxlan）")
 	} else {
 		// M3：VPP 数据面连接管理（FR-SYS-007）先于事务引擎装配（引擎需要下发编排器）。
@@ -1115,9 +1117,12 @@ func run() error {
 		// VPP 侧给出真值，内核侧对未实现族**如实报不可用**（Available=false + 原因），
 		// 装配处因此不分叉。
 		DHCPServer: netProvider,
-		Vxlan:      netProvider,
-		Storm:      netProvider,
-		PortSec:    netProvider,
+		// 决策 #437：内核数据面 DHCP 中继实例的运行态（交换机详情的 dhcp_relay_note；
+		// VPP 侧恒「不适用」——中继在 VPP 内运行、无进程内实例）。
+		DHCPRelay: netProvider,
+		Vxlan:     netProvider,
+		Storm:     netProvider,
+		PortSec:   netProvider,
 		// 决策 #388：主机防火墙数据面读数（CLI `show system firewall` 与
 		// `GET /system/firewall` 同一读视图；同一落地器负责下发/回读）。
 		Firewall: fwApplier,
@@ -1504,6 +1509,7 @@ type netRuntime interface {
 	ReconcileRecoveryAlarms(ctx context.Context, cfg model.Config) []error
 	ReconcileDHCPServer(ctx context.Context, cfg model.Config) []error
 	ReconcileProxy(ctx context.Context, cfg model.Config) []error
+	DHCPRelayState(name string) (network.DHCPRelayState, bool)
 	ReconcileStorm(ctx context.Context, cfg model.Config) []error
 	CheckLoop(ctx context.Context, cfg model.Config) []error
 	MACTable(ctx context.Context, name string) ([]network.MACTableEntry, error)

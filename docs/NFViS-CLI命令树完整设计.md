@@ -103,7 +103,9 @@ show virtual-switches                               # 全部虚拟交换机摘�
 show virtual-switches <name>
   ├─ detail                                         # 类型、成员端口、VLAN/VRF 配置、DHCP 中继（决策 #335：
                                                     #   配置了 dhcp-relay 才显示「DHCP 中继」行，与 REST
-                                                    #   GET /virtual-switches/{n} 的 dhcp_relay 同源）、
+                                                    #   GET /virtual-switches/{n} 的 dhcp_relay 同源；
+                                                    #   内核数据面另给「DHCP 中继说明」行——决策 #437 的
+                                                    #   dhcp_relay_note：机制 + 客户端寻址依据 + 运行态/计数）、
                                                     #   MAC 学习上限（决策 #337：配置了 learn-limit 才显示
                                                     #   「学习上限」行，与 REST 的 learn_limit 同源）、
                                                     #   DHCP 服务器（决策 #359：配置了 dhcp-server 才显示
@@ -629,16 +631,22 @@ set dns proxy server <ip> [secondary <ip>]           # 数据面 DNS 代理—�
                                                      #   查询如实回 **SERVFAIL**（不静默超时——那比未启用代理时 VPP
                                                      #   回 ICMP unreachable 更差）。
 delete dns proxy server [<ip> | secondary <ip>]      # 撤销本域上游（不带取值即清空本域；回落全局）
-set dhcp-relay server <ip>                           # DHCP 中继（决策 #335）：把该交换机转发域（网关 VRF，
-                                                     #   缺省专属 vr-<name>）里的 DHCP 广播中继到 <ip>。
+set dhcp-relay server <ip>                           # DHCP 中继（决策 #335；两数据面**同一语句**）：把该交换机
+                                                     #   转发域（网关 VRF，缺省专属 vr-<name>）里的 DHCP
+                                                     #   广播中继到 <ip>。VPP 侧＝dhcp proxy（按 rx-VRF）；
+                                                     #   内核数据面（决策 #437）＝nfvisd 内的**用户态中继实例**
+                                                     #   （收 bridge 上的请求 → 源地址重写为 BVI 的 v4 网关
+                                                     #   地址 → 单播 server:67，giaddr=0；应答按「请求期
+                                                     #   xid → 客户端 MAC」登记表回注以太帧，不依赖 option 82；
+                                                     #   起不来使提交失败并进未收敛告警，详情行给出运行态/计数）。
                                                      #   前置校验：仅 L2 且已 `set gateway ip` 的交换机可配——
                                                      #   src 地址自动取 BVI 的 IPv4 网关地址（用户不填），
                                                      #   未配网关/无 IPv4 网关地址即拒绝并指向 `set gateway ip`；
                                                      #   server 必填、IPv4，且须在该转发域内可达（跨 VRF 的 server 不在 v1）；
                                                      #   **与 dhcp-server 全局互斥**（决策 #368：任一交换机启用了
                                                      #   服务器即拒绝中继——UDP/67 本地处理归属全局，见 server 行）
-delete dhcp-relay                                    # 撤销中继（发 dhcp_proxy_config IsAdd=false，幂等；
-                                                     #   随交换机删除一并撤）
+delete dhcp-relay                                    # 撤销中继（VPP：发 dhcp_proxy_config IsAdd=false；
+                                                     #   内核：停用户态中继实例。两者都幂等，随交换机删除一并撤）
 set dhcp-server pool <start> <end>                   # DHCP 服务器（决策 #359）：为该交换机转发域内的客户端
                                                      #   提供地址租约（v1＝域内租约池/状态机；用户态服务器 +
                                                      #   每交换机一条内置 L2 tap，能力前提见 round140 spike）。

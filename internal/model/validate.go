@@ -419,6 +419,10 @@ func (v *validator) checkKernelDataPlane(c Config) {
 	const alt = "；如需该能力请先切换回 VPP 数据面（set system dataplane vpp）"
 	// 已实现（不下发拒绝）：ACL、QoS 端口限速、端口镜像、风暴抑制、端口安全——
 	// 内核侧分别落在 nftables（独立表）与 tc（clsact + police/mirred）上。
+	// DHCP 中继也已实现（决策 #437）：内核侧是 nfvisd 内的用户态中继实例（收 bridge 上的 DHCP
+	// 请求 → 源地址重写为 BVI 的 v4 网关地址 → 单播 server:67，giaddr=0；应答按「请求期
+	// xid → 客户端 MAC」登记表回注），故这里不再拒绝（通用段仍要求 L2 + v4 网关 + 与
+	// dhcp-server 互斥，见本文件后面的校验）。
 	if c.Protocols != nil && c.Protocols.LLDP != nil {
 		v.errf("protocols.lldp", "当前数据面为 Linux 内核网络，LLDP 尚未实现%s", alt)
 	}
@@ -430,9 +434,6 @@ func (v *validator) checkKernelDataPlane(c Config) {
 		if vs.CrossConnect {
 			v.errf(path+".cross_connect", "当前数据面为 Linux 内核网络，cross-connect（无学习点对点直通）尚未实现；"+
 				"内核侧只有学习/泛洪形态的桥。请改用 L2 交换机 + 端口%s", alt)
-		}
-		if vs.DhcpRelayServer != "" {
-			v.errf(path+".dhcp_relay_server", "当前数据面为 Linux 内核网络，DHCP 中继尚未实现%s", alt)
 		}
 		if vs.DhcpServerPoolStart != "" || vs.DhcpServerPoolEnd != "" {
 			v.errf(path+".dhcp_server_pool_start", "当前数据面为 Linux 内核网络，DHCP 服务器尚未实现%s", alt)

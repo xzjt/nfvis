@@ -67,6 +67,7 @@ type Options struct {
 	Ports          PortInventory                  // 运行态端口清单（决策 #83；nil = 接口名无动态候选）
 	VppState       VppStateRuntime                // VPP 运行态快照（决策 #84；nil = 相关 show 报未接入）
 	DHCPServer     DHCPServerRuntime              // DHCP 服务器运行态读物（决策 #359；nil = 租约端点 503）
+	DHCPRelay      DHCPRelayRuntime               // 内核数据面 DHCP 中继实例运行态（决策 #437；nil = 详情的 dhcp_relay_note 不出现）
 	Vxlan          VxlanRuntime                   // VXLAN 隧道运行态读物（决策 #383；nil = 读视图如实报未接入）
 	Storm          StormRuntime                   // 接口风暴抑制数据面实况（决策 #385；nil = detail 块如实报未接入）
 	PortSec        PortSecRuntime                 // 接口端口安全数据面实况（决策 #389；nil = detail 块如实报未接入）
@@ -95,6 +96,7 @@ type Server struct {
 	state        *state.State
 	vppState     VppStateRuntime        // VPP 运行态快照（决策 #84/#116：CLI show 与 REST 同源）
 	dhcpSrv      DHCPServerRuntime      // DHCP 服务器运行态读物（决策 #359：租约端点与 tap 过滤）
+	dhcpRelay    DHCPRelayRuntime       // 内核数据面 DHCP 中继实例运行态（决策 #437：详情注记 dhcp_relay_note）
 	vxlan        VxlanRuntime           // VXLAN 隧道运行态读物（决策 #383：GET /vxlan-tunnels 与 CLI 同源）
 	versions     VersionsRuntime        // 组件版本探测（R37-2 收口，决策 #118）
 	logs         func() ([]byte, error) // 服务端日志来源（决策 #123：GET /system/logs）
@@ -152,6 +154,8 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.cliExec.setNetRuntime(opts.L2, opts.L3, opts.LLDP, opts.NAT, opts.Alarms)
 	s.dhcpSrv = opts.DHCPServer
 	s.cliExec.setDHCPServer(opts.DHCPServer) // 决策 #359：dhcp-leases 读命令与 detail 块同源
+	s.dhcpRelay = opts.DHCPRelay
+	s.cliExec.setDHCPRelay(opts.DHCPRelay) // 决策 #437：detail 的中继运行态注记与 REST 同源
 	s.vxlan = opts.Vxlan
 	s.cliExec.setVxlan(opts.Vxlan)        // 决策 #383：show vxlan tunnels 与 GET /vxlan-tunnels 同源
 	s.cliExec.setStorm(opts.Storm)        // 决策 #385：show interfaces <if> detail 的 storm-control 块

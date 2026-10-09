@@ -38,6 +38,10 @@ type Provider struct {
 	storm   *stormManager
 	portSec *portSecManager
 
+	// relayMu/relay 交换机 DHCP 中继的用户态实例管理器（决策 #437；惰性构造，见 dhcp_relay.go）。
+	relayMu sync.Mutex
+	relay   *relayManager
+
 	// capture 抓包实现（惰性构造；与 Provider 共用同一个 Runner 与配置来源）。
 	capture *Capture
 
@@ -468,25 +472,29 @@ func unsupported(feature string) error {
 // ---------- 未实现族：只在**确有声明**时报不支持 ----------
 //
 // 关键口径（真机走查抓到）：提交编排把这些族当作 bridge-domain/VRF 的**伴随操作**调用——
-// 每台 L2 交换机都会走一次 `ApplyDhcpRelay`/`ApplyDHCPServer`，DNS 代理则按全局+按域上游
-// 汇总后调用。**未声明时必须是空操作**，否则任何一次普通提交都会被"未实现"挡住（现场：
-// 只建了一台 L2 交换机，提交却报 `dhcp-relay[vs-lan] 不受支持`）。
-// 提交期校验已拒绝在内核数据面下**声明**这些族，故下面这些分支是纵深防御。
+// 每台交换机都会走一次 `ApplyLLDP`/`ApplyDHCPServer`/`ApplyDNSProxy`。**未声明时必须是空操作**，
+// 否则任何一次普通提交都会被"未实现"挡住（现场：只建了一台 L2 交换机，提交却报
+// `dhcp-relay[vs-lan] 不受支持`）。提交期校验已拒绝在内核数据面下**声明**这些族，
+// 故下面这些分支是纵深防御。
 
 // ApplyLLDP LLDP 邻居：内核侧需 lldpd 守护进程对接，属独立立项；未声明即空操作。
 func (p *Provider) ApplyLLDP(_ context.Context, lldp *model.LldpConfig) error {
 	if lldp == nil {
 		return nil
 	}
-	return unsupported("LLDP（内核数据面尚未实现，请改用 VPP 数据面）")
+	return unsupported("LLDP（内核数据面尚未实现）")
 }
 
-// ApplyDhcpRelay 交换机 DHCP 中继：内核侧对应 dhcrelay，属独立立项；未声明即空操作。
-func (p *Provider) ApplyDhcpRelay(_ context.Context, vs model.VirtualSwitch) error {
-	if vs.DhcpRelayServer == "" {
-		return nil
-	}
-	return unsupported("DHCP 中继（内核数据面尚未实现，请改用 VPP 数据面）")
+// ApplyDhcpRelay 交换机 DHCP 中继（决策 #437）：内核数据面下由 nfvisd 内的**用户态中继实例**
+// 承担（每台声明了中继的交换机一个实例）——收该交换机内核 bridge 上的 DHCP 请求，源地址重写为
+// BVI 的 IPv4 网关地址后单播到 server:67（giaddr=0），应答按「请求期 xid → 客户端 MAC」登记表
+// 回注。实现与生命周期口径见 dhcp_relay.go。
+//
+// 未声明（server 为空）＝**停实例**（无实例即幂等空操作）：提交编排对每台 L2 交换机都会调用
+// 本方法，删除 relay 语句的提交也走这条（声明为空）；已声明但起不来时如实返回错误
+// （提交失败/恢复未收敛项），不静默。
+func (p *Provider) ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) error {
+	return p.relayMgr().Sync(ctx, vs)
 }
 
 // ApplyDHCPServer 域内 DHCP 服务器：内核侧对应 dnsmasq/kea，属独立立项；未声明即空操作。

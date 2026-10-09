@@ -415,6 +415,8 @@ func (s *Server) handleGetVSwitch(w http.ResponseWriter, r *http.Request) {
 			view := vswitchView(vs, s.dhcpActiveLeasesOf)
 			// 决策 #435：内核数据面下 learn-limit 的读视图注记（与 CLI 详情同源、同措辞）。
 			s.annotateLearnLimit(r.Context(), view, vs, name)
+			// 决策 #437：内核数据面下 DHCP 中继的运行态注记（与 CLI 详情同一实现、同一措辞）
+			s.annotateDHCPRelay(view, vs, name)
 			// 契约 VirtualSwitch.statistics：运行态可用且该交换机在数据面时附带（FR-NET-016）
 			if st, ok := s.vswitchStatistics(r.Context(), name); ok {
 				view["statistics"] = st
@@ -443,6 +445,19 @@ func (s *Server) annotateLearnLimit(ctx context.Context, view map[string]any, vs
 		}
 	}
 	view["learn_limit_note"] = kernelLearnLimitNote(vs.LearnLimit, count, ok)
+}
+
+// annotateDHCPRelay 内核数据面下给交换机详情加 DHCP 中继的运行态注记（决策 #437，与 CLI 详情
+// **同一实现、同一措辞**）：机制、客户端寻址依据（请求期 xid → 客户端 MAC 登记表）与运行态/
+// 计数。VPP 数据面不加（中继在 VPP 内运行，无进程内实例）；未声明中继/读不到的也不加
+// （不编造——未收敛/起不来的如实原因由中继读物的 State 给出）。
+func (s *Server) annotateDHCPRelay(view map[string]any, vs model.VirtualSwitch, name string) {
+	if vs.DhcpRelayServer == "" || s.dataPlaneMode() != model.DataPlaneKernel || s.dhcpRelay == nil {
+		return
+	}
+	if st, ok := s.dhcpRelay.DHCPRelayState(name); ok {
+		view["dhcp_relay_note"] = kernelDHCPRelayNote(st)
+	}
 }
 
 // vswitchStatistics 取该交换机在 VPP 中的成员口收发计数，与 CLI

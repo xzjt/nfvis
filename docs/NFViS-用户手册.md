@@ -821,7 +821,8 @@ nfvis$ request system kernel apply
 | cross-connect（直通） | 支持 | **尚不支持**（提交期直接拒绝；请改用 L2 交换机 + 端口） |
 | 抓包 | 支持（pcap trace） | 支持（`tcpdump`；命令/端点同名同语义，见 §10.4） |
 | IPv6 三层/转发（静态路由 v4+v6） | 支持 | **支持**（转发开关 v4/v6 一并置位并回读；v6 地址/静态路由/ACL 按各自语义下发） |
-| DHCP 中继与服务器 / DNS 代理 / LLDP | 支持 | **尚不支持**（提交期直接拒绝） |
+| DHCP 中继 | 支持（VPP dhcp proxy，按 rx-VRF） | **支持**（nfvisd 内的**用户态中继实例**：收 bridge 上的 DHCP 请求 → 源地址重写为 BVI 的 IPv4 网关地址 → 单播 `server:67`，giaddr=0；应答按「请求期 xid → 客户端 MAC」登记表回注以太帧，不依赖 option 82；运行态见详情页的中继说明行） |
+| DHCP 服务器 / DNS 代理 / LLDP | 支持 | **尚不支持**（提交期直接拒绝） |
 
 三处都能选，写的是同一个配置项 `system.dataplane`：
 
@@ -1311,13 +1312,34 @@ nfvis# commit
 
 > 语义：把该域里的 DHCP 广播以**单播**中继给 server（源地址重写为 BVI 网关地址），server 的应答
 > 再回程转发给客户端；`show virtual-switches <n> detail` 的「DHCP 中继」行与
-> `vppctl show dhcp proxy` 同源。server 须在该域（同子网或域内静态路由）可达。
+> `vppctl show dhcp proxy` 同源（**VPP 数据面**；内核数据面下同命令给出中继的运行态说明行，见下）。
+> server 须在该域（同子网或域内静态路由）可达。
 >
-> ⚠️ **排障要点（真机实证）**：VPP 的中继在**回程**要求 DHCP server **回显 option 82**
+> ⚠️ **排障要点（VPP 数据面，真机实证）**：VPP 的中继在**回程**要求 DHCP server **回显 option 82**
 > （Relay Agent Information，RFC 3046 的常规中继行为）——不回显时应答会被**静默丢弃**，
 > 表现为「relay 配置正确、客户端始终拿不到租约」。此时查 `vppctl show errors`：
 > 出现 `dhcp-proxy-to-client  DHCP option 82 missing` 即为该因，改用会回显 option 82 的
-> server（常见 DHCP 服务默认回显；自研/精简实现需自行保证）。
+> server（常见 DHCP 服务默认回显；自研/精简实现需自行保证）。**内核数据面下的中继不依赖
+> option 82 回显**（见下）。
+>
+> **内核数据面下的差别（`system.dataplane=kernel`）**：中继由 **nfvisd 内的用户态实例**承担
+> （每台声明了中继的交换机一个实例；不依赖 VPP，也不装外部中继守护进程），机制与 VPP 侧同口径
+> ——**源地址重写为 BVI 的 IPv4 网关地址**后单播到 `server:67`（giaddr=0），应答按
+> 「**请求期 xid → 客户端 MAC** 登记表（短 TTL）」回注以太帧给客户端。与本数据面有关的几条：
+>
+> - **不依赖 option 82 回显**（上面那条 VPP 侧排障要点不适用于本数据面）：server 不回显 option 82
+>   也能工作，平台也不往请求里插 option 82（载荷原样转发）。
+> - **运行态可查**：`show virtual-switches <n> detail`（或 Web 详情页）的中继说明行给出机制与运行态
+>   /计数（已转发 / 已回注 / 因找不到客户端丢弃的应答数）；实例起不来时如实给出「未运行 + 原因」，
+>   并进未收敛告警，15 秒巡检会自动重试启动。
+> - **收包面**：只处理**无 802.1Q 标签的 IPv4** DHCP 请求（BD 内 access/trunk 端口本就是无标签帧）；
+>   域内广播/多播、以及目的 MAC 是网关（BVI）自身的单播都能收到——若 DHCP server 与客户端处于
+>   **同一个二层域**（直连），客户端直发 server 的帧不经中继，此时不需要也不应配中继。
+> - **server 的可达要求与 VPP 侧相同**：须在该交换机转发域内可达（同子网或域内静态路由）。
+>   中继的上行 socket 绑在该域的 **VRF 设备**上（与 `ip vrf exec` 同口径——BVI 地址与域内路由都在
+>   该 VRF 的表里）；该域的网关 VRF 未收敛时中继起不来，会如实报错并进未收敛告警。
+> - 生命周期：清 `dhcp-relay` 声明 / 删交换机 / 切换数据面（重启服务）/ 重启 nfvis 服务，中继实例
+>   都按声明起停（进程重启后按 committed 配置重放）。
 
 **DHCP 服务器**（产品自带，域内客户端自动取址）：
 
@@ -1356,8 +1378,9 @@ nfvis# commit
 >
 > 池内地址耗尽时产生告警 `DHCP_POOL_EXHAUSTED`（warning；有地址释放/租约到期即自动消解）。
 >
-> **内核数据面下 DHCP 中继与 DHCP 服务器尚未实现**（`set dhcp-relay server` 与 DHCP 服务器的启用语句
-> `set dhcp-server pool …` 都会在提交期被直接拒绝）——该数据面请使用外部 DHCP 服务，或在 VNF/容器内静态编址。
+> **内核数据面下 DHCP 服务器尚未实现**（启用语句 `set dhcp-server pool …` 会在提交期被直接拒绝；
+> DHCP **中继**在该数据面**已支持**，机制与边界见上）——需要产品自带服务器时请切换回 `vpp` 数据面，
+> 或使用外部 DHCP 服务、在 VNF/容器内静态编址。
 
 ### 8.4 L3 虚拟交换机 + 静态路由
 
@@ -2619,6 +2642,7 @@ nfvis$ show system metrics history name nfvis_system_cpu_utilization_ratio [last
 | `show system kernel` 报「期望 N 实际 M」 | 配置改了但没重启 | `request system reboot` 后复核 |
 | `request interfaces <口> bind-dpdk` 报 vfio-pci 不可用 | 自动加载模块失败（内核/模块缺失）或 IOMMU 未生效 | 看报错里的加载失败原因；无 IOMMU 时 `enable_unsafe_noiommu_mode`（§7.2） |
 | 内核数据面下 `bind-dpdk` 报「不支持 bind-dpdk」 | 有意拒绝：内核数据面不使用 DPDK 接管，绑定会把网卡从内核里拿走 | 需要 DPDK 请切回 `vpp` 数据面（§7.0）；把网卡交还内核用 `unbind-dpdk`（同节清单） |
+| 内核数据面下配了 DHCP 中继但客户端拿不到租约 | 方向性排查：① `show virtual-switches <n> detail` 的「DHCP 中继说明」行看中继实例是否「运行中」、计数是否在涨（起不来会给出原因，并进未收敛告警、15 秒巡检自动重试）；② 该行同时给出「已转发 / 已回注 / 因找不到客户端丢弃」——已转发在涨而客户端仍无租约，问题多在 server 侧（server 须把应答**单播回中继源地址**即 BVI 地址，且须在该域内可达）；③ 宿主 `ss -lunp \| grep :67` 可看中继的 UDP 67 是否绑在 BVI 地址上（`tcpdump -i <交换机名>` 看三跳报文） | 本数据面**不依赖 server 回显 option 82**（该要点只适用 VPP 数据面）；server 与客户端同处一个二层域时应直连、不经中继 |
 | 内核数据面下 `unbind-dpdk` 报「接口仍被内核数据面使用」 | 该口是 bridge/bond/VRF 的成员口或带 IP 地址，仍被数据面转发使用 | 先在配置里删掉引用它的声明并提交，再解绑（报错文案里有照做路径） |
 | 同上但报「拒绝操作管理口」 | 该口被判为管理路径（配置声明/默认路由/监听口）——有意拒绝 | 换业务口；确需变更用带外方式 B |
 | commit 报 `接口在 VPP 中不存在: ensX（若该口由 DPDK 接管…）` | 该口尚未进数据面（刚声明/刚接管的过渡态），或未绑 vfio、或口名不对 | `request vpp restart`；仍失败按 §7.2 核对（`ip link` 里没有 = 已被接管） |

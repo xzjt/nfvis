@@ -3134,6 +3134,10 @@
             },
             "type": "object"
           },
+          "dhcp_relay_note": {
+            "description": "内核数据面下 DHCP 中继的**运行态说明**（决策 #437；仅详情端点附带）。内核侧的中继由\nnfvisd 内的**用户态实例**承担（VPP 侧是 VPP 内置 dhcp proxy，无进程内实例，故 VPP 下\n本字段缺席、读视图逐字不变）：收交换机 bridge 上的 DHCP 请求，源地址重写为 BVI 的\nIPv4 网关地址后单播到 `server:67`（giaddr=0）；应答按「请求期 xid → 客户端 MAC」的\n短 TTL 登记表回注以太帧给客户端。说明里同时给出运行态（运行中 / 未运行 + 原因）与\n计数（已转发 / 已回注 / 因找不到客户端丢弃的应答数）。仅在**内核数据面且声明了\ndhcp_relay** 时出现。\n",
+            "type": "string"
+          },
           "dhcp_relay_server": {
             "description": "DHCP 中继的服务器地址在**配置库/POST 请求体**里的存储键（与 dhcp_relay.server 同一声明，\n两种形状各司其职：GET 详情/列表回 dhcp_relay 对象，写入与 GET /configuration 用本键）。\n未配置时省略。\n",
             "type": "string"

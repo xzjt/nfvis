@@ -56,9 +56,6 @@ func TestKernelDataPlaneRejectsUnimplementedFamilies(t *testing.T) {
 	// 每一项都是一个「内核数据面下会静默不生效」的配置，必须提交期拒绝。
 	cases := map[string]func(*Config){
 		"LLDP": func(c *Config) { c.Protocols = &ProtocolsConfig{LLDP: &LldpConfig{}} },
-		"DHCP 中继": func(c *Config) {
-			c.VirtualSwitches = []VirtualSwitch{{Name: "vs", Type: "l2", DhcpRelayServer: "10.0.0.1"}}
-		},
 		"DHCP 服务器": func(c *Config) {
 			c.VirtualSwitches = []VirtualSwitch{{Name: "vs", Type: "l2", DhcpServerPoolStart: "10.0.0.10"}}
 		},
@@ -101,6 +98,50 @@ func TestKernelDataPlaneRejectsUnimplementedFamilies(t *testing.T) {
 		if errs := Validate(c); len(errs) == 0 {
 			t.Fatalf("%s：内核数据面下应提交期拒绝", name)
 		}
+	}
+}
+
+// 内核数据面下 DHCP 中继**不再**提交期拒绝：内核侧由 nfvisd 内的用户态中继实例承担
+// （收 bridge 上的 DHCP 请求 → 源地址重写为 BVI 的 v4 网关地址 → 单播 server:67，giaddr=0；
+// 应答按「请求期 xid → 客户端 MAC」登记表回注以太帧）。红-绿：把 validate.go 的内核侧拒绝
+// 加回来，本用例即失败。
+func TestKernelDataPlaneAcceptsDHCPRelay(t *testing.T) {
+	ok := Config{
+		System: &SystemConfig{DataPlane: DataPlaneKernel},
+		VirtualSwitches: []VirtualSwitch{{Name: "vs-r", Type: "l2",
+			Gateway:         &VSGateway{Addresses: []string{"192.168.99.1/24"}},
+			DhcpRelayServer: "192.168.99.10"}},
+	}
+	if errs := Validate(ok); len(errs) != 0 {
+		t.Fatalf("内核数据面下已配 v4 网关的 L2 交换机应可配 DHCP 中继，得到：%s", errText(errs))
+	}
+	// 两数据面同一语句：VPP 侧同样接受（既有行为不变）。
+	vpp := ok
+	vpp.System = &SystemConfig{DataPlane: DataPlaneVPP}
+	if errs := Validate(vpp); len(errs) != 0 {
+		t.Fatalf("VPP 数据面下该配置应照常接受，得到：%s", errText(errs))
+	}
+	// 通用约束两数据面共用（与数据面无关，保留）：无 v4 网关的中继仍被拒绝。
+	noV4 := Config{
+		System: &SystemConfig{DataPlane: DataPlaneKernel},
+		VirtualSwitches: []VirtualSwitch{{Name: "vs-r", Type: "l2",
+			Gateway:         &VSGateway{Addresses: []string{"2001:db8::1/64"}},
+			DhcpRelayServer: "192.168.99.10"}},
+	}
+	if errs := Validate(noV4); len(errs) == 0 {
+		t.Fatalf("网关没有 IPv4 地址时应拒绝 DHCP 中继（中继源地址取 BVI 的 IPv4 地址）")
+	}
+	// 与 dhcp-server 的互斥校验保留（两者争抢 UDP/67 的处理权）。
+	conflict := Config{
+		System: &SystemConfig{DataPlane: DataPlaneKernel},
+		VirtualSwitches: []VirtualSwitch{{Name: "vs-r", Type: "l2",
+			Gateway:             &VSGateway{Addresses: []string{"192.168.99.1/24"}},
+			DhcpRelayServer:     "192.168.99.10",
+			DhcpServerPoolStart: "192.168.99.100",
+			DhcpServerPoolEnd:   "192.168.99.120"}},
+	}
+	if errs := Validate(conflict); len(errs) == 0 {
+		t.Fatalf("同一交换机同时配 DHCP 中继与 DHCP 服务器仍应被拒绝（争抢 UDP/67）")
 	}
 }
 

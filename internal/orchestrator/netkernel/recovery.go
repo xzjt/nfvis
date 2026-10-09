@@ -58,6 +58,16 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 	for _, vs := range cfg.VirtualSwitches {
 		collect("virtual-switches/"+vs.Name, p.ApplyBridgeDomain(ctx, vs))
 	}
+	// 决策 #437：DHCP 中继用户态实例的恢复重放——**恢复重放必须含 relay**（与 VPP 侧同纪律）：
+	// 实例活在 nfvisd 进程内，进程重启后必然不在，不重放即静默丢中继。放在交换机段之后：
+	// 实例要绑 bridge、要绑 BVI 的 v4 网关地址（ApplyBridgeDomain 已把地址落下）。声明未变时
+	// Sync 幂等；起不来按未收敛项落告警（如实，不静默）。
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.Type == "l3" || vs.DhcpRelayServer == "" {
+			continue
+		}
+		collect("virtual-switches/"+vs.Name+"/dhcp-relay", p.ApplyDhcpRelay(ctx, vs))
+	}
 	for _, iface := range cfg.Interfaces {
 		collect("interfaces/"+iface.Name, p.enrichHeldPortErr(iface.Name, p.ApplyInterface(ctx, iface)))
 	}

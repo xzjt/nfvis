@@ -3506,6 +3506,16 @@ components:
             自动取 BVI 的 IPv4 网关地址，不随响应给出。未配置时整个对象缺席（不编造）。
           properties:
             server: { type: string, description: DHCP 服务器 IPv4 地址（须在该交换机转发域内可达） }
+        dhcp_relay_note:
+          type: string
+          description: |
+            内核数据面下 DHCP 中继的**运行态说明**（决策 #437；仅详情端点附带）。内核侧的中继由
+            nfvisd 内的**用户态实例**承担（VPP 侧是 VPP 内置 dhcp proxy，无进程内实例，故 VPP 下
+            本字段缺席、读视图逐字不变）：收交换机 bridge 上的 DHCP 请求，源地址重写为 BVI 的
+            IPv4 网关地址后单播到 `server:67`（giaddr=0）；应答按「请求期 xid → 客户端 MAC」的
+            短 TTL 登记表回注以太帧给客户端。说明里同时给出运行态（运行中 / 未运行 + 原因）与
+            计数（已转发 / 已回注 / 因找不到客户端丢弃的应答数）。仅在**内核数据面且声明了
+            dhcp_relay** 时出现。
         dhcp_relay_server:
           type: string
           description: |

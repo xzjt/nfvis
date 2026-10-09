@@ -53,6 +53,20 @@ type dhcpRelay struct {
 	src     string
 }
 
+// DHCPRelayState 内核数据面下用户态 DHCP 中继实例的运行态（决策 #437；CLI/REST 详情注记
+// dhcp_relay_note 的来源）。VPP 数据面的中继是 VPP 内置 dhcp proxy，没有进程内实例可报——
+// VPP 实现恒「不适用」（见 L2Network.DHCPRelayState）。
+type DHCPRelayState struct {
+	Running bool   // 实例是否在运行
+	Reason  string // 未运行（或运行中最近一次非致命失败）的如实原因；无则空
+	// Forwarded/Injected/DroppedNoClient/Evicted 是实例的累计计数（读视图注记如实给出）：
+	// 已转发的客户端请求 / 已回注给客户端的应答 / 应答找不到客户端而丢弃 / 登记表满挤掉的条目。
+	Forwarded       uint64
+	Injected        uint64
+	DroppedNoClient uint64
+	Evicted         uint64
+}
+
 // DhcpProvider 交换机 DHCP 中继（VPP dhcp proxy）编排。
 type DhcpProvider struct {
 	client func() (DhcpClient, error)

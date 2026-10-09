@@ -712,10 +712,11 @@ func TestApplyVxlanRebuildsOnTupleChange(t *testing.T) {
 func TestUnsupportedFamiliesReportError(t *testing.T) {
 	p := New(&fakeRunner{})
 	ctx := context.Background()
-	// ACL / QoS / 端口镜像 / 风暴抑制 / 端口安全已实现，不再在此列。
+	// ACL / QoS / 端口镜像 / 风暴抑制 / 端口安全已实现，不再在此列；DHCP 中继也已实现
+	// （决策 #437：nfvisd 内的用户态中继实例）——它不再报 ErrUnsupported，声明不完整时按
+	// 如实错误上报（见 TestApplyDhcpRelayWithoutV4GatewayIsHonest）。
 	cases := map[string]error{
 		"LLDP":     p.ApplyLLDP(ctx, &model.LldpConfig{}),
-		"中继":       p.ApplyDhcpRelay(ctx, model.VirtualSwitch{Name: "vs", DhcpRelayServer: "10.0.0.1"}),
 		"DHCP 服务器": p.ApplyDHCPServer(ctx, model.VirtualSwitch{Name: "vs", DhcpServerPoolStart: "10.0.0.10"}),
 		"DNS 代理":   p.ApplyDNSProxy(ctx, orchestrator.DNSProxyUpstreams{Global: []string{"8.8.8.8"}}),
 	}
