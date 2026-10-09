@@ -80,9 +80,12 @@ type computeFacade interface {
 }
 
 // containerFacade 容器侧同理（orchestrator.ContainerProvider 的 9 法已含
-// api.ContainerRuntime 的全部 5 法，无须再加方法）。
+// api.ContainerRuntime 的其余方法，本接口只补运行态读数一条）。
 type containerFacade interface {
 	orchestrator.ContainerProvider
+	// ContainerStatus 容器运行态读数（契约状态 + 重启次数，同一次 inspect；api.ContainerRuntime
+	// 消费该方法，持有层须一并转发）。
+	ContainerStatus(ctx context.Context, name string) (state string, restartCount int, restartCountKnown bool, err error)
 }
 
 // connCloser 持有层记账的连接所需的最小能力（决策 #378/D2）：只为单测能注入「会阻塞的
@@ -370,6 +373,15 @@ func (h *containerHolder) ContainerState(ctx context.Context, name string) (stri
 		return p.ContainerState(ctx, name)
 	}
 	return "", errContainerNotConnected
+}
+
+// ContainerStatus 未接入 ⇒ 与 ContainerState 同款错误（读视图据此省略状态与重启次数，
+// 与今天 x.ct == nil 的降级逐字一致）；重启次数同故 restartCountKnown=false。
+func (h *containerHolder) ContainerStatus(ctx context.Context, name string) (string, int, bool, error) {
+	if p := h.current(); p != nil {
+		return p.ContainerStatus(ctx, name)
+	}
+	return "", 0, false, errContainerNotConnected
 }
 
 // ContainerLogs 未接入 ⇒ 与 containerLog nil 分支同文案的错误。

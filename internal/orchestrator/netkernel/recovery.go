@@ -59,7 +59,7 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 		collect("virtual-switches/"+vs.Name, p.ApplyBridgeDomain(ctx, vs))
 	}
 	for _, iface := range cfg.Interfaces {
-		collect("interfaces/"+iface.Name, p.ApplyInterface(ctx, iface))
+		collect("interfaces/"+iface.Name, p.enrichHeldPortErr(iface.Name, p.ApplyInterface(ctx, iface)))
 	}
 	// 镜像在交换机/接口之后：源口（物理口/bond）此刻已存在且已 up（ApplySpan 会置分析口 up）。
 	for _, pm := range cfg.PortMirroring {
@@ -84,4 +84,32 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 		p.alarms.Sync(alarmScopeRecovery, failures)
 	}
 	return errs
+}
+
+// enrichHeldPortErr 给「口在内核里不存在」的未收敛项点名真正的持有者（决策 #426③）。
+//
+// 由来（真机走查）：数据面切到内核后，VPP 时代接管过的口仍留在 vfio-pci——内核里没有
+// 它的 netdev，`ApplyInterface` 报底座的 `Cannot find device`，于是恢复收敛只留下这一句，
+// 操作者看不出「它在 DPDK 手里，先交还内核」。这里按既有告警口径（同一 code/source，
+// 不新造告警码）把探测到的驱动名与 PCI 补进文案，并给照做路径。
+//
+// 只对**设备不存在**类错误附加（其它失败原因原样如实上报，不猜测）；探测取不到原样返回。
+func (p *Provider) enrichHeldPortErr(ifname string, err error) error {
+	if err == nil || p.heldPort == nil {
+		return err
+	}
+	if !notFound(err.Error(), err) {
+		return err
+	}
+	driver, pci, ok := p.heldPort(ifname)
+	if !ok || driver == "" {
+		return err
+	}
+	where := ""
+	if pci != "" {
+		where = "（PCI " + pci + "）"
+	}
+	return fmt.Errorf("%w；该口当前仍绑定在 %s 驱动上%s、内核里没有它——改用内核数据面请先交还："+
+		"request interfaces %s unbind-dpdk --yes（内核未自动重新探测原生驱动时，按其提示补 to-driver <驱动名>）",
+		err, driver, where, ifname)
 }

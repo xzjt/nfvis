@@ -168,9 +168,10 @@ func (r *vppRuntime) RuntimeStats(ctx context.Context) (state.RuntimeStats, bool
 }
 
 // StormCounters 读某 policer 的计数（决策 #385；StormCountersReader 的真机实现）。
-// 走同版本工具 vpp_get_stats 的组合计数（policer 计数不在 binary API 里）；读不到时
-// 返回可读的原因串（调用方在 CLI/读视图里如实显示，不编造数字）。
-func (m *Manager) StormCounters(ctx context.Context, policerIndex uint32, policerName string) (StormCounters, bool, string) {
+// 走同版本工具 vpp_get_stats 的组合计数（policer 计数不在 binary API 里），**按 policer 名**
+// 匹配（决策 #429②：索引不可回读且可能被底座复用，不按索引猜）；读不到时返回可读的原因串
+// （调用方在 CLI/读视图里如实显示，不编造数字）。
+func (m *Manager) StormCounters(ctx context.Context, policerName string) (StormCounters, bool, string) {
 	tool := m.statsTool
 	if tool == nil {
 		return StormCounters{}, false, "无同版本统计工具回退源（vpp_get_stats）"
@@ -179,9 +180,10 @@ func (m *Manager) StormCounters(ctx context.Context, policerIndex uint32, police
 	if err != nil {
 		return StormCounters{}, false, err.Error()
 	}
-	c, ok := StormCountersFromDump(text, policerIndex, policerName)
+	c, ok := StormCountersFromDump(text, policerName)
 	if !ok {
-		return StormCounters{}, false, "stats segment 未返回该 policer 的计数路径（" + stormPolicerStatsPattern + "）"
+		return StormCounters{}, false, "stats segment 未返回该 policer 的计数路径（按名 " + policerName +
+			" 在 " + stormPolicerStatsPattern + " 未命中）"
 	}
 	return c, true, ""
 }

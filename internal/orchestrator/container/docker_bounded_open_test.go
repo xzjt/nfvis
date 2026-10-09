@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 // shortDockerCallTimeout 临时调小 dockerCallTimeout（用完还原）。
@@ -125,5 +127,27 @@ func TestContainerShellStateCheckBounded(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("State 挂死时 ContainerShell 挂住未归（有界缺失）")
+	}
+}
+
+// 决策 #432：容器运行态读数（状态 + 重启次数）走同一次 inspect，且这一环同样**有界**——
+// dockerd 假死时读视图（CLI/REST 详情）不得无界挂起；底座不可达如实报错，重启次数按
+// 「取不到」处理（known=false），不谎报 0 次。
+func TestContainerStatusBoundedUnderDeadBackend(t *testing.T) {
+	shortDockerCallTimeout(t, 200*time.Millisecond)
+	p := &Provider{api: &dockerClient{http: &http.Client{}, base: deadBackend(t).URL}}
+	start := time.Now()
+	st, n, known, err := p.ContainerStatus(context.Background(), "ct")
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("读数应在 dockerCallTimeout 内返回，实耗 %s", time.Since(start))
+	}
+	if !errors.Is(err, orchestrator.ErrContainerUnavailable) {
+		t.Fatalf("底座不可达应归一为 ErrContainerUnavailable（API 503），得 %v", err)
+	}
+	if !strings.Contains(err.Error(), "Docker 未在") {
+		t.Fatalf("报错应可照做（Docker 未响应），得: %v", err)
+	}
+	if st != "" || n != 0 || known {
+		t.Fatalf("底座不可达时不得给出状态/次数（取不到 ≠ 0 次）: state=%q n=%d known=%v", st, n, known)
 	}
 }

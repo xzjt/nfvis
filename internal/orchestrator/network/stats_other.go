@@ -36,6 +36,6 @@ func (r *vppRuntime) RuntimeStats(ctx context.Context) (state.RuntimeStats, bool
 }
 
 // StormCounters 非 Linux 桩（决策 #385）：如实报不可读原因，读视图据此显示「不可读」。
-func (m *Manager) StormCounters(ctx context.Context, policerIndex uint32, policerName string) (StormCounters, bool, string) {
+func (m *Manager) StormCounters(ctx context.Context, policerName string) (StormCounters, bool, string) {
 	return StormCounters{}, false, "stats segment 仅在 Linux 可用"
 }

@@ -4,6 +4,8 @@ package system
 //
 // 在 nfvisd 内直接实现，不经 rsyslog/syslog-ng——journald drop-in 无法直连远端主机，
 // 依赖外部转发守护会引入安装期依赖。底座（网络连接）藏在 dial 后，单测注入假实现。
+// 报文头的 hostname 在**每次构造报文时**取当前事实（决策 #428）：产品声明优先，
+// 否则回落 os.Hostname()——运行中改主机名后新报文即用新名，无需重启 nfvisd。
 
 import (
 	"context"
@@ -40,6 +42,10 @@ type SyslogConfig struct {
 	Facility string // 缺省 user
 	Severity string // 最低转发级别，缺省 info
 	Network  string // udp（缺省）| tcp
+	// LocalHostname 报文头 HOSTNAME 字段的本机名（产品声明的主机名）。空则每次构造报文时
+	// 回落宿主实况 os.Hostname()。**刻意不在构造转发器时固化、也不进连接级缓存**：运行中
+	// 改主机名后下一条报文即用新名（决策 #428），不需要重启 nfvisd。
+	LocalHostname string
 }
 
 func (c SyslogConfig) withDefaults() SyslogConfig {
@@ -91,23 +97,20 @@ func FormatRFC5424(t time.Time, host, app string, pid int, msgID string, facilit
 
 // SyslogForwarder 远程 syslog 转发器（可重配置；未配置目标时为空操作）。
 type SyslogForwarder struct {
-	mu       sync.Mutex
-	cfg      SyslogConfig
-	conn     net.Conn
-	dial     func(network, addr string) (net.Conn, error)
-	hostname string
-	lastErr  error
-	now      func() time.Time
+	mu      sync.Mutex
+	cfg     SyslogConfig
+	conn    net.Conn
+	dial    func(network, addr string) (net.Conn, error)
+	lastErr error
+	now     func() time.Time
 }
 
 // NewSyslogForwarder 构造转发器（dial 为 nil 时用 net.DialTimeout）。
 func NewSyslogForwarder(cfg SyslogConfig) *SyslogForwarder {
-	host, _ := os.Hostname()
 	return &SyslogForwarder{
-		cfg:      cfg.withDefaults(),
-		dial:     func(network, addr string) (net.Conn, error) { return net.DialTimeout(network, addr, 3*time.Second) },
-		hostname: host,
-		now:      time.Now,
+		cfg:  cfg.withDefaults(),
+		dial: func(network, addr string) (net.Conn, error) { return net.DialTimeout(network, addr, 3*time.Second) },
+		now:  time.Now,
 	}
 }
 
@@ -156,6 +159,17 @@ func (f *SyslogForwarder) closeLocked() error {
 	return err
 }
 
+// currentHostname 渲染报文头主机名：每次构造报文时取**当前**事实——产品声明
+// （SyslogConfig.LocalHostname，随每次 Configure 刷新）优先，否则回落宿主实况 os.Hostname()。
+// 调用方须持有 f.mu（只读 f.cfg）。
+func (f *SyslogForwarder) currentHostname() string {
+	if h := strings.TrimSpace(f.cfg.LocalHostname); h != "" {
+		return h
+	}
+	h, _ := os.Hostname()
+	return h
+}
+
 // Forward 按配置转发一条消息（未配置目标或低于级别阈值时为空操作）。
 func (f *SyslogForwarder) Forward(severity int, app, msgID, msg string) error {
 	f.mu.Lock()
@@ -170,7 +184,7 @@ func (f *SyslogForwarder) Forward(severity int, app, msgID, msg string) error {
 	if code, ok := FacilityCode(f.cfg.Facility); ok {
 		facility = code
 	}
-	line := FormatRFC5424(f.now(), f.hostname, app, os.Getpid(), msgID, facility, severity, msg)
+	line := FormatRFC5424(f.now(), f.currentHostname(), app, os.Getpid(), msgID, facility, severity, msg)
 
 	if f.conn == nil {
 		conn, err := f.dial(f.cfg.Network, net.JoinHostPort(f.cfg.Host, strconv.Itoa(f.cfg.Port)))

@@ -712,6 +712,12 @@ async function hpReclaim() {
 
 // 接口卡：列表端点只有配置字段（名称/说明/MTU 等），逐口统计在详情端点上（见 loadInterfaceStats）。
 // 行可点进详情页（#/system/interfaces/:name）——驱动接管（DPDK）与 VF 数量都在那一页。
+//
+// 已知缺口（决策 #431）：CLI `show interfaces physical` 在内核数据面下会把「已声明却没进
+// 数据面」的口在备注列**点名原因**（仍绑 vfio-pci / 被 networkd 持有为 down），该文本走 CLI
+// 结构化输出的 `source` 字段；而 Web 取数的 REST `GET /interfaces`（`Interface` schema）**没有**
+// 这个字段（后端按口径未改契约），故本页**拿不到该点名**——不自己编一个近似值，如实留白
+// （`taken_over` 只说明「在不在数据面」，说不出「为什么不在」）。将来契约补字段再同源渲染。
 function renderInterfaces(ifaces, ifaceRows) {
   const tbody = $('iface-table').querySelector('tbody');
   tbody.textContent = '';
@@ -5099,6 +5105,9 @@ function ctdMsg(text, isErr) {
 function ctDetailHead(ct) {
   return [
     ['状态', ct.state],
+    // 重启次数（决策 #432）：契约字段 `restart_count`（Docker 累计重启数）。**取不到就省略该
+    // 字段**——此时如实显示「—」，不把它当 0（0 是「确实没重启过」的读数，两者不是一回事）。
+    ['重启次数', ct.restart_count],
     ['镜像', ct.image],
     ['vCPU', ct.vcpu],
     ['内存', ct.memory_mb ? mb(ct.memory_mb) : undefined],
@@ -5445,7 +5454,7 @@ const NET_OBJECT_VIEWS = [
   // （R110-1，决策 #332），字段以契约 QosPolicy schema 为准。
   ['QoS 策略', 'qos', ['名称', 'CIR(bps)', '绑定（接口:in|out）'], (q) => [q.name, q.cir, qosBindingsText(q)], '#/network/qos/'],
   ['端口镜像（SPAN）', 'span', ['名称', '源', '目的'], (s) => [
-    s.name, list(s.sources || s.source), s.destination,
+    s.name, spanSourceText(s.source), s.analyzer,
   ], '#/network/span/'],
   // VXLAN 隧道（决策 #383）：读 GET /vxlan-tunnels（配置声明 × 数据面实况，与 CLI
   // `show vxlan tunnels` 同源）。「状态」列取 `in_vpp`（数据面上有没有**该名字**的隧道口——
@@ -5679,6 +5688,16 @@ async function qsdDelete() {
   await reload().catch(() => {});
 }
 
+// SPAN 源的统一文本（决策 #430②）：vNIC 源在契约里是 `source.vnf` + `source.vnf_interface`
+// 两个字段（此时 `source.interface` 为空）——标题行只显示 vNIC 名会让操作者看不出是哪台 VM。
+// 合并成 `vnf <vm>/<vnic>` 一行后 VM 与 vNIC 都一眼可见（与交换机成员端口的 `vnf/<vnic>`
+// 写法同源）；物理口源仍显示口名。取不到源回 undefined ⇒ 该行如实显示「—」。
+function spanSourceText(src) {
+  if (!src) return undefined;
+  if (src.vnf) return 'vnf ' + src.vnf + '/' + (src.vnf_interface || '—');
+  return src.interface;
+}
+
 function renderSpanDetail(rows, params) {
   const name = (params && params.name) || '';
   const s = pickByName(rows, name);
@@ -5686,7 +5705,7 @@ function renderSpanDetail(rows, params) {
   const src = (s && (s.source || {})) || {};
   $('spd-name').textContent = name;
   fill($('spd-head'), s ? [
-    ['源', src.interface || src.vnf_interface || src.vnf],
+    ['源', spanSourceText(src)],
     ['方向', src.direction],
     ['分析口', s.analyzer],
   ] : [['读取失败', err ? err : notFoundText(name, 'SPAN 会话')]]);

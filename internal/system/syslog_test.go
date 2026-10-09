@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -81,10 +82,12 @@ func (c *fakeConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *fakeConn) SetWriteDeadline(time.Time) error { return nil }
 
 func newTestForwarder(cfg SyslogConfig) (*SyslogForwarder, *fakeConn) {
+	if cfg.LocalHostname == "" {
+		cfg.LocalHostname = "nfvis" // 报文头主机名固定，断言与宿主实况解耦
+	}
 	f := NewSyslogForwarder(cfg)
 	c := &fakeConn{}
 	f.SetDialer(func(_, _ string) (net.Conn, error) { return c, nil })
-	f.hostname = "nfvis"
 	f.now = func() time.Time { return time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC) }
 	return f, c
 }
@@ -137,6 +140,53 @@ func TestForwardLevelFiltering(t *testing.T) {
 	}
 	if !strings.Contains(c.buf.String(), "warn 应转发") {
 		t.Fatalf("阈值内应转发: %q", c.buf.String())
+	}
+}
+
+// 报文头 hostname 每次构造报文时取当前事实（决策 #428）：同一实例改主机名后，下一条报文
+// 即用新名，且 hostname 变化不触发重连（连接复用照旧）。
+func TestForwardHostnameFollowsCurrentFact(t *testing.T) {
+	f, c := newTestForwarder(SyslogConfig{Host: "10.0.0.9", LocalHostname: "old-name"})
+	if err := f.Forward(3, "nfvisd", "log", "第一条"); err != nil {
+		t.Fatal(err)
+	}
+	first := c.buf.String()
+	if !strings.HasPrefix(first, "<11>1 2026-09-14T12:00:00Z old-name nfvisd ") {
+		t.Fatalf("首条报文头应为 old-name：%q", first)
+	}
+	dials := 0
+	f.SetDialer(func(_, _ string) (net.Conn, error) { dials++; return &fakeConn{}, nil })
+	f.Configure(SyslogConfig{Host: "10.0.0.9", LocalHostname: "new-name"})
+	if err := f.Forward(3, "nfvisd", "log", "第二条"); err != nil {
+		t.Fatal(err)
+	}
+	all := c.buf.String()
+	if !strings.Contains(all, "<11>1 2026-09-14T12:00:00Z new-name nfvisd ") {
+		t.Fatalf("改主机名后下一条报文头应为 new-name：%q", all)
+	}
+	if c.closed {
+		t.Fatal("仅主机名变化不应断开既有连接")
+	}
+	if dials != 0 {
+		t.Fatalf("仅主机名变化不应重连（连接复用），实际拨号 %d 次", dials)
+	}
+}
+
+// 未声明主机名时回落宿主实况 os.Hostname()——同样是「每次构造时取值」，不是构造转发器时固化。
+func TestForwardHostnameFallsBackToOSHostname(t *testing.T) {
+	want, err := os.Hostname()
+	if err != nil || want == "" {
+		t.Skip("宿主主机名不可读，跳过")
+	}
+	f := NewSyslogForwarder(SyslogConfig{Host: "10.0.0.9"})
+	c := &fakeConn{}
+	f.SetDialer(func(_, _ string) (net.Conn, error) { return c, nil })
+	f.now = func() time.Time { return time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC) }
+	if err := f.Forward(3, "nfvisd", "log", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(c.buf.String(), "<11>1 2026-09-14T12:00:00Z "+want+" nfvisd ") {
+		t.Fatalf("未声明主机名应回落 os.Hostname()：%q", c.buf.String())
 	}
 }
 

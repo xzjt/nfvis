@@ -37,7 +37,7 @@ func (g *govppDiagClient) SwInterfaceNames() (map[uint32]string, error) {
 	names := map[uint32]string{}
 	for {
 		d := &ifapi.SwInterfaceDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}
@@ -68,7 +68,7 @@ func (g *govppDiagClient) InterfaceAddresses(isIPv6 bool) ([]IfaceAddr, error) {
 		})
 		for {
 			d := &ip.IPAddressDetails{}
-			stop, err := reqCtx.ReceiveReply(d)
+			stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 			if err != nil {
 				return nil, err
 			}

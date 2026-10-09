@@ -24,6 +24,14 @@ type mockDocker struct {
 	stateErr  error // State 查询失败注入（查询失败不清警的单测）
 	oomErr    error // OOMKilled 查询失败注入
 
+	// 决策 #432：inspect 事实注入——Docker 原始状态（restarting 等）与重启次数。
+	// rawStates 缺省回落到契约状态同名（restarting 场景需显式注入）；restartUnknown 里的
+	// 容器模拟「应答未给 RestartCount」（取不到 ⇒ 读视图省略该字段）。
+	rawStates      map[string]string
+	restartCounts  map[string]int
+	restartUnknown map[string]bool
+	inspects       []string // inspect 调用记账（断言一次读数只 inspect 一次）
+
 	// 决策 #357：容器内执行命令的记账与结果注入。
 	execCmd     string
 	execTimeout time.Duration
@@ -37,7 +45,8 @@ type mockDocker struct {
 
 func newMockDocker() *mockDocker {
 	return &mockDocker{states: map[string]string{}, specs: map[string]CreateSpec{}, exitCodes: map[string]int{},
-		oomKilled: map[string]bool{}}
+		oomKilled: map[string]bool{}, rawStates: map[string]string{}, restartCounts: map[string]int{},
+		restartUnknown: map[string]bool{}}
 }
 
 func (m *mockDocker) Create(_ context.Context, name string, spec CreateSpec) error {
@@ -92,6 +101,27 @@ func (m *mockDocker) State(_ context.Context, name string) (string, bool, error)
 	}
 	s, ok := m.states[name]
 	return s, ok, nil
+}
+
+// Inspect 单次 inspect 的容器事实（决策 #432）：状态 + 原始状态 + 重启次数。
+func (m *mockDocker) Inspect(_ context.Context, name string) (ContainerFacts, bool, error) {
+	m.inspects = append(m.inspects, name)
+	if m.stateErr != nil {
+		return ContainerFacts{}, false, m.stateErr
+	}
+	s, ok := m.states[name]
+	if !ok {
+		return ContainerFacts{}, false, nil
+	}
+	raw := m.rawStates[name]
+	if raw == "" {
+		raw = s // 缺省：原始状态与契约状态同名（restarting 需显式注入）
+	}
+	f := ContainerFacts{State: s, RawState: raw}
+	if !m.restartUnknown[name] {
+		f.RestartCount, f.RestartsKnown = m.restartCounts[name], true
+	}
+	return f, true, nil
 }
 func (m *mockDocker) Logs(_ context.Context, name string, tail int) (string, error) {
 	return m.logs, nil
@@ -270,6 +300,9 @@ type fakeSink struct {
 	details  []sinkAlarm
 	active   []sinkAlarm // 当前活动告警
 	resolved []string    // Resolve 的 source 序列（逐次追加）
+	// resolveCalls Resolve 的逐次明细：断言按**码**取用——巡检每轮都会对本轮「无此告警」的码
+	// 幂等调一次 Resolve，按总次数断言的既有用例会被新增告警码带偏（决策 #432）。
+	resolveCalls []sinkAlarm
 }
 
 func (f *fakeSink) Raise(scope, severity, code, message, source string) {
@@ -285,6 +318,7 @@ func (f *fakeSink) Raise(scope, severity, code, message, source string) {
 
 func (f *fakeSink) Resolve(scope, code, source string) bool {
 	f.resolved = append(f.resolved, source)
+	f.resolveCalls = append(f.resolveCalls, sinkAlarm{scope: scope, code: code, source: source})
 	for i, a := range f.active {
 		if a.scope == scope && a.code == code && a.source == source {
 			f.active = append(f.active[:i], f.active[i+1:]...)
@@ -292,6 +326,17 @@ func (f *fakeSink) Resolve(scope, code, source string) bool {
 		}
 	}
 	return false
+}
+
+// resolvedOf 按告警码取 Resolve 的 source 序列（按码断言，新增码不打乱既有计数）。
+func (f *fakeSink) resolvedOf(code string) []string {
+	var out []string
+	for _, c := range f.resolveCalls {
+		if c.code == code {
+			out = append(out, c.source)
+		}
+	}
+	return out
 }
 
 func (f *fakeSink) ActiveOf(scope string) []orchestrator.AlarmRef {
@@ -361,7 +406,7 @@ func TestCheckContainerAlarms(t *testing.T) {
 	// 正常退出（0）→ 消警
 	m.exitCodes["ct1"] = 0
 	p.CheckContainerAlarms(context.Background(), cfg)
-	if len(sink.resolved) != 1 {
+	if len(sink.resolvedOf(orchestrator.ContainerExited)) != 1 {
 		t.Fatalf("正常退出应消警: %v", sink.resolved)
 	}
 }
@@ -403,7 +448,7 @@ func TestCheckContainerAlarmsStoppedNotAlarmed(t *testing.T) {
 		if len(sink.raised) != 0 {
 			t.Fatalf("主动停止（退出码 %d）不应告警: %v", code, sink.raised)
 		}
-		if len(sink.active) != 0 || len(sink.resolved) != 1 {
+		if len(sink.active) != 0 || len(sink.resolvedOf(orchestrator.ContainerExited)) != 1 {
 			t.Fatalf("主动停止应消警: active=%+v resolved=%v", sink.active, sink.resolved)
 		}
 	}
@@ -565,5 +610,199 @@ func TestProviderContainerExec(t *testing.T) {
 	}
 	if m.execTimeout != 30*time.Second {
 		t.Fatalf("timeout<=0 应回落 30s，得 %v", m.execTimeout)
+	}
+}
+
+// ---------- 决策 #432：重启次数读数 + 崩溃重启循环告警 ----------
+
+// 读视图数据源：状态与重启次数**同一次 inspect** 取回；取不到时 restartKnown=false
+// （调用方据此省略字段，不回落为 0）。
+func TestContainerStatusRestartCount(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	m.states["ct1"] = orchestrator.CTStateRunning
+	m.restartCounts["ct1"] = 7
+
+	// ① 有值：状态与次数一起给出。
+	st, n, known, err := p.ContainerStatus(context.Background(), "ct1")
+	if err != nil || st != orchestrator.CTStateRunning || !known || n != 7 {
+		t.Fatalf("读数应为 running/7/known，得 %q %d %v %v", st, n, known, err)
+	}
+
+	// ② 契约状态把 restarting 并入 running（规格 #44 不改），但原始状态必须可判（巡检用）。
+	m.rawStates["ct1"] = "restarting"
+	if st, _, _, _ := p.ContainerStatus(context.Background(), "ct1"); st != orchestrator.CTStateRunning {
+		t.Fatalf("restarting 仍应映射为 running（规格 #44 不改）: %q", st)
+	}
+
+	// ③ 取不到：应答没有 RestartCount ⇒ known=false（不得冒充 0 次）。
+	m.restartUnknown["ct1"] = true
+	if st, n, known, err = p.ContainerStatus(context.Background(), "ct1"); err != nil ||
+		st != orchestrator.CTStateRunning || known || n != 0 {
+		t.Fatalf("取不到应为 known=false（不编造 0）: %q %d %v %v", st, n, known, err)
+	}
+
+	// ④ 容器不存在 ⇒ absent 且无错误、次数取不到。
+	if st, n, known, err = p.ContainerStatus(context.Background(), "ghost"); err != nil ||
+		st != orchestrator.CTStateAbsent || known || n != 0 {
+		t.Fatalf("不存在应为 absent/known=false: %q %d %v %v", st, n, known, err)
+	}
+
+	// ⑤ 底座不可达 ⇒ 归一为 ErrContainerUnavailable（API 503），不是「取不到 0 次」。
+	m.stateErr = fmt.Errorf("docker down")
+	if _, _, known, err = p.ContainerStatus(context.Background(), "ct1"); !errors.Is(err, orchestrator.ErrContainerUnavailable) || known {
+		t.Fatalf("底座不可达应报 ErrContainerUnavailable 且次数未知: %v known=%v", err, known)
+	}
+
+	// ⑥ ContainerState 与 ContainerStatus 同源（一次读数只 inspect 一次）。
+	m.stateErr = nil
+	m.restartUnknown["ct1"] = false
+	before := len(m.inspects)
+	if _, err := p.ContainerState(context.Background(), "ct1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.inspects) != before+1 {
+		t.Fatalf("单次读数应只 inspect 一次，实际 %v", m.inspects[before:])
+	}
+}
+
+// 崩溃重启循环：`restarting` 且重启次数**较上次巡检有增长**、**累计 ≥3** 才报
+// （warning `CONTAINER_RESTART_LOOP`）；转为非 restarting 即消警。
+func TestCheckContainerAlarmsRestartLoop(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	sink := &fakeSink{}
+	p.SetAlarms(sink)
+	cfg := model.Config{ContainerFunctions: []model.ContainerFunction{ctFixture("ct1")}}
+	ctx := context.Background()
+
+	// 首次巡检：契约状态 running（restarting 并入）、原始状态 restarting——无上一轮读数可比 ⇒ 不报。
+	m.states["ct1"] = orchestrator.CTStateRunning
+	m.rawStates["ct1"] = "restarting"
+	m.restartCounts["ct1"] = 1
+	if errs := p.CheckContainerAlarms(ctx, cfg); len(errs) != 0 {
+		t.Fatalf("巡检不应报错: %v", errs)
+	}
+	if len(sink.details) != 0 {
+		t.Fatalf("首轮无增长可比 ⇒ 不报: %+v", sink.details)
+	}
+	// 一次巡检一次 inspect（不为重启次数新增第二次查询）。
+	if len(m.inspects) != 1 {
+		t.Fatalf("每轮每容器应只 inspect 一次，实际 %v", m.inspects)
+	}
+
+	// 有增长但累计 <3 ⇒ 不报。
+	m.restartCounts["ct1"] = 2
+	p.CheckContainerAlarms(ctx, cfg)
+	if len(sink.details) != 0 {
+		t.Fatalf("累计 2 次不应报: %+v", sink.details)
+	}
+
+	// 有增长且累计 ≥3 ⇒ warning 报出。
+	m.restartCounts["ct1"] = 3
+	p.CheckContainerAlarms(ctx, cfg)
+	if len(sink.details) != 1 {
+		t.Fatalf("累计 3 次且有增长应报: %+v", sink.details)
+	}
+	d := sink.details[0]
+	if d.severity != orchestrator.SeverityWarning || d.code != orchestrator.ContainerRestartLoop || d.source != "ct1" {
+		t.Fatalf("告警级别/码/源不符: %+v", d)
+	}
+	for _, want := range []string{"ct1", "3", "request container-functions ct1 log", "docker inspect ct1"} {
+		if !strings.Contains(d.message, want) {
+			t.Errorf("告警文案应含 %q: %q", want, d.message)
+		}
+	}
+
+	// 仍在 restarting 但本次无增长 ⇒ 告警**保持活动**（每轮 Raise 是幂等更新：AlarmStore 对
+	// 同 code+source 的活动告警只刷新 message/severity、保留 RaisedAt；fakeSink 的 active 去重
+	// 同口径），且不得被消解。注意断言的是 active（不是 Raise 次数——判据不再要求增长，故每轮都会 Raise）。
+	m.restartCounts["ct1"] = 3
+	p.CheckContainerAlarms(ctx, cfg)
+	if len(sink.active) != 1 || len(sink.resolvedOf(orchestrator.ContainerRestartLoop)) != 0 {
+		t.Fatalf("无增长应保持既有告警: active=%v resolved=%v", sink.active, sink.resolved)
+	}
+
+	// 转为 running ⇒ 自动消解。
+	delete(m.rawStates, "ct1")
+	p.CheckContainerAlarms(ctx, cfg)
+	if len(sink.active) != 0 {
+		t.Fatalf("转 running 应消警: %+v", sink.active)
+	}
+}
+
+// 次数不增长**也报**（Docker 重启指数退避 ⇒ 两轮间未必涨）；次数低于门槛不报；计数回退（删除重建）后重新起算。
+func TestCheckContainerAlarmsRestartLoopNoGrowthStillReported(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	sink := &fakeSink{}
+	p.SetAlarms(sink)
+	cfg := model.Config{ContainerFunctions: []model.ContainerFunction{ctFixture("ct1")}}
+	ctx := context.Background()
+	m.states["ct1"] = orchestrator.CTStateRunning
+	m.rawStates["ct1"] = "restarting"
+	m.restartCounts["ct1"] = 5
+
+	// 两轮读数相同（次数 ≥3、两轮之间没涨）⇒ **仍应报**：Docker 重启有指数退避，成熟循环
+	// 40~60s 才涨一次而巡检 15s 一轮，「两轮都在涨」几乎不可达（真机实测：restart-count 15、
+	// 告警空）。restarting 本身即「没在服务、Docker 反复拉起」，次数门槛足够。
+	p.CheckContainerAlarms(ctx, cfg)
+	p.CheckContainerAlarms(ctx, cfg)
+	if len(sink.active) != 1 || sink.active[0].code != orchestrator.ContainerRestartLoop {
+		t.Fatalf("restarting 且累计 ≥3 应报（不要求两轮增长）: %+v", sink.active)
+	}
+
+	// 次数低于门槛（偶发一次自动重启）⇒ 不报（用全新 provider/sink：上面的告警已活动，
+	// 「次数变低」不会把它消掉——活动告警只在容器不再 restarting 或对象消失时消解）。
+	m2 := newMockDocker()
+	p2 := NewProvider(DefaultConfig(), m2)
+	sink2 := &fakeSink{}
+	p2.SetAlarms(sink2)
+	m2.states["ct1"] = orchestrator.CTStateRunning
+	m2.rawStates["ct1"] = "restarting"
+	m2.restartCounts["ct1"] = 2
+	p2.CheckContainerAlarms(ctx, cfg)
+	if len(sink2.active) != 0 {
+		t.Fatalf("累计低于门槛不应报: %+v", sink2.active)
+	}
+
+	// 计数回退 = 容器删除重建（Docker 计数从 0 起算）⇒ 按新值重新起算，不因旧计数大而永远追不上。
+	m2.restartCounts["ct1"] = 0
+	p2.CheckContainerAlarms(ctx, cfg)
+	if len(sink2.active) != 0 {
+		t.Fatalf("重建后计数 0 不应报: %+v", sink2.active)
+	}
+	m2.restartCounts["ct1"] = 3
+	p2.CheckContainerAlarms(ctx, cfg)
+	if len(sink2.active) != 1 || sink2.active[0].code != orchestrator.ContainerRestartLoop {
+		t.Fatalf("重建后重新起算应能报出: %+v", sink2.active)
+	}
+}
+
+// 对象从配置删除 ⇒ 崩溃重启循环告警随对账消解（沿用既有清警口径）。
+func TestCheckContainerAlarmsRestartLoopResolvesRemovedContainer(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	sink := &fakeSink{}
+	p.SetAlarms(sink)
+	sink.seed(orchestrator.RecoveryScopeContainer, orchestrator.ContainerRestartLoop, "walk-ct")
+	m.states["walk-ct"] = orchestrator.CTStateRunning
+	m.rawStates["walk-ct"] = "restarting"
+	m.restartCounts["walk-ct"] = 9
+	cfg := model.Config{ContainerFunctions: []model.ContainerFunction{{Name: "walk-ct", Image: "alpine:3.20"}}}
+
+	// 仍在循环（次数已记 9）：对象还在配置里 ⇒ 告警保留。
+	p.CheckContainerAlarms(context.Background(), cfg)
+	if len(sink.active) != 1 {
+		t.Fatalf("对象仍在配置里应保留告警: %+v", sink.active)
+	}
+
+	// 从配置删除 ⇒ 对账清警，且计数记忆一并丢弃。
+	p.CheckContainerAlarms(context.Background(), model.Config{})
+	if len(sink.active) != 0 {
+		t.Fatalf("已删除对象的告警应被清掉: %+v", sink.active)
+	}
+	if _, seen := p.restartSeenOf("walk-ct"); seen {
+		t.Fatal("计数记忆应随对象消失一并丢弃（有界）")
 	}
 }

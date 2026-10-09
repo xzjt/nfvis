@@ -182,6 +182,9 @@ type fakeContainer struct {
 	stateErr error
 	logsVal  string
 	logsErr  error
+	// 决策 #432：运行态读数（状态 + 重启次数）。
+	restartVal   int
+	restartKnown bool
 }
 
 func (f *fakeContainer) ApplyContainer(_ context.Context, ct model.ContainerFunction) error {
@@ -224,6 +227,14 @@ func (f *fakeContainer) ContainerState(_ context.Context, name string) (string, 
 	defer f.mu.Unlock()
 	f.states = append(f.states, name)
 	return f.stateVal, f.stateErr
+}
+
+// ContainerStatus 运行态读数（状态 + 重启次数，同一次 inspect；决策 #432）。
+func (f *fakeContainer) ContainerStatus(_ context.Context, name string) (string, int, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.states = append(f.states, name)
+	return f.stateVal, f.restartVal, f.restartKnown, f.stateErr
 }
 
 func (f *fakeContainer) ContainerLogs(_ context.Context, name string, _ int) (string, error) {
@@ -596,6 +607,11 @@ func TestContainerHolderDegradedSemantics(t *testing.T) {
 	if st, err := h.ContainerState(ctx, "ct-a"); err == nil || err.Error() != wantContainerBody || st != "" {
 		t.Fatalf("未接入 ContainerState 应报同文案错误: state=%q err=%v", st, err)
 	}
+	// ContainerStatus：同款错误且重启次数未知（读视图据此省略该字段；决策 #432）。
+	if st, n, known, err := h.ContainerStatus(ctx, "ct-a"); err == nil || err.Error() != wantContainerBody ||
+		st != "" || n != 0 || known {
+		t.Fatalf("未接入 ContainerStatus 应报同文案错误且次数未知: state=%q n=%d known=%v err=%v", st, n, known, err)
+	}
 	// 决策 #375（R142 B8）：未接入错误可被判为「底座不可用」——REST 层据此把容器 exec/shell
 	// 的 500 如实映射为 503（Docker 启动时即不可达的场景），且文案不变（CLI 逐字打印）。
 	if _, err := h.ContainerExec(ctx, "ct-a", "echo x", time.Second); !errors.Is(err, orchestrator.ErrContainerUnavailable) {
@@ -605,7 +621,8 @@ func TestContainerHolderDegradedSemantics(t *testing.T) {
 
 func TestContainerHolderForwardsAfterSwap(t *testing.T) {
 	h := newContainerHolder()
-	fake := &fakeContainer{stateVal: orchestrator.CTStateRunning, logsVal: "log line"}
+	fake := &fakeContainer{stateVal: orchestrator.CTStateRunning, logsVal: "log line",
+		restartVal: 4, restartKnown: true}
 	h.Swap(fake)
 	if !h.Connected() {
 		t.Fatal("Swap 后应处于已接入态")
@@ -629,6 +646,10 @@ func TestContainerHolderForwardsAfterSwap(t *testing.T) {
 	}
 	if st, err := h.ContainerState(ctx, "ct-a"); err != nil || st != orchestrator.CTStateRunning {
 		t.Fatalf("ContainerState 转发失败: state=%q err=%v", st, err)
+	}
+	if st, n, known, err := h.ContainerStatus(ctx, "ct-a"); err != nil || st != orchestrator.CTStateRunning ||
+		!known || n != 4 {
+		t.Fatalf("ContainerStatus 转发失败: state=%q n=%d known=%v err=%v", st, n, known, err)
 	}
 	if out, err := h.ContainerLogs(ctx, "ct-a", 50); err != nil || out != "log line" {
 		t.Fatalf("ContainerLogs 转发失败: out=%q err=%v", out, err)

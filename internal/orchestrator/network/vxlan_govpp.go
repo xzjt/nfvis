@@ -99,7 +99,7 @@ func (g *govppVxlanClient) FindTagged(prefix string) (map[string]TaggedIface, er
 	out := map[string]TaggedIface{}
 	for {
 		d := &ifapi.SwInterfaceDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}

@@ -1,7 +1,9 @@
 package system
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -285,4 +287,157 @@ func TestEnsureHugepageSysctlFromCmdlinePrefersGrubFragment(t *testing.T) {
 	if strings.Contains(string(b), "vm.nr_hugepages = 2\n") {
 		t.Fatalf("不得按当前运行 cmdline 的 1G 池声明值 2 钉（池身份错位）：%q", b)
 	}
+}
+
+// 决策 #423：90 号文件的注释必须**与实况一致**——不单方面声称「vpp 的 80 号文件已由
+// dpkg-divert 挪走」（round3 走查现场：divert 列表为空、80 号原样在场，而注释却写已接管，
+// 操作者据此误判），改为「接管状态以 divert 记录为准」并给出查证方式。
+func TestGenerateHugepageSysctlCommentTruthful(t *testing.T) {
+	got := GenerateHugepageSysctl(KernelDesired{DefaultHugepageSize: "2M", Hugepages2M: 768})
+	if got == "" {
+		t.Fatal("默认尺寸 2M 且声明 768 时应产出片段")
+	}
+	if !strings.Contains(got, "以 divert 记录为准") {
+		t.Fatalf("注释应写明接管状态以 divert 记录为准：%q", got)
+	}
+	if !strings.Contains(got, "dpkg-divert --list "+VppSysctlPath) {
+		t.Fatalf("注释应给出查证方式（dpkg-divert --list 原路径）：%q", got)
+	}
+	if strings.Contains(got, "已由 dpkg-divert 挪到") {
+		t.Fatalf("不得单方面声称已接管（与实况可能不符）：%q", got)
+	}
+}
+
+// 决策 #423：运行期接管 vpp 包的 80 号 conffile（dpkg-divert → .vpp-disabled），接管状态以
+// **divert 记录**为准（原路径在场也不重复接管）；接管成功同批次按当前声明重写 90 号文件。
+// 五处幂等/边界：已接管不重复执行、未接管且文件在场则接管一次、文件不在则跳过（连查询都不做）、
+// 无 dpkg-divert 则不动作、查询失败如实报错。
+func TestVppSysctlTakeoverEnsure(t *testing.T) {
+	lookOK := func(string) (string, error) { return "/usr/bin/dpkg-divert", nil }
+	// 记录命令的假 Runner：--list 按 *diverted 返回接管记录，--add（--package 开头）模拟
+	// 真实的 divert 生效（此后 --list 有记录），其余命令回空。
+	newFake := func(diverted *bool) (*[]string, Runner) {
+		var calls []string
+		runner := func(_ context.Context, name string, args ...string) (string, error) {
+			calls = append(calls, strings.Join(append([]string{name}, args...), " "))
+			if len(args) == 0 {
+				return "", nil
+			}
+			switch args[0] {
+			case "--list":
+				if *diverted {
+					return "diversion of " + args[1] + " to " + args[1] + ".vpp-disabled by " +
+						vppSysctlDivertPkg + "\n", nil
+				}
+				return "", nil
+			case "--package":
+				*diverted = true
+			}
+			return "", nil
+		}
+		return &calls, runner
+	}
+	cmdline := "BOOT_IMAGE=/vmlinuz ro default_hugepagesz=2M hugepagesz=2M hugepages=768\n"
+	no := func() *bool { f := false; return &f }
+
+	t.Run("已接管：不重复执行", func(t *testing.T) {
+		root := t.TempDir()
+		// 即便原路径仍在（例如手工把文件放回来），有 divert 记录即视为已接管——判据不是存在性。
+		writeProc(t, root, VppSysctlPath, "vm.nr_hugepages=1024\n")
+		writeProc(t, root, "/proc/cmdline", cmdline)
+		calls, runner := newFake(func() *bool { y := true; return &y }())
+		changed, err := (&VppSysctlTakeover{Root: root, Runner: runner, LookPath: lookOK}).
+			Ensure(context.Background())
+		if err != nil || changed {
+			t.Fatalf("已接管不应报告接管动作（changed=%v err=%v）", changed, err)
+		}
+		if len(*calls) != 1 || !strings.HasPrefix((*calls)[0], "dpkg-divert --list ") {
+			t.Fatalf("已接管只允许查询一次，不得再执行接管：%v", *calls)
+		}
+		if _, err := os.Stat(root + hugepageSysctlRel); !os.IsNotExist(err) {
+			t.Fatalf("已接管时不应改动 90 号文件（%v）", err)
+		}
+	})
+
+	t.Run("未接管且文件在场：接管一次并按声明写 90 号；再次调用幂等", func(t *testing.T) {
+		root := t.TempDir()
+		writeProc(t, root, VppSysctlPath, "vm.nr_hugepages=1024\nvm.hugetlb_shm_group=0\n")
+		writeProc(t, root, "/proc/cmdline", cmdline)
+		diverted := no()
+		calls, runner := newFake(diverted)
+		d := &VppSysctlTakeover{Root: root, Runner: runner, LookPath: lookOK}
+		changed, err := d.Ensure(context.Background())
+		if err != nil || !changed {
+			t.Fatalf("未接管且文件在场应执行接管（changed=%v err=%v）", changed, err)
+		}
+		if len(*calls) != 2 {
+			t.Fatalf("应恰好执行一次接管（查询 + 接管）：%v", *calls)
+		}
+		wantCmd := "dpkg-divert --package " + vppSysctlDivertPkg + " --add --rename --divert " +
+			join(root, VppSysctlDisabledPath) + " " + join(root, VppSysctlPath)
+		if (*calls)[1] != wantCmd {
+			t.Fatalf("接管命令应与安装期口径逐字一致\n  期望: %s\n  实得: %s", wantCmd, (*calls)[1])
+		}
+		b, err := os.ReadFile(root + hugepageSysctlRel)
+		if err != nil {
+			t.Fatalf("接管后应写 90 号文件: %v", err)
+		}
+		if !strings.Contains(string(b), "vm.nr_hugepages = 768") ||
+			!strings.Contains(string(b), "vm.hugetlb_shm_group = 0") {
+			t.Fatalf("90 号文件应按当前声明重写：%q", b)
+		}
+		// 幂等：接管记录已出现，第二次调用不再执行接管命令。
+		before := len(*calls)
+		if changed, err := d.Ensure(context.Background()); err != nil || changed {
+			t.Fatalf("第二次调用不应再接管（changed=%v err=%v）", changed, err)
+		}
+		if len(*calls) != before+1 || !strings.HasPrefix((*calls)[before], "dpkg-divert --list ") {
+			t.Fatalf("第二次调用只应查询一次：%v", *calls)
+		}
+	})
+
+	t.Run("文件不在：跳过（非错误，留给下一次）", func(t *testing.T) {
+		root := t.TempDir()
+		writeProc(t, root, "/proc/cmdline", cmdline)
+		calls, runner := newFake(no())
+		changed, err := (&VppSysctlTakeover{Root: root, Runner: runner, LookPath: lookOK}).
+			Ensure(context.Background())
+		if err != nil || changed {
+			t.Fatalf("文件不在应静默跳过（changed=%v err=%v）", changed, err)
+		}
+		if len(*calls) != 0 {
+			t.Fatalf("文件不在时不得执行任何命令（稳态每轮只做一次 stat）：%v", *calls)
+		}
+		if _, err := os.Stat(root + hugepageSysctlRel); !os.IsNotExist(err) {
+			t.Fatalf("未发生接管时不应写 90 号文件（%v）", err)
+		}
+	})
+
+	t.Run("无 dpkg-divert：跳过且不执行任何命令", func(t *testing.T) {
+		root := t.TempDir()
+		writeProc(t, root, VppSysctlPath, "vm.nr_hugepages=1024\n")
+		calls, runner := newFake(no())
+		d := &VppSysctlTakeover{Root: root, Runner: runner,
+			LookPath: func(string) (string, error) { return "", exec.ErrNotFound }}
+		changed, err := d.Ensure(context.Background())
+		if err != nil || changed {
+			t.Fatalf("无 dpkg-divert 应跳过（changed=%v err=%v）", changed, err)
+		}
+		if len(*calls) != 0 {
+			t.Fatalf("无 dpkg-divert 时不得执行任何命令：%v", *calls)
+		}
+	})
+
+	t.Run("查询失败：如实报错（不静默吞）", func(t *testing.T) {
+		root := t.TempDir()
+		writeProc(t, root, VppSysctlPath, "vm.nr_hugepages=1024\n")
+		runner := func(context.Context, string, ...string) (string, error) {
+			return "dpkg-divert: error: 读取数据库失败\n", exec.ErrNotFound
+		}
+		changed, err := (&VppSysctlTakeover{Root: root, Runner: runner, LookPath: lookOK}).
+			Ensure(context.Background())
+		if err == nil || changed {
+			t.Fatalf("查询失败须返回错误（changed=%v err=%v）", changed, err)
+		}
+	})
 }

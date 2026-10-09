@@ -16,6 +16,8 @@ type fakeSvc struct {
 	mtu      map[uint32]uint32
 	state    map[uint32]bool
 	spans    []string
+	spanFrom []uint32
+	spanTo   []uint32
 	spanOff  []uint32
 	policers map[string]uint32
 	nextIdx  uint32
@@ -81,6 +83,8 @@ func (f *fakeSvc) SpanSet(from, to uint32, state string, _ bool) error {
 		return f.err
 	}
 	f.spans = append(f.spans, state)
+	f.spanFrom = append(f.spanFrom, from)
+	f.spanTo = append(f.spanTo, to)
 	return nil
 }
 
@@ -149,6 +153,10 @@ func TestSpanApplyAndDelete(t *testing.T) {
 	if len(f.spans) != 1 || f.spans[0] != "rx" {
 		t.Fatalf("ingress 应为 rx: %v", f.spans)
 	}
+	// 物理口路径不回归：源=ens192(1) 分析口=ens256(3) 的索引原样传给 span 原语
+	if len(f.spanFrom) != 1 || f.spanFrom[0] != 1 || f.spanTo[0] != 3 {
+		t.Fatalf("物理口源应把 ens192(1)→ens256(3) 的索引传给 span: from=%v to=%v", f.spanFrom, f.spanTo)
+	}
 	if err := p.DeleteSpan(context.Background(), "pm1"); err != nil {
 		t.Fatalf("DeleteSpan: %v", err)
 	}
@@ -164,10 +172,123 @@ func TestSpanApplyAndDelete(t *testing.T) {
 	if f2.spans[0] != "rx_tx" {
 		t.Fatalf("缺省应 rx_tx: %v", f2.spans)
 	}
-	// VNF 源不支持
+	// VNF 源（决策 #425）：按确定性 vhost-user 口名解析后下发；该口不在数据面时
+	// 报可照做的错误（不得静默成功、也不得静默忽略源）。
 	if err := NewServicesProvider(newFakeSvc()).ApplySpan(context.Background(),
-		model.PortMirroring{Name: "pm3", Source: model.PMSource{Vnf: "vm1"}, Analyzer: "ens256"}); err == nil {
-		t.Fatalf("VNF 源应报 M4")
+		model.PortMirroring{Name: "pm3", Source: model.PMSource{Vnf: "vm1", VnfInterface: "eth0"},
+			Analyzer: "ens256"}); err == nil || !strings.Contains(err.Error(), "vh-vm1-eth0") {
+		t.Fatalf("VNF 源解析不到口应报错并点名 vh-vm1-eth0: %v", err)
+	}
+}
+
+// TestSpanApplyVnicSource 决策 #425：VNF vNIC 作镜像源——解析为确定性 vhost-user 口名
+// （`vh-<vm>-<vnic>`，与建接口/交换机端口/校验层同一份命名规则）后走**既有 span 原语**，
+// 与物理口同一路径；删除按登记关闭同一个源索引。
+func TestSpanApplyVnicSource(t *testing.T) {
+	f := newFakeSvc()
+	f.ifaces["vh-fw-vm-eth0"] = 20
+	p := NewServicesProvider(f)
+	ctx := context.Background()
+	pm := model.PortMirroring{Name: "pm-vnic",
+		Source:   model.PMSource{Vnf: "fw-vm", VnfInterface: "eth0", Direction: "both"},
+		Analyzer: "ens224"}
+	if err := p.ApplySpan(ctx, pm); err != nil {
+		t.Fatalf("ApplySpan(vNIC 源): %v", err)
+	}
+	if len(f.spans) != 1 || f.spans[0] != "rx_tx" {
+		t.Fatalf("both 应为 rx_tx: %v", f.spans)
+	}
+	if len(f.spanFrom) != 1 || f.spanFrom[0] != 20 || f.spanTo[0] != 2 {
+		t.Fatalf("源应为 vhost 口 vh-fw-vm-eth0(20)、分析口 ens224(2)，实际 from=%v to=%v",
+			f.spanFrom, f.spanTo)
+	}
+	if err := p.DeleteSpan(ctx, "pm-vnic"); err != nil {
+		t.Fatalf("DeleteSpan: %v", err)
+	}
+	if len(f.spanOff) != 1 || f.spanOff[0] != 20 {
+		t.Fatalf("关闭应按登记用同一个 vhost 口索引(20): %v", f.spanOff)
+	}
+	if svcSpanTracked(p, "pm-vnic") {
+		t.Fatal("关闭成功后登记应摘除")
+	}
+}
+
+// TestSpanApplyVnicSourceLongNameUsesSharedNaming 决策 #425 的「复用同一实现」守护：
+// (vm, vNIC) 拼接超过 63 字节时，口名走 ifacename.go 的哈希回退（`vh-<8位哈希>`）——
+// 用同一函数算出期望名放进假客户端，若实现里另写一套命名（截断/其它规则）就解析不到、
+// ApplySpan 会失败。同时钉住「长名仍可用」这一 vNIC 侧既有行为。
+func TestSpanApplyVnicSourceLongNameUsesSharedNaming(t *testing.T) {
+	vm := strings.Repeat("v", 40)
+	nic := strings.Repeat("n", 30)
+	want := model.VnfIfaceName(vm, nic) // 与实现同一真源：>63 字节 ⇒ vh-<8位哈希>
+	if len(want) > 63 || !strings.HasPrefix(want, "vh-") {
+		t.Fatalf("前置：长名应回退为不超过 63 字节的 vh-<哈希>，实得 %q", want)
+	}
+	if len(strings.TrimPrefix(want, "vh-")) != 8 {
+		t.Fatalf("前置：哈希形态应为 vh-<8位十六进制>，实得 %q", want)
+	}
+	f := newFakeSvc()
+	f.ifaces[want] = 21
+	if err := NewServicesProvider(f).ApplySpan(context.Background(), model.PortMirroring{
+		Name:     "pm-long",
+		Source:   model.PMSource{Vnf: vm, VnfInterface: nic, Direction: "ingress"},
+		Analyzer: "ens224"}); err != nil {
+		t.Fatalf("长名 vNIC 源应按共享命名解析成功: %v", err)
+	}
+	if len(f.spanFrom) != 1 || f.spanFrom[0] != 21 {
+		t.Fatalf("应按哈希口名(21)解析: %v", f.spanFrom)
+	}
+}
+
+// TestSpanApplyVnicSourceMissingIfaceActionable 决策 #425：解析不到口时**可照做**——
+// 错误点名 vhost 口名与来源(vnf/vNIC)、给出替代（物理口/bond）与前置（先声明 vNIC）；
+// 归为 ErrIfaceUnavailable（恢复收敛据此转「接口缺失」级告警，而不是含糊的未收敛）；
+// 且**不得**下发任何 span（不制造半截镜像）。
+func TestSpanApplyVnicSourceMissingIfaceActionable(t *testing.T) {
+	f := newFakeSvc()
+	err := NewServicesProvider(f).ApplySpan(context.Background(), model.PortMirroring{
+		Name:     "pm-x",
+		Source:   model.PMSource{Vnf: "fw-vm", VnfInterface: "eth0", Direction: "ingress"},
+		Analyzer: "ens224"})
+	if err == nil {
+		t.Fatal("vNIC 口不在数据面应报错")
+	}
+	if !errors.Is(err, ErrIfaceUnavailable) {
+		t.Fatalf("应归为接口不可用（ErrIfaceUnavailable）: %v", err)
+	}
+	for _, want := range []string{"vh-fw-vm-eth0", "fw-vm", "eth0", "物理口", "sriov-vf", "声明"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("错误应含 %q（可照做）: %v", want, err)
+		}
+	}
+	if len(f.spans) != 0 {
+		t.Fatalf("解析失败不得下发 span: %v", f.spans)
+	}
+}
+
+// TestSpanApplyVnicSourceQueryErrorPropagates 查询失败 ≠ 口不存在（同 #393 口径）：
+// SwInterfaceIndex 报错时如实上抛底层错误，不把它当成「口不存在」或静默成功。
+func TestSpanApplyVnicSourceQueryErrorPropagates(t *testing.T) {
+	f := newFakeSvc()
+	f.ifaces["vh-fw-vm-eth0"] = 20
+	f.idxErr = func(ifname string) error {
+		if ifname == "vh-fw-vm-eth0" {
+			return errors.New("vpp 查询失败")
+		}
+		return nil
+	}
+	err := NewServicesProvider(f).ApplySpan(context.Background(), model.PortMirroring{
+		Name:     "pm-q",
+		Source:   model.PMSource{Vnf: "fw-vm", VnfInterface: "eth0", Direction: "both"},
+		Analyzer: "ens224"})
+	if err == nil || !strings.Contains(err.Error(), "vpp 查询失败") {
+		t.Fatalf("查询失败应上抛底层错误: %v", err)
+	}
+	if strings.Contains(err.Error(), "不存在") {
+		t.Fatalf("查询失败不得答成「不存在」: %v", err)
+	}
+	if len(f.spans) != 0 {
+		t.Fatalf("查询失败不得下发 span: %v", f.spans)
 	}
 }
 

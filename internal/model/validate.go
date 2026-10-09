@@ -67,7 +67,8 @@ type validator struct {
 	aclNames   map[string]bool
 	qosNames   map[string]bool
 	vmNames    map[string]bool
-	vmVnics    map[string]bool // "vm/vnic"
+	vmVnics    map[string]bool   // "vm/vnic"
+	vmVnicType map[string]string // "vm/vnic" -> 接入类型（vhost-user|sriov-vf|memif）
 	ctNames    map[string]bool
 	ctVnics    map[string]bool // "ct/vnic"
 	vnicNames  map[string]bool // 配置已声明 vNIC 的 VPP 侧确定性名（vh-/mf-，见 ifacename.go）
@@ -250,10 +251,12 @@ func (v *validator) collect(c Config) {
 		v.qosNames[q.Name] = true
 	}
 	v.vmNames, v.vmVnics, v.vnicNames = map[string]bool{}, map[string]bool{}, map[string]bool{}
+	v.vmVnicType = map[string]string{}
 	for _, m := range c.VirtualMachineFunctions {
 		v.vmNames[m.Name] = true
 		for _, nic := range m.Interfaces {
 			v.vmVnics[m.Name+"/"+nic.Name] = true
+			v.vmVnicType[m.Name+"/"+nic.Name] = nic.Type
 			// VPP 侧接口名只对 vhost-user 类型的 vNIC 存在（与 orchestrator.VnfPortsOf
 			// 的过滤口径一致：type 必须显式为 vhost-user，sriov-vf 不进 VPP）。
 			if nic.Type == "vhost-user" {
@@ -1687,8 +1690,14 @@ func (v *validator) checkPortMirroring(c Config) {
 		}
 		if src.Vnf != "" {
 			kinds++
-			if !v.vmVnics[src.Vnf+"/"+src.VnfInterface] {
+			key := src.Vnf + "/" + src.VnfInterface
+			if !v.vmVnics[key] {
 				v.errf(p+".source", "源 VNF %q 的 vNIC %q 不存在", src.Vnf, src.VnfInterface)
+			} else if v.vmVnicType[key] == "sriov-vf" {
+				// 决策 #430①：sriov-vf 型 vNIC 是 PCI 直通，不经过 VPP/内核桥，作为镜像源
+				// 永远收不到流量。能前置判定的不留给下发期——两数据面一致地**提交期拒绝**并给替代。
+				v.errf(p+".source", "源 VNF %q 的 vNIC %q 是 sriov-vf（PCI 直通）型，不经过数据面交换机，"+
+					"作为镜像源收不到流量；请改用 vhost-user 型 vNIC，或把源换成物理口/bond", src.Vnf, src.VnfInterface)
 			}
 		}
 		if kinds != 1 {

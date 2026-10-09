@@ -42,6 +42,12 @@ type Provider struct {
 	// 只进 journal，`show alarms`/Web 总览/诊断包/`/events` 全查不到，与 #191/#321/#333
 	// 建立的「未收敛项必须事后可查」纪律冲突。装配期注入，未注入即只返回错误（测试/工具场景）。
 	alarms *network.AlarmStore
+
+	// heldPort 探测「该口内核里没有、但仍被某个驱动（vfio-pci 等 DPDK 驱动）占用」，
+	// 返回 (驱动名, PCI, ok)。用于恢复收敛的未收敛项**如实点名**（决策 #426③）：切换
+	// 数据面时 VPP 时代接管过的口留在 vfio-pci，内核里根本没有它，只报底座的
+	// `Cannot find device` 看不出该怎么处置。未注入即不判定（测试/工具场景）。
+	heldPort func(ifname string) (driver, pci string, ok bool)
 }
 
 // 告警作用域与码（内核数据面）。
@@ -64,6 +70,24 @@ const (
 
 // SetAlarms 注入告警表（恢复收敛未收敛项、物理口链路、转发前置条件的落点；可空）。
 func (p *Provider) SetAlarms(a *network.AlarmStore) { p.alarms = a }
+
+// SetHeldPortProbe 注入「该口仍被 DPDK 驱动占用」的探测（决策 #426③；nil = 不判定）。
+//
+// 装配处接 DPDK 绑定记录 + sysfs：内核里没有这个口、但能按 PCI 解析到它且当前绑定着某个
+// 驱动，即切换数据面留下的 DPDK 残留。探测取不到（没有记录、读不出来）就当做不到——
+// 恢复收敛退回底座的原始错误，不猜。
+func (p *Provider) SetHeldPortProbe(fn func(ifname string) (driver, pci string, ok bool)) {
+	p.heldPort = fn
+}
+
+// KernelIfaceInUse 判定某网口此刻是否正被内核数据面使用（决策 #426②的解绑前守卫接口）。
+//
+// 装配处把它接到 DPDK 接管的写路径上：内核数据面下解绑（把网卡交还内核）前先问内核
+// 「这个口还是某个数据面设备的一部分吗」——口仍被使用（bridge/bond/VRF 成员、带地址）
+// 时拒绝并给照做路径，而不是直接动它（正在转发时解绑会中断该口流量）。
+func (p *Provider) KernelIfaceInUse(ctx context.Context, ifname string) (bool, string, error) {
+	return p.rt().IfaceInUse(ctx, ifname)
+}
 
 // 编译期断言：本包必须完整实现 NetworkProvider（缺方法即编译失败，不靠运行时才发现）。
 var _ orchestrator.NetworkProvider = (*Provider)(nil)

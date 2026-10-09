@@ -89,8 +89,35 @@ type KernelIfFacts struct {
 	MTU       int
 }
 
+// KernelIfReasonKind 内核数据面下「已声明却未进数据面」的原因类别（决策 #431）。
+const (
+	// KernelIfReasonVFIO 该口内核里没有 netdev、仍被某个 DPDK 驱动（vfio-pci 等）占用
+	// ——切换数据面留下的 DPDK 残留，需先交还内核。
+	KernelIfReasonVFIO = "vfio"
+	// KernelIfReasonNetworkdDown 该口在内核里，但被 systemd-networkd 的链路策略持有为 down
+	// （netplan 的 `activation-mode: off` → `[Link] ActivationPolicy=always-down`）。
+	KernelIfReasonNetworkdDown = "networkd-down"
+)
+
+// KernelIfReason 内核数据面下某物理口「已声明却未进数据面」的原因（决策 #431）。
+//
+// 只承载**探测到的事实**，不含用户可见文案（文案渲染在 API 读视图层）。Kind 为空/未知时
+// 调用方按「取不到原因」处理（沿用既有「已声明未生效」）。
+type KernelIfReason struct {
+	Kind   string // KernelIfReasonVFIO | KernelIfReasonNetworkdDown
+	Driver string // VFIO：当前占用该口的 DPDK 驱动名
+	PCI    string // VFIO：PCI 地址
+}
+
 // KernelIfFacts 内核侧物理口事实清单（顺序与 KernelIfnames 一致：按名排序去重）。
 func (n *L2Network) KernelIfFacts() ([]KernelIfFacts, error) { return KernelIfFactsAll() }
+
+// KernelIfNotInDPReason 内核数据面下「已声明却未进数据面」的原因（决策 #431）。
+// VPP 数据面不适用（物理口要么已交 DPDK、要么仍在内核），如实返回「取不到」——
+// API 读视图只在**内核数据面**下查询它，VPP 下的既有渲染不受影响。
+func (n *L2Network) KernelIfNotInDPReason(string) (KernelIfReason, bool) {
+	return KernelIfReason{}, false
+}
 
 // KernelIfFactsAll 内核侧物理口事实的包级入口（内核数据面实现复用同一份 sysfs 读法）。
 func KernelIfFactsAll() ([]KernelIfFacts, error) {

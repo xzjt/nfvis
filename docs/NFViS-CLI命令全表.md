@@ -115,7 +115,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show virtual-machine-functions <name> statistics` | vhost-user 口计数（经 VPP） | `GET /virtual-machine-functions/{name}`（statistics 字段） | ✅ |
 | `show virtual-machine-functions <name> snapshots` | 快照列表 | `GET /virtual-machine-functions/{name}/snapshots` | ✅ |
 | `show container-functions` | 容器列表 | `GET /container-functions` | ✅ |
-| `show container-functions <name> [detail]` | 容器详情 | `GET /container-functions/{name}` | ✅ |
+| `show container-functions <name> [detail]` | 容器详情（含运行态 `state` 与 `restart-count`＝Docker `RestartCount`；重启次数**取不到时不显示该字段**） | `GET /container-functions/{name}` | ✅ |
 | `show container-functions <name> interfaces` | memif vNIC 列表 | 同上 | ✅ |
 | `show images` | 镜像仓库列表 | `GET /images` | ✅ |
 | `show images <name> detail` | 类型/大小/sha256/引用计数 | `GET /images/{name}` | ✅ |
@@ -161,7 +161,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request virtual-machine-functions <n> delete` | 删除 VNF（级联 vNIC/VPP 端口/快照） | S | `DELETE /virtual-machine-functions/{n}` | 🚫 交互确认（`Delete VNF 'x'? [yes,no]`；非交互拒绝） |
 | `request container-functions <n> start` | 启动容器 | O | `POST /container-functions/{n}:start` | ✅ |
 | `request container-functions <n> stop` | 停止容器 | O | `POST /container-functions/{n}:stop` | ✅ |
-| `request container-functions <n> restart` | 重启容器 | O | `POST /container-functions/{n}:restart` | ✅ |
+| `request container-functions <n> restart` | 重启容器 | O | `POST /container-functions/{n}:restart` | ✅（**改配置后 restart 不换规格**：容器规格在创建时写进 Docker——改镜像/命令/参数/环境/资源后，restart 与 stop+start 都沿用旧规格，需**删除重建**才生效；状态读数把 docker 的 restarting 并入 running，崩溃重启循环看 `show container-functions <n>` 的 `restart-count`，另看 `log`、宿主 `docker inspect` 的 `RestartCount` 与 `CONTAINER_RESTART_LOOP` 告警） |
 | `request container-functions <n> log [last <n>]` | 容器 stdout/stderr | O | `GET /container-functions/{n}/logs` | ✅ |
 | `request container-functions <n> exec <command> [timeout <seconds>]` | 在**运行中**的容器内执行命令（非交互；`<command>` 是整体、含空格请加引号；等价容器内 `sh -c`）；超时默认 30s（1..300）、stdout/stderr 各自上限 256 KiB（超限置 truncated）；**超时只中止客户端等待**（Docker 无 exec 中止接口，容器内进程可能仍在跑）、退出码未知时不报（决策 #357） | S | `POST /container-functions/{n}:exec` | ✅（真机四维（round138，含 Browser Use）；已入 fulltest——`docs/evidence/v2-round138-d357-container-exec.txt`） |
 | `request container-functions <n> shell` | **交互式终端**：进容器里的 `sh`（TTY；Ctrl-] 退出）。与 VM 串口 console **同一套管线**（一次性 ticket + WebSocket + CLI raw 接管），底座是 Docker exec 的 TTY 形态；**断开只关产品侧桥接**（WS 断开后容器内 shell 进程**可能仍在**，真机实测；Docker 无 exec 中止接口）；不做窗口尺寸同步（决策 #358） | S | `POST /container-functions/{n}/shell` + `GET …/shell/ws?ticket=…` | ✅（真机 pty 四维 + Browser Use（round139）——`docs/evidence/v2-round139-d358-container-shell.txt`） |
@@ -171,8 +171,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request images delete name <n>` | 删除镜像（引用检查） | S | `DELETE /images/{n}` | ✅ |
 | `request interfaces <ifname> enable` | 启用接口 | O | `PUT /interfaces/{n}` | ✅ |
 | `request interfaces <ifname> disable` | 禁用接口 | O | `PUT /interfaces/{n}` | ✅ |
-| `request interfaces <ifname> bind-dpdk [uio-driver <d>]` | 绑定 DPDK 驱动（中断流量，需确认） | O | `PUT /interfaces/{n}/dpdk` | ✅（真机周期见决策 #72） |
-| `request interfaces <ifname\|pci> unbind-dpdk [to-driver <d>]` | 解绑交还内核驱动 | O | `PUT /interfaces/{n}/dpdk` | ✅（提示确认；接管后须按 PCI） |
+| `request interfaces <ifname> bind-dpdk [uio-driver <d>]` | 绑定 DPDK 驱动（中断流量，需确认）。**内核数据面（`system.dataplane=kernel`）下直接拒绝**——内核数据面不使用 DPDK 接管，绑定会把网卡从内核里拿走（需要 DPDK 请切回 `vpp` 数据面并重启服务） | O | `PUT /interfaces/{n}/dpdk` | ✅（真机周期见决策 #72；内核方向拒绝见附录 A #426） |
+| `request interfaces <ifname\|pci> unbind-dpdk [to-driver <d>]` | 解绑交还内核驱动。**内核数据面下同样可用（用于把网卡交还内核）**：VPP 时代接管过的口在切到内核后仍留在 vfio-pci，交还后才能进内核数据面（切换时 nfvisd 会自动停掉 VPP，见手册 §7.0/§7.5）；两数据面下解绑前都会拒绝**仍被数据面使用中**的口（VPP 侧问 VPP、内核侧问内核：bridge/bond/VRF 成员口或带 IP 地址），并给先删声明的照做路径 | O | `PUT /interfaces/{n}/dpdk` | ✅（提示确认；接管后须按 PCI） |
 | `request sriov create-vfs <ifname> count <n>` | 创建 VF | O | `PUT /interfaces/{n}/sriov` | ⊘ 本机无 PF/VF，明确报错（round80 实测：报「不支持 SR-IOV」，未静默成功） |
 | `request sriov delete-vfs <ifname> vf <n>` | 回收 VF | O | `PUT /interfaces/{n}/sriov` | ⊘ 同上（另：`vf <n>` 不参与定位——按数量回收，回显已明确说明，附录 A #94） |
 | `request vpp restart` | 按 committed 配置重建数据面 + 恢复收敛 | S | `POST /vpp/restart` | ✅（返回成功即代表数据面可查询：等 VPP 起来**且**连接管理器换成新连接才返回；未重建则如实报「数据面连接在重启窗口内不可用」+ 指引，附录 A #315） |
@@ -364,7 +364,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set nat rules <seq> match source <p> virtual-switch <n> action interface <if> [source-pool <n>]` | 转换规则（出接口必填，决策 #38/#52） | VPP nat44 | ✅ |
 | `set nat static <inside> to <outside>` | 1:1 静态发布 | VPP nat44 | ✅ |
 | `set port-mirroring <n> source interface <if> direction <i\|e\|both>` | SPAN 源（物理口） | VPP span | ✅ |
-| `set port-mirroring <n> source vnf <vm> interface <vnic> direction <…>` | SPAN 源（vNIC） | VPP span | ✅ |
+| `set port-mirroring <n> source vnf <vm> interface <vnic> direction <…>` | SPAN 源（VNF 的 vNIC）：下发时按**确定性 vhost-user 口名** `vh-<vm>-<vnic>` 解析（与建 vNIC 接口/交换机端口同一命名规则），再走与物理口**同一条** span 原语。**前置：该 vNIC 口须已在数据面**——vhost-user 口随 vNIC 声明建立（VM 未启动也有此口，只是 link down、镜像是就绪的没有流量）；解析不到即提交失败并给出照做路径（先声明/下发该 vNIC、或改用物理口）；**sriov-vf（PCI 直通）型 vNIC 不经过数据面交换机、收不到流量，作为镜像源在提交期直接拒绝**（两数据面一致），请改用 vhost-user 型 vNIC 或物理口/bond | VPP span | 🚫 **真机复验待执行**（实现已入仓：解析路径/解析失败的可照做错误/物理口不回归均有单测；round3 走查登记的「提交期放行、下发期拒绝并整次回滚」已消除） |
 | `set port-mirroring <n> analyzer interface <if>` | 分析口 | VPP span | ✅ |
 | `set qos policies <n> cir <n> cbs <n>` | 限速策略（bps/bytes） | VPP policer | ✅ |
 | `set vxlan tunnels <n> vni <id> local <ip> remote <ip> [dst-port <n>] [virtual-switch <vs>]` | VXLAN overlay 隧道（单播 remote、IPv4 下垫层）：建/改；`virtual-switch` 给了就把隧道口加入该 **L2** 交换机的 bridge-domain；改 `vni/local/remote/dst-port` 时**先按旧配置的元组撤旧、再建新**（不给旧隧道留残留；旧元组来自提交 diff，不依赖 vxlan dump）；建隧后打平台接口标记（`nfvis-vxlan:<名>`）——恢复重放按它判存量；`dst-port` 缺省 4789 | VPP vxlan plugin（`vxlan_add_del_tunnel_v3` + 打标 + 置 up + 入 BD） | ✅（round164 真机四维：建隧逐字对（`vppctl show vxlan tunnel`）/改 remote 撤旧/restart nfvis 不重复建/vpp restart 重放/对抗双拒——`docs/evidence/v2-round164-d383-vxlan.txt`） |
@@ -479,11 +479,11 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 286 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）、**主机防火墙 5 行（#388，round169）**、**`set system dataplane`（v3 round1：干净快照两次切换 + 切回 vpp 实证，`docs/evidence/v3-round1-clean-snapshot-datapath-switch.txt` §4/§5）**——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，按增量口径一并订正 |
+| ✅ 实测通过 | 285 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）、**主机防火墙 5 行（#388，round169）**、**`set system dataplane`（v3 round1：干净快照两次切换 + 切回 vpp 实证，`docs/evidence/v3-round1-clean-snapshot-datapath-switch.txt` §4/§5）**——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，按增量口径一并订正。**本桶较上一版 -1**：`set port-mirroring <n> source vnf …`（vNIC 源）此前标 ✅ 但实为下发期拒绝，v3 round3 走查后按实现口径重写并移入 🚫 桶（真机复验待执行） |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 设计拒绝（网关 ACL 绑定） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 未在 v2 轮次执行 | 11 | **破坏性/需交互**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、`kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）。机制由单测/集成测试覆盖；破坏性动作按其交付说明单独走查（部分动作在 v1 收尾轮有真机走查记录，见各轮证据）。round168/170 一度在此桶挂过 #388 的 5 条与 #389 的 3 条待真机行，真机四维通过后均已移入 ✅；v3 的 `set system dataplane` 亦同（真机两次切换后移入 ✅） |
+| 🚫 未在 v2 轮次执行 | 12 | **破坏性/需交互**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、`kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）。机制由单测/集成测试覆盖；破坏性动作按其交付说明单独走查（部分动作在 v1 收尾轮有真机走查记录，见各轮证据）。**真机验证待执行**：`set port-mirroring <n> source vnf …`（vNIC 源；实现已入仓、单测覆盖解析与拒绝路径，真机步骤见交付说明）。round168/170 一度在此桶挂过 #388 的 5 条与 #389 的 3 条待真机行，真机四维通过后均已移入 ✅；v3 的 `set system dataplane` 亦同（真机两次切换后移入 ✅） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、

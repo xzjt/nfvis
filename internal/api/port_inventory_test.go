@@ -27,11 +27,19 @@ type fakePorts struct {
 	// facts 内核口事实（决策 #302）：非 nil 时 KernelIfFacts 返回它（替代按 kernel 名
 	// 派生的零值事实），供内核视图的字段级断言用。
 	facts []network.KernelIfFacts
+	// ifReasons 内核数据面下「已声明却未进数据面」的原因（决策 #431）：按口名给事实。
+	ifReasons map[string]network.KernelIfReason
 }
 
 func (f fakePorts) VPPIfnames() ([]string, error) { return f.vpp, f.vppErr }
 
 func (f fakePorts) KernelIfnames() ([]string, error) { return f.kernel, f.kernErr }
+
+// KernelIfNotInDPReason 原因事实源（决策 #431）：按口名查表，未命中即「取不到」。
+func (f fakePorts) KernelIfNotInDPReason(name string) (network.KernelIfReason, bool) {
+	r, ok := f.ifReasons[name]
+	return r, ok
+}
 
 // KernelIfFacts 内核口事实：显式给了 facts 用 facts；否则按 kernel 名派生零值事实
 // （只有名字、其余字段取不到——「取不到就不给」由上层处理）。

@@ -2297,6 +2297,12 @@ paths:
         实现为 sysfs 标准流程（`driver_override` + `bind`/`unbind`）；
         绑定会**中断该网卡现有流量**，且该网卡不得正被 VPP 使用，故需 `confirm=true`。
         先前该能力在产品内完全缺失，实机需人工/安装期带外完成（决策 #72）。
+        **两个方向按数据面实现分向**（决策 #426）：内核数据面（`system.dataplane=kernel`）下
+        **绑定被直接拒绝**（内核数据面不使用 DPDK 接管，绑定会把网卡从内核里拿走——如需接管
+        请改回 VPP 数据面并重启服务）；**解绑照常可用**，它正是「把网卡交还内核驱动」的动作
+        （VPP 时代接管过的口在本机切到内核后仍留在 vfio-pci，内核里没有它）。两个数据面下
+        解绑前都会拒绝**仍被数据面使用中**的口：VPP 侧问 VPP，内核侧问内核
+        （bridge/bond/VRF 的成员口或带 IP 地址即视为在用），并给出先删声明的照做路径。
       parameters:
         - { name: confirm, in: query, schema: { type: boolean, default: false } }
       requestBody:
@@ -3854,7 +3860,18 @@ components:
         args: { type: array, items: { type: string } }
         restart_policy: { type: string, enum: [no, on-failure] }
         autostart: { type: boolean }
-        state: { type: string, enum: [running, exited, dead] }
+        state:
+          type: string
+          enum: [running, exited, dead]
+          description: |
+            运行态（仅 GET 视图）。Docker 的 `restarting` **并入 `running`**——崩溃重启循环在
+            `state` 上看不出来，需看 `restart_count` 与告警 `CONTAINER_RESTART_LOOP`。
+        restart_count:
+          type: integer
+          description: |
+            容器重启次数（Docker `State.RestartCount`，含崩溃重启循环的累计次数；仅 GET 视图）。
+            **取不到就省略**该字段（容器不存在、Docker 不可用、应答未给该字段）——「读不到」与
+            「0 次」是两件事，故不提供 0 值回落。
 
     Image:
       type: object

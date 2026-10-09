@@ -11,6 +11,7 @@ package system
 // Root 可注入：单测用临时目录，不触碰宿主。update-grub 通过 Runner 注入（测试不执行）。
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -29,6 +30,13 @@ const (
 	// 大页池 sysctl 落点（R88-1）。序号 **大于** VPP 包自带的 /etc/sysctl.d/80-vpp.conf，
 	// systemd-sysctl 按文件名序执行，故本文件后执行、最后生效。
 	hugepageSysctlRel = "/etc/sysctl.d/90-nfvis-hugepages.conf"
+	// VppSysctlPath 是 vpp 包自带的 conffile（`vm.nr_hugepages=1024`，本意给 2M 池）；
+	// 由本产品用 dpkg-divert 接管走（见 VppSysctlTakeover）。
+	VppSysctlPath = "/etc/sysctl.d/80-vpp.conf"
+	// VppSysctlDisabledPath 是接管后的落点——与 postinst/prerm 的 `--divert` 参数**逐字相同**。
+	VppSysctlDisabledPath = VppSysctlPath + ".vpp-disabled"
+	// vppSysctlDivertPkg 接管方包名（dpkg-divert --package；卸载时 prerm 按同一包名还原）。
+	vppSysctlDivertPkg = "nfvis"
 )
 
 // KernelApplier 内核基线落地能力（CLI/API 注入；实现见 BaselineApplier）。
@@ -183,11 +191,15 @@ func (a *BaselineApplier) setFstabLine(line string) error {
 // 页数（真机现场：cmdline `hugepages=1`，运行实际 nr=4）。#347 后默认尺寸恒为 2M，这条
 // sysctl 与它的本意（2M 池）自然一致——#347 前是「配置写 2M、实际落 1G」的错配，改后消除。
 //
-// 单一事实源：安装期由 postinst 用 dpkg-divert 把 vpp 那个 conffile 挪到
-// `<同名>.vpp-disabled`（决策 #201），此后 `vm.nr_hugepages` 只由本文件声明——
-// 不再依赖「90 号文件名序在 80 号之后」的排序约定，也没有开机期「先撑大再回缩」的抖动。
+// 单一事实源：`vm.nr_hugepages` 只由本文件声明，vpp 包那个 conffile 由产品用 dpkg-divert
+// 挪到 `<同名>.vpp-disabled`（决策 #201 引入安装期动作，#423 把保证点移到运行期——
+// 见 VppSysctlTakeover；安装期同一次 apt 事务里 vpp 的 conffile 尚未落盘，单靠 postinst 会静默漏）。
+// 因此本文件不再依赖「90 号文件名序在 80 号之后」的排序约定，也没有开机期「先撑大再回缩」的抖动。
 // vpp 原文件里另一个生效键 `vm.hugetlb_shm_group=0`（root 组可访问大页）由本文件接管保持原值，
 // 免得挪走文件顺手丢掉它。回退内核基线时本文件一并撤除（见 Rollback）。
+//
+// 注释里**不声称接管已发生**：接管与否以 divert 记录为准（见 VppSysctlTakeover），
+// 本文件如实指引操作者查证，避免 90 号文件的自述与实况不符（round3 走查 R3-2 的现场就是这样）。
 func GenerateHugepageSysctl(d KernelDesired) string {
 	var n int
 	switch d.DefaultHugepageSize {
@@ -202,9 +214,11 @@ func GenerateHugepageSysctl(d KernelDesired) string {
 		return ""
 	}
 	return "# 由 NFViS 生成：大页池 sysctl 的**唯一真源**\n" +
-		"# vpp 包自带的 /etc/sysctl.d/80-vpp.conf 已由 dpkg-divert 挪到 .vpp-disabled\n" +
-		"# （它的 vm.nr_hugepages=1024 本意给 2M 池；钉值以**当前内核默认尺寸池**为准）\n" +
-		fmt.Sprintf("# 默认页尺寸 %s，声明 %d 页；hugetlb_shm_group 沿用 vpp 包原值\n", d.DefaultHugepageSize, n) +
+		"# vpp 包自带的 /etc/sysctl.d/80-vpp.conf（vm.nr_hugepages=1024，本意给 2M 池）是否\n" +
+		"# 已被接管，以 divert 记录为准：dpkg-divert --list /etc/sysctl.d/80-vpp.conf\n" +
+		"# 已接管则原文件在 /etc/sysctl.d/80-vpp.conf.vpp-disabled；接管由 nfvisd 在启动\n" +
+		"# 与周期巡检时幂等保证。\n" +
+		fmt.Sprintf("# 钉值以**当前内核默认尺寸池**为准：默认页尺寸 %s，声明 %d 页；hugetlb_shm_group 沿用 vpp 包原值\n", d.DefaultHugepageSize, n) +
 		fmt.Sprintf("vm.nr_hugepages = %d\n", n) +
 		"vm.hugetlb_shm_group = 0\n"
 }
@@ -384,6 +398,81 @@ func EnsureHugepageSysctlFromCmdline(root string) (bool, error) {
 	}
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		return false, fmt.Errorf("写入 %s: %w", p, err)
+	}
+	return true, nil
+}
+
+// VppSysctlTakeover 保证 vpp 包自带的大页池 sysctl（VppSysctlPath）被本产品接管：
+// `dpkg-divert --package nfvis --add --rename --divert <落点> <原路径>`，幂等；
+// 接管成功后 `vm.nr_hugepages` 只由 90 号文件（hugepageSysctlRel）声明。
+//
+// **为什么保证点在运行期**（决策 #423）：安装期 postinst 做同一件事（决策 #201），但**同一次 apt
+// 事务里 vpp 的 conffile 要到 vpp 自己被 configure 时才落盘**（真机实测 ctime 晚于 `configure nfvis`），
+// 那一刻 postinst 的 `[ -e ]` 判据为假、连「接管失败」提示分支都不进——静默漏接管，80 号文件长期
+// 在场（未声明该池时每次开机把池钉到 1024 页）。与决策 #182（libvirt AppArmor 同事务后配置）同族：
+// **单次 postinst 不是保证点**。运行期幂等补齐与安装顺序无关（启动与既有 60s 巡检各确认一次）。
+//
+// **接管状态以 divert 记录为准**（原路径在接管成功后本就不存在，只看存在性当守卫会永远落空——
+// postinst 的注释已记过这个坑）；反过来「原路径不在」既可能是已接管，也可能是 conffile 尚未落盘
+// 或本机没装 vpp——那不是错误，本轮跳过，晚落盘的情形由下一次启动/巡检收口。
+type VppSysctlTakeover struct {
+	Root     string                            // 配置根（默认 "/"；单测注入临时目录）
+	Runner   Runner                            // dpkg-divert 执行（nil = 真实执行；单测注入假实现）
+	LookPath func(file string) (string, error) // dpkg-divert 存在性判定（nil = exec.LookPath）
+}
+
+// NewVppSysctlTakeover 构造真实系统上的接管器（宿主命令经 run 执行；run 为 nil 时直接用 exec）。
+func NewVppSysctlTakeover(run Runner) *VppSysctlTakeover { return &VppSysctlTakeover{Runner: run} }
+
+func (d *VppSysctlTakeover) lookPath() func(string) (string, error) {
+	if d.LookPath != nil {
+		return d.LookPath
+	}
+	return exec.LookPath
+}
+
+func (d *VppSysctlTakeover) run(ctx context.Context, name string, args ...string) (string, error) {
+	if d.Runner != nil {
+		return d.Runner(ctx, name, args...)
+	}
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	return string(out), err
+}
+
+// Ensure 确认/执行接管（幂等）。返回 tookOver = 本次是否真的**执行了接管动作**：
+//   - 无 dpkg-divert（非 dpkg 系统）→ false，无 conffile 接管机制可言；
+//   - 原路径不在（已接管时它本就不在；vpp 未装或 conffile 尚未落盘亦然）→ false，不查不经手；
+//   - 原路径在场但已有 divert 记录（例如手工把文件放回来）→ false，不重复执行；
+//   - 原路径在场且未接管 → 执行接管一次并按**当前内核基线声明**重写 90 号文件（此刻起它是
+//     唯一声明处），返回 true。
+//
+// 先判存在性再查 divert 记录：稳态（已接管）下每轮巡检只做一次 stat，不起子进程；
+// 而判据仍是 divert 记录（口径：「文件存在**且未被 divert**」才动手）。
+// 查询/接管命令失败一律返回错误（调用方如实记日志、不阻断启动），绝不静默吞。
+func (d *VppSysctlTakeover) Ensure(ctx context.Context) (bool, error) {
+	if _, err := d.lookPath()("dpkg-divert"); err != nil {
+		return false, nil // 非 dpkg 系统：没有可接管的 conffile 机制（本产品按 deb 发布，真实系统恒有）
+	}
+	src := join(d.Root, VppSysctlPath)
+	dst := join(d.Root, VppSysctlDisabledPath)
+	if _, statErr := os.Stat(src); statErr != nil {
+		return false, nil // 原路径不在：无可接管之物（已接管/未装 vpp/尚未落盘），非错误，留给下一次
+	}
+	out, err := d.run(ctx, "dpkg-divert", "--list", src)
+	if err != nil {
+		return false, fmt.Errorf("查询大页池 sysctl 接管状态（dpkg-divert --list %s）: %v: %s",
+			src, err, strings.TrimSpace(out))
+	}
+	if strings.Contains(out, src) {
+		return false, nil // 已接管（判据见类型注释）
+	}
+	if out, err := d.run(ctx, "dpkg-divert", "--package", vppSysctlDivertPkg, "--add", "--rename",
+		"--divert", dst, src); err != nil {
+		return false, fmt.Errorf("接管 %s（dpkg-divert）: %v: %s", src, err, strings.TrimSpace(out))
+	}
+	// 接管成功：90 号文件从这一刻起是唯一声明处，按当前声明重写一次（与接管同批次收敛）。
+	if _, err := EnsureHugepageSysctlFromCmdline(d.Root); err != nil {
+		return true, fmt.Errorf("接管后重写大页池 sysctl 片段: %w", err)
 	}
 	return true, nil
 }

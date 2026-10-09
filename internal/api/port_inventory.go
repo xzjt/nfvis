@@ -10,6 +10,7 @@ package api
 // 底座交互藏在接口后：实现见 internal/orchestrator/network（govpp + sysfs），单测用假实现。
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/xzjt/nfvis/internal/orchestrator/network"
@@ -24,6 +25,9 @@ type PortInventory interface {
 	// KernelIfFacts 内核侧物理口事实（决策 #302：未接管口读视图的驱动/MAC/速率/状态取 sysfs，
 	// 不编造 VPP 侧事实）。
 	KernelIfFacts() ([]network.KernelIfFacts, error)
+	// KernelIfNotInDPReason 内核数据面下，某物理口「已声明却未进数据面」的原因（决策 #431）：
+	// 仍绑 vfio-pci / 被 networkd 持有为 down / 取不到（ok=false）。VPP 数据面下恒取不到。
+	KernelIfNotInDPReason(name string) (network.KernelIfReason, bool)
 }
 
 // vppIfnames / kernelIfnames 候选取值：未接入或查询失败一律返回 nil
@@ -96,6 +100,44 @@ func (x *cliExecutor) kernelIfaceFacts(name string) (network.KernelIfFacts, bool
 		}
 	}
 	return network.KernelIfFacts{}, false
+}
+
+// kernelIfNotInDPReason 内核数据面下，某物理口「已声明却未进数据面」的**点名文案**
+// （决策 #431）：仍绑 vfio-pci（附 PCI 与照做路径）/ 被 networkd 持有为 down（附人工做法）；
+// 取不到原因返回 ok=false（调用方沿用既有「已声明未生效」）。文案在此处渲染（事实源只给
+// 结构化的 Kind/Driver/PCI），无内部引用。
+func (x *cliExecutor) kernelIfNotInDPReason(name string) (string, bool) {
+	if x.ports == nil {
+		return "", false
+	}
+	r, ok := x.ports.KernelIfNotInDPReason(name)
+	if !ok {
+		return "", false
+	}
+	switch r.Kind {
+	case network.KernelIfReasonVFIO:
+		drv := r.Driver
+		if drv == "" {
+			drv = "vfio-pci"
+		}
+		where := ""
+		if r.PCI != "" {
+			where = "（PCI " + r.PCI + "）"
+		}
+		return fmt.Sprintf("仍绑定在 %s 驱动上%s、内核里没有它；先交还内核：request interfaces %s unbind-dpdk --yes",
+			drv, where, name), true
+	case network.KernelIfReasonNetworkdDown:
+		return "被 systemd-networkd 持有为 down（netplan activation-mode 为 off）；" +
+			"需人工把该口改为 manual 并 netplan apply（产品不代改 netplan）", true
+	}
+	return "", false
+}
+
+// kernelIfaceAdminUp 内核运行态里该口是否管理态 up（不在运行态清单 → 视为未生效）。
+// 决策 #431 的点名只在「已声明却没进数据面」的口上触发，用它把「已在数据面 up」的口排除。
+func kernelIfaceAdminUp(states map[string]InterfaceState, name string) bool {
+	st, ok := states[name]
+	return ok && st.AdminUp
 }
 
 // allIfnamesDeclared `set interfaces <n>` 的候选并集（决策 #302）：

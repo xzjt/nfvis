@@ -38,7 +38,7 @@ func (g *govppBondClient) Bonds() ([]BondRuntime, error) {
 	out := make([]BondRuntime, 0, 4)
 	for {
 		d := &bond.SwInterfaceBondDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}
@@ -58,7 +58,7 @@ func (g *govppBondClient) BondMembers(bondSwIfIndex uint32) ([]uint32, error) {
 	var out []uint32
 	for {
 		d := &bond.SwMemberInterfaceDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}
@@ -212,7 +212,7 @@ func (g *govppLldpClient) LldpNeighbors() ([]LldpNeighbor, error) {
 	var out []LldpNeighbor
 	for {
 		d := &lldp.LldpDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			if strings.Contains(err.Error(), "lldp_dump_reply") {
 				return out, nil

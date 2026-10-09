@@ -27,6 +27,9 @@ type ContainerRuntime interface {
 	StopContainer(ctx context.Context, name string) error
 	RestartContainer(ctx context.Context, name string) error
 	ContainerState(ctx context.Context, name string) (string, error)
+	// ContainerStatus 运行态读数（决策 #432）：契约状态 + 重启次数，**同一次 inspect** 取回。
+	// restartCountKnown=false ⇒ 重启次数取不到：读视图**省略**该字段（不给 0）。
+	ContainerStatus(ctx context.Context, name string) (state string, restartCount int, restartCountKnown bool, err error)
 	ContainerLogs(ctx context.Context, name string, tail int) (string, error)
 	// ContainerExec 在运行中的容器内执行命令（决策 #357，非交互）。
 	ContainerExec(ctx context.Context, name, command string, timeout time.Duration) (container.ExecResult, error)
@@ -34,21 +37,31 @@ type ContainerRuntime interface {
 	ContainerShell(ctx context.Context, name string) (io.ReadWriteCloser, error)
 }
 
-// containerResponse ContainerFunction + 运行态 state（契约 GET 视图）。
+// containerResponse ContainerFunction + 运行态读数（契约 GET 视图；决策 #432 增 restart_count）。
+//
+// restart_count 用指针：**取不到**（容器不存在 / Docker 不可达 / 应答未给该字段）时省略，
+// 「已重启 0 次」与「读不到」是两件事——前者要照实发 0。
 type containerResponse struct {
 	model.ContainerFunction
-	State string `json:"state,omitempty"`
+	State        string `json:"state,omitempty"`
+	RestartCount *int   `json:"restart_count,omitempty"`
 }
 
-func (s *Server) ctStateSafe(ctx context.Context, name string) string {
+// ctRuntimeSafe 容器运行态读数（状态 + 重启次数，同一次 inspect；决策 #432）。
+// 底座未接入或查询失败时状态为空串（omitempty 省略）、重启次数取不到（省略，不给 0）——
+// 与既有 state 的降级口径一致：读视图不因运行态不可用而报错。
+func (s *Server) ctRuntimeSafe(ctx context.Context, name string) (string, *int) {
 	if s.containers == nil {
-		return ""
+		return "", nil
 	}
-	st, err := s.containers.ContainerState(ctx, name)
+	st, n, known, err := s.containers.ContainerStatus(ctx, name)
 	if err != nil {
-		return ""
+		return "", nil
 	}
-	return st
+	if !known {
+		return st, nil
+	}
+	return st, &n
 }
 
 // handleListContainers GET /api/v1/container-functions
@@ -60,7 +73,8 @@ func (s *Server) handleListContainers(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]containerResponse, 0, len(cfg.ContainerFunctions))
 	for _, ct := range cfg.ContainerFunctions {
-		out = append(out, containerResponse{ContainerFunction: ct, State: s.ctStateSafe(r.Context(), ct.Name)})
+		st, restarts := s.ctRuntimeSafe(r.Context(), ct.Name)
+		out = append(out, containerResponse{ContainerFunction: ct, State: st, RestartCount: restarts})
 	}
 	writeJSON(w, http.StatusOK, paginate(r, out))
 }
@@ -78,7 +92,8 @@ func (s *Server) handleGetContainer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("容器 %s 不存在", name), nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, containerResponse{ContainerFunction: ct, State: s.ctStateSafe(r.Context(), name)})
+	st, restarts := s.ctRuntimeSafe(r.Context(), name)
+	writeJSON(w, http.StatusOK, containerResponse{ContainerFunction: ct, State: st, RestartCount: restarts})
 }
 
 // handlePostContainer POST /api/v1/container-functions（FR-CMP-020）。

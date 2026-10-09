@@ -39,6 +39,12 @@ func (b *blockingCT) ContainerLogs(ctx context.Context, _ string, _ int) (string
 	return "", blockUntilCtx(ctx)
 }
 
+// ContainerStatus 详情读视图的运行态读数（决策 #432）：同样阻塞到 ctx 结束——详情路径不再经
+// ContainerState，若这里不覆盖，「show container-functions <名> detail 有界」就失去守护。
+func (b *blockingCT) ContainerStatus(ctx context.Context, _ string) (string, int, bool, error) {
+	return "", 0, false, blockUntilCtx(ctx)
+}
+
 // shortContainerCallTimeout 临时调小 containerCallTimeout（用完还原）。
 func shortContainerCallTimeout(t *testing.T, d time.Duration) {
 	t.Helper()
@@ -104,6 +110,21 @@ func TestCLIContainerCallsBounded(t *testing.T) {
 		}
 		if !strings.Contains(out, "sbc-ct1") {
 			t.Fatalf("列表应仍渲染配置实体，得: %q", out)
+		}
+	})
+
+	// 详情读视图的运行态读数（状态 + 重启次数）同源有界（决策 #432）。
+	t.Run("show container-functions detail", func(t *testing.T) {
+		x := newBlockingCLI(t)
+		out, ok := runBounded(t, x, "show container-functions sbc-ct1 detail")
+		if !ok {
+			t.Fatal("show container-functions detail 无界挂起（ContainerStatus 未传有界 ctx）")
+		}
+		if !strings.Contains(out, "sbc-ct1") {
+			t.Fatalf("详情应仍渲染配置实体，得: %q", out)
+		}
+		if strings.Contains(out, "restart-count") {
+			t.Fatalf("取不到重启次数时不得给出该字段（更不得给 0）: %q", out)
 		}
 	})
 

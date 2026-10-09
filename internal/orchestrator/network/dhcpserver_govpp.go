@@ -102,7 +102,7 @@ func (g *govppDHCPServerClient) TapDump() ([]TapInfo, error) {
 	out := make([]TapInfo, 0, 4)
 	for {
 		d := &tapv2.SwInterfaceTapV2Details{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}

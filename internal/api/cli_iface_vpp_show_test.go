@@ -6,6 +6,7 @@ import (
 
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/state"
 )
 
 // 多余/未知参数不得被静默忽略：`show port-mirroring bogus extra` 此前照常作答（args 未使用），
@@ -129,5 +130,50 @@ func TestShowManagementInterfaceEmptyStates(t *testing.T) {
 	}
 	if !strings.Contains(out, "192.168.1.10/24") || !strings.Contains(out, "(未指定)") {
 		t.Fatalf("应显示已配置的地址与「未指定」口名: %q", out)
+	}
+}
+
+// 决策 #427①：`show interfaces <if> statistics` 必须回**带字段名的表格**——此前是原始结构体
+// （`interface ens192 statistics: {355512 417 …}`：无字段名、无列序，操作者不可判读）。
+// 列名与顺序对齐 REST 契约 `GET /interfaces/{name}` 的 statistics 对象（openapi
+// `Interface.statistics` 的八个字段），数值映射逐列、顺序敏感（测试值互不相同，错位必被抓到）。
+func TestShowInterfaceStatisticsFieldedTable(t *testing.T) {
+	x, _ := newCLIKit(t)
+	x.setRuntime(nil, state.New(fakeCounters{ok: true, c: state.InterfaceCounters{
+		RxPackets: 355512, TxPackets: 417, RxBytes: 469792537, TxBytes: 34348,
+		RxErrors: 11, TxErrors: 12, RxDrops: 13, TxDrops: 14,
+	}}))
+
+	out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show interfaces ens192 statistics").Output
+	// 不再输出无字段名的原始结构体（`%v` 打整个 struct 的形态）
+	if strings.Contains(out, "statistics: {") || strings.Contains(out, "355512 417") {
+		t.Fatalf("不得再输出无字段名的原始结构体：%q", out)
+	}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("应为「标题 + 表头 + 数据行」三行，实得 %d 行：%q", len(lines), out)
+	}
+	if !strings.Contains(lines[0], "interface ens192 statistics") {
+		t.Fatalf("首行应点名接口与子命令：%q", lines[0])
+	}
+	// 表头：列名与顺序 = REST 契约字段 rx_packets, tx_packets, rx_bytes, tx_bytes,
+	// rx_errors, tx_errors, rx_drops, tx_drops（Interface 为行标识列）
+	wantHead := "Interface rx-pkts tx-pkts rx-bytes tx-bytes rx-errors tx-errors rx-drops tx-drops"
+	if got := strings.Join(strings.Fields(lines[1]), " "); got != wantHead {
+		t.Fatalf("表头列名/顺序应为 %q，实得 %q（整行 %q）", wantHead, got, lines[1])
+	}
+	// 数据行：数值与字段逐列对应（顺序敏感）
+	wantRow := "ens192 355512 417 469792537 34348 11 12 13 14"
+	if got := strings.Join(strings.Fields(lines[2]), " "); got != wantRow {
+		t.Fatalf("数据行应为 %q，实得 %q（整行 %q）", wantRow, got, lines[2])
+	}
+	// 结构化输出（`display json` 用，Web/REST 同源消费）仍带 REST 的八个字段名——
+	// 渲染改动不得动摇它（两侧同字段名是本次改名的依据）。
+	js := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show interfaces ens192 statistics | display json").Output
+	for _, k := range []string{"rx_packets", "tx_packets", "rx_bytes", "tx_bytes",
+		"rx_errors", "tx_errors", "rx_drops", "tx_drops"} {
+		if !strings.Contains(js, `"`+k+`"`) {
+			t.Fatalf("结构化输出应含 REST 字段名 %q：%q", k, js)
+		}
 	}
 }

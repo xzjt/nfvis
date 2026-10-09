@@ -255,19 +255,47 @@ func (c *dockerClient) tag(ctx context.Context, ref, repo, tag string) error {
 
 // State 返回契约枚举；不存在 exists=false。
 func (c *dockerClient) State(ctx context.Context, name string) (string, bool, error) {
+	facts, exists, err := c.Inspect(ctx, name)
+	if err != nil || !exists {
+		return "", exists, err
+	}
+	return facts.State, true, nil
+}
+
+// Inspect 单次 GET /containers/{name}/json 取回契约状态 + 原始状态 + 重启次数（决策 #432）。
+//
+// 重启次数与状态**同一次应答**取回；用指针接收，应答里没有该字段时 RestartsKnown=false
+// （「取不到」与「0 次」必须分得开——规格 #432：取不到就不给该字段）。
+//
+// 字段位置（真机实测，Docker 29.1.3）：`RestartCount` 在 inspect 应答的**顶层**，
+// **不在** `State` 里（`State` 只有 Dead/Error/ExitCode/FinishedAt/OOMKilled/Paused/Pid/
+// Restarting/Running/StartedAt/Status）。首版按 `State.RestartCount` 读，于是永远「取不到」——
+// 读视图省略该字段、重启循环告警也不触发（真机 `docker inspect <名> --format '{{.RestartCount}}'`
+// = 10，而 `.State.RestartCount` 报 `map has no entry for key`）。故以顶层为准，`State` 内那份
+// 仅作兼容回退（同样是指针，缺省不影响判定）。
+func (c *dockerClient) Inspect(ctx context.Context, name string) (ContainerFacts, bool, error) {
 	var out struct {
-		State struct {
-			Status string `json:"Status"`
+		RestartCount *int `json:"RestartCount"`
+		State        struct {
+			Status       string `json:"Status"`
+			RestartCount *int   `json:"RestartCount"`
 		} `json:"State"`
 	}
 	err := c.do(ctx, http.MethodGet, "/containers/"+url.PathEscape(name)+"/json", nil, &out)
 	if err == errDockerNotFound {
-		return "", false, nil
+		return ContainerFacts{}, false, nil
 	}
 	if err != nil {
-		return "", false, err
+		return ContainerFacts{}, false, err
 	}
-	return dockerStateToContract(out.State.Status), true, nil
+	facts := ContainerFacts{State: dockerStateToContract(out.State.Status), RawState: out.State.Status}
+	switch {
+	case out.RestartCount != nil:
+		facts.RestartCount, facts.RestartsKnown = *out.RestartCount, true
+	case out.State.RestartCount != nil:
+		facts.RestartCount, facts.RestartsKnown = *out.State.RestartCount, true
+	}
+	return facts, true, nil
 }
 
 // ExitCode 返回容器退出码（State.ExitCode）。

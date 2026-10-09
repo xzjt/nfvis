@@ -4,6 +4,14 @@ package network
 //
 // 依赖集中在 *_govpp.go（由真机集成测试覆盖，不入本地覆盖率门槛），业务与向量构造在
 // storm.go（纯函数，可跨平台单测）。
+//
+// ⚠️ 底座能力前提（真机探针实测）：本底座的 `classify_table_by_interface` 与
+// `policer_classify_dump` **都读不到 policer-classify 绑定**（阴性不可判，详见
+// `AttachedL2Table` 的注释）——绑定事实的四态判定（含按形状/表链自认领）与删除安全化在
+// storm.go（决策 #421）。
+//
+// 读数（dump / 单请求查询）一律经 recvMultiBound / recvReplyBound 套应答时限（决策 #422，
+// 说明与红-绿用例见 govpp_read_bound.go）；**写路径有意不套时限**，语义保持原样。
 
 import (
 	"encoding/hex"
@@ -94,9 +102,10 @@ func (g *govppStormClient) ClassifyAddTable(mask []byte, nextTableIndex uint32) 
 
 // stormAbsentCode 删除方向的 VPP 错误码 → 是否表示「对象本就不在」（由 Provider 决定是否按
 // 「已达成」继续）：-6 No such entry / -65 No such table（真机实测：解绑未挂在接口上的表）/
-// -81 VALUE_EXIST（历史实现即以此判 del 幂等）。
+// -91 Classify table not found（**分类插件自己的码**；真机实测：带链删顺带删掉链上那张后，
+// 再对那张做属性读取/删前形状复核就收到 -91）/ -81 VALUE_EXIST（历史实现即以此判 del 幂等）。
 func stormAbsentCode(err error) bool {
-	return vppErrIs(err, vppNoSuchEntry, vppNoSuchTable, vppValueExist)
+	return vppErrIs(err, vppNoSuchEntry, vppNoSuchTable, vppClassifyTableNotFound, vppValueExist)
 }
 
 // ClassifyDelTable 删表；delChain=true 连同表链上的后续表一并删（两类并存时广播表链着
@@ -166,8 +175,10 @@ func (g *govppStormClient) ClassifyDelSession(tableIndex uint32, match []byte) e
 }
 
 // PolicerClassifySetInterface 挂上/摘掉该接口 L2 槽的分类表（入向）。
-// 摘除时 l2_table_index 传**实况读到的当前绑定**（`AttachedL2Table`）——真机实测按陈旧登记
-// 解绑会被 VPP 以 `No such table (-65)` 拒（归一到 ErrStormAbsent 由 Provider 按已达成处理）；
+// 摘除时 l2_table_index 传槽上那张表的索引：实况阳性用实况索引，实况不可回读时用**登记索引**
+// （见 `AttachedL2Table` 的能力说明）——真机实测按陈旧登记解绑会被 VPP 以 `No such table (-65)`
+// 拒（归一到 ErrStormAbsent，按本仓库口径＝「已是目标状态」）。摘除的返回是「解绑已达成」的
+// 确认依据：删表前必须拿到确认（无错误或 ErrStormAbsent），否则 Provider 一律不删表。
 // **挂上方向不容错**：槽已被别的表占用时静默吞错会留下「登记说新、实况是旧」的错位。
 func (g *govppStormClient) PolicerClassifySetInterface(swIfIndex, l2TableIndex uint32, add bool) error {
 	reply := &classify.PolicerClassifySetInterfaceReply{}
@@ -201,7 +212,7 @@ func (g *govppStormClient) PolicerDump() ([]StormPolicer, error) {
 	var out []StormPolicer
 	for {
 		d := &policer.PolicerDetails{}
-		stop, err := req.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, req, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}
@@ -214,15 +225,31 @@ func (g *govppStormClient) PolicerDump() ([]StormPolicer, error) {
 }
 
 // AttachedL2Table 读接口 L2 槽**当前实际挂着**的表：用 `classify_table_by_interface`
-// （请求/应答）。**绑定一律以本方法为准**——真机实测 `policer_classify_dump` 在本底座返回不了
-// 绑定（曾按该 dump 判实况，导致重放后重复建表）。
-// 无绑定（retval 非 0，或 l2_table_id = ~0 的「空槽」约定）返回 ok=false；这不区分「本就没挂」
-// 与「查询被拒」——两者对本层的动作相同（不解绑、不删表），真出错会在随后的挂表上暴露，不静默。
+// （请求/应答）。
+//
+// ⚠️ **能力前提（真机探针实测，2026-10-08，勿再把它当权威事实源）**：本底座（VPP 26.06）上
+// policer-classify 绑定**两个 API 都读不到**——
+//   - 本方法（`classify_table_by_interface`）对 policer-classify 绑定**恒回
+//     l2_table_id=0xFFFFFFFF（NONE）**，对所有接口都如此（含 vppctl 里确认有绑定的 ens224）；
+//   - `policer_classify_dump`（L2/IP4/IP6 三档）**恒返回 0 条目**；
+//     而 macip（端口安全）的绑定读得到——即绑定本身在数据面是生效的，只是回读通道缺失。
+//     探针原始输出与崩溃现场见 docs/evidence/v3-round3-release-clean-install-walkthrough.txt §2。
+//
+// 因此：**ok=false 只表示「没有阳性结果」，不等于「未挂」**（阴性 = 不可判）。绑定事实由
+// Provider 按四态判定（storm.go 的 bindFact：阳性权威 + 登记/自认领兜底），**绝不以本方法的阴性
+// 单方面作删除依据**——历史缺陷正是把阴性当未挂，孤儿清扫删掉槽上正在生效的表，接口槽悬空
+// 指向已释放的表，首包在 policer 插件里空指针（VPP 崩溃循环）。若未来底座恢复可回读，
+// 只需采信阳性（阴性仍不可判）。
+//
+// 无绑定（retval 非 0，或 l2_table_id = ~0 的「空槽」约定）返回 ok=false；查询被拒与「本就没挂」
+// 在返回值上不可区分——判断一律走 Provider 的事实判定（bindFact/adoptDeclared），本方法只提供原始读数。
 func (g *govppStormClient) AttachedL2Table(swIfIndex uint32) (uint32, bool, error) {
-	reply := &classify.ClassifyTableByInterfaceReply{}
-	if err := g.ch.SendRequest(&classify.ClassifyTableByInterface{
+	req := g.ch.SendRequest(&classify.ClassifyTableByInterface{
 		SwIfIndex: interface_types.InterfaceIndex(swIfIndex),
-	}).ReceiveReply(reply); err != nil {
+	})
+	reply := &classify.ClassifyTableByInterfaceReply{}
+	// 单请求读数同样有界（决策 #422）。
+	if err := recvReplyBound(g.ch, req, reply); err != nil {
 		if stormAbsentCode(err) {
 			return 0, false, nil
 		}
@@ -236,8 +263,10 @@ func (g *govppStormClient) AttachedL2Table(swIfIndex uint32) (uint32, bool, erro
 
 // ClassifyTableIDs 列出全部 classify 表索引（孤儿清扫用）。
 func (g *govppStormClient) ClassifyTableIDs() ([]uint32, error) {
+	req := g.ch.SendRequest(&classify.ClassifyTableIds{})
 	reply := &classify.ClassifyTableIdsReply{}
-	if err := g.ch.SendRequest(&classify.ClassifyTableIds{}).ReceiveReply(reply); err != nil {
+	// 单请求读数同样有界（决策 #422）。
+	if err := recvReplyBound(g.ch, req, reply); err != nil {
 		return nil, err
 	}
 	if reply.Retval != 0 {
@@ -252,7 +281,7 @@ func (g *govppStormClient) AllInterfaceIndexes() ([]uint32, error) {
 	var out []uint32
 	for {
 		d := &ifapi.SwInterfaceDetails{}
-		stop, err := req.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, req, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}
@@ -266,15 +295,17 @@ func (g *govppStormClient) AllInterfaceIndexes() ([]uint32, error) {
 
 // ClassifyTableInfo 读一张分类表的实测属性（掩码/会话数/表链；表不存在返回 ok=false）。
 func (g *govppStormClient) ClassifyTableInfo(tableIndex uint32) (StormTableInfo, bool, error) {
+	req := g.ch.SendRequest(&classify.ClassifyTableInfo{TableID: tableIndex})
 	reply := &classify.ClassifyTableInfoReply{}
-	if err := g.ch.SendRequest(&classify.ClassifyTableInfo{TableID: tableIndex}).ReceiveReply(reply); err != nil {
-		if vppErrIs(err, vppNoSuchEntry) {
+	// 单请求读数同样有界（决策 #422）。
+	if err := recvReplyBound(g.ch, req, reply); err != nil {
+		if stormAbsentCode(err) {
 			return StormTableInfo{}, false, nil
 		}
 		return StormTableInfo{}, false, err
 	}
 	if reply.Retval != 0 {
-		if vppErrIs(api.RetvalToVPPApiError(reply.Retval), vppNoSuchEntry) {
+		if stormAbsentCode(api.RetvalToVPPApiError(reply.Retval)) {
 			return StormTableInfo{}, false, nil
 		}
 		return StormTableInfo{}, false, fmt.Errorf("classify_table_info(%d) retval=%d", tableIndex, reply.Retval)

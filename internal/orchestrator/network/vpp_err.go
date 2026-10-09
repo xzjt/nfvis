@@ -44,6 +44,11 @@ const (
 	vppNoSuchEntry int32 = -6
 	// 分类表不存在（真机实测：对已不在/未挂在接口上的分类表做解绑，VPP 报 `No such table (-65)`）
 	vppNoSuchTable int32 = -65
+	// 分类表不存在（**分类插件自己的码**）：`classify_table_info` / 删表对不存在的表报
+	// `Classify table not found (-91)`。真机实测（nfvis-vm，VPP 26.06）：带链删会顺带删掉链上那张，
+	// 随后对链上那张做「删前形状复核 / 属性读取」就收到 -91——只认 -6/-65/-81 会把「表已不存在」
+	// 当硬错、中止整次提交（现场：风暴配置删不掉、policer 残留）。
+	vppClassifyTableNotFound int32 = -91
 )
 
 // natRemovalBenignCode 判断 NAT44 系列**移除方向**的返回码是否表示「已是目标状态」，

@@ -812,7 +812,7 @@ nfvis$ request system kernel apply
 | 容器虚拟网卡 | memif | 尚不支持 |
 | ACL（`l3-interface acl-in`） | acl 插件 | nftables（规则语义同：末尾隐式拒绝；非 IP/ARP 自动放行；**`protocol icmp` 带端口字段在提交期拒绝**——内核侧表达不了 ICMP type/code） |
 | QoS 端口限速（入/出向） | policer 特性 | tc policer（`cir` bps / `cbs` 字节） |
-| 端口镜像 | span 插件 | tc mirred（源不能是 VNF 虚拟网卡） |
+| 端口镜像 | span 插件（源可为物理口/bond 或 VNF vNIC） | tc mirred（源不能是 VNF 虚拟网卡，提交期拒绝） |
 | 风暴抑制 / 端口安全 | policer+classify / macip | tc 按目的 MAC 分类 / 桥口关学习 + nftables 源 MAC 白名单 |
 | 静态路由多下一跳（ECMP） | 支持（等权多路径） | **尚不支持**（提交期直接拒绝；内核数据面请拆成多条单跳路由） |
 | NAT 跨转发域（inside 与出接口不在同一转发域） | 支持（按 inside 转发域作用） | **尚不支持**（提交期直接拒绝；请改为同一转发域） |
@@ -844,6 +844,25 @@ exit
 （不做在线迁移），切换后数据面按 committed 配置重新收敛；③ 内核数据面下**未实现的功能
 在提交时就报错并给出替代路径**（不会出现「配了却不生效」），`show vpp` 会明确显示
 `dataplane: kernel`。
+
+> **切到内核后的第一件事（原 VPP 业务口的交接）**：切换只换 nfvisd 的装配，**不重启 VPP**；
+> 而产品不再使用 VPP，故 nfvisd 启动时会**自动把它停掉**（只停不卸、不改启用状态；日志有
+> 「数据面已切到内核，产品不再管理 VPP，已停 vpp.service」；未装/未运行则安静跳过；停不掉会
+> 给出 `systemctl status vpp` 自查路径）。VPP 停之前它仍以 vfio-pci 握着业务口——此时对网卡
+> 做任何「交还内核」的驱动操作都会挂死，这也是必须等它停下的原因。
+> 停掉之后，**曾交 DPDK 的业务口仍留在 vfio-pci**（内核里根本没有这个口），把它交还内核：
+>
+> ```bash
+> nfvis$ request interfaces ens224 unbind-dpdk --yes     # 口名或 PCI 地址均可；中断该口流量，需确认
+> nfvis$ request interfaces ens224 enable                # 或重启 nfvis 服务，让内核数据面收敛
+> ```
+>
+> 内核数据面下 **`unbind-dpdk` 照常可用**（它正是「把网卡交还内核」的动作）；
+> **`bind-dpdk` 会被直接拒绝**（内核数据面不使用 DPDK 接管，绑定会把网卡从内核里拿走——
+> 需要 DPDK 请先切回 `vpp` 数据面）。口若仍被内核数据面使用（bridge/bond/VRF 的成员口、
+> 带 IP 地址），解绑会被拒绝并提示**先把它从配置里移出**（删掉引用它的声明并提交）——
+> 数据面正在转发时解绑会中断该口流量。交还后该业务口按声明自动收敛进内核数据面
+> （启动期的未收敛告警会点名「仍绑在 vfio-pci 驱动上」并给出上面的照做命令）。
 
 内核数据面另有约束（提交期校验）：对象名（交换机/bond/隧道/L3 交换机）**不超过 15 个字符**
 （内核接口名上限）；两个对象**不能派生同一个内核设备名**（报错会点名是哪两条声明在撞）；
@@ -892,6 +911,15 @@ nfvis$ request interfaces ens224 unbind-dpdk to-driver vmxnet3 --yes
 > ⚠️ **解绑前先把该口移出数据面**（在配置里删掉它的 DPDK 声明与接口声明 → `request vpp restart`）。
 > 对**正在被数据面使用**的口直接 `unbind-dpdk`：该口悬空、命令迟迟不返回，
 > 且 CLI 通道会被占住直到重启守护进程（真机实测；处置见 §11）。
+> 产品自身也会拦：解绑前先确认该口已不在数据面（在 VPP 数据面问 VPP、在内核数据面问内核），
+> 仍被使用会直接拒绝并给出先删声明的照做路径。
+
+> **两个方向按数据面实现分向**（另见 §7.0 的切换清单）：内核数据面（`system.dataplane=kernel`）下
+> **`unbind-dpdk` 照常可用**——它正是**把网卡交还内核**的动作（VPP 时代接管过的口在本机切到
+> 内核后仍留在 vfio-pci，内核里根本没有它；且必须先确认 VPP 已停，见 §7.0）；
+> **`bind-dpdk` 会被直接拒绝**（内核数据面不使用 DPDK 接管，绑定会把网卡从内核里拿走——
+> 需要 DPDK 请先切回 `vpp` 数据面并重启服务）。管理口守卫（§7.1）与确认语义（`--yes`）
+> 在两种数据面下完全一样。
 
 > **先弄清有哪些口（两侧候选来源不同）**：`set vpp dpdk dev <ifname>` 的 Tab 候选 =
 > **VPP 中的接口**（已被 DPDK 接管的口），与 `show interfaces physical` 同源；
@@ -992,6 +1020,28 @@ nfvis$ show interfaces physical                                # ③ 核对两�
 > 关机（VM）/停机（容器）态，需手工 `request virtual-machine-functions <名> start`（VM）或
 > `request container-functions <名> start`（容器）。
 
+**数据面为 Linux 内核网络（`kernel`）时的固定动作**（宿主重启 / 从 VPP 切过来都照此）：
+
+```bash
+# ① 确认 VPP 已停：产品在 nfvisd 启动时自动停它（只停不卸），日志一行「已停 vpp.service」
+systemctl status vpp                                           # 期望 inactive；仍在跑就手工 systemctl stop vpp.service
+# ② 把曾交 DPDK 的业务口交还内核（口名或 PCI 地址均可；中断该口流量，需确认）
+nfvis$ request interfaces ens192 unbind-dpdk --yes
+nfvis$ request interfaces ens224 unbind-dpdk --yes
+# ③ 让内核数据面收敛（或重启 nfvis 服务），再核对
+nfvis$ request interfaces ens192 enable
+nfvis$ request interfaces ens224 enable
+nfvis$ show interfaces physical                                # 两口应作为内核口在列（来源列不再标「已声明未生效」）
+```
+
+> 为什么必须先确认 VPP 停了：VPP 只要还在运行就以 **vfio-pci** 握着业务口，此时对网卡做
+> 「交还内核」的驱动写会**挂死**（产品会先停 VPP 再放行这一步）。**绑定与解绑按数据面分向**：
+> 内核数据面下 `unbind-dpdk`（交还内核）照常可用，`bind-dpdk` 会被直接拒绝——需要 DPDK
+> 请切回 `vpp` 数据面并按上面的 ①②③ 重做绑定。
+> 业务口若仍被内核数据面使用（bridge/bond/VRF 的成员口、带 IP 地址），解绑会被**拒绝**并提示
+> 先删掉引用它的声明；启动期若发现已声明的口「内核里没有、仍绑在 vfio-pci」，未收敛告警会
+> **点名驱动并给出上面的照做命令**（不再只报一句 `Cannot find device`）。
+
 ---
 
 ## 8. 网络配置任务
@@ -1017,6 +1067,20 @@ nfvis# set system idle-timeout-minutes 10
 nfvis# top
 nfvis# commit
 ```
+
+> **主机名 / 时区 / NTP / DNS 是"落到宿主"的设置**：提交后产品会立即应用——`hostnamectl` 设主机名、
+> `timedatectl` 设时区、把 NTP 服务器写进 chrony 的源（`/etc/chrony/sources.d/nfvis.sources`）并热重载、
+> 把 `set system dns server` 写进 systemd-resolved 的上游；nfvisd 每次启动还会复核一遍（幂等，值未变
+> 不动系统）。**应用失败不静默**：`show log system` 会给出原因与自查命令，且不阻断提交；同一失败项还会
+> 进入告警面板——`show alarms active` 出现 `SYSTEM_BASELINE_APPLY_FAILED`（warning，逐项列明失败项、
+> 原因与自查命令），**修正后下一次应用（再次提交，或重启 nfvis 复核）成功即自动消解**；把对应声明
+> 删空同样消解。删除声明时：
+> NTP / DNS 由产品托管的片段**随之撤除**；主机名 / 时区**保留最后一次应用的值**（产品不再管理它，
+> 改回请重新声明并提交）。
+
+> **远程 syslog 报文头的主机名跟着主机名走**：每条报文的 HOSTNAME 字段在构造时取当前主机名
+> （产品声明优先，未声明用宿主实况），改主机名后下一条报文即用新名——**不需要重启 nfvis**。
+> 转发目标本身也是提交即生效（`set system syslog host …` 换目标后会重建到新目标的连接）。
 
 > ⚠️ **管理口的任何变更（含首次声明）必须用 `commit confirmed`**：改管理口可能切断当前 SSH
 > 会话，普通 commit 会被拒并输出自锁警告；confirmed 让它在超时未确认时自动回滚。
@@ -1388,14 +1452,36 @@ nfvis# commit
 
 ```bash
 nfvis# edit port-mirroring span-1
-nfvis# set source interface ens224 direction both     # 源也可为 vnf <vm> interface <vnic>
+nfvis# set source interface ens224 direction both     # 物理口/bond；VNF 源见下
 nfvis# set analyzer interface ens192
 nfvis# top
 nfvis# commit
 ```
 
+**源的两种形态（两个数据面有差别）**：源可以是**物理口/bond**，也可以是**某台 VNF 的 vNIC**：
+
+```bash
+nfvis# set source vnf fw-vm interface eth0 direction both
+```
+
+> ⚠️ **sriov-vf（PCI 直通）型 vNIC 不能作镜像源**：它由 PCI 直通直接交给 guest，不经过数据面
+> 交换机，作为镜像源收不到任何流量。提交期即直接拒绝（两个数据面一致），请改用 **vhost-user 型
+> vNIC**，或把源换成**物理口/bond**。
+
+> VPP 数据面把 vNIC 按它在数据面里的接口名下发镜像（vhost-user 口 `vh-<vm>-<vnic>`；该口
+> 随 vNIC 声明建立——**VM 未启动时这个口也在**，只是 link down、镜像是就绪的但没有流量）。
+> 若解析不到该口（vNIC 未声明，或数据面里确实没有这个口），提交会失败并提示先声明/下发该
+> vNIC、或改用物理口。
+>
 > **内核数据面下的差别**：镜像落在 tc mirred 上；**源不能是 VNF 虚拟网卡**（提交期直接拒绝——
 > 宿主 tap 由 libvirt 在域启动时创建，产品没有可靠的名字映射），请改用物理口或 bond。
+
+> ⚠️ **分析口不得与源口处于同一个二层域**（或上游交换机必须能把它隔离）：被镜像的**广播/组播**帧
+> 从分析口出去后，会被上游交换机泛洪**回到源口**（包括同一台交换机上的另一个端口），于是再被镜像
+> 一次……形成**自持镜像环**（真机实测可达数万 pps，链路与端侧都会被这一份"复制流量"打满）。
+> 正确的用法是把分析口接给一台**独立的抓包设备/另一个二层域**；本机演练时也请把分析口与源口分到
+> 不同 VLAN/交换机。环路检测（§8.12）**不覆盖**镜像环（它没有任何 MAC 学习参与，判据看不到），
+> 若发现分析口或源口速率异常增高，先 `delete port-mirroring <名>` 断开这一路。
 
 ### 8.8 NAT44
 
@@ -1886,6 +1972,18 @@ nfvis$ request container-functions ct-1 delete
 > - 控制台（Web）的容器详情页有对应的「交互终端」分栏，形态与 VM 串口页一致（纯文本终端，不引入终端模拟器）。
 > - 想进容器里交互操作，用 `request container-functions <名> shell`（见下）。
 
+> **改了容器配置怎么生效（重要）**：容器规格（镜像 / 命令 / 参数 / 环境变量 / 资源 / 重启策略）在
+> **创建时**写进 Docker；之后改配置再 `request container-functions <名> restart` 或 `stop`+`start`
+> **都沿用既有容器的旧规格**——要让新规格生效必须**删除重建**：
+> `request container-functions <名> delete --yes` → 重新声明 → `start`（既有数据/日志随容器一起消失）。
+> 另外：容器状态读数是 Docker → 产品的一层映射——`restarting`（崩溃重启循环）**并入 `running`**，
+> 崩溃循环不会被报成异常退出（`CONTAINER_EXITED` 只覆盖 exited/dead 且退出码非零）。**反复重启看得见**：
+> `show container-functions <名>`（或 `<名> detail`）会给出 `restart-count`（Docker 的 `RestartCount`，
+> 取不到时**不显示该字段**），且巡检发现容器停在 `restarting` 且重启次数还在增长、累计 ≥3 次时会报
+> warning 告警 `CONTAINER_RESTART_LOOP`（见 §10.6）。怀疑容器反复
+> 起不来时看两处：`request container-functions <名> log last 50` 与宿主 `docker inspect <名>`
+> 的 `RestartCount`；确认是配置写错就按上面的删除重建纠正。
+
 ### 9.5 GPU / 通用 PCI 设备直通（配置面）
 
 把宿主的一块 PCI 设备（GPU、加速卡或普通控制器等）整块直通给某台 VM。语法是按 **BDF
@@ -2056,6 +2154,8 @@ nfvis$ request alarms clear all
 > | `CONTAINER_UNAVAILABLE` | warning | 启动时**容器编排（Docker）未接入**——探测失败或超时（dockerd 未起/假死时，产品在 10 秒量级内放弃并降级）。容器生命周期动作不可用，配置声明不受影响。**告警在场期间产品后台持续重试接入（约每 30 秒一次）**，接入成功后本告警**自动消解**、容器编排恢复，无需重启 nfvis。处置：`systemctl status docker`、`journalctl -u docker` 查底座 |
 > | `VPP_AUTOSTART_FAILED` | warning | nfvisd 启动时**未能发起拉起数据面（VPP）**（发起动作失败或被取消）。此时数据面不可用、依赖它的操作会失败；**就绪由连接重试循环接管**（未就绪时 `show vpp` 显示未连接）。处置：`systemctl status vpp` / `journalctl -u vpp` 查因，或手工 `systemctl start vpp`，随后 `show vpp` 确认已连接。**VPP 恢复在线后自动消解** |
 > | `DHCP_POOL_EXHAUSTED` | warning | 该交换机内置 DHCP 服务器的**租约池耗尽**——无可用地址可应答新的 DISCOVER。来源=交换机名。处置：`show virtual-switches <n> dhcp-leases` 看在租明细，等租约到期/客户端释放，或扩大池（`set dhcp-server pool <start> <end>` 重新提交）；有地址释放（含租约到期）即自动消解 |
+> | `CONTAINER_RESTART_LOOP` | warning | 容器**反复重启**：Docker 状态停在 `restarting`，而重启次数在两次巡检之间还在增长、累计已 ≥3 次。状态读数按既有口径把 `restarting` 并入 `running`，所以这条告警是「容器起不来」的可见入口（来源=容器名）。处置：`show container-functions <名>` 看 `restart-count`，`request container-functions <名> log` 与宿主 `docker inspect <名>` 看崩溃原因——多为命令/参数/镜像配置写错，修正后需**删除重建**才对既有容器生效（`request container-functions <名> delete --yes` → 重新声明 → `start`）。容器不再重启（`restarting` 结束）或对象从配置删除后**自动消解** |
+> | `SYSTEM_BASELINE_APPLY_FAILED` | warning | **系统基线（主机名 / 时区 / NTP / DNS）有一项或多项没能落到宿主**——如 `hostnamectl` / `timedatectl` 失败、chrony 重载失败、systemd-resolved 重启失败。控制台显示的是配置值，宿主实况可能仍是旧值；不阻断提交与启动。文案**逐项**给出项名、原因与自查命令（`hostnamectl hostname`、`timedatectl`、`chronyc sources`、`resolvectl status`）。处置：按文案排查修正后**再次提交**（或重启 nfvis 触发复核）即重新应用；**应用成功、或对应声明被删空后自动消解**，跨 nfvisd 重启按重试结果重建 |
 >
 > 上面四条残渣告警的文案都会注明「由启动/巡检对账按数据面事实重建、原始提交不可回溯」——是哪次提交失败、是否被 NAT 引用，数据面看不出来，产品**不编造**。
 
@@ -2496,6 +2596,8 @@ nfvis$ show system metrics history name nfvis_system_cpu_utilization_ratio [last
 | `request system kernel apply` 报「隔离核 … 至少需保留 2 个」 | 护栏：隔离核把宿主挤满 | 缩小隔离核范围（报错可直接照做） |
 | `show system kernel` 报「期望 N 实际 M」 | 配置改了但没重启 | `request system reboot` 后复核 |
 | `request interfaces <口> bind-dpdk` 报 vfio-pci 不可用 | 自动加载模块失败（内核/模块缺失）或 IOMMU 未生效 | 看报错里的加载失败原因；无 IOMMU 时 `enable_unsafe_noiommu_mode`（§7.2） |
+| 内核数据面下 `bind-dpdk` 报「不支持 bind-dpdk」 | 有意拒绝：内核数据面不使用 DPDK 接管，绑定会把网卡从内核里拿走 | 需要 DPDK 请切回 `vpp` 数据面（§7.0）；把网卡交还内核用 `unbind-dpdk`（同节清单） |
+| 内核数据面下 `unbind-dpdk` 报「接口仍被内核数据面使用」 | 该口是 bridge/bond/VRF 的成员口或带 IP 地址，仍被数据面转发使用 | 先在配置里删掉引用它的声明并提交，再解绑（报错文案里有照做路径） |
 | 同上但报「拒绝操作管理口」 | 该口被判为管理路径（配置声明/默认路由/监听口）——有意拒绝 | 换业务口；确需变更用带外方式 B |
 | commit 报 `接口在 VPP 中不存在: ensX（若该口由 DPDK 接管…）` | 该口尚未进数据面（刚声明/刚接管的过渡态），或未绑 vfio、或口名不对 | `request vpp restart`；仍失败按 §7.2 核对（`ip link` 里没有 = 已被接管） |
 | 日志报 `以下已由 DPDK 接管的物理口未在配置中声明…` | 该口没在 committed 里声明为 DPDK 口 | 补 `set vpp dpdk dev <口>`（并确认 `set interfaces <口>`）再重启 |

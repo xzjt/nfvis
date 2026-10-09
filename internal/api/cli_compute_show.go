@@ -253,9 +253,9 @@ func (x *cliExecutor) execShowContainers(args []string) string {
 	switch sub {
 	case "", "detail":
 		m, _ := anyToTree(ct).(map[string]any)
-		// 决策 #396：运行态查询传有界 ctx（同上）。
+		// 决策 #396：运行态查询传有界 ctx（同上）；决策 #432：状态与重启次数**同一次** inspect。
 		dctx, dcancel := containerCallCtx()
-		m["state"] = x.ctStateOf(dctx, name)
+		x.ctRuntimeView(dctx, name, m)
 		dcancel()
 		x.structured = m
 		return RenderConfigJSON(m) + "\n"
@@ -287,6 +287,27 @@ func (x *cliExecutor) ctStateOf(ctx context.Context, name string) string {
 		return "-"
 	}
 	return st
+}
+
+// ctRuntimeView 把容器运行态读数写入详情视图（决策 #432）：`state` 与既有行为逐字一致
+// （未装配/查询失败为 "-"），`restart_count` 仅在**取到时**写入——Docker 应答里没有该字段时
+// **省略**而不是给 0（「取不到」与「0 次」不是一回事）。
+//
+// 两个读数来自**同一次** inspect（ContainerStatus），不为读数新增第二次查询。
+func (x *cliExecutor) ctRuntimeView(ctx context.Context, name string, row map[string]any) {
+	if x.ct == nil {
+		row["state"] = "-"
+		return
+	}
+	st, restarts, known, err := x.ct.ContainerStatus(ctx, name)
+	if err != nil || st == "" {
+		row["state"] = "-"
+		return
+	}
+	row["state"] = st
+	if known {
+		row["restart_count"] = restarts
+	}
 }
 
 // execShowImages：列表 / <name> [detail]。读镜像仓库运行态 + 引用计数（FR-CMP-030~033）。

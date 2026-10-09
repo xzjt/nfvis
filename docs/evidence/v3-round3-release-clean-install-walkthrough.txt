@@ -1,0 +1,455 @@
+================================================================================
+v3 round3：nfvis-v3.0.5.run 干净快照首装 + 拟人化全功能走查（CLI + Web）
+================================================================================
+日期：2026-10-08    执行：ZCode 会话（v3 线）
+环境：nfvis-vm（快照恢复为「干净」态：Ubuntu 26.04.1 / 内核 7.0.0-34，仅 git、dpkg-deb、
+      curl、chrony、tcpdump；无 make/go/vpp/docker/libvirt）
+发布件：/d/Images/Code/release-v3.0.5/nfvis-v3.0.5.run
+      sha256 b113590cd1bc7dd72ab60ef8d15ad3a41bdec30e7d33e37d5640822f6e9bc862（179,315,110 B）
+      —— 与 v3 发版记录逐字一致；上机后 VM 侧 sha256 复核一致。
+
+【结论先行】
+  · 全功能走查完成：安装 → 首启口令 → 向导 → 资源池/基线 → 业务口 → L2/L3/ACL/NAT/QoS/
+    VXLAN/SPAN → VNF（含 DHCP 服务器端到端）→ 容器（exec/shell/log）→ 用户与权限（CLI+REST+
+    Web 三面）→ 防火墙 → 备份/诊断归档/事件 → 内核数据面切换全往返 → 四类套件之外的人工黑盒。
+  · 抓到 1 条**重**缺陷（风暴抑制 → VPP 数据面崩溃循环 + 连带管理面整体卡死，受控复现），
+    以及 5 条中等/低等缺陷与文档口径矛盾（见 §2/§3 与 §4）。
+  · 其余为正向验证（§5），含 v3 头号特性「数据面可切换」在发布件上的完整往返。
+
+================================================================================
+§1 安装与首启（真人路径）
+================================================================================
+1.1 `sh nfvis-v3.0.5.run -y`（不给 --admin-password，走**首启一次性口令**路径）
+    · 载荷 238 deb 校验通过 → apt 本地源安装 62 包配置完成 → dpkg 审计无半装 →
+      VPP 套接字就绪 → 控制面 HTTP 200 → **自检 18 / 失败 0 / 不可判定 0**，退出码 0。
+    · 一次性口令打印一次（`nfvisd[10157]` 首启行），本机取用成功（CLI 自检即用它）。
+1.2 重启使内核基线生效（安装器提示的动作）
+    · cmdline：`default_hugepagesz=2M hugepagesz=2M hugepages=768 hugepagesz=1G hugepages=3
+      isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5 irqaffinity=0-1 intel_iommu=on
+      intel_pstate=disable iommu=pt`
+    · 池 1G=3 / 2M=768 ✓；nfvis/vpp/libvirtd/docker 全 active。
+1.3 真 pty 下跑 `wizard`（自写 pty 驱动模拟真人敲键）
+    · 数据面 vpp（回车默认）/ 隔离核 2-5 / VPP 主线程核 2 / 工作线程核 3 / 1G=3 / 2M=768 /
+      低延迟 false → 计划预览逐条列出 → commit rev 3 → `request system kernel apply` 写 GRUB
+      片段 + fstab → 提示重启与「重启后的固定动作」。
+1.4 业务口交数据面（手册 §7.3/§7.5 顺序）
+    · `request interfaces ens192|ens224 bind-dpdk --yes` → vfio-pci；
+      `set interfaces ens192|ens224` + `set vpp dpdk dev ens192|ens224` → commit（rev 4，
+      带「vpp 变更需 request vpp restart」警告）→ `request vpp restart` →
+      `show interfaces physical` 两口在列（10G/dpdk，up）。
+1.5 系统基线（手册 §8.1，含管理口自锁保护）
+    · `set system hostname nfvis-lab` / timezone / ntp / dns / **management interface ens160** /
+      syslog / health thresholds / idle-timeout → `commit confirmed 5` → 按提示再 `commit`
+      完成隐式确认（审计两条：config.commit + config.confirm）。
+    · 管理口首次声明被要求 confirmed ✓（照手册）。
+
+================================================================================
+§2 【重】风暴抑制（storm control）→ VPP 数据面崩溃循环 + 管理面整体卡死
+================================================================================
+2.1 现象（时间线，均为 2026-10-08 UTC）
+    · 09:53:5x 在 ens192 上配「广播+组播」两类风暴抑制（rev 12），读视图即报
+      「分类表未挂（接口 L2 槽上无本类分类表）」——但同刻 `vppctl` 里
+      `show interface features ens192` 有 `POLICER_CLAS (l2-policer-classify)`、
+      `show classify table interface ens192` 有绑定（表 0，链到表 1）。**读视图与实况矛盾。**
+    · 09:53:59 起 VPP **SIGSEGV 崩溃循环**（systemd `Restart=`，restart counter 一路涨到 23）。
+      崩溃栈每次都相同（worker 线程）：
+        #0 vnet_classify_find_entry +0x1b            （faulting address 0x0 —— 空表指针）
+        #1 policer_plugin.so
+        #4 vlib_worker_thread_bootstrap_fn
+      apport 落 core：`/var/crash/_usr_bin_vpp.0.crash`（11,322,987 B，Signal 6/ABRT）。
+    · 09:56 nfvisd 侧同时出现：`风暴抑制巡检未收敛项: interfaces/ens192/storm-control:
+      读取分类表 1 属性: VPPApiError: Classify table not found (-91)`（登记指向的表已不存在）。
+    · 09:53~10:02 期间**所有 CLI 命令挂起**（含 `show version`）：SIGQUIT 全栈显示
+      goroutine 阻塞在 `govpp/core.(*Channel).receiveReplyInternal`（
+      `network.(*govppL2Client).SwInterfaceNames` ← `cli_iface_vpp_show.go` 的接口名 dump），
+      持 `cliexec.go:312` 的**全局 CLI 互斥**；十余条后续请求全部排队在同一把锁上。
+      —— VPP 崩溃窗口内的一条 `show interfaces … detail` 把**整个管理面**拖死。
+2.2 受控复现（11:03 起，干净态、无端口安全历史）
+    仅 `set ens192 storm-control broadcast 8000` + `multicast 20000`（rev 32）：
+      · 读视图仍报「分类表未挂」（同上矛盾）。
+      · VPP 以 ~30s 为周期崩溃（restarts 17→18→19→20→21）：每次 VPP 新起后 nfvisd 恢复收敛
+        重建风暴对象，随后**背景包（ens192 rx ~0.5pps 即可）**命中悬空表 → 崩。
+      · 采样显示表链在两种形态间摆动（0→1 与 1→0），登记坐标（表 1）与实况持续错位。
+    止血：out-of-band `vppctl set interface state ens192 down`（掐断触发包）→
+      `delete ens192 storm-control` commit（rev 33）→ 崩溃循环立即停止（NRestarts 冻结）。
+2.3 根因分析（代码级）
+    · `internal/orchestrator/network/storm.go` 设计上以 `AttachedL2Table`（
+      `classify_table_by_interface`）为**绑定唯一事实源**，并明文承认「本方法不区分
+      『本就没挂』与『查询被拒』」（返回 ok=false 两者动作相同）。
+    · 实测该判定在本底座**与 vppctl 给出的实况不一致**（vppctl 看得到绑定，产品看不到），
+      于是重建/巡检走「按登记解绑」分支；重建过程中表被删而接口 L2 槽仍指向旧表 ⇒
+      policer-classify 节点解引用已释放的表 ⇒ worker 线程 SIGSEGV。
+    · 连带面：崩溃窗口内的 VPP **dump 型**请求（接口名 dump）在 govpp 侧**无超时**，
+      持 CLI 全局锁永久阻塞 ⇒ 管理面整体不可用（HTTP 层仍 200，但 `/cli/execute` 全挂）。
+2.4 影响与边界（如实）
+    · 影响：数据面崩溃循环（业务中断）；管理面被单条读命令拖死；重启 nfvisd 可恢复，
+      但**只要风暴抑制还在配置里，重放后再次进入崩溃循环**（本机实测 2 轮，共 23 次崩溃）。
+    · 建议优先级：**P0**。修法方向（供立项参考）：① 以可用的实况来源（如按
+      `classify_table_by_interface` 的 vppctl 等价路径）核查绑定，或对「登记与实况不符」
+      先解绑后删表；② VPP dump/多请求路径加**有界超时**（govpp 层面），失败即弃请求而非
+      持锁等待；③ 提交期对「同一接口已有 L2 槽对象」做前置拒绝（端口安全↔风暴抑制的互斥
+      已有提交期检查，但**换绑/重建路径**未覆盖）。
+    · 现场证据（保留在 VM）：`/root/crash-evidence/`（apport core、vpp/nfvis journal、
+      SIGQUIT 全栈）、本文件 §2.5 的原始命令输出文件。
+2.5 一条同族正例（端口安全→风暴抑制单提交换绑）
+    · 同一提交里 `delete ens192 port-security` + `set ens192 storm-control …` 会以
+      「L2 分类槽被非本产品对象占用（表 23，掩码 00…ffffffffffffffff…）」**下发失败并回滚**
+      ——拒绝本身正确（互斥），但拆成两次提交（先删端口安全，再加风暴）后仍进入 §2.1 的
+      坏态 ⇒ 说明问题在风暴自身的重建路径，而非换绑顺序。
+
+================================================================================
+§3 【中】SPAN：同二层域分析口 → 自持镜像环（无检测/无告警）
+================================================================================
+3.1 拓扑：源 ens224（DPDK 口，该时刻无其他角色）、分析口 ens192（DPDK 口），
+    二者与宿主 VMnet8 **同属一个二层域**（本机三口皆 nat 到 VMnet8）。
+3.2 现象：从 VM 内核侧（ens160）发 5 个广播包后，ens224 **rx 287→84,212（2s）**、
+    tx 5→84,637；删除会话前累计 rx 385,375 / 分析口 ens192 tx 385,531（≈1:1，即镜像副本）。
+    机理：被镜像的广播帧从分析口出去 → 上游交换/VMnet8 泛洪 → 回到**源口** → 再次被镜像……
+    自持循环（~42kpps 量级，随链路与端侧而定）。
+3.3 正向面：同一会话也**证明了镜像本体可用**（分析口 tx ≈ 源口 rx 逐包对齐）。
+3.4 边界/建议：与 #79 的 cross-connect 环路教训同族（当时触发 soft lockup）。建议：
+    ① 手册 §8.7 明写红线「分析口不得与源口处于同一二层域（或上游须隔离）」；
+    ② 产品侧可考虑对「源/分析口同属一个 BD 或同域」给提交期**警告**（不硬拒，因真实场景
+    可能是有意的）；③ 与学习上限/风暴抑制一样，环路检测（LOOP_SUSPECTED）当下**不覆盖**
+    镜像环（无 MAC 学习参与），建议纳入观察。
+
+================================================================================
+§4 其它发现（中等/低等 + 文档口径）
+================================================================================
+R3-1【中】`.run` 首装的「大页池 sysctl 单源接管」未生效，且 90 号文件自述失实
+    · 现场：`dpkg-divert --list | grep sysctl` = 0；`/etc/sysctl.d/80-vpp.conf` 原样在场
+      （`vm.nr_hugepages=1024`）；产品写的 `90-nfvis-hugepages.conf` 注释却写
+      「vpp 包自带的 /etc/sysctl.d/80-vpp.conf **已由 dpkg-divert 挪到 .vpp-disabled**」。
+    · 根因（证据链）：dpkg.log 显示 `configure nfvis` 在 09:32:38、`configure vpp` 在 09:32:40；
+      而 `/etc/sysctl.d/80-vpp.conf` 的 **ctime=09:32:40.87**（连同 /etc/vpp/startup.conf 同时刻）
+      ——**vpp 的 conffile 要到 vpp 自己 configure 时才落盘**，晚于 nfvis postinst（其 divert
+      段只在那一刻尝试一次，判据 `[ -e 80-vpp.conf ]` 当时为假）⇒ 静默跳过（连「接管失败」的
+      提示分支也不进）。这是 #182（AppArmor 同事务后配置）的同族结构缺陷：**同一次 apt 事务里
+      的时点假设不成立**，单次 postinst 不是保证点。
+    · 影响：未声明 2M 池时，80-vpp.conf 每次开机把 2M 池钉到 1024 页（7.4GB 机器上 2GB），
+      产品如实显示「未声明（不托管）」；90 号文件的自述与实况不符（操作者会误判已接管）。
+    · 建议：与 #182 同法——把该保证移到 nfvisd 运行期（启动/巡检时若发现 80-vpp.conf 仍在且
+      未 divert 则接管），或 postinst 改为「定时重试/下次启动再由 nfvisd 收口」；同时修正
+      90 号文件注释为「以实况为准」。
+R3-2【中】`set system hostname|timezone|ntp server` **只存不落**（无任何应用路径）
+    · 现场：`set system hostname nfvis-lab` 提交成功（rev 5），但 `hostnamectl hostname`=nfvis、
+      `/etc/hostname`=nfvis；`set system timezone Asia/Shanghai` 后 `/etc/localtime`→Etc/UTC；
+      `set system ntp server ntp.ubuntu.com prefer` 后 chrony 源仍是发行版默认（
+      `/etc/chrony/sources.d/ubuntu-ntp-pools.sources`）。全仓无 `hostnamectl`/`timedatectl`/
+      resolved/chrony 写入路径（`grep` 仅命中断言与读侧）。
+    · 影响：控制台/`GET /system/status.hostname` 显示的是**配置值**（#197 的取向），与宿主
+      实况不一致；NTP 声明对实际同步无作用（`request system ntp sync` 只跑 `chronyc makestep`，
+      用 chrony 自己的源）。
+    · 定裁点：这三项是「记录/展示」还是「应落到宿主」？若后者则为「命令成功、无实际效果」族，
+      建议补应用路径（或在校验期如实拒绝并给出替代）。
+R3-3【中】SPAN 的 VNF 源：文档说可用、实现是「下发期拒绝」，且**提交期不拦**
+    · 《命令全表》该行标 ✅、《命令树设计》/手册 §8.7 均写「源也可为 vnf <vm> interface <vnic>」；
+      实测 `set source vnf vnf-b interface eth0` 提交**通过**，下发时被
+      `%% 底座下发失败（已补偿）: SPAN 源 vnf-b 为 VNF 接口，暂不支持`（provider 明确 stub）。
+    · 与内核数据面口径不一致（内核侧是**提交期**拒绝并给替代）。建议：二选一——实现
+      （模型已有 `vh-<vm>-<vnic>` 确定性口名，VPP span 可用 sw_if_index）或**提交期拒绝**+
+      改文档；至少补一条与内核侧对称的前置校验。
+R3-4【中】VPP→内核数据面运行期切换：VPP 不被停、网卡交还必须带外，且内核模式禁用了
+     `request interfaces unbind-dpdk`
+    · 实测切换序列：`set system dataplane kernel` + commit（正确警告）+ `systemctl restart nfvis`
+      → `show vpp` 如实报 `dataplane: kernel … 未使用 VPP`；内核侧按配置建出
+      bridge/VRF/vxlan（`ip -br link` 可见 vs-lan/vs-dmz/vs-wan/vs-nat/vr-*/vx-a）。
+    · 但：① **VPP 仍在运行**（systemd active）并持有两块 vfio 网卡 → 手工 unbind 挂死；
+      停 `vpp.service` 后网卡才交还内核（vmxnet3）——产品在切换路径不提示也不停 VPP
+      （只有安装器的 kernel 分支有 stop_vpp_for_kernel）。② 内核模式下
+      `request interfaces <n> unbind-dpdk` 回答「该能力不可用」⇒ 产品内**没有**交还路径。
+      ③ 交还后还需 `request interfaces <n> enable`/重启 nfvis 才收敛，且本机 netplan
+      `activation-mode: off` 会让内核口恒 down（**v3 round1 已记录的环境前置**，快照恢复即复现；
+      本轮已改 manual 并留 `/root/netplan.bak`）。
+    · 建议：切换时给出「VPP 仍在运行/网卡仍在 vfio」的**点名提示 + 照做步骤**（或由 nfvisd
+      在 kernel 模式下自动停 VPP——与安装器同源）；把 unbind 的适用面从「数据面=当前实现」
+      解耦为「驱动层面动作，内核模式下同样需要」。
+R3-5【低】容器配置变更的生效语义未入手册；崩溃循环容器在读视图里是「running」
+    · 实测：改 `args` 后 `request … restart` / `stop+start` 均**沿用旧容器规格**
+      （`docker inspect .Config.Cmd` 不变），需 **delete+recreate** 才生效——该语义只写在
+      `container/docker.go` 注释（「M4-7 语义」），手册/命令表未写；本机因此出现
+      「配置已修好、容器仍按旧参数 crash loop」的现场。
+    · `restarting → running` 的状态映射是规格 #44 既定（非缺陷），但**崩溃重启循环**既无
+      告警（`CONTAINER_EXITED` 只覆盖 dead/exited）也不在读数里可见（无 RestartCount）。
+      建议：读数给「重启次数」或对高频重启（如 5 分钟内 ≥N 次）出告警；手册补一句生效语义。
+R3-6【低】`show interfaces <if> statistics` 输出原始结构体（无字段名）
+    · 例：`interface ens192 statistics: {355512 417 469792537 34348 0 0 0 0}`——操作者无法
+      判读（对照：`show virtual-machine-functions <n> statistics` 是有列名的表格）。
+      建议给列名（rx/tx packets/bytes/errors/drops…）或与接口详情同源渲染。
+R3-7【提示】`HUGEPAGE_POOL_ORPHAN`（2M 池 14 页）在**干净首装**后即出现且长期保持
+    · 属 DPDK 预留未用页（消息自述准确、`reclaim` 明确不动它）；但一条 warning 从首装起常驻，
+      建议评估是否对「预留来源=数据面自身」的情形改判 info/或与 `nfvis_system` 面板合并说明，
+      避免运维噪声掩盖真告警。
+
+================================================================================
+§5 正向验证（逐项，独立事实源）
+================================================================================
+5.1 L2 + BVI 真实转发：vs-lan（ens192 端口 + BVI 192.168.99.1/24）→ 宿主加次地址
+    192.168.99.10 → `ping 192.168.99.1` 5/5 0%；VPP：bvi0 带地址、ens192 在 bd-id 14615916。
+5.2 L3 + 静态路由：vs-wan（type l3，`l3-interface ens224 ip address 192.168.98.1/24`）+
+    `static-routes 10.99.0.0/24 next-hop 192.168.98.10` → 产品 `ping 10.99.0.1 source
+    192.168.98.1` 4/4 0%（宿主持 10.99.0.1/24 次地址）。
+5.3 ACL（唯一可用形态 L3 接口）：acl-icmp-deny 绑 ens224 acl-in → 产品 ping 10.99.0.1
+    **0/3（失败并给平面归属提示）**；vppctl `acl-plugin-in-ip4-fa` checked 3 / deny 3；
+    **ARP 不受影响**（宿主 `arp -d` 后仍能解析 192.168.98.1 ⇒ #341 伴随 macip 生效）；
+    解绑（`delete l3-interface ens224 acl-in acl-icmp-deny`，rev 9）后 ping 3/3 ⇒ #361 撤销链生效。
+    注：不写 ACL 名的 `delete … acl-in` 报「无匹配配置: l3-interface」（语法需带值；按 #361 口径）。
+5.4 端口安全 / 学习上限 / 互斥：`set ens192 port-security mac 00:50:56:c0:00:08`（rev 10）→
+    详情页「ACL 在场、接口已绑定」；宿主 ping 仍通；`set learn-limit 8192` 生效（BD 详情
+    Learn-li 8192）。**互斥双向拒绝**：在已配端口安全的口上加风暴抑制 → 提交失败并给
+    「两者留其一」的照做路径（文案逐条列出两侧）。
+5.5 DHCP 服务器 v1 端到端（真 guest）：vs-dmz（L2 + BVI 192.168.100.1/24 +
+    `dhcp-server pool .100-.200` + dns + domain）→ 新建 vnf-b（debian12 generic 云镜像，
+    cloud-init 生效）→ 租约表 `192.168.100.100 / 52:54:67:73:b6:76 / active`；
+    guest 串口标记：`ADDR: enp1s0 inet 192.168.100.100/24`、`ROUTE: default via 192.168.100.1`、
+    **`PING-GW-RC=0` 3/3 0%**；产品侧 `ping 192.168.100.100 source 192.168.100.1` 3/3 0%。
+    改 user-data 文件内容 → 重启 → cloud-init **重放**（DataSourceNoCloud 实读 seed）✓。
+5.6 NAT44 跨域实测：vs-nat（type l3，`l3-interface vh-vnf-b-eth0 ip address 192.168.200.1/24`
+    —— vNIC 作 L3 接口形态）+ `nat rules 10 match source 192.168.200.0/24 … action
+    interface ens224`（out=vs-wan 域）→ guest 侧静态编址 ping 宿主 192.168.98.10：
+    `show nat` 会话 `192.168.200.100:525 ↔ 192.168.98.1:63327 proto 1 packets 6`；
+    `vppctl show nat44 ei sessions detail`：i2o fib 4 ↔ o2i fib 1，**total pkts 6 / 504 B**
+    （3×98 去 + 3×70 回，双向闭环）。
+    负例（正确拒绝）：`virtual-switch vs-dmz`（L2）作 inside → 「不是 L3 交换机」。
+5.7 QoS（VPP policer）：`qos policies pol-walk cir 8000000 cbs 1000000` + ens192 入/出双向绑定
+    → `show qos policies` 显示 `ens192:in,ens192:out`；`vppctl show policer`
+    `pol-walk 1r2c cir 8000 conform transmit/exceed drop`。
+5.8 VXLAN：`set vxlan tunnels vx-a vni 100 local 192.168.98.1 remote 192.168.98.10
+    virtual-switch vs-lan` → `show vxlan tunnels`「已在 VPP（接口 vxlan_tunnel0）」；
+    BD 详情里 vxlan_tunnel0 为成员（tx 9 包）。
+5.9 VNF 生命周期（alpine + debian 双镜像）：建/启/停/重启/快照 create（需关机，运行中报语法-
+    语义正确错误）/rollback/删除；`show … interfaces|statistics`；真 pty 串口 console 抓启动日志；
+    Web 串口页「只发回车」令 guest 重绘 `vnf-b login:`（双向实证）；快照页/详情页一致。
+5.10 容器生命周期：创建（image alpine:3.20 / vcpu / memory / env / command+args / restart-policy）
+    → start → `exec "id -un; cat /etc/os-release…"`（root / Alpine Linux，退出码 0，stdout/stderr
+    分节）→ 超时按失败（`命令在 5s 内未结束…退出码未知`，REST 504 口径同 #366）→
+    `shell` 真 pty（`id -un`=root、`hostname`=容器 ID、Ctrl-] 退出）→ `log`（无输出如实报「无日志」）。
+     附：一次**自造输入错误**（heredoc 吞引号导致 args 变 3 个 token → `sh -c sleep 3600` 崩循环）
+     用于验证 §R3-5 的语义与读数（配置 `display set` 带引号回读、REST 读回 `['-c','sleep 3600']`
+     两元素 —— 引号保留正确，**非产品缺陷**）。
+5.11 用户与权限：建 op1（operator）/ro1（read-only）（密码回显 `«已隐藏»`）。CLI：op1
+    `configure`→`%% 无权限进入配置模式（需 super-user）`、`request vpp restart`→`%% 无权限执行该命令`、
+    `show log audit` 允许；REST：op1 `PUT /configuration/candidate`/`POST …/commit` 均 **403**；
+    Web：op1 登录后运维动作页**只余 O 级**（列出 core dump/导出清单/刷新备份列表），
+    Su 级写控件（生成备份/SSH host key/升级/回退/恢复出厂/电源…）整体隐藏（截图
+    docs/images/walkthrough-web-ops-operator.png）。
+5.12 主机防火墙：`set default-policy accept` + `set rule 10 action drop source 192.0.2.0/24
+    protocol icmp` → 非 console 会话须 `commit confirmed`（照做）→ 读视图「已收敛」+ 逐规则计数；
+    **`nft list table inet nfvis-firewall` 与读视图逐字对**（保留项：iifname!=ens160 accept /
+    established / 必要 ICMP，用户规则带 counter+comment）。
+5.13 备份 / 诊断归档 / 下载：`request system configuration backup`（7.0 KiB JSON，0600）+
+    `request system tech-support generate`（8.9 KiB，7 分节全在，0700/0600）→ REST 带 Bearer
+    下载 **逐字节一致**；归档 config.json **无口令哈希**（`pbkdf2` 命中 0），logs.txt **无一次性
+    口令**（#325 口径在首装机上成立）。
+5.14 事件总线（SSE）：`GET /api/v1/events` + `Last-Event-ID: 1` 补发历史（可见
+    alarm-raised/resolved、config-committed、VNF_PORT_DOWN），期间动作实时推送；20s 心跳保留帧。
+5.15 配置事务/审计/版本：`show configuration history`（rev 逐版可读）、`display set` 带引号
+    回读、`commit confirmed` 超时/确认两态、审计表含 intent 行（用户创建）、
+    会话锁 `show system configuration sessions`（Dirty 标记 + 10 分钟脏锁回收实测
+    —— 吊销他人 token **不**释放其 dirty 候选（设计：不替操作者丢未提交改动），
+    空闲阈值到点由「随访问清扫」回收，实测 10:49:44 后下一次访问即释放）。
+5.16 数据面切换全往返（v3 头号特性，发布件上）：
+    · 不兼容语句**提交期直接拒绝**：仅 `set system dataplane kernel` → 4 条逐项列明
+      （learn-limit / dhcp-server / vNIC 接 l3 交换机 / NAT 跨域）+ 各自「照做路径」。
+    · 清障后切换：commit rev 35（正确警告）→ `systemctl restart nfvis` → `show vpp`
+      「dataplane: kernel…未使用 VPP」→ 内核对象建成（bridge/VRF/vxlan）。
+    · 交还网卡（带外，见 R3-4）+ `request interfaces enable` + 重启 nfvis → **vs-lan bridge
+      UP 带 192.168.99.1/24、ens192/vx-a 为成员** → 宿主 `ping 192.168.99.1` 有应答
+      （内核桥 rx 17/tx 12）⇒ **内核数据面真实转发成立**。
+    · 切回 VPP：`set system dataplane vpp` commit rev 38（正确警告）→ 重启 → `show vpp`
+      connected → `request interfaces … bind-dpdk --yes` ×2 → `request vpp restart` →
+      两口回 DPDK、bvi0/bvi1 就位、宿主 ping 192.168.99.1 清 ARP 后 4/4 0%。
+5.17 其余读视图抽查（均如实）：show system cpu/memory/storage/kernel/hardware/firewall/
+    core-dumps/tech-support/metrics history（存储状态/序列/样本/采样时刻）、show vpp
+    runtime（线程级向量率/主循环速率）、show images detail（含 downloaded-bytes/import-state）、
+    show configuration permissions operator（逐路径生效权限 112 允许/0 拒绝）、
+    `show lldp neighbors`（无对端如实空）、`show vns statistics`、`show dns proxy`（未配置的
+    边界文案完整）、show vrfs 路由表（Distance 列「未下发」为既定口径）等。
+
+================================================================================
+§6 现场、还原与遗留
+================================================================================
+· 现场（收尾时）：nfvis + vpp active；数据面 vpp；两口在 VPP（dpdk）；对象：vs-lan（BVI
+  99.1）/vs-dmz（BVI 100.1，dhcp-server 已随内核切换移除）/vs-wan（98.1 + 静态路由）/
+  vs-nat（200.1，vNIC）/vxlan vx-a/qos pol-walk/防火墙 1 条（192.0.2.0/24 drop icmp）/
+  用户 op1、ro1；vnf-a、vnf-b、容器 ct-1 均在运行；告警：HUGEPAGE_POOL_ORPHAN（2M 14 页）+
+  vs-nat/vnf-b 的未收敛项（内核切换期间移除 vNIC 绑定所致，属本轮测试副产物）。
+· 环境改动（如实登记）：① netplan ens192/ens224 `activation-mode: off→manual`
+  （原件备份 `/root/netplan.bak`；这是 v3 round1 记录过的环境前置，快照恢复即复现）；
+  ② 创建 docker 代理 drop-in `/etc/systemd/system/docker.service.d/proxy.conf`
+  （指向 192.168.155.1:2333，供 `docker pull`）；③ 装入夹具：`alpine.qcow2`（产品下载路径，
+  179.0 MiB，sha256 由产品校验）、`debian12.qcow2`（cloud.debian.org 直下，SHA512 与官方
+  SHA512SUMS 一致，427.4 MiB）、容器镜像 `alpine:3.20`（docker save → `request images upload`）；
+  ④ 崩溃取证目录 `/root/crash-evidence/`。
+· 未做（如实）：软件 add/rollback（会重启管理面，本轮时间预算内未跑）、抓包导出（pcap 下载）、
+  配置 rollback 实际回退、bond（无空闲口）、LLDP 真邻居（无对端）、SR-IOV（无 PF）、
+  吞吐/规模基准（无流量发生器）、容器 memif 通流（镜像无 memif，与 T0-3 同因）。
+· 证据文件（VM 上）：/root/install-3.0.5.log、/root/wizard.log、/root/sysbase.log、
+  /root/console1..3.log、/root/console-nat.log、/root/crash-evidence/*（含 apport core）、
+  /root/walk1.log、/root/walk3.log、以及各 *.cli 脚本与对应输出。
+· 本文件对应的 Web 截图：docs/images/walkthrough-web-overview.png、
+  walkthrough-web-vm-console.png、walkthrough-web-network-objects.png、
+  walkthrough-web-ops-operator.png。
+
+（完）
+
+================================================================================
+§7 修复批（决策 #421~#427）与真机复验（2026-10-08 同日追加）
+================================================================================
+本批把 §2/§3/§4 的发现逐条落地为决策 **#421~#427**（附录 A 已入册、AGENTS 计数 322→329；
+契约先行），实现由子智能体完成并逐条红-绿，主会话在 nfvis-vm 上换装（修复版 nfvisd/nfvis-cli
+交叉编译后替换 /usr/bin，原二进制备份 /root/bin-orig/）后逐项复验。以下均为真机实测输出摘要。
+
+7.1 #421 风暴抑制崩溃与绑定事实源（对应 R3-1 主体）
+    · API 级根因（自建 govpp 探针 /root/probe，源码入仓 contrib/scripts/vpp-api-probe/）：
+        classify_table_ids → tables 0(ffff…)/1(0100…) 均 1 会话、链自洽；
+        classify_table_by_interface 逐接口 → **全部 l2=4294967295（NONE）**（含已绑定的 ens224）；
+        policer_classify_dump（L2/IP4/IP6）→ **entries=0**；policer_dump 可见 nfvis-storm-* 按名在场。
+      ⇒ 产品原「绑定唯一事实源」在本底座失效 ⇒ sweepOrphanTables 保护集恒空 ⇒ 误删在用的表 ⇒
+        槽悬空 ⇒ worker 线程 SIGSEGV（§2 的崩溃循环）。修复：绑定事实四态（实况回读/按登记/
+        自认领/未挂）+ 清扫安全化（不可回读底座上**只识别不删**）+ 删表前必须确认解绑。
+    · 真机复验（修复版）：
+        a) 下发两档 → 读视图「分类表 #3/#2 **按登记在位**（本数据面版本读不到该绑定；掩码…会话 1）」
+           （修复前为「分类表未挂」——误报）。
+        b) `request vpp restart` 后重放 → 仍按登记在位、表索引 0/1 单链。
+        c) **`systemctl restart nfvis`（VPP 不动）→ 读视图「分类表 #1/#0 自认领在位（依据 policer
+           按名在场 + 表链匹配…）」**；表索引与重启前**一致**（零删零建）。
+        d) **5 分钟稳定观察（10×30s）：VPP NRestarts=0、SIGSEGV=0、风暴巡检未收敛=0**（修复前
+           同场景为 ~30s 一轮崩溃、restart counter 涨到 23）。
+        e) 双接口并存 + nfvisd 重启：如实报「无法认领：数据面存在 2 组形态相符的分类表…
+           （不删不建；可稍后重试，或 request vpp restart 清空数据面后重建）」+ 候选「#0、#1、#2、#3
+           （只识别不删）」——**零崩溃、零删除**（宁可不认领，绝不误删）。
+        f) 删除声明 → `vppctl show policer | grep -c nfvis-storm`=0、`show classify tables`=0（干净回收）。
+    · 如实边界：多接口同时重整时因分类表无名字/会话结果不可回读而**放弃认领**（如实报未收敛，
+      `request vpp restart` 是文档化出路）；清扫在不可回读底座上**永不删除**（孤儿随 VPP 重启消失）。
+
+7.2 #422 VPP 读路径有界化（对应 R3-1 连带）
+    · 真机：`kill -STOP vpp_main` 后 `show interfaces physical` **3s 返回**（rc=1；修复前为无限挂起
+      并持 CLI 全局锁把管理面拖死）；`show interfaces ens192 detail` 1s 内如实报「VPP 运行态不可用…」；
+      `kill -CONT` 后读数自愈。
+    · 实现：统一有界包装（govpp `SetReplyTimeout` per-receive；不用外挂 goroutine——会泄漏并偷应答），
+      覆盖 29 个 dump + 5 个单请求读数点；写路径零改动（有专门用例钉住）。
+
+7.3 #423 大页池 sysctl 单源接管的运行期收口（对应 R3-2）
+    · 真机（修复版启动后）：`dpkg-divert --list | grep sysctl` → `diversion of /etc/sysctl.d/80-vpp.conf
+      to /etc/sysctl.d/80-vpp.conf.vpp-disabled by nfvis`；目录里原文件已成 `.vpp-disabled`；
+      日志 INFO「已接管 vpp 包自带的大页池 sysctl（原路径 → .vpp-disabled；此后由 NFViS 单源声明）」
+      并带 from/to；90 号文件注释改为「以 divert 记录为准 + 查证命令」（不再单方面宣称已接管）。
+
+7.4 #424 系统基线三项落地应用（对应 R3-3）
+    · 真机启动应用：`hostnamectl hostname`=`nfvis-lab`、`/etc/hostname`=nfvis-lab；
+      `timedatectl` Time zone=Asia/Shanghai（CST +0800）、/etc/localtime→…/Asia/Shanghai；
+      `/etc/chrony/sources.d/nfvis.sources`=`pool ntp.ubuntu.com prefer` 且 `chronyc -N sources`
+      实际使用 1~4.ntp.ubuntu.com；`/etc/systemd/resolved.conf.d/nfvis-dns.conf` 落盘（DNS=223.5.5.5 223.6.6.6）。
+    · 提交期应用/回收：改时区 → 立即生效；删 NTP 声明 → 托管片段撤除（仅剩发行版文件）；
+      改回 → 重新落盘并热重载。（DNS 同族：`set system dns server` 经核实此前同样未落地，本批一并落地。）
+
+7.5 #425 SPAN 的 vNIC 源（对应 R3-4）
+    · 真机：`set source vnf vnf-b interface eth0 direction both` + `set analyzer interface ens224`
+      → **commit 成功**（修复前为下发期「暂不支持」+ 整次回滚）；
+      `vppctl show interface span` → `vh-vnf-b-eth0 → ens224 (both)`；
+      guest 产生流量（runcmd ping 网关）：`vh-vnf-b-eth0` rx 16→35（+19）而 `ens224` **tx 3→22（+19）**
+      ⇒ 镜像逐包成立（分析口与源口不同二层域，未起环）。
+    · 内核数据面维持提交期拒绝（与既有口径一致，未变）。
+
+7.6 #426 数据面切换的运行期收尾（对应 R3-5）
+    · 真机（切内核 + 重启）：`systemctl is-active vpp` = **inactive**，日志 INFO「数据面已切到内核，
+      产品不再管理 VPP，已停 vpp.service」（附「只停不卸」说明与照做指引）；`show vpp` dataplane: kernel。
+      恢复收敛告警**点名**两口的 vfio 残留并给出「request interfaces <口> unbind-dpdk --yes」照做路径。
+    · 内核模式下 `request interfaces ens192 unbind-dpdk --yes` **已放行**（按既有语义要求显式 to-driver：
+      补 `to-driver vmxnet3` 后「已解绑并交还内核驱动，当前驱动 vmxnet3」×2）；`bind-dpdk` 仍拒（文案
+      指向切回 VPP）。交还 + `request interfaces enable` + 重启 nfvis → bridge 成员就位、宿主
+      `ping 192.168.99.1` **4/4 0%**（内核数据面真实转发）。
+    · 切回 VPP：一次提交 + 重启 → `show vpp` connected（nfvisd 自动拉起 VPP）→ 重绑 DPDK ×2 →
+      `request vpp restart` → 两口回 VPP（10G/dpdk）。
+
+7.7 #427 读数与文档收口（对应 R3-6/R3-7/R3-9；R3-8 如实保留）
+    · 真机：`show interfaces ens192 statistics` 由裸结构体 `{355512 417 …}` 改为带列名表格
+      （Interface / rx-pkts / tx-pkts / rx-bytes / tx-bytes / rx-errors / tx-errors / rx-drops / tx-drops，
+      列名与顺序取自 REST 契约字段；该端点 REST/Web 本就是具名字段，未改）。
+    · 手册补三处：§8.1「主机名/时区/NTP/DNS 落到宿主 + 删声明语义」、§8.7「分析口不得与源口同二层域
+      （自持镜像环实测 ~42kpps；环路检测不覆盖镜像环）」、§9.4「改容器配置需删除重建；restarting 并入
+      running，崩溃循环靠日志/RestartCount 观察」。
+    · 套件契约同步：`cli-fulltest-lib.sh` 的主机名清场升级为「配置 + 宿主」两处还原（入口快照记
+      `hostnamectl hostname`；按值识别只还原本轮写的 cli-tx-*/nfvis-cli），因为 #424 之后删声明
+      不再回退宿主——修前套件跑完会把宿主机名留成 cli-*。
+
+7.8 门禁（宿主交叉执行 make check 各件）
+    · decisions count ✓（329 项，结构完整）｜openapi 无重复键 ✓｜openapi.json 与 YAML 同步 ✓｜
+      go vet ✓｜archtest ✓｜toolcheck 全套 ✓（含套件契约同步：契约 296 / 套件 389 / 豁免 79、缺口 0）｜
+      make cover ✓（含门槛包全过：network 80.1%、compute 86.7%、container 83.8%、images 82.1%、config/model/schema 皆 ≥70%）、make test ✓（全仓 0 失败，internal/api 472s）。
+    · 如实边界：本批修复版以**交叉编译替换二进制**方式上机（非 deb 重装，VM 为 3.0.5 已装实例）；
+      正式发版仍须走 `make deb` + 两次打包逐字节一致 + 四套件复跑（本批未跑四套件；#421 的崩溃场景
+      已在真机以 ≥5 分钟稳定性替代覆盖，两档风暴 + nfvisd 重启 + 回收三段齐全）。
+
+================================================================================
+§8 第二批修复（决策 #428~#432，清掉 §7 如实登记的「应当修」项）+ 真机复验
+================================================================================
+背景：§7 收口后如实登记了一批「应当修但本批没修」的边界（应用失败不进告警面板、syslog 主机名固化、
+风暴残余两条、SPAN 的 sriov-vf 源、内核模式读视图不点名、容器重启不可见）。本轮把它们逐条落地为
+决策 **#428~#432**（附录 A 已入册、AGENTS 计数 329→334，契约先行），实现由子智能体完成并逐条红-绿，
+主会话在 nfvis-vm 上换装后复验。**真机复验又抓出两处实现缺陷（下面 8.2/8.5），均已当场修复并重验。**
+
+8.1 #428 系统基线应用失败进告警 + 远程 syslog 主机名随配置
+    · 真机：`systemctl mask --now systemd-hostnamed` 后提交主机名 → 提交成功（不阻断）且
+      `show alarms active` 出现 **`SYSTEM_BASELINE_APPLY_FAILED`**（warning，source=`system/baseline`），
+      message 含项名（主机名）、宿主命令原始报错、自查命令与处置路径；`systemctl unmask --now
+      systemd-hostnamed` + 重新提交 → `hostnamectl hostname` 回到 `nfvis-lab` 且**告警自动消解**（计数 0）。
+    · syslog 主机名动态化：`SyslogForwarder.currentHostname()` 每次构造报文时取「配置优先 / 否则 os.Hostname」，
+      单测 `TestForwardHostnameFollowsCurrentFact` 红-绿（把 Configure 改回固化 ⇒ 两条报文都是旧名 ⇒ 失败）。
+      **如实登记**：真机 tcpdump 在转发目标侧看 RFC5424 头的复验本轮未做（以单测为准）。
+
+8.2 #429 风暴残余两条（登记表删前形状复核 + 计数按名）——真机抓出并修掉一处回归
+    · 正常路径真机：两档下发 → 读视图「分类表 #1/#0 按登记在位（本数据面版本读不到该绑定；掩码…会话 1）」，
+      计数如实报「不可读（**按名** nfvis-storm-ens192-broadcast 在 /net/policer/* 未命中）」；
+      删除 → `show policer | grep -c nfvis-storm`=0、`show classify tables`=0、读视图无 Storm 段。
+    · **真机抓出回归（当场修）**：形状复核对「表已不存在」收到的错误码是 **`-91 Classify table not found`**
+      （带链删顺带删掉链上那张 → 再复核那张即 -91），而代码只认 -6/-65/-81 ⇒ 把「已不存在」当硬错、
+      中止整次提交 —— 现场表现为**风暴配置删不掉、policer 残留**（提交输出 `读取分类表 1 属性（删前形状复核）:
+      VPPApiError: Classify table not found (-91)`）。修法：新增 `vppClassifyTableNotFound = -91` 并纳入
+      `stormAbsentCode` 与 `ClassifyTableInfo` 的「不在位」识别；新增单测
+      `TestStormAbsentCodeIncludesClassifyTableNotFound`（红-绿：去掉 -91 ⇒ 失败）。修复版复验：同一条
+      `delete ens192 storm-control` **一次提交成功**（rev 60）。
+    · 残余（如实登记 **R3-10**）：登记丢失后残留的**孤儿 policer**（本轮由上面那次中止产生）没有自动清理
+      路径——`applyDone` 在「无声明 + 无登记」时早退，teardown 的「按名清 policer」因此不被调用；与孤儿
+      分类表同族（保护集不可证 ⇒ 不删），`request vpp restart` 是文档化出路（本轮即以此清场：policer 归 0）。
+
+8.3 #430 SPAN 的 sriov-vf 源提交期拒绝 + Web 详情页源显示
+    · 校验：sriov-vf 型 vNIC 作镜像源**提交期直接拒绝**（文案给出「改用 vhost-user 型 vNIC 或物理口/bond」），
+      vhost-user 与物理口照旧放行；单测三例红-绿。**如实登记**：本机无 PF/VF 环境，未做真机声明，
+      以校验层用例为准。
+    · Web 复验（Browser Use）：网络对象页 SPAN 列表卡由 `[object Object]`/恒「—」修为
+      **`span-web | vnf vnf-b/eth0 | ens224`**；详情页「源」由只显示 vNIC 名修为 **`vnf vnf-b/eth0`**。
+      顺带修掉**同类字段错位缺陷**（卡片取 `s.sources`/`s.destination`，契约里是 `source`/`analyzer`）并新增
+      字段级守护 `internal/api/ui_span_card_fields_test.go`（与 R110-1 的 QoS 卡守护同型；红-绿：改回旧写法
+      ⇒ 报「卡片行引用了契约 PortMirroring 里不存在的字段 s.sources / s.destination」）。
+
+8.4 #431 内核模式下接口读视图点名「为什么不在数据面」
+    · 真机（切内核、两口仍 vfio）：`show interfaces physical` 备注列 = 「仍绑定在 vfio-pci 驱动上
+      （PCI 0000:0b:00.0）、内核里没有它；先交还内核：request interfaces ens192 unbind-dpdk --yes」
+      （ens224 同）；`| display json` 的 `source` 字段与文本同源；内核模式下 `bind-dpdk` 仍拒（文案指向切回）。
+    · 交还 + 切回 vpp 流程照旧（重绑 DPDK ×2 + `request vpp restart`，`show vpp` connected）。
+
+8.5 #432 容器重启可见性（RestartCount 读视图 + 崩溃重启循环告警）——真机抓出并修掉两处实现缺陷
+    · **缺陷一（字段位置）**：Docker 29.1.3 的 `RestartCount` 在 inspect 应答**顶层**，**不在** `State`
+      （真机：`--format '{{.RestartCount}}'`=10 而 `{{.State.RestartCount}}` 报 `map has no entry for key`）。
+      首版按 `State.RestartCount` 读 ⇒ 永远「取不到」：读视图省略该字段、告警也不触发（现场：容器
+      `restarting`、累计 15，`show container-functions` 无 restart-count、`show alarms` 空）。修法：以顶层为准 +
+      `State` 兼容回退；新增守护 `internal/orchestrator/container/docker_inspect_restartcount_test.go`
+      （用**真机应答形状**钉死；红-绿：退回 State-only ⇒ `known=false count=0` 失败）。修复版复验：
+      `restart-count 22` 与宿主 `docker inspect` 的 `RestartCount` 逐值一致。
+    · **缺陷二（判据不可达）**：初稿判据「两次巡检间有增长且累计 ≥3」，而真机崩溃循环里 Docker 做**指数退避**
+      （实测约 40~60s 才重启一次，巡检 15s 一轮）⇒ 「两轮都在涨」几乎不可达、告警永不触发。修法：判据改为
+      「原始状态 `restarting` ＋ 累计 ≥3」（`restarting` 本身即「没在服务、Docker 反复拉起」；「重启过几次但
+      此刻 running」不会误报）；**决策 #432 正文已按真机更正**并注明。测试同步（`NoGrowthStillReported`：
+      不增长也报、低于门槛不报、重建后重新起算；活动告警按 `AlarmStore.Raise` 的幂等更新语义断言）。
+    · 真机建/消：坏 args 造崩溃循环 → `show alarms active` 出现 **`CONTAINER_RESTART_LOOP`**（warning，
+      source=容器名，message 含累计次数与两个排查入口）；`request container-functions ct-2 delete --yes` →
+      对象消失即**自动消解**（计数 0）。
+    · Web 复验：容器详情页新增 **`重启次数`** 行（ct-1 显示 0，与 docker 一致；字段缺失时显示「—」不显示 0）。
+
+8.6 门禁与现场
+    · 决策计数 334（守护通过）；`make check` **七项全绿**（check-rc=0：vet / test 全仓 0 失败 / cover 门槛包全过（network 80.0%）/ archtest / docscheck / toolcheck（含套件契约同步与 Web 桩式守护）/ prototype-check）；套件契约同步与两个 web-console 自校准另单独复跑通过。本批同样以**交叉编译替换 /usr/bin 二进制**上机。
+    · 现场收尾：数据面 vpp（两口在 VPP/dpdk）、vs-wan l3-interface 已还原、SPAN 会话已删、风暴配置已清、
+      policer/分类表归 0；`show alarms active` 仅剩既有的 `HUGEPAGE_POOL_ORPHAN`。
+    · 未做（如实）：#428 的 syslog 真机抓包复核、#430 的 sriov-vf 真机声明（无 PF）、四套件复跑（仍待发版前补）。

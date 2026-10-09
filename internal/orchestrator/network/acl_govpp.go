@@ -34,7 +34,7 @@ func (g *govppAclClient) ACLIndexByTag(tag string) (uint32, bool, error) {
 	reqCtx := g.ch.SendMultiRequest(&acl.ACLDump{ACLIndex: ^uint32(0)})
 	for {
 		d := &acl.ACLDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return 0, false, err
 		}
@@ -55,7 +55,7 @@ func (g *govppAclClient) ACLTags() ([]string, error) {
 	var out []string
 	for {
 		d := &acl.ACLDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}
@@ -238,7 +238,7 @@ func (g *govppAclClient) MacipACLByTag(tag string) (uint32, int, bool, error) {
 	reqCtx := g.ch.SendMultiRequest(&acl.MacipACLDump{ACLIndex: ^uint32(0)})
 	for {
 		d := &acl.MacipACLDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return 0, 0, false, err
 		}
@@ -261,7 +261,7 @@ func (g *govppAclClient) MacipBoundACL(swIfIndex uint32) (uint32, bool, error) {
 	})
 	for {
 		d := &acl.MacipACLInterfaceListDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return 0, false, err
 		}

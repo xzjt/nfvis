@@ -97,6 +97,13 @@ fi
 #    开机按可用内存尽量分配，1G 池因此大于声明值（真机首装现场：声明 1、实际 4）。接管后
 #    vm.nr_hugepages 只由 nfvisd 维护的 90 号文件声明，不再依赖文件名排序、也没有开机期
 #    「先撑大再回缩」的抖动。**幂等**（已接管则跳过）；卸载时由 prerm 还原。失败不阻断安装。
+#
+#    ⚠️ 本步只是**首选时机**，不是保证点（决策 #423，round3 走查 R3-2 实证）：同一次 apt 事务里
+#    vpp 的 conffile 要到 **vpp 自己被 configure 时**才落盘（实测 ctime 09:32:40 晚于
+#    `configure nfvis` 09:32:38），此刻 `[ -e "$VPP_SYSCTL" ]` 为假 → 连下面「接管失败」的提示
+#    分支都不进、静默漏接管。保证点在 **nfvisd 运行期**：启动与 60s 巡检会按 divert 记录复核并
+#    补接管（内建这份 dpkg-divert 动作，见 internal/system/kernel_apply.go 的 VppSysctlTakeover），
+#    故「上层包后装 / 同事务后配置」两种顺序都能收口。
 VPP_SYSCTL=/etc/sysctl.d/80-vpp.conf
 if command -v dpkg-divert >/dev/null 2>&1; then
     if dpkg-divert --list "$VPP_SYSCTL" 2>/dev/null | grep -q "$VPP_SYSCTL"; then

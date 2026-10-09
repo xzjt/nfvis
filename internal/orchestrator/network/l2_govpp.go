@@ -1,6 +1,10 @@
 package network
 
 // govpp L2 客户端（M3-3）：唯一使用 l2/interface binapi 的地方，供 L2Provider 调用。
+//
+// 读数（dump / 单请求查询）一律经 recvMultiBound / recvReplyBound 套应答时限（决策 #422，
+// 说明与红-绿用例见 govpp_read_bound.go），掉线/卡死的读数在预算内回错误而不是无限等待；
+// **写路径（add/del/set 这类下发）有意不套时限**——提交/下发的错误语义与等待语义保持原样。
 
 import (
 	"fmt"
@@ -65,7 +69,7 @@ func (g *govppL2Client) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	reqCtx := g.ch.SendMultiRequest(req)
 	for {
 		d := &ifapi.SwInterfaceDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return 0, false, err
 		}
@@ -83,7 +87,7 @@ func (g *govppL2Client) SwInterfaceNames() (map[uint32]SwIfInfo, error) {
 	names := map[uint32]SwIfInfo{}
 	for {
 		d := &ifapi.SwInterfaceDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}
@@ -128,7 +132,7 @@ func (g *govppL2Client) BridgeDomains() ([]BDRuntime, error) {
 	out := make([]BDRuntime, 0, 8)
 	for {
 		d := &l2.BridgeDomainDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}
@@ -159,7 +163,7 @@ func (g *govppL2Client) BridgeDomainExists(bdID uint32) (bool, error) {
 	})
 	for {
 		d := &l2.BridgeDomainDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return false, err
 		}
@@ -308,7 +312,7 @@ func (g *govppL2Client) MACTable(bdID uint32) ([]MACEntry, error) {
 	var out []MACEntry
 	for {
 		d := &l2.L2FibTableDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}

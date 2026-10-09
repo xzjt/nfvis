@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator"
 )
 
 // SvcClient VPP SPAN/QoS/接口 binary API 的最小能力集。
@@ -65,16 +66,18 @@ func (p *ServicesProvider) reset() {
 }
 
 // ApplySpan 配置 SPAN：源口 → 分析口，方向 ingress|egress|both（缺省 both）。
+//
+// 源两形态：物理口/bond 按名解析；VNF vNIC 先解析为其**确定性 vhost-user 口名**
+// （`vh-<vm>-<vnic>`，见 spanSourceIface），再与物理口走**同一条** span 原语。
+// vNIC 口随 vNIC 声明在数据面建立（与 VM 是否运行无关：VM 未运行时该口 link down，
+// 镜像是就绪的、只是没有流量），故无需为它加任何特殊下发路径。
 func (p *ServicesProvider) ApplySpan(ctx context.Context, pm model.PortMirroring) error {
-	if pm.Source.Vnf != "" {
-		return fmt.Errorf("SPAN 源 %s 为 VNF 接口，暂不支持", pm.Source.Vnf)
-	}
 	c, err := p.client()
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	src, err := resolveIface(c, pm.Source.Interface)
+	src, err := spanSourceIface(c, pm.Source)
 	if err != nil {
 		return fmt.Errorf("SPAN 源口: %w", err)
 	}
@@ -91,6 +94,36 @@ func (p *ServicesProvider) ApplySpan(ctx context.Context, pm model.PortMirroring
 	p.mu.Unlock()
 	return nil
 }
+
+// spanSourceIface 解析镜像源为 VPP sw_if_index：物理口/bond 按名；VNF vNIC 按其在数据面中的
+// **确定性 vhost-user 口名**解析（命名规则唯一真源 internal/model/ifacename.go，经
+// orchestrator.VnfIfaceName 转发——与建接口、交换机端口、l3-interface 校验同一份规则，
+// 不在此另写一套）。
+//
+// 解析不到该口即**如实报错、不静默降级**（不给「镜像成功」的假象），错误里带照做路径：
+// 先声明 vNIC 并下发、或改用物理口；sriov-vf 直通的 vNIC 不经过 VPP，点名它不能作镜像源。
+func spanSourceIface(c SvcClient, src model.PMSource) (uint32, error) {
+	if src.Vnf == "" {
+		return resolveIface(c, src.Interface)
+	}
+	name := orchestrator.VnfIfaceName(src.Vnf, src.VnfInterface)
+	idx, ok, err := c.SwInterfaceIndex(name)
+	if err != nil {
+		return 0, fmt.Errorf("解析 VNF %s 的 vNIC %s 的 vhost-user 接口 %s: %w", src.Vnf, src.VnfInterface, name, err)
+	}
+	if !ok {
+		return 0, fmt.Errorf("%w: VNF %s 的 vNIC %s 在数据面不存在（VPP 中未见接口 %s）：%s",
+			ErrIfaceUnavailable, src.Vnf, src.VnfInterface, name, vnicSpanMissingHint)
+	}
+	return idx, nil
+}
+
+// vnicSpanMissingHint VNF vNIC 作镜像源解析不到口时的照做提示。
+// 不带内部引用，只写操作者可照做的一步与两种替代。
+const vnicSpanMissingHint = "请先确认该 vNIC 已在 VNF 上声明并已下发" +
+	"（vhost-user 口随 vNIC 声明在数据面建立，VM 未启动也应有；若刚重启过数据面，" +
+	"等恢复收敛完成或执行 request vpp restart）；" +
+	"sriov-vf 直通的 vNIC 不经过 VPP、不能作镜像源；也可以把源改为物理口或 bond"
 
 // DeleteSpan 关闭 SPAN 会话。登记=最后一个成功下发的状态（决策 #363）：
 // SpanDisable 成功才摘登记，失败保留（重试可再关；此前先摘登记，关失败后登记已丢、再也关不掉）。

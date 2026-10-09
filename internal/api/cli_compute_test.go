@@ -41,6 +41,11 @@ type fakeCLIContainer struct {
 	logTail int
 	err     error
 
+	// 决策 #432：重启次数读数（restarts 有值且容器在 states 里 ⇒ known；restartUnknown 里的
+	// 容器模拟「Docker 应答未给该字段」⇒ 读视图必须省略该字段）。
+	restarts       map[string]int
+	restartUnknown map[string]bool
+
 	// 决策 #357：容器内执行命令的记账（命令原文、超时、注入结果）。
 	execCommand string
 	execTimeout time.Duration
@@ -53,7 +58,7 @@ type fakeCLIContainer struct {
 }
 
 func newFakeCLIContainer() *fakeCLIContainer {
-	return &fakeCLIContainer{states: map[string]string{}}
+	return &fakeCLIContainer{states: map[string]string{}, restarts: map[string]int{}, restartUnknown: map[string]bool{}}
 }
 
 func (f *fakeCLIContainer) StartContainer(_ context.Context, name string) error {
@@ -76,6 +81,21 @@ func (f *fakeCLIContainer) ContainerState(_ context.Context, name string) (strin
 		return s, nil
 	}
 	return "absent", nil
+}
+
+// ContainerStatus 运行态读数（状态 + 重启次数，同一次 inspect；决策 #432）。
+func (f *fakeCLIContainer) ContainerStatus(_ context.Context, name string) (string, int, bool, error) {
+	if f.err != nil {
+		return "", 0, false, f.err
+	}
+	st, ok := f.states[name]
+	if !ok {
+		return "absent", 0, false, nil
+	}
+	if f.restartUnknown[name] {
+		return st, 0, false, nil
+	}
+	return st, f.restarts[name], true, nil
 }
 func (f *fakeCLIContainer) ContainerLogs(_ context.Context, name string, tail int) (string, error) {
 	f.logTail = tail

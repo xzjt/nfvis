@@ -84,7 +84,7 @@ func (g *govppNatClient) NATAddressVRFs() (map[string]uint32, error) {
 	out := map[string]uint32{}
 	for {
 		d := &nat44_ei.Nat44EiAddressDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}
@@ -248,7 +248,7 @@ func (g *govppNatClient) natUsers() ([]natUserVPP, error) {
 	var users []natUserVPP
 	for {
 		d := &nat44_ei.Nat44EiUserDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, fmt.Errorf("列出 NAT44 用户: %w", err)
 		}
@@ -269,7 +269,7 @@ func (g *govppNatClient) natUserSessions(u natUserVPP) ([]NATSession, error) {
 	var out []NATSession
 	for {
 		d := &nat44_ei.Nat44EiUserSessionDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, fmt.Errorf("读取 NAT44 用户 %s（转发域 %d）的会话: %w", u.ip, u.vrfID, err)
 		}

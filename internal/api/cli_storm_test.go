@@ -152,6 +152,129 @@ func TestCLIStormControlReadViewNotAttached(t *testing.T) {
 	}
 }
 
+// TestCLIStormControlReadViewDeclaredBinding（决策 #421④）：本底座 policer-classify 绑定不可
+// 回读（实况阴性、登记在位）时，读视图按**登记**如实呈现「分类表 #N 按登记在位」，与
+// 「实况回读」（分类表 #N 实况回读）和「未挂」都区分开；结构化输出给 binding / declared_l2_table /
+// table_declared，且**不发射** attached_l2_table（那是实况字段，不得被登记冒名）。
+func TestCLIStormControlReadViewDeclaredBinding(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set interfaces ens224 description storm-port",
+		"set interfaces ens224 storm-control broadcast 8000",
+		"commit",
+		"exit",
+	)
+	x.setStorm(fakeStormRuntime{ok: true, dp: network.StormDataplane{
+		Available: true, Binding: network.StormBindingDeclared, DeclaredTable: 9,
+		Kinds: map[string]network.StormKindDataplane{
+			network.StormKindBroadcast: {PolicerPresent: true, CirKbps: 8000,
+				TableByRegistration: &network.StormTableInfo{Index: 9, Mask: "ffffffffffff00000000000000000000", Sessions: 1},
+				Counters:            &network.StormCounters{ConformPackets: 12}},
+		},
+	}})
+	out := x.Execute("admin", aaaClassSU, "ssh", "show interfaces ens224 detail").Output
+	for _, want := range []string{"cir 8000 kbps", "分类表 #9 按登记在位", "读不到该绑定", "conform 12"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("按登记态 detail 应含 %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "分类表未挂") {
+		t.Fatalf("登记在位时不得报「未挂」:\n%s", out)
+	}
+	if strings.Contains(out, "实况回读") {
+		t.Fatalf("按登记态不得冒充实况回读:\n%s", out)
+	}
+	rt := detailEntryOf(t, x, "ens224")["storm_control_runtime"].(map[string]any)
+	if rt["binding"] != network.StormBindingDeclared {
+		t.Fatalf("结构化 binding 应为 declared: %v", rt)
+	}
+	if !sameNumber(rt["declared_l2_table"], 9) {
+		t.Fatalf("结构化应按登记给 declared_l2_table=9: %v", rt)
+	}
+	if _, ok := rt["attached_l2_table"]; ok {
+		t.Fatalf("按登记态不得发射实况槽索引（attached_l2_table）: %v", rt)
+	}
+	bd := rt["kinds"].(map[string]any)["broadcast"].(map[string]any)
+	if _, ok := bd["table"]; ok {
+		t.Fatalf("按登记态不得把它写进实况字段 table: %v", bd)
+	}
+	if td, ok := bd["table_declared"].(*network.StormTableInfo); !ok || td.Index != 9 {
+		t.Fatalf("按登记态应给 table_declared（登记表 9）: %v", bd)
+	}
+}
+
+// TestCLIStormControlReadViewAdoptedAndCandidates（决策 #421 收口③）：四态里的「自认领」
+// 单独成态——文本给依据（policer 按名在场 + 表链匹配），结构化给 binding_basis /
+// adopted_l2_table / table_adopted / table_source，且**不发射**实况字段（attached_l2_table）
+// 与按登记字段（declared_l2_table）；只识别不删的分类表候选如实列出。
+func TestCLIStormControlReadViewAdoptedAndCandidates(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set interfaces ens224 description storm-port",
+		"set interfaces ens224 storm-control broadcast 8000",
+		"set interfaces ens224 storm-control multicast 20000",
+		"commit",
+		"exit",
+	)
+	x.setStorm(fakeStormRuntime{ok: true, dp: network.StormDataplane{
+		Available: true, Binding: network.StormBindingAdopted, AdoptedTable: 1,
+		OrphanCandidates: []uint32{7, 8},
+		Kinds: map[string]network.StormKindDataplane{
+			network.StormKindBroadcast: {PolicerPresent: true, CirKbps: 8000,
+				TableAdopted: &network.StormTableInfo{Index: 1, Mask: "ffffffffffff00000000000000000000", Sessions: 1},
+				Counters:     &network.StormCounters{ConformPackets: 3}},
+			network.StormKindMulticast: {PolicerPresent: true, CirKbps: 20000,
+				TableAdopted: &network.StormTableInfo{Index: 0, Mask: "01000000000000000000000000000000", Sessions: 1},
+				Counters:     &network.StormCounters{ConformPackets: 1}},
+		},
+	}})
+	out := x.Execute("admin", aaaClassSU, "ssh", "show interfaces ens224 detail").Output
+	for _, want := range []string{
+		"cir 8000 kbps", "分类表 #1 自认领在位", "依据 policer 按名在场 + 表链匹配",
+		"分类表候选: #7、#8", "只识别不删",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("自认领态 detail 应含 %q：\n%s", want, out)
+		}
+	}
+	for _, bad := range []string{"分类表未挂", "实况回读", "按登记在位"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("自认领态不得出现 %q（不得与其它的态混同）：\n%s", bad, out)
+		}
+	}
+	rt := detailEntryOf(t, x, "ens224")["storm_control_runtime"].(map[string]any)
+	if rt["binding"] != network.StormBindingAdopted {
+		t.Fatalf("结构化 binding 应为 adopted：%v", rt)
+	}
+	if basis, _ := rt["binding_basis"].(string); !strings.Contains(basis, "自认领") {
+		t.Fatalf("结构化应给认领依据：%v", rt)
+	}
+	if !sameNumber(rt["adopted_l2_table"], 1) {
+		t.Fatalf("结构化应按认领给 adopted_l2_table=1：%v", rt)
+	}
+	for _, bad := range []string{"attached_l2_table", "declared_l2_table"} {
+		if _, ok := rt[bad]; ok {
+			t.Fatalf("自认领态不得发射 %s：%v", bad, rt)
+		}
+	}
+	ids, ok := rt["orphan_candidates"].([]uint32)
+	if !ok || len(ids) != 2 || ids[0] != 7 || ids[1] != 8 {
+		t.Fatalf("结构化应给分类表候选（只识别）：%v", rt["orphan_candidates"])
+	}
+	bd := rt["kinds"].(map[string]any)["broadcast"].(map[string]any)
+	if _, ok := bd["table"]; ok {
+		t.Fatalf("自认领态不得写进实况字段 table：%v", bd)
+	}
+	if td, ok := bd["table_adopted"].(*network.StormTableInfo); !ok || td.Index != 1 {
+		t.Fatalf("自认领态应给 table_adopted（表 1）：%v", bd)
+	}
+	if src, _ := bd["table_source"].(string); !strings.Contains(src, "自认领") {
+		t.Fatalf("自认领态应给来源依据 table_source：%v", bd)
+	}
+}
+
 // 未声明接口 / unknown-unicast / 值域三类拒绝（各给能照做的报错或明确的校验错误）。
 func TestCLIStormControlRejections(t *testing.T) {
 	// 未声明接口：语句期拒绝并给出声明写法（不允许本语句代建声明）

@@ -58,7 +58,7 @@ func (g *govppVhostUserClient) VhostUserSocket(swIfIndex uint32) (string, bool, 
 	exists := false
 	for {
 		details := &vhostapi.SwInterfaceVhostUserDetails{}
-		stop, err := reqCtx.ReceiveReply(details)
+		stop, err := recvMultiBound(g.ch, reqCtx, details) // 有界读数（决策 #422）
 		if err != nil {
 			return "", false, err
 		}
@@ -121,7 +121,7 @@ func (g *govppVhostUserClient) InterfaceStatus(swIfIndex uint32) (bool, bool, bo
 	)
 	for {
 		details := &ifapi.SwInterfaceDetails{}
-		stop, err := reqCtx.ReceiveReply(details)
+		stop, err := recvMultiBound(g.ch, reqCtx, details) // 有界读数（决策 #422）
 		if err != nil {
 			return false, false, false, err
 		}

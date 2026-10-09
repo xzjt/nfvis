@@ -184,6 +184,8 @@ SUITE_BEFORE_CFG=${SUITE_BEFORE_CFG:-$SUITE_STATE_DIR/suite-before.cfg}
 SUITE_BEFORE_IMG=${SUITE_BEFORE_IMG:-$SUITE_STATE_DIR/suite-before.images}
 SUITE_DESC_MARK=${SUITE_DESC_MARK:-cli-pre}
 SUITE_HOST_PREFIX=${SUITE_HOST_PREFIX:-cli-tx-}
+# 阶段 2 写的主机名（值固定，不是前缀）——清场按值识别，同样只还原本轮写的。
+SUITE_HOST_ALT=${SUITE_HOST_ALT:-nfvis-cli}
 # 套件固定名对象（恒删）。
 SUITE_VS_FIXED="vs-l2 vs-l3"
 SUITE_ACL_FIXED="acl-test"
@@ -205,6 +207,10 @@ suite_snapshot_before() {
   mv -f "$SUITE_BEFORE_CFG.tmp" "$SUITE_BEFORE_CFG"
   _suite_cli "show images" > "$SUITE_BEFORE_IMG.tmp" 2>/dev/null
   mv -f "$SUITE_BEFORE_IMG.tmp" "$SUITE_BEFORE_IMG"
+  # 宿主主机名也拍一份：套件会 `set system hostname cli-tx-*/nfvis-cli` 并提交，
+  # 而产品把它应用到宿主；删声明**不回退宿主**，故清场要能还原宿主侧（见 cleanup_suite）。
+  # 假定套件与产品同机（本仓库套件的既有用法）；取不到就留空，清场只跳过宿主还原那一步。
+  hostnamectl hostname > "$SUITE_STATE_DIR/host.before" 2>/dev/null || true
   printf '· 套件入口已拍开始前现场快照：%s / %s\n' "$SUITE_BEFORE_CFG" "$SUITE_BEFORE_IMG"
 }
 
@@ -336,14 +342,32 @@ commit"
     esac
   fi
 
-  # 主机名：仅当被套件改成 cli-tx-* 才还原（阶段 6 的提交值；按值识别，不碰用户主机名）。
+  # 主机名：套件把它写成 cli-tx-*/nfvis-cli 并提交（产品会应用到宿主）；按值识别只还原本轮写的。
+  # 还原要两处都做：配置侧（复原/删除声明）＋宿主侧（删声明不回退宿主，所以宿主用
+  # 「先设为原值再删声明」的方式落回原值；入口快照缺 host.before 时只做配置侧并如实说明）。
   local host
   host=$(_suite_cli "show configuration" | sed -nE 's/^[[:space:]]*hostname[[:space:]]+([^;]+);.*/\1/p' | head -1 | tr -d '\r')
   case "$host" in
-    "$SUITE_HOST_PREFIX"*)
-      _clean_run "还原套件写入的主机名（$host）" "configure
+    "$SUITE_HOST_PREFIX"* | "$SUITE_HOST_ALT"*)
+      local before_cfg before_host
+      before_cfg=$(sed -nE 's/^[[:space:]]*hostname[[:space:]]+([^;]+);.*/\1/p' "$SUITE_BEFORE_CFG" 2>/dev/null | head -1 | tr -d '\r')
+      before_host=$(tr -d '\r' < "$SUITE_STATE_DIR/host.before" 2>/dev/null | head -1)
+      if [ -n "$before_cfg" ]; then
+        _clean_run "还原套件写入的主机名（$host → $before_cfg）" "configure
+set system hostname $before_cfg
+commit"
+      else
+        if [ -n "$before_host" ]; then
+          # 先应用原值（同时是宿主还原），再删声明——结果＝原值在宿主、声明不存在（与原现场一致）。
+          _clean_run "还原套件写入的主机名（$host → $before_host）" "configure
+set system hostname $before_host
+commit"
+        fi
+        _clean_run "清掉套件写入的主机名声明（$host）" "configure
 delete system hostname
-commit" ;;
+commit"
+      fi
+      ;;
   esac
 
   # 临时文件（床铺级清理，不属"对象"）。

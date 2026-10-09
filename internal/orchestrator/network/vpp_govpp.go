@@ -62,6 +62,10 @@ func mapConnState(s core.ConnectionState) State {
 type govppSession struct{ conn *core.Connection }
 
 // Version 经 VPP binary API show_version 查询（FR-SYS-007 版本锁定的数据来源）。
+//
+// 单请求读数同样有界（决策 #422）：本调用在连接建立序里同步执行，若 VPP 在握手后卡住，
+// 无界等待会把连接管理协程永久钉死（版本校验、重连、恢复收敛全都推进不了）；
+// 有界后最坏就是一次「查版本超时」失败，管理器按既有重试节奏再来。
 func (s *govppSession) Version() (string, error) {
 	ch, err := s.conn.NewAPIChannel()
 	if err != nil {
@@ -69,7 +73,7 @@ func (s *govppSession) Version() (string, error) {
 	}
 	defer ch.Close()
 	reply := &vpe.ShowVersionReply{}
-	if err := ch.SendRequest(&vpe.ShowVersion{}).ReceiveReply(reply); err != nil {
+	if err := recvReplyBound(ch, ch.SendRequest(&vpe.ShowVersion{}), reply); err != nil {
 		return "", err
 	}
 	if reply.Retval != 0 {

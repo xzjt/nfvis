@@ -583,16 +583,23 @@ else
 
   # L2-1 统计仍可读：抓「stats 连接只建一次，VPP 重启后永久不可用」
   st=$(cli "show interfaces $P1 statistics")
-  echo "    CLI: $(printf '%s' "$st" | head -1)"
+  echo "    CLI 表头: $(printf '%s' "$st" | sed -n '2p')"
+  echo "    CLI 数据: $(printf '%s' "$st" | sed -n '3p')"
   echo "    VPP: $P1 rx packets=$(vpp_if_rx "$P1") rx bytes=$(vpp_if_rxbytes "$P1")"
   if cli_err "$st"; then
     bad "L2-1 VPP 重启后 $P1 的统计取不到（重启前同一命令有值——连接陈旧未重连）"
   else
-    nums=$(printf '%s' "$st" | sed -n 's/.*statistics: *{\([0-9 ]*\)}.*/\1/p')
-    c_rx=$(printf '%s' "$nums" | awk '{print $1}'); c_bytes=$(printf '%s' "$nums" | awk '{print $3}')
+    # 输出是带字段名的表格（标题 + 表头 + 数据行），按**表头列名**取列——不按固定列号，
+    # 列宽/顺序再调整时这里不会静默取错列。
+    head=$(printf '%s' "$st" | sed -n '2p')
+    row=$(printf '%s' "$st" | awk -v ifc="$P1" '$1==ifc {print; exit}')
+    idx_rx=$(printf '%s' "$head" | awk '{for(i=1;i<=NF;i++) if($i=="rx-pkts") print i}')
+    idx_b=$(printf '%s' "$head" | awk '{for(i=1;i<=NF;i++) if($i=="rx-bytes") print i}')
+    c_rx=$(printf '%s' "$row" | awk -v i="$idx_rx" '{print $i}')
+    c_bytes=$(printf '%s' "$row" | awk -v i="$idx_b" '{print $i}')
     v_rx=$(vpp_if_rx "$P1"); v_bytes=$(vpp_if_rxbytes "$P1")
-    if [ -z "$nums" ]; then
-      bad "L2-1 统计输出不是计数元组，无法对账"
+    if [ -z "$row" ] || [ -z "$idx_rx" ] || [ -z "$idx_b" ] || [ -z "$c_rx" ] || [ -z "$c_bytes" ]; then
+      bad "L2-1 统计输出不是带字段名的表格（缺 $P1 数据行或表头 rx-pkts/rx-bytes 列），无法对账"
     else
       # 两次读之间可能真有流量，给一个**明确写出来**的容差，而不是"看起来差不多"
       tol_rx=$(( v_rx / 50 + 5 )); tol_b=$(( v_bytes / 50 + 10 ))

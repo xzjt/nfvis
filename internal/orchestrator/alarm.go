@@ -48,6 +48,10 @@ const (
 	VMCrashed = "VM_CRASHED"
 	// ContainerExited 容器异常退出（dead 或非零退出码），critical（FR-CMP-022）。
 	ContainerExited = "CONTAINER_EXITED"
+	// ContainerRestartLoop 容器崩溃重启循环（Docker 状态 restarting 且重启次数持续增长），
+	// warning（FR-CMP-022，决策 #432）。状态读数按既有口径仍显示 running，故本码是操作者
+	// 唯一能看见「容器反复起不来」的入口；重启结束或对象消失即消解。
+	ContainerRestartLoop = "CONTAINER_RESTART_LOOP"
 )
 
 // 告警严重级别（与 network.AlarmStore 取值一致）。

@@ -1,6 +1,9 @@
 package network
 
 // govpp L3 客户端（M3-4）：唯一使用 ip/interface/l2 BVI binapi 的地方。
+//
+// 读数（dump / 单请求查询）一律经 recvMultiBound / recvReplyBound 套应答时限（决策 #422，
+// 说明与红-绿用例见 govpp_read_bound.go）；**写路径有意不套时限**，语义保持原样。
 
 import (
 	"fmt"
@@ -35,7 +38,7 @@ func (g *govppL3Client) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	reqCtx := g.ch.SendMultiRequest(&ifapi.SwInterfaceDump{})
 	for {
 		d := &ifapi.SwInterfaceDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return 0, false, err
 		}
@@ -82,7 +85,7 @@ func (g *govppL3Client) IPTableExists(tableID uint32, isIP6 bool) (bool, error) 
 	reqCtx := g.ch.SendMultiRequest(&ip.IPTableDump{})
 	for {
 		d := &ip.IPTableDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return false, err
 		}
@@ -98,11 +101,12 @@ func (g *govppL3Client) IPTableExists(tableID uint32, isIP6 bool) (bool, error) 
 // SwInterfaceTable 查接口运行态当前所属表（供 SetVnfTable 判断是否需要下发置表：
 // VPP 只允许无地址的接口换表，带了地址的口重复下发会报 -114）。
 func (g *govppL3Client) SwInterfaceTable(swIfIndex uint32, isIP6 bool) (uint32, bool, error) {
-	reply := &ifapi.SwInterfaceGetTableReply{}
-	err := g.ch.SendRequest(&ifapi.SwInterfaceGetTable{
+	req := g.ch.SendRequest(&ifapi.SwInterfaceGetTable{
 		SwIfIndex: interface_types.InterfaceIndex(swIfIndex), IsIPv6: isIP6,
-	}).ReceiveReply(reply)
-	if err != nil {
+	})
+	reply := &ifapi.SwInterfaceGetTableReply{}
+	// 读回当前所属表：单请求读数同样有界（决策 #422）。
+	if err := recvReplyBound(g.ch, req, reply); err != nil {
 		return 0, false, err
 	}
 	if reply.Retval != 0 {
@@ -239,7 +243,7 @@ func (g *govppL3Client) Routes(tableID uint32, isIP6 bool) ([]RouteEntry, error)
 	var out []RouteEntry
 	for {
 		d := &ip.IPRouteDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}
@@ -304,7 +308,7 @@ func (g *govppL3Client) BviOfBD(bdID uint32) (uint32, bool, error) {
 	})
 	for {
 		d := &l2.BridgeDomainDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return 0, false, err
 		}
@@ -356,7 +360,7 @@ func (g *govppL3Client) IPTables() ([]uint32, error) {
 	seen := map[uint32]bool{}
 	for {
 		d := &ip.IPTableDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, fmt.Errorf("列出 IP 表: %w", err)
 		}

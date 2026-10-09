@@ -70,7 +70,7 @@ func (g *govppDhcpClient) ProxyDump() ([]ProxyEntry, error) {
 	out := make([]ProxyEntry, 0, 4)
 	for {
 		d := &dhcp.DHCPProxyDetails{}
-		stop, err := reqCtx.ReceiveReply(d)
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
 		if err != nil {
 			return nil, err
 		}

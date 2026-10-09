@@ -120,6 +120,46 @@ func TestShowInterfacesUnknownNameNeedsInventorySuccess(t *testing.T) {
 	}
 }
 
+// TestShowInterfacesInventoryFailureShowsReason：端口清单读数失败时，读视图要把**失败原因**
+// 如实带出来（如「数据面读数超时」），不能只说一句「清单不可用」——否则操作者会把一次读数失败
+// 读成「这台机器真没有运行态口」（决策 #422：读数有界 + 失败如实显示）。
+func TestShowInterfacesInventoryFailureShowsReason(t *testing.T) {
+	reason := "数据面读数超时（等待数据面应答超过 3s，已放弃本次读数；自查：show vpp 确认数据面连接与状态）"
+
+	// 单口：清单查不到时仍按「未声明」作答（不判「不在清单」），但要说明清单也不可用
+	x, _ := newCLIKit(t)
+	x.setPorts(fakePorts{vppErr: errors.New(reason)})
+	out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show interfaces ens999").Output
+	if !strings.Contains(out, "未在配置中声明") || !strings.Contains(out, "数据面读数超时") {
+		t.Fatalf("单口视图应带上读数失败原因: %q", out)
+	}
+	if strings.Contains(out, "也不在 VPP 接口清单中") {
+		t.Fatalf("读数失败时不得判「不在清单」: %q", out)
+	}
+
+	// 清单（空配置）：整条作答带原因
+	out = x.Execute("admin", aaa.ClassSuperUser, "ssh", "show interfaces").Output
+	if !strings.Contains(out, "端口清单不可用") || !strings.Contains(out, "数据面读数超时") {
+		t.Fatalf("空清单作答应带上读数失败原因: %q", out)
+	}
+
+	// 清单（有声明口）：注记行里带原因，且清单本身照常可读（降级而不是把请求搞挂）
+	x2, _ := newCLIKit(t)
+	x2.setPorts(fakePorts{vppErr: errors.New(reason)})
+	run(t, x2, "admin", aaa.ClassSuperUser, "ssh",
+		"configure",
+		"set interfaces ens2f0 description pending",
+		"commit", "exit",
+	)
+	out = x2.Execute("admin", aaa.ClassSuperUser, "ssh", "show interfaces").Output
+	if !strings.Contains(out, "ens2f0") {
+		t.Fatalf("读数失败也要照常列出配置声明口: %q", out)
+	}
+	if !strings.Contains(out, "端口清单不可用") || !strings.Contains(out, "数据面读数超时") {
+		t.Fatalf("清单注记应带上读数失败原因: %q", out)
+	}
+}
+
 // TestShowInterfacesDeclaredRuntimeView：决策 #155 接口族全运行态——已声明的口
 // 裸写法也回运行态单口视图（与 physical <name> 同一实现），声明描述进描述列；
 // 声明口已出现在运行态时不加注记（正常态不添噪）。

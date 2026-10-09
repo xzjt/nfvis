@@ -8,6 +8,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -61,7 +62,7 @@ func (x *cliExecutor) execShowInterfaces(args []string) string {
 // （派生口 bvi0/vh-* 或外部接管，未声明）、内核侧未接管的物理口（未接管）。
 func (x *cliExecutor) showInterfaceList(cfg model.Config) string {
 	states, stErr := x.ifaceStates()
-	inv, invOK := x.vppIfaceNamesSafe()
+	inv, invErr := x.vppIfaceNamesSafe()
 	inInv := map[string]bool{}
 	for _, n := range inv {
 		inInv[n] = true
@@ -96,8 +97,17 @@ func (x *cliExecutor) showInterfaceList(cfg model.Config) string {
 	sort.Strings(names)
 	dpNameSp := x.dpRuntimeName()
 	if len(names) == 0 {
-		if stErr != nil || !invOK {
-			return fmt.Sprintf("（无接口；%s运行态不可用，清单可能不完整）\n", dpNameSp)
+		// 读数为空且读数路径报错：**两类失败各说一次**（状态快照与端口清单是两个独立来源，
+		// 数据面卡住时往往一起失败——只报其一会让另一半的失败看不见）。
+		var why []string
+		if stErr != nil {
+			why = append(why, dpNameSp+"运行态不可用（"+stErr.Error()+"）")
+		}
+		if invErr != nil {
+			why = append(why, dpNameSp+"端口清单不可用（"+invErr.Error()+"）")
+		}
+		if len(why) > 0 {
+			return fmt.Sprintf("（无接口；%s，清单可能不完整）\n", strings.Join(why, "；"))
 		}
 		return "（无接口）\n"
 	}
@@ -105,6 +115,7 @@ func (x *cliExecutor) showInterfaceList(cfg model.Config) string {
 	fmt.Fprintf(&b, ifaceListRowFmt,
 		"Interface", "Admin", "Link", "Speed", "Driver", "RxPkts", "TxPkts", "Description", "备注")
 	items := make([]any, 0, len(names))
+	kernelDP := x.dpMode() == model.DataPlaneKernel
 	for _, name := range names {
 		desc, decl := declared[name]
 		entry, admin, link, speed, driver, rx, tx := x.ifaceRuntimeRow(name, desc, states)
@@ -122,6 +133,15 @@ func (x *cliExecutor) showInterfaceList(cfg model.Config) string {
 		case !decl:
 			source = "未声明"
 		}
+		// 决策 #431：内核数据面下「已声明却没进数据面」的口，备注列点名原因——① 仍绑
+		// vfio-pci（附 PCI 与照做路径）；② 被 networkd 持有为 down（附人工做法）；取不到原因
+		// 沿用既有「已声明未生效」。只在**内核数据面**且该口未生效（不在运行态，或运行态里
+		// 管理态为 down）时点名；VPP 数据面渲染不受影响。
+		if kernelDP && decl && !kernelIfaceAdminUp(states, name) {
+			if reason, ok := x.kernelIfNotInDPReason(name); ok {
+				source = reason
+			}
+		}
 		entry["source"] = source
 		items = append(items, entry)
 		fmt.Fprintf(&b, ifaceListRowFmt, name, admin, link, speed, driver, rx, tx, desc, source)
@@ -129,8 +149,13 @@ func (x *cliExecutor) showInterfaceList(cfg model.Config) string {
 	if stErr != nil {
 		// 运行态不可用：明确说明状态列为何是 "-"（按数据面点名，内核下不写「VPP 运行态」）
 		b.WriteString("%% 注: " + dpNameSp + "运行态不可用（" + stErr.Error() + "），Admin/Link/Speed/Driver 显示为 -\n")
-	} else if !invOK {
-		b.WriteString(fmt.Sprintf("%% 注: %s端口清单不可用，清单不含 %s运行态口（内核侧未接管口照列）\n", dpNameSp, dpNameSp))
+	}
+	if invErr != nil {
+		// 读数失败**如实带原因**（决策 #422）：端口清单查询失败（如数据面读数超时）与
+		// 「这台机器真没有运行态口」是两件事，操作者要能看出是前者。与上面那条**并列**：
+		// 两个来源各自独立，数据面卡住时常常一起失败，只报一条会把另一半的失败藏起来。
+		b.WriteString(fmt.Sprintf("%% 注: %s端口清单不可用（%s），清单不含 %s运行态口（内核侧未接管口照列）\n",
+			dpNameSp, invErr.Error(), dpNameSp))
 	}
 	x.structured = map[string]any{"interfaces": items}
 	return b.String()
@@ -282,7 +307,8 @@ func (x *cliExecutor) showManagementInterface(cfg model.Config) string {
 // 的**唯一实现**（决策 #153 收口「physical 可省」，#155 收口全形态同源）。
 // 决策 #155：接口族全运行态——裸/physical/detail 全部回运行态单口视图（声明口与
 // 派生口同一实现）；接口的**配置视图**退役到配置模式（edit interfaces <name> + show，
-// 或 show configuration | display set）。statistics 一律回计数单行；sriov 仍读声明
+// 或 show configuration | display set）。statistics 一律回**带字段名的计数表**
+// （列名与顺序同 REST 契约的 statistics 对象，见 renderIfaceCounters）；sriov 仍读声明
 // （VF 配置只在声明口存在；未声明口回空态）。
 func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) string {
 	desc, declared := "", false
@@ -304,17 +330,23 @@ func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) strin
 			return out
 		}
 		// 未声明且不在 VPP 清单（决策 #154：清单查询成功才可判「不在」）
-		names, ok := x.vppIfaceNamesSafe()
-		if ok && !ifaceInList(names, name) {
+		names, invErr := x.vppIfaceNamesSafe()
+		if invErr == nil && !ifaceInList(names, name) {
 			return x.errIfaceUnknown(name)
 		}
-		// 清单未接入或查询失败：无从核对运行态，维持既有文案（只陈述「未声明」，不否认存在）
+		// 清单未接入或查询失败：无从核对运行态，维持既有文案（只陈述「未声明」，不否认存在）；
+		// 但把**失败原因**带上（决策 #422）——读数超时/连接不可用与「这个口真的不在」是两件事，
+		// 操作者要能看出是前者，别把一次读数失败读成自己敲错了名字。
+		if invErr != nil {
+			return fmt.Sprintf("%% 接口 %s 未在配置中声明；%s端口清单亦不可用（%s）\n",
+				name, x.dpRuntimeName(), invErr.Error())
+		}
 		return fmt.Sprintf("%% 接口 %s 未在配置中声明\n", name)
 	case "statistics":
 		if x.state != nil {
 			if c, ok := x.state.InterfaceCounters(context.Background(), name); ok {
 				x.structured = map[string]any{"interface": name, "statistics": anyToTree(c)}
-				return fmt.Sprintf("interface %s statistics: %v\n", name, c)
+				return renderIfaceCounters(name, c)
 			}
 		}
 		// 未接管的内核口没有数据面统计（决策 #302）：如实区分于「连接未就绪」。
@@ -347,16 +379,39 @@ func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) strin
 	}
 }
 
+// ifaceCountersRowFmt 接口计数表的行格式（表头与数据行共用同一份列宽定义——两处各写一份
+// 必然漂移）。列名与顺序取自 REST 契约 `GET /interfaces/{name}` 的 `statistics` 对象
+// （openapi `Interface.statistics` 的八个字段：rx_packets / tx_packets / rx_bytes / tx_bytes /
+// rx_errors / tx_errors / rx_drops / tx_drops），与 `monitor interfaces` 的行格式同族。
+const ifaceCountersRowFmt = "%-14s %12s %12s %14s %14s %9s %9s %8s %8s\n"
+
+// renderIfaceCounters 单接口计数表的**唯一渲染实现**（决策 #427①）：此前 statistics 子命令
+// 用 `%v` 打整个结构体（`interface ens192 statistics: {355512 417 …}`），一串裸数字既无字段名
+// 也无列序，操作者不可判读（对照 vnf statistics 是有列名的表格）。字段名不另造：按 REST 契约
+// 的 JSON 字段名逐一对齐（数据本是同一个 state.InterfaceCounters，`| display json` 与 REST
+// 同字段名），数值映射逐列对应、顺序敏感（数值先转字符串，表头与数据行共用同一列宽格式）。
+func renderIfaceCounters(name string, c state.InterfaceCounters) string {
+	u := func(v uint64) string { return strconv.FormatUint(v, 10) }
+	var b strings.Builder
+	fmt.Fprintf(&b, "interface %s statistics:\n", name)
+	fmt.Fprintf(&b, ifaceCountersRowFmt,
+		"Interface", "rx-pkts", "tx-pkts", "rx-bytes", "tx-bytes", "rx-errors", "tx-errors", "rx-drops", "tx-drops")
+	fmt.Fprintf(&b, ifaceCountersRowFmt, name,
+		u(c.RxPackets), u(c.TxPackets), u(c.RxBytes), u(c.TxBytes),
+		u(c.RxErrors), u(c.TxErrors), u(c.RxDrops), u(c.TxDrops))
+	return b.String()
+}
+
 // ifaceRuntimeView 单口运行态视图（决策 #154/#155）：行格式与数据源同一实现
 // （ifaceRuntimeRow/ifaceRowFmt）。declared=该口在配置中声明（描述列取声明值）；
-// 未声明口仅在 VPP 清单可核时作答（ok=false → 调用方按 #154 口径报错）。
+// 未声明口仅在 VPP 清单可核时作答（查询出错 → 调用方按 #154 口径报错）。
 // 注记三态：未声明（说明口径）、已声明但运行态未出现（状态列为 -）、运行态不可用。
 //
 // MTU 列为**有效 MTU**（R86-7）：配置显式值优先、否则运行态（VPP L3 MTU）；两者都取不到
 // 显示 `-`，结构化输出不带 mtu 字段（「取不到就不给」，同 REST 读视图口径）。
 func (x *cliExecutor) ifaceRuntimeView(name, desc string, declared bool, ifc model.InterfaceConfig) (string, bool) {
-	names, invOK := x.vppIfaceNamesSafe()
-	inInv := invOK && ifaceInList(names, name)
+	names, invErr := x.vppIfaceNamesSafe()
+	inInv := invErr == nil && ifaceInList(names, name)
 	if !declared && !inInv {
 		return "", false
 	}
@@ -482,17 +537,21 @@ func (x *cliExecutor) kernelIfaceView(name string) (string, bool) {
 	return b.String(), true
 }
 
-// vppIfaceNamesSafe VPP 运行态接口清单：未接入或查询失败一律 ok=false
+// vppIfaceNamesSafe VPP 运行态接口清单：未接入或查询失败一律返回错误
 // （判「不在清单」必须有成功的查询——宁可少报错，与 interfaceKnown 同取向）。
-func (x *cliExecutor) vppIfaceNamesSafe() ([]string, bool) {
+//
+// 返回**错误原因**而不是一个布尔（决策 #422）：读数失败（数据面读数超时、连接不可用）
+// 与「清单里确实没有这个口」在判据上是同一件事（都不能判「不在清单」），但对操作者是
+// 两件事——调用方要把原因如实打出来，别让人把一次读数失败读成配置写错了。
+func (x *cliExecutor) vppIfaceNamesSafe() ([]string, error) {
 	if x.ports == nil {
-		return nil, false
+		return nil, errors.New("运行态端口清单未接入")
 	}
 	names, err := x.ports.VPPIfnames()
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
-	return names, true
+	return names, nil
 }
 
 func ifaceInList(names []string, name string) bool {

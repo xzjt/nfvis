@@ -212,12 +212,32 @@ func run() error {
 		dpdkBinder    *network.DPDKBinder
 		dpdkBindings  *network.Bindings
 		sriovProvider *network.SRIOVProvider
+		// kernelIfaceInUse 内核数据面下的「该口仍在用吗」探测（决策 #426②）：解绑（把网卡
+		// 交还内核）前的守卫；VPP 数据面为 nil（它走 VPP 侧探测）。
+		kernelIfaceInUse func(ctx context.Context, ifname string) (bool, string, error)
 	)
 	if dpMode == model.DataPlaneKernel {
-		// 内核数据面：不连 VPP、不拉起 VPP、不做 DPDK 接管与 startup.conf 管理。
+		// 内核数据面：不连 VPP、不拉起 VPP、不做 startup.conf 管理。
 		kp := netkernel.New(nil)
 		kernelNet = kp
 		netProvider = kp
+		kernelIfaceInUse = kp.KernelIfaceInUse
+		// 决策 #426②：DPDK 接管面在内核数据面下**不是**空实现——绑定拒绝，但解绑可用
+		// （VPP 时代接管过的口在切到内核后仍留在 vfio-pci，交还内核靠这条命令）。
+		// 绑定记录（口名→PCI）是口无 netdev 时唯一的定位来源（决策 #100），故照常装配；
+		// 探测「仍被 DPDK 驱动占用」供恢复收敛点名（决策 #426③）。
+		dpdkBinder = network.NewDPDKBinder()
+		dpdkBindings = network.NewBindings(network.DefaultBindingsPath)
+		dpdkBinder.Bindings = dpdkBindings
+		// 迁移：把手写 startup.conf 里 `dev <pci> { name <口> }` 的映射并入记录——内核数据面
+		// 下这是「按口名交还」（request interfaces <口> unbind-dpdk）的定位来源（同 VPP 分支
+		// 的迁移口径；带外方式绑定的存量安装不必改用 PCI 地址）。失败只告警，不影响启动。
+		if n, err := dpdkBindings.ImportStartupConf(network.DefaultStartupPath); err != nil {
+			log.Warn("导入现有 startup.conf 的 DPDK 端口映射失败（按 PCI 地址交还内核不受影响）", "err", err)
+		} else if n > 0 {
+			log.Info("已从现有 startup.conf 导入 DPDK 端口映射", "count", n, "path", dpdkBindings.Path)
+		}
+		kp.SetHeldPortProbe(dpdkHeldPortProbe(dpdkBinder, network.KernelIfnamesAll))
 		log.Info("已选择 Linux 内核网络数据面（内核 bridge/VRF/nftables/vxlan）")
 	} else {
 		// M3：VPP 数据面连接管理（FR-SYS-007）先于事务引擎装配（引擎需要下发编排器）。
@@ -446,10 +466,27 @@ func run() error {
 		return string(out), err
 	}
 
+	// 决策 #426①：数据面切到内核后的运行期收尾——VPP 不再被产品使用，但切换（改配置 +
+	// 重启 nfvisd）不会停 vpp.service：它会继续以 vfio-pci 握着业务口，此时操作者手工把
+	// 网卡交还内核的 sysfs 写会挂死（真机实证），只有停掉 VPP 网卡才回得去。装配期停掉它，
+	// 与安装器 stop_vpp_for_kernel 同源（只停不卸、不改启用状态、VPP 未装/未运行安静跳过）。
+	// 该分支只在 dataplane=kernel 下执行，而该模式下 nfvisd 本就不连 VPP，不引入新的启动依赖；
+	// 有界且 best-effort：停失败只 Warn 并给自查路径，不阻塞启动。
+	if dpMode == model.DataPlaneKernel {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), vppKernelStopTimeout)
+		logVPPKernelStop(log, stopVPPForKernelDataplane(stopCtx, dpMode, runCmd))
+		stopCancel()
+	}
+
 	// 决策 #388：管理面主机防火墙落地器（宿主 nftables 独立表 `table inet nfvis-firewall`）。
 	// 启动时与每次提交后各下发一次（`applyFirewallSettings`）；下发失败只告警、不阻塞启动/提交，
 	// 读视图（show system firewall / GET /system/firewall）以 applied=false 如实呈现。
 	fwApplier := system.NewFirewallApplier()
+
+	// 决策 #424：系统基线（主机名/时区/NTP/宿主解析器）落地器——启动时与每次提交后各应用一次
+	// （`applySystemBaseline`）。此前三项只存配置库、宿主实况不变（控制台显示配置值与宿主不一致、
+	// NTP 声明对同步无作用）；应用失败只逐条告警、不阻塞启动/提交。
+	baselineApplier := system.NewSystemBaselineApplier(runCmd)
 
 	// M5-8 / FR-SEC-004（决策 #72）：证书管理（FR-SYS-011）。未显式给 -tls-cert 时：
 	// 已装管理证书 → 直接用；否则**自动生成自签证书**（FR-API-001「REST over HTTPS（自签证书，可换）」）。
@@ -508,6 +545,9 @@ func run() error {
 			// 决策 #388：主机防火墙随配置热更新（幂等；失败只告警——提交已经成功，
 			// 数据面实况由读视图如实呈现，不把下发失败倒灌成提交失败）
 			applyFirewallSettings(cfg, fwApplier, log)
+			// 决策 #424：系统基线（主机名/时区/NTP/宿主解析器）随配置落到宿主（幂等；失败只告警）；
+			// 决策 #428：逐项失败同时对账进告警表（SYSTEM_BASELINE_APPLY_FAILED）。
+			applySystemBaseline(cfg, baselineApplier, alarms, log)
 			if cfg.System != nil && cfg.System.Syslog != nil {
 				if path, err := system.ApplyLogRetention(context.Background(), runCmd,
 					cfg.System.Syslog.RetentionDays, cfg.System.Syslog.MaxSizeMB); err != nil {
@@ -536,6 +576,9 @@ func run() error {
 		applySyslogSettings(cfg, logLevel, syslogFwd, log)
 		// 决策 #388：按 committed 配置下发管理面主机防火墙（幂等；失败只告警，不阻塞启动）。
 		applyFirewallSettings(cfg, fwApplier, log)
+		// 决策 #424：按 committed 配置把系统基线（主机名/时区/NTP/宿主解析器）落到宿主
+		// （幂等；失败只告警，不阻塞启动）；决策 #428：失败逐项对账进告警表。
+		applySystemBaseline(cfg, baselineApplier, alarms, log)
 		// FR-SEC-001（决策 #72）：管理面仅监听管理网卡——通配监听收敛到管理口地址
 		if addr, note := system.ResolveListenAddr(*listen, mgmtAddressOf(cfg), system.LocalAddrChecker()); note != "" {
 			log.Info(note, "listen", addr)
@@ -691,6 +734,29 @@ func run() error {
 	// 基线设了 default_hugepagesz=1G 时它就落到 1G 池上，开机按可用内存尽量分配，1G 池因此大于
 	// 基线声明值（真机：声明 1、实际 4）。#347 后内核默认大页尺寸恒为 2M，该 sysctl 与 2M 池本意一致。
 	// 按 cmdline 声明写 90 号落点钉回，与安装顺序无关（同 #182 的单源口径）。
+	//
+	// 决策 #423：先确认/执行「80 号文件的接管」再写 90 号——安装期 postinst 的 dpkg-divert 会撞上
+	// 「同一次 apt 事务里 vpp 的 conffile 尚未落盘」而静默漏掉（round3 走查实测：divert 列表为空、
+	// 80 号原样在场），保证点因此放在运行期（同 #182 的 AppArmor 口径）；接管发生后 90 号文件
+	// 才是唯一声明处，故两步同批次收敛。失败只告警、不阻断启动。
+	vppSysctl := system.NewVppSysctlTakeover(runCmd)
+	ensureVppSysctlTakeover := func(ctx context.Context) {
+		changed, err := vppSysctl.Ensure(ctx)
+		if err != nil {
+			log.Warn("大页池 sysctl 接管检查未完成（钉值仍由 90 号文件保证）", "err", err)
+			return
+		}
+		if !changed {
+			return
+		}
+		log.Info("已接管 vpp 包自带的大页池 sysctl（原路径 → .vpp-disabled；此后由 NFViS 单源声明）",
+			"from", system.VppSysctlPath, "to", system.VppSysctlDisabledPath)
+	}
+	// 启动期有界（15s，同 #349 的 AppArmor）：底座异常时不在启动序列里长等，巡检本就幂等重试。
+	vsCtx, vsCancel := context.WithTimeout(ctx, 15*time.Second)
+	ensureVppSysctlTakeover(vsCtx)
+	vsCancel()
+
 	if changed, err := system.EnsureHugepageSysctlFromCmdline(""); err != nil {
 		log.Warn("大页池 sysctl 钉值未完成", "err", err)
 	} else if changed {
@@ -953,6 +1019,9 @@ func run() error {
 			// ORPHAN（存在无主占用页）。按内核实况重建、收敛后自动消解（同一对账位置与口径、
 			// 各自独立 scope）。逻辑抽到 hugepageAlarms 便于单测。
 			hugepageAlarms(alarms, hpRes)
+			// 决策 #423：大页池 sysctl 单源接管的周期复核（幂等，只在大页相关巡检处顺带做，
+			// 不新造定时器）——覆盖「nfvisd 启动时 80 号文件尚未落盘、之后才落盘」这条路径。
+			ensureVppSysctlTakeover(cctx)
 			// 决策 #337：L2 环路疑似巡检（采样式，只告警不阻断）——对每个 L2 交换机读一次 MAC
 			// 学习表与上一轮快照比较；独立 scope "loop"，连续多轮平静自动消警。
 			for _, e := range netProvider.CheckLoop(cctx, cfg) {
@@ -1041,8 +1110,9 @@ func run() error {
 		// 运行态聚合：VPP 数据面取 stats segment；内核数据面无对应读数（nil 即安全返回空）。
 		State: state.New(stateRuntimeFor(dpMode, vppMgr)),
 		SRIOV: sriovProvider,
-		// DPDK 接管是 VPP 数据面专有（内核数据面物理口留在内核）；内核侧如实报不可用。
-		DPDK:        dpdkSetterFor(dpMode, dpdkBinder, dpdkBindings, log, mgmtFacts, vppMgr),
+		// DPDK 接管（决策 #426②）：VPP 数据面走 sysfs 接管；内核数据面下绑定拒绝、解绑可用
+		// （交还内核驱动——内核里没有的口正等这一步）。
+		DPDK:        dpdkSetterFor(dpMode, dpdkBinder, dpdkBindings, log, mgmtFacts, vppMgr, kernelIfaceInUse),
 		Kernel:      system.NewBaselineApplier(),
 		Hugepages:   system.NewSysfsHugepageSetter(), // 决策 #329：大页池回收（按页尺寸写 sysfs）
 		NAT:         &natSessionsController{net: netProvider},
@@ -1425,6 +1495,9 @@ type netRuntime interface {
 	VPPIfnames() ([]string, error)
 	KernelIfnames() ([]string, error)
 	KernelIfFacts() ([]network.KernelIfFacts, error)
+	// KernelIfNotInDPReason 内核数据面下「已声明却未进数据面」的原因（决策 #431）：
+	// 仍绑 vfio-pci / 被 networkd 持有为 down / 取不到。VPP 实现如实返回「取不到」。
+	KernelIfNotInDPReason(name string) (network.KernelIfReason, bool)
 	LldpNeighbors(ctx context.Context) ([]network.LldpNeighbor, error)
 	NATSessions(ctx context.Context) ([]network.NATSession, error)
 	VxlanStates(ctx context.Context) (map[string]network.VxlanState, error)
@@ -1480,6 +1553,11 @@ func (c *portInventoryController) KernelIfnames() ([]string, error) { return c.n
 // KernelIfFacts 内核侧物理口事实（决策 #302）：未接管口读视图的驱动/MAC/速率/状态取 sysfs。
 func (c *portInventoryController) KernelIfFacts() ([]network.KernelIfFacts, error) {
 	return c.net.KernelIfFacts()
+}
+
+// KernelIfNotInDPReason 内核数据面下「已声明却未进数据面」的原因（决策 #431）。
+func (c *portInventoryController) KernelIfNotInDPReason(name string) (network.KernelIfReason, bool) {
+	return c.net.KernelIfNotInDPReason(name)
 }
 
 // vppStateController 装配 api.VppStateRuntime（决策 #84）：bridge-domain 与接口的运行态，
@@ -1913,6 +1991,9 @@ func applySyslogSettings(cfg model.Config, level *slog.LevelVar, fwd *system.Sys
 		remote = system.SyslogConfig{
 			Host: sc.RemoteHost, Port: sc.RemotePort,
 			Facility: sc.Facility, Severity: sc.Severity,
+			// 报文头主机名随**声明**的主机名走（决策 #428）；空则渲染时回落宿主实况
+			// os.Hostname()。每次提交都会刷新（Configure 不重建连接），改主机名后新报文即新名。
+			LocalHostname: cfg.System.Hostname,
 		}
 	}
 	changed := level.Level() != lvl
@@ -1941,6 +2022,80 @@ func applyFirewallSettings(cfg model.Config, fw *system.FirewallApplier, log *sl
 		log.Warn("主机防火墙下发失败（读视图会如实显示未收敛）", "err", err)
 	}
 }
+
+// applySystemBaseline 按 committed 配置把系统基线（主机名/时区/NTP/宿主解析器）落到宿主
+// （决策 #424）。幂等（值未变不写文件、不起写子进程）；**失败只记日志、不阻塞启动也不回灌提交**
+// ——宿主设置应用失败不得让提交失败或 nfvisd 起不来。逐项如实：落地动作 Info 留痕，
+// 失败与跳过逐条 Warn（含原因与自查路径），宿主实况以 hostnamectl / timedatectl /
+// chronyc sources / resolvectl 的读数为准。整段应用有界（见 systemBaselineTimeout）：
+// 宿主命令挂住也不得把启动或提交回调拖在自己身上。
+// 逐项失败同时经 systemBaselineAlarms 对账进告警表（决策 #428）——此前只有 Warn 日志，
+// 运维在告警面板看不到。
+func applySystemBaseline(cfg model.Config, a *system.SystemBaselineApplier, sink alarmSink, log *slog.Logger) {
+	if a == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), systemBaselineTimeout)
+	defer cancel()
+	// cfg.System 未声明时 Apply 空转（零结果，不起任何子进程）——随后对账把告警消解，
+	// 正是「该项声明已空即消解」。
+	res, err := a.Apply(ctx, cfg.System)
+	for _, line := range res.Actions {
+		log.Info("系统基线已应用到宿主", "item", line)
+	}
+	for _, line := range res.Notes {
+		log.Warn("系统基线未落地（如实跳过或有取值被忽略）", "item", line)
+	}
+	if err != nil {
+		log.Warn("系统基线应用失败（宿主实况可能与配置不一致）", "err", err)
+	}
+	systemBaselineAlarms(sink, res)
+}
+
+// 系统基线告警的 scope/source（决策 #428 契约面：scope="system"、source="system/baseline"；
+// 告警码在 internal/system，与逐项失败清单同源）。
+const (
+	baselineAlarmScope  = "system"
+	baselineAlarmSource = "system/baseline"
+)
+
+// systemBaselineAlarms 把一次系统基线应用的逐项结果对账到告警表（决策 #428）。
+//
+// 选型理由（与既有风格一致）：与 hugepageAlarms（按本次对账结果重建/消解）、
+// checkHostForwardPolicy（按本次读数 raise/resolve）同一模式——结果即事实，Raise/Resolve
+// 全由刚拿到的逐项结果推导，不靠进程内记忆（nfvisd 重启后由启动时的重试重建，与
+// #192/#321 的「重建而非落盘」同口径），也不新造巡检；提交编排的 WithCommitAlarms 是
+// **计划操作级**落点（source=计划操作描述，由编排在计划执行中注入），而基线的应用发生在
+// 编排之外（提交回调 / 启动装配），拿不到计划操作描述，故不适用。
+//
+// 告警键固定（scope/code/source 三要素），因此逐项失败合成**一条** message（逐项含项名、
+// 原因与自查命令），而不是每项一条；失败项全部消失（应用成功、或声明已空）即 Resolve。
+// 「如实跳过」（本机不具备条件，如未装 chrony / resolved 未运行）**不是应用失败**——
+// 三态语义不动（#424），不建告警、仍只落日志 Warn。
+func systemBaselineAlarms(sink alarmSink, res system.SystemBaselineResult) {
+	if sink == nil {
+		return
+	}
+	if len(res.Failures) == 0 {
+		sink.Resolve(baselineAlarmScope, system.BaselineApplyFailedAlarmCode, baselineAlarmSource)
+		return
+	}
+	items := make([]string, 0, len(res.Failures))
+	for _, f := range res.Failures {
+		items = append(items, f.Item+"："+f.Err)
+	}
+	sink.Raise(baselineAlarmScope, network.SeverityWarning, system.BaselineApplyFailedAlarmCode,
+		"系统基线未全部落到宿主（宿主实况可能与配置不一致；提交与启动不受影响）："+
+			strings.Join(items, "；")+
+			"。处置：按每项附的自查命令排查（如 systemctl status systemd-hostnamed、"+
+			"chronyc sources、resolvectl status）；修正后重新提交配置、或重启 nfvis 触发复核，"+
+			"应用成功即本告警自动消解，删除对应声明同样消解",
+		baselineAlarmSource)
+}
+
+// systemBaselineTimeout 系统基线四项应用的整段上限（宿主命令逐条另受执行器 10 分钟上限约束，
+// 这里给的是「启动/提交回调不被拖住」的总闸）。
+const systemBaselineTimeout = 60 * time.Second
 
 // alarmSyslogSeverity 告警 severity → RFC 5424 severity（FR-OPS-022，决策 #69）。
 func alarmSyslogSeverity(sev string) int {
@@ -1985,10 +2140,15 @@ type dpdkController struct {
 }
 
 // checkManagement 判定目标是否为管理口（发现 #7，决策 #101：默认拒绝，不提供显式越过）。
+// 与内核数据面共用同一实现（checkManagementIface）——管理口守卫与数据面实现无关。
+func (c *dpdkController) checkManagement(target string) error {
+	return checkManagementIface(c.facts, c.rec, target)
+}
+
+// checkNotInDataplane 解绑前确认该口已离开数据面（发现 #13）。
 //
 // 目标可能是 PCI 地址（接管后内核已无 netdev，解绑时只能按 PCI 定位）→ 先解析成口名
 // （内核 netdev 名或绑定记录），解析不出按「未知」处理、不拦（理由见 ResolveIfaceName 注释）。
-// checkNotInDataplane 解绑前确认该口已离开数据面（发现 #13）。
 //
 // 探测不到（VPP 未连接等）**不拦**：数据面都没跑，就没有谁占着它，此时解绑是安全的。
 func (c *dpdkController) checkNotInDataplane(target string) error {
@@ -2009,66 +2169,35 @@ func (c *dpdkController) checkNotInDataplane(target string) error {
 	return network.CheckUnbindAllowed(name, inDP)
 }
 
-func (c *dpdkController) checkManagement(target string) error {
-	if c.facts == nil {
-		return nil
-	}
-	name, ok := network.ResolveIfaceName(target, c.rec)
-	if !ok {
-		return nil
-	}
-	return network.CheckManagementPort(name, c.facts())
-}
-
 func (c *dpdkController) SetDPDKBound(ctx context.Context, ifname string, bound bool, driver string) (string, string, error) {
 	// 管理口守卫（发现 #7，决策 #101）：**先于任何 sysfs 动作**判定，命中即拒绝。
 	// 落点在这里是因为 CLI 执行器与 REST handler 都经本方法（决策 #75：约束要放在两侧共同依赖处）。
 	if err := c.checkManagement(ifname); err != nil {
 		return "", "", err
 	}
-	// 解绑守卫（发现 #13）：仍被数据面占用的口不能直接解绑——实测会把 CLI 执行器占死、
-	// 并把网卡留在无驱动。正确顺序是「配置里删声明 → request vpp restart → 再解绑」。
 	if !bound {
-		if err := c.checkNotInDataplane(ifname); err != nil {
-			return "", "", err
-		}
+		// 解绑守卫（发现 #13）：仍被数据面占用的口不能直接解绑——实测会把 CLI 执行器占死、
+		// 并把网卡留在无驱动。正确顺序是「配置里删声明 → request vpp restart → 再解绑」。
+		// 解绑的写路径与内核数据面共用（dpdkUnbind；守卫判据按数据面不同，见 kernelDPDKSetter）。
+		return dpdkUnbind(ctx, c.b, c.rec, c.logger, ifname, driver, func() error {
+			return c.checkNotInDataplane(ifname)
+		})
 	}
-	var pci string
-	var err error
-	if bound {
-		pci, err = c.b.Bind(ctx, ifname, driver)
-	} else {
-		// driver 在解绑语义下表示「交还给哪个内核驱动」（缺省由内核自动探测）
-		pci, err = c.b.Unbind(ctx, ifname, driver)
-	}
+	pci, err := c.b.Bind(ctx, ifname, driver)
 	if err != nil {
 		return "", "", err
 	}
-	// 绑定记录（决策 #100）：接管后内核无 netdev，这是最后一次能拿到口名→PCI 的时机；
-	// 解绑则按 PCI 删除（操作者给的常是 PCI 地址）。记录失败只影响后续生成，故只告警。
+	// 绑定记录（决策 #100）：接管后内核无 netdev，这是最后一次能拿到口名→PCI 的时机。
+	// 记录失败只影响后续生成，故只告警。
 	if c.rec != nil {
-		var rerr error
-		if bound {
-			rerr = c.rec.Set(ifname, pci)
-		} else {
-			rerr = c.rec.DeleteByPCI(pci)
-		}
-		if rerr != nil && c.logger != nil {
+		if rerr := c.rec.Set(ifname, pci); rerr != nil && c.logger != nil {
 			c.logger.Warn("更新 DPDK 绑定记录失败（数据面重启可能需要重新解析端口）",
 				"ifname", ifname, "pci", pci, "err", rerr)
 		}
 	}
 	// 必须按 **PCI** 回读驱动：绑定到 DPDK 后内核网卡即消失，
 	// 按接口名解析会失败并把结果误报为「无驱动」（真机实测踩到）。
-	// 解绑后内核驱动重新探测需要一点时间，故轮询等待。
-	var cur string
-	for i := 0; i < 15; i++ {
-		if cur, _ = c.b.DriverOf(pci); cur != "" {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	return pci, cur, nil
+	return pci, readbackDPDKDriver(c.b, pci), nil
 }
 
 // vppAutostartAlarms 把一次「启动时确保 VPP 运行」的结果落到告警表（决策 #348）。

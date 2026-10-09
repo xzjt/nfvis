@@ -37,3 +37,27 @@ func CheckUnbindAllowed(ifname string, inDataplane bool) error {
 		"直接解绑会让该口悬空，并可能阻塞后续命令",
 		ErrIfaceInDataplane, name)
 }
+
+// ErrIfaceInKernelDataplane 拒绝对仍被内核数据面使用的接口做驱动层操作（决策 #426②）。
+var ErrIfaceInKernelDataplane = errors.New("接口仍被内核数据面使用")
+
+// CheckKernelUnbindAllowed 内核数据面的解绑守卫：该口此刻正被内核数据面使用时拒绝。
+//
+// 与 CheckUnbindAllowed（VPP 口径）对应——VPP 侧问的是「这个口还在 VPP 手里吗」，
+// 内核侧问的是「这个口还是某个数据面设备的一部分吗」（why 给出可读原因，如
+// 「是 vs-lan 的成员口」「带 IP 地址（1 个）」）。照做路径按内核侧改写：把声明删掉
+// 即解除占用（内核不会像 VPP 那样需要重启数据面才放开）。
+func CheckKernelUnbindAllowed(ifname string, inUse bool, why string) error {
+	name := strings.TrimSpace(ifname)
+	if name == "" || !inUse {
+		return nil
+	}
+	detail := ""
+	if why = strings.TrimSpace(why); why != "" {
+		detail = "（" + why + "）"
+	}
+	return fmt.Errorf("%w：%s%s。请先在配置里把它从数据面移出（删除引用它的声明，"+
+		"如交换机成员口 / bond 成员 / l3-interface）并提交，确认它不再被使用后再解绑——"+
+		"数据面正在转发时解绑会中断该口的流量",
+		ErrIfaceInKernelDataplane, name, detail)
+}

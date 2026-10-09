@@ -3,6 +3,7 @@ package netkernel
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -169,4 +170,64 @@ func (r *Runtime) DataplaneIfnames(ctx context.Context, cfg model.Config) ([]str
 		}
 	}
 	return names, nil
+}
+
+// IfaceInUse 判定某网口此刻是否正被内核数据面使用（决策 #426②的解绑前守卫）。
+//
+// 与 VPP 侧「问 VPP 这个口还在你手里吗」对应，这里问内核——判据是两条**可独立核对**的
+// 数据面事实（任一命中即「在用」，并返回可读原因）：
+//
+//   - 是某个 master 的成员口（`ip -j link show` 的 master 字段：bridge / bond / VRF 都算）；
+//   - 自身带 IP 地址（产品的 l3-interface 地址就下发在口上；Vlan>0 时落在子接口）。
+//
+// 口在内核里不存在（例如仍被 DPDK 驱动接管）时，`ip link show dev <n>` 报错返回——
+// 由调用方按「探测不到不拦」处理（与 VPP 侧同取向：探测通道不通不代表口在被使用，
+// 而 DPDK 残留恰恰是解绑要解决的情形）。
+func (r *Runtime) IfaceInUse(ctx context.Context, ifname string) (bool, string, error) {
+	name := strings.TrimSpace(ifname)
+	if name == "" {
+		return false, "", fmt.Errorf("接口名不能为空")
+	}
+	out, err := r.run.Run(ctx, "ip", "-j", "link", "show", "dev", name)
+	if err != nil {
+		return false, "", err
+	}
+	var links []struct {
+		Ifname string `json:"ifname"`
+		Master string `json:"master"`
+	}
+	if err := json.Unmarshal([]byte(out), &links); err != nil {
+		return false, "", fmt.Errorf("解析 %s 的链路信息失败: %w", name, err)
+	}
+	if len(links) == 0 {
+		return false, "", fmt.Errorf("内核中查不到 %s（ip link show 无该设备）", name)
+	}
+	if m := strings.TrimSpace(links[0].Master); m != "" {
+		return true, "是 " + m + " 的成员口", nil
+	}
+	aout, err := r.run.Run(ctx, "ip", "-j", "addr", "show", "dev", name)
+	if err != nil {
+		return false, "", err
+	}
+	var addrs []struct {
+		AddrInfo []struct {
+			Family string `json:"family"`
+			Local  string `json:"local"`
+		} `json:"addr_info"`
+	}
+	if err := json.Unmarshal([]byte(aout), &addrs); err != nil {
+		return false, "", fmt.Errorf("解析 %s 的地址信息失败: %w", name, err)
+	}
+	n := 0
+	for _, a := range addrs {
+		for _, ai := range a.AddrInfo {
+			if ai.Local != "" {
+				n++
+			}
+		}
+	}
+	if n > 0 {
+		return true, fmt.Sprintf("带 IP 地址（%d 个）", n), nil
+	}
+	return false, "", nil
 }

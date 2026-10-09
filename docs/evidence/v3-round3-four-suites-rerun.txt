@@ -1,0 +1,82 @@
+================================================================================
+v3 线 round3 · 两批修复（#421~#432）后的四套真机套件复跑
+日期：2026-10-09
+主机：nfvis-vm（Ubuntu 26.04.1 / 内核 7.0.0-34，管理口令为本轮 .run 首启一次性口令）
+被测构建：**换装二进制**（宿主机交叉编译替换 /usr/bin/nfvisd、/usr/bin/nfvis-cli；
+          show version 报 NFViS 1.0.0-dev；原 3.0.5 备份在 /root/bin-orig/）——非 deb 重装
+套件脚本：工作树 contrib/scripts/*.sh 同步到 VM /root/src/contrib/scripts/
+          （含本轮修改的 cli-fulltest-lib.sh 主机名清场逻辑）
+跑法：SRV=https://127.0.0.1:443 CLI_BIN=/usr/bin/nfvis-cli NFVIS_PASSWORD=… API_PORT=443
+原始日志：VM /root/suite-fulltest.log、suite-semantic.log、suite-lifecycle.log、suite-pty.log
+================================================================================
+
+§1 结果（四项均与 round2 基线逐项一致，零回归）
+--------------------------------------------------------------------------------
+  cli-fulltest       通过 273 / 失败 0 / 预期报错 20      （基线 273/0/20）
+  cli-semantic-check 通过  23 / 失败 0 / 不可判定 6 / 登记 0（基线 23/0/6）
+  cli-lifecycle-check 通过 21 / 失败 0 / 跳过 3 / 登记 0   （基线 21/0/3）
+  cli-pty-smoke      通过  10 / 失败 0                     （基线 10/10）
+
+  fulltest 分阶段：阶段1 47/0/0、阶段2 120/0/3、阶段3 8/0/0、阶段4 35/0/13、
+                  阶段5 45/0/4、阶段6 11/0/0、阶段7 7/0/0。
+  语义不可判定 6 项：S8（无流量成员）、S9（无 VM/容器对象）、S11（无 relay）、
+                    S12（无 learn-limit）、S13（无 dns proxy 现场，另 1 项 S9 的容器列表）。
+  生命周期跳过 3 项：L3-1（无 VNF）、L3-3 / L2-2（无 NAT 配置）。
+  —— 三项均属「无对象可对照」的如实登记，非回归。
+
+§2 复跑前置（本轮实测：清场是硬性前置）
+--------------------------------------------------------------------------------
+  ① 走查现场对象必须先清：fulltest 的 S2-pre 会声明 `vs-l3 l3-interface ens224`、
+     并把 ens192 收进 `bond0`；而走查现场里 ens192 是 vs-lan 的端口（+ pol-walk QoS）、
+     ens224 是 vs-wan 的 l3-interface，不清必然撞「同一网口角色互斥」。
+     本轮清理：停 vnf-a/vnf-b/ct-1 → 一次提交删 vnf-a/vnf-b/ct-1/接口 QoS 绑定/
+     pol-walk/acl-icmp-deny/vx-a/vs-lan/vs-dmz/vs-wan/vs-nat（revision 67）。
+  ② 走查的主机防火墙 rule 10（源 192.0.2.0/24）必须先删：phase2 断言 `show system firewall`
+     能走到「未配置」，留着它必假红。删除属「防火墙变更」⇒ 非 console 会话须 commit confirmed；
+     本轮用 console 源（/root/ncc）直接提交（revision 68）。
+  ③ 1G 大页池：走查后 3 页全被 vnf-a/vnf-b 占用（free 0），而 cli-vm（阶段3）需要 1 页——
+     停/删 VNF 后 free 2，满足。
+
+§3 #424 主机名清场复核（本轮首次实跑，通过）
+--------------------------------------------------------------------------------
+  fulltest 会 `set system hostname nfvis-cli`/`cli-tx-*` 并提交（产品把它应用到宿主），
+  清场按值识别还原本轮写的值（配置侧 + 宿主侧两处）。本轮实测：
+    · 套件结束后 hostnamectl --static 与 `show configuration` 的 hostname 均为 nfvis-lab（原值）；
+    · 套件收尾打印「· 套件对象已清干净（未清项 0）」。
+  —— 即 cli-fulltest-lib.sh 的主机名两处还原逻辑真机成立。
+
+§4 顺带补验 #428（远程 syslog 报文头主机名随配置动态取，handoff §3.3①）
+--------------------------------------------------------------------------------
+  手法：VM 上起 UDP 监听（python3 绑 0.0.0.0:5514）→ `set system syslog host 127.0.0.1 port 5514`
+        → 用健康阈值告警当触发器（`set system health thresholds disk-used-percent 1` 触发
+        HARDWARE_THRESHOLD，告警变更经 FR-OPS-022 转发远程 syslog）→ 再 `set system hostname
+        nfvis-syslog-x` 提交 → 复看后续报文的 RFC5424 头 HOSTNAME 字段。
+  结果（原样）：
+    08:48:57 … nfvis-lab    nfvisd 60730 alarm - [HARDWARE_THRESHOLD] … state=active
+    08:49:39 … nfvis-syslog-x nfvisd 60730 log - 远程 syslog 转发已配置 …
+    08:49:39 … nfvis-syslog-x nfvisd 60730 log - 系统基线已应用到宿主 item=hostnamectl set-hostname nfvis-syslog-x
+  —— 改主机名（未重启 nfvisd，PID 恒为 60730）后新报文的 HOSTNAME 即变 ⇒ #428 成立。
+  收尾：主机名还原 nfvis-lab、删 syslog host 配置、阈值还原 85、停监听；
+        HARDWARE_THRESHOLD 告警在下一巡检周期自动消解（只剩既有的 HUGEPAGE_POOL_ORPHAN）。
+
+§5 环境变化（如实登记；套件会改这些且自身不还原）
+--------------------------------------------------------------------------------
+  · 套件 S2-pre 提交会覆写 resource-pools（1G count、isolated-cores）、vpp cpu（main-core/
+    corelist-workers）；phase 内还会改 idle-timeout-minutes。本轮已还原为走查基线：
+      isolated-cores 2,3,4,5 ｜ vpp cpu main-core 2 / corelist-workers 3 ｜ idle-timeout 10。
+  · 1G 大页池：套件把声明改为 2，产品按 #329 收敛到实际 2（total 2 / free 1）。
+    cmdline 基线仍为 `hugepagesz=1G hugepages=3` ⇒ 存在**良性**漂移提示
+    「大页 1G：期望 2，cmdline 基线为 3（需写入 GRUB 基线并重启生效）」。
+    本轮**未重启**主机（故实际池仍 2）；要回到声明 3 需 `request system kernel apply` + 重启。
+  · 走查现场对象已清（vs-lan/vs-dmz/vs-wan/vs-nat、vnf-a/vnf-b、ct-1、pol-walk、acl-icmp-deny、
+    vx-a、防火墙 rule 10）；夹具镜像 alpine.qcow2 / debian12.qcow2 / docker alpine:3.20 均在
+    （Refs 0）。收尾无残留对象、无 VNF/容器、无持锁会话；告警仅剩既有的 HUGEPAGE_POOL_ORPHAN。
+  · 服务：套件跑完按脚本建议 restart vpp + nfvis 收敛；末态 nfvis/vpp 均 active，
+    ens192/ens224 均 up（ens224 曾被 fulltest 阶段4 末尾 disable，已 `request interfaces ens224 enable`）。
+
+§6 仍未做（承接 handoff §3）
+--------------------------------------------------------------------------------
+  · 发版（handoff §3.1）：未做（用户未点头）——本轮未提交 git、未重打 deb、未跑逐字节一致。
+  · handoff §3.3② #430 sriov-vf 真机声明：本机无 PF，不可做（仅校验层用例）。
+  · handoff §3.3③ #432 Web 详情页在编排不可用时 restart_count 省略为「—」：本轮未做
+    （需停 docker 造现场 + 浏览器黑盒；#432 的核心功能已在 round3 §8 真机建/消验证）。

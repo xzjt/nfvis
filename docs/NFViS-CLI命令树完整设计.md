@@ -274,6 +274,10 @@ request interfaces <ifname|pci> unbind-dpdk [to-driver <驱动名>]
                                                      # 实测：清空 override + rescan 不足以让内核重新探测，
                                                      # 故建议带 to-driver（如 to-driver vmxnet3）
                                                      # 绑定会中断该网卡现有流量，且该网卡不得正被 VPP 使用
+                                                     # 按数据面实现分向（附录 A #426）：内核数据面下
+                                                     # bind 拒绝（内核不使用 DPDK 接管）、unbind 可用
+                                                     # （它正是把口从 vfio-pci 交还内核驱动的动作）；
+                                                     # 两数据面解绑前各自问自己的数据面「该口仍在用吗」
 request sriov create-vfs <ifname> count <uint> | delete-vfs <ifname> vf <uint>
    # delete-vfs 的 vf <n> **不参与定位**：V1 的 VF 是数量型配置，按数量回收一个（回显会明确说明）
 request vpp restart                                 # S；确认。按 committed 配置重新生成 startup.conf 并重启 VPP，
@@ -436,7 +440,8 @@ set dataplane <vpp|kernel>                           # 数据面实现：vpp = V
                                                      #   不同的形态：cross-connect、静态路由多下一跳（ECMP）、NAT 跨
                                                      #   转发域、`nat static` 在多转发域配置下（静态映射无域字段、
                                                      #   作用域不明）、ACL protocol icmp 带端口字段、VNF 虚拟网卡接入
-                                                     #   type=l3 交换机、镜像源为 VNF 虚拟网卡。
+                                                     #   type=l3 交换机、镜像源为 VNF 虚拟网卡（VPP 数据面支持该形态，
+                                                     #   见 [edit port-mirroring]——两条口径的差别写在用户手册 §8.7）。
                                                      #   内核侧约束（提交期校验）：对象名 ≤15 字符、派生内核设备名不得
                                                      #   互撞、vlan 子接口派生名 ≤15 字符、VNF 虚拟网卡不能直接作三层
                                                      #   接口（改用「接入已配网关的二层交换机」）。
@@ -694,7 +699,13 @@ set static <inside-ip> to <outside-ip>               # 1:1 发布
 # 但 VPP NAT44 单实例仅一对 (inside, outside)，故多规则的 virtual-switch / 出接口 VRF 必须各自一致（决策 #52）
 
 [edit port-mirroring <name>]
-set source interface <ifname|vnf <vm> interface <vnic>> direction <ingress|egress|both>
+set source interface <ifname> direction <ingress|egress|both>          # 源＝物理口/bond
+set source vnf <vm> interface <vnic> direction <ingress|egress|both>   # 源＝VNF 的 vNIC（另一种写法）
+# VPP 数据面：vNIC 源按确定性 vhost-user 口名 `vh-<vm>-<vnic>` 解析后走与物理口
+#   同一条 span 原语；该口随 vNIC 声明建立（VM 未启动也有，只是 link down）。
+#   解析不到即 commit 失败并给照做路径（先声明/下发该 vNIC，或改用物理口）。
+# 内核数据面：vNIC 源在**提交期直接拒绝**（宿主 tap 由 libvirt 在域启动时创建、
+#   产品没有可靠的名字映射）——请改用物理口/bond。
 set analyzer interface <ifname>
 
 [edit qos]
