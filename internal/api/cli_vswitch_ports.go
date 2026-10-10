@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/state"
 )
 
 // showVSwitchPorts 交换机成员端口读视图（决策 #326）。未在配置中声明时退回运行态视图。
@@ -88,6 +89,14 @@ func (x *cliExecutor) renderSwitchPortView(cfg model.Config, name string, runtim
 	// 语义校验 S4 亦据此判定「是否含状态/计数字段」。
 	fmt.Fprintf(&b, "%-20s %-9s %-7s %-7s %-12s %-12s\n", "Port", "Source", "Admin", "Link", "RxPkts", "TxPkts")
 	states, _ := x.ifaceStates()
+	// 决策 #444：运行态列合并与 REST `/ports` 共用 resolveSwitchPortRuntime（三面同源不靠
+	// 两处各写一遍）；counters 闭包保持原「x.state 未装配 ⇒ 取不到」语义。
+	counters := func(ifname string) (state.InterfaceCounters, bool) {
+		if x.state == nil {
+			return state.InterfaceCounters{}, false
+		}
+		return x.state.InterfaceCounters(context.Background(), ifname)
+	}
 	items := make([]any, 0, len(rows))
 	for _, p := range rows {
 		label := switchPortLabel(p)
@@ -96,16 +105,23 @@ func (x *cliExecutor) renderSwitchPortView(cfg model.Config, name string, runtim
 			"interface": p.Interface, "vnf": p.VNF, "vnf_interface": p.VNFInterface,
 			"container": p.Container, "container_interface": p.ContainerInterface,
 		}
+		rt := resolveSwitchPortRuntime(label, states, counters)
 		admin, link, rx, tx := "-", "-", "-", "-"
-		if st, ok := states[label]; ok {
-			admin, link = yn(st.AdminUp), yn(st.LinkUp)
-			row["admin"], row["link"] = st.AdminUp, st.LinkUp
+		if rt.AdminUp != nil {
+			admin = yn(*rt.AdminUp)
+			row["admin"] = *rt.AdminUp
 		}
-		if x.state != nil {
-			if c, ok := x.state.InterfaceCounters(context.Background(), label); ok {
-				rx, tx = fmt.Sprintf("%d", c.RxPackets), fmt.Sprintf("%d", c.TxPackets)
-				row["rx_packets"], row["tx_packets"] = c.RxPackets, c.TxPackets
-			}
+		if rt.LinkUp != nil {
+			link = yn(*rt.LinkUp)
+			row["link"] = *rt.LinkUp
+		}
+		if rt.RxPackets != nil {
+			rx = fmt.Sprintf("%d", *rt.RxPackets)
+			row["rx_packets"] = *rt.RxPackets
+		}
+		if rt.TxPackets != nil {
+			tx = fmt.Sprintf("%d", *rt.TxPackets)
+			row["tx_packets"] = *rt.TxPackets
 		}
 		fmt.Fprintf(&b, "%-20s %-9s %-7s %-7s %-12s %-12s\n", label, p.Source, admin, link, rx, tx)
 		items = append(items, row)
@@ -166,6 +182,13 @@ func (x *cliExecutor) showRuntimeSwitchPorts(name string) string {
 	fmt.Fprintf(&b, "%-16s %-7s %-7s %-12s %-12s %s\n", "Port", "Admin", "Link", "RxPkts", "TxPkts", "Shg")
 	items := make([]any, 0, len(bd.Ports))
 	states, _ := x.ifaceStates()
+	// 决策 #444：与 renderSwitchPortView 同一份合并实现（counters 闭包语义同上）。
+	counters := func(ifname string) (state.InterfaceCounters, bool) {
+		if x.state == nil {
+			return state.InterfaceCounters{}, false
+		}
+		return x.state.InterfaceCounters(context.Background(), ifname)
+	}
 	var taps map[uint32]bool
 	if x.dhcpSrv != nil {
 		taps = x.dhcpSrv.DHCPTapIndexes() // 决策 #359：内置 DHCP tap 不进用户端口视图
@@ -177,16 +200,23 @@ func (x *cliExecutor) showRuntimeSwitchPorts(name string) string {
 		}
 		shown++
 		row := map[string]any{"port": p.Name, "sw_if_index": p.SwIfIndex, "shg": p.Shg}
+		rt := resolveSwitchPortRuntime(p.Name, states, counters)
 		admin, link, rx, tx := "-", "-", "-", "-"
-		if st, ok := states[p.Name]; ok {
-			admin, link = yn(st.AdminUp), yn(st.LinkUp)
-			row["admin"], row["link"] = st.AdminUp, st.LinkUp
+		if rt.AdminUp != nil {
+			admin = yn(*rt.AdminUp)
+			row["admin"] = *rt.AdminUp
 		}
-		if x.state != nil {
-			if c, ok := x.state.InterfaceCounters(context.Background(), p.Name); ok {
-				rx, tx = fmt.Sprintf("%d", c.RxPackets), fmt.Sprintf("%d", c.TxPackets)
-				row["rx_packets"], row["tx_packets"] = c.RxPackets, c.TxPackets
-			}
+		if rt.LinkUp != nil {
+			link = yn(*rt.LinkUp)
+			row["link"] = *rt.LinkUp
+		}
+		if rt.RxPackets != nil {
+			rx = fmt.Sprintf("%d", *rt.RxPackets)
+			row["rx_packets"] = *rt.RxPackets
+		}
+		if rt.TxPackets != nil {
+			tx = fmt.Sprintf("%d", *rt.TxPackets)
+			row["tx_packets"] = *rt.TxPackets
 		}
 		fmt.Fprintf(&b, "%-16s %-7s %-7s %-12s %-12s %d\n", p.Name, admin, link, rx, tx, p.Shg)
 		items = append(items, row)

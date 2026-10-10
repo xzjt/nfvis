@@ -1,0 +1,81 @@
+NFViS v3 · round9：决策 #444 交换机成员端口读视图运行态列三面同源（收口 R7-2）
+=====================================================================================
+
+日期/分支：2026-10-10，`v3`（起点 HEAD `a91d5e8`）
+决策：规格书附录 A #444（`docs/NFViS-系统产品需求与目标架构规格书.md`）
+账目：`docs/v3待做.md` 五 R7-2 收口（round7 真机登记）
+前序：round8（决策 #443 恢复告警按来源复核）；round7（Web 复核 + R7-1/R7-2 登记）
+
+§0 一句话
+---------
+内核数据面下 Web 交换机详情页的容器派生端口运行态列不再恒「—」：REST
+`GET /virtual-switches/{name}/ports` 逐行补齐 `admin`/`link`/`rx_packets`/`tx_packets`
+（与 CLI **同一份** `resolveSwitchPortRuntime` 按展示名合并；取不到即不出现该键），
+Web 改为「行内字段优先、statistics 回退」。真机：内核容器场景 Web 显示 `up/up`，
+与 CLI / REST / `ip -br link` 四方一致（修复前同位置「—」）。
+
+§1 契约与实现
+-------------
+- 决策 #444（附录 A）+ `AGENTS.md` 计数 345→346；`check_decisions_count.sh` 通过。
+- 落点：
+  - `internal/api/vswitch_ports_runtime.go`（新）：共享解析器 `resolveSwitchPortRuntime`
+    （状态＝`InterfaceStates()`、计数＝`state.InterfaceCounters`；两类事实独立判定，取不到即 nil）。
+  - `internal/api/cli_vswitch_ports.go`：两处内联合并（`renderSwitchPortView` /
+    `showRuntimeSwitchPorts`）改调共享解析器——文本列宽/缺省 `-`/结构化输出键与类型**逐字不变**
+    （既有字节级用例 `TestGetVSwitchPortsDerivedUnionREST` 原样全绿）。
+  - `internal/api/resources.go`：`handleGetVSwitchPorts` 逐行合并（新增 `switchPortViewJSON`，
+    四个 `omitempty` 指针＝条件字段）；状态取既有 `s.interfaceStates()`（与其它读视图同一取值口）；
+    空列表仍发 `[]`。
+  - `internal/api/ui/app.js`：端口表行内字段优先（`hasRowRT ? p : rtByName[label]`），
+    `statistics` 条目仅作补条目/回退。
+  - `docs/NFViS-openapi.yaml`（+ `internal/api/openapi.json` 经 `--write` 同步）：`SwitchPortView`
+    增四个可选字段 + 端点 description 如实化；`internal/api/shape_contract_test.go` 条件字段白名单 + 理由。
+- 实现偏差（如实）：无（共享解析器判定与 CLI 改前逐字一致；主会话把状态取法收敛到既有
+  `s.interfaceStates()`，语义等价）。
+
+§2 测试（红-绿 + 回归）
+-----------------------
+- 新用例：解析器四态（有状态有计数 / 无状态有计数 / 有状态无计数 / counters=nil / states=nil 不 panic）；
+  REST `/ports` 三态（派生条目带 `admin`/`link`；运行态缺名 ⇒ 键**缺席**而非零值；`source=runtime`
+  补条目同样被合并）；计数源未装配 ⇒ 计数键缺席；CLI 文本 + `x.structured` 键/类型回归；
+  `internal/api/ui_switch_ports_fields_test.go`（端口表消费的字段 ⊆ 契约 `SwitchPortView`、
+  四字段不得进 `required`；与 QoS/SPAN 卡片守护同族，带自校准）。
+- **红-绿**：把 `resolveSwitchPortRuntime` 临时改为恒零值 ⇒ 4/4 相关用例按预期失败
+  （例：`nfvisct637ec1e3 的运行态列应为 up/up…得到 admin=<nil> link=<nil>`；CLI 行退回 `- - - -`）；
+  恢复实现 ⇒ 8/8 全绿（含相邻既有用例）。
+- `go build ./...`、`go vet ./internal/api/...`、`go test ./internal/...`、`make check` 七项 **RC=0**
+  （决策计数 346；archtest / openapi 同步 / 无重复键 / 套件契约同步均过）。
+
+§3 真机验证（换装二进制）
+-------------------------
+- **VPP 侧 sanity**（建 vs-rt + 容器 ct-rt，memif 路径）：
+  - CLI `show virtual-switches vs-rt ports` → `mf-ct-rt-eth0  container  up  down  0  0`；
+  - REST `GET /virtual-switches/vs-rt/ports` → 行内 `"admin":true,"link":false,"rx_packets":0,
+    "tx_packets":0`（修复前该行只有 source/port/container 字段；VPP 侧有计数源故计数键在场）；
+    条目**不重复**（单行）。
+  - 本轮 Web 黑盒只在**内核侧**做（同一渲染代码路径；VPP 侧未另做浏览器复核，如实登记）。
+- **内核侧（修复目标）**：切内核 + 建 vs-rt + 容器 ct-rt（veth 宿主端）：
+  - 独立事实源：`ip -br link` → `nfvisctbb7ddaad@if112 UP … <…,UP,LOWER_UP>`；
+    `ls /sys/class/net/vs-rt/brif/` → `nfvisctbb7ddaad`；
+  - CLI → `nfvisctbb7ddaad  container  up  up  -  -`；
+  - REST → 行内 `"admin":true,"link":true`（**无** rx/tx 键——内核无计数源，按设计不编造）；
+  - **Browser Use 黑盒**（GUI 登录 → 导航「虚拟交换机」→ 列表「详情」）：成员端口表
+    `nfvisctbb7ddaad / 容器声明 / up / up / — / —`——**修复前同位置为「—」**（round7 截图对照）；
+    截图 `docs/images/round9-web-switch-ports-runtime-columns.png`。
+  - **四方一致**：Web＝CLI＝REST＝`ip`（up/up）；Rx/Tx 的「—」与 CLI 的「-」一致。
+- 清场与还原：内核模式下删除容器与交换机（无 `nfvisct*`/`vs-rt` 残留、配置干净、无容器）；
+  切回 vpp（`bind-dpdk`×2 + `request vpp restart`）→ `show vpp` connected、两口 `dpdk`、
+  告警仅既有 `HUGEPAGE_POOL_ORPHAN`（60s 巡检按内核实况重建）。
+
+§4 四套件（新构建，vpp 数据面；与基线对照）
+-------------------------------------------
+全部与基线**逐项一致、零失败**（跑前清场；fulltest 自清场）：
+- `cli-fulltest` **274 / 0 / 20**（阶段 1~7 逐段 0 失败）
+- `cli-semantic-check` **23 / 0 / 6**（6 项不可判定＝缺现场，如实报）
+- `cli-lifecycle-check` **21 / 0 / 3**（3 项跳过＝缺对象/缺现场）
+- `cli-pty-smoke` **10 / 10**
+对照（交接 §5）：当前构建与两版发布件均为 274/0/20、23/0/6、21/0/3、10/10——**无退化**。
+
+§5 提交
+-------
+（见 `git log` 的 `feat: 决策 #444 …` 提交信息——含红-绿与真机要点。）

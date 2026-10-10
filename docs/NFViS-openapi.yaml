@@ -349,6 +349,8 @@ paths:
         （source=runtime，运行态不可用时为空）。配置库形状不变：写入仍是 PUT（全量替换静态 ports）。
         派生条目**只读**——删除应指向声明它的 VNF/容器（CLI `show virtual-switches <n> ports`
         与 Web 交换机详情页展示同一份读视图）。
+        逐行带运行态列 `admin`/`link`/`rx_packets`/`tx_packets`（按展示名与 CLI
+        `show virtual-switches <n> ports` 同源合并；取不到时不出现该键，不编造）。
       responses:
         "200":
           description: OK
@@ -3692,6 +3694,12 @@ components:
         acl_out:
           type: string
           description: '**不支持**（同 acl_in，决策 #340）。'
+        # 决策 #444：运行态列（逐行按展示名与 CLI 同源合并）；取不到时不出现该键（条件字段），
+        # 不编造——故不在 required 里。
+        admin: { type: boolean, description: 管理状态（运行态；按展示名与 CLI 同源合并，取不到时不出现该键） }
+        link: { type: boolean, description: 链路状态（运行态；同上） }
+        rx_packets: { type: integer, description: 收包计数（运行态；计数源未装配时该键不出现） }
+        tx_packets: { type: integer, description: 发包计数（运行态；同上） }
 
     DhcpLease:
       type: object

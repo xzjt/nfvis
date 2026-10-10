@@ -12,6 +12,7 @@ import (
 
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator/network"
+	"github.com/xzjt/nfvis/internal/state"
 )
 
 // 资源 CRUD handlers 第一组（OpenAPI 附录 B 映射：system/interfaces/
@@ -555,12 +556,27 @@ func (s *Server) handleDeleteVSwitch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// switchPortViewJSON 端口读视图的响应条目（决策 #444）：model.SwitchPortView 的配置字段 +
+// 运行态列。四个运行态字段是**条件字段**——取不到时不出现该键（指针 omitempty），
+// 由 shape 守护的白名单在册（shapeConditional），不编造。
+type switchPortViewJSON struct {
+	model.SwitchPortView
+	AdminUp   *bool   `json:"admin,omitempty"`
+	LinkUp    *bool   `json:"link,omitempty"`
+	RxPackets *uint64 `json:"rx_packets,omitempty"`
+	TxPackets *uint64 `json:"tx_packets,omitempty"`
+}
+
 // handleGetVSwitchPorts GET /api/v1/virtual-switches/{name}/ports。
 //
 // 决策 #326（收口 R84-16）：返回的是**读视图**——配置里静态声明的 `ports` 与
 // VNF/容器声明（`interfaces <nic> virtual-switch <name>`）派生出的 vNIC 成员**并集**，
 // 逐条带 `source`（config|vnf|container）。配置库形状不动（写路径仍是 PUT 静态 ports）。
 // 交换机未在 committed 声明时 404（与其它详情端点同口径，不把派生条目单独发出来）。
+//
+// 决策 #444（收口 R7-2）：逐行带运行态列 `admin`/`link`/`rx_packets`/`tx_packets`，
+// 与 CLI `show virtual-switches <n> ports` **同一实现**（resolveSwitchPortRuntime）按展示名合并；
+// 接口状态/计数取不到时不出现该键，不编造。
 func (s *Server) handleGetVSwitchPorts(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	cfg, err := s.engine.Committed()
@@ -594,7 +610,28 @@ func (s *Server) handleGetVSwitchPorts(w http.ResponseWriter, r *http.Request) {
 			if ports == nil {
 				ports = []model.SwitchPortView{}
 			}
-			writeJSON(w, http.StatusOK, ports)
+			// 决策 #444：逐行合并运行态列（与 CLI 同一实现 resolveSwitchPortRuntime）。
+			// 状态＝该数据面的接口运行态快照（与其它读视图同一个取值口，未接入/查询失败
+			// 即「取不到」，不编造）；计数源未装配时对应字段同样不出现。
+			states := s.interfaceStates()
+			counters := func(ifname string) (state.InterfaceCounters, bool) {
+				if s.state == nil {
+					return state.InterfaceCounters{}, false
+				}
+				return s.state.InterfaceCounters(context.Background(), ifname)
+			}
+			out := make([]switchPortViewJSON, 0, len(ports))
+			for _, p := range ports {
+				rt := resolveSwitchPortRuntime(switchPortLabel(p), states, counters)
+				out = append(out, switchPortViewJSON{
+					SwitchPortView: p,
+					AdminUp:        rt.AdminUp,
+					LinkUp:         rt.LinkUp,
+					RxPackets:      rt.RxPackets,
+					TxPackets:      rt.TxPackets,
+				})
+			}
+			writeJSON(w, http.StatusOK, out)
 			return
 		}
 	}

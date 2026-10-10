@@ -87,6 +87,13 @@ var shapeConditional = map[string]map[string]string{
 		"mgmt_interface": "未声明管理口时省略（防火墙的前置是管理口已声明；测试服务基线未声明）",
 		"error":          "仅当 applied=false 时出现（如实说明原因；一致时省略，不编造）",
 	},
+	"GET /virtual-switches/{name}/ports": {
+		// 决策 #444：运行态列按展示名合并（与 CLI 同源），接口状态/计数取不到时不出现该键（不编造）。
+		"admin":      "决策 #444：运行态列按展示名合并（与 CLI 同源），接口状态/计数取不到时不出现该键（不编造）",
+		"link":       "同上",
+		"rx_packets": "同上",
+		"tx_packets": "同上",
+	},
 }
 
 // TestResponseShapeMatchesContract 契约声明的响应字段必须出现在实际响应里。

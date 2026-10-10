@@ -4683,7 +4683,10 @@ function renderSwitchDetail(vs, ports, params) {
     const label = p.port || p.interface || (p.vnf ? p.vnf + '/' + (p.vnf_interface || '') : '') ||
       (p.container ? p.container + '/' + (p.container_interface || '') : '') || '—';
     seen[label] = true;
-    rows.push({ label, source: p.source, rt: rtByName[label] });
+    // 决策 #444：/ports 行内运行态列优先（与 CLI 同源）；statistics 条目仅作补条目/回退。
+    const hasRowRT = p.admin !== undefined || p.link !== undefined ||
+      p.rx_packets !== undefined || p.tx_packets !== undefined;
+    rows.push({ label, source: p.source, rt: hasRowRT ? p : rtByName[label] });
   });
   rt.forEach((p) => { if (p && p.port != null && !seen[p.port]) rows.push({ label: p.port, source: 'runtime', rt: p }); });
   $('vsd-name').textContent = name;
