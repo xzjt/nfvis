@@ -30,12 +30,14 @@ func (p *Provider) InvalidateRuntimeState() {}
 // RetryDeferredVRFDeletes 无「延后删表」语义（内核 VRF 删除即时生效），无对象可复核。
 func (p *Provider) RetryDeferredVRFDeletes(context.Context, model.Config) []string { return nil }
 
-// ReconcileResidue / ReconcileRecoveryAlarms / ReconcileStorm 均为
-// VPP 侧登记型对账；内核数据面无登记、无对应族，空操作。
-// ReconcileDHCPServer 不在此列：内核侧有真实现（单播 socket 对账 + 复用的服务器核心巡检，
-// 见 dhcpserver.go 的同名方法）；ReconcileDNSProxy 同样不在此列（域落点 socket 对账，
-// 见 dnsproxy.go/下方实现）；ReconcileLLDP 也不在此列（自研收发代理的 socket 对账，
-// 见 lldp.go/下方实现）。
+// ReconcileResidue / ReconcileStorm 是 VPP 侧登记型对账，内核数据面无登记、无对应族；
+// 其中 ReconcileResidue 在内核侧承担**转发前置条件**的周期性对账（见下方实现），
+// ReconcileStorm 是空操作。
+// ReconcileRecoveryAlarms 不在此列（决策 #443）：内核侧有真实现——恢复收敛告警的按来源
+// 廉价复核，见 recovery_reconcile.go。ReconcileDHCPServer 同样不在此列：内核侧有真实现
+// （单播 socket 对账 + 复用的服务器核心巡检，见 dhcpserver.go 的同名方法）；
+// ReconcileDNSProxy 也不在此列（域落点 socket 对账，见 dnsproxy.go/下方实现）；
+// ReconcileLLDP 也不在此列（自研收发代理的 socket 对账，见 lldp.go/下方实现）。
 func (p *Provider) ReconcileResidue(ctx context.Context, cfg model.Config) []error {
 	// 内核数据面下本方法承担的不是"残渣对账"（那是 VPP 侧的登记型语义），而是**转发前置条件**
 	// 的周期性对账：数据面设备集合随提交变化，放行链要跟着重建；转发开关也可能被宿主改掉。
@@ -44,7 +46,6 @@ func (p *Provider) ReconcileResidue(ctx context.Context, cfg model.Config) []err
 	}
 	return nil
 }
-func (p *Provider) ReconcileRecoveryAlarms(context.Context, model.Config) []error { return nil }
 
 // ReconcileProxy 内核数据面下没有 VPP 的 dhcp proxy，但有**同一族**的用户态中继实例需要周期性
 // 对账（决策 #437）：声明了却没在跑的实例补启（启动失败、运行期收包失败被停等都能自愈）、

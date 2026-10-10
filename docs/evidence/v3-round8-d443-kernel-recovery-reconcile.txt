@@ -1,0 +1,86 @@
+NFViS v3 · round8：决策 #443 内核数据面下恢复收敛告警的按来源廉价复核（收口 R7-1）
+=====================================================================================
+
+日期/分支：2026-10-10，`v3`（起点 HEAD `f2d285e`）
+决策：规格书附录 A #443（`docs/NFViS-系统产品需求与目标架构规格书.md`）、设计文档 §3.2g
+账目：`docs/v3待做.md` 五 R7-1 收口（round7 真机登记）
+前序：round7 Web 复核（`docs/evidence/v3-round7-web-console-recheck.txt`——R7-1/R7-2 登记）
+
+§0 一句话
+---------
+内核数据面下这族告警（RECOVERY_UNCONVERGED / RECOVERY_IFACE_MISSING）不再只能等全量重放：
+两数据面共用 `network.ReconcileRecoveryAlarmsCore`，15s 巡检按来源廉价复核——来源对象已不在
+committed 声明 ⇒ 消解；`interfaces/<n>` 的 IFACE_MISSING 且仍声明 ⇒ 内核侧以「口已出现」
+（`ip -d -j link show`）当场消解。真机：**口仍缺时不误清、交还后首个巡检周期内自动消解、
+全程无重启**（修复前跨约 21 个周期不消解、必须重启）。
+
+§1 契约与实现
+-------------
+- 决策 #443（附录 A）+ `AGENTS.md` 计数 344→345；`check_decisions_count.sh` 通过。
+- 落点：
+  - `internal/orchestrator/network/recovery_reconcile_core.go`（新）：数据面中立核心
+    `ReconcileRecoveryAlarmsCore` + `RecoveryReconcileSpec`（Families/Switches/SubSource/IfaceAppeared）
+    + `RecoveryDeclSet`。纪律：只 Resolve、不 Raise、不触发重放；family 级/不可解析/未知保守保留；
+    `virtual-switches/<n>/<leaf>` 叶判定两数据面共享。
+  - `internal/orchestrator/network/recovery_reconcile.go`（VPP 入口改调核心）：**行为逐字不变**
+    （六族声明集、`vnf-ports/<vm>/<nic>` 与 `qos/policies/<n>` 词表、`svc.InterfaceExists`
+    存在性；`svc==nil` ⇒ 不查询即保留）。
+  - `internal/orchestrator/netkernel/recovery_reconcile.go`（新）：内核实现——声明集覆盖
+    `recovery.go` 的**全部可判定来源**（acls/qos/bonds/virtual-switches（含叶）/interfaces/
+    port-mirroring/vrfs/vxlan，键名与记源逐字一致）、`container-functions/<owner>/interfaces/<iface>`
+    词表（`containerVethSpecsOf` 同一派生口径）、存在性＝`rt().InterfaceStates`（`ip -d -j link show`）；
+    不读配置发动机（`p.config()`）。
+  - `internal/orchestrator/netkernel/api_surface.go`：删空操作与「无对应族」过时注释。
+- 实现偏差（如实）：核心的**存在性查询失败错误文案**统一为「复核接口 %s 是否已在数据面」
+  （VPP 侧原为「…已在 VPP」）——只进 15s 巡检日志；VPP 判定与告警行为不变（既有单测原样全绿）。
+
+§2 测试（红-绿 + 回归）
+-----------------------
+- VPP 既有 12 例（`internal/orchestrator/network/recovery_reconcile_test.go`）**原样未改、全绿**
+  （重构行为保持）；改前基线同命令 12/12，改后同绿。
+- 内核新 9 例（`internal/orchestrator/netkernel/recovery_reconcile_test.go`）覆盖：IFACE_MISSING
+  三态（口出现 ⇒ 消解 / 仍缺 ⇒ 保留 / 声明已删 ⇒ 消解且**零查询**）、查询失败 ⇒ 保留并上抛、
+  二段八族（acls 删 ⇒ 消解；qos/bonds/vrfs/port-mirroring/vxlan/interfaces 仍声明 ⇒ 保留）、
+  vswitch 叶四分支（交换机删/叶删/叶在/未知与超三段）、容器 vNIC 三态（声明在/容器删/畸形）、
+  family 级 5 条保留、非本族码不触碰、未注入告警表空操作。
+- **红-绿**：把新方法临时 `return nil`（模拟旧空操作）⇒ 6 例按预期失败（保留类 3 例在空操作下
+  平凡通过）；恢复实现 ⇒ 9/9 全绿（命令与关键输出见实现批交付说明）。
+- `go build ./...`、`go vet ./internal/orchestrator/...`、`go test ./internal/...`（20 包）全绿；
+  `make check` 七项 **RC=0**（决策计数 345、archtest/套件契约/openapi 同步均过）。
+
+§3 真机验证（换装二进制；内核数据面复现 round7 场景）
+-----------------------------------------------------
+- 上机：宿主同步源码 → VM 构建 → `install` 覆盖 /usr/bin/{nfvisd,nfvis-cli} → `systemctl restart nfvis`
+  （`show version` 1.0.0-dev＝dev 构建，正常；发布件 3.0.8 可用 `/root/rel308/nfvis-v3.0.8.run` 重装）。
+- ① **告警仍会落**（切内核 `set system dataplane kernel` + restart，两口仍绑 vfio）：
+  `10:23:31` 落两条 error `RECOVERY_IFACE_MISSING`（`interfaces/ens192|ens224`，journal
+  「网络恢复收敛未收敛项」同刻在场——此刻告警是对的）。
+- ② **不误清**（口仍缺，等 40s ≈ 2+ 个 15s 巡检周期）：`10:24:29` 复核，两条**仍在位**。
+- ③ **自动消解**（`10:24:38-39` 交还两口 `unbind-dpdk to-driver vmxnet3`；**不重启**）：
+  `10:24:47`（首个巡检周期内）复核 `RECOVERY_IFACE_MISSING` 活动条数 **= 0**；journal 确认
+  `10:23:31` 之后无任何重启。对照 round7（修复前）：同事实变化后跨约 21 个周期不消解、
+  只能等重启触发全量重放。
+  善后现象如实记录：重放未被重新触发时 ens192 保持 admin down，由**既有**独立族告警
+  `INTERFACE_LINK_DOWN`（scope=interface-link）如实报出——口径一致（全量重放只在启动/重连），
+  非本轮引入、非缺陷。
+- ④ **切回 vpp 回归**：`set system dataplane vpp` + restart 窗口重放**零未收敛项**——本次 VPP
+  启动即接管两口（内核日志 `10:25:05 vfio-pci 0000:0b:00.0: resetting`＝VPP 已在使用设备；
+  对照 round7 同窗口曾落 IFACE_MISSING 后经重放消解＝**子秒级时序差**，两侧 raise/clear 机制
+  均未改动）；`bind-dpdk`×2 + `request vpp restart` 后：无告警、`show vpp` connected=yes、
+  两口 `dpdk` 在位（ens192 up/up、ens224 down 按配置）——与基线逐项一致。
+- ⑤ 环境还原：无对象残留；配置基线逐行一致；告警仅既有 `HUGEPAGE_POOL_ORPHAN`（2M 池无主占用，
+  历史项，与交接 §2 登记一致）。
+
+§4 四套件（新构建，vpp 数据面；与基线对照）
+-------------------------------------------
+全部与基线**逐项一致、零失败**（跑前清场为硬性前置；fulltest 自清场，收尾残留核对为 0——无交换机/容器/VM、
+配置无套件对象、告警仅既有 `HUGEPAGE_POOL_ORPHAN`）：
+- `cli-fulltest` **274 / 0 / 20**（阶段 1~7 逐段 0 失败；预期报错 20 为设计内拒绝/守卫用例）
+- `cli-semantic-check` **23 / 0 / 6**（6 项不可判定＝缺现场，如实报，非回归）
+- `cli-lifecycle-check` **21 / 0 / 3**（3 项跳过＝缺对象/缺现场，如实报）
+- `cli-pty-smoke` **10 / 10**
+对照（交接 §5）：当前构建与两版发布件均为 274/0/20、23/0/6、21/0/3、10/10——**无退化**。
+
+§5 提交
+-------
+（见 `git log` 的 `feat: 决策 #443 …` 提交信息——含红-绿与真机要点。）
