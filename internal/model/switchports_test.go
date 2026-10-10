@@ -94,6 +94,8 @@ func TestDerivedSwitchPortsUndeclaredSwitch(t *testing.T) {
 }
 
 // AttachedPortName：vhost-user→vh-<vm>-<nic>、memif→mf-<owner>-<nic>；sriov-vf 无法确定→空。
+// 决策 #442（收口 R5-1）：**内核数据面**下容器 vNIC 的实际设备是 veth 宿主端（nfvisct…）——
+// 端口视图按数据面如实给名（VPP 侧与 VM 侧逐字不变）。
 func TestAttachedPortName(t *testing.T) {
 	cfg := Config{
 		VirtualMachineFunctions: []VMFunction{{Name: "fw", Interfaces: []VnfInterface{
@@ -107,7 +109,26 @@ func TestAttachedPortName(t *testing.T) {
 		t.Fatalf("sriov-vf 无法确定 VPP 名，应为空，实得 %q", got)
 	}
 	if got := AttachedPortName(cfg, PortSourceContainer, "ct", "m0"); got != "mf-ct-m0" {
-		t.Fatalf("memif 名应为 mf-ct-m0，实得 %q", got)
+		t.Fatalf("VPP 侧 memif 名应为 mf-ct-m0，实得 %q", got)
+	}
+
+	// 内核数据面：容器 ⇒ veth 宿主端名（15 字符、前缀 nfvisct）；且**逐字等于**编排序的
+	// ContainerVethNames 宿主端（读视图与编排同一份规则——单一真源）。
+	kernel := cfg
+	kernel.System = &SystemConfig{DataPlane: DataPlaneKernel}
+	hostWant, peerWant := ContainerVethNames("ct", "m0")
+	if len(hostWant) != 15 || hostWant[:7] != "nfvisct" || peerWant[:7] != "nfviscp" {
+		t.Fatalf("veth 命名形如 <前缀>+8hex（15 字符），实得 host=%q peer=%q", hostWant, peerWant)
+	}
+	if got := AttachedPortName(kernel, PortSourceContainer, "ct", "m0"); got != hostWant {
+		t.Fatalf("内核侧容器端口名应为 veth 宿主端 %q，实得 %q", hostWant, got)
+	}
+	if got := AttachedPortName(kernel, PortSourceContainer, "ct", "m0"); got == peerWant {
+		t.Fatal("内核侧端口名应为宿主端，不是容器端")
+	}
+	// 内核数据面下 VM 侧 vNIC 名逐字不变（vhost-user 走 virtio+tap，无产品接口名；仍给 vh- 名）。
+	if got := AttachedPortName(kernel, PortSourceVNF, "fw", "eth0"); got != "vh-fw-eth0" {
+		t.Fatalf("内核侧 vhost-user 名应逐字不变（vh-fw-eth0），实得 %q", got)
 	}
 }
 

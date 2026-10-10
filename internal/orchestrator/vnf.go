@@ -49,15 +49,14 @@ func VnfPortTag(vmName, ifaceName string) string {
 const DefaultMemifDir = "/run/nfvis/memif"
 
 // ContainerVethHostPrefix / ContainerVethPeerPrefix 内核数据面下容器 vNIC 的 veth 对两端前缀
-// （决策 #441）。命名总形如 `<前缀>+8 位小写十六进制` = 15 字符 = IFNAMSIZ 上限，与内核侧
-// DHCP 内置 tap（network.DHCPServerTapName）同一命名法：确定性派生、只由哈希区分实例，
-// 故恢复重放/巡检能按名核对与复用（长度也逐字对齐）。
+// （决策 #441）。**规则已下沉到 model**（读视图 `model.AttachedPortName` 要按同一份规则给派生
+// 端口条目命名，决策 #442），此处只作转发，取值与签名不变。
 const (
-	ContainerVethHostPrefix = "nfvisct" // 宿主端：网络编排创建并 enslave 到交换机内核 bridge
-	ContainerVethPeerPrefix = "nfviscp" // 容器端：容器编排在容器 start 后移入其 netns
+	ContainerVethHostPrefix = model.ContainerVethHostPrefix
+	ContainerVethPeerPrefix = model.ContainerVethPeerPrefix
 )
 
-// ContainerVethNames 内核数据面下容器 vNIC 的 veth 对命名（决策 #441 单一真源）：
+// ContainerVethNames 内核数据面下容器 vNIC 的 veth 对命名（决策 #441；规则真源在 model，本函数转发）：
 // 宿主端 nfvisct+8 位十六进制、容器端 nfviscp+同一 8 位十六进制（按「容器名/nic 名」派生，
 // 各 15 字符 = IFNAMSIZ 上限；哈希取法与 DHCP 内置 tap 同族）。
 //
@@ -69,10 +68,7 @@ const (
 // 名字反查不出「哪个容器的哪个 nic」，故内核侧另按声明/簿记集合判定归属
 // （见 internal/orchestrator/netkernel/container_veth.go）。
 func ContainerVethNames(containerName, ifaceName string) (hostEnd, ctEnd string) {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(containerName + "/" + ifaceName))
-	sum := fmt.Sprintf("%08x", h.Sum32())
-	return ContainerVethHostPrefix + sum, ContainerVethPeerPrefix + sum
+	return model.ContainerVethNames(containerName, ifaceName)
 }
 
 // MemifSocketPath 容器 vNIC 的 VPP 侧 memif socket 路径。

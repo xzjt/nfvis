@@ -196,6 +196,14 @@ func VNICAttachedTo(cfg Config, kind, owner, nic, vsName string) bool {
 // 返回 ""（调用方据此退回 `<owner>/<nic>`，不编造一个不存在的接口名）。
 func AttachedPortName(cfg Config, kind, owner, nic string) string {
 	if kind == PortSourceContainer {
+		// 内核数据面（决策 #441）：容器 vNIC 的等价物是 veth 对——端口列表里可核对、可排障的
+		// 实际设备是 **veth 宿主端**（nfvisct…），故按数据面如实给名（决策 #442，收口 R5-1：
+		// 此前两种数据面都显示 VPP 逻辑名 mf-<容器>-<vNIC>，内核侧照名去 `ip link` 找不到设备）。
+		// VPP 侧与 VM 侧各型 vNIC 的名字**逐字不变**。
+		if cfg.DataPlaneMode() == DataPlaneKernel {
+			host, _ := ContainerVethNames(owner, nic)
+			return host
+		}
 		return MemifIfaceName(owner, nic)
 	}
 	for _, vm := range cfg.VirtualMachineFunctions {
