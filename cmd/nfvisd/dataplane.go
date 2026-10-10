@@ -272,6 +272,29 @@ func attachSRIOV(l2net *network.L2Network) *network.SRIOVProvider {
 	return p
 }
 
+// netReconcileFor 选择「按已提交声明整段重放」的收敛入口（决策 #449 扩展）。
+//
+// 内核数据面注入 netProvider：它的 EnsureConsistent 就是 nfvisd 启动时的恢复收敛本身
+// （按 committed 全量重放、幂等），故 `request interfaces <n> enable|disable` 与
+// `unbind-dpdk` 在成功后调它一次，把「启用/交还后按声明收敛」落到**引用该口的整段**
+// （L2 交换机段：成员 + VLAN；L3 交换机 VRF 段：master + 地址 + 域兜底路由），而不是只
+// 补一句 master——真机缺口：稳态下 enable 是空修订、apply 段根本不跑，口起来了而地址与
+// 兜底仍缺（命令报成功、数据面没效果）。
+//
+// VPP 数据面**不注入**（nil = 不触发），理由三条：
+//   - VPP 侧的恢复收敛是「重连/数据面重启」语义（先 resetProviders 再按 committed 全量重下发）；
+//   - VPP 模式下 enable 的值变更本就由提交 apply 下发，值未变时口已在 VPP 且状态即声明态；
+//   - 逐口调用 VPP 侧 ApplyInterface 在「口已交还内核」时会以 ErrIfaceUnavailable 打断一个
+//     合法动作（交还后 VPP 里本来就没有该口）。
+//
+// 若将来 VPP 侧也要这一步，注入同一个对象即可（api 侧只按「能力是否接入」行事，不认数据面）。
+func netReconcileFor(mode string, rec api.NetReconcileRuntime) api.NetReconcileRuntime {
+	if mode != model.DataPlaneKernel || rec == nil {
+		return nil
+	}
+	return rec
+}
+
 // configSource 「当前 committed 配置」的来源（*config.Engine 的 Committed 即实现）。
 type configSource interface {
 	Committed() (model.Config, error)

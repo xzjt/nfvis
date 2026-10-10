@@ -1,0 +1,137 @@
+================================================================================
+NFViS v3 round11：round10 走查缺陷修复批（决策 #445~#449）——红-绿 + 真机逐条复验
+================================================================================
+日期：2026-10-10    执行：ZCode 会话（v3 线）
+由来：round10（`docs/evidence/v3-round10-clean-install-walkthrough-vpp-kernel.txt`）在 v3.0.9 发布件上
+      的干净快照走查登记了 R8-1~R8-4 与六条观察；用户裁定「修，涉及 Web 的同步修，实现类派子智能体」。
+流程：契约先行（规格书附录 A #445~#449 + AGENTS.md 决策计数 346→351，守护通过）→ 三个实现子智能体
+      并行（R8-1/R8-4/R8-3，逐条红-绿）→ 内核侧两批（R8-2 含 v6 兜底；#449 及缺口 A 扩展）→
+      `make check` 七项 → 换装二进制真机逐条复验 → 四套件复跑。
+环境：nfvis-vm（round10 收尾态：数据面 vpp、两口 DPDK、池 1G=3/2M=768、无对象、无告警）。
+
+--------------------------------------------------------------------------------
+§1 R8-1（决策 #445）oper 顶层 exit/quit 退出 CLI
+--------------------------------------------------------------------------------
+· 实现（子智能体 A，红-绿）：`internal/cli/repl.go` 的 Run() 在执行**前**记录 wasOper
+  （Mode=="oper" 且 Path 为空），执行+回显后若该行恰为 `exit`/`quit` 单词 ⇒ 走既有 teardown
+  （丢弃候选→退配置模式→吊销 token）并返回；新增 `isOperExit`。不改服务端、脚本/向导路径。
+· 单测红-绿：`TestREPLOperExitQuitsREPL`（修复前 FAIL：exit 后仍执行后续行）/ config exit 只退模式 /
+  `exi`、`exit now` 不误判。
+· **真机（真 pty，/root/r81-pty-test.py）3/3 PASS**：
+  case1 `exit` ⇒ 进程退出（sent=1）；case2 `quit` ⇒ 退出；case3 `configure → exit（不退，随后
+  show version 正常输出）→ oper exit` ⇒ 退出（sent=4 且输出含版本行——修复前此序列退不出）。
+
+--------------------------------------------------------------------------------
+§2 R8-2（决策 #446）内核域内到未知目的地：域内判不可达（不再经管理口外泄）
+--------------------------------------------------------------------------------
+· 实现（子智能体 B，红-绿 + 内核源码级依据）：`netkernel/l3.go` 的 `ensureVRF` 给每个产品域 VRF 表
+  补 **`unreachable default` 兜底**（v4：`ip route replace vrf <名> unreachable default metric
+  4278198272`；**v6 同构** `ip -6 …`——按族参数化同一结构），读回判存在（按族独立幂等）、
+  `DeleteVRF`/`DeleteBridgeDomain` 在删设备前**先回收兜底**（两族）。L2 网关域共用 `ensureVRF`
+  故自动覆盖。关键依据（内核/iproute2 源码实读）：`unreachable` 是**终止**查找（-EHOSTUNREACH；
+  `throw` 才回落 main）；**最大度量**防影子化/替换显式默认路由（v4/v6 均按度量定位）；
+  reject 路由**不归属 VRF 设备**（删设备不连带回收 ⇒ 显式先删是承重墙）；无 v6 地址的 VRF 亦接受
+  v6 unreachable（`fib6_nh_init` reject 分支跳过设备/地址/UP 校验）。
+· 单测红-绿：域兜底各恰一条（v4+v6，argv 逐参数钉住）、按族幂等、有 unicast default 仍补、
+  网关域同验、删除先于设备、未声明域零命令；受控变异（摘 v6 参数）5 例转红。
+· **真机**（内核数据面，宿主作域外源）：
+  · `ip route show vrf vs-wan|vr-vs-lan`：两域 v4 兜底各 1 行；`ip -6 …` 亦在（vs-wan 1 行）。
+  · 宿主 `route add 100.100.100.100 → 192.168.98.1` 后 ping：**4/4「Reply from 192.168.98.1:
+    Destination host unreachable」**（域内即时判不可达）；同期 `tcpdump -i ens160 -Q out
+    "src host 192.168.98.10"` 捕获 **0 包**（对照 round10：同场景抓到 guest 私网源 ICMP/NTP 外泄）。
+  · 正控：宿主 ping 192.168.98.1 **3/3**、ping BVI 192.168.99.1（清 ARP 后）**4/4**——显式/本地
+    路径不受兜底影响。
+· 如实边界：内核数据面 `show vrfs <名> routes` 读视图会多出 `default`（next-hop 空）一行——
+  是 FIB 实况（有意不过滤）；宿主内核层禁 IPv6 时 v6 兜底会如实报错在提交/收敛项里（未静默跳过）。
+
+--------------------------------------------------------------------------------
+§3 R8-3（决策 #447）容器镜像 Docker 引用推导与删除对称（**含 Web 同步**）
+--------------------------------------------------------------------------------
+· 实现（子智能体 C，红-绿）：container 包新增导出 `DockerRefFor`（含 `:` 原样、否则 `<名>:latest`）
+  与 `splitDockerRef`；`LoadImage` **仅当**归档载入引用 ≠ 推导引用时才重打（不再无条件下发 tag
+  ⇒ 不再抢占用户同名 tag）；`RemoveImage` 删**推导引用**（与 load 对称）；CLI 说明改为如实体
+  （「归档内嵌 tag 为 X；Docker 侧引用为 Y（与内嵌 tag 不一致时已自动重打）」）。
+· **Web 同步**（用户要求）：`internal/api/ui/app.js` 的导入结果文案同源改为「Docker 侧引用为
+  <推导引用>（…）」，与后端同一推导规则（JS 侧按同一规则推导，注释说明）；openapi 契约
+  `source_tags` 描述同步（`openapi.json` 以同一生成器重出，同步守护过）；`config/engine.go`
+  的镜像不存在校验文案（「导入时已按该名重打标签」→「导入会按该名准备 Docker 引用」）。
+· 单测红-绿：推导表（`alpine:3.20`/`alpine`/`a/b`/`reg:5000/img`/`a.b/c:1`）；mock load：
+  内嵌一致 ⇒ **零 tag 调用**（修复前恒 1 次、且参数错）、不一致 ⇒ 恰一次且 repo/tag 正确；
+  Remove 断言 DELETE URL；api 两例断言新文案。
+· **真机（docker 现场）**：
+  · 预置**异 ID** 的 `alpine:latest`（dummy `0e498878f3ff`）⇒ 上传 `alpine:3.20` 后
+    **`alpine:latest` 仍是 dummy（NO-CLOBBER PASS）**、`alpine:3.20`=d9e853e87e55；
+    上传输出含新说明（「Docker 侧引用为 alpine:3.20（与内嵌 tag 不一致时已自动重打）」）。
+  · 容器以目录项名 `alpine:3.20` 创建/启动成功（`docker ps` 在跑）。
+  · 产品删除后：**推导引用被清（alpine:3.20 消失）、dummy 的 alpine:latest 原样、无产品制造的
+    残留 tag**（对照 round10：删掉用户原 tag 且留下产品打的 alpine:latest）。
+· 顺带：`internal/images`、`container/docker.go`、`docker_archive.go` 的失实注释（「白名单禁冒号」）
+  一并更正。
+
+--------------------------------------------------------------------------------
+§4 R8-4（决策 #448）`delete interfaces <if> disable` 撤销禁用
+--------------------------------------------------------------------------------
+· 实现（子智能体 B）：`internal/api/cliexec.go` 的 disable 特判 delete 分支从「同写 enabled=false」
+  改为 **`delete(cur,"enabled")`**（缺省即启用）；set 分支与整条删除不动。
+· 单测红-绿：`TestCLIInterfaceDisableDeleteReenables`——修复前 delete 回「值未变化」且候选仍
+  `enabled=false`；修复后候选无该键、display set 无 disable 行、重复 delete 幂等提示。
+· **真机**：baseline up → `set interfaces ens224 disable` + commit（rev 124）⇒ display set 含
+  disable、产品读视图与 `vppctl` 均 **down/down**；`delete interfaces ens224 disable` + commit
+  （rev 125）⇒ **display set 行消失、端口 up/up**（修复前 delete 报「值未变化」、端口恒 down）。
+
+--------------------------------------------------------------------------------
+§5 #449（决策 #449 + 缺口 A 扩展）交还/启用即收敛（手册「一步」落地）
+--------------------------------------------------------------------------------
+· 实现（子智能体 D，两轮）：
+  · `netkernel`：`ApplyInterface` 后按**非阻塞快照**收敛该口声明的域归属（L2 成员：抽共享
+    `applyBridgeMember`（master→up→VLAN）单一语义；L3 l3-interface：`master vr-*`；桥/VRF 不在场
+    即跳过留给段重放）；幂等（读回 master 已在位不重发）。8 例红-绿（含 vlan 基口不 enslave、
+    未声明零动作、挂错 master 归位；受控变异 4 例转红）。
+  · **缺口 A（真机抓出）**：`request interfaces <n> enable` 在**稳态**（模型 enabled 本就 true）是
+    空修订 ⇒ apply 段根本不跑（真机：ens192 连 admin 都没起，同批 ens224 因值有变更才收敛）；
+    且逐口补 master 不足以补齐地址/兜底（VRF 段落的）。扩展为「**request = 确保声明状态**」：
+    commit 成功后一律再触发一次**整段重放** `EnsureConsistent`（与启动/重连恢复收敛**同一条路径**、
+    复用不新造；30s 有界；失败如实追加不改写提交结论），内核数据面注入（`netReconcileFor`）、
+    VPP 不注入（nil＝输出不变）；**unbind-dpdk（交还方向）同样触发**（手册「交还后按声明自动收敛」
+    的落点——既有恢复重放发生在口还握在 vfio 的时候）。新增 `NetReconcileRuntime` 面 +
+    `cli_iface_sriov_ops_test.go` 红-绿（稳态 enable ⇒ reconcile 被调；fail ⇒ 如实文案）。
+· **真机全链（对照 round10 的同序）**：vpp 态建 vs-lan/vs-wan → 切内核（VPP 自动停）→ **仅
+  `unbind ×2`**：第一条 unbind 输出「已解绑…；**接口状态收敛未完全成功**：…（ens224 仍在
+  vfio-pci，附照做指引）」，第二条 unbind 输出「…；**接口状态已按声明收敛**」；**不再重启**，
+  独立事实：ens192 UP+master vs-lan+bridge member forwarding、vs-lan UP+BVI 192.168.99.1/24、
+  ens224 UP+master vs-wan+192.168.98.1/24、两域 v4 兜底在、v6 兜底在；
+  随后手册原样的 `enable ×2` ⇒ 均报「接口状态已按声明收敛」（幂等）；
+  宿主 ping BVI **4/4**、ping 192.168.98.1 **3/3**。
+  （round10 修复前：同两步后端口 down、无成员，须第二次 `systemctl restart nfvis`。）
+
+--------------------------------------------------------------------------------
+§6 make check（七项）
+--------------------------------------------------------------------------------
+· **rc=0 全绿**（vet / test ./... / cover / archtest / docscheck / toolcheck / prototype-check）。
+  首跑一次遇到并行编译瞬时失败（多包 [build failed]、`go build ./...` 同刻单跑正常），
+  以 `GOFLAGS=-p=2` 复跑即全绿——如实记录，暂按构建机瞬时资源竞争处理（未再复现）。
+
+--------------------------------------------------------------------------------
+§7 四套件复跑（VPP 数据面，修复版换装二进制）
+--------------------------------------------------------------------------------
+· `cli-fulltest` **274 / 0 / 20**（与 round10/发布件基线逐字一致；自清场「未清项 0」）。
+· `cli-semantic-check` **31 / 0 / 0 / 0**：首跑 30/0/1（唯一不可判定＝S8「有成员但观察不到成员口流量」，
+  夹具 guest 的 beat 处于静默窗口）；用 `vppctl ping 192.168.99.2 source bvi0 repeat 10`
+  （10/10 应答）从数据面侧催生成员口流量后复跑即 31/0/0。
+· `cli-lifecycle-check` **23 / 0 / 2**（跳过项＝L3-3/L2-2，均为「配置里没有 NAT」——本轮现场无 NAT，如实）。
+· `cli-pty-smoke` **10 / 10**。
+· 注：套件收尾消费 docker `alpine:3.20` tag（既定工作流「每轮前备好」）；fulltest 的 phase2 仍会改
+  resource-pools/vpp.cpu/接口声明并留 `set interfaces ens224 disable`（suite 语句覆盖的既定残留），
+  本轮收尾已手工还原声明（1G=3/2-5/main2/workers3）并重启恢复 1G=3；`delete … disable` 现在可一键撤销（#448）。
+
+--------------------------------------------------------------------------------
+§8 现场与如实边界
+--------------------------------------------------------------------------------
+· 收尾现场：数据面 vpp、两口 DPDK up、无对象、无 active 告警、内核残留 0；docker
+  `alpine:3.20` 就位（套件夹具）、产品仓库无容器镜像（套件自传）。
+· 未做（如实）：R8-2 的 v6 兜底仅验证「行在 + 与 v4 同构实现」（未构造 v6 域外流量探针）；
+  #449 的 VPP 侧不触发收敛（设计如此，VPP 的口经 vpp restart 收敛——手册原流程）；
+  四套件按 round10 的现场条件（详见 §7 注）。
+· 环境改动（如实）：无新增（netplan/docker 代理等沿用 round10；本轮仅换装二进制与套件夹具重建）。
+================================================================================
+（完）

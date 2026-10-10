@@ -344,6 +344,12 @@ func (p *Provider) ApplyInterface(ctx context.Context, iface model.InterfaceConf
 		if err := p.ensureLinkUp(ctx, iface.Name); err != nil {
 			return err
 		}
+		// 决策 #449：链路确认 up 之后，顺手把该口声明的「域归属」按配置快照补齐（幂等）。
+		// 只挂在「口按声明应当 up」这条路径上：显式 disable 的口不反向 enslave（免得把操作者的
+		// 禁用又拽起来），其归属仍由交换机段/VRF 段与恢复重放负责。
+		if err := p.applyInterfaceDomain(ctx, iface); err != nil {
+			return err
+		}
 	} else if err := p.ipReq(ctx, "link", "set", "dev", iface.Name, "down"); err != nil {
 		return err
 	}
@@ -362,6 +368,87 @@ func (p *Provider) ApplyInterface(ctx context.Context, iface model.InterfaceConf
 		return err
 	}
 	return p.applyInterfacePortSec(ctx, iface)
+}
+
+// applyInterfaceDomain 按配置快照幂等收敛该口声明的「域归属」（决策 #449）。
+//
+// 现场（round10 真机走查）：从 VPP 切内核数据面后按手册两步走（`unbind-dpdk` →
+// `request interfaces <n> enable`），口回到内核、链路被置 up，但它在桥/VRF 里的归属没人补——
+// 交换机段/VRF 段的恢复重放在口还被 vfio-pci 握着的时候已经跑过（那次 enslave 如实失败），
+// 此后 15s 巡检只复核不重放，只有再 `systemctl restart nfvis` 走全量重放才收敛。本方法把
+// 「域归属」并进接口自己的收敛路径：任何一次 ApplyInterface（enable / MTU / 描述变更 / 恢复
+// 重放）都会顺手补齐，幂等。
+//
+// 只认两种声明归属（对应「口被谁 enslave」的声明来源；bond 成员由 ApplyBond 全量收敛，不在
+// 这里）：
+//   - L2 交换机的成员端口：按 memberLinkName 映射（ok=false 的 VM vNIC 等自然跳过）；
+//   - 某 VRF 的 l3-interface：按 l3DeviceName 派生设备名匹配——vlan 子接口的**载体基口不是**
+//     l3-interface 本身（同一基口可有多个子接口挂不同 VRF），不得把基口 enslave。
+//
+// 目标设备（桥/VRF）不存在时**跳过**而不报错：接口层先于交换机段/VRF 段执行，首次声明时目标
+// 还没建，这是提交顺序的正常中间态（留给对应的声明段收敛，避免顺序耦合）。
+//
+// 幂等：读回判据用 `linkMaster`——口已在目标 master 上时**不重发 master、不摘归属**；L2 形态
+// 仍走 applyPortVlans 的差异核对（要的条目按交换机段的同一份语义重发，`bridge vlan add` 真机
+// 幂等；多余的条目才删）。读不回来不跳过，按实况下发（写是幂等的）。
+//
+// 读的是**进程内快照**而非 config()：apply 路径读配置发动机＝重入自死锁（决策 #438 真机实证）。
+func (p *Provider) applyInterfaceDomain(ctx context.Context, iface model.InterfaceConfig) error {
+	dev := LinkName(iface.Name)
+	if dev == "" {
+		return nil
+	}
+	cfg := p.configSnapshot()
+	// 1) L2 交换机的成员口。
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.Type == "l3" {
+			continue // l3 交换机没有 bridge（它的成员是 VRF 的 l3-interface，走下面一段）
+		}
+		for _, port := range vs.Ports {
+			name, ok := memberLinkName(port)
+			if !ok || name != dev {
+				continue
+			}
+			br := LinkName(vs.Name)
+			if !p.linkKindPresent(ctx, br, "bridge") {
+				return nil // 桥不在场：留给交换机段收敛
+			}
+			if cur, _, ok := p.linkMaster(ctx, dev); ok && cur == br {
+				// 已在位：master/置 up 都是空操作，只剩 VLAN 条目的差异核对（幂等，零写）。
+				return p.applyPortVlans(ctx, dev, vs, port)
+			}
+			return p.applyBridgeMember(ctx, br, dev, vs, port)
+		}
+	}
+	// 2) VRF 的 l3-interface。
+	for _, vrf := range cfg.Vrfs {
+		for _, li := range vrf.L3Interfaces {
+			if l3DeviceName(li) != dev {
+				continue // vlan 子接口：载体基口不是 l3-interface 本身
+			}
+			vr := LinkName(vrf.Name)
+			if !p.vrfDevicePresent(ctx, vr) {
+				return nil // VRF 设备不在场：留给 VRF 段收敛
+			}
+			if cur, _, ok := p.linkMaster(ctx, dev); ok && cur == vr {
+				return nil // 已在位：零动作（幂等）
+			}
+			return p.ipReq(ctx, "link", "set", "dev", dev, "master", vr)
+		}
+	}
+	return nil
+}
+
+// linkKindPresent 内核里该名字是否（严格地）是指定类型的设备（存在 + 类型双重判据）。
+//
+// 读不到按「不在场」处理：本判据只用于「顺手补齐」类路径的跳过决策，判错只会少做一次
+// enslavement（由声明段的收敛兜底），不会把命令打到同名异类的设备上。
+func (p *Provider) linkKindPresent(ctx context.Context, name, kind string) bool {
+	row, ok := p.linkDetail(ctx, name)
+	if !ok || row.LinkInfo == nil {
+		return false
+	}
+	return strings.EqualFold(row.LinkInfo.InfoKind, kind)
 }
 
 // TeardownInterface 接口元素从配置里删除时的接口级绑定回收：限速（入/出两向）、

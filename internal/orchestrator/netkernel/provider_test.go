@@ -413,6 +413,270 @@ func TestDeleteVRFCleansMembersThenDeletesDevice(t *testing.T) {
 	}
 }
 
+// ---------- 域 VRF 兜底：域内到未知目的地判不可达（决策 #446） ----------
+
+// vrfFallbackStateRunner 模拟域 VRF 表里「有没有兜底路由」的内核状态：**按地址族各自记账**
+// （v4/v6 是两张独立 FIB），兜底命令执行后置位，`ip [-6] -j route show vrf <名>` 按状态回读
+// （真机形状：unreachable 行带 type，default 的 dst 打印为 "default"）。用于验证「已在位则
+// 跳过」（第二条路径不下发）。tableExtra 按族预置表内其它路由行（JSON 片段），用于模拟
+// 「域里已有显式默认路由」等现场。
+//
+// 同时按 **argv 逐参数**记录兜底下发（fakeRunner 的 calls 是把参数拼成一行，看不出
+// 「unreachable default 被塞进同一个参数」或「v6 漏了 -6」这类真机上必然失败的形状）。
+type vrfFallbackStateRunner struct {
+	fakeRunner
+	fallback     map[string]bool   // "族|VRF 名" → 该族兜底在位
+	fallbackArgv [][]string        // 兜底下发的逐参数记录（到达顺序）
+	tableExtra   map[string]string // 族 → 表内预置的其它路由行（JSON 片段）
+}
+
+func newVRFFallbackStateRunner() *vrfFallbackStateRunner {
+	return &vrfFallbackStateRunner{fallback: map[string]bool{}, tableExtra: map[string]string{}}
+}
+
+// fallbackCount 已下发的兜底命令条数（两族合计）。
+func (r *vrfFallbackStateRunner) fallbackCount() int { return len(r.fallbackArgv) }
+
+// present 预置某族的兜底已在位（模拟现场：只有一族在位、另一族被人删过一类）。
+func (r *vrfFallbackStateRunner) present(fam vrfFallbackFamily, vrf string) {
+	r.fallback[strings.Join(fam.args, " ")+"|"+vrf] = true
+}
+
+// hasArgv 是否有一条已下发的兜底命令与 want 逐参数相同。
+//
+// 比较用 NUL 连接而不是空格：空格连接会把「一个带空格的参数」与「两个参数」判成同形——
+// 那正是本组用例要抓的错误形状（v6 的 `-6` 末位差异同理）。
+func (r *vrfFallbackStateRunner) hasArgv(want []string) bool {
+	for _, got := range r.fallbackArgv {
+		if strings.Join(got, "\x00") == strings.Join(want, "\x00") {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *vrfFallbackStateRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	line := name + " " + strings.Join(args, " ")
+	if name != "ip" {
+		return r.fakeRunner.Run(ctx, name, args...)
+	}
+	// 归一：族参数（v4 无、v6 `-6`）总是在 `ip` 的其余参数之前。
+	fam, rest := "", args
+	if len(args) > 0 && args[0] == "-6" {
+		fam, rest = "-6", args[1:]
+	}
+	switch {
+	case len(rest) == 8 && rest[0] == "route" && (rest[1] == "replace" || rest[1] == "add") &&
+		rest[2] == "vrf" && rest[4] == vrfFallbackType && rest[5] == vrfFallbackPrefix &&
+		rest[6] == "metric" && rest[7] == vrfFallbackMetric:
+		// 兜底下发（真机=该族在该 VRF 表内多一条路由）。
+		r.calls = append(r.calls, line)
+		r.fallbackArgv = append(r.fallbackArgv, append([]string{name}, args...))
+		r.fallback[fam+"|"+rest[3]] = true
+		return "", nil
+	case len(rest) == 5 && rest[0] == "-j" && rest[1] == "route" && rest[2] == "show" && rest[3] == "vrf":
+		r.calls = append(r.calls, line)
+		rows := r.tableExtra[fam]
+		if r.fallback[fam+"|"+rest[4]] {
+			if rows != "" {
+				rows += ","
+			}
+			rows += `{"type":"unreachable","dst":"default","flags":[],"metric":` + vrfFallbackMetric + `}`
+		}
+		return "[" + rows + "]", nil
+	}
+	return r.fakeRunner.Run(ctx, name, args...)
+}
+
+// 决策 #446：ApplyVRF 必须在域 VRF 表内补 `unreachable default` 兜底，**v4/v6 各一条**——
+// 内核查找链是 l3mdev-table → main → default，缺兜底时域内到未知目的地的流量会回落宿主 main
+// 表的默认路由（round10 真机实测：带 guest 私网源地址的报文从管理口外泄；对照 VPP 数据面同
+// 流量为丢弃）；BVI 网关与 l3-interface 都支持 v6 地址，域内 v6 是同一条路径。已在位时重复
+// Apply 必须跳过（两族都不重发）。
+func TestApplyVRFAddsDomainFallbackOnce(t *testing.T) {
+	r := newVRFFallbackStateRunner()
+	p := New(r)
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		if err := p.ApplyVRF(ctx, model.Vrf{Name: "vs-l3"}); err != nil {
+			t.Fatalf("第 %d 次 ApplyVRF: %v", i+1, err)
+		}
+	}
+	if !r.has("ip route replace vrf vs-l3 unreachable default metric " + vrfFallbackMetric) {
+		t.Fatalf("域 VRF 表内应补 v4 unreachable default 兜底；实际：\n%s", r.joined())
+	}
+	if !r.has("ip -6 route replace vrf vs-l3 unreachable default metric " + vrfFallbackMetric) {
+		t.Fatalf("域 VRF 表内应补 v6 unreachable default 兜底；实际：\n%s", r.joined())
+	}
+	if got := r.fallbackCount(); got != 2 {
+		t.Fatalf("两族各应只写一次（重复 Apply 已在位即跳过），实际 %d 条：\n%s", got, r.joined())
+	}
+	// 命令必须逐 argv 成形：路由规格是两个词（`unreachable` + `default`）——合成一个带空格的
+	// 参数在真机上会被 iproute2 当非法前缀打回；v6 的族参数 `-6` 也不能缺。
+	for _, want := range [][]string{
+		{"ip", "route", "replace", "vrf", "vs-l3", "unreachable", "default", "metric", vrfFallbackMetric},
+		{"ip", "-6", "route", "replace", "vrf", "vs-l3", "unreachable", "default", "metric", vrfFallbackMetric},
+	} {
+		if !r.hasArgv(want) {
+			t.Fatalf("兜底命令 argv 形状不符，缺 %q；实际：%q", want, r.fallbackArgv)
+		}
+	}
+}
+
+// 两族的幂等判据**各自独立**：v4 兜底已在位时，重放只补 v6 一条（不因「有一族在位」就跳过
+// 另一族，也不重发已有的那族）。
+func TestApplyVRFFallbackIdempotenceIsPerFamily(t *testing.T) {
+	r := newVRFFallbackStateRunner()
+	r.present(vrfFallbackFamilies[0], "vs-l3") // v4 已在位，v6 缺
+	p := New(r)
+	if err := p.ApplyVRF(context.Background(), model.Vrf{Name: "vs-l3"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.fallbackCount(); got != 1 {
+		t.Fatalf("只应补 v6 一条，实际 %d 条：%q", got, r.fallbackArgv)
+	}
+	want := []string{"ip", "-6", "route", "replace", "vrf", "vs-l3", "unreachable", "default", "metric", vrfFallbackMetric}
+	if !r.hasArgv(want) {
+		t.Fatalf("应只补 v6 兜底 %q；实际：%q", want, r.fallbackArgv)
+	}
+}
+
+// 域内已有**显式默认路由**（unicast）时兜底照样要下发：判据是「表里已有一条 unreachable
+// default」，不是「表里有 default」。兜底的度量取最大档，显式默认路由（度量更小）优先——
+// 行为不变，且两者不会互相 replace（两族的 replace 都按度量定位既有路由）。
+func TestApplyVRFAddsFallbackAlongsideUnicastDefault(t *testing.T) {
+	r := newVRFFallbackStateRunner()
+	// v4 表里已有操作者声明的默认路由（unicast）——它不是兜底。
+	r.tableExtra[""] = `{"dst":"default","gateway":"10.0.0.254","metric":10}`
+	p := New(r)
+	err := p.ApplyVRF(context.Background(), model.Vrf{Name: "vs-l3",
+		Routes: []model.Route{{Prefix: "0.0.0.0/0", NextHop: "10.0.0.254", Distance: 10}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.fallbackCount(); got != 2 {
+		t.Fatalf("表里只有 unicast default 时两族兜底仍应各下发一次，实际 %d 条：\n%s", got, r.joined())
+	}
+	if !r.has("ip route replace vrf vs-l3 0.0.0.0/0 via 10.0.0.254 metric 10") {
+		t.Fatalf("显式默认路由照常下发；实际：\n%s", r.joined())
+	}
+}
+
+// 决策 #446：L2 网关域（`vr-<交换机名>`）与 L3 交换机 VRF 共用同一创建点（ensureVRF），
+// 同样要有兜底（v4/v6 两族）——round10 现场经管理口外泄的正是 BVI（网关）域。
+func TestApplyBridgeDomainGatewayVRFGetsFallback(t *testing.T) {
+	r := newVRFFallbackStateRunner()
+	p := New(r)
+	err := p.ApplyBridgeDomain(context.Background(), model.VirtualSwitch{
+		Name: "vs-dmz", Type: "l2",
+		Gateway: &model.VSGateway{Addresses: []string{"192.168.100.1/24"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"ip route replace vrf vr-vs-dmz unreachable default metric " + vrfFallbackMetric,
+		"ip -6 route replace vrf vr-vs-dmz unreachable default metric " + vrfFallbackMetric,
+	} {
+		if !r.has(want) {
+			t.Fatalf("L2 网关域 VRF 表内应补兜底 %q；实际：\n%s", want, r.joined())
+		}
+	}
+}
+
+// 决策 #446：没有域 VRF 的路径不得出现兜底命令（只加在产品管理的域 VRF 表里，
+// 不碰宿主 main 表，也不在无关对象上多写）。
+func TestNoDomainVRFNoFallbackCommand(t *testing.T) {
+	f := &fakeRunner{}
+	p := New(f)
+	ctx := context.Background()
+	// 静态路由下发本身不建 VRF（域 VRF 由 ApplyVRF/网关段收敛），不应连带兜底。
+	if err := p.ApplyRoute(ctx, "vs-l3", model.Route{Prefix: "10.9.0.0/24", NextHop: "10.0.0.9"}); err != nil {
+		t.Fatal(err)
+	}
+	// 无网关的 L2 交换机不建 VRF。
+	if err := p.ApplyBridgeDomain(ctx, model.VirtualSwitch{Name: "vs-lan", Type: "l2"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(f.joined(), "unreachable") {
+		t.Fatalf("没有域 VRF 的路径不得出现兜底命令；实际：\n%s", f.joined())
+	}
+}
+
+// 决策 #446：删除域 VRF 必须**先回收兜底路由（v4/v6 两族）、再删 VRF 设备**（不把孤立路由
+// 留给内核——reject 路由不归属 VRF 设备本身，设备删除不会连带回收它）。
+func TestDeleteVRFReclaimsFallbackBeforeDevice(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -d -j link show dev vs-l3",
+		out:    `[{"ifname":"vs-l3","linkinfo":{"info_kind":"vrf"}}]`,
+	}}}
+	p := New(f)
+	if err := p.DeleteVRF(context.Background(), "vs-l3"); err != nil {
+		t.Fatal(err)
+	}
+	joined := f.joined()
+	delDev := strings.Index(joined, "ip link del vs-l3")
+	if delDev < 0 {
+		t.Fatalf("VRF 设备应被删除；实际：\n%s", joined)
+	}
+	for _, del := range []string{
+		"ip route del vrf vs-l3 unreachable default metric " + vrfFallbackMetric,
+		"ip -6 route del vrf vs-l3 unreachable default metric " + vrfFallbackMetric,
+	} {
+		i := strings.Index(joined, del)
+		if i < 0 {
+			t.Fatalf("删除域 VRF 前应回收兜底路由 %q；实际：\n%s", del, joined)
+		}
+		if i > delDev {
+			t.Fatalf("兜底回收必须先于 VRF 设备删除（%q）；实际：\n%s", del, joined)
+		}
+	}
+}
+
+// 决策 #446：VRF 设备已不在场时**不得**下发兜底回收——`ip route del vrf <名>` 会因 iproute2
+// 解析不到该 VRF 报 Invalid VRF（不是「找不到设备」一类文案，ipBest 不容错），会把
+// 「删已删过的 VRF」的幂等路径打断（同名设备不是 VRF 时同理）。
+func TestDeleteVRFSkipsFallbackReclaimWhenDeviceGone(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{
+		{prefix: "ip -d -j link show dev vs-l3", out: `Cannot find device "vs-l3"`, err: errors.New("exit status 1")},
+		{prefix: "ip link del vs-l3", out: `Cannot find device "vs-l3"`, err: errors.New("exit status 1")},
+	}}
+	p := New(f)
+	if err := p.DeleteVRF(context.Background(), "vs-l3"); err != nil {
+		t.Fatalf("VRF 已不存在时删除应幂等成功，得到 %v", err)
+	}
+	if strings.Contains(f.joined(), "unreachable") {
+		t.Fatalf("设备不在场时不得下发兜底回收命令；实际：\n%s", f.joined())
+	}
+}
+
+// 决策 #446：删 L2 交换机时它自建的网关 VRF（`vr-<交换机名>`）同样要先回收兜底（v4/v6 两族）
+// 再删设备。
+func TestDeleteBridgeDomainReclaimsGatewayVRFFallback(t *testing.T) {
+	f := &fakeRunner{replies: []fakeReply{{
+		prefix: "ip -d -j link show dev vr-vs-lan",
+		out:    `[{"ifname":"vr-vs-lan","linkinfo":{"info_kind":"vrf"}}]`,
+	}}}
+	p := New(f)
+	if err := p.DeleteBridgeDomain(context.Background(), "vs-lan"); err != nil {
+		t.Fatal(err)
+	}
+	joined := f.joined()
+	delDev := strings.Index(joined, "ip link del vr-vs-lan")
+	if delDev < 0 {
+		t.Fatalf("网关 VRF 设备应被删除；实际：\n%s", joined)
+	}
+	for _, del := range []string{
+		"ip route del vrf vr-vs-lan unreachable default metric " + vrfFallbackMetric,
+		"ip -6 route del vrf vr-vs-lan unreachable default metric " + vrfFallbackMetric,
+	} {
+		i := strings.Index(joined, del)
+		if i < 0 || i > delDev {
+			t.Fatalf("网关 VRF 应先回收兜底 %q 再删设备；实际：\n%s", del, joined)
+		}
+	}
+}
+
 func TestDeleteRouteShape(t *testing.T) {
 	f := &fakeRunner{}
 	p := New(f)
@@ -1400,5 +1664,280 @@ func TestEnsureForwardingReportsUnwritableSysctl(t *testing.T) {
 	err := p.EnsureForwarding(context.Background(), model.Config{})
 	if err == nil || !strings.Contains(err.Error(), "ip_forward") {
 		t.Fatalf("写入失败应如实上报并点名开关，得到 %v", err)
+	}
+}
+
+// ---------- 接口 enable 后的域归属收敛（决策 #449） ----------
+
+// ifaceDomainRunner 模拟内核侧的「设备类型 + master 归属 + bridge VLAN 表」三方状态：
+//   - devices 预置内核里存在的设备名 → linkinfo.info_kind（bridge/vrf/…；不在表里=设备不存在）；
+//   - master 是「口 → 当前 master」的实况，`ip link set dev X master Y` / `nomaster` 会更新它
+//     （模拟「内核里 master 是否已设」，供幂等/漂移用例断言最终归属）；
+//   - vlans 按预置状态回读（`bridge -j vlan show dev X`）；vlan add/del 只记录命令、不改表——
+//     本组用例断言的是命令集合与「已在位条目不被删」。
+//
+// `ip -d -j` 与 `ip -j -d link show dev X` 都按上述状态回读（产品两处读形状不同、事实同一份）；
+// 其余命令落回内嵌 fakeRunner（限速/风暴/端口安全的读回按其口味容忍空输出）。
+type ifaceDomainRunner struct {
+	fakeRunner
+	devices map[string]string
+	master  map[string]string
+	vlans   map[string][]int
+}
+
+func newIfaceDomainRunner() *ifaceDomainRunner {
+	return &ifaceDomainRunner{
+		devices: map[string]string{}, master: map[string]string{}, vlans: map[string][]int{},
+	}
+}
+
+// linkShow 按状态输出 `ip [-d] -j link show dev X` 的真机形状；设备不存在时报底座原文。
+func (r *ifaceDomainRunner) linkShow(dev string) (string, error) {
+	kind, exists := r.devices[dev]
+	m, mastered := r.master[dev]
+	if !exists && !mastered {
+		return `Cannot find device "` + dev + `"`, errors.New("exit status 1")
+	}
+	row := []string{`"ifname":"` + dev + `"`}
+	if mastered {
+		row = append(row, `"master":"`+m+`"`)
+	}
+	var li []string
+	if kind != "" {
+		li = append(li, `"info_kind":"`+kind+`"`)
+	}
+	if mastered {
+		if k := r.devices[m]; k != "" {
+			li = append(li, `"info_slave_kind":"`+k+`"`)
+		}
+	}
+	if len(li) > 0 {
+		row = append(row, `"linkinfo":{`+strings.Join(li, ",")+`}`)
+	}
+	return "[{" + strings.Join(row, ",") + "}]", nil
+}
+
+func (r *ifaceDomainRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	line := name + " " + strings.Join(args, " ")
+	switch {
+	case name == "ip" && len(args) == 6 && args[0] == "link" && args[1] == "set" && args[2] == "dev" && args[4] == "master":
+		r.calls = append(r.calls, line)
+		r.master[args[3]] = args[5]
+		return "", nil
+	case name == "ip" && len(args) == 5 && args[0] == "link" && args[1] == "set" && args[2] == "dev" && args[4] == "nomaster":
+		r.calls = append(r.calls, line)
+		delete(r.master, args[3])
+		return "", nil
+	case name == "ip" && len(args) == 6 && args[2] == "link" && args[3] == "show" && args[4] == "dev" &&
+		((args[0] == "-d" && args[1] == "-j") || (args[0] == "-j" && args[1] == "-d")):
+		r.calls = append(r.calls, line)
+		return r.linkShow(args[5])
+	case name == "bridge" && len(args) == 5 && args[0] == "-j" && args[1] == "vlan" && args[2] == "show" && args[3] == "dev":
+		r.calls = append(r.calls, line)
+		var items []string
+		for _, v := range r.vlans[args[4]] {
+			items = append(items, fmt.Sprintf(`{"vlan":%d}`, v))
+		}
+		return `[{"ifname":"` + args[4] + `","vlans":[` + strings.Join(items, ",") + `]}]`, nil
+	}
+	return r.fakeRunner.Run(ctx, name, args...)
+}
+
+// 决策 #449（round10 真机实证）：从 VPP 切到内核数据面后按手册两步走（unbind-dpdk →
+// `request interfaces <n> enable`），口回到内核、链路被置 up，但它在桥/VRF 里的归属没人补
+// ——交换机段的恢复重放发生在口还被 vfio-pci 握着的时候，此后只有再 `systemctl restart nfvis`
+// 走一遍全量重放才收敛。现在 ApplyInterface 在链路 up 后按**配置快照**顺手补齐声明的域归属。
+func TestApplyInterfaceEnslavesDeclaredBridgeMember(t *testing.T) {
+	r := newIfaceDomainRunner()
+	r.devices["vs-lan"] = "bridge"
+	p := New(r)
+	p.SetConfig(model.Config{VirtualSwitches: []model.VirtualSwitch{{
+		Name: "vs-lan", Type: "l2", VlanAccess: 100,
+		Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens192"}},
+	}}})
+	enabled := true
+	if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens192", Enabled: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.has("ip link set dev ens192 master vs-lan") {
+		t.Fatalf("声明为交换机成员的口应在 enable 时接回桥；实际：\n%s", r.joined())
+	}
+	if !r.has("bridge vlan add dev ens192 vid 100 pvid untagged") {
+		t.Fatalf("成员口的 access VLAN 规则应一并落位；实际：\n%s", r.joined())
+	}
+}
+
+func TestApplyInterfaceEnslavesDeclaredTrunkMember(t *testing.T) {
+	r := newIfaceDomainRunner()
+	r.devices["vs-lan"] = "bridge"
+	p := New(r)
+	p.SetConfig(model.Config{VirtualSwitches: []model.VirtualSwitch{{
+		Name: "vs-lan", Type: "l2",
+		Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens224", TrunkVlans: []int{10, 20}}},
+	}}})
+	enabled := true
+	if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens224", Enabled: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.has("ip link set dev ens224 master vs-lan") {
+		t.Fatalf("trunk 成员口同样应接回桥；实际：\n%s", r.joined())
+	}
+	for _, vid := range []int{10, 20} {
+		if !r.has(fmt.Sprintf("bridge vlan add dev ens224 vid %d", vid)) {
+			t.Fatalf("trunk VLAN %d 应落位；实际：\n%s", vid, r.joined())
+		}
+	}
+}
+
+// 桥不在场（首次声明：接口层先于交换机段执行）⇒ **跳过**：不 enslave、更不得报错——
+// 报错会把正常提交打挂，而「此刻桥还没建」是提交顺序的正常中间态（留给交换机段收敛）。
+func TestApplyInterfaceSkipsDomainWhenBridgeAbsent(t *testing.T) {
+	r := newIfaceDomainRunner() // 内核里没有 vs-lan
+	p := New(r)
+	p.SetConfig(model.Config{VirtualSwitches: []model.VirtualSwitch{{
+		Name: "vs-lan", Type: "l2",
+		Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens192"}},
+	}}})
+	enabled := true
+	if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens192", Enabled: &enabled}); err != nil {
+		t.Fatalf("桥不在场时应跳过（留给交换机段），不得报错：%v", err)
+	}
+	if r.has("master") {
+		t.Fatalf("桥不在场时不得 enslave；实际：\n%s", r.joined())
+	}
+}
+
+// l3-interface 形态：口是某 VRF 的成员（ens224 ∈ vs-wan）时接回 VRF。
+func TestApplyInterfaceEnslavesDeclaredL3Interface(t *testing.T) {
+	r := newIfaceDomainRunner()
+	r.devices["vs-wan"] = "vrf"
+	p := New(r)
+	p.SetConfig(model.Config{Vrfs: []model.Vrf{{
+		Name: "vs-wan", L3Interfaces: []model.L3Interface{{Interface: "ens224"}},
+	}}})
+	enabled := true
+	if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens224", Enabled: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.has("ip link set dev ens224 master vs-wan") {
+		t.Fatalf("声明为 l3-interface 的口应接回 VRF；实际：\n%s", r.joined())
+	}
+}
+
+// VRF 设备不在场时同样跳过（不报错）。
+func TestApplyInterfaceSkipsDomainWhenVRFAbsent(t *testing.T) {
+	r := newIfaceDomainRunner() // 内核里没有 vs-wan
+	p := New(r)
+	p.SetConfig(model.Config{Vrfs: []model.Vrf{{
+		Name: "vs-wan", L3Interfaces: []model.L3Interface{{Interface: "ens224"}},
+	}}})
+	enabled := true
+	if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens224", Enabled: &enabled}); err != nil {
+		t.Fatalf("VRF 设备不在场时应跳过（留给 VRF 段），不得报错：%v", err)
+	}
+	if r.has("master") {
+		t.Fatalf("VRF 设备不在场时不得 enslave；实际：\n%s", r.joined())
+	}
+}
+
+// vlan 子接口的**载体基口不是** l3-interface 本身：`interfaces ens224 vlan 100` 声明的内核设备
+// 是 ens224.100，`request interfaces ens224 enable` 不得把基口 enslave 进 VRF——同一基口可以有
+// 多个子接口挂在不同 VRF 上，把基口拽进任一域都是错的（子接口的归属由 VRF 段收敛）。
+func TestApplyInterfaceDoesNotEnslaveVlanSubifBase(t *testing.T) {
+	r := newIfaceDomainRunner()
+	r.devices["vs-wan"] = "vrf"
+	p := New(r)
+	p.SetConfig(model.Config{Vrfs: []model.Vrf{{
+		Name: "vs-wan", L3Interfaces: []model.L3Interface{{Interface: "ens224", Vlan: 100}},
+	}}})
+	enabled := true
+	if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens224", Enabled: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+	if r.has("master") {
+		t.Fatalf("vlan 子接口的载体基口不得被 enslave；实际：\n%s", r.joined())
+	}
+}
+
+// 未声明任何归属的口 ⇒ 零额外命令（防过度 enslave）：本产品只把口交给两个声明来源
+// （交换机成员 / VRF 的 l3-interface），此外一律不碰。
+func TestApplyInterfaceNoDomainConvergenceWhenUndeclared(t *testing.T) {
+	r := newIfaceDomainRunner()
+	r.devices["vs-lan"] = "bridge"
+	p := New(r)
+	p.SetConfig(model.Config{VirtualSwitches: []model.VirtualSwitch{{
+		Name: "vs-lan", Type: "l2",
+		Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens224"}},
+	}}})
+	enabled := true
+	if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens192", Enabled: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+	if r.has("master") {
+		t.Fatalf("未声明归属的口不得被 enslave；实际：\n%s", r.joined())
+	}
+}
+
+// 幂等：口已在目标桥上时**不重发 master**（读回判据跳过；master 声明是这里唯一的「动作」来源——
+// VLAN 条目按交换机段的同一份语义重发，`bridge vlan add` 真机幂等，已在位的条目不删）；
+// 口此刻挂在别的 master 上（如旧 bond）时应改回声明的归属（收敛而非仅核对）。
+func TestApplyInterfaceDomainConvergenceIdempotent(t *testing.T) {
+	r := newIfaceDomainRunner()
+	r.devices["vs-lan"] = "bridge"
+	r.master["ens192"] = "vs-lan"
+	r.vlans["ens192"] = []int{100}
+	p := New(r)
+	p.SetConfig(model.Config{VirtualSwitches: []model.VirtualSwitch{{
+		Name: "vs-lan", Type: "l2", VlanAccess: 100,
+		Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens192"}},
+	}}})
+	enabled := true
+	for i := 0; i < 2; i++ {
+		if err := p.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens192", Enabled: &enabled}); err != nil {
+			t.Fatalf("第 %d 次 ApplyInterface: %v", i+1, err)
+		}
+	}
+	if r.master["ens192"] != "vs-lan" {
+		t.Fatalf("口应保持在声明的桥上，得到 %q", r.master["ens192"])
+	}
+	if r.has("ip link set dev ens192 master vs-lan") {
+		t.Fatalf("已在位时不得重发 master（读回判据应跳过）；实际：\n%s", r.joined())
+	}
+	if r.has("ip link set dev ens192 nomaster") {
+		t.Fatalf("重复收敛不得摘除归属；实际：\n%s", r.joined())
+	}
+	if r.has("bridge vlan del dev ens192 vid 100") {
+		t.Fatalf("已在位的 VLAN 条目不得被删；实际：\n%s", r.joined())
+	}
+
+	// 漂移：口当前挂在别的 master（bond0）上，声明归属是 vs-lan ⇒ 应改回 vs-lan。
+	r2 := newIfaceDomainRunner()
+	r2.devices["vs-lan"] = "bridge"
+	r2.master["ens224"] = "bond0"
+	p2 := New(r2)
+	p2.SetConfig(model.Config{VirtualSwitches: []model.VirtualSwitch{{
+		Name: "vs-lan", Type: "l2",
+		Ports: []model.VSwitchPort{{Seq: 1, Interface: "ens224"}},
+	}}})
+	if err := p2.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens224", Enabled: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+	if r2.master["ens224"] != "vs-lan" {
+		t.Fatalf("口被别的 master 占用时应改回声明的归属，得到 %q；实际：\n%s", r2.master["ens224"], r2.joined())
+	}
+
+	// l3-interface 同构：口已在声明的 VRF 里 ⇒ 零动作。
+	r3 := newIfaceDomainRunner()
+	r3.devices["vs-wan"] = "vrf"
+	r3.master["ens192"] = "vs-wan"
+	p3 := New(r3)
+	p3.SetConfig(model.Config{Vrfs: []model.Vrf{{
+		Name: "vs-wan", L3Interfaces: []model.L3Interface{{Interface: "ens192"}},
+	}}})
+	if err := p3.ApplyInterface(context.Background(), model.InterfaceConfig{Name: "ens192", Enabled: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+	if r3.has("master") {
+		t.Fatalf("已在声明的 VRF 里时不得重发 master；实际：\n%s", r3.joined())
 	}
 }

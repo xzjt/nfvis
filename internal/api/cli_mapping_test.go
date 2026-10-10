@@ -295,6 +295,77 @@ func TestCLIStatementMappingDelete(t *testing.T) {
 	}
 }
 
+// TestCLIInterfaceDisableDeleteReenables：`delete interfaces <if> disable` 必须**撤销禁用**
+// ——删除候选里的 enabled 字段（缺省即启用），而不是与 set 分支同写 enabled=false。
+// 反例（修复前）：两个分支同体，delete 重复写入同一值 ⇒ 候选不变、命令回「未产生配置变更」
+// 提示，禁用无从撤销、接口持续 admin-down。两处判据：候选树无 enabled 键 + display set
+// 反推无 disable 行（反推器只在 enabled==false 时渲染该行，见 setstmt.go）。
+func TestCLIInterfaceDisableDeleteReenables(t *testing.T) {
+	x, engine := newCLIKit(t)
+	run(t, x, "admin", aaa.ClassSuperUser, "ssh", "configure", "set interfaces ens224 disable")
+
+	ifaceEntry := func() map[string]any {
+		t.Helper()
+		cfg, _, err := engine.Candidate()
+		if err != nil {
+			t.Fatalf("读取 candidate: %v", err)
+		}
+		arr, _ := toJSONTree(cfg)["interfaces"].([]any)
+		for _, e := range arr {
+			if m, ok := e.(map[string]any); ok && m["name"] == "ens224" {
+				return m
+			}
+		}
+		t.Fatal("候选里找不到 ens224 接口元素")
+		return nil
+	}
+	hasDisableLine := func() bool {
+		t.Helper()
+		cfg, _, err := engine.Candidate()
+		if err != nil {
+			t.Fatalf("读取 candidate: %v", err)
+		}
+		lines, err := renderSetStatements(toJSONTree(cfg), nil)
+		if err != nil {
+			t.Fatalf("display set 反推失败: %v", err)
+		}
+		return strings.Contains(strings.Join(lines, "\n"), "set interfaces ens224 disable")
+	}
+
+	// ① set 行为不回归：候选显式 enabled=false，display set 含 disable 行。
+	if v, ok := ifaceEntry()["enabled"]; !ok || v != false {
+		t.Fatalf("set disable 后候选应为显式 enabled=false（存在=%v 值=%v）", ok, v)
+	}
+	if !hasDisableLine() {
+		t.Fatal("set disable 后 display set 应含 `set interfaces ens224 disable`")
+	}
+
+	// ② delete disable：撤销禁用（删除字段）；修复前此断言必红。
+	res := x.Execute("admin", aaa.ClassSuperUser, "ssh", "delete interfaces ens224 disable")
+	if strings.Contains(res.Output, "%%") {
+		t.Fatalf("delete disable 不应报错: %s", res.Output)
+	}
+	if res.Warning {
+		t.Fatalf("delete disable 产生了变更，不应以提示（warning）结束: %q", strings.TrimSpace(res.Output))
+	}
+	if v, ok := ifaceEntry()["enabled"]; ok {
+		t.Fatalf("delete disable 应删除 enabled 字段（缺省即启用），候选仍含 enabled=%v；命令输出: %q", v, strings.TrimSpace(res.Output))
+	}
+	if hasDisableLine() {
+		t.Fatal("delete disable 后 display set 不得再有 disable 行")
+	}
+
+	// ③ 幂等：字段本就不存在时重复 delete 是「未产生变更」提示（非失败，round86 R86-8 口径），
+	// 候选保持无 enabled 键。
+	again := x.Execute("admin", aaa.ClassSuperUser, "ssh", "delete interfaces ens224 disable")
+	if strings.Contains(again.Output, "%%") || !again.Warning {
+		t.Fatalf("重复 delete disable 应按提示（warning）结束而非失败: %q warning=%v", again.Output, again.Warning)
+	}
+	if _, ok := ifaceEntry()["enabled"]; ok {
+		t.Fatal("重复 delete 后候选仍不应有 enabled 字段")
+	}
+}
+
 // TestCLIStatementMappingUnknownStillErrors 真正未建模的语句必须显式报错，
 // 不允许“看似成功但模型不认”（宽松插入）——这是本轮缺陷的另一半。
 func TestCLIStatementMappingUnknownStillErrors(t *testing.T) {

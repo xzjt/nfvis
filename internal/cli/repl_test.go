@@ -120,6 +120,107 @@ func TestSessionExecuteSurfacesWarning(t *testing.T) {
 	}
 }
 
+// ---------- round10 R8-1 / 决策 #445：oper 顶层 exit/quit 退出交互式 CLI ----------
+//
+// 契约三处（命令树 tree_oper.go、《命令全表》§1.3、命令树设计）都写 exit/quit＝「退出 CLI」，
+// 此前 REPL.Run 没有退出分支：oper 下连发 exit 只静默回到提示符（服务端 #318 的分支只释放
+// 本会话候选与锁），只有 Ctrl-D 能退出。口径：**执行前**处于 oper 顶层（Mode=="oper" 且
+// Path 为空）且该行恰为单词 exit/quit ⇒ 先执行既有服务端释放语义，再走 teardown 收尾退出。
+
+// TestREPLOperExitQuitsREPL oper 顶层 exit/quit ⇒ Run 返回 nil 且 teardown 已生效。
+// 判定用「退出后再喂一行」：未退出时该行会被继续执行（修复前的现状），据此刻意与
+// 「EOF 收尾」（同样会吊销 token）区分开。
+func TestREPLOperExitQuitsREPL(t *testing.T) {
+	cases := []struct{ input, want string }{
+		{"exit", "exit"},
+		{"quit", "quit"},
+		{"  exit  ", "exit"}, // 前后空白不影响判定（TrimSpace 后取 token）
+	}
+	for _, tc := range cases {
+		stub := &modeStub{}
+		s := New(stub, "ssh")
+		e, w := newPipeEditor(t)
+		e.idle = &IdleGuard{Timeout: time.Hour, now: time.Now}
+		var out bytes.Buffer
+		rp := &REPL{session: s, editor: e, history: e.history, out: &out, poll: time.Hour}
+
+		go func() {
+			_, _ = w.WriteString(tc.input + "\nshow version\n")
+			w.Close()
+		}()
+		if err := rp.Run(); err != nil {
+			t.Fatalf("%q 应正常退出: %v", tc.want, err)
+		}
+		if len(stub.lines) != 1 || stub.lines[0] != tc.want {
+			t.Fatalf("%q 后不应继续执行输入（实际执行: %v）", tc.want, stub.lines)
+		}
+		if !stub.loggedOut {
+			t.Fatalf("%q 退出应吊销 token（teardown）", tc.want)
+		}
+		if !strings.Contains(out.String(), "[ok] "+tc.want) {
+			t.Fatalf("服务端对 %q 的输出应先回显再退出: %q", tc.want, out.String())
+		}
+	}
+}
+
+// TestREPLConfigExitReturnsToOperOnly 配置模式内的 exit 只退回 oper（既有行为逐字不变），
+// REPL 不退出、后续行照常执行；EOF 才收尾。
+func TestREPLConfigExitReturnsToOperOnly(t *testing.T) {
+	stub := &modeStub{}
+	s := New(stub, "ssh")
+	e, w := newPipeEditor(t)
+	e.idle = &IdleGuard{Timeout: time.Hour, now: time.Now}
+	var out bytes.Buffer
+	rp := &REPL{session: s, editor: e, history: e.history, out: &out, poll: time.Hour}
+
+	go func() {
+		_, _ = w.WriteString("configure\nexit\nshow version\n")
+		w.Close()
+	}()
+	if err := rp.Run(); err != nil {
+		t.Fatalf("Run 不应报错: %v", err)
+	}
+	if got := strings.Join(stub.lines, ","); got != "configure,exit,show version" {
+		t.Fatalf("配置模式 exit 后应继续执行后续行（不退出）: %v", stub.lines)
+	}
+	if s.Mode != "oper" {
+		t.Fatalf("配置模式 exit 后本地模式应回到 oper: %q", s.Mode)
+	}
+	if !strings.Contains(out.String(), "[ok] show version") {
+		t.Fatalf("后续行应正常执行并回显: %q", out.String())
+	}
+	if !stub.loggedOut {
+		t.Fatalf("EOF 收尾应吊销 token")
+	}
+}
+
+// TestREPLExitPrefixAndExtraTokensDoNotQuit 反向守卫：前缀不完整（exi）、多给 token
+// （exit now）都不是退出命令（判定恰为单词 exit/quit），REPL 继续执行后续行。
+func TestREPLExitPrefixAndExtraTokensDoNotQuit(t *testing.T) {
+	for _, input := range []string{"exi", "exit now", "quitx"} {
+		stub := &modeStub{}
+		s := New(stub, "ssh")
+		e, w := newPipeEditor(t)
+		e.idle = &IdleGuard{Timeout: time.Hour, now: time.Now}
+		var out bytes.Buffer
+		rp := &REPL{session: s, editor: e, history: e.history, out: &out, poll: time.Hour}
+
+		go func() {
+			_, _ = w.WriteString(input + "\nshow version\n")
+			w.Close()
+		}()
+		if err := rp.Run(); err != nil {
+			t.Fatalf("%q 场景 Run 不应报错: %v", input, err)
+		}
+		if len(stub.lines) != 2 || stub.lines[0] != input || stub.lines[1] != "show version" {
+			t.Fatalf("%q 不应触发退出（应继续执行）: %v", input, stub.lines)
+		}
+		if !stub.loggedOut { // EOF 收尾照常
+			t.Fatalf("%q 场景 EOF 收尾应吊销 token", input)
+		}
+	}
+}
+
 // TestREPLShowsNoChangeWarningAndContinues ③ 交互模式下该提示照常可读、**不中止**会话
 // （交互本来就不中止，本轮只是把 %% 错误样式改成提示，行为不变）。
 func TestREPLShowsNoChangeWarningAndContinues(t *testing.T) {

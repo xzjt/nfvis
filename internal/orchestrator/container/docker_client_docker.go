@@ -178,14 +178,20 @@ func (c *dockerClient) Remove(ctx context.Context, name string, force bool) erro
 }
 
 // RemoveImage 删除容器镜像（DELETE /images/<ref>）。
+//
+// ref 为镜像仓库目录项名，先经 DockerRefFor 归一为 Docker 侧引用（决策 #447），与 LoadImage
+// 落成的引用**严格对称**：含冒号原样删、不含冒号删 `<名>:latest`。此前按目录项名原样删，
+// 与载入侧重打出来的引用不对称（删不到产品打的那个 tag）。
 func (c *dockerClient) RemoveImage(ctx context.Context, ref string) error {
-	return c.do(ctx, http.MethodDelete, "/images/"+url.PathEscape(ref), nil, nil)
+	return c.do(ctx, http.MethodDelete, "/images/"+url.PathEscape(DockerRefFor(ref)), nil, nil)
 }
 
 // LoadImage 载入容器镜像归档（POST /images/load，body 为 docker save 的 tar；
-// 不复用 do()：其 body 走 JSON 序列化，无法流式传 tar）。载入后按 name 重打标签
-// `<name>:latest`（决策 #160）：tar 内嵌 tag 必含冒号（如 alpine:3.20）而容器引用的
-// 是目录项名（白名单禁冒号），不重打标签则 docker create 解析不到镜像。
+// 不复用 do()：其 body 走 JSON 序列化，无法流式传 tar）。载入后把 Docker 侧引用对齐到
+// 目录项名的推导引用（DockerRefFor，决策 #160/#447）：目录项名**允许含冒号**，`alpine:3.20`
+// 本身就是合法 Docker 引用（原样、优先于 #160 的补全口径）；归档载入的引用与推导引用一致时
+// **不做任何 tag 调用**（不抢占用户 Docker 里同名的既有 tag），不一致才按 repo/tag 重打，
+// 使 `docker create` 按目录项名解析得到镜像。
 func (c *dockerClient) LoadImage(ctx context.Context, path, name string) error {
 	// 决策 #396：镜像载入是**长操作**（大 tar），不经 do（流式 body）。上界按调用方 ctx
 	// 放宽——调用方（镜像导入路径）给宽松 deadline；若调用方未给（Background），仍套缺省
@@ -223,7 +229,17 @@ func (c *dockerClient) LoadImage(ctx context.Context, path, name string) error {
 	if loaded == "" {
 		return fmt.Errorf("docker image load: 归档中未解析到镜像 tag，无法按 %q 重打标签", name)
 	}
-	return c.tag(ctx, loaded, name, "latest")
+	// 引用对齐（决策 #447）：目录项名含冒号时它就是 Docker 引用本身，归档载入的引用与之一致
+	// 即无须任何 tag 调用（不抢占用户既有 tag）；不一致才按 repo/tag 重打（tag 缺省 latest）。
+	ref := DockerRefFor(name)
+	if loaded == ref {
+		return nil
+	}
+	repo, tag := splitDockerRef(ref)
+	if tag == "" {
+		tag = "latest"
+	}
+	return c.tag(ctx, loaded, repo, tag)
 }
 
 // loadedTagOf 从 docker load 的响应流（NDJSON）解析载入的镜像引用：

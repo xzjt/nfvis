@@ -469,6 +469,9 @@ nfvis# configure                    ← 进入配置模式（super-user/operator
 nfvis# top | up | exit              ← 回顶层 / 上一级 / 退出配置模式
 ```
 
+> 退出 CLI：**操作模式**（`nfvis>`）下输入 `exit` 或 `quit`，或按 Ctrl-D；
+> 配置模式下的 `exit` 只退回操作模式（不退出 CLI）。
+
 命令缩写：**无歧义前缀即可执行**（`sh vi` ≈ `show virtual-machine-functions`）；
 `?` 在任意位置列出候选，Tab 补全。配置模式内可用 `run <操作命令>` 执行操作命令（不必退出）。
 
@@ -857,7 +860,7 @@ exit
 >
 > ```bash
 > nfvis$ request interfaces ens224 unbind-dpdk --yes     # 口名或 PCI 地址均可；中断该口流量，需确认
-> nfvis$ request interfaces ens224 enable                # 或重启 nfvis 服务，让内核数据面收敛
+> nfvis$ request interfaces ens224 enable                # 一步收敛：按声明把它接回交换机/VRF（重启服务同效）
 > ```
 >
 > 内核数据面下 **`unbind-dpdk` 照常可用**（它正是「把网卡交还内核」的动作）；
@@ -871,6 +874,10 @@ exit
 （内核接口名上限）；两个对象**不能派生同一个内核设备名**（报错会点名是哪两条声明在撞）；
 vlan 子接口的派生名同样受限；VNF 虚拟网卡**不能直接作三层接口**、也**不能接入 `type l3` 的交换机**——
 把它接入一台**已配网关的 L2 交换机**即可达到同样效果。
+
+> **域内到未知目的的流量：在域内即判不可达**。每个转发域（L2 网关域 / L3 交换机 VRF）的表内都
+> 有一条兜底路由——没有匹配路由的流量**不会**经宿主的默认路由从管理口「借道」出去，而是就地报
+> 不可达（与 VPP 数据面「无路即弃」同语义）。**出域访问请显式配静态路由或 NAT**（§8.8）。
 
 > **内核数据面转发的前置条件（"接口都起来了、路由也下了、ping 全丢"先查这两条）**：
 > ① **转发开关**：产品会置 `net.ipv4.ip_forward=1` 与 `net.ipv6.conf.all.forwarding=1` 并**回读确认**
@@ -1635,6 +1642,10 @@ nfvis# commit
 > （缺省 30s），`show lldp neighbors` / `GET /protocols/lldp/neighbors` 两数据面同一读物、同形输出。
 > 边界（如实告知）：只解析 802.1AB 的**基础 TLV**（LLDP-MED/DCBX 等扩展不解析）、只收**无 VLAN 标签**
 > 的帧、不提供自定义系统名、不做 SNMP MIB 与收发统计。
+>
+> ⚠️ **VPP 数据面的一条底座限制**：本底座的 VPP LLDP 只接受 **vhost-user / BVI 等虚拟接口**；
+> 对 **DPDK 物理口**启用会被底座拒绝（提交时整次回滚并给出可照做的替代提示）。需要在**物理口**
+> 收发 LLDP 时，请切到**内核数据面**（自研收发代理不挑接口类型）。
 
 ### 8.11 cross-connect（直通，慎用）
 
@@ -1857,10 +1868,12 @@ nfvis$ request images upload name alpine type container-image file /data/incomin
 ```
 
 > ℹ️ 容器镜像的 `name` 是**仓库里的引用名**（也是 `set container-functions ... image` 要写的名字）。
-> 导入时产品会 `docker load` 这个归档，并**按你给的名字重打标签 `<name>:latest`**——所以
-> 名字**不必**等于 tar 内的 Docker tag（如 `alpine:3.20`，它含冒号、不能作目录项名）。
+> 导入时产品会 `docker load` 这个归档，并**按你给的名字收敛 Docker 侧引用**：名字含冒号（如
+> `alpine:3.20`）则原名即引用；不含冒号则补 `<name>:latest`。仅当归档内嵌 tag 与该引用不一致时
+> 才会自动重打标签——所以名字**不必**等于 tar 内的 Docker tag。
 > 归档内嵌的 tag 会如实记进 `show images <名> detail` 的 `source-tags` 供核对。
-> 例：上面导入后，配置里写 `set container-functions ... image alpine`。
+> 例：导入 `alpine:3.20` 后配置里写 `set container-functions ... image alpine:3.20`；
+> 导入 `alpine`（归档内嵌 `alpine:3.20`）后则写 `image alpine`（Docker 侧被收敛为 `alpine:latest`）。
 
 删除镜像有引用检查（被 VM/容器引用时拒绝）。
 
@@ -2777,7 +2790,7 @@ show log audit last 20                   # 审计（§10）
 
 | 限制 | 说明 |
 |---|---|
-| 容器镜像用「目录项名」引用（导入时已重打标签 `<名>:latest`） | §9.1 |
+| 容器镜像用「目录项名」引用（导入时按名收敛 Docker 引用：含冒号原样、否则补 `:latest`） | §9.1 |
 | 快照 create/rollback 需关机态 | §9.3（运行中回滚会静默重启 VM） |
 | `show \| display set` 已实现；`show vpp runtime` 给线程级运行态，**无逐节点明细** | `show vpp threads`/`show vpp buffers` 是另外两条；display set 支持 `show configuration` 与配置模式各层级；逐节点明细用 `vppctl show runtime` |
 | `show vpp runtime` 无逐节点明细（只有线程级） | 该明细无结构化来源（非故障）；需要时 `vppctl show runtime` |

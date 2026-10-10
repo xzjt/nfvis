@@ -11,9 +11,60 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
 )
+
+// NetReconcileRuntime 数据面「按已提交声明整段重放」的收敛入口（决策 #449 扩展）。
+//
+// 与启动/重连时的恢复收敛是**同一条路径**（orchestrator.NetworkProvider.EnsureConsistent，
+// 两个数据面同签名、各自幂等），故直接复用它而不新造第二套重放。装配处按数据面注入：
+// 内核数据面注入（按 committed 全量重放）；VPP 数据面不注入（nil ＝ 不触发，理由见装配处）。
+type NetReconcileRuntime interface {
+	EnsureConsistent(ctx context.Context, cfg model.Config) []error
+}
+
+// ifaceReconcileTimeout 运维动作触发的整段收敛上界（与启动恢复收敛的 30s 上界同档）：
+// 收敛是同步补齐，超时即带着已收集的未收敛项返回，由调用方如实上报（不谎报成功）。
+const ifaceReconcileTimeout = 30 * time.Second
+
+// reconcileNote 按**已提交声明**触发一次数据面整段收敛，返回追加到命令输出的说明
+// （能力未接入 ＝ 空串，输出保持原样）。
+//
+// 为什么必须有这一步（真机缺口 A，决策 #449 扩展）：commit 只下发**变更**——`request
+// interfaces <n> enable` 在稳态（模型 enabled 本就是 true）是空修订，apply 段根本不跑，
+// 「命令成功、什么也没发生」；`unbind-dpdk` 交还内核后设备才出现，而引用该口的交换机段 /
+// VRF 段重放早在它出现之前跑完了。整段重放覆盖引用该口的全部声明（L2 交换机段：成员 + VLAN；
+// L3 交换机 VRF 段：master + 地址 + 域兜底路由），比逐口补一句 master 更全——逐口兜底
+// （ApplyInterface 的域归属收敛）保留不动，二者叠加幂等、不冲突。
+//
+// 口径：**不改写已成功的提交结论**——收敛未完成时如实追加原因（让操作者看清「提交成功但数据面
+// 未完全收敛」），读不到已提交配置同样如实说明。
+func (x *cliExecutor) reconcileNote() string {
+	if x.netReconcile == nil {
+		return ""
+	}
+	cfg, err := x.engine.Committed()
+	if err != nil {
+		return fmt.Sprintf("；接口状态收敛未执行（读取已提交配置失败：%v）", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), ifaceReconcileTimeout)
+	defer cancel()
+	errs := x.netReconcile.EnsureConsistent(ctx, cfg)
+	if len(errs) == 0 {
+		return "；接口状态已按声明收敛"
+	}
+	msgs := make([]string, 0, 4)
+	for i, e := range errs {
+		if i == 3 {
+			msgs = append(msgs, fmt.Sprintf("…（共 %d 项）", len(errs)))
+			break
+		}
+		msgs = append(msgs, e.Error())
+	}
+	return "；接口状态收敛未完全成功：" + strings.Join(msgs, "；")
+}
 
 // requestInterfaces：request interfaces <ifname> enable|disable | bind-dpdk | unbind-dpdk。
 func (x *cliExecutor) requestInterfaces(user, source string, t []string) string {
@@ -39,7 +90,10 @@ func (x *cliExecutor) requestInterfaces(user, source string, t []string) string 
 	if err != nil {
 		return "%% " + err.Error() + "\n"
 	}
-	return fmt.Sprintf("接口 %s 已置为 %s；%s", ifname, action, summary)
+	// 决策 #449 扩展：「request = 确保声明状态」——提交只下发**变更**，值未变化（稳态）时是空
+	// 修订、apply 段根本不跑。提交成功后一律再触发一次整段收敛（未接入＝空串，输出保持不变）。
+	return fmt.Sprintf("接口 %s 已置为 %s；%s%s\n", ifname, action,
+		strings.TrimSuffix(summary, "\n"), x.reconcileNote())
 }
 
 // requestSRIOV：request sriov create-vfs <ifname> count <n> | delete-vfs <ifname> vf <n>。
@@ -139,5 +193,12 @@ func (x *cliExecutor) requestInterfacesDPDK(user, source string, t []string) str
 	if cur == "" {
 		cur = "(无驱动)"
 	}
-	return fmt.Sprintf("接口 %s（PCI %s）已%s，当前驱动 %s\n", ifname, pci, verb, cur)
+	out := fmt.Sprintf("接口 %s（PCI %s）已%s，当前驱动 %s", ifname, pci, verb, cur)
+	if !bound {
+		// 决策 #449 扩展：交还内核后设备才出现——手册承诺「交还后按声明自动收敛」的落点
+		// （既有恢复重放发生在口还握在 vfio-pci 手里的时候）。bind 方向不触发：口交 DPDK，
+		// 内核数据面下本就拒绝（决策 #426②），无收敛对象可补。
+		out += x.reconcileNote()
+	}
+	return out + "\n"
 }

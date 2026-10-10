@@ -45,6 +45,7 @@ type Options struct {
 	State          *state.State                   // 运行态聚合（M3-7；nil = 省略运行态字段）
 	SRIOV          SRIOVSetter                    // SR-IOV VF 数量（M3-7；nil = 503）
 	DPDK           DPDKSetter                     // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72；nil = 503）
+	NetReconcile   NetReconcileRuntime            // 数据面整段收敛入口（决策 #449 扩展；内核数据面注入，nil = 不触发）
 	Kernel         ksys.KernelApplier             // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
 	Hugepages      ksys.HugepagePoolSetter        // 大页池回收（FR-SYS-002，决策 #329；nil = 命令/端点报未接入）
 	HugepageRoot   string                         // 大页池 sysfs 根（决策 #329；空 = "/"，测试注入临时目录）
@@ -178,6 +179,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.cliExec.setHardware(opts.Hardware)
 	s.cliExec.setSRIOV(opts.SRIOV)
 	s.cliExec.setDPDK(opts.DPDK)
+	s.cliExec.setNetReconcile(opts.NetReconcile) // 决策 #449 扩展：运维动作后的整段收敛入口
 	s.cliExec.setKernel(opts.Kernel)
 	s.kernel = opts.Kernel
 	s.cliExec.setHugepages(opts.Hugepages) // 决策 #329：大页池回收（CLI 与 REST 共用）

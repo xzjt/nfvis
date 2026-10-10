@@ -1206,28 +1206,31 @@ func run() error {
 		SRIOV: sriovProvider,
 		// DPDK 接管（决策 #426②）：VPP 数据面走 sysfs 接管；内核数据面下绑定拒绝、解绑可用
 		// （交还内核驱动——内核里没有的口正等这一步）。
-		DPDK:        dpdkSetterFor(dpMode, dpdkBinder, dpdkBindings, log, mgmtFacts, vppMgr, kernelIfaceInUse),
-		Kernel:      system.NewBaselineApplier(),
-		Hugepages:   system.NewSysfsHugepageSetter(), // 决策 #329：大页池回收（按页尺寸写 sysfs）
-		NAT:         &natSessionsController{net: netProvider},
-		Alarms:      &alarmController{store: alarms},
-		Diag:        diagRuntimeFor(dpMode, vppMgr),
-		VM:          vmAPI,
-		VMConsole:   computeProvider, // M4-5：串口 console（libvirt 域串口 ↔ WebSocket；持有层常驻）
-		VMSnapshots: vmSnaps,
-		Containers:  containerProvider,
-		Images:      imagesStore,
-		Events:      bus,
-		SysOps:      sysOps,
-		DiagOps:     &diagOpsController{tech: techSupport, cores: coreDumps},
-		Capture:     captureAPI,
-		Software:    &softwareController{m: swMgr},
-		Hardware:    &hardwareController{p: hwProvider},
-		TLS:         &tlsController{m: tlsMgr},
-		Ports:       &portInventoryController{net: netProvider}, // 决策 #83：运行态端口清单
-		VppState:    &vppStateController{net: netProvider},      // 决策 #84：show 的运行态事实来源
-		Versions:    system.NewVersionProbe(),                   // R37-2 收口（决策 #118）：组件版本探测
-		LogSource:   nfvisdLogTail,
+		DPDK: dpdkSetterFor(dpMode, dpdkBinder, dpdkBindings, log, mgmtFacts, vppMgr, kernelIfaceInUse),
+		// 决策 #449 扩展：内核数据面下 enable/disable 与 unbind-dpdk 成功后按已提交声明整段收敛
+		// （netReconcileFor 的取舍与 VPP 侧不注入的理由见 dataplane.go）。
+		NetReconcile: netReconcileFor(dpMode, netProvider),
+		Kernel:       system.NewBaselineApplier(),
+		Hugepages:    system.NewSysfsHugepageSetter(), // 决策 #329：大页池回收（按页尺寸写 sysfs）
+		NAT:          &natSessionsController{net: netProvider},
+		Alarms:       &alarmController{store: alarms},
+		Diag:         diagRuntimeFor(dpMode, vppMgr),
+		VM:           vmAPI,
+		VMConsole:    computeProvider, // M4-5：串口 console（libvirt 域串口 ↔ WebSocket；持有层常驻）
+		VMSnapshots:  vmSnaps,
+		Containers:   containerProvider,
+		Images:       imagesStore,
+		Events:       bus,
+		SysOps:       sysOps,
+		DiagOps:      &diagOpsController{tech: techSupport, cores: coreDumps},
+		Capture:      captureAPI,
+		Software:     &softwareController{m: swMgr},
+		Hardware:     &hardwareController{p: hwProvider},
+		TLS:          &tlsController{m: tlsMgr},
+		Ports:        &portInventoryController{net: netProvider}, // 决策 #83：运行态端口清单
+		VppState:     &vppStateController{net: netProvider},      // 决策 #84：show 的运行态事实来源
+		Versions:     system.NewVersionProbe(),                   // R37-2 收口（决策 #118）：组件版本探测
+		LogSource:    nfvisdLogTail,
 		// 决策 #356：历史时序读视图（Store 为 nil 时以 Disabled 如实说明「为何没有历史」）。
 		MetricsHistory: &api.MetricsHistoryOptions{Store: metricsStore, Path: *metricsDB, Disabled: metricsDisabled},
 	})

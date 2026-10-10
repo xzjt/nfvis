@@ -121,6 +121,7 @@ type cliExecutor struct {
 	hw           HardwareRuntime         // 硬件健康（M5-5；nil = 报未接入）
 	sriov        SRIOVSetter             // SR-IOV VF 数量（M3-7；nil = 命令报未接入）
 	dpdk         DPDKSetter              // 网卡 DPDK 驱动接管（FR-NET-001，决策 #72）
+	netReconcile NetReconcileRuntime     // 数据面整段收敛入口（决策 #449 扩展；内核注入，nil = 不触发）
 	kernel       ksys.KernelApplier      // 内核启动基线落地（FR-SYS-014；nil = 命令报未接入）
 	hugepages    ksys.HugepagePoolSetter // 大页池回收（FR-SYS-002，决策 #329；nil = 命令报未接入）
 	hugepageRoot string                  // 大页池 sysfs 根（决策 #329；空 = "/"，测试注入临时目录）
@@ -243,6 +244,9 @@ func (x *cliExecutor) setSRIOV(s SRIOVSetter) { x.sriov = s }
 
 // setDPDK 注入网卡 DPDK 驱动接管能力（FR-NET-001，决策 #72）。
 func (x *cliExecutor) setDPDK(d DPDKSetter) { x.dpdk = d }
+
+// setNetReconcile 注入数据面的整段收敛入口（决策 #449 扩展；nil = 不触发）。
+func (x *cliExecutor) setNetReconcile(r NetReconcileRuntime) { x.netReconcile = r }
 
 // setKernel 注入内核基线落地器（FR-SYS-014：request system kernel apply|rollback）。
 func (x *cliExecutor) setKernel(k ksys.KernelApplier) { x.kernel = k }
@@ -1983,9 +1987,11 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 				}
 			}
 			k := jsonKeyOf(child)
-			// flag：disable 特例映射 enabled=false（§2.3）；其余 flag 走 Diff 兜底报错
+			// flag：disable 特例（§2.3）——set 映射 enabled=false；delete 是**撤销禁用**
+			// （删除 enabled 字段，缺省即启用），不得与 set 同写 false（否则删除是空操作、
+			// 禁用无从撤销）；其余 flag 走 Diff 兜底报错
 			if !isSet && i == len(tokens)-1 && tok == "disable" {
-				cur["enabled"] = false
+				delete(cur, "enabled")
 				return validateTreeJSON(tree)
 			}
 			if isSet && i == len(tokens)-1 && tok == "disable" {

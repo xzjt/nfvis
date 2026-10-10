@@ -84,7 +84,8 @@ type dockerAPI interface {
 	// RemoveImage 删除容器镜像（FR-CMP-033，经 Docker API）。
 	RemoveImage(ctx context.Context, ref string) error
 	// LoadImage 载入容器镜像归档（FR-CMP-031，经 Docker API `image load`）；
-	// name 为仓库目录项名，载入后按它重打标签 `<名>:latest`（决策 #160）。
+	// name 为仓库目录项名，载入后按它推导 Docker 引用（含 `:` 原样、否则 `<名>:latest`），
+	// 仅在归档内嵌 tag 与推导引用不一致时重打（决策 #160/#447）。
 	LoadImage(ctx context.Context, path, name string) error
 	State(ctx context.Context, name string) (state string, exists bool, err error)
 	// Inspect 单次 inspect 的容器事实（决策 #432）：契约状态 + Docker 原始状态 + 重启次数。

@@ -4058,7 +4058,8 @@ components:
           items: { type: string }
           description: |
             容器镜像归档（docker save）内嵌的镜像 tag（如 alpine:3.20，决策 #312）。
-            导入时已按仓库目录项名重打标签 `<name>:latest`，故配置里唯一可用名就是 `name`；
+            Docker 侧引用按目录项名推导（含 `:` 原样、否则 `<name>:latest`），归档内嵌 tag 与之不一致时
+            导入会自动重打；配置里唯一可用名就是 `name`；
             本字段用于显式登记来源 tag，便于排障（归档无 tag 或未解析到 manifest.json 时**省略**，不编造）。
 
     Snapshot:

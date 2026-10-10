@@ -42,13 +42,7 @@ func (p *Provider) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch
 			continue
 		}
 		declared[name] = true
-		if err := p.ipReq(ctx, "link", "set", "dev", name, "master", br); err != nil {
-			return err
-		}
-		if err := p.ensureLinkUp(ctx, name); err != nil {
-			return err
-		}
-		if err := p.applyPortVlans(ctx, name, vs, port); err != nil {
+		if err := p.applyBridgeMember(ctx, br, name, vs, port); err != nil {
 			return err
 		}
 	}
@@ -116,6 +110,22 @@ func memberLinkName(port model.VSwitchPort) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// applyBridgeMember 把一个成员口收敛进内核 bridge：入域（master）→ 置 up → 按声明落 VLAN 规则。
+//
+// 调用方：ApplyBridgeDomain 的成员循环（全量语义；name 由 memberLinkName 解析）与
+// ApplyInterface 的域归属收敛（决策 #449：`request interfaces <n> enable` 后按配置快照
+// 把口接回桥）。两处必须是**同一份**语义（enslave 与置 up 的顺序、VLAN 规则形态），
+// 复制第二份必然漂移——抽成这个单成员助手。
+func (p *Provider) applyBridgeMember(ctx context.Context, br, name string, vs model.VirtualSwitch, spec model.VSwitchPort) error {
+	if err := p.ipReq(ctx, "link", "set", "dev", name, "master", br); err != nil {
+		return err
+	}
+	if err := p.ensureLinkUp(ctx, name); err != nil {
+		return err
+	}
+	return p.applyPortVlans(ctx, name, vs, spec)
 }
 
 // applyPortVlans 按声明收敛成员口的 VLAN 条目（先按实况清、再按声明加，保证删除也能收敛）。
@@ -191,7 +201,8 @@ func (p *Provider) applyGateway(ctx context.Context, vs model.VirtualSwitch, br 
 // 网关 VRF 由 ApplyBridgeDomain 按需创建（无显式 vrf 声明时用派生的 `vr-<交换机名>`）——
 // 删交换机时必须一并回收，否则内核里长期留一张空 VRF（真机走查实测的残留：
 // 删了 vs-lan，`vr-vs-lan` 还在）。显式声明的 `gateway vrf <名>` 不在此删除：
-// 那是操作者自己的对象，生命周期不由本交换机决定。
+// 那是操作者自己的对象，生命周期不由本交换机决定。网关 VRF 表内的域兜底路由（决策 #446，
+// v4/v6 两族）同样随设备一并回收（先删路由、再删设备）。
 func (p *Provider) DeleteBridgeDomain(ctx context.Context, name string) error {
 	// 决策 #438：先停该交换机的 DHCP 服务器——内置 tap 是 bridge 成员口、单播接收 socket 绑在
 	// bridge 的 BVI 地址上（reference 先解、被引用者后删，与 #437 relay/#196/#342 的删除倒序一致）。
@@ -211,5 +222,15 @@ func (p *Provider) DeleteBridgeDomain(ctx context.Context, name string) error {
 	if err := p.ipBest(ctx, "link", "del", LinkName(name)); err != nil {
 		return err
 	}
-	return p.ipBest(ctx, "link", "del", GatewayVRFName(name))
+	// 决策 #446：网关域 VRF 表内也有域兜底路由（ApplyBridgeDomain → applyGateway → ensureVRF），
+	// 删 VRF 设备前先回收它——不把孤立路由留给内核。设备不在场（无网关/显式 gateway vrf/
+	// 已删过/同名设备不是 VRF）时跳过：对不存在的 VRF 下 `ip route del` 会报 Invalid VRF，
+	// 会把「删已删过的交换机」的幂等路径打断。
+	gwVrf := GatewayVRFName(name)
+	if p.vrfDevicePresent(ctx, gwVrf) {
+		if err := p.deleteVRFFallback(ctx, gwVrf); err != nil {
+			return err
+		}
+	}
+	return p.ipBest(ctx, "link", "del", gwVrf)
 }

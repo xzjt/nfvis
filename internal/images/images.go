@@ -64,9 +64,9 @@ type Meta struct {
 	LastError       string `json:"last_error,omitempty"`       // 失败原因（failed 必填；ready 时可载清理告警）
 
 	// SourceTags 容器镜像归档（docker save）内嵌的 tag（决策 #312）。
-	// 导入时产品按仓库目录项名重打标签 `<name>:latest`（决策 #160），故配置里唯一可用名就是
-	// `name`；本字段把来源 tag 显式登记下来（不再静默改名）。归档无 tag 或未解析到 manifest.json
-	// 时**省略**——如实说没有，不编造。
+	// Docker 侧引用按目录项名推导（含 `:` 原样、否则 `<name>:latest`；与内嵌 tag 不一致时导入
+	// 自动重打），故配置里唯一可用名就是 `name`；本字段把来源 tag 显式登记下来（不再静默改名）。
+	// 归档无 tag 或未解析到 manifest.json 时**省略**——如实说没有，不编造。
 	SourceTags []string `json:"source_tags,omitempty"`
 }
 
@@ -104,9 +104,9 @@ func (s *Store) emitState(name, typ, state string) {
 func (s *Store) SetDockerRemover(f func(ref string) error) { s.dockerRemove = f }
 
 // SetDockerLoader 注入容器镜像载入实现（Docker API `docker load`，FR-CMP-030/031）。
-// name 为仓库目录项名：load 后按它重打标签 `<名>:latest`，使容器引用（=目录项名）
-// 与 Docker 运行名闭环——tar 内嵌 tag 必含冒号而目录项名白名单禁冒号，两者天然不等，
-// 不重打标签则容器镜像端到端不可用（决策 #160）。
+// name 为仓库目录项名：load 后按引用推导把 Docker 侧引用对齐到目录项名（决策 #160/#447：
+// 含冒号原样——目录项名允许含冒号，`alpine:3.20` 本身即合法 Docker 引用；不含冒号补
+// `:latest`），使容器引用（=目录项名）与 Docker 运行名闭环。
 func (s *Store) SetDockerLoader(f func(path, name string) error) { s.dockerLoad = f }
 
 // Open 打开/初始化仓库（创建目录并载入 index.json）。
@@ -316,9 +316,9 @@ func (s *Store) ImportIncoming(name, typ, incomingFile, description string) (Met
 			incomingFile, s.cfg.IncomingDir)
 	}
 	// 容器镜像：归档（docker save 产物）经 Docker `image load` 入本地分层存储，
-	// 仓库只登记元数据、不留文件（FR-CMP-030）；name 即仓库目录项名，load 后按它重打标签
-	// `<name>:latest`（决策 #160），故配置里唯一可用的名字就是仓库中的镜像名——
-	// tar 内嵌 tag 与之无关（R84-7：旧文案宣称可用名是内嵌 tag，与实现不符）。
+	// 仓库只登记元数据、不留文件（FR-CMP-030）；name 即仓库目录项名，load 后按它推导并
+	// 收敛 Docker 引用（含 `:` 原样、否则 `<name>:latest`；与内嵌 tag 不一致才重打，见 #447），
+	// 故配置里唯一可用的名字就是仓库中的镜像名——tar 内嵌 tag 与之无关（R84-7 口径不变）。
 	if typ == TypeContainer && s.dockerLoad == nil {
 		return Meta{}, fmt.Errorf("导入容器镜像 %s：未接入 Docker", name)
 	}

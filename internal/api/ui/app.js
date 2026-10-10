@@ -5285,8 +5285,9 @@ function renderImageDetail(img, params) {
     ['引用计数', img.ref_count],
     ['导入状态', img.import_state || 'ready'],
     ['导入时间', img.imported_at ? fmtTime(img.imported_at) : undefined],
-    // 容器镜像归档内嵌的 tag：导入时产品按仓库名重打标签 `<名>:latest`，故配置里唯一可用名
-    // 就是仓库里的名字；这里如实回显来源 tag，便于核对（重命名不再静默）。
+    // 容器镜像归档内嵌的 tag：Docker 侧引用按目录项名推导（含冒号原样、否则 `<名>:latest`；
+    // 与内嵌 tag 不一致时导入会自动重打），故配置里唯一可用名就是仓库里的名字；
+    // 这里如实回显来源 tag，便于核对（重命名不再静默）。
     ['归档内嵌 tag', (img.source_tags && img.source_tags.length) ? img.source_tags.join('、') : undefined],
   ] : []);
 }
@@ -5304,11 +5305,13 @@ function imgOutcome(res, name) {
     const why = (res && (res.error || res.message)) || '服务端未给出原因';
     return '导入失败（' + name + '）：' + why;
   }
-  // 容器镜像导入后按仓库名重打标签：显式告诉操作者配置里该写哪个名字（不静默改名）。
+  // 容器镜像导入后：显式告诉操作者 Docker 侧引用与配置里该写哪个名字（不静默改名）。
+  // 引用推导与服务端同一规则：含冒号原样、否则 `<名>:latest`。
   const tags = (res && res.source_tags) || [];
+  const ref = name.indexOf(':') >= 0 ? name : name + ':latest';
   const tagNote = (res && res.type === 'container-image')
-    ? '；已按仓库名重打标签 ' + name + ':latest' +
-      (tags.length ? '（归档内嵌 tag：' + tags.join('、') + '）' : '（归档未内嵌 tag）') +
+    ? '；Docker 侧引用为 ' + ref +
+      (tags.length ? '（归档内嵌 tag：' + tags.join('、') + '，不一致时已自动重打）' : '（归档未内嵌 tag）') +
       '，配置中请用 ' + name + ' 引用'
     : '';
   if (st === 'ready' || st === 'imported') return '导入完成：' + name + tagNote;

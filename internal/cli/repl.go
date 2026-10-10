@@ -98,6 +98,9 @@ func (r *REPL) Run() error {
 			line = r.session.CompleteLine(line)
 		}
 		cmd := strings.TrimSpace(line)
+		// 决策 #445：退出判定以**执行前**的模式为准——配置模式内的 exit（退回 oper）与
+		// commit and-quit（把本地模式变回 oper）都不算「oper 顶层退出」。
+		wasOper := r.session.Mode == "oper" && len(r.session.Path) == 0
 		out, next, console := r.session.ExecuteFull(cmd)
 		prompt = next
 		// 破坏性动作的交互确认（FR-CMP-013）：服务端返回问询文本（以 "[yes,no]" 结尾），
@@ -117,11 +120,26 @@ func (r *REPL) Run() error {
 				fmt.Fprintln(r.out)
 			}
 		}
+		if wasOper && isOperExit(cmd) {
+			// 决策 #445：oper 顶层的 exit/quit 是「退出 CLI」（命令树与《命令全表》§1.3 皆然）。
+			// 服务端释放语义（决策 #318：丢弃本会话候选、释放编辑锁）已由上面的 ExecuteFull 执行；
+			// 这里再走既有收尾（丢弃 candidate → 退出配置模式 → 吊销 token）后退出循环。
+			// 配置模式内的 exit（退回 oper）、commit and-quit、脚本模式均不经过此分支。
+			r.teardown()
+			return nil
+		}
 		if console != nil { // 串口接管（FR-CMP-014）：进入 console，Ctrl-] 退出后续打提示符
 			r.runConsole(console)
 			prompt = r.session.Prompt()
 		}
 	}
+}
+
+// isOperExit 判断一行是否为 oper 顶层的退出命令：恰为单词 `exit` 或 `quit`
+// （前后/内部空白由分词吸收，多给 token 或前缀不完整都不算——决策 #445）。
+func isOperExit(line string) bool {
+	toks := strings.Fields(line)
+	return len(toks) == 1 && (toks[0] == "exit" || toks[0] == "quit")
 }
 
 // teardown 会话收尾并回显各步输出（丢弃 candidate 时会提示，避免「未提交变更被静默丢弃」）。

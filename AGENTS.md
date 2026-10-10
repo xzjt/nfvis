@@ -1215,7 +1215,7 @@
   「已声明未生效」、恢复重放给出照做指引）；④ 管理口**首次**声明需 `commit confirmed`（后续 commit 即确认）；
   ⑤ `bind-dpdk` 非交互需 `--yes`（缺省被守卫正确拒绝）；⑥ 套件判据是命令级，**夹具缺口会级联**（如容器镜像
   缺失 ⇒ phase 3 整体回滚 ⇒ 同 phase 的 bond 检查一起红）——判读失败先看夹具。
-- 已定决策 346 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
+- 已定决策 351 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线 #300~#403（其中 #350 撤回）、
   **v3 线自 #404 起**（分支 `v3`，已有 #404~#444））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **v3 线最新交接**：`docs/v3-交接-2026-10-10-内核族收口.md`（内核数据面缺失族**全收口** #433~#442、
@@ -1307,6 +1307,47 @@
   修复前恒「—」）、VPP 侧同场景 `mf-…` 照常带状态（REST 行内 up/down/0/0）；**四套件 274/0/20、
   23/0/6、21/0/3、10/10（与基线逐项一致）**。证据 `docs/evidence/v3-round9-d444-port-runtime-columns.txt`、
   截图 `docs/images/round9-web-switch-ports-runtime-columns.png`。
+  **round10（v3.0.9.run 干净快照首装 + VPP/内核双线全功能走查，2026-10-10）**：用户指令——在**恢复为「干净」快照**的
+  nfvis-vm 上装 **GitHub Release 的 `nfvis-v3.0.9.run`**（sha256 `e67c4089…` 与发布记录逐字一致；宿主经代理
+  下载、上机复核），从零拟人化走查全部功能（CLI + Web）并验证**数据面 vpp↔kernel 往返**。链路：环境重建
+  （apt 全栈 + docker 代理 + 自备 alpine/debian12 镜像）→ `.run -y` 首装**自检 18/0/0**（#423 的 sysctl 单源
+  接管首装即生效）→ 首启一次性口令 → **真 pty 向导**（vpp/隔离核 2-5/VPP 2+3/1G=3/2M=768）→ 内核基线与
+  hostname/timezone/NTP/DNS/管理口（**宿主落地四处实读**，#424）→ **VPP 全族**：L2+BVI 宿主 ping 4/4、
+  L3 静态路由（FIB DPO 正确）、ACL（deny 计数三方吻合 + #341 ARP 放行 + #361 解绑撤销）、NAT44（vNIC 作 L3
+  接口，guest→宿主通、46 会话 i2o/o2i 吻合）、QoS/风暴（**NRestarts=0 零崩溃**，#421 保持）、**vNIC 源
+  SPAN（命令全表的「真机复验待执行」→ 完成：#425 受控 A/B，ingress 与 guest tx 1:1）**、DHCP server（真
+  guest 租约 + GW ping）、DNS 代理（宿主/guest 两路）、镜像 download 正反例 + upload、VNF 快照全链、
+  容器 exec/真 pty shell/超时口径 → **Web 浏览器黑盒**（Browser Use：总览/串口「只发回车」重绘 login 提示/
+  GUI exec/交换机来源列与 MAC 拉取/内核基线三方一致/趋势 SVG/运维归档下载/CLI 提交→SSE 事件卡实时出现）→
+  **切内核**（#426：VPP 被自动停、unbind 可用；内核侧 BVI/VNF virtio+tap/DHCP server/容器 veth/DNS/
+  LLDP 自研代理真帧/抓包 tcpdump/ACL nft 阻断-解绑闭环）→ **切回 vpp**（VPP 自动拉起、往返零残留）→
+  四套件复跑 **274/0/20、31/0/0（含现场）、23/0/2（跳过=无 NAT）、10/10**（与基线一致或更好；fulltest 首跑
+  263/14/17 经查为**夹具**问题——docker `alpine:3.20` tag 被我清场时误删，正是下面 R8-3 的现场）。
+  **新登记 4 条**（`docs/v3待做.md` 六）：**R8-1** oper 模式 `exit`/`quit` **不退出 CLI**（真 pty 44 次实证；
+  契约三处写「退出 CLI」）；**R8-2（中）** 内核数据面下域内到未知目的地流量经**管理口默认路由外泄**
+  （tcpdump 实证 ens160 带 guest 私网源地址出包；VPP 下为丢弃；文档未声明该语义）；**R8-3** 容器镜像
+  对宿主 docker 的标签副作用（上传落成 `<基名>:latest` 会抢占同名 tag；删除带走用户原 tag、留下自己的）；
+  **R8-4** `delete interfaces <if> disable` 与 set 同体写 `enabled=false`（能设不能删；fulltest 会留下该
+  残留）。另 6 条观察（手册「unbind 后 enable 即收敛」不成立需再重启一次；LLDP 物理口底座 -7 限制的
+  现场复核与报错人话化；DNS 首查超时 R4-2 复现；风暴计数 stats segment 实可读的改进线索等）。
+  证据 `docs/evidence/v3-round10-clean-install-walkthrough-vpp-kernel.txt`、截图
+  `docs/images/v3-round10-web-*.png`（4 张）。
+  **修复批（同日，决策 #445~#449，契约先行 + 子智能体实现）**：用户裁定「修，Web 同步修」。
+  **#445** oper 顶层 `exit`/`quit` 正常退出 CLI（repl 按执行前模式判定；config exit 只退模式、
+  脚本/向导不受影响；真 pty 三用例）；**#446** 内核数据面每个域 VRF 表补 **`unreachable default`**
+  兜底（v4+v6、最大度量防影子化、删 VRF 先回收；内核源码级依据；真机：域外目的地→域内
+  Destination unreachable、管理口 ens160 零泄漏，对照 round10 实证的私网源外泄）；
+  **#447** 容器镜像 Docker 引用推导 `DockerRefFor`（含冒号原样/否则 `:latest`；LoadImage 仅
+  引用不一致才重打——不再抢占用户 tag；删除对称；**Web 导入文案/openapi/校验文案同源同步**；
+  真机：异 ID `alpine:latest` 不被抢占、删除只清推导引用）；**#448** `delete interfaces <if>
+  disable` 改为删 `enabled` 字段（能设能删；真机 set→down / delete→up）；**#449** 交还/启用即
+  收敛：`ApplyInterface` 按快照收敛域归属 + **缺口 A**（真机抓出：稳态 enable 空修订不触发
+  apply、逐口补 master 亦不够）扩展为运维动作触发**整段重放**（复用 `EnsureConsistent`，与启动
+  恢复收敛同源；unbind 交还方向同样触发）——真机对照 round10：**仅 `unbind×2` 即全量收敛
+  （成员/master/地址/兜底/宿主 ping 全对）、`enable×2` 幂等「已按声明收敛」，不再需要二次重启**。
+  逐条红-绿 + 真机证据 `docs/evidence/v3-round11-d445-d449-fixes.txt`（`make check` rc=0；修复版四套件
+  **274/0/20、31/0/0、23/0/2、10/10**——与基线逐项一致）；观察②（LLDP 物理口底座
+  限制）已落地为报错人话化 + 手册 §8.10 写明，观察①代码化收口（#449）。
   **Web 控制面**：V1 不含（规格书 §12 V2 候选），已于**决策 #115** 启动 V2 增量 1——
   只读总览，内嵌进 nfvisd 同源托管于 `GET /api/v1/ui/`，前端**免构建**（原生 HTML/CSS/JS，无 npm）。
   新增端点/读物类型时必须同步：OpenAPI 契约、`routes_contract` 守护、`user_text` 守护（`.html/.js/.css`）。

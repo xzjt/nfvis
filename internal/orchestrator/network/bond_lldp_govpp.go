@@ -196,6 +196,14 @@ func (g *govppLldpClient) LldpSetInterface(ifname string, enable bool) error {
 		return err
 	}
 	if reply.Retval != 0 {
+		// VPP 对物理（DPDK）口一律返回 Invalid value（实测 -7；vhost-user/BVI 口可启用）——
+		// 底座限制如实告知并给可照做的替代，不把裸错误码丢给操作者（round10 观察项落地：报错如实 + 可照做替代）。
+		if reply.Retval == -7 {
+			return fmt.Errorf("sw_interface_set_lldp(if=%s,enable=%v) retval=%d："+
+				"当前数据面底座拒绝在该接口上启用 LLDP——DPDK 物理口不受支持，"+
+				"vhost-user/BVI 等虚拟接口可用（可改用受支持的口，或在内核数据面使用 LLDP）",
+				ifname, enable, reply.Retval)
+		}
 		return fmt.Errorf("sw_interface_set_lldp(if=%s,enable=%v) retval=%d", ifname, enable, reply.Retval)
 	}
 	return nil

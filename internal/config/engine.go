@@ -1091,7 +1091,7 @@ func (e *Engine) checkImages(cfg *model.Config) []model.ValidateError {
 				msg += "（仓库为空，先用 request images upload 导入或 request images download 拉取）"
 			}
 			if want == "container-image" {
-				msg += "。容器镜像的可用名就是仓库中的镜像名（导入时已按该名重打标签）"
+				msg += "。容器镜像的可用名就是仓库中的镜像名（导入会按该名准备 Docker 引用）"
 			}
 			errs = append(errs, model.ValidateError{Path: path, Message: msg})
 			return

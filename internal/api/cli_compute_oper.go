@@ -29,6 +29,7 @@ import (
 	"github.com/xzjt/nfvis/internal/images"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
+	"github.com/xzjt/nfvis/internal/orchestrator/container"
 	"github.com/xzjt/nfvis/internal/schema"
 )
 
@@ -649,16 +650,18 @@ func (x *cliExecutor) imagesUpload(user string, rest []string) string {
 	return out
 }
 
-// containerTagNote 容器镜像导入后的命名说明（决策 #312）：产品按仓库目录项名重打标签
-// `<名>:latest`（决策 #160），故配置里唯一可用名就是目录项名；归档内嵌 tag 如实列出，
-// 让「tar 里的 tag 去哪了」有据可查（重命名不再静默）。
+// containerTagNote 容器镜像导入后的命名说明（决策 #312/#447）：Docker 侧引用按**目录项名的
+// 推导引用**（container.DockerRefFor：含冒号原样、不含冒号 `<名>:latest`）对齐；归档内嵌 tag
+// 如实列出，让「tar 里的 tag 去哪了」有据可查（重命名不再静默，也不再恒宣称「已重打」）。
+// 配置里唯一可用名仍是目录项名（引用计数/删除守卫同此单一身份口径）。
 func containerTagNote(name string, tags []string) string {
+	ref := container.DockerRefFor(name)
 	if len(tags) == 0 {
-		return fmt.Sprintf("（容器镜像）已按仓库名重打标签 %s:latest；归档未内嵌 tag（或未解析到 manifest.json）——配置中请用 %s 引用。\n",
-			name, name)
+		return fmt.Sprintf("（容器镜像）归档未内嵌 tag（或未解析到 manifest.json）；Docker 侧引用为 %s——配置中请用 %s 引用。\n",
+			ref, name)
 	}
-	return fmt.Sprintf("（容器镜像）归档内嵌 tag 为 %s；已按仓库名重打标签 %s:latest——配置中请用 %s 引用。\n",
-		strings.Join(tags, ", "), name, name)
+	return fmt.Sprintf("（容器镜像）归档内嵌 tag 为 %s；Docker 侧引用为 %s（与内嵌 tag 不一致时已自动重打）——配置中请用 %s 引用。\n",
+		strings.Join(tags, ", "), ref, name)
 }
 
 // imagesDownload：request images download name <n> type <t> url <url> [sha256 <hex>]

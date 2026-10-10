@@ -226,6 +226,15 @@ func TestKernelDataPlaneRealKernel(t *testing.T) {
 	if !ztIsMasterOf(t, ztBr, "vr-"+ztBr) {
 		t.Error("bridge 未入网关 VRF")
 	}
+	// 决策 #446：网关域 VRF 表内必须有 `unreachable default` 兜底（v4/v6 两族）——域内到未知
+	// 目的地判不可达，不回落宿主 main 表默认路由经管理口外泄（round10 现场）。
+	gwTable := VRFTableID(GatewayVRFName(ztBr))
+	if out := ztRun(t, "ip", "route", "show", "table", itoa(gwTable)); !strings.Contains(out, "unreachable default") {
+		t.Errorf("网关域 VRF 表 %d 缺 v4 unreachable default 兜底：\n%s", gwTable, out)
+	}
+	if out := ztRun(t, "ip", "-6", "route", "show", "table", itoa(gwTable)); !strings.Contains(out, "unreachable default") {
+		t.Errorf("网关域 VRF 表 %d 缺 v6 unreachable default 兜底：\n%s", gwTable, out)
+	}
 
 	// 幂等：同一声明再下一次不应报错。
 	if err := p.ApplyBridgeDomain(ctx, vs); err != nil {
@@ -254,6 +263,13 @@ func TestKernelDataPlaneRealKernel(t *testing.T) {
 	out := ztRun(t, "ip", "route", "show", "table", itoa(table))
 	if !strings.Contains(out, "10.98.99.0/24") {
 		t.Errorf("静态路由未进 VRF 表 %d：\n%s", table, out)
+	}
+	// 决策 #446：域 VRF 表内必须有 `unreachable default` 兜底（v4/v6 两族）。
+	if !strings.Contains(out, "unreachable default") {
+		t.Errorf("域 VRF 表 %d 缺 v4 unreachable default 兜底：\n%s", table, out)
+	}
+	if out6 := ztRun(t, "ip", "-6", "route", "show", "table", itoa(table)); !strings.Contains(out6, "unreachable default") {
+		t.Errorf("域 VRF 表 %d 缺 v6 unreachable default 兜底：\n%s", table, out6)
 	}
 	// 读视图（与上面独立事实源互为对照）。
 	rows, err := p.Routes(ctx, ztVrf)
@@ -300,11 +316,26 @@ func TestKernelDataPlaneRealKernel(t *testing.T) {
 	if ztLinkExists(t, ztVrf) || ztLinkExists(t, subif) {
 		t.Error("VRF 或 vlan 子接口未回收")
 	}
+	// 决策 #446：删 VRF 前兜底已回收（两族；不把孤立路由留给内核——reject 路由不归属 VRF
+	// 设备，设备删除不会连带回收它）。
+	if out := ztRun(t, "ip", "route", "show", "table", itoa(table)); strings.Contains(out, "unreachable") {
+		t.Errorf("VRF 删除后 v4 兜底路由仍在表 %d：\n%s", table, out)
+	}
+	if out := ztRun(t, "ip", "-6", "route", "show", "table", itoa(table)); strings.Contains(out, "unreachable") {
+		t.Errorf("VRF 删除后 v6 兜底路由仍在表 %d：\n%s", table, out)
+	}
 	if err := p.DeleteBridgeDomain(ctx, ztBr); err != nil {
 		t.Fatalf("DeleteBridgeDomain: %v", err)
 	}
 	if ztLinkExists(t, ztBr) {
 		t.Error("bridge 未删除")
+	}
+	// 决策 #446：网关域 VRF 的兜底路由随设备一并回收（v4/v6 两族）。
+	if out := ztRun(t, "ip", "route", "show", "table", itoa(gwTable)); strings.Contains(out, "unreachable") {
+		t.Errorf("网关 VRF 删除后 v4 兜底路由仍在表 %d：\n%s", gwTable, out)
+	}
+	if out := ztRun(t, "ip", "-6", "route", "show", "table", itoa(gwTable)); strings.Contains(out, "unreachable") {
+		t.Errorf("网关 VRF 删除后 v6 兜底路由仍在表 %d：\n%s", gwTable, out)
 	}
 }
 
