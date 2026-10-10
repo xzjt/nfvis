@@ -1,0 +1,129 @@
+NFViS v3 · round7：Web 控制面浏览器黑盒复核（#439 DNS 代理运行态块 / #441+#442 交换机端口派生条目名）
+=====================================================================================================
+
+日期/分支：2026-10-10，`v3`（起点 HEAD `945af39`；本轮**无代码改动**——纯复核 + 登记）
+由来：`docs/v3-交接-2026-10-10-内核族收口.md` §3.1（「唯一还没做的小复核」）
+方式：Browser Use（ZCode 内嵌浏览器）**纯 GUI 黑盒**（真实点击/填表/登录，无 JS 注入）+ 独立事实源交叉
+      核对（CLI / REST / `ip` / `ss` / `journalctl`）
+结论：**两个测试点全部通过**（三面同源 + 截图齐全）；顺带真机抓到两条新问题（**R7-1 中 / R7-2 低**，
+      见 §3），已登记 `docs/v3待做.md` 五，**未改代码**。
+
+§0 现场准备（内核数据面；测完已全量还原，见 §4）
+------------------------------------------------
+- nfvis-vm：发布件 **3.0.8**（交接 §2 收尾态）；起点数据面 `vpp`、两口 DPDK、告警仅既有
+  `HUGEPAGE_POOL_ORPHAN`。
+- 按交接 §6 固定动作切内核（`set system dataplane kernel`，rev 443 + restart + 两口
+  `unbind-dpdk to-driver vmxnet3`），再一次提交（rev 444）建全套测试现场：
+  - `ct-vs`：L2 + 网关 `192.168.99.1/24` + `ports 1 interface ens192`；
+  - 容器 `ct-a`：`alpine:3.20`、`command /bin/sleep`、`args 3600`、
+    `interfaces eth0 type memif virtual-switch ct-vs`；
+  - `set system dns proxy server 223.5.5.5`（全局上游，数据面中立）。
+- 准备完成时的独立事实源：
+  - `ip -br link` → `nfvisct7246f7c0@if103`（与 round6 同一命名哈希）；
+  - `ls /sys/class/net/ct-vs/brif/` → `ens192 nfvisct7246f7c0`；
+  - `ss -lunp` → `192.168.99.1%vr-ct-vs:53`（nfvisd 持有）；
+  - CLI `show dns proxy` 运行态块在场（域 ct-vs ← 上游 223.5.5.5）。
+
+§1 测试点 ①：#439 —— 「系统」页「数据面 DNS 代理」运行态块（Web）
+-----------------------------------------------------------------
+- 页面事实（Browser Use：GUI 登录 admin → 点导航「系统」；DOM 快照 + 截图
+  `docs/images/round7-web-system-dns-proxy-runtime.png`），四行：
+  - 数据面 DNS 代理：**启用**
+  - 全局上游：**223.5.5.5**
+  - 按域上游：—
+  - 运行态：**服务中 1 个落点 / 已应答 0 / SERVFAIL 0**
+- 三方同源交叉核对（同一时刻）：
+  - CLI `show dns proxy` → `域 ct-vs（vr-ct-vs）：192.168.99.1 ← 上游 223.5.5.5` /
+    `已应答 0 / 已回 SERVFAIL 0 / 回包失败 0`；
+  - REST `GET /dns/proxy` → `"runtime":{"domains":[{"name":"ct-vs","addresses":["192.168.99.1"],
+    "upstreams":["223.5.5.5"],"vrf_device":"vr-ct-vs"}],"answered":0,"servfail":0,"send_fail":0}`；
+  - 独立事实源 `ss` → socket 实际绑定 `192.168.99.1%vr-ct-vs:53`。
+- 结论：**通过**。运行态行（含「服务中 N 个落点」）只在服务端发出 `runtime` 时渲染——VPP 数据面/未启用
+  的负向本轮未测（如实登记；实现依据见 `api/dnsproxy_runtime.go` 的 omitempty 口径）。
+- 页面级错误表现：无（无错误横幅/空区）；浏览器工具未暴露控制台日志读取能力，如实登记未能收集控制台。
+
+§2 测试点 ②：#441/#442 —— 「虚拟交换机 → ct-vs 详情」成员端口派生条目名（Web）
+-------------------------------------------------------------------------------
+- 页面事实（GUI：导航「虚拟交换机」→ 列表点「详情」；DOM 快照 + 截图
+  `docs/images/round7-web-switch-ports-derived-name.png`），成员端口表两行：
+  - `ens192` / 配置 / up / up；
+  - **`nfvisct7246f7c0` / 容器声明** / — / — / — / —。
+- 三方同源交叉核对：
+  - CLI `show virtual-switches ct-vs ports` → 同一端口名 `nfvisct7246f7c0`（container 只读，
+    附「在容器侧删除」指引）；
+  - REST `GET /virtual-switches/ct-vs/ports` → `{"source":"container","port":"nfvisct7246f7c0",
+    "container":"ct-a","container_interface":"eth0"}`；
+  - 独立事实源 `ip -br link` → `nfvisct7246f7c0@if103`（**逐字一致**，非 VPP 逻辑名 `mf-…`）。
+- 结论：**通过**（派生条目名 = 数据面真实名）。
+
+§3 本轮真机新发现（如实登记，未改代码）
+-----------------------------------------
+**R7-1（中）内核数据面下恢复收敛告警不随事实消解（`ReconcileRecoveryAlarms` 为空操作）**
+- 时间线（证据 = journal + CLI `show alarms active` + Web 总览告警卡截图
+  `docs/images/round7-web-overview-stale-recovery-alarms.png`，全程未改判定条件）：
+  - `09:14:40` 按固定动作切内核并 restart（此刻两口仍绑 vfio-pci，内核里没有它们）；
+  - `09:14:41` 内核侧恢复重放对 `interfaces/ens192|ens224` 失败 → 落 **error 级
+    `RECOVERY_IFACE_MISSING`×2**（journal「网络恢复收敛未收敛项」同刻在场；**此刻告警是对的**）；
+  - `09:14:5x` 两口交还内核（unbind → vmxnet3）→ 设备出现、ens192 入桥 UP——**事实已愈合**；
+  - 此后多次取样（CLI + Web）两条 error 告警**一直在**，文案仍说「该口当前仍绑定在 vfio-pci 驱动上
+    （PCI 0000:0b:00.0）、内核里没有它」——与同刻 `ip -br link`（ens192 UP / ens224 DOWN 按配置）相反；
+  - `09:19:59` restart nfvis → `09:20:04`「恢复收敛完成」（本次重放成功）→ 告警被 `alarms.Sync`
+    **清掉**（随后「无 active 告警」）。跨度 5 分 18 秒 ≈ **21 个 15s 巡检周期**不消解。
+    现场重启后完整自愈（bridge 成员/DNS socket 新 pid/容器 running 均复核对过）。
+- 根因（代码）：`internal/orchestrator/netkernel/api_surface.go:47`
+  `func (p *Provider) ReconcileRecoveryAlarms(context.Context, model.Config) []error { return nil }`
+  ——注释把它归入「VPP 侧登记型对账，内核无对应族」。但内核侧**确实会落这一族告警**
+  （`netkernel/recovery.go:42` 按 `network.AlarmIfaceMissing`/`AlarmUnconverged` 落），而内核侧没有任何
+  按来源的廉价复核路径：15s 巡检不消解，只有下一次**全量重放**（nfvisd 重启/换数据面）末尾的 `Sync`
+  才会重估。与 VPP 侧口径（决策 #333/#367：口已出现即消解、来源对象已删即消解）不一致。
+- **VPP 侧对照（同轮实测）**：`09:20:50` 切回 vpp 的重启窗口落同类告警
+  （`接口在 VPP 中不存在: ens192`）→ `bind-dpdk`×2 + `request vpp restart`（`09:21:08`「恢复收敛完成」）
+  后告警**当场消解**（随后「无 active 告警」）——VPP 侧有恢复路径，内核侧没有。
+- 影响：走数据面切换**固定动作**必然产生两条过期 error 告警；不重启则永远看到「端口缺失/还在 vfio」
+  的假象（`show alarms`/Web/诊断包一致可见）。属「告警不随事实消解」族（#188/#321/#333/#367 同一纪律）。
+- 修法方向（待立项、契约先行）：给内核侧实现按来源廉价复核——「来源对象已不在 committed 声明 → 消解」
+  部分与 VPP 侧配置驱动逻辑同源可共享；`interfaces/<name>` 的存在性判据换成内核实况（设备存在）。
+  同纪律：只复核、不触发重放、不 Raise。
+
+**R7-2（低）内核数据面下 Web 交换机详情页「容器派生端口」的运行态列为「—」（CLI 同行有 up/up）**
+- 现象（同一现场、同一时刻的对照）：
+  - CLI `show virtual-switches ct-vs ports` → `nfvisct7246f7c0  container  up  up  -  -`；
+  - Web 详情页同一行 → 管理状态/链路/Rx/Tx 全「—」（截图同 §2）。
+- 根因（口径差）：
+  - Web 的运行态列取 REST `GET /virtual-switches/{name}` 的 `statistics.ports`（`api/resources.go`
+    的 `vswitchStatistics`）；该列表内核侧来自 `BridgeDomains()`，其中**产品自持的容器宿主端 veth 按
+    决策 #441 有意隐藏**（`netkernel/api_surface.go:242` 的 `isProductContainerVethPort` 过滤）⇒
+    派生条目拿不到运行态。实测该 REST 原文：`"statistics":{"bd_id":0,"ports":[{"admin":true,
+    "link":true,"port":"ens192","sw_if_index":0}]}`（只有 ens192，无 `nfvisct…`）。
+  - CLI 同一读视图按**端口名**合并接口运行态（`api/cli_vswitch_ports.go` 的 `ifaceStates()`）⇒ 能取到。
+  - VPP 数据面下该差异**预期不存在**（VPP 侧 statistics 不隐藏 memif 派生口）——**未复核，如实标为推断**。
+- 影响：内核数据面下 Web 看不出容器 vNIC 成员口的 up/down（三面同源原则下的一处信息缺失，不影响功能）。
+- 修法方向（待定裁）：不动「宿主端不进用户端口视图」前提，把派生条目的运行态按名补进 Web 所用读物
+  （REST 补 state 字段或 Web 换读法），保持三面同源。
+
+§4 清场与环境还原
+------------------
+- **内核模式下**一次提交删除（rev 445）：`delete container-functions ct-a` +
+  `delete virtual-switches ct-vs` + `delete system dns proxy server 223.5.5.5`。
+  残留核对全为零：无 `nfvisct*`/`ct-vs`/`vr-ct-vs`（`ip -br link`/`ls /sys/class/net`）、
+  无 `:53` 监听（仅 systemd-resolve）、无容器、`display set` 无残留、无 active 告警。
+- 切回 vpp（rev 446）：restart + `bind-dpdk`×2 + `request vpp restart` →
+  `show vpp`：`dataplane: vpp / version 26.06-release / connected: yes / pending_restart: no`；
+  `show interfaces physical`：ens192/ens224 `dpdk` 在位（ens224 down 按配置）。
+- 配置基线逐行复核与开工前一致（display set 全量比对，含 3 条口令哈希注记行）；
+  既有 `HUGEPAGE_POOL_ORPHAN` 在 vpp 恢复后由 60s 巡检按内核实况重建（`09:21:49`，与交接 §2 登记一致）。
+- **预先存在的孤儿内核对象（非本轮产生，未动）**：bridge `vs-lan`（成员 `vx-a`）、`vs-dmz`、
+  `srvsw`、VRF `vr-srvsw`（原样保留）。
+
+§5 代码/测试面
+---------------
+- **本轮无代码改动**（纯复核 + 登记）；`make check` 仅作提交前门禁（docs 改动）。
+- 浏览器工件：三张截图为 ZCode 浏览器工件目录导出，已复制为
+  `docs/images/round7-web-system-dns-proxy-runtime.png`、
+  `docs/images/round7-web-switch-ports-derived-name.png`、
+  `docs/images/round7-web-overview-stale-recovery-alarms.png`。
+
+§6 登记去向
+------------
+- `docs/v3待做.md` 新增「五、round7 登记」：R7-1（中）、R7-2（低）。
+- 交接文件 §3.1 标注完成并指向本证据。
