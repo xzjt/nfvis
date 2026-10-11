@@ -98,7 +98,7 @@ var uiOpsFamilyControls = map[string]map[string]uiPageControl{
 		"cap-iface":      {uiClassHide, "POST /capture"},   // 抓包接口（S）
 		"cap-count":      {uiClassHide, "POST /capture"},   // 报文数（S）
 		"cap-start-btn":  {uiClassHide, "POST /capture"},   // 开始抓包（S）
-		"cap-stop-btn":   {uiClassHide, "DELETE /capture"}, // 停止（丢弃）（S）
+		"cap-stop-btn":   {uiClassHide, "DELETE /capture"}, // 停止（保留数据；决策 #465）（S）
 		"cap-export-btn": {uiClassHide, "DELETE /capture"}, // 停止并导出 pcap（S）
 	},
 	// #/ops/diagnostics 诊断

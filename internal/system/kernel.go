@@ -253,7 +253,8 @@ func HugepageRuntimeNotes(d KernelDesired, a KernelActual) []string {
 }
 
 // GenerateBaseline 由期望基线生成 GRUB 片段与 fstab 行（安装器与 CLI 共用，
-// 保证"首次装机"与"后续调整"同源）。tuned profile 另写文件，不出现在 cmdline。
+// 保证"首次装机"与"后续调整"同源；fstab 部分为**每个已声明页尺寸一行**，可能多行）。
+// tuned profile 另写文件，不出现在 cmdline。
 func GenerateBaseline(d KernelDesired) (grubFragment string, fstabLine string) {
 	var params []string
 	// 决策 #347：内核启动基线的默认大页尺寸恒为 2M（数据面/VPP 的默认尺寸），不随池声明变化。
@@ -317,13 +318,27 @@ func GenerateBaseline(d KernelDesired) (grubFragment string, fstabLine string) {
 	if d.TunedProfile != "" {
 		b.WriteString("# tuned profile: " + d.TunedProfile + "\n")
 	}
-	fstab := ""
-	if d.Hugepages1G > 0 {
-		fstab = "nodev /dev/hugepages hugetlbfs defaults,pagesize=1G 0 0"
-	} else if d.Hugepages2M > 0 {
-		fstab = "nodev /dev/hugepages hugetlbfs defaults,pagesize=2M 0 0"
+	// 决策 #459（修 R13-E）：为**每个已声明页尺寸**各挂一个 hugetlbfs 挂载点。
+	// 此前只挂一个（1G 优先），同时声明 1G+2M 时 2M 后备的 guest 找不到挂载点——libvirt 起域
+	// 报 "Unable to find any usable hugetlbfs mount for 2048 KiB"（真机实测）。libvirt 按
+	// /proc/mounts 里的 pagesize= 匹配挂载点（路径不限）；主挂载点 /dev/hugepages 保持旧口径
+	// （1G 优先、否则 2M，向后兼容），另一尺寸用 /dev/hugepages-<size>（systemd 挂载单元会自动
+	// 创建挂载点目录；/dev 为 devtmpfs，重启后由挂载单元重建）。
+	primary := ""
+	switch {
+	case d.Hugepages1G > 0:
+		primary = "1G"
+	case d.Hugepages2M > 0:
+		primary = "2M"
 	}
-	return b.String(), fstab
+	var fstabLines []string
+	if primary != "" {
+		fstabLines = append(fstabLines, fmt.Sprintf("nodev /dev/hugepages hugetlbfs defaults,pagesize=%s 0 0", primary))
+	}
+	if d.Hugepages1G > 0 && d.Hugepages2M > 0 {
+		fstabLines = append(fstabLines, "nodev /dev/hugepages-2M hugetlbfs defaults,pagesize=2M 0 0")
+	}
+	return b.String(), strings.Join(fstabLines, "\n")
 }
 
 // DesiredFromConfig 由 committed 配置派生期望基线（resource-pools 为唯一真源）。

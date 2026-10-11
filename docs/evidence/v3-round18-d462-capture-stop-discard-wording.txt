@@ -1,0 +1,87 @@
+# v3 round18 证据：收口观察⑤——抓包「`stop` ≠ 导出」的后果明确化（决策 #462）
+
+日期：2026-10-11　　分支：`v3`　　VM：nfvis-lab（`3.0.10~dev8`，交叉编译换装二进制）
+
+## 0. 一句话
+
+round12/13 登记的「`request capture stop`＝停止且不导出，先 stop 后 export 得到『当前无抓包会话』——
+**与操作直觉相反**」本轮收口。真机复现后定位到**根因比「文案不清」更硬**：VPP 侧 pcap trace 落的本来就是
+**文件**，`Stop(export=false)` 会**显式 `os.Remove` 掉它**——即 `stop` 是**停止且丢弃**，操作者按
+「先 stop 冻结、再 export 取文件」走，报文**已经没了**。本轮按观察项自己给出的两个选项里的
+**「文案明示」**落地（改语义会动两个数据面 + 会话状态机，超出本条范围）：**CLI 三处 + 契约 + 手册**
+把后果写清，**语义与端点一律不动**。
+
+## 1. 真机复现（`dev7`，改前逐字）
+
+```
+$ nfvis-cli -c 'request capture start interface ens192 count 100'
+已开始抓包（接口 ens192，count 100（环形缓冲深度，超出丢最旧））。停止/导出：request capture stop|export
+
+$ nfvis-cli -c 'request capture stop'
+已停止抓包（未导出）。                     ← 没写明「缓冲被丢弃」
+
+$ nfvis-cli -c 'request capture export'
+%% 当前无抓包会话                          ← 报文已随之丢失
+```
+
+代码侧核对（`internal/orchestrator/network/capture.go` 的 `Stop`）：
+
+```go
+if captured == 0 { _ = os.Remove(p.vppOut); return CaptureFile{}, nil }
+if !export       { _ = os.Remove(p.vppOut); return CaptureFile{}, nil }   // ← 丢弃就发生在这里
+... moveFile(p.vppOut, dst)                                              // export=true 才搬进导出目录
+```
+
+即「数据本来就在磁盘上，`stop` 把它删了」——**不是没抓到，是被扔掉**。
+
+## 2. 改动（决策 #462；只改文案，不改语义）
+
+| 位置 | 改后 |
+|---|---|
+| `request capture start` 收尾提示 | `结束并取走 pcap：request capture export（停止并导出）；request capture stop 只停止并丢弃缓冲。` |
+| `request capture stop` 输出 | `已停止抓包（未导出，抓包缓冲已丢弃）。` + `如需 pcap 文件，请直接用 request capture export（它在停止的同时导出）。` |
+| `request capture export` 无会话 | `%% 当前无抓包会话（提示：request capture stop 会丢弃缓冲；「停止并导出」请用 request capture export）` |
+| `docs/NFViS-CLI命令全表.md`（`capture stop` 行） | 写明明示口径（**停止且丢弃**；先 stop 再 export 会得到「无会话」；CLI 三处已明示） |
+| `docs/NFViS-用户手册.md` §10.4 | 命令注释改「只停止并**丢弃**缓冲」；新增 ⚠️ 段说明「两条命令都会结束抓包，区别是要不要那个文件」 |
+
+**不改**：`stop`/`export` 的语义与端点、`Stop(export bool)` 接口、Web 按钮（已写「停止（丢弃）」）、
+两个数据面的实现。**落点**：`internal/api/cli_compute_oper.go`（三处文案）。
+
+## 3. 红-绿
+
+把三处文案 sed 回旧措辞后：
+
+```
+--- FAIL: TestCLICaptureStopDiscardWording (internal/api)
+    capture_test.go:149: start 输出应明示「stop 丢弃缓冲、取文件用 export」：已开始抓包（接口 ens2f0…）。
+        停止/导出：request capture stop|export
+```
+
+恢复 ⇒ PASS。守护覆盖三处（start 提示 / stop 后果 / export 无会话的照做提示）。
+
+## 4. 真机复验（`3.0.10~dev8`）
+
+```
+$ nfvis-cli -c 'request capture start interface ens192 count 100'
+已开始抓包（接口 ens192，count 100（环形缓冲深度，超出丢最旧））。
+结束并取走 pcap：request capture export（停止并导出）；request capture stop 只停止并丢弃缓冲。
+
+$ nfvis-cli -c 'request capture stop'
+已停止抓包（未导出，抓包缓冲已丢弃）。
+如需 pcap 文件，请直接用 request capture export（它在停止的同时导出）。
+
+$ nfvis-cli -c 'request capture export'
+%% 当前无抓包会话（提示：request capture stop 会丢弃缓冲；「停止并导出」请用 request capture export）
+
+# 正控：start → export 正常走通（本口无对端流量，如实报「未捕获到报文，无文件导出」）
+$ nfvis-cli -c 'request capture start interface ens192 count 100' && nfvis-cli -c 'request capture export name round18-check'
+已停止抓包：未捕获到报文，无文件导出。
+```
+
+## 5. 边界（如实）
+
+- **语义未变**：`stop` 仍然丢弃缓冲（本条按观察项的「或文案明示」选项落地）。若要改成
+  「stop 冻结、export 再取」，需在**两个数据面**（VPP 文件模型 / 内核 tcpdump）各加一个
+  「已停止待导出」的会话状态 + 契约/Web 同步——属**行为变更**，值得单独定裁（已在
+  `docs/v3待做.md` §七末登记为未立项候选）。
+- `make check` 七项 RC=0（决策计数 **364**）。

@@ -1,0 +1,96 @@
+# v3 round16 证据：收口观察①——VM 读视图给「有效值」+ `cores_assigned`（决策 #461）
+
+日期：2026-10-11　　分支：`v3`　　VM：nfvis-lab（`3.0.10~dev7`，交叉编译换装二进制）
+
+## 0. 一句话
+
+round12/13 两轮登记、也是观察池里最实在的一条：**Web VM 详情「资源」块的 vCPU 绑定 / 绑定核 /
+内存后端 / 大页大小 恒「—」，而运行态明明有事实**。本轮定位到**字段级**根因并收口：三项是
+「配置未显式声明 → 读视图原样回显空值」，一项是「**契约声明了 `vcpu.cores_assigned`、实现从未发过**」。
+修后真机三面（CLI/REST/Web）都显示有效值；`NUMA 节点`按设计**仍「—」**（未声明＝无 NUMA 亲和，不兜底）。
+
+## 1. 根因（字段级，同 #332/#353 方向）
+
+| 界面字段 | 读视图来源 | 为什么「—」 |
+|---|---|---|
+| vCPU 绑定 | `vcpu.pin`（`*bool,omitempty`） | 配置未声明 ⇒ 回显空 ⇒ 界面「—」，而**产品语义缺省是 true**（绑核是缺省行为） |
+| 内存后端 | `memory.backing`（`omitempty`） | 同上；**语义缺省 hugepage** |
+| 大页大小 | `memory.hugepage_size`（`omitempty`） | 同上；**语义缺省＝资源池主池页尺寸** |
+| 绑定核 | `vcpu.cores_assigned` | **契约声明了、任何 Go 代码都没发过**（`grep -rn cores_assigned --include=*.go` 零命中） |
+| NUMA 节点 | `memory.numa_node` | 未声明＝**确实没有** NUMA 亲和 ⇒ 「—」**如实**，本条**不**兜底 |
+
+## 2. 改动（决策 #461；契约先行）
+
+- `internal/model/resources.go`：**`EffectiveVM(cfg, vm)` 单源**——补有**确定缺省**的三项
+  （`pin`⇒true、`backing`⇒hugepage、`hugepage_size`⇒资源池主池页尺寸，页尺寸解析复用 #458 的
+  `vmHugepageSize`）；`backing=normal` 时**不**兜底页尺寸（普通内存不用大页，否则谎报）。
+  另加 **`AssignedCores(cfg, vmName)`**——取资源池账本分配到的绑核（与 `show resource-pools` 的
+  「已分配」、域 XML 的 `vcpupin` 同源）。
+- `internal/api/vm.go`：读视图类型 `vmResponse` 增加 `vmCPUView`（内嵌 `model.VMCpu` + `cores_assigned`），
+  由 `vmReadView()` 组装——详情与列表**同一实现**。
+  ⚠️ `cores_assigned` **刻意不加进 `model.VMCpu`**：`handlePutVM` 是 `cfg.VirtualMachineFunctions[idx] = in`
+  整体替换，加进配置模型会让 GET→PUT 把运行态**回灌进配置**。
+- `internal/api/cli_compute_show.go`：CLI 的列表/详情**同一渲染**（`EffectiveVM` + `injectCoresAssigned`），
+  与 REST 逐字同源。
+- `docs/NFViS-openapi.yaml`：四处字段 description 写明「读视图给有效值 / 运行态派生（未分到则省略）」；
+  `openapi.json` 以 `--write` 同步。
+
+## 3. 红-绿
+
+把 `EffectiveVM` 改成直接返回入参后：
+
+```
+--- FAIL: TestEffectiveVMFillsDefaults (internal/model)
+    effective_vm_test.go:23: pin 未声明时有效值应为 true：{Count:2 Pin:<nil>}
+--- FAIL: TestVMReadViewEffectiveAndAssignedCores (internal/api)
+    vm_readview_effective_test.go:48: pin 未声明时应给有效值 true: <nil>
+```
+
+恢复 ⇒ 双双 PASS。守护含：显式值一律保留（含 `pin=false` 这种与缺省相反的）、`backing=normal`
+不兜底页尺寸、`AssignedCores` 未分到时回 nil、以及**类型级**「配置模型不接受 `cores_assigned`」
+（GET→PUT 往返不回灌）。
+
+## 4. 真机三面复验（`3.0.10~dev7`）
+
+建一台**未声明** `pin`/`memory.backing`/`memory.hugepage_size` 的 VM（`vcpu count 2` + `size-mb 2048`）：
+
+```
+$ nfvis-cli -c 'show virtual-machine-functions'
+Name             State      vCPU  Memory       Image            Serial
+fw-vm            shutoff    2     2048MB/1G    alpine           true      ← 内存列出现有效页尺寸（改前只有 2048MB）
+
+$ nfvis-cli -c 'show virtual-machine-functions fw-vm detail'
+memory { backing hugepage; hugepage-size 1G; size-mb 2048; }          ← 两项有效值（改前被 omitempty 略去）
+vcpu { cores-assigned [4 5]; count 2; pin true; }                     ← 三项都不再缺（改前 cores-assigned 从未出现）
+
+$ curl -sk .../api/v1/virtual-machine-functions/fw-vm | python3 -c '…'
+"vcpu": {"count": 2, "pin": true, "cores_assigned": [4, 5]},
+"memory": {"size_mb": 2048, "hugepage_size": "1G", "backing": "hugepage"}   ← REST 同值
+```
+
+**Web 控制台（Browser Use 黑盒）**：`#/compute/vms/fw-vm` 概览页「资源」块渲染为
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| vCPU 绑定 | — | **是** |
+| 绑定核 | — | **4,5** |
+| 内存后端 | — | **大页** |
+| 大页大小 | — | **1G** |
+| NUMA 节点 | — | **—**（如实：未声明＝无 NUMA 亲和） |
+
+截图 `docs/images/v3-round16-web-vm-resources-effective.png`。
+
+## 5. 现场顺带修正（如实登记）
+
+排查时发现**资源池列表顺序**被前面的套件运行改成了 **2M 在前**（`set resource-pools hugepages
+page-size …` 是追加语义，套件清场只删对象不还原列表顺序）⇒ 当时 VM 的「主池缺省」落到 2M、
+`size-mb 2048` 提交被正确拒绝（`资源池大页 2M 不足：需要 1024，空闲 768`）。已按 wizard 的书写顺序
+（1G 在前）还原：一次提交里 `delete resource-pools hugepages page-size 2M` + 重新 `set … 2M count 768`，
+使列表回到 `1G, 2M`（rev 211）——**这是交接 §2 记录的环境基线**，不是产品改动。
+
+## 6. 边界（如实）
+
+- 只改**读视图**，不改行为：`pin` 的账本/域生成缺省本来就是 true，本条只是让读视图与之一致。
+- `cores_assigned` 是**账本口径**（域正是按它生成 `vcpupin`），不是逐个 `virsh` 现查；域被手工改动时
+  读视图不会跟着变——与 `show resource-pools` 的「已分配」同源、彼此一致。
+- `make check` 七项 RC=0（决策计数 **363**）。

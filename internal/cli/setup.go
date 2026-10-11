@@ -346,8 +346,9 @@ func planStatements(p SetupPlan) []string {
 }
 
 // setupPlanWarnings 计划预览的告警行（纯函数，便于单测；决策 #353）。
-// 数据面（VPP 主堆）固定占用 1 个 1G 页且无配置键可释放：1G 池只声明 1 页时，
+// 数据面（VPP）固定占用 1 个 1G 页且无配置键可释放：1G 池只声明 1 页时，
 // 数据面占走唯一那页，再起不了 VNF——声明前就该看见，而不是等 VNF 起不来才发现。
+// （该页的归属措辞见决策 #460：实测是 DPDK EAL 段，不是 VPP 主堆；本处的计数与告警逻辑不变。）
 func setupPlanWarnings(p SetupPlan) []string {
 	if p.HP1G > 0 && p.HP1G < 2 {
 		return []string{fmt.Sprintf("⚠ 1G 池仅 %d 页：数据面占 1，无法再起 VNF（装 VNF 建议 ≥2）", p.HP1G)}

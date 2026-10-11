@@ -156,6 +156,9 @@ type purgeTarget struct {
 // 决策 #365：**运行态残留一并清**——历史时序库 metrics.db（单文件）与 DHCP 租约目录
 // `/var/lib/nfvis/dhcp`（决策 #359）。它们是「数据分区」的运行数据，手册 §10.13 早已写明
 // format-data 会清 metrics.db；此前实现漏了这两项，属文档与实现相悖（round142 体检 A3/D7）。
+//
+// 决策 #466：抓包会话记录（单文件）随「抓包文件」目录一起清——它是该目录的索引，
+// 目录清空后记录若还在，指向的必是死文件。
 func (m *Manager) purgeTargets() []purgeTarget {
 	return []purgeTarget{
 		{"备份归档", m.cfg.Dir, false},
@@ -165,6 +168,7 @@ func (m *Manager) purgeTargets() []purgeTarget {
 		{"VNF 磁盘与快照", m.cfg.VMs, false},
 		{"DHCP 租约", m.cfg.DHCPLeases, false},
 		{"历史时序库", m.cfg.MetricsDB, true},
+		{"抓包会话记录", m.cfg.CaptureSessions, true},
 	}
 }
 

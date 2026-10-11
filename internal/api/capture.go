@@ -23,12 +23,18 @@ import (
 	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
-// CaptureSessionRow 活动抓包会话（契约 CaptureStatus.active）。
+// CaptureSessionRow 抓包会话（契约 CaptureStatus.active）。
+//
+// ⚠️ 决策 #465 起，登记里的会话有两种状态：**在抓**（Stopped=false）与**已停止、数据待导出**
+// （Stopped=true）——`stop` 不再丢弃数据，只冻结它；`export` 随后取走。
+// ⚠️ 决策 #466 起，会话还可由 nfvisd 启动时的重启收敛从持久记录重建（Recovered=true）。
 type CaptureSessionRow struct {
 	Interface string    `json:"interface"`
 	Captured  int       `json:"captured"`
 	StartedAt time.Time `json:"started_at"`
 	MaxDepth  int       `json:"max_depth,omitempty"`
+	Stopped   bool      `json:"stopped,omitempty"`
+	Recovered bool      `json:"recovered,omitempty"`
 }
 
 // CaptureFileRow 已导出 pcap（契约 CaptureStatus.files）。

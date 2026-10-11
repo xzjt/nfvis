@@ -153,13 +153,13 @@ func TestHugepagePoolViewForDataplane(t *testing.T) {
 	if v.HeldByDataplane != 1 {
 		t.Fatalf("HeldByDataplane = %d，期望 1（实测 comm=vpp 持有）：%+v", v.HeldByDataplane, v)
 	}
-	if !strings.Contains(v.Note, "数据面（VPP 主堆）固定占用 1 页") ||
+	if !strings.Contains(v.Note, "数据面（VPP）固定占用 1 页") ||
 		!strings.Contains(v.Note, "VNF 可起页数 = 空闲页数（当前 0）") {
 		t.Fatalf("1G 数据面占用说明不符：%q", v.Note)
 	}
 	// 与既有说明用「；」拼接（1G 无主占用 + 数据面占用并存）。
 	v = HugepagePoolViewFor("1G", 2, 2, 0, true, 1, true, 1, true)
-	if !strings.Contains(v.Note, "无主占用") || !strings.Contains(v.Note, "；数据面（VPP 主堆）固定占用 1 页") {
+	if !strings.Contains(v.Note, "无主占用") || !strings.Contains(v.Note, "；数据面（VPP）固定占用 1 页") {
 		t.Fatalf("数据面说明应与既有说明以「；」拼接：%q", v.Note)
 	}
 	// dp=0（实测没有数据面占用）：字段为 0，不追加说明——没有占用就不编造。

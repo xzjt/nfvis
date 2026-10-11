@@ -22,8 +22,10 @@
 #   FIXTURE_IMAGE   VNF 用的 vm-image（缺省 debian-12-generic-amd64.qcow2）
 #
 # ⚠️ 真机踩坑（都已在本脚本里规避，勿退回去）：
-#   1) **内存必须用 1G 大页**：本机 `/dev/hugepages` 以 `pagesize=1024M` 挂载，2M 大页**没有挂载点**，
-#      libvirt 会以 `定义 domain 失败: invalid argument` 拒绝定义 domain（1G/1024MB 才成）。
+#   1) **内存必须用 1G 大页**：本机 `/dev/hugepages` 以 `pagesize=1024M` 挂载（只声明了 1G 池），
+#      2M 后备的 guest 需要 `/dev/hugepages-2M`——决策 #459 起按**每个已声明页尺寸**各挂一个挂载点，
+#      但须先声明 2M 池并重启生效基线；否则 libvirt 会以 `定义 domain 失败: invalid argument` 拒绝
+#      定义 domain（1G/1024MB 才成）。另注：内存必须是页尺寸的整数倍（决策 #458）。
 #   2) **libvirtd 重启过而 nfvisd 未重启**时，VNF 定义会以同一个 `invalid argument` 失败
 #      （nfvisd 缓存的 libvirt 连接已失效）——先 `systemctl restart nfvis` 再重试（本轮真机实测）。
 #   3) **guest 需要能读 NoCloud seed**（产品把 seed 以 **virtio 盘的 iso9660** 交付，决策 #139）。

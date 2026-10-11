@@ -1215,10 +1215,14 @@
   「已声明未生效」、恢复重放给出照做指引）；④ 管理口**首次**声明需 `commit confirmed`（后续 commit 即确认）；
   ⑤ `bind-dpdk` 非交互需 `--yes`（缺省被守卫正确拒绝）；⑥ 套件判据是命令级，**夹具缺口会级联**（如容器镜像
   缺失 ⇒ phase 3 整体回滚 ⇒ 同 phase 的 bond 检查一起红）——判读失败先看夹具。
-- 已定决策 359 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
+- 已定决策 368 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线 #300~#403（其中 #350 撤回）、
-  **v3 线自 #404 起**（分支 `v3`，已有 #404~#444））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
-  **v3 线最新交接**：`docs/v3-交接-2026-10-10-内核族收口.md`（内核数据面缺失族**全收口** #433~#442、
+  **v3 线自 #404 起**（分支 `v3`，已有 #404~#466））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+  **v3 线最新交接**：`docs/v3-交接-2026-10-12.md`（round15~23 共 9 轮：#460~#466 七条决策 + round17 口径确认
+  + 四套件复跑 + teardown 假告警与两处套件漂移的顺带修正；观察池清空、三条已登记候选交付；环境/构建/跑测的坑
+  与「跑完要还原什么」都写在里面）。
+  **上一份**：`docs/v3-交接-2026-10-11.md`（round12/13 走查 + #450~#457）。再上：
+  `docs/v3-交接-2026-10-10-内核族收口.md`（内核数据面缺失族**全收口** #433~#442、
   v3.0.7/v3.0.8 双发版、Web 黑盒复核 round7 与新登记 R7-1/R7-2；环境现状/换装二进制配方/内核切换固定动作/教训）。**紧接其后**：内核 DNS 代理（决策 **#439**）——
   复用 #345 自研转发核心，落点＝域内 IPv4 地址上的 UDP/53 socket（绑地址 + `SO_BINDTODEVICE` 绑域 VRF）；
   全局上游（vpp 段的 `DNSProxyServers`，数据面中立）在该数据面下同样生效。**真机（换装二进制，内核数据面）**：
@@ -1379,7 +1383,7 @@
 - **v3 round13 修复批（round12/13 走查缺陷收口，决策 #450~#457，2026-10-11）**：两轮独立走查
   （round12 + round13，均 v3.0.10 干净快照）合计登记 **9 条缺陷 + 7 条观察**；用户裁定**跳过 R12-1**
   （3×1G-only 布局下 VPP 吃满 1G 池、VNF 容量 0，提交校验与读视图两套账本矛盾——涉及内存编排的
-  产品表态，另行立项），**其余全部修复**、涉及 Web 的同步修、实现派子智能体。**契约先行**（附录 A
+  产品表态；**round14 追加裁定：不立项**，理由见 round14 段），**其余全部修复**、涉及 Web 的同步修、实现派子智能体。**契约先行**（附录 A
   #450~#457，决策条数 351→**359**）→ 五个子智能体分域实现（逐条红-绿）→ `make check` 七项 RC=0 →
   **交叉编译换装二进制真机逐条复验**（`3.0.10~dev1`/`~dev2`/`~dev3`；原件备份 `/root/bin-orig-r13/`）。
   **收口八条**：**#450** LLDP 语句族（值可选形态 + 叶子级/整段 delete 幂等 + 通用遍历错误文案改引
@@ -1399,8 +1403,181 @@
   显式逐口声明的人话文案落地。**复验中顺带发现两条新项（未修，已登记）**：**R13-E（中低）** 同时声明
   1G+2M 池时 `hugepage-size 2M` 的 VM 起不来（产品把 `/dev/hugepages` 只按**一个**页大小挂载）；
   **R13-F（低）** VM 内存小于其大页尺寸时提交期未拦。**边界（如实）**：四套件本批未跑（正式发版仍须
-  `make deb` 两次逐字节一致 + 四套件复跑）；R12-1 按裁定未修。证据
+  `make deb` 两次逐字节一致 + 四套件复跑）；R12-1 按裁定未修（round14 追加：**不立项**，见下）。证据
   `docs/evidence/v3-round13-d450-d457-fix-batch.txt`（由来：`v3-round12-*.txt`、`v3-round13-*.txt`）。
+- **v3 round14（R13-E/R13-F 收口：决策 #458/#459，2026-10-11）**：round13 复验中顺带登记的两条
+  （本批未修）单独收口——**契约先行**（附录 A #458/#459，决策条数 359→**361**）→ 真机复现两缺陷
+  （用**当时的 `dev3` 二进制**取证）→ 实现（逐条红-绿）→ 交叉编译换装 `3.0.10~dev5` 真机复验。
+  **#458（R13-F）**：VM 内存必须是生效页尺寸的**正整数倍**，提交期拒绝——真机实测改前两态**提交放行、
+  start 才由 QEMU 报裸错**（`512`+`1G` ⇒ `memory size … must be equal to or larger than page size`；
+  `1536`+`1G` ⇒ `memory size must be multiple of 1 GiB`）；修后两态提交即拒、`1024`+`1G` 放行。
+  **#459（R13-E）**：内核基线**为每个已声明页尺寸各挂一个** hugetlbfs 挂载点（主挂载点 `/dev/hugepages`
+  保持旧口径、另一尺寸用 `/dev/hugepages-<size>`）——真机：`request system kernel apply` 写出两条挂载行，
+  2M 的 VM 从「`Unable to find any usable hugetlbfs mount for 2048 KiB`」变为 `running`。**真机当场
+  发现并修掉一个连带的不实陈述**：apply/show 的「一致（无需重启）」只比 cmdline、不含挂载点，现把
+  「已声明但未挂载」并入 pending/一致性差异（现场依据：libvirt 在 daemon 启动时扫描 `/proc/mounts`，
+  挂载点后加的要重启才可见——这正是不实陈述的由来）。**测试**：新增 4 组红-绿（校验矩阵、fstab 挂载集、
+  `parsePagesizeKB` 形态、`hugepageMountMissing` 组合），并把若干用 `size-mb 512`+`1G` 的测试夹具改为
+  `1024`（新校验下 `512` 非法）。**R12-1 裁定：不立项**（用户裁定，2026-10-11）——目标部署**继续同时
+  使用 1G 与 2M 双池**（VPP 缓冲走 2M、1G 留给 VNF），3×1G-only 不是目标形态，故**不改编排**；
+  「1G 池声明 N ⇒ VNF 可用 N−1」作为**明示边界**保留（决策 #347 / 手册 §6.2），不再作为待办。
+  `make check` 七项 RC=0（决策计数 361）。**四套真机套件已复跑**（`dev5`）：fulltest **274/0/20**、
+  语义 **26/0/3**、lifecycle **23/0/2**、pty **10/10**——与 v3 基线逐项一致，未引入回归；跑前需先解决的
+  **六件事**（脚本要拷到 VM、`cli-pty-smoke` 收位置参数而非环境变量、fulltest 的 S2-pre 夹具网段
+  `192.168.155.10/24` 与本机管理口 `192.168.155.129/24` 冲突须临时删管理口地址、夹具三件套
+  `images/alpine.qcow2` + `/data/incoming` + 容器镜像两处、语义需 Debian 云镜像 + S13 现场、
+  跑完要还原 `resource-pools`/`vpp cpu` 标量）见证据 §1；**顺带用一次 reboot 把 #459 的 systemd
+  挂载单元路径验到**（重启后 `/dev/hugepages-2M` 由挂载单元自动创建并挂载、`show system kernel`
+  自动回「一致」）。**如实边界**：仍是换装二进制验证（正式发版须 `make deb` 两次逐字节一致 +
+  四套件在发布件上复跑）。证据 `docs/evidence/v3-round14-d458-d459-hugepage-memory-and-mounts.txt`、
+  `docs/evidence/v3-round14-four-suites-rerun.txt`。
+- **v3 round15（观察③ 收口：决策 #460，2026-10-11）**：round12/13 登记的观察③「归属数字对、**解释错位**」
+  收口——读视图/手册把 1G 池里数据面固定占的那 1 页说成「**VPP 主堆**」，真机取证**不是**：
+  ① `/proc/<vpp>/smaps` 里**唯一的 1G 页映射**是 `memfd:seg_0-0`（1 GiB，`KernelPageSize: 1048576 kB`）；
+  ② `vppctl show memory` 的 main heap `page stats` 明写 **`page-size 2M`**（512×2M=1G）且 base 与
+  `seg_0-0` 不同址。**页数口径不变**（数据面固定占 1 页 ⇒ VNF 可用 N−1），**只改解释**：用户可见措辞在
+  **CLI/REST**（`hugepageDataplaneNote`，三面同源的那个 note）、**Web**（资源池卡 `hp-dp-note`）、
+  **向导注释**、**用户手册**（§6.2 注 / §6.5 规划速查 / §9 资源池段）、**命令全表**五处全部更正为
+  「该页实测归属为 **DPDK EAL 段**（`memfd:seg_0-0`，按最大页优先取页），不是 VPP 主堆（主堆按
+  `main-heap-page-size` 落在 2M 页）」；`#347/#353` 的附录 A 正文**保留原样**（历史记录，由 #460 更正，
+  既有惯例）。**红-绿**：把文案暂回旧措辞 ⇒ `TestHugepagePoolViewForDataplane` +
+  `TestCLIShowSystemHugepagesDataplaneNote` 双双 FAIL（后者含新增的「不得再出现『（VPP 主堆）固定占用』」
+  防返祖断言）；恢复 ⇒ PASS。**真机三面（`dev6`）**：CLI 说明行与 REST `note` 均带新归属、数字未变；
+  **Web 控制台 Browser Use 黑盒复核**（`#/system/pools`「大页池」段说明行渲染新措辞，总览页
+  「NFViS 3.0.10~dev6」证明确为本次构建）——三面同源。`make check` 七项 RC=0（决策计数 **362**）。
+  证据 `docs/evidence/v3-round15-d460-eal-segment-attribution.txt`、截图
+  `docs/images/v3-round15-web-pools-eal-attribution.png`。
+- **v3 round16（观察① 收口：决策 #461，2026-10-11）**：观察池里最实在的一条——**Web VM 详情「资源」块的
+  vCPU 绑定/绑定核/内存后端/大页大小 恒「—」而运行态有事实**。定位到**字段级**根因（同 #332/#353 方向）：
+  ① `pin`/`memory.backing`/`memory.hugepage_size` 配置未显式声明时读视图**原样回显空值**，而产品语义有
+  **确定缺省**（pin⇒true、backing⇒hugepage、页尺寸⇒资源池主池）；② `vcpu.cores_assigned` **契约声明了、
+  任何 Go 代码都没发过**（grep 零命中）。**口径**：`internal/model/resources.go` 加 **`EffectiveVM` 单源**
+  （补三项有效值；`backing=normal` 时**不**兜底页尺寸——普通内存不用大页）+ **`AssignedCores`**（资源池账本
+  单源，与 `show resource-pools` 的「已分配」及域 XML 的 `vcpupin` 同源）；`internal/api/vm.go` 读视图类型
+  加 `vmCPUView`（`cores_assigned` **刻意不进 `model.VMCpu`**——`handlePutVM` 是整体替换，进去会被
+  GET→PUT **回灌进配置**）；CLI 列表/详情**同一渲染**；openapi 四处 description 如实化。`numa_node`
+  **不兜底**（未声明＝无 NUMA 亲和，界面「—」如实）。**红-绿**：`EffectiveVM` 直接返回入参 ⇒
+  `TestEffectiveVMFillsDefaults` + `TestVMReadViewEffectiveAndAssignedCores` 双双 FAIL；恢复 ⇒ PASS
+  （守护含显式值保留、`pin=false`、normal 不兜底、类型级不回灌）。**真机三面（`dev7`）**：CLI 列表
+  `2048MB/1G`、详情 `backing hugepage/hugepage-size 1G/cores-assigned [4 5]/pin true`；REST 同值；
+  **Web Browser Use 黑盒**复核「资源」块（`vCPU 绑定=是 / 绑定核=4,5 / 内存后端=大页 / 大页大小=1G /
+  NUMA=—`）——截图 `docs/images/v3-round16-web-vm-resources-effective.png`。**顺带修正现场**：资源池列表
+  顺序被套件改成 2M 在前 ⇒ VM「主池缺省」落到 2M、2048MB 被正确拒绝；已按 wizard 书写顺序还原为
+  `1G, 2M`（rev 211，交接 §2 的环境基线）。`make check` 七项 RC=0（决策计数 **363**）。证据
+  `docs/evidence/v3-round16-d461-vm-readview-effective.txt`。
+- **v3 round17（观察④ 口径收口：`unbind-dpdk` 「不自动重探」＝内核行为，非缺陷，2026-10-11）**：
+  登记项原文是「`unbind-dpdk --yes`（不带 `to-driver`）报『内核未自动重新探测原生驱动』，而 round10
+  同操作自动交还 vmxnet3——**环境时序 vs 代码变化待确认**」。本轮把它拆成**内核行为**与**产品行为**
+  分别量：**先停 VPP**（否则 sysfs 写阻塞）→ 从 vfio-pci 解绑 → 清 `driver_override`（确认读到 `(null)`）
+  → `echo 1 > /sys/bus/pci/rescan` → **3s 内内核仍不 probe 该设备**；且 `modinfo vmxnet3` 的 alias 与
+  设备 modalias 语义匹配 ⇒ **模块在位、alias 也对，是内核不 probe**。产品侧代码核对：`Unbind` 确实做了
+  「解绑 → 清 override → `Rescan` → 按 PCI 回读」，`readbackDPDKDriver` 还轮询等 3s——把「探测有延迟」
+  也排除了。**结论：产品「先试 + 失败如实报错 + 给 `to-driver` 可照做提示」是正确行为**，round10 的
+  「自动交还」在本平台**不可复现**；该项按**口径**收口，**无代码改动**（决策计数仍 363）。
+  ⚠️ **教训入册**：**对仍被 VPP 持有的设备写 sysfs 会阻塞**（本次第一次实验没停 VPP，`driver_override`
+  的写直接挂住、实验作废）——产品那条「接口仍被数据面占用」守卫的文案（「可能阻塞后续命令」）与实测一致。
+  **另登记未立项候选**：绑定那一刻产品知道原生驱动（`Bind` 的 `cur`）却丢掉，解绑只能靠操作者报驱动名；
+  记进本机运行态即可免报（牵动 `format-data` 受管清单与备份语义，值得单独定裁）。现场已还原（两口回
+  vfio-pci + `request vpp restart`，池/挂载/告警与基线一致）。证据
+  `docs/evidence/v3-round17-unbind-dpdk-reprobe-confirmed.txt`。
+- **v3 round18（观察⑤ 收口：决策 #462，2026-10-11）**：`request capture stop` 的口径陷阱——真机复现
+  逐字为 `start` →「…停止/导出：request capture stop|export」、`stop` →「已停止抓包（未导出）。」、
+  `export` →「%% 当前无抓包会话」；**根因比「文案不清」更硬**：VPP 侧 pcap trace 落的本来就是**文件**，
+  `Stop(export=false)` 里**显式 `os.Remove` 掉它**（`internal/orchestrator/network/capture.go`），
+  即 `stop` 是**停止且丢弃**——操作者按「先 stop 冻结、再 export 取文件」的直觉走，**报文已经没了**
+  （不是没抓到，是被扔掉）。**口径**：按观察项自己给的「**或文案明示**」落地，**语义与端点一律不动**
+  （改语义要动两个数据面 + 会话状态机，另立候选）——**CLI 三处**（`start` 收尾提示写明「取文件用 export、
+  stop 丢弃缓冲」；`stop` 输出写明「缓冲已丢弃」+ 照做路径；`export` 无会话的错误补照做提示）+
+  **命令全表**该行 + **手册 §10.4**（新增 ⚠️ 段：两条命令都结束抓包，区别是要不要那个文件）。
+  **红-绿**：三处文案 sed 回旧措辞 ⇒ `TestCLICaptureStopDiscardWording` FAIL；恢复 ⇒ PASS。
+  **真机（`dev8`）**：三条文案逐字核对 + 正控（`start → export` 正常走通，本口无对流量故如实报
+  「未捕获到报文，无文件导出」）。`make check` 七项 RC=0（决策计数 **364**）。**另登记未立项候选**：
+  把 `stop` 改成「冻结待导出」是行为变更，牵动两数据面状态机，见 `docs/v3待做.md` §七末。证据
+  `docs/evidence/v3-round18-d462-capture-stop-discard-wording.txt`。
+- **v3 round19（观察② 收口：决策 #463，2026-10-11）**：绑核不足的**归因可读化**——真机复现（隔离核 `2,3,4,5`、
+  VPP 保留 `2,3` ⇒ 空闲仅 4/5）：建两台各 1 vcpu 的 VM 后把 **vnf-a** 扩到 2，报的却是
+  `virtual-machine-functions[vnf-b].vcpu.count: 隔离核不足：需要 1，可用 0`——**操作者会去查一台自己没动过的
+  VM**。根因：账本按 **VM 名序**依次分配绑核，**归因指向的是真正分不到的"受害者"（事实没错）**。
+  **口径**：**只改文案**（按名序分配是既定行为：确定性、可复现，域 XML 的 `vcpupin` 与之同源），
+  缺口文案补**分配顺序**（「绑核按 VM 名序依次分配：本台排在后面才分不到」）与**照做路径**
+  （「若你刚调整的是别的 VM，请缩小它的 vcpu 或扩充隔离核池 `set resource-pools cpu isolated-cores …`」）；
+  `Path`、NUMA 前缀、算法一律不动。**红-绿**：文案改回旧版 ⇒ `TestAllocateCoresShortfallAttributionHint`
+  FAIL（该守护同时钉住**事实不变**：名序在前的 `vnf-a` 仍分到 2 枚、缺口数字仍「需要 1，可用 0」）；
+  恢复 ⇒ PASS。**真机（`dev9`）**：同一现场重放，文案自带顺序说明与照做路径；**照做路径正控**——
+  把 `vnf-a` 缩回 1 vcpu ⇒ `commit 成功 (rev 214)`；现场已清场（rev 215，无 VNF）。
+  `make check` 七项 RC=0（决策计数 **365**）。证据 `docs/evidence/v3-round19-d463-core-shortfall-attribution.txt`。
+- **v3 round20（四套件在 #460~#463 之后复跑，2026-10-12）**：round14 跑过四套件之后，round15~19 又改了
+  **用户可见行为**（大页文案 #460、VM 读视图 #461、抓包文案 #462、绑核缺口文案 #463），故在当前构建
+  `3.0.10~dev9` 上整体复跑：**fulltest 274/0/20、语义 26/0/3、lifecycle 23/0/2、pty 10/10**——与 v3 基线
+  **逐项一致**（也与 round14 的同四套结果逐项一致）⇒ 这四轮**未引入回归**。**先做静态核对省一轮假红**：
+  套件的 `expect_out` 断言集合（Token-ID/横幅/DNS/metrics 间隔/DHCP 租约/防火墙/容器 exec）与本次改动
+  **无交集**，`MB/1G`/`固定占用`/`cores_assigned`/`隔离核不足` 在套件里**零命中**，抓包命令只 `run`
+  不断言文案——实跑印证。**前置照 round14 证据 §1 的六件事**（临时撤管理口地址、夹具三件套、语义前
+  重建 `alpine:3.20`、脚本 md5 与仓库逐字一致）。**套件留下的标量**（1G count 3→2、isolated 2-5→1-4、
+  vpp main/main-core→1/2、`interfaces ens224 enabled false` 残留）已一次提交还原；**1G 池运行期回不到 3**
+  ⇒ 按 round14 同一处置**重启**（重启后 nr=3、**两个 hugetlbfs 挂载点自动在位**＝#459 的 systemd 路径
+  再验一次、`show system kernel` 回「一致」），重启后按固定动作**重绑 DPDK + `request vpp restart`**；
+  管理口地址还原。⚠️ **两次重启都会重生成 SSH host key**（宿主 known_hosts 要 `ssh-keygen -R` 刷新）。
+  终态：nfvis/vpp active、池 1G=3 / 2M=768、isolated 2,3,4,5、无业务对象、告警仅既有
+  `HUGEPAGE_POOL_ORPHAN`。证据 `docs/evidence/v3-round20-four-suites-after-d460-d463.txt`。
+- **v3 round21（候选① 交付：决策 #464，2026-10-12）**：round17 登记的「未立项候选」落地——**`unbind-dpdk`
+  记住「接管前的原生驱动」**。由来：round17 真机确认本平台内核**不会**自动 probe（清 `driver_override` +
+  `rescan` 后 3s 内无驱动），而 `Bind` 里**明明读到了**当时的驱动（`cur`）却在切换后丢掉 ⇒ 解绑只能靠
+  操作者报驱动名。**做法**：新增落点 `internal/orchestrator/network/native_drivers.go`（`NativeDrivers`＝
+  PCI → 驱动名，与 #100 的 `Bindings` 同族同文件约定但**语义不同故单独成件**）；`Bind` **切换之前**记录；
+  `Unbind` 取值顺序＝**显式 `to-driver` > 本记录 > `rescan` 试探**，journal 写明走的是哪一路。
+  **只记非 DPDK 用户态驱动**（`vfio-pci`/`igb_uio`/`uio_pci_generic` 之外的才记——从 vfio-pci 换到
+  igb_uio 的**重绑**不该把 vfio-pci 记成原生驱动），表是**保守猜测**（自定义 DPDK 驱动不覆盖）并如实入注释；
+  记录里的驱动目录已不在 ⇒ **如实说明并退回探测**（不硬绑）。**记录失败不阻断绑定**（退回现状）。
+  **不入 committed 配置、不进 `format-data` 受管目录**（本机运行态事实，同 #100 的 bindings 口径）。
+  **真机 A/B**：改前（`dev9`）同一条 `unbind-dpdk --yes` 报「内核未自动重新探测…请显式指定 to-driver」；
+  改后（`dev10`）=「已解绑并交还内核驱动，当前驱动 **vmxnet3**」，`/sys/.../driver` 与内核 netdev 双向核对，
+  journal 两行（接管时记录 / 解绑时按记录交还）、落盘 `{"0000:13:00.0":"vmxnet3"}`。**红-绿 6 项**（夹具刻意
+  复现「解绑后链接消失、rescan 不恢复」，否则探测会假成功分不出红绿）：置死记录路径 ⇒ 两条 FAIL（其中一条
+  的失败文案正是改前的「需 to-driver」）；恢复 ⇒ 全过。覆盖显式优先/无记录退探测/**sysfs 写序不变**/
+  记录失效退回/uio 不记。**现场已还原**（两口回 DPDK + `request vpp restart`，记录保留为本机事实）。
+  证据 `docs/evidence/v3-round21-d464-native-driver-recorded.txt`。
+- **v3 round22（候选② 交付：决策 #465，2026-10-12）**：抓包「停止」从**丢弃**改为**冻结**——round18 只是把
+  后果写进文案，本条改行为。**做法**：两个数据面各一处（VPP 侧 `CaptureSession.Stopped` + `Stop` 先关
+  trace 标冻结 + `export` 走同一 finalize；内核侧 `captureSession.stopped` + 不再 `os.Remove` 工作文件）；
+  读视图如实暴露（契约 `CaptureStatus.active.stopped`、CLI `show capture` 打 `stopped（已停止，数据待导出）`、
+  Web 抓包卡同源），文案/按钮/全表/手册同步（Web 按钮「停止（丢弃）」→「**停止（保留数据）**」）。
+  **语义细节**：冻结中**再 stop 幂等成功**；**冻结中 start 被拒并给照做路径**（既有守卫天然生效）；
+  **取走后** `stop`/`export` 才回到 409。**真机 A/B（带真实报文）**：先 start、再从宿主发广播 ICMP 让
+  ens192 上有帧 ⇒ `stop` 后 **`/tmp/rxtx.pcap` 384 B 仍在盘上**（改前这里被删）、`show capture` 见到待导出、
+  冻结中 start 被拒、随后 `export` 取到 `nfvis-cap-ens192-…pcap（384 B）`（**改前必失败**：
+  `%% 当前无抓包会话`）；取走后工作文件已搬入导出目录。**测试**：新增 `TestCLICaptureStopFreezeSemantics`；
+  按新语义**重写**了四处表达「丢弃」的既有断言（两 provider + api 端点 + fake），逐条理由见证据 §3。
+  **工具坑入册**：用 Python 改 `docs/NFViS-openapi.yaml` **没强制 LF** ⇒ 契约变 CRLF ⇒
+  `check_openapi_json_sync.sh` 照样报「同步」，但三个**字段级 UI 守护**一起报「找不到 Xxx schema
+  （排版变了？）」（它们按行锚定 `$`）——改仓库文本文件必须 `newline="\n"` 写。`make check` 七项 RC=0
+  （决策计数 **367**）。证据 `docs/evidence/v3-round22-d465-capture-stop-freeze.txt`。
+- **v3 round23（决策 #466：抓包会话跨 nfvisd 重启收敛 + 两处顺带修正，2026-10-12）**：收口 round22 §5
+  的边界登记（「会话登记只在进程内」——冻结数据在盘上却无登记、在抓 trace 在 VPP 里静默残存）。
+  **口径（#466）**：① **持久会话记录** `/var/lib/nfvis/capture-sessions.json`（按数据面分键的
+  start/冻结/取走三处同步；运行态事实、随 `format-data` 清）；② **冻结即暂存**——`stop` 把工作文件
+  搬进导出目录隐藏位（`.<终名>.part`，不依赖 /tmp——宿主重启也保得住）；③ **启动收敛**（装配后一次、
+  未完成待下次抓包操作补跑）：按记录把重启前**冻结/在抓**两态都重建为「已停止待导出」会话
+  （VPP 在抓态补一次 `pcap trace off` 落盘；内核侧按记录 pid+命令行核对后终止遗留 tcpdump——
+  真机上 systemd 的 cgroup 通常已代收，走「进程已死→直接重建」路径，如实登记），契约新增
+  `active.recovered`、CLI/Web 打「重启前会话已恢复」；④ **无记录残件**扫描两个工作位归档为可见 pcap
+  （不藏不删，空件清掉）。**设计前的能力前提真机实测**（决定性证据）：`pcap trace off` 未启用时
+  幂等无害（RC=0）；**对已启用 trace 重复 start 是静默 no-op（`already enabled`、RC=0）**——
+  不收敛就会出现「命令成功但没在抓所配会话」的假会话。**真机 A/B（两数据面）**：改前——冻结后重启
+  `export` 报无会话且**下一次 start 静默删除冻结数据**；在抓重启后 trace 仍在 VPP（`off` 才见
+  「Write 4 packets」）、产品读视图全盲。改后——冻结/在抓两态重启后 `show capture` 均「已恢复」、
+  `export` 取到原数据（384 B / 2.6 KiB / 9.5 KiB 三组，含「在抓→重启→补 off 落盘→取回 4 个包」）；
+  零包冻结重启后如实清除；残件归档实证。**同轮顺带修掉两处（非决策，证据 §5b）**：
+  ① **R23-1** `netkernel/teardown.go` 步骤 6 把族常量 `natFamilyName` 当表名 ⇒ 每次内核→VPP 切换
+  生成 `nft delete table inet inet`（必报错）⇒ 假告警 `DATAPLANE_TEARDOWN_FAILED`（真残留其实被
+  步骤 4 回收过；单测 `has()` 子串断言被喂绿故一直漏）——修法用 `natTable` + 单测补**负面断言**，
+  dev13 真机复验 journal 变「已清理旧内核数据面对象」、假告警自动消解；② **套件 phase4/phase5
+  的 #465 语义漂移**（写于「停止即丢弃」时代）：phase4 的 stop 后 start 应被拒（改 `expect_fail`）、
+  phase5 旧名段 stop 后无收尾会**留下冻结会话**（本轮在切换时被启动收敛清掉而暴露）——补「取走」步骤。
+  **四套件**：fulltest 首轮 273/0/21 → 终轮（dev13，phase4+5 均修）**274/0/22**（274/0/20 起两处
+  run→expect_fail 位移）、语义 **27/0/2**（先跑正向控制夹具 ⇒ 比基线多一条：S8 转可判定并通过）、
+  lifecycle **23/0/2**、pty **10/10**。`make check` 七项 RC=0（决策计数 **368**）。证据
+  `docs/evidence/v3-round23-d466-capture-restart-reconcile.txt`。
 - **V1 验收收口**：`docs/V1-验收检查表.md` 把规格书 **109 条 FR** 逐条对照证据
   （**通过 101 / 未验 4 / 降级 2 / 移 V2 2**；2026-09-18 收口：NFR-005/NFR-006 转通过、FR-SEC-006 拆两半），降级理由与签字建议见其 §5/§6；
   **待办与未完成项的唯一入口见 `docs/V1-收尾待办.md`**（含环境要点与踩坑记录）。

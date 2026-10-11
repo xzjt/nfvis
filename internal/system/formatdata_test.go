@@ -109,17 +109,18 @@ func fullDemoConfig() model.Config {
 // testManagerConfig 把 format-data 的**全部**受管数据路径指向临时目录。
 //
 // 单测绝不能触碰生产路径：FormatData 会真删这些路径下的内容，而 Config 的零值缺省指向
-// /var/lib/nfvis/…（含决策 #365 新增的 metrics.db 与 dhcp 租约目录）——在真机上跑测试
-// 会误删现场数据（本函数即为此前的隐患加固）。
+// /var/lib/nfvis/…（含决策 #365 新增的 metrics.db 与 dhcp 租约目录、#466 的抓包会话记录）——
+// 在真机上跑测试会误删现场数据（本函数即为此前的隐患加固）。
 func testManagerConfig(root string) Config {
 	return Config{
-		Dir:         filepath.Join(root, "backup"),
-		Captures:    filepath.Join(root, "captures"),
-		CoreDumps:   filepath.Join(root, "coredumps"),
-		TechSupport: filepath.Join(root, "tech-support"),
-		VMs:         filepath.Join(root, "vms"),
-		DHCPLeases:  filepath.Join(root, "dhcp"),
-		MetricsDB:   filepath.Join(root, "metrics.db"),
+		Dir:             filepath.Join(root, "backup"),
+		Captures:        filepath.Join(root, "captures"),
+		CoreDumps:       filepath.Join(root, "coredumps"),
+		TechSupport:     filepath.Join(root, "tech-support"),
+		VMs:             filepath.Join(root, "vms"),
+		DHCPLeases:      filepath.Join(root, "dhcp"),
+		MetricsDB:       filepath.Join(root, "metrics.db"),
+		CaptureSessions: filepath.Join(root, "capture-sessions.json"),
 	}
 }
 
@@ -219,6 +220,8 @@ func TestFormatDataPurgesManagedDataAndReportsStats(t *testing.T) {
 	write(filepath.Join(dirs["dhcp"], "vs-x.json"), 60)         // 决策 #365：DHCP 租约（目录）
 	metricsDB := filepath.Join(root, "metrics.db")
 	write(metricsDB, 500) // 决策 #365：历史时序库（**单文件**）
+	sessionRec := filepath.Join(root, "capture-sessions.json")
+	write(sessionRec, 123) // 决策 #466：抓包会话记录（单文件，随「抓包文件」目录同生共死）
 
 	imgs := &fakeImages{metas: []images.Meta{
 		{Name: "alpine.qcow2", SizeBytes: 1000},
@@ -229,6 +232,7 @@ func TestFormatDataPurgesManagedDataAndReportsStats(t *testing.T) {
 		Dir: dirs["backup"], Captures: dirs["captures"], CoreDumps: dirs["coredumps"],
 		TechSupport: dirs["tech"], VMs: dirs["vms"],
 		DHCPLeases: dirs["dhcp"], MetricsDB: metricsDB, // 决策 #365
+		CaptureSessions: sessionRec, // 决策 #466（显式指向临时目录：零值缺省会落到生产路径）
 	}, eng, imgs, "test")
 
 	res, err := m.FormatData(context.Background(), "admin")
@@ -240,8 +244,12 @@ func TestFormatDataPurgesManagedDataAndReportsStats(t *testing.T) {
 	}
 	// 统计：删除对象按类别、镜像数、清理文件数、释放字节。
 	// 决策 #365：运行态残留（单文件 metrics.db + DHCP 租约目录）一并清掉；目录本体保留。
+	// 决策 #466：抓包会话记录（单文件）同列。
 	if _, err := os.Stat(metricsDB); !os.IsNotExist(err) {
 		t.Errorf("metrics.db（单文件）应被删除: %v", err)
+	}
+	if _, err := os.Stat(sessionRec); !os.IsNotExist(err) {
+		t.Errorf("capture-sessions.json（单文件）应被删除: %v", err)
 	}
 	if ents, err := os.ReadDir(dirs["dhcp"]); err != nil || len(ents) != 0 {
 		t.Errorf("DHCP 租约目录应被清空且目录本体保留: %v/%d", err, len(ents))
@@ -257,10 +265,10 @@ func TestFormatDataPurgesManagedDataAndReportsStats(t *testing.T) {
 	if res.RemovedImages != 2 {
 		t.Errorf("应删除 2 个镜像，实得 %d（deleted=%v）", res.RemovedImages, imgs.deleted)
 	}
-	if res.PurgedFiles != 7 { // 5 个受管目录里的文件 + DHCP 租约 + metrics.db（决策 #365）
-		t.Errorf("应清理 7 个文件，实得 %d", res.PurgedFiles)
+	if res.PurgedFiles != 8 { // 5 个受管目录里的文件 + DHCP 租约 + metrics.db（#365）+ 抓包会话记录（#466）
+		t.Errorf("应清理 8 个文件，实得 %d", res.PurgedFiles)
 	}
-	if want := int64(1000 + 2000 + 100 + 200 + 300 + 400 + 60 + 500); res.FreedBytes != want {
+	if want := int64(1000 + 2000 + 100 + 200 + 300 + 400 + 60 + 500 + 123); res.FreedBytes != want {
 		t.Errorf("释放字节应为 %d，实得 %d", want, res.FreedBytes)
 	}
 	for name, d := range dirs {

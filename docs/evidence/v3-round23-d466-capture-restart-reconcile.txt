@@ -1,0 +1,263 @@
+# v3 round23 证据：抓包会话跨 nfvisd 重启收敛（决策 #466）
+
+日期：2026-10-12　　分支：`v3`　　VM：nfvis-lab（Ubuntu 26.04.1 / 内核 7.0.0-34 / 6 核 7 GB）
+装的是**交叉编译换装二进制** `3.0.10~dev12`（原件备份 `/root/bin-dev11/` 与 `/root/bin-orig-r13/`）。
+
+## 0. 一句话
+
+round22 §5 登记的边界（「会话登记只在进程内：冻结数据在盘上却无登记、在抓 trace 静默残存」）
+本条收口：会话落**持久记录**（`/var/lib/nfvis/capture-sessions.json`，start/冻结/取走三处同步）、
+**冻结即暂存**（工作文件搬进导出目录隐藏位，不依赖 /tmp）、**启动收敛**（重启前冻结/在抓的会话
+经 VPP 补 `pcap trace off` / 内核孤儿判定后重建为「已停止待导出」，读视图标 `recovered=true`），
+无记录残件归档为可见 pcap。真机 A/B（VPP + 内核两数据面）逐条实锤，改前改后同场景对照。
+
+## 1. 改前复现（`dev11` 未修版，同一台机器）
+
+**A：冻结 → nfvisd 重启（数据失联 + 下一次 start 静默删除）**
+
+```
+$ /root/nc -c 'request capture start interface ens192 count 500'
+已开始抓包（接口 ens192，count 500（环形缓冲深度，超出丢最旧））。
+# ← 宿主发 4 类广播 ICMP（VMnet8 共享 L2，ens192 上真的有帧）
+$ /root/nc -c 'request capture stop'
+已停止抓包（数据已保留，待导出）。
+$ ls -l /tmp/rxtx.pcap
+-rw-r--r-- 1 root vpp 384 Oct 12 02:05 /tmp/rxtx.pcap        ← 冻结数据在盘上
+
+$ systemctl restart nfvis
+$ /root/nc -c 'show capture'
+capturing: none                                              ← 改前：登记没了（读视图全盲）
+$ /root/nc -c 'request capture export'; echo EXPORT_RC=$?
+%% 当前无抓包会话（提示：当前既无进行中的抓包、也无待导出的数据；请先 request capture start）
+EXPORT_RC=1                                                  ← 改前：数据取不回（仍在盘上）
+$ ls -l /tmp/rxtx.pcap
+-rw-r--r-- 1 root vpp 384 Oct 12 02:05 /tmp/rxtx.pcap
+
+$ /root/nc -c 'request capture start interface ens192 count 50'   # 再开新会话——成功
+$ ls -l /tmp/rxtx.pcap
+ls: cannot access '/tmp/rxtx.pcap': No such file or directory     ← 改前：旧冻结数据被静默删除
+```
+
+**B：在抓 → nfvisd 重启（trace 静默残存，产品读视图全盲）**
+
+```
+$ /root/nc -c 'request capture start interface ens192 count 50'   # 不 stop
+# ← 宿主发广播 ICMP
+$ systemctl restart nfvis
+$ /root/nc -c 'show capture' | head -2
+capturing: none                                                   ← 改前：产品不知道还有会话
+$ vppctl pcap trace off
+Write 4 packets to /tmp/rxtx.pcap, and stop capture...            ← 铁证：trace 一直在 VPP 里缓冲
+$ ls -l /tmp/rxtx.pcap
+-rw-r--r-- 1 root vpp 384 Oct 12 02:06 /tmp/rxtx.pcap
+```
+
+另一条同轮的底层实验（`vppctl` 直测，设计前核实能力前提）：`pcap trace off` 在未启用时回
+`dispatch trace already disabled...` RC=0（无害、可幂等补打）；**对已启用的 trace 再次 start
+只回 `dispatch trace already enabled...` RC=0（静默 no-op）**——即若不收敛，「产品登记了新会话
+而 VPP 还在按旧 config 抓」会是**假成功**（这正是必须收敛的另一半理由）。
+
+## 2. 改后验证（`dev12`，VPP 数据面）
+
+**B1：冻结 → 重启 → 恢复 → export 取到原数据**
+
+```
+$ /root/nc -c 'request capture start interface ens192 count 500'
+# ← 宿主发广播 ICMP
+$ /root/nc -c 'request capture stop'
+已停止抓包（数据已保留，待导出）。
+$ ls -l /tmp/rxtx.pcap
+ls: cannot access '/tmp/rxtx.pcap': ...                       ← 冻结即暂存：/tmp 不再持有数据
+$ ls -la /var/lib/nfvis/captures/ | grep part
+-rw-r--r-- 1 root root 384 Oct 12 02:08 .nfvis-cap-ens192-20261011T180822Z.pcap.part   ← 隐藏暂存位
+$ cat /var/lib/nfvis/capture-sessions.json
+{"vpp":{"interface":"ens192","file_name":"nfvis-cap-ens192-20261011T180822Z.pcap",
+ "work_path":"/var/lib/nfvis/captures/.nfvis-cap-ens192-20261011T180822Z.pcap.part",
+ "started_at":"2026-10-11T18:08:22.649837636Z","count":500,"stopped":true}}    ← stopped=true
+
+$ systemctl restart nfvis
+# journal：
+{"msg":"抓包重启收敛","结果":"已恢复重启前的抓包会话（接口 ens192，数据待导出
+ nfvis-cap-ens192-20261011T180822Z.pcap）：request capture export 取走"}
+$ /root/nc -c 'show capture' | head -3
+capturing: stopped（已停止，数据待导出；重启前会话已恢复）interface ens192, started 2026-10-11 18:08:22, max-depth 500
+  取走 pcap：request capture export
+$ /root/nc -c 'request capture start interface ens192 count 10'      # 冻结会话仍占登记位
+%% 已有已停止待导出的抓包会话（接口 ens192）：请先 request capture export 取走它，再开始新抓包
+$ /root/nc -c 'request capture export'
+已导出 pcap: nfvis-cap-ens192-20261011T180822Z.pcap（384 B）。下载：API GET /capture/…
+$ cat /var/lib/nfvis/capture-sessions.json
+cat: /var/lib/nfvis/capture-sessions.json: No such file or directory   ← 取走后记录清除
+```
+
+**B1b：零包冻结 → 重启 → 如实清除（不假装有数据）**
+
+```
+$ request capture stop        （没有任何包）
+$ cat capture-sessions.json   → vpp 记录 stopped=true（work_path=/tmp/rxtx.pcap，但无文件）
+$ systemctl restart nfvis
+{"msg":"抓包重启收敛","结果":"重启前冻结的抓包会话已无可导出数据（未捕获到报文或数据文件已被清理），登记已清除"}
+$ show capture → capturing: none；记录文件不复存在
+```
+
+**B2：在抓 → 重启 → 收敛补 off 落盘 → 恢复 → export 取到「重启前抓的包」**
+
+```
+$ request capture start interface ens192 count 500   # 不 stop
+# ← 宿主发广播 ICMP
+$ systemctl restart nfvis
+{"msg":"抓包重启收敛","结果":"已恢复重启前的抓包会话（接口 ens192，数据待导出
+ nfvis-cap-ens192-20261011T180853Z.pcap）：request capture export 取走"}      ← 收敛时补了 pcap trace off
+$ show capture | head -3
+capturing: stopped（已停止，数据待导出；重启前会话已恢复）interface ens192, started 2026-10-11 18:08:53, max-depth 500
+$ request capture export
+已导出 pcap: nfvis-cap-ens192-20261011T180853Z.pcap（384 B）。下载：API GET /capture/…
+$ ls -l /tmp/rxtx.pcap → No such file；记录已清除
+```
+
+对照 §1-B：同样 4 个包，改前只能靠手工 `vppctl pcap trace off` 看见、且产品永远取不回来；
+改后自动落盘、可 export。
+
+## 3. 改后验证（`dev12`，内核数据面，同一台机器）
+
+切换（手册 §7.0 口径，**只重启服务、不整机重启**）：
+
+```
+printf 'configure\nset system dataplane kernel\ncommit\nexit\n' | nfvis-cli -f -   # revision 268
+systemctl restart nfvis      # nfvisd 自动停 vpp.service（systemctl is-active vpp → inactive）
+/root/nc -c 'request interfaces ens224 unbind-dpdk --yes'                     # 按 #464 记录自动交还 vmxnet3
+/root/nc -c 'request interfaces ens192 unbind-dpdk to-driver vmxnet3 --yes'   # 无记录：显式 to-driver
+ip -br link show → ens192/ens224 UP（vmxnet3）
+```
+
+**B3a：内核冻结 → 重启 → 恢复 → export**
+
+- start 后 `pgrep -a tcpdump` 可见 `tcpdump -i ens192 -w /tmp/.nfvis-cap-…part -c 50`；记录带 `pid`。
+- stop 后：**tcpdump 已终止**（pgrep 空）、/tmp 工作文件搬走、暂存位
+  `.nfvis-cap-…part` = **2704 B**、记录 `stopped=true`。
+- 重启后 journal「已恢复重启前的抓包会话（接口 ens192…）」；`show capture` 标「重启前会话已恢复」；
+  export 取到 **2.6 KiB** pcap；记录清除、无 tcpdump 残留。
+
+**B3b：内核在抓 → 重启（孤儿 tcpdump 态）**
+
+- start（不 stop）→ `pgrep -a tcpdump` = 孤儿 pid 6892；宿主发广播 ICMP。
+- `systemctl restart nfvis` 后：**pgrep 空**；journal「已恢复重启前的抓包会话（接口 ens192，
+  数据待导出 nfvis-cap-ens192-20261011T181116Z.pcap）」；export 取到 **9.5 KiB** pcap（tcpdump
+  在 SIGTERM 时刷写了它捕获的全部帧）；记录清除、/tmp 无残留。
+- **如实更正一处口径**：本机 unit 是默认 `KillMode=control-group` ⇒ `systemctl restart` 的
+  停单元阶段会把 nfvisd 的整个 cgroup（含它 exec 出来的 tcpdump）一起 SIGTERM，
+  **孤儿进程往往活不到新进程收敛**；新进程实际走的是「进程已死 → 直接重建」路径。
+  「按记录 pid + 命令行核对身份后终止」的终止分支为**防御性**覆盖（nfvisd 脱离 systemd 手工运行、
+  或将来改 KillMode 时才可达），由单测钉住；旧注释里「孤儿会继续写」的前提在本部署下不成立
+  （systemd 已代收），但**旧代码确实没有恢复登记**这一点不变。
+
+**B3c：无记录残件 → 归档为可见 pcap**
+
+```
+$ printf 12345678 > /tmp/.nfvis-cap-ens192-20261012T001500Z.pcap.part
+$ systemctl restart nfvis
+{"msg":"抓包重启收敛","结果":"无记录残件已归档为 nfvis-cap-ens192-20261012T001500Z.pcap
+ （源 /tmp/.nfvis-cap-ens192-20261012T001500Z.pcap.part）"}
+$ ls -l /var/lib/nfvis/captures/nfvis-cap-ens192-20261012T001500Z.pcap → 8 B（源名归档）；/tmp 已清
+```
+
+切回（同一口径，只重启服务）：
+
+```
+set system dataplane vpp + commit → systemctl restart nfvis
+request interfaces ens192/ens224 bind-dpdk --yes → request vpp restart
+show vpp → dataplane: vpp / connected；show interfaces physical → 两口 dpdk up
+```
+
+## 4. 单测（`-p=1 go test`）与红-绿
+
+- **network**（VPP）：`TestCaptureReconcileRecoversFrozenSession`（记录驱动恢复 + 拦 start + export 取走 + 清记录）、
+  `TestCaptureReconcileActiveSessionFlushesTrace`（补 off → 落盘 → 恢复）、
+  `TestCaptureReconcileActiveNoDataCloses`（无数据如实关闭）、
+  `TestCaptureReconcileDeferredWhenVPPDown`（VPP 未就绪延后 → 下一次操作补跑）、
+  `TestCaptureResidueSweepArchives`（带名残件按源名、裸 rxtx.pcap 按 recovered 命名、空件清掉）；
+  改写 `TestCaptureStopWithoutExportFreezes`（暂存位 + 记录 + 取走清记录）。
+- **netkernel**：`TestCaptureReconcileTerminatesOrphanAndRecovers`（pid+命令行核对 → 有界终止 → 恢复）、
+  `TestCaptureReconcileDefersWhenOrphanStays`（终止失败延后 → 补跑）、
+  `TestCaptureResidueSweepKillsWriterAndArchives`（先终止写者再归档）；
+  改写 `TestCaptureStopTerminatesAndFreezes`（暂存位 + 记录含 pid + 取走清记录）。
+- **api**：`TestCLICaptureStopFreezeSemantics` 增 `recovered` 文案断言（`show capture` 打「重启前会话已恢复」）。
+- **system**：format-data 受管清单加「抓包会话记录」——`testManagerConfig` 全路径指临时目录；
+  用例扩为 8 个受管文件（+123 B），断言记录文件被删。
+- **红-绿抽查（两项，均验证后还原）**：① 摘掉 `stageStopped` 的暂存调用 ⇒ 两个 provider 的冻结用例
+  按预期失败（`冻结后应有隐藏暂存文件` / `停止应终止进程一次`）；② 摘掉 Reconcile 的接管分支
+  （`src,size = "","0"`）⇒ 收敛用例按预期失败（`应收敛为已停止待导出: <nil>`）。
+
+## 5. 门禁
+
+- `make check` **RC=0**（七项全绿；决策条数守护 **368**；openapi 同步守护过；首轮日志 `build/check-round23.log`、
+  终轮（含 teardown 修复与 phase5 修正）`build/check-round23-final.log`）。
+
+## 5b. 同轮实测修掉两处（非决策；均由本轮真机走查暴露）
+
+**【R23-1（中）】内核→VPP 切换必报假告警 `DATAPLANE_TEARDOWN_FAILED`**：`netkernel/teardown.go`
+的步骤 6（四张 nft 表整体回收）把**族常量** `natFamilyName`（"inet"）当**表名**用，生成
+`nft delete table inet inet`——该命令必报语法错（真机原文：`Error: syntax error, unexpected inet,
+expecting handle or string or last`）⇒ `errors.Join` 非空 ⇒ teardown 被误判「未清理干净」并落假告警
+（告警文案还说「这些对象可能继续转发」，误导）。**真残留其实没有**：步骤 4 的 `ApplyNAT(空声明)`
+已用正确表名（`inet nfvis-nat`）回收过它——`nft list tables` 独立核对无任何 nfvis-* 表。
+**单测为何一直绿**：`teardown_test.go` 用 `fakeRunner.has()`（子串、任意位置）断言
+`nft delete table inet nfvis-nat`——被步骤 4 的那条正确命令喂绿，抓不到步骤 6 的坏命令。
+**修法**：步骤 6 改用 `natTable`（"nfvis-nat"）；单测补**负面断言**（不得出现 `inet inet`）；
+红-绿已验（复现旧串 ⇒ 负面断言按要求失败）。
+**真机复验（dev13，同一轮内核→VPP 切换）**：journal 从
+「旧内核数据面对象未全部清理（已落告警…）」变为「**已清理旧内核数据面对象（数据面已切到 VPP）**」；
+`show alarms active` 里原假告警**自动消解**（重启用后也只有既有的 `HUGEPAGE_POOL_ORPHAN`）。
+
+**【套件两处 #465 语义漂移】phase4 与 phase5 的抓包时序**（都写于「停止即丢弃」时代）：
+
+- **phase4**（上节已修）：`start → stop → start → export`——`stop` 改冻结后第二个 `start`
+  应被**正确拒绝**（原脚本按成功断言）⇒ 改为 `expect_fail "已停止待导出"`。
+- **phase5**（**首轮复跑在切换时才暴露**）：旧名兼容段 `request vpp trace start → stop` 之后
+  **没有收尾**——`stop` 只冻结（无 export）⇒ **留下一个 stopped 记录**（阻塞后续抓包，
+  直到被启动收敛/人工清理）。首轮 fulltest 跑完后它一直躺在盘上，直到本轮内核往返时被启动收敛
+  如实清掉（journal:「重启前冻结的抓包会话已无可导出数据…登记已清除」）——**这正是 #466 收敛
+  机制在真实事故形态上的一次顺带实证**。修法：补「冻结中 start 被拒（`expect_fail`）+
+  `request vpp trace export` 取走」两步。
+- 套件数变化：**274/0/20 → 274/0/22**（phase4 一处、phase5 一处的 `run` → `expect_fail` 位移；
+  命令集无新增/移除）。终轮复跑后核对：`show capture` 无会话、无记录文件、无 `.part`、无
+  tcpdump 残留（修好后的 phase5 不再留现场）。
+
+## 6. 四套件复跑（跑前按 round14 §1 六件事备妥；套件脚本与仓库 md5 逐字一致）
+
+| 套件 | round23（首次） | round23（终轮） | v3 基线 | 判定 |
+|---|---|---|---|---|
+| `cli-fulltest` | 273/0/21（dev12，phase4 已修、phase5 未修） | **274/0/22**（dev13，phase4+5 均修） | 274/0/20 | 位移＝两处 run→expect_fail，无新增/移除 |
+| `cli-semantic-check` | **27/0/2**（dev12，先跑正向控制夹具） | （同左，不受终轮改动影响） | 26/0/3 | 比基线更强：S8 由「不可判定」转「通过」 |
+| `cli-lifecycle-check` | **23/0/2**（dev12，夹具在场） | （同左） | 23/0/2 | 逐项一致（首跑 21/0/3 系夹具不在场、L3-1/2 无从判别） |
+| `cli-pty-smoke` | **10/10**（dev12） | （同左） | 10/10 | 逐项一致 |
+
+- 语义首跑 24/0/5 的成因：**忘了先跑 `cli-semantic-fixture.sh up`**（S9 两列表两侧都空 +
+  S8 无成员口 → 不可判定多出 2 条）；夹具就位后复跑即 27/0/2。
+- 终轮 fulltest 在 dev13 上跑（含 teardown 修复 + phase5 修正）；语义/lifecycle/pty 在 dev12 上跑，
+  两版差异只有 teardown 的 1 行（三套件均不触达该路径）——如实标注，不冒充同版复跑。
+- 跑法与前置（撤管理口地址 + 夹具三件套 + S13 现场）与 round20 证据 §2 逐条相同；
+  本轮**两轮 fulltest** 各做了一遍撤/还原。
+
+## 7. 现场与还原（终态已逐个核对）
+
+- **配置面**：`system.dataplane vpp`、`resource-pools` 1G=3/2M=768、isolated 2,3,4,5、
+  `vpp cpu main-core 2/corelist-workers 3`、管理口地址 `192.168.155.129/24` 已还原、
+  `delete interfaces ens224 disable` 残留已清、S13 的 `dns proxy` 现场已删——与开工前逐字一致。
+- **数据面**：两口回 DPDK（vfio-pci）且 VPP 中 up；`show system kernel` 一致；1G 池重启后回 3（free 2）。
+- **告警**：仅既有的 `HUGEPAGE_POOL_ORPHAN`（2M 无主 14 页，登记在案）；无 `DATAPLANE_TEARDOWN_FAILED`。
+- **抓包**：无会话、无记录文件、无 `.part` 残件、无 tcpdump；导出目录新增 5 个本轮测试件
+  （384 B×3 / 2.6 KiB / 9.5 KiB，保留以便独立复核——与历轮 pcap 同口径）。
+- **切换往返两次**（#466 内核验证一轮 + teardown 修复复验一轮）：均只重启服务、未动端口绑定之外的宿主。
+- VM 现装 `3.0.10~dev13`；二进制备份 `/root/bin-orig-r13/`（原件）、`/root/bin-dev11/`（前一轮）。
+
+## 8. 教益（入册）
+
+1. **能力前提必须在真机上量**：`pcap trace` 对已启用 trace 的重复 start 是**静默 no-op（RC=0）**——
+   只读代码/文档都看不出，是设计启动收敛（而不是「放任 + 让 start 兜底」）的决定性证据。
+2. **systemd 的 cgroup 会替我们收尸**：`KillMode=control-group` 下 `systemctl restart` 会顺带
+   SIGTERM 掉 nfvisd exec 的子进程——「孤儿 tcpdump 继续写」的前提在本部署下不成立；
+   登记恢复才是真缺口（如实更正旧注释的口径）。
+3. **测试隔离要连「扫描范围」一起隔离**：新增的启动收敛会扫描工作位（/tmp 与导出目录）——
+   单测夹具若不注入工作目录，会把共享系统临时目录里**其它测试**留下的 `.part` 搬进本用例
+   导出目录（首跑即踩到，`SetWorkDir`/`SetSessionsFile` 注入后干净）。

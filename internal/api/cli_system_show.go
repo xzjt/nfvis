@@ -327,6 +327,9 @@ func (x *cliExecutor) renderKernelBaseline() string {
 		return "%% " + err.Error() + "\n"
 	}
 	diffs := ksys.Compare(desired, actual)
+	// 决策 #459：已声明页尺寸若没有对应的 hugetlbfs 挂载点，也属「需重启/手工 mount 生效」的差异
+	// （Compare 只比 cmdline）——否则会报「一致（无需重启）」而 2M 的 VM 其实还起不来。
+	diffs = append(diffs, hugepageMountDiffs(desired)...)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%-22s %-26s %s\n", "项", "内核基线(cmdline)", "运行实际")

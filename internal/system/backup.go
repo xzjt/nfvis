@@ -46,6 +46,10 @@ type Config struct {
 	// main.go 会把实际 `-metrics-db` 路径传进来（开发态路径可被 -db 改）。
 	MetricsDB  string // 历史时序库（/var/lib/nfvis/metrics.db）
 	DHCPLeases string // DHCP 租约目录（network.DefaultDHCPLeaseDir）
+
+	// 决策 #466：抓包会话的持久记录（**文件**）——它是 Captures 目录的索引，与该目录
+	// 同生共死（目录被清空后记录若还在，指向的必是死文件）。
+	CaptureSessions string // 抓包会话记录（/var/lib/nfvis/capture-sessions.json）
 }
 
 // DefaultConfig 生产缺省。
@@ -62,6 +66,8 @@ func DefaultConfig() Config {
 		VMs:         "/var/lib/nfvis/vms",
 		MetricsDB:   "/var/lib/nfvis/metrics.db",
 		DHCPLeases:  "/var/lib/nfvis/dhcp",
+		// 决策 #466：与 network.DefaultCaptureSessionsFile 同值（同址复制，理由见上）。
+		CaptureSessions: "/var/lib/nfvis/capture-sessions.json",
 	}
 }
 
@@ -131,6 +137,10 @@ func NewManager(cfg Config, engine Engine, imgs ImageStore, ver string) *Manager
 	}
 	if cfg.DHCPLeases == "" {
 		cfg.DHCPLeases = def.DHCPLeases
+	}
+	// 决策 #466：抓包会话记录（单文件）缺省值。
+	if cfg.CaptureSessions == "" {
+		cfg.CaptureSessions = def.CaptureSessions
 	}
 	if cfg.VMs == "" {
 		cfg.VMs = def.VMs

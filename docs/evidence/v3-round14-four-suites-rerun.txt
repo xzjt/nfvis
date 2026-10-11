@@ -1,0 +1,100 @@
+# v3 round14 追加证据：四套真机套件复跑（#450~#459 修复批，`3.0.10~dev5`）
+
+日期：2026-10-11　　分支：`v3`　　VM：nfvis-lab（Ubuntu 26.04.1 / 内核 7.0.0-34 / 6 核 7 GB）
+装的是**交叉编译换装二进制** `3.0.10~dev5`（含 #450~#457 与 #458/#459）。
+
+## 0. 结论
+
+| 套件 | 本次 | v3 基线 | 判定 |
+|---|---|---|---|
+| `cli-fulltest` | **274 通过 / 0 失败 / 20 预期报错** | 274/0/20（round10/11） | 逐项一致 |
+| `cli-semantic-check` | **26 / 0 / 不可判定 3** | 26/0/3（round132/149~152） | 逐项一致 |
+| `cli-lifecycle-check` | **23 / 0 / 跳过 2** | 23/0/2（round152） | 逐项一致 |
+| `cli-pty-smoke` | **10 / 0** | 10/10 | 逐项一致 |
+
+**四套全绿零失败**，与 #450~#457 之前的 v3 基线逐项一致 ⇒ #458/#459 **未引入回归**。
+
+跑法：
+
+```
+SRV=https://192.168.155.129:443 CLI_BIN=/usr/bin/nfvis-cli \
+NFVIS_PASSWORD='…' API_PORT=443 bash contrib/scripts/cli-fulltest.sh        # 274/0/20
+…                             bash contrib/scripts/cli-semantic-check.sh   # 26/0/3
+…                             bash contrib/scripts/cli-lifecycle-check.sh  # 23/0/2
+bash contrib/scripts/cli-pty-smoke.sh /usr/bin/nfvis-cli https://192.168.155.129:443 admin '…'   # 10/10
+```
+
+## 1. 跑之前必须先解决的六件事（**下轮直接照做，省一轮排查**）
+
+1. **套件脚本不在 VM 上**（VM 无源码树）。把 `contrib/scripts/cli-*.sh` +
+   `cli-fulltest-exemptions.tsv` 复制到 `/root/suites/` 即可（脚本自包含，不读仓库文件）。
+2. **`cli-pty-smoke.sh` 收的是位置参数**（`<CLI> <server> <user> <password>`），**不认 `SRV`/`CLI_BIN`
+   环境变量**——用环境变量跑会静默回落到 `https://127.0.0.1:443` 并连不上（本次首跑 3/7 即此因；
+   位置参数下 10/10）。
+3. **管理口地址与 fulltest 的 S2-pre 夹具网段冲突**（本轮新增的坑）：S2-pre 把 `192.168.155.10/24`
+   配在 ens224 上，而本机管理口是 `192.168.155.129/24` ⇒ 提交被**正确拒绝**
+   （`vrfs[vs-l3].l3_interfaces[ens224].addresses[0]: 地址网段与 system.management.address 重叠`），
+   vs-l2/vs-l3/acl-test 全没建出来 ⇒ 级联 **56 条假红**（223/56/15）。处置＝临时
+   `delete system management ip address 192.168.155.129/24` + `commit confirmed`（跑完即还原；
+   该地址只影响 nfvisd 监听地址，**不动宿主 IP**——`mgmtAddressOf` 唯一的消费点是 `ResolveListenAddr`）。
+4. **夹具三件套**（缺则 phase 3 起连锁红）：
+   - `/var/lib/nfvis/images/alpine.qcow2` —— 镜像仓库里实际叫 `alpine`（无后缀），而 phase 3 硬编码
+     `cp /var/lib/nfvis/images/alpine.qcow2 …` 且 `2>/dev/null` 静默失败 ⇒ 先补一份同名副本。
+   - `/data/incoming/{cli-test,cli-del}.qcow2` + `ct.tar` —— 阶段 3 自己造；注意**套件收尾会把
+     `/data/incoming` 清空**。
+   - docker `alpine:3.20` 与**产品镜像库里的 `alpine:3.20` 条目** —— 两者都会被套件自己的
+     「删镜像」用例消耗掉（R8-3 家族）；跑语义夹具前要重建（`docker tag` + `request images upload`）。
+5. **语义夹具需要 Debian 云镜像 + S13 现场**：`debian-12-generic-amd64.qcow2` 随快照丢失，本轮重新下载
+   （`https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2`，
+   sha512 `f631afb1…`，427.4 MiB —— **与当时官方 SHA512SUMS 逐字一致**；注意 round24 记的 sha512
+   `84946d6e…` 是更早的 "latest"，两者不同不是下载损坏）。S13 需先
+   `set system dns proxy server 10.0.0.53` 提交（否则如实报不可判定）。
+6. **跑完 fulltest 必须还原它改过的「配置面」**：`resource-pools hugepages page-size 1G count`、
+   `resource-pools cpu isolated-cores`、`vpp cpu main-core/corelist-workers` 都会被 S2-pre 改成夹具值，
+   套件清场**只删对象、不还原这些标量**（本次留下的现场：1G=2 / isolated 1-4 / main 2→1）。
+   另有 `interfaces ens224 { enabled false }` 残留（R8-4 同族；用 `delete interfaces ens224 disable` 清）。
+
+## 2. R13-E 的**启动路径**独立验证（本轮 reboot 顺带取得）
+
+为把 1G 池从 2 恢复到 3（运行期 `echo 3 > nr_hugepages` 无效——需开机预留），执行了一次
+`request system reboot`。这顺带把 #459 的 **systemd 挂载单元路径**验到了：
+
+```
+# 重启前 fstab（产品写）：
+# nfvis-hugepages
+nodev /dev/hugepages hugetlbfs defaults,pagesize=1G 0 0
+nodev /dev/hugepages-2M hugetlbfs defaults,pagesize=2M 0 0
+
+# 重启后（**无需任何手工动作**）：
+$ grep hugetlbfs /proc/mounts
+nodev /dev/hugepages-2M hugetlbfs rw,relatime,pagesize=2M 0 0
+nodev /dev/hugepages hugetlbfs rw,relatime,pagesize=1024M 0 0
+$ ls -ld /dev/hugepages-2M            # 挂载点目录由 systemd 挂载单元自动创建
+drwxr-xr-x 3 root root 0 Oct 11 22:00 /dev/hugepages-2M
+$ nfvis-cli -c 'show system kernel' | tail -1
+一致性：内核基线与配置期望一致（无需重启）
+
+1G 池：nr=3 free=2　2M 池：nr=768 free=235　cmdline：… hugepagesz=1G hugepages=3 isolcpus=2-5
+```
+
+即：**挂载点由 systemd 从 fstab 自动创建并挂载**（此前 round14 主体是手工 `mount` 验证的），
+且 `show system kernel` 的挂载点差异在挂载点就位后**自动回到「一致」**（4.3/4.1 的差异逻辑正反两向都过）。
+
+⚠️ 重启后固定动作照旧：DPDK 绑定不跨重启 ⇒ 两口 `request interfaces <口> bind-dpdk --yes` +
+`request vpp restart`（本轮已做；之后 ens192/ens224 在 VPP 中 up、`RECOVERY_IFACE_MISSING` 告警自动消解）。
+
+## 3. 现场收尾（已核对）
+
+对象：无交换机/VRF/VNF/容器；`virsh list` 空。池：1G=3 / 2M=768；isolated 2,3,4,5（vpp-reserved 2,3）。
+内核基线：`show system kernel` 一致（无需重启）。告警：仅既有 `HUGEPAGE_POOL_ORPHAN`（2M 无主 14 页）。
+管理口：`192.168.155.129/24` 已还原（`127.0.0.1:443` 恢复为不可达，与交接 §2 一致）。
+镜像：`alpine`(qm) + `debian-12-generic-amd64.qcow2`(qm) + `ct.tar` / `alpine:3.20`(ct)；docker 两个 tag 均在。
+套件脚本留在 VM 的 `/root/suites/`（下轮可直接复用，省掉第 1 步）。
+
+## 4. 判定口径（如实）
+
+- 「预期报错 / 跳过 / 不可判定」三类**不计入通过**：fulltest 的 20 条预期报错＝环境受限或防呆守卫
+  正确拒绝（如 SR-IOV 无 PF/VF、管理口守卫）；语义的 3 条不可判定＝**S8（成员口无持续流量——
+  夹具 VNF 的 beat 循环是 cloud-init 一次性 runcmd，fixture up 时确有 rx 增长、跑 S8 时已静默）**、
+  S11（无 relay 现场）、S12（无 learn-limit 现场）；lifecycle 的 2 条跳过＝无 NAT 配置。
+- 本次未额外造 S11/S12 现场（与基线同一口径，基线亦是 26/0/3）。

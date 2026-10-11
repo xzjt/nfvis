@@ -1606,9 +1606,10 @@ paths:
       tags: [system]
       summary: 停止抓包（`?export=true` 时同时导出 pcap）
       description: |
-        缺省只停止（丢弃缓冲）；`?export=true` 表示**停止并导出**——与 CLI
-        `request capture export` 同义。内核数据面下导出＝把 tcpdump 的工作文件搬入导出目录
-        （同一目录改名），未捕获到报文时如实回「无文件导出」，不返回不存在的文件。
+        缺省**停止并保留数据**（冻结）：已抓数据不丢、会话标为 `stopped`（见 CaptureStatus.active.stopped），
+        随后 `?export=true` 照样取走——两种顺序都能拿到 pcap；冻结期间开始新抓包会被拒。`?export=true`
+        表示**停止并导出**——与 CLI `request capture export` 同义。内核数据面下导出＝把 tcpdump 的工作文件
+        搬入导出目录（同一目录改名），未捕获到报文时如实回「无文件导出」，不返回不存在的文件。
       parameters:
         - name: export
           in: query
@@ -1678,8 +1679,8 @@ paths:
       tags: [system]
       summary: 停止抓包（**兼容别名**；`?export=true` 时同时导出 pcap，等价于 DELETE /capture）
       description: |
-        旧名保留为兼容别名（与 `/capture` 同一 handler）：缺省只停止（丢弃），`?export=true`
-        表示**停止并导出**——与 CLI `request capture export` 同义。
+        旧名保留为兼容别名（与 `/capture` 同一 handler）：缺省停止并**保留数据**（冻结），
+        `?export=true` 表示**停止并导出**——与 CLI `request capture export` 同义。
       parameters:
         - name: export
           in: query
@@ -3192,6 +3193,16 @@ components:
               description: |
                 会话开始时给的 count：VPP 数据面为 pcap trace 缓冲深度（环形、不自动停止）；
                 内核数据面为 tcpdump `-c`（达到即自动停止）。
+            stopped:
+              type: boolean
+              description: |
+                true = 已停止、**数据保留待导出**（`request capture stop` 之后、`request capture export`
+                之前的状态；会话仍占登记位，故此时开始新抓包会被拒并提示先 export）；缺省/false = 正在抓包。
+            recovered:
+              type: boolean
+              description: |
+                true = 该会话由 nfvisd 启动时的**重启收敛**重建（重启前已停止或正在抓的会话，数据已保留、
+                待导出——此时 `stopped` 同样为 true）；缺省/false = 本进程内正常建立或冻结的会话。
         files:
           type: array
           items:
@@ -3948,15 +3959,15 @@ components:
           type: object
           properties:
             count: { type: integer }
-            pin: { type: boolean, default: true }
-            cores_assigned: { type: array, items: { type: integer }, description: 运行态实际绑核 }
+            pin: { type: boolean, default: true, description: 读视图给有效值：未显式声明时为 true（绑核是缺省行为） }
+            cores_assigned: { type: array, items: { type: integer }, description: 运行态实际绑核（资源池账本单源，与 show resource-pools 的「已分配」及域 XML 的 vcpupin 同源）；账本未分到核时省略 }
         memory:
           type: object
           properties:
-            size_mb: { type: integer }
-            hugepage_size: { type: string, enum: ["2M", "1G"] }
-            numa_node: { type: integer }
-            backing: { type: string, enum: [hugepage, normal], default: hugepage, description: normal 时禁止 vhost-user vNIC }
+            size_mb: { type: integer, description: guest 内存；backing=hugepage 时必须是 hugepage_size 页尺寸的正整数倍（否则提交期拒绝——整页大页后备） }
+            hugepage_size: { type: string, enum: ["2M", "1G"], description: 缺省取资源池主池；用 2M 需已声明 2M 池且内核基线已挂载对应 hugetlbfs 挂载点（需重启生效）。读视图给有效值：未显式声明时为资源池主池页尺寸 }
+            numa_node: { type: integer, description: 可选；未声明即无 NUMA 亲和（读视图不给兜底，如实留空） }
+            backing: { type: string, enum: [hugepage, normal], default: hugepage, description: normal 时禁止 vhost-user vNIC。读视图给有效值：未显式声明时为 hugepage }
         disks:
           type: array
           description: 附加数据盘（virtio）

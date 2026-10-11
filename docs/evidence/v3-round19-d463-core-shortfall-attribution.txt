@@ -1,0 +1,75 @@
+# v3 round19 证据：收口观察②——绑核不足的归因可读化（决策 #463）
+
+日期：2026-10-11　　分支：`v3`　　VM：nfvis-lab（`3.0.10~dev9`，交叉编译换装二进制）
+
+## 0. 一句话
+
+round12/13 登记的「vcpu 扩容被容量校验拒绝时**错误归因到另一个 VM**」本轮收口。真机复现确认：**归因
+指向的 VM 正是账本里真正分不到核的那台（事实没错），但它是"受害者"而不是"操作者刚改的那台"**——
+因为账本按 **VM 名序**依次分配绑核。本轮**只改文案、不改分配算法**（按名序分配是既定行为：确定性、
+可复现，域 XML 的 `vcpupin` 也按它生成），在缺口文案里点明**分配顺序**与**照做路径**。
+
+## 1. 真机复现（`dev8`，改前逐字）
+
+现场：隔离核 `2,3,4,5`，VPP 保留 `2,3` ⇒ **空闲只有 4、5 两枚**；建两台各 1 vcpu 的 VM（`vnf-a`、`vnf-b`）。
+
+```
+$ nfvis-cli -c 'configure
+set virtual-machine-functions vnf-a vcpu count 2
+commit
+exit'
+[ok] virtual-machine-functions vnf-a vcpu count 2
+校验失败（candidate 保留在本会话内；…）:
+  - virtual-machine-functions[vnf-b].vcpu.count: 隔离核不足：需要 1，可用 0        ← 操作者动的是 vnf-a
+```
+
+即：**操作者会跑去查一台自己没动过的 VM**（`vnf-b`）。
+
+## 2. 改动（决策 #463；只改文案）
+
+`internal/model/resources.go` 的 `allocateCores` 缺口文案（唯一一处）补两点：
+
+| | 改前 | 改后 |
+|---|---|---|
+| 文案 | `隔离核不足：需要 1，可用 0` | `隔离核不足：需要 1，可用 0（绑核按 VM 名序依次分配：本台排在后面才分不到；若你刚调整的是别的 VM，请缩小它的 vcpu 或扩充隔离核池 set resource-pools cpu isolated-cores …）` |
+
+**不改**：账本的分配顺序/算法、错误 `Path`（仍指向**真正分不到**的那台——那是正确的事实）、
+NUMA 分支的 `NUMA <n> ` 前缀、退出码与事务行为。
+
+## 3. 红-绿
+
+把文案改回旧版（`隔离核不足：需要 %d，可用 %d`）后：
+
+```
+--- FAIL: TestAllocateCoresShortfallAttributionHint (internal/model)
+    cores_attribution_test.go:39: 文案应点明「按 VM 名序依次分配」：隔离核不足：需要 1，可用 0
+```
+
+恢复 ⇒ PASS。守护同时钉住**事实不变**：名序在前的 `vnf-a` 仍分到 2 枚核、缺口数字仍如实为
+「需要 1，可用 0」。
+
+## 4. 真机复验（`3.0.10~dev9`，同一现场重放）
+
+```
+$ nfvis-cli -c 'configure
+set virtual-machine-functions vnf-a vcpu count 2
+commit
+exit'
+  - virtual-machine-functions[vnf-b].vcpu.count: 隔离核不足：需要 1，可用 0（绑核按 VM 名序依次分配：
+    本台排在后面才分不到；若你刚调整的是别的 VM，请缩小它的 vcpu 或扩充隔离核池
+    set resource-pools cpu isolated-cores …）
+
+# 照做路径正控（「缩小它的 vcpu」）：
+$ … 'set virtual-machine-functions vnf-a vcpu count 1' + commit
+commit 成功 (revision 214)
+```
+
+现场已清场（删 `vnf-a`/`vnf-b`，rev 215，`show virtual-machine-functions` = 无 VNF）。
+
+## 5. 边界（如实）
+
+- **分配顺序未变**（按 VM 名序）：它是确定性的、与域 XML 的 `vcpupin` 同源；本条只让文案解释它，
+  不引入「按编辑顺序优先」这类状态。
+- 若将来要做「扩容时优先保住被编辑的那台」，那属**分配策略变更**（影响 `vcpupin` 生成与既有现场），
+  须另行定裁（本条不做）。
+- `make check` 七项 RC=0（决策计数 **365**）。

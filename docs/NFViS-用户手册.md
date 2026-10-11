@@ -742,14 +742,22 @@ nfvis$ show system kernel                      # 三方对照（cmdline / 运行
 
 > **大页默认尺寸与钉值**：内核启动基线的默认大页尺寸 `default_hugepagesz` **恒为 2M**（数据面/
 > VPP 的默认尺寸），不随池声明变化；池一律以 `hugepagesz=<size> hugepages=N` 显式声明（2M 给 VPP、
-> 1G 给 VNF）。⚠️ **1G 池的可用页数**：数据面（VPP）的 main heap **偏好最大可用页尺寸、实测始终占
-> 1 个 1G 页**，且 VPP 自己的 `default-hugepage-size`/`main-heap-page-size` 与内核 `default_hugepagesz`
-> **都改不了它**（三组对照 + 新基线重启后复测）；因此 **1G 池声明 N 页时，VNF 实际可用 N−1 页**
+> 1G 给 VNF）。⚠️ **1G 池的可用页数**：数据面（VPP）**固定占 1 个 1G 页**——实测该页归属为
+> **DPDK EAL 段**（`memfd:seg_0-0`，按最大页优先取页），**不是 VPP 主堆**（主堆按
+> `main-heap-page-size` 落在 2M 页）；VPP 自己的 `default-hugepage-size`/`main-heap-page-size`
+> 与内核 `default_hugepagesz` **都改不了它**（三组对照 + 新基线重启后复测）；因此
+> **1G 池声明 N 页时，VNF 实际可用 N−1 页**
 > （第 N 台及以后的 VNF 会因 `Cannot allocate memory` 起不来）——规划 1G 池时请把这一页算进去。
 > 写入内核基线时，产品同时维护 `/etc/sysctl.d/90-nfvis-hugepages.conf`，把 `vm.nr_hugepages` 钉为
 > **即将生效的默认尺寸池**的声明值——判据优先取产品写下的 GRUB 片段（`request system kernel apply`
 > 后即将生效），回退当前内核启动参数；两者都取不到时保守不动该文件。这样**改基线后尚未重启**的过渡期
 > 不会把某尺寸的页数喂给另一尺寸的池（否则重启后会把该尺寸池收小、数据面起不来）。
+>
+> **大页挂载点**：内核基线同时维护 `/etc/fstab` 里的 hugetlbfs 挂载——**每个已声明页尺寸各一个**
+> （主挂载点 `/dev/hugepages` 取 1G 优先、否则 2M；另一尺寸用 `/dev/hugepages-<size>`）。这是给 guest
+> 内存用的（libvirt 按 `pagesize=` 匹配挂载点）：**同时声明 1G 与 2M 池时，2M 后备的 VM 才起得来**
+> （改前只挂一个尺寸，2M 的 VM 报 `Unable to find any usable hugetlbfs mount for 2048 KiB`）。
+> **需重启生效**（`/dev` 为 devtmpfs，重启后由 systemd 挂载单元自动创建并挂载）。
 > 原因：VPP 的 deb 自带 `/etc/sysctl.d/80-vpp.conf`（`vm.nr_hugepages=1024`，注释写明是给 **2M**
 > 池留的），而该 sysctl 只作用于**默认尺寸**池——历史上产品默认为 1G 时它会落到 **1G** 池上，开机
 > 时按可用内存尽量分配，使 1G 池**大于**声明值（实测：声明 1 页、实际 3 页，`show system kernel`
@@ -792,8 +800,8 @@ nfvis$ request system kernel apply
 |---|---|
 | 隔离核 | = VPP 线程核 + 全部 VM 的 vCPU 数。宿主/管理面至少留 2 个核 |
 | VPP 线程 | `main-core` + `corelist-workers` 都必须在隔离核内；worker 数建议与业务口 `rx-queues` 一致 |
-| 1G 大页 | 每台 1G 内存的 VM 占 1 页；**VPP 用 2M 页（`hugepage-preference 2M`）把 1G 页让给 VM** |
-| 2M 大页 | VPP 缓冲用，768 页（1.5G）够起步；可运行期追加 |
+| 1G 大页 | 每台 1G 内存的 VM 占 1 页；**数据面（VPP）实测始终再占 1 个 1G 页**（该页实测是 DPDK EAL 段 `memfd:seg_0-0`，不是 VPP 主堆） ⇒ 声明 N 页时 VNF 实际可用 **N−1** 页（见 §6.2） |
+| 2M 大页 | 数据面（VPP）缓冲/辅助段落用（`hugepage-preference 2M`），768 页（1.5G）够起步；可运行期追加 |
 | 池子不足 | commit 明确报错（`无 1G 大页资源池，无法分配 …MB` / `隔离核不足：需要 N，可用 0`） |
 
 ---
@@ -1274,8 +1282,10 @@ nfvis$ request system hugepages reclaim   # 回收空闲的多余页（在用页
 如实报出。要释放它们得**从预留者一侧入手**（如停/重启数据面、释放其预留）。若池因此满而新 VNF 起不来
 （`Cannot allocate memory`），请先看「实际持有 / 无主占用」两列定位究竟是谁在用或谁预留了它。
 
-**1G 池为什么少一页可用（数据面固定占用）**：数据面（VPP）的 main heap **固定占 1 个 1G 页**——
-它偏好最大可用页尺寸，且 VPP 自己的 `default-hugepage-size`/`main-heap-page-size` 与内核
+**1G 池为什么少一页可用（数据面固定占用）**：数据面（VPP）**固定占 1 个 1G 页**——实测该页归属为
+**DPDK EAL 段**（`memfd:seg_0-0`，按最大页优先取页），**不是 VPP 主堆**（主堆按 `main-heap-page-size`
+落在 2M 页，`vppctl show memory` 的 `page stats` 可直接看到）；VPP 自己的
+`default-hugepage-size`/`main-heap-page-size` 与内核
 `default_hugepagesz` **都改不了它**（真机三组对照，见 §6.2），产品也没有配置键可释放这一页。
 因此 **1G 池声明 N 页时，VNF 实际可用 N−1 页**（第 N 台及以后的 VNF 会因 `Cannot allocate memory`
 起不来）。读法：`show system hugepages` 的「**数据面占用**」列 = 实际持有中**仅由**数据面进程（VPP，`comm` 形如 `vpp_main`）映射、无其它进程共享的页（vhost-user 共享给 VPP 的 VNF guest RAM 不计入）
@@ -1887,7 +1897,7 @@ nfvis# edit virtual-machine-functions fw-vm
 nfvis# set image ubuntu-cloud.qcow2
 nfvis# set vcpu count 2                          # pin 默认 true（绑到隔离核）
 nfvis# set memory size-mb 2048
-nfvis# set memory hugepage-size 1G               # 指定页池（缺省取主池）
+nfvis# set memory hugepage-size 1G               # 指定页池（缺省取主池）；size-mb 必须是该页尺寸的整数倍
 nfvis# set memory backing hugepage               # normal 则不用大页（此时禁止 vhost-user vNIC）
 nfvis# set interfaces eth0 type vhost-user
 nfvis# set interfaces eth0 virtual-switch vs-dmz
@@ -2175,10 +2185,21 @@ nfvis$ clear interfaces statistics ens224     # 清零（super-user）
 ```bash
 nfvis$ request capture start interface ens224 count 100      # 开始抓包
 nfvis$ show capture                                          # 会话状态 + 已导出 pcap 清单
-nfvis$ request capture export name my-capture                # 导出（隐含停止）
+nfvis$ request capture export name my-capture                # 停止并导出（一步到位）
 # 下载：GET /api/v1/capture/<file>
-nfvis$ request capture stop                                  # 停止且不导出
+nfvis$ request capture stop                                  # 只停止（**数据保留**，随后 export 取走）
 ```
+
+> **`stop` 与 `export` 都会结束抓包，区别只是「要不要现在就把文件搬出来」**：`stop` 只**冻结**
+> （已抓数据保留、会话标成「已停止待导出」，`show capture` 里看得到），随后 `request capture export`
+> 照样取得走——**两种顺序都能拿到 pcap**。冻结期间不能开始新抓包（会被拒并提示先 `export`）。
+> 想一步到位就直接用 `request capture export`（命令名里的 `export` 才是「停止并导出」，`name` 可指定文件名）。
+
+> **服务进程重启不会丢数据**：`stop` 冻结后（或抓包进行中）若 nfvis 服务被重启，重启后的
+> `show capture` 会把重启前的会话**恢复成同一形态**（「已停止，数据待导出；重启前会话已恢复」），
+> `request capture export` 照常取走；不留登记的工作文件会被自动归档为可下载的 pcap。
+> 唯一取不回的情形：抓包进行中 nfvis 与数据面**同时**重启（VPP 数据还没落盘就没了）——
+> 这时会如实显示「无捕获数据」，不会假装有文件。
 
 > 旧写法 `request vpp trace …` / `show vpp capture` 与旧端点 `/api/v1/vpp/capture` 仍可用
 > （同一实现的兼容别名），新脚本请用上面的写法。

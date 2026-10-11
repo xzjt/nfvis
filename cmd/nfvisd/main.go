@@ -257,6 +257,9 @@ func run() error {
 		dpdkBinder = network.NewDPDKBinder()
 		dpdkBindings = network.NewBindings(network.DefaultBindingsPath)
 		dpdkBinder.Bindings = dpdkBindings
+		// 决策 #464：原生驱动记录（PCI → 接管前的内核驱动）。解绑不带 to-driver 时按它交还——
+		// 本平台内核不会自动 probe（round17 实测），有记录才免去操作者报驱动名。
+		dpdkBinder.NativeDrivers = network.NewNativeDrivers(network.DefaultNativeDriversPath)
 		// 迁移：把手写 startup.conf 里 `dev <pci> { name <口> }` 的映射并入记录——内核数据面
 		// 下这是「按口名交还」（request interfaces <口> unbind-dpdk）的定位来源（同 VPP 分支
 		// 的迁移口径；带外方式绑定的存量安装不必改用 PCI 地址）。失败只告警，不影响启动。
@@ -329,6 +332,9 @@ func run() error {
 		// 也是「按口名解绑」的依据。不入 committed 配置（决策 #30：PCI 不随配置走）。
 		dpdkBindings = network.NewBindings(network.DefaultBindingsPath)
 		dpdkBinder.Bindings = dpdkBindings
+		// 决策 #464：原生驱动记录（PCI → 接管前的内核驱动）。解绑不带 to-driver 时按它交还——
+		// 本平台内核不会自动 probe（round17 实测），有记录才免去操作者报驱动名。
+		dpdkBinder.NativeDrivers = network.NewNativeDrivers(network.DefaultNativeDriversPath)
 		// 迁移：把当前部署的 startup.conf 里 dev <pci> { name <口> } 的映射并入记录，
 		// 使「照旧手册带外播种」的存量安装不必重绑就能转由产品维护。
 		if n, err := dpdkBindings.ImportStartupConf(network.DefaultStartupPath); err != nil {
@@ -702,6 +708,14 @@ func run() error {
 		// 两种数据面都应有后端；都没有才是装配缺口（端点如实回 503，而不是把一个内部为 nil
 		// 的控制器塞进接口——那样一调用就 panic）。
 		if backend != nil {
+			// 决策 #466：抓包会话跨 nfvisd 重启收敛——启动时按持久记录把重启前冻结/在抓的
+			// 会话重建为「已停止待导出」、无记录残件归档为可见 pcap。失败（如 VPP 未就绪）
+			// 不阻塞启动：Provider 会记住待办，在下次抓包操作时自动补跑。
+			rctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			for _, line := range backend.Reconcile(rctx) {
+				log.Info("抓包重启收敛", "结果", line)
+			}
+			cancel()
 			captureAPI = &captureController{p: backend}
 		}
 	}
@@ -2112,6 +2126,8 @@ type captureBackend interface {
 	Start(ctx context.Context, ifname string, count int, filterACL string) error
 	Stop(ctx context.Context, export bool) (network.CaptureFile, error)
 	Path(name string) (string, error)
+	// Reconcile 启动收敛（决策 #466）：跨 nfvisd 重启恢复抓包会话/归档残件。
+	Reconcile(ctx context.Context) []string
 }
 
 // 编译期断言：两数据面的抓包实现都满足后端方法面（换实现不换调用方）。
@@ -2128,7 +2144,8 @@ func (c *captureController) Status() (*api.CaptureSessionRow, []api.CaptureFileR
 	var a *api.CaptureSessionRow
 	if active != nil {
 		a = &api.CaptureSessionRow{Interface: active.Interface, Captured: active.Captured,
-			StartedAt: active.StartedAt, MaxDepth: active.MaxDepth}
+			StartedAt: active.StartedAt, MaxDepth: active.MaxDepth, Stopped: active.Stopped,
+			Recovered: active.Recovered}
 	}
 	rows := make([]api.CaptureFileRow, 0, len(files))
 	for _, f := range files {

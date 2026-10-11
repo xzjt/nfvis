@@ -1,0 +1,68 @@
+# v3 round20 证据：四套真机套件在 #460~#463 之后复跑（`3.0.10~dev9`）
+
+日期：2026-10-12　　分支：`v3`　　VM：nfvis-lab（Ubuntu 26.04.1 / 内核 7.0.0-34）
+
+## 0. 结论
+
+四套件是 round14（#458/#459）跑过的；round15~19 又改了**用户可见行为**（大页说明文案 #460、VM 读视图
+#461、抓包文案 #462、绑核缺口文案 #463），故在**当前构建 `3.0.10~dev9`** 上整体复跑一遍：
+
+| 套件 | 本次（dev9） | v3 基线 | 与 round14 一致？ |
+|---|---|---|---|
+| `cli-fulltest` | **274 / 0 / 20** | 274/0/20 | ✅ 逐项一致 |
+| `cli-semantic-check` | **26 / 0 / 不可判定 3** | 26/0/3 | ✅ 逐项一致 |
+| `cli-lifecycle-check` | **23 / 0 / 跳过 2** | 23/0/2 | ✅ 逐项一致 |
+| `cli-pty-smoke` | **10 / 0** | 10/10 | ✅ 逐项一致 |
+
+**四套全绿零失败** ⇒ #460~#463 **未引入回归**。（不可判定/跳过项与基线同源：语义的 S8 无持续流量、
+S11 无 relay 现场、S12 无 learn-limit 现场；lifecycle 的两条＝无 NAT 配置。）
+
+## 1. 跑之前先做的静态核对（省一轮假红）
+
+rounds 15~19 只改了三处**文案**与一处**读视图字段**，先静态查「套件是否断言这些字符串」：
+
+```
+$ grep -rn "已停止抓包\|停止/导出" contrib/scripts/cli-fulltest-phase*.sh   # 只 run，无 expect_out
+$ grep -rn "MB/1G\|固定占用\|数据面占用\|cores-assigned\|cores_assigned" contrib/scripts/*.sh   # 零命中
+$ grep -rn "隔离核不足" contrib/scripts/*.sh                                # 零命中
+```
+
+`expect_out` 的断言集合（Token-ID / 横幅 / DNS / metrics 间隔 / DHCP 租约 / 防火墙 / 容器 exec）
+与本次改动**无交集**；lifecycle 只比对配置形状与 VPP 事实。⇒ 静态即可判定不受影响，实跑进一步印证。
+
+## 2. 跑法与前置（沿用 round14 证据 §1 的六件事）
+
+```
+SRV=https://192.168.155.129:443 CLI_BIN=/usr/bin/nfvis-cli NFVIS_PASSWORD='…' API_PORT=443 \
+  bash /root/suites/cli-fulltest.sh
+bash /root/suites/cli-pty-smoke.sh /usr/bin/nfvis-cli https://192.168.155.129:443 admin '…'   # 位置参数！
+```
+
+本轮前置动作（逐条与 round14 证据 §1 相同）：
+1. **临时撤管理口地址**（fulltest 的 S2-pre 夹具把 `192.168.155.10/24` 配在 ens224，与本机管理口
+   `192.168.155.129/24` 同网段 ⇒ 提交被**正确拒绝**）：`delete system management ip address …` +
+   `commit confirmed`，跑完还原（见 §4）。
+2. 夹具：`/var/lib/nfvis/images/alpine.qcow2` ✓、docker `alpine:3.20` ✓、`/data/incoming` 由套件自造。
+3. 语义夹具前**重建产品镜像库里的 `alpine:3.20`**（fulltest 的删镜像用例会吃掉它）+ 导入
+   `debian-12-generic-amd64.qcow2` ✓ + S13 现场 `set system dns proxy server 10.0.0.53`。
+4. 套件脚本与仓库**逐字一致**（`md5sum` 比对 `cli-fulltest-phase4.sh`：两侧同为 `df25fa9a…`）。
+
+## 3. 套件自身留下的现场（跑完必须还原，同 round14 教训）
+
+`cli-fulltest` 的 S2-pre 会改**标量**：`resource-pools hugepages page-size 1G count`（3→2）、
+`resource-pools cpu isolated-cores`（2-5→1-4）、`vpp cpu main-core/corelist-workers`；清场**只删对象、
+不还原标量**。本轮还原动作（一次提交）：`set … 1G count 3`、`isolated-cores 2-5`、`vpp main-core 2`、
+`corelist-workers 3`、`delete interfaces ens224 disable`（清 R8-4 同族残留）。**hugepages 列表顺序**
+本轮未被破坏（仍是 `1G, 2M`）——round16 的那次 delete+set 重排仍然有效。
+
+## 4. 现场还原（已核对）
+
+- **1G 池**：套件把它改成 2 后**运行期回不去 3**（`echo 3 > nr_hugepages` 无效，需开机预留）⇒
+  按 round14 的同一处置**重启一次**：重启后 `nr=3`、**两个 hugetlbfs 挂载点自动在位**（#459 的
+  systemd 挂载单元路径再次被顺带验证）、`show system kernel` 回「一致（无需重启）」。
+  重启后按固定动作**重新绑定 DPDK**（两口 `bind-dpdk --yes` + `request vpp restart`）⇒ 两口在 VPP 中 up。
+- **管理口地址已还原**（`192.168.155.129/24` + 网关 + ens160）。
+- 终态：nfvis/vpp **active**、池 **1G=3 / 2M=768**、isolated **2,3,4,5**（vpp-reserved 2,3）、
+  无业务对象、告警仅既有 `HUGEPAGE_POOL_ORPHAN`（2M 无主 14 页）、hugetlbfs 挂载点 **2**。
+- ⚠️ 两次重启都会**重生成 SSH host key**（本轮与 round14 各遇到一次）：宿主 known_hosts 需 `ssh-keygen -R`
+  刷新，否则 `REMOTE HOST IDENTIFICATION HAS CHANGED`。

@@ -33,11 +33,15 @@ func (x *cliExecutor) execShowVMs(args []string) string {
 		fmt.Fprintf(&b, "%-16s %-10s %-5s %-12s %-16s %s\n", "Name", "State", "vCPU", "Memory", "Image", "Serial")
 		for _, vm := range cfg.VirtualMachineFunctions {
 			st := x.vmStateOf(context.Background(), vm.Name)
-			row, _ := anyToTree(vm).(map[string]any)
+			// 有效值（决策 #461）：pin/backing/页尺寸未显式声明时补产品的确定缺省，免得界面「—」
+			// 而运行态有事实；与 REST 读视图（vmReadView）同一实现。
+			eff := model.EffectiveVM(cfg, vm)
+			row, _ := anyToTree(eff).(map[string]any)
 			row["state"] = st
+			injectCoresAssigned(row, cfg, vm.Name)
 			items = append(items, row)
 			fmt.Fprintf(&b, "%-16s %-10s %-5d %-12s %-16s %v\n",
-				vm.Name, st, vm.VCPU.Count, memoryDisplay(vm.Memory), vm.Image, serialEnabled(vm))
+				vm.Name, st, eff.VCPU.Count, memoryDisplay(eff.Memory), vm.Image, serialEnabled(vm))
 		}
 		if len(items) == 0 {
 			return "（无 VNF）\n"
@@ -57,8 +61,11 @@ func (x *cliExecutor) execShowVMs(args []string) string {
 	}
 	switch sub {
 	case "", "detail":
-		m, _ := anyToTree(vm).(map[string]any)
+		// 有效值（决策 #461）：与 REST 读视图（vmReadView）同一实现——配置未显式声明时补确定缺省。
+		eff := model.EffectiveVM(cfg, vm)
+		m, _ := anyToTree(eff).(map[string]any)
 		m["state"] = x.vmStateOf(context.Background(), name)
+		injectCoresAssigned(m, cfg, name)
 		x.structured = m
 		out := RenderConfigJSON(m)
 		if len(vm.PCIDevices) > 0 {
@@ -430,6 +437,19 @@ func coreList(v any) string {
 		parts = append(parts, fmt.Sprintf("%d", n))
 	}
 	return strings.Join(parts, ",")
+}
+
+// injectCoresAssigned 往读视图树里注入**运行态派生**的 `vcpu.cores_assigned`（决策 #461）——
+// 取自资源池账本（`model.AssignedCores`，与 `show resource-pools` 的「已分配」及域 XML 的
+// `vcpupin` 同源；REST 读视图同源）。账本没分到核时**不注入**（界面「—」如实，不编造）。
+func injectCoresAssigned(tree map[string]any, cfg model.Config, vmName string) {
+	cores := model.AssignedCores(cfg, vmName)
+	if len(cores) == 0 {
+		return
+	}
+	if mv, ok := tree["vcpu"].(map[string]any); ok {
+		mv["cores_assigned"] = cores
+	}
 }
 
 // memoryDisplay 内存展示（size_mb + 页大小/backing 摘要）。

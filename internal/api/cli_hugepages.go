@@ -17,9 +17,11 @@ package api
 //	无主占用 = 在用 - 实际持有（≥0）：分配了却无进程/inode 引用的页（决策 #346）
 //	可回收   = 空闲的多余页（#329）；**无主占用页不可回收**（#346 真机实测撤回）
 //
-// ⚠️ 决策 #353（收口 #347 的困惑）：VPP 主堆**固定占 1 个 1G 页且无配置键可释放**——
+// ⚠️ 决策 #353（收口 #347 的困惑）：数据面**固定占 1 个 1G 页且无配置键可释放**——
 // 1G 池「数据面占用 ≥1」时读视图说明里给出「VNF 可起页数 = 空闲页数」。纯呈现，
-// 不影响任何回收/对账/告警语义。
+// 不影响任何回收/对账/告警语义。**归属措辞由决策 #460 更正**：该页实测是 **DPDK EAL 段**
+// （`memfd:seg_0-0`），不是 VPP 主堆（主堆按 `main-heap-page-size` 落在 2M 页）——见
+// `internal/system/hugepages.go` 的 `hugepageDataplaneNote`。
 //
 // ⚠️ **在用 ≠ 有持有者**（决策 #346 更正 #329 的措辞）：内核收缩池、或被进程**预留（reserve）
 // 但未 fault** 的页（如数据面 DPDK 预留）都算「在用」却没有可见持有者——它们**不在空闲链表上**，
@@ -35,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/model"
@@ -128,8 +131,11 @@ func hugepageOccupants(cfg model.Config, pageSize, mode string) []string {
 }
 
 // hugetlbfsMounts 内核 hugetlbfs 挂载点里按页尺寸匹配的项（作为「有人挂着它」的证据）。
+// 内核在 /proc/mounts 里把 pagesize= **规范化成「最大整数单位」形式**（1G ⇒ `1024M`、
+// 2M ⇒ `2M`），故按解析出的 kB 值比较、不按字面串（决策 #459 修：此前 1G 只匹配
+// `1G`/`1048576kB`，与实况 `1024M` 不符而恒漏报）。
 func hugetlbfsMounts(pageSize string) []string {
-	kb, ok := ksys.HugepagePageKB(pageSize)
+	wantKB, ok := ksys.HugepagePageKB(pageSize)
 	if !ok {
 		return nil
 	}
@@ -143,12 +149,38 @@ func hugetlbfsMounts(pageSize string) []string {
 		if len(f) < 4 || f[2] != "hugetlbfs" {
 			continue
 		}
-		opts := f[3]
-		if strings.Contains(opts, "pagesize="+pageSize) || strings.Contains(opts, fmt.Sprintf("pagesize=%dkB", kb)) {
+		for _, opt := range strings.Split(f[3], ",") {
+			v, ok := strings.CutPrefix(opt, "pagesize=")
+			if !ok || parsePagesizeKB(v) != wantKB {
+				continue
+			}
 			out = append(out, fmt.Sprintf("%s 挂载为 hugetlbfs（pagesize=%s）", f[1], pageSize))
+			break
 		}
 	}
 	return out
+}
+
+// parsePagesizeKB 把 hugetlbfs 挂载选项 pagesize 的值（`1024M`/`2048kB`/`1G`/`2M`/`1048576`）
+// 解析成 kB；无法解析返回 0（不匹配任何已知池）。
+func parsePagesizeKB(v string) int {
+	v = strings.TrimSpace(v)
+	mult := 1
+	switch {
+	case strings.HasSuffix(v, "kB"):
+		v = strings.TrimSuffix(v, "kB")
+	case strings.HasSuffix(v, "K"):
+		v = strings.TrimSuffix(v, "K")
+	case strings.HasSuffix(v, "M"):
+		v, mult = strings.TrimSuffix(v, "M"), 1024
+	case strings.HasSuffix(v, "G"):
+		v, mult = strings.TrimSuffix(v, "G"), 1024*1024
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n * mult
 }
 
 // hugepagePagesForMB 内存 MB → 页数（与 model 账本的换算同口径）。

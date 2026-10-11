@@ -913,19 +913,23 @@ func (x *cliExecutor) requestCapture(user string, t []string) string {
 			return "%% " + err.Error() + "\n"
 		}
 		x.audit(user, "capture.start", "开始抓包 "+ifname, nil)
-		return fmt.Sprintf("已开始抓包（接口 %s，count %s）。停止/导出：request capture stop|export\n",
+		return fmt.Sprintf("已开始抓包（接口 %s，count %s）。\n"+
+			"结束并取走 pcap：request capture export（停止并导出）；request capture stop 只停止（数据保留，随后仍可 export）。\n",
 			ifname, countNote(x.dpMode(), count))
 	case "stop":
 		if _, err := x.capture.Stop(context.Background(), false); err != nil {
 			return "%% " + err.Error() + "\n"
 		}
-		x.audit(user, "capture.stop", "停止抓包（不导出）", nil)
-		return "已停止抓包（未导出）。\n"
+		x.audit(user, "capture.stop", "停止抓包（保留数据待导出）", nil)
+		// 决策 #465（观察⑤ 的行为收口）：stop 不再丢弃数据——只停止并**冻结**，随后 export 取走。
+		return "已停止抓包（数据已保留，待导出）。\n取走 pcap：request capture export（它把这段数据搬进导出目录并登记，可直接下载）。\n"
 	case "export":
 		f, err := x.capture.Stop(context.Background(), true)
 		if err != nil {
 			x.audit(user, "capture.export", "导出 pcap", err)
-			return "%% " + err.Error() + "\n"
+			// 决策 #465 起「先 stop 再 export」是**正常路径**（stop 保留数据）；无会话只剩
+			// 「没开始过」或「已导出过」两种成因——提示照做路径，别让操作者以为踩了老坑。
+			return "%% " + err.Error() + "（提示：当前既无进行中的抓包、也无待导出的数据；请先 request capture start）\n"
 		}
 		x.audit(user, "capture.export", "导出 pcap "+f.Name, nil)
 		if f.Name == "" {
@@ -954,11 +958,22 @@ func (x *cliExecutor) execShowCapture() string {
 	}
 	active, files := x.capture.Status()
 	var b strings.Builder
-	if active != nil {
+	switch {
+	case active == nil:
+		b.WriteString("capturing: none\n")
+	case active.Stopped:
+		// 决策 #465：已停止、数据保留待导出——如实说清状态与下一步，别让操作者以为会话没了。
+		// 决策 #466：重启收敛重建的会话点明来源（操作者多半没在本进程里停过它）。
+		note := ""
+		if active.Recovered {
+			note = "；重启前会话已恢复"
+		}
+		fmt.Fprintf(&b, "capturing: stopped（已停止，数据待导出%s）interface %s, started %s, max-depth %d\n"+
+			"  取走 pcap：request capture export\n",
+			note, active.Interface, active.StartedAt.Format("2006-01-02 15:04:05"), active.MaxDepth)
+	default:
 		fmt.Fprintf(&b, "capturing: interface %s, started %s, max-depth %d\n",
 			active.Interface, active.StartedAt.Format("2006-01-02 15:04:05"), active.MaxDepth)
-	} else {
-		b.WriteString("capturing: none\n")
 	}
 	if len(files) == 0 {
 		b.WriteString("（无已导出 pcap）\n")

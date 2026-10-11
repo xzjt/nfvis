@@ -1,0 +1,78 @@
+# v3 round21 证据：候选① —— `unbind-dpdk` 记住「接管前的原生驱动」（决策 #464）
+
+日期：2026-10-12　　分支：`v3`　　VM：nfvis-lab（`3.0.10~dev10`，交叉编译换装二进制）
+
+## 0. 一句话
+
+round17 登记为「未立项候选」的可用性增强落地：产品在**接管那一刻**明明知道该设备当时用的内核驱动
+（`Bind` 里读到的 `cur`），却在切到 vfio-pci 后丢掉，于是解绑只能靠操作者报驱动名（round17 真机确认：
+本平台内核**不会**自动 probe）。现在把它记进本机运行态，解绑取值顺序＝**显式 `to-driver` > 本记录 >
+`rescan` 试探**——真机上 `unbind-dpdk --yes` **不带 `to-driver`** 一次成功、设备回到 `vmxnet3`。
+
+## 1. 真机 A/B（同一台机器、同一条命令）
+
+| | 改前（`dev9`，round17 实测） | 改后（`dev10`） |
+|---|---|---|
+| `request interfaces ens224 unbind-dpdk --yes` | `%% 已解绑 0000:13:00.0，但内核未自动重新探测原生驱动；请显式指定：request interfaces 0000:13:00.0 unbind-dpdk to-driver <驱动名>` | `接口 ens224（PCI 0000:13:00.0）已解绑并交还内核驱动，当前驱动 vmxnet3` |
+
+改后现场（`/sys/bus/pci/devices/0000:13:00.0/driver` = `vmxnet3`，内核侧 `ens224` 复现）；
+journal 两行如实记录走的是哪一路：
+
+```
+INFO 已记录 0000:13:00.0 的原生驱动：vmxnet3（解绑不带 to-driver 时按它交还）     ← 接管那一刻写的
+INFO 按绑定时记录的原生驱动交还：0000:13:00.0 → vmxnet3                          ← 解绑那一刻读的
+```
+
+落盘记录（`/var/lib/nfvis/dpdk-native-drivers.json`）：
+
+```json
+{ "0000:13:00.0": "vmxnet3" }
+```
+
+## 2. 改了什么
+
+- **新落点** `internal/orchestrator/network/native_drivers.go`：`NativeDrivers`（PCI → 驱动名）——
+  与决策 #100 的 `Bindings`（口名 → PCI）**同族同文件约定**（惰性读盘、`MkdirAll` 后写、损坏报错不静默），
+  但**语义不同故单独成件**：`Bindings` 解释「netdev 消失后这个口是哪个设备」，本记录解释
+  「这个设备接管前用的是哪个内核驱动」。
+- `dpdkbind.go`：`Bind` 在**切换之前**记录 `cur`（新增字段 `NativeDrivers`）；`Unbind` 在显式 `to-driver`
+  缺省时读记录并按它显式绑定（记录里的驱动目录不存在 ⇒ 如实说明并退回探测）。
+- `cmd/nfvisd/main.go`：两处装配（VPP 分支 + 内核分支）各挂一份记录。
+- **只记非 DPDK 用户态驱动**：`IsDPDKUioDriver`（`vfio-pci`/`igb_uio`/`uio_pci_generic`）——从 vfio-pci
+  换到 igb_uio 之类的**重绑**不该把 vfio-pci 记成「原生驱动」（那会让解绑把设备又交回 DPDK 驱动，
+  与操作者意图相反）。表是**保守猜测**、不覆盖自定义 DPDK 驱动，注释里如实写明。
+- **不入 committed 配置、不进 `format-data` 受管目录**：本机运行态事实，与 #100 的 `dpdk-bindings.json`
+  同类口径（那份同样不在清单里）——清配置不抹机器事实。
+
+## 3. 红-绿（6 项，`internal/orchestrator/network/native_drivers_test.go`）
+
+夹具刻意复现 round17 的真机行为：**解绑后驱动链接消失、`rescan` 不恢复，只有显式 `bind` 才回来**
+（否则假 sysfs 里链接一直在，探测会假成功、红-绿分不出来）。把 `Unbind` 的记录路径置死（`if false`）后：
+
+```
+--- FAIL: TestNativeDriverRecordedAndUsedOnUnbind
+    native_drivers_test.go:74: 有记录时解绑不该失败：已解绑 0000-13-00.0，但内核未自动重新探测原生驱动；
+        请显式指定：request interfaces 0000-13-00.0 unbind-dpdk to-driver <驱动名>   ← 正是改前行为
+--- FAIL: TestUnbindStaleRecordFallsBack
+    native_drivers_test.go:142: 应如实说明记录里的驱动不可用：[]
+```
+
+恢复 ⇒ 全过。覆盖：① 接管前记录 + 解绑按记录交还（含 journal 文案）；② **显式 `to-driver` 优先**
+（且不动记录里的驱动）；③ **无记录** ⇒ 退回 rescan 探测 + 既有报错与照做路径 + **sysfs 写序不变**
+（解绑 → 清 override → rescan）；④ **记录里的驱动已不在** ⇒ 不硬绑、如实说明、退回探测；
+⑤ 从 DPDK 驱动重绑不记录；⑥ `IsDPDKUioDriver` 三真三假（含空串与「长得像但不同名」）。
+
+## 4. 现场还原（已核对）
+
+`request interfaces ens224 bind-dpdk --yes` + `request vpp restart` ⇒ 两口在 VPP 中 **up**、
+`show interfaces physical` 两个业务口 `dpdk/up`；记录文件**保留**（本机事实）。
+（过程需要先 `systemctl stop vpp`——**对仍被 VPP 持有的设备写 sysfs 会阻塞**，round17 的教训；
+产品的「仍在数据面占用」守卫正是为此。）
+
+## 5. 边界（如实）
+
+- 记录**只在「确实换掉了一个内核驱动」时写**：设备已经无驱动、或本来就在 DPDK 驱动上时都不写 ⇒
+  这些情形解绑仍退回「报错并要 `to-driver`」的现状（不猜）。
+- 记录是**本机事实**，换槽位/换卡后旧 PCI 的条目成为无害的历史残留（新 PCI 无条目 ⇒ 退回探测）。
+- 未做（不在本条范围）：`show interfaces … sriov/dpdk` 读视图里暴露该记录、以及「解绑后删除记录」
+  的清理策略——记录不会过期失效（它描述的是硬件事实），无删除需求。

@@ -1,0 +1,207 @@
+# v3 round14 证据：R13-E / R13-F 收口（决策 #458/#459）
+
+日期：2026-10-11　　分支：`v3`　　基线：`ae97ad2`（round12/13 交接）
+VM：nfvis-lab（Ubuntu 26.04.1，内核 7.0.0-34，6 核 / 7 GB），vpp 数据面，两口（ens192/ens224）在 DPDK，
+池 **1G=3（数据面占 1 / 空闲 2）/ 2M=768（空闲 235）**。
+
+本轮把 round13 复验中**顺带登记的两条未修项**单独收口：
+
+- **R13-F（低）**：VM 内存不是其大页尺寸的整数倍时**提交放行**，到 `start` 才由 QEMU 以裸文案失败。
+- **R13-E（中低）**：同时声明 1G 与 2M 池时，产品只为**一个**页尺寸挂 `/dev/hugepages`，2M 后备的
+  guest 无可用挂载点、`start` 报 `Unable to find any usable hugetlbfs mount for 2048 KiB`。
+
+## 1. 缺陷复现（改动前的 `3.0.10~dev3` 二进制，直接取证）
+
+`/usr/bin/nfvisd` 版本 `3.0.10~dev3`（round12/13 修复批，**不含**本批修复）。
+
+### 1.1 R13-F：`512` + `1G`（小于一页）
+
+```
+$ nfvis-cli -c 'configure
+set virtual-machine-functions vnf-x image alpine
+set virtual-machine-functions vnf-x vcpu count 1
+set virtual-machine-functions vnf-x memory size-mb 512
+set virtual-machine-functions vnf-x memory hugepage-size 1G
+commit
+exit'
+[ok] virtual-machine-functions vnf-x memory size-mb 512
+[ok] virtual-machine-functions vnf-x memory hugepage-size 1G
+commit 成功 (revision 74)                     # ← 提交放行
+
+$ nfvis-cli -c 'request virtual-machine-functions vnf-x start'
+%% 启动 VM vnf-x: 操作 domain vnf-x 失败: internal error: QEMU unexpectedly closed the monitor (vm='vnf-x'):
+   2026-10-11T11:46:43.403760Z qemu-system-x86_64: memory size 0x20000000 must be equal to or larger than page size 0x40000000
+# ← start 才失败，裸 QEMU 文案
+```
+
+### 1.2 R13-F：`1536` + `1G`（非整数倍）
+
+```
+$ nfvis-cli -c 'configure
+set virtual-machine-functions vnf-x memory size-mb 1536
+commit
+exit'
+commit 成功 (revision 75)                     # ← 提交放行
+
+$ nfvis-cli -c 'request virtual-machine-functions vnf-x start'
+%% 启动 VM vnf-x: 操作 domain vnf-x 失败: internal error: QEMU unexpectedly closed the monitor (vm='vnf-x'):
+   qemu_madvise: Invalid argument
+   madvise doesn't support MADV_DONTDUMP, but dump-guest-core=off specified
+   2026-10-11T11:47:14.308935Z qemu-system-x86_64: backend 'memory-backend-file' memory size must be multiple of 1 GiB
+# ← 非整数倍同样在 start 才失败
+```
+
+### 1.3 R13-E：`1024` + `2M`（无 2M 挂载点）
+
+```
+$ nfvis-cli -c 'configure
+set virtual-machine-functions vnf-x memory size-mb 1024
+set virtual-machine-functions vnf-x memory hugepage-size 2M
+commit
+exit'
+commit 成功 (revision 76)
+
+$ nfvis-cli -c 'request virtual-machine-functions vnf-x start'
+%% 启动 VM vnf-x: 操作 domain vnf-x 失败: internal error: Unable to find any usable hugetlbfs mount for 2048 KiB
+
+$ grep huge /proc/mounts
+nodev /dev/hugepages hugetlbfs rw,relatime,pagesize=1024M 0 0      # ← 只有 1G 一个挂载点
+```
+
+复现后已清场（`delete virtual-machine-functions vnf-x` → `commit` rev 77，`show virtual-machine-functions`
+= 无 VNF）。
+
+## 2. 实现（决策 #458 / #459）
+
+- **#458**：`internal/model/validate.go` 的 `checkVMFunctions` 增「内存必须是生效页尺寸正整数倍」；
+  页尺寸解析抽 **`vmHugepageSize`** 单源（`internal/model/resources.go`，账本 `Allocate`、分配 `AllocationFor`
+  与校验共用）；`hugepageSizeMB` 单源供页数换算与校验共用。
+- **#459**：`internal/system/kernel.go` 的 `GenerateBaseline` 为每个已声明页尺寸产出挂载行（主挂载点
+  `/dev/hugepages` 保持旧口径、另一尺寸 `/dev/hugepages-<size>`）；`internal/api/cli_hugepages.go` 的
+  `hugetlbfsMounts` 按内核**规范化**的 `pagesize=` 形式匹配（`parsePagesizeKB`）；`deploy/debian/postrm`
+  与 `deploy/installer/nfvis-baseline.sh` 的撤销/回显同步为多行。
+- **连带（真机当场发现）**：`request system kernel apply` / `show system kernel` 的「一致（无需重启）」
+  只比 cmdline、不含挂载点，现由 `hugepageMountDiffs`/`hugepageMountMissing` 把「已声明但未挂载」并入
+  pending/一致性差异。
+
+## 3. 红-绿（实现后）
+
+- **#458**：把校验条件置为恒假 ⇒ `TestValidateVMMemoryMultipleOfHugepage` 的 `512+1G`/`1536+1G`/`1025+2M`/
+  `未声明按主池` 四个子例按预期 **FAIL**；恢复 ⇒ PASS。
+- **#459（fstab）**：把第二挂载点条件置为恒假 ⇒ `TestGenerateBaselineHugepageMounts/双池` FAIL
+  （实际只有 `nodev /dev/hugepages hugetlbfs defaults,pagesize=1G 0 0`）；恢复 ⇒ PASS。
+- **#459（挂载点差异）**：把 `hugepageMountMissing` 的声明判据置为恒假 ⇒ 组合矩阵用例 FAIL；恢复 ⇒ PASS。
+- `parsePagesizeKB` 对 `1024M`/`2M`/`2048kB`/`1G`/`1048576` 各形态均按 kB 值匹配（内核在
+  `/proc/mounts` 里把 1G 规范化成 `1024M`、2M 规范化成 `2M`）。
+
+## 4. 真机复验（换装 `3.0.10~dev5`）
+
+换装：`systemctl stop nfvis` → 覆盖 `/usr/bin/{nfvisd,nfvis-cli}` → `systemctl start nfvis`；
+`nfvis-cli -version` = `3.0.10~dev5`，`systemctl is-active nfvis` = `active`。
+（`~dev4` 为更早一次换装，只含 #458/#459 主体；`~dev5` 另含 4.3 的挂载点差异，全部复验以 `~dev5` 为准。）
+
+### 4.1 R13-F：提交期拒绝
+
+```
+$ nfvis-cli -c '... vnf-x memory size-mb 512 ... memory hugepage-size 1G ... commit ...'
+校验失败（candidate 保留在本会话内；会话/进程结束即释放，show configuration candidate 可查看）:
+  - virtual-machine-functions[vnf-x].memory.size_mb: memory size-mb 必须是 1G 大页尺寸的整数倍（当前 512MB）——guest 内存由整页大页后备，非整数倍会在启动时被 QEMU 拒绝；请改为 1024MB 的整数倍，或改用其它页尺寸 / 普通内存
+
+$ ... memory size-mb 1536 ... commit
+  - virtual-machine-functions[vnf-x].memory.size_mb: memory size-mb 必须是 1G 大页尺寸的整数倍（当前 1536MB）——…
+
+$ ... memory size-mb 1024 ... memory hugepage-size 1G ... commit
+commit 成功 (revision 82)                     # ← 整数倍放行（~dev5；~dev4 亦为 revision 78）
+```
+
+### 4.2 R13-E：两条挂载行 + 2M 的 VM 起得来
+
+生成器（同一实现供 CLI 与安装器）：
+
+```
+$ nfvisd --print-kernel-baseline --hugepages-1g 3 --hugepages-2m 768 --isolated-cores 2-5
+GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} default_hugepagesz=2M hugepagesz=2M hugepages=768 hugepagesz=1G hugepages=3 isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5 irqaffinity=0-1 intel_iommu=on intel_pstate=disable iommu=pt"
+---FSTAB---
+nodev /dev/hugepages hugetlbfs defaults,pagesize=1G 0 0
+nodev /dev/hugepages-2M hugetlbfs defaults,pagesize=2M 0 0        # ← 新增第二个挂载点
+```
+
+产品落地：
+
+```
+$ nfvis-cli -c 'request system kernel apply'
+内核基线已写入（GRUB 片段 /etc/default/grub.d/99-nfvis.cfg + fstab 大页挂载）
+$ grep -A3 nfvis-hugepages /etc/fstab
+# nfvis-hugepages
+nodev /dev/hugepages hugetlbfs defaults,pagesize=1G 0 0
+nodev /dev/hugepages-2M hugetlbfs defaults,pagesize=2M 0 0
+```
+
+2M 的 VM（`size-mb 256` + `hugepage-size 2M`，`commit` rev 79）：
+
+```
+# 挂载点就位前：
+$ nfvis-cli -c 'request virtual-machine-functions vnf-2m start'
+%% 启动 VM vnf-2m: 操作 domain vnf-2m 失败: internal error: Unable to find any usable hugetlbfs mount for 2048 KiB
+
+# 手工挂载 2M 挂载点（等价于重启后由 systemd 挂载单元挂载）：
+$ mkdir -p /dev/hugepages-2M && mount -t hugetlbfs -o pagesize=2M nodev /dev/hugepages-2M
+$ grep hugetlbfs /proc/mounts
+nodev /dev/hugepages hugetlbfs rw,relatime,pagesize=1024M 0 0
+nodev /dev/hugepages-2M hugetlbfs rw,relatime,pagesize=2M 0 0
+
+# 挂载点就位后（含 libvirtd 重启以重新扫描 /proc/mounts，再 restart nfvis 重建连接）：
+$ nfvis-cli -c 'request virtual-machine-functions vnf-2m start'
+启动 VNF vnf-2m 已受理
+$ virsh list --all
+ Id   Name     State
+------------------------
+ 1    vnf-2m   running                         # ← 改前报「无可用挂载点」
+```
+
+⚠️ **现场发现（并入 #459 口径）**：libvirt 在 **daemon 启动时**扫描 `/proc/mounts`——挂载点**后加**的，
+不重启 libvirtd 则仍报「无可用挂载点」（实测：先挂载后 start 仍失败，`systemctl restart libvirtd` +
+`systemctl restart nfvis` 后成功）。真实启动路径里 fstab 挂载（`dev-hugepages-2M.mount`，`Before=local-fs.target`）
+先于 libvirtd，故**重启即生效**；但「apply 后不重启就想用 2M」不成立——这正是 `request system kernel apply`
+改前会误报「一致（无需重启）」的那处不实陈述，本批已并入 pending/一致性差异。
+
+### 4.3 连带修复：apply/show 如实提示挂载点
+
+2M 已声明但挂载点缺失（手工 `umount /dev/hugepages-2M` 后）：
+
+```
+$ nfvis-cli -c 'show system kernel'
+  大页 1G=3 2M=768   isolcpus=2-5   nmi_watchdog=不托管   thp=-
+
+一致性：与配置期望不一致：
+  - 大页 2M：尚无对应 hugetlbfs 挂载点（需重启或手工 mount 生效）
+
+$ nfvis-cli -c 'request system kernel apply'
+内核基线已写入（GRUB 片段 /etc/default/grub.d/99-nfvis.cfg + fstab 大页挂载）
+待重启生效（pending_reboot）：
+  - 大页 2M：尚无对应 hugetlbfs 挂载点（需重启或手工 mount 生效）
+执行 request system reboot 应用新基线；重启后 show system kernel 应显示一致
+```
+
+挂载点就位（手工 `mount -t hugetlbfs -o pagesize=2M nodev /dev/hugepages-2M`）后同一命令回到
+「一致性：内核基线与配置期望一致（无需重启）」——差异随事实消解，不误报。
+
+## 5. 边界（如实）
+
+- 本批以**交叉编译换装二进制**验证（`3.0.10~dev5`），**非 deb 重装**；正式发版仍须 `make deb` 两次
+  逐字节一致 + 四套件（fulltest / 语义 / lifecycle / pty）复跑。
+- `size-mb` 的整数倍约束**不适用**于 `backing=normal`（普通内存、不占大页池）。
+- 已声明页尺寸的**挂载点目录**由 systemd 挂载单元自动创建（`/dev` 为 devtmpfs，重启后重建）；
+  产品侧不额外 `mkdir`（`/dev` 下的目录不跨重启）。
+- 现场收尾：已删除 `vnf-1g`/`vnf-2m`、卸载 `/dev/hugepages-2M`；`/etc/fstab` 保留两条挂载行（＝当前池声明的
+  正确基线，重启后由 systemd 挂载）。
+
+## 6. 追加裁定：R12-1 不立项（2026-10-11）
+
+用户裁定：**删除 R12-1 立项**——目标部署**继续同时使用 1G 与 2M 双池**（VPP 缓冲走 2M、1G 留给 VNF），
+3×1G-only 不是目标形态。故**不改编排**（不做「把缓冲/辅助段落挪到 2M、1G 全留给 VNF」的改造）；
+「1G 池声明 N ⇒ VNF 可用 N−1」作为**明示边界**保留（决策 #347 / 手册 §6.2）。
+
+落点（纯文档，无代码/契约变更，决策条数仍 361）：`docs/v3待做.md` §七（「未收口（按裁定跳过）」→
+「已裁定：不立项」）、`AGENTS.md`（round13/round14 段）、本交接 §3。round12/round13 的**历史证据不改**
+（如实保留当时的发现）。

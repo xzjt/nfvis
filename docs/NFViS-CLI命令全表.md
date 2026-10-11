@@ -65,7 +65,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show system cpu` | 总核/隔离核/每核占用 | 运行态（宿主 `/proc`） | ✅ |
 | `show system memory` | 内存与大页使用（池内/池外） | 运行态 | ✅ |
 | `show system storage` | 磁盘与镜像仓库占用 | 运行态 + 镜像仓库 | ✅ |
-| `show system hugepages` | 大页池数字：声明（配置唯一真源）/ 内核实际（sysfs）/ 在用（= 实际 − 空闲）/ **实际持有**（按 `/proc/*/smaps` 的 hugetlb 映射按 inode 去重汇总）/**数据面占用**（= 实际持有中 comm=vpp 的进程提交的页，实测归属；决策 #353）/**无主占用**（= 在用 − 持有，决策 #346）+ 空闲（可分配）与可回收（决策 #329/#346/#353，与 `GET /system/hugepages` 同源；**无主占用页不可回收**、只作可见性 + `HUGEPAGE_POOL_ORPHAN` 告警；1G 池「数据面占用 ≥1」时说明区给出「VNF 可起页数 = 空闲页数」——VPP 主堆固定占 1 个 1G 页、无配置键可释放；取不到内核值/持有值/占用值时如实显示「取不到」，不编造） | `GET /system/hugepages` | ✅ |
+| `show system hugepages` | 大页池数字：声明（配置唯一真源）/ 内核实际（sysfs）/ 在用（= 实际 − 空闲）/ **实际持有**（按 `/proc/*/smaps` 的 hugetlb 映射按 inode 去重汇总）/**数据面占用**（= 实际持有中 comm=vpp 的进程提交的页，实测归属；决策 #353）/**无主占用**（= 在用 − 持有，决策 #346）+ 空闲（可分配）与可回收（决策 #329/#346/#353，与 `GET /system/hugepages` 同源；**无主占用页不可回收**、只作可见性 + `HUGEPAGE_POOL_ORPHAN` 告警；1G 池「数据面占用 ≥1」时说明区给出「VNF 可起页数 = 空闲页数」——数据面固定占 1 个 1G 页、无配置键可释放，**该页实测归属为 DPDK EAL 段（`memfd:seg_0-0`），不是 VPP 主堆**（决策 #460 更正 #347/#353 的措辞）；取不到内核值/持有值/占用值时如实显示「取不到」，不编造） | `GET /system/hugepages` | ✅ |
 | `show system kernel` | 内核启动基线三方对照（cmdline/运行实际/配置期望，FR-SYS-014） | 配置 + 运行态 | ✅ |
 | `show system metrics history` | 历史时序**概览**（决策 #356）：存储状态（可用/不可用 + 原因）、生效采样间隔与保留天数、库大小、序列数、样本数、时间范围（最旧/最新）、上次采样时刻与是否停滞（stale）。数据源＝独立 SQLite 库 `/var/lib/nfvis/metrics.db`（`/metrics` 的历史底座） | `GET /metrics/history` | ✅ |
 | `show system metrics history name <metric> [last <duration>] [step <duration>]` | 某指标**各序列**（按标签分组）的时间点；`<metric>` 走动态候选（来源＝存储内已知指标名）；`last` 默认 1h、`step` 省略=自动降采样（取桶内最后一个样本）；存储不可用/无数据时如实说明，不编造 | `GET /metrics/history?name=…` | ✅ |
@@ -104,7 +104,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show vpp runtime [thread <id>]` | **线程级**运行态：每线程向量率/主循环速率 + 整机向量率 + 工作线程数 + 数据面运行时长 | 运行态（stats segment，经 `vpp_get_stats` 解码，与 buffer/接口计数同源） | ✅（决策 #200；按节点明细无结构化来源，CLI 如实说明需 `vppctl show runtime`） |
 | `show vpp buffers` | buffer 池（每 NUMA）用量；打印统计来源 | 运行态（statsclient ‖ `vpp_get_stats`，决策 #68） | ✅ |
 | `show vpp memory` | main-heap 与 hugepage 占用 | 运行态 | ✅ |
-| `show capture` | 抓包会话状态与已导出 pcap 清单（**数据面无关**：VPP 走 pcap trace、内核走 tcpdump） | `GET /capture` | ✅（同一实现的历史真机结论（VPP pcap trace 轮次）；**新名拼写**的真机复跑待执行——已入 fulltest 阶段 1/4/5） |
+| `show capture` | 抓包会话状态与已导出 pcap 清单（**数据面无关**：VPP 走 pcap trace、内核走 tcpdump）。**跨服务重启**：按持久记录恢复重启前的会话为「已停止待导出（重启前会话已恢复）」——决策 #466 | `GET /capture` | ✅（同一实现的历史真机结论（VPP pcap trace 轮次）；**新名拼写**的真机复跑待执行——已入 fulltest 阶段 1/4/5） |
 | `show vpp capture` | **兼容别名**（与 `show capture` 同一实现、同一端点，旧脚本不破） | 同上 | ✅ |
 | `show bonds` | 链路聚合列表 | `GET /bonds` | ✅ |
 | `show bonds <name> detail` | 成员口 link/LACP actor-partner | `GET /bonds/{name}` | ✅ |
@@ -173,13 +173,13 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request interfaces <ifname> enable` | 启用接口 | O | `PUT /interfaces/{n}` | ✅ |
 | `request interfaces <ifname> disable` | 禁用接口 | O | `PUT /interfaces/{n}` | ✅ |
 | `request interfaces <ifname> bind-dpdk [uio-driver <d>]` | 绑定 DPDK 驱动（中断流量，需确认）。**内核数据面（`system.dataplane=kernel`）下直接拒绝**——内核数据面不使用 DPDK 接管，绑定会把网卡从内核里拿走（需要 DPDK 请切回 `vpp` 数据面并重启服务） | O | `PUT /interfaces/{n}/dpdk` | ✅（真机周期见决策 #72；内核方向拒绝见附录 A #426） |
-| `request interfaces <ifname\|pci> unbind-dpdk [to-driver <d>]` | 解绑交还内核驱动。**内核数据面下同样可用（用于把网卡交还内核）**：VPP 时代接管过的口在切到内核后仍留在 vfio-pci，交还后才能进内核数据面（切换时 nfvisd 会自动停掉 VPP，见手册 §7.0/§7.5）；两数据面下解绑前都会拒绝**仍被数据面使用中**的口（VPP 侧问 VPP、内核侧问内核：bridge/bond/VRF 成员口或带 IP 地址），并给先删声明的照做路径 | O | `PUT /interfaces/{n}/dpdk` | ✅（提示确认；接管后须按 PCI） |
+| `request interfaces <ifname\|pci> unbind-dpdk [to-driver <d>]` | 解绑交还内核驱动。**内核数据面下同样可用（用于把网卡交还内核）**：VPP 时代接管过的口在切到内核后仍留在 vfio-pci，交还后才能进内核数据面（切换时 nfvisd 会自动停掉 VPP，见手册 §7.0/§7.5）；两数据面下解绑前都会拒绝**仍被数据面使用中**的口（VPP 侧问 VPP、内核侧问内核：bridge/bond/VRF 成员口或带 IP 地址），并给先删声明的照做路径。**交还哪个驱动**按「显式 `to-driver` > **接管那一刻记下的原生驱动** > `rescan` 自动探测」取值（决策 #464：本平台内核不会自动 probe，有记录才免去操作者报驱动名；记录落 `/var/lib/nfvis/dpdk-native-drivers.json`，journal 会写明本次走的是哪一路） | O | `PUT /interfaces/{n}/dpdk` | ✅（提示确认；接管后须按 PCI） |
 | `request sriov create-vfs <ifname> count <n>` | 创建 VF | O | `PUT /interfaces/{n}/sriov` | ⊘ 本机无 PF/VF，明确报错（round80 实测：报「不支持 SR-IOV」，未静默成功） |
 | `request sriov delete-vfs <ifname> vf <n>` | 回收 VF | O | `PUT /interfaces/{n}/sriov` | ⊘ 同上（另：`vf <n>` 不参与定位——按数量回收，回显已明确说明，附录 A #94） |
 | `request vpp restart` | 按 committed 配置重建数据面 + 恢复收敛 | S | `POST /vpp/restart` | ✅（返回成功即代表数据面可查询：等 VPP 起来**且**连接管理器换成新连接才返回；未重建则如实报「数据面连接在重启窗口内不可用」+ 指引，附录 A #315） |
 | `request capture start interface <if> [count <n>] [filter <acl>]` | 开始数据面抓包（**数据面无关**：VPP 走 pcap trace、内核走 tcpdump）。`count` 语义随数据面：VPP 为 pcap trace 缓冲深度（环形、不自动停，需显式 stop/export），内核为 tcpdump `-c`（**达到报文数即自动停止**）；`filter <acl>` **两数据面都不支持**（避免过滤语义分叉）。只接受**数据面设备**：VPP 中的端口，或内核侧的产品自持虚拟设备（虚拟交换机 bridge/VRF/bond/VXLAN）与已声明且在内核里的业务口——管理口与未声明的口一律如实拒绝 | S | `POST /capture` | ✅（同一实现的历史真机结论（VPP pcap trace 轮次）；**新名拼写**的真机复跑待执行——已入 fulltest 阶段 1/4/5） |
-| `request capture stop` | 停止抓包（不导出；内核侧终止 tcpdump 进程并删掉工作文件） | S | `DELETE /capture` | ✅（同一实现的历史真机结论（VPP pcap trace 轮次）；**新名拼写**的真机复跑待执行——已入 fulltest 阶段 1/4/5） |
-| `request capture export [name <n>]` | 导出 pcap（**隐含 stop**；内核侧把 tcpdump 的工作文件搬入导出目录，未捕获到报文时如实说明「无文件」） | S | `DELETE /capture` | ✅（同一实现的历史真机结论（VPP pcap trace 轮次）；**新名拼写**的真机复跑待执行——已入 fulltest 阶段 1/4/5） |
+| `request capture stop` | 停止抓包（**停止并冻结**：已抓数据**保留**、会话留登记（读视图 `stopped=true`），随后 `request capture export` 取走——决策 #465；改前这里丢弃数据）。冻结中**再 stop 幂等成功**；冻结中 `start` 会被拒并提示先 export。要 pcap 文件也可直接用 `request capture export`（停止并导出，一步到位）。**跨服务重启**：冻结数据暂存在导出目录（不依赖临时目录），重启后读视图按记录恢复为同一形态（`recovered=true`）——决策 #466 | S | `DELETE /capture` | ✅（同一实现的历史真机结论（VPP pcap trace 轮次）；**新名拼写**的真机复跑待执行——已入 fulltest 阶段 1/4/5） |
+| `request capture export [name <n>]` | 导出 pcap（**隐含 stop**；内核侧把 tcpdump 的工作文件搬入导出目录，未捕获到报文时如实说明「无文件」）。**对「仍在抓」与「已 `stop` 冻结」是同一条路径**——先 stop 再 export 照样取得到（决策 #465）。**重启恢复**：服务重启后 `export` 对「重启前会话」同样有效（决策 #466） | S | `DELETE /capture` | ✅（同一实现的历史真机结论（VPP pcap trace 轮次）；**新名拼写**的真机复跑待执行——已入 fulltest 阶段 1/4/5） |
 | `request vpp trace start interface <if> [count <n>] [filter <acl>]` | **兼容别名**（与 `request capture start` 同一实现，旧脚本不破） | S | 同上 | ✅ |
 | `request vpp trace stop` | **兼容别名**（同 `request capture stop`） | S | 同上 | ✅ |
 | `request vpp trace export [name <n>]` | **兼容别名**（同 `request capture export`） | S | 同上 | ✅ |
@@ -188,7 +188,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request system reboot` | 重启系统 | S | `POST /system:reboot` | 🚫 破坏性 |
 | `request system shutdown` | 关机 | S | `POST /system:shutdown` | 🚫 破坏性 |
 | `request system poweroff` | 断电 | S | `POST /system:shutdown` | 🚫 破坏性 |
-| `request system kernel apply` | 写入 GRUB 内核基线（需重启生效） | S | `POST /system/kernel:apply` | 🚫 未在 v2 轮次执行（会改启动项；机制由单测/集成测试覆盖） |
+| `request system kernel apply` | 写入 GRUB 内核基线（需重启生效）；fstab 为**每个已声明页尺寸**各写一个 hugetlbfs 挂载点（决策 #459） | S | `POST /system/kernel:apply` | 🚫 未在 v2 轮次执行（会改启动项；机制由单测/集成测试覆盖） |
 | `request system kernel rollback` | 回退内核基线 | S | `POST /system/kernel:rollback` | 🚫 同上 |
 | `request system hugepages reclaim` | 回收**空闲**的多余大页，收敛到声明值（决策 #329）；**在用页一律不动**、**不改声明值**、写后回读确认（未收敛/无变化如实报，含谁在占用）；⚠️ **无主占用页不在回收范围**（决策 #346 真机实测撤回：多为 DPDK 预留页，写 nr_hugepages 释放不了，需从预留者一侧释放） | S | `POST /system/hugepages:reclaim`（与 REST 同源） | ✅（真机（round108：造「实际 > 声明且空闲」现场回收 + Web 动作）——`docs/evidence/v2-round108-d329-hugepage-reclaim-verified.txt`；只动空闲多余页，无主占用页不在范围见 #346） |
 | `request system configuration backup [to <path>]` | 导出 committed 配置归档（`to <path>` 是另存一份：须绝对路径、目标不得已存在、父目录须已存在；已存在即如实拒绝） | S | `POST /system/backup`（生成归档；只读清单是 `GET /system/backup`） | ✅ |
@@ -404,8 +404,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 |---|---|---|---|
 | `set virtual-machine-functions <n> image <img>` | 引用 vm-image | libvirt | ✅ |
 | `set virtual-machine-functions <n> vcpu count <n> [pin <bool>]` | vCPU（隔离核池分配） | libvirt | ✅ |
-| `set virtual-machine-functions <n> memory size-mb <n>` | 内存（大页池分配） | libvirt | ✅ |
-| `set virtual-machine-functions <n> memory hugepage-size <2M\|1G>` | 页大小 | libvirt | ✅ |
+| `set virtual-machine-functions <n> memory size-mb <n>` | 内存（大页池分配） | libvirt | ✅ **必须是页尺寸的整数倍**（决策 #458：否则提交期拒绝——改前提交放行、start 才由 QEMU 报裸错误） |
+| `set virtual-machine-functions <n> memory hugepage-size <2M\|1G>` | 页大小 | libvirt | ✅ 缺省取主池；用 2M 需已声明 2M 池且内核基线已挂载 2M 挂载点（决策 #459，需重启生效） |
 | `set virtual-machine-functions <n> memory numa node <n>` | NUMA 亲和 | libvirt | ✅ |
 | `set virtual-machine-functions <n> memory backing <hugepage\|normal>` | 内存类型（**VPP 数据面下 normal 禁 vhost-user**——共享内存形态必须大页；**内核数据面下该约束不成立**：同名类型落成 virtio+宿主 tap+vhost-net，无共享内存对端，normal 可用） | libvirt | ✅ |
 | `set virtual-machine-functions <n> disks <d> size-gb <n>` | 附加空数据盘（FR-CMP-018） | libvirt | ✅ |
@@ -524,6 +524,15 @@ pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**
   变体漏网的工具假红后复跑 23/0/2）；round143~167 复核 **22/0/3（L3-2 正控未热）～23/0/2**（首跑偶见 22/0/3 系
   L3-2 正控未热，复跑转正；round165 起偶带「登记 1」＝已知 L2-3「查不了」附注，非回归）。
 - `cli-pty-smoke`：10/10（round80 起不变）。
+- **v3 线（分支 `v3`）当前基线（round23 实测，2026-10-12）**：`cli-fulltest` **274/0/22** ｜
+  `cli-semantic-check` **27/0/2**（S8 冷窗时 26/0/3）｜ `cli-lifecycle-check` **23/0/2**（L3-2 正控未热时
+  22/0/3）｜ `cli-pty-smoke` **10/10**。fulltest v3 段沿革：274/0/20（round14/20）→ **273/0/21**
+  （round23 首轮：phase4 的「`stop` 后 `start`」按 #465 冻结语义改 `expect_fail`）→ **274/0/22**
+  （终轮：phase5 旧名段补「冻结中 `start` 被拒 + `vpp trace export` 取走」两步——原脚本写于
+  「停止即丢弃」时代，会留下冻结会话阻塞后续抓包）。语义 27/0/2 系跑前先跑
+  `contrib/scripts/cli-semantic-fixture.sh up`（S8/S9 有正控）；lifecycle 23/0/2 同样需夹具在场
+  （L3-1/L3-2 才有对象与邻居）。证据
+  `docs/evidence/v3-round23-d466-capture-restart-reconcile.txt`（含两轮 fulltest 的全过程）。
 - 证据索引：`docs/evidence/v2-round137-d356-metrics-history.txt`、`v2-round138-d357-container-exec.txt`、
   `v2-round139-d358-container-shell.txt`、`v2-round141-d359-dhcp-server-verified.txt`、
   `v2-round143-d360-dhcpserver-r142-3-4.txt`、`v2-round144-d361-l3-acl-unbind.txt`、

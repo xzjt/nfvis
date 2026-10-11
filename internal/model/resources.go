@@ -94,12 +94,57 @@ func AllocationFor(cfg Config, vm VMFunction) AllocatedResources {
 	}
 	out := AllocatedResources{Cores: l.CPU.VMCores[vm.Name]}
 	if !usesNormalMemory(vm) {
-		out.HugepageSize = vm.Memory.HugepageSize
-		if out.HugepageSize == "" && cfg.ResourcePools != nil && len(cfg.ResourcePools.Hugepages) > 0 {
-			out.HugepageSize = cfg.ResourcePools.Hugepages[0].PageSize
+		out.HugepageSize = vmHugepageSize(cfg, vm)
+	}
+	return out
+}
+
+// AssignedCores 取该 VM 在**资源池账本**里分配到的绑核（与 `show resource-pools` 的「已分配」、
+// 以及域 XML 的 `vcpupin` **同源**）。账本有配额缺口时已分配部分仍有效——读视图只报「分到了哪些核」，
+// 未分到返回 nil（调用方据此省略该字段，不编造）。
+func AssignedCores(cfg Config, vmName string) []int {
+	l := NewPoolLedger(cfg)
+	_ = l.Allocate(cfg)
+	return slices.Clone(l.CPU.VMCores[vmName])
+}
+
+// EffectiveVM 返回该 VM 的**有效视图**（决策 #461，收口 round12/13 观察①）：配置里**未显式声明**、
+// 但产品语义上有**确定缺省**的项补成有效值——免得界面在运行态明明有事实时显示「—」。
+//
+//	vCPU 绑定（pin）：缺省 true（FR-CMP-002 绑核是缺省行为）
+//	内存后端（backing）：缺省 hugepage（FR-CMP-019：只有显式 normal 才用普通内存）
+//	大页页尺寸（hugepage_size）：缺省取资源池主池（与账本/编排同源，见 vmHugepageSize）
+//
+// **只补有确定缺省的项**：`numa_node` 未声明＝无 NUMA 亲和，界面「—」如实，不做兜底。
+// 不改行为（pin 的缺省在账本/域生成里本就是 true），只让读视图与之一致。
+func EffectiveVM(cfg Config, vm VMFunction) VMFunction {
+	out := vm
+	if out.VCPU.Pin == nil {
+		t := true
+		out.VCPU.Pin = &t
+	}
+	if !usesNormalMemory(out) {
+		if out.Memory.Backing == "" {
+			out.Memory.Backing = "hugepage"
+		}
+		if out.Memory.HugepageSize == "" {
+			out.Memory.HugepageSize = vmHugepageSize(cfg, out)
 		}
 	}
 	return out
+}
+
+// vmHugepageSize 解析某台 VM **实际生效**的大页页尺寸：显式声明优先，否则取资源池主池
+// （首个页池）；两者都没有时为空。**单源**——资源账本（Allocate）、分配结果（AllocationFor）
+// 与提交期校验（validate.go，决策 #458）共用，避免三处各写一份而漂移。
+func vmHugepageSize(cfg Config, vm VMFunction) string {
+	if vm.Memory.HugepageSize != "" {
+		return vm.Memory.HugepageSize
+	}
+	if cfg.ResourcePools != nil && len(cfg.ResourcePools.Hugepages) > 0 {
+		return cfg.ResourcePools.Hugepages[0].PageSize
+	}
+	return ""
 }
 
 // Allocate 分配演练：按 VM 名升序为每台 VM 分配大页与绑核（pin 默认 true）。
@@ -121,10 +166,7 @@ func (l *PoolLedger) Allocate(cfg Config) []ValidateError {
 		// —— 大页内存（FR-CFG-011⑪：指定页池必须有足够余量）——
 		// FR-CMP-019/决策 #39：backing=normal 用普通内存，不占用大页池。
 		if vm.Memory.SizeMB > 0 && !usesNormalMemory(vm) {
-			pageSize := vm.Memory.HugepageSize
-			if pageSize == "" && cfg.ResourcePools != nil && len(cfg.ResourcePools.Hugepages) > 0 {
-				pageSize = cfg.ResourcePools.Hugepages[0].PageSize // 缺省取资源池主池
-			}
+			pageSize := vmHugepageSize(cfg, vm)
 			pool := l.Hugepages[pageSize]
 			if pool == nil {
 				errs = append(errs, ValidateError{
@@ -178,9 +220,14 @@ func (l *PoolLedger) allocateCores(cfg Config, vm *VMFunction, used map[int]bool
 	}
 
 	if len(candidates) < count {
+		// 归因可读化（决策 #463，收口 round12/13 观察②）：账本按 **VM 名序**依次分配绑核，故
+		// 「用户刚扩大的那台」未必是报错这台（真机：把 vnf-a 扩到 2 vcpu，报的是 vnf-b 分不到）。
+		// Path 仍指向真正分不到的那台（那是正确的事实），文案补**分配顺序**与**照做路径**，
+		// 免得操作者跑去查一台自己没动过的 VM。
 		return nil, []ValidateError{{
 			Path: vmPath + ".vcpu.count",
-			Message: fmt.Sprintf("%s隔离核不足：需要 %d，可用 %d",
+			Message: fmt.Sprintf("%s隔离核不足：需要 %d，可用 %d（绑核按 VM 名序依次分配：本台排在后面才分不到；"+
+				"若你刚调整的是别的 VM，请缩小它的 vcpu 或扩充隔离核池 set resource-pools cpu isolated-cores …）",
 				where, count, len(candidates)),
 		}}
 	}
@@ -197,16 +244,26 @@ func usesNormalMemory(vm VMFunction) bool {
 	return strings.EqualFold(vm.Memory.Backing, "normal")
 }
 
-// pagesNeeded 由内存 MB 与页大小换算页数（向上取整）。
-func pagesNeeded(sizeMB int, pageSize string) int {
+// hugepageSizeMB 页尺寸 → MB（1G=1024、2M=2）；未知尺寸返回 0。**单源**——页数换算与
+// 提交期「内存必须是页尺寸整数倍」校验（决策 #458）共用。
+func hugepageSizeMB(pageSize string) int {
 	switch pageSize {
 	case "2M":
-		return (sizeMB + 1) / 2 // 每页 2MB
+		return 2
 	case "1G":
-		return (sizeMB + 1023) / 1024 // 每页 1024MB
+		return 1024
 	default:
 		return 0
 	}
+}
+
+// pagesNeeded 由内存 MB 与页大小换算页数（向上取整）。
+func pagesNeeded(sizeMB int, pageSize string) int {
+	mb := hugepageSizeMB(pageSize)
+	if mb <= 0 {
+		return 0
+	}
+	return (sizeMB + mb - 1) / mb
 }
 
 func pageSizeLabel(s string) string {

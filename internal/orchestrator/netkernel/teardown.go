@@ -118,11 +118,16 @@ func (p *Provider) TeardownDataplane(ctx context.Context, cfg model.Config) erro
 
 // deleteNftTables 整体回收四张产品自持的 nft 表（netdev nfvis-acl / netdev nfvis-portsec /
 // inet nfvis-nat / inet nfvis-forward）。幂等：表不存在按已达成。
+//
+// ⚠️ round23 真机更正：这里曾把**族常量** `natFamilyName`（"inet"）当**表名**用，生成
+// `nft delete table inet inet`——它必报语法错 ⇒ 每次内核→VPP 切换都误判「未清理干净」并
+// 落假告警 `DATAPLANE_TEARDOWN_FAILED`（真残留对象其实已被步骤 4 的 `ApplyNAT` 空声明回收；
+// 单测的 `has()` 子串断言被那条正确命令喂绿，抓不到本处——故测试补了负面断言）。
 func (p *Provider) deleteNftTables(ctx context.Context) error {
 	tables := []struct{ family, name string }{
 		{"netdev", aclTableName},
 		{"netdev", portSecTableName},
-		{"inet", natFamilyName},
+		{"inet", natTable},
 		{"inet", forwardTable},
 	}
 	var errs []error

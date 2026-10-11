@@ -2114,6 +2114,19 @@ func (v *validator) checkVMFunctions(c Config) {
 			// FR-CFG-011⑪（池存在性部分）：余量校验由 commit 阶段结合账本执行
 			v.errf(p+".memory.hugepage_size", "页大小 %s 无对应资源池", m.Memory.HugepageSize)
 		}
+		// FR-CFG-011（决策 #458）：guest RAM 由**整页大页**后备——内存必须是页尺寸的正整数倍。
+		// 否则提交放行、到 start 才由 QEMU 以裸文案失败（真机实测：`512`+`1G` ⇒ "memory size …
+		// must be equal to or larger than page size"；`1536`+`1G` ⇒ "memory size must be multiple
+		// of 1 GiB"）。backing=normal 用普通内存，不受此约束。页尺寸解析与账本/编排同源。
+		if m.Memory.SizeMB > 0 && !usesNormalMemory(m) {
+			if ps := vmHugepageSize(c, m); ps != "" {
+				if mb := hugepageSizeMB(ps); mb > 0 && m.Memory.SizeMB%mb != 0 {
+					v.errf(p+".memory.size_mb",
+						"memory size-mb 必须是 %s 大页尺寸的整数倍（当前 %dMB）——guest 内存由整页大页后备，非整数倍会在启动时被 QEMU 拒绝；请改为 %dMB 的整数倍，或改用其它页尺寸 / 普通内存",
+						ps, m.Memory.SizeMB, mb)
+				}
+			}
+		}
 		if m.Memory.Backing != "" && m.Memory.Backing != "hugepage" && m.Memory.Backing != "normal" {
 			v.errf(p+".memory.backing", "backing 必须为 hugepage 或 normal")
 		}

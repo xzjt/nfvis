@@ -148,7 +148,8 @@ func (a *BaselineApplier) Rollback() (string, error) {
 	return "已回退到上一次内核基线（备份 " + grubBackupRel + "）", nil
 }
 
-// setFstabLine 幂等维护大页挂载行（按注释标记整行替换；空行则移除）。
+// setFstabLine 幂等维护大页挂载行（按注释标记**整块**替换——先删标记行与所有 /dev/hugepages*
+// 行，再写回；line 为空则只删不写。line 可为多行，每个已声明页尺寸一行，见决策 #459）。
 func (a *BaselineApplier) setFstabLine(line string) error {
 	p := a.path(fstabRel)
 	raw, err := os.ReadFile(p)

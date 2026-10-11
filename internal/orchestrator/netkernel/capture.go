@@ -19,10 +19,10 @@ package netkernel
 // 必须是**数据面设备**（配置声明的业务口，或产品自持的虚拟交换机/VRF/bond/隧道），
 // 且**此刻在内核里存在**（被 DPDK 接管过的口内核里没有它）——任一不满足即如实拒绝，不换设备。
 //
-// 如实边界（登记的已知限制）：会话登记只在**本进程内**。若 nfvisd 在抓包进行中被重启，
-// 那个 tcpdump 会变成孤儿进程继续写工作文件（`.part`），重启后的读视图看不到它——
-// 与 VPP 侧同族（那边的 `pcap trace` 同样只有重启数据面才停）。宿主上可用
-// `pgrep -a tcpdump` 复核并手工处置。
+// 跨重启收敛（决策 #466）：会话登记仍只在**本进程内**，但 start/冻结/取走会把会话落进持久记录
+// （`/var/lib/nfvis/capture-sessions.json`），nfvisd 启动时按记录收敛——重启前冻结的会话重建为
+// 「已停止待导出」；重启前在抓的会话先终止遗留的孤儿 tcpdump（记录里有 pid，按命令行核对身份）
+// 再重建；无记录的工作文件残件归档为可见 pcap。宿主上仍可用 `pgrep -a tcpdump` 独立复核。
 
 import (
 	"context"
@@ -88,19 +88,34 @@ type Capture struct {
 	// probe 启动后探测窗（测试可缩短；0 即不探测）。
 	probe time.Duration
 
+	// 决策 #466：跨 nfvisd 重启收敛。
+	sessionsFile string             // 持久会话记录（两个数据面共用一个文件）
+	tmp          string             // 工作文件目录（缺省系统临时目录；测试注入）
+	termGrace    time.Duration      // 孤儿进程终止宽限（缺省 captureTermGrace；测试可缩短）
+	scanProcs    func() []procEntry // 进程扫描（孤儿 tcpdump 判定；测试注入）
+	killPID      func(pid int, sig syscall.Signal) error
+	pidAlive     func(pid int) bool
+
 	mu     sync.Mutex
 	active *captureSession
+
+	rmu              sync.Mutex // 收敛状态（与 mu 分开：收敛里会有有界等待，不能压着会话锁）
+	reconcilePending bool       // 启动收敛未完成（孤儿终止失败等）——下次抓包操作补跑
 }
 
-// captureSession 活动抓包会话（进程内登记；退出即摘除，不跨进程存活）。
+// captureSession 抓包会话（进程内登记；退出即摘除，由持久记录支撑跨进程收敛——决策 #466）。
+// ⚠️ 决策 #465：`stop` 后会话**不摘除**——标成 stopped（数据保留待导出），由 export 收尾。
+// ⚠️ 决策 #466：冻结即把工作文件暂存进导出目录隐藏位（`path` 随之指向暂存位）。
 type captureSession struct {
-	ifname   string // 用户给出的接口名（读视图展示用）
-	dev      string // 内核设备名（tcpdump -i 的目标）
-	fileName string // 导出文件名（沿用既有口径：nfvis-cap-<if>-<UTC>.pcap）
-	path     string // 工作文件绝对路径（导出目录内、.part 结尾）
-	proc     CaptureProc
-	started  time.Time
-	count    int
+	ifname    string // 用户给出的接口名（读视图展示用）
+	dev       string // 内核设备名（tcpdump -i 的目标）
+	fileName  string // 导出文件名（沿用既有口径：nfvis-cap-<if>-<UTC>.pcap）
+	path      string // 工作文件当前路径（在抓时＝临时目录 .part；冻结暂存后＝导出目录隐藏位）
+	proc      CaptureProc
+	started   time.Time
+	count     int
+	stopped   bool // 已停止采集、数据保留待导出（决策 #465）
+	recovered bool // 由 nfvisd 启动时的重启收敛重建（决策 #466）
 }
 
 // NewCapture 构造内核数据面抓包实现（run 为 nil 时用真实宿主命令）。
@@ -109,12 +124,19 @@ func NewCapture(run Runner) *Capture {
 		run = NewExecRunner()
 	}
 	return &Capture{
-		run:   run,
-		start: startExecProc,
-		dir:   network.DefaultCaptureDir,
-		cfg:   func() model.Config { return model.Config{} },
-		now:   time.Now,
-		probe: captureStartProbe,
+		run:              run,
+		start:            startExecProc,
+		dir:              network.DefaultCaptureDir,
+		cfg:              func() model.Config { return model.Config{} },
+		now:              time.Now,
+		probe:            captureStartProbe,
+		sessionsFile:     network.DefaultCaptureSessionsFile,
+		tmp:              os.TempDir(),
+		termGrace:        captureTermGrace,
+		scanProcs:        defaultScanProcs,
+		killPID:          defaultKillPID,
+		pidAlive:         defaultPIDAlive,
+		reconcilePending: true,
 	}
 }
 
@@ -145,6 +167,33 @@ func (c *Capture) SetStarter(s ProcStarter) {
 	}
 }
 
+// SetSessionsFile 覆盖会话记录文件（测试用）。
+func (c *Capture) SetSessionsFile(path string) {
+	if strings.TrimSpace(path) != "" {
+		c.sessionsFile = path
+	}
+}
+
+// SetWorkDir 覆盖工作文件目录（测试用；与 os.TempDir() 解耦）。
+func (c *Capture) SetWorkDir(dir string) {
+	if strings.TrimSpace(dir) != "" {
+		c.tmp = dir
+	}
+}
+
+// SetProcHooks 覆盖进程扫描/信号/存活判定（测试用）。
+func (c *Capture) SetProcHooks(scan func() []procEntry, kill func(int, syscall.Signal) error, alive func(int) bool) {
+	if scan != nil {
+		c.scanProcs = scan
+	}
+	if kill != nil {
+		c.killPID = kill
+	}
+	if alive != nil {
+		c.pidAlive = alive
+	}
+}
+
 // Dir 导出目录。
 func (c *Capture) Dir() string { return c.dir }
 
@@ -153,6 +202,7 @@ func (c *Capture) Dir() string { return c.dir }
 // 会话的 captured 计数只在进程**已自行退出**（tcpdump 的 `-c` 到达）时给得出——取 tcpdump
 // 打印的摘要；进行中一律 0（读数未知，不谎报计数）。
 func (c *Capture) Status() (*network.CaptureSession, []network.CaptureFile) {
+	c.tryReconcile(context.Background()) // 决策 #466：重启收敛未完成时补跑（读视图即触发点之一）
 	c.mu.Lock()
 	var active *network.CaptureSession
 	if c.active != nil {
@@ -161,6 +211,8 @@ func (c *Capture) Status() (*network.CaptureSession, []network.CaptureFile) {
 			Captured:  c.active.captured(),
 			StartedAt: c.active.started,
 			MaxDepth:  c.active.count,
+			Stopped:   c.active.stopped, // 决策 #465：已停止待导出（读视图如实暴露）
+			Recovered: c.active.recovered,
 		}
 	}
 	c.mu.Unlock()
@@ -179,6 +231,7 @@ func (s *captureSession) captured() int {
 
 // Start 开始抓包：`tcpdump -i <dev> -w <file> -c <count>`（后台进程）。
 func (c *Capture) Start(ctx context.Context, ifname string, count int, filterACL string) error {
+	c.tryReconcile(ctx) // 决策 #466：重启收敛未完成时先补跑（恢复的冻结会话会经下方守卫拦下新会话）
 	if strings.TrimSpace(ifname) == "" {
 		return errors.New("抓包接口必填")
 	}
@@ -192,9 +245,13 @@ func (c *Capture) Start(ctx context.Context, ifname string, count int, filterACL
 	}
 	c.mu.Lock()
 	if c.active != nil {
-		active := c.active.ifname
+		cur, stopped := c.active.ifname, c.active.stopped
 		c.mu.Unlock()
-		return fmt.Errorf("%w（接口 %s）", network.ErrCaptureActive, active)
+		if stopped {
+			// 决策 #465：冻结中的会话仍占登记位——如实说清并给照做路径。
+			return fmt.Errorf("已有已停止待导出的抓包会话（接口 %s）：请先 request capture export 取走它，再开始新抓包", cur)
+		}
+		return fmt.Errorf("%w（接口 %s）", network.ErrCaptureActive, cur)
 	}
 	c.mu.Unlock()
 
@@ -223,7 +280,9 @@ func (c *Capture) Start(ctx context.Context, ifname string, count int, filterACL
 		ifname: ifname, dev: dev, fileName: fileName, path: work,
 		proc: proc, started: c.now().UTC(), count: count,
 	}
+	sess := c.active
 	c.mu.Unlock()
+	c.saveRecord(sess) // 决策 #466：登记落盘（跨 nfvisd 重启可收敛；含孤儿判定用的 pid）
 	return nil
 }
 
@@ -244,24 +303,34 @@ func (c *Capture) probeStart(proc CaptureProc) error {
 }
 
 // Stop 停止抓包。export=true 时把工作文件搬入导出目录并登记（**隐含 stop**，契约语义不变）；
-// false 则丢弃。导出失败时**保留会话登记**（工作文件还在，操作者可重试），不假装已导出。
-func (c *Capture) Stop(_ context.Context, export bool) (network.CaptureFile, error) {
+// export=false 则**停止并冻结**（决策 #465：保留已抓数据、会话留在登记里待 export——
+// 原实现这里 `os.Remove` 会把数据丢掉；决策 #466：冻结即把工作文件暂存进导出目录隐藏位）。
+// 导出失败时**保留会话登记**（工作文件还在，操作者可重试），不假装已导出。
+func (c *Capture) Stop(ctx context.Context, export bool) (network.CaptureFile, error) {
+	c.tryReconcile(ctx) // 决策 #466：重启收敛未完成时先补跑（恢复出的冻结会话可在这里被 export 取走）
 	c.mu.Lock()
 	sess := c.active
 	c.mu.Unlock()
 	if sess == nil {
 		return network.CaptureFile{}, network.ErrNoCapture
 	}
-	if err := sess.proc.Terminate(); err != nil {
-		// 进程没停干净：会话登记保留（重试仍能停），如实报错。
-		return network.CaptureFile{}, fmt.Errorf("停止抓包（tcpdump pid %d，接口 %s，设备 %s）: %w",
-			sess.proc.Pid(), sess.ifname, sess.dev, err)
+	if !sess.stopped {
+		if err := sess.proc.Terminate(); err != nil {
+			// 进程没停干净：会话登记保留（重试仍能停），如实报错。
+			return network.CaptureFile{}, fmt.Errorf("停止抓包（tcpdump pid %d，接口 %s，设备 %s）: %w",
+				sess.proc.Pid(), sess.ifname, sess.dev, err)
+		}
+		c.mu.Lock()
+		if s := c.active; s == sess {
+			s.stopped = true
+		}
+		c.mu.Unlock()
 	}
 	if !export {
-		if err := os.Remove(sess.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return network.CaptureFile{}, fmt.Errorf("停止抓包后清理工作文件 %s: %w", sess.path, err)
-		}
-		c.clearActive(sess)
+		// 冻结：决策 #466 起把数据暂存进导出目录隐藏位（宿主重启/临时目录清理都不丢），
+		// 随后 export 在其上做同目录改名。暂存失败保留原位（不阻断；导出路径两处都认）。
+		c.stageStopped(sess)
+		c.saveRecord(sess)
 		return network.CaptureFile{}, nil
 	}
 	info, err := os.Stat(sess.path)
@@ -269,6 +338,7 @@ func (c *Capture) Stop(_ context.Context, export bool) (network.CaptureFile, err
 		if errors.Is(err, os.ErrNotExist) {
 			// 一个包也没抓到（tcpdump 不建文件）：无文件导出，与 VPP 侧同口径。
 			c.clearActive(sess)
+			c.clearRecord()
 			return network.CaptureFile{}, nil
 		}
 		return network.CaptureFile{}, fmt.Errorf("读取抓包文件 %s: %w", sess.path, err)
@@ -276,6 +346,7 @@ func (c *Capture) Stop(_ context.Context, export bool) (network.CaptureFile, err
 	if info.Size() == 0 {
 		_ = os.Remove(sess.path)
 		c.clearActive(sess)
+		c.clearRecord()
 		return network.CaptureFile{}, nil
 	}
 	dst := filepath.Join(c.dir, sess.fileName)
@@ -287,7 +358,39 @@ func (c *Capture) Stop(_ context.Context, export bool) (network.CaptureFile, err
 		return network.CaptureFile{}, fmt.Errorf("导出 pcap 后回读 %s: %w", dst, err)
 	}
 	c.clearActive(sess)
+	c.clearRecord()
 	return network.CaptureFile{Name: sess.fileName, SizeBytes: st.Size(), CreatedAt: st.ModTime().UTC()}, nil
+}
+
+// stageStopped 冻结暂存：把工作文件搬进导出目录的隐藏暂存位。尽力而为——失败保留原位、
+// 不阻断冻结（导出路径对原位与暂存位都认）。
+func (c *Capture) stageStopped(sess *captureSession) {
+	staged := c.stagedPath(sess.fileName)
+	if sess.path == staged {
+		return // 已暂存（冻结中再 stop 的幂等路径）
+	}
+	if _, err := os.Stat(sess.path); err != nil {
+		return // 无数据文件：无物可暂存
+	}
+	if err := os.MkdirAll(c.dir, 0o755); err != nil {
+		return
+	}
+	if err := moveFile(sess.path, staged); err != nil {
+		return
+	}
+	sess.path = staged
+}
+
+// saveRecord 把当前会话落盘（决策 #466；写失败不阻断抓包——退化为进程内登记）。
+func (c *Capture) saveRecord(sess *captureSession) {
+	_ = network.SaveCaptureRecord(c.sessionsFile, network.CapturePlaneKernel, &network.CaptureSessionRecord{
+		Interface: sess.ifname, Dev: sess.dev, FileName: sess.fileName, WorkPath: sess.path,
+		StartedAt: sess.started, Count: sess.count, Stopped: sess.stopped, PID: sess.proc.Pid(),
+	})
+}
+
+func (c *Capture) clearRecord() {
+	_ = network.SaveCaptureRecord(c.sessionsFile, network.CapturePlaneKernel, nil)
 }
 
 // clearActive 摘除**仍属本次会话**的登记（避免并发路径把新会话误清）。
@@ -298,6 +401,246 @@ func (c *Capture) clearActive(sess *captureSession) {
 	}
 	c.mu.Unlock()
 }
+
+// ---------- 决策 #466：跨 nfvisd 重启收敛 ----------
+
+// tryReconcile 启动收敛未完成时的补跑（如孤儿进程未终止成功）——在抓包操作入口触发。
+// 报告在补跑路径没有落点——可见信号就是读视图里出现的恢复会话/归档文件。
+func (c *Capture) tryReconcile(ctx context.Context) {
+	c.rmu.Lock()
+	need := c.reconcilePending
+	c.rmu.Unlock()
+	if !need {
+		return
+	}
+	_ = c.Reconcile(ctx)
+}
+
+// Reconcile 启动收敛（决策 #466）：把重启前冻结/在抓的会话按持久记录重建为「已停止待导出」，
+// 并把无记录的工作文件残件归档为可见 pcap。返回供 journal 记录的逐条报告。
+//
+// 语义（逐条都有单测钉住）：
+//   - 记录说有 pid 且进程还活着（命令行与本会话工作文件匹配——防 pid 复用）⇒ 先有界终止
+//     （SIGTERM→宽限→SIGKILL）；终止不掉则整体延后（待下次抓包操作重试），记录保持不动。
+//   - 数据文件（记录路径 / 工作位 / 暂存位，取第一个存在的）非空 ⇒ 重建为冻结会话
+//     （Recovered=true）；更新记录（stopped=true、work_path=实际位置）。
+//   - 数据文件不存在/为空 ⇒ 清记录：在抓态报「已关闭、无捕获数据」；冻结态报「已无可导出数据」。
+//   - 其余工作文件（无记录残件：旧版本遗留 / 记录写失败 / 换数据面）⇒ 先终止仍在写的进程，
+//     非空归档为可见 pcap（不藏不删），空文件清掉。
+func (c *Capture) Reconcile(ctx context.Context) []string {
+	c.rmu.Lock()
+	defer c.rmu.Unlock()
+	var rep []string
+
+	// 本进程已有会话（补跑竞态）：不重复接管，会话结束后下次操作再收敛。
+	c.mu.Lock()
+	live := c.active != nil
+	c.mu.Unlock()
+	if live {
+		return []string{"已有进行中的抓包会话，重启收敛跳过（会话结束后下次操作重试）"}
+	}
+
+	recs, err := network.LoadCaptureRecords(c.sessionsFile)
+	if err != nil {
+		rep = append(rep, "抓包会话记录无法解析（按无记录处理）："+err.Error())
+	}
+	rec := recs[network.CapturePlaneKernel]
+	incomplete := false
+	var adoptedWork string
+	if rec != nil {
+		// ① 孤儿 tcpdump：记录里有 pid——仍要按命令行核对身份（防 pid 复用）后才有界终止。
+		if rec.PID > 0 && c.pidAlive(rec.PID) {
+			if c.procMatches(rec.PID, rec.WorkPath) {
+				if err := c.terminatePID(rec.PID); err != nil {
+					rep = append(rep, fmt.Sprintf("重启前遗留的抓包进程 %d 未能终止（%v），收敛延后（下次抓包操作自动重试）",
+						rec.PID, err))
+					incomplete = true
+				} else {
+					rep = append(rep, fmt.Sprintf("已终止重启前遗留的抓包进程 %d（tcpdump，数据已写入工作文件）", rec.PID))
+				}
+			}
+		}
+	}
+	if rec != nil && !incomplete {
+		src := ""
+		var size int64
+		for _, cand := range c.recordFileCandidates(rec) {
+			if cand != "" && c.exists(cand) {
+				if info, serr := os.Stat(cand); serr == nil {
+					src, size = cand, info.Size()
+					break
+				}
+			}
+		}
+		if src != "" && size > 0 {
+			work := src
+			staged := c.stagedPath(rec.FileName)
+			if src != staged {
+				if err := os.MkdirAll(c.dir, 0o755); err == nil {
+					if err := moveFile(src, staged); err == nil {
+						work = staged
+					}
+				}
+			}
+			c.mu.Lock()
+			c.active = &captureSession{
+				ifname: rec.Interface, dev: rec.Dev, fileName: rec.FileName, path: work,
+				proc: deadProc{}, started: rec.StartedAt, count: rec.Count,
+				stopped: true, recovered: true,
+			}
+			c.mu.Unlock()
+			rec.Stopped, rec.WorkPath = true, work
+			_ = network.SaveCaptureRecord(c.sessionsFile, network.CapturePlaneKernel, rec)
+			adoptedWork = work
+			rep = append(rep, fmt.Sprintf("已恢复重启前的抓包会话（接口 %s，数据待导出 %s）：request capture export 取走",
+				rec.Interface, rec.FileName))
+		} else {
+			_ = network.SaveCaptureRecord(c.sessionsFile, network.CapturePlaneKernel, nil)
+			if rec.Stopped {
+				rep = append(rep, "重启前冻结的抓包会话已无可导出数据（未捕获到报文或数据文件已被清理），登记已清除")
+			} else {
+				rep = append(rep, "重启前的在抓会话已关闭（无捕获数据）")
+			}
+		}
+	}
+
+	if incomplete {
+		rep = append(rep, "无记录残件扫描延后（与孤儿终止同批重试）")
+	} else {
+		rep = append(rep, c.sweepWorkFiles(adoptedWork)...)
+	}
+
+	c.reconcilePending = incomplete
+	return rep
+}
+
+// recordFileCandidates 记录指向的数据文件候选（按优先级）：记录路径 → 临时工作位 → 暂存位。
+func (c *Capture) recordFileCandidates(rec *network.CaptureSessionRecord) []string {
+	return []string{rec.WorkPath, c.workPath(rec.FileName), c.stagedPath(rec.FileName)}
+}
+
+// procMatches pid 进程的命令行是否与抓包工作文件匹配（防 pid 复用；hint 空则只认 tcpdump）。
+func (c *Capture) procMatches(pid int, hint string) bool {
+	for _, p := range c.scanProcs() {
+		if p.PID != pid {
+			continue
+		}
+		if !strings.Contains(p.Cmdline, "tcpdump") {
+			return false
+		}
+		return hint == "" || strings.Contains(p.Cmdline, hint)
+	}
+	return false
+}
+
+// terminatePID 有界终止一个宿主进程：SIGTERM → 宽限 → SIGKILL → 宽限。
+func (c *Capture) terminatePID(pid int) error {
+	_ = c.killPID(pid, syscall.SIGTERM)
+	if c.waitPIDGone(pid, c.termGrace) {
+		return nil
+	}
+	_ = c.killPID(pid, syscall.SIGKILL)
+	if c.waitPIDGone(pid, c.termGrace) {
+		return nil
+	}
+	return fmt.Errorf("进程 %d 在 %s 内未退出（已发送 SIGTERM 与 SIGKILL）", pid, c.termGrace)
+}
+
+func (c *Capture) waitPIDGone(pid int, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if !c.pidAlive(pid) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// sweepWorkFiles 扫描两个工作位（临时目录 + 导出目录）里的工作文件残件。
+// skip 是本次已采纳的会话工作文件（不动它）。
+func (c *Capture) sweepWorkFiles(skip string) []string {
+	var rep []string
+	dirs := []string{c.tmp, c.dir}
+	seen := map[string]bool{}
+	for _, dir := range dirs {
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			base, ok := network.CaptureWorkBase(e.Name())
+			if !ok {
+				continue
+			}
+			full := filepath.Join(dir, e.Name())
+			if full == skip {
+				continue
+			}
+			// 仍在写的进程（本进程内的会话不算——上面已判 live）：先有界终止，再归档。
+			if c.killWriterOf(full) != nil {
+				rep = append(rep, fmt.Sprintf("残件 %s 仍有进程在写（终止失败），本次不动它", full))
+				continue
+			}
+			rep = append(rep, c.archiveResidue(full, base)...)
+		}
+	}
+	return rep
+}
+
+// killWriterOf 终止命令行包含 path 的 tcpdump（没有则 nil）。
+func (c *Capture) killWriterOf(path string) error {
+	for _, p := range c.scanProcs() {
+		if p.PID <= 0 || !strings.Contains(p.Cmdline, "tcpdump") || !strings.Contains(p.Cmdline, path) {
+			continue
+		}
+		if err := c.terminatePID(p.PID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// archiveResidue 把无记录的工作文件归档为可见 pcap（非空）或清掉（空）。
+func (c *Capture) archiveResidue(full, base string) []string {
+	info, err := os.Stat(full)
+	if err != nil {
+		return nil
+	}
+	if info.Size() == 0 {
+		if err := os.Remove(full); err == nil {
+			return []string{"清理空的工作文件残件 " + full}
+		}
+		return nil
+	}
+	name := network.UniquePcapName(c.dir, base)
+	if err := os.MkdirAll(c.dir, 0o755); err != nil {
+		return []string{fmt.Sprintf("归档残件 %s：创建导出目录失败: %v", full, err)}
+	}
+	if err := moveFile(full, filepath.Join(c.dir, name)); err != nil {
+		return []string{fmt.Sprintf("归档残件 %s 失败: %v", full, err)}
+	}
+	return []string{fmt.Sprintf("无记录残件已归档为 %s（源 %s）", name, full)}
+}
+
+// deadProc 已死进程的桩（重建的会话不持有进程句柄——它已停止，不参与 Terminate）。
+// captured() 取不到输出 → 0；Terminate() 视为已退出（幂等语义）。
+type deadProc struct{}
+
+func (deadProc) Pid() int              { return 0 }
+func (deadProc) Done() <-chan struct{} { c := make(chan struct{}); close(c); return c }
+func (deadProc) Err() error            { return nil }
+func (deadProc) Output() string        { return "" }
+func (deadProc) Terminate() error      { return nil }
 
 // Path 解析导出文件路径（限定目录内，防穿越）。
 func (c *Capture) Path(name string) (string, error) {
@@ -336,8 +679,14 @@ func (c *Capture) List() []network.CaptureFile {
 // 与导出文件同目录，导出即同目录改名——原子、不跨设备。
 // workPath 工作文件路径：**系统临时目录**——宿主 AppArmor 的 tcpdump 配置只放行 /tmp 一类
 // 路径、不放行产品的导出目录（真机实测落导出目录会被拒），导出时再搬进 c.dir。
+// （决策 #466：冻结即把它暂存进导出目录隐藏位——搬移由 nfvisd 做，不经 tcpdump，AppArmor 不适用。）
 func (c *Capture) workPath(fileName string) string {
-	return filepath.Join(os.TempDir(), "."+fileName+".part")
+	return filepath.Join(c.tmp, "."+fileName+".part")
+}
+
+// stagedPath 冻结暂存位（导出目录内、隐藏、`.part` 结尾——不参与已导出清单）。
+func (c *Capture) stagedPath(fileName string) string {
+	return filepath.Join(c.dir, "."+fileName+".part")
 }
 
 // moveFile 把工作文件搬进导出目录：优先同设备改名；跨设备（/tmp 与 /var 不同挂载）时
@@ -374,7 +723,7 @@ func (c *Capture) uniqueFileName(dev string) string {
 	ts := c.now().UTC()
 	for i := 0; i < 60; i++ {
 		name := fmt.Sprintf("nfvis-cap-%s-%s.pcap", dev, ts.Add(time.Duration(i)*time.Second).Format("20060102T150405Z"))
-		if !c.exists(filepath.Join(c.dir, name)) && !c.exists(c.workPath(name)) {
+		if !c.exists(filepath.Join(c.dir, name)) && !c.exists(c.workPath(name)) && !c.exists(c.stagedPath(name)) {
 			return name
 		}
 	}

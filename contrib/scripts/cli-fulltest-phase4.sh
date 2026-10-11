@@ -50,11 +50,13 @@ run S4 "request interfaces ens224 disable"
 expect_fail S4 "不支持 SR-IOV" "request sriov create-vfs ens224 count 2"
 
 # ---- 数据面抓包（新名；旧名 `request vpp trace …` 的兼容用例在阶段 5）----
-# 注意时序：export 内部即 Stop(export=true)，故 export 之后不应再 stop
-# （会正确地报「当前无抓包会话」）。
+# 时序（决策 #465 起）：stop 只停止并**冻结**（数据保留待导出）——冻结会话仍占登记位，
+# 故 stop 之后 start 会被**正确拒绝**（先 export 取走才能开新会话；决策 #466 的启动收敛
+# 会把重启前的会话也恢复成同一形态）；export 内部即 Stop(export=true)，故 export 之后
+# 不应再 stop（会正确地报「当前无抓包会话」）。
 run S4 "request capture start interface ens192 count 10"
 run S4 "request capture stop"
-run S4 "request capture start interface ens192 count 10"
+expect_fail S4 "已停止待导出" "request capture start interface ens192 count 10"
 run S4 "request capture export name cli-trace"
 run S4 "show capture"
 

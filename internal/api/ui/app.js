@@ -672,9 +672,11 @@ function renderHugepagePools(hp) {
   hpDataplaneNote(pools);
 }
 
-// 1G 池的数据面固定占用说明（决策 #353）：仅当**实测** held_by_dataplane >= 1 时显示，
-// 与 `show system hugepages` 的说明行同口径（VPP 主堆固定占 1 页、无配置键可释放 ⇒
-// VNF 可起页数 = 空闲页数）。取不到（-1）或非 1G 池时不显示，不编造。
+// 1G 池的数据面固定占用说明（决策 #353；归属措辞由 #460 更正）：仅当**实测**
+// held_by_dataplane >= 1 时显示，与 `show system hugepages` 的说明行同口径。
+// 归属口径（#460 实测）：该 1G 页是 **DPDK EAL 段**（memfd:seg_0-0），不是 VPP 主堆
+// （主堆走 2M 页）；页数口径不变（数据面固定占 1 页、无配置键可释放 ⇒ VNF 可用 = 空闲页数）。
+// 取不到（-1）或非 1G 池时不显示，不编造。
 function hpDataplaneNote(pools) {
   const box = $('hp-dp-note');
   const p1 = pools.find((p) => p && p.page_size === '1G') || {};
@@ -685,8 +687,9 @@ function hpDataplaneNote(pools) {
     return;
   }
   box.hidden = false;
-  box.textContent = '数据面（VPP 主堆）固定占用 ' + dp + ' 页（实测；不可释放）——VNF 可起页数 = 空闲页数（' +
-    hpNum(p1.free) + '）。';
+  box.textContent = '数据面（VPP）固定占用 ' + dp + ' 页（实测；不可释放）——该页实测归属为 DPDK EAL 段' +
+    '（memfd:seg_0-0，按最大页优先取页），不是 VPP 主堆（主堆按 main-heap-page-size 落在 2M 页）；' +
+    'VNF 可起页数 = 空闲页数（' + hpNum(p1.free) + '）。';
 }
 
 async function hpReclaim() {
@@ -5845,11 +5848,18 @@ function renderCapture(cap) {
   const active = cap && !cap.__err ? cap.active : null;
   const files = (cap && !cap.__err && cap.files) || [];
   $('cap-note').textContent = cap && cap.__err ? '（读取失败：' + cap.__err + '）' : '';
-  $('cap-active').textContent = active
-    ? '进行中：接口 ' + active.interface + '，已抓 ' + dash(active.captured) + ' 包，深度 ' +
-      dash(active.max_depth) + '，开始于 ' + fmtTime(active.started_at)
-    : '（无进行中的抓包）';
-  $('cap-active').className = active ? 'muted small' : 'muted small';
+  // 决策 #465：会话有两种状态——「进行中」与「已停止、数据待导出」（stop 之后、export 之前）。
+  // 后者别显示成「无进行中的抓包」，否则操作者会以为数据已经没了。
+  // 决策 #466：重启收敛重建的会话点明来源（操作者多半没在这个进程里停过它）。
+  $('cap-active').textContent = !active
+    ? '（无进行中的抓包）'
+    : (active.stopped
+      ? '已停止，数据待导出' + (active.recovered ? '（重启前会话已恢复）' : '') + '：接口 ' + active.interface +
+        '，已抓 ' + dash(active.captured) + ' 包，深度 ' +
+        dash(active.max_depth) + '，开始于 ' + fmtTime(active.started_at) + '——取走 pcap：用「停止并导出」'
+      : '进行中：接口 ' + active.interface + '，已抓 ' + dash(active.captured) + ' 包，深度 ' +
+        dash(active.max_depth) + '，开始于 ' + fmtTime(active.started_at));
+  $('cap-active').className = 'muted small';
 
   const tbody = $('cap-table').querySelector('tbody');
   tbody.textContent = '';

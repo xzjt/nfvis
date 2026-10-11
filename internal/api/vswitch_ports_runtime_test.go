@@ -224,7 +224,7 @@ func TestShowVSwitchPortsStructuredShapeUnchanged(t *testing.T) {
 		"set virtual-switches vs-a ports 1 interface ens224",
 		"set virtual-machine-functions fw-vm image base.qcow2",
 		"set virtual-machine-functions fw-vm vcpu count 1",
-		"set virtual-machine-functions fw-vm memory size-mb 512",
+		"set virtual-machine-functions fw-vm memory size-mb 1024",
 		"set virtual-machine-functions fw-vm interfaces eth0 type vhost-user",
 		"set virtual-machine-functions fw-vm interfaces eth0 virtual-switch vs-a",
 		"commit",

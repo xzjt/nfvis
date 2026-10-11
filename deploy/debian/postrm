@@ -48,7 +48,7 @@ if [ "$1" = "purge" ]; then
     echo "nfvis postrm: 以下安装期改动**仍需手工撤销**（重启后才彻底生效）："
     echo "  · /etc/default/grub.d/99-nfvis.cfg（大页/隔离核等启动参数）"
     echo "      手工：rm -f /etc/default/grub.d/99-nfvis.cfg && update-grub"
-    echo "  · /etc/fstab 里带 '# nfvis-hugepages' 标记的挂载行"
-    echo "      手工：删掉该标记行及其下一行（hugetlbfs 挂载）后 umount /dev/hugepages"
+    echo "  · /etc/fstab 里带 '# nfvis-hugepages' 标记的挂载行（每个已声明页尺寸一行，可能多行）"
+    echo "      手工：删掉该标记行及其后的所有 hugetlbfs 挂载行，再 umount /dev/hugepages /dev/hugepages-*"
 fi
 exit 0

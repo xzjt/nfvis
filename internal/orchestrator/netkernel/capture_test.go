@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -111,6 +112,10 @@ func newTestCapture(t *testing.T, cfg model.Config, s *fakeStarter) (*Capture, *
 	f.replies = append(f.replies, fakeReply{prefix: "ip -j link show", out: `[{"ifname":"lo"},{"ifname":"ens160"},{"ifname":"ens192"},{"ifname":"vs-l2"}]`})
 	c := NewCapture(f)
 	c.SetDir(t.TempDir())
+	// 决策 #466：工作位与会话记录都与真实宿主解耦（否则启动收敛的残件扫描会越界到
+	// 共享的系统临时目录/生产落点）。
+	c.SetWorkDir(t.TempDir())
+	c.SetSessionsFile(filepath.Join(t.TempDir(), "capture-sessions.json"))
 	c.SetStarter(s.start)
 	c.SetConfigSource(func() (model.Config, error) { return cfg, nil })
 	c.probe = 5 * time.Millisecond
@@ -187,8 +192,10 @@ func TestCaptureRejectsActiveSession(t *testing.T) {
 	}
 }
 
-// 停（不导出）：进程被终止、工作文件删除、会话摘除；无会话再停 ⇒ ErrNoCapture。
-func TestCaptureStopTerminatesAndDiscards(t *testing.T) {
+// 停（不导出）：进程被终止，工作文件**暂存进导出目录隐藏位**、会话登记保留
+// （决策 #465：冻结待 export 取走；决策 #466：冻结即暂存，不再依赖临时目录存活）；
+// 冻结中再停 ⇒ 幂等成功（不是 ErrNoCapture——数据还在）。
+func TestCaptureStopTerminatesAndFreezes(t *testing.T) {
 	s := &fakeStarter{}
 	work := ""
 	s.onStart = func(args []string, p *fakeProc) {
@@ -209,15 +216,43 @@ func TestCaptureStopTerminatesAndDiscards(t *testing.T) {
 	if n := s.procs[0].termN; n != 1 {
 		t.Fatalf("停止应终止进程一次，实际 %d", n)
 	}
+	// 决策 #466：冻结即暂存——工作文件从临时目录搬进导出目录的隐藏位（`.<终名>.part`，不进清单）。
+	base := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(work), "."), ".part")
+	staged := filepath.Join(c.Dir(), "."+base+".part")
 	if _, err := os.Stat(work); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("不导出应删除工作文件 %s（err=%v）", work, err)
+		t.Fatalf("冻结后临时工作文件应已搬走（暂存）：%v", err)
+	}
+	if info, err := os.Stat(staged); err != nil || info.Size() == 0 {
+		t.Fatalf("冻结后暂存位应有数据：%v", err)
 	}
 	active, files := c.Status()
-	if active != nil || len(files) != 0 {
-		t.Fatalf("停止后应无会话、无导出：active=%+v files=%+v", active, files)
+	if active == nil || !active.Stopped || active.Recovered || len(files) != 0 {
+		t.Fatalf("停止后应以「待导出」留在登记里、尚无导出：active=%+v files=%+v", active, files)
 	}
-	if _, err := c.Stop(context.Background(), false); !errors.Is(err, network.ErrNoCapture) {
-		t.Fatalf("无会话再停应报 ErrNoCapture：%v", err)
+	// 决策 #466：会话记录已落盘（stopped、含 pid）。
+	recs, err := network.LoadCaptureRecords(c.sessionsFile)
+	if err != nil {
+		t.Fatalf("读会话记录: %v", err)
+	}
+	if rec := recs[network.CapturePlaneKernel]; rec == nil || !rec.Stopped || rec.PID != s.procs[0].pid || rec.FileName != base {
+		t.Fatalf("会话记录不符：%+v", recs)
+	}
+	if _, err := c.Stop(context.Background(), false); err != nil {
+		t.Fatalf("冻结中再停应幂等成功：%v", err)
+	}
+	// export 取走：文件从暂存位搬进导出目录终名、登记与记录摘除
+	f, err := c.Stop(context.Background(), true)
+	if err != nil || f.Name != base {
+		t.Fatalf("冻结后 export 应取到文件：%+v %v", f, err)
+	}
+	if active, _ := c.Status(); active != nil {
+		t.Fatalf("导出后登记应摘除：%+v", active)
+	}
+	if _, err := os.Stat(staged); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("导出后暂存文件应已改名搬走：%v", err)
+	}
+	if recs, _ := network.LoadCaptureRecords(c.sessionsFile); recs[network.CapturePlaneKernel] != nil {
+		t.Fatalf("导出后记录应已清除：%+v", recs)
 	}
 }
 
@@ -422,15 +457,15 @@ func TestCaptureStopKeepsSessionWhenTerminateFails(t *testing.T) {
 	if active, _ := c.Status(); active == nil {
 		t.Fatalf("终止失败应保留会话（可重试）")
 	}
-	// 重试成功
+	// 重试成功（走导出路径：终止 + 取走文件 + 摘登记）
 	s.procs[0].mu.Lock()
 	s.procs[0].termErr = nil
 	s.procs[0].mu.Unlock()
-	if _, err := c.Stop(context.Background(), false); err != nil {
+	if _, err := c.Stop(context.Background(), true); err != nil {
 		t.Fatalf("重试停止: %v", err)
 	}
 	if active, _ := c.Status(); active != nil {
-		t.Fatalf("成功后应摘除会话：%+v", active)
+		t.Fatalf("导出成功后应摘除会话：%+v", active)
 	}
 }
 
@@ -490,8 +525,9 @@ func TestProviderCaptureProviderSharesConfig(t *testing.T) {
 	}
 	// 配置来源随 Provider 变化（提交后读视图不滞后）
 	p.SetConfig(model.Config{})
-	if _, err := c.Stop(context.Background(), false); err != nil {
-		t.Fatalf("停止: %v", err)
+	// 决策 #465：会话要**取走**（export）后才不占登记位——stop 只冻结，留着会挡下一次 start（这是刻意的）。
+	if _, err := c.Stop(context.Background(), true); err != nil {
+		t.Fatalf("导出取走会话: %v", err)
 	}
 	if err := c.Start(context.Background(), "vs-l2", 5, ""); !errors.Is(err, network.ErrIfaceUnavailable) {
 		t.Fatalf("配置来源变化后应拒绝已删设备：%v", err)
@@ -518,5 +554,141 @@ func TestCaptureUniqueFileName(t *testing.T) {
 	}
 	if second != fmt.Sprintf("nfvis-cap-ens192-%s.pcap", ts.Add(time.Second).Format("20060102T150405Z")) {
 		t.Fatalf("顺延口径不符：%s", second)
+	}
+}
+
+// ---------- 决策 #466：跨 nfvisd 重启收敛 ----------
+
+// fakeProcs 宿主进程视野的注入桩：lines 为「存活进程」的 pid→命令行。
+type fakeProcs struct {
+	mu      sync.Mutex
+	lines   map[int]string
+	kills   []int
+	killErr error
+}
+
+func (f *fakeProcs) scan() []procEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]procEntry, 0, len(f.lines))
+	for pid, line := range f.lines {
+		out = append(out, procEntry{PID: pid, Cmdline: line})
+	}
+	return out
+}
+
+func (f *fakeProcs) kill(pid int, sig syscall.Signal) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.kills = append(f.kills, pid)
+	if f.killErr != nil {
+		return f.killErr
+	}
+	delete(f.lines, pid) // 信号生效：进程消失
+	return nil
+}
+
+func (f *fakeProcs) alive(pid int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.lines[pid]
+	return ok
+}
+
+// 记录说「在抓」+ 遗留孤儿 tcpdump 还活着：重启收敛先按记录 pid + 命令行核对身份终止它，
+// 再把工作文件重建为「已停止待导出」会话（数据经 export 取走）。
+func TestCaptureReconcileTerminatesOrphanAndRecovers(t *testing.T) {
+	c, _ := newTestCapture(t, kernelCfg(), &fakeStarter{})
+	c.termGrace = 5 * time.Millisecond
+	name := "nfvis-cap-ens192-20261012T010203Z.pcap"
+	work := c.workPath(name)
+	if err := os.WriteFile(work, []byte("orphan-pcap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const pid = 4242
+	procs := &fakeProcs{lines: map[int]string{pid: "tcpdump -i ens192 -w " + work + " -c 10"}}
+	c.SetProcHooks(procs.scan, procs.kill, procs.alive)
+	if err := network.SaveCaptureRecord(c.sessionsFile, network.CapturePlaneKernel, &network.CaptureSessionRecord{
+		Interface: "ens192", Dev: "ens192", FileName: name, WorkPath: work,
+		StartedAt: time.Now().UTC().Add(-time.Minute), Count: 10, PID: pid,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rep := c.Reconcile(context.Background())
+	if len(procs.kills) == 0 || procs.alive(pid) {
+		t.Fatalf("孤儿进程应被终止：kills=%v 报告=%v", procs.kills, rep)
+	}
+	active, files := c.Status()
+	if active == nil || !active.Stopped || !active.Recovered || active.Interface != "ens192" || len(files) != 0 {
+		t.Fatalf("应收敛为「已停止待导出」：%+v %v（报告 %v）", active, files, rep)
+	}
+	// 数据从暂存位取走（工作文件已被收敛搬进导出目录隐藏位）。
+	f, err := c.Stop(context.Background(), true)
+	if err != nil || f.Name != name || f.SizeBytes == 0 {
+		t.Fatalf("恢复的数据应可导出：%+v %v", f, err)
+	}
+}
+
+// 终止不掉（进程顽固存活）：收敛整体延后、记录不动；可终止后下一次操作自动补跑。
+func TestCaptureReconcileDefersWhenOrphanStays(t *testing.T) {
+	c, _ := newTestCapture(t, kernelCfg(), &fakeStarter{})
+	c.termGrace = 5 * time.Millisecond
+	name := "nfvis-cap-ens192-20261012T040506Z.pcap"
+	work := c.workPath(name)
+	if err := os.WriteFile(work, []byte("stubborn"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const pid = 4243
+	procs := &fakeProcs{
+		lines:   map[int]string{pid: "tcpdump -i ens192 -w " + work},
+		killErr: errors.New("operation not permitted"),
+	}
+	c.SetProcHooks(procs.scan, procs.kill, procs.alive)
+	if err := network.SaveCaptureRecord(c.sessionsFile, network.CapturePlaneKernel, &network.CaptureSessionRecord{
+		Interface: "ens192", Dev: "ens192", FileName: name, WorkPath: work,
+		StartedAt: time.Now().UTC().Add(-time.Minute), Count: 10, PID: pid,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rep := c.Reconcile(context.Background())
+	if active, _ := c.Status(); active != nil {
+		t.Fatalf("终止失败不应接管会话：%+v（报告 %v）", active, rep)
+	}
+	recs, _ := network.LoadCaptureRecords(c.sessionsFile)
+	if recs[network.CapturePlaneKernel] == nil || recs[network.CapturePlaneKernel].Stopped {
+		t.Fatalf("记录应保持「在抓」不动：%+v", recs)
+	}
+	// 进程可终止后：下一次抓包操作（Status）自动补跑。
+	procs.mu.Lock()
+	procs.killErr = nil
+	procs.mu.Unlock()
+	active, _ := c.Status()
+	if active == nil || !active.Stopped || !active.Recovered {
+		t.Fatalf("补跑应收敛为已停止待导出：%+v", active)
+	}
+}
+
+// 无记录残件 + 仍在写的孤儿：残件扫描先有界终止写者，再把数据归档为可见 pcap。
+func TestCaptureResidueSweepKillsWriterAndArchives(t *testing.T) {
+	c, _ := newTestCapture(t, kernelCfg(), &fakeStarter{})
+	c.termGrace = 5 * time.Millisecond
+	name := "nfvis-cap-vs-l2-20261012T050607Z.pcap"
+	work := c.workPath(name)
+	if err := os.WriteFile(work, []byte("stray-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const pid = 4321
+	procs := &fakeProcs{lines: map[int]string{pid: "tcpdump -i vs-l2 -w " + work + " -c 1000"}}
+	c.SetProcHooks(procs.scan, procs.kill, procs.alive)
+	rep := c.Reconcile(context.Background())
+	if procs.alive(pid) {
+		t.Fatalf("仍在写的进程应被终止：kills=%v 报告=%v", procs.kills, rep)
+	}
+	files := c.List()
+	if len(files) != 1 || files[0].Name != name {
+		t.Fatalf("残件应按源名归档为可见文件：%v（报告 %v）", files, rep)
+	}
+	if _, err := os.Stat(work); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("残件应已搬走：%v", err)
 	}
 }

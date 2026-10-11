@@ -156,6 +156,29 @@ func (x *cliExecutor) kernelBaselineWarnings() []string {
 // 编译期保持 context 引用（后续 apply/rollback 使用），避免未使用导入。
 var _ = context.Background
 
+// hugepageMountDiffs 决策 #459：fstab 里声明的大页挂载点若**尚未挂载**，也属「需重启/手工 mount
+// 生效」的差异——`ksys.Compare` 只比 cmdline，这里补上挂载点一项，免得报「一致（无需重启）」而
+// 2M 的 VM 其实还起不来（真机：libvirt 在 daemon 启动时扫描 /proc/mounts，挂载点后加的要重启才可见）。
+func hugepageMountDiffs(d ksys.KernelDesired) []string {
+	mounted := map[string]bool{}
+	for _, ps := range []string{"1G", "2M"} {
+		mounted[ps] = len(hugetlbfsMounts(ps)) > 0
+	}
+	return hugepageMountMissing(d.Hugepages1G > 0, d.Hugepages2M > 0, mounted)
+}
+
+// hugepageMountMissing 纯函数：已声明但未挂载的页尺寸 → 提示项（便于红-绿测试，与 /proc 解耦）。
+func hugepageMountMissing(declared1G, declared2M bool, mounted map[string]bool) []string {
+	var out []string
+	for _, ps := range []string{"1G", "2M"} {
+		declared := (ps == "1G" && declared1G) || (ps == "2M" && declared2M)
+		if declared && !mounted[ps] {
+			out = append(out, fmt.Sprintf("大页 %s：尚无对应 hugetlbfs 挂载点（需重启或手工 mount 生效）", ps))
+		}
+	}
+	return out
+}
+
 // kernelBaselineOutcome：apply/rollback 的**结构化结果**（FR-SYS-014）。
 // CLI（`request system kernel apply|rollback`）与 REST（`POST /system/kernel:apply|:rollback`）
 // 共用下面两个函数产出它——两侧同源，CLI 只负责把结果渲染成文本，REST 直接回 JSON。
@@ -180,6 +203,9 @@ func applyKernelBaseline(k ksys.KernelApplier, cfg model.Config) (kernelBaseline
 	// pending_reboot 恒为数组（无差异时空数组）——契约声明的是 array，发 null 会让"字段没发出来"
 	// 与"没有差异"分不清（形状守护的既有口径：声明的字段必须真的发得出来）。
 	pending := ksys.Compare(desired, actual)
+	// 决策 #459：fstab 新增的大页挂载点也要重启（或手工 mount）才生效——Compare 只比 cmdline，
+	// 补上挂载点差异，避免报「已与期望一致（无需重启）」而 2M 的 VM 其实还起不来。
+	pending = append(pending, hugepageMountDiffs(desired)...)
 	if pending == nil {
 		pending = []string{}
 	}

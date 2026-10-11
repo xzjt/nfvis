@@ -37,12 +37,14 @@ func (f *fakeCapture) Stop(_ context.Context, export bool) (CaptureFileRow, erro
 	if f.active == nil {
 		return CaptureFileRow{}, network.ErrNoCapture
 	}
-	f.active = nil
 	f.stopped = true
-	f.exported = export
+	f.exported = export // 「最近一次 stop 是否走了导出」——既有断言按此读
 	if !export {
+		// 决策 #465：停止即**冻结**——数据保留、会话留在登记里（Stopped=true），随后 export 取走。
+		f.active.Stopped = true
 		return CaptureFileRow{}, nil
 	}
+	f.active = nil
 	row := CaptureFileRow{Name: "nfvis-cap-ens2f0-20260914T000000Z.pcap", SizeBytes: 128, CreatedAt: time.Now().UTC()}
 	f.files = append(f.files, row)
 	return row, nil
@@ -89,15 +91,29 @@ func TestCaptureEndpoints(t *testing.T) {
 	}
 	fc.startErr = nil
 
-	// 停止（不导出）→ 204
+	// 停止（不导出）→ 204；**冻结**（决策 #465：数据保留、会话仍在登记里）
 	if status, _, _ := cfgRequest(t, http.MethodDelete, ts.URL+APIPrefix+"/vpp/capture", token, nil,
 		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusNoContent {
 		t.Fatalf("停止应 204，实际 %d", status)
 	}
-	// 无会话再停 → 409
+	// 再停一次：冻结中的会话仍在登记里 ⇒ **幂等 204**（不是「无会话」——数据还没取走）
+	if status, _, _ := cfgRequest(t, http.MethodDelete, ts.URL+APIPrefix+"/vpp/capture", token, nil,
+		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusNoContent {
+		t.Fatalf("冻结中再停应幂等 204，实际 %d", status)
+	}
+	// 状态里如实标出「已停止待导出」（决策 #465）
+	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/vpp/capture", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), `"stopped":true`) {
+		t.Fatalf("状态应标出待导出：%d %s", status, data)
+	}
+	// 导出取走（清登记）后，再停 → 409（此时才真的「无会话」）
+	if status, _, _ := cfgRequest(t, http.MethodDelete, ts.URL+APIPrefix+"/vpp/capture?export=true", token, nil,
+		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusNoContent && status != http.StatusOK {
+		t.Fatalf("导出应成功，实际 %d", status)
+	}
 	if status, _, _ := cfgRequest(t, http.MethodDelete, ts.URL+APIPrefix+"/vpp/capture", token, nil,
 		map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusConflict {
-		t.Fatalf("无会话停止应 409，实际 %d", status)
+		t.Fatalf("取走后无会话应 409，实际 %d", status)
 	}
 }
 
@@ -132,6 +148,48 @@ func TestCLIVppTrace(t *testing.T) {
 	// 参数错误
 	if got := x.Execute("admin", "super-user", "ssh", "request vpp trace start"); !strings.Contains(got.Output, "语法") {
 		t.Fatalf("缺参数应报语法: %s", got.Output)
+	}
+}
+
+// 决策 #465（收口观察⑤ 的行为面）：抓包「停止」改为**冻结**——`stop` 保留已抓数据（会话转入
+// 「已停止、待导出」），随后的 `export` 取走它。改前 `stop` 会删掉工作文件，于是「先 stop 再 export」
+// 必然拿到「当前无抓包会话」且数据已丢（round18 只是把后果写进文案，本条改行为）。
+func TestCLICaptureStopFreezeSemantics(t *testing.T) {
+	fc := &fakeCapture{}
+	x, _ := newCLIKit(t)
+	x.setCapture(fc)
+
+	// ① start 的收尾提示：明示 stop 只停止（数据保留）、取文件用 export。
+	out := run(t, x, "admin", "super-user", "ssh", "request capture start interface ens2f0 count 100")
+	if !strings.Contains(out, "request capture export") || !strings.Contains(out, "数据保留") {
+		t.Fatalf("start 输出应明示「stop 数据保留、取文件用 export」：%s", out)
+	}
+	// ② stop：输出写明「数据已保留，待导出」+ 照做路径。
+	out = run(t, x, "admin", "super-user", "ssh", "request capture stop")
+	if !strings.Contains(out, "数据已保留") || !strings.Contains(out, "request capture export") {
+		t.Fatalf("stop 输出应写明数据保留并给照做路径：%s", out)
+	}
+	// ③ 读视图如实标出「已停止（待导出）」——别让操作者以为会话没了。
+	out = run(t, x, "admin", "super-user", "ssh", "show capture")
+	if !strings.Contains(out, "stopped（已停止，数据待导出）") {
+		t.Fatalf("show capture 应标出待导出状态：%s", out)
+	}
+	// ③b 决策 #466：重启收敛重建的会话点明来源（同一冻结态，多一句「重启前会话已恢复」）。
+	fc.active.Recovered = true
+	out = run(t, x, "admin", "super-user", "ssh", "show capture")
+	if !strings.Contains(out, "重启前会话已恢复") {
+		t.Fatalf("重启收敛的会话应点明来源：%s", out)
+	}
+	fc.active.Recovered = false
+	// ④ **关键行为**：stop 之后 export 能取走数据（改前这里必失败）。
+	out = run(t, x, "admin", "super-user", "ssh", "request capture export name after-stop")
+	if !strings.Contains(out, "已导出 pcap") || !fc.exported {
+		t.Fatalf("stop 之后 export 应成功取走数据：%s", out)
+	}
+	// ⑤ 取走之后再 export：无会话，且提示是「先 start」（不再是老坑的说法）。
+	got := x.Execute("admin", "super-user", "ssh", "request capture export")
+	if !strings.Contains(got.Output, "无抓包会话") || !strings.Contains(got.Output, "request capture start") {
+		t.Fatalf("无会话的 export 应提示先 start：%s", got.Output)
 	}
 }
 

@@ -187,8 +187,11 @@ func TestGenerateBaselineDualHugepages(t *testing.T) {
 			t.Fatalf("双池片段缺少 %q:\n%s", want, grub)
 		}
 	}
-	if !strings.Contains(fstab, "pagesize=1G") {
-		t.Fatalf("双池 fstab 主池应为 1G: %q", fstab)
+	// 决策 #459（R13-E）：双池必须**两个**页尺寸都有 hugetlbfs 挂载点——主挂载点 /dev/hugepages
+	// 保持旧口径（1G 优先），2M 落到 /dev/hugepages-2M（此前只挂 1G，2M 后备的 guest 起不来）。
+	if !strings.Contains(fstab, "/dev/hugepages hugetlbfs defaults,pagesize=1G") ||
+		!strings.Contains(fstab, "/dev/hugepages-2M hugetlbfs defaults,pagesize=2M") {
+		t.Fatalf("双池 fstab 应含 1G 主挂载 + 2M 挂载: %q", fstab)
 	}
 	// Compare：2M 期望与实际不符 → 报「大页 2M」
 	a := KernelActual{Hugepages2M: 700}
@@ -209,6 +212,45 @@ func TestGenerateBaselineDualHugepages(t *testing.T) {
 	}
 	if diffs := Compare(KernelDesired{Hugepages1G: 2, Hugepages2M: 768}, a2); len(diffs) != 0 {
 		t.Fatalf("双池一致应无差异: %v", diffs)
+	}
+}
+
+// 决策 #459（R13-E）：GenerateBaseline 按**已声明页尺寸**产出 hugetlbfs 挂载行——
+// 每个已声明尺寸一个挂载点；主挂载点 /dev/hugepages 保持旧口径（1G 优先、否则 2M，向后兼容）。
+func TestGenerateBaselineHugepageMounts(t *testing.T) {
+	cases := []struct {
+		name    string
+		d       KernelDesired
+		want    []string
+		notWant []string
+	}{
+		{"双池", KernelDesired{Hugepages1G: 2, Hugepages2M: 768},
+			[]string{"/dev/hugepages hugetlbfs defaults,pagesize=1G", "/dev/hugepages-2M hugetlbfs defaults,pagesize=2M"},
+			[]string{"/dev/hugepages hugetlbfs defaults,pagesize=2M"}},
+		{"仅 1G", KernelDesired{Hugepages1G: 2},
+			[]string{"/dev/hugepages hugetlbfs defaults,pagesize=1G"},
+			[]string{"/dev/hugepages-2M"}},
+		{"仅 2M", KernelDesired{Hugepages2M: 768},
+			[]string{"/dev/hugepages hugetlbfs defaults,pagesize=2M"},
+			[]string{"/dev/hugepages-2M"}},
+		{"无池", KernelDesired{},
+			nil,
+			[]string{"/dev/hugepages"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, fstab := GenerateBaseline(tc.d)
+			for _, w := range tc.want {
+				if !strings.Contains(fstab, w) {
+					t.Fatalf("fstab 缺少 %q: %q", w, fstab)
+				}
+			}
+			for _, nw := range tc.notWant {
+				if strings.Contains(fstab, nw) {
+					t.Fatalf("fstab 不应含 %q: %q", nw, fstab)
+				}
+			}
+		})
 	}
 }
 

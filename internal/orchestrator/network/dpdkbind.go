@@ -48,6 +48,10 @@ type DPDKBinder struct {
 	// 有了它，「按口名解绑」（`request interfaces ens224 unbind-dpdk`）才成立——
 	// 否则交 DPDK 后内核无 netdev，只能凭 PCI 地址操作。
 	Bindings *Bindings
+	// NativeDrivers 原生驱动记录（决策 #464）：PCI → 接管前该设备的**内核驱动名**。
+	// 解绑时按「显式 to-driver > 本记录 > rescan 试探」取值——本平台内核**不会**自动交还
+	// （round17 实测），有记录才能免去操作者报驱动名。nil = 无记录（退回现状：试探 + 报错要 to-driver）。
+	NativeDrivers *NativeDrivers
 	// ModuleLoader 加载内核模块（缺省 exec modprobe；单测注入假实现）。
 	ModuleLoader func(module string) error
 	// ModulesLoadDir 开机自动加载模块的 drop-in 目录（缺省 /etc/modules-load.d）。
@@ -187,6 +191,16 @@ func (b *DPDKBinder) Bind(ctx context.Context, ifname, driver string) (string, e
 	if cur == driver {
 		return pci, nil // 已就位，幂等
 	}
+	// 决策 #464：接管**之前**记下这个设备现在用的内核驱动——解绑要还回去的就是它。
+	// 只记「非 DPDK 用户态驱动」的情形（从 vfio-pci 换到 igb_uio 之类的重绑不该把它记成原生驱动）；
+	// 记录失败不阻断绑定（只让解绑退回「报错并要 to-driver」的现状）。
+	if cur != "" && !IsDPDKUioDriver(cur) && b.NativeDrivers != nil {
+		if err := b.NativeDrivers.Set(pci, cur); err != nil {
+			b.logf("警告：记录 %s 的原生驱动 %s 失败：%v（解绑时将退回「需显式 to-driver」）", pci, cur, err)
+		} else {
+			b.logf("已记录 %s 的原生驱动：%s（解绑不带 to-driver 时按它交还）", pci, cur)
+		}
+	}
 	// 目标驱动就位检查（决策 #112）：模块未加载时**先自动补一次**。
 	// 业务口绑定是产品自己的底座动作，modprobe 这种机械步骤不该留给操作者——
 	// 首次绑定与每次重启后都会撞上（实测首启路径最常报的错就是这条）。
@@ -279,7 +293,19 @@ func (b *DPDKBinder) Unbind(ctx context.Context, ifname, toDriver string) (strin
 	if err := b.write(b.path(filepath.Join("bus/pci/devices", pci, "driver_override")), "\n"); err != nil {
 		return "", fmt.Errorf("清除 driver_override: %w", err)
 	}
-	if toDriver = strings.TrimSpace(toDriver); toDriver != "" {
+	// 决策 #464：没给 to-driver 时，用**接管那一刻记下的原生驱动**（本平台内核不会自动交还，
+	// 见函数头注释）。记录里的驱动目录必须还在——模块被卸掉/改名时如实退回下面的探测路径。
+	if toDriver = strings.TrimSpace(toDriver); toDriver == "" && b.NativeDrivers != nil {
+		if rec, ok := b.NativeDrivers.Get(pci); ok {
+			if _, serr := os.Stat(b.path(filepath.Join("bus/pci/drivers", rec))); serr == nil {
+				toDriver = rec
+				b.logf("按绑定时记录的原生驱动交还：%s → %s", pci, rec)
+			} else {
+				b.logf("记录的原生驱动 %s 当前不可用（%v），退回内核自动探测", rec, serr)
+			}
+		}
+	}
+	if toDriver != "" {
 		if err := b.write(b.path(filepath.Join("bus/pci/drivers", toDriver, "bind")), pci); err != nil {
 			return pci, fmt.Errorf("绑定 %s 到 %s: %w", pci, toDriver, err)
 		}

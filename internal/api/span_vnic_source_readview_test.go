@@ -30,7 +30,7 @@ func spanVnicFixture() model.Config {
 		VirtualMachineFunctions: []model.VMFunction{{
 			Name: "fw-vm", Image: "base.qcow2",
 			VCPU:   model.VMCpu{Count: 1},
-			Memory: model.VMMemory{SizeMB: 512, HugepageSize: "1G"},
+			Memory: model.VMMemory{SizeMB: 1024, HugepageSize: "1G"},
 			Interfaces: []model.VnfInterface{
 				{Name: "eth0", Type: "vhost-user"},
 			},
@@ -53,7 +53,7 @@ func TestShowPortMirroringVnicSourceCLI(t *testing.T) {
 		"set interfaces ens224",
 		"set virtual-machine-functions fw-vm image base.qcow2",
 		"set virtual-machine-functions fw-vm vcpu count 1",
-		"set virtual-machine-functions fw-vm memory size-mb 512",
+		"set virtual-machine-functions fw-vm memory size-mb 1024",
 		"set virtual-machine-functions fw-vm interfaces eth0 type vhost-user",
 		"set port-mirroring span-v source vnf fw-vm interface eth0 direction both",
 		"set port-mirroring span-v analyzer interface ens224",

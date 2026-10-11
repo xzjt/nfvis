@@ -67,7 +67,7 @@ func TestSecretEgressMatrixClassified(t *testing.T) {
 		}}},
 		VirtualMachineFunctions: []model.VMFunction{{
 			Name: "sec-vm", Image: "base.qcow2",
-			VCPU: model.VMCpu{Count: 1}, Memory: model.VMMemory{SizeMB: 512, HugepageSize: "1G"},
+			VCPU: model.VMCpu{Count: 1}, Memory: model.VMMemory{SizeMB: 1024, HugepageSize: "1G"},
 			CloudInit: &model.CloudInit{UserData: "#cloud-config\nx: " + egressUserDataSent},
 		}},
 		ResourcePools: &model.ResourcePool{

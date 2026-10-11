@@ -36,8 +36,30 @@ type VMRuntime interface {
 // statistics 只在详情端点附带（契约 VMFunction.statistics；列表不带，避免每台 VM 都去查计数）。
 type vmResponse struct {
 	model.VMFunction
-	State      string `json:"state,omitempty"`
-	Statistics []any  `json:"statistics,omitempty"`
+	VCPU       vmCPUView `json:"vcpu"` // 覆盖内嵌的 model.VMFunction.VCPU（外层字段优先）
+	State      string    `json:"state,omitempty"`
+	Statistics []any     `json:"statistics,omitempty"`
+}
+
+// vmCPUView 读视图的 vcpu：配置字段（含**有效值**，决策 #461）+ **运行态派生**的 `cores_assigned`
+// （资源池账本单源，与 `show resource-pools` 的「已分配」、域 XML 的 `vcpupin` 同源）。
+// ⚠️ 刻意**不**把该字段加进 `model.VMCpu`——它是运行态派生，加进配置模型会经 PUT
+// （`handlePutVM` 整体替换 `cfg.VirtualMachineFunctions[idx]`）把它回灌进配置。
+// 契约见 VMFunction.vcpu.cores_assigned；账本未分到核时省略（不编造）。
+type vmCPUView struct {
+	model.VMCpu
+	CoresAssigned []int `json:"cores_assigned,omitempty"`
+}
+
+// vmReadView 组装 VM 读视图：有效值（#461）+ 运行态字段。
+func vmReadView(cfg model.Config, vm model.VMFunction, state string, stats []any) vmResponse {
+	eff := model.EffectiveVM(cfg, vm)
+	return vmResponse{
+		VMFunction: eff,
+		VCPU:       vmCPUView{VMCpu: eff.VCPU, CoresAssigned: model.AssignedCores(cfg, vm.Name)},
+		State:      state,
+		Statistics: stats,
+	}
 }
 
 // handleListVMs GET /api/v1/virtual-machine-functions（FR-CMP-011 状态实时查询）。
@@ -49,7 +71,7 @@ func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]vmResponse, 0, len(cfg.VirtualMachineFunctions))
 	for _, vm := range cfg.VirtualMachineFunctions {
-		out = append(out, vmResponse{VMFunction: vm, State: s.vmStateSafe(r.Context(), vm.Name)})
+		out = append(out, vmReadView(cfg, vm, s.vmStateSafe(r.Context(), vm.Name), nil))
 	}
 	writeJSON(w, http.StatusOK, paginate(r, out))
 }
@@ -67,11 +89,7 @@ func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("VM %s 不存在", name), nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, vmResponse{
-		VMFunction: vm,
-		State:      s.vmStateSafe(r.Context(), name),
-		Statistics: s.vmStatistics(r.Context(), name),
-	})
+	writeJSON(w, http.StatusOK, vmReadView(cfg, vm, s.vmStateSafe(r.Context(), name), s.vmStatistics(r.Context(), name)))
 }
 
 // vmStatistics 取该 VM 各 vhost-user vNIC 在 VPP 中的收发计数，与 CLI

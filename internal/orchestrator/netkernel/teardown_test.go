@@ -42,6 +42,11 @@ func TestTeardownDataplaneDeletesDeclaredObjectsAndNftTables(t *testing.T) {
 			t.Fatalf("teardown 应执行 %q；实际：\n%s", want, f.joined())
 		}
 	}
+	// 负面断言（round23 真机教训）：不得把**族名**当表名（曾生成 `nft delete table inet inet`，
+	// 必报语法错 ⇒ 切换误判未清理 + 假告警）。正向 `has()` 会被步骤 4 的正确删除喂绿，抓不到它。
+	if f.has("nft delete table inet inet") {
+		t.Fatalf("teardown 不得生成 `nft delete table inet inet`（族名被当表名）：\n%s", f.joined())
+	}
 }
 
 // teardown 幂等：空配置也要回收四张 nft 表（残留对象随表一并清），且不报错。

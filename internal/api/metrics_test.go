@@ -27,8 +27,8 @@ func metricsFixtureConfig() model.Config {
 			CPU:       &model.CPUSetup{IsolatedCores: []int{4, 5, 6, 7, 8, 9, 10, 11, 12, 13}},
 		},
 		VirtualMachineFunctions: []model.VMFunction{
-			{Name: "vma", Image: "base.qcow2", VCPU: model.VMCpu{Count: 2}, Memory: model.VMMemory{SizeMB: 512}},
-			{Name: "vmb", Image: "base.qcow2", VCPU: model.VMCpu{Count: 4}, Memory: model.VMMemory{SizeMB: 512}},
+			{Name: "vma", Image: "base.qcow2", VCPU: model.VMCpu{Count: 2}, Memory: model.VMMemory{SizeMB: 1024}},
+			{Name: "vmb", Image: "base.qcow2", VCPU: model.VMCpu{Count: 4}, Memory: model.VMMemory{SizeMB: 1024}},
 		},
 		ContainerFunctions: []model.ContainerFunction{
 			{Name: "cta", Image: "alpine:3.20", VCPU: 3, MemoryMB: 256},

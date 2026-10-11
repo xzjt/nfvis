@@ -377,7 +377,9 @@ type HugepagePoolView struct {
 	Free     int    `json:"free"`     // 内核空闲页数（不可读时 -1）
 	InUse    int    `json:"in_use"`   // 在用页数 = actual - free（不可读时 -1）
 	Held     int    `json:"held"`     // 实际持有页数（进程/inode 引用汇总；取不到时 -1）
-	// HeldByDataplane 其中数据面（comm 以 vpp 开头，即 VPP 主堆/缓冲）提交的页数（实测；取不到时 -1）。
+	// HeldByDataplane 其中数据面（comm 以 vpp 开头）提交的页数（实测；取不到时 -1）。
+	// 1G 池那 1 页的**归属**见 hugepageDataplaneNote 的注释：实测是 DPDK EAL 段（memfd:seg_0-0），
+	// 不是 VPP 主堆（决策 #460 更正 #347/#353 的措辞）。
 	// 决策 #353：VPP 主堆固定占 1 个 1G 页且无配置键可释放——这列回答「池里的页算谁的」。
 	HeldByDataplane int    `json:"held_by_dataplane"`
 	Orphan          int    `json:"orphan"`      // 无主占用页数 = in_use - held（>=0；取不到时 -1）
@@ -465,6 +467,11 @@ func HugepagePoolViewFor(pageSize string, declared, actual, free int, readable b
 
 // hugepageDataplaneNote 1G 池且实测有数据面占用时的可用性说明（决策 #353）。非 1G 池、
 // 占用值取不到（-1）、占用为 0 时返回空串——不编造；空闲值取不到时如实写「取不到」。
+//
+// 归属口径（决策 #460 更正 #347/#353 的措辞）：该 1G 页**实测是 DPDK EAL 段**——`/proc/<vpp>/smaps`
+// 里唯一的 1G 页映射是 `memfd:seg_0-0`（1 GiB，`KernelPageSize: 1048576 kB`），而 VPP 主堆另有其址：
+// `vppctl show memory` 的 `page stats` 显示 main heap 走 **2M 页**（`page-size 2M, total 512`）。
+// 故数字（占用页数）不变，**解释**改为 EAL 段——原写「VPP 主堆」是错的。
 func hugepageDataplaneNote(pageSize string, dataplane, free int) string {
 	if pageSize != "1G" || dataplane < 1 {
 		return ""
@@ -473,7 +480,7 @@ func hugepageDataplaneNote(pageSize string, dataplane, free int) string {
 	if free >= 0 {
 		freeText = strconv.Itoa(free)
 	}
-	return fmt.Sprintf("数据面（VPP 主堆）固定占用 %d 页（实测；不可配置释放）——VNF 可起页数 = 空闲页数（当前 %s）",
+	return fmt.Sprintf("数据面（VPP）固定占用 %d 页（实测；不可配置释放）——该页实测归属为 DPDK EAL 段（memfd:seg_0-0，按最大页优先取页），不是 VPP 主堆（主堆按 main-heap-page-size 落在 2M 页）；VNF 可起页数 = 空闲页数（当前 %s）",
 		dataplane, freeText)
 }
 

@@ -31,7 +31,7 @@ func switchPortsFixture() model.Config {
 		}},
 		VirtualMachineFunctions: []model.VMFunction{{
 			Name: "fw-vm", Image: "base.qcow2",
-			VCPU: model.VMCpu{Count: 1}, Memory: model.VMMemory{SizeMB: 512, HugepageSize: "1G"},
+			VCPU: model.VMCpu{Count: 1}, Memory: model.VMMemory{SizeMB: 1024, HugepageSize: "1G"},
 			Interfaces: []model.VnfInterface{{Name: "eth0", Type: "vhost-user", VirtualSwitch: "vs-a"}},
 		}},
 		ContainerFunctions: []model.ContainerFunction{{
@@ -119,7 +119,7 @@ func TestShowVSwitchPortsDerivedUnionCLI(t *testing.T) {
 		"set virtual-switches vs-a ports 1 interface ens224",
 		"set virtual-machine-functions fw-vm image base.qcow2",
 		"set virtual-machine-functions fw-vm vcpu count 1",
-		"set virtual-machine-functions fw-vm memory size-mb 512",
+		"set virtual-machine-functions fw-vm memory size-mb 1024",
 		"set virtual-machine-functions fw-vm interfaces eth0 type vhost-user",
 		"set virtual-machine-functions fw-vm interfaces eth0 virtual-switch vs-a",
 		"commit",
@@ -201,7 +201,7 @@ func TestDeleteDerivedSwitchPortRefused(t *testing.T) {
 		"set virtual-switches vs-a type l2",
 		"set virtual-machine-functions fw-vm image base.qcow2",
 		"set virtual-machine-functions fw-vm vcpu count 1",
-		"set virtual-machine-functions fw-vm memory size-mb 512",
+		"set virtual-machine-functions fw-vm memory size-mb 1024",
 		"set virtual-machine-functions fw-vm interfaces eth0 type vhost-user",
 		"set virtual-machine-functions fw-vm interfaces eth0 virtual-switch vs-a",
 		"commit",

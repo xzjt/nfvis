@@ -1,0 +1,83 @@
+# v3 round15 证据：收口观察③——「数据面固定占用 1 页」的归属更正（决策 #460）
+
+日期：2026-10-11　　分支：`v3`　　VM：nfvis-lab（`3.0.10~dev6`，交叉编译换装二进制）
+
+## 0. 一句话
+
+round12/13 走查登记的**观察③**（「归属数字对、解释错位」）收口：读视图/手册把 1G 池里数据面固定
+占的那 1 页解释成「**VPP 主堆**」，**真机实测不是**——它是 **DPDK EAL 段 `memfd:seg_0-0`**。
+页数口径不变（数据面固定占 1 页 ⇒ VNF 可用 N−1），**只改解释**。用户可见措辞在
+CLI / REST / Web / 向导 / 手册 / 命令全表**六处**全部更正。
+
+## 1. 真机取证（两条独立事实源，互相对照）
+
+```
+$ vppctl show memory
+base 0x71f9c3e00000, size 1g, locked, unmap-on-destroy, name 'main heap'
+  page stats: page-size 2M, total 512, populated 512, not-populated 0      ← 主堆走 2M 页（512×2M = 1G）
+    numa 0: 512 pages, 1g bytes
+  total: 1.00G, used: 258.16M, free: 765.84M, trimmable: 765.30M
+
+$ grep -nE "memfd|hugepages" /proc/$(pgrep -x vpp_main)/smaps
+101:140000000-180000000 rw-s 00000000 00:13 32785   /memfd:seg_0-0 (deleted)      ← 1 GiB（0x40000000）
+102:Size:            1048576 kB
+103:KernelPageSize:  1048576 kB                                                ← 1G 页就在这里
+...
+201:ac0200000-ac0400000 rw-s 00000000 00:12 32784   /memfd:seg_2-0 (deleted)
+351:1000000000-1002800000 rw-s 00000000 00:12 32776 /memfd:buffers-numa-0 (deleted)
+```
+
+结论：① `/proc/<vpp>/smaps` 里**唯一的 1G 页映射**是 `memfd:seg_0-0`（1 GiB，`KernelPageSize: 1048576 kB`）；
+② VPP 主堆另有其址（base `0x71f9c3e00000`，与 `seg_0-0` 的 `0x140000000` 不同）且 `page stats` 明写
+**`page-size 2M`**（512 页 × 2M = 1G）——即主堆**不是**那 1 个 1G 页。这与 round13 的 DPDK 源码级判断一致，
+**#347/#353 的「main heap 固定占 1 个 1G 页」措辞不成立**。
+
+## 2. 改动（决策 #460；契约先行）
+
+| 位置 | 改前 | 改后 |
+|---|---|---|
+| `internal/system/hugepages.go` `hugepageDataplaneNote`（CLI + REST 同源） | `数据面（VPP 主堆）固定占用 N 页…` | `数据面（VPP）固定占用 N 页…该页实测归属为 DPDK EAL 段（memfd:seg_0-0，按最大页优先取页），不是 VPP 主堆（主堆按 main-heap-page-size 落在 2M 页）；VNF 可起页数 = 空闲页数（…）` |
+| `internal/api/ui/app.js` 资源池卡说明 | `数据面（VPP 主堆）固定占用 …` | 同上措辞（同源） |
+| `internal/api/cli_hugepages.go`、`internal/cli/setup.go` 注释 | 「VPP 主堆固定占」 | 指向 #460 的正确归属 |
+| `docs/NFViS-用户手册.md` §6.2 注 / §6.5 规划速查 / §9 资源池段 | 「main heap 偏好最大页…」 | 明确「该页是 DPDK EAL 段，不是主堆」 |
+| `docs/NFViS-CLI命令全表.md`（`show system hugepages` 行） | 「VPP 主堆固定占 1 个 1G 页」 | 补「该页实测归属为 DPDK EAL 段（memfd:seg_0-0）」 |
+
+**不改**：归属判据（`comm` 以 vpp 开头 + 独占，#353）、页数、回收/对账/告警语义、向导的计数与告警
+**逻辑**（只改措辞）、#347/#353 的正文（历史记录，按既有惯例由 #460 更正而非改写）。
+
+## 3. 红-绿
+
+把 `hugepageDataplaneNote` 的文案**暂回旧措辞**（`数据面（VPP 主堆）固定占用 …`）后：
+
+```
+--- FAIL: TestHugepagePoolViewForDataplane (internal/system)
+    hugepages_test.go:158: 1G 数据面占用说明不符："数据面（VPP 主堆）固定占用 1 页（实测；不可配置释放）——VNF 可起页数 = 空闲页数（当前 0）"
+--- FAIL: TestCLIShowSystemHugepagesDataplaneNote (internal/api)     ← 新增的「不得再出现『（VPP 主堆）固定占用』」断言
+```
+
+恢复后两条均 PASS。新增断言：说明区**不得**含 `（VPP 主堆）固定占用`（防返祖）。
+
+## 4. 真机复验（`3.0.10~dev6`）
+
+```
+$ nfvis-cli -c 'show system hugepages'    # 摘说明行
+说明：
+  - 1G：数据面（VPP）固定占用 1 页（实测；不可配置释放）——该页实测归属为 DPDK EAL 段（memfd:seg_0-0，
+        按最大页优先取页），不是 VPP 主堆（主堆按 main-heap-page-size 落在 2M 页）；VNF 可起页数 = 空闲页数（当前 2）
+
+$ curl -sk .../api/v1/system/hugepages -H "Authorization: Bearer …" | grep note     # REST 同源
+"note":"数据面（VPP）固定占用 1 页（实测；不可配置释放）——该页实测归属为 DPDK EAL 段（memfd:seg_0-0，…）"
+```
+
+数字未变（数据面占用 1、空闲 2、声明/实际 3 一致），只有解释更正。
+
+**Web 控制台（Browser Use 黑盒，超级用户登录）**：`#/system/pools` 的「大页池」段说明行渲染为
+「数据面（VPP）固定占用 1 页（实测；不可释放）——该页实测归属为 DPDK EAL 段（memfd:seg_0-0，
+按最大页优先取页），不是 VPP 主堆（主堆按 main-heap-page-size 落在 2M 页）；VNF 可起页数 = 空闲页数（2）。」
+——与 CLI/REST 三方同源；总览页「组件版本・NFViS」显示 **3.0.10~dev6**（证明页面加载的是本次构建）。
+截图 `docs/images/v3-round15-web-pools-eal-attribution.png`。
+
+## 5. 边界（如实）
+
+- 本次只改**用户可见措辞**，不改任何判据与行为；`make check` 七项 RC=0（`user_text` 拦决策号入用户文本）。
+- `#347/#353` 的附录 A 正文**保留原样**（历史记录），由 #460 更正——这是本线的既有惯例。

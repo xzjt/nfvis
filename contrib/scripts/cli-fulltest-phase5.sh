@@ -30,14 +30,19 @@ run S5 "show configuration | display json"
 run S5 "show interfaces | display json"
 run S5 "show interfaces | begin system"
 
-# ---- 抓包正确时序：start → export（会话进行中）→ stop ----
-# export 隐含 stop，故「start → export → 再 start → stop」验证两个方向；
-# 末两条用**旧名**跑同样的序列——兼容别名必须仍可用（同一实现）。
+# ---- 抓包正确时序：start → export（会话进行中）→ 冻结断言（决策 #465/#466）----
+# export 隐含 stop，故「start → export → 再 start → stop → 再 export」验证两个方向；
+# 末段用**旧名**跑同样的序列——兼容别名必须仍可用（同一实现）。
+# 注意时序（决策 #465 起）：stop 只停止并**冻结**（数据保留待导出）——冻结会话仍占登记位，
+# stop 之后必须 export 取走（否则会话残留、后续 start 会被正确拒绝）；原脚本写于
+# 「停止即丢弃」时代，这里补上「冻结中 start 被拒 + export 取走」两步（同 phase4 的修正）。
 run S5 "request capture start interface ens192 count 50"
 run S5 "request capture export name cli-trace2"
 run S5 "show capture"
 run S5 "request vpp trace start interface ens192 count 50"   # 旧名兼容
-run S5 "request vpp trace stop"                               # 旧名兼容
+run S5 "request vpp trace stop"                               # 旧名兼容：只停止（冻结）
+expect_fail S5 "已停止待导出" "request vpp trace start interface ens192 count 50"
+run S5 "request vpp trace export name cli-trace2b"            # 旧名兼容：取走（清登记）
 
 # ---- 各 show 的二级子命令（契约 §1.1 全量）----
 run S5 "show interfaces ens224 detail"

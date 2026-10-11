@@ -1055,7 +1055,7 @@
           <input id="cap-count" data-write type="text" value="1000">
           <div class="cfg-actions">
             <button id="cap-start-btn" data-write type="button">开始抓包</button>
-            <button id="cap-stop-btn" data-write type="button" class="ghost">停止（丢弃）</button>
+            <button id="cap-stop-btn" data-write type="button" class="ghost">停止（保留数据）</button>
             <button id="cap-export-btn" data-write type="button">停止并导出 pcap</button>
           </div>
         </fieldset>
@@ -1063,6 +1063,7 @@
       <p class="muted small">
         抓包与数据面无关：VPP 下是<strong>环形缓冲</strong>（超出深度丢最旧，不会自动停），
         内核下达到上面填的报文数<strong>自动停止</strong>；停止并导出后文件落在服务端，可从下面下载。
+        <strong>「停止」只冻结、数据保留</strong>（随后「停止并导出」照样取得到），冻结期间不能开始新抓包。
         只抓数据面设备（管理口与未声明的口会被拒绝）。抓包会占用少量数据面开销，用完请停止。
       </p>
       <p id="cap-msg" class="muted small" hidden></p>

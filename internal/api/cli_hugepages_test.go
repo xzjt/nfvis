@@ -152,14 +152,14 @@ func TestCLIShowSystemHugepagesThreeWay(t *testing.T) {
 	}
 }
 
-// 决策 #353：1G 池「数据面固定占用」进 CLI 读视图——列有「数据面占用」，
-// 说明区给出「VNF 可起页数 = 空闲页数」（数据源：/proc/<pid>/comm == vpp）。
+// 决策 #353（归属措辞由 #460 更正为 DPDK EAL 段）：1G 池「数据面固定占用」进 CLI 读视图——
+// 列有「数据面占用」，说明区给出「VNF 可起页数 = 空闲页数」（数据源：/proc/<pid>/comm == vpp）。
 func TestCLIShowSystemHugepagesDataplaneNote(t *testing.T) {
 	x, _ := newCLIKit(t)
 	root := t.TempDir()
 	x.hugepageRoot = root
 	writeHugepageFixture(t, root, "1G", 2, 0) // 实际 2、空闲 0
-	writeHugepageSmaps(t, root, "100", 1)     // vpp 主堆持有 1 页
+	writeHugepageSmaps(t, root, "100", 1)     // 数据面（comm=vpp）持有 1 页
 	writeHugepageComm(t, root, "100", "vpp")
 	commitHugepagePool(t, x, "1G", 2)
 
@@ -168,8 +168,12 @@ func TestCLIShowSystemHugepagesDataplaneNote(t *testing.T) {
 		t.Fatalf("show 不该失败：%s", out)
 	}
 	// 1G 行（表内）「数据面占用」列应为 1；2M 池无进程持有 → 0。
-	if !strings.Contains(out, "数据面（VPP 主堆）固定占用 1 页（实测；不可配置释放）——VNF 可起页数 = 空闲页数（当前 0）") {
-		t.Fatalf("说明区应给出数据面固定占用与可起 VNF 页数：\n%s", out)
+	if !strings.Contains(out, "数据面（VPP）固定占用 1 页（实测；不可配置释放）——该页实测归属为 DPDK EAL 段（memfd:seg_0-0，按最大页优先取页），不是 VPP 主堆（主堆按 main-heap-page-size 落在 2M 页）；VNF 可起页数 = 空闲页数（当前 0）") {
+		t.Fatalf("说明区应给出数据面固定占用（归属＝DPDK EAL 段）与可起 VNF 页数：\n%s", out)
+	}
+	// 归属更正（决策 #460）：说明区不得再出现「主堆」这一错误归属。
+	if strings.Contains(out, "（VPP 主堆）固定占用") {
+		t.Fatalf("说明区仍把该页归属到 VPP 主堆（#460 已更正为 DPDK EAL 段）：\n%s", out)
 	}
 	// 结构化输出同样带新字段（供 display json 与 REST 同源消费）。
 	if x.structured == nil {

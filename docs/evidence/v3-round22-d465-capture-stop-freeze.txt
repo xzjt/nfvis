@@ -1,0 +1,97 @@
+# v3 round22 证据：候选② —— 抓包「停止」改为冻结（决策 #465）
+
+日期：2026-10-12　　分支：`v3`　　VM：nfvis-lab（`3.0.10~dev11`，交叉编译换装二进制）
+
+## 0. 一句话
+
+round18 登记为「未立项候选」的行为变更落地：`stop` 从「**停止且丢弃**」改为「**停止并冻结**」——
+已抓数据保留、会话标成「已停止待导出」，随后的 `export` 走**同一条 finalize 路径**取走。
+真机 A/B（**带真实报文**）：改后 `start → stop` 时工作文件 **384 B 仍在盘上**，`export` 取到
+`nfvis-cap-ens192-20261011T170404Z.pcap（384 B）`；改前同一序列在 `stop` 就把文件删了、`export` 只会
+得到 `%% 当前无抓包会话`。
+
+## 1. 真机 A/B（同一台机器、同一条序列）
+
+| 步骤 | 改前（round17/18 实测） | 改后（`dev11`） |
+|---|---|---|
+| `stop` | `已停止抓包（未导出）。` + 工作文件被 `os.Remove` | `已停止抓包（数据已保留，待导出）。` + **工作文件留在盘上** |
+| 冻结期间 `show capture` | `capturing: none` | `capturing: stopped（已停止，数据待导出）interface ens192, started …` |
+| 冻结期间 `start` | 允许（会话已清） | **如实拒绝**：`已有已停止待导出的抓包会话（接口 ens192）：请先 request capture export 取走它，再开始新抓包` |
+| 冻结后 `export` | `%% 当前无抓包会话`（**数据已丢**） | `已导出 pcap: nfvis-cap-ens192-20261011T170404Z.pcap（384 B）` |
+
+本轮实测序列（先 `start`，再从宿主发 4 个广播 ICMP 到这个 L2 段让 ens192 上真的有帧）：
+
+```
+$ nfvis-cli -c 'request capture start interface ens192 count 500'
+已开始抓包（接口 ens192，count 500（环形缓冲深度，超出丢最旧））。
+结束并取走 pcap：request capture export（停止并导出）；request capture stop 只停止（数据保留，随后仍可 export）。
+
+# ← 此处宿主发广播 ping，ens192 上真的有帧进来
+
+$ nfvis-cli -c 'request capture stop'
+已停止抓包（数据已保留，待导出）。
+$ ls -l /tmp/rxtx.pcap
+-rw-r--r-- 1 root vpp   384 Oct 12 01:04 /tmp/rxtx.pcap          ← **冻结：文件还在**（改前这一行会是 No such file）
+
+$ nfvis-cli -c 'show capture'
+capturing: stopped（已停止，数据待导出）interface ens192, started 2026-10-11 17:04:04, max-depth 500
+  取走 pcap：request capture export
+
+$ nfvis-cli -c 'request capture export name round22-freeze'
+已导出 pcap: nfvis-cap-ens192-20261011T170404Z.pcap（384 B）。下载：API GET /capture/nfvis-cap-ens192-20261011T170404Z.pcap
+$ ls -l /var/lib/nfvis/captures/ | tail -1
+-rw-r--r-- 1 root root   384 Oct 12 01:04 nfvis-cap-ens192-20261011T170404Z.pcap     ← 停止前的数据取到了
+$ ls -l /tmp/rxtx.pcap
+ls: cannot access '/tmp/rxtx.pcap': No such file or directory                     ← 已搬入导出目录
+```
+
+## 2. 改了什么（决策 #465）
+
+- **两个数据面各一处**：`internal/orchestrator/network/capture.go`（VPP 侧——`CaptureSession.Stopped`、
+  `Stop` 先关 trace 标冻结、`export` 时走同一 finalize）、`internal/orchestrator/netkernel/capture.go`
+  （内核侧——`captureSession.stopped`、不再 `os.Remove` 工作文件）。
+- **读视图如实暴露**：契约 `CaptureStatus.active.stopped`（`internal/api/capture.go` 的
+  `CaptureSessionRow` + `cmd/nfvisd/main.go` 的适配器透传）、CLI `show capture` 打
+  `stopped（已停止，数据待导出）`、Web 抓包卡同源（`internal/api/ui/app.js` 的 `renderCapture`
+  区分两种状态——否则界面会把它显示成「无进行中的抓包」，正好误导）。
+- **语义细节**：冻结中**再 `stop` 幂等成功**（不是「无会话」——数据还在）；**`start` 被拒并给照做路径**
+  （既有「已有会话」守卫天然生效，只是文案区分两态）；**取走后** `stop`/`export` 才回到 409。
+- **文案/契约同步**：CLI 三处（start 提示 / stop 输出 / export 无会话的提示改成「先 start」）、
+  `docs/NFViS-openapi.yaml`（`active.stopped` + 两处端点 description）、`docs/NFViS-CLI命令全表.md`
+  （stop/export 两行）、`docs/NFViS-用户手册.md` §10.4、Web 按钮标签
+  `停止（丢弃）`→`停止（保留数据）` + 卡片说明。
+- **不改**：`export` 的 finalize 细节（文件名口径/空文件如实说明/`Path` 下载端点）、`start` 的其余校验、
+  两个数据面的采集实现、`DELETE /capture?export=true` 的端点形状。
+
+## 3. 测试（改行为必然带来的既有断言更新，逐条说明）
+
+- **新增** `TestCLICaptureStopFreezeSemantics`（api）：start 提示含「数据保留」、stop 输出含「数据已保留」、
+  `show capture` 标出待导出、**stop 之后 export 成功**（改前必失败）、取走后 export 提示「先 start」。
+- **改写**（旧断言表达的是「丢弃」语义，本次行为变更后按新语义重写）：
+  - `internal/orchestrator/network`：`TestCaptureStopWithoutExportDiscards` →
+    `TestCaptureStopWithoutExportFreezes`（文件保留 + 会话 `Stopped` + 冻结中 start 被拒 + 再停幂等 + export 取走摘登记）。
+  - `internal/orchestrator/netkernel`：`TestCaptureStopTerminatesAndDiscards` →
+    `TestCaptureStopTerminatesAndFreezes`；`TestCaptureStopKeepsSessionWhenTerminateFails` 的重试改用
+    **export** 路径（终止成功 + 取走 + 摘登记）；`TestProviderCaptureProviderSharesConfig` 在改配置后先
+    **export** 再 start（否则会被冻结会话正确拦下）。
+  - `internal/api` 的 `TestCaptureEndpoints`：stop→**幂等 204**（冻结中仍是「有会话」），
+    状态里出现 `"stopped":true`，**取走后**再 stop 才 409；`fakeCapture` 改为模型冻结。
+
+## 4. 工具坑入册（本轮实测）
+
+用 Python 直接改 `docs/NFViS-openapi.yaml` 时**没有强制 LF**（Windows 的 Python 默认把 `\n` 翻译成
+`\r\n`）⇒ 契约变 CRLF ⇒ **`check_openapi_json_sync.sh` 照样报「同步」**，但三个**字段级 UI 守护**
+（`TestUIQosCardFieldsExistInContract` / `TestUISpanCardFieldsExistInContract` /
+`TestUISwitchPortTableFieldsExistInContract`）一起报「契约里找不到 Xxx schema（排版变了？）」——
+它们按行锚定 `$`，CRLF 让行尾多一个 `\r` 就匹配不上。
+**教训**：改仓库里的契约/文本文件必须像 `check_openapi_json_sync.sh` 那样**显式以 `newline="\n"` 写**
+（或改完跑一次 `python -c` 把 CRLF 归一为 LF）。已归一，三项守护转绿。
+
+## 5. 边界（如实）
+
+- 冻结**没有时限**：会话会一直占着「登记位」（新的 `start` 被拒）直到 `export` 取走——这是刻意的
+  （不丢数据优先）。**边界**：`nfvisd` 重启后会话登记不跨进程存活（与既有口径一致）——此时 VPP 侧的
+  工作文件 `/tmp/rxtx.pcap` 仍在盘上但已无登记，需人工处理（既有行为，非本条引入）。
+- 冻结**不额外占内存**：抓的数据本来就是磁盘文件（VPP 落 `/tmp/rxtx.pcap`、内核落导出目录里的 `.part`），
+  本条的改动只是**不再删它**。
+- `make check` 七项 RC=0（决策计数 **367**）。
