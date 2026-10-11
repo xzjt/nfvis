@@ -202,7 +202,7 @@ apply_dataplane() {
         return 0
     }
     printf '%s\n' configure 'set system dataplane kernel' commit exit > "$script"
-    out=$("$(command -v nfvis-cli)" -server https://127.0.0.1 -u admin -p "$pw" -source console         -f "$script" 2>&1 | grep -v '^连接' || true)
+    out=$("$(command -v nfvis-cli)" -server "$PROBE_SRV" -u admin -p "$pw" -source console         -f "$script" 2>&1 | grep -v '^连接' || true)
     rm -f "$script"
     if cli_is_err "$out"; then
         info "写入数据面配置未成功（见下方输出）；可稍后登录 CLI 执行 set system dataplane kernel"
@@ -287,11 +287,30 @@ wait_for() { # wait_for <秒> <命令...>
 
 http_code() { curl -sS -o /dev/null -m 5 -w '%{http_code}' "$@" 2>/dev/null || echo 000; }
 
+# 探测地址：nfvisd **声明管理口后只监听该地址**（127.0.0.1 不可达）——在已配置的机器上
+# 升级/复检时，写死 127.0.0.1 会让自检假红「控制台无响应」。这里取 nfvisd 的**实际监听地址**；
+# 监听在通配地址（0.0.0.0 / * / [::]）或取不到（无 ss / 首装未起）时回落 127.0.0.1。
+PROBE_SRV="https://127.0.0.1"
+resolve_probe_srv() {
+    local row addr port
+    row=$(ss -ltnp 2>/dev/null | grep -F nfvisd | head -1)
+    [ -n "$row" ] || return 0
+    addr=$(printf '%s' "$row" | awk '{print $4}')
+    port=${addr##*:}
+    addr=${addr%:*}
+    case "$addr" in
+        ''|'*'|'0.0.0.0'|'::'|'[::]') addr=127.0.0.1 ;;
+        \[*\]) ;;                # 已是 [v6] 字面量
+        *:*) addr="[$addr]" ;;   # 裸 v6 字面量 → 加方括号
+    esac
+    if [ -n "$port" ]; then PROBE_SRV="https://${addr}:${port}"; else PROBE_SRV="https://${addr}"; fi
+}
+
 ui_code() {
     if [ -f /var/lib/nfvis/tls/server.crt ]; then
-        http_code --cacert /var/lib/nfvis/tls/server.crt https://127.0.0.1/api/v1/ui/
+        http_code --cacert /var/lib/nfvis/tls/server.crt "$PROBE_SRV/api/v1/ui/"
     else
-        http_code -k https://127.0.0.1/api/v1/ui/
+        http_code -k "$PROBE_SRV/api/v1/ui/"
     fi
 }
 
@@ -316,6 +335,7 @@ start_services() {
         log "等待 VPP 数据面套接字 ..."
         if wait_for 30 test -S /run/vpp/api.sock; then ok "VPP API 套接字就绪：/run/vpp/api.sock"; else info "VPP 套接字未就绪（见自检项）"; fi
     fi
+    resolve_probe_srv
     log "等待 nfvisd 控制面就绪 ..."
     if wait_for 60 test "$(ui_code)" = 200; then ok "控制面已监听且响应（HTTP 200）"; else info "控制面未就绪（见自检项）"; fi
 }
@@ -328,12 +348,13 @@ grab_otp() { # 首次启动的一次性口令只在日志里出现一次
     [ -n "$OTP" ]
 }
 
-cli() { "$1" -server https://127.0.0.1 -u admin -p "$2" -source console -c "$3" 2>&1 | grep -v '^连接'; }
+cli() { "$1" -server "$PROBE_SRV" -u admin -p "$2" -source console -c "$3" 2>&1 | grep -v '^连接'; }
 cli_is_err() { printf '%s\n' "$1" | grep -qE '^%%|^%[^%]|^%$|^校验失败'; }
 
 # ---------- 自检（带独立事实源） ----------
 run_checks() {
     hdr "自检"
+    resolve_probe_srv
     local ver want pkgver out
 
     pkgver=$(dpkg-query -W -f='${Status}|${Version}' nfvis 2>/dev/null || echo "|")
@@ -396,7 +417,7 @@ run_checks() {
         elif [ -z "$pw" ]; then
             skip "committed 配置的数据面核对（本机未提供口令，读不到 committed 配置）"
         else
-            dpout=$("$(command -v nfvis-cli)" -server https://127.0.0.1 -u admin -p "$pw" -source console                 -c 'show configuration | display set' 2>/dev/null | grep '^set system dataplane' || true)
+            dpout=$("$(command -v nfvis-cli)" -server "$PROBE_SRV" -u admin -p "$pw" -source console                 -c 'show configuration | display set' 2>/dev/null | grep '^set system dataplane' || true)
             if [ "$dpout" = "set system dataplane kernel" ]; then
                 ok "committed 配置的数据面为 kernel（CLI 独立事实源）"
             else
