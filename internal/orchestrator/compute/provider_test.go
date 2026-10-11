@@ -20,6 +20,7 @@ type mockLibvirt struct {
 	present      map[string]bool
 	states       map[string]int
 	defined      []string
+	definedXML   []string // 每次 Define 收到的域 XML（决策 #455：断言重定义后的形态）
 	undefined    []string
 	started      []string
 	shutdown     []string
@@ -67,6 +68,7 @@ func (m *mockLibvirt) Define(_ context.Context, xml string) error {
 	}
 	name := xmlName(xml)
 	m.defined = append(m.defined, name)
+	m.definedXML = append(m.definedXML, xml)
 	m.present[name] = true
 	if _, ok := m.states[name]; !ok {
 		m.states[name] = domShutoff
@@ -891,6 +893,157 @@ func TestDefineVMSetsLibvirtAutostart(t *testing.T) {
 	}
 	if api.autostart["fw-vm"] {
 		t.Fatal("autostart=false 应清除自启标志")
+	}
+}
+
+// ---------- 域新鲜度前置（决策 #455） ----------
+
+// newTestProviderKernel 构造内核数据面的 provider（域生成走 bridge 形态，vNIC 需 virtual_switch）。
+func newTestProviderKernel(api libvirtAPI, store storageAPI, seed seedBuilder) *Provider {
+	c := testConfig()
+	c.DataPlane = model.DataPlaneKernel
+	p := NewProvider(c, api, store, seed)
+	p.poll = time.Millisecond
+	p.sleep = func(context.Context, time.Duration) error { return nil }
+	return p
+}
+
+// TestStartVM_RedefinesStaleDomainFromCurrentConfig 决策 #455：配置变更后 start 必须按当前配置
+// 重定义域（而非沿用先前持久化的旧域）——内核数据面下应产出 bridge 形态域，不落 vhost-user。
+// 红-绿：修复前 StartVM 直接启动旧域、从不重定义。
+func TestStartVM_RedefinesStaleDomainFromCurrentConfig(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProviderKernel(api, newMockStorage("/images/img.qcow2"), nil)
+
+	vm := vmFixture("fw-vm")
+	vm.Interfaces = []model.VnfInterface{{Name: "eth0", Type: "vhost-user", VirtualSwitch: "vs-lan"}}
+	// 当前配置（生产由提交期 DefineVM / 15s 巡检喂入）。
+	p.setVMSpec(vm, model.AllocatedResources{HugepageSize: "1G"})
+	// 先前持久化的旧域：存在且关机态（内容可能是为 vhost-user 写的老定义）。
+	api.present["fw-vm"] = true
+	api.states["fw-vm"] = domShutoff
+
+	if err := p.StartVM(context.Background(), "fw-vm"); err != nil {
+		t.Fatalf("StartVM: %v", err)
+	}
+	if len(api.definedXML) != 1 {
+		t.Fatalf("启动前应按当前配置重定义域一次: defined=%v", api.defined)
+	}
+	if !strings.Contains(api.definedXML[0], `<interface type="bridge">`) ||
+		strings.Contains(api.definedXML[0], "vhostuser") {
+		t.Fatalf("start 应按当前配置（内核 bridge）重定义域，而非沿用旧 vhost-user 域:\n%s", api.definedXML[0])
+	}
+	if len(api.started) != 1 || api.states["fw-vm"] != domRunning {
+		t.Fatalf("应启动到 running: started=%v state=%d", api.started, api.states["fw-vm"])
+	}
+}
+
+// TestStartVM_DestroysStalePausedDomainBeforeRedefine 决策 #455：陈旧 paused 域是活动态，
+// 幂等分支会直接返回、永远起不来；start 必须先销毁、再按当前配置重定义、再启动。
+func TestStartVM_DestroysStalePausedDomainBeforeRedefine(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProviderKernel(api, newMockStorage("/images/img.qcow2"), nil)
+
+	vm := vmFixture("fw-vm")
+	vm.Interfaces = []model.VnfInterface{{Name: "eth0", Type: "vhost-user", VirtualSwitch: "vs-lan"}}
+	p.setVMSpec(vm, model.AllocatedResources{HugepageSize: "1G"})
+	api.present["fw-vm"] = true
+	api.states["fw-vm"] = domPaused
+	api.reasons["fw-vm"] = pausedReasonStartingUp
+
+	if err := p.StartVM(context.Background(), "fw-vm"); err != nil {
+		t.Fatalf("StartVM: %v", err)
+	}
+	if len(api.destroyed) != 1 {
+		t.Fatalf("陈旧 paused 域应先被销毁: destroyed=%v", api.destroyed)
+	}
+	if len(api.definedXML) != 1 {
+		t.Fatalf("销毁后应按当前配置重定义: defined=%v", api.defined)
+	}
+	if len(api.started) != 1 || api.states["fw-vm"] != domRunning {
+		t.Fatalf("应重定义并启动到 running: started=%v state=%d", api.started, api.states["fw-vm"])
+	}
+}
+
+// TestRestartVM_RedefinesStalePausedDomain 决策 #455：restart 的 off→start 分支同口径
+// （陈旧 paused 域先销毁、按当前配置重定义、再启动）。
+func TestRestartVM_RedefinesStalePausedDomain(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProviderKernel(api, newMockStorage("/images/img.qcow2"), nil)
+
+	vm := vmFixture("fw-vm")
+	vm.Interfaces = []model.VnfInterface{{Name: "eth0", Type: "vhost-user", VirtualSwitch: "vs-lan"}}
+	p.setVMSpec(vm, model.AllocatedResources{HugepageSize: "1G"})
+	api.present["fw-vm"] = true
+	api.states["fw-vm"] = domPaused
+
+	if err := p.RestartVM(context.Background(), "fw-vm"); err != nil {
+		t.Fatalf("RestartVM: %v", err)
+	}
+	if len(api.destroyed) != 1 || len(api.definedXML) != 1 || len(api.started) != 1 {
+		t.Fatalf("restart 应先销毁陈旧 paused 域、重定义、再启动: destroyed=%v defined=%v started=%v",
+			api.destroyed, api.defined, api.started)
+	}
+	if api.states["fw-vm"] != domRunning {
+		t.Fatalf("restart 后应 running，实得 %d", api.states["fw-vm"])
+	}
+}
+
+// TestStartVM_RedefineFailureIsActionable 决策 #455：重定义失败（当前配置缺 virtual_switch）
+// 时如实返回可诊断错误，且**不启动旧域**（不把错误推到「起成 paused」之后）。
+func TestStartVM_RedefineFailureIsActionable(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProviderKernel(api, newMockStorage("/images/img.qcow2"), nil)
+
+	vm := vmFixture("fw-vm")
+	vm.Interfaces = []model.VnfInterface{{Name: "eth0", Type: "vhost-user"}} // 缺 virtual_switch
+	p.setVMSpec(vm, model.AllocatedResources{HugepageSize: "1G"})
+	api.present["fw-vm"] = true
+	api.states["fw-vm"] = domShutoff
+
+	err := p.StartVM(context.Background(), "fw-vm")
+	if err == nil || !strings.Contains(err.Error(), "缺少接入的虚拟交换机") {
+		t.Fatalf("重定义失败应如实报错（含可诊断原因），实得 %v", err)
+	}
+	if len(api.started) != 0 {
+		t.Fatalf("重定义失败不得启动旧域: %v", api.started)
+	}
+}
+
+// TestStartVM_NoCurrentSpecKeepsLegacySemantics 决策 #455：拿不到当前声明（provider 未收到过
+// 该 VM 的配置）时不臆测、不重定义，维持既有启动语义（启动已存在的域）。
+func TestStartVM_NoCurrentSpecKeepsLegacySemantics(t *testing.T) {
+	api := newMockLibvirt()
+	api.present["fw-vm"] = true
+	api.states["fw-vm"] = domShutoff
+	p := newTestProvider(api, newMockStorage(), nil) // 无 spec 缓存
+
+	if err := p.StartVM(context.Background(), "fw-vm"); err != nil {
+		t.Fatalf("无当前声明时应照常启动已存在的域: %v", err)
+	}
+	if len(api.definedXML) != 0 {
+		t.Fatalf("无当前声明时不应重定义: %v", api.defined)
+	}
+	if len(api.started) != 1 {
+		t.Fatalf("应真的启动一次: %v", api.started)
+	}
+}
+
+// TestStartVM_MissingDomainRedefinedFromCurrentSpec 决策 #455：域缺失但当前配置里有该 VM
+// 时按当前配置补建后再启动（不再直接报未定义）。
+func TestStartVM_MissingDomainRedefinedFromCurrentSpec(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProvider(api, newMockStorage("/images/img.qcow2"), nil)
+
+	vm := vmFixture("fw-vm")
+	p.setVMSpec(vm, model.AllocatedResources{HugepageSize: "1G"})
+	// 域不存在（present 缺省 false）。
+
+	if err := p.StartVM(context.Background(), "fw-vm"); err != nil {
+		t.Fatalf("域缺失但配置在时应补建并启动: %v", err)
+	}
+	if len(api.defined) != 1 || len(api.started) != 1 || api.states["fw-vm"] != domRunning {
+		t.Fatalf("应按当前配置补建并启动: defined=%v started=%v state=%d", api.defined, api.started, api.states["fw-vm"])
 	}
 }
 

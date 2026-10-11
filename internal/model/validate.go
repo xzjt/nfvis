@@ -546,6 +546,26 @@ func (v *validator) checkKernelDataPlane(c Config) {
 			}
 		}
 	}
+	// 交换机端口接入的 vNIC（VSwitchPort.Vnf，决策 #455）：内核数据面的域生成据该 vNIC 的
+	// virtual_switch 定位内核 bridge——「只在交换机 ports 里、VM 侧缺 virtual_switch」的配置
+	// 会在起 VM 时才失败（域生成报「vNIC 缺少接入的虚拟交换机」）。提交期前置拒绝并给照做路径。
+	// VPP 侧不受限（vhost-user 走 socket，端口接入本就无需该字段）。
+	for _, vs := range c.VirtualSwitches {
+		for _, pt := range vs.Ports {
+			if pt.Vnf == "" {
+				continue
+			}
+			nic, ok := findVMFuncNic(c, pt.Vnf, pt.VnfInterface)
+			if !ok || nic.VirtualSwitch != "" {
+				continue
+			}
+			v.errf(fmt.Sprintf("virtual-switches[%s].ports[%d]", vs.Name, pt.Seq),
+				"当前数据面为 Linux 内核网络，VNF %s 的 vNIC %s 经交换机 %s 端口接入，但 VM 侧未声明 virtual-switch："+
+					"内核数据面据它定位 bridge，缺失会让起 VM 时才失败。请补上 VM 侧声明："+
+					"set virtual-machine-functions %s interfaces %s virtual-switch %s",
+				pt.Vnf, pt.VnfInterface, vs.Name, pt.Vnf, pt.VnfInterface, vs.Name)
+		}
+	}
 	// 容器 vNIC 接入已实现（决策 #441）：内核侧是 veth 对（宿主端入交换机内核 bridge、容器端在
 	// 容器 start 后移入其 netns），故不再一律拒绝。留下的判据与 VNF vNIC 同源：接入的交换机必须是
 	// **L2**（type=l3 的内核交换机不建桥，veth 无处可挂）。
@@ -879,6 +899,21 @@ func vnicNames(c Config) map[string]bool {
 	return out
 }
 
+// findVMFuncNic 按 (VM 名, vNIC 名) 在配置里找 vNIC（决策 #455 的内核侧前置校验用）。
+func findVMFuncNic(c Config, vm, nic string) (VnfInterface, bool) {
+	for _, m := range c.VirtualMachineFunctions {
+		if m.Name != vm {
+			continue
+		}
+		for _, n := range m.Interfaces {
+			if n.Name == nic {
+				return n, true
+			}
+		}
+	}
+	return VnfInterface{}, false
+}
+
 // checkFirewall 校验管理面主机防火墙（决策 #388）：序号/动作/来源/协议/端口/至少一条匹配条件/
 // 重复规则/默认策略，以及「配置了防火墙但未声明管理口」这条前置。
 //
@@ -1072,6 +1107,18 @@ func (v *validator) checkInterfaces(c Config) {
 		// 出向绑定（决策 #331）：与入向同一份策略账本校验（删除被引用的策略即在此被拒）。
 		if i.EgressPolicy != "" && !v.qosNames[i.EgressPolicy] {
 			v.errf(p+".egress_policy", "限速策略 %q 不存在", i.EgressPolicy)
+		}
+		// L2 交换机成员口拒绝**出向** QoS 策略（决策 #454）：VPP 的 policer_output 无弧选择
+		// 参数，成员口上出向 policer 落在 l2-output 弧，会连带拦下经 BVI 路由回来的 L3 回程
+		// （真机实证：域内 DNS 应答被丢弃、解析静默中断），同口入向策略无此现象。与既有
+		// 「静默失效的保护手段一律硬拒」先例同口径（#340 网关/端口 ACL、#398 bond 成员风暴抑制）：
+		// 提交期硬拒、点名机理与替代（改用入向，或把出向绑到 L3 接口形态）。入向策略不受限。
+		if i.EgressPolicy != "" && v.l2Members[i.Name] {
+			v.errf(p+".egress_policy", "接口 %s 是 L2 交换机的成员口，不支持出向 QoS 策略："+
+				"出向 policer 落在 l2-output 弧，会连带拦下经 BVI 路由回来的 L3 回程（域内 DNS 等应答被丢弃，"+
+				"域内通信静默中断）——请改用入向策略 set interfaces %s ingress-policy <策略>，"+
+				"或把出向策略绑到 L3 接口形态（该口作某交换机的 l3-interface 后再绑）",
+				i.Name, i.Name)
 		}
 		// 入向风暴抑制（决策 #385，FR-NET-019）：值域 1-100000000 kbps；对象出现但两类
 		// 都没给值等于「配了个空声明」——它不下发任何限速，却会让读视图/display set 把它

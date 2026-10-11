@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"go.fd.io/govpp/api"
+	ifapi "go.fd.io/govpp/binapi/interface"
+
 	"github.com/xzjt/nfvis/internal/model"
 )
 
@@ -339,6 +342,7 @@ type fakeLldp struct {
 	ifaces   []string // "iface:on|off"
 	neigh    []LldpNeighbor
 	err      error
+	ifaceErr map[string]error // 按接口注入错误（如底座 -7）
 	requests int
 }
 
@@ -353,6 +357,14 @@ func (f *fakeLldp) LldpConfig(txInterval, txHold uint32, systemName string) erro
 }
 
 func (f *fakeLldp) LldpSetInterface(ifname string, enable bool) error {
+	if err := f.ifaceErr[ifname]; err != nil {
+		// 与真实 govpp 客户端**同一分类**：注入的 raw api.VPPApiError(-7) 走 ReceiveReply 错误
+		// 路径归一（不靠 Retval、不靠字符串匹配）。
+		if rv, ok := lldpVPPApiRetval(err); ok {
+			return lldpSetIfaceError(ifname, enable, rv)
+		}
+		return err
+	}
 	if f.err != nil {
 		return f.err
 	}
@@ -376,7 +388,7 @@ func TestLldpApplyAndDisable(t *testing.T) {
 	p := NewLldpProvider(f)
 	cfg := &model.LldpConfig{Enabled: true, AdvertisementInterval: 30,
 		Interfaces: []model.LldpInterface{{Interface: "ens192", Enabled: true}, {Interface: "ens224", Enabled: false}}}
-	if err := p.ApplyLLDP(context.Background(), cfg); err != nil {
+	if err := p.ApplyLLDP(context.Background(), cfg, nil); err != nil {
 		t.Fatalf("ApplyLLDP: %v", err)
 	}
 	if len(f.config) != 1 || len(f.ifaces) != 2 {
@@ -388,7 +400,7 @@ func TestLldpApplyAndDisable(t *testing.T) {
 	}
 	// 全局关闭 → 已启用接口被关闭
 	f.ifaces = nil
-	if err := p.ApplyLLDP(context.Background(), &model.LldpConfig{Enabled: false}); err != nil {
+	if err := p.ApplyLLDP(context.Background(), &model.LldpConfig{Enabled: false}, nil); err != nil {
 		t.Fatalf("关闭 LLDP: %v", err)
 	}
 	if len(f.ifaces) != 1 || f.ifaces[0] != "ens192:off" {
@@ -396,7 +408,7 @@ func TestLldpApplyAndDisable(t *testing.T) {
 	}
 	// nil 配置亦关闭
 	f.ifaces = nil
-	if err := p.ApplyLLDP(context.Background(), nil); err != nil {
+	if err := p.ApplyLLDP(context.Background(), nil, nil); err != nil {
 		t.Fatalf("nil 配置: %v", err)
 	}
 	if len(f.ifaces) != 0 && f.ifaces[0] != "ens192:off" {
@@ -410,11 +422,168 @@ func TestLldpApplyAndDisable(t *testing.T) {
 	}
 	// 错误传播
 	if err := NewLldpProvider(&fakeLldp{err: errors.New("boom")}).ApplyLLDP(context.Background(),
-		&model.LldpConfig{Enabled: true}); err == nil {
+		&model.LldpConfig{Enabled: true}, nil); err == nil {
 		t.Fatalf("客户端错误应上抛")
 	}
 	if !strings.HasSuffix(lldpIDString([]byte("sw1\x00\x00")), "sw1") {
 		t.Fatalf("标识解码应去尾部 NUL")
+	}
+}
+
+// ---------- 决策 #450/#451：全局开关＝默认值 + 逐口覆盖 ----------
+
+func TestLldpApplyGlobalDefaultsAndOverrides(t *testing.T) {
+	// 全局开 + 无逐口声明 ⇒ 对全部已声明物理口下发启用（改前 desired 为空 ⇒ 一个口都不下发）。
+	f := &fakeLldp{}
+	p := NewLldpProvider(f)
+	if err := p.ApplyLLDP(context.Background(),
+		&model.LldpConfig{Enabled: true, AdvertisementInterval: 30}, []string{"ens192", "ens224"}); err != nil {
+		t.Fatalf("ApplyLLDP: %v", err)
+	}
+	joined := strings.Join(f.ifaces, ",")
+	if !strings.Contains(joined, "ens192:on") || !strings.Contains(joined, "ens224:on") {
+		t.Fatalf("全局 enable 应对全部已声明口启用: %v", f.ifaces)
+	}
+
+	// 逐口 false 覆盖全局默认。
+	f.ifaces = nil
+	if err := p.ApplyLLDP(context.Background(), &model.LldpConfig{Enabled: true,
+		Interfaces: []model.LldpInterface{{Interface: "ens224", Enabled: false}}},
+		[]string{"ens192", "ens224"}); err != nil {
+		t.Fatalf("ApplyLLDP(覆盖): %v", err)
+	}
+	joined = strings.Join(f.ifaces, ",")
+	if !strings.Contains(joined, "ens224:off") || !strings.Contains(joined, "ens192:on") {
+		t.Fatalf("逐口 false 应覆盖全局默认: %v", f.ifaces)
+	}
+
+	// 全局 false + 无逐口 ⇒ 不主动去关从未启用过的已声明口（只关本进程登记过的）。
+	f2 := &fakeLldp{}
+	p2 := NewLldpProvider(f2)
+	if err := p2.ApplyLLDP(context.Background(), &model.LldpConfig{Enabled: false},
+		[]string{"ens192", "ens224"}); err != nil {
+		t.Fatalf("ApplyLLDP(全局关): %v", err)
+	}
+	if len(f2.ifaces) != 0 {
+		t.Fatalf("全局关且无逐口时不该对未启用过的口下发: %v", f2.ifaces)
+	}
+}
+
+// 决策 #450：逐口声明**不受全局开关阻断**——全局 false 也能逐口启用某口。
+func TestLldpApplyPerInterfaceWithoutGlobal(t *testing.T) {
+	f := &fakeLldp{}
+	p := NewLldpProvider(f)
+	if err := p.ApplyLLDP(context.Background(), &model.LldpConfig{Enabled: false,
+		Interfaces: []model.LldpInterface{{Interface: "ens192", Enabled: true}}},
+		[]string{"ens192", "ens224"}); err != nil {
+		t.Fatalf("ApplyLLDP: %v", err)
+	}
+	if strings.Join(f.ifaces, ",") != "ens192:on" {
+		t.Fatalf("全局 false 时逐口 true 应启用该口、不碰其它已声明口: %v", f.ifaces)
+	}
+}
+
+// 决策 #451 精化：全局启用扫到「底座服务不了的口」（VPP -7）⇒ 跳过并如实登记，**不整次回滚**；
+// 显式逐口声明遇同类拒绝仍如实报错（底座限制，不隐藏）。
+//
+// 关键：注入的是 govpp 从 ReceiveReply 返回的 **raw `api.VPPApiError(-7)`**（真机形态——-7 不落
+// 在 reply.Retval 上），由客户端同一分类函数归一；断言人类可读文案（非裸 VPPApiError）。
+func TestLldpApplyGlobalSkipsUnsupportedPorts(t *testing.T) {
+	// 全局开 + 两个已声明口：ens224 被底座拒绝 ⇒ 跳过并登记，ens192 照常启用，整体成功。
+	f := &fakeLldp{ifaceErr: map[string]error{"ens224": api.VPPApiError(-7)}}
+	p := NewLldpProvider(f)
+	if err := p.ApplyLLDP(context.Background(), &model.LldpConfig{Enabled: true, AdvertisementInterval: 30},
+		[]string{"ens192", "ens224"}); err != nil {
+		t.Fatalf("全局启用遇底座拒绝应跳过而非整次失败: %v", err)
+	}
+	if joined := strings.Join(f.ifaces, ","); !strings.Contains(joined, "ens192:on") {
+		t.Fatalf("可服务的口应照常启用: %v", f.ifaces)
+	}
+	st := p.State()
+	if !st.Enabled {
+		t.Fatal("运行态应记全局开关已启用")
+	}
+	var ens224 *LLDPInterfaceState
+	for i := range st.Interface {
+		if st.Interface[i].Name == "ens224" {
+			ens224 = &st.Interface[i]
+		}
+	}
+	if ens224 == nil || ens224.Converged || !strings.Contains(ens224.Error, "retval=-7") {
+		t.Fatalf("被跳过的口应如实登记（未收敛 + 原因）: %+v", st.Interface)
+	}
+	if !strings.Contains(ens224.Error, "底座不支持") {
+		t.Fatalf("原因应是人类可读文案（非裸 VPPApiError）: %q", ens224.Error)
+	}
+
+	// 显式逐口声明遇底座拒绝：仍如实报错（不隐藏）。
+	f2 := &fakeLldp{ifaceErr: map[string]error{"ens224": api.VPPApiError(-7)}}
+	p2 := NewLldpProvider(f2)
+	err := p2.ApplyLLDP(context.Background(), &model.LldpConfig{Enabled: true,
+		Interfaces: []model.LldpInterface{{Interface: "ens224", Enabled: true}}},
+		[]string{"ens192", "ens224"})
+	if err == nil {
+		t.Fatal("显式逐口声明遇底座拒绝必须如实报错（不隐藏底座限制）")
+	}
+	if !strings.Contains(err.Error(), "-7") || !strings.Contains(err.Error(), "ens224") ||
+		!strings.Contains(err.Error(), "底座不支持") {
+		t.Fatalf("报错应给人类可读的底座限制文案并点名接口: %v", err)
+	}
+}
+
+// 分类函数：api.VPPApiError(-7)（ReceiveReply 错误路径）⇒ 包装 ErrLldpIfaceUnsupported；
+// 其它 retval / 非 VPPApiError ⇒ 不误判。
+func TestLldpSetIfaceErrorClassification(t *testing.T) {
+	if rv, ok := lldpVPPApiRetval(api.VPPApiError(-7)); !ok || rv != -7 {
+		t.Fatalf("应从 VPPApiError 取到 retval -7: rv=%d ok=%v", rv, ok)
+	}
+	if _, ok := lldpVPPApiRetval(errors.New("连接断开")); ok {
+		t.Fatal("非 VPPApiError 不该被当作 retval")
+	}
+	err := lldpSetIfaceError("ens224", true, -7)
+	if !errors.Is(err, ErrLldpIfaceUnsupported) {
+		t.Fatalf("-7 应包装 ErrLldpIfaceUnsupported（供跳过判定）: %v", err)
+	}
+	if !strings.Contains(err.Error(), "retval=-7") || !strings.Contains(err.Error(), "底座不支持") {
+		t.Fatalf("-7 文案应人类可读: %v", err)
+	}
+	// 其它 retval：不包装 ErrLldpIfaceUnsupported（不被误跳过）。
+	other := lldpSetIfaceError("ens224", true, -57)
+	if errors.Is(other, ErrLldpIfaceUnsupported) {
+		t.Fatalf("非 -7 不该被当作「底座不支持」: %v", other)
+	}
+}
+
+// 真机形态复现：govpp 把 VPP 的 retval 转成 api.VPPApiError 从 **ReceiveReply** 返回（-7 不落在
+// reply.Retval 上）。本用例驱动**真实** govppLldpClient，断言该路径被正确归一（红-绿：旧实现直接
+// `return err`，裸 VPPApiError 透传、ErrLldpIfaceUnsupported 不成立 ⇒ 全局启用整次回滚）。
+func TestLldpSetInterfaceClassifiesReceiveReplyVPPApiError(t *testing.T) {
+	ch := newFakeBoundChannel(func(kind recvKind, _ int, msg api.Message) fakeReply {
+		switch kind {
+		case kindMulti: // sw_interface_dump：一条 ens224 明细（SwInterfaceIndex 据此解析）
+			if d, ok := msg.(*ifapi.SwInterfaceDetails); ok {
+				d.InterfaceName = "ens224"
+				d.SwIfIndex = 7
+				return fakeReply{ok: true}
+			}
+		case kindRequest: // sw_interface_set_lldp：VPP 以 api.VPPApiError(-7) 从 ReceiveReply 返回
+			return fakeReply{ok: true, err: api.VPPApiError(-7)}
+		}
+		return fakeReply{}
+	})
+	client := &govppLldpClient{ch: ch}
+	err := client.LldpSetInterface("ens224", true)
+	if err == nil {
+		t.Fatal("ReceiveReply 返回 VPPApiError(-7) 应归一为错误（不得吞掉）")
+	}
+	if !errors.Is(err, ErrLldpIfaceUnsupported) {
+		t.Fatalf("-7 应被识别为「底座不支持」（全局启用据此跳过）: %v", err)
+	}
+	if !strings.Contains(err.Error(), "retval=-7") || !strings.Contains(err.Error(), "底座不支持") {
+		t.Fatalf("应给人类可读文案（点名接口与底座限制）: %v", err)
+	}
+	if strings.Contains(err.Error(), "VPPApiError") {
+		t.Fatalf("不应把裸 VPPApiError 文案丢给操作者: %v", err)
 	}
 }
 

@@ -314,6 +314,56 @@ func (c *dockerClient) Inspect(ctx context.Context, name string) (ContainerFacts
 	return facts, true, nil
 }
 
+// InspectSpec 读取容器的**实况创建规格**（决策 #456）：image/entrypoint/cmd/env/资源/重启策略/
+// 特权/挂载/设备。供 Provider 比对「配置与运行态是否分叉」，分叉即重建。
+//
+// 字段位置（与 #432 同一次 GET /containers/{name}/json）：image/entrypoint/cmd/env 在 Config，
+// 资源/重启策略/特权/挂载/设备在 HostConfig。RestartPolicy.Name 对「不重启」可能回 ""——
+// 比对侧按 "no" 归一（specsEqual），此处如实回读、不臆造。
+func (c *dockerClient) InspectSpec(ctx context.Context, name string) (CreateSpec, bool, error) {
+	var out struct {
+		Config struct {
+			Image      string   `json:"Image"`
+			Entrypoint []string `json:"Entrypoint"`
+			Cmd        []string `json:"Cmd"`
+			Env        []string `json:"Env"`
+		} `json:"Config"`
+		HostConfig struct {
+			Binds         []string       `json:"Binds"`
+			Memory        int64          `json:"Memory"`
+			NanoCpus      int64          `json:"NanoCpus"`
+			RestartPolicy dockerRestart  `json:"RestartPolicy"`
+			Privileged    bool           `json:"Privileged"`
+			CapAdd        []string       `json:"CapAdd"`
+			Devices       []dockerDevice `json:"Devices"`
+		} `json:"HostConfig"`
+	}
+	err := c.do(ctx, http.MethodGet, "/containers/"+url.PathEscape(name)+"/json", nil, &out)
+	if err == errDockerNotFound {
+		return CreateSpec{}, false, nil
+	}
+	if err != nil {
+		return CreateSpec{}, false, err
+	}
+	spec := CreateSpec{
+		Image:         out.Config.Image,
+		Entrypoint:    out.Config.Entrypoint,
+		Cmd:           out.Config.Cmd,
+		Env:           out.Config.Env,
+		MemoryBytes:   out.HostConfig.Memory,
+		NanoCPUs:      out.HostConfig.NanoCpus,
+		RestartPolicy: out.HostConfig.RestartPolicy.Name,
+		Binds:         out.HostConfig.Binds,
+		Privileged:    out.HostConfig.Privileged,
+		CapAdd:        out.HostConfig.CapAdd,
+	}
+	for _, d := range out.HostConfig.Devices {
+		spec.Devices = append(spec.Devices, DeviceMapping{
+			PathOnHost: d.PathOnHost, PathInContainer: d.PathInContainer, CgroupPermissions: d.CgroupPermissions})
+	}
+	return spec, true, nil
+}
+
 // ExitCode 返回容器退出码（State.ExitCode）。
 func (c *dockerClient) ExitCode(ctx context.Context, name string) (int, bool, error) {
 	var out struct {

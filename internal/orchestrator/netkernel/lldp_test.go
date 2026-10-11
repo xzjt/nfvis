@@ -506,7 +506,7 @@ func TestLLDPHostnameIsReadPerAdvertisement(t *testing.T) {
 		defer mu.Unlock()
 		return cur
 	})
-	if err := f.m.Sync(ctx, lldpCfg(30, "eth0")); err != nil {
+	if err := f.m.Sync(ctx, lldpCfg(30, "eth0"), nil); err != nil {
 		t.Fatalf("收敛失败：%v", err)
 	}
 	s := f.lay.socket("eth0")
@@ -609,7 +609,7 @@ func TestLLDPNeighborTableAddRefreshDedupeAndExpire(t *testing.T) {
 func TestLLDPReaderUpdatesTableAndSurvivesNoise(t *testing.T) {
 	f := newLLDPFixture(t)
 	ctx := context.Background()
-	if err := f.m.Sync(ctx, lldpCfg(30, "eth0")); err != nil {
+	if err := f.m.Sync(ctx, lldpCfg(30, "eth0"), nil); err != nil {
 		t.Fatalf("收敛失败：%v", err)
 	}
 	s := f.lay.socket("eth0")
@@ -668,13 +668,12 @@ func TestLLDPSyncSwitchLifecycle(t *testing.T) {
 	f := newLLDPFixture(t)
 	ctx := context.Background()
 
-	// 未声明 / 全局关闭：一个口都不开——哪怕接口条目标了启用（判据是全局开关）。
-	if err := f.m.Sync(ctx, nil); err != nil {
+	// 未声明 / 全局关闭且无逐口声明：一个口都不开（判据＝启用集为空）。
+	if err := f.m.Sync(ctx, nil, nil); err != nil {
 		t.Fatalf("未声明应收敛为空操作：%v", err)
 	}
-	off := &model.LldpConfig{Enabled: false, AdvertisementInterval: 10,
-		Interfaces: []model.LldpInterface{{Interface: "eth0", Enabled: true}}}
-	if err := f.m.Sync(ctx, off); err != nil {
+	off := &model.LldpConfig{Enabled: false, AdvertisementInterval: 10}
+	if err := f.m.Sync(ctx, off, nil); err != nil {
 		t.Fatalf("全局关闭应收敛为空操作：%v", err)
 	}
 	if got := f.lay.openKeys(); len(got) != 0 {
@@ -688,7 +687,7 @@ func TestLLDPSyncSwitchLifecycle(t *testing.T) {
 		{Interface: "eth2", Enabled: true},
 		{Interface: "eth3", Enabled: false},
 	}}
-	if err := f.m.Sync(ctx, cfg); err != nil {
+	if err := f.m.Sync(ctx, cfg, nil); err != nil {
 		t.Fatalf("启用应收敛成功：%v", err)
 	}
 	if got := f.lay.openKeys(); !reflect.DeepEqual(got, []string{"eth0", "eth2"}) {
@@ -715,7 +714,7 @@ func TestLLDPSyncSwitchLifecycle(t *testing.T) {
 
 	// 幂等：同一份声明再收敛不重开、不换 socket。
 	opensBefore := len(f.lay.openKeys())
-	if err := f.m.Sync(ctx, cfg); err != nil {
+	if err := f.m.Sync(ctx, cfg, nil); err != nil {
 		t.Fatalf("幂等收敛失败：%v", err)
 	}
 	if got := len(f.lay.openKeys()); got != opensBefore {
@@ -726,7 +725,7 @@ func TestLLDPSyncSwitchLifecycle(t *testing.T) {
 	}
 
 	// 间隔变更 ⇒ **不重建 socket**（Open 次数不变），下一次发送的 TTL 立刻是新间隔的 4 倍。
-	if err := f.m.Sync(ctx, lldpCfg(10, "eth0", "eth2")); err != nil {
+	if err := f.m.Sync(ctx, lldpCfg(10, "eth0", "eth2"), nil); err != nil {
 		t.Fatalf("间隔变更收敛失败：%v", err)
 	}
 	if got := len(f.lay.openKeys()); got != opensBefore {
@@ -761,7 +760,7 @@ func TestLLDPSyncSwitchLifecycle(t *testing.T) {
 		{Interface: "eth0", Enabled: true},
 		{Interface: "eth2", Enabled: false},
 	}}
-	if err := f.m.Sync(ctx, one); err != nil {
+	if err := f.m.Sync(ctx, one, nil); err != nil {
 		t.Fatalf("关掉单口收敛失败：%v", err)
 	}
 	if !s2.closed() || s2.closeCount() != 1 {
@@ -781,7 +780,7 @@ func TestLLDPSyncSwitchLifecycle(t *testing.T) {
 	}
 
 	// 全局关 ⇒ 全部关闭、邻居表清空、State 清空。
-	if err := f.m.Sync(ctx, nil); err != nil {
+	if err := f.m.Sync(ctx, nil, nil); err != nil {
 		t.Fatalf("全局关收敛失败：%v", err)
 	}
 	if !s0.closed() {
@@ -795,13 +794,82 @@ func TestLLDPSyncSwitchLifecycle(t *testing.T) {
 	}
 }
 
+// ---------- ④b 全局开关＝默认值：对全部已声明物理口启用（决策 #451） ----------
+
+func TestLLDPSyncGlobalEnablesAllDeclaredPorts(t *testing.T) {
+	f := newLLDPFixture(t)
+	ctx := context.Background()
+
+	// 全局开 + 无逐口声明 ⇒ 对全部已声明口开 socket（改前 declOrder 为空 ⇒ 零 socket、零帧）。
+	if err := f.m.Sync(ctx, &model.LldpConfig{Enabled: true, AdvertisementInterval: 30},
+		[]string{"eth0", "eth1", "eth2"}); err != nil {
+		t.Fatalf("全局 enable 应收敛成功：%v", err)
+	}
+	if got := f.lay.openKeys(); !reflect.DeepEqual(got, []string{"eth0", "eth1", "eth2"}) {
+		t.Fatalf("全局 enable 应对全部已声明口开 socket：%v", got)
+	}
+	// 每个口**立即各发一帧**（对端立刻看得到）。
+	for _, n := range []string{"eth0", "eth1", "eth2"} {
+		waitLLDPSend(t, f.lay.socket(n), 1)
+	}
+
+	// 逐口 false 覆盖全局默认：eth1 关（socket 关闭），eth0/eth2 保持。
+	if err := f.m.Sync(ctx, &model.LldpConfig{Enabled: true, AdvertisementInterval: 30,
+		Interfaces: []model.LldpInterface{{Interface: "eth1", Enabled: false}}},
+		[]string{"eth0", "eth1", "eth2"}); err != nil {
+		t.Fatalf("逐口覆盖收敛失败：%v", err)
+	}
+	if s1 := f.lay.socket("eth1"); s1 == nil || !s1.closed() {
+		t.Fatalf("逐口 false 应关闭该口 socket：%+v", s1)
+	}
+	for _, n := range []string{"eth0", "eth2"} {
+		if s := f.lay.socket(n); s == nil || s.closed() {
+			t.Fatalf("未被覆盖的口 %s 不该被关", n)
+		}
+	}
+
+	// 全局关（无逐口）⇒ 全停。
+	if err := f.m.Sync(ctx, &model.LldpConfig{Enabled: false}, []string{"eth0", "eth1", "eth2"}); err != nil {
+		t.Fatalf("全局关收敛失败：%v", err)
+	}
+	for _, n := range []string{"eth0", "eth1", "eth2"} {
+		if s := f.lay.socket(n); s != nil && !s.closed() {
+			t.Fatalf("全局关应全停（%s 仍开）", n)
+		}
+	}
+}
+
+// ---------- ④c 逐口声明不受全局开关阻断（决策 #450） ----------
+
+func TestLLDPSyncPerInterfaceWithoutGlobal(t *testing.T) {
+	f := newLLDPFixture(t)
+	ctx := context.Background()
+	// 全局 false + 逐口 eth0=true：eth0 应开（逐口下发只由该口的 enabled 决定）。
+	if err := f.m.Sync(ctx, &model.LldpConfig{Enabled: false,
+		Interfaces: []model.LldpInterface{{Interface: "eth0", Enabled: true}}},
+		[]string{"eth0", "eth1"}); err != nil {
+		t.Fatalf("逐口声明（全局 false）应收敛成功：%v", err)
+	}
+	if got := f.lay.openKeys(); !reflect.DeepEqual(got, []string{"eth0"}) {
+		t.Fatalf("全局 false 时逐口 true 应开该口：%v", got)
+	}
+	// 全局 false 且无逐口 ⇒ 不主动去开从未启用过的已声明口（避免无谓动作）。
+	f2 := newLLDPFixture(t)
+	if err := f2.m.Sync(ctx, &model.LldpConfig{Enabled: false}, []string{"eth0", "eth1"}); err != nil {
+		t.Fatalf("全局 false 无逐口应收敛成功：%v", err)
+	}
+	if got := f2.lay.openKeys(); len(got) != 0 {
+		t.Fatalf("全局 false 无逐口不该开任何口：%v", got)
+	}
+}
+
 // ---------- ⑤ 起不来如实报错 + 恢复后重试 ----------
 
 func TestLLDPSyncOpenFailureIsHonestAndRetries(t *testing.T) {
 	f := newLLDPFixture(t)
 	ctx := context.Background()
 	f.lay.setFail("eth-bad", errors.New("内核接口不存在（注入）"))
-	err := f.m.Sync(ctx, lldpCfg(30, "eth-bad", "eth-good"))
+	err := f.m.Sync(ctx, lldpCfg(30, "eth-bad", "eth-good"), nil)
 	if err == nil {
 		t.Fatal("一个口起不来必须如实报错（不得静默）")
 	}
@@ -825,7 +893,7 @@ func TestLLDPSyncOpenFailureIsHonestAndRetries(t *testing.T) {
 	// 底座恢复 ⇒ 同一声明重试即收敛（只为坏口补开一次）。
 	opensBefore := len(f.lay.openKeys())
 	f.lay.setFail("eth-bad", nil)
-	if err := f.m.Sync(ctx, lldpCfg(30, "eth-bad", "eth-good")); err != nil {
+	if err := f.m.Sync(ctx, lldpCfg(30, "eth-bad", "eth-good"), nil); err != nil {
 		t.Fatalf("底座恢复后应重试收敛成功：%v", err)
 	}
 	if got := len(f.lay.openKeys()); got != opensBefore+1 {
@@ -836,7 +904,7 @@ func TestLLDPSyncOpenFailureIsHonestAndRetries(t *testing.T) {
 	}
 	// 幂等：两个口都在位，再收敛不重开。
 	opens := len(f.lay.openKeys())
-	if err := f.m.Sync(ctx, lldpCfg(30, "eth-bad", "eth-good")); err != nil {
+	if err := f.m.Sync(ctx, lldpCfg(30, "eth-bad", "eth-good"), nil); err != nil {
 		t.Fatalf("幂等收敛失败：%v", err)
 	}
 	if got := len(f.lay.openKeys()); got != opens {
@@ -875,7 +943,7 @@ func TestLLDPNeighborsDeterministicOrderAndLastHeard(t *testing.T) {
 func TestLLDPCloseStopsGoroutinesAndIsIdempotent(t *testing.T) {
 	f := newLLDPFixture(t)
 	ctx := context.Background()
-	if err := f.m.Sync(ctx, lldpCfg(30, "eth0", "eth2")); err != nil {
+	if err := f.m.Sync(ctx, lldpCfg(30, "eth0", "eth2"), nil); err != nil {
 		t.Fatalf("收敛失败：%v", err)
 	}
 	s0, s2 := f.lay.socket("eth0"), f.lay.socket("eth2")
@@ -922,7 +990,7 @@ func TestLLDPProviderWiringReadViewReplayAndClose(t *testing.T) {
 
 	// 声明并启用 ⇒ 收敛到注入的底座；读视图经 Provider 读到邻居（三面同源的服务端一侧）。
 	cfg := lldpCfg(30, "eth0")
-	if err := p.ApplyLLDP(ctx, cfg); err != nil {
+	if err := p.ApplyLLDP(ctx, cfg, nil); err != nil {
 		t.Fatalf("收敛失败：%v", err)
 	}
 	s := lay.socket("eth0")
@@ -956,7 +1024,7 @@ func TestLLDPProviderWiringReadViewReplayAndClose(t *testing.T) {
 	}
 
 	// 未声明（提交编排的 undo/删除路径）⇒ teardown。
-	if err := p.ApplyLLDP(ctx, nil); err != nil {
+	if err := p.ApplyLLDP(ctx, nil, nil); err != nil {
 		t.Fatalf("未声明应收敛为空操作：%v", err)
 	}
 	if !s.closed() {
@@ -968,7 +1036,7 @@ func TestLLDPProviderWiringReadViewReplayAndClose(t *testing.T) {
 	}
 
 	// 再次启用后 Provider.Close 应带上 LLDP（进程退出路径：socket 关、协程退出）。
-	if err := p.ApplyLLDP(ctx, cfg); err != nil {
+	if err := p.ApplyLLDP(ctx, cfg, nil); err != nil {
 		t.Fatalf("再收敛失败：%v", err)
 	}
 	s2 := lay.socket("eth0")

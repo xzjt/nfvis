@@ -36,7 +36,7 @@ func (n recNet) ApplyBond(ctx context.Context, bond model.Bond) error {
 func (n recNet) DeleteBond(ctx context.Context, name string) error {
 	return n.record("del-bond:" + name)
 }
-func (n recNet) ApplyLLDP(ctx context.Context, lldp *model.LldpConfig) error {
+func (n recNet) ApplyLLDP(ctx context.Context, lldp *model.LldpConfig, declaredPorts []string) error {
 	return n.record("lldp")
 }
 func (n recNet) ApplyACL(ctx context.Context, acl model.Acl) error {

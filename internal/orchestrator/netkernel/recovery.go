@@ -109,7 +109,7 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 	// socket 与收/发协程活在 nfvisd 进程内（进程重启后必然不在），不重放即静默丢 LLDP。放在
 	// 接口段之后：口要先存在/已 up（否则收不到、发不出）；声明为空＝teardown（Sync 关全部
 	// socket 并清邻居表，幂等；未声明过的机器只是空操作）。
-	collect("lldp", p.ApplyLLDP(ctx, lldpOf(cfg)))
+	collect("lldp", p.ApplyLLDP(ctx, lldpOf(cfg), orchestrator.DeclaredPhysicalPorts(cfg)))
 	// 镜像在交换机/接口之后：源口（物理口/bond）此刻已存在且已 up（ApplySpan 会置分析口 up）。
 	for _, pm := range cfg.PortMirroring {
 		collect("port-mirroring/"+pm.Name, p.ApplySpan(ctx, pm))
@@ -134,8 +134,11 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 	collect("nat", p.ApplyNAT(ctx, natCfg))
 	// 告警落点（R2-6）：与 VPP 侧同一 scope/码族；本次收敛成功的项由 Sync 自动消解
 	// （不在 failures 里的活动告警一律 resolved，跨重启按内核实况重建）。
+	// 数据面代际变化的强制重建门控：本次是**真正的全量重放**，先清除待办；再按门控覆盖
+	// recovery 作用域告警——无待办时照旧 Sync，有待办（重放被跳过）时不清空未收敛项。
 	if p.alarms != nil {
-		p.alarms.Sync(alarmScopeRecovery, failures)
+		p.replayGate.Satisfy()
+		network.SyncRecoveryAlarms(p.alarms, p.replayGate, failures)
 	}
 	return errs
 }

@@ -3,6 +3,7 @@ package network
 // govpp bond 与 LLDP 客户端（M3-6）。
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -12,6 +13,30 @@ import (
 	"go.fd.io/govpp/binapi/interface_types"
 	"go.fd.io/govpp/binapi/lldp"
 )
+
+// lldpVPPApiRetval 从 govpp 返回的错误里取 VPP retval；不是 api.VPPApiError 则 ok=false。
+//
+// 关键（真机实测）：VPP 的 retval 往往**不**落在 reply.Retval 上，而是由 govpp 把 retval 转成
+// api.VPPApiError 从 ReceiveReply 返回——必须用 errors.As 取类型值，不靠字符串匹配。
+func lldpVPPApiRetval(err error) (int32, bool) {
+	var apiErr api.VPPApiError
+	if errors.As(err, &apiErr) {
+		return int32(apiErr), true
+	}
+	return 0, false
+}
+
+// lldpSetIfaceError 把 sw_interface_set_lldp 的 VPP retval 归一为操作者可读的错误：
+//   - -7（VPP 对物理/DPDK 口返回 Invalid value）⇒ 包装 ErrLldpIfaceUnsupported（全局启用扫描
+//     据此 errors.Is 跳过该口并如实登记；显式逐口声明仍如实报错）；
+//   - 其余 retval ⇒ 带 retval 的文案。
+func lldpSetIfaceError(ifname string, enable bool, retval int32) error {
+	if retval == -7 {
+		return fmt.Errorf("sw_interface_set_lldp(if=%s,enable=%v) retval=%d：%w",
+			ifname, enable, retval, ErrLldpIfaceUnsupported)
+	}
+	return fmt.Errorf("sw_interface_set_lldp(if=%s,enable=%v) retval=%d", ifname, enable, retval)
+}
 
 // BondClientFunc 返回随当前连接获取 bond 客户端的工厂。
 func (m *Manager) BondClientFunc() func() (BondClient, error) {
@@ -193,18 +218,16 @@ func (g *govppLldpClient) LldpSetInterface(ifname string, enable bool) error {
 		PortDesc:  ifname,
 		Enable:    enable,
 	}).ReceiveReply(reply); err != nil {
+		// govpp 把 VPP retval 转成 api.VPPApiError 从 ReceiveReply 返回（真机 -7 即走此路径）——
+		// 归一为可读文案；其余错误原样。
+		if rv, ok := lldpVPPApiRetval(err); ok {
+			return lldpSetIfaceError(ifname, enable, rv)
+		}
 		return err
 	}
 	if reply.Retval != 0 {
-		// VPP 对物理（DPDK）口一律返回 Invalid value（实测 -7；vhost-user/BVI 口可启用）——
-		// 底座限制如实告知并给可照做的替代，不把裸错误码丢给操作者（round10 观察项落地：报错如实 + 可照做替代）。
-		if reply.Retval == -7 {
-			return fmt.Errorf("sw_interface_set_lldp(if=%s,enable=%v) retval=%d："+
-				"当前数据面底座拒绝在该接口上启用 LLDP——DPDK 物理口不受支持，"+
-				"vhost-user/BVI 等虚拟接口可用（可改用受支持的口，或在内核数据面使用 LLDP）",
-				ifname, enable, reply.Retval)
-		}
-		return fmt.Errorf("sw_interface_set_lldp(if=%s,enable=%v) retval=%d", ifname, enable, reply.Retval)
+		// 防御：少数 reply 仍直接带 retval（无 error）。
+		return lldpSetIfaceError(ifname, enable, reply.Retval)
 	}
 	return nil
 }

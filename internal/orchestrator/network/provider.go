@@ -42,6 +42,7 @@ type L2Network struct {
 	vhostDir                     string                 // vhost-user socket 目录（恢复收敛重放用）
 	memifDir                     string                 // memif socket 目录
 	alarms                       *AlarmStore            // 恢复收敛失败项落点（M3-8，可空）
+	replayGate                   *ReplayGate            // 数据面代际变化的强制重建门控（可空；见 replay_gate.go）
 	loop                         *loopDetector          // 采样式 L2 环路检测状态（决策 #337，进程内）
 	counters                     InterfaceCounterReader // 成员口 rx 计数读物（判据③，可空——未注入即跳过该判据）
 	sriov                        *SRIOVProvider         // PF 的 VF 数量（声明式 vf-count，决策 #70）
@@ -356,11 +357,22 @@ func (n *L2Network) DeleteBond(ctx context.Context, name string) error {
 	return n.bond.DeleteBond(ctx, name)
 }
 
-func (n *L2Network) ApplyLLDP(ctx context.Context, lldpCfg *model.LldpConfig) error {
+func (n *L2Network) ApplyLLDP(ctx context.Context, lldpCfg *model.LldpConfig, declaredPorts []string) error {
 	if n.lldp == nil {
-		return nil
+		// 决策 #450：此前这里静默返回 nil——逐口声明在「lldp 编排未接线」时被无声吞掉。
+		// 如实报错（不假装已下发），让提交失败并可回滚。
+		return fmt.Errorf("LLDP 编排未接线（数据面 LLDP 能力不可用）")
 	}
-	return n.lldp.ApplyLLDP(ctx, lldpCfg)
+	return n.lldp.ApplyLLDP(ctx, lldpCfg, declaredPorts)
+}
+
+// LLDPState LLDP 运行态读数：已成功启用的口（在发广告）+ 全局启用扫描时被底座跳过/未收敛的
+// 口（含原因）——读视图据此如实呈现（决策 #451）。LLDP 编排未接线 ⇒ ok=false（省略运行态块）。
+func (n *L2Network) LLDPState() (LLDPState, bool) {
+	if n.lldp == nil {
+		return LLDPState{}, false
+	}
+	return n.lldp.State(), true
 }
 
 // LldpNeighbors 供 /protocols/lldp/neighbors 运行态（M3-6）。

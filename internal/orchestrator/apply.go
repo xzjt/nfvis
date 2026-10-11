@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/model"
@@ -261,6 +262,23 @@ func (a *orchApplier) residueAlarm(desc string, err error) {
 			"request vpp restart 再提交即可复原。本条是进程内记录（重启后不再出现）；若残渣是可对账"+
 			"的对象（IP 表/ACL/bridge-domain），启动/巡检对账会另行以 *_LEFTOVER 告警持续呈现，"+
 			"对象清理后自动消解", desc, err))
+}
+
+// DeclaredPhysicalPorts 返回配置里已声明物理口的名字（保持声明序、去重、忽略空名）。
+//
+// LLDP 的全局 `enable true` 以**全部已声明物理口**为作用集（决策 #451）——LldpConfig 自身
+// 没有口清单，故由调用点从整份 model.Config 派生后送进 ApplyLLDP/Sync。
+func DeclaredPhysicalPorts(cfg model.Config) []string {
+	out := make([]string, 0, len(cfg.Interfaces))
+	seen := map[string]bool{}
+	for _, ifc := range cfg.Interfaces {
+		if ifc.Name == "" || seen[ifc.Name] {
+			continue
+		}
+		seen[ifc.Name] = true
+		out = append(out, ifc.Name)
+	}
+	return out
 }
 
 // lldpEqual 判断 LLDP 配置是否变化（Protocols 指针比较已由 configEqualPtr 覆盖，此处冗余防御）。
@@ -547,7 +565,14 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	}
 
 	// —— 新增/变更：LLDP（FR-NET-018）——
-	if !configEqualPtr(old.Protocols, new.Protocols) || !lldpEqual(old, new) {
+	// 触发条件含**已声明物理口清单变化**：全局 `enable true` 的作用集是全部已声明口
+	// （决策 #451），新声明一个口也要给它开 LLDP。仅当 LLDP 确有声明（新旧任一）时才把
+	// 「口清单变化」当触发条件——LLDP 全未配置时纯接口变更不该牵动本 op。
+	newLldpPorts := DeclaredPhysicalPorts(new)
+	lldpConfigured := (new.Protocols != nil && new.Protocols.LLDP != nil) ||
+		(old.Protocols != nil && old.Protocols.LLDP != nil)
+	if !configEqualPtr(old.Protocols, new.Protocols) || !lldpEqual(old, new) ||
+		(lldpConfigured && !slices.Equal(newLldpPorts, DeclaredPhysicalPorts(old))) {
 		newL := (*model.LldpConfig)(nil)
 		if new.Protocols != nil {
 			newL = new.Protocols.LLDP
@@ -558,8 +583,8 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 		}
 		ops = append(ops, op{
 			desc: "lldp",
-			run:  func(ctx context.Context) error { return a.net.ApplyLLDP(ctx, newL) },
-			undo: func(ctx context.Context) error { return a.net.ApplyLLDP(ctx, oldL) },
+			run:  func(ctx context.Context) error { return a.net.ApplyLLDP(ctx, newL, newLldpPorts) },
+			undo: func(ctx context.Context) error { return a.net.ApplyLLDP(ctx, oldL, DeclaredPhysicalPorts(old)) },
 		})
 	}
 

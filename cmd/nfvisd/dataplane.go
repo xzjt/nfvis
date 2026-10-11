@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -248,9 +249,23 @@ func stateRuntimeFor(mode string, mgr *network.Manager) state.Runtime {
 
 // diagRuntimeFor 选择诊断实现：内核数据面用宿主网络栈的 ping/traceroute（经 `ip vrf exec`
 // 支持 VRF 作用域）。
-func diagRuntimeFor(mode string, mgr *network.Manager) api.DiagRuntime {
+//
+// cfgSrc 为「当前 committed 配置」来源（决策 #457）：内核数据面下 vrf 参数是**交换机名/VRF 名**，
+// 而内核 VRF 设备名对网关域是 `vr-<交换机名>`——注入解析器把它换成设备名，否则网关域诊断恒报
+// 「Invalid VRF name」。VPP 侧诊断的 vrf 走 table-id（语义不同），不注入。
+func diagRuntimeFor(mode string, mgr *network.Manager, cfgSrc func() (model.Config, error)) api.DiagRuntime {
 	if mode == model.DataPlaneKernel {
-		return netkernel.NewDiag(nil)
+		var resolver netkernel.VRFResolver
+		if cfgSrc != nil {
+			resolver = func(name string) (string, error) {
+				cfg, err := cfgSrc()
+				if err != nil {
+					return "", fmt.Errorf("读取当前配置以解析 VRF %q: %w", name, err)
+				}
+				return netkernel.KernelVRFDeviceName(cfg, name)
+			}
+		}
+		return netkernel.NewDiag(nil, resolver)
 	}
 	return &diagController{diag: mgr.Diagnostics()}
 }

@@ -56,6 +56,12 @@ const (
 	// 或被取消。就绪由既有连接重试循环接管（未就绪时数据面不可用、`show vpp` 显示未连接）。
 	// 严重级别 warning；VPP 恢复在线即自动消解（与 #329/#346 同口径）。
 	AlarmVPPAutostartFailed = "VPP_AUTOSTART_FAILED"
+	// AlarmReplayRequired 数据面实现发生变化（vpp↔kernel 切换）后，**尚未完成一次全量重建**
+	// （R12-8）。数据面被整体替换而配置未变，提交差分引擎给出零计划；若恢复重放又被跳过，
+	// 未收敛项会被「不在 failures 即消解」的对账静默清空、从 `show alarms` 消失。本码由 15s
+	// 巡检按「强制重建待办」重建：待办在 ⇒ 活动；一次真正的全量重放完成 ⇒ 自动消解。
+	// 严重级别 warning；source 固定（描述的是「代际重建」这件事本身，不随某个对象变化）。
+	AlarmReplayRequired = "RECOVERY_REPLAY_REQUIRED"
 )
 
 // ResidueCodes 全部「残渣对账」告警码（消解只在本集合内进行，不误伤恢复收敛的其它告警）。

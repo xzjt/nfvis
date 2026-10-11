@@ -401,3 +401,138 @@ func TestDeleteSwitchPortVNFResidueReclaimed(t *testing.T) {
 		t.Fatalf("vnf 残壳（只剩 vm 名）应回收，实际仍在: %+v", *p)
 	}
 }
+
+// ---------- 两接入形态等价（决策 #455） ----------
+
+// vmNicVirtualSwitch 取某 VM 的 vNIC 的 virtual_switch（未声明返回空串）。
+func vmNicVirtualSwitch(cfg model.Config, vm, nic string) string {
+	for _, m := range cfg.VirtualMachineFunctions {
+		if m.Name != vm {
+			continue
+		}
+		for _, n := range m.Interfaces {
+			if n.Name == nic {
+				return n.VirtualSwitch
+			}
+		}
+	}
+	return ""
+}
+
+// ctNicVirtualSwitch 取某容器的 vNIC 的 virtual_switch（未声明返回空串）。
+func ctNicVirtualSwitch(cfg model.Config, ct, nic string) string {
+	for _, c := range cfg.ContainerFunctions {
+		if c.Name != ct {
+			continue
+		}
+		for _, n := range c.Interfaces {
+			if n.Name == nic {
+				return n.VirtualSwitch
+			}
+		}
+	}
+	return ""
+}
+
+// TestSwitchPortAttachmentWritesBackVnicVirtualSwitch 决策 #455：交换机侧接入
+// （`set virtual-switches <n> ports <seq> vnf <vm> interface <vnic>`）必须回写被引用 vNIC 的
+// virtual_switch——与 VM/容器侧 `interfaces <vnic> virtual-switch <n>` 产出**同一模型**（单一真源）。
+// 内核数据面的域生成据该字段定位 bridge；不回写则同一配置在 vpp 可用、切 kernel 生成域失败。
+func TestSwitchPortAttachmentWritesBackVnicVirtualSwitch(t *testing.T) {
+	// 交换机侧接入（VPP 形态）。
+	xSwitch, eSwitch := newCLIKit(t)
+	run(t, xSwitch, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-a type l2",
+		"set virtual-machine-functions fw-vm image base.qcow2",
+		"set virtual-machine-functions fw-vm interfaces eth0 type vhost-user",
+		"set virtual-switches vs-a ports 1 vnf fw-vm interface eth0",
+		"set container-functions sbc-ct1 image alpine:3.20",
+		"set container-functions sbc-ct1 interfaces m0 type memif",
+		"set virtual-switches vs-a ports 2 container sbc-ct1 interface m0",
+	)
+	cfgSwitch, _, err := eSwitch.Candidate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := vmNicVirtualSwitch(cfgSwitch, "fw-vm", "eth0"); got != "vs-a" {
+		t.Fatalf("交换机侧接入应回写 VM vNIC 的 virtual_switch=vs-a，实得 %q", got)
+	}
+	if got := ctNicVirtualSwitch(cfgSwitch, "sbc-ct1", "m0"); got != "vs-a" {
+		t.Fatalf("交换机侧接入应回写容器 vNIC 的 virtual_switch=vs-a，实得 %q", got)
+	}
+
+	// VM/容器侧接入（对照）。
+	xVnic, eVnic := newCLIKit(t)
+	run(t, xVnic, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-a type l2",
+		"set virtual-machine-functions fw-vm image base.qcow2",
+		"set virtual-machine-functions fw-vm interfaces eth0 type vhost-user",
+		"set virtual-machine-functions fw-vm interfaces eth0 virtual-switch vs-a",
+		"set container-functions sbc-ct1 image alpine:3.20",
+		"set container-functions sbc-ct1 interfaces m0 type memif",
+		"set container-functions sbc-ct1 interfaces m0 virtual-switch vs-a",
+	)
+	cfgVnic, _, err := eVnic.Candidate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, b := vmNicVirtualSwitch(cfgSwitch, "fw-vm", "eth0"), vmNicVirtualSwitch(cfgVnic, "fw-vm", "eth0"); a != b {
+		t.Fatalf("两形态应产出同一 virtual_switch：交换机侧=%q VM 侧=%q", a, b)
+	}
+	if a, b := ctNicVirtualSwitch(cfgSwitch, "sbc-ct1", "m0"), ctNicVirtualSwitch(cfgVnic, "sbc-ct1", "m0"); a != b {
+		t.Fatalf("两形态应产出同一 virtual_switch（容器）：交换机侧=%q 容器侧=%q", a, b)
+	}
+}
+
+// TestSwitchPortDetachClearsVnicVirtualSwitch 决策 #455：交换机侧解绑端口 = 解引用该 vNIC，
+// 其 virtual_switch 应一并清掉（与 VM 侧 `delete … interfaces <vnic> virtual-switch` 等价）。
+func TestSwitchPortDetachClearsVnicVirtualSwitch(t *testing.T) {
+	x, engine := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-a type l2",
+		"set virtual-machine-functions fw-vm image base.qcow2",
+		"set virtual-machine-functions fw-vm interfaces eth0 type vhost-user",
+		"set virtual-switches vs-a ports 1 vnf fw-vm interface eth0",
+	)
+	cfg, _, err := engine.Candidate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := vmNicVirtualSwitch(cfg, "fw-vm", "eth0"); got != "vs-a" {
+		t.Fatalf("接入后应先有 virtual_switch=vs-a，实得 %q", got)
+	}
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"delete virtual-switches vs-a ports 1 vnf fw-vm interface eth0")
+	cfg, _, err = engine.Candidate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := vmNicVirtualSwitch(cfg, "fw-vm", "eth0"); got != "" {
+		t.Fatalf("解绑交换机端口应清掉 vNIC 的 virtual_switch，实得 %q", got)
+	}
+}
+
+// TestDeleteNonexistentPortWithStaticAttachmentReportsMissing 决策 #455：交换机侧接入
+// （静态端口）也会回写 vNIC 的 virtual_switch——删一个**不存在的序号**时不得把该 vNIC 误报成
+// 「派生条目」（它在交换机侧有静态端口）。红-绿：回写后不加此判别，会误报「来自 VNF 的 vNIC
+// 声明（读视图派生条目）…去 VNF 侧删」。
+func TestDeleteNonexistentPortWithStaticAttachmentReportsMissing(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaaClassSU, "ssh",
+		"configure",
+		"set virtual-switches vs-a type l2",
+		"set virtual-machine-functions fw-vm image base.qcow2",
+		"set virtual-machine-functions fw-vm interfaces eth0 type vhost-user",
+		"set virtual-switches vs-a ports 1 vnf fw-vm interface eth0",
+	)
+	out := x.Execute("admin", aaaClassSU, "ssh", "delete virtual-switches vs-a ports 9 vnf fw-vm").Output
+	if !strings.Contains(out, "%%") || !strings.Contains(out, "不存在") {
+		t.Fatalf("删不存在的序号应如实报「序号不存在」:\n%s", out)
+	}
+	if strings.Contains(out, "派生条目") {
+		t.Fatalf("静态端口接入的 vNIC 不得被误报为派生条目:\n%s", out)
+	}
+}

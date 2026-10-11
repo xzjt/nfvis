@@ -8,8 +8,10 @@ package api
 import (
 	"net/http"
 	"slices"
+	"sort"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
 // ---------- acls（FR：ACL 绑定校验见 FR-CFG-011 前置引用） ----------
@@ -345,15 +347,83 @@ func (s *Server) handleDeleteBond(w http.ResponseWriter, r *http.Request) {
 
 // ---------- protocols/lldp（FR-NET-018，附录 B：/protocols/lldp） ----------
 
+// LLDPStateRuntime 内核数据面 LLDP 收发代理的运行态读物（Options.LLDPState；nil = 读视图
+// 不出现运行态块，VPP 数据面恒如此）。ok=false = 没有可报的运行态（从未装配），读视图据此
+// 省略运行态块——不编造（与 DNSProxyRuntime 同形，决策 #451）。
+type LLDPStateRuntime interface {
+	LLDPState() (network.LLDPState, bool)
+}
+
+// lldpView LLDP 读视图（GET /protocols/lldp）：配置声明 + **实际在发广告的口** + （内核侧）运行态。
+//
+// advertising 如实列出「实际在发广告的接口」：全局 `enable true` 时是**全部已声明物理口**按
+// 逐口覆盖后的结果（决策 #451）；全局 false 时只有逐口声明 true 的口。VPP 侧为配置派生值；
+// 内核侧另附 runtime（每口的就绪/未收敛原因，不谎报）。
+type lldpView struct {
+	model.LldpConfig
+	Advertising []string           `json:"advertising"`
+	Runtime     *network.LLDPState `json:"runtime,omitempty"`
+}
+
+// lldpAdvertising 实际在发广告的接口清单（配置派生；与数据面启用集同口径）。
+func lldpAdvertising(cfg model.Config) []string {
+	on := map[string]bool{}
+	var lldp *model.LldpConfig
+	if cfg.Protocols != nil {
+		lldp = cfg.Protocols.LLDP
+	}
+	if lldp != nil && lldp.Enabled {
+		for _, ifc := range cfg.Interfaces {
+			if ifc.Name != "" {
+				on[ifc.Name] = true
+			}
+		}
+	}
+	if lldp != nil {
+		for _, li := range lldp.Interfaces {
+			if li.Interface == "" {
+				continue
+			}
+			if li.Enabled {
+				on[li.Interface] = true
+			} else {
+				delete(on, li.Interface) // 逐口 false 覆盖全局默认
+			}
+		}
+	}
+	out := make([]string, 0, len(on))
+	for n := range on {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (s *Server) handleGetLldp(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.engine.Committed()
 	if err != nil {
 		mapEngineError(w, err)
 		return
 	}
-	out := model.LldpConfig{}
+	out := lldpView{Advertising: lldpAdvertising(cfg)}
 	if cfg.Protocols != nil && cfg.Protocols.LLDP != nil {
-		out = *cfg.Protocols.LLDP
+		out.LldpConfig = *cfg.Protocols.LLDP
+	}
+	// 运行态块（决策 #451）：内核数据面下把「每个在发广告的口」的就绪/未收敛原因如实给出
+	// （读物注入、可读时出现；VPP 数据面/读不到 ⇒ 字段缺席，不发 null）。运行态可读时
+	// **以运行态为准**给出 advertising（只算已收敛的口）——不谎报「在发广告」。
+	if s.lldpState != nil {
+		if st, ok := s.lldpState.LLDPState(); ok {
+			out.Runtime = &st
+			adv := make([]string, 0, len(st.Interface))
+			for _, i := range st.Interface {
+				if i.Converged {
+					adv = append(adv, i.Name)
+				}
+			}
+			sort.Strings(adv)
+			out.Advertising = adv
+		}
 	}
 	// 注意：这是 LLDP **配置对象**（非列表），不加分页；邻居列表在 handleGetLldpNeighbors。
 	writeJSON(w, http.StatusOK, out)

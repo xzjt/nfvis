@@ -302,7 +302,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 命令 | 说明 | 落点 | 实测 |
 |---|---|---|---|
-| `set protocols lldp enable <bool>` | LLDP 全局启停 | VPP：lldp 插件；内核：自研收发代理全局开关（关＝停广告 + 关 socket + 清邻居表，决策 #440） | ✅（内核侧 round5 真机：对端零帧 + 邻居清空） |
+| `set protocols lldp enable <bool>` | LLDP 全局启停（**全局 `true` ＝ 对全部已声明物理口启用**，逐口声明可覆盖；**底座服务不了的口**——VPP 对 DPDK 物理口返回 Invalid value——在全局扫描下**跳过并如实登记、不整次回滚**；显式逐口声明遇底座拒绝仍如实报错。决策 #451） | VPP：lldp 插件；内核：自研收发代理全局开关（关＝停广告 + 关 socket + 清邻居表，决策 #440） | ✅（内核侧 round5 真机：对端零帧 + 邻居清空；**round13 真机**：内核仅配全局即对全部已声明口建 socket 并发帧、VPP 侧全局启用跳过 DPDK 口且 commit 成功） |
 | `set protocols lldp advertisement-interval <n>` | 通告间隔（缺省 30s；内核侧广告 TTL＝4×interval，与 VPP txHold=4 同口径） | VPP：lldp 插件；内核：自研代理的发送节奏（变更只改节奏与 TTL、不重建 socket，决策 #440） | ✅（内核侧 round5 真机：3s 间隔逐帧解码） |
 | `set protocols lldp interface <ifname> enable <bool>` | 按接口覆盖（接口须为已声明物理口，两数据面一致） | VPP：lldp 插件逐口开关；内核：该口开/关 AF_PACKET 收发扬声器（决策 #440） | ✅（内核侧 round5 真机：关⇒零帧+邻居清空，开⇒恢复） |
 
@@ -315,7 +315,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set interfaces <ifname> mtu <n>` | MTU | VPP | ✅ |
 | `set interfaces <ifname> sriov vf-count <n>` | 创建/回收 VF（FR-NET-004） | sysfs `sriov_numvfs` | ⊘ 无 PF/VF 时 commit 明确报错（不再静默无效，决策 #70） |
 | `set interfaces <ifname> ingress-policy <name>` | 入向限速策略绑定 | VPP policer input | ✅ |
-| `set interfaces <ifname> egress-policy <name>` | 出向限速策略绑定（决策 #331；VPP policer output，可与入向并存） | VPP policer output | ✅ |
+| `set interfaces <ifname> egress-policy <name>` | 出向限速策略绑定（决策 #331；VPP policer output，可与入向并存）。**L2 交换机成员口提交期硬拒**（决策 #454，真机实证）：出向 policer 落在 **`l2-output`** 弧，会连带拦下经 BVI 路由回来的 L3 回程（域内 DNS 等应答被丢弃、域内通信静默中断）；改用入向策略或把出向策略绑到 L3 接口形态。**入向策略不受限** | VPP policer output | ✅（round13 真机：L2 成员口绑出向被拒、同口绑入向通过） |
 | `set interfaces <ifname> storm-control broadcast <kbps>` | 入向**广播**风暴抑制（决策 #385，FR-NET-019）：目的 MAC 精确匹配 `ff:ff:ff:ff:ff:ff`，超速**丢弃**；单位 **kbps**（不做 pps 换算）；接口须已声明；**与端口安全白名单（`port-security`）同接口互斥**（两者都绑该口唯一的 L2 入向分类槽——风暴走 classify、端口安全走 macip，提交期**双向拒绝**，留其一） | VPP policer（1R2C）+ L2 classify 表挂接口入向 | ✅（真机四维 + 定量对照（round167，dev110）：对照组 l2-flood 2000 vs 实验组 15/16；类别独立/表链/删除清查/重启重放；**能力前提 spike** 见 `docs/evidence/v2-round166-storm-control-spike.txt`；互斥为后续补强：真机实测并存时槽被 portsec 占用致限速静默不生效、删 storm 报「槽被非本产品对象占用」——证据 `docs/evidence/v2-round176-*.txt`） |
 | `set interfaces <ifname> storm-control multicast <kbps>` | 入向**组播**风暴抑制（决策 #385）：目的 MAC 的 I/G 位=1（掩码「匹配位」写法；按该口径广播帧也满足此位——两类同配时广播走自己的精确表，只配组播时广播按组播速率限） | 同上 | ✅（同上；掩码「匹配位」写法与两类表链（广播表经 `NextTableIndex` 链组播表）已按 `show classify tables` 真机核对） |
 | `delete interfaces <ifname> storm-control [broadcast \| multicast]` | 逐类撤销（detach → 删 session/表 → 删 policer）；**裸 delete ＝两类都清**（幂等：不存在按已达成） | 同上 | ✅（同上；删除一次提交全清、重启重放不翻倍——两处实测缺陷的修复复验） |

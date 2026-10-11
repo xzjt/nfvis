@@ -23,6 +23,7 @@ type mockDocker struct {
 	oomKilled map[string]bool
 	stateErr  error // State 查询失败注入（查询失败不清警的单测）
 	oomErr    error // OOMKilled 查询失败注入
+	specErr   error // InspectSpec 读取实况规格失败注入（决策 #456 的「读不到就报错」单测）
 
 	// 决策 #432：inspect 事实注入——Docker 原始状态（restarting 等）与重启次数。
 	// rawStates 缺省回落到契约状态同名（restarting 场景需显式注入）；restartUnknown 里的
@@ -126,6 +127,18 @@ func (m *mockDocker) Inspect(_ context.Context, name string) (ContainerFacts, bo
 		f.RestartCount, f.RestartsKnown = m.restartCounts[name], true
 	}
 	return f, true, nil
+}
+
+// InspectSpec 实况创建规格（决策 #456）：mock 里「实况」就是上次 Create 存下的规格。
+// 容器不存在 ⇒ exists=false（非错误）；未记录规格（测试里手工置 state 而未 Create）⇒ 零值规格。
+func (m *mockDocker) InspectSpec(_ context.Context, name string) (CreateSpec, bool, error) {
+	if m.specErr != nil {
+		return CreateSpec{}, false, m.specErr
+	}
+	if _, ok := m.states[name]; !ok {
+		return CreateSpec{}, false, nil
+	}
+	return m.specs[name], true, nil
 }
 func (m *mockDocker) Logs(_ context.Context, name string, tail int) (string, error) {
 	return m.logs, nil
@@ -820,5 +833,288 @@ func TestCheckContainerAlarmsRestartLoopResolvesRemovedContainer(t *testing.T) {
 	}
 	if _, seen := p.restartSeenOf("walk-ct"); seen {
 		t.Fatal("计数记忆应随对象消失一并丢弃（有界）")
+	}
+}
+
+// ---------- 决策 #456：容器 spec 变更 ⇒ 重建 ----------
+
+// containsCall 调用记录里是否含该调用。
+func containsCall(calls []string, want string) bool {
+	for _, c := range calls {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}
+
+// idxOf 首次出现的下标（无则 -1）。
+func idxOf(calls []string, want string) int {
+	for i, c := range calls {
+		if c == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// specsEqual 单源：env 顺序无关且按「期望 ⊆ 实况」（镜像注入变量不参与）、未声明的
+// entrypoint/cmd 不参与、restart-policy ""/"no" 等价；任一已声明维度变化即判不同。
+func TestSpecsEqualSingleSource(t *testing.T) {
+	cfg := DefaultConfig()
+	base := BuildCreateSpec(ctFixture("ct1"), cfg)
+
+	if !specsEqual(base, base) {
+		t.Fatal("同规格应相等")
+	}
+	// env 顺序无关（集合比较）。
+	reordered := base
+	reordered.Env = []string{"B=2", "A=1"}
+	if !specsEqual(base, reordered) {
+		t.Fatal("env 顺序不应影响相等判定")
+	}
+	// 实况含镜像/平台注入的变量（PATH 等）⇒ 期望仍是其子集，不判差异（否则反复重建）。
+	withInjected := base
+	withInjected.Env = append([]string{"PATH=/usr/bin", "HOSTNAME=abc"}, base.Env...)
+	if !specsEqual(base, withInjected) {
+		t.Fatal("实况含镜像注入变量不应判为差异")
+	}
+	// 期望未声明 cmd/entrypoint 时由镜像决定 ⇒ 不参与比较。
+	noCmd := base
+	noCmd.Cmd = nil
+	if !specsEqual(noCmd, base) {
+		t.Fatal("未声明的 cmd 不应参与比较")
+	}
+	// restart-policy ""/"no" 等价（Docker inspect 对「不重启」两种写法）。
+	pEmpty := base
+	pEmpty.RestartPolicy = ""
+	pNo := base
+	pNo.RestartPolicy = "no"
+	if !specsEqual(pEmpty, pNo) {
+		t.Fatal("restart-policy no/空 应等价")
+	}
+
+	// 已声明维度的差异必须被判出（每个维度一条）。
+	diffCases := map[string]func(*CreateSpec){
+		"image":      func(s *CreateSpec) { s.Image = "alpine:3.21" },
+		"entrypoint": func(s *CreateSpec) { s.Entrypoint = []string{"/bin/busybox"} },
+		"cmd":        func(s *CreateSpec) { s.Cmd = []string{"-c", "sleep 1"} },
+		"env":        func(s *CreateSpec) { s.Env = []string{"A=9", "B=2"} },
+		"memory":     func(s *CreateSpec) { s.MemoryBytes = 512 * 1024 * 1024 },
+		"cpu":        func(s *CreateSpec) { s.NanoCPUs = 4_000_000_000 },
+		"restart":    func(s *CreateSpec) { s.RestartPolicy = "always" },
+		"privileged": func(s *CreateSpec) { s.Privileged = !s.Privileged },
+		"capadd":     func(s *CreateSpec) { s.CapAdd = []string{"SYS_ADMIN"} },
+		"binds":      func(s *CreateSpec) { s.Binds = []string{"/a:/b"} },
+		"devices":    func(s *CreateSpec) { s.Devices = []DeviceMapping{{PathOnHost: "/dev/x"}} },
+	}
+	for name, mut := range diffCases {
+		live := base
+		mut(&live)
+		if specsEqual(base, live) {
+			t.Errorf("%s 维度变化应判为不同", name)
+		}
+	}
+}
+
+// ApplyContainer：已存在容器改 command/args/image/env/资源 ⇒ 重建（remove+create）且新规格生效。
+func TestApplyContainerRecreatesOnSpecChange(t *testing.T) {
+	base := ctFixture("ct1")
+	cases := []struct {
+		name   string
+		mutate func(*model.ContainerFunction)
+	}{
+		{"command", func(ct *model.ContainerFunction) { ct.Command = "/bin/busybox" }},
+		{"args", func(ct *model.ContainerFunction) { ct.Args = []string{"-c", "sleep 1"} }},
+		{"image", func(ct *model.ContainerFunction) { ct.Image = "alpine:3.21" }},
+		{"env", func(ct *model.ContainerFunction) { ct.Env = map[string]string{"A": "9", "B": "2"} }},
+		{"resources", func(ct *model.ContainerFunction) { ct.MemoryMB = 512 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newMockDocker()
+			p := NewProvider(DefaultConfig(), m)
+			ctx := context.Background()
+			if err := p.ApplyContainer(ctx, base); err != nil {
+				t.Fatalf("基线 ApplyContainer: %v", err)
+			}
+			before := len(m.calls)
+			changed := base
+			tc.mutate(&changed)
+			if err := p.ApplyContainer(ctx, changed); err != nil {
+				t.Fatalf("改规格 ApplyContainer: %v", err)
+			}
+			seq := m.calls[before:]
+			if !containsCall(seq, "remove:ct1:true") || !containsCall(seq, "create:ct1") {
+				t.Fatalf("%s 变更应重建（remove+create），实际调用 %v", tc.name, seq)
+			}
+			want := BuildCreateSpec(changed, DefaultConfig())
+			if got := m.specs["ct1"]; !specsEqual(want, got) {
+				t.Fatalf("重建后实况应为新规格：got %+v want %+v", got, want)
+			}
+			if m.states["ct1"] != orchestrator.CTStateRunning {
+				t.Fatalf("autostart 的容器重建后应重新运行：%v", m.states)
+			}
+		})
+	}
+}
+
+// ApplyContainer：规格未变 ⇒ 幂等，不重建。
+func TestApplyContainerNoRecreateWhenSpecUnchanged(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	ctx := context.Background()
+	ct := ctFixture("ct1")
+	if err := p.ApplyContainer(ctx, ct); err != nil {
+		t.Fatal(err)
+	}
+	before := len(m.calls)
+	if err := p.ApplyContainer(ctx, ct); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.calls) != before {
+		t.Fatalf("规格未变应幂等、不重建：%v", m.calls[before:])
+	}
+}
+
+// ApplyContainer：停机态改规格 ⇒ 先重建再启动（次序 remove → create → start）。
+func TestApplyContainerStoppedWithChangedSpecRecreatesThenStarts(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	ctx := context.Background()
+	ct := ctFixture("ct1")
+	if err := p.ApplyContainer(ctx, ct); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.StopContainer(ctx, "ct1"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(m.calls)
+	changed := ct
+	changed.Command = "/bin/busybox"
+	if err := p.ApplyContainer(ctx, changed); err != nil {
+		t.Fatal(err)
+	}
+	seq := m.calls[before:]
+	ri, ci, si := idxOf(seq, "remove:ct1:true"), idxOf(seq, "create:ct1"), idxOf(seq, "start:ct1")
+	if ri < 0 || ci < 0 || si < 0 || !(ri < ci && ci < si) {
+		t.Fatalf("停机态改规格应先删后建再启动（remove<create<start）：%v", seq)
+	}
+	if m.states["ct1"] != orchestrator.CTStateRunning {
+		t.Fatalf("重建后应启动：%v", m.states)
+	}
+}
+
+// StartContainer 走同一判定：声明在手且实况规格不同 ⇒ 先重建再启动。
+func TestStartContainerRecreatesOnSpecChange(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	ctx := context.Background()
+	base := ctFixture("ct1")
+	if err := p.ApplyContainer(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.StopContainer(ctx, "ct1"); err != nil {
+		t.Fatal(err)
+	}
+	changed := base
+	changed.Command = "/bin/busybox"
+	p.SetConfigSource(func() (model.Config, error) {
+		return model.Config{ContainerFunctions: []model.ContainerFunction{changed}}, nil
+	})
+	before := len(m.calls)
+	if err := p.StartContainer(ctx, "ct1"); err != nil {
+		t.Fatal(err)
+	}
+	seq := m.calls[before:]
+	if !containsCall(seq, "remove:ct1:true") || !containsCall(seq, "create:ct1") || !containsCall(seq, "start:ct1") {
+		t.Fatalf("声明与实况不同应重建再启动：%v", seq)
+	}
+	want := BuildCreateSpec(changed, DefaultConfig())
+	if got := m.specs["ct1"]; !specsEqual(want, got) {
+		t.Fatalf("应换成新规格：%+v", got)
+	}
+}
+
+// RestartContainer 走同一判定：声明与实况不同 ⇒ 重建（而非 docker restart）。
+func TestRestartContainerRecreatesOnSpecChange(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	ctx := context.Background()
+	base := ctFixture("ct1")
+	if err := p.ApplyContainer(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+	changed := base
+	changed.Image = "alpine:3.21"
+	p.SetConfigSource(func() (model.Config, error) {
+		return model.Config{ContainerFunctions: []model.ContainerFunction{changed}}, nil
+	})
+	before := len(m.calls)
+	if err := p.RestartContainer(ctx, "ct1"); err != nil {
+		t.Fatal(err)
+	}
+	seq := m.calls[before:]
+	if !containsCall(seq, "remove:ct1:true") || !containsCall(seq, "create:ct1") {
+		t.Fatalf("声明与实况不同应重建：%v", seq)
+	}
+	if containsCall(seq, "restart:ct1") {
+		t.Fatalf("重建路径不应再走 docker restart：%v", seq)
+	}
+	if m.states["ct1"] != orchestrator.CTStateRunning {
+		t.Fatalf("重建后应启动：%v", m.states)
+	}
+}
+
+// 声明与实况一致时，start/restart 仍走既有路径（start 不重建；restart 走 docker restart）。
+func TestStartRestartKeepLegacyWhenSpecMatches(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	ctx := context.Background()
+	ct := ctFixture("ct1")
+	if err := p.ApplyContainer(ctx, ct); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.StopContainer(ctx, "ct1"); err != nil {
+		t.Fatal(err)
+	}
+	p.SetConfigSource(func() (model.Config, error) {
+		return model.Config{ContainerFunctions: []model.ContainerFunction{ct}}, nil
+	})
+
+	before := len(m.calls)
+	if err := p.StartContainer(ctx, "ct1"); err != nil {
+		t.Fatal(err)
+	}
+	if seq := m.calls[before:]; containsCall(seq, "remove:ct1:true") || containsCall(seq, "create:ct1") {
+		t.Fatalf("规格一致不应重建：%v", seq)
+	}
+
+	before = len(m.calls)
+	if err := p.RestartContainer(ctx, "ct1"); err != nil {
+		t.Fatal(err)
+	}
+	seq := m.calls[before:]
+	if !containsCall(seq, "restart:ct1") || containsCall(seq, "remove:ct1:true") {
+		t.Fatalf("规格一致应走 docker restart、不重建：%v", seq)
+	}
+}
+
+// 读实况规格失败 ⇒ 不静默沿用旧规格，如实报错（含可照做线索）。
+func TestApplyContainerInspectSpecFailureFailsLoudly(t *testing.T) {
+	m := newMockDocker()
+	p := NewProvider(DefaultConfig(), m)
+	ctx := context.Background()
+	ct := ctFixture("ct1")
+	if err := p.ApplyContainer(ctx, ct); err != nil {
+		t.Fatal(err)
+	}
+	m.specErr = fmt.Errorf("docker down")
+	err := p.ApplyContainer(ctx, ct)
+	if err == nil {
+		t.Fatal("实况规格读不到时应如实报错，不得静默沿用旧规格")
+	}
+	if !strings.Contains(err.Error(), "实况规格") {
+		t.Fatalf("报错应点名「实况规格」：%v", err)
 	}
 }

@@ -361,13 +361,15 @@ func (m *lldpManager) hostnameNow() string {
 	return fallback
 }
 
-// Sync 把 LLDP 声明收敛到内核运行态（决策 #440）。
+// Sync 把 LLDP 声明收敛到内核运行态（决策 #440；启用集推导见决策 #450/#451）。
 //
-// 未启用（cfg 为 nil 或 Enabled=false）⇒ 关掉并忘掉全部接口（socket 关、停发、邻居表清空）；
-// 启用 ⇒ 对每个 Enabled=true 的口确保 socket 在位：新口开 socket + 起收/发协程（**启用即发
-// 一帧**，不等首个间隔），已在位的口保留（幂等，不抖动；间隔变更只改节奏与 TTL）。不再声明/
-// 被关掉的口：关 socket、停协程、该口邻居条目作废。
-func (m *lldpManager) Sync(ctx context.Context, cfg *model.LldpConfig) error {
+// 启用集（决策 #451）：**全局开关是默认值**——`Enabled=true` ⇒ 对全部已声明物理口
+// （declaredPorts）启用；`Enabled=false`/nil ⇒ 默认关闭。`cfg.Interfaces` 逐口声明覆盖默认，
+// **不受全局开关阻断**（全局 false 也能单独启用某口）。未启用 ⇒ 关掉并忘掉全部接口
+// （socket 关、停发、邻居表清空）；启用 ⇒ 对每个在启用集内的口确保 socket 在位：新口开
+// socket + 起收/发协程（**启用即发一帧**，不等首个间隔），已在位的口保留（幂等，不抖动；
+// 间隔变更只改节奏与 TTL）。不再声明/被关掉的口：关 socket、停协程、该口邻居条目作废。
+func (m *lldpManager) Sync(ctx context.Context, cfg *model.LldpConfig, declaredPorts []string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -378,9 +380,26 @@ func (m *lldpManager) Sync(ctx context.Context, cfg *model.LldpConfig) error {
 	enabled := cfg != nil && cfg.Enabled
 
 	var errs []error
+	// desired：这次的目标状态（true＝需要 socket）。candOrder：确定性的候选顺序（已声明口在前）。
 	desired := map[string]bool{}
-	var declOrder []string
+	candOrder := make([]string, 0, len(declaredPorts))
+	orderSet := map[string]bool{}
+	addOrder := func(name string) {
+		if !orderSet[name] {
+			orderSet[name] = true
+			candOrder = append(candOrder, name)
+		}
+	}
 	if enabled {
+		for _, name := range declaredPorts {
+			if name == "" {
+				continue
+			}
+			desired[name] = true
+			addOrder(name)
+		}
+	}
+	if cfg != nil {
 		seen := map[string]bool{}
 		for _, li := range cfg.Interfaces {
 			if li.Interface == "" {
@@ -393,10 +412,15 @@ func (m *lldpManager) Sync(ctx context.Context, cfg *model.LldpConfig) error {
 				continue
 			}
 			seen[li.Interface] = true
-			desired[li.Interface] = li.Enabled
-			if li.Enabled {
-				declOrder = append(declOrder, li.Interface)
-			}
+			desired[li.Interface] = li.Enabled // 逐口声明覆盖全局默认
+			addOrder(li.Interface)
+		}
+	}
+	// 声明序＝候选顺序里目标为启用的口。
+	declOrder := make([]string, 0, len(candOrder))
+	for _, name := range candOrder {
+		if desired[name] {
+			declOrder = append(declOrder, name)
 		}
 	}
 
@@ -601,6 +625,31 @@ func (m *lldpManager) State() []lldpIfaceState {
 		})
 	}
 	return out
+}
+
+// stateView 运行态读数（导出形状，读视图运行态块用，决策 #451）：全局开关最近声明 +
+// 每个在发广告的口的〔名称、是否就绪、未收敛原因、口 MAC〕。与 State() 同源，只是形状不同。
+func (m *lldpManager) stateView() network.LLDPState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := network.LLDPState{Enabled: m.enabled, Interface: make([]network.LLDPInterfaceState, 0, len(m.order))}
+	for _, name := range m.order {
+		rt := m.ifaces[name]
+		if rt == nil {
+			continue
+		}
+		mac := ""
+		if len(rt.mac) == 6 {
+			mac = rt.mac.String()
+		}
+		st.Interface = append(st.Interface, network.LLDPInterfaceState{
+			Name:      rt.name,
+			Converged: rt.err == "",
+			Error:     rt.err,
+			MAC:       mac,
+		})
+	}
+	return st
 }
 
 // ---------- 收 / 发协程 ----------

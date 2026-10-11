@@ -1792,6 +1792,16 @@ func validateTreeJSON(tree map[string]any) error {
 	return nil
 }
 
+// noMatchErr 通用树遍历的「无匹配配置」错误：引用**完整语句**而非遍历 token。
+//
+// 由来（决策 #450）：此前按遍历到的 token 报路径，会给出与操作无关的归因——同一候选里
+// 连续删除时，删 LLDP 按口覆盖会报「无匹配配置: interface」（树里是单数键、模型存复数），
+// 删不存在的交换机只报「无匹配配置: virtual-switches」，看不出是哪条语句。引用完整语句后，
+// 操作者能直接对上自己敲的那行。
+func noMatchErr(tokens []string) error {
+	return fmt.Errorf("无匹配配置: %s", strings.Join(tokens, " "))
+}
+
 // applyTokens 沿 schema 树消费 tokens，在 JSON 树上赋值（isSet）或删除。
 //
 // 状态机：关键字下钻区分三种容器——具名数组（有参数子节点，数组挂在其 JSON 键下）、
@@ -1828,7 +1838,7 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 			elem, idx := selectElement(arr, ident, tok)
 			if !isSet {
 				if elem == nil {
-					return fmt.Errorf("无匹配配置: %s", tok)
+					return noMatchErr(tokens)
 				}
 				if i == len(tokens)-1 {
 					cur[pendingArrKey] = append(arr[:idx], arr[idx+1:]...)
@@ -1883,7 +1893,7 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 					}
 				} else {
 					if _, ok := cur[pendingKey]; !ok {
-						return fmt.Errorf("无匹配配置: %s", pendingKey)
+						return noMatchErr(tokens)
 					}
 					delete(cur, pendingKey)
 				}
@@ -1925,7 +1935,7 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 			elem, idx := selectElement(arr, ident, tok)
 			if !isSet {
 				if elem == nil {
-					return fmt.Errorf("无匹配配置: %s", tok)
+					return noMatchErr(tokens)
 				}
 				if i == len(tokens)-1 {
 					cur[pendingArrKey] = append(arr[:idx], arr[idx+1:]...)
@@ -2000,7 +2010,7 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 			}
 			if !isSet && i == len(tokens)-1 {
 				if _, ok := cur[k]; !ok {
-					return fmt.Errorf("无匹配配置: %s", tok)
+					return noMatchErr(tokens)
 				}
 				delete(cur, k)
 				return validateTreeJSON(tree)
@@ -2010,7 +2020,7 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 				// 其取值即元素身份；数组挂在本关键字的 JSON 键下
 				if _, ok := cur[k]; !ok {
 					if !isSet {
-						return fmt.Errorf("无匹配配置: %s", tok)
+						return noMatchErr(tokens)
 					}
 					cur[k] = []any{}
 				}
@@ -2030,7 +2040,7 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 			case firstParamOf(child) != nil: // 具名数组容器
 				if _, ok := cur[k]; !ok {
 					if !isSet {
-						return fmt.Errorf("无匹配配置: %s", tok)
+						return noMatchErr(tokens)
 					}
 					cur[k] = []any{}
 				}
@@ -2041,7 +2051,7 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 				sub, ok := cur[k].(map[string]any)
 				if !ok {
 					if !isSet {
-						return fmt.Errorf("无匹配配置: %s", tok)
+						return noMatchErr(tokens)
 					}
 					sub = map[string]any{}
 					cur[k] = sub
@@ -2072,7 +2082,7 @@ func applyTokens(root *schema.Node, tree map[string]any, tokens []string, isSet 
 					}
 				} else {
 					if _, ok := cur[p.ScalarJSONKey]; !ok {
-						return fmt.Errorf("无匹配配置: %s", tok)
+						return noMatchErr(tokens)
 					}
 					delete(cur, p.ScalarJSONKey)
 				}

@@ -983,7 +983,7 @@ func TestDeclaredFamiliesReportErrorsHonestly(t *testing.T) {
 	p.SetLLDPLayer(lay)
 	ctx := context.Background()
 	err := p.ApplyLLDP(ctx, &model.LldpConfig{Enabled: true,
-		Interfaces: []model.LldpInterface{{Interface: "nfvis-no-such-if", Enabled: true}}})
+		Interfaces: []model.LldpInterface{{Interface: "nfvis-no-such-if", Enabled: true}}}, nil)
 	if err == nil {
 		t.Fatal("声明了口却起不来必须如实报错（不得静默成功）")
 	}
@@ -1011,7 +1011,7 @@ func TestUndeclaredFamiliesAreNoop(t *testing.T) {
 	if err := p.ApplyDNSProxy(ctx, orchestrator.DNSProxyUpstreams{}); err != nil {
 		t.Fatalf("全局与各域都空时 DNS 代理应空操作，得到 %v", err)
 	}
-	if err := p.ApplyLLDP(ctx, nil); err != nil {
+	if err := p.ApplyLLDP(ctx, nil, nil); err != nil {
 		t.Fatalf("未声明 LLDP 应空操作，得到 %v", err)
 	}
 	// 每交换机一次 DNS 代理伴随调用（按域上游为空列表）同样空操作。
@@ -1336,7 +1336,7 @@ func (r *orderingRunner) Run(ctx context.Context, name string, args ...string) (
 
 func TestDiagPingAndVRFScope(t *testing.T) {
 	f := &fakeRunner{}
-	d := NewDiag(f)
+	d := NewDiag(f, nil)
 	if _, err := d.Ping(context.Background(), "10.0.0.1", "", "", 3, false); err != nil {
 		t.Fatal(err)
 	}

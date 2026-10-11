@@ -247,6 +247,37 @@ func TestValidateGatewayACLRejected(t *testing.T) {
 	mustNoErr(t, Validate(c4))
 }
 
+func TestValidateEgressQosOnL2MemberRejected(t *testing.T) {
+	// 决策 #454：L2 交换机成员口的**出向** QoS 策略在提交期硬拒——真机实证出向 policer
+	// 落在 l2-output 弧，会连带拦下经 BVI 路由回来的 L3 回程（域内 DNS 应答被丢弃、解析
+	// 静默中断）；同口入向策略无此现象。文案须点名机理（l2-output）与替代（改用入向）。
+	withPol := func(c Config) Config {
+		c.QosPolicies = append(c.QosPolicies, QosPolicy{Name: "pol", Cir: 100000000, Cbs: 2000})
+		return c
+	}
+
+	// ① L2 成员（validBase 的 ens2f0 是 vs-app 的端口）+ 出向 ⇒ 拒。
+	c := withPol(validBase())
+	c.Interfaces[0].EgressPolicy = "pol"
+	mustErrContaining(t, Validate(c), "egress_policy", "l2-output")
+
+	// ② L2 成员 + 入向 ⇒ 放行（入向策略不受限）。
+	c2 := withPol(validBase())
+	c2.Interfaces[0].IngressPolicy = "pol"
+	mustNoErr(t, Validate(c2))
+
+	// ③ 非成员口 + 出向 ⇒ 放行（新增一个未被任何交换机引用的口）。
+	c3 := withPol(validBase())
+	c3.Interfaces = append(c3.Interfaces, InterfaceConfig{Name: "ens2f1", MTU: 9000})
+	c3.Interfaces[1].EgressPolicy = "pol"
+	mustNoErr(t, Validate(c3))
+
+	// ④ 策略不存在仍报错（回归）：出向绑到 L2 成员但策略账本里没有 ⇒ 既有「不存在」错误照出。
+	c4 := validBase()
+	c4.Interfaces[0].EgressPolicy = "pol-ghost"
+	mustErrContaining(t, Validate(c4), "egress_policy", "不存在")
+}
+
 func TestValidatePortACLRejected(t *testing.T) {
 	// 决策 #340 修订（round119 补验）：交换机端口级 acl-in/acl-out 与网关同口径硬拒——
 	// 真机实证 VPP 26.06 不评估 L2 路径（成员端口）上的 ACL，既不拦截也不计数；

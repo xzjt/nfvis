@@ -1,0 +1,117 @@
+================================================================================
+NFViS v3 round13 修复批：round12/13 走查缺陷收口（决策 #450~#457）——契约先行 + 红-绿 + 真机逐条复验
+================================================================================
+日期：2026-10-11    执行：ZCode 会话（v3 线）
+由来：round12（`docs/evidence/v3-round12-*.txt`）与 round13（`docs/evidence/v3-round13-*.txt`）两轮
+      v3.0.10 干净快照走查登记了 9 条缺陷。用户裁定：**跳过 R12-1**（3×1G-only 布局的 VNF 容量模型，
+      涉及内存编排的产品表态，另行立项），**其余全部修复**；涉及 Web 的同步修；实现类工作派子智能体。
+流程：契约先行（规格书附录 A **#450~#457**，AGENTS.md 决策条数 351→**359**，守护通过）→ 五个子智能体
+      分域实现（逐条红-绿）→ `make check` 七项 → 交叉编译换装二进制真机逐条复验 → 二次细化（LLDP 三处）。
+环境：nfvis-vm（round13 收尾态：vpp 数据面、两口 DPDK、池 1G=3/2M=768、无对象、仅 HUGEPAGE_POOL_ORPHAN）。
+      真机验证用**交叉编译换装二进制**（`3.0.10~dev1`/`~dev2`/`~dev3`），非 deb 重装；原件备份
+      `/root/bin-orig-r13/`。
+
+--------------------------------------------------------------------------------
+§1 逐条修复与真机复验
+--------------------------------------------------------------------------------
+#450（R12-2）**LLDP 语句族收敛**（`cli_aliases_net.go`、`cliexec.go`、`network/lldp.go`）
+  · 改：补值可选形态（裸 `enable` ＝ `enable true`）与叶子级 delete；本族 delete 幂等（含整段
+    `delete protocols lldp` 与 `advertisement-interval`/`interface <if>` 兄弟形态）；通用遍历的错误
+    文案改引**完整语句**（不再出现「无匹配配置: virtual-switches」这种无关归因）；逐口下发不再被
+    全局开关阻断。
+  · 真机（dev3，VPP）：`delete protocols lldp`（配置不存在）⇒ **警告「值未变化」+ commit 成功**
+    （修复前 `%% 无匹配配置: protocols lldp` 且脚本中断）；`delete … interface <if> enable` 幂等；
+    错误文案已是完整语句。
+#451（R12-5）**LLDP 全局启用语义**（`network/lldp.go`、`netkernel/lldp.go`、`apply.go`、读视图、Web、openapi）
+  · 改：全局 `enable true` ＝ 对**全部已声明物理口**启用（逐口声明可覆盖）；底座服务不了的口
+    （VPP 对 DPDK 物理口 `-7`）在**全局扫描**下**跳过并如实登记**、不整次回滚；**显式逐口声明**仍
+    如实报错；读视图列出「在发广告的口」与「被跳过的口及原因」。
+  · 真机（dev3，VPP）：`set protocols lldp enable true` ⇒ **commit 成功**（修复前 `-7` 整次回滚）；
+    `set protocols lldp interface ens192 enable true`（DPDK 口，显式）⇒ **如实报错**，且文案为
+    人话「当前数据面底座不支持在该接口上启用 LLDP（DPDK 物理口；vhost-user/BVI 等虚拟接口可用，
+    或改用内核数据面）」（修复前是裸 `VPPApiError: Invalid value (-7)`）。
+  · 真机（dev1，内核）：仅全局 `enable true` ⇒ nfvisd 对 **ens192 + ens224 两个已声明口都建了
+    AF_PACKET socket**，tcpdump 10s 抓 **6 帧**（修复前：零 socket、零帧）。
+#452（R12-4）**`display set` 回放自校验**（`setstmt_families.go`）
+  · 改：`vrfs[]` 发射自足（空 VRF 也发确定性创建语句）、`type l3` 只保留一条创建路径、vhost 派生名
+    不外泄到顶层 `interfaces`。
+  · 真机（dev1）：① 空 L3 交换机（`set virtual-switches vs-test type l3`）⇒ commit 成功且
+    `show configuration | display set` **正常输出**；② vhost 派生名作 L3 接口
+    （`set virtual-switches vs-natx l3-interface vh-vnf-x-nic1 ip address …`）⇒ display set 正常输出
+    （修复前两形态均报内部错误）。
+#453（R12-7/R12-8）**数据面切换的旧面 teardown + 代际变化强制重建 + 未收敛必告警**
+  （新增 `netkernel/teardown.go`、`network/replay_gate.go`、`applied_store.go` 的数据面代际、`main.go`）
+  · 改：新增整面 teardown 入口（逐对象删 + 四张 nfvis nft 表）；持久化「上次生效的数据面」，启动时
+    与当前不同 ⇒ 先 teardown 旧面；代际变化 ⇒ 强制全量重建（不受配置差分门控）；未真正重放时
+    recovery 告警**不被清空**（新码 `RECOVERY_REPLAY_REQUIRED`）。
+  · 真机（dev1，带对象 vpp→kernel→vpp）：切换前内核侧有 `vs-l2 / vs-test / vr-vs-l2` + nft
+    `inet nfvis-forward`；切回 vpp 后 ⇒ **只剩 ens192/ens224 两个物理口，桥/VRF/nft 全部消失**
+    （修复前：内核侧整体活跃、双活数据面，并连带 VPP 侧内置 tap 建不出来 `-13`）。
+#454（R13-A）**L2 成员口禁用出向 QoS 策略**（`model/validate.go`、`network/services.go` 注释）
+  · 改：提交期硬拒 L2 交换机成员口上的 `egress_policy`（出向 policer 落 `l2-output`、会拦下经 BVI
+    路由回来的 L3 回程）；入向不受限；文案给替代路径。
+  · 真机（dev1）：L2 成员口绑 `egress-policy` ⇒ **提交被拒**，文案点名机理与替代；同口绑
+    `ingress-policy` ⇒ **通过**。
+#455（R13-B）**vNIC 两形态等价 + 内核域生成前置校验 + start 前域新鲜度**
+  （`cli_aliases_compute.go`、`model/validate.go`、`compute/provider.go`）
+  · 改：交换机 ports 接入时**回写** vNIC 的 `virtual_switch`（容器侧同）；内核数据面提交期拒绝
+    缺该字段的 vNIC；start/restart 前确保域定义与当前配置一致（陈旧 ⇒ 重定义；陈旧 paused ⇒ 先销毁）。
+  · 真机（dev1）：① 仅用交换机 ports 接入 ⇒ `display set` 出现
+    `set virtual-machine-functions vnf-x interfaces nic0 virtual-switch vs-l2`（回写成立）；
+    ② 切内核后 start ⇒ 域生成为 `type='bridge' source bridge='vs-l2'` 并到 **running**；
+    ③ 切回 vpp 后 start ⇒ 域**重定义为 `type='vhostuser'`** 并到 running（修复前：陈旧域 ⇒ paused）。
+#456（R12-3）**容器 spec 变更即重建**（`container/docker.go`、`docker_client_docker.go`）
+  · 改：`ApplyContainer` 改为按**规格**比对（读容器实况），不一致即重建并如实报告；start/restart
+    走同一判定；规格一致保持幂等。
+  · 真机（dev1）：容器 `args 3600` 运行中改 `args 7200` ⇒ **容器被重建**（docker 容器 ID 由
+    d38eda94… 变 85af3e8c…），`docker inspect` 的 `Config.Cmd` 为 **[7200]**（修复前：restart 与
+    stop+start 都继续跑 3600）。
+#457（R12-6）**内核诊断的 vrf 参数按内核设备名解析**（`netkernel/diag.go`、`cmd/nfvisd/dataplane.go`）
+  · 改：ping/traceroute 的 vrf 参数按既有命名单源解析成内核设备名（L2 带网关 ⇒ `vr-<名>`；L3 ⇒
+    原名；未知 ⇒ 报错并列出已知设备）。
+  · 真机（dev1，内核）：`ping 192.168.99.1 vrf vs-l2` ⇒ **2/2 0% 丢包**（修复前 `Invalid VRF name`）。
+
+--------------------------------------------------------------------------------
+§2 门禁与二次细化
+--------------------------------------------------------------------------------
+· `make check` 七项全绿（vet / test / cover / archtest / docscheck / toolcheck / prototype-check），
+  两次（修复批完成后一次、LLDP 细化后一次）RC=0；决策条数守护 359 项一致。
+· **LLDP 三处二次细化**（真机复验当场抓出并回修，这正是「改完必须真机过一遍」的又一次实证）：
+  ① 全局启用最初仍整次回滚——根因是 VPP 的 `-7` **不是经 `reply.Retval` 回来**，而是 govpp 把
+     retval 转成 `api.VPPApiError` 从 `ReceiveReply` 返回，故跳过分支从未命中（顺带发现 round10/11 的
+     「-7 人话化」在这条路径上同样不可达）；改法＝用 `errors.As` 取 `api.VPPApiError` 分类（不靠
+     字符串匹配）。② 整段 `delete protocols lldp` 在配置不存在时仍报错 ⇒ 补齐幂等。
+  ③ 显式逐口声明的人话文案落地（真机核对）。
+
+--------------------------------------------------------------------------------
+§3 复验中顺带发现（如实登记，未在本批修）
+--------------------------------------------------------------------------------
+R13-E【中低】声明了 1G 与 2M 两个池时，**`memory hugepage-size 2M` 的 VM 起不来**——
+  libvirt 报 `Unable to find any usable hugetlbfs mount for 2048 KiB`；根因是产品把
+  `/dev/hugepages` 只按**一个**页大小挂载（有 1G 池时恒 `pagesize=1G`），2M 后备的 guest 没有
+  对应的 hugetlbfs 挂载点。影响：同一机器上「VPP 用 2M、VNF 用 2M」的布局起不来（VNF 只能用与
+  挂载点一致的页大小）。建议：按声明池挂多个 hugetlbfs 挂载点，或在 VM 校验期如实拒绝并给照做路径。
+R13-F【低】**VM 内存小于其大页尺寸时提交期未拦**——`memory size-mb 512` + `hugepage-size 1G`
+  提交成功，start 才报裸 QEMU 文案 `memory size 0x20000000 must be equal to or larger than page
+  size 0x40000000`。建议：提交期按「内存 ≥ 页大小」校验。
+
+--------------------------------------------------------------------------------
+§4 未做/边界（如实）
+--------------------------------------------------------------------------------
+· **R12-1 按裁定跳过**（未修）：3×1G-only 布局下 VPP 吃满 1G 池、VNF 容量 0，提交校验与读视图两套
+  账本矛盾——涉及内存编排的产品表态（支持则改编排，不支持则向导/校验挡下），另行立项。
+· 四套真机套件（fulltest / 语义 / lifecycle / pty）本批**未跑**——本批验证是交叉编译换装二进制 +
+  逐条真机复验；正式发版仍须走 `make deb` 两次逐字节一致 + 四套件复跑。
+· 内核侧 ACL/QoS/SPAN/抓包/NAT/DHCP 等族本批未重跑（与 #453 的 teardown 无直接耦合，round13 已
+  逐条真机覆盖）。
+· SR-IOV、吞吐/规模基准仍环境受限。
+
+--------------------------------------------------------------------------------
+§5 现场
+--------------------------------------------------------------------------------
+· 收尾现场：vpp 数据面、两口 DPDK up、池 1G=3(dp1/free2)/2M=768、无业务对象、内核残留 0、nft 无
+  nfvis 表、告警仅既有 HUGEPAGE_POOL_ORPHAN；VM 上装 `3.0.10~dev3`（原件备份 /root/bin-orig-r13/）。
+· VM 侧证据：/root/walk/*.cli（各条复验脚本）、/root/bin-orig-r13/（原件）。
+
+================================================================================
+（完）

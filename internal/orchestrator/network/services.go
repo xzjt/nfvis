@@ -288,7 +288,12 @@ func (p *ServicesProvider) ApplyInterface(ctx context.Context, iface model.Inter
 			p.setBoundPolicy(iface.Name, iface.IngressPolicy, false)
 		}
 	}
-	// 出向（policer_output，决策 #331）
+	// 出向（policer_output，决策 #331）。
+	// 防御性说明（决策 #454）：VPP 的 policer_output 无弧选择参数——出向 policer 绑到
+	// **L2 交换机成员口**时落在 l2-output 弧，会连带拦下经 BVI 路由回来的 L3 回程
+	// （真机实证：域内 DNS 应答被丢弃、解析静默中断），同口入向策略无此现象。产品在
+	// **提交期硬拒**该组合（model.checkInterfaces，与 #340/#398「静默失效即硬拒」同口径），
+	// 故此处不做运行期特判：能走到这里的出向绑定只可能是 L3 接口形态或非成员口。
 	if prevOut := p.boundPolicy(iface.Name, true); prevOut != iface.EgressPolicy {
 		if prevOut != "" {
 			if err := c.PolicerOutput(idx, prevOut, false); err != nil {

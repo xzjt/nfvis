@@ -202,6 +202,34 @@ func run() error {
 	dpMode := committedDataPlaneMode(store)
 	log.Info("数据面实现", "mode", dpMode)
 
+	// 数据面代际持久化与比对（R12-7 / R12-8）：数据面实现是**配置 + 整机重启**才切换的，
+	// 重启后进程内无从得知上一代是哪种数据面。持久化上一次生效的数据面，启动装配即可比对：
+	// 代际变化 ⇒ 装配新面之前先拆旧面（内核对象），并强制一次全量重建（不依赖连接事件、
+	// 不受配置差分门控）。落盘失败只告警（保守按首启处理，不误拆）。
+	dpModeStore := network.NewDataplaneModeStore(network.DefaultDataplaneModePath)
+	prevMode, pmErr := dpModeStore.Load()
+	if pmErr != nil {
+		log.Warn("读取上次生效的数据面实现失败（本次按首启处理，不做旧面 teardown）", "err", pmErr)
+	}
+	gen := planStartupDataplaneTransition(prevMode, dpMode)
+	if gen.Changed {
+		log.Info("检测到数据面实现变化（将先清理旧数据面对象并强制一次全量重建）",
+			"from", prevMode, "to", dpMode)
+	}
+
+	// 告警表在装配**之前**创建：数据面切换的旧面 teardown 需要它的落点（失败进告警、不阻断
+	// 启动）。NFR-006 的时钟探针随后注入（顺序无关）。
+	alarms := network.NewAlarmStore()
+	alarms.SetClockProbe(system.ClockSynced)
+
+	// 旧面为内核、本次切到 VPP：装配新面之前先把旧的内核对象拆干净（R12-7）。best-effort：
+	// 失败只告警（TeardownDataplane 已把残留落进告警表），不阻塞启动。
+	if err := gen.runTeardown(func() error {
+		return teardownOldKernelDataplane(committedConfigOf(store), alarms, log)
+	}); err != nil {
+		log.Warn("旧内核数据面对象未全部清理（已落告警，启动继续）", "err", err)
+	}
+
 	// netProvider 是装配层使用的完整网络编排方法面（提交编排 + 恢复巡检 + 运行态读视图）；
 	// VPP 与内核两种实现都满足它（见 netRuntime 的说明）。
 	var (
@@ -315,19 +343,31 @@ func run() error {
 	// 后构造，VPP（缺省）数据面拿到 nil，声明式 `interfaces … sriov vf-count` 变成硬失败（v2 回归）。
 	sriovProvider = attachSRIOV(l2net)
 
-	// M3-8：恢复收敛的不可收敛项落点（GET /alarms）
-	alarms := network.NewAlarmStore()
-	// NFR-006：告警也带「记录时时钟是否已同步」三态标记，探针与审计侧取同一个
-	// system.ClockSynced（单源），未注入即未知（决策 #307）。
-	alarms.SetClockProbe(system.ClockSynced)
+	// M3-8：恢复收敛的不可收敛项落点（GET /alarms）——alarms 已在装配前创建（旧面 teardown
+	// 的告警落点）。这里按数据面把告警表与代际重建门控注入具体实现。
+	//
+	// 数据面代际变化（R12-8）：标记「必须先做一次全量重放」的待办——15s 巡检据此建
+	// RECOVERY_REPLAY_REQUIRED 告警；一次真正的全量重放完成后自动消解。未变化时门控无待办，
+	// 行为与引入本门控之前逐字一致。
+	replayGate := network.NewReplayGate()
+	if gen.Changed {
+		replayGate.Require(fmt.Sprintf("数据面实现由 %s 变为 %s", prevMode, dpMode))
+	}
 	if l2net != nil {
 		l2net.SetAlarms(alarms)
+		l2net.SetReplayGate(replayGate)
 		// 决策 #337 判据③：成员口 rx 计数读物（复用 #326 的运行态读数路径，不新造 VPP 查询）。
 		l2net.SetCounters(vppMgr.Runtime())
 	} else if kp, ok := netProvider.(*netkernel.Provider); ok {
 		// v3 R2-6：内核数据面同样要有告警落点——恢复未收敛项与物理口链路此前只进 journal，
 		// `show alarms`/Web 总览/诊断包/`/events` 全查不到（与 #191/#321/#333 的纪律冲突）。
 		kp.SetAlarms(alarms)
+		kp.SetReplayGate(replayGate)
+	}
+	// 记录本次生效的数据面实现：下次启动据此判定代际变化（写失败只告警——下次启动会按首启
+	// 处理，不误拆；不会影响本次运行）。
+	if err := dpModeStore.Save(dpMode); err != nil {
+		log.Warn("持久化本次生效的数据面实现失败（下次启动可能按首启处理）", "err", err)
 	}
 	// M5-1：事件总线（FR-API-006 / FR-OPS-020~022）。所有事件源经此汇聚，
 	// 由 GET /events（SSE）推送；告警变更同时进入总线。
@@ -900,6 +940,11 @@ func run() error {
 					log.Warn("恢复收敛告警复核", "err", e)
 				}
 			}},
+			// R12-8：数据面代际变化的「未重放」可见性——强制重建待办未清时建
+			// RECOVERY_REPLAY_REQUIRED 告警（未重放不再只进 journal）；重放完成后自动消解。
+			{"replay-gate", func(context.Context, model.Config) {
+				network.ReplayGateAlarm(alarms, replayGate)
+			}},
 			// 决策 #359：DHCP 服务器的巡检收敛（补齐带外丢失的 tap/注册、到期租约回收、告警复核）。
 			{"dhcp-server", func(ctx context.Context, cfg model.Config) {
 				for _, e := range netProvider.ReconcileDHCPServer(ctx, cfg) {
@@ -1138,6 +1183,13 @@ func run() error {
 				log.Error("VPP 连接管理退出", "err", err)
 			}
 		}()
+		if gen.ForceRebuild {
+			// 数据面代际变化（kernel→vpp）：旧面已拆，新面从未按配置收敛过；重建由**首次
+			// 连接事件**承担（连接未建立时无法下发，故不在此处立即发起），且不受配置差分门控
+			// （EnsureConsistent 是整份重放）。门控保证「连接迟迟不来、重建未发生」在 15s
+			// 巡检以 RECOVERY_REPLAY_REQUIRED 可见，不会静默。
+			log.Info("数据面代际变化：待 VPP 连接建立后按 committed 强制一次全量重建")
+		}
 		startupApplier = &network.Applier{Mgr: vppMgr,
 			// 解析顺序：先系统事实（sysfs），netdev 已因 DPDK 接管而消失时再回退到绑定记录（决策 #100）
 			PCI:      network.PCIResolverWithBindings(network.NewSysfsPCIResolver(), dpdkBindings),
@@ -1147,13 +1199,15 @@ func run() error {
 			Warn:      func(msg string) { log.Warn(msg) },
 			Restarter: network.NewSystemctlRestarter(), RestartOnApply: true}
 	} else {
-		// 内核数据面：无连接事件可等，启动即收敛一次（声明式重放，幂等）。
+		// 内核数据面：无连接事件可等，启动即收敛一次（声明式重放，幂等）。数据面代际变化
+		// （vpp→kernel）时这一次即强制全量重建——runStartupRebuild 保证恰好一次；未变化时
+		// 内核启动同样恒需一次（gen.ForceRebuild 对内核数据面恒为真）。
 		if cfg, err := engine.Committed(); err == nil {
 			if kp, ok := netProvider.(*netkernel.Provider); ok {
 				kp.SetConfig(cfg)
 			}
 		}
-		go runRecovery()
+		go runStartupRebuild(gen.ForceRebuild, runRecovery)
 	}
 
 	// M4-4：VM 生命周期动作后刷新 vNIC 断连告警（FR-NET-023）。
@@ -1168,6 +1222,17 @@ func run() error {
 	var dnsProxyRuntime api.DNSProxyRuntime
 	if kernelNet != nil {
 		dnsProxyRuntime = kernelNet
+	}
+
+	// 决策 #451：LLDP 的运行态读物（在发广告的口 / 底座不支持而被跳过的口）。两数据面都提供：
+	// 内核侧是自研收发代理、VPP 侧是 lldp 插件（含 DPDK 物理口被底座拒绝时的如实跳过）。
+	// kernelNet 是具体指针、VPP 分支下为 nil，直接塞进接口会得到「非空接口 + 空指针」（调用即炸），
+	// 故按需装配、VPP 侧从 netProvider 断言取。
+	var lldpStateRT api.LLDPStateRuntime
+	if kernelNet != nil {
+		lldpStateRT = kernelNet
+	} else if rt, ok := netProvider.(api.LLDPStateRuntime); ok {
+		lldpStateRT = rt
 	}
 
 	apiServer := api.New(engine, aaaSvc, api.Options{
@@ -1191,9 +1256,12 @@ func run() error {
 		// 决策 #439：内核数据面 DNS 代理的运行态（`/dns/proxy` 的 runtime 块与
 		// `show dns proxy` 的运行态块同源；VPP 侧 nil = 不出现，行为不变）。
 		DNSProxy: dnsProxyRuntime,
-		Vxlan:    netProvider,
-		Storm:    netProvider,
-		PortSec:  netProvider,
+		// 决策 #451：内核数据面 LLDP 收发代理的运行态（`/protocols/lldp` 的 runtime 块；
+		// VPP 侧 nil = 不出现，行为不变）。
+		LLDPState: lldpStateRT,
+		Vxlan:     netProvider,
+		Storm:     netProvider,
+		PortSec:   netProvider,
 		// 决策 #388：主机防火墙数据面读数（CLI `show system firewall` 与
 		// `GET /system/firewall` 同一读视图；同一落地器负责下发/回读）。
 		Firewall: fwApplier,
@@ -1214,7 +1282,7 @@ func run() error {
 		Hugepages:    system.NewSysfsHugepageSetter(), // 决策 #329：大页池回收（按页尺寸写 sysfs）
 		NAT:          &natSessionsController{net: netProvider},
 		Alarms:       &alarmController{store: alarms},
-		Diag:         diagRuntimeFor(dpMode, vppMgr),
+		Diag:         diagRuntimeFor(dpMode, vppMgr, engine.Committed),
 		VM:           vmAPI,
 		VMConsole:    computeProvider, // M4-5：串口 console（libvirt 域串口 ↔ WebSocket；持有层常驻）
 		VMSnapshots:  vmSnaps,
@@ -1614,15 +1682,85 @@ var _ netRuntime = (*network.L2Network)(nil)
 // 读不到配置（首次启动、库异常、JSON 不可解析）时一律回落 vpp——**不因读失败换数据面**：
 // 既有安装升级到本版本后必须继续跑 VPP，直到操作者显式改配置并重启。
 func committedDataPlaneMode(store *config.Store) string {
+	cfg := committedConfigOf(store)
+	return cfg.DataPlaneMode()
+}
+
+// committedConfigOf 读取 committed 配置（启动装配用，早于事务引擎构造）。读不到返回零值
+// （其 DataPlaneMode 回落 vpp，与 committedDataPlaneMode 的口径一致）。
+func committedConfigOf(store *config.Store) model.Config {
 	_, raw, err := store.LatestRevision()
 	if err != nil || len(raw) == 0 {
-		return model.DataPlaneVPP
+		return model.Config{}
 	}
 	var cfg model.Config
 	if json.Unmarshal(raw, &cfg) != nil {
-		return model.DataPlaneVPP
+		return model.Config{}
 	}
-	return cfg.DataPlaneMode()
+	return cfg
+}
+
+// startupDataplaneTransition 启动期数据面代际变化的处置计划（纯数据，便于单测钉住
+// 「何时拆旧面、何时强制全量重建」）。
+type startupDataplaneTransition struct {
+	Prev    string // 上次生效的数据面（持久落点；空 = 首启）
+	Current string // 本次 committed 的数据面
+	// Changed 上一代已知且与本次不同（首启不算变化——没有旧面可拆）。
+	Changed bool
+	// TeardownOldKernel 旧面为内核、新面为 VPP：装配新面之前先拆旧的内核对象。
+	TeardownOldKernel bool
+	// ForceRebuild 本次启动必须做一次全量重建：代际变化（旧面可能残留、新面从未收敛），
+	// 或当前是内核数据面（无连接事件可等，启动恒需一次声明式重放）。
+	ForceRebuild bool
+}
+
+// planStartupDataplaneTransition 由「上次生效的数据面」与「本次数据面」得出处置计划。
+func planStartupDataplaneTransition(prev, cur string) startupDataplaneTransition {
+	changed := prev != "" && prev != cur
+	return startupDataplaneTransition{
+		Prev: prev, Current: cur,
+		Changed:           changed,
+		TeardownOldKernel: changed && prev == model.DataPlaneKernel && cur == model.DataPlaneVPP,
+		ForceRebuild:      changed || cur == model.DataPlaneKernel,
+	}
+}
+
+// runTeardown 按计划在**装配新面之前**拆除旧面：仅当旧面为内核、新面为 VPP 时调用
+// teardown（恰好一次）。返回 teardown 的错误（未触发时 nil）。
+func (t startupDataplaneTransition) runTeardown(teardown func() error) error {
+	if !t.TeardownOldKernel || teardown == nil {
+		return nil
+	}
+	return teardown()
+}
+
+// runStartupRebuild 需要时执行一次全量重建（rebuild 恰好调用一次），返回是否触发。
+// 内核数据面恒需（gen.ForceRebuild 为真）；代际变化时同一次即强制重建。
+func runStartupRebuild(force bool, rebuild func()) bool {
+	if !force || rebuild == nil {
+		return false
+	}
+	rebuild()
+	return true
+}
+
+// dataplaneTeardownTimeout 数据面切换时拆旧面的整段上界（不阻塞启动：底座异常时不在启动
+// 序列里长等，失败如实告警、启动继续）。
+const dataplaneTeardownTimeout = 30 * time.Second
+
+// teardownOldKernelDataplane 代际由内核切到 VPP 时，装配新面**之前**拆掉旧的内核对象
+// （R12-7：否则残留的内核 bridge/tap 与新 VPP 双活、甚至占住接口名让 VPP 内置 tap 建不出来）。
+// best-effort：失败只告警（TeardownDataplane 已把残留落进告警表），不阻塞启动。
+func teardownOldKernelDataplane(cfg model.Config, alarms *network.AlarmStore, log *slog.Logger) error {
+	ctx, cancel := context.WithTimeout(context.Background(), dataplaneTeardownTimeout)
+	defer cancel()
+	kp := netkernel.New(nil)
+	kp.SetAlarms(alarms)
+	if err := kp.TeardownDataplane(ctx, cfg); err != nil {
+		return err // 调用方落日志；残留已由 TeardownDataplane 落进告警表
+	}
+	log.Info("已清理旧内核数据面对象（数据面已切到 VPP）")
+	return nil
 }
 
 // l2Controller 装配 api.L2Runtime（M3-3）：把编排器 MAC 表返回转换为 API 契约结构。

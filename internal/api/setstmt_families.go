@@ -18,9 +18,9 @@ package api
 //
 // 结构性盲区（注册键不可能覆盖，回放自校验会如实报错而不是少输出）：
 //   - vrfs 数组（L3 交换机的 l3-interface/static-routes 落点）：命令树没有 vrfs 关键字，
-//     任何注册键都无法被 keyPath 命中。type l3 语句会同步建出同名 VRF 条目（别名 apply），
-//     故「仅 type l3」的空壳可随该语句自复现；带 l3_interfaces/routes 数据的配置目前
-//     无语句可还原。
+//     任何注册键都无法被 keyPath 命中，由根层回落发射器接管（emitVrfsFallback）。决策
+//     #452 起该回落**自足**：每个 VRF 先发一条确定性的 `type l3` 创建语句（含空 VRF），
+//     按 vrfs[] 顺序建表；顶层 `type l3`（emitVirtualSwitchFamily）让位到此处，不双发。
 //   - qos_policies 数组（qos policies 语句落点）：树顶层关键字为 qos、JSON 键为
 //     qos_policies，通用逆走在根层查不到 "qos" 键即跳过，同上无注册键可达。
 
@@ -473,8 +473,9 @@ func emitBondsFamily(w *stmtWriter, node *schema.Node, val any, prefix, keyPath 
 // 回放报「语句未产生配置变更」。全显式后 ports/gateway 层级只在 edit 进入时触达，
 // 各层自行补齐自身层级必需的裸声明。
 //
-// type l3 语句的别名 apply 会同步建出同名 VRF 空壳条目——vrfs 数组虽是注册盲区，
-// 「仅 type l3」的配置仍可完整还原（自复现）；带 l3 数据的配置见文件头盲区说明。
+// type l3 语句的别名 apply 会同步建出同名 VRF 空壳条目——但顶层整配置逆走时 `type l3`
+// 的创建语句**让位给根层 vrfs 回落发射器**（emitVrfsFallback 按 vrfs[] 顺序自足发出，
+// 决策 #452），本发射器只在层级 show（无前置裸声明）时就地发出，避免双发/顺序错乱。
 
 func emitVirtualSwitchFamily(w *stmtWriter, node *schema.Node, val any, prefix, keyPath []string) error {
 	switch kpOf(keyPath) {
@@ -487,7 +488,17 @@ func emitVirtualSwitchFamily(w *stmtWriter, node *schema.Node, val any, prefix, 
 			w.add(toks(prefix, "description", formatScalar(v)))
 		}
 		if v, ok := m["type"]; ok && v != "" {
-			w.add(toks(prefix, "type", formatScalar(v)))
+			// 决策 #452：顶层整配置逆走时，`type l3` 的创建语句让位给根层 vrfs 回落发射器
+			//（emitVrfsFallback 按 vrfs[] 顺序发出、且自足），此处不双发——既避免与回落重复，
+			// 又让回放后的 vrfs[] 顺序与 committed 一致（此前依赖 `type l3` 别名的副作用建
+			// VRF，顺序由 virtual_switches[] 决定，与 vrfs[] 声明序不一致即回放不等）。
+			// 层级 show（edit 层级直接进入本发射器，没有顶层具名数组分支的前置裸声明）仍就地
+			// 发出 type l3，保证 `edit virtual-switches <n>` 下的 display set 可还原。
+			if v == "l3" && lastStmtIs(w, prefix) {
+				// 让位（创建语句见 emitVrfsFallback）
+			} else {
+				w.add(toks(prefix, "type", formatScalar(v)))
+			}
 		}
 		if v, ok := m["vlan_access"].(float64); ok && v != 0 {
 			w.add(toks(prefix, "vlan", "access", formatScalar(v)))
@@ -1137,8 +1148,8 @@ func sortedKeys(m map[string]any) []string {
 // ---------- 根级回落发射器（决策 #155 补充） ----------
 //
 // vrfs / qos_policies 的模型键在命令树里没有对应顶层关键字（VRF 由
-// `virtual-switches <n> type l3` 派生、qos 由 `qos policies` 别名落库），
-// 通用逆走与家族注册表都不可达，由根层未消费键的回落钩子接管。
+// `virtual-switches <n> type l3` / l3-interface / static-routes 落库、qos 由
+// `qos policies` 别名落库），通用逆走与家族注册表都不可达，由根层未消费键的回落钩子接管。
 
 func init() {
 	rootFallbackEmitters["vrfs"] = emitVrfsFallback
@@ -1186,8 +1197,12 @@ func emitVxlanFallback(w *stmtWriter, val any) error {
 }
 
 // emitVrfsFallback 把 vrfs[]（L3 数据落点，VRF 名 = 同名虚拟交换机）反推为
-// `virtual-switches <名> l3-interface …` / `static-routes …` 语句。回放依赖
-// vs 侧已发出 `type l3`（家族发射器先于根层回落执行，顺序成立）。
+// `virtual-switches <名> type l3` / `l3-interface …` / `static-routes …` 语句。
+//
+// 决策 #452：**发射自足**——每个 VRF 先发一条确定性的创建语句（`type l3`），即便该
+// VRF 没有 l3_interfaces/routes 也能自复现；顶层 `type l3`（emitVirtualSwitchFamily）
+// 已让位到此处，故不双发。按 vrfs[] 顺序逐条创建，使回放后的 vrfs[] 顺序与 committed
+// 逐项一致（此前空 VRF 只能靠 `type l3` 别名副作用重建，顺序/重复即破）。
 func emitVrfsFallback(w *stmtWriter, val any) error {
 	arr, ok := val.([]any)
 	if !ok {
@@ -1201,6 +1216,13 @@ func emitVrfsFallback(w *stmtWriter, val any) error {
 		name, _ := vrf["name"].(string)
 		if name == "" {
 			continue
+		}
+		// 确定性创建语句：仅在**存在同名 type=l3 虚拟交换机**时发出（见 vrfSwitchIsL3）——
+		// VRF 没有同名交换机（仅由 l3-interface/static-routes 建出的形态）或同名交换机
+		// 显式为 l2 时，`type l3` 会凭空建/改交换机而破坏回放等价；那两种形态的 VRF 由
+		// 下面的 l3-interface/static-routes 语句自身建出（仍按 vrfs[] 顺序）。
+		if vrfSwitchIsL3(w, name) {
+			w.add([]string{"virtual-switches", name, "type", "l3"})
 		}
 		// description 仅 REST 可达（无语句形态），出现时由回放校验如实报错
 		if lis, ok := vrf["l3_interfaces"].([]any); ok {
@@ -1242,6 +1264,55 @@ func emitVrfsFallback(w *stmtWriter, val any) error {
 		}
 	}
 	return nil
+}
+
+// lastStmtIs 报告 w 最近一条语句是否恰为 toks。用于识别**顶层整配置逆走**：通用逆走器的
+// 具名数组分支在进入家族发射器前会先发出元素裸声明（= 该元素的 prefix），故「最近一条恰为
+// 本 prefix」＝当前在顶层逆走；配置模式层级 show（generateSetStmts 带 prefix 直接进入本
+// 发射器）没有这条前置裸声明。决策 #452 据此让顶层 `type l3` 让位给 vrfs 回落、层级 show
+// 仍就地发出。
+func lastStmtIs(w *stmtWriter, toks []string) bool {
+	if len(w.out) == 0 {
+		return false
+	}
+	last := w.out[len(w.out)-1].toks
+	if len(last) != len(toks) {
+		return false
+	}
+	for i := range toks {
+		if last[i] != toks[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// vrfSwitchIsL3 报告该 VRF 名是否对应一个 **type=l3** 的虚拟交换机（据此决定回落发射器
+// 要不要补发 `virtual-switches <名> type l3` 创建语句，决策 #452）。顶层逆走里交换机的
+// 裸声明已先行发出，且非 l3 的交换机会带自己的 `type` 语句；l3 交换机的 `type l3` 已让位
+// 给本回落（见 emitVirtualSwitchFamily），故此处看不到它的 type 语句。三种形态：
+//   - 同名交换机是 l3：有裸声明、无 type 语句 ⇒ true（补发创建语句）；
+//   - 同名交换机显式为 l2：有裸声明、且有 type 语句 ⇒ false（补发会把它改型为 l3）；
+//   - 无同名交换机（VRF 仅由 l3-interface/static-routes 建出）：无裸声明 ⇒ false
+//     （补发会凭空建出一个交换机）。
+//
+// 后两种形态的 VRF 由 l3-interface/static-routes 语句自身建出，顺序仍随 vrfs[] 迭代。
+func vrfSwitchIsL3(w *stmtWriter, name string) bool {
+	hasSwitch := false
+	for _, s := range w.out {
+		t := s.toks
+		if len(t) < 2 || t[0] != "virtual-switches" || t[1] != name {
+			continue
+		}
+		if len(t) == 2 {
+			hasSwitch = true
+			continue
+		}
+		if t[2] == "type" {
+			return false // 交换机已带 type 语句（非 l3——l3 已让位）⇒ 不是 l3 交换机
+		}
+	}
+	return hasSwitch
 }
 
 // emitQosFallback 把 qos_policies[] 反推为 `qos policies <名> cir <bps> cbs <bytes>`

@@ -604,6 +604,46 @@ func TestKernelDataPlaneRejectsVnicOnL3Switch(t *testing.T) {
 	}
 }
 
+// 决策 #455：交换机端口接入的 vNIC（VSwitchPort.Vnf）在内核数据面下必须带 virtual_switch
+// （域生成据它定位 bridge）。「只在 ports 里、VM 侧缺 virtual_switch」⇒ 提交期拒绝并给照做路径；
+// VPP 侧放行（vhost-user 走 socket）。红-绿：修复前该形态提交期零报错、起 VM 时才失败。
+func TestKernelDataPlaneRejectsSwitchPortVnicWithoutVirtualSwitch(t *testing.T) {
+	mk := func(mode string) Config {
+		return Config{
+			System: &SystemConfig{DataPlane: mode},
+			VirtualSwitches: []VirtualSwitch{{Name: "vs-a", Type: "l2",
+				Ports: []VSwitchPort{{Seq: 1, Vnf: "vm1", VnfInterface: "nic0"}}}},
+			VirtualMachineFunctions: []VMFunction{{
+				Name: "vm1", Image: "alpine.qcow2",
+				VCPU: VMCpu{Count: 1}, Memory: VMMemory{SizeMB: 512},
+				Interfaces: []VnfInterface{{Name: "nic0", Type: "vhost-user"}}, // 缺 virtual_switch
+			}},
+		}
+	}
+	errs := Validate(mk(DataPlaneKernel))
+	if len(errs) == 0 {
+		t.Fatalf("内核数据面下经交换机端口接入却缺 virtual_switch 的 vNIC 应提交期拒绝")
+	}
+	txt := errText(errs)
+	for _, w := range []string{
+		"virtual-switches[vs-a].ports[1]",
+		"set virtual-machine-functions vm1 interfaces nic0 virtual-switch vs-a",
+	} {
+		if !strings.Contains(txt, w) {
+			t.Fatalf("报错应含 %q，得到：\n%s", w, txt)
+		}
+	}
+	if errs := Validate(mk(DataPlaneVPP)); len(errs) != 0 {
+		t.Fatalf("VPP 数据面下该形态应放行，得到：\n%s", errText(errs))
+	}
+	// 补上 VM 侧 virtual_switch 后内核数据面应放行。
+	fixed := mk(DataPlaneKernel)
+	fixed.VirtualMachineFunctions[0].Interfaces[0].VirtualSwitch = "vs-a"
+	if errs := Validate(fixed); len(errs) != 0 {
+		t.Fatalf("补上 virtual_switch 后内核数据面应放行，得到：\n%s", errText(errs))
+	}
+}
+
 // vlan 子接口的派生名（`<接口名>.<vid>`）直接用作内核设备名，超过 IFNAMSIZ-1 时下发必失败：
 // 提交期拒绝（点名对象与折算后的长度）。红-绿：修复前零报错（失败落到 ip link add）。
 func TestKernelDataPlaneRejectsLongVlanSubifName(t *testing.T) {

@@ -85,6 +85,11 @@ type Provider struct {
 	// 建立的「未收敛项必须事后可查」纪律冲突。装配期注入，未注入即只返回错误（测试/工具场景）。
 	alarms *network.AlarmStore
 
+	// replayGate 数据面代际变化的强制重建门控（可空；见 network/replay_gate.go）。
+	// 内核侧恢复重放（EnsureConsistent）在真正重放时清除待办，并只在无待办时覆盖
+	// recovery 作用域告警——未重放不得静默清空未收敛项。
+	replayGate *network.ReplayGate
+
 	// heldPort 探测「该口内核里没有、但仍被某个驱动（vfio-pci 等 DPDK 驱动）占用」，
 	// 返回 (驱动名, PCI, ok)。用于恢复收敛的未收敛项**如实点名**（决策 #426③）：切换
 	// 数据面时 VPP 时代接管过的口留在 vfio-pci，内核里根本没有它，只报底座的
@@ -130,6 +135,11 @@ func (p *Provider) SetAlarms(a *network.AlarmStore) {
 	}
 	p.dhcpMu.Unlock()
 }
+
+// SetReplayGate 注入数据面代际变化的强制重建门控（可空；见 network/replay_gate.go）。
+// 注入后 EnsureConsistent 在真正重放时清除待办，并只在无待办时按 failures 覆盖 recovery
+// 作用域告警（未重放不得静默清空未收敛项）。
+func (p *Provider) SetReplayGate(g *network.ReplayGate) { p.replayGate = g }
 
 // SetHeldPortProbe 注入「该口仍被 DPDK 驱动占用」的探测（决策 #426③；nil = 不判定）。
 //
@@ -678,8 +688,8 @@ func unsupported(feature string) error {
 //
 // 未声明（nil/Enabled=false）＝全部关闭（socket 关、停发、邻居表清空，幂等）；起不来
 // （接口不存在/权限不足）**如实返回错误**（提交失败并回滚 / 恢复未收敛项），不静默。
-func (p *Provider) ApplyLLDP(ctx context.Context, lldp *model.LldpConfig) error {
-	return p.lldpMgr().Sync(ctx, lldp)
+func (p *Provider) ApplyLLDP(ctx context.Context, lldp *model.LldpConfig, declaredPorts []string) error {
+	return p.lldpMgr().Sync(ctx, lldp, declaredPorts)
 }
 
 // ApplyDhcpRelay 交换机 DHCP 中继（决策 #437）：内核数据面下由 nfvisd 内的**用户态中继实例**
@@ -757,6 +767,18 @@ func (p *Provider) lldpMgr() *lldpManager {
 		p.lldp = newLLDPManager(p.lldpLayerOrDefault())
 	}
 	return p.lldp
+}
+
+// LLDPState 内核数据面 LLDP 收发代理的运行态读数（读视图运行态块，决策 #451；ok=false =
+// 尚未装配管理器——内核侧恢复重放总会构造它，未构造即该数据面没在跑本功能）。
+func (p *Provider) LLDPState() (network.LLDPState, bool) {
+	p.lldpMu.Lock()
+	mgr := p.lldp
+	p.lldpMu.Unlock()
+	if mgr == nil {
+		return network.LLDPState{}, false
+	}
+	return mgr.stateView(), true
 }
 
 // SetLLDPLayer 注入 LLDP 收发底座（**单测专用**：不依赖真 socket 与内核口；须在任何 LLDP

@@ -1953,6 +1953,39 @@
         ],
         "type": "object"
       },
+      "LLDPState": {
+        "description": "LLDP 运行态（GET /protocols/lldp 的 runtime）。数据面不能报告逐口状态时该字段缺席\n（不发 null）。`interfaces` 同时列出在发广告的口（converged=true）与被底座跳过/未收敛\n的口（converged=false + error，如 VPP 下全局启用时 DPDK 物理口被跳过）。\n",
+        "properties": {
+          "enabled": {
+            "description": "全局开关最近一次声明",
+            "type": "boolean"
+          },
+          "interfaces": {
+            "description": "每个相关口的收敛状态（含被底座跳过/起失败的口，converged=false + error）",
+            "items": {
+              "properties": {
+                "converged": {
+                  "type": "boolean"
+                },
+                "error": {
+                  "description": "被跳过/未收敛原因（空 = 就绪）",
+                  "type": "string"
+                },
+                "mac": {
+                  "description": "接口 MAC（读不到为空）",
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "LldpConfig": {
         "properties": {
           "advertisement_interval": {
@@ -1978,6 +2011,29 @@
           }
         },
         "type": "object"
+      },
+      "LldpReadView": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/LldpConfig"
+          },
+          {
+            "properties": {
+              "advertising": {
+                "description": "实际在发广告的接口名（升序）",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "runtime": {
+                "$ref": "#/components/schemas/LLDPState"
+              }
+            },
+            "type": "object"
+          }
+        ],
+        "description": "GET /protocols/lldp 的读视图：配置字段 + 实际在发广告的口 + 运行态。\n`advertising` 是**实际在发广告的口**：VPP 侧为配置派生值（全局 `enable true` 时＝全部\n已声明物理口按逐口覆盖后的结果），运行态可读时以运行态为准（只算已收敛/在发的口）；\n`runtime` 在数据面能报告逐口 LLDP 状态时出现（内核侧＝收发代理各口就绪态；VPP 侧＝\n已启用口 + 全局启用时被底座跳过（如 DPDK 物理口）的口及原因），否则字段缺席。\n"
       },
       "LoginBanner": {
         "properties": {
@@ -2541,7 +2597,7 @@
           },
           "dataplane": {
             "default": "vpp",
-            "description": "数据面实现（FR-NET-001，v3 决策 #404）。`vpp` = VPP 数据面（DPDK 接管物理口，\nvhost-user/memif 接入 VNF/容器）；`kernel` = Linux 内核网络数据面（内核 bridge/VRF/\nnftables/vxlan，VNF 用 virtio 网卡 + 宿主 tap + vhost-net 接入）。\n**整机单数据面**：同一时刻只启用一种，变更需重启服务生效。缺省（未配置）= `vpp`\n（与引入该字段之前的行为一致）。内核数据面下 ACL/QoS/端口镜像/DHCP 中继与服务器/\nDNS 代理/风暴抑制/端口安全/LLDP/memif 尚未实现，提交期直接拒绝（支持矩阵见决策 #404）。\n",
+            "description": "数据面实现（FR-NET-001，v3 决策 #404）。`vpp` = VPP 数据面（DPDK 接管物理口，\nvhost-user/memif 接入 VNF/容器）；`kernel` = Linux 内核网络数据面（内核 bridge/VRF/\nnftables/vxlan，VNF 用 virtio 网卡 + 宿主 tap + vhost-net 接入）。\n**整机单数据面**：同一时刻只启用一种，变更需重启服务生效。缺省（未配置）= `vpp`\n（与引入该字段之前的行为一致）。内核数据面下 ACL/QoS/端口镜像/风暴抑制/端口安全\n（nftables 与 tc）、DHCP 中继与服务器、数据面 DNS 代理、LLDP、memif 容器接入均已实现；\n仍**提交期拒绝**的是：cross-connect（无学习点对点直通）、VNF 虚拟网卡直接作三层接口、\n多下一跳（ECMP）、镜像源为 VNF 虚拟网卡，以及网关/端口 ACL 绑定（两数据面一律拒绝，\n唯一可用形态是三层接口 ACL）。\n",
             "enum": [
               "vpp",
               "kernel"
@@ -6077,19 +6133,20 @@
     },
     "/protocols/lldp": {
       "get": {
+        "description": "配置字段（enabled / advertisement_interval / interfaces）与写路径同形；另附\n`advertising`（**实际在发广告的口**：全局 `enable true` 时是全部已声明物理口按逐口\n覆盖后的结果；VPP 侧为配置派生值）与 `runtime`（内核数据面下每口的就绪/未收敛原因，\nVPP 数据面或不适用时字段缺席）。\n",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LldpConfig"
+                  "$ref": "#/components/schemas/LldpReadView"
                 }
               }
             },
             "description": "OK"
           }
         },
-        "summary": "LLDP 全局配置",
+        "summary": "LLDP 全局配置 + 实际在发广告的口（+ 内核侧运行态）",
         "tags": [
           "interfaces"
         ]
@@ -6118,7 +6175,7 @@
     },
     "/protocols/lldp/neighbors": {
       "get": {
-        "description": "当前数据面为 Linux 内核网络时该能力未实现：返回 501（message 指明数据面与替代\n路径），而不是 500——内核侧没有 LLDP 邻居表这条事实源。\n",
+        "description": "当前数据面的 LLDP 邻居表。VPP 数据面取自 lldp 插件；Linux 内核网络数据面取自\nnfvisd 内的自研收发代理（每启用接口一个 AF_PACKET socket 收 LLDPDU 建表）。\n",
         "responses": {
           "200": {
             "content": {
@@ -6148,9 +6205,6 @@
               }
             },
             "description": "OK"
-          },
-          "501": {
-            "$ref": "#/components/responses/Error501"
           }
         },
         "summary": "LLDP 邻居表（运行态）",

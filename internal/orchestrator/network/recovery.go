@@ -49,6 +49,11 @@ func (n *L2Network) SetAlarms(a *AlarmStore) {
 	}
 }
 
+// SetReplayGate 注入数据面代际变化的强制重建门控（可空；见 replay_gate.go）。
+// 注入后：EnsureConsistent 在真正重放时清除待办，并只在无待办时按 failures 覆盖
+// recovery 作用域告警（未重放不得静默清空未收敛项）。
+func (n *L2Network) SetReplayGate(g *ReplayGate) { n.replayGate = g }
+
 // EnsureConsistent 恢复收敛（FR-OPS-010/011）：把 committed 配置全量重放到 VPP。
 // 返回未收敛项（调用方记日志即可，不据此拒绝服务）；不可收敛项同时进入告警表。
 func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []error {
@@ -241,7 +246,7 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 		}
 	}
 	if cfg.Protocols != nil {
-		if err := n.ApplyLLDP(ctx, cfg.Protocols.LLDP); err != nil {
+		if err := n.ApplyLLDP(ctx, cfg.Protocols.LLDP, orchestrator.DeclaredPhysicalPorts(cfg)); err != nil {
 			record("protocols/lldp", err)
 		}
 	}
@@ -272,7 +277,11 @@ func (n *L2Network) EnsureConsistent(ctx context.Context, cfg model.Config) []er
 	}
 
 	if n.alarms != nil {
-		n.alarms.Sync(recoveryScope, failures)
+		// 数据面代际变化的强制重建门控：本次是**真正的全量重放**，先清除待办（此后 15s 巡检
+		// 的「未重放」告警随之消解）；再按门控覆盖 recovery 作用域告警——无待办时照旧 Sync，
+		// 有待办（重放被跳过）时不清空未收敛项（见 replay_gate.go）。
+		n.replayGate.Satisfy()
+		SyncRecoveryAlarms(n.alarms, n.replayGate, failures)
 	}
 	// 提交期补偿告警的消解（决策 #321）：该对象已对得上配置（配置声明了它，或它确实不在
 	// 数据面）即不再是「数据面与配置不一致」，消解其 COMMIT_COMPENSATION_FAILED；

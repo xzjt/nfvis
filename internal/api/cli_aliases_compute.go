@@ -263,6 +263,11 @@ func aliasPortVnfMember(tree map[string]any, t []string, isSet bool) error {
 			}
 			return fmt.Errorf("端口序号 %s 在交换机 %s 的静态 ports 中不存在（不创建空端口）", t[3], t[1])
 		}
+		// 回写（决策 #455）：解绑交换机端口即解引用该 vNIC——若其 virtual_switch 正指向本交换机
+		// 则一并清掉，与 VM 侧 `delete … interfaces <vnic> virtual-switch` 等价（两形态同一字段）。
+		owner, _ := port["vnf"].(string)
+		vnic, _ := port["vnf_interface"].(string)
+		clearVnicVirtualSwitch(tree, "virtual_machine_functions", owner, vnic, t[1])
 		delete(port, "vnf")
 		delete(port, "vnf_interface")
 		return nil
@@ -277,6 +282,8 @@ func aliasPortVnfMember(tree map[string]any, t []string, isSet bool) error {
 	port["vnf"] = t[5]
 	if len(t) >= 8 {
 		port["vnf_interface"] = t[7]
+		// 回写被引用 vNIC 的 virtual_switch（决策 #455：交换机侧接入与 VM 侧接入产出同一模型）。
+		setVnicVirtualSwitch(tree, "virtual_machine_functions", t[5], t[7], t[1])
 	}
 	return nil
 }
@@ -301,6 +308,10 @@ func aliasPortContainerMember(tree map[string]any, t []string, isSet bool) error
 			}
 			return fmt.Errorf("端口序号 %s 在交换机 %s 的静态 ports 中不存在（不创建空端口）", t[3], t[1])
 		}
+		// 回写（决策 #455）：与 VM 侧同口径——解绑即解引用该容器 vNIC。
+		owner, _ := port["container"].(string)
+		vnic, _ := port["container_interface"].(string)
+		clearVnicVirtualSwitch(tree, "container_functions", owner, vnic, t[1])
 		delete(port, "container")
 		delete(port, "container_interface")
 		return nil
@@ -315,8 +326,57 @@ func aliasPortContainerMember(tree map[string]any, t []string, isSet bool) error
 	port["container"] = t[5]
 	if len(t) >= 8 {
 		port["container_interface"] = t[7]
+		// 回写被引用 vNIC 的 virtual_switch（决策 #455：交换机侧接入与容器侧接入产出同一模型）。
+		setVnicVirtualSwitch(tree, "container_functions", t[5], t[7], t[1])
 	}
 	return nil
+}
+
+// setVnicVirtualSwitch 回写被交换机端口引用的 vNIC 的 virtual_switch（决策 #455）。
+//
+// branch = virtual_machine_functions|container_functions，owner = VM/容器名，vnic = vNIC 名，
+// vs = 接入的交换机名。由来（round13 真机 R13-B）：交换机侧接入
+// （`set virtual-switches <n> ports <seq> vnf <vm> interface <vnic>`）此前只写 VSwitchPort，
+// 不写 VnfInterface.VirtualSwitch，而内核数据面的域生成据该字段定位内核 bridge——同一份配置
+// 在 vpp 可用、切 kernel 生成域失败（报「vNIC 缺少接入的虚拟交换机」）。此处回写使两形态
+// 产出**同一模型**（单一真源）。
+//
+// 仅当宿主元素与 vNIC 都已声明时写入（**不凭空创建**）：引用不存在由提交期校验报错，
+// 凭空造一个无 type 的残缺 vNIC 只会把问题推得更远。
+func setVnicVirtualSwitch(tree map[string]any, branch, owner, vnic, vs string) {
+	if owner == "" || vnic == "" {
+		return
+	}
+	ownerElem, err := elemByID(tree, branch, owner)
+	if err != nil {
+		return
+	}
+	arr, _ := ownerElem["interfaces"].([]any)
+	nic, _ := selectElement(arr, "name", vnic)
+	if nic == nil {
+		return
+	}
+	nic["virtual_switch"] = vs
+}
+
+// clearVnicVirtualSwitch 与 setVnicVirtualSwitch 对称：解绑交换机端口 = 解引用该 vNIC——
+// 仅当其 virtual_switch 正指向本交换机时清掉（不误清挂到别的交换机的声明）。
+func clearVnicVirtualSwitch(tree map[string]any, branch, owner, vnic, vs string) {
+	if owner == "" || vnic == "" {
+		return
+	}
+	ownerElem, err := elemByID(tree, branch, owner)
+	if err != nil {
+		return
+	}
+	arr, _ := ownerElem["interfaces"].([]any)
+	nic, _ := selectElement(arr, "name", vnic)
+	if nic == nil {
+		return
+	}
+	if cur, _ := nic["virtual_switch"].(string); cur == vs {
+		delete(nic, "virtual_switch")
+	}
 }
 
 // deleteNicHint 删除指引里的 vNIC 名：8-token 形态（含 `interface <vnic>`）给出实际名，
@@ -341,6 +401,10 @@ func existingPortElem(tree map[string]any, vsName, seq string) map[string]any {
 
 // vnicDeclaredOnVSwitch 报告 JSON 树里 owner（VM/容器）是否有 vNIC 声明挂到交换机 vs
 // （branch 为 virtual_machine_functions 或 container_functions）。用于删除派生端口的指引。
+//
+// 决策 #455：交换机侧接入（静态 ports）也会回写 vNIC 的 virtual_switch——此时该 vNIC **不是**
+// 派生条目（它在交换机侧有静态端口、可在交换机侧删），故若交换机已有静态端口引用该 vNIC 则
+// 不算「派生声明」，避免把静态端口误报成派生条目。
 func vnicDeclaredOnVSwitch(tree map[string]any, branch, owner, vs string) bool {
 	arr, _ := tree[branch].([]any)
 	for _, e := range arr {
@@ -357,9 +421,41 @@ func vnicDeclaredOnVSwitch(tree map[string]any, branch, owner, vs string) bool {
 			if im == nil {
 				continue
 			}
-			if v, _ := im["virtual_switch"].(string); v == vs {
-				return true
+			if v, _ := im["virtual_switch"].(string); v != vs {
+				continue
 			}
+			if vnic, _ := im["name"].(string); vnic != "" && staticPortRefsVnic(tree, vs, branch, owner, vnic) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// staticPortRefsVnic 交换机 vs 的静态 ports 里是否有引用 (owner, vnic) 的成员
+// （branch 决定成员字段：virtual_machine_functions → vnf/vnf_interface，
+// container_functions → container/container_interface）。
+func staticPortRefsVnic(tree map[string]any, vs, branch, owner, vnic string) bool {
+	ownerField, ifaceField := "vnf", "vnf_interface"
+	if branch == "container_functions" {
+		ownerField, ifaceField = "container", "container_interface"
+	}
+	vsElem, err := elemByID(tree, "virtual_switches", vs)
+	if err != nil {
+		return false
+	}
+	ports, _ := vsElem["ports"].([]any)
+	for _, pe := range ports {
+		pm, _ := pe.(map[string]any)
+		if pm == nil {
+			continue
+		}
+		if o, _ := pm[ownerField].(string); o != owner {
+			continue
+		}
+		if i, _ := pm[ifaceField].(string); i == vnic {
+			return true
 		}
 	}
 	return false

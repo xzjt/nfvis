@@ -207,38 +207,31 @@ var statementAliasesNet = []aliasRule{
 	{pattern: []string{"interfaces", "*", "port-security"},
 		apply: ifacePortSecBareAlias},
 
-	// protocols lldp enable <bool> | advertisement-interval <n> | interface <if> enable <bool>
+	// protocols lldp [enable [<bool>] | advertisement-interval [<n>] | interface <if> [enable [<bool>]]]
+	// 整族 delete 幂等（段/键/条目不存在＝已达成，不报错）——避免脚本「任一行出错即停」。
+	// 整段删（`delete protocols lldp`，无叶子）此前落通用遍历，段不存在时报「无匹配配置」。
+	{pattern: []string{"protocols", "lldp"},
+		apply: aliasLldpSegment},
+	// enable [<bool>]（值可选：裸 `enable` ＝ `enable true`）。
 	{pattern: []string{"protocols", "lldp", "enable", "*"},
 		apply: aliasLldpEnable},
 	{pattern: []string{"protocols", "lldp", "enable"},
-		apply: func(tree map[string]any, _ []string, _ bool) error {
-			if l := lldpObj(tree, false); l != nil {
-				delete(l, "enabled")
-			}
-			return nil
-		}},
+		apply: aliasLldpEnableBare},
+	// advertisement-interval [<n>]（值可选：delete 无值形态同样是幂等叶子删除）。
 	{pattern: []string{"protocols", "lldp", "advertisement-interval", "*"},
-		apply: func(tree map[string]any, t []string, isSet bool) error {
-			l := lldpObj(tree, isSet)
-			if l == nil {
-				return errNoLLDP
-			}
-			if !isSet {
-				delete(l, "advertisement_interval")
-				return nil
-			}
-			n, err := numField(t[3])
-			if err != nil {
-				return err
-			}
-			l["advertisement_interval"] = n
-			return nil
-		}},
+		apply: aliasLldpAdvInterval},
+	{pattern: []string{"protocols", "lldp", "advertisement-interval"},
+		apply: aliasLldpAdvInterval},
+	// interface <if> enable [<bool>]（值可选：裸 `enable` ＝ `enable true`；5-token 的叶子级
+	// delete ＝ 移除该口覆盖条目，键/条目不存在＝已达成）。
 	{pattern: []string{"protocols", "lldp", "interface", "*", "enable", "*"},
 		apply: aliasLldpInterface},
+	{pattern: []string{"protocols", "lldp", "interface", "*", "enable"},
+		apply: aliasLldpInterfaceBare},
+	// interface <if>（无 enable）：delete ＝ 移除该口覆盖条目（幂等）；set 不完整。
+	{pattern: []string{"protocols", "lldp", "interface", "*"},
+		apply: aliasLldpInterfaceEntry},
 }
-
-var errNoLLDP = errString("无匹配配置: lldp")
 
 type errString string
 
@@ -1427,16 +1420,27 @@ func ifacePortSecBareAlias(tree map[string]any, t []string, isSet bool) error {
 	return nil
 }
 
-// aliasLldpEnable：protocols lldp enable <bool>。
-func aliasLldpEnable(tree map[string]any, t []string, isSet bool) error {
-	l := lldpObj(tree, isSet)
-	if l == nil {
-		return errNoLLDP
+// aliasLldpSegment：protocols lldp（整段）——delete ＝ 删整个 lldp 段（幂等：段不存在＝已达成，
+// 不报错）；set 缺取值如实报错。此前整段 delete 落通用遍历，段不存在时报「无匹配配置」而中止脚本。
+func aliasLldpSegment(tree map[string]any, t []string, isSet bool) error {
+	if isSet {
+		return errString("配置不完整，缺少取值: " + strings.Join(t, " "))
 	}
+	if p := objOrNil(tree, "protocols"); p != nil {
+		delete(p, "lldp")
+	}
+	return nil
+}
+
+// aliasLldpEnable：protocols lldp enable <bool>（带值形态）。delete 幂等（键不存在＝已达成）。
+func aliasLldpEnable(tree map[string]any, t []string, isSet bool) error {
 	if !isSet {
-		delete(l, "enabled")
+		if l := lldpObj(tree, false); l != nil {
+			delete(l, "enabled")
+		}
 		return nil
 	}
+	l := lldpObj(tree, true)
 	b, err := boolField(t[3])
 	if err != nil {
 		return err
@@ -1445,26 +1449,47 @@ func aliasLldpEnable(tree map[string]any, t []string, isSet bool) error {
 	return nil
 }
 
-// aliasLldpInterface：protocols lldp interface <if> enable <bool>。
-func aliasLldpInterface(tree map[string]any, t []string, isSet bool) error {
-	l := lldpObj(tree, isSet)
-	if l == nil {
-		return errNoLLDP
-	}
+// aliasLldpEnableBare：protocols lldp enable（值可选形态）——set ＝ `enable true`；
+// delete ＝ 撤销全局开关（键不存在＝已达成，不报错）。
+func aliasLldpEnableBare(tree map[string]any, _ []string, isSet bool) error {
 	if !isSet {
-		arr, _ := l["interfaces"].([]any)
-		out := make([]any, 0, len(arr))
-		for _, e := range arr {
-			if em, ok := e.(map[string]any); ok {
-				if s, _ := em["interface"].(string); s == t[3] {
-					continue
-				}
-			}
-			out = append(out, e)
+		if l := lldpObj(tree, false); l != nil {
+			delete(l, "enabled")
 		}
-		l["interfaces"] = out
 		return nil
 	}
+	lldpObj(tree, true)["enabled"] = true
+	return nil
+}
+
+// aliasLldpAdvInterval：protocols lldp advertisement-interval [<n>]（值可选）——set 需取值；
+// delete（带值/无值）幂等删叶子（lldp 段/键不存在＝已达成，不报错）。
+func aliasLldpAdvInterval(tree map[string]any, t []string, isSet bool) error {
+	if !isSet {
+		if l := lldpObj(tree, false); l != nil {
+			delete(l, "advertisement_interval")
+		}
+		return nil
+	}
+	if len(t) < 4 {
+		return errString("配置不完整，缺少取值: " + strings.Join(t, " "))
+	}
+	n, err := numField(t[3])
+	if err != nil {
+		return err
+	}
+	lldpObj(tree, true)["advertisement_interval"] = n
+	return nil
+}
+
+// aliasLldpInterface：protocols lldp interface <if> enable <bool>（带值形态）。
+// delete 幂等：移除该口覆盖条目，lldp 段/条目不存在＝已达成。
+func aliasLldpInterface(tree map[string]any, t []string, isSet bool) error {
+	if !isSet {
+		removeLldpInterface(tree, t[3])
+		return nil
+	}
+	l := lldpObj(tree, true)
 	em := elemByField(l, "interfaces", "interface", t[3])
 	b, err := boolField(t[5])
 	if err != nil {
@@ -1472,6 +1497,56 @@ func aliasLldpInterface(tree map[string]any, t []string, isSet bool) error {
 	}
 	em["enabled"] = b
 	return nil
+}
+
+// aliasLldpInterfaceBare：protocols lldp interface <if> enable（值可选形态，5 token）——
+// set ＝ 该口 `enable true`；delete ＝ 移除该口覆盖条目（键不存在＝已达成，不报错）。
+// 此前这两条形态都落通用树遍历：树里是**单数**键 `interface`、模型存**复数** `interfaces`，
+// set 报「缺少取值」、delete 报「无匹配配置: interface」——本族别名在此收口。
+func aliasLldpInterfaceBare(tree map[string]any, t []string, isSet bool) error {
+	if !isSet {
+		removeLldpInterface(tree, t[3])
+		return nil
+	}
+	l := lldpObj(tree, true)
+	em := elemByField(l, "interfaces", "interface", t[3])
+	em["enabled"] = true
+	return nil
+}
+
+// aliasLldpInterfaceEntry：protocols lldp interface <if>（无 enable）——delete ＝ 移除该口覆盖
+// 条目（幂等：lldp 段/条目不存在＝已达成）；set 缺取值如实报错。
+func aliasLldpInterfaceEntry(tree map[string]any, t []string, isSet bool) error {
+	if !isSet {
+		removeLldpInterface(tree, t[3])
+		return nil
+	}
+	return errString("配置不完整，缺少取值: " + strings.Join(t, " "))
+}
+
+// removeLldpInterface 从 lldp.interfaces 移除某口的覆盖条目；lldp 段/条目不存在＝已达成
+// （幂等，不报错）。条目掏空时连 `interfaces` 键一起删（不留空壳，与 pruneEmptySingleton 同口径）。
+func removeLldpInterface(tree map[string]any, ifname string) {
+	l := lldpObj(tree, false)
+	if l == nil {
+		return
+	}
+	arr, _ := l["interfaces"].([]any)
+	out := make([]any, 0, len(arr))
+	for _, e := range arr {
+		if em, ok := e.(map[string]any); ok {
+			if s, _ := em["interface"].(string); s == ifname {
+				continue
+			}
+		}
+		out = append(out, e)
+	}
+	switch {
+	case len(out) == 0:
+		delete(l, "interfaces")
+	case len(out) != len(arr):
+		l["interfaces"] = out
+	}
 }
 
 // anySlice 取数组（不存在返回 nil）。

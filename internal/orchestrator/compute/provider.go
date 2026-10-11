@@ -46,7 +46,62 @@ type Provider struct {
 	sleep func(ctx context.Context, d time.Duration) error
 	poll  time.Duration
 
+	// specMu/vmSpecs 记录**当前配置**里各 VM 的声明与资源分配（决策 #455 的域新鲜度前置）。
+	//
+	// 由来（round13 真机 R13-B）：start/restart 只按名字启动 libvirt 域，从不核对域定义是否与
+	// 当前配置一致——配置变更（或数据面切换）后仍启动**先前持久化**的旧域：内核数据面的 VM 域
+	// 若还是为 vhost-user 写的老定义，起 VM 会落到 paused。故启动前须按当前配置重定义域。
+	//
+	// provider 在两条既有路径上持续收到当前配置（无需另设装配接线）：DefineVM（提交期/
+	// 恢复收敛/回滚，逐台喂入）与 CheckVMAlarms（15s 巡检，喂整份 committed 配置）。启动动作
+	// 发生在这两条路径之外，据此即可拿到「当前配置」。
+	specMu  sync.Mutex
+	vmSpecs map[string]vmSpec
+
 	mu sync.Mutex
+}
+
+// vmSpec 当前配置里一台 VM 的声明与资源分配（域新鲜度前置的输入）。
+type vmSpec struct {
+	vm    model.VMFunction
+	alloc model.AllocatedResources
+}
+
+// setVMSpec 记录一台 VM 的当前声明（DefineVM 逐台喂入）。
+func (p *Provider) setVMSpec(vm model.VMFunction, alloc model.AllocatedResources) {
+	p.specMu.Lock()
+	defer p.specMu.Unlock()
+	if p.vmSpecs == nil {
+		p.vmSpecs = map[string]vmSpec{}
+	}
+	p.vmSpecs[vm.Name] = vmSpec{vm: vm, alloc: alloc}
+}
+
+// setVMSpecs 记录整份配置里的 VM 声明（CheckVMAlarms 的 15s 巡检喂入）。
+func (p *Provider) setVMSpecs(cfg model.Config) {
+	p.specMu.Lock()
+	defer p.specMu.Unlock()
+	if p.vmSpecs == nil {
+		p.vmSpecs = map[string]vmSpec{}
+	}
+	for _, vm := range cfg.VirtualMachineFunctions {
+		p.vmSpecs[vm.Name] = vmSpec{vm: vm, alloc: model.AllocationFor(cfg, vm)}
+	}
+}
+
+// lookupVMSpec 取某 VM 的当前声明。
+func (p *Provider) lookupVMSpec(name string) (vmSpec, bool) {
+	p.specMu.Lock()
+	defer p.specMu.Unlock()
+	s, ok := p.vmSpecs[name]
+	return s, ok
+}
+
+// forgetVMSpec 删除某 VM 的当前声明（DeleteVM 时清理，避免删除后仍被启动路径读到）。
+func (p *Provider) forgetVMSpec(name string) {
+	p.specMu.Lock()
+	defer p.specMu.Unlock()
+	delete(p.vmSpecs, name)
 }
 
 // NewProvider 构造计算编排 Provider（cfg 零值字段取 DefaultConfig）。
@@ -99,9 +154,34 @@ func (p *Provider) Config() Config { return p.cfg }
 // DefineVM 声明式定义/重定义 domain（幂等）：准备落盘（主盘/数据盘/seed ISO）→
 // 组装 XML → DomainDefineXML；autostart=true 且未运行时启动（FR-CMP-010）。
 func (p *Provider) DefineVM(ctx context.Context, vm model.VMFunction, alloc model.AllocatedResources) error {
+	// 先记录当前声明（域新鲜度前置的单一事实源）：即便本次定义失败，启动路径仍应看到
+	// 「配置里现在是什么」（例如首次定义因镜像缺失失败，补镜像后 start 应能按此重定义）。
+	p.setVMSpec(vm, alloc)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if err := p.defineLocked(ctx, vm, alloc); err != nil {
+		return err
+	}
+	if vm.Autostart {
+		state, exists, err := p.api.State(ctx, vm.Name)
+		if err != nil {
+			return err
+		}
+		if !exists || !isActiveState(state) {
+			if err := p.api.Start(ctx, vm.Name); err != nil {
+				return fmt.Errorf("按 autostart 启动 VM %s: %w", vm.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// defineLocked 组装并定义 domain（幂等；调用方持 p.mu，**不自锁**）。
+//
+// 决策 #455：把「PCI 前置检查 + 落盘准备 + 域组装 + Define + 自启标志」从 DefineVM 抽出，
+// 供 start/restart 前的域新鲜度前置复用（重定义时**不重复**域组装逻辑）。
+func (p *Provider) defineLocked(ctx context.Context, vm model.VMFunction, alloc model.AllocatedResources) error {
 	// FR-CMP-023：直通 PCI 设备的存在性检查（define/apply 前）——不存在的设备
 	// 如实拒绝（否则 libvirt 定义会“成功”、启动才失败，且报错点离配置很远）。
 	if err := p.checkPCIDevices(vm); err != nil {
@@ -123,17 +203,6 @@ func (p *Provider) DefineVM(ctx context.Context, vm model.VMFunction, alloc mode
 	}
 	if err := p.api.SetAutostart(ctx, vm.Name, vm.Autostart); err != nil {
 		return fmt.Errorf("设置 VM %s 自启标志: %w", vm.Name, err)
-	}
-	if vm.Autostart {
-		state, exists, err := p.api.State(ctx, vm.Name)
-		if err != nil {
-			return err
-		}
-		if !exists || !isActiveState(state) {
-			if err := p.api.Start(ctx, vm.Name); err != nil {
-				return fmt.Errorf("按 autostart 启动 VM %s: %w", vm.Name, err)
-			}
-		}
 	}
 	return nil
 }
@@ -178,6 +247,7 @@ func (p *Provider) checkPCIDevices(vm model.VMFunction) error {
 // DeleteVM 级联删除（FR-CMP-013）：运行中先强停 → 删除 domain 定义 → 清理落盘。
 // 目标不存在时幂等返回 nil（重复删除不报错）。
 func (p *Provider) DeleteVM(ctx context.Context, name string) error {
+	p.forgetVMSpec(name)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -202,6 +272,10 @@ func (p *Provider) DeleteVM(ctx context.Context, name string) error {
 }
 
 // StartVM 启动（已运行则幂等返回）。
+//
+// 决策 #455：启动前确保域定义与**当前配置**一致——陈旧 paused 域（数据面切换/先前启动失败
+// 遗留的半成品）先销毁，域缺失或与当前声明不符时按当前配置重定义，再启动。否则会把「先前
+// 持久化的旧域」（如内核数据面下的 vhost-user 老定义）起成 paused。
 func (p *Provider) StartVM(ctx context.Context, name string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -210,19 +284,46 @@ func (p *Provider) StartVM(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	if !exists {
-		return fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
-	}
-	if isActiveState(state) {
+	// 已在运行（running/blocked）：幂等返回。paused 例外——见下（它是「起不来」的半成品，
+	// 必须按当前配置重定义，不能当作已运行而直接成功）。
+	if exists && isActiveState(state) && state != domPaused {
 		return nil
 	}
+	// 数据面前置判定（决策 #314）：命中即立即失败，不进入会阻塞的启动准备阶段
+	//（也不做重定义/销毁，故不留 paused 残域）。
 	if err := p.checkDataPlaneForStart(name); err != nil {
+		return err
+	}
+	// 陈旧 paused 域（决策 #455）：paused 属活动态，幂等分支会直接返回、永远起不来——先销毁。
+	if exists && state == domPaused {
+		if err := p.api.Destroy(ctx, name); err != nil {
+			return fmt.Errorf("清理 VM %s 陈旧的 paused 域（随后按当前配置重定义）: %w", name, err)
+		}
+		exists = false
+	}
+	if err := p.ensureDomainCurrentLocked(ctx, name, exists); err != nil {
 		return err
 	}
 	if err := p.api.Start(ctx, name); err != nil {
 		return fmt.Errorf("启动 VM %s: %w", name, err)
 	}
 	return nil
+}
+
+// ensureDomainCurrentLocked 确保域定义与**当前配置**一致（决策 #455；调用方持 p.mu）：
+// 域缺失或与当前声明不符时按当前配置重定义（幂等，复用 defineLocked，不重复域组装逻辑）。
+//
+// 域缺失且当前配置里也没有该 VM（孤儿）⇒ ErrVMNotFound（保持既有启动语义）；拿不到当前声明
+// （provider 从未收到过该 VM 的配置，如单测的裸启动）时**不臆测、不重定义**，维持既有行为。
+func (p *Provider) ensureDomainCurrentLocked(ctx context.Context, name string, exists bool) error {
+	spec, ok := p.lookupVMSpec(name)
+	if !ok {
+		if !exists {
+			return fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+		}
+		return nil
+	}
+	return p.defineLocked(ctx, spec.vm, spec.alloc)
 }
 
 // checkDataPlaneForStart 启动路径的数据面前置判定（决策 #314）。
@@ -388,6 +489,9 @@ func (p *Provider) StopVM(ctx context.Context, name string) error {
 }
 
 // RestartVM 运行中 ACPI 重启；已关机则直接启动。
+//
+// 决策 #455：off→start 分支与 start 同口径——陈旧 paused 域先销毁，域缺失或与当前声明不符时
+// 按当前配置重定义再启动（运行中的域走 ACPI 重启，不重定义，保持既有语义）。
 func (p *Provider) RestartVM(ctx context.Context, name string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -396,21 +500,29 @@ func (p *Provider) RestartVM(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	if !exists {
-		return fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
-	}
-	if !isActiveState(state) {
-		// off→start 分支同样做数据面前置判定（决策 #314）：与 start 一样会在 api.Start 阻塞。
-		if err := p.checkDataPlaneForStart(name); err != nil {
-			return err
-		}
-		if err := p.api.Start(ctx, name); err != nil {
-			return fmt.Errorf("启动 VM %s: %w", name, err)
+	// 运行中（running/blocked）：ACPI 重启，不重定义（决策 #314 的覆盖边界不变）。
+	if exists && isActiveState(state) && state != domPaused {
+		if err := p.api.Reboot(ctx, name); err != nil {
+			return fmt.Errorf("重启 VM %s: %w", name, err)
 		}
 		return nil
 	}
-	if err := p.api.Reboot(ctx, name); err != nil {
-		return fmt.Errorf("重启 VM %s: %w", name, err)
+	// off→start（含陈旧 paused）：与 start 同口径——先数据面前置判定（决策 #314），
+	// 再销毁陈旧 paused、按当前配置重定义，最后启动。
+	if err := p.checkDataPlaneForStart(name); err != nil {
+		return err
+	}
+	if exists && state == domPaused {
+		if err := p.api.Destroy(ctx, name); err != nil {
+			return fmt.Errorf("清理 VM %s 陈旧的 paused 域（随后按当前配置重定义）: %w", name, err)
+		}
+		exists = false
+	}
+	if err := p.ensureDomainCurrentLocked(ctx, name, exists); err != nil {
+		return err
+	}
+	if err := p.api.Start(ctx, name); err != nil {
+		return fmt.Errorf("启动 VM %s: %w", name, err)
 	}
 	return nil
 }
@@ -642,6 +754,9 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // libvirt 状态 crashed（on_crash=preserve 保留）→ critical `VM_CRASHED`；恢复 running/shutoff → 消警。
 // absent（配置存在但域未定义）由 EnsureConsistent 的收敛告警负责，不在此重复。
 func (p *Provider) CheckVMAlarms(ctx context.Context, cfg model.Config) []error {
+	// 决策 #455：巡检持整份 committed 配置，顺带刷新域新鲜度前置的「当前声明」——
+	// 即便某次提交/回滚未逐台喂到 DefineVM，15s 内也会收敛到当前配置。
+	p.setVMSpecs(cfg)
 	var errs []error
 	for _, vm := range cfg.VirtualMachineFunctions {
 		state, err := p.VMState(ctx, vm.Name)

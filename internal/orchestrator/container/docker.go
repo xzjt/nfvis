@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -91,6 +92,10 @@ type dockerAPI interface {
 	// Inspect 单次 inspect 的容器事实（决策 #432）：契约状态 + Docker 原始状态 + 重启次数。
 	// 不存在 exists=false（非错误）。
 	Inspect(ctx context.Context, name string) (ContainerFacts, bool, error)
+	// InspectSpec 读取容器的**实况创建规格**（决策 #456）：image/entrypoint/cmd/env/资源/
+	// 重启策略/特权/挂载/设备。供 ApplyContainer 与 start/restart 比对「配置与运行态是否分叉」，
+	// 分叉即按新声明重建（此前按存在性处理，改规格静默不生效）。不存在 exists=false（非错误）。
+	InspectSpec(ctx context.Context, name string) (CreateSpec, bool, error)
 	// ExitCode 返回容器退出码（不存在 exists=false）。
 	ExitCode(ctx context.Context, name string) (code int, exists bool, err error)
 	// ContainerPID 容器主进程 PID（Docker inspect 的 State.Pid；未运行的容器为 0）。
@@ -154,6 +159,11 @@ func NewProvider(cfg Config, api dockerAPI) *Provider {
 func (p *Provider) Config() Config { return p.cfg }
 
 // ApplyContainer 声明式创建/重建容器（幂等）：已存在则校正启动状态（autostart）。
+//
+// 规格判定（决策 #456）：已存在容器不再按**存在性**早退——比对期望规格（BuildCreateSpec）与
+// 实况规格（inspect），**不一致即重建**（删除旧容器、按新规格重新创建、重挂 vNIC），并如实
+// 报告发生了重建；一致才幂等。此前按存在性早退，改 command/image/env/资源后配置与运行态
+// 静默分叉，唯一出路是 delete+create。
 func (p *Provider) ApplyContainer(ctx context.Context, ct model.ContainerFunction) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -163,14 +173,28 @@ func (p *Provider) ApplyContainer(ctx context.Context, ct model.ContainerFunctio
 	if err != nil {
 		return err
 	}
+	recreated := false
 	if !exists {
 		if err := p.api.Create(ctx, ct.Name, spec); err != nil {
 			return fmt.Errorf("创建容器 %s: %w", ct.Name, err)
 		}
-	} else if state == orchestrator.CTStateRunning {
-		return nil // 已运行：幂等返回（配置变更需先删除重建，M4-7 语义）
+	} else {
+		live, ok, ierr := p.api.InspectSpec(ctx, ct.Name)
+		if ierr != nil {
+			return fmt.Errorf("读取容器 %s 的实况规格以判定是否需按新声明重建: %w", ct.Name, ierr)
+		}
+		if ok && !specUnknown(live) && !specsEqual(spec, live) {
+			if err := p.recreateContainer(ctx, ct.Name, spec); err != nil {
+				return err
+			}
+			reportSpecRecreate(ct.Name, spec, live)
+			recreated = true
+		} else if state == orchestrator.CTStateRunning {
+			return nil // 规格一致且已运行：幂等返回
+		}
 	}
-	if ct.Autostart {
+	// 启动判定：声明了 autostart，或**重建前正在运行**（重建把运行中的容器换成停止态，须恢复运行）。
+	if ct.Autostart || (recreated && state == orchestrator.CTStateRunning) {
 		if err := p.api.Start(ctx, ct.Name); err != nil {
 			return fmt.Errorf("按 autostart 启动容器 %s: %w", ct.Name, err)
 		}
@@ -211,6 +235,10 @@ func (p *Provider) DeleteContainer(ctx context.Context, name string) error {
 }
 
 // StartContainer 启动（已运行幂等）。
+//
+// 规格判定（决策 #456）：有声明在手且实况规格与声明不一致时，**先按新声明重建再启动**——
+// 配置与运行态分叉时 start 沿用旧规格是静默失效。一致/无法判定（无声明来源或配置外容器）
+// 时沿用既有启动语义。
 func (p *Provider) StartContainer(ctx context.Context, name string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -223,6 +251,9 @@ func (p *Provider) StartContainer(ctx context.Context, name string) error {
 	}
 	if state == orchestrator.CTStateRunning {
 		return nil
+	}
+	if _, err := p.recreateIfSpecChanged(ctx, name); err != nil {
+		return err
 	}
 	if err := p.api.Start(ctx, name); err != nil {
 		return fmt.Errorf("启动容器 %s: %w", name, err)
@@ -258,6 +289,9 @@ func (p *Provider) StopContainer(ctx context.Context, name string) error {
 }
 
 // RestartContainer 重启。
+//
+// 规格判定（决策 #456）：实况规格与声明不一致时**重建**（remove+create+start）而非 docker
+// restart——restart 沿用旧规格，配置与运行态会静默分叉。一致时走既有 restart 路径。
 func (p *Provider) RestartContainer(ctx context.Context, name string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -266,15 +300,242 @@ func (p *Provider) RestartContainer(ctx context.Context, name string) error {
 	} else if !exists {
 		return fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
 	}
-	if err := p.api.Restart(ctx, name); err != nil {
-		return fmt.Errorf("重启容器 %s: %w", name, err)
+	recreated, err := p.recreateIfSpecChanged(ctx, name)
+	if err != nil {
+		return err
 	}
-	// 容器 restart 会重建 netns（决策 #441）：旧容器端已随旧 netns 消失、宿主端留着旧对端
-	// （按名复用接不通），故**先删宿主端、再按声明重新接入**——先删后接，顺序即语义。
-	if err := p.detachNICs(ctx, name); err != nil {
-		return fmt.Errorf("容器 %s 已重启，但旧宿主端 vNIC 清理失败（巡检会继续清理）: %w", name, err)
+	if !recreated {
+		if err := p.api.Restart(ctx, name); err != nil {
+			return fmt.Errorf("重启容器 %s: %w", name, err)
+		}
+		// 容器 restart 会重建 netns（决策 #441）：旧容器端已随旧 netns 消失、宿主端留着旧对端
+		// （按名复用接不通），故**先删宿主端、再按声明重新接入**——先删后接，顺序即语义。
+		if err := p.detachNICs(ctx, name); err != nil {
+			return fmt.Errorf("容器 %s 已重启，但旧宿主端 vNIC 清理失败（巡检会继续清理）: %w", name, err)
+		}
+		return p.attachDeclaredNICs(ctx, name)
+	}
+	// 重建路径：容器已按新规格创建（未启动）——启动并重挂宿主端。
+	if err := p.api.Start(ctx, name); err != nil {
+		return fmt.Errorf("启动容器 %s: %w", name, err)
 	}
 	return p.attachDeclaredNICs(ctx, name)
+}
+
+// recreateIfSpecChanged 判定容器实况规格是否与声明不一致，不一致则按声明重建（决策 #456）。
+// 返回是否发生了重建。无声明来源（cfgSrc 为 nil，VPP 数据面）或配置外容器 ⇒ 不重建（沿用既有语义）。
+func (p *Provider) recreateIfSpecChanged(ctx context.Context, name string) (bool, error) {
+	if p.cfgSrc == nil {
+		return false, nil
+	}
+	ct, ok, err := p.declaredContainerByName(name)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	spec := BuildCreateSpec(ct, p.cfg)
+	live, exists, err := p.api.InspectSpec(ctx, name)
+	if err != nil {
+		return false, fmt.Errorf("读取容器 %s 的实况规格以判定是否需按新声明重建: %w", name, err)
+	}
+	if !exists || specUnknown(live) || specsEqual(spec, live) {
+		return false, nil
+	}
+	if err := p.recreateContainer(ctx, name, spec); err != nil {
+		return false, err
+	}
+	reportSpecRecreate(name, spec, live)
+	return true, nil
+}
+
+// recreateContainer 删除旧容器并按新规格重建（决策 #456）：remove → 清宿主端 vNIC → create。
+// 重建后容器处于「已创建未启动」态，由调用方按需 start（start 会重挂 vNIC）。
+//
+// 与 DeleteContainer 同口径清理宿主端：容器端随 netns 销毁自然消失，宿主端 veth 须清掉，
+// 否则按名复用会接到旧容器遗留的对端上（同 restart 的先删后接）。
+func (p *Provider) recreateContainer(ctx context.Context, name string, spec CreateSpec) error {
+	if err := p.api.Remove(ctx, name, true); err != nil {
+		return fmt.Errorf("容器 %s 规格已变更，重建时删除旧容器失败: %w", name, err)
+	}
+	if err := p.detachNICs(ctx, name); err != nil {
+		return fmt.Errorf("容器 %s 规格已变更，重建时清理旧宿主端 vNIC 失败（巡检会继续清理）: %w", name, err)
+	}
+	if err := p.api.Create(ctx, name, spec); err != nil {
+		return fmt.Errorf("容器 %s 规格已变更，重建时按新声明创建失败: %w", name, err)
+	}
+	return nil
+}
+
+// specUnknown 判定实况规格是否为「取不到」（全零）。
+//
+// 生产的 inspect 至少会带回 image，全零意味着**没有任何规格信息可比**（例如测试里只置了状态、
+// 未记录规格）——此时不重建、沿用既有启动/重启语义，避免拿空值与真实声明比对而误判成「已变更」。
+func specUnknown(spec CreateSpec) bool {
+	return spec.Image == "" && len(spec.Entrypoint) == 0 && len(spec.Cmd) == 0 &&
+		len(spec.Env) == 0 && spec.MemoryBytes == 0 && spec.NanoCPUs == 0 &&
+		normalizeRestartPolicy(spec.RestartPolicy) == "no" && !spec.Privileged &&
+		len(spec.CapAdd) == 0 && len(spec.Devices) == 0 && len(spec.Binds) == 0
+}
+
+// specsEqual 判定期望规格与实况规格是否一致（决策 #456 的比对**单源**）。
+// 逐字段比较，并按声明语义做两处归一：
+//   - env：Docker 会把镜像/平台注入的变量（如 PATH、HOSTNAME）写进 inspect 的 Config.Env，
+//     产品声明的变量只是其中一部分，故按「期望 ⊆ 实况」比对（每条 k=v 必须存在且值相等）；
+//     反过来要求实况 ⊆ 期望会把镜像自带变量误判成差异而反复重建。
+//   - entrypoint/cmd：期望未声明时由镜像决定，不参与比较；拿空值去比镜像解析出的值会每次都判
+//     「已变更」。已声明时精确比对。
+//
+// restart_policy 归一：Docker 对「不重启」可能回 ""、也可能回 "no"。
+func specsEqual(desired, live CreateSpec) bool {
+	if desired.Image != live.Image {
+		return false
+	}
+	if len(desired.Entrypoint) > 0 && !strSliceEqual(desired.Entrypoint, live.Entrypoint) {
+		return false
+	}
+	if len(desired.Cmd) > 0 && !strSliceEqual(desired.Cmd, live.Cmd) {
+		return false
+	}
+	if desired.MemoryBytes != live.MemoryBytes || desired.NanoCPUs != live.NanoCPUs {
+		return false
+	}
+	if normalizeRestartPolicy(desired.RestartPolicy) != normalizeRestartPolicy(live.RestartPolicy) {
+		return false
+	}
+	if desired.Privileged != live.Privileged {
+		return false
+	}
+	if !strSetEqual(desired.CapAdd, live.CapAdd) || !strSetEqual(desired.Binds, live.Binds) {
+		return false
+	}
+	if !devicesEqual(desired.Devices, live.Devices) {
+		return false
+	}
+	return strSetContains(live.Env, desired.Env)
+}
+
+// normalizeRestartPolicy 归一「不重启」的两种写法（Docker inspect 可能回 "" 或 "no"）。
+func normalizeRestartPolicy(policy string) string {
+	if strings.TrimSpace(policy) == "" {
+		return "no"
+	}
+	return policy
+}
+
+// strSliceEqual 逐元素比较（nil 与空切片等价）。
+func strSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// strSetEqual 集合（多重集）相等，顺序无关；nil 与空切片等价。
+func strSetEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, v := range a {
+		counts[v]++
+	}
+	for _, v := range b {
+		counts[v]--
+		if counts[v] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// strSetContains 判定 want 的每个元素都在 have 里（want ⊆ have，忽略 have 的多余项）。
+func strSetContains(have, want []string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	set := make(map[string]bool, len(have))
+	for _, v := range have {
+		set[v] = true
+	}
+	for _, v := range want {
+		if !set[v] {
+			return false
+		}
+	}
+	return true
+}
+
+// devicesEqual 设备映射集合相等（顺序无关）。
+func devicesEqual(a, b []DeviceMapping) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	key := func(d DeviceMapping) string {
+		return d.PathOnHost + "\x00" + d.PathInContainer + "\x00" + d.CgroupPermissions
+	}
+	set := make(map[string]bool, len(a))
+	for _, d := range a {
+		set[key(d)] = true
+	}
+	for _, d := range b {
+		if !set[key(d)] {
+			return false
+		}
+	}
+	return true
+}
+
+// reportSpecRecreate 如实报告发生了重建（决策 #456）：容器规格与运行态分叉已被收敛。
+// 走守护进程日志（`show log system` 与诊断包可见）——这是运行期事实可到的操作者出口。
+func reportSpecRecreate(name string, desired, live CreateSpec) {
+	slog.Warn("容器规格已变更，已按新声明重建（删除旧容器并重新创建）",
+		"container", name, "changed", specDiffSummary(desired, live))
+}
+
+// specDiffSummary 列出期望与实况的差异维度（供重建报告点名，便于操作者核对）。
+func specDiffSummary(desired, live CreateSpec) string {
+	var changed []string
+	if desired.Image != live.Image {
+		changed = append(changed, "image")
+	}
+	if len(desired.Entrypoint) > 0 && !strSliceEqual(desired.Entrypoint, live.Entrypoint) {
+		changed = append(changed, "command")
+	}
+	if len(desired.Cmd) > 0 && !strSliceEqual(desired.Cmd, live.Cmd) {
+		changed = append(changed, "args")
+	}
+	if desired.MemoryBytes != live.MemoryBytes || desired.NanoCPUs != live.NanoCPUs {
+		changed = append(changed, "resources")
+	}
+	if normalizeRestartPolicy(desired.RestartPolicy) != normalizeRestartPolicy(live.RestartPolicy) {
+		changed = append(changed, "restart-policy")
+	}
+	if desired.Privileged != live.Privileged {
+		changed = append(changed, "privileged")
+	}
+	if !strSetEqual(desired.CapAdd, live.CapAdd) {
+		changed = append(changed, "capabilities")
+	}
+	if !strSetEqual(desired.Binds, live.Binds) {
+		changed = append(changed, "mounts")
+	}
+	if !devicesEqual(desired.Devices, live.Devices) {
+		changed = append(changed, "devices")
+	}
+	if !strSetContains(live.Env, desired.Env) {
+		changed = append(changed, "env")
+	}
+	if len(changed) == 0 {
+		return "unknown"
+	}
+	return strings.Join(changed, ",")
 }
 
 // ContainerState 契约枚举（absent=不存在）。

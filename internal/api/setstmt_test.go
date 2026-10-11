@@ -300,6 +300,134 @@ func TestDisplaySetFirewallLevelPrefix(t *testing.T) {
 	}
 }
 
+// TestDisplaySetEmptyL3SwitchRoundTrip（决策 #452，修 round12 R12-4）：空 L3 交换机
+// （`set virtual-switches X type l3` 无内容）与其它 L3 交换机共存、且 vrfs[] 顺序与
+// virtual_switches[] 声明序不一致时，display set 反推必须无错误且回放深等——空 VRF
+// 由 vrfs[] 回落发射器的确定性创建语句自足重建（不再依赖 `type l3` 别名的副作用，
+// 此前顺序即破）。
+func TestDisplaySetEmptyL3SwitchRoundTrip(t *testing.T) {
+	// vs-A 先建成 l2、vs-B 建成 l3、再把 vs-A 改成 l3：virtual_switches=[vs-A,vs-B]，
+	// 但 vrfs[] 顺序=[vs-B,vs-A]（VRF 随 type l3 建立的先后追加）。
+	runDisplaySetRoundTrip(t, []string{
+		"set virtual-switches vs-A type l2",
+		"set virtual-switches vs-B type l3",
+		"set virtual-switches vs-A type l3",
+	})
+	// 空 L3 + 带数据的 L3 混合（同样顺序错位）。
+	runDisplaySetRoundTrip(t, []string{
+		"set virtual-switches vs-A type l2",
+		"set virtual-switches vs-B type l3",
+		"set virtual-switches vs-B l3-interface ens192 ip address 10.0.0.1/24",
+		"set virtual-switches vs-A type l3",
+	})
+}
+
+// TestDisplaySetL3SwitchSingleCreationStatement（决策 #452）：空 L3 交换机的创建语句
+// 只有一条（顶层 `type l3` 让位给 vrfs[] 回落，不双发）。
+func TestDisplaySetL3SwitchSingleCreationStatement(t *testing.T) {
+	var cfg model.Config
+	for _, line := range []string{
+		"set virtual-switches vs-A type l2",
+		"set virtual-switches vs-B type l3",
+		"set virtual-switches vs-A type l3",
+	} {
+		if err := applyStatement(&cfg, splitFieldsQuoted(line)[1:]); err != nil {
+			t.Fatalf("fixture %q 回放失败: %v", line, err)
+		}
+	}
+	lines, err := renderSetStatements(toJSONTree(cfg), nil)
+	if err != nil {
+		t.Fatalf("反推失败: %v", err)
+	}
+	for _, name := range []string{"vs-A", "vs-B"} {
+		want := "set virtual-switches " + name + " type l3"
+		n := 0
+		for _, l := range lines {
+			if l == want {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("%q 应恰发 1 条（不双发），实际 %d 条:\n%s", want, n, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// TestDisplaySetVhostDerivedL3InterfaceRoundTrip（决策 #452）：vhost 派生名作 L3 接口
+// （NAT-inside 文档化形态：VM vNIC 声明 + `l3-interface vh-<vm>-<nic> ip address …`）
+// 在组合树里往返；该派生名只应出现在 `virtual-switches … l3-interface` 路径，不得泄漏
+// 成顶层 `interfaces` 条目。
+func TestDisplaySetVhostDerivedL3InterfaceRoundTrip(t *testing.T) {
+	stmts := []string{
+		"set virtual-switches vs-lan type l2",
+		"set virtual-switches vs-empty type l2", // 先建成 l2，稍后改 l3（制造 vrfs[] 与 virtual_switches[] 顺序错位）
+		"set virtual-machine-functions vnf-a vcpu count 2",
+		"set virtual-machine-functions vnf-a interfaces nic0 type vhost-user virtual-switch vs-lan",
+		"set virtual-machine-functions vnf-a interfaces nic1 type vhost-user virtual-switch vs-nat",
+		"set virtual-switches vs-nat type l3",
+		"set virtual-switches vs-nat l3-interface vh-vnf-a-nic1 ip address 192.168.200.1/24",
+		"set virtual-switches vs-empty type l3",
+	}
+	runDisplaySetRoundTrip(t, stmts)
+
+	var cfg model.Config
+	for _, line := range stmts {
+		if err := applyStatement(&cfg, splitFieldsQuoted(line)[1:]); err != nil {
+			t.Fatalf("fixture %q 回放失败: %v", line, err)
+		}
+	}
+	lines, err := renderSetStatements(toJSONTree(cfg), nil)
+	if err != nil {
+		t.Fatalf("反推失败: %v", err)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "set virtual-switches vs-nat l3-interface vh-vnf-a-nic1 ip address 192.168.200.1/24") {
+		t.Fatalf("vhost 派生名应出现在 l3-interface 路径:\n%s", joined)
+	}
+	if strings.Contains(joined, "set interfaces vh-vnf-a-nic1") {
+		t.Fatalf("vhost 派生名不得泄漏成顶层 interfaces 条目:\n%s", joined)
+	}
+}
+
+// TestDisplaySetL2SwitchWithVrfRoundTrip（决策 #452 边界）：VRF 的同名交换机显式为 l2
+// （或 VRF 无同名交换机）时，回落发射器不得补发 `type l3`（会改型/凭空建交换机）——
+// 该形态仍由 l3-interface 语句自身建出 VRF 并往返。
+func TestDisplaySetL2SwitchWithVrfRoundTrip(t *testing.T) {
+	runDisplaySetRoundTrip(t, []string{
+		"set interfaces ens192 description x",
+		"set virtual-switches vs1 type l2",
+		"set virtual-switches vs1 l3-interface ens192 ip address 10.0.0.1/24",
+	})
+	runDisplaySetRoundTrip(t, []string{
+		"set virtual-switches vs-nat l3-interface ens192 ip address 10.0.0.1/24",
+	})
+}
+
+// TestDisplaySetEditLevelL3Switch：配置模式层级 show（`edit virtual-switches <n>`）下
+// L3 交换机的 display set 仍就地发出 `type l3`（顶层回落不参与该路径），保证层级反推可还原。
+func TestDisplaySetEditLevelL3Switch(t *testing.T) {
+	var cfg model.Config
+	for _, line := range []string{
+		"set virtual-switches vs-l3 type l3",
+		"set virtual-switches vs-l3 l3-interface ens192 ip address 10.0.0.1/24",
+	} {
+		if err := applyStatement(&cfg, splitFieldsQuoted(line)[1:]); err != nil {
+			t.Fatalf("fixture %q 回放失败: %v", line, err)
+		}
+	}
+	sub, err := navigateJSON(toJSONTree(cfg), []string{"virtual-switches", "vs-l3"})
+	if err != nil {
+		t.Fatalf("导航失败: %v", err)
+	}
+	lines, err := renderSetStatements(sub.(map[string]any), []string{"virtual-switches", "vs-l3"})
+	if err != nil {
+		t.Fatalf("层级反推失败: %v", err)
+	}
+	if len(lines) != 1 || lines[0] != "set virtual-switches vs-l3 type l3" {
+		t.Fatalf("层级 show 应就地发出 type l3，实际: %v", lines)
+	}
+}
+
 // TestDisplaySetEmpty：空配置反推为 0 条语句（调用方显示「配置为空」）。
 func TestDisplaySetEmpty(t *testing.T) {
 	lines, err := renderSetStatements(map[string]any{}, nil)

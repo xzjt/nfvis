@@ -131,7 +131,9 @@ type NetworkProvider interface {
 	ApplyInterface(ctx context.Context, iface model.InterfaceConfig) error
 	ApplyBond(ctx context.Context, bond model.Bond) error
 	DeleteBond(ctx context.Context, name string) error
-	ApplyLLDP(ctx context.Context, lldp *model.LldpConfig) error
+	// ApplyLLDP 收敛 LLDP 声明。declaredPorts 是已声明物理口清单（全局 `enable true` 的作用集；
+	// 全局开关只是默认值，逐口声明覆盖之——决策 #450/#451）。
+	ApplyLLDP(ctx context.Context, lldp *model.LldpConfig, declaredPorts []string) error
 	ApplyACL(ctx context.Context, acl model.Acl) error
 	DeleteACL(ctx context.Context, name string) error
 	ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch) error
@@ -287,7 +289,7 @@ func (noopNetwork) ApplyInterface(context.Context, model.InterfaceConfig) error 
 func (noopNetwork) ApplyACL(context.Context, model.Acl) error                    { return nil }
 func (noopNetwork) ApplyBond(context.Context, model.Bond) error                  { return nil }
 func (noopNetwork) DeleteBond(context.Context, string) error                     { return nil }
-func (noopNetwork) ApplyLLDP(context.Context, *model.LldpConfig) error           { return nil }
+func (noopNetwork) ApplyLLDP(context.Context, *model.LldpConfig, []string) error { return nil }
 func (noopNetwork) DeleteACL(context.Context, string) error                      { return nil }
 func (noopNetwork) ApplyBridgeDomain(context.Context, model.VirtualSwitch) error { return nil }
 func (noopNetwork) DeleteBridgeDomain(context.Context, string) error             { return nil }

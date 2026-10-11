@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xzjt/nfvis/internal/model"
 )
 
 // diagRecRunner 记录命令并返回预设结果（不 exec）。
@@ -30,7 +32,7 @@ func (r *diagRecRunner) joined() string { return strings.Join(r.calls, "\n") }
 func TestDiagPingCountBounds(t *testing.T) {
 	ctx := context.Background()
 	r := &diagRecRunner{}
-	d := NewDiag(r)
+	d := NewDiag(r, nil)
 
 	_, err := d.Ping(ctx, "10.0.0.1", "", "", diagCountMax+1, false)
 	if err == nil {
@@ -83,7 +85,7 @@ func TestDiagRejectsOptionLikeArgs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		r := &diagRecRunner{}
-		if _, err := tc.call(NewDiag(r)); err == nil || !strings.Contains(err.Error(), "选项") {
+		if _, err := tc.call(NewDiag(r, nil)); err == nil || !strings.Contains(err.Error(), "选项") {
 			t.Fatalf("%s 以 - 开头应被拒并说明原因，得到 %v", tc.name, err)
 		}
 		if len(r.calls) != 0 {
@@ -93,7 +95,7 @@ func TestDiagRejectsOptionLikeArgs(t *testing.T) {
 
 	// 正控：正常值照常执行（VRF 作用域 + IPv6 参数顺序不变）。
 	r := &diagRecRunner{}
-	d := NewDiag(r)
+	d := NewDiag(r, nil)
 	if _, err := d.Ping(ctx, "2001:db8::1", "", "vs-l3", 2, true); err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +149,7 @@ func TestDiagAppliesInternalDeadline(t *testing.T) {
 			cancel()
 		}()
 		before := time.Now()
-		if _, err := tc.call(ctx, NewDiag(r)); err == nil {
+		if _, err := tc.call(ctx, NewDiag(r, nil)); err == nil {
 			t.Fatalf("%s：ctx 结束时调用应如实返回错误", tc.name)
 		}
 		cancel()
@@ -170,7 +172,7 @@ func TestDiagAppliesInternalDeadline(t *testing.T) {
 // 有界是**生效**的（不只是给 ctx 设了值）：调用方给更紧的 deadline 时，调用在期限内结束并如实报错。
 func TestDiagBoundedByCallerDeadline(t *testing.T) {
 	r := &diagBlockRunner{}
-	d := NewDiag(r)
+	d := NewDiag(r, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	start := time.Now()
@@ -183,5 +185,128 @@ func TestDiagBoundedByCallerDeadline(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("调用未被 deadline 约束（耗时 %s）", elapsed)
+	}
+}
+
+// ---------- 决策 #457：vrf 参数按内核设备名解析 ----------
+
+// diagResolverFor 构造「从配置解析内核 VRF 设备名」的解析器（与装配处同一实现）。
+func diagResolverFor(cfg model.Config) VRFResolver {
+	return func(name string) (string, error) { return KernelVRFDeviceName(cfg, name) }
+}
+
+// L2 网关交换机 ⇒ `ip vrf exec vr-<名>`；L3 交换机 / vrfs 条目 ⇒ 原名；显式 gateway.vrf 生效；
+// ping 与 traceroute 共用 runVrf ⇒ 同改。
+func TestDiagVRFResolvesKernelDeviceNames(t *testing.T) {
+	cfg := model.Config{
+		VirtualSwitches: []model.VirtualSwitch{
+			{Name: "lan", Type: "l2", Gateway: &model.VSGateway{Addresses: []string{"192.168.99.1/24"}}},
+			{Name: "vs-l3", Type: "l3"},
+			{Name: "wan", Type: "l2", Gateway: &model.VSGateway{Addresses: []string{"10.0.0.1/24"}, Vrf: "explicit-vrf"}},
+		},
+		Vrfs: []model.Vrf{{Name: "vs-l3"}},
+	}
+	ctx := context.Background()
+
+	r := &diagRecRunner{}
+	d := NewDiag(r, diagResolverFor(cfg))
+	for _, call := range []struct {
+		host, vrf string
+	}{
+		{"192.168.99.10", "lan"}, // L2 网关域 ⇒ vr-lan
+		{"10.0.0.2", "vs-l3"},    // L3 ⇒ 原名
+		{"10.0.0.3", "wan"},      // 显式 gateway.vrf ⇒ 其设备名
+	} {
+		if _, err := d.Ping(ctx, call.host, "", call.vrf, 2, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, want := range []string{
+		"ip vrf exec vr-lan ping -c 2 192.168.99.10",
+		"ip vrf exec vs-l3 ping -c 2 10.0.0.2",
+		"ip vrf exec explicit-vrf ping -c 2 10.0.0.3",
+	} {
+		if !strings.Contains(r.joined(), want) {
+			t.Fatalf("缺少命令 %q：\n%s", want, r.joined())
+		}
+	}
+
+	// traceroute 与 ping 共用 runVrf：同样解析成设备名。
+	r2 := &diagRecRunner{}
+	if _, err := NewDiag(r2, diagResolverFor(cfg)).Traceroute(ctx, "192.168.99.10", "lan", false); err != nil {
+		t.Fatal(err)
+	}
+	if want := "ip vrf exec vr-lan traceroute 192.168.99.10"; !strings.Contains(r2.joined(), want) {
+		t.Fatalf("traceroute 应同样解析成设备名 %q：\n%s", want, r2.joined())
+	}
+}
+
+// 长名截断与命名单源（GatewayVRFName）一致——不另抄一份命名规则。
+func TestDiagVRFLongNameTruncationMatchesNaming(t *testing.T) {
+	long := "abcdefghijklmno" // 15 字符：`vr-`+名 超上限 ⇒ 走哈希截断
+	cfg := model.Config{VirtualSwitches: []model.VirtualSwitch{
+		{Name: long, Type: "l2", Gateway: &model.VSGateway{Addresses: []string{"192.168.99.1/24"}}},
+	}}
+	want := GatewayVRFName(long)
+	if want == "vr-"+long {
+		t.Fatalf("前提不成立：GatewayVRFName(%q) = %q 应走截断", long, want)
+	}
+	r := &diagRecRunner{}
+	if _, err := NewDiag(r, diagResolverFor(cfg)).Ping(context.Background(), "192.168.99.10", "", long, 1, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := "ip vrf exec " + want + " ping -c 1 192.168.99.10"; !strings.Contains(r.joined(), got) {
+		t.Fatalf("长名截断应与命名单源一致 %q：\n%s", got, r.joined())
+	}
+}
+
+// 未知 vrf ⇒ 明确报错并列出已知设备；不得执行宿主命令。未声明网关的 L2 交换机没有专属 VRF，
+// 同样按「未知」报错。
+func TestDiagVRFUnknownReportsKnownDevices(t *testing.T) {
+	cfg := model.Config{
+		VirtualSwitches: []model.VirtualSwitch{
+			{Name: "lan", Type: "l2", Gateway: &model.VSGateway{Addresses: []string{"192.168.99.1/24"}}},
+			{Name: "vs-l3", Type: "l3"},
+			{Name: "nogw", Type: "l2"}, // 未声明网关：没有专属 VRF
+		},
+		Vrfs: []model.Vrf{{Name: "vs-l3"}},
+	}
+	for _, bad := range []string{"nope", "nogw"} {
+		r := &diagRecRunner{}
+		_, err := NewDiag(r, diagResolverFor(cfg)).Ping(context.Background(), "10.0.0.1", "", bad, 1, false)
+		if err == nil {
+			t.Fatalf("未知 vrf %q 应报错", bad)
+		}
+		if !strings.Contains(err.Error(), bad) {
+			t.Fatalf("报错应点名未知对象 %q：%v", bad, err)
+		}
+		for _, want := range []string{"vr-lan", "vs-l3"} { // 已知设备清单
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("报错应列出已知设备 %q：%v", want, err)
+			}
+		}
+		if len(r.calls) != 0 {
+			t.Fatalf("解析失败时不得执行宿主命令：\n%s", r.joined())
+		}
+	}
+
+	// traceroute 同口径。
+	r := &diagRecRunner{}
+	if _, err := NewDiag(r, diagResolverFor(cfg)).Traceroute(context.Background(), "10.0.0.1", "nope", false); err == nil {
+		t.Fatal("traceroute 未知 vrf 应报错")
+	}
+	if len(r.calls) != 0 {
+		t.Fatalf("traceroute 解析失败时不得执行宿主命令：\n%s", r.joined())
+	}
+}
+
+// resolver 未注入 ⇒ 沿用按对象名映射的既有行为（不破坏既有装配/单测）。
+func TestDiagVRFNilResolverKeepsLegacy(t *testing.T) {
+	r := &diagRecRunner{}
+	if _, err := NewDiag(r, nil).Ping(context.Background(), "10.0.0.1", "", "vs-l3", 1, false); err != nil {
+		t.Fatal(err)
+	}
+	if want := "ip vrf exec vs-l3 ping -c 1 10.0.0.1"; !strings.Contains(r.joined(), want) {
+		t.Fatalf("nil 解析器应沿用对象名映射 %q：\n%s", want, r.joined())
 	}
 }

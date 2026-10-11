@@ -143,7 +143,7 @@ func (p *Provider) ReconcileLLDP(ctx context.Context, cfg model.Config) []error 
 	}
 	const src = "lldp"
 	mgr := p.lldpMgr()
-	err := mgr.Sync(ctx, declared)
+	err := mgr.Sync(ctx, declared, orchestrator.DeclaredPhysicalPorts(cfg))
 	mgr.expire(time.Now()) // 过期邻居随巡检回收（读视图之外也回收，内存不随历史邻居增长）
 	if err == nil {
 		if p.alarms != nil {

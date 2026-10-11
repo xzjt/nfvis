@@ -357,8 +357,11 @@ func TestKeptConfigPassesValidationWithDanglingRefs(t *testing.T) {
 		},
 		Interfaces: []model.InterfaceConfig{
 			{Name: "ens192", Enabled: &up,
-				IngressPolicy: "pol-in", EgressPolicy: "pol-out",
-				PortSecurity: []model.PortSecMAC{"b0:b0:00:00:00:01"}},
+				IngressPolicy: "pol-in",
+				PortSecurity:  []model.PortSecMAC{"b0:b0:00:00:00:01"}},
+			// 出向策略挂在**非 L2 成员口**上：L2 成员口的出向 policer 落在 l2-output 弧、
+			// 会连带拦下经 BVI 路由回来的 L3 回程，故提交期硬拒（本轮新增校验）。
+			{Name: "ens224", Enabled: &up, EgressPolicy: "pol-out"},
 		},
 		QosPolicies: []model.QosPolicy{{Name: "pol-in", Cir: 1000, Cbs: 1000}, {Name: "pol-out", Cir: 1000, Cbs: 1000}},
 		VirtualSwitches: []model.VirtualSwitch{{Name: "vs-app", Type: "l2", VlanAccess: 100,
@@ -373,9 +376,21 @@ func TestKeptConfigPassesValidationWithDanglingRefs(t *testing.T) {
 		t.Fatalf("最小保留配置应过提交校验（悬挂引用须清掉）: %v", errs)
 	}
 	// 只清引用、不改对象保留语义：物理口其余字段逐字段保留。
-	if len(kept.Interfaces) != 1 || kept.Interfaces[0].Name != "ens192" ||
-		kept.Interfaces[0].IngressPolicy != "" || kept.Interfaces[0].EgressPolicy != "" ||
-		kept.Interfaces[0].PortSecurity != nil {
+	if len(kept.Interfaces) != 2 {
 		t.Fatalf("接口应保留但清掉悬挂引用: %+v", kept.Interfaces)
+	}
+	for _, i := range kept.Interfaces {
+		switch i.Name {
+		case "ens192":
+			if i.IngressPolicy != "" || i.EgressPolicy != "" || i.PortSecurity != nil {
+				t.Fatalf("接口应保留但清掉悬挂引用: %+v", i)
+			}
+		case "ens224":
+			if i.EgressPolicy != "" {
+				t.Fatalf("接口应保留但清掉悬挂引用: %+v", i)
+			}
+		default:
+			t.Fatalf("出现非预期接口: %+v", i)
+		}
 	}
 }
