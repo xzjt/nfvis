@@ -261,3 +261,47 @@ expecting handle or string or last`）⇒ `errors.Join` 非空 ⇒ teardown 被�
 3. **测试隔离要连「扫描范围」一起隔离**：新增的启动收敛会扫描工作位（/tmp 与导出目录）——
    单测夹具若不注入工作目录，会把共享系统临时目录里**其它测试**留下的 `.part` 搬进本用例
    导出目录（首跑即踩到，`SetWorkDir`/`SetSessionsFile` 注入后干净）。
+
+## 9. 同轮收尾：v3.0.11 发版（2026-10-12）
+
+**提交**：`e1bab70`（round14~23 交付批，76 文件）→ `0776185`（安装器探测修正）→ 均推送 `origin/v3`。
+
+**构建（VM `/root/src` = e1bab70 git archive；`SOURCE_DATE_EPOCH=1791757589`）**：
+
+- `make deb VERSION=3.0.11` **连打两次逐字节一致**：`nfvis_3.0.11_amd64.deb` 10,271,344 字节，
+  sha256 `119f95f3c229f2930b7a6413743d74bb26cc2313a9f47b029c7003c201ee7722`。
+- 闭包按 round88 口径重抓（**教训**：`offline-closure.sh fetch` 只给 nfvis+VPP 种子只得 **51 包**；
+  需 `--pkg docker.io libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils
+  cloud-image-utils genisoimage chrony tcpdump curl ca-certificates` 才是 **238 包 / 837 依赖声明 /
+  312 提供名 / 172M** 的历史口径——VPP 的 9 个 deb 先放进 `--out`）。
+- `build-offline-run.sh` **连打两次逐字节一致**：`nfvis-v3.0.11.run` 179,587,335 字节，
+  sha256 `bf41c46d3289fb3da1137cd42c5206ba6dd308bcac9382678266b5ae09e27a25`；
+  产物结构自检 **18/0**。
+
+**同轮修掉的第三处（R23-2）：离线安装器自检写死 `127.0.0.1`**——v3.0.11 首次实装（未修版）在
+**已配置管理口的机器**上自检 14/1/1：「控制台无响应（HTTP 000000）」+ CLI 登录不可判定；根因是
+nfvisd **声明管理口后只监听该地址**（`ss` 实证 `192.168.155.129:443`），而 `deploy/offline/install.sh`
+的五处探测点写死 `https://127.0.0.1`（v3.0.10 的 18/0/0 是在干净快照、管理口尚未声明时装的，掩盖了
+它——**升级路径必踩**）。修法：`resolve_probe_srv` 取 nfvisd **实际监听地址**（`ss -ltnp` 解析；
+通配/取不到回落 127.0.0.1，首装行为不变），五处统一 `$PROBE_SRV`；提交 `0776185`。
+**真机复验**：同一台已配置机器上 `sh nfvis-v3.0.11.run -y` 自检 **18/0/0**。
+
+**发布件验收**：`-y` 实装自检 **18/0/0**（3.0.11，`show version`/`nfvis-cli --version` 双确认）；
+套件前备妥（撤管理口地址，跑完还原）→
+
+| 套件 | 发布件（3.0.11） |
+|---|---|
+| `cli-fulltest` | **274 / 0 / 22** |
+| `cli-semantic-check` | **27 / 0 / 2**（fixture + dns proxy 现场：S8/S9/S13 均转可判定） |
+| `cli-lifecycle-check` | **23 / 0 / 2**（L3-1/L3-2 可判定） |
+| `cli-pty-smoke` | **10 / 10** |
+
+**发布与三处一致（全部完成）**：`gh release create v3.0.11 --target v3`（四资产）——
+服务端资产摘要与构建哈希逐字相同；**deb 回下载逐字节一致 + 旁车一致**；**`.run` 完整回下载
+179,587,335 字节逐字节一致**（`cmp` 通过）+ 旁车一致——上轮（v1.1.50/v3.0.x）因链路慢只能以
+服务端摘要作等价证据，本轮链路走得通，**完整回下载补齐**。
+
+**套件后环境全量还原**：管理口地址（两轮 fulltest 各撤/还原）、`resource-pools`/`vpp cpu` 标量、
+`interfaces ens224 disable` 残留、S13 dns proxy 现场删除、1G 池重启回 3、DPDK 重绑 + `request vpp
+restart`；终态：`3.0.11`、池 1G=3/2M=768（一致）、两口 DPDK up、抓包无会话/无记录/无残件、
+告警仅既有 `HUGEPAGE_POOL_ORPHAN`。
