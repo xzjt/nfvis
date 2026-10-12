@@ -415,13 +415,20 @@ func writeSmaps(t *testing.T, root, pid, content string) {
 
 // smapsBlock 拼一个 smaps 映射块：头行（地址范围/权限/偏移/dev:inode/路径）+ Size +
 // KernelPageSize + VmFlags。huge=true 时 VmFlags 带 `ht`（内核的 HugeTLB 标记）。
+// 偏移恒为 0（历史夹具形状）；需要构造同 inode 的分段/重叠/共享映射时用 smapsBlockAt。
 func smapsBlock(start, end, dev, inode string, sizeKB, pageKB int, huge bool, path string) string {
+	return smapsBlockAt(start, end, "00000000", dev, inode, sizeKB, pageKB, huge, path)
+}
+
+// smapsBlockAt 同 smapsBlock，但显式给定映射头行的**文件偏移**（hex）——决策 #473 的页范围
+// 并集按「文件偏移 + Size」判重叠/去重，测试需要构造同 inode 的分段、重叠与跨进程共享映射。
+func smapsBlockAt(start, end, offset, dev, inode string, sizeKB, pageKB int, huge bool, path string) string {
 	flags := "rd wr mr mw me ac"
 	if huge {
 		flags = "rd wr sh mr mw me ms de ht pf io"
 	}
-	return fmt.Sprintf("%s-%s rw-s 00000000 %s %s %s\nSize: %d kB\nKernelPageSize: %d kB\nMMUPageSize: %d kB\nVmFlags: %s\n",
-		start, end, dev, inode, path, sizeKB, pageKB, pageKB, flags)
+	return fmt.Sprintf("%s-%s rw-s %s %s %s %s\nSize: %d kB\nKernelPageSize: %d kB\nMMUPageSize: %d kB\nVmFlags: %s\n",
+		start, end, offset, dev, inode, path, sizeKB, pageKB, pageKB, flags)
 }
 
 func TestHugepageHeldPages(t *testing.T) {
@@ -586,10 +593,147 @@ func (s *countingSetter) SetPoolPages(pageSize string, target int) error {
 	return nil
 }
 
-// 决策 #370（R142 D3）：同 inode 多映射取**最大视图**——读数与 /proc 扫描顺序无关。
-// 构造同一 dev:inode（92）被两个进程映射且视图长度不同（1 页 vs 2 页），两种 pid 顺序
-// 必须同值（旧「首见」实现会随顺序在 1/2 间漂移）。
-func TestHugepageHeldPagesSameInodeMaxView(t *testing.T) {
+// 决策 #473（round25 现场根因）：同 inode 的**页范围并集**——同一分配被内核切成多段不相交
+// VMA（VPP 主堆 1 GiB = 2M×512 页，smaps 里是 5 个连续、不相交 VMA）时，旧的「同 inode 取
+// 最大视图」（#370）只记最大段（498 页）⇔ 持有少算 14 页 ⇒ 「无主 14」假报。并集口径下五段
+// 全计 = 512 页。
+func TestHugepageHeldPagesSameInodeSegmentedVMAs(t *testing.T) {
+	root := t.TempDir()
+	// 复刻 round25 真机取证的五段布局（文件偏移 0/0x400000/0x600000/0x1a00000/0x1c00000，
+	// 大小 4M+2M+20M+2M+996M，合计 1 GiB；2M 页：2+1+10+1+498 = 512 页）。
+	writeSmaps(t, root, "31234",
+		smapsBlockAt("7f0000000000", "7f0040000000", "00000000", "00:1d", "527", 4096, 2048, true, "/dev/hugepages/vpp-main-heap")+ // 4M → 2 页
+			smapsBlockAt("7f1000000000", "7f1020000000", "00400000", "00:1d", "527", 2048, 2048, true, "/dev/hugepages/vpp-main-heap")+ // 2M → 1 页
+			smapsBlockAt("7f2000000000", "7f2140000000", "00600000", "00:1d", "527", 20480, 2048, true, "/dev/hugepages/vpp-main-heap")+ // 20M → 10 页
+			smapsBlockAt("7f3000000000", "7f3020000000", "01a00000", "00:1d", "527", 2048, 2048, true, "/dev/hugepages/vpp-main-heap")+ // 2M → 1 页
+			smapsBlockAt("7f4000000000", "7f7e40000000", "01c00000", "00:1d", "527", 1019904, 2048, true, "/dev/hugepages/vpp-main-heap")) // 996M → 498 页
+	writeProcComm(t, root, "31234", "vpp_main")
+
+	total, dp, ok := HugepageHeldPagesDetail(root)
+	if !ok {
+		t.Fatal("ok=false，预期可读")
+	}
+	if total["2M"] != 512 {
+		t.Errorf("total[2M] = %d，期望 512（同 inode 五段不相交 VMA 并集全计；旧「最大视图」只记 498）", total["2M"])
+	}
+	if dp["2M"] != 512 {
+		t.Errorf("dataplane[2M] = %d，期望 512（仅数据面进程映射 ⇒ 独占归属整键计入）", dp["2M"])
+	}
+}
+
+// 决策 #473：同 inode **重叠段去重**——两段叠一半 ⇒ 并集 = 覆盖页数（3 页），不是 4（简单求
+// 和）也不是 2（旧「最大视图」只记单段）。
+func TestHugepageHeldPagesSameInodeOverlapDedup(t *testing.T) {
+	root := t.TempDir()
+	// 同 inode（70）、2M 页：pid100 映射 [0,4M)（2 页），pid200 映射 [2M,6M)（2 页）。
+	writeSmaps(t, root, "100",
+		smapsBlockAt("7f0000000000", "7f0040000000", "00000000", "00:0d", "70", 4096, 2048, true, "/dev/hugepages/shared"))
+	writeSmaps(t, root, "200",
+		smapsBlockAt("7f1000000000", "7f1040000000", "00200000", "00:0d", "70", 4096, 2048, true, "/dev/hugepages/shared"))
+
+	total, _, ok := HugepageHeldPagesDetail(root)
+	if !ok {
+		t.Fatal("ok=false，预期可读")
+	}
+	if total["2M"] != 3 {
+		t.Errorf("total[2M] = %d，期望 3（[0,4M) ∪ [2M,6M) = [0,6M) ⇒ 3 页；重叠只计一次）", total["2M"])
+	}
+}
+
+// 决策 #473：跨进程共享**同一偏移范围**只计一次（如 vhost-user 的 guest RAM 同时映在 qemu
+// 与 VPP 的 smaps 里——两处同 inode 同范围）。
+func TestHugepageHeldPagesSameInodeSharedRangeOnce(t *testing.T) {
+	root := t.TempDir()
+	// 同 inode（71）、2M 页、同为 [0,4M)：两个进程各映射一次 → 只计 2 页（不是 4）。
+	writeSmaps(t, root, "100",
+		smapsBlockAt("7f0000000000", "7f0040000000", "00000000", "00:0d", "71", 4096, 2048, true, "/dev/hugepages/shared"))
+	writeSmaps(t, root, "200",
+		smapsBlockAt("7f1000000000", "7f1040000000", "00000000", "00:0d", "71", 4096, 2048, true, "/dev/hugepages/shared"))
+
+	total, _, ok := HugepageHeldPagesDetail(root)
+	if !ok {
+		t.Fatal("ok=false，预期可读")
+	}
+	if total["2M"] != 2 {
+		t.Errorf("total[2M] = %d，期望 2（同一偏移范围跨进程共享只计一次）", total["2M"])
+	}
+}
+
+// 决策 #473：不同进程各持**不相交段** ⇒ 求和；且读数与 /proc 扫描顺序无关。
+func TestHugepageHeldPagesSameInodeDisjointSumOrderIndependent(t *testing.T) {
+	for _, order := range []string{"A-first", "B-first"} {
+		t.Run(order, func(t *testing.T) {
+			root := t.TempDir()
+			// 同 inode（72）、2M 页：A 段 [0,4M)（2 页）+ B 段 [4M,6M)（1 页），分属两个进程。
+			segA := smapsBlockAt("7f0000000000", "7f0040000000", "00000000", "00:0d", "72", 4096, 2048, true, "/dev/hugepages/shared")
+			segB := smapsBlockAt("7f1000000000", "7f1020000000", "00400000", "00:0d", "72", 2048, 2048, true, "/dev/hugepages/shared")
+			if order == "A-first" {
+				writeSmaps(t, root, "100", segA)
+				writeSmaps(t, root, "200", segB)
+			} else {
+				writeSmaps(t, root, "100", segB)
+				writeSmaps(t, root, "200", segA)
+			}
+
+			total, _, ok := HugepageHeldPagesDetail(root)
+			if !ok {
+				t.Fatal("ok=false，预期可读")
+			}
+			if total["2M"] != 3 {
+				t.Errorf("total[2M] = %d，期望 3（不相交段并集求和：2+1；顺序 %s）", total["2M"], order)
+			}
+		})
+	}
+}
+
+// 决策 #473：混合页尺寸不回归——1G/2M 各自成键、互不污染。同一 inode 上混页尺寸属异常，
+// 按「inode + 尺寸」分键后各尺寸各自成并集：不挑分母、两边都不丢。
+func TestHugepageHeldPagesMixedPageSizesPerKey(t *testing.T) {
+	root := t.TempDir()
+	// pid100：inode 80 以 1G 页映射 [0,1G)（1 页）；inode 81 以 2M 页映射 [0,6M)（3 页）。
+	// pid200：inode 80 以 2M 页映射 [0,4M)（2 页）——异常布局，两个尺寸必须分别计入。
+	writeSmaps(t, root, "100",
+		smapsBlockAt("7f0000000000", "7f0040000000", "00000000", "00:0d", "80", 1048576, 1048576, true, "/dev/hugepages/a")+
+			smapsBlockAt("7f1000000000", "7f1060000000", "00000000", "00:0d", "81", 6144, 2048, true, "/dev/hugepages/b"))
+	writeSmaps(t, root, "200",
+		smapsBlockAt("7fa000000000", "7fa040000000", "00000000", "00:0d", "80", 4096, 2048, true, "/dev/hugepages/a"))
+
+	total, _, ok := HugepageHeldPagesDetail(root)
+	if !ok {
+		t.Fatal("ok=false，预期可读")
+	}
+	if total["1G"] != 1 {
+		t.Errorf("total[1G] = %d，期望 1（inode 80 的 1G 视图独立成键）", total["1G"])
+	}
+	if total["2M"] != 5 {
+		t.Errorf("total[2M] = %d，期望 5（inode 81 的 3 页 + inode 80 的 2M 视图 2 页）", total["2M"])
+	}
+}
+
+// 决策 #473 的防御回退：`Size:` 行缺失时用映射头行 end−start 作字节跨度（正常内核 smaps 恒
+// 有 Size 行；此分支只为畸形输入兜底，不让该映射被静默漏计）。
+func TestHugepageHeldPagesSpanFromHeaderFallback(t *testing.T) {
+	root := t.TempDir()
+	// inode 73、2M 页、无 Size 行：头行 [0x7f0000000000, 0x7f0000400000) = 4 MiB → 2 页。
+	writeSmaps(t, root, "100",
+		"7f0000000000-7f0000400000 rw-s 00000000 00:0d 73 /dev/hugepages/nosize\n"+
+			"KernelPageSize: 2048 kB\nMMUPageSize: 2048 kB\nVmFlags: rd wr sh mr mw me ms de ht pf io\n")
+
+	total, _, ok := HugepageHeldPagesDetail(root)
+	if !ok {
+		t.Fatal("ok=false，预期可读")
+	}
+	if total["2M"] != 2 {
+		t.Errorf("total[2M] = %d，期望 2（无 Size 行时按头行 end−start 折算）", total["2M"])
+	}
+}
+
+// 决策 #473 复核（原 #370 / R142 D3 用例，夹具与期望保持不变、注释按并集口径更新）：
+// 同 inode 的映射按**页范围并集**计——本例两进程在**同一偏移**给出 1 页 / 2 页两种视图，
+// 并集 = 较长覆盖范围（2 页），与 /proc 扫描顺序无关（#370 要保的顺序无关性由并集天然保持；
+// 「同一分配被切成多段不相交 VMA」的少算由 SegmentedVMAs 用例钉住）。旧「取最大视图」只是
+// 并集在「同偏移重叠」这一情形下的特例。
+func TestHugepageHeldPagesSameInodeUnionOrderIndependent(t *testing.T) {
 	for _, order := range []string{"small-first", "big-first"} {
 		t.Run(order, func(t *testing.T) {
 			root := t.TempDir()
@@ -610,7 +754,7 @@ func TestHugepageHeldPagesSameInodeMaxView(t *testing.T) {
 				t.Fatal("ok=false，预期可读")
 			}
 			if total["1G"] != 2 {
-				t.Fatalf("同 inode 只计一次且取最大视图（2 页），得 %d（顺序 %s）", total["1G"], order)
+				t.Fatalf("同 inode 并集只计一次（覆盖 2 页），得 %d（顺序 %s）", total["1G"], order)
 			}
 		})
 	}

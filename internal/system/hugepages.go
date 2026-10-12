@@ -13,7 +13,7 @@ package system
 // （dev34，round126 更正，见 `docs/evidence/v2-round12{4,5}-*.txt`）证明**无主占用页不能
 // 靠写 nr_hugepages 回收**：
 //   · #329 把「在用 = 内核实际 − 空闲」当作「有持有者的页」，但二者并不相等——读视图因此增两列
-//     **实际持有**（按 `/proc/*/smaps` 的 hugetlb 映射、按 inode 去重、按 KernelPageSize 折算）
+//     **实际持有**（按 `/proc/*/smaps` 的 hugetlb 映射、按 inode 的**页范围并集**汇总、按 KernelPageSize 折算）
 //     与 **无主占用**（= 在用 − 实际持有，≥ 0），并新增 `state=orphan` 与 `HUGEPAGE_POOL_ORPHAN`
 //     告警——**看得见确有效**。
 //   · ⚠️ 但「无主占用页」**不是**「内核释放得掉的页」：这类页多为**被进程预留（reserve）但尚未
@@ -26,7 +26,7 @@ package system
 // 口径：
 //   · 数字如实呈现：**声明**（配置唯一真源）/ **内核实际**（sysfs nr_hugepages）/
 //     **在用**（nr − free）/ **实际持有**（遍历 `/proc/*/smaps` 的 hugetlb 映射、按 inode
-//     去重、按 KernelPageSize 折算）/ **无主占用**（= 在用 − 实际持有，≥ 0）。取不到内核值就
+//     的页范围并集汇总、按 KernelPageSize 折算）/ **无主占用**（= 在用 − 实际持有，≥ 0）。取不到内核值就
 //     如实说取不到（actual/free/in_use = -1、state=unreadable）；取不到持有值就 held/orphan = -1
 //     并给 note，**都不编造**。
 //   · 数据面归属（决策 #353，收口 #347）：持有汇总再按进程 `/proc/<pid>/comm` 拆出
@@ -35,9 +35,10 @@ package system
 //     可用性说明（VNF 可起页数 = 空闲页数）。**纯呈现，不改回收/对账/告警任何语义**。
 //   · 判占用者**不能按 maps 路径过滤**（round125 教训：既漏匿名 hugetlb、又把共享映射当成独立
 //     分配）；本实现用 smaps 逐映射行的**内核 hugetlb 标记（VmFlags 含 `ht`）**识别，用
-//     `KernelPageSize` 折算到对应页尺寸池，用映射头行的 `dev:inode` 去重——同一页被多进程共享
-//     映射（如 vhost-user 同时出现在 qemu 与 VPP 的映射里）只计一次。也**不用**
-//     `/proc/<pid>/status` 的 `HugetlbPages`（它是全尺寸总量、不分页尺寸）。
+//     `KernelPageSize` 折算到对应页尺寸池，用映射头行的 `dev:inode` + **文件偏移**做**页范围
+//     并集**汇总（决策 #473）——同一页被多进程共享映射（如 vhost-user 同时出现在 qemu 与 VPP
+//     的映射里）按同一偏移范围只计一次；同一分配被内核切成多段不相交 VMA（VPP 主堆即如此）
+//     各段全计。也**不用** `/proc/<pid>/status` 的 `HugetlbPages`（它是全尺寸总量、不分页尺寸）。
 //   · 回收：只回收**空闲的多余页**（#329）= min(实际−声明, 空闲)。写 sysfs `nr_hugepages` 只能
 //     释放**空闲**页——被进程引用的页、被预留未 fault 的页都释放不了，故**在用页一律不动**。
 //   · 有界：每池**至多一次写 + 一次回读**（不重试不循环）；写 sysfs 返回成功不等于池已收敛，
@@ -172,8 +173,11 @@ var smapsHeaderRe = regexp.MustCompile(`^([0-9a-f]+)-([0-9a-f]+) (\S+) ([0-9a-f]
 //	· 判「是不是 hugetlb 映射」用内核自己的标记：该映射的 `VmFlags` 含 `ht`（HugeTLB）——
 //	  这既覆盖文件型 hugetlbfs，也覆盖匿名 hugetlb，不依赖路径。
 //	· 页尺寸按该映射的 `KernelPageSize` 折算，归属到同尺寸的池；不属于 1G/2M 的忽略。
-//	· 同一页被多进程共享映射（如 vhost-user 同时出现在 qemu 与 VPP 的映射里）：用映射头行的
-//	  `dev:inode` 去重，只计一次。
+//	· 同一页被多进程共享映射（如 vhost-user 同时出现在 qemu 与 VPP 的映射里）：同一 `dev:inode`
+//	  的映射按**页范围并集**汇总（决策 #473）——用映射头行的文件偏移与字节跨度收集区间、排序
+//	  合并：跨进程共享同一偏移范围只计一次，同一分配被内核切成多段不相交 VMA（VPP 主堆即如此）
+//	  各段全计，重叠段去重。⚠️ #370 的「同 inode 取最大视图」对多段 VMA 会少算（round25 现场
+//	  根因），已被本并集口径取代。
 //
 // ⚠️ 「无主占用 = 在用 − 实际持有」里那些页**不在这份汇总里**——它们恰恰是没有任何 smaps 引用的
 // 页（多为被进程预留 reserve 但未 fault 的大页），故本函数**看不到**它们，这也正是它们「无主」的原因。
@@ -193,17 +197,25 @@ const dataplaneCommPrefix = "vpp"
 // HugepageHeldPagesDetail 在 HugepageHeldPages 的基础上，把「数据面（comm 以 vpp 开头，实测 vpp_main）提交的页」
 // 单独归属出来（决策 #353）。total 与 HugepageHeldPages 的返回值完全一致。
 //
+// 去重与计页（决策 #473，取代 #370 的「同 inode 取最大视图」）：每个 hugetlb 映射同时带
+// `dev:inode` 与**文件偏移 + 字节跨度**；按「`dev:inode` + 页尺寸」为键收集全部映射的字节区间，
+// 排序合并后以**并集覆盖字节数 ÷ 页尺寸字节**计页——跨进程共享同一偏移范围只计一次、同一分配
+// 被内核切成多段不相交 VMA（VPP 主堆：1 GiB 主堆在 smaps 里是 5 个不相交 VMA）各段全计、
+// 重叠段去重。键按尺寸分开的理由：并集算术需要确定的页尺寸分母，而同一文件（hugetlbfs 挂载 /
+// memfd huge）的页尺寸恒定，真实映射下与纯 `dev:inode` 键等价；同 inode 混页尺寸属异常，分开
+// 记账让各尺寸各自成并集、不必为异常情形挑一个分母。
+//
 // 归属口径（round133b 上机修正——**独占归属**，勿改回「首见归属」）：
 //
-//	· 对每个 hugetlb 页（dev:inode）记录**全部映射它的进程**是否数据面（comm 以 "vpp" 开头，
-//	  真机实测 `vpp_main`）。一页**仅由数据面进程映射、无其它进程共享**才计入 dataplane。
+//	· 对每个 hugetlb 键（`dev:inode` + 页尺寸）记录**全部映射它的进程**是否数据面（comm 以 "vpp"
+//	  开头，真机实测 `vpp_main`）。一页**仅由数据面进程映射、无其它进程共享**才计入 dataplane。
 //	  ⚠️ 真机教训：vhost-user 会把 **VNF 的 guest RAM 大页映射进 VPP 进程**（该页同时出现在
 //	  vpp_main 与 qemu 的 smaps 里）——若按「首个被扫描到的进程」归属，/proc 目录序一变
 //	  （如 VNF 重启换 pid）同一现场会在 1↔2 间翻转（round133b Browser Use 复核抓到，CLI 与
 //	  REST 读数互相矛盾）。guest RAM 是 VNF 的页、不是「数据面固定占用」，独占判据把它排除。
 //	· comm 读不到的进程**按非数据面计**——宁少不猜；因此「无其它进程共享」若含 comm 读不到的
 //	  进程，也会把该页排除在 dataplane 之外（保守、不虚报数据面占用）。
-//	· 每页全局只计一次（total 与旧实现一致）。
+//	· 每键全局只计一次（total 与旧实现同形状；计的是并集页数，与 /proc 扫描顺序无关）。
 //
 // ok=false 表示一个进程的 smaps 都读不到（非 Linux / 无权限）：total/dataplane 为 nil，
 // 调用方应回 -1 并给 note，**不编造 0**。
@@ -213,14 +225,15 @@ func HugepageHeldPagesDetail(root string) (total, dataplane map[string]int, ok b
 	if err != nil {
 		return nil, nil, false
 	}
-	// 每页记录：页尺寸 + 页数 + 映射者构成（是否数据面映射过 / 是否被非数据面映射过）。
+	// 每个键记录：该键下收集到的映射字节区间 + 映射者构成（是否数据面映射过 / 是否被非数据面映射过）。
+	// 键 = `dev:inode` + 页尺寸（见上方「去重与计页」说明）。
 	type heldPage struct {
 		size    string
-		pages   int
+		ranges  []heldRange
 		byDP    bool
 		byOther bool
 	}
-	pages := map[string]*heldPage{} // dev:inode → 记录（跨进程共享映射只记一次）
+	pages := map[string]*heldPage{}
 	readAny := false
 	for _, e := range ents {
 		if !e.IsDir() {
@@ -237,17 +250,16 @@ func HugepageHeldPagesDetail(root string) (total, dataplane map[string]int, ok b
 		readAny = true
 		isDP := strings.HasPrefix(readProcComm(pidDir), dataplaneCommPrefix)
 		for _, pg := range scanSmapsPages(b) {
-			rec, ok := pages[pg.key]
+			key := pg.key + "|" + pg.size
+			rec, ok := pages[key]
 			if !ok {
-				rec = &heldPage{size: pg.size, pages: pg.pages}
-				pages[pg.key] = rec
-			} else if pg.pages > rec.pages ||
-				(pg.pages == rec.pages && pageSizeRank(pg.size) > pageSizeRank(rec.size)) {
-				// 决策 #370（R142 D3）：同 inode 多映射取**最大视图**（页数，平局按页尺寸取大）——
-				// 读数与 /proc 扫描顺序无关。此前保留首个扫描到的映射，映射视图长度不同时
-				// 同一现场会随目录序漂移（round134 的教训只修了归属）。
-				rec.pages, rec.size = pg.pages, pg.size
+				rec = &heldPage{size: pg.size}
+				pages[key] = rec
 			}
+			// 决策 #473：收集该键下**全部**映射的字节区间，汇总时按并集计页。
+			// （#370 的「同 inode 取最大视图」已被取代——同一分配被内核切成多段不相交 VMA 时
+			// 最大视图只记最长那段，round25 真机 2M 池即少算 14 页 ⇒ HUGEPAGE_POOL_ORPHAN 假报。）
+			rec.ranges = append(rec.ranges, heldRange{off: pg.off, span: pg.span})
 			if isDP {
 				rec.byDP = true
 			} else {
@@ -262,23 +274,13 @@ func HugepageHeldPagesDetail(root string) (total, dataplane map[string]int, ok b
 	total = map[string]int{"1G": 0, "2M": 0}
 	dataplane = map[string]int{"1G": 0, "2M": 0}
 	for _, rec := range pages {
-		total[rec.size] += rec.pages
+		n := unionHeldPages(rec.ranges, rec.size)
+		total[rec.size] += n
 		if rec.byDP && !rec.byOther {
-			dataplane[rec.size] += rec.pages // 独占归属：仅数据面映射的页才算「数据面固定占用」
+			dataplane[rec.size] += n // 独占归属：仅数据面映射的页才算「数据面固定占用」
 		}
 	}
 	return total, dataplane, true
-}
-
-// pageSizeRank 页尺寸的确定性排序（1G > 2M > 其它）——D3 的平局 tie-break 用。
-func pageSizeRank(size string) int {
-	switch size {
-	case "1G":
-		return 2
-	case "2M":
-		return 1
-	}
-	return 0
 }
 
 // readProcComm 读 `/proc/<pid>/comm`（进程名）；读不到返回 ""（按非数据面计——不猜）。
@@ -290,40 +292,58 @@ func readProcComm(pidDir string) string {
 	return strings.TrimSpace(string(b))
 }
 
-// heldPageRef 一份 smaps 里的一个托管 hugetlb 页（按 dev:inode 标识）。
+// heldPageRef 一份 smaps 里的一个托管 hugetlb 映射（按 dev:inode + 文件偏移标识区间）。
 type heldPageRef struct {
-	key   string // dev:inode（跨进程共享映射的同一页同键）
-	size  string // "1G" / "2M"
-	pages int    // 该映射的页数（sizeKB / KernelPageSize）
+	key  string // dev:inode（跨进程共享映射的同一文件同键）
+	size string // "1G" / "2M"
+	off  uint64 // 映射的文件偏移（头行第 3 字段，hex）；决策 #473 的并集判重叠用
+	span uint64 // 映射字节跨度（`Size:` kB×1024；缺失时按头行 end−start 回退）
 }
 
-// scanSmapsPages 解析一份 smaps 内容，返回其中**托管尺寸**的 hugetlb 映射（逐页记录，不去重）。
-// 去重与归属由调用方（HugepageHeldPagesDetail）按 dev:inode 汇总——独占归属需要看到**所有**
-// 映射者，故本函数不做 seen 过滤（决策 #353，round133b 修正）。
+// scanSmapsPages 解析一份 smaps 内容，返回其中**托管尺寸**的 hugetlb 映射（逐映射记录，不去重）。
+// 去重与归属由调用方（HugepageHeldPagesDetail）按 dev:inode + 页尺寸汇总——独占归属需要看到
+// **所有**映射者（决策 #353），并集计页需要看到**所有**映射区间（决策 #473），故本函数不做
+// seen 过滤。
 func scanSmapsPages(data []byte) []heldPageRef {
 	var (
 		out      []heldPageRef
 		devInode string // 当前映射头行的 dev:inode
+		offset   uint64 // 当前映射头行的文件偏移（hex）
+		addrSpan uint64 // 当前映射头行的 end−start（`Size:` 行缺失时的跨度回退）
 		inBlock  bool
 		isHuge   bool // 当前映射是否 hugetlb（VmFlags 含 ht）
 		pageKB   int  // KernelPageSize
 		sizeKB   int  // Size
 	)
 	flush := func() {
-		if !inBlock || !isHuge || pageKB <= 0 || sizeKB <= 0 {
+		if !inBlock || !isHuge || pageKB <= 0 {
 			return
 		}
 		size := hugepageSizeForKB(pageKB)
 		if size == "" {
 			return // 不是本产品托管的页尺寸
 		}
-		out = append(out, heldPageRef{key: devInode, size: size, pages: sizeKB / pageKB})
+		span := uint64(sizeKB) * 1024
+		if sizeKB <= 0 {
+			span = addrSpan // 防御回退：Size 行缺失时用头行 end−start
+		}
+		if span == 0 {
+			return
+		}
+		out = append(out, heldPageRef{key: devInode, size: size, off: offset, span: span})
 	}
 	for _, raw := range strings.Split(string(data), "\n") {
 		ln := strings.TrimRight(raw, "\r")
 		if m := smapsHeaderRe.FindStringSubmatch(ln); m != nil {
 			flush()
 			devInode = m[5] + ":" + m[6] // dev:inode
+			offset, _ = strconv.ParseUint(m[4], 16, 64)
+			addrSpan = 0
+			if start, e1 := strconv.ParseUint(m[1], 16, 64); e1 == nil {
+				if end, e2 := strconv.ParseUint(m[2], 16, 64); e2 == nil && end > start {
+					addrSpan = end - start
+				}
+			}
 			inBlock, isHuge, pageKB, sizeKB = true, false, 0, 0
 			continue
 		}
@@ -343,6 +363,59 @@ func scanSmapsPages(data []byte) []heldPageRef {
 	}
 	flush()
 	return out
+}
+
+// heldRange 一个映射的字节区间 [off, off+span)。
+type heldRange struct {
+	off  uint64
+	span uint64
+}
+
+// unionHeldPages 同键（dev:inode + 页尺寸）下全部映射区间按**并集**计页：按偏移排序、合并
+// 重叠区间，用并集覆盖字节数 ÷ 页尺寸字节（hugetlb 映射的偏移/长度实测为页对齐，除法精确；
+// 非对齐向下取整，与既有的「单映射 Size / KernelPageSize」折算一致）。
+//
+// 口径（决策 #473，取代 #370 的「最大视图」）：
+//   - 跨进程共享同一偏移范围 → 并集只计一次；
+//   - 同一分配被内核切成多段不相交 VMA（同一进程，如 VPP 主堆）→ 各段全计；
+//   - 重叠段 → 去重（只计覆盖一次）。
+func unionHeldPages(ranges []heldRange, size string) int {
+	kb, ok := HugepagePageKB(size)
+	if !ok || len(ranges) == 0 {
+		return 0
+	}
+	pageBytes := uint64(kb) * 1024
+	rs := append([]heldRange(nil), ranges...)
+	sort.Slice(rs, func(i, j int) bool {
+		if rs[i].off != rs[j].off {
+			return rs[i].off < rs[j].off
+		}
+		return rs[i].span < rs[j].span
+	})
+	var covered, curStart, curEnd uint64
+	open := false
+	for _, r := range rs {
+		if r.span == 0 {
+			continue
+		}
+		start, end := r.off, r.off+r.span
+		if !open {
+			curStart, curEnd, open = start, end, true
+			continue
+		}
+		if start > curEnd { // 与当前段不相交：结算当前段，另起一段
+			covered += curEnd - curStart
+			curStart, curEnd = start, end
+			continue
+		}
+		if end > curEnd { // 重叠/相邻：向右扩展
+			curEnd = end
+		}
+	}
+	if open {
+		covered += curEnd - curStart
+	}
+	return int(covered / pageBytes)
 }
 
 // smapsKBNum 取 smaps 行里的 kB 数值（如 "KernelPageSize:  2048 kB" → 2048）。
@@ -376,7 +449,7 @@ type HugepagePoolView struct {
 	Actual   int    `json:"actual"`   // 内核实际页数（sysfs nr_hugepages；不可读时 -1）
 	Free     int    `json:"free"`     // 内核空闲页数（不可读时 -1）
 	InUse    int    `json:"in_use"`   // 在用页数 = actual - free（不可读时 -1）
-	Held     int    `json:"held"`     // 实际持有页数（进程/inode 引用汇总；取不到时 -1）
+	Held     int    `json:"held"`     // 实际持有页数（进程/inode 页范围并集汇总；取不到时 -1）
 	// HeldByDataplane 其中数据面（comm 以 vpp 开头）提交的页数（实测；取不到时 -1）。
 	// 1G 池那 1 页的**归属**见 hugepageDataplaneNote 的注释：实测是 DPDK EAL 段（memfd:seg_0-0），
 	// 不是 VPP 主堆（决策 #460 更正 #347/#353 的措辞）。

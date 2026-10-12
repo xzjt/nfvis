@@ -1281,7 +1281,8 @@ nfvis$ request system hugepages reclaim   # 回收空闲的多余页（在用页
 ③ 命令会**回读**内核实际值确认，写不进去或回读不一致会如实报错、并说明**谁在占用**（声明用该页池的 VNF、
 数据面页尺寸偏好、大页挂载点）。收敛不掉时 `show alarms` 会有一条 `HUGEPAGE_POOL_SURPLUS`，收敛后自动消警。
 ④ **「在用」不等于「有持有者」**：读视图另有两列「**实际持有**」（按进程的 hugetlb
-映射按 inode 去重汇总，折算到本页尺寸）与「**无主占用**」（= 在用 − 持有），`state` 显示 `orphan`。
+映射**按 inode 的页范围并集**汇总——跨进程共享同一范围只计一次、同一分配被切成多段映射也不会
+少算；折算到本页尺寸）与「**无主占用**」（= 在用 − 持有），`state` 显示 `orphan`。
 ⚠️ 这类无主占用页**多为被进程预留（reserve）但尚未使用的大页**（例如数据面 DPDK 的预留）——它们
 **不在空闲链表上**，产品侧写 `nr_hugepages` **释放不了**，`request system hugepages reclaim`
 **不会动它们**（本命令只回收空闲的多余页）；它们只作**可见性**，由 `HUGEPAGE_POOL_ORPHAN`（warning）

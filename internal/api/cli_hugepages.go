@@ -12,7 +12,7 @@ package api
 //	声明值   = committed 的 resource-pools 声明（产品唯一真源；deriveKernelDesired 派生）
 //	内核实际 = sysfs nr_hugepages
 //	在用值   = 内核实际 - 空闲页（**不一定都有持有者**——见下）
-//	实际持有 = 遍历 /proc/*/smaps 的 hugetlb 映射、按 inode 去重、按 KernelPageSize 折算
+//	实际持有 = 遍历 /proc/*/smaps 的 hugetlb 映射、按 inode 的页范围并集汇总、按 KernelPageSize 折算
 //	数据面占用 = 实际持有中 comm=vpp 的进程提交的页（实测归属，决策 #353；取不到时 -1）
 //	无主占用 = 在用 - 实际持有（≥0）：分配了却无进程/inode 引用的页（决策 #346）
 //	可回收   = 空闲的多余页（#329）；**无主占用页不可回收**（#346 真机实测撤回）
