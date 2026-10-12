@@ -265,7 +265,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set system api tls cert-file <p> key-file <p>` | 安装外部证书（立即生效） | nfvisd TLS | ✅（决策 #79 修复） |
 | `set system api tls self-signed regenerate` | 重签自签证书 | nfvisd TLS | ✅ |
 | `set system management interface <ifname>` | 管理网卡（不得用于数据面） | 宿主 + 数据面隔离校验 | ✅（决策 #71/72；**变更须 `commit confirmed`**，含首次声明） |
-| `set system management ip address <ip-prefix>` | 管理口静态地址（须已配置在宿主上——产品**不代改宿主 netplan/地址**，该值用于监听收敛与隔离校验；**提交成功后监听地址实时收敛**，决策 #471） | 宿主网络 + nfvisd 监听 | ✅ |
+| `set system management ip address <ip-prefix>` | 管理口静态地址（须已配置在宿主上——产品**不代改宿主 netplan/地址**，该值用于监听收敛与隔离校验；**提交成功后监听地址实时收敛**，决策 #471。管理面**同时监听回环 `127.0.0.1`**（仅本机可达、不扩大对外暴露面），故本机 `nfvis-cli` **缺省即可用**、无需 `-server`；主监听为通配或回环时不再重复绑回环，回环绑定失败为尽力而为、不影响主监听） | 宿主网络 + nfvisd 监听 | ✅ |
 | `set system management gateway <ip>` | 管理口默认网关（同上：只记录，不代改宿主） | 宿主网络 | ✅ |
 | `set system kernel nmi-watchdog <bool>` | NMI watchdog | GRUB 基线 | ✅ |
 | `set system kernel transparent-hugepages <mode>` | THP 模式 | GRUB 基线 | ✅ |

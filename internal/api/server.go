@@ -8,6 +8,7 @@ package api
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -143,6 +144,17 @@ type Server struct {
 	lnAddr   string           // 当前实际绑定串（归一形式：如 [::]:443 → :443）
 	lnGen    uint64           // 监听代际：每起一代 serve 递增；旧代退出不视为致命
 	serveErr chan serveResult // 各代 serve 退出上报
+	// 决策 #478：主监听之外额外监听回环 127.0.0.1:<port>，使本机 nfvis-cli 缺省可用。
+	// 主监听为通配/回环时不重复绑（通配已覆盖回环、且会 EADDRINUSE）；回环**尽力而为**
+	// （绑定失败只记日志，绝不影响主监听），其 serve 退出只记日志、不进 serveErr 代际通道。
+	loopLn   net.Listener // 回环监听（nil = 当前无；受 listenMu 保护）
+	loopAddr string       // 回环监听地址（归一形式；受 listenMu 保护）
+	// listenFn 监听套接字工厂（默认 net.Listen）。测试注入以模拟「具体非回环主地址」与
+	// 「回环绑定失败」——Windows 上真绑具体非回环地址不可行。nil = net.Listen。
+	listenFn func(network, addr string) (net.Listener, error)
+	// tlsOnce 保证 s.http.TLSConfig 在所有 serve 代（主监听与回环）之前只设定一次，
+	// 避免两个 serve goroutine 并发写——TLS 语义不变（GetCertificate 仍每握手读盘）。
+	tlsOnce sync.Once
 }
 
 // serveResult 一次 serve 代退出上报（gen = 该代建立时的监听代际，决策 #471）。
@@ -166,6 +178,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	logs := scrubLogSource(opts.LogSource)
 	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, vppState: opts.VppState, sriov: opts.SRIOV, dpdk: opts.DPDK, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, ports: opts.Ports, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), versions: opts.Versions, logs: logs, diag: opts.Diag, log: log}
 	s.serveErr = make(chan serveResult, 8) // 决策 #471：常驻（缓冲 ≥4，serve 代退出不阻塞）
+	s.listenFn = net.Listen                // 决策 #478：监听工厂默认实现（测试可替换）
 	s.history = opts.MetricsHistory
 	s.cliExec.setMetricsHistory(s.metricsHistoryView) // 决策 #356：CLI 渲染与 REST 同一读视图
 	s.cliExec.setRuntime(opts.Diag, opts.State)
@@ -493,7 +506,11 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 // （FR-SYS-006；0/未设置 = 不限）。此前 max-sessions 在命令树与契约中均有声明，
 // 但无任何代码使用它——属「声明了但无实现」（决策 #71）。
 func (s *Server) listener(addr string) (net.Listener, error) {
-	ln, err := net.Listen("tcp", addr)
+	dial := s.listenFn
+	if dial == nil {
+		dial = net.Listen // 防御：未经 New 构造（测试直装）时用默认实现
+	}
+	ln, err := dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -534,6 +551,7 @@ func (s *Server) ListenAndServe() error {
 	}
 	s.listenMu.Lock()
 	s.startServeLocked(ln)
+	s.reconcileLoopbackLocked() // 决策 #478：主监听建立后协调回环监听
 	s.listenMu.Unlock()
 	for {
 		r := <-s.serveErr
@@ -572,30 +590,37 @@ func (s *Server) startServeLocked(ln net.Listener) {
 // serveOn 在监听上提供服务（初始监听与换绑后的新监听共用）。
 func (s *Server) serveOn(ln net.Listener) error {
 	if s.tlsCert != "" && s.tlsKey != "" {
+		// 决策 #478：主监听与回环监听共用同一 *http.Server，TLSConfig 必须在起任何 serve
+		// 之前只设定一次（否则两个 serve goroutine 并发写）。闭包内仍每握手读盘 ⇔ 换证即时生效。
+		s.tlsOnce.Do(func() { s.http.TLSConfig = s.buildTLSConfig() })
 		s.log.Info("API 服务启动（HTTPS）", "addr", ln.Addr().String())
-		// FR-SYS-011：GetCertificate 每次握手读盘 → 换证/重签（PUT /system/tls 或
-		// request system api tls regenerate）无需重启即时生效；读盘失败回退启动时加载的证书。
-		certPath, keyPath := s.tlsCert, s.tlsKey
-		var fallback *tls.Certificate
-		if c, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
-			fallback = &c
-		}
-		s.http.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12, // FR-SEC-004：TLS 1.2+
-			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-				if c, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
-					return &c, nil
-				}
-				if fallback != nil {
-					return fallback, nil
-				}
-				return nil, fmt.Errorf("加载证书 %s 失败", certPath)
-			},
-		}
 		return s.http.ServeTLS(ln, "", "")
 	}
 	s.log.Info("API 服务启动（HTTP，仅限开发/测试）", "addr", ln.Addr().String())
 	return s.http.Serve(ln)
+}
+
+// buildTLSConfig 构造 TLS 配置（FR-SYS-011）：GetCertificate 每次握手读盘，换证/重签
+// （PUT /system/tls 或 request system api tls regenerate）无需重启即时生效；读盘失败
+// 回退启动时加载的证书。仅由 serveOn 经 tlsOnce 调用一次。
+func (s *Server) buildTLSConfig() *tls.Config {
+	certPath, keyPath := s.tlsCert, s.tlsKey
+	var fallback *tls.Certificate
+	if c, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
+		fallback = &c
+	}
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12, // FR-SEC-004：TLS 1.2+
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if c, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
+				return &c, nil
+			}
+			if fallback != nil {
+				return fallback, nil
+			}
+			return nil, fmt.Errorf("加载证书 %s 失败", certPath)
+		},
+	}
 }
 
 // Rebind 运行期换绑监听地址（决策 #471）。
@@ -619,6 +644,11 @@ func (s *Server) Rebind(addr string) error {
 	}
 	old := s.lnAddr
 	_ = s.ln.Close() // 先放掉旧监听（同端口换 IP 时新旧不允许并存）
+	// 决策 #478：若新主监听本身会覆盖回环（通配/回环），必须先放掉回环监听——否则绑新
+	// 主监听会撞上自己占着的 127.0.0.1:<port>（EADDRINUSE），换绑被误判失败。
+	if _, need := loopbackListenAddr(want); !need {
+		s.closeLoopbackLocked()
+	}
 	newLn, err := s.listener(want)
 	if err != nil {
 		// 回退：重新绑定原地址，保证失败时服务不中断
@@ -627,9 +657,11 @@ func (s *Server) Rebind(addr string) error {
 			return fmt.Errorf("新监听地址 %s 绑定失败（%v）；回退原地址 %s 也失败：%w", addr, err, old, berr)
 		}
 		s.startServeLocked(back)
+		s.reconcileLoopbackLocked() // 决策 #478：主地址未变，回环协调为幂等（保证状态自洽）
 		return fmt.Errorf("新监听地址 %s 绑定失败（已回退 %s）：%w", addr, old, err)
 	}
 	s.startServeLocked(newLn)
+	s.reconcileLoopbackLocked() // 决策 #478：换绑成功后按新主地址重新协调回环
 	return nil
 }
 
@@ -638,6 +670,86 @@ func (s *Server) BoundAddr() string {
 	s.listenMu.Lock()
 	defer s.listenMu.Unlock()
 	return s.lnAddr
+}
+
+// LoopbackAddr 返回当前回环监听地址（归一形式；未监听时为空串；供日志与测试）。
+func (s *Server) LoopbackAddr() string {
+	s.listenMu.Lock()
+	defer s.listenMu.Unlock()
+	return s.loopAddr
+}
+
+// loopbackListenAddr 是决策函数（纯函数，便于红-绿）：给定**归一后**的主监听地址，
+// 判断是否需要额外监听回环 127.0.0.1:<port>（决策 #478）。
+//
+//	主监听为通配（""/0.0.0.0/:: → 归一为 ":port"）⇒ 不绑（通配已覆盖回环，重复绑会 EADDRINUSE）
+//	主监听本身是回环（127.0.0.0/8、::1）⇒ 不绑
+//	主监听为具体非回环 IP 字面 ⇒ 返回 "127.0.0.1:<port>"（port 取自主监听）
+//
+// 主机名（非 IP 字面）无法判定是否为回环，保守不绑（不猜测、避免 EADDRINUSE）；产品实际
+// 经 ResolveListenAddr 收敛出的都是 IP 字面。仅接受 host:port 形式；解析失败返回不绑。
+func loopbackListenAddr(mainAddr string) (string, bool) {
+	host, port, err := net.SplitHostPort(mainAddr)
+	if err != nil || port == "" {
+		return "", false
+	}
+	if host == "" { // 通配（归一后的 ""、0.0.0.0、:: 都落到这里）
+		return "", false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return "", false // 主机名：无法判定是否回环，保守不绑
+	}
+	if ip.IsUnspecified() || ip.IsLoopback() {
+		return "", false
+	}
+	return net.JoinHostPort("127.0.0.1", port), true
+}
+
+// reconcileLoopbackLocked 按当前主监听地址协调回环监听（调用方持 listenMu）。
+// 主监听为通配/回环 ⇒ 关闭多余回环；为具体非回环 ⇒ 幂等复用或新建。
+// 回环**尽力而为**：任何失败只记日志，绝不影响主监听，也不返回错误。
+func (s *Server) reconcileLoopbackLocked() {
+	want, need := loopbackListenAddr(s.lnAddr)
+	if !need {
+		s.closeLoopbackLocked()
+		return
+	}
+	if s.loopLn != nil && s.loopAddr == want {
+		return // 已在该回环地址：幂等
+	}
+	s.closeLoopbackLocked() // 目标变了：先放掉旧回环
+	ln, err := s.listener(want)
+	if err != nil {
+		// 诚实告警但绝不致命：主监听照常服务，本机 CLI 缺省暂不可用。
+		s.log.Warn("回环监听绑定失败（本机 nfvis-cli 缺省将不可用，管理面服务不受影响）",
+			"addr", want, "err", err)
+		return
+	}
+	s.loopLn = ln
+	s.loopAddr = want
+	go s.serveLoopback(ln)
+}
+
+// closeLoopbackLocked 关闭并清空回环监听（调用方持 listenMu）。
+func (s *Server) closeLoopbackLocked() {
+	if s.loopLn != nil {
+		_ = s.loopLn.Close()
+		s.loopLn = nil
+		s.loopAddr = ""
+	}
+}
+
+// serveLoopback 在回环监听上提供服务（独立 goroutine，决策 #478）。
+// 其退出**不进**主监听的 serveErr 代际通道——回环非必需，异常只记日志，不与主监听混淆。
+func (s *Server) serveLoopback(ln net.Listener) {
+	err := s.serveOn(ln)
+	switch {
+	case err == nil, errors.Is(err, http.ErrServerClosed), errors.Is(err, net.ErrClosed):
+		s.log.Debug("回环监听已停止", "addr", ln.Addr().String())
+	default:
+		s.log.Warn("回环监听服务退出", "addr", ln.Addr().String(), "err", err)
+	}
 }
 
 // normalizeListenAddr 归一监听地址串（决策 #471）：统一通配写法（""、0.0.0.0、:: →
@@ -667,8 +779,13 @@ func normalizeListenAddr(addr string) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
-// Shutdown 优雅停机。
-func (s *Server) Shutdown(ctx context.Context) error { return s.http.Shutdown(ctx) }
+// Shutdown 优雅停机（决策 #478：同时关掉回环监听）。
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.listenMu.Lock()
+	s.closeLoopbackLocked()
+	s.listenMu.Unlock()
+	return s.http.Shutdown(ctx)
+}
 
 // ---------- 中间件 ----------
 
