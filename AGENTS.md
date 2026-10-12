@@ -1593,6 +1593,39 @@
   run→expect_fail 位移）、语义 **27/0/2**（先跑正向控制夹具 ⇒ 比基线多一条：S8 转可判定并通过）、
   lifecycle **23/0/2**、pty **10/10**。`make check` 七项 RC=0（决策计数 **368**）。证据
   `docs/evidence/v3-round23-d466-capture-restart-reconcile.txt`。
+- **v3 round24（v3.0.11 发布件干净快照首装 + 全功能走查：VPP/内核双线 + 数据面往返，2026-10-12）**：
+  在恢复为「干净」快照的 nfvis-vm 上装 **v3.0.11 发布件**（宿主构建树 scp 上机、sha256 逐字复核；
+  GitHub 直连不可达、代理可用），**双池标准布局**（1G=3 / 2M=768，承接 R12-1 裁定）从零走查：
+  首装自检 **18/0/0** → 一次性口令 → 真 pty 向导（含 2M 在场时 hugepage-preference 自动 2M）→
+  kernel apply+重启（cmdline/两挂载点 [#459] 核对）→ 管理口 guard 负控 + commit confirmed →
+  系统基线宿主四处实读（[#424]）→ 业务口 bind-dpdk（负控 + #464 的「按记录交还」双口实证）→
+  **VPP 全族**（L2/BVI、L3/静态路由 [#194]、ACL 三态 [#340/#341/#361]、QoS [#454 硬拒 + 双向绑定]、
+  风暴 + VXLAN、VNF 串口真 pty、DHCP server **完整 DORA**、数据面 DNS（主机+guest）、relay/server
+  互斥 [#368]、LLDP 跳过登记 [#451]、抓包冻结/重启恢复 [#465/#466]、NAT44 pcap 源改写、
+  SPAN vNIC 源镜像帧（命令全表标「待真机」的补验）、display set 两形态 [#452]、快照全链、
+  诊断/备份/诊断包（秘密扫描干净）、operator 双面门禁、SSE 真事件）→ **Web 黑盒**（Browser Use：
+  7 页 + 6 截图，含浏览器↔guest 串口双向、浏览器↔容器 exec、QoS 绑定列 [#332]、LLDP 跳过态）→
+  **切内核**（NAT 跨域负控 [#419]、VPP 自动停 [#426]、内核侧桥/VRF/nft/tc、容器 veth ping 网关
+  [#441]、内核 DHCP DORA [#438]、内核 DNS 按域 socket [#439]、内核 LLDP 全局即全口发帧 [#451]、
+  内核 ACL nft 真拦 [#405]、内核抓包 [#436]、VNF 内核域 bridge + `ping … vrf` [#455/#457]）→
+  **切回 vpp**（**[#453] teardown 实证**：桥/VRF/nft 全消失；重绑 + VPP restart 后全部 RECOVERY
+  告警清零、对象全量重建）→ 收尾清场（终态：VPP 仅两口、内核零残留、池 3/768、告警仅既有
+  HUGEPAGE_POOL_ORPHAN）。**#450~#466 全部回归项逐条复验通过**。**新登记 5 条缺陷 + 6 条观察**
+  （账目 `docs/v3待做.md` §九）：**R24-C（中低）**内核侧放行 VPP-only 的 `l3-interface` 指向
+  vNIC 派生名（切换后 3 条告警如实上报 + 该 VM 内核侧域组装失败；R13-C 同族缺口）；**R24-D（中低）**
+  运行中负载形态变更须 stop+start 而无可发现性（加 vNIC / 跨数据面切换两态同根；唯一线索
+  VNF_PORT_DOWN 的括号解释还与事实相反）；**R24-A（低-中低）**CLI `show virtual-switches` 列表/
+  详情只覆盖 BD（不列 L3、对已存在 L3 名报「不存在」，REST/Web 均正常）；**R24-E（低）**管理口
+  首次声明后监听地址要下次服务启动才收敛（`ResolveListenAddr` 仅启动装配期）；**R24-B（低）**
+  事件 payload state 在 stop 时为 `"stoping"`。观察：租约不跨数据面切换（#360 口径）、
+  RECOVERY_UNCONVERGED 保守保留到下次重放（#333 口径）、未绑定 ACL 内核也有未挂载链、
+  **命令全表 `port-mirroring … source vnf` 仍标「🚫 待真机」而两轮均已真机补验（文档账目缺口，
+  留待收口批如实化）**、user-data 文件改动提示语不同步、lab artifact 两态复现。
+  ⚠️ **现场**：VM 装 v3.0.11（发布件；rev 31）、两口 DPDK、池 1G=3(dp1/free2)/2M=768、
+  管理口令 **dtsP1GXPNqIX-9gk@Aa1**（本轮首装的一次性口令；快照恢复即失效）、
+  告警仅既有 HUGEPAGE_POOL_ORPHAN；夹具 alpine.qcow2 + ct.tar + docker 两 tag 保留；
+  套件本轮未跑。证据 `docs/evidence/v3-round24-clean-install-walkthrough-vpp-kernel.txt`
+  + 截图 `docs/images/v3-round24-web-*.png`。
 - **V1 验收收口**：`docs/V1-验收检查表.md` 把规格书 **109 条 FR** 逐条对照证据
   （**通过 101 / 未验 4 / 降级 2 / 移 V2 2**；2026-09-18 收口：NFR-005/NFR-006 转通过、FR-SEC-006 拆两半），降级理由与签字建议见其 §5/§6；
   **待办与未完成项的唯一入口见 `docs/V1-收尾待办.md`**（含环境要点与踩坑记录）。
