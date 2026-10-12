@@ -27,6 +27,42 @@ import (
 // ping 超时。
 const pingTimeout = 30 * time.Second
 
+// 诊断 `count` 口径的**单一事实源**（决策 #475）。
+//
+// 两数据面共用同一口径：未指定（0）＝默认 DiagDefaultCount、上界 DiagCountMax
+// （越界报同一可读错误、**不静默截断**）、负数报错。内核侧（netkernel.Diag.Ping）与
+// VPP 侧（Diagnostics.Ping）都调用 ValidateDiagCount，错误文案逐字同源。
+//
+// 上界取 100：诊断是长耗时操作，不设上界时可以要求发几十万个包把调用挂住。
+const (
+	// DiagCountMax count 的上界：超出直接报可读错误，**不静默截断**（用户要的就是这个数）。
+	DiagCountMax = 100
+	// DiagDefaultCount 未指定 count（0）时的发包数。
+	DiagDefaultCount = 5
+)
+
+// ValidateDiagCount 校验并归一诊断发包数 count（ping 用），两数据面同源。
+//
+//   - count==0 视为「未指定」⇒ 返回 DiagDefaultCount；
+//   - 1..DiagCountMax 合法，原样返回；
+//   - count>DiagCountMax 或 count<0 ⇒ 返回可读错误（**不静默截断**）。
+//
+// 错误文案是本文件的唯一实现——内核（netkernel）与 VPP 两侧都从这里取，故逐字同源。
+func ValidateDiagCount(count int) (int, error) {
+	if count > DiagCountMax {
+		return 0, fmt.Errorf("ping count %d 超出上限 %d（不静默截断）：请改为不超过 %d 的值",
+			count, DiagCountMax, DiagCountMax)
+	}
+	if count < 0 {
+		return 0, fmt.Errorf("ping count %d 不合法：须为 1-%d（0 = 未指定，用默认 %d）",
+			count, DiagCountMax, DiagDefaultCount)
+	}
+	if count == 0 {
+		return DiagDefaultCount, nil
+	}
+	return count, nil
+}
+
 // IfaceAddr 一条接口地址（ip_address_dump）。
 type IfaceAddr struct {
 	SwIfIndex uint32
@@ -110,6 +146,15 @@ func (d *Diagnostics) Ping(ctx context.Context, req PingRequest) (string, error)
 	}
 	if d.shell == nil {
 		return "", errors.New("ping 不可用（VPP CLI 未装配）")
+	}
+	// 诊断 count 口径（决策 #475）：与内核数据面同源——0=「未指定，用默认 5」、上界 DiagCountMax、
+	// 负数报错；越界报同一可读错误（**不静默截断**）。此前这里只做 `req.Count > 0` 透传，>100 与
+	// 负数都会被原样交给 vppctl（无上界、不拒负）。
+	//
+	// 未指定（req.Count==0）时**不传 repeat**：vppctl ping 缺省即发 5 个（`repeat` 的默认值就是 5），
+	// 与内核侧默认 DiagDefaultCount=5 同值，两数据面「0=默认 5」因此一致；1..DiagCountMax 显式 `repeat N`。
+	if _, err := ValidateDiagCount(req.Count); err != nil {
+		return "", err
 	}
 	// 显式 IPv6（决策 #330）：VPP CLI 的族选择写在目标之前（`ping ipv6 <addr>`）。
 	// 未显式给时照旧只写目标——vppctl 会按地址字面自动判族（IPv6 字面也能走通，

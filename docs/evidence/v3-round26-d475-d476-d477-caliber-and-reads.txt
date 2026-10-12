@@ -1,0 +1,142 @@
+NFViS v3 · round26（2026-10-12）：v3待做 §二 项 22/23/24 收口
+=========================================================
+主题：清理 v3待做 §二「数据面可切换残余与口径」的三条开放项——
+  项 22 诊断 count 口径差（VPP 侧无上界）        → 决策 #475
+  项 23 风暴抑制计数可读（round8 观察④）        → 决策 #476
+  项 24 port-mirroring 连写口径不一致（观察⑤）  → 决策 #477
+方式：契约先行（附录 A #475/#476/#477 + AGENTS 计数 376→379）→ 子智能体分域实现（红-绿）
+      → make check 七项 → 交叉编译换装 3.0.12~dev1 真机逐条复核。
+
+────────────────────────────────────────────────────────
+§0 结论
+────────────────────────────────────────────────────────
+三条全部收口并经真机验证：
+  #475：VPP 侧补上界——`ping <h> count 101` ⇒ `%% ping count 101 超出上限 100（不静默截断）…`
+        （与内核侧同一文案；改前 VPP 侧放行）。count 100 放行、count -1 在解析层拒绝。
+        ※ 更正：本次会话早前把「ACL 链重建窗口」当开放项有误——它已由决策 #434 收口；
+        §二 真正的开放项即 22/23/24 三条。
+  #476：policer 计数改按**产品记录的索引**从 stats segment 读；真机经广播流量实证
+        read view `conform 301650 / exceed 0 / violate 0` = `vppctl show policer`
+        （301650 pkts / 36801421 B）= 原始 stats `3:2:1:301650:36801421:/net/policer/conform`
+        （索引 2 = 本产品 policer，跨线程求和；索引 0/1 保持 0）。改前按名查找恒不命中 ⇒ 恒「不可读」。
+  #477：候选树不再把已完成语句的兄弟关键字续补为同线语句（通用机制修正）；
+        REST `GET /cli/candidates` 实证：`… analyzer interface ens224` 后续补集合为 `null`、
+        `… source interface ens192` 后续补 `direction` 且不给 `analyzer`；两条独立语句 `[ok]`×2、
+        连写仍按契约拒绝（`%% 未知语句: "analyzer"`）。
+
+────────────────────────────────────────────────────────
+§1 契约（附录 A 追加，决策计数 376→379）
+────────────────────────────────────────────────────────
+  #475（v3 线第 72 条）诊断 count 口径统一：两数据面共用同一口径（0=默认 5、上界 100、负数报错），
+       上界常量/校验单一事实源（network 包），VPP 侧 `Diagnostics.Ping` 接入同一校验、文案同源。
+  #476（v3 线第 73 条）风暴 policer 计数改按记录索引从 stats segment 读取；**修正 #429②** 的
+       「计数一律按名匹配」（同步路径无 policer 名，按名不可行）。
+  #477（v3 线第 74 条）port-mirroring 树与映射收尾口径一致（以「两条独立语句」契约为准）。
+  AGENTS.md「已定决策 376 项」→「379 项」，v3 范围 #404~#474 → #404~#477。
+  附录 A 行 474 原为多行（换行续行），追加 #475~#477 后其续行落入「首尾决策行之间」被
+  check_decisions_count.sh 的结构检查判为孤立行 ⇒ 已把 #474 折成单行（纯格式，内容不变）。
+
+────────────────────────────────────────────────────────
+§2 #475 诊断 count 口径统一（VPP 侧补上界）
+────────────────────────────────────────────────────────
+【实现（子智能体）】
+  internal/orchestrator/network/diag.go：新增 `DiagCountMax=100`、`DiagDefaultCount=5`、
+    `ValidateDiagCount(count) (int, error)`（0→5；1..100 透传；>100/<0 报可读错误，文案与内核侧逐字同源）；
+    `Diagnostics.Ping` 入口先校验（拒绝发生在调 vppctl 之前）。count>0 才发 `repeat N`；count==0 不发
+    （依赖 vppctl 默认 repeat=5，与内核侧默认一致——注释写明）。
+  internal/orchestrator/netkernel/diag.go：删重复常量/文案，`Ping` 改调 `network.ValidateDiagCount`，
+    行为逐字不变。
+【红-绿】internal/orchestrator/network/diag_test.go 新增 `TestPingCountBoundsSharedWithKernel`：
+    改前 `count 101` 放行（用例红）→ 改后拒绝；`count=-1`、`count=100`、`count=0` 各断言；拒绝文案 ==
+    共享助手文案（同源）。netkernel 侧用例改用 `network.DiagCountMax` 并断言错误文案同源。
+【真机】VM（vpp 数据面，3.0.12~dev1）：
+    $ nc -c "ping 192.168.99.1 count 101"
+    %% ping count 101 超出上限 100（不静默截断）：请改为不超过 100 的值
+    $ nc -c "ping 192.168.99.1 count -1"
+    %% count 必须为正整数              ← 解析层（既有）先拒
+    $ nc -c "ping 192.168.99.1 count 100"   ← 过界校验后进 vppctl（无 L3 目标 ⇒ 无 egress 失败，非本次问题）
+【文档】命令全表 `ping` 行、用户手册诊断矩阵补「count 上界 100（两数据面一致）」注。
+
+────────────────────────────────────────────────────────
+§3 #476 风暴 policer 计数按记录索引读取（收口观察④）
+────────────────────────────────────────────────────────
+【能力前提 spike（本会话真机，VM 192.168.155.129）】——观察④的前提**不成立**，据此定裁：
+  · 计数确在 stats segment：路径 `/net/policer/{conform,exceed,violate}`，**按 policer 索引分维度、
+    不含 policer 名**。
+  · 机器格式 `vpp_get_stats dump machine`：`<type>:<index>:<thread>:<packets>:<bytes>:<path>`，
+    实测 3 个探测 policer（index 0,1,2）⇒ `3:0:0:…`/`3:1:0:…`/`3:2:0:…`（thread 维 0,1），
+    人工格式互证为 `[index @ thread]: N packets, M bytes /net/policer/conform`。
+    ⇒ 同一 policer 索引有**多行（每线程一行）**，须**按索引跨线程求和**。
+  · `policer.PolicerDetails`（binapi）**无索引字段**（Name/Cir/Eir/Cb/Eb/Rate/Round/Type/*Action/SingleRate）
+    ⇒ 「用 policer_dump 建名→索引」不可行；产品能拿到的索引只有本进程 `PolicerAddDel` 应答
+    （登记 `stormKindRT.policerIdx`）；自认领态只有哨兵。
+【实现（子智能体）】
+  storm_stats.go：`StormCountersFromDump(out, policerIndex uint32)` 改解析组合计数行（6 段、path 前缀
+    `/net/policer/`、行首索引==目标索引才计入、**跨线程求和** packets/bytes），其余 path/畸形行跳过。
+  storm.go：`StormCountersReader` 签名改按 index；`Dataplane` 计数块：不在数据面 →「不在数据面」；
+    索引哨兵 → 「计数不可读（policer 索引未记录：进程重启后按名认领，无 add 应答）」；未接入 →「未接入
+    stats 计数来源」；否则按 `e.policerIdx` 读。stats_linux.go/storm_govpp.go/stats_other.go 同步。
+【红-绿】`TestStormCountersFromDump` 重写（多线程同索引行 ⇒ 跨线程求和；另一索引不混淆；/err 行不干扰；
+    哨兵 ok=false）；`TestStormDataplaneCountersByIndex`（本进程下发按索引可读 / 自认领哨兵不可读+原因 /
+    不在场不可读）。红证：临时还原按名匹配 ⇒ 机器格式夹具 FAIL（按名恒不命中）。
+【真机】造风暴现场（`set interfaces ens192 storm-control broadcast 1000000` → commit rev108）：
+    read view：Storm control 计数: 广播 conform 0 / exceed 0 / violate 0   （改前恒「不可读」）
+    加 L2（`set virtual-switches vs-l2 type l2` + `ports 0 interface ens192`，rev109）+ 宿主广播流量
+    （VMnet8/VMnet1 段共 ~77 万帧；ens192 RxPkts 41 → 714148）后：
+      read view：Storm control 计数: 广播 conform 301650 / exceed 0 / violate 0
+      vppctl   ：Policer at index 2 … conform 301650 packets, 36801421 bytes
+      原始 stats：3:2:1:301650:36801421:/net/policer/conform（索引 0/1 保持 0）
+    ⇒ 索引 2 = 本产品 policer，跨线程求和正确（计数只在 thread 1），与独立事实源（vppctl）逐字一致。
+【如实边界（登记）】按索引读在**自认领态不可读**是刻意设计（policer_dump 无索引；同步路径无名）：
+    nfvisd 重启而 VPP 存活 ⇒ 按名自认领 ⇒ 指数为哨兵 ⇒ 读视图如实报「计数不可读（索引未记录）」，
+    不按索引猜、不编造（宁缺不谎报，与 #429 同纪律的收敛）。要在该场景恢复可读，需下一次成功下发
+    （重放/`request vpp restart`）重新取得 add 应答。
+【文档】用户手册 §8.14 风暴读数补「计数按记录的限速器索引读取（跨线程求和）；自认领态索引未知如实报不可读」。
+
+────────────────────────────────────────────────────────
+§4 #477 port-mirroring 树与映射收尾口径一致
+────────────────────────────────────────────────────────
+【机制（子智能体定位）】根因在通用候选补全 `internal/schema/node.go:keywordCandidatesUpward`——它从
+  「已消耗 token 的无子树参数」向上爬找最近带同级关键字的一层；对 `… analyzer interface ens224 `，
+  `analyzer` 层无同级关键字，遂越过爬到对象 `<name>`（Param），把兄弟 `source` 当续补列出。
+【实现】爬到**对象实例参数（Param）即停**（对象下的兄弟关键字是独立语句，不是本语句续补）——3 行 + 注释。
+  未动别名/模型/读视图，故两条语句语义与 `display set` 反推不变。
+  ※ 契约行原写的红例（`source interface X` 后给 `analyzer`）在当前树**不复现**（`source interface` 有
+    `direction` 兄弟，爬升在 interface 层即停）；真复现点是 `analyzer` 支（`analyzer interface X ` 后给
+    `[source]`）。已据此更正决策 #477 正文的测试/落点措辞（契约如实）。
+【红-绿】internal/schema/node_test.go `TestCandidatesInstanceObjectBoundary`：改前 `analyzer interface X `
+  后续补含 `source`（红）→ 改后为空；`source interface X` 后仍给 `direction`、不给 `analyzer`。
+【真机】REST `GET /cli/candidates`（admin 会话）：
+    tokens=set,port-mirroring,s1,analyzer,interface,ens224&partial=  ⇒  null        ← 不再续补 source
+    tokens=set,port-mirroring,s1,source,interface,ens192&partial=  ⇒  [{Token:direction,Desc:复制方向}]
+    two-statement 脚本：`set port-mirroring s1 source interface ens192` [ok]、`
+                        set port-mirroring s1 analyzer interface ens224` [ok]
+    连写：`set port-mirroring s2 source interface ens192 analyzer interface ens224` ⇒ `%% 未知语句: "analyzer"`
+          （契约=两条独立语句，连写仍拒；候选树与契约现已一致）。
+【文档】命令树设计 `port-mirroring` 段补注「source/analyzer 是两条独立语句，一条补齐后 ?/Tab 不再续补兄弟关键字」。
+
+────────────────────────────────────────────────────────
+§5 门禁与真机环境
+────────────────────────────────────────────────────────
+【make check】`GOFLAGS=-p=1 make check` 七项全绿（vet/test/coverage/archtest/docscheck/toolcheck/prototype）
+             + 全部脚本自校准通过；`MAKE_CHECK_RC=0`；决策计数校验 379 项、结构完整。
+【交叉编译】`GOOS=linux GOARCH=amd64 GOFLAGS=-p=1 go build -trimpath -ldflags "-s -w -X …=3.0.12~dev1"`
+            → 换装 /usr/bin/{nfvisd,nfvis-cli}（原件备份 /root/bin-orig-r26/）→ `systemctl restart nfvis` → active。
+【VM 现场（复核后，已还原）】dataplane=vpp；ens192/ens224 在 DPDK；无业务对象；**无 active 告警**；
+            vpp policer 0 个；rev 110；仅保留基线配置（interfaces/resource-pools/dns/dataplane/hostname/management）。
+            ⚠️ VM 现装 **3.0.12~dev1**（交叉编译换装，非发布件 3.0.12）。
+
+────────────────────────────────────────────────────────
+§6 教训（入册）
+────────────────────────────────────────────────────────
+- **能力前提必须真机核**（又一次实证）：观察④「用 policer_dump 建名→索引」的写法在 VPP 26.06 上**不成立**
+  （policer_dump 无索引、stats 按索引不按名）——若照抄观察就写成「按名建索引」，实现必恒不命中。
+  先探针（vpp_get_stats dump machine / dump 人工格式互证 + binapi 结构）才定下按索引口径。
+- **读路径的「非零」验证要用独立事实源**：计数全 0 时「read view==vppctl==0」不能证明索引正确；须造出**非零**
+  并用 vppctl/原始 stats 三方对齐——本次 301650/36801421 三方一致，才能坐实「索引 2 就是我们的 policer」。
+- **L2 policer-classify 只在接口处于 bridge 时执行**：把 DPDK 口加进 L2 交换机后风暴计数才动（此前 L3 态下
+  计数恒 0）——验证风暴读/限速须先把口置于 L2 域。
+- **通用机制改动要覆盖全量测试**：#477 改的是通用候选爬升（非 port-mirroring 局部），子智能体跑了
+  schema/cli/api 全量用例无回归（含 UI/契约/候选守护），make check 再兜底。
+- **追加决策行会改变「最后一行的续行是否被结构检查覆盖」**：本轮把 #474 折单行以过
+  check_decisions_count.sh 的孤立行检查。

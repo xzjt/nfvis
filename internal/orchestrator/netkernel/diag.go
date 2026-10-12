@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
 // ErrStatsClearUnsupported 内核数据面不支持清零接口统计。
@@ -24,10 +25,6 @@ const (
 	diagPingTimeout = 30 * time.Second
 	// diagTracerouteTimeout traceroute 允许更长（30 跳 × 1s 每跳超时），但同样必须有界。
 	diagTracerouteTimeout = 60 * time.Second
-	// diagDefaultPingCount 未指定 count 时的发包数（既有语义）。
-	diagDefaultPingCount = 5
-	// diagCountMax count 的上界：超出直接报可读错误，**不静默截断**（用户要的就是这个数）。
-	diagCountMax = 100
 )
 
 // VRFResolver 把用户给出的 vrf/交换机名解析为**内核数据面实际创建的 VRF 设备名**（决策 #457）。
@@ -58,7 +55,8 @@ func NewDiag(run Runner, resolver VRFResolver) *Diag {
 
 // Ping 执行 ping；未通（命令非零退出）时如实返回错误，输出原样带回供排查。
 //
-// 有界：内部 30s 上界（父 ctx 更紧时以父为准）；count 缺省 5、上界 diagCountMax（越界报错不截断）。
+// 有界：内部 30s 上界（父 ctx 更紧时以父为准）；count 口径与 VPP 侧**同源**——
+// network.ValidateDiagCount（未指定=默认 5、上界 network.DiagCountMax、越界报错不截断）。
 func (d *Diag) Ping(ctx context.Context, host, source, vrf string, count int, ipv6 bool) (string, error) {
 	if host == "" {
 		return "", errors.New("缺少 ping 目标")
@@ -72,16 +70,11 @@ func (d *Diag) Ping(ctx context.Context, host, source, vrf string, count int, ip
 	if err := guardDiagArg("ping vrf", vrf); err != nil {
 		return "", err
 	}
-	if count > diagCountMax {
-		return "", fmt.Errorf("ping count %d 超出上限 %d（不静默截断）：请改为不超过 %d 的值",
-			count, diagCountMax, diagCountMax)
-	}
-	if count < 0 {
-		return "", fmt.Errorf("ping count %d 不合法：须为 1-%d（0 = 未指定，用默认 %d）",
-			count, diagCountMax, diagDefaultPingCount)
-	}
-	if count == 0 {
-		count = diagDefaultPingCount
+	// 诊断 count 口径的**单一事实源**在 network 包（决策 #475）：0=未指定⇒默认 5、上界
+	// network.DiagCountMax（越界报同一可读错误、不静默截断）、负数报错——与 VPP 侧逐字同源。
+	count, err := network.ValidateDiagCount(count)
+	if err != nil {
+		return "", err
 	}
 	args := []string{"ping", "-c", strconv.Itoa(count)}
 	if ipv6 {

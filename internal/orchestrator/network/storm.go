@@ -63,8 +63,10 @@ package network
 //     不符（疑似索引被复用），已跳过删除」进未收敛项；读不到（表已不存在）同样不删（删除方向的
 //     「本就不在」＝已是目标状态，见 stormAbsentOK，故不报错、只推进登记）。带链删的**链目标**
 //     同样要核对（stormChainDeleteAllowed）——链目标形状不符即改为只删本表，不顺着链删外来对象。
-//     计数读取同理**一律按 policer 名匹配**（policer 索引在 `policer_dump` 里不可回读、且可能被
-//     复用，按索引猜会错配到别的 policer 的计数；名字在数据面查不到即如实报不可读）。
+//     计数读取同理**按本产品记录的 policer 索引**读（决策 #476）：path `/net/policer/{conform,
+//     exceed,violate}` 按索引分维度、每线程一行（跨线程求和），而 `policer_dump` 无索引字段、
+//     stats 计数也不含名——索引只有本进程 add 应答一个来源，索引未知（自认领）即如实报不可读，
+//     **不按名也不按索引猜**。
 //
 // 判据/登记口径沿用本仓库既定纪律：
 //   - 变更先撤旧后建新（旧 policer/表/session 全删，不留残渣，同 #380/#383 的教训）；
@@ -287,18 +289,21 @@ type StormClient interface {
 // StormCountersReader policer 计数读物（stats segment）。真机实现见 stats_linux.go；
 // 非 Linux / 工具不可用时按「读不到」如实说明（不猜）。
 type StormCountersReader interface {
-	// StormCounters 按 policer **名**读该 policer 的计数（决策 #429②）：policer 索引在
-	// `policer_dump` 里不可回读（自认领态只能以哨兵占位）、且可能被底座复用——按索引匹配会
-	// 错配到别的 policer 的计数，故一律按名。名字在 stats segment 里查不到即 ok=false + 原因
-	//（调用方如实呈现，不返回零值当真值）。
-	StormCounters(ctx context.Context, policerName string) (StormCounters, bool, string)
+	// StormCounters 按 policer **索引**读该 policer 的计数（决策 #476）：VPP 26.06 的 policer
+	// 计数在 stats segment 里按索引分维度（path `/net/policer/{conform,exceed,violate}`、
+	// 不含 policer 名），且同一索引每 VPP 线程一行——按索引**跨线程求和** ——而 `policer_dump`
+	// 的条目无索引，故产品能拿到的索引只有一个来源：本进程 `PolicerAddDel` 应答里的
+	// `PolicerIndex`（登记 stormKindRT.policerIdx）。
+	// 索引在 stats segment 里查不到即 ok=false + 原因（调用方如实呈现，不返回零值当真值）。
+	StormCounters(ctx context.Context, policerIndex uint32) (StormCounters, bool, string)
 }
 
-// stormPolicerIdxUnknown 登记里「policer 索引不可回读」的哨兵（决策 #429②）。
+// stormPolicerIdxUnknown 登记里「policer 索引不可回读」的哨兵（决策 #429②，口径见 #476）。
 //
 // 为什么会有哨兵：VPP 的 `policer_dump` 条目（`PolicerDetails`）**只有名字与配置字段、没有
-// 索引**（真机探针实测），索引只在 add 的应答里给出——自认领来的登记没有这一步，故以哨兵占位；
-// 计数的读取据此**一律按 policer 名**匹配（索引既不可读、又可能被底座复用，按索引猜会错配）。
+// 索引**（真机探针实测），索引只在 add 的应答里给出——自认领来的登记没有这一步，故以哨兵占位。
+// 计数按索引读（决策 #476），哨兵态无法读 ⇒ 调用方如实报「计数不可读（policer 索引未记录）」，
+// **既不按索引猜、也不编造数字**（宁缺不谎报）。
 const stormPolicerIdxUnknown = ^uint32(0)
 
 // stormKindRT 单类在该接口上的登记 = **最后一个成功下发**的状态（决策 #363 口径）。
@@ -522,8 +527,9 @@ func (p *StormProvider) adoptDeclared(c StormClient, ifname string, idx uint32, 
 	for kind, tbl := range cands[0].kinds {
 		kinds[kind] = &stormKindRT{
 			policerName: stormPolicerName(ifname, kind),
-			// policer 索引不可读（dump 条目不含索引；真机实测）：以哨兵占位，计数按名匹配
-			//（决策 #429②；StormCountersReader 一律按名）。
+			// policer 索引不可读（dump 条目不含索引；真机实测）：以哨兵占位，计数据此**如实报
+			// 不可读**（决策 #476：索引未知即不猜、不编造；与真实索引走同一读取通道的只有本进程
+			// add 应答）。
 			policerIdx: stormPolicerIdxUnknown,
 			tableIdx:   tbl,
 			kbps:       found[kind].CirKbps,
@@ -1558,16 +1564,19 @@ func (p *StormProvider) Dataplane(ctx context.Context, ifname string) (StormData
 			}
 		}
 		if e != nil {
-			// 计数一律按 policer **名**读（决策 #429②）：索引在 policer_dump 里不可回读
-			// （自认领态只有哨兵）且可能被底座复用——按索引猜会错配到别的 policer 的计数。
-			// 名字在数据面查不到即如实报不可读（连读数来源都不问：没有对象可读）。
+			// 计数按 policer **索引**读（决策 #476）：索引只有一个来源——本进程 PolicerAddDel
+			// 应答（登记 e.policerIdx）；`policer_dump` 无索引字段、stats segment 的计数也不含名，
+			// 故**仅当**索引已记录（非哨兵）**且**该 policer 按名在场时才读；否则如实写明原因，
+			// 既不按索引猜、也不编造数字（宁缺不谎报）。
 			switch {
 			case !kd.PolicerPresent:
 				kd.CountersReason = "计数不可读（policer 不在数据面）"
+			case e.policerIdx == stormPolicerIdxUnknown:
+				kd.CountersReason = "计数不可读（policer 索引未记录：进程重启后按名认领，无 add 应答）"
 			case p.counters == nil:
 				kd.CountersReason = "未接入 stats 计数来源"
 			default:
-				if cnt, ok, reason := p.counters.StormCounters(ctx, e.policerName); ok {
+				if cnt, ok, reason := p.counters.StormCounters(ctx, e.policerIdx); ok {
 					kd.Counters = &cnt
 				} else {
 					kd.CountersReason = reason

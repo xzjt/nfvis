@@ -836,45 +836,60 @@ type fakeStormCounters struct {
 	cnt    StormCounters
 	ok     bool
 	reason string
-	// names 记录读数来源被调用的 policer 名（决策 #429②：计数一律按名读；名字不在数据面时
-	// **根本不调用**读数来源——没有对象可读，也就不按索引猜）。
-	names []string
+	// idxs 记录读数来源被调用的 policer 索引（决策 #476：计数按索引读；索引未记录（哨兵）或
+	// policer 不在数据面时**根本不调用**读数来源——没有可读的坐标，也就不猜）。
+	idxs []uint32
 }
 
-func (f *fakeStormCounters) StormCounters(ctx context.Context, policerName string) (StormCounters, bool, string) {
-	f.names = append(f.names, policerName)
+func (f *fakeStormCounters) StormCounters(ctx context.Context, policerIndex uint32) (StormCounters, bool, string) {
+	f.idxs = append(f.idxs, policerIndex)
 	return f.cnt, f.ok, f.reason
 }
 
-// TestStormCountersFromDump：stats segment 文本解析——**按 policer 名**匹配，找不到 ok=false。
+// TestStormCountersFromDump：stats segment 文本解析——**按 policer 索引**匹配并**跨线程求和**。
 //
-// 决策 #429②：policer 索引在 policer_dump 里不可回读（自认领态只有哨兵占位）、且可能被底座
-// 复用，按索引匹配会把别的 policer 的计数读成本产品的计数 ⇒ 索引形状的路径一律不匹配。
-// 修复前：`<id> == 索引的十进制串 || <id> == 名字` 两路都试（索引路会把外来对象算进来）。
+// 决策 #476（修正 #429② 的「按名」口径）：真机 spike 实测 policer 计数是组合计数
+// `<type>:<index>:<thread>:<packets>:<bytes>:<path>`（path ∈ /net/policer/{conform,exceed,violate}），
+// **按索引分维度、不含 policer 名**，同一索引每 VPP 线程一行。改前 `StormCountersFromDump`
+// 按 `/net/policer/<名>/<字段>` 查找 ⇒ 真机格式**恒不命中**（先红）；改后按索引取到并跨线程求和。
 func TestStormCountersFromDump(t *testing.T) {
 	dump := strings.Join([]string{
-		"9:430184.00:/buffer-pools/default-numa-0/available",
-		"7:189.00:/net/policer/nfvis-storm-ens192-broadcast/conform_packets",
-		"7:12345.00:/net/policer/nfvis-storm-ens192-broadcast/conform_bytes",
-		"7:0.00:/net/policer/nfvis-storm-ens192-broadcast/exceed_packets",
-		"7:9.00:/net/policer/nfvis-storm-ens192-broadcast/violate_packets",
-		"7:784.00:/net/policer/nfvis-storm-ens192-broadcast/violate_bytes",
-		"7:42.00:/net/policer/nfvis-storm-ens224-multicast/conform_packets",
-		"7:999.00:/net/policer/11/conform_packets", // 索引形状的路径：不得被匹配
+		"9:430184.00:/buffer-pools/default-numa-0/available", // 简单计数（3 段）：跳过
+		"2:0:0:0:/err/acl/deny",                              // 错误计数（5 段）：段数不符，跳过
+		"2:2:0:50:500:/err/some/path",                        // 6 段但非 policer 路径：跳过
+		"3:2:0:5:500:/net/policer/conform",                   // 目标索引 2，线程 0
+		"3:2:1:7:700:/net/policer/conform",                   // 目标索引 2，线程 1（另一线程，求和）
+		"3:2:0:1:100:/net/policer/exceed",
+		"3:2:0:3:300:/net/policer/violate",
+		"3:0:0:99:9900:/net/policer/conform", // 另一索引 0：多索引并存不得混淆
+		"3:2:0:x:5:/net/policer/conform",     // 畸形计数（packets 非数字）：跳过
+		"garbage line",                       // 畸形行：跳过
 	}, "\n")
-	c, ok := StormCountersFromDump(dump, "nfvis-storm-ens192-broadcast")
-	if !ok || c.ConformPackets != 189 || c.ConformBytes != 12345 || c.ViolatePackets != 9 || c.ViolateBytes != 784 {
-		t.Fatalf("按名应解析出计数（来自按名路径的 189，而不是索引路径的 999）: %+v ok=%v", c, ok)
+	c, ok := StormCountersFromDump(dump, 2)
+	if !ok {
+		t.Fatalf("按索引 2 应命中（改前按名恒不命中）")
 	}
-	c, ok = StormCountersFromDump(dump, "nfvis-storm-ens224-multicast")
-	if !ok || c.ConformPackets != 42 {
-		t.Fatalf("按名应解析出计数: %+v ok=%v", c, ok)
+	if c.ConformPackets != 12 || c.ConformBytes != 1200 { // 5+7 / 500+700 跨线程求和
+		t.Fatalf("conform 应按索引跨线程求和: %+v", c)
 	}
-	if _, ok := StormCountersFromDump(dump, "nfvis-storm-ens999-broadcast"); ok {
-		t.Fatal("不存在的 policer 应 ok=false（不返回零值当真值）")
+	if c.ExceedPackets != 1 {
+		t.Fatalf("exceed 计数不符: %+v", c)
 	}
-	if _, ok := StormCountersFromDump(dump, ""); ok {
-		t.Fatal("空名应 ok=false（不猜任何对象）")
+	if c.ViolatePackets != 3 || c.ViolateBytes != 300 {
+		t.Fatalf("violate 计数不符: %+v", c)
+	}
+	// 多索引并存：索引 0 只取自己的行（99），不掺入索引 2 的计数。
+	c0, ok0 := StormCountersFromDump(dump, 0)
+	if !ok0 || c0.ConformPackets != 99 || c0.ConformBytes != 9900 {
+		t.Fatalf("索引 0 应只取自身行: %+v ok=%v", c0, ok0)
+	}
+	// 不存在的索引 ⇒ ok=false（不返回零值当真值）。
+	if _, ok := StormCountersFromDump(dump, 7); ok {
+		t.Fatal("不存在的索引应 ok=false")
+	}
+	// 哨兵（索引未记录）⇒ ok=false（不猜任何对象）。
+	if _, ok := StormCountersFromDump(dump, stormPolicerIdxUnknown); ok {
+		t.Fatal("哨兵索引应 ok=false（索引未记录，不按索引猜）")
 	}
 }
 
@@ -1749,59 +1764,81 @@ func TestStormTeardownSkipsDeleteWhenRegisteredTableGone(t *testing.T) {
 	}
 }
 
-// TestStormDataplaneCountersByName（决策 #429②）：计数读取一律按 policer **名**——
-//  1. 自认领态（policer 索引不可回读，登记里是哨兵）按名命中并给出计数；
-//  2. 名字在数据面查不到 ⇒ 如实报「计数不可读（policer 不在数据面）」，且**不调用**读数来源
-//     （没有对象可读，也就不按索引猜）。
+// TestStormDataplaneCountersByIndex（决策 #476）：计数按产品记录的 policer **索引**读取——
+//  1. 本进程下发态：登记持有真实索引（PolicerAddDel 应答）且 policer 按名在场 ⇒ 按该索引读并给计数；
+//  2. 自认领态（登记里是哨兵：nfvisd 重启后按名认领、无 add 应答）⇒ 索引未记录 ⇒ 如实报
+//     「policer 索引未记录」且**不调用**读数来源（不按索引猜、不编造）；
+//  3. policer 不在数据面 ⇒ 报「不在数据面」，且**不调用**读数来源。
 //
-// 修复前：读数来源收到的是登记里的索引（自认领态是哨兵）——索引既不可回读、又可能被复用，
-// 按索引匹配会把别的 policer 的计数读成本产品的计数。
-func TestStormDataplaneCountersByName(t *testing.T) {
+// 修正 #429②：真机 spike 证明计数在 stats segment 按 policer 索引分维度（不含名），
+// `policer_dump` 又无索引字段——按名恒不命中，索引只有本进程 add 应答一个来源。
+func TestStormDataplaneCountersByIndex(t *testing.T) {
 	ctx := context.Background()
-	c, p := adoptedFixture(t)
+
+	// ① 本进程下发：登记持有真实索引。
+	c := newFakeStormClient()
+	p := NewStormProvider(c)
 	cr := &fakeStormCounters{cnt: StormCounters{ConformPackets: 77, ViolatePackets: 3}, ok: true}
 	p.SetCountersReader(cr)
-	if errs := p.Reconcile(ctx, model.Config{Interfaces: []model.InterfaceConfig{stormCfg(8000, 20000)}}); len(errs) != 0 {
-		t.Fatalf("自认领应先成立: %v", errs)
+	if err := p.ApplyInterface(ctx, stormCfg(8000, 20000)); err != nil {
+		t.Fatalf("Apply: %v", err)
 	}
 	reg := p.regSnapshot("ens192")
-	if e := reg.kinds[StormKindBroadcast]; e == nil || e.policerIdx != stormPolicerIdxUnknown {
-		t.Fatalf("前提：自认领登记的 policer 索引应是「不可回读」哨兵: %+v", reg.kinds)
+	bIdx := reg.kinds[StormKindBroadcast].policerIdx
+	mIdx := reg.kinds[StormKindMulticast].policerIdx
+	if bIdx == stormPolicerIdxUnknown || mIdx == stormPolicerIdxUnknown {
+		t.Fatalf("前提：本进程下发态应持有真实索引（add 应答）: %+v", reg.kinds)
 	}
 	dp, err := p.Dataplane(ctx, "ens192")
 	if err != nil {
 		t.Fatalf("Dataplane: %v", err)
 	}
-	if dp.Binding != StormBindingAdopted {
-		t.Fatalf("前提：应为自认领态: %+v", dp)
-	}
 	for _, kind := range []string{StormKindBroadcast, StormKindMulticast} {
 		kd := dp.Kinds[kind]
 		if kd.Counters == nil || kd.Counters.ConformPackets != 77 || kd.Counters.ViolatePackets != 3 {
-			t.Fatalf("%s 应按名读到计数: %+v", kind, kd)
-		}
-		if kd.PolicerIndex != stormPolicerIdxUnknown {
-			t.Fatalf("%s 的 policer 索引不可回读，读视图应如实保留哨兵: %+v", kind, kd)
+			t.Fatalf("%s 应按索引读到计数: %+v", kind, kd)
 		}
 	}
-	want := "nfvis-storm-ens192-broadcast,nfvis-storm-ens192-multicast"
-	if got := strings.Join(cr.names, ","); got != want {
-		t.Fatalf("读数来源应按 policer 名调用: got=%s want=%s", got, want)
+	if len(cr.idxs) != 2 || cr.idxs[0] != bIdx || cr.idxs[1] != mIdx {
+		t.Fatalf("读数来源应按登记索引调用: got=%v want=[%d %d]", cr.idxs, bIdx, mIdx)
 	}
 
-	// 名字在数据面查不到：如实报不可读，且**不去问**读数来源（不按索引猜）。
+	// ③ 名字不在数据面：如实报不可读，且**不去问**读数来源（没有对象可读）。
 	delete(c.pols, "nfvis-storm-ens192-broadcast")
-	cr.names = nil
-	dp2, err := p.Dataplane(ctx, "ens192")
+	cr.idxs = nil
+	dp3, _ := p.Dataplane(ctx, "ens192")
+	if kd := dp3.Kinds[StormKindBroadcast]; kd.Counters != nil || kd.CountersReason != "计数不可读（policer 不在数据面）" {
+		t.Fatalf("policer 不在数据面时应如实报不可读: %+v", kd)
+	}
+	// 广播不在场⇒不读；组播仍在场⇒按组播索引读（多对象互不影响）。
+	if len(cr.idxs) != 1 || cr.idxs[0] != mIdx {
+		t.Fatalf("只应对在场对象调用读数来源: got=%v want=[%d]", cr.idxs, mIdx)
+	}
+
+	// ② 自认领态：索引未记录（哨兵）⇒ 报「索引未记录」，不调用读数来源。
+	_, p2 := adoptedFixture(t)
+	cr2 := &fakeStormCounters{cnt: StormCounters{ConformPackets: 9}, ok: true}
+	p2.SetCountersReader(cr2)
+	if errs := p2.Reconcile(ctx, model.Config{Interfaces: []model.InterfaceConfig{stormCfg(8000, 20000)}}); len(errs) != 0 {
+		t.Fatalf("自认领应先成立: %v", errs)
+	}
+	if r := p2.regSnapshot("ens192"); r.kinds[StormKindBroadcast] == nil || r.kinds[StormKindBroadcast].policerIdx != stormPolicerIdxUnknown {
+		t.Fatalf("前提：自认领登记的 policer 索引应是哨兵: %+v", r.kinds)
+	}
+	dp2, err := p2.Dataplane(ctx, "ens192")
 	if err != nil {
-		t.Fatalf("Dataplane(policer 缺失): %v", err)
+		t.Fatalf("Dataplane(自认领): %v", err)
 	}
-	kd := dp2.Kinds[StormKindBroadcast]
-	if kd.Counters != nil || kd.CountersReason != "计数不可读（policer 不在数据面）" {
-		t.Fatalf("名字不在数据面时应如实报不可读（不给计数、不改口）: %+v", kd)
+	if dp2.Binding != StormBindingAdopted {
+		t.Fatalf("前提：应为自认领态: %+v", dp2)
 	}
-	if got := strings.Join(cr.names, ","); got != "nfvis-storm-ens192-multicast" {
-		t.Fatalf("名字不在数据面时不得调用读数来源: %v", cr.names)
+	for _, kind := range []string{StormKindBroadcast, StormKindMulticast} {
+		if kd := dp2.Kinds[kind]; kd.Counters != nil || !strings.Contains(kd.CountersReason, "policer 索引未记录") {
+			t.Fatalf("%s 索引未记录时应如实报不可读: %+v", kind, kd)
+		}
+	}
+	if len(cr2.idxs) != 0 {
+		t.Fatalf("索引未记录时不得调用读数来源: %v", cr2.idxs)
 	}
 }
 

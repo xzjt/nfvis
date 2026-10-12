@@ -734,6 +734,10 @@ set source vnf <vm> interface <vnic> direction <ingress|egress|both>   # 源＝V
 # 内核数据面：vNIC 源在**提交期直接拒绝**（宿主 tap 由 libvirt 在域启动时创建、
 #   产品没有可靠的名字映射）——请改用物理口/bond。
 set analyzer interface <ifname>
+# 以上 `set source …` 与 `set analyzer …` 是**同一会话下的两条独立语句**，各自提交
+#   （命令全表如此）。一条语句补齐后，?/Tab **不再**把对象 `<name>` 的兄弟关键字
+#   （`source`/`analyzer`）续补为同线语句；连写（`… source … analyzer …` 一行）不被接受，
+#   请分两次 `set`。
 
 [edit qos]
 set policies <name> cir <uint> cbs <uint>            # bps / bytes

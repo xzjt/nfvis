@@ -628,10 +628,19 @@ func candidatesAt(n *Node, partial string, dyn DynamicValues, allow CandidateFil
 // 排除来路（cameFrom），否则 `management interface ens160 ` 会把 `interface` 自己再列一遍。
 // 只列关键字、不列同级参数：`bonds <name> members [<seq>] <ifname>` 那种连续位置参数
 // 此处仍列不出第二个 <ifname> ——如实登记为已知局限（附录 A #90），不靠猜把它补成噪声。
+//
+// 实例对象边界（决策 #477）：向上爬到**实例参数（Param，即某对象的 <name>）**时即停止，
+// 不再列它的兄弟关键字——那些兄弟是**同一对象下的独立语句**（如 `set port-mirroring <n>`
+// 下的 `source …` 与 `analyzer …` 是两条独立语句，命令全表如此），不是当前语句的续补。
+// 若不设此界，`… analyzer interface ens224 ` 会一路爬过没有同级关键字的 `analyzer` 层、
+// 把对象 `<n>` 的兄弟 `source` 当续补列出——与「两条独立语句」的契约相悖。
 func keywordCandidatesUpward(n *Node, partial string, allow CandidateFilter) []Candidate {
 	var out []Candidate
 	cameFrom := n
 	for p := n.parent; p != nil; p = p.parent {
+		if p.Kind == Param {
+			return nil // 到达对象边界：兄弟关键字是独立语句，不是续补
+		}
 		var lvl []*Node
 		for _, c := range p.Children {
 			if c != cameFrom && c.Kind == Keyword {

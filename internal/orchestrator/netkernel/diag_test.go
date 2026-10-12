@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
 // diagRecRunner 记录命令并返回预设结果（不 exec）。
@@ -34,22 +35,26 @@ func TestDiagPingCountBounds(t *testing.T) {
 	r := &diagRecRunner{}
 	d := NewDiag(r, nil)
 
-	_, err := d.Ping(ctx, "10.0.0.1", "", "", diagCountMax+1, false)
+	_, err := d.Ping(ctx, "10.0.0.1", "", "", network.DiagCountMax+1, false)
 	if err == nil {
-		t.Fatalf("count 超过上限应报错，实际接受 %d", diagCountMax+1)
+		t.Fatalf("count 超过上限应报错，实际接受 %d", network.DiagCountMax+1)
 	}
-	if !strings.Contains(err.Error(), fmt.Sprint(diagCountMax)) || !strings.Contains(err.Error(), "不静默截断") {
+	if !strings.Contains(err.Error(), fmt.Sprint(network.DiagCountMax)) || !strings.Contains(err.Error(), "不静默截断") {
 		t.Fatalf("越界错误应给出上限且说明不截断，得到 %v", err)
+	}
+	// 错误文案取自 network.ValidateDiagCount（单一事实源），与 VPP 侧逐字同源。
+	if _, herr := network.ValidateDiagCount(network.DiagCountMax + 1); herr == nil || herr.Error() != err.Error() {
+		t.Fatalf("越界文案应与共享助手同源：kernel=%q helper=%v", err.Error(), herr)
 	}
 	if len(r.calls) != 0 {
 		t.Fatalf("越界被拒时不应执行宿主命令：\n%s", r.joined())
 	}
 
 	// 边界值照常执行。
-	if _, err := d.Ping(ctx, "10.0.0.1", "", "", diagCountMax, false); err != nil {
+	if _, err := d.Ping(ctx, "10.0.0.1", "", "", network.DiagCountMax, false); err != nil {
 		t.Fatalf("上界值本身应放行：%v", err)
 	}
-	if want := fmt.Sprintf("ping -c %d 10.0.0.1", diagCountMax); !strings.Contains(r.joined(), want) {
+	if want := fmt.Sprintf("ping -c %d 10.0.0.1", network.DiagCountMax); !strings.Contains(r.joined(), want) {
 		t.Fatalf("缺少命令 %q：\n%s", want, r.joined())
 	}
 

@@ -374,6 +374,47 @@ func TestCandidatesAfterConsumingParam(t *testing.T) {
 	}
 }
 
+// TestCandidatesInstanceObjectBoundary（决策 #477）：一条子语句补齐后，候选**不得**再把
+// 同一实例对象（`<name>`）的兄弟关键字当同线续补——它们是独立语句（命令全表如此）。
+//
+// 由来（round8 观察⑤ / v3待做 §二 项 24）：`set port-mirroring <n> analyzer interface <if> `
+// 会一路爬过没有同级关键字的 `analyzer` 层，把对象 `<n>` 的兄弟 `source` 列出（改前实得
+// `[source]`），与「source … / analyzer … 是两条独立语句」的契约相悖。反向同理：`source …`
+// 语句补齐后不得再列兄弟 `analyzer`；两条独立语句的入口在对象层照常并存。
+func TestCandidatesInstanceObjectBoundary(t *testing.T) {
+	// analyzer 语句补齐后：不再续补兄弟 source（改前实得 [source]）
+	got := candidateNames(Candidates(ConfigRoot(),
+		[]string{"set", "port-mirroring", "s1", "analyzer", "interface", "ens224"}, "", testDyn))
+	if contains(got, "source") {
+		t.Errorf("analyzer 语句补齐后不应续补兄弟 source，实得 %v", got)
+	}
+	// source（物理口）语句补齐后：不再续补兄弟 analyzer，但仍给同语句的可选 direction
+	got = candidateNames(Candidates(ConfigRoot(),
+		[]string{"set", "port-mirroring", "s1", "source", "interface", "ens192"}, "", testDyn))
+	if contains(got, "analyzer") {
+		t.Errorf("source 语句补齐后不应续补兄弟 analyzer，实得 %v", got)
+	}
+	if !contains(got, "direction") {
+		t.Errorf("source interface 之后仍应给同语句的可选 direction，实得 %v", got)
+	}
+	// source vnf 形态同理
+	got = candidateNames(Candidates(ConfigRoot(),
+		[]string{"set", "port-mirroring", "s1", "source", "vnf", "fw-vm", "interface", "eth0"}, "", testDyn))
+	if contains(got, "analyzer") {
+		t.Errorf("source vnf 语句补齐后不应续补兄弟 analyzer，实得 %v", got)
+	}
+	if !contains(got, "direction") {
+		t.Errorf("source vnf interface 之后仍应给同语句的可选 direction，实得 %v", got)
+	}
+	// 对象层照常同时列出两条独立语句入口 source 与 analyzer
+	got = candidateNames(Candidates(ConfigRoot(), []string{"set", "port-mirroring", "s1"}, "", testDyn))
+	for _, w := range []string{"source", "analyzer"} {
+		if !contains(got, w) {
+			t.Errorf("对象层应同时列出两条独立语句入口 %q，实得 %v", w, got)
+		}
+	}
+}
+
 // TestCandidateLabelUsesPlaceholderType：候选描述里的类型标签取自占位符（`<ip>` → ip），
 // 不是 Node.ParamType——后者对 P/SP/SPA/SPD 统一是 "name"（供 scalarForNode 做取值转换），
 // 拿它当标签会写出「服务器地址（name）」这种自相矛盾的候选（附录 A #90④）。

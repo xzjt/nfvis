@@ -150,6 +150,60 @@ func TestPingIPv6UnreachableNotes(t *testing.T) {
 	}
 }
 
+// TestPingCountBoundsSharedWithKernel（决策 #475）：VPP 侧 ping 的 count 口径此前**无上界、不拒负数**
+// （>100 与 <0 都被原样透传给 vppctl）。收口后与内核数据面**同源**：0=默认 5、1..DiagCountMax 合法、
+// >DiagCountMax 与 <0 报同一可读错误；错误文案取自 network.ValidateDiagCount（单一事实源）。
+func TestPingCountBoundsSharedWithKernel(t *testing.T) {
+	const ok = "Statistics: 3 sent, 3 received, 0% packet loss\n"
+
+	// 越界：拒绝、不落到 vppctl，文案与共享助手逐字一致（不静默截断）。
+	sh := &fakeShell{out: ok}
+	_, err := diagWith(newFakeDiag(), sh, nil).Ping(context.Background(), PingRequest{Host: "10.0.0.9", Count: DiagCountMax + 1})
+	if err == nil {
+		t.Fatalf("count %d 应被拒绝（上限 %d）", DiagCountMax+1, DiagCountMax)
+	}
+	if len(sh.calls) != 0 {
+		t.Fatalf("越界被拒时不应调用 vppctl：%v", sh.calls)
+	}
+	if _, herr := ValidateDiagCount(DiagCountMax + 1); herr == nil || herr.Error() != err.Error() {
+		t.Fatalf("越界文案应与共享助手同源：vpp=%q helper=%v", err.Error(), herr)
+	}
+
+	// 负数：拒绝、不落到 vppctl。
+	sh = &fakeShell{out: ok}
+	_, err = diagWith(newFakeDiag(), sh, nil).Ping(context.Background(), PingRequest{Host: "10.0.0.9", Count: -1})
+	if err == nil {
+		t.Fatal("负 count 应被拒绝")
+	}
+	if len(sh.calls) != 0 {
+		t.Fatalf("负 count 被拒时不应调用 vppctl：%v", sh.calls)
+	}
+	if _, herr := ValidateDiagCount(-1); herr == nil || herr.Error() != err.Error() {
+		t.Fatalf("负值文案应与共享助手同源：vpp=%q helper=%v", err.Error(), herr)
+	}
+
+	// 边界值：上界本身放行，显式 `repeat 100`。
+	sh = &fakeShell{out: ok}
+	if _, err := diagWith(newFakeDiag(), sh, nil).Ping(context.Background(), PingRequest{Host: "10.0.0.9", Count: DiagCountMax}); err != nil {
+		t.Fatalf("上界值本身应放行：%v", err)
+	}
+	if got, want := strings.Join(sh.calls[0], " "), "ping 10.0.0.9 repeat "+strconv.Itoa(DiagCountMax); got != want {
+		t.Fatalf("上界应显式 repeat：got=%q want=%q", got, want)
+	}
+
+	// 未指定（0）=默认 5：不传 repeat（vppctl ping 缺省即发 5 个，与内核侧默认 5 同值）。
+	sh = &fakeShell{out: ok}
+	if _, err := diagWith(newFakeDiag(), sh, nil).Ping(context.Background(), PingRequest{Host: "10.0.0.9"}); err != nil {
+		t.Fatalf("未指定 count 应放行：%v", err)
+	}
+	if got, want := strings.Join(sh.calls[0], " "), "ping 10.0.0.9"; got != want {
+		t.Fatalf("未指定 count 不应传 repeat（默认 5）：got=%q want=%q", got, want)
+	}
+	if DiagDefaultCount != 5 {
+		t.Fatalf("默认发包数应为 5，实际 %d", DiagDefaultCount)
+	}
+}
+
 func TestPingErrors(t *testing.T) {
 	if _, err := diagWith(newFakeDiag(), &fakeShell{}, nil).Ping(context.Background(), PingRequest{}); err == nil {
 		t.Fatal("空目标应报错")

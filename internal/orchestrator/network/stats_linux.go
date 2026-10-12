@@ -168,10 +168,11 @@ func (r *vppRuntime) RuntimeStats(ctx context.Context) (state.RuntimeStats, bool
 }
 
 // StormCounters 读某 policer 的计数（决策 #385；StormCountersReader 的真机实现）。
-// 走同版本工具 vpp_get_stats 的组合计数（policer 计数不在 binary API 里），**按 policer 名**
-// 匹配（决策 #429②：索引不可回读且可能被底座复用，不按索引猜）；读不到时返回可读的原因串
-// （调用方在 CLI/读视图里如实显示，不编造数字）。
-func (m *Manager) StormCounters(ctx context.Context, policerName string) (StormCounters, bool, string) {
+// 走同版本工具 vpp_get_stats 的组合计数（policer 计数不在 binary API 里），**按 policer 索引**
+// 匹配并**跨线程求和**（决策 #476：path `/net/policer/{conform,exceed,violate}` 按索引分维度、
+// 每线程一行，且不含 policer 名）；读不到时返回可读的原因串（调用方在 CLI/读视图里如实显示，
+// 不编造数字）。
+func (m *Manager) StormCounters(ctx context.Context, policerIndex uint32) (StormCounters, bool, string) {
 	tool := m.statsTool
 	if tool == nil {
 		return StormCounters{}, false, "无同版本统计工具回退源（vpp_get_stats）"
@@ -180,10 +181,10 @@ func (m *Manager) StormCounters(ctx context.Context, policerName string) (StormC
 	if err != nil {
 		return StormCounters{}, false, err.Error()
 	}
-	c, ok := StormCountersFromDump(text, policerName)
+	c, ok := StormCountersFromDump(text, policerIndex)
 	if !ok {
-		return StormCounters{}, false, "stats segment 未返回该 policer 的计数路径（按名 " + policerName +
-			" 在 " + stormPolicerStatsPattern + " 未命中）"
+		return StormCounters{}, false, fmt.Sprintf("stats segment 未返回 policer 索引 %d 的计数路径（在 %s 中按索引未命中）",
+			policerIndex, stormPolicerStatsPattern)
 	}
 	return c, true, ""
 }
