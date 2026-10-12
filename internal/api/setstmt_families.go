@@ -1236,10 +1236,18 @@ func emitVrfsFallback(w *stmtWriter, val any) error {
 					continue
 				}
 				p := []string{"virtual-switches", name, "l3-interface", iface}
+				// 决策 #472：无地址条目（`delete … ip address` 只删地址叶留下的残形，
+				// 条目本身有数据面语义——接口仍属该 VRF/表）只能经裸形态语句表达；裸声明
+				// 须排在该条目的叶语句**之前**（回放时空配置从裸声明建出条目；条目已被
+				// 叶语句建出后再发裸声明会撞「值未变化」而回放失败）。有地址的条目保持
+				// 原输出：首条叶语句即建出条目，不掺裸声明（逐字不变）。
+				addrs, _ := li["addresses"].([]any)
+				if len(addrs) == 0 {
+					w.add(append([]string{}, p...))
+				}
 				if acl, ok := li["acl_in"].(string); ok && acl != "" {
 					w.add(append(append([]string{}, p...), "acl-in", acl))
 				}
-				addrs, _ := li["addresses"].([]any)
 				for _, a := range addrs {
 					w.add(append(append([]string{}, p...), "ip", "address", formatScalar(a)))
 				}

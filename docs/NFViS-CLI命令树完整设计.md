@@ -99,9 +99,13 @@ show interfaces management                          # 管理口（内核侧，IP
                                                     #   <name>` 保留「声明 + state 增补」合并视图——其运行态贫乏（仅 state），
                                                     #   拆分后信息净损失；配置子树同样可用配置模式层级 show 查看
 
-show virtual-switches                               # 全部虚拟交换机摘要（GET /virtual-switches）
+show virtual-switches                               # 全部虚拟交换机摘要（GET /virtual-switches；运行态 BD 行
+                                                    #   ∪ committed 里 type=l3 的行——L3 行 BD-ID 等列「—」、
+                                                    #   Note 列「l3（VRF）」，与 REST/Web 三面同源，决策 #467）
 show virtual-switches <name>
   ├─ detail                                         # 类型、成员端口、VLAN/VRF 配置、DHCP 中继（决策 #335：
+                                                    #   <name> 是 L3 交换机时与 `show vrfs <name>` 同一实现、
+                                                    #   同一输出——决策 #467；
                                                     #   配置了 dhcp-relay 才显示「DHCP 中继」行，与 REST
                                                     #   GET /virtual-switches/{n} 的 dhcp_relay 同源；
                                                     #   内核数据面另给「DHCP 中继说明」行——决策 #437 的
@@ -681,6 +685,10 @@ set cross-connect <true|false>                       # 两端口直通开关（�
                                                      #   ports，恰好两个——数据面取前两个，>2 拒绝、<2 提交期提示）
 # —— L3 ——
 set l3-interface <ifname|vlan <v>> ip address <ip-prefix>    # IPv4/IPv6，可配多条
+set l3-interface <ifname>                            # 裸形态（决策 #472）：声明 L3 接口条目、不带地址（幂等）。
+                                                     #   `delete … ip address` 只删地址、条目保留；无地址条目经
+                                                     #   display set 的裸形态行回放（此前该形态无语句可表达、
+                                                     #   回放自校验必失败）
 set static-routes <ip-prefix> next-hop <ip> [distance <uint>]  # 目的与下一跳支持 v4/v6；多个用逗号分隔＝ECMP（≤8，前缀与下一跳须同族）；distance 仅记录、不参与选路
 set static-routes default next-hop <ip>
 ```

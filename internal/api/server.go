@@ -12,7 +12,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/netutil"
@@ -134,6 +136,19 @@ type Server struct {
 	http         *http.Server
 	tlsCert      string
 	tlsKey       string
+	// 决策 #471：监听地址运行期重收敛（收口 R24-E）。listenMu 保护下面三字段；
+	// serveErr 常驻（缓冲 ≥4），只在 ListenAndServe 主循环读取——各代 serve 退出经它上报。
+	listenMu sync.Mutex
+	ln       net.Listener     // 当前监听（初始与换绑后）
+	lnAddr   string           // 当前实际绑定串（归一形式：如 [::]:443 → :443）
+	lnGen    uint64           // 监听代际：每起一代 serve 递增；旧代退出不视为致命
+	serveErr chan serveResult // 各代 serve 退出上报
+}
+
+// serveResult 一次 serve 代退出上报（gen = 该代建立时的监听代际，决策 #471）。
+type serveResult struct {
+	gen uint64
+	err error
 }
 
 // Handler 返回根 HTTP handler（测试与嵌套装配使用）。
@@ -150,6 +165,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	// 首启引导打印的一次性口令——三个出口（含诊断归档）共用同一份脱敏实现。
 	logs := scrubLogSource(opts.LogSource)
 	s := &Server{aaa: a, engine: e, cliExec: newCLIExecutor(e, a), vpp: opts.VPP, l2: opts.L2, l3: opts.L3, lldp: opts.LLDP, state: opts.State, vppState: opts.VppState, sriov: opts.SRIOV, dpdk: opts.DPDK, natSessions: opts.NAT, alarms: opts.Alarms, vm: opts.VM, vmConsole: opts.VMConsole, vmSnapshots: opts.VMSnapshots, containers: opts.Containers, images: opts.Images, ports: opts.Ports, events: opts.Events, sysOps: opts.SysOps, diagOps: opts.DiagOps, capture: opts.Capture, software: opts.Software, hardware: opts.Hardware, tlsMgr: opts.TLS, consoleTix: newConsoleTickets(), versions: opts.Versions, logs: logs, diag: opts.Diag, log: log}
+	s.serveErr = make(chan serveResult, 8) // 决策 #471：常驻（缓冲 ≥4，serve 代退出不阻塞）
 	s.history = opts.MetricsHistory
 	s.cliExec.setMetricsHistory(s.metricsHistoryView) // 决策 #356：CLI 渲染与 REST 同一读视图
 	s.cliExec.setRuntime(opts.Diag, opts.State)
@@ -473,7 +489,6 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	return s
 }
 
-// ListenAndServe 阻塞提供服务；Shutdown 优雅退出。
 // listener 创建监听套接字，并按 committed `system.api.max_sessions` 施加并发连接上限
 // （FR-SYS-006；0/未设置 = 不限）。此前 max-sessions 在命令树与契约中均有声明，
 // 但无任何代码使用它——属「声明了但无实现」（决策 #71）。
@@ -504,13 +519,60 @@ func (s *Server) maxSessions() int {
 	return cfg.System.API.MaxSessions
 }
 
+// ListenAndServe 阻塞提供服务；Shutdown 优雅退出。
+//
+// 决策 #471：监听按「代」管理——Rebind 换绑时关闭旧监听并起下一代 serve；旧代 serve
+// 因监听被关而退出属换绑的正常产物，**不得**当作致命退出（否则 main 侧会看成服务异常）。
+// 只有**当前代**的错误原样返回（保持既有语义：Shutdown 时返回 ErrServerClosed 等）。
 func (s *Server) ListenAndServe() error {
 	ln, err := s.listener(s.http.Addr)
 	if err != nil {
 		return err
 	}
+	if s.serveErr == nil { // 防御：未经 New 构造（测试直装）时按常驻通道初始化
+		s.serveErr = make(chan serveResult, 8)
+	}
+	s.listenMu.Lock()
+	s.startServeLocked(ln)
+	s.listenMu.Unlock()
+	for {
+		r := <-s.serveErr
+		s.listenMu.Lock()
+		cur := s.lnGen
+		s.listenMu.Unlock()
+		if r.gen != cur {
+			// 换绑（Rebind）关旧监听导致的退出：忽略，继续等当前代
+			s.log.Debug("旧监听代已退出（换绑所致，忽略）", "gen", r.gen, "current", cur, "err", r.err)
+			continue
+		}
+		return r.err
+	}
+}
+
+// serve 一代服务循环：在 ln 上提供服务，退出结果**带代际**上报（决策 #471）。
+func (s *Server) serve(ln net.Listener, gen uint64) {
+	s.serveErr <- serveResult{gen: gen, err: s.serveOn(ln)}
+}
+
+// startServeLocked 记录新监听并起下一代的 serve（调用方持有 listenMu）。
+// lnAddr 取 ln.Addr().String() 归一——使「同一实际绑定」（如 ":443" 与 "[::]:443"）
+// 在 Rebind 幂等比较中可比。
+func (s *Server) startServeLocked(ln net.Listener) {
+	s.ln = ln
+	addr := ln.Addr().String()
+	if n, err := normalizeListenAddr(addr); err == nil {
+		addr = n
+	}
+	s.lnAddr = addr
+	s.lnGen++
+	gen := s.lnGen
+	go s.serve(ln, gen)
+}
+
+// serveOn 在监听上提供服务（初始监听与换绑后的新监听共用）。
+func (s *Server) serveOn(ln net.Listener) error {
 	if s.tlsCert != "" && s.tlsKey != "" {
-		s.log.Info("API 服务启动（HTTPS）", "addr", s.http.Addr)
+		s.log.Info("API 服务启动（HTTPS）", "addr", ln.Addr().String())
 		// FR-SYS-011：GetCertificate 每次握手读盘 → 换证/重签（PUT /system/tls 或
 		// request system api tls regenerate）无需重启即时生效；读盘失败回退启动时加载的证书。
 		certPath, keyPath := s.tlsCert, s.tlsKey
@@ -532,8 +594,77 @@ func (s *Server) ListenAndServe() error {
 		}
 		return s.http.ServeTLS(ln, "", "")
 	}
-	s.log.Info("API 服务启动（HTTP，仅限开发/测试）", "addr", s.http.Addr)
+	s.log.Info("API 服务启动（HTTP，仅限开发/测试）", "addr", ln.Addr().String())
 	return s.http.Serve(ln)
+}
+
+// Rebind 运行期换绑监听地址（决策 #471）。
+//
+// 提交成功后由 nfvisd 钩子调用：管理口首次声明/地址变更后，「管理面仅监听管理网卡」
+// （FR-SEC-001）不再延迟到下次启动。失败安全：新地址绑不上时回退原地址继续服务并返回
+// 错误（带因）供调用方如实记录；任何路径都不 panic、不退出进程，且换绑成功/回退都推进
+// 监听代际，使旧代 serve 的退出不被 ListenAndServe 视为致命。
+func (s *Server) Rebind(addr string) error {
+	want, err := normalizeListenAddr(addr)
+	if err != nil {
+		return fmt.Errorf("监听地址 %q 不合法：%w", addr, err)
+	}
+	s.listenMu.Lock()
+	defer s.listenMu.Unlock()
+	if s.ln == nil {
+		return fmt.Errorf("服务尚未开始监听，无法换绑为 %s", addr)
+	}
+	if want == s.lnAddr {
+		return nil // 已是该地址：幂等，不动现有监听
+	}
+	old := s.lnAddr
+	_ = s.ln.Close() // 先放掉旧监听（同端口换 IP 时新旧不允许并存）
+	newLn, err := s.listener(want)
+	if err != nil {
+		// 回退：重新绑定原地址，保证失败时服务不中断
+		back, berr := s.listener(old)
+		if berr != nil {
+			return fmt.Errorf("新监听地址 %s 绑定失败（%v）；回退原地址 %s 也失败：%w", addr, err, old, berr)
+		}
+		s.startServeLocked(back)
+		return fmt.Errorf("新监听地址 %s 绑定失败（已回退 %s）：%w", addr, old, err)
+	}
+	s.startServeLocked(newLn)
+	return nil
+}
+
+// BoundAddr 返回当前实际监听地址（归一形式；供日志与测试）。未开始监听时为空串。
+func (s *Server) BoundAddr() string {
+	s.listenMu.Lock()
+	defer s.listenMu.Unlock()
+	return s.lnAddr
+}
+
+// normalizeListenAddr 归一监听地址串（决策 #471）：统一通配写法（""、0.0.0.0、:: →
+// 空主机 + ":port"）、IP 字面（IPv4-mapped、IPv6 规范形）与数字端口的书写差异，
+// 使「同一实际绑定」在 Rebind 幂等比较中可比。仅接受 host:port 形式；不合法返回错误
+// （Rebind 直接拒绝，绝不动现有监听）。ln.Addr().String() 也经同一归一后存入 lnAddr。
+func normalizeListenAddr(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", err
+	}
+	if host != "" {
+		if ip := net.ParseIP(host); ip == nil {
+			host = strings.ToLower(host) // 主机名不区分大小写
+		} else if ip.IsUnspecified() {
+			host = "" // 0.0.0.0 / :: —— 通配的两种写法归一为「空主机」
+		} else {
+			host = ip.String()
+		}
+	}
+	if n, err := strconv.Atoi(port); err == nil && n >= 0 && n <= 65535 {
+		port = strconv.Itoa(n) // "0443" 与 "443" 同义
+	}
+	if host == "" {
+		return ":" + port, nil
+	}
+	return net.JoinHostPort(host, port), nil
 }
 
 // Shutdown 优雅停机。

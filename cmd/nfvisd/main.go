@@ -581,6 +581,12 @@ func run() error {
 	}
 
 	var eng *config.Engine // 供 OnCommitted 回调引用（NewEngine 之后赋值）
+	// 决策 #471：提交后监听地址运行期重收敛（收口 R24-E）的钩子引用——apiSrv 在本函数
+	// 后段（api.New）才创建，故先声明、创建后赋值；钩子 goroutine 内先判 nil 再使用。
+	var apiSrv *api.Server
+	// 决策 #471：**原始**监听旗标值。启动收敛（下方 ResolveListenAddr）会就地改写 *listen，
+	// 而运行期重解析必须基于原始值（否则通配/未在本机的守门判定失真）。赋值见启动收敛之前。
+	var baseListen string
 	var engineOpts config.Options
 	// NFR-006：每条审计记录都带上「写入时宿主时钟是否已同步」的标记
 	engineOpts.TimeSynced = system.ClockSynced
@@ -616,6 +622,39 @@ func run() error {
 					log.Info("日志保留策略已应用", "dropin", path)
 				}
 			}
+			// 决策 #471：管理口地址变更后监听地址运行期重收敛（失败不改提交结果）。
+			// 规则：解析结果等于原始旗标值（管理口未配/未在本机等）→ 保持现状、绝不放宽
+			// 监听，只如实记日志；解析到具体管理口地址 → 换绑（与当前相同自然幂等）。
+			if apiSrv != nil {
+				if addr, note := system.ResolveListenAddr(baseListen, mgmtAddressOf(cfg), system.LocalAddrChecker()); note != "" {
+					switch {
+					case addr == baseListen: // 管理口未配/未在本机：保持现状，绝不放宽监听；如实记日志
+						log.Info(note)
+					default:
+						if err := apiSrv.Rebind(addr); err != nil {
+							log.Error("监听地址重收敛失败", "addr", addr, "err", err)
+						} else {
+							log.Info(note, "listen", addr)
+							tlsMgr.SetListen(addr) // 证书 SAN 随实际监听地址（与启动路径同序）
+							*listen = addr         // 监听守卫事实随新地址刷新
+							// 决策 #471（R24-E 行内回修）：SetListen 只影响**之后**生成的自签
+							// 证书，存量自签不重签——严格校验证书的客户端（nfvis-cli 缺省）
+							// 连新监听地址会报 certificate is valid for …, not <新地址>。
+							// 自签随换绑**立即重签**（SAN 含新监听地址）；外部证书不代重签，
+							// 只如实提示持证人自行处理。
+							if info, ok := tlsMgr.Info(); ok && info.SelfSigned {
+								if _, err := tlsMgr.RegenerateSelfSigned(hostnameOr("nfvis")); err != nil {
+									log.Warn("监听地址变更后自签证书重签失败——新地址可能不在证书 SAN 内", "err", err)
+								} else {
+									log.Info("监听地址变更后已重签自签证书（SAN 随新监听地址）")
+								}
+							} else if ok {
+								log.Info("监听地址已变更且已安装外部证书：新地址若不在其 SAN 内请自行重签（产品不代重签）")
+							}
+						}
+					}
+				}
+			}
 		}()
 	}
 	engine, err := config.NewEngine(store, applier, engineOpts)
@@ -636,6 +675,10 @@ func run() error {
 	// 零行为变化）。持有层记住并在换装时转发：后台接入循环会新建 Provider 再 Swap。
 	containerProvider.SetConfigSource(engine.Committed)
 
+	// 决策 #471：先留存**原始**监听旗标值——下面这条启动收敛会把 *listen 就地改写为
+	// 管理口地址，而提交后的运行期重解析必须基于原始值（守门判定「addr == baseListen
+	// ⇒ 保持现状」依赖的正是未收敛的通配写法）。
+	baseListen = *listen
 	// FR-OPS-030 / FR-SYS-004（决策 #69）：按 committed 配置初始化日志级别与远程转发
 	if cfg, err := engine.Committed(); err == nil {
 		applySyslogSettings(cfg, logLevel, syslogFwd, log)
@@ -1316,6 +1359,7 @@ func run() error {
 		// 决策 #356：历史时序读视图（Store 为 nil 时以 Disabled 如实说明「为何没有历史」）。
 		MetricsHistory: &api.MetricsHistoryOptions{Store: metricsStore, Path: *metricsDB, Disabled: metricsDisabled},
 	})
+	apiSrv = apiServer // 决策 #471：提交钩子（OnCommitted）据此做监听地址运行期重收敛
 
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- apiServer.ListenAndServe() }()

@@ -275,8 +275,9 @@ func (s *Server) vmAction(w http.ResponseWriter, r *http.Request, name, action s
 		return
 	}
 	s.engine.Audit(user, "vm."+action, fmt.Sprintf("%s VM %s", action, name), "success")
-	s.publishVNFState("virtual-machine-functions", name, action+"ing") // M5-1 vnf-state-changed
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": action + "ing", "name": name})
+	// 状态词经 vnfActionState 显式映射（决策 #468）：stop 不再拼成 "stoping"。
+	s.publishVNFState("virtual-machine-functions", name, vnfActionState(action)) // M5-1 vnf-state-changed
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": vnfActionState(action), "name": name})
 }
 
 // vmStateSafe 查询运行态，未装配/出错时返回空（列表仍可用，FR-CMP-011）。

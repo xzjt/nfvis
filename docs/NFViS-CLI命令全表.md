@@ -84,11 +84,11 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show interfaces <ifname> detail` | **≡ `show interfaces physical <ifname> detail`（全形态等价、同一实现）**；回**运行态单口视图**——已声明与未声明但在 VPP 清单里的口（派生口 bvi0/vh-* 等）都答，候选 advertise 的名字必须答得上来（决策 #154/#155）；内核侧未接管的物理口回**内核事实视图**（驱动/MAC/速率/Admin/Link/MTU 取 sysfs，注明「未被 VPP 接管」；决策 #302）；接口配置视图在配置模式 `edit interfaces <ifname>` + `show` | 运行态（VPP）；内核口取 sysfs；配置视图走配置模式层级 show | ✅ |
 | `show interfaces <ifname> statistics` | 同上（等价写法）；未接管口如实说明无数据面统计（决策 #302） | VPP 运行态统计 | ✅（round80 逐条比对：两侧输出逐字相同） |
 | `show interfaces <ifname> sriov` | 同上（等价写法） | sysfs SR-IOV | ✅ |
-| `show virtual-switches` | 全部虚拟交换机摘要 | `GET /virtual-switches` | ✅ |
-| `show virtual-switches <name> detail` | 类型/成员端口/VLAN/VRF/DHCP 中继 | `GET /virtual-switches/{name}` | ✅ |
-| `show virtual-switches <name> ports` | 成员端口及状态/计数（配置静态 ports ∪ VNF/容器声明派生，标注 source） | `GET /virtual-switches/{name}/ports` | ✅ |
-| `show virtual-switches <name> mac-table` | MAC 学习表（仅 L2） | `GET /virtual-switches/{name}/mac-table` | ✅ |
-| `show virtual-switches <name> statistics` | 每端口收发计数 | `GET /virtual-switches/{name}`（statistics 字段） | ✅ |
+| `show virtual-switches` | 全部虚拟交换机摘要（运行态 BD 行 **∪** committed 里 type=l3 的行——L3 行 BD-ID 等列「—」、Note 列「l3（VRF）」，与 REST/Web 列表三面同源，决策 #467） | `GET /virtual-switches` | ✅ |
+| `show virtual-switches <name> detail` | 类型/成员端口/VLAN/VRF/DHCP 中继；**`<name>` 是 L3 交换机时与 `show vrfs <name>` 同一实现、同一输出**（决策 #467） | `GET /virtual-switches/{name}` | ✅ |
+| `show virtual-switches <name> ports` | 成员端口及状态/计数（配置静态 ports ∪ VNF/容器声明派生，标注 source）；L3 交换机如实说明「无 L2 成员端口，三层接口见 show vrfs <名>」（决策 #467） | `GET /virtual-switches/{name}/ports` | ✅ |
+| `show virtual-switches <name> mac-table` | MAC 学习表（仅 L2；L3 交换机如实说明「仅 L2 交换机支持」） | `GET /virtual-switches/{name}/mac-table` | ✅ |
+| `show virtual-switches <name> statistics` | 每端口收发计数（L3 交换机同 ports 的如实说明口径） | `GET /virtual-switches/{name}`（statistics 字段） | ✅ |
 | `show vrfs` | L3 交换机（VRF）列表 | `GET /vrfs` | ✅ |
 | `show vrfs <name>` | detail：L3 接口/地址/路由 | `GET /vrfs/{name}` | ✅ |
 | `show vrfs <name> routes` | FIB 路由表 | `GET /vrfs/{name}/routes` | ✅（VRF 不存在时明确报错，决策 #76④） |
@@ -265,8 +265,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set system api tls cert-file <p> key-file <p>` | 安装外部证书（立即生效） | nfvisd TLS | ✅（决策 #79 修复） |
 | `set system api tls self-signed regenerate` | 重签自签证书 | nfvisd TLS | ✅ |
 | `set system management interface <ifname>` | 管理网卡（不得用于数据面） | 宿主 + 数据面隔离校验 | ✅（决策 #71/72；**变更须 `commit confirmed`**，含首次声明） |
-| `set system management ip address <ip-prefix>` | 管理口静态地址 | 宿主 netplan | ✅ |
-| `set system management gateway <ip>` | 管理口默认网关 | 宿主 netplan | ✅ |
+| `set system management ip address <ip-prefix>` | 管理口静态地址（须已配置在宿主上——产品**不代改宿主 netplan/地址**，该值用于监听收敛与隔离校验；**提交成功后监听地址实时收敛**，决策 #471） | 宿主网络 + nfvisd 监听 | ✅ |
+| `set system management gateway <ip>` | 管理口默认网关（同上：只记录，不代改宿主） | 宿主网络 | ✅ |
 | `set system kernel nmi-watchdog <bool>` | NMI watchdog | GRUB 基线 | ✅ |
 | `set system kernel transparent-hugepages <mode>` | THP 模式 | GRUB 基线 | ✅ |
 | `set system kernel iommu <on\|off\|pt>` | IOMMU | GRUB 基线 | ✅ |
@@ -353,7 +353,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-switches <n> ports <seq> vnf <vm> interface <vnic> [trunk vlans <l>]` | vhost-user 成员（`<seq>` 必填） | VPP + libvirt | ✅ |
 | `set virtual-switches <n> ports <seq> container <ct> interface <vnic>` | 容器 vNIC 成员（`<seq>` 必填） | VPP：memif；内核：veth 宿主端入交换机内核 bridge（决策 #441） | ✅ |
 | `set virtual-switches <n> cross-connect <bool>` | 两端口直通开关（与 ports/gateway 互斥；端口取该交换机的 `ports`，恰好两个——数据面取前两个，>2 提交期拒绝、<2 提交期提示） | VPP | ✅（决策 #79：置 `cross_connect`；`delete virtual-switches <n> cross-connect` 清键） |
-| `set virtual-switches <n> l3-interface <if> ip address <p>` | L3 接口地址（v4/v6 多条） | VPP | ✅ |
+| `set virtual-switches <n> l3-interface <if> ip address <p>` | L3 接口地址（v4/v6 多条）。**VPP-only 形态**：`<if>` 可以是被声明 vNIC 的**派生名**（`vh-<vm>-<nic>`，决策 #172）；**内核数据面下该形态提交期拒绝**（内核侧不存在该设备名——校验同时比对 vNIC 短名与派生名，决策 #469），请改用物理口/bond 或切回 vpp | VPP | ✅ |
+| `set virtual-switches <n> l3-interface <if>` | **裸形态**（决策 #472）：声明该 L3 接口条目、**不带地址**（幂等；地址用 `… ip address <p>` 逐条追加；`delete … ip address` 只删地址、条目保留）。补此形态前「删掉最后一个地址」留下的无地址条目**无法用任何 set 语句表达**，`display set` 回放自校验会失败——生成器现对无地址条目发射本形态 | VPP | ✅ |
 | `set virtual-switches <n> l3-interface <if> acl-in <acl>` | L3 接口 ACL 绑定 | VPP acl | ✅ 已实证生效（round118：vNIC/物理口作 L3 接口时 ACL 确实在拦；绑定时产品**自动伴随**一条放行全部非 IP（含 ARP）的 macip 白名单——决策 #341，故对端无需预置静态邻居；IP 流量仍受 ACL） |
 | `set virtual-switches <n> static-routes <prefix> next-hop <ip> [distance <n>]` | 静态路由（v4/v6）；`next-hop` 可**逗号分隔多下一跳＝ECMP**（≤8，**前缀与每个下一跳须同族**，混族提交期拒绝）；`distance` 仅记录、不参与选路（运行态读视图不给出该值） | VPP FIB | ✅ |
 | `set virtual-switches <n> static-routes default next-hop <ip>` | 默认路由（`next-hop` 同上的多下一跳/同族规则） | VPP FIB | ✅ |
@@ -368,7 +369,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set nat rules <seq> match source <p> virtual-switch <n> action interface <if> [source-pool <n>]` | 转换规则（出接口必填，决策 #38/#52） | VPP nat44 | ✅ |
 | `set nat static <inside> to <outside>` | 1:1 静态发布 | VPP nat44 | ✅ |
 | `set port-mirroring <n> source interface <if> direction <i\|e\|both>` | SPAN 源（物理口） | VPP span | ✅ |
-| `set port-mirroring <n> source vnf <vm> interface <vnic> direction <…>` | SPAN 源（VNF 的 vNIC）：下发时按**确定性 vhost-user 口名** `vh-<vm>-<vnic>` 解析（与建 vNIC 接口/交换机端口同一命名规则），再走与物理口**同一条** span 原语。**前置：该 vNIC 口须已在数据面**——vhost-user 口随 vNIC 声明建立（VM 未启动也有此口，只是 link down、镜像是就绪的没有流量）；解析不到即提交失败并给出照做路径（先声明/下发该 vNIC、或改用物理口）；**sriov-vf（PCI 直通）型 vNIC 不经过数据面交换机、收不到流量，作为镜像源在提交期直接拒绝**（两数据面一致），请改用 vhost-user 型 vNIC 或物理口/bond | VPP span | 🚫 **真机复验待执行**（实现已入仓：解析路径/解析失败的可照做错误/物理口不回归均有单测；round3 走查登记的「提交期放行、下发期拒绝并整次回滚」已消除） |
+| `set port-mirroring <n> source vnf <vm> interface <vnic> direction <…>` | SPAN 源（VNF 的 vNIC）：下发时按**确定性 vhost-user 口名** `vh-<vm>-<vnic>` 解析（与建 vNIC 接口/交换机端口同一命名规则），再走与物理口**同一条** span 原语。**前置：该 vNIC 口须已在数据面**——vhost-user 口随 vNIC 声明建立（VM 未启动也有此口，只是 link down、镜像是就绪的没有流量）；解析不到即提交失败并给出照做路径（先声明/下发该 vNIC、或改用物理口）；**sriov-vf（PCI 直通）型 vNIC 不经过数据面交换机、收不到流量，作为镜像源在提交期直接拒绝**（两数据面一致），请改用 vhost-user 型 vNIC 或物理口/bond | VPP span | ✅（**真机复验已完成**：round13 首验、**round24 发布件复验**——`vppctl show interface span` 见 `vh-vnf-a-nic0 → ens192 (both)`、vh 口 span-input/output 特性在位、**分析口 pcap 实测镜像帧**（guest MAC 的 ARP/ICMP 双向可见）；解析失败的可照做错误与 sriov-vf 提交期拒绝均有单测；round3 走查登记的「提交期放行、下发期拒绝并整次回滚」已消除——`docs/evidence/v3-round24-clean-install-walkthrough-vpp-kernel.txt` §2.15） |
 | `set port-mirroring <n> analyzer interface <if>` | 分析口 | VPP span | ✅ |
 | `set qos policies <n> cir <n> cbs <n>` | 限速策略（bps/bytes） | VPP policer | ✅ |
 | `set vxlan tunnels <n> vni <id> local <ip> remote <ip> [dst-port <n>] [virtual-switch <vs>]` | VXLAN overlay 隧道（单播 remote、IPv4 下垫层）：建/改；`virtual-switch` 给了就把隧道口加入该 **L2** 交换机的 bridge-domain；改 `vni/local/remote/dst-port` 时**先按旧配置的元组撤旧、再建新**（不给旧隧道留残留；旧元组来自提交 diff，不依赖 vxlan dump）；建隧后打平台接口标记（`nfvis-vxlan:<名>`）——恢复重放按它判存量；`dst-port` 缺省 4789 | VPP vxlan plugin（`vxlan_add_del_tunnel_v3` + 打标 + 置 up + 入 BD） | ✅（round164 真机四维：建隧逐字对（`vppctl show vxlan tunnel`）/改 remote 撤旧/restart nfvis 不重复建/vpp restart 重放/对抗双拒——`docs/evidence/v2-round164-d383-vxlan.txt`） |
@@ -464,8 +465,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request` | 52 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/抓包/系统/告警） |
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
-| 配置模式 | 159 | §2.1 余下 13 行 + §2.2~§2.9 共 146 行（§2.4 的 `dhcp-leases` 读行计入 `show` 族；含 FR-CMP-023 的 2 条 `pci-device`、决策 #383 的 2 条 vxlan、决策 #385 的 3 条 storm-control、决策 #388 的 4 条 firewall、决策 #389 的 3 条 port-security 语句、v3 的 `set system dataplane` 1 条） |
-| **合计** | **306** | 不含管道则为 **297**；按 ` / ` 拆开后 **310 条** |
+| 配置模式 | 160 | §2.1 余下 13 行 + §2.2~§2.9 共 147 行（§2.4 的 `dhcp-leases` 读行计入 `show` 族；含 FR-CMP-023 的 2 条 `pci-device`、决策 #383 的 2 条 vxlan、决策 #385 的 3 条 storm-control、决策 #388 的 4 条 firewall、决策 #389 的 3 条 port-security 语句、v3 的 `set system dataplane` 1 条、决策 #472 的 l3-interface 裸形态 1 条） |
+| **合计** | **307** | 不含管道则为 **298**；按 ` / ` 拆开后 **311 条** |
 
 **分节**（行数）：
 
@@ -483,11 +484,11 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 289 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）、**主机防火墙 5 行（#388，round169）**、**`set system dataplane`（v3 round1：干净快照两次切换 + 切回 vpp 实证，`docs/evidence/v3-round1-clean-snapshot-datapath-switch.txt` §4/§5）**——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，按增量口径一并订正。**本桶较上一版 -1**：`set port-mirroring <n> source vnf …`（vNIC 源）此前标 ✅ 但实为下发期拒绝，v3 round3 走查后按实现口径重写并移入 🚫 桶（真机复验待执行）。**本桶 +4**：抓包族改数据面中立命名（`show capture` / `request capture start|stop|export`）新增 4 行，与 3 行兼容别名（`show vpp capture` / `request vpp trace …`）**同一实现**——别名行的历史真机结论适用，新名拼写的真机复跑见各行实测注 |
+| ✅ 实测通过 | 290 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）、**主机防火墙 5 行（#388，round169）**、**`set system dataplane`（v3 round1：干净快照两次切换 + 切回 vpp 实证，`docs/evidence/v3-round1-clean-snapshot-datapath-switch.txt` §4/§5）**——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，按增量口径一并订正。**本桶较上一版 +1**：`set port-mirroring <n> source vnf …`（vNIC 源）——v3 round3 走查后曾按「下发期拒绝并整次回滚」口径移入 🚫 桶；**round13 首验 + round24 发布件复验**（分析口 pcap 镜像帧实证）确认实现口径成立，本轮按账目如实化移回 ✅。**更早的 +4**：抓包族改数据面中立命名（`show capture` / `request capture start|stop|export`）新增 4 行，与 3 行兼容别名（`show vpp capture` / `request vpp trace …`）**同一实现**——别名行的历史真机结论适用，新名拼写的真机复跑见各行实测注 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 设计拒绝（网关 ACL 绑定） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
-| 🚫 未在 v2 轮次执行 | 12 | **破坏性/需交互**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、`kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）。机制由单测/集成测试覆盖；破坏性动作按其交付说明单独走查（部分动作在 v1 收尾轮有真机走查记录，见各轮证据）。**真机验证待执行**：`set port-mirroring <n> source vnf …`（vNIC 源；实现已入仓、单测覆盖解析与拒绝路径，真机步骤见交付说明）。round168/170 一度在此桶挂过 #388 的 5 条与 #389 的 3 条待真机行，真机四维通过后均已移入 ✅；v3 的 `set system dataplane` 亦同（真机两次切换后移入 ✅） |
+| 🚫 未在 v2 轮次执行 | 11 | **破坏性/需交互**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、`kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）。机制由单测/集成测试覆盖；破坏性动作按其交付说明单独走查（部分动作在 v1 收尾轮有真机走查记录，见各轮证据）。round168/170 一度在此桶挂过 #388 的 5 条与 #389 的 3 条待真机行，真机四维通过后均已移入 ✅；v3 的 `set system dataplane` 亦同（真机两次切换后移入 ✅）；`set port-mirroring <n> source vnf …`（vNIC 源）经 round13/round24 真机复验后移入 ✅（见上行） |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、

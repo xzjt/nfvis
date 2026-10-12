@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -704,6 +705,7 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 	res.Warnings = append(res.Warnings, crossConnectPortWarnings(newCfg)...)
 	res.Warnings = append(res.Warnings, e.numaWarnings(committed, newCfg)...)
 	res.Warnings = append(res.Warnings, dataPlaneWarnings(committed, newCfg)...)
+	res.Warnings = append(res.Warnings, vmDefinitionWarnings(committed, newCfg)...)
 
 	// FR-CFG-011⑤：镜像检查需要 committed 之后的候选配置
 
@@ -1127,9 +1129,76 @@ func dataPlaneWarnings(old, new model.Config) []string {
 		out = append(out, fmt.Sprintf(
 			"警告: 数据面实现已改为 %s，需重启服务（systemctl restart nfvis）后生效；"+
 				"重启前数据面仍按原实现运行", new.DataPlaneMode()))
+		// 决策 #470（round24 R24-D②）：切换后仍在运行的 VNF/容器还带着**旧数据面形态**的
+		// 设备（例：VPP 停掉后 vhost-user 后端消失、guest 网卡实际断连），而 start 对已运行
+		// 负载是幂等空操作 ⇒ 必须 stop+start（容器 restart）才会按新形态重建。属可发现性提示，
+		// 不改切换语义；无负载时不追加（没有会保持旧形态的运行中对象）。
+		if len(new.VirtualMachineFunctions)+len(new.ContainerFunctions) > 0 {
+			out = append(out, "警告: 运行中的 VNF/容器仍使用旧数据面形态（网络将不通）："+
+				"需对其 stop+start（容器 restart）按新数据面重建")
+		}
 	}
 	if new.DataPlaneMode() == model.DataPlaneKernel && new.Vpp != nil && !vppSectionOnlyDNSProxyUpstreams(new.Vpp) {
 		out = append(out, "警告: 当前数据面为 Linux 内核网络，vpp 段配置不生效（切回 vpp 数据面后即可用）")
+	}
+	return out
+}
+
+// vmDefinitionWarnings 运行中 VM「形态/硬件」声明变更的提交提示（v3 决策 #470，收口 round24 R24-D①）。
+//
+// 由来：给**运行中**的 VM 新增 vNIC（或改内存/磁盘等）提交成功，但 guest 里没有新设备——
+// 这些声明进入运行域只在**下次启动**：`restart` 是 ACPI 重启、**沿用旧定义**；`start` 对已
+// 运行域是幂等空操作（均属文档化语义，本函数不改语义、不阻断提交）。缺的是提交输出的照做
+// 路径——此前唯一线索是 VNF_PORT_DOWN 告警，其括号文案还写着「VM 未启动」（与事实相反，
+// 已随本决策一并如实化，见 internal/orchestrator/network/vnf_alarm.go）。
+//
+// 判据（按**变更维度**列出人话类别）：vNIC 声明 / 磁盘 / 内存 / CPU / PCI 直通设备 / cloud-init
+// ——即运行域定义相关的六类字段。只对**同时存在于 old 与 new 的同名 VM**出：新增 VM 没有
+// 「运行中沿用旧定义」一说、删除 VM 也不涉及（走删除路径）；description/image 等非运行域
+// 字段不出。输出按 VM 名排序、维度按固定顺序拼接，保证确定性。
+func vmDefinitionWarnings(old, new model.Config) []string {
+	oldVM := make(map[string]model.VMFunction, len(old.VirtualMachineFunctions))
+	for _, vm := range old.VirtualMachineFunctions {
+		oldVM[vm.Name] = vm
+	}
+	newVM := make(map[string]model.VMFunction, len(new.VirtualMachineFunctions))
+	var names []string
+	for _, vm := range new.VirtualMachineFunctions {
+		newVM[vm.Name] = vm
+		if _, kept := oldVM[vm.Name]; kept {
+			names = append(names, vm.Name)
+		}
+	}
+	sort.Strings(names)
+
+	var out []string
+	for _, name := range names {
+		o, n := oldVM[name], newVM[name]
+		var dims []string
+		if !configEq(o.Interfaces, n.Interfaces) {
+			dims = append(dims, "vNIC 声明")
+		}
+		if !configEq(o.Disks, n.Disks) {
+			dims = append(dims, "磁盘")
+		}
+		if !configEq(o.Memory, n.Memory) {
+			dims = append(dims, "内存")
+		}
+		if !configEq(o.VCPU, n.VCPU) {
+			dims = append(dims, "CPU")
+		}
+		if !configEq(o.PCIDevices, n.PCIDevices) {
+			dims = append(dims, "PCI 直通设备")
+		}
+		if !configEq(o.CloudInit, n.CloudInit) {
+			dims = append(dims, "cloud-init")
+		}
+		if len(dims) == 0 {
+			continue
+		}
+		out = append(out, fmt.Sprintf(
+			"警告: VM %s 的 %s 已变更：变更在下次启动时生效；VM 运行中时 restart 沿用旧定义，需 stop+start",
+			name, strings.Join(dims, "、")))
 	}
 	return out
 }

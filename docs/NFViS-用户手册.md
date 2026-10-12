@@ -858,6 +858,9 @@ exit
 （不做在线迁移），切换后数据面按 committed 配置重新收敛；③ 内核数据面下**未实现的功能
 在提交时就报错并给出替代路径**（不会出现「配了却不生效」），`show vpp` 会明确显示
 `dataplane: kernel`。
+还有一条容易漏的：**切换后仍在运行的 VM/容器仍使用旧数据面的设备形态**（例如 VPP 停掉后
+vhost-user 后端消失、guest 网卡实际断连，而 `start` 对已运行负载是幂等空操作）——需对它们
+`stop` + `start`（容器 `restart`）按新数据面重建；带负载切换时提交输出会给出这条警告。
 
 > **切到内核后的第一件事（原 VPP 业务口的交接）**：切换只换 nfvisd 的装配，**不重启 VPP**；
 > 而产品不再使用 VPP，故 nfvisd 启动时会**自动把它停掉**（只停不卸、不改启用状态；日志有
@@ -1102,7 +1105,10 @@ nfvis# commit
 
 > ⚠️ **管理口的任何变更（含首次声明）必须用 `commit confirmed`**：改管理口可能切断当前 SSH
 > 会话，普通 commit 会被拒并输出自锁警告；confirmed 让它在超时未确认时自动回滚。
-> 管理口 IP 只在下次启动时收敛监听（运行期不热改地址）。
+> 管理口 IP 变更后**监听地址提交成功即实时收敛**（改前是「下次启动才收敛」）——
+> 例：声明 `192.168.155.130/24` 后 API 只监听该地址（旧地址拒新连接），改回即反向收敛。
+> 该地址须**已配置在宿主上**（产品不代改宿主 netplan/地址——这是管理员职责，产品只用它
+> 收敛监听与做隔离校验；地址未落在本机时保持通配监听并如实记日志）。
 
 #### DNS 的两条路：宿主解析器 vs 数据面代理
 
@@ -1434,6 +1440,9 @@ nfvis# commit
 ```
 
 核对：`show vrfs`、`show vrfs vs-wan`、`show vrfs vs-wan routes`（FIB 运行态）。
+`show virtual-switches vs-wan`（或 `… detail`）与 `show vrfs vs-wan` 是**同一输出**（L3 交换机即其 VRF）：
+L3 交换机即其 VRF）；`show virtual-switches` 列表里 L3 交换机也有对应行（BD-ID 等列「—」、
+Note 列「l3（VRF）」）——列表与 REST/Web 三面同源。
 
 多下一跳（等价多路径）：`next-hop` 可以逗号分隔写多个等价下一跳（如 `set static-routes 10.0.0.0/8 next-hop 192.168.1.1,192.168.1.2`，最多 8 个）；**前缀与每个下一跳必须同族**（IPv4 前缀配 IPv6 下一跳会在提交时被拒绝），运行态读视图会列出全部下一跳。**内核数据面下 ECMP 尚未实现**（多下一跳在提交期被直接拒绝）——请拆成多条单跳路由，用 `distance` 决定优先级。
 
@@ -1888,6 +1897,11 @@ nfvis$ request images upload name alpine type container-image file /data/incomin
 删除镜像有引用检查（被 VM/容器引用时拒绝）。
 
 ### 9.2 VM VNF 全流程
+
+> ⚠️ **运行中的 VM 改「运行域定义相关声明」（vNIC/磁盘/内存/CPU/PCI 直通/cloud-init）后**：
+> `commit` 会输出警告点名变更维度——这些变更在**下次启动**生效；`restart` 是 ACPI 重启、
+> **沿用旧定义**，`start` 对已运行域是幂等空操作——要让变更生效须 **`stop` + `start`**
+> （提交警告名单见提交输出，`VNF_PORT_DOWN` 告警也会给出同样的照做路径）。
 
 **① 定义并提交**（vCPU 从隔离核池分配并绑核、内存从大页池分配——池子不够 commit 会明确报错）：
 

@@ -276,11 +276,6 @@ func (v *validator) collect(c Config) {
 		for _, nic := range m.Interfaces {
 			v.vmVnics[m.Name+"/"+nic.Name] = true
 			v.vmVnicType[m.Name+"/"+nic.Name] = nic.Type
-			// VPP 侧接口名只对 vhost-user 类型的 vNIC 存在（与 orchestrator.VnfPortsOf
-			// 的过滤口径一致：type 必须显式为 vhost-user，sriov-vf 不进 VPP）。
-			if nic.Type == "vhost-user" {
-				v.vnicNames[VnfIfaceName(m.Name, nic.Name)] = true
-			}
 		}
 	}
 	v.ctNames, v.ctVnics = map[string]bool{}, map[string]bool{}
@@ -288,10 +283,12 @@ func (v *validator) collect(c Config) {
 		v.ctNames[ct.Name] = true
 		for _, nic := range ct.Interfaces {
 			v.ctVnics[ct.Name+"/"+nic.Name] = true
-			if nic.Type == "memif" {
-				v.vnicNames[MemifIfaceName(ct.Name, nic.Name)] = true
-			}
 		}
+	}
+	// vNIC 的 VPP 侧确定性接口名（vh-/mf-）单源归集（见 vnicDerivedOwners）：l3IfaceExists
+	// 与内核数据面的 L3 接口判据共用同一份集合，避免两处各抄一份类型过滤而漂移。
+	for name := range vnicDerivedOwners(c) {
+		v.vnicNames[name] = true
 	}
 	v.macOwner = map[string]string{}
 	v.hpSizes = map[string]bool{}
@@ -508,12 +505,23 @@ func (v *validator) checkKernelDataPlane(c Config) {
 	}
 	// 三层接口：ACL 绑定已支持；「vNIC 作三层接口」仍不支持（要把宿主 tap 挂进 VRF，
 	// 而 tap 由 libvirt 在域启动时创建，产品侧没有可靠的挂载时点）。
+	//
+	// 判据覆盖 vNIC 的两种写法（决策 #469）：① **短名**（nic0/nic1，vNIC 的声明名）；
+	// ② **派生名**（VPP 侧接口名 `vh-<vm>-<nic>`/`mf-<ct>-<nic>`，见 ifacename.go——它是
+	// 文档化的 NAT-inside 用法）。只比对短名时对文档化的派生名写法**永不命中**：内核侧没有
+	// 该设备名，放行只会把失败推迟到恢复收敛（IFACE_MISSING/UNCONVERGED 告警）与起 VM 失败。
 	vnics := vnicNames(c)
+	derived := vnicDerivedOwners(c)
 	for _, vrf := range c.Vrfs {
 		for _, li := range vrf.L3Interfaces {
 			if vnics[li.Interface] {
 				v.errf("vrfs["+vrf.Name+"].l3_interfaces["+li.Interface+"]",
 					"当前数据面为 Linux 内核网络，VNF 虚拟网卡不能直接作为三层接口；请改为接入一台已配网关的二层交换机%s", alt)
+			} else if owner, ok := derived[li.Interface]; ok {
+				v.errf("vrfs["+vrf.Name+"].l3_interfaces["+li.Interface+"]",
+					"当前数据面为 Linux 内核网络，%s 是 vNIC %s 的派生名（VPP 侧接口名），内核侧不存在该设备；"+
+						"请删除该三层接口并改用物理口/bond，或切回 VPP 数据面使用该形态（set system dataplane vpp）",
+					li.Interface, owner)
 			}
 			// vlan 子接口的派生名（`<接口名>.<vid>`）同样直接用作内核设备名：总长超过
 			// IFNAMSIZ-1 时 `ip link add … type vlan` 必失败（VPP 侧没有这个限制）。
@@ -893,6 +901,36 @@ func vnicNames(c Config) map[string]bool {
 		for _, nic := range ct.Interfaces {
 			if nic.Name != "" {
 				out[nic.Name] = true
+			}
+		}
+	}
+	return out
+}
+
+// vnicDerivedOwners 收集会产生 VPP 侧接口的已声明 vNIC 的**派生接口名** → 归属
+// （"<VM 或容器>/<vNIC>"，与读视图里的 <owner>/<nic> 寻址一致）。
+//
+// 名字统一走 ifacename.go 的规则函数（VnfIfaceName/MemifIfaceName）——派生规则是**命名
+// 单一事实源**，校验层不得另抄一份拼接逻辑（否则超长哈希回退等的漂移会让判据对正确写法
+// 永不命中）。类型过滤与历史口径一致（与 orchestrator.VnfPortsOf 同源）：VNF 只认
+// vhost-user、容器只认 memif——sriov-vf 不提进 VPP，没有派生接口名。
+//
+// 两个使用者：collect 用它填 validator.vnicNames（l3IfaceExists 判「已声明的 vNIC」）；
+// 内核数据面（checkKernelDataPlane，决策 #469）用它拒绝 l3-interface 指向派生名的配置，
+// 并报出归属——内核侧不存在该设备名，放行只会把失败推迟到恢复收敛与起 VM。
+func vnicDerivedOwners(c Config) map[string]string {
+	out := map[string]string{}
+	for _, vm := range c.VirtualMachineFunctions {
+		for _, nic := range vm.Interfaces {
+			if nic.Type == "vhost-user" {
+				out[VnfIfaceName(vm.Name, nic.Name)] = vm.Name + "/" + nic.Name
+			}
+		}
+	}
+	for _, ct := range c.ContainerFunctions {
+		for _, nic := range ct.Interfaces {
+			if nic.Type == "memif" {
+				out[MemifIfaceName(ct.Name, nic.Name)] = ct.Name + "/" + nic.Name
 			}
 		}
 	}

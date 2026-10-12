@@ -24,7 +24,13 @@ import (
 )
 
 // showVSwitchPorts 交换机成员端口读视图（决策 #326）。未在配置中声明时退回运行态视图。
+//
+// 决策 #467：名字命中 committed 里 type=l3 的交换机时如实说明——L3（VRF）没有 L2 成员端口
+// （它只有三层接口），并指向 `show vrfs <名>`；否则会打印一张没有意义的空端口表。
 func (x *cliExecutor) showVSwitchPorts(name string) string {
+	if x.vswitchIsL3(name) {
+		return fmt.Sprintf("%% 交换机 %s 是 L3（VRF），无 L2 成员端口；三层接口见 show vrfs %s\n", name, name)
+	}
 	if cfg, err := x.engine.Committed(); err == nil {
 		for _, vs := range cfg.VirtualSwitches {
 			if vs.Name == name {

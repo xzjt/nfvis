@@ -27,6 +27,23 @@ func (s *Server) publishVNFState(kind, name, state string) {
 	})
 }
 
+// vnfActionState 把生命周期动作映射为事件 payload 的进行时状态词（决策 #468）。
+//
+// 此前用 action+"ing" 直接拼接，stop 会得到拼写错误的 "stoping"——消费方按该值匹配
+// 会被固定拼写绑定，也与英文惯例不符；故 start/stop/restart 走显式映射，未知动作
+// 保留拼接兜底（事件类型名、payload 其余字段与 SSE 帧格式均不变）。
+func vnfActionState(action string) string {
+	switch action {
+	case "start":
+		return "starting"
+	case "stop":
+		return "stopping"
+	case "restart":
+		return "restarting"
+	}
+	return action + "ing"
+}
+
 // handleEvents GET /api/v1/events（text/event-stream）
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if s.events == nil {

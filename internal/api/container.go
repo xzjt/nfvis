@@ -296,8 +296,9 @@ func (s *Server) containerAction(w http.ResponseWriter, r *http.Request, name, a
 		return
 	}
 	s.engine.Audit(user, "container."+action, fmt.Sprintf("%s 容器 %s", action, name), "success")
-	s.publishVNFState("container-functions", name, action+"ing") // M5-1 vnf-state-changed
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": action + "ing", "name": name})
+	// 状态词经 vnfActionState 显式映射（决策 #468）：stop 不再拼成 "stoping"。
+	s.publishVNFState("container-functions", name, vnfActionState(action)) // M5-1 vnf-state-changed
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": vnfActionState(action), "name": name})
 }
 
 // handleContainerLogs GET /api/v1/container-functions/{name}/logs?last=N（text/plain）。

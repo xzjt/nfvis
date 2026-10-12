@@ -8,6 +8,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -23,6 +24,10 @@ const errRuntimeUnavailable = "%% VPP 未接入（编排器未装配），运行
 // `statistics` = 「每端口收发计数」——**都取 VPP 运行态**（BD 的 BD-Tag 即交换机名）。
 // 此前列表/ports/statistics 取自 committed 配置（后两者甚至回落到同一份配置 dump），
 // 于是「VPP 里存在但未写入配置」的 BD 不显示、也没有任何状态/计数。
+//
+// 决策 #467（收口 R24-A）：列表在运行态 BD 行之后**并入 committed 里 type=l3 的交换机行**
+// （BD-ID/Learn/Flood/Ports 列「—」、Note 列「l3（VRF）」，与 REST/Web 列表三面同源）；
+// `<L3名>`/`detail` 委托 `show vrfs <名>`（同一实现、同一输出）。L2 行渲染与 BD 运行态来源零变化。
 func (x *cliExecutor) execShowVSwitches(args []string) string {
 	if len(args) >= 2 && args[1] == "mac-table" {
 		return x.showMacTable(args[0])
@@ -36,13 +41,14 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 	if len(args) >= 2 && args[1] == "dhcp-leases" {
 		return x.showDHCPLeases(args[0])
 	}
-	bds, err := x.bdStates()
-	if err != nil {
-		// 运行态不可用：明确说明，**不**退回配置视图（那正是缺陷来源）
-		return fmt.Sprintf("%% 虚拟交换机运行态不可用: %v\n", err)
-	}
 	if len(args) == 0 {
-		if len(bds) == 0 {
+		bds, err := x.bdStates()
+		if err != nil {
+			// 运行态不可用：明确说明，**不**退回配置视图（那正是缺陷来源）
+			return fmt.Sprintf("%% 虚拟交换机运行态不可用: %v\n", err)
+		}
+		l3Names := x.committedL3VSwitchNames()
+		if len(bds) == 0 && len(l3Names) == 0 {
 			if x.dpMode() == model.DataPlaneKernel {
 				return "（Linux 内核网络中无虚拟交换机）\n"
 			}
@@ -51,7 +57,7 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 		cfgNames := x.vswitchConfigNames()
 		var b strings.Builder
 		fmt.Fprintf(&b, "%-10s %-22s %-6s %-6s %-6s %s\n", "BD-ID", "Name", "Learn", "Flood", "Ports", "Note")
-		items := make([]any, 0, len(bds))
+		items := make([]any, 0, len(bds)+len(l3Names))
 		for _, bd := range bds {
 			note := ""
 			if !cfgNames[bd.Name] {
@@ -66,10 +72,29 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 				yn(bd.Learn), yn(bd.Flood), len(bd.Ports), note)
 			items = append(items, bdView(bd))
 		}
+		// 决策 #467：committed 里 type=l3 的交换机并入列表（BD-ID/Learn/Flood/Ports 列「—」、
+		// Note 列「l3（VRF）」）——与 REST GET /virtual-switches/Web 列表三面同源（此前 CLI
+		// 列表只覆盖 BD 运行态，已配置的 L3 交换机不显示）。BD 行在前、L3 行随后；L3 行首列
+		// 是「—」不是数字，按「首列数字」解析 BD 行的判据（语义套件）不受影响。
+		for _, name := range l3Names {
+			fmt.Fprintf(&b, "%-10s %-22s %-6s %-6s %-6s %s\n", "—", name, "—", "—", "—", "l3（VRF）")
+			items = append(items, map[string]any{"name": name, "type": "l3", "note": "l3（VRF）"})
+		}
 		x.structured = map[string]any{"virtual_switches": items}
 		return b.String()
 	}
 	name := args[0]
+	// 决策 #467：`<L3名>`/`detail` 与 `show vrfs <名>` 是**同一实现、同一输出**——
+	// L3 交换机的读视图即其 VRF（它在数据面里没有 BD，此前会错报「在 VPP 中不存在」）。
+	// 判定只读 committed 配置，不依赖 BD 运行态，故先于运行态查询。
+	if x.vswitchIsL3(name) {
+		return x.execShowVrfs(args[:1])
+	}
+	bds, err := x.bdStates()
+	if err != nil {
+		// 运行态不可用：明确说明，**不**退回配置视图（那正是缺陷来源）
+		return fmt.Sprintf("%% 虚拟交换机运行态不可用: %v\n", err)
+	}
 	var bd *BridgeDomainState
 	for i := range bds {
 		if bds[i].Name == name {
@@ -169,6 +194,44 @@ func (x *cliExecutor) vswitchConfigNames() map[string]bool {
 	return out
 }
 
+// vswitchIsL3 名字是否命中 committed 里 type=l3 的交换机（决策 #467）。
+// 只读配置（内核数据面下同样可用），不碰运行态——L3 交换机的读视图即其 VRF。
+func (x *cliExecutor) vswitchIsL3(name string) bool {
+	if x.engine == nil {
+		return false
+	}
+	cfg, err := x.engine.Committed()
+	if err != nil {
+		return false
+	}
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.Name == name && vs.Type == "l3" {
+			return true
+		}
+	}
+	return false
+}
+
+// committedL3VSwitchNames committed 里 type=l3 的交换机名（按名排序，列表并入用；
+// 决策 #467——BD 行在前、L3 行随后，顺序确定不随配置编排序漂移）。
+func (x *cliExecutor) committedL3VSwitchNames() []string {
+	if x.engine == nil {
+		return nil
+	}
+	cfg, err := x.engine.Committed()
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, vs := range cfg.VirtualSwitches {
+		if vs.Type == "l3" {
+			names = append(names, vs.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // yn 布尔 → up/down（运行态列）。
 func yn(b bool) string {
 	if b {
@@ -179,6 +242,11 @@ func yn(b bool) string {
 
 // showMacTable 渲染 MAC 学习表（VPP l2fib）。
 func (x *cliExecutor) showMacTable(name string) string {
+	// 决策 #467：L3（VRF）没有 L2 学习表（MAC 学习表只存在于 BD 上，L3 的接口是三层接口），
+	// 如实说明而不是去查一张注定为空的 BD 表。
+	if x.vswitchIsL3(name) {
+		return fmt.Sprintf("%% 交换机 %s 是 L3（VRF），mac-table 仅 L2 交换机支持\n", name)
+	}
 	if x.l2 == nil {
 		return errRuntimeUnavailable
 	}

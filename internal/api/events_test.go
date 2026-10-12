@@ -146,6 +146,108 @@ func TestMetricsEndpoint(t *testing.T) {
 	}
 }
 
+// ---------- 决策 #468（R24-B）：事件 payload 的 state 动作词 ----------
+//
+// 口径：动作→状态词改**显式映射**（start→starting、stop→stopping、restart→restarting），
+// 不再用 action+"ing" 直接拼接——stop 拼接得拼写错误的 "stoping"，消费方按该值匹配会被
+// 固定拼写绑定。REST（VNF/容器）与 CLI 直连两路必须同源同值（事件类型与其余字段不变）。
+
+// vnfStateOf 取最近一条匹配 resource/name 的 vnf-state-changed 事件的 state（无则空串）。
+func vnfStateOf(bus *events.Bus, resource, name string) string {
+	state := ""
+	for _, ev := range bus.Since(0) {
+		if ev.Type != events.TypeVNFStateChanged {
+			continue
+		}
+		if ev.Payload["resource"] == resource && ev.Payload["name"] == name {
+			state, _ = ev.Payload["state"].(string)
+		}
+	}
+	return state
+}
+
+// REST VNF 动作：start/restart 逐字不变，stop 必须是 stopping。
+func TestVMActionStateWordInEvent(t *testing.T) {
+	bus := events.New()
+	ts := newTestServerOpts(t, Options{VM: newFakeVM(), Events: bus})
+	token := loginAdmin(t, ts)
+	seedVMPool(t, ts, token)
+	cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		vmBody("fw-vm"), map[string]string{"X-NFVIS-Auto-Commit": "true"})
+
+	for _, tc := range []struct{ action, want string }{
+		{"start", "starting"}, {"restart", "restarting"}, {"stop", "stopping"},
+	} {
+		status, _, data := cfgRequest(t, http.MethodPost,
+			ts.URL+APIPrefix+"/virtual-machine-functions/fw-vm:"+tc.action, token, nil, nil)
+		if status != http.StatusAccepted {
+			t.Fatalf("%s 应 202: %d %s", tc.action, status, data)
+		}
+		if got := vnfStateOf(bus, "virtual-machine-functions", "fw-vm"); got != tc.want {
+			t.Errorf("VNF %s 事件 state = %q，want %q", tc.action, got, tc.want)
+		}
+	}
+}
+
+// REST 容器动作：与 VNF 同源同值。
+func TestContainerActionStateWordInEvent(t *testing.T) {
+	bus := events.New()
+	ts := newTestServerOpts(t, Options{Containers: newFakeCLIContainer(), Events: bus})
+	token := loginAdmin(t, ts)
+	seedContainerCommit(t, ts, token, "ct-a")
+
+	for _, tc := range []struct{ action, want string }{
+		{"start", "starting"}, {"restart", "restarting"}, {"stop", "stopping"},
+	} {
+		status, _, data := cfgRequest(t, http.MethodPost,
+			ts.URL+APIPrefix+"/container-functions/ct-a:"+tc.action, token, nil, nil)
+		if status != http.StatusAccepted {
+			t.Fatalf("%s 应 202: %d %s", tc.action, status, data)
+		}
+		if got := vnfStateOf(bus, "container-functions", "ct-a"); got != tc.want {
+			t.Errorf("容器 %s 事件 state = %q，want %q", tc.action, got, tc.want)
+		}
+	}
+}
+
+// CLI 直连动作（不经 HTTP handler）与 REST 同源：`request … stop` 发布的 state 同样是 stopping。
+func TestCLIActionStateWordInEvent(t *testing.T) {
+	bus := events.New()
+	x, _ := newCLIKit(t)
+	x.setEventBus(bus)
+	x.setComputeRuntime(newFakeVM(), nil, nil, newFakeCLIContainer(), nil)
+
+	seedVMConfig(t, x)
+	run(t, x, "admin", "super-user", "ssh",
+		"configure",
+		"set container-functions ct1 image alpine:3.20",
+		"commit",
+		"exit")
+
+	run(t, x, "admin", "super-user", "ssh", "request virtual-machine-functions fw-vm stop")
+	if got := vnfStateOf(bus, "virtual-machine-functions", "fw-vm"); got != "stopping" {
+		t.Errorf("CLI VNF stop 事件 state = %q，want %q", got, "stopping")
+	}
+	run(t, x, "admin", "super-user", "ssh", "request container-functions ct1 stop")
+	if got := vnfStateOf(bus, "container-functions", "ct1"); got != "stopping" {
+		t.Errorf("CLI 容器 stop 事件 state = %q，want %q", got, "stopping")
+	}
+}
+
+// 映射函数本身：三动作显式词 + 未知动作保留 action+"ing" 兜底。
+func TestVNFActionStateMapping(t *testing.T) {
+	for _, tc := range []struct{ action, want string }{
+		{"start", "starting"},
+		{"stop", "stopping"},
+		{"restart", "restarting"},
+		{"migrate", "migrateing"}, // 未知动作：保留拼接兜底（决策 #468）
+	} {
+		if got := vnfActionState(tc.action); got != tc.want {
+			t.Errorf("vnfActionState(%q) = %q，want %q", tc.action, got, tc.want)
+		}
+	}
+}
+
 // M5-1：CLI 直连动作（不经 HTTP handler）也发布 vnf-state-changed。
 func TestCLIActionPublishesVNFState(t *testing.T) {
 	bus := events.New()

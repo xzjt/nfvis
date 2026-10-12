@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/xzjt/nfvis/internal/model"
@@ -160,5 +161,56 @@ func TestCheckVnfPortsNoProviderKeepsAlarm(t *testing.T) {
 	}
 	if got := alarms.List(AlarmActive); len(got) != 1 {
 		t.Fatalf("未装配 vhost 时不应清警: %+v", got)
+	}
+}
+
+// 决策 #470（round24 R24-D③）：告警原因文案如实化——运行中的域尚未包含该 vNIC（新增/改配
+// 后需 stop+start）与「VM 未启动」是两种事实，旧文案「VM 未启动或已关机」在 VM 正运行时
+// 与事实相反；两条分支都要给出 stop+start 的照做路径。告警码/作用域/自动消解不变。
+func TestCheckVnfPortsAlarmReasonTexts(t *testing.T) {
+	// ① link down 分支（接口在数据面、客户端未连接）。
+	f := newFakeVhost()
+	net, alarms := vnfAlarmFixture(f)
+	if err := net.ApplyVnfInterface(context.Background(), vnfPortFor("vm-a", "eth0", "/s")); err != nil {
+		t.Fatalf("ApplyVnfInterface: %v", err)
+	}
+	if errs := net.CheckVnfPorts(context.Background(), vmCfg("vm-a", "eth0")); len(errs) != 0 {
+		t.Fatalf("状态查询不应报错: %v", errs)
+	}
+	active := alarms.List(AlarmActive)
+	if len(active) != 1 || active[0].Code != AlarmVnfPortDown {
+		t.Fatalf("前置：应 1 条 VNF_PORT_DOWN 告警，实际 %+v", active)
+	}
+	msg := active[0].Message
+	if !strings.Contains(msg, "接口 link down（客户端未连接：VM 未启动，或运行中的域尚未包含该 vNIC——新增/改配后需 stop+start 才会生效）") {
+		t.Fatalf("link down 原因文案应如实并给出 stop+start 路径: %q", msg)
+	}
+	if strings.Contains(msg, "VM 未启动或已关机") {
+		t.Fatalf("旧文案「VM 未启动或已关机」与运行中事实相反，不得再出现: %q", msg)
+	}
+
+	// ② 不存在分支（VPP 里没有对应 vhost-user 接口——刚新增/改配 vNIC、域未重建）。
+	f2 := newFakeVhost()
+	net2, alarms2 := vnfAlarmFixture(f2)
+	if errs := net2.CheckVnfPorts(context.Background(), vmCfg("vm-b", "nic1")); len(errs) != 0 {
+		t.Fatalf("状态查询不应报错: %v", errs)
+	}
+	active2 := alarms2.List(AlarmActive)
+	if len(active2) != 1 || active2[0].Code != AlarmVnfPortDown {
+		t.Fatalf("前置：应 1 条 VNF_PORT_DOWN 告警，实际 %+v", active2)
+	}
+	msg2 := active2[0].Message
+	if !strings.Contains(msg2, "VPP 中不存在对应 vhost-user 接口（若刚新增/改配 vNIC：需 stop+start 重建域）") {
+		t.Fatalf("不存在分支应给出重建域照做路径: %q", msg2)
+	}
+
+	// ③ 接口出现且 link up 后照常自动消解（文案改动不影响对账清警）。
+	idx := f.byName[orchestrator.VnfIfaceName("vm-a", "eth0")]
+	f.links[idx] = true
+	if errs := net.CheckVnfPorts(context.Background(), vmCfg("vm-a", "eth0")); len(errs) != 0 {
+		t.Fatalf("状态查询不应报错: %v", errs)
+	}
+	if got := alarms.List(AlarmActive); len(got) != 0 {
+		t.Fatalf("链路恢复后应消警（自动消解逻辑不动）: %+v", got)
 	}
 }

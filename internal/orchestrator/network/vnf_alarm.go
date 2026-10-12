@@ -52,9 +52,12 @@ func (n *L2Network) CheckVnfPorts(ctx context.Context, cfg model.Config) []error
 				n.alarms.Resolve(vnfScope, AlarmVnfPortDown, source)
 				continue
 			}
-			reason := "接口 link down（VM 未启动或已关机，客户端未连接）"
+			// 文案如实化（决策 #470，round24 R24-D③）：link 断连有两种事实——VM 确实未启动，
+			// 或**运行中的域尚未包含该 vNIC**（新增/改配 vNIC 后需 stop+start 重建域才会出现）。
+			// 旧文案「VM 未启动或已关机」在 VM 正运行时与事实相反，且不给出照做路径。
+			reason := "接口 link down（客户端未连接：VM 未启动，或运行中的域尚未包含该 vNIC——新增/改配后需 stop+start 才会生效）"
 			if !exists {
-				reason = "VPP 中不存在对应 vhost-user 接口"
+				reason = "VPP 中不存在对应 vhost-user 接口（若刚新增/改配 vNIC：需 stop+start 重建域）"
 			}
 			n.alarms.Raise(vnfScope, SeverityWarning, AlarmVnfPortDown,
 				fmt.Sprintf("VNF %s 的 vNIC %s %s", vm.Name, nic.Name, reason), source)

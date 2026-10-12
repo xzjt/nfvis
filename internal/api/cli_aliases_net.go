@@ -662,10 +662,20 @@ func aliasL3InterfaceAddr(tree map[string]any, t []string, isSet bool) error {
 	return nil
 }
 
-// aliasL3InterfaceDel：delete virtual-switches <n> l3-interface <if>。
+// aliasL3InterfaceDel：set/delete virtual-switches <n> l3-interface <if>。
+// set 裸形态（决策 #472）＝**确保条目存在**：条目已在则无操作（引擎照 #190 给「值未变化」
+// 提示），不在则由 elemByField/l3VrfOf（与 aliasL3InterfaceAddr 同一路径）建出。
+// 由来：`delete … ip address` 只删地址叶会留下无地址条目（数据面语义真实——接口仍属该
+// VRF/表，ApplyVRF 按接口清单驱动），而该形态此前无任何 set 语句可表达、display set
+// 回放自校验必失败；delete 分支语义不动。
 func aliasL3InterfaceDel(tree map[string]any, t []string, isSet bool) error {
 	if isSet {
-		return errString("配置不完整，缺少取值: " + joinTokens(t))
+		vrf, err := l3VrfOf(tree, t[1], true)
+		if err != nil {
+			return err
+		}
+		elemByField(vrf, "l3_interfaces", "interface", t[3])
+		return nil
 	}
 	vrf, err := l3VrfOf(tree, t[1], false)
 	if err != nil {

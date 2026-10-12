@@ -177,7 +177,7 @@ func (x *cliExecutor) requestVM(user, class, source string, t []string) string {
 			}
 			return "%% " + err.Error() + "\n"
 		}
-		x.publishState("virtual-machine-functions", name, action+"ing") // M5-1：CLI 直连动作也发事件
+		x.publishState("virtual-machine-functions", name, vnfActionState(action)) // M5-1：CLI 直连动作也发事件（状态词与 REST 同源）
 		return fmt.Sprintf("%s VNF %s 已受理\n", actionCN(action), name)
 	case "console":
 		return x.requestVMConsole(user, name, confirmed)
@@ -351,7 +351,7 @@ func (x *cliExecutor) requestContainer(user, class, source string, t []string) s
 		if err != nil {
 			return "%% " + err.Error() + "\n"
 		}
-		x.publishState("container-functions", name, action+"ing") // M5-1：CLI 直连动作也发事件
+		x.publishState("container-functions", name, vnfActionState(action)) // M5-1：CLI 直连动作也发事件（状态词与 REST 同源）
 		return fmt.Sprintf("%s容器 %s 已受理\n", actionCN(action), name)
 	case "log":
 		return x.containerLog(name, t[2:])

@@ -220,3 +220,66 @@ func TestRegenerateSelfSignedUsesListen(t *testing.T) {
 		t.Fatalf("证书 DNS SAN 不符: %v", cert.DNSNames)
 	}
 }
+
+// 决策 #471（R24-E 行内回修）：监听地址**换绑后**重签，SAN 随即含新监听地址。
+//
+// 缺陷本体在 nfvisd 接线（main.go 的 OnCommitted 钩子：Rebind 成功后只调 SetListen，
+// 而 SetListen 只影响之后生成的证书、存量自签不重签），tls.go 侧逻辑本就成立——本测试
+// 先钉住前提（换绑而未重签时存量证书不含新地址），再钉住重签后的 SAN 更新（钩子照做
+// 这一步即修复）；端到端（严格校验客户端连新地址）由真机验证承担。
+func TestRegenerateSelfSignedSANFollowsListenRebind(t *testing.T) {
+	m := NewTLSManager(t.TempDir(), nil)
+	m.SetListen("10.9.8.7:443")
+	if _, err := m.RegenerateSelfSigned("nfvis-vm"); err != nil {
+		t.Fatalf("RegenerateSelfSigned: %v", err)
+	}
+	if !certHasIP(t, m.CertPath(), "10.9.8.7") {
+		t.Fatal("前提失效：首签应含当时的监听地址")
+	}
+	// 换绑：SetListen 单独**不重签**——存量证书必须仍不含新地址（这正是缺陷现场）
+	m.SetListen("10.9.8.8:443")
+	if certHasIP(t, m.CertPath(), "10.9.8.8") {
+		t.Fatal("前提失效：换绑而未重签时，存量证书不应凭空含新地址")
+	}
+	before, ok := m.Info()
+	if !ok {
+		t.Fatal("前提失效：证书应可读")
+	}
+	// 重签（main.go 钩子在 Rebind 成功后做的正是这一步）
+	if _, err := m.RegenerateSelfSigned("nfvis-vm"); err != nil {
+		t.Fatalf("重签: %v", err)
+	}
+	if !certHasIP(t, m.CertPath(), "10.9.8.8") {
+		t.Fatal("换绑后重签，SAN 应含新监听地址")
+	}
+	after, _ := m.Info()
+	if after.Fingerprint == before.Fingerprint {
+		t.Fatal("重签应产生新证书（指纹应变化）")
+	}
+	if !after.SelfSigned {
+		t.Fatal("重签结果应仍为自签（钩子据此判定与提示）")
+	}
+}
+
+// certHasIP 读证书文件，报告其 IP SAN 是否含指定地址。
+func certHasIP(t *testing.T, path, ip string) bool {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		t.Fatalf("证书 %s 不是 PEM", path)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, got := range cert.IPAddresses {
+		if got.String() == ip {
+			return true
+		}
+	}
+	return false
+}
