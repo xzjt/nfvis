@@ -24,6 +24,11 @@
 # 扩展（决策 #343 / R115-1）：S8 正控窗口的**增长周期计数**也纳入抽取（`s8_rx_cycles_of`），
 # 把「单次 3s 窗口」的判据钉住（1pps 型 ≈ 采样数−1、慢周期型 ≥2、全 0/单值 = 0）。
 #   · 把 s8_rx_cycles_of 改成恒 `printf '%s' "$#"` 或恒 0，本脚本必须报 ✗
+# 扩展（决策 #481）：S14「资源池两视图一致」的**判定函数** `s14_verdict` 也纳入抽取——它钉住
+# round29/#480 修好的「可分配必须扣在用者」，并防止 v2 #403 的旧口径返祖。喂三种夹具必须如实分档：
+# 两视图一致 ⇒ PASS；「resource-pools.free==total（忽略在用）+ system 侧 held_by_dataplane>0」⇒ FAIL；
+# 内核值取不到/缺视图 ⇒ UNKNOWN。
+#   · 把 s14_verdict 的「两视图一致」比对那一支改回恒 `printf PASS`（旧口径），本脚本必须报 ✗
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 SCRIPT=${SEM_SCRIPT:-$HERE/cli-semantic-check.sh}
@@ -37,7 +42,7 @@ extract() {
   ' "$SCRIPT"
 }
 
-ORACLES=$(for f in vpp_bd_ids vpp_bd_tag vpp_l2fib_count vpp_bd_index_of_tag vpp_bd_id_of_tag vpp_ifaces vpp_if_rx vpp_bd_members vsw_ports_parse vpp_l2fib_learned s8_verdict s9_verdict s8_rx_cycles_of; do
+ORACLES=$(for f in vpp_bd_ids vpp_bd_tag vpp_l2fib_count vpp_bd_index_of_tag vpp_bd_id_of_tag vpp_ifaces vpp_if_rx vpp_bd_members vsw_ports_parse vpp_l2fib_learned s8_verdict s9_verdict s8_rx_cycles_of s14_verdict; do
   body=$(extract "$f")
   [ -z "$body" ] && { echo "✗ 抽不到函数 $f（脚本改名了？）" >&2; exit 1; }
   printf '%s\n' "$body"
@@ -221,6 +226,26 @@ eqv FAIL    "事实源有对象、CLI 视图为空 → 失败" "$(s9_verdict 'li
 eqv FAIL    "反向：CLI 有对象、事实源为空 → 失败" "$(s9_verdict 'Docker 容器' '' 'CLI 视图' 'ct-a')"
 eqv PASS    "两侧非空且一致（顺序不同也算一致）→ 通过" "$(s9_verdict 'libvirt 域' 'vnf-a vnf-b' 'CLI 视图' 'vnf-b vnf-a')"
 eqv FAIL    "两侧非空但 CLI 少一个 → 失败（并点名缺谁）" "$(s9_verdict 'libvirt 域' 'vnf-a vnf-b' 'CLI 视图' 'vnf-a')"
+
+echo "— S14 判定：两视图同源一致/各自自洽 + 有数据面占用时 allocated ≥ held_by_dataplane —"
+# 决策 #481：钉住 round29/#480 修好的「可分配必须扣在用者」，并防止 v2 #403 的旧口径返祖
+# （当年把「resource-pools.free==total（忽略在用/VPP 占用）、system 侧 held_by_dataplane>0」
+# 这条**两视图数字矛盾**当成「口径不同」放过，只改 Web、数字没动）。坏夹具必须判 FAIL。
+# 红-绿验证本函数：让 s14_verdict 的「两视图一致」那一支恒 `printf PASS`，本段的对应用例必须报 ✗。
+eqv PASS    "两视图一致且自洽、数据面占用已计入 → 通过" \
+  "$(s14_verdict '1G' yes 3 4 1 yes 3 4 1 1 ok)"
+eqv FAIL    "坏夹具：resource-pools.free==total（忽略在用）、system 侧 held_by_dataplane>0 → 失败（#480 修掉的形态）" \
+  "$(s14_verdict '1G' yes 4 4 0 yes 3 4 1 1 ok)"
+eqv FAIL    "allocated < held_by_dataplane（可分配没扣数据面占用）→ 失败" \
+  "$(s14_verdict '2M' yes 1 2 1 yes 1 2 1 5 ok)"
+eqv FAIL    "两视图 total ≠ actual（同源不一致）→ 失败" \
+  "$(s14_verdict '1G' yes 2 4 2 yes 2 5 3 1 ok)"
+eqv FAIL    "resource-pools 自身不自洽（free ≠ total−allocated）→ 失败" \
+  "$(s14_verdict '1G' yes 2 4 1 yes 2 4 2 0 ok)"
+eqv UNKNOWN "内核实际值取不到（actual<0/state=unreadable）→ 不可判定（不静默通过）" \
+  "$(s14_verdict '2M' yes -1 -1 -1 yes 23 -1 0 0 unreadable)"
+eqv UNKNOWN "缺一个视图（resource-pools 没有该页尺寸）→ 不可判定" \
+  "$(s14_verdict '2M' no 0 0 0 yes 23 768 745 1 ok)"
 
 if [ $RC -eq 0 ]; then echo "全部符合预期"; else echo "有不符合预期的用例"; fi
 exit $RC

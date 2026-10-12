@@ -21,6 +21,13 @@
 # 单条 CLI 命令是一次性会话（收尾即释放），表达不了，故经 REST 同时持两个 token，
 # 用「HTTP 状态码 + 响应体 + 会话视图」三方对照，且**每项先立正向控制**再判结果
 # （dirty 严格排他 / 干净锁可接管 / 被接管者 ErrLockLost / 登出只清本会话）。
+# 另有 S14「资源池两视图一致」（决策 #481）：对每个页尺寸断言 `show resource-pools`
+# （GET /resource-pools）与 `show system hugepages`（GET /system/hugepages）**同源一致**
+# （free==free、total==actual、allocated==in_use）、各自自洽（free==total−allocated），
+# 且**该池有数据面占用则 allocated ≥ held_by_dataplane**（钉住「可分配必须扣在用者」）；
+# 缺一视图/取数失败/内核值取不到 ⇒ **不可判定**（沿用 S8/S9 三档口径）。判定写成纯函数
+# s14_verdict 并进 cli-semantic-selftest.sh 红-绿自校准——它钉住的正是「两视图数字矛盾」这条
+# 曾被 v2 #403 当「口径不同」放过、直到 #480 才修的老账（不可轻易结案为「口径不同」）。
 #
 # 判定分**三档**（2026-09-26 round84 复盘后改；此前只有「通过/失败」，于是「没有证据」被算成通过）：
 #   通过（✓）   —— 有正向控制且与事实源一致；
@@ -36,7 +43,7 @@
 #      · 输出格式会变（本脚本会随契约调整）→ 解析要有兜底并打印原始片段；
 #      · 扰动必须**真的改变**事实源：用确定空闲的 BD id、把接口翻到**相反**状态，
 #        并先确认「扰动前后 oracle 值不同」，否则本项应报「无从判别」而不是 PASS；
-#      · 判定函数（s8_verdict / s9_verdict）刻意写成**纯函数**并被 cli-semantic-selftest.sh 抽取自校准，
+#      · 判定函数（s8_verdict / s9_verdict / s14_verdict）刻意写成**纯函数**并被 cli-semantic-selftest.sh 抽取自校准，
 #        改判定时连同自校准一起改，否则「空结果算通过」这类返祖会静默回来。
 #
 # 前置（缺一不可，均在 nfvis-vm 上）：
@@ -362,6 +369,39 @@ s9_verdict() { # <l_label> <l_set> <r_label> <r_set>
   else
     printf 'PASS:两侧一致（%s）' "$ls"
   fi
+}
+# S14：<页尺寸> <rp 有该项> <rp:free> <rp:total> <rp:allocated> <sys 有该项> <sys:free> <sys:actual> <sys:in_use> <sys:held_by_dataplane> <sys:state>
+#   两视图 = GET /resource-pools（hugepages[]）与 GET /system/hugepages（pools[]），按 page_size 逐尺寸比对。
+#   判据（决策 #481；钉住 round29/#480 修好的「可分配必须扣在用者」）：
+#     缺一视图/取数失败/内核值取不到（actual<0 或 state=unreadable）⇒ UNKNOWN（缺证据绝不静默通过）；
+#     各自自洽：resource-pools 的 free==total−allocated、system-hugepages 的 free==actual−in_use；
+#     两视图同源一致：free==free、total==actual、allocated==in_use；
+#     该池有数据面占用（held_by_dataplane>0）时 allocated ≥ held_by_dataplane。
+#   旧口径（v2 #403）把「resource-pools 的 free==total（忽略在用/VPP 占用）」当「口径不同」放过——
+#   本判据必须据该坏夹具判 FAIL（见 cli-semantic-selftest.sh）：
+s14_verdict() { # <page_size> <rp_ok> <rp_free> <rp_total> <rp_alloc> <sys_ok> <sys_free> <sys_actual> <sys_in_use> <sys_dp> <sys_state>
+  local ps="$1" rok="$2" rfree="$3" rtotal="$4" ralloc="$5" \
+        sok="$6" sfree="$7" sactual="$8" sinuse="$9" sdp="${10}" sstate="${11}"
+  if [ "$rok" != yes ] || [ "$sok" != yes ]; then
+    printf 'UNKNOWN:%s 缺一个视图或取数失败（resource-pools=%s system-hugepages=%s）' "$ps" "$rok" "$sok"; return
+  fi
+  if [ "$rtotal" -lt 0 ] || [ "$sactual" -lt 0 ] || [ "$sstate" = unreadable ]; then
+    printf 'UNKNOWN:%s 内核实际值取不到（total=%s actual=%s state=%s），不编造' "$ps" "$rtotal" "$sactual" "$sstate"; return
+  fi
+  if [ $((rtotal - ralloc)) -ne "$rfree" ]; then
+    printf 'FAIL:%s resource-pools 视图不自洽（free=%s ≠ total(%s) − allocated(%s)）' "$ps" "$rfree" "$rtotal" "$ralloc"; return
+  fi
+  if [ $((sactual - sinuse)) -ne "$sfree" ]; then
+    printf 'FAIL:%s system-hugepages 视图不自洽（free=%s ≠ actual(%s) − in_use(%s)）' "$ps" "$sfree" "$sactual" "$sinuse"; return
+  fi
+  if [ "$rfree" -ne "$sfree" ] || [ "$rtotal" -ne "$sactual" ] || [ "$ralloc" -ne "$sinuse" ]; then
+    printf 'FAIL:%s 两视图不一致（resource-pools free=%s total=%s allocated=%s ≠ system-hugepages free=%s actual=%s in_use=%s）' \
+      "$ps" "$rfree" "$rtotal" "$ralloc" "$sfree" "$sactual" "$sinuse"; return
+  fi
+  if [ "$sdp" -gt 0 ] && [ "$ralloc" -lt "$sdp" ]; then
+    printf 'FAIL:%s 可分配未扣数据面占用（allocated=%s < held_by_dataplane=%s）' "$ps" "$ralloc" "$sdp"; return
+  fi
+  printf 'PASS:%s 两视图一致且自洽（free=%s total=%s allocated=%s，含数据面占用 %s）' "$ps" "$rfree" "$rtotal" "$ralloc" "$sdp"
 }
 
 echo "==================== CLI 语义校验（结果对不对）===================="
@@ -899,6 +939,93 @@ print("true" if v.get("enabled") else "false")')
     fi
   else
     unk "S13 现场没有 DNS 代理配置（enabled=false，无正向控制）——造现场：set system dns proxy server <ip> 提交后复跑"
+  fi
+fi
+
+# ---------- S14 资源池两视图一致（决策 #481）：GET /resource-pools ↔ GET /system/hugepages ----------
+# 由来：round29（#480）修好「show resource-pools 的『可分配』不扣数据面占用」——根因是 v2 #403 当年
+# 把「两视图数字矛盾」定性为「口径不同」而非缺陷（只改 Web、数字未动），错数字带着一行「口径说明」
+# 长期留存；而四套件/历次走查都只对两者各 `run` 一次冒烟、**从不并排比对**。本项按 page_size 逐尺寸
+# 比对两个视图：同源一致（free==free、total==actual、allocated==in_use）+ 各自自洽
+# （free==total−allocated）+ 有数据面占用时 allocated ≥ held_by_dataplane（钉住「可分配必须扣在用者」）。
+# 缺一视图/取数失败/内核值取不到（actual<0 或 state=unreadable）⇒ **不可判定**（沿用 S8/S9 三档口径，
+# 缺证据绝不静默通过）。判定在 s14_verdict（纯函数，被 cli-semantic-selftest.sh 抽取红-绿自校准）。
+# 只读，不改任何配置。
+hdr "S14 资源池两视图一致：GET /resource-pools ↔ GET /system/hugepages"
+s14_rp=$(curl_api "$SRV/api/v1/resource-pools" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
+s14_sy=$(curl_api "$SRV/api/v1/system/hugepages" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
+if [ -z "$s14_rp" ] || [ -z "$s14_sy" ]; then
+  unk "S14 取不到视图（resource-pools=$([ -n "$s14_rp" ] && echo ok || echo fail) system-hugepages=$([ -n "$s14_sy" ] && echo ok || echo fail)），无法对照"
+elif ! command -v python3 >/dev/null 2>&1; then
+  unk "S14 无 python3（解析两视图 JSON 用），无法判定——如实登记"
+else
+  # 把两个视图按 page_size 归一成 TSV 行（取并集：任一视图缺某页尺寸 ⇒ 该行 rok/sok=no ⇒ 判不可判定）。
+  # 字段以实际 handler 为准：resource-pools hugepages[]={page_size,count,total,allocated,free}；
+  # system-hugepages pools[]={page_size,declared,actual,free,in_use,held,held_by_dataplane,orphan,reclaimable,state,note}。
+  s14_rows=$(S14_RP="$s14_rp" S14_SY="$s14_sy" python3 -c '
+import json, os, sys
+
+def load(env):
+    raw = os.environ.get(env, "") or ""
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+def rp_map(v):
+    d = {}
+    if isinstance(v, dict):
+        for h in (v.get("hugepages") or []):
+            if isinstance(h, dict) and h.get("page_size") not in (None, ""):
+                d[str(h["page_size"])] = h
+    return d
+
+def sy_map(v):
+    d = {}
+    if isinstance(v, dict):
+        for p in (v.get("pools") or []):
+            if isinstance(p, dict) and p.get("page_size") not in (None, ""):
+                d[str(p["page_size"])] = p
+    return d
+
+def num(d, k):
+    try:
+        return int(d.get(k))
+    except Exception:
+        return 0
+
+rp = load("S14_RP")
+sy = load("S14_SY")
+if rp is None or sy is None:
+    sys.exit(0)   # 取数/解析失败：交给 bash 侧按空结果如实登记
+rpm, sym = rp_map(rp), sy_map(sy)
+sizes = []
+for k in list(rpm.keys()) + list(sym.keys()):
+    if k not in sizes:
+        sizes.append(k)
+sizes.sort()
+for ps in sizes:
+    r = rpm.get(ps)
+    s = sym.get(ps)
+    rok = "yes" if r is not None else "no"
+    sok = "yes" if s is not None else "no"
+    print("%s\t%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%d\t%s" % (
+        ps, rok,
+        num(r, "free"), num(r, "total"), num(r, "allocated"),
+        sok,
+        num(s, "free"), num(s, "actual"), num(s, "in_use"), num(s, "held_by_dataplane"),
+        (str(s.get("state", "")) if s else "")))
+')
+  if [ -z "$s14_rows" ]; then
+    unk "S14 两视图 JSON 解析为空（无页尺寸可对照）——如实登记"
+  else
+    while IFS="$(printf '\t')" read -r ps rok rfree rtotal ralloc sok sfree sactual sinuse sdp sstate; do
+      [ -n "$ps" ] || continue
+      echo "    页尺寸 $ps：resource-pools free=$rfree total=$rtotal allocated=$ralloc ｜ system-hugepages free=$sfree actual=$sactual in_use=$sinuse held_by_dataplane=$sdp state=$sstate"
+      judge "S14 $ps 两视图一致" "$(s14_verdict "$ps" "$rok" "$rfree" "$rtotal" "$ralloc" "$sok" "$sfree" "$sactual" "$sinuse" "$sdp" "$sstate")"
+    done <<S14_ROWS
+$s14_rows
+S14_ROWS
   fi
 fi
 
