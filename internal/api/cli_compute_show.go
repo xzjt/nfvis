@@ -382,17 +382,24 @@ func (x *cliExecutor) execShowResourcePools() string {
 }
 
 // renderResourcePools 资源池视图的表格渲染（hugepages + cpu 两段）。
+//
+// 大页段列名语义自明（决策 #479，与 Web「资源池」页同一措辞）：此处「可分配（VNF）」是**配置口径**
+// （声明总数 − 已分配给 VNF 的页数），与 `show system hugepages` 的「空闲」= **内核空闲页**（sysfs 口径，
+// 含被数据面缓冲占用而无法再分配的部分）含义不同——两处数字不必相等，故列名点明口径并在表下补一行说明。
+// 数字/字段/端点一律不变（仍取 GET /resource-pools 的 hugepages[].{page_size,count,total,allocated,free}）。
 func renderResourcePools(view map[string]any) string {
 	var b strings.Builder
 	hugepages, _ := view["hugepages"].([]map[string]any)
 	fmt.Fprintf(&b, "Hugepages:\n")
-	fmt.Fprintf(&b, "  %-10s %8s %10s %8s\n", "PageSize", "Total", "Allocated", "Free")
+	fmt.Fprintf(&b, "  %-8s %12s %14s %14s\n", "页大小", "总数（声明）", "已分配（VNF）", "可分配（VNF）")
 	if len(hugepages) == 0 {
 		fmt.Fprintf(&b, "  （未配置大页池）\n")
 	}
 	for _, hp := range hugepages {
-		fmt.Fprintf(&b, "  %-10v %8v %10v %8v\n", hp["page_size"], hp["total"], hp["allocated"], hp["free"])
+		fmt.Fprintf(&b, "  %-8v %12v %14v %14v\n", hp["page_size"], hp["total"], hp["allocated"], hp["free"])
 	}
+	fmt.Fprintf(&b, "  口径：可分配（VNF）＝声明总数 − 已分配给 VNF 的页数（配置口径）；"+
+		"内核空闲页（含数据面占用）见 show system hugepages，两处不必相等\n")
 	cpu, _ := view["cpu"].(map[string]any)
 	fmt.Fprintf(&b, "CPU (isolated cores):\n")
 	if cpu == nil {

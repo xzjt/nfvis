@@ -1,0 +1,81 @@
+NFViS v3 · round28（2026-10-12）：决策 #479 两视图大页口径如实化
+=============================================================
+主题：`show resource-pools` 与 `show system hugepages` 对「可用大页」给出互相矛盾的数字
+      （真机 1G：resource-pools Free 3 vs hugepages 空闲 1）。根因＝Web 侧决策 #403 的
+      「口径如实化」**未同步到 CLI**；修法＝把 #403 的列名/说明补到 CLI，并让 hugepages 的
+      「状态」如实标出「实际 < 声明」。
+方式：契约先行（附录 A #479 + AGENTS 计数 380→381）→ 子智能体实现（红-绿）→ make check 七项
+      → 交叉编译换装 `3.0.13~dev2` 真机复核。
+
+────────────────────────────────────────────────────────
+§0 结论与被否掉的方案
+────────────────────────────────────────────────────────
+❗ **方案更正**：上一轮对话里我提过「让两视图同源」——**那是错的**。核查发现 Web「资源池」页在
+   **决策 #403** 已明确：大页首表是**配置口径**（声明总数 − 已分配给 VNF），与「大页池」段的
+   **内核口径**（sysfs 空闲页）**有意不同**，且 #403 明言「**数字与端点不变、纯前端文案与列名**」。
+   故正确修法是**把 #403 的同口径如实化补到 CLI**（而非改数字/同源）。
+真机核实：`resource-pools` 1G `Total 3/Allocated 0/Free 3` vs `hugepages` 1G `内核实际 2/在用 1/空闲 1`
+（2M 同理 `768/0/768` vs `768/533/235`）——CLI 裸 `Total/Allocated/Free` 读起来像「可用」，误导。
+
+────────────────────────────────────────────────────────
+§1 契约（附录 A #479，决策计数 380→381）
+────────────────────────────────────────────────────────
+#479（v3 线第 76 条）：① CLI `show resource-pools` 大页段列名自明（对齐 Web #403）+ 一行口径说明；
+**数字/端点/字段不变**。② `show system hugepages` 状态补 `under`（实际 < 声明）；`ok` 收敛为
+「实际 == 声明」；`surplus/in_use/orphan`（实际 > 声明）不变。**不做「两视图同源」**（两口径有意保留）。
+
+────────────────────────────────────────────────────────
+§2 实现（子智能体）
+────────────────────────────────────────────────────────
+- `internal/api/cli_compute_show.go` `renderResourcePools`：列名 `PageSize/Total/Allocated/Free`
+  → `页大小/总数（声明）/已分配（VNF）/可分配（VNF）`；表下补说明行「口径：可分配（VNF）＝声明总数 −
+  已分配给 VNF 的页数（配置口径）；内核空闲页（含数据面占用）见 show system hugepages，两处不必相等」。
+  **数字/字段/端点不变**（仍取 `GET /resource-pools`）。
+- `internal/system/hugepages.go`：新增 `HugepageStateUnder = "under"`；`HugepagePoolViewFor` 的
+  `case actual <= declared → OK` 拆为 `actual == declared → OK` 与 `actual < declared → under`
+  （note：「声明 N 页、内核实际 M 页：声明的页未全部生效（需重启分配，或当前分配不足）」）；
+  `surplus/in_use/orphan`、`unmanaged/unreadable` 不变。
+- `internal/api/cli_hugepages.go` `hugepageStateText` + `internal/api/ui/app.js` `hpState`：加 `under` →
+  「声明未全部生效（需重启分配）」。
+- `docs/NFViS-openapi.yaml`（`/system/hugepages` 的 state 枚举/描述）+ `internal/api/openapi.json`（`--write` 同步）。
+
+────────────────────────────────────────────────────────
+§3 红-绿测试
+────────────────────────────────────────────────────────
+`internal/system/hugepages_test.go` `TestHugepagePoolViewUnder`（声明3/实际2 ⇒ 改前 `ok`、改后 `under`）；
+`internal/api/cli_compute_test.go` `TestRenderResourcePoolsSemanticColumns`（改前无口径说明 ⇒ 红）；
+`internal/api/cli_hugepages_test.go` `TestHugepageStateTextUnder`、`TestUIHugepageStateUnderText`。
+`/resource-pools` 数字/字段逐字不变由既有 `TestResourcePoolViewShape` 钉住。
+`GOFLAGS=-p=1 go test ./internal/api/... ./internal/system/...` 全绿（api 518.7s）；
+`check_openapi_json_sync.sh` ✓。
+
+────────────────────────────────────────────────────────
+§4 门禁与真机
+────────────────────────────────────────────────────────
+【make check】七项 RC=0（决策计数 **381**、结构完整；0 失败）。
+【真机（3.0.13~dev2，nfvis-vm）】
+- `show resource-pools`（大页段）：
+      页大小   总数（声明）   已分配（VNF）   可分配（VNF）
+      1G           3              0              3
+      2M         768              0            768
+      口径：可分配（VNF）＝声明总数 − 已分配给 VNF 的页数（配置口径）；内核空闲页（含数据面占用）见
+            show system hugepages，两处不必相等
+- `show system hugepages`：1G（声明 3 / 内核实际 2）状态 = **「声明未全部生效（需重启分配）」**（改前「一致」）；
+  2M（768/768）状态 = **「一致」**（实际==声明）。
+- 两视图并列不再误读为矛盾（CLI 已自述口径；hugepages 如实标出欠配）。
+
+────────────────────────────────────────────────────────
+§5 现场与环境
+────────────────────────────────────────────────────────
+VM 现装 **3.0.13~dev2**（交叉编译换装）；发布件 3.0.13 原件仍备份于 `/root/bin-orig-r26b/`。
+#479 **未发布**（仅 dev 构建）。1G 池仍为「声明 3 / 内核实际 2」（待下次重启分配——正是本轮
+「欠配」档要如实呈现的现场）。
+
+────────────────────────────────────────────────────────
+§6 教训（入册）
+────────────────────────────────────────────────────────
+- **同一个「两处数字打架」的问题，先查有没有既有决策已定口径**：Web 侧早在 #403 就把它定成
+  「两口径有意不同 + 标注」，只是没落到 CLI——若照直觉去「改数字/同源」就会推翻既有决策。
+  修前先 `grep` 附录 A 的关键词（本例「资源池/空闲/口径」）。
+- **「一致」这类状态标签要写明判据**：`HugepageStateOK` 从「实际 ≤ 声明」被读成「声明==实际」，
+  于是「声明3/实际2/状态一致」看着自相矛盾——把判据收紧到「==」并单独给出「欠配」档才如实。

@@ -644,6 +644,7 @@ const hpNum = (v) => (v === undefined || v === null || v < 0 ? '取不到' : Str
 const hpDeclared = (v) => (v === undefined || v === null || v <= 0 ? '未声明' : String(v));
 const hpState = (s) => ({
   ok: '一致',
+  under: '声明未全部生效（需重启分配）',
   surplus: '有可回收的空闲多余页',
   in_use: '多余页在用（回收不了/只能回收一部分）',
   orphan: '有无主占用页（产品侧不可回收）',

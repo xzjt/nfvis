@@ -71,7 +71,8 @@ const HugepageOrphanAlarmCode = "HUGEPAGE_POOL_ORPHAN"
 
 // 池读视图状态（HugepagePoolView.State；枚举顺序按 openapi）。
 const (
-	HugepageStateOK         = "ok"         // 实际 <= 声明（无多余）
+	HugepageStateOK         = "ok"         // 实际 == 声明（既无多余、也无欠配）
+	HugepageStateUnder      = "under"      // 实际 < 声明：声明的页未全部生效（需重启分配，或当前分配不足）
 	HugepageStateSurplus    = "surplus"    // 实际 > 声明，且有多余**空闲**页可回收
 	HugepageStateInUse      = "in_use"     // 实际 > 声明，多余页全/部分在用（不可回收）
 	HugepageStateOrphan     = "orphan"     // 存在**无主占用页**（在用 > 实际持有；决策 #346；产品侧不可回收）
@@ -514,9 +515,13 @@ func HugepagePoolViewFor(pageSize string, declared, actual, free int, readable b
 		v.Note = fmt.Sprintf("在用 %d 页中仅 %d 页有进程/inode 引用：%d 页无主占用（多为被进程预留但尚未使用的大页，例如数据面 DPDK 预留）。"+
 			"它们不在空闲链表上，产品侧写 nr_hugepages 释放不了、reclaim 不会动它们——需从预留者一侧释放（如停/重启数据面或释放预留）%s",
 			v.InUse, v.Held, v.Orphan, heldNote)
-	case actual <= declared:
+	case actual == declared:
 		v.State = HugepageStateOK
 		v.Note = heldNote
+	case actual < declared:
+		v.State = HugepageStateUnder
+		v.Note = fmt.Sprintf("声明 %d 页、内核实际 %d 页：声明的页未全部生效（需重启分配，或当前分配不足）%s",
+			declared, actual, heldNote)
 	default:
 		p := PlanHugepageReclaim(pageSize, declared, actual, free)
 		v.Reclaimable = p.Reclaimable

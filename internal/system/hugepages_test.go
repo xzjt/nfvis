@@ -147,6 +147,30 @@ func TestHugepageHeldPagesDetailSharedGuestRAMExcluded(t *testing.T) {
 	}
 }
 
+// 决策 #479：状态档细分——实际 < 声明 = under（此前被并入 ok），实际 == 声明 = ok，
+// 实际 > 声明 的 surplus/in_use/orphan 不变（回归护栏）。
+func TestHugepagePoolViewUnder(t *testing.T) {
+	// 真机形态：声明 3、内核实际 2、空闲 0（在用 2、持有 2）→ under（改前落 ok）。
+	v := HugepagePoolViewFor("1G", 3, 2, 0, true, 2, true, 0, true)
+	if v.State != HugepageStateUnder {
+		t.Fatalf("实际(2) < 声明(3) 应为 under，实得 %q：%+v", v.State, v)
+	}
+	if !strings.Contains(v.Note, "未全部生效") {
+		t.Fatalf("under 的 note 应说明声明未全部生效：%q", v.Note)
+	}
+	if v.Reclaimable != 0 {
+		t.Fatalf("under（欠配）不该有可回收页：%+v", v)
+	}
+	// 声明 == 实际 仍为 ok（既不多余也不欠配）。
+	if v = HugepagePoolViewFor("1G", 3, 3, 1, true, 2, true, 0, true); v.State != HugepageStateOK {
+		t.Fatalf("实际 == 声明 仍应为 ok，实得 %q：%+v", v.State, v)
+	}
+	// 实际 > 声明：surplus/in_use 判定不变。
+	if v = HugepagePoolViewFor("1G", 2, 4, 2, true, 2, true, 0, true); v.State != HugepageStateSurplus {
+		t.Fatalf("实际 > 声明且有多余空闲页仍应为 surplus：%+v", v)
+	}
+}
+
 func TestHugepagePoolViewForDataplane(t *testing.T) {
 	// 1G 池且实测数据面占用 >=1 → note 追加可用性说明（Y = 空闲页数）。
 	v := HugepagePoolViewFor("1G", 2, 2, 0, true, 2, true, 1, true)

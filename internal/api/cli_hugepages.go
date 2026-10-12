@@ -364,6 +364,8 @@ func hugepageStateText(state string) string {
 	switch state {
 	case ksys.HugepageStateOK:
 		return "一致"
+	case ksys.HugepageStateUnder:
+		return "声明未全部生效（需重启分配）"
 	case ksys.HugepageStateSurplus:
 		return "有可回收的空闲多余页"
 	case ksys.HugepageStateInUse:

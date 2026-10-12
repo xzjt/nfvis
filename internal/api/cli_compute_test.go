@@ -1002,3 +1002,41 @@ func TestCLISessionStateIdlePruned(t *testing.T) {
 		t.Fatalf("1 小时内空闲不应清（模式应保留）：%s（输出 %q）", res3.Mode, res3.Output)
 	}
 }
+
+// 决策 #479：`show resource-pools` 大页段列名语义自明（配置口径）+ 表下补一行口径说明，
+// 与 Web「资源池」页同一措辞。数字/字段/端点一律不变（见 TestResourcePoolViewShape）。
+func TestRenderResourcePoolsSemanticColumns(t *testing.T) {
+	view := map[string]any{
+		"hugepages": []map[string]any{
+			{"page_size": "1G", "count": 3, "total": 3, "allocated": 0, "free": 3},
+		},
+		"cpu": map[string]any{
+			"isolated_cores": []int{4, 5},
+			"vpp_reserved":   []int{4},
+			"free":           []int{5},
+			"allocated":      []map[string]any{},
+		},
+	}
+	out := renderResourcePools(view)
+	for _, want := range []string{"页大小", "总数（声明）", "已分配（VNF）", "可分配（VNF）"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("大页段列名应语义自明（含 %q）：\n%s", want, out)
+		}
+	}
+	// 旧裸列名不得再出现（否则仍会被读成「可用」）。
+	for _, bad := range []string{"PageSize", "Allocated", "Free"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("不应再有裸列名 %q：\n%s", bad, out)
+		}
+	}
+	// 口径说明一行：配置口径 + 指向 show system hugepages + 两处不必相等。
+	for _, want := range []string{"配置口径", "show system hugepages", "两处不必相等"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("大页段表下应补口径说明（含 %q）：\n%s", want, out)
+		}
+	}
+	// 纯渲染：数字仍照发（1G / 3）。
+	if !strings.Contains(out, "1G") || !strings.Contains(out, "3") {
+		t.Errorf("数字/字段应逐字保留：\n%s", out)
+	}
+}

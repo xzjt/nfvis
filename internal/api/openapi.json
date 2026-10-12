@@ -1487,8 +1487,10 @@
                   "type": "integer"
                 },
                 "state": {
+                  "description": "ok=实际 == 声明（既无多余也无欠配）；under=实际 < 声明（声明的页未全部生效，需重启分配或分配不足）；surplus=实际 > 声明且有多余空闲页可回收；in_use=实际 > 声明且多余页在用（不可回收）；orphan=存在无主占用页（产品侧不可回收）；unmanaged=未声明不托管；unreadable=内核不提供该池",
                   "enum": [
                     "ok",
+                    "under",
                     "surplus",
                     "in_use",
                     "orphan",

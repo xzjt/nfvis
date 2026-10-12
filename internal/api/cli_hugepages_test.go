@@ -421,3 +421,33 @@ func TestRESTHugepagesOrphanReadNotReclaimed(t *testing.T) {
 		t.Fatalf("回读 = nr %d free %d，期望 nr 2 free 0（无变化）", nr, free)
 	}
 }
+
+// 决策 #479：CLI `show system hugepages` 的「状态」列补「实际 < 声明」档（under）。
+// 文案非空且如实（说明声明未全部生效、需重启分配），且与 Web hpState 同措辞。
+func TestHugepageStateTextUnder(t *testing.T) {
+	got := hugepageStateText(ksys.HugepageStateUnder)
+	if got == "" || !strings.Contains(got, "声明未全部生效") {
+		t.Fatalf("under 状态文案应非空且如实（含「声明未全部生效」）：%q", got)
+	}
+	// 既有档位措辞不回归。
+	if hugepageStateText(ksys.HugepageStateOK) != "一致" {
+		t.Fatalf("ok 档应仍为「一致」：%q", hugepageStateText(ksys.HugepageStateOK))
+	}
+}
+
+// 决策 #479：Web「资源池」页的大页池卡状态映射同样补 under 档（与 CLI/契约同措辞）。
+func TestUIHugepageStateUnderText(t *testing.T) {
+	app := readUITestAsset(t, "app.js")
+	start := strings.Index(app, "const hpState = (s) => ({")
+	if start < 0 {
+		t.Fatal("app.js 找不到 hpState 映射（守护锚点变了？）")
+	}
+	end := strings.Index(app[start:], "}[s] || dash(s));")
+	if end < 0 {
+		t.Fatal("app.js 的 hpState 映射没有预期收尾（}[s] || dash(s));）")
+	}
+	block := app[start : start+end]
+	if !strings.Contains(block, "under:") || !strings.Contains(block, "声明未全部生效") {
+		t.Fatalf("hpState 必须为 under 档给出非空文案（含「声明未全部生效」）：\n%s", block)
+	}
+}
