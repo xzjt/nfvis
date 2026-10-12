@@ -1906,6 +1906,10 @@ nfvis$ request images upload name alpine type container-image file /data/incomin
 
 **① 定义并提交**（vCPU 从隔离核池分配并绑核、内存从大页池分配——池子不够 commit 会明确报错）：
 
+> 📎 user-data 也可以用**文件路径**（`set cloud-init user-data /root/ud.yaml`）：模型存的是路径——
+> **改了文件再重跑同一条 set** 会提示「值未变化」（路径确未变，属正常提示），文件内容的变更在 VM
+> **下次启动**时按新内容重新生成 seed 并生效（运行中须 `stop`+`start`，同上方运行域变更口径）。
+
 ```bash
 nfvis$ configure
 nfvis# edit virtual-machine-functions fw-vm

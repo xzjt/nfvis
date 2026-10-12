@@ -1015,8 +1015,16 @@ func (x *cliExecutor) execSetDelete(user, source string, s *cliSession, op strin
 			// 语句按与 `[ok]` 回显同一处掩码（口令类取值不回显明文），并带回 op
 			//（full 不含首位 set/delete，单独带上才好抄改）。
 			x.warningPending = true
-			return "警告: 语句未产生配置变更（值未变化或尚未映射到模型），已继续：" + op + " " +
+			out := "警告: 语句未产生配置变更（值未变化或尚未映射到模型），已继续：" + op + " " +
 				strings.Join(maskStatementTokens(full), " ") + "\n"
+			// 决策 #474（round24 R24-O5）：`set … cloud-init user-data <路径>` 的模型值＝
+			// **路径串**——同一条 set 重跑时「值未变化」只说明路径没变，而 VM 下次启动会按
+			// 同一路径的**文件新内容**重建 seed 并生效（决策 #114）。提示行与「有效输入将
+			// 变化」字面不同步，故追加一行口径说明；只加文本，判定与结构化标记保持原样。
+			if isCloudInitUserDataStatement(op, full) {
+				out += "提示: user-data 为文件路径——文件内容若已变化，将在 VM 下次启动时重新生成 seed 并生效（运行中需 stop+start）\n"
+			}
+			return out
 		}
 		return "%% " + err.Error() + "\n"
 	}
@@ -1027,6 +1035,25 @@ func (x *cliExecutor) execSetDelete(user, source string, s *cliSession, op strin
 		return "[ok] " + strings.Join(maskStatementTokens(full), " ") + "\n"
 	}
 	return "已删除 " + strings.Join(full, " ") + "（未提交）\n"
+}
+
+// isCloudInitUserDataStatement 语句是否为 `set … cloud-init user-data …`（决策 #474）。
+//
+// 判据：op == "set" 且 full 里任意位置出现 `cloud-init` **紧邻** `user-data`。
+// full 是「会话层级前缀 + 本次语句」的全量 token（见 execSetDelete），前缀参与扫描，
+// 故绝对形态（`virtual-machine-functions <n> cloud-init user-data <p>`）与 edit 下的
+// 相对形态（`cloud-init user-data <p>`）由同一判据覆盖。delete 一律不命中——空操作
+// 语义在删除路径上不适用（删已配置项是实变更、删不存在的项是真错误，都到不了这里）。
+func isCloudInitUserDataStatement(op string, full []string) bool {
+	if op != "set" {
+		return false
+	}
+	for i := 0; i+1 < len(full); i++ {
+		if full[i] == "cloud-init" && full[i+1] == "user-data" {
+			return true
+		}
+	}
+	return false
 }
 
 // cfgHistory 渲染配置提交历史（show configuration history）。

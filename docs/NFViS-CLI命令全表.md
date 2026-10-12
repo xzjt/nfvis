@@ -417,7 +417,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set … interfaces <vnic> mac <mac>` | MAC（缺省自动生成） | libvirt | ✅ |
 | `set … interfaces <vnic> vlan <vlan>` | VLAN tag | libvirt | ✅（决策 #79 修复：按 int 落库） |
 | `set … interfaces <vnic> virtual-switch <name>` | 所属 L2 交换机 | VPP | ✅ |
-| `set … cloud-init user-data <path\|text>` | user-data 注入（FR-CMP-016） | seed ISO | ✅ |
+| `set … cloud-init user-data <path\|text>` | user-data 注入（FR-CMP-016）。取值可为**文件路径**：模型存的是路径串，**改了文件再重跑同一条 set 会提示「值未变化」**（路径确未变）——提示后追加如实说明（决策 #474）：文件内容的变更在 VM **下次启动**时按新内容重建 seed 并生效（运行中需 `stop`+`start`） | seed ISO | ✅ |
 | `set … cloud-init ssh-key <key>` | SSH 公钥（可多条；**用双引号包住含空格的公钥**） | seed ISO | ✅（决策 #79 修复：引号感知切分 + `ssh_keys[]`） |
 | `set … cloud-init hostname <s>` | guest 主机名 | seed ISO | ✅ |
 | `set … serial console enable` | 串口控制台（默认启用） | libvirt | ✅ |
