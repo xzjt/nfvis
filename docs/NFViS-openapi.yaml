@@ -3912,10 +3912,10 @@ components:
             type: object
             properties:
               page_size: { type: string, enum: ["2M", "1G"] }
-              count: { type: integer, description: 配置的页数量（配置文档用）；GET 运行态视图另含 total/allocated/free }
-              total: { type: integer, description: 运行态：池总页数=count }
-              allocated: { type: integer, description: 运行态：已分配给 VNF 的页数（backing=normal 的 VM 不占大页池） }
-              free: { type: integer, description: 运行态：空闲页数（FR-CMP-003） }
+              count: { type: integer, description: 配置的页数量（声明；GET 与配置文档都用此字段） }
+              total: { type: integer, description: "运行态：**内核实际**页数（sysfs nr_hugepages）；取不到内核实际时回 -1（不编造）" }
+              allocated: { type: integer, description: "运行态：**在用**页数（内核实际 − 空闲，含数据面固定占用与 VNF/其它持有）；取不到时回 -1" }
+              free: { type: integer, description: "运行态：**内核空闲**页数（真实可分配＝VNF 实际可起页数）；取不到时回 -1（FR-CMP-003）" }
         cpu:
           type: object
           properties:

@@ -7,12 +7,16 @@ import (
 	"testing"
 
 	"github.com/xzjt/nfvis/internal/model"
+	ksys "github.com/xzjt/nfvis/internal/system"
 )
 
 // ---------- W5：资源池 / 本地用户 / 系统状态 ----------
 
 func TestResourcePoolsEndpoint(t *testing.T) {
-	ts := newTestServer(t)
+	// 决策 #480：大页数字取内核实况——用临时 sysfs 根注入（声明 32、内核实际 32、空闲 30 ⇒ 在用 2）。
+	root := t.TempDir()
+	writeHugepageFixture(t, root, "1G", 32, 30)
+	ts := newTestServerOpts(t, Options{HugepageRoot: root})
 	token := loginAdmin(t, ts)
 
 	// PUT 资源池（直提）
@@ -30,7 +34,7 @@ func TestResourcePoolsEndpoint(t *testing.T) {
 		t.Fatalf("资源池变更应有 reboot 警告: %s", data)
 	}
 
-	// GET：账本用量（总量/已分配/空闲 + vpp-reserved）
+	// GET：大页数字取内核实况（决策 #480）——count=声明、total=内核实际、allocated=在用、free=内核空闲。
 	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/resource-pools", token, nil, nil)
 	if status != http.StatusOK {
 		t.Fatalf("GET resource-pools: %d", status)
@@ -43,8 +47,8 @@ func TestResourcePoolsEndpoint(t *testing.T) {
 		t.Fatalf("资源池响应不符: %s", data)
 	}
 	hp := got.Hugepages[0]
-	if hp["total"] != float64(32) || hp["allocated"] != float64(0) || hp["free"] != float64(32) {
-		t.Fatalf("大页用量不符: %v", hp)
+	if hp["total"] != float64(32) || hp["allocated"] != float64(2) || hp["free"] != float64(30) {
+		t.Fatalf("大页数字应取内核实况（total=32/allocated=2/free=30）: %v", hp)
 	}
 	if hp["count"] != float64(32) || hp["page_size"] != "1G" {
 		t.Fatalf("大页配置项应含 count/page_size: %v", hp)
@@ -60,11 +64,48 @@ func TestResourcePoolsEndpoint(t *testing.T) {
 	}
 }
 
+// 决策 #480：大页段数字取**内核实况**（与 show system hugepages 同一事实源）——
+// count 仍=声明（保留），total/allocated/free 取自内核视图（声明3/实际2/在用1/空闲1 ⇒ 2/1/1）；
+// 取不到内核实际（Actual<0）时如实回 -1、不编造。
+func TestResourcePoolViewKernelBacked(t *testing.T) {
+	cfg := model.Config{
+		ResourcePools: &model.ResourcePool{
+			Hugepages: []model.HPool{{PageSize: "1G", Count: 3}},
+		},
+	}
+	// 注入假内核视图：声明 3、内核实际 2、在用 1、空闲 1。
+	pools := []ksys.HugepagePoolView{{PageSize: "1G", Declared: 3, Actual: 2, InUse: 1, Free: 1}}
+	hp := resourcePoolView(cfg, pools)["hugepages"].([]map[string]any)[0]
+	if hp["count"] != 3 {
+		t.Fatalf("count 应仍=声明(3): %v", hp)
+	}
+	if hp["total"] != 2 || hp["allocated"] != 1 || hp["free"] != 1 {
+		t.Fatalf("total/allocated/free 应取内核实际/在用/空闲(2/1/1): %v", hp)
+	}
+
+	// 取不到内核实际（Actual=-1，内核未提供该池）⇒ total/allocated/free 回 -1，如实不编造。
+	unread := []ksys.HugepagePoolView{{PageSize: "1G", Declared: 3, Actual: -1, InUse: -1, Free: -1}}
+	hp2 := resourcePoolView(cfg, unread)["hugepages"].([]map[string]any)[0]
+	if hp2["total"] != -1 || hp2["allocated"] != -1 || hp2["free"] != -1 {
+		t.Fatalf("取不到内核实际时应如实回 -1（不编造）: %v", hp2)
+	}
+	if hp2["count"] != 3 {
+		t.Fatalf("取不到内核实际时 count 仍=声明(3): %v", hp2)
+	}
+
+	// 视图里没有该页尺寸（pools 为空）⇒ 同样如实回 -1。
+	hp3 := resourcePoolView(cfg, nil)["hugepages"].([]map[string]any)[0]
+	if hp3["total"] != -1 || hp3["allocated"] != -1 || hp3["free"] != -1 {
+		t.Fatalf("无内核视图时应如实回 -1（不编造）: %v", hp3)
+	}
+}
+
 // 运行态视图与契约 ResourcePool 对齐：配置项 + 运行态（vpp_reserved/allocated/free），
 // 未配置资源池时返回空视图而非 panic（FR-CMP-001~004、FR-SYS-010，决策 #39）。
+// 大页段数字按决策 #480 取内核实况（注入视图）；CPU 段口径不变（账本重算）。
 func TestResourcePoolViewShape(t *testing.T) {
 	// 未配置资源池：空视图（此前实现会 nil panic）。
-	empty := resourcePoolView(model.Config{})
+	empty := resourcePoolView(model.Config{}, nil)
 	if hps, ok := empty["hugepages"].([]map[string]any); !ok || len(hps) != 0 {
 		t.Fatalf("未配置资源池应返回空 hugepages: %v", empty["hugepages"])
 	}
@@ -92,11 +133,13 @@ func TestResourcePoolViewShape(t *testing.T) {
 				Memory: model.VMMemory{SizeMB: 2048, Backing: "normal"}},
 		},
 	}
-	view := resourcePoolView(cfg)
+	// 注入内核视图：声明 8、内核实际 8、在用 1（fw-vm 的 1G 页）、空闲 7。
+	pools := []ksys.HugepagePoolView{{PageSize: "1G", Declared: 8, Actual: 8, InUse: 1, Free: 7}}
+	view := resourcePoolView(cfg, pools)
 
 	hp := view["hugepages"].([]map[string]any)[0]
-	if hp["total"] != 8 || hp["allocated"] != 1 || hp["free"] != 7 {
-		t.Fatalf("normal VM 不应占大页：%v", hp)
+	if hp["count"] != 8 || hp["total"] != 8 || hp["allocated"] != 1 || hp["free"] != 7 {
+		t.Fatalf("大页段应按内核实况映射（count=8/total=8/allocated=1/free=7）：%v", hp)
 	}
 
 	cpu = view["cpu"].(map[string]any)

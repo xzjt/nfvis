@@ -1003,12 +1003,13 @@ func TestCLISessionStateIdlePruned(t *testing.T) {
 	}
 }
 
-// 决策 #479：`show resource-pools` 大页段列名语义自明（配置口径）+ 表下补一行口径说明，
-// 与 Web「资源池」页同一措辞。数字/字段/端点一律不变（见 TestResourcePoolViewShape）。
+// 决策 #480：`show resource-pools` 大页段数字取**内核实况**（与 show system hugepages 同源），
+// 列名点明口径：页大小 / 声明 / 总数（内核实际） / 已分配（在用） / 可分配（VNF）；
+// 表下一行说明改为「数字取自内核实况」。旧 #479 的「配置口径 / 两处不必相等」说明不再成立。
 func TestRenderResourcePoolsSemanticColumns(t *testing.T) {
 	view := map[string]any{
 		"hugepages": []map[string]any{
-			{"page_size": "1G", "count": 3, "total": 3, "allocated": 0, "free": 3},
+			{"page_size": "1G", "count": 3, "total": 2, "allocated": 1, "free": 1},
 		},
 		"cpu": map[string]any{
 			"isolated_cores": []int{4, 5},
@@ -1018,9 +1019,9 @@ func TestRenderResourcePoolsSemanticColumns(t *testing.T) {
 		},
 	}
 	out := renderResourcePools(view)
-	for _, want := range []string{"页大小", "总数（声明）", "已分配（VNF）", "可分配（VNF）"} {
+	for _, want := range []string{"页大小", "声明", "总数（内核实际）", "已分配（在用）", "可分配（VNF）"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("大页段列名应语义自明（含 %q）：\n%s", want, out)
+			t.Errorf("大页段列名应点明口径（含 %q）：\n%s", want, out)
 		}
 	}
 	// 旧裸列名不得再出现（否则仍会被读成「可用」）。
@@ -1029,14 +1030,33 @@ func TestRenderResourcePoolsSemanticColumns(t *testing.T) {
 			t.Errorf("不应再有裸列名 %q：\n%s", bad, out)
 		}
 	}
-	// 口径说明一行：配置口径 + 指向 show system hugepages + 两处不必相等。
-	for _, want := range []string{"配置口径", "show system hugepages", "两处不必相等"} {
+	// 口径说明一行：数字取自内核实况 + 指向 show system hugepages。
+	for _, want := range []string{"内核实况", "show system hugepages", "内核空闲页数"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("大页段表下应补口径说明（含 %q）：\n%s", want, out)
+			t.Errorf("大页段表下应给出新口径说明（含 %q）：\n%s", want, out)
 		}
 	}
-	// 纯渲染：数字仍照发（1G / 3）。
-	if !strings.Contains(out, "1G") || !strings.Contains(out, "3") {
-		t.Errorf("数字/字段应逐字保留：\n%s", out)
+	// 旧 #479 说明不得残留（配置口径 / 两处不必相等已随 #480 取消）。
+	for _, bad := range []string{"配置口径", "两处不必相等"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("旧 #479 说明应已取消（不该再含 %q）：\n%s", bad, out)
+		}
+	}
+	// 数字按内核实况逐字发（声明 3 / 实际 2 / 在用 1 / 空闲 1）。
+	for _, want := range []string{"1G", "3", "2", "1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("数字应逐字发出（含 %q）：\n%s", want, out)
+		}
+	}
+	// 取不到内核值（-1）如实显示「取不到」，不编造数字。
+	unread := map[string]any{
+		"hugepages": []map[string]any{
+			{"page_size": "1G", "count": 3, "total": -1, "allocated": -1, "free": -1},
+		},
+		"cpu": map[string]any{},
+	}
+	out2 := renderResourcePools(unread)
+	if !strings.Contains(out2, "取不到") {
+		t.Errorf("取不到内核值应如实显示「取不到」：\n%s", out2)
 	}
 }

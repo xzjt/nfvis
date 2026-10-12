@@ -376,30 +376,32 @@ func (x *cliExecutor) execShowResourcePools() string {
 	if err != nil {
 		return "%% " + err.Error() + "\n"
 	}
-	view := resourcePoolView(cfg)
+	view := resourcePoolView(cfg, collectHugepagePools(x.hugepageRoot, cfg))
 	x.structured = view
 	return renderResourcePools(view)
 }
 
 // renderResourcePools 资源池视图的表格渲染（hugepages + cpu 两段）。
 //
-// 大页段列名语义自明（决策 #479，与 Web「资源池」页同一措辞）：此处「可分配（VNF）」是**配置口径**
-// （声明总数 − 已分配给 VNF 的页数），与 `show system hugepages` 的「空闲」= **内核空闲页**（sysfs 口径，
-// 含被数据面缓冲占用而无法再分配的部分）含义不同——两处数字不必相等，故列名点明口径并在表下补一行说明。
-// 数字/字段/端点一律不变（仍取 GET /resource-pools 的 hugepages[].{page_size,count,total,allocated,free}）。
+// 大页段数字取**内核实况**（决策 #480，与 Web「资源池」页同一措辞）：列名点明口径——
+// 「已分配（在用）」= 内核在用页数（含数据面固定占用与 VNF/其它持有），
+// 「可分配（VNF）」= 内核空闲页数 = VNF 实际可起页数；与 `show system hugepages` 同源，两处数字一致。
+// 取不到内核值（-1）如实显示「取不到」（不编造）。CPU 段仍为配置账本口径（不改）。
 func renderResourcePools(view map[string]any) string {
 	var b strings.Builder
 	hugepages, _ := view["hugepages"].([]map[string]any)
 	fmt.Fprintf(&b, "Hugepages:\n")
-	fmt.Fprintf(&b, "  %-8s %12s %14s %14s\n", "页大小", "总数（声明）", "已分配（VNF）", "可分配（VNF）")
+	fmt.Fprintf(&b, "  %-8s %10s %18s %18s %18s\n", "页大小", "声明", "总数（内核实际）", "已分配（在用）", "可分配（VNF）")
 	if len(hugepages) == 0 {
 		fmt.Fprintf(&b, "  （未配置大页池）\n")
 	}
 	for _, hp := range hugepages {
-		fmt.Fprintf(&b, "  %-8v %12v %14v %14v\n", hp["page_size"], hp["total"], hp["allocated"], hp["free"])
+		fmt.Fprintf(&b, "  %-8v %10v %18s %18s %18s\n", hp["page_size"], hp["count"],
+			poolCell(hp["total"]), poolCell(hp["allocated"]), poolCell(hp["free"]))
 	}
-	fmt.Fprintf(&b, "  口径：可分配（VNF）＝声明总数 − 已分配给 VNF 的页数（配置口径）；"+
-		"内核空闲页（含数据面占用）见 show system hugepages，两处不必相等\n")
+	fmt.Fprintf(&b, "  口径：数字取自内核实况（与 show system hugepages 同源）——"+
+		"已分配（在用）＝内核在用页数（含数据面固定占用与 VNF/其它持有）；"+
+		"可分配（VNF）＝内核空闲页数（VNF 实际可起页数）；取不到内核值显示「取不到」\n")
 	cpu, _ := view["cpu"].(map[string]any)
 	fmt.Fprintf(&b, "CPU (isolated cores):\n")
 	if cpu == nil {
@@ -418,6 +420,18 @@ func renderResourcePools(view map[string]any) string {
 		}
 	}
 	return b.String()
+}
+
+// poolCell 资源池大页段单元格渲染：-1（取不到内核值）如实显示「取不到」，其余照发
+// （与 `show system hugepages` 的 hugepageNum 同口径）。
+func poolCell(v any) string {
+	switch n := v.(type) {
+	case int:
+		return hugepageNum(n)
+	case float64:
+		return hugepageNum(int(n))
+	}
+	return fmt.Sprint(v)
 }
 
 // coreList 核列表渲染（[]int → "4,5,6,7"，空 → "-"）。

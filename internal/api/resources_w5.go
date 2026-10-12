@@ -18,44 +18,70 @@ import (
 	"github.com/xzjt/nfvis/internal/metrics"
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/schema"
+	ksys "github.com/xzjt/nfvis/internal/system"
 )
 
 // ---------- resource-pools（FR-CMP-001~003） ----------
 
 // handleGetResourcePools GET /api/v1/resource-pools：配置 + 运行态合并视图
-// （FR-CMP-001~004、FR-SYS-010，决策 #39）：
+// （FR-CMP-001~004、FR-SYS-010，决策 #39；大页数字接内核实况，决策 #480）：
 //
-//	hugepages[].{page_size,count} 配置；{total,allocated,free} 运行态（total=count）
-//	cpu.{isolated_cores,numa} 配置；{vpp_reserved,allocated[{vnf,cores}],free} 运行态
+//	hugepages[].{page_size,count} 配置（count=声明）；{total,allocated,free} 内核实况
+//	  （total=内核实际、allocated=在用含数据面占用、free=内核空闲=真实可分配）
+//	cpu.{isolated_cores,numa} 配置；{vpp_reserved,allocated[{vnf,cores}],free} 运行态（账本重算）
 //
-// 运行态由 committed 配置经账本确定性重算；未配置资源池时返回空视图而非报错。
+// 大页数字采集在 handler 层（collectHugepagePools，与 show system hugepages 同一事实源）；
+// 未配置资源池时返回空视图而非报错。
 func (s *Server) handleGetResourcePools(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.engine.Committed()
 	if err != nil {
 		mapEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resourcePoolView(cfg))
+	writeJSON(w, http.StatusOK, resourcePoolView(cfg, collectHugepagePools(s.hugepageRoot, cfg)))
+}
+
+// collectHugepagePools 采集内核大页池视图（与 `show system hugepages` / `GET /system/hugepages`
+// **同一事实源**：system.HugepagePoolViews）。采集放在 handler/装配层——纯函数 resourcePoolView
+// 只接已采集的视图，单测可注入假视图（决策 #480）。
+func collectHugepagePools(root string, cfg model.Config) []ksys.HugepagePoolView {
+	return ksys.HugepagePoolViews(hugepageRoot(root), hugepageDeclared(cfg))
 }
 
 // resourcePoolView 构造资源池「配置 + 运行态」视图（纯函数，便于直接单测）。
-func resourcePoolView(cfg model.Config) map[string]any {
+//
+// 大页段数字取**内核实况**（决策 #480，与 show system hugepages 同一事实源；count 保留为声明）：
+//
+//	count      = 声明页数（配置唯一真源，保留）
+//	total      = 内核实际页数（sysfs nr_hugepages）
+//	allocated  = 在用页数（含数据面固定占用与 VNF/其它持有）
+//	free       = 内核空闲页数（**真实可分配**，= VNF 实际可起页数）
+//
+// 取不到内核实际（Actual<0，内核未提供该页尺寸池）时 total/allocated/free 回 -1，如实呈现、不编造。
+// pools 由调用方采集后注入——本函数不读 sysfs。CPU 段仍由 committed 账本重算（不改）。
+func resourcePoolView(cfg model.Config, pools []ksys.HugepagePoolView) map[string]any {
 	ledger := model.NewPoolLedger(cfg)
-	_ = ledger.Allocate(cfg) // 分配演练填充运行态用量（缺口不影响只读展示）
+	_ = ledger.Allocate(cfg) // 分配演练填充 CPU 段运行态用量（缺口不影响只读展示）
+
+	// 内核大页视图按页尺寸索引（同一事实源：system.HugepagePoolViews）。
+	bySize := make(map[string]ksys.HugepagePoolView, len(pools))
+	for _, p := range pools {
+		bySize[p.PageSize] = p
+	}
 
 	hugepages := []map[string]any{}
 	if cfg.ResourcePools != nil {
 		for _, hp := range cfg.ResourcePools.Hugepages {
-			allocated, free := 0, hp.Count
-			if u := ledger.Hugepages[hp.PageSize]; u != nil {
-				allocated, free = u.Allocated, u.Free
+			total, allocated, free := -1, -1, -1
+			if p, ok := bySize[hp.PageSize]; ok && p.Actual >= 0 {
+				total, allocated, free = p.Actual, p.InUse, p.Free
 			}
 			hugepages = append(hugepages, map[string]any{
 				"page_size": hp.PageSize,
-				"count":     hp.Count,
-				"total":     hp.Count,
-				"allocated": allocated,
-				"free":      free,
+				"count":     hp.Count,  // 声明（保留）
+				"total":     total,     // 内核实际
+				"allocated": allocated, // 在用（含数据面固定占用）
+				"free":      free,      // 内核空闲（真实可分配）
 			})
 		}
 		// 排序保证稳定输出
@@ -424,9 +450,10 @@ func (s *Server) handleGetSystemStatus(w http.ResponseWriter, r *http.Request) {
 	// 决策 #116：契约声明了 cpu/memory/hugepages/storage，此前只回上面三项（响应形状与契约
 	// 不符，照契约开发的客户端一律取空）。这里补齐，且**数据源与 CLI 同源**：
 	//   cpu/memory/storage ← internal/metrics.HostMetrics()（与 show system cpu|memory|storage 同一来源）
-	//   hugepages          ← resourcePoolView(cfg)（与 GET /resource-pools 同一来源）
+	//   hugepages          ← resourcePoolView(cfg, …)（与 GET /resource-pools 同一来源；决策 #480
+	//                        起大页数字取内核实况，与 show system hugepages 同源）
 	// 宿主指标是 Linux 采集（非 Linux 为空实现）：取不到就**不给该子对象**，不编造零值。
-	pools := resourcePoolView(cfg)
+	pools := resourcePoolView(cfg, collectHugepagePools(s.hugepageRoot, cfg))
 	cpu := map[string]any{}
 	if n, ok := val["nfvis_system_cpu_online_count"]; ok {
 		cpu["total"] = int(n)

@@ -1,0 +1,78 @@
+NFViS v3 · round29（2026-10-12）：决策 #480 `/resource-pools` 大页段改为真实可分配
+=============================================================
+主题：`show resource-pools` 的「可分配」不扣数据面占用（1G 显示 3、2M 显示 768，而 VPP 实占
+      1×1G + 533×2M）——用户裁定改为**真实可分配**（＝内核空闲）。本决策**修正 #403** 的
+      「数字不变」前提（#403 当时把该表定为配置口径；但「可分配」不扣在用页就不是「可分配」）。
+方式：契约先行（附录 A #480 + AGENTS 计数 381→382）→ 子智能体实现（红-绿）→ make check 七项
+      → 交叉编译换装 `3.0.13~dev3` 真机复核。
+
+────────────────────────────────────────────────────────
+§0 结论
+────────────────────────────────────────────────────────
+真机（3.0.13~dev3）：
+    show resource-pools（大页段）
+      页大小   声明   总数（内核实际）   已分配（在用）   可分配（VNF）
+      1G         3           3                1               2
+      2M       768         768              533             235
+    show system hugepages
+      1G  声明3/内核实际3/在用1/空闲2（状态 一致）；2M 768/768/533/235（一致）
+⇒ 「可分配」＝ 2（1G）/235（2M），VPP 的 1×1G、533×2M 计入「已分配（在用）」；两视图**同源一致**，
+  不再互相矛盾。用户诉求（可分配应扣 VPP 占用）达成。
+
+────────────────────────────────────────────────────────
+§1 契约（附录 A #480，决策计数 381→382）
+────────────────────────────────────────────────────────
+#480（v3 线第 77 条）：`GET /resource-pools` 的 `hugepages[]` 数字改为**与 `show system hugepages`
+同一事实源**（`system.HugepagePoolViews`）：`count`＝声明（保留）、`total`＝内核实际、`allocated`＝
+在用（含数据面固定占用与 VNF/其它持有）、`free`＝内核空闲（真实可分配）；取不到内核值如实（-1/口径），
+不编造。CLI/Web 列名/说明同步；**修正 #403**（该表数字不再「不变」）。**不改** CPU 段、
+`/system/hugepages` 端点、`reclaim`、告警。
+
+────────────────────────────────────────────────────────
+§2 实现（子智能体）
+────────────────────────────────────────────────────────
+- `internal/api/resources_w5.go`：`resourcePoolView(cfg, pools []ksys.HugepagePoolView)`（纯函数，
+  **不读 sysfs**）+ 采集函数 `collectHugepagePools(root, cfg)`（复用既有单源
+  `ksys.HugepagePoolViews(hugepageRoot(root), hugepageDeclared(cfg))`，与 `show system hugepages`
+  同一份 sysfs/smaps）。映射 `count←Declared / total←Actual / allocated←InUse / free←Free`；
+  `Actual<0` ⇒ 三者 -1。接线：`handleGetResourcePools`、`handleGetSystemStatus`、`execShowResourcePools`
+  三处（生产注入点沿用既有 `Options.HugepageRoot → s.hugepageRoot`，`cmd/nfvisd` 无需改）。
+- `internal/api/cli_compute_show.go`：`renderResourcePools` 列 `页大小/声明/总数（内核实际）/已分配（在用）/
+  可分配（VNF）` + 新口径说明（含「取不到内核值显示「取不到」」）。
+- `internal/api/ui/app.js` `renderPools`：首表列名同步；**删除 #403 的「两处口径不同、数字不必相等」**
+  说明（改为「与下方大页池同源」）。
+- `docs/NFViS-openapi.yaml`（`/resource-pools` hugepages 四字段描述）+ `internal/api/openapi.json`（`--write`）。
+
+────────────────────────────────────────────────────────
+§3 红-绿测试
+────────────────────────────────────────────────────────
+`TestResourcePoolViewKernelBacked`（注入假视图 声明3/实际2/在用1/空闲1 ⇒ 改前 `3/0/3`、改后 `2/1/1`，
+`count` 仍=3；`Actual=-1`/空视图 ⇒ -1）；`TestResourcePoolsEndpoint`/`TestResourcePoolViewShape` 按新语义更新；
+`TestRenderResourcePoolsSemanticColumns`（旧表头/旧说明 ⇒ 红）；`TestUIPoolsFirstTableKernelColumns`（Web 首表列名）。
+`GOFLAGS=-p=1 go test ./internal/api/... ./internal/system/...` 全绿（api 465.6s）；`check_openapi_json_sync.sh` ✓。
+
+────────────────────────────────────────────────────────
+§4 门禁与真机
+────────────────────────────────────────────────────────
+【make check】七项 RC=0（决策计数 **382**、结构完整；0 失败）。
+【真机（3.0.13~dev3，nfvis-vm）】见 §0。1G 池本轮已收敛到内核实际 3（启动巡检把 `nr_hugepages`
+写回声明值并成功分配，此前那截「声明 3/实际 2」的欠配已消除，`show system hugepages` 状态回「一致」）；
+两视图数字与「可分配」遂完全对齐。
+【附带】`systemctl restart nfvis` 后 **SSH host key 轮换**（宿主 known_hosts 报 REMOTE HOST
+IDENTIFICATION HAS CHANGED）——已 `ssh-keygen -R` + `ssh-keyscan` 刷新（既有行为，非本轮引入）。
+
+────────────────────────────────────────────────────────
+§5 现场与环境
+────────────────────────────────────────────────────────
+VM 现装 **3.0.13~dev3**（交叉编译换装；发布件 3.0.13 原件仍在 `/root/bin-orig-r26b/`）。
+#480 **未发布**（仅 dev 构建）。
+
+────────────────────────────────────────────────────────
+§6 教训（入册）
+────────────────────────────────────────────────────────
+- **「口径」不能当作「数字不对」的挡箭牌**：上一轮（#479）我把「两视图数字不一致」解释成决策 #403
+  的口径差异、只补了标注——但用户指出「可分配」**必须扣在用页**，否则就是错的。裁决口径时先问
+  「这个标签在用户眼里意味着什么」，而不是「历史上它被定义成什么」。（#479 的列名/欠配档仍有效；
+  #480 把数字也改对。）
+- **单一事实源的边界值要一并处理**：接内核视图后必须覆盖「取不到内核值」分支（-1/说明），
+  否则会把 -1 当数字渲染。

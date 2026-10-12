@@ -120,7 +120,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show container-functions <name> interfaces` | memif vNIC 列表 | 同上 | ✅ |
 | `show images` | 镜像仓库列表 | `GET /images` | ✅ |
 | `show images <name> detail` | 类型/大小/sha256/引用计数 | `GET /images/{name}` | ✅ |
-| `show resource-pools` | 大页池/隔离核：大页段列名为语义自明「总数（声明）/已分配（VNF）/可分配（VNF）」，表下注明**配置口径**（可分配（VNF）＝声明总数 − 已分配给 VNF 的页数；内核空闲页见 `show system hugepages`、两处不必相等）；隔离核含 vpp-reserved | `GET /resource-pools` | ✅ |
+| `show resource-pools` | 大页池/隔离核：大页段列名「声明/总数（内核实际）/已分配（在用）/可分配（VNF）」，数字取**内核实况**（与 `show system hugepages` 同源，两处数字一致）：已分配（在用）＝内核在用页数（含数据面固定占用与 VNF/其它持有），可分配（VNF）＝内核空闲页数＝VNF 实际可起页数；取不到内核值显示「取不到」；隔离核含 vpp-reserved | `GET /resource-pools` | ✅ |
 | `show alarms [active\|all]` | 告警列表（未同步时消息后标 `[时钟未同步]`） | `GET /alarms` | ✅ |
 | `show log system [level <lvl>] [last <n>]` | 系统日志 | 服务端日志文件 | ✅ |
 | `show log audit [last <n>]` | 审计日志 | `GET /audit-logs` | ✅ |

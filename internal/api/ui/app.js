@@ -598,8 +598,9 @@ function renderVPP(vpp) {
 }
 
 // 资源池卡（大页池 + 隔离核分配）。
-// 决策 #403：首表列名语义自明——「空闲」在此表指**未分配给 VNF 的声明量**（配置口径），
-// 与下方「大页池」段的「空闲」= **内核空闲页**（sysfs 口径）含义不同，故改名并加一行说明。
+// 决策 #480：首表大页数字取**内核实况**，与下方「大页池」段（show system hugepages）同源——
+// 「已分配（在用）」= 内核在用页数（含数据面固定占用），「可分配（VNF）」= 内核空闲页数（VNF 实际可起页数）；
+// 故 #403 的「两处口径不同、数字不必相等」说明不再成立（两处现同源）。
 function renderPools(pools) {
   const p = $('pools');
   p.textContent = '';
@@ -608,16 +609,17 @@ function renderPools(pools) {
   } else {
     const hp = (pools && pools.hugepages) || [];
     p.appendChild(el('table', {}, [
-      el('thead', {}, [el('tr', {}, ['页大小', '总数（声明）', '已分配（VNF）', '可分配（VNF）'].map((h) => el('th', { text: h })))]),
+      el('thead', {}, [el('tr', {}, ['页大小', '声明', '总数（内核实际）', '已分配（在用）', '可分配（VNF）'].map((h) => el('th', { text: h })))]),
       el('tbody', {}, hp.length ? hp.map((h) => el('tr', {}, [
         el('td', { text: String(dash(h.page_size)) }),
-        el('td', { text: String(dash(h.total)) }),
-        el('td', { text: String(dash(h.allocated)) }),
-        el('td', { text: String(dash(h.free)) }),
-      ])) : [el('tr', {}, [el('td', { colspan: '4', class: 'muted', text: '（无）' })])]),
+        el('td', { text: String(dash(h.count)) }),
+        el('td', { text: hpNum(h.total) }),
+        el('td', { text: hpNum(h.allocated) }),
+        el('td', { text: hpNum(h.free) }),
+      ])) : [el('tr', {}, [el('td', { colspan: '5', class: 'muted', text: '（无）' })])]),
     ]));
-    p.appendChild(el('p', { class: 'muted small', text: '本表是配置口径：「可分配（VNF）」= 声明总数 − 已分配给 VNF 的页数；' +
-      '与下方「大页池」段的「空闲」（内核空闲页，取自 sysfs，含被数据面缓冲占用而无法再分配的部分）口径不同，两处数字不必相等。' }));
+    p.appendChild(el('p', { class: 'muted small', text: '大页数字取自内核实况，与下方「大页池」段同源：' +
+      '已分配（在用）= 内核在用页数（含数据面固定占用）；可分配（VNF）= 内核空闲页数（VNF 实际可起页数）；取不到内核值显示「取不到」。' }));
     const cpu = (pools && pools.cpu) || {};
     fill(p.appendChild(el('dl', { class: 'kv' })), [
       ['隔离核', list(cpu.isolated_cores)],

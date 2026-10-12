@@ -1266,7 +1266,7 @@ nfvis$ request vpp restart
 核对：
 
 ```bash
-nfvis$ show resource-pools      # 大页/隔离核：总数（声明）/已分配（VNF）/可分配（VNF），含 vpp-reserved
+nfvis$ show resource-pools      # 大页/隔离核：声明/总数（内核实际）/已分配（在用）/可分配（VNF），含 vpp-reserved
 nfvis$ show system hugepages    # 大页池数字：声明/内核实际/在用/实际持有/数据面占用/无主占用 + 空闲（可分配）/可回收
 nfvis$ show vpp                 # 版本/线程/buffer/内存（含 pending_restart 提示）
 nfvis$ show vpp threads
@@ -1274,11 +1274,11 @@ nfvis$ show vpp memory
 nfvis$ show system kernel       # 三方对照（cmdline / 运行实际 / 配置期望）
 ```
 
-> **两个「空闲」数字口径不同，不必相等**：`show resource-pools` 的「**可分配（VNF）**」是**配置口径**
-> （＝声明总数 − 已分配给 VNF 的页数），只看「按声明还有多少页没分给 VNF」；而 `show system hugepages`
-> 的「**空闲（可分配）**」是**内核口径**（sysfs `free_hugepages`，含被数据面缓冲占用而无法再分配的部分）。
-> 因此同一页池两处数字看起来「打架」（例如 resource-pools 显示可分配 3、hugepages 显示空闲 1）是**正常**的，
-> 要判断「内核里到底还剩几页能起 VNF」看 `show system hugepages`；命令行与 Web「资源池」页同一口径。
+> **两个「可分配/空闲」数字同源，应当一致**：`show resource-pools` 的大页数字取自**内核实况**
+> （与 `show system hugepages` 同一事实源）：`总数（内核实际）`＝sysfs `nr_hugepages`，`已分配（在用）`
+> ＝内核在用页数（**含数据面固定占用**与 VNF/其它持有），`可分配（VNF）`＝内核空闲页数
+> （sysfs `free_hugepages`），即「内核里到底还剩几页能起 VNF」。因此两处同一页池的数字应当一致；
+> 取不到内核值（内核未提供该页尺寸池）时如实显示「取不到」、不编造。命令行与 Web「资源池」页同一口径。
 
 **大页池「无主占用」怎么办**：如果 `show system hugepages` 显示**内核实际**高于**声明值**（例如实际 4 / 声明 2），
 说明池里有多出来的页。产品会在既有巡检里自动把**空闲的多余页**收回到声明值；也可以手动执行：
