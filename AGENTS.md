@@ -1227,7 +1227,7 @@
   「已声明未生效」、恢复重放给出照做指引）；④ 管理口**首次**声明需 `commit confirmed`（后续 commit 即确认）；
   ⑤ `bind-dpdk` 非交互需 `--yes`（缺省被守卫正确拒绝）；⑥ 套件判据是命令级，**夹具缺口会级联**（如容器镜像
   缺失 ⇒ phase 3 整体回滚 ⇒ 同 phase 的 bond 检查一起红）——判读失败先看夹具。
-- 已定决策 383 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
+- 已定决策 385 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线 #300~#403（其中 #350 撤回）、
   **v3 线自 #404 起**（分支 `v3`，已有 #404~#481））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **v3 线最新交接**：`docs/v3-交接-2026-10-12.md`（round15~23 共 9 轮：#460~#466 七条决策 + round17 口径确认
@@ -1783,6 +1783,32 @@
   `1G free=1 total=3 allocated=2（含数据面占用 1）`、`2M free=235 total=768 allocated=533` 均 ✓；
   `make check` 七项 RC=0（决策计数 **383**）。⚠️ **未发布**。证据
   `docs/evidence/v3-round30-d481-pool-view-guard.txt`。
+- **v3 round31（干净快照装 3.0.14 发布件 + 拟人化全功能走查（VPP/内核双线）+ 数据面往返 + Web 黑盒 → 修 R31-1、定性更正 R31-2：决策 #482/#483，2026-10-13）**：在**恢复为「干净」快照**的
+  nfvis-vm 上 `nfvis-v3.0.14.run` 首装（自检 18/0/0、一次性口令）→ 真 pty 向导（vpp / 隔离核 2-5 /
+  VPP 主 5 工 4 / **1G=3 / 2M=768** / 低延迟 false）→ 管理口 + 系统基线（**#471 监听运行期收敛 +
+  #478 回环监听**：`192.168.155.129:443` + `127.0.0.1:443`，本机裸 `nfvis-cli` 缺省可用）→ 业务口
+  bind-dpdk → VPP 全族（L2+BVI / L3+静态路由 FIB 非 dpo-drop / ACL（L3 形态真拦 + 网关·端口硬拒）/
+  QoS（+L2 出向拒）/ 风暴 / VXLAN / VNF（串口 console 真进 guest）/ DHCP server（guest 租约）/
+  数据面 DNS 代理（宿主经 BVI 解析）/ 抓包（冻结导出 pcap）/ **NAT44 端到端（ens224 抓包见源被
+  masquerade 为 192.168.98.1）** / SPAN（vNIC 源镜像帧 pcap 实证）/ display-set 回放 RC=0 / 快照 /
+  备份诊断（秘密扫描 0）/ metrics history / 用户权限（CLI+REST 403/200）/ 容器 exec·shell）
+  → **Web 黑盒（Browser Use）**（总览 / 资源池两表一致 / 交换机；截图 `docs/images/v3-round31-web-*.png`）
+  → **切内核**（#469 vNIC-L3 派生名 + #419 跨域 NAT 两条正确拒绝 → 清对象切换 → **VPP 自动停 #426** →
+  `unbind-dpdk` 交还 vmxnet3 #464 → 内核 bridge/VRF/nft/self-DNS(53)/self-DHCP(67)/vhost-net/LLDP 全实证、
+  宿主 ping 内核 BVI 3/3、ping guest 4/4、租约 active）→ **切回 vpp（#453 teardown 内核侧整面消失）** +
+  重绑重放全量重建。**#467~#481 回归项逐条复验通过**。**四套件（补齐前置后）**：fulltest **274/0/22**、
+  pty **10/0**、lifecycle **21/0/3**、语义 **25/0/6**（后两者多出的「不可判定」系未造 dns-proxy/relay/
+  learn-limit/L3 现场，**0 失败**）。**两条决策**：**#482** `nfvis-cli` 拒绝多余位置参数（消除
+  `nfvis-cli "show version"` 静默丢弃、退出 0 的假成功；真机换装复验 `% 不接受位置参数…`、退出码 2，
+  `-c` 不受影响）；**#483** cloud-init NoCloud ISO seed 在某精简 guest 不被消费的**定性更正**——真机
+  根因实验证明该 guest 用 **BusyBox `mount`**（`-t auto` 不触发 `request_module`）+ 内核只内建 ext3/ext4
+  ⇒ 模块化 fs（iso9660 / **vfat 同**）都挂不上；纯 Go ext2（内建 fs）可挂但 cloud-init 检测在该慢启动
+  嵌套 guest 上仍不认（未取得端到端证据）——**按「不留假功能」不成立即不改**，属 guest 兼容性、非产品
+  缺陷，seed 保持原状（实验分支已回退）。⚠️ **套件前置（入册）**：`cli-fulltest` 自建夹具给 ens224 配
+  `192.168.155.10/24` 会与**已声明的管理口地址**同网段、被产品**正确**拒绝 ⇒ 级联假红；**正确前置＝
+  临时删管理口地址（保留 management interface 声明，firewall 检查需要它）+ 在 `/data/incoming/` 预置
+  `cli-test.qcow2`/`cli-del.qcow2`/`ct.tar`**。`make check` 七项 RC=0（决策计数 **385**）。证据
+  `docs/evidence/v3-round31-clean-install-walkthrough-vpp-kernel.txt`。
 - **已发布 v3.0.14（2026-10-12，接入/资源口径与守护批）**：tag `v3.0.14` → **`v3 58bd3db`**
   （已推送 origin/v3）；GitHub Release 四资产；`SOURCE_DATE_EPOCH=1791815886`；deb `154f3173…`
   （10,294,924 字节）/ `.run` `3e68f2ec…`（179,609,903 字节，载荷 238 deb / 172M）两打逐字节一致、

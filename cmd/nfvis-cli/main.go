@@ -41,6 +41,14 @@ func main() {
 		return
 	}
 
+	// R31-1：多余的位置参数不是命令，必须 fail fast 拒绝。`nfvis-cli "show version"` 曾静默丢弃它、
+	// 落进交互模式（非 TTY stdin 立即 EOF）并以退出码 0 结束——命令没跑却「成功」（假成功）。
+	// 与 resolveScript 的错误路径并列放在握手/登录之前，退出码 2（用法错误同档，决策 #370）。
+	if err := rejectPositionalArgs(flag.Args()); err != nil {
+		fmt.Fprintf(os.Stderr, "%% %v\n", err)
+		os.Exit(2)
+	}
+
 	// 脚本来源（-c 字符串 / -f 文件或 stdin）收敛到同一入口：执行路径只有一条（runScript），
 	// 两种来源解析后的文本完全同义（决策 #309）。解析失败（互斥/缺文件/空文件）在此即退出，
 	// 不必先握手/登录取口令。
@@ -125,6 +133,19 @@ func printLoginBanner(w io.Writer, script string, f cli.BannerFetcher) bool {
 		return false
 	}
 	return cli.PrintLoginBanner(w, f)
+}
+
+// rejectPositionalArgs 拒绝多余的位置参数（R31-1）。
+//
+// 本客户端只认 -c/-f（决策 #309），**位置参数不是命令**：`nfvis-cli "show version"` 的
+// 位置参数此前被静默丢弃，随后进交互模式、在非 TTY 下立即 EOF 而以退出码 0 退出（假成功）。
+// 空参数返回 nil（放行既有三条路径）；否则报错并点名首个参数，给出一次性执行与交互两种正确用法。
+func rejectPositionalArgs(args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	return fmt.Errorf("不接受位置参数 %q：位置参数不会被当作命令执行。"+
+		"要一次性执行命令请用 -c '<命令>'（或 -f <文件>）；要进入交互模式请不带参数运行 nfvis-cli", args[0])
 }
 
 // resolveScript 把脚本来源（`-c` 字符串 / `-f` 文件或 stdin）收敛到**同一入口**，

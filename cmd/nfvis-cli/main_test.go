@@ -624,3 +624,32 @@ func TestResolveScriptEmptyValues(t *testing.T) {
 		t.Fatal("空文件应报错")
 	}
 }
+
+// ---------- R31-1：位置参数不是命令 ----------
+
+// TestRejectPositionalArgs 位置参数不得被静默忽略——`nfvis-cli "show version"` 曾把多余的位置
+// 参数丢掉、落进交互模式，非 TTY stdin 立即 EOF 而以退出码 0 结束（命令没跑却「成功」=假成功）。
+// 空参数放行；有参数即报错并点名，给出 -c/-f 与不带参数的交互两种正确用法。
+func TestRejectPositionalArgs(t *testing.T) {
+	// ① 无位置参数：放行（走既有 -c/-f/交互三条路径）
+	if err := rejectPositionalArgs(nil); err != nil {
+		t.Fatalf("无位置参数应放行: %v", err)
+	}
+	if err := rejectPositionalArgs([]string{}); err != nil {
+		t.Fatalf("空切片应放行: %v", err)
+	}
+	// ② 一个位置参数：报错、点名该参数，并给出两种正确用法
+	err := rejectPositionalArgs([]string{"show version"})
+	if err == nil {
+		t.Fatal("位置参数应报错（而非静默进交互模式）")
+	}
+	for _, want := range []string{"show version", "-c", "-f", "交互"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("报错应含 %q：%v", want, err)
+		}
+	}
+	// ③ 多个位置参数：同样报错
+	if err := rejectPositionalArgs([]string{"show", "version"}); err == nil {
+		t.Fatal("多个位置参数也应报错")
+	}
+}
