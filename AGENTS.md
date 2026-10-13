@@ -1809,6 +1809,13 @@
   临时删管理口地址（保留 management interface 声明，firewall 检查需要它）+ 在 `/data/incoming/` 预置
   `cli-test.qcow2`/`cli-del.qcow2`/`ct.tar`**。`make check` 七项 RC=0（决策计数 **385**）。证据
   `docs/evidence/v3-round31-clean-install-walkthrough-vpp-kernel.txt`。
+- **已发布 v3.0.15（2026-10-13，round31 走查批）**：tag `v3.0.15` → **`v3 049de0e`**（v3 线发布点；
+  其上仅本轮发版记录提交）；GitHub Release 四资产；`SOURCE_DATE_EPOCH=1791861293`；deb `247e9b5e…`
+  （10,295,988 字节）/ `.run` `539970153f…`（179,611,344 字节，载荷 238 deb / 172M）两打逐字节一致、
+  `.run` 结构自检 **18/0**、**实装自检 18/0/0**（`show version` 3.0.15）；**发布件四套件全 0 失败**：
+  fulltest **274/0/22**、语义 **25/0/6**、lifecycle **21/0/3**、pty **10/10**；`make check` 七项 RC=0
+  （决策计数 **385**）。内容＝**#482**（`nfvis-cli` 拒绝多余位置参数）+ **#483**（R31-2 定性更正，
+  无代码改动）。
 - **已发布 v3.0.14（2026-10-12，接入/资源口径与守护批）**：tag `v3.0.14` → **`v3 58bd3db`**
   （已推送 origin/v3）；GitHub Release 四资产；`SOURCE_DATE_EPOCH=1791815886`；deb `154f3173…`
   （10,294,924 字节）/ `.run` `3e68f2ec…`（179,609,903 字节，载荷 238 deb / 172M）两打逐字节一致、
