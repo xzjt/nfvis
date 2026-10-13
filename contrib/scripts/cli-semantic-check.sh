@@ -51,14 +51,22 @@
 #        -init-admin-password "Admin@12345" -allow-plaintext
 #   2) /tmp/nfvis-cli 为**同版本**构建产物；口令 Admin@12345
 #   3) VPP 运行中（vppctl 可用）；内核侧读 /sys/class/net；libvirt/Docker 可选（缺失则该项降级为登记）
-#   4) 「不留不可判定」要求现场有对象与流量（S8 需交换机里有真的在收发帧的成员，S9 需 VM/容器对象各一）：
-#        bash contrib/scripts/cli-semantic-fixture.sh up    # 造现场（见其头部；用完 down 清理）
-#      缺 S8 的正控现场时该项会**如实报不可判定**（不会静默变绿）；脚本会在报告里提示这条命令。
+#   4) 「不留不可判定」的现场（S8 需交换机里有真的在收发帧的成员，S9 需 VM/容器对象各一，S11/S12/S13
+#      各需一份配置）**默认由本脚本自举**：跑前自动 `cli-semantic-fixture.sh up`、退出时自动 down。
+#      要自己控制现场可用 SKIP_FIXTURE=1 / --no-fixture 跳过自举（缺现场项会**如实报不可判定**，
+#      不会静默变绿；也不会因为自举失败把检查判红）。
 #
 # 用法：
-#   bash contrib/scripts/cli-semantic-check.sh
+#   bash contrib/scripts/cli-semantic-check.sh                 # 自举现场（默认）——正常一次跑即 0 不可判定
+#   SKIP_FIXTURE=1 bash contrib/scripts/cli-semantic-check.sh  # 只读复跑（不造现场；缺现场项会如实报「不可判定」）
+#   bash contrib/scripts/cli-semantic-check.sh --no-fixture    # 同上（等价开关）
+# 自举（默认开）：跑前自动调同目录的 `cli-semantic-fixture.sh up`（造出 sem-vs/sem-vm/sem-ct 与
+#   S11/S12/S13 对象），退出时（EXIT/INT/TERM trap）自动 `down`。故**无需手工 prep**，一次 plain run
+#   即有完整正控、0 不可判定。`up` **失败不构成检查失败**——打印原因后继续（缺现场项如实报 UNK，
+#   退出码仍只看失败项）。现场脚本路径可用 FIXTURE_SH=… 覆盖；现场参数（FIXTURE_IMAGE/WAIT/
+#   RELAY_SRV/DNS_UPSTREAM/LEARN_LIMIT）原样透传。
 # 退出码：有失败项 → 1（可用作发布前门槛）。**不可判定不算失败、也不算通过**，单列计数；
-#        要判断「会不会是环境让本项测不到」，看小结里的不可判定条数。
+#        要判断「会不会是环境让本项测不到」，看小结里的不可判定条数（默认自举后应为 0）。
 #
 # 副作用与恢复：脚本会临时改 VPP（建/删一个 BD、翻转某接口 admin 状态、在**开发态实例**里
 # 建一个交换机并删除）。S10（配置编辑锁语义）另外会：① 用两个 REST 会话取锁并**提交一次
@@ -66,6 +74,16 @@
 # 都释放，异常中断时下一遍开头的清理会兜底。结束时会尽力恢复；仍建议随后
 # `systemctl restart vpp` + `restart nfvis` 以清掉残留拓扑（脚本会打印提醒）。
 set -u
+
+# 自举现场：默认开（跑前 up、退出 down）；--no-fixture / SKIP_FIXTURE=1 关掉（只读复跑）。
+SKIP_FIXTURE=${SKIP_FIXTURE:-0}
+for _arg in "$@"; do
+  case "$_arg" in
+    --no-fixture) SKIP_FIXTURE=1;;
+    -h|--help) awk 'NR>=2 && NR<=90 {sub(/^# ?/, ""); print}' "$0"; exit 0;;
+    *) echo "未知参数：$_arg（可用 --no-fixture；或 -h/--help）" >&2; exit 2;;
+  esac
+done
 
 SRV=${SRV:-http://127.0.0.1:18443}
 CLI_BIN=${CLI_BIN:-/tmp/nfvis-cli}
@@ -406,6 +424,44 @@ s14_verdict() { # <page_size> <rp_ok> <rp_free> <rp_total> <rp_alloc> <sys_ok> <
 
 echo "==================== CLI 语义校验（结果对不对）===================="
 echo "服务端 $SRV ｜ CLI $CLI_BIN ｜ 标记 $MARK"
+
+# ============ 自举现场（S8/S9/S11/S12/S13 的正控）============
+# 默认：跑前 `cli-semantic-fixture.sh up`、退出时（EXIT/INT/TERM）自动 `down`——使 plain run 即得
+# 完整正控、0 不可判定。`up` 失败**不构成检查失败**（打印原因后继续，缺现场项如实报 UNK）。
+# 现场脚本与本脚本同目录（FIXTURE_SH 可覆盖）；现场参数经 fixture_cmd 原样透传。
+HERE=$(cd "$(dirname "$0")" && pwd)
+FIXTURE_SH=${FIXTURE_SH:-$HERE/cli-semantic-fixture.sh}
+SEM_FIXTURE_UP=0
+# 把本脚本已定的连接参数透传给现场脚本（子进程只看得到显式传入者）。空值让现场脚本用自身缺省。
+fixture_cmd() {
+  SRV="$SRV" CLI_BIN="$CLI_BIN" NFVIS_PASSWORD="$PW" \
+    FIXTURE_IMAGE="${FIXTURE_IMAGE:-}" FIXTURE_WAIT="${FIXTURE_WAIT:-}" \
+    FIXTURE_RELAY_SRV="${FIXTURE_RELAY_SRV:-}" FIXTURE_DNS_UPSTREAM="${FIXTURE_DNS_UPSTREAM:-}" \
+    FIXTURE_LEARN_LIMIT="${FIXTURE_LEARN_LIMIT:-}" \
+    bash "$FIXTURE_SH" "$@"
+}
+fixture_cleanup() {                       # 幂等：INT/TERM 与 EXIT 都调它，只真正跑一次
+  [ "$SEM_FIXTURE_UP" = 1 ] || return 0
+  SEM_FIXTURE_UP=0
+  echo; echo "· 清理自举现场（cli-semantic-fixture.sh down）"
+  fixture_cmd down 2>&1 | sed 's/^/    /' || true
+}
+_on_signal() { fixture_cleanup; exit 130; }
+trap fixture_cleanup EXIT
+trap _on_signal INT TERM
+if [ "$SKIP_FIXTURE" = 1 ]; then
+  echo "自举现场：跳过（SKIP_FIXTURE=1 / --no-fixture）——缺现场项会如实报「不可判定」"
+elif [ ! -f "$FIXTURE_SH" ]; then
+  echo "自举现场：跳过——找不到 $FIXTURE_SH（用 FIXTURE_SH=… 指定）；缺现场项会如实报 UNK"
+else
+  echo "自举现场：provisioning（$FIXTURE_SH up）——VNF 首启较慢，请稍候（可达数分钟）"
+  if fixture_cmd up; then
+    SEM_FIXTURE_UP=1
+    echo "自举现场：已就绪（退出时自动 down）"
+  else
+    echo "⚠️ 自举现场失败（见上）——**不构成检查失败**；缺现场项将如实报「不可判定」"
+  fi
+fi
 
 # ============ 准备：被测接口（后续多项需要配置里有对象）============
 IFACE=$(vpp_ifaces | head -1)

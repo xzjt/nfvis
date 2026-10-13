@@ -1,0 +1,47 @@
+================================================================================
+NFViS v3 round32：语义套件自造现场（清零不可判定）——决策 #484
+================================================================================
+日期：2026-10-13    执行：ZCode 会话（v3 线）
+由来（用户指令）：cli-semantic-check 的 6 项「不可判定」要补齐对象清零，并**写入脚本**——
+  之后的 cli-semantic-check 同样要自己补齐对象、做到无不可判定。
+
+现状（改前，发布件 3.0.15 上）：通过 25 / 失败 0 / 不可判定 6。6 项均为「缺现场/无对象可对照」：
+  S8（MAC↔l2fib 缺正向控制）、S9 VM / S9 容器（两侧都空）、S11 relay、S12 learn-limit、
+  S13 DNS 代理（均「没有该配置」）。
+
+改动（两个脚本，纯真机工具，不进 deb/.run）：
+· contrib/scripts/cli-semantic-fixture.sh（现场脚本）：`up` 在既有 sem-vs/sem-vm/sem-ct 之外，
+  同一台 sem-vs 上补齐 S11/S12/S13 正控——`learn-limit 8192`、`dhcp-relay server 192.168.99.3`、
+  全局 `set system dns proxy server 223.5.5.5`；一次原子提交并**检提交结果**（任一行被拒即整块回滚，
+  此前会带着空现场傻等 600s——本轮真机踩过：容器镜像误写 Docker 名 `alpine:3.20` 而非仓库名 `ct.tar`）；
+  `up` 增加**有界 l2fib 学习轮询**（S8 正控除 rx 增长外还要「成员口真的学到 MAC」）；`down` 显式撤销
+  全局 DNS 代理（子配置随交换机删）；`status` 报告 S11/S12/S13 三项有无；容器镜像名改**仓库
+  container-image** `ct.tar`（可 FIXTURE_CT_IMAGE 覆盖）。
+· contrib/scripts/cli-semantic-check.sh（语义套件）：**缺省自举现场**——跑前 `cli-semantic-fixture.sh up`、
+  退出（EXIT/INT/TERM trap）自动 `down`；`SKIP_FIXTURE=1` / `--no-fixture` 可关（只读复跑）；
+  `up` 失败**不构成检查失败**（打印原因后继续，缺现场项如实报 UNK）；**判定逻辑（PASS/FAIL/UNKNOWN
+  三档与 s8/s9/s14_verdict）一律未动**。
+
+真机验证（nfvis-vm，装 3.0.15；SRV=https://192.168.155.129:443）：
+· 改前（裸跑，无现场）：`合计：通过 25 / 失败 0 / 不可判定 6 / 登记 0`
+· 改后（plain `bash cli-semantic-check.sh`，自举）：`合计：通过 33 / 失败 0 / 不可判定 0 / 登记 0`
+  6 项 UNK 全部转 PASS：S8（CLI 2 / VPP 2、成员口已学到 MAC）、S9-VM（sem-vm）、S9-CT（sem-ct）、
+  S11（读视图 dhcp_relay.server=192.168.99.3 + VPP show dhcp proxy src=192.168.99.1 server=192.168.99.3）、
+  S12（learn_limit=8192 + VPP Learn-li=8192）、S13（enabled=true + VPP punt nfvis-dns.sock）。
+· 通过数 25→33（+8）而非 +6：S11/S12 各含**两条**断言（读视图 + VPP 对照）、S13 含第三条（VPP punt），
+  故 6 个 UNK 项展开为 8 条断言。
+· 清理核对：trap 自动 `down` 后 `show virtual-switches`/`show virtual-machine-functions`/
+  `show container-functions` 均空、`show dns proxy` 未配置、virsh/docker 零对象、
+  `vppctl show bridge-domain` 无 BD。
+· 自校准/守护：`cli-semantic-selftest.sh` 全绿、`check_suite_contract_sync.sh` 绿（缺口 0）。
+
+如实边界：
+· **S10-4 偶发**：三次裸跑得 33/0/0、32/1/0、33/0/0；唯一失败是
+  `S10-4 被接管者登出后接管者的脏候选原封不动`——S10 是纯 REST 的配置锁语义项、**与本次现场无关**，
+  另两次通过（既有瞬态，非本轮引入；如实登记）。
+· 现场脚本 `up` 的 rx 增长轮询沿用既有 FIXTURE_WAIT 缺省 600s + 新增 60s l2fib 轮询；嵌套虚拟化下
+  Debian guest 首启在该窗口内完成。
+· 本改为**真机工具（contrib/scripts）**改动，**不进 deb/.run 发布件**；发布件上的语义基线读数仍以
+  当次发布为准（v3.0.15 记录里的 25/0/6 系当次发布件读数，历史保留）。语义基线沿革更新见
+  docs/v3已做.md §五。
+================================================================================

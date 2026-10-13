@@ -1227,7 +1227,7 @@
   「已声明未生效」、恢复重放给出照做指引）；④ 管理口**首次**声明需 `commit confirmed`（后续 commit 即确认）；
   ⑤ `bind-dpdk` 非交互需 `--yes`（缺省被守卫正确拒绝）；⑥ 套件判据是命令级，**夹具缺口会级联**（如容器镜像
   缺失 ⇒ phase 3 整体回滚 ⇒ 同 phase 的 bond 检查一起红）——判读失败先看夹具。
-- 已定决策 385 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
+- 已定决策 386 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线 #300~#403（其中 #350 撤回）、
   **v3 线自 #404 起**（分支 `v3`，已有 #404~#481））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **v3 线最新交接**：`docs/v3-交接-2026-10-12.md`（round15~23 共 9 轮：#460~#466 七条决策 + round17 口径确认
@@ -1809,6 +1809,19 @@
   临时删管理口地址（保留 management interface 声明，firewall 检查需要它）+ 在 `/data/incoming/` 预置
   `cli-test.qcow2`/`cli-del.qcow2`/`ct.tar`**。`make check` 七项 RC=0（决策计数 **385**）。证据
   `docs/evidence/v3-round31-clean-install-walkthrough-vpp-kernel.txt`。
+- **v3 round32（语义套件自造现场、清零不可判定：决策 #484，2026-10-13）**：用户指令——`cli-semantic-check`
+  的 6 项「不可判定」要补齐对象清零并**写入脚本**（之后的语义套件同样要自补对象）。改动（**真机工具，
+  不进 deb/.run 发布件**）：① `contrib/scripts/cli-semantic-fixture.sh` 的 `up` 在同一台 `sem-vs` 上补齐
+  **S11/S12/S13 正控**（`learn-limit 8192`、`dhcp-relay server 192.168.99.3`、全局 `dns proxy server 223.5.5.5`），
+  一次原子提交并**检提交结果**（否则整块回滚却傻等 600s——真机踩过：容器镜像误写 Docker 名 `alpine:3.20`
+  而非仓库名 `ct.tar`），并**有界轮询 l2fib 学到 MAC**（S8 正控的另一半）；`down` 显式撤销全局 DNS 代理。
+  ② `contrib/scripts/cli-semantic-check.sh` **缺省自举**——跑前 `up`、退出（EXIT/INT/TERM trap）自动 `down`；
+  `SKIP_FIXTURE=1`/`--no-fixture` 可只读复跑；`up` 失败**不构成检查失败**（缺现场项如实报 UNK）。
+  **判定三档与 `s8/s9/s14_verdict` 一律未动**。**真机（3.0.15）plain run：25/0/6 → 33/0/0（不可判定 0）**
+  （+8 系 S11/S12 各两条断言、S13 三条）；`cli-semantic-selftest.sh` 与 `check_suite_contract_sync.sh` 全绿；
+  trap `down` 后现场清空。证据 `docs/evidence/v3-round32-d484-semantic-selfprovision.txt`；语义基线沿革
+  `docs/v3已做.md` §五（**29/0/2 → 33/0/0**）。**如实边界**：S10-4 偶发（纯 REST 锁语义项、与本次现场无关，
+  三次里一次，非本轮引入）。
 - **已发布 v3.0.15（2026-10-13，round31 走查批）**：tag `v3.0.15` → **`v3 049de0e`**（v3 线发布点；
   其上仅本轮发版记录提交）；GitHub Release 四资产；`SOURCE_DATE_EPOCH=1791861293`；deb `247e9b5e…`
   （10,295,988 字节）/ `.run` `539970153f…`（179,611,344 字节，载荷 238 deb / 172M）两打逐字节一致、
