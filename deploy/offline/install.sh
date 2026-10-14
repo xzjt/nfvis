@@ -67,8 +67,14 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # 不决定"装什么"。理由：切换数据面是运行期动作（改配置 + 重启服务），若当时机器没有另一套
 # 数据面的软件包，切换就变成"得先联网/再找安装包"，气隙场景直接做不到。装齐一次，之后
 # 随时可切（VPP 只占磁盘，不在内核数据面下运行）。
+#
+# **ovmf-generic**：VNF 启动画像的 `firmware=uefi` 需要宿主 OVMF 固件（产品探测
+# `/usr/share/OVMF` 下的 `*.fd`），气隙机器没有它就起不了 UEFI 的 VM。只装 **generic**
+# 变体——它同时提供 `/usr/share/OVMF/*.fd` 与 libvirt 的 `/usr/share/qemu/firmware/*.json`
+# 固件描述符（libvirt 据此自动选码）；**不装 `ovmf` 元包**，因为它的 Depends 会连带
+# amdsev/inteltdx 等家族专用固件与 ubuntu-virt，x86_64 上用不到、白白撑大闭包约 15MB。
 PKGS_COMMON="nfvis
-libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils cloud-image-utils
+libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils cloud-image-utils ovmf-generic
 genisoimage docker.io chrony tcpdump curl ca-certificates"
 PKGS_VPP="vpp vpp-plugin-core vpp-plugin-dpdk vpp-drivers"
 
