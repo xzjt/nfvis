@@ -344,6 +344,12 @@ func (p *Provider) StartVM(ctx context.Context, name string) error {
 	if err := p.checkDataPlaneForStart(name); err != nil {
 		return err
 	}
+	// telnet 控制台端口占用前置判定（决策 #485 复审）：派生端口被本机其它进程占用时，
+	// 快速失败并给出产品化出路，避免把 qemu 原始报错原样抛给操作者。仅 telnet 形态判，
+	// 且同样在进入 api.Start 之前（不产生半成品域）。
+	if err := p.checkConsolePortForStart(name); err != nil {
+		return err
+	}
 	// 陈旧 paused 域（决策 #455）：paused 属活动态，幂等分支会直接返回、永远起不来——先销毁。
 	if exists && state == domPaused {
 		if err := p.api.Destroy(ctx, name); err != nil {
@@ -560,6 +566,10 @@ func (p *Provider) RestartVM(ctx context.Context, name string) error {
 	// off→start（含陈旧 paused）：与 start 同口径——先数据面前置判定（决策 #314），
 	// 再销毁陈旧 paused、按当前配置重定义，最后启动。
 	if err := p.checkDataPlaneForStart(name); err != nil {
+		return err
+	}
+	// telnet 控制台端口占用前置判定（决策 #485 复审）：与 start 同口径、同落点。
+	if err := p.checkConsolePortForStart(name); err != nil {
 		return err
 	}
 	if exists && state == domPaused {
