@@ -80,6 +80,12 @@ type Config struct {
 	// 缺省（空）= vpp，与引入该字段之前的行为逐字一致。
 	DataPlane string
 
+	// VMImageProfiles 镜像级启动画像（决策 #485）：定义 VM 时按**有效画像**
+	// （实例 startup 覆盖 > 镜像画像 > 产品默认，见 model.EffectiveStartup）填 domain。
+	// 由装配层从 committed 配置注入；改动画像需**重定义 VM**（start/restart/提交）才生效
+	// ——与 FR-CMP-012 的「域定义随配置」一致，恢复收敛与 15s 巡检会按当次 committed 刷新。
+	VMImageProfiles []model.VMImageProfile
+
 	// DataPlaneProbe 数据面（VPP）可用性前置判定（决策 #314）：返回 nil = 可用；返回 error =
 	// 不可用（error 文本作为原因透出）。由装配层注入、复用**既有**的 VPP 连接状态查询
 	// （cmd/nfvisd 用 network.Manager.StatusView，与 /vpp/status 同源）——本包不另写探测，

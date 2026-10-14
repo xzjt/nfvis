@@ -58,7 +58,30 @@ type Provider struct {
 	specMu  sync.Mutex
 	vmSpecs map[string]vmSpec
 
+	// profileMu/profiles 镜像级启动画像的当前来源（决策 #485）：装配期由 Config 注入，
+	// 恢复收敛（EnsureConsistent）与 15s 巡检（CheckVMAlarms）按**当次 committed 配置**刷新
+	// ——这两条路径本就拿到整份配置（同 #455 的域新鲜度前置），故不另设装配接线。
+	// 读写分锁（与 p.mu 互不相干），避免与域组装的临界区交叉。
+	profileMu sync.RWMutex
+	profiles  []model.VMImageProfile
+
 	mu sync.Mutex
+}
+
+// SetVMImageProfiles 更新镜像级启动画像（决策 #485）。取**副本**存入，避免调用方后续
+// 改写切片影响到 provider（提交路径复用同一份配置快照）。
+func (p *Provider) SetVMImageProfiles(profiles []model.VMImageProfile) {
+	cp := append([]model.VMImageProfile(nil), profiles...)
+	p.profileMu.Lock()
+	p.profiles = cp
+	p.profileMu.Unlock()
+}
+
+// effectiveProfiles 当前镜像级启动画像的副本（读侧，specFor 用）。
+func (p *Provider) effectiveProfiles() []model.VMImageProfile {
+	p.profileMu.RLock()
+	defer p.profileMu.RUnlock()
+	return append([]model.VMImageProfile(nil), p.profiles...)
 }
 
 // vmSpec 当前配置里一台 VM 的声明与资源分配（域新鲜度前置的输入）。
@@ -135,6 +158,8 @@ func NewProvider(cfg Config, api libvirtAPI, store storageAPI, seed seedBuilder)
 		seed:  seed,
 		sleep: sleepCtx,
 		poll:  200 * time.Millisecond,
+		// 决策 #485：装配期注入的镜像级启动画像（零值 = 无画像，行为与引入前一致）。
+		profiles: append([]model.VMImageProfile(nil), cfg.VMImageProfiles...),
 	}
 }
 
@@ -583,6 +608,9 @@ func (p *Provider) Console(ctx context.Context, name string) (io.ReadWriteCloser
 // EnsureConsistent 恢复收敛（FR-OPS-010/012）：按 committed 配置补建/修正缺失 domain。
 // 单个对象失败不阻塞其余对象，错误由调用方转告警。
 func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []error {
+	// 决策 #485：重放（数据面重启/恢复收敛）必须带上**当次 committed** 的镜像级启动画像，
+	// 否则 request vpp restart 后域会按装配期旧画像重建、画像参数丢失。
+	p.SetVMImageProfiles(cfg.VMImageProfiles)
 	var errs []error
 	for _, vm := range cfg.VirtualMachineFunctions {
 		err := p.DefineVM(ctx, vm, model.AllocationFor(cfg, vm))
@@ -664,6 +692,30 @@ func (p *Provider) prepare(ctx context.Context, vm model.VMFunction, spec Domain
 	return nil
 }
 
+// startupDomainSpec 计算 VM 的**有效启动画像**并映射到 DomainSpec 的启动字段
+// （决策 #485，纯函数；Task 9 的可单测组装入口）。
+//
+// 合并优先级由 model.EffectiveStartup 给出（实例 startup 覆盖 > 镜像画像 > 产品默认）；
+// 本函数只做「有效画像 → DomainSpec 字段」的映射，不碰资源类字段（memory/vcpu/hugepage/
+// numa/绑核——账本单一真源，AGENTS #481 红线）。生产路径（specFor）与单测调用**同一函数**。
+//
+// 说明：brief 里的 `DomainSpecForTest` 即此函数的等价内部形态——测试与生产同包（package compute），
+// 无需为测试在生产代码里暴露导出符号。
+func startupDomainSpec(vm model.VMFunction, profiles []model.VMImageProfile) DomainSpec {
+	eff := model.EffectiveStartup(vm, profiles)
+	return DomainSpec{
+		Machine:   eff.Machine,
+		CPUMode:   eff.CPUMode,
+		CPUModel:  eff.CPUModel,
+		Firmware:  eff.Firmware,
+		DiskIface: eff.DiskIface,
+		BootOrder: eff.BootOrder,
+		Accel:     eff.Accel,
+		Console:   eff.Console,
+		ExtraArgs: append([]string(nil), eff.ExtraArgs...),
+	}
+}
+
 // specFor 由配置 + 资源分配组装 DomainSpec（纯逻辑）。
 // vhost-user socket 路径确定性派生（M4-4 由 VPP 侧创建同路径 socket）。
 func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) (DomainSpec, error) {
@@ -672,18 +724,24 @@ func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) 
 	if ImageIsISO(vm.Image) {
 		diskPath, diskFormat = p.imagePath(vm.Image), "iso"
 	}
-	spec := DomainSpec{
-		VM:              vm,
-		KernelDataPlane: p.kernelDataPlane(),
-		Cores:           alloc.Cores,
-		HugepageSize:    alloc.HugepageSize,
-		DiskPath:        diskPath,
-		DiskFormat:      diskFormat,
-		Emulator:        p.cfg.Emulator,
-		Machine:         p.cfg.Machine,
-		CPUMode:         p.cfg.CPUMode,
-		PCIDevices:      append([]string(nil), vm.PCIDevices...), // FR-CMP-023（存在性检查在 DefineVM 前完成）
+	// 决策 #485：启动画像字段（machine/cpu/cpu-model/firmware/disk-interface/boot-order/accel/
+	// console/extra-args）取**有效画像**。装配配置里的 Machine/CPUMode 降为兜底——有效画像必带
+	// 产品默认（q35 / host-passthrough），故实际总取有效画像值；无画像/无覆盖时结果与引入前一致。
+	spec := startupDomainSpec(vm, p.effectiveProfiles())
+	if spec.Machine == "" {
+		spec.Machine = p.cfg.Machine
 	}
+	if spec.CPUMode == "" {
+		spec.CPUMode = p.cfg.CPUMode
+	}
+	spec.VM = vm
+	spec.KernelDataPlane = p.kernelDataPlane()
+	spec.Cores = alloc.Cores
+	spec.HugepageSize = alloc.HugepageSize
+	spec.DiskPath = diskPath
+	spec.DiskFormat = diskFormat
+	spec.Emulator = p.cfg.Emulator
+	spec.PCIDevices = append([]string(nil), vm.PCIDevices...) // FR-CMP-023（存在性检查在 DefineVM 前完成）
 	if vm.CloudInit != nil {
 		spec.SeedISO = layout.SeedISO
 	}
@@ -757,6 +815,9 @@ func (p *Provider) CheckVMAlarms(ctx context.Context, cfg model.Config) []error 
 	// 决策 #455：巡检持整份 committed 配置，顺带刷新域新鲜度前置的「当前声明」——
 	// 即便某次提交/回滚未逐台喂到 DefineVM，15s 内也会收敛到当前配置。
 	p.setVMSpecs(cfg)
+	// 决策 #485：同一条巡检按 committed 刷新镜像级启动画像——画像变更不属 VM 声明的差分，
+	// 提交期不会重定义域；刷新后「下一次 start/restart 重定义」即用上当前画像。
+	p.SetVMImageProfiles(cfg.VMImageProfiles)
 	var errs []error
 	for _, vm := range cfg.VirtualMachineFunctions {
 		state, err := p.VMState(ctx, vm.Name)

@@ -1069,3 +1069,88 @@ func TestCheckVMAlarms(t *testing.T) {
 		t.Fatalf("恢复应消警: %v", sink.resolved)
 	}
 }
+
+// ---------- 有效启动画像接入（决策 #485，Task 9）----------
+
+// 给定镜像画像 + 实例覆盖时，组装出的 DomainSpec 启动字段应等于有效画像
+// （实例覆盖 > 镜像画像 > 产品默认，合并由 model.EffectiveStartup 给出）。
+func TestDomainSpecUsesEffectiveStartup(t *testing.T) {
+	profiles := []model.VMImageProfile{{Image: "img1", Machine: "pc", Firmware: "uefi"}}
+	vm := model.VMFunction{Name: "v1", Image: "img1", VCPU: model.VMCpu{Count: 1}, Memory: model.VMMemory{SizeMB: 512},
+		Startup: &model.VMStartupOverride{Console: "vnc"}}
+	spec := startupDomainSpec(vm, profiles)
+	if spec.Machine != "pc" || spec.Firmware != "uefi" || spec.Console != "vnc" {
+		t.Fatalf("effective profile not applied: %+v", spec)
+	}
+}
+
+// 无画像、无覆盖时启动字段回落产品默认（既有行为不变：q35/host-passthrough/bios/virtio/hd/kvm/serial）。
+func TestDomainSpecDefaultStartupWithoutProfile(t *testing.T) {
+	spec := startupDomainSpec(vmFixture("v1"), nil)
+	if spec.Machine != model.DefaultMachine || spec.CPUMode != model.DefaultCPUMode ||
+		spec.Firmware != model.DefaultFirmware || spec.DiskIface != model.DefaultDiskIface ||
+		spec.BootOrder != model.DefaultBootOrder || spec.Accel != model.DefaultAccel ||
+		spec.Console != model.DefaultConsole {
+		t.Fatalf("无画像应回落产品默认: %+v", spec)
+	}
+}
+
+// 装配配置（compute.Config）里的画像经生产路径 specFor 进入 DomainSpec。
+func TestSpecForUsesConfiguredProfiles(t *testing.T) {
+	c := testConfig()
+	c.VMImageProfiles = []model.VMImageProfile{{Image: "img.qcow2", Machine: "pc-i440fx", Accel: "tcg", BootOrder: "cd"}}
+	p := NewProvider(c, newMockLibvirt(), newMockStorage("/images/img.qcow2"), nil)
+	spec, err := p.specFor(vmFixture("fw-vm"), model.AllocatedResources{HugepageSize: "1G"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Machine != "pc-i440fx" || spec.Accel != "tcg" || spec.BootOrder != "cd" {
+		t.Fatalf("装配配置的画像应进入 DomainSpec: %+v", spec)
+	}
+	// 资源类字段不因画像改变（账本单一真源，决策 #481 红线）。
+	if spec.HugepageSize != "1G" || len(spec.Cores) != 0 {
+		t.Fatalf("画像不得触碰资源字段: %+v", spec)
+	}
+}
+
+// 恢复收敛（重放路径）按当次 committed 配置刷新画像：EnsureConsistent 后定义出的域应带新画像。
+func TestEnsureConsistentRefreshesProfiles(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProvider(api, newMockStorage("/images/img.qcow2"), nil)
+
+	cfg := model.Config{
+		ResourcePools: &model.ResourcePool{
+			Hugepages: []model.HPool{{PageSize: "1G", Count: 4}},
+			CPU:       &model.CPUSetup{IsolatedCores: []int{0, 1, 2, 3}},
+		},
+		VMImageProfiles:         []model.VMImageProfile{{Image: "img.qcow2", Firmware: "uefi"}},
+		VirtualMachineFunctions: []model.VMFunction{vmFixture("fw-vm")},
+	}
+	if errs := p.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("恢复收敛不应报错: %v", errs)
+	}
+	if len(api.definedXML) != 1 || !strings.Contains(api.definedXML[0], `firmware="efi"`) {
+		t.Fatalf("重放应使用 committed 画像（firmware=uefi）: %v", api.definedXML)
+	}
+}
+
+// 15s 巡检同样按 committed 刷新画像（提交画像变更后、下次 start/restart 重定义即生效）。
+func TestCheckVMAlarmsRefreshesProfiles(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProvider(api, newMockStorage("/images/img.qcow2"), nil)
+
+	cfg := model.Config{
+		VMImageProfiles:         []model.VMImageProfile{{Image: "img.qcow2", Machine: "pc"}},
+		VirtualMachineFunctions: []model.VMFunction{vmFixture("fw-vm")},
+	}
+	p.CheckVMAlarms(context.Background(), cfg)
+
+	// 巡检刷新后，specFor（start/restart 的重定义路径）应带上新画像。
+	spec, err := p.specFor(vmFixture("fw-vm"), model.AllocatedResources{HugepageSize: "1G"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Machine != "pc" {
+		t.Fatalf("巡检应刷新画像: %+v", spec)
+	}
+}

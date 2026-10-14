@@ -401,6 +401,11 @@ func run() error {
 	defer func() { _ = computeProvider.Close() }()
 	computeCfg := compute.DefaultConfig()
 	computeCfg.URI = envOr("NFVIS_LIBVIRT_URI", compute.DefaultURI)
+	// 决策 #485：镜像级启动画像随 committed 配置注入——定义 VM 时据此合并有效画像
+	// （实例 startup 覆盖 > 镜像画像 > 产品默认，见 model.EffectiveStartup）。此处早于事务引擎
+	// 构造，故经 committedConfigOf 直读落盘配置（与数据面选择同一读法）；运行期画像变更由
+	// 恢复收敛/15s 巡检按当次 committed 刷新（compute 侧），改动需重定义 VM 才生效（FR-CMP-012）。
+	computeCfg.VMImageProfiles = committedConfigOf(store).VMImageProfiles
 	// 决策 #314：启动路径的数据面前置判定。复用连接管理器的既有状态视图（与 /vpp/status 同源），
 	// 不另写探测——VPP 未连接时 start/restart(off→start) 立即失败，不进入会阻塞的 vhost-user
 	// 准备阶段（round95 真机：该阶段会一直等到客户端超时且留下 paused 残域）。
