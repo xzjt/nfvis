@@ -130,6 +130,11 @@ func hugepageOccupants(cfg model.Config, pageSize, mode string) []string {
 	return out
 }
 
+// readMounts 读内核挂载表（真实 /proc/mounts）。提为可替换的函数变量：单测据此脱离
+// 宿主挂载状态——CI 宿主可能挂了 hugetlbfs，会让「占用者证据」与真机现场不同（断言随宿主而变）。
+// 生产行为不变：默认实现即读 /proc/mounts。
+var readMounts = func() ([]byte, error) { return os.ReadFile("/proc/mounts") }
+
 // hugetlbfsMounts 内核 hugetlbfs 挂载点里按页尺寸匹配的项（作为「有人挂着它」的证据）。
 // 内核在 /proc/mounts 里把 pagesize= **规范化成「最大整数单位」形式**（1G ⇒ `1024M`、
 // 2M ⇒ `2M`），故按解析出的 kB 值比较、不按字面串（决策 #459 修：此前 1G 只匹配
@@ -139,7 +144,7 @@ func hugetlbfsMounts(pageSize string) []string {
 	if !ok {
 		return nil
 	}
-	b, err := os.ReadFile("/proc/mounts")
+	b, err := readMounts()
 	if err != nil {
 		return nil
 	}

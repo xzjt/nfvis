@@ -267,6 +267,10 @@ func newTestProvider(api libvirtAPI, store storageAPI, seed seedBuilder) *Provid
 	p := NewProvider(testConfig(), api, store, seed)
 	p.poll = time.Millisecond
 	p.sleep = func(context.Context, time.Duration) error { return nil }
+	// 默认注入「固件在位」探针：单测不得依赖宿主是否装了 OVMF（CI 宿主通常未装，
+	// 否则 firmware=uefi 的画像会在 define 期被真机探针拒绝，用例随宿主而红）。
+	// 缺少 OVMF 的拒绝路径由 TestCheckFirmwareUEFIProbe 显式注入 missing=true 覆盖。
+	p.SetUEFIFirmwareProbe(func() (bool, string) { return false, "" })
 	return p
 }
 
@@ -277,6 +281,7 @@ func newTestProviderProbe(api libvirtAPI, store storageAPI, seed seedBuilder, pr
 	p := NewProvider(c, api, store, seed)
 	p.poll = time.Millisecond
 	p.sleep = func(context.Context, time.Duration) error { return nil }
+	p.SetUEFIFirmwareProbe(func() (bool, string) { return false, "" })
 	return p
 }
 
@@ -1041,6 +1046,7 @@ func newTestProviderKernel(api libvirtAPI, store storageAPI, seed seedBuilder) *
 	p := NewProvider(c, api, store, seed)
 	p.poll = time.Millisecond
 	p.sleep = func(context.Context, time.Duration) error { return nil }
+	p.SetUEFIFirmwareProbe(func() (bool, string) { return false, "" })
 	return p
 }
 

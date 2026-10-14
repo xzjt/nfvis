@@ -81,7 +81,19 @@ func TestHugepageDeclaredFromConfig(t *testing.T) {
 	}
 }
 
+// stubHostMounts 让「内核 hugetlbfs 挂载」证据脱离宿主（CI 宿主可能挂了 hugetlbfs，
+// 会让占用者证据随宿主而变、断言不确定）。content 即挂载表文本，测试按需提供固定夹具。
+func stubHostMounts(t *testing.T, content string) {
+	t.Helper()
+	prev := readMounts
+	readMounts = func() ([]byte, error) { return []byte(content), nil }
+	t.Cleanup(func() { readMounts = prev })
+}
+
 func TestHugepageOccupantsEvidence(t *testing.T) {
+	// 本用例断言的是**产品自身的账本/VPP/回退说明**，不含宿主挂载证据——
+	// 固定「无 hugetlbfs 挂载」夹具，使断言不随 CI 宿主的 /proc/mounts 而变。
+	stubHostMounts(t, "")
 	cfg := model.Config{
 		ResourcePools: &model.ResourcePool{Hugepages: []model.HPool{{PageSize: "1G", Count: 4}}},
 		Vpp:           &model.VppConfig{Memory: &model.VppMemory{HugepagePreference: "2M"}},
