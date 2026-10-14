@@ -176,6 +176,64 @@ func TestUIAssetsUnknownPathAndTraversal(t *testing.T) {
 	}
 }
 
+// 决策 #485：novnc/ 子树（Web 内置 VNC 查看器的 vendored noVNC）按扩展名放行，
+// 白名单外的路径仍 404；不存在但扩展名合法者也 404（不能因扩展名放行就 500）。
+func TestUINovncAssetsServed(t *testing.T) {
+	ts := newTestServerOpts(t, Options{})
+	for path, wantCT := range map[string]string{
+		APIPrefix + "/ui/vncview.js":                            "text/javascript; charset=utf-8",
+		APIPrefix + "/ui/novnc/core/rfb.js":                     "text/javascript; charset=utf-8",
+		APIPrefix + "/ui/novnc/core/util/int.js":                "text/javascript; charset=utf-8",
+		APIPrefix + "/ui/novnc/vendor/pako/lib/zlib/zstream.js": "text/javascript; charset=utf-8",
+		// novnc/LICENSE 无扩展名，单独放行（vendored noVNC 的许可证需可从 /ui/ 取到）。
+		APIPrefix + "/ui/novnc/LICENSE": "text/plain; charset=utf-8",
+	} {
+		resp, err := http.Get(ts.URL + path) // 静态资源无鉴权（与串口页同源）
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: 状态 %d", path, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != wantCT {
+			t.Errorf("%s: Content-Type = %q，期望 %q", path, ct, wantCT)
+		}
+		if len(body) == 0 {
+			t.Errorf("%s: 空响应", path)
+		}
+		if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s: X-Content-Type-Options = %q", path, got)
+		}
+	}
+
+	// 白名单外 / 不存在 / 越界：一律 404 + 统一错误体。
+	h := ts.Config.Handler
+	for _, p := range []string{
+		APIPrefix + "/ui/novnc/core/nope.js",   // 扩展名合法但文件不存在
+		APIPrefix + "/ui/novnc/core/nope.wasm", // 同上（合法扩展名）
+		APIPrefix + "/ui/novnc/core/.hidden",   // 未知扩展名
+		APIPrefix + "/ui/novnc/",               // 目录（空段）
+		APIPrefix + "/ui/other/x.js",           // 非 novnc 前缀
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "http://nfvis.local/", nil)
+		req.URL.Path = p
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: 状态 %d，期望 404", p, rec.Code)
+			continue
+		}
+		var e struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil || e.Code != "NOT_FOUND" {
+			t.Errorf("%s: 期望统一错误体 NOT_FOUND，得到 %s", p, rec.Body.String())
+		}
+	}
+}
+
 func TestUIRedirectsToTrailingSlash(t *testing.T) {
 	ts := newTestServerOpts(t, Options{})
 	cli := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -414,4 +472,51 @@ func hasNestedKey(m map[string]any, path string) bool {
 		cur = next
 	}
 	return false
+}
+
+// I2 守护：VNC 视图会隐藏 #vm-console-out（vmConsoleShowVNC），故 VNC 的连接/错误/断开提示
+// 必须写进**可见**的 #vm-vnc-notice——否则真实连接失败或断开只表现为黑屏、用户无从得知原因。
+// 此处查形状与存在性（真行为由浏览器验收负责）：HTML 有该元素、app.js 有 vncNotice，
+// 且 VNC 的三个回调都走它、不再落到被隐藏的 termMsg。
+func TestVNCNoticeVisibleTarget(t *testing.T) {
+	html := readUITestAsset(t, "index.html")
+	app := readUITestAsset(t, "app.js")
+
+	if !strings.Contains(html, `id="vm-vnc-notice"`) {
+		t.Error("index.html 缺少 #vm-vnc-notice（VNC 视图内的可见提示元素）")
+	}
+	if !strings.Contains(app, "function vncNotice(") {
+		t.Error("app.js 缺少 vncNotice()（把 VNC 提示写进可见元素）")
+	}
+	if !strings.Contains(app, "function vmConsoleHideVNCNotice(") {
+		t.Error("app.js 缺少 vmConsoleHideVNCNotice()（切换视图时清空提示）")
+	}
+	// VNC 打开回调块：三个回调都必须走 vncNotice（可见），且不得再用 termMsg（写进被隐藏元素）。
+	block := vncOpenBlockForTest(t, app)
+	for _, want := range []string{
+		"onConnect: () => vncNotice(",
+		"onError: (e) => vncNotice(",
+		"vncNotice(clean ?",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("VNC 打开回调未走可见提示（缺 %q）——失败会只显黑屏", want)
+		}
+	}
+	if strings.Contains(block, "termMsg(") {
+		t.Error("VNC 打开回调仍用 termMsg（写进被隐藏的 #vm-console-out，用户看不到）")
+	}
+}
+
+// vncOpenBlockForTest 取 app.js 中 window.nfvisVnc.open(wsURL, …) 的回调块（到该语句的 `});` 为止）。
+func vncOpenBlockForTest(t *testing.T, app string) string {
+	t.Helper()
+	i := strings.Index(app, "window.nfvisVnc.open(wsURL")
+	if i < 0 {
+		t.Fatal("app.js 未找到 window.nfvisVnc.open(wsURL")
+	}
+	rest := app[i:]
+	if j := strings.Index(rest, "\n  });"); j >= 0 {
+		return rest[:j]
+	}
+	return rest
 }

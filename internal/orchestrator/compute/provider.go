@@ -39,8 +39,17 @@ type Provider struct {
 	// nil = 明确报「未提供检查」（声明了设备就不静默放行，与 vfPCI 同口径）。
 	pciDeviceExists func(bdf string) (bool, error)
 
+	// uefiProbe 宿主 UEFI 固件（OVMF）缺失探测（决策 #485 复审；注入以便单测）：
+	// nil = 用默认实现 hostUEFIFirmwareMissing。仅在能判定时返回 missing=true（保守不误拒）。
+	uefiProbe func() (missing bool, detail string)
+
 	// alarms 恢复收敛告警落点（可空）。
 	alarms orchestrator.AlarmSink
+
+	// imageExists 镜像仓库存在性探针（决策 #485）：报告某镜像名是否在仓库中（内部实现为
+	// images.Store.Lookup）。nil = 不判（镜像仓库未装配，或单测未注入）——此时孤儿画像对账
+	// **既不建也不消**（保守，不猜测；与 #192 的「问不出来 ≠ 已复原」同口径）。
+	imageExists func(name string) bool
 
 	// 测试注入：睡眠与轮询间隔（生产用 time.Sleep / 200ms）。
 	sleep func(ctx context.Context, d time.Duration) error
@@ -58,7 +67,32 @@ type Provider struct {
 	specMu  sync.Mutex
 	vmSpecs map[string]vmSpec
 
+	// profileMu/profiles 镜像级启动画像的当前来源（决策 #485）：装配期由 Config 注入，
+	// 恢复收敛（EnsureConsistent）与 15s 巡检（CheckVMAlarms）按**当次 committed 配置**刷新
+	// ——这两条路径本就拿到整份配置（同 #455 的域新鲜度前置）。此外，提交期的 apply 计划
+	// 在 VM 定义之前先按**当次 new 声明**喂入（SetVMImageProfiles），否则同一提交里
+	// 「改画像 + 建/改该 VM」的域会用到上一次刷新的旧画像。
+	// 读写分锁（与 p.mu 互不相干），避免与域组装的临界区交叉。
+	profileMu sync.RWMutex
+	profiles  []model.VMImageProfile
+
 	mu sync.Mutex
+}
+
+// SetVMImageProfiles 更新镜像级启动画像（决策 #485）。取**副本**存入，避免调用方后续
+// 改写切片影响到 provider（提交路径复用同一份配置快照）。
+func (p *Provider) SetVMImageProfiles(profiles []model.VMImageProfile) {
+	cp := append([]model.VMImageProfile(nil), profiles...)
+	p.profileMu.Lock()
+	p.profiles = cp
+	p.profileMu.Unlock()
+}
+
+// effectiveProfiles 当前镜像级启动画像的副本（读侧，specFor 用）。
+func (p *Provider) effectiveProfiles() []model.VMImageProfile {
+	p.profileMu.RLock()
+	defer p.profileMu.RUnlock()
+	return append([]model.VMImageProfile(nil), p.profiles...)
 }
 
 // vmSpec 当前配置里一台 VM 的声明与资源分配（域新鲜度前置的输入）。
@@ -135,11 +169,19 @@ func NewProvider(cfg Config, api libvirtAPI, store storageAPI, seed seedBuilder)
 		seed:  seed,
 		sleep: sleepCtx,
 		poll:  200 * time.Millisecond,
+		// 决策 #485：装配期注入的镜像级启动画像（零值 = 无画像，行为与引入前一致）。
+		profiles: append([]model.VMImageProfile(nil), cfg.VMImageProfiles...),
+		// 决策 #485：装配期注入的镜像仓库存在性探针（零值 = 不判孤儿画像）。
+		imageExists: cfg.ImageExists,
 	}
 }
 
 // SetAlarms 注入恢复收敛告警落点（M4-9；可空）。
 func (p *Provider) SetAlarms(a orchestrator.AlarmSink) { p.alarms = a }
+
+// SetImageExists 注入镜像仓库存在性探针（决策 #485；可空 = 不判孤儿画像，保守不猜测）。
+// 与 Config.ImageExists 同义，供装配/单测在构造后注入。
+func (p *Provider) SetImageExists(f func(name string) bool) { p.imageExists = f }
 
 // SetVFResolver 注入 SR-IOV VF PCI 解析（M4-4）。
 func (p *Provider) SetVFResolver(f func(pf string, vfID int) (string, error)) { p.vfPCI = f }
@@ -147,6 +189,9 @@ func (p *Provider) SetVFResolver(f func(pf string, vfID int) (string, error)) { 
 // SetPCIDeviceChecker 注入通用 PCI 直通设备的存在性检查（FR-CMP-023；生产见
 // NewSysfsPCIDeviceChecker）。nil 且声明了设备时 define 明确报错，不静默放行。
 func (p *Provider) SetPCIDeviceChecker(f func(bdf string) (bool, error)) { p.pciDeviceExists = f }
+
+// SetUEFIFirmwareProbe 注入宿主 UEFI 固件（OVMF）缺失探测（决策 #485 复审；测试用）。
+func (p *Provider) SetUEFIFirmwareProbe(f func() (bool, string)) { p.uefiProbe = f }
 
 // Config 返回生效配置（只读）。
 func (p *Provider) Config() Config { return p.cfg }
@@ -189,6 +234,11 @@ func (p *Provider) defineLocked(ctx context.Context, vm model.VMFunction, alloc 
 	}
 	spec, err := p.specFor(vm, alloc)
 	if err != nil {
+		return err
+	}
+	// 决策 #485 复审：firmware=uefi 的宿主能力前置检查——缺少 OVMF 时把可行动的提示提前到定义期
+	// （否则 libvirt 到启动/定义才以晦涩报错拒绝，报错点离配置很远）。
+	if err := p.checkFirmware(spec); err != nil {
 		return err
 	}
 	if err := p.prepare(ctx, vm, spec); err != nil {
@@ -292,6 +342,12 @@ func (p *Provider) StartVM(ctx context.Context, name string) error {
 	// 数据面前置判定（决策 #314）：命中即立即失败，不进入会阻塞的启动准备阶段
 	//（也不做重定义/销毁，故不留 paused 残域）。
 	if err := p.checkDataPlaneForStart(name); err != nil {
+		return err
+	}
+	// telnet 控制台端口占用前置判定（决策 #485 复审）：派生端口被本机其它进程占用时，
+	// 快速失败并给出产品化出路，避免把 qemu 原始报错原样抛给操作者。仅 telnet 形态判，
+	// 且同样在进入 api.Start 之前（不产生半成品域）。
+	if err := p.checkConsolePortForStart(name); err != nil {
 		return err
 	}
 	// 陈旧 paused 域（决策 #455）：paused 属活动态，幂等分支会直接返回、永远起不来——先销毁。
@@ -512,6 +568,10 @@ func (p *Provider) RestartVM(ctx context.Context, name string) error {
 	if err := p.checkDataPlaneForStart(name); err != nil {
 		return err
 	}
+	// telnet 控制台端口占用前置判定（决策 #485 复审）：与 start 同口径、同落点。
+	if err := p.checkConsolePortForStart(name); err != nil {
+		return err
+	}
 	if exists && state == domPaused {
 		if err := p.api.Destroy(ctx, name); err != nil {
 			return fmt.Errorf("清理 VM %s 陈旧的 paused 域（随后按当前配置重定义）: %w", name, err)
@@ -580,9 +640,67 @@ func (p *Provider) Console(ctx context.Context, name string) (io.ReadWriteCloser
 	return p.api.OpenConsole(ctx, name)
 }
 
+// VNC 打开 VM VNC 图形控制台的 TCP 流（决策 #485/Task 8；Web 内置查看器经此接入）。
+// 前置与 Console 同构：须域存在且运行中（VNC 端口由 libvirt 在域运行后分配，未运行取不到）。
+func (p *Provider) VNC(ctx context.Context, name string) (io.ReadWriteCloser, error) {
+	state, exists, err := p.api.State(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+	}
+	if !isActiveState(state) {
+		return nil, fmt.Errorf("VM %s 未运行，VNC 控制台不可用（当前 %s）", name, VMStateFromLibvirt(state))
+	}
+	return p.api.OpenVNC(ctx, name)
+}
+
+// reconcileImageProfileAlarms 孤儿画像对账（决策 #485）：配置里有画像、镜像仓库却没有它指向的
+// 镜像 ⇒ 该画像静默失效（受影响的 VM 在下一次定义时回落产品默认），报 `VM_IMAGE_PROFILE_ORPHAN`
+// （warning，source = vm-image-profile/<镜像名>）。
+//
+// 口径（与 ACL_LEFTOVER / BRIDGE_DOMAIN_LEFTOVER 同族）：**按事实重建**——事实源是
+// 「committed 配置 × 镜像仓库」而非进程内记忆，故跨 nfvisd 重启仍可见；镜像重新出现在仓库即
+// 自动消解。只消解本码（不碰同作用域的 RECOVERY_UNCONVERGED / VM_CRASHED）。探针为 nil（仓库未
+// 装配/单测未注入）时**既不建也不消**——不猜测「镜像是否存在」（问不出来 ≠ 已复原）。
+func (p *Provider) reconcileImageProfileAlarms(cfg model.Config) {
+	if p.alarms == nil || p.imageExists == nil {
+		return
+	}
+	expect := make(map[string]bool, len(cfg.VMImageProfiles))
+	for _, prof := range cfg.VMImageProfiles {
+		if prof.Image == "" {
+			continue
+		}
+		if p.imageExists(prof.Image) {
+			continue
+		}
+		source := "vm-image-profile/" + prof.Image
+		expect[source] = true
+		p.alarms.Raise(orchestrator.RecoveryScopeCompute, orchestrator.SeverityWarning,
+			orchestrator.VMImageProfileOrphan,
+			fmt.Sprintf("镜像启动画像指向的镜像 %q 不在镜像仓库中：该画像不会生效（受影响的 VM 在"+
+				"下一次定义时回落产品默认启动参数）。本项由恢复收敛/巡检按配置与仓库事实重建"+
+				"（跨重启可见），用 request images upload 导入或 request images download 拉取该"+
+				"镜像后自动消警", prof.Image), source)
+	}
+	for _, a := range p.alarms.ActiveOf(orchestrator.RecoveryScopeCompute) {
+		if a.Code != orchestrator.VMImageProfileOrphan || expect[a.Source] {
+			continue
+		}
+		p.alarms.Resolve(orchestrator.RecoveryScopeCompute, a.Code, a.Source)
+	}
+}
+
 // EnsureConsistent 恢复收敛（FR-OPS-010/012）：按 committed 配置补建/修正缺失 domain。
 // 单个对象失败不阻塞其余对象，错误由调用方转告警。
 func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []error {
+	// 决策 #485：重放（数据面重启/恢复收敛）必须带上**当次 committed** 的镜像级启动画像，
+	// 否则 request vpp restart 后域会按装配期旧画像重建、画像参数丢失。
+	p.SetVMImageProfiles(cfg.VMImageProfiles)
+	// 决策 #485：孤儿画像对账与恢复收敛同块（同一份 committed 配置 + 同一张告警表）。
+	p.reconcileImageProfileAlarms(cfg)
 	var errs []error
 	for _, vm := range cfg.VirtualMachineFunctions {
 		err := p.DefineVM(ctx, vm, model.AllocationFor(cfg, vm))
@@ -664,6 +782,32 @@ func (p *Provider) prepare(ctx context.Context, vm model.VMFunction, spec Domain
 	return nil
 }
 
+// startupDomainSpec 计算 VM 的**有效启动画像**并映射到 DomainSpec 的启动字段
+// （决策 #485，纯函数；Task 9 的可单测组装入口）。
+//
+// 合并优先级由 model.EffectiveStartup 给出（实例 startup 覆盖 > 镜像画像 > 产品默认）；
+// 本函数只做「有效画像 → DomainSpec 字段」的映射，不碰资源类字段（memory/vcpu/hugepage/
+// numa/绑核——账本单一真源，AGENTS #481 红线）。生产路径（specFor）与单测调用**同一函数**。
+//
+// 说明：brief 里的 `DomainSpecForTest` 即此函数的等价内部形态——测试与生产同包（package compute），
+// 无需为测试在生产代码里暴露导出符号。
+func startupDomainSpec(vm model.VMFunction, profiles []model.VMImageProfile) DomainSpec {
+	eff := model.EffectiveStartup(vm, profiles)
+	console, consoleExplicit := model.EffectiveConsole(vm, profiles)
+	return DomainSpec{
+		Machine:         eff.Machine,
+		CPUMode:         eff.CPUMode,
+		CPUModel:        eff.CPUModel,
+		Firmware:        eff.Firmware,
+		DiskIface:       eff.DiskIface,
+		BootOrder:       eff.BootOrder,
+		Accel:           eff.Accel,
+		Console:         console,
+		ConsoleExplicit: consoleExplicit,
+		ExtraArgs:       append([]string(nil), eff.ExtraArgs...),
+	}
+}
+
 // specFor 由配置 + 资源分配组装 DomainSpec（纯逻辑）。
 // vhost-user socket 路径确定性派生（M4-4 由 VPP 侧创建同路径 socket）。
 func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) (DomainSpec, error) {
@@ -672,18 +816,24 @@ func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) 
 	if ImageIsISO(vm.Image) {
 		diskPath, diskFormat = p.imagePath(vm.Image), "iso"
 	}
-	spec := DomainSpec{
-		VM:              vm,
-		KernelDataPlane: p.kernelDataPlane(),
-		Cores:           alloc.Cores,
-		HugepageSize:    alloc.HugepageSize,
-		DiskPath:        diskPath,
-		DiskFormat:      diskFormat,
-		Emulator:        p.cfg.Emulator,
-		Machine:         p.cfg.Machine,
-		CPUMode:         p.cfg.CPUMode,
-		PCIDevices:      append([]string(nil), vm.PCIDevices...), // FR-CMP-023（存在性检查在 DefineVM 前完成）
+	// 决策 #485：启动画像字段（machine/cpu/cpu-model/firmware/disk-interface/boot-order/accel/
+	// console/extra-args）取**有效画像**。装配配置里的 Machine/CPUMode 降为兜底——有效画像必带
+	// 产品默认（q35 / host-passthrough），故实际总取有效画像值；无画像/无覆盖时结果与引入前一致。
+	spec := startupDomainSpec(vm, p.effectiveProfiles())
+	if spec.Machine == "" {
+		spec.Machine = p.cfg.Machine
 	}
+	if spec.CPUMode == "" {
+		spec.CPUMode = p.cfg.CPUMode
+	}
+	spec.VM = vm
+	spec.KernelDataPlane = p.kernelDataPlane()
+	spec.Cores = alloc.Cores
+	spec.HugepageSize = alloc.HugepageSize
+	spec.DiskPath = diskPath
+	spec.DiskFormat = diskFormat
+	spec.Emulator = p.cfg.Emulator
+	spec.PCIDevices = append([]string(nil), vm.PCIDevices...) // FR-CMP-023（存在性检查在 DefineVM 前完成）
 	if vm.CloudInit != nil {
 		spec.SeedISO = layout.SeedISO
 	}
@@ -729,6 +879,25 @@ func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) 
 	return spec, nil
 }
 
+// checkFirmware 固件能力前置检查（决策 #485 复审）：firmware=uefi 时**尽力**核对宿主是否装了
+// UEFI 固件（OVMF）。仅当能确定宿主**缺少**时如实拒绝并给可照做的补救（安装 OVMF / 改用 bios）；
+// 探测器在无法判定（非 POSIX 宿主、未知布局）时保守返回「不缺」，不误拒合法配置（libvirt 到
+// 定义/启动仍会自行报错，本检查只是把可行动的提示提前）。
+func (p *Provider) checkFirmware(spec DomainSpec) error {
+	if !strings.EqualFold(strings.TrimSpace(spec.Firmware), "uefi") {
+		return nil
+	}
+	probe := p.uefiProbe
+	if probe == nil {
+		probe = hostUEFIFirmwareMissing
+	}
+	if missing, detail := probe(); missing {
+		return fmt.Errorf("VM %s: firmware=uefi，但宿主未找到 UEFI 固件（OVMF）：%s——请安装 OVMF（如 apt install ovmf）或改用 firmware=bios",
+			spec.VM.Name, detail)
+	}
+	return nil
+}
+
 // kernelDataPlane 数据面是否为 Linux 内核网络（v3 决策 #404）：vNIC 走 virtio + 宿主 tap +
 // vhost-net（`<interface type='bridge'>`），而非 VPP 的 vhost-user socket。
 func (p *Provider) kernelDataPlane() bool { return p.cfg.DataPlane == model.DataPlaneKernel }
@@ -757,6 +926,11 @@ func (p *Provider) CheckVMAlarms(ctx context.Context, cfg model.Config) []error 
 	// 决策 #455：巡检持整份 committed 配置，顺带刷新域新鲜度前置的「当前声明」——
 	// 即便某次提交/回滚未逐台喂到 DefineVM，15s 内也会收敛到当前配置。
 	p.setVMSpecs(cfg)
+	// 决策 #485：同一条巡检按 committed 刷新镜像级启动画像——画像变更不属 VM 声明的差分，
+	// 提交期不会重定义域；刷新后「下一次 start/restart 重定义」即用上当前画像。
+	p.SetVMImageProfiles(cfg.VMImageProfiles)
+	// 决策 #485：同一条巡检顺带做孤儿画像对账（镜像被删/重新出现即建/消告警）。
+	p.reconcileImageProfileAlarms(cfg)
 	var errs []error
 	for _, vm := range cfg.VirtualMachineFunctions {
 		state, err := p.VMState(ctx, vm.Name)

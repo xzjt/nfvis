@@ -137,6 +137,8 @@ var uiDynamicWired = map[string]string{
 	"/container-functions/{name}/shell":                               "ctShellOpen()：POST …/{name}/shell（容器详情页「交互终端」分栏，一次性 ticket；S 档，入口按 data-write 门禁）",
 	"/container-functions/{name}/shell/ws":                            "ctShellOpen()：WebSocket 连 res.ws_url（ticket 鉴权；字节原样透传 + 前端剥离 ANSI）",
 	"/virtual-machine-functions/{name}/console":                       "vmConsoleOpen()：api('/virtual-machine-functions/' + name + '/console')",
+	"/virtual-machine-functions/{name}/console/vnc":                   "vmConsoleOpenVNC()：POST …/{name}/console/vnc（vnc 形态换内置 noVNC 查看器的一次性 ticket；S 档）",
+	"/virtual-machine-functions/{name}/console/vnc/ws":                "vmConsoleOpenVNC()：window.nfvisVnc.open(… + res.ws_url)（内置 noVNC 经 vncview.js 连入；ticket 鉴权）",
 	"/virtual-machine-functions/{name}/snapshots":                     "vmSnapLoad()/vmSnapCreate()：api(… + '/snapshots')",
 	"/virtual-machine-functions/{name}/snapshots/{snapshot}":          "vmSnapAct()：DELETE …/snapshots/{snapshot}",
 	"/virtual-machine-functions/{name}/snapshots/{snapshot}:rollback": "vmSnapAct()：POST …:rollback",

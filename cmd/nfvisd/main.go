@@ -399,8 +399,30 @@ func run() error {
 	computeProvider := newDynamicCompute()
 	// 持有层记账的 libvirt 连接随进程优雅停机关闭（同步/后台两路接入统一记账）。
 	defer func() { _ = computeProvider.Close() }()
+
+	// M4-8：镜像仓库（本地目录 + index.json；容器镜像删除经 Docker）。
+	// **提前打开**（早于计算编排）：孤儿画像对账（决策 #485）要按仓库事实判定画像指向的镜像
+	// 是否存在，该探针随 computeCfg 注入。Docker 侧钩子与事件落点在容器编排就绪后再注册（见下）。
+	imagesStore, ierr := images.Open(images.DefaultConfig())
+	if ierr != nil {
+		log.Warn("镜像仓库初始化失败", "err", ierr)
+	}
+
 	computeCfg := compute.DefaultConfig()
 	computeCfg.URI = envOr("NFVIS_LIBVIRT_URI", compute.DefaultURI)
+	// 决策 #485：镜像级启动画像随 committed 配置注入——定义 VM 时据此合并有效画像
+	// （实例 startup 覆盖 > 镜像画像 > 产品默认，见 model.EffectiveStartup）。此处早于事务引擎
+	// 构造，故经 committedConfigOf 直读落盘配置（与数据面选择同一读法）；运行期画像变更由
+	// 恢复收敛/15s 巡检按当次 committed 刷新（compute 侧），改动需重定义 VM 才生效（FR-CMP-012）。
+	computeCfg.VMImageProfiles = committedConfigOf(store).VMImageProfiles
+	// 决策 #485：孤儿画像对账的仓库存在性探针（配置有画像、仓库无镜像 ⇒ 告警 VM_IMAGE_PROFILE_ORPHAN，
+	// 镜像回来即消解）。仓库未初始化（imagesStore=nil）时不注入 ⇒ 计算编排既不建也不消该告警（保守）。
+	if imagesStore != nil {
+		computeCfg.ImageExists = func(name string) bool {
+			_, ok := imagesStore.Lookup(name)
+			return ok
+		}
+	}
 	// 决策 #314：启动路径的数据面前置判定。复用连接管理器的既有状态视图（与 /vpp/status 同源），
 	// 不另写探测——VPP 未连接时 start/restart(off→start) 立即失败，不进入会阻塞的 vhost-user
 	// 准备阶段（round95 真机：该阶段会一直等到客户端超时且留下 paused 残域）。
@@ -476,11 +498,8 @@ func run() error {
 		log.Warn("创建 memif socket 目录失败", "dir", ctCfg.MemifDir, "err", err)
 	}
 
-	// M4-8：镜像仓库（本地目录 + index.json；容器镜像删除经 Docker）
-	imagesStore, ierr := images.Open(images.DefaultConfig())
-	if ierr != nil {
-		log.Warn("镜像仓库初始化失败", "err", ierr)
-	} else {
+	// M4-8：镜像仓库的 Docker 侧钩子与事件落点（仓库本身已在上方提前打开，见 computeCfg 附近）。
+	if imagesStore != nil {
 		// 决策 #396：镜像 remove/load 经 Docker 的调用点传有界 ctx（此前 Background ⇒
 		// dockerd 假死即无界挂起）。remove 短上界；load 是**长操作**（大 tar 落盘），给宽松
 		// 上界——dockerClient 内部硬上界会按此调用方 deadline 放宽（不被 10s 缺省截断）。

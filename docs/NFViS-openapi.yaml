@@ -810,6 +810,15 @@ paths:
     post:
       tags: [virtual-machine-functions]
       summary: 申请串口 console 访问凭证（一次性 ticket，短时有效；FR-CMP-014）
+      description: |
+        按该 VM 的**有效控制台形态**（实例 startup 覆盖 > 镜像画像 > 产品默认，决策 #485）分派：
+        - `serial`/`telnet`：签发一次性 ticket，返回 `ws_url`（文本串口 WebSocket 桥接；telnet
+          底层拨域里仅回环的 `<serial type='tcp'>` 端口）；
+        - `vnc`：VNC 是图形控制台，**不在此端点签发文本串口 ticket**，只回 `kind: vnc`。前端据此
+          改走 `POST .../console/vnc` 换 VNC 查看器的一次性 ticket（Web 控制台内置 noVNC 查看器）；
+          宿主也可用 `virsh vncdisplay <name>` 查端口后以任意 VNC 客户端接入。
+        响应里的 `kind` 即该形态，供前端选择处理：`serial`/`telnet` 走文本串口管线；`vnc` 改走
+        VNC 图形查看器（见 `.../console/vnc`）。
       responses:
         "200":
           description: OK
@@ -820,12 +829,58 @@ paths:
                 properties:
                   ws_url: { type: string, example: "/api/v1/virtual-machine-functions/fw-vm/console/ws?ticket=..." }
                   expires_in: { type: integer, description: ticket 有效期（秒） }
+                  kind:
+                    type: string
+                    enum: [serial, telnet, vnc]
+                    description: 有效控制台形态；`vnc` 时不带 `ws_url`（图形控制台改走 POST .../console/vnc 的内置 noVNC 查看器）
         "404": { $ref: "#/components/responses/Error404" }
         "409":
           description: VM 未启用串口（serial_console=false）
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+  /virtual-machine-functions/{name}/console/vnc:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [virtual-machine-functions]
+      summary: 申请 VNC 图形查看器访问凭证（一次性 ticket；Web 内置 noVNC）
+      description: |
+        仅当该 VM 的**有效控制台形态**为 `vnc` 时签发一次性 ticket，返回 `ws_url`——Web 控制台内置的
+        noVNC 查看器（`vncview.js`）经它连入 `.../console/vnc/ws`。形态不是 vnc 时 **409** 并点名实际
+        形态。与串口 console 凭证端点**同权限档**（super-user，需 Bearer）；ticket 与串口/容器
+        **资源键隔离**（`vnc/` 前缀）——一个 vnc ticket 开不了串口 WS，反之亦然。VNC 服务仅监听本机
+        回环（`127.0.0.1`）。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ws_url: { type: string, example: "/api/v1/virtual-machine-functions/fw-vm/console/vnc/ws?ticket=..." }
+                  expires_in: { type: integer, description: ticket 有效期（秒） }
+                  kind: { type: string, enum: [vnc] }
+        "404": { $ref: "#/components/responses/Error404" }
+        "409":
+          description: 该 VM 的控制台形态不是 VNC
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /virtual-machine-functions/{name}/console/vnc/ws:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+      - name: ticket
+        in: query
+        required: true
+        schema: { type: string }
+        description: POST .../console/vnc 返回的一次性凭证（WebSocket 握手无法带 Bearer Token，故以 ticket 鉴权）
+    get:
+      tags: [virtual-machine-functions]
+      summary: VNC 图形查看器 WebSocket（与 VM 的 VNC 服务双向透传；打开/关闭入审计）
+      responses:
+        "101": { description: 协议切换为 WebSocket }
+        "401": { $ref: "#/components/responses/Error401" }
   /virtual-machine-functions/{name}/console/ws:
     parameters:
       - { name: name, in: path, required: true, schema: { type: string } }
@@ -1057,6 +1112,11 @@ paths:
         "401": { description: ticket 无效、已过期或已消费 }
         "503": { description: "容器编排未接入，或 Docker 服务不可用（连接失败/无响应；决策 #375）" }
 
+  /vm-image-profiles:
+    get:
+      summary: 镜像启动画像列表
+      responses:
+        "200": { description: OK }
   /images:
     parameters:
       - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
@@ -4016,6 +4076,38 @@ components:
               tx_bytes: { type: integer }
         autostart: { type: boolean }
         state: { type: string, enum: [running, shutoff, crashed, paused], description: 运行态 }
+        startup: { $ref: "#/components/schemas/VMStartupOverride" }
+
+    VMImageProfile:
+      type: object
+      required: [image]
+      properties:
+        image: { type: string, description: 镜像名（键） }
+        machine: { type: string, enum: [q35, pc, pc-i440fx-*, pc-q35-*], description: 机器类型，缺省 q35 }
+        cpu_mode: { type: string, enum: [host-passthrough, host-model, custom], description: 缺省 host-passthrough }
+        cpu_model: { type: string, description: cpu_mode=custom 时必填 }
+        firmware: { type: string, enum: [bios, uefi], description: 缺省 bios }
+        disk_interface: { type: string, enum: [virtio, sata, ide, scsi], description: 缺省 virtio }
+        boot_order: { type: string, enum: [hd, cd, dc], description: 缺省 hd }
+        accel: { type: string, enum: [kvm, tcg], description: 缺省 kvm }
+        console: { type: string, enum: [serial, telnet, vnc], description: 缺省 serial；vnc：Web 控制台内置 noVNC 查看器（POST .../console/vnc 换 ticket），VNC 仅监听 127.0.0.1，宿主也可用 `virsh vncdisplay` 查端口后以任意 VNC 客户端接入 }
+        extra_args:
+          type: array
+          items: { type: string }
+          description: 额外 QEMU 参数（窄自由口；命中 denylist 提交期拒绝；S 档；绕过资源账本）
+    VMStartupOverride:
+      type: object
+      description: VNF 实例对镜像画像的覆盖（仅允许覆盖的子集）
+      properties:
+        machine: { type: string }
+        cpu_mode: { type: string, enum: [host-passthrough, host-model, custom] }
+        cpu_model: { type: string }
+        firmware: { type: string, enum: [bios, uefi] }
+        disk_interface: { type: string, enum: [virtio, sata, ide, scsi] }
+        boot_order: { type: string, enum: [hd, cd, dc] }
+        accel: { type: string, enum: [kvm, tcg] }
+        console: { type: string, enum: [serial, telnet, vnc] }
+        extra_args: { type: array, items: { type: string } }
 
     VnfInterface:
       type: object

@@ -28,6 +28,7 @@ var branchCovered = map[string]string{
 	"resource-pools":            "resource_pools",
 	"vpp":                       "vpp",
 	"protocols":                 "protocols",
+	"vm-image-profiles":         "vm_image_profiles",
 	"virtual-machine-functions": "virtual_machine_functions",
 	"container-functions":       "container_functions",
 }
@@ -47,6 +48,7 @@ var configBranchForModelField = map[string]string{
 	"resource_pools":            "resource-pools",
 	"vpp":                       "vpp",
 	"protocols":                 "protocols",
+	"vm_image_profiles":         "vm-image-profiles",
 	"virtual_machine_functions": "virtual-machine-functions",
 	"container_functions":       "container-functions",
 }
@@ -306,5 +308,82 @@ func TestCrossConnectLeafMatchesModelBool(t *testing.T) {
 	}
 	if _, _, err := Match(ConfigPathTree(), []string{"virtual-switches", "vs1", "cross-connect", "true"}); err != nil {
 		t.Fatalf("`cross-connect true` 应可解析: %v", err)
+	}
+}
+
+// TestTreeHasVMImageProfiles：镜像启动画像（vm-image-profiles）与实例级 startup
+// 覆盖的命令树路径必须存在（决策 #485；命令全表 §2.10 与 §2.8 的对应行）。
+// 红态：树里尚无这两个分支时 Match 报「未知命令」。
+func TestTreeHasVMImageProfiles(t *testing.T) {
+	root := ConfigPathTree()
+	if _, _, err := Match(root, []string{"vm-image-profiles", "img1", "machine", "q35"}); err != nil {
+		t.Fatalf("vm-image-profiles path missing: %v", err)
+	}
+	if _, _, err := Match(root, []string{"vm-image-profiles", "img1", "extra-args", "-global x"}); err != nil {
+		t.Fatalf("extra-args leaf missing: %v", err)
+	}
+	if _, _, err := Match(root, []string{"virtual-machine-functions", "v1", "startup", "console", "vnc"}); err != nil {
+		t.Fatalf("startup override path missing: %v", err)
+	}
+}
+
+// TestExtraArgsIsKeywordNode：钉住 `extra-args` 是**关键字节点**。
+//
+// 由来（Task 5 复审 Critical）：`SPA("<arg>", "extra_args", …)` 建出的节点名是占位符 `<arg>`，
+// 直接把它挂到父级（不套 `K("extra-args", …)`）时树里根本没有名为 `extra-args` 的节点——
+// `set … extra-args "<arg>"` 里 `extra-args` 会被当成该数组参数的一个**取值**消费掉，
+// 随后的真正参数无匹配 ⇒「未知语句」。这与命令全表 §2.8/§2.10、命令树设计、计划 Task 6 的
+// 四处契约相矛盾。
+//
+// 上面 TestTreeHasVMImageProfiles 的 `Match(root, [… "extra-args", "-global x"])` 抓不住它：
+// `Match` 让任意 Param 吞任意 token（`<arg>` 先吞 `extra-args`、回退父级后再吞 `-global x`），
+// 所以裸 SPA 形态**也能**解析成功（假绿）。本用例改钉「节点名与种类」——
+// 遍历父级子节点找名为 `extra-args` 的 Keyword，并断言 `Match` 停在名为 `extra-args` 的 Keyword 上。
+func TestExtraArgsIsKeywordNode(t *testing.T) {
+	root := ConfigPathTree()
+	for _, sec := range []struct {
+		name string
+		path []string
+	}{
+		{"vm-image-profiles", []string{"vm-image-profiles", "img1"}},
+		{"startup", []string{"virtual-machine-functions", "v1", "startup"}},
+	} {
+		parent, _, err := Match(root, sec.path)
+		if err != nil {
+			t.Fatalf("%s 路径不可解析: %v", sec.name, err)
+		}
+		var ea *Node
+		for _, c := range parent.Children {
+			if c.Name == "extra-args" {
+				ea = c
+			}
+		}
+		if ea == nil {
+			t.Fatalf("%s 下没有名为 extra-args 的节点（裸 SPA 会把它命名为 <arg>，红态）", sec.name)
+		}
+		if ea.Kind != Keyword {
+			t.Fatalf("%s 的 extra-args 应是关键字节点，实为 %s", sec.name, ea.Kind)
+		}
+		// 该关键字下应恰有一个数组标量参数叶子（值追加、按值删除）。
+		if len(ea.Children) != 1 || ea.Children[0].Kind != Param || !ea.Children[0].ScalarIsArray {
+			t.Fatalf("%s 的 extra-args 下应恰有一个数组标量参数叶子: %+v", sec.name, ea.Children)
+		}
+		// Match 在只给到 `extra-args` 时必须停在该关键字上（不是停在 `<arg>` 取值上）。
+		stop, _, err := Match(root, append(append([]string{}, sec.path...), "extra-args"))
+		if err != nil {
+			t.Fatalf("%s extra-args 关键字不可解析: %v", sec.name, err)
+		}
+		if stop.Name != "extra-args" || stop.Kind != Keyword {
+			t.Fatalf("%s 的 extra-args 位置解析到 %q(%s)，不是 extra-args 关键字（红态：裸 SPA 吞成值）",
+				sec.name, stop.Name, stop.Kind)
+		}
+		// 整句可解析。
+		if _, _, err := Match(root, append(append([]string{}, sec.path...), "extra-args", "-global x")); err != nil {
+			t.Fatalf("%s extra-args 整句不可解析: %v", sec.name, err)
+		}
+		// 负控：该位置给一个树里不存在的关键字必须失败（证明 Match 并非在该层一律放行）。
+		if _, _, err := Match(root, append(append([]string{}, sec.path...), "bogus-keyword")); err == nil {
+			t.Fatalf("%s 位置给不存在的关键字本应失败（假绿）", sec.name)
+		}
 	}
 }

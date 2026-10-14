@@ -52,6 +52,12 @@ const (
 	// warning（FR-CMP-022，决策 #432）。状态读数按既有口径仍显示 running，故本码是操作者
 	// 唯一能看见「容器反复起不来」的入口；重启结束或对象消失即消解。
 	ContainerRestartLoop = "CONTAINER_RESTART_LOOP"
+	// VMImageProfileOrphan 镜像级启动画像指向的镜像不在镜像仓库中（孤儿画像，决策 #485），
+	// warning。画像只在「下一次 VM 定义」被读取，镜像被删后画像静默失效、VM 回落产品默认
+	// ——与「数据面存在配置未声明对象」同族的「配置与事实不一致」事实，故按 ACL_LEFTOVER
+	// 口径处理：由恢复收敛/15s 巡检**按配置 × 仓库事实重建**（不靠进程内记忆、跨 nfvisd
+	// 重启可见），镜像重新出现在仓库即自动消解。source 形如 vm-image-profile/<镜像名>。
+	VMImageProfileOrphan = "VM_IMAGE_PROFILE_ORPHAN"
 )
 
 // 告警严重级别（与 network.AlarmStore 取值一致）。

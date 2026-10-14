@@ -354,6 +354,10 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	// M4-5：串口 console（凭证端点需 Bearer；ws 端点以一次性 ticket 鉴权）
 	mux.Handle("POST "+APIPrefix+"/virtual-machine-functions/{name}/console", s.auth(s.handleConsoleTicket, schema.ClassSuperUser, "request virtual-machine-functions console"))
 	mux.Handle("GET "+APIPrefix+"/virtual-machine-functions/{name}/console/ws", http.HandlerFunc(s.handleConsoleWS))
+	// 决策 #485：VNC 图形查看器（Web 内置 noVNC）——凭证端点与串口 console **同权限档**，
+	// ws 端点同样以一次性 ticket 鉴权；ticket 资源键隔离（vnc/ ≠ vm/）。
+	mux.Handle("POST "+APIPrefix+"/virtual-machine-functions/{name}/console/vnc", s.auth(s.handleVNCTicket, schema.ClassSuperUser, "request virtual-machine-functions console"))
+	mux.Handle("GET "+APIPrefix+"/virtual-machine-functions/{name}/console/vnc/ws", http.HandlerFunc(s.handleVNCWS))
 	// M4-6：快照（列表/创建/回滚/删除）
 	mux.Handle("GET "+APIPrefix+"/virtual-machine-functions/{name}/snapshots", s.auth(s.handleListSnapshots, schema.ClassReadOnly, "show virtual-machine-functions"))
 	mux.Handle("POST "+APIPrefix+"/virtual-machine-functions/{name}/snapshots", s.auth(s.handleCreateSnapshot, schema.ClassSuperUser, "request virtual-machine-functions snapshot create"))
@@ -376,6 +380,8 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/images/{name}", s.auth(s.handleGetImage, schema.ClassReadOnly, "show images"))
 	mux.Handle("POST "+APIPrefix+"/images", s.auth(s.handlePostImage, schema.ClassSuperUser, "request images"))
 	mux.Handle("DELETE "+APIPrefix+"/images/{name}", s.auth(s.handleDeleteImage, schema.ClassSuperUser, "request images delete"))
+	// 决策 #485：镜像启动画像读视图（与 CLI `show vm-image-profiles` 同源；写路径在配置模式）。
+	mux.Handle("GET "+APIPrefix+"/vm-image-profiles", s.auth(s.handleGetVMImageProfiles, schema.ClassReadOnly, "show vm-image-profiles"))
 
 	// M3-8：告警列表（恢复收敛的不可收敛项落点，FR-OPS-010）
 	mux.Handle("GET "+APIPrefix+"/alarms", s.auth(s.handleGetAlarms, schema.ClassReadOnly, "show alarms"))

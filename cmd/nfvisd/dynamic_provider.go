@@ -65,7 +65,7 @@ func (notConnectedError) Is(target error) bool {
 	return target == orchestrator.ErrContainerUnavailable
 }
 
-// computeFacade 持有层所持的 libvirt 编排能力集合：orchestrator.ComputeProvider 全部 9 法，
+// computeFacade 持有层所持的 libvirt 编排能力集合：orchestrator.ComputeProvider 全部 10 法，
 // 加上 api 控制器消费的超集——StartVMChecked（决策 #311 的启动回读）、Console（M4-5）、
 // 快照 4 法（M4-6）。抽成小接口是为了单测能注入假件（*compute.Provider 是绑定真实
 // libvirt 连接的具体类型，测试环境造不出）；生产路径持有的仍是 *compute.Provider。
@@ -73,6 +73,7 @@ type computeFacade interface {
 	orchestrator.ComputeProvider
 	StartVMChecked(ctx context.Context, name string) (orchestrator.VMStartProbe, error)
 	Console(ctx context.Context, name string) (io.ReadWriteCloser, error)
+	VNC(ctx context.Context, name string) (io.ReadWriteCloser, error)
 	SnapshotCreate(ctx context.Context, domain, name, description string) error
 	Snapshots(ctx context.Context, domain string) ([]compute.SnapshotInfo, error)
 	SnapshotRevert(ctx context.Context, domain, name string) error
@@ -259,6 +260,14 @@ func (h *dynamicCompute) Console(ctx context.Context, name string) (io.ReadWrite
 	return nil, errConsoleNotConnected
 }
 
+// VNC 未接入 ⇒ 与 console 同款错误（WebSocket 侧经 handleVNCWS 渲染「VNC 连接失败: …」）。
+func (h *dynamicCompute) VNC(ctx context.Context, name string) (io.ReadWriteCloser, error) {
+	if p := h.current(); p != nil {
+		return p.VNC(ctx, name)
+	}
+	return nil, errConsoleNotConnected
+}
+
 // SnapshotCreate 未接入 ⇒ 与快照 nil 分支（errComputeUnavailable 正文）同文案的错误。
 func (h *dynamicCompute) SnapshotCreate(ctx context.Context, domain, name, description string) error {
 	if p := h.current(); p != nil {
@@ -305,6 +314,15 @@ func (h *dynamicCompute) CheckVMAlarms(ctx context.Context, cfg model.Config) []
 		return p.CheckVMAlarms(ctx, cfg)
 	}
 	return nil
+}
+
+// SetVMImageProfiles 未接入 ⇒ 静默无操作（画像同步是纯配置能力，降级期不必记账：
+// 后台接入新建的实现由 computeCfg 携带装配期画像，且接入后 EnsureConsistent 会再按
+// committed 刷新一次；此处若也记账反需另一份镜像状态，得不偿失）。
+func (h *dynamicCompute) SetVMImageProfiles(profiles []model.VMImageProfile) {
+	if p := h.current(); p != nil {
+		p.SetVMImageProfiles(profiles)
+	}
 }
 
 // containerHolder Docker 编排的动态持有层（容器侧没有独立连接对象，Provider 即全部）。

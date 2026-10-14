@@ -14,6 +14,11 @@
 #       `set virtual-switches sem-vs dhcp-relay server …`       → S11（DHCP 中继；须先有 gateway ip）
 #       `set system dns proxy server …`                         → S13（数据面 DNS 代理；**全局**，非交换机作用域）
 #     三者都是「有配置才可判定」的项，缺现场时套件会如实报不可判定（见其头部 S11/S12/S13 段）。
+#   · **在 sem-vm 用的镜像上补一份启动画像**（`set vm-image-profiles $IMAGE machine pc` +
+#     `console serial` + `extra-args "-global kvm-pit.lost_tick_policy=discard"`）→ S15（镜像启动画像：
+#     读视图 ↔ display set 往返 + 有效画像来源标注）。extra-args 用来真正走通**「已绕过资源账本」标注**
+#     那条断言（取值用真机 #485 验证过的同一串，省得引入新的 QEMU 参数风险）；画像在建 VNF 之后、
+#     启动**之前**建立（故 sem-vm 首次定义即取用；machine=pc / console=serial 对 Debian cloud 安全）；`down` 时连同删除。
 #
 # 用法：
 #   bash contrib/scripts/cli-semantic-fixture.sh up      # 造现场（先清后建，幂等）；成功即具备正控
@@ -154,12 +159,19 @@ commit" 2>&1 | grep -E '^%%|错误' || true
 delete system dns proxy server
 commit" 2>&1 | grep -E '^%%|错误' || true
   fi
+  # S15 的启动画像是**全局**配置（键＝镜像名，不随 VM/交换机删除），显式撤销；不存在时容忍。
+  if has_obj vm-image-profiles "$IMAGE"; then
+    cli "configure
+delete vm-image-profiles $IMAGE
+commit" 2>&1 | grep -E '^%%|错误' || true
+  fi
   sleep 2
   echo "· 终态核对"
   echo "  virtual-switches: $(cli 'show virtual-switches' | tr '\n' ' ')"
   echo "  VNF:              $(cli 'show virtual-machine-functions' | tr '\n' ' ')"
   echo "  容器:             $(cli 'show container-functions' | tr '\n' ' ')"
   echo "  DNS 代理:         $(cli 'show dns proxy' | sed -n '1p')"
+  echo "  镜像画像:         $(cli 'show vm-image-profiles' | sed -n '1p')"
   rm -f "$UD"
 }
 
@@ -198,6 +210,23 @@ commit" 2>&1)
     return 1
   fi
   echo "  ✓ 现场对象已创建（交换机 $VS / VNF $VM / 容器 $CT / DNS 代理）"
+  # S15 正控：在 sem-vm 用的镜像上建一份启动画像（machine pc + console serial + extra-args）。
+  # 画像在建 VNF 提交之后、启动之前建立，故 sem-vm 首次定义即取用（machine=pc / console=serial 对
+  # 本机 Debian cloud 镜像安全）。extra-args 用真机 #485 验证过的同一串，专门走通 S15 的
+  # 「extra-args 读视图须带『已绕过资源账本』标注」这条断言（空 extra-args 会让该断言变成空转）。
+  profout=$(cli "configure
+set vm-image-profiles $IMAGE machine pc
+set vm-image-profiles $IMAGE console serial
+set vm-image-profiles $IMAGE extra-args \"-global kvm-pit.lost_tick_policy=discard\"
+commit" 2>&1)
+  if printf '%s' "$profout" | grep -qE '^%%|^% '; then
+    echo "  ! 镜像启动画像提交未成功（S15 读视图/来源项将如实报不可判定）："
+    printf '%s\n' "$profout" | sed 's/^/     /'
+  elif has_obj vm-image-profiles "$IMAGE"; then
+    echo "  ✓ 镜像启动画像已创建（$IMAGE：machine=pc console=serial extra-args=…）"
+  else
+    echo "  ! 镜像启动画像未在仓（S15 将如实报不可判定）"
+  fi
   echo "· 启动 VNF 与容器"
   cli "request virtual-machine-functions $VM start"
   cli "request container-functions $CT start"
@@ -253,6 +282,9 @@ do_status() {
   # S13 现场：DNS 代理是全局配置（读视图 `show dns proxy`）
   if dns_proxy_enabled; then echo "· S13 DNS 代理:   有（$(cli 'show dns proxy' | sed -n '1p')）"
   else echo "· S13 DNS 代理:   无"; fi
+  # S15 现场：镜像启动画像（键＝$IMAGE），读视图 `show vm-image-profiles`
+  if has_obj vm-image-profiles "$IMAGE"; then echo "· S15 镜像画像:   有（$IMAGE：$(cli "show vm-image-profiles $IMAGE" | sed -n '2p' | tr -s ' ')）"
+  else echo "· S15 镜像画像:   无"; fi
   ifn=$(vnic_if)
   echo "· 成员口 $ifn rx=$(if_rx "$ifn")  l2fib 已学到 MAC: $(l2fib_learned_on "$ifn" && echo 是 || echo 否)"
   echo "· libvirt: $(virsh domstate "$VM" 2>&1)"

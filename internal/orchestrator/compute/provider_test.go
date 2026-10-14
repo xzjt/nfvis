@@ -178,6 +178,14 @@ func (m *mockLibvirt) OpenConsole(_ context.Context, name string) (io.ReadWriteC
 	return nopConsole{}, nil
 }
 
+// OpenVNC 同 OpenConsole（单测验证 Provider.VNC 的状态前置条件）。
+func (m *mockLibvirt) OpenVNC(_ context.Context, name string) (io.ReadWriteCloser, error) {
+	if !m.present[name] {
+		return nil, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+	}
+	return nopConsole{}, nil
+}
+
 type nopConsole struct{}
 
 func (nopConsole) Read([]byte) (int, error)    { return 0, io.EOF }
@@ -524,6 +532,28 @@ func TestStartVM_IdempotentAndNotFound(t *testing.T) {
 	}
 	if err := p.StartVM(context.Background(), "ghost"); err == nil {
 		t.Fatal("未定义应报错")
+	}
+}
+
+// 决策 #485：Provider.VNC 与 Console 同构的状态前置——运行中可打开，未定义/未运行如实报错。
+func TestProviderVNCStateGate(t *testing.T) {
+	p, _, _ := newRunningProvider("fw-vm")
+	stream, err := p.VNC(context.Background(), "fw-vm")
+	if err != nil || stream == nil {
+		t.Fatalf("运行中的 VM 应能打开 VNC: %v", err)
+	}
+	_ = stream.Close()
+
+	if _, err := p.VNC(context.Background(), "ghost"); err == nil {
+		t.Fatal("未定义的 VM 应报错")
+	}
+
+	api := newMockLibvirt()
+	api.present["off-vm"] = true
+	api.states["off-vm"] = domShutoff
+	p2 := newTestProvider(api, newMockStorage(), nil)
+	if _, err := p2.VNC(context.Background(), "off-vm"); err == nil {
+		t.Fatal("未运行的 VM 应报错（VNC 端口未分配）")
 	}
 }
 
@@ -874,6 +904,112 @@ func TestEnsureConsistentAlarms(t *testing.T) {
 	}
 }
 
+// recordingSink 进程内告警表（对账建/消测试用）：按 (code, source) 记账，支持 ActiveOf/Resolve
+// ——与生产 network.AlarmStore 的语义一致（同键幂等、按 code+source 消解）。
+type recordingSink struct {
+	active map[string]orchestrator.AlarmRef
+	order  []string
+}
+
+func newRecordingSink() *recordingSink {
+	return &recordingSink{active: map[string]orchestrator.AlarmRef{}}
+}
+
+func recordingKey(code, source string) string { return code + "\x00" + source }
+
+func (s *recordingSink) Raise(_, _, code, _, source string) {
+	k := recordingKey(code, source)
+	if _, ok := s.active[k]; !ok {
+		s.order = append(s.order, k)
+	}
+	s.active[k] = orchestrator.AlarmRef{Code: code, Source: source}
+}
+
+func (s *recordingSink) Resolve(_, code, source string) bool {
+	k := recordingKey(code, source)
+	if _, ok := s.active[k]; !ok {
+		return false
+	}
+	delete(s.active, k)
+	return true
+}
+
+func (s *recordingSink) ActiveOf(string) []orchestrator.AlarmRef {
+	out := make([]orchestrator.AlarmRef, 0, len(s.active))
+	for _, k := range s.order {
+		if a, ok := s.active[k]; ok {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// 决策 #485：孤儿画像对账告警——配置有画像、镜像仓库无该镜像 ⇒ VM_IMAGE_PROFILE_ORPHAN（warning）；
+// 镜像出现即自动消解；换一张空告警表模拟 nfvisd 重启后仍按事实重建（不靠进程内记忆）。
+func TestImageProfileOrphanAlarmRebuiltAndResolved(t *testing.T) {
+	p := newTestProvider(newMockLibvirt(), newMockStorage(), nil)
+	p.SetImageExists(func(name string) bool { return name == "img-ok" })
+	sink := newRecordingSink()
+	p.SetAlarms(sink)
+
+	cfg := model.Config{VMImageProfiles: []model.VMImageProfile{
+		{Image: "img-ok", Machine: "q35"},
+		{Image: "img-gone", Machine: "q35"},
+	}}
+
+	// 恢复收敛路径（无 VM ⇒ 不产生 VM 收敛告警）
+	if errs := p.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("无 VM 时收敛应无错误: %v", errs)
+	}
+	active := sink.ActiveOf(orchestrator.RecoveryScopeCompute)
+	if len(active) != 1 || active[0].Code != orchestrator.VMImageProfileOrphan ||
+		active[0].Source != "vm-image-profile/img-gone" {
+		t.Fatalf("应产生孤儿画像告警（仅 img-gone）: %+v", active)
+	}
+
+	// 15s 巡检路径：事实未变 ⇒ 保持（幂等）
+	if errs := p.CheckVMAlarms(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("巡检应无错误: %v", errs)
+	}
+	if got := sink.ActiveOf(orchestrator.RecoveryScopeCompute); len(got) != 1 {
+		t.Fatalf("事实未变告警应保持: %+v", got)
+	}
+
+	// 镜像出现 ⇒ 自动消警
+	p.SetImageExists(func(string) bool { return true })
+	p.CheckVMAlarms(context.Background(), cfg)
+	if got := sink.ActiveOf(orchestrator.RecoveryScopeCompute); len(got) != 0 {
+		t.Fatalf("镜像出现应自动消警: %+v", got)
+	}
+
+	// 跨「重启」：换一张空告警表（进程内历史全丢），仓库仍缺 img-gone ⇒ 按事实重建
+	p.SetImageExists(func(name string) bool { return name == "img-ok" })
+	sink2 := newRecordingSink()
+	p.SetAlarms(sink2)
+	p.EnsureConsistent(context.Background(), cfg)
+	active = sink2.ActiveOf(orchestrator.RecoveryScopeCompute)
+	if len(active) != 1 || active[0].Code != orchestrator.VMImageProfileOrphan ||
+		active[0].Source != "vm-image-profile/img-gone" {
+		t.Fatalf("重启后孤儿画像告警必须仍可见（按事实重建）: %+v", active)
+	}
+}
+
+// 未注入镜像仓库探针（ImageExists 为 nil）⇒ 不猜测：既不建也不消（生产在镜像仓库未装配时即此情形）。
+func TestImageProfileOrphanSkippedWithoutImageProbe(t *testing.T) {
+	p := newTestProvider(newMockLibvirt(), newMockStorage(), nil)
+	sink := newRecordingSink()
+	p.SetAlarms(sink)
+	// 预置一条历史活动告警，验证无探针时不被误消
+	sink.Raise(orchestrator.RecoveryScopeCompute, orchestrator.SeverityWarning,
+		orchestrator.VMImageProfileOrphan, "旧告警", "vm-image-profile/img-gone")
+
+	cfg := model.Config{VMImageProfiles: []model.VMImageProfile{{Image: "img-gone", Machine: "q35"}}}
+	p.EnsureConsistent(context.Background(), cfg)
+	if got := sink.ActiveOf(orchestrator.RecoveryScopeCompute); len(got) != 1 {
+		t.Fatalf("无镜像探针时不得猜测（保守留警）: %+v", got)
+	}
+}
+
 // FR-OPS-012：autostart 须落到 libvirt 域自启标志。
 func TestDefineVMSetsLibvirtAutostart(t *testing.T) {
 	api := newMockLibvirt()
@@ -1068,4 +1204,116 @@ func TestCheckVMAlarms(t *testing.T) {
 	if len(sink.resolved) != 1 {
 		t.Fatalf("恢复应消警: %v", sink.resolved)
 	}
+}
+
+// ---------- 有效启动画像接入（决策 #485，Task 9）----------
+
+// 给定镜像画像 + 实例覆盖时，组装出的 DomainSpec 启动字段应等于有效画像
+// （实例覆盖 > 镜像画像 > 产品默认，合并由 model.EffectiveStartup 给出）。
+func TestDomainSpecUsesEffectiveStartup(t *testing.T) {
+	profiles := []model.VMImageProfile{{Image: "img1", Machine: "pc", Firmware: "uefi"}}
+	vm := model.VMFunction{Name: "v1", Image: "img1", VCPU: model.VMCpu{Count: 1}, Memory: model.VMMemory{SizeMB: 512},
+		Startup: &model.VMStartupOverride{Console: "vnc"}}
+	spec := startupDomainSpec(vm, profiles)
+	if spec.Machine != "pc" || spec.Firmware != "uefi" || spec.Console != "vnc" {
+		t.Fatalf("effective profile not applied: %+v", spec)
+	}
+}
+
+// 无画像、无覆盖时启动字段回落产品默认（既有行为不变：q35/host-passthrough/bios/virtio/hd/kvm/serial）。
+func TestDomainSpecDefaultStartupWithoutProfile(t *testing.T) {
+	spec := startupDomainSpec(vmFixture("v1"), nil)
+	if spec.Machine != model.DefaultMachine || spec.CPUMode != model.DefaultCPUMode ||
+		spec.Firmware != model.DefaultFirmware || spec.DiskIface != model.DefaultDiskIface ||
+		spec.BootOrder != model.DefaultBootOrder || spec.Accel != model.DefaultAccel ||
+		spec.Console != model.DefaultConsole {
+		t.Fatalf("无画像应回落产品默认: %+v", spec)
+	}
+}
+
+// 装配配置（compute.Config）里的画像经生产路径 specFor 进入 DomainSpec。
+func TestSpecForUsesConfiguredProfiles(t *testing.T) {
+	c := testConfig()
+	c.VMImageProfiles = []model.VMImageProfile{{Image: "img.qcow2", Machine: "pc-i440fx", Accel: "tcg", BootOrder: "cd"}}
+	p := NewProvider(c, newMockLibvirt(), newMockStorage("/images/img.qcow2"), nil)
+	spec, err := p.specFor(vmFixture("fw-vm"), model.AllocatedResources{HugepageSize: "1G"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Machine != "pc-i440fx" || spec.Accel != "tcg" || spec.BootOrder != "cd" {
+		t.Fatalf("装配配置的画像应进入 DomainSpec: %+v", spec)
+	}
+	// 资源类字段不因画像改变（账本单一真源，决策 #481 红线）。
+	if spec.HugepageSize != "1G" || len(spec.Cores) != 0 {
+		t.Fatalf("画像不得触碰资源字段: %+v", spec)
+	}
+}
+
+// 恢复收敛（重放路径）按当次 committed 配置刷新画像：EnsureConsistent 后定义出的域应带新画像。
+func TestEnsureConsistentRefreshesProfiles(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProvider(api, newMockStorage("/images/img.qcow2"), nil)
+
+	cfg := model.Config{
+		ResourcePools: &model.ResourcePool{
+			Hugepages: []model.HPool{{PageSize: "1G", Count: 4}},
+			CPU:       &model.CPUSetup{IsolatedCores: []int{0, 1, 2, 3}},
+		},
+		VMImageProfiles:         []model.VMImageProfile{{Image: "img.qcow2", Firmware: "uefi"}},
+		VirtualMachineFunctions: []model.VMFunction{vmFixture("fw-vm")},
+	}
+	if errs := p.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("恢复收敛不应报错: %v", errs)
+	}
+	if len(api.definedXML) != 1 || !strings.Contains(api.definedXML[0], `firmware="efi"`) {
+		t.Fatalf("重放应使用 committed 画像（firmware=uefi）: %v", api.definedXML)
+	}
+}
+
+// 15s 巡检同样按 committed 刷新画像（提交画像变更后、下次 start/restart 重定义即生效）。
+func TestCheckVMAlarmsRefreshesProfiles(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProvider(api, newMockStorage("/images/img.qcow2"), nil)
+
+	cfg := model.Config{
+		VMImageProfiles:         []model.VMImageProfile{{Image: "img.qcow2", Machine: "pc"}},
+		VirtualMachineFunctions: []model.VMFunction{vmFixture("fw-vm")},
+	}
+	p.CheckVMAlarms(context.Background(), cfg)
+
+	// 巡检刷新后，specFor（start/restart 的重定义路径）应带上新画像。
+	spec, err := p.specFor(vmFixture("fw-vm"), model.AllocatedResources{HugepageSize: "1G"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Machine != "pc" {
+		t.Fatalf("巡检应刷新画像: %+v", spec)
+	}
+}
+
+// 决策 #485 复审：firmware=uefi 的宿主能力前置检查——探测到缺失时如实拒绝并给补救；
+// 探测到在位/无法判定时放行（保守，不误拒合法组合）。
+func TestCheckFirmwareUEFIProbe(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProvider(api, newMockStorage("/images/img.qcow2"), nil)
+	spec := DomainSpec{VM: model.VMFunction{Name: "fw-vm"}, Firmware: "uefi"}
+
+	p.SetUEFIFirmwareProbe(func() (bool, string) { return true, "OVMF 缺失（测试）" })
+	err := p.checkFirmware(spec)
+	if err == nil || !strings.Contains(err.Error(), "firmware=uefi") || !strings.Contains(strings.ToLower(err.Error()), "ovmf") {
+		t.Fatalf("缺少 OVMF 应如实拒绝并给补救: %v", err)
+	}
+
+	p.SetUEFIFirmwareProbe(func() (bool, string) { return false, "" })
+	if err := p.checkFirmware(spec); err != nil {
+		t.Fatalf("探测到固件在位不应拒绝: %v", err)
+	}
+
+	// 非 uefi 不触发固件检查。
+	if err := p.checkFirmware(DomainSpec{VM: model.VMFunction{Name: "fw-vm"}, Firmware: "bios"}); err != nil {
+		t.Fatalf("bios 不应触发固件检查: %v", err)
+	}
+
+	// 默认探测器在无法判定宿主（非 POSIX / 未知布局）时保守放行；本仓 CI 主机即此情形。
+	_, _ = hostUEFIFirmwareMissing()
 }

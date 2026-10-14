@@ -29,6 +29,10 @@
 # 两视图一致 ⇒ PASS；「resource-pools.free==total（忽略在用）+ system 侧 held_by_dataplane>0」⇒ FAIL；
 # 内核值取不到/缺视图 ⇒ UNKNOWN。
 #   · 把 s14_verdict 的「两视图一致」比对那一支改回恒 `printf PASS`（旧口径），本脚本必须报 ✗
+# 扩展（决策 #485）：S15「镜像启动画像」的**判定函数** `s15_verdict`（读视图 ↔ display set 往返）
+# 与 `s15_source_verdict`（有效画像来源＝实例覆盖 > 镜像画像 > 产品默认）也纳入抽取——喂错配夹具
+# 必须 FAIL、缺画像（两侧都空）必须 UNKNOWN（不得静默通过）。
+#   · 把 s15_verdict 的「两侧都空」分支改回恒 `printf PASS`，本脚本必须报 ✗
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 SCRIPT=${SEM_SCRIPT:-$HERE/cli-semantic-check.sh}
@@ -42,7 +46,7 @@ extract() {
   ' "$SCRIPT"
 }
 
-ORACLES=$(for f in vpp_bd_ids vpp_bd_tag vpp_l2fib_count vpp_bd_index_of_tag vpp_bd_id_of_tag vpp_ifaces vpp_if_rx vpp_bd_members vsw_ports_parse vpp_l2fib_learned s8_verdict s9_verdict s8_rx_cycles_of s14_verdict; do
+ORACLES=$(for f in vpp_bd_ids vpp_bd_tag vpp_l2fib_count vpp_bd_index_of_tag vpp_bd_id_of_tag vpp_ifaces vpp_if_rx vpp_bd_members vsw_ports_parse vpp_l2fib_learned s8_verdict s9_verdict s8_rx_cycles_of s14_verdict s15_verdict s15_source_verdict; do
   body=$(extract "$f")
   [ -z "$body" ] && { echo "✗ 抽不到函数 $f（脚本改名了？）" >&2; exit 1; }
   printf '%s\n' "$body"
@@ -246,6 +250,26 @@ eqv UNKNOWN "内核实际值取不到（actual<0/state=unreadable）→ 不可�
   "$(s14_verdict '2M' yes -1 -1 -1 yes 23 -1 0 0 unreadable)"
 eqv UNKNOWN "缺一个视图（resource-pools 没有该页尺寸）→ 不可判定" \
   "$(s14_verdict '2M' no 0 0 0 yes 23 768 745 1 ok)"
+
+echo "— S15 判定：镜像画像读视图 ↔ display set 往返（缺画像=不可判定；错配=失败）—"
+# 决策 #485：钉住「读视图与 display set 同源」——两侧字段/值必须一一对应，缺证据不得当通过。
+# 红-绿验证本函数：把 s15_verdict 的「两侧都空」分支改成 printf PASS，本段第一句必须报 ✗。
+eqv UNKNOWN "两侧都空（无画像对象）→ 不可判定（不得静默通过）" "$(s15_verdict 'imgX' '' '' yes)"
+eqv PASS    "逐字段/值一致且 extra-args 往返与标注一致 → 通过" \
+  "$(s15_verdict 'imgX' 'machine=pc|cpu_mode=custom|console=telnet' 'machine=pc|cpu_mode=custom|console=telnet' yes)"
+eqv FAIL    "读视图多一个 display set 没有的字段 → 失败（不同源）" "$(s15_verdict 'imgX' 'machine=pc|accel=tcg' 'machine=pc' yes)"
+eqv FAIL    "display set 多一个读视图没有的字段 → 失败（不同源）" "$(s15_verdict 'imgX' 'machine=pc' 'machine=pc|accel=tcg' yes)"
+eqv FAIL    "同字段值不同（machine pc vs q35）→ 失败" "$(s15_verdict 'imgX' 'machine=pc' 'machine=q35' yes)"
+eqv FAIL    "extra-args 往返不一致（缺「已绕过资源账本」标注）→ 失败" "$(s15_verdict 'imgX' 'machine=pc' 'machine=pc' no)"
+eqv FAIL    "读视图有字段而 display set 空 → 失败" "$(s15_verdict 'imgX' 'machine=pc' '' yes)"
+
+echo "— S15 来源判定：有效画像来源＝实例覆盖 > 镜像画像 > 产品默认 —"
+eqv PASS    "实例覆盖已设 → 来源应为实例覆盖（标注相符）" "$(s15_source_verdict 'v1' 'machine' '实例覆盖' yes yes)"
+eqv PASS    "实例未设、画像已设 → 来源应为镜像画像" "$(s15_source_verdict 'v1' 'accel' '镜像画像' no yes)"
+eqv PASS    "实例与画像都未设 → 来源应为产品默认" "$(s15_source_verdict 'v1' 'console' '产品默认' no no)"
+eqv FAIL    "标注「镜像画像」但实例覆盖已设（实为实例覆盖）→ 失败" "$(s15_source_verdict 'v1' 'machine' '镜像画像' yes yes)"
+eqv FAIL    "标注「产品默认」但画像已设（实为镜像画像）→ 失败" "$(s15_source_verdict 'v1' 'accel' '产品默认' no yes)"
+eqv UNKNOWN "来源标注为空/不可识别 → 不可判定" "$(s15_source_verdict 'v1' 'console' '' no no)"
 
 if [ $RC -eq 0 ]; then echo "全部符合预期"; else echo "有不符合预期的用例"; fi
 exit $RC

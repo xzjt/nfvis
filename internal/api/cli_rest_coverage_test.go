@@ -118,6 +118,8 @@ var cliRESTCoverage = map[string]string{
 	"show container-functions <name> interfaces":       "GET /container-functions/{name}",
 	"show images":                                      "GET /images",
 	"show images <name> detail":                        "GET /images/{name}",
+	"show vm-image-profiles":                           "GET /vm-image-profiles",
+	"show vm-image-profiles <image>":                   "GET /vm-image-profiles",
 	"show resource-pools":                              "GET /resource-pools",
 	"show alarms":                                      "GET /alarms",
 	"show log audit":                                   "GET /audit-logs",

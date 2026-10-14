@@ -119,6 +119,18 @@ func (n recNet) DeleteVnfInterface(ctx context.Context, vmName, ifaceName string
 type recCompute struct {
 	calls  *[]string
 	failOn string
+	// profiles 非 nil 时记录最近一次 SetVMImageProfiles 收到的画像（决策 #485）。
+	profiles *[]model.VMImageProfile
+}
+
+// SetVMImageProfiles 同步镜像级启动画像（纯配置能力，不下发数据面动作）。
+func (c recCompute) SetVMImageProfiles(profiles []model.VMImageProfile) {
+	if c.profiles != nil {
+		*c.profiles = append([]model.VMImageProfile(nil), profiles...)
+	}
+	if c.calls != nil {
+		*c.calls = append(*c.calls, "profiles")
+	}
 }
 
 func (c recCompute) DefineVM(ctx context.Context, vm model.VMFunction, alloc model.AllocatedResources) error {
@@ -1033,6 +1045,29 @@ func TestApplyInterfaceElementTeardownPlan(t *testing.T) {
 	}
 }
 
+// 决策 #485：镜像启动画像节进 apply 计划——新建/删除画像都必须有计划操作，
+// 且每个操作都有撤销（#178/#179 的 undo 缺口教训：apply 的 undo 缺口是历史高发区）。
+func TestPlanVMImageProfileCreateDelete(t *testing.T) {
+	ap, _ := newRecApplier("")
+	oa := ap.(*orchApplier)
+
+	old := model.Config{}
+	nw := model.Config{VMImageProfiles: []model.VMImageProfile{{Image: "img1", Machine: "pc"}}}
+	if descs := planDescs(t, oa, old, nw); len(descs) == 0 {
+		t.Fatalf("画像新建未进 apply 计划")
+	}
+
+	ops := oa.plan(nw, old)
+	if len(ops) == 0 {
+		t.Fatalf("画像删除未进 apply 计划")
+	}
+	for _, o := range ops {
+		if o.undo == nil {
+			t.Fatalf("操作 %q 缺撤销路径", o.desc)
+		}
+	}
+}
+
 // 形态③（边界）：接口元素只是**变更**（未被删）⇒ 走既有 interface[<n>] 应用段，不生成 del-interface。
 func TestApplyInterfaceElementChangedNoTeardown(t *testing.T) {
 	ap, _ := newRecApplier("")
@@ -1047,5 +1082,116 @@ func TestApplyInterfaceElementChangedNoTeardown(t *testing.T) {
 	}
 	if indexOf(descs, "interface[ens224]") < 0 {
 		t.Fatalf("变更应走既有 interface[<n>] 段: %v", descs)
+	}
+}
+
+// 决策 #485：画像节的操作把当次声明喂给计算编排（供下一次 VM 定义取用），
+// 撤销（回滚）恢复**变更前**的画像值——不下发任何数据面动作，但撤销必须完整。
+func TestApplyVMImageProfileSyncAndUndo(t *testing.T) {
+	got := &[]model.VMImageProfile{}
+	calls := &[]string{}
+	ap := NewApplier(
+		recNet{calls: calls},
+		recCompute{calls: calls, profiles: got},
+		recContainer{calls: calls},
+	)
+	old := model.Config{VMImageProfiles: []model.VMImageProfile{{Image: "img1", Machine: "q35"}}}
+	nw := model.Config{VMImageProfiles: []model.VMImageProfile{{Image: "img1", Machine: "pc"}}}
+
+	if err := ap.Apply(context.Background(), old, nw); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(*got) != 1 || (*got)[0].Machine != "pc" {
+		t.Fatalf("新画像未喂给计算编排: %+v", *got)
+	}
+
+	// 撤销：恢复旧画像值（回滚后下一次 VM 定义仍按变更前的画像）。
+	oa := ap.(*orchApplier)
+	undone := false
+	for _, o := range oa.plan(old, nw) {
+		if o.desc != "vm-image-profiles" {
+			continue
+		}
+		undone = true
+		if err := o.undo(context.Background()); err != nil {
+			t.Fatalf("画像撤销: %v", err)
+		}
+	}
+	if !undone {
+		t.Fatalf("计划里没有画像操作: %v", *calls)
+	}
+	if len(*got) != 1 || (*got)[0].Machine != "q35" {
+		t.Fatalf("撤销未恢复旧画像: %+v", *got)
+	}
+}
+
+// 决策 #485：删除画像同样进计划，撤销把整份画像恢复回来（删除不需要引用校验/阻断：
+// 受影响的 VM 在下一次定义时回落产品默认，见 model.EffectiveStartup）。
+func TestApplyVMImageProfileDeleteSyncAndUndo(t *testing.T) {
+	got := &[]model.VMImageProfile{}
+	calls := &[]string{}
+	ap := NewApplier(
+		recNet{calls: calls},
+		recCompute{calls: calls, profiles: got},
+		recContainer{calls: calls},
+	)
+	old := model.Config{VMImageProfiles: []model.VMImageProfile{{Image: "img1", Machine: "pc"}}}
+	nw := model.Config{}
+
+	if err := ap.Apply(context.Background(), old, nw); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(*got) != 0 {
+		t.Fatalf("删除画像后编排侧应为空: %+v", *got)
+	}
+
+	oa := ap.(*orchApplier)
+	for _, o := range oa.plan(old, nw) {
+		if o.desc == "vm-image-profiles" {
+			if err := o.undo(context.Background()); err != nil {
+				t.Fatalf("画像撤销: %v", err)
+			}
+		}
+	}
+	if len(*got) != 1 || (*got)[0].Image != "img1" {
+		t.Fatalf("撤销未恢复被删画像: %+v", *got)
+	}
+}
+
+// 决策 #485：画像同步必须排在 VM 定义**之前**——同一提交里「改画像 + 建/改该 VM」时，
+// VM 定义取用的有效画像（model.EffectiveStartup）才是当次声明的值。
+func TestApplyVMImageProfileSyncBeforeVMDefine(t *testing.T) {
+	calls := &[]string{}
+	ap := NewApplier(recNet{calls: calls}, recCompute{calls: calls}, recContainer{calls: calls})
+	old := model.Config{}
+	nw := model.Config{
+		VMImageProfiles:         []model.VMImageProfile{{Image: "img", Machine: "pc"}},
+		VirtualMachineFunctions: []model.VMFunction{vmOf("vm-1")},
+	}
+	if err := ap.Apply(context.Background(), old, nw); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	pi, vi := indexOf(*calls, "profiles"), indexOf(*calls, "vm:vm-1")
+	if pi < 0 {
+		t.Fatalf("画像未同步: %v", *calls)
+	}
+	if vi < 0 {
+		t.Fatalf("VM 未定义: %v", *calls)
+	}
+	if pi > vi {
+		t.Fatalf("画像同步须先于 VM 定义: %v", *calls)
+	}
+}
+
+// 决策 #485（边界）：画像声明未变 ⇒ 不产生计划操作（不下发、也不刷新编排侧画像）。
+func TestApplyVMImageProfileUnchangedNoOp(t *testing.T) {
+	calls := &[]string{}
+	ap := NewApplier(recNet{calls: calls}, recCompute{calls: calls}, recContainer{calls: calls})
+	cfg := model.Config{VMImageProfiles: []model.VMImageProfile{{Image: "img1", Machine: "pc"}}}
+	if err := ap.Apply(context.Background(), cfg, cfg); err != nil {
+		t.Fatalf("Apply(noop): %v", err)
+	}
+	if hasCall(*calls, "profiles") {
+		t.Fatalf("画像未变不应产生操作: %v", *calls)
 	}
 }

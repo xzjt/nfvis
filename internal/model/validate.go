@@ -48,6 +48,7 @@ func Validate(c Config) []ValidateError {
 	v.checkVpp(c)
 	v.checkProtocols(c)
 	v.checkVMFunctions(c)
+	v.checkVMImageProfiles(c)
 	v.checkContainerFunctions(c)
 	v.checkAddressOverlap(c)
 	v.checkPortRoleExclusivity(c)
@@ -2242,6 +2243,157 @@ func (v *validator) checkVMFunctions(c Config) {
 			}
 		}
 	}
+}
+
+// checkVMImageProfiles 镜像级启动画像（决策 #485）的提交期校验：
+//   - image 键必填且**唯一**（重复键会让 EffectiveStartup 取到哪一个不确定）；
+//   - 枚举取值须在契约集合内（空 = 未设置，合并期落产品默认值，见 startup.go）；
+//   - cpu_mode=custom 必须给出 cpu_model（否则合并后仍是 custom 却无型号）；
+//   - 画像 extra_args 过 denylist（ValidateExtraArgs，与实例覆盖同一份判据）。
+//
+// 实例覆盖（VMFunction.Startup）用**同一份**规则校验（见下方循环）——CLI 路径被命令树的
+// VE 叶子顺带挡住，但 REST/JSON/配置导入可绕过树，把非法枚举带进 DomainSpec→domain XML。
+//
+// 镜像**存在性**不在此判——那要访问镜像仓库，归编排层（本任务范围外）。
+func (v *validator) checkVMImageProfiles(c Config) {
+	dupCheck(v, c.VMImageProfiles, "vm-image-profiles", func(p VMImageProfile) string { return p.Image }, "镜像画像")
+	for i, p := range c.VMImageProfiles {
+		if strings.TrimSpace(p.Image) == "" {
+			v.errf(fmt.Sprintf("vm-image-profiles[%d]", i), "镜像名不能为空")
+			continue
+		}
+		at := fmt.Sprintf("vm-image-profiles[%s]", p.Image)
+		if p.CPUMode == "custom" && strings.TrimSpace(p.CPUModel) == "" {
+			v.errf(at+".cpu_model", "cpu mode custom 必须给出 cpu model")
+		}
+		v.checkStartupEnums(at, p.Machine, p.CPUMode, p.Firmware, p.DiskIface, p.BootOrder, p.Accel, p.Console)
+		// 跨字段兼容性（决策 #485 复审）：单字段各自合法、组合起来到启动才炸的组合，提交期拦住。
+		v.checkStartupCombos(at, p.Machine, p.CPUMode, p.Accel, p.DiskIface)
+		if err := ValidateExtraArgs(p.ExtraArgs); err != nil {
+			v.errf(at+".extra_args", "%v", err)
+		}
+	}
+	// 实例覆盖（VMFunction.Startup）：与画像**对称**——枚举/机型名同一份规则，extra_args 同一份
+	// denylist。cpu_mode=custom 的 cpu_model 判定按**生效值**：覆盖块自身没给时，若匹配的镜像
+	// 画像提供了也算满足（合并序 覆盖 > 画像 > 默认，见 startup.go）。
+	for _, vm := range c.VirtualMachineFunctions {
+		if vm.Startup == nil {
+			continue
+		}
+		o := vm.Startup
+		sp := fmt.Sprintf("virtual-machine-functions[%s].startup", vm.Name)
+		v.checkStartupEnums(sp, o.Machine, o.CPUMode, o.Firmware, o.DiskIface, o.BootOrder, o.Accel, o.Console)
+		if o.CPUMode == "custom" && strings.TrimSpace(o.CPUModel) == "" && profileCPUModel(c, vm.Image) == "" {
+			v.errf(sp+".cpu_model", "cpu mode custom 必须给出 cpu model")
+		}
+		// 跨字段兼容性按**生效画像**（实例覆盖 > 画像 > 默认）判定——覆盖可能单独制造出
+		// 「accel=tcg + 生效 cpu mode=host-passthrough」这类组合。
+		eff := EffectiveStartup(vm, c.VMImageProfiles)
+		v.checkStartupCombos(sp, eff.Machine, eff.CPUMode, eff.Accel, eff.DiskIface)
+		if err := ValidateExtraArgs(o.ExtraArgs); err != nil {
+			v.errf(sp+".extra_args", "%v", err)
+		}
+	}
+	// telnet 控制台端口冲突（决策 #485 复审）：端口由 VM 名确定性派生，1000 个槽，规模一上来
+	// 必撞——撞上的两台**无法同时启动**（第二台绑定端口失败，报晦涩的 libvirt 错）。提交期比对。
+	v.checkConsoleTelnetPortCollisions(c)
+}
+
+// checkStartupCombos 启动画像的**跨字段**兼容性校验（决策 #485 复审）：单字段各自合法，但组合
+// 起来到启动才被 QEMU/libvirt 以晦涩报错拒绝。这里在提交期拦住，并给出**可照做的补救**
+// （点名要改的配套字段）。与 checkStartupEnums 同法，画像与实例覆盖两处共用；**调用方传生效值**
+// （未设字段由本函数回落产品默认再判）。
+func (v *validator) checkStartupCombos(path, machine, cpuMode, accel, diskIface string) {
+	em := firstNonEmpty(machine, DefaultMachine)
+	ec := firstNonEmpty(cpuMode, DefaultCPUMode)
+	ea := firstNonEmpty(accel, DefaultAccel)
+	ed := firstNonEmpty(diskIface, DefaultDiskIface)
+
+	// accel=tcg 是纯软件模拟，无法使用 host-passthrough——后者要求 KVM 直通宿主 CPU。
+	if ea == "tcg" && ec == "host-passthrough" {
+		v.errf(path+".cpu_mode",
+			"accel=tcg（纯软件模拟）不能与 cpu mode host-passthrough 同用（host-passthrough 需要 KVM 直通宿主 CPU）——请把 cpu mode 改为 host-model 或 custom（custom 下另给 cpu model）")
+	}
+	// q35 系列机器类型没有 IDE 总线（只有 SATA/AHCI），ide 磁盘挂不上。
+	if ed == "ide" && (em == "q35" || strings.HasPrefix(em, "pc-q35-")) {
+		v.errf(path+".disk_interface",
+			"machine=%s（q35 系列没有 IDE 总线）不能与 disk-interface ide 同用——请把 machine 改为 pc / pc-i440fx-*，或把 disk-interface 改为 virtio|sata|scsi", em)
+	}
+}
+
+// checkConsoleTelnetPortCollisions 检出「有效控制台为 telnet」的 VM 中端口撞车的两台，如实拒绝
+// 并**点名两台 VM**（端口由 model.ConsoleTelnetPort 由 VM 名确定性派生，与域组装同源）。
+func (v *validator) checkConsoleTelnetPortCollisions(c Config) {
+	byPort := map[int]string{}
+	for _, vm := range c.VirtualMachineFunctions {
+		form, _ := EffectiveConsole(vm, c.VMImageProfiles)
+		if form != "telnet" {
+			continue
+		}
+		port := ConsoleTelnetPort(vm.Name)
+		if owner, taken := byPort[port]; taken {
+			v.errf(fmt.Sprintf("virtual-machine-functions[%s]", vm.Name),
+				"telnet 控制台端口 %d 与 VNF %s 冲突（端口由 VM 名确定性派生）——请改名其中之一，或为该 VNF 改用 serial/vnc 控制台",
+				port, owner)
+			continue
+		}
+		byPort[port] = vm.Name
+	}
+}
+
+// firstNonEmpty 返回首个非空字符串（启动画像的字段回落用）。
+func firstNonEmpty(vals ...string) string {
+	for _, s := range vals {
+		if s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// checkStartupEnums 画像与实例覆盖**共用**的枚举/机型名校验（决策 #485）：machine（含版本化
+// 机型名前缀 pc-i440fx-* / pc-q35-*）与六个取值枚举。path 为承载这些字段的对象路径
+// （画像块或实例覆盖块）。两处共用同一实现，保证「同一份配置、同一份规则」不漂移。
+func (v *validator) checkStartupEnums(path, machine, cpuMode, firmware, diskIface, bootOrder, accel, console string) {
+	v.checkProfileMachine(path, machine)
+	v.checkProfileEnum(path, "cpu_mode", cpuMode, "host-passthrough", "host-model", "custom")
+	v.checkProfileEnum(path, "firmware", firmware, "bios", "uefi")
+	v.checkProfileEnum(path, "disk_interface", diskIface, "virtio", "sata", "ide", "scsi")
+	v.checkProfileEnum(path, "boot_order", bootOrder, "hd", "cd", "dc")
+	v.checkProfileEnum(path, "accel", accel, "kvm", "tcg")
+	v.checkProfileEnum(path, "console", console, "serial", "telnet", "vnc")
+}
+
+// profileCPUModel 返回 Image 匹配的镜像画像的 cpu_model（无匹配画像或未设返回 ""）——
+// 实例覆盖的 cpu_mode=custom 校验据此判定「画像已提供型号」（生效值来自合并）。
+func profileCPUModel(c Config, image string) string {
+	for _, p := range c.VMImageProfiles {
+		if p.Image == image {
+			return p.CPUModel
+		}
+	}
+	return ""
+}
+
+// checkProfileMachine machine 枚举（决策 #485）：q35|pc 两个固定值，另允许 QEMU 的版本化
+// 机型名前缀 pc-i440fx-* / pc-q35-*（如实例覆盖写 pc-q35-6.2）；空 = 未设置。
+// 前缀允许与 EffectiveStartup 的实例覆盖形态一致（见 startup_test 的 pc-q35-6.2 用例）。
+func (v *validator) checkProfileMachine(path, val string) {
+	if val == "" || val == "q35" || val == "pc" ||
+		strings.HasPrefix(val, "pc-i440fx-") || strings.HasPrefix(val, "pc-q35-") {
+		return
+	}
+	v.errf(path+".machine", "machine 必须为 q35|pc|pc-i440fx-*|pc-q35-*（当前 %q）", val)
+}
+
+// checkProfileEnum 画像枚举取值（决策 #485）：空 = 未设置（合并期落默认值）；非空须在
+// allowed 内。报错点名字段与全部允许取值，操作者才知道怎么改（与文件内既有 switch 式
+// 枚举校验同口径）。
+func (v *validator) checkProfileEnum(path, field, val string, allowed ...string) {
+	if val == "" || slices.Contains(allowed, val) {
+		return
+	}
+	v.errf(path+"."+field, "%s 必须为 %s", field, strings.Join(allowed, "|"))
 }
 
 // pfInDataPath 判断物理口是否已被 L2 交换机端口引用（FR-NET-021 用），

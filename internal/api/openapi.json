@@ -3109,6 +3109,9 @@
             "default": true,
             "type": "boolean"
           },
+          "startup": {
+            "$ref": "#/components/schemas/VMStartupOverride"
+          },
           "state": {
             "description": "运行态",
             "enum": [
@@ -3179,6 +3182,157 @@
           "vcpu",
           "memory"
         ],
+        "type": "object"
+      },
+      "VMImageProfile": {
+        "properties": {
+          "accel": {
+            "description": "缺省 kvm",
+            "enum": [
+              "kvm",
+              "tcg"
+            ],
+            "type": "string"
+          },
+          "boot_order": {
+            "description": "缺省 hd",
+            "enum": [
+              "hd",
+              "cd",
+              "dc"
+            ],
+            "type": "string"
+          },
+          "console": {
+            "description": "缺省 serial；vnc：Web 控制台内置 noVNC 查看器（POST .../console/vnc 换 ticket），VNC 仅监听 127.0.0.1，宿主也可用 `virsh vncdisplay` 查端口后以任意 VNC 客户端接入",
+            "enum": [
+              "serial",
+              "telnet",
+              "vnc"
+            ],
+            "type": "string"
+          },
+          "cpu_mode": {
+            "description": "缺省 host-passthrough",
+            "enum": [
+              "host-passthrough",
+              "host-model",
+              "custom"
+            ],
+            "type": "string"
+          },
+          "cpu_model": {
+            "description": "cpu_mode=custom 时必填",
+            "type": "string"
+          },
+          "disk_interface": {
+            "description": "缺省 virtio",
+            "enum": [
+              "virtio",
+              "sata",
+              "ide",
+              "scsi"
+            ],
+            "type": "string"
+          },
+          "extra_args": {
+            "description": "额外 QEMU 参数（窄自由口；命中 denylist 提交期拒绝；S 档；绕过资源账本）",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "firmware": {
+            "description": "缺省 bios",
+            "enum": [
+              "bios",
+              "uefi"
+            ],
+            "type": "string"
+          },
+          "image": {
+            "description": "镜像名（键）",
+            "type": "string"
+          },
+          "machine": {
+            "description": "机器类型，缺省 q35",
+            "enum": [
+              "q35",
+              "pc",
+              "pc-i440fx-*",
+              "pc-q35-*"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "image"
+        ],
+        "type": "object"
+      },
+      "VMStartupOverride": {
+        "description": "VNF 实例对镜像画像的覆盖（仅允许覆盖的子集）",
+        "properties": {
+          "accel": {
+            "enum": [
+              "kvm",
+              "tcg"
+            ],
+            "type": "string"
+          },
+          "boot_order": {
+            "enum": [
+              "hd",
+              "cd",
+              "dc"
+            ],
+            "type": "string"
+          },
+          "console": {
+            "enum": [
+              "serial",
+              "telnet",
+              "vnc"
+            ],
+            "type": "string"
+          },
+          "cpu_mode": {
+            "enum": [
+              "host-passthrough",
+              "host-model",
+              "custom"
+            ],
+            "type": "string"
+          },
+          "cpu_model": {
+            "type": "string"
+          },
+          "disk_interface": {
+            "enum": [
+              "virtio",
+              "sata",
+              "ide",
+              "scsi"
+            ],
+            "type": "string"
+          },
+          "extra_args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "firmware": {
+            "enum": [
+              "bios",
+              "uefi"
+            ],
+            "type": "string"
+          },
+          "machine": {
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "VSwitchPort": {
@@ -7807,6 +7961,7 @@
         }
       ],
       "post": {
+        "description": "按该 VM 的**有效控制台形态**（实例 startup 覆盖 > 镜像画像 > 产品默认，决策 #485）分派：\n- `serial`/`telnet`：签发一次性 ticket，返回 `ws_url`（文本串口 WebSocket 桥接；telnet\n  底层拨域里仅回环的 `<serial type='tcp'>` 端口）；\n- `vnc`：VNC 是图形控制台，**不在此端点签发文本串口 ticket**，只回 `kind: vnc`。前端据此\n  改走 `POST .../console/vnc` 换 VNC 查看器的一次性 ticket（Web 控制台内置 noVNC 查看器）；\n  宿主也可用 `virsh vncdisplay <name>` 查端口后以任意 VNC 客户端接入。\n响应里的 `kind` 即该形态，供前端选择处理：`serial`/`telnet` 走文本串口管线；`vnc` 改走\nVNC 图形查看器（见 `.../console/vnc`）。\n",
         "responses": {
           "200": {
             "content": {
@@ -7816,6 +7971,15 @@
                     "expires_in": {
                       "description": "ticket 有效期（秒）",
                       "type": "integer"
+                    },
+                    "kind": {
+                      "description": "有效控制台形态；`vnc` 时不带 `ws_url`（图形控制台改走 POST .../console/vnc 的内置 noVNC 查看器）",
+                      "enum": [
+                        "serial",
+                        "telnet",
+                        "vnc"
+                      ],
+                      "type": "string"
                     },
                     "ws_url": {
                       "example": "/api/v1/virtual-machine-functions/fw-vm/console/ws?ticket=...",
@@ -7847,6 +8011,101 @@
           "virtual-machine-functions"
         ]
       }
+    },
+    "/virtual-machine-functions/{name}/console/vnc": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "仅当该 VM 的**有效控制台形态**为 `vnc` 时签发一次性 ticket，返回 `ws_url`——Web 控制台内置的\nnoVNC 查看器（`vncview.js`）经它连入 `.../console/vnc/ws`。形态不是 vnc 时 **409** 并点名实际\n形态。与串口 console 凭证端点**同权限档**（super-user，需 Bearer）；ticket 与串口/容器\n**资源键隔离**（`vnc/` 前缀）——一个 vnc ticket 开不了串口 WS，反之亦然。VNC 服务仅监听本机\n回环（`127.0.0.1`）。\n",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "expires_in": {
+                      "description": "ticket 有效期（秒）",
+                      "type": "integer"
+                    },
+                    "kind": {
+                      "enum": [
+                        "vnc"
+                      ],
+                      "type": "string"
+                    },
+                    "ws_url": {
+                      "example": "/api/v1/virtual-machine-functions/fw-vm/console/vnc/ws?ticket=...",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "该 VM 的控制台形态不是 VNC"
+          }
+        },
+        "summary": "申请 VNC 图形查看器访问凭证（一次性 ticket；Web 内置 noVNC）",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      }
+    },
+    "/virtual-machine-functions/{name}/console/vnc/ws": {
+      "get": {
+        "responses": {
+          "101": {
+            "description": "协议切换为 WebSocket"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          }
+        },
+        "summary": "VNC 图形查看器 WebSocket（与 VM 的 VNC 服务双向透传；打开/关闭入审计）",
+        "tags": [
+          "virtual-machine-functions"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "POST .../console/vnc 返回的一次性凭证（WebSocket 握手无法带 Bearer Token，故以 ticket 鉴权）",
+          "in": "query",
+          "name": "ticket",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
     },
     "/virtual-machine-functions/{name}/console/ws": {
       "get": {
@@ -8428,6 +8687,16 @@
         "tags": [
           "virtual-switches"
         ]
+      }
+    },
+    "/vm-image-profiles": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "镜像启动画像列表"
       }
     },
     "/vpp/capture": {

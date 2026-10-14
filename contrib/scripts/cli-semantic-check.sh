@@ -28,6 +28,13 @@
 # 缺一视图/取数失败/内核值取不到 ⇒ **不可判定**（沿用 S8/S9 三档口径）。判定写成纯函数
 # s14_verdict 并进 cli-semantic-selftest.sh 红-绿自校准——它钉住的正是「两视图数字矛盾」这条
 # 曾被 v2 #403 当「口径不同」放过、直到 #480 才修的老账（不可轻易结案为「口径不同」）。
+# 另有 S15「镜像启动画像」（决策 #485）：事实源＝**同一份 committed 配置的另一视图**——
+# `show configuration | display set` 反推出的等价 `set vm-image-profiles …` 语句。断言：读视图
+# `show vm-image-profiles` 逐列字段/值须在 display set 里有对应语句、反之亦然（往返一致），
+# 且 extra-args 读视图须带「已绕过资源账本」标注（契约 §4.4）；VNF 详情「有效启动画像」块的
+# 来源标注（实例覆盖/镜像画像/产品默认）须与**配置事实**一致（实例是否设了 startup 该叶、
+# 该镜像的画像是否设了该叶）。判定写成纯函数 s15_verdict / s15_source_verdict 并进
+# cli-semantic-selftest.sh 红-绿（缺画像 ⇒ 不可判定，不静默通过）。
 #
 # 判定分**三档**（2026-09-26 round84 复盘后改；此前只有「通过/失败」，于是「没有证据」被算成通过）：
 #   通过（✓）   —— 有正向控制且与事实源一致；
@@ -420,6 +427,60 @@ s14_verdict() { # <page_size> <rp_ok> <rp_free> <rp_total> <rp_alloc> <sys_ok> <
     printf 'FAIL:%s 可分配未扣数据面占用（allocated=%s < held_by_dataplane=%s）' "$ps" "$ralloc" "$sdp"; return
   fi
   printf 'PASS:%s 两视图一致且自洽（free=%s total=%s allocated=%s，含数据面占用 %s）' "$ps" "$rfree" "$rtotal" "$ralloc" "$sdp"
+}
+# S15：镜像启动画像读视图 ↔ display set 往返（决策 #485）。
+#   <镜像> <读视图字段对> <display set 字段对> <extra 往返是否一致且标注在场>
+#   字段对＝`|` 分隔的 `leaf=value`（只含 8 个标量叶：machine/cpu_mode/cpu_model/firmware/
+#     disk_interface/boot_order/accel/console；extra-args 值可含空格，故单列不进对）。
+#   判据（缺证据不静默通过）：
+#     两侧都空 ⇒ UNKNOWN（无画像对象，不得当 PASS）；
+#     一侧有另一侧空 ⇒ FAIL（读视图与 display set 不同源）；
+#     任一侧多出字段/值不同 ⇒ FAIL；一致且 extra-args 往返与「已绕过资源账本」标注都对 ⇒ PASS。
+s15_verdict() { # <image> <rv_pairs> <ds_pairs> <extra_ok>
+  local img="$1" rv="$2" ds="$3" extra="$4" p xr xd miss=""
+  xr=$(printf '%s' "$rv" | tr '|' ' ')     # `|`→空格：把「对」变成可整词匹配的集合
+  xd=$(printf '%s' "$ds" | tr '|' ' ')
+  if [ -z "$xr" ] && [ -z "$xd" ]; then
+    printf 'UNKNOWN:镜像 %s 无画像对象（读视图与 display set 都空）' "$img"; return
+  fi
+  if [ -z "$xd" ]; then
+    printf 'FAIL:镜像 %s 读视图有字段而 display set 未反推：%s' "$img" "$xr"; return
+  fi
+  if [ -z "$xr" ]; then
+    printf 'FAIL:镜像 %s display set 有语句而读视图为空：%s' "$img" "$xd"; return
+  fi
+  for p in $xr; do case " $xd " in *" $p "*) ;; *) miss="$miss $p";; esac; done
+  if [ -n "$miss" ]; then
+    printf 'FAIL:镜像 %s 读视图字段/值未出现在 display set：%s' "$img" "$miss"; return
+  fi
+  miss=""
+  for p in $xd; do case " $xr " in *" $p "*) ;; *) miss="$miss $p";; esac; done
+  if [ -n "$miss" ]; then
+    printf 'FAIL:镜像 %s display set 字段/值未出现在读视图：%s' "$img" "$miss"; return
+  fi
+  if [ "$extra" != yes ]; then
+    printf 'FAIL:镜像 %s 的 extra-args 往返不一致（读视图缺「已绕过资源账本」标注，或两侧设置不同）' "$img"; return
+  fi
+  printf 'PASS:镜像 %s 读视图 ↔ display set 逐字段/值一致（extra-args 往返与标注一致）' "$img"
+}
+# S15-来源：VNF 详情「有效启动画像」块的来源标注是否与实际来源一致（决策 #485）。
+#   <VNF 名> <字段> <读视图来源标注> <实例覆盖已设> <镜像画像已设>
+#   期望来源＝实例覆盖 > 镜像画像 > 产品默认（与 model.EffectiveStartup 合并顺序一致）；
+#   标注为空/不可识别 ⇒ UNKNOWN（读视图解析失败＝缺证据，不静默通过）；与期望不符 ⇒ FAIL。
+s15_source_verdict() { # <vm> <field> <shown> <override_set> <profile_set>
+  local vm="$1" f="$2" shown="$3" ov="$4" prof="$5" want=""
+  case "$shown" in
+    实例覆盖|镜像画像|产品默认) ;;
+    *) printf 'UNKNOWN:%s 的 %s 来源标注为空或不可识别（读视图解析失败？）' "$vm" "$f"; return;;
+  esac
+  if [ "$ov" = yes ]; then want="实例覆盖"
+  elif [ "$prof" = yes ]; then want="镜像画像"
+  else want="产品默认"; fi
+  if [ "$shown" = "$want" ]; then
+    printf 'PASS:%s 的 %s 来源=%s 与实际来源一致' "$vm" "$f" "$shown"
+  else
+    printf 'FAIL:%s 的 %s 来源标注=%s 但实际来源应为 %s（实例覆盖=%s 镜像画像=%s）' "$vm" "$f" "$shown" "$want" "$ov" "$prof"
+  fi
 }
 
 echo "==================== CLI 语义校验（结果对不对）===================="
@@ -1082,6 +1143,186 @@ for ps in sizes:
     done <<S14_ROWS
 $s14_rows
 S14_ROWS
+  fi
+fi
+
+# ---------- S15 镜像启动画像（决策 #485）：读视图 ↔ display set 往返 + 有效画像来源标注 ----------
+# 事实源（独立）：**同一份 committed 配置的另一视图**——`show configuration | display set` 反推的
+# 等价 `set vm-image-profiles …` 语句（round81）。断言读视图 `show vm-image-profiles` 逐列字段/值
+# 须在 display set 中有对应语句、反之亦然；extra-args 读视图须带「已绕过资源账本」标注（契约 §4.4）。
+# 另有 VNF 详情「有效启动画像」块的来源标注（实例覆盖/镜像画像/产品默认）须与**配置事实**一致
+# （实例是否设了 startup 该叶、该镜像的画像是否设了该叶）——照 #134「三源对照」；域映射用的
+# model.EffectiveStartup 与这里读的配置同源。判定在 s15_verdict / s15_source_verdict（纯函数，
+# 供 cli-semantic-selftest.sh 红-绿自校准）。缺画像/缺 python3/取数失败 ⇒ **不可判定**（三档口径）。
+hdr "S15 镜像启动画像：show vm-image-profiles ↔ display set 往返 + 有效画像来源标注"
+s15_view=$(cli "show vm-image-profiles")
+s15_ds=$(cli "show configuration | display set")
+if printf '%s' "$s15_view" | grep -qE '^%%'; then
+  bad "S15 show vm-image-profiles 报错：$(printf '%s' "$s15_view" | head -1)"
+elif ! command -v python3 >/dev/null 2>&1; then
+  unk "S15 无 python3（解析读视图/display set 用），无法判定——如实登记"
+else
+  # 读视图 → 每行 `<镜像>\t<读视图对>\t<display set 对>\t<读视图有 extra>\t<display set 有 extra>`。
+  s15_rows=$(S15_VIEW="$s15_view" S15_DS="$s15_ds" python3 - <<'PY'
+import os, sys
+view = os.environ.get("S15_VIEW", "") or ""
+ds   = os.environ.get("S15_DS", "") or ""
+rv = {}
+for ln in view.splitlines():
+    s = ln.strip()
+    if not s or s.startswith("镜像") or s.startswith("（"):
+        continue
+    f = s.split()
+    if len(f) < 2:
+        continue
+    img = f[0]
+    def cell(i):  # 空白表列里 `-` 是「未声明」占位
+        return f[i] if i < len(f) and f[i] != "-" else ""
+    ps = []
+    if cell(1): ps.append("machine=%s" % cell(1))
+    cpu = cell(2)
+    if cpu:
+        parts = cpu.split("/")
+        if len(parts) >= 1 and parts[0]: ps.append("cpu_mode=%s" % parts[0])
+        if len(parts) >= 2 and parts[1]: ps.append("cpu_model=%s" % parts[1])
+    if cell(3): ps.append("firmware=%s" % cell(3))
+    if cell(4): ps.append("disk_interface=%s" % cell(4))
+    if cell(5): ps.append("boot_order=%s" % cell(5))
+    if cell(6): ps.append("accel=%s" % cell(6))
+    if cell(7): ps.append("console=%s" % cell(7))
+    extra = " ".join(f[8:]) if len(f) > 8 else ""
+    has_extra = "yes" if (extra and extra != "（无）") else "no"
+    rv[img] = ("|".join(ps), has_extra)
+dsm = {}
+for ln in ds.splitlines():
+    t = ln.split()
+    if len(t) < 4 or t[0] != "set" or t[1] != "vm-image-profiles":
+        continue
+    img, rest = t[2], t[3:]
+    if not rest:
+        continue                    # 裸创建语句（元素声明）无叶子，跳过
+    d = dsm.setdefault(img, {"pairs": [], "extra": "no"})
+    if rest[:2] == ["cpu", "mode"]:
+        if len(rest) >= 3: d["pairs"].append("cpu_mode=%s" % rest[2])
+    elif rest[:2] == ["cpu", "model"]:
+        if len(rest) >= 3: d["pairs"].append("cpu_model=%s" % rest[2])
+    else:
+        leaf = rest[0].replace("-", "_")
+        if leaf == "extra_args":
+            d["extra"] = "yes"     # extra-args 值可含空格，只判往返在场（值由带引号语句承载）
+        elif len(rest) >= 2:
+            d["pairs"].append("%s=%s" % (leaf, rest[1]))
+        else:
+            d["pairs"].append(leaf)
+imgs = []
+for k in list(rv.keys()) + list(dsm.keys()):
+    if k not in imgs: imgs.append(k)
+for img in sorted(imgs):
+    rvp, rve = rv.get(img, ("", "no"))
+    d = dsm.get(img, {"pairs": [], "extra": "no"})
+    print("%s\t%s\t%s\t%s\t%s" % (img, rvp, "|".join(d["pairs"]), rve, d["extra"]))
+PY
+)
+  if [ -z "$s15_rows" ]; then
+    unk "S15 无镜像启动画像（读视图与 display set 都无画像对象）——造现场：cli-semantic-fixture.sh up 或 set vm-image-profiles <image> … 后复跑"
+  else
+    s15_annot=no
+    printf '%s' "$s15_view" | grep -q '已绕过资源账本' && s15_annot=yes
+    while IFS="$(printf '\t')" read -r img rvp dsp rve dse; do
+      [ -n "$img" ] || continue
+      if [ "$rve" = yes ] || [ "$dse" = yes ]; then
+        # 有 extra-args 时：两侧都要有、且读视图标注在场，才算往返一致。
+        if [ "$rve" = yes ] && [ "$dse" = yes ] && [ "$s15_annot" = yes ]; then extra_ok=yes; else extra_ok=no; fi
+      else
+        extra_ok=yes
+      fi
+      echo "    镜像 $img：读视图字段 [$rvp] ｜ display set 字段 [$dsp] ｜ extra-args 读视图=$rve display set=$dse 标注=$s15_annot"
+      judge "S15 $img 读视图 ↔ display set 往返" "$(s15_verdict "$img" "$rvp" "$dsp" "$extra_ok")"
+    done <<S15_ROWS
+$s15_rows
+S15_ROWS
+  fi
+fi
+
+# ---- S15-来源：VNF 详情「有效启动画像」块的来源标注 ↔ 配置事实 ----
+# 只对「镜像有画像」的 VNF 判定（无匹配画像者无有效画像可对照）。对每个 VNF 取其有效画像块
+# 的每行（label / 值 / [来源]），再按 committed 配置算**实际来源**（实例 startup 是否设该叶、
+# 画像是否设该叶），交 s15_source_verdict 判。缺画像的 VNF ⇒ 本块无对象 ⇒ 不可判定。
+if command -v python3 >/dev/null 2>&1; then
+  s15_cfg=$(curl_api "$SRV/api/v1/configuration" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
+  if [ -z "$s15_cfg" ]; then
+    unk "S15 来源标注：取不到产品配置（GET /configuration 失败），无对照对象"
+  else
+    s15_checked=0
+    for _vm in $(cli "show virtual-machine-functions" | awk 'NR>1 && $1 !~ /^（/ {print $1}'); do
+      _det=$(cli "show virtual-machine-functions $_vm detail")
+      _rows=$(S15_CFG="$s15_cfg" S15_DET="$_det" S15_VM="$_vm" python3 - <<'PY'
+import json, os, sys
+try:
+    cfg = json.loads(os.environ.get("S15_CFG", "") or "{}")
+except Exception:
+    sys.exit(0)
+cfg = cfg.get("configuration", cfg) if isinstance(cfg, dict) else {}
+vmname = os.environ.get("S15_VM", "")
+det = os.environ.get("S15_DET", "") or ""
+vm = None
+for v in (cfg.get("virtual_machine_functions") or []):
+    if v.get("name") == vmname:
+        vm = v; break
+if vm is None:
+    sys.exit(0)
+prof = None
+for p in (cfg.get("vm_image_profiles") or []):
+    if p.get("image") == vm.get("image"):
+        prof = p; break
+if prof is None:
+    sys.exit(0)                     # 该 VNF 的镜像没有画像 ⇒ 非本项对象
+ov = vm.get("startup") or {}
+KEY = {"machine": "machine", "cpu mode": "cpu_mode", "cpu model": "cpu_model",
+       "firmware": "firmware", "disk-interface": "disk_interface", "boot-order": "boot_order",
+       "accel": "accel", "console": "console", "extra-args": "extra_args"}
+LABELS = ["cpu model", "cpu mode", "disk-interface", "boot-order", "extra-args",
+          "machine", "firmware", "accel", "console"]
+def flag(d, k):
+    if k == "extra_args":
+        return "yes" if (d.get("extra_args") or []) else "no"
+    return "yes" if d.get(k) not in (None, "") else "no"
+started = False
+for ln in det.splitlines():
+    if not started:
+        if "有效启动画像" in ln:
+            started = True
+        continue
+    if not ln.startswith((" ", "\t")):
+        break                       # 块结束（回到顶格的下一节）
+    if "[" not in ln or "]" not in ln:
+        continue
+    head = ln.rsplit("[", 1)[0].strip()
+    shown = ln.rsplit("[", 1)[1].split("]", 1)[0].strip()
+    label = ""
+    for L in LABELS:                # 标签可含空格（cpu mode/cpu model/disk-interface…）
+        if head.startswith(L):
+            label = L
+            break
+    k = KEY.get(label)
+    if k is None:
+        continue
+    print("%s\t%s\t%s\t%s" % (label, shown, flag(ov, k), flag(prof, k)))
+PY
+)
+      [ -z "$_rows" ] && continue
+      s15_checked=1
+      echo "    VNF $_vm 有效画像来源标注："
+      while IFS="$(printf '\t')" read -r _label _shown _ov _prof; do
+        [ -n "$_label" ] || continue
+        judge "S15 来源 $_vm/$_label" "$(s15_source_verdict "$_vm" "$_label" "$_shown" "$_ov" "$_prof")"
+      done <<S15_SRC
+$_rows
+S15_SRC
+    done
+    if [ "$s15_checked" = 0 ]; then
+      unk "S15 来源标注：现场没有「镜像有画像」的 VNF（无有效画像可对照）——造现场后再复跑"
+    fi
   fi
 fi
 

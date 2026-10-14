@@ -191,8 +191,15 @@ SUITE_VS_FIXED="vs-l2 vs-l3"
 SUITE_ACL_FIXED="acl-test"
 SUITE_QOS_FIXED="pol-test"
 SUITE_VM_FIXED="cli-vm"
+# 阶段 8 的临时 VM：只在**失败的提交**里出现（telnet 端口撞车必须被拒），正常不进配置；
+# 万一判据失效真落了库，清场据名删除（幂等：不在即跳过）。
+SUITE_VM_EXTRA="vm29 vm54"
 SUITE_CT_FIXED="cli-ct2"
 SUITE_IMG_FIXED="cli-test.qcow2 cli-del.qcow2"
+# 镜像启动画像（决策 #485，阶段 8）：键＝**镜像名**，没有独立对象名，故按「夹具镜像 + 阶段 8 落盘
+# 记录的选用镜像名」清（阶段 8 把选用的镜像名写入 SUITE_PROFILE_IMG_FILE）。固定夹具镜像恒试删。
+SUITE_PROFILE_FIXED="cli-test.qcow2"
+SUITE_PROFILE_IMG_FILE=${SUITE_PROFILE_IMG_FILE:-$SUITE_STATE_DIR/suite-profile-image}
 # 通用名对象（仅当本轮开始前不存在才删）。
 SUITE_BOND_AMBIG="bond0"
 SUITE_IMG_AMBIG="alpine:3.20"
@@ -272,6 +279,18 @@ delete $kind $name
 commit"
 }
 
+# _clean_profile：删除套件建的**镜像启动画像**（项键＝镜像名；决策 #485，阶段 8）。
+# 画像没有独立对象名，端口/名称都不可打标——据读视图确认该镜像确有画像才删（幂等：没有即跳过），
+# 只删点名的那一个镜像，绝不碰用户自建画像。
+_clean_profile() { # <镜像名>
+  local img="$1"
+  [ -n "$img" ] || return 0
+  printf '%s\n' "$(_suite_cli "show vm-image-profiles")" | grep -qE "^$img([[:space:]]|$)" || return 0
+  _clean_run "删除镜像启动画像 $img" "configure
+delete vm-image-profiles $img
+commit"
+}
+
 # cleanup_suite：清掉本套件创建的对象，逐条如实报。可安全重复调用（幂等）。
 cleanup_suite() {
   local quiet="${1:-}"
@@ -284,7 +303,11 @@ cleanup_suite() {
   SUITE_CFG=$(_suite_cli "show configuration")
 
   # ① VNF / 容器（先删，避免镜像引用检查挡路）；② 配置对象；③ 镜像；④ 打标字段。
-  _clean_runtime_config_obj "VNF" "virtual-machine-functions" "cli-vm" "request virtual-machine-functions cli-vm stop"
+  # VNF 名单＝固定对象 cli-vm + 阶段 8 的临时 VM（vm29/vm54，正常只在失败提交里出现、不进配置）。
+  local vm
+  for vm in $SUITE_VM_FIXED $SUITE_VM_EXTRA; do
+    _clean_runtime_config_obj "VNF" "virtual-machine-functions" "$vm" "request virtual-machine-functions $vm stop"
+  done
   _clean_runtime_config_obj "容器" "container-functions" "cli-ct2" "request container-functions cli-ct2 stop"
 
   # 配置对象（交换机/ACL/QoS/bond）一次提交：applier 按依赖倒序处理（决策 #196）。
@@ -325,6 +348,13 @@ commit"
       *) printf '  ⊘ 防火墙规则 192.0.2.0/24 在套件开始前已存在，保留（非本轮创建）\n';;
     esac
   fi
+
+  # 镜像启动画像（决策 #485，阶段 8）：键＝镜像名——固定夹具镜像 + 阶段 8 落盘记录的选用镜像名。
+  # 排在镜像删除之前（画像引用的镜像仍要在场才能提交删除；实际画像不参与镜像引用计数，先后皆可）。
+  local pimg
+  for pimg in $SUITE_PROFILE_FIXED $(cat "$SUITE_PROFILE_IMG_FILE" 2>/dev/null); do
+    _clean_profile "$pimg"
+  done
 
   # 镜像：固定名恒删（幂等）；alpine:3.20 仅当本轮导入（开始前不存在）才删。
   local img all_imgs

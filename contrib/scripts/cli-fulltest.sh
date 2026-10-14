@@ -20,7 +20,8 @@
 #   bash contrib/scripts/cli-fulltest.sh --cleanup-only   # 只做收尾清场（异常中断后的补救）
 #
 # 阶段：1 show 只读 · 2 配置语句 · 3 前置对象 · 4 request 运维动作 · 5 操作命令与管道 ·
-#       6 事务语义 · 7 CLI 脚本文件模式 `-f`（决策 #309，客户端开关；见该脚本头部说明）。
+#       6 事务语义 · 7 CLI 脚本文件模式 `-f`（决策 #309，客户端开关；见该脚本头部说明）·
+#       8 镜像启动画像（决策 #485；vm-image-profiles + VNF startup 覆盖）。
 #
 # 收尾清场（决策 #323）：套件在配置库/运行态里**真的建对象**，跑完必须自己清干净——
 # 残渣会让后续套件/走查撞上「同一网口角色互斥」这类**正确校验**而级联出假红。
@@ -57,6 +58,7 @@ phase_of() { # phase_of <phase1.sh> → 阶段号
     *phase5*) echo 5;;
     *phase6*) echo 6;;
     *phase7*) echo 7;;
+    *phase8*) echo 8;;
     *) echo 0;;
   esac
 }

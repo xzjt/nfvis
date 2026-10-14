@@ -57,6 +57,9 @@ var identityFields = map[string]string{
 	"rules":         "seq",
 	"l3_interfaces": "interface",
 	"per_dev":       "interface",
+	// vm-image-profiles 的元素身份字段是 image（模型 VMImageProfile.Image），
+	// 缺省 name 会让元素建出的键与模型不符、fromJSONTree 直接报「不存在字段 name」（决策 #485）。
+	"vm_image_profiles": "image",
 }
 
 // CLIEResult 单条命令的执行结果。
@@ -79,10 +82,24 @@ type CLIEResult struct {
 type ConsoleRequest struct {
 	VM    string `json:"vm"`
 	WSURL string `json:"ws_url"`
-	// Kind 会话种类："vm"（缺省，VM 串口 console）或 "container"（容器交互式终端，
-	// 决策 #358）——前端据此选择提示文案，桥接方式两者相同。
+	// Kind 会话种类（**CLI 侧取值集**）："vm"（缺省，VM 文本串口 console——serial 与 telnet 两种
+	// 控制台形态都走它）、"container"（容器交互式终端，决策 #358）。
+	// 注意：与 REST `POST …/console` 响应里的 `kind` **不是同一取值集**——REST 回的是该 VM 的
+	// **有效控制台形态**（serial|telnet|vnc，见 ConsoleKindSerial/Telnet/VNC），供前端按形态分派；
+	// CLI 侧对 vnc 直接拒绝（CLI 无图形通道；查看器由 Web 控制台内置提供），故不会产出 vnc。
 	Kind string `json:"kind,omitempty"`
 }
+
+// 控制台/终端会话种类（决策 #485）：CLI 接管请求（ConsoleRequest.Kind）用 "vm"（serial+telnet
+// 共用）/"container"；REST `POST …/console` 响应的 `kind` 用有效控制台形态 serial/telnet/vnc。
+// CLI 拒绝与 REST 告知两面同源（consoleFormOf），此处常量供 REST/前端按形态分派。
+const (
+	ConsoleKindVM        = "vm"        // CLI 接管请求：VM 文本串口（serial/telnet 共用）
+	ConsoleKindSerial    = "serial"    // REST 响应：VM 串口形态 pty（产品默认）
+	ConsoleKindTelnet    = "telnet"    // REST 响应：VM 串口形态 telnet over tcp（仅回环）
+	ConsoleKindVNC       = "vnc"       // REST 响应：VM 图形控制台（VNC 仅监听 127.0.0.1；Web 控制台内置 noVNC 查看器，宿主亦可经 virsh vncdisplay 接入）
+	ConsoleKindContainer = "container" // 容器交互式终端（决策 #358）
+)
 
 // cliExecutor 守护进程侧 CLI 执行器。会话（模式/层级）按持有者+接入源隔离。
 type cliExecutor struct {
@@ -683,6 +700,9 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 		return x.execShowContainers(t[1:])
 	case len(t) >= 1 && t[0] == "images":
 		return x.execShowImages(t[1:])
+	case len(t) >= 1 && t[0] == "vm-image-profiles":
+		// 决策 #485：镜像启动画像读视图（与 GET /vm-image-profiles 同源）。
+		return x.execShowVMImageProfiles(t[1:])
 	case len(t) == 1 && t[0] == "resource-pools":
 		return x.execShowResourcePools()
 	case len(t) >= 3 && t[0] == "system" && t[1] == "configuration" && t[2] == "sessions":
@@ -707,7 +727,7 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 	}
 	// 注：`show vpp capture`（兼容别名）不在这里——它由上面的 `t[0] == "vpp"` 分支
 	// 收进 execShowVpp，由那里的 `sub == "capture"` 转发到同一实现。
-	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class> [detail]|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|metrics history [name <metric> [last <duration>] [step <duration>]]|hardware|firewall|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | capture | vpp [threads|buffers|memory] | acls | bonds | nat | vxlan tunnels | port-mirroring | dns proxy | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions | system api tokens\n"
+	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class> [detail]|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|metrics history [name <metric> [last <duration>] [step <duration>]]|hardware|firewall|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | capture | vpp [threads|buffers|memory] | acls | bonds | nat | vxlan tunnels | port-mirroring | dns proxy | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | vm-image-profiles | resource-pools | system configuration sessions | system api tokens\n"
 }
 
 // invalidShowConfiguration：`show configuration <未知/多余 token>` 的统一报错
@@ -1229,6 +1249,9 @@ func (x *cliExecutor) cfgRollback(user, source string, args []string) string {
 // （内层空壳），整节点删（`delete protocols lldp`，通用遍历路径）留下 `protocols = {}`
 // （外层空壳）；两者都让 display set 回放自校验还原不出、如实报内部错误（运维突然读不到配置）。
 // 先剪内层 lldp、再判外层 protocols（与 metrics/history 同法）。
+//
+// VM 实例级启动画像覆盖（决策 #485）：`delete … startup cpu mode|model` 删光覆盖字段后留下
+// 元素内嵌的 `startup = {}` 空壳，同因（空 startup 与「从未配置」语义相同，逐元素回收）。
 func pruneEmptySingleton(tree map[string]any) {
 	if sys, ok := tree["system"].(map[string]any); ok {
 		if mgmt, ok := sys["management"].(map[string]any); ok && len(mgmt) == 0 {
@@ -1258,6 +1281,22 @@ func pruneEmptySingleton(tree map[string]any) {
 	}
 	if nat, ok := tree["nat"].(map[string]any); ok && isEmptyShell(nat) {
 		delete(tree, "nat")
+	}
+	// VM 实例级启动画像覆盖（决策 #485）：`delete virtual-machine-functions <n> startup cpu
+	// mode|model` 删掉最后一个覆盖字段后，元素内嵌的 `startup` 留下 `{}` 空壳——空壳在
+	// display set 回放时还原不出（模型序列化后 startup 指针仍非 nil、照常出现在树里），
+	// 自校验如实报内部错误（与 management/metrics/firewall 同因）。空 startup 与「从未
+	// 配置覆盖」语义相同（各字段均 omitempty），逐元素回收。
+	if vms, ok := tree["virtual_machine_functions"].([]any); ok {
+		for _, el := range vms {
+			vm, ok := el.(map[string]any)
+			if !ok {
+				continue
+			}
+			if st, ok := vm["startup"].(map[string]any); ok && isEmptyShell(st) {
+				delete(vm, "startup")
+			}
+		}
 	}
 	// 登记制（既有口径）：本函数只收敛**逐个登记**的容器——未登记容器（如 `vpp`）的空壳行为
 	// 不在范围内（`TestPruneEmptySingletonScope` 钉着这条，避免通用扫描误剪将来可能引入的

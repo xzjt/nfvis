@@ -24,6 +24,8 @@ type libvirtAPI interface {
 	SetAutostart(ctx context.Context, name string, autostart bool) error
 	// OpenConsole 打开域串口双向流（FR-CMP-014）。
 	OpenConsole(ctx context.Context, name string) (io.ReadWriteCloser, error)
+	// OpenVNC 打开域 VNC 图形控制台的 TCP 连接（决策 #485/Task 8；仅回环）。
+	OpenVNC(ctx context.Context, name string) (io.ReadWriteCloser, error)
 	// DumpDomainXML 返回域 XML（快照需据此取磁盘 target）。
 	DumpDomainXML(ctx context.Context, name string) (string, error)
 	// 快照（FR-CMP-015）：内部 qcow2 快照，含全部磁盘。
@@ -79,6 +81,17 @@ type Config struct {
 	// vhost-net（libvirt 按 `<interface type='bridge'>` 自建 tap 并挂内核 bridge）。
 	// 缺省（空）= vpp，与引入该字段之前的行为逐字一致。
 	DataPlane string
+
+	// VMImageProfiles 镜像级启动画像（决策 #485）：定义 VM 时按**有效画像**
+	// （实例 startup 覆盖 > 镜像画像 > 产品默认，见 model.EffectiveStartup）填 domain。
+	// 由装配层从 committed 配置注入；改动画像需**重定义 VM**（start/restart/提交）才生效
+	// ——与 FR-CMP-012 的「域定义随配置」一致，恢复收敛与 15s 巡检会按当次 committed 刷新。
+	VMImageProfiles []model.VMImageProfile
+
+	// ImageExists 镜像仓库存在性探针（决策 #485）：报告某镜像名是否在仓库中（装配层接
+	// images.Store.Lookup）。恢复收敛/15s 巡检据此对账「配置有画像、仓库无镜像」的孤儿画像
+	// （告警 VM_IMAGE_PROFILE_ORPHAN，镜像回来即消解）。nil = 不判（既不建也不消，保守不猜测）。
+	ImageExists func(name string) bool
 
 	// DataPlaneProbe 数据面（VPP）可用性前置判定（决策 #314）：返回 nil = 可用；返回 error =
 	// 不可用（error 文本作为原因透出）。由装配层注入、复用**既有**的 VPP 连接状态查询

@@ -268,17 +268,18 @@ func (x *cliExecutor) requestVMSnapshot(user, name string, rest []string) string
 	return fmt.Sprintf("快照 %s 已%s\n", snap, snapshotCN(op))
 }
 
-// requestVMConsole：进入串口（终端接管由 CLI 前端完成）。
+// requestVMConsole：进入 VM 串口（终端接管由 CLI 前端完成）。
 // 服务端签发一次性 ticket 并返回 ws 相对路径，前端经 CLIEResult.Console 接管终端
 // 连入（审计在 ws handler 统一落点，FR-OPS-032，与 Web 控制面同源）。
+//
+// 控制台形态分派（决策 #485，Task 10）：按该 VM 的**有效控制台形态**（实例覆盖 > 镜像画像 >
+// 产品默认，见 model.EffectiveStartup）分流——
+//   - vnc：CLI 无图形通道，**拒绝**并指向 Web 控制台的内置查看器（内置 noVNC，Web 侧可用），
+//     另给宿主接入路径（VNC 仅监听 127.0.0.1，用 virsh vncdisplay 查端口后以任意 VNC 客户端接入）；
+//   - telnet：仍走既有 ticket + WS 管线（底层由编排层拨 127.0.0.1 上的 telnet TCP 串口）；
+//   - serial（缺省）：既有 pty 串口，行为不变。
 func (x *cliExecutor) requestVMConsole(user, name string, confirmed bool) string {
 	_ = confirmed
-	if x.console == nil {
-		return "%% 串口 console 不可用（libvirt 未装配）\n"
-	}
-	if x.issueConsole == nil {
-		return "%% 串口 console 凭证不可用（服务未装配 ticket 签发）\n"
-	}
 	cfg, err := x.engine.Committed()
 	if err != nil {
 		return "%% " + err.Error() + "\n"
@@ -287,15 +288,51 @@ func (x *cliExecutor) requestVMConsole(user, name string, confirmed bool) string
 	if !ok {
 		return fmt.Sprintf("%% VNF %s 不存在\n", name)
 	}
-	if vm.SerialConsole != nil && !*vm.SerialConsole {
+	// vnc 的拒绝先于装配检查：形态是**配置事实**，与 libvirt 是否接入无关——
+	// 装了也不该给 vnc VM 签发一个连上就断的串口凭证。
+	// 文案与 Web 侧同一事实：CLI 无图形通道；**内置 VNC 查看器在 Web 控制台提供**（该 VM 详情页
+	// 「串口」分栏，点连接即由内置 noVNC 打开）；亦给出宿主接入路径（VNC 仅监听本机回环）。
+	form := consoleFormOf(vm, cfg.VMImageProfiles)
+	if form == ConsoleKindVNC {
+		return "%% 该 VNF 使用 VNC 图形控制台，CLI 无法显示图形界面；请在 Web 控制台用内置 VNC 查看器接入" +
+			"（打开该 VNF 详情页的「串口」分栏，点「连接」）。VNC 服务仅监听本机回环（127.0.0.1），" +
+			"有宿主访问权限时也可用 virsh vncdisplay " + name + " 查到端口后以任意 VNC 客户端接入。\n"
+	}
+	if x.console == nil {
+		return "%% 串口 console 不可用（libvirt 未装配）\n"
+	}
+	if x.issueConsole == nil {
+		return "%% 串口 console 凭证不可用（服务未装配 ticket 签发）\n"
+	}
+	// 只有「域内确实没有串口」才拒绝：consoleFormOf 为空表示未显式设定 console 且
+	// serial_console=false（显式设定的形态独立于该开关，见契约 §4.3）。
+	if form == "" {
 		return fmt.Sprintf("%% VNF %s 未启用串口（serial_console=false）\n", name)
 	}
 	wsPath, ttl, terr := x.issueConsole(name, user)
 	if terr != nil {
 		return "%% " + terr.Error() + "\n"
 	}
-	x.consolePending = &ConsoleRequest{VM: name, WSURL: wsPath}
+	x.consolePending = &ConsoleRequest{VM: name, WSURL: wsPath, Kind: ConsoleKindVM}
 	return fmt.Sprintf("正在打开 %s 的串口（Ctrl-] 退出，%d 秒内有效）…\n", name, ttl)
+}
+
+// consoleFormOf 该 VM 的**有效控制台形态**（serial|telnet|vnc；决策 #485）。
+// 合并优先级由 model.EffectiveStartup 给出（实例覆盖 > 镜像画像 > 产品默认），
+// 空值回落产品默认 serial。CLI 拒绝与 REST ticket 响应共用本函数，保证两面同源。
+//
+// **与实际域一致**（契约 §4.3）：显式设定的形态独立于 serial_console 开关；未显式设定且
+// serial_console 关闭时域里**没有串口**——如实返回空串（"没有 console"），不再谎报一个域里
+// 不存在的 console。调用方（签发/拒绝路径）据实处理。
+func consoleFormOf(vm model.VMFunction, profiles []model.VMImageProfile) string {
+	form, explicit := model.EffectiveConsole(vm, profiles)
+	if form == ConsoleKindVNC {
+		return ConsoleKindVNC
+	}
+	if !explicit && vm.SerialConsole != nil && !*vm.SerialConsole {
+		return ""
+	}
+	return form
 }
 
 // ---------- request container-functions ----------
@@ -426,7 +463,7 @@ func (x *cliExecutor) containerShell(user, name string, rest []string) string {
 	if err != nil {
 		return "%% " + err.Error() + "\n"
 	}
-	x.consolePending = &ConsoleRequest{VM: name, WSURL: wsPath, Kind: "container"}
+	x.consolePending = &ConsoleRequest{VM: name, WSURL: wsPath, Kind: ConsoleKindContainer}
 	// 决策 #374（R142 B5）：**不在签发期记审计**——审计只记真实发生的会话事件（WS 建立时 open、
 	// 断开时 close；失败记 failure，见 container_shell.go）。签发本身不产生会话；此前成功会话因此
 	// 有两条 open、脚本模式（不接管终端）也记 success，与 VM 串口 console 路径不一致。

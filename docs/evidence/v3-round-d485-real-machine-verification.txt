@@ -1,0 +1,142 @@
+NFViS 决策 #485「镜像启动画像」真机验证证据
+================================================
+
+日期：2026-10-14
+主机：nfvis-vm（nfvis-lab，Ubuntu 26.04，内核 7.0.0-34-generic）
+访问：ssh -i ~/.ssh/id_ed25519_nfvis root@192.168.155.129（管理口令 CRSZjYSQy3H-fXnI@Aa1）
+上机方式：本开发机交叉编译 linux/amd64 的 nfvisd/nfvis-cli（非 deb 重装），换装 /usr/bin/，
+  原二进制备份于 /root/bin-backup-485-1718/。数据面 VPP（26.06-release），libvirt 12.0.0 / QEMU 10.2.1。
+
+上机构建（逐个场景）：
+  1) HEAD f64c470（Task 1-14 + 最终 review fix wave）  nfvisd sha256 e9c98ac1…
+  2) + BUG-1 修复 ea6bf36（boot-order 映射）            nfvisd sha256 8af69c1a…
+  3) + noVNC 查看器 c43ae0c + 复审修复 36dd440          nfvisd sha256 91f2261a…（终态）
+
+
+§1 六个场景（全部通过）
+
+场景 1 —— CLI 往返 + display set（真机）
+  profile：alpine { machine pc / cpu mode custom / cpu model Nehalem / disk-interface ide /
+                    boot-order cd / accel tcg / console telnet /
+                    extra-args "-global kvm-pit.lost_tick_policy=discard" }
+  结果：设置 + commit 成功（rev 254）。
+    · `show vm-image-profiles` 逐字段渲染，extra-args 列带「（已绕过资源账本）」标注。
+    · `show configuration | display set` 反推出 9 条等价 `set vm-image-profiles …` 语句（可回放）。
+
+场景 2 —— 跨字段校验（真机拒绝 + 补救文案）
+  2a machine q35 + disk-interface ide → 拒绝：
+     "machine=q35（q35 系列没有 IDE 总线）不能与 disk-interface ide 同用——请把 machine 改为
+      pc / pc-i440fx-*，或把 disk-interface 改为 virtio|sata|scsi"
+  2b accel tcg + 默认 cpu mode host-passthrough → 拒绝：
+     "accel=tcg（纯软件模拟）不能与 cpu mode host-passthrough 同用（host-passthrough 需要 KVM
+      直通宿主 CPU）——请把 cpu mode 改为 host-model 或 custom（custom 下另给 cpu model）"
+  2c 合法组合（machine pc + ide + tcg + cpu custom/Nehalem）→ 提交成功。
+
+场景 3 —— 画像真正进 domain XML（真机 dumpxml）
+  建 VM vm485（镜像 alpine、1 vcpu、1024MB，**无实例覆盖 ⇒ 走镜像画像**）→ start →
+  `show virtual-machine-functions vm485 detail` 的「有效启动画像」块逐项标来源
+  （machine/cpu/disk-interface/boot-order/accel/console/extra-args = [镜像画像]，firmware = [产品默认]）。
+  `virsh dumpxml vm485` 实证：
+    <domain type='qemu' …>                                  ← accel tcg
+    <type arch='x86_64' machine='pc-i440fx-10.2'>hvm</type>  ← machine pc
+    <boot dev='cdrom'/>                                      ← boot-order cd（见 BUG-1）
+    <cpu mode='custom' match='exact' check='full'><model fallback='forbid'>Nehalem</model>
+    <target dev='hda' bus='ide'/>                            ← disk-interface ide
+    <serial type='tcp'><protocol type='telnet'/>             ← console telnet
+    <qemu:commandline><qemu:arg value='-global'/>            ← extra-args
+      <qemu:arg value='kvm-pit.lost_tick_policy=discard'/></qemu:commandline>
+
+场景 4 —— 重放不丢参数（真机）
+  停 VM → `virsh undefine vm485`（模拟域丢失）→ `request vpp restart` → `systemctl restart nfvis`
+  → 域被**按 committed 配置重定义**，dumpxml 仍带全部画像参数（machine pc / cpu custom+Nehalem /
+  hda ide / boot cdrom / serial tcp / qemu:commandline），产品视图仍列出该 VM。
+
+场景 5 —— telnet console 接入（真机）
+  `request virtual-machine-functions vm485 console` →
+  "正在打开 vm485 的串口（Ctrl-] 退出，60 秒内有效）…"（受 Non-TTY 脚本模式提示限制，未做真人接管）。
+
+场景 6 —— vnc console：域 + 拒绝 + **Web 内置 noVNC 查看器端到端**（真机 + 真浏览器）
+  实例覆盖 `startup console vnc` → stop/start → `virsh dumpxml`：
+    <graphics type='vnc' port='5900' autoport='yes' listen='127.0.0.1'> 且**无 <serial>**。
+  CLI `console` 对 vnc 如实拒绝：
+    "%% 该 VNF 使用 VNC 图形控制台，CLI 无法显示图形界面（CLI 与 Web 控制台均未随包提供 VNC 查看器）。
+       VNC 服务仅监听本机回环（127.0.0.1），端口由 libvirt 自动分配——有宿主访问权限时，用
+       virsh vncdisplay vm485 查到端口后以任意 VNC 客户端接入。"
+  Web（ZCode 内置浏览器，https://192.168.155.129/api/v1/ui/ ，admin 登录）：
+    虚拟机 → vm485 详情 → 「串口」分栏 → 「连接串口」→ 渲染出 VNC 图形控制台视图，状态行
+    "已连接 vm485 的 VNC 图形控制台（鼠标/键盘直接作用于 guest）"。**决定性证据**：noVNC 画布
+    帧缓冲 = **1280×800**（guest 实际分辨率）⇒ RFB 握手完成且已收到帧更新（若服务端仍以 TEXT 帧
+    发送，握手不会完成、帧缓冲尺寸为 0）。
+  截图：docs/images/d485-web-vnc-console.png
+
+
+§2 真机抓到的两条缺陷（均已修 + 复验）
+
+BUG-1（Critical，真机才暴露）—— boot-order 映射为 libvirt 非法设备值
+  真机错误：`XML error: Invalid value for attribute 'dev' in element 'boot': 'cd'.`
+  libvirt 合法 `<boot dev>` 值为 `fd|hd|cdrom|network`（无 `cd`；「dc」也不能用单个值表达——
+  顺序由多个 `<boot>` 元素表达）。**既有 ISO 路径同样用了 `cd`（latent bug）**，且单元测试把
+  错误值也钉死了（自洽但错）。修复 ea6bf36：hd→`hd`、cd→`cdrom`、dc→[`cdrom`,`hd`]（顺序即优先级）、
+  iso 默认→`cdrom`；枚举保持 hd|cd|dc 不变。复验：场景 3/4 的 dumpxml `<boot dev='cdrom'/>`。
+
+BUG-2（Critical，真机+真浏览器才暴露）—— WS↔VNC 代理用 TEXT 帧，noVNC 收不到
+  `golang.org/x/net/websocket` 的 `Handler` 默认以 `TextFrame` 发送；noVNC 设 `binaryType=arraybuffer`
+  且 `new Uint8Array(e.data)`，TEXT 帧给出的是 JS 字符串 ⇒ 长度 0（浏览器亦会以 1007 关闭非 UTF-8 文本帧）
+  ⇒ 握手永不完成、黑屏。单元测试被 x/net 客户端「不看 opcode」掩盖。修复 36dd440：VNC 处理器设
+  `ws.PayloadType = websocket.BinaryFrame`，并加**帧 opcode 红-绿测试**（修前 0x1、修后 0x2）。
+  复验：场景 6 浏览器实测帧缓冲 1280×800（若仍 TEXT 不可能到这一步）。
+
+
+§3 四套件复跑（本机构建，nfvisd sha 9a1580a2 = c43ae0c + 36dd440）
+
+  语义 cli-semantic-check   通过 33 / 失败 0 / 不可判定 0 / 登记 0     （与 v3 基线一致）
+  生命周期 cli-lifecycle-check 通过 21 / 失败 0 / 跳过 3 / 登记 0      （与 v3 基线一致）
+  pty cli-pty-smoke         通过 10 / 失败 0                          （与 v3 基线一致）
+  全功能 cli-fulltest       通过 274 / 失败 0 / 预期报错 22           （零失败；覆盖补齐后 **297 / 0 / 26**）
+
+  ⚠️ 环境前置（本轮补齐，非产品问题）：
+   (a) 套件硬编码 L3 测试地址 `192.168.155.10/24` 与本机管理网段 `192.168.155.129/24` 重叠 ⇒
+       被产品正确的「管理网段隔离」校验拒绝 ⇒ 阶段 2 整块原子回滚、级联 70 项红。**A/B 对照**：
+       换回上机前原二进制复跑，结果**同为 212/70/14** ⇒ 与 #485 无关（环境/套件地址所致）。
+       本轮在 VM 上把该测试地址改为不重叠值（`10.99.155.10`，仅本机适配、不改仓库）后 → 244/35。
+   (b) 夹具缺口：`/data/incoming/` 空（套件 `cp alpine.qcow2` 找不到——镜像仓库文件名是 `alpine`）、
+       docker 缺 `alpine:3.20`（docker 未配代理）。本轮补 `alpine.qcow2` 副本 + 给 docker 配
+       `192.168.155.1:2333` 代理后 `docker pull alpine:3.20` → 零失败。
+
+  说明：套件硬编码地址 `192.168.155.10` 属**工具**问题（任何管理网段落在 192.168.155.0/24 的机器都会
+  触发）；登记为后续工具改进候选（改为可配/按管理网段自动避让），不在本决策范围。
+
+
+§3b 套件覆盖补齐（同一日，本机构建）
+
+  #485 的 21 条命令起初只登记在 cli-fulltest-exemptions.tsv（未真跑）。本轮三处补齐并复跑（均零失败）：
+   · cli-fulltest **阶段 8**（新）：profile 九叶子设置/读视图（含「已绕过资源账本」标注）/display set 往返 +
+     守卫拒绝（q35+ide、tcg+host-passthrough、`-m 4096` denylist）+ telnet 端口撞车（vm29/vm54 均点名）+
+     条件性实例覆盖与「有效启动画像」来源标签 → 23 通过 / 4 预期报错；**297 / 0 / 26**。
+   · cli-semantic-check **S15**（新）：`show vm-image-profiles` ↔ `display set` 双向往返 + 有效画像来源标注
+     （产品默认/镜像画像）→ **43 / 0 / 0**。
+   · cli-lifecycle-check **L4**（新，自建 VM）：画像/覆盖 → 域参数（machine/cpu/disk/boot/accel）实证、
+     `request vpp restart` 重放不丢、删覆盖回落产品默认、自建对象清理 → **40 / 0 / 3**。
+   · cli-pty-smoke：无新增 pty 交互面，未改（**10 / 10**）。
+   · 21 行豁免已从 cli-fulltest-exemptions.tsv 摘除（check_suite_contract_sync.sh：缺口 0）。
+
+§3c 启动前置判定：telnet 控制台端口被占用（同日追加，真机验证）
+
+  背景：派生端口被**本机其它进程**占用时，原先报的是 qemu 原文
+  `Failed to find an available port: Address already in use`（诚实但无补救指引）。
+  修复（commit af3a7ad，`internal/orchestrator/compute/console_port.go`）：`StartVM` 与 `RestartVM` 的
+  off→start 分支在进入 libvirt 前，对「有效控制台＝telnet」的 VM 探测 `127.0.0.1:<ConsoleTelnetPort(名)>` 是否可绑。
+  真机复验（vm29，派生端口 5820）：
+    · 占住 5820 后 `start` →
+      "%% VNF vm29 的 telnet 控制台端口 5820 已被本机其它进程占用——端口由 VNF 名确定性派生；
+        请改用别的 VNF 名，或把该 VNF 的控制台改为 serial/vnc"
+    · 释放端口后 `start` → "启动 VNF vm29 已受理"（正常路径不受影响）
+  边界：探测与真正绑定之间存在窄 TOCTOU 窗口（仍以 qemu 原文兜底）；`DefineVM` 的 autostart 路径不在本次覆盖内
+  （与既有数据面前置判定 #314 的覆盖边界一致）。
+
+§4 现场还原
+
+  测试对象全部清除：删除 vm485、删除 alpine 画像（rev 403），`show virtual-machine-functions` 与
+  `show vm-image-profiles` 均空、`virsh list --all` 空。VM 上仍装本轮构建（nfvisd 91f2261a…），
+  原二进制备份在 /root/bin-backup-485-1718/。宿主侧改动：docker 代理 drop-in（新增，用于夹具拉取）、
+  本机复制的 `/var/lib/nfvis/images/alpine.qcow2`（套件夹具）。

@@ -1096,3 +1096,129 @@ func TestValidateNatV6Rejected(t *testing.T) {
 	c5.Nat.Static = []NatStatic{{InsideIP: "10.99.0.5", OutsideIP: "203.0.113.9"}}
 	mustNoErr(t, Validate(c5))
 }
+
+// 决策 #485：镜像级启动画像的提交期校验——枚举取值、cpu_mode=custom 必带 cpu_model、
+// 重复镜像键、以及画像/实例覆盖两侧的 extra-args denylist。
+func TestValidateVMImageProfiles(t *testing.T) {
+	base := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", Machine: "q35"}}}
+	if errs := Validate(base); len(errs) != 0 {
+		t.Fatalf("valid profile rejected: %v", errs)
+	}
+	// 重复键
+	dup := Config{VMImageProfiles: []VMImageProfile{{Image: "img1"}, {Image: "img1"}}}
+	if errs := Validate(dup); len(errs) == 0 {
+		t.Fatalf("duplicate key not rejected")
+	}
+	// cpu mode=custom 缺 model
+	bad := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", CPUMode: "custom"}}}
+	if errs := Validate(bad); len(errs) == 0 {
+		t.Fatalf("custom without model not rejected")
+	}
+	// 非法枚举
+	bad2 := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", Accel: "bogus"}}}
+	if errs := Validate(bad2); len(errs) == 0 {
+		t.Fatalf("bad enum not rejected")
+	}
+	// extra-args denylist
+	bad3 := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", ExtraArgs: []string{"-m 8G"}}}}
+	if errs := Validate(bad3); len(errs) == 0 {
+		t.Fatalf("denylisted extra-args not rejected")
+	}
+	// VNF startup 覆盖也要过 denylist
+	bad4 := Config{
+		VirtualMachineFunctions: []VMFunction{{Name: "v1", Image: "img1", Startup: &VMStartupOverride{ExtraArgs: []string{"-netdev tap"}}}},
+	}
+	if errs := Validate(bad4); len(errs) == 0 {
+		t.Fatalf("denylisted startup extra-args not rejected")
+	}
+}
+
+// 决策 #485 复审：VMFunction.Startup 覆盖块与画像**同一份**枚举/一致性规则。
+// CLI 路径被命令树的 VE 叶子顺带挡住，但 REST/JSON/配置导入可绕过树，故在此对称补齐。
+func TestValidateVMStartupOverrideEnums(t *testing.T) {
+	// 合法覆盖：版本化机型名 + 合法枚举 + 画像提供 cpu_model（custom 生效值来自合并）
+	c := validBase()
+	c.VMImageProfiles = []VMImageProfile{{Image: "ubuntu22-vm", CPUMode: "custom", CPUModel: "Skylake-Client"}}
+	c.VirtualMachineFunctions[0].Startup = &VMStartupOverride{Machine: "pc-q35-6.2", CPUMode: "custom", Console: "vnc", Accel: "tcg"}
+	mustNoErr(t, Validate(c))
+
+	// 覆盖块非法枚举被拒
+	c2 := validBase()
+	c2.VirtualMachineFunctions[0].Startup = &VMStartupOverride{Accel: "bogus"}
+	mustErrContaining(t, Validate(c2), "startup.accel", "accel")
+
+	// 覆盖块非法 machine 被拒
+	c5 := validBase()
+	c5.VirtualMachineFunctions[0].Startup = &VMStartupOverride{Machine: "bogus"}
+	mustErrContaining(t, Validate(c5), "startup.machine", "machine")
+
+	// cpu_mode=custom 缺 cpu_model，且匹配画像也未提供 ⇒ 拒
+	c3 := validBase()
+	c3.VirtualMachineFunctions[0].Startup = &VMStartupOverride{CPUMode: "custom"}
+	mustErrContaining(t, Validate(c3), "startup.cpu_model", "cpu model")
+
+	// cpu_mode=custom 缺 cpu_model，但匹配画像提供了 cpu_model ⇒ 通过（生效值来自合并）
+	c4 := validBase()
+	c4.VMImageProfiles = []VMImageProfile{{Image: "ubuntu22-vm", CPUModel: "Skylake-Client"}}
+	c4.VirtualMachineFunctions[0].Startup = &VMStartupOverride{CPUMode: "custom"}
+	mustNoErr(t, Validate(c4))
+}
+
+// 决策 #485 复审：启动画像的**跨字段**兼容性——单字段合法但组合起来启动才炸的，提交期拦住
+// 且给出可照做的补救。覆盖 accel×cpu mode 与 disk-interface×machine 两组。
+func TestValidateStartupCrossFieldCombos(t *testing.T) {
+	// accel=tcg + 生效 cpu mode=host-passthrough（默认）⇒ 拒绝，文案点名 host-model|custom。
+	c := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", Accel: "tcg"}}}
+	mustErrContaining(t, Validate(c), "vm-image-profiles[img1].cpu_mode", "host-passthrough")
+
+	// tcg + host-model 合法。
+	ok := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", Accel: "tcg", CPUMode: "host-model"}}}
+	mustNoErr(t, Validate(ok))
+
+	// disk-interface=ide + 生效 machine=q35（默认）⇒ 拒绝，文案点名 pc / pc-i440fx-*。
+	ide := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", DiskIface: "ide"}}}
+	mustErrContaining(t, Validate(ide), "vm-image-profiles[img1].disk_interface", "IDE")
+
+	// ide + pc 合法（pc 有 IDE 总线）。
+	idePC := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", DiskIface: "ide", Machine: "pc"}}}
+	mustNoErr(t, Validate(idePC))
+
+	// ide + pc-q35-6.2 也拒（q35 系列无 IDE 总线）。
+	ideQ35 := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", DiskIface: "ide", Machine: "pc-q35-6.2"}}}
+	mustErrContaining(t, Validate(ideQ35), "disk_interface", "IDE")
+
+	// 实例覆盖单独制造冲突：画像 accel=tcg + 覆盖 cpu mode=host-passthrough。
+	ov := Config{
+		VMImageProfiles: []VMImageProfile{{Image: "img1", Accel: "tcg", CPUMode: "host-model"}},
+		VirtualMachineFunctions: []VMFunction{{Name: "v1", Image: "img1", VCPU: VMCpu{Count: 1}, Memory: VMMemory{SizeMB: 512},
+			Startup: &VMStartupOverride{CPUMode: "host-passthrough"}}},
+	}
+	mustErrContaining(t, Validate(ov), "startup", "host-passthrough")
+}
+
+// 决策 #485 复审：telnet 控制台端口由 VM 名确定性派生，撞车的两台无法同时启动——提交期点名两台 VM。
+func TestValidateTelnetConsolePortCollision(t *testing.T) {
+	// 先构造一对端口撞车的 VM 名（端口空间 1000，扫名字即可）。
+	seen := map[int]string{}
+	var a, b string
+	for i := 0; i < 5000 && b == ""; i++ {
+		n := fmt.Sprintf("vm-%d", i)
+		if prev, ok := seen[ConsoleTelnetPort(n)]; ok {
+			a, b = prev, n
+		} else {
+			seen[ConsoleTelnetPort(n)] = n
+		}
+	}
+	if b == "" {
+		t.Fatal("未能构造出端口冲突（端口派生异常）")
+	}
+	telnetVM := func(name string) VMFunction {
+		return VMFunction{Name: name, Image: "img1", VCPU: VMCpu{Count: 1}, Memory: VMMemory{SizeMB: 512},
+			Startup: &VMStartupOverride{Console: "telnet"}}
+	}
+	c := Config{VirtualMachineFunctions: []VMFunction{telnetVM(a), telnetVM(b)}}
+	mustErrContaining(t, Validate(c), "virtual-machine-functions["+b+"]", "冲突")
+
+	// 单个 telnet VM 无冲突。
+	mustNoErr(t, Validate(Config{VirtualMachineFunctions: []VMFunction{telnetVM(a)}}))
+}
