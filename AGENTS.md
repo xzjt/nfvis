@@ -1839,6 +1839,12 @@
   `docs/evidence/v3-round-d485-real-machine-verification.txt`、截图 `docs/images/d485-web-vnc-console.png`；细则 `docs/v3-发版记录.md`。
   **登记工具改进候选**：套件硬编码 L3 测试地址 `192.168.155.10/24` 与管理网段重叠（A/B 对照证明与本次改动无关）、
   `cli-fulltest` 自清场会删掉 docker `alpine:3.20` 夹具（每轮须重备）。
+  **发布后追加（同日，`v3 91dbf8a`）：CI 长期全红的两条宿主依赖单测已修**——GitHub Actions 自 ≥2026-10-12 每次 push/tag 全红
+  （`make check` 里的 `go test ./...` 中有两个单测读宿主真实环境、断言只在配置好的 nfvis-vm 上成立）：
+  ① `internal/api` `TestHugepageOccupantsEvidence`（既有，读宿主 hugetlbfs 挂载）；② `internal/orchestrator/compute`
+  `TestEnsureConsistentRefreshesProfiles`（**本版 #485 引入**，画像 `firmware=uefi` + 默认 UEFI 探测在无 OVMF 的 runner 上拒绝）。
+  修法＝把宿主读取做成可注入接缝（hugetlbfs 挂载读取提升为可替换包级变量、UEFI 探测经既有 `SetUEFIFirmwareProbe` 在测试构造器注入），
+  **产品行为不变**；`91dbf8a` 的 CI **10 步全绿（本线长期首次）**。⚠️ tag `v3.0.16`（`1db4117`）早于该修复，发布件不含此改动但与行为无关。
 - **已发布 v3.0.15（2026-10-13，round31 走查批）**：tag `v3.0.15` → **`v3 049de0e`**（v3 线发布点；
   其上仅本轮发版记录提交）；GitHub Release 四资产；`SOURCE_DATE_EPOCH=1791861293`；deb `247e9b5e…`
   （10,295,988 字节）/ `.run` `539970153f…`（179,611,344 字节，载荷 238 deb / 172M）两打逐字节一致、
