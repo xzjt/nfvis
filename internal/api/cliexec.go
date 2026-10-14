@@ -1232,6 +1232,9 @@ func (x *cliExecutor) cfgRollback(user, source string, args []string) string {
 // （内层空壳），整节点删（`delete protocols lldp`，通用遍历路径）留下 `protocols = {}`
 // （外层空壳）；两者都让 display set 回放自校验还原不出、如实报内部错误（运维突然读不到配置）。
 // 先剪内层 lldp、再判外层 protocols（与 metrics/history 同法）。
+//
+// VM 实例级启动画像覆盖（决策 #485）：`delete … startup cpu mode|model` 删光覆盖字段后留下
+// 元素内嵌的 `startup = {}` 空壳，同因（空 startup 与「从未配置」语义相同，逐元素回收）。
 func pruneEmptySingleton(tree map[string]any) {
 	if sys, ok := tree["system"].(map[string]any); ok {
 		if mgmt, ok := sys["management"].(map[string]any); ok && len(mgmt) == 0 {
@@ -1261,6 +1264,22 @@ func pruneEmptySingleton(tree map[string]any) {
 	}
 	if nat, ok := tree["nat"].(map[string]any); ok && isEmptyShell(nat) {
 		delete(tree, "nat")
+	}
+	// VM 实例级启动画像覆盖（决策 #485）：`delete virtual-machine-functions <n> startup cpu
+	// mode|model` 删掉最后一个覆盖字段后，元素内嵌的 `startup` 留下 `{}` 空壳——空壳在
+	// display set 回放时还原不出（模型序列化后 startup 指针仍非 nil、照常出现在树里），
+	// 自校验如实报内部错误（与 management/metrics/firewall 同因）。空 startup 与「从未
+	// 配置覆盖」语义相同（各字段均 omitempty），逐元素回收。
+	if vms, ok := tree["virtual_machine_functions"].([]any); ok {
+		for _, el := range vms {
+			vm, ok := el.(map[string]any)
+			if !ok {
+				continue
+			}
+			if st, ok := vm["startup"].(map[string]any); ok && isEmptyShell(st) {
+				delete(vm, "startup")
+			}
+		}
 	}
 	// 登记制（既有口径）：本函数只收敛**逐个登记**的容器——未登记容器（如 `vpp`）的空壳行为
 	// 不在范围内（`TestPruneEmptySingletonScope` 钉着这条，避免通用扫描误剪将来可能引入的

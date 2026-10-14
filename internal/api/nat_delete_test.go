@@ -263,6 +263,19 @@ func TestPruneEmptySingletonScope(t *testing.T) {
 	if _, ok := tree["protocols"]; ok {
 		t.Fatalf("已登记的 protocols 空壳应被剪: %v", tree)
 	}
+	// 已登记：VM 实例级 startup 覆盖空壳（决策 #485）——逐元素回收；仍有覆盖字段的保留
+	tree = map[string]any{"virtual_machine_functions": []any{
+		map[string]any{"name": "v1", "startup": map[string]any{}},
+		map[string]any{"name": "v2", "startup": map[string]any{"cpu_mode": "custom"}},
+	}}
+	pruneEmptySingleton(tree)
+	vms := tree["virtual_machine_functions"].([]any)
+	if _, ok := vms[0].(map[string]any)["startup"]; ok {
+		t.Fatalf("空 startup 壳应被剪: %v", tree)
+	}
+	if _, ok := vms[1].(map[string]any)["startup"]; !ok {
+		t.Fatalf("仍有覆盖字段的 startup 不应被剪: %v", tree)
+	}
 }
 
 // TestNatDisplaySetWithContent（不回退）：有内容的 NAT 配置 display set 仍能反推、

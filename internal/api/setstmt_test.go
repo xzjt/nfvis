@@ -470,3 +470,131 @@ func TestDisplaySetExplicitEnabledTrue(t *testing.T) {
 		t.Fatalf("mtu/disable 语句应照常反推: %v", w.out)
 	}
 }
+
+// TestDisplaySetRoundTripVMImageProfile（决策 #485，Task 7）：镜像启动画像的 display set
+// 反推。模型把 cpu 存成**平铺** cpu_mode/cpu_model，而语句树是 cpu→mode/model 两层；
+// 机械逆走查不到 "cpu" 键即整棵 cpu 子树跳过，须由家族发射器显式渲染 `cpu mode`/`cpu model`。
+// 其余平铺叶子（machine/firmware/disk-interface/boot-order/accel/console/extra-args）
+// 与树关键字同形（jsonKeyOf 横线转下划线），机械可达。
+func TestDisplaySetRoundTripVMImageProfile(t *testing.T) {
+	cfg := model.Config{VMImageProfiles: []model.VMImageProfile{{
+		Image: "img1", Machine: "pc", CPUMode: "custom", CPUModel: "Skylake-Client",
+		Firmware: "uefi", DiskIface: "ide", BootOrder: "cd", Accel: "tcg",
+		Console: "telnet", ExtraArgs: []string{"-global x"},
+	}}}
+	tree := toJSONTree(cfg)
+	stmts, err := renderSetStatements(tree, nil)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	joined := strings.Join(stmts, "\n")
+	for _, want := range []string{
+		"set vm-image-profiles img1 machine pc",
+		"set vm-image-profiles img1 cpu mode custom",
+		"set vm-image-profiles img1 cpu model Skylake-Client",
+		"set vm-image-profiles img1 firmware uefi",
+		"set vm-image-profiles img1 disk-interface ide",
+		"set vm-image-profiles img1 boot-order cd",
+		"set vm-image-profiles img1 accel tcg",
+		"set vm-image-profiles img1 console telnet",
+		"set vm-image-profiles img1 extra-args",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("display set missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+// TestDisplaySetRoundTripVMStartupOverride（决策 #485，Task 7）：VNF 实例的 startup
+// 覆盖对象与镜像画像同族——cpu 平铺字段须渲染成 `startup cpu mode/model` 两层语句，
+// 其余平铺叶子机械可达；整组语句回放后必须与原子树深等（含 cpu 平铺字段）。
+func TestDisplaySetRoundTripVMStartupOverride(t *testing.T) {
+	runDisplaySetRoundTrip(t, []string{
+		"set virtual-machine-functions v1 vcpu count 2",
+		"set virtual-machine-functions v1 startup machine q35",
+		"set virtual-machine-functions v1 startup cpu mode custom",
+		"set virtual-machine-functions v1 startup cpu model Skylake-Client",
+		"set virtual-machine-functions v1 startup firmware uefi",
+		"set virtual-machine-functions v1 startup extra-args \"-global x\"",
+	})
+}
+
+// TestDisplaySetEmptyStartupShellPruned（决策 #485，Task 7）：删掉 startup 覆盖的最后一个
+// 字段后，元素内嵌的 `startup` 不应留下 `{}` 空壳——空壳在 display set 回放时还原不出、
+// 自校验如实报内部错误（Task 6 登记的已知小项，本任务按「回放可重放」纪律收口）。
+func TestDisplaySetEmptyStartupShellPruned(t *testing.T) {
+	var cfg model.Config
+	for _, line := range []string{
+		"set virtual-machine-functions v1 image img1",
+		"set virtual-machine-functions v1 startup cpu mode custom",
+	} {
+		if err := applyStatement(&cfg, splitFieldsQuoted(line)[1:]); err != nil {
+			t.Fatalf("fixture %q 回放失败: %v", line, err)
+		}
+	}
+	if cfg.VirtualMachineFunctions[0].Startup == nil {
+		t.Fatalf("前置失效：startup 覆盖应已落库")
+	}
+	if err := deleteStatement(&cfg, splitFieldsQuoted("delete virtual-machine-functions v1 startup cpu mode")[1:]); err != nil {
+		t.Fatalf("delete startup cpu mode 失败: %v", err)
+	}
+	if cfg.VirtualMachineFunctions[0].Startup != nil {
+		t.Fatalf("删光覆盖字段后 startup 空壳应被回收，实得 %+v", cfg.VirtualMachineFunctions[0].Startup)
+	}
+	if _, err := renderSetStatements(toJSONTree(cfg), nil); err != nil {
+		t.Fatalf("空壳回收后 display set 应可反推: %v", err)
+	}
+}
+
+// TestDisplaySetVMImageProfileLevelShow（决策 #485，Task 7）：配置模式层级 show
+// （`edit vm-image-profiles <img>` / `edit virtual-machine-functions <n> startup`）下，
+// 反推语句须带绝对路径前缀、可回放还原（cpu 别名要求属主元素已存在，故须就地补发创建语句）。
+func TestDisplaySetVMImageProfileLevelShow(t *testing.T) {
+	cfg := model.Config{VMImageProfiles: []model.VMImageProfile{{
+		Image: "img1", Machine: "pc", CPUMode: "custom", CPUModel: "Skylake-Client",
+	}}}
+	sub, err := navigateJSON(toJSONTree(cfg), []string{"vm-image-profiles", "img1"})
+	if err != nil {
+		t.Fatalf("导航失败: %v", err)
+	}
+	lines, err := renderSetStatements(sub.(map[string]any), []string{"vm-image-profiles", "img1"})
+	if err != nil {
+		t.Fatalf("层级反推失败: %v", err)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "set vm-image-profiles img1 cpu mode custom") {
+		t.Fatalf("层级反推应含 cpu mode 语句:\n%s", joined)
+	}
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "set vm-image-profiles img1") {
+			t.Fatalf("层级反推的语句应带绝对路径前缀: %q", l)
+		}
+	}
+}
+
+// TestDisplaySetVMStartupLevelShow（决策 #485，Task 7）：`edit virtual-machine-functions
+// <n> startup` 层级 show 的反推须先补发属主 VM 创建语句，否则 cpu 别名回放报「无匹配配置」。
+func TestDisplaySetVMStartupLevelShow(t *testing.T) {
+	var cfg model.Config
+	for _, line := range []string{
+		"set virtual-machine-functions v1 image img1",
+		"set virtual-machine-functions v1 startup cpu mode custom",
+		"set virtual-machine-functions v1 startup machine q35",
+	} {
+		if err := applyStatement(&cfg, splitFieldsQuoted(line)[1:]); err != nil {
+			t.Fatalf("fixture %q 回放失败: %v", line, err)
+		}
+	}
+	sub, err := navigateJSON(toJSONTree(cfg), []string{"virtual-machine-functions", "v1", "startup"})
+	if err != nil {
+		t.Fatalf("导航失败: %v", err)
+	}
+	lines, err := renderSetStatements(sub.(map[string]any), []string{"virtual-machine-functions", "v1", "startup"})
+	if err != nil {
+		t.Fatalf("层级反推失败: %v", err)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "set virtual-machine-functions v1 startup cpu mode custom") {
+		t.Fatalf("层级反推应含 startup cpu mode 语句:\n%s", joined)
+	}
+}

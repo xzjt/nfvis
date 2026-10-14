@@ -46,6 +46,7 @@ func init() {
 	subtreeEmitters["vpp"] = emitVppFamily
 	subtreeEmitters["virtual-machine-functions"] = emitVMFamily
 	subtreeEmitters["container-functions"] = emitContainerFamily
+	subtreeEmitters["vm-image-profiles"] = emitVMImageProfilesFamily
 }
 
 // toks 语句 token 拼装：prefix 原样拷贝后追加（w.add 持有切片，禁止 append 共享底层数组）。
@@ -1062,6 +1063,23 @@ func emitVMFamily(w *stmtWriter, node *schema.Node, val any, prefix, keyPath []s
 			w.add(toks(prefix, "numa", "node", formatScalar(v)))
 		}
 		return emitMechanicalInner(w, node, withoutZeroScalars(m), prefix, keyPath) // size-mb:0 等零值自复现
+	case "virtual-machine-functions startup":
+		// 实例级启动画像覆盖（决策 #485）：与镜像画像同族——模型平铺 cpu_mode/cpu_model，
+		// 语句树是 startup→cpu→mode/model 两层，机械逆走查不到 "cpu" 键即跳过，须显式渲染。
+		// 其余平铺叶子（machine/firmware/disk-interface/boot-order/accel/console/extra-args）
+		// 与树关键字同形，委托通用逆走即可。
+		m, ok := val.(map[string]any)
+		if !ok {
+			return nil
+		}
+		// 配置模式层级 show（`edit virtual-machine-functions <n> startup`）无前置裸声明，
+		// 而 startup 的 cpu 别名（elemByID）要求属主元素已存在——就地补发 VM 创建语句；
+		// 顶层逆走已由具名数组分支先行发出（不双发）。
+		if len(prefix) >= 2 {
+			emitElemIfAbsent(w, prefix[:len(prefix)-1])
+		}
+		emitCPUModeModel(w, m, prefix)
+		return emitMechanicalInner(w, node, withoutZeroScalars(m), prefix, keyPath)
 	case "virtual-machine-functions interfaces sriov":
 		if m, ok := val.(map[string]any); ok {
 			if vf, ok := m["vf_id"].(float64); ok && vf != 0 {
@@ -1143,6 +1161,68 @@ func sortedKeys(m map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// ---------- vm-image-profiles（镜像启动画像，决策 #485） ----------
+//
+// cpu 在语句树里是**对象容器**（cpu→mode/model 两层），模型却是平铺的
+// cpu_mode/cpu_model；通用逆走按 jsonKeyOf 查 "cpu" 键查不到即整棵子树跳过（回放
+// 自校验会如实报「未能完整还原」）。故本族显式把平铺字段渲染成 `cpu mode …` /
+// `cpu model …`，其余平铺叶子（machine/firmware/disk-interface/boot-order/accel/
+// console/extra-args）与树关键字同形（横线转下划线），委托通用逆走即可。
+
+func emitVMImageProfilesFamily(w *stmtWriter, node *schema.Node, val any, prefix, keyPath []string) error {
+	m, ok := val.(map[string]any)
+	if !ok {
+		return nil
+	}
+	// 配置模式层级 show（`edit vm-image-profiles <img>`）：没有通用逆走具名数组分支的
+	// 前置裸声明，而 cpu 别名（elemByID）要求元素已存在——就地补发创建语句；顶层逆走已
+	// 由前置裸声明建出（不双发，见 elemEmitted）。
+	emitElemIfAbsent(w, prefix)
+	emitCPUModeModel(w, m, prefix)
+	return emitMechanicalInner(w, node, withoutZeroScalars(m), prefix, keyPath)
+}
+
+// emitElemIfAbsent 在 writer 尚未输出任何以 prefix 开头的语句时补发元素创建语句（裸声明）。
+// 顶层逆走由通用逆走器的具名数组分支先行发出（不补，避免回放撞「值未变化」）；
+// 配置模式层级 show 直接进入家族发射器、无此前置，须就地补发（cpu 等别名要求元素已存在）。
+func emitElemIfAbsent(w *stmtWriter, prefix []string) {
+	if len(prefix) == 0 || elemEmitted(w, prefix) {
+		return
+	}
+	w.add(append([]string{}, prefix...))
+}
+
+// elemEmitted 报告 writer 输出里是否已有以 prefix 开头的语句（元素已被前置语句建出/引用）。
+func elemEmitted(w *stmtWriter, prefix []string) bool {
+	for _, s := range w.out {
+		if len(s.toks) < len(prefix) {
+			continue
+		}
+		match := true
+		for i := range prefix {
+			if s.toks[i] != prefix[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+// emitCPUModeModel 把平铺 cpu_mode/cpu_model 渲染为两层语句 `cpu mode <v>` / `cpu model <v>`
+// （镜像画像与 VNF startup 覆盖共用；空值不发射——模型字段 omitempty，缺席与空串同义）。
+func emitCPUModeModel(w *stmtWriter, m map[string]any, prefix []string) {
+	if v, ok := m["cpu_mode"]; ok && v != "" {
+		w.add(toks(prefix, "cpu", "mode", formatScalar(v)))
+	}
+	if v, ok := m["cpu_model"]; ok && v != "" {
+		w.add(toks(prefix, "cpu", "model", formatScalar(v)))
+	}
 }
 
 // ---------- 根级回落发射器（决策 #155 补充） ----------

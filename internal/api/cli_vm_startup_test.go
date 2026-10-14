@@ -120,3 +120,49 @@ func TestSetVMStartupOverrideViaAlias(t *testing.T) {
 		t.Fatalf("startup cpu_mode/cpu_model 未落平铺字段：%+v", st)
 	}
 }
+
+// TestDisplaySetVMStartupEndToEnd（决策 #485，Task 7）：真实 Execute 路径下
+// `show configuration | display set` 能反推出镜像画像与 startup 覆盖的等价语句
+// （cpu 平铺字段 → `cpu mode`/`cpu model` 两层语句）。
+func TestDisplaySetVMStartupEndToEnd(t *testing.T) {
+	x, _ := newCLIKit(t)
+	exec := func(line string) CLIEResult {
+		t.Helper()
+		return x.Execute("admin", aaa.ClassSuperUser, "ssh", line)
+	}
+	for _, line := range []string{
+		"configure",
+		"set resource-pools hugepages page-size 1G count 8",
+		"set resource-pools cpu isolated-cores 4-7",
+		"set vm-image-profiles img1 machine pc",
+		"set vm-image-profiles img1 cpu mode custom",
+		"set vm-image-profiles img1 cpu model Skylake-Client",
+		"set virtual-machine-functions v1 image img1",
+		"set virtual-machine-functions v1 vcpu count 2",
+		"set virtual-machine-functions v1 memory size-mb 1024",
+		"set virtual-machine-functions v1 startup cpu mode custom",
+		"set virtual-machine-functions v1 startup cpu model Skylake-Client",
+		"commit",
+		"exit",
+	} {
+		res := exec(line)
+		if strings.HasPrefix(res.Output, "%%") || strings.Contains(res.Output, "校验失败") {
+			t.Fatalf("%s failed: %s", line, res.Output)
+		}
+	}
+	res := exec("show configuration | display set")
+	if strings.Contains(res.Output, "%%") {
+		t.Fatalf("display set 不应报错:\n%s", res.Output)
+	}
+	for _, want := range []string{
+		"set vm-image-profiles img1 machine pc",
+		"set vm-image-profiles img1 cpu mode custom",
+		"set vm-image-profiles img1 cpu model Skylake-Client",
+		"set virtual-machine-functions v1 startup cpu mode custom",
+		"set virtual-machine-functions v1 startup cpu model Skylake-Client",
+	} {
+		if !strings.Contains(res.Output, want) {
+			t.Fatalf("display set 缺少 %q:\n%s", want, res.Output)
+		}
+	}
+}
