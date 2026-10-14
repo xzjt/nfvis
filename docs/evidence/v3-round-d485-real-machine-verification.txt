@@ -120,6 +120,20 @@ BUG-2（Critical，真机+真浏览器才暴露）—— WS↔VNC 代理用 TEXT
    · cli-pty-smoke：无新增 pty 交互面，未改（**10 / 10**）。
    · 21 行豁免已从 cli-fulltest-exemptions.tsv 摘除（check_suite_contract_sync.sh：缺口 0）。
 
+§3c 启动前置判定：telnet 控制台端口被占用（同日追加，真机验证）
+
+  背景：派生端口被**本机其它进程**占用时，原先报的是 qemu 原文
+  `Failed to find an available port: Address already in use`（诚实但无补救指引）。
+  修复（commit af3a7ad，`internal/orchestrator/compute/console_port.go`）：`StartVM` 与 `RestartVM` 的
+  off→start 分支在进入 libvirt 前，对「有效控制台＝telnet」的 VM 探测 `127.0.0.1:<ConsoleTelnetPort(名)>` 是否可绑。
+  真机复验（vm29，派生端口 5820）：
+    · 占住 5820 后 `start` →
+      "%% VNF vm29 的 telnet 控制台端口 5820 已被本机其它进程占用——端口由 VNF 名确定性派生；
+        请改用别的 VNF 名，或把该 VNF 的控制台改为 serial/vnc"
+    · 释放端口后 `start` → "启动 VNF vm29 已受理"（正常路径不受影响）
+  边界：探测与真正绑定之间存在窄 TOCTOU 窗口（仍以 qemu 原文兜底）；`DefineVM` 的 autostart 路径不在本次覆盖内
+  （与既有数据面前置判定 #314 的覆盖边界一致）。
+
 §4 现场还原
 
   测试对象全部清除：删除 vm485、删除 alpine 画像（rev 403），`show virtual-machine-functions` 与
