@@ -376,6 +376,8 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	mux.Handle("GET "+APIPrefix+"/images/{name}", s.auth(s.handleGetImage, schema.ClassReadOnly, "show images"))
 	mux.Handle("POST "+APIPrefix+"/images", s.auth(s.handlePostImage, schema.ClassSuperUser, "request images"))
 	mux.Handle("DELETE "+APIPrefix+"/images/{name}", s.auth(s.handleDeleteImage, schema.ClassSuperUser, "request images delete"))
+	// 决策 #485：镜像启动画像读视图（与 CLI `show vm-image-profiles` 同源；写路径在配置模式）。
+	mux.Handle("GET "+APIPrefix+"/vm-image-profiles", s.auth(s.handleGetVMImageProfiles, schema.ClassReadOnly, "show vm-image-profiles"))
 
 	// M3-8：告警列表（恢复收敛的不可收敛项落点，FR-OPS-010）
 	mux.Handle("GET "+APIPrefix+"/alarms", s.auth(s.handleGetAlarms, schema.ClassReadOnly, "show alarms"))

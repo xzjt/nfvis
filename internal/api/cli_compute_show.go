@@ -68,6 +68,8 @@ func (x *cliExecutor) execShowVMs(args []string) string {
 		injectCoresAssigned(m, cfg, name)
 		x.structured = m
 		out := RenderConfigJSON(m)
+		// 决策 #485：有效启动画像块（逐项标来源）——域映射用的合并规则与这里同源。
+		out += "\n" + x.effectiveStartupBlock(vm, cfg.VMImageProfiles)
 		if len(vm.PCIDevices) > 0 {
 			out += "\n" + x.vmPCIDevicesView(vm.PCIDevices)
 		}
@@ -367,6 +369,149 @@ func imagesRow(m images.Meta, refCount int) map[string]any {
 	}
 	row["ref_count"] = refCount
 	return row
+}
+
+// execShowVMImageProfiles `show vm-image-profiles [<image>]`（决策 #485）：镜像级启动画像读视图。
+// 取 committed 配置（与 REST `GET /vm-image-profiles` **同源**）；给定 <image> 时只列该画像、
+// 不存在则如实报错。逐项显示的是**配置值**（不补产品默认）——补默认后的「有效画像」在
+// `show virtual-machine-functions <name> detail` 的「有效启动画像」块里，两处口径不同、不混用。
+func (x *cliExecutor) execShowVMImageProfiles(args []string) string {
+	cfg, err := x.engine.Committed()
+	if err != nil {
+		return "%% " + err.Error() + "\n"
+	}
+	profiles := cfg.VMImageProfiles
+	if len(args) >= 1 {
+		want := args[0]
+		found := false
+		for _, p := range profiles {
+			if p.Image == want {
+				profiles = []model.VMImageProfile{p}
+				found = true
+				break
+			}
+		}
+		if !found {
+			// 用字符串拼接而非 Sprintf：Sprintf 会把 `%%` 渲染成单个 `%`（错误前缀就没了）。
+			return "%% 镜像画像 " + want + " 不存在\n"
+		}
+	}
+	if len(profiles) == 0 {
+		return "（无镜像启动画像）\n"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-20s %-10s %-22s %-9s %-15s %-11s %-6s %-8s %s\n",
+		"镜像", "machine", "cpu", "firmware", "disk-interface", "boot-order", "accel", "console", "extra-args")
+	items := make([]any, 0, len(profiles))
+	for _, p := range profiles {
+		items = append(items, anyToTree(p))
+		fmt.Fprintf(&b, "%-20s %-10s %-22s %-9s %-15s %-11s %-6s %-8s %s\n",
+			p.Image, orDash(p.Machine), vmProfileCPU(p), orDash(p.Firmware), orDash(p.DiskIface),
+			orDash(p.BootOrder), orDash(p.Accel), orDash(p.Console), vmProfileExtraArgs(p.ExtraArgs))
+	}
+	x.structured = map[string]any{"vm_image_profiles": items}
+	return b.String()
+}
+
+// vmProfileCPU 画像的 cpu 单元格：mode 或 mode/model（都空时 "-"）。
+func vmProfileCPU(p model.VMImageProfile) string {
+	switch {
+	case p.CPUMode == "" && p.CPUModel == "":
+		return "-"
+	case p.CPUModel == "":
+		return p.CPUMode
+	case p.CPUMode == "":
+		return p.CPUModel
+	}
+	return p.CPUMode + "/" + p.CPUModel
+}
+
+// vmProfileExtraArgs 额外 QEMU 参数单元格：多条以空格连接，空则 "（无）"。
+func vmProfileExtraArgs(args []string) string {
+	if len(args) == 0 {
+		return "（无）"
+	}
+	return strings.Join(args, " ")
+}
+
+// effectiveStartupBlock `show virtual-machine-functions <name> detail` 的「有效启动画像」块
+// （决策 #485）：逐项给出**有效值**并标出**来源**（实例覆盖 > 镜像画像 > 产品默认）。
+// 合并规则与 `model.EffectiveStartup` 同源（域映射用的就是它），这里只额外判「谁给了这个值」。
+func (x *cliExecutor) effectiveStartupBlock(vm model.VMFunction, profiles []model.VMImageProfile) string {
+	var b strings.Builder
+	b.WriteString("有效启动画像（合并规则：实例覆盖 > 镜像画像 > 产品默认）:\n")
+	for _, f := range effectiveStartupFields(vm, profiles) {
+		fmt.Fprintf(&b, "  %-14s %-26s [%s]\n", f.Label, f.Value, f.Source)
+	}
+	return b.String()
+}
+
+// startupFieldView 有效画像的一个字段：显示名 / 有效值 / 来源。
+type startupFieldView struct {
+	Label  string
+	Value  string
+	Source string
+}
+
+// effectiveStartupFields 逐字段算有效值与来源。来源按**谁提供了该值**判定（与
+// `model.EffectiveStartup` 的合并顺序一致）：实例覆盖设了 → 实例覆盖；否则画像设了 →
+// 镜像画像；都没设 → 产品默认（`EffectiveStartup` 已把默认填进 Value）。
+func effectiveStartupFields(vm model.VMFunction, profiles []model.VMImageProfile) []startupFieldView {
+	eff := model.EffectiveStartup(vm, profiles)
+	var prof *model.VMImageProfile
+	for i := range profiles {
+		if profiles[i].Image == vm.Image {
+			prof = &profiles[i]
+			break
+		}
+	}
+	ov := vm.Startup
+	overrideExtraArgs := 0
+	if ov != nil {
+		overrideExtraArgs = len(ov.ExtraArgs)
+	}
+	source := func(overrideSet, profileSet bool) string {
+		switch {
+		case overrideSet:
+			return "实例覆盖"
+		case profileSet:
+			return "镜像画像"
+		default:
+			return "产品默认"
+		}
+	}
+	ovSet := func(f func(o model.VMStartupOverride) string) bool {
+		return ov != nil && f(*ov) != ""
+	}
+	profSet := func(f func(p model.VMImageProfile) string) bool {
+		return prof != nil && f(*prof) != ""
+	}
+	val := func(s string) string {
+		if s == "" {
+			return "—"
+		}
+		return s
+	}
+	rows := []startupFieldView{
+		{"machine", val(eff.Machine), source(ovSet(func(o model.VMStartupOverride) string { return o.Machine }),
+			profSet(func(p model.VMImageProfile) string { return p.Machine }))},
+		{"cpu mode", val(eff.CPUMode), source(ovSet(func(o model.VMStartupOverride) string { return o.CPUMode }),
+			profSet(func(p model.VMImageProfile) string { return p.CPUMode }))},
+		{"cpu model", val(eff.CPUModel), source(ovSet(func(o model.VMStartupOverride) string { return o.CPUModel }),
+			profSet(func(p model.VMImageProfile) string { return p.CPUModel }))},
+		{"firmware", val(eff.Firmware), source(ovSet(func(o model.VMStartupOverride) string { return o.Firmware }),
+			profSet(func(p model.VMImageProfile) string { return p.Firmware }))},
+		{"disk-interface", val(eff.DiskIface), source(ovSet(func(o model.VMStartupOverride) string { return o.DiskIface }),
+			profSet(func(p model.VMImageProfile) string { return p.DiskIface }))},
+		{"boot-order", val(eff.BootOrder), source(ovSet(func(o model.VMStartupOverride) string { return o.BootOrder }),
+			profSet(func(p model.VMImageProfile) string { return p.BootOrder }))},
+		{"accel", val(eff.Accel), source(ovSet(func(o model.VMStartupOverride) string { return o.Accel }),
+			profSet(func(p model.VMImageProfile) string { return p.Accel }))},
+		{"console", val(eff.Console), source(ovSet(func(o model.VMStartupOverride) string { return o.Console }),
+			profSet(func(p model.VMImageProfile) string { return p.Console }))},
+		{"extra-args", vmProfileExtraArgs(eff.ExtraArgs), source(overrideExtraArgs > 0, prof != nil && len(prof.ExtraArgs) > 0)},
+	}
+	return rows
 }
 
 // execShowResourcePools：show resource-pools（复用 GET /resource-pools 的同一视图函数，

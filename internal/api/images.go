@@ -12,6 +12,7 @@ import (
 	"net/http"
 
 	"github.com/xzjt/nfvis/internal/images"
+	"github.com/xzjt/nfvis/internal/model"
 )
 
 // ImagesRuntime 镜像仓库能力（*images.Store 注入；nil = 503）。
@@ -72,6 +73,20 @@ func (s *Server) handleGetImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, imageResponse{Meta: m, RefCount: images.RefCount(cfg, name)})
+}
+
+// handleGetVMImageProfiles GET /api/v1/vm-image-profiles（决策 #485）：镜像级启动画像列表。
+// 读 committed 配置——与 CLI `show vm-image-profiles` 同源（同一份配置事实，不另存一份）。
+// 空集合发 `[]`（不是 null）；分页参数与其余列表端点同口径（缺省不截断）。
+func (s *Server) handleGetVMImageProfiles(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.engine.Committed()
+	if err != nil {
+		mapEngineError(w, err)
+		return
+	}
+	out := make([]model.VMImageProfile, 0, len(cfg.VMImageProfiles))
+	out = append(out, cfg.VMImageProfiles...)
+	writeJSON(w, http.StatusOK, paginate(r, out))
 }
 
 // handlePostImage POST /api/v1/images（URL 拉取 或 incoming 导入）

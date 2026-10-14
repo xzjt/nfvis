@@ -146,6 +146,7 @@ func TestSecretsNeverEchoed(t *testing.T) {
 		{"/virtual-switches", "virtual_switches 段"},
 		{"/vrfs", "vrfs 段"},
 		{"/virtual-machine-functions", "virtual_machine_functions 段"},
+		{"/vm-image-profiles", "vm_image_profiles 段"},
 		{"/container-functions", "container_functions 段"},
 		{"/cli/candidates", "CLI 动态候选：只回名字清单"},
 	} {

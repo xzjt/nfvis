@@ -177,6 +177,12 @@ func OperRoot() *Node {
 					K("detail", "类型/大小/sha256/引用计数"),
 				),
 			),
+			// 镜像启动画像读视图（决策 #485）：键＝镜像名；值逐项来自配置（不补产品默认，
+			// 与配置模式 `show` 同口径）。`<image>` 走镜像动态候选（与 `set vm-image-profiles`
+			// 同一来源），与 REST `GET /vm-image-profiles` 同源。
+			K("vm-image-profiles", "镜像启动画像（键＝镜像名）",
+				Opt(P("<image>", "镜像名", DynImages)),
+			),
 			K("resource-pools", "资源池：总量/已分配/空闲（含 vpp-reserved）"),
 			K("alarms", "告警列表",
 				Opt(VE("state", "告警状态过滤", "active", "all")),

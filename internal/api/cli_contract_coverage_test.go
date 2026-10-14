@@ -47,6 +47,7 @@ var contractCLICommands = []string{
 	"show port-mirroring", "show qos policies", "show dns proxy", "show vxlan tunnels",
 	"show protocols lldp neighbors", "show lldp neighbors",
 	"show alarms", "show users", "show images", "show resource-pools",
+	"show vm-image-profiles", "show vm-image-profiles img1",
 	"show log system", "show log audit", "show log vnf vm1",
 	"show virtual-machine-functions", "show container-functions", "show configuration",
 	"show configuration history", "show configuration permissions read-only",

@@ -10,6 +10,8 @@ package api
 //     需别名规则显式映射，否则落成模型不认识的 cpu:{mode:…}。
 
 import (
+	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -164,5 +166,81 @@ func TestDisplaySetVMStartupEndToEnd(t *testing.T) {
 		if !strings.Contains(res.Output, want) {
 			t.Fatalf("display set 缺少 %q:\n%s", want, res.Output)
 		}
+	}
+}
+
+// TestShowVMImageProfilesAndEffective（决策 #485，Task 12）：镜像画像读视图（CLI）
+// 与 VNF 详情的「有效启动画像」块——逐项标来源（实例覆盖 > 镜像画像 > 产品默认）。
+//
+// 三面同源：`show vm-image-profiles` 与 REST `GET /vm-image-profiles`（TestGetVMImageProfilesEndpoint）
+// 都读 committed 配置；VNF 详情的有效画像由 `model.EffectiveStartup` 合并得出（与域映射同一函数）。
+func TestShowVMImageProfilesAndEffective(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaa.ClassSuperUser, "ssh",
+		"configure",
+		"set resource-pools hugepages page-size 1G count 8",
+		"set resource-pools cpu isolated-cores 4-7",
+		"set vm-image-profiles img1 machine pc",
+		"set vm-image-profiles img1 firmware uefi",
+		"set virtual-machine-functions v1 image img1",
+		"set virtual-machine-functions v1 vcpu count 1",
+		"set virtual-machine-functions v1 memory size-mb 1024",
+		"set virtual-machine-functions v1 startup machine q35", // 实例覆盖（覆盖画像的 machine=pc）
+		"commit",
+		"exit",
+	)
+
+	out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show vm-image-profiles").Output
+	if !strings.Contains(out, "img1") || !strings.Contains(out, "pc") {
+		t.Fatalf("show vm-image-profiles wrong: %s", out)
+	}
+	if !strings.Contains(out, "uefi") {
+		t.Fatalf("show vm-image-profiles 应显示 firmware 列: %s", out)
+	}
+
+	// 单画像形态：`show vm-image-profiles <image>` 只列该画像；不存在的画像如实报错。
+	single := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show vm-image-profiles img1").Output
+	if !strings.Contains(single, "img1") {
+		t.Fatalf("show vm-image-profiles img1 应列出该画像: %s", single)
+	}
+	missing := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show vm-image-profiles nope").Output
+	if !strings.HasPrefix(missing, "%%") {
+		t.Fatalf("不存在的画像应如实报错: %s", missing)
+	}
+
+	det := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show virtual-machine-functions v1 detail").Output
+	if !strings.Contains(det, "有效启动画像") || !strings.Contains(det, "uefi") {
+		t.Fatalf("detail effective profile missing: %s", det)
+	}
+	// 逐项来源：machine/firmware 来自画像；firmware 被实例覆盖；accel 未声明 → 产品默认。
+	for _, want := range []string{"镜像画像", "实例覆盖", "产品默认"} {
+		if !strings.Contains(det, want) {
+			t.Fatalf("有效启动画像应标出来源 %q:\n%s", want, det)
+		}
+	}
+}
+
+// TestGetVMImageProfilesEndpoint（决策 #485，Task 12）：REST `GET /vm-image-profiles`
+// 返回 committed 配置里的镜像画像数组（与 CLI `show vm-image-profiles` 同源）。
+func TestGetVMImageProfilesEndpoint(t *testing.T) {
+	ts := newTestServer(t)
+	token := loginAdmin(t, ts)
+
+	patch := map[string]any{"vm_image_profiles": []map[string]any{{"image": "img1", "machine": "pc"}}}
+	if status, _, data := cfgRequest(t, http.MethodPut, ts.URL+APIPrefix+"/configuration/candidate", token, patch,
+		map[string]string{"X-NFVIS-Merge": "true", "X-NFVIS-Auto-Commit": "true"}); status != http.StatusOK {
+		t.Fatalf("写画像: %d %s", status, data)
+	}
+
+	status, data := getWithToken(t, ts.URL+APIPrefix+"/vm-image-profiles", token)
+	if status != http.StatusOK {
+		t.Fatalf("GET /vm-image-profiles: %d %s", status, data)
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("解析响应: %v (%s)", err, data)
+	}
+	if len(got) != 1 || got[0]["image"] != "img1" || got[0]["machine"] != "pc" {
+		t.Fatalf("画像列表不符: %s", data)
 	}
 }

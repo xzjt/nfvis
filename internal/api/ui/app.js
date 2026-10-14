@@ -1199,7 +1199,7 @@ export const VIEWS = {
     render(d) { pageWarn(d); renderImages(rowsOf(d['/images'])); },
   },
   'imageDetail': {
-    render(d, params) { pageWarn(d); renderImageDetail(d['/images/{name}'], params); },
+    render(d, params) { pageWarn(d); renderImageDetail(d['/images/{name}'], d['/vm-image-profiles'], params); },
   },
   'network': {
     async render(d) { pageWarn(d); renderNetworkObjects(await loadNetworkObjects(d)); },
@@ -5298,7 +5298,9 @@ function renderImages(imgs) {
 }
 
 // 镜像详情页（#/compute/images/:name）：完整元数据（元数据是静态的，本页不轮询）。
-function renderImageDetail(img, params) {
+// 启动画像（决策 #485）取自 /vm-image-profiles 列表里该镜像的条目（键＝镜像名）——与 CLI
+// `show vm-image-profiles` 同源（同一份 committed 配置）；未配置时如实说明按产品默认启动。
+function renderImageDetail(img, profiles, params) {
   const name = (params && params.name) || '';
   $('imd-name').textContent = name;
   const ok = img && !img.__err;
@@ -5322,6 +5324,28 @@ function renderImageDetail(img, params) {
     // 这里如实回显来源 tag，便于核对（重命名不再静默）。
     ['归档内嵌 tag', (img.source_tags && img.source_tags.length) ? img.source_tags.join('、') : undefined],
   ] : []);
+  renderImageProfile(Array.isArray(profiles) ? profiles : [], name);
+}
+
+// renderImageProfile 填镜像详情页的「启动画像」块：列表里按 image 名取该镜像的画像。
+// 只显示**配置值**（未配置的项由 fill 渲染成「—」）；合并后的有效值与来源在虚拟机详情页。
+function renderImageProfile(profiles, name) {
+  const p = profiles.find((x) => x && x.image === name);
+  if (!p) {
+    fill($('imd-profile'), [['状态', '未配置启动画像（按产品默认）']]);
+    return;
+  }
+  const cpu = p.cpu_model ? ((p.cpu_mode ? p.cpu_mode + '/' : '') + p.cpu_model) : p.cpu_mode;
+  fill($('imd-profile'), [
+    ['machine', p.machine],
+    ['cpu', cpu],
+    ['firmware', p.firmware],
+    ['disk-interface', p.disk_interface],
+    ['boot-order', p.boot_order],
+    ['accel', p.accel],
+    ['console', p.console],
+    ['extra-args', (p.extra_args && p.extra_args.length) ? p.extra_args.join(' ') : undefined],
+  ]);
 }
 
 // imgIsFailed / imgOutcome：**不把 2xx 当成功**——服务端可能已受理但导入失败

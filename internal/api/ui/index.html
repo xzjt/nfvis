@@ -763,6 +763,11 @@
       </div>
       <h3>元数据</h3>
       <dl id="imd-info" class="kv"></dl>
+      <h3>启动画像</h3>
+      <dl id="imd-profile" class="kv"></dl>
+      <p class="muted small">镜像级启动画像（machine / cpu / firmware / disk-interface / boot-order / accel / console / extra-args）。
+        未配置的项显示「—」；虚拟机启动时按「实例覆盖 → 镜像画像 → 产品默认」合并，逐项有效值与来源见虚拟机详情页。
+        配置入口在命令行（set vm-image-profiles）。</p>
       <p class="muted small">删除入口在镜像列表页；被 VM 或容器引用时服务端会拒绝删除。</p>
     </article>
     </section>

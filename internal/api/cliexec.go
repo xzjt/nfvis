@@ -698,6 +698,9 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 		return x.execShowContainers(t[1:])
 	case len(t) >= 1 && t[0] == "images":
 		return x.execShowImages(t[1:])
+	case len(t) >= 1 && t[0] == "vm-image-profiles":
+		// 决策 #485：镜像启动画像读视图（与 GET /vm-image-profiles 同源）。
+		return x.execShowVMImageProfiles(t[1:])
 	case len(t) == 1 && t[0] == "resource-pools":
 		return x.execShowResourcePools()
 	case len(t) >= 3 && t[0] == "system" && t[1] == "configuration" && t[2] == "sessions":
@@ -722,7 +725,7 @@ func (x *cliExecutor) execOperShow(user, class string, t []string) string {
 	}
 	// 注：`show vpp capture`（兼容别名）不在这里——它由上面的 `t[0] == "vpp"` 分支
 	// 收进 execShowVpp，由那里的 `sub == "capture"` 转发到同一实现。
-	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class> [detail]|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|metrics history [name <metric> [last <duration>] [step <duration>]]|hardware|firewall|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | capture | vpp [threads|buffers|memory] | acls | bonds | nat | vxlan tunnels | port-mirroring | dns proxy | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | resource-pools | system configuration sessions | system api tokens\n"
+	return "%% 该 show 命令形式未支持。可用：version | configuration [candidate|history|sessions|permissions <class> [detail]|compare rollback <n>] | system uptime|cpu|memory|storage|hugepages|metrics history [name <metric> [last <duration>] [step <duration>]]|hardware|firewall|core-dumps|tech-support | users | log system|audit|vnf | interfaces [physical|management|<ifname> [detail|statistics|sriov]] | virtual-switches | vrfs | capture | vpp [threads|buffers|memory] | acls | bonds | nat | vxlan tunnels | port-mirroring | dns proxy | qos policies | protocols lldp neighbors | lldp neighbors | alarms | virtual-machine-functions | container-functions | images | vm-image-profiles | resource-pools | system configuration sessions | system api tokens\n"
 }
 
 // invalidShowConfiguration：`show configuration <未知/多余 token>` 的统一报错
