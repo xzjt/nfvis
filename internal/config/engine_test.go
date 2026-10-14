@@ -888,6 +888,51 @@ func TestEngineImageTypeRule(t *testing.T) {
 	}
 }
 
+// 决策 #485：镜像启动画像指向的镜像必须在仓库中存在——与 VNF.image 同处校验（checkImages），
+// 提交期拒绝且文案点名镜像。model.Validate 无仓库访问，故不在那里判。
+func TestEngineImageProfileExistenceRule(t *testing.T) {
+	images := mockImages{
+		"ubuntu22-vm": {Name: "ubuntu22-vm", Type: "vm-image"},
+		"alpine-ct":   {Name: "alpine-ct", Type: "container-image"},
+	}
+	e, _, _ := newEngineWithExternals(t, images, nil)
+	sess := Session{User: "admin", Source: "ssh"}
+	if err := e.Edit(sess); err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+
+	// 画像指向仓库中不存在的镜像 → 提交拒绝，文案给出镜像名与照做路径
+	cfg := baseCommitted()
+	cfg.VMImageProfiles = []model.VMImageProfile{{Image: "ghost-img", Machine: "q35"}}
+	if err := e.UpdateCandidate(sess, cfg); err != nil {
+		t.Fatalf("UpdateCandidate: %v", err)
+	}
+	var ve *ValidationError
+	_, err := e.Commit(context.Background(), sess, CommitOpts{})
+	if !errors.As(err, &ve) {
+		t.Fatalf("画像镜像不存在应提交拒绝: %v", err)
+	}
+	msg := fmt.Sprint(ve.Errors)
+	if !strings.Contains(msg, "ghost-img") || !strings.Contains(msg, "vm-image-profiles[ghost-img]") {
+		t.Fatalf("拒绝文案应点名镜像与路径: %s", msg)
+	}
+
+	// 画像指向容器镜像 → 类型不匹配（画像仅 VM/QEMU，须 vm-image）
+	cfg.VMImageProfiles = []model.VMImageProfile{{Image: "alpine-ct", Machine: "q35"}}
+	_ = e.UpdateCandidate(sess, cfg)
+	_, err = e.Commit(context.Background(), sess, CommitOpts{})
+	if !errors.As(err, &ve) || !strings.Contains(fmt.Sprint(ve.Errors), "vm-image") {
+		t.Fatalf("画像引用容器镜像应报类型不匹配: %v", err)
+	}
+
+	// 画像指向存在的 vm-image → 放行
+	cfg.VMImageProfiles = []model.VMImageProfile{{Image: "ubuntu22-vm", Machine: "q35"}}
+	_ = e.UpdateCandidate(sess, cfg)
+	if _, err := e.Commit(context.Background(), sess, CommitOpts{}); err != nil {
+		t.Fatalf("画像引用存在的 vm-image 应放行: %v", err)
+	}
+}
+
 func TestEngineNumaWarning(t *testing.T) {
 	topo := mockTopo{"ens2f0": 1}
 	e, _, _ := newEngineWithExternals(t, nil, topo)

@@ -874,6 +874,112 @@ func TestEnsureConsistentAlarms(t *testing.T) {
 	}
 }
 
+// recordingSink 进程内告警表（对账建/消测试用）：按 (code, source) 记账，支持 ActiveOf/Resolve
+// ——与生产 network.AlarmStore 的语义一致（同键幂等、按 code+source 消解）。
+type recordingSink struct {
+	active map[string]orchestrator.AlarmRef
+	order  []string
+}
+
+func newRecordingSink() *recordingSink {
+	return &recordingSink{active: map[string]orchestrator.AlarmRef{}}
+}
+
+func recordingKey(code, source string) string { return code + "\x00" + source }
+
+func (s *recordingSink) Raise(_, _, code, _, source string) {
+	k := recordingKey(code, source)
+	if _, ok := s.active[k]; !ok {
+		s.order = append(s.order, k)
+	}
+	s.active[k] = orchestrator.AlarmRef{Code: code, Source: source}
+}
+
+func (s *recordingSink) Resolve(_, code, source string) bool {
+	k := recordingKey(code, source)
+	if _, ok := s.active[k]; !ok {
+		return false
+	}
+	delete(s.active, k)
+	return true
+}
+
+func (s *recordingSink) ActiveOf(string) []orchestrator.AlarmRef {
+	out := make([]orchestrator.AlarmRef, 0, len(s.active))
+	for _, k := range s.order {
+		if a, ok := s.active[k]; ok {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// 决策 #485：孤儿画像对账告警——配置有画像、镜像仓库无该镜像 ⇒ VM_IMAGE_PROFILE_ORPHAN（warning）；
+// 镜像出现即自动消解；换一张空告警表模拟 nfvisd 重启后仍按事实重建（不靠进程内记忆）。
+func TestImageProfileOrphanAlarmRebuiltAndResolved(t *testing.T) {
+	p := newTestProvider(newMockLibvirt(), newMockStorage(), nil)
+	p.SetImageExists(func(name string) bool { return name == "img-ok" })
+	sink := newRecordingSink()
+	p.SetAlarms(sink)
+
+	cfg := model.Config{VMImageProfiles: []model.VMImageProfile{
+		{Image: "img-ok", Machine: "q35"},
+		{Image: "img-gone", Machine: "q35"},
+	}}
+
+	// 恢复收敛路径（无 VM ⇒ 不产生 VM 收敛告警）
+	if errs := p.EnsureConsistent(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("无 VM 时收敛应无错误: %v", errs)
+	}
+	active := sink.ActiveOf(orchestrator.RecoveryScopeCompute)
+	if len(active) != 1 || active[0].Code != orchestrator.VMImageProfileOrphan ||
+		active[0].Source != "vm-image-profile/img-gone" {
+		t.Fatalf("应产生孤儿画像告警（仅 img-gone）: %+v", active)
+	}
+
+	// 15s 巡检路径：事实未变 ⇒ 保持（幂等）
+	if errs := p.CheckVMAlarms(context.Background(), cfg); len(errs) != 0 {
+		t.Fatalf("巡检应无错误: %v", errs)
+	}
+	if got := sink.ActiveOf(orchestrator.RecoveryScopeCompute); len(got) != 1 {
+		t.Fatalf("事实未变告警应保持: %+v", got)
+	}
+
+	// 镜像出现 ⇒ 自动消警
+	p.SetImageExists(func(string) bool { return true })
+	p.CheckVMAlarms(context.Background(), cfg)
+	if got := sink.ActiveOf(orchestrator.RecoveryScopeCompute); len(got) != 0 {
+		t.Fatalf("镜像出现应自动消警: %+v", got)
+	}
+
+	// 跨「重启」：换一张空告警表（进程内历史全丢），仓库仍缺 img-gone ⇒ 按事实重建
+	p.SetImageExists(func(name string) bool { return name == "img-ok" })
+	sink2 := newRecordingSink()
+	p.SetAlarms(sink2)
+	p.EnsureConsistent(context.Background(), cfg)
+	active = sink2.ActiveOf(orchestrator.RecoveryScopeCompute)
+	if len(active) != 1 || active[0].Code != orchestrator.VMImageProfileOrphan ||
+		active[0].Source != "vm-image-profile/img-gone" {
+		t.Fatalf("重启后孤儿画像告警必须仍可见（按事实重建）: %+v", active)
+	}
+}
+
+// 未注入镜像仓库探针（ImageExists 为 nil）⇒ 不猜测：既不建也不消（生产在镜像仓库未装配时即此情形）。
+func TestImageProfileOrphanSkippedWithoutImageProbe(t *testing.T) {
+	p := newTestProvider(newMockLibvirt(), newMockStorage(), nil)
+	sink := newRecordingSink()
+	p.SetAlarms(sink)
+	// 预置一条历史活动告警，验证无探针时不被误消
+	sink.Raise(orchestrator.RecoveryScopeCompute, orchestrator.SeverityWarning,
+		orchestrator.VMImageProfileOrphan, "旧告警", "vm-image-profile/img-gone")
+
+	cfg := model.Config{VMImageProfiles: []model.VMImageProfile{{Image: "img-gone", Machine: "q35"}}}
+	p.EnsureConsistent(context.Background(), cfg)
+	if got := sink.ActiveOf(orchestrator.RecoveryScopeCompute); len(got) != 1 {
+		t.Fatalf("无镜像探针时不得猜测（保守留警）: %+v", got)
+	}
+}
+
 // FR-OPS-012：autostart 须落到 libvirt 域自启标志。
 func TestDefineVMSetsLibvirtAutostart(t *testing.T) {
 	api := newMockLibvirt()

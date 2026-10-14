@@ -86,6 +86,11 @@ type Config struct {
 	// ——与 FR-CMP-012 的「域定义随配置」一致，恢复收敛与 15s 巡检会按当次 committed 刷新。
 	VMImageProfiles []model.VMImageProfile
 
+	// ImageExists 镜像仓库存在性探针（决策 #485）：报告某镜像名是否在仓库中（装配层接
+	// images.Store.Lookup）。恢复收敛/15s 巡检据此对账「配置有画像、仓库无镜像」的孤儿画像
+	// （告警 VM_IMAGE_PROFILE_ORPHAN，镜像回来即消解）。nil = 不判（既不建也不消，保守不猜测）。
+	ImageExists func(name string) bool
+
 	// DataPlaneProbe 数据面（VPP）可用性前置判定（决策 #314）：返回 nil = 可用；返回 error =
 	// 不可用（error 文本作为原因透出）。由装配层注入、复用**既有**的 VPP 连接状态查询
 	// （cmd/nfvisd 用 network.Manager.StatusView，与 /vpp/status 同源）——本包不另写探测，

@@ -1113,6 +1113,15 @@ func (e *Engine) checkImages(cfg *model.Config) []model.ValidateError {
 			check(ct.Name, ct.Image, "container-image", fmt.Sprintf("container-functions[%s].image", ct.Name))
 		}
 	}
+	// 决策 #485：镜像级启动画像以**镜像名为键**，其镜像也须在仓库中（画像仅 VM/QEMU，须 vm-image）。
+	// 与 VNF/容器同一处校验（checkImages）——model.Validate 无仓库访问，故不在那里判。
+	// 注意：这里只在**提交期**拦「建画像时镜像就缺」；已提交的画像在镜像事后被删时成为孤儿，
+	// 由计算编排的恢复收敛/15s 巡检按事实重建告警 VM_IMAGE_PROFILE_ORPHAN（不阻断提交）。
+	for _, p := range cfg.VMImageProfiles {
+		if p.Image != "" {
+			check("", p.Image, "vm-image", fmt.Sprintf("vm-image-profiles[%s]", p.Image))
+		}
+	}
 	return errs
 }
 

@@ -42,6 +42,11 @@ type Provider struct {
 	// alarms 恢复收敛告警落点（可空）。
 	alarms orchestrator.AlarmSink
 
+	// imageExists 镜像仓库存在性探针（决策 #485）：报告某镜像名是否在仓库中（内部实现为
+	// images.Store.Lookup）。nil = 不判（镜像仓库未装配，或单测未注入）——此时孤儿画像对账
+	// **既不建也不消**（保守，不猜测；与 #192 的「问不出来 ≠ 已复原」同口径）。
+	imageExists func(name string) bool
+
 	// 测试注入：睡眠与轮询间隔（生产用 time.Sleep / 200ms）。
 	sleep func(ctx context.Context, d time.Duration) error
 	poll  time.Duration
@@ -162,11 +167,17 @@ func NewProvider(cfg Config, api libvirtAPI, store storageAPI, seed seedBuilder)
 		poll:  200 * time.Millisecond,
 		// 决策 #485：装配期注入的镜像级启动画像（零值 = 无画像，行为与引入前一致）。
 		profiles: append([]model.VMImageProfile(nil), cfg.VMImageProfiles...),
+		// 决策 #485：装配期注入的镜像仓库存在性探针（零值 = 不判孤儿画像）。
+		imageExists: cfg.ImageExists,
 	}
 }
 
 // SetAlarms 注入恢复收敛告警落点（M4-9；可空）。
 func (p *Provider) SetAlarms(a orchestrator.AlarmSink) { p.alarms = a }
+
+// SetImageExists 注入镜像仓库存在性探针（决策 #485；可空 = 不判孤儿画像，保守不猜测）。
+// 与 Config.ImageExists 同义，供装配/单测在构造后注入。
+func (p *Provider) SetImageExists(f func(name string) bool) { p.imageExists = f }
 
 // SetVFResolver 注入 SR-IOV VF PCI 解析（M4-4）。
 func (p *Provider) SetVFResolver(f func(pf string, vfID int) (string, error)) { p.vfPCI = f }
@@ -607,12 +618,51 @@ func (p *Provider) Console(ctx context.Context, name string) (io.ReadWriteCloser
 	return p.api.OpenConsole(ctx, name)
 }
 
+// reconcileImageProfileAlarms 孤儿画像对账（决策 #485）：配置里有画像、镜像仓库却没有它指向的
+// 镜像 ⇒ 该画像静默失效（受影响的 VM 在下一次定义时回落产品默认），报 `VM_IMAGE_PROFILE_ORPHAN`
+// （warning，source = vm-image-profile/<镜像名>）。
+//
+// 口径（与 ACL_LEFTOVER / BRIDGE_DOMAIN_LEFTOVER 同族）：**按事实重建**——事实源是
+// 「committed 配置 × 镜像仓库」而非进程内记忆，故跨 nfvisd 重启仍可见；镜像重新出现在仓库即
+// 自动消解。只消解本码（不碰同作用域的 RECOVERY_UNCONVERGED / VM_CRASHED）。探针为 nil（仓库未
+// 装配/单测未注入）时**既不建也不消**——不猜测「镜像是否存在」（问不出来 ≠ 已复原）。
+func (p *Provider) reconcileImageProfileAlarms(cfg model.Config) {
+	if p.alarms == nil || p.imageExists == nil {
+		return
+	}
+	expect := make(map[string]bool, len(cfg.VMImageProfiles))
+	for _, prof := range cfg.VMImageProfiles {
+		if prof.Image == "" {
+			continue
+		}
+		if p.imageExists(prof.Image) {
+			continue
+		}
+		source := "vm-image-profile/" + prof.Image
+		expect[source] = true
+		p.alarms.Raise(orchestrator.RecoveryScopeCompute, orchestrator.SeverityWarning,
+			orchestrator.VMImageProfileOrphan,
+			fmt.Sprintf("镜像启动画像指向的镜像 %q 不在镜像仓库中：该画像不会生效（受影响的 VM 在"+
+				"下一次定义时回落产品默认启动参数）。本项由恢复收敛/巡检按配置与仓库事实重建"+
+				"（跨重启可见），用 request images upload 导入或 request images download 拉取该"+
+				"镜像后自动消警", prof.Image), source)
+	}
+	for _, a := range p.alarms.ActiveOf(orchestrator.RecoveryScopeCompute) {
+		if a.Code != orchestrator.VMImageProfileOrphan || expect[a.Source] {
+			continue
+		}
+		p.alarms.Resolve(orchestrator.RecoveryScopeCompute, a.Code, a.Source)
+	}
+}
+
 // EnsureConsistent 恢复收敛（FR-OPS-010/012）：按 committed 配置补建/修正缺失 domain。
 // 单个对象失败不阻塞其余对象，错误由调用方转告警。
 func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []error {
 	// 决策 #485：重放（数据面重启/恢复收敛）必须带上**当次 committed** 的镜像级启动画像，
 	// 否则 request vpp restart 后域会按装配期旧画像重建、画像参数丢失。
 	p.SetVMImageProfiles(cfg.VMImageProfiles)
+	// 决策 #485：孤儿画像对账与恢复收敛同块（同一份 committed 配置 + 同一张告警表）。
+	p.reconcileImageProfileAlarms(cfg)
 	var errs []error
 	for _, vm := range cfg.VirtualMachineFunctions {
 		err := p.DefineVM(ctx, vm, model.AllocationFor(cfg, vm))
@@ -820,6 +870,8 @@ func (p *Provider) CheckVMAlarms(ctx context.Context, cfg model.Config) []error 
 	// 决策 #485：同一条巡检按 committed 刷新镜像级启动画像——画像变更不属 VM 声明的差分，
 	// 提交期不会重定义域；刷新后「下一次 start/restart 重定义」即用上当前画像。
 	p.SetVMImageProfiles(cfg.VMImageProfiles)
+	// 决策 #485：同一条巡检顺带做孤儿画像对账（镜像被删/重新出现即建/消告警）。
+	p.reconcileImageProfileAlarms(cfg)
 	var errs []error
 	for _, vm := range cfg.VirtualMachineFunctions {
 		state, err := p.VMState(ctx, vm.Name)
