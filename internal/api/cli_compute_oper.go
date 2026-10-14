@@ -274,7 +274,8 @@ func (x *cliExecutor) requestVMSnapshot(user, name string, rest []string) string
 //
 // 控制台形态分派（决策 #485，Task 10）：按该 VM 的**有效控制台形态**（实例覆盖 > 镜像画像 >
 // 产品默认，见 model.EffectiveStartup）分流——
-//   - vnc：CLI 无图形通道，**拒绝**并指向 Web 控制台（noVNC）；
+//   - vnc：内置 VNC 查看器尚未随包提供，**拒绝**并说明（CLI 与 Web 控制台均未随包提供查看器），
+//     给出宿主接入路径（VNC 仅监听 127.0.0.1，用 virsh vncdisplay 查端口后以任意 VNC 客户端接入）；
 //   - telnet：仍走既有 ticket + WS 管线（底层由编排层拨 127.0.0.1 上的 telnet TCP 串口）；
 //   - serial（缺省）：既有 pty 串口，行为不变。
 func (x *cliExecutor) requestVMConsole(user, name string, confirmed bool) string {

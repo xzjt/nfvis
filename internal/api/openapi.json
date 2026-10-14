@@ -7961,7 +7961,7 @@
         }
       ],
       "post": {
-        "description": "按该 VM 的**有效控制台形态**（实例 startup 覆盖 > 镜像画像 > 产品默认，决策 #485）分派：\n- `serial`/`telnet`：签发一次性 ticket，返回 `ws_url`（文本串口 WebSocket 桥接；telnet\n  底层拨域里仅回环的 `<serial type='tcp'>` 端口）；\n- `vnc`：VNC 是图形控制台、走 noVNC 而非文本串口 WS，**不签发 ticket**——只回 `kind: vnc`，\n  前端据此走图形路径。\n响应里的 `kind` 即该形态，供前端选择渲染管线。\n",
+        "description": "按该 VM 的**有效控制台形态**（实例 startup 覆盖 > 镜像画像 > 产品默认，决策 #485）分派：\n- `serial`/`telnet`：签发一次性 ticket，返回 `ws_url`（文本串口 WebSocket 桥接；telnet\n  底层拨域里仅回环的 `<serial type='tcp'>` 端口）；\n- `vnc`：VNC 是图形控制台，文本串口 WS 不适用；**内置 VNC 查看器尚未随包提供**——\n  **不签发 ticket**，只回 `kind: vnc`。有宿主访问权限时用 `virsh vncdisplay <name>`\n  查端口后以任意 VNC 客户端接入。\n响应里的 `kind` 即该形态，供前端选择处理：`serial`/`telnet` 走文本串口管线；`vnc` 无内置\n查看器，前端仅提示上述宿主接入路径。\n",
         "responses": {
           "200": {
             "content": {
