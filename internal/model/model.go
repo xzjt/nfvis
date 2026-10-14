@@ -29,6 +29,8 @@ type Config struct {
 	Protocols               *ProtocolsConfig    `json:"protocols,omitempty"`
 	VirtualMachineFunctions []VMFunction        `json:"virtual_machine_functions,omitempty"`
 	ContainerFunctions      []ContainerFunction `json:"container_functions,omitempty"`
+	// VMImageProfiles 镜像级启动画像（决策 #485）：键＝vm-image 名，供 VM 的 domain 生成使用。
+	VMImageProfiles []VMImageProfile `json:"vm_image_profiles,omitempty"`
 
 	// Annotations 配置节点注释（FR-CFG-007 annotate；键=语句路径，决策 #27）
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -643,6 +645,8 @@ type VMFunction struct {
 	CloudInit     *CloudInit `json:"cloud_init,omitempty"`
 	SerialConsole *bool      `json:"serial_console,omitempty"` // 缺省启用
 	Autostart     bool       `json:"autostart,omitempty"`
+	// Startup 启动画像覆盖（实例级；仅含镜像画像允许覆盖的子集；决策 #485）。
+	Startup *VMStartupOverride `json:"startup,omitempty"`
 }
 
 type VMCpu struct {
@@ -697,4 +701,31 @@ type ContainerFunction struct {
 	Args          []string          `json:"args,omitempty"`
 	RestartPolicy string            `json:"restart_policy,omitempty"` // no|on-failure
 	Autostart     bool              `json:"autostart,omitempty"`
+}
+
+// VMImageProfile 镜像级启动画像（决策 #485，首版仅 VM/QEMU）。
+type VMImageProfile struct {
+	Image     string   `json:"image"`
+	Machine   string   `json:"machine,omitempty"`
+	CPUMode   string   `json:"cpu_mode,omitempty"`
+	CPUModel  string   `json:"cpu_model,omitempty"`
+	Firmware  string   `json:"firmware,omitempty"`
+	DiskIface string   `json:"disk_interface,omitempty"`
+	BootOrder string   `json:"boot_order,omitempty"`
+	Accel     string   `json:"accel,omitempty"`
+	Console   string   `json:"console,omitempty"`
+	ExtraArgs []string `json:"extra_args,omitempty"`
+}
+
+// VMStartupOverride VNF 实例对镜像画像的覆盖（字段集＝VMImageProfile 去掉 Image）。
+type VMStartupOverride struct {
+	Machine   string   `json:"machine,omitempty"`
+	CPUMode   string   `json:"cpu_mode,omitempty"`
+	CPUModel  string   `json:"cpu_model,omitempty"`
+	Firmware  string   `json:"firmware,omitempty"`
+	DiskIface string   `json:"disk_interface,omitempty"`
+	BootOrder string   `json:"boot_order,omitempty"`
+	Accel     string   `json:"accel,omitempty"`
+	Console   string   `json:"console,omitempty"`
+	ExtraArgs []string `json:"extra_args,omitempty"`
 }
