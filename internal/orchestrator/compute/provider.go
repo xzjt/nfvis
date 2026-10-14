@@ -60,7 +60,9 @@ type Provider struct {
 
 	// profileMu/profiles 镜像级启动画像的当前来源（决策 #485）：装配期由 Config 注入，
 	// 恢复收敛（EnsureConsistent）与 15s 巡检（CheckVMAlarms）按**当次 committed 配置**刷新
-	// ——这两条路径本就拿到整份配置（同 #455 的域新鲜度前置），故不另设装配接线。
+	// ——这两条路径本就拿到整份配置（同 #455 的域新鲜度前置）。此外，提交期的 apply 计划
+	// 在 VM 定义之前先按**当次 new 声明**喂入（SetVMImageProfiles），否则同一提交里
+	// 「改画像 + 建/改该 VM」的域会用到上一次刷新的旧画像。
 	// 读写分锁（与 p.mu 互不相干），避免与域组装的临界区交叉。
 	profileMu sync.RWMutex
 	profiles  []model.VMImageProfile

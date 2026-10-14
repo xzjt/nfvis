@@ -603,6 +603,32 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	}
 
 	// —— 新增/变更：计算、容器 ——
+	//
+	// 镜像级启动画像（决策 #485）排在 VM 定义**之前**：它是纯配置节，**不下发任何数据面
+	// 动作**（画像只被「下一次 VM 定义」读取——compute 组装 domain 时经 model.EffectiveStartup
+	// 合并「实例覆盖 > 镜像画像 > 产品默认」），但必须把当次声明的画像先喂给计算编排，
+	// 否则同一提交里「改画像 + 建/改该 VM」的 VM 定义会取用上一次刷新（装配期或 15s 巡检）
+	// 的旧画像。undo 恢复变更前的画像值，保证回滚后下一次定义仍按旧画像（#178/#179 的
+	// undo 缺口教训：apply 的 undo 缺口是历史高发区）。
+	//
+	// 删除画像不需要解引用/阻断：画像只是「按镜像名索引的一组默认值」，删掉它意味着受影响的
+	// VM 在下一次定义时回落产品默认（model.EffectiveStartup 无匹配即返回默认），故不设引用校验。
+	// 运行中的 VM 仍按 FR-CMP-012 需停机重定义才生效（画像不做热修改）。
+	if !configEqual(old.VMImageProfiles, new.VMImageProfiles) {
+		newProfiles := append([]model.VMImageProfile(nil), new.VMImageProfiles...)
+		oldProfiles := append([]model.VMImageProfile(nil), old.VMImageProfiles...)
+		ops = append(ops, op{
+			desc: "vm-image-profiles",
+			run: func(ctx context.Context) error {
+				a.comp.SetVMImageProfiles(newProfiles)
+				return nil
+			},
+			undo: func(ctx context.Context) error {
+				a.comp.SetVMImageProfiles(oldProfiles)
+				return nil
+			},
+		})
+	}
 	for _, vm := range new.VirtualMachineFunctions {
 		oldVM, inOld := oldVMs[vm.Name]
 		if inOld && configEqual(oldVM, vm) {

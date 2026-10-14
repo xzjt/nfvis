@@ -251,6 +251,14 @@ type ComputeProvider interface {
 	EnsureConsistent(ctx context.Context, cfg model.Config) []error
 	// CheckVMAlarms 异常退出巡检（FR-CMP-017）：crashed → critical 告警，恢复则消警。
 	CheckVMAlarms(ctx context.Context, cfg model.Config) []error
+
+	// SetVMImageProfiles 同步镜像级启动画像（决策 #485）。
+	//
+	// 纯配置能力：**不下发任何数据面动作**，只影响下一次 DefineVM 组装 domain 时取用的
+	// 有效画像（model.EffectiveStartup：实例覆盖 > 镜像画像 > 产品默认）。提交期由 apply
+	// 计划喂入当次声明（否则同一提交里「改画像 + 建/改 VM」会用上一次刷新——装配期或 15s
+	// 巡检——的旧画像）；恢复收敛与 15s 巡检另按 committed 配置刷新。未接入态静默无操作。
+	SetVMImageProfiles(profiles []model.VMImageProfile)
 }
 
 // ContainerProvider Docker 侧编排接口（memif socket 挂载，FR-NET-022）。
@@ -338,6 +346,7 @@ func (noopCompute) EnsureConsistent(context.Context, model.Config) []error {
 	return nil
 }
 func (noopCompute) CheckVMAlarms(context.Context, model.Config) []error { return nil }
+func (noopCompute) SetVMImageProfiles([]model.VMImageProfile)           {}
 
 // NewNoopContainer 空容器编排（M4 替换为 Docker 实现）。
 func NewNoopContainer() ContainerProvider { return noopContainer{} }

@@ -51,6 +51,7 @@ type fakeCompute struct {
 	snapDeleted  [][2]string
 	ensured      []model.Config
 	alarmRuns    []model.Config
+	profileSets  [][]model.VMImageProfile
 
 	stateVal   string
 	stateErr   error
@@ -163,6 +164,13 @@ func (f *fakeCompute) CheckVMAlarms(_ context.Context, cfg model.Config) []error
 	defer f.mu.Unlock()
 	f.alarmRuns = append(f.alarmRuns, cfg)
 	return nil
+}
+
+// SetVMImageProfiles 决策 #485：记录同步收到的画像（持有层换装转发断言用）。
+func (f *fakeCompute) SetVMImageProfiles(profiles []model.VMImageProfile) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.profileSets = append(f.profileSets, profiles)
 }
 
 // fakeContainer 记录调用的 containerFacade 假件。
@@ -319,6 +327,8 @@ func TestDynamicComputeDegradedSemantics(t *testing.T) {
 	if errs := h.CheckVMAlarms(ctx, model.Config{}); len(errs) != 0 {
 		t.Fatalf("未接入 CheckVMAlarms 应为空: %v", errs)
 	}
+	// 画像同步（决策 #485）：未接入 ⇒ 静默无操作（无返回值，调用不 panic 即通过）。
+	h.SetVMImageProfiles([]model.VMImageProfile{{Image: "img1", Machine: "pc"}})
 	// 生命周期/seed/启动回读：与 nil 分支同文案的错误。
 	for name, fn := range map[string]func() error{
 		"StartVM":   func() error { return h.StartVM(ctx, "vm-a") },
@@ -416,6 +426,11 @@ func TestDynamicComputeForwardsAfterSwap(t *testing.T) {
 	}
 	if errs := h.CheckVMAlarms(ctx, model.Config{}); len(errs) != 0 {
 		t.Fatalf("CheckVMAlarms 转发失败: %v", errs)
+	}
+	// 画像同步（决策 #485）：换装后必须转发到真实实现（否则提交期喂入的画像丢失）。
+	h.SetVMImageProfiles([]model.VMImageProfile{{Image: "img1", Machine: "pc"}})
+	if len(fake.profileSets) != 1 || len(fake.profileSets[0]) != 1 || fake.profileSets[0][0].Machine != "pc" {
+		t.Fatalf("SetVMImageProfiles 未转发到实现: %v", fake.profileSets)
 	}
 	// 参数确实到达了真实实现（抽两条核对）。
 	if len(fake.startChecked) != 1 || fake.startChecked[0] != "vm-a" {
