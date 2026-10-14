@@ -1132,3 +1132,34 @@ func TestValidateVMImageProfiles(t *testing.T) {
 		t.Fatalf("denylisted startup extra-args not rejected")
 	}
 }
+
+// 决策 #485 复审：VMFunction.Startup 覆盖块与画像**同一份**枚举/一致性规则。
+// CLI 路径被命令树的 VE 叶子顺带挡住，但 REST/JSON/配置导入可绕过树，故在此对称补齐。
+func TestValidateVMStartupOverrideEnums(t *testing.T) {
+	// 合法覆盖：版本化机型名 + 合法枚举 + 画像提供 cpu_model（custom 生效值来自合并）
+	c := validBase()
+	c.VMImageProfiles = []VMImageProfile{{Image: "ubuntu22-vm", CPUMode: "custom", CPUModel: "Skylake-Client"}}
+	c.VirtualMachineFunctions[0].Startup = &VMStartupOverride{Machine: "pc-q35-6.2", CPUMode: "custom", Console: "vnc", Accel: "tcg"}
+	mustNoErr(t, Validate(c))
+
+	// 覆盖块非法枚举被拒
+	c2 := validBase()
+	c2.VirtualMachineFunctions[0].Startup = &VMStartupOverride{Accel: "bogus"}
+	mustErrContaining(t, Validate(c2), "startup.accel", "accel")
+
+	// 覆盖块非法 machine 被拒
+	c5 := validBase()
+	c5.VirtualMachineFunctions[0].Startup = &VMStartupOverride{Machine: "bogus"}
+	mustErrContaining(t, Validate(c5), "startup.machine", "machine")
+
+	// cpu_mode=custom 缺 cpu_model，且匹配画像也未提供 ⇒ 拒
+	c3 := validBase()
+	c3.VirtualMachineFunctions[0].Startup = &VMStartupOverride{CPUMode: "custom"}
+	mustErrContaining(t, Validate(c3), "startup.cpu_model", "cpu model")
+
+	// cpu_mode=custom 缺 cpu_model，但匹配画像提供了 cpu_model ⇒ 通过（生效值来自合并）
+	c4 := validBase()
+	c4.VMImageProfiles = []VMImageProfile{{Image: "ubuntu22-vm", CPUModel: "Skylake-Client"}}
+	c4.VirtualMachineFunctions[0].Startup = &VMStartupOverride{CPUMode: "custom"}
+	mustNoErr(t, Validate(c4))
+}

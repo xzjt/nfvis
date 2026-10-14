@@ -2251,6 +2251,9 @@ func (v *validator) checkVMFunctions(c Config) {
 //   - cpu_mode=custom 必须给出 cpu_model（否则合并后仍是 custom 却无型号）；
 //   - 画像 extra_args 过 denylist（ValidateExtraArgs，与实例覆盖同一份判据）。
 //
+// 实例覆盖（VMFunction.Startup）用**同一份**规则校验（见下方循环）——CLI 路径被命令树的
+// VE 叶子顺带挡住，但 REST/JSON/配置导入可绕过树，把非法枚举带进 DomainSpec→domain XML。
+//
 // 镜像**存在性**不在此判——那要访问镜像仓库，归编排层（本任务范围外）。
 func (v *validator) checkVMImageProfiles(c Config) {
 	dupCheck(v, c.VMImageProfiles, "vm-image-profiles", func(p VMImageProfile) string { return p.Image }, "镜像画像")
@@ -2263,27 +2266,52 @@ func (v *validator) checkVMImageProfiles(c Config) {
 		if p.CPUMode == "custom" && strings.TrimSpace(p.CPUModel) == "" {
 			v.errf(at+".cpu_model", "cpu mode custom 必须给出 cpu model")
 		}
-		v.checkProfileMachine(at, p.Machine)
-		v.checkProfileEnum(at, "cpu_mode", p.CPUMode, "host-passthrough", "host-model", "custom")
-		v.checkProfileEnum(at, "firmware", p.Firmware, "bios", "uefi")
-		v.checkProfileEnum(at, "disk_interface", p.DiskIface, "virtio", "sata", "ide", "scsi")
-		v.checkProfileEnum(at, "boot_order", p.BootOrder, "hd", "cd", "dc")
-		v.checkProfileEnum(at, "accel", p.Accel, "kvm", "tcg")
-		v.checkProfileEnum(at, "console", p.Console, "serial", "telnet", "vnc")
+		v.checkStartupEnums(at, p.Machine, p.CPUMode, p.Firmware, p.DiskIface, p.BootOrder, p.Accel, p.Console)
 		if err := ValidateExtraArgs(p.ExtraArgs); err != nil {
 			v.errf(at+".extra_args", "%v", err)
 		}
 	}
-	// 实例覆盖（VMFunction.Startup）的 extra_args 与画像同一份 denylist——两侧都过，
-	// 否则实例覆盖会绕过画像的窄自由口约束。
+	// 实例覆盖（VMFunction.Startup）：与画像**对称**——枚举/机型名同一份规则，extra_args 同一份
+	// denylist。cpu_mode=custom 的 cpu_model 判定按**生效值**：覆盖块自身没给时，若匹配的镜像
+	// 画像提供了也算满足（合并序 覆盖 > 画像 > 默认，见 startup.go）。
 	for _, vm := range c.VirtualMachineFunctions {
 		if vm.Startup == nil {
 			continue
 		}
-		if err := ValidateExtraArgs(vm.Startup.ExtraArgs); err != nil {
-			v.errf(fmt.Sprintf("virtual-machine-functions[%s].startup.extra_args", vm.Name), "%v", err)
+		o := vm.Startup
+		sp := fmt.Sprintf("virtual-machine-functions[%s].startup", vm.Name)
+		v.checkStartupEnums(sp, o.Machine, o.CPUMode, o.Firmware, o.DiskIface, o.BootOrder, o.Accel, o.Console)
+		if o.CPUMode == "custom" && strings.TrimSpace(o.CPUModel) == "" && profileCPUModel(c, vm.Image) == "" {
+			v.errf(sp+".cpu_model", "cpu mode custom 必须给出 cpu model")
+		}
+		if err := ValidateExtraArgs(o.ExtraArgs); err != nil {
+			v.errf(sp+".extra_args", "%v", err)
 		}
 	}
+}
+
+// checkStartupEnums 画像与实例覆盖**共用**的枚举/机型名校验（决策 #485）：machine（含版本化
+// 机型名前缀 pc-i440fx-* / pc-q35-*）与六个取值枚举。path 为承载这些字段的对象路径
+// （画像块或实例覆盖块）。两处共用同一实现，保证「同一份配置、同一份规则」不漂移。
+func (v *validator) checkStartupEnums(path, machine, cpuMode, firmware, diskIface, bootOrder, accel, console string) {
+	v.checkProfileMachine(path, machine)
+	v.checkProfileEnum(path, "cpu_mode", cpuMode, "host-passthrough", "host-model", "custom")
+	v.checkProfileEnum(path, "firmware", firmware, "bios", "uefi")
+	v.checkProfileEnum(path, "disk_interface", diskIface, "virtio", "sata", "ide", "scsi")
+	v.checkProfileEnum(path, "boot_order", bootOrder, "hd", "cd", "dc")
+	v.checkProfileEnum(path, "accel", accel, "kvm", "tcg")
+	v.checkProfileEnum(path, "console", console, "serial", "telnet", "vnc")
+}
+
+// profileCPUModel 返回 Image 匹配的镜像画像的 cpu_model（无匹配画像或未设返回 ""）——
+// 实例覆盖的 cpu_mode=custom 校验据此判定「画像已提供型号」（生效值来自合并）。
+func profileCPUModel(c Config, image string) string {
+	for _, p := range c.VMImageProfiles {
+		if p.Image == image {
+			return p.CPUModel
+		}
+	}
+	return ""
 }
 
 // checkProfileMachine machine 枚举（决策 #485）：q35|pc 两个固定值，另允许 QEMU 的版本化
