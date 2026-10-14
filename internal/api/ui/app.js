@@ -4563,6 +4563,23 @@ function termMsg(text, isErr) {
   out.scrollTop = out.scrollHeight;
 }
 
+// VNC 视图内的可见提示：VNC 视图会隐藏 #vm-console-out（见 vmConsoleShowVNC），故 VNC 的
+// 连接/错误/断开提示必须写进这块**可见**元素——否则真实连接失败或断开只会让用户看到黑屏、
+// 毫无解释。追加式保留本次会话内的提示历史。
+function vncNotice(text, isErr) {
+  const n = $('vm-vnc-notice');
+  if (!n) return;
+  n.hidden = false;
+  n.classList.toggle('err', !!isErr);
+  n.textContent += (isErr ? '[错误] ' : '[信息] ') + text + '\n';
+}
+
+// 清空并隐藏 VNC 提示条（切换视图/关闭 console 时调用）。
+function vmConsoleHideVNCNotice() {
+  const n = $('vm-vnc-notice');
+  if (n) { n.textContent = ''; n.hidden = true; n.classList.remove('err'); }
+}
+
 async function vmConsoleOpen(name) {
   if (termWS || (window.nfvisVnc && window.nfvisVnc.isOpen())) {
     termMsg('先断开当前 console（' + termVM + '）。', true); return;
@@ -4629,14 +4646,14 @@ async function vmConsoleOpenVNC(name) {
   vmConsoleSyncBtn();
   const wsURL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + ticket.ws_url;
   window.nfvisVnc.open(wsURL, $('vm-vnc-view'), {
-    onConnect: () => termMsg('已连接 ' + name + ' 的 VNC 图形控制台（鼠标/键盘直接作用于 guest）。', false),
-    onError: (e) => termMsg('VNC 连接失败：' + (e && e.message ? e.message : e), true),
+    onConnect: () => vncNotice('已连接 ' + name + ' 的 VNC 图形控制台（鼠标/键盘直接作用于 guest）。', false),
+    onError: (e) => vncNotice('VNC 连接失败：' + (e && e.message ? e.message : e), true),
     onDisconnect: (d) => {
       const clean = !!(d && d.clean);
       termVNC = false; termVM = '';
       vmConsoleSyncBtn();
       if (vncClosing) { vncClosing = false; return; }
-      termMsg(clean ? 'VNC 连接已关闭。'
+      vncNotice(clean ? 'VNC 连接已关闭。'
         : 'VNC 连接已断开（凭证过期、VM 未运行或 VNC 服务不可达）。', !clean);
     },
   });
@@ -4647,6 +4664,7 @@ function vmConsoleShowText() {
   const out = $('vm-console-out'); if (out) out.hidden = false;
   const io = $('vm-console-io'); if (io) io.hidden = false;
   const v = $('vm-vnc-view'); if (v) v.hidden = true;
+  vmConsoleHideVNCNotice();
   vmConsoleTitle('串口 console ');
 }
 
@@ -4655,6 +4673,7 @@ function vmConsoleShowVNC() {
   const out = $('vm-console-out'); if (out) out.hidden = true;
   const io = $('vm-console-io'); if (io) io.hidden = true;
   const v = $('vm-vnc-view'); if (v) v.hidden = false;
+  vmConsoleHideVNCNotice();
   vmConsoleTitle('VNC 图形控制台 ');
 }
 
@@ -4680,6 +4699,7 @@ function vmConsoleClose() {
   if (box) box.hidden = true;
   const out = $('vm-console-out');
   if (out) out.textContent = '';
+  vmConsoleHideVNCNotice();
 }
 
 function vmConsoleSend(text, enter) {

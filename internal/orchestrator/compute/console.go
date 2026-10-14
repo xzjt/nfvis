@@ -71,10 +71,18 @@ func VNCTCPAddr(domainXML string) (string, bool, error) {
 		if end < 0 {
 			return "", false, nil
 		}
+		// 界定「以 start 起始的这个 <graphics> 元素」：
+		//   - 自闭合（`<graphics .../>`）→ 只到其起始标签的 `>`；
+		//   - 带子元素（如 <listen .../>）→ 扩到**本元素自己的** `</graphics>`。
+		// 关键：不能无条件扩到「start 之后出现的第一个 `</graphics>`」——若前面有一个自闭合的
+		// 图形元素（如 spice），那个 `</graphics>` 属于**后面的** VNC 元素，会把 VNC 元素一并
+		// 吞进 block 并让 idx 越过它，之后再也找不到（复现：
+		// `<graphics type='spice' .../><graphics type='vnc' ...></graphics>`）。
 		block := rest[:end+1]
-		// 图形元素带子元素（如 <listen .../>）时扩到闭合标签，便于读 listen/address 子元素。
-		if j := strings.Index(rest, "</graphics>"); j >= 0 {
-			block = rest[:j]
+		if !strings.HasSuffix(strings.TrimSpace(rest[:end]), "/") {
+			if j := strings.Index(rest, "</graphics>"); j >= 0 {
+				block = rest[:j]
+			}
 		}
 		idx = start + len(block)
 		mt := graphicsTypeRe.FindStringSubmatch(block)
@@ -97,6 +105,24 @@ func VNCTCPAddr(domainXML string) (string, bool, error) {
 		}
 		return net.JoinHostPort(host, strconv.Itoa(port)), true, nil
 	}
+}
+
+// IsLoopbackAddr 判断 "host:port"（如 net.JoinHostPort 的产物）的 host 是否为回环地址。
+// 仅回环（127.0.0.0/8、::1、localhost）为真——VNC 图形服务只应监听本机，访问路径据此
+// 拒绝把字节流送到任何非回环目标（纵深防御，见 OpenVNC）。
+func IsLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // SerialTCPAddr 从 domain XML 提取 **telnet 控制台**的 TCP 目标地址（纯函数，单测覆盖）。

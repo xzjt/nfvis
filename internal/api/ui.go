@@ -67,6 +67,11 @@ func uiContentType(name string) (string, bool) {
 			return "", false
 		}
 	}
+	// novnc/LICENSE 无扩展名（path.Ext 为空），不在扩展名表里——单独放行，让 vendored noVNC
+	// 的许可证（MPL-2.0）也能从 /ui/ 取到（合规可见性）。
+	if name == "novnc/LICENSE" {
+		return "text/plain; charset=utf-8", true
+	}
 	ct, ok := uiExtTypes[strings.ToLower(path.Ext(name))]
 	return ct, ok
 }

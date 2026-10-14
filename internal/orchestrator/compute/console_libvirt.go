@@ -79,6 +79,11 @@ func (c *Conn) OpenVNC(ctx context.Context, name string) (io.ReadWriteCloser, er
 	if !ok {
 		return nil, fmt.Errorf("VM %s 未配置 VNC 图形控制台", name)
 	}
+	// 纵深防御：VNC 服务只应监听回环；域 XML 的 listen/address 一旦被改成非回环地址
+	// （误配/被篡改），此处如实拒绝，绝不把内建查看器的字节流拨向外部主机。
+	if !IsLoopbackAddr(addr) {
+		return nil, fmt.Errorf("VM %s 的 VNC 监听地址 %q 不是回环地址（内置查看器仅允许本机回环，拒绝对外拨号）", name, addr)
+	}
 	d := net.Dialer{Timeout: 5 * time.Second}
 	conn, derr := d.DialContext(ctx, "tcp", addr)
 	if derr != nil {

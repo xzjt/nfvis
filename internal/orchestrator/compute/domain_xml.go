@@ -97,7 +97,7 @@ type DomainSpec struct {
 	CPUModel  string // CPUMode=custom 时的 CPU 型号
 	Firmware  string // bios|uefi（缺省 bios）
 	DiskIface string // virtio|sata|ide|scsi（缺省 virtio）
-	BootOrder string // hd|cd|dc（缺省 hd；iso 强制 cd）
+	BootOrder string // hd|cd|dc（缺省 hd；iso 主盘强制 cdrom）
 	Accel     string // kvm|tcg（缺省 kvm）
 	Console   string // serial|telnet|vnc（缺省 serial）
 	// ConsoleExplicit 有效控制台形态是否由画像/实例覆盖**显式设定**（决策 #485 契约 §4.3）：

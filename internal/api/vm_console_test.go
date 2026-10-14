@@ -1,11 +1,13 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -476,5 +478,138 @@ func TestConsoleTicketSerialOffNoConsole(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "serial_console=false") {
 		t.Fatalf("409 文案应点明 serial_console=false: %s", data)
+	}
+}
+
+// hijackResponseWriter 是一个能被抓握（Hijack）的最小 http.ResponseWriter，
+// 用于在进程内把 WS 服务端的字节写进 net.Pipe，从而直接读**线上原始帧**。
+type hijackResponseWriter struct {
+	conn net.Conn
+	hdr  http.Header
+	rw   *bufio.ReadWriter
+}
+
+func (w *hijackResponseWriter) Header() http.Header {
+	if w.hdr == nil {
+		w.hdr = http.Header{}
+	}
+	return w.hdr
+}
+func (w *hijackResponseWriter) Write(b []byte) (int, error) { return w.conn.Write(b) }
+func (w *hijackResponseWriter) WriteHeader(int)             {}
+func (w *hijackResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if w.rw == nil {
+		w.rw = bufio.NewReadWriter(bufio.NewReader(w.conn), bufio.NewWriter(w.conn))
+	}
+	return w.conn, w.rw, nil
+}
+
+// readUntilDoubleCRLF 逐字节读到 HTTP 头结束（\r\n\r\n）为止，返回读到的原始字节。
+func readUntilDoubleCRLF(br *bufio.Reader) ([]byte, error) {
+	var out []byte
+	for {
+		b, err := br.ReadByte()
+		if err != nil {
+			return out, err
+		}
+		out = append(out, b)
+		if len(out) >= 4 && string(out[len(out)-4:]) == "\r\n\r\n" {
+			return out, nil
+		}
+	}
+}
+
+// wsFrameOpcodeInProcess 在**进程内**完成一次 WS 握手并返回服务端→客户端**首个 WS 帧**的 opcode。
+// 为何这么做：x/net 的客户端读帧时对 opcode 无感，看不出「二进制当文本发」这个缺陷；而把真实
+// 客户端/代理夹在中间时，x/net 服务端握手在本环境会出现「握手后即关连接」的竞态（帧被丢）。
+// 用 net.Pipe 直接对接握手后的帧写入，既确定性、又读到真正的线上字节——这正是 noVNC
+// （binaryType=arraybuffer，逐字节读 RFB）依赖的东西。
+func wsFrameOpcodeInProcess(t *testing.T, h http.Handler, path string) byte {
+	t.Helper()
+	client, server := net.Pipe()
+	defer client.Close()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Origin", "http://nfvis.local")
+	go func() {
+		defer server.Close()
+		h.ServeHTTP(&hijackResponseWriter{conn: server}, req)
+	}()
+	br := bufio.NewReader(client)
+	raw, err := readUntilDoubleCRLF(br)
+	if err != nil {
+		t.Fatalf("读握手响应: %v（已读 %q）", err, raw)
+	}
+	if !strings.Contains(string(raw), "101") {
+		t.Fatalf("WS 未升级: %q", raw)
+	}
+	b, err := br.ReadByte()
+	if err != nil {
+		t.Fatalf("读服务端帧首字节: %v", err)
+	}
+	return b & 0x0f
+}
+
+// frameConsoleRuntime 每次调用都返回**新的**假串口流（一条会话一个）——假流「读一次问候即阻塞」，
+// 一条会话消费掉问候后再复用就只剩阻塞，故不能像 fakeConsoleRuntime 那样共享同一个流。
+type frameConsoleRuntime struct {
+	serial string
+	vnc    string
+}
+
+func (r frameConsoleRuntime) Console(context.Context, string) (io.ReadWriteCloser, error) {
+	return newFakeConsoleStream(r.serial), nil
+}
+func (r frameConsoleRuntime) VNC(context.Context, string) (io.ReadWriteCloser, error) {
+	return newFakeConsoleStream(r.vnc), nil
+}
+
+// C1 回归：VNC WS 代理服务端→客户端必须发**二进制帧**（opcode 0x2），否则 noVNC 收到的是
+// 文本帧（JS 里变字符串、Uint8Array 归零、RFB 握手拿不到字节 ⇒ 黑屏，非 UTF-8 还会被浏览器以
+// 1007 关帧）。同时锁定**串口 console 仍为文本帧**（0x1）——文本终端语义不变。
+func TestConsoleWSFrameOpcodeBinaryVsText(t *testing.T) {
+	ts := newTestServerOpts(t, Options{VM: newFakeVM(), VMConsole: frameConsoleRuntime{serial: "HELLO-CONSOLE\r\n", vnc: "RFB 003.008\n"}})
+	token := loginAdmin(t, ts)
+	seedVMPool(t, ts, token)
+
+	// VNC 形态 VM：服务端问候须以二进制帧送出（0x2）。
+	vbody := vmBody("vnc-vm")
+	vbody["startup"] = map[string]any{"console": "vnc"}
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		vbody, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("建 vnc VM: %d %s", status, data)
+	}
+	_, _, vdata := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions/vnc-vm/console/vnc", token, nil, nil)
+	var vgot struct {
+		WSURL string `json:"ws_url"`
+	}
+	if err := json.Unmarshal(vdata, &vgot); err != nil || vgot.WSURL == "" {
+		t.Fatalf("vnc 凭证响应不符: %s", vdata)
+	}
+	vtok := vgot.WSURL[strings.Index(vgot.WSURL, "ticket=")+len("ticket="):]
+	vpath := APIPrefix + "/virtual-machine-functions/vnc-vm/console/vnc/ws?ticket=" + vtok
+	if op := wsFrameOpcodeInProcess(t, ts.Config.Handler, vpath); op != 0x2 {
+		t.Fatalf("VNC 服务端→客户端首帧 opcode = 0x%x，期望 0x2（二进制）；noVNC 需要二进制帧读 RFB", op)
+	}
+
+	// 串口形态 VM（缺省 serial）：文本终端仍走文本帧（0x1）——既有行为不变。
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		vmBody("ser-vm"), map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("建 serial VM: %d %s", status, data)
+	}
+	_, _, sdata := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions/ser-vm/console", token, nil, nil)
+	var sgot struct {
+		WSURL string `json:"ws_url"`
+	}
+	if err := json.Unmarshal(sdata, &sgot); err != nil || sgot.WSURL == "" {
+		t.Fatalf("serial 凭证响应不符: %s", sdata)
+	}
+	stok := sgot.WSURL[strings.Index(sgot.WSURL, "ticket=")+len("ticket="):]
+	spath := APIPrefix + "/virtual-machine-functions/ser-vm/console/ws?ticket=" + stok
+	if op := wsFrameOpcodeInProcess(t, ts.Config.Handler, spath); op != 0x1 {
+		t.Fatalf("串口 console 首帧 opcode = 0x%x，期望 0x1（文本帧，行为须与既有文本终端一致）", op)
 	}
 }

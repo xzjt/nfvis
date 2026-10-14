@@ -102,6 +102,23 @@ func TestVNCTCPAddr(t *testing.T) {
 	if addr, ok, err := VNCTCPAddr(mixed); err != nil || !ok || addr != "127.0.0.1:5903" {
 		t.Fatalf("并存应取 vnc: %q ok=%v err=%v", addr, ok, err)
 	}
+	// 复现（多图形域）：前一个图形元素自闭合、后一个 vnc 元素带子元素（有 `</graphics>`）——
+	// 旧实现把 block 无条件扩到「首个 `</graphics>`」，于是自闭合元素把后面的 vnc 元素一并吞掉，
+	// idx 越过 vnc 后返回 not-vnc。正确行为：只界定「以本元素起始」的那一个元素。
+	swallow := `<domain><devices>
+    <graphics type='spice' port='5930' autoport='yes'/>
+    <graphics type='vnc' port='5904' autoport='no' listen='127.0.0.1'>
+      <listen type='address' address='127.0.0.1'/>
+    </graphics>
+  </devices></domain>`
+	if addr, ok, err := VNCTCPAddr(swallow); err != nil || !ok || addr != "127.0.0.1:5904" {
+		t.Fatalf("自闭合元素不应吞掉其后的 vnc 元素: %q ok=%v err=%v", addr, ok, err)
+	}
+	// 自闭合 vnc 元素本身在前、带子元素的 vnc 在后：取到后面的（带子元素那个）。
+	selfThenChild := `<domain><devices><graphics type='vnc' port='5905' listen='127.0.0.1'/><graphics type='vnc' port='5906' listen='127.0.0.1'><listen type='address' address='127.0.0.1'/></graphics></devices></domain>`
+	if addr, ok, err := VNCTCPAddr(selfThenChild); err != nil || !ok || addr != "127.0.0.1:5905" {
+		t.Fatalf("应取第一个 vnc 元素（自闭合那个）: %q ok=%v err=%v", addr, ok, err)
+	}
 
 	// 无 graphics：不是 vnc（交给上层如实报「未配置 VNC」）。
 	if _, ok, err := VNCTCPAddr(`<domain><devices></devices></domain>`); ok || err != nil {
@@ -116,5 +133,23 @@ func TestVNCTCPAddr(t *testing.T) {
 	// vnc 但完全无 port 属性：同样如实报错。
 	if _, ok, err := VNCTCPAddr(`<domain><devices><graphics type='vnc' autoport='yes'/></devices></domain>`); !ok || err == nil {
 		t.Fatalf("vnc 缺端口应报错: ok=%v err=%v", ok, err)
+	}
+}
+
+// IsLoopbackAddr：仅回环地址（127.0.0.0/8、::1、localhost）为真；其余（含空 host、
+// 非回环 IP、域名、无端口/非法 host:port）一律为假——OpenVNC 据此拒绝把字节流拨向外部。
+func TestIsLoopbackAddr(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:5900", "127.0.0.5:5901", "[::1]:5900", "localhost:5900", "LOCALHOST:5900"} {
+		if !IsLoopbackAddr(addr) {
+			t.Errorf("%q 应判为回环", addr)
+		}
+	}
+	for _, addr := range []string{
+		"10.0.0.1:5900", "192.168.1.1:5900", "0.0.0.0:5900", "8.8.8.8:5900",
+		"example.com:5900", ":5900", "127.0.0.1", "not-an-addr",
+	} {
+		if IsLoopbackAddr(addr) {
+			t.Errorf("%q 不应判为回环", addr)
+		}
 	}
 }

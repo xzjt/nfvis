@@ -250,6 +250,13 @@ func (s *Server) handleVNCWS(w http.ResponseWriter, r *http.Request) {
 		user = "api"
 	}
 	websocket.Handler(func(ws *websocket.Conn) {
+		// **必须发二进制帧**：x/net/websocket 默认 PayloadType=TextFrame，
+		// 会把服务端→客户端的字节当 UTF-8 文本帧发。noVNC 对每个消息做
+		// `new Uint8Array(e.data)`（binaryType="arraybuffer"）——文本帧在 JS 里是字符串，
+		// 转 Uint8Array 只得空数组，RFB 握手永远拿不到字节；非 UTF-8 的 VNC 字节更会触发
+		// 浏览器的 1007（非法 UTF-8）关帧。RFB 是二进制协议，故此处把帧类型设为二进制
+		// （字段是导出的、每次 Write 现读，见 x/net/websocket Conn.Write/PayloadType）。
+		ws.PayloadType = websocket.BinaryFrame
 		stream, err := s.vmConsole.VNC(ws.Request().Context(), name)
 		if err != nil {
 			_, _ = fmt.Fprintf(ws, "\r\nVNC 连接失败: %v\r\n", err)
