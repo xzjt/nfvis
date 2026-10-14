@@ -176,13 +176,9 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 		diskFormat = DefaultDiskFormat
 	}
 	isoDisk := strings.EqualFold(diskFormat, "iso")
-	bootDev := "hd"
-	if isoDisk {
-		// iso 镜像强制从光驱引导，画像的 boot-order 不覆盖它。
-		bootDev = "cd"
-	} else if bo := strings.TrimSpace(spec.BootOrder); bo != "" {
-		bootDev = bo
-	}
+	// 引导顺序（决策 #485）：画像的 boot-order 取值 hd|cd|dc，须映射为 libvirt **合法**的
+	// `<boot dev>` 设备名；iso 主盘强制从光驱引导，画像的 boot-order 不覆盖它。
+	bootDevices := bootDevicesFor(spec.BootOrder, isoDisk)
 
 	// accel：tcg → 域类型 qemu（纯软件模拟）；否则 kvm（缺省）。
 	domainType := "kvm"
@@ -213,7 +209,7 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 		OS: &libvirtxml.DomainOS{
 			Type:        &libvirtxml.DomainOSType{Arch: "x86_64", Machine: machine, Type: "hvm"},
 			Firmware:    firmware,
-			BootDevices: []libvirtxml.DomainBootDevice{{Dev: bootDev}},
+			BootDevices: bootDevices,
 		},
 		Clock:    &libvirtxml.DomainClock{Offset: "utc"},
 		Features: &libvirtxml.DomainFeatureList{ACPI: &libvirtxml.DomainFeature{}},
@@ -368,6 +364,32 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 	}
 
 	return d, nil
+}
+
+// bootDevicesFor 引导顺序 → libvirt `<boot dev>` 元素序列（决策 #485）。
+//
+// libvirt 的 `<boot dev>` 只认 fd|hd|cdrom|network（**没有 "cd"**），且引导优先级由 `<boot>`
+// 元素的**先后次序**表达。真机实证：写 `dev="cd"` 会被 libvirt 拒绝
+// （XML error: Invalid value for attribute 'dev' in element 'boot': 'cd'）。
+// 因此契约枚举 hd|cd|dc（产品侧语义不变）在此做映射：
+//   - hd       → hd
+//   - cd       → cdrom
+//   - dc       → cdrom, hd（**次序即优先级**，先光驱后磁盘）
+//   - 空/未知  → hd（既有缺省行为）
+//
+// iso 主盘强制从光驱引导，画像的 boot-order 不覆盖它（恒 cdrom）。
+func bootDevicesFor(order string, isoDisk bool) []libvirtxml.DomainBootDevice {
+	if isoDisk {
+		return []libvirtxml.DomainBootDevice{{Dev: "cdrom"}}
+	}
+	switch strings.ToLower(strings.TrimSpace(order)) {
+	case "cd":
+		return []libvirtxml.DomainBootDevice{{Dev: "cdrom"}}
+	case "dc":
+		return []libvirtxml.DomainBootDevice{{Dev: "cdrom"}, {Dev: "hd"}}
+	default: // "" | "hd" | 未知
+		return []libvirtxml.DomainBootDevice{{Dev: "hd"}}
+	}
 }
 
 // buildDisks 主盘 + 附加数据盘 + cloud-init seed ISO。

@@ -180,7 +180,7 @@ func TestBuildDomainXML_ISOImageBootsFromCdrom(t *testing.T) {
 	xml := mustXML(t, spec)
 
 	assertContains(t, xml,
-		`<boot dev="cd">`,
+		`<boot dev="cdrom">`, // iso 主盘映射为 libvirt 合法的 cdrom（"cd" 非法）
 		`<disk type="file" device="cdrom">`,
 		`<target dev="vdb" bus="virtio">`, // seed 走 virtio（决策 #139）
 		`<target dev="vdb" bus="virtio">`, // seed 走 virtio（决策 #139）
@@ -457,7 +457,7 @@ func TestBuildDomainStartupProfile(t *testing.T) {
 		`firmware="efi"`,       // firmware=uefi → efi
 		`bus="ide"`,            // 主盘总线来自 disk-interface
 		`dev="hda"`,            // ide → hd* 设备名
-		`<boot dev="cd">`,      // 非 iso 时引导设备来自 boot-order
+		`<boot dev="cdrom">`,   // 非 iso 时引导设备来自 boot-order（cd → libvirt 合法值 cdrom）
 	)
 }
 
@@ -490,23 +490,35 @@ func TestBuildDomainAccelDefault(t *testing.T) {
 	}
 }
 
-// boot-order 缺省 hd；iso 镜像强制 cd（既有行为不被画像覆盖）。
+// boot-order 缺省 hd；映射为 libvirt 合法设备名（cd→cdrom、dc→双 boot 且顺序即优先级）；
+// iso 镜像强制从光驱引导（既有行为不被画像覆盖）。
 func TestBuildDomainBootOrder(t *testing.T) {
 	spec := baseSpec()
 	xml := mustXML(t, spec)
-	assertContains(t, xml, `<boot dev="hd">`)
+	assertContains(t, xml, `<boot dev="hd">`) // 空画像 → hd（缺省）
 
-	// 非 iso 时画像指定 dc 生效。
-	spec2 := baseSpec()
-	spec2.BootOrder = "dc"
-	assertContains(t, mustXML(t, spec2), `<boot dev="dc">`)
+	// cd → libvirt 合法值 cdrom（"cd" 会被 libvirt 拒绝）。
+	specCD := baseSpec()
+	specCD.BootOrder = "cd"
+	assertContains(t, mustXML(t, specCD), `<boot dev="cdrom">`)
 
-	// iso 主盘强制从光驱引导，画像的 boot-order 不覆盖它。
+	// dc → 先光驱后磁盘：必须同时给出两个 boot 元素，且 cdrom 在前、hd 在后（次序即优先级）。
+	specDC := baseSpec()
+	specDC.BootOrder = "dc"
+	dcXML := mustXML(t, specDC)
+	assertContains(t, dcXML, `<boot dev="cdrom">`, `<boot dev="hd">`)
+	cdAt := strings.Index(dcXML, `<boot dev="cdrom">`)
+	hdAt := strings.Index(dcXML, `<boot dev="hd">`)
+	if cdAt < 0 || hdAt < 0 || cdAt > hdAt {
+		t.Fatalf("dc 应为 cdrom 在前、hd 在后（次序即优先级），实际 cdrom=%d hd=%d:\n%s", cdAt, hdAt, dcXML)
+	}
+
+	// iso 主盘强制从光驱引导，画像的 boot-order 不覆盖它（恒 cdrom）。
 	spec3 := baseSpec()
 	spec3.DiskPath = "/var/lib/nfvis/images/installer.iso"
 	spec3.DiskFormat = "iso"
 	spec3.BootOrder = "hd"
-	assertContains(t, mustXML(t, spec3), `<boot dev="cd">`)
+	assertContains(t, mustXML(t, spec3), `<boot dev="cdrom">`)
 }
 
 // console=vnc：无 serial/console，改挂 VNC 图形设备（仅回环监听）+ vga 显卡。
