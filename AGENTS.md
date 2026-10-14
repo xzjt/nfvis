@@ -1822,6 +1822,20 @@
   trap `down` 后现场清空。证据 `docs/evidence/v3-round32-d484-semantic-selfprovision.txt`；语义基线沿革
   `docs/v3已做.md` §五（**29/0/2 → 33/0/0**）。**如实边界**：S10-4 偶发（纯 REST 锁语义项、与本次现场无关，
   三次里一次，非本轮引入）。
+- **已发布 v3.0.17（2026-10-15，`firmware=uefi` 交付补齐 + UEFI 域删除修复 + CI 恢复）**：tag `v3.0.17` → **`v3 54f3947`**
+  （发布点＝PR #326/#327 合并；其上仅本轮发版记录提交）；GitHub Release 四资产；`SOURCE_DATE_EPOCH=1791995353`；
+  deb `f1f36e5f…`（10,470,692 字节）/ `.run` `ca905bdb…`（185,190,523 字节，载荷 **239** deb / 177M）两打逐字节一致、
+  `.run` 结构自检 **18/0**、闭包自洽（239/838/313/178M）。**三处一致全部完成**（含 **deb 与 `.run` 完整回下载逐字节一致**，
+  走代理 `192.168.155.1:2333`；`.run` 首传被 schannel 中断、`-C -` 续传补齐）。**发布件上四套件零失败**：
+  fulltest **297/0/26**、语义 **43/0/0**、lifecycle **40/0/3**、pty **10/10**。内容三问收口：
+  ①**OVMF 交付**——`firmware=uefi` 此前**配了也用不了**（闭包与 nfvis-vm 都无 ovmf，气隙机装不了）；deb `Recommends` 加 `ovmf`、
+  离线包清单加 **`ovmf-generic`**（闭包 +1）；真机以「**卸净 OVMF → `.run` 安装 → ovmf-generic 就位 → uefi 域起得来**」验证。
+  ②**UEFI 域删不掉（Critical，真机抓出）**——`cannot undefine domain with nvram`，配置删不掉且巡检把域重定义回来（死锁）；
+  `(*Conn).Undefine` 补 `VIR_DOMAIN_UNDEFINE_NVRAM`（非 nvram 域 no-op）+ 单测钉标志位；真机复验一次提交删成功。
+  ③**CI 恢复绿**——Actions 自 **≥2026-10-12 每次 push/tag 全红**（既有问题）：两个单测**读宿主真实环境**
+  （`TestHugepageOccupantsEvidence` 读宿主 hugetlbfs 挂载；`TestEnsureConsistentRefreshesProfiles` 的默认 UEFI 探测在无 OVMF 的 runner 上拒绝——#485 引入），
+  修法＝宿主读取做成可注入接缝、**产品行为不变**。**教训入册**：跑套件前必须清场（本轮残留污染过一轮：fulltest 296/1、lifecycle 38/2）；
+  清场成败要读**提交结论**而非 grep 关键字。
 - **已发布 v3.0.16（2026-10-14，决策 #485 镜像启动画像 + Web 内置 noVNC 查看器）**：tag `v3.0.16` → **`v3 1db4117`**
   （v3 线发布点＝PR #325 合并提交；其上仅本轮发版记录提交）；GitHub Release 四资产；`SOURCE_DATE_EPOCH=1791988540`；
   deb `982651e5…`（10,471,088 字节）/ `.run` `89c53a2e…`（179,785,994 字节，载荷 238 deb / 173M）两打逐字节一致、
