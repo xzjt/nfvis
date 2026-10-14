@@ -82,10 +82,22 @@ type CLIEResult struct {
 type ConsoleRequest struct {
 	VM    string `json:"vm"`
 	WSURL string `json:"ws_url"`
-	// Kind 会话种类："vm"（缺省，VM 串口 console）或 "container"（容器交互式终端，
-	// 决策 #358）——前端据此选择提示文案，桥接方式两者相同。
+	// Kind 会话种类："vm"（缺省，VM 串口 console——serial 与 telnet 两种控制台形态都走它）、
+	// "container"（容器交互式终端，决策 #358）、"vnc"（VM 图形控制台——**仅 Web/noVNC 可访问**；
+	// CLI `console` 对 vnc 直接拒绝并指向 Web，故 CLI 侧不会产出该值，REST console 端点以同一
+	// 取值告知前端，见 ConsoleKind* 常量）。
 	Kind string `json:"kind,omitempty"`
 }
+
+// 控制台/终端会话种类（ConsoleRequest.Kind 与 REST `POST …/console` 响应的 `kind` 同源，
+// 决策 #485/Task 10）：serial/telnet 走文本串口 WS 管线，vnc 仅 Web（noVNC）可访问。
+const (
+	ConsoleKindVM        = "vm"        // VM 串口 console（CLI 接管请求的缺省种类）
+	ConsoleKindSerial    = "serial"    // VM 串口形态：pty（产品默认）
+	ConsoleKindTelnet    = "telnet"    // VM 串口形态：telnet over tcp（仅回环）
+	ConsoleKindVNC       = "vnc"       // VM 图形控制台：仅 Web（noVNC）可访问
+	ConsoleKindContainer = "container" // 容器交互式终端（决策 #358）
+)
 
 // cliExecutor 守护进程侧 CLI 执行器。会话（模式/层级）按持有者+接入源隔离。
 type cliExecutor struct {

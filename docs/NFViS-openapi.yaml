@@ -810,6 +810,13 @@ paths:
     post:
       tags: [virtual-machine-functions]
       summary: 申请串口 console 访问凭证（一次性 ticket，短时有效；FR-CMP-014）
+      description: |
+        按该 VM 的**有效控制台形态**（实例 startup 覆盖 > 镜像画像 > 产品默认，决策 #485）分派：
+        - `serial`/`telnet`：签发一次性 ticket，返回 `ws_url`（文本串口 WebSocket 桥接；telnet
+          底层拨域里仅回环的 `<serial type='tcp'>` 端口）；
+        - `vnc`：VNC 是图形控制台、走 noVNC 而非文本串口 WS，**不签发 ticket**——只回 `kind: vnc`，
+          前端据此走图形路径。
+        响应里的 `kind` 即该形态，供前端选择渲染管线。
       responses:
         "200":
           description: OK
@@ -820,6 +827,10 @@ paths:
                 properties:
                   ws_url: { type: string, example: "/api/v1/virtual-machine-functions/fw-vm/console/ws?ticket=..." }
                   expires_in: { type: integer, description: ticket 有效期（秒） }
+                  kind:
+                    type: string
+                    enum: [serial, telnet, vnc]
+                    description: 有效控制台形态；`vnc` 时不带 `ws_url`（图形控制台，仅 Web/noVNC 可访问）
         "404": { $ref: "#/components/responses/Error404" }
         "409":
           description: VM 未启用串口（serial_console=false）

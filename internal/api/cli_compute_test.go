@@ -26,6 +26,7 @@ import (
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/config"
 	"github.com/xzjt/nfvis/internal/images"
+	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
 	"github.com/xzjt/nfvis/internal/orchestrator/container"
 	"github.com/xzjt/nfvis/internal/system"
@@ -469,6 +470,79 @@ func TestCLIRequestVMConsoleIssuesTicket(t *testing.T) {
 	}
 	if res.Console == nil || res.Console.VM != "fw-vm" || !strings.Contains(res.Console.WSURL, "ticket=tok123") {
 		t.Fatalf("应回传 console 接管请求: %+v", res.Console)
+	}
+}
+
+// 控制台形态分派（决策 #485，Task 10）：镜像画像把有效控制台设为 vnc 时，CLI `console`
+// 必须拒绝并指向 Web（noVNC）——CLI 没有图形通道，不能签发一个连上就断的串口凭证。
+func TestConsoleCommandRejectsVNC(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaa.ClassSuperUser, "ssh",
+		"configure",
+		"set resource-pools hugepages page-size 1G count 8",
+		"set resource-pools cpu isolated-cores 4-7",
+		"set vm-image-profiles img1 console vnc",
+		"set virtual-machine-functions v1 image img1",
+		"set virtual-machine-functions v1 vcpu count 1",
+		"set virtual-machine-functions v1 memory size-mb 1024",
+		"commit",
+		"exit",
+	)
+	res := x.Execute("admin", aaa.ClassSuperUser, "ssh", "request virtual-machine-functions v1 console")
+	if !strings.Contains(res.Output, "VNC") || !strings.Contains(res.Output, "Web") {
+		t.Fatalf("vnc console should be rejected with Web pointer: %s", res.Output)
+	}
+	if !strings.Contains(res.Output, "%%") {
+		t.Fatalf("vnc 拒绝应为错误输出（%% 前缀）: %s", res.Output)
+	}
+	if res.Console != nil {
+		t.Fatalf("vnc 拒绝时不得回传 console 接管请求: %+v", res.Console)
+	}
+}
+
+// 控制台形态分派（决策 #485，Task 10）：telnet 形态仍走既有 ticket + WS 管线（CLI 侧与
+// serial 同一接管路径，底层由编排层拨 telnet TCP 串口）。
+func TestConsoleCommandTelnetIssuesTicket(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaa.ClassSuperUser, "ssh",
+		"configure",
+		"set resource-pools hugepages page-size 1G count 8",
+		"set resource-pools cpu isolated-cores 4-7",
+		"set vm-image-profiles img1 console telnet",
+		"set virtual-machine-functions v1 image img1",
+		"set virtual-machine-functions v1 vcpu count 1",
+		"set virtual-machine-functions v1 memory size-mb 1024",
+		"commit",
+		"exit",
+	)
+	x.setComputeRuntime(newFakeVM(), &fakeConsoleRuntime{stream: newFakeConsoleStream("")}, nil, nil, nil)
+	x.issueConsole = func(vm, _ string) (string, int, error) {
+		return APIPrefix + "/virtual-machine-functions/" + vm + "/console/ws?ticket=tok123", 60, nil
+	}
+	res := x.Execute("admin", aaa.ClassSuperUser, "ssh", "request virtual-machine-functions v1 console")
+	if strings.Contains(res.Output, "%%") {
+		t.Fatalf("telnet console 应签发凭证: %s", res.Output)
+	}
+	if res.Console == nil || res.Console.VM != "v1" || !strings.Contains(res.Console.WSURL, "ticket=tok123") {
+		t.Fatalf("telnet 应回传 console 接管请求: %+v", res.Console)
+	}
+}
+
+// consoleFormOf 合并语义（决策 #485，Task 10）：实例覆盖 > 镜像画像 > 产品默认 serial；
+// 结果一律小写（域映射与访问路径两面共用同一形态词）。
+func TestConsoleFormOfPrecedence(t *testing.T) {
+	profiles := []model.VMImageProfile{{Image: "img1", Console: "vnc"}}
+	if got := consoleFormOf(model.VMFunction{Name: "v1", Image: "img1"}, profiles); got != ConsoleKindVNC {
+		t.Fatalf("画像 console=vnc 应得 vnc: %q", got)
+	}
+	// 实例覆盖优先于画像。
+	vm := model.VMFunction{Name: "v1", Image: "img1", Startup: &model.VMStartupOverride{Console: "telnet"}}
+	if got := consoleFormOf(vm, profiles); got != ConsoleKindTelnet {
+		t.Fatalf("实例覆盖 console=telnet 应盖过画像: %q", got)
+	}
+	// 无画像/无覆盖 ⇒ 产品默认 serial。
+	if got := consoleFormOf(model.VMFunction{Name: "v2", Image: "none"}, nil); got != ConsoleKindSerial {
+		t.Fatalf("无画像应回落 serial: %q", got)
 	}
 }
 

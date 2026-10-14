@@ -4569,6 +4569,13 @@ async function vmConsoleOpen(name) {
     termMsg('申请凭证失败：' + e.message, true);
     return;
   }
+  // 控制台形态分派（决策 #485，Task 10）：vnc 是图形控制台，服务端不签发串口 ticket——
+  // 走 noVNC 图形路径（文本串口管线不适用），此处如实告知，不伪装成串口连接。
+  if (res && res.kind === 'vnc') {
+    termMsg('该虚拟机使用 VNC 图形控制台，文本串口终端无法显示。请在 Web 控制台使用 noVNC 访问' +
+      '（本部署未内置 noVNC 前端，暂无法在 Web 端渲染图形控制台）。', true);
+    return;
+  }
   const wsURL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + res.ws_url;
   try {
     termWS = new WebSocket(wsURL);

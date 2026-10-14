@@ -16,12 +16,18 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"syscall"
+	"time"
 )
 
-// OpenConsole 打开域串口的 pty 作为双向流。
-// 域未运行或未启用串口时无 pty 源，返回明确错误。
+// OpenConsole 打开域串口的双向流。
+// 域未运行或未启用串口时无串口源，返回明确错误。
+//
+// 控制台形态（决策 #485/Task 10）按**域 XML**分派：
+//   - serial（缺省）：`<serial type='pty'>` ⇒ 打开 libvirt 分配的 pty（既有路径）；
+//   - telnet：`<serial type='tcp'>`（仅回环）⇒ 直接拨该 TCP 端点，字节流语义与 pty 等价。
 //
 // **必须带 O_NOCTTY**（决策 #183）：nfvisd 由 systemd 拉起时是「无控制终端的会话首进程」，
 // 此时打开 tty **不带** O_NOCTTY 会让它成为本进程的**控制终端**。此后该 pty 的 master
@@ -32,6 +38,17 @@ func (c *Conn) OpenConsole(ctx context.Context, name string) (io.ReadWriteCloser
 	xml, err := c.DumpXML(ctx, name)
 	if err != nil {
 		return nil, err
+	}
+	// telnet 控制台：串口是 tcp 源，拨它（地址从域 XML 读出，以域为单一事实源）。
+	if addr, isTCP, aerr := SerialTCPAddr(xml); aerr != nil {
+		return nil, fmt.Errorf("VM %s: %w", name, aerr)
+	} else if isTCP {
+		d := net.Dialer{Timeout: 5 * time.Second}
+		conn, derr := d.DialContext(ctx, "tcp", addr)
+		if derr != nil {
+			return nil, fmt.Errorf("连接 VM %s 的 telnet 串口 %s: %w", name, addr, derr)
+		}
+		return conn, nil
 	}
 	pty, err := SerialPtyPath(xml)
 	if err != nil {
