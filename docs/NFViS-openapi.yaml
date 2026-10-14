@@ -830,7 +830,7 @@ paths:
                   kind:
                     type: string
                     enum: [serial, telnet, vnc]
-                    description: 有效控制台形态；`vnc` 时不带 `ws_url`（图形控制台，仅 Web/noVNC 可访问）
+                    description: 有效控制台形态；`vnc` 时不带 `ws_url`（图形控制台，内置查看器尚未随包提供：VNC 仅监听 127.0.0.1，有宿主访问权限时用 `virsh vncdisplay` 查端口后以任意 VNC 客户端接入）
         "404": { $ref: "#/components/responses/Error404" }
         "409":
           description: VM 未启用串口（serial_console=false）
@@ -4046,7 +4046,7 @@ components:
         disk_interface: { type: string, enum: [virtio, sata, ide, scsi], description: 缺省 virtio }
         boot_order: { type: string, enum: [hd, cd, dc], description: 缺省 hd }
         accel: { type: string, enum: [kvm, tcg], description: 缺省 kvm }
-        console: { type: string, enum: [serial, telnet, vnc], description: 缺省 serial；vnc 仅 Web 可访问 }
+        console: { type: string, enum: [serial, telnet, vnc], description: 缺省 serial；vnc：内置查看器尚未随包提供（VNC 仅监听 127.0.0.1，有宿主访问权限时用 `virsh vncdisplay` 查端口后以任意 VNC 客户端接入） }
         extra_args:
           type: array
           items: { type: string }
