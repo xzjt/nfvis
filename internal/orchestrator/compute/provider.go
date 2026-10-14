@@ -39,6 +39,10 @@ type Provider struct {
 	// nil = 明确报「未提供检查」（声明了设备就不静默放行，与 vfPCI 同口径）。
 	pciDeviceExists func(bdf string) (bool, error)
 
+	// uefiProbe 宿主 UEFI 固件（OVMF）缺失探测（决策 #485 复审；注入以便单测）：
+	// nil = 用默认实现 hostUEFIFirmwareMissing。仅在能判定时返回 missing=true（保守不误拒）。
+	uefiProbe func() (missing bool, detail string)
+
 	// alarms 恢复收敛告警落点（可空）。
 	alarms orchestrator.AlarmSink
 
@@ -186,6 +190,9 @@ func (p *Provider) SetVFResolver(f func(pf string, vfID int) (string, error)) { 
 // NewSysfsPCIDeviceChecker）。nil 且声明了设备时 define 明确报错，不静默放行。
 func (p *Provider) SetPCIDeviceChecker(f func(bdf string) (bool, error)) { p.pciDeviceExists = f }
 
+// SetUEFIFirmwareProbe 注入宿主 UEFI 固件（OVMF）缺失探测（决策 #485 复审；测试用）。
+func (p *Provider) SetUEFIFirmwareProbe(f func() (bool, string)) { p.uefiProbe = f }
+
 // Config 返回生效配置（只读）。
 func (p *Provider) Config() Config { return p.cfg }
 
@@ -227,6 +234,11 @@ func (p *Provider) defineLocked(ctx context.Context, vm model.VMFunction, alloc 
 	}
 	spec, err := p.specFor(vm, alloc)
 	if err != nil {
+		return err
+	}
+	// 决策 #485 复审：firmware=uefi 的宿主能力前置检查——缺少 OVMF 时把可行动的提示提前到定义期
+	// （否则 libvirt 到启动/定义才以晦涩报错拒绝，报错点离配置很远）。
+	if err := p.checkFirmware(spec); err != nil {
 		return err
 	}
 	if err := p.prepare(ctx, vm, spec); err != nil {
@@ -755,16 +767,18 @@ func (p *Provider) prepare(ctx context.Context, vm model.VMFunction, spec Domain
 // 无需为测试在生产代码里暴露导出符号。
 func startupDomainSpec(vm model.VMFunction, profiles []model.VMImageProfile) DomainSpec {
 	eff := model.EffectiveStartup(vm, profiles)
+	console, consoleExplicit := model.EffectiveConsole(vm, profiles)
 	return DomainSpec{
-		Machine:   eff.Machine,
-		CPUMode:   eff.CPUMode,
-		CPUModel:  eff.CPUModel,
-		Firmware:  eff.Firmware,
-		DiskIface: eff.DiskIface,
-		BootOrder: eff.BootOrder,
-		Accel:     eff.Accel,
-		Console:   eff.Console,
-		ExtraArgs: append([]string(nil), eff.ExtraArgs...),
+		Machine:         eff.Machine,
+		CPUMode:         eff.CPUMode,
+		CPUModel:        eff.CPUModel,
+		Firmware:        eff.Firmware,
+		DiskIface:       eff.DiskIface,
+		BootOrder:       eff.BootOrder,
+		Accel:           eff.Accel,
+		Console:         console,
+		ConsoleExplicit: consoleExplicit,
+		ExtraArgs:       append([]string(nil), eff.ExtraArgs...),
 	}
 }
 
@@ -837,6 +851,25 @@ func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) 
 		spec.Interfaces = append(spec.Interfaces, is)
 	}
 	return spec, nil
+}
+
+// checkFirmware 固件能力前置检查（决策 #485 复审）：firmware=uefi 时**尽力**核对宿主是否装了
+// UEFI 固件（OVMF）。仅当能确定宿主**缺少**时如实拒绝并给可照做的补救（安装 OVMF / 改用 bios）；
+// 探测器在无法判定（非 POSIX 宿主、未知布局）时保守返回「不缺」，不误拒合法配置（libvirt 到
+// 定义/启动仍会自行报错，本检查只是把可行动的提示提前）。
+func (p *Provider) checkFirmware(spec DomainSpec) error {
+	if !strings.EqualFold(strings.TrimSpace(spec.Firmware), "uefi") {
+		return nil
+	}
+	probe := p.uefiProbe
+	if probe == nil {
+		probe = hostUEFIFirmwareMissing
+	}
+	if missing, detail := probe(); missing {
+		return fmt.Errorf("VM %s: firmware=uefi，但宿主未找到 UEFI 固件（OVMF）：%s——请安装 OVMF（如 apt install ovmf）或改用 firmware=bios",
+			spec.VM.Name, detail)
+	}
+	return nil
 }
 
 // kernelDataPlane 数据面是否为 Linux 内核网络（v3 决策 #404）：vNIC 走 virtio + 宿主 tap +

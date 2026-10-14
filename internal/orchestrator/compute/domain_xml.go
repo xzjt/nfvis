@@ -94,31 +94,29 @@ type DomainSpec struct {
 
 	// 启动画像（决策 #485，Task 8）：实例 startup 覆盖 > 镜像画像 > 产品默认，
 	// 已由 model.EffectiveStartup 合并后填入；本层只做映射，空值一律回落既有行为。
-	CPUModel  string   // CPUMode=custom 时的 CPU 型号
-	Firmware  string   // bios|uefi（缺省 bios）
-	DiskIface string   // virtio|sata|ide|scsi（缺省 virtio）
-	BootOrder string   // hd|cd|dc（缺省 hd；iso 强制 cd）
-	Accel     string   // kvm|tcg（缺省 kvm）
-	Console   string   // serial|telnet|vnc（缺省 serial）
-	ExtraArgs []string // 额外 QEMU 参数（已过 denylist）
+	CPUModel  string // CPUMode=custom 时的 CPU 型号
+	Firmware  string // bios|uefi（缺省 bios）
+	DiskIface string // virtio|sata|ide|scsi（缺省 virtio）
+	BootOrder string // hd|cd|dc（缺省 hd；iso 强制 cd）
+	Accel     string // kvm|tcg（缺省 kvm）
+	Console   string // serial|telnet|vnc（缺省 serial）
+	// ConsoleExplicit 有效控制台形态是否由画像/实例覆盖**显式设定**（决策 #485 契约 §4.3）：
+	// 显式设定的形态**权威**，独立于 serial_console 开关；未显式设定时沿用既有语义。
+	ConsoleExplicit bool
+	ExtraArgs       []string // 额外 QEMU 参数（已过 denylist）
 	// ConsolePort telnet 控制台绑定端口：<=0 时按 VM 名确定性派生（见 ConsoleTelnetPort）。
 	ConsolePort int
 }
 
-// telnet 控制台端口分配区间（决策 #485）：由 VM 名确定性派生，稳定可复算，
-// 落在高位非特权端口段，避免与产品其它监听撞车。
+// telnet 控制台端口分配区间与派生（唯一实现见 model.ConsoleTelnetPort；此处仅为包内既有
+// 调用点保留同名别名，域组装与端口冲突校验共用同一派生，避免两处漂移）。
 const (
-	ConsolePortMin = 5700
-	ConsolePortMax = 6699
+	ConsolePortMin = model.ConsolePortMin
+	ConsolePortMax = model.ConsolePortMax
 )
 
-// ConsoleTelnetPort 由 VM 名确定性派生 telnet 控制台绑定端口（[ConsolePortMin, ConsolePortMax]）。
-// 同名恒等、跨进程可复算；Task 10 的访问路径据此定位端口。
-func ConsoleTelnetPort(vmName string) int {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte("nfvis:console:" + vmName))
-	return ConsolePortMin + int(h.Sum32()%uint32(ConsolePortMax-ConsolePortMin+1))
-}
+// ConsoleTelnetPort 见 model.ConsoleTelnetPort（由 VM 名确定性派生 telnet 控制台绑定端口）。
+func ConsoleTelnetPort(vmName string) int { return model.ConsoleTelnetPort(vmName) }
 
 // DeterministicUUID 由 VM 名派生 UUIDv5 风格标识（版本 5、RFC 4122 variant），
 // 保证同一 VM 名字恒等，重定义/收敛幂等。
@@ -301,17 +299,22 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 		d.Devices.Hostdevs = append(d.Devices.Hostdevs, hostdev)
 	}
 
-	// 控制台形态（决策 #485，Task 8 只做域映射；访问路径归 Task 10）：
+	// 控制台形态（决策 #485）：域映射与访问路径归既有管线。
 	//   serial（缺省）：既有 pty 串口 + console，行为不变；
 	//   telnet：串口换 tcp + telnet 协议（端口按 VM 名确定性派生），仅监听回环；
 	//   vnc：不挂串口，改挂 VNC 图形设备（autoport，仅回环），显卡换 vga。
+	//
+	// **显式设定的形态权威**（契约 §4.3）：由画像/实例覆盖显式给出 console（无论 serial 还是
+	// telnet）时，该形态**独立于**既有的 serial_console 开关——否则会出现「读视图报 telnet、域里
+	// 却无串口」的「看着有其实没生效」。未显式设定时沿用既有语义（serial_console==false ⇒ 无串口）。
+	serialWanted := spec.ConsoleExplicit || serialConsoleEnabled(vm)
 	switch strings.ToLower(strings.TrimSpace(spec.Console)) {
 	case "vnc":
 		d.Devices.Graphics = []libvirtxml.DomainGraphic{{
 			VNC: &libvirtxml.DomainGraphicVNC{AutoPort: "yes", Port: -1, Listen: "127.0.0.1"},
 		}}
 	case "telnet":
-		if serialConsoleEnabled(vm) {
+		if serialWanted {
 			port := spec.ConsolePort
 			if port <= 0 {
 				port = ConsoleTelnetPort(vm.Name)
@@ -333,7 +336,7 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 			}}
 		}
 	default: // "" | "serial"
-		if serialConsoleEnabled(vm) {
+		if serialWanted {
 			d.Devices.Serials = []libvirtxml.DomainSerial{{
 				Source: &libvirtxml.DomainChardevSource{Pty: &libvirtxml.DomainChardevSourcePty{}},
 				Target: &libvirtxml.DomainSerialTarget{Port: uintPtr(0)},

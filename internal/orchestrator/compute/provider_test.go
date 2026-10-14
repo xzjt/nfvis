@@ -1260,3 +1260,30 @@ func TestCheckVMAlarmsRefreshesProfiles(t *testing.T) {
 		t.Fatalf("巡检应刷新画像: %+v", spec)
 	}
 }
+
+// 决策 #485 复审：firmware=uefi 的宿主能力前置检查——探测到缺失时如实拒绝并给补救；
+// 探测到在位/无法判定时放行（保守，不误拒合法组合）。
+func TestCheckFirmwareUEFIProbe(t *testing.T) {
+	api := newMockLibvirt()
+	p := newTestProvider(api, newMockStorage("/images/img.qcow2"), nil)
+	spec := DomainSpec{VM: model.VMFunction{Name: "fw-vm"}, Firmware: "uefi"}
+
+	p.SetUEFIFirmwareProbe(func() (bool, string) { return true, "OVMF 缺失（测试）" })
+	err := p.checkFirmware(spec)
+	if err == nil || !strings.Contains(err.Error(), "firmware=uefi") || !strings.Contains(strings.ToLower(err.Error()), "ovmf") {
+		t.Fatalf("缺少 OVMF 应如实拒绝并给补救: %v", err)
+	}
+
+	p.SetUEFIFirmwareProbe(func() (bool, string) { return false, "" })
+	if err := p.checkFirmware(spec); err != nil {
+		t.Fatalf("探测到固件在位不应拒绝: %v", err)
+	}
+
+	// 非 uefi 不触发固件检查。
+	if err := p.checkFirmware(DomainSpec{VM: model.VMFunction{Name: "fw-vm"}, Firmware: "bios"}); err != nil {
+		t.Fatalf("bios 不应触发固件检查: %v", err)
+	}
+
+	// 默认探测器在无法判定宿主（非 POSIX / 未知布局）时保守放行；本仓 CI 主机即此情形。
+	_, _ = hostUEFIFirmwareMissing()
+}

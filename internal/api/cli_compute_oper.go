@@ -292,7 +292,8 @@ func (x *cliExecutor) requestVMConsole(user, name string, confirmed bool) string
 	// 装了也不该给 vnc VM 签发一个连上就断的串口凭证。
 	// 文案与 Web 侧同一事实：**内置 VNC 查看器尚未随包提供**，给出可照做的宿主接入路径
 	// （VNC 仅监听本机回环），不指向一个不可用的查看器。
-	if consoleFormOf(vm, cfg.VMImageProfiles) == ConsoleKindVNC {
+	form := consoleFormOf(vm, cfg.VMImageProfiles)
+	if form == ConsoleKindVNC {
 		return "%% 该 VNF 使用 VNC 图形控制台，CLI 无法显示图形界面（CLI 与 Web 控制台均未随包提供 VNC 查看器）。" +
 			"VNC 服务仅监听本机回环（127.0.0.1），端口由 libvirt 自动分配——有宿主访问权限时，" +
 			"用 virsh vncdisplay " + name + " 查到端口后以任意 VNC 客户端接入。\n"
@@ -303,7 +304,9 @@ func (x *cliExecutor) requestVMConsole(user, name string, confirmed bool) string
 	if x.issueConsole == nil {
 		return "%% 串口 console 凭证不可用（服务未装配 ticket 签发）\n"
 	}
-	if vm.SerialConsole != nil && !*vm.SerialConsole {
+	// 只有「域内确实没有串口」才拒绝：consoleFormOf 为空表示未显式设定 console 且
+	// serial_console=false（显式设定的形态独立于该开关，见契约 §4.3）。
+	if form == "" {
 		return fmt.Sprintf("%% VNF %s 未启用串口（serial_console=false）\n", name)
 	}
 	wsPath, ttl, terr := x.issueConsole(name, user)
@@ -314,13 +317,20 @@ func (x *cliExecutor) requestVMConsole(user, name string, confirmed bool) string
 	return fmt.Sprintf("正在打开 %s 的串口（Ctrl-] 退出，%d 秒内有效）…\n", name, ttl)
 }
 
-// consoleFormOf 该 VM 的**有效控制台形态**（serial|telnet|vnc；决策 #485，Task 10）。
+// consoleFormOf 该 VM 的**有效控制台形态**（serial|telnet|vnc；决策 #485）。
 // 合并优先级由 model.EffectiveStartup 给出（实例覆盖 > 镜像画像 > 产品默认），
 // 空值回落产品默认 serial。CLI 拒绝与 REST ticket 响应共用本函数，保证两面同源。
+//
+// **与实际域一致**（契约 §4.3）：显式设定的形态独立于 serial_console 开关；未显式设定且
+// serial_console 关闭时域里**没有串口**——如实返回空串（"没有 console"），不再谎报一个域里
+// 不存在的 console。调用方（签发/拒绝路径）据实处理。
 func consoleFormOf(vm model.VMFunction, profiles []model.VMImageProfile) string {
-	form := strings.ToLower(strings.TrimSpace(model.EffectiveStartup(vm, profiles).Console))
-	if form == "" {
-		return ConsoleKindSerial
+	form, explicit := model.EffectiveConsole(vm, profiles)
+	if form == ConsoleKindVNC {
+		return ConsoleKindVNC
+	}
+	if !explicit && vm.SerialConsole != nil && !*vm.SerialConsole {
+		return ""
 	}
 	return form
 }

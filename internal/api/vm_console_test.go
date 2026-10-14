@@ -250,3 +250,53 @@ func TestConsoleTicketsPrunedOnIssue(t *testing.T) {
 		t.Fatalf("过期条目应被清扫（旧实现永久驻留），实得 %d", n)
 	}
 }
+
+// 决策 #485 契约 §4.3：显式设定的 console 形态独立于 serial_console 开关——显式 telnet 即使
+// serial_console=false，域名里仍有串口，console 端点应签发 ticket（不再被误拒）。
+func TestConsoleTicketExplicitFormOverridesSerialOff(t *testing.T) {
+	fc := &fakeConsoleRuntime{stream: newFakeConsoleStream("")}
+	ts := newTestServerOpts(t, Options{VM: newFakeVM(), VMConsole: fc})
+	token := loginAdmin(t, ts)
+	seedVMPool(t, ts, token)
+
+	body := vmBody("fw-vm")
+	body["serial_console"] = false
+	body["startup"] = map[string]any{"console": "telnet"}
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		body, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("建 VM: %d %s", status, data)
+	}
+	status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions/fw-vm/console", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("显式 telnet 应签发 ticket: %d %s", status, data)
+	}
+	var got struct {
+		WSURL string `json:"ws_url"`
+		Kind  string `json:"kind"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil || got.Kind != "telnet" || got.WSURL == "" {
+		t.Fatalf("应回 kind=telnet + ws_url: %s", data)
+	}
+}
+
+// 未显式设定 + serial_console=false ⇒ 域内无串口，console 端点如实 409。
+func TestConsoleTicketSerialOffNoConsole(t *testing.T) {
+	fc := &fakeConsoleRuntime{stream: newFakeConsoleStream("")}
+	ts := newTestServerOpts(t, Options{VM: newFakeVM(), VMConsole: fc})
+	token := loginAdmin(t, ts)
+	seedVMPool(t, ts, token)
+
+	body := vmBody("fw-vm")
+	body["serial_console"] = false
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		body, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("建 VM: %d %s", status, data)
+	}
+	status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions/fw-vm/console", token, nil, nil)
+	if status != http.StatusConflict {
+		t.Fatalf("未启用串口应 409: %d %s", status, data)
+	}
+	if !strings.Contains(string(data), "serial_console=false") {
+		t.Fatalf("409 文案应点明 serial_console=false: %s", data)
+	}
+}

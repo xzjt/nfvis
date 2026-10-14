@@ -5344,7 +5344,8 @@ function renderImageProfile(profiles, name) {
     ['boot-order', p.boot_order],
     ['accel', p.accel],
     ['console', p.console],
-    ['extra-args', (p.extra_args && p.extra_args.length) ? p.extra_args.join(' ') : undefined],
+    // extra-args 是窄自由口，**已绕过资源账本**（契约 §4.4）：与 CLI 读视图同一标注（决策 #485）。
+    ['extra-args', (p.extra_args && p.extra_args.length) ? p.extra_args.join(' ') + '（已绕过资源账本）' : undefined],
   ]);
 }
 

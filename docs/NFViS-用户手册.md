@@ -2240,6 +2240,12 @@ nfvis$ show virtual-machine-functions fw-vm detail    # 「有效启动画像」
 该画像不生效（受影响的 VM 下次定义时回落产品默认），产品报 `VM_IMAGE_PROFILE_ORPHAN`（warning；
 按配置与仓库事实重建，跨 nfvisd 重启可见），镜像重新导入/拉取后**自动消警**。
 
+> **⑥ `disk-interface` 的边界（如实）**：`disk-interface` 只作用于**主盘与数据盘**的 target 总线；
+> **cloud-init seed ISO 始终以 virtio 磁盘交付**（不受画像影响）。原因是 seed 的可发现性依赖
+> guest 内核自带 `virtio_blk`（§9.2③ 实测清单），改总线会让精简 guest 看不到 seed、user-data 静默失效。
+> 因此**需要非 virtio 启动盘**、且 guest 内核**无法读取 virtio 盘**的镜像，可能看不到 seed——这类
+> 镜像请勿依赖 cloud-init，或在 guest 内自行提供配置。
+
 ---
 
 ## 10. 日常运维

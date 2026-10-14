@@ -2267,6 +2267,8 @@ func (v *validator) checkVMImageProfiles(c Config) {
 			v.errf(at+".cpu_model", "cpu mode custom 必须给出 cpu model")
 		}
 		v.checkStartupEnums(at, p.Machine, p.CPUMode, p.Firmware, p.DiskIface, p.BootOrder, p.Accel, p.Console)
+		// 跨字段兼容性（决策 #485 复审）：单字段各自合法、组合起来到启动才炸的组合，提交期拦住。
+		v.checkStartupCombos(at, p.Machine, p.CPUMode, p.Accel, p.DiskIface)
 		if err := ValidateExtraArgs(p.ExtraArgs); err != nil {
 			v.errf(at+".extra_args", "%v", err)
 		}
@@ -2284,10 +2286,69 @@ func (v *validator) checkVMImageProfiles(c Config) {
 		if o.CPUMode == "custom" && strings.TrimSpace(o.CPUModel) == "" && profileCPUModel(c, vm.Image) == "" {
 			v.errf(sp+".cpu_model", "cpu mode custom 必须给出 cpu model")
 		}
+		// 跨字段兼容性按**生效画像**（实例覆盖 > 画像 > 默认）判定——覆盖可能单独制造出
+		// 「accel=tcg + 生效 cpu mode=host-passthrough」这类组合。
+		eff := EffectiveStartup(vm, c.VMImageProfiles)
+		v.checkStartupCombos(sp, eff.Machine, eff.CPUMode, eff.Accel, eff.DiskIface)
 		if err := ValidateExtraArgs(o.ExtraArgs); err != nil {
 			v.errf(sp+".extra_args", "%v", err)
 		}
 	}
+	// telnet 控制台端口冲突（决策 #485 复审）：端口由 VM 名确定性派生，1000 个槽，规模一上来
+	// 必撞——撞上的两台**无法同时启动**（第二台绑定端口失败，报晦涩的 libvirt 错）。提交期比对。
+	v.checkConsoleTelnetPortCollisions(c)
+}
+
+// checkStartupCombos 启动画像的**跨字段**兼容性校验（决策 #485 复审）：单字段各自合法，但组合
+// 起来到启动才被 QEMU/libvirt 以晦涩报错拒绝。这里在提交期拦住，并给出**可照做的补救**
+// （点名要改的配套字段）。与 checkStartupEnums 同法，画像与实例覆盖两处共用；**调用方传生效值**
+// （未设字段由本函数回落产品默认再判）。
+func (v *validator) checkStartupCombos(path, machine, cpuMode, accel, diskIface string) {
+	em := firstNonEmpty(machine, DefaultMachine)
+	ec := firstNonEmpty(cpuMode, DefaultCPUMode)
+	ea := firstNonEmpty(accel, DefaultAccel)
+	ed := firstNonEmpty(diskIface, DefaultDiskIface)
+
+	// accel=tcg 是纯软件模拟，无法使用 host-passthrough——后者要求 KVM 直通宿主 CPU。
+	if ea == "tcg" && ec == "host-passthrough" {
+		v.errf(path+".cpu_mode",
+			"accel=tcg（纯软件模拟）不能与 cpu mode host-passthrough 同用（host-passthrough 需要 KVM 直通宿主 CPU）——请把 cpu mode 改为 host-model 或 custom（custom 下另给 cpu model）")
+	}
+	// q35 系列机器类型没有 IDE 总线（只有 SATA/AHCI），ide 磁盘挂不上。
+	if ed == "ide" && (em == "q35" || strings.HasPrefix(em, "pc-q35-")) {
+		v.errf(path+".disk_interface",
+			"machine=%s（q35 系列没有 IDE 总线）不能与 disk-interface ide 同用——请把 machine 改为 pc / pc-i440fx-*，或把 disk-interface 改为 virtio|sata|scsi", em)
+	}
+}
+
+// checkConsoleTelnetPortCollisions 检出「有效控制台为 telnet」的 VM 中端口撞车的两台，如实拒绝
+// 并**点名两台 VM**（端口由 model.ConsoleTelnetPort 由 VM 名确定性派生，与域组装同源）。
+func (v *validator) checkConsoleTelnetPortCollisions(c Config) {
+	byPort := map[int]string{}
+	for _, vm := range c.VirtualMachineFunctions {
+		form, _ := EffectiveConsole(vm, c.VMImageProfiles)
+		if form != "telnet" {
+			continue
+		}
+		port := ConsoleTelnetPort(vm.Name)
+		if owner, taken := byPort[port]; taken {
+			v.errf(fmt.Sprintf("virtual-machine-functions[%s]", vm.Name),
+				"telnet 控制台端口 %d 与 VNF %s 冲突（端口由 VM 名确定性派生）——请改名其中之一，或为该 VNF 改用 serial/vnc 控制台",
+				port, owner)
+			continue
+		}
+		byPort[port] = vm.Name
+	}
+}
+
+// firstNonEmpty 返回首个非空字符串（启动画像的字段回落用）。
+func firstNonEmpty(vals ...string) string {
+	for _, s := range vals {
+		if s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // checkStartupEnums 画像与实例覆盖**共用**的枚举/机型名校验（决策 #485）：machine（含版本化

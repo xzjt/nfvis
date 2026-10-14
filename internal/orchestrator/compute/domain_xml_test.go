@@ -595,3 +595,35 @@ func TestBuildDomainEmptyProfileKeepsDefaults(t *testing.T) {
 	)
 	assertNotContains(t, xml, `firmware=`, "<commandline", "<graphics")
 }
+
+// 决策 #485 契约 §4.3：**显式设定**的 console 形态权威、独立于 serial_console 开关。
+// 显式 telnet + serial_console=false ⇒ 域里仍有 telnet 串口（否则「读视图报 telnet、域里没有」）。
+func TestBuildDomainExplicitTelnetOverridesSerialOff(t *testing.T) {
+	spec := baseSpec()
+	spec.Console = "telnet"
+	spec.ConsoleExplicit = true
+	off := false
+	spec.VM.SerialConsole = &off
+	xml := mustXML(t, spec)
+	assertContains(t, xml, `<serial type="tcp">`, `<protocol type="telnet">`)
+}
+
+// 显式 serial + serial_console=false ⇒ 域里仍有 pty 串口（显式形态权威）。
+func TestBuildDomainExplicitSerialOverridesSerialOff(t *testing.T) {
+	spec := baseSpec()
+	spec.Console = "serial"
+	spec.ConsoleExplicit = true
+	off := false
+	spec.VM.SerialConsole = &off
+	xml := mustXML(t, spec)
+	assertContains(t, xml, `<serial type="pty">`, `<console type="pty">`)
+}
+
+// 未显式设定 + serial_console=false ⇒ 沿用既有语义：域里无串口（ConsoleExplicit=false）。
+func TestBuildDomainNonExplicitSerialOffNoConsole(t *testing.T) {
+	spec := baseSpec()
+	spec.Console = "serial"
+	off := false
+	spec.VM.SerialConsole = &off
+	assertNotContains(t, mustXML(t, spec), "<serial", "<console")
+}

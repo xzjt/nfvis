@@ -82,20 +82,22 @@ type CLIEResult struct {
 type ConsoleRequest struct {
 	VM    string `json:"vm"`
 	WSURL string `json:"ws_url"`
-	// Kind 会话种类："vm"（缺省，VM 串口 console——serial 与 telnet 两种控制台形态都走它）、
-	// "container"（容器交互式终端，决策 #358）、"vnc"（VM 图形控制台——**仅 Web/noVNC 可访问**；
-	// CLI `console` 对 vnc 直接拒绝并指向 Web，故 CLI 侧不会产出该值，REST console 端点以同一
-	// 取值告知前端，见 ConsoleKind* 常量）。
+	// Kind 会话种类（**CLI 侧取值集**）："vm"（缺省，VM 文本串口 console——serial 与 telnet 两种
+	// 控制台形态都走它）、"container"（容器交互式终端，决策 #358）。
+	// 注意：与 REST `POST …/console` 响应里的 `kind` **不是同一取值集**——REST 回的是该 VM 的
+	// **有效控制台形态**（serial|telnet|vnc，见 ConsoleKindSerial/Telnet/VNC），供前端按形态分派；
+	// CLI 侧对 vnc 直接拒绝（无内置 VNC 查看器），故不会产出 vnc。
 	Kind string `json:"kind,omitempty"`
 }
 
-// 控制台/终端会话种类（ConsoleRequest.Kind 与 REST `POST …/console` 响应的 `kind` 同源，
-// 决策 #485/Task 10）：serial/telnet 走文本串口 WS 管线，vnc 仅 Web（noVNC）可访问。
+// 控制台/终端会话种类（决策 #485）：CLI 接管请求（ConsoleRequest.Kind）用 "vm"（serial+telnet
+// 共用）/"container"；REST `POST …/console` 响应的 `kind` 用有效控制台形态 serial/telnet/vnc。
+// CLI 拒绝与 REST 告知两面同源（consoleFormOf），此处常量供 REST/前端按形态分派。
 const (
-	ConsoleKindVM        = "vm"        // VM 串口 console（CLI 接管请求的缺省种类）
-	ConsoleKindSerial    = "serial"    // VM 串口形态：pty（产品默认）
-	ConsoleKindTelnet    = "telnet"    // VM 串口形态：telnet over tcp（仅回环）
-	ConsoleKindVNC       = "vnc"       // VM 图形控制台：仅 Web（noVNC）可访问
+	ConsoleKindVM        = "vm"        // CLI 接管请求：VM 文本串口（serial/telnet 共用）
+	ConsoleKindSerial    = "serial"    // REST 响应：VM 串口形态 pty（产品默认）
+	ConsoleKindTelnet    = "telnet"    // REST 响应：VM 串口形态 telnet over tcp（仅回环）
+	ConsoleKindVNC       = "vnc"       // REST 响应：VM 图形控制台（VNC 仅监听 127.0.0.1；无内置查看器，宿主经 virsh vncdisplay 接入）
 	ConsoleKindContainer = "container" // 容器交互式终端（决策 #358）
 )
 

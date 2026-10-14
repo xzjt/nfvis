@@ -42,7 +42,7 @@ type ConsoleRequest struct {
 	WSURL string `json:"ws_url"`
 	// Kind 会话种类："vm"（缺省，VM 串口 console——serial 与 telnet 两种控制台形态都走它）、
 	// "container"（容器交互式终端，决策 #358）——前端据此选择提示文案，桥接方式两者相同。
-	// "vnc"（VM 图形控制台，仅 Web/noVNC 可访问）由 CLI `console` 直接拒绝，CLI 侧不会出现。
+	// "vnc"（VM 图形控制台，无内置查看器）由 CLI `console` 直接拒绝，CLI 侧不会出现。
 	Kind string `json:"kind,omitempty"`
 }
 

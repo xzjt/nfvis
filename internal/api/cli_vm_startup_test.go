@@ -244,3 +244,27 @@ func TestGetVMImageProfilesEndpoint(t *testing.T) {
 		t.Fatalf("画像列表不符: %s", data)
 	}
 }
+
+// 决策 #485 契约 §4.4 / 用户手册 §9.6：读视图必须显式标注 extra-args「已绕过资源账本」——
+// `show vm-image-profiles` 的表格列与 VNF 详情的「有效启动画像」块**共用**同一助手
+// （vmProfileExtraArgs），保证两面标注一致。
+func TestShowVMImageProfilesExtraArgsBypassNote(t *testing.T) {
+	x, _ := newCLIKit(t)
+	run(t, x, "admin", aaa.ClassSuperUser, "ssh",
+		"configure",
+		"set resource-pools hugepages page-size 1G count 8",
+		"set resource-pools cpu isolated-cores 4-7",
+		`set vm-image-profiles img1 extra-args "-global x"`,
+		"set virtual-machine-functions v1 image img1",
+		"set virtual-machine-functions v1 vcpu count 1",
+		"set virtual-machine-functions v1 memory size-mb 1024",
+		"commit",
+		"exit",
+	)
+	if out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show vm-image-profiles").Output; !strings.Contains(out, "已绕过资源账本") {
+		t.Fatalf("show vm-image-profiles 应标注已绕过资源账本: %s", out)
+	}
+	if det := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show virtual-machine-functions v1 detail").Output; !strings.Contains(det, "已绕过资源账本") {
+		t.Fatalf("有效启动画像块应标注已绕过资源账本: %s", det)
+	}
+}

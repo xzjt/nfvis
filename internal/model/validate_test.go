@@ -1163,3 +1163,62 @@ func TestValidateVMStartupOverrideEnums(t *testing.T) {
 	c4.VirtualMachineFunctions[0].Startup = &VMStartupOverride{CPUMode: "custom"}
 	mustNoErr(t, Validate(c4))
 }
+
+// 决策 #485 复审：启动画像的**跨字段**兼容性——单字段合法但组合起来启动才炸的，提交期拦住
+// 且给出可照做的补救。覆盖 accel×cpu mode 与 disk-interface×machine 两组。
+func TestValidateStartupCrossFieldCombos(t *testing.T) {
+	// accel=tcg + 生效 cpu mode=host-passthrough（默认）⇒ 拒绝，文案点名 host-model|custom。
+	c := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", Accel: "tcg"}}}
+	mustErrContaining(t, Validate(c), "vm-image-profiles[img1].cpu_mode", "host-passthrough")
+
+	// tcg + host-model 合法。
+	ok := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", Accel: "tcg", CPUMode: "host-model"}}}
+	mustNoErr(t, Validate(ok))
+
+	// disk-interface=ide + 生效 machine=q35（默认）⇒ 拒绝，文案点名 pc / pc-i440fx-*。
+	ide := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", DiskIface: "ide"}}}
+	mustErrContaining(t, Validate(ide), "vm-image-profiles[img1].disk_interface", "IDE")
+
+	// ide + pc 合法（pc 有 IDE 总线）。
+	idePC := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", DiskIface: "ide", Machine: "pc"}}}
+	mustNoErr(t, Validate(idePC))
+
+	// ide + pc-q35-6.2 也拒（q35 系列无 IDE 总线）。
+	ideQ35 := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", DiskIface: "ide", Machine: "pc-q35-6.2"}}}
+	mustErrContaining(t, Validate(ideQ35), "disk_interface", "IDE")
+
+	// 实例覆盖单独制造冲突：画像 accel=tcg + 覆盖 cpu mode=host-passthrough。
+	ov := Config{
+		VMImageProfiles: []VMImageProfile{{Image: "img1", Accel: "tcg", CPUMode: "host-model"}},
+		VirtualMachineFunctions: []VMFunction{{Name: "v1", Image: "img1", VCPU: VMCpu{Count: 1}, Memory: VMMemory{SizeMB: 512},
+			Startup: &VMStartupOverride{CPUMode: "host-passthrough"}}},
+	}
+	mustErrContaining(t, Validate(ov), "startup", "host-passthrough")
+}
+
+// 决策 #485 复审：telnet 控制台端口由 VM 名确定性派生，撞车的两台无法同时启动——提交期点名两台 VM。
+func TestValidateTelnetConsolePortCollision(t *testing.T) {
+	// 先构造一对端口撞车的 VM 名（端口空间 1000，扫名字即可）。
+	seen := map[int]string{}
+	var a, b string
+	for i := 0; i < 5000 && b == ""; i++ {
+		n := fmt.Sprintf("vm-%d", i)
+		if prev, ok := seen[ConsoleTelnetPort(n)]; ok {
+			a, b = prev, n
+		} else {
+			seen[ConsoleTelnetPort(n)] = n
+		}
+	}
+	if b == "" {
+		t.Fatal("未能构造出端口冲突（端口派生异常）")
+	}
+	telnetVM := func(name string) VMFunction {
+		return VMFunction{Name: name, Image: "img1", VCPU: VMCpu{Count: 1}, Memory: VMMemory{SizeMB: 512},
+			Startup: &VMStartupOverride{Console: "telnet"}}
+	}
+	c := Config{VirtualMachineFunctions: []VMFunction{telnetVM(a), telnetVM(b)}}
+	mustErrContaining(t, Validate(c), "virtual-machine-functions["+b+"]", "冲突")
+
+	// 单个 telnet VM 无冲突。
+	mustNoErr(t, Validate(Config{VirtualMachineFunctions: []VMFunction{telnetVM(a)}}))
+}

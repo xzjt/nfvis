@@ -50,3 +50,33 @@ func TestValidateExtraArgsDenylist(t *testing.T) {
 		}
 	}
 }
+
+// EffectiveConsole（决策 #485 契约 §4.3）：显式设定的形态**权威**（explicit=true），
+// 未显式设定时回落产品默认 serial（explicit=false）。
+func TestEffectiveConsoleExplicit(t *testing.T) {
+	// 画像显式 console=telnet ⇒ explicit、形态 telnet。
+	p := []VMImageProfile{{Image: "img1", Console: "telnet"}}
+	if form, exp := EffectiveConsole(VMFunction{Name: "v1", Image: "img1"}, p); form != "telnet" || !exp {
+		t.Fatalf("画像 telnet 应 explicit: form=%q explicit=%v", form, exp)
+	}
+	// 实例覆盖优先且显式。
+	vm := VMFunction{Name: "v1", Image: "img1", Startup: &VMStartupOverride{Console: "serial"}}
+	if form, exp := EffectiveConsole(vm, p); form != "serial" || !exp {
+		t.Fatalf("实例覆盖 serial 应盖过画像并 explicit: form=%q explicit=%v", form, exp)
+	}
+	// 无画像/无覆盖 ⇒ 默认 serial、非显式。
+	if form, exp := EffectiveConsole(VMFunction{Name: "v2", Image: "none"}, nil); form != "serial" || exp {
+		t.Fatalf("无画像应回落默认且非显式: form=%q explicit=%v", form, exp)
+	}
+}
+
+// ConsoleTelnetPort 确定性 + 区间（唯一实现位于 model，域组装与端口冲突校验共用）。
+func TestConsoleTelnetPortDeterministic(t *testing.T) {
+	a := ConsoleTelnetPort("fw-vm")
+	if a != ConsoleTelnetPort("fw-vm") {
+		t.Fatal("同名应恒等")
+	}
+	if a < ConsolePortMin || a > ConsolePortMax {
+		t.Fatalf("端口应在 [%d,%d]，实得 %d", ConsolePortMin, ConsolePortMax, a)
+	}
+}

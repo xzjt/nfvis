@@ -473,8 +473,8 @@ func TestCLIRequestVMConsoleIssuesTicket(t *testing.T) {
 	}
 }
 
-// 控制台形态分派（决策 #485，Task 10）：镜像画像把有效控制台设为 vnc 时，CLI `console`
-// 必须拒绝并指向 Web（noVNC）——CLI 没有图形通道，不能签发一个连上就断的串口凭证。
+// 控制台形态分派（决策 #485）：镜像画像把有效控制台设为 vnc 时，CLI `console`
+// 必须拒绝并说明「无内置 VNC 查看器 + 宿主接入路径」——CLI 没有图形通道，不能签发一个连上就断的串口凭证。
 func TestConsoleCommandRejectsVNC(t *testing.T) {
 	x, _ := newCLIKit(t)
 	run(t, x, "admin", aaa.ClassSuperUser, "ssh",
@@ -543,6 +543,17 @@ func TestConsoleFormOfPrecedence(t *testing.T) {
 	// 无画像/无覆盖 ⇒ 产品默认 serial。
 	if got := consoleFormOf(model.VMFunction{Name: "v2", Image: "none"}, nil); got != ConsoleKindSerial {
 		t.Fatalf("无画像应回落 serial: %q", got)
+	}
+	// 未显式设定 + serial_console=false ⇒ 域内无串口，consoleFormOf 如实返回空（不谎报 serial）。
+	off := false
+	if got := consoleFormOf(model.VMFunction{Name: "v3", Image: "none", SerialConsole: &off}, nil); got != "" {
+		t.Fatalf("serial_console=false 且未显式设定应无 console: %q", got)
+	}
+	// 显式 telnet + serial_console=false ⇒ 形态权威（契约 §4.3），仍是 telnet。
+	exp := model.VMFunction{Name: "v4", Image: "img1", SerialConsole: &off,
+		Startup: &model.VMStartupOverride{Console: "telnet"}}
+	if got := consoleFormOf(exp, profiles); got != ConsoleKindTelnet {
+		t.Fatalf("显式 telnet 应独立于 serial_console: %q", got)
 	}
 }
 

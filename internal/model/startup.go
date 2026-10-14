@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"hash/fnv"
 	"strings"
 )
 
@@ -15,6 +16,22 @@ const (
 	DefaultAccel     = "kvm"
 	DefaultConsole   = "serial"
 )
+
+// telnet 控制台端口分配区间（决策 #485）：由 VM 名确定性派生，稳定可复算，
+// 落在高位非特权端口段，避免与产品其它监听撞车。**唯一实现**在 model 层——
+// 域组装（compute）与端口冲突校验（model.validate）共用同一函数，避免两处派生漂移。
+const (
+	ConsolePortMin = 5700
+	ConsolePortMax = 6699
+)
+
+// ConsoleTelnetPort 由 VM 名确定性派生 telnet 控制台绑定端口（[ConsolePortMin, ConsolePortMax]）。
+// 同名恒等、跨进程可复算；访问路径据此定位端口。
+func ConsoleTelnetPort(vmName string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte("nfvis:console:" + vmName))
+	return ConsolePortMin + int(h.Sum32()%uint32(ConsolePortMax-ConsolePortMin+1))
+}
 
 // EffectiveStartup 合并有效启动画像：实例覆盖 > 镜像画像 > 产品默认。
 // 资源类字段（memory/vcpu/hugepage/numa/绑核）不在画像内——账本单一真源（AGENTS #481）。
@@ -77,6 +94,28 @@ func EffectiveStartup(vm VMFunction, profiles []VMImageProfile) VMImageProfile {
 		p.Console = DefaultConsole
 	}
 	return p
+}
+
+// EffectiveConsole 返回 VM 的**有效控制台形态**（serial|telnet|vnc）及该形态是否由
+// 画像/实例覆盖**显式设定**（决策 #485 契约 §4.3）。
+//
+// 显式设定的形态**权威**——独立于既有的 `serial_console` 开关；未显式设定时回落产品默认
+// serial，此时是否真的落进域仍受 `serial_console` 约束（由域组装与读视图按 explicit 判定）。
+// 域组装（compute）与访问路径/端口冲突校验（api/model）共用本函数，保证模型层与数据面一致。
+func EffectiveConsole(vm VMFunction, profiles []VMImageProfile) (form string, explicit bool) {
+	form = strings.ToLower(strings.TrimSpace(EffectiveStartup(vm, profiles).Console))
+	if form == "" {
+		form = DefaultConsole
+	}
+	for _, p := range profiles {
+		if p.Image == vm.Image && strings.TrimSpace(p.Console) != "" {
+			return form, true
+		}
+	}
+	if vm.Startup != nil && strings.TrimSpace(vm.Startup.Console) != "" {
+		return form, true
+	}
+	return form, false
 }
 
 // extraArgDenyPrefixes 窄自由口的拒绝前缀（决策 #485）：覆盖资源账本 / 抢走产品的

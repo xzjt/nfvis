@@ -427,7 +427,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-machine-functions <n> startup cpu mode <mode>` | 实例级覆盖：CPU 模式（host-passthrough\|host-model\|custom） | libvirt | 🚫 真机验证待执行（同上） |
 | `set virtual-machine-functions <n> startup cpu model <model>` | 实例级覆盖：CPU 型号（cpu mode custom 时必填） | libvirt | 🚫 真机验证待执行（同上） |
 | `set virtual-machine-functions <n> startup firmware <type>` | 实例级覆盖：固件（bios\|uefi） | libvirt | 🚫 真机验证待执行（同上） |
-| `set virtual-machine-functions <n> startup disk-interface <iface>` | 实例级覆盖：主盘接口（virtio\|sata\|ide\|scsi） | libvirt | 🚫 真机验证待执行（同上） |
+| `set virtual-machine-functions <n> startup disk-interface <iface>` | 实例级覆盖：主盘接口（virtio\|sata\|ide\|scsi）；**仅作用主盘/数据盘**——cloud-init seed 恒以 virtio 磁盘交付（用户手册 §9.6⑥） | libvirt | 🚫 真机验证待执行（同上） |
 | `set virtual-machine-functions <n> startup boot-order <order>` | 实例级覆盖：引导顺序（hd\|cd\|dc） | libvirt | 🚫 真机验证待执行（同上） |
 | `set virtual-machine-functions <n> startup accel <type>` | 实例级覆盖：加速器（kvm\|tcg） | libvirt | 🚫 真机验证待执行（同上） |
 | `set virtual-machine-functions <n> startup console <type>` | 实例级覆盖：console 形态（serial\|telnet\|vnc；vnc：内置查看器尚未随包提供（VNC 仅监听 127.0.0.1；有宿主访问时用 virsh vncdisplay 查端口后以任意 VNC 客户端接入）；CLI `console` 对 vnc 拒绝并说明无内置查看器）；**S** | libvirt | 🚫 真机验证待执行（同上） |
@@ -461,7 +461,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set vm-image-profiles <image> cpu mode <mode>` | CPU 模式（host-passthrough\|host-model\|custom；缺省 host-passthrough） | libvirt | 🚫 真机验证待执行（同上） |
 | `set vm-image-profiles <image> cpu model <model>` | CPU 型号（cpu mode custom 时必填） | libvirt | 🚫 真机验证待执行（同上） |
 | `set vm-image-profiles <image> firmware <type>` | 固件（bios\|uefi；缺省 bios） | libvirt | 🚫 真机验证待执行（同上） |
-| `set vm-image-profiles <image> disk-interface <iface>` | 主盘接口（virtio\|sata\|ide\|scsi；缺省 virtio） | libvirt | 🚫 真机验证待执行（同上） |
+| `set vm-image-profiles <image> disk-interface <iface>` | 主盘接口（virtio\|sata\|ide\|scsi；缺省 virtio）；**仅作用主盘/数据盘**——cloud-init seed 恒以 virtio 磁盘交付（用户手册 §9.6⑥） | libvirt | 🚫 真机验证待执行（同上） |
 | `set vm-image-profiles <image> boot-order <order>` | 引导顺序（hd\|cd\|dc；缺省 hd） | libvirt | 🚫 真机验证待执行（同上） |
 | `set vm-image-profiles <image> accel <type>` | 加速器（kvm\|tcg；缺省 kvm） | libvirt | 🚫 真机验证待执行（同上） |
 | `set vm-image-profiles <image> console <type>` | console 形态（serial\|telnet\|vnc；缺省 serial；vnc：内置查看器尚未随包提供（VNC 仅监听 127.0.0.1；有宿主访问时用 virsh vncdisplay 查端口后以任意 VNC 客户端接入）；CLI `console` 对 vnc 拒绝并说明无内置查看器）；**S** | libvirt | 🚫 真机验证待执行（同上） |

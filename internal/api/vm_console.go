@@ -94,9 +94,11 @@ func (t *consoleTickets) consume(resource, token string) (consoleTicket, bool) {
 // handleConsoleTicket POST /api/v1/virtual-machine-functions/{name}/console
 // 申请串口 console 访问凭证（契约 console 端点）。
 //
-// 控制台形态分派（决策 #485，Task 10）：响应里的 `kind` 告知前端该 VM 的有效控制台形态
-// （serial|telnet|vnc，见 consoleFormOf）。**vnc 不签发串口 ticket**——VNC 是图形控制台、
-// 走 noVNC 而非文本串口 WS；此处如实回 `kind=vnc`（不带 ws_url），由前端按 noVNC 路径处理。
+// 控制台形态分派（决策 #485）：响应里的 `kind` 告知前端该 VM 的有效控制台形态
+// （serial|telnet|vnc，见 consoleFormOf）。**vnc 不签发串口 ticket**——VNC 是图形控制台，
+// 没有文本串口可接管（内置 VNC 查看器尚未随包提供；VNC 仅监听 127.0.0.1，宿主可经
+// virsh vncdisplay 查端口后用任意 VNC 客户端接入）；此处如实回 `kind=vnc`（不带 ws_url），
+// 由前端据此如实提示，不假装能显示。
 func (s *Server) handleConsoleTicket(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if s.vmConsole == nil {
@@ -115,11 +117,13 @@ func (s *Server) handleConsoleTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	form := consoleFormOf(vm, cfg.VMImageProfiles)
 	if form == ConsoleKindVNC {
-		// VNC 无文本串口可接管：不签发 ticket，只如实告知形态（前端据此走 noVNC）。
+		// VNC 无文本串口可接管：不签发 ticket，只如实告知形态（无内置查看器；前端据此提示宿主接入路径）。
 		writeJSON(w, http.StatusOK, map[string]any{"kind": ConsoleKindVNC})
 		return
 	}
-	if vm.SerialConsole != nil && !*vm.SerialConsole {
+	// 只有「域内确实没有串口」才拒绝（未显式设定 console 且 serial_console=false）；
+	// 显式设定的形态独立于该开关（契约 §4.3），此时域内有串口、可正常签发 ticket。
+	if form == "" {
 		writeError(w, http.StatusConflict, "CONFLICT", fmt.Sprintf("VM %s 未启用串口（serial_console=false）", name), nil)
 		return
 	}

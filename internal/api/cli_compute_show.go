@@ -426,12 +426,19 @@ func vmProfileCPU(p model.VMImageProfile) string {
 	return p.CPUMode + "/" + p.CPUModel
 }
 
-// vmProfileExtraArgs 额外 QEMU 参数单元格：多条以空格连接，空则 "（无）"。
+// extraArgsLedgerNote extra-args 的读视图标注（决策 #485，契约 §4.4 / 用户手册 §9.6）：
+// 这些参数是窄自由口，**已绕过资源账本**——产品不再校验其资源含义，故读视图如实标注，
+// 免得操作者以为它们仍受账本约束。CLI 两处读视图（`show vm-image-profiles` 表格列与
+// VNF 详情的「有效启动画像」块）**共用**本常量，单一事实源。
+const extraArgsLedgerNote = "（已绕过资源账本）"
+
+// vmProfileExtraArgs 额外 QEMU 参数单元格：多条以空格连接，有值时标注「已绕过资源账本」，
+// 空则「（无）」。CLI 两处读视图共用（见 extraArgsLedgerNote）。
 func vmProfileExtraArgs(args []string) string {
 	if len(args) == 0 {
 		return "（无）"
 	}
-	return strings.Join(args, " ")
+	return strings.Join(args, " ") + extraArgsLedgerNote
 }
 
 // effectiveStartupBlock `show virtual-machine-functions <name> detail` 的「有效启动画像」块
@@ -492,6 +499,13 @@ func effectiveStartupFields(vm model.VMFunction, profiles []model.VMImageProfile
 		}
 		return s
 	}
+	// 控制台形态与实际域一致（决策 #485 契约 §4.3）：未显式设定且 serial_console 关闭时
+	// 域里没有串口——读视图如实补一句，避免「看着有其实没生效」。
+	consoleVal := val(eff.Console)
+	if form, explicit := model.EffectiveConsole(vm, profiles); form != ConsoleKindVNC &&
+		!explicit && vm.SerialConsole != nil && !*vm.SerialConsole {
+		consoleVal += "（serial_console 已禁用，域内无串口）"
+	}
 	rows := []startupFieldView{
 		{"machine", val(eff.Machine), source(ovSet(func(o model.VMStartupOverride) string { return o.Machine }),
 			profSet(func(p model.VMImageProfile) string { return p.Machine }))},
@@ -507,7 +521,7 @@ func effectiveStartupFields(vm model.VMFunction, profiles []model.VMImageProfile
 			profSet(func(p model.VMImageProfile) string { return p.BootOrder }))},
 		{"accel", val(eff.Accel), source(ovSet(func(o model.VMStartupOverride) string { return o.Accel }),
 			profSet(func(p model.VMImageProfile) string { return p.Accel }))},
-		{"console", val(eff.Console), source(ovSet(func(o model.VMStartupOverride) string { return o.Console }),
+		{"console", consoleVal, source(ovSet(func(o model.VMStartupOverride) string { return o.Console }),
 			profSet(func(p model.VMImageProfile) string { return p.Console }))},
 		{"extra-args", vmProfileExtraArgs(eff.ExtraArgs), source(overrideExtraArgs > 0, prof != nil && len(prof.ExtraArgs) > 0)},
 	}
