@@ -57,6 +57,9 @@ var identityFields = map[string]string{
 	"rules":         "seq",
 	"l3_interfaces": "interface",
 	"per_dev":       "interface",
+	// vm-image-profiles 的元素身份字段是 image（模型 VMImageProfile.Image），
+	// 缺省 name 会让元素建出的键与模型不符、fromJSONTree 直接报「不存在字段 name」（决策 #485）。
+	"vm_image_profiles": "image",
 }
 
 // CLIEResult 单条命令的执行结果。

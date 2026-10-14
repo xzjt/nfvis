@@ -185,6 +185,88 @@ var statementAliasesCompute = []aliasRule{
 			delete(vm, "pci_devices")
 			return nil
 		}},
+
+	// vm-image-profiles <img> cpu mode|model <v>（决策 #485）：树里 cpu 是**对象容器**、
+	// mode/model 是其子关键字（两层），而模型是**平铺**的 cpu_mode/cpu_model。通用遍历会把
+	// 取值写成模型不认识的 cpu:{mode:…}（fromJSONTree 报「配置中不存在字段 "cpu"」），
+	// 故显式映射到平铺字段（set 赋值 / delete 清字段）。删除形态不带取值（4 token），
+	// 与既有 `memory numa node` 的两形态同例。
+	{pattern: []string{"vm-image-profiles", "*", "cpu", "mode", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return aliasProfileCPUScalar(tree, t, isSet, "cpu_mode")
+		}},
+	{pattern: []string{"vm-image-profiles", "*", "cpu", "mode"},
+		apply: func(tree map[string]any, t []string, _ bool) error {
+			return aliasProfileCPUScalar(tree, t, false, "cpu_mode")
+		}},
+	{pattern: []string{"vm-image-profiles", "*", "cpu", "model", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return aliasProfileCPUScalar(tree, t, isSet, "cpu_model")
+		}},
+	{pattern: []string{"vm-image-profiles", "*", "cpu", "model"},
+		apply: func(tree map[string]any, t []string, _ bool) error {
+			return aliasProfileCPUScalar(tree, t, false, "cpu_model")
+		}},
+
+	// virtual-machine-functions <n> startup cpu mode|model <v>（决策 #485）：与镜像画像同族的
+	// 层级差异，落在元素**内嵌的 startup 对象**上（VMStartupOverride 的平铺 cpu_mode/cpu_model）。
+	{pattern: []string{"virtual-machine-functions", "*", "startup", "cpu", "mode", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return aliasStartupCPUScalar(tree, t, isSet, "cpu_mode")
+		}},
+	{pattern: []string{"virtual-machine-functions", "*", "startup", "cpu", "mode"},
+		apply: func(tree map[string]any, t []string, _ bool) error {
+			return aliasStartupCPUScalar(tree, t, false, "cpu_mode")
+		}},
+	{pattern: []string{"virtual-machine-functions", "*", "startup", "cpu", "model", "*"},
+		apply: func(tree map[string]any, t []string, isSet bool) error {
+			return aliasStartupCPUScalar(tree, t, isSet, "cpu_model")
+		}},
+	{pattern: []string{"virtual-machine-functions", "*", "startup", "cpu", "model"},
+		apply: func(tree map[string]any, t []string, _ bool) error {
+			return aliasStartupCPUScalar(tree, t, false, "cpu_model")
+		}},
+}
+
+// aliasProfileCPUScalar：`vm-image-profiles <img> cpu mode|model <v>` → 平铺 VMImageProfile
+// 字段（field = cpu_mode|cpu_model）。t = [vm-image-profiles, <img>, cpu, mode|model(, <v>)]。
+func aliasProfileCPUScalar(tree map[string]any, t []string, isSet bool, field string) error {
+	e, err := elemByID(tree, "vm_image_profiles", t[1])
+	if err != nil {
+		return err
+	}
+	if !isSet {
+		delete(e, field)
+		return nil
+	}
+	e[field] = t[4]
+	return nil
+}
+
+// aliasStartupCPUScalar：`virtual-machine-functions <n> startup cpu mode|model <v>` → 元素
+// startup 对象上的平铺字段（field = cpu_mode|cpu_model）。
+// t = [virtual-machine-functions, <n>, startup, cpu, mode|model(, <v>)]。
+//
+// set 时按需建 startup 对象（与 memory numa node 同例）；delete 时 startup 不在则不动作
+// （交由 commitTree 的 Diff 兜底报「未产生变更」，不凭空建壳）。
+func aliasStartupCPUScalar(tree map[string]any, t []string, isSet bool, field string) error {
+	vm, err := elemByID(tree, "virtual_machine_functions", t[1])
+	if err != nil {
+		return err
+	}
+	st, _ := vm["startup"].(map[string]any)
+	if !isSet {
+		if st != nil {
+			delete(st, field)
+		}
+		return nil
+	}
+	if st == nil {
+		st = map[string]any{}
+		vm["startup"] = st
+	}
+	st[field] = t[5]
+	return nil
 }
 
 // aliasVMPCIDevice：VM 的通用 PCI 直通设备列表（VMFunction.PCIDevices，FR-CMP-023）。
