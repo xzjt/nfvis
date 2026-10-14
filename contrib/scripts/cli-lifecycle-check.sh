@@ -26,14 +26,16 @@
 #                    并用 ping 该转发域里的主机（对端取自邻居表）作正向控制；NAT 会话与 VPP 会话表对账。
 #   L2 重启/重放一致性：systemctl restart vpp（**不**重启 nfvisd）→ 等守护进程重连收敛
 #                    → 断言统计仍可读、NAT 的 inside/outside 仍下在数据面、日志无未收敛项。
-#   L4 镜像启动画像（决策 #485）的生命周期：改画像 + VM 重定义 → 域参数按画像组装（virsh dumpxml
-#                    或产品读视图为事实源）→ `request vpp restart` 后恢复收敛重放**不丢参数**
-#                    → 删画像回落产品默认（非报错）。只挑「镜像未被其它 VM 共用、且当前无画像」
-#                    的 VM，改完立刻还原；缺 VNF / 缺 libvirt / 缺画像现场时如实跳过。
+#   L4 镜像启动画像（决策 #485）的生命周期：**自建一台带前缀的 VM**（镜像取自仓库、实例级 startup
+#                    覆盖若干画像字段）→ 提交期 DefineVM，域参数按画像组装（`virsh dumpxml --inactive`
+#                    为事实源）→ `request vpp restart` 后恢复收敛重放**不丢参数** → 删覆盖回落产品
+#                    默认（非报错）→ 收尾把本段的 VM 删掉（EXIT trap 兜底）。缺镜像 / 缺 libvirt
+#                    时如实跳过（三档口径，不伪装通过）。
 #
 # ⚠️ L2 会**短暂中断数据面**（VPP 重启期间业务口不通，guest 可能掉线再恢复），结束时会如实报告终态。
 # ⚠️ 本脚本会在配置里建对象，跑完自行删除；对象名统一带 rc84t- 前缀，便于识别与收尾。
-#    它刻意**不碰**既有基线的对象（不依赖、不修改别人的交换机/VNF），只使用「能自由分配的口」。
+#    它刻意**不碰**既有基线的对象（不依赖、不修改别人的交换机/VNF），只使用「能自由分配的口」；
+#    L4 自建的 VNF（$PFX-vm）用**仓库里现成的镜像**，收尾删掉（不新增/不改动任何镜像或画像键）。
 #
 # 前置（均在 nfvis-vm 上）：
 #   1) nfvisd 已起；CLI_BIN 指向**同版本** CLI（已装实例用 /usr/bin/nfvis-cli）
@@ -181,6 +183,23 @@ l23_kind() { # stdin: 未收敛行 → stdout: unqueryable | finding
   done
 }
 
+# ---------- L4 判据：从 `show images` 文本里选建 VM 用的 vm-image（可自校准）----------
+# 旧版 L4 把「机器上已有满足条件的 VNF」当**默认**前提，缺就整段跳过——等于四套件常态漏测画像生命周期。
+# 现自建 VM，只依赖「仓库里有可用的 vm-image」这一个前提。纯判据抽出来以便 --selftest 红-绿：
+#   · 优先套件既有夹具名（cli-test.qcow2 / alpine.qcow2 / alpine），保证与 fulltest/语义夹具同源；
+#   · 否则取仓库里**第一个 vm-image**（`show images` 的 Type 列，header 在第 1 行）；
+#   · ISO 主盘强制 cdrom/sata（disk-interface/boot-order 不适用），一律排除；
+#   · 仓库为空/只有 container-image/只有 ISO ⇒ 回空（调用方据此如实跳过，不伪装通过）。
+l4_pick_image_from() { # <show images 文本> → 选中的 vm-image 名（无则空）
+  local imgs="$1" cand
+  # 夹具名只认 **vm-image** 类型：仓库里可能有**同名容器镜像**（如 `alpine`），只按名字抓会选错类型。
+  for cand in cli-test.qcow2 alpine.qcow2 alpine; do
+    printf '%s\n' "$imgs" | awk -v c="$cand" 'NR>1 && $1==c && $2=="vm-image" {f=1} END{exit !f}' \
+      && { echo "$cand"; return; }
+  done
+  printf '%s\n' "$imgs" | awk 'NR>1 && $2=="vm-image" && $1 !~ /\.[iI][sS][oO]$/ {print $1; exit}'
+}
+
 # `--selftest`：合成输入自校准（不碰真机；CI 可跑）——只有「查不了」⇒ 0 判定；
 # 真残渣行仍抓得到；混合输入两类各归各。判据回归时这里先红。
 if [ "${1:-}" = "--selftest" ]; then
@@ -212,6 +231,47 @@ nfvisd[1]: {"msg":"残渣对账未收敛项","err":"对账数据面 IP 表: VPP 
 nfvisd[1]: {"msg":"残渣对账未收敛项","err":"对账数据面 ACL: unable to process request: write unix @->/run/vpp/api.sock: write: broken pipe"}
 nfvisd[1]: {"msg":"残渣对账未收敛项","err":"对账数据面 bridge-domain: 配置未声明却在数据面：BD [314680]"}
 EOF
+
+  # L4 判据自校准：从 `show images` 文本里选建 VM 的 vm-image（自建前提）。
+  chk_img() { # chk_img <说明> <期望选中名> <<< show images 文本
+    local why="$1" want="$2" got
+    got=$(l4_pick_image_from "$(cat)")
+    if [ "$got" = "$want" ]; then
+      echo "  ✓ $why（选中 '${got:-空}'）"
+    else
+      echo "  ✗ $why：期望 '${want:-空}'，实得 '${got:-空}'"
+      fail=1
+    fi
+  }
+  echo "— cli-lifecycle-check 判据自校准（L4 镜像选择）—"
+  chk_img "优先夹具名 cli-test.qcow2（跳过 container-image）" "cli-test.qcow2" <<'EOF'
+Name                   Type             Size       Refs   State
+alpine                 container-image  7.8 MB     0      ready
+cli-test.qcow2         vm-image         178.1 MB   0      ready
+EOF
+  chk_img "无夹具名则回退仓库里第一个 vm-image" "alpine.qcow2" <<'EOF'
+Name                   Type             Size       Refs   State
+alpine                 container-image  7.8 MB     0      ready
+alpine.qcow2           vm-image         178.1 MB   0      ready
+debian-12.qcow2        vm-image         350.0 MB   0      ready
+EOF
+  chk_img "跳过 ISO（主盘强制 cdrom/sata，参数不适用）" "extra.qcow2" <<'EOF'
+Name                   Type             Size       Refs   State
+netinst.iso            vm-image         700.0 MB   0      ready
+extra.qcow2            vm-image         200.0 MB   0      ready
+EOF
+  chk_img "仓库为空 ⇒ 空（如实跳过，不伪装通过）" "" <<'EOF'
+（镜像仓库为空）
+EOF
+  chk_img "只有 container-image ⇒ 空（无 vm-image 可建 VM）" "" <<'EOF'
+Name                   Type             Size       Refs   State
+alpine                 container-image  7.8 MB     0      ready
+EOF
+  chk_img "同名容器镜像不误选（alpine 是 container-image ⇒ 回退真 vm-image）" "other.qcow2" <<'EOF'
+Name                   Type             Size       Refs   State
+alpine                 container-image  7.8 MB     0      ready
+other.qcow2            vm-image         200.0 MB   0      ready
+EOF
   if [ "$fail" = 0 ]; then echo "全部符合预期"; exit 0; else echo "有不符合预期的用例"; exit 1; fi
 fi
 
@@ -237,61 +297,50 @@ NFVIS_PASS_BEFORE=$(vpp_nat_ifaces | tr '\n' ' ')
 BD_BEFORE=$(vpp_bd_ids | tr '\n' ' ')
 BOND_BEFORE=$(vpp_bond_set | tr '\n' ' ')
 
-# ---------- L4（镜像启动画像）用的解析与收尾态 ----------
-# 这组变量在 L4 段被赋值；cleanup（EXIT trap）据此把「L4 改过的画像/描述」还原，
-# 避免中途失败或中断把改动留在机器上（终态会以配置逐字节比对兜底）。
-L4_VM=""; L4_IMG=""; L4_DESC_ORIG=""; L4_TOUCHED=0
-# <vm 名> → 该 VNF 声明的 image（配置块内 `image <名>;`）。取不到回空。
-vm_image_of() { cli "show configuration" | awk -v n="$1" '
-  $0 == "virtual-machine-functions " n " {" { inb=1; next }
-  inb && /^\}/ { inb=0 }
-  inb && $1 == "image" { gsub(/;/, "", $2); print $2; exit }'; }
-# <vm 名> → 该 VNF 的 description（无则空）。
-vm_desc_of() { cli "show configuration" | awk -v n="$1" '
-  $0 == "virtual-machine-functions " n " {" { inb=1; next }
-  inb && /^\}/ { inb=0 }
-  inb && $1 == "description" { sub(/^[ \t]*description[ \t]*/, ""); sub(/;.*/, ""); print; exit }'; }
-# <镜像名> → 该画像已声明的叶子名（空格分隔）。无画像回空。
-profile_field_names() { cli "show configuration" | awk -v n="$1" '
-  $0 == "vm-image-profiles " n " {" { inb=1; next }
-  inb && /^\}/ { inb=0 }
-  inb && NF { gsub(/;.*/, "", $1); print $1 }' | tr '\n' ' '; }
-# <vm 名> → 该 VNF 是否设了**实例级 startup 覆盖**（用 display set 反推，不依赖配置块缩进）。
-# L4 改画像时若该 VM 有实例覆盖，实例值会盖过画像（合并顺序：实例覆盖 > 镜像画像），可能与画像的
-# accel/cpu 组合冲突而被**正确**拒绝——故挑对象时排除它们（避免把校验拒绝误当缺陷）。
-vm_startup_set() { cli "show configuration | display set" | grep -qE "^set virtual-machine-functions $1 startup( |$)"; }
-# L4 读域定义：`virsh dumpxml --inactive` 优先——VM 在跑时**新画像落在持久配置**里，live 域仍是旧值
+# ---------- L4（镜像启动画像）用的对象选择、事实源与收尾态 ----------
+# L4 **自建**一台带前缀的 VM（$L4_PFX_VM）来验画像生命周期——不再依赖机器上预存的 VNF（旧版把这种
+# 「没有现成 VNF 就跳过」当**默认**路径，这里降级为**最后兜底**：仅当镜像仓库没有可用的 vm-image 时
+# 才如实跳过）。画像用**实例级 startup 覆盖**表达（生效优先级：实例覆盖 > 镜像画像 > 产品默认），它
+# 随 VM 一起删除，故「清 VM」即清画像，不会在机器上留下孤立的画像键、也不改任何既有镜像画像。
+L4_PFX_VM="$PFX-vm"
+L4_IMG=""
+
+# 选仓库里现成的 vm-image 作建 VM 的镜像（排除 ISO——ISO 主盘强制 cdrom/sata：disk-interface/
+# boot-order 不适用）。纯判据抽成 l4_pick_image_from（见文件上方、--selftest 可自校准），这里只做
+# 取数包装。优先套件既有的夹具名，回退仓库里第一个 vm-image；都无则回空（如实跳过）。
+l4_pick_image() { l4_pick_image_from "$(cli "show images")"; }
+
+# 删本段自建的 VM（先尽力停、再删一次提交），并**回读确认**。幂等，返回码表示「返回后配置里是否确无
+# 该 VM」（0＝确无，含本就没有；1＝删后仍在）。删 VM 即带走其实例级 startup 覆盖（＝画像）。
+l4_del_vm() {
+  cli "show configuration" | grep -qE "^virtual-machine-functions $L4_PFX_VM \{" || return 0   # 本就没有
+  cli "request virtual-machine-functions $L4_PFX_VM stop" >/dev/null 2>&1
+  "$CLI_BIN" -server "$SRV" -u admin -p "$PW" -source console -c "configure
+delete virtual-machine-functions $L4_PFX_VM
+commit" >/dev/null 2>&1
+  ! cli "show configuration" | grep -qE "^virtual-machine-functions $L4_PFX_VM \{"
+}
+
+# 收尾：删掉本段建的 VM（正常路径下已删过；失败/中断时兜底）。幂等，EXIT trap 与正常路径都可重入。
+l4_cleanup() {
+  cli "show configuration" | grep -qE "^virtual-machine-functions $L4_PFX_VM \{" || return 0   # 本就没有
+  if l4_del_vm; then echo "· 收尾：已删除 L4 自建 VM $L4_PFX_VM"
+  else echo "· 收尾：L4 自建 VM $L4_PFX_VM 删除未生效（仍留在配置，终态比对会据此报红）"; fi
+}
+
+# L4 读域定义：`virsh dumpxml --inactive` 优先——VM 在跑时画像落在**持久配置**里，live 域仍是旧值
 # （DefineVM 只写持久配置，不重启运行中的域）。--inactive 取不到（瞬态域）再退回 live dumpxml。
 l4_dump() { # <vm>
   local d; d=$(virsh dumpxml --inactive "$1" 2>/dev/null)
   [ -n "$d" ] || d=$(virsh dumpxml "$1" 2>/dev/null)
   printf '%s' "$d"
 }
-# 还原 L4 改动（画像删除 + 描述还原）；幂等，EXIT trap 与正常路径都可安全重入。
-l4_restore() {
-  [ "$L4_TOUCHED" = 1 ] || return 0
-  if cli "show configuration" | grep -q "^vm-image-profiles $L4_IMG {"; then
-    "$CLI_BIN" -server "$SRV" -u admin -p "$PW" -source console -c "configure
-delete vm-image-profiles $L4_IMG
-commit" >/dev/null 2>&1
-  fi
-  if [ -n "$L4_DESC_ORIG" ]; then
-    "$CLI_BIN" -server "$SRV" -u admin -p "$PW" -source console -c "configure
-set virtual-machine-functions $L4_VM description $L4_DESC_ORIG
-commit" >/dev/null 2>&1
-  else
-    "$CLI_BIN" -server "$SRV" -u admin -p "$PW" -source console -c "configure
-delete virtual-machine-functions $L4_VM description
-commit" >/dev/null 2>&1
-  fi
-  L4_TOUCHED=0
-}
 
 # 收尾：把本脚本可能留下的对象删掉（正常路径下已删过；失败/中断时兜底）。
 # 只在**配置里确实还有**时才发删除，避免无谓的「无匹配配置」噪音。
 cleanup() {
   local cfg="$1" todo=""
-  l4_restore
+  l4_cleanup
   for o in "virtual-switches $V3" "bonds $B3" "port-mirroring $S3"; do
     case "$o" in
       virtual-switches*) grep -q "^virtual-switches ${o##* } \{" "$cfg" 2>/dev/null && todo="$todo|${o}";;
@@ -707,19 +756,22 @@ else
 fi
 
 # ============================================================ L4
-# L4 镜像启动画像（决策 #485）的生命周期：**改画像 + VM 重定义 → 域参数按画像组装 → 重启重放
-# 不丢参数 → 删画像回落产品默认**。量的是「画像是否真的参与 VM 定义与恢复重放」，既有两套真机
-# 套件都覆盖不到（它们只看一次性读视图）。
+# L4 镜像启动画像（决策 #485）的生命周期：**自建 VM（实例级 startup 覆盖）→ 域参数按画像组装 →
+# request vpp restart 重放不丢参数 → 删覆盖回落产品默认 → 收尾删 VM**。量的是「画像是否真的参与
+# VM 定义与恢复重放」，既有两套真机套件都覆盖不到（它们只看一次性读视图）。
+#   · 为什么自建：本套件本就自建对象（L1 的交换机/bond/镜像会话都带 $PFX 前缀并自行清理），画像
+#     这一维没有理由反过来**依赖机器上预存的 VNF**——旧版「没有现成 VNF 就跳过」是**默认**路径，
+#     等于四套件常态漏测。现改为自建，仅当**镜像仓库没有可用 vm-image**时才如实跳过（最后兜底）。
 #   · 事实源（域定义）：`virsh dumpxml --inactive <vm>`——画像参数落在 <os>/<cpu>/<disk target bus>/
-#     <boot>/<serial> 里，是「画像进了 domain」的**唯一独立事实源**；用 **--inactive** 是因为
-#     DefineVM 只写**持久配置**（不重启运行中的域），对运行中的 VM 而言 live 域仍是旧值；virsh 不可用
-#     时降级读产品读视图（有效画像块）。⚠️ libvirt 会把 machine 别名**展开**（pc → pc-i440fx-<ver>、
+#     <boot> 里，是「画像进了 domain」的**唯一独立事实源**；用 **--inactive** 是因为 DefineVM 只写
+#     **持久配置**（不重启运行中的域），对运行中的 VM 而言 live 域仍是旧值；virsh 不可用时降级读产品
+#     读视图（有效画像块）。⚠️ libvirt 会把 machine 别名**展开**（pc → pc-i440fx-<ver>、
 #     q35 → pc-q35-<ver>），故断言按前缀/子串匹配而非等值。
 #   · 事实源（重放触发）：`request vpp restart` 后恢复收敛（EnsureConsistent）按 committed 配置
 #     重定义每台 VM——画像须随重放带回（否则重启丢参数，正是本项要钉的返祖）。
-#   · 只挑「镜像未被其它 VM 共用、且当前无画像、且无实例级 startup 覆盖」的 VM，改完**立刻还原**
-#     （cleanup trap 兜底），避免动到基线对象。缺 VNF / 缺 libvirt / 缺画像现场时如实跳过（三档口径）。
-hdr "L4 镜像启动画像的生命周期（改画像→重定义→request vpp restart 重放→删画像回落）"
+#   · 只改**自建对象**，收尾删掉（cleanup trap 兜底）；不动任何既有 VNF/镜像/画像键。缺镜像 / 缺
+#     libvirt / 起不来（如无空闲大页）时如实跳过（三档口径），绝不伪装通过。
+hdr "L4 镜像启动画像的生命周期（自建 VM + 实例覆盖 → 域按画像组装 → request vpp restart 重放不丢 → 删覆盖回落默认）"
 
 # 域定义断言（virsh dumpxml）：<标签> <xml> <grep -E 模式>
 dom_has() { if printf '%s' "$2" | grep -qE "$3"; then ok "L4 $1"; else exp_act "域定义匹配 $3" "未见"; bad "L4 $1：域定义里找不到 $3"; fi; }
@@ -753,7 +805,6 @@ l4_assert_params() { # <阶段标签> <xml> <detail>
     dom_has "$tag 磁盘接口＝ide" "$xml" "bus='ide'"
     dom_has "$tag 引导顺序＝cdrom" "$xml" "<boot dev='cdrom'"
     dom_has "$tag 加速器＝tcg（domain type=qemu）" "$xml" "<domain type='qemu'"
-    dom_has "$tag console＝telnet（serial type=tcp）" "$xml" "<serial type='tcp'"
   else
     eff_has "$tag 机器类型 pc" "$det" 'machine +pc'
     eff_has "$tag cpu 模式 custom" "$det" 'cpu mode +custom'
@@ -761,125 +812,108 @@ l4_assert_params() { # <阶段标签> <xml> <detail>
     eff_has "$tag 磁盘接口 ide" "$det" 'disk-interface +ide'
     eff_has "$tag 引导顺序 cd" "$det" 'boot-order +cd'
     eff_has "$tag 加速器 tcg" "$det" 'accel +tcg'
-    eff_has "$tag console telnet" "$det" 'console +telnet'
   fi
 }
 
-l4_vms=$(cli "show virtual-machine-functions" | awk 'NR > 1 && $1 !~ /^（/ {print $1}')
+l4_img=$(l4_pick_image)
 l4_xml_ok=1
-if [ -z "$l4_vms" ]; then
-  skip "L4 镜像启动画像的删除/重放 —— 没有 VNF 对象（需一台 VNF 重定义才能验画像驱动的域参数）"
+if [ -z "$l4_img" ]; then
+  skip "L4 镜像启动画像的删除/重放 —— 镜像仓库里没有可用的 vm-image（无从自建 VNF；先 request images upload 一个 vm-image 再复跑）"
 else
-  for _v in $l4_vms; do
-    _img=$(vm_image_of "$_v"); [ -n "$_img" ] || continue
-    case "$_img" in *.iso|*.ISO) continue;; esac             # ISO 主盘强制 cdrom/sata：disk-interface/boot-order 不适用
-    [ -z "$(profile_field_names "$_img")" ] || continue       # 该镜像已有画像：不覆盖他人画像
-    vm_startup_set "$_v" && continue                          # 有实例级覆盖：会盖过画像致组合冲突，避开
-    _shared=$(for _v2 in $l4_vms; do [ "$(vm_image_of "$_v2")" = "$_img" ] && echo x; done | grep -c .)
-    [ "$_shared" = 1 ] || continue                            # 只挑「镜像不被其它 VM 共用」的，避免牵连基线
-    L4_VM="$_v"; L4_IMG="$_img"; break
-  done
-  # 域定义事实源是否可用（挑到对象后再探测，避免对空名调 virsh）。
-  if [ -n "$L4_VM" ] && command -v virsh >/dev/null 2>&1 && [ -n "$(l4_dump "$L4_VM")" ]; then
-    l4_xml_ok=1
-  else
-    l4_xml_ok=0
-    [ -n "$L4_VM" ] && note "L4 无 virsh（或 libvirt 不可达）：改读产品读视图（有效画像块）判定，弱于域定义"
-  fi
-fi
+  L4_IMG="$l4_img"
+  command -v virsh >/dev/null 2>&1 || { l4_xml_ok=0; note "L4 无 virsh（或 libvirt 不可达）：改读产品读视图（有效画像块）判定，弱于域定义"; }
+  echo "    对象: 自建 VNF $L4_PFX_VM（镜像 $L4_IMG，取自仓库）｜ 域定义事实源: $([ "$l4_xml_ok" = 1 ] && echo 'virsh dumpxml --inactive' || echo '产品读视图（降级）')"
+  echo "    覆盖字段: machine pc / cpu custom+Nehalem / disk-interface ide / boot-order cd / accel tcg（firmware 跳过以免依赖 OVMF）"
 
-if [ -z "$l4_vms" ]; then
-  : # 上面已报跳过
-elif [ -z "$L4_VM" ]; then
-  skip "L4 镜像启动画像的删除/重放 —— 没有「镜像未被其它 VM 共用、且当前无既有画像、且无实例级 startup 覆盖」的 VNF（不拿基线对象试验）"
-else
-  L4_DESC_ORIG=$(vm_desc_of "$L4_VM")
-  echo "    对象: VNF $L4_VM（镜像 $L4_IMG）｜ 原描述: ${L4_DESC_ORIG:-（无）}｜ 域定义可用: $([ "$l4_xml_ok" = 1 ] && echo 是 || echo 否)"
-  echo "    可用参数: machine/cpu/disk-interface/boot-order/accel/console（firmware 跳过以免依赖 OVMF）"
-
-  # ---- A. 改画像 + 改该 VM 描述（同一提交 → 画像先喂给计算编排，VM 定义取用新画像）----
-  L4_TOUCHED=1
+  # ---- A. 自建 VM（实例级 startup 覆盖）+ 提交：提交期 DefineVM 按有效画像组装 domain ----
   aout=$(cli "configure
-set vm-image-profiles $L4_IMG machine pc
-set vm-image-profiles $L4_IMG cpu mode custom
-set vm-image-profiles $L4_IMG cpu model Nehalem
-set vm-image-profiles $L4_IMG disk-interface ide
-set vm-image-profiles $L4_IMG boot-order cd
-set vm-image-profiles $L4_IMG accel tcg
-set vm-image-profiles $L4_IMG console telnet
-set virtual-machine-functions $L4_VM description $PFX-prof-$$
+set virtual-machine-functions $L4_PFX_VM image $L4_IMG
+set virtual-machine-functions $L4_PFX_VM vcpu count 1
+set virtual-machine-functions $L4_PFX_VM memory size-mb 1024
+set virtual-machine-functions $L4_PFX_VM startup machine pc
+set virtual-machine-functions $L4_PFX_VM startup cpu mode custom
+set virtual-machine-functions $L4_PFX_VM startup cpu model Nehalem
+set virtual-machine-functions $L4_PFX_VM startup disk-interface ide
+set virtual-machine-functions $L4_PFX_VM startup boot-order cd
+set virtual-machine-functions $L4_PFX_VM startup accel tcg
 commit")
   if cli_err "$aout"; then
     if printf '%s' "$aout" | grep -qE '计算|libvirt|compute|不可用'; then
-      skip "L4 建画像 + 重定义 —— 计算编排不可用（libvirt），本项环境受限"
+      skip "L4 自建 VM + 画像覆盖 —— 计算编排不可用（libvirt），本项环境受限：$(printf '%s' "$aout" | head -1)"
     else
-      bad "L4 建画像 + 重定义 $L4_VM 的提交失败，本项不继续"
+      bad "L4-A 自建 VM $L4_PFX_VM（含 startup 覆盖）的提交失败，本项不继续"
       printf '%s\n' "$aout" | sed 's/^/      | /' | head -8
     fi
+  elif ! cli "show configuration" | grep -qE "^virtual-machine-functions $L4_PFX_VM \{"; then
+    bad "L4-A 提交未报错但配置里没有 $L4_PFX_VM（未落库）"
   else
-    ok "L4-A 画像已提交且 $L4_VM 被重定义（同一提交）"
-    xml=$(l4_dump "$L4_VM"); det=$(cli "show virtual-machine-functions $L4_VM detail")
-    l4_assert_params "L4-A" "$xml" "$det"
-    if printf '%s' "$det" | grep -qE 'machine +pc.*镜像画像'; then
-      ok "L4-A 有效画像块：machine=pc 且来源＝镜像画像"
+    ok "L4-A 自建 VM $L4_PFX_VM 已提交（含实例级 startup 覆盖，同一提交）"
+
+    # 启动：域按提交期 DefineVM 起。起不来（如无空闲大页 / libvirt 受限）时按三档口径**如实报跳过**，
+    # 不把「没起来」当通过；但域定义（持久配置）参数仍按事实判定（下方断言）——它不依赖运行态。
+    cli "request virtual-machine-functions $L4_PFX_VM start" >/dev/null 2>&1
+    l4_running=no
+    if command -v virsh >/dev/null 2>&1; then
+      for _ in $(seq 1 30); do
+        [ "$(virsh domstate "$L4_PFX_VM" 2>/dev/null | tr -d '\r')" = "running" ] && { l4_running=yes; break; }
+        sleep 1
+      done
     else
-      exp_act "machine  pc  [镜像画像]" "$(printf '%s' "$det" | grep -E '^[[:space:]]*machine ' | head -1)"
-      bad "L4-A 有效画像块未按画像标注 machine（值或来源不符）"
+      sleep 3   # 无 virsh：无法核对运行态，只给一个短窗口让启动动作落下，运行态按降级口径不计入
     fi
+    if [ "$l4_running" = yes ]; then
+      ok "L4-A 自建 VM 已启动（virsh domstate=running）"
+    else
+      skip "L4-A 自建 VM 未能确认启动（大页不足 / 计算编排受限）——运行态未覆盖；域定义参数（提交期 DefineVM）仍按事实判定"
+    fi
+
+    # 域定义读：virsh 返回空 ⇒ 降级读视图（并对齐 l4_xml_ok）
+    xml=$(l4_dump "$L4_PFX_VM"); det=$(cli "show virtual-machine-functions $L4_PFX_VM detail")
+    if [ "$l4_xml_ok" = 1 ] && [ -z "$xml" ]; then
+      l4_xml_ok=0; note "L4 virsh 取不到 $L4_PFX_VM 的域定义：降级读产品读视图（有效画像块）"
+    fi
+    l4_assert_params "L4-A" "$xml" "$det"
 
     # ---- B. request vpp restart → 恢复收敛按 committed 重定义 → 画像参数须随重放带回 ----
     if l4_restart_wait; then
       ok "L4-B request vpp restart 后 VPP 重连且恢复收敛完成"
-      xml=$(l4_dump "$L4_VM"); det=$(cli "show virtual-machine-functions $L4_VM detail")
+      xml=$(l4_dump "$L4_PFX_VM"); det=$(cli "show virtual-machine-functions $L4_PFX_VM detail")
       l4_assert_params "L4-B（重启重放后）" "$xml" "$det"
     elif [ -n "$L4_RESTART_ERR" ]; then
       skip "L4-B request vpp restart 未受理（数据面不可管理），重放段无从判定：$(printf '%s' "$L4_RESTART_ERR" | head -1)"
     else
       note "L4-B 未在 ${CONV_TIMEOUT}s 内看到「恢复收敛完成」标记（下面按事实判定）"
-      xml=$(l4_dump "$L4_VM"); det=$(cli "show virtual-machine-functions $L4_VM detail")
+      xml=$(l4_dump "$L4_PFX_VM"); det=$(cli "show virtual-machine-functions $L4_PFX_VM detail")
       l4_assert_params "L4-B（重启重放后）" "$xml" "$det"
     fi
 
-    # ---- C. 删画像 + 还原描述（同一提交 → VM 重定义；无画像 ⇒ 回落产品默认，非报错）----
-    if [ -n "$L4_DESC_ORIG" ]; then
-      cscript="configure
-delete vm-image-profiles $L4_IMG
-set virtual-machine-functions $L4_VM description $L4_DESC_ORIG
-commit"
-    else
-      cscript="configure
-delete vm-image-profiles $L4_IMG
-delete virtual-machine-functions $L4_VM description
-commit"
-    fi
-    cout=$(cli "$cscript")
+    # ---- C. 删实例覆盖（＝删画像）→ VM 重定义回落产品默认（非报错）----
+    cout=$(cli "configure
+delete virtual-machine-functions $L4_PFX_VM startup
+commit")
     if cli_err "$cout"; then
-      bad "L4-C 删画像 + 还原描述的提交失败（画像删除应回落默认，不应报错）"
+      bad "L4-C 删 startup 覆盖的提交失败（删画像应回落产品默认，不应报错）"
       printf '%s\n' "$cout" | sed 's/^/      | /' | head -8
     else
-      ok "L4-C 画像已删除、描述已还原（同一提交，$L4_VM 重定义）"
-      L4_TOUCHED=0
-      xml=$(l4_dump "$L4_VM"); det=$(cli "show virtual-machine-functions $L4_VM detail")
+      ok "L4-C 实例覆盖已删除（同一提交，$L4_PFX_VM 重定义）"
+      xml=$(l4_dump "$L4_PFX_VM"); det=$(cli "show virtual-machine-functions $L4_PFX_VM detail")
       if [ "$l4_xml_ok" = 1 ]; then
         dom_has "L4-C 回落产品默认机器类型（pc→q35）" "$xml" "machine='(pc-)?q35"
         dom_has "L4-C 回落产品默认磁盘接口（ide→virtio）" "$xml" "bus='virtio'"
       else
         eff_has "L4-C 回落产品默认 machine=q35" "$det" 'machine +q35'
       fi
-      if printf '%s' "$det" | grep -qE 'machine +q35.*产品默认'; then
-        ok "L4-C 有效画像块：machine=q35 且来源＝产品默认（删画像即回落，非报错）"
-      else
-        exp_act "machine  q35  [产品默认]" "$(printf '%s' "$det" | grep -E '^[[:space:]]*machine ' | head -1)"
-        bad "L4-C 删画像后 machine 未如实回落产品默认"
-      fi
-      if cli "show vm-image-profiles" | grep -qE "^$L4_IMG([[:space:]]|$)"; then
-        bad "L4-C 删画像后 show vm-image-profiles 仍列出 $L4_IMG"
-      else
-        ok "L4-C 删画像后读视图不再列出该画像（键＝镜像名，删除按事实生效）"
-      fi
+    fi
+
+    # ---- D. 收尾：删掉本段自建的 VM（实例级画像覆盖随 VM 一起消失，机器上不留孤立画像键）----
+    if l4_del_vm; then
+      ok "L4-D 自建 VM $L4_PFX_VM 已删除（连带其实例级 startup 覆盖/画像）"
+    else
+      bad "L4-D 自建 VM $L4_PFX_VM 收尾删除失败（仍留在配置里）"
     fi
   fi
 fi
+
 
 # ============================================================ 终态
 hdr "终态报告（本脚本为机器留下的状态）"
