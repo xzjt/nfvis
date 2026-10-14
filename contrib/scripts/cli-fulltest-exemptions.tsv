@@ -99,3 +99,28 @@ set vxlan tunnels <n> vni <id> local <ip> remote <ip> [dst-port <n>] [virtual-sw
 delete vxlan tunnels <n> [vni | local | remote | dst-port | virtual-switch]	配置语句未逐条执行	同上（裸 delete ＝删整条；逐叶子与整条两种形态由 cli_mapping 删除用例与别名单测覆盖）
 set virtual-machine-functions <n> pci-device <bdf>	配置语句未逐条执行	通用 PCI 直通设备声明（追加语义）；解析/别名/同值幂等/display set 往返由 cli_mapping 与 setstmt 守护覆盖，语法与跨 VM 冲突由 model 单测覆盖，hostdev 组装与存在性检查由 compute 单测覆盖；真机按交付步骤以一次性 VNF（只 define 不 start）走查，实际直通端到端未验（宿主无 IOMMU 直通能力）
 delete virtual-machine-functions <n> pci-device [<bdf>]	配置语句未逐条执行	同上（去一条/清空两形态；按归一 BDF 匹配由 api 单测覆盖）
+# —— 镜像启动画像（决策 #485）：语句已实现并由单测逐条覆盖，真机验证待执行（步骤见附录 A #485）——
+# 语句的解析/别名/display set 往返由 cli_mapping 与 setstmt 守护覆盖；枚举取值与 extra-args denylist
+# 由 internal/model 单测覆盖；画像 → domain XML 的字段级映射由 internal/orchestrator/compute 单测覆盖。
+# 真机验证通过后，按增量口径把命令移入 fulltest 套件并删除本登记。
+show vm-image-profiles [<image>]	由其他套件或单测覆盖	镜像启动画像读视图；CLI 渲染与 REST 三面同源由 internal/api 单测覆盖（execShowVMImageProfiles）；真机验证待执行（附录 A #485），通过后入套件
+set virtual-machine-functions <n> startup machine <type>	配置语句未逐条执行	实例级启动画像覆盖（machine 机型）；解析/别名/display set 往返由 cli_mapping 与 setstmt 守护覆盖，枚举/机型名前缀由 model 单测覆盖；真机验证待执行（附录 A #485），通过后入套件
+set virtual-machine-functions <n> startup cpu mode <mode>	配置语句未逐条执行	同上（cpu 模式）；cpu_mode=custom 需 cpu_model 的一致性由 model 单测覆盖
+set virtual-machine-functions <n> startup cpu model <model>	配置语句未逐条执行	同上（cpu 型号）
+set virtual-machine-functions <n> startup firmware <type>	配置语句未逐条执行	同上（固件 bios|uefi）；域映射（os firmware='efi'）由 compute 单测覆盖
+set virtual-machine-functions <n> startup disk-interface <iface>	配置语句未逐条执行	同上（主盘接口）；域映射（target bus）由 compute 单测覆盖
+set virtual-machine-functions <n> startup boot-order <order>	配置语句未逐条执行	同上（引导顺序）；域映射（os boot dev）由 compute 单测覆盖
+set virtual-machine-functions <n> startup accel <type>	配置语句未逐条执行	同上（加速器 kvm|tcg）；域映射（domain type 降 qemu）由 compute 单测覆盖
+set virtual-machine-functions <n> startup console <type>	配置语句未逐条执行	同上（console 形态 serial|telnet|vnc，S 档）；域映射由 compute 单测覆盖，CLI 形态分派（vnc 拒绝并指向宿主接入）由 api 单测覆盖
+set virtual-machine-functions <n> startup extra-args <arg>	配置语句未逐条执行	同上（窄自由口，S 档）；denylist（ValidateExtraArgs）红-绿由 model 单测覆盖
+delete virtual-machine-functions <n> startup [<leaf>]	配置语句未逐条执行	同上（清覆盖块/叶子）；删除语义与空壳回收由 api 单测覆盖
+set vm-image-profiles <image> machine <type>	配置语句未逐条执行	镜像级启动画像（machine 机型）；解析/别名/display set 往返由 cli_mapping 与 setstmt 守护覆盖，枚举/机型名由 model 单测覆盖；真机验证待执行（附录 A #485），通过后入套件
+set vm-image-profiles <image> cpu mode <mode>	配置语句未逐条执行	同上（cpu 模式）
+set vm-image-profiles <image> cpu model <model>	配置语句未逐条执行	同上（cpu 型号）
+set vm-image-profiles <image> firmware <type>	配置语句未逐条执行	同上（固件）
+set vm-image-profiles <image> disk-interface <iface>	配置语句未逐条执行	同上（主盘接口）
+set vm-image-profiles <image> boot-order <order>	配置语句未逐条执行	同上（引导顺序）
+set vm-image-profiles <image> accel <type>	配置语句未逐条执行	同上（加速器）
+set vm-image-profiles <image> console <type>	配置语句未逐条执行	同上（console 形态，S 档）
+set vm-image-profiles <image> extra-args <arg>	配置语句未逐条执行	同上（窄自由口，S 档）；denylist 由 model 单测覆盖
+delete vm-image-profiles <image> [<leaf>]	配置语句未逐条执行	同上（裸 delete＝整节 / 带叶子＝只清叶子）；删除语义由 api 单测覆盖

@@ -2142,6 +2142,104 @@ nfvis# commit                            # 提交时核对设备确实在本机
   看不到设备」。投入生产前先在 guest 内用 `lspci` 确认设备出现，必要时检查宿主
   `dmesg | grep -i iommu` 与设备所用驱动。
 
+### 9.6 镜像启动画像（VNF 自定义启动参数）
+
+有些 VM 镜像需要**特定的 QEMU 启动参数**才能起来（老机器类型、UEFI-only、只认 IDE 启动、需要
+`-cpu host`、只输出 VNC 等）。产品把「某镜像需要什么启动参数」固化成一个**镜像级画像**，定义 VM 时
+自动并入；个别 VM 还能**按实例覆盖**其中若干项。
+
+**生效优先级**：实例 `startup` 覆盖 > 镜像画像 > 产品默认。
+
+**可配置项**（只有这些——都是结构化字段，取值受校验）：
+
+| 项 | 取值 | 产品默认 |
+|---|---|---|
+| `machine` | `q35` \| `pc` \| `pc-i440fx-*` \| `pc-q35-*` | `q35` |
+| `cpu mode` | `host-passthrough` \| `host-model` \| `custom` | `host-passthrough` |
+| `cpu model` | CPU 型号（`cpu mode custom` 时必填） | — |
+| `firmware` | `bios` \| `uefi` | `bios` |
+| `disk-interface` | `virtio` \| `sata` \| `ide` \| `scsi` | `virtio` |
+| `boot-order` | `hd` \| `cd` \| `dc` | `hd` |
+| `accel` | `kvm` \| `tcg` | `kvm` |
+| `console` | `serial` \| `telnet` \| `vnc` | `serial` |
+| `extra-args` | 额外 QEMU 参数（窄自由口，见下） | — |
+
+**① 镜像级画像**（键＝镜像名；该镜像须已在镜像仓库中）：
+
+```bash
+nfvis$ configure
+nfvis# edit vm-image-profiles ubuntu-cloud.qcow2
+nfvis# set machine pc                    # 老机器类型
+nfvis# set firmware uefi                 # UEFI-only 镜像
+nfvis# set disk-interface ide            # 只认 IDE 启动
+nfvis# set cpu mode custom
+nfvis# set cpu model Skylake-Client
+nfvis# set boot-order cd
+nfvis# set accel tcg
+nfvis# set console vnc
+nfvis# set extra-args "-cpu host"        # S 档；命中 denylist 提交期拒绝（见下）
+nfvis# top
+nfvis# commit
+```
+
+**② 实例级覆盖**（只覆盖个别项，其余仍用镜像画像/产品默认）：
+
+```bash
+nfvis# edit virtual-machine-functions fw-vm
+nfvis# set startup machine pc
+nfvis# set startup console telnet
+nfvis# delete startup                   # 裸 delete＝清整个覆盖块；带叶子＝只清该叶子
+```
+
+**③ 读视图**：
+
+```bash
+nfvis$ show vm-image-profiles                         # 全部画像（逐项为配置值，不补默认）
+nfvis$ show vm-image-profiles ubuntu-cloud.qcow2
+nfvis$ show virtual-machine-functions fw-vm detail    # 「有效启动画像」块：逐项给有效值 + 来源
+```
+
+> **改画像后需停机重定义**：画像与实例覆盖都是**域（domain）定义参数**，改动在 VM **下次启动**时
+> 生效——运行中的 VM 须 `stop` + `start`（`restart` 是 ACPI 重启、沿用旧定义）。这与 §9.2 的运行域
+> 变更口径一致。`request vpp restart` 或 nfvis 重启后产品按配置重放域定义，**画像参数不会丢**。
+
+> ⚠️ **资源账本红线**：本节**只有上面那些启动参数**——**memory / vcpu / hugepage-size / numa / 绑核
+> 一律不在这里配**（命令树根本没有这些叶子，属「无从配置」）。内存与 vCPU 归 VM 的资源声明单一真源
+> （`set memory …` / `set vcpu …`），大页与隔离核归内核基线与资源池。启动画像**不碰**资源账本。
+
+> ⚠️ **`extra-args` 窄自由口红线**：`extra-args` 是唯一的自由串口，属 **S 档**（仅 super-user），
+> **每次使用进审计**。命中以下前缀**提交期直接拒绝**——要么覆盖资源账本，要么与产品的网络/磁盘/console
+> 模型冲突，要么本就有结构化字段可代替：
+>
+> `-m` / `-mem*` / `-smp` / `-object` / `-numa`（资源账本）、`-kernel` / `-initrd` / `-append`（绕过磁盘模型）、
+> `-drive` / `-blockdev`（磁盘）、`-netdev` / `-nic` / `-net`（网络）、`-chardev` / `-monitor` / `-qmp` / `-mon` / `-serial`（console/监视器）、
+> `-cpu` / `-machine` / `-boot` / `-device` / `-M`（有结构化字段，强制走字段）、`-uuid` / `-daemonize` / `-pidfile` / `-S`（身份/进程生命周期）。
+>
+> 读视图会显式标注「已绕过资源账本」。确有需求时**补结构化字段**，不放宽自由串。
+
+**④ console 形态（三种）**：
+
+| 形态 | 行为 | 怎么访问 |
+|---|---|---|
+| `serial`（默认） | 文本串口（pty），与既有串口行为一致 | `request virtual-machine-functions <vm> console`（Ctrl-] 退出） |
+| `telnet` | 文本串口改为回环 TCP（`127.0.0.1`），管线不变 | 同上，`request … console` 照常接管（底层拨回环 telnet） |
+| `vnc` | 图形控制台（仅回环 `127.0.0.1`，端口由 libvirt 自动分配） | ⚠️ 见下 |
+
+> ⚠️ **VNC 形态：内置 VNC 查看器尚未随包提供**。`vnc` 是图形控制台，CLI 的 `request … console`
+> **会如实拒绝**并指向宿主接入路径（不假装能显示），Web 控制台当前也给同样的如实提示。
+> VNC 服务仅监听**本机回环**（`127.0.0.1`）——**有宿主访问权限时**：
+>
+> ```bash
+> virsh vncdisplay <vm>        # 例：127.0.0.1:0（对应端口 5900）
+> ```
+>
+> 再用任意 VNC 客户端（宿主上的 `vncviewer` / TigerVNC / RealVNC 等）接入该回环地址即可。
+> 绑定地址一律 `127.0.0.1`（不扩大对外暴露面）。
+
+**⑤ 相关告警**：画像以**镜像名为键**——若某画像指向的镜像**不在镜像仓库中**（被删或未导入），
+该画像不生效（受影响的 VM 下次定义时回落产品默认），产品报 `VM_IMAGE_PROFILE_ORPHAN`（warning；
+按配置与仓库事实重建，跨 nfvisd 重启可见），镜像重新导入/拉取后**自动消警**。
+
 ---
 
 ## 10. 日常运维
@@ -2312,6 +2410,7 @@ nfvis$ request alarms clear all
 > | `CONTAINER_RESTART_LOOP` | warning | 容器**反复重启**：Docker 状态停在 `restarting`，而重启次数在两次巡检之间还在增长、累计已 ≥3 次。状态读数按既有口径把 `restarting` 并入 `running`，所以这条告警是「容器起不来」的可见入口（来源=容器名）。处置：`show container-functions <名>` 看 `restart-count`，`request container-functions <名> log` 与宿主 `docker inspect <名>` 看崩溃原因——多为命令/参数/镜像配置写错，修正后需**删除重建**才对既有容器生效（`request container-functions <名> delete --yes` → 重新声明 → `start`）。容器不再重启（`restarting` 结束）或对象从配置删除后**自动消解** |
 > | `SYSTEM_BASELINE_APPLY_FAILED` | warning | **系统基线（主机名 / 时区 / NTP / DNS）有一项或多项没能落到宿主**——如 `hostnamectl` / `timedatectl` 失败、chrony 重载失败、systemd-resolved 重启失败。控制台显示的是配置值，宿主实况可能仍是旧值；不阻断提交与启动。文案**逐项**给出项名、原因与自查命令（`hostnamectl hostname`、`timedatectl`、`chronyc sources`、`resolvectl status`）。处置：按文案排查修正后**再次提交**（或重启 nfvis 触发复核）即重新应用；**应用成功、或对应声明被删空后自动消解**，跨 nfvisd 重启按重试结果重建 |
 > | `BRIDGE_FDB_LIMIT_REACHED` | warning | **仅内核数据面**：某 L2 交换机的 MAC 学习表已学条目数**达到/超过**声明的 `learn-limit`（来源=交换机名）。内核 bridge 没有「学习条数上限」原语，该上限在内核侧实现为**阈值告警、非强制上限**——**不强制限制学习**，只是提醒学习表已到量。处置：`show virtual-switches <n> detail` 看「学习上限说明」行的已学/上限（自查 `bridge fdb show br <交换机名>`）；条目回落到阈值以下、或删除 `learn-limit` 声明即**自动消解** |
+> | `VM_IMAGE_PROFILE_ORPHAN` | warning | 某个**镜像启动画像**指向的镜像**不在镜像仓库中**（被删或未导入）——该画像不会生效（受影响的 VM 在下一次定义时回落产品默认启动参数）。来源=画像名。按配置与仓库事实重建、跨 nfvisd 重启仍可见；用 `request images upload` 导入或 `request images download` 拉取该镜像后**自动消警** |
 >
 > 上面四条残渣告警的文案都会注明「由启动/巡检对账按数据面事实重建、原始提交不可回溯」——是哪次提交失败、是否被 NAT 引用，数据面看不出来，产品**不编造**。
 

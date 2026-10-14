@@ -142,7 +142,7 @@ set vm-image-profiles <image-name>            # 键=镜像名（? / Tab 从镜�
 -drive / -blockdev                              （磁盘模型）
 -netdev / -nic / -net                           （网络模型）
 -chardev / -monitor / -qmp / -mon / -serial     （console/监视器）
--cpu / -machine / -boot / -device               （有结构化字段，强制走字段）
+-cpu / -machine / -boot / -device / -M          （有结构化字段，强制走字段）
 -uuid / -daemonize / -pidfile / -S              （身份/进程生命周期）
 ```
 

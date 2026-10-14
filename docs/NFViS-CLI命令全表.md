@@ -25,7 +25,7 @@
 | ⚠️ | **已知缺口**：未实现但**明确提示**（非静默空值，也不是静默返回别的正文） |
 | ⊘ | **预期报错**：环境受限或防呆守卫正确拒绝——报错即正确行为 |
 | 🚫 | **本轮未执行**：破坏性/需交互（测试机不宜执行）或环境上做不了——**不是「未实现」**，真值以代码与单测为准 |
-| 🔜 | **契约先行**：契约（附录 A / 命令树设计 / 本表 / openapi）已声明、实现与真机验证在后续任务——如实标注，不谎报 ✅ |
+| 🔜 | **契约先行**：契约（附录 A / 命令树设计 / 本表 / openapi）已声明、实现与真机验证在后续任务——如实标注，不谎报 ✅（**本表当前无行使用**：镜像启动画像 21 行实现落地后已转 🚫 真机验证待执行） |
 
 **实测列的覆盖面（如实登记）**：round80 套件覆盖的是「非破坏性、可脚本化」的那部分命令——
 `show` 族（§1.1）逐条覆盖；配置语句（§2）覆盖 **58 条**契约语句（+1 批前置对象，每条语句在独立会话里执行，
@@ -121,7 +121,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show container-functions <name> interfaces` | memif vNIC 列表 | 同上 | ✅ |
 | `show images` | 镜像仓库列表 | `GET /images` | ✅ |
 | `show images <name> detail` | 类型/大小/sha256/引用计数 | `GET /images/{name}` | ✅ |
-| `show vm-image-profiles [<image>]` | 镜像启动画像（键＝镜像名）：machine / cpu mode / cpu model / firmware / disk-interface / boot-order / accel / console / extra-args，逐项含来源＝配置（决策 #485）；`<image>` 走动态候选（镜像仓库 vm-image 清单） | `GET /vm-image-profiles` | 🔜 契约先行（实现与真机验证见后续任务） |
+| `show vm-image-profiles [<image>]` | 镜像启动画像（键＝镜像名）：machine / cpu mode / cpu model / firmware / disk-interface / boot-order / accel / console / extra-args，逐项含来源＝配置（决策 #485）；`<image>` 走动态候选（镜像仓库 vm-image 清单） | `GET /vm-image-profiles` | 🚫 真机验证待执行（实现已落地并单测覆盖；步骤见附录 A #485） |
 | `show resource-pools` | 大页池/隔离核：大页段列名「声明/总数（内核实际）/已分配（在用）/可分配（VNF）」，数字取**内核实况**（与 `show system hugepages` 同源，两处数字一致）：已分配（在用）＝内核在用页数（含数据面固定占用与 VNF/其它持有），可分配（VNF）＝内核空闲页数＝VNF 实际可起页数；取不到内核值显示「取不到」；隔离核含 vpp-reserved | `GET /resource-pools` | ✅ |
 | `show alarms [active\|all]` | 告警列表（未同步时消息后标 `[时钟未同步]`） | `GET /alarms` | ✅ |
 | `show log system [level <lvl>] [last <n>]` | 系统日志 | 服务端日志文件 | ✅ |
@@ -423,16 +423,16 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set … cloud-init ssh-key <key>` | SSH 公钥（可多条；**用双引号包住含空格的公钥**） | seed ISO | ✅（决策 #79 修复：引号感知切分 + `ssh_keys[]`） |
 | `set … cloud-init hostname <s>` | guest 主机名 | seed ISO | ✅ |
 | `set … serial console enable` | 串口控制台（默认启用） | libvirt | ✅ |
-| `set virtual-machine-functions <n> startup machine <type>` | 实例级启动画像覆盖：机器类型（q35\|pc\|pc-i440fx-*\|pc-q35-*；决策 #485） | libvirt | 🔜 契约先行（实现与真机验证见后续任务） |
-| `set virtual-machine-functions <n> startup cpu mode <mode>` | 实例级覆盖：CPU 模式（host-passthrough\|host-model\|custom） | libvirt | 🔜 契约先行（同上） |
-| `set virtual-machine-functions <n> startup cpu model <model>` | 实例级覆盖：CPU 型号（cpu mode custom 时必填） | libvirt | 🔜 契约先行（同上） |
-| `set virtual-machine-functions <n> startup firmware <type>` | 实例级覆盖：固件（bios\|uefi） | libvirt | 🔜 契约先行（同上） |
-| `set virtual-machine-functions <n> startup disk-interface <iface>` | 实例级覆盖：主盘接口（virtio\|sata\|ide\|scsi） | libvirt | 🔜 契约先行（同上） |
-| `set virtual-machine-functions <n> startup boot-order <order>` | 实例级覆盖：引导顺序（hd\|cd\|dc） | libvirt | 🔜 契约先行（同上） |
-| `set virtual-machine-functions <n> startup accel <type>` | 实例级覆盖：加速器（kvm\|tcg） | libvirt | 🔜 契约先行（同上） |
-| `set virtual-machine-functions <n> startup console <type>` | 实例级覆盖：console 形态（serial\|telnet\|vnc；vnc 仅 Web，CLI `console` 拒绝并指向 Web）；**S** | libvirt | 🔜 契约先行（同上） |
-| `set virtual-machine-functions <n> startup extra-args <arg>` | 实例级覆盖：额外 QEMU 参数（窄自由口；可多条；命中 denylist 提交期拒绝；**S**；绕过资源账本） | libvirt（qemu:commandline） | 🔜 契约先行（同上） |
-| `delete virtual-machine-functions <n> startup [<leaf>]` | 清除实例级启动画像覆盖（裸 delete＝整块；带叶子＝只清该叶子） | libvirt | 🔜 契约先行（同上） |
+| `set virtual-machine-functions <n> startup machine <type>` | 实例级启动画像覆盖：机器类型（q35\|pc\|pc-i440fx-*\|pc-q35-*；决策 #485） | libvirt | 🚫 真机验证待执行（实现已落地并单测覆盖；步骤见附录 A #485） |
+| `set virtual-machine-functions <n> startup cpu mode <mode>` | 实例级覆盖：CPU 模式（host-passthrough\|host-model\|custom） | libvirt | 🚫 真机验证待执行（同上） |
+| `set virtual-machine-functions <n> startup cpu model <model>` | 实例级覆盖：CPU 型号（cpu mode custom 时必填） | libvirt | 🚫 真机验证待执行（同上） |
+| `set virtual-machine-functions <n> startup firmware <type>` | 实例级覆盖：固件（bios\|uefi） | libvirt | 🚫 真机验证待执行（同上） |
+| `set virtual-machine-functions <n> startup disk-interface <iface>` | 实例级覆盖：主盘接口（virtio\|sata\|ide\|scsi） | libvirt | 🚫 真机验证待执行（同上） |
+| `set virtual-machine-functions <n> startup boot-order <order>` | 实例级覆盖：引导顺序（hd\|cd\|dc） | libvirt | 🚫 真机验证待执行（同上） |
+| `set virtual-machine-functions <n> startup accel <type>` | 实例级覆盖：加速器（kvm\|tcg） | libvirt | 🚫 真机验证待执行（同上） |
+| `set virtual-machine-functions <n> startup console <type>` | 实例级覆盖：console 形态（serial\|telnet\|vnc；vnc 仅 Web，CLI `console` 拒绝并指向 Web）；**S** | libvirt | 🚫 真机验证待执行（同上） |
+| `set virtual-machine-functions <n> startup extra-args <arg>` | 实例级覆盖：额外 QEMU 参数（窄自由口；可多条；命中 denylist 提交期拒绝；**S**；绕过资源账本） | libvirt（qemu:commandline） | 🚫 真机验证待执行（同上） |
+| `delete virtual-machine-functions <n> startup [<leaf>]` | 清除实例级启动画像覆盖（裸 delete＝整块；带叶子＝只清该叶子） | libvirt | 🚫 真机验证待执行（同上） |
 | `set virtual-machine-functions <n> pci-device <bdf>` | 通用 PCI 直通设备（BDF，可多条、追加语义；同值幂等；FR-CMP-023） | libvirt（hostdev） | ✅（真机（round165）：一次性 VNF 只 define 不 start——hostdev 逐字对/去声明消失/双拒；**实际直通端到端未验**（宿主无 IOMMU 直通能力，如实登记）——`docs/evidence/v2-round165-d384-pci-passthrough.txt`） |
 | `delete virtual-machine-functions <n> pci-device [<bdf>]` | 去掉一条直通设备；不带 BDF 清空（FR-CMP-023） | libvirt（hostdev） | ✅（同上；去一条/清空与跨 VM 冲突拒绝均真机核对） |
 | `set … autostart <bool>` | 随系统自启 | libvirt | ✅ |
@@ -457,16 +457,16 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 命令 | 说明 | 落点 | 实测 |
 |---|---|---|---|
-| `set vm-image-profiles <image> machine <type>` | 镜像级启动画像：机器类型（q35\|pc\|pc-i440fx-*\|pc-q35-*；缺省 q35） | libvirt | 🔜 契约先行（决策 #485；实现与真机验证见后续任务） |
-| `set vm-image-profiles <image> cpu mode <mode>` | CPU 模式（host-passthrough\|host-model\|custom；缺省 host-passthrough） | libvirt | 🔜 契约先行（同上） |
-| `set vm-image-profiles <image> cpu model <model>` | CPU 型号（cpu mode custom 时必填） | libvirt | 🔜 契约先行（同上） |
-| `set vm-image-profiles <image> firmware <type>` | 固件（bios\|uefi；缺省 bios） | libvirt | 🔜 契约先行（同上） |
-| `set vm-image-profiles <image> disk-interface <iface>` | 主盘接口（virtio\|sata\|ide\|scsi；缺省 virtio） | libvirt | 🔜 契约先行（同上） |
-| `set vm-image-profiles <image> boot-order <order>` | 引导顺序（hd\|cd\|dc；缺省 hd） | libvirt | 🔜 契约先行（同上） |
-| `set vm-image-profiles <image> accel <type>` | 加速器（kvm\|tcg；缺省 kvm） | libvirt | 🔜 契约先行（同上） |
-| `set vm-image-profiles <image> console <type>` | console 形态（serial\|telnet\|vnc；缺省 serial；vnc 仅 Web 可访问，CLI `console` 拒绝并指向 Web）；**S** | libvirt | 🔜 契约先行（同上） |
-| `set vm-image-profiles <image> extra-args <arg>` | 额外 QEMU 参数（窄自由口；可多条；命中 denylist 提交期拒绝；**S**；绕过资源账本） | libvirt（qemu:commandline） | 🔜 契约先行（同上） |
-| `delete vm-image-profiles <image> [<leaf>]` | 删除画像（裸 delete＝整节；带叶子＝只清该叶子） | 配置库 | 🔜 契约先行（同上） |
+| `set vm-image-profiles <image> machine <type>` | 镜像级启动画像：机器类型（q35\|pc\|pc-i440fx-*\|pc-q35-*；缺省 q35） | libvirt | 🚫 真机验证待执行（决策 #485；实现已落地并单测覆盖；步骤见附录 A #485） |
+| `set vm-image-profiles <image> cpu mode <mode>` | CPU 模式（host-passthrough\|host-model\|custom；缺省 host-passthrough） | libvirt | 🚫 真机验证待执行（同上） |
+| `set vm-image-profiles <image> cpu model <model>` | CPU 型号（cpu mode custom 时必填） | libvirt | 🚫 真机验证待执行（同上） |
+| `set vm-image-profiles <image> firmware <type>` | 固件（bios\|uefi；缺省 bios） | libvirt | 🚫 真机验证待执行（同上） |
+| `set vm-image-profiles <image> disk-interface <iface>` | 主盘接口（virtio\|sata\|ide\|scsi；缺省 virtio） | libvirt | 🚫 真机验证待执行（同上） |
+| `set vm-image-profiles <image> boot-order <order>` | 引导顺序（hd\|cd\|dc；缺省 hd） | libvirt | 🚫 真机验证待执行（同上） |
+| `set vm-image-profiles <image> accel <type>` | 加速器（kvm\|tcg；缺省 kvm） | libvirt | 🚫 真机验证待执行（同上） |
+| `set vm-image-profiles <image> console <type>` | console 形态（serial\|telnet\|vnc；缺省 serial；vnc 仅 Web 可访问，CLI `console` 拒绝并指向 Web）；**S** | libvirt | 🚫 真机验证待执行（同上） |
+| `set vm-image-profiles <image> extra-args <arg>` | 额外 QEMU 参数（窄自由口；可多条；命中 denylist 提交期拒绝；**S**；绕过资源账本） | libvirt（qemu:commandline） | 🚫 真机验证待执行（同上） |
+| `delete vm-image-profiles <image> [<leaf>]` | 删除画像（裸 delete＝整节；带叶子＝只清该叶子） | 配置库 | 🚫 真机验证待执行（同上） |
 
 ---
 
@@ -517,7 +517,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | ⊘ 设计拒绝（网关 ACL 绑定） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
 | 🚫 未在 v2 轮次执行 | 11 | **破坏性/需交互**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、`kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）。机制由单测/集成测试覆盖；破坏性动作按其交付说明单独走查（部分动作在 v1 收尾轮有真机走查记录，见各轮证据）。round168/170 一度在此桶挂过 #388 的 5 条与 #389 的 3 条待真机行，真机四维通过后均已移入 ✅；v3 的 `set system dataplane` 亦同（真机两次切换后移入 ✅）；`set port-mirroring <n> source vnf …`（vNIC 源）经 round13/round24 真机复验后移入 ✅（见上行） |
-| 🔜 契约先行（决策 #485） | 21 | 镜像启动画像新增的 21 行**契约已声明、实现与真机验证在后续任务**：`show vm-image-profiles` 1 行、`set/delete virtual-machine-functions <n> startup …` 10 行、`set/delete vm-image-profiles …` 10 行。**不谎报 ✅**——实现落地并真机通过后按增量口径移入 ✅ 桶 |
+| 🚫 真机验证待执行（决策 #485） | 21 | 镜像启动画像新增的 21 行**实现已落地并由单测逐条覆盖**（`show vm-image-profiles` 1 行、`set/delete virtual-machine-functions <n> startup …` 10 行、`set/delete vm-image-profiles …` 10 行）；**真机验证待执行**——本开发机无 nfvis-vm 访问，验证步骤见附录 A #485 的「真机验证」段。**不谎报 ✅**——真机通过后按增量口径移入 ✅ 桶 |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
