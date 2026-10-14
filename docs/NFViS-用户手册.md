@@ -154,7 +154,8 @@ sudo ./nfvis-v1.1.47.run --verify                            # 只体检（装�
 bash contrib/scripts/offline-closure.sh fetch --out /root/ob/debs \
   --seed-deb build/nfvis_1.1.47_amd64.deb \
   --pkg docker.io libvirt-daemon-system libvirt-clients qemu-system-x86 \
-        qemu-utils cloud-image-utils genisoimage chrony tcpdump curl ca-certificates
+        qemu-utils cloud-image-utils genisoimage chrony tcpdump curl ca-certificates \
+        ovmf-generic
 # 2) 打 .run（可复现：同一批 deb + 同一版本 + 同一时间锚 ⇒ 逐字节相同的产物）
 bash contrib/scripts/build-offline-run.sh --debs /root/ob/debs \
   --version 1.1.47 --epoch $(git log -1 --format=%ct) --output build/nfvis-v1.1.47.run
@@ -2163,6 +2164,12 @@ nfvis# commit                            # 提交时核对设备确实在本机
 | `accel` | `kvm` \| `tcg` | `kvm` |
 | `console` | `serial` \| `telnet` \| `vnc` | `serial` |
 | `extra-args` | 额外 QEMU 参数（窄自由口，见下） | — |
+
+> **UEFI（`firmware uefi`）需要宿主 OVMF 固件**：产品在 `/usr/share/OVMF`（及若干兼容路径）下找
+> `*.fd`，找不到会拒绝该配置并提示安装 OVMF。**离线一键安装包（§2.2）已随包内置 `ovmf-generic`**
+> （同时提供 `/usr/share/OVMF/*.fd` 与 libvirt 的 `/usr/share/qemu/firmware/*.json` 固件描述符），
+> 气隙机器无需联网即可用 **UEFI-only 镜像**；联网用 deb 安装（§2.1）时 `ovmf` 经包依赖
+> （`Recommends`）自动带上。两种方式装完都**无需再手工安装固件**。
 
 **① 镜像级画像**（键＝镜像名；该镜像须已在镜像仓库中）：
 
