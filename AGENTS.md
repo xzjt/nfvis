@@ -1822,6 +1822,23 @@
   trap `down` 后现场清空。证据 `docs/evidence/v3-round32-d484-semantic-selfprovision.txt`；语义基线沿革
   `docs/v3已做.md` §五（**29/0/2 → 33/0/0**）。**如实边界**：S10-4 偶发（纯 REST 锁语义项、与本次现场无关，
   三次里一次，非本轮引入）。
+- **已发布 v3.0.16（2026-10-14，决策 #485 镜像启动画像 + Web 内置 noVNC 查看器）**：tag `v3.0.16` → **`v3 1db4117`**
+  （v3 线发布点＝PR #325 合并提交；其上仅本轮发版记录提交）；GitHub Release 四资产；`SOURCE_DATE_EPOCH=1791988540`；
+  deb `982651e5…`（10,471,088 字节）/ `.run` `89c53a2e…`（179,785,994 字节，载荷 238 deb / 173M）两打逐字节一致、
+  `.run` 结构自检 **18/0**、闭包自洽（238 包 / 837 依赖声明 / 312 提供名 / 173M）；**发布件四套件全 0 失败**：
+  fulltest **297/0/26**、语义 **43/0/0**、lifecycle **40/0/3**、pty **10/10**（21 条 #485 命令由套件**真跑**覆盖＝
+  新增 fulltest **阶段 8** / 语义 **S15** / lifecycle **L4**，`cli-fulltest-exemptions.tsv` 的 21 行豁免已摘）。
+  内容＝**#485**：镜像级 `vm-image-profiles` + VNF `startup` 覆盖（生效优先级 实例>画像>默认）、
+  console 形态 `serial`/`telnet`/`vnc`、**Web 内置 noVNC 查看器（noVNC 1.6.0 vendored、`go:embed` 随二进制交付，
+  不占 apt 闭包）**、`extra-args` 窄自由口（27 条 denylist 提交期拒绝）、跨字段校验、telnet 派生端口撞车点名、
+  **启动前置占用判定**（派生端口被本机其它进程占用时给产品口径文案）。**真机验证（nfvis-vm）六场景全过**，
+  并抓出/修复两条只有真机/真浏览器才暴露的 Critical：**BUG-1** `boot-order` 映射成 libvirt 非法值 `cd`（既有 ISO
+  路径同病、单元测试曾钉死错值）、**BUG-2** WS↔VNC 代理以 TEXT 帧发送（noVNC 需 BINARY；x/net 客户端不看 opcode ⇒ 假绿）。
+  **三处一致**：构建端两打 + 服务端资产摘要逐字一致；deb **完整回下载逐字节一致**；⚠️ `.run`（180MB）回下载**未跑完**
+  （直连约 20KB/s），按其既有口径以服务端摘要为等价证据、**如实登记**。证据
+  `docs/evidence/v3-round-d485-real-machine-verification.txt`、截图 `docs/images/d485-web-vnc-console.png`；细则 `docs/v3-发版记录.md`。
+  **登记工具改进候选**：套件硬编码 L3 测试地址 `192.168.155.10/24` 与管理网段重叠（A/B 对照证明与本次改动无关）、
+  `cli-fulltest` 自清场会删掉 docker `alpine:3.20` 夹具（每轮须重备）。
 - **已发布 v3.0.15（2026-10-13，round31 走查批）**：tag `v3.0.15` → **`v3 049de0e`**（v3 线发布点；
   其上仅本轮发版记录提交）；GitHub Release 四资产；`SOURCE_DATE_EPOCH=1791861293`；deb `247e9b5e…`
   （10,295,988 字节）/ `.run` `539970153f…`（179,611,344 字节，载荷 238 deb / 172M）两打逐字节一致、
