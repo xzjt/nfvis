@@ -92,7 +92,7 @@ BUG-2（Critical，真机+真浏览器才暴露）—— WS↔VNC 代理用 TEXT
   语义 cli-semantic-check   通过 33 / 失败 0 / 不可判定 0 / 登记 0     （与 v3 基线一致）
   生命周期 cli-lifecycle-check 通过 21 / 失败 0 / 跳过 3 / 登记 0      （与 v3 基线一致）
   pty cli-pty-smoke         通过 10 / 失败 0                          （与 v3 基线一致）
-  全功能 cli-fulltest       通过 274 / 失败 0 / 预期报错 22           （零失败）
+  全功能 cli-fulltest       通过 274 / 失败 0 / 预期报错 22           （零失败；覆盖补齐后 **297 / 0 / 26**）
 
   ⚠️ 环境前置（本轮补齐，非产品问题）：
    (a) 套件硬编码 L3 测试地址 `192.168.155.10/24` 与本机管理网段 `192.168.155.129/24` 重叠 ⇒
@@ -106,6 +106,19 @@ BUG-2（Critical，真机+真浏览器才暴露）—— WS↔VNC 代理用 TEXT
   说明：套件硬编码地址 `192.168.155.10` 属**工具**问题（任何管理网段落在 192.168.155.0/24 的机器都会
   触发）；登记为后续工具改进候选（改为可配/按管理网段自动避让），不在本决策范围。
 
+
+§3b 套件覆盖补齐（同一日，本机构建）
+
+  #485 的 21 条命令起初只登记在 cli-fulltest-exemptions.tsv（未真跑）。本轮三处补齐并复跑（均零失败）：
+   · cli-fulltest **阶段 8**（新）：profile 九叶子设置/读视图（含「已绕过资源账本」标注）/display set 往返 +
+     守卫拒绝（q35+ide、tcg+host-passthrough、`-m 4096` denylist）+ telnet 端口撞车（vm29/vm54 均点名）+
+     条件性实例覆盖与「有效启动画像」来源标签 → 23 通过 / 4 预期报错；**297 / 0 / 26**。
+   · cli-semantic-check **S15**（新）：`show vm-image-profiles` ↔ `display set` 双向往返 + 有效画像来源标注
+     （产品默认/镜像画像）→ **43 / 0 / 0**。
+   · cli-lifecycle-check **L4**（新，自建 VM）：画像/覆盖 → 域参数（machine/cpu/disk/boot/accel）实证、
+     `request vpp restart` 重放不丢、删覆盖回落产品默认、自建对象清理 → **40 / 0 / 3**。
+   · cli-pty-smoke：无新增 pty 交互面，未改（**10 / 10**）。
+   · 21 行豁免已从 cli-fulltest-exemptions.tsv 摘除（check_suite_contract_sync.sh：缺口 0）。
 
 §4 现场还原
 

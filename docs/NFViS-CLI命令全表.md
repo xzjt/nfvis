@@ -535,7 +535,7 @@ pty 交互冒烟（`contrib/scripts/cli-pty-smoke.sh`）**通过 10 / 失败 0**
 `cli-fulltest` **273 / 0 / 20** ｜ `cli-semantic-check` **27 / 0 / 2**（S8 冷窗时 26/0/3）｜
 `cli-lifecycle-check` **22 / 0 / 3**（L3-2 可判定时 **23/0/2 + 登记 1**）｜ `cli-pty-smoke` **10 / 10**
 （真机 nfvis-vm 2.0.0~dev113，round170）。
-**决策 #485（镜像启动画像）真机轮（2026-10-14，v3 开发线本机构建）**：`cli-fulltest` **274 / 0 / 22**（零失败）、`cli-semantic-check` **33 / 0 / 0**、`cli-lifecycle-check` **21 / 0 / 3**、`cli-pty-smoke` **10 / 10**；证据 `docs/evidence/v3-round-d485-real-machine-verification.txt`。（该轮 fulltest 两项环境前置——套件硬编码 L3 测试地址 `192.168.155.10/24` 与本机管理网段重叠、夹具缺口——见证据 §3；A/B 对照证明与产品改动无关。）fulltest 沿革：258→**272**（round169＝#388 主机防火墙 16 项入套件，+14 通过 / +2 预期报错）→**273**（round170＝#389 端口安全四条语句**同会话往返块** +1；套件首跑抓出的 2 项红系编排问题——严格 delete 与逐条独立会话不匹配，修套件不改产品语义）。
+**决策 #485（镜像启动画像）真机轮（2026-10-14，v3 开发线本机构建）——含新增覆盖后的读数**：`cli-fulltest` **297 / 0 / 26**（零失败；新增**阶段 8** 覆盖 #485 全部 21 条命令，23 通过 / 4 预期报错＝守卫拒绝）、`cli-semantic-check` **43 / 0 / 0**（新增 **S15**：读视图 ↔ display set 双向往返 + 有效画像来源标注，+10）、`cli-lifecycle-check` **40 / 0 / 3**（新增 **L4**：自建 VM 验画像→域参数、`request vpp restart` 重放不丢、删覆盖回落默认，+19）、`cli-pty-smoke` **10 / 10**（无 pty 交互面，未改）。**21 条 #485 命令已由套件真跑覆盖，`cli-fulltest-exemptions.tsv` 里的 21 行豁免已摘除**。证据 `docs/evidence/v3-round-d485-real-machine-verification.txt`。（该轮 fulltest 两项环境前置——套件硬编码 L3 测试地址 `192.168.155.10/24` 与本机管理网段重叠、夹具缺口——见证据 §3；A/B 对照证明与产品改动无关。）fulltest 沿革：258→**272**（round169＝#388 主机防火墙 16 项入套件，+14 通过 / +2 预期报错）→**273**（round170＝#389 端口安全四条语句**同会话往返块** +1；套件首跑抓出的 2 项红系编排问题——严格 delete 与逐条独立会话不匹配，修套件不改产品语义）。
 
 > 注（决策 #388，主机防火墙）：本轮新增 **5 行**（`show system firewall` + 4 条 `set/delete system firewall …`），
 > 全表由 **293 行增至 298 行**（§1.1 +1、§2.2 +4）。该 5 行已随 **round169 真机四维**
