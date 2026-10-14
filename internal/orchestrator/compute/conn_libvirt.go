@@ -366,14 +366,30 @@ func (c *Conn) Define(ctx context.Context, xml string) error {
 	})
 }
 
-// Undefine 删除 domain 定义（连带快照元数据，避免「has snapshots」错误，FR-CMP-013）。
+// domainUndefine 是 DomainUndefineFlags 的可注入包装（决策 #485）：生产恒为直接调用；
+// 单测替换它以观察**实际下发**的 undefine flags（go-libvirt 的 *Libvirt 方法不可 mock）。
+var domainUndefine = func(l *libvirt.Libvirt, dom libvirt.Domain, flags libvirt.DomainUndefineFlagsValues) error {
+	return l.DomainUndefineFlags(dom, flags)
+}
+
+// undefineDomain 删除给定域的域定义，标志恒含两位：
+//   - DomainUndefineSnapshotsMetadata：连带清除快照元数据，避免「has snapshots」错误（FR-CMP-013）；
+//   - DomainUndefineNvram：UEFI（firmware=uefi）域带 nvram（OVMF 变量存储），libvirt 在未指定
+//     该位时**拒绝** undefine（"cannot undefine domain with nvram"，真机 libvirt 12 实证，
+//     决策 #485）。对无 nvram 的域该位是**无操作**（no-op），故一律带上、按族统一。
+func undefineDomain(l *libvirt.Libvirt, dom libvirt.Domain) error {
+	return domainUndefine(l, dom, libvirt.DomainUndefineSnapshotsMetadata|libvirt.DomainUndefineNvram)
+}
+
+// Undefine 删除 domain 定义（连带快照元数据与 UEFI NVRAM，避免「has snapshots」与
+// 「cannot undefine domain with nvram」两类错误，FR-CMP-013）。
 func (c *Conn) Undefine(ctx context.Context, name string) error {
 	return c.call(ctx, func(l *libvirt.Libvirt) error {
 		dom, err := l.DomainLookupByName(name)
 		if err != nil {
 			return fmt.Errorf("查找 domain %s 失败: %w", name, err)
 		}
-		if err := l.DomainUndefineFlags(dom, libvirt.DomainUndefineSnapshotsMetadata); err != nil {
+		if err := undefineDomain(l, dom); err != nil {
 			return fmt.Errorf("删除 domain %s 失败: %w", name, err)
 		}
 		return nil
