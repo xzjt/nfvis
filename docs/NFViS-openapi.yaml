@@ -1057,6 +1057,11 @@ paths:
         "401": { description: ticket 无效、已过期或已消费 }
         "503": { description: "容器编排未接入，或 Docker 服务不可用（连接失败/无响应；决策 #375）" }
 
+  /vm-image-profiles:
+    get:
+      summary: 镜像启动画像列表
+      responses:
+        "200": { description: OK }
   /images:
     parameters:
       - { name: limit, in: query, schema: { type: integer, minimum: 1 }, description: 返回条数上限；缺省不截断（FR-API-007） }
@@ -4016,6 +4021,38 @@ components:
               tx_bytes: { type: integer }
         autostart: { type: boolean }
         state: { type: string, enum: [running, shutoff, crashed, paused], description: 运行态 }
+        startup: { $ref: "#/components/schemas/VMStartupOverride" }
+
+    VMImageProfile:
+      type: object
+      required: [image]
+      properties:
+        image: { type: string, description: 镜像名（键） }
+        machine: { type: string, enum: [q35, pc, pc-i440fx-*, pc-q35-*], description: 机器类型，缺省 q35 }
+        cpu_mode: { type: string, enum: [host-passthrough, host-model, custom], description: 缺省 host-passthrough }
+        cpu_model: { type: string, description: cpu_mode=custom 时必填 }
+        firmware: { type: string, enum: [bios, uefi], description: 缺省 bios }
+        disk_interface: { type: string, enum: [virtio, sata, ide, scsi], description: 缺省 virtio }
+        boot_order: { type: string, enum: [hd, cd, dc], description: 缺省 hd }
+        accel: { type: string, enum: [kvm, tcg], description: 缺省 kvm }
+        console: { type: string, enum: [serial, telnet, vnc], description: 缺省 serial；vnc 仅 Web 可访问 }
+        extra_args:
+          type: array
+          items: { type: string }
+          description: 额外 QEMU 参数（窄自由口；命中 denylist 提交期拒绝；S 档；绕过资源账本）
+    VMStartupOverride:
+      type: object
+      description: VNF 实例对镜像画像的覆盖（仅允许覆盖的子集）
+      properties:
+        machine: { type: string }
+        cpu_mode: { type: string, enum: [host-passthrough, host-model, custom] }
+        cpu_model: { type: string }
+        firmware: { type: string, enum: [bios, uefi] }
+        disk_interface: { type: string, enum: [virtio, sata, ide, scsi] }
+        boot_order: { type: string, enum: [hd, cd, dc] }
+        accel: { type: string, enum: [kvm, tcg] }
+        console: { type: string, enum: [serial, telnet, vnc] }
+        extra_args: { type: array, items: { type: string } }
 
     VnfInterface:
       type: object

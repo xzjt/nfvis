@@ -174,6 +174,10 @@ show container-functions <name> [detail|interfaces]
 
 show images                                         # 镜像仓库列表（GET /images）
 show images <name> detail                           # 元数据：类型/大小/sha256/引用计数
+show vm-image-profiles [<image>]                    # 镜像启动画像（键＝镜像名；GET /vm-image-profiles）
+                                                    #   逐项列出 machine/cpu mode/cpu model/firmware/disk-interface/
+                                                    #   boot-order/accel/console/extra-args（来源＝配置，决策 #485）；
+                                                    #   `<image>` 走动态候选（镜像仓库 vm-image 清单）
 show resource-pools                                 # 大页池/隔离核：总量、已分配、空闲（GET /resource-pools）
 
 show alarms [active|all]                            # GET /alarms；未同步时消息后标 [时钟未同步]（NFR-006）
@@ -786,9 +790,46 @@ set cloud-init
   ├─ ssh-key <string>                                # 可多条
   └─ hostname <string>
 set serial console enable                            # 默认启用
+set startup                                          # 实例级启动画像覆盖（决策 #485；未设即用镜像画像/产品默认）
+  ├─ machine <type>                                  # q35|pc|pc-i440fx-*|pc-q35-*
+  ├─ cpu mode <mode>                                 # host-passthrough|host-model|custom
+  ├─ cpu model <model>                               # cpu mode custom 时必填
+  ├─ firmware <type>                                 # bios|uefi
+  ├─ disk-interface <iface>                          # virtio|sata|ide|scsi
+  ├─ boot-order <order>                              # hd|cd|dc
+  ├─ accel <type>                                    # kvm|tcg
+  ├─ console <type>                                  # serial|telnet|vnc（vnc 仅 Web；CLI console 拒绝并指向 Web）
+  └─ extra-args <arg>                                # S；可多条；命中 denylist 提交期拒绝
+delete startup [<leaf>]                              # 裸 delete＝清覆盖块；带叶子＝只清该叶子
 set autostart <bool>
 set description <string>
 ```
+
+### 2.7b `vm-image-profiles`
+
+```
+[edit vm-image-profiles <image-name>]                # 键＝镜像名（? / Tab 从镜像仓库枚举 vm-image）
+set machine <type>                                   # q35(默认)|pc|pc-i440fx-*|pc-q35-*
+set cpu mode <mode>                                  # host-passthrough(默认)|host-model|custom
+set cpu model <model>                                # cpu mode custom 时必填
+set firmware <type>                                  # bios(默认)|uefi
+set disk-interface <iface>                           # virtio(默认)|sata|ide|scsi
+set boot-order <order>                               # hd(默认)|cd|dc
+set accel <type>                                     # kvm(默认)|tcg
+set console <type>                                   # serial(默认)|telnet|vnc（vnc 仅 Web 可访问，决策 #485）
+set extra-args <arg>                                 # S；可多条；命中 denylist 提交期拒绝；每次使用进 audit
+delete vm-image-profiles <image-name> [<leaf>]       # 裸 delete＝整节删；带叶子＝只清该叶子
+```
+
+- **生效优先级**：实例 `startup` > 镜像画像 > 产品默认（`set virtual-machine-functions <name> startup …` 为实例级覆盖）。
+- **资源账本红线（决策 #481）**：本节叶子**只有**上述启动参数，**没有** memory/vcpu/hugepage-size/numa/绑核
+  ——这些归资源池单一真源，故是「**无从配置**」而非「配了再拒」。
+- **`extra-args` 窄自由口**：命中 denylist 即**提交期拒绝**——`-m`/`-mem*`/`-smp`/`-object`/`-numa`（资源账本）、
+  `-kernel`/`-initrd`/`-append`（绕过产品磁盘模型）、`-drive`/`-blockdev`（磁盘模型）、
+  `-netdev`/`-nic`/`-net`（网络模型）、`-chardev`/`-monitor`/`-qmp`/`-mon`/`-serial`（console/监视器）、
+  `-cpu`/`-machine`/`-boot`/`-device`（有结构化字段，强制走字段）、`-uuid`/`-daemonize`/`-pidfile`/`-S`（身份/进程生命周期）。
+- **console 形态**：`serial`（默认，既有 pty 管线不变）/ `telnet`（同一 console 管线，底层 pty 换 tcp）/
+  `vnc`（`<graphics type='vnc'>`，**仅 Web noVNC**；CLI `console` 对 vnc 明确拒绝并指向 Web）；绑定地址一律 `127.0.0.1`。
 
 ### 2.8 `container-functions`
 
@@ -909,6 +950,21 @@ virtual-machine-functions {
         cloud-init {
             ssh-key "ssh-ed25519 AAAA...";
         }
+        startup {
+            machine pc;
+            console telnet;
+        }
+    }
+}
+vm-image-profiles {
+    ubuntu22-vm {
+        machine q35;
+        cpu mode host-passthrough;
+        firmware bios;
+        disk-interface virtio;
+        boot-order hd;
+        accel kvm;
+        console serial;
     }
 }
 ```

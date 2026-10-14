@@ -3109,6 +3109,9 @@
             "default": true,
             "type": "boolean"
           },
+          "startup": {
+            "$ref": "#/components/schemas/VMStartupOverride"
+          },
           "state": {
             "description": "运行态",
             "enum": [
@@ -3179,6 +3182,157 @@
           "vcpu",
           "memory"
         ],
+        "type": "object"
+      },
+      "VMImageProfile": {
+        "properties": {
+          "accel": {
+            "description": "缺省 kvm",
+            "enum": [
+              "kvm",
+              "tcg"
+            ],
+            "type": "string"
+          },
+          "boot_order": {
+            "description": "缺省 hd",
+            "enum": [
+              "hd",
+              "cd",
+              "dc"
+            ],
+            "type": "string"
+          },
+          "console": {
+            "description": "缺省 serial；vnc 仅 Web 可访问",
+            "enum": [
+              "serial",
+              "telnet",
+              "vnc"
+            ],
+            "type": "string"
+          },
+          "cpu_mode": {
+            "description": "缺省 host-passthrough",
+            "enum": [
+              "host-passthrough",
+              "host-model",
+              "custom"
+            ],
+            "type": "string"
+          },
+          "cpu_model": {
+            "description": "cpu_mode=custom 时必填",
+            "type": "string"
+          },
+          "disk_interface": {
+            "description": "缺省 virtio",
+            "enum": [
+              "virtio",
+              "sata",
+              "ide",
+              "scsi"
+            ],
+            "type": "string"
+          },
+          "extra_args": {
+            "description": "额外 QEMU 参数（窄自由口；命中 denylist 提交期拒绝；S 档；绕过资源账本）",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "firmware": {
+            "description": "缺省 bios",
+            "enum": [
+              "bios",
+              "uefi"
+            ],
+            "type": "string"
+          },
+          "image": {
+            "description": "镜像名（键）",
+            "type": "string"
+          },
+          "machine": {
+            "description": "机器类型，缺省 q35",
+            "enum": [
+              "q35",
+              "pc",
+              "pc-i440fx-*",
+              "pc-q35-*"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "image"
+        ],
+        "type": "object"
+      },
+      "VMStartupOverride": {
+        "description": "VNF 实例对镜像画像的覆盖（仅允许覆盖的子集）",
+        "properties": {
+          "accel": {
+            "enum": [
+              "kvm",
+              "tcg"
+            ],
+            "type": "string"
+          },
+          "boot_order": {
+            "enum": [
+              "hd",
+              "cd",
+              "dc"
+            ],
+            "type": "string"
+          },
+          "console": {
+            "enum": [
+              "serial",
+              "telnet",
+              "vnc"
+            ],
+            "type": "string"
+          },
+          "cpu_mode": {
+            "enum": [
+              "host-passthrough",
+              "host-model",
+              "custom"
+            ],
+            "type": "string"
+          },
+          "cpu_model": {
+            "type": "string"
+          },
+          "disk_interface": {
+            "enum": [
+              "virtio",
+              "sata",
+              "ide",
+              "scsi"
+            ],
+            "type": "string"
+          },
+          "extra_args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "firmware": {
+            "enum": [
+              "bios",
+              "uefi"
+            ],
+            "type": "string"
+          },
+          "machine": {
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "VSwitchPort": {
@@ -8428,6 +8582,16 @@
         "tags": [
           "virtual-switches"
         ]
+      }
+    },
+    "/vm-image-profiles": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "镜像启动画像列表"
       }
     },
     "/vpp/capture": {

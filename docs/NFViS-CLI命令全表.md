@@ -25,6 +25,7 @@
 | ⚠️ | **已知缺口**：未实现但**明确提示**（非静默空值，也不是静默返回别的正文） |
 | ⊘ | **预期报错**：环境受限或防呆守卫正确拒绝——报错即正确行为 |
 | 🚫 | **本轮未执行**：破坏性/需交互（测试机不宜执行）或环境上做不了——**不是「未实现」**，真值以代码与单测为准 |
+| 🔜 | **契约先行**：契约（附录 A / 命令树设计 / 本表 / openapi）已声明、实现与真机验证在后续任务——如实标注，不谎报 ✅ |
 
 **实测列的覆盖面（如实登记）**：round80 套件覆盖的是「非破坏性、可脚本化」的那部分命令——
 `show` 族（§1.1）逐条覆盖；配置语句（§2）覆盖 **58 条**契约语句（+1 批前置对象，每条语句在独立会话里执行，
@@ -120,6 +121,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show container-functions <name> interfaces` | memif vNIC 列表 | 同上 | ✅ |
 | `show images` | 镜像仓库列表 | `GET /images` | ✅ |
 | `show images <name> detail` | 类型/大小/sha256/引用计数 | `GET /images/{name}` | ✅ |
+| `show vm-image-profiles [<image>]` | 镜像启动画像（键＝镜像名）：machine / cpu mode / cpu model / firmware / disk-interface / boot-order / accel / console / extra-args，逐项含来源＝配置（决策 #485）；`<image>` 走动态候选（镜像仓库 vm-image 清单） | `GET /vm-image-profiles` | 🔜 契约先行（实现与真机验证见后续任务） |
 | `show resource-pools` | 大页池/隔离核：大页段列名「声明/总数（内核实际）/已分配（在用）/可分配（VNF）」，数字取**内核实况**（与 `show system hugepages` 同源，两处数字一致）：已分配（在用）＝内核在用页数（含数据面固定占用与 VNF/其它持有），可分配（VNF）＝内核空闲页数＝VNF 实际可起页数；取不到内核值显示「取不到」；隔离核含 vpp-reserved | `GET /resource-pools` | ✅ |
 | `show alarms [active\|all]` | 告警列表（未同步时消息后标 `[时钟未同步]`） | `GET /alarms` | ✅ |
 | `show log system [level <lvl>] [last <n>]` | 系统日志 | 服务端日志文件 | ✅ |
@@ -421,6 +423,16 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set … cloud-init ssh-key <key>` | SSH 公钥（可多条；**用双引号包住含空格的公钥**） | seed ISO | ✅（决策 #79 修复：引号感知切分 + `ssh_keys[]`） |
 | `set … cloud-init hostname <s>` | guest 主机名 | seed ISO | ✅ |
 | `set … serial console enable` | 串口控制台（默认启用） | libvirt | ✅ |
+| `set virtual-machine-functions <n> startup machine <type>` | 实例级启动画像覆盖：机器类型（q35\|pc\|pc-i440fx-*\|pc-q35-*；决策 #485） | libvirt | 🔜 契约先行（实现与真机验证见后续任务） |
+| `set virtual-machine-functions <n> startup cpu mode <mode>` | 实例级覆盖：CPU 模式（host-passthrough\|host-model\|custom） | libvirt | 🔜 契约先行（同上） |
+| `set virtual-machine-functions <n> startup cpu model <model>` | 实例级覆盖：CPU 型号（cpu mode custom 时必填） | libvirt | 🔜 契约先行（同上） |
+| `set virtual-machine-functions <n> startup firmware <type>` | 实例级覆盖：固件（bios\|uefi） | libvirt | 🔜 契约先行（同上） |
+| `set virtual-machine-functions <n> startup disk-interface <iface>` | 实例级覆盖：主盘接口（virtio\|sata\|ide\|scsi） | libvirt | 🔜 契约先行（同上） |
+| `set virtual-machine-functions <n> startup boot-order <order>` | 实例级覆盖：引导顺序（hd\|cd\|dc） | libvirt | 🔜 契约先行（同上） |
+| `set virtual-machine-functions <n> startup accel <type>` | 实例级覆盖：加速器（kvm\|tcg） | libvirt | 🔜 契约先行（同上） |
+| `set virtual-machine-functions <n> startup console <type>` | 实例级覆盖：console 形态（serial\|telnet\|vnc；vnc 仅 Web，CLI `console` 拒绝并指向 Web） | libvirt | 🔜 契约先行（同上） |
+| `set virtual-machine-functions <n> startup extra-args <arg>` | 实例级覆盖：额外 QEMU 参数（窄自由口；可多条；命中 denylist 提交期拒绝；**S**；绕过资源账本） | libvirt（qemu:commandline） | 🔜 契约先行（同上） |
+| `delete virtual-machine-functions <n> startup [<leaf>]` | 清除实例级启动画像覆盖（裸 delete＝整块；带叶子＝只清该叶子） | libvirt | 🔜 契约先行（同上） |
 | `set virtual-machine-functions <n> pci-device <bdf>` | 通用 PCI 直通设备（BDF，可多条、追加语义；同值幂等；FR-CMP-023） | libvirt（hostdev） | ✅（真机（round165）：一次性 VNF 只 define 不 start——hostdev 逐字对/去声明消失/双拒；**实际直通端到端未验**（宿主无 IOMMU 直通能力，如实登记）——`docs/evidence/v2-round165-d384-pci-passthrough.txt`） |
 | `delete virtual-machine-functions <n> pci-device [<bdf>]` | 去掉一条直通设备；不带 BDF 清空（FR-CMP-023） | libvirt（hostdev） | ✅（同上；去一条/清空与跨 VM 冲突拒绝均真机核对） |
 | `set … autostart <bool>` | 随系统自启 | libvirt | ✅ |
@@ -441,6 +453,21 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set container-functions <n> autostart <bool>` | 随系统自启 | Docker | ✅ |
 | `set container-functions <n> description <s>` | 描述 | 配置库 | ✅ |
 
+### 2.10 `vm-image-profiles`（§2.7b，FR-CMP-024）
+
+| 命令 | 说明 | 落点 | 实测 |
+|---|---|---|---|
+| `set vm-image-profiles <image> machine <type>` | 镜像级启动画像：机器类型（q35\|pc\|pc-i440fx-*\|pc-q35-*；缺省 q35） | libvirt | 🔜 契约先行（决策 #485；实现与真机验证见后续任务） |
+| `set vm-image-profiles <image> cpu mode <mode>` | CPU 模式（host-passthrough\|host-model\|custom；缺省 host-passthrough） | libvirt | 🔜 契约先行（同上） |
+| `set vm-image-profiles <image> cpu model <model>` | CPU 型号（cpu mode custom 时必填） | libvirt | 🔜 契约先行（同上） |
+| `set vm-image-profiles <image> firmware <type>` | 固件（bios\|uefi；缺省 bios） | libvirt | 🔜 契约先行（同上） |
+| `set vm-image-profiles <image> disk-interface <iface>` | 主盘接口（virtio\|sata\|ide\|scsi；缺省 virtio） | libvirt | 🔜 契约先行（同上） |
+| `set vm-image-profiles <image> boot-order <order>` | 引导顺序（hd\|cd\|dc；缺省 hd） | libvirt | 🔜 契约先行（同上） |
+| `set vm-image-profiles <image> accel <type>` | 加速器（kvm\|tcg；缺省 kvm） | libvirt | 🔜 契约先行（同上） |
+| `set vm-image-profiles <image> console <type>` | console 形态（serial\|telnet\|vnc；缺省 serial；vnc 仅 Web 可访问，CLI `console` 拒绝并指向 Web） | libvirt | 🔜 契约先行（同上） |
+| `set vm-image-profiles <image> extra-args <arg>` | 额外 QEMU 参数（窄自由口；可多条；命中 denylist 提交期拒绝；**S**；绕过资源账本） | libvirt（qemu:commandline） | 🔜 契约先行（同上） |
+| `delete vm-image-profiles <image> [<leaf>]` | 删除画像（裸 delete＝整节；带叶子＝只清该叶子） | 配置库 | 🔜 契约先行（同上） |
+
 ---
 
 ## 3. 统计
@@ -451,44 +478,46 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 > **复核方法**（下面每个数字都可这样复算）：
 >
 > ```bash
-> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 304（§1/§2 的命令行 302 行 + §3 本表的 `show`、`request` 两行）
+> grep -c '^| `' docs/NFViS-CLI命令全表.md          # → 330（§1/§2 的命令行 328 行 + §3 本表的 `show`、`request` 两行）
 > ```
 >
-> 即 §1/§2 合计 **306 行**；把两处 ` / ` 并列写法各拆成一条后为 **310 条**命令
+> 即 §1/§2 合计 **328 行**；把两处 ` / ` 并列写法各拆成一条后为 **332 条**命令
 > （§1.3 的 `exit` / `quit` +1；§2.1 的 `edit <path>` / `up` / `top` / `exit` +3）。
 
 **分族**（族 = 该行**首个 token**；§2.1 的裸 `show` 与 `show | display set` 因此计入 `show` 族，`help` 计入其余操作）：
 
 | 族 | 行数 | 明细 |
 |---|---|---|
-| `show` | 75 | §1.1 show 表 72 行 + §2.1 的 `show`、`show \| display set` 2 行 + §2.4 的 `show virtual-switches <n> dhcp-leases` 1 行 |
+| `show` | 76 | §1.1 show 表 73 行 + §2.1 的 `show`、`show \| display set` 2 行 + §2.4 的 `show virtual-switches <n> dhcp-leases` 1 行 |
 | `request` | 52 | §1.2 全部（VM/容器/镜像/接口/SR-IOV/VPP/抓包/系统/告警） |
 | 其余操作命令 | 11 | §1.3 的 10 行（`exit` / `quit` 一行两命令）+ §1.1 的 `help [command]` 1 行 |
 | 通用管道 | 9 | `match` / `except` / `count` / `last` / `begin` / `display json` / `display xml` / `compare` / `compare rollback <n>`（后两者是差异渲染，非文本过滤；发现 #4 接线） |
-| 配置模式 | 160 | §2.1 余下 13 行 + §2.2~§2.9 共 147 行（§2.4 的 `dhcp-leases` 读行计入 `show` 族；含 FR-CMP-023 的 2 条 `pci-device`、决策 #383 的 2 条 vxlan、决策 #385 的 3 条 storm-control、决策 #388 的 4 条 firewall、决策 #389 的 3 条 port-security 语句、v3 的 `set system dataplane` 1 条、决策 #472 的 l3-interface 裸形态 1 条） |
-| **合计** | **307** | 不含管道则为 **298**；按 ` / ` 拆开后 **311 条** |
+| 配置模式 | 180 | §2.1 余下 13 行 + §2.2~§2.10 共 168 行（§2.4 的 `dhcp-leases` 读行计入 `show` 族；含 FR-CMP-023 的 2 条 `pci-device`、决策 #383 的 2 条 vxlan、决策 #385 的 3 条 storm-control、决策 #388 的 4 条 firewall、决策 #389 的 3 条 port-security 语句、v3 的 `set system dataplane` 1 条、决策 #472 的 l3-interface 裸形态 1 条、决策 #485 的 20 条 `vm-image-profiles`/`startup` 语句） |
+| **合计** | **328** | 不含管道则为 **319**；按 ` / ` 拆开后 **332 条** |
 
 **分节**（行数）：
 
 | 节 | 行数 | 节 | 行数 |
 |---|---|---|---|
-| §1.1 `show`（含通用管道 9） | 82 | §2.2b `protocols` | 3 |
+| §1.1 `show`（含通用管道 9） | 83 | §2.2b `protocols` | 3 |
 | §1.2 `request` | 52 | §2.3 `interfaces` 与 `bonds` | 17 |
-| §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 25 |
+| §1.3 其余操作命令 | 10 | §2.4 `virtual-switches` | 26 |
 | §2.1 导航与事务 | 15 | §2.5 高级网络功能 | 11 |
 | §2.2 `system` | 45 | §2.6 `resource-pools` | 3 |
-| §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 22 |
-| §2.9 `container-functions` | 10 | **合计** | **306** |
+| §2.7 `vpp` | 11 | §2.8 `virtual-machine-functions` | 32 |
+| §2.9 `container-functions` | 10 | §2.10 `vm-image-profiles` | 10 |
+| **合计** | **328** | | |
 
-**按实测状态分布**（共 306 行）：
+**按实测状态分布**（共 328 行）：
 
 | 状态 | 行数 | 逐条 |
 |---|---|---|
-| ✅ 实测通过 | 290 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）、**主机防火墙 5 行（#388，round169）**、**`set system dataplane`（v3 round1：干净快照两次切换 + 切回 vpp 实证，`docs/evidence/v3-round1-clean-snapshot-datapath-switch.txt` §4/§5）**——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，按增量口径一并订正。**本桶较上一版 +1**：`set port-mirroring <n> source vnf …`（vNIC 源）——v3 round3 走查后曾按「下发期拒绝并整次回滚」口径移入 🚫 桶；**round13 首验 + round24 发布件复验**（分析口 pcap 镜像帧实证）确认实现口径成立，本轮按账目如实化移回 ✅。**更早的 +4**：抓包族改数据面中立命名（`show capture` / `request capture start|stop|export`）新增 4 行，与 3 行兼容别名（`show vpp capture` / `request vpp trace …`）**同一实现**——别名行的历史真机结论适用，新名拼写的真机复跑见各行实测注 |
+| ✅ 实测通过 | 291 | round80 套件直接覆盖的命令逐条执行通过；未进套件的行沿用真机轮次结论。本桶含此后各轮新落地并真机验证的行——数据面 DNS 代理（#345，round124）、容器 exec/shell（#357/#358，round138/139）、DHCP server（#359，round141）、relay 端到端租约（#335，round131）、大页回收（#329，round108）、逐 token 吊销（#301，v2-dev1 轮）、登录横幅（#303，round90）、VXLAN（#383，round164）、PCI 直通（#384，round165）、storm control（#385，round167）、**主机防火墙 5 行（#388，round169）**、**`set system dataplane`（v3 round1：干净快照两次切换 + 切回 vpp 实证，`docs/evidence/v3-round1-clean-snapshot-datapath-switch.txt` §4/§5）**——此前标「🚫 待真机 / 真机复跑待执行」而证据已俱者，按增量口径一并订正。**本轮按实际行数订正 +1**：§2.4 此前漏计 1 行（分节表写 25、实际 26），该行本就在 ✅ 桶（决策 #485 未改动任何既有行的状态）。**更早的 +1**：`set port-mirroring <n> source vnf …`（vNIC 源）——v3 round3 走查后曾按「下发期拒绝并整次回滚」口径移入 🚫 桶；**round13 首验 + round24 发布件复验**（分析口 pcap 镜像帧实证）确认实现口径成立，本轮按账目如实化移回 ✅。**更早的 +4**：抓包族改数据面中立命名（`show capture` / `request capture start|stop|export`）新增 4 行，与 3 行兼容别名（`show vpp capture` / `request vpp trace …`）**同一实现**——别名行的历史真机结论适用，新名拼写的真机复跑见各行实测注 |
 | ⚠️ 已知缺口 | 0 | 无——`show configuration permissions <class>` 已由决策 #304 落地；`show \| display set`（决策 #155）、`show vpp runtime`（决策 #200）、`request system api token revoke`（决策 #301）此前均已移出缺口 |
 | ⊘ 设计拒绝（网关 ACL 绑定） | 1 | 网关 ACL 绑定 `set virtual-switches <n> gateway acl-in\|acl-out <acl>`（acl-in 与 acl-out 同行计 1 行）：真机实证 VPP 26.06 不评估 BVI（网关）域内流量，提交期硬拒；替代为 L3 接口形态 |
 | ⊘ 预期报错 | 4 | SR-IOV 4 条环境受限项：`request sriov create-vfs`、`request sriov delete-vfs`、`set interfaces <ifname> sriov vf-count`、`set … interfaces <vnic> sriov physical-interface <if> vf <n>` |
 | 🚫 未在 v2 轮次执行 | 11 | **破坏性/需交互**：`request system software add`、`reboot`、`shutdown`、`poweroff`、`kernel apply`、`kernel rollback`、`configuration restore`、`zeroize`、VM/容器删除确认、`request system password change`（契约已登记延期）。机制由单测/集成测试覆盖；破坏性动作按其交付说明单独走查（部分动作在 v1 收尾轮有真机走查记录，见各轮证据）。round168/170 一度在此桶挂过 #388 的 5 条与 #389 的 3 条待真机行，真机四维通过后均已移入 ✅；v3 的 `set system dataplane` 亦同（真机两次切换后移入 ✅）；`set port-mirroring <n> source vnf …`（vNIC 源）经 round13/round24 真机复验后移入 ✅（见上行） |
+| 🔜 契约先行（决策 #485） | 21 | 镜像启动画像新增的 21 行**契约已声明、实现与真机验证在后续任务**：`show vm-image-profiles` 1 行、`set/delete virtual-machine-functions <n> startup …` 10 行、`set/delete vm-image-profiles …` 10 行。**不谎报 ✅**——实现落地并真机通过后按增量口径移入 ✅ 桶 |
 
 round88 全功能 CLI 套件（`contrib/scripts/cli-fulltest.sh`）的逐阶段结果为
 **通过 195 / 失败 0 / 预期报错 12**（阶段 1 的 42/0/0、阶段 2 的 59/0/0、阶段 3 的 8/0/0、
