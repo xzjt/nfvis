@@ -28,6 +28,7 @@ var branchCovered = map[string]string{
 	"resource-pools":            "resource_pools",
 	"vpp":                       "vpp",
 	"protocols":                 "protocols",
+	"vm-image-profiles":         "vm_image_profiles",
 	"virtual-machine-functions": "virtual_machine_functions",
 	"container-functions":       "container_functions",
 }
@@ -47,6 +48,7 @@ var configBranchForModelField = map[string]string{
 	"resource_pools":            "resource-pools",
 	"vpp":                       "vpp",
 	"protocols":                 "protocols",
+	"vm_image_profiles":         "vm-image-profiles",
 	"virtual_machine_functions": "virtual-machine-functions",
 	"container_functions":       "container-functions",
 }
@@ -306,5 +308,21 @@ func TestCrossConnectLeafMatchesModelBool(t *testing.T) {
 	}
 	if _, _, err := Match(ConfigPathTree(), []string{"virtual-switches", "vs1", "cross-connect", "true"}); err != nil {
 		t.Fatalf("`cross-connect true` 应可解析: %v", err)
+	}
+}
+
+// TestTreeHasVMImageProfiles：镜像启动画像（vm-image-profiles）与实例级 startup
+// 覆盖的命令树路径必须存在（决策 #485；命令全表 §2.10 与 §2.8 的对应行）。
+// 红态：树里尚无这两个分支时 Match 报「未知命令」。
+func TestTreeHasVMImageProfiles(t *testing.T) {
+	root := ConfigPathTree()
+	if _, _, err := Match(root, []string{"vm-image-profiles", "img1", "machine", "q35"}); err != nil {
+		t.Fatalf("vm-image-profiles path missing: %v", err)
+	}
+	if _, _, err := Match(root, []string{"vm-image-profiles", "img1", "extra-args", "-global x"}); err != nil {
+		t.Fatalf("extra-args leaf missing: %v", err)
+	}
+	if _, _, err := Match(root, []string{"virtual-machine-functions", "v1", "startup", "console", "vnc"}); err != nil {
+		t.Fatalf("startup override path missing: %v", err)
 	}
 }
