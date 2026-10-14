@@ -572,7 +572,7 @@ Expected: FAIL（路径不存在）。
 				K("boot-order", "引导顺序", VE("order", "hd|cd|dc", "hd", "cd", "dc")),
 				K("accel", "加速器", VE("type", "kvm|tcg", "kvm", "tcg")),
 				Su(K("console", "控制台形态（vnc 仅 Web 可访问）", VE("type", "serial|telnet|vnc", "serial", "telnet", "vnc"))),
-				Su(SPA("<arg>", "extra_args", "额外 QEMU 参数（窄自由口；S 档）")),
+				Su(K("extra-args", "额外 QEMU 参数（窄自由口；S 档）", SPA("<arg>", "extra_args", "额外 QEMU 参数"))),
 			),
 		),
 ```
@@ -591,7 +591,7 @@ Expected: FAIL（路径不存在）。
 					K("boot-order", "引导顺序", VE("order", "hd|cd|dc", "hd", "cd", "dc")),
 					K("accel", "加速器", VE("type", "kvm|tcg", "kvm", "tcg")),
 					K("console", "控制台形态", VE("type", "serial|telnet|vnc", "serial", "telnet", "vnc")),
-					SPA("<arg>", "extra_args", "额外 QEMU 参数（窄自由口；S 档）"),
+					K("extra-args", "额外 QEMU 参数（窄自由口；S 档）", SPA("<arg>", "extra_args", "额外 QEMU 参数")),
 				)),
 ```
 
