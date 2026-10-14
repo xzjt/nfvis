@@ -289,8 +289,12 @@ func (x *cliExecutor) requestVMConsole(user, name string, confirmed bool) string
 	}
 	// vnc 的拒绝先于装配检查：形态是**配置事实**，与 libvirt 是否接入无关——
 	// 装了也不该给 vnc VM 签发一个连上就断的串口凭证。
+	// 文案与 Web 侧同一事实：**内置 VNC 查看器尚未随包提供**，给出可照做的宿主接入路径
+	// （VNC 仅监听本机回环），不指向一个不可用的查看器。
 	if consoleFormOf(vm, cfg.VMImageProfiles) == ConsoleKindVNC {
-		return "%% 该 VNF 使用 VNC 图形控制台，CLI 无法显示图形界面；请用 Web 控制台访问（虚拟机详情页 · 控制台）。\n"
+		return "%% 该 VNF 使用 VNC 图形控制台，CLI 无法显示图形界面（CLI 与 Web 控制台均未随包提供 VNC 查看器）。" +
+			"VNC 服务仅监听本机回环（127.0.0.1），端口由 libvirt 自动分配——有宿主访问权限时，" +
+			"用 virsh vncdisplay " + name + " 查到端口后以任意 VNC 客户端接入。\n"
 	}
 	if x.console == nil {
 		return "%% 串口 console 不可用（libvirt 未装配）\n"

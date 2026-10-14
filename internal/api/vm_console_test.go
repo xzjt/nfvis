@@ -103,9 +103,14 @@ func TestConsoleTicketAndWebSocketBridge(t *testing.T) {
 	var got struct {
 		WSURL     string `json:"ws_url"`
 		ExpiresIn int    `json:"expires_in"`
+		Kind      string `json:"kind"`
 	}
 	if err := json.Unmarshal(data, &got); err != nil || got.WSURL == "" || got.ExpiresIn <= 0 {
 		t.Fatalf("响应不符: %s", data)
+	}
+	// 控制台形态分派（决策 #485，Task 10）：serial（缺省）形态随响应如实给出 kind。
+	if got.Kind != "serial" {
+		t.Fatalf("serial VM 的 kind 应为 serial: %s", data)
 	}
 
 	// WebSocket 连接：收到串口问候，写入内容到达 guest 侧
@@ -136,6 +141,47 @@ func TestConsoleTicketAndWebSocketBridge(t *testing.T) {
 	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/audit-logs?limit=50", token, nil, nil)
 	if status != http.StatusOK || !strings.Contains(string(data), "vm.console") {
 		t.Fatalf("审计应含 vm.console: %d %s", status, data)
+	}
+}
+
+// 控制台形态分派（决策 #485，Task 10）：有效 console=vnc 的 VM，POST 控制台端点**不下发 ticket**
+// ——只回 `kind=vnc`（VNC 是图形控制台、文本串口 WS 不适用），且不存在可用 ticket 可连 WS。
+// 与 CLI 侧 TestConsoleCommandRejectsVNC 同源（同一 consoleFormOf 判定）。
+func TestConsoleTicketVNCNoTicket(t *testing.T) {
+	fc := &fakeConsoleRuntime{stream: newFakeConsoleStream("")}
+	ts := newTestServerOpts(t, Options{VM: newFakeVM(), VMConsole: fc})
+	token := loginAdmin(t, ts)
+	seedVMPool(t, ts, token)
+	// 实例级 startup 覆盖把有效控制台设为 vnc（实例覆盖 > 镜像画像 > 产品默认）。
+	body := vmBody("fw-vm")
+	body["startup"] = map[string]any{"console": "vnc"}
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		body, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("建 vnc VM: %d %s", status, data)
+	}
+
+	status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions/fw-vm/console", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("vnc console 端点应 200（如实告知形态，非拒绝）: %d %s", status, data)
+	}
+	var got struct {
+		Kind      string `json:"kind"`
+		WSURL     string `json:"ws_url"`
+		ExpiresIn int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	if got.Kind != "vnc" {
+		t.Fatalf("有效 console=vnc 时 kind 应为 vnc: %s", data)
+	}
+	if got.WSURL != "" || got.ExpiresIn != 0 {
+		t.Fatalf("vnc 不应下发 ticket（无 ws_url/expires_in）: %s", data)
+	}
+	// 无 ticket 即无从连入：带任意 ticket 的 WS 握手必须失败。
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + APIPrefix + "/virtual-machine-functions/fw-vm/console/ws?ticket=bogus"
+	if _, err := websocket.Dial(u, "", ts.URL); err == nil {
+		t.Fatal("vnc 未签发 ticket，console WS 握手应失败")
 	}
 }
 
