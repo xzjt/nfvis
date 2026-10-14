@@ -91,6 +91,33 @@ type DomainSpec struct {
 	Emulator string // 缺省 DefaultEmulator
 	Machine  string // 缺省 q35
 	CPUMode  string // 缺省 host-passthrough
+
+	// 启动画像（决策 #485，Task 8）：实例 startup 覆盖 > 镜像画像 > 产品默认，
+	// 已由 model.EffectiveStartup 合并后填入；本层只做映射，空值一律回落既有行为。
+	CPUModel  string   // CPUMode=custom 时的 CPU 型号
+	Firmware  string   // bios|uefi（缺省 bios）
+	DiskIface string   // virtio|sata|ide|scsi（缺省 virtio）
+	BootOrder string   // hd|cd|dc（缺省 hd；iso 强制 cd）
+	Accel     string   // kvm|tcg（缺省 kvm）
+	Console   string   // serial|telnet|vnc（缺省 serial）
+	ExtraArgs []string // 额外 QEMU 参数（已过 denylist）
+	// ConsolePort telnet 控制台绑定端口：<=0 时按 VM 名确定性派生（见 ConsoleTelnetPort）。
+	ConsolePort int
+}
+
+// telnet 控制台端口分配区间（决策 #485）：由 VM 名确定性派生，稳定可复算，
+// 落在高位非特权端口段，避免与产品其它监听撞车。
+const (
+	ConsolePortMin = 5700
+	ConsolePortMax = 6699
+)
+
+// ConsoleTelnetPort 由 VM 名确定性派生 telnet 控制台绑定端口（[ConsolePortMin, ConsolePortMax]）。
+// 同名恒等、跨进程可复算；Task 10 的访问路径据此定位端口。
+func ConsoleTelnetPort(vmName string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte("nfvis:console:" + vmName))
+	return ConsolePortMin + int(h.Sum32()%uint32(ConsolePortMax-ConsolePortMin+1))
 }
 
 // DeterministicUUID 由 VM 名派生 UUIDv5 风格标识（版本 5、RFC 4122 variant），
@@ -153,11 +180,30 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 	isoDisk := strings.EqualFold(diskFormat, "iso")
 	bootDev := "hd"
 	if isoDisk {
+		// iso 镜像强制从光驱引导，画像的 boot-order 不覆盖它。
 		bootDev = "cd"
+	} else if bo := strings.TrimSpace(spec.BootOrder); bo != "" {
+		bootDev = bo
+	}
+
+	// accel：tcg → 域类型 qemu（纯软件模拟）；否则 kvm（缺省）。
+	domainType := "kvm"
+	if strings.EqualFold(strings.TrimSpace(spec.Accel), "tcg") {
+		domainType = "qemu"
+	}
+	// firmware：uefi → efi（libvirt 的固件选择器）。
+	firmware := ""
+	if strings.EqualFold(strings.TrimSpace(spec.Firmware), "uefi") {
+		firmware = "efi"
+	}
+	// cpu：mode=custom 时附 CPU 型号（<cpu mode='custom'><model>…</model></cpu>）。
+	cpu := &libvirtxml.DomainCPU{Mode: cpuMode}
+	if strings.EqualFold(cpuMode, "custom") {
+		cpu.Model = &libvirtxml.DomainCPUModel{Value: spec.CPUModel}
 	}
 
 	d := &libvirtxml.Domain{
-		Type: "kvm",
+		Type: domainType,
 		Name: vm.Name,
 		// 确定性 UUID（由 VM 名派生）：重定义/恢复收敛时 libvirt 身份稳定，
 		// 避免「同名不同 uuid」导致 DomainDefineXML 报 already exists。
@@ -168,11 +214,12 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 		VCPU:          &libvirtxml.DomainVCPU{Placement: "static", Value: uint(vm.VCPU.Count)},
 		OS: &libvirtxml.DomainOS{
 			Type:        &libvirtxml.DomainOSType{Arch: "x86_64", Machine: machine, Type: "hvm"},
+			Firmware:    firmware,
 			BootDevices: []libvirtxml.DomainBootDevice{{Dev: bootDev}},
 		},
 		Clock:    &libvirtxml.DomainClock{Offset: "utc"},
 		Features: &libvirtxml.DomainFeatureList{ACPI: &libvirtxml.DomainFeature{}},
-		CPU:      &libvirtxml.DomainCPU{Mode: cpuMode},
+		CPU:      cpu,
 		// on_crash=preserve：保留 crashed 态供 M4-10 告警（FR-CMP-017），
 		// 与契约 state 枚举 {running,shutoff,crashed,paused} 对齐。
 		OnPoweroff: "destroy",
@@ -254,28 +301,79 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 		d.Devices.Hostdevs = append(d.Devices.Hostdevs, hostdev)
 	}
 
-	if serialConsoleEnabled(vm) {
-		d.Devices.Serials = []libvirtxml.DomainSerial{{
-			Source: &libvirtxml.DomainChardevSource{Pty: &libvirtxml.DomainChardevSourcePty{}},
-			Target: &libvirtxml.DomainSerialTarget{Port: uintPtr(0)},
+	// 控制台形态（决策 #485，Task 8 只做域映射；访问路径归 Task 10）：
+	//   serial（缺省）：既有 pty 串口 + console，行为不变；
+	//   telnet：串口换 tcp + telnet 协议（端口按 VM 名确定性派生），仅监听回环；
+	//   vnc：不挂串口，改挂 VNC 图形设备（autoport，仅回环），显卡换 vga。
+	switch strings.ToLower(strings.TrimSpace(spec.Console)) {
+	case "vnc":
+		d.Devices.Graphics = []libvirtxml.DomainGraphic{{
+			VNC: &libvirtxml.DomainGraphicVNC{AutoPort: "yes", Port: -1, Listen: "127.0.0.1"},
 		}}
-		d.Devices.Consoles = []libvirtxml.DomainConsole{{
-			Source: &libvirtxml.DomainChardevSource{Pty: &libvirtxml.DomainChardevSourcePty{}},
-			Target: &libvirtxml.DomainConsoleTarget{Type: "serial", Port: uintPtr(0)},
-		}}
+	case "telnet":
+		if serialConsoleEnabled(vm) {
+			port := spec.ConsolePort
+			if port <= 0 {
+				port = ConsoleTelnetPort(vm.Name)
+			}
+			service := strconv.Itoa(port)
+			d.Devices.Serials = []libvirtxml.DomainSerial{{
+				Source: &libvirtxml.DomainChardevSource{TCP: &libvirtxml.DomainChardevSourceTCP{
+					Mode: "bind", Host: "127.0.0.1", Service: service,
+				}},
+				Protocol: &libvirtxml.DomainChardevProtocol{Type: "telnet"},
+				Target:   &libvirtxml.DomainSerialTarget{Port: uintPtr(0)},
+			}}
+			d.Devices.Consoles = []libvirtxml.DomainConsole{{
+				Source: &libvirtxml.DomainChardevSource{TCP: &libvirtxml.DomainChardevSourceTCP{
+					Mode: "bind", Host: "127.0.0.1", Service: service,
+				}},
+				Protocol: &libvirtxml.DomainChardevProtocol{Type: "telnet"},
+				Target:   &libvirtxml.DomainConsoleTarget{Type: "serial", Port: uintPtr(0)},
+			}}
+		}
+	default: // "" | "serial"
+		if serialConsoleEnabled(vm) {
+			d.Devices.Serials = []libvirtxml.DomainSerial{{
+				Source: &libvirtxml.DomainChardevSource{Pty: &libvirtxml.DomainChardevSourcePty{}},
+				Target: &libvirtxml.DomainSerialTarget{Port: uintPtr(0)},
+			}}
+			d.Devices.Consoles = []libvirtxml.DomainConsole{{
+				Source: &libvirtxml.DomainChardevSource{Pty: &libvirtxml.DomainChardevSourcePty{}},
+				Target: &libvirtxml.DomainConsoleTarget{Type: "serial", Port: uintPtr(0)},
+			}}
+		}
 	}
 
-	// 无人值守：无显卡、无内存气球（气球与大页不兼容）。
-	d.Devices.Videos = []libvirtxml.DomainVideo{{Model: libvirtxml.DomainVideoModel{Type: "none"}}}
+	// 无人值守：无显卡（vnc 除外）、无内存气球（气球与大页不兼容）。
+	videoType := "none"
+	if strings.EqualFold(strings.TrimSpace(spec.Console), "vnc") {
+		videoType = "vga"
+	}
+	d.Devices.Videos = []libvirtxml.DomainVideo{{Model: libvirtxml.DomainVideoModel{Type: videoType}}}
 	d.Devices.MemBalloon = &libvirtxml.DomainMemBalloon{Model: "none"}
+
+	// 额外 QEMU 参数（决策 #485）：每个元素按空白切分为独立 arg（denylist 已在 model 层校验）。
+	if len(spec.ExtraArgs) > 0 {
+		cmdline := &libvirtxml.DomainQEMUCommandline{}
+		for _, a := range spec.ExtraArgs {
+			for _, tok := range strings.Fields(a) {
+				cmdline.Args = append(cmdline.Args, libvirtxml.DomainQEMUCommandlineArg{Value: tok})
+			}
+		}
+		d.QEMUCommandline = cmdline
+	}
 
 	return d, nil
 }
 
 // buildDisks 主盘 + 附加数据盘 + cloud-init seed ISO。
-// 设备命名确定：主盘 vda，数据盘 vdb/vdc…，seed 接在数据盘之后（**均为 virtio**，决策 #139）。
+// 主盘/数据盘的设备名与总线由画像 disk-interface 决定（决策 #485）；seed 保持 virtio 磁盘
+// （决策 #139——精简 guest 可能无 ahci，而 NoCloud 扫的是带 CIDATA 的块设备）。
 func buildDisks(vmName string, spec DomainSpec, diskFormat string, isoDisk bool) ([]libvirtxml.DomainDisk, error) {
 	var out []libvirtxml.DomainDisk
+
+	devPrefix, bus := diskIfaceDevBus(spec.DiskIface)
 
 	main := libvirtxml.DomainDisk{
 		Device: "disk",
@@ -283,12 +381,12 @@ func buildDisks(vmName string, spec DomainSpec, diskFormat string, isoDisk bool)
 		Source: &libvirtxml.DomainDiskSource{File: &libvirtxml.DomainDiskSourceFile{File: spec.DiskPath}},
 	}
 	if isoDisk {
-		// ISO 作为只读光盘引导。
+		// ISO 作为只读光盘引导：仍走 cdrom/sata（与 disk-interface 无关）。
 		main.Device = "cdrom"
 		main.Target = &libvirtxml.DomainDiskTarget{Dev: "sda", Bus: "sata"}
 		main.ReadOnly = &libvirtxml.DomainDiskReadOnly{}
 	} else {
-		main.Target = &libvirtxml.DomainDiskTarget{Dev: "vda", Bus: "virtio"}
+		main.Target = &libvirtxml.DomainDiskTarget{Dev: devPrefix + "a", Bus: bus}
 	}
 	out = append(out, main)
 
@@ -304,7 +402,7 @@ func buildDisks(vmName string, spec DomainSpec, diskFormat string, isoDisk bool)
 			Device: "disk",
 			Driver: &libvirtxml.DomainDiskDriver{Name: "qemu", Type: format},
 			Source: &libvirtxml.DomainDiskSource{File: &libvirtxml.DomainDiskSourceFile{File: dd.Path}},
-			Target: &libvirtxml.DomainDiskTarget{Dev: diskDevName(i + 1), Bus: "virtio"},
+			Target: &libvirtxml.DomainDiskTarget{Dev: diskDevNameWithPrefix(devPrefix, i+1), Bus: bus},
 		})
 	}
 
@@ -326,17 +424,35 @@ func buildDisks(vmName string, spec DomainSpec, diskFormat string, isoDisk bool)
 	return out, nil
 }
 
-// diskDevName 数据盘序号 → virtio 设备名，沿用 Linux 命名序列
-// （vda…vdz、vdaa…vdaz、vdba…），避免静默重复命名。
-func diskDevName(idx int) string {
+// diskIfaceDevBus 画像 disk-interface → (设备名前缀, libvirt target bus)。
+// 空值/未知一律回落 virtio（既有行为）。
+func diskIfaceDevBus(iface string) (prefix, bus string) {
+	switch strings.ToLower(strings.TrimSpace(iface)) {
+	case "sata":
+		return "sd", "sata"
+	case "scsi":
+		return "sd", "scsi"
+	case "ide":
+		return "hd", "ide"
+	default: // "" | "virtio"
+		return "vd", "virtio"
+	}
+}
+
+// diskDevName 数据盘序号 → virtio 设备名（既有默认路径，保持向后兼容）。
+func diskDevName(idx int) string { return diskDevNameWithPrefix("vd", idx) }
+
+// diskDevNameWithPrefix 数据盘序号 → 指定前缀的设备名，沿用 Linux 命名序列
+// （vda…vdz、vdaa…vdaz、vdba…；sd*/hd* 同理），避免静默重复命名。
+func diskDevNameWithPrefix(prefix string, idx int) string {
 	if idx <= 0 {
 		idx = 0
 	}
 	if idx < 26 {
-		return "vd" + string(rune('a'+idx))
+		return prefix + string(rune('a'+idx))
 	}
 	idx -= 26
-	return "vd" + string(rune('a'+idx/26)) + string(rune('a'+idx%26))
+	return prefix + string(rune('a'+idx/26)) + string(rune('a'+idx%26))
 }
 
 // buildVhostUserIface VM 侧 virtio-net 指向 VPP 监听的 vhost-user socket。

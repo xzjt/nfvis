@@ -1,6 +1,7 @@
 package compute
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -434,4 +435,163 @@ func TestBuildDomainXML_KernelDataPlaneRequiresVirtualSwitch(t *testing.T) {
 	if _, err := BuildDomainXML(spec); err == nil {
 		t.Fatal("缺虚拟交换机时应报错")
 	}
+}
+
+// 启动画像（决策 #485）：machine/cpu/firmware/disk-interface/boot-order/accel 落到域 XML。
+func TestBuildDomainStartupProfile(t *testing.T) {
+	spec := baseSpec()
+	spec.Machine = "pc"
+	spec.CPUMode = "custom"
+	spec.CPUModel = "Skylake-Client"
+	spec.Firmware = "uefi"
+	spec.DiskIface = "ide"
+	spec.BootOrder = "cd"
+	spec.Accel = "tcg"
+	xml := mustXML(t, spec)
+
+	assertContains(t, xml,
+		`<domain type="qemu">`, // accel=tcg → 域类型 qemu（非 kvm）
+		`machine="pc"`,         // 机器类型来自画像
+		`mode="custom"`,        // CPU 模式来自画像
+		`Skylake-Client`,       // cpu mode=custom 时写 CPU 型号
+		`firmware="efi"`,       // firmware=uefi → efi
+		`bus="ide"`,            // 主盘总线来自 disk-interface
+		`dev="hda"`,            // ide → hd* 设备名
+		`<boot dev="cd">`,      // 非 iso 时引导设备来自 boot-order
+	)
+}
+
+// disk-interface 各取值 → 主盘设备名前缀与总线；空值回落 virtio（既有行为）。
+func TestBuildDomainDiskInterface(t *testing.T) {
+	cases := []struct{ iface, dev, bus string }{
+		{"", "vda", "virtio"},
+		{"virtio", "vda", "virtio"},
+		{"sata", "sda", "sata"},
+		{"scsi", "sda", "scsi"},
+		{"ide", "hda", "ide"},
+	}
+	for _, tc := range cases {
+		t.Run("iface="+tc.iface, func(t *testing.T) {
+			spec := baseSpec()
+			spec.DiskIface = tc.iface
+			xml := mustXML(t, spec)
+			assertContains(t, xml, `<target dev="`+tc.dev+`" bus="`+tc.bus+`">`)
+		})
+	}
+}
+
+// accel 缺省为 kvm；显式 kvm 亦然。
+func TestBuildDomainAccelDefault(t *testing.T) {
+	for _, accel := range []string{"", "kvm"} {
+		spec := baseSpec()
+		spec.Accel = accel
+		xml := mustXML(t, spec)
+		assertContains(t, xml, `<domain type="kvm">`)
+	}
+}
+
+// boot-order 缺省 hd；iso 镜像强制 cd（既有行为不被画像覆盖）。
+func TestBuildDomainBootOrder(t *testing.T) {
+	spec := baseSpec()
+	xml := mustXML(t, spec)
+	assertContains(t, xml, `<boot dev="hd">`)
+
+	// 非 iso 时画像指定 dc 生效。
+	spec2 := baseSpec()
+	spec2.BootOrder = "dc"
+	assertContains(t, mustXML(t, spec2), `<boot dev="dc">`)
+
+	// iso 主盘强制从光驱引导，画像的 boot-order 不覆盖它。
+	spec3 := baseSpec()
+	spec3.DiskPath = "/var/lib/nfvis/images/installer.iso"
+	spec3.DiskFormat = "iso"
+	spec3.BootOrder = "hd"
+	assertContains(t, mustXML(t, spec3), `<boot dev="cd">`)
+}
+
+// console=vnc：无 serial/console，改挂 VNC 图形设备（仅回环监听）+ vga 显卡。
+func TestBuildDomainVNCConsole(t *testing.T) {
+	spec := baseSpec()
+	spec.Console = "vnc"
+	xml := mustXML(t, spec)
+
+	assertContains(t, xml,
+		`<graphics type="vnc"`,
+		`listen="127.0.0.1"`,
+		`<video>`,
+		`<model type="vga">`, // vnc 需要真实显卡，不再 none
+	)
+	assertNotContains(t, xml, "<serial", "<console", `<model type="none">`)
+}
+
+// console=telnet：串口换 tcp + telnet 协议，端口按 VM 名确定性派生。
+func TestBuildDomainTelnetConsole(t *testing.T) {
+	spec := baseSpec()
+	spec.Console = "telnet"
+	xml := mustXML(t, spec)
+
+	assertContains(t, xml,
+		`<serial type="tcp">`,
+		`<protocol type="telnet">`,
+		`mode="bind"`,
+		`host="127.0.0.1"`,
+	)
+	port := ConsoleTelnetPort(spec.VM.Name)
+	assertContains(t, xml, fmt.Sprintf(`service="%d"`, port))
+	if port < ConsolePortMin || port > ConsolePortMax {
+		t.Fatalf("控制台端口应在 [%d,%d]，实际 %d", ConsolePortMin, ConsolePortMax, port)
+	}
+	// 确定性：同名恒等、异名可不同。
+	if ConsoleTelnetPort("fw-vm") != ConsoleTelnetPort("fw-vm") {
+		t.Fatal("ConsoleTelnetPort 非确定")
+	}
+	// 显式 ConsolePort 优先。
+	spec.ConsolePort = 6123
+	assertContains(t, mustXML(t, spec), `service="6123"`)
+}
+
+// serial_console=false 时 telnet 串口也不生成（console 开关语义一致）。
+func TestBuildDomainTelnetRespectsSerialConsoleOff(t *testing.T) {
+	spec := baseSpec()
+	spec.Console = "telnet"
+	off := false
+	spec.VM.SerialConsole = &off
+	assertNotContains(t, mustXML(t, spec), "<serial", "<console")
+}
+
+// extra-args：每个元素按空白切分，逐个写成 qemu:commandline 的 arg。
+func TestBuildDomainExtraArgs(t *testing.T) {
+	spec := baseSpec()
+	spec.ExtraArgs = []string{"-global kvm-pit.lost_tick_policy=discard"}
+	xml := mustXML(t, spec)
+
+	assertContains(t, xml,
+		// libvirtxml 以默认命名空间形式输出（语义等同 libvirt 的 qemu:commandline）。
+		`<commandline xmlns="http://libvirt.org/schemas/domain/qemu/1.0">`,
+		`<arg value="-global"></arg>`,
+		`<arg value="kvm-pit.lost_tick_policy=discard"></arg>`,
+	)
+
+	// 单个元素含多 token 时逐 token 拆开。
+	spec2 := baseSpec()
+	spec2.ExtraArgs = []string{"-no-hpet -no-shutdown"}
+	xml2 := mustXML(t, spec2)
+	assertContains(t, xml2, `value="-no-hpet"`, `value="-no-shutdown"`)
+
+	// 无 extra-args 时不出现 commandline（既有行为）。
+	assertNotContains(t, mustXML(t, baseSpec()), "<commandline")
+}
+
+// 空画像字段时保持既有行为（回归）：machine/cpu/firmware/accel/console 全缺省。
+func TestBuildDomainEmptyProfileKeepsDefaults(t *testing.T) {
+	xml := mustXML(t, baseSpec())
+	assertContains(t, xml,
+		`<domain type="kvm">`,
+		`machine="q35"`,
+		`mode="host-passthrough"`,
+		`<serial type="pty">`,
+		`<console type="pty">`,
+		`<model type="none">`,
+	)
+	assertNotContains(t, xml, `firmware=`, "<commandline", "<graphics")
 }
