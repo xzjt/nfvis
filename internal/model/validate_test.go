@@ -1096,3 +1096,39 @@ func TestValidateNatV6Rejected(t *testing.T) {
 	c5.Nat.Static = []NatStatic{{InsideIP: "10.99.0.5", OutsideIP: "203.0.113.9"}}
 	mustNoErr(t, Validate(c5))
 }
+
+// 决策 #485：镜像级启动画像的提交期校验——枚举取值、cpu_mode=custom 必带 cpu_model、
+// 重复镜像键、以及画像/实例覆盖两侧的 extra-args denylist。
+func TestValidateVMImageProfiles(t *testing.T) {
+	base := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", Machine: "q35"}}}
+	if errs := Validate(base); len(errs) != 0 {
+		t.Fatalf("valid profile rejected: %v", errs)
+	}
+	// 重复键
+	dup := Config{VMImageProfiles: []VMImageProfile{{Image: "img1"}, {Image: "img1"}}}
+	if errs := Validate(dup); len(errs) == 0 {
+		t.Fatalf("duplicate key not rejected")
+	}
+	// cpu mode=custom 缺 model
+	bad := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", CPUMode: "custom"}}}
+	if errs := Validate(bad); len(errs) == 0 {
+		t.Fatalf("custom without model not rejected")
+	}
+	// 非法枚举
+	bad2 := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", Accel: "bogus"}}}
+	if errs := Validate(bad2); len(errs) == 0 {
+		t.Fatalf("bad enum not rejected")
+	}
+	// extra-args denylist
+	bad3 := Config{VMImageProfiles: []VMImageProfile{{Image: "img1", ExtraArgs: []string{"-m 8G"}}}}
+	if errs := Validate(bad3); len(errs) == 0 {
+		t.Fatalf("denylisted extra-args not rejected")
+	}
+	// VNF startup 覆盖也要过 denylist
+	bad4 := Config{
+		VirtualMachineFunctions: []VMFunction{{Name: "v1", Image: "img1", Startup: &VMStartupOverride{ExtraArgs: []string{"-netdev tap"}}}},
+	}
+	if errs := Validate(bad4); len(errs) == 0 {
+		t.Fatalf("denylisted startup extra-args not rejected")
+	}
+}
