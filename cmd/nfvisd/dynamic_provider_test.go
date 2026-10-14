@@ -124,6 +124,14 @@ func (f *fakeCompute) Console(_ context.Context, name string) (io.ReadWriteClose
 	return f.consoleRWC, f.consoleErr
 }
 
+// VNC 与 Console 共用假件字段（本包只验证转发/降级，不区分两路的流语义）。
+func (f *fakeCompute) VNC(_ context.Context, name string) (io.ReadWriteCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.consoled = append(f.consoled, name)
+	return f.consoleRWC, f.consoleErr
+}
+
 func (f *fakeCompute) SnapshotCreate(_ context.Context, domain, name, description string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

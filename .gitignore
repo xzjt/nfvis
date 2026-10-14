@@ -12,6 +12,9 @@
 # Go
 vendor/
 
+# 例外：Web 控制台内嵌 noVNC 前端资产（浏览器 ES 模块，非 Go 依赖；随二进制 embed，须入库）
+!internal/api/ui/novnc/vendor/
+
 # 编辑器
 .idea/
 .vscode/

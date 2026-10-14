@@ -86,7 +86,7 @@ type ConsoleRequest struct {
 	// 控制台形态都走它）、"container"（容器交互式终端，决策 #358）。
 	// 注意：与 REST `POST …/console` 响应里的 `kind` **不是同一取值集**——REST 回的是该 VM 的
 	// **有效控制台形态**（serial|telnet|vnc，见 ConsoleKindSerial/Telnet/VNC），供前端按形态分派；
-	// CLI 侧对 vnc 直接拒绝（无内置 VNC 查看器），故不会产出 vnc。
+	// CLI 侧对 vnc 直接拒绝（CLI 无图形通道；查看器由 Web 控制台内置提供），故不会产出 vnc。
 	Kind string `json:"kind,omitempty"`
 }
 
@@ -97,7 +97,7 @@ const (
 	ConsoleKindVM        = "vm"        // CLI 接管请求：VM 文本串口（serial/telnet 共用）
 	ConsoleKindSerial    = "serial"    // REST 响应：VM 串口形态 pty（产品默认）
 	ConsoleKindTelnet    = "telnet"    // REST 响应：VM 串口形态 telnet over tcp（仅回环）
-	ConsoleKindVNC       = "vnc"       // REST 响应：VM 图形控制台（VNC 仅监听 127.0.0.1；无内置查看器，宿主经 virsh vncdisplay 接入）
+	ConsoleKindVNC       = "vnc"       // REST 响应：VM 图形控制台（VNC 仅监听 127.0.0.1；Web 控制台内置 noVNC 查看器，宿主亦可经 virsh vncdisplay 接入）
 	ConsoleKindContainer = "container" // 容器交互式终端（决策 #358）
 )
 

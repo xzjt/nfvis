@@ -798,7 +798,7 @@ set startup                                          # 实例级启动画像覆�
   ├─ disk-interface <iface>                          # virtio|sata|ide|scsi
   ├─ boot-order <order>                              # hd|cd|dc
   ├─ accel <type>                                    # kvm|tcg
-  ├─ console <type>                                  # S；serial|telnet|vnc（vnc：内置查看器尚未随包提供，VNC 仅监听 127.0.0.1，须有宿主访问权限时用 virsh vncdisplay 查端口后以任意 VNC 客户端接入；CLI console 拒绝并说明）
+  ├─ console <type>                                  # S；serial|telnet|vnc（vnc：Web 控制台内置 noVNC 查看器，VNC 仅监听 127.0.0.1，宿主也可用 virsh vncdisplay 查端口后以任意 VNC 客户端接入；CLI console 拒绝并指向 Web 内置查看器）
   └─ extra-args <arg>                                # S；可多条；命中 denylist 提交期拒绝
 delete startup [<leaf>]                              # 裸 delete＝清覆盖块；带叶子＝只清该叶子
 set autostart <bool>
@@ -816,7 +816,7 @@ set firmware <type>                                  # bios(默认)|uefi
 set disk-interface <iface>                           # virtio(默认)|sata|ide|scsi
 set boot-order <order>                               # hd(默认)|cd|dc
 set accel <type>                                     # kvm(默认)|tcg
-set console <type>                                   # S；serial(默认)|telnet|vnc（vnc：内置查看器尚未随包提供，VNC 仅监听 127.0.0.1，须有宿主访问权限时用 virsh vncdisplay 查端口后以任意 VNC 客户端接入）
+set console <type>                                   # S；serial(默认)|telnet|vnc（vnc：Web 控制台内置 noVNC 查看器，VNC 仅监听 127.0.0.1，宿主也可用 virsh vncdisplay 查端口后以任意 VNC 客户端接入）
 set extra-args <arg>                                 # S；可多条；命中 denylist 提交期拒绝；每次使用进 audit
 delete vm-image-profiles <image-name> [<leaf>]       # 裸 delete＝整节删；带叶子＝只清该叶子
 ```
@@ -829,8 +829,8 @@ delete vm-image-profiles <image-name> [<leaf>]       # 裸 delete＝整节删；
   `-netdev`/`-nic`/`-net`（网络模型）、`-chardev`/`-monitor`/`-qmp`/`-mon`/`-serial`（console/监视器）、
   `-cpu`/`-machine`/`-boot`/`-device`/`-M`（有结构化字段，强制走字段）、`-uuid`/`-daemonize`/`-pidfile`/`-S`（身份/进程生命周期）。
 - **console 形态**：`serial`（默认，既有 pty 管线不变）/ `telnet`（同一 console 管线，底层 pty 换 tcp）/
-  `vnc`（`<graphics type='vnc'>`，**内置查看器尚未随包提供**；CLI `console` 对 vnc 明确拒绝并说明无内置查看器，
-  有宿主访问权限时用 `virsh vncdisplay` 查端口后以任意 VNC 客户端接入）；绑定地址一律 `127.0.0.1`。
+  `vnc`（`<graphics type='vnc'>`，**Web 控制台内置 noVNC 查看器**可直接接入——CLI `console` 对 vnc 明确拒绝并
+  指向 Web 内置查看器；宿主也可用 `virsh vncdisplay` 查端口后以任意 VNC 客户端接入）；绑定地址一律 `127.0.0.1`。
 
 ### 2.8 `container-functions`
 

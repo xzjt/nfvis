@@ -2223,11 +2223,15 @@ nfvis$ show virtual-machine-functions fw-vm detail    # 「有效启动画像」
 |---|---|---|
 | `serial`（默认） | 文本串口（pty），与既有串口行为一致 | `request virtual-machine-functions <vm> console`（Ctrl-] 退出） |
 | `telnet` | 文本串口改为回环 TCP（`127.0.0.1`），管线不变 | 同上，`request … console` 照常接管（底层拨回环 telnet） |
-| `vnc` | 图形控制台（仅回环 `127.0.0.1`，端口由 libvirt 自动分配） | ⚠️ 见下 |
+| `vnc` | 图形控制台（仅回环 `127.0.0.1`，端口由 libvirt 自动分配） | Web 控制台内置 noVNC 查看器（见下） |
 
-> ⚠️ **VNC 形态：内置 VNC 查看器尚未随包提供**。`vnc` 是图形控制台，CLI 的 `request … console`
-> **会如实拒绝**并指向宿主接入路径（不假装能显示），Web 控制台当前也给同样的如实提示。
-> VNC 服务仅监听**本机回环**（`127.0.0.1`）——**有宿主访问权限时**：
+> **VNC 形态：Web 控制台内置 noVNC 查看器可直接接入**。`vnc` 是图形控制台，CLI 的
+> `request … console` **会如实拒绝**并指向 Web 控制台（CLI 没有图形通道，不假装能显示）。在
+> Web 控制台打开该 VNF 的**详情页 →「串口」分栏 → 点「连接」**，即由内置查看器（随包提供，
+> 无需另装客户端）打开图形画面，鼠标/键盘直接作用于 guest。
+>
+> 也可用宿主上的外部客户端接入（**有宿主访问权限时**）——VNC 服务仅监听**本机回环**
+> （`127.0.0.1`）：
 >
 > ```bash
 > virsh vncdisplay <vm>        # 例：127.0.0.1:0（对应端口 5900）

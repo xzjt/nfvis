@@ -354,6 +354,10 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	// M4-5：串口 console（凭证端点需 Bearer；ws 端点以一次性 ticket 鉴权）
 	mux.Handle("POST "+APIPrefix+"/virtual-machine-functions/{name}/console", s.auth(s.handleConsoleTicket, schema.ClassSuperUser, "request virtual-machine-functions console"))
 	mux.Handle("GET "+APIPrefix+"/virtual-machine-functions/{name}/console/ws", http.HandlerFunc(s.handleConsoleWS))
+	// 决策 #485：VNC 图形查看器（Web 内置 noVNC）——凭证端点与串口 console **同权限档**，
+	// ws 端点同样以一次性 ticket 鉴权；ticket 资源键隔离（vnc/ ≠ vm/）。
+	mux.Handle("POST "+APIPrefix+"/virtual-machine-functions/{name}/console/vnc", s.auth(s.handleVNCTicket, schema.ClassSuperUser, "request virtual-machine-functions console"))
+	mux.Handle("GET "+APIPrefix+"/virtual-machine-functions/{name}/console/vnc/ws", http.HandlerFunc(s.handleVNCWS))
 	// M4-6：快照（列表/创建/回滚/删除）
 	mux.Handle("GET "+APIPrefix+"/virtual-machine-functions/{name}/snapshots", s.auth(s.handleListSnapshots, schema.ClassReadOnly, "show virtual-machine-functions"))
 	mux.Handle("POST "+APIPrefix+"/virtual-machine-functions/{name}/snapshots", s.auth(s.handleCreateSnapshot, schema.ClassSuperUser, "request virtual-machine-functions snapshot create"))

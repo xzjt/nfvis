@@ -18,6 +18,7 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"path"
 	"strings"
 )
 
@@ -30,9 +31,44 @@ var uiAssets embed.FS
 var uiFiles = map[string]string{
 	"index.html":  "text/html; charset=utf-8",
 	"app.js":      "text/javascript; charset=utf-8",
+	"vncview.js":  "text/javascript; charset=utf-8",
 	"style.css":   "text/css; charset=utf-8",
 	"router.js":   "text/javascript; charset=utf-8",
 	"routes.json": "application/json; charset=utf-8",
+}
+
+// uiExtTypes novnc/ 子树（决策 #485：Web 内置 noVNC 查看器）按扩展名的 MIME 表。
+// noVNC 是一组 ES 模块（core/*.js 相互相对 import、vendor/pako/*.js），逐个进白名单会
+// 变成一份随上游版本漂移的清单——故 novnc/ 子树改为「前缀 + 扩展名查表」放行。
+var uiExtTypes = map[string]string{
+	".js":   "text/javascript; charset=utf-8",
+	".mjs":  "text/javascript; charset=utf-8",
+	".css":  "text/css; charset=utf-8",
+	".json": "application/json; charset=utf-8",
+	".wasm": "application/wasm",
+	".png":  "image/png",
+	".svg":  "image/svg+xml",
+	".map":  "application/json; charset=utf-8",
+	".txt":  "text/plain; charset=utf-8",
+}
+
+// uiContentType 解析静态资源的内容类型（命中即放行）。
+// 白名单文件用固定表；novnc/ 子树按扩展名查表。其余一律「未命中」→ 404。
+func uiContentType(name string) (string, bool) {
+	if ct, ok := uiFiles[name]; ok {
+		return ct, true
+	}
+	if !strings.HasPrefix(name, "novnc/") {
+		return "", false
+	}
+	// 防路径穿越：内嵌 FS 只含 ui/ 下的文件，但仍显式拒绝 `..`/空段，避免把 ../ 交给 ReadFile。
+	for _, seg := range strings.Split(name, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", false
+		}
+	}
+	ct, ok := uiExtTypes[strings.ToLower(path.Ext(name))]
+	return ct, ok
 }
 
 // handleUIRedirect GET /api/v1/ui：跳到 `/ui/`。
@@ -47,14 +83,15 @@ func (s *Server) handleUIAssets(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = "index.html"
 	}
-	ct, ok := uiFiles[name]
+	ct, ok := uiContentType(name)
 	if !ok {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "静态资源不存在", nil)
 		return
 	}
 	data, err := fs.ReadFile(uiAssets, "ui/"+name)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "读取内嵌资源失败", nil)
+		// novnc/ 子树按扩展名放行，但并非每个扩展名下的路径都存在——不存在就当 404（而非 500）。
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "静态资源不存在", nil)
 		return
 	}
 	h := w.Header()

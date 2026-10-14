@@ -523,14 +523,16 @@
           <button id="vm-console-connect" data-write type="button">连接串口</button>
         </div>
         <p class="muted small">
-          终端连接的是该 VM 的<strong>串口</strong>（与 CLI 的 console 同一路）。连接后输入的内容会直接进入 guest——
+          本页连接该 VM 的控制台：文本串口（serial/telnet，与 CLI 的 console 同一路）或 VNC 图形控制台
+          （内置 noVNC 查看器，仅对 console 形态为 vnc 的 VM）。连接后输入的内容会直接进入 guest——
           请确认这是你要操作的机器；离开本页会自动断开。
         </p>
         <div id="vm-console" hidden>
           <h3>串口 console <span id="vm-console-name" class="muted small"></span>
             <button id="vm-console-close" data-write type="button" class="ghost small">断开</button></h3>
           <pre id="vm-console-out" class="code console-out"></pre>
-          <div class="cfg-actions">
+          <div id="vm-vnc-view" class="vnc-view" hidden></div>
+          <div class="cfg-actions" id="vm-console-io">
             <input id="vm-console-in" data-write type="text" placeholder="输入后回车发送（文本框不能发送控制字符；需要 Ctrl-C 请用 CLI 交互终端）">
             <button id="vm-console-send" data-write type="button" class="ghost">发送</button>
             <button id="vm-console-enter" data-write type="button" class="ghost">只发回车</button>
@@ -1132,7 +1134,9 @@
 </section>
 
 <!-- app.js 是页面逻辑（页面处理器 + 各页视图），router.js 按 hash 决定显示哪一页并取数。
-     两个都是模块：同一 URL 只求值一次，router.js 复用 app.js 的那一份实例。 -->
+     两个都是模块：同一 URL 只求值一次，router.js 复用 app.js 的那一份实例。
+     vncview.js 是 VNC 查看器绑定（内置 noVNC），作为独立模块暴露 window.nfvisVnc 供 app.js 调用。 -->
+<script type="module" src="vncview.js"></script>
 <script type="module" src="app.js"></script>
 </body>
 </html>

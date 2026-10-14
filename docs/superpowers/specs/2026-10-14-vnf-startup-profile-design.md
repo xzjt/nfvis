@@ -115,7 +115,7 @@ set vm-image-profiles <image-name>            # 键=镜像名（? / Tab 从镜�
 |---|---|---|
 | `serial`（默认） | `<serial type='pty'>` + `<console type='pty'>`（**现状不变**） | 既有 console 管线（ticket + WS + CLI raw + Ctrl-]） |
 | `telnet` | `<serial type='tcp'><source mode='bind' host='127.0.0.1' service='<port>'/><protocol type='telnet'/></serial>` | 同一 console 管线，底层由 pty 换 tcp |
-| `vnc` | `<graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>`（+ `<video>` 模型） | **内置 VNC 查看器尚未随包提供**（VNC 仅监听 `127.0.0.1`，端口由 libvirt 自动分配）；CLI `console` 对 vnc **拒绝**并说明无内置查看器，有宿主访问权限时用 `virsh vncdisplay <vm>` 查端口后以任意 VNC 客户端接入（如实，不假装能显示）（v1 实现：查看器待补，见附录 A #485 真机验证段） |
+| `vnc` | `<graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>`（+ `<video>` 模型） | **Web 控制台内置 noVNC 查看器**（随包提供；`POST .../console/vnc` 换一次性 ticket，ticket 资源键与串口隔离）；CLI `console` 对 vnc **拒绝**并指向 Web 内置查看器，宿主也可用 `virsh vncdisplay <vm>` 查端口后以任意 VNC 客户端接入（如实，不假装能显示） |
 
 - **绑定地址一律 `127.0.0.1`**（与 #478 回环哲学一致，不扩大对外暴露面）。
 - 与既有 `serial console enable/disable`（`SerialConsole *bool`）的关系：`console` 字段**存在时权威**；
@@ -191,7 +191,7 @@ set vm-image-profiles <image-name>            # 键=镜像名（? / Tab 从镜�
 - **不做运行时脚本**（EVE-NG `config_script`）：产品里等于任意代码执行，明确拒绝。
 - **资源类一律不碰账本**：memory/vcpu/hugepage/numa/绑核不进画像，`extra-args` denylist 兜底。
 - **不做热修改**：画像改动需停机重定义 VM（与 FR-CMP-012 一致）。
-- **内置 VNC 查看器尚未随包提供**：CLI `console` 对 vnc 拒绝并说明无内置查看器；VNC 仅监听 `127.0.0.1`，有宿主访问权限时用 `virsh vncdisplay <vm>` 查端口后以任意 VNC 客户端接入（v1 实现：查看器待补，见附录 A #485 真机验证段）。
+- **VNC 由 Web 控制台内置 noVNC 查看器接入**（随包提供）：CLI `console` 对 vnc 拒绝并指向 Web 内置查看器；VNC 仅监听 `127.0.0.1`，宿主也可用 `virsh vncdisplay <vm>` 查端口后以任意 VNC 客户端接入。
 - **`extra-args` 是窄口**：`-device`/`-netdev` 等一律拒；确有需求时补**结构化字段**，不放宽自由串。
 
 ## 7. 实现清单（供 writing-plans 排期）
@@ -201,7 +201,7 @@ set vm-image-profiles <image-name>            # 键=镜像名（? / Tab 从镜�
 3. 命令树 + 执行器（`set/delete/show vm-image-profiles`、`startup` 覆盖、display set 反推）。
 4. 编排：`DomainSpec` 扩字段 + `BuildDomain` 合并 + 有效画像计算（实例>画像>默认）。
 5. `extra-args` denylist 校验 + 审计 + 读视图标注。
-6. console：telnet/vnc 的 domain 映射 + 访问路径（telnet 走既有管线；vnc 仅回环监听、内置查看器尚未随包提供——CLI `console` 拒绝并说明无内置查看器）（v1 实现：查看器待补，见附录 A #485 真机验证段）。
+6. console：telnet/vnc 的 domain 映射 + 访问路径（telnet 走既有管线；vnc 仅回环监听、Web 控制台内置 noVNC 查看器接入——CLI `console` 拒绝并指向 Web 内置查看器）。
 7. 对账：孤儿画像告警 `VM_IMAGE_PROFILE_ORPHAN`。
 8. 守护测试 + 红-绿；`make check` 全绿。
 9. 真机验证：老机器类型 / UEFI / IDE 启动 / `-cpu host` / telnet / vnc 各造一个可启动现场；

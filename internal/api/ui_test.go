@@ -176,6 +176,62 @@ func TestUIAssetsUnknownPathAndTraversal(t *testing.T) {
 	}
 }
 
+// 决策 #485：novnc/ 子树（Web 内置 VNC 查看器的 vendored noVNC）按扩展名放行，
+// 白名单外的路径仍 404；不存在但扩展名合法者也 404（不能因扩展名放行就 500）。
+func TestUINovncAssetsServed(t *testing.T) {
+	ts := newTestServerOpts(t, Options{})
+	for path, wantCT := range map[string]string{
+		APIPrefix + "/ui/vncview.js":                            "text/javascript; charset=utf-8",
+		APIPrefix + "/ui/novnc/core/rfb.js":                     "text/javascript; charset=utf-8",
+		APIPrefix + "/ui/novnc/core/util/int.js":                "text/javascript; charset=utf-8",
+		APIPrefix + "/ui/novnc/vendor/pako/lib/zlib/zstream.js": "text/javascript; charset=utf-8",
+	} {
+		resp, err := http.Get(ts.URL + path) // 静态资源无鉴权（与串口页同源）
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: 状态 %d", path, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != wantCT {
+			t.Errorf("%s: Content-Type = %q，期望 %q", path, ct, wantCT)
+		}
+		if len(body) == 0 {
+			t.Errorf("%s: 空响应", path)
+		}
+		if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s: X-Content-Type-Options = %q", path, got)
+		}
+	}
+
+	// 白名单外 / 不存在 / 越界：一律 404 + 统一错误体。
+	h := ts.Config.Handler
+	for _, p := range []string{
+		APIPrefix + "/ui/novnc/core/nope.js",   // 扩展名合法但文件不存在
+		APIPrefix + "/ui/novnc/core/nope.wasm", // 同上（合法扩展名）
+		APIPrefix + "/ui/novnc/core/.hidden",   // 未知扩展名
+		APIPrefix + "/ui/novnc/",               // 目录（空段）
+		APIPrefix + "/ui/other/x.js",           // 非 novnc 前缀
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "http://nfvis.local/", nil)
+		req.URL.Path = p
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: 状态 %d，期望 404", p, rec.Code)
+			continue
+		}
+		var e struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil || e.Code != "NOT_FOUND" {
+			t.Errorf("%s: 期望统一错误体 NOT_FOUND，得到 %s", p, rec.Body.String())
+		}
+	}
+}
+
 func TestUIRedirectsToTrailingSlash(t *testing.T) {
 	ts := newTestServerOpts(t, Options{})
 	cli := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

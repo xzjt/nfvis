@@ -73,6 +73,7 @@ type computeFacade interface {
 	orchestrator.ComputeProvider
 	StartVMChecked(ctx context.Context, name string) (orchestrator.VMStartProbe, error)
 	Console(ctx context.Context, name string) (io.ReadWriteCloser, error)
+	VNC(ctx context.Context, name string) (io.ReadWriteCloser, error)
 	SnapshotCreate(ctx context.Context, domain, name, description string) error
 	Snapshots(ctx context.Context, domain string) ([]compute.SnapshotInfo, error)
 	SnapshotRevert(ctx context.Context, domain, name string) error
@@ -255,6 +256,14 @@ func (h *dynamicCompute) VMState(ctx context.Context, name string) (string, erro
 func (h *dynamicCompute) Console(ctx context.Context, name string) (io.ReadWriteCloser, error) {
 	if p := h.current(); p != nil {
 		return p.Console(ctx, name)
+	}
+	return nil, errConsoleNotConnected
+}
+
+// VNC 未接入 ⇒ 与 console 同款错误（WebSocket 侧经 handleVNCWS 渲染「VNC 连接失败: …」）。
+func (h *dynamicCompute) VNC(ctx context.Context, name string) (io.ReadWriteCloser, error) {
+	if p := h.current(); p != nil {
+		return p.VNC(ctx, name)
 	}
 	return nil, errConsoleNotConnected
 }

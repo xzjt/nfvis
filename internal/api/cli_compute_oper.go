@@ -274,8 +274,8 @@ func (x *cliExecutor) requestVMSnapshot(user, name string, rest []string) string
 //
 // 控制台形态分派（决策 #485，Task 10）：按该 VM 的**有效控制台形态**（实例覆盖 > 镜像画像 >
 // 产品默认，见 model.EffectiveStartup）分流——
-//   - vnc：内置 VNC 查看器尚未随包提供，**拒绝**并说明（CLI 与 Web 控制台均未随包提供查看器），
-//     给出宿主接入路径（VNC 仅监听 127.0.0.1，用 virsh vncdisplay 查端口后以任意 VNC 客户端接入）；
+//   - vnc：CLI 无图形通道，**拒绝**并指向 Web 控制台的内置查看器（内置 noVNC，Web 侧可用），
+//     另给宿主接入路径（VNC 仅监听 127.0.0.1，用 virsh vncdisplay 查端口后以任意 VNC 客户端接入）；
 //   - telnet：仍走既有 ticket + WS 管线（底层由编排层拨 127.0.0.1 上的 telnet TCP 串口）；
 //   - serial（缺省）：既有 pty 串口，行为不变。
 func (x *cliExecutor) requestVMConsole(user, name string, confirmed bool) string {
@@ -290,13 +290,13 @@ func (x *cliExecutor) requestVMConsole(user, name string, confirmed bool) string
 	}
 	// vnc 的拒绝先于装配检查：形态是**配置事实**，与 libvirt 是否接入无关——
 	// 装了也不该给 vnc VM 签发一个连上就断的串口凭证。
-	// 文案与 Web 侧同一事实：**内置 VNC 查看器尚未随包提供**，给出可照做的宿主接入路径
-	// （VNC 仅监听本机回环），不指向一个不可用的查看器。
+	// 文案与 Web 侧同一事实：CLI 无图形通道；**内置 VNC 查看器在 Web 控制台提供**（该 VM 详情页
+	// 「串口」分栏，点连接即由内置 noVNC 打开）；亦给出宿主接入路径（VNC 仅监听本机回环）。
 	form := consoleFormOf(vm, cfg.VMImageProfiles)
 	if form == ConsoleKindVNC {
-		return "%% 该 VNF 使用 VNC 图形控制台，CLI 无法显示图形界面（CLI 与 Web 控制台均未随包提供 VNC 查看器）。" +
-			"VNC 服务仅监听本机回环（127.0.0.1），端口由 libvirt 自动分配——有宿主访问权限时，" +
-			"用 virsh vncdisplay " + name + " 查到端口后以任意 VNC 客户端接入。\n"
+		return "%% 该 VNF 使用 VNC 图形控制台，CLI 无法显示图形界面；请在 Web 控制台用内置 VNC 查看器接入" +
+			"（打开该 VNF 详情页的「串口」分栏，点「连接」）。VNC 服务仅监听本机回环（127.0.0.1），" +
+			"有宿主访问权限时也可用 virsh vncdisplay " + name + " 查到端口后以任意 VNC 客户端接入。\n"
 	}
 	if x.console == nil {
 		return "%% 串口 console 不可用（libvirt 未装配）\n"

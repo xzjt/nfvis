@@ -24,6 +24,8 @@ type libvirtAPI interface {
 	SetAutostart(ctx context.Context, name string, autostart bool) error
 	// OpenConsole 打开域串口双向流（FR-CMP-014）。
 	OpenConsole(ctx context.Context, name string) (io.ReadWriteCloser, error)
+	// OpenVNC 打开域 VNC 图形控制台的 TCP 连接（决策 #485/Task 8；仅回环）。
+	OpenVNC(ctx context.Context, name string) (io.ReadWriteCloser, error)
 	// DumpDomainXML 返回域 XML（快照需据此取磁盘 target）。
 	DumpDomainXML(ctx context.Context, name string) (string, error)
 	// 快照（FR-CMP-015）：内部 qcow2 快照，含全部磁盘。

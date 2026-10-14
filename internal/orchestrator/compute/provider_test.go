@@ -178,6 +178,14 @@ func (m *mockLibvirt) OpenConsole(_ context.Context, name string) (io.ReadWriteC
 	return nopConsole{}, nil
 }
 
+// OpenVNC 同 OpenConsole（单测验证 Provider.VNC 的状态前置条件）。
+func (m *mockLibvirt) OpenVNC(_ context.Context, name string) (io.ReadWriteCloser, error) {
+	if !m.present[name] {
+		return nil, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+	}
+	return nopConsole{}, nil
+}
+
 type nopConsole struct{}
 
 func (nopConsole) Read([]byte) (int, error)    { return 0, io.EOF }
@@ -524,6 +532,28 @@ func TestStartVM_IdempotentAndNotFound(t *testing.T) {
 	}
 	if err := p.StartVM(context.Background(), "ghost"); err == nil {
 		t.Fatal("未定义应报错")
+	}
+}
+
+// 决策 #485：Provider.VNC 与 Console 同构的状态前置——运行中可打开，未定义/未运行如实报错。
+func TestProviderVNCStateGate(t *testing.T) {
+	p, _, _ := newRunningProvider("fw-vm")
+	stream, err := p.VNC(context.Background(), "fw-vm")
+	if err != nil || stream == nil {
+		t.Fatalf("运行中的 VM 应能打开 VNC: %v", err)
+	}
+	_ = stream.Close()
+
+	if _, err := p.VNC(context.Background(), "ghost"); err == nil {
+		t.Fatal("未定义的 VM 应报错")
+	}
+
+	api := newMockLibvirt()
+	api.present["off-vm"] = true
+	api.states["off-vm"] = domShutoff
+	p2 := newTestProvider(api, newMockStorage(), nil)
+	if _, err := p2.VNC(context.Background(), "off-vm"); err == nil {
+		t.Fatal("未运行的 VM 应报错（VNC 端口未分配）")
 	}
 }
 

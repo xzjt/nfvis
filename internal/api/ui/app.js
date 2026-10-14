@@ -4386,8 +4386,10 @@ function renderVMDetail(d, params) {
   // 列表数据用路由表预取的这一份，不重复请求（点「刷新」才重新拉）。
   vmSnapOpen(name, snaps);
   renderVMStats([{ name }], { [name]: ok ? vm.statistics : null }, 'vmd-stat');
-  // 串口 Tab 的连接按钮：未启用串口的 VM 不给连（服务端也会拒绝，这里只是别让人白点）。
-  termNoSerial = !!(vm && vm.serial_console === false);
+  // 串口 Tab 的连接按钮：未启用串口且非显式 VNC 控制台的 VM 不给连
+  // （服务端也会拒绝，这里只是别让人白点）；显式设 console=vnc 时该 VM 走内置 VNC 查看器，照样可连。
+  const vncConsole = !!(vm && vm.startup && vm.startup.console === 'vnc');
+  termNoSerial = !!(vm && vm.serial_console === false && !vncConsole);
   vmConsoleSyncBtn();
   vmTabShow(vmTab); // 重渲染后保持当前 Tab（默认概览）
 }
@@ -4527,14 +4529,19 @@ async function vmSnapCreate() {
 // 终端状态：WebSocket 与当前 VM 名（同一时刻只连一台，避免误操作）。
 let termWS = null;
 let termVM = '';
+// 当前会话是否为 VNC 图形查看器（决策 #485）：断开路径与按钮状态随之分派。
+let termVNC = false;
+// 关闭 VNC 时抑制 disconnect 回调里的提示（是我们主动关的，不是异常断开）。
+let vncClosing = false;
 // 当前 VM 是否未启用串口（模型里 serial_console=false）：连接按钮随之禁用——
 // 与列表页原来"未启用就不显示串口按钮"同一口径，只是这里说得出原因。
 let termNoSerial = false;
 
-// 连接按钮跟着真实状态走（连着、或该 VM 没启用串口，都禁用——点了只会得到一句解释）。
+// 连接按钮跟着真实状态走（连着 VNC/串口、或该 VM 没启用串口且非显式 VNC，都禁用）。
 function vmConsoleSyncBtn() {
   const b = $('vm-console-connect');
-  if (b) b.disabled = !!termWS || termNoSerial;
+  const vncOpen = !!(window.nfvisVnc && window.nfvisVnc.isOpen());
+  if (b) b.disabled = !!termWS || vncOpen || termNoSerial;
 }
 
 // 串口输出含 ANSI 转义（颜色/光标），去掉后按纯文本渲染（不引入终端模拟器）。
@@ -4557,7 +4564,9 @@ function termMsg(text, isErr) {
 }
 
 async function vmConsoleOpen(name) {
-  if (termWS) { termMsg('先断开当前 console（' + termVM + '）。', true); return; }
+  if (termWS || (window.nfvisVnc && window.nfvisVnc.isOpen())) {
+    termMsg('先断开当前 console（' + termVM + '）。', true); return;
+  }
   $('vm-console').hidden = false;
   $('vm-console-name').textContent = name;
   $('vm-console-out').textContent = '';
@@ -4569,15 +4578,15 @@ async function vmConsoleOpen(name) {
     termMsg('申请凭证失败：' + e.message, true);
     return;
   }
-  // 控制台形态分派（决策 #485，Task 10）：vnc 是图形控制台，服务端不签发串口 ticket——
-  // 文本串口管线不适用。内置 VNC 查看器尚未随包提供，故如实告知并给出可照做的路径
-  // （VNC 仅监听本机回环，有宿主访问权限时用任意 VNC 客户端接入），不伪装成串口连接。
+  // 控制台形态分派（决策 #485）：vnc 是图形控制台，服务端在 /console 端点不签发串口 ticket——
+  // 文本串口管线不适用，改走 Web 内置 noVNC 查看器（另换一次性 ticket，见下面 vmConsoleOpenVNC）。
   if (res && res.kind === 'vnc') {
-    termMsg('该虚拟机使用 VNC 图形控制台，文本串口终端无法显示。内置 VNC 查看器尚未随包提供；' +
-      'VNC 服务仅监听本机回环（127.0.0.1），端口由 libvirt 自动分配——有宿主访问权限时，' +
-      '用 virsh vncdisplay ' + name + ' 查到端口后以任意 VNC 客户端接入。', true);
+    await vmConsoleOpenVNC(name);
     return;
   }
+  // 文本串口（serial/telnet）：切回文本显示（清掉可能留着的 VNC 视图）。
+  termVNC = false;
+  vmConsoleShowText();
   const wsURL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + res.ws_url;
   try {
     termWS = new WebSocket(wsURL);
@@ -4596,8 +4605,76 @@ async function vmConsoleOpen(name) {
   $('vm-console-in').focus();
 }
 
+// vmConsoleOpenVNC 打开内置 noVNC 查看器：向 /console/vnc 换一次性 ticket，再让 vncview.js
+// （window.nfvisVnc）把 WS 桥接到该 VM 的 VNC 服务（127.0.0.1:<port>，域 XML 里的实际端口）。
+async function vmConsoleOpenVNC(name) {
+  if (!window.nfvisVnc) {
+    termMsg('内置 VNC 查看器脚本未加载（novnc/vncview.js 未就绪）。', true);
+    return;
+  }
+  let ticket;
+  try {
+    ticket = await api('/virtual-machine-functions/' + encodeURIComponent(name) + '/console/vnc', { method: 'POST' });
+  } catch (e) {
+    termMsg('申请 VNC 凭证失败：' + e.message, true);
+    return;
+  }
+  if (!ticket || !ticket.ws_url) {
+    termMsg('服务端未返回 VNC 连接地址（该 VM 的控制台形态可能不是 VNC）。', true);
+    return;
+  }
+  termVNC = true;
+  termVM = name;
+  vmConsoleShowVNC();
+  vmConsoleSyncBtn();
+  const wsURL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + ticket.ws_url;
+  window.nfvisVnc.open(wsURL, $('vm-vnc-view'), {
+    onConnect: () => termMsg('已连接 ' + name + ' 的 VNC 图形控制台（鼠标/键盘直接作用于 guest）。', false),
+    onError: (e) => termMsg('VNC 连接失败：' + (e && e.message ? e.message : e), true),
+    onDisconnect: (d) => {
+      const clean = !!(d && d.clean);
+      termVNC = false; termVM = '';
+      vmConsoleSyncBtn();
+      if (vncClosing) { vncClosing = false; return; }
+      termMsg(clean ? 'VNC 连接已关闭。'
+        : 'VNC 连接已断开（凭证过期、VM 未运行或 VNC 服务不可达）。', !clean);
+    },
+  });
+}
+
+// 文本串口显示：显示输出与输入行，隐藏 VNC 视图；同步标题文案。
+function vmConsoleShowText() {
+  const out = $('vm-console-out'); if (out) out.hidden = false;
+  const io = $('vm-console-io'); if (io) io.hidden = false;
+  const v = $('vm-vnc-view'); if (v) v.hidden = true;
+  vmConsoleTitle('串口 console ');
+}
+
+// VNC 图形显示：隐藏文本输出与输入行，显示 VNC 视图；同步标题文案。
+function vmConsoleShowVNC() {
+  const out = $('vm-console-out'); if (out) out.hidden = true;
+  const io = $('vm-console-io'); if (io) io.hidden = true;
+  const v = $('vm-vnc-view'); if (v) v.hidden = false;
+  vmConsoleTitle('VNC 图形控制台 ');
+}
+
+// 改 `#vm-console` 内 <h3> 的首个文本节点（保留其后的名字 span 与断开按钮）。
+function vmConsoleTitle(text) {
+  const box = $('vm-console');
+  if (!box) return;
+  const h3 = box.querySelector('h3');
+  if (h3 && h3.firstChild && h3.firstChild.nodeType === 3) {
+    h3.firstChild.nodeValue = text;
+  }
+}
+
 function vmConsoleClose() {
   if (termWS) { termWS.close(); termWS = null; termVM = ''; }
+  if (window.nfvisVnc && window.nfvisVnc.isOpen()) {
+    vncClosing = true;
+    window.nfvisVnc.close();
+  }
+  termVNC = false;
   vmConsoleSyncBtn();
   const box = $('vm-console');
   if (box) box.hidden = true;

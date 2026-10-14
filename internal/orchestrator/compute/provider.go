@@ -630,6 +630,22 @@ func (p *Provider) Console(ctx context.Context, name string) (io.ReadWriteCloser
 	return p.api.OpenConsole(ctx, name)
 }
 
+// VNC 打开 VM VNC 图形控制台的 TCP 流（决策 #485/Task 8；Web 内置查看器经此接入）。
+// 前置与 Console 同构：须域存在且运行中（VNC 端口由 libvirt 在域运行后分配，未运行取不到）。
+func (p *Provider) VNC(ctx context.Context, name string) (io.ReadWriteCloser, error) {
+	state, exists, err := p.api.State(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("%w: %s", orchestrator.ErrVMNotFound, name)
+	}
+	if !isActiveState(state) {
+		return nil, fmt.Errorf("VM %s 未运行，VNC 控制台不可用（当前 %s）", name, VMStateFromLibvirt(state))
+	}
+	return p.api.OpenVNC(ctx, name)
+}
+
 // reconcileImageProfileAlarms 孤儿画像对账（决策 #485）：配置里有画像、镜像仓库却没有它指向的
 // 镜像 ⇒ 该画像静默失效（受影响的 VM 在下一次定义时回落产品默认），报 `VM_IMAGE_PROFILE_ORPHAN`
 // （warning，source = vm-image-profile/<镜像名>）。

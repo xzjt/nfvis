@@ -60,3 +60,29 @@ func (c *Conn) OpenConsole(ctx context.Context, name string) (io.ReadWriteCloser
 	}
 	return f, nil
 }
+
+// OpenVNC 打开域 VNC 图形控制台的 TCP 连接（决策 #485/Task 8；Web 内置查看器经此接入）。
+//
+// 控制台形态 vnc 时，域挂 `<graphics type='vnc' listen='127.0.0.1'>`；运行后 libvirt 会给出
+// **实际端口**（`port='5900'`）。本函数从**运行中的域 XML** 读出「监听在哪」再拨号——
+// 与 OpenConsole 的 telnet 分支同一手法、同一事实源（域 XML）。VNC 服务仅监听回环，
+// 故拨号目标恒为本机；rfbserver 层无认证时首个字节即协议握手，字节流双向透传。
+func (c *Conn) OpenVNC(ctx context.Context, name string) (io.ReadWriteCloser, error) {
+	xml, err := c.DumpXML(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	addr, ok, aerr := VNCTCPAddr(xml)
+	if aerr != nil {
+		return nil, fmt.Errorf("VM %s: %w", name, aerr)
+	}
+	if !ok {
+		return nil, fmt.Errorf("VM %s 未配置 VNC 图形控制台", name)
+	}
+	d := net.Dialer{Timeout: 5 * time.Second}
+	conn, derr := d.DialContext(ctx, "tcp", addr)
+	if derr != nil {
+		return nil, fmt.Errorf("连接 VM %s 的 VNC 服务 %s: %w", name, addr, derr)
+	}
+	return conn, nil
+}

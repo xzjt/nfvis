@@ -474,7 +474,7 @@ func TestCLIRequestVMConsoleIssuesTicket(t *testing.T) {
 }
 
 // 控制台形态分派（决策 #485）：镜像画像把有效控制台设为 vnc 时，CLI `console`
-// 必须拒绝并说明「无内置 VNC 查看器 + 宿主接入路径」——CLI 没有图形通道，不能签发一个连上就断的串口凭证。
+// 必须拒绝并指向 Web 控制台内置查看器（CLI 没有图形通道，不能签发一个连上就断的串口凭证）。
 func TestConsoleCommandRejectsVNC(t *testing.T) {
 	x, _ := newCLIKit(t)
 	run(t, x, "admin", aaa.ClassSuperUser, "ssh",

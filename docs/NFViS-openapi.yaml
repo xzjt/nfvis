@@ -814,11 +814,11 @@ paths:
         按该 VM 的**有效控制台形态**（实例 startup 覆盖 > 镜像画像 > 产品默认，决策 #485）分派：
         - `serial`/`telnet`：签发一次性 ticket，返回 `ws_url`（文本串口 WebSocket 桥接；telnet
           底层拨域里仅回环的 `<serial type='tcp'>` 端口）；
-        - `vnc`：VNC 是图形控制台，文本串口 WS 不适用；**内置 VNC 查看器尚未随包提供**——
-          **不签发 ticket**，只回 `kind: vnc`。有宿主访问权限时用 `virsh vncdisplay <name>`
-          查端口后以任意 VNC 客户端接入。
-        响应里的 `kind` 即该形态，供前端选择处理：`serial`/`telnet` 走文本串口管线；`vnc` 无内置
-        查看器，前端仅提示上述宿主接入路径。
+        - `vnc`：VNC 是图形控制台，**不在此端点签发文本串口 ticket**，只回 `kind: vnc`。前端据此
+          改走 `POST .../console/vnc` 换 VNC 查看器的一次性 ticket（Web 控制台内置 noVNC 查看器）；
+          宿主也可用 `virsh vncdisplay <name>` 查端口后以任意 VNC 客户端接入。
+        响应里的 `kind` 即该形态，供前端选择处理：`serial`/`telnet` 走文本串口管线；`vnc` 改走
+        VNC 图形查看器（见 `.../console/vnc`）。
       responses:
         "200":
           description: OK
@@ -832,13 +832,55 @@ paths:
                   kind:
                     type: string
                     enum: [serial, telnet, vnc]
-                    description: 有效控制台形态；`vnc` 时不带 `ws_url`（图形控制台，内置查看器尚未随包提供：VNC 仅监听 127.0.0.1，有宿主访问权限时用 `virsh vncdisplay` 查端口后以任意 VNC 客户端接入）
+                    description: 有效控制台形态；`vnc` 时不带 `ws_url`（图形控制台改走 POST .../console/vnc 的内置 noVNC 查看器）
         "404": { $ref: "#/components/responses/Error404" }
         "409":
           description: VM 未启用串口（serial_console=false）
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+  /virtual-machine-functions/{name}/console/vnc:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [virtual-machine-functions]
+      summary: 申请 VNC 图形查看器访问凭证（一次性 ticket；Web 内置 noVNC）
+      description: |
+        仅当该 VM 的**有效控制台形态**为 `vnc` 时签发一次性 ticket，返回 `ws_url`——Web 控制台内置的
+        noVNC 查看器（`vncview.js`）经它连入 `.../console/vnc/ws`。形态不是 vnc 时 **409** 并点名实际
+        形态。与串口 console 凭证端点**同权限档**（super-user，需 Bearer）；ticket 与串口/容器
+        **资源键隔离**（`vnc/` 前缀）——一个 vnc ticket 开不了串口 WS，反之亦然。VNC 服务仅监听本机
+        回环（`127.0.0.1`）。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ws_url: { type: string, example: "/api/v1/virtual-machine-functions/fw-vm/console/vnc/ws?ticket=..." }
+                  expires_in: { type: integer, description: ticket 有效期（秒） }
+                  kind: { type: string, enum: [vnc] }
+        "404": { $ref: "#/components/responses/Error404" }
+        "409":
+          description: 该 VM 的控制台形态不是 VNC
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /virtual-machine-functions/{name}/console/vnc/ws:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+      - name: ticket
+        in: query
+        required: true
+        schema: { type: string }
+        description: POST .../console/vnc 返回的一次性凭证（WebSocket 握手无法带 Bearer Token，故以 ticket 鉴权）
+    get:
+      tags: [virtual-machine-functions]
+      summary: VNC 图形查看器 WebSocket（与 VM 的 VNC 服务双向透传；打开/关闭入审计）
+      responses:
+        "101": { description: 协议切换为 WebSocket }
+        "401": { $ref: "#/components/responses/Error401" }
   /virtual-machine-functions/{name}/console/ws:
     parameters:
       - { name: name, in: path, required: true, schema: { type: string } }
@@ -4048,7 +4090,7 @@ components:
         disk_interface: { type: string, enum: [virtio, sata, ide, scsi], description: 缺省 virtio }
         boot_order: { type: string, enum: [hd, cd, dc], description: 缺省 hd }
         accel: { type: string, enum: [kvm, tcg], description: 缺省 kvm }
-        console: { type: string, enum: [serial, telnet, vnc], description: 缺省 serial；vnc：内置查看器尚未随包提供（VNC 仅监听 127.0.0.1，有宿主访问权限时用 `virsh vncdisplay` 查端口后以任意 VNC 客户端接入） }
+        console: { type: string, enum: [serial, telnet, vnc], description: 缺省 serial；vnc：Web 控制台内置 noVNC 查看器（POST .../console/vnc 换 ticket），VNC 仅监听 127.0.0.1，宿主也可用 `virsh vncdisplay` 查端口后以任意 VNC 客户端接入 }
         extra_args:
           type: array
           items: { type: string }

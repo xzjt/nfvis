@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -79,9 +80,23 @@ func (f *fakeConsoleStream) Close() error {
 	return nil
 }
 
-type fakeConsoleRuntime struct{ stream *fakeConsoleStream }
+type fakeConsoleRuntime struct {
+	stream    *fakeConsoleStream
+	vncStream *fakeConsoleStream // nil ⇒ 复用 stream
+	vncErr    error
+}
 
 func (f *fakeConsoleRuntime) Console(context.Context, string) (io.ReadWriteCloser, error) {
+	return f.stream, nil
+}
+
+func (f *fakeConsoleRuntime) VNC(context.Context, string) (io.ReadWriteCloser, error) {
+	if f.vncErr != nil {
+		return nil, f.vncErr
+	}
+	if f.vncStream != nil {
+		return f.vncStream, nil
+	}
 	return f.stream, nil
 }
 
@@ -182,6 +197,169 @@ func TestConsoleTicketVNCNoTicket(t *testing.T) {
 	u := "ws" + strings.TrimPrefix(ts.URL, "http") + APIPrefix + "/virtual-machine-functions/fw-vm/console/ws?ticket=bogus"
 	if _, err := websocket.Dial(u, "", ts.URL); err == nil {
 		t.Fatal("vnc 未签发 ticket，console WS 握手应失败")
+	}
+}
+
+// 决策 #485：VNC 图形查看器凭证端点（POST .../console/vnc）+ WS 代理。
+// 覆盖：ticket 签发/消费、WS↔VNC 字节双向桥接、形态不符 409、VM 不存在 404、
+// 以及**跨资源隔离**（vnc ticket 开不了串口 console，串口 ticket 开不了 vnc）。
+func TestConsoleVNCTicketAndIsolation(t *testing.T) {
+	fc := &fakeConsoleRuntime{stream: newFakeConsoleStream("RFB 003.008\n")}
+	ts := newTestServerOpts(t, Options{VM: newFakeVM(), VMConsole: fc})
+	token := loginAdmin(t, ts)
+	seedVMPool(t, ts, token)
+
+	// vnc VM（实例级 startup 覆盖）与一台缺省 serial VM（用于隔离对照）。
+	vbody := vmBody("vnc-vm")
+	vbody["startup"] = map[string]any{"console": "vnc"}
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		vbody, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("建 vnc VM: %d %s", status, data)
+	}
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		vmBody("ser-vm"), map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("建 serial VM: %d %s", status, data)
+	}
+
+	// 形态不符（serial VM 申请 vnc 凭证）→ 409。
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions/ser-vm/console/vnc", token, nil, nil); status != http.StatusConflict {
+		t.Fatalf("非 vnc VM 应 409: %d %s", status, data)
+	}
+	// VM 不存在 → 404。
+	if status, _, _ := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions/ghost/console/vnc", token, nil, nil); status != http.StatusNotFound {
+		t.Fatalf("VM 不存在应 404: %d", status)
+	}
+
+	// vnc ticket 签发。
+	status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions/vnc-vm/console/vnc", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("vnc 凭证应 200: %d %s", status, data)
+	}
+	var got struct {
+		WSURL     string `json:"ws_url"`
+		ExpiresIn int    `json:"expires_in"`
+		Kind      string `json:"kind"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil || got.WSURL == "" || got.ExpiresIn <= 0 || got.Kind != "vnc" {
+		t.Fatalf("vnc 凭证响应不符: %s", data)
+	}
+	vncTicket := got.WSURL[strings.Index(got.WSURL, "ticket=")+len("ticket="):]
+
+	// WS 桥接：读到 VNC 服务问候，写入到达 VNC 流（字节原样透传）。
+	vwsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + got.WSURL
+	conn, err := websocket.Dial(vwsURL, "", ts.URL)
+	if err != nil {
+		t.Fatalf("vnc ws 连接失败: %v", err)
+	}
+	buf := make([]byte, len("RFB 003.008\n"))
+	if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "RFB 003.008\n" {
+		t.Fatalf("应读到 VNC 问候: %q err=%v", buf, err)
+	}
+	if _, err := conn.Write([]byte("RFB 003.008\n")); err != nil {
+		t.Fatalf("写入 vnc 流: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if w := fc.stream.wrote.String(); !strings.Contains(w, "RFB 003.008\n") {
+		t.Fatalf("字节应到达 VNC 流: %q", w)
+	}
+	_ = conn.Close()
+
+	// 串口 ticket（对照）：同 VM 名也开不了 vnc——资源键前缀隔离。
+	_, _, sdata := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions/ser-vm/console", token, nil, nil)
+	var sgot struct {
+		WSURL string `json:"ws_url"`
+	}
+	if err := json.Unmarshal(sdata, &sgot); err != nil || sgot.WSURL == "" {
+		t.Fatalf("serial 凭证响应不符: %s", sdata)
+	}
+	serialTicket := sgot.WSURL[strings.Index(sgot.WSURL, "ticket=")+len("ticket="):]
+
+	// 隔离①：vnc ticket 拿去开**串口** console WS（同 VM 名 vnc-vm）应 401。
+	if _, err := websocket.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+APIPrefix+
+		"/virtual-machine-functions/vnc-vm/console/ws?ticket="+vncTicket, "", ts.URL); err == nil {
+		t.Fatal("vnc ticket 不应能开串口 console（资源键应隔离）")
+	}
+	// 隔离②：串口 ticket 拿去开 **vnc** WS 应 401。
+	if _, err := websocket.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+APIPrefix+
+		"/virtual-machine-functions/ser-vm/console/vnc/ws?ticket="+serialTicket, "", ts.URL); err == nil {
+		t.Fatal("串口 ticket 不应能开 vnc（资源键应隔离）")
+	}
+
+	// 审计：vnc 打开/关闭各一条 vm.vnc。
+	status, _, data = cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/audit-logs?limit=50", token, nil, nil)
+	if status != http.StatusOK || !strings.Contains(string(data), "vm.vnc") {
+		t.Fatalf("审计应含 vm.vnc: %d %s", status, data)
+	}
+}
+
+// tcpDialConsoleRuntime VNC 侧拨一个**真实 TCP 监听**（模拟域 VNC 服务就在 127.0.0.1:<port>）；
+// 用来把 WS↔VNC 代理跑在真 socket 上，而不是内存流假件。
+type tcpDialConsoleRuntime struct{ addr string }
+
+func (r *tcpDialConsoleRuntime) Console(context.Context, string) (io.ReadWriteCloser, error) {
+	return net.Dial("tcp", r.addr)
+}
+func (r *tcpDialConsoleRuntime) VNC(context.Context, string) (io.ReadWriteCloser, error) {
+	return net.Dial("tcp", r.addr)
+}
+
+// 决策 #485：WS 代理对**真实 TCP 监听**双向透传——服务端先发 VNC 问候，客户端写入回环抵达 TCP 侧。
+func TestConsoleVNCWSProxyToTCPListener(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听: %v", err)
+	}
+	defer ln.Close()
+
+	got := make(chan string, 1)
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer c.Close()
+		_, _ = c.Write([]byte("RFB-TCP-LISTENER\n"))
+		buf := make([]byte, 64)
+		n, _ := c.Read(buf)
+		got <- string(buf[:n])
+	}()
+
+	ts := newTestServerOpts(t, Options{VM: newFakeVM(), VMConsole: &tcpDialConsoleRuntime{addr: ln.Addr().String()}})
+	token := loginAdmin(t, ts)
+	seedVMPool(t, ts, token)
+	vbody := vmBody("vnc-vm")
+	vbody["startup"] = map[string]any{"console": "vnc"}
+	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions", token,
+		vbody, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusCreated {
+		t.Fatalf("建 vnc VM: %d %s", status, data)
+	}
+	_, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/virtual-machine-functions/vnc-vm/console/vnc", token, nil, nil)
+	var got2 struct {
+		WSURL string `json:"ws_url"`
+	}
+	if err := json.Unmarshal(data, &got2); err != nil || got2.WSURL == "" {
+		t.Fatalf("vnc 凭证响应不符: %s", data)
+	}
+
+	conn, err := websocket.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+got2.WSURL, "", ts.URL)
+	if err != nil {
+		t.Fatalf("ws 连接失败: %v", err)
+	}
+	defer conn.Close()
+	buf := make([]byte, len("RFB-TCP-LISTENER\n"))
+	if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "RFB-TCP-LISTENER\n" {
+		t.Fatalf("应读到 TCP 监听端的问候: %q err=%v", buf, err)
+	}
+	if _, err := conn.Write([]byte("PING-FROM-WS")); err != nil {
+		t.Fatalf("写入: %v", err)
+	}
+	select {
+	case s := <-got:
+		if s != "PING-FROM-WS" {
+			t.Fatalf("TCP 侧应收到 WS 写入，得到 %q", s)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("TCP 侧未收到 WS 写入（代理未双向透传）")
 	}
 }
 
