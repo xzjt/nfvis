@@ -798,7 +798,7 @@ set startup                                          # 实例级启动画像覆�
   ├─ disk-interface <iface>                          # virtio|sata|ide|scsi
   ├─ boot-order <order>                              # hd|cd|dc
   ├─ accel <type>                                    # kvm|tcg
-  ├─ console <type>                                  # serial|telnet|vnc（vnc 仅 Web；CLI console 拒绝并指向 Web）
+  ├─ console <type>                                  # S；serial|telnet|vnc（vnc 仅 Web；CLI console 拒绝并指向 Web）
   └─ extra-args <arg>                                # S；可多条；命中 denylist 提交期拒绝
 delete startup [<leaf>]                              # 裸 delete＝清覆盖块；带叶子＝只清该叶子
 set autostart <bool>
@@ -816,7 +816,7 @@ set firmware <type>                                  # bios(默认)|uefi
 set disk-interface <iface>                           # virtio(默认)|sata|ide|scsi
 set boot-order <order>                               # hd(默认)|cd|dc
 set accel <type>                                     # kvm(默认)|tcg
-set console <type>                                   # serial(默认)|telnet|vnc（vnc 仅 Web 可访问，决策 #485）
+set console <type>                                   # S；serial(默认)|telnet|vnc（vnc 仅 Web 可访问，决策 #485）
 set extra-args <arg>                                 # S；可多条；命中 denylist 提交期拒绝；每次使用进 audit
 delete vm-image-profiles <image-name> [<leaf>]       # 裸 delete＝整节删；带叶子＝只清该叶子
 ```
@@ -827,7 +827,7 @@ delete vm-image-profiles <image-name> [<leaf>]       # 裸 delete＝整节删；
 - **`extra-args` 窄自由口**：命中 denylist 即**提交期拒绝**——`-m`/`-mem*`/`-smp`/`-object`/`-numa`（资源账本）、
   `-kernel`/`-initrd`/`-append`（绕过产品磁盘模型）、`-drive`/`-blockdev`（磁盘模型）、
   `-netdev`/`-nic`/`-net`（网络模型）、`-chardev`/`-monitor`/`-qmp`/`-mon`/`-serial`（console/监视器）、
-  `-cpu`/`-machine`/`-boot`/`-device`（有结构化字段，强制走字段）、`-uuid`/`-daemonize`/`-pidfile`/`-S`（身份/进程生命周期）。
+  `-cpu`/`-machine`/`-boot`/`-device`/`-M`（有结构化字段，强制走字段）、`-uuid`/`-daemonize`/`-pidfile`/`-S`（身份/进程生命周期）。
 - **console 形态**：`serial`（默认，既有 pty 管线不变）/ `telnet`（同一 console 管线，底层 pty 换 tcp）/
   `vnc`（`<graphics type='vnc'>`，**仅 Web noVNC**；CLI `console` 对 vnc 明确拒绝并指向 Web）；绑定地址一律 `127.0.0.1`。
 

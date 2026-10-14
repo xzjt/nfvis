@@ -430,7 +430,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set virtual-machine-functions <n> startup disk-interface <iface>` | 实例级覆盖：主盘接口（virtio\|sata\|ide\|scsi） | libvirt | 🔜 契约先行（同上） |
 | `set virtual-machine-functions <n> startup boot-order <order>` | 实例级覆盖：引导顺序（hd\|cd\|dc） | libvirt | 🔜 契约先行（同上） |
 | `set virtual-machine-functions <n> startup accel <type>` | 实例级覆盖：加速器（kvm\|tcg） | libvirt | 🔜 契约先行（同上） |
-| `set virtual-machine-functions <n> startup console <type>` | 实例级覆盖：console 形态（serial\|telnet\|vnc；vnc 仅 Web，CLI `console` 拒绝并指向 Web） | libvirt | 🔜 契约先行（同上） |
+| `set virtual-machine-functions <n> startup console <type>` | 实例级覆盖：console 形态（serial\|telnet\|vnc；vnc 仅 Web，CLI `console` 拒绝并指向 Web）；**S** | libvirt | 🔜 契约先行（同上） |
 | `set virtual-machine-functions <n> startup extra-args <arg>` | 实例级覆盖：额外 QEMU 参数（窄自由口；可多条；命中 denylist 提交期拒绝；**S**；绕过资源账本） | libvirt（qemu:commandline） | 🔜 契约先行（同上） |
 | `delete virtual-machine-functions <n> startup [<leaf>]` | 清除实例级启动画像覆盖（裸 delete＝整块；带叶子＝只清该叶子） | libvirt | 🔜 契约先行（同上） |
 | `set virtual-machine-functions <n> pci-device <bdf>` | 通用 PCI 直通设备（BDF，可多条、追加语义；同值幂等；FR-CMP-023） | libvirt（hostdev） | ✅（真机（round165）：一次性 VNF 只 define 不 start——hostdev 逐字对/去声明消失/双拒；**实际直通端到端未验**（宿主无 IOMMU 直通能力，如实登记）——`docs/evidence/v2-round165-d384-pci-passthrough.txt`） |
@@ -464,7 +464,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set vm-image-profiles <image> disk-interface <iface>` | 主盘接口（virtio\|sata\|ide\|scsi；缺省 virtio） | libvirt | 🔜 契约先行（同上） |
 | `set vm-image-profiles <image> boot-order <order>` | 引导顺序（hd\|cd\|dc；缺省 hd） | libvirt | 🔜 契约先行（同上） |
 | `set vm-image-profiles <image> accel <type>` | 加速器（kvm\|tcg；缺省 kvm） | libvirt | 🔜 契约先行（同上） |
-| `set vm-image-profiles <image> console <type>` | console 形态（serial\|telnet\|vnc；缺省 serial；vnc 仅 Web 可访问，CLI `console` 拒绝并指向 Web） | libvirt | 🔜 契约先行（同上） |
+| `set vm-image-profiles <image> console <type>` | console 形态（serial\|telnet\|vnc；缺省 serial；vnc 仅 Web 可访问，CLI `console` 拒绝并指向 Web）；**S** | libvirt | 🔜 契约先行（同上） |
 | `set vm-image-profiles <image> extra-args <arg>` | 额外 QEMU 参数（窄自由口；可多条；命中 denylist 提交期拒绝；**S**；绕过资源账本） | libvirt（qemu:commandline） | 🔜 契约先行（同上） |
 | `delete vm-image-profiles <image> [<leaf>]` | 删除画像（裸 delete＝整节；带叶子＝只清该叶子） | 配置库 | 🔜 契约先行（同上） |
 
