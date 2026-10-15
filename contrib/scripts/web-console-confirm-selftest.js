@@ -148,6 +148,13 @@ function makeDom() {
       tagName: String(tag).toUpperCase(),
       attrs: {}, listeners: {}, children: [],
       value: '', className: '', hidden: false, disabled: false, parent: null, _text: '',
+      // classList 最小实现（拆分后的视图代码用 classList.toggle 切错误态，如 depMsg）。
+      classList: {
+        add(...cs) { const s = new Set(this._owner.className.split(/\s+/).filter(Boolean)); cs.forEach((c) => s.add(c)); this._owner.className = [...s].join(' '); },
+        remove(...cs) { const s = new Set(this._owner.className.split(/\s+/).filter(Boolean)); cs.forEach((c) => s.delete(c)); this._owner.className = [...s].join(' '); },
+        toggle(c, force) { const s = new Set(this._owner.className.split(/\s+/).filter(Boolean)); const has = s.has(c); const want = force === undefined ? !has : !!force; if (want) s.add(c); else s.delete(c); this._owner.className = [...s].join(' '); return want; },
+        contains(c) { return this._owner.className.split(/\s+/).includes(c); },
+      },
       appendChild(c) { this.children.push(c); c.parent = this; register(c); return c; },
       insertBefore(c) { return this.appendChild(c); },
       removeChild(c) {
@@ -182,6 +189,7 @@ function makeDom() {
         this._text = v === undefined || v === null ? '' : String(v);
       },
     };
+    node.classList._owner = node;
     created.push(node);
     return node;
   }
@@ -392,6 +400,18 @@ const ACTIONS = [
     pre: (ctx) => { nodeOf(ctx, 'ops-export-url').value = 'http://192.0.2.10:8080/collect'; } },
   { id: 'diag-clear-btn', title: '清零接口统计', tier: 'low', cli: /clear interfaces statistics$/,
     req: { method: 'POST', url: /\/interfaces:clear-statistics$/ } },
+  { id: 'dep-submit', title: '部署 虚拟机 dep-web-1', tier: 'low', cli: /set virtual-machine-functions dep-web-1 /,
+    req: { method: 'POST', url: /\/virtual-machine-functions$/ },
+    pre: (ctx) => {
+      // 向导的状态在 js/views/deploy.js：pre 里直接置 Kind（拼接域同作用域）。
+      vm.runInContext('depKind = "vm"', ctx);
+      vm.runInContext('depData = { images: [{ name: "alpine" }], profiles: [], vss: [{ name: "vs-l3" }], pools: null, hp: null }', ctx);
+      nodeOf(ctx, 'dep-name').value = 'dep-web-1';
+      nodeOf(ctx, 'dep-image').value = 'alpine';
+      nodeOf(ctx, 'dep-vcpu').value = '1';
+      nodeOf(ctx, 'dep-mem').value = '1024';
+      nodeOf(ctx, 'dep-disk-mode').value = 'image';
+    } },
   { id: 'cfg-discard-btn', title: '丢弃并结束编辑', tier: 'low', cli: /^对应命令（只读回显，便于工单对照）：discard$/,
     req: { method: 'DELETE', url: /\/configuration\/candidate$/ },
     pre: (ctx) => { vm.runInContext('cfg.editing = true', ctx); } },
