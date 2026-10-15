@@ -25,6 +25,7 @@ type uiRoute struct {
 	View       string   `json:"view"`
 	Detail     bool     `json:"detail"`
 	Breadcrumb []string `json:"breadcrumb"`
+	Group      string   `json:"group"`
 	Endpoints  []string `json:"endpoints"`
 	Poll       int      `json:"poll"`
 	Write      bool     `json:"write"`
@@ -83,6 +84,30 @@ func TestUIRoutesAreConsistent(t *testing.T) {
 	}
 	if !seen["#/"] {
 		t.Error("缺少总览路由 #/（未知路由与登录后都要回落到它）")
+	}
+
+	// group 列（Cisco 式左侧树分组）：必填且取值闭合——导航树按它分组渲染，
+	// 拼错/漏填会让该路由在左侧树里消失。
+	groups := map[string]bool{"仪表盘": true, "虚拟机": true, "网络": true, "系统": true, "运维": true}
+	for _, r := range routes {
+		if !groups[r.Group] {
+			t.Errorf("路由 %s 的 group=%q 不在许可集合内（漏填或拼错）", r.Path, r.Group)
+		}
+	}
+	// 部署向导（Cisco VM Life Cycle > Deploy 对应物）：写页（对只读角色隐藏），
+	// 且端点必须都是读端点（写入走该页表单的 POST，不进页面取数声明）。
+	deployFound := false
+	for _, r := range routes {
+		if r.Path != "#/deploy" {
+			continue
+		}
+		deployFound = true
+		if !r.Write {
+			t.Error("部署向导路由必须 write:true（写候选页对只读角色隐藏）")
+		}
+	}
+	if !deployFound {
+		t.Error("routes.json 缺 #/deploy 部署向导路由")
 	}
 
 	// 参数化路由（`#/compute/vms/:name`）的形状：
@@ -187,6 +212,7 @@ func TestUIConsoleRoleGating(t *testing.T) {
 		"#/system/kernel": "内核基线写入/回退",
 		"#/ops/actions":   "运维动作（备份/升级/恢复/重启/关机/恢复出厂）",
 		"#/ops/capture":   "抓包（request capture 为 super-user 级）",
+		"#/deploy":        "部署向导（写候选；POST /virtual-machine-functions|/container-functions）",
 	}
 	got := map[string]bool{}
 	for _, r := range routes {

@@ -1164,6 +1164,10 @@ function renderMhLegend(name, series) {
 //
 // `leave` 可选：离开本页（换页或换对象）时由 router.js 调一次，用于收尾（详情页断开串口）。
 export const VIEWS = {
+  'deploy': {
+    // 部署向导（Task 6 落地分步表单）：先占位保住路由↔视图映射。
+    render(d) { pageWarn(d); },
+  },
   'overview': {
     render(d) {
       pageWarn(d);
@@ -1327,7 +1331,6 @@ function renderEvents() {
 }
 
 // ---------- 内核基线（#/system/kernel）----------
-//
 // 三方对照：**运行实际**（内核命令行与 /proc 读数）、**配置期望**（由已生效配置派生）、
 // **差异**（空 = 一致）。写入与回退都是服务端动作：界面只做入口与确认——不改配置、不重启主机、
 // 不绕过任何护栏（写入前的备份与"期望值从哪来"都由服务端实现决定）。

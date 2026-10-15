@@ -775,6 +775,85 @@
     </article>
     </section>
 
+    <!-- 部署向导（Cisco VM Life Cycle > Deploy 对应物）：分步表单见 js/views/deploy.js。
+         只写候选不代提交——提交在「配置」页复核后进行，与命令行同一管线。 -->
+    <section class="page" id="page-deploy" hidden>
+      <article class="card wide">
+        <h2>部署向导 <span id="dep-step-note" class="muted small"></span></h2>
+        <p class="muted small">分四步生成部署候选：只写候选、不代提交——提交仍在
+          <a href="#/config">配置</a>页复核后进行（与命令行同一管线）。</p>
+        <div id="dep-steps" class="tabs">
+          <button type="button" data-step="1" aria-current="step">① 类型</button>
+          <button type="button" data-step="2" aria-current="step">② 镜像与资源</button>
+          <button type="button" data-step="3" aria-current="step">③ 网络映射</button>
+          <button type="button" data-step="4" aria-current="step">④ 摘要确认</button>
+        </div>
+        <div id="dep-step-1">
+          <div class="dep-type-row">
+            <button type="button" id="dep-type-vm" class="dep-type">虚拟机（VM）</button>
+            <button type="button" id="dep-type-ct" class="dep-type">容器</button>
+          </div>
+        </div>
+        <div id="dep-step-2" hidden>
+          <label for="dep-name">名称</label>
+          <input id="dep-name" autocomplete="off" placeholder="如 vnf-web-1">
+          <label for="dep-image">镜像</label>
+          <select id="dep-image"></select>
+          <p id="dep-image-note" class="muted small"></p>
+          <label for="dep-vcpu">vCPU 数</label>
+          <input id="dep-vcpu" type="number" min="1" value="1">
+          <label for="dep-mem">内存 (MB)</label>
+          <input id="dep-mem" type="number" min="128" value="1024">
+          <p id="dep-pool-note" class="muted small"></p>
+          <!-- VM 专属 -->
+          <div id="dep-vm-only">
+            <label for="dep-disk-mode">磁盘</label>
+            <select id="dep-disk-mode">
+              <option value="image">从镜像克隆（推荐）</option>
+              <option value="empty">空盘</option>
+            </select>
+            <label for="dep-disk-size">空盘容量 (GB)</label>
+            <input id="dep-disk-size" type="number" min="1" value="8">
+            <label><input id="dep-autostart" type="checkbox"> 提交后自动启动</label>
+            <label><input id="dep-serial" type="checkbox" checked> 串口控制台</label>
+          </div>
+          <!-- 容器专属 -->
+          <div id="dep-ct-only" hidden>
+            <label for="dep-cmd">启动命令（可选）</label>
+            <input id="dep-cmd" placeholder="如 /bin/sh -c">
+            <label for="dep-restart">重启策略</label>
+            <select id="dep-restart">
+              <option value="">（缺省）</option><option value="no">no</option><option value="on-failure">on-failure</option>
+            </select>
+          </div>
+          <button type="button" id="dep-next-2" class="ghost">下一步 →</button>
+        </div>
+        <div id="dep-step-3" hidden>
+          <p class="muted small">为每个虚拟网卡选择挂接的虚拟交换机；类型按平台给可选值
+            （VM：vhost-user / sriov-vf；容器：memif）。拓扑预览为静态示意（右侧），不可拖拽。</p>
+          <table id="dep-nic-table">
+            <thead><tr><th>网卡名</th><th>类型</th><th>挂接交换机</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <button type="button" id="dep-add-nic" class="ghost">+ 加一块网卡</button>
+          <div class="dep-topo">
+            <svg id="dep-topo" width="520" height="180" role="img" aria-label="部署拓扑预览"></svg>
+          </div>
+          <button type="button" id="dep-back-3" class="ghost">← 上一步</button>
+          <button type="button" id="dep-next-3" class="ghost">下一步 →</button>
+        </div>
+        <div id="dep-step-4" hidden>
+          <dl id="dep-summary" class="kv"></dl>
+          <p id="dep-msg" class="muted"></p>
+          <!-- 写入候选：data-write（read-only/operator 角色门禁）+ uiConfirm 低危档；
+               只写候选不提交。 -->
+          <button type="button" id="dep-submit" data-write class="primary">写入部署候选</button>
+          <button type="button" id="dep-back-4" class="ghost">← 上一步</button>
+          <pre id="dep-result" class="code console-out" hidden></pre>
+        </div>
+      </article>
+    </section>
+
     <section class="page" id="page-network" hidden>
     <article class="card wide">
       <h2>网络对象 <span class="muted small">（VRF / ACL / NAT / 聚合 / QoS / 端口镜像）</span></h2>
