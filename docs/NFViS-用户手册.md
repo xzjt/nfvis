@@ -2340,7 +2340,8 @@ nfvis$ clear interfaces statistics ens224     # 清零（super-user）
 ```bash
 nfvis$ request capture start interface ens224 count 100      # 开始抓包
 nfvis$ show capture                                          # 会话状态 + 已导出 pcap 清单
-nfvis$ request capture export name my-capture                # 停止并导出（一步到位）
+nfvis$ request capture export                                # 停止并导出（一步到位）
+#   导出文件名由系统按 <接口>-<时间戳> 自动生成（本命令不接受参数）
 # 下载：GET /api/v1/capture/<file>
 nfvis$ request capture stop                                  # 只停止（**数据保留**，随后 export 取走）
 ```

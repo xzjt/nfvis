@@ -317,7 +317,7 @@ func OperRoot() *Node {
 						Opt(K("filter", "ACL 过滤", P("<acl>", "ACL 名", DynAcls))),
 					),
 					K("stop", "停止抓包"),
-					K("export", "导出 pcap 到诊断目录", Opt(K("name", "文件名", PT("<name>", "name", "名称")))),
+					K("export", "导出 pcap 到诊断目录"),
 				),
 			)),
 			// 数据面中立命名（VPP 走 pcap trace、内核走 tcpdump；与 ping/traceroute 的
@@ -329,7 +329,11 @@ func OperRoot() *Node {
 					Opt(K("filter", "ACL 过滤", P("<acl>", "ACL 名", DynAcls))),
 				),
 				K("stop", "停止抓包（不导出）"),
-				K("export", "导出 pcap 到诊断目录（隐含 stop）", Opt(K("name", "文件名", PT("<name>", "name", "名称")))),
+				// 走查收口（round34）：`export` 不接受参数——导出文件名由编排层按
+				// `<接口>-<时间戳>` 自动生成；树里此前的 `name` 叶子是实现从未消费的
+				// 幻影参数（`?`/Tab 会补出来、执行器静默吞掉），已移除并与执行器
+				// 的显式拒绝保持一致。
+				K("export", "导出 pcap 到诊断目录（隐含 stop）"),
 			)),
 			K("system", "系统操作",
 				// 决策 #146：kernel apply/rollback 会改写 GRUB 启动参数（需重启生效）——命令树契约

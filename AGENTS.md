@@ -1822,6 +1822,46 @@
   trap `down` 后现场清空。证据 `docs/evidence/v3-round32-d484-semantic-selfprovision.txt`；语义基线沿革
   `docs/v3已做.md` §五（**29/0/2 → 33/0/0**）。**如实边界**：S10-4 偶发（纯 REST 锁语义项、与本次现场无关，
   三次里一次，非本轮引入）。
+- **v3 round34（干净快照装 3.0.17 发布件 + 拟人化全功能走查（VPP/内核双线）+ 数据面往返 + Web 全页黑盒
+  + 内核 relay 完整 DORA + 四套件 → 修 R34-1，2026-10-15）**：在**恢复为「干净」快照**的 nfvis-vm 上
+  `nfvis-v3.0.17.run` 首装（快照实况**比 round31 更干净**：无 docker/virsh/ovmf；自检 **18/0/0**、一次性口令）
+  → 真 pty 向导（vpp / 核 2-5 / 主 5 工 4 / **1G=3 / 2M=768**）→ 管理口 + 系统基线（**#424 宿主四处实读 +
+  #471/#478 监听收敛与回环监听**）→ 业务口 bind-dpdk → VPP 全族（L2+BVI / L3 静态路由 FIB **非 dpo-drop** /
+  ACL（L3 形态真拦 + macip 伴生 + 解绑复原）/ QoS（vppctl+双向弧+读视图三面）/ 风暴 / VXLAN / VNF（debian 夹具
+  完整 DORA + 串口 console）/ **DHCP server（真 guest 租约 99.150）** / DNS 代理 / 抓包（冻结→导出→tcpdump
+  读回真实 ICMP）/ **NAT44（ens224 抓包见源改写为 192.168.98.1）** / SPAN（分析口 pcap 镜像帧）/ display-set
+  回放 78 行 RC=0 / 快照全链 / 备份诊断（秘密扫描 0）/ metrics history（逐对象序列）/ 容器 exec·shell·memif /
+  用户权限）→ **v3.0.16/17 新特性逐条复验**：**OVMF 交付**（`ovmf-generic` 在位）、**UEFI 域建→起→一次提交
+  删成**（`<os firmware='efi'>` + OVMF_CODE_4M.ms.fd + nvram；**#485② 的 undefine 修复实证**：删后 20s 未被
+  巡检重建、nvram 随之清理）、**启动画像**（实例>画像>默认合并 + `boot-order cd→cdrom` BUG-1 回归 + telnet
+  串口真引导）、**Web 内置 noVNC 帧缓冲与 `virsh screenshot` 独立对照逐字一致**（键盘通路亦达 guest）
+  → **Web 黑盒（Browser Use，全部 18 页）**（含资源池两表/接口/内核基线/审计（Web 动作入账）/诊断 ping 真跑/
+  抓包下载事件/证书/会话失效提示重登；截图 `docs/images/v3-round34-web-*.png`）→ **切内核**（#469 vNIC-L3 派生名
+  + #419 跨域 NAT 两条提交期硬拒 → 清对象切换 → **VPP 自动停** → `unbind-dpdk` 交还 vmxnet3 → bridge/VRF/
+  nft(ACL 真拦)/tc(QoS 双向 + 风暴 clsact)/self-DHCP(67)/self-DNS(53)/tcpdump 抓包/**单域 NAT（nft masquerade，
+  删后整表回收）**/LLDP（**两口互见邻居**）/vhost-net 全实证）→ **内核 DHCP relay 完整 DORA**（宿主临时最小
+  DHCP server；`rx from 192.168.99.1:67`（源重写、giaddr=0）→ OFFER/ACK → guest `enp1s0 192.168.99.111/24` +
+  默认路由 BVI + 宿主 ping 3/3；读视图「已转发 8/已回注 8/丢弃 0」——**清掉账目里「内核侧真机 DORA 待执行」
+  挂账项**）→ **切回 vpp**（内核对象整面消失 + VPP 对象全量重建 + 业务恢复）。**四套件（发布件上，清场 + 撤
+  管理口地址前置）**：fulltest **297/0/26**、语义 **43/0/0**、lifecycle **40/0/3**、pty **10/10**——与
+  v3.0.16/17 基线**逐项一致、零失败**（修复版二进制另跑 fulltest 阶段 2~5 = **208/0/22** 零失败）。
+  **R34-1（低危，已修）**：`request capture export [name <n>]` 是**幻影参数**——**命令树**
+  （`internal/schema/tree_oper.go` 的 `Opt(name)` 叶子，`?`/Tab 补全与契约守护的单一真源）、CLI 语法提示、
+  命令全表、用户手册示例、套件调用**五处都在传**，而实现自 M5 起从未消费、静默吞掉。按**契约如实化**
+  收口：**树里删两处 name 叶子** + 提示/全表/用户手册 §10.4 同步 + `export` 对多余参数显式拒绝
+  （兜底；文件名恒按 `<接口>-<时间戳>` 自动生成）+ 套件 3 处调用去 `name` + 单测与 schema 路径夹具改
+  两面断言（红-绿）。**真机复核（dev2）三面**：带参 → `% 无效命令`（树级拒绝、RC=1）；plain export
+  取到真实 pcap；**真 pty `?` 补全不再列 name**。守护 `TestCommandTableCoversOperTree` 首跑即报红
+  （「树里有 name 而全表没有」——把「树才是真源」指了出来）。⚠️ **换装注意**：补全树编译在
+  **nfvis-cli 客户端**内，树改动须 **nfvisd 与 nfvis-cli 同时换装**才看得到补全变化。**观察（非缺陷）**：alpine **generic** 镜像
+  不消费 seed（#483 同族，夹具改 debian12）；DPDK 口 unicast promisc=off（抓包只见本口 + 广播/组播）；
+  `ping source <VRF 内地址>` 不带 vrf 报原始 bind 错误（带 vrf 即通）；实验室 VMnet8 外置 DHCP 抢答
+  （R31-O2 同族，测试时停用）。**教训入册**：cloud-init 列表形式须写 3 元素 `[ sh, -c, "..." ]`；套件**选跑
+  也要撤管理口地址**（否则 S2-pre 被重叠守卫正确拒绝、级联 35 红，诊断要读 `/tmp/cli-test/full.log`）；
+  读 tc/qdisc 先取全量（`head -N` 会截掉 clsact 造成「没配」误判）。证据
+  `docs/evidence/v3-round34-clean-install-walkthrough-vpp-kernel.txt`；**代码侧改动（未提交）**：
+  `internal/api/cli_compute_oper.go`、`internal/api/capture_test.go`、`contrib/scripts/cli-fulltest-phase4/5.sh`、
+  `docs/NFViS-CLI命令全表.md`。
 - **已发布 v3.0.17（2026-10-15，`firmware=uefi` 交付补齐 + UEFI 域删除修复 + CI 恢复）**：tag `v3.0.17` → **`v3 54f3947`**
   （发布点＝PR #326/#327 合并；其上仅本轮发版记录提交）；GitHub Release 四资产；`SOURCE_DATE_EPOCH=1791995353`；
   deb `f1f36e5f…`（10,470,692 字节）/ `.run` `ca905bdb…`（185,190,523 字节，载荷 **239** deb / 177M）两打逐字节一致、

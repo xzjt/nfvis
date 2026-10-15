@@ -182,9 +182,16 @@ func TestCLICaptureStopFreezeSemantics(t *testing.T) {
 	}
 	fc.active.Recovered = false
 	// ④ **关键行为**：stop 之后 export 能取走数据（改前这里必失败）。
-	out = run(t, x, "admin", "super-user", "ssh", "request capture export name after-stop")
+	out = run(t, x, "admin", "super-user", "ssh", "request capture export")
 	if !strings.Contains(out, "已导出 pcap") || !fc.exported {
 		t.Fatalf("stop 之后 export 应成功取走数据：%s", out)
+	}
+	// ④b 走查收口：`export` 的幻影参数 `name <n>` 已从命令树/提示/全表去掉——误传被拒
+	// （不再静默吞掉）。树里已无该叶子，故拒绝发生在**命令分派层**（`% 无效命令: …`）；
+	// 执行器另有同口径的兜底拒绝（`不接受参数`），两条路径都不允许「说了不做」。
+	bad := x.Execute("admin", "super-user", "ssh", "request capture export name after-stop")
+	if !strings.Contains(bad.Output, "无效命令") && !strings.Contains(bad.Output, "不接受参数") {
+		t.Fatalf("export 带参数应被拒绝（无效命令/不接受参数）：%s", bad.Output)
 	}
 	// ⑤ 取走之后再 export：无会话，且提示是「先 start」（不再是老坑的说法）。
 	got := x.Execute("admin", "super-user", "ssh", "request capture export")

@@ -37,12 +37,12 @@ run S5 "show interfaces | begin system"
 # stop 之后必须 export 取走（否则会话残留、后续 start 会被正确拒绝）；原脚本写于
 # 「停止即丢弃」时代，这里补上「冻结中 start 被拒 + export 取走」两步（同 phase4 的修正）。
 run S5 "request capture start interface ens192 count 50"
-run S5 "request capture export name cli-trace2"
+run S5 "request capture export"
 run S5 "show capture"
 run S5 "request vpp trace start interface ens192 count 50"   # 旧名兼容
 run S5 "request vpp trace stop"                               # 旧名兼容：只停止（冻结）
 expect_fail S5 "已停止待导出" "request vpp trace start interface ens192 count 50"
-run S5 "request vpp trace export name cli-trace2b"            # 旧名兼容：取走（清登记）
+run S5 "request vpp trace export"            # 旧名兼容：取走（清登记）
 
 # ---- 各 show 的二级子命令（契约 §1.1 全量）----
 run S5 "show interfaces ens224 detail"
