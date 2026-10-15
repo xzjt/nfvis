@@ -912,13 +912,17 @@ func (x *cliExecutor) requestVPP(user string, t []string) string {
 // 不再按数据面分叉，也不给「该数据面没有该能力」的错误指向。
 const captureWiringGapText = "%% 抓包不可用（编排器未装配抓包 Provider）\n"
 
-// requestCapture `request capture start interface <if> [count <n>] [filter <acl>] | stop | export [name <n>]`。
+// requestCapture `request capture start interface <if> [count <n>] [filter <acl>] | stop | export`。
 //
 // 数据面中立（与 ping/traceroute 的「同一命令名、数据面换实现」同口径）：VPP 数据面走 pcap trace、
 // 内核数据面走 tcpdump，读视图与导出契约相同。`request vpp trace …` 是同一实现的兼容别名
 // （由 requestVPP 的 trace 分支转发进来）。
+//
+// `export` **不接受参数**（此前语法提示里挂着 `[name <n>]`，但实现从未消费该取值——导出文件名
+// 由编排层按 `<接口>-<时间戳>` 自动生成，属幻影参数；走查登记后按「不留假功能」收口：提示与
+// 全表去掉该参数，误传时显式报错，不再静默吞掉）。
 func (x *cliExecutor) requestCapture(user string, t []string) string {
-	const syntax = "%% 语法: request capture start interface <if> [count <n>] [filter <acl>] | stop | export [name <n>]\n"
+	const syntax = "%% 语法: request capture start interface <if> [count <n>] [filter <acl>] | stop | export\n"
 	if x.capture == nil {
 		return captureWiringGapText
 	}
@@ -961,6 +965,9 @@ func (x *cliExecutor) requestCapture(user string, t []string) string {
 		// 决策 #465（观察⑤ 的行为收口）：stop 不再丢弃数据——只停止并**冻结**，随后 export 取走。
 		return "已停止抓包（数据已保留，待导出）。\n取走 pcap：request capture export（它把这段数据搬进导出目录并登记，可直接下载）。\n"
 	case "export":
+		if len(t) > 1 {
+			return "%% request capture export 不接受参数（导出文件名由系统按 <接口>-<时间戳> 自动生成）\n"
+		}
 		f, err := x.capture.Stop(context.Background(), true)
 		if err != nil {
 			x.audit(user, "capture.export", "导出 pcap", err)

@@ -57,7 +57,7 @@ expect_fail S4 "不支持 SR-IOV" "request sriov create-vfs ens224 count 2"
 run S4 "request capture start interface ens192 count 10"
 run S4 "request capture stop"
 expect_fail S4 "已停止待导出" "request capture start interface ens192 count 10"
-run S4 "request capture export name cli-trace"
+run S4 "request capture export"
 run S4 "show capture"
 
 # ---- 系统运维（非破坏性）----

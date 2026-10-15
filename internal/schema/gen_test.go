@@ -235,7 +235,8 @@ func TestOperPathsExist(t *testing.T) {
 		{"request", "capture", "start", "interface", "ens2f0", "count", "100"},
 		{"request", "capture", "start", "interface", "vs-l2", "filter", "acl1"},
 		{"request", "capture", "stop"},
-		{"request", "capture", "export", "name", "cap1"},
+		// round34 走查收口：`export` 的 `name` 叶子是幻影参数（实现从未消费）已移除。
+		{"request", "capture", "export"},
 		{"request", "system", "software", "add", "/tmp/nfvis.deb", "sha256", "ff00"},
 		{"request", "system", "configuration", "backup", "to", "/var/backup"},
 		{"request", "system", "zeroize"},
