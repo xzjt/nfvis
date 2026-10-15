@@ -5,7 +5,7 @@ import { $, el, dash, wbtn, fill, table, list, uiDialog, closeDialog, uiConfirm,
   CONFIRM_COUNTDOWN, rowButton, rowClickable, goDetail } from '../core/dom.js';
 import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from '../core/const.js';
 import { api, soft, apiErrText, httpErrText,
-  errTextOf, rowsOf, pageWarn, softLoad, expandEndpoint, loadVSwitchStats,
+  errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
@@ -143,12 +143,12 @@ function renderNetworkObjects(nets) {
 // 只有 DELETE（没有 GET），按单取路径请求只会得到 405——列表端点里本来就有完整的对象。
 
 // 列表里按名字取对象（QoS / SPAN 的详情页用；列表端点缺省不截断，故能取全）。
-function pickByName(rows, name) {
+export function pickByName(rows, name) {
   return rowsOf(rows).find((r) => r.name === name) || null;
 }
 
 // 列表里没找到时给一句能读懂的话（而不是把空对象渲染成一片「—」）。
-function notFoundText(name, label) {
+export function notFoundText(name, label) {
   return '未找到' + label + ' ' + name + '（可能已被删除，或当前配置里没有它）';
 }
 
@@ -170,7 +170,7 @@ function vrfRoutesShow(res) {
 }
 
 // 按需重拉路由表（大表不进轮询；进页面时用路由表预取的那一份先画出来）。
-async function vrfRoutesLoad(name) {
+export async function vrfRoutesLoad(name) {
   const pre = $('vrd-routes');
   pre.hidden = false;
   pre.textContent = '读取中…';
@@ -263,7 +263,7 @@ function qsdMsg(text, isErr) {
   p.className = isErr ? 'error small' : 'muted small';
 }
 
-async function qsdDelete() {
+export async function qsdDelete() {
   const name = $('qsd-name').textContent;
   if (!name) { qsdMsg('没有选中策略。', true); return; }
   const ok = await uiConfirm('删除 QoS 策略', {
@@ -327,7 +327,7 @@ function spdMsg(text, isErr) {
   p.className = isErr ? 'error small' : 'muted small';
 }
 
-async function spdDelete() {
+export async function spdDelete() {
   const name = $('spd-name').textContent;
   if (!name) { spdMsg('没有选中镜像会话。', true); return; }
   const ok = await uiConfirm('删除端口镜像会话', {

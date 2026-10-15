@@ -5,10 +5,11 @@ import { $, el, dash, wbtn, fill, table, list, uiDialog, closeDialog, uiConfirm,
   CONFIRM_COUNTDOWN, rowButton, rowClickable, goDetail } from '../core/dom.js';
 import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from '../core/const.js';
 import { api, soft, apiErrText, httpErrText,
-  errTextOf, rowsOf, pageWarn, softLoad, expandEndpoint, loadVSwitchStats,
+  errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
+import { notFoundText } from './network.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
@@ -71,7 +72,9 @@ function renderVSwitches(vss, rows) {
 // 详情页（#/network/switches/:name）：对象头 + 成员口运行态 + MAC 学习表（按需拉取）。
 // 数据都来自路由表声明的 /virtual-switches/{name}（配置对象 + statistics）；**MAC 表不在声明里**——
 // 它可能很大，只在点「拉取 MAC 表」时才请求，不随页面刷新反复下载。
-let vsdMacFor = '';   // 当前 MAC 表属于哪台交换机（换对象必须清掉，免得把 A 的表挂在 B 名下）
+let vsdMacFor = '';
+export function getVsdMacFor() { return vsdMacFor; }
+export function clearVsdMacFor() { vsdMacFor = ''; }   // 当前 MAC 表属于哪台交换机（换对象必须清掉，免得把 A 的表挂在 B 名下）
 const VSD_MAC_LIMIT = 200;
 
 function vsdMsg(text, isErr) {
@@ -81,7 +84,7 @@ function vsdMsg(text, isErr) {
   p.className = isErr ? 'error small' : 'muted small';
 }
 
-function vsdMacClear(text, isErr) {
+export function vsdMacClear(text, isErr) {
   table($('vsd-mac-table').querySelector('tbody'), 3, []);
   $('vsd-mac-note').textContent = '';
   vsdMsg(text || '', isErr === true);
@@ -157,7 +160,7 @@ function renderSwitchDetail(vs, ports, params) {
 }
 
 // 按需拉取 MAC 表：limit 由操作者给（默认 200 条），服务端按上限截断。
-async function vsdMacLoad() {
+export async function vsdMacLoad() {
   const name = $('vsd-name').textContent;
   if (!name) { vsdMsg('没有选中虚拟交换机。', true); return; }
   const limit = Math.max(1, Math.floor(Number($('vsd-mac-limit').value) || VSD_MAC_LIMIT));
@@ -180,6 +183,8 @@ async function vsdMacLoad() {
 // （未配置时服务端整个缺席，页面如实「—」）；租约表按需拉取（运行态，未配置时
 // 服务端回 409 + 文案，页面如实显示未配置而非空表）。
 let vsdDhcpFor = '';
+export function getVsdDhcpFor() { return vsdDhcpFor; }
+export function clearVsdDhcpFor() { vsdDhcpFor = ''; }
 
 function vsdDhcpMsg(text, isErr) {
   const p = $('vsd-dhcp-msg');
@@ -188,7 +193,7 @@ function vsdDhcpMsg(text, isErr) {
   p.className = isErr ? 'error small' : 'muted small';
 }
 
-function vsdDhcpClear(text, isErr) {
+export function vsdDhcpClear(text, isErr) {
   table($('vsd-dhcp-lease-table').querySelector('tbody'), 4, []);
   $('vsd-dhcp-note').textContent = '';
   vsdDhcpMsg(text || '', isErr === true);
@@ -208,7 +213,7 @@ function vsdDhcpRender(vs) {
 }
 
 // 按需拉取租约表：未配置（409）与尚未收敛（503）都如实转述服务端文案，不显示成空表。
-async function vsdDhcpLoad() {
+export async function vsdDhcpLoad() {
   const name = $('vsd-name').textContent;
   if (!name) { vsdDhcpMsg('没有选中虚拟交换机。', true); return; }
   vsdDhcpMsg('读取租约表…', false);

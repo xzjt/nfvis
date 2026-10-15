@@ -9,7 +9,8 @@
 //
 // 数据来源只用**对外**的 REST 端点（/cli/execute 是 x-internal，前端不碰）。
 
-import { softLoad, setPollRoute, showGlobalError } from './js/core/state.js';
+import { softLoad } from './js/core/api.js';
+import { setPollRoute, showGlobalError } from './js/core/state.js';
 import { pageWarn } from './js/core/api.js';
 
 import { viewsOverview } from './js/views/overview.js';
@@ -44,6 +45,7 @@ export const VIEWS = {
   ...viewsOps,
 };
 // router.js 消费的取数助手由 core 提供（re-export 保持既有 import 面）。
-export { softLoad, setPollRoute, showGlobalError, reload };
+import { el } from './js/core/dom.js';
+export { softLoad, setPollRoute, showGlobalError, reload, el };
 
 boot();

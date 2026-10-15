@@ -5,7 +5,7 @@ import { $, el, dash, wbtn, fill, table, list, uiDialog, closeDialog, uiConfirm,
   CONFIRM_COUNTDOWN, rowButton, rowClickable, goDetail } from '../core/dom.js';
 import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from '../core/const.js';
 import { api, soft, apiErrText, httpErrText,
-  errTextOf, rowsOf, pageWarn, softLoad, expandEndpoint, loadVSwitchStats,
+  errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
@@ -64,7 +64,7 @@ function renderSystem(st, ver) {
 // 系统域一级页（#/system）：状态与版本（与总览同源）+ **已生效配置**的系统段只读回显。
 // 系统段里口令哈希这类敏感叶子由服务端脱敏后才发出来（界面拿不到原文，也不回显）。
 // 改字段仍在「配置」页的系统段表单里做（只写候选、提交后生效）——本页不提供第二个写入口。
-function renderSystemPage(st, ver, sysCfg, dnsProxy, fw) {
+export function renderSystemPage(st, ver, sysCfg, dnsProxy, fw) {
   $('sysp-note').textContent = st && st.hostname ? '（' + st.hostname + '）' : '';
   const pairs = st && st.__err ? [['读取失败', st.__err]] : systemPairs(st);
   // 决策 #345：数据面 DNS 代理（只读两行，与 `show dns proxy` / GET /dns/proxy 同源）。
@@ -165,7 +165,7 @@ function renderVPP(vpp) {
 // 决策 #480：首表大页数字取**内核实况**，与下方「大页池」段（show system hugepages）同源——
 // 「已分配（在用）」= 内核在用页数（含数据面固定占用），「可分配（VNF）」= 内核空闲页数（VNF 实际可起页数）；
 // 故 #403 的「两处口径不同、数字不必相等」说明不再成立（两处现同源）。
-function renderPools(pools) {
+export function renderPools(pools) {
   const p = $('pools');
   p.textContent = '';
   if (pools && pools.__err) {
@@ -218,7 +218,7 @@ const hpState = (s) => ({
   unreadable: '取不到内核实际值',
 }[s] || dash(s));
 
-function renderHugepagePools(hp) {
+export function renderHugepagePools(hp) {
   const tbody = $('hp-table').querySelector('tbody');
   tbody.textContent = '';
   const ok = hp && !hp.__err;
@@ -259,7 +259,7 @@ function hpDataplaneNote(pools) {
     'VNF 可起页数 = 空闲页数（' + hpNum(p1.free) + '）。';
 }
 
-async function hpReclaim() {
+export async function hpReclaim() {
   const ok = await uiConfirm('回收空闲的多余大页', {
     tier: 'mid',
     bullets: [
@@ -295,7 +295,7 @@ async function hpReclaim() {
 // 结构化输出的 `source` 字段；而 Web 取数的 REST `GET /interfaces`（`Interface` schema）**没有**
 // 这个字段（后端按口径未改契约），故本页**拿不到该点名**——不自己编一个近似值，如实留白
 // （`taken_over` 只说明「在不在数据面」，说不出「为什么不在」）。将来契约补字段再同源渲染。
-function renderInterfaces(ifaces, ifaceRows) {
+export function renderInterfaces(ifaces, ifaceRows) {
   const tbody = $('iface-table').querySelector('tbody');
   tbody.textContent = '';
   if (!ifaceRows.length) {

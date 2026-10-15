@@ -5,7 +5,7 @@ import { $, el, dash, wbtn, fill, table, list, uiDialog, closeDialog, uiConfirm,
   CONFIRM_COUNTDOWN, rowButton, rowClickable, goDetail } from '../core/dom.js';
 import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from '../core/const.js';
 import { api, soft, apiErrText, httpErrText,
-  errTextOf, rowsOf, pageWarn, softLoad, expandEndpoint, loadVSwitchStats,
+  errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
@@ -29,7 +29,7 @@ async function reload() {
 // pingBody 组请求体：源地址留空则不传（服务端按目标自动选路）；IPv6 勾选则 ipv6=true
 // （决策 #330：ping 走 v6 平面、traceroute 走宿主侧 ICMPv6，与 CLI `ping/traceroute ipv6` 同源）。
 // withVrf：仅 ping 带 vrf（决策 #402）——traceroute 的 vrf 维持不支持（REST 明文拒绝），故不传。
-function pingBody(host, count, withVrf) {
+export function pingBody(host, count, withVrf) {
   const body = { host };
   if (count) body.count = count;
   const src = $('diag-source').value.trim();
@@ -55,7 +55,7 @@ function renderDiagPlaneNote(st) {
     : 'ping 只覆盖数据面（VPP）——管理口在内核平面，请在宿主机上 ping。目标在 VRF 内时（如 VNF/交换机域）须在上方填该 VRF 名，否则会报 no egress interface（与 CLI ping … vrf 同源）。traceroute 走宿主侧 ICMP/ICMPv6，可测管理口；其 vrf 参数不支持（要经 VRF 测请用 ping vrf）。勾选 IPv6 后 ping 走 v6 平面、traceroute 走宿主侧 ICMPv6。';
 }
 
-async function diagPing() {
+export async function diagPing() {
   const host = $('diag-host').value.trim();
   const out = $('diag-out');
   out.hidden = false;
@@ -83,7 +83,7 @@ async function diagPing() {
   }
 }
 
-async function diagLogs() {
+export async function diagLogs() {
   const pre = $('diag-log');
   pre.hidden = false;
   pre.textContent = '读取中…';
@@ -99,20 +99,20 @@ async function diagLogs() {
 
 // ---------- 大表（NAT 会话）：按需拉取 ----------
 
-function bigMsg(text, isErr) {
+export function bigMsg(text, isErr) {
   const p = $('big-msg');
   p.hidden = !text;
   p.textContent = text || '';
   p.className = isErr ? 'error small' : 'muted small';
 }
 
-function bigOut(text) {
+export function bigOut(text) {
   const pre = $('big-out');
   pre.hidden = !text;
   pre.textContent = text || '';
 }
 
-async function bigNat() {
+export async function bigNat() {
   bigMsg('读取 NAT 会话…', false);
   bigOut('');
   try {
@@ -130,7 +130,7 @@ async function bigNat() {
 
 // ---------- 审计日志 ----------
 
-function renderAudit(audit) {
+export function renderAudit(audit) {
   const rows = (audit && !audit.__err && Array.isArray(audit.items)) ? audit.items : (Array.isArray(audit) ? audit : []);
   table($('audit-table').querySelector('tbody'), 5, rows.slice(0, 50).map((a) => [
     fmtTime(a.ts || a.time || a.timestamp), a.user, a.action || a.event,
@@ -142,7 +142,7 @@ function renderAudit(audit) {
 
 // ---------- 抓包（数据面无关：VPP pcap trace / 内核 tcpdump，端点同源 /capture）----------
 
-function capMsg(text, isErr) {
+export function capMsg(text, isErr) {
   const p = $('cap-msg');
   p.hidden = !text;
   p.textContent = text || '';
@@ -189,7 +189,7 @@ function renderCapture(cap) {
 }
 
 // downloadFile 带 Authorization 取文件再触发浏览器下载（<a href> 带不了请求头）。
-async function downloadFile(path, name, note) {
+export async function downloadFile(path, name, note) {
   if (note) note('下载 ' + name + '：准备中…', false);
   try {
     const res = await fetch(API + path, { headers: { Authorization: 'Bearer ' + getToken() } });
@@ -254,7 +254,7 @@ function archiveTable(tbody, rows, prefix) {
 
 // ---------- 运维动作（写操作，均二次确认）----------
 
-function opsMsg(text, isErr) {
+export function opsMsg(text, isErr) {
   const p = $('ops-msg');
   p.hidden = !text;
   p.textContent = text || '';
@@ -270,7 +270,7 @@ function opsOut(text) {
 // opsRun 统一的"确认 → 调用 → 回显"流程（写操作一律先确认，与 CLI 的 --yes 同口径）。
 // `ask` 是这次动作的档位与影响面（tier / paragraphs / bullets / cli / confirmLabel），
 // 交 uiDialog 渲染——低危一句话，中危逐条列影响面并标红，高危再加确认词与倒计时。
-async function opsRun(label, ask, fn) {
+export async function opsRun(label, ask, fn) {
   if (!(await uiConfirm(label, ask))) return;
   opsMsg(label + '：执行中…', false);
   opsOut('');
@@ -289,7 +289,7 @@ async function opsRun(label, ask, fn) {
 // 两条都是**高危**：软件升级会安装 deb 并在维护脚本里重启管理服务（本页面掉线、需要重新登录），
 // 回退同样是替换整机软件版本。确认词用固定词（这两个动作没有"对象名"可打）：upgrade / rollback。
 // 界面不做任何"代替确认"的捷径——不自动重试、不预判成功，只如实显示服务端的结果或报错。
-async function swAdd(pkg, sha) {
+export async function swAdd(pkg, sha) {
   const p = (pkg || '').trim();
   if (!p) { opsMsg('请先填软件包路径或下载地址。', true); return; }
   const s = (sha || '').trim();
@@ -322,7 +322,7 @@ async function swAdd(pkg, sha) {
   await reload().catch(() => {});
 }
 
-async function swRollback() {
+export async function swRollback() {
   const ok = await uiConfirm('回退软件版本', {
     tier: 'high',
     requireWord: 'rollback',
@@ -353,7 +353,7 @@ async function swRollback() {
 // 从服务端取回来、再作为 multipart 上传（契约收的就是 multipart file）——这样真人与自动化
 // 都走得通，也不会出现"文件在操作者本机、服务端要的是上传件"的错配。
 // 确认词取**归档文件名**（对象名）：恢复覆盖的是当前生效配置，打一遍文件名最有效的拦阻。
-async function restoreRun(name) {
+export async function restoreRun(name) {
   const file = (name || '').trim();
   if (!file) { opsMsg('请先选择要恢复的备份归档（没有备份就先点「生成配置备份」）。', true); return; }
   const ok = await uiConfirm('从备份归档恢复配置', {
@@ -395,7 +395,7 @@ async function restoreRun(name) {
 // 契约要求请求体 confirm=true（服务端的双重确认）；界面这一层是确认词 zeroize + 10 秒倒计时。
 // 两者都不是"多余的仪式"：这一步会清空数据分区的配置与镜像、级联删除虚拟机与容器、账号复位，
 // 且**本机不会自动重启**——重启后进入初始化状态，需要带外/控制台重新初始化。没有撤销入口。
-async function zeroizeRun() {
+export async function zeroizeRun() {
   const ok = await uiConfirm('恢复出厂（清空配置与镜像）', {
     tier: 'high',
     requireWord: 'zeroize',
@@ -431,7 +431,7 @@ async function zeroizeRun() {
 // 网络配置对象、清受管数据目录（镜像/备份/抓包/转储/诊断归档），但**管理口/API/登录用户**与
 // **物理口/DPDK 声明**原样保留，执行完仍能登录继续配置、不必重启。契约要求请求体 confirm=true；
 // 界面这一层是确认词 format-data + 10 秒倒计时。
-async function formatDataRun() {
+export async function formatDataRun() {
   const ok = await uiConfirm('重置数据分区（恢复出厂数据状态）', {
     tier: 'high',
     requireWord: 'format-data',

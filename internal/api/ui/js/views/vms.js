@@ -5,10 +5,11 @@ import { $, el, dash, wbtn, fill, table, list, uiDialog, closeDialog, uiConfirm,
   CONFIRM_COUNTDOWN, rowButton, rowClickable, goDetail } from '../core/dom.js';
 import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from '../core/const.js';
 import { api, soft, apiErrText, httpErrText,
-  errTextOf, rowsOf, pageWarn, softLoad, expandEndpoint, loadVSwitchStats,
+  errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
+import { opsMsg } from './ops.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
@@ -67,7 +68,7 @@ const VM_ACTION_IMPACT = {
   stop: '运行中的业务会中断；停止是正常关机（超时会强杀），配置与磁盘保留。',
   restart: '重启期间业务中断数秒到数十秒。',
 };
-async function vmAction(name, action, label, msg) {
+export async function vmAction(name, action, label, msg) {
   const say = msg || opsMsg;
   const ok = await uiConfirm(label + '虚拟机', {
     tier: 'low',
@@ -88,7 +89,7 @@ async function vmAction(name, action, label, msg) {
 
 // vhost-user 口计数（详情端点附带的 statistics；运行态未接入时如实说"未取到计数"）。
 // 渲染到 `id` 指定的 pre 上（详情页的概览 Tab）。
-function renderVMStats(vms, stats, id) {
+export function renderVMStats(vms, stats, id) {
   const pre = $(id);
   const rows = [];
   (vms || []).forEach((v) => {

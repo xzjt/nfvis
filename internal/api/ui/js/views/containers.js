@@ -5,10 +5,11 @@ import { $, el, dash, wbtn, fill, table, list, uiDialog, closeDialog, uiConfirm,
   CONFIRM_COUNTDOWN, rowButton, rowClickable, goDetail } from '../core/dom.js';
 import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from '../core/const.js';
 import { api, soft, apiErrText, httpErrText,
-  errTextOf, rowsOf, pageWarn, softLoad, expandEndpoint, loadVSwitchStats,
+  errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
+import { opsMsg } from './ops.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
@@ -61,7 +62,7 @@ const CT_ACTION_IMPACT = {
   stop: '容器内的进程会被停止；容器与镜像保留，可以再启动。',
   restart: '容器内的进程会被重启，服务短暂中断。',
 };
-async function ctAction(name, action, label, msg) {
+export async function ctAction(name, action, label, msg) {
   const say = msg || opsMsg;
   const ok = await uiConfirm(label + '容器', {
     tier: 'low',

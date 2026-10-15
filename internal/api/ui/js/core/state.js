@@ -65,7 +65,7 @@ async function reloadViaBoot() {
   return boot.reload();
 }
 
-function setStream(text, cls) {
+export function setStream(text, cls) {
   const n = $('stream-state');
   n.textContent = text;
   n.className = 'pill ' + cls;

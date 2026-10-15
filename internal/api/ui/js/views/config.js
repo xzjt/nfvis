@@ -5,7 +5,7 @@ import { $, el, dash, wbtn, fill, table, list, uiDialog, closeDialog, uiConfirm,
   CONFIRM_COUNTDOWN, rowButton, rowClickable, goDetail } from '../core/dom.js';
 import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from '../core/const.js';
 import { api, soft, apiErrText, httpErrText,
-  errTextOf, rowsOf, pageWarn, softLoad, expandEndpoint, loadVSwitchStats,
+  errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
@@ -30,6 +30,7 @@ async function reload() {
 // 编辑态以原始 JSON 文本为准（表单改动会先写回文本），提交前都会先保存。
 
 let cfg = {
+// （跨模块访问经下方访问器：boot.js 的编辑态探针与登录复位走这里，不直接 import let。）
   committed: null, // {configuration, revision}
   editing: false,
   // 由「提交历史」页取候选后落回本页时记下偏移（> 0 时本页载入候选并直接展示差异）。
@@ -86,7 +87,7 @@ function cfgMsg(text, isErr) {
   n.className = isErr ? 'error small' : 'muted small';
 }
 
-function cfgSetEditing(on) {
+export function cfgSetEditing(on) {
   cfg.editing = on;
   $('cfg-read').hidden = on;
   $('cfg-edit').hidden = !on;
@@ -1422,7 +1423,7 @@ function cfgRenderDomainForms(box, c) {
 }
 
 // 预校验（POST /configuration/check）：先保存，再让服务端跑与提交相同的全部校验。
-async function cfgCheck() {
+export async function cfgCheck() {
   if (!(await cfgSave())) return;
   try {
     const res = await api('/configuration/check', { method: 'POST' });
@@ -1458,6 +1459,8 @@ function renderCfgVpp(vpp) {
 
 // 读取 committed 配置。`pre` 是路由表声明端点的预取结果（配置页由 softLoad 取齐后传进来，
 // 不重复请求）；不传则自己拉（提交事件、结束编辑会话等处调用）。
+export function getCfg() { return cfg; }
+export function cfgSetEditingForBoot(on) { cfgSetEditing(on); }
 export async function loadConfig(pre) {
   const res = pre !== undefined ? pre : await api('/configuration');
   if (res && res.__err) {
@@ -1516,7 +1519,7 @@ async function cfgSyncSession() {
 
 // 当前编辑锁的持有者：取自持锁会话列表里**有取锁时间**的那一条（只有一条会话锁，
 // 另有在途 commit confirmed 时它不带取锁时间，不能当成持锁者）；查不到时返回空串。
-async function cfgLockHolder() {
+export async function cfgLockHolder() {
   try {
     const list = await api('/system/configuration/sessions');
     const lock = (Array.isArray(list) ? list : []).find((s) => s && s.acquired_at);
@@ -1528,7 +1531,7 @@ async function cfgLockHolder() {
 
 // 开始编辑：以 committed 为起点建立 candidate（PUT 取锁）。
 // 读不到 committed 时**拒绝进入**——否则会把空配置当 candidate 提交（危险）。
-async function cfgStartEdit() {
+export async function cfgStartEdit() {
   try {
     if (!(await loadConfig()) || !cfg.committed) {
       cfgSetEditing(false);
@@ -1551,7 +1554,7 @@ async function cfgStartEdit() {
   }
 }
 
-async function cfgSave() {
+export async function cfgSave() {
   // 口令没派生出哈希（明文还留在控件里）时**整次保存失败**：不写 candidate，也不报成功。
   if (!(await cfgPwGate())) return false;
   let c;
@@ -1575,7 +1578,7 @@ async function cfgSave() {
   }
 }
 
-async function cfgShowDiff() {
+export async function cfgShowDiff() {
   try {
     const res = await fetch(API + '/configuration/diff', { headers: { Authorization: 'Bearer ' + getToken() } });
     const text = await res.text();
@@ -1598,7 +1601,7 @@ async function cfgEndSession() {
 
 // 丢弃并结束编辑：低危确认（只丢自己这份候选草稿，运行配置不变）。没有进入编辑态时
 // 没有草稿可丢，就不打扰——直接收尾（可能只是把超时残留的锁收掉）。
-async function cfgDiscardAsk() {
+export async function cfgDiscardAsk() {
   if (cfg.editing) {
     const ok = await uiConfirm('丢弃并结束编辑', {
       tier: 'low',
@@ -1615,7 +1618,7 @@ async function cfgDiscardAsk() {
 // 不是保存草稿；改到管理路径（管理口地址/网关）时还可能把自己关在门外，故逐条列影响面。
 // 注意：确认框只加在按钮这一层，cfgCommit 本身保持原样（结束会话/失败补偿等内部路径
 // 不该被二次确认挡住）。
-async function cfgCommitAsk(confirmedMinutes) {
+export async function cfgCommitAsk(confirmedMinutes) {
   const ok = await uiConfirm(confirmedMinutes ? '以 commit confirmed 提交' : '提交配置', {
     tier: 'mid',
     paragraphs: [confirmedMinutes
@@ -1677,7 +1680,7 @@ async function cfgCommit(confirmedMinutes) {
 
 // 确认在途提交：**有意不做确认框**——它的语义就是「保住刚才那次提交」，
 // 而窗口正在倒计时（超时自动回滚）；在这里再拦一次反而是害人。审计仍由服务端记。
-async function cfgConfirmPending() {
+export async function cfgConfirmPending() {
   try {
     await api('/configuration/commit:confirm', { method: 'POST' });
     await cfgEndSession();

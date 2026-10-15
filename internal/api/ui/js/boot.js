@@ -4,11 +4,26 @@ import { $, el, dash, wbtn, fill, table, list, uiDialog, closeDialog, uiConfirm,
   CONFIRM_COUNTDOWN, rowButton, rowClickable, goDetail } from './core/dom.js';
 import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from './core/const.js';
 import { api, soft, apiErrText, httpErrText,
-  errTextOf, rowsOf, pageWarn, softLoad, expandEndpoint, loadVSwitchStats,
+  errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from './core/api.js';
 import { fmtTime, fmtClockHint } from './core/format.js';
+import { isConsoleOpen } from './views/vmDetail.js';
+import { diagPing, diagLogs, bigNat, bigMsg, bigOut, renderAudit, opsRun, capMsg, pingBody,
+  downloadFile, swAdd, swRollback, restoreRun, zeroizeRun, formatDataRun } from './views/ops.js';
+import { qsdDelete, spdDelete } from './views/network.js';
+import { cfgStartEdit, cfgSave, cfgCheck, cfgShowDiff, cfgCommitAsk, cfgConfirmPending,
+  cfgDiscardAsk, getCfg, cfgSetEditing, cfgLockHolder } from './views/config.js';
+import { vmSnapLoad, vmSnapCreate, vmConsoleOpen, vmConsoleSend, vmConsoleClose, vmTabShow, getVmDetailName } from './views/vmDetail.js';
+import { ctTabClick, ctExecRun, ctShellOpen, ctShellClose, ctShellSend, ctLogsLoad, getCtDetailName } from './views/containerDetail.js';
+import { imgImportURL, imgImportIncoming, imgImportFile } from './views/images.js';
+import { vrfRoutesLoad } from './views/network.js';
+import { vsdMacLoad, vsdMacClear, vsdDhcpLoad, vsdDhcpClear, getVsdMacFor, clearVsdMacFor, getVsdDhcpFor, clearVsdDhcpFor } from './views/switches.js';
+import { tlsInstall, tlsRegenerate, knlAct, dpdkAct, sriovSet, openAcct, closeAcct, acctMsg,
+  usrCreate, usrMyPassword, usrBannerSave, usrBannerClear } from './views/system.js';
+import { hpReclaim } from './views/overview.js';
+
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
-  getEvents, setEvents, renderEvents, setStream, startStream, stopStream,
+  getEvents, setEvents, renderEvents, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
   showGlobalError, setCfgEditingProbe } from './core/state.js';
 
@@ -73,7 +88,7 @@ async function enterApp(user) {
   setCurrentClass((user && user.class) || '');
   $('user-line').textContent = user ? user.name + '（' + user.class + '）' : '';
   applyRole(user);
-  setCfgEditingProbe(() => cfg.editing);
+  setCfgEditingProbe(() => getCfg().editing);
   cfgSetEditing(false);
   try {
     // 路由表 → 渲染当前 hash 那一页（配置页的数据由 config 视图自己拉）。
@@ -99,7 +114,8 @@ export function signOut(msg) {
   setUser('');
   setCurrentClass('');
   applyRole(null);
-  cfg = { committed: null, editing: false };
+  const c = getCfg();
+  c.committed = null; c.editing = false; c.landedFromRollback = 0;
   cfgSetEditing(false);
   sessionStorage.removeItem(TOKEN_KEY);
   sessionStorage.removeItem(USER_KEY);
@@ -194,7 +210,7 @@ for (const b of $('ctd-tabs').querySelectorAll('button')) {
 // 容器内执行命令（决策 #357）：入口按 data-write 门禁，非 super-user 时按钮/输入被 CSS 隐藏。
 $('ct-exec-run').addEventListener('click', ctExecRun);
 // 容器交互终端（决策 #358）：连接/断开/发送；输入框回车即发送。
-$('ct-shell-connect').addEventListener('click', () => ctShellOpen(ctDetailName));
+$('ct-shell-connect').addEventListener('click', () => ctShellOpen(getCtDetailName()));
 $('ct-shell-close').addEventListener('click', ctShellClose);
 $('ct-shell-send').addEventListener('click', () => { const i = $('ct-shell-in'); ctShellSend(i.value, true); i.value = ''; });
 $('ct-shell-enter').addEventListener('click', () => ctShellSend('', true));
@@ -206,11 +222,11 @@ $('vrd-routes-btn').addEventListener('click', () => vrfRoutesLoad($('vrd-name').
 
 // 虚拟交换机详情：MAC 学习表按需拉取（大表不进页面刷新）
 $('vsd-mac-btn').addEventListener('click', vsdMacLoad);
-$('vsd-mac-clear-btn').addEventListener('click', () => { vsdMacFor = ''; vsdMacClear(''); });
+$('vsd-mac-clear-btn').addEventListener('click', () => { clearVsdMacFor(); vsdMacClear(''); });
 
 // 虚拟交换机详情：DHCP 租约表按需拉取（运行态；未配置时服务端 409，页面如实转述）
 $('vsd-dhcp-btn').addEventListener('click', vsdDhcpLoad);
-$('vsd-dhcp-clear-btn').addEventListener('click', () => { vsdDhcpFor = ''; vsdDhcpClear(''); });
+$('vsd-dhcp-clear-btn').addEventListener('click', () => { clearVsdDhcpFor(); vsdDhcpClear(''); });
 
 // VM 快照
 $('vm-snap-refresh').addEventListener('click', () => vmSnapLoad());
@@ -225,7 +241,7 @@ $('img-file-btn').addEventListener('click', imgImportFile);
 $('ct-logs-refresh').addEventListener('click', ctLogsLoad);
 
 // 串口 console
-$('vm-console-connect').addEventListener('click', () => vmConsoleOpen(vmDetailName));
+$('vm-console-connect').addEventListener('click', () => vmConsoleOpen(getVmDetailName()));
 $('vm-console-close').addEventListener('click', vmConsoleClose);
 $('vm-console-send').addEventListener('click', () => {
   const inp = $('vm-console-in');
@@ -471,11 +487,11 @@ window.nfvis = {
   reload,
   navigate: async (path) => (await routerModule()).navigate(path),
   // 串口状态（浏览器验收要断言"离开详情页后 WebSocket 已关"，这里给一个可读的判据）。
-  consoleOpen: () => !!termWS,
+  consoleOpen: isConsoleOpen,
 };
 
 export async function boot() {
-  if (!token) { showLogin(''); return; }
+  if (!getToken()) { showLogin(''); return; }
   let user = null;
   try { user = JSON.parse(sessionStorage.getItem(USER_KEY) || 'null'); } catch (e) { user = null; }
   try {

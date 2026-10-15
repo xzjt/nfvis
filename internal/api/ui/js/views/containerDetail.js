@@ -5,10 +5,11 @@ import { $, el, dash, wbtn, fill, table, list, uiDialog, closeDialog, uiConfirm,
   CONFIRM_COUNTDOWN, rowButton, rowClickable, goDetail } from '../core/dom.js';
 import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from '../core/const.js';
 import { api, soft, apiErrText, httpErrText,
-  errTextOf, rowsOf, pageWarn, softLoad, expandEndpoint, loadVSwitchStats,
+  errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
+import { ctAction } from './containers.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
@@ -30,6 +31,7 @@ async function reload() {
 const CT_TABS = ['overview', 'logs', 'exec', 'shell'];
 let ctTab = 'overview';
 let ctDetailName = '';
+export function getCtDetailName() { return ctDetailName; }
 let ctLogsName = '';
 
 function ctTabShow(tab) {
@@ -44,7 +46,7 @@ function ctTabShow(tab) {
 }
 
 // 点 Tab：切面板；进日志 Tab 顺手拉一次（与原来点行内「日志」按钮同一行为）。
-function ctTabClick(tab) {
+export function ctTabClick(tab) {
   ctTabShow(tab);
   if (tab === 'logs') ctLogsOpen(ctDetailName);
 }
@@ -82,7 +84,7 @@ function ctShellMsg(text, isErr) {
   out.scrollTop = out.scrollHeight;
 }
 
-async function ctShellOpen(name) {
+export async function ctShellOpen(name) {
   if (ctShellWS) { ctShellMsg('先断开当前终端（' + ctShellName + '）。', true); return; }
   $('ct-shell').hidden = false;
   $('ct-shell-name').textContent = name;
@@ -113,7 +115,7 @@ async function ctShellOpen(name) {
   $('ct-shell-in').focus();
 }
 
-function ctShellClose() {
+export function ctShellClose() {
   if (ctShellWS) { ctShellWS.close(); ctShellWS = null; ctShellName = ''; }
   ctShellSyncBtn();
   const box = $('ct-shell');
@@ -122,7 +124,7 @@ function ctShellClose() {
   if (out) out.textContent = '';
 }
 
-function ctShellSend(text, enter) {
+export function ctShellSend(text, enter) {
   if (!ctShellWS || ctShellWS.readyState !== 1) { ctShellMsg('尚未连接。', true); return; }
   ctShellWS.send(text + (enter ? '\n' : ''));
 }
@@ -159,7 +161,7 @@ function ctExecRender(d) {
   out.hidden = false;
 }
 
-async function ctExecRun() {
+export async function ctExecRun() {
   const name = ctDetailName;
   if (!name) return;
   const cmd = ($('ct-exec-cmd').value || '').trim();
@@ -292,7 +294,7 @@ async function ctLogsOpen(name) {
   await ctLogsLoad();
 }
 
-async function ctLogsLoad() {
+export async function ctLogsLoad() {
   const pre = $('ct-logs');
   if (!ctLogsName) return;
   pre.textContent = '读取中…';

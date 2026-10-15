@@ -5,10 +5,11 @@ import { $, el, dash, wbtn, fill, table, list, uiDialog, closeDialog, uiConfirm,
   CONFIRM_COUNTDOWN, rowButton, rowClickable, goDetail } from '../core/dom.js';
 import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from '../core/const.js';
 import { api, soft, apiErrText, httpErrText,
-  errTextOf, rowsOf, pageWarn, softLoad, expandEndpoint, loadVSwitchStats,
+  errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
+import { vmAction, renderVMStats } from './vms.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
@@ -30,10 +31,11 @@ async function reload() {
 const VM_TABS = ['overview', 'ifaces', 'snapshots', 'console'];
 let vmTab = 'overview';
 let vmDetailName = '';
+export function getVmDetailName() { return vmDetailName; }
 
 // 切 Tab：只动面板的 hidden 与 Tab 条的选中态（不碰 hash，也不重新取数）。
 // `focusBtn` 只在**用户点 Tab** 时为真——重渲染（轮询/事件）里抢焦点会把光标从正在输入的地方挪走。
-function vmTabShow(tab, focusBtn) {
+export function vmTabShow(tab, focusBtn) {
   if (VM_TABS.indexOf(tab) < 0) tab = 'overview';
   vmTab = tab;
   VM_TABS.forEach((t) => { $('vm-tab-' + t).hidden = t !== tab; });
@@ -171,7 +173,7 @@ function vmSnapOpen(name, pre) {
   return vmSnapLoad(pre);
 }
 
-async function vmSnapLoad(pre) {
+export async function vmSnapLoad(pre) {
   const tbody = $('vm-snap-table').querySelector('tbody');
   tbody.textContent = '';
   if (!snapVM) return;
@@ -252,7 +254,7 @@ async function vmSnapAct(snap, kind) {
   await vmSnapLoad();
 }
 
-async function vmSnapCreate() {
+export async function vmSnapCreate() {
   const nm = $('vm-snap-new').value.trim();
   if (!nm) { snapMsg('请填写快照名。', true); return; }
   const ok = await uiConfirm('创建快照', {
@@ -282,6 +284,8 @@ async function vmSnapCreate() {
 
 // 终端状态：WebSocket 与当前 VM 名（同一时刻只连一台，避免误操作）。
 let termWS = null;
+// 串口连接状态的外部只读取径（boot.js 的 window.nfvis.consoleOpen 判据）。
+export function isConsoleOpen() { return !!termWS; }
 let termVM = '';
 // 当前会话是否为 VNC 图形查看器（决策 #485）：断开路径与按钮状态随之分派。
 let termVNC = false;
@@ -334,7 +338,7 @@ function vmConsoleHideVNCNotice() {
   if (n) { n.textContent = ''; n.hidden = true; n.classList.remove('err'); }
 }
 
-async function vmConsoleOpen(name) {
+export async function vmConsoleOpen(name) {
   if (termWS || (window.nfvisVnc && window.nfvisVnc.isOpen())) {
     termMsg('先断开当前 console（' + termVM + '）。', true); return;
   }
@@ -441,7 +445,7 @@ function vmConsoleTitle(text) {
   }
 }
 
-function vmConsoleClose() {
+export function vmConsoleClose() {
   if (termWS) { termWS.close(); termWS = null; termVM = ''; }
   if (window.nfvisVnc && window.nfvisVnc.isOpen()) {
     vncClosing = true;
@@ -456,7 +460,7 @@ function vmConsoleClose() {
   vmConsoleHideVNCNotice();
 }
 
-function vmConsoleSend(text, enter) {
+export function vmConsoleSend(text, enter) {
   if (!termWS || termWS.readyState !== 1) { termMsg('尚未连接。', true); return; }
   termWS.send(text + (enter ? '\r' : ''));
 }

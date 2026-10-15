@@ -5,10 +5,13 @@ import { $, el, dash, wbtn, fill, table, list, uiDialog, closeDialog, uiConfirm,
   CONFIRM_COUNTDOWN, rowButton, rowClickable, goDetail } from '../core/dom.js';
 import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from '../core/const.js';
 import { api, soft, apiErrText, httpErrText,
-  errTextOf, rowsOf, pageWarn, softLoad, expandEndpoint, loadVSwitchStats,
+  errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
+import { renderSystemPage, renderPools, renderHugepagePools, renderInterfaces } from './overview.js';
+import { pickByName, notFoundText } from './network.js';
+import { cfgLockHolder } from './config.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
@@ -77,7 +80,7 @@ function renderIfaceDetail(iface, ifaces, params) {
 
 // dpdkAct 绑定/解绑：confirm=true 由界面带上（服务端要求，缺了会 400——这不是界面在放水，
 // 而是服务端对"会中断该口流量"的显式要求）。
-async function dpdkAct(bound) {
+export async function dpdkAct(bound) {
   const name = $('ifd-name').textContent;
   if (!name) { ifdMsg('没有选中接口。', true); return; }
   const uio = $('ifd-uio').value;
@@ -116,7 +119,7 @@ async function dpdkAct(bound) {
   await reload().catch(() => {});
 }
 
-async function sriovSet() {
+export async function sriovSet() {
   const name = $('ifd-name').textContent;
   if (!name) { ifdMsg('没有选中接口。', true); return; }
   const raw = $('ifd-vfs').value.trim();
@@ -461,7 +464,7 @@ function renderKernel(k) {
     : '运行实际与配置期望一致——无需写入基线。');
 }
 
-async function knlAct(action) {
+export async function knlAct(action) {
   const apply = action === 'apply';
   const ok = await uiConfirm(apply ? '写入内核基线' : '回退内核基线', {
     tier: 'mid',
@@ -807,7 +810,7 @@ async function usrPut(name, body, okText) {
 }
 
 // 建用户（POST /system/login-users）：确认词是**这次要建的用户名**。
-async function usrCreate(name, cls, pw) {
+export async function usrCreate(name, cls, pw) {
   const n = (name || '').trim();
   if (!n) { usrMsg('请先填用户名。', true); return; }
   if (!(pw || '').trim()) { usrMsg('新用户必须设置初始口令（服务端也要求非空）。', true); return; }
@@ -855,7 +858,7 @@ async function usrDelete(name) {
 // 改我自己的口令（POST /system/login-users/{me}:change-password）：要验旧口令。
 // `say` 是消息去处（缺省＝用户页的 #usr-msg）——顶栏「我的账号」入口复用这条处理器，
 // 但它的提示要落在自己的对话框里（决策 #147）。**一条处理器，两个入口**（不复制第二份实现）。
-async function usrMyPassword(oldPw, newPw, say) {
+export async function usrMyPassword(oldPw, newPw, say) {
   const emit = say || usrMsg;
   const me = getUser();
   if (!me) { emit('拿不到当前登录用户名，请刷新页面后重试。', true); return; }
@@ -897,7 +900,7 @@ function renderBannerCard(payload) {
   el.textContent = ok ? (banner || '（未设置）') : '（读取失败：' + (payload ? payload.__err : '未取到数据') + '）';
 }
 
-async function usrBannerSave() {
+export async function usrBannerSave() {
   const text = $('usr-banner-text').value;
   if (!(text || '').trim()) {
     usrMsg('请先填横幅文本；要清除现有横幅请点「清除横幅」。', true);
@@ -927,7 +930,7 @@ async function usrBannerSave() {
   await reload().catch(() => {});
 }
 
-async function usrBannerClear() {
+export async function usrBannerClear() {
   const block = await usrCandidateBlock();
   if (block) { usrMsg(block, true); return; } // 本会话在配置页有未提交候选：拒绝（同用户管理口径）
   const ok = await uiConfirm('清除登录横幅', {
@@ -958,14 +961,14 @@ async function usrBannerClear() {
 //   ② 口令控件只在提交那一刻读值，随后立即清空（不留在别处，也不进 sessionStorage）；
 //   ③ 分级确认按**高危**档（确认词＝当前登录用户名、10 秒倒计时、只读回显对应命令）；
 //   ④ 改完**不自动登出**，只提示用新口令重新登录；框随时可取消（点「取消」、点遮罩、按 Esc）。
-function acctMsg(text, isErr) {
+export function acctMsg(text, isErr) {
   const p = $('acct-msg');
   p.hidden = !text;
   p.textContent = text || '';
   p.className = isErr ? 'error small' : 'muted small';
 }
 
-function openAcct() {
+export function openAcct() {
   // 每次打开都从空开始：上一次的口令（哪怕是成功改过的）不留在控件里。
   $('acct-old').value = '';
   $('acct-new').value = '';
@@ -978,7 +981,7 @@ function openAcct() {
   if (first.focus) first.focus();
 }
 
-function closeAcct() {
+export function closeAcct() {
   $('acct-old').value = '';
   $('acct-new').value = '';
   acctMsg('', false);
@@ -1016,7 +1019,7 @@ function renderTLS(info) {
 const TLS_PEM_CERT_RE = /-----BEGIN CERTIFICATE-----/;
 const TLS_PEM_KEY_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
 
-async function tlsInstall(cert, key) {
+export async function tlsInstall(cert, key) {
   const c = (cert || '').trim();
   const k = (key || '').trim();
   if (!TLS_PEM_CERT_RE.test(c)) { tlsMsg('证书那一栏不是 PEM 文本（应以 -----BEGIN CERTIFICATE----- 开头）。', true); return; }
@@ -1050,7 +1053,7 @@ async function tlsInstall(cert, key) {
 }
 
 // 重签自签证书（原在「运维动作」页，随证书相关入口一并落到本页）。
-async function tlsRegenerate() {
+export async function tlsRegenerate() {
   const ok = await uiConfirm('重签自签证书', {
     tier: 'mid',
     bullets: [
