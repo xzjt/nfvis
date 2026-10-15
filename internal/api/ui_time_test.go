@@ -229,7 +229,7 @@ func TestUITimeRenderingIsUTC(t *testing.T) {
 }
 
 // uiFuncLinesIn = uiFuncLines 的文件内变体：函数不存在时返回 (0,0) 而不是 Fatal
-//（多文件扫描里「本文件没有这个函数」是常态）。
+// （多文件扫描里「本文件没有这个函数」是常态）。
 func uiFuncLinesIn(t *testing.T, masked, name string) (int, int) {
 	t.Helper()
 	if !strings.Contains(masked, "function "+name+"(") {
