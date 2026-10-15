@@ -37,9 +37,11 @@ var uiFiles = map[string]string{
 	"routes.json": "application/json; charset=utf-8",
 }
 
-// uiExtTypes novnc/ 子树（决策 #485：Web 内置 noVNC 查看器）按扩展名的 MIME 表。
+// uiExtTypes 子目录（novnc/ 与 js/）按扩展名的 MIME 表。
 // noVNC 是一组 ES 模块（core/*.js 相互相对 import、vendor/pako/*.js），逐个进白名单会
 // 变成一份随上游版本漂移的清单——故 novnc/ 子树改为「前缀 + 扩展名查表」放行。
+// js/ 同理（Web 控制台重构 2026-10：共享件 js/core/** 与视图 js/views/** 相互相对
+// import，逐个进白名单会随实现漂移）——同一口径放行。
 var uiExtTypes = map[string]string{
 	".js":   "text/javascript; charset=utf-8",
 	".mjs":  "text/javascript; charset=utf-8",
@@ -53,12 +55,12 @@ var uiExtTypes = map[string]string{
 }
 
 // uiContentType 解析静态资源的内容类型（命中即放行）。
-// 白名单文件用固定表；novnc/ 子树按扩展名查表。其余一律「未命中」→ 404。
+// 白名单文件用固定表；novnc/ 与 js/ 子树按扩展名查表。其余一律「未命中」→ 404。
 func uiContentType(name string) (string, bool) {
 	if ct, ok := uiFiles[name]; ok {
 		return ct, true
 	}
-	if !strings.HasPrefix(name, "novnc/") {
+	if !strings.HasPrefix(name, "novnc/") && !strings.HasPrefix(name, "js/") {
 		return "", false
 	}
 	// 防路径穿越：内嵌 FS 只含 ui/ 下的文件，但仍显式拒绝 `..`/空段，避免把 ../ 交给 ReadFile。
