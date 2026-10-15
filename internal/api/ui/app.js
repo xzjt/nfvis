@@ -45,7 +45,7 @@ const $ = (id) => document.getElementById(id);
 // ---------- 小工具 ----------
 
 // 全部用 textContent 落值（不用 innerHTML 拼数据），服务端返回的字符串因此不会变成标记。
-function el(tag, attrs, children) {
+export function el(tag, attrs, children) {
   const node = document.createElement(tag);
   for (const k in (attrs || {})) {
     if (k === 'text') node.textContent = attrs[k];
