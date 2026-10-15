@@ -1886,6 +1886,26 @@
   fulltest 业务地址写死、与「已声明同网段管理地址」的现场互斥，长期修法候选=参数化（见 `docs/v3待做.md` §三-30）。
   现场已还原（地址/池 3/2-5/VPP threads=2/两口 dpdk+up/无告警），dev 构建 3.0.19~dev1 留机。证据
   `docs/evidence/v3-round35-web-console-redesign-real-machine.txt`、截图 `docs/images/web-redesign-*.png`。
+- **v3 round36（手册截图全量重拍 + 抓出并热修 v3.0.19 跨模块 ReferenceError，2026-10-15）**：起因用户问
+  「Web 重构后 命令全表/用户手册 是否应整体重构」——评估结论：**全表不用动**（CLI 零变更、15 处 Web 字样
+  为三面同源佐证类、契约同步守护绿）；手册做**情补**（`adca8c0`：§10.12 左树五组口径 + 新增「部署向导」
+  小节 + 容器详情四栏【#357/#358 漏网】+ 面包屑样例；并统一 `routes.json` 6 条 compute 路由面包屑首段
+  「计算」→「虚拟机」）；**28 张控制台截图全部重拍**（`c9e2c32`：浅色新 UI、登录 1200×675 其余 1200×771、
+  演示现场 = vnf-a running/vnf-b shutoff/ct-web running/vs-l2·vs-l3/acl-web·pol-web/NAT 静态/web-probe
+  用户全生命周期；图注随实况更新三处）。**同轮黑盒回归（对象在场）抓出 v3.0.19 的真缺陷并热修（`253daff`）**：
+  `app.js` 拆分时 `VM_ACTIONS`（vms.js 导出 + containers/containerDetail/vmDetail 补 import）、`stripANSI`、
+  `bytes`/`opsMsg` 共 **6 处跨模块自由标识符缺口**——**有容器/VM 对象时三个页面整页失败**（零对象现场
+  触发不到循环体，round35 未暴露）；修复后 27 路由（含 4 详情页）零 JS 错。**守护加二层**：
+  `web-console-esm-link-check.mjs` 新增 **XREF**（跨模块自由标识符静态核对，白名单带理由），**红-绿**
+  注回缺陷即精确报红。**已发布 v3.0.20（热修）**：tag `v3.0.20` → **`v3 c9e2c32`**；`SOURCE_DATE_EPOCH=1792070268`；
+  deb `28710489…`（**11,156,902** 字节，+676KB＝28 张新截图随包）/ `.run` `a266ab1b…`（**185,880,408** 字节，
+  载荷 239 deb / 178M）两打逐字节一致、闭包自洽（239/838/313/178M）、结构自检 **18/0**；**发布件四套件
+  零失败**：fulltest **297/0/26**、语义 **43/0/0**、lifecycle **40/0/3**、pty **10/10**；**三处一致全部完成**
+  （`.run` 回下载首下两段截断经 `-C -` 续传补齐）。环境：nfvis-vm 装 **3.0.20**（演示现场已清场、前置撤管理
+  地址已 confirmed 还原、池 3/2-5、VPP threads=2、两口 up+dpdk、无告警）。证据
+  `docs/evidence/v3-round36-manual-screenshots-and-xref-hotfix.txt`。**教训入册**：**「对象在场」是黑盒回归的
+  必需分支**（零对象现场只能覆盖一半代码路径——本轮 bug 因此逃过 round35）；`link()` 挡「import 名不存在」、
+  挡不了「用了却没 import」——XREF 二层补位（两类盲区均自动化守护、各带红-绿）。
 - **已发布 v3.0.19（2026-10-15，round35：Web 控制台 Cisco 门户式重构）**：tag `v3.0.19` → **`v3 9889b5c`**
   （发布点＝PR #329 squash 合并；其上仅本轮发版记录提交；CI 双跑绿）；GitHub Release 四资产；
   `SOURCE_DATE_EPOCH=1792065486`；deb `f91dc040…`（10,480,822 字节）/ `.run` `b8b86e14…`（185,202,564 字节，
