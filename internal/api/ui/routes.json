@@ -21,7 +21,6 @@
       "title": "虚拟机",
       "view": "vms",
       "breadcrumb": [
-        "计算",
         "虚拟机"
       ],
       "group": "虚拟机",
@@ -36,7 +35,6 @@
       "view": "vmDetail",
       "detail": true,
       "breadcrumb": [
-        "计算",
         "虚拟机"
       ],
       "group": "虚拟机",
@@ -51,7 +49,7 @@
       "title": "容器",
       "view": "containers",
       "breadcrumb": [
-        "计算",
+        "虚拟机",
         "容器"
       ],
       "group": "虚拟机",
@@ -66,7 +64,7 @@
       "view": "containerDetail",
       "detail": true,
       "breadcrumb": [
-        "计算",
+        "虚拟机",
         "容器"
       ],
       "group": "虚拟机",
@@ -80,7 +78,7 @@
       "title": "镜像",
       "view": "images",
       "breadcrumb": [
-        "计算",
+        "虚拟机",
         "镜像"
       ],
       "group": "虚拟机",
@@ -114,7 +112,7 @@
       "view": "imageDetail",
       "detail": true,
       "breadcrumb": [
-        "计算",
+        "虚拟机",
         "镜像"
       ],
       "group": "虚拟机",
