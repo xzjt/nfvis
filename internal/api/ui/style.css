@@ -1,17 +1,19 @@
-/* NFViS 控制台样式（只读总览）。
-   无外部字体/图标依赖：页面在气隙环境也要能看。 */
+/* NFViS 控制台样式（浅色主题，参考 Cisco NFVIS 门户取色：白底、Cisco 蓝主色）。
+   无外部字体/图标依赖：页面在气隙环境也要能看。
+   历史备注：v3 前为深色运维风（--bg:#0f1720 族），2026-10 Web 控制台重构时整体换套。 */
 
 :root {
-  --bg: #0f1720;
-  --panel: #16202b;
-  --panel-2: #1c2836;
-  --line: #2a3947;
-  --fg: #e6edf3;
-  --muted: #93a4b5;
-  --accent: #4aa3df;
-  --ok: #3fb950;
-  --warn: #d29922;
-  --err: #f85149;
+  --bg: #f4f6f9;
+  --panel: #ffffff;
+  --panel-2: #f8fafc;
+  --line: #d9dee5;
+  --fg: #1a2b3c;
+  --muted: #5f7183;
+  --accent: #049fd9;
+  --accent-hover: #0281b0;
+  --ok: #03804b;
+  --warn: #9a6a00;
+  --err: #b32d21;
 }
 
 * { box-sizing: border-box; }
@@ -39,10 +41,10 @@ p { margin: 6px 0; }
 /* 页面容器（hash 路由：一次只显示一页，页内卡片沿用原来的栅格排布） */
 .page { display: grid; gap: 14px; grid-column: 1 / -1; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
 /* 必须显式写 [hidden]：作者样式（display: grid）会盖掉 UA 的 [hidden] { display: none }，
-   不写的话 13 页会全部同时显示（与登录卡片同一条教训）。 */
+   不写的话 33 页会全部同时显示（与登录卡片同一条教训）。 */
 .page[hidden] { display: none; }
 
-/* 顶栏导航（按面包屑首段分组）与面包屑 */
+/* 顶栏导航（旧容器，已被左侧树取代；元素保留只为不破守护锚点） */
 .nav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; }
 .nav a { color: var(--muted); text-decoration: none; font-size: 13px; padding: 2px 4px; border-radius: 4px; }
 .nav a:hover { color: var(--accent); }
@@ -50,6 +52,37 @@ p { margin: 6px 0; }
 .nav-group { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
 .nav-title { color: var(--muted); font-size: 12px; }
 .crumb { color: var(--muted); font-size: 12px; }
+
+/* 骨架：顶栏 + 左侧导航树 + 内容区（Cisco 门户式布局） */
+.topbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  position: sticky; top: 0; z-index: 20;
+}
+.shell { display: flex; min-height: calc(100vh - 49px); }
+.sidebar {
+  width: 220px; flex: 0 0 220px; background: var(--panel);
+  border-right: 1px solid var(--line); padding: 10px 8px; overflow-y: auto;
+}
+body.sb-collapsed .sidebar { display: none; }
+.content { flex: 1; padding: 14px 18px; min-width: 0; }
+
+/* 左侧导航树（router.js 按 group 渲染）：组头可折叠（aria-expanded），项高亮用 aria-current */
+.nav-tree-group { margin: 2px 0 10px; }
+.nav-tree-head {
+  display: flex; width: 100%; align-items: center; justify-content: space-between;
+  background: none; border: 0; color: var(--muted); font-size: 12px; font-weight: 600;
+  padding: 6px 8px; cursor: pointer; letter-spacing: .04em;
+}
+.nav-tree-head:hover { color: var(--accent); }
+.nav-tree-head .caret { transition: transform .12s; }
+.nav-tree-head[aria-expanded="false"] .caret { transform: rotate(-90deg); }
+.nav-tree-items a {
+  display: block; color: var(--fg); text-decoration: none;
+  font-size: 13.5px; padding: 6px 10px; border-radius: 6px;
+}
+.nav-tree-items a:hover { background: var(--panel-2); color: var(--accent); }
+.nav-tree-items a[aria-current="page"] { background: #e6f7fd; color: var(--accent-hover); font-weight: 600; }
 
 /* 登录 */
 /* flex-direction: column 是必须的：横幅与登录卡是 .login-wrap 的两个子元素，
@@ -65,27 +98,24 @@ p { margin: 6px 0; }
 .login-card {
   width: 340px; padding: 26px; border: 1px solid var(--line);
   border-radius: 10px; background: var(--panel);
+  box-shadow: 0 2px 10px rgba(16, 35, 47, .06);
 }
 .login-card label { display: block; margin: 12px 0 4px; color: var(--muted); font-size: 13px; }
 .login-card input {
   width: 100%; padding: 9px 10px; border: 1px solid var(--line);
-  border-radius: 6px; background: var(--bg); color: var(--fg); font-size: 14px;
+  border-radius: 6px; background: #fff; color: var(--fg); font-size: 14px;
 }
 .login-card input:focus { outline: none; border-color: var(--accent); }
 .login-card button {
   width: 100%; margin-top: 18px; padding: 10px; border: 0; border-radius: 6px;
-  background: var(--accent); color: #06121c; font-size: 15px; font-weight: 600; cursor: pointer;
+  background: var(--accent); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
 }
+.login-card button:hover { background: var(--accent-hover); }
 .login-card button:disabled { opacity: .6; cursor: default; }
 
 /* 顶栏 */
-.topbar {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
-  flex-wrap: wrap;
-}
 .brand { display: flex; align-items: baseline; gap: 10px; }
-.topbar-right { display: flex; align-items: center; gap: 10px; }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 button.ghost {
   padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px;
   background: transparent; color: var(--fg); cursor: pointer; font-size: 13px;
@@ -93,18 +123,19 @@ button.ghost {
 button.ghost:hover { border-color: var(--accent); color: var(--accent); }
 
 .pill { padding: 3px 9px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
-.pill-ok { color: var(--ok); border-color: var(--ok); }
-.pill-warn { color: var(--warn); border-color: var(--warn); }
+.pill-ok { color: var(--ok); border-color: var(--ok); background: #e7f6ee; }
+.pill-warn { color: var(--warn); border-color: var(--warn); background: #fdf4e0; }
 .pill-idle { color: var(--muted); }
 
 /* 卡片栅格 */
 .grid {
-  display: grid; gap: 14px; padding: 16px;
+  display: grid; gap: 14px; padding: 0;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
 }
 .card {
   padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
   min-width: 0;
+  box-shadow: 0 1px 2px rgba(16, 35, 47, .05);
 }
 .card.wide { grid-column: 1 / -1; }
 
@@ -135,7 +166,7 @@ ul.events li { margin-bottom: 4px; }
 /* 配置卡片（candidate → 提交） */
 pre.code {
   margin: 8px 0; padding: 10px 12px; max-height: 320px; overflow: auto;
-  background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  background: #0f1720; color: #dce7f0; border: 1px solid var(--line); border-radius: 6px;
   font: 12px/1.5 Consolas, "Courier New", monospace; white-space: pre;
 }
 /* 内置 VNC 查看器画布容器（noVNC 在容器内自建 canvas；相对定位 + 固定高度供 scaleViewport 适配）。 */
@@ -147,13 +178,13 @@ pre.code {
    （否则用户只看到黑屏、没有任何解释）。 */
 .vnc-notice {
   margin: 8px 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px;
-  background: var(--bg); font: 12px/1.5 Consolas, "Courier New", monospace; white-space: pre-wrap;
+  background: var(--panel-2); font: 12px/1.5 Consolas, "Courier New", monospace; white-space: pre-wrap;
 }
 .vnc-notice.err { border-color: var(--err); color: var(--err); }
 #cfg-details summary, #cfg-raw-wrap summary { cursor: pointer; }
 #cfg-edit textarea {
   width: 100%; margin-top: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 6px;
-  background: var(--bg); color: var(--fg); font: 12px/1.5 Consolas, "Courier New", monospace;
+  background: #fff; color: var(--fg); font: 12px/1.5 Consolas, "Courier New", monospace;
   resize: vertical;
 }
 .cfg-forms { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin: 8px 0; }
@@ -162,7 +193,7 @@ pre.code {
 .cfg-forms label { display: block; margin: 8px 0 3px; color: var(--muted); font-size: 12px; }
 .cfg-forms input {
   width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
-  background: var(--bg); color: var(--fg); font-size: 13px;
+  background: #fff; color: var(--fg); font-size: 13px;
 }
 .cfg-forms input:focus { outline: none; border-color: var(--accent); }
 .cfg-sub { border-top: 1px dashed var(--line); padding-top: 6px; margin-top: 8px; }
@@ -173,7 +204,7 @@ pre.code {
 .cfg-forms .cfg-wide { grid-column: 1 / -1; }
 .cfg-forms select, .cfg-forms textarea {
   width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
-  background: var(--bg); color: var(--fg); font-size: 13px;
+  background: #fff; color: var(--fg); font-size: 13px;
 }
 .cfg-forms textarea { font: 12px/1.5 Consolas, "Courier New", monospace; resize: vertical; }
 .cfg-forms select:focus, .cfg-forms textarea:focus { outline: none; border-color: var(--accent); }
@@ -189,9 +220,10 @@ pre.code {
 .cfg-add label { margin: 0 0 3px; }
 .cfg-add input { max-width: 240px; }
 .cfg-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-.cfg-actions button { padding: 6px 12px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: #06121c; cursor: pointer; font-size: 13px; font-weight: 600; }
+.cfg-actions button { padding: 6px 12px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; font-size: 13px; font-weight: 600; }
+.cfg-actions button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .cfg-actions button.ghost { background: transparent; color: var(--fg); border-color: var(--line); font-weight: 400; }
-.cfg-actions button.ghost:hover { border-color: var(--accent); color: var(--accent); }
+.cfg-actions button.ghost:hover { background: transparent; border-color: var(--accent); color: var(--accent); }
 
 /* 行内动作按钮（虚拟机生命周期）与危险动作（电源类） */
 td.actions { white-space: nowrap; }
@@ -199,15 +231,17 @@ td.actions button { margin-right: 4px; }
 button.small { padding: 3px 8px; font-size: 12px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--fg); cursor: pointer; }
 button.small:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 button.small:disabled { opacity: 0.45; cursor: not-allowed; }
-button.danger { background: #b3261e; border-color: #b3261e; color: #fff; }
+button.danger, button.primary { background: #b3261e; border-color: #b3261e; color: #fff; }
 button.danger:hover { background: #cf3a31; border-color: #cf3a31; }
+button.primary { background: var(--accent); border-color: var(--accent); }
+button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 /* 行内危险动作（如「回滚到这一版」）：悬停时保持红底——否则 button.small:hover 的
    「透明底 + 主题色文字」会盖掉红色，标红的意义就没了。 */
 button.small.danger, button.small.danger:hover:not(:disabled) { background: #b3261e; border-color: #b3261e; color: #fff; }
 
 /* 网络对象：多块只读小表并排 */
 .net-objects { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
-.net-object h3 { margin: 4px 0 6px; font-size: 13px; color: var(--accent); }
+.net-object h3 { margin: 4px 0 6px; font-size: 13px; color: var(--accent-hover); }
 .net-object table { width: 100%; }
 
 /* 审计日志：只让"详情"列折行，其余列保持单行（否则时间/用户/结果会被挤成竖排） */
@@ -226,6 +260,13 @@ button.small.danger, button.small.danger:hover:not(:disabled) { background: #b32
 }
 .tabs .tab:hover { color: var(--accent); }
 .tabs .tab[aria-selected="true"] { color: var(--fg); background: var(--panel-2); border-color: var(--line); }
+/* 部署向导的分步条（#dep-steps 复用 .tabs 布局）：按钮非 .tab 类，给基础外观。 */
+.tabs button:not(.tab) {
+  padding: 6px 12px; border: 1px solid transparent; border-bottom: 0; border-radius: 6px 6px 0 0;
+  background: transparent; color: var(--muted); cursor: pointer; font-size: 13px;
+}
+.tabs button:not(.tab):hover { color: var(--accent); }
+.tabs button:not(.tab)[aria-current="step"] { color: var(--accent-hover); font-weight: 600; border-color: var(--line); background: var(--panel-2); }
 .tab-panel { padding-top: 10px; }
 
 /* 列表行可点进详情：整行给出手型与悬停底色（行内按钮各自 stopPropagation，不会误触） */
@@ -242,7 +283,7 @@ td.st-crit { color: var(--err); }
 .crumb a:hover { color: var(--accent); border-bottom-color: var(--accent); }
 
 /* 正文里的页间链接（如「配置」页顶部的「提交历史」「编辑锁会话」） */
-.card a { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); }
+.card a { color: var(--accent-hover); text-decoration: none; border-bottom: 1px dotted var(--accent-hover); }
 .card a:hover { border-bottom-style: solid; }
 
 /* 提交历史 / 编辑锁会话：除注释与长文本列外保持单行（否则时间与 Rev 会被挤成竖排） */
@@ -253,11 +294,12 @@ td.st-crit { color: var(--err); }
 /* 分级确认对话框：遮罩 + 面板；主按钮标红由 button.danger 给出（中危与高危动作）。 */
 .modal {
   position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
-  padding: 20px; background: rgba(6, 12, 18, .68);
+  padding: 20px; background: rgba(16, 35, 47, .45);
 }
 .modal-box {
   width: min(620px, 100%); max-height: 86vh; overflow: auto;
   padding: 16px 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+  box-shadow: 0 8px 30px rgba(16, 35, 47, .18);
 }
 .modal-box h3 { margin: 0 0 8px; color: var(--fg); font-size: 15px; }
 .modal-box p { margin: 6px 0; }
@@ -269,7 +311,7 @@ td.st-crit { color: var(--err); }
 /* 高危档的闸门区：确认词输入框 + 倒计时提示。整块内容由 app.js 现建，这里只管样式。 */
 .modal-box #modal-guard {
   margin: 10px 0 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
-  background: rgba(255, 255, 255, .04);
+  background: var(--panel-2);
 }
 .modal-box #modal-word { width: 100%; margin: 6px 0 2px; font: 13px/1.4 Consolas, "Courier New", monospace; }
 .modal-box #modal-count { margin: 6px 0 0; }
@@ -278,14 +320,40 @@ td.st-crit { color: var(--err); }
 /* 闸门没放行时主按钮必须看起来就是点不动的（禁用态）。 */
 .modal-box button:disabled { opacity: .5; cursor: not-allowed; }
 
-/* 导航：组名（计算/网络/系统/配置/运维）与可点项在视觉上分开——组名不可点、更弱、组间留白 */
-.nav { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
-.nav-group { display: inline-flex; align-items: center; gap: 4px 8px; padding-left: 10px; border-left: 1px solid rgba(255, 255, 255, .18); }
-.nav-title { opacity: .55; font-size: .85em; letter-spacing: .04em; }
-.nav a { text-decoration: none; padding: 2px 4px; border-radius: 4px; }
-.nav a:hover { text-decoration: underline; }
-.nav a[aria-current="page"] { font-weight: 600; text-decoration: underline; }
-.crumb { opacity: .7; font-size: .9em; }
+/* 历史趋势页（#/system/metrics，决策 #356）：只读页——控件条、内联 SVG 折线与图例。
+   图表无外部库（免构建）：一条序列一条 polyline，配色循环取 --accent 系的近似色。 */
+.mh-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.mh-controls label { color: var(--muted); font-size: 12px; }
+.mh-controls select {
+  padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: #fff; color: var(--fg); font-size: 13px; max-width: 340px;
+}
+.mh-chart { margin-top: 8px; }
+.mh-svg { width: 100%; height: auto; display: block; }
+.mh-axis { stroke: var(--line); stroke-width: 1; }
+.mh-tick { fill: var(--muted); font-size: 11px; }
+.mh-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; }
+.mh-legend-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.mh-swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+
+/* 部署向导（#/deploy）：类型选择卡与网卡映射表。
+   拓扑预览是静态 SVG 示意（连线 = 网卡 → 交换机），不可拖拽编辑。 */
+.dep-type-row { display: flex; gap: 12px; margin: 10px 0; }
+button.dep-type {
+  flex: 0 0 220px; padding: 18px 16px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel-2); color: var(--fg); font-size: 15px; font-weight: 600; cursor: pointer;
+}
+button.dep-type:hover { border-color: var(--accent); color: var(--accent); }
+#page-deploy label { display: block; margin: 10px 0 3px; color: var(--muted); font-size: 12px; }
+#page-deploy input, #page-deploy select {
+  padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
+  background: #fff; color: var(--fg); font-size: 13px; max-width: 340px;
+}
+#page-deploy input:focus, #page-deploy select:focus { outline: none; border-color: var(--accent); }
+#page-deploy label input[type="checkbox"] { width: auto; margin-right: 6px; }
+#dep-nic-table td { vertical-align: middle; padding-right: 6px; }
+#dep-nic-table input, #dep-nic-table select { max-width: 160px; }
+.dep-topo { margin: 10px 0; padding: 8px; border: 1px dashed var(--line); border-radius: 8px; background: var(--panel-2); }
 
 /* 角色渲染（决策 #145，设计 §8）：read-only 账号只看到只读部分。
    写/运维入口一律带 data-write（静态的在 index.html 上打标、动态的经 wbtn 生成），
@@ -299,22 +367,6 @@ body.role-readonly [data-write] { display: none !important; }
    operator 仍可用的少数 O 级入口（连通性测试、core dump 清单导出）显式带 data-op，
    由 :not() 放行；其余未带 data-op 的写入口对非 super-user 一律隐藏（缺省收紧，宁可少放）。 */
 body.role-nonsuper [data-write]:not([data-op]) { display: none !important; }
-
-/* 历史趋势页（#/system/metrics，决策 #356）：只读页——控件条、内联 SVG 折线与图例。
-   图表无外部库（免构建）：一条序列一条 polyline，配色循环取 --accent 系的近似色。 */
-.mh-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
-.mh-controls label { color: var(--muted); font-size: 12px; }
-.mh-controls select {
-  padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
-  background: var(--bg); color: var(--fg); font-size: 13px; max-width: 340px;
-}
-.mh-chart { margin-top: 8px; }
-.mh-svg { width: 100%; height: auto; display: block; }
-.mh-axis { stroke: var(--line); stroke-width: 1; }
-.mh-tick { fill: var(--muted); font-size: 11px; }
-.mh-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; }
-.mh-legend-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
-.mh-swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
 
 /* read-only 落在写页上（深链/收藏）时的说明条：讲清"为什么这页是空的、该找谁"。 */
 #role-notice { display: none; }

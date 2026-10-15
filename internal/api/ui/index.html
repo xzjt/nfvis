@@ -25,14 +25,15 @@
   </form>
 </section>
 
-<!-- 总览视图 -->
+<!-- 总览视图（Cisco NFVIS 门户式骨架：顶栏 + 左侧导航树 + 内容区） -->
 <section id="main-view" hidden>
   <header class="topbar">
+    <!-- ☰ 折叠左侧导航树（窄屏/专注模式）；接线与记忆在 router.js。 -->
+    <button id="sb-toggle" type="button" class="ghost" aria-label="折叠/展开导航">☰</button>
     <div class="brand">
       <strong>NFViS 控制台</strong>
       <span id="host-line" class="muted"></span>
     </div>
-    <nav id="nav" class="nav" aria-label="主导航"></nav>
     <div id="crumb" class="crumb" aria-label="面包屑"></div>
     <div class="topbar-right">
       <span id="stream-state" class="pill pill-idle">实时通道：连接中</span>
@@ -46,13 +47,22 @@
     </div>
   </header>
 
-  <p id="global-error" class="error" hidden></p>
-  <p id="route-notice" class="error" hidden></p>
-  <!-- 角色说明（决策 #145）：read-only 账号落在"写页"上时讲清为什么这页没有动作入口。
-       显示/隐藏由 style.css 的 body.role-readonly 规则决定，文案由 router.js 按页填。 -->
-  <p id="role-notice" class="muted small"></p>
+  <div class="shell">
+    <!-- 左侧导航树：内容由 router.js 按 routes.json 的 group 分组渲染（Cisco 门户式信息架构）。 -->
+    <aside id="sidebar" class="sidebar">
+      <nav id="nav-tree" aria-label="主导航"></nav>
+    </aside>
 
-  <div class="grid">
+    <main class="content">
+      <!-- 旧顶栏导航容器：重构后由 #nav-tree 取代，保留元素只为不破既有守护锚点（router.js 不再写它）。 -->
+      <nav id="nav" class="nav" aria-label="主导航" hidden></nav>
+      <p id="global-error" class="error" hidden></p>
+      <p id="route-notice" class="error" hidden></p>
+      <!-- 角色说明（决策 #145）：read-only 账号落在"写页"上时讲清为什么这页没有动作入口。
+           显示/隐藏由 style.css 的 body.role-readonly 规则决定，文案由 router.js 按页填。 -->
+      <p id="role-notice" class="muted small"></p>
+
+      <div class="grid">
     <section class="page" id="page-overview" hidden>
     <article class="card">
       <h2>系统</h2>
@@ -1162,6 +1172,9 @@
     </article>
     </section>
 
+  </div>
+
+    </main>
   </div>
 
   <footer class="foot muted">
