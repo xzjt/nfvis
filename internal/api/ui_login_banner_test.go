@@ -24,11 +24,7 @@ func TestUILoginBannerRenderWiring(t *testing.T) {
 		t.Fatalf("读取 ui/index.html: %v", err)
 	}
 	html := string(htmlB)
-	jsB, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
-	js := string(jsB)
+	js := jsAll(t)
 
 	// ① 登录页横幅块：必须在登录表单之前（表单上方），否则改文案顺序会静默把它挪到表单下。
 	bi := strings.Index(html, `id="login-banner"`)

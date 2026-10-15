@@ -182,7 +182,7 @@ func TestUIOpsFamilyWriteControlClasses(t *testing.T) {
 // 唯一一条"写动作却用 el('button') 生成"的：镜像列表的「删除」（DELETE /images/{name}，
 // super-user 级）——read-only/operator 都能看到并按下去得 403，违反 #324/#141。已改为 wbtn。
 func TestUIDynamicWriteEntriesUseWbtn(t *testing.T) {
-	app := readUITestAsset(t, "app.js")
+	app := jsAll(t)
 
 	// 镜像列表的「删除」：必须经 wbtn（带 data-write）。
 	if !strings.Contains(app, "rowButton(wbtn({ type: 'button', class: 'danger small', text: '删除' }))") {

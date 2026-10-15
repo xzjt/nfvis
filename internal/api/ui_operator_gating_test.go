@@ -36,7 +36,7 @@ func readUITestAsset(t *testing.T, name string) string {
 
 func TestUIConsoleOperatorGating(t *testing.T) {
 	css := readUITestAsset(t, "style.css")
-	app := readUITestAsset(t, "app.js")
+	app := jsAll(t)
 	html := readUITestAsset(t, "index.html")
 
 	// ① 机制三件套：CSS 规则、applyRole 切类、role-nonsuper 字样。

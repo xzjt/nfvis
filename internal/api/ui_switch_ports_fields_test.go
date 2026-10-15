@@ -62,11 +62,7 @@ func switchPortViewSchemaPropsFromOpenapi(t *testing.T) (props map[string]bool, 
 // 运行态字段必须都在契约里，且是**条件字段**（取不到不出现，不得进 required）。
 func TestUISwitchPortTableFieldsExistInContract(t *testing.T) {
 	props, requiredLine := switchPortViewSchemaPropsFromOpenapi(t)
-	src, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
-	text := string(src)
+	text := jsAll(t)
 
 	// ① 行内运行态列优先判断（决策 #444）：`const hasRowRT = p.admin !== undefined || …`。
 	prioStart := strings.Index(text, "const hasRowRT")

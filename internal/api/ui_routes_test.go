@@ -179,13 +179,11 @@ func TestUIRoutesAreConsistent(t *testing.T) {
 		}
 	}
 
-	app, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
+	// VIEWS 注册表按域拆在 js/views/ 各文件（app.js 聚合）：搜全部自有 js。
+	appAll := jsAll(t)
 	for _, r := range routes {
-		if !strings.Contains(string(app), "'"+r.View+"':") {
-			t.Errorf("路由 %q 的 view %q 在 app.js 的 VIEWS 注册表里找不到（键名要写成带引号的形式）", r.Path, r.View)
+		if !strings.Contains(appAll, "'"+r.View+"':") {
+			t.Errorf("路由 %q 的 view %q 在前端 js 的 views 注册表里找不到（键名要写成带引号的形式）", r.Path, r.View)
 		}
 	}
 }
@@ -238,10 +236,7 @@ func TestUIConsoleRoleGating(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取 ui/style.css: %v", err)
 	}
-	app, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
+	appAll := jsAll(t)
 	router, err := os.ReadFile("ui/router.js")
 	if err != nil {
 		t.Fatalf("读取 ui/router.js: %v", err)
@@ -290,11 +285,11 @@ func TestUIConsoleRoleGating(t *testing.T) {
 		t.Errorf("顶栏「我的账号」入口被打上了 data-write：%s——只读账号会看不到它，自助改密入口就没了", btn)
 	}
 	//    两步（表单 + 高危确认）缺一个就点不通：处理器、开/关函数与对话框骨架都要在源码里。
-	if !strings.Contains(string(app), "$('account-btn').addEventListener('click', openAcct)") {
-		t.Error("app.js 里顶栏「我的账号」入口没有接到 openAcct（点了不会有反应）")
+	if !strings.Contains(appAll, "$('account-btn').addEventListener('click', openAcct)") {
+		t.Error("前端 js 里顶栏「我的账号」入口没有接到 openAcct（点了不会有反应）")
 	}
-	if !strings.Contains(string(app), "function openAcct(") || !strings.Contains(string(app), "function closeAcct(") {
-		t.Error("app.js 缺少 openAcct / closeAcct（「我的账号」框的开与关）")
+	if !strings.Contains(appAll, "function openAcct(") || !strings.Contains(appAll, "function closeAcct(") {
+		t.Error("前端 js 缺少 openAcct / closeAcct（「我的账号」框的开与关）")
 	}
 	for _, id := range []string{`id="acct"`, `id="acct-old"`, `id="acct-new"`, `id="acct-submit"`} {
 		if !strings.Contains(string(html), id) {
@@ -309,11 +304,7 @@ func TestUIConsoleRoleGating(t *testing.T) {
 // 真机 round88 现场（1.1.49）：vs-wan 有两条静态路由，该列显示 "[object Object],[object Object]"，
 // 而详情页同一数据用 .length 是正常的——列表与详情两处口径不一致。
 func TestNetworkObjectsVrfRouteCountRendersNumber(t *testing.T) {
-	app, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
-	src := string(app)
+	src := jsAll(t)
 	if strings.Contains(src, "v.routes != null ? v.routes : undefined") {
 		t.Error("VRF 列表的「路由数」列仍在直接塞对象数组（会渲染成 [object Object]）：应取 v.routes.length")
 	}

@@ -83,10 +83,7 @@ func jsObjFields(src, obj string) []string {
 }
 
 func TestUIQosCardFieldsExistInContract(t *testing.T) {
-	src, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
+	src := jsAll(t)
 	text := string(src)
 
 	// 卡片行：NET_OBJECT_VIEWS 里锚定 'QoS 策略' 的一行（保持单行书写；

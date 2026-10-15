@@ -449,7 +449,7 @@ func TestHugepageStateTextUnder(t *testing.T) {
 
 // 决策 #479：Web「资源池」页的大页池卡状态映射同样补 under 档（与 CLI/契约同措辞）。
 func TestUIHugepageStateUnderText(t *testing.T) {
-	app := readUITestAsset(t, "app.js")
+	app := jsAll(t)
 	start := strings.Index(app, "const hpState = (s) => ({")
 	if start < 0 {
 		t.Fatal("app.js 找不到 hpState 映射（守护锚点变了？）")

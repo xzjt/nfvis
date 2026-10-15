@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -65,4 +66,19 @@ func uiJSSortedNames(m map[string]string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// jsAll 拼接全部自有前端 js（按文件名排序）——拆分后接线散在 core/views/boot 各文件，
+// 「搜 app.js」的守护一律改搜拼接域（断言文本不变，命中面变全量）。
+// 注意：拼接会引入重复的 import 语句文本——按「完整接线行」断言的用例不受影响
+// （import 行不是它们的目标）。
+func jsAll(t *testing.T) string {
+	t.Helper()
+	m := uiJSFiles(t)
+	var b strings.Builder
+	for _, n := range uiJSSortedNames(m) {
+		b.WriteString(m[n])
+		b.WriteString("\n")
+	}
+	return b.String()
 }
