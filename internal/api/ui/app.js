@@ -21,440 +21,33 @@
 // Authorization，故这里用 fetch + 流式读取手工解析 SSE 帧（同样走头部传 token，
 // 不把 token 放进 URL——URL 会进日志与浏览器历史）。流断了就按当前页声明的节奏轮询。
 
-const API = location.pathname.replace(/\/ui\/.*$/, '') || '/api/v1';
-const TOKEN_KEY = 'nfvis.token';
-const USER_KEY = 'nfvis.user';
-const MAX_EVENTS = 20;
-const MAX_IFACE_DETAIL = 12;
+import { $, el, dash, wbtn, fill, table, list, uiDialog, closeDialog, uiConfirm,
+  CONFIRM_COUNTDOWN, rowButton, rowClickable, goDetail } from './js/core/dom.js';
+import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from './js/core/const.js';
+import { api, soft, apiErrText, httpErrText,
+  errTextOf, rowsOf, pageWarn, softLoad, expandEndpoint, loadVSwitchStats,
+  loadNetworkObjects, loadInterfaceStats } from './js/core/api.js';
+import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
+  portSecText, stormControlText } from './js/core/format.js';
+import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
+  getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
+  armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
+  showGlobalError, setCfgEditingProbe } from './js/core/state.js';
+// （共享件已拆至 js/core/；本文件保留各 view 域的实现与 VIEWS 注册表，Task 5 再拆 views。）
 
-let token = sessionStorage.getItem(TOKEN_KEY) || '';
-// 当前登录用户名（接口来源的会话持有者记作 `用户@api`，配置页据此判断候选是不是本会话的）。
-let currentUser = '';
-// 当前登录账号的权限类（决策 #304：非 super-user 只看得到自己所属 class 的「生效权限」入口）。
-let currentClass = '';
-let pollTimer = null;
-let pollRoute = null;      // 当前路由（轮询节奏取它声明的 poll）
-let pollPath = '';         // 已武装的路由地址（同一页的重复渲染不重置计时器）
-let pollFallback = false;  // 只在实时通道断了之后才轮询
-let streamAbort = null;
-let reloadTimer = null;
-let events = [];
+// router.js 要用本文件的 VIEWS 与取数助手，本文件要用它的 render/navigate。
+// 按需动态 import：静态互相 import 会形成环，对两边的求值顺序有隐含要求。
+const routerModule = () => import('./router.js');
 
-const $ = (id) => document.getElementById(id);
-
-// ---------- 小工具 ----------
-
-// 全部用 textContent 落值（不用 innerHTML 拼数据），服务端返回的字符串因此不会变成标记。
-export function el(tag, attrs, children) {
-  const node = document.createElement(tag);
-  for (const k in (attrs || {})) {
-    if (k === 'text') node.textContent = attrs[k];
-    else if (k === 'class') node.className = attrs[k];
-    else node.setAttribute(k, attrs[k]);
-  }
-  (children || []).forEach((c) => node.appendChild(c));
-  return node;
+// 重新渲染**当前路由**：SSE 事件到达、轮询、动作完成、点顶栏「刷新」都走这里。
+export async function reload() {
+  return (await routerModule()).render();
 }
 
-const dash = (v) => (v === undefined || v === null || v === '' ? '—' : v);
 
-// wbtn：**动态生成的写/运维入口**（决策 #145，设计 §8）——带 `data-write` 标记，
-// read-only 账号下由 CSS 隐藏（见 style.css 的 body.role-readonly 规则）。
-// 只用于"会改状态或需要 O 级以上"的动作；读类（详情/刷新/下载/看差异）仍用 el()。
-const wbtn = (opts) => el('button', Object.assign({ 'data-write': '' }, opts));
 
-function fill(dl, pairs) {
-  dl.textContent = '';
-  pairs.forEach(([k, v]) => {
-    dl.appendChild(el('dt', { text: k }));
-    dl.appendChild(el('dd', { text: String(dash(v)) }));
-  });
-}
 
-function table(tbody, cols, rows) {
-  tbody.textContent = '';
-  if (!rows.length) {
-    const tr = el('tr');
-    tr.appendChild(el('td', { colspan: String(cols), class: 'muted', text: '（无）' }));
-    tbody.appendChild(tr);
-    return;
-  }
-  rows.forEach((cells) => {
-    const tr = el('tr');
-    cells.forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
-    tbody.appendChild(tr);
-  });
-}
 
-function uptime(sec) {
-  if (sec === undefined || sec === null) return undefined;
-  const s = Math.floor(Number(sec));
-  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
-  return (d ? d + ' 天 ' : '') + h + ' 小时 ' + m + ' 分';
-}
-
-function bytes(n) {
-  if (n === undefined || n === null) return undefined;
-  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0, v = Number(n);
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return (i === 0 ? v : v.toFixed(1)) + ' ' + u[i];
-}
-
-function pct(ratio) {
-  if (ratio === undefined || ratio === null) return undefined;
-  return (Number(ratio) * 100).toFixed(1) + '%';
-}
-
-// portSecText：接口端口安全白名单的只读摘要（决策 #389）。白名单非空即启用；
-// 未配置（空/缺省）回 undefined ⇒ 该行如实显示「—」（与同页其它未配置项一致）。
-function portSecText(ps) {
-  if (!Array.isArray(ps) || ps.length === 0) return undefined;
-  return ps.length + ' 条：' + ps.join(' ') + '（白名单外源 MAC 丢弃）';
-}
-
-// stormControlText：接口入向风暴抑制的只读摘要（决策 #385）。只列已配置的类
-// （字段缺省＝该类未配置）；两类都没配时回 undefined ⇒ 该行如实显示「—」
-// （与同页「入向/出向限速策略」等未配置项一致），不编造「0 kbps」。
-function stormControlText(sc) {
-  if (!sc || typeof sc !== 'object') return undefined;
-  const parts = [];
-  if (sc.broadcast_kbps) parts.push('广播 ' + sc.broadcast_kbps + ' kbps');
-  if (sc.multicast_kbps) parts.push('组播 ' + sc.multicast_kbps + ' kbps');
-  return parts.length ? parts.join(' / ') + '（入向，超速丢弃）' : undefined;
-}
-
-function mb(n) {
-  if (n === undefined || n === null) return undefined;
-  return Number(n) >= 1024 ? (Number(n) / 1024).toFixed(1) + ' GB' : n + ' MB';
-}
-
-// **记录类**绝对时间的统一渲染（形状与 CLI 对齐）：`2026-09-25 01:24:22 UTC`。
-//
-// 为什么一律按 UTC 并带显式标记：控制台的设计目标之一是「与 CLI 工单对照」（确认框里就回显
-// 等价的命令行语句），而审计/告警/归档这类时间还要与 `journalctl`（UTC）核对——三者必须同一
-// 口径。此前用浏览器本地时区渲染（`toLocaleString()`），同一台机上控制台会比 `show log audit`
-// 差一个时区偏移、且不带任何标记，对不上账（round80 缺陷）。
-// 故：**记录类**时间一律 UTC（审计、告警、事件、提交历史、会话、镜像/虚拟机创建、归档、
-// 抓包开始、证书有效期……凡是这里渲染的都是记录时间）；只有**纯 UI 提示**（说明"这张卡刚
-// 被点过"、与任何记录无关）才允许用本地时间，且必须经下面的 fmtClockHint()，写明理由。
-//
-// 输入可能是 RFC3339（带 `Z` 或 `±hh:mm` 偏移）、服务端已格式化的字符串，或本来就不是时间：
-//   · 不带时区但形状是 `YYYY-MM-DD[ T]HH:MM:SS` 的字符串：服务端的时间戳都是 UTC，按 UTC
-//     字面量渲染——交给 Date 解析会按**浏览器本地时区**理解，等于平白多出一个偏移；
-//   · 其余（带时区的 RFC3339、数字、Date 对象）交给 Date 的原有语义；
-//   · 解析失败（非时间）：原样返回（保持既有容错，不抛异常）。
-const FMT_TIME_NAIVE_RE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?$/;
-
-function fmtTime(ts) {
-  if (!ts) return '—';
-  const naive = typeof ts === 'string'
-    ? FMT_TIME_NAIVE_RE.exec(ts.trim().replace(/\s+UTC$/, '')) : null;
-  const d = naive ? new Date(naive[1] + 'T' + naive[2] + 'Z') : new Date(ts);
-  return isNaN(d) ? String(ts) : d.toISOString().slice(0, 19).replace('T', ' ') + ' UTC';
-}
-
-// 纯 UI 提示用的**墙上时钟**（本地时区，故意不加 UTC 标记）。
-// 只用于说明"这张卡片刚刚被刷新过"这类与记录无关的提示：它是操作者自己刚点的动作，
-// 与操作者本机时钟对照最直观，与 CLI/journalctl 的记账时间无关（那些一律走 fmtTime()）。
-// 本仓库对"本地时间"的纪律：**只有经本函数**才允许——结构守护会拒绝别处出现本地时区格式化。
-function fmtClockHint(date) {
-  return date.toLocaleTimeString();
-}
-
-function list(v) {
-  if (v === undefined || v === null) return undefined;
-  return Array.isArray(v) ? (v.length ? v.join(',') : '—') : String(v);
-}
-
-// ---------- 确认对话框（分级确认：低 / 中 / 高，三档共用一个组件） ----------
-//
-// 三档的差别只看「要不要把人拦一下」，不是三套实现：
-//   低危（tier 'low'）：一次确认。文案用 paragraphs 说清要做什么，不列影响面、不要求输入。
-//     用于可回退、影响单对象、坏了也能马上再点回去的动作（单台 VM/容器启停、清计数、
-//     清告警、删快照、取消抓包…）。
-//   中危（tier 'mid'）：逐条列出**影响面**（bullets：谁会断、是否需重启生效、能不能回退）
-//     + 主按钮标红。用于重启数据面/主机、删对象、重签证书、重生成 SSH host key、配置提交/
-//     回滚这类「影响面跨对象或跨会话」的动作。
-//   高危（tier 'high'）：中危的全部，再加两道闸门——
-//     ① 输入确认词（调用方给 requireWord：对象名或固定词；输入不匹配则「执行」保持禁用）；
-//     ② 倒计时（默认 10 秒，走完之前「执行」保持禁用，期间随时可取消）。
-//     用于恢复出厂、软件升级/回退、恢复配置、删用户/改口令策略、证书上传这类不可逆动作。
-//
-// 三档共同点：内容一律经 textContent 落值（服务端字符串不会变成标记）；点遮罩、按 Esc 都算取消；
-// 每个框都**只读回显**这条动作对应的命令行语句（工单与审计对照用——操作者不需要输入语句）。
-// 审计由服务端记；界面只负责把「意图」说清楚。
-//
-// 返回 Promise<boolean>：确认 true / 取消（点取消、点遮罩、按 Esc）false。
-let dialogResolve = null;
-let dialogTimer = null;    // 高危档的倒计时（取消/关闭时必须清掉，否则它会继续跑并动到下一个框）
-const CONFIRM_COUNTDOWN = 10;  // 高危档倒计时秒数（调用方可用 countdown 覆盖，自校准用短值）
-
-function uiDialog(opts) {
-  const o = opts || {};
-  const tier = o.tier === 'high' ? 'high' : (o.tier === 'mid' ? 'mid' : 'low');
-  const high = tier === 'high';
-  const mid = tier !== 'low';
-  const countdown = high
-    ? Math.max(0, Math.floor(Number(o.countdown === undefined ? CONFIRM_COUNTDOWN : o.countdown) || 0))
-    : 0;
-  // 高危必须有确认词：调用方没给就**失败关闭**（宁可这个动作点不动，也不能放过一道闸门）。
-  const word = high ? String(o.requireWord === undefined ? '' : o.requireWord) : '';
-  const wordMissing = high && !word;
-  const label = o.confirmLabel || (high ? '执行' : '确定');
-
-  $('modal-title').textContent = o.title || '';
-  const body = $('modal-body');
-  body.textContent = '';
-  (o.paragraphs || []).forEach((t) => body.appendChild(el('p', { text: t })));
-  // 影响面逐条列（低危不列：单击确认不该被一屏字挡住）。
-  if (mid && (o.bullets || []).length) {
-    const ul = el('ul');
-    o.bullets.forEach((t) => ul.appendChild(el('li', { text: t })));
-    body.appendChild(ul);
-  }
-  const cli = $('modal-cli');
-  cli.hidden = !o.cli;
-  cli.textContent = o.cli ? '对应命令（只读回显，便于工单对照）：' + o.cli : '';
-
-  // 高危档的两道闸门。两个状态变量是唯一的判据，`syncOk()` 只读它们——
-  // 「执行」按钮的可用性完全由它决定（自校准就是拆这两个变量）。
-  let wordOK = !high;
-  let timeOK = countdown <= 0;
-  const gatesOK = () => wordOK && timeOK;
-
-  // 闸门控件整块由这里现建（见 index.html 的骨架只有容器）：每次打开框都重建，
-  // 不会把上一次的输入或状态带进来。
-  const guard = $('modal-guard');
-  guard.hidden = !high;
-  guard.textContent = '';
-  let wordInput = null;
-  if (high) {
-    const hint = el('p', {
-      class: wordMissing ? 'small error' : 'small',
-      text: wordMissing
-        ? '这一步没有拿到确认词，无法执行（请报告这一处缺陷）。'
-        : '这一步要求手工输入确认词：' + word + '（区分大小写）。输入不匹配时「执行」保持不可点。',
-    });
-    wordInput = el('input', {
-      type: 'text', id: 'modal-word', autocomplete: 'off', spellcheck: 'false',
-      placeholder: wordMissing ? '' : word,
-    });
-    wordInput.disabled = wordMissing;
-    wordInput.addEventListener('input', () => {
-      wordOK = !wordMissing && wordInput.value.trim() === word;
-      syncOk();
-    });
-    // 回车 = 点「执行」，只在闸门都放行时生效（禁用状态下回车什么也不做）。
-    wordInput.addEventListener('keydown', (ev) => {
-      if (ev.key !== 'Enter') return;
-      if (ev.preventDefault) ev.preventDefault();
-      if (gatesOK()) closeDialog(true);
-    });
-    guard.appendChild(hint);
-    guard.appendChild(wordInput);
-    guard.appendChild(el('p', {
-      class: 'muted small', id: 'modal-count',
-      text: wordMissing ? ''
-        : (countdown > 0
-          ? '还有 ' + countdown + ' 秒倒计时结束；倒计时期间可以随时取消。'
-          : '本次没有倒计时（可立即执行）。'),
-    }));
-  }
-
-  const acts = $('modal-actions');
-  acts.textContent = '';
-  const ok = el('button', { type: 'button', id: 'modal-ok', class: mid || o.danger ? 'danger' : '' });
-  ok.addEventListener('click', () => { if (!ok.disabled) closeDialog(true); });
-  // 倒计时与闸门状态都要如实显示在按钮上：禁用时按钮上写着还要等几秒。
-  let left = countdown;
-  function syncOk() {
-    if (!high) {
-      ok.disabled = false;
-      ok.textContent = label;
-      return;
-    }
-    ok.disabled = !gatesOK();
-    ok.textContent = timeOK ? label : (label + '（' + left + ' 秒后可点）');
-  }
-  // 焦点落在「取消」上（没有取消按钮时落在主按钮）：破坏性动作不该被一个回车键直接执行。
-  // 高危档焦点在确认词输入框上（本来就要打字，且它在闸门放行前不触发任何动作）。
-  let focusTarget = wordInput || ok;
-  if (o.cancelLabel !== '') {
-    const cancel = el('button', { type: 'button', id: 'modal-cancel', class: 'ghost', text: o.cancelLabel || '取消' });
-    cancel.addEventListener('click', () => closeDialog(false));
-    acts.appendChild(cancel);
-    focusTarget = wordInput || cancel;
-  }
-  acts.appendChild(ok);
-
-  // 倒计时：每秒一格，走完即放行（此刻确认词还得对）。
-  if (high && left > 0) {
-    dialogTimer = setInterval(() => {
-      left -= 1;
-      const count = $('modal-count');
-      if (left <= 0) {
-        left = 0;
-        timeOK = true;
-        if (dialogTimer) { clearInterval(dialogTimer); dialogTimer = null; }
-        if (count) count.textContent = '倒计时已结束，现在可以执行（确认词仍需匹配）。';
-      } else if (count) {
-        count.textContent = '还有 ' + left + ' 秒倒计时结束；倒计时期间可以随时取消。';
-      }
-      syncOk();
-    }, 1000);
-  }
-  syncOk();
-
-  $('modal').hidden = false;
-  if (focusTarget.focus) focusTarget.focus();
-  return new Promise((resolve) => { dialogResolve = resolve; });
-}
-
-function closeDialog(value) {
-  if (dialogTimer) { clearInterval(dialogTimer); dialogTimer = null; }
-  $('modal').hidden = true;
-  const resolve = dialogResolve;
-  dialogResolve = null;
-  if (resolve) resolve(value);
-}
-
-// uiConfirm：给动作调用点用的薄封装——标题统一是动作名，其余按档位传
-// （tier / paragraphs / bullets / cli / confirmLabel / requireWord）。
-function uiConfirm(label, opts) {
-  const o = Object.assign({}, opts || {});
-  o.title = o.title || label;
-  return uiDialog(o);
-}
-
-// ---------- 取数 ----------
-
-async function api(path, opts) {
-  const o = opts || {};
-  o.headers = Object.assign({ Authorization: 'Bearer ' + token }, o.headers || {});
-  const res = await fetch(API + path, o);
-  if (res.status === 401) {
-    // token 失效（过期/被吊销/服务端重启）：回到登录视图，别让页面停在半截数据上。
-    signOut('登录状态已失效，请重新登录。');
-    throw new Error('未认证');
-  }
-  if (!res.ok) {
-    let msg = 'HTTP ' + res.status;
-    try {
-      const body = await res.json();
-      if (body && body.message) msg = body.message;
-      // 校验类失败会带 `detail[]`（逐条说明"哪里不对、该怎么办"）——那正是操作者最需要的一行，
-      // 不能只把 summary（如「commit 校验失败」）摆出来：含糊的失败和谎报成功一样不可接受。
-      if (body && Array.isArray(body.detail) && body.detail.length) {
-        const lines = body.detail
-          .map((d) => (d && d.message ? ((d.path ? d.path + '：' : '') + d.message) : ''))
-          .filter(Boolean);
-        if (lines.length) msg += '——' + lines.join('；');
-      }
-    } catch (e) { /* 非 JSON 错误体：保留状态码 */ }
-    throw new Error(msg);
-  }
-  return res.status === 204 ? null : res.json();
-}
-
-// 单个端点失败不该拖垮整页：各自降级为"读取失败"。
-const soft = (p) => p.catch((e) => ({ __err: e.message }));
-
-// apiErrText：把"服务端没有这个接口"（Go 的路由表对未注册路径直接 404，错误体是纯文本，
-// 界面只能看到 HTTP 404）说成可操作的说明。**不改变判定**——404 仍然是失败，只是把
-// "为什么失败、接下来怎么办"讲清楚（含糊的"失败"和谎报成功一样不可接受）。
-function apiErrText(e, hint) {
-  const m = (e && e.message) || '未知错误';
-  return /^HTTP 404$/.test(m) ? m + '（本机服务端没有提供这个接口；' + hint + '）' : m;
-}
-
-// soft() 失败时给的是 {__err} 而不是数组——数组类渲染一律先过 rowsOf()，否则 .filter/.map 抛错
-// （浏览器验收抓到的旧缺陷：token 失效时整页报 JS 错，而不是干净地提示）。
-const rowsOf = (v) => (Array.isArray(v) ? v : []);
-
-// httpErrText：**直连 fetch**（下载/上传/日志这类不走 api() 的路径）失败时的文案。
-// 与 api() 同口径——错误体里的原话优先，取不到才回落到状态码：服务端讲了原因
-// （如「当前 class 无权执行该操作」），就要让操作者看到，而不是只剩一个 HTTP 403。
-async function httpErrText(res) {
-  let msg = 'HTTP ' + res.status;
-  try { const b = await res.json(); if (b && b.message) msg = b.message; } catch (e) { /* 非 JSON 错误体：保留状态码 */ }
-  return msg;
-}
-
-// 同上，但给**已经把响应体读成文本**的调用方用（文本类端点：差异 / 日志）。
-function errTextOf(text, status) {
-  try { const b = JSON.parse(text); if (b && b.message) return b.message; } catch (e) { /* 非 JSON 错误体：保留状态码 */ }
-  return 'HTTP ' + status;
-}
-
-// 页面级取数失败提示：把失败的端点列出来（不静默），全部成功时清掉提示。
-// 只清自己写的那条——路由的「页面不存在」提示要留着（否则一重渲染就被抹掉）。
-let pageWarnActive = false;
-function pageWarn(d) {
-  const bad = Object.entries(d || {})
-    .filter(([, v]) => v && v.__err)
-    .map(([k, v]) => k + '（' + v.__err + '）');
-  const box = $('global-error');
-  if (bad.length) {
-    box.textContent = '以下数据读取失败：' + bad.join('、');
-    box.hidden = false;
-    pageWarnActive = true;
-    return;
-  }
-  if (pageWarnActive) { box.hidden = true; box.textContent = ''; pageWarnActive = false; }
-}
-
-// 按路由声明的端点取数：返回 { 端点: 数据 }（各自降级，单个失败不拖垮整页）。
-// `params` 是参数化路由取出的对象名（如 `:name`）：端点里的 `{name}` 占位在**取数时**展开，
-// 返回值的键仍是路由表里声明的那一串（`'/virtual-machine-functions/{name}'`）——
-// 视图照路由表原文取值，不必自己拼路径，也不会因为对象名不同而取错键。
-export async function softLoad(paths, params) {
-  const out = {};
-  await Promise.all((paths || []).map(async (p) => {
-    out[p] = await soft(api(expandEndpoint(p, params)));
-  }));
-  return out;
-}
-
-// 端点占位展开：`{name}` → 参数值（URL 编码）。参数缺席时**保留占位原样**（请求会得到
-// 404 而不是打到某个碰巧同名的对象上），页面上会如实显示这条读取失败。
-function expandEndpoint(path, params) {
-  const p = params || {};
-  return path.replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, k) =>
-    (p[k] === undefined || p[k] === null ? m : encodeURIComponent(p[k])));
-}
-
-// 虚拟交换机：列表取自运行态（/virtual-switches 是配置视图，统计在详情上）。
-async function loadVSwitchStats(vss) {
-  const head = vss.slice(0, MAX_IFACE_DETAIL);
-  const details = await Promise.all(head.map((v) => api('/virtual-switches/' + encodeURIComponent(v.name)).catch(() => null)));
-  return head.map((v, n) => ({ cfg: v, stat: (details[n] || {}).statistics || null }));
-}
-
-// 网络对象：一次拉齐只读视图（每个端点各自降级，缺一个不影响其余）。
-// `pre` 是路由表声明端点的预取结果（softLoad 已取齐）：命中就直接归位，不重复请求；
-// 未预取时（别处直接调用）逐条自取。
-// LLDP 不在这一页：它的开关状态与邻居表有自己的页面（#/network/lldp）——本页只取路由表声明的端点。
-async function loadNetworkObjects(pre) {
-  const pick = (path, fetchIt) => (pre && pre[path] !== undefined ? pre[path] : fetchIt());
-  const [vrfs, acls, nat, bonds, qos, span, vxlan] = await Promise.all([
-    pick('/vrfs', () => soft(api('/vrfs'))),
-    pick('/acls', () => soft(api('/acls'))),
-    pick('/nat', () => soft(api('/nat'))),
-    pick('/bonds', () => soft(api('/bonds'))),
-    pick('/qos/policies', () => soft(api('/qos/policies'))),
-    pick('/port-mirroring', () => soft(api('/port-mirroring'))),
-    pick('/vxlan-tunnels', () => soft(api('/vxlan-tunnels'))),
-  ]);
-  return { vrfs, acls, nat, bonds, qos, span, vxlan };
-}
-
-// 逐口取统计（列表端点只有配置字段；收发包数在 /interfaces/<name> 上）。
-async function loadInterfaceStats(ifaces) {
-  const head = ifaces.slice(0, MAX_IFACE_DETAIL);
-  const details = await Promise.all(head.map((i) => api('/interfaces/' + encodeURIComponent(i.name)).catch(() => null)));
-  return head.map((i, n) => ({ cfg: i, stat: (details[n] || {}).statistics || null }));
-}
 
 // ---------- 各卡渲染（每页只动自己那块 DOM）----------
 
@@ -1317,18 +910,6 @@ export const VIEWS = {
   },
 };
 
-function renderEvents() {
-  const ul = $('events');
-  ul.textContent = '';
-  if (!events.length) {
-    ul.appendChild(el('li', { class: 'muted', text: '（暂无事件）' }));
-    return;
-  }
-  events.forEach((e) => ul.appendChild(el('li', {}, [
-    el('span', { class: 'muted small', text: fmtTime(e.timestamp) + ' ' }),
-    el('span', { text: e.type + (e.summary ? '：' + e.summary : '') }),
-  ])));
-}
 
 // ---------- 内核基线（#/system/kernel）----------
 // 三方对照：**运行实际**（内核命令行与 /proc 读数）、**配置期望**（由已生效配置派生）、
@@ -1461,7 +1042,7 @@ function usrClassSelect(id, names, selected) {
 }
 
 // 「生效权限」入口的解析口径（决策 #304）：非 super-user 只能查看**自己所属** class 的
-// 生效权限（服务端 403 兜底；界面只是不摆必被拒的按钮）。currentClass 在 enterApp 里从登录
+// 生效权限（服务端 403 兜底；界面只是不摆必被拒的按钮）。getCurrentClass() 在 enterApp 里从登录
 // 响应设置、signOut 清空。
 const USR_PERM_PREVIEW = 12;
 
@@ -1509,7 +1090,7 @@ function renderPermClassTable(classes) {
     tr.appendChild(el('td', { text: String(dash(list(c.allow))) }));
     tr.appendChild(el('td', { text: String(dash(list(c.deny))) }));
     const cell = el('td', { class: 'actions' });
-    if (currentClass === 'super-user' || currentClass === c.name) {
+    if (getCurrentClass() === 'super-user' || getCurrentClass() === c.name) {
       const btn = el('button', { type: 'button', class: 'ghost small', text: '生效权限' });
       btn.addEventListener('click', () => usrPermLoad(c.name));
       cell.appendChild(btn);
@@ -1648,9 +1229,9 @@ async function usrTokenRevoke(tk) {
 // 锁不在本会话手里时返回空串——那种情况服务端自己会拒绝（如实显示它的报错即可），
 // 界面不替服务端做第二个判定。
 async function usrCandidateBlock() {
-  if (!currentUser) return '';
+  if (!getUser()) return '';
   const holder = await cfgLockHolder();
-  if (holder !== currentUser + '@api') return '';
+  if (holder !== getUser() + '@api') return '';
   let cand = null;
   try {
     cand = await api('/configuration/candidate');
@@ -1766,7 +1347,7 @@ async function usrDelete(name) {
 // 但它的提示要落在自己的对话框里（决策 #147）。**一条处理器，两个入口**（不复制第二份实现）。
 async function usrMyPassword(oldPw, newPw, say) {
   const emit = say || usrMsg;
-  const me = currentUser;
+  const me = getUser();
   if (!me) { emit('拿不到当前登录用户名，请刷新页面后重试。', true); return; }
   if (!(oldPw || '').trim()) { emit('请先填当前口令。', true); return; }
   if (!(newPw || '').trim()) { emit('请先填新口令。', true); return; }
@@ -1878,8 +1459,8 @@ function openAcct() {
   // 每次打开都从空开始：上一次的口令（哪怕是成功改过的）不留在控件里。
   $('acct-old').value = '';
   $('acct-new').value = '';
-  $('acct-who').textContent = currentUser
-    ? '当前登录账号：' + currentUser
+  $('acct-who').textContent = getUser()
+    ? '当前登录账号：' + getUser()
     : '拿不到当前登录用户名，请刷新页面后重试。';
   acctMsg('', false);
   $('acct').hidden = false;
@@ -3458,7 +3039,7 @@ async function cfgSyncSession() {
     return;
   }
   const holder = await cfgLockHolder();
-  if (holder !== currentUser + '@api') {
+  if (holder !== getUser() + '@api') {
     cfgLockNote('当前候选配置由 ' + (holder || '未知会话') + ' 持有编辑锁——本页只读，' +
       '可在「编辑锁会话」页查看；要自己改配置请等对方结束编辑。');
     return;
@@ -3540,7 +3121,7 @@ async function cfgSave() {
 
 async function cfgShowDiff() {
   try {
-    const res = await fetch(API + '/configuration/diff', { headers: { Authorization: 'Bearer ' + token } });
+    const res = await fetch(API + '/configuration/diff', { headers: { Authorization: 'Bearer ' + getToken() } });
     const text = await res.text();
     const pre = $('cfg-diff');
     pre.textContent = res.ok ? (text.trim() || '（candidate 与 committed 无差异）') : '读取差异失败：' + errTextOf(text, res.status);
@@ -3890,7 +3471,7 @@ async function diagPing() {
   try {
     const res = await fetch(API + '/diagnostics/ping', {
       method: 'POST',
-      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer ' + getToken(), 'Content-Type': 'application/json' },
       body: JSON.stringify(pingBody(host, count, true)),
     });
     const body = await res.json().catch(() => ({}));
@@ -3910,7 +3491,7 @@ async function diagLogs() {
   pre.hidden = false;
   pre.textContent = '读取中…';
   try {
-    const res = await fetch(API + '/system/logs?last=100', { headers: { Authorization: 'Bearer ' + token } });
+    const res = await fetch(API + '/system/logs?last=100', { headers: { Authorization: 'Bearer ' + getToken() } });
     const text = await res.text();
     pre.textContent = res.ok ? (text || '（日志为空）') : '读取失败：' + errTextOf(text, res.status);
   } catch (e) {
@@ -3918,131 +3499,6 @@ async function diagLogs() {
   }
 }
 
-// ---------- 实时通道与刷新 ----------
-
-// router.js 要用本文件的 VIEWS 与取数助手，本文件要用它的 render/navigate。
-// 按需动态 import：静态互相 import 会形成环，对两边的求值顺序有隐含要求。
-const routerModule = () => import('./router.js');
-
-// 重新渲染**当前路由**：SSE 事件到达、轮询、动作完成、点顶栏「刷新」都走这里
-// （不再像以前那样一次刷新所有页面）。
-export async function reload() {
-  return (await routerModule()).render();
-}
-
-function setStream(text, cls) {
-  const n = $('stream-state');
-  n.textContent = text;
-  n.className = 'pill ' + cls;
-}
-
-function scheduleReload() {
-  // 事件可能成串到达（一次提交触发多条）：合并成一次刷新。
-  if (reloadTimer) return;
-  reloadTimer = setTimeout(() => {
-    reloadTimer = null;
-    reload().catch((e) => showGlobalError(e.message));
-  }, 400);
-}
-
-function summaryOf(ev) {
-  const p = (ev && ev.payload) || {};
-  const parts = [];
-  ['resource', 'name', 'state', 'severity', 'message', 'revision'].forEach((k) => {
-    if (p[k] !== undefined && p[k] !== null && p[k] !== '') parts.push(k + '=' + p[k]);
-  });
-  return parts.join(' ');
-}
-
-async function startStream() {
-  stopStream();
-  const ctl = new AbortController();
-  streamAbort = ctl;
-  try {
-    const res = await fetch(API + '/events', {
-      headers: { Authorization: 'Bearer ' + token, Accept: 'text/event-stream' },
-      signal: ctl.signal,
-    });
-    if (res.status === 401) { signOut('登录状态已失效，请重新登录。'); return; }
-    if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
-    setStream('实时通道：已连接', 'pill-ok');
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let i;
-      while ((i = buf.indexOf('\n\n')) >= 0) {
-        const frame = buf.slice(0, i);
-        buf = buf.slice(i + 2);
-        let data = '';
-        frame.split('\n').forEach((line) => {
-          if (line.indexOf('data:') === 0) data += line.slice(5).trim();
-        });
-        if (!data) continue;   // 心跳等注释帧
-        try {
-          const ev = JSON.parse(data);
-          events.unshift({ type: ev.type, timestamp: ev.timestamp, summary: summaryOf(ev) });
-          events = events.slice(0, MAX_EVENTS);
-          renderEvents();
-          // 配置提交事件：顺带刷新配置卡（编辑中不打扰——避免覆盖正在改的文本）。
-          if (ev.type === 'config-committed' && !cfg.editing) {
-            loadConfig().catch(() => {});
-          }
-          scheduleReload();
-        } catch (e) { /* 非 JSON 帧：忽略，不影响后续 */ }
-      }
-    }
-    // 流正常结束（服务端重启等）：退化为轮询。
-    setStream('实时通道：已断开（改为轮询）', 'pill-warn');
-    startPolling();
-  } catch (e) {
-    if (ctl.signal.aborted) return;
-    setStream('实时通道：不可用（改为轮询）', 'pill-warn');
-    startPolling();
-  }
-}
-
-function stopStream() {
-  if (streamAbort) { streamAbort.abort(); streamAbort = null; }
-}
-
-// 轮询是实时通道不可用时的兜底：节奏取**当前路由声明的 poll**（毫秒，0 = 该页不轮询）。
-function armPolling() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  const ms = (pollRoute && pollRoute.poll) || 0;
-  if (!pollFallback || !ms) return;
-  pollTimer = setInterval(() => {
-    reload().catch((e) => showGlobalError(e.message));
-  }, ms);
-}
-
-// 路由切换时同步轮询节奏（由 router.js 在每次渲染时调用）。
-export function setPollRoute(route) {
-  const path = route ? route.path : '';
-  if (path === pollPath) return;
-  pollPath = path;
-  pollRoute = route;
-  armPolling();
-}
-
-function startPolling() {
-  pollFallback = true;
-  armPolling();
-}
-
-function stopPolling() {
-  pollFallback = false;
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-}
-
-export function showGlobalError(msg) {
-  const n = $('global-error');
-  n.textContent = msg;
-  n.hidden = false;
-}
 
 // ---------- 登录 / 退出 ----------
 
@@ -4096,8 +3552,8 @@ async function enterApp(user) {
   $('login-view').hidden = true;
   $('main-view').hidden = false;
   $('global-error').hidden = true;
-  currentUser = (user && user.name) || '';
-  currentClass = (user && user.class) || '';
+  setUser((user && user.name) || '');
+  setCurrentClass((user && user.class) || '');
   $('user-line').textContent = user ? user.name + '（' + user.class + '）' : '';
   applyRole(user);
   cfgSetEditing(false);
@@ -4120,10 +3576,10 @@ function signOut(msg) {
   vmConsoleClose();
   // 「我的账号」框里可能有刚填的口令：退出登录时连值一起清掉，别留在 DOM 里。
   closeAcct();
-  token = '';
-  events = [];
-  currentUser = '';
-  currentClass = '';
+  setToken('');
+  setEvents([]);
+  setUser('');
+  setCurrentClass('');
   applyRole(null);
   cfg = { committed: null, editing: false };
   cfgSetEditing(false);
@@ -4147,8 +3603,8 @@ async function doLogin(ev) {
       showLogin(body.message || ('登录失败（HTTP ' + res.status + '）'));
       return;
     }
-    token = body.token;
-    sessionStorage.setItem(TOKEN_KEY, token);
+    setToken(body.token);
+    sessionStorage.setItem(TOKEN_KEY, body.token);
     sessionStorage.setItem(USER_KEY, JSON.stringify(body.user || {}));
     await enterApp(body.user);
   } catch (e) {
@@ -5353,7 +4809,7 @@ async function ctLogsLoad() {
   pre.textContent = '读取中…';
   try {
     const res = await fetch(API + '/container-functions/' + encodeURIComponent(ctLogsName) + '/logs?tail=200', {
-      headers: { Authorization: 'Bearer ' + token },
+      headers: { Authorization: 'Bearer ' + getToken() },
     });
     if (!res.ok) {
       pre.textContent = '读取失败：' + await httpErrText(res);
@@ -5585,7 +5041,7 @@ async function imgImportFile() {
   fd.append('file', f);
   imgMsg('上传中…（大镜像可能耗时较久，请勿关闭页面）', false);
   try {
-    const res = await fetch(API + '/images', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd });
+    const res = await fetch(API + '/images', { method: 'POST', headers: { Authorization: 'Bearer ' + getToken() }, body: fd });
     if (!res.ok) {
       imgMsg('导入失败：' + await httpErrText(res), true);
     } else {
@@ -6024,7 +5480,7 @@ function renderCapture(cap) {
 async function downloadFile(path, name, note) {
   if (note) note('下载 ' + name + '：准备中…', false);
   try {
-    const res = await fetch(API + path, { headers: { Authorization: 'Bearer ' + token } });
+    const res = await fetch(API + path, { headers: { Authorization: 'Bearer ' + getToken() } });
     if (!res.ok) throw new Error(await httpErrText(res));
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -6434,7 +5890,7 @@ async function restoreRun(name) {
   opsOut('');
   try {
     const res = await fetch(API + '/system/backup/' + encodeURIComponent(file), {
-      headers: { Authorization: 'Bearer ' + token },
+      headers: { Authorization: 'Bearer ' + getToken() },
     });
     if (!res.ok) throw new Error('读取归档失败（' + await httpErrText(res) + '）');
     const blob = await res.blob();
@@ -6610,7 +6066,7 @@ $('diag-trace-btn').addEventListener('click', async () => {
   try {
     const res = await fetch(API + '/diagnostics/traceroute', {
       method: 'POST',
-      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer ' + getToken(), 'Content-Type': 'application/json' },
       body: JSON.stringify(pingBody(host, 0, false)),
     });
     const body = await res.json().catch(() => ({}));

@@ -255,11 +255,20 @@ func TestUIConsoleRoleGating(t *testing.T) {
 	if !strings.Contains(string(css), "body.role-readonly [data-write]") {
 		t.Error("style.css 缺少 body.role-readonly [data-write] 的隐藏规则")
 	}
-	if !strings.Contains(string(app), "role-readonly") || !strings.Contains(string(app), "function applyRole(") {
-		t.Error("app.js 缺少 applyRole（按登录响应的 class 切 body.role-readonly）")
+	// applyRole 在 js/boot.js（登录域）、wbtn 在 js/core/dom.js（拆分后搜索面=全部自有 js）。
+	appAnywhere := func(needle string) bool {
+		for _, src := range uiJSFiles(t) {
+			if strings.Contains(src, needle) {
+				return true
+			}
+		}
+		return false
 	}
-	if !strings.Contains(string(app), "const wbtn = ") {
-		t.Error("app.js 缺少 wbtn（动态写入口的标记助手）")
+	if !appAnywhere("role-readonly") || !appAnywhere("function applyRole(") {
+		t.Error("前端 js 缺少 applyRole（按登录响应的 class 切 body.role-readonly）")
+	}
+	if !appAnywhere("export const wbtn = ") {
+		t.Error("前端 js 缺少 wbtn（动态写入口的标记助手）")
 	}
 	if !strings.Contains(string(router), "r.write && isReadOnlyRole()") {
 		t.Error("router.js 没有按 write 标记过滤导航（read-only 仍会看到写页）")
