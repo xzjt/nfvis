@@ -1,0 +1,110 @@
+# v3 round35 · Web 控制台 Cisco 门户式重构：真机构建 + 全功能走查 + 四套件
+# 日期：2026-10-15 ｜ 分支：feat/web-console-redesign（708ba51 起算，14 提交）
+# 环境：nfvis-vm（192.168.155.129，开发机侧 SSH 免密），Browser Use（ZCode 内置浏览器）
+#
+# 说明：本文件记录「参考 Cisco NFVIS 门户重构 Web 前端」分支的真机验证全过程与全部读数、
+#       判读与登记。前端改动本身（js/core + js/views 拆分、浅色主题、左侧树、部署向导、
+#       ui.go 的 js/ 子树静态放行）的单元/守护面在开发机已完成（Go 全包测试、两桩自校准含
+#       红-绿、ESM 链接检查、浏览器黑盒）；本文件是**真机侧**的构建、黑盒与四套件。
+
+## §1 构建（可复现）与实装
+
+- 源码同步：`git archive feat/web-console-redesign`（708ba51）→ `scp` → VM `/root/src-web`
+  （`/root/src-web.tgz` 留存）。无 `.git`，`SOURCE_DATE_EPOCH` 显式传 `1792061245`。
+- `make deb VERSION=3.0.19~dev1 SOURCE_DATE_EPOCH=1792061245` **连打两次**：
+  `157cf33c8d5bce079780908c43e01439d906e6bc55c1fdadd4c820ea7e89a4cc`（10,480,712 字节）——
+  **逐字节一致**（两打唯一哈希，`/tmp/build1.sha` 对照）。
+- `dpkg -i` 实装（3.0.18 → **3.0.19~dev1**）：postinst 正常（大页 sysctl 接管/AppArmor 复核）；
+  服务 `active`、journal「已连接 VPP 26.06 → 恢复收敛完成」，无 active 告警。
+- UI 三面资产真机取回：`/api/v1/ui/` 200（67,875 B）、`js/core/dom.js` 200、`js/views/deploy.js` 200
+  （js/ 子树静态放行在真机 HTTPS 下同样生效）。
+
+## §2 浏览器黑盒（https://192.168.155.129，真数据）
+
+- 登录（admin）→ 左侧树五组（仪表盘单项 + 虚拟机/网络/系统/运维可折叠）、总览四卡真实数据
+  （nfvis-lab、3.0.19~dev1、VPP 26.06-release 已连接、Docker 29.1.3、无告警）；
+  **23 条路由逐页扫描：零 JS 错误、零页面级异常**（含数据面可用后 LLDP 页正常读）。
+- **部署向导（新页）四步全流程**：①VM ②镜像下拉真实夹具四项（alpine.qcow2 / alpine:3.20 /
+  ct.tar / debian12.qcow2）＋资源池注记「1G 池空闲页 2 页；2M 池空闲页 235 页」与
+  `show system hugepages` 的 free=2/235 **逐字一致** ③网卡映射 + 静态拓扑预览（连线标注
+  eth0→vs-demo）④摘要确认。**「写入部署候选」经低危确认框（含只读 CLI 回显）→ 服务端写入
+  rev 级候选 → CLI `show configuration candidate` 回读逐字一致**（image/disks/interfaces/
+  serial-console 全对）；随之 discard 清理（409 于跨会话尝试＝#317/#318 语义正确的旁证）。
+- 角色矩阵：read-only 账号（ro1，REST 建造/删除）：导航不列写页（部署向导/配置/用户/证书/
+  内核基线/运维动作/抓包均不在）、落写页时 role-note 如实说明、`body.role-readonly` 下写控件隐藏。
+  截图：`docs/images/web-redesign-real-overview.png`、`web-redesign-real-deploy-confirm.png`
+  （开发机验收截图另存 `web-redesign-{overview,deploy-topo,readonly-deploy}.png`）。
+
+## §3 四套件（3.0.19~dev1 发布件口径；调用方式对齐 12:01 基线轮 `run-suites-318.sh`）
+
+| 套件 | round35 最终 | 今日 12:01 基线（3.0.18） | 判定 |
+|---|---|---|---|
+| `cli-fulltest` | **297 / 0 / 26** | 297/0/26 | 逐项一致 |
+| `cli-semantic-check` | **43 / 0 / 0 / 0** | 43/0/0 | 逐项一致 |
+| `cli-lifecycle-check` | **40 / 0 / 3（登记 0）** | 40/0/3（登记 1） | 通过项一致；差 1 条为基线轮的软附注（L2-3「对账时 VPP 不可用＝查不了≠查到残渣」），本轮未出现（良性瞬态） |
+| `cli-pty-smoke` | **10 / 10** | 10/10 | 逐项一致 |
+
+跑前前置（照 round34 文档化「六件事」）：清场、`alpine.qcow2`/`docker alpine:3.20`/`ct.tar`、
+**临时撤管理口地址**、`FIXTURE_IMAGE=debian12.qcow2`。环境事实：1G 池 3/3/自由 2、2M 768/235、
+两口 DPDK、无对象无告警。
+
+### §3.1 fulltest 首跑 265/35/23 的**全数判读（单一根因，非产品缺陷、非本分支引入）**
+
+- 失败分布：P2 **27** + P5 **8** = 35；其余阶段（P1 48/0、P3 8/0、P4 34/0、P6 11/0、P7 7/0、P8 23/0）
+  全绿。P2 失败清单前两行即根因与首级联：
+  `[S2-pre] …commit :: 校验失败`；`[S2] set virtual-switches vs-l2 vlan access 100 :: %% 无匹配配置: vs-l2`。
+- 根因（`/tmp/cli-test/full.log` 完整输出实锤）：
+  `vrfs[vs-l3].l3_interfaces[ens224].addresses[0]: 地址网段与 system.management.address 重叠`
+  ——S2-pre 给 vs-l3 配 `192.168.155.10/24`，与现场管理地址 `192.168.155.129/24` 同 /24。
+- **产品行为正确**：FR-CFG-011②（全部 L3 地址两两不得同网段重叠）自 M1（a014848）即存在；
+  手工单条复现同样被拒。
+- **现场变化的 rev 级证据**：配置库 `config_revisions` 中，紧随当日 12:01 基线轮之后，
+  **rev 206→207 的唯一差异 = management 段新增 `address: "192.168.155.129/24"`（12:11:39 CST，
+  当日 walk 会话的走查动作）**；12:01 基线轮跑在同一现场但**尚无此声明**（当时 management 只有
+  interface+gateway，校验不参与）→ 297/0/26。同一份代码（本分支对 Go 侧仅 ui.go 增静态放行，
+  与校验无关）在「有声明」现场必然 35 红——**这正是 round34 已文档化的前置坑**：
+  「跑套件前也要撤管理口地址（否则 S2-pre 被重叠守卫正确拒绝、级联 35 红）」。
+- 处置与复跑：`delete system management ip address 192.168.155.129/24` + `commit confirmed`
+  （管理口变更的既定提交形态，网络路径不受影响）→ fulltest 复跑 **297/0/26**；P5 的
+  `ping 192.168.155.1 source 192.168.155.10` 也随之转绿（对象与源地址齐备）。
+
+## §4 现场还原（与接手时逐项对齐）
+
+- 管理地址：`set system management ip address 192.168.155.129/24` + `commit confirmed` + 确认
+  （读回 management 三段齐全）。
+- 资源池：`set resource-pools hugepages … 1G count 3`、`set resource-pools cpu isolated-cores 2-5`
+  （与接手时读数一致；套件把声明降 2 时产品按声明**自动回收**了 1 页（#329 口径），
+  **reboot 后内核实况回 3/自由 2**，`show system hugepages` 状态「一致」）。
+- VPP 核声明：按「池一致性（校验会拒池外核）+ 运行态 threads=2」重建为
+  `main-core 2 + corelist-workers 3`（1 worker）；中途实测两处校验/底座事实（见 §5 教训），
+  终态 `connected: yes / threads: 2 / pending_restart: no`。
+- 业务口：reboot 后如文档回 vmxnet3 → `request interfaces ens192/ens224 bind-dpdk --yes`
+  + `request vpp restart`（ens224 曾为管理态 down，`vppctl set interface state ens224 up` 后
+  两口 up/dpdk，与接手时一致）。
+- 终态核对：对象 0、VNF/容器/域 0、无 active 告警、UI 200；dev 构建 3.0.19~dev1 **保留在机**
+  （对应本分支，便于后续合入后对照）；日志与材料留存：`/root/web-*.log`、`/root/src-web{,.tgz}`。
+
+## §5 本轮教训（入册）
+
+1. **「套件全绿」依赖现场前置，回归前先对前置**：同一代码 09:52/12:01 两轮 297/0，17 小时后
+   同套件 35 红——变量不是代码而是**现场（管理地址声明）**。判读路径固定为：读完整输出落点
+   （`/tmp/cli-test/full.log`，stdout 只有 head -8 截断）→ 先看 S2-pre 的 commit 结论。
+2. **产品守卫会把「工具假设」照出来**：FR-CFG-011② 的重叠守卫在套件写死业务地址 + 现场管理
+   同网段时**必然拒绝**；处置是撤声明（文档化前置）而非松动守卫——守卫语义正确。
+3. **撤/恢复管理地址的正确形态**：`commit confirmed` 提交 + **配置模式内再 `commit` 确认**
+   （裸 `commit` 在配置模式外会报「脚本在第 1 行停止」）；`delete system management ip address`
+   带值（R152-1 形态）。
+4. **底座硬约束要按事实校**：`corelist-workers/coremask` **必须同时给 main-core**（VPP 拒绝启动，
+   实锤 `cpu_config: main-core must be specified…`）；且 main-core 必须在隔离核池内（产品校验）。
+   恢复声明时两条约束都要过。
+5. **状态展示含「管理态」与「链路态」两层**：VPP 里 ens 口 `State=down` 是管理员态
+   （`vppctl set interface state … up` 即恢复），与链路速率为两回事——排障先分清。
+
+## §6 登记与未竟
+
+- **R35-1（工具口径，已在 v3待做 §三 建条目）**：fulltest 的业务地址（`192.168.155.10` /
+  同网段 ping 目标 `192.168.155.1`）**写死**，与「现场已声明同网段管理地址」互斥；现行处置=
+  跑前撤管理地址（round34 文档化）。长期修法候选：套件把 L3 地址/ping 目标参数化
+  （`L3_ADDR`/`PING_TARGET`），并把「P5 目标须与源同 L2 且会应答」的口径写进套件头。
+- **未竟（发版纪律）**：本分支尚未合入 v3；合入后仍须按发版口径走 `make deb` 两打逐字节 +
+  发布件上四套件（本轮 dev 构建已把「四套件零失败」预演到位）。
