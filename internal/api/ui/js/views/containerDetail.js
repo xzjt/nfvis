@@ -10,6 +10,8 @@ import { api, soft, apiErrText, httpErrText,
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
 import { ctAction } from './containers.js';
+import { VM_ACTIONS } from './vms.js';
+import { stripANSI } from './vmDetail.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,

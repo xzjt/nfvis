@@ -6,10 +6,10 @@ import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from './core/const.js';
 import { api, soft, apiErrText, httpErrText,
   errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from './core/api.js';
-import { fmtTime, fmtClockHint } from './core/format.js';
+import { fmtTime, fmtClockHint, bytes } from './core/format.js';
 import { isConsoleOpen } from './views/vmDetail.js';
 import { diagPing, diagLogs, bigNat, bigMsg, bigOut, renderAudit, opsRun, capMsg, pingBody,
-  downloadFile, swAdd, swRollback, restoreRun, zeroizeRun, formatDataRun } from './views/ops.js';
+  downloadFile, swAdd, swRollback, restoreRun, zeroizeRun, formatDataRun, opsMsg } from './views/ops.js';
 import { qsdDelete, spdDelete } from './views/network.js';
 import { cfgStartEdit, cfgSave, cfgCheck, cfgShowDiff, cfgCommitAsk, cfgConfirmPending,
   cfgDiscardAsk, getCfg, cfgSetEditing, cfgLockHolder } from './views/config.js';

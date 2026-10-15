@@ -9,7 +9,7 @@ import { api, soft, apiErrText, httpErrText,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
-import { vmAction, renderVMStats } from './vms.js';
+import { vmAction, renderVMStats, VM_ACTIONS } from './vms.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
@@ -303,7 +303,7 @@ function vmConsoleSyncBtn() {
 }
 
 // 串口输出含 ANSI 转义（颜色/光标），去掉后按纯文本渲染（不引入终端模拟器）。
-function stripANSI(s) {
+export function stripANSI(s) {
   return s.replace(/\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/[\]\][^]*/g, '');
 }
 

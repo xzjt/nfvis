@@ -25,7 +25,7 @@ async function reload() {
 
 // 状态 → 允许的动作（与 CLI 同口径：运行中可 stop/restart，关机态可 start）。
 // 列表页与详情页共用这份判定，两边不会分叉。
-const VM_ACTIONS = [
+export const VM_ACTIONS = [
   { key: 'start', label: '启动', states: ['shutoff', 'crashed', '-'] },
   { key: 'stop', label: '停止', states: ['running', 'paused'] },
   { key: 'restart', label: '重启', states: ['running', 'paused'] },
