@@ -1862,6 +1862,16 @@
   `docs/evidence/v3-round34-clean-install-walkthrough-vpp-kernel.txt`；**代码侧改动（未提交）**：
   `internal/api/cli_compute_oper.go`、`internal/api/capture_test.go`、`contrib/scripts/cli-fulltest-phase4/5.sh`、
   `docs/NFViS-CLI命令全表.md`。
+- **已发布 v3.0.18（2026-10-15，round34 走查 R34-1：`request capture export` 幻影参数收口）**：tag `v3.0.18` → **`v3 815f44a`**
+  （发布点＝PR #328 squash 合并；其上仅本轮发版记录提交）；GitHub Release 四资产；`SOURCE_DATE_EPOCH=1792035954`；
+  deb `600aa3d2…`（10,471,078 字节）/ `.run` `f3ea020e…`（185,193,421 字节，载荷 **239** deb / 178M）两打逐字节一致、
+  闭包自洽（239/838/313/178M）、`.run` 结构自检 **18/0**、实装自检 **18/0/0**。**发布件上四套件零失败**：
+  fulltest **297/0/26**、语义 **43/0/0**、lifecycle **40/0/3**（+1 良性登记：L2-3「查不了≠查到残渣」附注）、pty **10/10**
+  ——与 v3.0.17 基线逐项一致。**三处一致全部完成**（含 deb 与 `.run` 完整回下载逐字节一致，走代理）。环境：nfvis-vm 装
+  **3.0.18**（vpp 数据面、两口 DPDK、池 1G=3/2M=768、无对象无告警；重启后瞬时的 `HUGEPAGE_POOL_ORPHAN` 2M/51 页在
+  VPP 初始化完成后自动消解＝既有对账口径）。⚠️ **本机工具链为 release 构建现装**（快照无 go/make：`apt-get install make
+  golang-go`，go 1.26.0）；源码树 `/root/src`（`v3.0.18` git archive 全量）、发布材料 `/root/rel318/`（deb/.run/旁车 +
+  构建日志）、闭包 `/root/closure/`（239 包）。
 - **已发布 v3.0.17（2026-10-15，`firmware=uefi` 交付补齐 + UEFI 域删除修复 + CI 恢复）**：tag `v3.0.17` → **`v3 54f3947`**
   （发布点＝PR #326/#327 合并；其上仅本轮发版记录提交）；GitHub Release 四资产；`SOURCE_DATE_EPOCH=1791995353`；
   deb `f1f36e5f…`（10,470,692 字节）/ `.run` `ca905bdb…`（185,190,523 字节，载荷 **239** deb / 177M）两打逐字节一致、
