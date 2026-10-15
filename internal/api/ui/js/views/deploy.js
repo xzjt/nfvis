@@ -69,18 +69,12 @@ function depUpdateImageNote() {
 
 function depFillPools() {
   const lines = [];
-  const pools = depData.pools;
-  if (pools && Array.isArray(pools.hugepages)) {
-    for (const p of pools.hugepages) {
-      lines.push(p.size + ' 大页：声明 ' + (p.count != null ? p.count : '—') +
-        '，可分配 ' + (p.allocatable != null ? p.allocatable : (p.free != null ? p.free : '取不到')));
-    }
-  }
   const hp = depData.hp;
+  // 字段口径 = GET /system/hugepages 的池段（page_size/free；-1 = 取不到，如实显示）。
   if (hp && Array.isArray(hp.pools)) {
     for (const p of hp.pools) {
-      lines.push(p.size + ' 池空闲页 ' + (p.free != null ? p.free : '取不到') +
-        '（VNF 可起页数以此为准）');
+      const freeText = p.free != null && p.free >= 0 ? p.free + ' 页' : '取不到';
+      lines.push(p.page_size + ' 池空闲页 ' + freeText + '（VNF 可起页数以此为准）');
     }
   }
   $('dep-pool-note').textContent = lines.length
@@ -115,7 +109,7 @@ function depCollect() {
     };
     if ($('dep-serial').checked) out.serial_console = true;
     if ($('dep-disk-mode').value === 'image') out.disks = [{ name: 'disk0', image }];
-    else out.disks = [{ name: 'disk0', size_gb: Number($('dep-disk-size').value) }];
+    else out.disks = [{ name: 'disk0', size_gb: Number($('dep-disk-size').value) || 8 }];
     return out;
   }
   const out = { name, image, interfaces: nics };

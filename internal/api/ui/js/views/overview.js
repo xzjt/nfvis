@@ -330,3 +330,26 @@ export const viewsOverview = {
     }
   },
 };
+
+// 告警卡（renderAlarms + 时钟标记）从 system.js 移回总览域（overview 视图独用；
+// system 页不消费它——拆分时误落 system 域导致 overview 引用断线）。
+// 告警时间是否可信（NFR-006）：记录该告警时时钟未与 NTP 同步则标注；未知/已同步不标。
+function alarmClockMark(a) {
+  return a && a.time_synced === false ? '  [时钟未同步]' : '';
+}
+
+// 告警卡：只列未解决的（已恢复的由运维页的清除动作处理）。
+function renderAlarms(alarms) {
+  const al = $('alarms');
+  al.textContent = '';
+  const active = (alarms || []).filter((a) => a.state !== 'resolved');
+  if (!active.length) {
+    al.appendChild(el('p', { class: 'muted', text: '（无未解决告警）' }));
+  } else {
+    active.forEach((a) => al.appendChild(el('div', { class: 'alarm sev-' + (a.severity || 'info') }, [
+      el('div', { class: 'alarm-head', text: '[' + (a.severity || '') + '] ' + (a.code || '') }),
+      el('div', { text: a.message || '' }),
+      el('div', { class: 'muted small', text: (a.source ? a.source + ' · ' : '') + fmtTime(a.raised_at) + alarmClockMark(a) }),
+    ])));
+  }
+}

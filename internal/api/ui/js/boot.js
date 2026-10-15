@@ -28,7 +28,7 @@ import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   showGlobalError, setCfgEditingProbe } from './core/state.js';
 
 // 重新渲染**当前路由**：SSE 事件到达、轮询、动作完成、点顶栏「刷新」都走这里。
-const routerModule = () => import('./router.js');
+const routerModule = () => import('../router.js');
 export async function reload() {
   return (await routerModule()).render();
 }
