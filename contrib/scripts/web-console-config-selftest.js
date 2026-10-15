@@ -29,17 +29,41 @@ const { webcrypto, pbkdf2Sync } = require('node:crypto');
 const APP_JS = process.env.WEB_CONSOLE_APP_JS ||
   path.join(__dirname, '..', '..', 'internal', 'api', 'ui', 'app.js');
 
-// app.js 是 ES 模块（index.html 用 `type="module"` 加载），只有 `export` 没有静态 `import`
-// （唯一的 import 是 routerModule() 里的动态 `import('./router.js')`，本桩的路径用不到它）。
-// vm 里按**经典脚本**跑，故剥掉行首的 `export ` 前缀——纯语法层面，不改任何实现；
-// 哪天真加了静态 import，下面这条判据会先报出来（而不是让本桩悄悄测别的东西）。
-const APP_SRC_RAW = fs.readFileSync(APP_JS, 'utf8');
-if (/^\s*import\s/m.test(APP_SRC_RAW)) {
-  throw new Error(APP_JS + ' 出现了静态 import——本桩按经典脚本跑，需改用模块方式加载');
+// ---- 多模块加载：沿 app.js 的静态 import 递归拼接为一份经典脚本 ----
+// 前端是 ES modules（index.html 用 `type="module"` 加载），但本桩要在 vm 里以经典脚本求值
+// 并直接摸顶层符号（cfg/cfgSave/cfgRenderForms/...），故把依赖闭包**按后序**拼接
+// （被依赖者先出现）、剥掉 import/export 语句后整份求值——测的仍是真实实现，不是复刻。
+// 拼接后若残留 import（动态 import 或裸 import）即报错：桩不支持，别悄悄测别的东西。
+function bundle(entry) {
+  const seen = new Set();
+  const order = [];
+  (function walk(file) {
+    const key = path.normalize(file);
+    if (seen.has(key)) return;
+    seen.add(key);
+    let src = fs.readFileSync(file, 'utf8');
+    if (/^\s*import\s/m.test(src)) {
+      src = src.replace(/^[ \t]*import\s[^;]*?from\s+['"]([^'"]+)['"];?[ \t]*$/gm, (m, spec) => {
+        if (!spec.startsWith('.')) throw new Error(file + ' 出现非相对 import ' + spec + '——本桩不支持');
+        walk(path.resolve(path.dirname(file), spec));
+        return ''; // 名字经拼接共享同一作用域，import 语句本身可删
+      });
+      if (/^\s*import\s/m.test(src)) {
+        throw new Error(file + ' 残留未处理的 import（动态 import 或裸 import）——本桩不支持');
+      }
+    }
+    // export 剥离：export const/let/var/function/async function/class → 保留声明本体
+    src = src.replace(/^export\s+(?=(const|let|var|function|async\s+function|class)\b)/gm, '');
+    src = src.replace(/^export\s*\{[^}]*\}\s*(?:from\s+['\"][^'\"]+['\"])?;?[ \t]*$/gm, ''); // re-export 行删除
+    order.push({ file, src });
+  })(entry);
+  return order.map((o) => '// ===== ' + o.file + ' =====\n' + o.src).join('\n');
 }
-const APP_SRC = APP_SRC_RAW.replace(/^export /gm, '');
-if ((APP_SRC_RAW.match(/^export /gm) || []).length < 3) {
-  throw new Error(APP_JS + ' 的顶层 export 变少了？本桩的剥法要跟着改');
+
+const APP_SRC_RAW = fs.readFileSync(APP_JS, 'utf8');
+const APP_SRC = bundle(APP_JS);
+if ((APP_SRC.match(/^export /gm) || []).length !== 0) {
+  throw new Error('拼接产物仍残留 export——剥法要跟着改');
 }
 
 // ---- 最小 DOM 桩：只实现 app.js 真的用到的那几个成员 ----

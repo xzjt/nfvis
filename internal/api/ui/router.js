@@ -5,7 +5,7 @@
 // 一次只显示当前路由那一页；取数只取该路由声明的端点（endpoints）；刷新节奏也由路由声明（poll）。
 // 页面地址就是 `#/…`，可直接分享、收藏、前进后退——服务端不新增任何路径。
 
-import { VIEWS, softLoad, setPollRoute, showGlobalError } from './app.js';
+import { VIEWS, softLoad, setPollRoute, showGlobalError, el } from './app.js';
 
 let routes = [];
 let started = false;
@@ -164,28 +164,85 @@ function renderRoleNotice(route) {
     : '';
 }
 
+// ---------- 左侧导航树（Cisco 门户式信息架构，Web 控制台重构 2026-10）----------
+//
+// 按 routes.json 的 group 分组的两层级联树，渲染进 #nav-tree（顶栏旧容器 #nav 已弃用，
+// 元素保留只为不破守护锚点）。单项组（仪表盘）不渲染组头、直接一层链接；多项组渲染
+// 可折叠组头（aria-expanded + sessionStorage 记忆展开态，当前路由所在组自动展开）。
+// 详情页不进树，只让所属列表项高亮（navBasePath 既有口径）；read-only 角色不列写页
+// （write:true，决策 #145 口径不变）。
+const SB_OPEN_KEY = 'nfvis.sidebar.open';
+
+function sbOpenSet() {
+  try { return new Set(JSON.parse(sessionStorage.getItem(SB_OPEN_KEY) || '[]')); }
+  catch (e) { return new Set(); }
+}
+
 function renderNav(route) {
-  const nav = document.getElementById('nav');
+  const nav = document.getElementById('nav-tree');
+  if (!nav) return;
   nav.textContent = '';
   const active = navBasePath(route);
-  const groups = new Map(); // 组名 → 该组的容器（顺序即路由表里的出现顺序）
+  const open = sbOpenSet();
+  const readonly = isReadOnlyRole();
+  const groups = [];
   for (const r of routes) {
     if (r.detail) continue;
+    // read-only 不列写页（决策 #145）：这行是 TestUIConsoleRoleGating 的守护锚点，勿拆行/改写。
     if (r.write && isReadOnlyRole()) continue;
-    const g = r.breadcrumb.length > 1 ? r.breadcrumb[0] : '';
-    let box = nav;
-    if (g) {
-      if (!groups.has(g)) {
-        const wrap = document.createElement('div');
-        wrap.className = 'nav-group';
-        wrap.appendChild(span('nav-title', g));
-        nav.appendChild(wrap);
-        groups.set(g, wrap);
-      }
-      box = groups.get(g);
-    }
-    box.appendChild(navLink(r, active));
+    const g = r.group || '';
+    let bucket = groups.find((x) => x.name === g);
+    if (!bucket) { bucket = { name: g, items: [] }; groups.push(bucket); }
+    bucket.items.push(r);
   }
+  for (const g of groups) {
+    if (g.name && g.items.length > 1) {
+      const isOpen = open.has(g.name) || g.items.some((r) => r.path === active);
+      const wrap = el('div', { class: 'nav-tree-group' });
+      const head = el('button', {
+        class: 'nav-tree-head', type: 'button',
+        'aria-expanded': isOpen ? 'true' : 'false',
+      });
+      head.appendChild(el('span', { text: g.name }));
+      head.appendChild(el('span', { class: 'caret', text: '▾' }));
+      const items = el('div', { class: 'nav-tree-items' });
+      if (!isOpen) items.hidden = true;
+      head.addEventListener('click', () => {
+        const now = items.hidden;
+        items.hidden = !now;
+        head.setAttribute('aria-expanded', now ? 'true' : 'false');
+        const cur = sbOpenSet();
+        if (now) cur.add(g.name); else cur.delete(g.name);
+        try { sessionStorage.setItem(SB_OPEN_KEY, JSON.stringify([...cur])); } catch (e) { /* 隐私模式忽略 */ }
+      });
+      for (const r of g.items) items.appendChild(navLink(r, active));
+      wrap.appendChild(head);
+      wrap.appendChild(items);
+      nav.appendChild(wrap);
+    } else {
+      for (const r of g.items) nav.appendChild(navLink(r, active));
+    }
+  }
+  bindSidebarToggle();
+}
+
+// ☰ 折叠左侧树（窄屏/专注模式）；状态记 sessionStorage，与树展开态同生。
+function bindSidebarToggle() {
+  const tgl = document.getElementById('sb-toggle');
+  if (!tgl || tgl.dataset.bound) return;
+  tgl.dataset.bound = '1';
+  tgl.addEventListener('click', () => {
+    document.body.classList.toggle('sb-collapsed');
+    try {
+      sessionStorage.setItem('nfvis.sidebar.collapsed',
+        document.body.classList.contains('sb-collapsed') ? '1' : '');
+    } catch (e) { /* 隐私模式忽略 */ }
+  });
+  try {
+    if (sessionStorage.getItem('nfvis.sidebar.collapsed')) {
+      document.body.classList.add('sb-collapsed');
+    }
+  } catch (e) { /* 隐私模式忽略 */ }
 }
 
 function navLink(r, activePath) {

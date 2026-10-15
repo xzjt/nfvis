@@ -26,17 +26,40 @@ const APP_JS = process.env.WEB_CONSOLE_APP_JS ||
 // 骨架永远取仓库里那一份（红-绿跑的是 app.js 的变异体，骨架没变——别跟着变异体去临时目录找）。
 const INDEX_HTML = path.join(__dirname, '..', '..', 'internal', 'api', 'ui', 'index.html');
 
-// app.js 是 ES 模块（index.html 用 `type="module"` 加载），只有 `export` 没有静态 `import`
-// （唯一的 import 是 routerModule() 里的动态 `import('./router.js')`，本桩用不到它——
-// 动态 import 在 vm 里会以 ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING 拒绝，动作收尾的
-// reload() 已被 .catch 吞掉，不影响本桩的断言）。
-const APP_SRC_RAW = fs.readFileSync(APP_JS, 'utf8');
-if (/^\s*import\s/m.test(APP_SRC_RAW)) {
-  throw new Error(APP_JS + ' 出现了静态 import——本桩按经典脚本跑，需改用模块方式加载');
+// app.js 是 ES modules 聚合入口（共享件在 js/core/，Web 控制台重构 2026-10）。
+// 本桩要在 vm 里以经典脚本求值并直接摸顶层符号（cfg/cfgSave/uiConfirm/usrDelete/...），
+// 故沿静态 import 递归拼接为一份脚本（被依赖者先出现）、剥掉 import/export——
+// 测的仍是真实实现，不是复刻。动态 import（routerModule 的 './router.js'）在 vm 里会以
+// ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING 拒绝，动作收尾的 reload() 已被 .catch 吞掉，
+// 不影响本桩的断言。
+function bundle(entry) {
+  const seen = new Set();
+  const order = [];
+  (function walk(file) {
+    const key = path.normalize(file);
+    if (seen.has(key)) return;
+    seen.add(key);
+    let src = fs.readFileSync(file, 'utf8');
+    if (/^\s*import\s/m.test(src)) {
+      src = src.replace(/^[ \t]*import\s[^;]*?from\s+['"]([^'"]+)['"];?[ \t]*$/gm, (m, spec) => {
+        if (!spec.startsWith('.')) throw new Error(file + ' 出现非相对 import ' + spec + '——本桩不支持');
+        walk(path.resolve(path.dirname(file), spec));
+        return ''; // 名字经拼接共享同一作用域，import 语句本身可删
+      });
+      if (/^\s*import\s/m.test(src)) {
+        throw new Error(file + ' 残留未处理的 import（动态 import 或裸 import）——本桩不支持');
+      }
+    }
+    src = src.replace(/^export\s+(?=(const|let|var|function|async\s+function|class)\b)/gm, '');
+    src = src.replace(/^export\s*\{[^}]*\}\s*(?:from\s+['"][^'"]+['"])?;?[ \t]*$/gm, '');
+    order.push({ file, src });
+  })(entry);
+  return order.map((o) => '// ===== ' + o.file + ' =====\n' + o.src).join('\n');
 }
-const APP_SRC = APP_SRC_RAW.replace(/^export /gm, '');
-if ((APP_SRC_RAW.match(/^export /gm) || []).length < 3) {
-  throw new Error(APP_JS + ' 的顶层 export 变少了？本桩的剥法要跟着改');
+
+const APP_SRC = bundle(APP_JS);
+if ((APP_SRC.match(/^export /gm) || []).length !== 0) {
+  throw new Error('拼接产物仍残留 export——剥法要跟着改');
 }
 
 // ---- 红-绿用的变异表：每条都对着闸门/档位的一行实现，锚点必须唯一 ----
@@ -91,12 +114,15 @@ if (process.argv[2] === '--mutate') {
     console.error('用法：node … --mutate <' + Object.keys(MUTATIONS).join('|') + '> <输出文件>');
     process.exit(2);
   }
-  const hits = APP_SRC_RAW.split(m.find).length - 1;
+  // 变异对**拼接产物**操作（锚点可能随拆分落在 core/views 文件里）；
+  // 产物已剥 import/export，WEB_CONSOLE_APP_JS=<产物> 直接被 bundle() 当单文件读——不冲突。
+  const bundled = APP_SRC;
+  const hits = bundled.split(m.find).length - 1;
   if (hits !== 1) {
-    console.error('✗ 变异 ' + name + ' 的锚点在 app.js 里命中 ' + hits + ' 处（期望 1）——锚点变了，本自校准要跟着改');
+    console.error('✗ 变异 ' + name + ' 的锚点在前端 js 里命中 ' + hits + ' 处（期望 1）——锚点变了，本自校准要跟着改');
     process.exit(2);
   }
-  fs.writeFileSync(out, APP_SRC_RAW.split(m.find).join(m.replace));
+  fs.writeFileSync(out, bundled.split(m.find).join(m.replace));
   process.exit(0);
 }
 
@@ -122,6 +148,13 @@ function makeDom() {
       tagName: String(tag).toUpperCase(),
       attrs: {}, listeners: {}, children: [],
       value: '', className: '', hidden: false, disabled: false, parent: null, _text: '',
+      // classList 最小实现（拆分后的视图代码用 classList.toggle 切错误态，如 depMsg）。
+      classList: {
+        add(...cs) { const s = new Set(this._owner.className.split(/\s+/).filter(Boolean)); cs.forEach((c) => s.add(c)); this._owner.className = [...s].join(' '); },
+        remove(...cs) { const s = new Set(this._owner.className.split(/\s+/).filter(Boolean)); cs.forEach((c) => s.delete(c)); this._owner.className = [...s].join(' '); },
+        toggle(c, force) { const s = new Set(this._owner.className.split(/\s+/).filter(Boolean)); const has = s.has(c); const want = force === undefined ? !has : !!force; if (want) s.add(c); else s.delete(c); this._owner.className = [...s].join(' '); return want; },
+        contains(c) { return this._owner.className.split(/\s+/).includes(c); },
+      },
       appendChild(c) { this.children.push(c); c.parent = this; register(c); return c; },
       insertBefore(c) { return this.appendChild(c); },
       removeChild(c) {
@@ -156,6 +189,7 @@ function makeDom() {
         this._text = v === undefined || v === null ? '' : String(v);
       },
     };
+    node.classList._owner = node;
     created.push(node);
     return node;
   }
@@ -366,6 +400,18 @@ const ACTIONS = [
     pre: (ctx) => { nodeOf(ctx, 'ops-export-url').value = 'http://192.0.2.10:8080/collect'; } },
   { id: 'diag-clear-btn', title: '清零接口统计', tier: 'low', cli: /clear interfaces statistics$/,
     req: { method: 'POST', url: /\/interfaces:clear-statistics$/ } },
+  { id: 'dep-submit', title: '部署 虚拟机 dep-web-1', tier: 'low', cli: /set virtual-machine-functions dep-web-1 /,
+    req: { method: 'POST', url: /\/virtual-machine-functions$/ },
+    pre: (ctx) => {
+      // 向导的状态在 js/views/deploy.js：pre 里直接置 Kind（拼接域同作用域）。
+      vm.runInContext('depKind = "vm"', ctx);
+      vm.runInContext('depData = { images: [{ name: "alpine" }], profiles: [], vss: [{ name: "vs-l3" }], pools: null, hp: null }', ctx);
+      nodeOf(ctx, 'dep-name').value = 'dep-web-1';
+      nodeOf(ctx, 'dep-image').value = 'alpine';
+      nodeOf(ctx, 'dep-vcpu').value = '1';
+      nodeOf(ctx, 'dep-mem').value = '1024';
+      nodeOf(ctx, 'dep-disk-mode').value = 'image';
+    } },
   { id: 'cfg-discard-btn', title: '丢弃并结束编辑', tier: 'low', cli: /^对应命令（只读回显，便于工单对照）：discard$/,
     req: { method: 'DELETE', url: /\/configuration\/candidate$/ },
     pre: (ctx) => { vm.runInContext('cfg.editing = true', ctx); } },
@@ -635,7 +681,7 @@ async function runHighAction(ctx, act, start) {
     ok('#' + id + ' 没有 data-write（只读账号也要能看见/能用）', tag !== '' && tag.indexOf('data-write') < 0, tag);
   }
   ok('app.js 里顶栏入口接的是 openAcct（不是直接发请求）',
-    /\$\('account-btn'\)\.addEventListener\('click', openAcct\)/.test(APP_SRC_RAW));
+    /\$\('account-btn'\)\.addEventListener\('click', openAcct\)/.test(APP_SRC));
 
   console.log('— ① 逐个动作走一遍：档位特征 + 确认前/取消后都不许发请求 —');
   for (const act of ACTIONS) {
@@ -745,21 +791,21 @@ async function runHighAction(ctx, act, start) {
 
   console.log('— ⑦ 不许退回浏览器自带的 confirm（没有影响面、没有只读回显、没有闸门） —');  ok('整轮下来 window.confirm 一次都没被调用', ctx.__stub.confirms.length === 0,
     '被调用 ' + ctx.__stub.confirms.length + ' 次：' + JSON.stringify(ctx.__stub.confirms.slice(0, 3)));
-  ok('app.js 里已经没有 window.confirm(', !/window\.confirm\s*\(/.test(APP_SRC_RAW));
+  ok('app.js 里已经没有 window.confirm(', !/window\.confirm\s*\(/.test(APP_SRC));
   ok('高危档的倒计时不许被调用点缩短（app.js 里不该出现 countdown 覆盖）',
-    !/\bcountdown:\s*[0-9]/.test(APP_SRC_RAW));
+    !/\bcountdown:\s*[0-9]/.test(APP_SRC));
 
   // 直连 fetch（下载/上传/日志这类不走 api() 的路径）失败时，**服务端的原话要到达操作者**：
   // 服务端会说明原因（如「当前 class 无权执行该操作」），界面只剩一个 HTTP 403 就是把原因丢了。
   // 判据是结构性的：裸状态码只允许出现在两个取文案的助手函数里，其余调用点都必须经它们。
   console.log('— ⑧ 直连 fetch 的失败文案：服务端原话优先（不许只剩 HTTP 状态码） —');
-  const viaHelper = (APP_SRC_RAW.match(/await httpErrText\(res\)/g) || []).length;
+  const viaHelper = (APP_SRC.match(/await httpErrText\(res\)/g) || []).length;
   ok('下载/归档读取/容器日志/镜像上传都经 httpErrText（4 处调用）', viaHelper === 4, '出现 ' + viaHelper + ' 处');
-  const viaTextHelper = (APP_SRC_RAW.match(/errTextOf\(text, res\.status\)/g) || []).length;
+  const viaTextHelper = (APP_SRC.match(/errTextOf\(text, res\.status\)/g) || []).length;
   ok('文本类端点（差异/日志）经 errTextOf（2 处调用）', viaTextHelper === 2, '出现 ' + viaTextHelper + ' 处');
   // 回归判据：被修掉的那几处**裸状态码文案**不许再出现（各自写明端点的读失败）。
   for (const bad of ['读取失败：HTTP ', '读取差异失败：HTTP ', '读取归档失败（HTTP ']) {
-    ok('不再出现「' + bad + '」这种丢了服务端原因的文案', APP_SRC_RAW.indexOf(bad) < 0);
+    ok('不再出现「' + bad + '」这种丢了服务端原因的文案', APP_SRC.indexOf(bad) < 0);
   }
 
 
@@ -767,9 +813,9 @@ async function runHighAction(ctx, act, start) {
   // 判据是结构性的：api() 必须把 detail 逐条并入错误文案（只摆 summary 等于把原因丢掉）。
   console.log('— ⑨ 校验类失败的 detail 必须到达操作者 —');
   ok('api() 把 detail[] 逐条并入错误文案',
-    /Array\.isArray\(body\.detail\)/.test(APP_SRC_RAW) && /msg \+= '——/.test(APP_SRC_RAW));
+    /Array\.isArray\(body\.detail\)/.test(APP_SRC) && /msg \+= '——/.test(APP_SRC));
   ok('错误文案不再只有 summary（提交失败时能看到「为什么」）',
-    APP_SRC_RAW.indexOf('detail') >= 0 && APP_SRC_RAW.indexOf('校验类失败会带') >= 0);
+    APP_SRC.indexOf('detail') >= 0 && APP_SRC.indexOf('校验类失败会带') >= 0);
 
   // —— ⑩ 记录类时间的口径：一律 UTC + 显式标记（round80 真机验收的缺陷）——
   //
@@ -816,16 +862,16 @@ async function runHighAction(ctx, act, start) {
     optOf('2026-10-24T12:00:00Z') === '2026-10-24 12:00:00 UTC' && optOf('0001-01-01T00:00:00Z') === undefined,
     JSON.stringify([optOf('2026-10-24T12:00:00Z'), optOf('0001-01-01T00:00:00Z')]));
   // 结构性判据（与上面的行为判据互补）：fmtTime 的实现里不许再出现本地时区格式化。
-  const fmtBody = (APP_SRC_RAW.match(/function fmtTime\(ts\)[\s\S]*?\n\}/) || [''])[0];
+  const fmtBody = (APP_SRC.match(/function fmtTime\(ts\)[\s\S]*?\n\}/) || [''])[0];
   ok('fmtTime 的实现经 toISOString 取 UTC 分量', /toISOString/.test(fmtBody));
   ok("fmtTime 的产物带 ' UTC' 标记", /' UTC'/.test(fmtBody));
   ok('fmtTime 的实现里没有 toLocale*（记录类时间不随浏览器时区变）', !/toLocale/.test(fmtBody));
   // 唯一的本地时间出口是纯 UI 提示（「已刷新 时刻」，与任何记录无关）；它的理由写在注释里。
   ok('本地时区格式化只留在 fmtClockHint 一处（纯 UI 提示），且注释写明理由',
-    /function fmtClockHint\(date\)/.test(APP_SRC_RAW) &&
-    /纯 UI 提示/.test(APP_SRC_RAW.slice(Math.max(0, APP_SRC_RAW.indexOf('function fmtClockHint(') - 400),
-      APP_SRC_RAW.indexOf('function fmtClockHint('))) &&
-    !/new Date\(\)\.toLocaleTimeString\(\)/.test(APP_SRC_RAW));
+    /function fmtClockHint\(date\)/.test(APP_SRC) &&
+    /纯 UI 提示/.test(APP_SRC.slice(Math.max(0, APP_SRC.indexOf('function fmtClockHint(') - 400),
+      APP_SRC.indexOf('function fmtClockHint('))) &&
+    !/new Date\(\)\.toLocaleTimeString\(\)/.test(APP_SRC));
 
   if (RC === 0) console.log('全部符合预期');
   else console.log('有不符合预期的用例');

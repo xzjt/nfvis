@@ -44,13 +44,10 @@ var uiNotWired = map[string]string{
 
 // uiUsedPaths 从**前端源码**提取路径字面量：api('/x')、fetch(API + '/x')。
 // 以 `/` 结尾的字面量（如 `/interfaces/` + name）按前缀匹配使用。
+// 搜索面 = 全部自有 JS（uiJSFiles）：拆分后取数路径散在 core/views 各文件，单搜 app.js 会漏。
 func uiUsedPaths(t *testing.T) []string {
 	t.Helper()
-	data, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
-	src := string(data)
+	files := uiJSFiles(t)
 	seen := map[string]bool{}
 	// 并入**路由表**（ui/routes.json）的 endpoints：控制台改成"资源域一级 + 对象详情二级"后，
 	// 页面取数由路由表声明（如 /system/status 只在总览页取），字面量只剩动作类端点。
@@ -79,16 +76,18 @@ func uiUsedPaths(t *testing.T) []string {
 		regexp.MustCompile(`api\('(/[^']*)'`),
 		regexp.MustCompile(`fetch\(API \+ '(/[^']*)'`),
 	} {
-		for _, m := range re.FindAllStringSubmatch(src, -1) {
-			p := m[1]
-			if i := strings.IndexByte(p, '?'); i >= 0 {
-				p = p[:i] // 去掉查询串（/audit-logs?limit=50 → /audit-logs）
+		for _, fsrc := range files {
+			for _, m := range re.FindAllStringSubmatch(fsrc, -1) {
+				p := m[1]
+				if i := strings.IndexByte(p, '?'); i >= 0 {
+					p = p[:i] // 去掉查询串（/audit-logs?limit=50 → /audit-logs）
+				}
+				seen[p] = true
 			}
-			seen[p] = true
 		}
 	}
 	if len(seen) < 15 {
-		t.Fatalf("从 ui/app.js 只提取到 %d 条路径，提取规则可能失效（前端调用形式变了？）", len(seen))
+		t.Fatalf("从前端 js 只提取到 %d 条路径，提取规则可能失效（前端调用形式变了？）", len(seen))
 	}
 	out := make([]string, 0, len(seen))
 	for p := range seen {

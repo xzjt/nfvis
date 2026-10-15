@@ -25,6 +25,7 @@ type uiRoute struct {
 	View       string   `json:"view"`
 	Detail     bool     `json:"detail"`
 	Breadcrumb []string `json:"breadcrumb"`
+	Group      string   `json:"group"`
 	Endpoints  []string `json:"endpoints"`
 	Poll       int      `json:"poll"`
 	Write      bool     `json:"write"`
@@ -83,6 +84,30 @@ func TestUIRoutesAreConsistent(t *testing.T) {
 	}
 	if !seen["#/"] {
 		t.Error("缺少总览路由 #/（未知路由与登录后都要回落到它）")
+	}
+
+	// group 列（Cisco 式左侧树分组）：必填且取值闭合——导航树按它分组渲染，
+	// 拼错/漏填会让该路由在左侧树里消失。
+	groups := map[string]bool{"仪表盘": true, "虚拟机": true, "网络": true, "系统": true, "运维": true}
+	for _, r := range routes {
+		if !groups[r.Group] {
+			t.Errorf("路由 %s 的 group=%q 不在许可集合内（漏填或拼错）", r.Path, r.Group)
+		}
+	}
+	// 部署向导（Cisco VM Life Cycle > Deploy 对应物）：写页（对只读角色隐藏），
+	// 且端点必须都是读端点（写入走该页表单的 POST，不进页面取数声明）。
+	deployFound := false
+	for _, r := range routes {
+		if r.Path != "#/deploy" {
+			continue
+		}
+		deployFound = true
+		if !r.Write {
+			t.Error("部署向导路由必须 write:true（写候选页对只读角色隐藏）")
+		}
+	}
+	if !deployFound {
+		t.Error("routes.json 缺 #/deploy 部署向导路由")
 	}
 
 	// 参数化路由（`#/compute/vms/:name`）的形状：
@@ -154,13 +179,11 @@ func TestUIRoutesAreConsistent(t *testing.T) {
 		}
 	}
 
-	app, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
+	// VIEWS 注册表按域拆在 js/views/ 各文件（app.js 聚合）：搜全部自有 js。
+	appAll := jsAll(t)
 	for _, r := range routes {
-		if !strings.Contains(string(app), "'"+r.View+"':") {
-			t.Errorf("路由 %q 的 view %q 在 app.js 的 VIEWS 注册表里找不到（键名要写成带引号的形式）", r.Path, r.View)
+		if !strings.Contains(appAll, "'"+r.View+"':") {
+			t.Errorf("路由 %q 的 view %q 在前端 js 的 views 注册表里找不到（键名要写成带引号的形式）", r.Path, r.View)
 		}
 	}
 }
@@ -187,6 +210,7 @@ func TestUIConsoleRoleGating(t *testing.T) {
 		"#/system/kernel": "内核基线写入/回退",
 		"#/ops/actions":   "运维动作（备份/升级/恢复/重启/关机/恢复出厂）",
 		"#/ops/capture":   "抓包（request capture 为 super-user 级）",
+		"#/deploy":        "部署向导（写候选；POST /virtual-machine-functions|/container-functions）",
 	}
 	got := map[string]bool{}
 	for _, r := range routes {
@@ -212,10 +236,7 @@ func TestUIConsoleRoleGating(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取 ui/style.css: %v", err)
 	}
-	app, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
+	appAll := jsAll(t)
 	router, err := os.ReadFile("ui/router.js")
 	if err != nil {
 		t.Fatalf("读取 ui/router.js: %v", err)
@@ -229,11 +250,20 @@ func TestUIConsoleRoleGating(t *testing.T) {
 	if !strings.Contains(string(css), "body.role-readonly [data-write]") {
 		t.Error("style.css 缺少 body.role-readonly [data-write] 的隐藏规则")
 	}
-	if !strings.Contains(string(app), "role-readonly") || !strings.Contains(string(app), "function applyRole(") {
-		t.Error("app.js 缺少 applyRole（按登录响应的 class 切 body.role-readonly）")
+	// applyRole 在 js/boot.js（登录域）、wbtn 在 js/core/dom.js（拆分后搜索面=全部自有 js）。
+	appAnywhere := func(needle string) bool {
+		for _, src := range uiJSFiles(t) {
+			if strings.Contains(src, needle) {
+				return true
+			}
+		}
+		return false
 	}
-	if !strings.Contains(string(app), "const wbtn = ") {
-		t.Error("app.js 缺少 wbtn（动态写入口的标记助手）")
+	if !appAnywhere("role-readonly") || !appAnywhere("function applyRole(") {
+		t.Error("前端 js 缺少 applyRole（按登录响应的 class 切 body.role-readonly）")
+	}
+	if !appAnywhere("export const wbtn = ") {
+		t.Error("前端 js 缺少 wbtn（动态写入口的标记助手）")
 	}
 	if !strings.Contains(string(router), "r.write && isReadOnlyRole()") {
 		t.Error("router.js 没有按 write 标记过滤导航（read-only 仍会看到写页）")
@@ -255,11 +285,11 @@ func TestUIConsoleRoleGating(t *testing.T) {
 		t.Errorf("顶栏「我的账号」入口被打上了 data-write：%s——只读账号会看不到它，自助改密入口就没了", btn)
 	}
 	//    两步（表单 + 高危确认）缺一个就点不通：处理器、开/关函数与对话框骨架都要在源码里。
-	if !strings.Contains(string(app), "$('account-btn').addEventListener('click', openAcct)") {
-		t.Error("app.js 里顶栏「我的账号」入口没有接到 openAcct（点了不会有反应）")
+	if !strings.Contains(appAll, "$('account-btn').addEventListener('click', openAcct)") {
+		t.Error("前端 js 里顶栏「我的账号」入口没有接到 openAcct（点了不会有反应）")
 	}
-	if !strings.Contains(string(app), "function openAcct(") || !strings.Contains(string(app), "function closeAcct(") {
-		t.Error("app.js 缺少 openAcct / closeAcct（「我的账号」框的开与关）")
+	if !strings.Contains(appAll, "function openAcct(") || !strings.Contains(appAll, "function closeAcct(") {
+		t.Error("前端 js 缺少 openAcct / closeAcct（「我的账号」框的开与关）")
 	}
 	for _, id := range []string{`id="acct"`, `id="acct-old"`, `id="acct-new"`, `id="acct-submit"`} {
 		if !strings.Contains(string(html), id) {
@@ -274,11 +304,7 @@ func TestUIConsoleRoleGating(t *testing.T) {
 // 真机 round88 现场（1.1.49）：vs-wan 有两条静态路由，该列显示 "[object Object],[object Object]"，
 // 而详情页同一数据用 .length 是正常的——列表与详情两处口径不一致。
 func TestNetworkObjectsVrfRouteCountRendersNumber(t *testing.T) {
-	app, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
-	src := string(app)
+	src := jsAll(t)
 	if strings.Contains(src, "v.routes != null ? v.routes : undefined") {
 		t.Error("VRF 列表的「路由数」列仍在直接塞对象数组（会渲染成 [object Object]）：应取 v.routes.length")
 	}

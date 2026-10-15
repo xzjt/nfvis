@@ -1862,6 +1862,31 @@
   `docs/evidence/v3-round34-clean-install-walkthrough-vpp-kernel.txt`；**代码侧改动（未提交）**：
   `internal/api/cli_compute_oper.go`、`internal/api/capture_test.go`、`contrib/scripts/cli-fulltest-phase4/5.sh`、
   `docs/NFViS-CLI命令全表.md`。
+- **v3 round35（Web 控制台 Cisco 门户式重构：真机构建 + 全页黑盒 + 四套件零失败，2026-10-15）**：
+  分支 **`feat/web-console-redesign`**（自 `b6eb041` 切出，14 提交；范围与设计见
+  `docs/superpowers/specs/2026-10-15-web-console-cisco-redesign-design.md`）：左侧导航树（routes.json 增
+  `group` 列，仪表盘/虚拟机/网络/系统/运维五组、可折叠会话记忆）、浅色主题（Cisco 蓝白）、**部署向导**新页
+  （四步：类型→镜像与资源→网卡映射+静态 SVG 拓扑→摘要确认；**只写候选不代提交**，低危确认档）、
+  app.js 6100 行 → 聚合入口 + `js/core/`（const/dom/api/format/state）+ `js/views/`（12 域）+ `js/boot.js`；
+  `ui.go` 给 `js/` 子树按「前缀+扩展名」放行静态服务（与 novnc/ 同口径）。守护：Go UI 守护全部改
+  `uiJSFiles/jsAll` 拼接域（断言不变）；两个 vm 桩自校准改「沿静态 import 递归拼接」加载器；**新增
+  `contrib/scripts/web-console-esm-link-check.mjs`**（SourceTextModule.link 全图链接期检查——真 ESM 下
+  「幻影 import/跨模块直引」类加载失败在桩拼接域不可见，黑盒首轮即抓出十余处并全量收口）。**真机验证
+  （nfvis-vm，Browser Use）**：`git archive` → `make deb VERSION=3.0.19~dev1 SOURCE_DATE_EPOCH=1792061245`
+  **两打逐字节一致**（`157cf33c…`，10,480,712 B）→ 实装三面资产 200；**23 页逐页零 JS 错**、部署向导
+  全流程（真实镜像四夹具、池注记与 `show system hugepages` 逐字一致、**写入候选 CLI 回读逐字一致**）、
+  read-only 角色矩阵全过；**四套件零失败：fulltest 297/0/26、语义 43/0/0、lifecycle 40/0/3、pty 10/10**
+  （逐项命中 12:01 基线）。⚠️ fulltest 首跑 265/35/23 **全数判读为单一根因**（round34 已文档化的前置坑
+  的 **rev 级实证**）：S2-pre 业务地址 `192.168.155.10/24` 与现场管理地址（**rev206→207 唯一差异 =
+  12:11 新增 `address 192.168.155.129/24`**）同网段 → 重叠守卫（FR-CFG-011②，M1 即有）**正确拒绝** →
+  级联 35 红；按前置撤管理地址（`commit confirmed`）→ 复跑 297/0/26。**教训入册**：撤/恢复管理地址须
+  **配置模式内再 `commit` 确认**（裸 commit 报「脚本在第 1 行停止」）；`corelist-workers` **必须配
+  main-core**（VPP 拒绝启动）且 main-core 须在隔离核池内（两约束同过才能恢复声明）；VPP `State=down`
+  是管理员态（`vppctl set interface state … up`），与链路速率两层。**新登记 R35-1**（工具口径）：
+  fulltest 业务地址写死、与「已声明同网段管理地址」的现场互斥，长期修法候选=参数化（见 `docs/v3待做.md` §三-30）。
+  现场已还原（地址/池 3/2-5/VPP threads=2/两口 dpdk+up/无告警），dev 构建 3.0.19~dev1 留机。证据
+  `docs/evidence/v3-round35-web-console-redesign-real-machine.txt`、截图 `docs/images/web-redesign-*.png`。
+  **未竟**：分支尚未合入 v3（合入后按发版纪律走两打+发布件四套件）。
 - **已发布 v3.0.18（2026-10-15，round34 走查 R34-1：`request capture export` 幻影参数收口）**：tag `v3.0.18` → **`v3 815f44a`**
   （发布点＝PR #328 squash 合并；其上仅本轮发版记录提交）；GitHub Release 四资产；`SOURCE_DATE_EPOCH=1792035954`；
   deb `600aa3d2…`（10,471,078 字节）/ `.run` `f3ea020e…`（185,193,421 字节，载荷 **239** deb / 178M）两打逐字节一致、

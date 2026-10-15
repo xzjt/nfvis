@@ -7,17 +7,12 @@ package api
 // 断言首表列名与取数接线为内核口径，且旧 #403 说明已去掉。**真行为仍由浏览器验收**。
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
 
 func TestUIPoolsFirstTableKernelColumns(t *testing.T) {
-	jsB, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
-	js := string(jsB)
+	js := jsAll(t)
 
 	// 首表列名（决策 #480）：页大小 / 声明 / 总数（内核实际） / 已分配（在用） / 可分配（VNF）。
 	for _, want := range []string{

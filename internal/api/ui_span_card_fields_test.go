@@ -70,10 +70,7 @@ func spanSchemaPropsFromOpenapi(t *testing.T) (top, src map[string]bool) {
 // spanCardSnippet 从 app.js 取 SPAN 卡行与其源 formatter 的实现片段。
 func spanCardSnippet(t *testing.T) string {
 	t.Helper()
-	data, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 app.js: %v", err)
-	}
+	data := jsAll(t)
 	src := string(data)
 	// 卡片行：以「端口镜像（SPAN）」开头的那条表项（到下一行以 `  ['` 或 `  //` 开头为止）。
 	start := strings.Index(src, "['端口镜像（SPAN）'")

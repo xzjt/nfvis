@@ -7,17 +7,12 @@ package api
 // **真行为仍由浏览器验收**（决策 #141），本用例替代不了它。
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
 
 func TestUIAlarmClockMarkWiring(t *testing.T) {
-	jsB, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
-	js := string(jsB)
+	js := jsAll(t)
 	for _, want := range []string{
 		"function alarmClockMark(",
 		"a.time_synced === false",

@@ -19,19 +19,19 @@ package api
 //	⑤ 记录类时间的调用点不少于登记下限（把某处改回内联格式化时至少会被提醒）。
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
 
-// uiFuncSpan 定位 app.js 里的顶层函数：返回函数体与起始偏移。
-// app.js 的顶层函数都以行首 `}` 收尾，锚点唯一；锚点变了就让本守护报红（而不是静默空转）。
+// uiFuncSpan 定位**自有 JS 文件集合**里的顶层函数：返回（函数体, 所在文件, 文件内起始偏移）。
+// 顶层函数都以行首 `}` 收尾，锚点唯一；锚点变了就让本守护报红（而不是静默空转）。
+// 拆分后搜索面=全部自有 js（uiJSFiles）：fmtTime 在 core/format.js、fmtTimeOpt 的调用点散在各 views。
 func uiFuncSpan(t *testing.T, src, name string) (body string, start int) {
 	t.Helper()
 	sig := "function " + name + "("
 	i := strings.Index(src, sig)
 	if i < 0 {
-		t.Fatalf("ui/app.js 里找不到 %q：守护的锚点变了，本用例要跟着改", sig)
+		t.Fatalf("前端 js 里找不到 %q：守护的锚点变了，本用例要跟着改", sig)
 	}
 	j := strings.Index(src[i:], "\n}")
 	if j < 0 {
@@ -122,14 +122,22 @@ func uiBadTokensOutside(t *testing.T, masked string, lo, hi int, why string, bad
 }
 
 func TestUITimeRenderingIsUTC(t *testing.T) {
-	data, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
+	// 搜索面 = 全部自有 JS（拆分后：format.js 定义、views 各文件调用）。
+	files := uiJSFiles(t)
+	names := uiJSSortedNames(files)
+	// —— ① fmtTime 的口径：换算成 UTC 渲染 + 带标记（在定义它的文件里查）——
+	fmtFile := ""
+	for _, n := range names {
+		if strings.Contains(files[n], "function fmtTime(") {
+			fmtFile = n
+			break
+		}
 	}
-	masked := uiMaskComments(string(data))
-
-	// —— ① fmtTime 的口径：换算成 UTC 渲染 + 带标记 ——
-	body, _ := uiFuncSpan(t, masked, "fmtTime")
+	if fmtFile == "" {
+		t.Fatal("前端 js 里找不到 function fmtTime(（core/format.js 被改名/删掉？守护要跟着改）")
+	}
+	maskedFmt := uiMaskComments(files[fmtFile])
+	body, _ := uiFuncSpan(t, maskedFmt, "fmtTime")
 	if !strings.Contains(body, "toISOString") {
 		t.Error("fmtTime 没有按 UTC 渲染：应经 toISOString 取 UTC 分量（记录类时间一律 UTC，与 CLI/journalctl 同口径）")
 	}
@@ -145,24 +153,38 @@ func TestUITimeRenderingIsUTC(t *testing.T) {
 	if !strings.Contains(body, "FMT_TIME_NAIVE_RE") {
 		t.Error("fmtTime 没有处理「不带时区标记」的时间戳：服务端时间戳都是 UTC，须按 UTC 字面量渲染（别交给 Date 按浏览器时区解析）")
 	}
-	if hint, _ := uiFuncSpan(t, masked, "fmtClockHint"); strings.TrimSpace(hint) == "" {
-		t.Fatal("ui/app.js 里的 fmtClockHint() 是空的：纯 UI 提示的本地时间要集中在这一个函数里")
+	if hint, _ := uiFuncSpan(t, maskedFmt, "fmtClockHint"); strings.TrimSpace(hint) == "" {
+		t.Fatal("前端 js 里的 fmtClockHint() 是空的：纯 UI 提示的本地时间要集中在这一个函数里")
 	}
 
-	// —— ② 本地时区格式化只允许出现在 fmtClockHint() ——
-	hintLo, hintHi := uiFuncLines(t, masked, "fmtClockHint")
-	uiBadTokensOutside(t, masked, hintLo, hintHi,
-		"记录类时间必须走 fmtTime()（UTC + 标记）；只有**纯 UI 提示**（与任何记录无关，如「已刷新 时刻」）"+
-			"才允许本地时间，且必须经 fmtClockHint()",
-		"toLocaleString(", "toLocaleTimeString(", "toLocaleDateString(")
+	// —— ② 本地时区格式化只允许出现在 fmtClockHint()（逐文件判定；文件内函数体区间照算）——
+	// 每份文件单独 mask/定位/扫描：跨文件拼接会破坏行号与「函数体区间外」的语义。
+	hintFound := false
+	for _, n := range names {
+		masked := uiMaskComments(files[n])
+		if strings.Contains(masked, "function fmtClockHint(") {
+			hintFound = true
+		}
+		hintLo, hintHi := uiFuncLinesIn(t, masked, "fmtClockHint")
+		if hintLo == 0 {
+			continue // 本文件没有这个函数：没有例外区间，全文件按无例外扫描
+		}
+		uiBadTokensOutsideFile(t, n, masked, hintLo, hintHi,
+			"记录类时间必须走 fmtTime()（UTC + 标记）；只有**纯 UI 提示**（与任何记录无关，如「已刷新 时刻」）"+
+				"才允许本地时间，且必须经 fmtClockHint()",
+			"toLocaleString(", "toLocaleTimeString(", "toLocaleDateString(")
+	}
+	if !hintFound {
+		t.Fatal("前端 js 里找不到 fmtClockHint（本地时间的唯一出口被删了？守护要跟着改）")
+	}
 
 	// 这个例外要写明理由（本仓库对例外的纪律：例外必须自带理由，否则下一个人只会照着加）。
-	hintBody, hintStart := uiFuncSpan(t, masked, "fmtClockHint")
+	hintBody, hintStart := uiFuncSpan(t, maskedFmt, "fmtClockHint")
 	if !strings.Contains(hintBody, "toLocale") {
 		t.Error("fmtClockHint 现在不渲染本地时间了：要么恢复它（唯一的本地时间出口），要么连同本守护一起收口")
 	}
 	// 理由在**注释**里，而 masked 已把注释抹成空格——故这里回到原文找它。
-	origPre := string(data)[:hintStart]
+	origPre := files[fmtFile][:hintStart]
 	if i := strings.LastIndex(origPre, "\n\n"); i >= 0 {
 		origPre = origPre[i:]
 	}
@@ -171,24 +193,65 @@ func TestUITimeRenderingIsUTC(t *testing.T) {
 	}
 
 	// —— ③ 本地时区取数不许散落：只允许 fmtTimeOpt 里那处零值判定（判断"是不是 0001 年"）——
-	optLo, optHi := uiFuncLines(t, masked, "fmtTimeOpt")
-	uiBadTokensOutside(t, masked, optLo, optHi,
-		"本地时区取数只允许出现在 fmtTimeOpt 的零值判定里；渲染记录类时间请用 fmtTime()（UTC）",
-		"getHours(", "getMinutes(", "getSeconds(", "getFullYear(", "getMonth(", "getDate(", "getDay(")
-
-	// —— ⑤ 调用点下限：记录类时间的渲染点不许被悄悄删掉/改回内联格式化 ——
-	// 只数**代码行**（注释已抹掉，故解释文字不计数）。
-	calls := 0
-	for _, line := range strings.Split(masked, "\n") {
-		if strings.Contains(line, "function ") {
+	// 逐文件：文件里没有 fmtTimeOpt 时，全文件不允许这些记号。
+	for _, n := range names {
+		masked := uiMaskComments(files[n])
+		optLo, optHi := uiFuncLinesIn(t, masked, "fmtTimeOpt")
+		if optLo == 0 {
+			uiBadTokensOutsideFile(t, n, masked, 0, -1,
+				"本地时区取数只允许出现在 fmtTimeOpt 的零值判定里；渲染记录类时间请用 fmtTime()（UTC）",
+				"getHours(", "getMinutes(", "getSeconds(", "getFullYear(", "getMonth(", "getDate(", "getDay(")
 			continue
 		}
-		if strings.Contains(line, "fmtTime(") || strings.Contains(line, "fmtTimeOpt(") {
-			calls++
+		uiBadTokensOutsideFile(t, n, masked, optLo, optHi,
+			"本地时区取数只允许出现在 fmtTimeOpt 的零值判定里；渲染记录类时间请用 fmtTime()（UTC）",
+			"getHours(", "getMinutes(", "getSeconds(", "getFullYear(", "getMonth(", "getDate(", "getDay(")
+	}
+
+	// —— ⑤ 调用点下限：记录类时间的渲染点不许被悄悄删掉/改回内联格式化 ——
+	// 只数**代码行**（注释已抹掉，故解释文字不计数）；跨全部自有文件累计。
+	calls := 0
+	for _, n := range names {
+		masked := uiMaskComments(files[n])
+		for _, line := range strings.Split(masked, "\n") {
+			if strings.Contains(line, "function ") {
+				continue
+			}
+			if strings.Contains(line, "fmtTime(") || strings.Contains(line, "fmtTimeOpt(") {
+				calls++
+			}
 		}
 	}
 	if calls < 15 {
-		t.Errorf("app.js 里 fmtTime/fmtTimeOpt 的代码调用点只剩 %d 处（登记下限 15）：记录类时间被删掉或改回内联格式化了？", calls)
+		t.Errorf("前端 js 里 fmtTime/fmtTimeOpt 的代码调用点只剩 %d 处（登记下限 15）：记录类时间被删掉或改回内联格式化了？", calls)
 	}
 	t.Logf("记录类时间渲染点：%d 处（唯一出口 fmtTime/fmtTimeOpt，UTC + 标记）", calls)
+}
+
+// uiFuncLinesIn = uiFuncLines 的文件内变体：函数不存在时返回 (0,0) 而不是 Fatal
+// （多文件扫描里「本文件没有这个函数」是常态）。
+func uiFuncLinesIn(t *testing.T, masked, name string) (int, int) {
+	t.Helper()
+	if !strings.Contains(masked, "function "+name+"(") {
+		return 0, 0
+	}
+	body, start := uiFuncSpan(t, masked, name)
+	first := uiLineOf(masked, start)
+	return first, uiLineOf(masked, start+len(body))
+}
+
+// uiBadTokensOutsideFile = uiBadTokensOutside 的带文件名变体（报错指到具体文件与行）。
+func uiBadTokensOutsideFile(t *testing.T, file string, masked string, lo, hi int, why string, bad ...string) {
+	t.Helper()
+	for i, line := range strings.Split(masked, "\n") {
+		lineNo := i + 1
+		if lineNo >= lo && lineNo <= hi {
+			continue
+		}
+		for _, tok := range bad {
+			if strings.Contains(line, tok) {
+				t.Errorf("%s 第 %d 行出现了 %q：%s", file, lineNo, tok, why)
+			}
+		}
+	}
 }

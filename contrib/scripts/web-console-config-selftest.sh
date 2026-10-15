@@ -30,13 +30,19 @@ node "$STUB" || RC=1
 # 红-绿：把闸门调用点换成 `true`（= 保存前不再检查口令有没有派生出哈希）。
 TMPD=$(mktemp -d) || exit 1
 trap 'rm -rf "$TMPD"' EXIT
-sed 's/await cfgPwGate()/true/' "$APP" > "$TMPD/app.js"
-BEFORE=$(grep -c 'await cfgPwGate()' "$APP")
-AFTER=$(grep -c 'await cfgPwGate()' "$TMPD/app.js")
+# 闸门调用点在拆分后的 js/views/config.js（app.js 是聚合入口）；红-绿对**真实文件**操作，
+# 变异体经 bundle 加载器拼接（config-selftest.js 会沿 import 递归，变异体替换 config.js）。
+CFGJS="$HERE/../../internal/api/ui/js/views/config.js"
+cp "$CFGJS" "$TMPD/config.js.orig"
+sed 's/await cfgPwGate()/true/' "$CFGJS" > "$TMPD/config.js"
+cp "$TMPD/config.js" "$CFGJS"
+trap 'cp "$TMPD/config.js.orig" "$CFGJS" 2>/dev/null' EXIT
+BEFORE=$(grep -c 'await cfgPwGate()' "$TMPD/config.js.orig")
+AFTER=$(grep -c 'await cfgPwGate()' "$TMPD/config.js")
 if [ "$BEFORE" != "1" ] || [ "$AFTER" != "0" ]; then
   echo "✗ 红-绿用例没能改到闸门调用点（锚点变了？原文件命中 $BEFORE 处）——这条自校准本身要修"
   RC=1
-elif WEB_CONSOLE_APP_JS="$TMPD/app.js" node "$STUB" >/dev/null 2>&1; then
+elif WEB_CONSOLE_APP_JS="$APP" node "$STUB" >/dev/null 2>&1; then
   echo "✗ 拆掉保存前的口令闸门后仍然全绿——断言没有判别力（这正是假绿的成因）"
   RC=1
 else

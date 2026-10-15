@@ -22,11 +22,16 @@ func TestUIPermissionsViewRenderWiring(t *testing.T) {
 		t.Fatalf("读取 ui/index.html: %v", err)
 	}
 	html := string(htmlB)
-	jsB, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
+	// 搜索面 = 全部自有 JS（拆分后 users 域在 views/system.js、登录/退出在 js/boot.js）。
+	jsFiles := uiJSFiles(t)
+	hasSomewhere := func(needle string) bool {
+		for _, src := range jsFiles {
+			if strings.Contains(src, needle) {
+				return true
+			}
+		}
+		return false
 	}
-	js := string(jsB)
 
 	// ① 表头多一列「生效权限」+ 摘要容器
 	if !strings.Contains(html, "<th>生效权限</th>") {
@@ -36,24 +41,27 @@ func TestUIPermissionsViewRenderWiring(t *testing.T) {
 		t.Error(`index.html 缺摘要容器 id="usr-perm-out"`)
 	}
 
-	// ② app.js 的接线
+	// ② 权限页的接线（views/system.js）
 	for _, want := range []string{
 		"function renderPermClassTable(",
 		"function usrPermLoad(",
 		"'/configuration/permissions?class='",
 		"renderPermClassTable(classes)",
-		"currentClass === 'super-user' || currentClass === c.name",
 	} {
-		if !strings.Contains(js, want) {
-			t.Errorf("app.js 缺少生效权限的接线：%q", want)
+		if !hasSomewhere(want) {
+			t.Errorf("前端 js 缺少生效权限的接线：%q", want)
 		}
 	}
-
-	// ③ currentClass 从登录响应设置、退出登录清空
-	if !strings.Contains(js, "currentClass = (user && user.class) || ''") {
-		t.Error("app.js 未从登录响应设置 currentClass")
+	// ③ 权限类判定：getCurrentClass() 访问器（原 currentClass，拆分后经 state.js 访问器读写）。
+	if !hasSomewhere("getCurrentClass() === 'super-user' || getCurrentClass() === c.name") {
+		t.Error("前端 js 缺少「非 super 只看自己 class」的判定（getCurrentClass 访问器口径）")
 	}
-	if !strings.Contains(js, "currentClass = ''") {
-		t.Error("app.js 未在退出登录时清空 currentClass")
+
+	// ④ currentClass 从登录响应设置、退出登录清空（js/boot.js 的 enterApp/signOut）
+	if !hasSomewhere("setCurrentClass((user && user.class) || '')") {
+		t.Error("前端 js 未从登录响应设置 currentClass（setCurrentClass 口径）")
+	}
+	if !hasSomewhere("setCurrentClass('')") {
+		t.Error("前端 js 未在退出登录时清空 currentClass（setCurrentClass 口径）")
 	}
 }

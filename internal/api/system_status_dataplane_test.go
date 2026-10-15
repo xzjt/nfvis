@@ -69,11 +69,7 @@ func jsFuncBody(t *testing.T, src, sig string) string {
 // 数据面卡的字段级守护：卡片读的字段必须都在契约 VppStatus 里（字段写了、响应里没有
 // 会让整行恒「—」——R110-1 的复刻），且必须真的按 `dataplane` 分流内核语义。
 func TestUIDataplaneCardReadsAssemblyFact(t *testing.T) {
-	src, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
-	text := string(src)
+	text := jsAll(t)
 	body := jsFuncBody(t, text, "function renderVPP(vpp) {")
 
 	if !strings.Contains(body, "vpp.dataplane") {
@@ -108,10 +104,7 @@ func TestUIDataplaneCardReadsAssemblyFact(t *testing.T) {
 // 诊断页说明：按装配事实切换（内核数据面下 ping 走宿主网络栈），且页面有承载节点、
 // 路由取数范围含 /system/status。
 func TestUIDiagPlaneNoteFollowsDataplane(t *testing.T) {
-	app, err := os.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("读取 ui/app.js: %v", err)
-	}
+	app := jsAll(t)
 	body := jsFuncBody(t, string(app), "function renderDiagPlaneNote(st) {")
 	if !strings.Contains(body, "st.dataplane") {
 		t.Fatalf("诊断页说明必须按 st.dataplane 切换")
