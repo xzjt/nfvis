@@ -38,7 +38,7 @@ func uiFile(t *testing.T, name string) string {
 
 func TestDetailTabsConsistentBetweenHTMLAndJS(t *testing.T) {
 	html := uiFile(t, "index.html")
-	js := uiFile(t, "app.js")
+	js := jsAll(t)
 
 	for _, p := range tabPair {
 		// HTML：取该 tab 条到下一个 </div> 之间的 data-tab 值。

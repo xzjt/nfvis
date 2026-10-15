@@ -480,7 +480,7 @@ func hasNestedKey(m map[string]any, path string) bool {
 // 且 VNC 的三个回调都走它、不再落到被隐藏的 termMsg。
 func TestVNCNoticeVisibleTarget(t *testing.T) {
 	html := readUITestAsset(t, "index.html")
-	app := readUITestAsset(t, "app.js")
+	app := jsAll(t)
 
 	if !strings.Contains(html, `id="vm-vnc-notice"`) {
 		t.Error("index.html 缺少 #vm-vnc-notice（VNC 视图内的可见提示元素）")
