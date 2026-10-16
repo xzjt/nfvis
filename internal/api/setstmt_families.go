@@ -485,8 +485,12 @@ func emitVirtualSwitchFamily(w *stmtWriter, node *schema.Node, val any, prefix, 
 		if !ok {
 			return nil
 		}
+		// 描述字段无语句关键字：命令树与别名表都没有 `virtual-switches <n> description <v>`
+		// 的形态（该关键字仅 interfaces/bonds/VM/容器有），照发语句会被回放自校验打回
+		// 「未知语句」、整条 display set 读不出来——只发注释说明（同 acls 描述先例），
+		// 回放比较两侧按 stripNonEmittable 同剥。
 		if v, ok := m["description"]; ok && v != "" {
-			w.add(toks(prefix, "description", formatScalar(v)))
+			w.note("virtual-switches %s：描述字段无语句关键字，不入 display set", lastTok(prefix))
 		}
 		if v, ok := m["type"]; ok && v != "" {
 			// 决策 #452：顶层整配置逆走时，`type l3` 的创建语句让位给根层 vrfs 回落发射器
@@ -905,10 +909,15 @@ func emitNumaNode(w *stmtWriter, em map[string]any, numaToks []string) {
 	if !ok {
 		return
 	}
-	t := toks(numaToks, "node", formatScalar(node))
-	if cores, ok := em["cores"].([]any); ok && len(cores) > 0 {
-		t = append(t, "cores", joinScalars(cores, ",")) // core-list 逆格式化，expandCores 可还原
+	cores, _ := em["cores"].([]any)
+	if len(cores) == 0 {
+		// 空/缺核列表：`numa node <n>` 不带 cores 回放即失败（core-list 是语句必需取值），
+		// 该元素无语句可还原——只注释说明，回放比较两侧同剥该元素（nonEmittableElem）。
+		w.note("resource-pools cpu numa node %s：核列表为空，无语句可还原（不入 display set）", formatScalar(node))
+		return
 	}
+	t := toks(numaToks, "node", formatScalar(node))
+	t = append(t, "cores", joinScalars(cores, ",")) // core-list 逆格式化，expandCores 可还原
 	w.add(t)
 }
 
@@ -1304,7 +1313,11 @@ func emitVrfsFallback(w *stmtWriter, val any) error {
 		if vrfSwitchIsL3(w, name) {
 			w.add([]string{"virtual-switches", name, "type", "l3"})
 		}
-		// description 仅 REST 可达（无语句形态），出现时由回放校验如实报错
+		// 描述字段仅 REST 可达（无语句形态）：只发注释说明（同交换机/ACL 描述先例），
+		// 不再让回放自校验把整条 display set 打回；回放比较两侧按 stripNonEmittable 同剥。
+		if v, ok := vrf["description"]; ok && v != "" {
+			w.note("virtual-switches %s：描述字段无语句关键字，不入 display set", name)
+		}
 		if lis, ok := vrf["l3_interfaces"].([]any); ok {
 			for _, l := range lis {
 				li, ok := l.(map[string]any)
@@ -1434,4 +1447,157 @@ func emitQosFallback(w *stmtWriter, val any) error {
 		w.add(toks)
 	}
 	return nil
+}
+
+// ---------- 回放自校验的「不发射字段」剥离 ----------
+
+// 口径（R38-2）：**空容器不是有意义的数据**——`{}` / `[]` / null 与「键不存在」对回放等价。
+// 发射器对空容器本就发不出语句（无内容可逆走），回放侧也不会凭空建出空壳——于是
+// **一侧的空容器与另一侧的缺席**会让深比较不等，把整条 `display set` 打回内部错误
+// （真机实例：Web 侧清空字段留下的 `system.kernel = {}`、`vpp.dpdk.dev = {}`）。
+// 修法与 stripNonEmittable 同路：比较端**两侧同剥**（stripEmptyContainers）——
+// 不是提交期拒绝（界面清空字段是正常操作，不该变报错），也不动前端。
+
+// stripEmptyContainers 递归剪除空容器（比较端两侧同口径）。剪除是递归的：只含空容器的
+// 父容器同样被剪（`{a:{}}` ≡ 缺席）；数组里的空元素一并剔除（`[{},x]` ≡ `[x]`）。
+// 判据是**值形态**而非字段名——任何字段的空容器都不参与比较，故无需 w.note 说明
+// （空容器本身没有可说明的数据；字段级清单仍走 stripNonEmittable 的注释原则）。
+func stripEmptyContainers(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, vv := range x {
+			sv := stripEmptyContainers(vv)
+			if isEmptyContainer(sv) {
+				continue
+			}
+			out[k] = sv
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(x))
+		for _, vv := range x {
+			sv := stripEmptyContainers(vv)
+			if isEmptyContainer(sv) {
+				continue
+			}
+			out = append(out, sv)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// isEmptyContainer 空容器判据：null（模型无 omitempty 的 slice/map 字段在空值时的
+// 序列化形态）、空 dict、空 list——三者对语句反推都是「无内容」。
+func isEmptyContainer(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return true
+	case map[string]any:
+		return len(x) == 0
+	case []any:
+		return len(x) == 0
+	}
+	return false
+}
+
+// stripNonEmittable 剥离发射器**有意不输出**、无语句可还原的字段——回放自校验两侧同剥，
+// 使 display set 不再因这些字段把**整条读命令**打回（修复「一条 Web 侧编辑让整条
+// display set 读不出来」：此前 virtual-switches 的 description 照发语句，回放撞
+// 「未知语句: description」整条失败）。每一项在对应发射器处都有 w.note 说明，剥的就是
+// 这些**已注释**的字段——任何未注释的差异仍如实报错：
+//   - virtual_switches[].description / vrfs[].description / acls[].description：
+//     描述字段无语句关键字（发射器只发注释）；
+//   - virtual_switches[].gateway：空对象（删除残留，非空照常由语句还原、照常比较）；
+//   - virtual_machine_functions[].serial_console=false：关闭态无 set 语句形态
+//     （true 由 `serial console enable` 发射）；
+//   - virtual_machine_functions[].interfaces[].sriov.vf_id：VF 编号无可用 set 语句
+//     （语句关键字与模型字段不一致）。
+//
+// prefix 为展示层级（顶层 show 为空、配置模式层级 show 为绝对语句路径）——层级 show 的
+// 子树根就是元素对象本身，须按 prefix 折算元素归属的 JSON 键路径（身份取值不占键段）。
+func stripNonEmittable(v any, prefix []string) any {
+	return stripNonEmittableAt(v, nonEmittableKeyPath(prefix))
+}
+
+// nonEmittableKeyPath 语句层级路径 → 元素所属 JSON 键路径（只认发射器有「不输出」字段的
+// 四个家族；关键字 token 经 jsonKeyOf 折算，身份取值 token 跳过）。顶层与其它层级返回
+// 空路径（顶层逆走的数组规则在空路径下照常生效）。
+func nonEmittableKeyPath(prefix []string) []string {
+	if len(prefix) == 0 {
+		return nil
+	}
+	switch prefix[0] {
+	case "virtual-switches", "vrfs", "acls", "virtual-machine-functions":
+		out := make([]string, 0, len(prefix)/2+1)
+		for i := 0; i < len(prefix); i += 2 { // 「关键字 身份取值」逐对推进
+			out = append(out, strings.ReplaceAll(prefix[i], "-", "_")) // 与 jsonKeyOf 同口径
+		}
+		return out
+	}
+	return nil
+}
+
+// stripNonEmittableAt 递归剥离（数组元素不增加键路径段：元素的 family 即其数组键路径）。
+func stripNonEmittableAt(v any, jk []string) any {
+	switch x := v.(type) {
+	case map[string]any:
+		family := strings.Join(jk, " ")
+		out := make(map[string]any, len(x))
+		for k, vv := range x {
+			if nonEmittableLeaf(family, k, vv) {
+				continue
+			}
+			out[k] = stripNonEmittableAt(vv, append(append([]string{}, jk...), k))
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(x))
+		for _, vv := range x {
+			if nonEmittableElem(jk, vv) {
+				continue
+			}
+			out = append(out, stripNonEmittableAt(vv, jk))
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// nonEmittableLeaf 报告键路径 family 下的字段 k 是否属「发射器有意不输出」之列——
+// 与各发射器的 w.note 站点一一对应，改一处须连另一处（回归测试钉住 display set 行为）。
+func nonEmittableLeaf(family, k string, v any) bool {
+	switch family + "|" + k {
+	case "virtual_switches|description", "vrfs|description", "acls|description":
+		s, ok := v.(string)
+		return ok && s != ""
+	case "virtual_switches|gateway":
+		gw, ok := v.(map[string]any)
+		return ok && len(gw) == 0 // 删除残留的空对象；非空网关照常比较
+	case "virtual_machine_functions|serial_console":
+		b, ok := v.(bool)
+		return ok && !b // 关闭态；true 由语句还原、照常比较
+	case "virtual_machine_functions interfaces sriov|vf_id":
+		return true // 无可用 set 语句（vpp/内核均不依赖 display set 还原该值）
+	}
+	return false
+}
+
+// nonEmittableElem 报告数组元素**整体**属「发射器有意不输出」之列（字段级判据
+// nonEmittableLeaf 表达不了的元素级规则）。判据与发射器逐字同源：
+//   - resource-pools cpu numa 的空核列表节点：核列表是语句必需取值（`numa node <n>`
+//     不带 cores 回放即失败），空/缺 cores 的元素无语句可还原（见 emitNumaNode）。
+func nonEmittableElem(jk []string, v any) bool {
+	if strings.Join(jk, " ") != "resource_pools cpu numa" {
+		return false
+	}
+	em, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	cores, _ := em["cores"].([]any)
+	return len(cores) == 0
 }

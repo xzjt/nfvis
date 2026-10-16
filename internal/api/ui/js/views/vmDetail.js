@@ -9,7 +9,7 @@ import { api, soft, apiErrText, httpErrText,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
-import { vmAction, renderVMStats, VM_ACTIONS } from './vms.js';
+import { vmAction, renderVMStats, VM_ACTIONS, vmRememberState, vmDetailEditorLeave } from './vms.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
@@ -132,6 +132,8 @@ function renderVMDetail(d, params) {
   const changed = vmDetailName !== name;
   vmDetailName = name;
   if (changed) vmDetailMsg('', false);
+  // 运行态进缓存：详情页「编辑」面板据此如实提示「运行中变更需 stop+start 生效」。
+  if (ok) vmRememberState(name, vm.state);
 
   $('vmd-name').textContent = name;
   fill($('vmd-head'), ok ? vmDetailHead(vm) : [['读取失败', vm ? vm.__err : '未取到数据']]);
@@ -473,7 +475,8 @@ export const viewsVmDetail = {
       pageWarn(d);
       renderVMDetail(d, params);
     },
-    // 串口是有状态的（WebSocket + 一次性 ticket）：离开这一页就断开，别把连接留在后台。
-    leave() { vmConsoleClose(); }
+    // 串口是有状态的（WebSocket + 一次性 ticket）：离开这一页就断开，别把连接留在后台；
+    // 同理收掉就地编辑面板（草稿不跨页残留）。
+    leave() { vmConsoleClose(); vmDetailEditorLeave(); }
   },
 };

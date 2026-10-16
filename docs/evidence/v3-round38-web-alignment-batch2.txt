@@ -1,0 +1,278 @@
+================================================================================
+NFViS v3 round38：Web 控制台对齐 CLI —— 第二批（P0 删除入口 / P1 配置控件 /
+  网络族就地增删改 / 树遍历守护）+ 抓出并定位 R38-1
+================================================================================
+日期：2026-10-16    执行：ZCode 会话（v3 线），三批并行子智能体 + 主会话集成核验
+用户指令：「实现类工作派子智能体」——按 `docs/v3-Web对齐-CLI-排期.md` 的批次推进。
+线上构建：`3.0.21~dev9`（合并工作树重编，sha256 `d5e180fb…`，上机后复核一致）。
+
+【本批三段，全部已回收 + 主会话独立复验】
+  · P0（B1）VM / 容器 / core dump 三个删除入口
+  · P1 第一批（B2）表单引擎抽成 `js/core/forms.js`（config.js 1894→1201）+ 防火墙/VXLAN/DHCP 三族
+  · P4（B3）遍历命令树的归类守护（关闭「0 缺口」只是已归类集合内的口径漏洞）
+  随后第二批两路（C1 网络族就地增删改 / C2 P1 剩余 26 条）也已落地并联合复验。
+
+--------------------------------------------------------------------------------
+§1 P0：三个删除入口（本轮实测通过）
+--------------------------------------------------------------------------------
+· VM 列表行内 + 详情页「删除虚拟机」；容器列表行内 + 详情页「删除」；运维动作页 core dump
+  每行「删除」。三处经 `wbtn`（`data-write`）+ **中危确认框**（列影响面 + CLI 回显 + 取消/确定）。
+· **端到端实测（主会话亲做，非采信子智能体自述）**：造临时容器 `del-probe` → 界面点「删除」→
+  确认框（4 条影响面 + 回显 `request container-functions del-probe delete`）→「确定」→
+  页面 `已删除 del-probe。`；机器侧三方独立核实：产品视图无、`docker ps -a` 无、审计落
+  `config.commit` 带 diff（与 CLI `commitMutate` 同口径）。core dump 删除亦留审计
+  （`system.core-dumps.delete`）。
+· 一处**我自己的测试误解**（如实登记）：首次点「删除」后我看到对象还在，一度判为实现有问题；
+  读代码后确认那是**中危确认框**、是我没把确认点完，不是缺陷。
+
+--------------------------------------------------------------------------------
+§2 P4：树遍历归类守护（关闭结构性空洞）
+--------------------------------------------------------------------------------
+· 新增 `internal/api/cli_tree_coverage_test.go`：**直接遍历命令树**（`schema.OperRoot()` +
+  配置树）而不是只看手工清单 `contractCLICommands`，逐条断言叶子落进
+  `cliRESTCoverage` / `cliRESTExceptions` / `cliRESTGaps` 之一，未归类即逐条点名报红。
+· **首次运行揪出 60 条未归类**（操作树 55 + 配置树 5）——这就是空洞的真实体量。归位后
+  **真缺口仍为 0**；覆盖表 +58（端点全部从 `server.go` 现读）、例外表 +2（写明理由）。
+· 口径（可复现）：操作树 **177** 片形态 / 配置树 **19** 片形态 / 配置语句 **196** 条，未归类 0。
+  另修 `contractCLICommands` 里 `show vpp capture` 的重复项。
+· **主会话独立红-绿**：摘掉 `show system metrics history` 一行 → 报红并精确点名
+  （`命令树形态 "show system metrics history"（需要 class R）未归类…`），恢复即绿。
+
+--------------------------------------------------------------------------------
+§3 P1：配置控件缺口收尾（26 条叶子补完）
+--------------------------------------------------------------------------------
+· 第一批（B2）：主机防火墙（默认策略 + 规则子表）、VXLAN（vni/local/remote/dst-port/交换机）、
+  DHCP 服务器与中继（池/租约/DNS/域名 + 中继），共 15 条；并抽出 `js/core/forms.js`
+  （`renderSection`/`renderSections` + candidate 事务封装），为去中心化铺路。
+· 第二批（C2）：DNS 代理（全局 + 按交换机，4）、入向风暴抑制（2）、learn-limit（1）、
+  VM 启动画像 9 项 + PCI 直通（10）、镜像启动画像（9）。
+· 校验口径一律取自服务端实现（`internal/model/validate.go` 等）做成前端提示，**最终以服务端
+  `detail[]` 为准**；真机实证服务端拒绝文案逐条命中（防火墙裸 action、同/跨交换机 DHCP 互斥、
+  L3 交换机配 relay / 作 VXLAN 成员、租约越界、learn-limit 越界、`cpu_mode=custom` 缺型号）。
+· **真机独立事实源**：VM 启动画像下发后用 `virsh dumpxml` 逐项印证（`machine='pc-q35-6.2'`、
+  `<os firmware='efi'>`+OVMF、`boot dev='cdrom'`、磁盘 `bus='sata'`、telnet 控制台、
+  `<qemu:arg value='-no-hpet'/>`、hostdev PCI；并补证 `<domain type='qemu'>`=tcg、
+  `<cpu mode='custom'>` 型号），不只看产品自己的读视图。
+
+--------------------------------------------------------------------------------
+§4 配置页去中心化第一刀：网络族就地增删改（C1）
+--------------------------------------------------------------------------------
+· 入口：交换机（列表「+ 新建」/ 详情「编辑」「删除该交换机」）、VRF/ACL/bond/QoS/SPAN
+  （`#/network` 各块头「+ 新建」+ 详情「编辑/删除」）、NAT（整节「编辑」）、VXLAN（块头「+ 新建」
+  + 每行「编辑/删除」）。全部写控件 `data-write`、不带 `data-op`（配置写路径整体 S 级）。
+· 写路径复用 `forms.js` 的 candidate 事务（取锁 → 写候选 → 校验 → 提交 → 释放，失败同样释放），
+  新建/编辑/删除均走**中危确认**（列影响面 + CLI 回显）。
+· **主会话亲测完整 CRUD 三步（dev9 合并构建）**：
+  ① 新建：交换机页「+ 新建」→ 填名 `vs-probe` → 「新增」→「保存并提交」→ 确认框
+     （回显 `set virtual-switches vs-probe type l2`）→「提交」⇒ 页面 `vs-probe l2 — 28429`；
+     机器侧双向核实：`show virtual-switches` 见 `28429 vs-probe`、`vppctl show bridge-domain`
+     见 `BD 28429 Index 2`。
+  ② 编辑：详情页「编辑」→ 改描述 → 提交 ⇒ `提交成功（revision 85）`。
+  ③ 删除：详情页「删除该交换机」→ 确认框 → 删除 ⇒ `提交成功（revision 86）`；产品视图与 VPP
+     里 `28429` 均消失；`grep -c probe` = 0。
+· **整合副产物（值得记）**：C2 补的 DHCP/DNS/learn-limit 字段是加在**节定义**上的，因此
+  **自动出现在 C1 的对象页面板里**——两边合起来正好是「同一份节数据，两个入口渲染」。
+
+--------------------------------------------------------------------------------
+§5 本轮抓出的新缺陷 R38-1（已定位，修复见 §6）
+--------------------------------------------------------------------------------
+**现象**：只要某个虚拟交换机带 `description` 字段，**整条 CLI 命令 `show configuration |
+display set` 整体失败**：
+
+```
+%% display set 内部错误：生成语句回放失败（未知语句: "description"）——请改用 show configuration / | display json 并报告缺陷
+```
+
+**不是少一行输出，是整份配置读不出来**——**一条 Web 侧编辑就能让 CLI 的全局读命令失效**。
+
+**根因（三处对齐关系，主会话逐处核实）**：
+1. `internal/model/model.go:341` —— `VirtualSwitch` 有 `Description` 字段；
+2. `internal/schema/tree_config.go` —— 命令树里 `interfaces`（~203）、`bonds`（~244）、
+   VM（~581）、容器（~610）**都有** `description` 叶子，**`virtual-switches` 没有**；
+3. `internal/api/setstmt_families.go:~1307` —— 发射器显式不发射该字段，注释写「description 仅
+   REST 可达（无语句形态），出现时由回放校验如实报错」⇒ 回放校验拿到它就整条失败。
+
+**仓内已有正确先例**：同文件 `emitAclsFamily`（~675-683）对 **ACL 的同名字段**就是
+`w.note("acls %s：描述字段无语句关键字，不入 display set")`——**用注释优雅处理**；同族 note 还有
+口令哈希（`setstmt.go:358`）、空 gateway（`setstmt_families.go:524`）、serial console 关闭态
+（`:1038`）。即：**同一类情况在仓里有两种处理，ACL 是「注释」，vswitch 是「报错」**。
+
+**触发路径**：Web 的「虚拟交换机」表单**提供「描述」字段**（配置页与对象页都有），用户填了就中招。
+
+**修复方向（照 ACL 先例）**：让 vswitch 的 description 走 `w.note(...)` 发注释、不再让回放失败。
+**不**顺手给 `virtual-switches` 加 `description` 语句叶子——那属新增 CLI 产品面，按本仓纪律是
+「契约先行」的另一件事（若要，应作为独立提案）。本缺陷只修「一个字段把整条读命令拖垮」。
+
+--------------------------------------------------------------------------------
+§6 修复与复验（`3.0.21~dev10`；sha256 `1c533b5b…`）
+--------------------------------------------------------------------------------
+**修复子智能体挖出比本会话最初诊断更深的问题**：仓内那些 `w.note(...)` 先例（ACL 描述、口令哈希、
+空 gateway、serial console 关闭态…）**全是半成品**——回放自校验只剥离敏感值与 `enabled=true`，
+**从不剥「不入 display set」的字段**，所以**每个被注释的字段照样把整条命令打回**（实测确认：
+**连 ACL 描述本身也失败**）。即缺陷面不止 vswitch 一个字段。
+
+**改动**：
+· `setstmt_families.go`：`emitVirtualSwitchFamily` 的 description 由 `w.add(...)` 改为 `w.note(...)`；
+  `emitVrfsFallback` 的 vrf description 由裸注释改为同一句 note；**新增剥离机制**
+  `stripNonEmittable` / `nonEmittableKeyPath` / `stripNonEmittableAt` / `nonEmittableLeaf`
+  （把「已注释 ⇒ 两侧同剥」补成真机制，并支持配置模式层级 show 的 prefix 折算）。
+· `setstmt.go`：两处比较式（`verifySetStatements`）接入 `stripNonEmittable`（2 行）。
+· `setstmt_test.go`：新增 `TestDisplaySetVSwitchDescriptionNote`（顶层 + `edit virtual-switches`
+  层级形态）与 `TestDisplaySetNonEmittableFieldsNote`（vrf 描述/空 gateway/serial 关闭态/SR-IOV VF）。
+· `docs/NFViS-CLI命令全表.md`：`show | display set` 行补「无语句形态字段以 # 注释说明」。（openapi 未动）
+
+**同类清单（对象 × 字段）**——已修 6 项（原先都会让整条命令失败，现改为注释 + 成功）：
+`virtual_switches[].description`、`vrfs[].description`、`acls[].description`、
+`virtual_switches[].gateway={}`（**CLI 自己造**：`delete … gateway ip` 留空对象）、
+`virtual_machine_functions[].serial_console=false`（**CLI 自己造**：`delete … serial console enable`）、
+`virtual_machine_functions[].interfaces[].sriov.vf_id`。
+**未修、维持响亮失败**（提交校验本就拒绝、建不出）7 例：ports 的 trunk/native/acl 无成员、
+NAT 池 `address_range` 缺「 to 」、PM 源 `vnf_interface` 无 vnf、lldp 缺 enabled、dhcp-server 单端点、
+裸 user、vxlan 缺必填。
+**新登记 2 处「静默丢字段」**（同症状但**无注释**，属发射器疏漏，需产品口径定裁——三选一：
+补语句形态（契约先行）/ 提交期拒绝 / 注释放行）：`ports[]` 的 vnf 成员 + `native` VLAN；
+`vrfs[].l3_interfaces[].vlan`（内核 vlan 子接口）。
+
+**主会话独立复验（不采信子智能体自述）**：
+· **单测红-绿**：`TestDisplaySet*` 全绿；**我亲手把 `stripNonEmittable` 调用摘掉**→
+  `TestDisplaySetVSwitchDescriptionNote` / `TestDisplaySetNonEmittableFieldsNote` 双双精确报红
+  （`生成语句未能完整还原配置`），恢复即绿。判别力确证。
+· **真机对照（我自己造的现场，非采信）**：用 **Web 走的候选路径**（`GET /configuration` →
+  改 JSON → `PUT /configuration/candidate` → `POST /configuration/commit`）给 `vs-lan` 加
+  `description` ⇒ **`show configuration | display set` 成功**、且输出含
+  `# virtual-switches vs-lan：描述字段无语句关键字，不入 display set`；再换**另一个字段**
+  （`acl-lab` 的 `description`）复测 ⇒ 同样成功 + `# acls acl-lab：描述字段无语句关键字，不入 display set`
+  ——**证明机制不是只对一个字段生效**。两次都 `grep -c 内部错误` = 0。
+· **收尾还原**：探针字段全部清除（`grep -c probe` 配置内 = 0）、注释行回落到只剩两条口令哈希、
+  `vs-lan`/`vs-wan` 完好、无告警。过程细节如实记两笔：① 我探针的候选会话**留下过一个 clean lock**
+  （`dirty=false`）——按**决策 #318** 的短空闲阈值**约一个周期内自动消解**（顺带复验了该决策）；
+  ② 我给 vs-lan 造现场时先误读了 `GET /configuration` 的响应形状（外层是 `{configuration, revision}`），
+  已更正后重做。
+
+**未验证（如实）**：① 真机端到端只覆盖 `virtual-switches[].description` 与 `acls[].description`
+两个字段，其余 4 个已修字段仅单测；② 新登记的 2 处「静默丢字段」未在真机复现（仅单测）；③ 升级前
+旧配置携带「提交校验已拒」字段的存量场景未测；④ 未跑 `make check` 全量 / `make deb` / 四套件。
+
+--------------------------------------------------------------------------------
+§7 现场与证据
+--------------------------------------------------------------------------------
+· 收尾现场：`3.0.21~dev9`、服务 active、无告警、无持锁会话、`grep -c probe` = 0、
+  `vs-lan`/`vs-wan`/`acl-lab`/`pol-lab`/`vx-a`/`vnf-a`/`ct-1` 齐全。
+· **主会话统一复验（不采信子智能体自述）**：合并工作树重编 `dev9` 统一安装（避免两路各自换装
+  互相覆盖）→ ESM 三层守护 `LINK/XREF/DYN` 全绿（76 模块）→ 两个前端自校准（含红-绿）全绿 →
+  Go 守护 + `archtest` 全绿 → **32 路由扫描零失败零 JS 错误** → 网络族 CRUD 三步真机走通。
+· **未验证（如实）**：① 端口安全在真机上的**成功提交**未走通可视路径（现场唯一 L2 成员口
+  `ens192` 已配 storm-control，与之单槽互斥、服务端正确拒绝），成功提交由 REST 路径验证；
+  ② 实时监视页只验渲染与取数，**未验**「SSE 到达即时刷新」的动态过程；③ C2 未做数据面行为
+  验证（DNS 代理未打流量、storm-control policer 与 learn-limit 未看 VPP 计数——本批只补控件）。
+· 子智能体如实登记的两条观察：① 清空单对象节的字段会留下**空壳父对象**（`system:{}`/`firewall:{}`），
+  经**对照组实测**确认为既有引擎性状、非本批引入；② 一次掩码命令失败曾把 `/root/nc` 口令打进
+  子智能体自己的会话记录（本报告不复述、未轮换；风险低——口令本就以明文存在于 VM 侧 `/root/nc`
+  与首装日志里）。
+
+--------------------------------------------------------------------------------
+§8 发版准备与口令轮换（2026-10-16，用户裁定「先继续 P3、晚点一起发」+「轮换口令」）
+--------------------------------------------------------------------------------
+8.1 **发版准备（本地全做完，发布待用户确认）**
+  · deb：`make deb VERSION=3.0.21 SOURCE_DATE_EPOCH=1792142481`（VM 上装 make+go 后构建）
+    连打两次逐字节一致，sha256 `08b40760322dc70c75f4e165c0e57e3591a5321f521174ad886d5b68164bf0a4`
+    （11,190,090 字节）；`dpkg -i` 走 3.0.20→3.0.21 升级路径 RC=0、postinst 全过、包内二进制与落盘 md5 一致。
+  · **四套真机套件与 v3.0.20 基线逐项一致**：`cli-fulltest` 297/0/26 ｜ 语义 43/0/0 ｜
+    lifecycle 40/0/3 ｜ pty 10/10。
+  · `.run`：离线闭包 **239 包 / 838 依赖声明 / 313 提供名 / 178M、自洽**；两打逐字节一致
+    （sha256 `57d0bf15661ede57d04416dcb90c8de997d901a15040c30b8805113b28eb5238`，185,914,533 字节）；
+    **结构自检 18/0**。
+  · **本轮实测教训（入册）**：首版闭包用了 v3.0.10 时代的 `--pkg` 配方（**238 包**，缺 `ovmf-generic`）——
+    `.run` **两打依然逐字节一致**，但**结构自检如实判红**（`安装清单有包不在载荷内： ovmf-generic`，
+    17 通过 / 1 失败）。补齐后 239 包、自检 18/0。**「哈希一致」与「校验项通过」是两件事**：
+    只比对哈希会把这个洞直接漏到气隙机器上。（v3.0.5 的发版记录里已写过该检查「在不满闭包上会如实
+    判红、非空转假绿」——本轮它第二次正经发挥作用。）
+  · 跑套件前的现场坑（**非产品缺陷**，已清）：ens192 上 round38 走查残留的 `storm-control` 与套件 bond
+    成员口校验互斥（服务端**正确拒绝**、级联 13 条假红）；套件自身会消耗 docker `alpine:3.20` 夹具
+    （R8-3 家族），复跑前需重打 tag。
+
+8.2 **口令轮换（用户裁定「轮换」；含一次自造事故，如实登记）**
+  · **起因**：两个子智能体在取 `/root/nc` 口令时各有一次掩码失败，口令被写进它们的本地会话记录。
+  · **我自造的事故（关键教训）**：轮换时我把口令写成嵌套引号里的 `'$NEW'`——**在外层双引号内，单引号
+    是字面量**，于是传给 CLI 的是 `password 'XXX'`，CLI 把引号也并入了值 ⇒ 新旧口令**都登不进**。
+    **诊断路径**（值得复用）：① 用另一个账号（oper1）验证传输面正常 ⇒ 定位到「是该账号的口令值问题、
+    不是认证链路问题」；② 读 `nfvis.db` 的 `config_revisions`，比对 rev 237 与 rev 238 的 `password_hash`
+    ⇒ 确认哈希确实被我改了。
+    ⚠️ **诊断中的二次失误**：我连着试了口令变体，**把 admin 账号又锁了**（#76 策略，5 次/15 分钟）——
+    教训是**验证前先算好「还剩几次尝试机会」**，别把锁定窗口一起耗进去。
+  · **恢复（外科手术，无需停机重装）**：`systemctl stop nfvis` → 备份 `nfvis.db` → 把 **rev 237 的
+    admin `password_hash` 写回 rev 238**（只改该用户、不动其余）→ `systemctl start nfvis` ⇒ 旧口令立即
+    恢复可用。**这印证了一件事**：口令哈希在 `config_revisions.config_json` 里逐版留痕，**有 root 就有
+    可审计的恢复路径**（不需 zeroize/重置数据）。
+  · **干净重设**：把命令**写进脚本文件**（`configure` / `set system login user admin password <值>` /
+    `commit`）再 `nfvis-cli -f` 执行——**绕开 shell 引号**（这正是上次栽的地方）。
+  · **终态双向验证**：新口令 `show version` 正常、**旧口令已失效**（`用户名或口令错误`）、`/root/nc` 已同步、
+    无告警、无持锁会话。新口令值不落在本证据里，只存 VM 的 `/root/nfvis-admin-password.txt`（`0600`）。
+  · **给后续会话的硬规矩（建议入 AGENTS）**：① 传口令给 CLI **一律走脚本文件或 pty**，**不要**在嵌套
+    引号里拼；② **不要** `cat/echo/xxd` 口令文件；③ 试口令前先数尝试次数（5 次/15 分钟锁号）。
+
+--------------------------------------------------------------------------------
+§9 R38-2（P3 期间由系统族子智能体发现、主会话真机复现并定位）
+--------------------------------------------------------------------------------
+**现象**：配置里存在**空容器对象**（如 `system.kernel = {}`、`vpp.dpdk.dev = []`）时，
+**整条 `show configuration | display set` 整体失败**：
+`%% display set 内部错误：生成语句未能完整还原配置——请改用 show configuration / | display json 并报告缺陷`。
+**与 R38-1 同族**（一个无关紧要的结构把整条读命令拖垮），**同样是「整份配置读不出来」级别的后果**。
+
+**主会话真机复现（非采信自述）**：用候选 API 写入 `system.kernel={}` → commit（rev 269）→
+`display set` **立即整体失败**；删掉空壳后**立即恢复**（0 内部错误、32 行 `set`）。
+**且这不是理论问题**：现场**本就存在**一个非我造的空壳 `vpp.dpdk.dev=[]`——是系统族子智能体
+**正常操作（测 VPP 面板后回退）留下的**，即**界面常规操作即可造出**。
+
+**成因**：`js/core/forms.js` 的 `cfgWrite` 在「某节最后一个字段被清空」时**不清理 loc 路径上的中间对象**，
+留下空壳；**配置页与对象页都能造**。CLI 侧亦有同族先例（R38-1 记的 `delete virtual-switches X gateway ip`
+留 `gateway={}`）。
+
+**修法方向（照 R38-1 既有机制，不另造）**：让**空容器**走同一条「发射端不发射 / 比较端同剥」的路子
+——R38-1 刚在 `setstmt_families.go` 建立了 `stripNonEmittable` 系列并被 `setstmt.go` 的
+`verifySetStatements` 两侧调用；空容器（`{}`/`[]`，与「键不存在」对回放等价）按同口径处理，
+使 `display set` **整体成功**。**不改前端、不做提交期拒绝**（与 R38-1 的处置保持一致）。
+
+**修复与复验**：见 §10（修复子智能体回收后填入）。
+--------------------------------------------------------------------------------
+§10 R38-2 修复与复验（`3.0.21~dev14`）
+--------------------------------------------------------------------------------
+**修法**（照 R38-1 既有机制、不另造）：`setstmt_families.go` 新增
+`stripEmptyContainers` / `isEmptyContainer`（递归剪除 `{}`/`[]`/`null`，含「只含空容器的父容器」与
+数组内空元素——`null` 纳入是因为模型无 `omitempty` 的 slice 空值序列化就是 `null`，`[]` vs `null`
+不对称正是 ACL rules / bond members 的失败形态）、`nonEmittableElem` + `stripNonEmittableAt`
+数组元素级钩子、`emitNumaNode`（空核列表不发语句、只发注释）；`setstmt.go` 把 `verifySetStatements`
+**两侧合并为同一条规整链 `comparableTree`**（敏感值/缺省态/有意不输出 + 空容器剪除，**杜绝单侧漏包**
+——两侧各写一遍正是这类缺陷的来源）；回放缺层时若本层在比较口径下为空容器则成功（**空≡缺失**）。
+
+**同类清单（矩阵实测）**：修复前**20+ 种**空容器形态都会让 `display set` **整体失败**——
+`system` / `system.kernel` / `system.management|login|api|health|metrics|firewall` / `vpp` /
+`vpp.cpu|memory|dpdk|dpdk.dev` / `protocols(|.lldp)` / `nat` / `resource_pools(|.cpu)` /
+`interfaces[].storm_control` / `virtual_machine_functions[].startup` / **`acls[].rules=[]`** /
+**`bonds[].members=[]`**（后两条是 `[]` vs `null` 不对称的典型）/ numa 空核列表 /
+层级 show 落在空容器层级。**未修残余（如实，均非 `{}`/`[]` 且校验期即拒）**：
+`sriov` 全零值对象、`vrfs[].l3_interfaces=[{interface:""}]`、`vrfs[].routes=[{}]`（真机 `check` 实测
+被拒「物理口 "" 不存在」）。
+
+**验证**：单测 3 条（`TestDisplaySetEmptyContainersPruned` 9 形态表 /
+`TestDisplaySetEmptyLevelShow` 含非空层级缺层的**负控** / `TestDisplaySetNumaEmptyCoresPruned`）
+**红-绿各一次**（撤下修复即逐条精确报红）；`-run "TestDisplaySet|Test.*Stmt"` 30 条全 PASS；
+全包 `go test ./internal/api -p=1` 全绿（`ok 435s`）；`gofmt` 干净。
+**真机对照（主会话核对过其读数）**：**改前**（正式件 3.0.21）写 `{"system":{"kernel":{}}}`（rev 274）
+⇒ `display set` **整体失败**（正是那条内部错误）；**换 dev14 后**（空壳仍在）⇒ **成功**：32 条 `set`、
+0 内部错误、`display json` 仍含空壳；`configure; show system kernel | display set` ⇒ `（配置为空）`。
+numa 空核列表真机可提交（rev 275）⇒ 修复后成功 + 注释
+`# resource-pools cpu numa node 0：核列表为空，无语句可还原（不入 display set）`。
+**收尾**：探针对象全删（rev 278），最终 `display set` 与会话起始基线 **逐字节一致**（DIFF-EMPTY）、
+`probe` grep=0、无告警无锁、正式 deb 装回（md5 与备份一致）。
+
+**顺带新登记（未修，超出该刀可改范围）**：CLI **`delete system kernel` 对空壳是 no-op**——
+`model.Diff`/`Flatten` 不渲染空容器 ⇒ 判「值未变化」、变更被丢（真机实测）；绕过办法是真机验过的
+「先 merge 一个叶子使变更可见再删整节点」。**这印证了一条更普遍的观察：空壳在 `Diff`/`Flatten`
+层就是「不存在」，本轮把这条口径补齐到发射/比较两侧，但 `Diff` 侧仍是同族待收口点。**
+
+**如实边界**：其余空容器层级 show 仅单测覆盖（真机只过 `system kernel` 一条）；前端未动——
+**空壳仍可由界面回退产生**，靠本次比较端口径兜住（与 R38-1 的处置一致）。
+
+================================================================================
+（完）

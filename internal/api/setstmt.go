@@ -144,7 +144,11 @@ func generateSetStmts(tree map[string]any, prefix []string) (*stmtWriter, error)
 }
 
 // verifySetStatements 回放自校验：语句应用到空配置，导航到 prefix 层级后必须与
-// 待渲染子树深比较一致（语句生成用原值，掩码发生在校验之后）。
+// 待渲染子树深比较一致（语句生成用原值，掩码发生在校验之后）。两侧走**同一条规整链**
+// （comparableTree）：敏感值（stripUnreplayable）、显式缺省态（stripDefaultTrue）、
+// 发射器有意不输出项（stripNonEmittable，见 setstmt_families.go）与空容器
+// （stripEmptyContainers——`{}`/`[]`/null 与「键不存在」对回放等价，R38-2）。
+// 收在一处而非比较式里各写一遍：链条漏一环（单侧）即把整条读命令打回，不对称是隐患。
 func verifySetStatements(tree map[string]any, prefix []string, stmts []setStmt) error {
 	var cfg model.Config
 	for _, s := range stmts {
@@ -154,13 +158,23 @@ func verifySetStatements(tree map[string]any, prefix []string, stmts []setStmt) 
 	}
 	got, err := navigateJSON(toJSONTree(cfg), prefix)
 	if err != nil {
+		// 空容器层级（如 `edit virtual-switches <n> gateway` / `edit system kernel` 下的
+		// 空对象）：回放里该层不存在，但空 ≡ 缺失，本层没有数据可核对——整条命令成功
+		// 而不是报内部错误；非空层级的缺失仍旧如实报错。
+		if isEmptyContainer(comparableTree(any(tree), prefix)) {
+			return nil
+		}
 		return fmt.Errorf("display set 内部错误：回放结果缺少层级 %s——请改用 show configuration / | display json 并报告缺陷", strings.Join(prefix, " "))
 	}
-	if !reflect.DeepEqual(normalizeJSON(stripUnreplayable(stripDefaultTrue(got))),
-		normalizeJSON(stripUnreplayable(stripDefaultTrue(any(tree))))) {
+	if !reflect.DeepEqual(comparableTree(got, prefix), comparableTree(any(tree), prefix)) {
 		return fmt.Errorf("display set 内部错误：生成语句未能完整还原配置——请改用 show configuration / | display json 并报告缺陷")
 	}
 	return nil
+}
+
+// comparableTree 回放自校验的单侧规整链（与 verifySetStatements 的剥离清单同源）。
+func comparableTree(v any, prefix []string) any {
+	return stripEmptyContainers(normalizeJSON(stripUnreplayable(stripDefaultTrue(stripNonEmittable(v, prefix)))))
 }
 
 // stripDefaultTrue 剥离「显式 true = 缺省态」的语句不可表达字段：interfaces[].enabled=true
@@ -352,6 +366,12 @@ func emitMechanicalInner(w *stmtWriter, node *schema.Node, val any, prefix, keyP
 
 		// 值叶子关键字（applyTokens 分支 4 镜像）
 		if sv := singleValueOf(c); sv != nil && len(c.Children) == 1 {
+			// 空容器取值（`[]`/`null`/`{}`）不发语句：formatValue 对空数组会产出空 token、
+			// 回放即失败（如空 core-list），而空容器本就不是有意义的数据（R38-2 口径，
+			// 比较端由 stripEmptyContainers 同剥）。
+			if isEmptyContainer(v) {
+				continue
+			}
 			if model.IsSensitiveKey(k) {
 				// 敏感值不输出（无「直设哈希/秘密」的语句形态，占位符回放会造成
 				// 静默的凭据替换）：注释说明 + 回放校验两侧剥离（stripUnreplayable）

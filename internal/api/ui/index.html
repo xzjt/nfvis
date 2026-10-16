@@ -103,20 +103,31 @@
       <dl id="sysp-list" class="kv"></dl>
       <h3>组件版本</h3>
       <dl id="sysp-ver" class="kv"></dl>
+      <h3>系统配置（就地编辑）</h3>
+      <p class="muted small">
+        在这里就地改<strong>系统域配置节</strong>：系统（基础：主机名 / 时区 / DNS / 会话空闲超时 / NTP 服务器）、
+        数据面 DNS 代理（全局上游）、日志（syslog）、健康阈值、管理口、API 与 TLS。写入即提交
+        （取编辑锁 → 写候选 → 校验 → 提交），等价命令行的 set system … + commit。
+        主机名 / 时区 / DNS / NTP 提交后由 nfvisd 立即落到宿主；管理口地址/网关这类会改变管理路径的
+        变更，服务端会强制要求以 commit confirmed 提交（超时未确认自动回滚）。
+        用户与口令策略在<a href="#/system/users">用户与权限</a>页的就地编辑面板里改。
+      </p>
+      <div class="cfg-actions"><button id="sysp-edit-btn" data-write type="button">编辑系统配置</button></div>
+      <div id="sysp-edit"></div>
       <h3>系统配置段（已生效）</h3>
       <pre id="sysp-cfg" class="code console-out"></pre>
       <p class="muted small">
-        改这些字段在<a href="#/config">配置</a>页的系统段表单里做（只写候选，提交后生效）。
+        这里只读回显已生效的 system 段（口令哈希等敏感叶子不回显）；改由上面的「编辑系统配置」就地做。
       </p>
     </article>
 
     <article class="card wide">
       <h2>主机防火墙 <span id="fw-note" class="muted small"></span></h2>
       <p class="muted small">
-        管理口<strong>入向</strong>的主机过滤（数据面 VPP/虚拟机/容器不受影响）。本卡是只读读视图，
-        与 <code>show system firewall</code> / <code>GET /system/firewall</code> 同源；写路径在
-        <a href="#/config">配置</a>页与命令行。⚠️ 改错策略/规则可能切断管理访问——非本地串口会话的防火墙
-        变更须用 <code>commit confirmed</code> 提交（超时未确认会自动回滚恢复访问）。
+        管理口<strong>入向</strong>的主机过滤（数据面 VPP/虚拟机/容器不受影响）。上表是只读读视图，
+        与 <code>show system firewall</code> / <code>GET /system/firewall</code> 同源；默认策略与规则在下面的
+        面板里就地改（写入即提交，等价 set system firewall … + commit）。⚠️ 改错策略/规则可能切断管理访问——
+        非本地串口会话的防火墙变更**必须**以 <code>commit confirmed</code> 提交（服务端强制；超时未确认会自动回滚恢复访问）。
       </p>
       <dl id="fw-list" class="kv"></dl>
       <table id="fw-table">
@@ -125,6 +136,9 @@
       </table>
       <p id="fw-reserved" class="muted small"></p>
       <p id="fw-counters" class="muted small"></p>
+      <h3>防火墙配置（就地编辑）</h3>
+      <div class="cfg-actions"><button id="fw-edit-btn" data-write type="button">编辑防火墙配置</button></div>
+      <div id="fw-edit"></div>
     </article>
     </section>
 
@@ -152,7 +166,7 @@
       <h2>健康阈值 <span id="hw-th-note" class="muted small"></span></h2>
       <dl id="hw-th-list" class="kv"></dl>
       <p class="muted small">
-        阈值属于配置：到<a href="#/config">配置</a>页的「系统 · 健康阈值」表单里改，
+        阈值属于配置：在<a href="#/system">系统</a>页的「编辑系统配置」面板（系统 · 健康阈值一节）里改，
         提交后生效——提交前不影响正在使用的阈值（改的是候选配置，随时可丢弃）。
         留空表示不设该阈值，也就不产生对应告警。
       </p>
@@ -163,6 +177,15 @@
     <article class="card wide">
       <h2>资源池</h2>
       <div id="pools"></div>
+      <h3>资源池声明（就地编辑）</h3>
+      <p class="muted small">
+        大页数量与隔离核的<strong>唯一真源</strong>在这里改（写入即提交，等价 set resource-pools … + commit）。
+        提交后服务端会给「resource-pools 变更需 reboot 生效」提示——池的分配发生在下次启动：
+        要到<a href="#/system/kernel">内核基线</a>页点「写入基线（按配置期望）」并重启主机才落地。
+        下面「大页池」是按内核实况的读数与回收入口（回收只把池收敛到<strong>已声明</strong>值，不改声明）。
+      </p>
+      <div class="cfg-actions"><button id="pool-edit-btn" data-write type="button">编辑资源池声明</button></div>
+      <div id="pool-edit"></div>
     </article>
     <article class="card wide">
       <h2>大页池 <span id="hp-note" class="muted small"></span></h2>
@@ -177,7 +200,7 @@
         <code>nr_hugepages</code> 释放不了——<strong>回收不会动它们</strong>，需从预留者一侧释放。
         <strong>可回收</strong> = 空闲的多余页。回收只把池收敛到<strong>已声明</strong>值——
         <strong>在用页一律不动</strong>、<strong>不改声明值</strong>
-        （改声明在「配置」页的 resource-pools，需重启生效）。取不到内核值/持有值时如实显示「取不到」，不编造。
+        （改声明在<strong>上方「资源池声明（就地编辑）」</strong>里，需重启生效）。取不到内核值/持有值时如实显示「取不到」，不编造。
       </p>
       <table id="hp-table">
         <thead><tr><th>页尺寸</th><th>声明</th><th>内核实际</th><th>在用</th><th>实际持有</th><th>数据面占用</th><th>无主占用</th><th>空闲</th><th>可回收</th><th>状态</th></tr></thead>
@@ -246,6 +269,19 @@
       <h3>配置与运行态</h3>
       <dl id="ifd-info" class="kv"></dl>
 
+      <h3>接口配置（就地编辑）</h3>
+      <p class="muted small">
+        该口的配置字段（描述 / MTU / 启用 / 入向与出向限速策略绑定 / 风暴抑制）与
+        <strong>数据面单网卡覆盖</strong>（VPP 的收/发队列与描述符，逐口覆盖全局默认）在这里就地改：
+        写入即提交（取编辑锁 → 写候选 → 校验 → 提交），等价 set interfaces &lt;if&gt; … + commit。
+        配置字段提交后即下发数据面；限速策略须先在<a href="#/network">网络对象</a>页建好；
+        风暴抑制与端口安全白名单<strong>同接口互斥</strong>（两者都绑该口唯一的 L2 入向分类槽）。
+        单网卡覆盖改完需 <code>request vpp restart</code> 才生效（入口在<a href="#/ops/actions">运维动作</a>页）；
+        数据面全局参数与插件开关也在那一页的「数据面（VPP）配置」面板里。
+      </p>
+      <div class="cfg-actions"><button id="ifd-edit-btn" data-write type="button">编辑接口配置</button></div>
+      <div id="ifd-edit"></div>
+
       <h3>收发计数</h3>
       <dl id="ifd-stat" class="kv"></dl>
 
@@ -279,6 +315,21 @@
           <p class="muted small">本机物理口不支持 SR-IOV 时服务端会明确报错，本页如实显示该报错。</p>
         </fieldset>
       </div>
+
+      <h3>端口安全</h3>
+      <p class="muted small">
+        端口安全白名单：非空即启用，该口<strong>入向</strong>只放行白名单源 MAC（IP 帧与非 IP 帧一样），
+        其余丢弃。每条 MAC 一句（<strong>追加</strong>语义），每接口上限 32 条；须是某 L2 交换机的静态成员口，
+        且与 L3 接口 ACL 的 macip 绑定槽互斥。写入走与<a href="#/config">配置</a>页同一套候选事务
+        （取锁 → 写候选 → 校验 → 提交），提交后才生效。
+      </p>
+      <ul id="ifd-ps-list" class="events"></ul>
+      <p id="ifd-ps-note" class="muted small"></p>
+      <div class="cfg-actions">
+        <input id="ifd-ps-mac" data-write type="text" placeholder="如 b0:b0:00:00:00:01">
+        <button id="ifd-ps-add-btn" data-write type="button" class="ghost">添加 MAC</button>
+      </div>
+      <p id="ifd-ps-msg" class="muted small" hidden></p>
       <p id="ifd-msg" class="muted small" hidden></p>
     </article>
     </section>
@@ -297,6 +348,15 @@
       <dl id="knl-desired" class="kv"></dl>
       <h3>差异 <span id="knl-diff-note" class="muted small"></span></h3>
       <pre id="knl-diffs" class="code"></pre>
+      <h3>编辑配置期望（就地编辑）</h3>
+      <p class="muted small">
+        「配置期望」那一组值（NMI watchdog / 透明大页 / IOMMU / 低延迟参数组 / tuned profile / 附加内核参数）
+        就在下面改（写入即提交，等价 set system kernel … + commit）。提交只改<strong>配置</strong>——
+        要落到引导配置还得点下面的「写入基线（按配置期望）」，再<strong>重启主机</strong>才生效
+        （内核命令行只在启动期读取）。大页与隔离核的唯一真源是<a href="#/system/pools">资源池</a>页。
+      </p>
+      <div class="cfg-actions"><button id="knl-edit-btn" data-write type="button">编辑内核启动参数</button></div>
+      <div id="knl-edit"></div>
       <h3>写入引导基线</h3>
       <div class="cfg-actions">
         <button id="knl-apply-btn" data-write type="button" class="danger">写入基线（按配置期望）</button>
@@ -316,6 +376,16 @@
         若你正在<a href="#/config">配置</a>页编辑候选（有未提交改动），本页的写操作会先被拒绝——
         避免把你的候选改动一并提交；请先在配置页提交或丢弃。
       </p>
+      <h3>登录与口令策略（就地编辑）</h3>
+      <p class="muted small">
+        本地用户、自定义 class 与口令策略（最小长度 / 复杂度 / 有效期 / 锁定阈值与时长）也可以在这里
+        以<strong>配置节</strong>的方式整体改：写入即提交（取编辑锁 → 写候选 → 校验 → 提交），
+        等价 set system login … + commit。口令在本页就地派生成加盐哈希后才写入候选（明文不进配置；
+        已有用户不填口令即保持原口令不变）。新增用户必须立刻给口令（服务端拒绝无口令账号）。
+        下面表格里的「创建用户 / 应用修改 / 删除 / 修改我的口令」是同一套实现的类型化端点，两条路都可用。
+      </p>
+      <div class="cfg-actions"><button id="usr-edit-btn" data-write type="button">编辑登录与口令策略</button></div>
+      <div id="usr-edit"></div>
       <h3>用户</h3>
       <table id="usr-table">
         <thead><tr><th>用户名</th><th>权限类</th><th>新口令（留空 = 不改）</th><th>操作</th></tr></thead>
@@ -443,17 +513,15 @@
       <!-- 编辑：candidate 会话（提交或丢弃后自动结束） -->
       <div id="cfg-edit" hidden>
         <p class="muted small">
-          编辑的是 candidate——未提交的变更不影响正在运行的配置。表单覆盖系统段（基础 / API 与 TLS /
-          管理口 / 内核启动参数 / 日志 / 健康阈值 / 登录与口令策略）、接口、资源池、VPP（数据面），
-          以及网络域（虚拟交换机 / VRF 与路由 / ACL / NAT / QoS / 端口镜像 / 链路聚合 / LLDP）
-          与计算域（虚拟机 / 容器）；没进表单的字段在「原始 JSON」里改——两者都写进同一份 candidate。
-          表里「删除」只改 candidate，提交后才生效。
+          编辑的是 candidate——未提交的变更不影响正在运行的配置。本页编辑原始 JSON（整体替换 candidate，
+          高级通道兜底）；系统 / 网络对象（交换机 / VRF / ACL / NAT / QoS / 端口镜像 / 聚合 / VXLAN 等）/
+          虚拟机 / 容器 / 镜像的字段，都在它们各自的对象页与系统页就地编辑——两者写进同一份 candidate。
+          改完点「保存到 candidate」，可用「预校验」「查看差异」核对，点「提交」才生效。
         </p>
-        <div id="cfg-forms" class="cfg-forms"></div>
-        <details id="cfg-raw-wrap">
+        <details id="cfg-raw-wrap" open>
           <summary class="muted">原始 JSON（整体替换 candidate）</summary>
           <textarea id="cfg-text" data-write rows="12" spellcheck="false"></textarea>
-          <p class="muted small">保存时以这段 JSON 为准；表单改动会先写回这里。</p>
+          <p class="muted small">保存时以这段 JSON 为准。</p>
         </details>
         <div class="cfg-actions">
           <button id="cfg-save-btn" data-write type="button">保存到 candidate</button>
@@ -471,12 +539,18 @@
 
     <section class="page" id="page-vms" hidden>
     <article class="card wide">
-      <h2>虚拟机 <span id="vm-note" class="muted small"></span></h2>
+      <h2>虚拟机 <span id="vm-note" class="muted small"></span>
+        <button id="vm-new-btn" data-write type="button" class="small">+ 新建</button></h2>
       <table id="vm-table">
         <thead><tr><th>名称</th><th>状态</th><th>vCPU</th><th>内存</th><th>镜像</th><th>操作</th></tr></thead>
         <tbody></tbody>
       </table>
-      <p class="muted small">点行进详情页：概览 / 接口 / 快照 / 串口 都在那一页。</p>
+      <p id="vm-msg" class="muted small" hidden></p>
+      <p class="muted small">点行进详情页：概览 / 接口 / 快照 / 串口 都在那一页。
+        「+ 新建」在本页直接建（写入即提交：取编辑锁 → 写候选 → 校验 → 提交），等价命令行的
+        set virtual-machine-functions + commit；需要引导式部署（选镜像 / 资源 / 网络映射）时用
+        <a href="#/deploy">部署向导</a>（它只写候选，提交在「配置」页）。</p>
+      <div id="vm-list-edit"></div>
     </article>
     </section>
 
@@ -499,6 +573,11 @@
         <dl id="vmd-info" class="kv"></dl>
         <h3>生命周期</h3>
         <div class="cfg-actions" id="vmd-actions"></div>
+        <div class="cfg-actions">
+          <button id="vmd-edit-btn" data-write type="button">编辑</button>
+          <button id="vmd-delete-btn" data-write type="button" class="danger">删除虚拟机</button>
+        </div>
+        <div id="vmd-edit"></div>
         <p id="vmd-msg" class="muted small" hidden></p>
         <h3>vhost-user 口计数</h3>
         <pre id="vmd-stat" class="code" hidden></pre>
@@ -555,13 +634,17 @@
 
     <section class="page" id="page-switches" hidden>
     <article class="card wide">
-      <h2>虚拟交换机 <span id="vs-note" class="muted small"></span></h2>
+      <h2>虚拟交换机 <span id="vs-note" class="muted small"></span>
+        <button id="vs-new-btn" data-write type="button" class="small">+ 新建</button></h2>
       <table id="vs-table">
         <thead><tr><th>名称</th><th>类型</th><th>成员端口</th><th>BD</th><th>操作</th></tr></thead>
         <tbody></tbody>
       </table>
-      <p class="muted small">点行进详情页：成员端口运行态与 MAC 学习表都在那一页。</p>
+      <p class="muted small">点行进详情页：成员端口运行态与 MAC 学习表都在那一页。
+        「+ 新建」在本页直接建（写入即提交：取编辑锁 → 写候选 → 校验 → 提交），等价命令行的
+        set + commit；建好后可在详情页继续「编辑 / 删除」。</p>
       <pre id="vs-stat" class="code" hidden></pre>
+      <div id="vs-list-edit"></div>
     </article>
     </section>
 
@@ -571,6 +654,12 @@
         <h2>虚拟交换机 <span id="vsd-name" class="muted small"></span></h2>
         <dl id="vsd-head" class="kv"></dl>
       </div>
+
+      <div class="cfg-actions">
+        <button id="vsd-edit-btn" data-write type="button">编辑</button>
+        <button id="vsd-del-btn" data-write type="button" class="danger">删除该交换机</button>
+      </div>
+      <div id="vsd-edit"></div>
 
       <h3>成员端口 <span id="vsd-stat-note" class="muted small"></span></h3>
       <table id="vsd-port-table">
@@ -642,7 +731,11 @@
         <thead><tr><th>名称</th><th>状态</th><th>vCPU</th><th>内存</th><th>镜像</th><th>操作</th></tr></thead>
         <tbody></tbody>
       </table>
-      <p class="muted small">点行进详情页：配置概览与容器日志都在那一页。</p>
+      <p id="ct-msg" class="muted small" hidden></p>
+      <p class="muted small">点行进详情页：配置概览、容器日志、执行命令与交互终端都在那一页；
+        行内「编辑」就地改配置（写入即提交：取编辑锁 → 写候选 → 校验 → 提交），「删除」删除容器。
+        新建容器用<a href="#/deploy">部署向导</a>（或命令行），这里不重复造创建入口。</p>
+      <div id="ct-list-edit"></div>
     </article>
     </section>
 
@@ -665,6 +758,11 @@
         <dl id="ctd-info" class="kv"></dl>
         <h3>生命周期</h3>
         <div class="cfg-actions" id="ctd-actions"></div>
+        <div class="cfg-actions">
+          <button id="ctd-edit-btn" data-write type="button">编辑</button>
+          <button id="ctd-delete-btn" data-write type="button" class="danger">删除容器</button>
+        </div>
+        <div id="ctd-edit"></div>
         <p id="ctd-msg" class="muted small" hidden></p>
         <h3>vNIC</h3>
         <table id="ctd-iface-table">
@@ -729,7 +827,9 @@
         <thead><tr><th>名称</th><th>类型</th><th>大小</th><th>引用</th><th>状态</th><th>操作</th></tr></thead>
         <tbody></tbody>
       </table>
-      <p class="muted small">点行进详情页看完整元数据（sha256 / 格式 / 导入状态与时间）。</p>
+      <p class="muted small">点行进详情页看完整元数据（sha256 / 格式 / 导入状态与时间），并在那里编辑
+        启动画像或删除镜像；行内「画像」就地编辑该镜像的启动画像（写入即提交，等价
+        set vm-image-profiles + commit），「删除」从仓库删除镜像。</p>
 
       <details id="img-import-wrap">
         <summary class="muted">导入镜像（URL 拉取 / incoming 文件 / 本地上传）</summary>
@@ -765,6 +865,7 @@
         </div>
         <p id="img-msg" class="muted small" hidden></p>
       </details>
+      <div id="img-list-edit"></div>
     </article>
     </section>
 
@@ -776,12 +877,20 @@
       </div>
       <h3>元数据</h3>
       <dl id="imd-info" class="kv"></dl>
+      <div class="cfg-actions">
+        <button id="imd-profile-btn" data-write type="button">编辑画像</button>
+        <button id="imd-del-btn" data-write type="button" class="danger">删除该镜像</button>
+      </div>
+      <div id="imd-edit"></div>
+      <p id="imd-msg" class="muted small" hidden></p>
       <h3>启动画像</h3>
       <dl id="imd-profile" class="kv"></dl>
       <p class="muted small">镜像级启动画像（machine / cpu / firmware / disk-interface / boot-order / accel / console / extra-args）。
         未配置的项显示「—」；虚拟机启动时按「实例覆盖 → 镜像画像 → 产品默认」合并，逐项有效值与来源见虚拟机详情页。
-        配置入口在命令行（set vm-image-profiles）。</p>
-      <p class="muted small">删除入口在镜像列表页；被 VM 或容器引用时服务端会拒绝删除。</p>
+        「编辑画像」就地改这份画像（写入即提交，等价 set vm-image-profiles + commit）；容器镜像没有启动画像，
+        该入口不出现在它的页面/行上。</p>
+      <p class="muted small">「删除该镜像」从仓库删除本镜像；仍被虚拟机或容器引用时服务端会拒绝并指出引用者。
+        镜像列表页的行内「删除」是同一动作。</p>
     </article>
     </section>
 
@@ -866,10 +975,16 @@
 
     <section class="page" id="page-network" hidden>
     <article class="card wide">
-      <h2>网络对象 <span class="muted small">（VRF / ACL / NAT / 聚合 / QoS / 端口镜像）</span></h2>
+      <h2>网络对象 <span class="muted small">（VRF / ACL / NAT / 聚合 / QoS / 端口镜像 / VXLAN）</span></h2>
       <p class="muted small">点行或「详情」进对象详情页（VRF / ACL / 聚合 / QoS / 端口镜像）。
+        每个块右上角的「+ 新建」与行内的「编辑 / 删除」在本页就地改——写入即提交（取编辑锁 → 写候选 → 校验 → 提交），
+        等价命令行的 set/delete + commit；VXLAN 没有独立详情路由，行内直接编辑。
         LLDP 的开关状态与邻居表在<a href="#/network/lldp">LLDP</a>页。</p>
       <div id="net-objects" class="net-objects"></div>
+
+      <!-- 就地编辑面板（「+ 新建」/「编辑」/「删除」都把面板与结果提示放在这里；
+           面板由 js/core/forms.js 的 objEditor 用**配置页那一份节定义**画出来）。 -->
+      <div id="net-obj-edit"></div>
 
       <!-- 大表按需拉取：NAT 会话不进 5 秒轮询（VRF 路由表在 VRF 详情页里） -->
       <div class="cfg-forms">
@@ -892,6 +1007,11 @@
         <h2>VRF <span id="vrd-name" class="muted small"></span></h2>
         <dl id="vrd-head" class="kv"></dl>
       </div>
+      <div class="cfg-actions">
+        <button id="vrd-edit-btn" data-write type="button">编辑</button>
+        <button id="vrd-del-btn" data-write type="button" class="danger">删除该 VRF</button>
+      </div>
+      <div id="vrd-edit"></div>
       <h3>L3 接口</h3>
       <table id="vrd-l3-table">
         <thead><tr><th>接口</th><th>VLAN</th><th>地址</th><th>入口 ACL</th></tr></thead>
@@ -911,6 +1031,11 @@
         <h2>ACL <span id="acd-name" class="muted small"></span></h2>
         <dl id="acd-head" class="kv"></dl>
       </div>
+      <div class="cfg-actions">
+        <button id="acd-edit-btn" data-write type="button">编辑</button>
+        <button id="acd-del-btn" data-write type="button" class="danger">删除该 ACL</button>
+      </div>
+      <div id="acd-edit"></div>
       <h3>规则</h3>
       <table id="acd-rule-table">
         <thead><tr><th>序号</th><th>方向</th><th>源</th><th>目的</th><th>协议</th><th>源端口</th></tr></thead>
@@ -925,6 +1050,11 @@
         <h2>链路聚合 <span id="bnd-name" class="muted small"></span></h2>
         <dl id="bnd-head" class="kv"></dl>
       </div>
+      <div class="cfg-actions">
+        <button id="bnd-edit-btn" data-write type="button">编辑</button>
+        <button id="bnd-del-btn" data-write type="button" class="danger">删除该聚合口</button>
+      </div>
+      <div id="bnd-edit"></div>
       <h3>配置与运行态</h3>
       <dl id="bnd-info" class="kv"></dl>
     </article>
@@ -939,9 +1069,14 @@
       <h3>参数</h3>
       <dl id="qsd-info" class="kv"></dl>
       <p class="muted small">策略详情取自限速策略列表（该对象没有单独读取的接口）。</p>
-      <div class="cfg-actions"><button id="qsd-del-btn" data-write type="button" class="danger">删除该策略</button></div>
+      <div class="cfg-actions">
+        <button id="qsd-edit-btn" data-write type="button">编辑</button>
+        <button id="qsd-del-btn" data-write type="button" class="danger">删除该策略</button>
+      </div>
       <p id="qsd-msg" class="muted small" hidden></p>
-      <p class="muted small">删除只写候选：到<a href="#/config">配置</a>页提交后才生效（被接口绑定的策略由服务端拒绝删除）。</p>
+      <div id="qsd-edit"></div>
+      <p class="muted small">编辑与删除都是写入即提交（取编辑锁 → 写候选 → 校验 → 提交；删除走该对象自己的端点后再统一提交），
+        等价命令行的 set/delete + commit。被接口绑定的策略由服务端拒绝删除，报错原文照实显示。</p>
     </article>
     </section>
 
@@ -954,9 +1089,14 @@
       <h3>配置</h3>
       <dl id="spd-info" class="kv"></dl>
       <p class="muted small">会话详情取自端口镜像列表（该对象没有单独读取的接口）。</p>
-      <div class="cfg-actions"><button id="spd-del-btn" data-write type="button" class="danger">删除该镜像会话</button></div>
+      <div class="cfg-actions">
+        <button id="spd-edit-btn" data-write type="button">编辑</button>
+        <button id="spd-del-btn" data-write type="button" class="danger">删除该镜像会话</button>
+      </div>
       <p id="spd-msg" class="muted small" hidden></p>
-      <p class="muted small">删除只写候选：到<a href="#/config">配置</a>页提交后才生效。</p>
+      <div id="spd-edit"></div>
+      <p class="muted small">编辑与删除都是写入即提交（取编辑锁 → 写候选 → 校验 → 提交；删除走该对象自己的端点后再统一提交），
+        等价命令行的 set/delete + commit。生效后该会话的镜像流量停止（分析口不再收到复制流量）。</p>
     </article>
     </section>
 
@@ -1009,8 +1149,19 @@
         </fieldset>
         <fieldset>
           <legend>时间（NTP）</legend>
-          <p class="muted small">同步源取自已提交的配置；服务器地址在<a href="#/config">配置</a>页的系统（基础）表单里声明。</p>
+          <p class="muted small">同步源取自已提交的配置；服务器地址在<a href="#/system">系统</a>页的「编辑系统配置」面板（系统（基础）一节的 NTP 服务器子表）里声明，提交后立即落到宿主 chrony。</p>
           <div class="cfg-actions"><button id="ops-ntp-btn" data-write type="button" class="ghost">立即同步时间</button></div>
+        </fieldset>
+        <fieldset>
+          <legend>数据面（VPP）配置（就地编辑）</legend>
+          <p class="muted small">
+            数据面运行时配置（CPU 主核与 worker 核 / 内存主堆与 buffer / 大页偏好 / DPDK 全局队列与描述符 /
+            单网卡覆盖 / 插件开关）在这里就地改：写入即提交，等价 set vpp … + commit。
+            CPU / 内存 / DPDK / 插件类改动提交后需 <code>request vpp restart</code>（或整机 reboot）才生效——
+            本页下方就有「重启数据面（VPP）」；只改数据面 DNS 代理上游不在其列（那项不需要重启，入口在<a href="#/system">系统</a>页）。
+          </p>
+          <div class="cfg-actions"><button id="ops-vpp-edit-btn" data-write type="button">编辑数据面（VPP）配置</button></div>
+          <div id="ops-vpp-edit"></div>
         </fieldset>
         <fieldset>
           <legend>诊断归档</legend>
@@ -1022,6 +1173,11 @@
           <label for="ops-export-url">core dump 清单导出到</label>
           <input id="ops-export-url" data-write data-op type="text" placeholder="http://192.0.2.10:8080/collect">
           <div class="cfg-actions"><button id="ops-export-btn" data-write data-op type="button" class="ghost">导出清单</button></div>
+          <h3 class="muted small">core dump 清单（点「列出 core dump」加载；每行可删）</h3>
+          <table id="ops-coredump-table">
+            <thead><tr><th>文件</th><th>进程</th><th>大小</th><th>时间</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
         </fieldset>
         <fieldset>
           <legend>归档下载</legend>
@@ -1172,6 +1328,29 @@
     </article>
     </section>
 
+    <section class="page" id="page-monitor" hidden>
+    <article class="card wide">
+      <h2>实时监视 <span id="mon-note" class="muted small"></span></h2>
+      <p class="muted small">
+        虚拟机与容器的运行态<strong>跟踪</strong>（对应命令行的 <code>monitor vnf</code>）：
+        随实时通道（<code>/events</code>）推送<strong>即时更新</strong>；实时通道不可用时按本页 5 秒节奏
+        <strong>兜底轮询</strong>。与命令行 <code>monitor</code> 同一语义——持续跟踪，不是一次快照。
+        只读页：任何角色都能看。
+      </p>
+      <h3>虚拟机 <span id="mon-vm-note" class="muted small"></span></h3>
+      <table id="mon-vm-table">
+        <thead><tr><th>名称</th><th>状态</th><th>vCPU</th><th>内存</th><th>镜像</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>容器 <span id="mon-ct-note" class="muted small"></span></h3>
+      <table id="mon-ct-table">
+        <thead><tr><th>名称</th><th>状态</th><th>vCPU</th><th>内存</th><th>镜像</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="muted small">点行进对象的详情页。</p>
+    </article>
+    </section>
+
   </div>
 
     </main>
@@ -1181,6 +1360,8 @@
     数据取自本机 REST 接口；当前页按其自身节奏刷新（多数页 5 秒一次，配置与运维类页面不自动刷新），
     事件推送到达时立即刷新。顶栏可切换页面，地址里的 # 可直接分享或收藏。
     配置修改在「配置」页里经 candidate → 提交 流程进行，未提交前不影响运行配置；
+    对象页（网络对象 / 虚拟交换机等）的「新建 / 编辑 / 删除」就地走同一套候选事务
+    （取锁 → 写候选 → 校验 → 提交），确认后即生效——与命令行的 set/delete + commit 同口径；
     写类动作按影响面分级确认：低危点一次即可，中危先列出影响面，高危还要手工输入确认词并等倒计时走完。
   </footer>
 

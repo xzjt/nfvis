@@ -13,12 +13,98 @@ import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
   showGlobalError } from '../core/state.js';
+// 就地增删改（配置页去中心化第一刀）：面板复用配置页的节定义（单一真源，不在这里复制字段
+// 清单），写路径走 core/forms.js 的同一套 candidate 事务（取锁 → 写候选 → 校验 → 提交 → 释放）。
+import { CFG_SECTIONS } from './config.js';
+import { objEditor, objTxn } from '../core/forms.js';
 
 // reload（重渲染当前路由）与 goDetail 类似，按需动态 import 防静态环。
 const jsviewsnetworkRouterModule = () => import('../../router.js');
 async function reload() {
   return (await jsviewsnetworkRouterModule()).render();
 }
+
+// ---------- 就地增删改：对象种类与面板（网络对象族）----------
+//
+// 每个种类的面板都画配置页那一份节（CFG_SECTIONS 里的一条）；节缺失时如实报错，不静默。
+// cli* 只在确认框里做只读回显（工单对照用），关键字取自命令行同一族语句。
+const NET_EDIT_KINDS = {
+  vrfs: {
+    list: 'vrfs', label: 'VRF',
+    cliNew: (n) => 'set virtual-switches ' + n + ' type l3',
+    cliSave: (n) => 'set virtual-switches ' + n + ' l3-interface … / static-routes …',
+    cliDelete: (n) => 'delete virtual-switches ' + n + ' type',
+  },
+  acls: {
+    list: 'acls', label: 'ACL',
+    cliNew: (n) => 'set acls ' + n + ' rule <seq> …',
+    cliSave: (n) => 'set acls ' + n + ' rule <seq> …',
+    cliDelete: (n) => 'delete acls ' + n,
+  },
+  nat: {
+    legend: 'NAT', label: 'NAT 配置',
+    cliSave: () => 'set nat source-pool … / nat rules … / nat static …',
+    cliDelete: () => 'delete nat',
+  },
+  bonds: {
+    list: 'bonds', label: '链路聚合（bond）',
+    cliNew: (n) => 'set bonds ' + n + ' members <成员口…>',
+    cliSave: (n) => 'set bonds ' + n + ' members <成员口…> / lacp …',
+    cliDelete: (n) => 'delete bonds ' + n,
+  },
+  qos: {
+    list: 'qos_policies', label: 'QoS 策略',
+    cliNew: (n) => 'set qos policies ' + n + ' cir <bps> cbs <bytes>',
+    cliSave: (n) => 'set qos policies ' + n + ' cir <bps> cbs <bytes>',
+    cliDelete: (n) => 'delete qos policies ' + n,
+  },
+  span: {
+    list: 'port_mirroring', label: '端口镜像会话',
+    cliNew: (n) => 'set port-mirroring ' + n + ' source … analyzer interface …',
+    cliSave: (n) => 'set port-mirroring ' + n + ' source … analyzer interface …',
+    cliDelete: (n) => 'delete port-mirroring ' + n,
+  },
+  vxlan: {
+    list: 'vxlan_tunnels', label: 'VXLAN 隧道',
+    cliNew: (n) => 'set vxlan tunnels ' + n + ' vni <n> local <ip> remote <ip>',
+    cliSave: (n) => 'set vxlan tunnels ' + n + ' vni <n> local <ip> remote <ip>',
+    cliDelete: (n) => 'delete vxlan tunnels ' + n,
+  },
+};
+
+function netKind(key) {
+  const k = NET_EDIT_KINDS[key];
+  if (!k) return null;
+  const all = Array.isArray(CFG_SECTIONS) ? CFG_SECTIONS : [];
+  const section = all.find((s) => (k.list ? s.list === k.list : s.legend === k.legend)) || null;
+  return Object.assign({}, k, { section });
+}
+
+// 网络对象总览页一块面板（所有种类共用：节定义不同，事务与确认口径完全相同）。
+const netPageEditor = objEditor({ slot: 'net-obj-edit', reload });
+// 各对象详情页一块面板（VRF / ACL / bond / QoS / SPAN）。
+const vrdEditor = objEditor({ slot: 'vrd-edit', reload });
+const acdEditor = objEditor({ slot: 'acd-edit', reload });
+const bndEditor = objEditor({ slot: 'bnd-edit', reload });
+const qsdEditor = objEditor({ slot: 'qsd-edit', reload });
+const spdEditor = objEditor({ slot: 'spd-edit', reload });
+
+function netDetailName(id) { const n = $(id); return (n && n.textContent) || ''; }
+function netBind(btnId, fn) { const b = $(btnId); if (b) b.addEventListener('click', fn); }
+if (vrdEditor) {
+  netBind('vrd-edit-btn', () => vrdEditor.openEdit(netKind('vrfs'), netDetailName('vrd-name')));
+  netBind('vrd-del-btn', () => vrdEditor.remove(netKind('vrfs'), netDetailName('vrd-name')));
+}
+if (acdEditor) {
+  netBind('acd-edit-btn', () => acdEditor.openEdit(netKind('acls'), netDetailName('acd-name')));
+  netBind('acd-del-btn', () => acdEditor.remove(netKind('acls'), netDetailName('acd-name')));
+}
+if (bndEditor) {
+  netBind('bnd-edit-btn', () => bndEditor.openEdit(netKind('bonds'), netDetailName('bnd-name')));
+  netBind('bnd-del-btn', () => bndEditor.remove(netKind('bonds'), netDetailName('bnd-name')));
+}
+if (qsdEditor) netBind('qsd-edit-btn', () => qsdEditor.openEdit(netKind('qos'), netDetailName('qsd-name')));
+if (spdEditor) netBind('spd-edit-btn', () => spdEditor.openEdit(netKind('span'), netDetailName('spd-name')));
 
 // ---------- 网络对象（只读总览）----------
 
@@ -31,8 +117,10 @@ function qosBindingsText(q) {
     : undefined;
 }
 
-// 每块：[标题, 数据, 列名, 取值函数, 详情页路由前缀（可选）]；有前缀时表格多一列"详情"，
-// 且整行可点进详情页。NAT 没有独立详情页（没有"单对象"语义：NAT 是配置对象），故只列在总览里；
+// 每块：[标题, 数据, 列名, 取值函数, 详情页路由前缀（可选）, 就地编辑的种类键（可选）]。
+// 有详情前缀时表格多一列"详情"，且整行可点进详情页；种类键让块右上角出现「+ 新建」（单对象节
+// 是「编辑」），行内动作只给没有独立详情路由的 VXLAN（它的「编辑 / 删除」就在行里）。
+// NAT 没有独立详情页（没有"单对象"语义：NAT 是配置对象），故只列在总览里，且是整节编辑；
 // LLDP 也有自己的页面（#/network/lldp），不在这里重复列一遍。
 const NET_OBJECT_VIEWS = [
   ['VRF（L3 虚拟交换机）', 'vrfs', ['名称', 'L3 接口', '路由数'], (v) => [
@@ -41,20 +129,20 @@ const NET_OBJECT_VIEWS = [
     // 列名是「路由数」：routes 是对象数组，直接塞进单元格会渲染成
     // "[object Object],[object Object]"（真机 round88 现场）。取长度，与详情页同一口径。
     v.routes != null ? v.routes.length : undefined,
-  ], '#/network/vrfs/'],
-  ['ACL', 'acls', ['名称', '规则数'], (a) => [a.name, (a.rules || []).length], '#/network/acls/'],
+  ], '#/network/vrfs/', 'vrfs'],
+  ['ACL', 'acls', ['名称', '规则数'], (a) => [a.name, (a.rules || []).length], '#/network/acls/', 'acls'],
   // NAT 是对象（source_pools/rules/static），按池与规则各出一行
-  ['NAT', 'nat', ['类型', '内容'], (n) => [n.kind, n.summary]],
+  ['NAT', 'nat', ['类型', '内容'], (n) => [n.kind, n.summary], undefined, 'nat'],
   ['链路聚合（bond）', 'bonds', ['名称', '模式', '成员'], (b) => [
     b.name, b.mode, (b.members || []).join(', '),
-  ], '#/network/bonds/'],
+  ], '#/network/bonds/', 'bonds'],
   // 列与 CLI `show qos policies`（Policy / CIR(bps) / 绑定方向）同源；CBS 只在详情页展示。
   // 曾取 `q.type`/`q.target`/`q.interface` —— 响应里从来没有这些字段，「类型/目标」恒「—」
   // （R110-1，决策 #332），字段以契约 QosPolicy schema 为准。
-  ['QoS 策略', 'qos', ['名称', 'CIR(bps)', '绑定（接口:in|out）'], (q) => [q.name, q.cir, qosBindingsText(q)], '#/network/qos/'],
+  ['QoS 策略', 'qos', ['名称', 'CIR(bps)', '绑定（接口:in|out）'], (q) => [q.name, q.cir, qosBindingsText(q)], '#/network/qos/', 'qos'],
   ['端口镜像（SPAN）', 'span', ['名称', '源', '目的'], (s) => [
     s.name, spanSourceText(s.source), s.analyzer,
-  ], '#/network/span/'],
+  ], '#/network/span/', 'span'],
   // VXLAN 隧道（决策 #383）：读 GET /vxlan-tunnels（配置声明 × 数据面实况，与 CLI
   // `show vxlan tunnels` 同源）。「状态」列取 `in_vpp`（数据面上有没有**该名字**的隧道口——
   // 按平台打在接口上的标记识别；底座没有可回读隧道参数的清单，VNI/地址/端口以配置为准）。
@@ -63,7 +151,7 @@ const NET_OBJECT_VIEWS = [
     t.name, t.vni, (t.local || '—') + ' → ' + (t.remote || '—'), t.dst_port, t.virtual_switch,
     t.runtime_available === false ? '运行态不可用'
       : (t.in_vpp ? '已在 VPP（接口 ' + dash(t.interface_name) + '）' : '未收敛'),
-  ]],
+  ], undefined, 'vxlan'],
 ];
 
 // natRows 把 NAT 配置对象摊平成行（池 / 规则 / 静态映射各一行）。
@@ -92,10 +180,26 @@ function renderNetworkObjects(nets) {
     box.appendChild(el('p', { class: 'muted', text: '（读取失败）' }));
     return;
   }
-  NET_OBJECT_VIEWS.forEach(([title, key, cols, pick, routePrefix]) => {
+  NET_OBJECT_VIEWS.forEach(([title, key, cols, pick, routePrefix, editKey]) => {
     const data = nets[key];
+    const kind = editKey ? netKind(editKey) : null;
+    // 没有独立详情路由的对象（VXLAN）在行内就地编辑 / 删除；有详情页的块只给「+ 新建」。
+    const rowEdit = !!(kind && !routePrefix);
+    const actionCol = routePrefix ? '详情' : (rowEdit ? '操作' : '');
     const wrap = el('div', { class: 'net-object' });
-    wrap.appendChild(el('h3', { text: title }));
+    const head = el('h3', { text: title });
+    if (kind) {
+      // 多对象节给「+ 新建」；单对象节（NAT）整节只有一份配置，给「编辑」。
+      const isSingle = !kind.list;
+      const b = rowButton(wbtn({ type: 'button', class: 'small', text: isSingle ? '编辑' : '+ 新建' }));
+      b.addEventListener('click', () => {
+        if (!netPageEditor) return;
+        if (isSingle) netPageEditor.openEdit(kind, '');
+        else netPageEditor.openNew(kind);
+      });
+      head.appendChild(b);
+    }
+    wrap.appendChild(head);
     if (data && data.__err) {
       wrap.appendChild(el('p', { class: 'muted small', text: '读取失败：' + data.__err }));
       box.appendChild(wrap);
@@ -107,26 +211,35 @@ function renderNetworkObjects(nets) {
     const thead = el('thead');
     const htr = el('tr');
     cols.forEach((c) => htr.appendChild(el('th', { text: c })));
-    if (routePrefix) htr.appendChild(el('th', { text: '详情' }));
+    if (actionCol) htr.appendChild(el('th', { text: actionCol }));
     thead.appendChild(htr);
     t.appendChild(thead);
     const tbody = el('tbody');
     if (!rows.length) {
       const tr = el('tr');
-      tr.appendChild(el('td', { colspan: String(cols.length + (routePrefix ? 1 : 0)), class: 'muted', text: '（无）' }));
+      tr.appendChild(el('td', { colspan: String(cols.length + (actionCol ? 1 : 0)), class: 'muted', text: '（无）' }));
       tbody.appendChild(tr);
     } else {
       rows.forEach((r) => {
         const path = routePrefix ? routePrefix + encodeURIComponent(r.name) : '';
         const tr = path ? rowClickable(el('tr'), path) : el('tr');
         pick(r).forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
+        const cell = el('td', { class: 'actions' });
         if (path) {
-          const cell = el('td', { class: 'actions' });
           const b = rowButton(el('button', { type: 'button', class: 'ghost small', text: '详情' }));
           b.addEventListener('click', () => goDetail(path));
           cell.appendChild(b);
-          tr.appendChild(cell);
         }
+        if (rowEdit) {
+          // 行内写入口必须经 wbtn（data-write）：read-only 角色由 CSS 隐藏（决策 #145/#327）。
+          const eb = rowButton(wbtn({ type: 'button', class: 'small', text: '编辑' }));
+          eb.addEventListener('click', () => { if (netPageEditor) netPageEditor.openEdit(kind, r.name); });
+          const db = rowButton(wbtn({ type: 'button', class: 'small danger', text: '删除' }));
+          db.addEventListener('click', () => { if (netPageEditor) netPageEditor.remove(kind, r.name); });
+          cell.appendChild(eb);
+          cell.appendChild(db);
+        }
+        if (actionCol) tr.appendChild(cell);
         tbody.appendChild(tr);
       });
     }
@@ -252,10 +365,12 @@ function renderQosDetail(rows, params) {
 
 // 删 QoS 策略（DELETE /qos/policies/{name}，该路径**只有 DELETE**——所以详情取自列表端点）。
 //
-// 语义核实：服务端走 mutateCandidate —— 取配置编辑锁、把删除写进**候选**，**不自动提交**
-// （响应体 {committed:false, revision:N}）。故这里按「配置」页口径做：删的是候选，
-// 到「配置」页点「提交」才生效；界面**不**用 auto-commit 绕过那条流程。
-// 档位：中危（删对象一类）——逐条列影响面 + 主按钮标红。
+// 写路径与其它对象同一套一次性事务（core/forms.js 的 objTxn）：**改候选**这一步走该对象自己的
+// 端点（服务端内部就是「取配置编辑锁 + 把删除写进候选」，且带对象级检查——被接口绑定的策略由它
+// 精确拒绝），随后统一 校验（POST /configuration/check）→ 提交（POST /configuration/commit）→
+// 释放（DELETE /configuration/candidate）——与 CLI `delete qos policies <n>` + commit 同口径。
+// 档位：中危（删对象一类）——逐条列影响面 + 主按钮标红。标题与只读回显语句是既有验收锚点
+// （contrib/scripts/web-console-confirm-selftest.js 的动作表逐字钉住），保持原样。
 function qsdMsg(text, isErr) {
   const p = $('qsd-msg');
   p.hidden = !text;
@@ -269,22 +384,18 @@ export async function qsdDelete() {
   const ok = await uiConfirm('删除 QoS 策略', {
     tier: 'mid',
     bullets: [
-      '从候选配置里删除限速策略 ' + name + '：**只写候选，不立即生效**——到「配置」页提交后才生效。',
+      '从配置里删除限速策略 ' + name + '：写入即提交（取编辑锁 → 写候选 → 校验 → 立即提交生效），等价命令行的 delete + commit。',
       '被接口绑定的策略由服务端拒绝删除（要先把接口上的引用解掉），界面会把它的报错原文显示出来。',
-      '提交前随时可以在「配置」页点「丢弃并结束编辑」撤销这次删除。',
-      '可回退：丢弃候选，或提交后再把策略配回来。',
+      '生效后绑过它的接口不再限速，相关流量行为可能随之变化。',
+      '可回退：「提交历史」里能把上一版取为候选、再提交回来。',
     ],
     cli: 'delete qos policy name ' + name,
   });
   if (!ok) return;
-  qsdMsg('写入候选：执行中…', false);
-  try {
-    await api('/qos/policies/' + encodeURIComponent(name), { method: 'DELETE' });
-    qsdMsg('已把「删除 ' + name + '」写入候选（未生效）——到「配置」页提交后才生效。', false);
-  } catch (e) {
-    qsdMsg('删除失败：' + e.message, true);
-  }
-  await reload().catch(() => {});
+  qsdMsg('提交中…', false);
+  const res = await objTxn(() => api('/qos/policies/' + encodeURIComponent(name), { method: 'DELETE' }));
+  qsdMsg(res.text, !res.ok);
+  if (res.ok) await reload().catch(() => {});
 }
 
 // SPAN 源的统一文本（决策 #430②）：vNIC 源在契约里是 `source.vnf` + `source.vnf_interface`
@@ -319,7 +430,8 @@ function renderSpanDetail(rows, params) {
 }
 
 // 删端口镜像会话（DELETE /port-mirroring/{name}，同样只有 DELETE）。语义与 QoS 删除一致：
-// 只写候选、不自动提交，故同样按「配置」页口径做，并指路到提交。
+// 改候选走该对象自己的端点（服务端内部「取锁 + 写候选」），随后统一 校验 → 提交 → 释放，
+// 等价 CLI `delete port-mirroring <n>` + commit。标题与只读回显语句是既有验收锚点，保持原样。
 function spdMsg(text, isErr) {
   const p = $('spd-msg');
   p.hidden = !text;
@@ -333,43 +445,46 @@ export async function spdDelete() {
   const ok = await uiConfirm('删除端口镜像会话', {
     tier: 'mid',
     bullets: [
-      '从候选配置里删除镜像会话 ' + name + '：**只写候选，不立即生效**——到「配置」页提交后才生效。',
-      '提交生效后该会话的镜像流量停止（分析口不再收到复制流量）。',
-      '提交前随时可以在「配置」页点「丢弃并结束编辑」撤销这次删除。',
-      '可回退：丢弃候选，或提交后再把会话配回来。',
+      '从配置里删除镜像会话 ' + name + '：写入即提交（取编辑锁 → 写候选 → 校验 → 立即提交生效），等价命令行的 delete + commit。',
+      '生效后该会话的镜像流量停止（分析口不再收到复制流量）。',
+      '被别处引用的会话删不掉时服务端会拒绝并指出原因，报错原文照实显示。',
+      '可回退：「提交历史」里能把上一版取为候选、再提交回来。',
     ],
     cli: 'delete port-mirroring name ' + name,
   });
   if (!ok) return;
-  spdMsg('写入候选：执行中…', false);
-  try {
-    await api('/port-mirroring/' + encodeURIComponent(name), { method: 'DELETE' });
-    spdMsg('已把「删除 ' + name + '」写入候选（未生效）——到「配置」页提交后才生效。', false);
-  } catch (e) {
-    spdMsg('删除失败：' + e.message, true);
-  }
-  await reload().catch(() => {});
+  spdMsg('提交中…', false);
+  const res = await objTxn(() => api('/port-mirroring/' + encodeURIComponent(name), { method: 'DELETE' }));
+  spdMsg(res.text, !res.ok);
+  if (res.ok) await reload().catch(() => {});
 }
 
 // 各 view 的渲染注册（从 app.js 的 VIEWS 注册表按域拆出；键名=routes.json 的 view 名）。
 
 export const viewsNetwork = {
   'network': {
-    async render(d) { pageWarn(d); renderNetworkObjects(await loadNetworkObjects(d)); }
+    async render(d) { pageWarn(d); renderNetworkObjects(await loadNetworkObjects(d)); },
+    // 离开本页（router 的 leave 钩子）：收掉就地编辑面板——草稿不跨页残留。
+    leave() { if (netPageEditor) netPageEditor.leave(); }
   },
   'vrfDetail': {
-    render(d, params) { pageWarn(d); renderVrfDetail(d['/vrfs/{name}'], d['/vrfs/{name}/routes'], params); }
+    render(d, params) { pageWarn(d); renderVrfDetail(d['/vrfs/{name}'], d['/vrfs/{name}/routes'], params); },
+    leave() { if (vrdEditor) vrdEditor.leave(); }
   },
   'aclDetail': {
-    render(d, params) { pageWarn(d); renderAclDetail(d['/acls/{name}'], params); }
+    render(d, params) { pageWarn(d); renderAclDetail(d['/acls/{name}'], params); },
+    leave() { if (acdEditor) acdEditor.leave(); }
   },
   'bondDetail': {
-    render(d, params) { pageWarn(d); renderBondDetail(d['/bonds/{name}'], params); }
+    render(d, params) { pageWarn(d); renderBondDetail(d['/bonds/{name}'], params); },
+    leave() { if (bndEditor) bndEditor.leave(); }
   },
   'qosDetail': {
-    render(d, params) { pageWarn(d); renderQosDetail(d['/qos/policies'], params); }
+    render(d, params) { pageWarn(d); renderQosDetail(d['/qos/policies'], params); },
+    leave() { if (qsdEditor) qsdEditor.leave(); }
   },
   'spanDetail': {
-    render(d, params) { pageWarn(d); renderSpanDetail(d['/port-mirroring'], params); }
+    render(d, params) { pageWarn(d); renderSpanDetail(d['/port-mirroring'], params); },
+    leave() { if (spdEditor) spdEditor.leave(); }
   },
 };

@@ -191,6 +191,47 @@ function xrefCheck() {
   return true;
 }
 
+// ---------- DYN：动态 import() 说明符的**可解析性**核对 ----------
+//
+// 由来三（v3.0.20 真机教训）：LINK 层用 SourceTextModule.link() 只解析**静态** import/export，
+// **动态** `import('…')` 是运行期才取模块，link() 一概看不见。Web 重构后
+// `js/core/dom.js` 的 `goDetail()` 写了 `import('../router.js')`——本文件在 js/core/ 下，
+// 该说明符解析到 **js/router.js（不存在）**，而 router.js 实际在 ui/ 根。后果是**详情按钮与
+// 列表行点击全部静默失效**（只抛一个未处理的 rejection，界面无任何提示），零对象/纯 hash
+// 走查都抓不到（hash 直连走的是 app.js 的静态 import，那条路是好的）。
+// 故本层把每个相对说明符**按文件所在目录解析**并断言目标存在。
+function dynCheck() {
+  const files = [];
+  (function walk(dir) {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.name === 'novnc') continue; // 第三方库，不为我们的拆分管
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.js')) files.push(p);
+    }
+  })(ROOT);
+  const bad = [];
+  for (const f of files) {
+    const raw = fs.readFileSync(f, 'utf8');
+    for (const m of raw.matchAll(/import\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+      const spec = m[1];
+      if (!spec.startsWith('.')) continue; // 裸说明符/URL 不在本层范围
+      const target = path.resolve(path.dirname(f), spec);
+      if (!fs.existsSync(target)) {
+        bad.push(moduleKey(path.relative(ROOT, f)).replace(/\\/g, '/') + ' -> ' + spec +
+          '（解析到 ' + moduleKey(path.relative(ROOT, target)).replace(/\\/g, '/') + '，该文件不存在）');
+      }
+    }
+  }
+  if (bad.length) {
+    console.log('DYN FAIL —— 以下动态 import() 的相对路径解析不到文件（运行期 404 ⇒ 该动作静默失效）：');
+    for (const b of bad) console.log('  ' + b);
+    return false;
+  }
+  console.log('DYN OK —— 动态 import() 说明符全部可解析（' + files.length + ' 个模块）');
+  return true;
+}
+
 // ---------- 主流程：LINK（链接期）→ XREF（自由标识符） ----------
 
 (async () => {
@@ -217,6 +258,7 @@ function xrefCheck() {
   }
   console.log('LINK OK —— ' + mods.size + ' 个模块的 import 名全部在目标模块有导出');
   if (!xrefCheck()) process.exit(1);
+  if (!dynCheck()) process.exit(1);
 })().catch((e) => {
   console.log('LINK FAIL: ' + e.message);
   process.exit(1);

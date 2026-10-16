@@ -10,6 +10,10 @@ import { api, soft, apiErrText, httpErrText,
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
 import { notFoundText } from './network.js';
+// 就地增删改（配置页去中心化第一刀）：面板复用配置页的「虚拟交换机」节定义（单一真源），
+// 写路径走 core/forms.js 的同一套 candidate 事务（取锁 → 写候选 → 校验 → 提交 → 释放）。
+import { CFG_SECTIONS } from './config.js';
+import { objEditor } from '../core/forms.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
@@ -19,6 +23,36 @@ import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
 const jsviewsswitchesRouterModule = () => import('../../router.js');
 async function reload() {
   return (await jsviewsswitchesRouterModule()).render();
+}
+
+// ---------- 就地新建 / 编辑 / 删除（虚拟交换机）----------
+//
+// 种类描述：节定义取自配置页的 CFG_SECTIONS（**同一份**节，不在这里复制字段清单——字段
+// 新增/变更自动生效；节缺失时如实报错，不静默）。cli* 只在确认框里做只读回显（工单对照用）。
+function vsKind() {
+  const all = Array.isArray(CFG_SECTIONS) ? CFG_SECTIONS : [];
+  return {
+    label: '虚拟交换机',
+    section: all.find((s) => s.list === 'virtual_switches') || null,
+    cliNew: (n) => 'set virtual-switches ' + n + ' type l2',
+    cliSave: (n) => 'set virtual-switches ' + n + ' …（类型 / 网关 / 成员端口 / DHCP …）',
+    cliDelete: (n) => 'delete virtual-switches ' + n,
+  };
+}
+
+// 列表页一块面板（「+ 新建」）；详情页一块面板（「编辑 / 删除」）。
+const vsListEditor = objEditor({ slot: 'vs-list-edit', reload });
+const vsdEditor = objEditor({ slot: 'vsd-edit', reload });
+const vsdCurrentName = () => { const n = $('vsd-name'); return (n && n.textContent) || ''; };
+if (vsListEditor) {
+  const b = $('vs-new-btn');
+  if (b) b.addEventListener('click', () => vsListEditor.openNew(vsKind()));
+}
+if (vsdEditor) {
+  const eb = $('vsd-edit-btn');
+  if (eb) eb.addEventListener('click', () => vsdEditor.openEdit(vsKind(), vsdCurrentName()));
+  const db = $('vsd-del-btn');
+  if (db) db.addEventListener('click', () => vsdEditor.remove(vsKind(), vsdCurrentName()));
 }
 
 // ---------- 虚拟交换机（列表 + 详情）----------
@@ -239,7 +273,9 @@ export const viewsSwitches = {
       pageWarn(d);
       const vss = rowsOf(d['/virtual-switches']);
       renderVSwitches(vss, await loadVSwitchStats(vss));
-    }
+    },
+    // 离开本页（router 的 leave 钩子）：收掉就地编辑面板——草稿不跨页残留。
+    leave() { if (vsListEditor) vsListEditor.leave(); }
   },
   'switchDetail': {
     // 成员端口取 `/virtual-switches/{name}/ports`（该路径的 GET 就是**配置里的成员端口列表**），
@@ -247,6 +283,7 @@ export const viewsSwitches = {
     render(d, params) {
       pageWarn(d);
       renderSwitchDetail(d['/virtual-switches/{name}'], d['/virtual-switches/{name}/ports'], params);
-    }
+    },
+    leave() { if (vsdEditor) vsdEditor.leave(); }
   },
 };

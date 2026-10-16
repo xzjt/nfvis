@@ -1,0 +1,352 @@
+================================================================================
+NFViS v3 round37：干净快照 · nfvis-v3.0.20.run 首装 + 拟人化全功能走查
+（VPP / 内核网络双数据面 + 数据面往返；CLI 与 Web 两面）
+================================================================================
+日期：2026-10-16    执行：ZCode 会话（v3 线）
+用户指令：在 nfvis-vm（已恢复至「干净」快照）上离线安装 nfvis-v3.0.20.run；模拟真人操作
+  从零开始，分 VPP 及内核网络两个过程验证全部功能（含 CLI 与 Web 端），验证数据面转换；
+  找遗漏的 Bug。可按需使用代理 192.168.155.1:2333。
+环境：nfvis-vm —— 干净快照（Ubuntu 26.04.1 / 内核 7.0.0-34 / 6 核 / 7 GB；只有 git/dpkg-deb/
+  curl/python3 + /root/vpp-v26.06-deb；无 make/go/docker/libvirt/VPP）。
+发布件：nfvis-v3.0.20.run（GitHub Release v3.0.20）——宿主经代理下载，sha256
+  a266ab1b72ef8067a1c0b4c038795bfde827d1b1dab6538461de4c935179e71a（185,880,408 字节，与发版
+  记录逐字一致）→ scp 上机，VM 侧 sha256 复核一致。
+证据采集：每步独立事实源（/proc、/sys、ip/bridge/nft/tc、vppctl、virsh、docker、tcpdump、
+  ss、journalctl、浏览器黑盒截图），不拿产品读视图当 oracle。
+  Web 截图：docs/images/v3-round37-web-{network-objects,vm-serial}.png。
+
+【结论先行】
+  · 首装（自检 18/0/0）→ 一次性口令 → 真 pty 向导 → 内核基线重启 → 管理口/系统基线 →
+    业务口 DPDK → **VPP 全族**（L2/BVI、L3/静态路由、ACL、QoS、风暴、VXLAN、NAT44 端到端、
+    SPAN、DHCP server 完整 DORA、DNS 代理、LLDP、抓包、快照、备份/诊断、读视图、诊断、
+    用户/权限、事件 SSE、容器 exec/shell）→ **Web 黑盒**（31 路由零 JS 错 + 容器 exec +
+    VM 串口双向）→ **切内核**（内核全族：桥/VRF/nft/tc/DHCP/DNS/LLDP/抓包/QoS/ACL/VNF
+    virtio+tap/容器 veth）→ **切回 VPP**（teardown 零残留 + 对象全量重建）→ 收尾。
+  · **round24 登记的 R24-A~E 五条全部已修复**（逐条复验，见 §7）。
+  · **本轮未发现产品新缺陷**；登记 2 条观察（§7 O-1/O-2，均为工具/口径，非产品缺陷）。
+  · 四套真机套件本轮未跑（用户指令未要求；基线沿用 v3.0.20 发版记录 fulltest 297/0/26 等）。
+
+--------------------------------------------------------------------------------
+§0 环境重建（干净快照 → 可用）
+--------------------------------------------------------------------------------
+0.1 快照基线核对：无 nfvis/VPP/docker/libvirt；apt 源 USTC；/root/vpp-v26.06-deb 在位。
+0.2 netplan ens192/ens224 `activation-mode: off`→`manual`（备份 /root/netplan.bak；
+    off 会让 systemd-networkd 把它们 always-down，内核数据面无法置 up）。
+0.3 apt：libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils cloud-image-utils
+    genisoimage docker.io sshpass（RC=0）；libvirtd/docker active。
+    · docker 代理 drop-in（192.168.155.1:2333）→ `docker pull alpine:3.20` 成功
+      （digest d9e853e87e55，与此前各轮同 ID）。
+0.4 夹具：alpine.qcow2 = `nocloud_alpine-3.20.3-x86_64-bios-cloudinit-r0.qcow2`
+    （186,777,600 B，经代理下载；**nocloud 变体**，与 round24 同款）。
+    ⚠️ 先误下 `generic_alpine-3.20.0-*.qcow2`（187,695,104 B）：cloud-init 数据源表把 Ec2 排在
+    NoCloud 前，首启要等 120s 才回落 —— 改用 nocloud 变体后即刻生效（教益，非产品问题）。
+    ct.tar = `docker save alpine:3.20`（3,731,968 B）。
+0.5 pty 驱动：本轮用改进版 `/root/ptydrive2.py`（**raw 模式 + 固定窗口尺寸**）——见 §7 O-1。
+
+--------------------------------------------------------------------------------
+§1 首装与基线（真人路径）
+--------------------------------------------------------------------------------
+1.1 `sh /root/nfvis-v3.0.20.run -y` → 载荷校验（SHA256SUMS 逐文件一致）→ 本地源 239 个候选包
+    → **自检 18/0/0**，退出码 0；一次性口令 **fAAbOzyiVk5Xq14-@Aa1**（nfvisd 首启行）。
+1.2 重启（安装期基线 `default_hugepagesz=2M hugepagesz=1G hugepages=1 intel_iommu=on iommu=pt`）
+    → nfvis/vpp/libvirtd/docker 全 active。
+1.3 真 pty 向导（/root/wizard-3.0.20.log）：vpp / 隔离核 2-5 / VPP 主 5 工 4 / **1G=3 / 2M=768** /
+    低延迟 false → 计划含 `set vpp memory hugepage-preference 2M` → commit **rev 3**；
+    `request system kernel apply` 写 GRUB 片段 + fstab。
+1.4 重启。cmdline：`default_hugepagesz=2M hugepagesz=2M hugepages=768 hugepagesz=1G hugepages=3
+    isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5 irqaffinity=0-1 intel_iommu=on intel_pstate=disable
+    iommu=pt`；**两个 hugetlbfs 挂载点均在位**；1G 池 nr=3、2M 池 nr=768。
+1.5 系统基线（一次脚本）：hostname/timezone/ntp/dns/syslog/health/idle-timeout → **rev 4**。
+    宿主四处实读：hostnamectl=nfvis-lab / timedatectl=Asia/Shanghai / chrony
+    sources=pool ntp.aliyun.com / resolved drop-in DNS=223.5.5.5 114.114.114.114。
+1.6 管理口首次声明（**负控**：裸 commit 被正确拒绝「管理口地址/网关变更必须以 commit confirmed
+    提交」→ 正控：`commit confirmed 5` + 同会话 `commit`）→ **rev 5**。
+    · **[R24-E 回归] 监听地址实时收敛**：声明后 `ss -ltnp` 立即见
+      `192.168.155.129:443` + `127.0.0.1:443`（改前只 `*:443` 且要等下次启动）——已修。
+1.7 业务口：`bind-dpdk` 不带 --yes 被正确拒绝 → `--yes` ×2（→vfio-pci）→
+    `set interfaces <口> description` + `set vpp dpdk dev <口> rx-queues 1` → **rev 6** →
+    `request vpp restart` → vppctl 见 ens192/ens224 均 up。
+
+--------------------------------------------------------------------------------
+§2 VPP 数据面 CLI 全族（独立事实源；rev 7~26）
+--------------------------------------------------------------------------------
+2.1 只读基线：show version（3.0.20 / VPP 26.06-release / DPDK（未探测到＝既定取舍）/ libvirt
+    12.0.0 / QEMU 10.2.1 / Docker 29.1.3）、无告警。
+2.2 L2+BVI：vs-lan（l2 + ports 1 ens192 + gateway 192.168.99.1/24 + learn-limit 8192）+
+    vs-wan（l3 + l3-interface ens224 192.168.98.1/24 + static-routes 10.99.0.0/24 → 192.168.98.10）
+    → **rev 7**。vppctl：BD 14615916（bvi0+ens192，Learn-li 8192）、ip table 见 vr-vs-lan/vs-wan；
+    **宿主 ping 192.168.99.1 3/4（首包 ARP）**、**192.168.98.1 4/4**。
+    FIB 实证静态路由 `10.99.0.0/24 → ipv4 via 192.168.98.10 ens224`（非 dpo-drop，[#194 保持]）；
+    产品 `ping 192.168.98.10 vrf vs-wan` 5/5。
+2.3 ACL（L3 形态）：**负控 [#340]** `set virtual-switches vs-lan gateway acl-in acl-lab` → 提交期
+    硬拒（文案含机理 + L3 形态替代指引）；正控：acl-lab（rule 10 any any icmp deny）绑
+    vs-wan l3-interface ens224 acl-in → **rev 8**；vppctl features 见 `acl-plugin-in-ip4-fa`；
+    伴随 macip 在 sw_if_index 2；**宿主 ping 3/3 全丢**、`show errors` 见
+    `acl-plugin-in-ip4-fa checked 3 / ACL deny packets 3`；**ARP 不受影响**（neighbors 有
+    192.168.98.10，[#341 保持]）。解绑（带名）→ **rev 9**、**ping 3/3 复通**（[#361 保持]）。
+2.4 QoS：**负控 [#454 保持]** `set interfaces ens192 egress-policy pol-lab`（L2 成员口）→ 提交期
+    硬拒（点名 l2-output 弧机理 + 替代路径）；正控：pol-lab（cir 8000000 cbs 100000）绑 ens224
+    入+出两向 → **rev 10**；vppctl show policer `pol-lab 1r2c cir 8000`；features 见
+    `policer-input` + `policer-output`；读视图 `pol-lab 8000000 100000 ens224:in,ens224:out`。
+2.5 风暴抑制 + VXLAN：ens192 broadcast 8000 / multicast 20000 + vx-a（vni 100 local 192.168.98.1
+    remote 192.168.98.10 → vs-lan）→ **rev 11**；vppctl：`nfvis-storm-ens192-broadcast`（cir 8000）/
+    `…-multicast`（cir 20000）、classify 表在位；**NRestarts=0（[#421 保持]：风暴+分类表不崩）**；
+    `show vxlan tunnel` 见 instance 0；读视图「已在 VPP（接口 vxlan_tunnel0）」。
+2.6 数据面 DNS 代理（[#345]）：`set system dns proxy server 223.5.5.5` → **rev 18**；
+    宿主 `nslookup example.com 192.168.99.1` 成功（首查一次 2s 超时后成功，属首查开销）。
+2.7 relay/server 互斥（[#368 保持]）：vs-lan 已有 dhcp-server 时加 `dhcp-relay` → 硬拒
+    （「两者争抢 UDP/67 的处理权…请删除之一」）。
+2.8 LLDP（[#450/#451 保持]）：全局 `set protocols lldp enable true` +
+    `advertisement-interval 3` → **rev 19**、**不整次回滚**；REST `GET /protocols/lldp` 的 runtime
+    块**如实登记**两口跳过：`sw_interface_set_lldp(if=ens192,enable=true) retval=-7：当前数据面
+    底座不支持在该接口上启用 LLDP（DPDK 物理口；…）`（Web LLDP 页同源）。
+2.9 抓包（[#465/#466 保持]）：start（ens224/vh-vnf-a-nic0/ens192）→ stop＝冻结 → export → pcap
+    逐件 tcpdump 实证（NAT 源改写、镜像帧、guest ARP/DHCP 等，见各节）。
+2.10 NAT44 端到端：vnf-a 加 nic1（vhost-user）→ vs-nat（l3）+ l3-interface vh-vnf-a-nic1
+    192.168.200.1/24 + nat rules 10 → **rev 20**；guest 配 eth1 192.168.200.100 + 默认路由落 eth1
+    → **抓 ens224 pcap：`192.168.98.1 > 192.168.98.10: ICMP echo request` 5/5——源被 NAT 改写为
+    出接口地址**（guest 的 192.168.200.100 被替换）。两向特征弧在位。
+    ⚠️ 现场注记：提交时产品**新增提示**「VM vnf-a 的 vNIC 声明已变更：变更在下次启动时生效；
+    VM 运行中时 restart 沿用旧定义，需 stop+start」——R24-D① 的可发现性缺口已补。
+2.11 用户与权限（[#324/#327 保持]）：oper1（class operator）→ CLI 写命令「% 无效命令: …（输入 ?
+    查看可用命令）」、`request vpp restart`「%% 无权限执行该命令」；REST 以 oper1 登录：
+    `POST /configuration/commit` **403**、`GET /interfaces` **200**——双面门禁成立。
+2.12 事件 SSE：`GET /api/v1/events` 订阅 → 容器 stop/start 触达真实事件帧，state 为
+    **`stopping` / `starting`**（**R24-B 的 "stoping" 拼写已修**）。
+2.13 诊断面：`ping 192.168.98.10`（缺省表）如实失败并指引 vrf；`ping … vrf vs-wan` 5/5；
+    `traceroute 192.168.98.10` 宿主侧 2 跳。
+2.14 读视图：`show vpp runtime`（线程级：vpp_main core5 / vpp_wk_0 core4 + 向量率 + uptime，
+    source vpp_get_stats）；`show system metrics history`（49 序列 / 2966 样本 / 7 天保留 +
+    35 个已知指标名）；`show system hugepages`（1G 3/3/在用2/持有2/数据面1/空闲1；注记＝
+    DPDK EAL 段 memfd:seg_0-0）；`show resource-pools`（**可分配已扣全部在用者**——1G 可分配 1）；
+    VM 读视图（[#461] 绑定 是/核心 2/后端 大页/页尺寸 1G/cores-assigned [2] + 有效启动画像）。
+2.15 `show configuration | display set` 74 行 RC=0（含口令哈希剥离注记）；
+    `show configuration | display json` **0 处口令哈希**（[#325] 秘密出口守护保持）。
+2.16 备份/诊断：`request system configuration backup`（6.0 KiB json）+
+    `request system tech-support generate`（7.6 KiB tar.gz）——**秘密扫描 0 次一次性口令原文**
+    （[#325] 保持）。
+2.17 快照全链（[#75]）：停机 → snapshot create snap1 → rollback → delete → start 全过。
+2.18 `show virtual-switches`（列表）：**三台全列**——vs-lan（BD 14615916）+
+    vs-nat/vs-wan 注记「l3（VRF）」；`show virtual-switches vs-wan`（L3 名）**返回 VRF 详情**
+    （不再是「在 VPP 中不存在」）——**R24-A 已修**。
+2.19 `show virtual-switches vs-lan ports`：成员含**派生条目**（来源列 config/vnf/container/runtime
+    + 只读注记与「在 VNF/容器侧删除」指引，[#326] 保持）；`show interfaces ens224 statistics`
+    带列名表格（[#427] 保持）。
+
+--------------------------------------------------------------------------------
+§3 VNF 与容器（CLI 全生命周期 + guest 事实源）
+--------------------------------------------------------------------------------
+3.1 VNF vnf-a：image alpine.qcow2 + vcpu 1 + memory 1024（1G）+ cloud-init user-data +
+    interfaces nic0 type vhost-user + nic0 virtual-switch vs-lan → **rev 12** → start。
+    · **负控**：对已存在的 vnf-a 写 `interfaces nic1 virtual-switch vs-lan`（无 type）→ 提交期
+      「vNIC type 必须为 vhost-user 或 sriov-vf」。
+    · virsh：域 running、接口 `type='vhostuser'` socket `/run/nfvis/vhost/vnf-a-nic0.sock`、
+      seed.iso 挂在域上；vppctl `vh-vnf-a-nic0` up；MAC 表学到 guest MAC 52:54:d9:27:fa:d2。
+3.2 **guest 事实源（读 guest 磁盘 /root/conn.txt，qemu-nbd）**：eth0 = 192.168.99.100/24（DHCP）、
+    默认路由 via 192.168.99.1；**ping BVI 3/3 0%**、**ping 宿主 192.168.99.10 3/3 0%**。
+    · 宿主侧对照：ping guest 192.168.99.100 **5/5 0%**；抓 vh-vnf-a-nic0 pcap 见 guest→BVI
+      与 guest→宿主 ICMP 请求/应答成对。
+3.3 DHCP server（[#359/#438 保持]）：vs-lan 池 192.168.99.100-200 + dns + domain → **rev 15**；
+    vppctl 见内置 tap0 up。**完整 DORA 实证**：把 ens192 临时移出 vs-lan（隔离实验室的 VMware
+    DHCP 竞速，见 §7 O-2）后 restart guest → 租约表 `192.168.99.100 52:54:d9:27:fa:d2 active`；
+    抓 vh-vnf-a-nic0 pcap 见 guest DISCOVER → **产品 OFFER（192.168.99.1.67 → 255.255.255.255.68，
+    源 MAC＝VPP tap 02:fe:53:2b:d0:24）**。恢复 ens192 后 guest 保持租约。
+3.4 真 pty 串口（CLI console）：进入/退出正常（`[已进入 vnf-a 串口，Ctrl-] 退出]` / `[已退出…]`）。
+    ⚠️ **本机 CLI pty 下 guest 串口输出严重串扰**（字符丢/错位，见 §7 O-1）——**Web 串口同一条
+    管线却清晰**（§4.4），故判为 pty/终端尺寸环境因素、非产品缺陷。
+3.5 容器 ct-1：image ct.tar + command /bin/sleep + args 3600 + interfaces nic0 type memif
+    virtual-switch vs-lan → **rev 25** → start。
+    · docker ps 见 ct-1 Up；vppctl 见 **`mf-ct-1-nic0`**（memif 口，socket
+      /run/nfvis/memif/ct-1-nic0.sock、listener）；memif 口 up 但容器侧未接（alpine 镜像无 memif
+      库——**T0-3 既有边界**）。
+    · `request container-functions ct-1 exec "id -un; hostname; uname -r"` → 退出码 0，
+      stdout = root / 63dec9d9c3da / 7.0.0-34-generic（与 docker exec 一致）。
+    · 真 pty `request container-functions ct-1 shell`：进容器 `sh`（root / 容器 ID / 内核 /
+      `ls /`），**Ctrl-] 正常退出**，输出**无串扰**（[#358] 保持）。
+    · 生命周期：stop（exited）→ start（running）、`restart-count 0`。
+
+--------------------------------------------------------------------------------
+§4 Web 控制台黑盒（Browser Use，纯 GUI；截图 docs/images/v3-round37-web-*.png）
+--------------------------------------------------------------------------------
+4.1 登录（admin）→ 总览：NFViS 3.0.20 / VPP 26.06-release / DPDK — / libvirt 12.0.0 /
+    QEMU 10.2.1 / Docker 29.1.3 / Ubuntu 26.04；数据面 VPP 已连接、threads 2、buffer 池；
+    **实时通道：已连接**；无未解决告警。
+4.2 **全路由回归（31 条，含 4 个详情页）零 JS 错误、零整页失败**——判据是注入
+    `window.onerror`/`unhandledrejection`/`console.error` 收集器后逐路由导航并读 main 文本；
+    现场**有对象**（vnf-a / ct-1 / vs-lan / ens192 四个详情页均渲染）——这正是 v3.0.20 热修的
+    判据分支（v3.0.19 在同现场三页整页失败 `VM_ACTIONS is not defined`）。**热修有效**。
+    ⚠️ **本扫描的盲区（事后如实更正）**：该扫描是**直接改 hash** 逐路由导航的——**没有点任何
+    「详情」按钮/列表行**，因此**漏掉了 R37-1**（详情按钮全站失效，见 §7）。教训：路由覆盖 ≠
+    交互路径覆盖。
+4.3 容器详情「执行命令」分栏：浏览器内跑 `id -un && hostname && uname -r` → 退出码 0、
+    stdout = root / 63dec9d9c3da / 7.0.0-34-generic（与 CLI 同源）。
+4.4 VM 详情「串口」分栏：连接 → 浏览器内完成 alpine 登录（alpine/alpine）→ 执行
+    `hostname; id -un; ip -br addr` → guest 真实回显 vnf-a / alpine / eth0 UP 192.168.99.100 /
+    eth1 DOWN（截图 v3-round37-web-vm-serial.png）——**浏览器↔guest 串口双向实证**。
+    ⚠️ 现场注记：`发送` 键**自带回车**，「只发回车」是独立的空回车——两者都用会多送一个空行
+    （本轮首次登录因此失败；属使用语义，UI 提示已写「文本框不自动回车」）。
+4.5 网络对象页（截图 v3-round37-web-network-objects.png）：VRF（vs-wan，L3 接口 1 / 路由 1）、
+    ACL（acl-lab 1）、NAT（无）、Bond（无）、QoS（pol-lab 8000000，绑定 ens224:in；ens224:out）、
+    SPAN（无）、VXLAN（vx-a，已在 VPP 接口 vxlan_tunnel0）——与 CLI/vppctl 三方一致。
+4.6 资源池页：1G 3/3/在用2/可分配1；隔离核 2,3,4,5 / VPP 保留 4,5 / 空闲 3 / vnf-a→2——
+    与 CLI `show resource-pools` 同源。
+4.7 **令牌到期处理**：浏览器会话超 1 小时后页面回登录页并提示「登录状态已失效，请重新登录。」
+    （行为正确，非缺陷）。
+
+--------------------------------------------------------------------------------
+§5 数据面切换 vpp → kernel（带对象切换）
+--------------------------------------------------------------------------------
+5.1 `set system dataplane kernel` 首次 commit **被三条校验正确拒绝**（逐条给出照做路径）：
+    ① `vrfs[vs-nat].l3_interfaces[vh-vnf-a-nic1]`：内核侧不存在该 vNIC 派生设备名
+       （**R24-C 的缺口已修**，[#469]）；
+    ② `virtual_machine_functions[vnf-a].interfaces[nic1].virtual_switch`：VNF 虚拟网卡不能接入
+       type=l3 的交换机（内核侧 L3 不建桥，tap 无处可挂）；
+    ③ `nat.rules[10]`：内核侧 NAT 不支持跨转发域（[#419]）。
+    删除 nat 规则 + nic1 + vs-nat → **rev 26**；再 `set system dataplane kernel` → **rev 27**；
+    `systemctl restart nfvis` → **VPP 被 nfvisd 自动停掉**（inactive），`show vpp` 如实报
+    「当前数据面为 Linux 内核网络，未使用 VPP」。
+5.2 DPDK 交还（[#464 保持]）：`request interfaces ens192/ens224 unbind-dpdk --yes`（**不带
+    to-driver**）→ 均一次成功、lspci 回 vmxnet3；期间「收敛未完全成功」逐项如实（另一口尚未
+    交还时点名 ens224 仍绑 vfio-pci 并给照做命令），非静默。
+5.3 内核侧独立事实：vs-lan 内核桥（成员 ens192 + 容器 veth nfvisct… + DHCP tap nfvisdh… +
+    vx-a）、vr-vs-lan（网关域设备）、vs-lan 桥持 192.168.99.1/24、ens224 192.168.98.1/24；
+    nft 两表（`inet nfvis-forward` 的 accept-dp 链 + `netdev nfvis-acl`）；
+    **宿主 ping 192.168.99.1 4/4、192.168.98.1 4/4**——内核数据面真实转发。
+5.4 内核 ACL（[#405 保持]）：acl-lab 绑 vs-wan l3-interface ens224（**rev 28**）→ nft 出现
+    **挂载链** `bind_ens224 { type filter hook ingress device "ens224" }` + `meta protocol !=
+    { ip, ip6 } accept`（非 IP/ARP 放行）+ jump acl 链 → **宿主 ping 3/3 全丢**；解绑 → 复通。
+5.5 内核 QoS（[#405 保持]）：pol-lab 绑 ens224 → `tc filter` ingress 见 matchall + `police rate
+    8Mbit burst 100000b action drop/continue`（＝cir 8000000/cbs 100000）。
+5.6 内核风暴抑制：ens192 ingress flower `dst_mac ff:ff:ff:ff:ff:ff` + `police rate 8Mbit … drop`
+    （＝broadcast 8000kbps）。
+5.7 内核 DHCP server（[#438 保持]）：读视图租约 `192.168.99.100 … active`——同一份用户态服务器
+    核心，只换传输面（内核 tap 持有着为 nfvisd）。
+5.8 内核 DNS 代理（[#439 保持]）：`ss -lunp` 见 nfvisd 持 `192.168.99.1%vr-vs-lan:53` 与
+    `192.168.98.1%vs-wan:53`（按域 SO_BINDTODEVICE 形态）。
+5.9 内核 LLDP（[#440 保持]）：`ss -0` 见 nfvisd 持 `LLDP:ens192` 原始套接字；**邻居表实得**
+    `ens192 ← nfvis-lab/ens224` 与 `ens224 ← nfvis-lab/ens192`（TTL 12，两口互见——两业务口同
+    交换机域，真帧往返）。
+5.10 内核抓包（[#436 保持]）：`request capture start interface vs-lan count 10`（提示「达到该报文
+     数自动停止」＝tcpdump 语义）→ export → pcap 596 B；tcpdump 见管理侧随路帧（ens192 与宿主
+     同 L2 的实验室噪声，既有登记）。
+5.11 内核 VNF 形态（[#455 保持]）：stop+start vnf-a → 域重建为
+     `<interface type='bridge'><source bridge='vs-lan'/><target dev='vnet0'/><model
+     type='virtio'/>`、vnet0 入 vs-lan 桥；容器 restart → veth nfvisct… 入桥；**宿主 ping guest
+     4/4**。
+
+--------------------------------------------------------------------------------
+§6 数据面切回 vpp（往返）
+--------------------------------------------------------------------------------
+6.1 `set system dataplane vpp` → **rev 30** → `systemctl restart nfvis` → nfvis/vpp active。
+6.2 **teardown 实证**：切回后 `ip -br link` 里 **vs-lan/vs-wan/vr-vs-lan/vx-a 计数 0**、
+    `nft list tables` **无 nfvis 表**（计数 0）——内核侧整面回收干净。
+6.3 重绑 DPDK（`bind-dpdk --yes` ×2）+ `request vpp restart` → VPP 对象全量重建
+    （bvi0/ens192/ens224/vh-vnf-a-nic0/mf-ct-1-nic0/vxlan_tunnel0/tap0 + BD）。
+    期间 VNF_PORT_DOWN 如实出现，**文案已准确**：「客户端未连接：VM 未启动，**或运行中的域尚未
+    包含该 vNIC——新增/改配后需 stop+start 才会生效**」——**R24-D② 的括号文案已修**。
+6.4 运行中负载回 VPP 形态：vnf-a stop+start → 域回 `type='vhostuser'`、vppctl `vh-vnf-a-nic0`
+    up；容器 restart → `mf-ct-1-nic0`；**宿主 ping BVI 4/4（先清宿主陈旧 ARP）、L3 4/4、
+    guest 4/4**；租约 192.168.99.100 保持；**告警清零**。
+6.5 终态：VPP 数据面、无告警、对象全在（bvi0/ens192/ens224/mf-ct-1-nic0/tap0/vh-vnf-a-nic0/
+    vxlan_tunnel0）、池 1G 3（在用2/空闲1）/2M 768（在用533/空闲235）、配置 rev 30。
+
+--------------------------------------------------------------------------------
+§7 缺陷 / 观察登记
+--------------------------------------------------------------------------------
+【R24-A~E 回归：五条全部已修复（逐条复验）】
+  · R24-A（CLI 只覆盖 BD、L3 交换机名报「不存在」）→ 已修：§2.18（列表三台全列 + L3 名给 VRF 详情）。
+  · R24-B（事件 state 拼作 "stoping"）→ 已修：§2.12（"stopping"）。
+  · R24-C（VPP-only「vNIC 作 L3 接口」在内核切换提交期被放行）→ 已修：§5.1（提交期三条硬拒，
+    点名派生设备名与照做路径）。
+  · R24-D（运行中负载形态变更可发现性）→ 已修：§2.10 提交期新增「vNIC 变更需 stop+start」提示；
+    §6.3 VNF_PORT_DOWN 文案改为准确表述。
+  · R24-E（管理口首次声明后监听地址不实时收敛）→ 已修：§1.6（声明后立即收敛到管理口 + 回环）。
+
+【本轮抓到并已修复：R37-1（高）】
+  （编号消歧：本条是 **v3 线 round37** 的 R37-1；**v1 线另有一个同名 R37-1**（契约↔实现响应形状
+  不符，见 `docs/V1-收尾待办.md`），两者不同事、不同线。）
+  **现象（用户报）**：Web 控制台里**所有「详情」都点不开**——点列表行的「详情」按钮或整行，页面
+  毫无反应、无任何提示。
+  **定位（代码级）**：`internal/api/ui/js/core/dom.js` 的 `goDetail()` 写的是
+  `import('../router.js')`。本文件在 `ui/js/core/` 下，`../router.js` 解析到 **`ui/js/router.js`**，
+  而 `router.js` 实际在 **`ui/` 根**（`ui/js/views/*` 与 `ui/js/boot.js` 用的都是正确深度）。该
+  动态 import 因此 404（`TypeError: Failed to fetch dynamically imported module:
+  …/api/v1/ui/js/router.js`），`goDetail` 的 promise 被静默拒绝 ⇒ 按钮与行点击全死。
+  **真机取证（浏览器）**：注入 `unhandledrejection` 收集器后点「详情」——`location.hash` 不变、
+  捕获到上面那条 TypeError；而**直接改 hash**（`#/network/vrfs/vs-wan`）能正常进详情页
+  （那条路走的是 app.js 的**静态** import，一直是好的）——这正是历次走查漏掉它的原因：
+  **零对象/纯 hash 扫描覆盖不到按钮路径**。
+  **影响面**：`goDetail` 是**全站唯一的详情跳转入口**（`rowClickable()` 行点击 + 各列表页的
+  「详情」按钮都走它）——VM/容器/镜像/交换机/网络对象/接口等**所有**详情入口同时失效。
+  **引入版本**：v3.0.19 Web 重构（app.js 按域拆分）——`js/core/dom.js` 的深度写错一层。
+  **修复**：`import('../router.js')` → `import('../../router.js')`（一行）。
+  **守护（三层补齐）**：`contrib/scripts/web-console-esm-link-check.mjs` 新增 **DYN** 层——把
+  每个**动态** `import()` 的相对说明符按文件所在目录解析、断言目标存在（LINK 的
+  `SourceTextModule.link()` **只解析静态 import**，动态 import 它一概看不见——本缺陷正是从
+  这个盲区穿过去的；XREF 只管自由标识符，也挡不住）。**红-绿验证**：注回 `../router.js` ⇒
+  `DYN FAIL js/core/dom.js -> ../router.js（解析到 js/router.js，该文件不存在）`；恢复 ⇒ `DYN OK`。
+  **真机复验（3.0.21~dev1 交叉编译换装，见 §9）**：真实点击列表行 → `#/compute/vms/vnf-a` 详情页
+  正常渲染；「详情」按钮（网络对象页 → `#/network/vrfs/vs-wan`、镜像页 →
+  `#/compute/images/alpine.qcow2`）同样正常；`unhandledrejection` 不再出现。
+  **教益**：**静态扫描 + hash 直连覆盖不了「按钮/行点击」这条交互路径**——黑盒回归必须**真的点**
+  至少一个详情入口（与 round36「零对象现场覆盖不到循环体」同族：**判据的覆盖面**要跟着
+  代码路径走，不是跟着路由数走）。
+
+【本轮新登记】
+  O-1【工具/环境，非产品缺陷】本机 CLI pty 下 guest 串口输出严重串扰（字符丢/错位），而
+    **Web 串口同一条 console 管线输出清晰**（§4.4）。判读：pty/终端尺寸与 QEMU 串口读写的
+    环境因素（本轮已把驱动改为 raw 模式 + 固定 120x40 窗口仍复现），非产品缺陷；Web 侧可作为
+    串口的可靠验证通道。**建议**：CLI 侧串口若需自动化验证，优先用 Web 通道或 virsh console
+    直连复核。
+    · **同族工具缺陷（本轮现场暴露并已清理）**：`ptydrive.py` 收尾的 `os.waitpid(pid, 0)` **无限等子进程**
+      ——超时只发 ^C、不杀子进程；宿主把该 SSH 命令转入后台时，驱动被丢弃而**子进程 `nfvis-cli` 留在
+      `nfvis>` REPL**。收尾清点得 **3 个残留会话**（pts/1、pts/2、pts/3，11:45/11:48/11:51），已 `pkill`
+      清除；清后 `ps` 计数 0、`show configuration sessions` 无持锁、无告警（**残留会话未持配置锁，对产品
+      无影响**）。**改进**：驱动超时应先 `os.kill(pid)` 再 wait（ptydrive2.py 同）。
+  O-2【lab artifact，既有登记复现】guest DHCP 广播经 BD 泛洪到 ens192（与宿主同 L2）⇒ 与实验室
+    的 VMware VMnet8 DHCP 竞速：本轮**首次**两方同刻应答（VMware 192.168.155.254 回 OFFER
+    早 121µs，guest 取 192.168.155.138），**隔离 ens192 后产品 DHCP 完整 DORA 成功**（§3.3）。
+    非产品缺陷；既有 R24-O6 同族。
+
+【如实边界（未验证 / 未做）】
+  · 四套真机套件（fulltest/语义/lifecycle/pty）本轮未跑（用户指令未要求）。
+  · SR-IOV（无 PF）；吞吐/规模基准（无流量发生器）。
+  · 破坏性动作：`configuration restore`、`zeroize`、`format-data`、`software add/rollback`、
+    `reboot/shutdown` 未执行（破坏性，按既定纪律单独走查）。
+  · 容器 memif 通流（T0-3：alpine 镜像无 memif 库）。
+  · DHCP relay 端到端租约（本轮只做互斥负控）。
+
+--------------------------------------------------------------------------------
+§8 现场与证据
+--------------------------------------------------------------------------------
+· 收尾现场：vpp 数据面、两口 DPDK up、对象全在、告警 0、池 1G 3/2M 768、配置 rev 30。
+· 环境改动（如实）：① netplan ens192/ens224 off→manual（/root/netplan.bak）；② docker 代理
+  drop-in；③ apt 全栈安装；④ 夹具 alpine.qcow2(nocloud) + ct.tar + docker alpine:3.20。
+· VM 侧证据：/root/install-3.0.20.log、/root/wizard-3.0.20.log、/root/walk/*（各抓包 pcap、
+  console 日志、events.txt、token.txt）、/var/lib/nfvis/captures/*.pcap、/var/lib/nfvis/backup/、
+  /var/lib/nfvis/tech-support/。
+· 截图：docs/images/v3-round37-web-network-objects.png、v3-round37-web-vm-serial.png。
+· 宿主侧事实源：ping -S 192.168.99.10/192.168.98.10（VMnet8 次地址，前轮遗留）、route print。
+
+--------------------------------------------------------------------------------
+§9 修复版实装（R37-1；3.0.21~dev1，交叉编译换装）
+--------------------------------------------------------------------------------
+9.1 源码修复：`internal/api/ui/js/core/dom.js` 的 `goDetail()` 动态 import 深度
+    `../router.js` → `../../router.js`（一行；UI 经 `go:embed ui` 编进 nfvisd）。
+9.2 构建：`GOFLAGS="-p=1" GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w
+    -X github.com/xzjt/nfvis/internal/api.VersionStr=3.0.21~dev1" -o build/x/nfvisd ./cmd/nfvisd`
+    → 23,273,634 字节（sha256 `4cc75a25bc277b1a93cd8ae808cb18d4f9279f9f37092d355df33bd307bc42a9`）。
+9.3 实装：原件备份 `/root/nfvisd-orig-3.0.20` → `install -m 0755` 换 `/usr/bin/nfvisd` →
+    `systemctl restart nfvis` → active；`show version` = **3.0.21~dev1**。
+    （**交叉编译换装、非 deb 重装**——正式发版仍须走 `make deb` 两打逐字节一致 + 四套件。）
+9.4 真机复验（浏览器）：真实点击列表行 → `#/compute/vms/vnf-a`；「详情」按钮 → 网络对象页
+    `#/network/vrfs/vs-wan`、镜像页 `#/compute/images/alpine.qcow2`——均正常渲染、
+    `unhandledrejection` 为空（见 §7 R37-1）。
+9.5 守护复跑：`node --experimental-vm-modules contrib/scripts/web-console-esm-link-check.mjs`
+    → LINK/XREF/**DYN** 三层全 OK；`web-console-config-selftest.sh`、`web-console-confirm-selftest.sh`
+    全绿（含各自的红-绿自校准）。
+⚠️ **未做**：`make check` 全量、`make deb` 两打一致、四套真机套件、`.run` 重打 —— 本轮只做
+    交叉编译换装 + 针对性复验；正式发布须补。
+
+================================================================================
+（完）

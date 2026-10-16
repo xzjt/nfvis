@@ -9,7 +9,7 @@ import { api, soft, apiErrText, httpErrText,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
-import { ctAction } from './containers.js';
+import { ctAction, ctDetailEditorLeave } from './containers.js';
 import { VM_ACTIONS } from './vms.js';
 import { stripANSI } from './vmDetail.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
@@ -319,7 +319,8 @@ export async function ctLogsLoad() {
 export const viewsContainerDetail = {
   'containerDetail': {
     render(d, params) { pageWarn(d); renderContainerDetail(d, params); },
-    // 交互终端是有状态的（WebSocket）：离开这一页就断开，别把连接留在后台（与 VM 串口同纪律）。
-    leave() { ctShellClose(); }
+    // 交互终端是有状态的（WebSocket）：离开这一页就断开，别把连接留在后台（与 VM 串口同纪律）；
+    // 同理收掉就地编辑面板（草稿不跨页残留）。
+    leave() { ctShellClose(); ctDetailEditorLeave(); }
   },
 };

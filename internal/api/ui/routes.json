@@ -503,6 +503,21 @@
       ],
       "poll": 0,
       "write": true
+    },
+    {
+      "path": "#/ops/monitor",
+      "title": "实时监视",
+      "view": "monitor",
+      "breadcrumb": [
+        "运维",
+        "实时监视"
+      ],
+      "group": "运维",
+      "endpoints": [
+        "/virtual-machine-functions",
+        "/container-functions"
+      ],
+      "poll": 5000
     }
   ]
 }

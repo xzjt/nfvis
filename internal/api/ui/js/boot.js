@@ -6,15 +6,17 @@ import { API, TOKEN_KEY, USER_KEY, MAX_IFACE_DETAIL } from './core/const.js';
 import { api, soft, apiErrText, httpErrText,
   errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from './core/api.js';
-import { fmtTime, fmtClockHint, bytes } from './core/format.js';
+import { fmtClockHint, bytes } from './core/format.js';
 import { isConsoleOpen } from './views/vmDetail.js';
 import { diagPing, diagLogs, bigNat, bigMsg, bigOut, renderAudit, opsRun, capMsg, pingBody,
-  downloadFile, swAdd, swRollback, restoreRun, zeroizeRun, formatDataRun, opsMsg } from './views/ops.js';
+  downloadFile, swAdd, swRollback, restoreRun, zeroizeRun, formatDataRun, opsMsg, cdRender } from './views/ops.js';
 import { qsdDelete, spdDelete } from './views/network.js';
 import { cfgStartEdit, cfgSave, cfgCheck, cfgShowDiff, cfgCommitAsk, cfgConfirmPending,
   cfgDiscardAsk, getCfg, cfgSetEditing, cfgLockHolder } from './views/config.js';
 import { vmSnapLoad, vmSnapCreate, vmConsoleOpen, vmConsoleSend, vmConsoleClose, vmTabShow, getVmDetailName } from './views/vmDetail.js';
 import { ctTabClick, ctExecRun, ctShellOpen, ctShellClose, ctShellSend, ctLogsLoad, getCtDetailName } from './views/containerDetail.js';
+import { vmDelete } from './views/vms.js';
+import { ctDelete } from './views/containers.js';
 import { imgImportURL, imgImportIncoming, imgImportFile } from './views/images.js';
 import { vrfRoutesLoad } from './views/network.js';
 import { vsdMacLoad, vsdMacClear, vsdDhcpLoad, vsdDhcpClear, getVsdMacFor, clearVsdMacFor, getVsdDhcpFor, clearVsdDhcpFor } from './views/switches.js';
@@ -240,6 +242,19 @@ $('img-file-btn').addEventListener('click', imgImportFile);
 // 容器日志
 $('ct-logs-refresh').addEventListener('click', ctLogsLoad);
 
+// VM / 容器详情页的删除入口（#vmd-delete-btn / #ctd-delete-btn，静态骨架按钮）。
+// 两条端点（DELETE /virtual-machine-functions/{name}、/container-functions/{name}）在 server.go
+// 里都经 cfgAPI 注册 = super-user 级，故按钮只带 data-write、不带 data-op（非 super 隐藏）。
+// 回显落在各详情页提示区（与详情页其它动作同一处）；删成功后对象已不存在，故回列表页。
+const detailMsgSink = (id) => (text, isErr) => {
+  const p = $(id);
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+};
+$('vmd-delete-btn').addEventListener('click', () => vmDelete(getVmDetailName(), detailMsgSink('vmd-msg'), '#/compute/vms'));
+$('ctd-delete-btn').addEventListener('click', () => ctDelete(getCtDetailName(), detailMsgSink('ctd-msg'), '#/compute/containers'));
+
 // 串口 console
 $('vm-console-connect').addEventListener('click', () => vmConsoleOpen(getVmDetailName()));
 $('vm-console-close').addEventListener('click', vmConsoleClose);
@@ -331,9 +346,9 @@ $('ops-coredumps-btn').addEventListener('click', () => opsRun('列出 core dump'
   paragraphs: ['列出本机 core dump 文件清单？只读操作，不改任何状态。'],
   cli: 'show system core-dumps',
 }, async () => {
-  const rows = await api('/system/core-dumps');
-  if (!rows || !rows.length) return '（无 core dump）';
-  return rows.map((r) => r.file + '  ' + r.process + '  ' + bytes(r.size_bytes) + '  ' + fmtTime(r.occurred_at)).join('\n');
+  // 清单落进表格（每行带删除入口，见 ops.js 的 cdRender）；不再往 pre 里重复打一份文本。
+  cdRender(await api('/system/core-dumps'));
+  return '';
 }));
 $('ops-alarms-btn').addEventListener('click', () => opsRun('清除已恢复告警', {
   tier: 'low',

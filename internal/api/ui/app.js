@@ -25,6 +25,7 @@ import { viewsNetwork } from './js/views/network.js';
 import { viewsSwitches } from './js/views/switches.js';
 import { viewsLldp } from './js/views/lldp.js';
 import { viewsOps } from './js/views/ops.js';
+import { viewsMonitor } from './js/views/monitor.js';
 import { viewsDeploy } from './js/views/deploy.js';
 
 import { boot, reload } from './js/boot.js';
@@ -43,6 +44,7 @@ export const VIEWS = {
   ...viewsSwitches,
   ...viewsLldp,
   ...viewsOps,
+  ...viewsMonitor,
 };
 // router.js 消费的取数助手由 core 提供（re-export 保持既有 import 面）。
 import { el } from './js/core/dom.js';

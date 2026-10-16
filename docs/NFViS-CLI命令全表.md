@@ -238,7 +238,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set <path> …` | 设置配置语句 | 事务引擎 | ✅ |
 | `delete <path> …` | 删除语句/子树 | 事务引擎 | ✅ |
 | `show` | 显示 candidate（当前层级） | candidate | ✅ |
-| `show \| display set` | 展开为 `set` 语句（**已实现**，决策 #155：语句带绝对路径、敏感值不输出（注释说明）、生成后回放自校验；`show configuration \| display set` 同管道同实现） | candidate | ✅ |
+| `show \| display set` | 展开为 `set` 语句（**已实现**，决策 #155：语句带绝对路径、敏感值不输出（注释说明）、生成后回放自校验；`show configuration \| display set` 同管道同实现）；个别**无语句形态**的字段不入输出、以 `#` 注释逐条说明（虚拟交换机/VRF/ACL 的描述、gateway 空对象、serial console 关闭态、SR-IOV VF 编号）——带这些字段的配置照常整体可读 | candidate | ✅ |
 | `annotate <path> "text"` | 节点注释（**路径相对当前层级**） | candidate annotations | ✅（**决策 #76⑤** 修相对路径） |
 | `commit` | 提交（FR-CFG-002/003） | 事务引擎 → Applier | ✅ |
 | `commit check` | 仅校验不下发 | 事务引擎 | ✅ |

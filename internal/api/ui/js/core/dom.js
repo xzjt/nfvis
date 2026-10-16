@@ -233,7 +233,9 @@ export function rowClickable(tr, path) {
 // 详情页跳转：路由模块按需动态 import（与 reload 同一路，避免静态互相 import 成环）。
 // 名字带 Go 前缀：app.js 顶层已有 routerModule（'./router.js'），拼接域里不能撞名。
 async function goRouterModule() {
-  return import('../router.js');
+  // 本文件在 js/core/ 下，router.js 在 ui/ 根：需两级上跳（`../router.js` 会解析到
+  // js/router.js——该文件不存在，动态 import 404 ⇒ 详情按钮/行点击静默失效）。
+  return import('../../router.js');
 }
 export async function goDetail(path) {
   (await goRouterModule()).navigate(path);

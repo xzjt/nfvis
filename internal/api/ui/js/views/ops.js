@@ -13,6 +13,10 @@ import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
   showGlobalError } from '../core/state.js';
+// 就地编辑（配置页去中心化第三刀·系统族）：面板用 renderSection 画配置页那一份 VPP 节定义
+// （CFG_VPP_SECTIONS，单一真源），写路径走 core/forms.js 的同一套 candidate 事务。
+import { CFG_VPP_SECTIONS } from './config.js';
+import { objEditor } from '../core/forms.js';
 
 // reload（重渲染当前路由）与 goDetail 类似，按需动态 import 防静态环。
 const jsviewsopsRouterModule = () => import('../../router.js');
@@ -252,6 +256,63 @@ function archiveTable(tbody, rows, prefix) {
   });
 }
 
+// ---------- core dump 清单（列表 + 逐条删除）----------
+//
+// 与 CLI 同源：列表取自 GET /system/core-dumps（`show system core-dumps`），逐条删除走
+// DELETE /system/core-dumps?file=<name>（`request system core-dumps delete file <name>`；端点缺省
+// file 是"全部"，故逐条删除必须显式带上文件名）。该 DELETE 端点在 server.go 里经 cfgAPI 注册
+// （super-user 级），故行内删除入口经 wbtn 打 data-write——非 super 角色看不到（决策 #327）。
+export function cdRender(rows) {
+  const tbody = $('ops-coredump-table').querySelector('tbody');
+  tbody.textContent = '';
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) {
+    const tr = el('tr');
+    tr.appendChild(el('td', { colspan: '5', class: 'muted', text: '（无 core dump）' }));
+    tbody.appendChild(tr);
+    return;
+  }
+  list.forEach((r) => {
+    const tr = el('tr');
+    [r.file, r.process, r.size_bytes ? bytes(r.size_bytes) : undefined, fmtTime(r.occurred_at)].forEach((c) => {
+      tr.appendChild(el('td', { text: String(dash(c)) }));
+    });
+    const cell = el('td', { class: 'actions' });
+    const btn = wbtn({ type: 'button', class: 'danger small', text: '删除' });
+    btn.addEventListener('click', () => cdDelete(r.file));
+    cell.appendChild(btn);
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
+  });
+}
+
+// 删除单个 core dump：中危（删本机文件、不可恢复）。失败理由（如文件已不在）原样展示，不吞。
+async function cdDelete(file) {
+  const ok = await uiConfirm('删除 core dump', {
+    tier: 'mid',
+    paragraphs: ['删除本机 core dump 文件 ' + file + '。'],
+    bullets: [
+      '该转储文件从本机移除，不可恢复（要留档请先用「导出清单」或从本机取走文件）。',
+      '只删这一个文件，其他 core dump 与运行态不受影响。',
+    ],
+    cli: 'request system core-dumps delete file ' + file,
+  });
+  if (!ok) return;
+  opsMsg('删除 ' + file + '：执行中…', false);
+  try {
+    await api('/system/core-dumps?file=' + encodeURIComponent(file), { method: 'DELETE' });
+    opsMsg('已删除 ' + file + '。', false);
+  } catch (e) {
+    opsMsg('删除失败：' + e.message, true);
+  }
+  // 重新列一遍（删成功/失败都刷；失败时表格保持上一次的内容，理由已在上面的提示里如实给出）。
+  try {
+    cdRender(await api('/system/core-dumps'));
+  } catch (e) {
+    opsMsg('读取 core dump 清单失败：' + e.message, true);
+  }
+}
+
 // ---------- 运维动作（写操作，均二次确认）----------
 
 export function opsMsg(text, isErr) {
@@ -472,11 +533,46 @@ function fmtDataCount(o) {
   return Object.keys(o).reduce((a, k) => a + (Number(o[k]) || 0), 0);
 }
 
+// ---------- 数据面（VPP）配置：就地编辑（配置页去中心化第三刀·系统族）----------
+//
+// 面板画配置页那一份「VPP（数据面）」节（CFG_VPP_SECTIONS，含 CPU / 内存 / DPDK 全局参数 /
+// 单网卡覆盖 / 插件开关子表——单一真源，不复制字段清单），写路径走 core/forms.js 的同一套
+// candidate 事务（取锁 → 写候选 → 校验 → 提交 → 释放）。
+//
+// 生效口径以**服务端提交期的实际警告**为准（engine.go：vpp 段 StartupKey 子集变更 ⇒
+// 「警告: vpp 变更需 request vpp restart（或整机 reboot）后生效」；只改数据面 DNS 代理上游
+// 不在其列——决策 #400）。本页下方就有「重启数据面（VPP）」按钮，界面不另立第二套说法。
+function opsVppKind() {
+  const all = Array.isArray(CFG_VPP_SECTIONS) ? CFG_VPP_SECTIONS : [];
+  return {
+    label: '数据面（VPP）配置',
+    section: all.find((s) => s && s.legend === 'VPP（数据面）') || null,
+    cliSave: () => 'set vpp …（cpu / memory / dpdk / plugins）',
+    note: () => 'CPU 主核与 worker 核须取自「资源池」的隔离核池，大页偏好须与资源池的页大小一致' +
+      '（服务端在提交时校验）；CPU / 内存 / DPDK / 插件类改动提交后服务端会给' +
+      '「需 request vpp restart（或整机 reboot）后生效」提示——**提交不等于生效**，重启数据面后新参数才被采用' +
+      '（重启会中断全部数据面转发）。单网卡覆盖要求该口已在「配置」里声明。' +
+      '只改数据面 DNS 代理上游不需要重启（那项在「系统」页的就地编辑面板里）。',
+    bullets: () => [
+      '写入即提交（revision 加一），但 CPU / 内存 / DPDK / 插件类改动**要重启数据面才生效**（服务端提交期会给该提示）。',
+      '重启数据面会中断全部转发路径（虚拟机 / 容器数据口一并断开）——入口在本页「电源」一组里。',
+      '主核 / worker 核必须落在资源池的隔离核池内；大页偏好须与资源池声明的页尺寸一致，否则提交期拒绝。',
+    ],
+  };
+}
+const opsVppEditor = objEditor({ slot: 'ops-vpp-edit', reload });
+if (opsVppEditor) {
+  const b = $('ops-vpp-edit-btn');
+  if (b) b.addEventListener('click', () => opsVppEditor.openEdit(opsVppKind(), ''));
+}
+
 // 各 view 的渲染注册（从 app.js 的 VIEWS 注册表按域拆出；键名=routes.json 的 view 名）。
 
 export const viewsOps = {
   'ops': {
-    render(d) { pageWarn(d); renderArchives(rowsOf(d['/system/backup']), rowsOf(d['/system/tech-support'])); }
+    render(d) { pageWarn(d); renderArchives(rowsOf(d['/system/backup']), rowsOf(d['/system/tech-support'])); },
+    // 离开本页（router 的 leave 钩子）：收掉就地编辑面板——草稿不跨页残留。
+    leave() { if (opsVppEditor) opsVppEditor.leave(); }
   },
   'audit': {
     render(d) { pageWarn(d); renderAudit(d['/audit-logs?limit=50']); }

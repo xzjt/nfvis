@@ -9,6 +9,11 @@ import { api, soft, apiErrText, httpErrText,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
+// 就地编辑启动画像（配置页去中心化第二刀·计算族）：画像节定义取自配置页的 CFG_SECTIONS
+// （同一份节，不复制字段清单），写路径走 core/forms.js 的同一套 candidate 事务。镜像本身不是
+// 配置对象（删除走仓库端点 imgDelete），可编辑的配置只有**镜像启动画像**（键 = 镜像名）。
+import { CFG_SECTIONS } from './config.js';
+import { objEditor } from '../core/forms.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
@@ -19,6 +24,37 @@ const jsviewsimagesRouterModule = () => import('../../router.js');
 async function reload() {
   return (await jsviewsimagesRouterModule()).render();
 }
+
+// ---------- 镜像：就地编辑启动画像（列表行「画像」、详情页「编辑画像」）----------
+
+// 种类描述：节定义取自配置页的 CFG_SECTIONS（**同一份**节）；cli* 只在确认框里做只读回显。
+function imgProfileKind() {
+  const all = Array.isArray(CFG_SECTIONS) ? CFG_SECTIONS : [];
+  return {
+    label: '镜像启动画像',
+    section: all.find((s) => s.list === 'vm_image_profiles') || null,
+    cliNew: (n) => 'set vm-image-profiles ' + n + ' … + commit',
+    cliSave: (n) => 'set vm-image-profiles ' + n + ' … + commit',
+    cliDelete: (n) => 'delete vm-image-profiles ' + n + ' + commit',
+  };
+}
+
+// 画像按镜像名索引：未配置的镜像用 openUpsert 一步建好（先建条目再填字段），
+// 已配置的直接编辑——操作者不需要先知道「有没有画像」再选入口。
+const imgListEditor = objEditor({ slot: 'img-list-edit', reload });
+const imdEditor = objEditor({ slot: 'imd-edit', reload });
+function imdName() { const n = $('imd-name'); return (n && n.textContent) || ''; }
+if (imdEditor) {
+  const pb = $('imd-profile-btn');
+  if (pb) pb.addEventListener('click', () => imdEditor.openUpsert(imgProfileKind(), imdName()));
+}
+export function imdEditorLeave() { if (imdEditor) imdEditor.leave(); }
+
+// 容器镜像没有「启动画像」（那是 QEMU 的启动参数）——不给会写出死配置的入口（按钮/行内入口
+// 只在 VM 镜像上出现）。类型取不到时按 VM 镜像对待（宁可多一个入口，也别把入口藏掉）。
+const imgIsVMImage = (i) => !i || i.type !== 'container-image';
+// 详情页最近一次渲染的镜像对象：删除入口的确认框要如实带出当前引用数（服务端仍会再判一次）。
+let imdImg = null;
 
 // ---------- 镜像仓库 ----------
 
@@ -42,6 +78,13 @@ function renderImages(imgs) {
     const detBtn = rowButton(el('button', { type: 'button', class: 'ghost small', text: '详情' }));
     detBtn.addEventListener('click', () => goDetail('#/compute/images/' + encodeURIComponent(i.name)));
     cell.appendChild(detBtn);
+    // 行内「画像」= super-user 级写入口（写入路径是 candidate 事务）——必须经 wbtn 带 data-write，
+    // 否则 read-only/operator 也会看到它（决策 #327）。容器镜像没有启动画像，不出该入口。
+    if (imgIsVMImage(i)) {
+      const pb = rowButton(wbtn({ type: 'button', class: 'small', text: '画像' }));
+      pb.addEventListener('click', () => { if (imgListEditor) imgListEditor.openUpsert(imgProfileKind(), i.name); });
+      cell.appendChild(pb);
+    }
     // 删除镜像 = super-user 级写入口（DELETE /images/{name}）——**必须经 wbtn 带 data-write**，
     // 否则 read-only/operator 仍会看到它（决策 #327 修 R105-1：动态写入口漏打门禁标记）。
     const btn = rowButton(wbtn({ type: 'button', class: 'danger small', text: '删除' }));
@@ -59,6 +102,10 @@ function renderImageDetail(img, profiles, params) {
   const name = (params && params.name) || '';
   $('imd-name').textContent = name;
   const ok = img && !img.__err;
+  imdImg = ok ? img : null;
+  // 容器镜像不显示「编辑画像」（启动画像只对 VM 生效）；详情页删除入口的确认框用缓存的引用数。
+  const pb = $('imd-profile-btn');
+  if (pb) pb.hidden = !imgIsVMImage(img);
   fill($('imd-head'), ok ? [
     ['类型', img.type],
     ['大小', img.size_bytes ? bytes(img.size_bytes) : undefined],
@@ -139,7 +186,10 @@ function imgMsg(text, isErr) {
 }
 
 // 删除镜像：中危（删仓库对象，且可能正被虚拟机/容器引用）。
-async function imgDelete(name, refCount) {
+// `say` 是回显去处（列表页缺省 #img-msg；详情页传详情页提示区）；`navTo` 只给详情页用：
+// 删成功后镜像已不存在，留在详情页只会显示"读取失败"，故回列表页。
+async function imgDelete(name, refCount, say, navTo) {
+  const emit = say || imgMsg;
   const ok = await uiConfirm('删除镜像', {
     tier: 'mid',
     paragraphs: ['从镜像仓库删除 ' + name + '。'],
@@ -153,14 +203,29 @@ async function imgDelete(name, refCount) {
     cli: 'request images delete name ' + name,
   });
   if (!ok) return;
-  imgMsg('删除 ' + name + '：执行中…', false);
+  emit('删除 ' + name + '：执行中…', false);
   try {
     await api('/images/' + encodeURIComponent(name), { method: 'DELETE' });
-    imgMsg('已删除 ' + name + '。', false);
+    emit('已删除 ' + name + '。', false);
+    if (navTo) { await goDetail(navTo); return; }
   } catch (e) {
-    imgMsg('删除失败：' + e.message, true);
+    emit('删除失败：' + e.message, true);
   }
   await reload().catch(() => {});
+}
+
+// 详情页提示区（#imd-msg）：与列表页的 #img-msg 分开——两处都在 DOM 里，但只有当前页可见。
+function imdMsg(text, isErr) {
+  const p = $('imd-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+const imdDeleteBtn = $('imd-del-btn');
+if (imdDeleteBtn) {
+  imdDeleteBtn.addEventListener('click', () => {
+    imgDelete(imdName(), imdImg && imdImg.ref_count, imdMsg, '#/compute/images');
+  });
 }
 
 function imgCommon() {
@@ -257,9 +322,12 @@ export async function imgImportFile() {
 
 export const viewsImages = {
   'images': {
-    render(d) { pageWarn(d); renderImages(rowsOf(d['/images'])); }
+    render(d) { pageWarn(d); renderImages(rowsOf(d['/images'])); },
+    // 离开本页（router 的 leave 钩子）：收掉就地编辑面板——草稿不跨页残留。
+    leave() { if (imgListEditor) imgListEditor.leave(); }
   },
   'imageDetail': {
-    render(d, params) { pageWarn(d); renderImageDetail(d['/images/{name}'], d['/vm-image-profiles'], params); }
+    render(d, params) { pageWarn(d); renderImageDetail(d['/images/{name}'], d['/vm-image-profiles'], params); },
+    leave() { imdEditorLeave(); }
   },
 };

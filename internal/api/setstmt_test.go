@@ -598,3 +598,222 @@ func TestDisplaySetVMStartupLevelShow(t *testing.T) {
 		t.Fatalf("层级反推应含 startup cpu mode 语句:\n%s", joined)
 	}
 }
+
+// TestDisplaySetVSwitchDescriptionNote（回归）：交换机带 description（Web 侧编辑的
+// REST 写入形态，模型有字段、语句树与别名表都无关键字）时 display set 必须整体成功——
+// 该字段以注释说明不入输出（同 acls 描述先例），不再照发语句被回放自校验打回
+// 「未知语句: description」而把整条读命令拖垮（修复前的行为）。
+func TestDisplaySetVSwitchDescriptionNote(t *testing.T) {
+	var cfg model.Config
+	if err := applyStatement(&cfg, splitFieldsQuoted("set virtual-switches vs-lan type l2")[1:]); err != nil {
+		t.Fatalf("fixture 回放失败: %v", err)
+	}
+	cfg.VirtualSwitches[0].Description = "probe-desc"
+	tree := toJSONTree(cfg)
+	if _, ok := tree["virtual_switches"].([]any)[0].(map[string]any)["description"]; !ok {
+		t.Fatalf("fixture 前置失效：description 应已落库")
+	}
+	lines, err := renderSetStatements(tree, nil)
+	if err != nil {
+		t.Fatalf("带 description 的配置应可反推（修复前整体失败）: %v", err)
+	}
+	joined := strings.Join(lines, "\n")
+	if strings.Contains(joined, "probe-desc") || strings.Contains(joined, "description") {
+		t.Fatalf("描述字段不得出现在 display set 输出: %v", lines)
+	}
+	if !strings.Contains(joined, "# virtual-switches vs-lan：描述字段无语句关键字，不入 display set") {
+		t.Fatalf("描述字段应有「不入 display set」的注释说明: %v", lines)
+	}
+	if !strings.Contains(joined, "set virtual-switches vs-lan type l2") {
+		t.Fatalf("其余语句应照常输出: %v", lines)
+	}
+	// 配置模式层级 show（`edit virtual-switches vs-lan`）同一行为：不再整体失败，
+	// 注释说明照发（回放比较两侧按 stripNonEmittable 同剥）。
+	sub, err := navigateJSON(tree, []string{"virtual-switches", "vs-lan"})
+	if err != nil {
+		t.Fatalf("导航失败: %v", err)
+	}
+	level, err := renderSetStatements(sub.(map[string]any), []string{"virtual-switches", "vs-lan"})
+	if err != nil {
+		t.Fatalf("层级反推应可成功（修复前整体失败）: %v", err)
+	}
+	for _, l := range level {
+		if !strings.HasPrefix(l, "set virtual-switches vs-lan") && !strings.HasPrefix(l, "# ") {
+			t.Fatalf("层级反推的语句应带绝对路径前缀: %q", l)
+		}
+	}
+}
+
+// TestDisplaySetNonEmittableFieldsNote（回归）：其余「发射器有意不输出」字段同口径——
+// 出现时 display set 整体成功 + 注释说明，不因单个字段把整条读命令打回。
+//   - VRF（L3 交换机数据落点）description：语句树无该叶子（仅 REST 可达）；
+//   - gateway 空对象：多为 `delete … gateway ip` 的删除残留，无语句可还原；
+//   - serial console 关闭态（`delete … serial console enable` 落库 false）：无 set 形态；
+//   - SR-IOV vNIC 的 VF 编号：语句关键字与模型字段不一致，无可用 set 语句。
+func TestDisplaySetNonEmittableFieldsNote(t *testing.T) {
+	serialOff := false
+	cases := []struct {
+		name   string
+		cfg    model.Config
+		note   string
+		absent string
+	}{
+		{"vrf-description", model.Config{
+			VirtualSwitches: []model.VirtualSwitch{{Name: "vs-l3", Type: "l3"}},
+			Vrfs:            []model.Vrf{{Name: "vs-l3", Description: "probe-desc"}},
+		}, "# virtual-switches vs-l3：描述字段无语句关键字，不入 display set", "probe-desc"},
+		{"gateway-empty", model.Config{
+			VirtualSwitches: []model.VirtualSwitch{{Name: "vs1", Type: "l2", Gateway: &model.VSGateway{}}},
+		}, "# virtual-switches vs1：gateway 为空对象（多为删除残留），不入 display set", ""},
+		{"serial-console-off", model.Config{
+			VirtualMachineFunctions: []model.VMFunction{{Name: "v1", Image: "img1", SerialConsole: &serialOff}},
+		}, "# virtual-machine-functions v1：serial console 关闭态没有 set 语句形态，不入 display set", ""},
+		{"sriov-vf-id", model.Config{
+			VirtualMachineFunctions: []model.VMFunction{{Name: "v1", Image: "img1",
+				Interfaces: []model.VnfInterface{{Name: "nic0", Type: "sriov-vf", Sriov: &model.SriovBind{PhysicalInterface: "ens192", VFID: 3}}}}},
+		}, "# virtual-machine-functions 接口 nic0：SR-IOV VF 编号无可用 set 语句（语句关键字与模型字段不一致），不入 display set", ""},
+	}
+	for _, tc := range cases {
+		lines, err := renderSetStatements(toJSONTree(tc.cfg), nil)
+		if err != nil {
+			t.Fatalf("%s: display set 应整体成功: %v", tc.name, err)
+		}
+		joined := strings.Join(lines, "\n")
+		if !strings.Contains(joined, tc.note) {
+			t.Fatalf("%s: 应含注释 %q:\n%s", tc.name, tc.note, joined)
+		}
+		if tc.absent != "" && strings.Contains(joined, tc.absent) {
+			t.Fatalf("%s: %q 不得出现在输出:\n%s", tc.name, tc.absent, joined)
+		}
+	}
+}
+
+// TestDisplaySetEmptyContainersPruned（R38-2 回归）：配置里存在**空容器**（`{}`/`[]`）+ null，
+// 如 Web 侧清空字段留下的 `system.kernel = {}`（真机 rev 269 复现：display set **整体失败**，
+// 删掉空壳立即恢复）——空容器不是有意义的数据（与「键不存在」对回放等价），发射器不发
+// 语句、比较端两侧同剥（stripEmptyContainers），整条读命令必须成功，且空容器之外的语句
+// 照常输出。修复前：空壳只在一侧（committed 树）、回放树里缺席，深比较不等即报内部错误。
+func TestDisplaySetEmptyContainersPruned(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     model.Config
+		absent  string // 输出中不得出现的空容器痕迹
+		present string // 空容器之外的语句照常输出（可选）
+	}{
+		{"system-kernel（真机复现形态）", model.Config{
+			System: &model.SystemConfig{Kernel: &model.KernelConfig{}, Hostname: "nfvis-lab"}},
+			"kernel", "set system hostname nfvis-lab"},
+		{"vpp-dpdk-dev（真机现场形态：dev 为值结构体恒现）", model.Config{
+			Vpp: &model.VppConfig{Memory: &model.VppMemory{HugepagePreference: "2M"}, DPDK: &model.VppDPDK{}}},
+			"dpdk", "set vpp memory hugepage-preference 2M"},
+		{"metrics-history（两层空壳）", model.Config{
+			System: &model.SystemConfig{Metrics: &model.MetricsConfig{History: &model.MetricsHistoryConfig{}}, Hostname: "probe"}},
+			"metrics", "set system hostname probe"},
+		{"management（空对象）", model.Config{
+			System: &model.SystemConfig{Management: &model.MgmtConfig{}, Hostname: "probe"}},
+			"management", "set system hostname probe"},
+		{"storm-control（空对象）", model.Config{
+			Interfaces: []model.InterfaceConfig{{Name: "ens192", Description: "sd", StormControl: &model.StormControl{}}}},
+			"storm-control", "set interfaces ens192 description sd"},
+		{"vm-startup（空对象）", model.Config{
+			VirtualMachineFunctions: []model.VMFunction{{Name: "v1", Image: "img1", Startup: &model.VMStartupOverride{}}}},
+			"startup", "set virtual-machine-functions v1 image img1"},
+		{"lldp（空对象）", model.Config{Protocols: &model.ProtocolsConfig{LLDP: &model.LldpConfig{}}},
+			"lldp", ""},
+		{"nat（空对象）", model.Config{Nat: &model.NatConfig{}}, "nat", ""},
+		{"acl-rules（空 list：回放侧为 null，口径等价）", model.Config{
+			Acls: []model.Acl{{Name: "a1", Rules: []model.AclRule{}}}},
+			"rule", "set acls a1"},
+	}
+	for _, tc := range cases {
+		tree := toJSONTree(tc.cfg)
+		lines, err := renderSetStatements(tree, nil)
+		if err != nil {
+			t.Fatalf("%s: 带空容器的配置 display set 必须整体成功（修复前整体失败）: %v", tc.name, err)
+		}
+		joined := strings.Join(lines, "\n")
+		if tc.absent != "" && strings.Contains(joined, tc.absent) {
+			t.Fatalf("%s: 空容器 %q 不得出现在输出:\n%s", tc.name, tc.absent, joined)
+		}
+		if tc.present != "" && !strings.Contains(joined, tc.present) {
+			t.Fatalf("%s: 空容器之外的语句应照常输出（缺 %q）:\n%s", tc.name, tc.present, joined)
+		}
+	}
+	// 主复现形态的前置确认：空壳确实落在树里（否则上表第一条测不到点）。
+	kernelTree := toJSONTree(model.Config{System: &model.SystemConfig{Kernel: &model.KernelConfig{}}})
+	if _, ok := kernelTree["system"].(map[string]any)["kernel"]; !ok {
+		t.Fatalf("fixture 前置失效：system.kernel 空壳应已落树")
+	}
+}
+
+// TestDisplaySetEmptyLevelShow（R38-2 回归）：配置模式层级 show 落在**空容器层级**时同样整体
+// 成功——`edit system kernel` / `edit virtual-switches <n> gateway` 的空壳在回放里该层不存在，
+// 但空 ≡ 缺失、本层没有数据可核对（修复前报「回放结果缺少层级」内部错误）。
+// 负控：树在该层级**非空**（只是语句缺口）时，缺层的内部错误必须如实保留。
+func TestDisplaySetEmptyLevelShow(t *testing.T) {
+	lines, err := renderSetStatements(map[string]any{}, []string{"system", "kernel"})
+	if err != nil {
+		t.Fatalf("空容器层级（system kernel）应整体成功（修复前报缺少层级）: %v", err)
+	}
+	if len(lines) != 0 {
+		t.Fatalf("空容器层级应无语句输出: %v", lines)
+	}
+	// 空网关层级：edit 进入只补发交换机裸声明（无数据语句），不再整体失败。
+	lines, err = renderSetStatements(map[string]any{}, []string{"virtual-switches", "vs1", "gateway"})
+	if err != nil {
+		t.Fatalf("空容器层级（virtual-switches vs1 gateway）应整体成功（修复前报缺少层级）: %v", err)
+	}
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "set virtual-switches vs1") {
+			t.Fatalf("空网关层级只应补发交换机裸声明: %q", l)
+		}
+	}
+	// 负控：层级树非空但语句缺口 ⇒ 缺层仍旧如实报错（容忍只吃「空」）。
+	if err := verifySetStatements(map[string]any{"hostname": "probe"}, []string{"system", "kernel"}, nil); err == nil {
+		t.Fatalf("非空层级缺层不得被空容器容忍误吞（应报缺层内部错误）")
+	}
+}
+
+// TestDisplaySetNumaEmptyCoresPruned（R38-2 同族回归）：空/缺核列表的 numa 节点没有语句可
+// 还原——`numa node <n>` 不带 cores 回放即失败（core-list 是语句必需取值，解析报「核编号 ""
+// 不合法」），修复前照发该语句把**整条 display set** 拖垮。修复后只注释说明、不发语句；
+// 回放比较两侧同剥该元素（nonEmittableElem 与发射器同判据）。同数组里的正常节点照常发射。
+func TestDisplaySetNumaEmptyCoresPruned(t *testing.T) {
+	cfg := model.Config{ResourcePools: &model.ResourcePool{CPU: &model.CPUSetup{
+		IsolatedCores: []int{4, 5},
+		Numa: []model.NumaNode{
+			{Node: 0, Cores: []int{}}, // 空 list（REST 形态）
+			{Node: 1, Cores: nil},     // null（字段无 omitempty 的缺值形态）
+			{Node: 2, Cores: []int{4, 5}},
+		},
+	}}}
+	lines, err := renderSetStatements(toJSONTree(cfg), nil)
+	if err != nil {
+		t.Fatalf("空核列表 numa 节点应被跳过而不是整体失败（修复前回放失败）: %v", err)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "set resource-pools cpu numa node 2 cores 4,5") {
+		t.Fatalf("正常 numa 节点应照常发射:\n%s", joined)
+	}
+	for _, l := range lines {
+		if strings.HasPrefix(l, "set ") && (strings.Contains(l, "numa node 0") || strings.Contains(l, "numa node 1")) {
+			t.Fatalf("空核列表节点不得发语句（回放即失败）: %q", l)
+		}
+	}
+	for _, node := range []string{"0", "1"} {
+		note := "# resource-pools cpu numa node " + node + "：核列表为空，无语句可还原（不入 display set）"
+		if !strings.Contains(joined, note) {
+			t.Fatalf("空核列表节点应有注释说明 %q:\n%s", note, joined)
+		}
+	}
+	// 输出的每条语句必须可回放（修复前 `numa node 0` 语句回放即报「核编号 "" 不合法」）。
+	var rebuilt model.Config
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "set ") {
+			continue
+		}
+		if err := applyStatement(&rebuilt, splitFieldsQuoted(l)[1:]); err != nil {
+			t.Fatalf("输出语句 %q 回放失败: %v", l, err)
+		}
+	}
+}

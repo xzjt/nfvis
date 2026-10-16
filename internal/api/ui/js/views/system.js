@@ -11,7 +11,11 @@ import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
   portSecText, stormControlText } from '../core/format.js';
 import { renderSystemPage, renderPools, renderHugepagePools, renderInterfaces } from './overview.js';
 import { pickByName, notFoundText } from './network.js';
-import { cfgLockHolder } from './config.js';
+import { cfgLockHolder, CFG_SYS_SECTIONS, CFG_VPP_SECTIONS } from './config.js';
+// 就地编辑（配置页去中心化第三刀·系统族）：面板用 renderSection 画**配置页那一份节定义**
+// （CFG_SYS_SECTIONS / CFG_VPP_SECTIONS 的 per_dev 子表，单一真源），写路径走 core/forms.js
+// 的同一套 candidate 事务（取锁 → 写候选 → 校验 → 提交 → 释放）。
+import { objEditor, confirmRequiredAsk } from '../core/forms.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
@@ -76,6 +80,153 @@ function renderIfaceDetail(iface, ifaces, params) {
     ['Rx / Tx 错误', dash(st.rx_errors) + ' / ' + dash(st.tx_errors)],
     ['Rx / Tx 丢弃', dash(st.rx_drops) + ' / ' + dash(st.tx_drops)],
   ] : [['读取失败', ok ? '该口当前取不到计数（数据面未连接或口不在数据面）' : '未取到数据']]);
+  renderPortSecurity(iface, name);
+}
+
+// ---------- 端口安全（#/system/interfaces/:name 内的写路径，决策 #389）----------
+//
+// 写路径与「配置」页**同一套** candidate 事务：读 committed 文档 → 只改这一个口的
+// `port_security` 数组 → PUT /configuration/candidate（取锁并写候选）→ POST /configuration/check
+// （与提交同一套服务端校验）→ POST /configuration/commit（立即下发）→ DELETE candidate
+// （释放会话锁）。界面**不另造**第二套写通道：不直改运行配置、不 auto-commit。
+//
+// 本会话在「配置」页还有未提交候选（dirty）时**拒绝**——避免把操作者正在编辑的草稿整体覆盖掉；
+// 由服务端会话锁兜底：候选被别的会话持有时，PUT 会按锁规则报错，界面如实转述。
+// 档位中危：写入即提交（revision 加一、下发数据面），逐条列影响面 + 主按钮标红。
+function psMsg(text, isErr) {
+  const p = $('ifd-ps-msg');
+  p.hidden = !text;
+  p.textContent = text || '';
+  p.className = isErr ? 'error small' : 'muted small';
+}
+
+const PS_MAC_RE = /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/;
+
+// renderPortSecurity：白名单只读呈现（服务端读视图的 port_security 数组）。每条 MAC 的「删除」
+// 是**动态写入口**——必须经 wbtn 打 data-write（决策 #327），super-user 级（无 data-op）。
+function renderPortSecurity(iface, name) {
+  const ul = $('ifd-ps-list');
+  ul.textContent = '';
+  const note = $('ifd-ps-note');
+  if (!iface || iface.__err) {
+    note.textContent = '读取失败：' + (iface ? iface.__err : notFoundText(name, '接口'));
+    ul.appendChild(el('li', { class: 'muted', text: '（读不到白名单）' }));
+    return;
+  }
+  const list = Array.isArray(iface.port_security) ? iface.port_security : [];
+  note.textContent = list.length
+    ? '已启用（' + list.length + ' / 32 条）——白名单外的源 MAC 入向丢弃。'
+    : '未启用（白名单为空）。';
+  if (!list.length) {
+    ul.appendChild(el('li', { class: 'muted', text: '（白名单为空）' }));
+    return;
+  }
+  list.forEach((mac) => {
+    const li = el('li');
+    li.appendChild(el('span', { text: String(mac) }));
+    const del = wbtn({ type: 'button', class: 'danger small', text: '删除' });
+    del.addEventListener('click', () => psDeleteMac(mac));
+    li.appendChild(del);
+    ul.appendChild(li);
+  });
+}
+
+// psDiscard：结束本会话的候选会话（释放编辑锁）。失败不阻塞——会话可能已因超时释放。
+async function psDiscard() {
+  try { await api('/configuration/candidate', { method: 'DELETE' }); } catch (e) { /* 已释放 */ }
+}
+
+// psTxn：端口安全的一次完整 candidate 事务。mutate 就地改接口对象，返回错误文案（null = 通过）。
+async function psTxn(desc, cli, mutate) {
+  const name = $('ifd-name').textContent;
+  if (!name) { psMsg('没有选中接口。', true); return; }
+  const ok = await uiConfirm(desc, {
+    tier: 'mid',
+    bullets: [
+      '写入即提交：候选会立即下发给数据面并生效（revision 加一）。',
+      '端口安全只放行白名单源 MAC（L2 入向），白名单外的帧被丢弃——配错会切断该口上的业务。',
+      '前置：该口须是某 L2 交换机的静态成员口，且与 L3 接口 ACL 的 macip 绑定槽互斥；不满足时服务端在提交期拒绝，界面如实显示。',
+      '可回退：把白名单改回原样（再提交一次），或清空全部条目即停用。',
+    ],
+    cli: cli,
+    confirmLabel: '提交',
+  });
+  if (!ok) return;
+  psMsg(desc + '：执行中…', false);
+  try {
+    // 本会话在「配置」页还有未提交的候选改动时拒绝（不覆盖操作者的草稿）。
+    let existing = null;
+    try { existing = await api('/configuration/candidate'); } catch (e) { existing = null; }
+    if (existing && existing.dirty) {
+      psMsg('本会话在「配置」页还有未提交的候选改动——请先在那页提交或丢弃，再回来改端口安全。', true);
+      return;
+    }
+    const committed = await api('/configuration');
+    const doc = JSON.parse(JSON.stringify((committed && committed.configuration) || {}));
+    const list = Array.isArray(doc.interfaces) ? doc.interfaces : [];
+    let ifc = null;
+    for (const i of list) { if (i && i.name === name) { ifc = i; break; } }
+    if (!ifc) { psMsg('已生效配置里没有声明接口 ' + name + '——请先在「配置」页声明该口。', true); return; }
+    const err = mutate(ifc);
+    if (err) { psMsg(err, true); return; }
+    await api('/configuration/candidate', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(doc),
+    });
+    const chk = await api('/configuration/check', { method: 'POST' });
+    if (!chk || !chk.ok) {
+      const errs = (chk && chk.errors) || [];
+      await psDiscard();
+      psMsg(desc + '失败（预校验）：' + (errs.length
+        ? errs.map((e) => (e.path ? e.path + '：' : '') + e.message).join('；')
+        : '服务端校验未通过'), true);
+      return;
+    }
+    const res = await api('/configuration/commit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    await psDiscard();
+    const warns = (res && res.warnings) || [];
+    psMsg(desc + '：提交成功（revision ' + (res && res.revision) + '）' +
+      (warns.length ? '；提示：' + warns.join('；') : ''), false);
+  } catch (e) {
+    await psDiscard();
+    psMsg(desc + '失败：' + e.message, true);
+  }
+  await reload().catch(() => {});
+}
+
+// psAddMac：追加一条白名单 MAC（set interfaces <if> port-security mac <mac> 的等价写路径）。
+export async function psAddMac() {
+  const name = $('ifd-name').textContent;
+  const raw = ($('ifd-ps-mac').value || '').trim();
+  if (!name) { psMsg('没有选中接口。', true); return; }
+  if (!raw) { psMsg('请填写要添加的 MAC 地址（形如 b0:b0:00:00:00:01）。', true); return; }
+  if (!PS_MAC_RE.test(raw)) { psMsg('MAC 地址格式不对：应为六段十六进制（形如 b0:b0:00:00:00:01）。', true); return; }
+  const mac = raw.toLowerCase(); // 服务端解码层会归一小写，这里同一口径
+  await psTxn('添加端口安全 MAC ' + mac, 'set interfaces ' + name + ' port-security mac ' + mac, (ifc) => {
+    const cur = Array.isArray(ifc.port_security) ? ifc.port_security.slice() : [];
+    if (cur.map((m) => String(m).toLowerCase()).indexOf(mac) >= 0) return '白名单里已有 ' + mac + '（重复条目提交期会被拒）。';
+    if (cur.length >= 32) return '白名单已达上限 32 条——先删除一条再加。';
+    cur.push(mac);
+    ifc.port_security = cur;
+    return null;
+  });
+  $('ifd-ps-mac').value = '';
+}
+
+// psDeleteMac：按值删一条白名单 MAC（delete interfaces <if> port-security mac <mac> 的等价写路径）。
+async function psDeleteMac(mac) {
+  const name = $('ifd-name').textContent;
+  if (!name) { psMsg('没有选中接口。', true); return; }
+  await psTxn('删除端口安全 MAC ' + mac, 'delete interfaces ' + name + ' port-security mac ' + mac, (ifc) => {
+    const cur = Array.isArray(ifc.port_security) ? ifc.port_security : [];
+    const out = cur.filter((m) => String(m).toLowerCase() !== String(mac).toLowerCase());
+    if (out.length === cur.length) return '白名单里没有 ' + mac + '。';
+    if (out.length) ifc.port_security = out;
+    else delete ifc.port_security; // 清空后不留空壳（与 CLI 删空同口径）
+    return null;
+  });
 }
 
 // dpdkAct 绑定/解绑：confirm=true 由界面带上（服务端要求，缺了会 400——这不是界面在放水，
@@ -1128,7 +1279,10 @@ export const viewsSystem = {
       pageWarn(d);
       renderPools(d['/resource-pools']);
       renderHugepagePools(d['/system/hugepages']);
-    }
+    },
+    // 离开本页（router 的 leave 钩子）：收掉就地编辑面板——草稿不跨页残留
+    //（「资源池声明」面板里的改动只在本页草稿里，切页即弃）。
+    leave() { if (sysPoolEditor) sysPoolEditor.leave(); }
   },
   'metrics': {
     // 概览由路由声明的 `/metrics/history?last=1h` 取齐；趋势序列由本页按选择器自行取数
@@ -1146,21 +1300,279 @@ export const viewsSystem = {
     }
   },
   'ifaceDetail': {
-    render(d, params) { pageWarn(d); renderIfaceDetail(d['/interfaces/{name}'], d['/interfaces'], params); }
+    render(d, params) { pageWarn(d); renderIfaceDetail(d['/interfaces/{name}'], d['/interfaces'], params); },
+    leave() { if (sysIfdEditor) sysIfdEditor.leave(); }
   },
   'system': {
     render(d) {
       pageWarn(d);
       renderSystemPage(d['/system/status'], d['/system/version'], d['/system'], d['/dns/proxy'], d['/system/firewall']);
+    },
+    leave() {
+      if (sysCfgEditor) sysCfgEditor.leave();
+      if (sysFwEditor) sysFwEditor.leave();
     }
   },
   'kernel': {
-    render(d) { pageWarn(d); renderKernel(d['/system/kernel']); }
+    render(d) { pageWarn(d); renderKernel(d['/system/kernel']); },
+    leave() { if (sysKnlEditor) sysKnlEditor.leave(); }
   },
   'users': {
-    render(d) { pageWarn(d); renderUsers(d['/system/login-users']); renderTokens(d['/system/api-tokens']); renderBannerCard(d['/login-banner']); }
+    render(d) { pageWarn(d); renderUsers(d['/system/login-users']); renderTokens(d['/system/api-tokens']); renderBannerCard(d['/login-banner']); },
+    leave() { if (sysUsrEditor) sysUsrEditor.leave(); }
   },
   'tls': {
     render(d) { pageWarn(d); renderTLS(d['/system/tls']); }
   },
 };
+
+// ---------- 配置页去中心化 · 第三刀（系统族）：各系统页就地编辑 ----------
+//
+// 面板画的是配置页那一份**节定义**（CFG_SYS_SECTIONS / CFG_VPP_SECTIONS 的 per_dev 子表，单一
+// 真源——加字段/改 kind 自动跟随，这里不复制字段清单）；写路径与对象页/配置页同一套 candidate
+// 事务（core/forms.js 的 objEditor：取锁 → 写候选 → 校验 → 提交 → 释放）。
+//
+// 「生效条件」的措辞一律以**产品提交期的实际口径**为准（engine.go 的提交提示 + FR-CFG-012 /
+// 决策 #388 的确认守卫），界面不另立一套说法：
+//   · 主机名/时区/DNS/NTP/日志/健康阈值/登录：提交即落地（无重启提示）；
+//   · 管理口地址/网关、主机防火墙：非 console 会话服务端**强制** commit confirmed（超时自动回滚）
+//     ——故这两处面板带 confirmAsk（core/forms.js 的 confirmRequiredAsk），走与配置页同一条
+//     「以 commit confirmed 提交 → 确认在途提交」路径；
+//   · 系统 · 内核启动参数：提交只改配置，写入基线 + 重启主机才生效；
+//   · 资源池：提交期给「需 reboot 生效」提示；
+//   · VPP 段（CPU/内存/DPDK/插件）：提交期给「需 request vpp restart（或整机 reboot）」提示。
+
+const SYS_PANEL_LEGENDS = ['系统（基础）', '系统 · 数据面 DNS 代理', '系统 · 日志（syslog）',
+  '系统 · 健康阈值', '系统 · 管理口', '系统 · API 与 TLS'];
+
+// sysSec：按 legend 从配置页的节定义里取一条。取不到返回 null——调用方据「有没有取齐」决定
+// 是否拒开面板，绝不静默少画一节（少画一节而照常提交会让操作者以为改过了）。
+function sysSec(legend) {
+  const all = Array.isArray(CFG_SYS_SECTIONS) ? CFG_SYS_SECTIONS : [];
+  return all.find((s) => s && s.legend === legend) || null;
+}
+
+// 系统页（#/system）：六个单对象节画在一个面板里（objEditor 的 kind.sections）。
+function sysKind() {
+  const secs = SYS_PANEL_LEGENDS.map(sysSec);
+  return {
+    label: '系统配置',
+    sections: secs.every(Boolean) ? secs : [], // 任一节缺失即整面板拒开（takeBase 会如实说明）
+    cliSave: () => 'set system …（主机名 / 时区 / DNS / 日志 / 健康阈值 / 管理口 / API 与 TLS）',
+    note: () => '主机名 / 时区 / DNS / NTP：提交后由 nfvisd 立即落到宿主（hostnamectl / timedatectl / ' +
+      'resolved / chrony），改完即生效；日志、健康阈值、API（端口 / 令牌有效期 / 并发上限）提交即生效；' +
+      '数据面 DNS 代理上游只影响 nfvisd 侧转发器，不需要重启数据面；' +
+      '管理口地址 / 网关变更会改变管理路径——服务端强制要求以 commit confirmed 提交（超时未确认自动回滚）。' +
+      '证书 / 私钥在这里只声明**文件路径**（证书内容在「证书」页安装，本面板不上传文件）。' +
+      '用户与口令策略在「用户与权限」页的就地编辑面板里改。',
+    bullets: () => [
+      '主机名 / 时区 / DNS / NTP：提交后立即落地宿主（hostnamectl / timedatectl / resolved / chrony）——服务端不再给重启提示。',
+      '管理口地址 / 网关：服务端要求以 commit confirmed 提交（防自锁）；API 端口变更会让当前客户端改到新端口访问。',
+      '日志（syslog 远程主机 / 级别 / 保留天数 / 容量上限）、健康阈值、数据面 DNS 代理上游：提交即生效，不牵动数据面重启。',
+      '可回退：「提交历史」里能把上一版取为候选、再提交回来。',
+    ],
+    // 本面板含「管理口」节：非 console 会话服务端会强制 commit confirmed（FR-CFG-012），
+    // 走与配置页同一条确认窗口路径；其余节不触发它，无副作用。
+    confirmAsk: confirmRequiredAsk,
+  };
+}
+const sysCfgEditor = objEditor({ slot: 'sysp-edit', reload });
+if (sysCfgEditor) {
+  const b = $('sysp-edit-btn');
+  if (b) b.addEventListener('click', () => sysCfgEditor.openEdit(sysKind(), ''));
+}
+
+// 主机防火墙（#/system 的防火墙卡）：默认策略 + 规则子表。决策 #388：非 console 会话的防火墙
+// 变更服务端强制 commit confirmed（超时自动回滚恢复访问）——同样带确认窗口路径。
+function fwKind() {
+  return {
+    label: '主机防火墙',
+    section: sysSec('系统 · 主机防火墙'),
+    cliSave: () => 'set system firewall default-policy … / set system firewall rule <seq> …',
+    note: () => '规则按序号升序首命中生效；由 nfvisd 渲染成宿主 nftables 独立表，只作用于管理口入向' +
+      '（数据面 VPP / 虚拟机 / 容器不受影响）。配置前须先声明管理口，否则提交会被拒。' +
+      '⚠️ 非本地串口会话的防火墙变更**必须**以 commit confirmed 提交（服务端强制）——提交后在窗口内' +
+      '确认管理面仍然连得上，再点「确认在途提交」；超时未确认会自动回滚恢复访问。',
+    bullets: () => [
+      '提交后防火墙立即渲染到宿主（只作用于管理口入向）——改错默认策略 / 规则可能切断管理访问。',
+      '服务端强制以 commit confirmed 提交：窗口内不点「确认在途提交」会自动回滚到提交前那一版（访问随之恢复）。',
+      '每条规则至少要有一条匹配条件（来源 / 协议 / 端口之一）；端口仅 tcp/udp 可配。',
+    ],
+    confirmAsk: confirmRequiredAsk,
+  };
+}
+const sysFwEditor = objEditor({ slot: 'fw-edit', reload });
+if (sysFwEditor) {
+  const b = $('fw-edit-btn');
+  if (b) b.addEventListener('click', () => sysFwEditor.openEdit(fwKind(), ''));
+}
+
+// 内核基线页（#/system/kernel）：这里写的是本页「配置期望」那一组值；写入引导基线与重启仍由
+// 本页既有的两个按钮负责（配置 ≠ 生效，界面不把两步并成一步的假象）。
+function knlKind() {
+  return {
+    label: '内核启动参数',
+    section: sysSec('系统 · 内核启动参数'),
+    cliSave: () => 'set system kernel …（nmi-watchdog / transparent-hugepages / iommu / low-latency / tuned-profile / params）',
+    note: () => '提交只改**配置**（提交后本页「配置期望」与「差异」随刷新更新）；要落到引导配置还得点' +
+      '本页的「写入基线（按配置期望）」，再**重启主机**才生效——内核命令行只在启动期读取。' +
+      '大页与隔离核的唯一真源是「资源池」节（在资源池页就地编辑），不在这里重复声明。',
+    bullets: () => [
+      '写入即提交（revision 加一）；这一步**不改宿主引导配置**，重启前内核仍按旧参数运行。',
+      '要生效：本页「写入基线（按配置期望）」→ 重启主机（入口在「运维动作」页）。',
+      '写错会让重启后的内核基线与预期不符（如关掉 IOMMU 会让 PCI 直通不可用）——重启前核对本页「差异」。',
+    ],
+  };
+}
+const sysKnlEditor = objEditor({ slot: 'knl-edit', reload });
+if (sysKnlEditor) {
+  const b = $('knl-edit-btn');
+  if (b) b.addEventListener('click', () => sysKnlEditor.openEdit(knlKind(), ''));
+}
+
+// 用户与权限页（#/system/users）：本地用户 / 自定义 class / 口令策略（同一节）。
+// 口令明文在表单引擎里就地派生成加盐哈希后才写入候选（明文不进配置、也不留在页面上）。
+function usrCfgKind() {
+  return {
+    label: '登录与口令策略',
+    section: sysSec('系统 · 登录与口令策略'),
+    cliSave: () => 'set system login password-policy … / set system login user <名> … / set system login class <名> …',
+    note: () => '提交后立即生效（下一次登录即按新配置判定；用户 / class / 口令策略都在这一节里）。' +
+      '新增用户**必须**立刻设置口令——服务端拒绝无口令账号；已有用户不填口令即保持原口令不变。' +
+      '口令控件填明文会在本机就地派生成加盐哈希后才写入候选（派生要用浏览器只在 HTTPS 或 localhost 下' +
+      '提供的能力——不满足时这次保存整体失败、输入会保留）。' +
+      '本页下方表格里的「创建用户 / 应用修改 / 删除 / 修改我的口令」是同一套实现的类型化端点，两条路都可用。',
+    bullets: () => [
+      '提交后立即生效（用户 / class / 口令策略）；变更记入审计。',
+      '口令只以加盐哈希落库（明文既不进候选也不回显）；新增用户没成功设置口令会被服务端整体拒绝。',
+      '服务端会拒绝删当前登录用户与删最后一个 super-user（自锁保护）。',
+    ],
+  };
+}
+const sysUsrEditor = objEditor({ slot: 'usr-edit', reload });
+if (sysUsrEditor) {
+  const b = $('usr-edit-btn');
+  if (b) b.addEventListener('click', () => sysUsrEditor.openEdit(usrCfgKind(), ''));
+}
+
+// 资源池页（#/system/pools）：配置页的 resource-pools 是**手写的一段字段**（不是节定义），
+// 这里按同一份字段口径与判据声明成本页的节（大页页尺寸限 2M/1G、数量 ≥0——与服务端校验一致；
+// 隔离核用 corenums：值落成整数数组，展示时压成「2-5,7」）。
+const POOLS_SECTION = {
+  legend: '资源池声明',
+  loc: [{ obj: 'resource_pools' }],
+  fields: [{ label: '隔离核（如 2-5,7）', path: ['cpu', 'isolated_cores'], kind: 'corenums',
+    hint: '逗号分隔的核号或核号区间' }],
+  sublists: [{
+    list: 'hugepages', key: 'page_size', keyKind: 'text', title: '大页池', what: '大页池',
+    keyLabel: '页尺寸', placeholder: '如 1G 或 2M',
+    note: '页尺寸限 2M / 1G（服务端校验）；数量 0 = 不托管该尺寸的池。删除整行 = 不再声明该页尺寸。',
+    fields: [{ label: '数量（页）', path: ['count'], kind: 'int', min: 0 }],
+  }],
+};
+function poolKind() {
+  return {
+    label: '资源池声明',
+    section: POOLS_SECTION,
+    cliSave: () => 'set resource-pools cpu isolated-cores … / set resource-pools hugepages <2M|1G> count <n>',
+    note: () => '大页数量与隔离核的唯一真源。提交后服务端会给「resource-pools 变更需 reboot 生效」提示——' +
+      '池的分配发生在**下次启动**：到「内核基线」页点「写入基线（按配置期望）」再重启主机才落地；' +
+      '本页下方「大页池」是内核实况与回收入口，回收只把池收敛到已声明值、不改声明。' +
+      '⚠️ 隔离核是 VPP worker 与 VNF vCPU 的分配来源：不可行的缩减会被服务端按资源账本在提交期拒绝。',
+    bullets: () => [
+      '写入即提交（revision 加一）；**生效要重启主机**（服务端提交期会给该提示）——重启前池与隔离核仍是旧值。',
+      '缩减隔离核 / 大页会影响已声明的 VNF 与数据面 worker（服务端按资源账本在提交期拒绝不可行的缩减）。',
+      '可回退：把声明改回原值并重启；已分配的大页不会被本次提交抽走。',
+    ],
+  };
+}
+const sysPoolEditor = objEditor({ slot: 'pool-edit', reload });
+if (sysPoolEditor) {
+  const b = $('pool-edit-btn');
+  if (b) b.addEventListener('click', () => sysPoolEditor.openEdit(poolKind(), ''));
+}
+
+// 接口详情页（#/system/interfaces/:name）：接口自身的配置字段在配置页是手写字段（不是节定义），
+// 按同一份字段口径与判据（MTU 68-9216、风暴抑制 1-100000000 kbps、与端口安全同接口互斥）声明成
+// 本页的节；loc 按当前接口名**动态**构造——只画这一口，不出现其它接口，也没有新增/删除按钮。
+function ifaceFieldsSection(name) {
+  return {
+    legend: '接口 ' + name + '（配置）',
+    loc: [{ list: 'interfaces', key: 'name', val: name }],
+    note: '描述 / MTU（68-9216）/ 启用（空 = 不声明，按运行态/缺省）/ 限速策略绑定（入向、出向各自独立；' +
+      '策略须先在「网络对象」页建好）/ 风暴抑制（广播、组播，单位 kbps，1-100000000；按目的 MAC 分类限速、' +
+      '超速丢弃，不做 pps 换算）。风暴抑制与端口安全白名单**同接口互斥**（两者都绑该口唯一的 L2 入向分类槽）。' +
+      '提交后即下发数据面。',
+    fields: [
+      { label: '描述', path: ['description'], kind: 'text' },
+      { label: 'MTU', path: ['mtu'], kind: 'int', min: 68, max: 9216 },
+      { label: '启用', path: ['enabled'], kind: 'bool', note: '留空 = 不声明（按运行态/缺省）；提交后即下发生效。' },
+      { label: '入向限速策略', path: ['ingress_policy'], kind: 'text' },
+      { label: '出向限速策略', path: ['egress_policy'], kind: 'text' },
+      { label: '风暴抑制 · 广播（kbps）', path: ['storm_control', 'broadcast_kbps'], kind: 'int',
+        min: 1, max: 100000000 },
+      { label: '风暴抑制 · 组播（kbps）', path: ['storm_control', 'multicast_kbps'], kind: 'int',
+        min: 1, max: 100000000 },
+    ],
+  };
+}
+
+// 数据面单网卡覆盖：**直接取 VPP 段的 per_dev 子表**（同一份定义，不复制字段），只把它单独
+// 画在接口页上。表是按接口名索引的（含其它接口已有的覆盖行）；新增一行填本口名即给本口覆盖。
+function vppPerDevSection() {
+  const sec = (Array.isArray(CFG_VPP_SECTIONS) ? CFG_VPP_SECTIONS : [])
+    .find((s) => s && s.legend === 'VPP（数据面）');
+  const sub = sec && Array.isArray(sec.sublists)
+    ? sec.sublists.find((x) => x && x.list === 'per_dev') : null;
+  if (!sub) return null;
+  return {
+    legend: '数据面 · 单网卡覆盖（逐口，含其它接口的既有覆盖行）',
+    loc: [{ obj: 'vpp' }],
+    note: '按接口名逐口覆盖数据面（VPP）的收/发队列与描述符：未覆盖的参数继承「数据面（VPP）」的全局默认，' +
+      '删除整行 = 该网卡全部回落全局默认。只对已声明的物理口生效（服务端校验）。' +
+      '改动提交后需 request vpp restart 才生效——重启前数据面仍按旧队列/描述符数运行。',
+    sublists: [sub],
+  };
+}
+
+function ifdCfgKind(name) {
+  const secs = [ifaceFieldsSection(name), vppPerDevSection()].filter(Boolean);
+  return {
+    label: '接口配置（' + name + '）',
+    sections: secs.length === 2 ? secs : [],
+    cliSave: () => 'set interfaces ' + name + ' …（description / mtu / enable / ingress-policy / egress-policy / ' +
+      'storm-control）',
+    note: () => '描述 / MTU / 启用 / 限速绑定 / 风暴抑制：提交后即下发数据面（改 MTU 或启用态会立刻影响该口转发）；' +
+      '数据面单网卡覆盖（vpp.dpdk.per_dev）改完需 request vpp restart 才生效（入口在「运维动作」页）。' +
+      '驱动接管（DPDK）与 SR-IOV 是本页下面各自的按钮（服务端守卫不变），不在这份配置里。',
+    bullets: () => [
+      '写入即提交，提交后下发数据面（revision 加一）——限速/风暴抑制配错会切断该口业务。',
+      '数据面单网卡覆盖改完需 request vpp restart 才生效（重启数据面会中断全部数据面转发）。',
+      '风暴抑制与端口安全白名单同接口互斥；限速策略须已存在，否则服务端在提交期拒绝并指名。',
+    ],
+  };
+}
+const sysIfdEditor = objEditor({ slot: 'ifd-edit', reload });
+if (sysIfdEditor) {
+  const b = $('ifd-edit-btn');
+  if (b) b.addEventListener('click', () => {
+    const n = $('ifd-name');
+    const name = (n && n.textContent) || '';
+    if (!name) { ifdMsg('没有选中接口。', true); return; }
+    sysIfdEditor.openEdit(ifdCfgKind(name), '');
+  });
+}
+
+// ---- 接线（模块求值期执行；type=module 在 DOM 解析后运行，元素必已存在）----
+// 端口安全：静态的「添加 MAC」入口在 index.html 上；逐条的「删除」由 renderPortSecurity
+// 在每次渲染时经 wbtn 现建（动态写入口）。
+const ifdPsAddBtn = $('ifd-ps-add-btn');
+if (ifdPsAddBtn) ifdPsAddBtn.addEventListener('click', psAddMac);
+const ifdPsMacIn = $('ifd-ps-mac');
+if (ifdPsMacIn) {
+  ifdPsMacIn.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter') return;
+    ev.preventDefault();
+    psAddMac();
+  });
+}

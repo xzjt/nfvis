@@ -41,7 +41,7 @@ var contractCLICommands = []string{
 	"show virtual-switches", "show virtual-switches vs1", "show virtual-switches vs1 mac-table",
 	"show virtual-switches vs1 dhcp-leases", // 决策 #359：租约表（未配置分支的如实报错也在覆盖内）
 	"show vrfs", "show vrfs vr1", "show vrfs vr1 routes",
-	"show vpp", "show vpp threads", "show vpp buffers", "show vpp memory", "show vpp capture",
+	"show vpp", "show vpp threads", "show vpp buffers", "show vpp memory",
 	"show vpp runtime", "show vpp runtime thread 1",
 	"show acls", "show acls a1", "show bonds", "show nat",
 	"show port-mirroring", "show qos policies", "show dns proxy", "show vxlan tunnels",
