@@ -378,7 +378,7 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			// 才有 relay）。新配/改 server 下发 IsAdd=true，清 relay 按登记撤（IsAdd=false），
 			// 声明未变时幂等跳过；undo 把中继收敛回旧声明（新交换机的删除向=整体撤销）。
 			// 校验层已保证：配 relay 的交换机必有 IPv4 网关（中继源地址的来源）。
-			ops = append(ops, applyOp(
+			relayOp := applyOp(
 				fmt.Sprintf("dhcp-relay[%s]", vs.Name),
 				func(ctx context.Context) error { return a.net.ApplyDhcpRelay(ctx, vs) },
 				vs.Name, ok,
@@ -386,13 +386,13 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 				func(ctx context.Context) error {
 					return a.net.ApplyDhcpRelay(ctx, model.VirtualSwitch{Name: vs.Name})
 				},
-			))
+			)
 			// 决策 #359：DHCP 服务器作为 bridge-domain（与 relay）之后的伴随操作收敛——
 			// tap 入 BD、server-id/下发网关都来自网关声明（先有 BVI 地址与 BD 才有 server）。
 			// 新配/变更收敛到新声明，停用（声明里无池）＝teardown（删内置 tap、注销 punt、
 			// 清租约文件）；undo 把服务器收敛回旧声明（新交换机的删除向=整体撤销，同 relay）。
 			// 校验层已保证：仅 L2 + 已配 IPv4 BVI 网关可配，且与 relay 互斥。
-			ops = append(ops, applyOp(
+			serverOp := applyOp(
 				fmt.Sprintf("dhcp-server[%s]", vs.Name),
 				func(ctx context.Context) error { return a.net.ApplyDHCPServer(ctx, vs) },
 				vs.Name, ok,
@@ -400,7 +400,17 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 				func(ctx context.Context) error {
 					return a.net.ApplyDHCPServer(ctx, model.VirtualSwitch{Name: vs.Name})
 				},
-			))
+			)
+			// R39-4（round39 真机）：**同一次提交里把 DHCP 服务器换成中继**时，顺序必须反过来
+			// ——服务器停用（注销 UDP/67 的 punt socket、删内置 tap）要**先**做，否则中继在
+			// `bind 192.168.99.1:67` 上撞 `address already in use`，整次提交回滚（真机实测：
+			// 「删除 dhcp-server + 加 dhcp-relay」一条提交必失败，拆两次提交才行）。反向
+			// （中继换成服务器）没有这个问题：服务器走 punt 注册、不 bind 该地址。
+			if ok && vsHasDHCPServer(o) && !vsHasDHCPServer(vs) {
+				ops = append(ops, serverOp, relayOp)
+			} else {
+				ops = append(ops, relayOp, serverOp)
+			}
 		}
 	}
 	// —— 决策 #390①：被删 VRF 的 L3 接口 ACL/macip 解绑（**按旧声明**，先于新建/迁移段）——
@@ -439,6 +449,26 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	}
 	for _, vrf := range new.Vrfs {
 		if o, ok := oldVRFs[vrf.Name]; !ok || !configEqual(o, vrf) {
+			// 缺陷 A（round39 真机）：**被删的 l3-interface 必须先于本 VRF 的 ApplyVRF 回收**。
+			// 此前顺序是 ApplyVRF(新) → del-l3-if(旧)，于是「把同一台 L3 交换机的地址从
+			// vh-…-nic0 挪到 vh-…-nic1」在**一次提交**里必撞 VPP `-105 Address in use`：
+			// ApplyVRF 只清**新声明里仍有**的接口地址（l3.go 逐接口 clear→置表→add），
+			// nic0 不在新声明里 ⇒ 它的 192.168.200.1/24 还挂在同一张表上，nic1 再加同前缀
+			// 即冲突；整次提交回滚，只能拆成「先删、提交、再加、提交」两次。
+			// 先回收（清地址/解绑/移回默认表/摘登记）再 ApplyVRF，既消掉冲突，也维持
+			// 「先解引用、后建引用」的口径；undo 仍是 ApplyVRF(旧)，回滚能把 nic0 复原。
+			if ok {
+				for _, li := range removedL3Ifaces(o, vrf) {
+					li := li
+					ops = append(ops, op{
+						desc: fmt.Sprintf("del-l3-if[%s/%s]", vrf.Name, l3IfaceKeyOf(li)),
+						run: func(ctx context.Context) error {
+							return a.net.DeleteL3Interface(ctx, vrf.Name, li)
+						},
+						undo: func(ctx context.Context) error { return a.net.ApplyVRF(ctx, o) },
+					})
+				}
+			}
 			vrfOp := applyOp(
 				VrfOpDesc(vrf.Name),
 				func(ctx context.Context) error { return a.net.ApplyVRF(ctx, vrf) },
@@ -449,12 +479,12 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			// 复合操作（建表 → 配地址 → 置表 → 下路由）：失败时可能已部分生效，需按旧配置复原。
 			vrfOp.compensateOnFail = true
 			ops = append(ops, vrfOp)
-			// 决策 #361：L3 接口一级的差分撤销（与 removedRoutes 同一风格），紧跟本次 ApplyVRF
-			// 之后执行、且位于删除段之前——此前这两类撤销没有任何生产路径：ApplyVRF 只对仍声明
-			// AclIn 的接口下发绑定（对「不再声明」不复核），声明里删掉 l3-interface 也不回收
-			// （口留原表、地址不摘、deny 绑定继续拦；round142 真机实测）。
+			// 决策 #361：L3 接口一级的差分撤销（与 removedRoutes 同一风格），位于删除段之前
+			// ——此前这两类撤销没有任何生产路径：ApplyVRF 只对仍声明 AclIn 的接口下发绑定
+			// （对「不再声明」不复核），声明里删掉 l3-interface 也不回收（口留原表、地址不摘、
+			// deny 绑定继续拦；round142 真机实测）。
 			//   - l3-acl-unbind：接口仍在、acl-in 被清 ⇒ 只撤绑定与伴随 macip；
-			//   - del-l3-if：接口整条被删 ⇒ 回收（清地址/解绑/移回默认表/摘登记）。
+			//   - del-l3-if 的回收动作已上移到本 VRF 的 ApplyVRF **之前**（缺陷 A）。
 			// 顺序也是「先解引用、后删被引用」（#342 同族）：绑定撤销先于删除段里的 del-acl，
 			// 否则删 ACL 会撞上仍指向它的陈旧绑定。undo 与该 VRF 的 apply op 同源（ApplyVRF(old)），
 			// 回滚时把旧声明的接口与绑定整体复原。
@@ -465,16 +495,6 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 						desc: fmt.Sprintf("l3-acl-unbind[%s/%s]", vrf.Name, l3IfaceKeyOf(li)),
 						run: func(ctx context.Context) error {
 							return a.net.UnbindL3IfaceACL(ctx, vrf.Name, li)
-						},
-						undo: func(ctx context.Context) error { return a.net.ApplyVRF(ctx, o) },
-					})
-				}
-				for _, li := range removedL3Ifaces(o, vrf) {
-					li := li
-					ops = append(ops, op{
-						desc: fmt.Sprintf("del-l3-if[%s/%s]", vrf.Name, l3IfaceKeyOf(li)),
-						run: func(ctx context.Context) error {
-							return a.net.DeleteL3Interface(ctx, vrf.Name, li)
 						},
 						undo: func(ctx context.Context) error { return a.net.ApplyVRF(ctx, o) },
 					})
@@ -524,7 +544,15 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 		})
 	}
 
-	if !configEqualPtr(old.Nat, new.Nat) {
+	// 缺陷 B（round39 真机）：NAT 的 inside/outside **不是** nat 段自身的字段，而是从
+	// 「规则引用的 L3 交换机（VRF）的 l3-interface 集合 + 挂到该交换机的 vNIC + 出接口所属
+	// 转发域」**推导**出来的（network/nat.go 的 desiredFeatures → L3Provider.AttachedIfaces）。
+	// 因此只在 `Nat` 段本身变化时才排 nat 操作会漏掉「拓扑变了、NAT 该重算」：真机实测把
+	// vh-…-nic0 从 vs-nat 的 l3-interface 挪到 vh-…-nic1 后，配置与 `show nat` 都正常，
+	// 而 VPP 里 inside 仍是旧口（`show nat44 ei interfaces` = 旧口 in），in2out 计数在涨、
+	// 会话建不起来（0 sessions），只有手工重提一次 NAT 规则才恢复。
+	// 判据取**派生输入指纹**（只含被规则引用的对象），无关 VRF 的改动不会白白重放 NAT。
+	if !configEqualPtr(old.Nat, new.Nat) || !slices.Equal(natDerivedInputs(old), natDerivedInputs(new)) {
 		newNat := model.NatConfig{}
 		if new.Nat != nil {
 			newNat = *new.Nat
@@ -899,6 +927,72 @@ func removedL3Ifaces(old, new model.Vrf) []model.L3Interface {
 	return out
 }
 
+// natDerivedInputs 返回 NAT 的**派生输入**指纹（缺陷 B，round39）：ApplyNAT 的 inside/outside
+// 不是 nat 段自身的字段，而是从下面三类事实推导的（network/nat.go 的 desiredFeatures →
+// L3Provider.AttachedIfaces / TableOfIface）：
+//   - 规则引用的 L3 交换机（同名 VRF）的 l3-interface 集合（名字/地址/VLAN）；
+//   - 挂到该交换机的 VNF/容器 vNIC（派生口名也是 inside 来源）；
+//   - 出接口所属的转发域（该接口在哪台 VRF 的 l3-interface 里）。
+//
+// 只含**被规则引用**的对象：无关 VRF 的改动不会让 NAT 白重放一次。排序后比较，与声明序无关。
+// 无 NAT 规则时返回 nil（两侧都 nil ⇒ 不排 nat 操作）。
+func natDerivedInputs(c model.Config) []string {
+	if c.Nat == nil || len(c.Nat.Rules) == 0 {
+		return nil
+	}
+	// 规则引用到的交换机名 ∪ 出接口所在 VRF 名。
+	switches := map[string]bool{}
+	outsideOwners := map[string]bool{} // 出接口名 → 由哪台 VRF 承载（只记名，够判定）
+	for _, r := range c.Nat.Rules {
+		if r.VirtualSwitch != "" {
+			switches[r.VirtualSwitch] = true
+		}
+		if r.Action.Interface != "" {
+			for _, vrf := range c.Vrfs {
+				for _, li := range vrf.L3Interfaces {
+					if l3IfaceKeyOf(li) == r.Action.Interface {
+						outsideOwners[r.VirtualSwitch+"|"+r.Action.Interface+"|"+vrf.Name] = true
+					}
+				}
+			}
+		}
+	}
+	if len(switches) == 0 {
+		return nil
+	}
+	var out []string
+	for _, vrf := range c.Vrfs {
+		if !switches[vrf.Name] {
+			continue
+		}
+		for _, li := range vrf.L3Interfaces {
+			out = append(out, fmt.Sprintf("vrf:%s|if:%s|vlan:%d|addr:%s",
+				vrf.Name, li.Interface, li.Vlan, strings.Join(li.Addresses, ",")))
+		}
+	}
+	for _, vm := range c.VirtualMachineFunctions {
+		for _, n := range vm.Interfaces {
+			if switches[n.VirtualSwitch] {
+				out = append(out, fmt.Sprintf("vnf:%s|nic:%s|type:%s|vs:%s",
+					vm.Name, n.Name, n.Type, n.VirtualSwitch))
+			}
+		}
+	}
+	for _, ct := range c.ContainerFunctions {
+		for _, n := range ct.Interfaces {
+			if switches[n.VirtualSwitch] {
+				out = append(out, fmt.Sprintf("ct:%s|nic:%s|type:%s|vs:%s",
+					ct.Name, n.Name, n.Type, n.VirtualSwitch))
+			}
+		}
+	}
+	for k := range outsideOwners {
+		out = append(out, "outside:"+k)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // deletedVrfL3Revokes 返回一台**被删** VRF 需要撤销的 L3 接口（决策 #390①）：
 // 按 old 声明决定，**不依赖运行时登记**——ApplyVRF(新交换机) 经 reassignLocked 会把该口
 // 从旧表的 ifaces/subifs 登记摘掉，删除段的 DeleteVRF(旧) 因此拿不到解绑清单（round171 §1.1）。
@@ -1198,3 +1292,8 @@ func NewNoopApplier() Applier { return noopApplier{} }
 type noopApplier struct{}
 
 func (noopApplier) Apply(context.Context, model.Config, model.Config) error { return nil }
+
+// vsHasDHCPServer 该交换机声明了可运行的 DHCP 服务器（pool 两键齐全，与模型校验同口径）。
+func vsHasDHCPServer(vs model.VirtualSwitch) bool {
+	return vs.DhcpServerPoolStart != "" && vs.DhcpServerPoolEnd != ""
+}

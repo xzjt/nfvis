@@ -32,6 +32,9 @@ p { margin: 6px 0; }
 
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
+/* 窄输入框（如容器 exec 的「超时」秒数）：用类名而不是内联 style——CSP 为
+   default-src 'self'，内联 style 会被拦掉（R39-1 同族）。 */
+.w-5em { width: 5em; }
 .error { color: var(--err); }
 .hidden { display: none; }
 /* hidden 属性必须压过下面的 .login-wrap { display: flex }：作者样式优先于 UA 的
@@ -335,6 +338,15 @@ td.st-crit { color: var(--err); }
 .mh-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; }
 .mh-legend-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .mh-swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+/* 图例色块的配色（与 system.js 的 MH_COLORS 同序）：用类名而不是内联 style——
+   控制台 CSP 为 default-src 'self'（无 unsafe-inline），内联 style 会被拦掉、
+   色块退化成空白方块（R39-1 真机实测）。 */
+.mh-sw-0 { background: #4aa3df; }
+.mh-sw-1 { background: #3fb950; }
+.mh-sw-2 { background: #d29922; }
+.mh-sw-3 { background: #f85149; }
+.mh-sw-4 { background: #b58cff; }
+.mh-sw-5 { background: #4adfd0; }
 
 /* 部署向导（#/deploy）：类型选择卡与网卡映射表。
    拓扑预览是静态 SVG 示意（连线 = 网卡 → 交换机），不可拖拽编辑。 */

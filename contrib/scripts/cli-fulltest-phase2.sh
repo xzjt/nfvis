@@ -252,7 +252,26 @@ commit"
 expect_fail S2-dhcpserver "未配置 DHCP 服务器" "show virtual-switches vs-l2 dhcp-leases"
 
 # ---------- 主机防火墙：负例 → 正例（confirmed）→ 回读 → 清理（决策 #388）----------
-# 前置：本机管理口须已声明（防火墙作用面＝管理口入向；未声明时提交期会正确拒绝并给照做路径）。
+# 前置：本机管理口须已声明（防火墙作用面＝管理口入向；未声明时提交期会**正确拒绝**并给照做路径）。
+# R39-T1（round39 真机）：此前本块**没有**这一步，于是「未声明管理口」时：
+#   · 负例 `commit` 命中的是「先声明管理口」而不是「必须 commit confirmed」⇒ 判据落空；
+#   · 正例与全部清理步骤全被同一校验拒绝 ⇒ 5~6 条级联红（产品侧校验正确、套件前置不全）。
+# 故这里显式补前置：管理口未声明时先声明（本身也属管理面变更 ⇒ 须 confirmed + 确认），
+# 跑完再还原（不把管理口声明留在现场）。管理口名从 `show interfaces physical` 里取缺省 ens160。
+FW_MGMT_IF=${FW_MGMT_IF:-ens160}
+fw_had_mgmt=0
+if $CLI -c "show configuration | display set" 2>&1 | grep -q "set system management interface"; then
+  fw_had_mgmt=1
+  echo "  · 管理口已声明（防火墙前置满足）"
+else
+  echo "  · 声明管理口 $FW_MGMT_IF（防火墙前置；跑完还原）"
+  run S2-fw "configure
+set system management interface $FW_MGMT_IF
+commit confirmed 5"
+  run S2-fw "configure
+commit"
+fi
+
 # 负例：普通 commit（非 console 会话）必须被自锁保护拒绝，文案含照做路径 commit confirmed。
 expect_fail S2-fw "commit confirmed" "configure
 set system firewall rule 100 action accept source 192.0.2.0/24 protocol tcp port 9999
@@ -286,5 +305,14 @@ run S2-fw "configure
 commit"
 # 读视图回到「未配置」（不留下防火墙配置——套件自清场纪律）。
 expect_out S2-fw "未配置" "show system firewall"
+
+# 还原前置：本轮自己声明的管理口要撤掉（管理面变更 ⇒ 同样 confirmed + 确认）。
+if [ "$fw_had_mgmt" = 0 ]; then
+  run S2-fw "configure
+delete system management interface
+commit confirmed 5"
+  run S2-fw "configure
+commit"
+fi
 
 summary "阶段 2"

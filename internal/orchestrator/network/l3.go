@@ -157,6 +157,12 @@ func (p *L3Provider) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 
 	var idxs, subs []uint32
 	idxOf := make(map[string]uint32, len(vrf.L3Interfaces))
+	// 两趟：**先全清地址 + 全置表，再统一配地址**。
+	//
+	// 逐接口「clear→置表→add」在「同一张表内把一个前缀从 A 口挪到 B 口、两口都仍在声明里」
+	// 时会撞 VPP `-105 Address in use`：按声明序先处理 B 时，A 的前缀还挂在同表上。
+	// 两趟把「所有旧地址先消失」变成前提，再逐条 add，与声明序无关。
+	// 清地址仍必须先于置表（VPP 拒绝把仍带地址的接口移到其它 VRF，-114）。
 	for _, li := range vrf.L3Interfaces {
 		idx, sub, err := p.resolveL3Iface(c, li)
 		if err != nil {
@@ -172,16 +178,18 @@ func (p *L3Provider) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 		if err := c.SwInterfaceSetTable(idx, true, tableID); err != nil {
 			return fmt.Errorf("接口 %s 置入 VRF %s(IPv6): %w", li.Interface, vrf.Name, err)
 		}
-		for _, addr := range li.Addresses {
-			if err := c.SwInterfaceAddDelAddress(idx, addr, true, false); err != nil {
-				return fmt.Errorf("接口 %s 配地址 %s: %w", li.Interface, addr, err)
-			}
-		}
 		idxs = append(idxs, idx)
 		if sub != 0 {
 			subs = append(subs, sub)
 		}
 		idxOf[li.Interface] = idx
+	}
+	for i, li := range vrf.L3Interfaces {
+		for _, addr := range li.Addresses {
+			if err := c.SwInterfaceAddDelAddress(idxs[i], addr, true, false); err != nil {
+				return fmt.Errorf("接口 %s 配地址 %s: %w", li.Interface, addr, err)
+			}
+		}
 	}
 
 	// 静态路由：**只下发声明里的**（撤销由提交编排按旧/新声明求差集另行下发，

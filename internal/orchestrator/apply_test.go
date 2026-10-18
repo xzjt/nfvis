@@ -757,8 +757,9 @@ func TestL3RevokeDiffs(t *testing.T) {
 	}
 }
 
-// 计划顺序：l3-acl-unbind / del-l3-if 排在**本 VRF 的 ApplyVRF 之后、删除段的 del-acl 之前**
-// （先解引用、后删被引用，#342 同族——否则删 ACL 会撞上仍指向它的陈旧绑定）。
+// 计划顺序（缺陷 A 修订）：**del-l3-if 排在本 VRF 的 ApplyVRF 之前**（先回收旧接口，否则
+// 同一台 L3 交换机把地址从 A 口挪到 B 口时会撞 VPP `-105 Address in use`）；l3-acl-unbind
+// 与两者都排在删除段的 del-acl 之前（先解引用、后删被引用，#342 同族）。
 func TestApplyPlanL3RevokeBeforeDeleteACL(t *testing.T) {
 	calls := &[]string{}
 	oa, ok := NewApplier(recNet{calls: calls}, recCompute{calls: calls}, recContainer{calls: calls}).(*orchApplier)
@@ -796,8 +797,8 @@ func TestApplyPlanL3RevokeBeforeDeleteACL(t *testing.T) {
 		t.Fatalf("计划缺少预期操作（vrf=%d unbind=%d del-if=%d del-acl=%d）: %v",
 			vrfI, unbindI, delIfI, delAclI, descs)
 	}
-	if !(vrfI < unbindI && vrfI < delIfI) {
-		t.Fatalf("撤销应排在本 VRF 的 ApplyVRF 之后: %v", descs)
+	if !(delIfI < vrfI) {
+		t.Fatalf("被删的 l3-interface 必须先于本 VRF 的 ApplyVRF 回收（缺陷 A）: %v", descs)
 	}
 	if !(unbindI < delAclI && delIfI < delAclI) {
 		t.Fatalf("解引用（解绑/回收）应先于删 ACL: %v", descs)
@@ -1193,5 +1194,168 @@ func TestApplyVMImageProfileUnchangedNoOp(t *testing.T) {
 	}
 	if hasCall(*calls, "profiles") {
 		t.Fatalf("画像未变不应产生操作: %v", *calls)
+	}
+}
+
+// 缺陷 B（round39 真机）：NAT 的 inside 是从「规则引用的 L3 交换机 + 挂其上的 vNIC」推导的，
+// 因此**拓扑变了、nat 段没变**也必须重放一次 NAT——否则 VPP 里 inside 还是旧口，
+// in2out 计数在涨而会话建不起来（真机实测：地址从 vh-…-nic0 挪到 vh-…-nic1 后必须手工重提规则）。
+func TestApplyPlanReappliesNATWhenReferencedVrfChanges(t *testing.T) {
+	calls := &[]string{}
+	oa, ok := NewApplier(recNet{calls: calls}, recCompute{calls: calls}, recContainer{calls: calls}).(*orchApplier)
+	if !ok {
+		t.Fatal("NewApplier 应返回 *orchApplier")
+	}
+	nat := &model.NatConfig{Rules: []model.NatRule{{
+		Seq: 10, MatchSource: "192.168.200.0/24", VirtualSwitch: "vs-nat",
+		Action: model.NatAction{Interface: "ens224"},
+	}}}
+	mkCfg := func(l3if string) model.Config {
+		return model.Config{
+			Nat: nat,
+			Vrfs: []model.Vrf{
+				{Name: "vs-nat", L3Interfaces: []model.L3Interface{l3ifOf(l3if, "192.168.200.1/24")}},
+				{Name: "vs-wan", L3Interfaces: []model.L3Interface{l3ifOf("ens224", "192.168.98.1/24")}},
+			},
+		}
+	}
+	old, newCfg := mkCfg("vh-vm-a-nic0"), mkCfg("vh-vm-a-nic1")
+	ops := oa.plan(old, newCfg)
+	descs := make([]string, 0, len(ops))
+	for _, o := range ops {
+		descs = append(descs, o.desc)
+	}
+	pos := func(desc string) int {
+		for i, d := range descs {
+			if d == desc {
+				return i
+			}
+		}
+		return -1
+	}
+	natI, vrfI, delIfI := pos("nat"), pos("vrf[vs-nat]"), pos("del-l3-if[vs-nat/vh-vm-a-nic0]")
+	if natI < 0 {
+		t.Fatalf("被引用 VRF 的 l3-interface 变了，NAT 必须重放（缺陷 B）: %v", descs)
+	}
+	if delIfI < 0 || !(delIfI < vrfI) {
+		t.Fatalf("del-l3-if 必须先于 ApplyVRF（缺陷 A）: %v", descs)
+	}
+	if !(vrfI < natI) {
+		t.Fatalf("NAT 重放须排在 VRF 收敛之后（inside 解析依赖登记）: %v", descs)
+	}
+
+	// 负控 1：nat 段与被引用对象都没变 ⇒ 不排 nat（避免每轮提交白重放）。
+	same := mkCfg("vh-vm-a-nic1")
+	for _, d := range oa.plan(same, same) {
+		if d.desc == "nat" {
+			t.Fatalf("无变化时不应重放 NAT")
+		}
+	}
+	// 负控 2：只有**未被规则引用**的 VRF 变了 ⇒ 不排 nat。
+	unrelated := mkCfg("vh-vm-a-nic1")
+	unrelated.Vrfs = append(unrelated.Vrfs, model.Vrf{
+		Name: "vs-other", L3Interfaces: []model.L3Interface{l3ifOf("ens192", "10.0.9.1/24")},
+	})
+	for _, d := range oa.plan(mkCfg("vh-vm-a-nic1"), unrelated) {
+		if d.desc == "nat" {
+			t.Fatalf("未被 NAT 引用的 VRF 变化不应重放 NAT: %v", d.desc)
+		}
+	}
+	// 负控 3：无 NAT 规则 ⇒ 不排 nat。
+	noNatOld, noNatNew := mkCfg("vh-vm-a-nic0"), mkCfg("vh-vm-a-nic1")
+	noNatOld.Nat, noNatNew.Nat = nil, nil
+	for _, d := range oa.plan(noNatOld, noNatNew) {
+		if d.desc == "nat" {
+			t.Fatalf("未配置 NAT 时不应排 nat 操作")
+		}
+	}
+}
+
+// 缺陷 B 的第二来源：挂到被引用交换机上的 vNIC 变了（inside 集合同样变化）⇒ 重放 NAT。
+func TestApplyPlanReappliesNATWhenVnfNicAttached(t *testing.T) {
+	calls := &[]string{}
+	oa := NewApplier(recNet{calls: calls}, recCompute{calls: calls}, recContainer{calls: calls}).(*orchApplier)
+	nat := &model.NatConfig{Rules: []model.NatRule{{
+		Seq: 10, MatchSource: "192.168.200.0/24", VirtualSwitch: "vs-nat",
+		Action: model.NatAction{Interface: "ens224"},
+	}}}
+	base := model.Config{
+		Nat:             nat,
+		VirtualSwitches: []model.VirtualSwitch{{Name: "vs-nat", Type: "l3"}},
+		Vrfs:            []model.Vrf{{Name: "vs-nat", L3Interfaces: []model.L3Interface{l3ifOf("ens224", "192.168.98.1/24")}}},
+	}
+	withNic := base
+	withNic.VirtualMachineFunctions = []model.VMFunction{{
+		Name: "vm-a", Image: "img",
+		Interfaces: []model.VnfInterface{{Name: "nic0", Type: "vhost-user", VirtualSwitch: "vs-nat"}},
+	}}
+	found := false
+	for _, d := range oa.plan(base, withNic) {
+		if d.desc == "nat" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("vNIC 接入被 NAT 引用的交换机后必须重放 NAT（inside 集合变化）")
+	}
+}
+
+// l3ifOf 带地址的 L3 接口（无 ACL）。
+func l3ifOf(ifname string, addrs ...string) model.L3Interface {
+	return model.L3Interface{Interface: ifname, Addresses: addrs}
+}
+
+// R39-4（round39 真机）：同一次提交里把 DHCP 服务器换成中继，**服务器停用必须排在中继启动之前**
+// ——否则中继在 bind <BVI 地址>:67 时撞 `address already in use`，整次提交回滚（真机实测）。
+func TestApplyPlanRelayAfterServerTeardown(t *testing.T) {
+	calls := &[]string{}
+	oa := NewApplier(recNet{calls: calls}, recCompute{calls: calls}, recContainer{calls: calls}).(*orchApplier)
+	vsWithServer := model.VirtualSwitch{
+		Name: "vs-lan", Type: "l2",
+		Gateway:             &model.VSGateway{Addresses: []string{"192.168.99.1/24"}},
+		DhcpServerPoolStart: "192.168.99.100", DhcpServerPoolEnd: "192.168.99.200",
+	}
+	vsWithRelay := vsWithServer
+	vsWithRelay.DhcpServerPoolStart, vsWithRelay.DhcpServerPoolEnd = "", ""
+	vsWithRelay.DhcpRelayServer = "192.168.99.5"
+
+	order := func(old, newCfg model.Config) []string {
+		var out []string
+		for _, o := range oa.plan(old, newCfg) {
+			out = append(out, o.desc)
+		}
+		return out
+	}
+	pos := func(descs []string, want string) int {
+		for i, d := range descs {
+			if d == want {
+				return i
+			}
+		}
+		return -1
+	}
+	// 服务器 → 中继：先 server（停用）后 relay。
+	descs := order(
+		model.Config{VirtualSwitches: []model.VirtualSwitch{vsWithServer}},
+		model.Config{VirtualSwitches: []model.VirtualSwitch{vsWithRelay}},
+	)
+	srvI, relayI := pos(descs, "dhcp-server[vs-lan]"), pos(descs, "dhcp-relay[vs-lan]")
+	if srvI < 0 || relayI < 0 {
+		t.Fatalf("计划缺 DHCP 操作: %v", descs)
+	}
+	if !(srvI < relayI) {
+		t.Fatalf("服务器停用必须先于中继启动（否则 bind :67 冲突，R39-4）: %v", descs)
+	}
+	// 反向（中继 → 服务器）：保持 relay 在前（既有顺序逐字不变）。
+	descs2 := order(
+		model.Config{VirtualSwitches: []model.VirtualSwitch{vsWithRelay}},
+		model.Config{VirtualSwitches: []model.VirtualSwitch{vsWithServer}},
+	)
+	relayI2, srvI2 := pos(descs2, "dhcp-relay[vs-lan]"), pos(descs2, "dhcp-server[vs-lan]")
+	if relayI2 < 0 || srvI2 < 0 {
+		t.Fatalf("计划缺 DHCP 操作: %v", descs2)
+	}
+	if !(relayI2 < srvI2) {
+		t.Fatalf("反向切换应保持 relay 在前的既有顺序: %v", descs2)
 	}
 }

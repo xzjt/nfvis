@@ -315,6 +315,10 @@ export async function sriovSet() {
 // 「不可用」（available=false）与「可用但窗口内无点」是两种空态，分别如实说明；**绝不摆一张
 // 空图冒充「没有数据」**。折线用内联 SVG（无外部库、免构建），数据与 CLI/REST 同一份读视图。
 const MH_COLORS = ['#4aa3df', '#3fb950', '#d29922', '#f85149', '#b58cff', '#4adfd0'];
+// 图例色块的**类名**（与 MH_COLORS 同序、同色；style.css 的 .mh-sw-* 定义颜色）。
+// 为什么不用内联 style：控制台 CSP 为 `default-src 'self'`（无 unsafe-inline），
+// 内联 style 会被浏览器拦掉、色块变成空白——真机实测图例只剩文字（R39-1）。
+const MH_SWATCH_CLASSES = ['mh-sw-0', 'mh-sw-1', 'mh-sw-2', 'mh-sw-3', 'mh-sw-4', 'mh-sw-5'];
 const MH_W = 720, MH_H = 260, MH_PAD_L = 56, MH_PAD_R = 12, MH_PAD_T = 12, MH_PAD_B = 28;
 let mhMetric = '';   // 当前选中指标（跨重渲染保留）
 let mhWindow = '1h'; // 当前窗口
@@ -549,7 +553,10 @@ function renderMhLegend(name, series) {
       lastText = mhValueText(name, tail.value);
     }
     const row = el('div', { class: 'mh-legend-row' });
-    row.appendChild(el('span', { class: 'mh-swatch', style: 'background:' + MH_COLORS[i % MH_COLORS.length] }));
+    // 色块用**类名**上色，不用内联 style：控制台的 CSP 是 `default-src 'self'`（无 unsafe-inline），
+    // 内联 style 会被浏览器直接拦掉——图例色块退化成空白方块（真机实测：图例只剩文字、
+    // 看不出哪条线对应哪个序列）。类名在 style.css 里定义，CSP 允许。
+    row.appendChild(el('span', { class: 'mh-swatch ' + MH_SWATCH_CLASSES[i % MH_SWATCH_CLASSES.length] }));
     row.appendChild(el('span', { text: mhLabelsText(s.labels) + '（' + pts.length + ' 点，末值 ' + lastText + '）' }));
     box.appendChild(row);
   });

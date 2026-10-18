@@ -328,6 +328,18 @@ func boolField(s string) (bool, error) {
 }
 
 // l3VrfOf 取（或建）L3 交换机的同名 Vrf 条目（与 resources_w6.go 的只读 vrfOf 区分）。
+//
+// create=true 时**同时确保同名虚拟交换机条目存在且 type=l3**（R39-2 真机缺陷）：
+// 此前只建 VRF 条目，于是 `set virtual-switches vs-z l3-interface ens192 ip address …`
+// 在交换机尚未存在时会留下「半个对象」——配置里只有 `vrfs vs-z`，没有 `virtual-switches vs-z`：
+//   - `show virtual-switches` 不列它（列表按 committed 的 type=l3 交换机并入）、
+//     `show virtual-switches vs-z` 报「在 <数据面> 中不存在」；
+//   - `show vrfs` / display set 里却看得见，数据面也真的建了表并配了地址；
+//   - CLI 再无任何语句能删它（`delete virtual-switches vs-z` 报「无匹配配置」，
+//     `delete virtual-switches vs-z type l3` 报同样的错），只能整份 REST 候选文档改写。
+//
+// 交换机条目由本语句建出后，`type l3` 与 VRF 的成对关系与 `set … type l3` 别名一致，
+// display set 回放也自足（vrfs 回落发射器据同名 l3 交换机发 `type l3`）。
 func l3VrfOf(tree map[string]any, vsName string, create bool) (map[string]any, error) {
 	arr, _ := tree["vrfs"].([]any)
 	em, _ := selectElement(arr, "name", vsName)
@@ -337,6 +349,14 @@ func l3VrfOf(tree map[string]any, vsName string, create bool) (map[string]any, e
 		}
 		em = map[string]any{"name": vsName}
 		tree["vrfs"] = append(arr, em)
+	}
+	if create {
+		// 同名交换机不存在则一并建出（已存在时不动它的 type——L2 交换机加 l3-interface
+		// 由模型校验如实拒绝，不在别名层猜）。
+		vsArr, _ := tree["virtual_switches"].([]any)
+		if vs, _ := selectElement(vsArr, "name", vsName); vs == nil {
+			tree["virtual_switches"] = append(vsArr, map[string]any{"name": vsName, "type": "l3"})
+		}
 	}
 	return em, nil
 }
@@ -418,6 +438,13 @@ func lldpObj(tree map[string]any, create bool) map[string]any {
 // ---------- 各语句实现 ----------
 
 // aliasVSType：virtual-switches <n> type <l2|l3>，并同步 vrfs 条目。
+//
+// delete 分支（R39-3，round39 真机）：`delete virtual-switches <n> type l3` 此前只清 `type`
+// 叶、并删同名 VRF，于是交换机**条目本身**留着却没有 type ⇒ 提交被
+// 「virtual-switches[vs-nat].type: type 必须为 l2 或 l3」打回，操作者只能改用裸
+// `delete virtual-switches <n>`；两种写法本应等价。现在：清掉 type 后若该交换机再无任何
+// 其它声明（裸壳），整条回收（与裸 delete 同一结果）；仍带端口/网关等声明时保留条目、
+// 由校验如实拒绝（那是「L2 缺 type」的真实残缺，不该静默删掉操作者的其它声明）。
 func aliasVSType(tree map[string]any, t []string, isSet bool) error {
 	if !isSet {
 		vs, err := elemByID(tree, "virtual_switches", t[1])
@@ -426,6 +453,9 @@ func aliasVSType(tree map[string]any, t []string, isSet bool) error {
 		}
 		delete(vs, "type")
 		removeVrf(tree, t[1])
+		if vswitchIsBare(vs) {
+			removeElemByID(tree, "virtual_switches", t[1])
+		}
 		return nil
 	}
 	vs := ensureElem(tree, "virtual_switches", t[1])
@@ -438,6 +468,38 @@ func aliasVSType(tree map[string]any, t []string, isSet bool) error {
 		removeVrf(tree, t[1])
 	}
 	return nil
+}
+
+// vswitchIsBare 交换机条目除身份字段外没有任何声明（只剩 name）——即「裸壳」。
+func vswitchIsBare(vs map[string]any) bool {
+	for k := range vs {
+		if k != "name" {
+			return false
+		}
+	}
+	return true
+}
+
+// removeElemByID 按身份字段从数组里摘掉一条（不存在即无操作）。
+func removeElemByID(tree map[string]any, arrKey, ident string) {
+	arr, _ := tree[arrKey].([]any)
+	out := make([]any, 0, len(arr))
+	for _, e := range arr {
+		em, ok := e.(map[string]any)
+		if !ok {
+			out = append(out, e)
+			continue
+		}
+		if s, _ := em["name"].(string); s == ident {
+			continue
+		}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		delete(tree, arrKey)
+		return
+	}
+	tree[arrKey] = out
 }
 
 // aliasVSDhcpRelay：virtual-switches <n> dhcp-relay server <ip>（决策 #335）。
