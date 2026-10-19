@@ -174,7 +174,8 @@ func (d *Diag) resolveVRFDevice(vrf string) (string, error) {
 // 派生**同源**（复用 model 的导出入口，不另抄一份命名规则）：
 //   - L2 交换机且声明了网关地址 ⇒ 网关 VRF 设备（显式 gateway.vrf 优先，否则派生 `vr-<交换机名>`）；
 //   - `vrfs` 条目（含 type=l3 交换机的同名条目）⇒ 该名派生的设备名；
-//   - 其它（未声明网关的 L2 交换机没有专属 VRF、未知名）⇒ 报错并列出本机已知的内核 VRF 设备。
+//   - 其它（未声明网关的 L2 交换机没有专属 VRF、未知名）⇒ 报错并列出**可接受的写法**
+//     （交换机名 / VRF 名），同时点明内核设备名不接受（round40 R40-1）。
 func KernelVRFDeviceName(cfg model.Config, name string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -199,35 +200,53 @@ func KernelVRFDeviceName(cfg model.Config, name string) (string, error) {
 			return model.KernelVRFDevice(vs.Name), nil
 		}
 	}
-	known := knownKernelVRFDevices(cfg)
+	known := kernelVRFTargets(cfg)
 	if len(known) == 0 {
-		return "", fmt.Errorf("未知的 VRF/交换机 %q；本机当前没有任何内核 VRF 设备（L2 交换机需先声明网关地址、或建立 L3 交换机/VRF）", name)
+		return "", fmt.Errorf("未知的 VRF/交换机 %q；本机当前没有可用于诊断的 VRF 域"+
+			"（L2 交换机需先声明网关地址、或建立 L3 交换机/VRF）；"+
+			"vrf 参数填**交换机名或 VRF 名**，不是内核设备名", name)
 	}
-	return "", fmt.Errorf("未知的 VRF/交换机 %q；本机已知的内核 VRF 设备: %s", name, strings.Join(known, "、"))
+	names := make([]string, 0, len(known))
+	for _, t := range known {
+		names = append(names, t.Name)
+	}
+	return "", fmt.Errorf("未知的 VRF/交换机 %q；本机可用的写法（交换机名 / VRF 名）: %s。"+
+		"vrf 参数填**配置对象名**，不是内核设备名（如 %s）；若你要找的是设备名，请改填上面对应的交换机名",
+		name, strings.Join(names, "、"), known[0].Dev)
 }
 
-// knownKernelVRFDevices 本配置在内核数据面下会创建的 VRF 设备名（去重、按声明序固定，报错可复现）。
-func knownKernelVRFDevices(cfg model.Config) []string {
+// kernelVRFTarget 可接受的诊断 VRF 写法（供错误文案逐条列出）。
+//
+// 名字是**配置对象名**（交换机名 / VRF 名），不是内核设备名——设备名是派生结果
+// （L2 网关域为 `vr-<交换机名>`），诊断命令不接受它。两者分开列出，避免把派生名
+// 当成「已知可填项」误导操作者（round40 R40-1）。
+type kernelVRFTarget struct {
+	Name string // 可接受的写法
+	Dev  string // 解析出的内核设备名
+}
+
+// kernelVRFTargets 本配置在内核数据面下**可用于诊断 vrf 参数**的配置对象（去重、按声明序固定）。
+func kernelVRFTargets(cfg model.Config) []kernelVRFTarget {
 	seen := map[string]bool{}
-	var out []string
-	add := func(dev string) {
-		if dev == "" || seen[dev] {
+	var out []kernelVRFTarget
+	add := func(name, dev string) {
+		if name == "" || dev == "" || seen[name] {
 			return
 		}
-		seen[dev] = true
-		out = append(out, dev)
+		seen[name] = true
+		out = append(out, kernelVRFTarget{Name: name, Dev: dev})
 	}
 	for _, vs := range cfg.VirtualSwitches {
 		if vs.Type == "l2" && vs.Gateway != nil && len(vs.Gateway.Addresses) > 0 {
-			add(model.KernelGatewayVRFDevice(vs.Name, vs.Gateway.Vrf))
+			add(vs.Name, model.KernelGatewayVRFDevice(vs.Name, vs.Gateway.Vrf))
 		}
 	}
 	for _, vrf := range cfg.Vrfs {
-		add(model.KernelVRFDevice(vrf.Name))
+		add(vrf.Name, model.KernelVRFDevice(vrf.Name))
 	}
 	for _, vs := range cfg.VirtualSwitches {
 		if vs.Type == "l3" {
-			add(model.KernelVRFDevice(vs.Name))
+			add(vs.Name, model.KernelVRFDevice(vs.Name))
 		}
 	}
 	return out

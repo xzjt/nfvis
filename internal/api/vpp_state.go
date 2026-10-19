@@ -12,7 +12,11 @@ package api
 //   CLI `show …` 返回**运行态**（供人判读「现在实际是什么」）。
 // 二者事实不同源、口径不同，不是漂移。
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/xzjt/nfvis/internal/model"
+)
 
 // errVppNotWired VPP 运行态未装配（区别于「查询失败」）。
 var errVppNotWired = errors.New("VPP 未接入（编排器未装配）")
@@ -60,6 +64,23 @@ func (x *cliExecutor) bdStates() ([]BridgeDomainState, error) {
 		return nil, errVppNotWired
 	}
 	return x.vppState.BridgeDomains()
+}
+
+// bdIDApplicable 当前数据面是否**有** BD-ID 这个概念。
+//
+// 只有 VPP 的 bridge-domain 有 BD-ID；内核 bridge 没有（netkernel 侧该字段恒 0 且不使用）。
+// 读视图在不适用的数据面下**不给**该字段/该列，而不是把 0 当成真实标识（round40 R40-O1；
+// 与「取不到就不给，不编造」同口径）。
+func (x *cliExecutor) bdIDApplicable() bool {
+	return x.dpMode() != model.DataPlaneKernel
+}
+
+// bdIDText CLI 列表/详情里的 BD-ID 文本：不适用时给「—」。
+func (x *cliExecutor) bdIDText(id uint32) any {
+	if !x.bdIDApplicable() {
+		return "—"
+	}
+	return id
 }
 
 func (x *cliExecutor) ifaceStates() (map[string]InterfaceState, error) {

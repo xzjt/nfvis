@@ -68,9 +68,9 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 				name = "-"
 			}
 			bd = x.withoutInternalPorts(bd) // 决策 #359：内置 DHCP tap 不进用户端口视图
-			fmt.Fprintf(&b, "%-10d %-22s %-6s %-6s %-6d %s\n", bd.ID, name,
+			fmt.Fprintf(&b, "%-10v %-22s %-6s %-6s %-6d %s\n", x.bdIDText(bd.ID), name,
 				yn(bd.Learn), yn(bd.Flood), len(bd.Ports), note)
-			items = append(items, bdView(bd))
+			items = append(items, x.bdViewForDP(bd))
 		}
 		// 决策 #467：committed 里 type=l3 的交换机并入列表（BD-ID/Learn/Flood/Ports 列「—」、
 		// Note 列「l3（VRF）」）——与 REST GET /virtual-switches/Web 列表三面同源（此前 CLI
@@ -108,7 +108,7 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 	// detail 及不带子命令：运行态（状态 + 成员口）叠加配置的类型信息。
 	// （ports/statistics 已在函数入口转给端口读视图，决策 #326。）
 	*bd = x.withoutInternalPorts(*bd) // 决策 #359：内置 DHCP tap 不进用户端口视图
-	m := bdView(*bd)
+	m := x.bdViewForDP(*bd)
 	learnLimit := 0
 	if cfg, err := x.engine.Committed(); err == nil {
 		for _, vs := range cfg.VirtualSwitches {
@@ -170,6 +170,9 @@ func kernelLearnLimitNote(limit, count int, countOK bool) string {
 }
 
 // bdView BD 运行态的对外形态（structured 快照与 detail 渲染共用）。
+//
+// 注意：**CLI 侧请用 `bdViewForDP`**——`bd_id` 只有 VPP 才有（内核 bridge 无此概念，见 round40
+// R40-O1）；本函数保留给「数据面中立、由调用方决定是否附带 bd_id」的既有用法。
 func bdView(bd BridgeDomainState) map[string]any {
 	ports := make([]any, 0, len(bd.Ports))
 	for _, p := range bd.Ports {
@@ -181,6 +184,16 @@ func bdView(bd BridgeDomainState) map[string]any {
 		"forward": bd.Forward, "arp_term": bd.ArpTerm, "mac_age": bd.MacAge,
 		"ports": ports,
 	}
+}
+
+// bdViewForDP 按**当前数据面**给 BD 的对外形态：内核数据面下**不出现 `bd_id`**（不编造 0），
+// VPP 数据面下与 bdView 逐字相同（round40 R40-O1）。
+func (x *cliExecutor) bdViewForDP(bd BridgeDomainState) map[string]any {
+	m := bdView(bd)
+	if !x.bdIDApplicable() {
+		delete(m, "bd_id")
+	}
+	return m
 }
 
 // vswitchConfigNames committed 配置里的交换机名集合（用于标注「未在配置中」）。

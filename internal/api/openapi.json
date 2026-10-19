@@ -3541,7 +3541,7 @@
             "description": "运行态统计（**仅详情端点 `GET /virtual-switches/{name}` 附带**；取自 VPP 运行态，\n与 CLI `show virtual-switches <name> statistics` 同源，FR-NET-016）。\n运行态未接入或交换机不在数据面时不返回（不编造）。\n",
             "properties": {
               "bd_id": {
-                "description": "VPP bridge-domain ID",
+                "description": "VPP bridge-domain ID；**内核数据面下省略该字段**（内核 bridge 没有 BD-ID 概念，不编造 0）",
                 "type": "integer"
               },
               "ports": {

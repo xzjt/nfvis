@@ -500,7 +500,13 @@ func (s *Server) vswitchStatistics(ctx context.Context, name string) (map[string
 		}
 		ports = append(ports, row)
 	}
-	return map[string]any{"bd_id": bd.ID, "ports": ports}, true
+	st := map[string]any{"ports": ports}
+	// bd_id 只有 VPP 的 bridge-domain 才有；内核 bridge 没有此概念，**省略该键**而不是发 0
+	// （round40 R40-O1；与「取不到就不给，不编造」同口径）。
+	if s.dataPlaneMode() != model.DataPlaneKernel {
+		st["bd_id"] = bd.ID
+	}
+	return st, true
 }
 
 // handlePostVSwitch POST /api/v1/virtual-switches：创建（重名 409）。

@@ -230,6 +230,8 @@ func (x *cliExecutor) showRuntimeSwitchPorts(name string) string {
 	if shown == 0 {
 		b.WriteString("（该 BD 无成员口）\n")
 	}
-	x.structured = map[string]any{"bd_id": bd.ID, "name": bd.Name, "ports": items}
+	bdv := x.bdViewForDP(*bd)
+	bdv["ports"] = items
+	x.structured = bdv
 	return b.String()
 }

@@ -3741,7 +3741,7 @@ components:
             与 CLI `show virtual-switches <name> statistics` 同源，FR-NET-016）。
             运行态未接入或交换机不在数据面时不返回（不编造）。
           properties:
-            bd_id: { type: integer, description: VPP bridge-domain ID }
+            bd_id: { type: integer, description: "VPP bridge-domain ID；**内核数据面下省略该字段**（内核 bridge 没有 BD-ID 概念，不编造 0）" }
             ports:
               type: array
               description: 成员端口的收发计数（每端口一项）

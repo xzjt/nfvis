@@ -73,6 +73,8 @@ function renderVSwitches(vss, rows) {
       const tr = rowClickable(el('tr'), path);
       [r.cfg.name, r.cfg.type,
         (r.cfg.ports || []).map((p) => p.interface || p.vnf || p.container || '?').join(', '),
+        // 内核数据面下没有 BD-ID 概念：服务端省略该字段（round40 R40-O1），此处如实显示「—」，
+        // 不把缺字段误画成 0。
         r.stat ? r.stat.bd_id : undefined].forEach((c) => {
         tr.appendChild(el('td', { text: String(dash(c)) }));
       });

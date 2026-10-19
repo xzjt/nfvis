@@ -265,9 +265,13 @@ func TestDiagVRFLongNameTruncationMatchesNaming(t *testing.T) {
 	}
 }
 
-// 未知 vrf ⇒ 明确报错并列出已知设备；不得执行宿主命令。未声明网关的 L2 交换机没有专属 VRF，
-// 同样按「未知」报错。
-func TestDiagVRFUnknownReportsKnownDevices(t *testing.T) {
+// 未知 vrf ⇒ 明确报错并列出**可接受的写法**（交换机名/VRF 名）；不得执行宿主命令。
+// 未声明网关的 L2 交换机没有专属 VRF，同样按「未知」报错。
+//
+// round40 R40-1 回归点：报错**不得**把内核设备名列为「已知可填项」——旧文案写
+// 「本机已知的内核 VRF 设备: vr-lan、vs-l3」，与前半句「未知的 VRF/交换机 "vr-lan"」自相矛盾，
+// 操作者照它填一定失败。现文案列出配置对象名，并把设备名明确标为「不接受」。
+func TestDiagVRFUnknownReportsAcceptedNames(t *testing.T) {
 	cfg := model.Config{
 		VirtualSwitches: []model.VirtualSwitch{
 			{Name: "lan", Type: "l2", Gateway: &model.VSGateway{Addresses: []string{"192.168.99.1/24"}}},
@@ -282,21 +286,39 @@ func TestDiagVRFUnknownReportsKnownDevices(t *testing.T) {
 		if err == nil {
 			t.Fatalf("未知 vrf %q 应报错", bad)
 		}
-		if !strings.Contains(err.Error(), bad) {
+		msg := err.Error()
+		if !strings.Contains(msg, bad) {
 			t.Fatalf("报错应点名未知对象 %q：%v", bad, err)
 		}
-		for _, want := range []string{"vr-lan", "vs-l3"} { // 已知设备清单
-			if !strings.Contains(err.Error(), want) {
-				t.Fatalf("报错应列出已知设备 %q：%v", want, err)
+		// 可接受的写法必须列出（配置对象名）。
+		for _, want := range []string{"lan", "vs-l3", "交换机名"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("报错应列出可接受的写法 %q：%v", want, err)
 			}
+		}
+		// 关键回归点：不得把派生设备名说成「已知的内核 VRF 设备」（那是自相矛盾的旧文案）。
+		if strings.Contains(msg, "已知的内核 VRF 设备") {
+			t.Fatalf("报错不得把设备名列为已知可填项（round40 R40-1）：%v", err)
+		}
+		if !strings.Contains(msg, "不是内核设备名") {
+			t.Fatalf("报错应点明设备名不接受：%v", err)
 		}
 		if len(r.calls) != 0 {
 			t.Fatalf("解析失败时不得执行宿主命令：\n%s", r.joined())
 		}
 	}
 
-	// traceroute 同口径。
+	// 设备名（派生结果）仍不被接受——解析范围不变，只改提示。
 	r := &diagRecRunner{}
+	if _, err := NewDiag(r, diagResolverFor(cfg)).Ping(context.Background(), "10.0.0.1", "", "vr-lan", 1, false); err == nil {
+		t.Fatal("内核设备名 vr-lan 不应被接受（诊断 vrf 填配置对象名）")
+	}
+	if len(r.calls) != 0 {
+		t.Fatalf("解析失败时不得执行宿主命令：\n%s", r.joined())
+	}
+
+	// traceroute 同口径。
+	r = &diagRecRunner{}
 	if _, err := NewDiag(r, diagResolverFor(cfg)).Traceroute(context.Background(), "10.0.0.1", "nope", false); err == nil {
 		t.Fatal("traceroute 未知 vrf 应报错")
 	}
