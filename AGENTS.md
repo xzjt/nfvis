@@ -2134,3 +2134,15 @@ bash contrib/scripts/offline-installer-selftest.sh --run build/nfvis-vX.run   # 
   都**不会出现**（决策 #81）。交互行为必须在 **pty** 下验证：`script -qec '<cmd>' /dev/null`，
   并用 `cat -A` 核对行尾是 `^M$`（CRLF）而非裸 `$`（LF）；可复跑的手动冒烟见
   `contrib/scripts/cli-pty-smoke.sh`（10 项断言，修复前失败 7 项）。
+- **构建报网络错误时，先用「失败的那条命令本身」带代理重试一次，再考虑搬运依赖**（2026-10-19 round40 发版）：
+  VM 上 `make deb` 失败于 `proxy.golang.org: connection refused`（模块缓存为空），当时**从宿主打包
+  `vendor/` 27MB 上传**解围——**多余的一步**。实测：`proxy.golang.org` 直连无响应、经
+  `192.168.155.1:2333` **200**；`HTTPS_PROXY=… go mod download …` **RC=0**；**删掉 vendor、仅靠代理**
+  `make deb` 同样 **RC=0**。根因是**探测的不是真正失败的目标**——只用 curl 测了 USTC 镜像就断定
+  「网络/代理正常」，而 Go 走的是另一条链路。正确写法：
+  `env HTTPS_PROXY=http://192.168.155.1:2333 HTTP_PROXY=… make deb …`。
+  **附带口径**：`-mod=vendor` 与 module 模式产出的包**不可互比**——二进制大小一致，但 module 模式会给
+  每个依赖写 `h1:` 校验和、vendor 模式不写，故摘要不同；**发版以同一种模式连打两次**比对为准。
+- **给操作者的代理提示要用在「真正失败的那条链路」上**：本项目环境里 apt（USTC）与 Go 模块
+  （`proxy.golang.org`）、GitHub 上传/下载各有不同可达性——**分别探测、分别选路**，
+  别用一条链路的成功推断另一条。
