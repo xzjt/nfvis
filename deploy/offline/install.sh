@@ -76,7 +76,12 @@ have() { command -v "$1" >/dev/null 2>&1; }
 PKGS_COMMON="nfvis
 libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils cloud-image-utils ovmf-generic
 genisoimage docker.io chrony tcpdump curl ca-certificates"
-PKGS_VPP="vpp vpp-plugin-core vpp-plugin-dpdk vpp-drivers"
+# 运行时 VPP 包：**必须装齐运行时能力**。
+# `vpp-crypto-engines` 是运行时加密引擎（Depends 只依赖 vpp，提供 IPsec 类能力）——
+# 此前漏在安装清单外，只随载荷交付不安装，导致装完的机器 VPP 加密能力缺一块。
+# **不装**的是纯开发/调试包：`vpp-dev`、`libvppinfra-dev`（头文件与链接库）、
+# `vpp-plugin-devtools`（调试插件）——它们随载荷交付以便现场排障与二次开发，但默认不装。
+PKGS_VPP="vpp vpp-plugin-core vpp-plugin-dpdk vpp-drivers vpp-crypto-engines"
 
 pkgs_install() {
     printf '%s
