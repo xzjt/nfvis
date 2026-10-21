@@ -44,21 +44,22 @@ func TestShowVSwitchListIncludesCommittedL3(t *testing.T) {
 
 	out := x.Execute("admin", aaaClassSU, "ssh", "show virtual-switches").Output
 
-	// 表头逐字不变
-	if !strings.Contains(out, "BD-ID      Name                   Learn  Flood  Ports  Note\n") {
+	// 表头逐字不变（决策 #495：`Ports` → `Ports(rt)`，明示该列是**运行态**成员数，
+	// 与 `show virtual-switches <n> ports` 的派生并集不是同一口径）。
+	if !strings.Contains(out, "BD-ID      Name                   Learn  Flood  Ports(rt) Note\n") {
 		t.Fatalf("表头应逐字不变:\n%s", out)
 	}
 	// L2 行逐字不变（含 orphan 行）
 	for _, want := range []string{
-		"42         vs-lan                 up     up     1      \n",
-		"77         phantom                up     up     0      未在配置中（运行态存在）\n",
+		"42         vs-lan                 up     up     1         \n",
+		"77         phantom                up     up     0         未在配置中（运行态存在）\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("L2/运行态行应逐字不变，缺 %q:\n%s", want, out)
 		}
 	}
 	// L3 行：BD-ID/Learn/Flood/Ports 列「—」、Note 列「l3（VRF）」
-	wantL3 := "—          vs-wan                 —      —      —      l3（VRF）\n"
+	wantL3 := "—          vs-wan                 —      —      —         l3（VRF）\n"
 	if !strings.Contains(out, wantL3) {
 		t.Fatalf("列表应含 L3 行 %q:\n%s", wantL3, out)
 	}
@@ -158,5 +159,31 @@ func TestShowVSwitchL3SubviewsHonestText(t *testing.T) {
 	got := x2.Execute("admin", aaaClassSU, "ssh", "show virtual-switches vs-cfg").Output
 	if !strings.Contains(got, "不存在") {
 		t.Fatalf("L2 且运行态无 BD 的名字应保持既有「不存在」文案:\n%s", got)
+	}
+}
+
+// 决策 #495（收口 R41-1）：列表这一列的**口径**必须在输出里写明——它是**运行态**成员数，
+// 与 `show virtual-switches <n> ports` 的派生并集不是同一口径。此前同族三个视图读出三个
+// 数字而没有任何一处说明，操作者无从判断哪个才是「实际有几个口」。
+//
+// 红-绿：把列名改回 `Ports`、或删掉表尾口径注，本用例即精确报红。
+func TestShowVSwitchListStatesPortColumnCaliber(t *testing.T) {
+	x := l3Fixture(t)
+	x.setVppState(fakeVppState{bds: []BridgeDomainState{
+		{ID: 42, Name: "vs-lan", Learn: true, Flood: true,
+			Ports: []BridgeDomainPort{{Name: "ens192", SwIfIndex: 1}}},
+	}})
+
+	out := x.Execute("admin", aaaClassSU, "ssh", "show virtual-switches").Output
+	// 列名带 (rt) 后缀，明示运行态口径。**按表头行匹配**（`Ports(rt)` 在表尾口径注里也
+	// 出现一次，只查子串的话改回表头也不会报红——本守护必须钉住「表头本身」）。
+	if !strings.Contains(out, "Ports(rt) Note\n") {
+		t.Fatalf("列表表头应标出运行态口径（Ports(rt)）:\n%s", out)
+	}
+	// 表尾口径注：点明运行态数 ≠ 成员读视图，并指向正确的读法
+	for _, want := range []string{"运行态", "show virtual-switches", "ports", "口径不同"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("表尾口径注应含 %q:\n%s", want, out)
+		}
 	}
 }

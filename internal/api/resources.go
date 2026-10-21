@@ -349,11 +349,61 @@ func (s *Server) handleGetVSwitches(w http.ResponseWriter, r *http.Request) {
 		mapEngineError(w, err)
 		return
 	}
+	// 决策 #495（收口 R41-1）：同一事实「这台交换机有几个成员口」的两个口径并列给出。
+	// `ports` 是配置声明的原始端口（`PUT …/ports` 的回写来源，语义不动），只给它会与
+	// `/ports` 读出不同的数；故补两个计数：声明数＝len(ports)，总数＝成员读视图条数。
+	// 总数**必须**与 `GET …/{name}/ports` 的条目数逐值相等，因此与它共用同一实现
+	// （switchPortViews + 同一份运行态成员收集 switchRuntimePortNames）——两处各写一遍
+	// 必然漂移，而「同一事实两个视图数字不一致」正是本条要根治的缺陷。
+	// 运行态快照整表只取一次（不逐交换机重复打数据面）；取不到即 bds 为 nil，各交换机
+	// 退回配置派生条数（契约写明的降级口径，不报错、不省略字段、不编造运行态条目）。
+	bds, taps := s.vswitchRuntimeSnapshot()
 	out := make([]map[string]any, 0, len(cfg.VirtualSwitches))
 	for _, vs := range cfg.VirtualSwitches {
-		out = append(out, vswitchView(vs, s.dhcpActiveLeasesOf))
+		view := vswitchView(vs, s.dhcpActiveLeasesOf)
+		view["ports_declared_count"] = len(vs.Ports) // nil 时给 0（不省略、不发 null）
+		view["ports_total_count"] = len(switchPortViews(cfg, vs.Name, switchRuntimePortNames(bds, taps, vs.Name)))
+		out = append(out, view)
 	}
 	writeJSON(w, http.StatusOK, paginate(r, out))
+}
+
+// vswitchRuntimeSnapshot 交换机运行态快照（决策 #495）：BD 列表 + 内置 DHCP tap 索引。
+// 运行态不可用（未装配/查询失败）时返回 nil,nil——调用方据此只出配置派生条目。
+func (s *Server) vswitchRuntimeSnapshot() ([]BridgeDomainState, map[uint32]bool) {
+	if s.vppState == nil {
+		return nil, nil
+	}
+	bds, err := s.vppState.BridgeDomains()
+	if err != nil {
+		return nil, nil
+	}
+	return bds, s.dhcpInternalPorts() // 决策 #359：内置 DHCP tap 按 sw_if_index 过滤
+}
+
+// switchRuntimePortNames 运行态某 BD 的成员口名（决策 #495 的**单一实现**：列表的
+// ports_total_count 与 `GET …/{name}/ports` 都走它，两处数字因此恒相等）。
+// 该 BD 不在数据面时返回 nil（不编造运行态成员）；空串口名跳过（不产出一个无名条目）。
+func switchRuntimePortNames(bds []BridgeDomainState, taps map[uint32]bool, name string) []string {
+	var out []string
+	for _, bd := range bds {
+		if bd.Name != name {
+			continue
+		}
+		for _, p := range bd.Ports {
+			if taps[p.SwIfIndex] || p.Name == "" {
+				continue
+			}
+			out = append(out, p.Name)
+		}
+	}
+	return out
+}
+
+// runtimeSwitchPortNames 单台交换机的运行态成员口名（`GET …/{name}/ports` 的入口）。
+func (s *Server) runtimeSwitchPortNames(name string) []string {
+	bds, taps := s.vswitchRuntimeSnapshot()
+	return switchRuntimePortNames(bds, taps, name)
 }
 
 // vswitchView 交换机的读视图形状（决策 #335/#359）：配置库的 dhcp_relay_server 以
@@ -594,25 +644,9 @@ func (s *Server) handleGetVSwitchPorts(w http.ResponseWriter, r *http.Request) {
 		if vs.Name == name {
 			// 运行态成员（仅有 source=runtime 的补条目）：数据面未接入/该 BD 不在数据面时为空，
 			// 不编造。配置派生部分与 CLI `show virtual-switches <n> ports` 同源（switchPortViews）。
-			// 决策 #359：内置 DHCP tap 按 sw_if_index 过滤，不进端口读视图（用户不可见/不可删）。
-			var runtimePorts []string
-			taps := s.dhcpInternalPorts()
-			if s.vppState != nil {
-				if bds, err := s.vppState.BridgeDomains(); err == nil {
-					for _, bd := range bds {
-						if bd.Name != name {
-							continue
-						}
-						for _, p := range bd.Ports {
-							if taps[p.SwIfIndex] {
-								continue
-							}
-							runtimePorts = append(runtimePorts, p.Name)
-						}
-					}
-				}
-			}
-			ports := switchPortViews(cfg, name, runtimePorts)
+			// 决策 #495：运行态成员收集抽成 runtimeSwitchPortNames 单一实现——列表的
+			// ports_total_count 也调它，两处数字因此恒相等（含 #359 的内置 DHCP tap 过滤）。
+			ports := switchPortViews(cfg, name, s.runtimeSwitchPortNames(name))
 			if ports == nil {
 				ports = []model.SwitchPortView{}
 			}

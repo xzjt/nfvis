@@ -441,3 +441,70 @@ lifecycle 40/0/3、pty 10/10。
   镜像仓库 alpine / debian / ct / ct.tar / debian-12-generic-amd64.qcow2；
   docker `ct:latest` + `alpine:3.20`。
 · ⚠️ 若快照恢复，本节现场全部作废，需按 §0 重做。
+
+--------------------------------------------------------------------------------
+§10 收口：决策 #495（R41-1 / R41-2 / R41-3 三条口径缺陷）
+--------------------------------------------------------------------------------
+日期：2026-10-21（同一轮，走查登记后立即修复）。用户指令：「修，如果涉及到 web，也同步修复，
+实现类工作派子智能体。」——按此执行：契约先行（附录 A #495 + openapi），实现分三路并行
+（REST 计数 / 派生端口名 / show nat 降级），Web 与 CLI 列表由主会话同步。
+
+10.1 **R41-1 口径统一（不改 `ports` 语义）**
+  · 契约：`VirtualSwitch.ports` 补 description（＝配置声明；判断「某口是否属于本交换机」请用
+    `/ports`，否则漏派生与运行时成员）；新增 `ports_declared_count` / `ports_total_count`。
+  · 实现：`handleGetVSwitches` 补两个计数；`ports_total_count` 与 `/ports` **共用同一实现**
+    （`vswitchSnapshot` → `switchRuntimePortNames` → `switchPortViews`），两处数字恒相等
+    （此前 `/ports` handler 内联收集运行态成员的代码已删除，只留一份）。
+    运行态不可用时退化为配置派生条数（不报错、不省略、不编造运行态条目）。
+  · CLI：列表列名 `Ports` → **`Ports(rt)`**，表尾加口径注（明示运行态数 ≠ 成员读视图）。
+  · Web：列表「成员端口」列并列 **配置 / 读视图** 两个数（相等时只显一个），列头与页内说明写明口径。
+  · 真机（VPP）：`declared=1 / total=2`，`GET …/vs-lan/ports` = **2 条**（ens192, bvi0）——相等。
+  · 真机（内核）：`declared=1 / total=3`，`/ports` = **3 条**（ens192, VNF 派生, vnet1）——相等。
+  · 真机（Web，内核）：列表行显示 `vs-lan | l2 | 1 / 3 | —`、`vs-wan | l3 | 0 | —`；
+    表头「成员端口 配置 / 读视图」在位。
+
+10.2 **R41-3 内核下 VNF 派生端口名如实化**
+  · `AttachedPortName` 的 VNF 分支加数据面判断（与容器分支同口径）：内核下返回空串，
+    调用方按既有约定退回 `<vm>/<nic>`；VPP 侧逐字不变（仍 `vh-<vm>-<nic>`）。
+  · 契约同补：`SwitchPortView.port` **可缺席**（`omitempty`）——缺席时用 `source` + 身份字段寻址。
+  · 真机前（旧实现）：端口表 `ens192 | vh-r41v-nic0(vnf) | vnet0(runtime)`，
+    `ip link show vh-r41v-nic0` → **does not exist**。
+  · 真机后（新实现，同一现场）：`ens192 | r41v/nic0(vnf) | vnet1(runtime)`，
+    与 `bridge link show master vs-lan` 的实际成员（ens192 / vnet1 / 内置 tap）一一对应；
+    不再有「表里有、设备没有」的条目。
+  · 未做 tap 名簿记（`vnetN` 由 libvirt 分配且随域重建变化，需整套生命周期维护）；
+    `CheckVnfPorts` 在核下继续如实不报（R41-4 保持现状）。
+
+10.3 **R41-2 `show nat` 能力哨兵行内降级**
+  · `execShowNat` 报错时先过能力哨兵判据（`unsupportedCapabilityErr`，与 REST 501 **同一判据**）：
+    命中 → 配置段照给 + 一行「运行态不可用（…不受支持——NAT 会话表）；切回 VPP 数据面后可用」，
+    **不带 `%` 前缀、退出码 0**；非哨兵错误仍 `%%` 报失败。
+  · 措辞抽 `runtimeUnavailableText` 与 `show vxlan tunnels` 共用（同族不造第三套降级风格）。
+  · 结构化视图：`{runtime_available:false, runtime_reason:…}`，不塞空 `nat_sessions`。
+  · 真机（内核，同域 NAT 现场）：输出
+      `source-pool p41 address-range …;`
+      `rules 30 match source 192.168.98.0/24 virtual-switch vs-wan action …;`
+      `运行态不可用（该能力在 Linux 内核网络数据面下不受支持——NAT 会话表）；切回 VPP 数据面后可用`
+    且 **rc=0**（修复前同现场 rc=1）。
+
+10.4 **守护（均做过红-绿）**
+  · `TestGetVSwitchesPortCountsMatchPortsEndpoint`：有派生/运行态时两数不等，且 `total` 与
+    `/ports` 条目数逐值相等；把 `total` 临时改成 `len(vs.Ports)` 即精确报红。
+  · `TestGetVSwitchesPortCountsRuntimeUnavailable`（两子例）/ `…ZeroWhenNoPorts`。
+  · `TestShowVSwitchListStatesPortColumnCaliber`：钉**表头行**（`Ports(rt) Note`）与表尾口径注；
+    改回 `Ports` 即报红（首版只查子串，被表尾注里的同名词掩盖过——已收紧）。
+  · `TestAttachedPortNameVNFKernelReturnsEmpty` / `…VNFMemifKernelReturnsEmpty` /
+    `TestDerivedSwitchPortsKernelVNFPortEmpty` / `TestSwitchPortViewsKernelVNFLabelFallsBack`
+    （内核空串、VPP 逐字不变；注回旧实现即报红）。
+  · `TestCLIShowNatUnsupportedIsInlineDegradation` / `…NoConfig` / `…NoteVppMode` +
+    对照组 `TestCLIShowNatRuntimeFaultStillFails`（证明只降级能力哨兵、不吞真故障）。
+
+10.5 **检查与现场**
+  · `go build ./...`、`go vet ./...`、`go test -p 1 ./internal/model/ ./internal/api/`
+    （model ok / api **538s ok**）、`archtest`、`docscheck`（决策 **397** 项）、
+    `check_openapi_json_sync`、`check_openapi_no_duplicate_keys`、`check_suite_contract_sync`、
+    `node --check`、`web-console-config-selftest` —— 全绿。
+  · 真机用**交叉编译替装二进制**验证（`3.0.23~r41`，原件备份 `/root/bin-orig-r41-*`），
+    两数据面各复核一次后已还原：切回 VPP、DPDK 重新绑定、配置回到基线 39 条、
+    `show alarms active` 空、nfvis/vpp 均 active。
+  · **正式发版仍须走 `make deb` 两打逐字节一致 + 四套件复跑**（本轮未做，如实登记）。

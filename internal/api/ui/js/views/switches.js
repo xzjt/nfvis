@@ -71,8 +71,16 @@ function renderVSwitches(vss, rows) {
     list.forEach((r) => {
       const path = '#/network/switches/' + encodeURIComponent(r.cfg.name);
       const tr = rowClickable(el('tr'), path);
-      [r.cfg.name, r.cfg.type,
-        (r.cfg.ports || []).map((p) => p.interface || p.vnf || p.container || '?').join(', '),
+      // 决策 #495（收口 R41-1）：「成员端口」两数并列——配置声明数 / 成员读视图条数。
+      // 只给一个数会让读者以为是「这台交换机实际有几个口」，而三面（列表配置视图、
+      // 成员读视图、CLI 运行态列）本就是三种取数；服务端连配置一起给的两个计数是唯一
+      // 无歧义的呈现（读视图口径与详情页那张表、`/ports` 逐值相等）。
+      const declared = (r.cfg.ports_declared_count !== undefined)
+        ? r.cfg.ports_declared_count : (r.cfg.ports || []).length;
+      const total = r.cfg.ports_total_count;
+      const portCell = (total === undefined || total === declared)
+        ? String(declared) : declared + ' / ' + total;
+      [r.cfg.name, r.cfg.type, portCell,
         // 内核数据面下没有 BD-ID 概念：服务端省略该字段（round40 R40-O1），此处如实显示「—」，
         // 不把缺字段误画成 0。
         r.stat ? r.stat.bd_id : undefined].forEach((c) => {

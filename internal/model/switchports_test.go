@@ -95,7 +95,8 @@ func TestDerivedSwitchPortsUndeclaredSwitch(t *testing.T) {
 
 // AttachedPortName：vhost-user→vh-<vm>-<nic>、memif→mf-<owner>-<nic>；sriov-vf 无法确定→空。
 // 决策 #442（收口 R5-1）：**内核数据面**下容器 vNIC 的实际设备是 veth 宿主端（nfvisct…）——
-// 端口视图按数据面如实给名（VPP 侧与 VM 侧逐字不变）。
+// 端口视图按数据面如实给名（VPP 侧逐字不变）。决策 #495（收口 R41-3）：内核下**VNF** vNIC
+// 同理没有产品侧可确定的设备名（宿主 tap vnetN 由 libvirt 分配），返回空串。
 func TestAttachedPortName(t *testing.T) {
 	cfg := Config{
 		VirtualMachineFunctions: []VMFunction{{Name: "fw", Interfaces: []VnfInterface{
@@ -126,9 +127,11 @@ func TestAttachedPortName(t *testing.T) {
 	if got := AttachedPortName(kernel, PortSourceContainer, "ct", "m0"); got == peerWant {
 		t.Fatal("内核侧端口名应为宿主端，不是容器端")
 	}
-	// 内核数据面下 VM 侧 vNIC 名逐字不变（vhost-user 走 virtio+tap，无产品接口名；仍给 vh- 名）。
-	if got := AttachedPortName(kernel, PortSourceVNF, "fw", "eth0"); got != "vh-fw-eth0" {
-		t.Fatalf("内核侧 vhost-user 名应逐字不变（vh-fw-eth0），实得 %q", got)
+	// 内核数据面下 VM 侧 vNIC 没有产品侧可确定的设备名：libvirt 的宿主 tap 叫 vnetN（由 libvirt
+	// 分配、随域重建变化，产品无可靠映射），`vh-` 名在内核里**并不存在**——故返回空串，由调用方
+	// 退回 `<vm>/<nic>`（决策 #495，收口 R41-3；两数据面的逐条对照见 switchports_kernel_test.go）。
+	if got := AttachedPortName(kernel, PortSourceVNF, "fw", "eth0"); got != "" {
+		t.Fatalf("内核侧 vhost-user 不应给出 VPP 逻辑名，应为空串，实得 %q", got)
 	}
 }
 

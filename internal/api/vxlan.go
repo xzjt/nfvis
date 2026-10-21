@@ -141,7 +141,8 @@ func (x *cliExecutor) execShowVxlan(args []string) string {
 		state := "未收敛（数据面无该名字的隧道口）"
 		switch {
 		case !view.RuntimeAvailable:
-			state = "运行态不可用（" + view.RuntimeReason + "）"
+			// 措辞单源：与 `show nat` 的降级行共用 runtimeUnavailableText（cli_net_runtime_show.go）。
+			state = runtimeUnavailableText(view.RuntimeReason)
 		case t.InVPP:
 			state = fmt.Sprintf("已在 VPP（接口 %s）", t.InterfaceName)
 		}

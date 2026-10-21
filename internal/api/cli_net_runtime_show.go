@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/xzjt/nfvis/internal/model"
+	"github.com/xzjt/nfvis/internal/orchestrator/netkernel"
 	"github.com/xzjt/nfvis/internal/orchestrator/network"
 )
 
@@ -56,7 +57,11 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 		}
 		cfgNames := x.vswitchConfigNames()
 		var b strings.Builder
-		fmt.Fprintf(&b, "%-10s %-22s %-6s %-6s %-6s %s\n", "BD-ID", "Name", "Learn", "Flood", "Ports", "Note")
+		// 决策 #495（收口 R41-1）：该列是**运行态**成员数（len(bd.Ports)，已剔内置 DHCP tap），
+		// 与 `show virtual-switches <n> ports` 的**派生并集**（配置 ∪ VNF/容器派生 ∪ 运行态）
+		// 不是同一个口径——两者在「配置声明了、数据面还没建」时必然不等。列名带 (rt) 并在表尾
+		// 给口径注，避免操作者把运行态数当成成员总数（此前同族三视图读出三个数即此因）。
+		fmt.Fprintf(&b, "%-10s %-22s %-6s %-6s %-9s %s\n", "BD-ID", "Name", "Learn", "Flood", "Ports(rt)", "Note")
 		items := make([]any, 0, len(bds)+len(l3Names))
 		for _, bd := range bds {
 			note := ""
@@ -68,7 +73,7 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 				name = "-"
 			}
 			bd = x.withoutInternalPorts(bd) // 决策 #359：内置 DHCP tap 不进用户端口视图
-			fmt.Fprintf(&b, "%-10v %-22s %-6s %-6s %-6d %s\n", x.bdIDText(bd.ID), name,
+			fmt.Fprintf(&b, "%-10v %-22s %-6s %-6s %-9d %s\n", x.bdIDText(bd.ID), name,
 				yn(bd.Learn), yn(bd.Flood), len(bd.Ports), note)
 			items = append(items, x.bdViewForDP(bd))
 		}
@@ -77,10 +82,13 @@ func (x *cliExecutor) execShowVSwitches(args []string) string {
 		// 列表只覆盖 BD 运行态，已配置的 L3 交换机不显示）。BD 行在前、L3 行随后；L3 行首列
 		// 是「—」不是数字，按「首列数字」解析 BD 行的判据（语义套件）不受影响。
 		for _, name := range l3Names {
-			fmt.Fprintf(&b, "%-10s %-22s %-6s %-6s %-6s %s\n", "—", name, "—", "—", "—", "l3（VRF）")
+			fmt.Fprintf(&b, "%-10s %-22s %-6s %-6s %-9s %s\n", "—", name, "—", "—", "—", "l3（VRF）")
 			items = append(items, map[string]any{"name": name, "type": "l3", "note": "l3（VRF）"})
 		}
 		x.structured = map[string]any{"virtual_switches": items}
+		// 口径注（决策 #495）：三面同源的说明——列表这一列只数运行态成员。
+		b.WriteString("（Ports(rt) 是**运行态**成员数；成员读视图见 show virtual-switches <名> ports" +
+			"——含配置声明、VNF/容器派生与运行时口，口径不同，两者不等属正常）\n")
 		return b.String()
 	}
 	name := args[0]
@@ -414,6 +422,25 @@ func (x *cliExecutor) execShowNat(args []string) string {
 	}
 	rows, err := x.natRT.Sessions(context.Background())
 	if err != nil {
+		// 能力哨兵（如内核数据面没有 NAT 会话表）**不是**执行故障：行内降级——配置段照给、
+		// 原因写在说明里、不带 `%` 前缀。此前把它原样带 `%%` 返回，脚本模式按行首 `%` 判失败，
+		// `-c`/`-f` 在第 1 行就中止（退出码 1），而**同族** `show vxlan tunnels` 是行内降级。
+		// 判据与 REST 的 501 映射同源（unsupportedCapabilityErr）：能力不受支持 ≠ 服务异常。
+		if unsupportedCapabilityErr(err) {
+			head := x.natConfigLines()
+			if head == "" {
+				head = "（无 NAT 配置）\n"
+			}
+			// 与 `show vxlan tunnels` 同一形状：配置照给，运行态部分如实说「不可用 + 原因」。
+			// 结构化视图也只给「可用性 + 原因」——**不**塞一个空 `nat_sessions`（空数组会被读成
+			// 「零会话」，而这里是「说不清」）。
+			x.structured = map[string]any{
+				"runtime_available": false,
+				"runtime_reason":    err.Error(),
+			}
+			return head + x.natRuntimeUnavailableNote(err)
+		}
+		// 真实执行故障照旧 `%%` 报失败——降级分支只认能力哨兵，不把「查不到」吞成成功。
 		return x.natConfigLines() + "%% " + err.Error() + "\n"
 	}
 	if len(rows) == 0 {
@@ -433,6 +460,33 @@ func (x *cliExecutor) execShowNat(args []string) string {
 	}
 	x.structured = map[string]any{"nat_sessions": items}
 	return b.String()
+}
+
+// runtimeUnavailableText 「运行态不可用」的统一措辞（`show vxlan tunnels` 的状态列与
+// `show nat` 的降级行共用）——同一个文件里不造第二套降级风格，两处若各写一份措辞必然漂移。
+func runtimeUnavailableText(reason string) string {
+	return "运行态不可用（" + reason + "）"
+}
+
+// natRuntimeUnavailableNote NAT 运行态（会话表）不可用的一行说明——**不带** `%` 前缀：
+// 能力不受支持不是执行故障，脚本模式（cli.OutputFailed 判行首 `%`）据此继续执行。
+//
+// 措辞复用 runtimeUnavailableText（与 `show vxlan tunnels` 同族）；原因直接用提供者哨兵的
+// 原文（已含数据面与能力名），不在渲染层复述，避免两处措辞漂移。「切回 VPP 后可用」只在
+// 当前确为内核数据面时给——VPP 侧若报同族哨兵，这句会把操作者引向一个无效动作。
+func (x *cliExecutor) natRuntimeUnavailableNote(err error) string {
+	// 提供者按 `ErrUnsupported：<能力名>` 包装（netkernel.unsupported），照搬进括号会与
+	// 外层括号里的冒号连读成两个层级；把内层那个换成破折号。只改写已知前缀，其它形态原样
+	// 保留（不猜、不改写别人的文案）。
+	msg := err.Error()
+	if rest, ok := strings.CutPrefix(msg, netkernel.ErrUnsupported.Error()+"："); ok {
+		msg = netkernel.ErrUnsupported.Error() + "——" + rest
+	}
+	alt := ""
+	if x.dpMode() == model.DataPlaneKernel {
+		alt = "；切回 VPP 数据面后可用"
+	}
+	return runtimeUnavailableText(msg) + alt + "\n"
 }
 
 // natConfigLines 渲染 NAT 配置（池/规则/静态映射，来自 committed 配置，FR-NET-016）。

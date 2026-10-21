@@ -33,8 +33,9 @@ const (
 )
 
 // SwitchPortView 交换机成员端口的读视图条目：静态声明与派生端口的并集，逐条标注来源。
-// 字段与 VSwitchPort 对齐（便于客户端复用渲染），额外带 source 与 port（VPP 侧接口名，
-// 供运行态列按名合并、CLI/Web 展示；SR-IOV VF 等无法确定时为空串）。
+// 字段与 VSwitchPort 对齐（便于客户端复用渲染），额外带 source 与 port（该数据面里的
+// 接口名，供运行态列按名合并、CLI/Web 展示；SR-IOV VF 与内核数据面下的 VNF vNIC 等
+// 无法确定时为空串）。
 type SwitchPortView struct {
 	Source             string `json:"source"`
 	Port               string `json:"port,omitempty"`
@@ -50,8 +51,9 @@ type SwitchPortView struct {
 	AclOut             string `json:"acl_out,omitempty"`
 }
 
-// portDisplayName 端口在 VPP 中的接口名（物理口=其名；vNIC=确定性名，见 AttachedPortName）。
-// 无法确定（SR-IOV VF）时返回空串——调用方退回 <owner>/<nic>，不编造不存在的接口名。
+// portDisplayName 端口在当前数据面中的接口名（物理口=其名；vNIC=按数据面确定的名字，见
+// AttachedPortName）。无法确定时返回空串——调用方退回 <owner>/<nic>，不编造不存在的接口名
+// （内核数据面下的 VNF vNIC 即属此类，决策 #495）。
 func (p SwitchPortView) portDisplayName(cfg Config) string {
 	switch {
 	case p.Interface != "":
@@ -191,20 +193,34 @@ func VNICAttachedTo(cfg Config, kind, owner, nic, vsName string) bool {
 	return false
 }
 
-// AttachedPortName 返回 VNF/容器 vNIC 在 VPP 中的接口名（vhost-user/memif，命名规则与
-// 建接口侧同源——见 ifacename.go）。SR-IOV VF 的 VPP 名取决于绑定关系、此处无法确定，
-// 返回 ""（调用方据此退回 `<owner>/<nic>`，不编造一个不存在的接口名）。
+// AttachedPortName 返回 VNF/容器 vNIC 在网络数据面中的接口名（vhost-user/memif，命名规则与
+// 建接口侧同源——见 ifacename.go）。名字**按数据面如实给**：内核数据面下 VPP 那套逻辑名并不
+// 存在（见下面两分支的注释）。
+//
+// 无法确定时返回 ""：SR-IOV VF 的 VPP 名取决于绑定关系；内核数据面下的 VNF vNIC（决策 #495）。
+// 调用方据此退回 `<owner>/<nic>`，不编造一个不存在的接口名。
 func AttachedPortName(cfg Config, kind, owner, nic string) string {
+	kernelDP := cfg.DataPlaneMode() == DataPlaneKernel
 	if kind == PortSourceContainer {
 		// 内核数据面（决策 #441）：容器 vNIC 的等价物是 veth 对——端口列表里可核对、可排障的
 		// 实际设备是 **veth 宿主端**（nfvisct…），故按数据面如实给名（决策 #442，收口 R5-1：
 		// 此前两种数据面都显示 VPP 逻辑名 mf-<容器>-<vNIC>，内核侧照名去 `ip link` 找不到设备）。
 		// VPP 侧与 VM 侧各型 vNIC 的名字**逐字不变**。
-		if cfg.DataPlaneMode() == DataPlaneKernel {
+		if kernelDP {
 			host, _ := ContainerVethNames(owner, nic)
 			return host
 		}
 		return MemifIfaceName(owner, nic)
+	}
+	// 内核数据面下的 VNF vNIC 同理（决策 #495，收口 R41-3）：vNIC 由 libvirt 以
+	// `interface type='bridge'` + 宿主 tap `vnetN` 承载，内核里**没有** vh-/mf- 设备，而产品侧
+	// 也没有可靠的 tap 名映射（`vnetN` 由 libvirt 分配且随域重建变化——见
+	// internal/orchestrator/netkernel 的 CheckVnfPorts 注释）。此前两种数据面都返回 VPP 逻辑名，
+	// 于是端口表里 `vh-<vm>-<nic>`（派生）与 `vnet0`（运行态）两条并列：按表里的名字去
+	// `ip link` 找不到设备、反查也被人引到不存在的名字上。故这里返回 ""，由调用方退回
+	// `<vm>/<nic>` 语义名——宁可失去「按名核对」，也不编造（与 sriov-vf 同一个既有约定）。
+	if kernelDP {
+		return ""
 	}
 	for _, vm := range cfg.VirtualMachineFunctions {
 		if vm.Name != owner {

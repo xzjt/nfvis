@@ -3733,7 +3733,28 @@ components:
             VPP 侧不出现（VPP 侧是真限制，见 learn_limit 的说明）。
         ports:
           type: array
+          description: |
+            **配置声明的**成员端口（committed 配置里该交换机的 `ports` 列表原样），
+            **不含**运行态派生条目。要「这台交换机实际有哪些成员口」请看
+            `GET /virtual-switches/{name}/ports`（决策 #326 的成员读视图＝配置派生 ∪ 运行态，
+            逐条带 `source`），两者**口径不同、用途不同**：
+            · 本字段＝写路径的回写来源（`PUT /virtual-switches/{name}/ports` 全量替换它）；
+            · `/ports`＝读视图（含 VNF/容器派生与运行时口 bvi0/vxlan/…）。
+            判断「某口是否属于本交换机」请用 `/ports`，否则会漏掉派生与运行时成员（决策 #495）。
+            计数见 `ports_declared_count` / `ports_total_count`。
           items: { $ref: "#/components/schemas/VSwitchPort" }
+        ports_declared_count:
+          type: integer
+          description: |
+            `ports` 的条数（**配置声明**）。与 `ports_total_count` 并列给出，避免调用方
+            对同一事实读出不同数字（决策 #495）。
+        ports_total_count:
+          type: integer
+          description: |
+            **成员读视图**的条数（＝`GET /virtual-switches/{name}/ports` 的条目数：
+            配置派生 ∪ VNF/容器声明派生 ∪ 运行态成员，已剔除产品自持的内置 DHCP tap）。
+            运行态不可用时等于配置派生条数（不编造运行态条目）。
+            **与 `ports_declared_count` 不等是正常的**——差值就是派生与运行时成员（决策 #495）。
         statistics:
           type: object
           description: |
@@ -3793,7 +3814,15 @@ components:
       required: [source]
       properties:
         source: { type: string, enum: [config, vnf, container, runtime], description: 端口来源（config=配置静态声明；vnf/container=VNF/容器 vNIC 声明派生；runtime=仅数据面存在的成员） }
-        port: { type: string, description: 数据面接口名（vh-<vm>-<nic> / mf-<ct>-<nic> / 物理口名）；无法确定时为空串 }
+        port:
+          type: string
+          description: |
+            条目在**当前数据面**里的接口名（物理口＝其名；VPP 侧 VNF＝`vh-<vm>-<nic>`、
+            容器＝`mf-<ct>-<nic>`；内核数据面下容器＝veth 宿主端 `nfvisct…`）。
+            **该键可缺席**（`omitempty`）：无法确定时不给（不编造），此时用 `source` 加身份字段
+            （`vnf`+`vnf_interface` / `container`+`container_interface`）寻址，展示名退回
+            `<owner>/<nic>`。内核数据面下的 VNF vNIC 属此类——宿主 tap `vnetN` 由 libvirt 分配、
+            产品侧无可靠映射（决策 #495），不再给数据面里并不存在的 `vh-…`。
         seq: { type: integer, description: 配置静态端口的序号（派生条目无） }
         interface: { type: string }
         vnf: { type: string }
