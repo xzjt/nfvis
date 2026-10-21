@@ -92,6 +92,7 @@ toolcheck:
 	bash contrib/scripts/check_suite_contract_sync.sh
 	bash contrib/scripts/check_line_endings.sh --selftest
 	bash contrib/scripts/check_line_endings.sh
+	bash contrib/scripts/check_release_delta.sh --selftest
 
 # 真机集成测试（M3）：需 VPP 运行环境（nfvis-vm）。无环境时跳过并提示，CI 不跑。
 # 约定：build tag integration + 环境变量 NFVIS_VPP_SOCK（缺省 /run/vpp/api.sock）。

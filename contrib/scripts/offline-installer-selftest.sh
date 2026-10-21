@@ -270,6 +270,44 @@ check_payload() { # $1=已解包的载荷目录；判定计数走全局 PASS/FAI
         2) bad "$judged" ;;
         *) bad "包清单提取不可用（禁止空转通过）：$judged——提取器需与 install.sh 同步" ;;
     esac
+    # ---- 决策 #495 教训：两项"自洽但内容错"的检查（此前完全缺失）----
+    # ① **同包名重复**：载荷里同一 Package 出现多份（如把产品 deb 另存一份拷进 deb 目录）时，
+    #    Packages 索引会出现重复条目，而上面「索引条目数 == deb 数」因两边同时多算而**照样通过**。
+    #    判据：按 Package 名去重后条数必须等于总条数。
+    if [ -f "$EX/debs/Packages" ]; then
+        all_n=$(grep -c '^Package: ' "$EX/debs/Packages")
+        uniq_n=$(grep '^Package: ' "$EX/debs/Packages" | sort -u | wc -l)
+        if [ "$all_n" = "$uniq_n" ]; then
+            ok "载荷无同包名重复（$uniq_n 个不同包名）"
+        else
+            dupes=$(grep '^Package: ' "$EX/debs/Packages" | sed 's/^Package: //' | sort | uniq -d | tr '
+' ' ')
+            bad "载荷存在同包名多份（索引条目 $all_n、不同包名 $uniq_n）：$dupes"
+        fi
+    fi
+    # ② **运行时包漏装**：载荷里有、但不在安装清单里 ⇒ 交付了却不装（v3.0.24 首发的
+    #    vpp-crypto-engines 就是这样漏的：提供 ipsecmb/native/openssl 三个加密引擎，
+    #    随包交付却从不安装）。判据：载荷内已知的**运行时** VPP 包必须都在清单内；
+    #    纯开发/调试包（vpp-dev/libvppinfra-dev/vpp-plugin-devtools）**有意**不装，不参与判定。
+    if command -v dpkg-deb >/dev/null 2>&1 && [ -f "$EX/install.sh" ]; then
+        runtime_missing=""
+        # 只判**顶层运行时包**：libvppinfra 是 vpp 的 Depends，由 apt 自动带入，
+        # 不要求在清单里显式列出（真机实证它确实被装上了）。要求显式列的必须是
+        # 「不写就不装、且运行时需要」的那些。
+        for n in vpp vpp-plugin-core vpp-plugin-dpdk vpp-drivers vpp-crypto-engines; do
+            # 该运行时包不在载荷里就不判（载荷根本没交付它，不属于"交付了却不装"）
+            ls "$EX/debs/${n}_"*.deb >/dev/null 2>&1 || continue
+            if ! extract_pkgs "$EX/install.sh" | grep -qx -- "$n"; then
+                runtime_missing="$runtime_missing $n"
+            fi
+        done
+        if [ -z "$runtime_missing" ]; then
+            ok "载荷内的运行时 VPP 包都在安装清单内"
+        else
+            bad "载荷里的运行时包未被安装清单收录（交付了却不装）：$runtime_missing"
+        fi
+    fi
+
     # 载荷内的 nfvis 版本与 VERSION 一致
     if command -v dpkg-deb >/dev/null 2>&1; then
         local v1 v2

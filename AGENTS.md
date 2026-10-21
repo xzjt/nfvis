@@ -2144,6 +2144,22 @@ bash contrib/scripts/offline-installer-selftest.sh --run build/nfvis-vX.run   # 
   `env HTTPS_PROXY=http://192.168.155.1:2333 HTTP_PROXY=… make deb …`。
   **附带口径**：`-mod=vendor` 与 module 模式产出的包**不可互比**——二进制大小一致，但 module 模式会给
   每个依赖写 `h1:` 校验和、vendor 模式不写，故摘要不同；**发版以同一种模式连打两次**比对为准。
+- **发版前必跑「跨版本对账」，且「自检通过」不等于「内容正确」**（2026-10-21 round41 三次错误的根因）：
+  同一次发布里错了三次——载荷混进同包名副本、VPP 少带 3 个 deb、安装清单漏装 `vpp-crypto-engines`，
+  **结构自检每次都 18/0 全绿**。原因是自检只证明「索引与目录同步」这种**内部自洽**：
+  包少了、混进多余文件，只要两边一起错，条目数比对照样相等。
+  **规程（缺一不可）**：
+  ① `bash contrib/scripts/offline-installer-selftest.sh --run <新.run>`——新增两项内容级判据：
+  **载荷无同包名重复**（按 `Package` 去重后条数须等于总条数）与**载荷内运行时 VPP 包都在安装清单内**
+  （只判顶层 `vpp/vpp-plugin-core/vpp-plugin-dpdk/vpp-drivers/vpp-crypto-engines` 五个；
+  `libvppinfra` 是依赖由 apt 带入、`-dev`/`devtools` 有意不装）。
+  ② `bash contrib/scripts/check_release_delta.sh <上一版.run> <新.run>`——**跟上一版对包名清单**，
+  未登记的新增/消失包名直接判「不可直接发布」（确认无误时用 `ALLOW_ADD/ALLOW_DROP` 显式登记）。
+  这条是唯一能抓住「整批漏带」的动作；三次错误里两次靠它才能自动发现。
+  ③ 发版链路：**上传直连**（`gh release upload` 不挂代理）、**下载走代理**
+  （`curl -x http://192.168.155.1:2333 --retry-all-errors -C -`），最后 `gh release edit --draft=false --latest`，
+  再核对 `isDraft=false` + 四资产 `state=uploaded` + 回下载 sha256——**按清单核对，不凭记忆**
+  （本轮曾给上传挂代理致 178MB 长 POST 卡死留 draft，又忘发布导致回下载 404）。
 - **给操作者的代理提示要用在「真正失败的那条链路」上**：本项目环境里 apt（USTC）与 Go 模块
   （`proxy.golang.org`）、GitHub 上传/下载各有不同可达性——**分别探测、分别选路**，
   别用一条链路的成功推断另一条。
