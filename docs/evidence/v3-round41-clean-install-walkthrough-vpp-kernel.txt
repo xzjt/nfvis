@@ -508,3 +508,19 @@ lifecycle 40/0/3、pty 10/10。
     两数据面各复核一次后已还原：切回 VPP、DPDK 重新绑定、配置回到基线 39 条、
     `show alarms active` 空、nfvis/vpp 均 active。
   · **正式发版仍须走 `make deb` 两打逐字节一致 + 四套件复跑**（本轮未做，如实登记）。
+
+10.6 **⚠️ 本轮踩到并根治的一个坑：整文件 CRLF 污染让三条契约守护同时「假报排版坏了」**
+  · 现象：`make check` 的 `test` 里三条字段级守护同时失败，报的都是
+    「契约里找不到 QosPolicy / PortMirroring / SwitchPortView schema（排版变了？）」。
+  · 真因：子智能体在 Windows 上改 `docs/NFViS-openapi.yaml` 时把**整个文件**的行尾写成了 CRLF。
+    `.gitattributes` 有 `* text=auto eol=lf`，提交时会被归一化 ⇒ **`git diff` 只显示真实的 30 行改动，
+    污染在 git 层面完全看不见**；而这三条守护是「按 `
+` 切行 + 精确字符串比较」
+    （`if l == "    SwitchPortView:"`）⇒ 每行尾部多一个 ``，精确匹配永不命中。
+    更隐蔽的是：CI 在 Linux 检出为 LF 会**全绿**，只有 Windows 工作区才红。
+  · 处置：把 4 个文件（openapi.yaml + AGENTS.md + 本证据 + round39 证据 + round-d485 证据）的行尾
+    转回 LF；新增守护 `contrib/scripts/check_line_endings.sh`（`git ls-files --eol` 判 `w/crlf`，
+    未跟踪文件退化为查 CR），带 `--selftest` 自校准（已知 LF → 通过 / 已知 CRLF → 报违规），
+    已接进 `make toolcheck`（`make check` 的一环）。
+  · **教训**：Windows 上用整文件重写的方式改仓库文件时，**必须先确认行尾**；
+    「git diff 干净」不能证明文件没被污染——`eol=lf` 会在提交时把污染藏起来。
