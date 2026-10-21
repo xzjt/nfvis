@@ -40,6 +40,11 @@ Web 截图：docs/images/v3-round41-web-switches.png。
     （**配置 ∪ 运行态派生**）口径不同且契约未说明——同一事实三个数。
     **R41-2（中）** 内核数据面下**已配 NAT 规则**时 `show nat` **整条命令失败**（`%%` + 退出码 1），
     而同族「能力不支持」的 `show vxlan tunnels` 是**行内降级**（退出码 0）——同类情况两种处置。
+  · **追查新增 1 条（R41-3，中）**：用户追问「R41-1 是不是内核/VPP 不同导致」后核实——
+    R41-1 **主因与数据面无关**（三种取数：配置 / 配置∪运行态 / 纯运行态），
+    但顺带挖出**确与数据面有关**的一层：内核下 **VNF 派生端口名仍是 VPP 逻辑名 `vh-<vm>-<nic>`**
+    （`AttachedPortName` 只给容器分支按数据面取名），而内核真实设备是 libvirt 的 `vnetN`
+    ⇒ 端口表两条并列、按名核对找不到设备。详见 §7 R41-3 与 §7 R41-1 的「补充追查」。
   · 其余均为既有登记项复现或环境观察（§8），未发现其它新缺陷。
 
 --------------------------------------------------------------------------------
@@ -339,6 +344,47 @@ lifecycle 40/0/3、pty 10/10。
   · 建议修法（未实施）：① 契约补 description（列表 `ports` = **配置声明**，
     成员读视图见 `/ports`）；② 或在列表视图里改名/加 `ports_declared_count` +
     `ports_runtime_count`，避免与成员读视图同名不同义。**须先定裁口径再改实现**。
+  · **补充追查（用户追问「是不是内核/VPP 不同导致」后的实测与代码核实）**：
+    **主因与数据面无关**，但**确有一层与数据面有关**，须拆成三层看：
+    ① **REST 列表**＝纯配置（`handleGetVSwitches` 只序列化 `cfg.VirtualSwitches`，不碰数据面）；
+    ② **`/ports` 与 CLI `… ports`**＝配置派生 ∪ 运行态（`switchPortViews`）；
+       —— ①② 的差是「运行态有多少成员」，**两个数据面都会有这个差**，不是切换造成的。
+       本场实测（VPP，vs-lan 静态口只有 ens192）：
+         REST 列表 `1 条（ens192）`｜`/ports` `2 条（ens192, bvi0）`｜
+         CLI 列表 **2**｜`vppctl show bridge-domain 14615916 detail` 真实成员 `bvi0/ens192/tap0`。
+    ③ **CLI 列表的 `Ports` 列取的是运行态 BD 成员数**（`len(bd.Ports)`，已剔内置 tap），
+       **不是** `/ports` 那套派生并集 ⇒ **CLI 列表与 CLI `… ports` 本身也不同口径**
+       （前者看不到「配置里声明了、数据面还没建」的 VNF vNIC）。这是本缺陷最容易被忽略的一层。
+    ⇒ 三数并存的**主因是「配置 / 配置∪运行态 / 运行态」三种取数**，与数据面无关；
+    数据面的影响只在「运行态成员有多少、派生名怎么叫」（见 R41-3）。
+  · **与数据面有关的那一层（新登记 R41-3）**：派生条目**取名**两数据面不对称——
+    `internal/model/switchports.go:197 AttachedPortName` 只有容器分支读 `DataPlaneMode()`
+    （内核→veth 宿主端 `nfvisct…`，#442 修 R5-1）；**VNF 分支（:223）不看数据面**，
+    内核下仍返回 VPP 逻辑名 `vh-<vm>-<nic>`，而内核侧真实设备是 libvirt 的 `vnetN`
+    （§4.4 实测 `interface type='bridge'`，宿主侧 `vnet0` 在 bridge 里 forwarding；
+    `netkernel/api_surface.go:161` 已如实写明「产品侧没有可靠的 tap 名映射」）。
+    后果：内核现场端口表出现「`vh-…` 派生 + `vnet0` 运行态」**两条并列**、数字偏大，
+    且按 `vh-…` 去 `ip link` 找不到设备——R5-1 同类问题在 **VNF 侧**的残留。
+
+**R41-3（中，2026-10-21 追查新增）内核数据面下 VNF 派生端口名仍是 VPP 逻辑名**
+  · 根因如上（`AttachedPortName` 的 VNF 分支不看 `DataPlaneMode()`）。
+  · **真机复验（同日，switch 到 kernel + 新建 VNF `r41v`，rev 191）**：
+      宿主 `bridge link show master vs-lan` 真实成员 = `ens192` / `vnet0` / `nfvisdh…(内置 tap)`；
+      CLI `show virtual-switches vs-lan ports`：
+        `ens192  config`｜`vh-r41v-nic0  vnf`｜`vnet0  runtime`  ← **同一 vNIC 两条并列**
+      `GET …/ports` 同为 **3 条**（含 `vh-r41v-nic0` source=vnf）；CLI 列表 Ports 列 = **2**
+      （纯运行态，故不含 `vh-`）。
+      按派生名核对：`ip link show vh-r41v-nic0` → **`Device "vh-r41v-nic0" does not exist.`**
+      而 `ip -br link show vnet0` → 存在且 UP。⇒ 「表里有、设备没有」**实测成立**。
+  · 影响：① 端口表两条并列、数字偏大；② 按名核对找不到设备（`vh-…` 在内核不存在）；
+    ③ 反查 vNIC 归属被引到不存在的名字。
+  · 修法方向（**待定裁**）：① 内核侧 VNF 派生名**留空**、退回 `<vm>/<nic>` 语义名
+    （`AttachedPortName` 注释已有「无法确定时返回 ""，不编造不存在的接口名」的既有约定）——
+    小且与既有口径一致；② 编排层在 DefineVM 时把 libvirt 分配的 tap 名记进运行态簿记
+    （与容器 veth 同路数）——完整但需新增簿记与生命周期维护。**倾向 ①**。
+  · 连带：`CheckVnfPorts` 在核下恒 no-op（`VNF_PORT_DOWN` 在核下不判，有意避免误报）——
+    若走 ② 可顺带转成可判；若走 ① 则该告警族在核下继续「如实不报」，须在手册写明。
+
 
 **R41-2（中）内核数据面下 `show nat` 整条命令失败（与同族降级口径不一致）**
   · 现场：`set system dataplane kernel` + 已配 NAT 规则与池（rev 40 同域 NAT），
