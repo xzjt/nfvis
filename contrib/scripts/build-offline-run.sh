@@ -62,6 +62,37 @@ NFVIS_VER=$(dpkg-deb -f "$NFVIS_DEB" Version)
 [ "$NFVIS_VER" = "$VERSION" ] ||
     die "版本不一致：nfvis 包是 $NFVIS_VER，--version 给的是 $VERSION"
 
+# ---------- 载荷前置校验：同包名只能一份（决策 #495 教训） ----------
+# 由来（round41 v3.0.24 首发）：把产品 deb 另存为 `deb-pass1.deb` 复制进 deb 目录后，
+#   stage_payload 无条件收下**所有** *.deb ⇒ 载荷里同时有 `deb-pass1.deb` 与
+#   `nfvis_3.0.24_amd64.deb`（同一 sha256、同一包名），Packages 索引里出现**两条 nfvis 条目**。
+#   而结构自检的「索引条目数 == deb 数」两边都多算了同一文件，因此**照样通过**——
+#   这类"重复但自洽"的污染只能在这里拦。
+# 判据：按包名去重；同一包名出现多份即报错并点名两个文件（不猜该留哪份，交给人决定）。
+check_deb_dir() { # $1=deb 目录
+    local d name dup=0
+    local -A seen=()
+    for d in "$1"/*.deb; do
+        [ -e "$d" ] || continue
+        name=$(dpkg-deb -f "$d" Package 2>/dev/null)
+        [ -n "$name" ] || die "读不出包名：$d"
+        if [ -n "${seen[$name]:-}" ]; then
+            printf '错误：包名重复（%s）：
+  %s
+  %s
+'                 "$name" "${seen[$name]}" "$d" >&2
+            printf '  同一包名只能一份——载荷里出现两份会让 Packages 索引出现重复条目，
+' >&2
+            printf '  而结构自检的条目数比对会因两边同时多算而通过（不报错）。
+' >&2
+            dup=1
+        else
+            seen[$name]=$d
+        fi
+    done
+    [ "$dup" -eq 0 ] || die "deb 目录里存在同包名的多个文件（见上），请清理后重试"
+}
+
 # ---------- 本地 apt 源索引（扁平源；只用 dpkg-deb，不需要 dpkg-dev） ----------
 gen_packages() { # $1=deb 目录 $2=输出文件
     local d name f v desc
@@ -134,6 +165,8 @@ stage_payload() { # $1=目标载荷目录
 
     (cd "$P" && find . -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs sha256sum > SHA256SUMS)
 }
+
+check_deb_dir "$DEBS"
 
 if [ -n "$INDEX_ONLY" ]; then
     stage_payload "$INDEX_ONLY"
