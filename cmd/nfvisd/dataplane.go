@@ -267,7 +267,15 @@ func diagRuntimeFor(mode string, mgr *network.Manager, cfgSrc func() (model.Conf
 		}
 		return netkernel.NewDiag(nil, resolver)
 	}
-	return &diagController{diag: mgr.Diagnostics()}
+	// VPP 侧（修 BUG-11）：vrf 参数同样按**配置对象名**解析——L2 交换机的 BVI 网关落在专属
+	// VRF `vr-<交换机名>`，而操作者按文档填的是交换机名；直接拿它算 table-id 会查到另一张
+	// （通常是空的）表，报「no FIB table for lookup」的假阴性，链路其实是通的。
+	// 解析器把交换机名换成网关域表名；其余名字原样返回（与修复前逐字同行为）。
+	d := mgr.Diagnostics()
+	if cfgSrc != nil {
+		d.SetVRFTableResolver(network.ConfigVRFTableResolver(cfgSrc))
+	}
+	return &diagController{diag: d}
 }
 
 // attachSRIOV 构造 SR-IOV VF 数量编排并注入 VPP 侧网络实现（v3 round2 体检 R2-7）。

@@ -1298,9 +1298,92 @@ func pruneEmptySingleton(tree map[string]any) {
 			}
 		}
 	}
+	// vrfs（真机缺陷）：`delete virtual-switches <n> l3-interface <if>` 删掉**最后一条**
+	// 三层接口后，名字还留着的 Vrf 条目只剩身份字段——空壳里没有任何可发射的语句（`vrfs`
+	// 在命令树里没有关键字，条目只由 type l3 / l3-interface / static-routes 派生），
+	// `show configuration | display set` 的回放自校验因此永久对不上、如实报内部错误
+	// （操作者突然读不到整份配置）。空 VRF 条目与「从未配置该 VRF」在读视图里不可区分，
+	// 故与 management/metrics/firewall/protocols 同法回收；`tree["vrfs"]` 是数组，逐元素判。
+	pruneEmptyVrfs(tree)
 	// 登记制（既有口径）：本函数只收敛**逐个登记**的容器——未登记容器（如 `vpp`）的空壳行为
 	// 不在范围内（`TestPruneEmptySingletonScope` 钉着这条，避免通用扫描误剪将来可能引入的
 	// 「显式空 = 有意义」的容器）。新增登记时连测试一起补。
+}
+
+// pruneEmptyVrfs 回收只剩身份字段的 Vrf 条目；全部回收后连 `vrfs` 键一起删（不留空数组）。
+//
+// 两条「空条目必须保留」的红线（都是**被别处引用**，剪掉会让配置自相矛盾）：
+//   - 同名虚拟交换机是 type=l3：模型校验要求 L3 交换机必须有同名 VRF 条目承载 L3 配置；
+//   - 被某交换机的 `gateway vrf <名>` 显式引用：模型校验要求该 VRF 存在。
+//
+// 这两类空条目是可被语句还原的合法声明（`virtual-switches <n> type l3` 即重建它），
+// 不是删剩的残渣；其余空条目（尤其删光 l3-interface 之后留下的）一律回收。
+//
+// 取舍如实登记：REST/整文档写入可以直建**裸 vrfs 条目**（无同名交换机、无接口/路由），
+// 这种条目同样会被本条收回——它与「从未声明该 VRF」在任何读视图里都不可区分，且
+// display set 根本无法还原它（`vrfs` 没有语句关键字）。要保留一个具名转发域，请用
+// `set virtual-switches <n> type l3`（可还原）声明。
+func pruneEmptyVrfs(tree map[string]any) {
+	arr, ok := tree["vrfs"].([]any)
+	if !ok {
+		return
+	}
+	if len(arr) == 0 { // 空数组与「键不存在」等价（同 stripEmptyContainers 口径）
+		delete(tree, "vrfs")
+		return
+	}
+	pinned := pinnedVrfNames(tree)
+	out := make([]any, 0, len(arr))
+	for _, el := range arr {
+		vrf, ok := el.(map[string]any)
+		if !ok { // 非对象条目（正常流程建不出来）宁可不剪
+			out = append(out, el)
+			continue
+		}
+		name, _ := vrf["name"].(string)
+		if name != "" && pinned[name] {
+			out = append(out, vrf)
+			continue
+		}
+		ident := identityFieldOf("vrfs")
+		if isEmptyShellExcept(vrf, ident) {
+			continue
+		}
+		out = append(out, vrf)
+	}
+	switch {
+	case len(out) == 0:
+		delete(tree, "vrfs")
+	case len(out) != len(arr):
+		tree["vrfs"] = out
+	}
+}
+
+// pinnedVrfNames 树里**必须存在**的 VRF 名集合（判据见 pruneEmptyVrfs）：
+// type=l3 交换机名 + 各交换机 `gateway vrf` 的显式引用。
+func pinnedVrfNames(tree map[string]any) map[string]bool {
+	out := map[string]bool{}
+	arr, _ := tree["virtual_switches"].([]any)
+	ident := identityFieldOf("virtual_switches")
+	for _, el := range arr {
+		vs, ok := el.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := vs[ident].(string)
+		if name == "" {
+			continue
+		}
+		if t, _ := vs["type"].(string); t == "l3" {
+			out[name] = true
+		}
+		if gw, ok := vs["gateway"].(map[string]any); ok {
+			if v, _ := gw["vrf"].(string); v != "" {
+				out[v] = true
+			}
+		}
+	}
+	return out
 }
 
 // isEmptyShell 容器是否已无内容：所有子键都是空数组或 nil。
@@ -1309,6 +1392,29 @@ func pruneEmptySingleton(tree map[string]any) {
 // 出现任何其它取值（含未知键）一律视为有内容，宁可不剪。
 func isEmptyShell(m map[string]any) bool {
 	for _, v := range m {
+		switch x := v.(type) {
+		case nil:
+		case []any:
+			if len(x) > 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isEmptyShellExcept 同 isEmptyShell，但跳过 keep 键（身份字段不算「内容」）。
+//
+// 数组元素与单例容器不同：元素天然带身份字段（vrfs 的 name），若照搬 isEmptyShell 则
+// 只有 name 的条目永远判「有内容」、空壳剪不掉——正是 `delete … l3-interface` 删光后
+// 残渣存活的原因。
+func isEmptyShellExcept(m map[string]any, keep string) bool {
+	for k, v := range m {
+		if k == keep {
+			continue
+		}
 		switch x := v.(type) {
 		case nil:
 		case []any:
@@ -1545,14 +1651,22 @@ func patternMatches(p, tokens []string) bool {
 	return true
 }
 
+// identityFieldOf 具名数组的元素身份字段（identityFields 的读取口，缺省 name）。
+//
+// 单一真源：建元素（elemByField/通用遍历）、取元素（elemByID）、display set 反推与
+// 读视图导航都经这里取字段名——身份字段写错会让元素键与模型不符，fromJSONTree 的
+// DisallowUnknownFields 直接报「配置中不存在字段」，而错误点离真正写错的地方很远。
+func identityFieldOf(arrKey string) string {
+	if fld := identityFields[arrKey]; fld != "" {
+		return fld
+	}
+	return "name"
+}
+
 // elemByID 在具名数组 tree[arrKey] 中按身份值取元素（不存在报错）。
 func elemByID(tree map[string]any, arrKey, ident string) (map[string]any, error) {
 	arr, _ := tree[arrKey].([]any)
-	fld := identityFields[arrKey]
-	if fld == "" {
-		fld = "name"
-	}
-	em, _ := selectElement(arr, fld, ident)
+	em, _ := selectElement(arr, identityFieldOf(arrKey), ident)
 	if em == nil {
 		return nil, fmt.Errorf("无匹配配置: %s", ident)
 	}
@@ -1713,6 +1827,13 @@ var statementAliases = []aliasRule{
 		apply: func(tree map[string]any, t []string, isSet bool) error {
 			return numaNode(tree, t[4], "", isSet)
 		}},
+	// set virtual-switches <n> ports <seq> interface trunk vlans <list>（**分步**形态，8 token）
+	// 端口成员分两步写是操作者的自然写法（先 interface、后 trunk）。这条 8-token 形态此前
+	// 没有别名规则，落到通用树遍历：`trunk` 被当成对象容器、写成 trunk:{vlans:…}，与模型
+	// 字段 TrunkVlans []int 不符，整条语句被 JSON 解码拒绝（真机复现）。语义＝一步形态
+	// 去掉成员口赋值：成员口保持已声明值，只写 trunk 列表。
+	{pattern: []string{"virtual-switches", "*", "ports", "*", "interface", "trunk", "vlans", "*"},
+		apply: aliasPortStagedTrunk},
 	// set virtual-switches <n> ports <seq> interface <if> [trunk vlans <list>|native <vlan>]
 	{pattern: []string{"virtual-switches", "*", "ports", "*", "interface", "*", "trunk", "vlans", "*"},
 		apply: func(tree map[string]any, t []string, isSet bool) error {
@@ -1727,6 +1848,38 @@ var statementAliases = []aliasRule{
 		apply: func(tree map[string]any, t []string, isSet bool) error {
 			return portTrunkApply(tree, t, isSet, "vnf", 7)
 		}},
+}
+
+// aliasPortStagedTrunk：`virtual-switches <n> ports <seq> interface trunk vlans <list>`——
+// 分步形态的 trunk VLAN 列表（t = [virtual-switches, <vs>, ports, <seq>, interface, trunk, vlans, <list>]）。
+//
+// 与一步形态（portTrunkApply 的 interface 分支）的唯一差别是**不写成员口**：成员口由前一条
+// `set … ports <seq> interface <if>` 声明，本语句只补 trunk 列表。VLAN 列表解析复用
+// expandVlanList（与一步形态同一实现，不另写一份）。
+//
+// 端口元素不存在（或还没有任何成员口）时**明确报错、不建空端口**：无成员口的端口条目提交
+// 必被模型校验拒绝（端口必须且只能指定 interface/vnf/container 之一），静默建壳只是把错误
+// 推迟到 commit，操作者还得回头找原因。
+func aliasPortStagedTrunk(tree map[string]any, t []string, isSet bool) error {
+	if _, err := elemByID(tree, "virtual_switches", t[1]); err != nil {
+		return err
+	}
+	port := existingPortElem(tree, t[1], t[3])
+	if port == nil || !portMemberValue(port["interface"]) {
+		return fmt.Errorf("端口序号 %s 在交换机 %s 的静态 ports 中不存在或不是物理口成员（本语句只补 trunk 列表，不创建端口）；"+
+			"请先声明成员口：set virtual-switches %s ports %s interface <ifname>",
+			t[3], t[1], t[1], t[3])
+	}
+	if !isSet {
+		delete(port, "trunk")
+		return nil
+	}
+	vlans, err := expandVlanList(t[len(t)-1])
+	if err != nil {
+		return err
+	}
+	port["trunk"] = vlans
+	return nil
 }
 
 // portTrunkApply 端口成员 + trunk VLAN 列表（memberKind/interfaceIdx 按语句形态）。

@@ -2135,6 +2135,9 @@ func (v *validator) checkVMFunctions(c Config) {
 	// pciOwner 归一 BDF → 首个声明者 VM 名（FR-CMP-023 跨 VM 冲突：同一 PCI 设备不能
 	// 同时直通给两台 VM——否则第二台域定义/启动必失败）。
 	pciOwner := map[string]string{}
+	// dpdkPorts / dpdkPortNames 数据面已占用为端口的声明（归一 BDF / 字面名两种索引）。
+	// 见 dataplanePortClaims 关于「为什么只能判定这一维」的说明。
+	dpdkPorts, dpdkPortNames := dataplanePortClaims(c)
 	for _, m := range c.VirtualMachineFunctions {
 		p := fmt.Sprintf("virtual-machine-functions[%s]", m.Name)
 		if !v.checkName(p, m.Name, "VM") {
@@ -2175,13 +2178,23 @@ func (v *validator) checkVMFunctions(c Config) {
 				v.errf(fmt.Sprintf("%s.disks[%s]", p, d.Name), "数据盘必须且只能指定 size-gb 或 image 之一")
 			}
 		}
-		// FR-CMP-023：通用 PCI 直通设备（BDF）——语法、同 VM 去重、跨 VM 冲突。
+		// FR-CMP-023：通用 PCI 直通设备（BDF）——语法、同 VM 去重、跨 VM 冲突，
+		// 以及**数据面已占用**（BUG-05）。
 		// 归一后比较（`03:00.0` 与 `0000:03:00.0` 是同一设备）；存在性属编排层。
 		seenPCI := map[string]bool{}
 		for i, bdf := range m.PCIDevices {
 			dp := fmt.Sprintf("%s.pci_devices[%d]", p, i)
 			norm, err := NormalizeBDF(bdf)
 			if err != nil {
+				// 填进来的是数据面端口名（`pci-device ens224`）——报告要点名它占着哪台设备，
+				// 而不是只说「格式非法」：这正是「想直通一台已被数据面接管的口」的写法。
+				if claim, taken := dpdkPortNames[strings.TrimSpace(bdf)]; taken {
+					v.errf(dp, "%q 是数据面端口名，不是 PCI 地址（BDF）——该口已被数据面占用（%s，%s）；"+
+						"若要把它直通给 VM，须先释放该端口（%s）并 request vpp restart 让数据面放手，"+
+						"再用该设备的 PCI 地址（形如 0000:13:00.0，可用 lspci 或 ls /sys/bus/pci/devices 核对）声明 pci-device",
+						bdf, claim.role, claim.path, claim.release)
+					continue
+				}
 				v.errf(dp, "%v", err)
 				continue
 			}
@@ -2190,6 +2203,16 @@ func (v *validator) checkVMFunctions(c Config) {
 				continue
 			}
 			seenPCI[norm] = true
+			// 提交期拦下「数据面正占着这台设备」：放行后 commit 只提示「下次开机生效」，
+			// 真正的失败要等 start 才以 vfio `Could not open '/dev/vfio/N': Device or
+			// resource busy` 冒出来（真机 v3.0.24 实证），操作者按提交成功判断操作正确。
+			if claim, taken := dpdkPorts[norm]; taken {
+				v.errf(dp, "PCI 设备 %s 已被数据面占用（%s，%s）：直通给 VM 与数据面接管互斥——"+
+					"先释放该端口（%s），随后 request vpp restart 让数据面放手；"+
+					"若设备仍绑在 vfio-pci 上，再 request interfaces %s unbind-dpdk 交还内核驱动",
+					norm, claim.role, claim.path, claim.release, norm)
+				continue
+			}
 			if owner, taken := pciOwner[norm]; taken {
 				v.errf(dp, "PCI 设备 %s 已声明给 VM %s：同一设备不能同时直通给两台 VM（%s 与 %s）", norm, owner, owner, m.Name)
 				continue
@@ -2243,6 +2266,73 @@ func (v *validator) checkVMFunctions(c Config) {
 			}
 		}
 	}
+}
+
+// dataplanePortClaim 数据面端口声明的一处出处。
+type dataplanePortClaim struct {
+	path string // 配置路径（报错点名用）
+	role string // 人话角色（哪个对象把它当端口用）
+	// release 释放该占用的**照做命令**（报错直接给操作者抄；与该角色的删除语句逐字对应）。
+	release string
+}
+
+// dataplanePortClaims 收集「数据面把某个标识当端口占用」的声明，供 PCI 直通校验比对。
+//
+// 两个索引各有其用（见 lookup）：
+//   - byBDF：取值能归一成 BDF 的出处，键为归一 BDF——覆盖「同一个 BDF 既填进端口位置、
+//     又填进 pci-device」；
+//   - byName：取值的**字面形态**，键为去空白的原文——覆盖「把端口名填进 pci-device」
+//     （`set virtual-machine-functions <vm> pci-device ens224`）。这一向是**可达**的：
+//     接口名校验不允许冒号，故 BDF 永远进不了端口位置，而端口名随时可能被误填进 BDF 字段。
+//
+// 为什么止步于「字面标识」这一维（BUG-05 的如实边界）：真实配置里两侧写法不同——
+// `set vpp dpdk dev ens224` 写**口名**、`pci-device 0000:13:00.0` 写 **BDF**，把两者对起来
+// 需要 `ens224 → 0000:13:00.0` 的映射。该映射只存在于运行态（sysfs 的
+// /sys/class/net/<n>/device，或 DPDK 绑定记录 network.Bindings，见决策 #100），而本包是
+// **叶子包**（network 反向 import 它，见 ifacename.go 头注），校验必须只看配置自身
+// （同 Validate 头注：依赖外部状态的规则归 commit/编排阶段）。故「口名 → BDF」的占用判定
+// 不在本层，仍由编排层在 define/start 前的事实检查兜底（见 compute.checkPCIDevices）。
+//
+// 判据是**标识精确匹配**（与 checkPortRoleExclusivity / checkManagementIsolation 同口径）。
+func dataplanePortClaims(c Config) (byBDF, byName map[string]dataplanePortClaim) {
+	byBDF, byName = map[string]dataplanePortClaim{}, map[string]dataplanePortClaim{}
+	add := func(raw, path, role, release string) {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return
+		}
+		claim := dataplanePortClaim{path: path, role: role, release: release}
+		// 先声明者优先（与 pciOwner 同序），多处占用时报第一条出处即可定位。
+		if _, dup := byName[name]; !dup {
+			byName[name] = claim
+		}
+		if norm, err := NormalizeBDF(name); err == nil {
+			if _, dup := byBDF[norm]; !dup {
+				byBDF[norm] = claim
+			}
+		}
+	}
+	if c.Vpp != nil && c.Vpp.DPDK != nil {
+		for i, d := range c.Vpp.DPDK.PerDev {
+			add(d.Interface, fmt.Sprintf("vpp.dpdk.per_dev[%d].interface", i), "VPP/DPDK 接管",
+				fmt.Sprintf("delete vpp dpdk dev %s", d.Interface))
+		}
+	}
+	for _, s := range c.VirtualSwitches {
+		for _, pt := range s.Ports {
+			add(pt.Interface, fmt.Sprintf("virtual-switches[%s].ports[%d].interface", s.Name, pt.Seq),
+				fmt.Sprintf("虚拟交换机 %s 的端口", s.Name),
+				fmt.Sprintf("delete virtual-switches %s ports %d", s.Name, pt.Seq))
+		}
+	}
+	for _, b := range c.Bonds {
+		for i, m := range b.Members {
+			add(m, fmt.Sprintf("bonds[%s].members[%d]", b.Name, i),
+				fmt.Sprintf("bond %s 的成员口", b.Name),
+				fmt.Sprintf("delete bonds %s members %s", b.Name, m))
+		}
+	}
+	return byBDF, byName
 }
 
 // checkVMImageProfiles 镜像级启动画像（决策 #485）的提交期校验：

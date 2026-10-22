@@ -293,6 +293,10 @@ func (x *cliExecutor) renderHardware() string {
 		b.WriteString("disks          （未枚举到块设备）\n")
 	} else {
 		fmt.Fprintf(&b, "%-16s %-10s %-10s %s\n", "Disk", "SMART", "Temp", "Wear")
+		// SMART 取不到时原因不能省：操作者要据此决定「装工具 / 换盘 / 查权限」，
+		// 单看到一个 unknown 什么也做不了。原因不塞进窄列（会撞烂列宽、也读不成句），
+		// 而是配对呈现为「设备: 原因」——正常盘的行与历史逐字节相同。
+		var notes []string
 		for _, d := range hh.Disks {
 			temp := "-"
 			if d.TempCelsius > 0 {
@@ -303,6 +307,15 @@ func (x *cliExecutor) renderHardware() string {
 				wear = fmt.Sprintf("%.0f%%", d.WearPercent)
 			}
 			fmt.Fprintf(&b, "%-16s %-10s %-10s %s\n", d.Device, d.SmartStatus, temp, wear)
+			if d.SmartStatus == "unknown" && d.SmartReason != "" {
+				notes = append(notes, fmt.Sprintf("%s: %s", d.Device, d.SmartReason))
+			}
+		}
+		if len(notes) > 0 {
+			b.WriteString("SMART unknown 原因:\n")
+			for _, n := range notes {
+				b.WriteString("  - " + n + "\n")
+			}
 		}
 	}
 	fmt.Fprintf(&b, "root-used      %.1f%%（阈值 %s）\n", hh.RootUsedPercent, thresholdText(th.DiskUsedPercent, "%"))

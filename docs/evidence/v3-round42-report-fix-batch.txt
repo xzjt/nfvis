@@ -1,0 +1,153 @@
+================================================================================
+NFViS v3 round42：外部测试报告（docs/REPORT.md）核实 + 14 条缺陷修复批
+================================================================================
+日期：2026-10-22        执行：ZCode 会话（v3 线）
+用户指令：先修上面已核实成立的 Bug，如果涉及到 web 也同步修复，实现类工作派子智能体。
+
+环境：nfvis-vm —— 干净快照起步（Ubuntu 26.04.1 / 6 核 / 7 GB / 内核 7.0.0-38），
+  上机件 `nfvis-v3.0.24.run`（sha256 12a396fe…，185,983,844 B，与本仓 build/rel324 逐字一致），
+  首装自检 18/0/0、退出码 0。修复版以**交叉编译换装**上机（`3.0.24~r42fix` → `~r42fix2`），
+  逐条复验；正式发版仍须走 `make deb` 两打逐字节一致 + 四套件复跑。
+
+【结论先行】
+  · 报告 14 条：**12 条经真机复现成立并已修复**（决策 #496），SMART 原因一条为 #497；
+    另有 2 条（BUG-07 Distance 列、BUG-13 步骤按钮）属可读性/交互，一并修掉。
+  · 报告 **4 处结论经实测更正**（不影响其缺陷成立，但会影响修法）：
+    ① BUG-01 根因不是「绑定记录被遗忘」（删除后记录仍在），真正致命态是「声明在、记录无」，
+       且**可由产品自身解除**，不是「只能手工 sysfs 救场」；
+    ② BUG-09 影响面不是「Debian 9+ 全系」——Debian 12 实测**正常启动**（其 GRUB 用 console），
+       判别标准是 guest 的 GRUB 是否用 gfxterm；
+    ③ BUG-14 不是「唯一恢复路径是 rollback」——删掉该交换机本身同样恢复；且**不是所有空 VRF
+       都能回收**（L3 交换机承载项与 gateway vrf 引用是可重建的声明，必须钉住）；
+    ④ BUG-13 不是「只改高亮」——按钮**根本没有绑定 click**。
+  · **本轮自己引入并当场修掉一条自死锁**（见 §4），教训入册。
+
+================================================================================
+§1 修复前逐条复现（全部在 3.0.24 发布件上，修复前）
+================================================================================
+BUG-02  IOMMU 矛盾：`set system kernel iommu off` + apply 后 GRUB 片段
+         `… iommu=off intel_iommu=on intel_pstate=disable`（两参数并存）。
+BUG-03  画像 CPU：`set vm-image-profiles newprof.qcow2 cpu mode host-passthrough`
+         → `%% 无匹配配置: newprof.qcow2`；同族 `accel kvm` 能建壳。
+BUG-04  ping 非法目标：`ping not-a-host!!` → usage 文案 + **rc=0**；`vppctl ping` 自身 rc=0。
+BUG-05  直通占用：commit 成功（仅「下次启动生效」警告），start 才报
+         `Could not open '/dev/vfio/8': Device or resource busy`。
+BUG-06  分步 trunk：`… ports 5 interface ens192` 后 `… ports 5 interface trunk vlans 300`
+         → `json: cannot unmarshal object into … trunk of type []int`。
+BUG-07  Distance 列：每条路由单元格恒 `未下发`（真实在 FIB 的 `10.88.0.0/24` 也一样）。
+BUG-08  SMART：`/dev/sda  unknown  -  -`，无原因；`smartctl` 未安装。
+BUG-09  无显卡：Debian 13 genericcloud + 默认 `console serial`，串口 60s 内
+         `Booting 'Debian GNU/Linux'` **39 次**、无 login，`virsh domstate` 恒 running；
+         域 XML `<video><model type='none'/></video>`。对照组：同一镜像
+         **手工改 vga 后立刻到 `localhost login:`**；Debian 12 同路径**不受影响**
+         （其 grub.cfg 是 `terminal_output console serial`，D13 是 `gfxterm serial`）。
+BUG-10  software add：`%% 安装失败…: signal: terminated` → `dpkg -l` = **iF**，
+         `dpkg --audit` 报 half-configured；`dpkg --configure nfvis` 后回 `ii`。
+BUG-11  ping vrf：`ping … vrf vs-lan` → `Failed: no FIB table for lookup`（0 发出）；
+         `vrf vr-vs-lan` 能发出（1 sent）。
+BUG-12  向导空 vNIC：REST 写 `interfaces:[{name:"",…}]` → **201**；
+         预校验报 `container-functions[wizct3].interfaces[]：vNIC名称缺失`。
+BUG-13  步骤按钮：`#dep-steps` 的 `<button data-step="N">` **无任何 click 处理器**；
+         走查 App 层 `eval` 读 `input.value` 仍为空串（仅 placeholder 有值）。
+BUG-14  空 VRF 壳：L2 交换机删最后一个 `l3-interface` 后 `display set`
+         → `%% display set 内部错误…`；树里残留 `vrfs vs-lan { name vs-lan; }`。
+BUG-01  坏 per-dev：造出「配置声明 `vpp dpdk dev ens224`、绑定记录无、内核无 netdev」
+         ⇒ `request vpp restart` → `%% 解析 "ens224" 的 PCI 地址失败: 读取
+         /sys/class/net/ens224/device/uevent: no such file or directory`，
+         startup.conf 整份不生成、其余口一起起不来。
+         ⚠️ 更正：同一设备**先删 per-dev 声明**时 restart 成功（连测两次），
+         故报告「绑定记录被遗忘」与「永久失败、只能手工救场」两点均不成立。
+
+================================================================================
+§2 修复后逐条真机复验（`3.0.24~r42fix` / `~r42fix2`）
+================================================================================
+BUG-02  ✔ `iommu off` ⇒ 片段为 `… iommu=off intel_pstate=disable`（**无 intel_iommu=on**）；
+         反向正控 `iommu pt` ⇒ `… iommu=pt intel_iommu=on …`（厂商开关照常）。
+BUG-03  ✔ `set … cpu mode host-passthrough` 直接成功，`show | compare` 见
+         `+ cpu-mode host-passthrough; + image newprof.qcow2;`。
+BUG-04  ✔ `ping not-a-host!!` → 原文 + `%% ping 目标 "not-a-host!!" 未被 vppctl 接受…`
+         **rc=1**。（判据只认 usage 文案；「格式变化不判失败」的既有取舍保留，另有用例钉住。）
+BUG-05  ✔ 同一现场（ens224 在 VPP）commit 即拒：
+         `%% 底座下发失败（已补偿）: 下发失败 vm[db13]: VM db13: 直通 PCI 设备
+         0000:13:00.0 已被数据面占用（vpp dpdk 单网卡覆盖（ens224））——…请先解除数据面声明…
+         或用 request interfaces 0000:13:00.0 unbind-dpdk 把设备交还内核后再直通`
+         **反向正控**：交还设备后同一份声明 commit 成功（不误伤）。
+BUG-06  ✔ 两步序列成功，`show | compare` 见 `+ seq 5; + trunk 300;`。
+BUG-07  ✔ 单元格改 `—`，表尾注：`（Distance 不可用：VPP 路由 API 不接收 distance 参数，
+         该列恒不可用；上面每条路由**均已下发**——此注不表示路由缺失）`。
+BUG-08  ✔ `SMART unknown 原因:` / `  - /dev/sda: 未安装 smartctl（安装 smartmontools 后重新查看）`；
+         健康设备的表格与列宽逐字不变（单测钉住）。
+BUG-09  ✔ 域 XML 为 `<model type='vga' vram='16384' heads='1' primary='yes'/>`；
+         **Debian 13 从修复前 39 次 Booting 循环 → 正常到 `Debian GNU/Linux 13 localhost
+         ttyS0` / `localhost login:`**（同一镜像、同一默认 console）。
+BUG-10  ✔ 同一升级动作：命令侧仍会因 nfvisd 被重启而断连（预期，文案如实），
+         但 **`dpkg -l` = `ii`、`dpkg --audit` 为空、`dpkg-query ${Status}` = `install ok
+         installed`**；nfvis/vpp/libvirtd/docker 均 active。
+BUG-11  ✔ `ping 10.10.10.1 vrf vs-p count 1`（vs-p 是带 BVI 的 L2 交换机）→
+         `1 个报文已从 VPP 发出…本次查询的 VRF 域为 vr-vs-p`；修复前该写法是
+         `no FIB table for lookup` / 0 发出。
+BUG-12  ✔ 浏览器黑盒：向导加网卡后 `input.value === "eth0"`（修复前 `""`）；
+         本地预校验拒绝空名/重名。
+BUG-13  ✔ 浏览器黑盒：第 4 步点「③ 网络映射」→ 主区标题由
+         `部署向导 第 4 / 4 步` 变为 `部署向导 第 3 / 4 步`（修复前只改按钮透明度）。
+BUG-14  ✔ L2 交换机删最后一个 l3-interface 后：`display set` **rc=0**、输出完整，
+         树里**无 `vrfs` 残壳**。
+BUG-01  ✔ 同一致命态：`request vpp restart` **rc=0**，startup.conf 只含能解析的 ens192，
+         journal 有具名告警：
+         `配置中的 vpp dpdk dev ens224 未能解析 PCI 地址（…no such file or directory），
+          已从 startup.conf 中跳过：该口不会出现在数据面。如仍需给 VPP 用，请重新接管后
+          重启数据面（request interfaces ens224 bind-dpdk --yes 然后 request vpp restart）；
+          否则删除该声明（delete vpp dpdk dev ens224）以免每次生成都跳过。`
+         补回绑定后 `RECOVERY_IFACE_MISSING` 在巡检周期内**自动消解**。
+
+================================================================================
+§3 测试与守护（全部红-绿验证）
+================================================================================
+新增用例（11 个文件，逐条先红后绿）：
+  internal/api/cli_fix_profile_cpu_test.go、cli_fix_port_trunk_staged_test.go、
+  cli_fix_vrfs_prune_test.go、ui_fix_deploy_nic_name_test.go、ui_fix_vrf_routes_distance_test.go
+  internal/model/fix_pci_owner_validate_test.go
+  internal/orchestrator/compute/fix_domain_video_test.go、fix_pci_dataplane_claim_test.go
+  internal/orchestrator/network/fix_dpdk_unresolved_test.go、fix_ping_usage_error_test.go、
+  fix_diag_vrf_l2_test.go
+  internal/system/fix_kernel_iommu_conflict_test.go、fix_software_halfconfigured_test.go、
+  fix_hardware_smart_reason_test.go
+  cmd/nfvisd/dataplane_claim_set_test.go
+改写既有断言两处（均按新语义，理由写在注释里）：
+  · `TestBuildDomainEmptyProfileKeepsDefaults`：`<model type="none">` → `<model type="vga">`
+    （原来那条断言把缺陷行为钉成了「正确」）
+  · `TestCLIShowVrfRoutesECMPAndDistanceTruthful`：`含「未下发」` → `不含「未下发」且含「不可用」`
+`make check` 七项 RC=0（决策计数 397→**399**）。
+
+================================================================================
+§4 本轮自己引入并修掉的缺陷（教训入册）
+================================================================================
+**R42-F1（P0，自死锁，已修）**：BUG-05 的第一版把「数据面占用」写成**每次检查都回读**
+`engine.Committed()`。而 `checkPCIDevices` 在 commit 的 apply 阶段被调用，
+`Engine.Commit` 全程持写锁、`Committed()` 也要同一把锁 ⇒ **自死锁**。
+真机现象：`request virtual-machine-functions db13 start` 卡住，随后连 `POST /login` 都
+1m30s 超时；goroutine dump 栈为
+  `compute.(*Provider).checkPCIDevices → config.(*Engine).Committed → sync.Mutex.Lock`
+叠在 `config.(*Engine).Commit` 上。
+**修法**：占用集改**进程内快照**（`dataplaneClaimSet`），启动与每次提交后
+（`OnCommitted` 的 goroutine 内，事务已结束）刷新；`Claim` 只读快照、绝不回调引擎。
+**守护**：`TestDataplaneClaimSetClaimNeverBlocks`（模拟配置来源被持锁卡死，要求 Claim 立即返回；
+注回「回读」写法即红）。
+**教训**：给「提交期会跑到的路径」注入依赖时，先确认该依赖**会不会去拿提交自己持有的锁**；
+快照 + 提交后刷新是这类读的安全形态。
+
+另两处**接线缺口**由子智能体如实上报、主会话补齐（否则修了不生效）：
+  · `cmd/nfvisd/dataplane.go`：VPP 侧诊断未注入 `SetVRFTableResolver` ⇒ BUG-11 在生产不生效；
+  · `cmd/nfvisd/dynamic_provider.go`：`computeFacade` 未转发占用检查 ⇒ 后台接入后检查静默消失。
+
+================================================================================
+§5 未覆盖 / 后续
+================================================================================
+· **四套真机套件未在本轮修复版上复跑**——本批 12 条行为变更，复跑是发版前必做项
+  （登记 `docs/v3待做.md` R42-4）。
+· R42-1：提交期（`model.Validate`）仍无法判「口名 vs BDF」的占用（映射在运行态），
+  拒绝点已从 start 前移到 define 前；彻底做需给 validate 注入口名→BDF 来源。
+· R42-2：CLI/审计里两处「升级完成」类文案在「中断但已生效」场景仍偏乐观（纯文案）。
+· 报告未覆盖、本轮也未验的：Web 十页 34 序列全量、§5.2 直通成功路径逐项、§7.1 容器 14 项。
+· 现场已清（对象删除、告警清零、`display set` rc=0、nfvis/vpp active）；
+  镜像仓库留有 `debian-12.qcow2` / `debian-13.qcow2`（本轮验证用）。

@@ -1278,7 +1278,7 @@
           <label for="diag-source">源地址（可选，如 192.168.100.1）</label>
           <input id="diag-source" data-write data-op type="text" placeholder="留空则按目标自动选路">
           <label for="diag-vrf">VRF（可选；目标在 VRF 内时填交换机名或 VRF 名，如 vs-lan）</label>
-          <input id="diag-vrf" data-write data-op type="text" placeholder="填配置对象名（如 vs-lan），不是内核设备名 vr-…；traceroute 不支持">
+          <input id="diag-vrf" data-write data-op type="text" placeholder="填配置对象名（如 vs-lan）——L2 交换机的 BVI 网关域会自动解析为 vr-&lt;名&gt;；traceroute 不支持">
           <label for="diag-ipv6"><input id="diag-ipv6" data-write data-op type="checkbox"> IPv6（ping 走自身 v6 平面 / traceroute 走宿主侧 ICMPv6）</label>
           <div class="cfg-actions">
             <button id="diag-ping-btn" data-write data-op type="button">执行 ping</button>

@@ -509,7 +509,9 @@ func TestCLIShowVrfRoutesValidatesExistence(t *testing.T) {
 }
 
 // 决策 #393：运行态路由读视图如实——ECMP 显示**全部**下一跳（逗号串，与配置同形），
-// distance 不打印假 0 而标注「未下发」（v1 的 VPP 路由 API 不接收该参数）。
+// distance 不打印假 0 而标注该属性不可得（v1 的 VPP 路由 API 不接收该参数）。
+// BUG-07：逐行单元格的旧文案「未下发」已改为「—」（紧挨前缀读起来像「这条路由没下发」），
+// 不可用的事实由列头 `Distance(不可用)` 与表尾注承载。
 func TestCLIShowVrfRoutesECMPAndDistanceTruthful(t *testing.T) {
 	x, _ := newCLIKit(t)
 	x.setNetRuntime(nil, &fakeL3Runtime{rows: []RouteRow{
@@ -529,8 +531,11 @@ func TestCLIShowVrfRoutesECMPAndDistanceTruthful(t *testing.T) {
 	if !strings.Contains(out, "10.99.5.4") {
 		t.Fatalf("单跳应逐字显示，实际:\n%s", out)
 	}
-	if !strings.Contains(out, "未下发") {
-		t.Fatalf("distance 应如实标注「未下发」（不打印假 0），实际:\n%s", out)
+	if strings.Contains(out, "未下发") {
+		t.Fatalf("逐行不得再出现「未下发」（会被读成「这条路由没下发」），实际:\n%s", out)
+	}
+	if !strings.Contains(out, "不可用") || !strings.Contains(out, "不接收 distance") {
+		t.Fatalf("distance 应如实标注为不可用（并说明 VPP 路由 API 不接收该参数），实际:\n%s", out)
 	}
 }
 

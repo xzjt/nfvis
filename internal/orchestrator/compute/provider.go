@@ -39,6 +39,14 @@ type Provider struct {
 	// nil = 明确报「未提供检查」（声明了设备就不静默放行，与 vfPCI 同口径）。
 	pciDeviceExists func(bdf string) (bool, error)
 
+	// dataplaneClaims 查某 BDF 是否已被**数据面**占用（修 BUG-05）：返回占用者描述与是否占用。
+	// nil = 不判（单测未注入，或数据面编排未装配）——此时只做存在性检查，行为与修复前一致。
+	//
+	// 为什么是 BDF→占用者的函数而不是端口名集合：配置侧数据面占用写的是口名
+	//（`vpp dpdk dev ens224`），直通写的是 BDF，两者的映射只在运行态（绑定记录/sysfs），
+	// 而 model 层是叶子包读不到——故由 main.go 注入一个读运行态的解析器。
+	dataplaneClaims func(bdf string) (owner string, claimed bool)
+
 	// uefiProbe 宿主 UEFI 固件（OVMF）缺失探测（决策 #485 复审；注入以便单测）：
 	// nil = 用默认实现 hostUEFIFirmwareMissing。仅在能判定时返回 missing=true（保守不误拒）。
 	uefiProbe func() (missing bool, detail string)
@@ -190,6 +198,14 @@ func (p *Provider) SetVFResolver(f func(pf string, vfID int) (string, error)) { 
 // NewSysfsPCIDeviceChecker）。nil 且声明了设备时 define 明确报错，不静默放行。
 func (p *Provider) SetPCIDeviceChecker(f func(bdf string) (bool, error)) { p.pciDeviceExists = f }
 
+// SetDataplaneClaimChecker 注入「某 BDF 是否已被数据面占用」的运行态解析（修 BUG-05）。
+//
+// 由 main.go 装配：读 committed 的 vpp dpdk per-dev / 交换机端口 / bond 成员，结合
+// 绑定记录与 sysfs 把**端口名**解析成 BDF 后比对。不注入时该检查整体跳过（与注入前一致）。
+func (p *Provider) SetDataplaneClaimChecker(f func(bdf string) (string, bool)) {
+	p.dataplaneClaims = f
+}
+
 // SetUEFIFirmwareProbe 注入宿主 UEFI 固件（OVMF）缺失探测（决策 #485 复审；测试用）。
 func (p *Provider) SetUEFIFirmwareProbe(f func() (bool, string)) { p.uefiProbe = f }
 
@@ -289,6 +305,21 @@ func (p *Provider) checkPCIDevices(vm model.VMFunction) error {
 			return fmt.Errorf("VM %s: 直通 PCI 设备 %s 不在本机（%s/%s 不存在）——"+
 				"请用 lspci 或 ls %s 核对设备地址；若该设备已被数据面占用，先 request interfaces <ifname|pci> unbind-dpdk 释放后再试",
 				vm.Name, norm, PCIDevicesDir, norm, PCIDevicesDir)
+		}
+		// 数据面占用检查（修 BUG-05）：设备存在 ≠ 可用——被 VPP/DPDK 接管的网卡在 sysfs
+		// 里照样存在（只是驱动是 vfio-pci），提交期放行、到 start 才被 QEMU 以
+		// `Could not open '/dev/vfio/N': Device or resource busy` 拒掉。
+		//
+		// 为什么必须在这里判而不能在 model 层：配置里数据面占用是按**端口名**写的
+		//（`vpp dpdk dev ens224`），直通是按 **BDF** 写的，两者之间的映射只在**运行态**
+		//（绑定记录 / sysfs），model 是叶子包、拿不到也读不得（依赖方向）。
+		if p.dataplaneClaims != nil {
+			if owner, claimed := p.dataplaneClaims(norm); claimed {
+				return fmt.Errorf("VM %s: 直通 PCI 设备 %s 已被数据面占用（%s）——"+
+					"提交期无法直接复用：请先解除数据面声明（delete vpp dpdk dev <口> 等）并 request vpp restart，"+
+					"或用 request interfaces %s unbind-dpdk 把设备交还内核后再直通",
+					vm.Name, norm, owner, norm)
+			}
 		}
 	}
 	return nil

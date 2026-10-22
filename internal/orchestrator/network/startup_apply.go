@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/xzjt/nfvis/internal/model"
 )
@@ -34,12 +35,40 @@ type Applier struct {
 	Bindings *Bindings
 	// Warn 告警回调（掉口风险等；缺省丢弃）。
 	Warn func(string)
+
+	// lastWarnings 最近一次 Apply 产生的告警（掉口提示 + 生成期跳过条目）。
+	// 保留是为了让「重启返回成功、但某个声明口没进数据面」这类事实在命令输出里可见——
+	// 只落日志的话，操作者跑完 `request vpp restart` 看不到它。
+	//
+	// Apply 有两个并发来源（CLI/REST 的 request vpp restart、恢复收敛的后台 goroutine），
+	// 故写入用锁保护，并按「本次调用自己攒、结束时一次性发布」的方式避免两次 Apply 的告警串味。
+	mu           sync.Mutex
+	lastWarnings []string
 }
 
-func (a *Applier) warnf(format string, args ...any) {
-	if a.Warn != nil {
-		a.Warn(fmt.Sprintf(format, args...))
+// setWarnings 发布本次 Apply 的告警集（nil 表示无告警）。
+func (a *Applier) setWarnings(w []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(w) == 0 {
+		a.lastWarnings = nil
+		return
 	}
+	a.lastWarnings = append([]string(nil), w...)
+}
+
+// Warnings 最近一次成功 Apply 期间的告警（按时间顺序；无告警返回 nil）。
+//
+// 为什么留这个读口：`request vpp restart` 的返回值只有 (文本, error)，且它由 api 层注入，
+// 装配处拿不到生成期的细节。把事实留在 Applier 上，cmd/nfvisd 的 Restart 实现就能在成功路径上
+// 一并把它报给操作者（见交付说明的接线项），而不是让人去翻日志。
+func (a *Applier) Warnings() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.lastWarnings) == 0 {
+		return nil
+	}
+	return append([]string(nil), a.lastWarnings...)
 }
 
 func (a *Applier) path() string {
@@ -62,10 +91,24 @@ func (a *Applier) write(path string, data []byte) error {
 // Apply 生成 startup.conf 并写盘；RestartOnApply 时随后重启数据面。返回生成文本。
 // 重启成功后记录已应用哈希，pending_restart 随之清除（FR-SYS-009）。
 func (a *Applier) Apply(ctx context.Context, cfg *model.Config) (string, error) {
-	a.warnDroppedPorts(cfg)
-	conf, err := GenerateStartup(cfg, a.PCI)
+	// 本次调用的告警先攒在局部，成功落地后再一次性发布到 Applier（失败时不留半份事实）。
+	var runWarnings []string
+	report := func(format string, args ...any) {
+		msg := fmt.Sprintf(format, args...)
+		runWarnings = append(runWarnings, msg)
+		if a.Warn != nil {
+			a.Warn(msg)
+		}
+	}
+	a.warnDroppedPorts(cfg, report)
+	conf, warnings, err := GenerateStartupWithWarnings(cfg, a.PCI)
 	if err != nil {
 		return "", err
+	}
+	// 生成期告警（某个声明口解析不出 PCI 被跳过）必须在**写盘与重启之前**报出来：
+	// 重启成功后数据面里就没有那个口，这条是唯一的信号。
+	for _, w := range warnings {
+		report("%s", w)
 	}
 	if err := a.write(a.path(), []byte(conf)); err != nil {
 		return "", err
@@ -85,6 +128,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *model.Config) (string, error) 
 		}
 		a.Mgr.SetApplied(vpp)
 	}
+	a.setWarnings(runWarnings)
 	return conf, nil
 }
 
@@ -93,7 +137,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *model.Config) (string, error) 
 // startup.conf 的 dpdk dev 段只由 `vpp.dpdk.per-dev` 生成，故未声明的口不会出现在新文件里，
 // 数据面重启后即从 VPP 消失——真机上「掉口」正是这么发生的（手写播种被重生成覆盖）。
 // 这是配置的应有之义（声明式），但操作者必须被告知，否则是静默的功能损失。
-func (a *Applier) warnDroppedPorts(cfg *model.Config) {
+func (a *Applier) warnDroppedPorts(cfg *model.Config, report func(string, ...any)) {
 	if a.Bindings == nil {
 		return
 	}
@@ -113,7 +157,7 @@ func (a *Applier) warnDroppedPorts(cfg *model.Config) {
 		return
 	}
 	sort.Strings(dropped)
-	a.warnf("以下已由 DPDK 接管的物理口未在配置中声明，重启数据面后将不再出现在数据面："+
+	report("以下已由 DPDK 接管的物理口未在配置中声明，重启数据面后将不再出现在数据面："+
 		"%s；如需保留，请先 set vpp dpdk dev <口> 并提交", strings.Join(dropped, "、"))
 }
 

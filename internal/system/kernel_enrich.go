@@ -54,6 +54,84 @@ func detectCPUVendor(root string) CPUVendor {
 	return VendorUnknown
 }
 
+// iommuFamilyNames IOMMU 语义族：这三个参数名都作用于同一件事（是否启用/如何使用 IOMMU），
+// 只按参数名去重会漏掉它们之间的冲突——`iommu=off` 与 `intel_iommu=on` 名字不同、都合法，
+// 合在一起却是自相矛盾的产物（真机 v3.0.24：`set system kernel iommu off` 之后片段里同时出现）。
+// 族内判据一律走本表，别处不再各自列名字。
+var iommuFamilyNames = map[string]bool{"iommu": true, "intel_iommu": true, "amd_iommu": true}
+
+// isIOMMUFamilyParam 判断 p（形如 "intel_iommu=on"，也容忍无值的裸参数）是否属 IOMMU 语义族。
+func isIOMMUFamilyParam(p string) bool {
+	name, _, _ := strings.Cut(p, "=")
+	return iommuFamilyNames[name]
+}
+
+// paramValue 取 "name=value" 的 value（无 "=" 时返回空串）。
+func paramValue(p string) string {
+	_, v, ok := strings.Cut(p, "=")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
+// iommuOff 托管字段是否**明确关闭** IOMMU（只认字段）。
+func iommuOff(d KernelDesired) bool {
+	return strings.EqualFold(strings.TrimSpace(d.IOMMU), "off")
+}
+
+// iommuDisabled 期望基线是否表达「关闭 IOMMU」——**任一**族内成员写 off 都算：
+// 托管字段（`set system kernel iommu off`）与 params 逃生口（`intel_iommu=off`/`iommu=off`…）
+// 虽然入口不同，表达的仍是同一个意图。厂商默认的开启开关必须让位给这个意图：
+// 两者并存正是本缺陷的产物（真机 v3.0.24 的 `iommu=off intel_iommu=on`，两套开关各自合法、
+// 合起来无人能读懂，实际生效语义取决于内核解析顺序）。
+//
+// 只认可识别的 off；on/pt/未设置一律不动（见 EnrichDesired 与 iommuFamilyParams）。
+func iommuDisabled(d KernelDesired) bool {
+	if iommuOff(d) {
+		return true
+	}
+	for _, p := range d.ExtraParams {
+		if isIOMMUFamilyParam(p) && strings.EqualFold(paramValue(p), "off") {
+			return true
+		}
+	}
+	return false
+}
+
+// iommuFamilyParams 输出进入 cmdline 的 IOMMU 族参数（保证族内至多一个 `iommu=` 成员）。
+//
+// 处置口径（真机 v3.0.24 的 `iommu=off intel_iommu=on` 现场）：
+//   - 托管字段非空时它是**最明确的意图**（也进 `show system kernel` 的三方对照）：
+//     族内 `iommu=` 只由该字段产出，params 里同名的成员丢弃——两个 `iommu=` 并存时内核对同名
+//     参数取最后一个，实际生效的既不是配置意图也不是操作者写下的那条；
+//   - 托管字段明确为 off 时，params 里残留的厂商开关（intel_iommu/amd_iommu）一并丢弃：
+//     「关」与厂商的「开」并存是自相矛盾的产物；
+//   - 其余情形（on/pt）params 里的**厂商**开关原样保留（既有产出逐字不变）。
+//
+// 字段为空时 params 原样透传：此时族内参数全是操作者亲手写的，产品不替人删自己的话
+// （产品自己引入的矛盾已由 EnrichDesired 的 iommuDisabled 抑制掉）。
+func iommuFamilyParams(d KernelDesired) []string {
+	if strings.TrimSpace(d.IOMMU) == "" {
+		return d.ExtraParams
+	}
+	off := iommuOff(d)
+	out := make([]string, 0, len(d.ExtraParams))
+	for _, p := range d.ExtraParams {
+		name, _, _ := strings.Cut(p, "=")
+		if !iommuFamilyNames[name] {
+			out = append(out, p)
+			continue
+		}
+		if off || name == "iommu" {
+			// off：族内成员全部让位给 iommu=off；非 off：字段产出的 iommu= 是唯一的那一个。
+			continue
+		}
+		out = append(out, p) // on/pt：厂商开关照旧
+	}
+	return out
+}
+
 // vendorParams 每厂商的默认启动参数（NFV 底座常规基线）：
 // IOMMU 开 + DMA 直通（iommu=pt 对未分配给 VM 的设备近似零开销）+ 关掉 cpufreq 驱动
 // （intel_pstate/amd_pstate 的动态调频是抖动来源）。厂商识别不了时不加。
@@ -278,7 +356,14 @@ func detectVirtualized(root string) bool {
 // 幂等：对已补全的结果重复调用，产出不变。
 func EnrichDesired(d KernelDesired, root string) KernelDesired {
 	out := d
+	// 期望基线表达了「关闭 IOMMU」时（字段或 params 逃生口任一处说 off），厂商默认的开启开关
+	// 必须让位（见 iommuDisabled）：两者并存会让「关」这个意图在 cmdline 上自相矛盾，
+	// 实际生效语义取决于内核解析顺序，不是任何人写下的意图。
+	disableIOMMU := iommuDisabled(d)
 	for _, p := range vendorParams(detectCPUVendor(root)) {
+		if disableIOMMU && isIOMMUFamilyParam(p) {
+			continue
+		}
 		if !paramTaken(p, out) {
 			out.ExtraParams = append(out.ExtraParams, p)
 		}

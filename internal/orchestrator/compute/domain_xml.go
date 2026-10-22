@@ -298,7 +298,7 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 	// 控制台形态（决策 #485）：域映射与访问路径归既有管线。
 	//   serial（缺省）：既有 pty 串口 + console，行为不变；
 	//   telnet：串口换 tcp + telnet 协议（端口按 VM 名确定性派生），仅监听回环；
-	//   vnc：不挂串口，改挂 VNC 图形设备（autoport，仅回环），显卡换 vga。
+	//   vnc：不挂串口，改挂 VNC 图形设备（autoport，仅回环）；显卡与其余形态同为 vga（见下）。
 	//
 	// **显式设定的形态权威**（契约 §4.3）：由画像/实例覆盖显式给出 console（无论 serial 还是
 	// telnet）时，该形态**独立于**既有的 serial_console 开关——否则会出现「读视图报 telnet、域里
@@ -344,12 +344,21 @@ func BuildDomain(spec DomainSpec) (*libvirtxml.Domain, error) {
 		}
 	}
 
-	// 无人值守：无显卡（vnc 除外）、无内存气球（气球与大页不兼容）。
-	videoType := "none"
-	if strings.EqualFold(strings.TrimSpace(spec.Console), "vnc") {
-		videoType = "vga"
-	}
-	d.Devices.Videos = []libvirtxml.DomainVideo{{Model: libvirtxml.DomainVideoModel{Type: videoType}}}
+	// 显示设备：**每种控制台形态都挂一块 std VGA**，无内存气球（气球与大页不兼容）。
+	//
+	// 为什么不能按「无人值守 ⇒ 无显卡」写 `none`（真机 v3.0.24 验证）：Debian 13 / Ubuntu
+	// 云镜像的 grub.cfg 用 `insmod gfxterm` + `terminal_output gfxterm serial`，而 gfxterm
+	// 需要一个**真实显示设备**（BIOS 固件下取 VBE 模式）。`none` 让 gfxterm 初始化失败 ⇒
+	// GRUB 复位 ⇒ 无限重启：串口把 `Booting 'Debian GNU/Linux'` 打了 39 次却永远到不了登录，
+	// `virsh domstate` 恒 running、cpu.time 一直在涨，产品侧零告警——看着活着，实际没起来。
+	// 同一镜像的域 XML 只加上 `<video><model type='vga'/></video>` 即正常起到 login。
+	//
+	// 代价：std VGA 预留 ~16 MiB guest 显存，空闲时不耗 CPU（guest 有驱动才初始化），
+	// 而失效形态是「guest 永远起不来」——这个取舍显然偏向有显卡。
+	// vga 而非 virtio：BIOS 固件下 GRUB 的 gfxterm 走 VBE，只有 std VGA 提供它；virtio-gpu
+	// 需要 guest 内核驱动，GRUB 阶段还没有。
+	// vnc 形态同样用 vga（它还要一块能抓帧的显卡给 VNC 用），两者在此合一。
+	d.Devices.Videos = []libvirtxml.DomainVideo{{Model: libvirtxml.DomainVideoModel{Type: "vga"}}}
 	d.Devices.MemBalloon = &libvirtxml.DomainMemBalloon{Model: "none"}
 
 	// 额外 QEMU 参数（决策 #485）：每个元素按空白切分为独立 arg（denylist 已在 model 层校验）。

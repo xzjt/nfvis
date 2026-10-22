@@ -230,15 +230,24 @@ var statementAliasesCompute = []aliasRule{
 
 // aliasProfileCPUScalar：`vm-image-profiles <img> cpu mode|model <v>` → 平铺 VMImageProfile
 // 字段（field = cpu_mode|cpu_model）。t = [vm-image-profiles, <img>, cpu, mode|model(, <v>)]。
+//
+// set 时按需建出画像元素（与兄弟语句 `vm-image-profiles <img> accel|machine …` 的通用遍历
+// 产出**同一模型**）：此前一律走 elemByID，全新画像上 `set … cpu mode` 直接报
+// 「无匹配配置」——同一族语句一半能建元素、一半不能，纯属实现疏漏（真机复现）。
+// 元素身份字段取 identityFields 的单一真源（image），不在这里另写一份缺省 name。
+//
+// delete 保持「不凭空建元素」：删一个不存在的画像若建出只有 image 的空壳，读视图会从
+// 「没有这个画像」变成「多了一条空画像」，且空壳无语句可还原（display set 自校验失败）。
 func aliasProfileCPUScalar(tree map[string]any, t []string, isSet bool, field string) error {
-	e, err := elemByID(tree, "vm_image_profiles", t[1])
-	if err != nil {
-		return err
-	}
 	if !isSet {
+		e, err := elemByID(tree, "vm_image_profiles", t[1])
+		if err != nil {
+			return err
+		}
 		delete(e, field)
 		return nil
 	}
+	e := elemByField(tree, "vm_image_profiles", identityFieldOf("vm_image_profiles"), t[1])
 	e[field] = t[4]
 	return nil
 }

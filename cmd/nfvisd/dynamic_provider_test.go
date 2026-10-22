@@ -59,6 +59,7 @@ type fakeCompute struct {
 	consoleErr error
 	snapErr    error
 	snapInfos  []compute.SnapshotInfo
+	dpClaim    func(bdf string) (string, bool)
 }
 
 func (f *fakeCompute) DefineVM(_ context.Context, vm model.VMFunction, _ model.AllocatedResources) error {
@@ -158,6 +159,13 @@ func (f *fakeCompute) SnapshotDelete(_ context.Context, domain, name string) err
 	defer f.mu.Unlock()
 	f.snapDeleted = append(f.snapDeleted, [2]string{domain, name})
 	return f.snapErr
+}
+
+// SetDataplaneClaimChecker 记录注入的占用解析（修 BUG-05：持有层换装时必须转发给新实现）。
+func (f *fakeCompute) SetDataplaneClaimChecker(fn func(bdf string) (string, bool)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dpClaim = fn
 }
 
 func (f *fakeCompute) EnsureConsistent(_ context.Context, cfg model.Config) []error {

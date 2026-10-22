@@ -383,10 +383,13 @@ func (x *cliExecutor) showVrfRoutes(name string) string {
 	}
 	items := make([]any, 0, len(rows))
 	var b strings.Builder
-	// 决策 #393：Distance 列**如实标注**。v1 的路由下发（VPP ip_route_add_del）不接收
-	// distance 参数、读回也不带该值（RouteEntry.Distance 恒 0），故读视图不打印假的 0，
-	// 而标注为「未下发」（配置里的 distance 仅记录、不参与选路；下发能力不在本条）。
-	fmt.Fprintf(&b, "%-20s %-20s %s\n", "Prefix", "NextHop", "Distance")
+	// 决策 #393 / BUG-07：Distance 列**如实标注该属性不可得**——v1 的路由下发（VPP ip_route_add_del）
+	// 不接收 distance 参数、读回也不带该值（RouteEntry.Distance 恒 0）。
+	//
+	// 措辞曾把逐行单元格写成「未下发」：它紧挨某个前缀，读起来像「**这条路由**没下发」，
+	// 而路由其实就在 FIB 里（真机现场：运维据此怀疑路由丢失）。故列头把含义前置、单元格用
+	// 「—」（无可展示的值，与全站空值的写法一致），把「哪个属性不可用」放在表尾注里说清。
+	fmt.Fprintf(&b, "%-20s %-20s %s\n", "Prefix", "NextHop", "Distance(不可用)")
 	for _, r := range rows {
 		items = append(items, anyToTree(r))
 		fmt.Fprintf(&b, "%-20s %-20s %s\n", r.Prefix, r.NextHop, routeDistanceText(r.Distance))
@@ -394,17 +397,22 @@ func (x *cliExecutor) showVrfRoutes(name string) string {
 	// 这条注记只对 VPP 数据面成立（VPP 的路由 API 不接收 distance）。内核数据面下 distance
 	// 就是 `ip route` 的 metric，**真的下发了**，再挂这条注记就是错的（真机走查实测）。
 	if x.dpMode() != model.DataPlaneKernel {
-		b.WriteString("（Distance 未下发：VPP 路由 API 不接收该参数，v1 不显示具体值）\n")
+		b.WriteString("（Distance 不可用：VPP 路由 API 不接收 distance 参数，该列恒不可用；" +
+			"上面每条路由**均已下发**——此注不表示路由缺失）\n")
 	}
 	x.structured = map[string]any{"routes": items}
 	return b.String()
 }
 
-// routeDistanceText 运行态路由 distance 的读值（决策 #393）：0（未下发）→「未下发」，
-// 其余原样（供将来真的下发 distance 时显示）。当前 govpp 侧恒 0，故列值恒「未下发」。
+// routeDistanceText 运行态路由 distance 的读值（决策 #393 / BUG-07）：不可得时给「—」，
+// 其余原样（供将来真的下发 distance 时显示）。当前 govpp 侧恒 0，故单元格恒「—」。
+//
+// 「—」而不是「未下发」：后者的字面主语在前缀列（读成「这条路由未下发」），而事实只是
+// **distance 这个属性**取不到；不可用的事实由列头 `Distance(不可用)` 与表尾注承载，
+// 一处说清，避免逐行重复一句会被误读的短语。
 func routeDistanceText(d int) string {
 	if d == 0 {
-		return "未下发"
+		return "—"
 	}
 	return strconv.Itoa(d)
 }

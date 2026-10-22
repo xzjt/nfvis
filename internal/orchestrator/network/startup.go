@@ -34,6 +34,14 @@ type PCIResolver func(ifname string) (string, error)
 // GenerateStartup 生成 startup.conf 文本。pciOf 为 nil 时，仅当存在单网卡覆盖或
 // 需要绑定物理口时才报错；纯 cpu/memory 配置可离线生成。
 func GenerateStartup(cfg *model.Config, pciOf PCIResolver) (string, error) {
+	out, _, err := GenerateStartupWithWarnings(cfg, pciOf)
+	return out, err
+}
+
+// GenerateStartupWithWarnings 同 GenerateStartup，另返回生成期告警（每条都是「配置声明了、
+// 但没能进 startup.conf」的条目）。warnings 非空**不是**错误：文件照样可用，但那部分不在数据面里，
+// 调用方必须把它报给操作者（见 Applier.Warnings）。
+func GenerateStartupWithWarnings(cfg *model.Config, pciOf PCIResolver) (string, []string, error) {
 	if cfg == nil {
 		cfg = &model.Config{}
 	}
@@ -42,7 +50,7 @@ func GenerateStartup(cfg *model.Config, pciOf PCIResolver) (string, error) {
 		vpp = &model.VppConfig{}
 	}
 	if err := validateVPP(cfg, vpp); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	var b strings.Builder
@@ -50,14 +58,15 @@ func GenerateStartup(cfg *model.Config, pciOf PCIResolver) (string, error) {
 	puntStanza(&b)
 	cpuStanza(&b, vpp.CPU)
 	if err := memoryStanza(&b, vpp.Memory); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	buffersStanza(&b, vpp.Memory)
-	if err := dpdkStanza(&b, vpp.DPDK, pciOf); err != nil {
-		return "", err
+	var warnings []string
+	if err := dpdkStanza(&b, vpp.DPDK, pciOf, &warnings); err != nil {
+		return "", nil, err
 	}
 	pluginsStanza(&b, vpp.Plugins)
-	return b.String(), nil
+	return b.String(), warnings, nil
 }
 
 // startupShapeSentinel 生成器**输出形状**哨兵（决策 #400，沿用 #345 的 punt 盐技法）：
@@ -230,7 +239,15 @@ func buffersStanza(b *strings.Builder, mem *model.VppMemory) {
 	fmt.Fprintf(b, "buffers {\n  buffers-per-numa %d\n}\n\n", mem.BuffersPerNuma)
 }
 
-func dpdkStanza(b *strings.Builder, dpdk *model.VppDPDK, pciOf PCIResolver) error {
+// dpdkStanza 输出 dpdk 段。pciOf 为 nil 且存在单网卡覆盖时是**配置级错误**（没有运行态解析就
+// 无从生成 dev 块，且这不是「某个口暂不可用」而是调用方漏装配），故仍直接失败。
+//
+// 单条 PCI 解析失败则是另一回事（真机 v3.0.24）：口被交还内核驱动后仍留在 committed 配置里，
+// 此时 sysfs 里没有该网卡、绑定记录也已清——把它当整份生成的失败，会让**其余配置正常的口**
+// 一起起不来，数据面整段停摆，产品内唯一出路是删掉那一条声明。故这里只跳过那一条，
+// 其余 dev 块照常产出，并通过 warnings 点名跳过者与可照做的出路——静默丢口是更坏的缺陷
+// （操作者会以为声明还在生效，而数据面里根本没这个口）。
+func dpdkStanza(b *strings.Builder, dpdk *model.VppDPDK, pciOf PCIResolver, warnings *[]string) error {
 	if dpdk == nil {
 		return nil
 	}
@@ -239,6 +256,10 @@ func dpdkStanza(b *strings.Builder, dpdk *model.VppDPDK, pciOf PCIResolver) erro
 	if !hasDefault && len(dpdk.PerDev) == 0 && dpdk.UIODriver == "" {
 		return nil
 	}
+	if pciOf == nil && len(dpdk.PerDev) > 0 {
+		// 装配缺口（不是运行态事实）：沿用既有契约直接报错，点名第一条需要的口。
+		return fmt.Errorf("vpp dpdk 单网卡覆盖 %q 需要运行态解析 PCI 地址", dpdk.PerDev[0].Interface)
+	}
 	b.WriteString("dpdk {\n")
 	if hasDefault {
 		b.WriteString("  dev default {\n")
@@ -246,12 +267,10 @@ func dpdkStanza(b *strings.Builder, dpdk *model.VppDPDK, pciOf PCIResolver) erro
 		b.WriteString("  }\n")
 	}
 	for _, o := range dpdk.PerDev {
-		if pciOf == nil {
-			return fmt.Errorf("vpp dpdk 单网卡覆盖 %q 需要运行态解析 PCI 地址", o.Interface)
-		}
 		pci, err := pciOf(o.Interface)
 		if err != nil {
-			return fmt.Errorf("解析 %q 的 PCI 地址失败: %w", o.Interface, err)
+			*warnings = append(*warnings, skippedDPDKDevWarning(o.Interface, err))
+			continue
 		}
 		fmt.Fprintf(b, "  dev %s {\n", pci)
 		if o.Interface != "" {
@@ -266,6 +285,19 @@ func dpdkStanza(b *strings.Builder, dpdk *model.VppDPDK, pciOf PCIResolver) erro
 	}
 	b.WriteString("}\n\n")
 	return nil
+}
+
+// skippedDPDKDevWarning 一条被跳过的单网卡覆盖的说明。
+//
+// 必须同时给出三件事，否则操作者无从下手：**哪个口**、**为什么**（解析原文）、
+// **两条可照做的出路**——重新接管（口还在、只是不在 DPDK 手里）或删掉这条声明
+// （口已不存在/不再要给数据面）。
+func skippedDPDKDevWarning(ifname string, cause error) string {
+	return fmt.Sprintf("配置中的 vpp dpdk dev %s 未能解析 PCI 地址（%v），已从 startup.conf 中跳过："+
+		"该口不会出现在数据面。如仍需给 VPP 用，请重新接管后重启数据面"+
+		"（request interfaces %s bind-dpdk --yes 然后 request vpp restart）；"+
+		"否则删除该声明（delete vpp dpdk dev %s）以免每次生成都跳过。",
+		ifname, cause, ifname, ifname)
 }
 
 // writeDevOptions 只输出非零项，实现「单网卡覆盖项缺省回落全局默认」。

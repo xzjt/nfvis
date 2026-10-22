@@ -306,7 +306,7 @@ func GenerateBaseline(d KernelDesired) (grubFragment string, fstabLine string) {
 	if d.IOMMU != "" {
 		params = append(params, "iommu="+d.IOMMU)
 	}
-	params = append(params, d.ExtraParams...)
+	params = append(params, iommuFamilyParams(d)...)
 
 	var b strings.Builder
 	b.WriteString("# 由 NFViS 生成：请勿手工编辑；变更经 CLI set system kernel / resource-pools 后由 nfvisd 重写\n")

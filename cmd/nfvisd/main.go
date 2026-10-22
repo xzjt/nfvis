@@ -600,6 +600,8 @@ func run() error {
 	}
 
 	var eng *config.Engine // 供 OnCommitted 回调引用（NewEngine 之后赋值）
+	// 修 BUG-05：数据面占用快照的钩子引用（引擎创建后才装配，回调 goroutine 内先判 nil）。
+	var dpClaims *dataplaneClaimSet
 	// 决策 #471：提交后监听地址运行期重收敛（收口 R24-E）的钩子引用——apiSrv 在本函数
 	// 后段（api.New）才创建，故先声明、创建后赋值；钩子 goroutine 内先判 nil 再使用。
 	var apiSrv *api.Server
@@ -630,6 +632,11 @@ func run() error {
 			// 决策 #388：主机防火墙随配置热更新（幂等；失败只告警——提交已经成功，
 			// 数据面实况由读视图如实呈现，不把下发失败倒灌成提交失败）
 			applyFirewallSettings(cfg, fwApplier, log)
+			// 修 BUG-05：数据面占用快照随 committed 刷新（PCI 直通的运行期互斥用它判）。
+			// 放在这里而不是在检查时回读引擎：本 goroutine 在事务提交完成之后才跑，此时取锁安全。
+			if dpClaims != nil {
+				dpClaims.Refresh()
+			}
 			// 决策 #424：系统基线（主机名/时区/NTP/宿主解析器）随配置落到宿主（幂等；失败只告警）；
 			// 决策 #428：逐项失败同时对账进告警表（SYSTEM_BASELINE_APPLY_FAILED）。
 			applySystemBaseline(cfg, baselineApplier, alarms, log)
@@ -693,6 +700,23 @@ func run() error {
 	// committed 配置取（与内核读视图同一来源的单一真源；钩子未注入的 VPP 数据面**不会被读**，
 	// 零行为变化）。持有层记住并在换装时转发：后台接入循环会新建 Provider 再 Swap。
 	containerProvider.SetConfigSource(engine.Committed)
+
+	// 修 BUG-05：PCI 直通与数据面占用的**运行期**互斥。配置里数据面占用按端口名写
+	//（`vpp dpdk dev ens224`）、直通按 BDF 写，两者的映射只在运行态（绑定记录/sysfs），
+	// model 层是叶子包读不到——故由这里注入。少了它，把已被 DPDK 接管的网卡直通给 VM
+	// 会「提交成功、start 才炸」（真机：`Could not open '/dev/vfio/8': Device or resource busy`）。
+	//
+	// 解析顺序与 startup.conf 生成同源（PCIResolverWithBindings：先 sysfs 活事实、后绑定记录），
+	// 保证「生成时认为它占着哪个 BDF」与「这里判它占着哪个 BDF」是同一个答案。
+	//
+	// ⚠️ 占用集走**进程内快照**，不在检查时回读引擎：`checkPCIDevices` 是在 commit 的 apply 阶段
+	// 被调用的，而 `Engine.Commit` 全程持写锁、`Engine.Committed()` 也要这把锁——直接回读会
+	// **自死锁**（真机复验时踩到：commit 卡住、API 整体无响应）。快照在启动与每次提交后刷新；
+	// 提交期读到的可能是「上一版 committed」，但数据面声明与直通的冲突在那一版里同样可见
+	// （新增冲突的配置会在下一次提交前的校验里被 model 层的字面判据拦住），不会漏判。
+	dataplaneClaims := newDataplaneClaimSet(engine, dpdkBindings)
+	computeProvider.SetDataplaneClaimChecker(dataplaneClaims.Claim)
+	dpClaims = dataplaneClaims
 
 	// 决策 #471：先留存**原始**监听旗标值——下面这条启动收敛会把 *listen 就地改写为
 	// 管理口地址，而提交后的运行期重解析必须基于原始值（守门判定「addr == baseListen
@@ -2531,6 +2555,94 @@ func (c *dpdkController) SetDPDKBound(ctx context.Context, ifname string, bound 
 	// 必须按 **PCI** 回读驱动：绑定到 DPDK 后内核网卡即消失，
 	// 按接口名解析会失败并把结果误报为「无驱动」（真机实测踩到）。
 	return pci, readbackDPDKDriver(c.b, pci), nil
+}
+
+// dataplaneClaimSet 「某 BDF 是否已被数据面占用」的运行期快照（修 BUG-05）。
+//
+// 为什么是快照而不是每次回读：`Claim` 在 commit 的 apply 阶段被调用，而提交事务全程持
+// `Engine` 的写锁——从那里调 `engine.Committed()` 会**自死锁**（真机复验实证：commit 卡死、
+// API 全部超时）。故把「committed 里声明为数据面端口的名字」预先解析成 BDF 集合，
+// 由启动与每次提交后（OnCommitted 的 goroutine 里，事务已结束）刷新。
+//
+// 解析器与 startup.conf 生成**同源**（先 sysfs 活事实、后绑定记录），保证两处对「这个口占着
+// 哪个 BDF」的答案一致。解析不出来的名字直接跳过——它本来就没被数据面接管，不构成占用。
+type dataplaneClaimSet struct {
+	mu       sync.RWMutex
+	byBDF    map[string]string // 归一 BDF → 占用者描述
+	resolve  network.PCIResolver
+	srcOfCfg func() (model.Config, error)
+}
+
+func newDataplaneClaimSet(engine *config.Engine, bindings *network.Bindings) *dataplaneClaimSet {
+	c := &dataplaneClaimSet{
+		byBDF:    map[string]string{},
+		resolve:  network.PCIResolverWithBindings(network.NewSysfsPCIResolver(), bindings),
+		srcOfCfg: engine.Committed,
+	}
+	c.Refresh()
+	return c
+}
+
+// Refresh 重算快照（启动与每次提交后调用；失败时保留旧快照——宁可旧也不能空）。
+func (c *dataplaneClaimSet) Refresh() {
+	if c == nil || c.srcOfCfg == nil {
+		return
+	}
+	cfg, err := c.srcOfCfg()
+	if err != nil {
+		return
+	}
+	next := map[string]string{}
+	type claim struct{ ifname, role string }
+	var claims []claim
+	if cfg.Vpp != nil && cfg.Vpp.DPDK != nil {
+		for _, d := range cfg.Vpp.DPDK.PerDev {
+			claims = append(claims, claim{d.Interface, "vpp dpdk 单网卡覆盖"})
+		}
+	}
+	for _, vs := range cfg.VirtualSwitches {
+		for _, p := range vs.Ports {
+			if p.Interface != "" {
+				claims = append(claims, claim{p.Interface, "交换机 " + vs.Name + " 端口"})
+			}
+		}
+	}
+	for _, b := range cfg.Bonds {
+		for _, m := range b.Members {
+			claims = append(claims, claim{m, "bond " + b.Name + " 成员"})
+		}
+	}
+	for _, cl := range claims {
+		if cl.ifname == "" {
+			continue
+		}
+		pci, err := c.resolve(cl.ifname)
+		if err != nil || strings.TrimSpace(pci) == "" {
+			continue
+		}
+		// 键归一（与直通侧 model.NormalizeBDF 同口径）：`13:00.0` 与 `0000:13:00.0` 是同一设备。
+		if norm, err := model.NormalizeBDF(pci); err == nil {
+			next[norm] = cl.role + "（" + cl.ifname + "）"
+		}
+	}
+	c.mu.Lock()
+	c.byBDF = next
+	c.mu.Unlock()
+}
+
+// Claim 查某 BDF 是否已被数据面占用（归一后比较；只读快照，绝不回调引擎）。
+func (c *dataplaneClaimSet) Claim(bdf string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	key, err := model.NormalizeBDF(bdf)
+	if err != nil {
+		key = strings.TrimSpace(bdf)
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	owner, ok := c.byBDF[key]
+	return owner, ok
 }
 
 // vppAutostartAlarms 把一次「启动时确保 VPP 运行」的结果落到告警表（决策 #348）。

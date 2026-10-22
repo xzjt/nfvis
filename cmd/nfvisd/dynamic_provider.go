@@ -78,6 +78,10 @@ type computeFacade interface {
 	Snapshots(ctx context.Context, domain string) ([]compute.SnapshotInfo, error)
 	SnapshotRevert(ctx context.Context, domain, name string) error
 	SnapshotDelete(ctx context.Context, domain, name string) error
+	// SetDataplaneClaimChecker 注入「某 BDF 是否已被数据面占用」的运行态解析（修 BUG-05）。
+	// 持有层在换装时转发——后台接入新建的 Provider 不得丢掉这项检查，否则提交期又会放行
+	// 「已被 DPDK 接管」的设备、到 start 才被 QEMU 以 device busy 拒掉。
+	SetDataplaneClaimChecker(f func(bdf string) (string, bool))
 }
 
 // containerFacade 容器侧同理（orchestrator.ContainerProvider 的 9 法已含
@@ -108,9 +112,23 @@ type dynamicCompute struct {
 	mu   sync.RWMutex
 	p    computeFacade
 	conn connCloser // 持有层记账的 libvirt 连接（进程优雅停机时统一关闭）
+	// dpClaim 数据面占用解析（修 BUG-05）：与容器侧的钩子/来源同口径——注入面由持有层记住，
+	// 换装时转交给新实现，否则后台接入成功后这项检查会静默消失。
+	dpClaim func(bdf string) (string, bool)
 }
 
 func newDynamicCompute() *dynamicCompute { return &dynamicCompute{} }
+
+// SetDataplaneClaimChecker 注入数据面占用解析；已接入时立即转发给当前实现。
+func (h *dynamicCompute) SetDataplaneClaimChecker(f func(bdf string) (string, bool)) {
+	h.mu.Lock()
+	h.dpClaim = f
+	p := h.p
+	h.mu.Unlock()
+	if p != nil && f != nil {
+		p.SetDataplaneClaimChecker(f)
+	}
+}
 
 // Swap 原子换装：写入真实 Provider 并接管其连接的记账（含关闭职责）。生产路径换装
 // 至多一次（本决策只服务「从未接入」状态）；防御性地先关旧连接，避免覆盖泄漏。
@@ -123,7 +141,11 @@ func (h *dynamicCompute) Swap(p computeFacade, conn connCloser) {
 	h.mu.Lock()
 	old := h.conn
 	h.p, h.conn = p, conn
+	claim := h.dpClaim
 	h.mu.Unlock()
+	if p != nil && claim != nil {
+		p.SetDataplaneClaimChecker(claim)
+	}
 	if old != nil {
 		_ = old.Close()
 	}

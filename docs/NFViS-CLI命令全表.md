@@ -70,7 +70,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show system kernel` | 内核启动基线三方对照（cmdline/运行实际/配置期望，FR-SYS-014） | 配置 + 运行态 | ✅ |
 | `show system metrics history` | 历史时序**概览**（决策 #356）：存储状态（可用/不可用 + 原因）、生效采样间隔与保留天数、库大小、序列数、样本数、时间范围（最旧/最新）、上次采样时刻与是否停滞（stale）。数据源＝独立 SQLite 库 `/var/lib/nfvis/metrics.db`（`/metrics` 的历史底座） | `GET /metrics/history` | ✅ |
 | `show system metrics history name <metric> [last <duration>] [step <duration>]` | 某指标**各序列**（按标签分组）的时间点；`<metric>` 走动态候选（来源＝存储内已知指标名）；`last` 默认 1h、`step` 省略=自动降采样（取桶内最后一个样本）；存储不可用/无数据时如实说明，不编造 | `GET /metrics/history?name=…` | ✅ |
-| `show system hardware` | 硬件健康：温度/风扇/电源/SMART（FR-SYS-012） | `GET /system/hardware` | ✅（本机无 IPMI/传感器，走降级路径） |
+| `show system hardware` | 硬件健康：温度/风扇/电源/SMART（FR-SYS-012）。SMART 读不到时**附原因**（smartctl 未安装 / 设备不支持 / 其它读取失败），便于判断要不要装工具 | `GET /system/hardware` | ✅（本机无 IPMI/传感器，走降级路径） |
 | `show system firewall` | 主机防火墙（管理面入向）读视图（决策 #388）：默认策略 / 规则表（seq/动作/来源/协议/端口 + **逐规则 packets/bytes 计数**）/ 保留项说明 / `applied` 状态与未收敛原因（表缺失、规则集合不一致、检测到手工修改、nft 不可用等如实说明）/ 计数口径；未配置时如实报「未配置」并给前置提示（写路径走配置模式 candidate→commit） | `GET /system/firewall` | ✅ 真机四维验证（round169，dev112）：规则与 `nft list table inet nfvis-firewall` 逐字对、drop ICMP 后宿主 ping 断而 SSH 存活、逐规则计数递增可读（3 包/180 字节）、restart nfvis 幂等跳过（计数 3→6 连续）、删空回收表、未声明管理口拒绝、plain commit 被拒且文案含照做路径、operator 双面拒（CLI 拒/REST 403）；自锁-回滚场景抓出并修复一处真缺陷（confirmed 超时回滚不触发宿主侧重收敛 ⇒ 表残留 drop，修后回滚即回收表、访问自动恢复）——证据 `docs/evidence/v2-round169-d388-host-firewall.txt` |
 | `show system core-dumps` | 崩溃转储清单（VPP/QEMU/nfvisd） | `GET /system/core-dumps` | ✅ |
 | `show system tech-support` | 诊断归档清单 | `GET /system/tech-support` | ✅ |
@@ -213,7 +213,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 |---|---|---|---|---|
 | `configure` | 进入配置模式 | S | 本地（会话模式切换） | ✅ |
 | `exit` / `quit` | 退出 CLI | R | 本地 | ✅ |
-| `ping [ipv6] <host> [source <ip>] [count <n>] [vrf <name>]` | 经 VPP L3 连通性测试（`ipv6` 显式走 v6 平面，即 `vppctl ping ipv6`）；`count` 上界 **100**（两数据面一致：未指定＝默认 5、越界报可读错误不静默截断、负数报错）。**`vrf` 填配置对象名**（交换机名 / VRF 名 / L3 交换机名，如 `vs-lan`）；内核数据面下尤其不要填内核设备名（`vr-<交换机名>`）——那是派生结果，命令不接受，报错会列出可用的写法 | O | `vppctl ping`（CLI socket）；内核数据面经宿主 `ip vrf exec` | ✅（`source` 须为 **VPP 接口**地址；`vrf` 经 VPP 路径）。round80 套件里三条 ping 用例均记 ⊘：该实例到 `192.168.155.1` 不通（「0 发包 / 100% 丢包即报失败」的**判定自洽**通过，决策 #89——0 发包不再被算作通过）。IPv6（决策 #330）：4/6 同口径「未通即失败」，并区分「没发出去」与「发了没应答」 |
+| `ping [ipv6] <host> [source <ip>] [count <n>] [vrf <name>]` | 经 VPP L3 连通性测试（`ipv6` 显式走 v6 平面，即 `vppctl ping ipv6`）；`count` 上界 **100**（两数据面一致：未指定＝默认 5、越界报可读错误不静默截断、负数报错）。**`vrf` 填配置对象名**（交换机名 / VRF 名 / L3 交换机名，如 `vs-lan`）——VPP 数据面下 L2 交换机名会被解析到其网关域 `vr-<交换机名>` 的表（其余名字按原名查表，与旧行为一致）；内核数据面下尤其不要填内核设备名（`vr-<交换机名>`）——那是派生结果，命令不接受，报错会列出可用的写法。**非法目标即失败**（vppctl 对非法参数以 0 退出，产品另行判据纠正） | O | `vppctl ping`（CLI socket）；内核数据面经宿主 `ip vrf exec` | ✅（`source` 须为 **VPP 接口**地址；`vrf` 经 VPP 路径）。round80 套件里三条 ping 用例均记 ⊘：该实例到 `192.168.155.1` 不通（「0 发包 / 100% 丢包即报失败」的**判定自洽**通过，决策 #89——0 发包不再被算作通过）。IPv6（决策 #330）：4/6 同口径「未通即失败」，并区分「没发出去」与「发了没应答」 |
 | `traceroute [ipv6] <host> [vrf <name>]` | 路径跟踪（`ipv6` 走宿主侧 ICMPv6） | O | 宿主侧 raw ICMP/ICMPv6 | ✅（`vrf` 对 v4/v6 **都不支持**并明确报错、不静默降级，附录 A #36/#330） |
 | `monitor interfaces <ifname> [interval <sec>]` | 实时刷新计数（Ctrl-C 退出） | O | 服务端单次快照 + 前端轮询 | ✅（round80 实测不带 `interval` 的写法） |
 | `wizard` | 初始化向导：问答规划资源池+内核基线并提交（CLI 端交互） | O | 本地（CLI 端交互编排，无 REST 端点；Web 等价物是向导式页面） | ✅（非 TTY 明确拒绝） |

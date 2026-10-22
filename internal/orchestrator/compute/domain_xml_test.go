@@ -595,6 +595,11 @@ func TestBuildDomainExtraArgs(t *testing.T) {
 }
 
 // 空画像字段时保持既有行为（回归）：machine/cpu/firmware/accel/console 全缺省。
+//
+// ⚠️ 显卡一项的断言按 round42 BUG-09 的修复改写：缺省 console（串口）此前生成
+// `<model type="none">`（无显卡），而用 gfxterm 的发行版（Debian 13 / Ubuntu 等）在 GRUB
+// 阶段无显示设备会无限重启——真机实测 60s 内 `Booting` 循环 39 次、VM 恒 `running` 却永不
+// 到登录提示符；同一镜像把域 XML 改成 vga 后立刻正常启动。故缺省改为 std VGA。
 func TestBuildDomainEmptyProfileKeepsDefaults(t *testing.T) {
 	xml := mustXML(t, baseSpec())
 	assertContains(t, xml,
@@ -603,9 +608,9 @@ func TestBuildDomainEmptyProfileKeepsDefaults(t *testing.T) {
 		`mode="host-passthrough"`,
 		`<serial type="pty">`,
 		`<console type="pty">`,
-		`<model type="none">`,
+		`<model type="vga">`,
 	)
-	assertNotContains(t, xml, `firmware=`, "<commandline", "<graphics")
+	assertNotContains(t, xml, `firmware=`, "<commandline", "<graphics", `<model type="none">`)
 }
 
 // 决策 #485 契约 §4.3：**显式设定**的 console 形态权威、独立于 serial_console 开关。

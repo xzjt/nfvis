@@ -19,6 +19,10 @@ import { bytes } from '../core/format.js';
 
 let depKind = '';        // 'vm' | 'ct'（Step 1 选定）
 let depStep = 1;
+// 已走到过的最远步骤（步骤条只允许回到这里为止）。
+// 由 depShow 推进：它是「四步表单的必填项已按序填过」的进程内事实——
+// 没有它时步骤条无从判断「第 ③ 步的网络映射能不能直接跳过去」。
+let depMaxStep = 1;
 let depData = null;      // { images, profiles, vss, pools, hp }（render 时从路由端点取齐）
 
 function depMsg(text, isErr) {
@@ -29,6 +33,7 @@ function depMsg(text, isErr) {
 
 function depShow(step) {
   depStep = step;
+  if (step > depMaxStep) depMaxStep = step;
   for (let i = 1; i <= 4; i++) $('dep-step-' + i).hidden = i !== step;
   for (const b of $('dep-steps').querySelectorAll('button')) {
     const n = Number(b.dataset.step);
@@ -37,6 +42,20 @@ function depShow(step) {
   $('dep-step-note').textContent = '第 ' + step + ' / 4 步';
   if (step === 3) depDrawTopo();
   if (step === 4) depFillSummary();
+}
+
+// 步骤条导航（真机实测缺陷：这些按钮此前**没有任何 click 处理器**，点了只动高亮、
+// 主区纹丝不动——操作者以为界面卡住）。
+//
+// 允许的跳转口径：**向前只到已到过的最远一步**（depMaxStep），向后任意。
+// 理由是四步之间有必填依赖（第 ② 步没选类型/镜像、第 ③ 步的网卡名没填），
+// 跳到没走过的步会把「网络映射/摘要」渲染成半空表单，比不禁更误导；
+// 已走过的步则一定填过，回去不需要再问一遍。depRequireKind 作为兜底
+// （浏览器前进/后退等路径让 depMaxStep 与真实状态脱节时，第 ② 步之后仍要求先选类型）。
+function depStepClick(step) {
+  if (!(step >= 1 && step <= depMaxStep)) return; // 未到过的步：不跳（不弹错，避免点一下就红）
+  if (step >= 2 && !depRequireKind()) return;
+  depShow(step);
 }
 
 function depRequireKind() {
@@ -123,6 +142,11 @@ function depCollect() {
 }
 
 // 提示级预校验：只拦明显缺漏，规则全集在服务端。
+//
+// 网卡名**必须**在这里拦（真机实测缺陷）：此前只校验名称/镜像/vCPU/内存，网卡名留空时
+// 向导照常报「部署候选已写入」，而写进候选的是 `{"name": "", "type": "memif", …}`——
+// 服务端预检直接判 `vNIC名称缺失`，这份候选**永远提交不了**。写成功而对象不可用，
+// 正是「命令成功、结果不可用」那一类假绿，故在本地就拦下并点名是第几块网卡。
 function depPrecheck(body) {
   const errs = [];
   if (!body.name) errs.push('名称必填');
@@ -134,13 +158,64 @@ function depPrecheck(body) {
     if (!(body.vcpu.count >= 1)) errs.push('vCPU 至少 1');
     if (!(body.memory.size_mb >= 128)) errs.push('内存至少 128 MB');
   }
+  // 网卡名：空（含纯空白）与重名都由服务端拒绝，这里提前拦——不然「写入成功」是假的。
+  // 查的是**表格里实际存在的行**而不是 body.interfaces：depNicRows 会丢掉「名字空且没挂
+  // 交换机」的行（那种行不该写进候选），但操作者明明加了一块网卡——那也要说清楚缺什么，
+  // 而不是让它在提交时无声消失。
+  errs.push(...depNicNameIssues());
   return errs;
+}
+
+// depNicNameIssues 逐行核对网卡名（空 / 非法形状 / 同表重名），报错点名「第 N 块网卡」。
+// 行号取表格行序（删掉中间一行后即为操作者看到的顺序），与摘要里的顺序一致。
+function depNicNameIssues() {
+  const errs = [];
+  const seen = new Map();
+  const rows = $('dep-nic-table').querySelectorAll('tbody tr');
+  rows.forEach((tr, i) => {
+    const input = tr.querySelector('input');
+    if (!input) return;
+    const name = input.value.trim(); // 纯空白视同未填
+    const label = '第 ' + (i + 1) + ' 块网卡';
+    if (!name) {
+      errs.push(label + '的名称必填（如 eth0）');
+      return;
+    }
+    // 与服务端 checkName 的 nameRe 同形：字母数字开头、字母数字-_.、≤64 字符。
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) {
+      errs.push(label + '的名称 ' + name + ' 不合法（字母数字-_.，≤64 字符）');
+    }
+    if (seen.has(name)) {
+      errs.push(label + '的名称 ' + name + ' 与' + seen.get(name) + '重名（同一对象内网卡名须唯一）');
+    } else {
+      seen.set(name, label);
+    }
+  });
+  return errs;
+}
+
+// 新网卡行的缺省名：`eth<N>`，取当前**表格**里尚未占用的最小序号。
+//
+// 口径来源：产品文档与套件的 VNF 网卡约定是 `eth0/eth1…`（guest 内就是 eth*），
+// 服务器端只要求「字母数字开头、同对象内唯一」，故按顺序递增即可同时满足唯一性与可读性。
+// 此前这一列只有 placeholder、没有 value——用户不点输入框留空，候选里就是空名。
+function depNextNicName() {
+  const used = new Set();
+  for (const tr of $('dep-nic-table').querySelectorAll('tbody tr')) {
+    const input = tr.querySelector('input');
+    if (input && input.value.trim()) used.add(input.value.trim());
+  }
+  for (let i = 0; i < 64; i++) {
+    const name = 'eth' + i;
+    if (!used.has(name)) return name;
+  }
+  return ''; // 64 块以上网卡的极端场景：取名交给用户（预校验会拦住空名）
 }
 
 function depAddNicRow() {
   const tbody = $('dep-nic-table').querySelector('tbody');
   const tr = document.createElement('tr');
-  const nic = el('input', { placeholder: 'eth0' });
+  const nic = el('input', { placeholder: 'eth0', value: depNextNicName() });
   const type = el('select');
   const types = depKind === 'vm' ? ['vhost-user', 'sriov-vf'] : ['memif'];
   for (const t of types) type.appendChild(el('option', { value: t, text: t }));
@@ -258,6 +333,7 @@ export const viewsDeploy = {
     async render(d) {
       pageWarn(d);
       depKind = '';
+      depMaxStep = 1; // 重新进入向导＝全新一份表单：步骤条的可跳范围随之归零
       depData = {
         images: rowsOf(d['/images']),
         profiles: rowsOf(d['/vm-image-profiles']),
@@ -296,6 +372,11 @@ $('dep-next-2').addEventListener('click', () => { if (depRequireKind()) depShow(
 $('dep-back-3').addEventListener('click', () => depShow(2));
 $('dep-next-3').addEventListener('click', () => depShow(4));
 $('dep-back-4').addEventListener('click', () => depShow(3));
+// 步骤条（① 类型 / ② 镜像与资源 / ③ 网络映射 / ④ 摘要确认）：**必须**绑定，否则点了只动高亮、
+// 主区不动（真机实测：从第 ④ 步点「③ 网络映射」只改透明度，页面仍停在摘要）。跳转判据见 depStepClick。
+for (const b of $('dep-steps').querySelectorAll('button')) {
+  b.addEventListener('click', () => depStepClick(Number(b.dataset.step)));
+}
 $('dep-add-nic').addEventListener('click', () => depAddNicRow());
 $('dep-image').addEventListener('change', depUpdateImageNote);
 $('dep-submit').addEventListener('click', depSubmit);
