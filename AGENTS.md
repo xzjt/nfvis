@@ -2,6 +2,37 @@
 
 任何在本仓库内工作的 AI 助手 / 开发会话，开始工作前先读本文件与 README.md。
 
+- **round42（外部测试报告 12 条缺陷收口，2026-10-22，决策 #496/#497）**：外部测试人员提交 `docs/REPORT.md`
+  （对 v3.0.24 发布件的独立测试，14 条），本会逐条真机复现核实后按层修复（**实现派 5 个子智能体并行，
+  同一文件只让一个会话改**）：**12 条成立并修复**，另 2 条可读性/交互一并修。**报告 4 处结论经实测更正**：
+  ① BUG-01 根因不是「绑定记录被遗忘」（删除后记录仍在），真正致命态是「配置声明在、绑定记录无」，
+  且**可由产品自身解除**，不是「只能手工 sysfs 救场」；② BUG-09 影响面不是「Debian 9+ 全系」——
+  **Debian 12 实测正常**（其 GRUB 用 `terminal_output console`），判别标准是 guest 的 GRUB 是否用 gfxterm；
+  ③ BUG-14 不是「唯一恢复路径是 rollback」——删掉该交换机本身同样恢复；且**不是所有空 VRF 都能回收**
+  （L3 交换机承载项与 `gateway vrf` 引用是可重建的声明，必须钉住，否则配置过不了自己的校验）；
+  ④ BUG-13 不是「只改高亮」——步骤按钮**根本没有绑定 click**。
+  **两条 P0**：缺省 `console serial` 无显卡致 Debian 13 无限重启（真机 60s 内 `Booting` 39 次 →
+  改 std VGA 后立刻到 login）；一个解析不出的 `vpp dpdk dev` 使整份 startup.conf 不生成、其余口
+  一起起不来（改跳过 + 具名告警）。其余：IOMMU 语义族互斥、PCI 直通与数据面占用的**运行期**互斥
+  （配置按口名写、直通按 BDF 写，映射在运行态 ⇒ model 层加校验**不会触发**，必须落编排层）、
+  `software add` 的 half-configured（`systemd-run --scope` 脱离 + 输出落文件 + Status/Version 双判）、
+  `ping … vrf <L2 交换机名>` 解析到网关域、画像 CPU 建元素、分步 trunk、非法 ping 目标判失败、
+  Distance 列、SMART 降级原因、向导空 vNIC 名、步骤按钮导航、空 `vrfs` 壳。
+  ⚠️ **本轮自己引入并修掉一条自死锁（R42-F1）**：BUG-05 第一版每次检查都回读 `engine.Committed()`，
+  而它在 commit 的 apply 阶段被调用、`Commit` 全程持写锁 ⇒ 自锁死（真机 commit 卡住、登录 1m30s
+  超时）。改进程内快照 + 提交后刷新。**教训**：给「提交期会跑到的路径」注入依赖时，先确认它会不会
+  去拿提交自己持有的锁。`make check` 七项 RC=0（决策计数 **399**）。
+  **已发布 v3.0.25**（tag `v3.0.25` → `v3 3314851`；`SOURCE_DATE_EPOCH=1792742400`；
+  deb sha256 `7b4fe1cd…`（11,238,300 B）、`.run` sha256 `d67a248c…`（186,006,621 B）——两件均
+  连打两次逐字节一致；`.run` 结构自检 **20/0**、`--verify` 10/0/1、**purge 后首装路径自检 18/0/0**）。
+  **发布件上四套件零失败**：fulltest **297/0/26**、语义 **43/0/0**、lifecycle **40/0/3**、pty **10/10**。
+  ⚠️ **套件前置（本轮实测新增两条，已入册）**：① `CLI_BIN=/usr/bin/nfvis-cli`——套件缺省是
+  `/tmp/nfvis-cli`，用系统装的 CLI 时必须显式给，否则 299 条全红；② **1G 池 ≥2 页**——VPP 主堆
+  固定占 1 页、cli-vm 用 1 页，只有 1 页时 QEMU 报 `unable to map backing store for guest RAM`；
+  ③ **每轮前备 `docker alpine:3.20` 与 `/data/incoming/ct.tar`**——套件收尾会一起清掉（第二轮
+  14 条红即此因）；④ 语义套件 `FIXTURE_IMAGE=alpine FIXTURE_CT_IMAGE=ct` 用**仓库名**不是 Docker tag。
+  证据 `docs/evidence/v3-round42-report-fix-batch.txt`。
+
 ## 验证与口径纪律（决策 #481；对所有会话生效）
 
 - **口径红线：凡含「可分配 / 可用 / 空闲 / 剩余」字样的读数，必须扣掉全部在用者**——
