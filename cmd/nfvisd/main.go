@@ -2278,6 +2278,14 @@ func (c *softwareController) NTPSync(ctx context.Context, servers []string) (str
 	return c.m.NTPSync(ctx, servers)
 }
 
+// PackageState 把「当前包状态」转发给读口做交叉核对（修 BUG-17）。
+//
+// 这层转发不可省：api 侧用**可选接口**（类型断言）取它，装配处不转发就会静默退化成
+// 「无法核对」——而所有单测都注入带该方法的假件，抓不到这个缺口（子会话实证）。
+func (c *softwareController) PackageState(ctx context.Context) (string, string, error) {
+	return c.m.PackageState(ctx)
+}
+
 // hardwareController 装配 api.HardwareRuntime（M5-5）。
 type hardwareController struct{ p *system.HardwareProvider }
 

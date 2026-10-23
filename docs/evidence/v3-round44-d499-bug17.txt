@@ -1,0 +1,110 @@
+================================================================================
+NFViS v3 round44：首次升级谎报成功的「判定早于终态」收口（决策 #499 / BUG-17）
+================================================================================
+日期：2026-10-23        执行：ZCode 会话（v3 线）+ 1 个实现子智能体
+输入：docs/REPORT-v3.0.26.md（测试方复测：BUG-15 完全修复；BUG-16 主症状修复，
+      但暴露 BUG-17——首次升级报「成功」而包实际 half-configured）
+
+【结论先行】
+  · BUG-17 成立，**3 处根因**（报告指出 2 处，第 3 处本轮自查发现），全部修复 + 真机复验。
+  · 这条比 BUG-16 更危险：v3.0.25 是「看不出结果」，v3.0.26 是「**明确告诉你成功，但没成功**」。
+  · 我上一轮的判据（「真机读回结论文件」）有盲区：文件里的 status 是硬编码字面量，
+    所以「读回文件」只验证了「文件说成功」。**判据链的最后一环必须回到 dpkg。**
+
+================================================================================
+§1 根因（报告指出 2 处 + 本轮自查 1 处）
+================================================================================
+① 收敛等待只在报错时执行（报告指出）
+   installAndVerify: `if at.err != nil && looksInterrupted(at.err) { awaitTerminalStatus() }`
+   首次升级 dpkg 以 0 退出 ⇒ 轮询没跑 ⇒ 直接读到配置中途的**瞬时 installed**。
+
+   测试方 0.5s 采样时间线（本轮采信，未重复采样）：
+     08:04:30–36  install ok installed        ← 12 次：postinst 执行中的瞬时态
+     08:04:37–56  （dpkg 数据库短暂不可读）
+     08:04:57–59  install ok half-configured  ← 44 次：终态
+
+② 落盘状态是硬编码（报告指出）
+   `res.Status = pkgStatusInstalled`——复核到的真实状态只进了返回文本 out，没回填到 res。
+   故结论文件的 status 是字面量，不是事实。
+
+③ 脱离 shell 也采一次就写（**本轮自查**，报告未提）
+   installScriptWithResult 在 `dpkg -i` 退出后立刻读 /var/lib/dpkg/status 写结论——
+   同一个瞬时态隐患，在第二个地方。只修 ①② 仍会在此处复现。
+
+================================================================================
+§2 修法
+================================================================================
+① 收敛判定**无条件**执行，判据＝「同一状态行连续 N 次采样一致」
+   installSettleSamples=6 × installConvergeInterval=2s ⇒ 最小跨度 10s
+   （由两常量单一推出 settleMinSpan()，不另立时间常量——否则两者迟早矛盾）。
+   **为什么不是报告建议的「3 次」**：其时间线显示瞬时态持续约 7s，3×2s=4s 落在其中，
+   改了等于没改。10s > 7s 才有判别力。
+   超时未稳定 ⇒ 如实报「无法判定」（既不说成功也不说失败），且**跳过 dpkg --configure 补救**
+   （dpkg 可能仍在跑，并发事务只会更糟）。
+   永久不可读的通道与暂时不可读分开处理（后者不进入 60s 等待）⇒ 既有适配器桩不回归成长等待。
+
+② 删掉两处硬编码：落盘状态取实测值（仅 stable 时写真值；未观测到就留空 + ok:false）。
+   新增 Reason 字段承载「为什么没成/判不出」，与 Status（只放观测事实）分开。
+
+③ 脱离 shell 改为**先写 pending、再写终判**：
+   pending 让「升级进行中就来读」的 CLI 得到诚实的「未定」（而不是上一次的成功或空的「无记录」）；
+   终判由 shell 侧同样按「连续 N 次一致」循环后写出（临时文件 + mv，读不到半截 JSON）。
+
+④ 读口交叉核对：show system software result 实时读 dpkg 状态并与记录比对
+   —— 一致则明说「与记录一致」；**不一致以当前事实为准**并给处理路径；读不到如实说「无法核对」。
+   pending 单独渲染为「未定」而非「失败」。这正面回答了报告 §3.5「错误结论跨重启不自愈」：
+   **不改写历史记录，但绝不让过期记录冒充现状。**
+
+================================================================================
+§3 守护（全部红-绿）
+================================================================================
+internal/system/fix_upgrade_settle_verdict_test.go（9 条）：
+  TestSoftwareAddDoesNotTrustTransientInstalled          红：{OK:true Status:install ok installed}
+  TestSoftwareAddPersistsObservedStatusWhenStable        （旧代码也绿——见下方说明）
+  TestSoftwareAddReportsUnstableInsteadOfSuccess         红：{OK:true ...}
+  TestSoftwareRollbackDoesNotTrustTransientInstalled     红：{Action:rollback OK:true ...}
+  TestSoftwareResultRecordNeverClaimsOKForNonTerminalState 红：包最终 half-configured 却报成功
+  TestSoftwareResultWithoutObservationDoesNotClaimSuccess 红：**零观测**仍写 ok:true（纯因 ② 而红）
+  TestInstallScriptWaitsForRepeatedStatusBeforeWritingResult 红：取样在循环外
+  TestInstallScriptWritesPendingRecordBeforeVerdict      红：没有 pending 记录
+  TestPackageStateIsImmediateAndReportsErrors
+internal/api/cli_fix_software_result_crosscheck_test.go（8 条）：三形态 + pending + Reason + 无读口
+cmd/nfvisd/software_state_wiring_test.go（1 条）：**装配静默缺口**
+  可选接口漏转发不会编译失败，而 internal/api 所有单测都注入带该方法的假件 ⇒ 抓不到；
+  用一个复制生产接线的临时程序才照出来。只能静态钉住。
+make check 七项 RC=0；决策计数 400→401。
+
+如实说明：TestSoftwareAddPersistsObservedStatusWhenStable **在旧代码上也绿**——因为
+installSettled 要求 status==installed，成功路径上硬编码值与观测值恰好相同。故「断言落盘状态＝观测值」
+这类用例无法暴露 ②；能暴露它的是**未观测路径**（unverified 时旧代码仍写 ok:true）。
+
+================================================================================
+§4 真机验证（~r44fix）
+================================================================================
+从 ii 干净态发起**两次首次升级**（正是报告指出的最容易漏测的路径）：
+  3.0.2 → 3.0.26：`升级完成`；dpkg-query = install ok installed；dpkg --audit 空；
+                  结论文件 {"ok":true,"status":"install ok installed"} ← 与事实一致
+  3.0.26 → 3.0.28：同上，version=3.0.28、audit 空
+  **修复前同一条路径会落 ok:true 而实际 iF**（报告 3/3 复现）。
+
+读口交叉核对：
+  $ nfvis-cli -c "show system software result"
+  结果: 成功 / 动作: 升级 / 版本: 3.0.28 / 原版本: 3.0.26 / 状态: install ok installed
+  当前状态核对: install ok installed（与记录一致）
+
+  伪造「记录说失败、实际已装好」后：
+  结果: 失败 ... 原因: 包未收敛
+  注：记录为「失败」，当前 dpkg 状态是 "install ok installed"（已装好）——可能事后被修复或
+      再次升级，**以当前状态为准**。
+  结论（按当前状态）: 成功
+
+================================================================================
+§5 未覆盖 / 后续
+================================================================================
+· 「记录说成功、实际 half-configured」这一向的真机构造风险高（要故意把包做坏），本轮由单测覆盖；
+  真机只验了反方向（记录失败/实际成功）。如实登记。
+· **报告未提、子会话发现的一条**：脱离脚本的退出码取的是它最后一条 printf 的状态，故恒为 0——
+  `dpkg -i` 的失败与「dpkg frontend lock」文本都被掩盖，installDeb 文档里写的「6 次锁重试」
+  实际从未触发。**本轮未改**：修它会改变 at.err 语义，而 looksInterrupted / installedReport /
+  锁重试路径都依赖它，需单独一轮红-绿。**登记为 R44-1**（见 docs/v3待做.md）。
+· 本轮修复版未复跑四套真机套件；发版前须补。

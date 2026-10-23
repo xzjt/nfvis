@@ -429,6 +429,18 @@ func (x *cliExecutor) renderSoftwareResult() string {
 	return x.renderSoftwareResultPath(ksys.LastResultPath)
 }
 
+// packageStateForResult 实时读宿主上 nfvis 包的状态与版本（供读口交叉核对）。
+//
+// 走可选接口（`packageStateReader`）：注入的 SoftwareRuntime 若支持就取，否则返回错误——
+// 调用方据此如实说「无法核对」，不假装一致（修 BUG-17：一条过期记录不能冒充现状）。
+func (x *cliExecutor) packageStateForResult() (string, string, error) {
+	r, ok := x.sw.(packageStateReader)
+	if !ok || r == nil {
+		return "", "", fmt.Errorf("当前装配未提供包状态读取")
+	}
+	return r.PackageState(context.Background())
+}
+
 // renderSoftwareResultPath 按给定路径渲染（路径可注入以便单测覆盖三种形态：
 // 成功记录 / 失败记录 / 无记录）。
 func (x *cliExecutor) renderSoftwareResultPath(path string) string {
@@ -446,8 +458,13 @@ func (x *cliExecutor) renderSoftwareResultPath(path string) string {
 		action = "回退"
 	}
 	verdict := "失败"
-	if res.OK {
+	switch {
+	case res.OK:
 		verdict = "成功"
+	case res.Status == resultStatusPendingText:
+		// 升级进行中/判定未完成时落的是 pending：这是**诚实**的「未定」，不是失败。
+		// 分开报，否则操作者会把「还没定」读成「装坏了」。
+		verdict = "未定（升级进行中或判定未完成）"
 	}
 	fmt.Fprintf(&b, "结果: %s\n", verdict)
 	fmt.Fprintf(&b, "动作: %s\n", action)
@@ -460,12 +477,59 @@ func (x *cliExecutor) renderSoftwareResultPath(path string) string {
 	if res.Status != "" {
 		fmt.Fprintf(&b, "状态: %s\n", res.Status)
 	}
+	// 判不出/失败的原因与 Status 分开（Status 只放观测事实）——否则失败时读口只说「失败」
+	// 却不说为什么，操作者仍无从下手。
+	if res.Reason != "" {
+		fmt.Fprintf(&b, "原因: %s\n", res.Reason)
+	}
 	if res.Package != "" {
 		fmt.Fprintf(&b, "包: %s\n", res.Package)
 	}
-	x.structured = map[string]any{
-		"ok": res.OK, "action": res.Action, "version": res.Version,
+	// 修 BUG-17（读口这一半）：落盘结论可能与**当前事实**不符（结论是历史快照，且旧版本写入的
+	// 记录不会自愈——真机实证：结论说 installed、实际 half-configured，重启后照旧）。
+	// 能实时读到 dpkg 状态就交叉核对，**以当前事实为准**，绝不让过期记录冒充现状；
+	// 读不到就如实说「无法核对」，不假装一致。
+	curStatus, curVer, curErr := x.packageStateForResult()
+	effOK := res.OK
+	if curErr == nil && curStatus != "" {
+		effOK = curStatus == pkgStatusInstalledText
+		switch {
+		case res.OK && !effOK:
+			fmt.Fprintf(&b, "\n⚠ 记录与当前状态不符：记录为「成功」，当前 dpkg 状态是 %q——"+
+				"记录已过期或升级并未真正落定，**以当前状态为准**。\n"+
+				"  处理：dpkg --configure nfvis 收口，或 request system software rollback 回退。\n", curStatus)
+			fmt.Fprintf(&b, "结论（按当前状态）: 未落定为成功\n")
+		case !res.OK && effOK:
+			fmt.Fprintf(&b, "\n注：记录为「失败」，当前 dpkg 状态是 %q（已装好）——"+
+				"可能事后被修复或再次升级，**以当前状态为准**。\n", curStatus)
+			fmt.Fprintf(&b, "结论（按当前状态）: 成功\n")
+		default:
+			fmt.Fprintf(&b, "当前状态核对: %s（与记录一致）\n", curStatus)
+		}
+	} else {
+		fmt.Fprintf(&b, "当前状态核对: 读取失败（%v）——无法与记录交叉核对，以上仅为历史记录\n", curErr)
+	}
+	st := map[string]any{
+		"ok": effOK, "action": res.Action, "version": res.Version,
 		"previous": res.Previous, "status": res.Status, "package": res.Package,
 	}
+	if curErr == nil && curStatus != "" {
+		st["current_status"] = curStatus
+		st["current_version"] = curVer
+		st["matches_record"] = res.Status == curStatus
+	}
+	x.structured = st
 	return b.String()
 }
+
+// pkgStatusInstalledText dpkg 里「已装且已配置」的唯一状态行。
+//
+// 在 api 层复写一份而不是引用 internal/system 的私有常量：那边的常量是包内实现细节
+// （它的取值本身是 dpkg 的契约字符串，不是产品自定义的），跨包引用要把它导出、扩大面；
+// 这里只需要同一串字面量做**展示层判等**，取值由 dpkg 决定、不会各自漂移。
+const pkgStatusInstalledText = "install ok installed"
+
+// resultStatusPendingText 结论文件里「升级进行中、结论未定」的标记（与 internal/system 的
+// resultStatusPending 同值）。跨包引用要导出内部常量、扩大面，而这里是 dpkg 之外**本产品约定的
+// 落盘取值**——故按同一字面量判等，改一处必须同时改另一处（两边都有用例覆盖 pending 语义）。
+const resultStatusPendingText = "pending"

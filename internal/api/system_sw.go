@@ -25,6 +25,20 @@ type SoftwareRuntime interface {
 	NTPSync(ctx context.Context, servers []string) (string, error)
 }
 
+// packageStateReader 可选读口：实时读宿主上 nfvis 包的 dpkg 状态与版本（修 BUG-17）。
+//
+// 为什么需要它：`show system software result` 展示的是**落盘的历史结论**，而结论可能因升级
+// 时序、手工 `dpkg --configure`、或旧版本写入而**与当前事实不符**（真机实证：结论说
+// `install ok installed`、实际 `half-configured`，且跨重启不自愈）。读口必须能拿当前事实做
+// 交叉核对，否则它只是在复述一条可能过期的记录。
+//
+// 用可选接口（类型断言）而非加进 SoftwareRuntime：未装配该能力的路径不应被逼实现空方法。
+type packageStateReader interface {
+	// PackageState 返回 dpkg 状态行（如 `install ok installed`）与已装版本。
+	// 读不到时返回 error——调用方据此如实说「无法核对」，不猜测。
+	PackageState(ctx context.Context) (status, version string, err error)
+}
+
 func (s *Server) requireSoftware(w http.ResponseWriter) bool {
 	if s.software == nil {
 		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "软件升级模块未接入", nil)

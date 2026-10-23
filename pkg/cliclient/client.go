@@ -267,13 +267,13 @@ func (c *Client) recheckAfterRestart(line string, cause error) (Result, error) {
 			fmt.Fprintf(&b, "  版本: %s\n", ver)
 		}
 		if status != "" {
-fmt.Fprintf(&b, "  状态: %s\n", status)
+			fmt.Fprintf(&b, "  状态: %s\n", status)
 		}
 		if ok {
-b.WriteString("结论: 成功。\n")
+			b.WriteString("结论: 成功。\n")
 			return Result{Output: b.String(), Mode: "oper"}, nil
 		}
-b.WriteString("结论: 未落定为成功——可执行 request system software rollback 回退，或看 journalctl -u nfvis 定位。\n")
+		b.WriteString("结论: 未落定为成功——可执行 request system software rollback 回退，或看 journalctl -u nfvis 定位。\n")
 		return Result{}, fmt.Errorf("%s", b.String())
 	}
 	_ = lastErr
