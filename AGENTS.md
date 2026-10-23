@@ -33,6 +33,27 @@
   14 条红即此因）；④ 语义套件 `FIXTURE_IMAGE=alpine FIXTURE_CT_IMAGE=ct` 用**仓库名**不是 Docker tag。
   证据 `docs/evidence/v3-round42-report-fix-batch.txt`。
 
+- **round43（v3.0.25 复测两条「事实不达终端」缺陷收口，2026-10-23，决策 #498）**：测试方复测确认
+  **12/14 已修复、4 处更正全部成立**，新发现两条——共同特征是**系统状态正确、用户认知错误**：
+  **BUG-15** 决策 #496 把「解析不出 PCI 的 `vpp dpdk dev`」改成跳过、留了 `Applier.Warnings()` 读口，
+  注释还写着「见交付说明的接线项」——但**全仓零调用者**，操作者看到「成功」就以为口都在；
+  改为可选接口 `vppRestartWarnings` + CLI 成功分支追加告警块（无告警时文案逐字不变）。
+  **BUG-16** `software add` 包状态已修对，但承载命令的连接随 nfvisd 重启断开、CLI 只报 EOF + rc=1
+  （发版说明登记的「文案偏乐观」低估了它：**实测完全没文案**）；结论落盘 + **由脱离执行的 shell
+  自己写**（postinst 已杀 nfvisd）+ 状态读 `/var/lib/dpkg/status` 而非 `dpkg-query`（重启期间拿不到锁）
+  + awk `{ }` 分组防外层 `>>log` 覆盖内层重定向 + **脱离执行不挂调用方 ctx**（`CommandContext` 会
+  SIGKILL `systemd-run` 客户端、连带收走 scope）；CLI 侧重连 + 重新登录 + 读结论（有界 90s）；
+  新增读口 `show system software result`。**教训（四个叠加的坑，入册）**：这条链上「命令成功」与
+  「事实落地」之间有四个独立失败点，任一都会让修复看起来生效而实际没有——**判据必须是真机读回
+  结论文件，不能只看退出码**。`make check` 七项 RC=0（决策计数 **400**）。
+  **已发布 v3.0.26**（tag `v3.0.26` → `v3 4ddf254`；`SOURCE_DATE_EPOCH=1792828800`；
+  deb sha256 `3abd240c…`（11,247,682 B）、`.run` sha256 `b989759b…`——两件均两打逐字节一致；
+  `.run` 结构自检 **20/0**、purge 后首装路径自检 **18/0/0**）。
+  **发布件上四套件零失败**：fulltest **298/0/26**（+1＝新增读口检查）、语义 **43/0/0**、
+  lifecycle **40/0/3**、pty **10/10**。⚠️ **套件前置补充**：上一轮 fulltest 收尾未清的 `db2` 域与
+  `c1` 容器会让语义 S9 报两条假红（「libvirt/Docker 有而 CLI 视图未列出」）——清掉即转绿。
+  证据 `docs/evidence/v3-round43-d498-bug15-bug16.txt`。
+
 ## 验证与口径纪律（决策 #481；对所有会话生效）
 
 - **口径红线：凡含「可分配 / 可用 / 空闲 / 剩余」字样的读数，必须扣掉全部在用者**——
