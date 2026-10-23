@@ -66,6 +66,13 @@ func OperRoot() *Node {
 				K("firewall", "主机防火墙（管理面入向；默认策略/规则/逐规则计数/下发状态）"),
 				K("core-dumps", "崩溃转储清单（VPP/QEMU/nfvisd）"),
 				K("tech-support", "诊断归档清单"),
+				// 修 BUG-16：最近一次升级/回退的**结论**（服务端在安装结束时落盘）。
+				// 存在理由：`request system software add` 会重启 nfvisd，承载该命令的连接随之断开，
+				// 操作者只看到 EOF；重连后读这条命令即可知道「到底成没成」，不必猜、也不必
+				// 为一次复核新增别的命令面。
+				K("software", "软件包状态",
+					K("result", "最近一次升级/回退的结论（版本/状态/成败）"),
+				),
 				// 决策 #301：活动会话 / API Token 清单——super-user 见全部、其他 class 仅自己的
 				// （数据范围判定在执行器调用的 aaa 实现处，树只声明命令级权限 R）。
 				K("api", "API 服务",

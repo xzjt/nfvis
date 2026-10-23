@@ -1,0 +1,96 @@
+================================================================================
+NFViS v3 round43：v3.0.25 复测两条「事实不达终端」缺陷收口（决策 #498）
+================================================================================
+日期：2026-10-23        执行：ZCode 会话（v3 线）
+输入：docs/REPORT-v3.0.25.md（测试方对 v3.0.25 的复测：12/14 已修复，新发现 BUG-15/16）
+
+【结论先行】
+  · 两条新缺陷**全部成立**并已修复 + 真机复验。
+  · 共同特征：**系统状态正确、用户认知错误**——比功能缺失更难发现，也更危险。
+  · 修复过程中自己踩到并修掉**三个叠加的坑**（见 §3），每个都是「真机才发现、单测看不见」的那类。
+
+================================================================================
+§1 BUG-15：跳过端口的事实只落 journal，`request vpp restart` 输出零提示
+================================================================================
+根因（复核成立）：决策 #496 的修法把「某个 vpp dpdk dev 解析不出 PCI」从整份失败改成**跳过**，
+并留了 Applier.Warnings() 读口、注释写着「见交付说明的接线项」——但全仓**零调用者**：
+  $ grep -rn "\.Warnings()" --include=*.go . | grep -v _test
+  （无输出）
+于是重启成功但某口没进数据面时，操作者完全看不到。
+
+修复：可选接口 vppRestartWarnings（类型断言取，内核数据面占位实现无需实现）→
+      cliExecutor.setVPPRestartWarnings → CLI 成功分支追加告警块；无告警时文案逐字不变。
+
+真机（修复版，造「声明在、记录无、netdev 无」的态）：
+  $ nfvis-cli -c "request vpp restart"
+  已按 committed 配置重启 VPP（binary API 已连通）并触发恢复收敛。
+  警告: 1 条生成期告警（数据面已起来，但下列声明未完全生效）：
+    - 配置中的 vpp dpdk dev ens224 未能解析 PCI 地址（读取 /sys/class/net/ens224/device/uevent:
+      ... no such file or directory），已从 startup.conf 中跳过：该口不会出现在数据面。
+      如仍需给 VPP 用，请重新接管后重启数据面（request interfaces ens224 bind-dpdk --yes
+      然后 request vpp restart）；否则删除该声明（delete vpp dpdk dev ens224）以免每次生成都跳过。
+
+================================================================================
+§2 BUG-16：`software add` 命令侧仍以 EOF 中止，用户拿不到任何结论
+================================================================================
+根因（复核成立，且比发版说明登记的更严重——不是「文案偏乐观」，是**完全没有文案**）：
+  $ nfvis-cli -c "request system software add ... --yes"
+  %% 连接 nfvisd 失败: Post ".../api/v1/cli/execute": EOF     ← rc=1
+而事后 dpkg -l = ii、audit 干净、四服务 active。用户第一反应是「失败了」→ 重试或回退。
+
+修复（三处，缺一不可）：
+  (a) 结论落盘：SoftwareResult 增 OK/Status，写 /var/lib/nfvis/software/last-result.json。
+  (b) 结论必须由**脱离执行的那个 shell 自己**写——postinst 重启 nfvisd，回到本进程再写根本
+      执行不到。且状态读 /var/lib/dpkg/status（不用 dpkg-query：postinst 重启期间拿不到锁、
+      返回空串）；awk 用 { } 分组，避免内层重定向被 launchShell 的 >>install.log 覆盖。
+  (c) 脱离执行的命令不能挂调用方 ctx——注入 Runner 是 exec.CommandContext，nfvisd 一死 ctx 取消、
+      systemd-run 客户端被 SIGKILL、scope 内命令连带收走。改 context.WithoutCancel。
+  CLI 侧：识别 software add|rollback + 连接中断（EOF/reset/broken pipe，**不含超时**）→ 等 nfvisd
+      回来、**重新登录**（旧 token 随重启失效）→ 读结论；有界 90s，等不到如实说「结果未知」。
+  新增读口：show system software result（R 级；无记录时如实说两种可能并给独立核对路径）。
+
+真机（修复版，用含修复的 deb 自升级）：
+  $ nfvis-cli -c "request system software add /root/nfvis_3.0.36_test.deb --yes"
+  升级动作已受理：nfvisd 因此重启，本次连接已断开（预期行为，不是失败）。
+  已自动重连并读取服务端记录的实际结果：
+    版本: 3.0.35
+    状态: install ok installed
+  结论: 成功。
+  $ nfvis-cli -c "show system software result"
+  结果: 成功 / 动作: 升级 / 版本: 3.0.35 / 状态: install ok installed
+对照：修复前同一动作 → `%% … EOF` + rc=1（用户无从判断）。
+
+================================================================================
+§3 本轮自己踩到并修掉的三个坑（都是真机才现形的）
+================================================================================
+① **结论文件写了但恒为空**：首版把 RecordResult 放在 Add 返回前——postinst 已把 nfvisd 杀了，
+   那行代码根本执行不到。→ 改由脱离 shell 自己写。
+② **写了但 version/status 为空**：用 dpkg-query 取状态，而 postinst 重启期间 dpkg 事务未收尾、
+   查询返回空串。→ 改读 /var/lib/dpkg/status（纯文本、无需锁）。
+③ **日志里有正确 JSON、结果文件恒空**：launchShell 在整条命令后追加 `>>install.log 2>&1`，
+   把脚本内最后一个重定向覆盖了。→ awk 用 `{ … }` 分组。
+④（第四个，最隐蔽）**install.log 只有上一轮残渣**：脱离执行的 systemd-run 客户端进程挂在
+   调用方 ctx 上，nfvisd 被杀 → ctx 取消 → CommandContext SIGKILL → scope 内命令连带收走。
+   → context.WithoutCancel。
+**教训**：这条链上「命令成功」与「事实落地」之间有四个独立的失败点，任何一个都会让修复看起来
+已生效而实际没有。判据必须是**真机读回结论文件**，不能只看命令退出码。
+
+================================================================================
+§4 测试与守护（全部红-绿）
+================================================================================
+新增：internal/api/cli_fix_vpp_restart_warnings_test.go（3 条）
+      internal/api/cli_fix_software_result_test.go（3 条）
+      internal/system/fix_software_result_persist_test.go（5 条）
+改写既有断言 1 处：TestInstallScriptWritesResultInsideDetachedShell（实现从 dpkg-query 改为
+读 status 文件后，断言随之更新——理由写在测试注释里）。
+命令面同步：internal/schema/tree_oper.go（show system software result）、
+      docs/NFViS-CLI命令全表.md、cli_rest_coverage_test.go 的 cliRESTExceptions、
+      contrib/scripts/cli-fulltest-phase1.sh（S1 加一条）。
+make check 七项 RC=0；决策计数 399→400。
+
+================================================================================
+§5 未覆盖
+================================================================================
+· 本轮修复版（3.0.26~r43fix11）**未复跑四套真机套件**；发版前须补（同 R42-4 的口径）。
+· BUG-16 的「失败路径」（升级真失败时 CLI 报失败）由单测覆盖，真机未构造（需造一颗必然装坏的包）。
+· 升级到**不带本记录功能**的旧版本时结论文件不存在——读口已如实说明两种可能并给独立核对路径。

@@ -275,8 +275,11 @@ var cliRESTExceptions = map[string]string{
 	"wizard": "决策 #107：CLI 端交互编排，明确无 API 端点（Web 等价物是向导式页面）",
 	// `show vpp runtime` 是本机 stats segment 的读视图（CLI 侧渲染），
 	// 不经 HTTP 端点；Web 控制台「数据面」卡用的是 /vpp/status（版本/线程/内存同源）。
-	"show vpp runtime":                           "决策 #200：数据源是本机 VPP stats segment（vpp_get_stats），不经 HTTP 端点；Web 等价形态是 /vpp/status",
-	"show vpp runtime thread <id>":               "决策 #200：同上（thread 只是本机过滤参数）",
+	"show vpp runtime":             "决策 #200：数据源是本机 VPP stats segment（vpp_get_stats），不经 HTTP 端点；Web 等价形态是 /vpp/status",
+	"show vpp runtime thread <id>": "决策 #200：同上（thread 只是本机过滤参数）",
+	// 修 BUG-16：最近一次升级/回退的结论（服务端落盘、CLI 重连后读）。它是**升级命令自身的
+	// 事后读口**——Web 侧的等价形态是运维动作页里升级操作的返回提示，不另设端点。
+	"show system software result":                "修 BUG-16：升级/回退结论的事后读口（服务端落盘，CLI 重连后读）；Web 等价形态是升级动作的返回提示",
 	"monitor interfaces <ifname>":                "决策 #92：CLI 轮询形态；Web 等价物是定时刷新 + GET /events 推送",
 	"monitor interfaces <ifname> interval <sec>": "决策 #92：同上（`interval <sec>` 只是本机刷新节奏）",
 	"monitor vnf <name>":                         "决策 #92：同上",

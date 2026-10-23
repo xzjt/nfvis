@@ -62,6 +62,13 @@ func (x *cliExecutor) execShowSystemDiag(t []string) string {
 			return errRuntimeUnavailable
 		}
 		return x.renderDiag(t)
+	case "software":
+		// 修 BUG-16：升级/回退的结论。`request system software add` 会重启 nfvisd 并断开
+		// 承载该命令的连接，CLI 重连后靠这条读口拿「到底成没成」——不猜、不新增别的命令面。
+		if len(t) < 2 || t[1] != "result" {
+			return "%% 语法: show system software result\n"
+		}
+		return x.renderSoftwareResult()
 	case "uptime", "cpu", "memory", "storage":
 		return x.renderHostMetrics(t[0])
 	case "hugepages":
@@ -411,4 +418,54 @@ func desiredBool(v *bool) string {
 		return "不托管"
 	}
 	return fmt.Sprintf("%v", *v)
+}
+
+// renderSoftwareResult 渲染最近一次升级/回退的结论（修 BUG-16）。
+//
+// 数据源是服务端落盘的 `/var/lib/nfvis/software/last-result.json`：`request system software
+// add` 会重启 nfvisd、断开承载该命令的连接，操作者只看到 EOF；重连后读这条命令即可知道
+// 真实结果。**没有任何记录时如实说「无记录」**，不编造「上次成功」。
+func (x *cliExecutor) renderSoftwareResult() string {
+	return x.renderSoftwareResultPath(ksys.LastResultPath)
+}
+
+// renderSoftwareResultPath 按给定路径渲染（路径可注入以便单测覆盖三种形态：
+// 成功记录 / 失败记录 / 无记录）。
+func (x *cliExecutor) renderSoftwareResultPath(path string) string {
+	res, ok := ksys.ReadLastResultAt(path)
+	if !ok {
+		// 不能一口咬定「没操作过」：升级到**不带本记录功能**的版本（或被旧版覆盖）时，
+		// 结论文件同样不存在，而升级可能已经成功。如实说明两种可能并给可独立核对的事实源。
+		return "（无升级/回退结论记录：可能从未经 request system software add|rollback 操作，\n" +
+			"  也可能所装版本不写此记录（该记录功能自 3.0.26 起）——\n" +
+			"  请用 `show version` 与宿主 `dpkg -l nfvis` 核对实际安装状态）\n"
+	}
+	var b strings.Builder
+	action := "升级"
+	if res.Action == "rollback" {
+		action = "回退"
+	}
+	verdict := "失败"
+	if res.OK {
+		verdict = "成功"
+	}
+	fmt.Fprintf(&b, "结果: %s\n", verdict)
+	fmt.Fprintf(&b, "动作: %s\n", action)
+	if res.Version != "" {
+		fmt.Fprintf(&b, "版本: %s\n", res.Version)
+	}
+	if res.Previous != "" {
+		fmt.Fprintf(&b, "原版本: %s\n", res.Previous)
+	}
+	if res.Status != "" {
+		fmt.Fprintf(&b, "状态: %s\n", res.Status)
+	}
+	if res.Package != "" {
+		fmt.Fprintf(&b, "包: %s\n", res.Package)
+	}
+	x.structured = map[string]any{
+		"ok": res.OK, "action": res.Action, "version": res.Version,
+		"previous": res.Previous, "status": res.Status, "package": res.Package,
+	}
+	return b.String()
 }

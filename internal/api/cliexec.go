@@ -151,13 +151,16 @@ type cliExecutor struct {
 	firewallView func() map[string]any
 	tlsR         TlsRuntime                  // 证书管理（M5-8；nil = 报未接入）
 	vppRestart   func(context.Context) error // request vpp restart（M5-9；nil = 报未接入）
-	events       *events.Bus                 // 事件总线（M5-1；nil = 不发布）
-	versions     VersionsRuntime             // 组件版本探测（R37-2 收口，决策 #118；nil = show version 只印 NFViS）
-	tokens       tokenAdmin                  // 活动会话清单/逐 token 吊销（决策 #301；nil = 命令报未接入）
-	perms        permissionResolver          // 生效权限视图的 class 解析（决策 #304；nil = 命令报未接入）
-	mu           sync.Mutex
-	sess         map[string]*cliSession
-	now          func() time.Time // 时钟（决策 #374/E6：会话态空闲清扫；测试可注入）
+	// vppRestartWarns 读回**最近一次**重启期间的生成期告警（修 BUG-15）：重启成功 ≠ 所有声明口
+	// 都进了数据面（某个 `vpp dpdk dev` 解析不出 PCI 时会被跳过，决策 #496）。nil = 无读口（不报）。
+	vppRestartWarns func() []string
+	events          *events.Bus        // 事件总线（M5-1；nil = 不发布）
+	versions        VersionsRuntime    // 组件版本探测（R37-2 收口，决策 #118；nil = show version 只印 NFViS）
+	tokens          tokenAdmin         // 活动会话清单/逐 token 吊销（决策 #301；nil = 命令报未接入）
+	perms           permissionResolver // 生效权限视图的 class 解析（决策 #304；nil = 命令报未接入）
+	mu              sync.Mutex
+	sess            map[string]*cliSession
+	now             func() time.Time // 时钟（决策 #374/E6：会话态空闲清扫；测试可注入）
 	// structured 当前命令的结构化输出快照（display json/xml 用；单命令执行期内有效）
 	structured any
 	// structuredPath structured 在整配置中的绝对路径（display set 反推语句时作前缀，
@@ -249,6 +252,20 @@ func (x *cliExecutor) setCapture(c CaptureRuntime) { x.capture = c }
 
 // setVPPRestart 注入 VPP 重启能力（request vpp restart）。
 func (x *cliExecutor) setVPPRestart(f func(context.Context) error) { x.vppRestart = f }
+
+// setVPPRestartWarnings 注入「最近一次重启的生成期告警」读口（修 BUG-15）。
+//
+// 与 setVPPRestart 分开注入：重启能力是必需项（nil 报未接入），这个读口是**可选**的
+// （nil 就不报），内核数据面与未装配 Applier 的路径都不必提供。
+func (x *cliExecutor) setVPPRestartWarnings(f func() []string) { x.vppRestartWarns = f }
+
+// vppRestartWarnings 取最近一次重启的生成期告警（未注入或无告警返回 nil）。
+func (x *cliExecutor) vppRestartWarnings() []string {
+	if x.vppRestartWarns == nil {
+		return nil
+	}
+	return x.vppRestartWarns()
+}
 
 // setSoftware 注入软件升级/电源/NTP 能力（M5-7）。
 func (x *cliExecutor) setSoftware(s SoftwareRuntime) { x.sw = s }

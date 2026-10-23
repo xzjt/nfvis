@@ -229,6 +229,14 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 		}
 		return s.vpp.Restart(ctx, cfg.Vpp)
 	})
+	// 修 BUG-15：把「最近一次重启的生成期告警」接到 CLI 成功分支上。装配处的 VppController
+	// 若实现可选读口 vppRestartWarnings 就取（内核数据面占位实现没有，不报）。
+	s.cliExec.setVPPRestartWarnings(func() []string {
+		if w, ok := s.vpp.(vppRestartWarnings); ok {
+			return w.RestartWarnings()
+		}
+		return nil
+	})
 	// M4-12：CLI `request … console` 复用 console 端点同一 ticket 表（ws 桥接与审计同源）
 	s.cliExec.issueConsole = func(vm, user string) (string, int, error) {
 		tok, ttl, err := s.consoleTix.issue(vmConsoleResource(vm), user)

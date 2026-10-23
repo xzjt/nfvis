@@ -66,6 +66,19 @@ type VppController interface {
 	Version() string
 }
 
+// vppRestartWarnings 可选读口：最近一次重启期间**生成期**的告警（修 BUG-15）。
+//
+// 为什么是可选接口而不是加进 VppController：只有 VPP 数据面的实现有它，内核数据面占位实现
+// 没有；用类型断言取，既不改既有实现契约，也不逼占位实现编一个空方法。
+//
+// 为什么必须报给操作者：`request vpp restart` 成功 ≠ 所有声明口都进了数据面——某个
+// `vpp dpdk dev` 解析不出 PCI 时会被**跳过**（决策 #496 的修法），只落 journal 的话操作者
+// 跑完重启看到「成功」就以为口都在，正是那条修复本要避免的「静默丢口」。
+type vppRestartWarnings interface {
+	// RestartWarnings 最近一次成功重启期间的生成期告警（无告警返回 nil）。
+	RestartWarnings() []string
+}
+
 // dataPlaneModeAssembled 本进程**实际装配**的数据面实现（"vpp"|"kernel"）。
 //
 // 数据面事实有两个来源：装配事实（VppController 由装配处按数据面注入，如实自报

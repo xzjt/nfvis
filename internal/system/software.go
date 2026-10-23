@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +49,49 @@ type SoftwareResult struct {
 	Previous string `json:"previous,omitempty"`
 	Package  string `json:"package,omitempty"`
 	Output   string `json:"output,omitempty"`
+	// OK 本次动作是否落定为成功（修 BUG-16：结论要能在连接断开后仍被读到）。
+	OK bool `json:"ok,omitempty"`
+	// Status 复核时的 dpkg 状态行（如 `install ok installed`；取不到则为空）。
+	Status string `json:"status,omitempty"`
+}
+
+// LastResultPath 最近一次升级/回退的结论落点（修 BUG-16）。
+//
+// 为什么必须落盘：`software add` 会重启 nfvisd，承载该命令的 HTTP 连接随之 EOF——操作者
+// 只看到「连接 nfvisd 失败」+ 非零退出码，会误判失败而重试或走回退，而升级其实已成功。
+// 结论写在**不随进程消失**的文件里，CLI 重连后就能读到「到底成没成」，不靠猜、也不必
+// 为此新增一条读命令（命令树是契约，为一次复核扩命令面不划算）。
+const LastResultPath = DefaultSoftwareDir + "/last-result.json"
+
+// RecordResult 把结论落到 LastResultPath（尽力而为：写不成不影响升级本身）。
+func (m *SoftwareManager) RecordResult(res SoftwareResult) {
+	if m == nil || m.dir == "" {
+		return
+	}
+	b, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(m.dir, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(m.dir, "last-result.json"), append(b, '\n'), 0o644)
+}
+
+// ReadLastResult 读最近一次结论（供升级后复核；文件不存在或损坏返回 ok=false）。
+func ReadLastResult() (SoftwareResult, bool) { return ReadLastResultAt(LastResultPath) }
+
+// ReadLastResultAt 按给定路径读结论（读口路径可注入以便单测覆盖三种形态）。
+func ReadLastResultAt(path string) (SoftwareResult, bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return SoftwareResult{}, false
+	}
+	var res SoftwareResult
+	if json.Unmarshal(raw, &res) != nil {
+		return SoftwareResult{}, false
+	}
+	return res, res.Version != "" || res.Status != ""
 }
 
 // SoftwareManager 软件升级管理。
@@ -154,11 +198,18 @@ func (m *SoftwareManager) Add(ctx context.Context, pkg, expectSHA string) (Softw
 	}
 	out, err := m.installAndVerify(ctx, archived, newVer, "安装")
 	if err != nil {
+		// 修 BUG-16：失败也要留结论——连接可能已随 nfvisd 重启断掉，CLI 重连后靠这份
+		// 落盘结论才知道「到底成没成」，而不是只看到 EOF。
+		m.RecordResult(SoftwareResult{Action: "add", Version: newVer, Package: filepath.Base(archived),
+			Previous: res.Previous, Status: "安装失败: " + err.Error(), OK: false})
 		return res, err
 	}
 	res.Package, res.Output = filepath.Base(archived), strings.TrimSpace(out)
 	// 以包内版本为准报告（安装后版本读回由 dpkg-query 另行校验，避免时钟/缓存歧义）
 	res.Version = newVer
+	res.OK = true
+	res.Status = pkgStatusInstalled
+	m.RecordResult(res)
 	return res, nil
 }
 
@@ -186,11 +237,16 @@ func (m *SoftwareManager) Rollback(ctx context.Context) (SoftwareResult, error) 
 	}
 	out, err := m.installAndVerify(ctx, pick, res.Version, "回退")
 	if err != nil {
+		m.RecordResult(SoftwareResult{Action: "rollback", Version: res.Version,
+			Package: filepath.Base(pick), Status: "回退失败: " + err.Error(), OK: false})
 		return res, err
 	}
 	res.Package, res.Output = filepath.Base(pick), strings.TrimSpace(out)
 	// 版本读回不继承调用方 ctx：回退同样会重启 nfvisd，那个 ctx 可能已随重启失效。
 	res.Version = m.currentVersion(context.Background())
+	res.OK = true
+	res.Status = pkgStatusInstalled
+	m.RecordResult(res)
 	return res, nil
 }
 
@@ -275,7 +331,7 @@ func parseInt(s string) (int, error) {
 //  3. 停在 half-configured 等「已解包未配置」的中间态时，补救执行一次 `dpkg --configure nfvis`；
 //  4. 仍不到位就如实报出**真实状态**与**恢复命令**，不谎称原因、也不承诺并不存在的自动回退。
 func (m *SoftwareManager) installAndVerify(ctx context.Context, path, targetVer, action string) (string, error) {
-	at := m.installDeb(ctx, path)
+	at := m.installDeb(ctx, path, action)
 	if at.err != nil && looksInterrupted(at.err) {
 		at.log = joinOutput(at.log, m.awaitTerminalStatus(targetVer))
 	}
@@ -450,11 +506,11 @@ func (m *SoftwareManager) runBounded(timeout time.Duration, name string, args ..
 
 // installDeb 安装 .deb；dpkg 前端锁被 apt/unattended-upgrades 占用时短等重试
 // （Ubuntu 定时升级是常态，不应让一次升级因锁竞争失败）。
-func (m *SoftwareManager) installDeb(ctx context.Context, path string) installAttempt {
+func (m *SoftwareManager) installDeb(ctx context.Context, path, action string) installAttempt {
 	const attempts = 6
 	var at installAttempt
 	for i := 0; i < attempts; i++ {
-		at = m.installOnce(ctx, path)
+		at = m.installOnce(ctx, path, action)
 		if at.err == nil {
 			return at
 		}
@@ -487,11 +543,46 @@ func (m *SoftwareManager) installLogPath() string {
 //
 // 输出也不走管道：父进程（nfvisd）一死，读端关闭，写管道的那端会拿到 SIGPIPE/EPIPE，
 // 等于换了个方式杀死 dpkg。改为重定向到文件、事后读回，操作者照样拿到完整输出。
-func (m *SoftwareManager) installOnce(ctx context.Context, path string) installAttempt {
+func (m *SoftwareManager) installOnce(ctx context.Context, path, action string) installAttempt {
 	logPath := m.installLogPath()
 	_ = os.Remove(logPath) // 上一次的残渣会误导本次排障
-	cmdOut, err := m.launchShell(ctx, logPath, "dpkg -i "+shellQuote(path), "nfvis-install")
+	// 修 BUG-16（关键一处）：结论必须由**脱离执行的那个 shell 自己**在 dpkg 结束后写出。
+	// 为什么不能等回到本进程再写：postinst 会重启 nfvisd，本进程在那时已被杀——`Add` 里
+	// 后面的 RecordResult 根本执行不到（真机实证：升级成功但结论文件不存在）。
+	cmdOut, err := m.launchShell(ctx, logPath, m.installScriptWithResult(path, action), "nfvis-install")
 	return installAttempt{cmdOut: cmdOut, log: m.readInstallLog(logPath), err: err}
+}
+
+// installScriptWithResult dpkg 安装 + **在同一个脱离 shell 里**落结论。
+//
+// 结论文件格式与 ReadLastResultAt 读取的一致（action/version/status/ok）。版本取
+// `dpkg-query` 的实装版本（不是包内声明值——半装时两者会不一致），成败以状态行为准
+// （`install ok installed` 是唯一成功态，与 installSettled 同口径）。
+func (m *SoftwareManager) installScriptWithResult(path, action string) string {
+	act := "add"
+	if action == "回退" {
+		act = "rollback"
+	}
+	// 结论由**脱离执行的那个 shell 自己**在 dpkg 结束后写出（nfvisd 那时已被 postinst 杀掉）。
+	//
+	// 两处关键取舍：
+	//   · 状态与版本直接读 **/var/lib/dpkg/status**，不调 `dpkg-query`——后者要拿 dpkg 的锁，
+	//     而 postinst 重启期间事务未收尾，真机实证返回空串；
+	//   · 结论**写进独立文件**，且整段用 `{ … }` 分组把 awk 的输出重定向到该文件：
+	//     launchShell 会在整条命令后追加 `>>install.log 2>&1`，若不加分组，脚本内最后一个
+	//     重定向会被外层覆盖，结论落进日志而不是结果文件（真机实证：log 里有正确 JSON、
+	//     last-result.json 恒为空）。
+	res := filepath.Join(m.dir, "last-result.json")
+	script := "dpkg -i " + shellQuote(path) + "; mkdir -p " + shellQuote(m.dir) + "; " +
+		"{ awk -v act=" + shellQuote(act) + " '" +
+		"BEGIN{st=\"\";ver=\"\"} " +
+		"/^Package: nfvis$/{inpkg=1;next} inpkg&&/^Status:/{sub(/^Status: /,\"\");st=$0} " +
+		"inpkg&&/^Version:/{sub(/^Version: /,\"\");ver=$0} " +
+		"inpkg&&/^$/{inpkg=0} " +
+		"END{printf \"{\\\"action\\\":\\\"%s\\\",\\\"version\\\":\\\"%s\\\",\\\"status\\\":\\\"%s\\\",\\\"ok\\\":%s}\\n\", " +
+		"act, ver, st, (st==\"install ok installed\"?\"true\":\"false\")}' " +
+		"/var/lib/dpkg/status > " + shellQuote(res) + "; }"
+	return script
 }
 
 // runDetached 执行一条**会重启 nfvisd** 的补救命令（dpkg --configure），同样脱离本进程的
@@ -509,17 +600,27 @@ func (m *SoftwareManager) runDetached(ctx context.Context, command string) insta
 // 一遍就是重复解包同一颗包。手段本身不可用时由 detacher 提前降级，代价是一次 `/bin/true` 探针。
 func (m *SoftwareManager) launchShell(ctx context.Context, logPath, command, unitPrefix string) (string, error) {
 	script := fmt.Sprintf("%s >>%s 2>&1", command, shellQuote(logPath))
+	// 修 BUG-16（第三处，也是最隐蔽的一处）：**脱离执行的命令不能挂调用方的 ctx**。
+	//
+	// 注入的 Runner 是 `exec.CommandContext`：调用方 ctx 一取消，它立刻 SIGKILL 掉
+	// `systemd-run` 客户端进程——而那个客户端正是 scope 的发起者，父进程一死，scope 里的
+	// dpkg 与后续脚本一起被收走。真机实证：升级装上了（包状态 installed），但结论文件
+	// 恒为空、install.log 只有上一轮残渣——因为写结论的那半截命令从没跑完。
+	//
+	// 故这里给脱离执行换成**独立 ctx**（context.WithoutCancel 保留值、去掉取消传播），
+	// 有界性由 systemd-run 的 scope 自身与 dpkg 事务保证，不再依赖调用方存活。
+	detached := context.WithoutCancel(ctx)
 	switch m.detacher(ctx) {
 	case detachSystemdRun:
 		// 系统级 scope：自持 cgroup，重启 nfvisd 波及不到；单元名带固定前缀便于排障
 		//（只放 nfvis-install / nfvis-configure 两族，异常残留一眼能认出来）。
-		return m.run(ctx, "systemd-run", "--scope", "--collect", "--quiet",
+		return m.run(detached, "systemd-run", "--scope", "--collect", "--quiet",
 			fmt.Sprintf("--unit=%s-%d", unitPrefix, m.now().UnixNano()),
 			"/bin/sh", "-c", script)
 	case detachSetsid:
 		// setsid 把命令放进新 session：无 systemd 的底座上 postinst 的 try-restart 本就不执行
 		//（它先判 command -v systemctl），故不存在 cgroup 连坐，脱离 session 已经足够。
-		return m.run(ctx, "setsid", "/bin/sh", "-c", script)
+		return m.run(detached, "setsid", "/bin/sh", "-c", script)
 	}
 	// 一个脱离手段都没有：功能仍可用，但回到「被重启波及」的旧风险，必须在输出里写明。
 	out, err := m.run(ctx, "/bin/sh", "-c", script)

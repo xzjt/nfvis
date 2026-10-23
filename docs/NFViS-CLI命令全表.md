@@ -74,6 +74,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show system firewall` | 主机防火墙（管理面入向）读视图（决策 #388）：默认策略 / 规则表（seq/动作/来源/协议/端口 + **逐规则 packets/bytes 计数**）/ 保留项说明 / `applied` 状态与未收敛原因（表缺失、规则集合不一致、检测到手工修改、nft 不可用等如实说明）/ 计数口径；未配置时如实报「未配置」并给前置提示（写路径走配置模式 candidate→commit） | `GET /system/firewall` | ✅ 真机四维验证（round169，dev112）：规则与 `nft list table inet nfvis-firewall` 逐字对、drop ICMP 后宿主 ping 断而 SSH 存活、逐规则计数递增可读（3 包/180 字节）、restart nfvis 幂等跳过（计数 3→6 连续）、删空回收表、未声明管理口拒绝、plain commit 被拒且文案含照做路径、operator 双面拒（CLI 拒/REST 403）；自锁-回滚场景抓出并修复一处真缺陷（confirmed 超时回滚不触发宿主侧重收敛 ⇒ 表残留 drop，修后回滚即回收表、访问自动恢复）——证据 `docs/evidence/v2-round169-d388-host-firewall.txt` |
 | `show system core-dumps` | 崩溃转储清单（VPP/QEMU/nfvisd） | `GET /system/core-dumps` | ✅ |
 | `show system tech-support` | 诊断归档清单 | `GET /system/tech-support` | ✅ |
+| `show system software result` | **最近一次升级/回退的结论**（结果/动作/版本/状态）。`request system software add|rollback` 会重启 nfvisd、断开承载该命令的连接；重连后用它拿真实结果，不必猜 | （无端点：升级动作的事后读口，CLI 侧渲染） | ✅（修 BUG-16） |
 | `show system configuration sessions` | candidate 持锁会话列表（FR-CFG-009）；列 Holder/Session/User/Acquired/Last-Activity/Dirty（会话标识与所属用户，决策 #317） | `GET /system/configuration/sessions` | ✅ |
 | `show configuration sessions` | **等价写法**（与上一条**同一实现**、输出逐字相同；本轮起多余 token 会报错，不再静默回配置正文） | 同上 | ✅（round80 真机复验：与上一条输出一致） |
 | `show interfaces` | 接口运行态清单：行 = 配置声明 ∪ VPP 运行态口 ∪ **内核未接管口**（决策 #302，收口 round81 F1：首装在接管前也能看见网卡；内核口在备注列标注「未接管」，不编造 VPP 侧事实），Admin/Link/Speed/Driver/计数全取运行态（决策 #155；仅声明未生效的行状态列 - 并标注，纯运行态口标注「未声明」） | `GET /interfaces` | ✅ |

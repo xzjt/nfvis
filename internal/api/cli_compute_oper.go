@@ -898,6 +898,20 @@ func (x *cliExecutor) requestVPP(user string, t []string) string {
 			x.audit(user, "vpp.restart", "重启数据面", err)
 			return "%% " + err.Error() + "\n"
 		}
+		// 修 BUG-15：成功 ≠ 所有声明口都进了数据面。某个 `vpp dpdk dev` 解析不出 PCI 时会被
+		// **跳过**（决策 #496 的修法），若只落 journal，操作者看到「成功」就以为口都在——
+		// 正是那条修复本要避免的「静默丢口」。生成期告警由装配处经 RestartWarnings 读回。
+		if warns := x.vppRestartWarnings(); len(warns) > 0 {
+			var b strings.Builder
+			b.WriteString("已按 committed 配置重启 VPP（binary API 已连通）并触发恢复收敛。\n")
+			fmt.Fprintf(&b, "警告: %d 条生成期告警（数据面已起来，但下列声明未完全生效）：\n", len(warns))
+			for _, w := range warns {
+				fmt.Fprintf(&b, "  - %s\n", w)
+			}
+			x.audit(user, "vpp.restart",
+				"重启数据面（按 committed 配置，binary API 已连通；含生成期告警："+strings.Join(warns, "；")+"）", nil)
+			return b.String()
+		}
 		x.audit(user, "vpp.restart", "重启数据面（按 committed 配置，binary API 已连通）", nil)
 		return "已按 committed 配置重启 VPP（binary API 已连通）并触发恢复收敛。\n"
 	case "trace":

@@ -23,6 +23,9 @@ run S1 "show system hardware"
 run S1 "show system firewall"
 run S1 "show system core-dumps"
 run S1 "show system tech-support"
+# 升级/回退结论的事后读口（修 BUG-16）：无记录时也如实返回文本（非错误），
+# 故这里只量「命令能不能用」；真值判定由 phase4 的升级往返覆盖。
+run S1 "show system software result"
 run S1 "show system configuration sessions"
 run S1 "show interfaces"
 run S1 "show interfaces physical"

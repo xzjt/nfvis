@@ -50,6 +50,9 @@ type ConsoleRequest struct {
 type Client struct {
 	base  string
 	token string
+	// user/pass 登录凭据（修 BUG-16）：升级会重启 nfvisd，旧 token 随之失效；复核前必须能
+	// **重新登录**才问得到结论。只在本进程内存里留，不落盘、不进日志。
+	user, pass string
 	// class 登录响应 `user.class`（服务端权威的本会话 login class，决策 #145/#324）。
 	// nfvis-cli 据此按同一口径过滤 `?`/Tab 候选（见 internal/cli.Session）。
 	class string
@@ -159,6 +162,7 @@ func (c *Client) Login(user, password string) error {
 	}
 	c.token = resp.Token
 	c.class = resp.User.Class
+	c.user, c.pass = user, password
 	return nil
 }
 
@@ -182,12 +186,135 @@ func (c *Client) Execute(line, source string) (Result, error) {
 		"line": line, "source": source,
 	}, &resp)
 	if err != nil {
+		// 修 BUG-16：`request system software add` 会让 nfvisd 重启（postinst 的
+		// try-restart），承载这次请求的连接随之 EOF——升级本身在下游继续并成功，但操作者
+		// 只看到「连接 nfvisd 失败」+ 非零退出码，会误判失败而重试或走回退。
+		// 这里等 nfvisd 回来，再用**独立读命令**把真实结果问一遍并作为本命令的结论返回。
+		if isUpgradeLine(line) && isConnDropped(err) {
+			return c.recheckAfterRestart(line, err)
+		}
 		return Result{}, err
 	}
 	return Result{
 		Output: resp.Output, Mode: resp.Mode, Path: resp.Path, Prompt: resp.Prompt,
 		Console: resp.Console, Warning: resp.Warning,
 	}, nil
+}
+
+// upgradeRestartWait nfvisd 被升级脚本重启后，等它回到可服务状态的上限。
+//
+// 取 90s：`dpkg -i` 含解包 + postinst（基线检查/AppArmor/sysctl 接管），真机实测十几秒到
+// 数十秒；留足余量但仍**有界**——等不到就如实说「结果未知」，不无限挂住终端。
+const upgradeRestartWait = 90 * time.Second
+
+// isUpgradeLine 该命令行是不是会重启 nfvisd 的那类动作（升级/回退）。
+//
+// 只认这两条：它们必然触发 postinst 的 try-restart；其它命令即使让服务抖动，也不该被
+// 静默改成「重连后报另一条命令的结论」。
+func isUpgradeLine(line string) bool {
+	l := strings.Join(strings.Fields(line), " ")
+	return strings.HasPrefix(l, "request system software add") ||
+		strings.HasPrefix(l, "request system software rollback")
+}
+
+// isConnDropped 这次错误是不是「服务端在请求处理中断开了连接」（EOF / 连接被重置 / 对端关闭），
+// 而不是超时或本地网络问题——只有前者才可能对应「服务端已受理并重启」。
+func isConnDropped(err error) bool {
+	if err == nil {
+		return false
+	}
+	var nerr net.Error
+	if errors.As(err, &nerr) && nerr.Timeout() {
+		return false // 超时另有专门文案（决策 #76），不在此改判
+	}
+	s := err.Error()
+	return strings.Contains(s, "EOF") || strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "broken pipe") || strings.Contains(s, "server closed")
+}
+
+// recheckAfterRestart 等 nfvisd 回来后复核升级结果，并把结论作为本命令的输出返回。
+//
+// 复核**不猜**：服务端在安装结束时把结论（状态行 + 版本 + 成败）落到
+// /var/lib/nfvis/software/last-result.json（见 system.LastResultPath），这里重连后读它。
+// 为什么不读 dpkg：CLI 在宿主之外拿不到 dpkg；而 `show version` 给的是**运行中进程**的编译
+// 版本，证明不了包状态（半装时它照样报新版本）。
+func (c *Client) recheckAfterRestart(line string, cause error) (Result, error) {
+	deadline := time.Now().Add(upgradeRestartWait)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		// 旧 token 随 nfvisd 重启失效：先重登（凭据只在内存里），再问结论。
+		if c.user != "" {
+			if err := c.Login(c.user, c.pass); err != nil {
+				lastErr = err
+				continue // nfvisd 还没回来 / 尚未就绪
+			}
+		}
+		var r Result
+		if err := c.executeOnce("show system software result", &r); err != nil {
+			lastErr = err
+			continue // nfvisd 还没回来
+		}
+		ok, ver, status := parseSoftwareResult(r.Output)
+		var b strings.Builder
+		if strings.HasPrefix(line, "request system software rollback") {
+			b.WriteString("回退动作已受理：nfvisd 因此重启，本次连接已断开（预期行为，不是失败）。\n")
+		} else {
+			b.WriteString("升级动作已受理：nfvisd 因此重启，本次连接已断开（预期行为，不是失败）。\n")
+		}
+		b.WriteString("已自动重连并读取服务端记录的实际结果：\n")
+		if ver != "" {
+			fmt.Fprintf(&b, "  版本: %s\n", ver)
+		}
+		if status != "" {
+fmt.Fprintf(&b, "  状态: %s\n", status)
+		}
+		if ok {
+b.WriteString("结论: 成功。\n")
+			return Result{Output: b.String(), Mode: "oper"}, nil
+		}
+b.WriteString("结论: 未落定为成功——可执行 request system software rollback 回退，或看 journalctl -u nfvis 定位。\n")
+		return Result{}, fmt.Errorf("%s", b.String())
+	}
+	_ = lastErr
+	return Result{}, fmt.Errorf("升级请求的连接中断（%v），且在 %s 内未能重连 nfvisd 复核结果："+
+		"请手动核对 `dpkg -l nfvis`（升级可能已成功）", cause, upgradeRestartWait)
+}
+
+// executeOnce 发一次执行请求（不触发升级重连复核，供内部复核路径用）。
+func (c *Client) executeOnce(line string, out *Result) error {
+	var resp struct {
+		Output string   `json:"output"`
+		Mode   string   `json:"mode"`
+		Path   []string `json:"path"`
+		Prompt string   `json:"prompt"`
+	}
+	if err := c.do(http.MethodPost, "/api/v1/cli/execute",
+		map[string]string{"line": line, "source": "ssh"}, &resp); err != nil {
+		return err
+	}
+	*out = Result{Output: resp.Output, Mode: resp.Mode, Path: resp.Path, Prompt: resp.Prompt}
+	return nil
+}
+
+// parseSoftwareResult 解析服务端 `show system software result` 的输出。
+//
+// 输出形状由服务端渲染（`结果: 成功|失败`、`版本: x`、`状态: install ok installed`）；
+// 解析不出「结果」行时返回 ok=false——**判不出就不当作成功**。
+func parseSoftwareResult(out string) (ok bool, version, status string) {
+	for _, ln := range strings.Split(out, "\n") {
+		s := strings.TrimSpace(ln)
+		if v, found := strings.CutPrefix(s, "版本:"); found {
+			version = strings.TrimSpace(v)
+		}
+		if v, found := strings.CutPrefix(s, "状态:"); found {
+			status = strings.TrimSpace(v)
+		}
+		if v, found := strings.CutPrefix(s, "结果:"); found {
+			ok = strings.TrimSpace(v) == "成功"
+		}
+	}
+	return ok, version, status
 }
 
 func (c *Client) do(method, path string, body any, out any) error {

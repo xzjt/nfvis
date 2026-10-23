@@ -1729,6 +1729,17 @@ func readHugepagePool(size string) (int, bool) {
 // Version 最近一次成功连接探测到的 VPP 版本（决策 #118：/system/version 的 vpp 键取这里）。
 func (c *vppController) Version() string { return c.mgr.Version() }
 
+// RestartWarnings 最近一次重启期间的生成期告警（修 BUG-15；由 api 层经类型断言取用）。
+//
+// 重启成功只说明 binary API 可连，不说明每个声明口都进了数据面——某个 `vpp dpdk dev`
+// 解析不出 PCI 时会被跳过（决策 #496）。这些事实必须到终端，否则操作者以为口都在。
+func (c *vppController) RestartWarnings() []string {
+	if c.applier == nil {
+		return nil
+	}
+	return c.applier.Warnings()
+}
+
 // envOr 读取环境变量，缺省返回 fallback。
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
