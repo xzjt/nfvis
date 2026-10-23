@@ -201,11 +201,18 @@ func (c *Client) Execute(line, source string) (Result, error) {
 	}, nil
 }
 
-// upgradeRestartWait nfvisd 被升级脚本重启后，等它回到可服务状态的上限。
+// upgradeRestartWait 升级后等「结论落定」的上限。
 //
-// 取 90s：`dpkg -i` 含解包 + postinst（基线检查/AppArmor/sysctl 接管），真机实测十几秒到
-// 数十秒；留足余量但仍**有界**——等不到就如实说「结果未知」，不无限挂住终端。
-const upgradeRestartWait = 90 * time.Second
+// 为什么是 240s：这段等待覆盖的不只是「nfvisd 回来」，而是**服务端判定的全过程**——
+//
+//	· nfvisd 重启（postinst 触发的 try-restart）：十几秒；
+//	· 服务端等「同一状态行 + audit 干净」连续 6 次一致（约 10s+，spec 见 internal/system）；
+//	· 若 dpkg 被打断留下 half-configured，脚本还要跑一次 `dpkg --configure nfvis` 自救，
+//	  那又是一轮 postinst（重启 + 基线检查），实测数十秒。
+//
+// 90s 在真机上不够（CLI 会读到 pending 就报「未定」，而包其实稍后就装好了）。
+// 仍**有界**：等不到就如实说「结果未知」，不无限挂住终端。
+const upgradeRestartWait = 240 * time.Second
 
 // isUpgradeLine 该命令行是不是会重启 nfvisd 的那类动作（升级/回退）。
 //
@@ -256,6 +263,15 @@ func (c *Client) recheckAfterRestart(line string, cause error) (Result, error) {
 			continue // nfvisd 还没回来
 		}
 		ok, ver, status := parseSoftwareResult(r.Output)
+		// 结论还在 pending（升级进行中/判定未完成）⇒ **继续等**，不要就此下「失败」的结论。
+		// 真机实证：服务端的终判要等「同一状态行连续 6 次一致」（约 10s+），而 CLI 重连通常
+		// 在 16s 内就发生——读到 pending 是中间态，不是结果；把它当失败会让用户白白回退。
+		// 结论还没定：pending（升级进行中）或空（脚本刚起步、还没有观测）。
+		// 两者都**不是结果**，必须接着等——把它当失败会让用户对一次正在成功的升级执行回退。
+		if status == statusPending || status == "" {
+			lastErr = fmt.Errorf("服务端结论尚未落定（当前 %q）", status)
+			continue
+		}
 		var b strings.Builder
 		if strings.HasPrefix(line, "request system software rollback") {
 			b.WriteString("回退动作已受理：nfvisd 因此重启，本次连接已断开（预期行为，不是失败）。\n")
@@ -296,6 +312,10 @@ func (c *Client) executeOnce(line string, out *Result) error {
 	*out = Result{Output: resp.Output, Mode: resp.Mode, Path: resp.Path, Prompt: resp.Prompt}
 	return nil
 }
+
+// statusPending 服务端结论文件里「升级进行中、结论未定」的标记（与 internal/system 同值）。
+// 读到它表示**还没定**，既不是成功也不是失败——复核循环要接着等。
+const statusPending = "pending"
 
 // parseSoftwareResult 解析服务端 `show system software result` 的输出。
 //

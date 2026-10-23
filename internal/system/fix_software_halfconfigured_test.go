@@ -17,6 +17,8 @@ package system
 import (
 	"context"
 	"errors"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -37,9 +39,61 @@ type fixRunner struct {
 	calls       []string
 }
 
-func (f *fixRunner) run(_ context.Context, name string, args ...string) (string, error) {
+func (f *fixRunner) run(ctx context.Context, name string, args ...string) (string, error) {
 	line := name + " " + strings.Join(args, " ")
 	f.calls = append(f.calls, line)
+	// 修 round44：安装脚本改为落文件后用 `sh <file>` 执行（systemd-run 会吞 ${x%%|*}）。
+	// 假 runner 要认这一形态并模拟脚本里的命令序列，否则「dpkg -i 被调用」这类断言会失效。
+	if isShellScriptInvocation(name, args) {
+		b, err := os.ReadFile(args[len(args)-1])
+		if err != nil {
+			return "", err
+		}
+		script := string(b)
+		// 脚本内的命令**以 script: 前缀单独记账**：顶层 calls 只反映「谁被当作脱离执行
+		// 的入口」，否则「dpkg -i 不得直跑」这类断言会被脚本内部调用误伤。
+		var out strings.Builder
+		// 路径里的引号形态在 Windows 宿主上与非 POSIX 一致（脚本内是 / 分隔，deb 路径是 \），
+		// 故只判「脚本里有没有 dpkg -i」并取引号内内容，不依赖分隔符。
+		if strings.Contains(script, "dpkg -i ") {
+			pkg := ""
+			if m := regexp.MustCompile(`dpkg -i '([^']*)'`).FindStringSubmatch(script); m != nil {
+				pkg = m[1]
+			}
+			f.calls = append(f.calls, "script:dpkg -i "+pkg)
+			{
+				// 只记一条带前缀的（runScript 内部不再二次记账），避免「顶层 dpkg -i」误报。
+				// 输出必须**连同错误一起**带回：上层靠「输出里有没有 dpkg frontend lock」
+				// 决定要不要重试（R44-1 同族的语义），丢掉输出等于让重试路径永远不触发。
+				o, e := f.installOnce(ctx, pkg)
+				out.WriteString(o)
+				if e != nil {
+					return out.String(), e
+				}
+			}
+		}
+		// 脚本只**观测** audit（判据的一部分），不自救：补救由进程内 installAndVerify 做一次，
+		// 两处都补会让「恰好一次 configure」的语义失效。
+		if strings.Contains(script, "dpkg --audit") {
+			_, _ = f.run(ctx, "dpkg", "--audit")
+		}
+		// runDetached 的脚本就是一条 `dpkg --configure nfvis`——照实执行，否则补救路径的
+		// 断言（「恰好一次」「输出回传」）永远看不到效果。
+		if strings.Contains(script, "dpkg --configure nfvis") {
+			if o, e := f.run(ctx, "dpkg", "--configure", "nfvis"); e != nil {
+				return out.String(), e
+			} else {
+				out.WriteString(o)
+			}
+		}
+		if strings.Contains(script, "${Status}") {
+			_, _ = f.run(ctx, "dpkg-query", "-W", "-f=${Status}", "nfvis")
+		}
+		if strings.Contains(script, "${Version}") {
+			_, _ = f.run(ctx, "dpkg-query", "-W", "-f=${Version}", "nfvis")
+		}
+		return out.String(), nil
+	}
 	switch {
 	case strings.HasPrefix(line, "dpkg-deb "):
 		if strings.Contains(line, " Package") {
@@ -54,6 +108,12 @@ func (f *fixRunner) run(_ context.Context, name string, args ...string) (string,
 			return f.db.status + "\n", nil
 		}
 		return f.db.version + "\n", nil
+	case strings.Contains(line, "dpkg --audit"):
+		// 数据库视角：状态不是 installed 就列出来（与真机 dpkg --audit 行为一致）。
+		if f.db != nil && f.db.status != "" && f.db.status != pkgStatusInstalled {
+			return " nfvis                NFViS NFV infrastructure appliance\n", nil
+		}
+		return "", nil
 	case strings.Contains(line, "dpkg --configure"):
 		if f.onConfigure != nil {
 			return f.onConfigure(f.db)
@@ -64,6 +124,14 @@ func (f *fixRunner) run(_ context.Context, name string, args ...string) (string,
 			return f.onInstall(f.db)
 		}
 		return "", nil
+	}
+	return "", nil
+}
+
+// installOnce 执行一次 dpkg -i 但**不记入 calls**（由 runScript 记带前缀的一条）。
+func (f *fixRunner) installOnce(_ context.Context, pkg string) (string, error) {
+	if f.onInstall != nil {
+		return f.onInstall(f.db)
 	}
 	return "", nil
 }
@@ -230,23 +298,29 @@ func TestSoftwareInstallRunsDetachedFromNfvisd(t *testing.T) {
 	if _, err := m.Add(context.Background(), pkg, ""); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
+	// 契约（round44 起）：安装是「systemd-run 起一个 transient unit 去跑脚本文件」，
+	// 脚本内部才执行 dpkg -i。故断言分两层——顶层不得出现裸 dpkg -i；顶层必须有一条
+	// systemd-run 调用且指向 .sh；脚本内部确实含 dpkg -i。
 	seen := 0
 	for _, c := range fr.calls {
 		if strings.HasPrefix(c, "dpkg -i ") {
 			t.Fatalf("安装不得作为 nfvisd 的同 cgroup 子进程直跑（postinst 重启会连带杀掉它）：%s", c)
 		}
-		if !strings.Contains(c, "dpkg -i") {
+		if strings.HasPrefix(c, "script:dpkg -i ") {
+			seen++
 			continue
 		}
-		seen++
-		for _, want := range []string{"systemd-run", "--scope", "/bin/sh -c", ">>"} {
-			if !strings.Contains(c, want) {
-				t.Fatalf("安装调用缺少脱离手段 %q：%s", want, c)
+		if strings.Contains(c, "systemd-run") && !strings.Contains(c, "/bin/true") {
+			if !strings.Contains(c, ".sh") {
+				t.Fatalf("systemd-run 应执行脚本文件（systemd-run 会吞脚本里的 ${x%%%%|*}）：%s", c)
+			}
+			if strings.Contains(c, "--scope") {
+				t.Fatalf("不得用 --scope：--scope 让脚本活在调用方 cgroup 里，nfvisd 重启时会被整组收走：%s", c)
 			}
 		}
 	}
 	if seen == 0 {
-		t.Fatalf("没有记录到安装调用：%v", fr.calls)
+		t.Fatalf("脚本里没有 dpkg -i：%v", fr.calls)
 	}
 }
 
@@ -269,10 +343,21 @@ func TestSoftwareInstallFallsBackToSetsidWithoutSystemd(t *testing.T) {
 	if _, err := m.Add(context.Background(), pkg, ""); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
+	// 无 systemd：顶层应出现 setsid 且指向脚本文件；不得有裸 dpkg -i。
+	sawSetsid := false
 	for _, c := range fr.calls {
-		if strings.Contains(c, "dpkg -i") && !strings.Contains(c, "setsid") {
-			t.Fatalf("无 systemd 时安装应走 setsid 脱离 session：%s", c)
+		if strings.HasPrefix(c, "dpkg -i ") {
+			t.Fatalf("无 systemd 时安装不得直跑 dpkg -i：%s", c)
 		}
+		if strings.Contains(c, "setsid") {
+			sawSetsid = true
+			if !strings.Contains(c, ".sh") {
+				t.Fatalf("setsid 应执行脚本文件：%s", c)
+			}
+		}
+	}
+	if !sawSetsid {
+		t.Fatalf("无 systemd 时应走 setsid 脱离 session：%v", fr.calls)
 	}
 }
 

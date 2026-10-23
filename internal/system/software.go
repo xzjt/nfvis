@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	posixpath "path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -374,7 +375,7 @@ func parseInt(s string) (int, error) {
 func (m *SoftwareManager) installAndVerify(ctx context.Context, path, targetVer, action string) installOutcome {
 	at := m.installDeb(ctx, path, action)
 	obs := m.settlePackage()
-	if obs.stable && installSettled(obs.status, obs.statusErr, obs.version, obs.verErr, targetVer) {
+	if obs.stable && installSettled(obs.status, obs.statusErr, obs.version, obs.verErr, obs.auditClean, obs.auditErr, targetVer) {
 		return installOutcome{out: m.installedReport(action, at, obs), status: obs.status, version: obs.version, ok: true}
 	}
 	// 复核拿不到可判读的状态行时**不能**据此判失败——那只是「这个执行通道答不了这个问题」，
@@ -397,12 +398,17 @@ func (m *SoftwareManager) installAndVerify(ctx context.Context, path, targetVer,
 	//（not-installed）补救没有意义（那要先重装），直接如实报错。
 	// 补救本身会再跑一遍 postinst（同样重启 nfvisd），故与安装走同一条脱离路径。
 	recovery := ""
-	if isConfigurableStatus(obs.status) {
+	// 补救触发条件放宽：状态行说「已解包未配置」**或** audit 不干净（后者最关键——真机实证
+	// dpkg 被打断时状态行仍写 installed，而 audit 列出该包；此时只按状态行不会补救，
+	// 包就永远停在 half-configured）。audit 判据带来的是「能自救」而不只是「能报错」。
+	needsRecovery := isConfigurableStatus(obs.status) ||
+		(obs.auditErr == nil && !obs.auditClean && obs.status == pkgStatusInstalled)
+	if needsRecovery {
 		rec := m.runDetached(ctx, "dpkg --configure nfvis")
 		recovery = "dpkg --configure nfvis: " + strings.TrimSpace(joinLines(rec.text(), errText(rec.err)))
 		// 补救之后同样要等稳定观测：configure 会重跑 postinst，瞬态读数在这里一样会骗人。
 		obs = m.settlePackage()
-		if obs.stable && installSettled(obs.status, obs.statusErr, obs.version, obs.verErr, targetVer) {
+		if obs.stable && installSettled(obs.status, obs.statusErr, obs.version, obs.verErr, obs.auditClean, obs.auditErr, targetVer) {
 			return installOutcome{out: m.installedReport(action, at, obs, recovery),
 				status: obs.status, version: obs.version, ok: true}
 		}
@@ -432,6 +438,10 @@ type pkgObservation struct {
 	statusErr error
 	version   string
 	verErr    error
+	// auditClean dpkg --audit 不列 nfvis（**真装好**的数据库视角）。
+	// 与 status 并列而非替代：dpkg 被打断时 status 可能仍写 installed 而 audit 列出该包。
+	auditClean bool
+	auditErr   error
 	// observable 这个执行通道是否答过「可判读的状态行」。false = dpkg-query 根本不提供
 	// 这个答案，等待不会改变它（与「暂时读不到」区别对待）。
 	observable bool
@@ -462,9 +472,14 @@ func (m *SoftwareManager) settlePackage() pkgObservation {
 	for {
 		status, serr := m.packageStatus()
 		version, verr := m.installedVersion()
+		// audit 与状态行**一起**构成判据：dpkg 被打断时状态行可能仍写 installed 而
+		// audit 列出该包（真机实证：该窗口持续 16s+，见 packageAuditClean 的注释）。
+		// audit 读不到时按「不可判定」处理（空候选），不当作干净。
+		auditClean, aerr := m.packageAuditClean()
 		obs.samples++
 		obs.status, obs.statusErr = status, serr
 		obs.version, obs.verErr = version, verr
+		obs.auditClean, obs.auditErr = auditClean, aerr
 		obs.waited = time.Since(start)
 		if serr == nil && status != "" && !statusKnown(status, nil) {
 			// 这个通道答的不是状态行：再等只会拿到同一个形状，立即如实返回「不可观测」。
@@ -472,8 +487,13 @@ func (m *SoftwareManager) settlePackage() pkgObservation {
 		}
 		if statusKnown(status, serr) {
 			obs.observable = true
-			if status != cand {
-				cand, same = status, 1
+			// 候选键 = 「状态行 + audit 是否干净」：audit 变脏等于状态变了，计数必须重来。
+			key := status
+			if aerr != nil || !auditClean {
+				key = status + "|audit-dirty"
+			}
+			if key != cand {
+				cand, same = key, 1
 			} else {
 				same++
 			}
@@ -494,8 +514,13 @@ func (m *SoftwareManager) settlePackage() pkgObservation {
 // installSettled 判定「这次安装真的落定了」：状态必须是 install ok installed，**且**版本是
 // 目标版本。两个条件缺一不可——半配置（half-configured/unpacked）时 dpkg 已经把 Version 改成
 // 新版本、旧包没被触碰时状态又本来就是 installed：只看其中一个都会得出错误结论。
-func installSettled(status string, serr error, installed string, verr error, target string) bool {
+func installSettled(status string, serr error, installed string, verr error, auditClean bool, auditErr error, target string) bool {
 	if serr != nil || status != pkgStatusInstalled {
+		return false
+	}
+	// audit 必须干净：dpkg 被打断时状态行仍可能是 installed 而实际半配置（真机实证 16s+ 窗口）。
+	// audit 读不到 ⇒ 拿不到证据 ⇒ 不算落定（宁可报「无法判定」也不谎报成功）。
+	if auditErr != nil || !auditClean {
 		return false
 	}
 	if target == "" || verr != nil || installed == "" {
@@ -614,6 +639,36 @@ func looksInterrupted(err error) bool {
 // packageStatus 读 dpkg 数据库里 nfvis 的状态行（如 `install ok installed`）。
 func (m *SoftwareManager) packageStatus() (string, error) {
 	return m.queryPackage("${Status}")
+}
+
+// packageAuditClean dpkg 的**数据库一致性**视角：`dpkg --audit` 不列 nfvis 才算真装好。
+//
+// 为什么状态行不够（真机实证，本轮最重要的一条）：dpkg 1.23 在配置被信号打断时，
+// `/var/lib/dpkg/status` 的 `Status:` 可能**仍然写着 `install ok installed`**，而
+// `dpkg.log` 与数据库内部记账是 `half-configured`——此时只有 `dpkg --audit` 会把它列出来：
+//
+//	12:05:52  status half-configured        （dpkg.log）
+//	至今       Status: install ok installed （status 文件字段，未回退）
+//	dpkg --audit → "nfvis  … only half configured"
+//
+// 实测该「状态字段假装 installed」的窗口持续 **16 秒以上**（12:05:52–12:06:08 采样）。
+// 只按状态行判定就会在这个窗口里判成功——这正是 BUG-17 的全部来源。
+// 故收敛判据改为「状态行 installed **且** audit 干净」，两者缺一不算落定。
+//
+// 读不到 audit（命令失败）时返回 error：调用方据此「无法判定」，不猜。
+func (m *SoftwareManager) packageAuditClean() (bool, error) {
+	out, err := m.runBounded(installVerifyTimeout, "dpkg", "--audit")
+	if err != nil {
+		return false, fmt.Errorf("%w: %s", err, strings.TrimSpace(out))
+	}
+	// audit 对**其它**包的半装也会报；只关心 nfvis 这一行（实测格式：` nfvis   <desc>`）。
+	for _, ln := range strings.Split(out, "\n") {
+		f := strings.Fields(ln)
+		if len(f) > 0 && f[0] == "nfvis" {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // installedVersion 读 dpkg 数据库里的 nfvis 版本（与状态分开查：状态不区分版本）。
@@ -744,10 +799,16 @@ func (m *SoftwareManager) installScriptWithResult(path, action string) string {
 	//     last-result.json 恒为空）；
 	//   · 两次落笔都走「临时文件 + mv」：读口可能恰在 nfvisd 刚起来时打开这个文件，直接
 	//     覆盖会让它读到半截 JSON——那会被读成「无记录」，操作者据此误判。
-	res := filepath.Join(m.dir, "last-result.json")
+	// 拼进 shell 脚本的路径必须用 **POSIX 分隔符**：`filepath.Join` 在 Windows 上产出反斜杠，
+	// 而这段文本最终由 Linux 上的 /bin/sh 执行——反斜杠会被 shell 当转义，路径直接失效
+	//（单测在 Windows 宿主上跑，曾因此生成 `'\var\lib\…'` 而看不出来）。
+	res := posixpath.Join(m.dir, "last-result.json")
 	quotedRes := shellQuote(res)
 	// 循环上界与进程内判定同源：脱离脚本不能无限等——它没有调用方在看，卡死会留下一个
 	// 永远占着 scope 的空转进程。
+	// auditCleanSh `dpkg --audit` 不列 nfvis 的 shell 判据（与 packageAuditClean 同义）。
+	// `grep -q "  nfvis "` 只认缩进两空格的包名行，避免匹配到描述文本里的 nfvis。
+	auditCleanSh := "! dpkg --audit 2>/dev/null | grep -qE '^ +nfvis( |$)'"
 	maxIter := int(installConvergeTimeout / installConvergeInterval)
 	if maxIter < 1 {
 		maxIter = 1
@@ -759,6 +820,15 @@ func (m *SoftwareManager) installScriptWithResult(path, action string) string {
 	}
 	// awk 只负责从 dpkg 状态文件里取「nfvis 那一段」的 Status 与 Version，输出 `status|version`。
 	// 取不到就是空串——空串不参与「连续出现」的计数（见下）。
+	// 采样**必须走 dpkg-query**，不能读 /var/lib/dpkg/status 文件。
+	//
+	// 真机实证（本轮决定性的一条）：dpkg 被打断时两个视图会**互相矛盾**——
+	//	awk 读 /var/lib/dpkg/status → "install ok installed"（陈旧字段）
+	//	dpkg-query -W -f='${Status}' → "install ok half-configured"（数据库真实视图）
+	// 只读文件就会读到谎言，把半配置判成成功——这正是 BUG-17 的最终来源。
+	// 早先改读文件是为了绕开「postinst 期间拿不到锁」，但实测 dpkg-query 在此时只花 16ms、
+	// 不阻塞（它读的是数据库快照），那个担忧不成立。
+	// 取不到时**回退**到读文件（只作为最后手段），两者都拿不到才算空样本。
 	awk := "awk '" +
 		"BEGIN{st=\"\";ver=\"\"} " +
 		"/^Package: nfvis$/{inpkg=1;next} inpkg&&/^Status:/{sub(/^Status: /,\"\");st=$0} " +
@@ -775,14 +845,19 @@ func (m *SoftwareManager) installScriptWithResult(path, action string) string {
 		// 同一状态行连续出现才累加，换值就从头计；中途读不到（空串）同样打断计数——
 		// 「一直读不到」与「一直是 installed」是两码事，前者不是证据。
 		"while [ \"$i\" -lt " + strconv.Itoa(maxIter) + " ]; do " +
-		"pair=$(" + awk + "); st=${pair%%|*}; ver=${pair#*|}; " +
-		"if [ -n \"$st\" ] && [ \"$st\" = \"$prev\" ]; then n=$((n+1)); else prev=$st; n=1; fi; " +
+		"pair=$(dpkg-query -W -f='${Status}|${Version}' nfvis 2>/dev/null); " +
+		"if [ -z \"$pair\" ]; then pair=$(" + awk + "); fi; " +
+		"st=${pair%%|*}; ver=${pair#*|}; " +
+		// audit 与状态行一起构成判据：dpkg 被打断时状态行可能仍写 installed 而 audit 列出该包
+		//（真机实证：该窗口持续 16s+）。audit 干净才把 key 记成纯状态行，否则键变 ⇒ 计数重来。
+		"if " + auditCleanSh + "; then key=\"$st\"; else key=\"$st|audit-dirty\"; fi; " +
+		"if [ -n \"$st\" ] && [ \"$key\" = \"$prev\" ]; then n=$((n+1)); else prev=$key; n=1; fi; " +
 		"i=$((i+1)); " +
 		"if [ \"$n\" -ge " + strconv.Itoa(installSettleSamples) + " ]; then break; fi; " +
 		"sleep " + strconv.Itoa(interval) + "; " +
 		"done; " +
 		"ok=false; " +
-		"if [ \"$n\" -ge " + strconv.Itoa(installSettleSamples) + " ] && [ \"$st\" = " + shellQuote(pkgStatusInstalled) + " ]; then ok=true; fi; " +
+		"if [ \"$n\" -ge " + strconv.Itoa(installSettleSamples) + " ] && [ \"$st\" = " + shellQuote(pkgStatusInstalled) + " ] && " + auditCleanSh + "; then ok=true; fi; " +
 		"printf '{\"action\":\"%s\",\"version\":\"%s\",\"status\":\"%s\",\"ok\":%s}\\n' " +
 		shellQuote(act) + " \"$ver\" \"$st\" \"$ok\" > " + quotedRes + ".tmp && mv " + quotedRes + ".tmp " + quotedRes + "; }"
 }
@@ -808,7 +883,27 @@ func (m *SoftwareManager) runDetached(ctx context.Context, command string) insta
 // 只跑**一次**：手段由 detacher 事先探定，不在失败后改换手段重跑——dpkg 不幂等，换手段再跑
 // 一遍就是重复解包同一颗包。手段本身不可用时由 detacher 提前降级，代价是一次 `/bin/true` 探针。
 func (m *SoftwareManager) launchShell(ctx context.Context, logPath, command, unitPrefix string) (string, error) {
-	script := fmt.Sprintf("%s >>%s 2>&1", command, shellQuote(logPath))
+	// 不要用 fmt.Sprintf 拼这段：command 是**shell 脚本**，里面天然含 `%`
+	//（`${pair%%|*}`、`printf '…%s…'`）。Sprintf 会把 `%%` 折叠成 `%`、把 `%s` 当格式动词，
+	// 结果交给 /bin/sh 的脚本被静默改写（真机实证：`st=${pair%%|*}` 变成 `st=`，
+	// 采样永远为空、结论恒停在 pending）。用字符串拼接，一个字符都不动。
+	script := m.launchScriptForTest(command, logPath)
+	// 修 round44（第三处，且是**决定性**的一处）：脚本必须落成**文件**再用 `sh <file>` 执行，
+	// 不能作为 `sh -c "<script>"` 的参数传。
+	//
+	// 根因：`systemd-run` 会扫描命令参数里的 `NAME=value` 形态并当作**环境变量赋值**处理。
+	// 我们的脚本里满是 `${pair%%|*}`、`${pair#*|}`——systemd-run 把它们误判成赋值，
+	// 直接报 `Invalid environment variable name evaluates to an empty string: pair%%|*`
+	// 并把那一段吞掉，于是 shell 看到的是 `st=` （空），采样恒空、结论永远停在 pending。
+	// 真机对照（同一脚本、同一 scope）：
+	//   systemd-run … /bin/sh -c "pair=a|b; echo ${pair%%|*}"  → Invalid environment variable …
+	//   systemd-run … /bin/sh /tmp/t.sh                        → st=[install ok installed] ✓
+	//
+	// 落文件还顺带解决三件事：命令行长度无上限、脚本内容不经多层引号、排障时可直接看文件。
+	scriptPath, werr := m.writeLaunchScript(script)
+	if werr != nil {
+		return "", fmt.Errorf("写执行脚本: %w", werr)
+	}
 	// 修 BUG-16（第三处，也是最隐蔽的一处）：**脱离执行的命令不能挂调用方的 ctx**。
 	//
 	// 注入的 Runner 是 `exec.CommandContext`：调用方 ctx 一取消，它立刻 SIGKILL 掉
@@ -823,17 +918,47 @@ func (m *SoftwareManager) launchShell(ctx context.Context, logPath, command, uni
 	case detachSystemdRun:
 		// 系统级 scope：自持 cgroup，重启 nfvisd 波及不到；单元名带固定前缀便于排障
 		//（只放 nfvis-install / nfvis-configure 两族，异常残留一眼能认出来）。
-		return m.run(detached, "systemd-run", "--scope", "--collect", "--quiet",
+		// 用 **transient service**（不带 --scope）而不是 --scope：
+		// `--scope` 让命令活在**调用方的 cgroup 里**，父进程（nfvisd）被 postinst 重启时
+		// 整组会被 systemd 收走——脚本后半段（稳定采样 + 自救）根本没机会跑，结论只剩 pending
+		// 或空（真机实证：install.log 全空、结论 status=""）。
+		// 不带 --scope 时 systemd-run 起的是独立 unit，与本进程的生死无关；
+		// 真机对照（同一脚本）：--scope ⇒ 结论空/pending；transient service ⇒ ok:true + audit 干净。
+		return m.run(detached, "systemd-run", "--collect", "--quiet",
 			fmt.Sprintf("--unit=%s-%d", unitPrefix, m.now().UnixNano()),
-			"/bin/sh", "-c", script)
+			"/bin/sh", scriptPath)
 	case detachSetsid:
 		// setsid 把命令放进新 session：无 systemd 的底座上 postinst 的 try-restart 本就不执行
 		//（它先判 command -v systemctl），故不存在 cgroup 连坐，脱离 session 已经足够。
-		return m.run(detached, "setsid", "/bin/sh", "-c", script)
+		return m.run(detached, "setsid", "/bin/sh", scriptPath)
 	}
 	// 一个脱离手段都没有：功能仍可用，但回到「被重启波及」的旧风险，必须在输出里写明。
-	out, err := m.run(ctx, "/bin/sh", "-c", script)
+	out, err := m.run(ctx, "/bin/sh", scriptPath)
 	return joinLines("未找到可用的 systemd-run/setsid，已直跑（升级可能被 nfvisd 重启波及）", out), err
+}
+
+// writeLaunchScript 把待执行脚本落成文件（0600，软件目录下），返回其路径。
+//
+// 落盘而非 `sh -c`：见 launchShell 的注释（systemd-run 会把脚本里的 `${x%%|*}`
+// 误判成环境变量赋值并吞掉）。文件按时间戳区分，便于排障时对照 install.log。
+func (m *SoftwareManager) writeLaunchScript(script string) (string, error) {
+	if err := os.MkdirAll(m.dir, 0o755); err != nil {
+		return "", err
+	}
+	now := time.Now
+	if m.now != nil {
+		now = m.now
+	}
+	p := filepath.Join(m.dir, fmt.Sprintf("run-%d.sh", now().UnixNano()))
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+script+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+// launchScriptForTest 拼「脚本 + 重定向」的最终命令（单测用它钉住 % 不被格式化）。
+func (m *SoftwareManager) launchScriptForTest(command, logPath string) string {
+	return command + " >>" + shellQuote(logPath) + " 2>&1"
 }
 
 // 脱离手段。
@@ -854,7 +979,7 @@ func (m *SoftwareManager) detacher(ctx context.Context) string {
 	}
 	pick := detachDirect
 	if _, err := m.lookPathFn()("systemd-run"); err == nil {
-		if _, err := m.run(ctx, "systemd-run", "--scope", "--quiet", "/bin/true"); err == nil {
+		if _, err := m.run(ctx, "systemd-run", "--quiet", "/bin/true"); err == nil {
 			pick = detachSystemdRun
 		}
 	}

@@ -108,3 +108,54 @@ installSettled 要求 status==installed，成功路径上硬编码值与观测�
   实际从未触发。**本轮未改**：修它会改变 at.err 语义，而 looksInterrupted / installedReport /
   锁重试路径都依赖它，需单独一轮红-绿。**登记为 R44-1**（见 docs/v3待做.md）。
 · 本轮修复版未复跑四套真机套件；发版前须补。
+
+================================================================================
+§6 追加：修 BUG-17 途中又挖出五个「工具层」坑（全是真机才现形，全部已修）
+================================================================================
+修这条缺陷的过程比缺陷本身更值得记录：每一层修好后，下一层才暴露。
+
+① **`fmt.Sprintf` 改写 shell 脚本**
+   `launchShell` 用 `fmt.Sprintf("%s >>%s 2>&1", command, …)` 拼命令，而脚本里含
+   `${pair%%|*}` 与 `printf '…%s…'`：Sprintf 把 `%%` 折成 `%`、把 `%s` 当格式动词。
+   真机现象：`st=${pair%%|*}` 变成 `st=`，采样恒空、结论永远 pending。
+   → 改字符串拼接；守护 `TestLaunchShellDoesNotFormatScript`。
+
+② **`systemd-run` 把 `${x%%|*}` 当环境变量赋值**
+   即便脚本正确，`systemd-run … /bin/sh -c "<script>"` 仍会扫描参数里的 `NAME=value`：
+   它报 `Invalid environment variable name evaluates to an empty string: pair%%|*` 并吞掉那段。
+   → 脚本落成文件、用 `sh <file>` 执行；守护 `TestLaunchShellUsesScriptFileNotDashC`。
+
+③ **拼进脚本的路径是 Windows 反斜杠**
+   `filepath.Join` 在 Windows 宿主上产出 `\var\lib\…`，而脚本由 Linux 的 sh 执行——
+   反斜杠被当转义，结论写不出去。单测跑在 Windows 上正好能抓，前提是有断言。
+   → 改 `posixpath.Join`；守护 `TestInstallScriptUsesPosixPaths`。
+
+④ **`--scope` 让脚本活在调用方 cgroup 里**
+   nfvisd 被 postinst 重启时整组被 systemd 收走，脚本后半段（稳定采样 + 自救）没机会跑。
+   真机现象：install.log 全空、结论 status=""。
+   → 改 transient service（`systemd-run` 不带 `--scope`）；真机对照：
+   `--scope` ⇒ 结论空/pending；transient service ⇒ ok:true + audit 干净。
+
+⑤ **读 `/var/lib/dpkg/status` 文件会读到谎言（本轮最关键的一条）**
+   真机同一时刻两个视图互相矛盾：
+     awk 读 /var/lib/dpkg/status        → "install ok installed"   ← 陈旧字段
+     dpkg-query -W -f='${Status}' nfvis → "install ok half-configured" ← 数据库真实视图
+   早先为绕开「postinst 期间拿不到锁」而改读文件，那个取舍读到了谎言：半配置被判成功。
+   实测 dpkg-query 此刻只花 16ms、不阻塞（读的是数据库快照）——原担忧不成立。
+   → 采样改走 `dpkg-query`，读不到才回退文件。
+
+**并因此得出 BUG-17 的真正判据**：仅看状态行不够（它可能写着 installed 而实际半配置），
+必须**同时**要求 `dpkg --audit` 不列出该包。实测该「状态行假装 installed」的窗口持续
+**16 秒以上**（12:05:52–12:06:08 逐秒采样：status=installed 而 audit=1）。
+`installSettled` 增 audit 参数；脱离脚本同判据；且 audit 脏时脚本**自己**跑一次
+`dpkg --configure nfvis` 自救（脚本是 CLI 唯一能读到结论的地方，不救就只能是「未定」）。
+
+**真机闭环（脚本直跑，transient service）**：
+  结论 {"action":"add","version":"3.0.28","status":"install ok installed","ok":true}
+  dpkg --audit 空
+三者一致——修复前同路径会落 ok:true 而实际 iF（报告 3/3 复现）。
+
+**如实登记（仍未闭环的一环）**：CLI 侧读到终判需要等「服务端自救 + 稳定判定」全过程
+（实测数十秒），CLI 的等待窗已放宽到 240s 且 pending/空状态都继续等；但由于每次
+`dpkg -i` 都会把我换装的 `nfvis-cli` 覆盖回发布版二进制，**CLI 侧的端到端时延只能在
+正式发布件上验**——本轮以服务端结论与读口交叉核对为准，CLI 侧由单测（3 条）覆盖。

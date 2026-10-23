@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -16,11 +17,17 @@ type fakeRunner struct {
 	failOn  string
 }
 
-func (f *fakeRunner) run(_ context.Context, name string, args ...string) (string, error) {
+func (f *fakeRunner) run(ctx context.Context, name string, args ...string) (string, error) {
 	line := name + " " + strings.Join(args, " ")
 	f.calls = append(f.calls, line)
 	if f.failOn != "" && strings.Contains(line, f.failOn) {
 		return "", errors.New("command failed")
+	}
+	// 修 round44：安装脚本改为**落成文件**再用 `sh <file>` 执行（systemd-run 会把脚本里的
+	// `${x%%|*}` 当环境变量赋值吞掉）。假 runner 因此要认这一形态：把脚本内容当命令序列
+	// 逐行跑一遍，好让测试仍能断言「dpkg -i 被调用」「状态被读到」。
+	if isShellScriptInvocation(name, args) {
+		return f.runScript(ctx, args[len(args)-1])
 	}
 	// 最长匹配优先（避免 "Version" 抢先匹配到 dpkg-query 的 -f=${Version}）
 	bestKey, bestVal := "", ""
@@ -168,4 +175,60 @@ func TestCompareVersion(t *testing.T) {
 			t.Fatalf("compareVersion(%s,%s)=%d，期望 %d", c.a, c.b, got, c.want)
 		}
 	}
+}
+
+// isShellScriptInvocation 判定这次调用是不是「执行一个脚本文件」
+// （`/bin/sh <path>.sh` / `setsid /bin/sh <path>.sh` / `systemd-run … /bin/sh <path>.sh`）。
+func isShellScriptInvocation(name string, args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	last := args[len(args)-1]
+	if !strings.HasSuffix(last, ".sh") {
+		return false
+	}
+	if name == "/bin/sh" || filepath.Base(name) == "sh" {
+		return true
+	}
+	// systemd-run / setsid 包装：最后一个参数是脚本、且参数里出现过 /bin/sh。
+	for _, a := range args {
+		if a == "/bin/sh" || a == "sh" {
+			return true
+		}
+	}
+	return false
+}
+
+// runScript 模拟「执行脚本文件」：把脚本里我们关心的命令按出现顺序跑一遍。
+//
+// 只模拟状态相关的那几条（dpkg -i / dpkg-query / dpkg --audit / dpkg --configure），
+// 足够让既有断言（「应调用 dpkg -i」「补救后应报成功」）继续成立；不试图实现一个 shell。
+func (f *fakeRunner) runScript(ctx context.Context, path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	script := string(b)
+	var out strings.Builder
+	// 顺序：dpkg -i → dpkg --audit → dpkg-query(Status) → dpkg-query(Version)
+	if m := regexp.MustCompile(`dpkg -i '([^']+)'`).FindStringSubmatch(script); m != nil {
+		o, e := f.run(ctx, "dpkg", "-i", m[1])
+		out.WriteString(o)
+		if e != nil {
+			return out.String(), e
+		}
+	}
+	if strings.Contains(script, "dpkg --configure nfvis") {
+		_, _ = f.run(ctx, "dpkg", "--configure", "nfvis")
+	}
+	if strings.Contains(script, "dpkg --audit") {
+		_, _ = f.run(ctx, "dpkg", "--audit")
+	}
+	if strings.Contains(script, "${Status}") {
+		_, _ = f.run(ctx, "dpkg-query", "-W", "-f=${Status}", "nfvis")
+	}
+	if strings.Contains(script, "${Version}") {
+		_, _ = f.run(ctx, "dpkg-query", "-W", "-f=${Version}", "nfvis")
+	}
+	return out.String(), nil
 }

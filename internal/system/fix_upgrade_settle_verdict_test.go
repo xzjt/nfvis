@@ -60,6 +60,31 @@ func (r *settleRunner) run(_ context.Context, name string, args ...string) (stri
 	r.calls = append(r.calls, line)
 	// 安装/补救命令被裹在脱离手段里（`systemd-run … /bin/sh -c "… dpkg -i …"`），故按内容匹配；
 	// 这两条必须排在 systemd-run 前缀之前，否则夹具会把真调用记成「脱离手段什么都没干」。
+	// 修 round44：安装脚本已改为落文件后用 `sh <file>` 执行，命令行里不再有 `dpkg -i`。
+	// 夹具要读脚本内容才能看到那些命令（否则 onInstall 永不触发、版本不升）。
+	if isShellScriptInvocation(name, args) {
+		if b, err := os.ReadFile(args[len(args)-1]); err == nil {
+			script := string(b)
+			if strings.Contains(script, "dpkg -i ") {
+				if r.onInstall != nil {
+					if o, e := r.onInstall(r); e != nil {
+						return o, e
+					}
+				}
+			}
+			// 脚本内自救：audit 脏才 configure。
+			if strings.Contains(script, "dpkg --configure nfvis") {
+				st, _ := r.statusAt(1)
+				if strings.TrimSpace(st) != pkgStatusInstalled {
+					r.configures++
+					if r.onConfigure != nil {
+						_, _ = r.onConfigure(r)
+					}
+				}
+			}
+		}
+		return "", nil
+	}
 	switch {
 	case strings.Contains(line, "dpkg -i "):
 		if r.onInstall != nil {
