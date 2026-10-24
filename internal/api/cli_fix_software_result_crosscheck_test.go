@@ -62,7 +62,9 @@ func TestShowSoftwareResultDetectsStaleSuccessRecord(t *testing.T) {
 	}
 }
 
-// 记录说失败、现状已 installed：也要说明（可能事后修复），并按当前状态判成功。
+// 记录说失败、现状已 installed：如实说明现状与可能的原因，但**该次尝试仍按记录为失败**——
+// 修 BUG-18 后不再翻案成「结论（按当前状态）: 成功」：「包没坏」与「那次升级成了」是两件事
+// （同版本坏包失败后，包本来就好好的；旧翻案逻辑会把那次失败显示成成功）。
 func TestShowSoftwareResultDetectsStaleFailureRecord(t *testing.T) {
 	dir := t.TempDir()
 	writeResultFixture(t, dir, `{"action":"add","version":"3.0.26","status":"安装失败: x","ok":false}`)
@@ -71,11 +73,55 @@ func TestShowSoftwareResultDetectsStaleFailureRecord(t *testing.T) {
 	x.setSoftware(&fakeSoftwareRuntime{status: "install ok installed", ver: "3.0.26"})
 	out := x.renderSoftwareResultPath(filepath.Join(dir, "last-result.json"))
 
-	if !strings.Contains(out, "记录为「失败」") || !strings.Contains(out, "已装好") {
+	if !strings.Contains(out, "记录为「失败」") {
 		t.Fatalf("过期的失败记录应说明现状：\n%s", out)
 	}
-	if !strings.Contains(out, "结论（按当前状态）: 成功") {
-		t.Fatalf("应以当前状态判定：\n%s", out)
+	if !strings.Contains(out, "事后修复") {
+		t.Fatalf("现状完好时应给出「可能是事后修复/其后升级」的解释：\n%s", out)
+	}
+	if !strings.Contains(out, "该次尝试仍按记录为失败") {
+		t.Fatalf("不得把失败的尝试翻案成成功（BUG-18 读口边界）：\n%s", out)
+	}
+	if strings.Contains(out, "结论（按当前状态）: 成功") {
+		t.Fatalf("失败记录不得翻案成成功结论：\n%s", out)
+	}
+}
+
+// 修 BUG-18（版本维度交叉核对）：失败记录的目标版本不在机上（跨版本坏包——目标 3.0.26
+// 没装上、当前仍是 3.0.28）⇒ 明说「该次升级确实未发生」，不得翻案成成功。
+func TestShowSoftwareResultFailureWithTargetNotInstalled(t *testing.T) {
+	dir := t.TempDir()
+	writeResultFixture(t, dir, `{"action":"add","attempt":"42","time":"2026-10-24T01:04:55Z","version":"3.0.26","reason":"安装未完成：dpkg -i 失败（退出码 2）","ok":false}`)
+
+	x, _ := newCLIKit(t)
+	x.setSoftware(&fakeSoftwareRuntime{status: "install ok installed", ver: "3.0.28"})
+	out := x.renderSoftwareResultPath(filepath.Join(dir, "last-result.json"))
+
+	for _, want := range []string{"目标版本未在机上", "该次升级确实未发生", "当前已装 3.0.28"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("目标版本未装机时应明说（缺 %q）：\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "结论（按当前状态）: 成功") {
+		t.Fatalf("失败记录不得翻案成成功：\n%s", out)
+	}
+}
+
+// 结论带时间与尝试标识（修 BUG-18 的 P2 项）：渲染给出「时间」，结构化视图带 attempt/time。
+func TestShowSoftwareResultRendersAttemptAndTime(t *testing.T) {
+	dir := t.TempDir()
+	writeResultFixture(t, dir, `{"action":"add","attempt":"42","time":"2026-10-24T01:04:55Z","version":"3.0.26","status":"install ok installed","ok":true}`)
+
+	x, _ := newCLIKit(t)
+	x.setSoftware(&fakeSoftwareRuntime{status: "install ok installed", ver: "3.0.26"})
+	out := x.renderSoftwareResultPath(filepath.Join(dir, "last-result.json"))
+
+	if !strings.Contains(out, "时间: 2026-10-24T01:04:55Z") {
+		t.Fatalf("记录时间必须渲染（防旧记录冒充新结论）：\n%s", out)
+	}
+	st, isMap := x.structured.(map[string]any)
+	if !isMap || st["attempt"] != "42" || st["time"] != "2026-10-24T01:04:55Z" {
+		t.Fatalf("结构化视图应带 attempt/time：%v", x.structured)
 	}
 }
 

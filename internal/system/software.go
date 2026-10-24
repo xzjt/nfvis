@@ -62,6 +62,13 @@ type SoftwareResult struct {
 	// Reason 判不出/失败时的原因（状态行之外的说明）。与 Status 分开：Status 只放观测事实，
 	// 原因放这里，操作者据此知道「发生了什么」以及「下一步做什么」。
 	Reason string `json:"reason,omitempty"`
+	// Attempt 本次升级/回退尝试的标识（纳秒时间戳）。结论文件曾有「双写者」：进程侧与
+	// 脱离脚本都会写它（修 BUG-18 场景 B：脚本晚 ~12s 用自己的判定覆盖进程侧结论）。
+	// 带上标识后读侧能分清「这是哪次尝试的结论」，上一次的旧记录不再冒充本次结果。
+	Attempt string `json:"attempt,omitempty"`
+	// Time 本次尝试的发起时间（RFC3339）。结论文件此前没有任何时间字段，一条旧记录可以
+	// 永远冒充「最近一次」；有落笔时间，操作者一眼能看出它有多旧。
+	Time string `json:"time,omitempty"`
 }
 
 // LastResultPath 最近一次升级/回退的结论落点（修 BUG-16）。
@@ -71,6 +78,25 @@ type SoftwareResult struct {
 // 结论写在**不随进程消失**的文件里，CLI 重连后就能读到「到底成没成」，不靠猜、也不必
 // 为此新增一条读命令（命令树是契约，为一次复核扩命令面不划算）。
 const LastResultPath = DefaultSoftwareDir + "/last-result.json"
+
+// installRCName dpkg 退出码的落点：脱离脚本在 `dpkg -i` 返回后**立即**写下
+// `<attempt> <rc>`，进程侧判定读它（修 BUG-18 / R44-1）。
+//
+// 为什么必须经文件：dpkg 在 transient unit 里跑，`launchShell` 拿到的退出码是 systemd-run
+// 客户端的、与 dpkg 无关（R44-1：脚本以 printf 收尾时整段退出码恒 0）——「dpkg 到底成没成」
+// 这个事实只有跑 dpkg 的那个 shell 知道，它写下来，这边才读得到。
+const installRCName = "install.rc"
+
+// stagingSuffix 归档暂存名后缀：Add 先把包拷成 `<归档名>.<attempt>.staging`，dpkg 成功
+// （rc==0）才由脱离 shell 晋升为正式归档名——坏包/失败包**不进回退池**（修 BUG-18 的归档
+// 副作用：以前无条件先归档，一个同版本坏包就能把归档里的好包覆盖掉；真机实测归档文件
+// 与 broken.deb 哈希一致）。后缀让 archived() 的正则匹配不到暂存件。
+const stagingSuffix = ".staging"
+
+// dpkgRCWait installDeb 每次尝试后等 install.rc 出现的上界：坏包/撞锁在秒级失败，
+// 正常安装要跑十几秒——等不到就按「dpkg 仍在正常推进」返回（等待由 settlePackage 承担）。
+// var（非 const）：单测把它与收敛节奏一起缩短（见 shrinkingSettle）。
+var dpkgRCWait = 5 * time.Second
 
 // RecordResult 把结论落到 LastResultPath（尽力而为：写不成不影响升级本身）。
 func (m *SoftwareManager) RecordResult(res SoftwareResult) {
@@ -101,6 +127,85 @@ func ReadLastResultAt(path string) (SoftwareResult, bool) {
 		return SoftwareResult{}, false
 	}
 	return res, res.Version != "" || res.Status != ""
+}
+
+// nowFn 当前时间（now 未注入时用真实时钟——脚本生成/stamp/sweep 都要调它，
+// 裸构造的 SoftwareManager 不许因此 panic）。
+func (m *SoftwareManager) nowFn() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+// stamp 给结论补上尝试标识与时间（读侧据此分辨「哪次尝试、多旧的记录」——修 BUG-18
+// 的 P2 项：此前结论文件无任何时间字段，一条旧记录可以永远冒充「最近一次」）。
+func (m *SoftwareManager) stamp(res SoftwareResult, job installJob) SoftwareResult {
+	res.Attempt, res.Time = job.attempt, m.nowFn().UTC().Format(time.RFC3339)
+	return res
+}
+
+// rcPath dpkg 退出码文件的路径。
+func (m *SoftwareManager) rcPath() string { return filepath.Join(m.dir, installRCName) }
+
+// readDpkgRC 读脱离脚本落下的 dpkg 退出码。attempt 前缀不符（上一轮残渣）不算数：
+// 这份证据只属于本次尝试。
+func (m *SoftwareManager) readDpkgRC(at installAttempt) (int, bool) {
+	raw, err := os.ReadFile(m.rcPath())
+	if err != nil {
+		return 0, false
+	}
+	f := strings.Fields(string(raw))
+	if len(f) != 2 || f[0] != at.attempt {
+		return 0, false
+	}
+	rc, err := strconv.Atoi(f[1])
+	if err != nil {
+		return 0, false
+	}
+	return rc, true
+}
+
+// waitDpkgRC 有界地等 install.rc 出现：坏包/撞锁在秒级失败（等得到），正常安装要跑
+// 十几秒（等不到就按未知返回——不阻塞，等待由 settlePackage 承担）。
+func (m *SoftwareManager) waitDpkgRC(at installAttempt, max time.Duration) (int, bool) {
+	deadline := time.Now().Add(max)
+	for {
+		if rc, known := m.readDpkgRC(at); known {
+			return rc, true
+		}
+		if !time.Now().Before(deadline) {
+			return 0, false
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// sweepStaging 清掉老的归档暂存残渣：判定失败而进程又没能删（如整机重启打断）的暂存件
+// 留在软件目录里没有用途；超过 1 小时的一律清（新于此的可能是还在跑的尝试的活件）。
+func (m *SoftwareManager) sweepStaging() {
+	entries, err := os.ReadDir(m.dir)
+	if err != nil {
+		return
+	}
+	cut := m.nowFn().Add(-time.Hour)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), stagingSuffix) {
+			continue
+		}
+		if info, ierr := e.Info(); ierr == nil && info.ModTime().Before(cut) {
+			_ = os.Remove(filepath.Join(m.dir, e.Name()))
+		}
+	}
+}
+
+// retryHintFor 失败文案里的重试指引：本地包还能照路径重装；URL 下载件是临时文件、
+// 指过去只会让人扑空——指到「再跑一次命令」。
+func retryHintFor(pkg string) string {
+	if isURL(pkg) {
+		return "重新下载后再次执行 request system software add " + pkg
+	}
+	return "执行 dpkg -i " + pkg + " 重试"
 }
 
 // SoftwareManager 软件升级管理。
@@ -146,6 +251,17 @@ type installAttempt struct {
 	cmdOut string
 	log    string
 	err    error
+	// unit 本次尝试的 transient unit 名（systemd-run 形态；其余为空）——进程侧判定
+	// 完成后按它停掉后台脚本（修 BUG-18 场景 B 的双写者竞态）。
+	unit string
+	// logPath 安装日志路径（判定时再读一次拿全文：launch 返回那一刻 dpkg 多半还没写完）。
+	logPath string
+	// attempt 本次尝试的标识（install.rc 的前缀防上一轮残渣冒充）。
+	attempt string
+	// rc / rcKnown dpkg 自身的退出码（脚本在 dpkg 返回后立即落 install.rc）。
+	// unknown = 没读到（适配层不写、或 dpkg 还在跑）——此时沿用只看状态的旧语义。
+	rc      int
+	rcKnown bool
 }
 
 // text 合并本次尝试的全部输出。
@@ -213,29 +329,44 @@ func (m *SoftwareManager) Add(ctx context.Context, pkg, expectSHA string) (Softw
 		return res, errors.New("软件包版本为空")
 	}
 
-	// 归档（供回退）后安装
+	// 归档（供回退）后安装。修 BUG-18 的归档副作用：先拷成**暂存名**，dpkg 成功（rc==0）
+	// 才由脱离 shell 晋升为正式归档——以前无条件先归档，一个同版本坏包就能把归档里的
+	// 好包覆盖掉，回退池从此只能选到坏包（真机实测：/var/lib/nfvis/software/ 里的
+	// nfvis_3.0.28_amd64.deb 与 broken.deb 哈希一致）。
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return res, fmt.Errorf("创建软件目录: %w", err)
 	}
+	m.sweepStaging()
+	attempt := strconv.FormatInt(m.nowFn().UnixNano(), 10)
 	archived := filepath.Join(m.dir, fmt.Sprintf("nfvis_%s_amd64.deb", newVer))
-	if err := copyFileTo(path, archived); err != nil {
+	staging := fmt.Sprintf("%s.%s%s", archived, attempt, stagingSuffix)
+	if err := copyFileTo(path, staging); err != nil {
 		return res, fmt.Errorf("归档软件包: %w", err)
 	}
-	inst := m.installAndVerify(ctx, archived, newVer, "安装")
+	job := installJob{
+		action: "安装", act: "add",
+		staging: staging, canonical: archived, promote: true,
+		targetVer: newVer, attempt: attempt,
+		retryHint: retryHintFor(pkg),
+	}
+	inst := m.installAndVerify(ctx, job)
 	if !inst.ok {
 		// 修 BUG-16：失败也要留结论——连接可能已随 nfvisd 重启断掉，CLI 重连后靠这份
 		// 落盘结论才知道「到底成没成」，而不是只看到 EOF。
 		// 修 BUG-17：Status 只放**稳定观测到**的事实（没稳定就留空），原因进 reason——
 		// 以前这里写 `"安装失败: …"`、成功分支写死 `install ok installed`，两处都在
 		// 用字面量冒充事实。
-		m.RecordResult(SoftwareResult{Action: "add", Version: newVer, Package: filepath.Base(archived),
-			Previous: res.Previous, Status: inst.status, Reason: inst.reason, OK: false})
+		m.RecordResult(m.stamp(SoftwareResult{Action: "add", Version: newVer, Package: filepath.Base(archived),
+			Previous: res.Previous, Status: inst.status, Reason: inst.reason, OK: false}, job))
 		if inst.unverified {
 			// 复核通道答不了 ⇒ 沿用旧口径（命令成功即成功），但结论文件里绝不写 ok:true。
+			// 暂存件也不删：判定未定，dpkg 可能已把它装好（删了回退池就缺这一版）。
 			res.Package, res.Output = filepath.Base(archived), strings.TrimSpace(inst.out)
 			res.Version = newVer
 			return res, nil
 		}
+		// 判定失败：暂存件不进回退池（晋升只在 rc==0 时发生，这里兜底删掉）。
+		_ = os.Remove(staging)
 		return res, errors.New(inst.reason)
 	}
 	res.Package, res.Output = filepath.Base(archived), strings.TrimSpace(inst.out)
@@ -243,6 +374,7 @@ func (m *SoftwareManager) Add(ctx context.Context, pkg, expectSHA string) (Softw
 	res.Version = newVer
 	res.OK = true
 	res.Status = inst.status
+	res = m.stamp(res, job)
 	m.RecordResult(res)
 	return res, nil
 }
@@ -269,10 +401,17 @@ func (m *SoftwareManager) Rollback(ctx context.Context) (SoftwareResult, error) 
 	if pick == "" {
 		return res, fmt.Errorf("无可回退的版本：归档中仅有当前版本 %s（%d 个包）", cur, len(cands))
 	}
-	inst := m.installAndVerify(ctx, pick, res.Version, "回退")
+	job := installJob{
+		action: "回退", act: "rollback",
+		staging: pick, canonical: pick, promote: false,
+		targetVer: res.Version,
+		attempt:   strconv.FormatInt(m.nowFn().UnixNano(), 10),
+		retryHint: "执行 dpkg -i " + pick + " 重试",
+	}
+	inst := m.installAndVerify(ctx, job)
 	if !inst.ok {
-		m.RecordResult(SoftwareResult{Action: "rollback", Version: res.Version,
-			Package: filepath.Base(pick), Status: inst.status, Reason: inst.reason, OK: false})
+		m.RecordResult(m.stamp(SoftwareResult{Action: "rollback", Version: res.Version,
+			Package: filepath.Base(pick), Status: inst.status, Reason: inst.reason, OK: false}, job))
 		if inst.unverified {
 			res.Package, res.Output = filepath.Base(pick), strings.TrimSpace(inst.out)
 			res.Version = m.currentVersion(context.Background())
@@ -286,6 +425,7 @@ func (m *SoftwareManager) Rollback(ctx context.Context) (SoftwareResult, error) 
 	res.OK = true
 	// 修 BUG-17：同样只落**观测到**的状态行（曾恒写 install ok installed）。
 	res.Status = inst.status
+	res = m.stamp(res, job)
 	m.RecordResult(res)
 	return res, nil
 }
@@ -360,39 +500,87 @@ func parseInt(s string) (int, error) {
 	return n, nil
 }
 
-// installAndVerify 安装/回退的统一收口：下发 → 以 dpkg 数据库里的**真实状态与版本**判定结果。
+// installJob 一次安装/回退尝试的全部输入：脱离脚本按它生成（含目标版本与尝试标识——
+// 修 BUG-18：脚本终判必须比对目标版本并吸收 dpkg 退出码，缺一个都会把「包没被改动」
+// 判成成功），进程侧判定也按它做（版本核对 + 退出码否决 + 失败文案的重试指引）。
+type installJob struct {
+	action    string // 展示用动作名（安装/回退）
+	act       string // 结论里的 action（add/rollback）
+	staging   string // dpkg -i 执行的包路径（Add=暂存名；Rollback=归档原件）
+	canonical string // 成功后晋升的归档名（Add；Rollback 与 staging 同）
+	promote   bool   // 脱离 shell 是否在 rc==0 后把 staging 晋升为 canonical
+	targetVer string // 目标版本（脚本终判与进程侧版本核对的同一真源）
+	attempt   string // 尝试标识（结论 attempt 字段、install.rc 前缀、unit 名后缀）
+	retryHint string // 失败文案里的重试指引（用户还能拿到的路径/命令）
+}
+
+// installAndVerify 安装/回退的统一收口：下发 → 以 dpkg 数据库里的**真实状态与版本**判定
+// 结果 → 停掉不再需要写结论的后台脚本。
 //
 // 为什么不能看命令退出码：升级时 postinst 会 `systemctl try-restart nfvis.service`，而本函数
 // 的调用方（CLI/REST）就活在那个被重启的进程里——命令侧看到的「被终止」与「包是否装好」
-// 是两件事（真机 v3.0.24：报 signal: terminated，包随后是 iF）。故：
-//  1. 判定**一律**先等一次稳定观测（见 settlePackage）——不是只在命令报错时才等：
-//     dpkg 退出 0 并不代表事务已收尾，真机实证半配置的包在 postinst 期间照样读作
-//     `install ok installed`；单次读数不构成证据（修 BUG-17 的 Cause A）；
-//  2. 判定只认 `dpkg-query` 的 `install ok installed`，且**版本必须是本次的目标版本**——
-//     升级前旧包本来也是 installed，只看状态会把「dpkg 根本没跑」误判成升级成功；
-//  3. 停在 half-configured 等「已解包未配置」的中间态时，补救执行一次 `dpkg --configure nfvis`；
+// 是两件事（真机 v3.0.24：报 signal: terminated，包随后是 iF）。但** dpkg 自身的退出码**
+// 不在此列（修 BUG-18）：它在脱离 shell 里跑完才落下，坏包在校验阶段就被拒、包根本没动过，
+// 此时状态/版本/audit 的「全绿」是旧包的读数，退出码是唯一能戳穿它的证据。
+//
+// 判定顺序（judgeInstall）：
+//  1. 判定一律先等一次稳定观测（见 settlePackage）——dpkg 退出 0 并不代表事务已收尾；
+//  2. 判定只认 `dpkg-query` 的 `install ok installed`，**版本必须是本次的目标版本**，
+//     且 **dpkg 退出码必须为 0**（同版本重装失败时版本核对恒真，退出码是最后一道）；
+//  3. 停在 half-configured 等「已解包未配置」的中间态时，补救执行一次 `dpkg --configure nfvis`
+//     （补救成功即算成功——configure 自身的成功就是证据，不要求 dpkg -i 那次退出 0）；
 //  4. 仍不到位就如实报出**真实状态**与**恢复命令**，不谎称原因、也不承诺并不存在的自动回退。
-func (m *SoftwareManager) installAndVerify(ctx context.Context, path, targetVer, action string) installOutcome {
-	at := m.installDeb(ctx, path, action)
+func (m *SoftwareManager) installAndVerify(ctx context.Context, job installJob) installOutcome {
+	at := m.installDeb(ctx, job)
+	oc := m.judgeInstall(ctx, job, at)
+	// 进程侧结论已出：脱离脚本的采样/落笔到此为止。只要 dpkg 已退出（rc 已知），
+	// 停掉它的 transient unit——否则它会晚 ~12s 用自己的判定**覆盖**这里的结论
+	//（BUG-18 场景 B 真机实证：02:06:30 进程侧写下正确的 ok:false，02:06:31 被脚本
+	// 覆盖成 ok:true 且 version 还是旧包号）。rc 未知时**不停**：dpkg 可能仍在事务中，
+	// 杀它只会制造 BUG-17 那种 half-configured。unverified 也不停：脚本终判是那时
+	// 唯一还会落笔的结论。
+	if !oc.unverified {
+		m.stopDetachedScript(at)
+	}
+	return oc
+}
+
+// judgeInstall 只看事实做判定（从 installAndVerify 拆出，便于先得出结论、再决定
+// 是否停掉后台脚本）。
+func (m *SoftwareManager) judgeInstall(ctx context.Context, job installJob, at installAttempt) installOutcome {
 	obs := m.settlePackage()
-	if obs.stable && installSettled(obs.status, obs.statusErr, obs.version, obs.verErr, obs.auditClean, obs.auditErr, targetVer) {
-		return installOutcome{out: m.installedReport(action, at, obs), status: obs.status, version: obs.version, ok: true}
+	// dpkg 退出码在判定前再读一次：installDeb 只等了 dpkgRCWait，慢安装的 rc 可能
+	// 在那之后才落——而稳定观测（≥settleMinSpan）天然长于 dpkg 收尾，此刻读得到。
+	rc, rcKnown := m.readDpkgRC(at)
+	if rcKnown {
+		at.rc, at.rcKnown = rc, true
+		at.log = m.readInstallLog(at.logPath) // dpkg 已退出，install.log 此刻才有全文
+	}
+	if obs.stable && installSettled(obs.status, obs.statusErr, obs.version, obs.verErr, obs.auditClean, obs.auditErr, job.targetVer) {
+		// 修 BUG-18 场景 A（同版本坏包）：状态/版本/audit 全绿可能是**旧包本来就是这个
+		// 状态**——dpkg 在校验阶段就失败、包根本没动过；版本核对在同版本重装时恒真。
+		// 只有 dpkg 自己的退出码能戳穿：rc!=0 说明这次安装没有正常完成，
+		// 「读数与升级前一致」不构成成功证据。
+		if rcKnown && rc != 0 {
+			return m.rcFailureOutcome(job, obs, at, rc)
+		}
+		return installOutcome{out: m.installedReport(job.action, at, obs), status: obs.status, version: obs.version, ok: true}
 	}
 	// 复核拿不到可判读的状态行时**不能**据此判失败——那只是「这个执行通道答不了这个问题」，
 	// 旧口径（以命令结果为准）必须保留，否则任何不支持 dpkg-query 的适配都会让升级恒报错。
 	// 但**结论里不写成功断言**：没有观测就没有证据（修 BUG-17 的 Cause B）。
 	if !obs.observable {
 		if at.err == nil {
-			return installOutcome{out: m.installedReport(action, at, obs), unverified: true,
+			return installOutcome{out: m.installedReport(job.action, at, obs), unverified: true,
 				reason: fmt.Sprintf("%s命令成功，但无法复核包状态（dpkg-query 未给出可判读的状态行）："+
-					"结论不作成功断言，请用 dpkg -l nfvis 核对实际状态。", action)}
+					"结论不作成功断言，请用 dpkg -l nfvis 核对实际状态。", job.action)}
 		}
-		return m.failureOutcome(action, path, obs, at, "")
+		return m.failureOutcome(job, obs, at, "")
 	}
 	// 读数还在变（或观察窗内没稳定过）：判不出，不能报成功；也不宜再插一条 --configure——
 	// dpkg 可能仍在推进，并发事务只会把事情弄得更糟（真机实测这时状态会在两者间反复）。
 	if !obs.stable {
-		return m.failureOutcome(action, path, obs, at, "")
+		return m.failureOutcome(job, obs, at, "")
 	}
 	// 只对「已解包、未配置」的中间态做补救：一次 configure 就能收口；而「包根本没落地」
 	//（not-installed）补救没有意义（那要先重装），直接如实报错。
@@ -408,12 +596,47 @@ func (m *SoftwareManager) installAndVerify(ctx context.Context, path, targetVer,
 		recovery = "dpkg --configure nfvis: " + strings.TrimSpace(joinLines(rec.text(), errText(rec.err)))
 		// 补救之后同样要等稳定观测：configure 会重跑 postinst，瞬态读数在这里一样会骗人。
 		obs = m.settlePackage()
-		if obs.stable && installSettled(obs.status, obs.statusErr, obs.version, obs.verErr, obs.auditClean, obs.auditErr, targetVer) {
-			return installOutcome{out: m.installedReport(action, at, obs, recovery),
+		if obs.stable && installSettled(obs.status, obs.statusErr, obs.version, obs.verErr, obs.auditClean, obs.auditErr, job.targetVer) {
+			// 补救成功：dpkg -i 那次的非零退出码被 configure 的成功解释了
+			//（configure 自身的成功就是「包已收口」的证据），不因 rc!=0 翻回失败。
+			return installOutcome{out: m.installedReport(job.action, at, obs, recovery),
 				status: obs.status, version: obs.version, ok: true}
 		}
 	}
-	return m.failureOutcome(action, path, obs, at, recovery)
+	return m.failureOutcome(job, obs, at, recovery)
+}
+
+// rcFailureOutcome dpkg 以非零退出、而状态读数却「全绿」时的收口（BUG-18 场景 A）。
+//
+// 这个组合的真身是「包根本没被改动」（坏包在校验阶段被拒、依赖冲突在解包前被拒…）：
+// 旧包的 installed + audit 干净 + 版本相同让一切状态判据失明。失败文案必须点名这一点，
+// 并带上 dpkg 的真实输出（经 install.log 回传——修 R44-1 后 dpkg 的报错才真正落进日志）。
+func (m *SoftwareManager) rcFailureOutcome(job installJob, obs pkgObservation, at installAttempt, rc int) installOutcome {
+	ver := obs.version
+	if ver == "" {
+		ver = "（未知）"
+	}
+	msg := fmt.Sprintf("%s未完成：dpkg -i 失败（退出码 %d），包未被更新——状态/版本读数（%s / %s）"+
+		"与升级前一致，不构成成功证据。恢复：%s；仍失败请查看安装日志 %s 的 dpkg 输出。",
+		job.action, rc, obs.status, ver, job.retryHint, m.installLogPath())
+	// dpkg 的原始报错是操作者最需要的东西（坏包在校验阶段被拒的那一行）——
+	// 它在 install.log 里，但把它（尾部）直接带进失败文案，操作者不必再去翻文件。
+	if tail := tailLines(at.log, 3); tail != "" {
+		msg += "\ndpkg 输出（尾部）:\n" + tail
+	}
+	return installOutcome{out: strings.TrimSpace(at.text()), version: obs.version, ok: false, reason: msg}
+}
+
+// tailLines 取文本的最后 n 个非空行（截尾而非截头：失败原因通常在输出的末尾）。
+func tailLines(s string, n int) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	var keep []string
+	for i := len(lines) - 1; i >= 0 && len(keep) < n; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			keep = append([]string{t}, keep...)
+		}
+	}
+	return strings.Join(keep, "\n")
 }
 
 // installOutcome 一次安装/回退的**判定结论**。
@@ -561,11 +784,14 @@ func (m *SoftwareManager) installedReport(action string, at installAttempt, obs 
 // failureOutcome 真失败/判不出时的收口：点名包的**真实状态**与**照做的恢复命令**，
 // 并把同一个原因同时给文本（out）与结论（reason），两者不各写一份、避免漂移。
 //
-// 三种形态分开说，因为操作者的下一步完全不同：
+// 四种形态分开说，因为操作者的下一步完全不同：
 //   - 读数仍在变（观察窗内没稳定过）→ 如实说「无法判定」，不动手（dpkg 可能还在跑）；
 //   - 读数取不到（通道答不了）→ 说「无法复核」，同样不声称任何结论；
-//   - 稳定地停在某个非 installed 状态 → 给恢复命令。
-func (m *SoftwareManager) failureOutcome(action, path string, obs pkgObservation, at installAttempt, recovery string) installOutcome {
+//   - 稳定地停在某个非 installed 状态 → 给恢复命令；
+//   - 状态已是 installed 但版本不是目标（修 BUG-19）→ 主句说**版本**：旧文案
+//     「当前状态为 "install ok installed"（未达到 "install ok installed"）」两侧是同一个
+//     字符串，读起来像逻辑错误，而操作者最需要读懂报错的正是这一刻。
+func (m *SoftwareManager) failureOutcome(job installJob, obs pkgObservation, at installAttempt, recovery string) installOutcome {
 	state := obs.status
 	switch {
 	case obs.statusErr != nil:
@@ -582,7 +808,7 @@ func (m *SoftwareManager) failureOutcome(action, path string, obs pkgObservation
 	case !obs.observable:
 		// 通道答不了这个问题：不猜结论，也不给「恢复命令」（没有事实依据去让人重装）。
 		msg = fmt.Sprintf("%s结果无法判定：读不到可判读的 nfvis 包状态（dpkg-query 未返回状态行）。"+
-			"请用 dpkg -l nfvis 核对实际状态；确认是 half-configured 时执行 dpkg --configure nfvis 收口。", action)
+			"请用 dpkg -l nfvis 核对实际状态；确认是 half-configured 时执行 dpkg --configure nfvis 收口。", job.action)
 	case !obs.stable:
 		// 关键的一类（真机形态）：等在 installConvergeTimeout 内没能稳定下来。
 		// 这时**不能**报成功——曾经的瞬态 installed 就是这样被当成终态的。
@@ -590,23 +816,38 @@ func (m *SoftwareManager) failureOutcome(action, path string, obs pkgObservation
 		msg = fmt.Sprintf("%s结果无法判定：等了 %s（共 %d 次采样），包状态始终没有连续 %s 保持不变"+
 			"（最后一次为 %q；它在安装/配置过程中会短暂显示为 %q）。此时不宣称成功、也不自动补救"+
 			"（dpkg 可能仍在推进）。请稍后用 dpkg -l nfvis 复核；若停在 half-configured，"+
-			"执行 dpkg --configure nfvis 收口，否则执行 dpkg -i %s 重试。",
-			action, installConvergeTimeout, obs.samples, settleMinSpan(), state, pkgStatusInstalled, path)
+			"执行 dpkg --configure nfvis 收口，否则%s。",
+			job.action, installConvergeTimeout, obs.samples, settleMinSpan(), state, pkgStatusInstalled, job.retryHint)
 	default:
 		// 恢复命令按状态给出：已解包/半配置 → configure 即可；其余 → 重新下发同一个包。
 		var fix string
 		if obs.statusErr == nil && isConfigurableStatus(obs.status) {
-			fix = fmt.Sprintf("恢复：执行 dpkg --configure nfvis（当前状态 %s）；仍失败时执行 dpkg -i %s 重试。", obs.status, path)
+			fix = fmt.Sprintf("恢复：执行 dpkg --configure nfvis（当前状态 %s）；仍失败时%s。", obs.status, job.retryHint)
 		} else {
-			fix = fmt.Sprintf("恢复：执行 dpkg -i %s 重试，随后 dpkg --configure nfvis；仍失败请查看上方 dpkg 输出。", path)
+			fix = fmt.Sprintf("恢复：%s；仍失败请查看安装日志 %s 的 dpkg 输出。", job.retryHint, m.installLogPath())
 		}
-		msg = fmt.Sprintf("%s未完成：包 nfvis 当前状态为 %q（未达到 %q）。%s", action, state, pkgStatusInstalled, fix)
-		if obs.verErr == nil && obs.version != "" {
-			msg += fmt.Sprintf(" 已安装版本为 %s。", obs.version)
+		if obs.statusErr == nil && obs.status == pkgStatusInstalled && obs.version != "" && obs.version != job.targetVer {
+			// 修 BUG-19：状态行已达标、差的是版本——主句说版本，不再把状态写进
+			// 「未达到」的宾语里（那正是自相矛盾文案的来源）。
+			msg = fmt.Sprintf("%s未完成：包未更新到目标版本——已装 %s（目标 %s），状态 %q。%s",
+				job.action, obs.version, job.targetVer, obs.status, fix)
+		} else {
+			msg = fmt.Sprintf("%s未完成：包 nfvis 当前状态为 %q（未达到 %q）。%s",
+				job.action, state, pkgStatusInstalled, fix)
+			if obs.verErr == nil && obs.version != "" {
+				msg += fmt.Sprintf(" 已安装版本为 %s。", obs.version)
+			}
 		}
 	}
 	if at.err != nil {
 		msg += fmt.Sprintf(" 底层错误: %v。", at.err)
+	}
+	// dpkg 的原始报错直接带进失败文案（尾部）：它是操作者最需要的东西——
+	// 「为什么没装上」的答案在 dpkg 的输出里，不该让人去翻文件（完整输出仍在 install.log）。
+	if at.rcKnown && at.rc != 0 {
+		if tail := tailLines(at.log, 3); tail != "" {
+			msg += "\ndpkg 输出（尾部）:\n" + tail
+		}
 	}
 	// status 只带**稳定观测到**的事实：不稳/不可观测时不把最后那次读数写进结论文件，
 	// 否则「记录里的一行」又会被后来的读视图当成事实引用。
@@ -719,15 +960,27 @@ func (m *SoftwareManager) runBounded(timeout time.Duration, name string, args ..
 
 // installDeb 安装 .deb；dpkg 前端锁被 apt/unattended-upgrades 占用时短等重试
 // （Ubuntu 定时升级是常态，不应让一次升级因锁竞争失败）。
-func (m *SoftwareManager) installDeb(ctx context.Context, path, action string) installAttempt {
+//
+// 修 R44-1 的重试一半：以前判「撞锁」看的是 launchShell 的退出码（恒 0）与刚 launch
+// 完、多半还没落盘的日志——真机上重试**从未触发过**。现在 dpkg 的退出码经 install.rc
+// 传回，坏包/撞锁这类秒级失败在 dpkgRCWait 内就能读到，重试第一次真正可用。
+func (m *SoftwareManager) installDeb(ctx context.Context, job installJob) installAttempt {
 	const attempts = 6
 	var at installAttempt
 	for i := 0; i < attempts; i++ {
-		at = m.installOnce(ctx, path, action)
+		at = m.installOnce(ctx, job)
 		if at.err == nil {
-			return at
-		}
-		if !strings.Contains(at.text(), "dpkg frontend lock") && !strings.Contains(at.text(), "frontend lock was locked") {
+			if rc, known := m.waitDpkgRC(at, dpkgRCWait); known {
+				at.rc, at.rcKnown = rc, true
+				at.log = m.readInstallLog(at.logPath) // dpkg 已退出，日志此刻才有全文
+				if rc == 0 || !isFrontendLock(at.text()) {
+					return at
+				}
+			} else {
+				// install.rc 没出现：dpkg 多半仍在正常推进，等待由 settlePackage 承担。
+				return at
+			}
+		} else if !isFrontendLock(at.text()) {
 			return at
 		}
 		select {
@@ -738,6 +991,11 @@ func (m *SoftwareManager) installDeb(ctx context.Context, path, action string) i
 		}
 	}
 	return at
+}
+
+// isFrontendLock dpkg 前端锁被占用的输出签名（apt/unattended-upgrades 在跑）。
+func isFrontendLock(text string) bool {
+	return strings.Contains(text, "dpkg frontend lock") || strings.Contains(text, "frontend lock was locked")
 }
 
 // installLogPath 安装输出的落盘位置：放在软件目录（root 0700，不进 /tmp——那里任何本地用户
@@ -756,43 +1014,47 @@ func (m *SoftwareManager) installLogPath() string {
 //
 // 输出也不走管道：父进程（nfvisd）一死，读端关闭，写管道的那端会拿到 SIGPIPE/EPIPE，
 // 等于换了个方式杀死 dpkg。改为重定向到文件、事后读回，操作者照样拿到完整输出。
-func (m *SoftwareManager) installOnce(ctx context.Context, path, action string) installAttempt {
+func (m *SoftwareManager) installOnce(ctx context.Context, job installJob) installAttempt {
 	logPath := m.installLogPath()
 	_ = os.Remove(logPath) // 上一次的残渣会误导本次排障
+	_ = os.Remove(m.rcPath())
 	// 修 BUG-16（关键一处）：结论必须由**脱离执行的那个 shell 自己**在 dpkg 结束后写出。
 	// 为什么不能等回到本进程再写：postinst 会重启 nfvisd，本进程在那时已被杀——`Add` 里
 	// 后面的 RecordResult 根本执行不到（真机实证：升级成功但结论文件不存在）。
-	cmdOut, err := m.launchShell(ctx, logPath, m.installScriptWithResult(path, action), "nfvis-install")
-	return installAttempt{cmdOut: cmdOut, log: m.readInstallLog(logPath), err: err}
+	cmdOut, err, unit := m.launchShell(ctx, logPath, m.installScriptWithResult(job), "nfvis-install", job.attempt)
+	return installAttempt{cmdOut: cmdOut, log: m.readInstallLog(logPath), err: err,
+		unit: unit, logPath: logPath, attempt: job.attempt}
 }
 
-// installScriptWithResult dpkg 安装 + **在同一个脱离 shell 里**落结论。
+// installScriptWithResult dpkg 安装 + **在同一个脱离 shell 里**落结论与退出码。
 //
-// 结论文件格式与 ReadLastResultAt 读取的一致（action/version/status/ok）。状态与版本都取
-// `/var/lib/dpkg/status` 里的**实际**字段（不是包内声明值——半装时两者会不一致）。
+// 结论文件格式与 ReadLastResultAt 读取的一致（action/attempt/time/version/status/reason/ok）。
 //
-// 修 BUG-17（Cause C）：取样必须等**同一状态重复出现**才落笔。曾经这里 `dpkg -i` 一退出就
-// 采一次快照，而真机上那一刻状态正是 `install ok installed` 的瞬态（postinst 仍在跑），
-// 于是这份由脱离 shell 写出的结论把瞬态固化成「成功」——而它恰恰是 nfvisd 被杀后 CLI 唯一
-// 能读到的东西。
+// 修 BUG-17（Cause C）：取样必须等**同一状态重复出现**才落笔——曾经 `dpkg -i` 一退出就
+// 采一次快照，而真机上那一刻正是 `install ok installed` 的瞬态，这份由脱离 shell 写出的
+// 结论把瞬态固化成「成功」，而它恰恰是 nfvisd 被杀后 CLI 唯一能读到的东西。
+//
+// 修 BUG-18（本脚本的三个判据缺口）：
+//   - 终判必须比对**目标版本**（字面量，不用采样读到的 $ver——同版本重装失败时 $ver 恰好
+//     等于目标、完全失去判别力，且把它写进 version 字段会把「装到了什么版本」记错）；
+//   - 必须吸收 **dpkg -i 的退出码**（rc!=0 一票否决——状态/版本/audit 全绿可能是旧包的
+//     读数，坏包在校验阶段就被拒、包根本没动过）；
+//   - 落笔带 attempt/time，读侧能分清「哪次尝试、多旧的记录」。
 //
 // 落笔分**两次**，两次都不能谎报：
 //   - 一开始先写一条 `pending`（ok:false）：这一半是给 BUG-16 用的——nfvisd 被 postinst 重启
 //     后，CLI 重连的第一时间就会来读这个文件，那时本次安装往往还没结束；没有这条，
-//     CLI 会读到「无记录」而说不清状态。同时它也顶掉了**上一次**升级的成功结论——旧结论
-//     若留在这里，本次安装期间会被当成本次结果（同样是假成功）。
-//   - 同一状态行连续出现 installSettleSamples 次才算判出终态，值确为 installed 才写 ok:true；
-//     等不满就如实写 ok:false（状态留最后一次观测）。绝不为了「让文件好看」而放宽判据。
-func (m *SoftwareManager) installScriptWithResult(path, action string) string {
-	act := "add"
-	if action == "回退" {
-		act = "rollback"
-	}
+//     CLI 会读到「无记录」而说不清状态。同时它也顶掉了**上一次**升级的成功结论。
+//   - 同一状态行连续出现 installSettleSamples 次、且版本/退出码/audit 全达标才写 ok:true；
+//     等不满就如实写 ok:false（状态留最后一次观测 + reason 说明差在哪）。绝不为了
+//     「让文件好看」而放宽判据。
+func (m *SoftwareManager) installScriptWithResult(job installJob) string {
 	// 结论由**脱离执行的那个 shell 自己**在 dpkg 结束后写出（nfvisd 那时已被 postinst 杀掉）。
 	//
-	// 三处关键取舍：
-	//   · 状态与版本直接读 **/var/lib/dpkg/status**，不调 `dpkg-query`——后者要拿 dpkg 的锁，
-	//     而 postinst 重启期间事务未收尾，真机实证返回空串；
+	// 处关键取舍：
+	//   · 状态与版本优先走 `dpkg-query`（数据库真实视图）；读不到（事务期间拿不到锁等）
+	//     才回退读 /var/lib/dpkg/status 文件（只作最后手段，它会读到陈旧字段——真机实证
+	//     dpkg 被打断时文件说 installed、dpkg-query 说 half-configured）；
 	//   · 结论**写进独立文件**，且整段用 `{ … }` 分组把最终输出重定向到该文件：
 	//     launchShell 会在整条命令后追加 `>>install.log 2>&1`，若不加分组，脚本内最后一个
 	//     重定向会被外层覆盖，结论落进日志而不是结果文件（真机实证：log 里有正确 JSON、
@@ -804,11 +1066,17 @@ func (m *SoftwareManager) installScriptWithResult(path, action string) string {
 	//（单测在 Windows 宿主上跑，曾因此生成 `'\var\lib\…'` 而看不出来）。
 	res := posixpath.Join(m.dir, "last-result.json")
 	quotedRes := shellQuote(res)
-	// 循环上界与进程内判定同源：脱离脚本不能无限等——它没有调用方在看，卡死会留下一个
-	// 永远占着 scope 的空转进程。
+	rcFile := posixpath.Join(m.dir, installRCName)
+	quotedRC := shellQuote(rcFile)
+	ts := m.nowFn().UTC().Format(time.RFC3339)
+	target := shellQuote(job.targetVer)
+	installedLit := shellQuote(pkgStatusInstalled)
 	// auditCleanSh `dpkg --audit` 不列 nfvis 的 shell 判据（与 packageAuditClean 同义）。
 	// `grep -q "  nfvis "` 只认缩进两空格的包名行，避免匹配到描述文本里的 nfvis。
 	auditCleanSh := "! dpkg --audit 2>/dev/null | grep -qE '^ +nfvis( |$)'"
+	auditDirtySh := "dpkg --audit 2>/dev/null | grep -qE '^ +nfvis( |$)'"
+	// 循环上界与进程内判定同源：脱离脚本不能无限等——它没有调用方在看，卡死会留下一个
+	// 永远占着 unit 的空转进程。
 	maxIter := int(installConvergeTimeout / installConvergeInterval)
 	if maxIter < 1 {
 		maxIter = 1
@@ -819,16 +1087,6 @@ func (m *SoftwareManager) installScriptWithResult(path, action string) string {
 		interval = 1
 	}
 	// awk 只负责从 dpkg 状态文件里取「nfvis 那一段」的 Status 与 Version，输出 `status|version`。
-	// 取不到就是空串——空串不参与「连续出现」的计数（见下）。
-	// 采样**必须走 dpkg-query**，不能读 /var/lib/dpkg/status 文件。
-	//
-	// 真机实证（本轮决定性的一条）：dpkg 被打断时两个视图会**互相矛盾**——
-	//	awk 读 /var/lib/dpkg/status → "install ok installed"（陈旧字段）
-	//	dpkg-query -W -f='${Status}' → "install ok half-configured"（数据库真实视图）
-	// 只读文件就会读到谎言，把半配置判成成功——这正是 BUG-17 的最终来源。
-	// 早先改读文件是为了绕开「postinst 期间拿不到锁」，但实测 dpkg-query 在此时只花 16ms、
-	// 不阻塞（它读的是数据库快照），那个担忧不成立。
-	// 取不到时**回退**到读文件（只作为最后手段），两者都拿不到才算空样本。
 	awk := "awk '" +
 		"BEGIN{st=\"\";ver=\"\"} " +
 		"/^Package: nfvis$/{inpkg=1;next} inpkg&&/^Status:/{sub(/^Status: /,\"\");st=$0} " +
@@ -836,12 +1094,21 @@ func (m *SoftwareManager) installScriptWithResult(path, action string) string {
 		"inpkg&&/^$/{inpkg=0} " +
 		"END{printf \"%s|%s\", st, ver}' /var/lib/dpkg/status"
 	// 先落 pending（ok 恒 false）：安装进行中读到它是**诚实**的「未定」，而不是上次的成功。
-	pending := "printf '{\"action\":\"%s\",\"version\":\"\",\"status\":\"" + resultStatusPending + "\",\"ok\":false}\\n' " +
-		shellQuote(act) + " > " + quotedRes + ".tmp && mv " + quotedRes + ".tmp " + quotedRes
-	return "mkdir -p " + shellQuote(m.dir) + "; " +
-		"{ " + pending + "; }; " +
-		"dpkg -i " + shellQuote(path) + "; " +
-		"{ prev=''; n=0; i=0; st=''; ver=''; " +
+	pending := "printf '{\"action\":\"%s\",\"attempt\":\"" + job.attempt + "\",\"time\":\"" + ts +
+		"\",\"version\":\"\",\"status\":\"" + resultStatusPending + "\",\"ok\":false}\\n' " +
+		shellQuote(job.act) + " > " + quotedRes + ".tmp && mv " + quotedRes + ".tmp " + quotedRes
+	// dpkg 的退出码必须显式吸收（修 R44-1/BUG-18）：`rc=$?` 紧跟 dpkg，第一时间落到
+	// install.rc（进程侧判定读它）；随后 rc==0 才把暂存件晋升为正式归档（坏包不进回退池）。
+	dpkgRun := "dpkg -i " + shellQuote(job.staging) + "; rc=$?; " +
+		"printf '%s %s\\n' " + shellQuote(job.attempt) + " \"$rc\" > " + quotedRC + ".tmp && mv " + quotedRC + ".tmp " + quotedRC + "; "
+	promote := ""
+	if job.promote {
+		promote = "if [ \"$rc\" -eq 0 ]; then mv " + shellQuote(job.staging) + " " +
+			shellQuote(job.canonical) + " || true; fi; "
+	}
+	// 采样与终判。终判四条同时成立才 ok=true：状态行 installed、audit 干净、**dpkg 退出码
+	// 为 0**、**已装版本==目标版本**。差哪一条，reason 就说哪一条——失败结论也要能读懂。
+	loop := "{ prev=''; n=0; i=0; st=''; ver=''; " +
 		// 同一状态行连续出现才累加，换值就从头计；中途读不到（空串）同样打断计数——
 		// 「一直读不到」与「一直是 installed」是两码事，前者不是证据。
 		"while [ \"$i\" -lt " + strconv.Itoa(maxIter) + " ]; do " +
@@ -857,9 +1124,26 @@ func (m *SoftwareManager) installScriptWithResult(path, action string) string {
 		"sleep " + strconv.Itoa(interval) + "; " +
 		"done; " +
 		"ok=false; " +
-		"if [ \"$n\" -ge " + strconv.Itoa(installSettleSamples) + " ] && [ \"$st\" = " + shellQuote(pkgStatusInstalled) + " ] && " + auditCleanSh + "; then ok=true; fi; " +
-		"printf '{\"action\":\"%s\",\"version\":\"%s\",\"status\":\"%s\",\"ok\":%s}\\n' " +
-		shellQuote(act) + " \"$ver\" \"$st\" \"$ok\" > " + quotedRes + ".tmp && mv " + quotedRes + ".tmp " + quotedRes + "; }"
+		"if [ \"$n\" -ge " + strconv.Itoa(installSettleSamples) + " ] && [ \"$st\" = " + installedLit + " ] && " +
+		auditCleanSh + " && [ \"$rc\" -eq 0 ] && [ \"$ver\" = " + target + " ]; then ok=true; fi; " +
+		"rsn=''; " +
+		"if [ \"$ok\" != true ]; then " +
+		"if [ \"$rc\" -ne 0 ]; then rsn=\"dpkg -i 失败（退出码 $rc），包未被更新（当前 $st / $ver）\"; " +
+		"elif [ -z \"$st\" ]; then rsn='观察窗内未取得可判读的包状态'; " +
+		"elif [ \"$st\" != " + installedLit + " ]; then rsn=\"包状态停在 $st，未达到 install ok installed\"; " +
+		"elif " + auditDirtySh + "; then rsn='dpkg --audit 仍列出 nfvis（半配置/被打断）'; " +
+		"elif [ \"$ver\" != " + target + " ]; then rsn=\"已装版本 $ver 未达到目标 " + job.targetVer + "\"; " +
+		"else rsn='状态在观察窗内未稳定（最后观测见 install.log）'; fi; fi; " +
+		// 结论的 version 写**目标版本**：这份记录回答「这次要装什么、装成了没」；写采样值
+		// 会把「装到了什么版本」记错（真机场景 B：目标 3.0.26、记录写 3.0.28）。
+		"printf '{\"action\":\"%s\",\"attempt\":\"" + job.attempt + "\",\"time\":\"" + ts +
+		"\",\"version\":\"%s\",\"status\":\"%s\",\"reason\":\"%s\",\"ok\":%s}\\n' " +
+		shellQuote(job.act) + " " + target + " \"$st\" \"$rsn\" \"$ok\" > " + quotedRes + ".tmp && mv " + quotedRes + ".tmp " + quotedRes + "; }"
+	return "mkdir -p " + shellQuote(m.dir) + "; " +
+		"{ " + pending + "; }; " +
+		dpkgRun +
+		promote +
+		loop
 }
 
 // resultStatusPending 结论文件里「安装进行中、结论未定」的标记。
@@ -874,15 +1158,17 @@ const resultStatusPending = "pending"
 func (m *SoftwareManager) runDetached(ctx context.Context, command string) installAttempt {
 	logPath := m.installLogPath() + ".configure"
 	_ = os.Remove(logPath)
-	cmdOut, err := m.launchShell(ctx, logPath, command, "nfvis-configure")
-	return installAttempt{cmdOut: cmdOut, log: m.readInstallLog(logPath), err: err}
+	cmdOut, err, _ := m.launchShell(ctx, logPath, command, "nfvis-configure", strconv.FormatInt(m.nowFn().UnixNano(), 10))
+	return installAttempt{cmdOut: cmdOut, log: m.readInstallLog(logPath), err: err, logPath: logPath}
 }
 
-// launchShell 以「与调用方不同 cgroup/session」的形态执行命令，返回脱离手段自身的诊断输出。
+// launchShell 以「与调用方不同 cgroup/session」的形态执行命令，返回脱离手段自身的诊断输出
+// 与 transient unit 名（systemd-run 形态；其余为空）。token 是 unit 名后缀——用本次尝试的
+// 标识，让进程侧判定后能按名字停掉它（stopDetachedScript）。
 //
 // 只跑**一次**：手段由 detacher 事先探定，不在失败后改换手段重跑——dpkg 不幂等，换手段再跑
 // 一遍就是重复解包同一颗包。手段本身不可用时由 detacher 提前降级，代价是一次 `/bin/true` 探针。
-func (m *SoftwareManager) launchShell(ctx context.Context, logPath, command, unitPrefix string) (string, error) {
+func (m *SoftwareManager) launchShell(ctx context.Context, logPath, command, unitPrefix, token string) (string, error, string) {
 	// 不要用 fmt.Sprintf 拼这段：command 是**shell 脚本**，里面天然含 `%`
 	//（`${pair%%|*}`、`printf '…%s…'`）。Sprintf 会把 `%%` 折叠成 `%`、把 `%s` 当格式动词，
 	// 结果交给 /bin/sh 的脚本被静默改写（真机实证：`st=${pair%%|*}` 变成 `st=`，
@@ -902,7 +1188,7 @@ func (m *SoftwareManager) launchShell(ctx context.Context, logPath, command, uni
 	// 落文件还顺带解决三件事：命令行长度无上限、脚本内容不经多层引号、排障时可直接看文件。
 	scriptPath, werr := m.writeLaunchScript(script)
 	if werr != nil {
-		return "", fmt.Errorf("写执行脚本: %w", werr)
+		return "", fmt.Errorf("写执行脚本: %w", werr), ""
 	}
 	// 修 BUG-16（第三处，也是最隐蔽的一处）：**脱离执行的命令不能挂调用方的 ctx**。
 	//
@@ -914,9 +1200,10 @@ func (m *SoftwareManager) launchShell(ctx context.Context, logPath, command, uni
 	// 故这里给脱离执行换成**独立 ctx**（context.WithoutCancel 保留值、去掉取消传播），
 	// 有界性由 systemd-run 的 scope 自身与 dpkg 事务保证，不再依赖调用方存活。
 	detached := context.WithoutCancel(ctx)
+	unit := fmt.Sprintf("%s-%s", unitPrefix, token)
 	switch m.detacher(ctx) {
 	case detachSystemdRun:
-		// 系统级 scope：自持 cgroup，重启 nfvisd 波及不到；单元名带固定前缀便于排障
+		// 系统级 unit：自持 cgroup，重启 nfvisd 波及不到；单元名带固定前缀便于排障
 		//（只放 nfvis-install / nfvis-configure 两族，异常残留一眼能认出来）。
 		// 用 **transient service**（不带 --scope）而不是 --scope：
 		// `--scope` 让命令活在**调用方的 cgroup 里**，父进程（nfvisd）被 postinst 重启时
@@ -924,17 +1211,37 @@ func (m *SoftwareManager) launchShell(ctx context.Context, logPath, command, uni
 		// 或空（真机实证：install.log 全空、结论 status=""）。
 		// 不带 --scope 时 systemd-run 起的是独立 unit，与本进程的生死无关；
 		// 真机对照（同一脚本）：--scope ⇒ 结论空/pending；transient service ⇒ ok:true + audit 干净。
-		return m.run(detached, "systemd-run", "--collect", "--quiet",
-			fmt.Sprintf("--unit=%s-%d", unitPrefix, m.now().UnixNano()),
+		out, err := m.run(detached, "systemd-run", "--collect", "--quiet", "--unit="+unit,
 			"/bin/sh", scriptPath)
+		return out, err, unit
 	case detachSetsid:
 		// setsid 把命令放进新 session：无 systemd 的底座上 postinst 的 try-restart 本就不执行
 		//（它先判 command -v systemctl），故不存在 cgroup 连坐，脱离 session 已经足够。
-		return m.run(detached, "setsid", "/bin/sh", scriptPath)
+		out, err := m.run(detached, "setsid", "/bin/sh", scriptPath)
+		return out, err, ""
 	}
 	// 一个脱离手段都没有：功能仍可用，但回到「被重启波及」的旧风险，必须在输出里写明。
 	out, err := m.run(ctx, "/bin/sh", scriptPath)
-	return joinLines("未找到可用的 systemd-run/setsid，已直跑（升级可能被 nfvisd 重启波及）", out), err
+	return joinLines("未找到可用的 systemd-run/setsid，已直跑（升级可能被 nfvisd 重启波及）", out), err, ""
+}
+
+// stopDetachedScript 停掉本次安装的 transient unit（前提：dpkg 已退出——install.rc 已知）。
+//
+// 修 BUG-18 场景 B 的双写者竞态：脱离脚本晚 ~12s 用自己的终判覆盖进程侧结论。脚本侧
+// 判据已补齐后两边的结论**内容**一致了，但仍要停——「最后落笔的人」必须唯一，否则任何
+// 一侧的回归都会以覆盖的形式复活。`systemctl stop` 会等 unit 的进程真正终止才返回，
+// 返回后脚本不可能再写结论文件；unit 已结束/不存在时是幂等 no-op。
+// 只在 systemd-run 形态下可停（setsid 无 unit 名可寻）。
+func (m *SoftwareManager) stopDetachedScript(at installAttempt) {
+	if at.unit == "" || m.detacher(context.Background()) != detachSystemdRun {
+		return
+	}
+	if _, known := m.readDpkgRC(at); !known {
+		// dpkg 还没退出（或 rc 没落下来）：绝不停——杀了正在推进的 dpkg，
+		// 制造出来的正是 BUG-17 那种 half-configured。
+		return
+	}
+	_, _ = m.runBounded(30*time.Second, "systemctl", "stop", at.unit)
 }
 
 // writeLaunchScript 把待执行脚本落成文件（0600，软件目录下），返回其路径。
@@ -957,8 +1264,12 @@ func (m *SoftwareManager) writeLaunchScript(script string) (string, error) {
 }
 
 // launchScriptForTest 拼「脚本 + 重定向」的最终命令（单测用它钉住 % 不被格式化）。
+//
+// 修 R44-1 的重定向一半：重定向必须罩住**整段**（`{ …; } >>log 2>&1`），不能只追加在末尾——
+// 那只会罩住最后一个分组，`dpkg -i` 的输出根本进不了 install.log（真机实证 v3.0.28：
+// 坏包场景 install.log 恒 0 字节，操作者永远看不到 dpkg 拒绝坏包的那行报错）。
 func (m *SoftwareManager) launchScriptForTest(command, logPath string) string {
-	return command + " >>" + shellQuote(logPath) + " 2>&1"
+	return "{ " + command + "; } >>" + shellQuote(logPath) + " 2>&1"
 }
 
 // 脱离手段。

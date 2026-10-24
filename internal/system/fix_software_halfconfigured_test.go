@@ -149,8 +149,10 @@ func (f *fixRunner) count(sub string) int {
 
 // newFixSoftware 构造夹具：lookPath 固定「有 systemd-run、无 setsid」，
 // 使断言不受测试机是否装了 systemd 影响（Windows 上两者都没有，直跑分支会掩盖回归）。
+// 收敛节奏与 install.rc 等待一并缩短（假件的 dpkg 是瞬时完成的，生产值只拖慢用例）。
 func newFixSoftware(t *testing.T, fr *fixRunner) *SoftwareManager {
 	t.Helper()
+	shrinkingSettle(t)
 	m := NewSoftwareManager(t.TempDir(), fr.run, func() string { return "3.0.24" })
 	m.lookPath = func(file string) (string, error) {
 		if file == "systemd-run" {

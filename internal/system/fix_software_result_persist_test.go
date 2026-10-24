@@ -92,7 +92,9 @@ func TestLastResultJSONShape(t *testing.T) {
 // RecordResult 根本执行不到（真机实证：升级成功、结论文件却不存在，CLI 重连后读不到）。
 func TestInstallScriptWritesResultInsideDetachedShell(t *testing.T) {
 	m := &SoftwareManager{dir: "/var/lib/nfvis/software"}
-	script := m.installScriptWithResult("/tmp/nfvis_3.0.26_amd64.deb", "安装")
+	job := installJob{action: "安装", act: "add", staging: "/tmp/nfvis_3.0.26_amd64.deb",
+		canonical: "/tmp/nfvis_3.0.26_amd64.deb", targetVer: "3.0.26", attempt: "1"}
+	script := m.installScriptWithResult(job)
 
 	for _, want := range []string{
 		"dpkg -i",
@@ -106,7 +108,9 @@ func TestInstallScriptWritesResultInsideDetachedShell(t *testing.T) {
 		}
 	}
 	// 回退动作要写成 rollback（否则 CLI 侧把回退报成升级）。
-	if rb := m.installScriptWithResult("/tmp/x.deb", "回退"); !strings.Contains(rb, "'rollback'") {
+	rbJob := job
+	rbJob.action, rbJob.act = "回退", "rollback"
+	if rb := m.installScriptWithResult(rbJob); !strings.Contains(rb, "'rollback'") {
 		t.Fatalf("回退应写 action=rollback：\n%s", rb)
 	}
 }
@@ -118,7 +122,8 @@ func TestInstallScriptWritesResultInsideDetachedShell(t *testing.T) {
 // 单测跑在 Windows 上正好能抓到它——但前提是有这条断言。
 func TestInstallScriptUsesPosixPaths(t *testing.T) {
 	m := &SoftwareManager{dir: "/var/lib/nfvis/software"}
-	s := m.installScriptWithResult("/tmp/x.deb", "安装")
+	s := m.installScriptWithResult(installJob{action: "安装", act: "add", staging: "/tmp/x.deb",
+		canonical: "/tmp/x.deb", targetVer: "3.0.26", attempt: "1"})
 	// 只查**路径段**：脚本里的 `\n`（printf 的换行转义）是合法的，不能一刀切禁反斜杠。
 	if strings.Contains(s, `\var\`) || strings.Contains(s, `\root\`) || strings.Contains(s, `\lib\`) {
 		t.Fatalf("路径段出现 Windows 分隔符（会破坏 shell 语义）：\n%s", s)
@@ -226,7 +231,8 @@ func TestInstallSettledRequiresCleanAudit(t *testing.T) {
 // 脱离脚本也必须带 audit 判据（它写的是 CLI 最终读到的那份结论）。
 func TestInstallScriptChecksAudit(t *testing.T) {
 	m := &SoftwareManager{dir: t.TempDir()}
-	s := m.installScriptWithResult("/tmp/x.deb", "安装")
+	s := m.installScriptWithResult(installJob{action: "安装", act: "add", staging: "/tmp/x.deb",
+		canonical: "/tmp/x.deb", targetVer: "3.0.26", attempt: "1"})
 	if !strings.Contains(s, "dpkg --audit") {
 		t.Fatalf("脚本必须以 dpkg --audit 为判据之一（只看状态行会谎报 installed）：\n%s", s)
 	}

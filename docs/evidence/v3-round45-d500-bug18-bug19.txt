@@ -1,0 +1,170 @@
+================================================================================
+NFViS v3 round45：BUG-18/BUG-19（升级失败路径谎报成功）收口（决策 #500）
+================================================================================
+日期：2026-10-24        执行：ZCode 会话（v3 线）
+输入：docs/REPORT-v3.0.28.md（测试方对 v3.0.28 的复测：BUG-17 完全修复；新发现
+      BUG-18 高危「失败路径双双谎报成功」与 BUG-19 低危「失败文案自相矛盾」；
+      并点名 R44-1〔脱离脚本退出码恒 0〕是成因之一）
+环境：nfvis-vm 干净快照起步 → `.run` 首装 v3.0.28（自检 18/0/0、退出码 0；
+      sha256 与发布页逐字节一致）→ 重启 → 一次性口令 → 复现 → 换装修复版复验。
+
+【结论先行】
+  · 报告三条（BUG-18 场景 A/B、BUG-19）**全部成立、全部修复并真机复验**；
+    报告的根因分析与时间线（含 1s 采样的竞态覆盖过程）与本轮独立复现逐秒吻合，
+    **无一处需要更正**。
+  · 本轮另发现并一并收口两个报告未提的**同族缺陷**：
+    ① 归档池污染：Add 无条件先归档，同版本坏包会把回退池里的好包**覆盖掉**
+      （真机实测：/var/lib/nfvis/software/nfvis_3.0.28_amd64.deb 与 broken.deb
+      哈希一致 f092673d…）；
+    ② dpkg 报错丢失：launchShell 的 `>>install.log 2>&1` 只罩住脚本**最后一个分组**，
+      `dpkg -i` 的输出从不落日志（真机实证坏包场景 install.log 恒 0 字节），
+      操作者永远看不到 dpkg 拒绝坏包的那行报错——正是 R44-1 登记的重定向问题，
+      影响面比登记的「重试空转」更大。
+  · R44-1（v3待做 §42）随本批收口。
+
+================================================================================
+§1 复现（v3.0.28 发布件，先复现后修复）
+================================================================================
+坏包构造与测试方同法：在文件中部写 \x00CORRUPT\x00（dpkg-deb -f 仍能读出
+Package/Version——控制成员在文件头部，故 Add 的前置校验全部通过）。
+
+1.1 场景 A（同版本坏包）——完全复现
+  $ request system software add /root/nfvis-test/broken.deb --yes
+  升级完成：3.0.28 → 3.0.28（包 nfvis_3.0.28_amd64.deb）。nfvisd 由 postinst 重启后版本生效。
+  CLI_RC=0                                    ← 完全虚假
+  事后：dpkg 仍 install ok installed 3.0.28、audit 干净（包没被动——这没错，
+  错的是「升级完成」这句话）；last-result.json {"ok":true,…}；
+  归档目录里的 nfvis_3.0.28_amd64.deb == broken.deb（哈希 f092673d…）；
+  install.log 0 字节（dpkg 报错没落日志，§0-②）。
+
+1.2 场景 B（跨版本坏包）+ 竞态覆盖——完全复现（1s 采样）
+  $ request system software add broken26.deb --yes   （当前 3.0.28，目标 3.0.26）
+  %% 安装未完成：包 nfvis 当前状态为 "install ok installed"（未达到 "install ok installed"）。
+                                              ← BUG-19：两侧同一字符串，自相矛盾
+  CLI_RC=1（命令侧判对）
+  时间线（/tmp/race-watch.log）：
+    02:06:18-19  {version:3.0.28, ok:true}          ← 上一次（场景 A）的旧记录
+    02:06:20-29  {version:"", status:"pending"}     ← 脚本首写 pending
+    02:06:30     {version:3.0.26, ok:false, reason:…} ← 进程侧写入正确失败记录
+    02:06:31 起  {version:3.0.28, ok:true}           ← 被脚本终判覆盖，谎报成功且
+                                                       version 还是旧包号——与报告
+                                                       §3.2 逐秒一致
+
+1.3 根因（与报告 §3.3 一致，代码核对）
+  · 脚本终判只看「状态行 installed + audit 干净 + 连续 6 次」，**不比对目标版本**、
+    **不吸收 dpkg -i 退出码**（R44-1：脚本以 printf 收尾，整段退出码恒 0）；
+  · `$ver` 取采样时的**当前**包版本写进结论（记错「装到了什么版本」）；
+  · 进程侧 installSettled 有版本核对，但**同版本重装时 installed==target 恒真**
+    （场景 A 命中）；脚本采样 ~12s 晚于进程侧返回 ⇒ 覆盖（场景 B 命中）。
+
+================================================================================
+§2 修法（决策 #500；三道闸 + 归档保护 + 文案分岔 + 读口维度）
+================================================================================
+① dpkg 退出码吸收（R44-1 收口）
+   脚本 `dpkg -i '<暂存>' ; rc=$?` 后**立即**落 install.rc（`<attempt> <rc>`，
+   attempt 前缀防上一轮残渣冒充）；日志重定向改**整段分组** `{ …; } >>install.log 2>&1`
+   ——dpkg 的报错从此落日志。
+   进程侧判定吸收 rc：稳定观测到「installed+目标版本+audit 干净」**且 rc!=0** ⇒ 报失败
+   （场景 A 的最后一道闸：同版本时状态判据全失明，退出码是唯一证据）。
+   撞锁重试第一次真正可用（以前判 launchShell 退出码恒 0，重试从未触发）。
+② 脚本终判比对**目标版本**（字面量）并要求 rc==0；结论 version 写目标版本；
+   reason 分五种如实说明差在哪（rc/状态/audit/版本/未稳定）。
+③ 双写者收口：进程侧判定完成后，只要 dpkg 已退出（rc 已知）就 `systemctl stop` 该次
+   transient unit（stop 等 unit 真正终止才返回）——最后落笔的人唯一；rc 未知时**不停**
+   （dpkg 可能仍在事务中，杀它只会制造 half-configured）。
+④ 结论文件带 attempt（尝试标识）与 time（RFC3339）——旧记录不再冒充新结论。
+⑤ 归档保护：Add 先拷**暂存名**（nfvis_<ver>_amd64.deb.<attempt>.staging，archived()
+   的正则匹配不到），脚本在 rc==0 时才 mv 晋升为正式归档名——坏包/失败包不进回退池；
+   判定失败由进程侧兜底删除暂存件；超 1 小时的残渣由下次 Add 顺带清扫。
+⑥ BUG-19：失败文案分岔——状态行已达标而版本不达标时，主句说**版本差距**
+   （「包未更新到目标版本——已装 X（目标 Y）」），不再出现
+   「当前状态为 "install ok installed"（未达到 "install ok installed"）」；
+   两类失败文案都带 dpkg 输出尾部（3 行）与可照做的重试指引。
+⑦ 读口（show system software result）加**版本维度**交叉核对，且失败记录**不翻案**：
+   「包当前完好」与「那次升级成了」是两件事；目标版本不在机上时明说
+   「该次升级确实未发生」。成功记录与当前版本不符时注明「其后可能又升级过」。
+   渲染新增「时间:」行；结构化视图带 attempt/time/matches_record（含版本）。
+
+语义边界（有意如此，如实登记）：
+  · rc 未知（适配层不写 install.rc）⇒ 沿用只看状态的旧语义，不停 unit；
+  · 补救（dpkg --configure）成功即算成功——configure 自身的成功就是证据，
+    不因 dpkg -i 那次的 rc!=0 翻回失败；
+  · 回退（rollback）不参与归档晋升（它装的就是归档原件）。
+
+================================================================================
+§3 守护（红-绿；均先在旧实现上红、新实现上绿）
+================================================================================
+internal/system/fix_bug18_failure_path_test.go（8 条，新增）：
+  TestSoftwareAddSameVersionBrokenDebFailsHonestly      场景 A：rc 否决 + attempt/time
+                                                        + 坏包不进池 + 停 unit
+  TestSoftwareAddCrossVersionBrokenDebReportsVersionGap 场景 B：版本差距主句 +
+                                                        结论 version=目标 + 停 unit
+  TestSoftwareAddSucceedsWithExitCodeAndPromotesArchive 成功：rc=0 + 归档晋升 + attempt/time
+  TestSoftwareAddRecoveryBeatsNonZeroExitCode           补救成功不因 rc!=0 翻回失败
+  TestSoftwareAddUnknownExitCodeKeepsOldSemanticsAndDoesNotStop  rc 未知⇒旧语义+不停 unit
+  TestReadDpkgRCRejectsStaleAttempt                      rc 残渣（前缀不符）不算数
+  TestInstallScriptVerdictChecksVersionAndExitCode       脚本四判据 + rc 落盘 + 晋升前提
+  TestLaunchScriptRedirectsWholeScript                   重定向罩住整段（R44-1 另一半）
+internal/api/cli_fix_software_result_crosscheck_test.go（+2 条，1 条改断言）：
+  TestShowSoftwareResultFailureWithTargetNotInstalled    目标版本未装机⇒「确实未发生」不翻案
+  TestShowSoftwareResultRendersAttemptAndTime            时间行 + 结构化 attempt/time
+  TestShowSoftwareResultDetectsStaleFailureRecord        改：失败记录不再翻案成「成功」
+既有夹具升级：fakeRunner 模拟 rc 落盘与归档晋升；shrinkingSettle 连同 dpkgRCWait
+一起缩短；全部旧用例（half-configured/settle/持久化/回退）零改动语义通过。
+make check 七项 RC=0（决策计数 401→…见发版记录）。
+
+================================================================================
+§4 真机复验（修复版 3.0.29~dev1→dev3，产品自升级链路）
+================================================================================
+4.1 成功路径（BUG-17 判定链零回退）
+  dev1 → dev2（修复版二进制自己发起）：CLI 受理 → 连接断开 → 自动重连 →
+  「版本: 3.0.29~dev2 / 状态: install ok installed / 结论: 成功」rc=0；
+  dpkg --audit 干净；结论文件带 attempt+time、version=目标；
+  归档晋升（nfvis_3.0.29~dev2_amd64.deb 入池、无暂存残渣）；无残留 unit；
+  install.log 首次包含 postinst 全文（整段重定向生效）。
+  dev2 → dev3 同样成功；读口「当前状态核对: install ok installed（与记录一致）」
+  + 「时间: 2026-10-24T02:51:21Z」行。
+4.2 场景 A 复验（同版本坏包，修复版）
+  %% 安装未完成：dpkg -i 失败（退出码 1），包未被更新——状态/版本读数
+    （install ok installed / 3.0.29~dev3）与升级前一致，不构成成功证据。恢复：…重试…
+  dpkg 输出（尾部）: … zstd error: Data corruption detected …
+  CLI_RC=1；包未动（installed@dev3、audit 干净）；结论 ok:false + attempt/time +
+  reason 含退出码；**归档好包未被污染**（正式归档哈希 498e76d2… 原样，坏包
+  2615c0b4… 未入池）、暂存件已清；unit 已停（systemctl list-units 空）；
+  install.log 含 dpkg 真实报错（修复前恒 0 字节）。
+  1s 采样（/tmp/raceA.log）：旧记录 → pending（带 attempt）→ 进程失败记录，
+  **此后无任何 ok:true 覆盖**。
+4.3 场景 B 复验（跨版本坏包，修复版）+ BUG-19
+  %% 安装未完成：包未更新到目标版本——已装 3.0.29~dev3（目标 3.0.26），
+    状态 "install ok installed"。恢复：…        ← 主句说版本，自相矛盾消失
+  CLI_RC=1；结论 version=3.0.26（目标）、ok:false、attempt/time；
+  1s 采样（/tmp/raceB.log）：pending → 02:59:22 进程失败记录 → **稳定到采样结束无覆盖**
+  （v3.0.28 是 +1s 即被覆盖）；install.rc = "<attempt> 1"；
+  读口：「注：记录为「失败」（目标版本 3.0.26），当前已装 3.0.29~dev3 / 状态
+  "install ok installed"——目标版本未在机上，该次升级确实未发生。」不翻案。
+4.4 正控：同版本**好**包重装（rc=0）照常成功
+  「升级动作已受理 → 重连 → 结论: 成功」rc=0——退出码否决不误伤合法重装。
+
+================================================================================
+§5 方法论附记（如实登记）
+================================================================================
+  · 验证用 deb 的两跳（3.0.28→dev1→dev2）是必要的：升级由**发起方**的代码执行，
+    修复必须由修复版二进制自己发起的升级来验证——第一跳（旧进程发起）的结论文件
+    仍是旧格式，属预期不是缺陷。
+  · 本轮踩坑：Windows 侧 tar 组装 deb 树会丢执行位（MSYS tar 对 NTFS 的 chmod
+    不落档），装出 0644 的 /usr/bin/nfvisd——postinst 的 try-restart 是 best-effort、
+    包状态照样 installed，CLI 侧表现为「240s 重连失败」。经纬：发行 deb 一律走
+    `make deb`（install -m 定权限），验证 deb 在 VM 侧解包后 chmod 再封装。
+  · 撞锁重试的真机路径未构造（需可控地占住 dpkg 前端锁）；由单测
+    （fakeRunner 传播 dpkg 错误 + rc 落盘）覆盖，如实登记。
+
+================================================================================
+§6 与报告的对照结论
+================================================================================
+  · 报告 §3.4 修复建议 1/2/3/4 全部采纳并实现（1=脚本版本核对、2=退出码吸收〔经
+    install.rc 而非 exit $rc：launch 的退出码属于 systemd-run 客户端，与 dpkg 无关〕、
+    3=停 unit 消除双写者、4=attempt+time）；
+  · §7 优先级 P0/P1/P2/P3 全部落地（P3=读口版本维度交叉核对 + 失败不翻案）；
+  · §6.2「发版说明示例写 3.0.29」——本轮发版说明示例改用真实版本号；
+  · 报告无结论性错误，无需更正；两个补充发现（归档污染、dpkg 报错丢失）见 §0。
+================================================================================

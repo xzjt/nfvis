@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -15,6 +16,7 @@ type fakeRunner struct {
 	calls   []string
 	replies map[string]string // "dpkg-deb -f <path> Version" → 值（按子串匹配）
 	failOn  string
+	dir     string // 结论/rc/归档所在目录（脚本模拟写 install.rc 与归档晋升用）
 }
 
 func (f *fakeRunner) run(ctx context.Context, name string, args ...string) (string, error) {
@@ -66,13 +68,14 @@ func writeDeb(t *testing.T, dir, name string) string {
 }
 
 func TestSoftwareAddLocalDeb(t *testing.T) {
+	shrinkingSettle(t)
 	dir := t.TempDir()
 	pkgDir := t.TempDir()
 	src := writeDeb(t, pkgDir, "nfvis_1.0.1_amd64.deb")
 	cur := "1.0.0"
-	fr := &fakeRunner{replies: map[string]string{" Package": "nfvis\n"}}
-	fr.replies["Version"] = "1.0.1\n"
-	fr.replies["dpkg-query"] = "1.0.0\n"
+	fr := &fakeRunner{replies: map[string]string{" Package": "nfvis\n"}, dir: dir}
+	fr.replies["Version"] = "1.0.1\n"    // dpkg-deb -f … Version（包内声明版本）
+	fr.replies["dpkg-query"] = "1.0.0\n" // 静态夹具：dpkg-query 答不了状态行 → unverified 旧口径（成功路径另由 bug18 用例覆盖）
 	m := NewSoftwareManager(dir, fr.run, func() string { return cur })
 
 	res, err := m.Add(context.Background(), src, "")
@@ -112,6 +115,7 @@ func TestSoftwareAddSHA256Mismatch(t *testing.T) {
 }
 
 func TestSoftwareRollbackPicksHighestNonCurrent(t *testing.T) {
+	shrinkingSettle(t)
 	dir := t.TempDir()
 	for _, v := range []string{"1.0.0", "1.0.2", "1.0.1"} {
 		writeDeb(t, dir, "nfvis_"+v+"_amd64.deb")
@@ -201,8 +205,9 @@ func isShellScriptInvocation(name string, args []string) bool {
 
 // runScript 模拟「执行脚本文件」：把脚本里我们关心的命令按出现顺序跑一遍。
 //
-// 只模拟状态相关的那几条（dpkg -i / dpkg-query / dpkg --audit / dpkg --configure），
-// 足够让既有断言（「应调用 dpkg -i」「补救后应报成功」）继续成立；不试图实现一个 shell。
+// 只模拟状态相关的那几条（dpkg -i / rc 落盘 / 归档晋升 / dpkg-query / dpkg --audit /
+// dpkg --configure），足够让既有断言（「应调用 dpkg -i」「补救后应报成功」「归档在位」）
+// 继续成立；不试图实现一个 shell。
 func (f *fakeRunner) runScript(ctx context.Context, path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -210,12 +215,26 @@ func (f *fakeRunner) runScript(ctx context.Context, path string) (string, error)
 	}
 	script := string(b)
 	var out strings.Builder
-	// 顺序：dpkg -i → dpkg --audit → dpkg-query(Status) → dpkg-query(Version)
+	// 顺序：dpkg -i →（rc 落盘 + 成功时归档晋升）→ dpkg --configure → dpkg --audit
+	// → dpkg-query(Status) → dpkg-query(Version)
+	rc := 0
 	if m := regexp.MustCompile(`dpkg -i '([^']+)'`).FindStringSubmatch(script); m != nil {
 		o, e := f.run(ctx, "dpkg", "-i", m[1])
 		out.WriteString(o)
 		if e != nil {
-			return out.String(), e
+			rc = 2 // 脚本里的 rc=$?：dpkg 失败即非零（假件统一按 2 记）
+		}
+		// rc 落盘（attempt 前缀取自脚本）：进程侧判定靠它识别「dpkg 没跑成」。
+		if am := regexp.MustCompile(`'([0-9]+)' "\$rc"`).FindStringSubmatch(script); am != nil && f.dir != "" {
+			_ = os.WriteFile(filepath.Join(f.dir, installRCName), []byte(am[1]+" "+strconv.Itoa(rc)+"\n"), 0o644)
+		}
+		// 成功时归档晋升（mv staging canonical）：Add 只把包拷到暂存名，晋升在脚本里。
+		if e == nil {
+			if mv := regexp.MustCompile(`mv '([^']+)' '([^']+)'`).FindStringSubmatch(script); mv != nil {
+				if _, serr := os.Stat(mv[2]); serr == nil || mv[1] != mv[2] {
+					_ = os.Rename(mv[1], mv[2]) // 目标已存在（幂等重装）时 Rename 失败即可接受
+				}
+			}
 		}
 	}
 	if strings.Contains(script, "dpkg --configure nfvis") {

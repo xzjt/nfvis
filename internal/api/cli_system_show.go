@@ -468,6 +468,9 @@ func (x *cliExecutor) renderSoftwareResultPath(path string) string {
 	}
 	fmt.Fprintf(&b, "结果: %s\n", verdict)
 	fmt.Fprintf(&b, "动作: %s\n", action)
+	if res.Time != "" {
+		fmt.Fprintf(&b, "时间: %s\n", res.Time)
+	}
 	if res.Version != "" {
 		fmt.Fprintf(&b, "版本: %s\n", res.Version)
 	}
@@ -489,34 +492,53 @@ func (x *cliExecutor) renderSoftwareResultPath(path string) string {
 	// 记录不会自愈——真机实证：结论说 installed、实际 half-configured，重启后照旧）。
 	// 能实时读到 dpkg 状态就交叉核对，**以当前事实为准**，绝不让过期记录冒充现状；
 	// 读不到就如实说「无法核对」，不假装一致。
+	//
+	// 修 BUG-18（读口的翻案边界）：失败记录**不因当前包状态完好而翻案成成功**——
+	// 「包没坏」与「那次升级成了」是两件事（同版本坏包失败后，包本来就好好的；
+	// 真机场景 A 的失败记录若按旧逻辑翻案，读口会显示「结论（按当前状态）: 成功」）。
+	// 交叉核对同时看**版本**：目标版本不在机上，就明说「该次升级确实未发生」。
 	curStatus, curVer, curErr := x.packageStateForResult()
-	effOK := res.OK
 	if curErr == nil && curStatus != "" {
-		effOK = curStatus == pkgStatusInstalledText
+		verKnown := curVer != "" && res.Version != ""
+		verMatch := !verKnown || curVer == res.Version
 		switch {
-		case res.OK && !effOK:
+		case res.OK && curStatus != pkgStatusInstalledText:
 			fmt.Fprintf(&b, "\n⚠ 记录与当前状态不符：记录为「成功」，当前 dpkg 状态是 %q——"+
 				"记录已过期或升级并未真正落定，**以当前状态为准**。\n"+
 				"  处理：dpkg --configure nfvis 收口，或 request system software rollback 回退。\n", curStatus)
 			fmt.Fprintf(&b, "结论（按当前状态）: 未落定为成功\n")
-		case !res.OK && effOK:
-			fmt.Fprintf(&b, "\n注：记录为「失败」，当前 dpkg 状态是 %q（已装好）——"+
-				"可能事后被修复或再次升级，**以当前状态为准**。\n", curStatus)
-			fmt.Fprintf(&b, "结论（按当前状态）: 成功\n")
-		default:
+		case res.OK && !verMatch:
+			fmt.Fprintf(&b, "\n注：记录为「成功（版本 %s）」，当前已装版本为 %s——"+
+				"其后可能又执行过一次升级/回退；本记录只代表它那一次。\n", res.Version, curVer)
+			fmt.Fprintf(&b, "当前状态核对: %s（版本不符：记录 %s / 当前 %s）\n", curStatus, res.Version, curVer)
+		case res.OK:
 			fmt.Fprintf(&b, "当前状态核对: %s（与记录一致）\n", curStatus)
+		case verKnown && curVer != res.Version:
+			fmt.Fprintf(&b, "\n注：记录为「失败」（目标版本 %s），当前已装 %s / 状态 %q——"+
+				"目标版本未在机上，该次升级确实未发生。\n", res.Version, curVer, curStatus)
+			fmt.Fprintf(&b, "当前状态核对: %s\n", curStatus)
+		default:
+			fmt.Fprintf(&b, "\n注：记录为「失败」；当前包状态 %q（版本 %s）——包当前完好，"+
+				"但**该次尝试仍按记录为失败**（可能是事后修复或其后的升级使然）。\n", curStatus, curVer)
+			fmt.Fprintf(&b, "当前状态核对: %s\n", curStatus)
 		}
 	} else {
 		fmt.Fprintf(&b, "当前状态核对: 读取失败（%v）——无法与记录交叉核对，以上仅为历史记录\n", curErr)
 	}
 	st := map[string]any{
-		"ok": effOK, "action": res.Action, "version": res.Version,
+		"ok": res.OK, "action": res.Action, "version": res.Version,
 		"previous": res.Previous, "status": res.Status, "package": res.Package,
+	}
+	if res.Attempt != "" {
+		st["attempt"] = res.Attempt
+	}
+	if res.Time != "" {
+		st["time"] = res.Time
 	}
 	if curErr == nil && curStatus != "" {
 		st["current_status"] = curStatus
 		st["current_version"] = curVer
-		st["matches_record"] = res.Status == curStatus
+		st["matches_record"] = res.Status == curStatus && (curVer == "" || res.Version == "" || curVer == res.Version)
 	}
 	x.structured = st
 	return b.String()

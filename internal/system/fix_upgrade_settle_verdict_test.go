@@ -32,13 +32,15 @@ import (
 
 // shrinkingSettle 把「稳定」判据缩短到毫秒级，使用例不必真等生产值的 10s 观察窗。
 // 用例里的瞬态长度按同一比例缩短，因此判据的**相对**关系与真机一致。
+// install.rc 的等待（dpkgRCWait）一并缩短：假件不写 rc 时按未知返回，不缩短会白等。
 func shrinkingSettle(t *testing.T) {
 	t.Helper()
-	oldTimeout, oldInterval := installConvergeTimeout, installConvergeInterval
+	oldTimeout, oldInterval, oldRC := installConvergeTimeout, installConvergeInterval, dpkgRCWait
 	installConvergeTimeout = 250 * time.Millisecond
 	installConvergeInterval = 2 * time.Millisecond
+	dpkgRCWait = 20 * time.Millisecond
 	t.Cleanup(func() {
-		installConvergeTimeout, installConvergeInterval = oldTimeout, oldInterval
+		installConvergeTimeout, installConvergeInterval, dpkgRCWait = oldTimeout, oldInterval, oldRC
 	})
 }
 
@@ -363,7 +365,9 @@ func TestSoftwareResultRecordNeverClaimsOKForNonTerminalState(t *testing.T) {
 // 等于把瞬态固化成「成功」。
 func TestInstallScriptWaitsForRepeatedStatusBeforeWritingResult(t *testing.T) {
 	m := &SoftwareManager{dir: "/var/lib/nfvis/software"}
-	script := m.installScriptWithResult("/tmp/nfvis_3.0.26_amd64.deb", "安装")
+	job := installJob{action: "安装", act: "add", staging: "/tmp/nfvis_3.0.26_amd64.deb",
+		canonical: "/tmp/nfvis_3.0.26_amd64.deb", targetVer: "3.0.26", attempt: "1"}
+	script := m.installScriptWithResult(job)
 
 	loop := strings.Index(script, "while [")
 	if loop < 0 {
@@ -389,7 +393,8 @@ func TestInstallScriptWaitsForRepeatedStatusBeforeWritingResult(t *testing.T) {
 			t.Fatalf("脚本应含 %q：\n%s", want, script)
 		}
 	}
-	if rb := m.installScriptWithResult("/tmp/x.deb", "回退"); !strings.Contains(rb, "'rollback'") {
+	if rb := m.installScriptWithResult(installJob{action: "回退", act: "rollback", staging: "/tmp/x.deb",
+		canonical: "/tmp/x.deb", targetVer: "3.0.25", attempt: "1"}); !strings.Contains(rb, "'rollback'") {
 		t.Fatalf("回退应写 action=rollback：\n%s", rb)
 	}
 }
@@ -400,7 +405,12 @@ func TestInstallScriptWaitsForRepeatedStatusBeforeWritingResult(t *testing.T) {
 // 更糟：旧结论会被当成本次结果。
 func TestInstallScriptWritesPendingRecordBeforeVerdict(t *testing.T) {
 	m := &SoftwareManager{dir: "/var/lib/nfvis/software"}
-	script := m.installScriptWithResult("/tmp/nfvis_3.0.26_amd64.deb", "安装")
+	job := installJob{action: "安装", act: "add", staging: "/tmp/nfvis_3.0.26_amd64.deb",
+		canonical: "/tmp/nfvis_3.0.26_amd64.deb", targetVer: "3.0.26", attempt: "1792807507720994446"}
+	script := m.installScriptWithResult(job)
+	if !strings.Contains(script, `"attempt":"1792807507720994446"`) {
+		t.Fatalf("结论（含 pending）应带尝试标识（读侧据此分辨是哪次尝试）：\n%s", script)
+	}
 
 	pending := strings.Index(script, resultStatusPending)
 	if pending < 0 {
