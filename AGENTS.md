@@ -82,6 +82,9 @@
   （不是 `alpine.qcow2`、不是 Docker tag）——`request images upload name alpine type vm-image …`
   + `name ct type container-image …`。
   证据 `docs/evidence/v3-round45-d500-bug18-bug19.txt`。
+  ⚠️ 收尾注记：发版核对完成后 VM 曾发生**一次计划外重启且 SSH host key 再生成**（现场完好、
+  3.0.29 active、无对象残留；原因未定位，如实登记——下次连接先 `ssh-keygen -R 192.168.155.129`）；
+  夹具已复备（docker `alpine:3.20` + `/data/incoming/ct.tar` + `/data/incoming/alpine.qcow2`）。
 
 ## 验证与口径纪律（决策 #481；对所有会话生效）
 
