@@ -86,6 +86,52 @@
   3.0.29 active、无对象残留；原因未定位，如实登记——下次连接先 `ssh-keygen -R 192.168.155.129`）；
   夹具已复备（docker `alpine:3.20` + `/data/incoming/ct.tar` + `/data/incoming/alpine.qcow2`）。
 
+- **round46（v3.0.29 复测 6 条缺陷 + 4 条观察项收口，2026-10-25，决策 #501/#502）**：测试方提交
+  `docs/REPORT-v3.0.29.md`——BUG-18/19/R44-1 确认修复（六项事实源一致、1s 采样 45 次无 ok:true），
+  新发现 **6 条缺陷（BUG-20~25，0 高危 / 2 中危 / 4 低危）** 与 **4 条观察（O-1~O-4）**。本会逐条
+  真机复现：**9 项成立并全部修复 + 真机复验**；**BUG-20 经决定性实验证伪、报告结论需更正**——
+  报告称「libvirt 启动期失败后 VM 功能永久不可用（永不重试）」，实测**产品的常驻状态机
+  （#351/#354）在 libvirtd 恢复后 30s 节奏内自动接回、同 pid、无需重启 nfvis**；测试方误判是
+  **时序**：他在 libvirtd 修好后 18 秒就重启了 nfvis，抢在状态机第二次重试（+60s）之前，
+  而「8 分钟无重试日志」正是该状态机**刻意静默**的契约（防 journal 刷屏）。产品零改动。
+  **修复的 9 项**：**BUG-21** 树把 optional 修饰建成独立叶子（`dns server secondary`、
+  `ntp server prefer`、两处 `dns proxy secondary`）⇒ 改 `Opt()` 包住修饰节点（解析器零改动），
+  顺带修掉「`ntp server prefer` 被当成名字叫 prefer 的服务器接受」这条报告未提的静默写错；
+  **BUG-22** REST `PUT candidate` 未知字段静默成功 ⇒ 入口严格校验（400 + 完整路径 + 相近字段
+  提示），`load override|merge` 同源，annotations/env 自由键值对不受影响；
+  **BUG-23** `OK` 的 `omitempty` 致失败结论缺 `ok` 键 ⇒ 去掉；守护改为「成败两方向键集合逐字相同」；
+  **BUG-24** 新增 `show system pci [detail]`（BDF/厂商:设备/类型/IOMMU 组/组内设备/驱动/直通建议）；
+  **BUG-25** 大页声明与 hugetlbfs 挂载点脱节无告警 ⇒ 提交期挂载点预检 + VM start 大页余量预检
+  （中文量差、不碰 libvirt；**陈旧 paused 域例外**——它的页已自持有，按空闲页判会误拒 #455 恢复路径）；
+  **O-1** 无 vNIC 启动成功无提示 ⇒ 成功文案追加说明（有 vNIC 时逐字不变）；
+  **O-2（数据面真缺陷）** `vlan access` + vhost-user vNIC 时只把 `.100` 子接口挂进 BD、主接口不在
+  BD ⇒ guest 无 tag 帧全被 blackholed 且无告警；**先真机证伪了「改用 VPP VTR」这条更漂亮的路线**
+  （26.06 的 `l2 tag-rewrite` 对 `vh-*`/`tap0`/`bvi0`/`vxlan` 一律 `not compatible with interface`，
+  `l2vtr_configure` 要求 hw_class == ethernet），改为虚拟口父接口直接入 BD（物理口保持子接口，
+  FR-NET-011 不回归）+ 清理历史 `.100` 残留；A/B：修复前 rx+51/drops+51、ping 0/5 → 修复后
+  drops 不增长、ping 5/5；**O-3** 新增 `request system configuration unlock [force]`（force 为
+  super-user + 审计 + 明示代价）；**O-4** seed.iso 补 `network-config`（v2 / eth0 dhcp4；写盘失败降级）。
+  **本轮自捕并修掉 3 条报告没提的缺陷**：① **BUG-24 首版用 `DirEntry.IsDir()` 过滤设备条目**，
+  而 sysfs 的 `/sys/bus/pci/devices/<bdf>` 是符号链接（IsDir 用 lstat 对链接恒 false）⇒ 真机输出
+  「（未枚举到 PCI 设备）」假读数（夹具用真实目录造，照不出）——已改为放行符号链接 + 专门守护；
+  ② **按口名声明的 `vpp dpdk dev <口名>` 在口已被 DPDK 接管（无 netdev）时无法解析 PCI** ⇒
+  startup.conf 跳过该口、而告警让人「重新 bind-dpdk」也是死路（bind 同样要 netdev），操作者
+  无法自救——产品记着绑定关系却只有 BDF→BDF 一维；修：绑定记录持久「口名→BDF」（format 2、
+  向后兼容旧扁平表）+ startup 解析回退 + 告警给两条真能走通的出路（并更正「delete 也删不掉」：
+  删除本来就不依赖解析，已落守护）；③ **语义 S8 oracle** 把产品**内置 DHCP server 的 L2 tap**
+  当「读视图漏成员」报假红（读视图有意不列它）——修 oracle：仅当该交换机配了 dhcp-server 且
+  VPP 侧名字形如 `tap<N>` 时排除。
+  守护：11 个新测试文件/用例组，全部红-绿。`make check` 七项 RC=0（日志里 FAIL 字样均来自
+  工具自校准的**预期输出文本**）；`go test ./...` RC=0（**须 `-p=1` 串行**——并行在 Windows
+  内存紧张时有假红，本轮 pre-commit 两次撞上）。
+  **四套件零失败**：fulltest **306/0/26**（+4＝`show system pci` 两条 + `unlock` 两条）、
+  语义 **43/0/0**、lifecycle **39/0/4**、pty **10/10**。
+  ⚠️ **套件前置两条（本轮实测入册）**：① **1G 池必须真的可用**（`hugepagesz=1G hugepages≥2`
+  且重启过）——套件 phase2 声明 1G=2 但**不重启**，池为 0 页时 cli-vm 起不来（本轮 4 条红即此因；
+  新加的 BUG-25 预检会**正确**拒绝并给出中文量差，判读失败先看它）；② 现场若留着别的交换机的
+  `dhcp-server`，语义夹具的 `dhcp-relay` 会被产品的**正确校验**拒绝（跨交换机中继/服务器互斥）。
+  证据 `docs/evidence/v3-round46-v3029-report-fix-batch.txt`。
+
 ## 验证与口径纪律（决策 #481；对所有会话生效）
 
 - **口径红线：凡含「可分配 / 可用 / 空闲 / 剩余」字样的读数，必须扣掉全部在用者**——
