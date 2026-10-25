@@ -258,6 +258,12 @@ vsw_ports_parse() {
 }
 # <vs-name> → 产品读视图里的成员口（调 CLI；解析在 vsw_ports_parse，便于自校准）。
 vsw_readview_ports() { vsw_ports_parse "$(cli "show virtual-switches $1 ports")"; }
+# <vs-name> → 该交换机是否启用了产品内置 DHCP server（决定 VPP 的 BD 里是否会出现产品自持的
+# L2 tap）。S8 的对照基准要据此排除那些 tap——读视图不列它们是有意为之（决策 #359）。
+# 事实源与 S15 同源（`show configuration | display set` 反推的 committed 视图）。
+vs_has_dhcp_server() {
+  cli "show configuration | display set" 2>/dev/null | grep -qE "^set virtual-switches $1 dhcp-server "
+}
 # <空格分隔的 rx 采样值> → 「增长周期数」（相邻采样增长记 1 次）。纯函数，供自校准抽取：
 #   `10 12 12 15` → 2；全 0 → 0；单值 → 0；非数字按 0 容错。把「一瞬」的比对换成「一段时间」的
 #   计数——fixture guest beat 在 ping 超时时降为 ~3s/发，单次 3s 窗口会整窗跨零（决策 #343 / R115-1）。
@@ -643,6 +649,19 @@ for t in $(cli_bdnames); do
   bid=$(vpp_bd_id_of_tag "$t")                             # BD-ID：成员表查询用它（两者不同！）
   rv=$(vsw_readview_ports "$t" | tr '\n' ' '); rv=${rv% }
   vp=$(vpp_bd_members "$bid" | tr '\n' ' '); vp=${vp% }
+  # 排除**产品自持的内部口**：内置 DHCP server 的 L2 tap（决策 #359）由产品按 sw_if_index
+  # 过滤在读视图之外——那是实现细节，不是「用户的交换机成员」，读视图不列它是对的。
+  # 判据取「本交换机配了 dhcp-server 且 VPP 侧名字形如 tap<N>」：两者同时成立才排除，
+  # 否则照旧逐条比对（避免把真实的漏成员借口排除掉）。
+  # 由来（v3.0.30 round46）：v3.0.29 语义套件 43/0/0，是因为当时现场没有启用 dhcp-server；
+  # 本轮夹具启用了它 ⇒ VPP 的 BD 里多出 tap0，而读视图（正确地）不列它 ⇒ S8 报假红。
+  if vs_has_dhcp_server "$t"; then
+    vp_filtered=""
+    for m in $vp; do
+      case "$m" in tap[0-9]*) echo "      （跳过产品内置 DHCP tap：$m——读视图有意不列它）";; *) vp_filtered="$vp_filtered $m";; esac
+    done
+    vp=${vp_filtered# }
+  fi
   miss=""
   for m in $vp; do case " $rv " in *" $m "*) ;; *) miss="$miss $m";; esac; done
   echo "    交换机 $t（bd-id=$bid index=$i）"

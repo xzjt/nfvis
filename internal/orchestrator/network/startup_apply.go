@@ -137,6 +137,10 @@ func (a *Applier) Apply(ctx context.Context, cfg *model.Config) (string, error) 
 // startup.conf 的 dpdk dev 段只由 `vpp.dpdk.per-dev` 生成，故未声明的口不会出现在新文件里，
 // 数据面重启后即从 VPP 消失——真机上「掉口」正是这么发生的（手写播种被重生成覆盖）。
 // 这是配置的应有之义（声明式），但操作者必须被告知，否则是静默的功能损失。
+//
+// v3.0.30：记录里**口名未知**的设备（旧格式的 BDF→BDF 遗留）单独一行如实报出，且不给
+// `set vpp dpdk dev <BDF>` 这种无法执行的建议（接口名校验不允许冒号，真机实测）——
+// 只给能补齐口名的路径（先交还内核让它重新有 netdev，再按 PCI 接管）。
 func (a *Applier) warnDroppedPorts(cfg *model.Config, report func(string, ...any)) {
 	if a.Bindings == nil {
 		return
@@ -153,12 +157,17 @@ func (a *Applier) warnDroppedPorts(cfg *model.Config, report func(string, ...any
 			dropped = append(dropped, ifname)
 		}
 	}
-	if len(dropped) == 0 {
-		return
+	if len(dropped) > 0 {
+		sort.Strings(dropped)
+		report("以下已由 DPDK 接管的物理口未在配置中声明，重启数据面后将不再出现在数据面："+
+			"%s；如需保留，请先 set vpp dpdk dev <口> 并提交", strings.Join(dropped, "、"))
 	}
-	sort.Strings(dropped)
-	report("以下已由 DPDK 接管的物理口未在配置中声明，重启数据面后将不再出现在数据面："+
-		"%s；如需保留，请先 set vpp dpdk dev <口> 并提交", strings.Join(dropped, "、"))
+	if unnamed := a.Bindings.UnnamedPCIs(); len(unnamed) > 0 {
+		report("以下 PCI 设备已由 DPDK 接管，但绑定记录里没有口名（旧版记录或按 PCI 地址接管）："+
+			"%s。它们无法按名字声明，重启数据面后不会出现；若要按口名给数据面用，先交还内核让它重新"+
+			"拿到网卡名、再按 PCI 接管以补齐记录（request interfaces <BDF> unbind-dpdk --yes → "+
+			"request interfaces <BDF> bind-dpdk --yes）", strings.Join(unnamed, "、"))
+	}
 }
 
 // systemctlRestarter 经 systemctl 重启 VPP（M3-P0：VPP 有意不自启，由 nfvisd/手工管理）。

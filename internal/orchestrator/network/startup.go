@@ -290,14 +290,25 @@ func dpdkStanza(b *strings.Builder, dpdk *model.VppDPDK, pciOf PCIResolver, warn
 // skippedDPDKDevWarning 一条被跳过的单网卡覆盖的说明。
 //
 // 必须同时给出三件事，否则操作者无从下手：**哪个口**、**为什么**（解析原文）、
-// **两条可照做的出路**——重新接管（口还在、只是不在 DPDK 手里）或删掉这条声明
-// （口已不存在/不再要给数据面）。
+// **两条真能走通的出路**。
+//
+// v3.0.30 真机更正：此前的出路一写的是「`request interfaces <口名> bind-dpdk --yes`」——
+// 而这个现场恰恰是**口已在内核里没有 netdev**，按口名 bind 必然失败
+// （`接口 X 无 PCI 设备（DPDK 已接管的网卡在内核中无 netdev，请改用 PCI 地址）`），
+// 是条死路。另一条「改用 `set vpp dpdk dev <BDF>`」同样走不通：接口名校验不允许冒号，
+// 而 `vpp dpdk dev <BDF>` 又要求该值已在 interfaces 里声明（真机两条都验证过）。
+//
+// 故现在给的两条是实测可走通的：按 **PCI 地址**重新接管（会补齐「口名 → PCI」记录，
+// 见 DPDKBinder.learnBindName），或删掉这条声明（该口若仍绑在 DPDK 驱动上，按 PCI 交还内核）。
 func skippedDPDKDevWarning(ifname string, cause error) string {
 	return fmt.Sprintf("配置中的 vpp dpdk dev %s 未能解析 PCI 地址（%v），已从 startup.conf 中跳过："+
-		"该口不会出现在数据面。如仍需给 VPP 用，请重新接管后重启数据面"+
-		"（request interfaces %s bind-dpdk --yes 然后 request vpp restart）；"+
-		"否则删除该声明（delete vpp dpdk dev %s）以免每次生成都跳过。",
-		ifname, cause, ifname, ifname)
+		"该口不会出现在数据面。两条可照做的出路。出路一：若这个口仍要给数据面用——按 PCI 地址重新接管"+
+		"（先 `show system pci` 核对该口的 BDF，再 `request interfaces <BDF> bind-dpdk --yes`，"+
+		"成功后重跑 `request vpp restart`；按 PCI 接管会记下口名，此后按口名声明的这条就能解析）。"+
+		"出路二：若不再给数据面用——删除该声明（`delete vpp dpdk dev %s`）；该口若仍绑在 DPDK 驱动上"+
+		"（内核里没有它），按 PCI 交还内核：`request interfaces <BDF> unbind-dpdk --yes`。"+
+		"注意：按口名 `bind-dpdk` 在这种现场走不通（内核无 netdev，只能按 PCI 定位）。",
+		ifname, cause, ifname)
 }
 
 // writeDevOptions 只输出非零项，实现「单网卡覆盖项缺省回落全局默认」。

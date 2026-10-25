@@ -147,6 +147,37 @@ func (b *DPDKBinder) PCIAddrOf(ifnameOrPCI string) (string, error) {
 	return filepath.Base(target), nil
 }
 
+// learnBindName 在**绑定前**记下「口名 → PCI」（v3.0.30 四套件复跑的死锁）。
+//
+// 为什么必须在绑定前：一旦设备进了 vfio-pci，内核里就没有 netdev 了
+// （/sys/class/net/<if> 消失），`/sys/bus/pci/devices/<pci>/net/` 也空——**任何**来源都
+// 问不到这个名字。绑定这一刻是最后一次机会，错过就永久丢失，此后：
+//   - 按口名解析不到 PCI ⇒ startup.conf 跳过该死声明（口不进数据面）；
+//   - 告警里的「重新 bind-dpdk」在无 netdev 时也走不通（`PCIAddrOf` 靠记录，而记录里
+//     只有 PCI→PCI）——操作者被卡死。
+//
+// 按 PCI 地址接管（`request interfaces 0000:0b:00.0 bind-dpdk`）时入参不是名字，故这里
+// 从 sysfs 反查该设备当前的 netdev 名（KernelIfaceOfPCIIn）——这就是那个「口名」。
+//
+// 记录失败不阻断绑定（与 #100/#464 同口径）：只让后续生成退回「跳过 + 具名告警」。
+func (b *DPDKBinder) learnBindName(ifname, pci string) {
+	if b.Bindings == nil {
+		return
+	}
+	name := strings.TrimSpace(ifname)
+	if IsPCIAddr(name) {
+		name = KernelIfaceOfPCIIn(b.root(), pci)
+	}
+	if name == "" || IsPCIAddr(name) {
+		return // 内核里已没有该口（已接管/未插卡）：口名无从得知，不编造
+	}
+	if err := b.Bindings.Set(name, pci); err != nil {
+		b.logf("警告：记录 %s → %s 的 DPDK 绑定关系失败：%v（重启数据面后该声明可能解析不到 PCI）", name, pci, err)
+		return
+	}
+	b.logf("已记录 %s → %s（DPDK 绑定关系；数据面重启按它解析 PCI）", name, pci)
+}
+
 // normPCI 补全 4 位域前缀（内核 sysfs 路径用完整域）。
 func normPCI(pci string) string {
 	if strings.Count(pci, ":") == 2 {
@@ -188,6 +219,10 @@ func (b *DPDKBinder) Bind(ctx context.Context, ifname, driver string) (string, e
 	if err != nil {
 		return "", err
 	}
+	// v3.0.30：在**任何 sysfs 写之前**记下口名 → PCI。设备一旦进 vfio-pci，内核里就没有
+	// netdev、`/sys/bus/pci/devices/<pci>/net/` 也空——这是最后一次问得到这个名字的时刻
+	// （见 learnBindName）。幂等路径也走一次（无 netdev 时是空操作）。
+	b.learnBindName(ifname, pci)
 	if cur == driver {
 		return pci, nil // 已就位，幂等
 	}

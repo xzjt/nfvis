@@ -12,6 +12,21 @@ package network
 //
 // 写失败不算致命：绑定动作本身已经发生，记录失败只影响后续的 startup.conf 生成，
 // 故调用方按告警处理（见 cmd/nfvisd 的装配）。
+//
+// 目录版本 2（v3.0.30 四套件复跑的死锁）：旧文件是**单表** `{<口名或 PCI>: <PCI>}`——
+// 按 PCI 地址接管（`request interfaces 0000:0b:00.0 bind-dpdk`）时它只记下 `PCI → PCI`，
+// 「口名 → PCI」这一维**在绑定时就丢了**。此后口在内核里没有 netdev、记录里又没有口名，
+// `vpp dpdk dev <口名>` 永远解析不到 PCI 而被跳过（口不在数据面），而告警给的「重新
+// bind-dpdk」在无 netdev 时也走不通——操作者被卡死，只能清空整族声明或手改配置库。
+//
+// 故记录改为**两个方向各自成表**：
+//
+//	ifname_to_pci  口名 → PCI   （生成 startup.conf 时的回退来源，核心）
+//	pci_to_ifname  PCI → 口名   （按 PCI 操作时的反查，如管理口守卫/解绑）
+//	pci_only       已知已接管但口名未知的 PCI（旧格式遗留，不猜名字，只如实保留）
+//
+// 旧格式仍可读（只有 `{k:v}` 平表）：值是 PCI、键能归一成 BDF 的条目进 pci_only
+// （口名未知），其余进 ifname_to_pci。**不报错、不编造口名**，向后兼容。
 
 import (
 	"encoding/json"
@@ -19,6 +34,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -26,16 +42,37 @@ import (
 // DefaultBindingsPath DPDK 绑定记录缺省路径。
 const DefaultBindingsPath = "/var/lib/nfvis/dpdk-bindings.json"
 
-// Bindings 口名 → PCI 地址的持久记录（并发安全；首次访问时读盘）。
+// bindingsFormatV2 当前落盘格式版本（1/缺省 = 旧平表）。
+const bindingsFormatV2 = 2
+
+// bindingsDoc 落盘结构（v2）。字段名刻意用蛇形，便于运维直接读。
+type bindingsDoc struct {
+	Format      int               `json:"format"`
+	IfnameToPCI map[string]string `json:"ifname_to_pci"`
+	PCIToIfname map[string]string `json:"pci_to_ifname"`
+	// PCIOnly 已知已接管、但口名未知的 PCI（旧格式遗留或按 PCI 接管且内核已无 netdev）。
+	// 只作诊断/回读保留，**不**用来猜口名。
+	PCIOnly []string `json:"pci_only,omitempty"`
+}
+
+// Bindings 口名 ↔ PCI 地址的持久记录（并发安全；首次访问时读盘）。
 type Bindings struct {
 	Path      string
 	ReadFile  func(string) ([]byte, error)
 	WriteFile func(string, []byte) error
 
-	mu     sync.Mutex
-	m      map[string]string
-	loaded bool
+	mu        sync.Mutex
+	nameToPCI map[string]string // 口名 → PCI
+	pciToName map[string]string // 归一 PCI（小写定宽） → 口名
+	pciOnly   map[string]bool   // 归一 PCI → 已知已接管但口名未知
+	loaded    bool
 }
+
+// normBindKey PCI 地址的**索引键**：归一（补域前缀）后转小写。
+//
+// 大小写不敏感是既有行为（`IfaceOfPCI("0000:1A:00.0")` 要能命中 `0000:1a:00.0`），
+// 而 sysfs 目录名恒小写，故索引统一小写。
+func normBindKey(pci string) string { return strings.ToLower(normPCI(strings.TrimSpace(pci))) }
 
 // NewBindings 构造（path 空取缺省）。
 func NewBindings(path string) *Bindings {
@@ -65,7 +102,7 @@ func (b *Bindings) load() error {
 		return nil
 	}
 	b.loaded = true
-	b.m = map[string]string{}
+	b.resetLocked()
 	raw, err := b.read(b.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -76,12 +113,116 @@ func (b *Bindings) load() error {
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return nil
 	}
-	return json.Unmarshal(raw, &b.m)
+	return b.decodeLocked(raw)
+}
+
+// resetLocked 清空内存表（只在 load 时调用）。
+func (b *Bindings) resetLocked() {
+	b.nameToPCI = map[string]string{}
+	b.pciToName = map[string]string{}
+	b.pciOnly = map[string]bool{}
+}
+
+// decodeLocked 解析落盘内容：先按 v2 试，不是 v2 就按旧平表读（向后兼容）。
+func (b *Bindings) decodeLocked(raw []byte) error {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return err
+	}
+	if f, ok := probe["format"]; ok {
+		var ver int
+		if json.Unmarshal(f, &ver) == nil && ver >= bindingsFormatV2 {
+			var doc bindingsDoc
+			if err := json.Unmarshal(raw, &doc); err != nil {
+				return err
+			}
+			for name, pci := range doc.IfnameToPCI {
+				b.recordLocked(name, pci)
+			}
+			// 正向表是**唯一真源**；反向表只是索引的落盘副本，读回时按正向表重建，
+			// 不从它反推正向值（否则会因归一化把原始取值改写）。
+			for _, pci := range doc.PCIOnly {
+				b.addPCISeenLocked(pci)
+			}
+			return nil
+		}
+	}
+	// 旧格式：扁平 {<口名或 PCI>: <PCI>}。键能归一成 BDF 的条目**口名未知**
+	// （按 PCI 地址绑定的形态：只有 PCI→PCI），其余才是真正的口名映射。
+	var legacy map[string]string
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		return err
+	}
+	for k, v := range legacy {
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" || v == "" {
+			continue
+		}
+		if IsPCIAddr(k) {
+			b.addPCISeenLocked(v)
+			continue
+		}
+		b.recordLocked(k, v)
+	}
+	return nil
+}
+
+// recordLocked 记一条「口名 → PCI」（两侧索引同步；BDF 形态的"口名"不当作名字）。
+func (b *Bindings) recordLocked(ifname, pci string) {
+	ifname, pci = strings.TrimSpace(ifname), strings.TrimSpace(pci)
+	if ifname == "" || pci == "" {
+		return
+	}
+	if IsPCIAddr(ifname) {
+		// 按 PCI 地址接管且内核已无 netdev：只知道设备，不知道口名——不编造。
+		b.addPCISeenLocked(pci)
+		return
+	}
+	if old, ok := b.nameToPCI[ifname]; ok && !strings.EqualFold(old, pci) {
+		// 同一口换了设备（换槽位/换卡）：旧的反向索引指向它时要一并摘掉，否则按 PCI 反查会答错口名。
+		if n, ok := b.pciToName[normBindKey(old)]; ok && n == ifname {
+			delete(b.pciToName, normBindKey(old))
+		}
+	}
+	b.nameToPCI[ifname] = pci
+	b.pciToName[normBindKey(pci)] = ifname
+	delete(b.pciOnly, normBindKey(pci))
+}
+
+// addPCISeenLocked 记「该 PCI 已被接管」，但口名未知（有名字时以名字为准，不覆盖）。
+func (b *Bindings) addPCISeenLocked(pci string) {
+	pci = strings.TrimSpace(pci)
+	if pci == "" {
+		return
+	}
+	norm := normBindKey(pci)
+	if _, ok := b.pciToName[norm]; ok {
+		return
+	}
+	if b.pciOnly[norm] {
+		return
+	}
+	b.pciOnly[norm] = true
 }
 
 // flush 落盘（有变更时调用）。
 func (b *Bindings) flush() error {
-	raw, err := json.MarshalIndent(b.m, "", "  ")
+	doc := bindingsDoc{
+		Format:      bindingsFormatV2,
+		IfnameToPCI: make(map[string]string, len(b.nameToPCI)),
+		PCIToIfname: make(map[string]string, len(b.pciToName)),
+	}
+	for k, v := range b.nameToPCI {
+		doc.IfnameToPCI[k] = v
+	}
+	for k, v := range b.pciToName {
+		doc.PCIToIfname[k] = v
+	}
+	for pci := range b.pciOnly {
+		doc.PCIOnly = append(doc.PCIOnly, pci)
+	}
+	sort.Strings(doc.PCIOnly)
+	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -94,17 +235,44 @@ func (b *Bindings) flush() error {
 }
 
 // Get 查询口名对应的 PCI。
+//
+// 兼容旧行为：入参本身就是**已知的已接管 PCI** 时返回它自己（旧平表里那条 PCI→PCI
+// 记录的含义）；其余情况一律以「口名 → PCI」为准，不猜。
 func (b *Bindings) Get(ifname string) (string, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.load(); err != nil {
 		return "", false
 	}
-	pci, ok := b.m[strings.TrimSpace(ifname)]
-	return pci, ok && pci != ""
+	k := strings.TrimSpace(ifname)
+	if pci, ok := b.nameToPCI[k]; ok && pci != "" {
+		return pci, true
+	}
+	if IsPCIAddr(k) && b.pciOnly[normBindKey(k)] {
+		return k, true
+	}
+	return "", false
+}
+
+// NameOfPCI 按 PCI 反查口名（口名未知时 ok=false，不编造）。
+func (b *Bindings) NameOfPCI(pci string) (string, bool) {
+	pci = strings.TrimSpace(pci)
+	if pci == "" {
+		return "", false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.load(); err != nil {
+		return "", false
+	}
+	name, ok := b.pciToName[normBindKey(pci)]
+	return name, ok && name != ""
 }
 
 // Set 记录口名 → PCI（绑定成功后调用）。
+//
+// ifname 是 **PCI 地址**时（按 PCI 接管的形态）只登记「该设备已被接管」，口名未知——
+// 口名由 `DPDKBinder.Bind` 在**绑定前**从内核读出来另记一条（见 learnBindName）。
 func (b *Bindings) Set(ifname, pci string) error {
 	ifname, pci = strings.TrimSpace(ifname), strings.TrimSpace(pci)
 	if ifname == "" || pci == "" {
@@ -115,17 +283,42 @@ func (b *Bindings) Set(ifname, pci string) error {
 	if err := b.load(); err != nil {
 		return err
 	}
-	if b.m[ifname] == pci {
+	before := b.signatureLocked()
+	b.recordLocked(ifname, pci)
+	if b.signatureLocked() == before {
 		return nil
 	}
-	b.m[ifname] = pci
 	return b.flush()
+}
+
+// signatureLocked 记录内容指纹（判「有没有变化」，避免每次 Set 都重写文件）。
+func (b *Bindings) signatureLocked() string {
+	var sb strings.Builder
+	names := make([]string, 0, len(b.nameToPCI))
+	for k := range b.nameToPCI {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		sb.WriteString(k)
+		sb.WriteByte('=')
+		sb.WriteString(b.nameToPCI[k])
+		sb.WriteByte(';')
+	}
+	only := make([]string, 0, len(b.pciOnly))
+	for k := range b.pciOnly {
+		only = append(only, k)
+	}
+	sort.Strings(only)
+	sb.WriteString("|")
+	sb.WriteString(strings.Join(only, ","))
+	return sb.String()
 }
 
 // DeleteByPCI 按 PCI 删除记录（解绑成功后调用）。
 //
 // 按 PCI 而非口名：解绑时操作者给的多半是 **PCI 地址**（netdev 已消失，只能按 PCI 定位），
-// 而记录是以口名为键的。
+// 而记录是以口名为键的。两侧索引与该设备的 pci_only 条目一并清掉。
 func (b *Bindings) DeleteByPCI(pci string) error {
 	pci = strings.TrimSpace(pci)
 	if pci == "" {
@@ -136,12 +329,21 @@ func (b *Bindings) DeleteByPCI(pci string) error {
 	if err := b.load(); err != nil {
 		return err
 	}
+	norm := normBindKey(pci)
 	changed := false
-	for name, p := range b.m {
-		if strings.EqualFold(p, pci) {
-			delete(b.m, name)
+	for name, p := range b.nameToPCI {
+		if strings.EqualFold(p, pci) || normBindKey(p) == norm {
+			delete(b.nameToPCI, name)
 			changed = true
 		}
+	}
+	if _, ok := b.pciToName[norm]; ok {
+		delete(b.pciToName, norm)
+		changed = true
+	}
+	if b.pciOnly[norm] {
+		delete(b.pciOnly, norm)
+		changed = true
 	}
 	if !changed {
 		return nil
@@ -149,17 +351,35 @@ func (b *Bindings) DeleteByPCI(pci string) error {
 	return b.flush()
 }
 
-// All 返回记录快照（诊断与「掉口」告警用）。
+// All 返回**口名 → PCI** 快照（诊断与「掉口」告警用）。
+//
+// 只含口名可解的条目：pci_only 里的设备口名未知，把它当「口」报给操作者只会得到
+// 一句无法照做的提示（`set vpp dpdk dev 0000:0b:00.0` 过不了接口名校验）。
 func (b *Bindings) All() map[string]string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.load(); err != nil {
 		return nil
 	}
-	out := make(map[string]string, len(b.m))
-	for k, v := range b.m {
+	out := make(map[string]string, len(b.nameToPCI))
+	for k, v := range b.nameToPCI {
 		out[k] = v
 	}
+	return out
+}
+
+// UnnamedPCIs 返回「已知已接管但口名未知」的 PCI（归一地址，已排序）。
+func (b *Bindings) UnnamedPCIs() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.load(); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(b.pciOnly))
+	for pci := range b.pciOnly {
+		out = append(out, pci)
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -190,6 +410,12 @@ func (b *Bindings) ImportStartupConf(path string) (int, error) {
 	}
 	text := stripConfComments(string(raw))
 	n := 0
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.load(); err != nil {
+		return 0, err
+	}
+	before := b.signatureLocked()
 	for _, m := range devStanzaRe.FindAllStringSubmatch(text, -1) {
 		pci := strings.TrimSpace(m[1])
 		if !IsPCIAddr(pci) {
@@ -200,34 +426,19 @@ func (b *Bindings) ImportStartupConf(path string) (int, error) {
 			continue
 		}
 		ifname := strings.TrimSpace(nm[1])
-		if ifname == "" {
+		if ifname == "" || IsPCIAddr(ifname) {
 			continue
 		}
-		if b.setIfAbsent(ifname, normPCI(pci)) {
-			n++
+		if _, ok := b.nameToPCI[ifname]; ok {
+			continue
 		}
+		b.recordLocked(ifname, normPCI(pci))
+		n++
 	}
-	if n == 0 {
+	if n == 0 || b.signatureLocked() == before {
 		return 0, nil
 	}
-	b.mu.Lock()
-	err = b.flush()
-	b.mu.Unlock()
-	return n, err
-}
-
-// setIfAbsent 记录映射但**不落盘**（由调用方统一 flush）；返回是否新增。
-func (b *Bindings) setIfAbsent(ifname, pci string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if err := b.load(); err != nil {
-		return false
-	}
-	if _, ok := b.m[ifname]; ok {
-		return false
-	}
-	b.m[ifname] = pci
-	return true
+	return n, b.flush()
 }
 
 // stripConfComments 去掉 startup.conf 的行注释（`#` 起）。
