@@ -52,7 +52,14 @@ type SoftwareResult struct {
 	Package  string `json:"package,omitempty"`
 	Output   string `json:"output,omitempty"`
 	// OK 本次动作是否落定为成功（修 BUG-16：结论要能在连接断开后仍被读到）。
-	OK bool `json:"ok,omitempty"`
+	//
+	// 修 BUG-23（v3.0.29 外部测试报告）：**不得带 omitempty**。结论文件是对外产物——
+	// CLI 重连后读它判成败，外部脚本也直接解析它。带 omitempty 时失败态（false 是零值）
+	// 会**没有 `ok` 键**，于是 `jq '.ok == false'` 得到 null、Go 的 `*bool` 得到 nil：
+	// 「没有这个键」被读成「没这个信息」而不是「不是成功」。成功写 `"ok":true`、失败无键的
+	// 不对称结构，是比错值更难发现的误判来源（读口靠 reason/status 仍能判对，所以产品
+	// 自身不会报错，只有外部脚本会静静走错分支）。成败两个方向的键集合必须一致。
+	OK bool `json:"ok"`
 	// Status 复核时的 dpkg 状态行（如 `install ok installed`；取不到则为空）。
 	//
 	// 修 BUG-17：这里必须是**观测到的**那一行，不允许再写字面量。曾经这里恒写

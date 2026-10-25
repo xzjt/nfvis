@@ -693,6 +693,13 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 	}
 	if !configEq(committed.ResourcePools, newCfg.ResourcePools) {
 		res.Warnings = append(res.Warnings, "警告: resource-pools 变更需 reboot 生效")
+		// 修 BUG-25（v3.0.29 外部测试报告）：光说「需 reboot 生效」不够——重启后池建好了，
+		// 若本机没有该页尺寸的 hugetlbfs 挂载点，libvirt 仍起不了 VM，报的是英文原文
+		// `Unable to find any usable hugetlbfs mount for 2048 KiB`。故在提交期把**挂载点覆盖**
+		// 一并核对并点名（只提示、不阻断：fstab 会在重启后把它挂起来，配置本身是对的）。
+		// 只在 resource-pools 变更时判（与上一行同域）：每提交都判会让「本就没挂」的老现场
+		// 在无关提交上反复刷同一条警告。
+		res.Warnings = append(res.Warnings, hugepageMountWarnings(newCfg.ResourcePools)...)
 	}
 	// 删掉被 NAT 用过的 L3 交换机：VPP 在该表上留 `nat44-ei-hi` 引用，只有数据面重启才释放
 	// （round86 真机 R86-4/R86-10 实证）。提交本身按「延后收敛」口径成功（决策 #192），但

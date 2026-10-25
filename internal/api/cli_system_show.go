@@ -54,7 +54,8 @@ func (x *cliExecutor) execShowSystemAPI(user, class string, t []string) string {
 
 func (x *cliExecutor) execShowSystemDiag(t []string) string {
 	if len(t) == 0 {
-		return "%% 语法: show system <uptime|cpu|memory|storage|hugepages|metrics|core-dumps|tech-support>\n"
+		// 提示串与本函数实际接受的子命令同源（本轮补上此前漏列的 software，并加入新增的 pci）。
+		return "%% 语法: show system <uptime|cpu|memory|storage|hugepages|metrics|kernel|hardware|firewall|pci|software|core-dumps|tech-support>\n"
 	}
 	switch t[0] {
 	case "tech-support", "core-dumps":
@@ -84,8 +85,12 @@ func (x *cliExecutor) execShowSystemDiag(t []string) string {
 	case "firewall":
 		// 决策 #388：主机防火墙读视图（与 GET /system/firewall 同源）。
 		return x.renderSystemFirewall()
+	case "pci":
+		// BUG-24：PCI 设备 / IOMMU 组 / 驱动 / 直通可用性清单（只读；事实源＝sysfs）。
+		// 无 REST 端点（CLI 侧渲染，理由见 cli_rest_coverage_test.go 的 cliRESTExceptions 登记）。
+		return x.renderSystemPCI(t[1:])
 	}
-	return fmt.Sprintf("%% 无效命令: show system %s（可用：uptime|cpu|memory|storage|hugepages|metrics history|kernel|hardware|firewall|core-dumps|tech-support）\n", strings.Join(t, " "))
+	return fmt.Sprintf("%% 无效命令: show system %s（可用：uptime|cpu|memory|storage|hugepages|metrics history|kernel|hardware|firewall|pci|core-dumps|tech-support）\n", strings.Join(t, " "))
 }
 
 func (x *cliExecutor) renderDiag(t []string) string {

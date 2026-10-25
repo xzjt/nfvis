@@ -665,6 +665,7 @@ NFViS 初始化向导（wizard）——规划资源池与内核基线（Enter �
 commit 成功 (revision 3)
 警告: vpp 变更需 request vpp restart（或整机 reboot）后生效
 警告: resource-pools 变更需 reboot 生效
+警告: 大页 1G/2M 尚无对应的 hugetlbfs 挂载点（当前挂载表 /proc/mounts 里没有该 pagesize）——重启后由产品按 fstab 重建（request system kernel apply 写入基线 → request system reboot）；在此之前该池的 VNF 起不来（libvirt 报 unable to find any usable hugetlbfs mount）
 警告: 内核启动基线与配置不一致，需写入 GRUB 并重启生效：
   - 大页 1G：期望 1，实际 0（cmdline 启动参数需生效并重启）
   - 大页 2M：期望 768，实际 0（cmdline 启动参数需生效并重启）
@@ -765,6 +766,11 @@ nfvis$ show system kernel                      # 三方对照（cmdline / 运行
 > 内存用的（libvirt 按 `pagesize=` 匹配挂载点）：**同时声明 1G 与 2M 池时，2M 后备的 VM 才起得来**
 > （改前只挂一个尺寸，2M 的 VM 报 `Unable to find any usable hugetlbfs mount for 2048 KiB`）。
 > **需重启生效**（`/dev` 为 devtmpfs，重启后由 systemd 挂载单元自动创建并挂载）。
+> **提交期就会核对挂载点**：`set resource-pools hugepages …` 提交时，若本机当前**没有**新声明页尺寸的
+> hugetlbfs 挂载点，提交输出会多一条点名告警（``警告: 大页 2M 尚无对应的 hugetlbfs 挂载点 … 重启后
+> 由产品按 fstab 重建（request system kernel apply 写入基线 → request system reboot）；在此之前该池的
+> VNF 起不来（libvirt 报 unable to find any usable hugetlbfs mount）``）。这是**提示、不阻断**（配置本身
+> 是对的，挂载点要重启后才出现）；挂载表读不到时如实说「无法核对」，不谎报通过。
 > 原因：VPP 的 deb 自带 `/etc/sysctl.d/80-vpp.conf`（`vm.nr_hugepages=1024`，注释写明是给 **2M**
 > 池留的），而该 sysctl 只作用于**默认尺寸**池——历史上产品默认为 1G 时它会落到 **1G** 池上，开机
 > 时按可用内存尽量分配，使 1G 池**大于**声明值（实测：声明 1 页、实际 3 页，`show system kernel`
@@ -1974,6 +1980,18 @@ nfvis$ request virtual-machine-functions fw-vm delete   # super-user；交互确
 > 非预期态，CLI 会以 `%%` 报出**域状态、libvirt 日志摘录与恢复建议**（常见处置：确认数据面在跑
 > `show vpp status` → `request vpp restart` → 再 `start`；REST 侧同一失败返回 500 且 `detail[]`
 > 带同样信息，控制台详情页也能看到）。启动正常时行为与耗时不变。
+>
+> **大页不足会在 `start` 之前就说清**：若该 VM 所需页尺寸的空闲大页不够（例如 1G 池空闲 1 页、
+> VM 需要 2 页），`start` 在**进入 libvirt 之前**就失败并给出中文量差——
+> 「大页不足：1G 池空闲 1 页，本 VM 需要 2 页（每页 1024MB × 2 = 2048MB）；请释放或扩大资源池
+> （`set resource-pools hugepages page-size 1G count <n>`，需 reboot 生效）…」，不再把 libvirt
+> 的英文原文（`Unable to find any usable hugetlbfs mount for …`）透给操作者，也不留半成品域。
+> 读不到内核实况时**不判**（不误拒合法启动）。
+>
+> **VM 没有 vNIC 时会明确提示**：`start` 仍会成功（无网卡的 VM 是合法形态），但 CLI 成功文案下方
+> 会多一行「注：本 VM 未声明任何 vNIC，将无网络连通性（guest 内的 cloud-init/DHCP 会持续重试）…
+> 如需网络，请先 `set virtual-machine-functions <n> interfaces nic0 …` 后重新 start」；REST 的
+> 202 响应多一个 `notes` 字段带同一句（有 vNIC 时不带该键，响应体与既往逐字一致）。
 >
 > **VPP 未运行时 `start`/`restart` 会秒级失败**：数据面不可用时（如 `systemctl stop vpp`、
 > 或连接不可达），启动在进入会阻塞的 vhost-user 准备**之前**就判定并立即返回 `%%`——明确告知

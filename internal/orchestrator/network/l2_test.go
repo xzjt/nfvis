@@ -27,8 +27,9 @@ type fakeL2 struct {
 	learn      map[uint32]uint32 // 决策 #337：bdID → 已下发的学习上限
 	calls      []string
 	subifs     []CreateSubifReq
-	err        error // 非 nil 时各方法返回该错误
-	namesErr   error // 非 nil 时 SwInterfaceNames 返回该错误（链路告警「查询失败不清警」单测）
+	vtrs       []VlanTagRewriteReq // 决策 #502：VTR 调用记录（当前期望零调用）
+	err        error               // 非 nil 时各方法返回该错误
+	namesErr   error               // 非 nil 时 SwInterfaceNames 返回该错误（链路告警「查询失败不清警」单测）
 }
 
 func newFakeL2() *fakeL2 {
@@ -170,7 +171,13 @@ func (f *fakeL2) DeleteSubif(swIfIndex uint32) error {
 	return nil
 }
 
-func (f *fakeL2) L2InterfaceVlanTagRewrite(VlanTagRewriteReq) error { return nil }
+// L2InterfaceVlanTagRewrite 记录 VTR 下发（决策 #502：本底座对虚拟口不支持 VTR，
+// 记录是为了让「万一日后有人改走 VTR 路线」在测试里可见；当前期望**零调用**）。
+func (f *fakeL2) L2InterfaceVlanTagRewrite(req VlanTagRewriteReq) error {
+	f.vtrs = append(f.vtrs, req)
+	f.calls = append(f.calls, fmt.Sprintf("vtr:%d=%d", req.SwIfIndex, req.Op))
+	return nil
+}
 
 func (f *fakeL2) MACTable(bdID uint32) ([]MACEntry, error) {
 	if f.err != nil {
@@ -267,6 +274,143 @@ func TestL2AccessVlanCreatesSubif(t *testing.T) {
 	}
 }
 
+// ---------- 决策 #502：access + 虚拟口（O-2） ----------
+//
+// 真机 round46（报告 docs/REPORT-v3.0.29.md §6.4 / O-2）现场：`set virtual-switches vs-data
+// vlan access 100` + 一个 vhost-user vNIC 后，VPP 的 BD 里**只有** `vh-vm1-nic0.100` 子接口，
+// 主接口 `vh-vm1-nic0` 不在 BD；VM 发的无 tag 帧落到主接口、无 BD 可去 ⇒ `null-node` 的
+// `blackholed packets` 12→49，且**无任何告警**。删掉 vlan access 后才恢复。
+//
+// 根因：access 被实现为「建 VLAN 子接口」（`outer-vlan 100` + one-tag，只匹配带 tag 的帧），
+// 这对物理口成立（对端交换机打 tag），对**虚拟口不成立**——guest/容器侧根本没有 tag。
+//
+// 修法：虚拟口 access 改为**父接口直接入 BD**（BD 内本就是无 tag 域，与物理口 access 子接口
+// 在 BD 内的形态一致）。VPP 的 L2 VLAN tag rewrite 路线在本底座不可用：`set interface l2
+// tag-rewrite <if> pop 1` 对 vh-vm1-nic0 / tap0 / bvi0 / vxlan_tunnel0 **一律**返回
+// `vlan tag rewrite is not compatible with interface`（l2vtr_configure 要求 hw_class 恰为
+// ethernet_hw_interface_class）。
+func TestL2AccessVlanVirtualPortAttachesParent(t *testing.T) {
+	f := newFakeL2()
+	f.ifaces["vh-vm1-nic0"] = 7
+	f.names[7] = SwIfInfo{Name: "vh-vm1-nic0"}
+	p := NewL2Provider(f)
+	vs := l2vs("vs-data", model.VSwitchPort{Seq: 0, Vnf: "vm1", VnfInterface: "nic0"})
+	vs.VlanAccess = 100
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("access vlan + vhost vNIC: %v", err)
+	}
+	bd := BDID("vs-data")
+	// 判据①（报告原文）：**主接口**必须在 BD 成员里——这是修复的核心。
+	if f.bridge[7] != bd {
+		t.Fatalf("vhost 主接口必须直接挂进 BD（修复前只有 .100 子接口，真机 blackholed）: %v", f.bridge)
+	}
+	// 判据②：不得再为虚拟口建 VLAN 子接口（guest 无 tag，子接口匹配不到任何帧）。
+	if len(f.subifs) != 0 {
+		t.Fatalf("虚拟口 access 不应建子接口: %+v", f.subifs)
+	}
+	if _, ok := f.nameIdx["vh-vm1-nic0.100"]; ok {
+		t.Fatalf("虚拟口不应出现 .100 子接口: %v", f.nameIdx)
+	}
+	// 判据③：VTR 零调用——本底座对虚拟口不支持（见上方注释的真机证据）。
+	if len(f.vtrs) != 0 {
+		t.Fatalf("本底座虚拟口不支持 l2 VTR，不应调用: %+v", f.vtrs)
+	}
+	// 挂接登记里必须包含父接口（AttachedIfaces 供 NAT inside 解析等）。
+	if got := p.AttachedIfaces("vs-data"); len(got) != 1 || got[0] != 7 {
+		t.Fatalf("AttachedIfaces 应只含父接口 7: %v", got)
+	}
+}
+
+// 容器 memif 走同一判据（虚拟口的共性：对端无 tag）。
+func TestL2AccessVlanMemifPortAttachesParent(t *testing.T) {
+	f := newFakeL2()
+	f.ifaces["mf-ct1-eth0"] = 9
+	f.names[9] = SwIfInfo{Name: "mf-ct1-eth0"}
+	p := NewL2Provider(f)
+	vs := l2vs("vs-data", model.VSwitchPort{Seq: 0, Container: "ct1", ContainerInterface: "eth0"})
+	vs.VlanAccess = 100
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("access vlan + memif: %v", err)
+	}
+	if f.bridge[9] != BDID("vs-data") {
+		t.Fatalf("memif 父接口必须直接挂进 BD: %v", f.bridge)
+	}
+	if len(f.subifs) != 0 {
+		t.Fatalf("memif 不应建子接口: %+v", f.subifs)
+	}
+}
+
+// 物理口的 access **保持**子接口（FR-NET-011 的真机验证路径，不得回归）。
+// 与上一个用例成对：同一 VlanAccess 值，两种端口形态走两条路径。
+func TestL2AccessVlanPhysicalPortKeepsSubif(t *testing.T) {
+	f := newFakeL2()
+	p := NewL2Provider(f)
+	vs := l2vs("vs-vlan", model.VSwitchPort{Seq: 0, Interface: "ens192"})
+	vs.VlanAccess = 100
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("物理口 access: %v", err)
+	}
+	if len(f.subifs) != 1 || f.subifs[0].ParentSwIfIndex != 1 {
+		t.Fatalf("物理口必须仍走子接口路径（FR-NET-011）: %+v", f.subifs)
+	}
+	if f.bridge[101] != BDID("vs-vlan") {
+		t.Fatalf("子接口应挂接 BD: %v", f.bridge)
+	}
+	// 物理口的**父接口**不入 BD（access 语义：只有带 tag 的帧进 BD）
+	if _, ok := f.bridge[1]; ok {
+		t.Fatalf("物理口 access 时父接口不应直接入 BD: %v", f.bridge)
+	}
+}
+
+// 升级路径：历史现场里虚拟口的 access 子接口还在（v3.0.29 及之前建的），
+// 收敛时必须把它**清理掉**，否则 BD 里长期留一个无人管理的 `vh-….100`。
+func TestL2AccessVlanVirtualPortDropsLegacySubif(t *testing.T) {
+	f := newFakeL2()
+	f.ifaces["vh-vm1-nic0"] = 7
+	f.names[7] = SwIfInfo{Name: "vh-vm1-nic0"}
+	// 造「修复前留下的子接口」：nameIdx + names 都在，且已挂在 BD 上。
+	f.nameIdx["vh-vm1-nic0.100"] = 55
+	f.names[55] = SwIfInfo{Name: "vh-vm1-nic0.100", OuterVlanID: 100}
+	p := NewL2Provider(f)
+	vs := l2vs("vs-data", model.VSwitchPort{Seq: 0, Vnf: "vm1", VnfInterface: "nic0"})
+	vs.VlanAccess = 100
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("收敛历史现场: %v", err)
+	}
+	if _, ok := f.names[55]; ok {
+		t.Fatalf("历史遗留的虚拟口 access 子接口应被清理（否则 BD 里长期挂无人管理的口）: %v", f.names)
+	}
+	if _, ok := f.nameIdx["vh-vm1-nic0.100"]; ok {
+		t.Fatalf("遗留子接口名应已消失: %v", f.nameIdx)
+	}
+	if f.bridge[7] != BDID("vs-data") {
+		t.Fatalf("父接口仍须挂进 BD: %v", f.bridge)
+	}
+}
+
+// trunk 路径不变（按 VID 建子接口 + native 挂父口），虚拟口与物理口同规则——
+// trunk 的语义就是「对端会打 tag」，虚拟口在 trunk 下带 tag 是用户显式声明的。
+func TestL2TrunkVlanVirtualPortUnchanged(t *testing.T) {
+	f := newFakeL2()
+	f.ifaces["vh-vm1-nic0"] = 7
+	f.names[7] = SwIfInfo{Name: "vh-vm1-nic0"}
+	p := NewL2Provider(f)
+	vs := l2vs("vs-trunk", model.VSwitchPort{Seq: 0, Vnf: "vm1", VnfInterface: "nic0",
+		TrunkVlans: []int{10, 20}, NativeVlan: 1})
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("虚拟口 trunk: %v", err)
+	}
+	if len(f.subifs) != 2 {
+		t.Fatalf("trunk 应为每个 tagged VID 建子接口: %+v", f.subifs)
+	}
+	if f.bridge[7] != BDID("vs-trunk") {
+		t.Fatalf("native 父接口应挂接: %v", f.bridge)
+	}
+	if len(f.vtrs) != 0 {
+		t.Fatalf("trunk 不应用 VTR: %+v", f.vtrs)
+	}
+}
+
 // R88-3 回归：BD 重放必须幂等——已有 access 子接口不得再建一次。
 //
 // 真机 round88 现场：先建好 vs-l2（access vlan 100，成员 ens224），之后把 vnf-a 的 vNIC
@@ -303,16 +447,16 @@ func TestL2AccessVlanSubifIdempotentOnReplay(t *testing.T) {
 	if _, ok := f.nameIdx["ens224.100"]; !ok {
 		t.Fatalf("ens224 的子接口应存在并可按名查到: %v", f.nameIdx)
 	}
-	if _, ok := f.nameIdx["vh-vnf-a-eth0.100"]; !ok {
-		t.Fatalf("新增端口的子接口应已创建: %v", f.nameIdx)
-	}
 	if f.bridge[101] != BDID("vs-vlan") {
 		t.Fatalf("子接口应仍挂接在 BD 上: %v", f.bridge)
 	}
-	// access VLAN 下端口是经其子接口挂接的（不是裸 vNIC）
-	subVnic := f.nameIdx["vh-vnf-a-eth0.100"]
-	if subVnic == 0 || f.bridge[subVnic] != BDID("vs-vlan") {
-		t.Fatalf("新增 vNIC 端口的子接口应挂接在 BD 上: %v（idx=%d）", f.bridge, subVnic)
+	// 决策 #502：**虚拟口**（vhost-user vNIC）的 access 不再建子接口——guest 侧无 tag，
+	// 建 `<vh>.100` 只会让帧落到不在 BD 的父接口上（真机 blackholed）。父接口必须直接入 BD。
+	if _, ok := f.nameIdx["vh-vnf-a-eth0.100"]; ok {
+		t.Fatalf("虚拟口不应再建 VLAN 子接口（决策 #502）: %v", f.nameIdx)
+	}
+	if f.bridge[7] != BDID("vs-vlan") {
+		t.Fatalf("新增 vNIC 的**父接口**应直接挂接在 BD 上: %v", f.bridge)
 	}
 }
 

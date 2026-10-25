@@ -277,7 +277,19 @@ func (s *Server) vmAction(w http.ResponseWriter, r *http.Request, name, action s
 	s.engine.Audit(user, "vm."+action, fmt.Sprintf("%s VM %s", action, name), "success")
 	// 状态词经 vnfActionState 显式映射（决策 #468）：stop 不再拼成 "stoping"。
 	s.publishVNFState("virtual-machine-functions", name, vnfActionState(action)) // M5-1 vnf-state-changed
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": vnfActionState(action), "name": name})
+	body := map[string]string{"status": vnfActionState(action), "name": name}
+	// O-1（v3.0.29 外部测试报告）：start 成功但该 VM 没声明 vNIC ⇒ 追加 notes 提示。
+	// **不阻断启动**（无网卡的 VM 是合法形态），且只在有提示时才加这个键——有 vNIC 时响应体
+	// 与既往逐字一致（既有守护 TestVMActionStartNormalShapeUnchanged 依赖这一点）。
+	// 与 CLI 共用同一判定（vmNoVNICHint），不两处各写一份。
+	if action == "start" {
+		if vm, found := findVM(cfg, name); found {
+			if hint := vmNoVNICHint(vm); hint != "" {
+				body["notes"] = hint
+			}
+		}
+	}
+	writeJSON(w, http.StatusAccepted, body)
 }
 
 // vmStateSafe 查询运行态，未装配/出错时返回空（列表仍可用，FR-CMP-011）。

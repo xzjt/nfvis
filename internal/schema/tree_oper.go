@@ -64,6 +64,14 @@ func OperRoot() *Node {
 				// 决策 #388：管理面主机防火墙读视图（配置 × 数据面实况 × 逐规则计数，
 				// 与 GET /system/firewall 同源）。写路径在配置模式（candidate→commit）。
 				K("firewall", "主机防火墙（管理面入向；默认策略/规则/逐规则计数/下发状态）"),
+				// 修 BUG-24：PCI 设备 / IOMMU 组 / 当前驱动 / 直通可用性清单（只读）。
+				// 存在理由：此前只有 `set virtual-machine-functions <n> pci-device <bdf>`，
+				// **没有任何命令能列出**可选 BDF、它们的 IOMMU 组或当前驱动——运维只能 ssh 进
+				// shell 跑 lspci，且无法判断某个 BDF 是否与无关设备同组（真机现场：group 7 里
+				// 还躺着 8 个 PCIe root port）。`detail` 追加每设备明细（class/enable/numa/同组 BDF）。
+				K("pci", "PCI 设备与 IOMMU 直通可用性（BDF/组/驱动）",
+					Opt(K("detail", "含每设备明细")),
+				),
 				K("core-dumps", "崩溃转储清单（VPP/QEMU/nfvisd）"),
 				K("tech-support", "诊断归档清单"),
 				// 修 BUG-16：最近一次升级/回退的**结论**（服务端在安装结束时落盘）。
@@ -366,9 +374,14 @@ func OperRoot() *Node {
 				Su(K("reboot", "重启系统")),
 				Su(K("shutdown", "关机")),
 				Su(K("poweroff", "断电")),
-				Su(K("configuration", "配置备份与恢复",
+				Su(K("configuration", "配置事务：备份/恢复与编辑锁释放",
 					K("backup", "导出 committed 配置归档", Opt(K("to", "目标路径", V("path", "路径")))),
 					K("restore", "导入归档为 candidate 并提交", PT("<path>", "path", "归档路径")),
+					// O-3（报告 v3.0.29 §7）：脏锁此前只能等 10 分钟或重启服务，读视图也不给照做路径。
+					// 不带 force 只释放本会话；带 force 释放全部（代价：持锁会话的未提交 candidate 被丢弃）。
+					K("unlock", "释放编辑锁（不带 force 只释放本会话）",
+						Opt(K("force", "强制释放全部编辑锁（会丢弃持锁会话未提交的 candidate）")),
+					),
 				)),
 				K("tech-support", "诊断归档",
 					K("generate", "生成诊断归档 tar.gz"),

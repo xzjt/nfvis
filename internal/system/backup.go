@@ -218,6 +218,14 @@ func (m *Manager) Path(name string) (string, error) {
 
 // Restore 从归档数据恢复：解析 → 以 candidate 提交（FR-OPS-005）。
 // 恢复后镜像文件本体不在归档内（FR-OPS-006），镜像清单仅作对照返回。
+//
+// 有意**不做**「未知字段」严格校验（BUG-22 只收紧 REST/CLI 的**用户输入**入口）：
+// 归档是产品的内部产物，由本机 Backup 生成、跨版本升级后由新版本读回。若这里改用
+// `DisallowUnknownFields`，旧版本归档里被后续版本删除/改名的字段会让**老备份无法恢复**——
+// 那是比「静默丢弃一个不认识的历史字段」严重得多的数据可用性回归（FR-OPS-005 的目标是能把
+// 配置拿回来，不是逐字段审计归档）。归档自身的完整性由 Format/ArchiveVersion 闸门与
+// checksum 口径保证；用户手写的 JSON 走 PUT /configuration/candidate 或 load override|merge，
+// 那两处是严格的（internal/api/configuration.go、cli_annotate.go）。
 func (m *Manager) Restore(ctx context.Context, data []byte, user string) (config.CommitResult, []images.Meta, error) {
 	var arch Archive
 	if err := json.Unmarshal(data, &arch); err != nil {

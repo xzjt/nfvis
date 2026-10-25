@@ -381,6 +381,15 @@ func (p *Provider) StartVM(ctx context.Context, name string) error {
 	if err := p.checkConsolePortForStart(name); err != nil {
 		return err
 	}
+	// 大页可用量前置判定（修 BUG-25）：空闲页不够时立即失败并给中文、可操作的量差，
+	// 不透传 libvirt/qemu 的英文原文（`Unable to find any usable hugetlbfs mount for …`）。
+	// 同样在 api.Start 之前——不产生半成品域、不必等 QEMU 起来才失败。
+	// 陈旧 paused 域除外：它的大页已被自己持有（销毁后回到池里），按此刻的空闲页判会误拒。
+	if !(exists && state == domPaused) {
+		if err := p.checkHugepagesForStart(name); err != nil {
+			return err
+		}
+	}
 	// 陈旧 paused 域（决策 #455）：paused 属活动态，幂等分支会直接返回、永远起不来——先销毁。
 	if exists && state == domPaused {
 		if err := p.api.Destroy(ctx, name); err != nil {
@@ -602,6 +611,14 @@ func (p *Provider) RestartVM(ctx context.Context, name string) error {
 	// telnet 控制台端口占用前置判定（决策 #485 复审）：与 start 同口径、同落点。
 	if err := p.checkConsolePortForStart(name); err != nil {
 		return err
+	}
+	// 大页可用量前置判定（修 BUG-25）：与 start 同口径、同落点（同一份「空闲页不够就别碰
+	// libvirt」的理由；运行中域的 restart 走上面的 ACPI 分支，不判——它不重新分配内存）。
+	// 陈旧 paused 域同样除外（与 start 一致：它的页已被自己持有，销毁后会回到池里）。
+	if !(exists && state == domPaused) {
+		if err := p.checkHugepagesForStart(name); err != nil {
+			return err
+		}
 	}
 	if exists && state == domPaused {
 		if err := p.api.Destroy(ctx, name); err != nil {

@@ -88,6 +88,10 @@ func resolveAnnotatePath(cur, path []string) ([]string, error) {
 }
 
 // cfgLoad load override|merge <file>（FR-CFG-008，JSON 配置导入）。
+//
+// BUG-22（round46）：此前这里是裸 `json.Unmarshal`——文件里写错字段名同样静默丢弃，且命令回
+// `[ok] load …`，与 REST 侧同一根因。校验与 REST 共用 `unknownConfigFieldMessage`（文案同源），
+// 位置在 `engine.Edit` 之前，因此失败不取锁、不动候选。
 func (x *cliExecutor) cfgLoad(user, source string, args []string) string {
 	if len(args) != 2 || (args[0] != "override" && args[0] != "merge") {
 		return "%% 语法: load override|merge <file>\n"
@@ -95,6 +99,9 @@ func (x *cliExecutor) cfgLoad(user, source string, args []string) string {
 	data, err := os.ReadFile(args[1])
 	if err != nil {
 		return "%% 读取文件失败: " + err.Error() + "\n"
+	}
+	if msg := unknownConfigFieldMessage(data); msg != "" {
+		return "%% " + msg + "\n"
 	}
 	var doc model.Config
 	if err := json.Unmarshal(data, &doc); err != nil {

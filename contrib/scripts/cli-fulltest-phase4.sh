@@ -64,6 +64,11 @@ run S4 "show capture"
 run S4 "request system tech-support generate"
 run S4 "show system tech-support"
 run S4 "request system configuration backup"
+# O-3（报告 v3.0.29 §7）：释放编辑锁。本套件在操作模式下执行、未持锁 ⇒ 应如实回「无持锁会话」，
+# 既不丢任何 candidate 也不改变现场（幂等、可反复跑）。带 force 同样无锁可释放，一并覆盖
+# 「force 在没有锁时不谎报成功」这条。
+run S4 "request system configuration unlock"
+run S4 "request system configuration unlock force"
 run S4 "request system ntp sync"
 run S4 "request system api tls regenerate"
 run S4 "request system ssh host-key regenerate"

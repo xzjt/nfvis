@@ -52,6 +52,17 @@ show system
   │                                                 #   存储不可用/无数据时如实说明，不编造（v1 不设告警码）
   ├─ kernel                                         # 内核启动基线三方对照（cmdline/运行实际/配置期望，FR-SYS-014）
   ├─ hardware                                       # 硬件健康：CPU 温度/风扇/电源（IPMI/Redfish/lm-sensors）、磁盘 SMART
+  ├─ pci [detail]                                   # PCI 设备与 IOMMU 直通可用性（修 BUG-24，R）：逐设备列
+  │                                                 #   BDF / 厂商:设备 ID / 类型 / IOMMU 组 / 组内设备数 /
+  │                                                 #   当前驱动 / 直通建议；`detail` 追加明细块
+  │                                                 #   （label/class/enable/numa_node/同组 BDF 列表）。
+  │                                                 #   事实源＝本机 sysfs（/sys/bus/pci/devices +
+  │                                                 #   /sys/kernel/iommu_groups，组号**反查**组目录）；
+  │                                                 #   直通建议只看「组是否存在」「组内是否含桥/root port」
+  │                                                 #   （class 06xx，直通需整组隔离），最终以 libvirt 报错为准；
+  │                                                 #   厂商/设备只显示 ID 形态（人类可读名称需 pci.ids，不打包）；
+  │                                                 #   PCI 目录不可读如实报「取不到 + 原因」，不谎报空清单
+  │                                                 #   无 REST 端点（CLI 侧渲染）
   ├─ firewall                                       # 主机防火墙（管理面入向）读视图（决策 #388，R）：
   │                                                 #   默认策略 / 规则表（含**逐规则 packets/bytes 计数**）/
   │                                                 #   保留项说明 / `applied` 与未收敛原因 / 计数口径；
@@ -328,6 +339,19 @@ request system
   ├─ configuration backup [to <path>] | restore <path>   # S；确认。to <path> 另存一份归档（0600）：
   │                                                 #   须绝对路径、目标不得已存在、父目录须已存在；
   │                                                 #   目标已存在即如实拒绝，不覆盖既有文件
+  ├─ configuration unlock [force]                   # S（O-3，报告 v3.0.29 §7）。释放编辑锁：
+  │                                                 #   不带 force：只释放**本会话**的锁（等价 discard + 释放；
+  │                                                 #     本会话没锁时如实说「未持有」并指向 force）；
+  │                                                 #   带 force：释放**全部**锁（含其它会话），写审计
+  │                                                 #     `config.unlock-force`；**代价必须点名**：持锁会话
+  │                                                 #     未提交的 candidate 会被丢弃，其后续配置操作需重新
+  │                                                 #     进入配置模式。此前脏锁只能等 10 分钟空闲超时或
+  │                                                 #     `systemctl restart nfvis`，读视图也不给照做路径。
+  │                                                 # 读视图：`show configuration sessions` 末尾追加可照做命令
+  │                                                 #   （super-user 见 force 形态；其他 class 只见非 force，
+  │                                                 #    并说明 force 需 super-user）。
+  │                                                 # API: DELETE /configuration/candidate（非 force 形态同义）；
+  │                                                 #   force 是跨会话抢救动作，REST 无对应形态（例外登记）
   ├─ tech-support generate                          # 生成诊断归档 tar.gz，CLI/API 下载
   │                                                 #   （归档里的配置是脱敏视图：口令哈希等已隐藏，
   │                                                 #    不能用于恢复；要可恢复的完整配置用 configuration backup）

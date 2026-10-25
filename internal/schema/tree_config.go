@@ -55,16 +55,24 @@ func ConfigPathTree() *Node {
 				VE("dataplane", "vpp|kernel", "vpp", "kernel")),
 			K("hostname", "主机名", V("string", "名称")),
 			K("timezone", "时区", V("string", "如 Asia/Shanghai")),
+			// `prefer` 与下面 dns 三处 `secondary` 都是**主参数之后的可选修饰**（命令全表
+			// 写 `<ip|host> [prefer]` / `<ip> [secondary <ip>]`），故一律 `Opt` 包住修饰
+			// 节点本身——与 `system syslog host` 的 `P(<ip>)` + `Opt(K(port|facility|severity))`
+			// 同一先例。不标 Opt 时修饰被当成**独立叶子**（`set system dns server secondary <ip>`、
+			// `set system ntp server prefer`），而解析器只认规范序（`server <ip> secondary <ip>` /
+			// `server <ip> prefer`）——按树生成的命令必然失败（v3.0.29 报告 BUG-21）。
+			// `prefer` 那条更隐蔽：执行器会把单独出现的 `prefer` 当成一台**名字叫 prefer 的
+			// 服务器**接受（静默写错配置）。守护见 fix_bug21_dns_secondary_test.go。
 			K("ntp", "NTP",
 				K("server", "NTP 服务器",
 					P("<ip|host>", "服务器地址", ""),
-					K("prefer", "标记首选"),
+					Opt(K("prefer", "标记首选")),
 				),
 			),
 			K("dns", "DNS",
 				K("server", "DNS 服务器（宿主解析器：本机 resolv/systemd-resolved 用）",
 					SPA("<ip>", "dns_servers", "服务器地址"),
-					K("secondary", "备用服务器", SPA("<ip>", "dns_servers", "地址")),
+					Opt(K("secondary", "备用服务器", SPA("<ip>", "dns_servers", "地址"))),
 				),
 				// 决策 #345：数据面 DNS 代理的**全局上游**（自研域内转发器，非 VPP dns 插件）。
 				// 与上面的宿主解析器是两回事：域内 VNF/容器把 resolver 指向产品自己的地址即可解析，
@@ -73,7 +81,7 @@ func ConfigPathTree() *Node {
 				K("proxy", "数据面 DNS 代理（全局上游；域内客户端把 resolver 指向网关即可解析）",
 					K("server", "上游 DNS 服务器",
 						SPA("<ip>", "dns_proxy_servers", "上游地址"),
-						K("secondary", "备用上游", SPA("<ip>", "dns_proxy_servers", "上游地址")),
+						Opt(K("secondary", "备用上游", SPA("<ip>", "dns_proxy_servers", "上游地址"))),
 					),
 				),
 			),
@@ -290,7 +298,8 @@ func ConfigPathTree() *Node {
 					K("proxy", "数据面 DNS 代理",
 						K("server", "上游 DNS 服务器",
 							SPA("<ip>", "dns_proxy_servers", "上游地址"),
-							K("secondary", "备用上游", SPA("<ip>", "dns_proxy_servers", "上游地址")),
+							// 可选修饰（同 system 级：`<ip> [secondary <ip>]`，见上面 system 树的注释）
+							Opt(K("secondary", "备用上游", SPA("<ip>", "dns_proxy_servers", "上游地址"))),
 						),
 					),
 				),

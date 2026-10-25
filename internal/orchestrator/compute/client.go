@@ -100,6 +100,15 @@ type Config struct {
 	// 命中即立即失败，不进入会阻塞的 vhost-user/socket 准备阶段，也不产生 paused 残域。
 	// **nil = 不做判定**——正常路径与既有语义逐字/逐秒不变（单测与无 VPP 的环境即此情形）。
 	DataPlaneProbe func() error
+
+	// HugepageProbe 某页尺寸池的**空闲页数**探针（修 BUG-25）：返回 (freePages, ok)，
+	// ok=false = 读不到（内核未提供该池 / sysfs 不可读）⇒ 调用方**不判定、不阻断**。
+	// 装配层注入 SysfsHugepageProbe（读 /sys/kernel/mm/hugepages/hugepages-<kB>kB/free_hugepages，
+	// 回退 /proc/meminfo）；**nil = 不做判定**——单测与未装配环境的行为与修复前逐字一致。
+	//
+	// 与 DataPlaneProbe 同一范式（注入而非本包直接读宿主）：本包单测在任意宿主上跑，
+	// 直接读 /sys 会让「启动成功/失败」随宿主的空闲大页数而变。
+	HugepageProbe func(pageSize string, needPages int) (freePages int, ok bool)
 }
 
 // 启动结果回读的缺省参数（决策 #311）。

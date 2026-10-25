@@ -472,7 +472,30 @@ func (p *L2Provider) desiredMembers(c L2Client, vs model.VirtualSwitch) (map[uin
 		}
 		parent := l2ParentIfaceName(port)
 		switch {
-		case vs.VlanAccess > 0: // access：每个端口建 VLAN 子接口后挂接（FR-NET-011）
+		case vs.VlanAccess > 0 && isVirtualPort(port):
+			// access + **虚拟口**（vhost-user vNIC / memif）：父接口直接挂进 BD（决策 #502）。
+			//
+			// 为什么不能沿用「建 VLAN 子接口」：虚拟口对端是 guest/容器，**侧上无 tag**——
+			// 子接口（`outer-vlan 100` + one-tag）只匹配带 tag 的帧，guest 发的无 tag 帧落到
+			// 父接口，而父接口不在 BD ⇒ 帧在 `null-node` 被判 blackholed（真机 round46 复现：
+			// BD 里只有 `vh-vm1-nic0.100`，`show errors` 的 blackholed packets 12→49，无任何告警）。
+			//
+			// 为什么不改用 VPP 的 L2 VLAN tag rewrite（VTR，pop1）：**VPP 26.06 不支持虚拟口**。
+			// 真机实测 `set interface l2 tag-rewrite <if> pop 1` 对 vh-vm1-nic0 / tap0 / bvi0 /
+			// vxlan_tunnel0 **一律**返回 `vlan tag rewrite is not compatible with interface`
+			// （`l2vtr_configure` 要求接口的 hw_class 恰为 ethernet_hw_interface_class；vhost-user /
+			// tap / BVI / VXLAN 各自注册自己的 hw class）。故 VTR 路线在本底座不可用。
+			//
+			// 语义是否等价：本产品的 L2 交换机 = 一个 bridge-domain，BD 内流量一律无 tag（物理口的
+			// access 子接口正是「入向 pop、出向 push」）。虚拟口的入向本来就无 tag，直接挂父接口
+			// 就是「无 tag 进 BD」——与物理口 access 在 BD 内的形态一致，两种端口可互通的同一份
+			// 无 tag 域。**边界（如实）**：若 guest 自己给帧打了 tag，该 tag 会原样进 BD（产品不做
+			// 逐 tag 收敛）；guest 侧要带 tag 请用 trunk（`trunk <vlans>`，按 VID 建子接口）。
+			p.dropLegacyAccessSubif(c, parent, portIdx, bdID, vs.VlanAccess)
+			attached[portIdx] = func(c L2Client) error {
+				return c.SwInterfaceSetL2Bridge(portIdx, bdID, L2PortNormal, 0, true)
+			}
+		case vs.VlanAccess > 0: // access：物理口每个端口建 VLAN 子接口后挂接（FR-NET-011）
 			sub, err := p.ensureSubif(c, parent, portIdx, vs.Name, CreateSubifReq{
 				ParentSwIfIndex: portIdx, SubID: uint32(vs.VlanAccess),
 				OuterVlanID: uint16(vs.VlanAccess), OneTag: true,
@@ -520,6 +543,56 @@ func l2ParentIfaceName(port model.VSwitchPort) string {
 		return orchestrator.MemifIfaceName(port.Container, port.ContainerInterface)
 	default:
 		return port.Interface
+	}
+}
+
+// isVirtualPort 端口是否为**虚拟口**（VNF 的 vhost-user vNIC / 容器的 memif）。
+//
+// 判据用「端口来源」而不是「接口名前缀」：`vh-`/`mf-` 前缀只说明命名约定
+// （orchestrator.VnfIfaceName/MemifIfaceName），而端口结构里已有权威来源字段。
+// 虚拟口与物理口的本质差别在 access 语义上：虚拟口对端（guest/容器）**侧上无 tag**。
+func isVirtualPort(port model.VSwitchPort) bool {
+	return port.Vnf != "" || port.Container != ""
+}
+
+// dropLegacyAccessSubif 清理「虚拟口 access 曾按物理口做法建出的 VLAN 子接口」（决策 #502）。
+//
+// 历史形态（v3.0.29 及之前）：access 对**所有**端口建 `<父口>.<vlan>` 子接口。对虚拟口这是错的
+// （guest 无 tag ⇒ 帧落父接口，而父接口不在 BD ⇒ blackholed）。修复后改为父接口直接入 BD，
+// **但升级前的现场里子接口仍在**——它挂在 BD 上（产物），不清理会：
+//
+//	① 让 BD 里长期留一个无人管理的 `vh-vm1-nic0.100`（读视图标「未声明」，与 FR-NET-016 同族）；
+//	② 子接口带 one-tag 匹配，若 guest 真发了 tag 帧会与该子接口抢流（同一父口上两处匹配）。
+//
+// 只按**确定性名字**查（`<父口>.<vlan>`），查到才删；删失败**不阻断提交**——BD 成员收敛才是
+// 本次修复的目标，残留子接口由下次巡检/重放再试（如实登记，不静默当作已清）。
+func (p *L2Provider) dropLegacyAccessSubif(c L2Client, parent string, parentIdx uint32, bdID uint32, vlan int) {
+	if parent == "" {
+		return
+	}
+	idx, ok, err := c.SwInterfaceIndex(subifName(parent, vlan))
+	if err != nil || !ok || idx == parentIdx {
+		return
+	}
+	// 先摘出 BD（子接口在 BD 里时删不掉），再删接口本身。
+	if err := c.SwInterfaceSetL2Bridge(idx, bdID, L2PortNormal, 0, false); err != nil && !isMissingIfaceErr(err) {
+		return
+	}
+	if err := c.DeleteSubif(idx); err != nil && !isMissingIfaceErr(err) {
+		return
+	}
+	p.forgetSubif(bdID, idx)
+}
+
+// forgetSubif 从「本交换机建的子接口」登记里摘掉一项（回收成功/已不存在）。
+func (p *L2Provider) forgetSubif(bdID, subIdx uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.subifs[bdID] != nil {
+		delete(p.subifs[bdID], subIdx)
+	}
+	if p.attached[bdID] != nil {
+		delete(p.attached[bdID], subIdx)
 	}
 }
 

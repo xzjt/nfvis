@@ -178,7 +178,18 @@ func (x *cliExecutor) requestVM(user, class, source string, t []string) string {
 			return "%% " + err.Error() + "\n"
 		}
 		x.publishState("virtual-machine-functions", name, vnfActionState(action)) // M5-1：CLI 直连动作也发事件（状态词与 REST 同源）
-		return fmt.Sprintf("%s VNF %s 已受理\n", actionCN(action), name)
+		out := fmt.Sprintf("%s VNF %s 已受理\n", actionCN(action), name)
+		// O-1（v3.0.29 外部测试报告）：start 成功但该 VM 没声明 vNIC ⇒ 追加一句提示。
+		// **不阻断启动**（无网卡的 VM 是合法形态）：只在成功文案之后补一行，说明现象与出路。
+		// 有 vNIC 时不追加任何东西——既有成功文案逐字不变（既有守护依赖这一点）。
+		if action == "start" {
+			if v, ok := findVM(cfg, name); ok {
+				if hint := vmNoVNICHint(v); hint != "" {
+					out += hint + "\n"
+				}
+			}
+		}
+		return out
 	case "console":
 		return x.requestVMConsole(user, name, confirmed)
 	case "snapshot":

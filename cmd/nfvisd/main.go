@@ -443,6 +443,9 @@ func run() error {
 	}
 	// 计算编排按数据面决定 vNIC 的落地形态（VPP：vhost-user socket；内核：virtio + 宿主 tap + vhost-net）。
 	computeCfg.DataPlane = dpMode
+	// 修 BUG-25：启动前的大页可用量预检（读 sysfs 按尺寸的空闲页，回退 /proc/meminfo）。
+	// 与上面 DataPlaneProbe 同一范式：由装配层注入，计算编排包不直接读宿主文件（单测可脱宿主）。
+	computeCfg.HugepageProbe = compute.SysfsHugepageProbe
 	// vhost-user socket 目录须存在且可被 QEMU/VPP 访问（M4-P0 记录 §5）。内核数据面不用它。
 	if dpMode == model.DataPlaneVPP {
 		if err := os.MkdirAll(computeCfg.VhostDir, 0o755); err != nil {

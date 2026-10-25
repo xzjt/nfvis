@@ -767,8 +767,25 @@ paths:
         不可用，未启动虚拟机 <name>」与 `request vpp restart` 指引），**不产生 paused 残域**
         （决策 #314；同一判定覆盖 restart 的 off→start 分支）。该 503 复用既有 Error 形状与
         既有 `UNAVAILABLE` code，不新增响应字段。
+
+        最后，该 VM **未声明任何 vNIC** 时启动仍成功（无网卡的 VM 是合法形态），但 202 响应
+        会多一个 `notes` 字段给出提示（无网络连通性、guest 内 cloud-init/DHCP 会持续重试，以及
+        声明 vNIC 的照做命令）——这是提示而不是失败，`status`/`name` 与既往一致。有 vNIC 时
+        **不带** `notes`，响应体与既往逐字一致。
       responses:
-        "202": { description: 已受理且回读到运行态（异步完成，事件通知） }
+        "202":
+          description: 已受理且回读到运行态（异步完成，事件通知）；该 VM 未声明 vNIC 时附 `notes` 提示
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, name]
+                properties:
+                  status: { type: string, description: 受理后的状态词（start 为 starting） }
+                  name: { type: string, description: VNF 名 }
+                  notes:
+                    type: string
+                    description: 提示（当前仅一种：本 VM 未声明任何 vNIC ⇒ 无网络连通性）。存在时才发
         "404": { $ref: "#/components/responses/Error404" }
         "409": { $ref: "#/components/responses/Error409" }
         "500":

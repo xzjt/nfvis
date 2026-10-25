@@ -1,12 +1,17 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"reflect"
+	"sort"
 	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/xzjt/nfvis/internal/aaa"
 	"github.com/xzjt/nfvis/internal/config"
@@ -171,6 +176,244 @@ func (s *Server) handleConfigurationHistory(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, revs) // 无历史时为空数组（契约声明是数组，不发 null）
 }
 
+// ---------- 未知字段校验（BUG-22，round46） ----------
+//
+// 缺陷（外部测试报告 docs/REPORT-v3.0.29.md BUG-22）：REST `PUT /configuration/candidate`
+// 接受 JSON 里的**任何**字段名，未知键被 `encoding/json` 静默丢弃，仍回 `{"committed":true}`：
+//
+//	PUT /configuration/candidate  {"system":{"dns":{"servers":["198.51.100.97"]}}}
+//	→ 200 {"committed":true,"revision":125}   ← 真实字段是 system.dns_servers，配置什么都没变
+//
+// 同一份模型在 **CLI 路径**上是严格的：配置模式语句先回放 schema 树、再由 `fromJSONTree` 用
+// `DisallowUnknownFields` 落模型（cliexec.go:1999），关键字写错立刻报「配置中不存在字段」。
+// REST 侧此前只有裸 `json.Unmarshal`，是这条「命令成功、事实没变」的唯一缺口。
+//
+// 修法只在 **HTTP/文件入口**：先用 `DisallowUnknownFields` 严格解一次，只为拿「未知键」这一类
+// 错误并给出可操作的文案；**判定与放行仍由 encoding/json 自己做**（不在这里重写一套 schema
+// 校验），随后照旧 `json.Unmarshal` 得到 cfg 继续——REST 的 merge/override/auto-commit 语义、
+// 锁获取顺序、既有错误码一律不变。
+//
+// 分档：只拒绝**结构体内**（顶层到各级子对象）的未知键。`annotations`（map[string]string）与
+// 容器的 `env` 是自由键值对，`DisallowUnknownFields` 本来就不检查 map 的键——这一点由
+// fix_bug22_unknown_field_test.go 的回归用例钉住（**不得**为一刀切而拒绝它们）。
+//
+// 有意**不**在这里做（如实登记的边界）：
+//   - `internal/system/backup.go` 的归档恢复：归档是本产品的内部产物，旧版本归档里的历史键
+//     必须继续能吃（严格化会让老备份无法恢复，破坏兼容），故那里保持宽松（见该处注释）。
+//   - `model.Config` 的解码本身：CLI/REST/候选合并/归档共用同一入口，在模型层严格化会同时
+//     改变 CLI 的报错口径与备份兼容性；本缺陷是「入口没校验」，不是「模型太宽松」。
+
+// unknownConfigFieldMessage 检查配置文档里的**未知字段**，命中则返回中文报错文案（"" = 无未知键）。
+//
+// 只识别 `json: unknown field "x"` 这一类解码错误；其它 JSON 错误（类型不符、语法错误）**不**在此
+// 处理，交给调用方原有的 `json.Unmarshal` 报「配置文档 JSON 不合法: …」——保持既有文案与状态码。
+func unknownConfigFieldMessage(data []byte) string {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var probe model.Config
+	err := dec.Decode(&probe)
+	if err == nil {
+		return ""
+	}
+	m := unknownFieldRe.FindStringSubmatch(err.Error()) // 同一个 regexp（cliexec.go，CLI 侧同源错误类）
+	if m == nil {
+		return ""
+	}
+	path, parent := unknownConfigFieldPath(data, m[1])
+	if path == "" {
+		path = m[1] // 定位不到路径时退回 encoding/json 给的键名（不谎报上下文）
+	}
+	// 文案：点名字段 + 结构提示；能猜到「想写的是哪个」时插在同一个括号里。
+	hint := ""
+	if s := similarKnownFields(parent, m[1]); len(s) > 0 {
+		hint = "相近的已知字段: " + strings.Join(quoteAll(s), "、") + "；"
+	}
+	return `配置文档含未知字段 "` + path + `"（` + hint +
+		"请检查字段名；可用 show configuration | display json 查看当前结构）"
+}
+
+// unknownConfigFieldPath 尽力给出未知键在文档里的**完整路径**（如 `system.dns.servers`、
+// `virtual_switches[0].nosuch`），并返回未知键所在的对象类型（供「相近的已知字段」提示）。
+//
+// 为什么需要它：`encoding/json` 只报最后一段键名（且报错时 `Decoder.InputOffset()` 已走到文档
+// 末尾，实测取不到位置），而 `{"system":{"dns":{"servers":[…]}}}` 这类**整棵子树都不存在**的写法
+// 只会报 `unknown field "dns"`——只给 `dns` 不足以让人看出写错的是 `dns.servers`。
+//
+// 本函数沿**模型类型**把文档往下走一遍**只为文案**：判定与放行完全由上面的严格解码决定，这里走
+// 不通时（返回空路径）文案退回键名，**不影响任何行为**。因此这里刻意只处理三种形状：结构体
+// （查键）、数组/切片（带下标）、其余（map/interface 等**自由键值对**，整棵跳过——它们的键天然
+// 合法，也不可能是本次报错的位置）。
+func unknownConfigFieldPath(doc []byte, key string) (string, reflect.Type) {
+	var tree any
+	if err := json.Unmarshal(doc, &tree); err != nil {
+		return "", nil // 文档本身不合法时调用方会在后续 Unmarshal 报出，这里不抢戏
+	}
+	steps, parent, ok := findUnknownField(reflect.TypeOf(model.Config{}), tree, nil, key)
+	if !ok {
+		return "", nil
+	}
+	return joinPathSteps(steps), parent
+}
+
+// joinPathSteps 路径段拼成可读路径（数组下标紧贴前一段：`virtual_switches[0].nosuch`）。
+func joinPathSteps(steps []string) string {
+	var b strings.Builder
+	for _, s := range steps {
+		if b.Len() > 0 && !strings.HasPrefix(s, "[") {
+			b.WriteByte('.')
+		}
+		b.WriteString(s)
+	}
+	return b.String()
+}
+
+// findUnknownField 沿模型类型在 JSON 树上定位未知键（见 unknownConfigFieldPath 的说明）。
+// 返回的 steps 已拼成路径段（数组下标写成 `[i]`）。
+func findUnknownField(t reflect.Type, node any, steps []string, key string) ([]string, reflect.Type, bool) {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == nil || node == nil {
+		return nil, nil, false
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		obj, ok := node.(map[string]any)
+		if !ok {
+			return nil, nil, false
+		}
+		fields := jsonFieldsOf(t) // 声明顺序
+		known := false
+		for _, f := range fields {
+			if f.name == key {
+				known = true
+				break
+			}
+		}
+		if !known {
+			if v, present := obj[key]; present { // 未知键就在这一层
+				return appendLeafPath(steps, key, v), t, true
+			}
+		}
+		for _, f := range fields {
+			child, present := obj[f.name]
+			if !present {
+				continue
+			}
+			if p, parent, ok := findUnknownField(f.typ, child, appendStep(steps, f.name), key); ok {
+				return p, parent, ok
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		arr, ok := node.([]any)
+		if !ok {
+			return nil, nil, false
+		}
+		for i, e := range arr {
+			if p, parent, ok := findUnknownField(t.Elem(), e, appendStep(steps, "["+strconv.Itoa(i)+"]"), key); ok {
+				return p, parent, ok
+			}
+		}
+	}
+	// 其余类型（map/interface/标量）不在此校验（map 的键是自由键值对）
+	return nil, nil, false
+}
+
+// appendLeafPath 追加未知键；若它的值是**单键对象**，一并带上里面的键（最多两层）。
+//
+// 成因：`dns` 这类整棵子树都不在模型里时，解码器只能报最外层；操作者真正写错的是里面的叶子
+// （BUG-22 现场＝`{"dns":{"servers":[…]}}`，正确字段是 `dns_servers`，只报 `dns` 看不出问题）。
+// **只在值恰好是单键对象时下钻**——多键时不知道该点哪个，宁可只报确知的那一段（不猜）。
+func appendLeafPath(steps []string, key string, value any) []string {
+	out := appendStep(steps, key)
+	for i := 0; i < 2; i++ {
+		obj, ok := value.(map[string]any)
+		if !ok || len(obj) != 1 { // 多键（含 0 键）到此为止
+			break
+		}
+		for k, v := range obj { // 单键：唯一的键就是它
+			out = appendStep(out, k)
+			value = v
+		}
+	}
+	return out
+}
+
+// appendStep 复制后追加（避免兄弟分支共享底层数组互相覆盖）。
+func appendStep(steps []string, s string) []string {
+	out := make([]string, len(steps)+1)
+	copy(out, steps)
+	out[len(steps)] = s
+	return out
+}
+
+// jsonField json 标签派生出的一个字段。
+type jsonField struct {
+	name string
+	typ  reflect.Type
+}
+
+// jsonFieldsCache reflect.Type → []jsonField（每次请求都反射一遍没有必要）。
+var jsonFieldsCache sync.Map
+
+// jsonFieldsOf 结构体的 JSON 字段表（与 encoding/json 的取名规则一致：无 tag 用字段名、
+// `json:"-"` 跳过、未导出字段跳过；`omitempty` 等选项不影响名字）。
+func jsonFieldsOf(t reflect.Type) []jsonField {
+	if cached, ok := jsonFieldsCache.Load(t); ok {
+		return cached.([]jsonField)
+	}
+	out := make([]jsonField, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.PkgPath != "" { // 未导出
+			continue
+		}
+		name := strings.Split(f.Tag.Get("json"), ",")[0]
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = f.Name
+		}
+		out = append(out, jsonField{name: name, typ: f.Type})
+	}
+	jsonFieldsCache.Store(t, out)
+	return out
+}
+
+// similarKnownFields 在父对象里找与未知键**相近**的已知字段（仅用于提示「是不是想写 X」）。
+//
+// 判据刻意保守：只认**前缀包含关系**（`dns` → `dns_servers`，即 BUG-22 的现场；
+// `dns_server` → `dns_servers`，单复数写错）。不做编辑距离之类的模糊匹配——
+// 提示写错比不提示更糟，前三级已够覆盖「少写/多写一个词」这一类真实笔误。
+func similarKnownFields(parent reflect.Type, key string) []string {
+	if parent == nil || parent.Kind() != reflect.Struct {
+		return nil
+	}
+	var out []string
+	for _, f := range jsonFieldsOf(parent) {
+		if f.name == key {
+			continue // 已知字段不会走到这里
+		}
+		if strings.HasPrefix(f.name, key) || strings.HasPrefix(key, f.name) {
+			out = append(out, f.name)
+		}
+	}
+	sort.Strings(out)
+	if len(out) > 3 {
+		out = out[:3]
+	}
+	return out
+}
+
+func quoteAll(items []string) []string {
+	out := make([]string, len(items))
+	for i, s := range items {
+		out[i] = `"` + s + `"`
+	}
+	return out
+}
+
 // handlePutCandidate PUT /configuration/candidate：写 candidate（FR-CFG-008）。
 //
 // 两种语义（决策 #22/#127）：
@@ -179,11 +422,18 @@ func (s *Server) handleConfigurationHistory(w http.ResponseWriter, r *http.Reque
 //     ——只覆盖文档里出现的字段，未出现的保持不动。
 //
 // X-NFVIS-Auto-Commit: true 时校验+下发+落库一次完成（决策 #22）。
+//
+// BUG-22：文档含未知字段时 400 VALIDATION_FAILED 并点名路径（见 unknownConfigFieldMessage）——
+// 校验在 `engine.Edit` **之前**，因此不取锁、不产生候选、revision 不变（失败无副作用）。
 func (s *Server) handlePutCandidate(w http.ResponseWriter, r *http.Request) {
 	sess := s.sessionFromIdentity(r)
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "读取请求体失败", nil)
+		return
+	}
+	if msg := unknownConfigFieldMessage(body); msg != "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", msg, nil)
 		return
 	}
 	var cfg model.Config

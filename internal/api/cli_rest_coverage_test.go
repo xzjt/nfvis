@@ -242,6 +242,10 @@ var cliRESTCoverage = map[string]string{
 	"request system software rollback to <string>":                           "POST /system/software:rollback",
 	"request system configuration backup to <path>":                          "POST /system/backup + GET /system/backup/{file}",
 	"request system configuration restore <path>":                            "POST /system/restore",
+	// O-3（报告 v3.0.29 §7）：释放编辑锁 = 丢弃候选并放锁（`DELETE /configuration/candidate`）。
+	// 不带 force 只释放本会话，端点语义完全一致；带 force 释放全部锁（含其它会话），
+	// REST 侧没有对应形态，归 CLI 例外（理由见 cliRESTExceptions）。
+	"request system configuration unlock":                                    "DELETE /configuration/candidate",
 	"request system core-dumps export <url>":                                 "POST /system/core-dumps:export",
 	"request system core-dumps delete file <name>":                           "DELETE /system/core-dumps",
 	"request alarms clear <scope>":                                           "POST /alarms:clear",
@@ -279,7 +283,12 @@ var cliRESTExceptions = map[string]string{
 	"show vpp runtime thread <id>": "决策 #200：同上（thread 只是本机过滤参数）",
 	// 修 BUG-16：最近一次升级/回退的结论（服务端落盘、CLI 重连后读）。它是**升级命令自身的
 	// 事后读口**——Web 侧的等价形态是运维动作页里升级操作的返回提示，不另设端点。
-	"show system software result":                "修 BUG-16：升级/回退结论的事后读口（服务端落盘，CLI 重连后读）；Web 等价形态是升级动作的返回提示",
+	"show system software result": "修 BUG-16：升级/回退结论的事后读口（服务端落盘，CLI 重连后读）；Web 等价形态是升级动作的返回提示",
+	// 修 BUG-24：PCI 设备 / IOMMU 组 / 驱动 / 直通可用性的 CLI 侧只读渲染。事实源是**本机 sysfs**
+	// （/sys/bus/pci/devices + /sys/kernel/iommu_groups），不经 HTTP 端点；Web 侧的等价形态是
+	// 「运维动作」里的 PCI 直通手填入口（BDF 由操作者输入），故不另设端点。
+	"show system pci":                            "修 BUG-24：本机 sysfs 的 CLI 侧只读渲染（BDF/IOMMU 组/驱动/直通可用性），不经 HTTP 端点；Web 等价形态是运维动作页的 PCI 直通输入",
+	"show system pci detail":                     "修 BUG-24：同上（`detail` 只是本机渲染的明细开关）",
 	"monitor interfaces <ifname>":                "决策 #92：CLI 轮询形态；Web 等价物是定时刷新 + GET /events 推送",
 	"monitor interfaces <ifname> interval <sec>": "决策 #92：同上（`interval <sec>` 只是本机刷新节奏）",
 	"monitor vnf <name>":                         "决策 #92：同上",
@@ -304,6 +313,12 @@ var cliRESTExceptions = map[string]string{
 	"| display json":                             "CLI 渲染；Web 原生消费 JSON",
 	"| display xml":                              "CLI 渲染；Web 原生消费 JSON",
 	"show | display set":                         "CLI 文本渲染；契约已登记未实现（决策 #84④）",
+	// O-3（报告 v3.0.29 §7）：**强制**释放全部编辑锁（含其它会话持有的锁）在 REST 侧没有
+	// 对应形态——它的等价物是「各会话各自 DELETE 自己的 candidate」或等空闲超时自动回收。
+	// 这是一个跨会话的运维抢救动作，语义上必须由人显式确认代价（持锁会话的未提交候选被丢弃）；
+	// 不给 Web 一键入口是有意的（与 request system zeroize 等 S 级破坏性动作同口径：
+	// 它们有端点是因为动作本身有端点，而「丢别人的编辑中候选」没有）。
+	"request system configuration unlock force": "O-3：强制释放他人编辑锁是跨会话抢救动作，REST 无对应形态（等价物=各会话自删候选/等空闲超时）；代价（丢弃持锁会话未提交候选）须由人显式确认",
 }
 
 // cliRESTGaps 已登记的 REST 缺口（CLI 有、REST 无）→ 理由/归属。补一个划掉一个。

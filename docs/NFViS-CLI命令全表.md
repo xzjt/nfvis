@@ -72,6 +72,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show system metrics history name <metric> [last <duration>] [step <duration>]` | 某指标**各序列**（按标签分组）的时间点；`<metric>` 走动态候选（来源＝存储内已知指标名）；`last` 默认 1h、`step` 省略=自动降采样（取桶内最后一个样本）；存储不可用/无数据时如实说明，不编造 | `GET /metrics/history?name=…` | ✅ |
 | `show system hardware` | 硬件健康：温度/风扇/电源/SMART（FR-SYS-012）。SMART 读不到时**附原因**（smartctl 未安装 / 设备不支持 / 其它读取失败），便于判断要不要装工具 | `GET /system/hardware` | ✅（本机无 IPMI/传感器，走降级路径） |
 | `show system firewall` | 主机防火墙（管理面入向）读视图（决策 #388）：默认策略 / 规则表（seq/动作/来源/协议/端口 + **逐规则 packets/bytes 计数**）/ 保留项说明 / `applied` 状态与未收敛原因（表缺失、规则集合不一致、检测到手工修改、nft 不可用等如实说明）/ 计数口径；未配置时如实报「未配置」并给前置提示（写路径走配置模式 candidate→commit） | `GET /system/firewall` | ✅ 真机四维验证（round169，dev112）：规则与 `nft list table inet nfvis-firewall` 逐字对、drop ICMP 后宿主 ping 断而 SSH 存活、逐规则计数递增可读（3 包/180 字节）、restart nfvis 幂等跳过（计数 3→6 连续）、删空回收表、未声明管理口拒绝、plain commit 被拒且文案含照做路径、operator 双面拒（CLI 拒/REST 403）；自锁-回滚场景抓出并修复一处真缺陷（confirmed 超时回滚不触发宿主侧重收敛 ⇒ 表残留 drop，修后回滚即回收表、访问自动恢复）——证据 `docs/evidence/v2-round169-d388-host-firewall.txt` |
+| `show system pci [detail]` | PCI 设备与 IOMMU 直通可用性清单（修 BUG-24，只读）：逐设备列 BDF / 厂商:设备 ID / 类型 / IOMMU 组 / 组内设备数 / 当前驱动 / 直通建议。事实源＝本机 sysfs（`/sys/bus/pci/devices` + `/sys/kernel/iommu_groups`，组号**反查**组目录）；直通建议只看两件事实——IOMMU 组是否存在、组内是否含桥/root port（class `06xx`，直通需整组隔离），已绑 `vfio-pci` 标「已在直通」，**最终以 libvirt 报错为准**。`detail` 每设备追加明细块（label/class/enable/numa_node/同组 BDF 列表）。厂商/设备**只显示 ID 形态**（如 `15ad:07b0`）——人类可读名称需 pci.ids，产品不打包也不联网取；PCI 目录不可读时如实报「取不到 + 原因」、不谎报空清单；IOMMU 目录不存在时按「无 IOMMU 组」呈现并在页脚说明 | （无端点：本机 sysfs 的 CLI 侧只读渲染） | 🚫 待真机 |
 | `show system core-dumps` | 崩溃转储清单（VPP/QEMU/nfvisd） | `GET /system/core-dumps` | ✅ |
 | `show system tech-support` | 诊断归档清单 | `GET /system/tech-support` | ✅ |
 | `show system software result` | **最近一次升级/回退的结论**（结果/动作/版本/状态）。`request system software add|rollback` 会重启 nfvisd、断开承载该命令的连接；重连后用它拿真实结果，不必猜 | （无端点：升级动作的事后读口，CLI 侧渲染） | ✅（修 BUG-16） |
@@ -155,7 +156,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 
 | 命令 | 说明 | 权限 | 落点 | 实测 |
 |---|---|---|---|---|
-| `request virtual-machine-functions <n> start` | 启动 VM；受理后回读域状态（决策 #311）；VPP 不可用时秒级前置失败（决策 #314） | O | `POST /vmf/{n}:start` | ✅（停在 `paused`/`crashed` 等非预期态时以 `%%` 报出域状态、libvirt 日志摘录与恢复建议；VPP 停时秒级 `%%` 报「数据面（VPP）当前不可用…」+ `request vpp restart`，不再阻塞到超时） |
+| `request virtual-machine-functions <n> start` | 启动 VM；受理后回读域状态（决策 #311）；VPP 不可用时秒级前置失败（决策 #314）；**空闲大页不足时进 libvirt 前即失败**（BUG-25，中文量差 + 照做命令） | O | `POST /vmf/{n}:start` | ✅（停在 `paused`/`crashed` 等非预期态时以 `%%` 报出域状态、libvirt 日志摘录与恢复建议；VPP 停时秒级 `%%` 报「数据面（VPP）当前不可用…」+ `request vpp restart`，不再阻塞到超时；大页不足报「大页不足：<尺寸> 池空闲 M 页，本 VM 需要 N 页…」；**该 VM 未声明 vNIC 时成功文案后追加一行提示**——O-1，不阻断启动） |
 | `request virtual-machine-functions <n> stop` | 停止（ACPI 关机，超时强杀） | O | `POST /vmf/{n}:stop` | ✅（**决策 #76③** 修超时误报） |
 | `request virtual-machine-functions <n> restart` | 重启（运行中 ACPI；已关机的 off→start 分支同 `start` 前置判定，决策 #314） | O | `POST /vmf/{n}:restart` | ✅ |
 | `request virtual-machine-functions <n> console` | 进入串口（Ctrl-] 退出） | O | `POST /vmf/{n}/console` + WS | ✅（非 TTY 明确提示；真人 Ctrl-] 见 T0-4） |
@@ -196,6 +197,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request system hugepages reclaim` | 回收**空闲**的多余大页，收敛到声明值（决策 #329）；**在用页一律不动**、**不改声明值**、写后回读确认（未收敛/无变化如实报，含谁在占用）；⚠️ **无主占用页不在回收范围**（决策 #346 真机实测撤回：多为 DPDK 预留页，写 nr_hugepages 释放不了，需从预留者一侧释放） | S | `POST /system/hugepages:reclaim`（与 REST 同源） | ✅（真机（round108：造「实际 > 声明且空闲」现场回收 + Web 动作）——`docs/evidence/v2-round108-d329-hugepage-reclaim-verified.txt`；只动空闲多余页，无主占用页不在范围见 #346） |
 | `request system configuration backup [to <path>]` | 导出 committed 配置归档（`to <path>` 是另存一份：须绝对路径、目标不得已存在、父目录须已存在；已存在即如实拒绝） | S | `POST /system/backup`（生成归档；只读清单是 `GET /system/backup`） | ✅ |
 | `request system configuration restore <path>` | 导入归档为 candidate 并提交 | S | `POST /system/restore`（与 REST 同源，高危档审计两条，决策 #150） | 🚫 会覆盖现网配置 |
+| `request system configuration unlock [force]` | 释放编辑锁（O-3）：不带 `force` 只释放**本会话**的锁（等价 discard + 释放，本会话没锁时如实说）；带 `force` 释放**全部**锁并写审计（`config.unlock-force`）——**代价：持锁会话未提交的 candidate 会被丢弃**，故为 S 级 | S | `DELETE /configuration/candidate`（非 force 形态与端点同义）；`force` 是跨会话抢救动作，REST 无对应形态 | ✅ |
 | `request system tech-support generate` | 生成诊断归档 tar.gz（归档里的配置是**脱敏视图**：口令哈希等已隐藏，不能用于恢复；要可恢复的完整配置用 `configuration backup`） | O | `POST /system/tech-support` | ✅ |
 | `request system core-dumps export <url>` | 导出转储清单到 URL（POST JSON） | O | `POST /system/core-dumps:export` | ✅（决策 #126 修掉此前的假成功） |
 | `request system core-dumps delete [file <n>]` | 删除转储 | O | `DELETE /system/core-dumps` | ✅（**决策 #76⑨** 修错误文案） |

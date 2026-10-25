@@ -1,0 +1,297 @@
+# round46：REPORT-v3.0.29 三条观察项收口（O-2 / O-4 / O-3）
+
+日期：2026-10-25　基线：v3 分支 c98e658（v3.0.29 已发布）　真机：nfvis-vm 192.168.155.129
+
+---
+## O-2（数据面缺陷）vhost-user vNIC + `vlan access` 时主接口不在 BD ⇒ blackholed
+
+### 结论：**已修好功能**（不是只做告警兜底）。VTR 路线经真机实证**不可用**，改走「父接口直接入 BD」。
+
+### 一、VTR 路线不可用（真机实证 + VPP 头文件）
+
+任务书建议先查证 VPP 的 `l2_interface_vlan_tag_rewrite` 语义再定。查证结果是**该路线在本底座不可用**：
+
+```
+# VPP 26.06-release，逐个接口类型试 pop1
+$ vppctl set interface l2 tag-rewrite vh-vm1-nic0 pop 1
+set interface l2 tag-rewrite: vlan tag rewrite is not compatible with interface
+$ vppctl set interface l2 tag-rewrite tap0        pop 1   → 同上报错
+$ vppctl set interface l2 tag-rewrite bvi0        pop 1   → 同上报错
+$ vppctl set interface l2 tag-rewrite vxlan_tunnel0 pop 1 → 同上报错
+```
+
+机制（反汇编 + 头文件）：`libvnet.so.26.06` 的 `l2vtr_configure` 在 0x18b7da..0x18b7e9 处取接口的
+hw_class 与 `ethernet_hw_interface_class` 比较，**不相等即返回 0xffffffb9（= -71 INVALID_INTERFACE，
+见 /usr/include/vnet/error.h:55）**。vhost-user / tap / BVI / VXLAN 各自注册自己的 hw class，故
+**全部虚拟口都不支持 L2 VTR**（只有物理 ethernet 口才可能支持）。
+
+`l2_vtr_op_t` 取值已从头文件 `/usr/include/vnet/l2/l2_vtr.h:15-25` 核实（0=DISABLED,1=PUSH_1,
+2=PUSH_2,3=POP_1,4=POP_2,5=TRANSLATE_1_1,…），与仓库里 `VlanTagRewriteReq.Op` 的注释一致。
+**产品 production 代码里 VTR 至今零调用是对的**——这条路在本底座走不通。
+
+### 二、采用的修法（`internal/orchestrator/network/l2.go`）
+
+`desiredMembers` 的 `case vs.VlanAccess > 0` 拆成两支：
+
+| 端口形态 | access 处理 | 理由 |
+|---|---|---|
+| **虚拟口**（`port.Vnf != ""` / `port.Container != ""`） | **父接口直接挂进 BD**（`SwInterfaceSetL2Bridge(portIdx, …)`） | 虚拟口对端（guest/容器）**侧上无 tag**；BD 内本就是无 tag 域，与物理口 access 子接口在 BD 内的形态一致 |
+| **物理口**（`port.Interface`） | **保持原样：建 VLAN 子接口** | FR-NET-011 已真机验证的路径，动它会引入回归 |
+
+语义等价性说明（写进代码注释）：「L2 交换机 = 一个 bridge-domain，BD 内流量一律无 tag；物理口的
+access 子接口正是『入向 pop、出向 push』。虚拟口入向本来就无 tag，父接口直接入 BD 即『无 tag 进 BD』
+——两种端口落在**同一份无 tag 域**，可互通。」
+**如实边界（代码注释与文档都写明）**：若 guest 自己给帧打了 tag，该 tag 会原样进 BD（产品不做逐 tag
+收敛）；guest 侧要带 tag 请用 `trunk <vlans>`。
+
+新增两个助手：
+- `isVirtualPort(port)`：判据用**端口来源字段**（`Vnf`/`Container`），不用接口名前缀（前缀只是命名约定）。
+- `dropLegacyAccessSubif(...)` + `forgetSubif(...)`：清掉**升级前留下的**虚拟口 access 子接口
+  （`<父口>.<vlan>`，按确定性名字查，查到才摘 BD + 删接口，失败不阻断提交）。不清理的话 BD 里会长期
+  留一个无人管理的 `vh-….100`（FR-NET-016 同族问题）。
+
+### 三、真机证据（同一台 guest `vm1`，只有 BD 成员关系不同）
+
+BD = `vs-data`（ID 7320585），配置含 `set virtual-switches vs-data vlan access 100` +
+`set virtual-machine-functions vm1 interfaces nic0 virtual-switch vs-data`（vhost-user）。
+
+#### 修复前（已装 v3.0.29 原版二进制；VPP 重启后由它从零重建）
+
+```
+$ vppctl show bridge-domain 7320585 detail
+           Interface           If-idx ISN  SHG  BVI  TxFlood        VLAN-Tag-Rewrite
+             bvi0                3     1    0    *      *                 none
+        vh-vm1-nic0.100          2     3    0    -      *                 none     ← 只有子接口
+             tap0                4    11    0    -      *                 none
+$ vppctl show interface vh-vm1-nic0
+vh-vm1-nic0        1   up   9000/0/0/0   rx packets 100   tx packets 4
+                                                         drops      100          ← 全部丢弃
+$ vppctl show interface vh-vm1-nic0.100
+vh-vm1-nic0.100    2   down                           tx packets 4                ← 收不到包
+```
+50 秒窗口（guest 在发 ARP/DHCP/metadata）：
+```
+STATE A (OLD) t=0   rx=100 drops=100 tx=4
+STATE A (OLD) t=50  rx=151 drops=151 tx=5
+STATE A (OLD) DELTA: rx=+51 drops=+51 tx=+1          ← 100% 被丢
+$ vppctl ping 10.10.10.100 source bvi0 repeat 5
+Statistics: 5 sent, 0 received, 100% packet loss     ← guest 完全不可达
+```
+
+#### 修复后（本次构建 `3.0.29~o2fix`，VPP 重启后由它从零重建）
+
+```
+$ vppctl show bridge-domain 7320585 detail
+           Interface           If-idx ISN  SHG  BVI  TxFlood        VLAN-Tag-Rewrite
+             bvi0                3     1    0    *      *                 none
+          vh-vm1-nic0            1     1    0    -      *                 none     ← 主接口在 BD
+             tap0                4    11    0    -      *                 none
+$ vppctl show interface                      → 只有 vh-vm1-nic0，vh-vm1-nic0.100 已消失
+```
+50 秒窗口：
+```
+STATE B (FIXED) t=0   rx=177 drops=101 tx=17
+STATE B (FIXED) t=50  rx=195 drops=101 tx=18
+STATE B (FIXED) DELTA: rx=+18 drops=+0 tx=+1         ← 零丢弃（drops 计数器冻结）
+$ vppctl ping 10.10.10.100 source bvi0 repeat 5
+Statistics: 5 sent, 5 received, 0% packet loss       ← guest 可达
+```
+
+#### blackholed 计数的正确解读（重要，避免误判）
+
+修复后 `show errors` 里 `null-node / blackholed packets` **仍会缓慢增长**，但**与 VLAN 无关**。
+用 `vppctl trace add vhost-user-input` 逐包追踪（修复后）：
+
+```
+$ vppctl show trace
+ Packet 1: vhost-user-input → ethernet-input → l2-input → l2-learn
+           → l2-fwd  sw_if_index 1 … bd_index 1 result [0x700000003, 3]     ← 已进入 BD 1
+           → ip4-input → ip4-lookup → ip4-drop  (fib:1 adj:0)
+           → error-drop → null-node: blackholed packets
+   包内容: IP4 10.10.10.100 -> 169.254.169.254 TCP:41048 -> 80
+```
+即：帧**正常经 l2-fwd 在 BD 内转发**，随后因目标是 `169.254.169.254:80`（cloud-init 的 metadata
+服务）而**在 IP 层**被丢——那是 **O-4 的另一半**（guest 在找 metadata），不是 L2 黑洞。
+修复前则是帧**根本进不了 l2-fwd**（父接口不在任何 BD，rx 全计 drops）。
+
+### 四、守护测试（`internal/orchestrator/network/l2_test.go`）
+
+新增 5 例 + 改造 1 例：
+| 用例 | 断言 |
+|---|---|
+| `TestL2AccessVlanVirtualPortAttachesParent` | vhost + access ⇒ **父接口 idx 在 BD**；无子接口；**VTR 零调用**；`AttachedIfaces` 只含父接口 |
+| `TestL2AccessVlanMemifPortAttachesParent` | memif + access ⇒ 父接口入 BD、无子接口 |
+| `TestL2AccessVlanPhysicalPortKeepsSubif` | 物理口 + access ⇒ **仍是子接口路径**（FR-NET-011 回归保护），父接口**不入** BD |
+| `TestL2AccessVlanVirtualPortDropsLegacySubif` | 造「升级前遗留的 `<vh>.100`」⇒ 收敛后被清理，父接口仍入 BD |
+| `TestL2TrunkVlanVirtualPortUnchanged` | 虚拟口 trunk ⇒ 仍按 VID 建子接口 + native 挂父口；VTR 零调用 |
+| `TestL2AccessVlanSubifIdempotentOnReplay`（改） | R88-3 幂等语义保留（物理口子接口只建一次）；**新增**断言 vNIC 不再建子接口、父接口入 BD |
+
+假客户端 `fakeL2` 增加 `vtrs []VlanTagRewriteReq` 记录（`L2InterfaceVlanTagRewrite` 从空实现改为记录），
+让「万一日后有人改走 VTR 路线」在测试里可见。
+
+**红-绿验证**：把 `l2.go` 暂回原实现（`git stash push -- l2.go`），三条新用例按预期失败：
+```
+--- FAIL: TestL2AccessVlanVirtualPortAttachesParent … vhost 主接口必须直接挂进 BD（修复前只有 .100 子接口，真机 blackholed）: map[101:7320585]
+--- FAIL: TestL2AccessVlanMemifPortAttachesParent … memif 父接口必须直接挂进 BD: map[101:7320585]
+--- FAIL: TestL2AccessVlanVirtualPortDropsLegacySubif … 历史遗留的虚拟口 access 子接口应被清理
+```
+恢复实现后全绿。
+
+---
+## O-4（seed.iso 缺 `network-config`）—— 已修好
+
+### 改动
+
+| 文件 | 行 | 内容 |
+|---|---|---|
+| `internal/orchestrator/compute/cloudinit.go` | 末尾新增 | `BuildNetworkConfig(vm) string`：有 vNIC 时产出 cloud-init **v2** 配置（按声明序 `eth0/eth1/…: {dhcp4: true}`），无 vNIC 返回**空串**（行为与修复前一致） |
+| 同上 | 同上 | `cloudLocaldsArgs(iso, userData, metaData, netCfgPath) []string`：纯函数，网络配置非空时插 `--network-config=<path>`（形态按真机 `cloud-localds --help` 核实：`-N \| --network-config F`） |
+| `internal/orchestrator/compute/disk_libvirt.go` | `cloudLocaldsSeed.Build` | 写 `network-config` 文件；**写盘失败降级**为旧两件形态 + 打一行日志（网络配置是增强、不是必需），不阻断 VM 定义 |
+
+**ethN 与 vNIC 的对应关系已在代码注释里如实写明**：libvirt 按 `vm.Interfaces` 声明序挂 virtio、
+guest 内按 PCI 槽序枚举为 eth0/eth1/…，二者一致是**经验事实而非契约保证**（guest 有 udev 改名
+规则或镜像自带 netplan 绑 MAC 时可能不同）；故只产出「按序 DHCP」的最小配置。
+
+### 真机证据（nfvis-vm，`vm1` = cirros）
+
+**修复前**（已装 3.0.29 原版 + 原有 seed）：
+```
+$ mount -o loop,ro /var/lib/nfvis/vms/vm1/seed.iso /tmp/seedchk && ls /tmp/seedchk
+meta-data
+user-data                      ← 只有两个文件，无 network-config
+```
+
+**修复后**（重启 vm1 触发 `RefreshSeed`）：
+```
+$ mount -o loop,ro /var/lib/nfvis/vms/vm1/seed.iso /tmp/seedchk2 && ls /tmp/seedchk2
+meta-data
+network-config                 ← 新增
+user-data
+$ cat /tmp/seedchk2/network-config
+#cloud-init network-config v2（nfvis 生成：按 vNIC 声明顺序启用 DHCP）
+version: 2
+ethernets:
+  eth0:
+    dhcp4: true
+```
+guest 侧仍正常拿到租约（`10.10.10.100` active）、`vppctl ping 10.10.10.100 source bvi0` **5/5 0% 丢包**
+⇒ 新增 network-config 未破坏既有路径。
+
+### 守护测试（`internal/orchestrator/compute/cloudinit_network_test.go`，5 例）
+
+| 用例 | 断言 |
+|---|---|
+| `TestBuildNetworkConfigSingleNic` | 含 `version: 2` / `eth0:` / `dhcp4: true`；无 `eth1:` |
+| `TestBuildNetworkConfigTwoNics` | 含 `eth0:` 与 `eth1:` 且 eth0 在 eth1 之前；无 `eth2:` |
+| `TestBuildNetworkConfigNoNics` | **返回空串**（不产出 network-config） |
+| `TestCloudLocaldsArgs` | 有网络配置 ⇒ 4 个参数且含 `--network-config=<path>`、user-data/meta-data 在后；**无网络配置 ⇒ 逐字回到修复前 3 参数形态** |
+| `TestBuildNetworkConfigShape` | 顶层含 `version: 2` 与 `ethernets:`（产物形状自校准） |
+
+---
+## O-3（无「强制释放编辑锁」命令）—— 已修好
+
+### 改动
+
+| 文件 | 内容 |
+|---|---|
+| `internal/schema/tree_oper.go` | `request system configuration` 子树下新增 `unlock` + 可选 `force`（父节点已是 `Su()`，故两级都继承 S） |
+| `internal/api/cli_config_unlock.go`（新文件） | `requestConfigUnlockEarly`（前置拦截 + 权限 + 语法）、`configUnlock`（两种形态的实现与文案）、`sessionsOfUser`/`sourceOfHolder`、`configUnlockHint`（读视图提示） |
+| `internal/api/cliexec.go` | ① `case "request"` 先调 `requestConfigUnlockEarly`（命中即返回，未命中照旧交 `execRequest`）；② `showConfigSessions` 末尾追加 `configUnlockHint` |
+| `internal/api/cli_rest_coverage_test.go` | `unlock` → `DELETE /configuration/candidate`（非 force 形态同义）；`unlock force` 归 CLI 例外（跨会话抢救动作，REST 无对应形态，理由写全） |
+| `internal/api/cli_config_unlock_test.go`（新文件） | 7 例守护（见下） |
+| `docs/NFViS-CLI命令全表.md` | §1.2 request 段插入**一行**（未动其它行） |
+| `docs/NFViS-CLI命令树完整设计.md` | `request system` 树形图补 `configuration unlock [force]` 及语义/读视图/API 说明 |
+| `contrib/scripts/cli-fulltest-phase4.sh` | 非破坏性段加两条（无锁时如实回「无持锁会话」，幂等可反复跑） |
+
+**引擎侧零改动**：只用既有导出方法 `Engine.Sessions()` / `Engine.Discard()`。强制释放「别人的」锁走的是
+**以该持锁会话的身份调用 `Discard`**——引擎按匹配键（holder + 稳定会话 ID）判定，因此精确落到那把锁上，
+且复用引擎唯一的「释放锁 + 清编辑态」路径（不另造第二份释放逻辑，避免与 sweep/接管语义漂移）。
+**`internal/config/engine.go` 未改。**
+
+**为什么执行器落在 `cli_config_unlock.go` 而不是 `requestSystem`**：`requestSystem` 在
+`cli_compute_oper.go`（另一个会话在改的文件）；且它语义上是「编排动作分发器」，而本命令只动配置引擎的
+编辑锁、与底座编排无关。故在 `execOper` 的 `case "request"` 处**先拦一次**，命中即返回。
+
+### 真机证据（nfvis-vm）
+
+**① 无锁时如实说（两种形态都不谎报）**
+```
+$ nfvis-cli … -c "request system configuration unlock"
+（无持锁会话，无需释放）
+$ nfvis-cli … -c "request system configuration unlock force"
+（无持锁会话，无需释放）
+```
+
+**② 脏锁现场：非 force 从「别人的会话」执行 → 正确拒绝并指向 force，且不动那把锁**
+（用 REST `PUT /configuration/candidate` 造一个 `admin@api` 的脏锁）
+```
+$ show configuration sessions
+Holder       Session                              User   Acquired          Last-Activity     Dirty
+admin@api    e2fc3b44-6709-4ecc-a979-2429373ab073 admin  2026-10-25 10:05  2026-10-25 10:05  true
+提示：本会话持锁用 discard 释放；如锁由其它会话持有，可用
+  request system configuration unlock force
+强制释放全部编辑锁（**会丢弃持锁会话未提交的 candidate**）。      ← 读视图给出照做路径（O-3 原文诉求）
+
+$ request system configuration unlock
+当前用户有其它会话持锁；释放它请用 request system configuration unlock force（**会丢弃该会话的未提交 candidate**）
+$ show configuration sessions      ← 锁仍在（非 force 不动别人的锁）
+admin@api    e2fc3b44-…  admin  …  true
+```
+
+**③ force 释放 + 新会话立刻能取锁（报告要求的判据）**
+```
+$ request system configuration unlock force
+已强制释放 1 个编辑锁：admin@api
+注意：这些会话的**未提交 candidate 已被丢弃**，它们后续的配置操作需重新进入配置模式。
+
+$ show configuration sessions
+（无持锁会话）
+
+$ configure / set system hostname qa-desc / commit      ← 新会话立刻取锁并提交成功
+[ok] system hostname qa-desc
+commit 成功 (revision 130)
+```
+
+**④ 审计留痕**
+```
+$ show log audit | grep unlock
+2026-10-25 10:05:38  admin  config.unlock-force  success  强制释放全部编辑锁（释放 1：admin@api）
+```
+
+### 守护测试（`internal/api/cli_config_unlock_test.go`，7 例）
+
+| 用例 | 断言 |
+|---|---|
+| `TestConfigUnlockInCommandTree` | `request system configuration ?` 列出 `unlock`；`… unlock ?` 列出 `force` |
+| `TestConfigUnlockNoLock` | 无锁时如实说「无持锁会话」，**不**声称「已释放」（两种形态都验） |
+| `TestConfigUnlockReleasesOwnOnly` | 别人的 unlock 不动这把锁；自己 unlock 后锁释放且能重新取锁 |
+| `TestConfigUnlockForceReleasesAll` | force 释放全部 + **文案点名代价** + 新会话能立刻取锁 |
+| `TestConfigUnlockForceRequiresSuperUser` | operator 执行 force 被拒（`无权限`），且**被拒时锁不释放** |
+| `TestShowConfigSessionsGivesUnlockHint` | 有锁时读视图给照做命令；super-user 见 force、operator 不见；**空态文案逐字不变**（既有守护依赖） |
+| `TestConfigUnlockSyntaxErrors` | 未知参数给可照做的语法提示（含 `force`） |
+
+---
+## 附：改动文件清单
+
+**O-2**：`internal/orchestrator/network/l2.go`（`desiredMembers` 的 access 分支 + `isVirtualPort` /
+`dropLegacyAccessSubif` / `forgetSubif`）、`internal/orchestrator/network/l2_test.go`（5 例新增 + 1 例改造 + 假件加 VTR 记录）
+
+**O-4**：`internal/orchestrator/compute/cloudinit.go`（`BuildNetworkConfig` / `cloudLocaldsArgs`）、
+`internal/orchestrator/compute/disk_libvirt.go`（seed 构建）、`internal/orchestrator/compute/cloudinit_network_test.go`（新）
+
+**O-3**：`internal/schema/tree_oper.go`、`internal/api/cli_config_unlock.go`（新）、`internal/api/cliexec.go`、
+`internal/api/cli_config_unlock_test.go`（新）、`internal/api/cli_rest_coverage_test.go`、
+`docs/NFViS-CLI命令全表.md`、`docs/NFViS-CLI命令树完整设计.md`、`contrib/scripts/cli-fulltest-phase4.sh`
+
+**未触碰**（按任务书要求，这些是其它会话在改的文件）：`internal/api/{configuration.go,cli_annotate.go,
+cli_compute_oper.go,vm.go,cli_system_show.go,cli_system_pci.go}`、`internal/schema/tree_config.go`、
+`internal/system/{software.go,backup.go}`、`internal/config/engine.go`、
+`internal/orchestrator/compute/{provider.go,client.go,pci_inventory.go}`。
+
+**边界/未做**：
+- O-2 未引入 `L2_ACCESS_VNIC_BLACKHOLE` 兜底告警——**因为功能已真机修好**（任务书说「若 VTR 修好了，
+  这条告警就不需要了——优先把功能修对」）。如实边界：guest 若自己给帧打 tag，该 tag 会原样进 BD
+  （产品不做逐 tag 收敛），要带 tag 请用 trunk。
+- O-2 的 `dropLegacyAccessSubif` 清理失败**不阻断提交**（残留子接口由下次巡检/重放再试）。
+- O-3 的 `force` 形态不提供 REST 端点（跨会话抢救动作，代价须由人显式确认；已在覆盖表登记为 CLI 例外）。
+- O-4 的 ethN 对应关系是经验事实（已在代码注释与本节写明）。

@@ -21,6 +21,11 @@ run S1 "show system kernel"
 run S1 "show system hardware"
 # 主机防火墙读视图（决策 #388）：未配置时如实报「未配置」；真机收敛判定由阶段 2 的提交往返覆盖。
 run S1 "show system firewall"
+# PCI 设备 / IOMMU 组 / 驱动 / 直通可用性清单（修 BUG-24）：列表 + detail 明细。
+# 真机必有 PCI 设备（至少宿主桥/控制器），故列表这条做正向内容断言——表头必须在，
+# 否则「未枚举到 PCI 设备」这类空答会被算作通过；detail 只量命令可用（明细块内容随机器而异）。
+expect_out S1 "IOMMU 组" "show system pci"
+run S1 "show system pci detail"
 run S1 "show system core-dumps"
 run S1 "show system tech-support"
 # 升级/回退结论的事后读口（修 BUG-16）：无记录时也如实返回文本（非错误），

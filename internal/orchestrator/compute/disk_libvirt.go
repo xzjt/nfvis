@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -134,7 +135,25 @@ func (cloudLocaldsSeed) Build(ctx context.Context, vm model.VMFunction, isoPath 
 	if err := os.WriteFile(metaData, []byte(BuildMetaData(vm)), 0o600); err != nil {
 		return err
 	}
-	out, err := exec.CommandContext(ctx, "cloud-localds", isoPath, userData, metaData).CombinedOutput()
+	// O-4（报告 §6.3）：有 vNIC 时追加 `--network-config`，让依赖 cloud-init 网络的镜像
+	// （Cirros 等）拿到 DHCP 配置——此前 seed 只有 user-data/meta-data，guest 无地址 ⇒
+	// 无限重试 metadata（串口刷 `failed N/20: request failed`）、进不到登录态。
+	//
+	// **网络配置是增强，不是必需**：写盘/传参失败时**降级为旧的两件形态**（打一行日志），
+	// 不让「多一份网络配置」把 VM 定义整个挡住。cloud-localds 的形态已按其 --help 核实：
+	//   -N | --network-config F   write network config file to local datasource
+	netCfg := BuildNetworkConfig(vm)
+	netCfgPath := ""
+	if netCfg != "" {
+		netCfgPath = filepath.Join(dir, "network-config")
+		if werr := os.WriteFile(netCfgPath, []byte(netCfg), 0o600); werr != nil {
+			log.Printf("VM %s: 写 network-config 失败，seed 降级为不含网络配置（guest 需镜像自带 DHCP 客户端）: %v",
+				vm.Name, werr)
+			netCfgPath = ""
+		}
+	}
+	out, err := exec.CommandContext(ctx, "cloud-localds",
+		cloudLocaldsArgs(isoPath, userData, metaData, netCfgPath)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("cloud-localds %s: %w: %s", isoPath, err, strings.TrimSpace(string(out)))
 	}

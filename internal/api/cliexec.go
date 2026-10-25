@@ -556,6 +556,12 @@ func (x *cliExecutor) execOper(user, class, source string, s *cliSession, t []st
 	case "clear":
 		return x.execClear(class, t[1:])
 	case "request":
+		// O-3（报告 §7 / O-3）：`request system configuration unlock [force]` 在进入
+		// requestSystem 之前拦下——那是「编排动作分发器」（cli_compute_oper.go），而这个
+		// 子命令只动**配置引擎的编辑锁**，与编排无关。放在这里也避免在分发器里再加一层分支。
+		if out, handled := x.requestConfigUnlockEarly(user, class, source, s, t[1:]); handled {
+			return out
+		}
 		return x.execRequest(user, class, source, t[1:])
 	case "start":
 		return x.execStart(class, source, t[1:])
@@ -946,6 +952,9 @@ func (x *cliExecutor) showConfigSessions(user, class string) string {
 		fmt.Fprintf(&b, "%-12s %-36s %-10s %-19s %-19s %v\n", v.Holder, sid, user,
 			v.AcquiredAt.Format("2006-01-02 15:04"), v.LastActivity.Format("2006-01-02 15:04"), v.Dirty)
 	}
+	// O-3（报告 v3.0.29 §7）：直接给出可照做的释放命令——此前这屏只报「谁在编辑」，
+	// 脏锁的唯一出路（等 10 分钟 / 重启服务）无从得知。
+	b.WriteString(configUnlockHint(views, user, class))
 	return b.String()
 }
 

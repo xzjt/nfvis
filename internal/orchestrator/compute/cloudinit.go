@@ -165,3 +165,50 @@ func ensureTrailingNewline(s string) string {
 	}
 	return s + "\n"
 }
+
+// BuildNetworkConfig 生成 cloud-init **v2** 网络配置（O-4 / 报告 §6.3）。
+//
+// 由来：产品此前的 seed.iso 只含 `meta-data` + `user-data`（`cloud-localds` 只传两个文件），
+// **没有 `network-config`**。对依赖 cloud-init 网络配置的镜像（Cirros、部分 Alpine 变体），
+// guest 起来后网卡上没有 DHCP 客户端在跑 ⇒ 拿不到地址 ⇒ cloud-init 反复重试 metadata
+// （串口刷 `failed N/0: request failed`），根本进不到登录态，而产品侧日志/告警毫无提示。
+//
+// 形态：每块 vNIC 一条 `ethN: {dhcp4: true}`，与产品在 VPP 侧把这些 vNIC 挂进交换机
+// （BD 内有 DHCP server / relay 提供租约）的拓扑一致。
+//
+// **ethN 与 vNIC 声明顺序的对应关系（如实说明这条假设）**：libvirt 按 `vm.Interfaces` 的
+// 声明顺序挂 virtio 网卡，guest 内按 PCI 槽序枚举为 eth0/eth1/…。二者一致是**经验事实**而非
+// 契约保证（guest 若有 udev 改名规则、或镜像自带 netplan 绑定 MAC，序号可能不同）。因此这里
+// 只产出「按序 DHCP」的最小配置——它是对「网卡拿得到地址」的增强，不承诺与 vNIC 名的映射。
+//
+// 无 vNIC 时返回**空串**（不产出 network-config，行为与今天完全一致）——没有网卡的 VM
+// 写一份空的 v2 配置只会让 cloud-init 多一次无意义解析。
+func BuildNetworkConfig(vm model.VMFunction) string {
+	if len(vm.Interfaces) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("#cloud-init network-config v2（nfvis 生成：按 vNIC 声明顺序启用 DHCP）\n")
+	b.WriteString("version: 2\n")
+	b.WriteString("ethernets:\n")
+	for i := range vm.Interfaces {
+		fmt.Fprintf(&b, "  eth%d:\n    dhcp4: true\n", i)
+	}
+	return b.String()
+}
+
+// cloudLocaldsArgs 构造 cloud-localds 的参数（纯函数，便于守护「传参形态」）。
+//
+// 形态（按 `cloud-localds --help`，Ubuntu 26.04 的 cloud-image-utils）：
+//
+//	cloud-localds [options] output user-data [meta-data]
+//	  -N | --network-config F   write network config file to local datasource
+//
+// networkConfigPath 为空 ⇒ 旧的两件形态（行为与修复前逐字一致）。
+func cloudLocaldsArgs(isoPath, userData, metaData, networkConfigPath string) []string {
+	args := []string{isoPath}
+	if networkConfigPath != "" {
+		args = append(args, "--network-config="+networkConfigPath)
+	}
+	return append(args, userData, metaData)
+}
