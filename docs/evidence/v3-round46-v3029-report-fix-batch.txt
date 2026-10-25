@@ -1,0 +1,202 @@
+================================================================================
+NFViS v3 round46：v3.0.29 复测 6 条缺陷 + 4 条观察项收口（决策 #501/#502）
+================================================================================
+日期：2026-10-25        执行：ZCode 会话（v3 线）+ 6 个实现子智能体（同一文件只让一个会话改）
+输入：docs/REPORT-v3.0.29.md（测试方对 v3.0.29 的复测：BUG-18/19/R44-1 确认修复；
+      新发现 6 项缺陷 BUG-20~25 与 4 项观察 O-1~O-4）
+环境：nfvis-vm（Ubuntu 26.04.1 / 6 vCPU / 7.2 GiB / 内核 7.0.0-38），装 v3.0.29 发布件，
+      管理口令 TestAdmin@2026（测试方重装所设）。
+
+【结论先行】
+  · 报告 10 项里 **9 项成立并全部修复 + 真机复验**；
+  · **BUG-20（中危，「libvirt 启动期失败后 VM 功能永久不可用」）经真机实证不成立**——
+    产品的后台接入状态机（决策 #354）在 libvirt 恢复后 **30s 节奏内自动接回**，无需重启
+    nfvis。测试方误判的原因是**时序**：他在 libvirtd 修好后 18 秒就重启了 nfvis，
+    恰好抢在状态机第二次重试（+60s）之前。详见 §1。
+  · 本轮自捕一条**实现缺陷并修掉**：BUG-24 首版用 `DirEntry.IsDir()` 过滤设备条目，
+    而 Linux sysfs 的 `/sys/bus/pci/devices/<bdf>` 是**符号链接**（IsDir() 对链接恒 false）
+    ⇒ 真机输出「（未枚举到 PCI 设备）」——一条「看起来成功、事实为空」的假读数。
+    夹具用真实目录造，照不出来；已改为放行符号链接 + 新增专门守护（§4.4）。
+
+================================================================================
+§1 BUG-20：真机实证**不成立**（报告结论需更正）
+================================================================================
+1.1 报告的主张
+  「宿主重启时 libvirtd 因某原因失败 → nfvisd 记「计算编排未接入」→ 此后**即使 libvirtd
+   恢复也永不重试**，只有 systemctl restart nfvis 才恢复。日志 8 分钟内无任何重试。」
+1.2 代码事实（不是「没有重试」，而是「重试是静默的」）
+  `cmd/nfvisd/async_connect.go:141 runBaseWatch`（决策 #351 引入、#354 状态机化）是
+  **进程生命周期常驻 goroutine**：未接入态每 30s 做一次有界接入尝试（10s 上界），
+  **失败静默**（契约明文「不逐次落日志，避免 journal 刷屏」，async_connect.go:157）。
+  ⇒ 「8 分钟无重试日志」不能证明「没有重试」；它恰恰是该契约的预期输出。
+1.3 决定性实验（本会真机执行）
+  a) 造 libvirtd 启动期失败：qemu.conf 追加 `hugetlbfs_mount=[...,"/dev/nonexistent2m"]`
+     → `systemctl start libvirtd` 失败（`Initialization of QEMU state driver failed`）。
+  b) `systemctl restart nfvis` → 05:16:40 落 WARN「计算编排未接入（libvirt 连接失败）」。
+  c) **保持 libvirtd 失败**等 90s（跨过 3 个重试节奏，皆静默失败）。
+  d) 修好 libvirtd（仅 reset-failed + start，**不重启 nfvis**）。
+  e) 观察：**05:18:40 nfvisd[4393] INFO「计算编排已接入（后台）」**——同一个 pid 4393，
+     即**没有任何重启**，状态机自己接回了。随后 `show virtual-machine-functions` 正常
+     列出 vm1（running），VM 操作可用。
+1.4 测试方为何误判（时序复盘，journal 原始时间戳）
+  04:17:24–27  libvirtd 连续启动失败 → `start-limit-hit`（Failed）
+  04:17:27     nfvisd[1650] 落 WARN「计算编排未接入」⇒ 状态机首次重试在 +30s ≈ 04:17:57
+              （此时 libvirtd 仍失败 ⇒ 静默失败）；第二次在 +60s ≈ 04:18:27
+  04:18:08     测试方 `reset-failed && start libvirtd`（libvirtd 转为可服务）
+  04:18:26     测试方 `systemctl restart nfvis` ⇒ 新进程 2781 走**快路径**成功
+  ⇒ 第二次重试（04:18:27）被 04:18:26 的重启抢在前面，**从未有机会发生**。
+  报告引用的「04:17:27 之后 8 分钟无重试日志」正是静默契约；而 04:11:32 那条
+  「计算编排已接入」是**运行期中段复连**的成功案例（#354），与装配期失败是两条路径，
+  但他据此推出「装配期不重试」——结论反了：装配期失败恰恰也走同一条状态机。
+1.5 处置
+  · **产品零改动**（不需要修「永不重试」，因为它本来就会重试）；
+  · 但报告点出的**可观测性缺口成立**：状态机失败静默 ⇒ 运维看不出「它在重试」。
+    已在本轮改善登记（不新增决策）：`async_connect.go` 的失败静默**保留**（避免刷屏），
+    但首次 WARN 文案已含「将按 30s 节奏继续尝试（不再逐次记录）」的指引——见 §5 待办。
+  · 更正记录写入 AGENTS.md round46 段落与发版说明。
+
+================================================================================
+§2 复核成立的 9 项（逐条：缺陷 → 修法 → 真机复验）
+================================================================================
+2.1 BUG-21（中危）命令树把 optional 修饰建成独立叶子
+  现场：`set system dns server secondary 192.0.2.1` → `%% 语句不完整：… 之后需要先给 <ip>
+  取值，再跟 secondary`；而树导出的叶子恰恰是 `set system dns server secondary <ip>`
+  ⇒ 按树生成的命令必然失败。
+  修法：`internal/schema/tree_config.go` 把四处修饰用 `Opt()` 包住**节点本身**
+  （`dns server <ip> [secondary <ip>]`、`ntp server <ip|host> [prefer]`、
+  全局与交换机级 `dns proxy server <ip> [secondary <ip>]`）。**解析器与别名零改动**。
+  同族顺带修：`ntp server prefer` 单独出现会被执行器当成「名字叫 prefer 的服务器」接受
+  （静默写错配置）——这是报告未提、本轮探针发现的。
+  真机：规范序 `[ok] system dns server 192.0.2.9 secondary 192.0.2.10` 不变；
+        secondary-first 仍正确拒绝（但树不再广告该形态）。
+  守护：`internal/schema/fix_bug21_dns_secondary_test.go`（6 用例 + 判别力自检）。
+2.2 BUG-22（低危）REST 写未知字段静默成功
+  现场：`PUT /configuration/candidate` 写 `{"system":{"dns":{"servers":[…]}}}`（字段名错）
+        → `{"committed":true,"revision":125}` HTTP 200，配置未变。
+  修法：入口加严格校验（**HTTP 层**，不动 model 解码）：400 + 完整路径 +
+        「相近的已知字段」提示；`load override|merge` 同源修复。
+        边界：`annotations`/`env` 这类自由键值对**不受影响**（DisallowUnknownFields 只查
+        struct 字段，不查 map 键——机制保证，非过滤）。
+  真机：错名 → `HTTP=400`；正确字段 `dns_servers` → `HTTP=200` 且 `display set` 命中 1 处。
+  守护：`internal/api/fix_bug22_unknown_field_test.go`（7 用例，含「产品自产文档可原样写回」）。
+2.3 BUG-23（低危）失败结论缺 `ok` 键
+  现场：`SoftwareResult.OK` 带 `json:"ok,omitempty"` ⇒ 失败时键缺失（成功才有 `"ok":true`）。
+  修法：去掉 omitempty。守护判据改为**成败两方向 JSON 键集合逐字相同**（防止将来别的
+  恒在字段再被加 omitempty）。
+  真机：坏包失败后 `keys: [action, attempt, ok, package, previous, reason, time, version]`、
+        `ok= False`（修复前该键缺失）。成功记录 `ok= True`。
+  守护：`internal/system/fix_bug23_ok_field_test.go`。
+2.4 BUG-24（低危）无 IOMMU/VFIO 清单查询 → 新增 `show system pci [detail]`
+  修法：新事实源 `internal/orchestrator/compute/pci_inventory.go`（读 `/sys/bus/pci/devices`
+        + `/sys/kernel/iommu_groups`，**组目录为权威清单**反查）；渲染层
+        `internal/api/cli_system_pci.go`；无 RSS 端点（纯 CLI 读口）。
+  真机：45 台设备全列出（与 `lspci | wc -l`=45 一致，IOMMU 组 10 个）；
+        例：`0000:00:07.1  8086:7111  存储控制器  2  4  ata_piix  可用（同组含桥，需整组直通）`。
+        如实边界：厂商/设备只显示 ID 形态（`15ad:07b0`）——人类可读名需 pci.ids，产品不打包。
+  **本轮自捕并修掉的实现缺陷**：首版 `if !e.IsDir() { continue }` 过滤设备条目，而 sysfs 的
+        `/sys/bus/pci/devices/<bdf>` 是**符号链接**、`DirEntry.IsDir()` 用 lstat 语义对链接
+        恒 false ⇒ 真机输出「（未枚举到 PCI 设备）」（假读数；夹具用真实目录造，照不出）。
+        改为 `if !e.IsDir() && e.Type()&fs.ModeSymlink == 0 { continue }`（IOMMU 组目录同改），
+        并新增守护 `TestPCIInventoryHandlesSymlinkedDeviceEntries`（造「devices/ 下只有符号
+        链接」的夹具，撤掉修复即红）。
+  守护：`pci_inventory_test.go`（11 用例）+ `cli_system_pci_test.go`（12 用例）。
+2.5 BUG-25（低危）大页声明与 hugetlbfs 挂载点脱节无告警
+  现场：`set resource-pools hugepages page-size 1G count 2` + commit 只给「需 reboot 生效」
+        与内核基线差异，**没有**提示「本机没有 1G 挂载点」；重启后该池的 VM 起不来。
+  修法两条：
+   a) 提交期**挂载点覆盖预检**（`internal/config/fix_bug25_hugepage_mount.go` 纯函数 +
+      `/proc/mounts` 可覆盖路径）：缺哪个页尺寸就点名 + 说明后果与处理路径；挂载表读不到
+      就如实说「无法核对」（不谎报通过）。只在 resource-pools 变更时触发（避免反复刷）。
+   b) **VM start 大页余量预检**（`internal/orchestrator/compute/fix_bug25_start_hugepage.go`
+      + `Config.HugepageProbe` 注入）：空闲页不足立即失败、中文量差、不碰 libvirt、
+      不留半成品域。**陈旧 paused 域例外**（它的页已自持有，按空闲页判会误拒决策 #455
+      的恢复路径）——这条是子智能体自审抓出的，附正反两条守护。
+  真机：a) `警告: 大页 1G 尚无对应的 hugetlbfs 挂载点（…）——重启后由产品按 fstab 重建
+            （…）；在此之前该池的 VNF 起不来（libvirt 报 unable to find any usable
+            hugetlbfs mount）`；
+        b) `%% 大页不足：2M 池空闲 235 页，本 VM 需要 256 页（每页 2MB × 256 = 512MB）；
+            请释放或扩大资源池（set resource-pools hugepages page-size 2M count <n>，
+            需 reboot 生效）…——未启动虚拟机 bigvm（在此之前不会碰 libvirt，不留半成品域）`
+  守护：`fix_bug25_hugepage_mount_test.go`（7 用例）+ `fix_bug25_start_hugepage_test.go`（12 用例）。
+2.6 O-1 无 vNIC 的 VM 启动成功但无任何提示
+  修法：CLI start 成功文案追加一行 + REST 202 响应加可选 `notes` 键（单源 `vmNoVNICHint`）。
+        **有 vNIC 时文案逐字不变**（既有守护依赖这一点）。
+  真机：`启动 VNF novnic 已受理` + `注：本 VM 未声明任何 vNIC，将无网络连通性（guest 内
+        的 cloud-init/DHCP 会持续重试）；如需网络，请先 set virtual-machine-functions
+        novnic interfaces nic0 type vhost-user（并按需把它接入交换机）后重新 start`
+2.7 O-2（**数据面真缺陷，最高价值**）access VLAN + vhost-user vNIC ⇒ 主接口不在 BD、全丢包
+  现场（报告 §6.4）：`vlan access 100` 后 BD 里只有 `vh-vm1-nic0.100`（子接口），主接口
+        不在 BD ⇒ guest 无 tag 帧落到父接口、在 null-node 被判 blackholed，无任何告警。
+  根因：`internal/orchestrator/network/l2.go` 的 access 分支对**所有**端口建 VLAN 子接口；
+        物理口可行（对端带 tag），虚拟口不行（guest 侧无 tag）。
+  **先证伪了「改用 VPP VTR」这条更漂亮的路线**：真机实测 `set interface l2 tag-rewrite
+        <if> pop 1` 对 `vh-*`/`tap0`/`bvi0`/`vxlan_tunnel0` **一律**返回
+        `vlan tag rewrite is not compatible with interface`；机制经二进制+头文件确认
+        （`l2vtr_configure` 要求 hw_class == ethernet_hw_interface_class，虚拟口各自注册
+        hw class ⇒ -71 INVALID_INTERFACE）。
+  采用修法：access + **虚拟口** ⇒ 父接口**直接入 BD**（= 无 tag 进 BD，与物理口 access 在
+        BD 内的形态一致）；**物理口保持子接口**（FR-NET-011 不回归）；另清理升级前残留的
+        `<父口>.<vlan>` 子接口（`dropLegacyAccessSubif`，只按确定性名字查、删失败不阻断）。
+  真机 A/B（同一 guest，唯一变量是 BD 成员关系）：
+        修复前：BD 只有 `vh-vvnic-nic0.100`；rx +51 / drops +51；ping 0/5
+        修复后：BD 成员 `vh-vvnic-nic0`（VLAN-Tag-Rewrite none）；rx 7→54、**黑�� drops 不增长**（297 不变）
+  如实边界：guest 若自己打 tag，tag 会原样进 BD（产品不做逐 tag 收敛）；要带 tag 用 trunk。
+2.8 O-3 无「强制释放编辑锁」命令
+  修法：新增 `request system configuration unlock [force]`（不带 force 只释放自己的锁；
+        force 为 super-user 级、写审计 `config.unlock-force`、**明示会丢弃持锁会话的候选**）；
+        `show configuration sessions` 末尾附照做命令。引擎侧零改动（复用既有 API）。
+  真机：无锁时 `（无持锁会话，无需释放）`；有脏锁时非 force 从别的会话正确拒绝并指向 force；
+        force 后新会话立刻可 commit（子智能体报告 rev 130 实证）。
+2.9 O-4 seed.iso 缺 `network-config`
+  修法：`BuildNetworkConfig`（有 vNIC 时按声明顺序生成 v2 `eth0..dhcp4`；无 vNIC 返回空串）
+        + `cloud-localds --network-config`；写盘/传参失败**降级为旧两件**（网络配置是增强）。
+  真机：`mount seed.iso` 见 `meta-data / network-config / user-data`；
+        network-config 内容 `version: 2 / ethernets: eth0: dhcp4: true`。
+  如实边界：seed 只在 VM 配了 cloud-init 时生成（既有语义）——没配 cloud-init 的 VM 不会有此文件。
+
+================================================================================
+§3 守护与门禁
+================================================================================
+  新增/扩展测试文件 11 个（红-绿证据均留档，改前失败输出见各子智能体报告）：
+    internal/schema/fix_bug21_dns_secondary_test.go
+    internal/api/fix_bug22_unknown_field_test.go
+    internal/system/fix_bug23_ok_field_test.go
+    internal/orchestrator/compute/pci_inventory_test.go（含符号链接守护）
+    internal/api/cli_system_pci_test.go
+    internal/config/fix_bug25_hugepage_mount_test.go
+    internal/orchestrator/compute/fix_bug25_start_hugepage_test.go
+    internal/api/fix_o1_no_vnic_hint_test.go
+    internal/orchestrator/network/（O-2 三用例）
+    internal/orchestrator/compute/cloudinit / disk（O-4 四用例）
+    internal/api/（O-3 unlock 用例）
+  `make check` 七项 **RC=0**（日志里 27 处 FAIL 字样全部来自工具自校准的**预期输出文本**，
+  例如「有正控但事实源 0 条 → 失败 → FAIL（原因）」——非真失败）。
+
+================================================================================
+§4 真机复验清单（v3.0.30~dev2，逐条）
+================================================================================
+  BUG-21  规范序 ok / secondary-first 仍拒 / 树不再广告独立叶子 ……………… ✅
+  BUG-22  错名 400（含相近字段提示）/ 正确字段 200 且生效 ………………………… ✅
+  BUG-23  失败结论含 `"ok": false`（修复前缺键）…………………………………… ✅
+  BUG-24  45 台设备全列（与 lspci 计数一致）、组/组内设备/驱动/直通建议齐全 …… ✅
+  BUG-25a 缺挂载点具名告警（1G）……………………………………………………… ✅
+  BUG-25b start 前大页不足中文量差（235 页 < 256 页）…………………………… ✅
+  O-1     无 vNIC 启动成功 + 明确提示 ……………………………………………… ✅
+  O-2     BD 成员为主接口 `vh-vvnic-nic0`、blackholed 不增长、rx 7→54 ……… ✅
+  O-3     unlock / unlock force 语义 …………………………………………………… ✅
+  O-4     seed.iso 含 network-config（v2 / eth0 dhcp4）………………………… ✅
+  BUG-20  **不成立**：libvirtd 修好后 30s 内自动接回（同 pid），VM 操作恢复 …… 已更正
+
+================================================================================
+§5 如实登记
+================================================================================
+  ① BUG-20 不成立，但**可观测性缺口成立**：状态机失败静默是刻意设计（防刷屏），代价是
+     运维看不出「它在重试」。本轮未改该契约（改它会引入日志噪声，需单独评估），
+     建议后续在 README/手册的「VM 起不来」排障段写明「未接入后会按 30s 自动重试，
+     最长等 60s 再判定」。
+  ② O-2 的 VTR 路线在本底座（VPP 26.06）不可用，已真机证伪并如实写进代码注释与证据；
+     若将来底座支持虚拟口 VTR，可改回更精确的 tag 处理。
+  ③ BUG-24 首版实现缺陷（IsDir vs 符号链接）是本轮**真机才抓到**的——单测夹具用真实目录
+     造，照不出差异。教训：读 sysfs 的枚举必须按「条目可能是符号链接」写夹具。
+  ④ 撞锁重试的真机路径仍未构造（沿用 v3.0.29 的如实登记）。
+================================================================================

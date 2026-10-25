@@ -146,8 +146,14 @@ func readPCIInventory(pciRoot, iommuRoot string) (PCIInventory, error) {
 
 	for _, e := range entries {
 		bdf := e.Name()
-		if !e.IsDir() {
-			continue // sysfs 里都是目录；非常规条目如实跳过（不是设备）
+		// sysfs 里 `/sys/bus/pci/devices/<bdf>` 是**指向真实设备目录的符号链接**——
+		// `DirEntry.IsDir()` 用 lstat 语义，对符号链接恒返回 false。真机实测：只认 IsDir()
+		// 会把本机 45 个设备全过滤掉，输出「（未枚举到 PCI 设备）」——一条**看起来成功、
+		// 事实为空**的假读数（单测用真实目录造夹具，照不出这个差异）。
+		// 故这里只排除「确定不是目录也不是符号链接」的条目（如 `uevent` 之类普通文件），
+		// 符号链接留给下面的字段读取去证伪（读不到就是 `-`，不猜）。
+		if !e.IsDir() && e.Type()&fs.ModeSymlink == 0 {
+			continue
 		}
 		f := PCIDeviceFacts{
 			BDF:        bdf,
@@ -198,7 +204,9 @@ func readIOMMUGroups(root string, byBDF map[string]int, groupDevices map[int][]s
 		return false, fmt.Errorf("IOMMU 组目录 %s 不可读: %w", root, err)
 	}
 	for _, g := range groups {
-		if !g.IsDir() {
+		// 同 PCI 设备目录：sysfs 的组条目也可能是符号链接（IsDir() 对链接恒 false）。
+		// 只放行「目录或符号链接」，避免因 lstat 语义把整份 IOMMU 视图读成空。
+		if !g.IsDir() && g.Type()&fs.ModeSymlink == 0 {
 			continue
 		}
 		n, err := strconv.Atoi(g.Name())

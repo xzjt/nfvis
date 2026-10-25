@@ -383,3 +383,58 @@ func TestPCIInventoryProductionSourceReadOnly(t *testing.T) {
 	}
 	t.Logf("本机枚举到 %d 台 PCI 设备（首台 %s，组 %d）", len(inv.Devices), inv.Devices[0].BDF, inv.Devices[0].IOMMUGroup)
 }
+
+// TestPCIInventoryHandlesSymlinkedDeviceEntries 设备条目本身是**符号链接**时仍要枚举到。
+//
+// 这是真机才暴露的一条（v3.0.30 验证现场抓出）：Linux 的 `/sys/bus/pci/devices/<bdf>` 是
+// **指向 devices/pciXXXX:XX/… 的符号链接**，而 `DirEntry.IsDir()` 用 lstat 语义、对链接恒
+// 返回 false。第一版按 `IsDir()` 过滤 ⇒ 本机 45 台设备全被跳过，命令输出「（未枚举到 PCI
+// 设备）」——**一条看起来成功、事实为空的假读数**（上面的夹具都用真实目录，照不出这个差异）。
+//
+// 守护方式：把设备目录放到 devices 之外，再在 devices 下建**指向它的符号链接**（与 sysfs 同形）。
+func TestPCIInventoryHandlesSymlinkedDeviceEntries(t *testing.T) {
+	f := newPCIFixture(t)
+	// 真实设备目录放在真实 sysfs 会有的位置（<root>/devices/pci0000:00/…），devices/ 下只放链接。
+	realDir := filepath.Join(f.root, "devices", f.name("pci0000:00"), f.name("0000:00:1f.2"))
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{"vendor": "0x8086\n", "device": "0x2829\n", "class": "0x010601\n", "enable": "1\n"} {
+		if err := os.WriteFile(filepath.Join(realDir, k), []byte(v), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(f.devs, f.name("0000:00:1f.2"))
+	if err := os.Symlink(realDir, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("跳过：本环境无法创建符号链接（%v）", err)
+		}
+		t.Fatal(err)
+	}
+	// 组目录下的条目同样是符号链接（sysfs 形态）。
+	if err := os.MkdirAll(filepath.Join(f.groups, "5", "devices"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(link, filepath.Join(f.groups, "5", "devices", f.name("0000:00:1f.2"))); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("跳过：本环境无法创建符号链接（%v）", err)
+		}
+		t.Fatal(err)
+	}
+
+	inv, err := readPCIInventory(f.devs, f.groups)
+	if err != nil {
+		t.Fatalf("读清单: %v", err)
+	}
+	if len(inv.Devices) != 1 {
+		t.Fatalf("符号链接形态的设备条目必须被枚举到（IsDir() 对链接恒 false——这正是真机输出「未枚举到 PCI 设备」的原因）；实得 %d 台：%+v",
+			len(inv.Devices), inv.Devices)
+	}
+	d := inv.Devices[0]
+	if d.Vendor != "8086" || d.Device != "2829" {
+		t.Fatalf("经符号链接也要读到真实字段（vendor/device）：%+v", d)
+	}
+	if d.IOMMUGroup != 5 {
+		t.Fatalf("经符号链接也要反查到 IOMMU 组 5，实得 %d", d.IOMMUGroup)
+	}
+}
