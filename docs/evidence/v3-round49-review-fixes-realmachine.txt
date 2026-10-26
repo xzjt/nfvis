@@ -229,3 +229,17 @@ $ nfvis-cli -c "configure; set system dataplane vpp; commit" → revision 5 → 
 - 终端 ticket 的手工吊销与已建立 WS 的关闭：仅单测（可观察 fake 流）覆盖，真机未接 WS 客户端验证。
 - `cloud-init.hostname` 的 YAML 转义分支：RFC1123 校验已挡住危险值，**转义路径在配置侧不可达**，仅单测覆盖。
 - `main-core = 0` 是否占核 0：未定裁（同 AGENTS 登记）。
+
+## §7 发版记录（v3.0.32）
+
+```
+源码：git archive of fix(round49) commit a84d93a（v3 分支），VERSION=3.0.32，SOURCE_DATE_EPOCH=1793028178
+deb：两打逐字节一致
+  d0da4242b4d46fc36176334554067e15fb12f30f697ecc949ad4b651ec73d543  nfvis_3.0.32_amd64.deb（11,342,348 B）
+.run：两打逐字节一致（闭包自 v3.0.31 载荷提取并替换产品 deb；gzip 数据在标记行下一行，tail -n +65）
+  0a106797dc68e172ad96ac0ce60ce2bb1f33069171974fca0ce4568b0108b2e1  nfvis-v3.0.32.run（186,115,029 B）
+自检：offline-installer-selftest 11/0；sh .run --verify 11 项全过 rc=0（只体检模式）
+安装：.run -y → 退出码 0，自检 18/0/0；dpkg -i deb → NFViS 3.0.32
+发布件上四套件：fulltest 306/0/26 · 语义 43/0/0 · lifecycle 40/0/3 · pty 10/10
+  （连续跑时 lifecycle 出现「登记 1」＝L2 对账窗口 VPP 不可用的时序假象，单独复跑 40/0/3、登记 0）
+```
