@@ -205,6 +205,20 @@
   `os.WriteFile`，换证窗口内 `GetCertificate` 会回退旧 cert（round47 观测到一次
   `x509: certificate signed by unknown authority`，40 串行 + 12×12 并发未复现）；建议
   `os.Rename` 原子替换。证据 `docs/evidence/v3-round48-r47-1-r47-2-fix.txt`。
+  **已发布 v3.0.31**（tag `v3.0.31` → `v3 37e9612`；`SOURCE_DATE_EPOCH=1792994318`）：
+  deb sha256 `9446f49c…`（**11,268,202 B**，`-Zzstd --uniform-compression`——⚠️ **deb 必须 zstd
+  且带 `SOURCE_DATE_EPOCH`**，否则 dpkg-deb 会把当前时间写进 control.tar、两打不一致，
+  且 gzip 口径比 zstd 大约 2.8 MB）、`.run` sha256 `0b7897e7…`（**186,041,023 B**，载荷 239 deb）——
+  两件均**两打逐字节一致**；`.run` 结构自检 **20/0**、`--verify` **12/0/0**、
+  **真 `.run` 首装 18/0/0**（退出码 0）；**回下载件 sha256 与构建端逐字相同**（四资产）。
+  **发布件上四套件零失败**：fulltest **302/0/26**、语义 **43/0/0**、lifecycle **40/0/3**、pty **10/10**；
+  两条修复在发布件上各复验一次（deb 装一次、`.run` 装一次）：全新 Debian 13 VNF 不改 guest
+  即得 active 租约、`statistics` 的 `drops` 列非零（154 / 93）、REST 键集为
+  `['drops','rx_bytes','rx_errors','rx_packets','tx_bytes','tx_errors','tx_packets']`。
+  ⚠️ **`.run` 构建入册**：闭包（239 deb）可从上一版 `.run` 的载荷里取出复用——
+  `tail -n +<PAYLOAD_BELOW 标记行> old.run > p.tgz && tar -xzf p.tgz -C dir`（**别用管道接 `head`**，
+  SIGPIPE 会把 tar 打断、只解出一个 `Packages`），再替换其中的 `nfvis_*.deb` 后用
+  `build-offline-run.sh --debs … --version … --epoch …` 重建。
 
 ## 验证与口径纪律（决策 #481；对所有会话生效）
 

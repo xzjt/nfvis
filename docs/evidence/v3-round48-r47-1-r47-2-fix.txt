@@ -250,3 +250,32 @@ fulltest 自清场「套件对象已清干净（未清项 0）」。
   从来没有任何提供者**（`stateRuntimeFor` 直接返回 nil）——本轮一并补齐（`state.Counters` +
   `netkernel/counters.go`），否则「内核侧按方向给丢弃」这条口径根本无处落地。
 · 四套件零失败且与发版基线逐项一致；`make check` 七项 RC=0；全仓测试 0 失败。
+
+--------------------------------------------------------------------------------
+§11 发版（v3.0.31）
+--------------------------------------------------------------------------------
+11.1 产物（`SOURCE_DATE_EPOCH=1792994318`，两打**逐字节一致**）：
+     · `nfvis_3.0.31_amd64.deb` sha256
+       `9446f49cf0148f6bf1b60c1a40492f6ccd48ea1d1cac539ec0f0ae9c17878a00`（11,268,202 B）
+       —— ⚠️ **构建口径两条（本轮踩到并纠正，入册）**：
+       ① 必须 `-Zzstd --uniform-compression`（v3.0.30 就是 zstd；gzip 口径大 ~2.8 MB 且与历史不一致）；
+       ② 必须给 `SOURCE_DATE_EPOCH`——否则 dpkg-deb 把**当前时间**写进 control.tar，
+          两打 sha256 不同（首轮实测 `5a0e4908…` vs `13217bfa…`，`cmp` 在 byte 34 分叉）。
+     · `nfvis-v3.0.31.run` sha256
+       `0b7897e7bf440030b26e930dd9cdd9eb1c6f4bc54d4b68528ecc2796fd9f494e`（186,041,023 B，载荷 239 deb）。
+11.2 `.run` 自检：结构自检 **20/0**（含「Packages 条目数 = deb 数」「索引 sha256 逐一一致」
+     「依赖闭包自洽 239 包 / 838 依赖 / 313 提供名」「安装清单里每个包名都在载荷内」等）；
+     `--verify` **12/0/0**；**真 `.run` 首装 18/0/0**（退出码 0）。
+11.3 **三处一致**：构建端 / 上传件（GitHub 服务端 asset digest）/ 回下载件 sha256 **逐字相同**
+     （deb `9446f49c…`、`.run` `0b7897e7…`；deb 回下载 `cmp` 逐字节一致）。
+11.4 **发布件上两条修复的真机复验**（deb 装一次、`.run` 装一次，各一轮）：
+     · R47-1：全新 Debian 13 VNF **不改 guest** ⇒ `192.168.99.100 active`（MAC 与 seed 逐字一致）、
+       网关 ping **4/4 0% 丢包**；
+     · R47-2：`show interfaces ens192 statistics` 的 `drops` 列非零（**154** / **93**）；
+       REST 键集 `['drops','rx_bytes','rx_errors','rx_packets','tx_bytes','tx_errors','tx_packets']`
+       （**不含** `rx_drops`/`tx_drops`）。
+     （如实登记：两轮的**首次** ping 都在 guest 刚起 ~85s 时 0/4，隔 30~35s 复测即 4/4——
+      那是 guest 网络栈初始化窗口，不是缺陷；观测窗口要留够。）
+11.5 **发布件上四套件零失败**（与 v3.0.30 基线逐项一致）：fulltest **302/0/26**、
+     语义 **43/0/0**、lifecycle **40/0/3**、pty **10/10**。
+11.6 tag `v3.0.31` → `v3 37e9612`；GitHub Release 四资产（deb/.run 各带 `.sha256` 旁车）。
