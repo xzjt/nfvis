@@ -268,6 +268,17 @@ func (s *Service) Logout(token string) {
 }
 
 // VerifyToken 校验 token 并返回身份（FR-SEC-002：token 与用户绑定且继承其权限）。
+//
+// 决策 #506（round49）：身份按**当前 committed 配置重算**，不再回带签发时固化的 class。
+// 此前只在签发时固化 user/class、校验只查内存表——用户被降权（含 CLI
+// `set system login user <n> class <c>` 这条不经 REST 主动吊销的路径）、被删除后，
+// 旧 token 在 TTL 内仍以原身份可用。现在的口径：
+//
+//	过期/未登记 ⇒ ErrUnauthorized（语义不变）；
+//	用户已不在 committed 配置 ⇒ ErrUnauthorized（「谁」已不存在，凭据随之作废）；
+//	用户仍在 ⇒ class 取 effectiveClass(cfg,u)，与清单（ListTokens）同源刷新。
+//
+// token 与用户绑定、重启失效、过期随访问清扫等既有语义均不变。
 func (s *Service) VerifyToken(token string) (*TokenInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -276,6 +287,17 @@ func (s *Service) VerifyToken(token string) (*TokenInfo, error) {
 	if !ok {
 		return nil, ErrUnauthorized
 	}
+	cfg, err := s.src.Committed()
+	if err != nil {
+		return nil, err
+	}
+	u := findUser(cfg, entry.user)
+	if u == nil {
+		return nil, ErrUnauthorized
+	}
+	// 登记表里的 class 同步刷新：清单与被吊销判定都以它为准，不留陈旧读数。
+	entry.class = effectiveClass(cfg, u)
+	s.tokens[token] = entry
 	return &TokenInfo{Token: token, ID: entry.id, User: entry.user, Class: entry.class, IssuedAt: entry.issuedAt, ExpiresAt: entry.expiresAt}, nil
 }
 
@@ -338,6 +360,56 @@ func (s *Service) RevokeToken(viewerUser, viewerClass, id string) error {
 		return nil
 	}
 	return ErrTokenNotFoundOrForbidden
+}
+
+// ---------- 按用户吊销与按 ID 复核（决策 #506；round49） ----------
+
+// RevokeUserTokens 吊销某用户的**全部**活动会话，返回被吊销 token 的稳定 ID 列表
+// （稳定升序，无会话时为空）。
+//
+// 调用点是「该用户的身份凭据已变」的每一处（round49 第 1 条）：改 class、重置口令、
+// 删除用户、本人自助改口令成功之后。此前这些路径都不吊销 token，于是被降权/被删/改了
+// 口令的用户在 TTL 内继续持旧凭据可用（高危）。空用户名不吊销任何东西（不误伤全体）。
+//
+// 与 RevokeToken 的分工：后者是「按稳定 ID 吊销单个会话」的用户可见动作（带权限判定），
+// 本方法是无权限语义的**系统内部收尾**（调用方已在自己的鉴权路径内），故不做 viewer 判定。
+func (s *Service) RevokeUserTokens(user string) []string {
+	if user == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked()
+	var ids []string
+	for tok, e := range s.tokens {
+		if e.user != user {
+			continue
+		}
+		ids = append(ids, e.id)
+		delete(s.tokens, tok)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// ActiveTokenID 报告某稳定 ID 是否仍对应一个**活动**会话（决策 #507；round49 第 2 条）。
+//
+// 面向「ticket 已在手、WS 已握上」的终端：这些用途拿不到 Bearer Token，只能靠 ticket 鉴权，
+// 于是登出/吊销不会终止它们。握手期与建立后的收尾都以本方法复核。
+// 空 ID 保守放行为真——调用方拿不到稳定 ID（无凭据来源可比）时不能凭一个空串推断「已吊销」。
+func (s *Service) ActiveTokenID(id string) bool {
+	if id == "" {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked()
+	for _, e := range s.tokens {
+		if e.id == id {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- 生效权限视图的判定查询（决策 #304） ----------

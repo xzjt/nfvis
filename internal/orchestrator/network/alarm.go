@@ -62,6 +62,16 @@ const (
 	// 巡检按「强制重建待办」重建：待办在 ⇒ 活动；一次真正的全量重放完成 ⇒ 自动消解。
 	// 严重级别 warning；source 固定（描述的是「代际重建」这件事本身，不随某个对象变化）。
 	AlarmReplayRequired = "RECOVERY_REPLAY_REQUIRED"
+	// AlarmConfirmedRollbackFailed commit confirmed 超时后**反向下发失败**（round49 缺陷 #1）：
+	// 变更未被撤销，committed 与数据面都仍停在变更后的版本。这是「超时保护已被这次超时消费掉、
+	// 但承诺的回滚没有发生」——必须让操作者在 `show alarms`/Web 总览/诊断包里看到，而不是
+	// 只在审计里留一行。严重级别 error；source=system；操作者重新提交一份正确配置（提交成功）
+	// 即自动消解（配置与数据面重新一致）。
+	AlarmConfirmedRollbackFailed = "CONFIRMED_ROLLBACK_FAILED"
+	// AlarmAuditWriteFailed 审计日志写入失败（round49 收尾）：操作记录将丢失，而审计正是
+	// 配置/高危动作**唯一的持久事实源**（FR-CFG-010）。严重级别 error；source=system；
+	// 一次审计写入成功后由引擎上报恢复事件，据此自动消解。
+	AlarmAuditWriteFailed = "AUDIT_WRITE_FAILED"
 )
 
 // ResidueCodes 全部「残渣对账」告警码（消解只在本集合内进行，不误伤恢复收敛的其它告警）。

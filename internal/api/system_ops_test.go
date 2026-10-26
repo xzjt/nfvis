@@ -15,8 +15,11 @@ import (
 )
 
 // M5-6：备份 → 恢复出厂 → 恢复 的 API 闭环。
+//
+// 决策 #506 起「恢复出厂」会连同账号表一起复位（FR-OPS-007），原会话随之结束——本用例按真机
+// 口径重走启动引导（admin 重建）后再继续，闭环本身（空配置 → restore 回来）不变。
 func TestBackupRestoreZeroizeEndpoints(t *testing.T) {
-	ts := newTestServer(t)
+	ts, engine, authz := authKit(t, Options{})
 	token := loginAdmin(t, ts)
 
 	// 预置一点配置（经 CLI 会话，exit 会释放 candidate 锁，避免影响后续 zeroize/restore）
@@ -75,6 +78,13 @@ func TestBackupRestoreZeroizeEndpoints(t *testing.T) {
 		map[string]any{"confirm": true}, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusAccepted {
 		t.Fatalf("zeroize: %d %s", status, data)
 	}
+	// 决策 #506：恢复出厂**连同账号表一起复位**（FR-OPS-007，「账号已复位」是产品自己的文案）
+	// ——发起本动作的会话随之结束，不能再用旧 token 读空配置。恢复现场与真机同路：重启 nfvisd
+	// ⇒ 启动引导重建 admin（同一函数）⇒ 重新登录继续本闭环。
+	if status, _, _ := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/interfaces", token, nil, nil); status != http.StatusUnauthorized {
+		t.Fatalf("恢复出厂后原会话应 401（账号已复位），实得 %d", status)
+	}
+	token = asSuperUser(t, ts, rebootstrapAdmin(t, engine, authz))
 	if status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/interfaces", token, nil, nil); status != http.StatusOK ||
 		strings.Contains(string(data), "ens3f0") {
 		t.Fatalf("恢复出厂后接口应清空: %d %s", status, data)

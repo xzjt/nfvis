@@ -254,6 +254,9 @@ func run() error {
 		// 绑定记录（口名→PCI）是口无 netdev 时唯一的定位来源（决策 #100），故照常装配；
 		// 探测「仍被 DPDK 驱动占用」供恢复收敛点名（决策 #426③）。
 		dpdkBinder = network.NewDPDKBinder()
+		// round49：绑定失败且原驱动未还原（设备可能已无驱动）需要事后可查的落点——只报在
+		// 当次命令输出里的话，`show alarms`/Web 总览/诊断包全查不到（与 #191/#321 的纪律冲突）。
+		dpdkBinder.Alarms = alarms
 		dpdkBindings = network.NewBindings(network.DefaultBindingsPath)
 		dpdkBinder.Bindings = dpdkBindings
 		// 决策 #464：原生驱动记录（PCI → 接管前的内核驱动）。解绑不带 to-driver 时按它交还——
@@ -326,6 +329,9 @@ func run() error {
 		l2net.SetMemif(network.NewMemifProviderFunc(vppMgr.MemifClientFunc()))
 		// FR-NET-001（决策 #72）：网卡 DPDK 驱动接管（sysfs driver_override/bind/unbind）
 		dpdkBinder = network.NewDPDKBinder()
+		// round49：绑定失败且原驱动未还原（设备可能已无驱动）需要事后可查的落点——只报在
+		// 当次命令输出里的话，`show alarms`/Web 总览/诊断包全查不到（与 #191/#321 的纪律冲突）。
+		dpdkBinder.Alarms = alarms
 		// 决策 #100（发现 #8）：绑定记录（口名 → PCI）。口一旦交 DPDK，内核就没有它的 netdev 了，
 		// 而 startup.conf 的 dev 段以 PCI 为键——记录是「绑定那一刻」留下的唯一映射来源，
 		// 也是「按口名解绑」的依据。不入 committed 配置（决策 #30：PCI 不随配置走）。
@@ -616,9 +622,42 @@ func run() error {
 	if imagesStore != nil {
 		engineOpts.ImageResolver = imagesStore // FR-CFG-011⑤：镜像存在性与类型匹配
 	}
+	// round49：引擎事件与审计故障出口的接线。
+	//
+	// 由来：`Options.OnEvent` 自引入起**从未接线**，于是超时回滚、空闲锁释放失败这类
+	// 「持久化/收敛失败」在生产里只有测试能看到；审计写入失败（round49 才发现）更是完全无痕，
+	// 而审计正是配置与高危动作唯一的持久事实源。这里把事件落成日志 + 告警（可自动消解），
+	// 失败与恢复都可见——不接的话 `show alarms`/Web 总览/诊断包全查不到。
+	engineOpts.OnEvent = func(ev config.Event) {
+		switch ev.Type {
+		case config.EventConfirmedRollbackFailed:
+			log.Error("commit confirmed 超时回滚失败：变更未被撤销", "msg", ev.Message)
+			alarms.Raise("config", network.SeverityError, network.AlarmConfirmedRollbackFailed, ev.Message, "system")
+		case config.EventConfirmedTimeout:
+			log.Warn("commit confirmed 超时，已自动回滚", "msg", ev.Message)
+		case config.EventLockReleaseFailed:
+			log.Error("空闲锁释放失败：锁行仍在，其它会话的配置写可能被挡住", "msg", ev.Message)
+		case config.EventAuditWriteRecovered:
+			log.Info("审计写入已恢复")
+			alarms.Resolve("config", network.AlarmAuditWriteFailed, "system")
+		case config.EventLockTimeout:
+			log.Debug("candidate 空闲超时释放", "msg", ev.Message)
+		default:
+			log.Debug("配置引擎事件", "type", ev.Type, "msg", ev.Message)
+		}
+	}
+	engineOpts.OnAuditError = func(en config.AuditEntry, err error) {
+		log.Error("审计写入失败：操作记录将丢失", "action", en.Action, "user", en.User, "result", en.Result, "err", err)
+		alarms.Raise("config", network.SeverityError, network.AlarmAuditWriteFailed,
+			"审计日志写入失败：操作记录将丢失。根因："+err.Error()+
+				"；请检查 /var/lib/nfvis 所在分区与配置库状态", "system")
+	}
 	// M5-1：commit 成功事件（config-committed）
 	engineOpts.OnCommitted = func(revision int, user string) {
 		bus.Publish(events.TypeConfigCommitted, map[string]any{"revision": revision, "user": user})
+		// 一次成功的提交意味着配置与数据面重新一致 ⇒ 超时回滚失败的告警自动消解
+		// （审计写失败不在此列：提交成功也可能是审计写不进去时走完的，只由恢复事件消解）。
+		alarms.Resolve("config", network.AlarmConfirmedRollbackFailed, "system")
 		// M5-8：提交后落实证书与日志保留策略（尽力而为，不阻塞 commit）
 		go func() {
 			if eng == nil {
@@ -2274,6 +2313,16 @@ func (c *softwareController) Add(ctx context.Context, pkg, sha string) (system.S
 }
 func (c *softwareController) Rollback(ctx context.Context) (system.SoftwareResult, error) {
 	return c.m.Rollback(ctx)
+}
+
+// RollbackTo 转发「回退到指定版本」（round49）。
+//
+// 这层转发曾漏过一次，且**真机才抓到**：当时 RollbackTo 只在 api 侧以可选接口断言，适配器没实现
+// ⇒ `rollback to <版本>` 在真机恒报「装配不支持指定版本回退」，而所有单测都注入自带该方法的假件、
+// 全绿（与下面 PackageState 的静默缺转发同族）。现已把 RollbackTo 升为 api.SoftwareRuntime 的成员
+// ——适配器漏实现直接编译失败；`cmd/nfvisd` 另有静态守护钉住本方法（software_state_wiring_test.go）。
+func (c *softwareController) RollbackTo(ctx context.Context, version string) (system.SoftwareResult, error) {
+	return c.m.RollbackTo(ctx, version)
 }
 func (c *softwareController) Reboot(ctx context.Context) error   { return c.m.Reboot(ctx) }
 func (c *softwareController) Shutdown(ctx context.Context) error { return c.m.Shutdown(ctx) }

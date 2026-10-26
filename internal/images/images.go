@@ -237,14 +237,35 @@ func (s *Store) Get(name string) (Meta, bool) {
 }
 
 // Path 返回镜像文件路径（容器镜像无本地文件，返回空）。
+// 越界的历史遗留条目不给路径（round49 镜像名越界收口）：Path 是克隆源，指到仓库外就是读任意文件。
 func (s *Store) Path(name string) string {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	m, ok := s.index[name]
+	s.mu.Unlock()
 	if !ok || m.Type != TypeVM {
 		return ""
 	}
+	if _, err := s.containedPath(name); err != nil {
+		return ""
+	}
 	return filepath.Join(s.cfg.Dir, name)
+}
+
+// containedPath 返回镜像在仓库内的**最终落盘路径**，并复核它确实位于仓库目录之内
+// （round49 镜像名越界收口的第二层：名称校验是第一层）。
+//
+// 复核方式：Dir 先取绝对路径，Join（会 Clean）后必须仍带 `<dirAbs><分隔符>` 前缀——
+// `../` 一旦逃逸出去，前缀必然失配，故历史遗留的越界条目/被绕过的校验都挡在这里。
+func (s *Store) containedPath(name string) (string, error) {
+	dirAbs, err := filepath.Abs(s.cfg.Dir)
+	if err != nil {
+		return "", err
+	}
+	dest := filepath.Join(dirAbs, name)
+	if !strings.HasPrefix(dest, dirAbs+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w：%q 超出镜像仓库目录 %s", ErrInvalidName, name, s.cfg.Dir)
+	}
+	return dest, nil
 }
 
 // ErrReferenced 镜像被 VNF/容器引用，不可删除（FR-CMP-033）。
@@ -254,6 +275,9 @@ var ErrReferenced = errors.New("镜像被引用，不可删除")
 var ErrNotFound = errors.New("镜像不存在")
 
 // Delete 删除镜像（refCount>0 时报 ErrReferenced；容器镜像经 Docker API 删除）。
+//
+// 删除前先校验名字（round49 镜像名越界收口）：索引里可能存在**历史遗留的越界条目**（写这条路时尚未
+// 校验），照删就等于按名字去仓库外 os.Remove。
 func (s *Store) Delete(name string, refCount int) error {
 	if refCount > 0 {
 		return fmt.Errorf("%w（%d 个引用）", ErrReferenced, refCount)
@@ -264,6 +288,9 @@ func (s *Store) Delete(name string, refCount int) error {
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrNotFound, name)
 	}
+	if err := ValidateImageName(name, m.Type); err != nil {
+		return err
+	}
 	if m.Type == TypeContainer {
 		if s.dockerRemove == nil {
 			return fmt.Errorf("删除容器镜像 %s：未接入 Docker", name)
@@ -272,7 +299,11 @@ func (s *Store) Delete(name string, refCount int) error {
 			return fmt.Errorf("删除容器镜像 %s: %w", name, err)
 		}
 	} else {
-		if err := os.Remove(filepath.Join(s.cfg.Dir, name)); err != nil && !os.IsNotExist(err) {
+		dest, err := s.containedPath(name)
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(dest); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("删除镜像文件 %s: %w", name, err)
 		}
 	}
@@ -297,6 +328,10 @@ func (s *Store) ImportIncoming(name, typ, incomingFile, description string) (Met
 	}
 	if typ != TypeVM && typ != TypeContainer {
 		return Meta{}, fmt.Errorf("type 必须为 %s 或 %s", TypeVM, TypeContainer)
+	}
+	// 名字先校验（round49 镜像名越界收口）：下面的 dst 直接由它拼出，`../` 一穿就是仓库外的任意文件。
+	if err := ValidateImageName(name, typ); err != nil {
+		return Meta{}, err
 	}
 	incAbs, err := filepath.Abs(s.cfg.IncomingDir)
 	if err != nil {
@@ -344,7 +379,10 @@ func (s *Store) ImportIncoming(name, typ, incomingFile, description string) (Met
 		s.emitState(name, typ, StateReady)
 		return m, nil
 	}
-	dst := filepath.Join(s.cfg.Dir, name)
+	dst, err := s.containedPath(name)
+	if err != nil {
+		return Meta{}, err
+	}
 	if err := os.Rename(abs, dst); err != nil {
 		return Meta{}, fmt.Errorf("导入镜像 %s: %w", name, err)
 	}

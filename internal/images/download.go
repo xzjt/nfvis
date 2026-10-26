@@ -94,6 +94,12 @@ func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error
 	if err := ValidateDownloadOptions(opts); err != nil {
 		return Meta{}, err
 	}
+	// 落盘路径在这里算一次（round49 镜像名越界收口）：名称校验已过，这里再做**仓库前缀复核**并给
+	// 容器镜像挑一个安全临时名；后续 .part / 清理 / docker load 都用同一个 dest。
+	dest, err := s.downloadDest(opts.Name, opts.Type)
+	if err != nil {
+		return Meta{}, err
+	}
 	pending := Meta{Name: opts.Name, Type: opts.Type, SHA256: opts.SHA256,
 		Description: opts.Description, ImportState: StateDownloading}
 	if err := s.setMeta(pending); err != nil {
@@ -130,14 +136,14 @@ func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error
 		m.DownloadedBytes, m.TotalBytes = done, total
 		if m.DownloadedBytes == 0 {
 			// 一个字节都没读到就失败（连接/HTTP 层）：断点仍可能留在 .part（续传场景）。
-			if st, err := os.Stat(filepath.Join(s.cfg.Dir, opts.Name) + ".part"); err == nil {
+			if st, err := os.Stat(dest + ".part"); err == nil {
 				m.DownloadedBytes = st.Size()
 			}
 		}
 		return m
 	}
 
-	meta, err := s.downloadFile(ctx, opts)
+	meta, err := s.downloadFile(ctx, opts, dest)
 	if err != nil {
 		if progressErr != nil {
 			err = fmt.Errorf("%w（进度落盘失败：%v）", err, progressErr)
@@ -147,10 +153,10 @@ func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error
 	// 容器镜像：URL 拉取的是 docker save 归档 → `image load` 后删除临时文件，仅登记元数据。
 	if opts.Type == TypeContainer {
 		if s.dockerLoad == nil {
-			_ = os.Remove(filepath.Join(s.cfg.Dir, opts.Name))
+			_ = os.Remove(dest)
 			return Meta{}, s.fail(failedMeta(), fmt.Errorf("拉取容器镜像 %s：未接入 Docker", opts.Name))
 		}
-		archive := filepath.Join(s.cfg.Dir, opts.Name)
+		archive := dest
 		// 读出归档内嵌 tag（决策 #312）：用于说明，不作放行判据（读不到不阻断）。
 		if tags, terr := ReadDockerArchiveTags(archive); terr == nil {
 			meta.SourceTags = tags
@@ -187,7 +193,24 @@ func (s *Store) fail(m Meta, cause error) error {
 	return cause
 }
 
-func (s *Store) downloadFile(ctx context.Context, opts DownloadOptions) (Meta, error) {
+// downloadDest 计算 URL 拉取的落盘路径，并复核它位于仓库之内（round49 镜像名越界收口）。
+//
+// VM 镜像：就是仓库里的 `<name>`（与 Path() 同一处）——名字已由 ValidateImageName 保证
+// 是纯文件名，不会建出子目录。
+//
+// 容器镜像：name 是 **Docker 引用**（合法者可含 `/`，如 `library/alpine:3.20`），**不能**
+// 当文件名用——直接用会在仓库里建子目录，且 .part 断点、临时归档与清理路径全跟着
+// 用户输入走。改用仓库内的安全临时名（由名字摘要推出，故同一镜像名的续传断点稳定可复用），
+// 载入 Docker 后即删除。
+func (s *Store) downloadDest(name, typ string) (string, error) {
+	if typ == TypeContainer {
+		sum := sha256.Sum256([]byte(name))
+		return s.containedPath(".download-" + hex.EncodeToString(sum[:8]) + ".archive")
+	}
+	return s.containedPath(name)
+}
+
+func (s *Store) downloadFile(ctx context.Context, opts DownloadOptions, dest string) (Meta, error) {
 	client := opts.Client
 	if client == nil {
 		// 缺省客户端：只在「连接 + 响应头」上设上限，**不设整体上限**（决策 #185）。
@@ -202,7 +225,8 @@ func (s *Store) downloadFile(ctx context.Context, opts DownloadOptions) (Meta, e
 			client = &http.Client{}
 		}
 	}
-	dest := filepath.Join(s.cfg.Dir, opts.Name)
+	// dest 由调用方经 downloadDest 算好（仓库内且已过前缀复核）；仓库目录本身在 Open
+	// 时已建，这里只需保证父目录存在（VM 镜像即仓库目录，容器临时名也在仓库目录下）。
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return Meta{}, err
 	}
@@ -396,6 +420,11 @@ func ValidateDownloadOptions(opts DownloadOptions) error {
 	}
 	if opts.Type != TypeVM && opts.Type != TypeContainer {
 		return fmt.Errorf("type 必须为 %s 或 %s", TypeVM, TypeContainer)
+	}
+	// 名字校验（round49 镜像名越界收口）：拉取的落盘路径由它拼出，越界名必须在**受理前**就拒绝
+	// （异步拉取一旦受理，写盘发生在别处）。
+	if err := ValidateImageName(opts.Name, opts.Type); err != nil {
+		return err
 	}
 	// FR-SEC-004：URL 拉取**默认强制** sha256，缺省即拒绝（不再静默跳过校验）。
 	if strings.TrimSpace(opts.SHA256) == "" {

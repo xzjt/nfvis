@@ -16,6 +16,7 @@ package network
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -28,6 +29,31 @@ import (
 
 // DefaultUioDriver DPDK 默认绑定驱动（决策 #18 的 vpp.dpdk.uio_driver 缺省值）。
 const DefaultUioDriver = "vfio-pci"
+
+// ErrDriverRestoreFailed 绑定中途失败、且把设备交还**原驱动**也失败：设备当前可能已无驱动
+// （既没绑上目标驱动，也没回到原驱动），需要人工处置。
+//
+// 为什么必须类型化（round49 外部走查）：绑定是「unbind 原驱动 → 写 driver_override →
+// bind 目标驱动」三步，后两步任一失败此前**直接返回**——网卡被留在无驱动状态，而文案只说
+// 失败原因，看不出「设备现在没有驱动」这个更严重的事实，调用方也无从据此落告警。
+var ErrDriverRestoreFailed = errors.New("DPDK 绑定失败且原驱动未能还原（设备当前可能已无驱动）")
+
+// DPDK 接管的告警作用域与码。
+//
+// AlarmDPDKRestoreFailed（error 级）：绑定失败且原驱动未还原——设备可能已无驱动、需人工处置。
+// 落点是可注入的告警表（见 DPDKBinder.Alarms）：该失败态此前只在当次命令输出里出现一次
+// （CLI/REST 各一次），事后 `show alarms`/Web 总览/诊断包全查不到，与 #191/#321/#333 建立的
+// 「需要人工处置的状态必须事后可查」纪律冲突。同 PCI 下一次绑定成功即自动消警。
+const (
+	dpdkAlarmScope         = "dpdk"
+	AlarmDPDKRestoreFailed = "DPDK_BIND_RESTORE_FAILED"
+)
+
+// DPDKAlarmSink DPDK 接管告警的最小落点能力（*network.AlarmStore 实现；未注入＝不落告警）。
+type DPDKAlarmSink interface {
+	Raise(scope, severity, code, message, source string)
+	Resolve(scope, code, source string) bool
+}
 
 // DefaultWriteTimeout 单次 sysfs 写的缺省时限（发现 #13：不能让一条命令永久占住执行器）。
 const DefaultWriteTimeout = 20 * time.Second
@@ -58,6 +84,10 @@ type DPDKBinder struct {
 	ModulesLoadDir string
 	// Logf 运行期提示输出（缺省 log.Printf → journald；单测注入以断言）。
 	Logf func(format string, args ...any)
+	// Alarms 告警落点（可空）：绑定失败且原驱动未能还原时落一条 error 级告警
+	// （AlarmDPDKRestoreFailed），同 PCI 下一次绑定成功即消警。由装配处
+	// （cmd/nfvisd/main.go）注入 *network.AlarmStore；未注入即只返回类型化错误。
+	Alarms DPDKAlarmSink
 }
 
 // NewDPDKBinder 构造缺省（真实 sysfs）实现。
@@ -224,6 +254,9 @@ func (b *DPDKBinder) Bind(ctx context.Context, ifname, driver string) (string, e
 	// （见 learnBindName）。幂等路径也走一次（无 netdev 时是空操作）。
 	b.learnBindName(ifname, pci)
 	if cur == driver {
+		// 已就位同样是「这个口现在正常」的事实：旧的「还原失败」告警随之消解
+		// （先失败、人工修好后再执行一次 bind-dpdk 是常见路径）。
+		b.resolveRestoreAlarm(pci)
 		return pci, nil // 已就位，幂等
 	}
 	// 决策 #464：接管**之前**记下这个设备现在用的内核驱动——解绑要还回去的就是它。
@@ -259,16 +292,65 @@ func (b *DPDKBinder) Bind(ctx context.Context, ifname, driver string) (string, e
 		}
 	}
 	if err := b.write(b.path(filepath.Join("bus/pci/devices", pci, "driver_override")), driver); err != nil {
-		return "", fmt.Errorf("设置 driver_override=%s: %w", driver, err)
+		return "", b.afterUnbindFailure(pci, cur, driver, fmt.Errorf("设置 driver_override=%s: %w", driver, err))
 	}
 	if err := b.write(b.path(filepath.Join("bus/pci/drivers", driver, "bind")), pci); err != nil {
-		return "", fmt.Errorf("绑定 %s 到 %s: %w", pci, driver, err)
+		return "", b.afterUnbindFailure(pci, cur, driver, fmt.Errorf("绑定 %s 到 %s: %w", pci, driver, err))
 	}
 	// 绑定成功即持久化开机加载（决策 #112）：绑定不跨重启（重启后网卡回内核驱动、
 	// 操作者要重新 bind），但驱动模块必须已在位——不持久化则每次重启后都得记得手工
 	// modprobe，实测这正是首启路径反复卡住的一步。
 	b.persistModuleLoad(driver)
+	b.resolveRestoreAlarm(pci)
 	return pci, nil
+}
+
+// afterUnbindFailure 「已解绑原驱动」之后失败时的收尾：先尽力把设备交还**原驱动**
+// （同一 sysfs 写路径），再把结果如实写进错误文案。
+//
+// 由来（round49 外部走查）：这三步里后两步任一失败此前直接返回——网卡被解绑后既没绑上目标
+// 驱动、也没回到原驱动，留在无驱动状态，而文案只说失败原因。「原驱动未被解绑」的情形
+// （cur == ""，如目标驱动模块不可用——那一步在 unbind 之前）不需要还原，照原样上抛。
+func (b *DPDKBinder) afterUnbindFailure(pci, cur, driver string, cause error) error {
+	if cur == "" {
+		return cause
+	}
+	if rerr := b.restoreDriver(pci, cur); rerr != nil {
+		// 类型化错误 + 落一条 error 级告警：该失败态只在当次命令输出里出现一次，
+		// 事后 `show alarms`/诊断包全查不到，而设备可能需要人工处置（见 DPDKBinder.Alarms）。
+		err := fmt.Errorf("%w：设备 %s（原驱动 %s）未能绑到目标驱动 %s：绑定失败（%v）；回绑失败（%v）",
+			ErrDriverRestoreFailed, pci, cur, driver, cause, rerr)
+		if b.Alarms != nil {
+			b.Alarms.Raise(dpdkAlarmScope, SeverityError, AlarmDPDKRestoreFailed,
+				err.Error()+"；请人工处置：确认该口是否仍要给数据面用，必要时 request interfaces "+
+					pci+" bind-dpdk --yes 重新接管，或 request interfaces "+pci+" unbind-dpdk 交还内核驱动", pci)
+		}
+		return err
+	}
+	return fmt.Errorf("%v（失败前已还原原驱动 %s，该口仍可用按原驱动工作）", cause, cur)
+}
+
+// restoreDriver 把设备交还原驱动（同一条 sysfs 写路径）。
+//
+// 「已还原」的判据是**显式 bind 那一步**是否成功（本平台内核不会自动重新探测原生驱动，
+// 见 Unbind 的实测结论）；清 driver_override 是 best-effort——它把设备从「被钉在目标驱动」
+// 的状态松开，失败只记一条警告（交还本身靠下面的显式 bind）。
+func (b *DPDKBinder) restoreDriver(pci, cur string) error {
+	if err := b.write(b.path(filepath.Join("bus/pci/devices", pci, "driver_override")), "\n"); err != nil {
+		b.logf("警告：清 driver_override 失败（%v），继续尝试把 %s 交还 %s", err, pci, cur)
+	}
+	if err := b.write(b.path(filepath.Join("bus/pci/drivers", cur, "bind")), pci); err != nil {
+		return fmt.Errorf("回绑 %s 到 %s: %w", pci, cur, err)
+	}
+	b.logf("已把 %s 交还原驱动 %s（DPDK 接管失败时的还原）", pci, cur)
+	return nil
+}
+
+// resolveRestoreAlarm 清掉该 PCI 的「绑定失败且原驱动未还原」告警（绑定成功即已不成立）。
+func (b *DPDKBinder) resolveRestoreAlarm(pci string) {
+	if b.Alarms != nil {
+		b.Alarms.Resolve(dpdkAlarmScope, AlarmDPDKRestoreFailed, pci)
+	}
 }
 
 // persistModuleLoad 把驱动模块写进开机自动加载目录（幂等；失败不阻断绑定）。

@@ -114,6 +114,9 @@ func TestSoftwareAddSHA256Mismatch(t *testing.T) {
 	}
 }
 
+// TestSoftwareRollbackPicksHighestNonCurrent 原语义「归档里最高且非当前」在 round49 收窄为
+// 「版本序上严格低于当前的最大者」（见 fix_round49_rollback_version_test.go）；本用例的夹具
+// （当前 1.0.2、归档含 1.0.0/1.0.1/1.0.2，无更高版本）在新语义下结论相同，故断言不动。
 func TestSoftwareRollbackPicksHighestNonCurrent(t *testing.T) {
 	shrinkingSettle(t)
 	dir := t.TempDir()

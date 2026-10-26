@@ -121,6 +121,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
     result   TEXT NOT NULL
 );`
 
+// migrate 把存储升级到 CurrentSchemaVersion。
+//
+// round49 缺陷 #4（中危）：此前每步 `step(s.db)` 之后**单独** `setVersion(s.db, v+1)`，DDL 与
+// 版本推进分两个事务——两步之间断电/被杀就留下「列已加、版本未前进」的半成品库，下次启动
+// 从同一版本重跑，`ALTER TABLE` 撞 `duplicate column name` 直接失败，**服务再也起不来**。
+// 现在每个步骤的 DDL 与版本推进在**同一个事务**内提交：要么该步骤整体完成（含版本推进），
+// 要么整体未发生（下次启动从该步骤重来，且步骤本身也已幂等——见 addColumnIfMissing）。
+// v0→1 的建表同理与版本推进同事务。
 func (s *Store) migrate() error {
 	v, err := userVersion(s.db)
 	if err != nil {
@@ -131,26 +139,44 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("存储 schema 版本 %d 高于当前支持版本 %d", v, CurrentSchemaVersion)
 	}
 	if v == 0 {
-		if _, err := s.db.Exec(baseSchema); err != nil {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("开启存储初始化事务: %w", err)
+		}
+		if _, err := tx.Exec(baseSchema); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("初始化表结构: %w", err)
 		}
-		v = 1
-		if err := setVersion(s.db, v); err != nil {
+		if err := setVersion(tx, 1); err != nil {
+			_ = tx.Rollback()
 			return err
 		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("提交存储初始化: %w", err)
+		}
+		v = 1
 	}
 	for v < CurrentSchemaVersion {
 		step := schemaMigrations[v]
 		if step == nil {
 			return fmt.Errorf("缺少存储迁移步骤 %d→%d", v, v+1)
 		}
-		if err := step(s.db); err != nil {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("开启存储迁移事务 %d→%d: %w", v, v+1, err)
+		}
+		if err := step(tx); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("存储迁移 %d→%d: %w", v, v+1, err)
 		}
-		v++
-		if err := setVersion(s.db, v); err != nil {
+		if err := setVersion(tx, v+1); err != nil {
+			_ = tx.Rollback()
 			return err
 		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("提交存储迁移 %d→%d: %w", v, v+1, err)
+		}
+		v++
 	}
 	return nil
 }
@@ -237,6 +263,76 @@ func (s *Store) ListRevisions(limit int) ([]RevisionInfo, error) {
 		out = append(out, ri)
 	}
 	return out, rows.Err()
+}
+
+// AppendCommit 在**单个事务**内完成一次提交的落库：追加修订 + 修剪历史 + 写/清 confirmed。
+//
+// 由来（round49 缺陷 #3，中危）：`Engine.Commit` 此前依次**独立**调用 AppendRevision /
+// PruneRevisions / SetConfirmed，而配置库全文没有 BeginTx —— 中途任一步失败（磁盘写满、
+// 进程被杀、SQL 报错）都会留下「数据面已生效、修订已写、调用方却收到失败、**confirmed 保护
+// 未建立**」的中间态：数据面在跑新版、配置面以为这次提交失败了，且危险变更的超时保护
+// 根本不存在。同为「已提交变更」的自动回滚（追加回滚修订 + 清 confirmed）同样只在
+// 全有或全无时才有意义。
+//
+// confirm 语义三态：
+//   - 非 nil：写入待确认状态，`BaseRev` 由本方法**在事务内**按「新修订号 - 1」落定
+//     （confirmed 的基线恒为「本次提交之前的那一版」，调用方无需、也不应自行推算）；
+//     Deadline/Holder 由调用方给出。
+//   - nil：在同一事务内**清除**待确认状态（无待确认的提交与自动回滚走这条路径；
+//     清一个不存在的行是幂等的空操作）。
+//
+// keep <= 0 时跳过修剪（与 PruneRevisions 的语义区分开：这里显式取值）。
+func (s *Store) AppendCommit(configJSON []byte, at time.Time, message, user string, confirm *ConfirmedInfo, keep int) (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("开启提交事务: %w", err)
+	}
+	// 已 Commit 时 Rollback 返回 ErrTxDone（忽略）；未 Commit 的任一早退都靠它兜底。
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.Exec(
+		`INSERT INTO config_revisions (committed_at, message, user, config_json) VALUES (?, ?, ?, ?)`,
+		fmtTime(at), message, user, configJSON,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("追加修订: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("获取修订号: %w", err)
+	}
+	rev := int(id)
+
+	if keep > 0 {
+		if _, err := tx.Exec(
+			`DELETE FROM config_revisions WHERE rev NOT IN (
+				SELECT rev FROM config_revisions ORDER BY rev DESC LIMIT ?
+			)`, keep,
+		); err != nil {
+			return 0, fmt.Errorf("清理历史快照: %w", err)
+		}
+	}
+
+	if confirm == nil {
+		if _, err := tx.Exec(`DELETE FROM confirmed_pending WHERE pending_id = 1`); err != nil {
+			return 0, fmt.Errorf("清除 confirmed 状态: %w", err)
+		}
+	} else {
+		if _, err := tx.Exec(
+			`INSERT INTO confirmed_pending (pending_id, base_rev, deadline, holder)
+			 VALUES (1, ?, ?, ?)
+			 ON CONFLICT(pending_id) DO UPDATE SET base_rev = excluded.base_rev,
+			   deadline = excluded.deadline, holder = excluded.holder`,
+			rev-1, fmtTime(confirm.Deadline), confirm.Holder,
+		); err != nil {
+			return 0, fmt.Errorf("记录 confirmed 状态: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("提交事务: %w", err)
+	}
+	return rev, nil
 }
 
 // PruneRevisions 只保留最近 keep 份快照。

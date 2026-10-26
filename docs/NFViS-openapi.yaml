@@ -83,6 +83,9 @@ paths:
         （另一个浏览器/CLI 终端/脚本）未提交的候选与编辑锁**不受影响**。未在编辑时也返回 204。
         决策 #318：本会话的锁**不区分接入源**地释放——CLI 侧以 `user@ssh`（或 `user@console`）
         取得的锁，由登出请求（会话身份来自 REST）按 token 稳定 ID 一并清掉；匹配仍只认本 token。
+        决策 #507（round49）：**同时终止本会话已建立的终端**——由该会话签发的串口/VNC/容器 shell
+        一次性 ticket 随即失效（握手期复核），已建立的 WebSocket 桥接被关闭（终端只在产品侧断开；
+        容器内进程可能仍在运行，见容器 shell 的既有边界）。
       responses:
         "204": { description: 已吊销 }
 
@@ -128,6 +131,8 @@ paths:
         吊销后该 token 的下一个请求即 401。吊销**当前**会话等价于登出（本会话 candidate 锁随之释放；
         决策 #318：按 token 稳定标识释放，**不区分接入源**——CLI 侧 `user@ssh` 的锁也一并清掉）；
         吊销**他人**会话不主动释放其编辑锁——由既有空闲巡检（lock_idle_ttl）回收（决策 #317）。
+        决策 #507（round49）：吊销**同时终止该会话已建立的终端**（串口/VNC/容器 shell）——其 ticket
+        随即失效、已建立的 WebSocket 桥接被关闭（同 `POST /logout` 的口径）。
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, description: token 稳定 ID（GET /system/api-tokens 的 token_id） }
       responses:
@@ -173,6 +178,7 @@ paths:
         切回 VPP 的路径），不是 500——这不是执行故障，而是该能力在本数据面不存在。
       responses:
         "202": { $ref: "#/components/responses/ConfigAccepted" }
+        "413": { description: 仅 multipart 上传：请求体总量超过上限（4 GiB）——在读入过程中即中断，不落任何文件 }
         "409": { $ref: "#/components/responses/Error409" }
         "501": { $ref: "#/components/responses/Error501" }
         "500":
@@ -1066,6 +1072,10 @@ paths:
         `truncated`；退出码未知时（超时/流中断）该字段**不出现**（不谎报 0）。
         **超时按失败**（决策原文「超时/流中断 ⇒ REST 非 2xx」；#366 收口 R142-10 的记账漂移）：
         超时回 **504**（标准错误体，不带部分输出；CLI 侧仍有进程内结构化视图），审计记 failure。
+        **命令原文入审计**（可追溯），但按文本级掩码处理：口令/令牌/私钥形态的值（如
+        `mysql -p…`、`--password=…`、`Authorization: Bearer …`、PEM 私钥块）替换为 `«已隐藏»`，
+        普通命令逐字保留；`GET /audit-logs`、CLI `show log audit` 与诊断包对历史记录同样掩码
+        （FR-SEC-007：口令/口令哈希/证书私钥正文一律不入审计）。
       requestBody:
         required: true
         content:
@@ -1160,7 +1170,13 @@ paths:
               type: object
               required: [name, type, file]
               properties:
-                name: { type: string }
+                name:
+                  type: string
+                  description: |
+                    镜像名（**仓库标识**，也是删除/引用时用的名字）。VM 镜像名＝纯文件名：
+                    不得含 `/`、`\`、`:`，且必须等于 `filepath.Base(名字)`；容器镜像名＝Docker 引用
+                    （允许 `:`、`/`、`@`，禁首尾 `/`、空段）。两者都拒绝空/控制字符/绝对路径/任何 `..` 段，
+                    违约 `400`（决策 #506：此前无校验，越界名可让 `os.Rename/Remove` 操作到仓库外）。
                 type: { type: string, enum: [vm-image, container-image] }
                 file: { type: string, format: binary }
                 description: { type: string }
@@ -1169,8 +1185,11 @@ paths:
               type: object
               required: [name, type]
               properties:
-                name: { type: string }
-                type: { type: string, enum: [vm-image, container-image] }
+                name:
+                  type: string
+                  description: |
+                    同 multipart 的 `name`：VM 镜像＝纯文件名（禁 `/`、`\`、`:` 与 `..`），
+                    容器镜像＝Docker 引用（允许 `:`、`/`、`@`）。违约 `400`。
                 url: { type: string, format: uri, description: HTTP(S) 拉取地址（与 incoming_file 二选一） }
                 sha256: { type: string, description: "**URL 拉取时必填**：期望校验和（FR-SEC-004 默认强制）；incoming_file 导入时可省" }
                 incoming_file:
@@ -1196,9 +1215,10 @@ paths:
               schema: { $ref: "#/components/schemas/Image" }
     delete:
       tags: [images]
-      summary: 删除镜像（被引用时 409）
+      summary: 删除镜像（被引用时 409；名字非法 400）
       responses:
         "200": { $ref: "#/components/responses/ConfigAccepted" }
+        "400": { $ref: "#/components/responses/Error400" }   # 名字不合法（含历史遗留越界条目被拒，决策 #506）
         "409": { $ref: "#/components/responses/Error409" }
 
   /configuration:
@@ -1457,6 +1477,9 @@ paths:
         动作结束后一条「结果」（`result: success|failure`，失败带原因）。两条的 `action`
         相同，据此配对；其余动作仍只有一条结果记录（不产生额外审计噪音）。
         口令、口令哈希与证书/私钥正文**一律不入审计**（FR-SEC-007）。
+        决策 #506（round49）：写侧兜底 + **读侧同口径掩码**——命令原文（如容器 exec）入库前先做
+        文本级掩码（口令/令牌/私钥形态的值 → `«已隐藏»`，普通命令逐字保留），而修复前入库的
+        **历史明文**在经本端点读出时同样被掩码；CLI `show log audit` 与诊断包 audit.json 同一口径。
       parameters:
         - { name: limit, in: query, schema: { type: integer, default: 100 } }
         - { name: offset, in: query, schema: { type: integer, default: 0 } }
@@ -1919,9 +1942,20 @@ paths:
   /system/software:rollback:
     post:
       tags: [system]
-      summary: 回退到上一版本
+      summary: 回退版本（缺省＝上一版本；`version=` 指定目标版本）
+      description: |
+        回退安装归档中的 nfvis 包（`request system software rollback [to <版本>]`）。
+        **缺省**：安装版本序上**严格低于当前版本的最大者**（不是「归档里最高且非当前」——
+        归档留有更高版本时那样会把回退做成升级；版本比较按 Debian 语义，`3.0.30~dev1 < 3.0.30`）。
+        归档中没有任何更低版本时如实报错并列出可见版本（不会往上装）。
+        **`version=<版本>`**：安装归档中的**该版本**；归档里没有该版本、目标等于当前版本、
+        或目标高于当前版本（那是升级，应走 `POST /system/software`）时一律 `400` 并说明原因
+        （决策 #509：此前 `to <版本>` 被命令树接受却被静默忽略，实际按自动选版执行）。
+      parameters:
+        - { name: version, in: query, required: false, schema: { type: string }, description: 回退目标版本（缺省＝上一版本） }
       responses:
         "202": { description: 已受理 }
+        "400": { $ref: "#/components/responses/Error400" }
   /system/ntp:sync:
     post:
       tags: [system]
@@ -2536,6 +2570,9 @@ paths:
       description: |
         一次性事务：提交即生效、收尾交还编辑锁（决策 #151，同 `POST /system/login-users`）。
         **本会话已有未提交候选时拒绝**（决策 #316）：见 `POST /system/login-users` 同款口径。
+        决策 #507（round49）：**成功后该用户的全部活动 token 立即失效**（含其发起的终端会话）——
+        降权/改口令即刻生效，不再等 token TTL（默认 60 分钟）；此外每次请求都按当前 committed
+        配置重算身份（用户被删除即 401，class 变更立即生效），故 CLI 侧改 class 同样即时生效。
       requestBody:
         required: true
         content:
@@ -2551,7 +2588,10 @@ paths:
     delete:
       tags: [system]
       summary: 删除用户
-      description: 一次性事务：提交即生效、收尾交还编辑锁（决策 #151，同 `POST /system/login-users`）。
+      description: |
+        一次性事务：提交即生效、收尾交还编辑锁（决策 #151，同 `POST /system/login-users`）。
+        决策 #507（round49）：**被删用户的全部活动 token 立即失效**（含其发起的终端会话），
+        之后对旧 token 的请求一律 401——删除账号不再等到 TTL 才真正断掉访问。
       responses:
         "204": { description: 已删除 }
         "409": { $ref: "#/components/responses/Error409" }   # 不能删除自己/最后一个 super-user
@@ -2565,6 +2605,8 @@ paths:
         改完口令的会话不再持有全局编辑锁，其它会话的配置写不会被挡（也无需为此登出）。
         **只改口令，不牵动候选**（决策 #316）：本会话已有未提交候选（典型＝控制台配置页正在编辑）时
         **拒绝**（409）并说明「先提交或丢弃候选」——绝不再把那份候选一并提交生效（round77 观察项）。
+        决策 #507（round49）：**改口令成功后该用户全部活动 token 立即失效**（含本会话自身）——
+        客户端须用新口令重新登录（一次性事务的另一半语义不受影响）。
       requestBody:
         required: true
         content:
@@ -3678,7 +3720,11 @@ components:
         cross_connect: { type: boolean, description: 仅 L2：两端口直通模式 }
         gateway:
           type: object
-          description: 仅 L2：BVI 三层网关（FR-NET-014）
+          description: |
+            仅 L2：BVI 三层网关（FR-NET-014）。**撤销语义**（决策 #508，round49 收口）：
+            提交一份不再含该网关（或地址集合收缩）的配置时，提交编排会**主动拆除**数据面侧的
+            BVI、旧地址与专属 VRF（`vr-<name>`；显式 `vrf` 指定的共享表不动），并同步清理
+            进程内登记——修复前只改配置、BVI 与地址继续生效（配置说没有、数据面还在转发）。
           properties:
             addresses: { type: array, items: { type: string }, description: IPv4/IPv6 网关地址 }
             vrf: { type: string, description: 缺省为专属 VRF vr-<name> }
@@ -4120,7 +4166,13 @@ components:
           properties:
             user_data: { type: string }
             ssh_keys: { type: array, items: { type: string } }
-            hostname: { type: string }
+            hostname:
+              type: string
+              description: |
+                guest 主机名。受 RFC1123 校验（点分标签、每段 1–63、总长 ≤253、字母数字与 `-` 且段首尾非 `-`），
+                并拒绝**整体全数字**的形态（点分十进制不是主机名）；非法值提交期拒绝。
+                seed 生成侧对非安全值做 YAML 双引号转义（决策 #506），故 `branch: blue` 这类值不会再
+                破坏整份 `#cloud-config`（修复前会连带丢掉 SSH 公钥与用户配置）。
         serial_console: { type: boolean, default: true }
         statistics:
           type: array

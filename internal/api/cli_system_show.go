@@ -207,6 +207,30 @@ func (x *cliExecutor) execShowUsers() string {
 }
 
 // execShowLog：show log system|audit|vnf。
+// scrubAuditTree 递归对审计记录的结构化快照做敏感值掩码（round49）。
+//
+// 只处理 JSON 反序列化后的通用树（anyToTree 的产物：map[string]any / []any / string），
+// 对每个字符串调用 model.ScrubSecrets——与 REST `GET /audit-logs` 的读侧脱敏同一实现，
+// 保证两条出口对同一条历史记录给出同样的文本。
+func scrubAuditTree(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			t[k] = scrubAuditTree(val)
+		}
+		return t
+	case []any:
+		for i, val := range t {
+			t[i] = scrubAuditTree(val)
+		}
+		return t
+	case string:
+		return model.ScrubSecrets(t)
+	default:
+		return v
+	}
+}
+
 func (x *cliExecutor) execShowLog(t []string) string {
 	if len(t) == 0 {
 		return "%% 语法: show log <system|audit|vnf> [last <n>]\n"
@@ -231,8 +255,12 @@ func (x *cliExecutor) execShowLog(t []string) string {
 		fmt.Fprintf(&b, "%-20s %-12s %-24s %-8s %s\n", "Time", "User", "Action", "Result", "Detail")
 		items := make([]any, 0, len(trail))
 		for _, e := range trail {
-			items = append(items, anyToTree(e))
-			detail := e.Detail
+			items = append(items, scrubAuditTree(anyToTree(e)))
+			// round49（收口 A 组点名的最后一条明文出口）：CLI `show log audit` 此前直读引擎
+			// 审计原文——REST `GET /audit-logs` 与诊断包的 audit.json 都已掩码，这里漏了，
+			// 于是只读账号经 CLI 仍能读到命令里的口令/令牌（FR-SEC-007）。表格与结构化快照
+			// 两处都要过 ScrubSecrets；历史记录同样被覆盖（读侧掩码，与 REST 出口同口径）。
+			detail := model.ScrubSecrets(e.Detail)
 			if len(detail) > 60 {
 				detail = detail[:60] + "…"
 			}

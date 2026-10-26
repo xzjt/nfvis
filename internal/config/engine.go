@@ -37,7 +37,19 @@ var (
 // 事件类型（经 Options.OnEvent 上报，M5 事件总线接入）。
 const (
 	EventConfirmedTimeout = "confirmed-timeout-rollback" // commit confirmed 超时自动回滚（FR-CFG-003 告警）
-	EventLockTimeout      = "candidate-lock-timeout"     // candidate 空闲超时释放
+	// EventConfirmedRollbackFailed 超时回滚的**数据面反向下发失败**（round49 缺陷 #1）：
+	// 配置**未**回滚（保持与数据面一致），但超时保护已被这次超时消费掉——操作者必须知道
+	// 「这次的变更没有被撤销，数据面与配置都还停在变更后的版本」。
+	EventConfirmedRollbackFailed = "confirmed-timeout-rollback-failed"
+	// EventLockReleaseFailed 空闲锁**释放失败**（round49 收尾）：锁行仍在、其它会话的配置写
+	// 仍会被 409 挡住，而回收动作没能完成。与 EventLockTimeout（**已**释放）分开是有意的——
+	// 事件类型是订阅方唯一的判别字段，复用成功事件会让「没释放」看起来像「已释放」。
+	EventLockReleaseFailed = "candidate-lock-release-failed"
+	// EventAuditWriteRecovered 审计写入从失败中恢复（round49 收尾）：`reportAuditError` 按根因
+	// 去重后，一条**写成功**即复位去重键并上报本事件——装配方据此消解 `AUDIT_WRITE_FAILED`
+	// 告警（失败可见、恢复同样可见，不留下不会自己消失的告警）。
+	EventAuditWriteRecovered = "audit-write-recovered"
+	EventLockTimeout         = "candidate-lock-timeout" // candidate 空闲超时释放
 )
 
 // DefaultLockIdleTTL candidate 会话空闲超时（骨架 §3.4：空闲超时自动释放）。
@@ -49,6 +61,13 @@ const DefaultLockIdleTTL = 10 * time.Minute
 // 的常规阈值更快回收（复用既有 `sweepLocked` 巡检，不新造定时器）。1 分钟的口径：足够覆盖
 // 「进入配置模式后思考片刻再敲第一条 set」，又不会让一次遗留的干净锁挡住后续调用太久。
 const DefaultCleanLockIdleTTL = 1 * time.Minute
+
+// dataPlaneApplyTimeout 一次**数据面下发**的时长上界（提交下发与 confirmed 超时回滚共用）。
+//
+// 自 round49（缺陷 #2）起下发上下文与请求取消**解耦**——客户端断开不再中断下发与补偿，
+// 而没有取消信号之后就只剩超时这一道边界；且下发期间持有引擎锁（提交与回滚都是），
+// 底座卡死时不能把整个配置面永久锁死（有界失败会走既有的逆序补偿 + 失败上报路径）。
+var dataPlaneApplyTimeout = 5 * time.Minute
 
 // Session 配置会话标识。User 用于审计与锁展示，Source 用于 FR-CFG-012 判定。
 type Session struct {
@@ -172,6 +191,14 @@ type Options struct {
 	TimeSynced     func() bool
 	ImageResolver  ImageResolver  // 镜像仓库（nil = 跳过规则⑤）
 	TopologyReader TopologyReader // NUMA 拓扑（nil = 跳过规则⑩）
+	// OnAuditError 审计写入失败的出口（round49 收尾，缺陷②）。
+	//
+	// 审计写入失败此前**完全无痕**——而审计恰是本轮之后操作者唯一的持久事实源
+	// （引擎事件在生产未接线）。装配方按需接日志/计数/告警。
+	//
+	// **nil = 保持既有静默行为**（不 panic）：本钩子只负责「让失败有出口」，不改变审计
+	// 本身的语义。实现见 Engine.reportAuditError（同根因去重，见其注释）。
+	OnAuditError func(AuditEntry, error)
 }
 
 // Engine 配置事务引擎。内部串行（单写多读，骨架 §4）。
@@ -187,11 +214,23 @@ type Engine struct {
 	afterFunc        func(d time.Duration, fn func()) func()
 	onEvent          func(Event)
 	onCommit         func(revision int, user string)
+	onAuditError     func(AuditEntry, error) // 审计写入失败的出口（nil = 静默，见 Options.OnAuditError）
 	validate         func(model.Config) []model.ValidateError
 	images           ImageResolver
 	topology         TopologyReader
 
 	confirmStop func() // 在途 confirmed 定时器的 stop
+
+	// auditFailKey 上一次「审计写入失败」的去重键（错误根因文本，round49 收尾）：审计通道
+	// 坏掉通常是粘性的（库只读/磁盘满/长期占用），同根因只报一次，避免每次审计都调钩子刷屏；
+	// 一条审计写成功即复位（故「恢复后再次失败」会重新可见）。
+	auditFailKey string
+	// recoveredAuditWrite 当前是否处在「审计写入曾失败且已上窗、尚未上报恢复」的状态：
+	// 一条写成功时上报 EventAuditWriteRecovered 并复位（装配方据此消解 AUDIT_WRITE_FAILED）。
+	recoveredAuditWrite bool
+	// lockReleaseFailKey 上一次「空闲锁释放失败」的去重键（holder + 会话标识）：sweepLocked 被
+	// 十余条入口调用，同一持有会话的连续失败只报一次；释放成功（clearLockStateLocked）即复位。
+	lockReleaseFailKey string
 
 	candidate  *model.Config // nil = 无会话持锁
 	sessionKey string        // 当前持锁会话的匹配键（决策 #317）
@@ -218,6 +257,7 @@ func NewEngine(store *Store, applier orchestrator.Applier, opts Options) (*Engin
 		afterFunc:        opts.AfterFunc,
 		onEvent:          opts.OnEvent,
 		onCommit:         opts.OnCommitted,
+		onAuditError:     opts.OnAuditError,
 		validate:         opts.Validate,
 		superseded:       map[string]string{},
 	}
@@ -354,7 +394,20 @@ func (e *Engine) Edit(sess Session) error {
 	committed, err := e.committedLocked()
 	if err != nil {
 		if li == nil || takeover {
-			_ = e.store.ReleaseLock(h, sess.ID)
+			// 刚拿到（或刚接管）的锁要还回去，但**释放失败不得静默**（round49 收尾，缺陷③）：
+			// 锁行会残留成一把「无人持有的锁」，之后任意会话的配置写都被 ErrLocked 挡住，
+			// 直到空闲超时 / 装配期回收。这里选**记一条 failure 审计**（而不是走 OnAuditError 钩子）：
+			// 该钩子的语义是「审计写不进去」的出口，用它报锁清理失败会混淆两件事；而审计本就是
+			// 引擎记录锁生命周期事件的既有通道（config.lock-timeout/lock-takeover 同族）。
+			// 兜底不变：审计若也写不进去，会经新钩子 OnAuditError 出到装配方。
+			if rerr := e.store.ReleaseLock(h, sess.ID); rerr != nil {
+				e.appendAudit(AuditEntry{
+					Time: e.now(), User: h, Action: "config.lock-release", Result: "failure",
+					Detail: fmt.Sprintf("进入配置模式失败后清理会话锁失败: %v。锁行可能仍存在（无人持有的锁），"+
+						"后续会话的配置写会被 409 挡住直到空闲超时 / 装配期回收；"+
+						"可用 request system configuration unlock [force] 手工解除", rerr),
+				})
+			}
 		}
 		return err
 	}
@@ -405,6 +458,9 @@ func (e *Engine) clearLockStateLocked() {
 	e.sessionID = ""
 	e.sessionKey = ""
 	e.dirty = false
+	// 锁状态被真正清掉 = 上一次「空闲锁释放失败」的现场已结束：复位去重键，
+	// 使之后（若再坏）的失败能重新上窗（round49 收尾，缺陷①）。
+	e.lockReleaseFailKey = ""
 }
 
 // DiscardSession 结束**本会话（按稳定标识）**时丢弃其 candidate 并释放锁（决策 #318）。
@@ -741,8 +797,28 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 		}()
 	}
 
-	// 下发底座（失败逆序补偿，全有或全无，骨架 §3.3）
-	if err := e.applier.Apply(ctx, committed, newCfg); err != nil {
+	// 请求在**开始下发之前**就已取消：照旧尽早失败、不进入下发（保留下发前取消的既有语义）。
+	// 放在这里而不是函数入口：锁/校验/守卫的语义一律不变，只有「要不要真的下发」这一刀受影响。
+	if cerr := ctx.Err(); cerr != nil {
+		resultWritten = true
+		e.appendAudit(AuditEntry{
+			Time: e.now(), User: sess.User, Action: "config.commit",
+			Detail: fmt.Sprintf("提交已取消（%v）：未下发数据面、未落库，candidate 保留待重提", cerr), Result: "failure",
+		})
+		return res, fmt.Errorf("提交已取消: %w", cerr)
+	}
+
+	// 下发底座（失败逆序补偿，全有或全无，骨架 §3.3）。
+	//
+	// round49 缺陷 #2（高危）：此前把**调用方的请求上下文**原样交给底座——REST 侧它就是
+	// `r.Context()`，客户端一断开（关标签页/断线/超时）即取消；而 netkernel 的 Runner 用
+	// `exec.CommandContext`，对已取消的上下文**根本不执行**宿主命令。于是「客户端断开」这个
+	// 纯客户端行为会让服务端变成「下发一半 + 补偿也做不完」：数据面停在中间态而配置未提交。
+	// 故下发上下文与请求取消**解耦**（WithoutCancel 保留值、不保留取消信号），另以有界超时
+	// 兜底——下发期间持有引擎锁，失去取消信号之后就只剩超时这一道边界。
+	applyCtx, cancelApply := context.WithTimeout(context.WithoutCancel(ctx), dataPlaneApplyTimeout)
+	defer cancelApply()
+	if err := e.applier.Apply(applyCtx, committed, newCfg); err != nil {
 		resultWritten = true
 		e.appendAudit(AuditEntry{
 			Time: e.now(), User: sess.User, Action: "config.commit",
@@ -751,21 +827,32 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 		return res, fmt.Errorf("底座下发失败（已补偿）: %w", err)
 	}
 
-	// 落库：追加式快照，历史修订天然保留（覆盖前快照不丢失）；记提交者（决策 #142）
-	newRev, err := e.store.AppendRevision(mustJSON(newCfg), e.now(), opts.Message, sess.User)
-	if err != nil {
-		return res, err
+	// 落库：追加式快照，历史修订天然保留（覆盖前快照不丢失）；记提交者（决策 #142）。
+	// 「追加修订 + 修剪 + 写/清 confirmed」走**单个事务**（round49 缺陷 #3）：此前三步各自独立
+	// 提交，中途失败会留下「修订已写、confirmed 未建立」的中间态——数据面此时已经生效，
+	// 而危险变更的超时保护根本不存在（配置面以为这次提交失败了）。confirmed 的基线修订号
+	// 由 AppendCommit 在事务内按「新修订号 - 1」落定，这里不再自行推算。
+	var deadline time.Time
+	var cf *ConfirmedInfo
+	if opts.ConfirmedMinutes > 0 {
+		deadline = e.now().Add(time.Duration(opts.ConfirmedMinutes) * time.Minute)
+		cf = &ConfirmedInfo{Deadline: deadline, Holder: sess.holder()}
 	}
-	if err := e.store.PruneRevisions(storeKeepRevisions); err != nil {
+	newRev, err := e.store.AppendCommit(mustJSON(newCfg), e.now(), opts.Message, sess.User, cf, storeKeepRevisions)
+	if err != nil {
+		// 数据面已生效、落库失败：必须如实留痕（否则读审计的人只看到「什么都没发生」，
+		// 而数据面已经在跑新配置）。
+		resultWritten = true
+		e.appendAudit(AuditEntry{
+			Time: e.now(), User: sess.User, Action: "config.commit",
+			Detail: fmt.Sprintf("%s\n落库失败（数据面已下发，配置库未更新）: %v", model.Diff(committed, newCfg), err),
+			Result: "failure",
+		})
 		return res, err
 	}
 	res.Revision = newRev
 
-	if opts.ConfirmedMinutes > 0 {
-		deadline := e.now().Add(time.Duration(opts.ConfirmedMinutes) * time.Minute)
-		if err := e.store.SetConfirmed(newRev-1, deadline, sess.holder()); err != nil {
-			return res, err
-		}
+	if cf != nil {
 		e.confirmStop = e.afterFunc(time.Until(deadline), e.onConfirmedTimer)
 		res.ConfirmedUntil = &deadline
 	}
@@ -812,11 +899,10 @@ func (e *Engine) ConfirmCommit(sess Session) error {
 	if cf == nil {
 		return errors.New("无待确认的 commit confirmed")
 	}
-	e.clearConfirmedLocked(AuditEntry{
+	return e.clearConfirmedLocked(AuditEntry{
 		Time: e.now(), User: sess.User, Action: "config.confirm",
 		Detail: fmt.Sprintf("confirmed 已确认（基线 rev %d）", cf.BaseRev), Result: "success",
 	})
-	return nil
 }
 
 // Rollback 取第 n 个历史 committed 为 candidate，需再 commit 生效
@@ -831,12 +917,14 @@ func (e *Engine) Rollback(sess Session, n int) error {
 	if n < 1 || n > storeKeepRevisions-1 {
 		return fmt.Errorf("rollback %d: %w", n, ErrNoRevision)
 	}
-	// rollback 取消在途 confirmed 等待
+	// rollback 取消在途 confirmed 等待（清除失败要如实上抛：否则等待仍在，变更到期仍会被回滚）
 	if cf, _ := e.store.GetConfirmed(); cf != nil {
-		e.clearConfirmedLocked(AuditEntry{
+		if err := e.clearConfirmedLocked(AuditEntry{
 			Time: e.now(), User: sess.User, Action: "config.confirm",
 			Detail: "rollback 取消在途 confirmed 等待", Result: "success",
-		})
+		}); err != nil {
+			return err
+		}
 	}
 	rev, _, err := e.store.LatestRevision()
 	if err != nil {
@@ -959,14 +1047,48 @@ func (e *Engine) sweepLocked() {
 	}
 	if now.Sub(li.LastActivity) > ttl {
 		holder, sessionID := li.Holder, li.SessionID
-		e.clearLockStateLocked()
-		_ = e.store.ReleaseLock(holder, sessionID)
+		// 顺序改由**存储先定**（round49 收尾，缺陷①）：此前先 `clearLockStateLocked()` 再
+		// `_ = ReleaseLock` —— 释放失败时内存说「已释放」而库里锁行还在，且照样记
+		// `config.lock-timeout/success` 并发「candidate 已释放」事件：**假成功**。
+		// 现在释放成功才清内存态并记成功；失败时**内存态保持不清**（内存与库一致，下一轮再试，
+		// 本会话回来还能拿回自己未提交的候选），且**不记成功**（见 reportLockReleaseFailureLocked）。
+		if err := e.store.ReleaseLock(holder, sessionID); err != nil {
+			e.reportLockReleaseFailureLocked(now, holder, sessionID, detail, err)
+			return
+		}
+		e.clearLockStateLocked() // 内含去重键复位：释放成功即算「上一次故障已结束」
 		e.appendAudit(AuditEntry{
 			Time: now, User: holder, Action: "config.lock-timeout",
 			Detail: detail, Result: "success",
 		})
 		e.emit(EventLockTimeout, fmt.Sprintf("会话 %s 空闲超时，candidate 已释放", holder))
 	}
+}
+
+// reportLockReleaseFailureLocked 空闲锁回收**失败**的上报（round49 收尾，缺陷①）。
+//
+// 两条口径：
+//   - **不记成功**：释放没成功就不得留 `config.lock-timeout/success`、也不得发「已释放」事件；
+//     改记一条 `config.lock-timeout/failure` 审计（带底层错误 + 后果 + 照做路径）并发
+//     `EventLockReleaseFailed`——与既有事件类型分开，是因为事件类型是订阅方唯一的判别字段。
+//   - **同一持有会话连续失败只报一次**（防刷屏）：sweepLocked 被十余条入口调用
+//     （Candidate/Sessions/Committed…），失败若每次都往审计与事件里写会淹掉别的记录。
+//     去重键 = holder + 会话标识，在释放成功（clearLockStateLocked）时复位 ⇒
+//     「失败 → 恢复 → 再失败」会重新可见（结果变化即重新上窗）。
+func (e *Engine) reportLockReleaseFailureLocked(now time.Time, holder, sessionID, why string, err error) {
+	key := holder + "\x00" + sessionID
+	if e.lockReleaseFailKey == key {
+		return
+	}
+	e.lockReleaseFailKey = key
+	e.appendAudit(AuditEntry{
+		Time: now, User: holder, Action: "config.lock-timeout", Result: "failure",
+		Detail: fmt.Sprintf("%s；但释放会话锁失败: %v。锁行仍在，其它会话的配置写仍会被 409 挡住；"+
+			"可用 request system configuration unlock [force] 手工解除（本机内存态未清，与库保持一致）", why, err),
+	})
+	e.emit(EventLockReleaseFailed, fmt.Sprintf(
+		"会话 %s 空闲超时但会话锁释放失败（锁行仍在，其它会话仍被挡住；详见审计 config.lock-timeout）: %v",
+		holder, err))
 }
 
 // onConfirmedTimer confirmed 定时器触发：仅当确实已到期时回滚
@@ -984,49 +1106,134 @@ func (e *Engine) onConfirmedTimer() {
 	e.doConfirmedRollback(cf)
 }
 
-// doConfirmedRollback 超时自动回滚（FR-CFG-003）：以新修订恢复基线配置并告警。
-// 调用方持引擎锁。
+// doConfirmedRollback 超时自动回滚（FR-CFG-003）：把**数据面反向收敛回基线**，成功才把基线
+// 配置以新修订落库并告警。调用方持引擎锁。
+//
+// round49 缺陷 #1（高危）：此前这里只 `LoadRevision` + `AppendRevision` + `ClearConfirmed`，
+// **从不调用 applier.Apply** —— 超时后 committed 回到旧版，而数据面（VPP/nft/tc）仍是新拓扑，
+// 且恢复收敛明确「只补齐、不摘除」⇒ 配置与事实不一致、无任何告警。回滚与提交一样是
+// 「已提交的配置变更」，必须一样地反向下发。
+//
+// 顺序与失败语义（逐条，均有守护测试）：
+//  1. 基线快照取不到/解析不了、或读不出当前配置 → **无可下发之物**：不动配置与数据面，
+//     清 confirmed（不再重试）并如实报失败；
+//  2. 反向下发 `Apply(current, base)`（applier 语义是 Apply(old, new)），**成功才落库**——
+//     回滚修订 + 清 confirmed 走同一事务（round49 缺陷 #3）；
+//  3. 下发失败 → 数据库**不动**：committed 与数据面保持一致（宁可「没回滚」，也不能出现
+//     「配置说回滚了、数据面还在新拓扑」这种无人可查的不一致）；清 confirmed（在途保护已被
+//     这次超时消费掉，留着只会每个巡检周期重放一次）；报失败事件 + failure 审计。
+//
+// 上下文：定时器 goroutine 里没有请求 ctx，故用独立的 background 上下文，仅以
+// dataPlaneApplyTimeout 兜底（回滚在下发期间持有引擎锁，必须有界）。
 func (e *Engine) doConfirmedRollback(cf *ConfirmedInfo) {
 	baseJSON, err := e.store.LoadRevision(cf.BaseRev)
 	if err != nil {
-		_ = e.store.ClearConfirmed()
-		e.emit(EventConfirmedTimeout, fmt.Sprintf("confirmed 基线快照 rev %d 缺失: %v", cf.BaseRev, err))
+		e.reportRollbackAborted(fmt.Sprintf("基线快照 rev %d 缺失: %v", cf.BaseRev, err))
 		return
 	}
-	now := e.now()
-	newRev, err := e.store.AppendRevision(baseJSON, now,
-		fmt.Sprintf("commit confirmed 超时，自动回滚到 rev %d", cf.BaseRev), "system")
+	var base model.Config
+	if err := json.Unmarshal(baseJSON, &base); err != nil {
+		e.reportRollbackAborted(fmt.Sprintf("基线快照 rev %d 解析失败: %v", cf.BaseRev, err))
+		return
+	}
+	current, err := e.committedLocked()
 	if err != nil {
-		e.emit(EventConfirmedTimeout, fmt.Sprintf("自动回滚落库失败: %v", err))
+		e.reportRollbackAborted(fmt.Sprintf("读取当前生效配置失败: %v", err))
 		return
 	}
-	_ = e.store.ClearConfirmed()
+
+	ctx, cancel := context.WithTimeout(context.Background(), dataPlaneApplyTimeout)
+	defer cancel()
+	if err := e.applier.Apply(ctx, current, base); err != nil {
+		detail := fmt.Sprintf("commit confirmed 超时，但数据面反向下发失败、**配置未回滚**"+
+			"（committed 与数据面都仍是变更后的版本）: %v", err)
+		if cerr := e.clearPendingConfirmedLocked(); cerr != nil {
+			detail += fmt.Sprintf("；清除 confirmed 待确认状态失败: %v（每个巡检周期都会重放本次回滚）", cerr)
+		}
+		e.appendAudit(AuditEntry{
+			Time: e.now(), User: "system", Action: "config.rollback-auto",
+			Detail: detail, Result: "failure",
+		})
+		e.emit(EventConfirmedRollbackFailed, detail+"；请人工核对数据面，必要时重新提交一份正确配置")
+		return
+	}
+
+	// 下发成功才落库：追加回滚修订 + 清 confirmed 同一事务（round49 缺陷 #3），
+	// 不再出现「修订已写、在途保护未清」的中间态。
+	now := e.now()
+	newRev, err := e.store.AppendCommit(baseJSON, now,
+		fmt.Sprintf("commit confirmed 超时，自动回滚到 rev %d", cf.BaseRev), "system", nil, storeKeepRevisions)
+	if err != nil {
+		// 数据面已回到基线而配置库没有：这是一处**必须人工处置**的不一致，如实报出
+		// （不再假装回滚成功）。confirmed 有意**保留**：重试是恢复一致性的唯一自动路径
+		// （与上面「下发失败即清」相反——那里重放无益，这里重放正是解药）。
+		detail := fmt.Sprintf("commit confirmed 超时：数据面已回滚到基线 rev %d，但回滚修订**落库失败**: %v"+
+			"（数据面已回滚、配置库未更新，须人工核对）", cf.BaseRev, err)
+		if e.confirmStop != nil { // 一次性定时器已触发，先收掉引用；巡检会按在途状态继续重试
+			e.confirmStop()
+			e.confirmStop = nil
+		}
+		e.appendAudit(AuditEntry{
+			Time: now, User: "system", Action: "config.rollback-auto",
+			Detail: detail, Result: "failure",
+		})
+		e.emit(EventConfirmedRollbackFailed, detail)
+		return
+	}
 	if e.confirmStop != nil {
 		e.confirmStop()
 		e.confirmStop = nil
 	}
 	e.appendAudit(AuditEntry{
 		Time: now, User: "system", Action: "config.rollback-auto",
-		Detail: fmt.Sprintf("commit confirmed 超时未确认，已自动回滚（基线 rev %d）", cf.BaseRev), Result: "success",
+		Detail: fmt.Sprintf("commit confirmed 超时未确认，已自动回滚（基线 rev %d）：数据面已反向收敛到该版本", cf.BaseRev),
+		Result: "success",
 	})
 	e.emit(EventConfirmedTimeout, fmt.Sprintf("commit confirmed 超时，已自动回滚到 rev %d 并产生告警", cf.BaseRev))
 
 	// 持锁会话的 candidate 同步回滚后配置
 	if e.candidate != nil {
-		var cfg model.Config
-		if err := json.Unmarshal(baseJSON, &cfg); err == nil {
-			e.candidate = &cfg
-			e.dirty = true
-		}
+		cfg := base
+		e.candidate = &cfg
+		e.dirty = true
 	}
 
 	// 决策 #388 真机验证（round169）抓到的缺口：回滚改变了 committed 配置，却只落库、
-	// 不走 OnCommitted ⇒ 宿主侧重收敛（防火墙/TLS/syslog/日志保留）不触发——防火墙场景
-	// 的真机实锤是「配置已回滚、nft 表仍是 policy drop」，管理面锁死到重启。回滚与
+	// 不走 OnCommitted ⇒ 宿主侧重收敛（防火墙/TLS/syslog/日志保留）不触发——防火墙场景的
+	// 真机实锤是「配置已回滚、nft 表仍是 policy drop」，管理面锁死到重启。回滚与
 	// Commit 一样是「已提交配置变更」，必须走同一通知（M5-1 事件 + 宿主侧再收敛）。
 	if e.onCommit != nil {
 		e.onCommit(newRev, "system")
 	}
+}
+
+// reportRollbackAborted 回滚在**下发之前**就不可执行（基线快照缺失/解析失败、读不出当前配置）：
+// 不动配置与数据面，清 confirmed（不再重试）并如实上报——绝不静默当作「已回滚」。
+func (e *Engine) reportRollbackAborted(reason string) {
+	detail := "commit confirmed 超时，但自动回滚无法执行（" + reason + "）：配置与数据面均未改动"
+	if cerr := e.clearPendingConfirmedLocked(); cerr != nil {
+		detail += fmt.Sprintf("；清除 confirmed 待确认状态失败: %v", cerr)
+	}
+	e.appendAudit(AuditEntry{
+		Time: e.now(), User: "system", Action: "config.rollback-auto",
+		Detail: detail, Result: "failure",
+	})
+	e.emit(EventConfirmedRollbackFailed, detail)
+}
+
+// clearPendingConfirmedLocked 清除在途 confirmed 并停掉定时器，**返回错误给调用方**。
+//
+// round49 缺陷 #1 附带项：超时回滚路径上此前的 `_ = e.store.ClearConfirmed()` 把错误整个吞掉
+// ——清不掉就意味着每个巡检周期都会重放一次回滚（配置面反复抖动），必须让调用方看得见。
+func (e *Engine) clearPendingConfirmedLocked() error {
+	if err := e.store.ClearConfirmed(); err != nil {
+		return err
+	}
+	if e.confirmStop != nil {
+		e.confirmStop()
+		e.confirmStop = nil
+	}
+	return nil
 }
 
 // recoverConfirmedLocked 装配时恢复在途 confirmed：到期立即回滚，未到重挂定时器。
@@ -1043,27 +1250,40 @@ func (e *Engine) recoverConfirmedLocked() error {
 	return nil
 }
 
-// clearConfirmedLocked 确认在途 confirmed 并停定时器（调用方持锁）。
-func (e *Engine) clearConfirmedLocked(audit AuditEntry) {
-	_ = e.store.ClearConfirmed()
-	if e.confirmStop != nil {
-		e.confirmStop()
-		e.confirmStop = nil
+// clearConfirmedLocked 确认在途 confirmed（显式 `confirm`、新 commit 的隐式确认、rollback 取消等待）
+// 并停定时器（调用方持锁）。
+//
+// round49 收尾：此前这里是 `_ = e.store.ClearConfirmed()` —— 与缺陷 #3 同一类「持久化步骤失败被
+// 吞掉」。清除失败时在途行还在库里、定时器也没停，调用方却拿到成功 ⇒ 一次**已被确认**的变更会在
+// 到期后被自动回滚（配置突然变回去，且没人知道为什么）。现在：
+//   - 失败**上抛**给调用方（文案说清「确认未能持久化，超时回滚仍可能在到期后触发」）；
+//   - 如实记一条 failure 审计（**不得**记成功）；
+//   - 定时器与库里的在途行**都不动**（二者保持一致），由调用方把风险报给操作者。
+func (e *Engine) clearConfirmedLocked(audit AuditEntry) error {
+	if err := e.clearPendingConfirmedLocked(); err != nil {
+		audit.Detail += fmt.Sprintf("；但清除在途 confirmed 失败: %v", err)
+		audit.Result = "failure"
+		e.appendAudit(audit)
+		return fmt.Errorf("确认未能持久化（在途 confirmed 未能清除，超时回滚仍可能在到期后触发）: %w", err)
 	}
 	e.appendAudit(audit)
+	return nil
 }
 
 // implicitConfirmLocked 持有者的新 commit 隐式确认在途 confirmed（FR-CFG-004）。
 //
 // 决策 #395（R171-13）：调用点只在「校验与守卫都通过、即将生效」处（以及无变更 commit 的
 // 成功路径）——被拒的 commit 不得替在途 confirmed 背书、不记错审计主体。
+//
+// round49 收尾：确认本身未能持久化时把错误上抛 ⇒ 调用方在**下发之前**中止（数据面与库都不动），
+// 而不是「已下发到数据面、却在落库时才炸」。
 func (e *Engine) implicitConfirmLocked(sess Session) error {
 	cf, err := e.store.GetConfirmed()
 	if err != nil {
 		return err
 	}
 	if cf != nil {
-		e.clearConfirmedLocked(AuditEntry{
+		return e.clearConfirmedLocked(AuditEntry{
 			Time: e.now(), User: sess.User, Action: "config.confirm",
 			Detail: "新 commit 隐式确认在途 confirmed", Result: "success",
 		})
@@ -1499,9 +1719,42 @@ func (e *Engine) AuditTrail(limit, offset int) ([]AuditEntry, error) {
 // appendAudit 统一写审计：补上**时钟是否已同步**的标记（NFR-006）。
 // 所有审计写入都必须经此，避免个别路径漏标。三态口径与告警侧共用 clocksync.Mark
 // （单一事实源：探针为 nil ⇒ 未知，不谎称已同步）。
+//
+// round49 收尾（缺陷②）：写失败此前被整条吞掉——审计是本轮之后操作者**唯一**的持久事实源
+// （引擎事件在生产未接线），写不进去时不能无声无息。失败一律经 reportAuditError 出到
+// Options.OnAuditError 钩子（未接线时保持既有静默行为）。
 func (e *Engine) appendAudit(a AuditEntry) {
 	a.TimeSynced = clocksync.Mark(e.timeSynced)
-	e.store.AppendAudit(a)
+	if err := e.store.AppendAudit(a); err != nil {
+		e.reportAuditError(a, err)
+		return
+	}
+	e.auditFailKey = "" // 审计通道已恢复：复位去重键（再次坏掉时重新上窗）
+	if e.recoveredAuditWrite {
+		e.recoveredAuditWrite = false
+		e.emit(EventAuditWriteRecovered, "审计写入已恢复")
+	}
+}
+
+// reportAuditError 审计写入失败的出口（round49 收尾，缺陷②）。
+//
+// 出口是可选钩子 `Options.OnAuditError`：由装配方决定落日志/计数/告警；**钩子为 nil 时
+// 保持既有静默行为、不 panic**（本函数只负责「让失败有出口」，不改审计本身的语义）。
+//
+// 防刷屏：按**错误根因文本**在进程内去重。审计写不进去的原因通常是粘性的（库只读、磁盘满、
+// 长期占用），按根因去重最有效，也让「同一故障」只打扰操作者一次；一条审计写成功即复位，
+// 故「恢复后再次失败」会重新上报（结果变化即重新可见）。
+func (e *Engine) reportAuditError(a AuditEntry, err error) {
+	if e.onAuditError == nil {
+		return
+	}
+	if key := err.Error(); key == e.auditFailKey {
+		return
+	} else {
+		e.auditFailKey = key
+		e.recoveredAuditWrite = true // 故障已上窗：恢复时上报一次 recovered
+	}
+	e.onAuditError(a, err)
 }
 
 // Audit 追加一条运行态操作审计（FR-OPS-031：生命周期操作入审计通道）。

@@ -2,7 +2,10 @@ package netkernel
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/netip"
+	"strings"
 
 	"github.com/xzjt/nfvis/internal/model"
 	"github.com/xzjt/nfvis/internal/orchestrator"
@@ -73,6 +76,16 @@ func (p *Provider) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch
 		if err := p.applyGateway(ctx, vs, br); err != nil {
 			return err
 		}
+		// 地址**收缩**（两个减到一个）也要收敛：applyGateway 只做 add/replace，旧地址不会
+		// 自己消失（round49 外部走查）。两步合起来即「声明集合为准」的全量语义。
+		if err := p.pruneGatewayAddresses(ctx, br, vs.Gateway.Addresses); err != nil {
+			return err
+		}
+	} else if err := p.revokeGateway(ctx, vs, br); err != nil {
+		// 网关声明消失（交换机保留）：清地址、退归属、回收派生的网关 VRF 设备。
+		// 此前这里什么都不做——配置说没有网关，内核里 bridge 仍带着网关地址、仍挂在
+		// `vr-<交换机>` 上（域内主机继续把已删网关当可用，全程零报错）。
+		return err
 	}
 	return p.ensureLinkUp(ctx, br)
 }
@@ -194,6 +207,131 @@ func (p *Provider) applyGateway(ctx context.Context, vs model.VirtualSwitch, br 
 		}
 	}
 	return nil
+}
+
+// pruneGatewayAddresses 删掉 bridge 上**声明里已没有**的网关地址（地址收缩，round49 外部走查）。
+//
+// applyGateway 对每个声明地址只做 `ip addr replace`（加/替换），旧地址不会自己消失：网关地址
+// 从两个减到一个时，被删的那个继续留在 bridge 上，域内主机照旧把它当网关用——而配置与读视图
+// 里都只有新的那一个。与 applyGateway 合起来即「声明集合为准」的全量语义（与本文件成员口、
+// VLAN 条的收敛同一口径）。
+//
+// 比较前两边都归一（normCIDR）：内核实况回读的写法未必与配置逐字相同（`2001:0db8::1/64` 与
+// `2001:db8::1/64` 是同一个地址），不归一会把自己刚替换上去的地址当成「已不声明」删掉。
+func (p *Provider) pruneGatewayAddresses(ctx context.Context, br string, declared []string) error {
+	want := make(map[string]bool, len(declared))
+	for _, cidr := range declared {
+		want[normCIDR(cidr)] = true
+	}
+	have, err := p.bridgeAddresses(ctx, br)
+	if err != nil {
+		return err
+	}
+	for _, cidr := range have {
+		if want[normCIDR(cidr)] {
+			continue
+		}
+		if err := p.ipBest(ctx, "addr", "del", cidr, "dev", br); err != nil {
+			return fmt.Errorf("删除 %s 上已不声明的网关地址 %s: %w", br, cidr, err)
+		}
+	}
+	return nil
+}
+
+// revokeGateway 撤销 L2 交换机的三层网关（`gateway` 声明消失，或声明仍在但地址集合清空）。
+//
+// 顺序：清地址（v4/v6 按实况逐条删）→ 退出网关 VRF 归属 → 回收**派生的**网关 VRF 设备
+// （`vr-<交换机名>`，含域兜底路由）。与 VPP 侧 ApplyGateway 的撤销语义（同轮实现）对齐。
+//
+// 两处边界：
+//   - **显式 `gateway vrf <名>` 的设备不动**：它是操作者在 vrf 段里声明的对象，生命周期不由
+//     这台交换机决定（与 DeleteBridgeDomain 同口径）。判据是「bridge 当前挂在哪个 VRF 上」，
+//     只有挂的正好是派生名才回收——派生名与操作者可能的同名对象（如名为 `vr-vs-lan` 的 L3
+//     交换机，LinkName 后就是它）**不会**被误删。
+//   - 读不到归属（linkMaster 答不出）时不猜：地址照清（那是声明外的事实），归属与设备保留，
+//     由下一次按配置重放再收敛（猜测式 nomaster 会摘掉别的对象刚建立的归属，见 detachMasterIf）。
+func (p *Provider) revokeGateway(ctx context.Context, vs model.VirtualSwitch, br string) error {
+	have, err := p.bridgeAddresses(ctx, br)
+	if err != nil {
+		return err
+	}
+	for _, cidr := range have {
+		if err := p.ipBest(ctx, "addr", "del", cidr, "dev", br); err != nil {
+			return fmt.Errorf("撤销网关：删除 %s 上的地址 %s: %w", br, cidr, err)
+		}
+	}
+	master, slaveKind, ok := p.linkMaster(ctx, br)
+	if !ok || master == "" || !strings.EqualFold(slaveKind, "vrf") {
+		return nil // 没有 VRF 归属（或读不到）：地址已清，其余不在本语句的处置范围
+	}
+	if err := p.ipBest(ctx, "link", "set", "dev", br, "nomaster"); err != nil {
+		return err
+	}
+	if master != GatewayVRFName(vs.Name) {
+		return nil // 显式/共享 VRF：归属已摘，设备留给它的属主
+	}
+	// 派生网关 VRF 随声明消失而回收：先回收域兜底路由、再删设备（与 DeleteVRF/DeleteBridgeDomain
+	// 同序——设备删除不会连带回收 reject 路由）。此处设备必然在场（bridge 刚挂在它上面），
+	// 故不需要 vrfDevicePresent 守卫。
+	if err := p.deleteVRFFallback(ctx, master); err != nil {
+		return err
+	}
+	return p.ipBest(ctx, "link", "del", master)
+}
+
+// bridgeAddrRow `ip -j addr show dev <名>` 的一行（本文件只取地址、前缀长与 scope）。
+//
+// 不复用 l3.go 的 ipAddrRow：那里刻意只要地址（删除路径上的宽容读取），而这里必须看 scope
+// ——内核自动生成的 IPv6 链路本地地址（fe80::/64，scope=link）不属于网关声明，绝不能被
+// 撤销/收缩当成「声明外的旧地址」删掉（删掉不会自动重生，会静默打瘸 bridge 的 v6 邻居发现）。
+type bridgeAddrRow struct {
+	AddrInfo []struct {
+		Local     string `json:"local"`
+		PrefixLen int    `json:"prefixlen"`
+		Scope     string `json:"scope"`
+	} `json:"addr_info"`
+}
+
+// bridgeAddresses 读回某设备当前**属于本产品管理范围**的地址（CIDR 形态，比较的是集合而非写法）：
+// scope=link 的（IPv6 链路本地、IPv4 的 169.254.0.0/16）一律排除——它们是内核按设备/协议栈
+// 自动生成的，不代表任何声明（见 bridgeAddrRow）。
+//
+// 与 deviceAddresses（宽容版：删除路径把「读不到」当「没有」）不同，本函数**读失败上抛**：
+// 网关撤销/收缩若把「问不出来」当成「没有旧地址」，就会静默留下已删网关的地址——那正是
+// round49 修的那类「配置与数据面不一致、全程无报错」。
+func (p *Provider) bridgeAddresses(ctx context.Context, dev string) ([]string, error) {
+	out, err := p.ip(ctx, "-j", "addr", "show", "dev", dev)
+	if err != nil {
+		return nil, fmt.Errorf("读取 %s 的地址: %w", dev, err)
+	}
+	if strings.TrimSpace(out) == "" {
+		// iproute2 成功时至少打印 `[]`；**空白输出**只出现在读不到现场的情形（设备不在场等）。
+		// 这条容忍不会造成误删（没有任何可删的名字），而上抛会让「设备已不在」的幂等重入
+		// （恢复重放、重复提交）整条失败；真失败（命令非零退出、输出不可解析）照旧上抛。
+		return nil, nil
+	}
+	var rows []bridgeAddrRow
+	if json.Unmarshal([]byte(out), &rows) != nil {
+		return nil, fmt.Errorf("解析 %s 的地址失败（%s）", dev, trimOut(out))
+	}
+	var cidrs []string
+	for _, r := range rows {
+		for _, a := range r.AddrInfo {
+			if a.Local == "" || strings.EqualFold(a.Scope, "link") {
+				continue
+			}
+			cidrs = append(cidrs, fmt.Sprintf("%s/%d", a.Local, a.PrefixLen))
+		}
+	}
+	return cidrs, nil
+}
+
+// normCIDR 归一 CIDR 文本，只用于「是不是同一个地址」的比较（解析不出来时按原样返回，不猜）。
+func normCIDR(s string) string {
+	if pre, err := netip.ParsePrefix(strings.TrimSpace(s)); err == nil {
+		return pre.String()
+	}
+	return s
 }
 
 // DeleteBridgeDomain 删除内核 bridge（成员口由内核自动释放），并回收**它自己创建的**网关 VRF。

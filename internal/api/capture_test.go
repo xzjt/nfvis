@@ -223,6 +223,10 @@ func (f *fakeSoftware) Rollback(_ context.Context) (system.SoftwareResult, error
 	f.rolled = true
 	return system.SoftwareResult{Action: "rollback", Version: "1.0.0", Previous: "1.0.1", Package: "nfvis_1.0.0_amd64.deb"}, nil
 }
+func (f *fakeSoftware) RollbackTo(_ context.Context, version string) (system.SoftwareResult, error) {
+	f.rolled = true
+	return system.SoftwareResult{Action: "rollback", Version: version, Previous: "1.0.1", Package: "nfvis_" + version + "_amd64.deb"}, nil
+}
 func (f *fakeSoftware) Reboot(_ context.Context) error   { f.rebooted = true; return nil }
 func (f *fakeSoftware) Shutdown(_ context.Context) error { f.shut = true; return nil }
 func (f *fakeSoftware) NTPSync(_ context.Context, _ []string) (string, error) {

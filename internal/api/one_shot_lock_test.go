@@ -129,6 +129,10 @@ func candidateDirty(t *testing.T, ts *httptest.Server, token string) bool {
 // ---------- 正面：一次性事务逐入口交还锁 ----------
 
 // login-users 一族（mutateLoginUsers：建/改/删用户、改 class、重置口令、自助改密）。
+//
+// 决策 #506 起「自助改密」会**吊销该用户全部 token**（含发起请求的那个）——这是刻意的安全
+// 口径（口令已换，持旧口令建立的凭据不该继续有效），故本用例在该步之后以新口令重新登录，
+// 后续步骤用新 token（锁是引擎级状态，谁问都一样）。
 func TestOneShotLockReleasedLoginUsersFamily(t *testing.T) {
 	ts := newTestServer(t)
 	token := loginAdmin(t, ts)
@@ -137,19 +141,28 @@ func TestOneShotLockReleasedLoginUsersFamily(t *testing.T) {
 		what, method, path string
 		body               any
 		status             int
+		// relogin 本步成功后要用的新口令（空 = 沿用当前 token）。
+		relogin string
 	}{
 		{"建用户", http.MethodPost, "/system/login-users",
-			map[string]any{"name": "ops77", "kind": "user", "password": "OneShot-Passw0rd!1", "class": "operator"}, http.StatusCreated},
+			map[string]any{"name": "ops77", "kind": "user", "password": "OneShot-Passw0rd!1", "class": "operator"}, http.StatusCreated, ""},
 		{"改 class 与重置口令", http.MethodPut, "/system/login-users/ops77",
-			map[string]any{"class": "read-only", "password": "OneShot-Passw0rd!2"}, http.StatusOK},
+			map[string]any{"class": "read-only", "password": "OneShot-Passw0rd!2"}, http.StatusOK, ""},
 		{"自助改密", http.MethodPost, "/system/login-users/admin:change-password",
-			map[string]any{"old_password": "s3cret-Passw0rd!", "new_password": "OneShot-Passw0rd!3"}, http.StatusOK},
-		{"删用户", http.MethodDelete, "/system/login-users/ops77", nil, http.StatusOK},
+			map[string]any{"old_password": "s3cret-Passw0rd!", "new_password": "OneShot-Passw0rd!3"}, http.StatusOK, "OneShot-Passw0rd!3"},
+		{"删用户", http.MethodDelete, "/system/login-users/ops77", nil, http.StatusOK, ""},
 	}
 	for _, s := range steps {
 		status, _, body := cfgRequest(t, s.method, ts.URL+APIPrefix+s.path, token, s.body, nil)
 		if status != s.status {
 			t.Fatalf("%s：状态 %d %s", s.what, status, body)
+		}
+		if s.relogin != "" {
+			// 口令已换 ⇒ 旧 token 立即失效（决策 #506），后续步骤以新口令重新登录
+			if status, _, _ := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/system/version", token, nil, nil); status != http.StatusUnauthorized {
+				t.Fatalf("%s：改口令后旧 token 应 401，实得 %d", s.what, status)
+			}
+			token = asSuperUser(t, ts, s.relogin)
 		}
 		assertOneShotEnded(t, ts, token, s.what)
 	}

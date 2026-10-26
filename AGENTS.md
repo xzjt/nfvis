@@ -220,6 +220,78 @@
   SIGPIPE 会把 tar 打断、只解出一个 `Packages`），再替换其中的 `nfvis_*.deb` 后用
   `build-offline-run.sh --debs … --version … --epoch …` 重建。
 
+- **round49（一次全仓只读评审 → 12 条缺陷收口 + 3 条同族新缺陷，2026-10-26，决策 #505~#511）**：用户要求
+  「只读审查此项目代码」，本会先做**纯静态审查**（4 个子会话分域并行 + 主线程复核，逐条要求给出
+  file:line、触发前提与影响，并排除文档已登记的取舍），得 **12 条可闭环缺陷（6 高危）**；随后按
+  「**文件所有权互斥 + 每文件单会话 + 先红后绿**」派 5 个实现子智能体并行修复，主线程做集成。
+  **六条高危**：① **镜像 `name` 无路径校验**（`ImportIncoming`/`downloadFile`/`Delete` 三处直接拼
+  `filepath.Join(cfg.Dir, name)`）——`../../..` 可在 root 权限下移动/覆盖/删除仓库外文件（含毁掉
+  `index.json` 使下次启动失败），修法是类型感知的 `ValidateImageName`（VM＝纯文件名、容器＝Docker 引用）
+  + 落盘路径前缀复核（历史越界条目也拒、HTTP 400）+ 容器下载改用仓库内安全临时名；② **`commit
+  confirmed` 超时只回滚 SQLite 与宿主侧、不反向下发**（而恢复收敛「只补齐不摘除」）⇒ 配置回旧版、
+  VPP/内核仍是新拓扑且**零告警**，修法是超时回滚先 `Apply(current, base)`、成功才落库，失败则
+  **配置不回滚**（与数据面保持一致）并报 `CONFIRMED_ROLLBACK_FAILED`；③ **REST 提交把 `r.Context()`
+  原样交给底座**，客户端断开令下发与**补偿一起失效**（`exec.CommandContext` 对已取消 ctx 不执行），
+  修法是下发/补偿改用 `context.WithoutCancel` + 5 分钟上界（未开始就取消的提交仍尽早失败）；
+  ④ **token 不随降权/删除/改口令失效**（`VerifyToken` 只查内存表、class 固化），**默认 60 分钟内旧
+  token 照样有权**，修法是每次校验按 committed 重算身份 + 用户变更主动吊销；⑤ **`delete … gateway`
+  不下发拆除**（`ApplyGateway` 遇 `gw == nil` 直接返回，拆除只在整台交换机删除时走）⇒ 配置已无网关、
+  BVI/地址/专属 VRF 继续转发，修法是把撤销语义并进 `ApplyGateway`（内核侧另有 `ip addr replace`
+  只加不删的收缩缺口，一并补差集）；⑥ **DPDK 绑定中途失败不回绑原驱动** ⇒ 业务口可能落成「无任何
+  驱动」，修法是失败即回绑并落 `DPDK_BIND_RESTORE_FAILED`（回绑也失败时给类型化错误）。
+  **六条中危**：终端 ticket/已建立 WS 不随登出吊销终止（新增 `console_sessions.go` 登记 + 按 ID/用户
+  关闭桥接、Web 登出补齐关容器终端）；`exec` 命令原文进审计且 read-only/诊断包可读（`model.ScrubSecrets`
+  写侧+读侧+诊断包三处、覆盖历史明文）；提交落库非单事务（新增 `Store.AppendCommit`）与迁移非幂等
+  （每步 DDL+版本同事务 + `addColumnIfMissing`）；`software rollback`「取归档最高且非当前」可把回退做成
+  升级（`~dev` 序还反了）⇒ 改 Debian 语义比较 + 只选**严格低于当前**的最大者；`cloud-init.hostname`
+  未转义 ⇒ `branch: blue` 生成不可解析的 seed（整段 `#cloud-config` 被丢）⇒ RFC1123 校验 + seed 侧
+  YAML 双引号转义（instance-id 摘要仍取原始字节）；CPU 账本在**内核数据面仍扣 VPP 线程核**（读数偏低、
+  可能误拒 VNF）⇒ 仅 VPP 数据面扣减。
+  **本轮自己发现并收口 3 条评审未提的同族缺陷**：① 命令树声明 `request system software rollback [to <版本>]`
+  而**执行器把 `to` 丢掉**、REST 也无版本参数（点名版本静默改道到自动选版）⇒ 新增 `RollbackTo` +
+  CLI 解析 + REST `?version=`，四类请求（不存在/等于当前/高于当前/装配不支持）一律如实拒绝；
+  ② **`POST /images` 契约声明 `multipart/form-data` 而实现只解 JSON** ⇒ Web「上传文件并导入」必然 400，
+  已实现 multipart（随机安全临时名落 IncomingDir、请求体总量上限 4 GiB 超限 413、字段只读表单体不吃 query、失败清理），并新增一条**契约声明 multipart ↔ 实现支持**的交叉守护（照出该类漂移，顺带确认 `/system/restore` 早已实现）；
+  ③ 顺带收掉「持久化失败被吞」三处：确认路径 `clearConfirmedLocked`（清除失败却记成功 ⇒ 已确认的变更
+  仍会在到期后被回滚）、空闲锁释放失败**记成成功**（锁行还在、他会话仍被 409 挡住）、`appendAudit`
+  写失败无痕（审计正是本轮之后**唯一**的持久事实源）——三者分别改为上抛/失败审计+不记成功/经
+  `Options.OnAuditError` 出到装配方。
+  **接线（此前从未接过）**：`cmd/nfvisd` 首次接 `Options.OnEvent`/`OnAuditError`，新增告警码
+  `CONFIRMED_ROLLBACK_FAILED`（下次成功提交消解）与 `AUDIT_WRITE_FAILED`（审计恢复事件消解），
+  后者配套引擎新增 `EventAuditWriteRecovered`；另有静态装配守护钉住「钩子在 `NewEngine` 之前赋值」。
+  **纪律与证据**：每条修复都有红-绿守护（评审项 + 收尾项共 **90+ 条新用例**，含 4 条既有用例按新契约
+  更新——zeroize 清账号/自助改密后旧 token 401，判据取自产品自身文案与既有真机证据，**吊销语义未放宽**；
+  测试注入统一用 SQLite 触发器做确定性失败，不用关库）。`go test -count=1 -p=1 ./...` **全绿**
+  （中途被 `internal/archtest` 的 `TestUserVisibleTextHasNoInternalRefs` 拦下——我给操作者文案写了
+  `FR-CFG-010`，已按仓库规矩去掉）；覆盖率门槛包全过（config 88.2 / model 90.5 / schema 92.0 /
+  network 80.5 / compute 89.2 / container 85.7 / images 80.2，门槛 70）；四套工具自校准、维护脚本、
+  离线安装器、决策条数（**410**）、openapi 同步全过。**契约与文档**：openapi yaml 改了 9 处并
+  `--write` 重生成嵌入 `openapi.json`；命令全表 7 行、用户手册 7 处补注 + 告警表 +3 码；
+  附录 A 新增 #505~#511 七条。**分支 `fix/round49-review-findings`，未 commit、未发版**。
+  **真机验证（2026-10-26，nfvis-vm 从「裸」快照重建）**：该快照连 nfvis/VPP/libvirt/docker/make/go 都没有，
+  按 `contrib/dev-vm/provision.sh`（`SKIP_VPP=1`，VPP 用 `/root/vpp-v26.06-deb` 本地 9 个 deb）重建；
+  ⚠️ **Go 依赖必须走代理**（`http(s)_proxy=http://192.168.155.1:2333`——`proxy.golang.org` 直连被拒，
+  apt 直连可用）；内核基线 `1G=4 / 2M=768 / isolcpus=2-5`，本分支 deb `3.0.32~r49` 装齐后逐条复验：
+  镜像名越界（CLI 与 multipart 均拒、仓库外无文件）、multipart 上传 201、`rollback to` 三类拒绝
+  **并真实回退到 3.0.31 成功**（装回 r49）、hostname 拒绝 `branch: blue`、`commit confirmed` 超时
+  **反向下发**（VPP 里 BD/BVI 真的消失 + `config.rollback-auto success`）、网关撤销（BD 保留、BVI 消失）、
+  token 生命周期（只读 403 → CLI 改 class 同一 token 201 → 删用户后 401）、审计三出口脱敏
+  （CLI/REST/诊断包明文 0、`mysql -p«已隐藏»`）、内核数据面下 `vpp-reserved` 为空。
+  **真机抓到并收口一条装配漏转发**：`rollback to` 在真机恒报「当前装配不支持指定版本回退」，而所有单测
+  注入的假件自带该方法、全绿（与 BUG-17 的 `PackageState` 同族）；修法不是再补一个可选接口，而是把
+  `RollbackTo` **升为 `api.SoftwareRuntime` 的成员**（适配器漏实现即**编译失败**）+ `cmd/nfvisd` 静态守护
+  钉转发 + 真机复验。**四套件与发版基线逐项一致**：fulltest **306/0/26**、语义 **43/0/0**、
+  lifecycle **40/0/3**、pty **10/10**。环境坑（均入册）：套件收尾会把 docker `alpine:3.20` 与
+  `/data/incoming` 夹具一起清掉（每轮必重备）；阶段 2 的业务地址与宿主管理网段同段 ⇒ 套件副本改
+  `192.168.177.0/24`（R41-T1 仍在）；VM 重启后 SSH host key 会再生成（先 `ssh-keygen -R 192.168.155.129`）；
+  套件会改 `resource-pools`/`vpp cpu` 声明，收尾需还原并 `request system kernel apply` + 重启才让内核池
+  回到声明值。现场已还原（验证用归档与诊断包删除、池/隔离核写回、DPDK 重新绑定、`show alarms` 无活动项）。证据 `docs/evidence/v3-round49-review-fixes-realmachine.txt`（含逐条原始输出与五条环境坑）。
+  ⚠️ **仍未覆盖（如实）**：DPDK 绑定失败回绑、空闲锁释放失败/审计写失败注入、终端 ticket 的手工吊销、
+  cloud-init seed 的 YAML 转义路径（RFC1123 校验已挡住危险值，转义分支不可达）——这四项只有单测覆盖；
+  `main-core = 0` 是否占核 0 **未定裁**（仓库内无 VPP 缺省主核落点的依据，实现取「不占」并登记反证）；
+  `DeleteGateway` 仍只按进程内登记拆除（「nfvisd 未运行时手工改配置」的现场不会被清，候选修法已登记）；
+  **未发版、未 commit**。
+
 ## 验证与口径纪律（决策 #481；对所有会话生效）
 
 - **口径红线：凡含「可分配 / 可用 / 空闲 / 剩余」字样的读数，必须扣掉全部在用者**——
@@ -1445,9 +1517,9 @@
   「已声明未生效」、恢复重放给出照做指引）；④ 管理口**首次**声明需 `commit confirmed`（后续 commit 即确认）；
   ⑤ `bind-dpdk` 非交互需 `--yes`（缺省被守卫正确拒绝）；⑥ 套件判据是命令级，**夹具缺口会级联**（如容器镜像
   缺失 ⇒ phase 3 整体回滚 ⇒ 同 phase 的 bond 检查一起红）——判读失败先看夹具。
-- 已定决策 403 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
+- 已定决策 410 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线 #300~#403（其中 #350 撤回）、
-  **v3 线自 #404 起**（分支 `v3`，已有 #404~#495））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
+  **v3 线自 #404 起**（分支 `v3`，已有 #404~#511））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **v3 线最新交接**：`docs/v3-交接-2026-10-12.md`（round15~23 共 9 轮：#460~#466 七条决策 + round17 口径确认
   + 四套件复跑 + teardown 假告警与两处套件漂移的顺带修正；观察池清空、三条已登记候选交付；环境/构建/跑测的坑
   与「跑完要还原什么」都写在里面）。

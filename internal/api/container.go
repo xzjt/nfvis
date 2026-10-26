@@ -225,12 +225,17 @@ func (s *Server) containerExec(w http.ResponseWriter, r *http.Request, name stri
 		return
 	}
 	// 审计记**命令原文**（操作可追溯），不记输出（可能很大）。
+	// 但命令里可能带口令（`mysql -p…`、`--password=…`、`Authorization: Bearer …`、PEM 私钥），
+	// 而入审计的文本会经 CLI `show log audit`、GET /audit-logs、诊断包三个出口——契约承诺
+	// 「口令与私钥正文一律不入审计」，故入库前先做**文本级脱敏**（round49 审计脱敏收口）。
+	// 执行用的仍是原文，只有审计副本被掩码。
+	auditCmd := model.ScrubSecrets(in.Command)
 	// 超时按失败记账（决策 #366）：决策 #357 原文「只有没跑完（超时/流中断/前置不满足）
 	// 才按失败处理」——此前超时记 success 是实现漂移，三面（CLI/REST/审计）归一。
 	if res.TimedOut {
 		s.engine.Audit(user, "container.exec",
 			fmt.Sprintf("exec 容器 %s: %s（超时 %s，已停止等待；容器内进程可能仍在运行）",
-				name, in.Command, timeout.Round(time.Second)), "failure")
+				name, auditCmd, timeout.Round(time.Second)), "failure")
 		writeError(w, http.StatusGatewayTimeout, "EXEC_TIMEOUT",
 			fmt.Sprintf("命令在 %s 内未结束（已停止等待；容器内进程可能仍在运行，退出码未知）",
 				timeout.Round(time.Second)), nil)
@@ -241,7 +246,7 @@ func (s *Server) containerExec(w http.ResponseWriter, r *http.Request, name stri
 		exit = "未知（未跑完）"
 	}
 	s.engine.Audit(user, "container.exec",
-		fmt.Sprintf("exec 容器 %s: %s（退出码 %s）", name, in.Command, exit), "success")
+		fmt.Sprintf("exec 容器 %s: %s（退出码 %s）", name, auditCmd, exit), "success")
 	out := map[string]any{
 		"stdout":      res.Stdout,
 		"stderr":      res.Stderr,

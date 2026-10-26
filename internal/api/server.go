@@ -238,8 +238,13 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 		return nil
 	})
 	// M4-12：CLI `request … console` 复用 console 端点同一 ticket 表（ws 桥接与审计同源）
+	//
+	// round49：把发起本条命令的会话稳定 ID 一并绑到 ticket 上——REST/Web 三条签发路径已绑，
+	// 能据此在握手期复核凭据、并在吊销/登出时关闭已建会话。CLI 经 REST 桥（`/cli/execute`）
+	// 执行时 callerTokenID 非空，同样受益；SSH/控制台直连没有 token（callerTokenID 为空），
+	// 按空 ID 保守放行（与既有语义一致，不凭空推断「已吊销」）。
 	s.cliExec.issueConsole = func(vm, user string) (string, int, error) {
-		tok, ttl, err := s.consoleTix.issue(vmConsoleResource(vm), user)
+		tok, ttl, err := s.consoleTix.issue(vmConsoleResource(vm), user, s.cliExec.callerTokenID)
 		if err != nil {
 			return "", 0, err
 		}
@@ -248,7 +253,7 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	// 决策 #358：CLI `request container-functions <n> shell` 与 REST 端点**共用同一 ticket 表**
 	// （WS 桥接与审计同源；资源键前缀隔离，一张表的 ticket 开不了另一类会话）。
 	s.cliExec.issueShell = func(name, user string) (string, int, error) {
-		tok, ttl, err := s.consoleTix.issue(ctShellResource(name), user)
+		tok, ttl, err := s.consoleTix.issue(ctShellResource(name), user, s.cliExec.callerTokenID)
 		if err != nil {
 			return "", 0, err
 		}

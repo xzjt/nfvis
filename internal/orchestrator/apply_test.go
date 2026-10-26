@@ -17,14 +17,31 @@ type recNet struct {
 	failOn   string
 	bds      *[]model.VirtualSwitch // 非 nil 时记录每次 ApplyBridgeDomain 收到的交换机（含端口集合）
 	dnsProxy *DNSProxyUpstreams     // 非 nil 时记录最近一次 ApplyDNSProxy 收到的声明
+	// ctxErrs 非 nil 时逐次记录**删除类（补偿）**调用收到的上下文是否已取消
+	// ——round49 缺陷 #2 的守护用（补偿不得拿到已取消的上下文）。
+	ctxErrs *[]error
+	// cancelOn 记录到该操作时调用 cancel（模拟「下发进行中调用方断开」）。
+	cancelOn string
+	cancel   func()
 }
 
 func (n recNet) record(op string) error {
 	*n.calls = append(*n.calls, op)
+	if n.cancelOn != "" && n.cancelOn == op && n.cancel != nil {
+		n.cancel() // 模拟下发进行中调用方断开上下文
+	}
 	if n.failOn == op {
 		return fmt.Errorf("模拟失败: %s", op)
 	}
 	return nil
+}
+
+// recordDel 记录一次删除类（补偿）调用并留存其上下文状态。
+func (n recNet) recordDel(ctx context.Context, op string) error {
+	if n.ctxErrs != nil {
+		*n.ctxErrs = append(*n.ctxErrs, ctx.Err())
+	}
+	return n.record(op)
 }
 
 func (n recNet) ApplyInterface(ctx context.Context, iface model.InterfaceConfig) error {
@@ -42,7 +59,9 @@ func (n recNet) ApplyLLDP(ctx context.Context, lldp *model.LldpConfig, declaredP
 func (n recNet) ApplyACL(ctx context.Context, acl model.Acl) error {
 	return n.record("acl:" + acl.Name)
 }
-func (n recNet) DeleteACL(ctx context.Context, name string) error { return n.record("del-acl:" + name) }
+func (n recNet) DeleteACL(ctx context.Context, name string) error {
+	return n.recordDel(ctx, "del-acl:"+name)
+}
 func (n recNet) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch) error {
 	if n.bds != nil {
 		*n.bds = append(*n.bds, vs)
@@ -50,7 +69,7 @@ func (n recNet) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwitch) e
 	return n.record("bd:" + vs.Name)
 }
 func (n recNet) DeleteBridgeDomain(ctx context.Context, name string) error {
-	return n.record("del-bd:" + name)
+	return n.recordDel(ctx, "del-bd:"+name)
 }
 func (n recNet) ApplyDhcpRelay(ctx context.Context, vs model.VirtualSwitch) error {
 	return n.record("dhcp-relay:" + vs.Name)

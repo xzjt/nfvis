@@ -32,6 +32,7 @@ type HugepagePoolUsage struct {
 
 // CPULedger 隔离核账本。VppReserved 先扣（FR-SYS-010：账本先扣 VPP 保留核，
 // 剩余才是 VNF 可分配额度，show resource-pools 单独展示 vpp-reserved）。
+// **仅 VPP 数据面**有 VPP 保留核：内核数据面下 VPP 不运行，该集合为空（见 NewPoolLedger）。
 type CPULedger struct {
 	Isolated    []int            // 隔离核全集（升序）
 	VppReserved []int            // VPP main-core + corelist-workers（升序）
@@ -39,7 +40,46 @@ type CPULedger struct {
 	Free        []int            // 未分配核（升序）
 }
 
+// vppReservedCores 由配置推导「VPP 线程核」集合（main-core + corelist-workers）。
+//
+// **只收显式声明**：`main-core` 的 0 语义是「未显式指定」（network/startup.go 的
+// `MainCore > 0` 才写 main-core、向导的「输入 - 表示不配置 VPP CPU」、config 引擎的 vpp
+// 空段判定三处一致），此时产品**不向 startup.conf 写任何主核**，VPP 的主线程因而不被钉核
+// ——扣哪一枚都没有依据。
+//
+// ⚠️ 如实边界（round49 定裁）：**不**把核 0 记为缺省主核占用。`docs/` 里没有 VPP 主线程缺省
+// 落点的依据，而「未指定就扣核 0」会改动真实机器上的 `vpp-reserved`/`free` 读数（`show
+// resource-pools`），并让「隔离核池含 0」的现有配置凭空少一枚可分配核——本仓库既有的期望
+// 恰恰相反（orchestrator/compute 的收敛夹具就是 isolated=[0,1,2,3] + 无 vpp 段 + 需要 4 枚核，
+// 期望分得满）。故按「无依据不扣」处理：未声明就不算在用者；若日后取得 VPP 缺省主核落点的
+// 实证，落点即在此函数（补一条 `reserved[0] = true`）。
+func vppReservedCores(cfg Config) []int {
+	if cfg.Vpp == nil || cfg.Vpp.CPU == nil {
+		return nil
+	}
+	reserved := map[int]bool{}
+	if cfg.Vpp.CPU.MainCore > 0 {
+		reserved[cfg.Vpp.CPU.MainCore] = true
+	}
+	if cores, err := parseCoreList(cfg.Vpp.CPU.CorelistWorkers); err == nil {
+		for _, c := range cores {
+			reserved[c] = true
+		}
+	}
+	out := make([]int, 0, len(reserved))
+	for c := range reserved {
+		out = append(out, c)
+	}
+	sort.Ints(out)
+	return out
+}
+
 // NewPoolLedger 按配置构建账本并扣减 VPP 保留核。
+//
+// VPP 线程核只在 **VPP 数据面**下是在用者：内核数据面下 VPP 不运行（vpp 段配置按设计保留，
+// 但不下发、VPP 也被停掉），把它记成在用者会让「空闲/可用」读数凭空少核——操作者按该读数
+// 规划 VNF 会白白放弃隔离核（同一条口径红线：不得只报声明值，也不得扣不存在的占用者）。
+// 故内核数据面下 VppReserved 恒为空。
 func NewPoolLedger(cfg Config) *PoolLedger {
 	l := &PoolLedger{
 		Hugepages: map[string]*HugepagePoolUsage{},
@@ -53,21 +93,9 @@ func NewPoolLedger(cfg Config) *PoolLedger {
 			l.CPU.Isolated = sortedCopy(cfg.ResourcePools.CPU.IsolatedCores)
 		}
 	}
-	reserved := map[int]bool{}
-	if cfg.Vpp != nil && cfg.Vpp.CPU != nil {
-		if cfg.Vpp.CPU.MainCore != 0 {
-			reserved[cfg.Vpp.CPU.MainCore] = true
-		}
-		if cores, err := parseCoreList(cfg.Vpp.CPU.CorelistWorkers); err == nil {
-			for _, c := range cores {
-				reserved[c] = true
-			}
-		}
+	if cfg.DataPlaneMode() != DataPlaneKernel {
+		l.CPU.VppReserved = vppReservedCores(cfg)
 	}
-	for c := range reserved {
-		l.CPU.VppReserved = append(l.CPU.VppReserved, c)
-	}
-	sort.Ints(l.CPU.VppReserved)
 	l.CPU.Free = minusInts(l.CPU.Isolated, l.CPU.VppReserved)
 	return l
 }

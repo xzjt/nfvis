@@ -97,12 +97,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // 决策 #318：本会话的锁**不区分接入源**地释放（`discardOwnSession` → `DiscardSession`）——
 // CLI 会话的锁 holder 是 user@ssh/console，而登出请求的会话身份是 REST（user@api），按身份键
 // 匹配清不掉它（R98-1：CLI 退出后留下的干净锁把后续调用挡住）。匹配仍只认本 token 的稳定 ID。
+//
+// 决策 #507（round49 第 2 条）：登出**同时终止本会话已建立的终端**（串口 console / VNC /
+// 容器 shell）——这些链路以一次性 ticket 鉴权、拿不到 Bearer，此前登出只清 REST token 与
+// CLI 本地态，终端会一直活着（凭据已吊销而终端仍在用）。
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	sess := s.sessionFromIdentity(r)
 	discardOwnSession(s.engine, sess, s.log)
 	if tok := bearerToken(r); tok != "" {
 		if info, ok := Identity(r); ok {
 			s.cliExec.DropSession(info.ID)
+			s.consoleTix.closeSessionsByToken(info.ID)
 		}
 		s.aaa.Logout(tok)
 	}

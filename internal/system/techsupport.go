@@ -86,7 +86,7 @@ func (t *TechSupport) Generate() (File, error) {
 	}{
 		{"version.json", t.sectionVersion},
 		{"config.json", t.sectionRedacted(t.Src.Config)},
-		{"audit.json", t.sectionJSON(t.Src.Audit)},
+		{"audit.json", t.sectionScrubbedJSON(t.Src.Audit)},
 		{"status.json", t.sectionJSON(t.Src.Status)},
 		{"logs.txt", t.sectionLogs},
 		{"core-dumps.json", t.sectionFixed(cores)},
@@ -214,6 +214,66 @@ func ScrubBootstrapCredential(b []byte) []byte {
 	return bytes.Join(lines, []byte("\n"))
 }
 
+// sectionScrubbedJSON 与 sectionJSON 同，但对每个字符串值做**文本级脱敏**
+// （model.ScrubSecrets；round49 审计脱敏收口）。
+//
+// 为什么审计分节要单独走这一条：审计 detail 是自由文本（容器 exec 的命令原文等），可能含
+// 口令、`Authorization: Bearer …` 令牌或 PEM 私钥正文——而诊断包是**要交给支持人员**的件
+// （FR-SEC-007 / 决策 #149 的口径）。config 分节按**键名**移除敏感叶子，看不见文本里的秘密。
+//
+// 实现取「先规范化成通用树、再逐字符串脱敏」而不是「对整段 JSON 文本做正则」：后者一旦
+// 被跨条目的标记误配（某条只有 BEGIN、另一条只有 END）就会破坏 JSON 结构——「诊断包里这一节
+// 读不出来」同样不可接受。逐字符串同样覆盖单条内完整的 PEM 块与键值形态，且**永远是合法 JSON**。
+func (t *TechSupport) sectionScrubbedJSON(fn func() (any, error)) func() ([]byte, error) {
+	return func() ([]byte, error) {
+		if fn == nil {
+			return []byte("null\n"), nil
+		}
+		v, err := fn()
+		if err != nil {
+			return nil, err
+		}
+		// 来源可能是结构体切片（engine.AuditTrail）——先经一轮 JSON 规范化成 map/数组/字符串，
+		// 下面的遍历才与形状无关。
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, err
+		}
+		var tree any
+		if err := json.Unmarshal(b, &tree); err != nil {
+			return nil, err
+		}
+		scrubTreeStrings(tree)
+		out, err := json.MarshalIndent(tree, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		return append(out, '\n'), nil
+	}
+}
+
+// scrubTreeStrings 就地脱敏通用 JSON 树里的每个字符串值（其余类型原样）。
+func scrubTreeStrings(v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			if s, ok := val.(string); ok {
+				t[k] = model.ScrubSecrets(s)
+				continue
+			}
+			scrubTreeStrings(val)
+		}
+	case []any:
+		for i, e := range t {
+			if s, ok := e.(string); ok {
+				t[i] = model.ScrubSecrets(s)
+				continue
+			}
+			scrubTreeStrings(e)
+		}
+	}
+}
+
 func (t *TechSupport) sectionFixed(v any) func() ([]byte, error) {
 	return func() ([]byte, error) {
 		b, err := json.MarshalIndent(v, "", "  ")
@@ -228,7 +288,7 @@ func (t *TechSupport) sectionReadme(created time.Time, cores int) func() ([]byte
 	return func() ([]byte, error) {
 		var b strings.Builder
 		fmt.Fprintf(&b, "NFViS tech-support archive\ncreated_at: %s\nnfvis_version: %s\ncore_dumps: %d\n\n", created.Format(time.RFC3339), t.version, cores)
-		b.WriteString("sections:\n  version.json    nfvis 与底座组件版本\n  config.json     committed 配置（口令等敏感字段已隐藏）\n  audit.json      审计日志\n  status.json     VPP/运行态快照\n  logs.txt        nfvisd 日志尾部\n  core-dumps.json core dump 清单\n")
+		b.WriteString("sections:\n  version.json    nfvis 与底座组件版本\n  config.json     committed 配置（口令等敏感字段已隐藏）\n  audit.json      审计日志（命令原文里的口令/令牌/私钥形态已掩码为占位）\n  status.json     VPP/运行态快照\n  logs.txt        nfvisd 日志尾部\n  core-dumps.json core dump 清单\n")
 		b.WriteString("\nnote: 本归档内的配置是脱敏视图，不能用于恢复；要可恢复的完整配置请导出配置备份。\n")
 		return []byte(b.String()), nil
 	}

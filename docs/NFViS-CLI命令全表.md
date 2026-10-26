@@ -127,7 +127,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show resource-pools` | 大页池/隔离核：大页段列名「声明/总数（内核实际）/已分配（在用）/可分配（VNF）」，数字取**内核实况**（与 `show system hugepages` 同源，两处数字一致）：已分配（在用）＝内核在用页数（含数据面固定占用与 VNF/其它持有），可分配（VNF）＝内核空闲页数＝VNF 实际可起页数；取不到内核值显示「取不到」；隔离核含 vpp-reserved | `GET /resource-pools` | ✅ |
 | `show alarms [active\|all]` | 告警列表（未同步时消息后标 `[时钟未同步]`） | `GET /alarms` | ✅ |
 | `show log system [level <lvl>] [last <n>]` | 系统日志 | 服务端日志文件 | ✅ |
-| `show log audit [last <n>]` | 审计日志 | `GET /audit-logs` | ✅ |
+| `show log audit [last <n>]` | 审计日志。命令原文里的口令/令牌/私钥形态的值（`-p…`、`--password=…`、`Authorization: Bearer …`、PEM）在**写入侧与读取侧**均掩码为 `«已隐藏»`（REST 出口与诊断包同口径，决策 #506），普通命令逐字保留 | `GET /audit-logs` | ✅ |
 | `show log vnf <name> [last <n>]` | VNF 控制台/事件日志 | 运行态 | ✅ |
 | `show users` | 本地用户与 class | `GET /system/login-users` | ✅ |
 | `show system api tokens` | 活动会话 / API Token 清单：token-id、用户、权限类、签发时间、过期时间、是否当前会话（super-user 列**全部用户**的会话，其他 class 只列自己的；token 为内存态，重启后清空） | `GET /system/api-tokens` | ✅（真机：`docs/evidence/v2-dev1-d301-real-machine-verification.txt`——CLI/REST/Web 三方 + 审计独立事实源；已入 fulltest 阶段 1/4 与 semantic S10-8） |
@@ -171,9 +171,9 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request container-functions <n> exec <command> [timeout <seconds>]` | 在**运行中**的容器内执行命令（非交互；`<command>` 是整体、含空格请加引号；等价容器内 `sh -c`）；超时默认 30s（1..300）、stdout/stderr 各自上限 256 KiB（超限置 truncated）；**超时只中止客户端等待**（Docker 无 exec 中止接口，容器内进程可能仍在跑）、退出码未知时不报（决策 #357） | S | `POST /container-functions/{n}:exec` | ✅（真机四维（round138，含 Browser Use）；已入 fulltest——`docs/evidence/v2-round138-d357-container-exec.txt`） |
 | `request container-functions <n> shell` | **交互式终端**：进容器里的 `sh`（TTY；Ctrl-] 退出）。与 VM 串口 console **同一套管线**（一次性 ticket + WebSocket + CLI raw 接管），底座是 Docker exec 的 TTY 形态；**断开只关产品侧桥接**（WS 断开后容器内 shell 进程**可能仍在**，真机实测；Docker 无 exec 中止接口）；不做窗口尺寸同步（决策 #358） | S | `POST /container-functions/{n}/shell` + `GET …/shell/ws?ticket=…` | ✅（真机 pty 四维 + Browser Use（round139）——`docs/evidence/v2-round139-d358-container-shell.txt`） |
 | `request container-functions <n> delete` | 删除容器 | S | `DELETE /container-functions/{n}` | 🚫 交互确认 |
-| `request images upload name <n> type <t> file <path>` | 从 `/data/incoming/` 导入（成功自动清理源文件）；容器镜像读出 tar 内嵌 tag 并回显（决策 #312） | O | `POST /images` | ✅ |
-| `request images download name <n> type <t> url <u> sha256 <hex>` | 从 HTTP(S) 拉取；**`sha256` 必填**（键值形态，非可选——校验层在受理前同步强制，缺省即拒） | O | `POST /images` | ✅（FR-SEC-004） |
-| `request images delete name <n>` | 删除镜像（引用检查） | S | `DELETE /images/{n}` | ✅ |
+| `request images upload name <n> type <t> file <path>` | 从 `/data/incoming/` 导入（成功自动清理源文件）；容器镜像读出 tar 内嵌 tag 并回显（决策 #312）。**镜像名的形态受校验**（决策 #506）：VM 镜像＝纯文件名（禁 `/`、`\`、`:` 与任何 `..` 段），容器镜像＝Docker 引用（允许 `:`、`/`、`@`）——越界名一律拒绝，不再能操作到仓库外文件 | O | `POST /images` | ✅ |
+| `request images download name <n> type <t> url <u> sha256 <hex>` | 从 HTTP(S) 拉取；**`sha256` 必填**（键值形态，非可选——校验层在受理前同步强制，缺省即拒）。镜像名形态同上传（决策 #506）；容器镜像落盘用仓库内安全临时名，不用原始名建子目录 | O | `POST /images` | ✅（FR-SEC-004） |
+| `request images delete name <n>` | 删除镜像（引用检查）；名字非法（含历史遗留越界条目）返回 400 而不是照删（决策 #506） | S | `DELETE /images/{n}` | ✅ |
 | `request interfaces <ifname> enable` | 启用接口 | O | `PUT /interfaces/{n}` | ✅ |
 | `request interfaces <ifname> disable` | 禁用接口 | O | `PUT /interfaces/{n}` | ✅ |
 | `request interfaces <ifname> bind-dpdk [uio-driver <d>]` | 绑定 DPDK 驱动（中断流量，需确认）。**内核数据面（`system.dataplane=kernel`）下直接拒绝**——内核数据面不使用 DPDK 接管，绑定会把网卡从内核里拿走（需要 DPDK 请切回 `vpp` 数据面并重启服务） | O | `PUT /interfaces/{n}/dpdk` | ✅（真机周期见决策 #72；内核方向拒绝见附录 A #426） |
@@ -188,7 +188,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request vpp trace stop` | **兼容别名**（同 `request capture stop`） | S | 同上 | ✅ |
 | `request vpp trace export [name <n>]` | **兼容别名**（同 `request capture export`） | S | 同上 | ✅ |
 | `request system software add <deb\|url> [sha256 <hex>]` | 安装升级包（校验→升级→重启 nfvisd） | S | `POST /system/software` | 🚫 破坏性 |
-| `request system software rollback [to <v>]` | 回退版本 | S | `POST /system/software:rollback` | ✅ |
+| `request system software rollback [to <v>]` | 回退版本。**缺省＝版本序上严格低于当前版本的最大者**（不是「归档里最高且非当前」——归档留有更高版本时那样会把回退做成升级）；`to <v>` 指定目标版本，落地为 REST `?version=<v>`。归档无该版本 / 目标＝当前 / 目标高于当前（那是升级，应用 `software add`）一律**如实拒绝**（决策 #509：`to` 此前被命令树接受却被静默忽略） | S | `POST /system/software:rollback` | ✅ |
 | `request system reboot` | 重启系统 | S | `POST /system:reboot` | 🚫 破坏性 |
 | `request system shutdown` | 关机 | S | `POST /system:shutdown` | 🚫 破坏性 |
 | `request system poweroff` | 断电 | S | `POST /system:shutdown` | 🚫 破坏性 |
@@ -339,7 +339,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 |---|---|---|---|
 | `set virtual-switches <n> type <l2\|l3>` | 类型（创建后不可改） | VPP（BD / VRF） | ✅ |
 | `set virtual-switches <n> vlan access <vlan>` | L2 默认 untag VLAN | VPP BD | ✅ |
-| `set virtual-switches <n> gateway ip <ip-prefix>` | BVI 三层网关（可多条） | VPP BVI | ✅ |
+| `set virtual-switches <n> gateway ip <ip-prefix>` | BVI 三层网关（可多条）。**撤销语义**（决策 #508）：`delete … gateway` 或删光地址时提交编排会主动拆除 BVI、旧地址与专属 VRF（显式 `vrf` 的共享表不动），配置与数据面一起收敛 | VPP BVI | ✅ |
 | `set virtual-switches <n> gateway vrf <name>` | 网关所属 VRF | VPP | ✅ |
 | `set virtual-switches <n> gateway acl-in\|acl-out <acl>` | 网关 ACL | VPP acl | ⊘ **设计拒绝（decision #340）**：真机实证 VPP 26.06 不评估 BVI（网关）上的域内流量——既不拦截也不计数（round117 绑定登记可见但域内流量零评估；round118 复核），绑定给不出任何保护，故提交期硬拒。替代：`set virtual-switches <n> l3-interface <if> acl-in <acl>`（见下一行，已实证生效）。 |
 | `set virtual-switches <n> dhcp-relay server <ip>` | DHCP 中继（仅已 `set gateway ip` 的 L2 交换机可配；src 自动取 BVI 的 IPv4 网关地址，server 须在该转发域内可达）。**内核数据面（v3）**：nfvisd 内的自研用户态中继实例（每交换机一个）——收 bridge 上的 DHCP 请求、源地址重写为 BVI 的 v4 网关地址后单播 `server:67`（giaddr=0），应答按「请求期 xid → 客户端 MAC」登记表回注以太帧（不依赖 option 82；运行态见交换机详情的中继说明行） | VPP dhcp proxy；内核数据面：nfvisd 用户态中继实例 | ✅（round113：配置/撤销/读视图/pcap 转发签名；**端到端租约已补验（round131：完整 DORA + 客户端实际使用；option 82 回程要求进手册）**——`docs/evidence/v2-round113-*.txt`、`v2-round131-d335-relay-lease-verified.txt`）；**内核数据面侧实现已落地（用户态中继实例，单测覆盖报文处理/生命周期/恢复重放）；**真机 DORA 已完成（round34）**：宿主最小 server + 客户端 guest —— 中继单播（源重写为 BVI、giaddr=0）→ OFFER/ACK → guest 拿到 192.168.99.111 + 默认路由 BVI + 宿主 ping 3/3，读视图「已转发 8/已回注 8/丢弃 0」，证据 `docs/evidence/v3-round34-clean-install-walkthrough-vpp-kernel.txt` §6.3** |
@@ -424,7 +424,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `set … interfaces <vnic> virtual-switch <name>` | 所属 L2 交换机 | VPP | ✅ |
 | `set … cloud-init user-data <path\|text>` | user-data 注入（FR-CMP-016）。取值可为**文件路径**：模型存的是路径串，**改了文件再重跑同一条 set 会提示「值未变化」**（路径确未变）——提示后追加如实说明（决策 #474）：文件内容的变更在 VM **下次启动**时按新内容重建 seed 并生效（运行中需 `stop`+`start`） | seed ISO | ✅ |
 | `set … cloud-init ssh-key <key>` | SSH 公钥（可多条；**用双引号包住含空格的公钥**） | seed ISO | ✅（决策 #79 修复：引号感知切分 + `ssh_keys[]`） |
-| `set … cloud-init hostname <s>` | guest 主机名 | seed ISO | ✅ |
+| `set … cloud-init hostname <s>` | guest 主机名。受 RFC1123 校验（点分标签、每段 ≤63、总长 ≤253、字母数字与 `-` 且段首尾非 `-`，并拒绝整体全数字）；非法值提交期拒绝（决策 #506）。seed 生成侧对非安全值做 YAML 双引号转义，`branch: blue` 这类值不再破坏整份 `#cloud-config` | seed ISO | ✅ |
 | `set … serial console enable` | 串口控制台（默认启用） | libvirt | ✅ |
 | `set virtual-machine-functions <n> startup machine <type>` | 实例级启动画像覆盖：机器类型（q35\|pc\|pc-i440fx-*\|pc-q35-*；决策 #485） | libvirt | ✅ 真机实测通过（决策 #485；doc(证据 `docs/evidence/v3-round-d485-real-machine-verification.txt`)） |
 | `set virtual-machine-functions <n> startup cpu mode <mode>` | 实例级覆盖：CPU 模式（host-passthrough\|host-model\|custom） | libvirt | ✅ 真机实测通过（同上；决策 #485） |

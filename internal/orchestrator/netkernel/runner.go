@@ -49,8 +49,20 @@ type execRunner struct{}
 func NewExecRunner() Runner { return execRunner{} }
 
 func (execRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	// 上下文已取消：`exec.CommandContext` **不执行**命令直接返回。如实报成「未执行」而不是
+	// 通用的失败——排障时两者结论完全不同（未执行 = 什么都没发生；失败 = 可能已部分生效，
+	// 尤其在「补偿是否真的做完了」这类判读上）。round49 缺陷 #2 的现场正是补偿链路
+	// 里的宿主命令因上下文取消而静默不跑。
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("宿主命令 %s %s 未执行（上下文已取消）: %w", name, strings.Join(args, " "), err)
+	}
 	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 	if err != nil {
+		// 执行中被取消：命令可能已被中断，副作用可能已部分发生（与「未执行」区分开）。
+		if cerr := ctx.Err(); cerr != nil {
+			return string(out), fmt.Errorf("宿主命令 %s %s 被中断（上下文取消，副作用可能已部分发生）: %w",
+				name, strings.Join(args, " "), cerr)
+		}
 		if errors.Is(err, exec.ErrNotFound) {
 			return string(out), fmt.Errorf("%w: %s", ErrToolMissing, name)
 		}

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/xzjt/nfvis/internal/model"
 )
@@ -228,19 +229,25 @@ func (a *orchApplier) Apply(ctx context.Context, old, new model.Config) error {
 		if err := o.run(ctx); err != nil {
 			// 逆序补偿已执行操作；补偿失败仅追加说明，不掩盖原始错误
 			errs := []string{fmt.Sprintf("下发失败 %s: %v", o.desc, err)}
+			// 补偿上下文（round49 缺陷 #2 的纵深防御，与 config.Engine.Commit 的解耦同一理由）：
+			// 调用方取消后原 ctx 已失效，而 undo 链路末端的宿主命令走 `exec.CommandContext`
+			// ——对已取消的上下文**根本不执行**，补偿会静默变成空操作，数据面停在半途
+			// （比不补偿更糟：看起来走了补偿分支，实际什么都没做）。
+			undoCtx, cancelUndo := compensationCtx(ctx)
 			// 失败操作本身可能已部分生效（复合操作）：先按旧配置复原，使回滚真正回到变更前状态。
 			if o.compensateOnFail {
-				if cerr := o.undo(ctx); cerr != nil {
+				if cerr := o.undo(undoCtx); cerr != nil {
 					errs = append(errs, fmt.Sprintf("补偿失败 %s: %v", o.desc, cerr))
 					a.residueAlarm(o.desc, cerr)
 				}
 			}
 			for i := len(executed) - 1; i >= 0; i-- {
-				if cerr := executed[i].undo(ctx); cerr != nil {
+				if cerr := executed[i].undo(undoCtx); cerr != nil {
 					errs = append(errs, fmt.Sprintf("补偿失败 %s: %v", executed[i].desc, cerr))
 					a.residueAlarm(executed[i].desc, cerr)
 				}
 			}
+			cancelUndo()
 			return fmt.Errorf("%s", strings.Join(errs, "; "))
 		}
 		// 该对象本轮重新收敛成功：清掉它历史上的残渣告警（重试提交即为复原方式）。
@@ -248,6 +255,21 @@ func (a *orchApplier) Apply(ctx context.Context, old, new model.Config) error {
 		executed = append(executed, o)
 	}
 	return nil
+}
+
+// compensationTimeout 一次**补偿（undo）动作串**的时长上界（见 compensationCtx）。
+const compensationTimeout = 2 * time.Minute
+
+// compensationCtx 返回执行补偿动作的上下文，第二项为释放函数。
+//
+// 调用方上下文仍有效时**原样沿用**（不新造、不改既有语义）；已取消时改用与取消解耦的后台
+// 上下文 + 有界超时——否则补偿链路里的宿主命令（netkernel.Runner 的 exec.CommandContext）
+// 对已取消上下文不执行，补偿静默失效（round49 缺陷 #2 的现场：REST 提交被客户端断开）。
+func compensationCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx.Err() == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), compensationTimeout)
 }
 
 // residueAlarm 补偿未完成 → 告警（FR-OPS-014 的可追溯口径）。

@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/xzjt/nfvis/internal/model"
 )
@@ -102,10 +105,10 @@ func buildCloudConfig(ci *model.CloudInit, vmName string) string {
 	var b strings.Builder
 	b.WriteString("#cloud-config\n")
 	if ci.Hostname != "" {
-		b.WriteString("hostname: " + ci.Hostname + "\n")
-		fmt.Fprintf(&b, "fqdn: %s\n", ci.Hostname)
+		b.WriteString("hostname: " + yamlScalar(ci.Hostname) + "\n")
+		fmt.Fprintf(&b, "fqdn: %s\n", yamlScalar(ci.Hostname))
 	} else if vmName != "" {
-		b.WriteString("hostname: " + vmName + "\n")
+		b.WriteString("hostname: " + yamlScalar(vmName) + "\n")
 	}
 	keys := make([]string, 0, len(ci.SSHKeys))
 	for _, k := range ci.SSHKeys {
@@ -132,6 +135,91 @@ func buildCloudConfig(ci *model.CloudInit, vmName string) string {
 	return b.String()
 }
 
+// yamlSafeScalarRe 「可以原样裸写」的值：RFC1123 主机名形状——首尾是字母数字、中间只允许
+// 字母数字与 `.`/`-`。裸写这类值不会有任何歧义（既不是 YAML 的保留字面量，也不含指示符）。
+var yamlSafeScalarRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
+
+// yamlScalar 把宿主名一类的**自由文本值**渲染成安全的 YAML 标量（round49 缺陷修复）。
+//
+// 由来（真机形态）：`buildCloudConfig` 曾直接拼 `hostname: <值>`（`fqdn:` 与 `BuildMetaData`
+// 的 `local-hostname:` 同样），而 cloud-init 的 hostname 当时没有格式校验 ⇒ 一次合法提交
+// `set vnf … cloud-init hostname "branch: blue"` 生成的正是字面 `hostname: branch: blue`，
+// YAML 解析直接失败（mapping values are not allowed here）：hostname 落不下去，**整段
+// #cloud-config 一起被丢弃**（SSH 公钥、users 都没了），而产品侧提交成功、零提示。
+//
+// 转义策略（两段判据）：
+//  1. **形状**：匹配 yamlSafeScalarRe 的值原样输出——合法 hostname 的历史输出形态逐字不变
+//     （既有测试与真机夹具都按这个形状比对）；
+//  2. **语义**：形状安全但裸写会被 YAML 解析成**非字符串**的值也加引号（纯数字 → 整数；
+//     true/yes/on/null/~ → 布尔与空值）。cloud-init 的 hostname/local-hostname 是字符串
+//     字段，拿到整数/布尔即 schema 校验失败——判据与同文件的 netplanScalar 同源（同一缺陷族，
+//     那里是 netplan 的 ethernets 键不允许非字符串）。
+//
+// 其余一律走 YAML **双引号标量**（`quoteYAMLString`）：`\`、`"`、控制字符与不可打印字符
+// 全部转义，故值里带换行/制表/冒号也不会破坏结构或注入新行。
+//
+// 注意：instance-id 的**摘要**仍取宿主名的原始字节（见 BuildMetaData）——转义只影响 YAML 文本，
+// 不许改变 instance-id，否则既有 VM 重启后会被 cloud-init 当成新实例、重跑 user-data。
+func yamlScalar(s string) string {
+	if yamlSafeScalarRe.MatchString(s) && !allDigits(s) && !yamlNonStringLiterals[strings.ToLower(s)] {
+		return s
+	}
+	return quoteYAMLString(s)
+}
+
+// quoteYAMLString 把任意字符串渲染成 YAML 双引号标量（可直接嵌进 `key: <结果>` 行）。
+//
+// 转义表按 YAML 的双引号风格：`\\`、`\"`、`\n`、`\r`、`\t`、`\0`，其余控制字符与不可打印
+// 字符按 `\xNN`（≤0xFF）/ `\uNNNN`（≤0xFFFF）/ `\UNNNNNNNN` 写出；可打印字符（含非 ASCII）
+// 原样保留。
+//
+// 非法 UTF-8 字节按字节 `\xNN` 转义。⚠️ **如实边界**：YAML 的 `\xNN` 是**码点**转义，
+// 故这一步对非法字节不是**字节级**可逆的（解回来是 U+00NN）；这里的目标只是「结构不破、
+// 解析得出来」——非法 UTF-8 本来就不可能是合法主机名。
+func quoteYAMLString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('"')
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			fmt.Fprintf(&b, `\x%02x`, s[i])
+			i++
+			continue
+		}
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		case 0:
+			b.WriteString(`\0`)
+		default:
+			if r < 0x20 || r == 0x7f || !unicode.IsPrint(r) {
+				switch {
+				case r <= 0xff:
+					fmt.Fprintf(&b, `\x%02x`, r)
+				case r <= 0xffff:
+					fmt.Fprintf(&b, `\u%04x`, r)
+				default:
+					fmt.Fprintf(&b, `\U%08x`, r)
+				}
+			} else {
+				b.WriteRune(r)
+			}
+		}
+		i += size
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
 // BuildMetaData 生成 meta-data。
 //
 // instance-id 取「VM 名 + cloud-init 输入摘要」（决策 #114）：同名 VM 重启时 id 不变
@@ -155,7 +243,7 @@ func BuildMetaData(vm model.VMFunction) string {
 	sum := sha256.Sum256([]byte(hostname + "\x00" + ciInputs))
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("instance-id: %s-%x\n", vm.Name, sum[:4]))
-	b.WriteString("local-hostname: " + hostname + "\n")
+	b.WriteString("local-hostname: " + yamlScalar(hostname) + "\n")
 	return b.String()
 }
 

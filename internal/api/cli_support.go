@@ -32,8 +32,11 @@ func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 			"timestamp": e.Time,
 			"user":      e.User,
 			"action":    e.Action,
-			"detail":    e.Detail,
-			"result":    e.Result,
+			// detail 是**自由文本**（可含命令原文）：入库前已按同口径脱敏（round49 审计脱敏收口），
+			// 这里再兜一遍是为**修复前入库的历史记录**——只读账号就能读本端点，
+			// 明文口令不能靠「后来的写入侧修复」免责。掩码是幂等的。
+			"detail": model.ScrubSecrets(e.Detail),
+			"result": e.Result,
 		}
 		// NFR-006：只有**确实记录了**时钟状态才给出该字段；迁移前的老记录为 nil（未知），
 		// 显式省略而不是谎称已同步。

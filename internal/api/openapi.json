@@ -3028,6 +3028,7 @@
           "cloud_init": {
             "properties": {
               "hostname": {
+                "description": "guest 主机名。受 RFC1123 校验（点分标签、每段 1–63、总长 ≤253、字母数字与 `-` 且段首尾非 `-`），\n并拒绝**整体全数字**的形态（点分十进制不是主机名）；非法值提交期拒绝。\nseed 生成侧对非安全值做 YAML 双引号转义（决策 #506），故 `branch: blue` 这类值不会再\n破坏整份 `#cloud-config`（修复前会连带丢掉 SSH 公钥与用户配置）。\n",
                 "type": "string"
               },
               "ssh_keys": {
@@ -3508,7 +3509,7 @@
             "type": "array"
           },
           "gateway": {
-            "description": "仅 L2：BVI 三层网关（FR-NET-014）",
+            "description": "仅 L2：BVI 三层网关（FR-NET-014）。**撤销语义**（决策 #508，round49 收口）：\n提交一份不再含该网关（或地址集合收缩）的配置时，提交编排会**主动拆除**数据面侧的\nBVI、旧地址与专属 VRF（`vr-<name>`；显式 `vrf` 指定的共享表不动），并同步清理\n进程内登记——修复前只改配置、BVI 与地址继续生效（配置说没有、数据面还在转发）。\n",
             "properties": {
               "acl_in": {
                 "description": "**不支持**：VPP 26.06 不评估网关（BVI）上的域内流量 ACL（既不拦也不计，真机实证），提交期拒绝\n（决策 #340）。入向过滤请改用 L3 接口绑定：`Vrf.l3_interfaces[].acl_in`。本字段保留仅为解析兼容。\n",
@@ -4253,7 +4254,7 @@
     },
     "/audit-logs": {
       "get": {
-        "description": "审计记录（FR-CFG-010/FR-OPS-031）。**高危档动作记两条**（决策 #150，设计 §7）：\n动作开始执行之前一条「意图」（`result: intent`，detail 写明要做什么、含关键参数），\n动作结束后一条「结果」（`result: success|failure`，失败带原因）。两条的 `action`\n相同，据此配对；其余动作仍只有一条结果记录（不产生额外审计噪音）。\n口令、口令哈希与证书/私钥正文**一律不入审计**（FR-SEC-007）。\n",
+        "description": "审计记录（FR-CFG-010/FR-OPS-031）。**高危档动作记两条**（决策 #150，设计 §7）：\n动作开始执行之前一条「意图」（`result: intent`，detail 写明要做什么、含关键参数），\n动作结束后一条「结果」（`result: success|failure`，失败带原因）。两条的 `action`\n相同，据此配对；其余动作仍只有一条结果记录（不产生额外审计噪音）。\n口令、口令哈希与证书/私钥正文**一律不入审计**（FR-SEC-007）。\n决策 #506（round49）：写侧兜底 + **读侧同口径掩码**——命令原文（如容器 exec）入库前先做\n文本级掩码（口令/令牌/私钥形态的值 → `«已隐藏»`，普通命令逐字保留），而修复前入库的\n**历史明文**在经本端点读出时同样被掩码；CLI `show log audit` 与诊断包 audit.json 同一口径。\n",
         "parameters": [
           {
             "in": "query",
@@ -5197,7 +5198,7 @@
         }
       ],
       "post": {
-        "description": "在**运行中**的容器内执行一条命令并返回 stdout/stderr 与退出码（等价容器内 `sh -c`）。\n权限：**super-user only**（`request container-functions <name> exec` 为 S 档）——与 VM 串口\n`console` 的关键差别是「console 进 guest 串口仍需 guest 凭据，而 exec 是**免凭据的容器内\n命令执行**（等价 root）」，operator 本不能创建容器，故不能经此绕过。\n有界且如实：超时默认 30s（可配 1..300），超时**只中止服务端等待**——Docker 不提供 exec\n进程的中止接口，容器内进程**可能仍在运行**；stdout/stderr **各自**上限 256 KiB，超限置\n`truncated`；退出码未知时（超时/流中断）该字段**不出现**（不谎报 0）。\n**超时按失败**（决策原文「超时/流中断 ⇒ REST 非 2xx」；#366 收口 R142-10 的记账漂移）：\n超时回 **504**（标准错误体，不带部分输出；CLI 侧仍有进程内结构化视图），审计记 failure。\n",
+        "description": "在**运行中**的容器内执行一条命令并返回 stdout/stderr 与退出码（等价容器内 `sh -c`）。\n权限：**super-user only**（`request container-functions <name> exec` 为 S 档）——与 VM 串口\n`console` 的关键差别是「console 进 guest 串口仍需 guest 凭据，而 exec 是**免凭据的容器内\n命令执行**（等价 root）」，operator 本不能创建容器，故不能经此绕过。\n有界且如实：超时默认 30s（可配 1..300），超时**只中止服务端等待**——Docker 不提供 exec\n进程的中止接口，容器内进程**可能仍在运行**；stdout/stderr **各自**上限 256 KiB，超限置\n`truncated`；退出码未知时（超时/流中断）该字段**不出现**（不谎报 0）。\n**超时按失败**（决策原文「超时/流中断 ⇒ REST 非 2xx」；#366 收口 R142-10 的记账漂移）：\n超时回 **504**（标准错误体，不带部分输出；CLI 侧仍有进程内结构化视图），审计记 failure。\n**命令原文入审计**（可追溯），但按文本级掩码处理：口令/令牌/私钥形态的值（如\n`mysql -p…`、`--password=…`、`Authorization: Bearer …`、PEM 私钥块）替换为 `«已隐藏»`，\n普通命令逐字保留；`GET /audit-logs`、CLI `show log audit` 与诊断包对历史记录同样掩码\n（FR-SEC-007：口令/口令哈希/证书私钥正文一律不入审计）。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -5525,17 +5526,11 @@
                     "type": "string"
                   },
                   "name": {
+                    "description": "同 multipart 的 `name`：VM 镜像＝纯文件名（禁 `/`、`\\`、`:` 与 `..`），\n容器镜像＝Docker 引用（允许 `:`、`/`、`@`）。违约 `400`。\n",
                     "type": "string"
                   },
                   "sha256": {
                     "description": "**URL 拉取时必填**：期望校验和（FR-SEC-004 默认强制）；incoming_file 导入时可省",
-                    "type": "string"
-                  },
-                  "type": {
-                    "enum": [
-                      "vm-image",
-                      "container-image"
-                    ],
                     "type": "string"
                   },
                   "url": {
@@ -5562,6 +5557,7 @@
                     "type": "string"
                   },
                   "name": {
+                    "description": "镜像名（**仓库标识**，也是删除/引用时用的名字）。VM 镜像名＝纯文件名：\n不得含 `/`、`\\`、`:`，且必须等于 `filepath.Base(名字)`；容器镜像名＝Docker 引用\n（允许 `:`、`/`、`@`，禁首尾 `/`、空段）。两者都拒绝空/控制字符/绝对路径/任何 `..` 段，\n违约 `400`（决策 #506：此前无校验，越界名可让 `os.Rename/Remove` 操作到仓库外）。\n",
                     "type": "string"
                   },
                   "type": {
@@ -5606,11 +5602,14 @@
           "200": {
             "$ref": "#/components/responses/ConfigAccepted"
           },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
           "409": {
             "$ref": "#/components/responses/Error409"
           }
         },
-        "summary": "删除镜像（被引用时 409）",
+        "summary": "删除镜像（被引用时 409；名字非法 400）",
         "tags": [
           "images"
         ]
@@ -6007,7 +6006,7 @@
     },
     "/logout": {
       "post": {
-        "description": "吊销调用者自己的 token，并**丢弃本会话**的 candidate 编辑锁（决策 #119）。\n决策 #317：只作用**本会话**（会话标识 = 本 token 的稳定 ID）——同一用户其它登录\n（另一个浏览器/CLI 终端/脚本）未提交的候选与编辑锁**不受影响**。未在编辑时也返回 204。\n决策 #318：本会话的锁**不区分接入源**地释放——CLI 侧以 `user@ssh`（或 `user@console`）\n取得的锁，由登出请求（会话身份来自 REST）按 token 稳定 ID 一并清掉；匹配仍只认本 token。\n",
+        "description": "吊销调用者自己的 token，并**丢弃本会话**的 candidate 编辑锁（决策 #119）。\n决策 #317：只作用**本会话**（会话标识 = 本 token 的稳定 ID）——同一用户其它登录\n（另一个浏览器/CLI 终端/脚本）未提交的候选与编辑锁**不受影响**。未在编辑时也返回 204。\n决策 #318：本会话的锁**不区分接入源**地释放——CLI 侧以 `user@ssh`（或 `user@console`）\n取得的锁，由登出请求（会话身份来自 REST）按 token 稳定 ID 一并清掉；匹配仍只认本 token。\n决策 #507（round49）：**同时终止本会话已建立的终端**——由该会话签发的串口/VNC/容器 shell\n一次性 ticket 随即失效（握手期复核），已建立的 WebSocket 桥接被关闭（终端只在产品侧断开；\n容器内进程可能仍在运行，见容器 shell 的既有边界）。\n",
         "responses": {
           "204": {
             "description": "已吊销"
@@ -6625,7 +6624,7 @@
     },
     "/system/api-tokens/{id}:revoke": {
       "post": {
-        "description": "权限与范围：super-user 可吊销任意 token；其他 class 只能吊销自己的。\n吊销不存在的/他人的 token_id 统一回 404「会话不存在或无权操作」（不泄露存在性）；\n吊销后该 token 的下一个请求即 401。吊销**当前**会话等价于登出（本会话 candidate 锁随之释放；\n决策 #318：按 token 稳定标识释放，**不区分接入源**——CLI 侧 `user@ssh` 的锁也一并清掉）；\n吊销**他人**会话不主动释放其编辑锁——由既有空闲巡检（lock_idle_ttl）回收（决策 #317）。\n",
+        "description": "权限与范围：super-user 可吊销任意 token；其他 class 只能吊销自己的。\n吊销不存在的/他人的 token_id 统一回 404「会话不存在或无权操作」（不泄露存在性）；\n吊销后该 token 的下一个请求即 401。吊销**当前**会话等价于登出（本会话 candidate 锁随之释放；\n决策 #318：按 token 稳定标识释放，**不区分接入源**——CLI 侧 `user@ssh` 的锁也一并清掉）；\n吊销**他人**会话不主动释放其编辑锁——由既有空闲巡检（lock_idle_ttl）回收（决策 #317）。\n决策 #507（round49）：吊销**同时终止该会话已建立的终端**（串口/VNC/容器 shell）——其 ticket\n随即失效、已建立的 WebSocket 桥接被关闭（同 `POST /logout` 的口径）。\n",
         "parameters": [
           {
             "description": "token 稳定 ID（GET /system/api-tokens 的 token_id）",
@@ -7163,7 +7162,7 @@
     },
     "/system/login-users/{name}": {
       "delete": {
-        "description": "一次性事务：提交即生效、收尾交还编辑锁（决策",
+        "description": "一次性事务：提交即生效、收尾交还编辑锁（决策 #151，同 `POST /system/login-users`）。\n决策 #507（round49）：**被删用户的全部活动 token 立即失效**（含其发起的终端会话），\n之后对旧 token 的请求一律 401——删除账号不再等到 TTL 才真正断掉访问。\n",
         "responses": {
           "204": {
             "description": "已删除"
@@ -7188,7 +7187,7 @@
         }
       ],
       "put": {
-        "description": "一次性事务：提交即生效、收尾交还编辑锁（决策 #151，同 `POST /system/login-users`）。\n**本会话已有未提交候选时拒绝**（决策 #316）：见 `POST /system/login-users` 同款口径。\n",
+        "description": "一次性事务：提交即生效、收尾交还编辑锁（决策 #151，同 `POST /system/login-users`）。\n**本会话已有未提交候选时拒绝**（决策 #316）：见 `POST /system/login-users` 同款口径。\n决策 #507（round49）：**成功后该用户的全部活动 token 立即失效**（含其发起的终端会话）——\n降权/改口令即刻生效，不再等 token TTL（默认 60 分钟）；此外每次请求都按当前 committed\n配置重算身份（用户被删除即 401，class 变更立即生效），故 CLI 侧改 class 同样即时生效。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -7234,7 +7233,7 @@
         }
       ],
       "post": {
-        "description": "一次性事务：校验旧口令 + 策略后提交生效（FR-SEC-008），收尾交还编辑锁（决策 #151）——\n改完口令的会话不再持有全局编辑锁，其它会话的配置写不会被挡（也无需为此登出）。\n**只改口令，不牵动候选**（决策 #316）：本会话已有未提交候选（典型＝控制台配置页正在编辑）时\n**拒绝**（409）并说明「先提交或丢弃候选」——绝不再把那份候选一并提交生效（round77 观察项）。\n",
+        "description": "一次性事务：校验旧口令 + 策略后提交生效（FR-SEC-008），收尾交还编辑锁（决策 #151）——\n改完口令的会话不再持有全局编辑锁，其它会话的配置写不会被挡（也无需为此登出）。\n**只改口令，不牵动候选**（决策 #316）：本会话已有未提交候选（典型＝控制台配置页正在编辑）时\n**拒绝**（409）并说明「先提交或丢弃候选」——绝不再把那份候选一并提交生效（round77 观察项）。\n决策 #507（round49）：**改口令成功后该用户全部活动 token 立即失效**（含本会话自身）——\n客户端须用新口令重新登录（一次性事务的另一半语义不受影响）。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -7396,12 +7395,27 @@
     },
     "/system/software:rollback": {
       "post": {
+        "description": "回退安装归档中的 nfvis 包（`request system software rollback [to <版本>]`）。\n**缺省**：安装版本序上**严格低于当前版本的最大者**（不是「归档里最高且非当前」——\n归档留有更高版本时那样会把回退做成升级；版本比较按 Debian 语义，`3.0.30~dev1 < 3.0.30`）。\n归档中没有任何更低版本时如实报错并列出可见版本（不会往上装）。\n**`version=<版本>`**：安装归档中的**该版本**；归档里没有该版本、目标等于当前版本、\n或目标高于当前版本（那是升级，应走 `POST /system/software`）时一律 `400` 并说明原因\n（决策 #509：此前 `to <版本>` 被命令树接受却被静默忽略，实际按自动选版执行）。\n",
+        "parameters": [
+          {
+            "description": "回退目标版本（缺省＝上一版本）",
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "202": {
             "description": "已受理"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
           }
         },
-        "summary": "回退到上一版本",
+        "summary": "回退版本（缺省＝上一版本；`version=` 指定目标版本）",
         "tags": [
           "system"
         ]
@@ -8914,6 +8928,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "description": "仅 multipart 上传：请求体总量超过上限（4 GiB）——在读入过程中即中断，不落任何文件"
           },
           "500": {
             "content": {

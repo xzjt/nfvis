@@ -42,6 +42,14 @@ func (s stubSoftware) Rollback(context.Context) (system.SoftwareResult, error) {
 	}
 	return system.SoftwareResult{Package: "nfvis_1.1.30_amd64.deb", Previous: "1.1.31", Version: "1.1.30"}, nil
 }
+
+// RollbackTo（round49）：SoftwareRuntime 的成员方法，假件必须实现（漏了编译期就报）。
+func (s stubSoftware) RollbackTo(_ context.Context, version string) (system.SoftwareResult, error) {
+	if s.fail != nil {
+		return system.SoftwareResult{}, s.fail
+	}
+	return system.SoftwareResult{Package: "nfvis_" + version + "_amd64.deb", Previous: "1.1.31", Version: version}, nil
+}
 func (stubSoftware) Reboot(context.Context) error   { return nil }
 func (stubSoftware) Shutdown(context.Context) error { return nil }
 func (stubSoftware) NTPSync(context.Context, []string) (string, error) {
@@ -186,19 +194,25 @@ func intentDetailOf(rows []auditRow, action string) string {
 // ---------- REST：四个直接动作（恢复出厂 / 软件升级 / 软件回退 / 证书上传） ----------
 
 func TestHighRiskAuditTwoRowsREST(t *testing.T) {
-	ts := newTestServerOpts(t, Options{Software: stubSoftware{}, TLS: stubTLS{}})
+	ts, engine, authz := authKit(t, Options{Software: stubSoftware{}, TLS: stubTLS{}})
 	token := loginAdmin(t, ts)
 
 	// 1) 恢复出厂
-	before := auditRows(t, ts, token)
 	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system:zeroize", token,
 		map[string]any{"confirm": true}, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusAccepted {
 		t.Fatalf("zeroize: %d %s", status, data)
 	}
-	assertPair(t, newRows(t, before, auditRows(t, ts, token)), "system.zeroize", "恢复出厂", "success")
+	// 决策 #506：恢复出厂**连同账号表一起复位**（FR-OPS-007）——「谁」已不在 committed 配置里，
+	// 发起本动作的会话随之结束（与产品文案「登录被拒：系统尚未初始化本地用户」同口径）。
+	// 恢复现场的方式与真机一致：重启 nfvisd ⇒ 启动引导重建 admin（同一函数），再登录继续。
+	if status, _, _ := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/system/version", token, nil, nil); status != http.StatusUnauthorized {
+		t.Fatalf("恢复出厂后原会话应 401（账号已复位），实得 %d", status)
+	}
+	token = asSuperUser(t, ts, rebootstrapAdmin(t, engine, authz))
+	assertPair(t, auditRows(t, ts, token), "system.zeroize", "恢复出厂", "success")
 
 	// 2) 软件升级
-	before = auditRows(t, ts, token)
+	before := auditRows(t, ts, token)
 	if status, _, data := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system/software", token,
 		map[string]any{"package": "/tmp/nfvis_9.9.9_amd64.deb"}, nil); status != http.StatusAccepted {
 		t.Fatalf("software add: %d %s", status, data)
@@ -408,12 +422,14 @@ func postRestoreArchive(t *testing.T, ts *httptest.Server, token string, archive
 
 // 恢复出厂：CLI 侧两条，且意图文案与 REST 逐字相同（同一份构造）。
 func TestHighRiskAuditIntentSameTextAcrossEntries(t *testing.T) {
-	ts := newTestServer(t)
+	ts, engine, authz := authKit(t, Options{})
 	token := loginAdmin(t, ts)
 	if status, _, _ := cfgRequest(t, http.MethodPost, ts.URL+APIPrefix+"/system:zeroize", token,
 		map[string]any{"confirm": true}, map[string]string{"X-NFVIS-Auto-Commit": "true"}); status != http.StatusAccepted {
 		t.Fatalf("REST zeroize 失败")
 	}
+	// 决策 #506：恢复出厂复位账号表 ⇒ 原会话结束；按真机口径重走一遍启动引导（admin 重建）后再读审计。
+	token = asSuperUser(t, ts, rebootstrapAdmin(t, engine, authz))
 	rows := auditRows(t, ts, token)
 	assertPair(t, rows, "system.zeroize", "恢复出厂", "success")
 	restIntent := intentDetailOf(rows, "system.zeroize")

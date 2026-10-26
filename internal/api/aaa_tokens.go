@@ -85,6 +85,9 @@ func (s *Server) handleRevokeAPIToken(w http.ResponseWriter, r *http.Request, id
 		discardOwnSession(s.engine, s.sessionFromIdentity(r), s.log)
 	}
 	s.cliExec.DropSession(id)
+	// 决策 #507（round49 第 2 条）：被吊销会话已建立的终端一并终止（无论吊销的是自己还是他人
+	// ——terminal 以一次性 ticket 鉴权，不终止则凭据已死而终端仍在用）。
+	s.consoleTix.closeSessionsByToken(id)
 	// 安全相关动作入审计（与 CLI 执行器同一动作名，两侧同源可配对）
 	s.engine.Audit(ident.User, "system.api-token.revoke", "吊销会话 "+id, "success")
 	w.WriteHeader(http.StatusNoContent)

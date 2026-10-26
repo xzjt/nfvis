@@ -32,19 +32,28 @@ type VMConsoleRuntime interface {
 type consoleTicket struct {
 	resource string
 	user     string
-	expires  time.Time
+	// tokenID 签发该 ticket 的会话稳定 ID（决策 #507）：握手期据此复核凭据是否仍然有效。
+	// 空串 = 签发路径拿不到稳定 ID（CLI 侧签发，无 Bearer 上下文）——按 aaa 的保守口径放行。
+	tokenID string
+	expires time.Time
 }
 
 // consoleTickets 进程内 ticket 表（一次性、短 TTL；M5 可换持久化/事件总线）。
+//
+// sessions 一并挂在这里（决策 #507）：它需要与 ticket 表**同一生命周期**（一个 Server 一份），
+// 而本结构就是装配处已按 Server 建好的那个单例（newConsoleTickets 由 api.New 调用），
+// 故不再新增装配字段。
 type consoleTickets struct {
-	mu  sync.Mutex
-	m   map[string]consoleTicket
-	now func() time.Time
-	ttl time.Duration
+	mu       sync.Mutex
+	m        map[string]consoleTicket
+	now      func() time.Time
+	ttl      time.Duration
+	sessions *consoleSessionTable
 }
 
 func newConsoleTickets() *consoleTickets {
-	return &consoleTickets{m: map[string]consoleTicket{}, now: time.Now, ttl: 60 * time.Second}
+	return &consoleTickets{m: map[string]consoleTicket{}, now: time.Now, ttl: 60 * time.Second,
+		sessions: newConsoleSessionTable()}
 }
 
 // 资源键：同类会话共享一张表、不同类互不通用（一张表的 ticket 开不了另一类会话）。
@@ -57,7 +66,10 @@ func vncConsoleResource(name string) string { return "vnc/" + name }
 
 func ticketKey(resource, token string) string { return resource + "\x00" + token }
 
-func (t *consoleTickets) issue(resource, user string) (string, int, error) {
+// issue 签发一次性 ticket（决策 #507：tokenID 为可选入参——签发它的会话稳定 ID）。
+// 带 Bearer 身份的签发路径（REST 三处端点）一律传入；拿不到稳定 ID 的路径给空串，
+// 消费侧对空 ID 保守放行（见 aaa.Service.ActiveTokenID 的口径与 console_sessions.go 的说明）。
+func (t *consoleTickets) issue(resource, user string, tokenID ...string) (string, int, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		return "", 0, err
@@ -74,7 +86,11 @@ func (t *consoleTickets) issue(resource, user string) (string, int, error) {
 			delete(t.m, k)
 		}
 	}
-	t.m[ticketKey(resource, tok)] = consoleTicket{resource: resource, user: user, expires: now.Add(t.ttl)}
+	ct := consoleTicket{resource: resource, user: user, expires: now.Add(t.ttl)}
+	if len(tokenID) > 0 {
+		ct.tokenID = tokenID[0]
+	}
+	t.m[ticketKey(resource, tok)] = ct
 	return tok, int(t.ttl.Seconds()), nil
 }
 
@@ -95,6 +111,49 @@ func (t *consoleTickets) consume(resource, token string) (consoleTicket, bool) {
 		return consoleTicket{}, false
 	}
 	return ct, true
+}
+
+// ---------- 活动终端会话登记（决策 #507 的薄封装；表本体见 console_sessions.go） ----------
+
+// registerSession 登记一条活动终端会话，返回注销函数（桥接结束 defer 调用）。
+func (t *consoleTickets) registerSession(tokenID, user string, closeFn func()) func() {
+	if t == nil {
+		return func() {}
+	}
+	return t.sessions.register(tokenID, user, closeFn)
+}
+
+// closeSessionsByToken 关闭该会话稳定 ID 的全部活动终端，返回关闭条数。
+func (t *consoleTickets) closeSessionsByToken(tokenID string) int {
+	if t == nil {
+		return 0
+	}
+	return t.sessions.closeByToken(tokenID)
+}
+
+// closeSessionsByUser 关闭该用户的全部活动终端（含无稳定 ID 的登记），返回关闭条数。
+func (t *consoleTickets) closeSessionsByUser(user string) int {
+	if t == nil {
+		return 0
+	}
+	return t.sessions.closeByUser(user)
+}
+
+// ticketTokenID 取签发 ticket 的会话稳定 ID（无身份/无稳定 ID 时为空串 → 消费侧保守放行）。
+func ticketTokenID(r *http.Request) string {
+	if info, ok := Identity(r); ok {
+		return info.ID
+	}
+	return ""
+}
+
+// ticketCredentialActive 复核 ticket 绑定会话的凭据是否仍然有效（决策 #507）。
+// 空 tokenID（CLI 侧签发）保守放行：那条路径没有 Bearer 上下文，不能凭一个空串推断「已吊销」。
+func (s *Server) ticketCredentialActive(tokenID string) bool {
+	if s.aaa == nil {
+		return true
+	}
+	return s.aaa.ActiveTokenID(tokenID)
 }
 
 // handleConsoleTicket POST /api/v1/virtual-machine-functions/{name}/console
@@ -138,7 +197,8 @@ func (s *Server) handleConsoleTicket(w http.ResponseWriter, r *http.Request) {
 	if info, ok := Identity(r); ok {
 		user = info.User
 	}
-	tok, ttl, err := s.consoleTix.issue(vmConsoleResource(name), user)
+	// 决策 #507：ticket 绑定签发它的会话稳定 ID——吊销/登出后握手期即复核失败。
+	tok, ttl, err := s.consoleTix.issue(vmConsoleResource(name), user, ticketTokenID(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "生成 console 凭证失败", nil)
 		return
@@ -163,6 +223,12 @@ func (s *Server) handleConsoleWS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "console ticket 无效或已过期", nil)
 		return
 	}
+	// 决策 #507：ticket 本身有效（一次性、60s 内），但签发它的会话可能已被吊销/登出/用户被删
+	// ——升级前复核一次，否则「吊销凭据后仍能开终端」（round49 第 2 条）依旧成立。
+	if !s.ticketCredentialActive(ct.tokenID) {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "console ticket 无效或已过期（签发它的会话已失效）", nil)
+		return
+	}
 	user := ct.user
 	if user == "" {
 		user = "api"
@@ -175,6 +241,9 @@ func (s *Server) handleConsoleWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer stream.Close()
+		// 决策 #507：登记为活动终端会话——吊销/登出/用户变更时按会话 ID 或用户关闭它
+		// （关闭 = 关底层流，桥接两端随即返回）。
+		defer s.consoleTix.registerSession(ct.tokenID, user, streamCloser(stream))()
 		s.engine.Audit(user, "vm.console", fmt.Sprintf("open console %s", name), "success")
 		defer s.engine.Audit(user, "vm.console", fmt.Sprintf("close console %s", name), "success")
 
@@ -219,7 +288,8 @@ func (s *Server) handleVNCTicket(w http.ResponseWriter, r *http.Request) {
 	if info, ok := Identity(r); ok {
 		user = info.User
 	}
-	tok, ttl, err := s.consoleTix.issue(vncConsoleResource(name), user)
+	// 决策 #507：VNC ticket 同样绑定签发会话的稳定 ID（与串口同口径）。
+	tok, ttl, err := s.consoleTix.issue(vncConsoleResource(name), user, ticketTokenID(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "生成 VNC 凭证失败", nil)
 		return
@@ -245,6 +315,11 @@ func (s *Server) handleVNCWS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "VNC ticket 无效或已过期", nil)
 		return
 	}
+	// 决策 #507：与串口 console 同口径——升级前复核签发会话是否仍然有效。
+	if !s.ticketCredentialActive(ct.tokenID) {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "VNC ticket 无效或已过期（签发它的会话已失效）", nil)
+		return
+	}
 	user := ct.user
 	if user == "" {
 		user = "api"
@@ -264,6 +339,8 @@ func (s *Server) handleVNCWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer stream.Close()
+		// 决策 #507：登记为活动终端会话（资源键隔离不变，登记只按会话 ID / 用户索引）。
+		defer s.consoleTix.registerSession(ct.tokenID, user, streamCloser(stream))()
 		s.engine.Audit(user, "vm.vnc", fmt.Sprintf("open vnc %s", name), "success")
 		defer s.engine.Audit(user, "vm.vnc", fmt.Sprintf("close vnc %s", name), "success")
 

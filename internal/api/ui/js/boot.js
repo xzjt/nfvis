@@ -107,8 +107,11 @@ async function enterApp(user) {
 export function signOut(msg) {
   stopStream();
   stopPolling();
-  // 串口是有状态的（WebSocket）：退出登录必须断开，别把连接留在后台。
+  // 终端都是有状态的（WebSocket）：退出登录必须断开，别把连接留在后台——
+  // 串口（VM console）与容器交互式终端都是「会话」，登出后服务端凭据已吊销，
+  // 客户端也要收尾（决策 #507：两条路径口径一致）。
   vmConsoleClose();
+  ctShellClose();
   // 「我的账号」框里可能有刚填的口令：退出登录时连值一起清掉，别留在 DOM 里。
   closeAcct();
   setToken('');
@@ -494,8 +497,8 @@ $('diag-clear-btn').addEventListener('click', () => {
   }));
 });
 
-// 关页面/刷新时收尾：实时通道、轮询、以及串口 WebSocket（详情页的串口连着就要断开）。
-window.addEventListener('beforeunload', () => { stopStream(); stopPolling(); vmConsoleClose(); });
+// 关页面/刷新时收尾：实时通道、轮询、以及终端 WebSocket（串口与容器终端连着就要断开）。
+window.addEventListener('beforeunload', () => { stopStream(); stopPolling(); vmConsoleClose(); ctShellClose(); });
 
 // 动作处理器与浏览器控制台用得上：刷新当前页 / 跳到某条路由（如 #/ops/audit）。
 window.nfvis = {

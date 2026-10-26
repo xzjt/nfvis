@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/xzjt/nfvis/internal/system"
 )
@@ -19,11 +20,23 @@ import (
 // SoftwareRuntime 软件/电源能力（*system.SoftwareManager 经适配注入；nil = 503）。
 type SoftwareRuntime interface {
 	Add(ctx context.Context, pkg, sha256 string) (system.SoftwareResult, error)
+	// Rollback 回退到「上一版本」（版本序上严格低于当前版本的最大者）。
 	Rollback(ctx context.Context) (system.SoftwareResult, error)
+	// RollbackTo 回退到**指定版本**（等价 CLI `rollback to <版本>` / REST `?version=`）。
+	//
+	// round49：本方法一度写成**可选接口**（类型断言），因为当时不想逼测试假件补方法——
+	// 结果真机验证当场抓到：`cmd/nfvisd` 的装配适配器 `softwareController` 只转发了 5 个方法，
+	// 于是 `rollback to <版本>` 在真机上恒报「当前装配不支持指定版本回退」，而所有单测都注入
+	// 了自带该方法的假件、全绿（与 BUG-17 的 `PackageState` 静默缺转发同族）。改为接口成员后，
+	// **任何适配器漏实现都在编译期报错**，这类缺口不再可能静默通过。
+	RollbackTo(ctx context.Context, version string) (system.SoftwareResult, error)
 	Reboot(ctx context.Context) error
 	Shutdown(ctx context.Context) error
 	NTPSync(ctx context.Context, servers []string) (string, error)
 }
+
+// 构造级：真实软件管理器必须实现全部能力（漏了在这里编译失败）。
+var _ SoftwareRuntime = (*system.SoftwareManager)(nil)
 
 // packageStateReader 可选读口：实时读宿主上 nfvis 包的 dpkg 状态与版本（修 BUG-17）。
 //
@@ -96,10 +109,18 @@ func (s *Server) handlePostSoftwareRollback(w http.ResponseWriter, r *http.Reque
 		user = info.User
 	}
 	// 决策 #150：软件回退同升级（两条记录；CLI `request system software rollback` 走同一助手）。
+	//
+	// round49：可选查询参数 `version=<版本>` 指定回退目标（等价 CLI `rollback to <版本>`）；
+	// 不给则仍为「上一版本」自动选版。
+	version := strings.TrimSpace(r.URL.Query().Get("version"))
 	var res system.SoftwareResult
 	err := runHighRisk(s.engine, user, highRiskSoftwareRollback(), func() (string, error) {
 		var rerr error
-		res, rerr = s.software.Rollback(r.Context())
+		if version != "" {
+			res, rerr = s.software.RollbackTo(r.Context(), version)
+		} else {
+			res, rerr = s.software.Rollback(r.Context())
+		}
 		if rerr != nil {
 			return "", rerr
 		}

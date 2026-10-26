@@ -91,6 +91,42 @@ func (v *validator) errf(path, format string, args ...any) {
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 var portSpecRe = regexp.MustCompile(`^\d+(-\d+)?$`)
 
+// hostLabelRe 主机名的单个分段（RFC1123）：1-63 字符，首尾为字母/数字，中间可含 '-'。
+var hostLabelRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$`)
+
+// checkGuestHostname 校验 VNF 的 guest 主机名（`cloud-init.hostname`）。
+//
+// 规则＝RFC1123 主机名形态：总长 ≤253、以 '.' 分段、每段 1-63 字符且首尾为字母/数字、
+// 段内只允许字母数字与 '-'。
+//
+// 比 RFC1123 **更严一档**：整体全为数字的取值一律拒绝。点分十进制（`192.168.1.1`）按 RFC1123
+// §2.1 明确不是合法主机名（"a valid host name can never have the dotted-decimal form
+// #.#.#.#"），在 guest/DNS/DHCP 语境里会被当成 IP 地址；纯数字标签（`12345`）没有可读含义，
+// 与「主机名」的用途不符，产品一并拒绝（宁可提交期报错，也不要 guest 侧静默异常）。
+//
+// 由来（round49 外部走查）：此前零校验——任何字符串（含 `branch: blue` 这类 YAML 语法符号、
+// 带空格的取值）都会原样落进 seed 的 YAML，非法值要到 guest 侧才显形，而提交与读视图全绿。
+// seed 生成侧的 YAML 转义是另一层（本条只管校验）。
+func checkGuestHostname(name string) error {
+	if len(name) > 253 {
+		return fmt.Errorf("主机名过长：%d 字符（上限 253）", len(name))
+	}
+	if !strings.ContainsAny(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+		return fmt.Errorf("主机名不能全为数字：%q（点分十进制会与 IP 地址混淆，RFC1123 亦不接受该形态）", name)
+	}
+	for _, seg := range strings.Split(name, ".") {
+		switch {
+		case seg == "":
+			return fmt.Errorf("主机名含空分段（重复的点或首尾点）：%q", name)
+		case len(seg) > 63:
+			return fmt.Errorf("主机名分段 %q 过长：%d 字符（上限 63）", seg, len(seg))
+		case !hostLabelRe.MatchString(seg):
+			return fmt.Errorf("主机名分段 %q 不合法（只允许字母、数字与 '-'，段首尾不能是 '-'）", seg)
+		}
+	}
+	return nil
+}
+
 func (v *validator) checkName(path, name, what string) bool {
 	if name == "" {
 		v.errf(path, "%s名称缺失", what)
@@ -1984,7 +2020,16 @@ func (v *validator) checkVpp(c Config) {
 		}
 	}
 	if vp.CPU != nil {
-		if vp.CPU.MainCore != 0 {
+		// 内核数据面下 VPP 不运行：vpp 段配置按设计保留（切回 VPP 时立刻可用），但「VPP 线程核
+		// 必须落在隔离核池内」这条规则随之**不生效**——它随 VPP 的下发才成立，继续校验只会把
+		// VPP 时代的调参变成内核数据面下的提交拦路石（round49 外部走查）。配置**自洽**的判断
+		// （核列表语法、workers 与 corelist 互斥、核号非负）与数据面无关，照旧。
+		kernelDP := c.DataPlaneMode() == DataPlaneKernel
+		if vp.CPU.MainCore < 0 {
+			// CLI 叶子是 uint，但 REST/配置导入可绕过：负核号永远不自洽（两数据面都拒）。
+			// 0 = 未显式指定（产品不向 startup.conf 写主核，见 resources.vppReservedCores）。
+			v.errf("vpp.cpu.main-core", "核号不能为负: %d（0 表示未显式指定，VPP 用缺省主核）", vp.CPU.MainCore)
+		} else if vp.CPU.MainCore > 0 && !kernelDP {
 			if !hasIso {
 				v.errf("vpp.cpu.main-core", "必须先配置 resource-pools cpu isolated-cores")
 			} else if !iso[vp.CPU.MainCore] {
@@ -1995,12 +2040,14 @@ func (v *validator) checkVpp(c Config) {
 			cores, err := parseCoreList(vp.CPU.CorelistWorkers)
 			if err != nil {
 				v.errf("vpp.cpu.corelist_workers", "%v", err)
-			} else if !hasIso {
-				v.errf("vpp.cpu.corelist_workers", "必须先配置 resource-pools cpu isolated-cores")
-			} else {
-				for _, core := range cores {
-					if !iso[core] {
-						v.errf("vpp.cpu.corelist_workers", "核 %d 不在隔离核池内", core)
+			} else if !kernelDP {
+				if !hasIso {
+					v.errf("vpp.cpu.corelist_workers", "必须先配置 resource-pools cpu isolated-cores")
+				} else {
+					for _, core := range cores {
+						if !iso[core] {
+							v.errf("vpp.cpu.corelist_workers", "核 %d 不在隔离核池内", core)
+						}
 					}
 				}
 			}
@@ -2171,6 +2218,13 @@ func (v *validator) checkVMFunctions(c Config) {
 		}
 		if m.Memory.Backing != "" && m.Memory.Backing != "hugepage" && m.Memory.Backing != "normal" {
 			v.errf(p+".memory.backing", "backing 必须为 hugepage 或 normal")
+		}
+		// guest 主机名（决策 #49x，round49 外部走查）：此前零校验，任何字符串都会落进 seed 的
+		// YAML（`hostname: <原样>`），非法值到 guest 侧才显形。只接受 RFC1123 主机名形态。
+		if m.CloudInit != nil && m.CloudInit.Hostname != "" {
+			if err := checkGuestHostname(m.CloudInit.Hostname); err != nil {
+				v.errf(p+".cloud_init.hostname", "%v；请改为 RFC1123 主机名（示例：fw-1、web.example.com）", err)
+			}
 		}
 		dupCheck(v, m.Disks, p+".disks", func(d VMDisk) string { return d.Name }, "数据盘")
 		for _, d := range m.Disks {

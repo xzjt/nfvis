@@ -180,17 +180,21 @@ func effectiveClassOf(u model.LoginUserConfig) string {
 // 的一次性事务：收尾时按 endOneShot 的判据交还会话锁（决策 #151）——此前提交后仍持有
 // 全局编辑锁，其它会话随后的配置写被 409 挡住（round76 三次复现）。
 // msg 是提交说明（入审计；登录横幅的变更与用户管理共用本编排，决策 #303）。
-func (s *Server) mutateLoginUsers(w http.ResponseWriter, r *http.Request, status int, msg string, mutate func(*model.SystemLogin) error) {
+//
+// 返回值报告**本次改动是否已生效**（决策 #506）：调用方据此决定要不要做「凭据变更收尾」
+// （吊销该用户的 token / 终止其终端）——失败路径（校验 400/409、提交失败）一律 false，
+// 绝不能因为一次失败的改动去吊销别人的凭据。响应由本方法自己写出，故不能靠状态码回传。
+func (s *Server) mutateLoginUsers(w http.ResponseWriter, r *http.Request, status int, msg string, mutate func(*model.SystemLogin) error) bool {
 	sess := s.sessionFromIdentity(r)
 	if err := s.engine.Edit(sess); err != nil {
 		mapEngineError(w, err)
-		return
+		return false
 	}
 	defer endOneShot(s.engine, sess, s.log)
 	cfg, dirty, err := s.engine.Candidate()
 	if err != nil {
 		mapEngineError(w, err)
-		return
+		return false
 	}
 	// 决策 #316：本会话已持有**有未提交改动**的候选（典型：控制台配置页正在编辑）。
 	// 本族是「取锁 → 写候选 → 立即提交」的一次性事务，直接提交会把操作者尚未打算提交的
@@ -202,7 +206,7 @@ func (s *Server) mutateLoginUsers(w http.ResponseWriter, r *http.Request, status
 		writeError(w, http.StatusConflict, "CONFLICT",
 			"本会话已有未提交的候选配置：请先在配置页提交或丢弃它，再改动用户/口令/登录横幅"+
 				"（本次操作只做该改动，不会连带提交其它候选改动）", nil)
-		return
+		return false
 	}
 	if cfg.System == nil {
 		cfg.System = &model.SystemConfig{}
@@ -214,14 +218,14 @@ func (s *Server) mutateLoginUsers(w http.ResponseWriter, r *http.Request, status
 		var ce conflictError
 		if errors.As(err, &ce) {
 			writeError(w, http.StatusConflict, "CONFLICT", err.Error(), nil)
-			return
+			return false
 		}
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
-		return
+		return false
 	}
 	if err := s.engine.UpdateCandidate(sess, cfg); err != nil {
 		mapEngineError(w, err)
-		return
+		return false
 	}
 	// 用户/口令变更强制直提生效（FR-SEC-008，入审计）
 	opts := CommitOptsFrom(r)
@@ -229,10 +233,11 @@ func (s *Server) mutateLoginUsers(w http.ResponseWriter, r *http.Request, status
 	res, err := s.engine.Commit(r.Context(), sess, opts)
 	if err != nil {
 		mapEngineError(w, err)
-		return
+		return false
 	}
 	w.Header().Set("X-NFVIS-Committed", "true")
 	writeJSON(w, status, commitResponseOf(res))
+	return true
 }
 
 // handlePostLoginUser POST /api/v1/system/login-users：创建用户或 class。
@@ -284,6 +289,9 @@ func (s *Server) handlePostLoginUser(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePutLoginUser PUT /api/v1/system/login-users/{name}：改 class / 重置口令。
+//
+// 决策 #506：改 class 或重置口令都改变了该用户的**凭据语义**，改动生效后立即吊销其全部
+// API token 并终止其已建立的终端（否则被降权/被重置口令的用户在 TTL 内继续可用）。
 func (s *Server) handlePutLoginUser(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var in struct {
@@ -294,7 +302,7 @@ func (s *Server) handlePutLoginUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
 		return
 	}
-	s.mutateLoginUsers(w, r, http.StatusOK, "login-users 变更", func(l *model.SystemLogin) error {
+	ok := s.mutateLoginUsers(w, r, http.StatusOK, "login-users 变更", func(l *model.SystemLogin) error {
 		for i := range l.Users {
 			if l.Users[i].Name != name {
 				continue
@@ -316,14 +324,20 @@ func (s *Server) handlePutLoginUser(w http.ResponseWriter, r *http.Request) {
 		}
 		return conflictError("用户 " + name + " 不存在")
 	})
+	if ok {
+		s.revokeUserSessions(name)
+	}
 }
 
 // handleDeleteLoginUser DELETE /api/v1/system/login-users/{name}：
 // 不能删除自己，也不能删除最后一个 super-user（409）。
+//
+// 决策 #506：删除生效后吊销其全部 token 并终止其终端（「用户已不在册」的下一请求即 401，
+// 不靠 TTL 等待）。
 func (s *Server) handleDeleteLoginUser(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	info, _ := Identity(r)
-	s.mutateLoginUsers(w, r, http.StatusOK, "login-users 变更", func(l *model.SystemLogin) error {
+	ok := s.mutateLoginUsers(w, r, http.StatusOK, "login-users 变更", func(l *model.SystemLogin) error {
 		if name == info.User {
 			return conflictError("不能删除当前登录用户")
 		}
@@ -348,6 +362,9 @@ func (s *Server) handleDeleteLoginUser(w http.ResponseWriter, r *http.Request) {
 		l.Users = append(l.Users[:idx], l.Users[idx+1:]...)
 		return nil
 	})
+	if ok {
+		s.revokeUserSessions(name)
+	}
 }
 
 // dispatchLoginUsersPost POST /system/login-users/{tail...}：
@@ -364,6 +381,9 @@ func (s *Server) dispatchLoginUsersPost(w http.ResponseWriter, r *http.Request) 
 
 // handleChangePassword POST /api/v1/system/login-users/{name}:change-password：
 // 口令自助修改（FR-SEC-008，验证旧口令 + 策略；入审计）。
+//
+// 决策 #506：口令已换 ⇒ 持旧口令建立的凭据不该继续有效：改动生效后吊销该用户全部 token
+// （含发起本次请求的那个）并终止其终端。客户端会因此回到登录页，这正是期望行为。
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, name string) {
 	info, _ := Identity(r)
 	if info.User != name {
@@ -390,7 +410,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, na
 		mapEngineError(w, err)
 		return
 	}
-	s.mutateLoginUsers(w, r, http.StatusOK, "login-users 变更", func(l *model.SystemLogin) error {
+	ok := s.mutateLoginUsers(w, r, http.StatusOK, "login-users 变更", func(l *model.SystemLogin) error {
 		for i := range l.Users {
 			if l.Users[i].Name == name {
 				l.Users[i].PasswordHash = hash
@@ -399,6 +419,9 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, na
 		}
 		return conflictError("用户 " + name + " 不存在")
 	})
+	if ok {
+		s.revokeUserSessions(name)
+	}
 }
 
 // ---------- system/status（§6.2，运行态字段 M3 补齐） ----------

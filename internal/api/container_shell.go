@@ -72,7 +72,8 @@ func (s *Server) handleContainerShellTicket(w http.ResponseWriter, r *http.Reque
 	if info, ok := Identity(r); ok {
 		user = info.User
 	}
-	tok, ttl, err := s.consoleTix.issue(ctShellResource(name), user)
+	// 决策 #507：ticket 绑定签发它的会话稳定 ID（WS 握手期的复核依据）。
+	tok, ttl, err := s.consoleTix.issue(ctShellResource(name), user, ticketTokenID(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "生成终端凭证失败", nil)
 		return
@@ -96,6 +97,11 @@ func (s *Server) handleContainerShellWS(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "容器终端凭证无效或已过期", nil)
 		return
 	}
+	// 决策 #507：升级前复核签发会话是否仍然有效（吊销/登出/用户被删后握手即拒）。
+	if !s.ticketCredentialActive(ct.tokenID) {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "容器终端凭证无效或已过期（签发它的会话已失效）", nil)
+		return
+	}
 	user := ct.user
 	if user == "" {
 		user = "api"
@@ -108,6 +114,8 @@ func (s *Server) handleContainerShellWS(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		defer stream.Close()
+		// 决策 #507：登记为活动终端会话（与串口 console 同源）——吊销后桥接被取消。
+		defer s.consoleTix.registerSession(ct.tokenID, user, streamCloser(stream))()
 		s.engine.Audit(user, "container.shell", fmt.Sprintf("open shell %s", name), "success")
 		defer s.engine.Audit(user, "container.shell", fmt.Sprintf("close shell %s", name), "success")
 

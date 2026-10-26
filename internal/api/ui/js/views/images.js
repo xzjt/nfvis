@@ -228,10 +228,70 @@ if (imdDeleteBtn) {
   });
 }
 
+// 镜像名校验（与服务端同源：internal/images.ValidateImageName，round49（镜像名越界收口））。
+//
+// 为什么前端也要挡一次：镜像名是**用户输入**，而它会被拼进仓库目录路径——`../` 一穿就是
+// 仓库外的文件；而 `a/b.qcow2` 这类名字在 VM 镜像上**永远**不可能成立（VM 镜像的名字就是
+// 仓库里的文件名）。前端挡在发请求之前，服务端仍是有意保留的权威（它拒绝时 400 文案原样显示）。
+//
+// 两类名字的语法不同，别用一套规则卡：
+//   VM 镜像（vm-image）：就是文件名——不许含 `/`、`\`、`:`，只写名字（如 alpine.qcow2）。
+//   容器镜像（container-image）：是 **Docker 引用**——`:`、`/`、`@` 是它的语法
+//     （`alpine:3.20`、`library/alpine:3.20`、`…/img@sha256:…`），只挡首尾 `/`、空段、`\`、空白。
+//
+// 下面是**自校准用例表**：internal/api 的 Go 守护（TestUIImageNameValidationMatchesServer）
+// 会把每一条喂给服务端同名校验并要求两边结论一致——前端放宽/收紧了而服务端没跟上即红。
+// 格式：`// @imgname ok|bad <type> <name>`（只列跨平台结论一致的形态）。
+// @imgname ok vm-image alpine.qcow2
+// @imgname ok vm-image debian12.img
+// @imgname ok vm-image img-a.iso
+// @imgname ok container-image alpine:3.20
+// @imgname ok container-image library/alpine:3.20
+// @imgname ok container-image registry.example.com/ns/img@sha256:abcdef
+// @imgname bad vm-image a/b.qcow2
+// @imgname bad vm-image C:\evil.qcow2
+// @imgname bad vm-image /etc/passwd
+// @imgname bad vm-image ../evil.qcow2
+// @imgname bad vm-image ..
+// @imgname bad container-image library/alpine/
+// @imgname bad container-image /library/alpine
+// @imgname bad container-image library//alpine
+// @imgname bad container-image library\alpine
+// @imgname bad container-image alpine 3.20
+// @imgname bad container-image ../evil
+const IMG_NAME_CTRL_RE = /[\u0000-\u001f\u007f]/;
+
+// imgNameError 返回中文提示（合法时返回空串）。空名与非法名一起收口，调用方一处判空即可。
+function imgNameError(name, type) {
+  const n = name || '';
+  if (!n.trim()) return '请填写名称。';
+  if (IMG_NAME_CTRL_RE.test(n)) return '名称不能含控制字符（换行、制表符等）。';
+  if (n.startsWith('/') || n.startsWith('\\') || /^[A-Za-z]:[\\/]/.test(n)) {
+    return '名称不能是绝对路径：只写镜像名，不带目录。';
+  }
+  if (n.split(/[\\/]/).includes('..')) {
+    return '名称不能含 `..` 路径段（会引出上级目录）。';
+  }
+  if (type === 'container-image') {
+    if (n.includes('\\')) return '容器镜像名（Docker 引用）不能含 `\\`：分层请用 `/`。';
+    if (/\s/.test(n)) return '容器镜像名不能含空白。';
+    if (n.split('/').some((seg) => seg === '')) {
+      return '容器镜像名不能以 `/` 开头或结尾，也不能出现 `//`。';
+    }
+    return '';
+  }
+  // VM 镜像（含类型取不到时按最严判，与服务端一致）
+  if (/[\\/:]/.test(n)) {
+    return 'VM 镜像名不能含 `/`、`\\`、`:`（它同时是仓库里的文件名，如 alpine.qcow2）。';
+  }
+  return '';
+}
+
 function imgCommon() {
   const name = $('img-name').value.trim();
   const type = $('img-type').value.trim() || 'vm-image';
-  if (!name) { imgMsg('请填写名称。', true); return null; }
+  const bad = imgNameError(name, type);
+  if (bad) { imgMsg(bad, true); return null; }
   return { name, type };
 }
 

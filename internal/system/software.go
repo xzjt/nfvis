@@ -5,7 +5,9 @@
 //     → 归档到软件目录（供 rollback）→ `dpkg -i` 安装（postinst 负责重启 nfvisd）→ 读回版本报告。
 //     安装**脱离 nfvisd 的 cgroup** 执行、并以 dpkg 数据库状态复核成败（见 installOnce / installAndVerify）：
 //     postinst 重启 nfvisd 时不能连带杀死 dpkg，命令的退出路径也不能当作安装结果。
-//   - rollback：从归档目录选**版本最高且非当前**的 .deb → `dpkg -i` 回退（FR-OPS-002）。
+//   - rollback：从归档目录选**版本序上严格低于当前版本的上一版本** → `dpkg -i` 回退（FR-OPS-002）。
+//     版本比较按 Debian 语义（CompareDebVersion，等价 dpkg --compare-versions）：不是
+//     「归档里最高且非当前」——那样归档中若存有更高版本（含预发布版）会把「回退」做成升级。
 //   - reboot/shutdown：`systemctl reboot|poweroff`（调用方须已完成确认）。
 //   - ntp sync：优先 chronyc，其次 ntpdate（取配置服务器），最后 systemd-timesyncd 重启。
 //
@@ -386,9 +388,22 @@ func (m *SoftwareManager) Add(ctx context.Context, pkg, expectSHA string) (Softw
 	return res, nil
 }
 
-// Rollback 回退到归档中的上一个版本（FR-OPS-002）。
+// Rollback 回退到归档中的**上一版本**（FR-OPS-002）：版本序上严格低于当前版本的最大者。
+//
+// 为什么不能是「归档里版本最高且非当前」（修 round49 缺陷）：当归档里存着比**当前**版本更高的
+// 包时（例如装着 3.0.30、归档里留着 3.0.31），那样会把更高的包「回退」上去——契约写的是
+// 「回退到上一版本」（docs/NFViS-openapi.yaml 的 /system/software:rollback），行为却成了升级。
+// 更危险的是预发布版：旧比较器把 `~` 当普通分隔符，`3.0.30~dev1` 排在 `3.0.30` **之后**，
+// 于是「最高且非当前」会选中预发布版（甚至把它装到比它还新的正式版机器上）。
+// 升级/换版本应走 `request system software add`，由操作者显式点名目标版本。
+//
+// 判定全部交给 CompareDebVersion（Debian 语义）：
+//   - 归档里没有高于当前版本的包时，结果与旧行为一致（选出最大者）；
+//   - 当前版本可能不在归档中（手工 dpkg -i 装上的版本）——此时仍按版本大小判断，不放弃；
+//   - 没有任何更低版本时**如实报错并列出归档可见版本**，绝不往上装。
 func (m *SoftwareManager) Rollback(ctx context.Context) (SoftwareResult, error) {
-	res := SoftwareResult{Action: "rollback", Previous: m.currentVersion(ctx)}
+	cur := m.currentVersion(ctx)
+	res := SoftwareResult{Action: "rollback", Previous: cur}
 	cands, err := m.archived()
 	if err != nil {
 		return res, err
@@ -396,22 +411,84 @@ func (m *SoftwareManager) Rollback(ctx context.Context) (SoftwareResult, error) 
 	if len(cands) == 0 {
 		return res, fmt.Errorf("无可回退的版本：归档目录 %s 为空（仅能回退到经 request system software add 安装过的版本）", m.dir)
 	}
-	// 排除当前版本，取版本最高者
-	cur := m.currentVersion(ctx)
+	// archived 已按版本升序 ⇒ 最后一个「严格低于当前版本」的就是上一版本。
 	var pick string
-	for _, c := range cands { // archived 已按版本升序
-		if c.version != cur {
-			pick = c.path
-			res.Version = c.version
+	for _, c := range cands {
+		if CompareDebVersion(c.version, cur) < 0 {
+			pick, res.Version = c.path, c.version
 		}
 	}
 	if pick == "" {
-		return res, fmt.Errorf("无可回退的版本：归档中仅有当前版本 %s（%d 个包）", cur, len(cands))
+		// 归档里的版本全部 >= 当前版本：如实说清「为什么没有可回退的」，并把可见版本列出来
+		// （操作者据此判断是不是归档没留旧包，而不是以为功能坏了）。
+		versions := make([]string, 0, len(cands))
+		for _, c := range cands {
+			versions = append(versions, c.version)
+		}
+		return res, fmt.Errorf("无可回退的版本：归档中没有任何低于当前版本 %s 的包（可见版本：%s）；"+
+			"回退只安装版本序上更旧的包，要装同版本或更高版本请用 request system software add 显式指定",
+			cur, strings.Join(versions, "、"))
 	}
+	return m.rollbackInstall(ctx, res, pick, res.Version)
+}
+
+// RollbackTo 回退到归档中的**指定版本**（FR-OPS-002；round49 收口）。
+//
+// 由来：命令树一直声明 `request system software rollback [to <版本>]`（tree_oper.go），
+// 但 CLI 解析后**丢掉了 `to`**、REST 端点也没有版本参数——于是操作者点名目标版本会得到一个
+// 「回退完成：A → B」，而 B 是自动选版的结果，与点名无关。这是「参数被接受但静默无效」，
+// 比拒绝更危险：救援动作看起来按操作者的意思执行了。本函数把指定版本真正落地。
+//
+// 三类请求都如实拒绝，不静默改道：
+//   - 归档里没有该版本 → 报错并列出可见版本（并指向 `request system software add`）；
+//   - 目标 = 当前版本 → 回退无意义，报错；
+//   - 目标 > 当前版本 → 那是升级，报错并指向 `software add`（与无参回退的选版口径一致：
+//     回退只安装版本序上更旧的包）。
+func (m *SoftwareManager) RollbackTo(ctx context.Context, version string) (SoftwareResult, error) {
+	cur := m.currentVersion(ctx)
+	res := SoftwareResult{Action: "rollback", Previous: cur}
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return res, fmt.Errorf("回退目标版本不能为空（用法：request system software rollback to <版本>）")
+	}
+	// 先与当前版本比：等于/高于当前时，结论与「归档里有没有这个包」无关，先说清最贴切的原因
+	// （真机验证发现：等于当前而归档无此包时，此前只报「归档中没有该版本」，操作者要多想一步）。
+	switch CompareDebVersion(version, cur) {
+	case 0:
+		return res, fmt.Errorf("目标版本 %s 已是当前版本，无需回退", version)
+	case 1:
+		return res, fmt.Errorf("目标版本 %s 高于当前版本 %s：那是升级不是回退，请用 request system software add 显式安装",
+			version, cur)
+	}
+	cands, err := m.archived()
+	if err != nil {
+		return res, err
+	}
+	var pick string
+	versions := make([]string, 0, len(cands))
+	for _, c := range cands {
+		versions = append(versions, c.version)
+		if CompareDebVersion(c.version, version) == 0 {
+			pick = c.path
+		}
+	}
+	if pick == "" {
+		if len(versions) == 0 {
+			return res, fmt.Errorf("无可回退的版本：归档目录 %s 为空（仅能回退到经 request system software add 安装过的版本）", m.dir)
+		}
+		return res, fmt.Errorf("归档中没有版本 %s（可见版本：%s）；回退只安装归档里已有的包，"+
+			"其它来源请用 request system software add 显式安装", version, strings.Join(versions, "、"))
+	}
+	return m.rollbackInstall(ctx, res, pick, version)
+}
+
+// rollbackInstall 执行一次回退安装（Rollback 与 RollbackTo 共用；version 是要安装的目标版本）。
+func (m *SoftwareManager) rollbackInstall(ctx context.Context, res SoftwareResult, pick, version string) (SoftwareResult, error) {
+	res.Version = version
 	job := installJob{
 		action: "回退", act: "rollback",
 		staging: pick, canonical: pick, promote: false,
-		targetVer: res.Version,
+		targetVer: version,
 		attempt:   strconv.FormatInt(m.nowFn().UnixNano(), 10),
 		retryHint: "执行 dpkg -i " + pick + " 重试",
 	}
@@ -437,7 +514,7 @@ func (m *SoftwareManager) Rollback(ctx context.Context) (SoftwareResult, error) 
 	return res, nil
 }
 
-// archived 列出归档包（按版本升序；版本比较用 dpkg --compare-versions 等价的简化排序）。
+// archived 列出归档包（按版本升序，比较器为 Debian 语义的 CompareDebVersion）。
 func (m *SoftwareManager) archived() ([]struct{ version, path string }, error) {
 	entries, err := os.ReadDir(m.dir)
 	if err != nil {
@@ -457,54 +534,161 @@ func (m *SoftwareManager) archived() ([]struct{ version, path string }, error) {
 		}
 		out = append(out, struct{ version, path string }{mx[1], filepath.Join(m.dir, e.Name())})
 	}
-	sort.Slice(out, func(i, j int) bool { return compareVersion(out[i].version, out[j].version) < 0 })
+	sort.Slice(out, func(i, j int) bool { return CompareDebVersion(out[i].version, out[j].version) < 0 })
 	return out, nil
 }
 
-// compareVersion 版本比较（数字段逐段比较，非数字段字典序；够用即可）。
-func compareVersion(a, b string) int {
-	as, bs := strings.FieldsFunc(a, func(r rune) bool { return r == '.' || r == '-' || r == '+' || r == '~' }), strings.FieldsFunc(b, func(r rune) bool { return r == '.' || r == '-' || r == '+' || r == '~' })
-	for i := 0; i < len(as) && i < len(bs); i++ {
-		ai, aerr := parseInt(as[i])
-		bi, berr := parseInt(bs[i])
-		switch {
-		case aerr == nil && berr == nil:
-			if ai != bi {
-				if ai < bi {
-					return -1
-				}
-				return 1
-			}
-		default:
-			if as[i] != bs[i] {
-				if as[i] < bs[i] {
-					return -1
-				}
-				return 1
-			}
-		}
+// CompareDebVersion 按 Debian 的版本比较规则比较两个版本号（等价于 dpkg
+// `--compare-versions`）：a<b 返回 -1、a==b 返回 0、a>b 返回 1。
+//
+// 为什么不能沿用「按 `.`/`-`/`+`/`~` 切段再逐段比」的朴素做法（本函数取代的旧实现，
+// 缺陷见 round49）——四条都会给出错误结论：
+//   - `~` 的排序位置特殊：它排在**任何**字符之前，**包括段末**。故
+//     `3.0.30~dev1 < 3.0.30 < 3.0.30.1`；朴素做法把 `~` 当分隔符切掉，`3.0.30~dev1`
+//     变成「段数更多的 3.0.30」⇒ 排在正式版之后，于是一个**预发布版**被当成「更新」的版本
+//     （回退时正好选中它）；
+//   - 数字段要按**数值**比：`3.0.9 < 3.0.31`（字典序会给出反结论），
+//     `3.0.30~dev10 > 3.0.30~dev9`；
+//   - 数字段与字母段交错时，同一位置上的数字段**更小**（order('1')=0 < order('a')=97）：
+//     `1.0.1 < 1.0.a`；而两侧都停在数字段上时先比长度/数值，故 `1.0.10 > 1.0.1a`（"10" 比 "1" 长）；
+//   - epoch（`1:1.0`）优先于其余全部字段：`1:1.0 > 2.0`。
+//
+// 形态 `[epoch:]upstream[-revision]`：epoch 缺省 0（`0:2.0` 与 `2.0` 相等）；revision 取
+// **最后一个** `-` 之后的部分，没有 `-` 时按空串（空串小于任何非空 revision，故
+// `3.0.30 < 3.0.30-1`）。规则与 dpkg 的 verrevcmp 同构（见 debVerRevCmp），故可与之逐一对照。
+func CompareDebVersion(a, b string) int {
+	ae, au, ar := splitDebVersion(a)
+	be, bu, br := splitDebVersion(b)
+	// epoch 是纯数字串，交给同一个比较器按数值比（空串 = 0）。
+	if c := debVerRevCmp(ae, be); c != 0 {
+		return c
 	}
-	switch {
-	case len(as) < len(bs):
-		return -1
-	case len(as) > len(bs):
-		return 1
+	if c := debVerRevCmp(au, bu); c != 0 {
+		return c
+	}
+	return debVerRevCmp(ar, br)
+}
+
+// compareVersion 保留为 CompareDebVersion 的薄包装。
+//
+// 历史：它曾是「切段 + 逐段比」的简化比较器（且语义与 dpkg 不一致，见 round49）；现在
+// 只做转发，全仓唯一的调用点是 archived() 的排序。保留它是因为「归档排序用哪个比较器」
+// 是一个被测试钉住的内部点，改名会让守护与历史记录对不上。
+func compareVersion(a, b string) int { return CompareDebVersion(a, b) }
+
+// splitDebVersion 把 `[epoch:]upstream[-revision]` 拆成三部分。
+//
+// epoch 只在前缀是**纯数字**时成立（与 dpkg 的 parseversion 一致）：`1:1.0` 的 epoch 是 1；
+// 冒号前不是纯数字时（畸形输入）整串都算 upstream，不做截断——畸形值仍要有确定性的序，
+// 而不是让整条命令报错。
+func splitDebVersion(v string) (epoch, upstream, revision string) {
+	rest := v
+	if i := strings.IndexByte(v, ':'); i > 0 && isASCIIDigits(v[:i]) {
+		epoch, rest = v[:i], v[i+1:]
+	}
+	if i := strings.LastIndexByte(rest, '-'); i >= 0 {
+		return epoch, rest[:i], rest[i+1:]
+	}
+	return epoch, rest, ""
+}
+
+// debVerRevCmp 比较单个片段（upstream 或 revision 或 epoch），等价 dpkg 的 verrevcmp。
+//
+// 交替推进：先取两侧的**非数字段**逐字符比（次序见 debVerOrder），再取**数字段**按数值比
+// （跳前导零 → 比长度 → 比字典序，等价于比数值且不会整数溢出）。任一轮分出胜负即返回。
+func debVerRevCmp(a, b string) int {
+	i, j := 0, 0
+	for i < len(a) || j < len(b) {
+		// 非数字段：只要还有一侧停在非数字字符上就继续比。
+		// 段末按 debVerOrder 的 0 分支（256）参与比较：它排在字母之后、`.` 之前——配合
+		// `~` 的 -1，得到 `3.0.30~dev1 < 3.0.30`；配合 `.` 的 302，得到 `1.0 < 1.0.0`。
+		for (i < len(a) && !isASCIIDigit(a[i])) || (j < len(b) && !isASCIIDigit(b[j])) {
+			ac, bc := debVerOrder(debVerChar(a, i)), debVerOrder(debVerChar(b, j))
+			if ac != bc {
+				if ac < bc {
+					return -1
+				}
+				return 1
+			}
+			i++
+			j++
+		}
+		// 跳过前导零：`1.0.01 == 1.0.1`（与 dpkg 一致）。
+		for i < len(a) && a[i] == '0' {
+			i++
+		}
+		for j < len(b) && b[j] == '0' {
+			j++
+		}
+		// 数字段：先比长度（去掉前导零后更长者数值更大），再比字典序。
+		si, sj := i, j
+		for i < len(a) && isASCIIDigit(a[i]) {
+			i++
+		}
+		for j < len(b) && isASCIIDigit(b[j]) {
+			j++
+		}
+		na, nb := a[si:i], b[sj:j]
+		if len(na) != len(nb) {
+			if len(na) < len(nb) {
+				return -1
+			}
+			return 1
+		}
+		if na != nb {
+			if na < nb {
+				return -1
+			}
+			return 1
+		}
 	}
 	return 0
 }
 
-func parseInt(s string) (int, error) {
-	n := 0
+// debVerChar 取片段的第 i 个字符；越界返回 0（NUL），与 dpkg 读 `*a`/`*b` 的形态一致——
+// 「段末」也是一个可比较的取值。
+func debVerChar(s string, i int) byte {
+	if i < len(s) {
+		return s[i]
+	}
+	return 0
+}
+
+// debVerOrder 单字符的排序权重，逐字对齐 dpkg 的 order()：
+//
+//	数字 → 0；字母 → 其 ASCII 值；`~` → -1；段末（NUL）→ 256；其它（`.`/`+`/`-`…）→ 值 + 256。
+//
+// 于是 `~` < 数字 < 字母 < 段末（NUL）< 其它（`.`/`+`/`-`…）：`~` 排在一切之前（含段末），
+// 同一位置上的数字段小于字母段（order 0 < order('a')=97），而**段末排在字母之后、`.` 之前**
+// ——这正是 `1.0.1a < 1.0.1`（dpkg 的著名怪癖，故预发布必须用 `~`）与 `1.0 < 1.0.0` 的来源。
+func debVerOrder(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return 0
+	case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
+		return int(c)
+	case c == '~':
+		return -1
+	case c == 0:
+		return 256
+	}
+	return int(c) + 256
+}
+
+// isASCIIDigit 判断单字节是否是十进制数字（版本号只允许 ASCII）。
+func isASCIIDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// isASCIIDigits 判断字符串非空且全为十进制数字（epoch 的判据）。
+func isASCIIDigits(s string) bool {
 	if s == "" {
-		return 0, errors.New("empty")
+		return false
 	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return 0, errors.New("not a number")
+	for i := 0; i < len(s); i++ {
+		if !isASCIIDigit(s[i]) {
+			return false
 		}
-		n = n*10 + int(r-'0')
 	}
-	return n, nil
+	return true
 }
 
 // installJob 一次安装/回退尝试的全部输入：脱离脚本按它生成（含目标版本与尝试标识——

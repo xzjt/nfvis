@@ -536,13 +536,17 @@ func (x *cliExecutor) containerExec(user, name string, rest []string) string {
 	if res.HasExitCode {
 		exit = strconv.Itoa(res.ExitCode)
 	}
+	// 审计记命令原文，但先做**文本级脱敏**（round49 审计脱敏收口）：命令里可能带口令/令牌/私钥正文，
+	// 而审计可经 CLI `show log audit`、GET /audit-logs、诊断包三个出口交给不同权限的人
+	// （与 REST 侧同一口径，两处都要做——审计入库只有这两个入口）。
+	auditCmd := model.ScrubSecrets(command)
 	if res.TimedOut {
 		x.engine.Audit(user, "container.exec",
 			fmt.Sprintf("exec 容器 %s: %s（超时 %s，已停止等待；容器内进程可能仍在运行）",
-				name, command, timeout.Round(time.Second)), "failure")
+				name, auditCmd, timeout.Round(time.Second)), "failure")
 	} else {
 		x.audit(user, "container.exec",
-			fmt.Sprintf("exec 容器 %s: %s（退出码 %s）", name, command, exit), nil)
+			fmt.Sprintf("exec 容器 %s: %s（退出码 %s）", name, auditCmd, exit), nil)
 	}
 
 	// 结构化输出（`| display json` / 管道用）。
@@ -1207,11 +1211,29 @@ func (x *cliExecutor) systemSoftware(user string, t []string, raw []string) stri
 		}
 		return fmt.Sprintf("升级完成：%s → %s（包 %s）。nfvisd 由 postinst 重启后版本生效。\n", prev, ver, pkgName)
 	case "rollback":
+		// round49：`to <版本>` 此前被命令树接受、被执行器**静默忽略**——操作者点名版本却拿到
+		// 自动选版的结果。这里解析尾参并真正落地；未知尾参报语法错误而不是照做。
+		// 先剥离确认标记（`--yes` 不是命令树节点，可能出现在尾参里）。
+		target, terr := rollbackTargetOf(stripAllConfirm(t[1:]))
+		if terr != nil {
+			return "%% " + terr.Error() + "\n"
+		}
 		if confirmed == 0 {
+			if target != "" {
+				return fmt.Sprintf("回退到版本 %s 将替换 nfvis 并重启 nfvisd。Continue? [yes,no] ", target)
+			}
 			return "回退到上一版本将替换 nfvis 并重启 nfvisd。Continue? [yes,no] "
 		}
 		var prev, ver, pkgName string
 		err := runHighRisk(x.engine, user, highRiskSoftwareRollback(), func() (string, error) {
+			if target != "" {
+				res, rerr := x.sw.RollbackTo(context.Background(), target)
+				if rerr != nil {
+					return "", rerr
+				}
+				prev, ver, pkgName = res.Previous, res.Version, res.Package
+				return fmt.Sprintf("回退完成：%s → %s", prev, ver), nil
+			}
 			res, rerr := x.sw.Rollback(context.Background())
 			if rerr != nil {
 				return "", rerr
@@ -1224,7 +1246,26 @@ func (x *cliExecutor) systemSoftware(user string, t []string, raw []string) stri
 		}
 		return fmt.Sprintf("回退完成：%s → %s（包 %s）。\n", prev, ver, pkgName)
 	}
-	return "%% 语法: request system software add <deb路径|URL> [sha256 <hex>] | rollback\n"
+	return "%% 语法: request system software add <deb路径|URL> [sha256 <hex>] | rollback [to <版本>]\n"
+}
+
+// rollbackTargetOf 解析 `request system software rollback [to <版本>]` 的尾参。
+//
+// 只接受两种形态：空、或 `to <版本>`。其它一律报语法错误——**不静默忽略未知尾参**：
+// 「参数被接受但没生效」正是 round49 修掉的那类缺陷（操作者以为按点名回退，实际是自动选版）。
+func rollbackTargetOf(rest []string) (string, error) {
+	switch {
+	case len(rest) == 0:
+		return "", nil
+	case len(rest) == 2 && rest[0] == "to":
+		v := strings.TrimSpace(rest[1])
+		if v == "" {
+			return "", fmt.Errorf("语法: rollback [to <版本>]（版本不能为空）")
+		}
+		return v, nil
+	default:
+		return "", fmt.Errorf("语法: rollback [to <版本>]（未知参数 %s）", strings.Join(rest, " "))
+	}
 }
 
 // systemPower：request system reboot|shutdown|poweroff（确认后执行，FR-OPS-003）。

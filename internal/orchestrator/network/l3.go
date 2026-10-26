@@ -1104,11 +1104,21 @@ func (p *L3Provider) Routes(ctx context.Context, name string) ([]RouteEntry, err
 	return rows, nil
 }
 
-// ApplyGateway 配置 L2 交换机的 BVI 三层网关（FR-NET-014）。
+// ApplyGateway 配置 L2 交换机的 BVI 三层网关（FR-NET-014）；`Gateway` 声明消失时是**撤销**
+// 语义——等价于 DeleteGateway（清地址 → 删 BVI → 回收专属 VRF 表），幂等且不误删共享表。
+//
+// 为什么撤销必须落在这里（round49 外部走查，高）：提交计划对「变更的 L2 交换机」只生成
+// ApplyBridgeDomain（→ l2 段 + 本方法），拆除 BVI/专属表此前只发生在**整台交换机被删**时
+// （DeleteBridgeDomain → DeleteGateway）。于是
+// `delete virtual-switches <n> gateway ip <cidr>` 提交成功、读视图干净，而 VPP 里 BVI 仍在
+// （地址仍在、仍在专属 VRF 表里），域内主机继续把已删的网关当可用——配置与数据面不一致、
+// 全程零报错。地址收缩（两地址删一个）无需另做差集：下面的下发路径对 BVI 本就是
+// 「先 delAll 清空、再按声明逐条 add」，故不引入「登记里没有、VPP 里却有」的第二份状态。
 func (p *L3Provider) ApplyGateway(ctx context.Context, vs model.VirtualSwitch) error {
 	gw := vs.Gateway
 	if gw == nil {
-		return nil
+		// 撤销：登记里有 BVI 才动作（没有＝该交换机从来没有/已撤销网关，属已达成）。
+		return p.DeleteGateway(ctx, vs.Name)
 	}
 	c, err := p.client()
 	if err != nil {
@@ -1185,6 +1195,10 @@ func (p *L3Provider) ApplyGateway(ctx context.Context, vs model.VirtualSwitch) e
 }
 
 // DeleteGateway 拆除 BVI 与专属 VRF（非专属 VRF 的表保留）。
+//
+// 两个调用方：整台交换机删除（provider.DeleteBridgeDomain）与**网关声明消失但交换机保留**
+// （ApplyGateway 的撤销语义，round49）。两处都必须幂等：登记里没有 BVI 时直接返回
+// （没有任何动作可撤），故重复撤销/删已删过的交换机都是空操作。
 func (p *L3Provider) DeleteGateway(ctx context.Context, vsName string) error {
 	p.mu.Lock()
 	bvi, ok := p.bvis[vsName]

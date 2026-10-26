@@ -1,0 +1,231 @@
+# round49 真机验证证据（nfvis-vm，2026-10-26）
+
+**被测对象**：分支 `fix/round49-review-findings`（工作区打包，非 commit），VM 内构建
+`nfvis_3.0.32~r49_amd64.deb`（11,341,928 B），`SOURCE_DATE_EPOCH=1793088000`。
+**快照起点**：恢复为「裸」快照——连 nfvis / VPP / libvirt / docker / make / go 都没有，
+`/data/incoming` 不存在，`HugePages_Total=0`。
+
+---
+
+## §1 环境重建（可复现步骤）
+
+1. 快照后重建（`contrib/dev-vm/provision.sh`，`SKIP_VPP=1`；VPP 用 `/root/vpp-v26.06-deb` 本地 9 个 deb）：
+   ```
+   $ go version            → go1.26.3 linux/amd64
+   $ systemctl is-active docker libvirtd   → active / active
+   $ ls -l /usr/bin/vppctl → 存在（26.06 release）
+   ```
+   ⚠️ **Go 依赖必须走代理**：`proxy.golang.org` 直连被拒
+   （`dial tcp 142.250.198.81:443: connect: connection refused`），
+   设 `http(s)_proxy=http://192.168.155.1:2333` 后 `make deb` 成功；apt 直连可用。
+
+2. 内核基线（`nfvis-baseline.sh --apply --hugepages-1g 4 --hugepages-2m 768 --isolated-cores 2-5`）→ 重启：
+   ```
+   $ tr ' ' '\n' < /proc/cmdline | grep -E 'hugepages|isolcpus'
+   default_hugepagesz=2M hugepagesz=2M hugepages=768 hugepagesz=1G hugepages=4 isolcpus=2-5
+   $ cat /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages   → 4
+   $ cat /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages     → 768
+   $ mount | grep hugepages
+   /dev/hugepages-2M (pagesize=2M) ; /dev/hugepages (pagesize=1024M)
+   ```
+
+3. 安装被测 deb → 首次启动取一次性口令 → 声明资源池与业务口 → 交 DPDK：
+   ```
+   $ dpkg -i nfvis_3.0.32~r49_amd64.deb  → postinst 全流程 OK
+   $ journalctl -u nfvis | grep 一次性口令 → DCRtnRbKYW5BkMML@Aa1（仅一次，本文件登记后请视作已泄漏）
+   $ nfvis-cli -c 'show version' → NFViS 3.0.32~r49 / VPP 26.06-release / libvirt 12.0.0 / Docker 29.1.3
+   $ nfvis-cli -c 'request interfaces ens192 bind-dpdk --yes' → 已绑定 vfio-pci（ens224 同）
+   $ nfvis-cli -c 'request vpp restart'
+   $ vppctl show interface → ens192(idx1,up) ens224(idx2,up) local0(down)
+   ```
+
+---
+
+## §2 逐条缺陷真机复验
+
+### 2.1 镜像名路径穿越（R49-1，高危）
+```
+$ nfvis-cli -c "request images upload name ../../tmp/pwned type vm-image file /data/incoming/cli-del.qcow2"
+%% 镜像名不合法："../../tmp/pwned" 含 `..` 路径段（不允许引出上级目录）
+[ -e /tmp/pwned ] → PASS: 仓库外无文件
+$ nfvis-cli -c "request images upload name /tmp/abs.qcow2 type vm-image file /data/incoming/cli-del.qcow2"
+→ 拒绝；[ -e /tmp/abs.qcow2 ] → PASS: 未创建
+```
+
+### 2.2 multipart 上传（契约↔实现漂移的收口 + Web 路径）
+```
+$ curl -sk -X POST .../api/v1/images -H "Authorization: Bearer $TOK" \
+      -F name=mp.qcow2 -F type=vm-image -F file=@/data/incoming/cli-del.qcow2
+http=201  {"name":"mp.qcow2",...,"sha256":"900c91ed…","format":"qcow2"}
+$ curl … -F name=../../tmp/mp-evil.qcow2 …
+http=400  {"code":"VALIDATION_FAILED","message":"镜像名不合法：\"../../tmp/mp-evil.qcow2\" 含 `..` 路径段…"}
+[ -e /tmp/mp-evil.qcow2 ] → PASS: 未创建
+$ ls /data/incoming | grep upload-  → PASS: 无 upload-*.tmp 残留（失败路径已清理）
+```
+
+### 2.3 `rollback to <版本>`（决策 #509；含真机抓到的装配漏转发）
+拒绝三类（最终构建）：
+```
+to 3.0.32~r49 → %% 目标版本 3.0.32~r49 已是当前版本，无需回退
+to 9.9.9      → %% 目标版本 9.9.9 高于当前版本 3.0.32~r49：那是升级不是回退，请用 request system software add 显式安装
+to 3.0.29     → %% 归档中没有版本 3.0.29（可见版本：3.0.31、9.9.9）；回退只安装归档里已有的包…
+to（缺值）/未知尾参 → %% 语法: rollback [to <版本>]（…）
+无参 rollback（归档空） → %% 无可回退的版本：归档目录 /var/lib/nfvis/software 为空…
+```
+**命中路径（真实安装）**：把仓库里留存的 `nfvis_3.0.31_amd64.deb` 放入归档后——
+```
+$ nfvis-cli -c "request system software rollback to 3.0.31 --yes"
+回退动作已受理：nfvisd 因此重启，本次连接已断开（预期行为，不是失败）。
+已自动重连并读取服务端记录的实际结果：
+  版本: 3.0.31
+  状态: install ok installed
+结论: 成功。
+$ nfvis-cli -c 'show version' → NFViS 3.0.31
+$ dpkg -i build/nfvis_3.0.32~r49_amd64.deb && systemctl restart nfvis → NFViS 3.0.32~r49
+```
+**真机首次跑出的缺陷（本文件的重点）**：首版实现把 `RollbackTo` 只做成 **api 侧可选接口**，
+`cmd/nfvisd` 的适配器 `softwareController` 没转发 → 真机上 `rollback to` 恒报
+`%% 当前装配不支持指定版本回退（rollback to <版本>）`，而**所有单测注入的假件自带该方法、全绿**
+（与 BUG-17 的 `PackageState` 同族）。修法：把 `RollbackTo` **升为 `api.SoftwareRuntime` 的成员方法**
+（适配器漏实现即**编译失败**）+ `cmd/nfvisd` 静态守护钉转发
+（`TestSoftwareControllerForwardsRollbackTo`）+ 真机复验（上）。
+
+### 2.4 `cloud-init.hostname` 校验
+```
+$ configure; set virtual-machine-functions vm-r49 image alpine
+             set virtual-machine-functions vm-r49 cloud-init hostname "branch: blue"; commit check
+  - virtual-machine-functions[vm-r49].cloud_init.hostname: 主机名分段 "branch: blue" 不合法
+    （只允许字母、数字与 '-'，段首尾不能是 '-'）；请改为 RFC1123 主机名（示例：fw-1、web.example.com）
+```
+
+### 2.5 `commit confirmed` 超时**反向下发**（决策 #508，高危）
+```
+$ nfvis-cli -c "configure
+  set virtual-switches vs-r49 type l2
+  set virtual-switches vs-r49 gateway ip 192.168.222.1/24
+  commit confirmed 1"
+commit 成功 (revision 6)，confirmed 模式：14:16:22 前再次 commit 确认，否则自动回滚
+
+# 提交后数据面（事实源：vppctl）
+$ vppctl show bridge-domain
+  BD-ID   Index  …  BVI-Intf
+  6216082  1      …  bvi0
+$ vppctl show interface address
+  bvi0 (up): L2 bridge bd-id 6216082 … ; L3 192.168.222.1/24 ip4 table-id 14158755
+
+# 等 80s（超时）
+$ nfvis-cli -c 'show configuration' | grep -c vs-r49 → 0
+$ vppctl show bridge-domain → no bridge-domains in use
+$ vppctl show interface → 只剩 ens192/ens224/local0（bvi0 已消失）
+$ nfvis-cli -c 'show log audit last 5' | grep rollback-auto
+  2026-10-26 14:16:22  system  config.rollback-auto  success  commit confirmed 超时未确认，已自动回滚（基线 …）
+```
+**修复前的对照**：同一路径只会回滚 SQLite 与宿主侧，VPP 里 BD/BVI 会继续存在（本轮只读评审结论）。
+
+### 2.6 网关撤销（决策 #508）
+```
+$ configure; set virtual-switches vs-r49b type l2; set … gateway ip 192.168.223.1/24; commit → revision 8
+$ vppctl show bridge-domain → BD 5313744 … BVI-Intf=bvi0 ; show interface address → bvi0 L3 192.168.223.1/24
+$ configure; delete virtual-switches vs-r49b gateway; commit → revision 9
+$ vppctl show bridge-domain → BD 5313744 … BVI-Intf=N/A     ← BD 保留
+$ vppctl show interface     → bvi0 已消失                    ← BVI 拆除
+$ show configuration        → virtual-switches vs-r49b { name …; type l2; }（无 gateway）
+$ configure; delete virtual-switches vs-r49b; commit → revision 10（清场）
+```
+
+### 2.7 凭据生命周期与终端会话（决策 #507）
+```
+# 只读 token 无写权限
+create probe-r49(read-only) → 201 ; login → token
+POST /system/login-users (probe token) → 403
+
+# REST 改 class：成功后该用户全部 token 立即失效（比“只重算”更强）
+PUT /system/login-users/probe-r49 {"class":"super-user"} → 200
+POST … (同一旧 token) → 401
+
+# CLI 改 class 不走 handler ⇒ 不吊销；同一 token 立即按新 class 生效（按 committed 重算身份）
+create probe2-r49(read-only) → 201 ; POST … (probe2 token) → 403
+set system login user probe2-r49 class super-user + commit → 成功（revision 15）
+POST … (同一 probe2 token) → 201   ← 未重新登录即拿到新权限
+
+# 删除用户 ⇒ 旧 token 立即 401
+DELETE /system/login-users/probe2-r49 → 200 ; GET /system/version (旧 token) → 401
+```
+
+### 2.8 审计命令原文脱敏（决策 #506）
+```
+$ nfvis-cli -c 'request container-functions ct-r49 exec "echo ok; mysql -pS3cr3t9 -h 10.9.9.9; true" --yes'
+--- stdout --- ok   （容器内 mysql 不存在，命令本身成功返回）
+$ nfvis-cli -c 'show log audit last 3' | grep container.exec
+  … container.exec  success  exec 容器 ct-r49: echo ok; mysql -p«已隐藏» -h 10.9.…
+明文命中数: 0    掩码命中数: 1
+
+# REST 出口
+$ curl …/audit-logs?limit=10 → 明文命中: 0 ; 掩码命中: 1 ; 片段: mysql -p«已隐藏» -h 10.9.9.9; true（退出码 0）
+# 诊断包出口
+$ nfvis-cli -c 'request system tech-support generate'
+$ tar -xzOf /var/lib/nfvis/tech-support/nfvis-tech-support-20261026T141928Z.tar.gz audit.json
+  诊断包内明文命中: 0    诊断包内掩码命中: 8
+```
+
+### 2.9 CPU 账本按数据面（决策 #510）
+```
+# VPP 数据面（main-core 2 / workers 3-4）
+$ nfvis-cli -c 'show resource-pools' → isolated 2,3,4,5 | vpp-reserved 2,3,4 | free 5
+$ nfvis-cli -c "configure; set system dataplane kernel; commit" → revision 4
+$ nfvis-cli -c 'show resource-pools' → isolated 2,3,4,5 | vpp-reserved - | free 2,3,4,5   ← 内核下 VPP 不占核
+$ nfvis-cli -c "configure; set system dataplane vpp; commit" → revision 5 → vpp-reserved 恢复 2,3,4
+```
+
+---
+
+## §3 四套真机套件（与发版基线逐项一致）
+
+环境：`SRV=https://127.0.0.1:443 CLI_BIN=/usr/bin/nfvis-cli API_PORT=443`；
+语义另加 `FIXTURE_IMAGE=alpine FIXTURE_CT_IMAGE=ct`。
+⚠️ 阶段 2 的业务地址与宿主管理网段同段（R41-T1 仍在），套件副本改 `192.168.177.0/24` 后跑。
+
+| 套件 | 结果 | 基线 |
+|---|---|---|
+| `cli-fulltest` | **通过 306 / 失败 0 / 预期报错 26**（收尾自清场「未清项 0」） | 306/0/26 |
+| `cli-semantic-check` | **通过 43 / 失败 0 / 不可判定 0 / 登记 0** | 43/0/0 |
+| `cli-lifecycle-check` | **通过 40 / 失败 0 / 跳过 3 / 登记 0**（终态「与开工前逐字节一致」） | 40/0/3 |
+| `cli-pty-smoke` | **通过 10 / 失败 0** | 10/10 |
+
+---
+
+## §4 环境坑（本轮实测入册）
+
+1. **套件收尾会删掉 docker `alpine:3.20`**：fulltest 结束后 `docker save alpine:3.20` 报
+   `No such image`，导致语义夹具的 `ct.tar` 生成失败 → 需 `docker load -i /root/alpine-3.20.tar` 重备
+   （AGENTS round47/48 已登记，本轮再次实证）。
+2. **套件会改 `resource-pools` 与 `vpp cpu` 声明**（fulltest 阶段 2 设 1G=2 / isolated 1-4 /
+   main-core 1 / workers 2），且产品的池对账会把 1G 池从 4 收敛到 2。**还原必须三处一起改回**
+   （`vpp cpu main-core`、`corelist-workers`、`resource-pools cpu isolated-cores`——隔离核必须涵盖
+   VPP 线程核，否则校验拒绝），再 `request system kernel apply` + 重启，内核池才会回到 4。
+3. **VM 重启后 SSH host key 再生成**：出现
+   `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED`，需 `ssh-keygen -R 192.168.155.129` 后重连
+   （AGENTS round45 收尾注记过同现象，本轮第二次遇到）。
+4. **远程脚本用管道喂 `cat > file` 会落成 0 字节**：改用 `scp` 传脚本 + `setsid nohup … </dev/null &`
+   才真正脱离 ssh 会话（首轮踩过）。
+5. `pkill -f <名>` 会匹配到自己的 ssh 命令行并自杀：用 `[n]ame` 形式规避。
+
+## §5 现场还原终态
+
+```
+内核：1G=4  2M=768  isolcpus=2-5   两种 hugetlbfs 已挂载
+服务：nfvis active  vpp active；业务口已重新 bind-dpdk（vfio-pci）；VPP 已 restart
+读视图：isolated 2,3,4,5 | vpp-reserved 2,3,4 | free 5
+        show system kernel → 一致性：内核基线与配置期望一致（无需重启）
+告警：无 active 告警；配置对象 0；/data/incoming 空
+清理：验证用的软件归档（3.0.31 / 9.9.9 占位）与 tech-support 归档已删；
+     仓库夹具 alpine(vm-image) / ct(container-image) 保留（与既有夹具口径一致）
+```
+
+## §6 未覆盖项（如实）
+
+- DPDK 绑定中途失败→回绑原驱动、空闲锁释放失败、审计写失败：**未在真机造故障**（需 sysfs/DB 级注入），
+  仅单测覆盖（fake sysfs / SQLite 触发器）。
+- 终端 ticket 的手工吊销与已建立 WS 的关闭：仅单测（可观察 fake 流）覆盖，真机未接 WS 客户端验证。
+- `cloud-init.hostname` 的 YAML 转义分支：RFC1123 校验已挡住危险值，**转义路径在配置侧不可达**，仅单测覆盖。
+- `main-core = 0` 是否占核 0：未定裁（同 AGENTS 登记）。

@@ -37,6 +37,9 @@ func (f *fakeSoftwareRuntime) Add(context.Context, string, string) (ksys.Softwar
 func (f *fakeSoftwareRuntime) Rollback(context.Context) (ksys.SoftwareResult, error) {
 	return ksys.SoftwareResult{}, errors.New("not used")
 }
+func (f *fakeSoftwareRuntime) RollbackTo(context.Context, string) (ksys.SoftwareResult, error) {
+	return ksys.SoftwareResult{}, errors.New("not used")
+}
 func (f *fakeSoftwareRuntime) Reboot(context.Context) error   { return nil }
 func (f *fakeSoftwareRuntime) Shutdown(context.Context) error { return nil }
 func (f *fakeSoftwareRuntime) NTPSync(context.Context, []string) (string, error) {

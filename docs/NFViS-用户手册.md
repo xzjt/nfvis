@@ -1342,6 +1342,10 @@ nfvis# commit
 
 L2 交换机在 VPP 侧落地为 **bridge-domain**；`gateway ip` 创建 BVI（三层网关），
 缺省归入专属 VRF `vr-<交换机名>`（也可 `set gateway vrf <name>` 挂到别的 VRF）。
+
+> **撤销网关会真正拆掉数据面**：`delete virtual-switches <n> gateway`（或删光 `gateway ip`）提交后，
+> 产品会主动拆除 BVI、旧地址与专属 VRF（`vr-<交换机名>`；显式 `set gateway vrf <name>` 的共享表不动）。
+> 修复前这一步只改配置、BVI 与地址继续在数据面转发（配置说没有、事实还在），现已收敛。
 端口支持 trunk（`trunk vlans 100,200`）与 native VLAN。
 
 > **网关（BVI）上不能绑 ACL**：`set gateway acl-in|acl-out <acl>` 会被**提交期直接拒绝**。
@@ -1905,6 +1909,12 @@ nfvis$ show images img.qcow2 detail
 > **已下载部分保留在 `.part`**：重跑同一条命令即从断点续传（不必重新下载）。
 > 若目标机到镜像站链路太差，也可以在别处下好再 `request images upload`（见上）。
 
+> **镜像名有形态约束（安全边界）**：VM 镜像名是**纯文件名**——不得含 `/`、`\`、`:`，
+> 且必须等于 `filepath.Base(名字)`；容器镜像名是 **Docker 引用**——允许 `:`、`/`、`@`，
+> 但不得以 `/` 开头/结尾、不得有空段。两者都拒绝空/控制字符/绝对路径/任何 `..` 段，违约报 400。
+> 控制台「上传文件并导入」与 `request images upload` 走同一条校验（名字里带 `..` 一律被拒）；
+> 控制台单次上传的**请求体总量上限 4 GiB**，超限在读入过程中即中断并报 413（不落任何文件）。
+
 **容器镜像**（docker save 出的 tar）：
 
 ```bash
@@ -2031,6 +2041,10 @@ nfvis$ request virtual-machine-functions fw-vm delete   # super-user；交互确
   脚本（`-c`/`-f`）与交互里用双引号把多行 user-data 包住即按整段取值（值内保留换行），
   引号内的 `|` 与 `#` 都不作特殊切分（故 `#!/bin/sh` 可直接内联）；把长内容放文件里
   （`set cloud-init user-data /data/incoming/ud.yaml`）仍是推荐做法，便于复用与审查；
+- **`cloud-init hostname` 受校验**：须是 RFC1123 主机名（点分标签、每段 ≤63、总长 ≤253、
+  字母数字与 `-` 且段首尾非 `-`），并拒绝整体全数字的写法（`192.168.1.1` 不是主机名）；
+  非法值提交期直接拒绝。seed 生成侧还会对非安全值做 YAML 转义——`hostname: branch: blue`
+  这类值不再破坏整份 `#cloud-config`（修复前会连带丢掉 SSH 公钥与用户配置，而提交是成功的）；
 - **改 user-data 后需重建 VM 或改 `cloud-init hostname`**：cloud-init 按 instance-id
   判定「是否首次」，产品的 instance-id 含输入摘要（改了就重放），但同一输入重启不重放；
 - 验证注入是否生效：串口里看 `Cloud-init ... finished ... Datasource DataSourceNoCloud`，
@@ -2419,6 +2433,11 @@ nfvis$ show log audit last 20                 # 审计：登录/配置/运维动
 nfvis$ show log vnf fw-vm last 50             # VNF 控制台/事件日志
 ```
 
+> **审计里的秘密被掩码**：命令原文里的口令/令牌/私钥形态的值（`mysql -p…`、`--password=…`、
+> `Authorization: Bearer …`、PEM 私钥块）在**写入与读取两侧**都替换为 `«已隐藏»`，普通命令逐字保留——
+> CLI `show log audit`、REST `GET /api/v1/audit-logs` 与诊断包 `audit.json` 三处同口径，
+> 修复前入库的历史明文行在读出时同样被掩码。
+
 - 审计含「时钟是否已同步」标记：NTP 未同步的记录带 `[时钟未同步]`；
 - **高危动作记两条**：恢复出厂、重置数据分区、软件升级/回退、恢复配置、证书上传，以及本地用户与口令策略
   的写操作，会先记一条**意图**（Result 列显示 `intent`，说明「要做什么」、含关键参数），
@@ -2465,6 +2484,9 @@ nfvis$ request alarms clear all
 > | `SYSTEM_BASELINE_APPLY_FAILED` | warning | **系统基线（主机名 / 时区 / NTP / DNS）有一项或多项没能落到宿主**——如 `hostnamectl` / `timedatectl` 失败、chrony 重载失败、systemd-resolved 重启失败。控制台显示的是配置值，宿主实况可能仍是旧值；不阻断提交与启动。文案**逐项**给出项名、原因与自查命令（`hostnamectl hostname`、`timedatectl`、`chronyc sources`、`resolvectl status`）。处置：按文案排查修正后**再次提交**（或重启 nfvis 触发复核）即重新应用；**应用成功、或对应声明被删空后自动消解**，跨 nfvisd 重启按重试结果重建 |
 > | `BRIDGE_FDB_LIMIT_REACHED` | warning | **仅内核数据面**：某 L2 交换机的 MAC 学习表已学条目数**达到/超过**声明的 `learn-limit`（来源=交换机名）。内核 bridge 没有「学习条数上限」原语，该上限在内核侧实现为**阈值告警、非强制上限**——**不强制限制学习**，只是提醒学习表已到量。处置：`show virtual-switches <n> detail` 看「学习上限说明」行的已学/上限（自查 `bridge fdb show br <交换机名>`）；条目回落到阈值以下、或删除 `learn-limit` 声明即**自动消解** |
 > | `VM_IMAGE_PROFILE_ORPHAN` | warning | 某个**镜像启动画像**指向的镜像**不在镜像仓库中**（被删或未导入）——该画像不会生效（受影响的 VM 在下一次定义时回落产品默认启动参数）。来源=画像名。按配置与仓库事实重建、跨 nfvisd 重启仍可见；用 `request images upload` 导入或 `request images download` 拉取该镜像后**自动消警** |
+> | `CONFIRMED_ROLLBACK_FAILED` | error | `commit confirmed` **超时后自动回滚失败**：产品已尝试把数据面反向收敛回变更前版本但没成功，于是**变更没有被撤销**——配置与数据面都仍停在变更后的版本（保持一致，不是「配置回滚了、数据面没回」）。来源固定 `system`。处置：核对 `show configuration` 与数据面实况，必要时**重新提交一份正确配置**；提交成功后本告警自动消解（配置与数据面重新一致）。注意：为不把「半回滚」留在现场，这种情况下产品**有意不回滚配置库**，并已写一条 `config.rollback-auto` 的 failure 审计 |
+> | `AUDIT_WRITE_FAILED` | error | **审计日志写入失败**：配置与高危动作的记录将丢失。来源固定 `system`。常见根因：`/var/lib/nfvis` 所在分区满、配置库只读/被占用。处置：按文案里的根因检查分区与配置库（`df -h /var/lib`、`ls -l /var/lib/nfvis/nfvis.db`），恢复后**下一次审计写入成功即自动消解**。这条告警存在的意义是「审计写不进去时不再无声」——操作记录是事后追责与排查的唯一事实源 |
+> | `DPDK_BIND_RESTORE_FAILED` | error | `request interfaces <口> bind-dpdk` **中途失败且没能还原原驱动**：产品在解绑原驱动之后、绑定目标驱动之前出错，且回绑原驱动也失败——该设备**当前可能没有任何驱动**（业务口消失、流量中断）。来源=PCI 地址（BDF）。处置：按告警文案两条出路操作——目标驱动可用后重新 `request interfaces <口> bind-dpdk --yes`（成功即自动消警），或显式 `request interfaces <口> unbind-dpdk to-driver <原驱动>` 交还内核驱动；`show interfaces physical` 备注列会点名当前驱动状态 |
 >
 > 上面四条残渣告警的文案都会注明「由启动/巡检对账按数据面事实重建、原始提交不可回溯」——是哪次提交失败、是否被 NAT 引用，数据面看不出来，产品**不编造**。
 
@@ -2493,6 +2515,8 @@ nfvis$ request system storage format-data
 
 > **`zeroize` 与 `storage format-data` 的区别**：两者都**不可撤销**且都删业务对象，但
 > `zeroize` 连同账号表一起复位（重启后进入初始化状态，需带外/控制台重新初始化）；
+> 因为账号表随配置一起被清空，**执行 zeroize 后当前会话立即失效**（下一个请求 401），
+> 需重启后用一次性口令重新初始化——这是设计使然，不是掉线；
 > `storage format-data` 保留 `system.management`、`system.api`、`system.login` 三节与物理口、
 > DPDK 声明——**为的就是不把自己关在门外**：执行完 SSH/Web 仍可登录继续配置。
 > 执行结果会如实给出删除对象数、清理文件数与释放空间；**有清不掉的残留时它报失败并逐条列出**
@@ -2576,6 +2600,10 @@ nfvis$ request system shutdown
 ```
 
 - `software add` 先校验 sha256（可选但强烈建议）→ 安装 → 重启 nfvisd → 报告；
+- `software rollback` 缺省装**版本序上严格低于当前版本的最大者**（不是「归档里最高且非当前」——
+  归档留有更高版本时那样会把回退做成升级）；`rollback to <版本>` 装点名的那个版本。
+  归档里没有该版本、目标等于当前版本、或目标高于当前版本（那是升级，请用 `software add`）时
+  **一律如实拒绝**并列出可见版本——不会静默改道到别的版本；
 - 升级期间配置库不受影响；`purge` 才会清运行态（配置数据仍保留，见 §2.7）；
 - 每次升级/回退的结论落在 `/var/lib/nfvis/software/last-result.json`（带尝试标识与落笔时间），
   `show system software result` 随时回读，并与**当前** dpkg 状态、已装版本交叉核对——
@@ -2770,6 +2798,11 @@ DPDK 没有独立版本来源（随 VPP 一起编译），同样显示「—」�
 被吊销的会话在下一个请求时要求重新登录（吊销当前浏览器这个会话＝本页登出）。会话只存在内存里，
 服务重启后自动清空。super-user 能看到全部用户的会话，其他角色只看到自己的；等价的命令行是
 `show system api tokens`（清单）与 `request system api token revoke <会话 ID>`（吊销）。
+
+> **凭据变更立即生效**：改权限类、重置口令、删除用户、以及自助改口令成功后，该用户**全部活动 token
+> 立即失效**（不必等 token 有效期，默认 60 分钟），并且其已建立的终端（串口 / VNC / 容器 shell）
+> 同时被关闭、未消费的 ticket 随即作废。每次请求的身份与权限都按**当前配置**重算——
+> 被降权的账号立即按新权限判定，被删除的账号立即 401。登出同样会终止本会话的终端。
 
 ![用户与权限](images/console/18-users.jpg)
 
