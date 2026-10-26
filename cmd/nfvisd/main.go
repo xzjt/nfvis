@@ -35,7 +35,6 @@ import (
 	"github.com/xzjt/nfvis/internal/orchestrator/container"
 	"github.com/xzjt/nfvis/internal/orchestrator/netkernel"
 	"github.com/xzjt/nfvis/internal/orchestrator/network"
-	"github.com/xzjt/nfvis/internal/state"
 	"github.com/xzjt/nfvis/internal/system"
 	"github.com/xzjt/nfvis/internal/systemd"
 	"os/exec"
@@ -1372,8 +1371,9 @@ func run() error {
 		// 存在性检查**同一个** sysfs 实现（单一事实源）。
 		PCIExists: compute.NewSysfsPCIDeviceChecker(),
 		LLDP:      &lldpController{net: netProvider},
-		// 运行态聚合：VPP 数据面取 stats segment；内核数据面无对应读数（nil 即安全返回空）。
-		State: state.New(stateRuntimeFor(dpMode, vppMgr)),
+		// 运行态聚合：VPP 数据面取 stats segment；内核数据面无 VPP 运行态，但**接口计数**
+		// 有 sysfs 真值（决策 #504：按方向的 rx_dropped/tx_dropped）。
+		State: stateRuntimeFor(dpMode, vppMgr, kernelCounters(kernelNet)),
 		SRIOV: sriovProvider,
 		// DPDK 接管（决策 #426②）：VPP 数据面走 sysfs 接管；内核数据面下绑定拒绝、解绑可用
 		// （交还内核驱动——内核里没有的口正等这一步）。

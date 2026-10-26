@@ -1,5 +1,9 @@
 // NFViS 控制台共享件 · 格式化（从 app.js 拆出，逻辑逐字保留；Web 控制台重构 2026-10）。
 
+// dash：缺值显示「—」的唯一实现（dom.js 是零业务知识的件，它导出的 dash 就是这一份；
+// 本模块需要它只为 ifaceDropsText/ifaceDropsCell 的缺值分支——单向依赖，不成环）。
+import { dash } from './dom.js';
+
 export function uptime(sec) {
   if (sec === undefined || sec === null) return undefined;
   const s = Math.floor(Number(sec));
@@ -41,6 +45,34 @@ export function stormControlText(sc) {
 export function mb(n) {
   if (n === undefined || n === null) return undefined;
   return Number(n) >= 1024 ? (Number(n) / 1024).toFixed(1) + ' GB' : n + ' MB';
+}
+
+// ifaceDropsText：接口丢弃计数的**统一口径渲染**（决策 #504）。
+//
+// 两条数据面给的东西不一样：VPP 的 stats segment 只有 `/interfaces/<if>/drops` 一个
+// **方向无关**的总数，内核网络数据面的 sysfs 才有 `rx_dropped`/`tx_dropped` 两个真值。
+// 故同一个单元格在两处各按自己的口径显示，**不适用的键在响应里缺席**（不是 0）：
+//   - 有 `drops`（VPP）⇒ 「总数 N」；
+//   - 有 `rx_drops`/`tx_drops`（内核）⇒ 「收 X / 发 Y」；
+//   - 都没有（取不到计数）⇒ undefined ⇒ 显示「—」。
+export function ifaceDropsText(st) {
+  if (!st || typeof st !== 'object') return undefined;
+  if (st.drops !== undefined && st.drops !== null) return '总数 ' + st.drops;
+  if (st.rx_drops !== undefined || st.tx_drops !== undefined) {
+    return '收 ' + dash(st.rx_drops) + ' / 发 ' + dash(st.tx_drops);
+  }
+  return undefined;
+}
+
+// ifaceDropsCell：概览接口卡的单列「丢弃」值——口径同上，只取当前数据面发的那一个数。
+// VPP 下是方向无关总数；内核下是收+发两个方向（分开写，不相加冒充总数）。
+export function ifaceDropsCell(st) {
+  if (!st || typeof st !== 'object') return undefined;
+  if (st.drops !== undefined && st.drops !== null) return st.drops;
+  if (st.rx_drops !== undefined || st.tx_drops !== undefined) {
+    return dash(st.rx_drops) + ' / ' + dash(st.tx_drops);
+  }
+  return undefined;
 }
 
 // **记录类**绝对时间的统一渲染（形状与 CLI 对齐）：`2026-09-25 01:24:22 UTC`。

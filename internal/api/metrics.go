@@ -95,9 +95,21 @@ func (s *Server) vppMetrics(ctx context.Context) []metrics.Sample {
 					metrics.Sample{Name: "nfvis_vpp_interface_tx_bytes", Help: "接口发字节数", Type: "counter", Labels: l, Value: float64(c.TxBytes)},
 					metrics.Sample{Name: "nfvis_vpp_interface_rx_errors", Help: "接口收包错误", Type: "counter", Labels: l, Value: float64(c.RxErrors)},
 					metrics.Sample{Name: "nfvis_vpp_interface_tx_errors", Help: "接口发包错误", Type: "counter", Labels: l, Value: float64(c.TxErrors)},
-					metrics.Sample{Name: "nfvis_vpp_interface_rx_drops", Help: "接口收包丢弃", Type: "counter", Labels: l, Value: float64(c.RxDrops)},
-					metrics.Sample{Name: "nfvis_vpp_interface_tx_drops", Help: "接口发包丢弃", Type: "counter", Labels: l, Value: float64(c.TxDrops)},
 				)
+				// 丢弃序列**按数据面口径**取名字（决策 #504）：VPP 只有方向无关的总数，故一条
+				// `nfvis_vpp_interface_drops`（原先的 rx_drops/tx_drops 两条恒 0 是「编造方向」+
+				// 「没接线」两处错）；内核网络数据面有按方向的两个真值，故两条方向序列。
+				// 两者并不同时出现——判据与 CLI 同一处（`DirectionalDrops`），不各写一套。
+				if c.DirectionalDrops {
+					out = append(out,
+						metrics.Sample{Name: "nfvis_vpp_interface_rx_drops", Help: "接口收包丢弃（内核网络数据面按方向计数）", Type: "counter", Labels: l, Value: float64(c.RxDrops)},
+						metrics.Sample{Name: "nfvis_vpp_interface_tx_drops", Help: "接口发包丢弃（内核网络数据面按方向计数）", Type: "counter", Labels: l, Value: float64(c.TxDrops)},
+					)
+				} else {
+					out = append(out,
+						metrics.Sample{Name: "nfvis_vpp_interface_drops", Help: "接口丢弃总数（VPP 数据面；不分方向）", Type: "counter", Labels: l, Value: float64(c.Drops)},
+					)
+				}
 			}
 		}
 	}

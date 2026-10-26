@@ -3002,6 +3002,15 @@ components:
                   assigned_vnf: { type: string }
         statistics:
           type: object
+          description: |
+            接口计数（**仅详情端点 `GET /interfaces/{name}` 附带**；取不到时不返回该字段，不编造）。
+            丢弃计数按数据面口径只发适用者：**VPP 数据面**发 `drops`（方向无关总数，取自 stats
+            segment 的 `/interfaces/<if>/drops`——它本身不区分方向，摊给收或发都属编造），
+            `rx_drops`/`tx_drops` **缺席**；**Linux 内核网络数据面**发 `rx_drops`/`tx_drops`
+            （sysfs 的 `statistics/rx_dropped`、`tx_dropped` 两个真值），`drops` **缺席**
+            （两方向不相加冒充总数，避免同一事实两种口径）。0 是有效读数，缺席才是「本数据面
+            不提供该口径」——与 CLI `show interfaces <name> statistics` / `monitor interfaces`
+            及 `/metrics` 的 `nfvis_vpp_interface_drops` 同一判据。
           properties:
             rx_packets: { type: integer, format: int64 }
             tx_packets: { type: integer, format: int64 }
@@ -3009,8 +3018,9 @@ components:
             tx_bytes: { type: integer, format: int64 }
             rx_errors: { type: integer, format: int64 }
             tx_errors: { type: integer, format: int64 }
-            rx_drops: { type: integer, format: int64 }
-            tx_drops: { type: integer, format: int64 }
+            drops: { type: integer, format: int64, description: "接口丢弃总数（VPP 数据面；VPP 的 /interfaces/<if>/drops 不区分方向）。内核网络数据面下该键缺席" }
+            rx_drops: { type: integer, format: int64, description: "接收方向丢弃（仅内核网络数据面提供；VPP 数据面不发这个键）" }
+            tx_drops: { type: integer, format: int64, description: "发送方向丢弃（仅内核网络数据面提供；VPP 数据面不发这个键）" }
 
     InterfaceUpdate:
       type: object

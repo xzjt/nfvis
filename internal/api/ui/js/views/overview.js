@@ -8,7 +8,7 @@ import { api, soft, apiErrText, httpErrText,
   errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
-  portSecText, stormControlText } from '../core/format.js';
+  portSecText, stormControlText, ifaceDropsText, ifaceDropsCell } from '../core/format.js';
 import { getToken, setToken, getUser, setUser, getCurrentClass, setCurrentClass,
   getEvents, setEvents, pushEvent, renderEvents, setStream, startStream, stopStream,
   armPolling, setPollRoute, startPolling, stopPolling, scheduleReload,
@@ -307,7 +307,10 @@ export function renderInterfaces(ifaces, ifaceRows) {
     const tr = rowClickable(el('tr'), '#/system/interfaces/' + encodeURIComponent(r.cfg.name));
     [r.cfg.name, r.cfg.description, r.cfg.mtu,
       r.stat ? r.stat.rx_packets : undefined, r.stat ? r.stat.tx_packets : undefined,
-      r.stat ? r.stat.rx_errors : undefined, r.stat ? r.stat.tx_drops : undefined,
+      // 丢弃列按数据面口径取值（决策 #504）：VPP 是方向无关的 `drops`，内核网络数据面
+      // 按方向给（`rx_drops`/`tx_drops`，同一格里写「收 / 发」，不相加冒充总数）；
+      // 两个口径的键都不在时如实留「—」。
+      r.stat ? r.stat.rx_errors : undefined, ifaceDropsCell(r.stat),
     ].forEach((c) => tr.appendChild(el('td', { text: String(dash(c)) })));
     tbody.appendChild(tr);
   });

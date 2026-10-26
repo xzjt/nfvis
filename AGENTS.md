@@ -132,6 +132,80 @@
   `dhcp-server`，语义夹具的 `dhcp-relay` 会被产品的**正确校验**拒绝（跨交换机中继/服务器互斥）。
   证据 `docs/evidence/v3-round46-v3029-report-fix-batch.txt`。
 
+- **round47（干净快照 v3.0.30 发布件首装 + 拟人化全功能走查，2026-10-26，未定裁）**：在恢复为
+  「干净」快照的 nfvis-vm 上走**发布件真人路径**——`nfvis-v3.0.30.run`（sha256 `981d60a8…`，
+  上机复核一致）`sh … -y` 一步装齐（**18/0/0 自检**、退出码 0、1m30s）→ 一次性口令 → 真 pty
+  向导（rev 3）→ 内核基线重启（cmdline/hugetlbfs/isolcpus 三处实读）→ 系统基线 rev 4/5
+  → 管理口 rev 6（**负控**裸 commit 被拒、正控 commit confirmed；`ss` 见 `.129:443` +
+  `127.0.0.1:443` 双监听）→ 业务口 DPDK rev 7 → **VPP 全族**（L2/BVI、L3+静态路由 FIB
+  `resolved`、ACL 网关拒绝+L3 真拦（`ACL deny 4/checked 4`）+**ARP 不受影响**、QoS 双向
+  **定量 A/B**（offered 204 Mbps → conform 8339/violate 210427）、风暴抑制、端口安全
+  **A/B**（白名单内 4/4 → 删该条后 0/4）、VXLAN（**须写 `virtual-switch` 才入 BD**）、
+  DHCP server **DORA pcap 四步实证**、SPAN、抓包、诊断三态、备份/归档/审计/令牌、三面权限、
+  `/metrics`、`software add` **全链路含 3.0.29 downgrade 再升回 3.0.30**、`show system pci`、
+  `BUG-22` 未知字段 400、`O-3 unlock`）→ **Debian 13 VNF / 容器（exec 与宿主 `docker exec`
+  逐字一致、**交互 shell**）** → **Web 黑盒**（**24 条路由零 JS 错误**、建/删交换机三源一致
+  （rev 37/38、BD 12199341 建后即撤）、VNF 串口经 WS **拿到 guest 真 `login:`**、容器 exec/终端、
+  operator 写控件门禁 **4/229**）→ **切内核**（bridge/VRF/nft ACL 真拦+ARP 放行/tc QoS 8Mbit/
+  **DNS 真解析**/LLDP **真邻居**/VNF virtio+tap/容器 veth）→ **切回 VPP**（teardown + 重绑 +
+  全量重放 + 告警清零）→ 四套件 → 现场还原。
+  **四套真机套件与发版基线逐项一致**：fulltest **302/0/26**、语义 **43/0/0**、
+  lifecycle **40/0/3**、pty **10/10**。
+  **新登记两条缺陷（**均已由 round48 收口**——决策 #503/#504，见下条；详见 `docs/v3待做.md` §八 与证据 §7）**：
+  **R47-1（中，两数据面共同）** seed 的 `network-config` 写死 `eth0`，而 Debian 12+/13 有
+  systemd 可预测命名（`enp1s0`）⇒ guest **从不发 DHCP**、租约永远拿不到，而 vNIC 是 up、
+  VM 是 running ⇒ `VNF_PORT_DOWN` 不报、**产品零提示**；**A/B 实锤**（只改 guest netplan
+  键名即得 active 租约 + 宿主 ping 4/4）；**判别线**：Alpine 根 fs 无该 udev 规则（保持
+  `eth0`，历轮夹具全是 Alpine 故未暴露）。**R47-2（中）** 接口 `rx_drops/tx_drops` 在
+  CLI statistics / CLI monitor / REST / `/metrics` **四处恒 0**，而 vppctl 与 stats segment
+  真有丢弃（构造 100% 丢弃：`rx 85 / drops 85`、`/interfaces/ens192/drops=148`）；同次取数
+  `tx_errors=1` 如实 ⇒ 只是 `Drops` 字段没接线（govpp 有该字段）。
+  ⚠️ **套件参数三条（本轮实测入册，缺一条就整批红）**：① `SRV=https://127.0.0.1:443`
+  （缺省 `http://127.0.0.1:18443` ⇒ 302 条全红）；② `CLI_BIN=/usr/bin/nfvis-cli`；
+  ③ `API_PORT=443`（阶段 2 会把该端口写进配置）。**阶段 2 的 `192.168.155.10/24` 与已装实例
+  管理口同网段**（R41-T1 仍在）⇒ 套件副本改 `192.168.77.0/24`（建议参数化）。
+  **每轮前必须重备** docker `alpine:3.20` 与 `/data/incoming/cli-test.qcow2` +
+  `cli-del.qcow2`（套件收尾会一起清掉）。**观察项 O-1**：`request system api tls regenerate`
+  的 cert/key 是**两次独立 `os.WriteFile`**，换证窗口内 `GetCertificate` 会回退旧 cert ⇒
+  fulltest S6 观测到**一次** `x509: certificate signed by unknown authority`
+  （加压 40 次串行 + 12×12 并发**未复现**，窗口极窄）；建议临时文件 + `os.Rename` 原子替换。
+  证据 `docs/evidence/v3-round47-clean-install-walkthrough-vpp-kernel.txt`、
+  截图 `docs/images/v3-round47-web-vnf-console.png`。
+
+- **round48（R47-1/R47-2 收口 + 发版 v3.0.31，2026-10-26，决策 #503/#504）**：接 round47 两条
+  缺陷，按「**能力前提先核实 → 契约先行 → 实现派子智能体 → 红-绿 → 真机复验 → 现场还原**」走完。
+  **#503（R47-1）seed 网络配置改 MAC 匹配**：`BuildNetworkConfig` 不再写死 `eth0`，改每块 vNIC
+  一条 `<vNIC 名>: { match: { macaddress: "<MAC>" }, set-name: <vNIC 名>, dhcp4: true }`；
+  MAC 复用 `DefaultMAC(vm, vnic)`（**与 domain XML 同一函数**）。**先做了真机 spike 才动手**
+  （#338 纪律）：手写 `match.macaddress` seed ⇒ Debian 13 **立刻拿到 active 租约**——
+  ⚠️ **spike 的坑**：直接 `request … start` 会被 `RefreshSeed`（#114）**覆盖**手写 seed，
+  必须 `virsh start` 绕过才验得到。**真机复验**：全新 Debian 13 VNF **不碰 guest 任何文件**
+  即得 `192.168.99.100 active` + 网关 ping **4/4**、vhost rx 由 0→57；**Alpine 回归**仍拿租约。
+  **#504（R47-2）丢弃计数如实化**：新增 `Drops`（VPP 总丢弃，**方向无关**——VPP 的
+  `/interfaces/<if>/drops` 本来就不分方向，摊给 rx/tx 属编造），`rx_drops`/`tx_drops`
+  只在**内核数据面**发（sysfs 有 `rx_dropped`/`tx_dropped` 真值），**不适用者缺席而非发 0**
+  （`MarshalJSON` 按 `DirectionalDrops` 决定）。四处出口 + **Web 三处**同步
+  （接口详情页「丢弃（总）」、概览接口卡列标题「丢弃」、CLI 列名 `drops`）。
+  **顺带收掉一条报告未提的缺陷**：修复前**内核数据面下接口 `statistics` 从来没有任何提供者**
+  （`cmd/nfvisd/dataplane.go` 的 `stateRuntimeFor()` 在内核下直接返回 `nil`，`netkernel` 也没有
+  `InterfaceCounters`）⇒ 新增 `state.Counters` + `netkernel/counters.go`（读 sysfs，
+  任一文件缺失即 `ok=false` 不给半个读数）。**真机七处同值**（100% 丢弃现场：端口安全白名单
+  不放行宿主 MAC）：vppctl 23740 / stats segment 23798 / CLI statistics 23748 / CLI monitor 23751 /
+  REST 23843 / `/metrics` 23846 / Web「总数 25403」——都同源增长；REST 键集**不含**
+  `rx_drops`/`tx_drops`（VPP 口径）。内核侧四处与 sysfs `rx_packets` 逐值同步、发两方向不发
+  `drops`；⚠️ **环境限制如实登记**：本机 vmxnet3 **不上报** sysfs 的 `rx_dropped`/`tx_dropped`
+  （tc police / 小 rx ring / 超长帧三种造法都恒 0），非零穿透改用**假 sysfs**
+  （1234/77 → JSON `rx_drops/tx_drops` 且无 `drops`）证明。
+  **质量门**：`make check` 七项 RC=0（决策 **403**）；全仓 `go test -p=1 ./...` **0 失败**
+  （⚠️ **环境事故入册**：整仓一次跑出现 `fatal error: out of memory`（Windows 分页文件不足），
+  `cmd/nfvisd` 单独重跑 `ok`——**OOM 要按环境问题单独重跑取证，不能当成测试失败**）；
+  **四套件与基线逐项一致**：fulltest **302/0/26**、语义 **43/0/0**、lifecycle **40/0/3**、
+  pty **10/10**（套件里没有断言旧 seed 键名与旧列名，故零失败）。
+  **观察项 O-1（未修）**：`request system api tls regenerate` 的 cert/key 是两次独立
+  `os.WriteFile`，换证窗口内 `GetCertificate` 会回退旧 cert（round47 观测到一次
+  `x509: certificate signed by unknown authority`，40 串行 + 12×12 并发未复现）；建议
+  `os.Rename` 原子替换。证据 `docs/evidence/v3-round48-r47-1-r47-2-fix.txt`。
+
 ## 验证与口径纪律（决策 #481；对所有会话生效）
 
 - **口径红线：凡含「可分配 / 可用 / 空闲 / 剩余」字样的读数，必须扣掉全部在用者**——
@@ -1357,7 +1431,7 @@
   「已声明未生效」、恢复重放给出照做指引）；④ 管理口**首次**声明需 `commit confirmed`（后续 commit 即确认）；
   ⑤ `bind-dpdk` 非交互需 `--yes`（缺省被守卫正确拒绝）；⑥ 套件判据是命令级，**夹具缺口会级联**（如容器镜像
   缺失 ⇒ phase 3 整体回滚 ⇒ 同 phase 的 bond 检查一起红）——判读失败先看夹具。
-- 已定决策 401 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
+- 已定决策 403 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线 #300~#403（其中 #350 撤回）、
   **v3 线自 #404 起**（分支 `v3`，已有 #404~#495））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **v3 线最新交接**：`docs/v3-交接-2026-10-12.md`（round15~23 共 9 轮：#460~#466 七条决策 + round17 口径确认

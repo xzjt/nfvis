@@ -381,24 +381,56 @@ func (x *cliExecutor) showOneInterface(cfg model.Config, name, sub string) strin
 
 // ifaceCountersRowFmt 接口计数表的行格式（表头与数据行共用同一份列宽定义——两处各写一份
 // 必然漂移）。列名与顺序取自 REST 契约 `GET /interfaces/{name}` 的 `statistics` 对象
-// （openapi `Interface.statistics` 的八个字段：rx_packets / tx_packets / rx_bytes / tx_bytes /
-// rx_errors / tx_errors / rx_drops / tx_drops），与 `monitor interfaces` 的行格式同族。
-const ifaceCountersRowFmt = "%-14s %12s %12s %14s %14s %9s %9s %8s %8s\n"
+// （openapi `Interface.statistics`：rx_packets / tx_packets / rx_bytes / tx_bytes /
+// rx_errors / tx_errors / drops（VPP）或 rx_drops + tx_drops（内核）），与
+// `monitor interfaces` 的行格式同族；丢弃列由 ifaceDropsCols 按数据面口径选，两处共用。
+const ifaceCountersRowFmt = "%-14s %12s %12s %14s %14s %9s %9s %8s\n"
+
+// ifaceDropsCols 丢弃列的**唯一来源**（决策 #504）：列名、取值、列宽一并给出。
+//
+// 为什么按口径分叉：VPP stats segment 只有 `/interfaces/<if>/drops` 一个**方向无关**的总数
+// （摊给 rx 或 tx 都属编造方向），内核网络数据面的 sysfs 才有 `rx_dropped`/`tx_dropped`
+// 两个真值。故 VPP 一列 `drops`，内核两列 `rx-drops`/`tx-drops`——与 REST/JSON 出口
+// （`state.InterfaceCounters.MarshalJSON`）同一判据，不另造第二套。
+func ifaceDropsCols(c state.InterfaceCounters) (cols, vals []string, widths []int) {
+	u := func(v uint64) string { return strconv.FormatUint(v, 10) }
+	if c.DirectionalDrops {
+		return []string{"rx-drops", "tx-drops"}, []string{u(c.RxDrops), u(c.TxDrops)}, []int{8, 8}
+	}
+	return []string{"drops"}, []string{u(c.Drops)}, []int{10}
+}
+
+// ifaceCountersLine 一行计数表：首列（接口名/表头首格）左对齐到 nameWidth，其余按各自列宽
+// 右对齐。宽度与列名来自同一份定义（表头与数据行因此恒对齐，不多一处手写的格式串）。
+func ifaceCountersLine(nameWidth int, label string, values []string, widths []int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-*s", nameWidth, label)
+	for i, w := range widths {
+		fmt.Fprintf(&b, " %*s", w, values[i])
+	}
+	b.WriteString("\n")
+	return b.String()
+}
 
 // renderIfaceCounters 单接口计数表的**唯一渲染实现**（决策 #427①）：此前 statistics 子命令
 // 用 `%v` 打整个结构体（`interface ens192 statistics: {355512 417 …}`），一串裸数字既无字段名
 // 也无列序，操作者不可判读（对照 vnf statistics 是有列名的表格）。字段名不另造：按 REST 契约
 // 的 JSON 字段名逐一对齐（数据本是同一个 state.InterfaceCounters，`| display json` 与 REST
-// 同字段名），数值映射逐列对应、顺序敏感（数值先转字符串，表头与数据行共用同一列宽格式）。
+// 同字段名），数值映射逐列对应、顺序敏感。
 func renderIfaceCounters(name string, c state.InterfaceCounters) string {
 	u := func(v uint64) string { return strconv.FormatUint(v, 10) }
+	head := []string{"rx-pkts", "tx-pkts", "rx-bytes", "tx-bytes", "rx-errors", "tx-errors"}
+	vals := []string{u(c.RxPackets), u(c.TxPackets), u(c.RxBytes), u(c.TxBytes), u(c.RxErrors), u(c.TxErrors)}
+	widths := []int{12, 12, 14, 14, 9, 9}
+	dCols, dVals, dWidths := ifaceDropsCols(c)
+	head = append(head, dCols...)
+	vals = append(vals, dVals...)
+	widths = append(widths, dWidths...)
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "interface %s statistics:\n", name)
-	fmt.Fprintf(&b, ifaceCountersRowFmt,
-		"Interface", "rx-pkts", "tx-pkts", "rx-bytes", "tx-bytes", "rx-errors", "tx-errors", "rx-drops", "tx-drops")
-	fmt.Fprintf(&b, ifaceCountersRowFmt, name,
-		u(c.RxPackets), u(c.TxPackets), u(c.RxBytes), u(c.TxBytes),
-		u(c.RxErrors), u(c.TxErrors), u(c.RxDrops), u(c.TxDrops))
+	b.WriteString(ifaceCountersLine(14, "Interface", head, widths))
+	b.WriteString(ifaceCountersLine(14, name, vals, widths))
 	return b.String()
 }
 

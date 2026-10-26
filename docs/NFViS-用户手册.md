@@ -2361,6 +2361,13 @@ nfvis$ clear interfaces statistics ens224     # 清零（super-user）
 > **内核数据面下 `clear interfaces statistics` 不支持**（清零内核接口计数需要重建接口，代价与影响面过大）
 > ——命令会如实拒绝；接口计数仍可在 `show interfaces <口> statistics` 里查看。
 
+> **「丢弃」列怎么读**：VPP 数据面下是**一列 `drops`**——VPP 的接口丢弃计数本身**不区分方向**
+> （stats segment 的 `/interfaces/<口>/drops`），所以不拆成收/发两个数；**Linux 内核网络数据面**
+> 下是**两列 `rx-drops`/`tx-drops`**（内核分别记 `rx_dropped`/`tx_dropped` 两个真值）。
+> 两种口径**不会同时出现**：某个方向上不适用的列/字段一律**缺席**（不是显示 0）——0 表示
+> 「查了、确实没丢」，缺席表示「本数据面不提供这个口径」。REST `GET /interfaces/{口}` 的
+> `statistics` 与 `/metrics` 的 `nfvis_vpp_interface_drops` 同此判据。
+
 ### 10.4 抓包（数据面抓包）
 
 抓包命令与数据面无关：VPP 数据面走 pcap trace，内核数据面走 tcpdump（宿主需装 tcpdump）——

@@ -81,7 +81,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `show interfaces` | 接口运行态清单：行 = 配置声明 ∪ VPP 运行态口 ∪ **内核未接管口**（决策 #302，收口 round81 F1：首装在接管前也能看见网卡；内核口在备注列标注「未接管」，不编造 VPP 侧事实），Admin/Link/Speed/Driver/计数全取运行态（决策 #155；仅声明未生效的行状态列 - 并标注，纯运行态口标注「未声明」） | `GET /interfaces` | ✅ |
 | `show interfaces physical` | **与上一条完全等价**（决策 #155：`physical` 选择器退役为等价写法；原「仅声明口聚合+空态提示」口径废止） | `GET /interfaces` | ✅ |
 | `show interfaces physical <ifname> detail` | 运行态单口视图（与裸写法同一实现，决策 #155） | 运行态（VPP） | ✅ |
-| `show interfaces physical <ifname> statistics` | 收发包/字节/错误/drop | VPP 运行态统计 | ✅ |
+| `show interfaces physical <ifname> statistics` | 收发包/字节/错误/丢弃（VPP 数据面一列 `drops`＝方向无关总数；内核网络数据面两列 `rx-drops`/`tx-drops`） | VPP 运行态统计；内核数据面取 sysfs 计数 | ✅ |
 | `show interfaces physical <ifname> sriov` | VF 列表与占用状态 | sysfs SR-IOV | ✅（无 PF/VF 时为空列表） |
 | `show interfaces management` | 管理口（内核侧，IP/链路） | 运行态（内核） | ✅ |
 | `show interfaces <ifname> detail` | **≡ `show interfaces physical <ifname> detail`（全形态等价、同一实现）**；回**运行态单口视图**——已声明与未声明但在 VPP 清单里的口（派生口 bvi0/vh-* 等）都答，候选 advertise 的名字必须答得上来（决策 #154/#155）；内核侧未接管的物理口回**内核事实视图**（驱动/MAC/速率/Admin/Link/MTU 取 sysfs，注明「未被 VPP 接管」；决策 #302）；接口配置视图在配置模式 `edit interfaces <ifname>` + `show` | 运行态（VPP）；内核口取 sysfs；配置视图走配置模式层级 show | ✅ |
@@ -218,7 +218,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `exit` / `quit` | 退出 CLI | R | 本地 | ✅ |
 | `ping [ipv6] <host> [source <ip>] [count <n>] [vrf <name>]` | 经 VPP L3 连通性测试（`ipv6` 显式走 v6 平面，即 `vppctl ping ipv6`）；`count` 上界 **100**（两数据面一致：未指定＝默认 5、越界报可读错误不静默截断、负数报错）。**`vrf` 填配置对象名**（交换机名 / VRF 名 / L3 交换机名，如 `vs-lan`）——VPP 数据面下 L2 交换机名会被解析到其网关域 `vr-<交换机名>` 的表（其余名字按原名查表，与旧行为一致）；内核数据面下尤其不要填内核设备名（`vr-<交换机名>`）——那是派生结果，命令不接受，报错会列出可用的写法。**非法目标即失败**（vppctl 对非法参数以 0 退出，产品另行判据纠正） | O | `vppctl ping`（CLI socket）；内核数据面经宿主 `ip vrf exec` | ✅（`source` 须为 **VPP 接口**地址；`vrf` 经 VPP 路径）。round80 套件里三条 ping 用例均记 ⊘：该实例到 `192.168.155.1` 不通（「0 发包 / 100% 丢包即报失败」的**判定自洽**通过，决策 #89——0 发包不再被算作通过）。IPv6（决策 #330）：4/6 同口径「未通即失败」，并区分「没发出去」与「发了没应答」 |
 | `traceroute [ipv6] <host> [vrf <name>]` | 路径跟踪（`ipv6` 走宿主侧 ICMPv6） | O | 宿主侧 raw ICMP/ICMPv6 | ✅（`vrf` 对 v4/v6 **都不支持**并明确报错、不静默降级，附录 A #36/#330） |
-| `monitor interfaces <ifname> [interval <sec>]` | 实时刷新计数（Ctrl-C 退出） | O | 服务端单次快照 + 前端轮询 | ✅（round80 实测不带 `interval` 的写法） |
+| `monitor interfaces <ifname> [interval <sec>]` | 实时刷新计数（Ctrl-C 退出）；丢弃列与 `show interfaces <ifname> statistics` 同一口径（VPP 一列 `drops`、内核两列方向） | O | 服务端单次快照 + 前端轮询 | ✅（round80 实测不带 `interval` 的写法） |
 | `wizard` | 初始化向导：问答规划资源池+内核基线并提交（CLI 端交互） | O | 本地（CLI 端交互编排，无 REST 端点；Web 等价物是向导式页面） | ✅（非 TTY 明确拒绝） |
 | `monitor vnf <name>` | 跟踪 VNF 状态/事件（**真跟踪**，决策 #92） | O | 运行态 | ✅ |
 | `clear interfaces statistics [<ifname>]` | 清零统计计数 | S | 运行态（VPP） | ✅（round80 实测：无参与带 `<ifname>` 两种写法都过） |

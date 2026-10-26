@@ -136,12 +136,18 @@ func TestShowManagementInterfaceEmptyStates(t *testing.T) {
 // 决策 #427①：`show interfaces <if> statistics` 必须回**带字段名的表格**——此前是原始结构体
 // （`interface ens192 statistics: {355512 417 …}`：无字段名、无列序，操作者不可判读）。
 // 列名与顺序对齐 REST 契约 `GET /interfaces/{name}` 的 statistics 对象（openapi
-// `Interface.statistics` 的八个字段），数值映射逐列、顺序敏感（测试值互不相同，错位必被抓到）。
+// `Interface.statistics`），数值映射逐列、顺序敏感（测试值互不相同，错位必被抓到）。
+//
+// 决策 #504 把丢弃列改成**按数据面口径**：VPP 数据面一列 `drops`（stats segment 的
+// `/interfaces/<if>/drops` 不分方向），内核网络数据面两列 `rx-drops`/`tx-drops`。
+// 本用例覆盖 VPP 侧（内核侧见 TestShowInterfaceStatisticsKernelDirectionalDrops）。
 func TestShowInterfaceStatisticsFieldedTable(t *testing.T) {
 	x, _ := newCLIKit(t)
 	x.setRuntime(nil, state.New(fakeCounters{ok: true, c: state.InterfaceCounters{
 		RxPackets: 355512, TxPackets: 417, RxBytes: 469792537, TxBytes: 34348,
-		RxErrors: 11, TxErrors: 12, RxDrops: 13, TxDrops: 14,
+		RxErrors: 11, TxErrors: 12, Drops: 148,
+		// 故意给方向字段非零值：VPP 口径下它们**不得**出现在出口（摊方向＝编造）。
+		RxDrops: 13, TxDrops: 14,
 	}}))
 
 	out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show interfaces ens192 statistics").Output
@@ -157,23 +163,32 @@ func TestShowInterfaceStatisticsFieldedTable(t *testing.T) {
 		t.Fatalf("首行应点名接口与子命令：%q", lines[0])
 	}
 	// 表头：列名与顺序 = REST 契约字段 rx_packets, tx_packets, rx_bytes, tx_bytes,
-	// rx_errors, tx_errors, rx_drops, tx_drops（Interface 为行标识列）
-	wantHead := "Interface rx-pkts tx-pkts rx-bytes tx-bytes rx-errors tx-errors rx-drops tx-drops"
+	// rx_errors, tx_errors, drops（Interface 为行标识列；VPP 口径只有方向无关的 drops）
+	wantHead := "Interface rx-pkts tx-pkts rx-bytes tx-bytes rx-errors tx-errors drops"
 	if got := strings.Join(strings.Fields(lines[1]), " "); got != wantHead {
 		t.Fatalf("表头列名/顺序应为 %q，实得 %q（整行 %q）", wantHead, got, lines[1])
 	}
-	// 数据行：数值与字段逐列对应（顺序敏感）
-	wantRow := "ens192 355512 417 469792537 34348 11 12 13 14"
+	// 数据行：数值与字段逐列对应（顺序敏感）。丢弃列必须是**VPP 的总数 148**，
+	// 不是方向字段的 13/14（那正是决策 #504 要消灭的「编造方向」）。
+	wantRow := "ens192 355512 417 469792537 34348 11 12 148"
 	if got := strings.Join(strings.Fields(lines[2]), " "); got != wantRow {
 		t.Fatalf("数据行应为 %q，实得 %q（整行 %q）", wantRow, got, lines[2])
 	}
-	// 结构化输出（`display json` 用，Web/REST 同源消费）仍带 REST 的八个字段名——
-	// 渲染改动不得动摇它（两侧同字段名是本次改名的依据）。
+	// 结构化输出（`display json` 用，Web/REST 同源消费）带 REST 的字段名，且**只带**
+	// 当前数据面适用的丢弃键——VPP 下发 drops、不发 rx_drops/tx_drops（决策 #504）。
 	js := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show interfaces ens192 statistics | display json").Output
 	for _, k := range []string{"rx_packets", "tx_packets", "rx_bytes", "tx_bytes",
-		"rx_errors", "tx_errors", "rx_drops", "tx_drops"} {
+		"rx_errors", "tx_errors", "drops"} {
 		if !strings.Contains(js, `"`+k+`"`) {
 			t.Fatalf("结构化输出应含 REST 字段名 %q：%q", k, js)
 		}
+	}
+	for _, k := range []string{"rx_drops", "tx_drops"} {
+		if strings.Contains(js, `"`+k+`"`) {
+			t.Fatalf("VPP 数据面下结构化输出不得含 %q（该口径不适用，发了就是编造方向）：%q", k, js)
+		}
+	}
+	if !strings.Contains(js, `"drops": 148`) {
+		t.Fatalf("结构化输出的 drops 应为 148（stats 值），实得：%q", js)
 	}
 }

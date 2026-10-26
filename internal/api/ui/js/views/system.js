@@ -8,7 +8,7 @@ import { api, soft, apiErrText, httpErrText,
   errTextOf, rowsOf, pageWarn, softLoad, loadVSwitchStats,
   loadNetworkObjects, loadInterfaceStats } from '../core/api.js';
 import { uptime, bytes, pct, mb, fmtTime, fmtClockHint, fmtTimeOpt, fmtBytes,
-  portSecText, stormControlText } from '../core/format.js';
+  portSecText, stormControlText, ifaceDropsText, ifaceDropsCell } from '../core/format.js';
 import { renderSystemPage, renderPools, renderHugepagePools, renderInterfaces } from './overview.js';
 import { pickByName, notFoundText } from './network.js';
 import { cfgLockHolder, CFG_SYS_SECTIONS, CFG_VPP_SECTIONS } from './config.js';
@@ -78,7 +78,9 @@ function renderIfaceDetail(iface, ifaces, params) {
     ['Rx / Tx 包', dash(st.rx_packets) + ' / ' + dash(st.tx_packets)],
     ['Rx / Tx 字节', dash(bytes(st.rx_bytes)) + ' / ' + dash(bytes(st.tx_bytes))],
     ['Rx / Tx 错误', dash(st.rx_errors) + ' / ' + dash(st.tx_errors)],
-    ['Rx / Tx 丢弃', dash(st.rx_drops) + ' / ' + dash(st.tx_drops)],
+    // 丢弃按数据面口径呈现（决策 #504）：VPP 只有方向无关的总数（`drops`），内核网络
+    // 数据面按方向（`rx_drops`/`tx_drops`）；不适用的键在响应里缺席，本行随之换文案。
+    ['丢弃（总）', ifaceDropsText(st)],
   ] : [['读取失败', ok ? '该口当前取不到计数（数据面未连接或口不在数据面）' : '未取到数据']]);
   renderPortSecurity(iface, name);
 }

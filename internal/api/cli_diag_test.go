@@ -174,13 +174,18 @@ func TestCLITracerouteExecution(t *testing.T) {
 func TestCLIMonitorSnapshot(t *testing.T) {
 	x, _ := newCLIKit(t)
 	x.setRuntime(nil, state.New(fakeCounters{ok: true, c: state.InterfaceCounters{
-		RxPackets: 123, TxPackets: 456, RxBytes: 789, TxBytes: 1011, RxDrops: 2, TxDrops: 3,
+		RxPackets: 123, TxPackets: 456, RxBytes: 789, TxBytes: 1011, Drops: 77,
 	}}))
 	out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "monitor interfaces ens192 interval 2").Output
-	for _, want := range []string{"rx-pkts", "ens192", "123", "456", "789", "1011"} {
+	// 列名与 `show interfaces <n> statistics` **同一份定义**（ifaceDropsCols）：VPP 口径只有
+	// 一列 `drops`，值取 stats 的方向无关总丢弃（决策 #504）。
+	for _, want := range []string{"rx-pkts", "drops", "ens192", "123", "456", "789", "1011", "77"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("快照缺少 %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "rx-drops") || strings.Contains(out, "tx-drops") {
+		t.Fatalf("VPP 数据面下 monitor 不得再有方向丢弃列（该口径不适用，发了就是编造方向）：\n%s", out)
 	}
 	// 接口统计取不到：文案须如实说「这一刻连接没就绪 / 口不在数据面」，
 	// 不得说成「stats 未接入」（stats 是接入了的；与 `show interfaces <n> statistics` 同口径）
@@ -192,6 +197,47 @@ func TestCLIMonitorSnapshot(t *testing.T) {
 	if out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "monitor interfaces").Output; !strings.Contains(out, "语法") {
 		t.Fatalf("缺接口应报语法: %q", out)
 	}
+}
+
+// 内核网络数据面下 monitor 的丢弃列**按方向**（决策 #504）：sysfs 有 rx_dropped 与
+// tx_dropped 两个真值，故两列而非一列，且不得出现方向无关的 `drops` 总数列。
+func TestCLIMonitorKernelDirectionalDrops(t *testing.T) {
+	x := kernelDPKit(t)
+	x.setRuntime(nil, state.NewCounters(fakeKernelCounters{ok: true, c: state.InterfaceCounters{
+		RxPackets: 10, TxPackets: 20, RxBytes: 30, TxBytes: 40,
+		RxErrors: 1, TxErrors: 2, RxDrops: 5, TxDrops: 6, DirectionalDrops: true,
+	}}))
+	out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "monitor interfaces ens192").Output
+	var head, row string
+	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		f := strings.Fields(l)
+		if len(f) == 0 {
+			continue
+		}
+		if f[0] == "Interface" {
+			head = strings.Join(f, " ")
+		}
+		if f[0] == "ens192" {
+			row = strings.Join(f, " ")
+		}
+	}
+	wantHead := "Interface rx-pkts tx-pkts rx-bytes tx-bytes rx-errors tx-errors rx-drops tx-drops"
+	if head != wantHead {
+		t.Fatalf("内核数据面表头应为 %q，实得 %q\n%s", wantHead, head, out)
+	}
+	if want := "ens192 10 20 30 40 1 2 5 6"; row != want {
+		t.Fatalf("内核数据面数据行应为 %q，实得 %q\n%s", want, row, out)
+	}
+}
+
+// fakeKernelCounters 只实现 state.Counters（内核数据面的窄接口：只有接口计数）。
+type fakeKernelCounters struct {
+	c  state.InterfaceCounters
+	ok bool
+}
+
+func (f fakeKernelCounters) InterfaceCounters(context.Context, string) (state.InterfaceCounters, bool) {
+	return f.c, f.ok
 }
 
 func TestCLIClearInterfaceStats(t *testing.T) {

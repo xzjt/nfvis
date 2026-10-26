@@ -166,35 +166,106 @@ func ensureTrailingNewline(s string) string {
 	return s + "\n"
 }
 
-// BuildNetworkConfig 生成 cloud-init **v2** 网络配置（O-4 / 报告 §6.3）。
+// BuildNetworkConfig 生成 cloud-init **v2** 网络配置（O-4 / 报告 §6.3，决策 #503 / R47-1）。
 //
 // 由来：产品此前的 seed.iso 只含 `meta-data` + `user-data`（`cloud-localds` 只传两个文件），
 // **没有 `network-config`**。对依赖 cloud-init 网络配置的镜像（Cirros、部分 Alpine 变体），
 // guest 起来后网卡上没有 DHCP 客户端在跑 ⇒ 拿不到地址 ⇒ cloud-init 反复重试 metadata
 // （串口刷 `failed N/0: request failed`），根本进不到登录态，而产品侧日志/告警毫无提示。
 //
-// 形态：每块 vNIC 一条 `ethN: {dhcp4: true}`，与产品在 VPP 侧把这些 vNIC 挂进交换机
-// （BD 内有 DHCP server / relay 提供租约）的拓扑一致。
+// 形态：每块 vNIC 一条，以 **vNIC 名**为键，按该 vNIC 的 **MAC 匹配**网卡、把 guest 内名字
+// 设回同一个名字，再启用 DHCP：
 //
-// **ethN 与 vNIC 声明顺序的对应关系（如实说明这条假设）**：libvirt 按 `vm.Interfaces` 的
-// 声明顺序挂 virtio 网卡，guest 内按 PCI 槽序枚举为 eth0/eth1/…。二者一致是**经验事实**而非
-// 契约保证（guest 若有 udev 改名规则、或镜像自带 netplan 绑定 MAC，序号可能不同）。因此这里
-// 只产出「按序 DHCP」的最小配置——它是对「网卡拿得到地址」的增强，不承诺与 vNIC 名的映射。
+//	ethernets:
+//	  nic0:
+//	    match:
+//	      macaddress: "52:54:8e:b8:b3:7f"
+//	    set-name: nic0
+//	    dhcp4: true
 //
-// 无 vNIC 时返回**空串**（不产出 network-config，行为与今天完全一致）——没有网卡的 VM
+// 为什么不再按 `ethN` 写（旧实现的实证缺陷，round47 真机）：旧实现按「vNIC 声明顺序 ⇒
+// guest 内 PCI 槽序 ⇒ eth0/eth1/…」产出配置，这条对应关系只是**经验假设**。Debian 12+/13
+// 有 systemd 可预测命名（`/lib/udev/rules.d/80-net-setup-link.rules`）会把 virtio 网卡改名成
+// `enp1s0` ⇒ 渲染出的 netplan 指向**不存在的** eth0 ⇒ guest 一个 DHCP 报文都不发 ⇒ 租约永远
+// 拿不到；而 VM 是 running、vNIC 是 up，故 `VNF_PORT_DOWN` 不报，产品侧唯一可见信号只是
+// 「租约表空」，极易被当成「guest 自己没配网」。Alpine 根 fs 没有该 udev 规则（保持 eth0），
+// 历轮夹具全是 Alpine 故未暴露。
+//
+// 按 MAC 匹配与 guest 的命名策略无关：可预测命名的镜像（enp1s0）、保持 eth0 的镜像（Alpine）、
+// 以及镜像自带 udev 规则改名的情形都成立。`set-name` 用 vNIC 名（nic0/nic1…）让 guest 内名字
+// 可预测、「按 vNIC 名找设备」成立，同时避开 `eth0` 这个名字在可预测命名镜像上的歧义。
+//
+// MAC 取值与域定义**同一函数**（DefaultMAC，见 domain_xml.go）：配置显式声明
+// `interfaces[].mac` 时用它，否则用 `DefaultMAC(vm.Name, vNIC 名)`——与 buildVhostUserIface /
+// buildBridgeIface 的取值完全同源，故 seed 与域定义必然一致。**不在这里自写一份推导**：
+// 两处一旦算法漂移，netplan 就匹配不到任何网卡，而复现出来又是「guest 不发 DHCP」的老症状。
+// DefaultMAC 是纯函数，seed 在 MAC 尚未下发到域定义之前生成也无碍。
+//
+// **如实边界**：契约的口径是「每块 vNIC 一条」，故这里对 sriov-vf 型 vNIC 同样产出一条
+// （它走 PCI 直通、域定义里是 hostdev 而**没有 `<mac>` 元素**，MAC 由 VF 自身决定）——这类
+// 条目里的派生 MAC 与 guest 实际看到的网卡地址未必相同，能否匹配上取决于镜像与 VF 的 MAC
+// 策略。本轮按契约不为其做特例（真机环境无 PF/VF，无法验证）；产品侧不受影响的场合是
+// vhost-user 型 vNIC（VPP 数据面与内核数据面两条路径都由 DefaultMAC 决定实际 MAC）。
+//
+// 无 vNIC 时返回**空串**（不产出 network-config，行为与引入时逐字一致）——没有网卡的 VM
 // 写一份空的 v2 配置只会让 cloud-init 多一次无意义解析。
 func BuildNetworkConfig(vm model.VMFunction) string {
 	if len(vm.Interfaces) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("#cloud-init network-config v2（nfvis 生成：按 vNIC 声明顺序启用 DHCP）\n")
+	b.WriteString("#cloud-init network-config v2（nfvis 生成：按 vNIC 的 MAC 匹配网卡并启用 DHCP）\n")
 	b.WriteString("version: 2\n")
 	b.WriteString("ethernets:\n")
-	for i := range vm.Interfaces {
-		fmt.Fprintf(&b, "  eth%d:\n    dhcp4: true\n", i)
+	for _, nic := range vm.Interfaces {
+		mac := nic.MAC
+		if mac == "" {
+			mac = DefaultMAC(vm.Name, nic.Name)
+		}
+		// 键与 set-name 都取 vNIC 名（不区分 vNIC 类型：契约 #503 的形态是「每块 vNIC 一条」）。
+		name := netplanScalar(nic.Name)
+		fmt.Fprintf(&b, "  %s:\n", name)
+		b.WriteString("    match:\n")
+		fmt.Fprintf(&b, "      macaddress: %q\n", mac)
+		fmt.Fprintf(&b, "    set-name: %s\n", name)
+		b.WriteString("    dhcp4: true\n")
 	}
 	return b.String()
+}
+
+// yamlNonStringLiterals YAML 1.1（netplan 经 libyaml/PyYAML 解析）里**不加引号会被解析成
+// 非字符串**的裸字面量：布尔与空值。
+var yamlNonStringLiterals = map[string]bool{
+	"true": true, "false": true,
+	"yes": true, "no": true,
+	"on": true, "off": true,
+	"null": true, "~": true,
+}
+
+// netplanScalar 把 vNIC 名渲染成 netplan 配置里的 YAML 键与取值。
+//
+// vNIC 名在提交期已按 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` 校验（internal/model 的 nameRe），
+// 绝大多数名字可原样写出；但**纯数字**与上表的 YAML 裸字面量不加引号会被解析成非字符串——
+// netplan 的 `ethernets` 键必须是字符串，届时整份配置校验失败，退回「guest 没有网络配置」
+// 的老症状。这类名字加双引号即恢复字面量语义（普通名字保持逐字输出，读起来与契约一致）。
+func netplanScalar(name string) string {
+	if name == "" {
+		return `""`
+	}
+	if allDigits(name) || yamlNonStringLiterals[strings.ToLower(name)] {
+		return `"` + name + `"`
+	}
+	return name
+}
+
+// allDigits 判断 s 全为十进制数字（s 非空）。
+func allDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // cloudLocaldsArgs 构造 cloud-localds 的参数（纯函数，便于守护「传参形态」）。

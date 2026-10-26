@@ -91,11 +91,7 @@ func (r *vppRuntime) InterfaceCounters(ctx context.Context, ifname string) (stat
 		if uint32(c.InterfaceIndex) != idx && c.InterfaceName != ifname {
 			continue
 		}
-		return state.InterfaceCounters{
-			RxPackets: c.Rx.Packets, TxPackets: c.Tx.Packets,
-			RxBytes: c.Rx.Bytes, TxBytes: c.Tx.Bytes,
-			RxErrors: c.RxErrors, TxErrors: c.TxErrors,
-		}, true
+		return interfaceCountersFrom(c), true
 	}
 	return state.InterfaceCounters{}, false
 }

@@ -238,13 +238,31 @@ func dpdkHeldPortProbe(b *network.DPDKBinder, kernelIfnames func() ([]string, er
 	}
 }
 
-// stateRuntimeFor 选择运行态聚合的数据源：内核数据面无 VPP stats segment，返回 nil
-// （state.New(nil) 的方法安全返回空，读视图如实省略运行态字段）。
-func stateRuntimeFor(mode string, mgr *network.Manager) state.Runtime {
+// stateRuntimeFor 选择运行态聚合的数据源：VPP 数据面走 stats segment（Runtime）；
+// 内核数据面无 VPP stats segment，但**接口计数有真值**（sysfs 的按方向计数）——故装配
+// `state.NewCounters`，只有接口计数可取，其余读视图按数据面点名不可用（决策 #504）。
+//
+// 修复前内核数据面直接返回 nil（`state.New(nil)`），于是 `show interfaces <i> statistics`
+// 与 `GET /interfaces/{n}` 的 statistics 在内核数据面下**恒无输出**——而内核本就记着
+// rx_dropped/tx_dropped 两个真值。返回类型仍是 `state.Runtime` 不合用（内核没有线程/buffer/
+// 主堆），故本函数改为返回 `*state.State`（两条数据面各构造自己的聚合器）。
+//
+// kernel 收窄成 `state.Counters` 而不是 `*netkernel.Provider`：装配处传 Provider（它实现了
+// 该方法面），单测可直接注入假计数源，不必为了测分叉去动 sysfs 根。
+func stateRuntimeFor(mode string, mgr *network.Manager, kernel state.Counters) *state.State {
 	if mode == model.DataPlaneKernel {
+		return state.NewCounters(kernel)
+	}
+	return state.New(mgr.Runtime())
+}
+
+// kernelCounters 内核数据面的接口计数源（内核编排未装配时 nil）：
+// `state.NewCounters(nil).InterfaceCounters` 安全返回 ok=false，读视图照既有文案说明，不编造。
+func kernelCounters(kernel *netkernel.Provider) state.Counters {
+	if kernel == nil {
 		return nil
 	}
-	return mgr.Runtime()
+	return kernel
 }
 
 // diagRuntimeFor 选择诊断实现：内核数据面用宿主网络栈的 ping/traceroute（经 `ip vrf exec`

@@ -1,0 +1,252 @@
+================================================================================
+NFViS v3 round48：R47-1 / R47-2 收口（决策 #503 / #504）
+——seed 网络配置改 MAC 匹配 + 接口丢弃计数如实化（含 Web 同步）
+================================================================================
+日期：2026-10-26    执行：ZCode 会话（v3 线）
+用户指令：修，如果涉及到 web，也同步修复，实现类工作派子智能体，修完提交，发版。
+上游：round47 走查登记的两条缺陷（证据
+  `docs/evidence/v3-round47-clean-install-walkthrough-vpp-kernel.txt` §7）。
+
+【结论先行】
+  · 两条缺陷**都已修复**，均按「能力前提先核实 → 契约先行 → 实现派子智能体 → 红-绿 →
+    真机复验 → 现场还原」走完；Web 侧同步改（接口详情页 / 概览接口卡 / 列标题）。
+  · **能力前提真机 spike 成立**（#338 纪律，不猜）：`match.macaddress` + `set-name` 在
+    Debian 13 上**真能拿到租约**——这是 #503 的立论基础，先证后写。
+  · **真机复验两条都过**：全新 Debian 13 VNF **不碰 guest 任何文件**直接拿到 active 租约
+    `192.168.99.100` + 网关 ping 4/4；Alpine 回归仍拿租约；
+    100% 丢弃现场下 **vppctl / stats segment / CLI statistics / CLI monitor / REST /
+    `/metrics` / Web 七处同值**。
+  · `make check` 七项 RC=0；全仓 `go test -p=1 ./...` **0 失败**；
+    **四套件与发版基线逐项一致**：fulltest **302/0/26**、语义 **43/0/0**、
+    lifecycle **40/0/3**、pty **10/10**。
+
+--------------------------------------------------------------------------------
+§1 决策与契约（先行）
+--------------------------------------------------------------------------------
+1.1 **#503**（附录 A）：`BuildNetworkConfig` 不再写死 `eth0`，改为每块 vNIC 一条
+    `<vNIC 名>: { match: { macaddress: "<该 vNIC 的 MAC>" }, set-name: <vNIC 名>, dhcp4: true }`；
+    MAC 取配置显式值，否则 `DefaultMAC(vm, vnic)`（**与 domain XML 同一函数**，纯函数、确定性）。
+    **不改**：无 vNIC 不产出；`cloud-localds --network-config` 传参形态；`RefreshSeed`（#114）；
+    user-data/meta-data；容器侧。**如实边界**：镜像自带 netplan 键名并绑 MAC 的形态未验。
+1.2 **#504**（附录 A）：`state.InterfaceCounters` 新增 `Drops`（方向无关总数，VPP 提供）；
+    `RxDrops`/`TxDrops` **仅内核数据面**提供（sysfs 有 `rx_dropped`/`tx_dropped` 两个真值）；
+    出口**只发适用者**（不适用的键**缺席，不是 0**——宁缺不谎报）。四处出口 + Web 同步。
+1.3 openapi：`statistics` 块补总说明 + 三字段 description（同风格单行）；
+    `internal/api/openapi.json` 已 `--write` 同步，`check_openapi_json_sync.sh` ✓。
+1.4 手册与命令全表同步（「丢弃列怎么读」+ statistics/monitor 两行口径注）。
+1.5 决策条数 **401 → 403**，`check_decisions_count.sh` ✓。
+
+--------------------------------------------------------------------------------
+§2 能力前提 spike（#338 纪律：先证后写）
+--------------------------------------------------------------------------------
+2.1 目标：证明 `match.macaddress` + `set-name` 在 **Debian 13 cloud image** 上真的能
+    匹配到那块 virtio 网卡并起 DHCP——否则「改成 MAC 匹配」只是另一种假设。
+2.2 做法：**不动产品**，纯手工造 seed 并绕过产品路径。
+    · 先由产品建一台 VM 读到它分配的 MAC（`virsh dumpxml` → `52:54:8e:b8:b3:7f`，
+      与 `DefaultMAC(vm,nic)` 的本地推导**逐字一致**——这同时验证了「seed 生成时能算出 MAC」）。
+    · 手写 `network-config`：
+      ```
+      version: 2
+      ethernets:
+        nfvis-nic0:
+          match:
+            macaddress: "52:54:8e:b8:b3:7f"
+          set-name: nfvis-nic0
+          dhcp4: true
+      ```
+      `cloud-localds --network-config=… seed.iso user-data meta-data` 生成 seed。
+    · **关键中间坑（入册）**：直接 `request virtual-machine-functions … start` 会**覆盖**手写
+      seed——决策 #114 的 `RefreshSeed` 在启动前按配置重建 seed（这是**正确行为**，不是缺陷），
+      于是第一次 spike 读到的仍是产品生成的 `eth0` 版。改用 `virsh start` 绕过刷新才验到。
+2.3 结果（**能力前提成立**）：
+      · 租约表 `192.168.99.100  52:54:8e:b8:b3:7f  active  86338`；
+      · `vh-spike1-nic0` rx **42** 包（对照 `eth0` 形态：rx 恒 0）；
+      · guest 内部渲染出的 netplan 键名为 `nfvis-nic0`、网卡按 MAC 匹配成功。
+2.4 cloud-init v2 schema 侧核实：Debian 13 自带 cloud-init **25.1.4** 的
+    `schema-network-config-v2.json` 含 `match` / `set-name` / `macaddress`（离线挂载实测）。
+
+--------------------------------------------------------------------------------
+§3 实现（派子智能体并行，同一文件只让一个会话改）
+--------------------------------------------------------------------------------
+3.1 **R47-1（子智能体 A）**：`internal/orchestrator/compute/cloudinit.go`
+    · `BuildNetworkConfig` 按 §1.1 重写；MAC 复用 `DefaultMAC`（**没有第二份推导**）；
+    · 头部注释**如实改写**：删掉旧的「ethN 与 PCI 槽序一致是经验事实」假设，改为记录
+      R47-1 的真机实证与「为何 MAC 匹配与 guest 命名策略无关」；
+    · 新增 `netplanScalar`（+`allDigits`、`yamlNonStringLiterals`）：vNIC 名同时作 YAML **键**，
+      纯数字或 `true/yes/on/null` 等 YAML 1.1 裸字面量不加引号会被解析成非字符串
+      （**这是实现期自己想到的边界，不是报告里的**）。
+    · 如实登记的边界：`sriov-vf` 型 vNIC 也产出一条（契约口径是「每块 vNIC 一条」），
+      但它域定义里是 hostdev、**没有 `<mac>` 元素**，派生 MAC 与 guest 实际地址未必相同
+      （本机无 PF/VF、无法验证）。
+3.2 **R47-2（子智能体 B）**：`internal/state/state.go` + 五处出口 + Web。
+    · **子智能体调查出的更大一层**：修复前**内核数据面下 `statistics` 根本没人提供**——
+      `cmd/nfvisd/dataplane.go` 的 `stateRuntimeFor()` 在内核数据面下直接返回 `nil`
+      （注释「内核数据面无 VPP stats segment」），`netkernel` 包里**没有** `InterfaceCounters`
+      实现 ⇒ CLI 落到「未被数据面接管」分支、REST 详情端点**不带** `statistics` 键。
+      修法：新增 `state.Counters`（窄接口，只有接口计数）+ `state.NewCounters()`，
+      `netkernel/counters.go` 从 `sysfsNetRoot/<if>/statistics/{rx,tx}_{packets,bytes,errors,dropped}`
+      逐项读（任一缺失即 `ok=false`，**不给半个读数**），装配处按数据面各构造自己的聚合器。
+    · `MarshalJSON` 按 `DirectionalDrops` 标记**只发适用者**（用指针+omitempty 表达「缺席」，
+      不靠零值——0 是有效读数）。
+    · CLI 列名单源（`ifaceDropsCols` + `ifaceCountersLine`，`statistics` 与 `monitor` 共用）；
+      `/metrics` 两条恒 0 序列合成 `nfvis_vpp_interface_drops`；
+      Web 新增 `ifaceDropsText`/`ifaceDropsCell`（丢弃渲染单源，`format.js`），
+      接口详情页「Rx / Tx 丢弃」→「丢弃（总）」，概览接口卡列标题 `Tx 丢弃`→`丢弃`。
+3.3 **红-绿双向验证（我独立复跑，不采信报告）**：
+    · R47-2：删掉 `Drops: c.Drops` ⇒
+      `TestInterfaceCountersFromMapsDrops` 报
+      「Drops 应映射为 148（stats 值），实得 0——丢弃没接线时恒 0」；恢复后转绿。
+    · R47-1：把 `cloudinit.go` 换回 `git show HEAD:` 的旧实现 ⇒
+      **6 条**用例红（SingleNic / ExplicitMAC / MultipleNics / NoHardcodedEthKeys /
+      MACSameAsDomainXML / NameScalarSafety），仅 `NoNics` 保持绿（那正是要守住的既有行为）；
+      恢复后全绿。
+    · 子智能体另做的变异测试：把 `DefaultMAC(vm,nic)` 改成 `DefaultMAC(vm,"drifted-"+nic)` ⇒
+      三条用例同时红，证明「防漂移守护」不是摆设。
+
+--------------------------------------------------------------------------------
+§4 真机复验 A：R47-1（Debian 13 直接拿租约 + Alpine 回归）
+--------------------------------------------------------------------------------
+现场：换装 `3.0.31~dev1` 交叉编译二进制（`/root/bin-orig-r48/` 存原件），VPP 数据面。
+4.1 **新建 Debian 13 VNF `vnf-d13`，全程不碰 guest 内部**（这是与 round47 修法验证的
+    关键区别：round47 靠手改 guest netplan 做 A/B，这次是**产品自己给的 seed**）。
+    · 产品生成的 seed（挂载实读）：
+      ```
+      #cloud-init network-config v2（nfvis 生成：按 vNIC 的 MAC 匹配网卡并启用 DHCP）
+      version: 2
+      ethernets:
+        nic0:
+          match:
+            macaddress: "52:54:1f:13:00:c3"
+          set-name: nic0
+          dhcp4: true
+      ```
+    · 域定义 MAC `52:54:1f:13:00:c3` —— **与 seed 里的逐字相同**（同一 `DefaultMAC`）。
+4.2 `start` 后 85s：租约表 **`192.168.99.100  52:54:1f:13:00:c3  active  86346`**、
+    `vh-vnf-d13-nic0` `rx 57 / tx 21`（rx 从 0 变 57 ⇒ guest 真在发包）。
+    **对照 round47 同场景**：租约表恒空、rx 恒 0。
+4.3 连通性：`ping -c 4 192.168.99.100` **4/4，0% 丢包**、`rtt 0.57~3.24 ms`；
+    VPP 邻居表 `192.168.99.100 … 52:54:1f:13:00:c3  bvi0`。
+    （如实登记：**首次** ping 在 guest 刚起 85s 时 0/4——那是 guest 还在初始化网络栈的
+    过渡态；隔 30s 复测即 4/4。不是缺陷，观测窗口要留够。）
+4.4 **Alpine 回归（必须验，防「修 Debian 破 Alpine」）**：新建 `vnf-alp`（alpine 镜像，
+    同一条交换机、同 DHCP 池）→ seed 同样是 MAC 匹配形态（`52:54:68:3d:56:26`）→
+    `start` 后租约表 **`192.168.99.100  52:54:68:3d:56:26  active`**。
+    ⇒ Alpine 侧**无回归**（Alpine 根 fs 无 cloud-init/netplan，走镜像自带 DHCP，本就不受
+    network-config 影响；但「产品生成物变了」仍须实测确认没破）。
+4.5 顺带复验两条既有守卫（**正确拒绝**，非缺陷）：
+    · 1G 池只剩 1 页空闲时起第二台 1G VM ⇒ BUG-25 预检**在碰 libvirt 前**拒绝
+      （「大页不足：1G 池空闲 0 页，本 VM 需要 1 页…未启动虚拟机，不留半成品域」）；
+    · vhost-user vNIC + `memory backing normal` ⇒ 提交期拒绝
+      （「vhost-user vNIC 要求 memory backing=hugepage」）。
+
+--------------------------------------------------------------------------------
+§5 真机复验 B：R47-2（丢弃计数七处同值）
+--------------------------------------------------------------------------------
+5.1 **构造 100% 丢弃**（可复现、非合成）：`set interfaces ens192 port-security mac
+    00:50:56:c0:00:09`（白名单只放一个非宿主 MAC），宿主真实 MAC 是 `…:08`
+    ⇒ 宿主 `ping -n 8 192.168.99.1` = **8 发 0 收（100% 丢失）**。
+5.2 **同一时刻七处读数**（VPP 数据面）：
+    | 出口 | 读数 |
+    |---|---|
+    | ① `vppctl show interface ens192`（权威） | `rx packets 23785 / drops 23740` |
+    | ② `vpp_get_stats dump` 的 `/interfaces/ens192/drops` | **23798**（双线程两行相加） |
+    | ③ CLI `show interfaces ens192 statistics` | `… rx-errors 0  tx-errors 0  drops 23748` |
+    | ④ CLI `monitor interfaces ens192` | `… rx-errors 0  tx-errors 0  drops 23751` |
+    | ⑤ REST `GET /interfaces/ens192` → `statistics` | `drops = 23843`；**键集不含** `rx_drops`/`tx_drops` |
+    | ⑥ `/metrics` | `nfvis_vpp_interface_drops{interface="ens192"} 23846` |
+    | ⑦ **Web** 接口详情页 | 「丢弃（总） **总数 25403**」；旧文案「Rx / Tx 丢弃」**已不存在** |
+    ⇒ **七处同源且都随包数增长**。对照修复前：③④⑤⑥ 全 0（而 ① 有真值）。
+5.3 **REST 键集是契约口径的实证**：
+    `keys: ['drops','rx_bytes','rx_errors','rx_packets','tx_bytes','tx_errors','tx_packets']`
+    ⇒ VPP 下 `rx_drops`/`tx_drops` **缺席**（不是 0），正是 #504 的「宁缺不谎报」。
+5.4 **Web 字段级复核**（Browser Use 真浏览器）：接口详情页
+    「Rx / Tx 错误 0 / 0」下一行是「**丢弃（总） 总数 25403**」；
+    概览页接口卡表头末列为「**丢弃**」（原「Tx 丢弃」）。
+5.5 **内核数据面的方向口径**（切内核 + `unbind-dpdk` 后复验）：
+    · REST `statistics` 键集 = `['rx_bytes','rx_drops','rx_errors','rx_packets',
+      'tx_bytes','tx_drops','tx_errors','tx_packets']` ⇒ **发两方向、不发 `drops`**，与契约一致；
+    · 四处（CLI statistics / CLI monitor / REST / metrics）与 `sysfs`
+      **`rx_packets` 逐值同步递增**（357→359→361 vs sysfs 365），口径同一。
+    · **非零方向值的穿透实证**：本机 vmxnet3 驱动**不上报** `rx_dropped`/`tx_dropped`
+      （tc police / 小 rx ring / 超长帧三种造法都试过，sysfs 恒 0——**如实登记为环境限制**），
+      故改用「假 sysfs 非零值」做端到端穿透：
+      `rx_dropped=1234 / tx_dropped=77` ⇒ `interfaceCounters` 读出 **1234/77** ⇒
+      `json.Marshal` 出口 **`{"rx_drops":1234,"tx_drops":77,…}`** 且**无 `drops` 键**。
+      （该临时用例跑完即删，不留在仓库里；永久守护见 §3.3 的正式用例。）
+5.6 如实登记一处**既有行为**（非本轮引入）：内核数据面下 `clear interfaces statistics`
+    如实拒绝（内核计数由内核维护、读取不重置）。
+
+--------------------------------------------------------------------------------
+§6 质量门
+--------------------------------------------------------------------------------
+6.1 `go build ./...` RC=0；`go vet` 干净；`gofmt -l` 无输出。
+6.2 全仓测试：`go test -p=1 ./...` ⇒ **21 个包全 ok、0 失败**。
+    ⚠️ **环境事故（入册）**：第一次整仓跑时 `cmd/nfvisd` 报
+    `fatal error: out of memory`（Windows 分页文件不足，**不是测试失败**）；
+    单独重跑 `GOGC=30 go test ./cmd/nfvisd/` ⇒ `ok 1.875s`；其余包分批跑亦全 ok。
+    **判读口径**：本机跑全仓必须 `-p=1` 且内存宽裕，OOM 要按环境问题处理并单独重跑取证。
+6.3 `make check` 七项：`vet` ✓、`test` ✓、`cover` ✓（七包 71.9%~92.0%，network 72.9% /
+    compute 71.9%，门槛 70）、`archtest` ✓、`docscheck` ✓（决策 403 项一致、
+    openapi 无重复键、openapi.json 与 YAML 同步）、`toolcheck` ✓（含两处 Web 控制台
+    DOM 桩自校准，会真跑改过的视图）、`prototype-check` ✓。
+6.4 另跑：`check_line_endings` ✓、`check_maint_scripts` ✓、`check_suite_contract_sync` ✓
+    （套件命令清单与契约同步，缺口 0）。
+
+--------------------------------------------------------------------------------
+§7 四套件（3.0.31~dev1）
+--------------------------------------------------------------------------------
+前置：清场 → 备夹具（`/var/lib/nfvis/images/alpine`、docker `alpine:3.20`、
+`/data/incoming/cli-test.qcow2` + `cli-del.qcow2`）→ `SRV=https://127.0.0.1:443`
++ `CLI_BIN=/usr/bin/nfvis-cli` + `API_PORT=443` + 套件副本网段改 `192.168.77.0/24`。
+
+| 套件 | 结果 | 与 v3.0.30 基线 |
+|---|---|---|
+| `cli-fulltest` | **302 / 0 / 26** | 逐项一致 |
+| `cli-semantic-check` | **43 / 0 / 0** | 一致 |
+| `cli-lifecycle-check` | **40 / 0 / 3**（登记 1） | 一致 |
+| `cli-pty-smoke` | **10 / 10** | 一致 |
+
+**关注点确认**：本轮改了两处**会影响面**的东西——① seed 的 `network-config` 形态变了
+（套件会建 cli-vm/cli-del 等 VM），② `statistics`/`monitor` 的列名变了（`rx-drops/tx-drops`
+→ `drops`）。**四套件零失败**说明：套件里没有断言旧 seed 键名（`grep dhcp4 contrib/scripts/`
+= 零命中），也没有断言旧列名（`monitor interfaces` 只被 `run` 冒烟、不断言列）。
+fulltest 自清场「套件对象已清干净（未清项 0）」。
+
+--------------------------------------------------------------------------------
+§8 新登记 / 观察项
+--------------------------------------------------------------------------------
+· **O-1（观察项，未修）** `request system api tls regenerate` 的 cert/key 是两次独立
+  `os.WriteFile`（先 cert 后 key），而 `GetCertificate` 每握手读盘、失败时**回退启动时旧证书**
+  ⇒ 理论上存在「新 cert / 旧 fallback」瞬时不一致；round47 fulltest S6 观测到**一次**
+  `x509: certificate signed by unknown authority`，随后 40 次串行 + 12×12 并发加压**未复现**。
+  建议临时文件 + `os.Rename` 原子替换。本轮未改（不在两条缺陷范围内）。
+· **R48-1（观察项，未验）** 镜像**自带** netplan/networkd 配置并按自己的键名绑 MAC 时，
+  与本产品生成的 `50-cloud-init.yaml` **并存**，二者按 MAC 匹配同一块网卡时行为由 netplan
+  合并规则决定——本轮未覆盖该形态（已写进 #503 的如实边界）。
+· **环境限制（如实登记）** 本机 vmxnet3 驱动不上报 `rx_dropped`/`tx_dropped`（见 §5.5），
+  故**内核侧的「非零方向丢弃」只能靠假 sysfs 穿透证明**，无法在本环境造出真实值。
+· **既有的中间态噪声**：内核模式下「多口 unbind-dpdk」时，第一个口的收敛会对尚未交还的
+  第二个口报 `Cannot find device`（R41-O1，本轮两个方向都再遇到，未变差）。
+
+--------------------------------------------------------------------------------
+§9 现场还原
+--------------------------------------------------------------------------------
+· 对象清理：vs-lan / port-security / vnf-d13 / vnf-alp / spike1 全部删除并提交；
+  `show configuration | display set` 无业务对象（grep=0）；`systemctl is-active nfvis vpp`
+  均 active；`show alarms active` **空**；VPP `connected: yes`。
+· 数据面往返：切内核（含 unbind-dpdk ×2）→ 复验 → 切回 VPP（含 bind-dpdk ×2 +
+  `request vpp restart` + 全量重放）。
+· 二进制：`/root/bin-orig-r48/{nfvisd,nfvis-cli}` 存 3.0.30 原件；当前装的是
+  `3.0.31~dev1` 交叉编译产物（换装方式，非 deb 重装）——**正式发版另走 deb/.run 两打**。
+· 基线：`isolated 2-5` / `1G count 3` / `vpp cpu 4/5`；1G 池「声明 3 / 内核实际 2」
+  且读视图**如实**标「运行实际少于声明（分配不足）」，GRUB 已写 `hugepages=3`，下次重启收敛。
+
+--------------------------------------------------------------------------------
+§10 结论
+--------------------------------------------------------------------------------
+· R47-1 / R47-2 **两条都收口**，且都有「修复前红 → 修复后绿」的自动化守护与真机实证；
+  Web 三处（接口详情页、概览接口卡、列标题）同步。
+· 修复过程中**新发现并顺手收掉**一条报告未提的缺陷：**内核数据面下接口 `statistics`
+  从来没有任何提供者**（`stateRuntimeFor` 直接返回 nil）——本轮一并补齐（`state.Counters` +
+  `netkernel/counters.go`），否则「内核侧按方向给丢弃」这条口径根本无处落地。
+· 四套件零失败且与发版基线逐项一致；`make check` 七项 RC=0；全仓测试 0 失败。

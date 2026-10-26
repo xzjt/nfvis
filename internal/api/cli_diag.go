@@ -160,11 +160,20 @@ func (x *cliExecutor) execMonitor(class string, t []string) string {
 		}
 		return fmt.Sprintf("%% 接口 %s 统计暂不可用（不存在或 stats 连接未就绪）\n", ifname)
 	}
+	// 列定义与 `show interfaces <n> statistics` **同一份**（ifaceCountersLine /
+	// ifaceDropsCols）：丢弃列随数据面口径走——VPP 一列 `drops`（stats segment 的
+	// /interfaces/<if>/drops 不分方向），内核两列 rx-drops/tx-drops（决策 #504）。
+	u := func(v uint64) string { return strconv.FormatUint(v, 10) }
+	head := []string{"rx-pkts", "tx-pkts", "rx-bytes", "tx-bytes", "rx-errors", "tx-errors"}
+	vals := []string{u(c.RxPackets), u(c.TxPackets), u(c.RxBytes), u(c.TxBytes), u(c.RxErrors), u(c.TxErrors)}
+	widths := []int{12, 12, 14, 14, 9, 9}
+	dCols, dVals, dWidths := ifaceDropsCols(c)
+	head = append(head, dCols...)
+	vals = append(vals, dVals...)
+	widths = append(widths, dWidths...)
 	var b strings.Builder
-	fmt.Fprintf(&b, "%-12s %12s %12s %14s %14s %8s %8s\n",
-		"Interface", "rx-pkts", "tx-pkts", "rx-bytes", "tx-bytes", "rx-drops", "tx-drops")
-	fmt.Fprintf(&b, "%-12s %12d %12d %14d %14d %8d %8d\n",
-		ifname, c.RxPackets, c.TxPackets, c.RxBytes, c.TxBytes, c.RxDrops, c.TxDrops)
+	b.WriteString(ifaceCountersLine(12, "Interface", head, widths))
+	b.WriteString(ifaceCountersLine(12, ifname, vals, widths))
 	return b.String()
 }
 
