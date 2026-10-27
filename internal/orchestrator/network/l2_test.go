@@ -486,6 +486,118 @@ func TestDeleteBridgeDomainReclaimsSubif(t *testing.T) {
 	}
 }
 
+// 决策 #518：L2 交换机成员收缩（交换机保留、只改端口 VLAN 声明）时，本交换机**自建**的
+// VLAN 子接口若不再 desired 必须回收——成员摘除只把子接口从 BD 摘下来，接口本身仍在数据面，
+// 回收此前只发生在删整台交换机（#195/round88 同族的「未声明残留」）。
+func TestVLANShrinkReclaimsSubif(t *testing.T) {
+	f := newFakeL2()
+	p := NewL2Provider(f)
+	vs := l2vs("vs-vlan",
+		model.VSwitchPort{Seq: 0, Interface: "ens192"},
+		model.VSwitchPort{Seq: 1, Interface: "ens224"})
+	vs.VlanAccess = 100
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("首次下发: %v", err)
+	}
+	bd := BDID("vs-vlan")
+	sub224, ok := f.nameIdx["ens224.100"]
+	if !ok {
+		t.Fatalf("前置：ens224 的 access 子接口应已创建: %v", f.nameIdx)
+	}
+	if !p.subifs[bd][sub224] {
+		t.Fatalf("前置：子接口应登记在本交换机下: %v", p.subifs[bd])
+	}
+	// 收缩：去掉 ens224 端口（交换机保留）。
+	vs.Ports = vs.Ports[:1]
+	before := len(f.calls)
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("收缩下发: %v", err)
+	}
+	if !l2CallsContain(f.calls[before:], "delsubif") {
+		t.Fatalf("收缩后应回收不再 desired 的子接口: %v", f.calls[before:])
+	}
+	if _, ok := f.names[sub224]; ok {
+		t.Fatalf("子接口应已从数据面回收: %v", f.names)
+	}
+	if p.subifs[bd][sub224] {
+		t.Fatalf("子接口登记应被摘除: %v", p.subifs[bd])
+	}
+	if f.bridge[sub224] != 0 {
+		t.Fatalf("子接口应从 BD 摘除: %v", f.bridge)
+	}
+}
+
+// 收缩只回收**本次不再 desired** 的子接口：仍 desired 的端口子接口不动（不误删、登记保留）。
+func TestVLANShrinkKeepsOtherSubifs(t *testing.T) {
+	f := newFakeL2()
+	p := NewL2Provider(f)
+	vs := l2vs("vs-vlan",
+		model.VSwitchPort{Seq: 0, Interface: "ens192"},
+		model.VSwitchPort{Seq: 1, Interface: "ens224"})
+	vs.VlanAccess = 100
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("首次下发: %v", err)
+	}
+	bd := BDID("vs-vlan")
+	sub192, ok192 := f.nameIdx["ens192.100"]
+	sub224, ok224 := f.nameIdx["ens224.100"]
+	if !ok192 || !ok224 {
+		t.Fatalf("前置：两个 access 子接口都应存在: %v", f.nameIdx)
+	}
+	// 收缩：只留 ens192。
+	vs.Ports = vs.Ports[:1]
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("收缩下发: %v", err)
+	}
+	if _, ok := f.names[sub192]; !ok {
+		t.Fatalf("仍 desired 的子接口不得被回收: %v", f.names)
+	}
+	if !p.subifs[bd][sub192] {
+		t.Fatalf("仍 desired 的子接口登记应保留: %v", p.subifs[bd])
+	}
+	if f.bridge[sub192] != bd {
+		t.Fatalf("仍 desired 的子接口应仍挂在 BD 上: %v", f.bridge)
+	}
+	if _, ok := f.names[sub224]; ok {
+		t.Fatalf("被移除端口的子接口应回收: %v", f.names)
+	}
+}
+
+// 幂等：子接口已在数据面不存在（ErrIfaceMissing）时，回收按已达成——不报错、登记照摘。
+func TestSubifAlreadyGoneIsIdempotent(t *testing.T) {
+	f := newFakeL2()
+	p := NewL2Provider(f)
+	vs := l2vs("vs-vlan",
+		model.VSwitchPort{Seq: 0, Interface: "ens192"},
+		model.VSwitchPort{Seq: 1, Interface: "ens224"})
+	vs.VlanAccess = 100
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("首次下发: %v", err)
+	}
+	bd := BDID("vs-vlan")
+	sub224 := f.nameIdx["ens224.100"]
+	// 模拟 VPP 侧子接口已被删掉（目录/名字均不在）——DeleteSubif 将返回 -2。
+	delete(f.names, sub224)
+	delete(f.nameIdx, "ens224.100")
+	vs.Ports = vs.Ports[:1]
+	if err := p.ApplyBridgeDomain(context.Background(), vs); err != nil {
+		t.Fatalf("子接口已不存在时回收应幂等（不报错）: %v", err)
+	}
+	if p.subifs[bd][sub224] {
+		t.Fatalf("已不存在的子接口登记仍应被摘除: %v", p.subifs[bd])
+	}
+}
+
+// l2CallsContain 判断调用记录里是否出现过某条记录（顺序无关）。
+func l2CallsContain(calls []string, want string) bool {
+	for _, c := range calls {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}
+
 // M4-4：VNF 端口在 VPP 侧按确定性接口名解析（ApplyVnfInterface 先建）；
 // 接口不存在时给出可诊断错误（ErrIfaceUnavailable），不再以「M4 未支持」拒绝。
 func TestL2VnfPortResolvesByIfaceName(t *testing.T) {

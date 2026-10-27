@@ -1,0 +1,128 @@
+round50：第二次全仓只读评审 → 9 条缺陷收口（决策 #512~#520）
+================================================================
+日期：2026-10-27
+起点：v3 分支 HEAD 44b1b07（v3.0.32 文档提交后，工作树干净）
+本轮性质：**只读评审 + 实现修复**；**仅单测/包测试通过，未做真机验证、未发版、未 commit**
+方法：评审沿用 round49 口径（最多两个子智能体并行、分域、逐条要求 file:line 与触发前提）；
+      实现按「契约先行 → 每文件单会话 → 先红后绿 → 主线程集成」分两批（每批两个会话，
+      文件所有权互斥）。
+
+一、九条决策与落点
+------------------
+#512 管理证书不可用时启动失败（fail-closed），明文仅限显式开关
+     落点 cmd/nfvisd/{main.go,tls_resolve.go}；`ResolveTLS` 纯函数 + 5 条单测。
+#513 凭据变更在全部提交路径收尾（CLI/整文档/恢复/zeroize 同口径）
+     落点 cmd/nfvisd/{main.go,identity_finalize.go}、internal/aaa/service.go、
+     internal/api/console_sessions.go（`RevokeUserSessions` 导出入口）。
+#514 镜像发布防覆盖被引用项 + 只认 ready 为可用
+     落点 internal/images/{images.go,download.go}（三道复核 + Lookup/Names 只认 ready）、
+     internal/api/images.go（409 映射）、internal/api/server.go（注入启用）。
+#515 新增接口元素回滚走 TeardownInterface
+     落点 internal/orchestrator/apply.go（与删除段对称）。
+#516 提交后宿主收敛按修订代际串行，最新修订最后生效
+     落点 cmd/nfvisd/{main.go,host_apply.go}（单 worker + 合并待办）。
+#517 zeroize 部分失败如实上报
+     落点 internal/system/backup.go（Residuals + 非 nil 错误）、
+     internal/api/{system_ops.go,cli_compute_oper.go}（500 + detail / CLI `%%`）。
+#518 L2 交换机成员收缩时回收自建 VLAN 子接口
+     落点 internal/orchestrator/network/l2.go（`reclaimStaleSubifs`）。
+#519 内核 DeleteVRF 不删自动生成的链路本地地址
+     落点 internal/orchestrator/netkernel/l3.go（`ipAddrRow.Scope` + 排除 `scope=link`）。
+#520 审计脱敏覆盖 `sshpass -p <值>` 分隔形态
+     落点 internal/model/redact.go（工具感知正则，置于贴值规则之前）。
+
+二、新增守护用例（先红后绿，逐条临时回退实现复现失败后转绿）
+------------------------------------------------------------
+- #512：TestResolveTLSFailClosedWithoutPlaintext / UsesInstalledCert / UsesSelfSignedWhenGenerated /
+       ExplicitCertWins / PlaintextOnlyWhenExplicit
+- #516：TestHostApplyQueueLatestRevisionWins / CoalescesPending / SerializesRunning
+- #515：TestNewInterfaceRollbackTearsDownBindings / TestDeletedInterfaceStillTearsDown
+- #518：TestVLANShrinkReclaimsSubif / KeepsOtherSubifs / SubifAlreadyGoneIsIdempotent
+- #519：TestKernelDeleteVRFKeepsLinkLocalAddresses / StillRemovesDeclaredAddresses
+- #513：TestCLIDeleteUserRevokesActiveTokensAndSessions / TestCLIClassChangeRevokesUserTokens /
+       TestCLIPasswordChangeRevokes / TestZeroizeRevokesAllSessions /
+       TestRestoreDoesNotRevokeReappearingUser / TestActiveTokenIDRejectsDeletedUser /
+       TestListTokensHidesDeletedUser
+- #520：TestScrubSecretsMasksSSHPassSeparatedValue / KeepsMkdirP / KeepsDockerPortPublish /
+       SSHPassIdempotent
+- #514：TestImportIncomingRejectsReferencedName / AllowsUnreferencedReplace /
+       TestDownloadPublishRejectsReferencedName / TestLookupRequiresReady /
+       TestImagesPostReferencedConflict / TestCLIImagesUploadReferencedFails
+- #517：TestZeroizeReportsPartialFailure / AllRemovedSucceeds / ZeroizeRESTSurfacesResidue500 /
+       CLIZeroizePartialFailureFails / ZeroizeAuditFailure
+
+三、make check（GOFLAGS=-p=1，退出码 0）
+---------------------------------------
+- vet：`go vet ./...` 通过。
+- test：`go test ./...` 全绿。关键包：cmd/nfvisd 9.9s、internal/aaa 21.9s、internal/api 541.2s、
+  internal/archtest 2.1s、internal/config 5.6s、internal/images 1.2s、internal/model 0.1s、
+  internal/orchestrator 0.05s、…/compute 2.6s、…/container 64.0s、…/netkernel 1.2s、
+  …/network 3.2s、internal/schema 1.5s、internal/system 32.9s、pkg/cliclient。
+- cover（门槛 70）：config 88.2 / model 90.5 / schema 92.0 / network 80.5 / compute 89.2 /
+  container 85.7 / images 80.3——全部达标（images 由 80.2 → 80.3）。
+- archtest：依赖方向与「操作者文案不得含内部引用」均通过（本轮未新增内部引用文案）。
+- docscheck：`✓ 决策条数一致（419 项）且决策记录表格结构完整`；`✓ openapi.json 与契约 YAML 同步`。
+- toolcheck：全部通过。其中 `check_suite_contract_sync.sh`：契约命令 325 / 套件命令 492 /
+  豁免 79，缺口 0、登记问题 0；离线安装器自校准「通过 9 / 失败 0」；行尾一致；维护脚本检查通过。
+- prototype-check：build/vet/test 通过。
+
+四、Web 面同步核对（结论：无需改 JS）
+-------------------------------------
+- 镜像上传/拉取失败：`internal/api/ui/js/views/images.js` 的 multipart 路径用 `httpErrText(res)`
+  （取服务端 `message`），JSON 路径与 zeroize 用 `api()`；`internal/api/ui/js/core/api.js` 的
+  `api()` 已把 message 与 `detail[]` 逐条并入错误文案。因此新的 409（被引用不可覆盖）与
+  500（zeroize 残留）都会如实显示。
+- zeroize：`views/ops.js` 走 `api()` + catch → `opsMsg('恢复出厂失败：' + e.message, true)`，
+  成功分支才显示「已恢复出厂」。
+- 本轮因此未改任何前端文件；只把新语义写进 openapi 与手册（见下）。
+
+五、契约与文档回填
+------------------
+- 规格书附录 A：新增 #512~#520 九条（决策计数 410 → 419）。
+- AGENTS.md：声明计数同步为 419；新增 round50 条目（含九条落点、Web 结论、质量门与边界）。
+- docs/NFViS-openapi.yaml + 重新生成的 internal/api/openapi.json：
+  `POST /images` 补 409 与「被引用不可覆盖 / 只认 ready」；`POST /system:zeroize` 补 500、
+  202 响应体改为 `ZeroizeResult`，新增 `ZeroizeResult` schema（含 `residuals`）；
+  `/audit-logs` 与容器 `…:exec` 描述补 `sshpass -p <值>` 掩码口径。
+- docs/NFViS-用户手册.md：`-tls-cert`/`-allow-plaintext` 行补 fail-closed；
+  §9.1 补「同名镜像不可覆盖被引用项 / 只认 ready」；§10.7 补 zeroize 部分失败如实上报。
+- docs/NFViS-CLI命令全表.md：images upload/download、system zeroize 三行补新语义。
+- docs/v3已做.md：证据索引加 round50；新增「六、round50 决策（#512~#520）」表。
+
+六、改动文件清单（相对 HEAD 44b1b07）
+-------------------------------------
+生产代码：
+  cmd/nfvisd/{main.go,host_apply.go,identity_finalize.go,tls_resolve.go}
+  internal/aaa/service.go
+  internal/api/{console_sessions.go,images.go,server.go,system_ops.go,cli_compute_oper.go}
+  internal/images/{images.go,download.go}
+  internal/model/redact.go
+  internal/orchestrator/{apply.go,network/l2.go,netkernel/l3.go}
+  internal/system/backup.go
+测试（新增）：
+  cmd/nfvisd/{host_apply_test.go,identity_finalize_round50_test.go,tls_resolve_test.go}
+  internal/aaa/deleted_user_revalidate_round50_test.go
+  internal/api/{console_revoke_user_sessions_round50_test.go,images_referenced_round50_test.go,
+                system_zeroize_round50_test.go}
+  internal/images/referenced_round50_test.go
+  internal/model/scrub_sshpass_round50_test.go
+  internal/orchestrator/netkernel/l3_round50_test.go
+  internal/system/zeroize_round50_test.go
+测试（改动）：internal/orchestrator/{apply_test.go,network/l2_test.go}、
+  internal/api/{images_test.go,audit_highrisk_test.go}（后者为桩补 `zeroizeRes` 字段；
+  前者把「等后台拉取落定」的判据收紧为「先见条目、再见落定」，避免 Windows 上的清理竞态假红，
+  属判据增强而非放宽）。
+文档：AGENTS.md、规格书、openapi.yaml/openapi.json、用户手册、CLI 命令全表、v3已做.md、本文件。
+
+七、如实边界
+------------
+- 本轮**未做真机验证**（未发布件安装、未跑四套件）；所有结论来自源码复核 + 单测/包测试。
+- `-race` 在本机不可用（`-race requires cgo`）；两个队列（hostApplyQueue、identityFinalizer）的
+  正确性靠「状态迁移都在同一把锁下 + 无非阻塞唤醒丢失」的推理与确定性 channel 用例，未做竞态检测。
+- #519 的「删除链路本地地址后是否影响后续 v6 ND」需真机 A/B 复核（本轮只按同族网关撤销路径的
+  既有口径对齐）。
+- #514 的 URL「发布期第二道复核」在真机上基本不可达（配置引用一个未 ready 的镜像会被
+  `Lookup` 拒），属防御性路径；测试以「下载中途翻转配置来源」制造确定性时序覆盖。
+- `checkPublishAllowed` 在未注入配置来源或 `Committed()` 报错时**不阻断**（无配置事实无从判定
+  引用，与 `Delete` 由调用方给 refCount 的既有口径一致）。
+- 未提交 git。

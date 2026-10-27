@@ -735,6 +735,11 @@ func (x *cliExecutor) imagesDownload(user string, rest []string) string {
 	if err := images.ValidateDownloadOptions(opts); err != nil {
 		return "%% " + err.Error() + "\n"
 	}
+	// 受理前同步复核（决策 #514）：同名镜像已被 VNF/容器引用时立刻报错，别先打印「已受理」
+	// 再在后台静默失败（异步拉取没有同步错误出口）。
+	if err := imagePublishPrecheck(x.images, opts.Name); err != nil {
+		return "%% " + err.Error() + "\n"
+	}
 	// 异步：与端点一致只做登记受理（进度经 import_state 观察），不在 CLI 阻塞等待。
 	go func() {
 		_, _ = x.images.Download(context.Background(), opts)
@@ -1487,15 +1492,22 @@ func (x *cliExecutor) systemZeroize(user string, raw []string) string {
 	}
 	// 决策 #150：高危档动作——审计两条（意图 + 结果），与 REST `POST /system:zeroize` 同源。
 	var rev, removed int
+	var residual []string
 	err := runHighRisk(x.engine, user, highRiskZeroize(), func() (string, error) {
 		res, rerr := x.sys.Zeroize(context.Background(), user)
+		rev, removed, residual = res.Revision, res.RemovedImages, res.Residuals
 		if rerr != nil {
 			return "", rerr
 		}
-		rev, removed = res.Revision, res.RemovedImages
 		return fmt.Sprintf("已恢复出厂（revision %d，删除镜像 %d 个）", rev, removed), nil
 	})
 	if err != nil {
+		// 决策 #517：有残留时**以 %% 报失败**，绝不打印「已恢复出厂」（此前失败只塞桩内 Reason、
+		// 出口不展示，操作者看到完全成功而镜像文件/索引仍在）。残留逐条已在 err 文案里。
+		if len(residual) > 0 {
+			return "%% " + err.Error() +
+				fmt.Sprintf("（配置已清空且不回滚；本次已删除镜像 %d 个，修订 %d）\n", removed, rev)
+		}
 		return "%% " + err.Error() + "\n"
 	}
 	return fmt.Sprintf("已恢复出厂（revision %d，删除镜像 %d 个）。重启后进入初始化状态。\n", rev, removed)

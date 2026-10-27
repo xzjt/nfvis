@@ -201,6 +201,13 @@ func New(e *config.Engine, a *aaa.Service, opts Options) *Server {
 	s.cliExec.setFirewall(s.firewallView) // 决策 #388：CLI 渲染与 REST 同一读视图
 	s.cliExec.pciExists = opts.PCIExists  // FR-CMP-023：VM detail 的直通设备实测态（nil = 如实说无法核对）
 	s.cliExec.setComputeRuntime(opts.VM, opts.VMConsole, opts.VMSnapshots, opts.Containers, opts.Images)
+	// 决策 #514：给镜像仓库注入 committed 配置读口（可选接口断言）——CLI 与 REST 共用**同一**
+	// store 实例（s.images 与 s.cliExec.images 均来自 opts.Images），注入一次即覆盖三条发布路径
+	// （incoming 导入 / URL 拉取 / multipart 上传）。发布前复核同名镜像是否已被 VNF/容器引用，
+	// 命中即拒（ErrReferenced → REST 409 / CLI 如实报错），不得覆盖被引用镜像的仓库文件。
+	if cs, ok := opts.Images.(imageConfigSource); ok {
+		cs.SetConfigSource(e)
+	}
 	s.cliExec.setEventBus(opts.Events) // M5-1：CLI 直连动作也发布 vnf-state-changed
 	s.cliExec.setSystemOps(opts.SysOps)
 	s.cliExec.setDiagOps(opts.DiagOps)

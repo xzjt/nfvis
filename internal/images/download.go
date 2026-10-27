@@ -94,6 +94,12 @@ func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error
 	if err := ValidateDownloadOptions(opts); err != nil {
 		return Meta{}, err
 	}
+	// 发布前复核（决策 #514，第一道）：同名镜像已被 committed 配置引用时**受理前**即拒绝，
+	// 且不触碰索引——否则下面的 setMeta(downloading) 会把既有 ready 条目改写成 downloading，
+	// 等于把一个正在被引用的好镜像变成不可用（发布失败却伤到了原镜像）。
+	if err := s.checkPublishAllowed(opts.Name); err != nil {
+		return Meta{}, err
+	}
 	// 落盘路径在这里算一次（round49 镜像名越界收口）：名称校验已过，这里再做**仓库前缀复核**并给
 	// 容器镜像挑一个安全临时名；后续 .part / 清理 / docker load 都用同一个 dest。
 	dest, err := s.downloadDest(opts.Name, opts.Type)
@@ -155,6 +161,12 @@ func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error
 		if s.dockerLoad == nil {
 			_ = os.Remove(dest)
 			return Meta{}, s.fail(failedMeta(), fmt.Errorf("拉取容器镜像 %s：未接入 Docker", opts.Name))
+		}
+		// 发布前复核（决策 #514，第二道）：拉取期间配置可能新增了引用——**docker load 之前**
+		// 再查一次，被引用即拒绝并清掉临时归档（不把新内容载入 Docker、不覆盖既有镜像）。
+		if err := s.checkPublishAllowed(opts.Name); err != nil {
+			_ = os.Remove(dest)
+			return Meta{}, s.fail(failedMeta(), err)
 		}
 		archive := dest
 		// 读出归档内嵌 tag（决策 #312）：用于说明，不作放行判据（读不到不阻断）。
@@ -342,6 +354,11 @@ func (s *Store) downloadFile(ctx context.Context, opts DownloadOptions, dest str
 	if !equalFoldHex(sum, opts.SHA256) {
 		_ = os.Remove(part)
 		return Meta{}, fmt.Errorf("sha256 校验失败：期望 %s，实际 %s", opts.SHA256, sum)
+	}
+	// 发布前复核（决策 #514，第二道）：拉取期间配置可能新增了引用——**改名（覆盖同名仓库文件）
+	// 之前**再查一次，被引用即拒绝并丢掉本次下载内容（.part 保留作断点，仓库既有文件不动）。
+	if err := s.checkPublishAllowed(opts.Name); err != nil {
+		return Meta{}, err
 	}
 	if err := os.Rename(part, dest); err != nil {
 		return Meta{}, err

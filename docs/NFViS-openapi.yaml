@@ -1073,7 +1073,8 @@ paths:
         **超时按失败**（决策原文「超时/流中断 ⇒ REST 非 2xx」；#366 收口 R142-10 的记账漂移）：
         超时回 **504**（标准错误体，不带部分输出；CLI 侧仍有进程内结构化视图），审计记 failure。
         **命令原文入审计**（可追溯），但按文本级掩码处理：口令/令牌/私钥形态的值（如
-        `mysql -p…`、`--password=…`、`Authorization: Bearer …`、PEM 私钥块）替换为 `«已隐藏»`，
+        `mysql -p…`、`--password=…`、`sshpass -p <值>`（`-p` 与值之间可有空格）、
+        `Authorization: Bearer …`、PEM 私钥块）替换为 `«已隐藏»`，
         普通命令逐字保留；`GET /audit-logs`、CLI `show log audit` 与诊断包对历史记录同样掩码
         （FR-SEC-007：口令/口令哈希/证书私钥正文一律不入审计）。
       requestBody:
@@ -1162,6 +1163,16 @@ paths:
     post:
       tags: [images]
       summary: 导入镜像（multipart 文件上传 / JSON URL 拉取 / JSON incoming 导入，三选一）
+      description: |
+        三选一导入形态（multipart 上传 / JSON URL 拉取 / JSON incoming 导入）。
+        **发布前引用复核（决策 #514）**：同名镜像若已被 VNF/容器引用（引用计数 > 0），
+        导入/上传/拉取一律**拒绝**，且仓库文件与索引**一字不改**——VM 主盘是
+        `qemu-img create -b <仓库路径>` 的 backing 克隆，被引用镜像被换底后既有 VM 重启/重建
+        会读到错误底层，且事后无法用删除回退。命中即回 **409**（与 DELETE 被引用同码）；
+        URL 拉取为异步，故受理前同步复核一次、发布前（改名/加载前）再复核一次（挡住拉取期间
+        新增的引用）。
+        **可用性只认 `ready`（决策 #514）**：`import_state` 为 `downloading`/`failed` 的条目不算
+        可用镜像（`GET /images` 仍如实列出它们供观察），被配置引用时按「镜像不存在」拒绝。
       requestBody:
         required: true
         content:
@@ -1202,6 +1213,7 @@ paths:
         "201":
           description: incoming 导入完成（同步返回镜像元数据）
         "400": { $ref: "#/components/responses/Error400" }
+        "409": { $ref: "#/components/responses/Error409" }   # 同名镜像被 VNF/容器引用，不可覆盖（决策 #514）
   /images/{name}:
     parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
     get:
@@ -1480,6 +1492,8 @@ paths:
         决策 #506（round49）：写侧兜底 + **读侧同口径掩码**——命令原文（如容器 exec）入库前先做
         文本级掩码（口令/令牌/私钥形态的值 → `«已隐藏»`，普通命令逐字保留），而修复前入库的
         **历史明文**在经本端点读出时同样被掩码；CLI `show log audit` 与诊断包 audit.json 同一口径。
+        决策 #520：**工具感知**的 `sshpass -p <值>`（`-p` 与值之间可有空格）同样被掩码——不泛化到
+        所有 `-p`，故 `mkdir -p /a`、`ls -p` 逐字不变；与既有掩码同样幂等。
       parameters:
         - { name: limit, in: query, schema: { type: integer, default: 100 } }
         - { name: offset, in: query, schema: { type: integer, default: 0 } }
@@ -1883,6 +1897,12 @@ paths:
     post:
       tags: [system]
       summary: 恢复出厂（清空数据分区配置/镜像/VNF 并重置账号，FR-OPS-007）
+      description: |
+        清空数据分区配置（applier 级联删除网络/VNF/容器）并删除全部镜像，账号随空配置复位
+        （下次启动重新引导 admin）。高危档：需 `confirm=true`（双重确认）。
+        **部分失败如实上报（决策 #517）**：若个别镜像删不掉（残留），**返回 500** 并在
+        message 与 detail 里**逐条**列出残留对象与原因——绝不因账号已复位就报「已恢复出厂」；
+        已成功清空的配置**不回滚**（账号已复位就是复位了）。CLI 侧以 `%%` 报失败，审计结果行记 `failure`。
       requestBody:
         required: true
         content:
@@ -1893,8 +1913,13 @@ paths:
               properties:
                 confirm: { type: boolean, description: 双重确认，必须为 true }
       responses:
-        "202": { description: 已受理，重启后进入初始化状态 }
+        "202":
+          description: 已受理，重启后进入初始化状态；响应体为结果摘要
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ZeroizeResult" }
         "400": { $ref: "#/components/responses/Error400" }
+        "500": { description: 部分失败：有残留未清除（message 与 detail 逐条列出残留对象与原因），已清部分不回滚，账号已复位 }
   /system:format-data:
     post:
       tags: [system]
@@ -3666,6 +3691,18 @@ components:
         created_at: { type: string, format: date-time }
         includes_core_dumps: { type: boolean, description: tech-support 归档时 }
 
+    ZeroizeResult:
+      type: object
+      description: 决策 #517：`request system zeroize` / `POST /system:zeroize` 的结果摘要。
+      properties:
+        status: { type: string, example: zeroized }
+        revision: { type: integer, description: 提交空配置（恢复出厂）后的修订号 }
+        removed_images: { type: integer, description: 从镜像仓库成功删除的镜像数 }
+        note: { type: string, description: 结果说明（账号已复位、重启后进入初始化状态） }
+        residuals:
+          type: array
+          items: { type: string }
+          description: 未清掉的残留（逐条含原因）；非空即表示本次未清干净，端点据此返回 500（已清部分不回滚）
     FormatDataResult:
       type: object
       description: 决策 #305：`request system storage format-data` / `POST /system:format-data` 的结果统计。

@@ -639,6 +639,13 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	}
 
 	// —— 新增/变更：接口层（MTU / ingress-policy 绑定；QoS 之后，保证 policer 已建）——
+	//
+	// 决策 #515：撤销（回滚）时「本次**新声明**的接口元素」走 `del`——它必须回收该元素在本次下发
+	// 中装上的**接口级绑定**（storm policer/L2 分类表、portsec macip、QoS 入/出向绑定），与删除段的
+	// `del-interface`（见下）对称。此前该 `del` 恒返回 nil，于是同一次提交里该元素**之后**的操作失败时，
+	// 配置回旧版、接口级绑定却留在数据面，且 undo 返回 nil 不产生 COMMIT_COMPENSATION_FAILED——
+	// 正是「配置与数据面不一致、全程无报错」那一族（决策 #390③ 的另一半）。复用既有
+	// `TeardownInterface`（语义只回收接口级绑定，不碰 MTU/状态）。
 	dpdkPorts := dpdkManagedIfaces(new.Vpp)
 	for _, iface := range new.Interfaces {
 		if o, ok := oldIfaces[iface.Name]; !ok || !configEqual(o, iface) {
@@ -647,7 +654,7 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 				a.ifaceApply(iface, dpdkPorts[iface.Name]),
 				iface.Name, ok,
 				func(ctx context.Context) error { return a.net.ApplyInterface(ctx, o) },
-				func(ctx context.Context) error { return nil },
+				func(ctx context.Context) error { return a.net.TeardownInterface(ctx, iface) },
 			))
 		}
 	}

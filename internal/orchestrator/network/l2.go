@@ -240,6 +240,12 @@ func (p *L2Provider) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwit
 			return fmt.Errorf("解除 cross-connect %d: %w", idx, err)
 		}
 	}
+	// 决策 #518：成员摘除只把旧成员从 BD 摘下来，接口本身仍在数据面——本交换机**自建**的
+	// VLAN 子接口若本次不再 desired，须一并回收（否则「交换机保留、只改端口 VLAN 声明」会留下
+	// 无归属的 `<父口>.<vlan>`）。必须在摘除 BD 之后做（子接口在 BD 里时删不掉）。
+	if err := p.reclaimStaleSubifs(c, bdID, desired); err != nil {
+		return err
+	}
 
 	idxs := make([]int, 0, len(desired))
 	for idx := range desired {
@@ -582,6 +588,33 @@ func (p *L2Provider) dropLegacyAccessSubif(c L2Client, parent string, parentIdx 
 		return
 	}
 	p.forgetSubif(bdID, idx)
+}
+
+// reclaimStaleSubifs 回收本交换机**自建**、但本次不再 desired 的 VLAN 子接口（决策 #518）。
+//
+// 与 DeleteBridgeDomain 同族（#195/round88）：「交换机保留、只改端口 VLAN 声明」（缩 VLAN、
+// 删一个端口）时，成员摘除只把子接口从 BD 上摘下来，接口本身仍在数据面、`subifs` 登记也还在；
+// 回收此前只发生在删整台交换机与 #502 的历史残留清理路径，于是留下无归属的 `<父口>.<vlan>`。
+//
+// 顺序与 DeleteBridgeDomain 一致：摘 BD（本函数调用前，stale 循环已完成）→ 删子接口 → 摘登记。
+// 子接口已不存在（isMissingIfaceErr）按已达成；其余失败如实冒泡（不静默当作已清）。
+func (p *L2Provider) reclaimStaleSubifs(c L2Client, bdID uint32, desired map[uint32]func(L2Client) error) error {
+	p.mu.Lock()
+	var stale []uint32
+	for idx := range p.subifs[bdID] {
+		if _, ok := desired[idx]; !ok {
+			stale = append(stale, idx)
+		}
+	}
+	p.mu.Unlock()
+	sort.Slice(stale, func(i, j int) bool { return stale[i] < stale[j] })
+	for _, idx := range stale {
+		if err := c.DeleteSubif(idx); err != nil && !isMissingIfaceErr(err) {
+			return fmt.Errorf("回收子接口 %d: %w", idx, err)
+		}
+		p.forgetSubif(bdID, idx)
+	}
+	return nil
 }
 
 // forgetSubif 从「本交换机建的子接口」登记里摘掉一项（回收成功/已不存在）。

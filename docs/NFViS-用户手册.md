@@ -280,8 +280,8 @@ journalctl -u nfvis -f          # 观察启动日志
 |---|---|---|
 | `-db` | `/var/lib/nfvis/nfvis.db`（单元内） | SQLite 配置库 |
 | `-listen` | `:443` | API 监听；通配时会**按管理口地址收敛** |
-| `-tls-cert` / `-tls-key` | 空 | 缺省**自动生成自签证书**并启用 HTTPS |
-| `-allow-plaintext` | 关 | **强制明文**，仅开发/测试；给出即忽略已装/自签证书 |
+| `-tls-cert` / `-tls-key` | 空 | 缺省**自动生成自签证书**并启用 HTTPS；证书准备失败时**启动直接失败**（不静默降级为明文） |
+| `-allow-plaintext` | 关 | **强制明文**（唯一允许明文的入口），仅开发/测试；给出即忽略已装/自签证书 |
 | `-init-admin-password` | 空 | 首次启动的 admin 口令；缺省随机生成 |
 | `-vpp-sock` | `/run/vpp/api.sock` | VPP binary API |
 
@@ -1915,6 +1915,14 @@ nfvis$ show images img.qcow2 detail
 > 控制台「上传文件并导入」与 `request images upload` 走同一条校验（名字里带 `..` 一律被拒）；
 > 控制台单次上传的**请求体总量上限 4 GiB**，超限在读入过程中即中断并报 413（不落任何文件）。
 
+> **同名镜像不可覆盖仍被引用的那一份**：VM/容器在配置里引用某个镜像名时，再以同名的上传/导入/
+> URL 拉取会被**拒绝**（报冲突，仓库里的文件与索引都不动）。原因是被引用的 VM 主盘是**以仓库文件
+> 为底层（backing）的克隆**，换底会让既有 VM 在下一次启动/重建时读到错误磁盘内容，而那时已无法
+> 用「删除镜像」退回（删除会因被引用而拒绝）。要替换请先解除全部引用（改/删引用它的 VNF/容器）
+> 再导入；这与删除镜像的引用检查是同一口径。
+> 另外只有 `import_state=ready` 的镜像可被引用——`downloading`/`failed` 一律按「镜像不存在」拒绝，
+> 避免引用一个还没落定的导入。
+
 **容器镜像**（docker save 出的 tar）：
 
 ```bash
@@ -1931,7 +1939,8 @@ nfvis$ request images upload name alpine type container-image file /data/incomin
 > 例：导入 `alpine:3.20` 后配置里写 `set container-functions ... image alpine:3.20`；
 > 导入 `alpine`（归档内嵌 `alpine:3.20`）后则写 `image alpine`（Docker 侧被收敛为 `alpine:latest`）。
 
-删除镜像有引用检查（被 VM/容器引用时拒绝）。
+删除镜像有引用检查（被 VM/容器引用时拒绝）；导入/拉取被引用的同名镜像同样被拒（见上）。
+只有 `ready` 的镜像可被引用。
 
 ### 9.2 VM VNF 全流程
 
@@ -2521,6 +2530,8 @@ nfvis$ request system storage format-data
 > DPDK 声明——**为的就是不把自己关在门外**：执行完 SSH/Web 仍可登录继续配置。
 > 执行结果会如实给出删除对象数、清理文件数与释放空间；**有清不掉的残留时它报失败并逐条列出**
 > （不会在没清干净时报成功）。重复执行安全，第二次会如实说明「已是出厂态」。
+> **`zeroize` 同样适用这条**：清空配置后若有个别镜像文件/镜像引用删不掉（例如容器运行时不可用），
+> 它**不再报「已恢复出厂」**，而是报失败并逐条列出残留（配置已清空的部分不回滚，供你手工收尾）。
 > 两者都会清掉镜像与 VNF 磁盘，需要的镜像与备份请先取到本机之外。
 > `storage format-data` 清的是**数据分区**：除上列受管目录外，运行态残留——历史时序库
 > `/var/lib/nfvis/metrics.db`（清后 `/metrics` 仍可用、历史页如实报「无历史」）与 DHCP 租约目录

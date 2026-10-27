@@ -4037,6 +4037,35 @@
           "runtime_available"
         ],
         "type": "object"
+      },
+      "ZeroizeResult": {
+        "description": "决策",
+        "properties": {
+          "note": {
+            "description": "结果说明（账号已复位、重启后进入初始化状态）",
+            "type": "string"
+          },
+          "removed_images": {
+            "description": "从镜像仓库成功删除的镜像数",
+            "type": "integer"
+          },
+          "residuals": {
+            "description": "未清掉的残留（逐条含原因）；非空即表示本次未清干净，端点据此返回 500（已清部分不回滚）",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "description": "提交空配置（恢复出厂）后的修订号",
+            "type": "integer"
+          },
+          "status": {
+            "example": "zeroized",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -4254,7 +4283,7 @@
     },
     "/audit-logs": {
       "get": {
-        "description": "审计记录（FR-CFG-010/FR-OPS-031）。**高危档动作记两条**（决策 #150，设计 §7）：\n动作开始执行之前一条「意图」（`result: intent`，detail 写明要做什么、含关键参数），\n动作结束后一条「结果」（`result: success|failure`，失败带原因）。两条的 `action`\n相同，据此配对；其余动作仍只有一条结果记录（不产生额外审计噪音）。\n口令、口令哈希与证书/私钥正文**一律不入审计**（FR-SEC-007）。\n决策 #506（round49）：写侧兜底 + **读侧同口径掩码**——命令原文（如容器 exec）入库前先做\n文本级掩码（口令/令牌/私钥形态的值 → `«已隐藏»`，普通命令逐字保留），而修复前入库的\n**历史明文**在经本端点读出时同样被掩码；CLI `show log audit` 与诊断包 audit.json 同一口径。\n",
+        "description": "审计记录（FR-CFG-010/FR-OPS-031）。**高危档动作记两条**（决策 #150，设计 §7）：\n动作开始执行之前一条「意图」（`result: intent`，detail 写明要做什么、含关键参数），\n动作结束后一条「结果」（`result: success|failure`，失败带原因）。两条的 `action`\n相同，据此配对；其余动作仍只有一条结果记录（不产生额外审计噪音）。\n口令、口令哈希与证书/私钥正文**一律不入审计**（FR-SEC-007）。\n决策 #506（round49）：写侧兜底 + **读侧同口径掩码**——命令原文（如容器 exec）入库前先做\n文本级掩码（口令/令牌/私钥形态的值 → `«已隐藏»`，普通命令逐字保留），而修复前入库的\n**历史明文**在经本端点读出时同样被掩码；CLI `show log audit` 与诊断包 audit.json 同一口径。\n决策 #520：**工具感知**的 `sshpass -p <值>`（`-p` 与值之间可有空格）同样被掩码——不泛化到\n所有 `-p`，故 `mkdir -p /a`、`ls -p` 逐字不变；与既有掩码同样幂等。\n",
         "parameters": [
           {
             "in": "query",
@@ -5198,7 +5227,7 @@
         }
       ],
       "post": {
-        "description": "在**运行中**的容器内执行一条命令并返回 stdout/stderr 与退出码（等价容器内 `sh -c`）。\n权限：**super-user only**（`request container-functions <name> exec` 为 S 档）——与 VM 串口\n`console` 的关键差别是「console 进 guest 串口仍需 guest 凭据，而 exec 是**免凭据的容器内\n命令执行**（等价 root）」，operator 本不能创建容器，故不能经此绕过。\n有界且如实：超时默认 30s（可配 1..300），超时**只中止服务端等待**——Docker 不提供 exec\n进程的中止接口，容器内进程**可能仍在运行**；stdout/stderr **各自**上限 256 KiB，超限置\n`truncated`；退出码未知时（超时/流中断）该字段**不出现**（不谎报 0）。\n**超时按失败**（决策原文「超时/流中断 ⇒ REST 非 2xx」；#366 收口 R142-10 的记账漂移）：\n超时回 **504**（标准错误体，不带部分输出；CLI 侧仍有进程内结构化视图），审计记 failure。\n**命令原文入审计**（可追溯），但按文本级掩码处理：口令/令牌/私钥形态的值（如\n`mysql -p…`、`--password=…`、`Authorization: Bearer …`、PEM 私钥块）替换为 `«已隐藏»`，\n普通命令逐字保留；`GET /audit-logs`、CLI `show log audit` 与诊断包对历史记录同样掩码\n（FR-SEC-007：口令/口令哈希/证书私钥正文一律不入审计）。\n",
+        "description": "在**运行中**的容器内执行一条命令并返回 stdout/stderr 与退出码（等价容器内 `sh -c`）。\n权限：**super-user only**（`request container-functions <name> exec` 为 S 档）——与 VM 串口\n`console` 的关键差别是「console 进 guest 串口仍需 guest 凭据，而 exec 是**免凭据的容器内\n命令执行**（等价 root）」，operator 本不能创建容器，故不能经此绕过。\n有界且如实：超时默认 30s（可配 1..300），超时**只中止服务端等待**——Docker 不提供 exec\n进程的中止接口，容器内进程**可能仍在运行**；stdout/stderr **各自**上限 256 KiB，超限置\n`truncated`；退出码未知时（超时/流中断）该字段**不出现**（不谎报 0）。\n**超时按失败**（决策原文「超时/流中断 ⇒ REST 非 2xx」；#366 收口 R142-10 的记账漂移）：\n超时回 **504**（标准错误体，不带部分输出；CLI 侧仍有进程内结构化视图），审计记 failure。\n**命令原文入审计**（可追溯），但按文本级掩码处理：口令/令牌/私钥形态的值（如\n`mysql -p…`、`--password=…`、`sshpass -p <值>`（`-p` 与值之间可有空格）、\n`Authorization: Bearer …`、PEM 私钥块）替换为 `«已隐藏»`，\n普通命令逐字保留；`GET /audit-logs`、CLI `show log audit` 与诊断包对历史记录同样掩码\n（FR-SEC-007：口令/口令哈希/证书私钥正文一律不入审计）。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -5513,6 +5542,7 @@
         }
       ],
       "post": {
+        "description": "三选一导入形态（multipart 上传 / JSON URL 拉取 / JSON incoming 导入）。\n**发布前引用复核（决策 #514）**：同名镜像若已被 VNF/容器引用（引用计数 > 0），\n导入/上传/拉取一律**拒绝**，且仓库文件与索引**一字不改**——VM 主盘是\n`qemu-img create -b <仓库路径>` 的 backing 克隆，被引用镜像被换底后既有 VM 重启/重建\n会读到错误底层，且事后无法用删除回退。命中即回 **409**（与 DELETE 被引用同码）；\nURL 拉取为异步，故受理前同步复核一次、发布前（改名/加载前）再复核一次（挡住拉取期间\n新增的引用）。\n**可用性只认 `ready`（决策 #514）**：`import_state` 为 `downloading`/`failed` 的条目不算\n可用镜像（`GET /images` 仍如实列出它们供观察），被配置引用时按「镜像不存在」拒绝。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -5588,6 +5618,9 @@
           },
           "400": {
             "$ref": "#/components/responses/Error400"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
           }
         },
         "summary": "导入镜像（multipart 文件上传 / JSON URL 拉取 / JSON incoming 导入，三选一）",
@@ -7744,6 +7777,7 @@
     },
     "/system:zeroize": {
       "post": {
+        "description": "清空数据分区配置（applier 级联删除网络/VNF/容器）并删除全部镜像，账号随空配置复位\n（下次启动重新引导 admin）。高危档：需 `confirm=true`（双重确认）。\n**部分失败如实上报（决策 #517）**：若个别镜像删不掉（残留），**返回 500** 并在\nmessage 与 detail 里**逐条**列出残留对象与原因——绝不因账号已复位就报「已恢复出厂」；\n已成功清空的配置**不回滚**（账号已复位就是复位了）。CLI 侧以 `%%` 报失败，审计结果行记 `failure`。\n",
         "requestBody": {
           "content": {
             "application/json": {
@@ -7765,10 +7799,20 @@
         },
         "responses": {
           "202": {
-            "description": "已受理，重启后进入初始化状态"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ZeroizeResult"
+                }
+              }
+            },
+            "description": "已受理，重启后进入初始化状态；响应体为结果摘要"
           },
           "400": {
             "$ref": "#/components/responses/Error400"
+          },
+          "500": {
+            "description": "部分失败：有残留未清除（message 与 detail 逐条列出残留对象与原因），已清部分不回滚，账号已复位"
           }
         },
         "summary": "恢复出厂（清空数据分区配置/镜像/VNF 并重置账号，FR-OPS-007）",

@@ -1,0 +1,127 @@
+round50 真机验证：9 条修复在 nfvis-vm 上逐条复核 + 四套件复跑
+================================================================
+日期：2026-10-27
+环境：nfvis-vm（192.168.155.129，Ubuntu 26.04 / 内核基线 1G=2、2M=768 / isolcpus 1-4 声明）
+上机路径：源树（含本轮未提交改动）tar → VM 上 `go build`（Go 依赖经 http(s)_proxy=192.168.155.1:2333）
+          → `make deb VERSION=3.0.32~r50 SOURCE_DATE_EPOCH=…`（11,353,874 B）→ `dpkg -i`
+          → 服务 active、`show version` = **3.0.32~r50**、VPP 26.06 运行、无告警。
+
+一、逐条真机复核（全部为实机命令输出）
+--------------------------------------
+#512 TLS fail-closed（决策 #512）
+  方法：停 nfvis → 把 /var/lib/nfvis/tls 目录替换为同名**文件**（逼迫自签失败）→ 裸跑
+        `nfvisd -db /tmp/r50-fail.db -listen 127.0.0.1:18444`（**不带** -allow-plaintext）。
+  结果：`rc=1`；`ss -ltn` 在 18444/443 上**均无监听**；日志末行
+        `准备管理面证书: 管理证书不可用，且自动生成自签证书失败: mkdir /var/lib/nfvis/tls: not a directory。
+         请用 set system api tls cert-file <证书> key-file <私钥> 安装管理证书；或以 -allow-plaintext 显式启动`
+        （点名根因 + 两条出路）。还原目录后 `systemctl start nfvis` → active、CLI 可登录。
+
+#516 宿主收敛按修订串行（决策 #516）
+  方法：连续两次快速提交不同主机名（同一 CLI 会话两条命令，间隔数秒）。
+  结果：`set system hostname r50a` → commit rev166 → 宿主 `hostnamectl --static` = r50a（journal 有
+        `系统基线已应用到宿主: hostnamectl set-hostname r50a`）；随即 `set system hostname r50b` → rev167
+        → 宿主 = **r50b**；无回退到 r50a。验证后恢复 `nfvis` 并删除该声明。
+
+#520 审计脱敏覆盖 `sshpass -p <值>`（决策 #520）
+  方法：建容器 r50c（image ct + `command sleep` 保活），执行
+        `request container-functions r50c exec "sshpass -p SuperSecret123 ssh nobody@host"` 与
+        `… exec "mkdir -p /tmp/r50a && echo ok"`。
+  结果：CLI `show log audit` 显示 `exec 容器 r50c: sshpass -p «已隐藏» ssh nobody@host…`（明文 0）；
+        `mkdir -p /tmp/r50a && echo ok` 逐字保留；REST `GET /audit-logs` 同一形态 `sshpass -p «已隐藏»`。
+
+#513 凭据变更在全部提交路径收尾（决策 #513）
+  方法：CLI 建 super-user `r50u`（rev173）→ REST 登录取其 token → 取容器 shell 一次性 ticket →
+        用最小 Go WS 客户端（`golang.org/x/net/websocket`，跳过自签校验）建立并**保持**终端连接 →
+        CLI `delete system login user r50u` + commit。
+  结果：
+    · 删除前 token `GET /system/version` = **200**；删除后同一 token = **401**；
+    · 删除前 WS 客户端打印 `CONNECTED`（会话活着）；删除提交后客户端打印 **`CLOSED EOF`** 并退出
+      ——已建立的容器终端被服务端关闭（装配层身份收尾 → 关闭桥接）；
+    · 删除后旧 ticket 重新握手 = **401**；删除后重新签发 ticket 也 = **401**（用户已不在册）；
+    · `show system api tokens` 不再列出 r50u（User 列仅剩 admin）；
+    · 审计有 `删除本地用户 r50u（原权限类 super-user）` intent/结果两条。
+
+#514 镜像发布防覆盖被引用项 + 只认 ready（决策 #514）
+  方法：`set virtual-machine-functions r50vm image alpine`（1G/1024、vcpu 1）→ commit（refs 变 1）→
+        再以同名 `alpine` 走 CLI 上传（incoming 里另放**内容不同**的 r50-diff.qcow2）与 CLI URL 拉取。
+  结果：
+    · 两次均被拒；上传文案逐字为
+      `%% 镜像被引用，不能覆盖：该镜像正在被 VNF/容器引用（1 个引用）；先删除引用它的 VNF/容器，或改用其它镜像名`；
+    · 仓库文件 sha256 与 `index.json` sha256 **前后逐字节一致**（`FILE-UNCHANGED: yes` / `INDEX-UNCHANGED: yes`）；
+    · incoming 里的 r50-diff.qcow2 **未被消费/清理**（拒绝发生在任何落盘/登记之前）；
+    · 清掉引用 VM 后 refs 回 0，`show images` 仍 ready。
+  过程实录（如实）：首轮因 VM 内存选 2M（需 1024 页、空闲 768）导致 commit 校验失败、引用前提未成立，
+        两次误尝试确实覆盖成功——这从反面印证了「无引用保护时可覆盖」；修正前提后如上。
+
+#518 L2 成员收缩回收自建 VLAN 子接口（决策 #518）
+  方法：建 L2 交换机 r50vs（access vlan 100，成员 ens192）→ commit → 仅改 `vlan access 200` → commit。
+  结果：`vppctl show interface` 由 `ens192.100` 变为 **`ens192.200`**（旧 `.100` 被回收，索引 3→4）；
+        删除交换机后 `ens192` 无任何子接口残留；`show classify tables` = No classifier tables configured。
+
+#515 新增接口元素回滚走 TeardownInterface（决策 #515）
+  方法：先撤 `vpp dpdk dev ens224` + `delete interfaces ens224`（rev184，使 ens224 在配置中**不存在**）→
+        同一次提交里 `set interfaces ens224 mtu 8000` + `set interfaces ens224 storm-control broadcast 1000`
+        （＝**新增接口元素**，inOld=false）+ `set container-functions r50bad image ct`（先把 ct:latest 从
+        Docker 移除，令容器段在 apply 期失败）。
+  结果：提交失败并补偿（`%% 底座下发失败（已补偿）: …container[r50bad]: …`）；失败后
+    · `vppctl show interface` 的 ens224 仍是 **MTU 8000** —— 证明接口段确实执行过（TeardownInterface
+      有意不还原 MTU/状态，属登记边界）；
+    · `vppctl show policer` **为空**、`show classify tables` = **No classifier tables configured**
+      —— 新增元素的 storm policer/L2 分类表被 teardown **回收，零残留**；
+    · committed 配置中无 ens224 元素、无 r50bad（回滚成功）；`show alarms active` **无**
+      `COMMIT_COMPENSATION_FAILED`；
+    · 随后恢复 Docker ct:latest、`set interfaces ens224 mtu 9000` + `disable` + `vpp dpdk dev ens224`（rev185）。
+
+#519 内核数据面 DeleteVRF 不删链路本地地址（决策 #519）
+  方法：`set system dataplane kernel` + commit → 重启 nfvis（该变更只需重启服务）→ 交还两口内核驱动 →
+        临时把 netplan 的 `activation-mode: off` 改为 `manual`（备份 /root/netplan.r50.bak）并把两口 up →
+        `set virtual-switches r50k type l3` + `l3-interface ens192 ip address 198.18.0.1/24` → commit →
+        `delete virtual-switches r50k` → commit。
+  结果：
+    · 建后：`ip -o addr show dev ens192` 同时有 `inet 198.18.0.1/24` 与 `inet6 fe80::…/64 scope link`；
+    · 删后：**`198.18.0.1` 消失、`fe80::…/64 scope link` 保留**（`show vrfs` = 无 VRF）；
+    · 切回 vpp：commit → 重启 nfvis → `bind-dpdk` 两口 → `request vpp restart` → 两口在数据面、
+      `show alarms active` 无活动项；netplan 已还原为原文件（`activation-mode: off`）。
+
+#517 zeroize 部分失败如实上报（决策 #517）
+  方法：备份配置库（/root/nfvis-db-r50-2.bak）→ 停 Docker（`systemctl stop docker docker.socket`，
+        令容器镜像 ct 删不掉）→ `request system zeroize --yes --yes`。
+  结果：CLI 输出
+        `%% 恢复出厂未清干净：1 项残留——镜像 ct：删除失败: 删除容器镜像 ct: docker DELETE /images/ct:latest:
+         dial unix /var/run/docker.sock: connect: connection refused（配置已清空且不回滚；本次已删除镜像 1 个，修订 191）`
+        —— **不再打印「已恢复出厂」**；脚本因 `%%` 在第 1 行停止（非 0 语义）。
+        宿主事实：`/var/lib/nfvis/images/index.json` 仍含 `ct`（残留）、`alpine` 文件已删（成功项）。
+        恢复：停 nfvis → 还原配置库 → 起 nfvis/docker → 重新导入 alpine（从未被删的副本）→
+        登录、`show images` 正常。如实边界：该次 zeroize 的审计行随配置库还原一并回退，未能事后从库中取出
+        （CLI 输出已在本文件留证）。
+
+二、四套件复跑（同一 r50 构建、同一台 VM）
+------------------------------------------
+前置（按 AGENTS 既有登记逐条落实）：
+  · `SRV=https://127.0.0.1:443`、`CLI_BIN=/usr/bin/nfvis-cli`、`API_PORT=443`、`NFVIS_PASSWORD=…`；
+  · Docker 守护进程经 `/etc/systemd/system/docker.service.d/http-proxy.conf` 走 192.168.155.1:2333，
+    `docker pull alpine:3.20` 成功；
+  · `/var/lib/nfvis/images/alpine.qcow2` 在位（阶段 3 依赖）；
+  · 语义夹具用**仓库名** `FIXTURE_IMAGE=alpine FIXTURE_CT_IMAGE=ct`；
+  · **套件副本地址规避 R41-T1**：`cli-fulltest-phase2.sh` 的 L3 地址改为 192.168.77.10/24、
+    `cli-fulltest-phase5.sh` 的 ping source 同步改为 192.168.77.10（判据对「未通」是预期失败，不受影响）。
+
+结果（全部零失败，与 v3.0.32 基线逐项一致）：
+  · `cli-fulltest` **306 / 0 / 26**（阶段 1 51/0/0、2 124/0/3、3 8/0/0、4 36/0/14、5 46/0/5、
+    6 11/0/0、7 7/0/0、8 23/0/4；套件收尾「对象已清干净（未清项 0）」）；
+  · `cli-semantic-check` **43 / 0 / 0**（不可判定 0）；
+  · `cli-lifecycle-check` **40 / 0 / 3**（跳过 3 项为环境受限，与基线同）；
+  · `cli-pty-smoke` **10 / 10**。
+
+三、现场还原与如实登记
+----------------------
+  · 配置：套件只改了一处声明（`system idle-timeout-minutes` 17→16），已还原为 17（rev255）；
+    其余声明与开工前一致（interfaces/资源池/数据面/vpp cpu）。
+  · 对象：无交换机/VNF/容器；镜像 `alpine`(vm) 与 `ct`(容器) ready；`show alarms active` 无活动项；
+    VPP 两口在位；nfvis/vpp/libvirtd/docker 均 active。
+  · 环境改动（保留以便后续轮次）：Docker 代理 systemd drop-in（下载经代理）；`docker alpine:3.20`
+    在套件清场后已重新拉回；`/root/nfvis-db-r50.bak`、`/root/nfvis-db-r50-2.bak`（配置库备份保留）；
+    测试临时件（wsclient、源包、/tmp r50 文件、incoming ct-r50.tar）已删除。
+  · netplan 已按备份还原；`/root/netplan.r50.bak` 留档。
+  · **未做**：发布件（deb 之外的 .run 形态）与回下载闭环；`make deb` 两次逐字节一致性；
+    真机的 `-race`（宿主不支持 cgo）。

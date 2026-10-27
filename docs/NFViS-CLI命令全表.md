@@ -171,8 +171,8 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request container-functions <n> exec <command> [timeout <seconds>]` | 在**运行中**的容器内执行命令（非交互；`<command>` 是整体、含空格请加引号；等价容器内 `sh -c`）；超时默认 30s（1..300）、stdout/stderr 各自上限 256 KiB（超限置 truncated）；**超时只中止客户端等待**（Docker 无 exec 中止接口，容器内进程可能仍在跑）、退出码未知时不报（决策 #357） | S | `POST /container-functions/{n}:exec` | ✅（真机四维（round138，含 Browser Use）；已入 fulltest——`docs/evidence/v2-round138-d357-container-exec.txt`） |
 | `request container-functions <n> shell` | **交互式终端**：进容器里的 `sh`（TTY；Ctrl-] 退出）。与 VM 串口 console **同一套管线**（一次性 ticket + WebSocket + CLI raw 接管），底座是 Docker exec 的 TTY 形态；**断开只关产品侧桥接**（WS 断开后容器内 shell 进程**可能仍在**，真机实测；Docker 无 exec 中止接口）；不做窗口尺寸同步（决策 #358） | S | `POST /container-functions/{n}/shell` + `GET …/shell/ws?ticket=…` | ✅（真机 pty 四维 + Browser Use（round139）——`docs/evidence/v2-round139-d358-container-shell.txt`） |
 | `request container-functions <n> delete` | 删除容器 | S | `DELETE /container-functions/{n}` | 🚫 交互确认 |
-| `request images upload name <n> type <t> file <path>` | 从 `/data/incoming/` 导入（成功自动清理源文件）；容器镜像读出 tar 内嵌 tag 并回显（决策 #312）。**镜像名的形态受校验**（决策 #506）：VM 镜像＝纯文件名（禁 `/`、`\`、`:` 与任何 `..` 段），容器镜像＝Docker 引用（允许 `:`、`/`、`@`）——越界名一律拒绝，不再能操作到仓库外文件 | O | `POST /images` | ✅ |
-| `request images download name <n> type <t> url <u> sha256 <hex>` | 从 HTTP(S) 拉取；**`sha256` 必填**（键值形态，非可选——校验层在受理前同步强制，缺省即拒）。镜像名形态同上传（决策 #506）；容器镜像落盘用仓库内安全临时名，不用原始名建子目录 | O | `POST /images` | ✅（FR-SEC-004） |
+| `request images upload name <n> type <t> file <path>` | 从 `/data/incoming/` 导入（成功自动清理源文件）；容器镜像读出 tar 内嵌 tag 并回显（决策 #312）。**镜像名的形态受校验**（决策 #506）：VM 镜像＝纯文件名（禁 `/`、`\`、`:` 与任何 `..` 段），容器镜像＝Docker 引用（允许 `:`、`/`、`@`）——越界名一律拒绝，不再能操作到仓库外文件。**同名且已被 VNF/容器引用者拒绝覆盖**（决策 #514：VM 主盘以仓库文件为 backing，换底会毁既有 VM；报错如实说明引用数） | O | `POST /images` | ✅ |
+| `request images download name <n> type <t> url <u> sha256 <hex>` | 从 HTTP(S) 拉取；**`sha256` 必填**（键值形态，非可选——校验层在受理前同步强制，缺省即拒）。镜像名形态同上传（决策 #506）；容器镜像落盘用仓库内安全临时名，不用原始名建子目录。**受理前同步复核同名引用**（决策 #514），被引用即当场报错、不打印「已受理」再后台静默失败；发布前（改名/加载前）再复核一次 | O | `POST /images` | ✅（FR-SEC-004） |
 | `request images delete name <n>` | 删除镜像（引用检查）；名字非法（含历史遗留越界条目）返回 400 而不是照删（决策 #506） | S | `DELETE /images/{n}` | ✅ |
 | `request interfaces <ifname> enable` | 启用接口 | O | `PUT /interfaces/{n}` | ✅ |
 | `request interfaces <ifname> disable` | 禁用接口 | O | `PUT /interfaces/{n}` | ✅ |
@@ -201,7 +201,7 @@ schema/api 单测、lifecycle 套件或真机单独走查）。**全局 CLI 选�
 | `request system tech-support generate` | 生成诊断归档 tar.gz（归档里的配置是**脱敏视图**：口令哈希等已隐藏，不能用于恢复；要可恢复的完整配置用 `configuration backup`） | O | `POST /system/tech-support` | ✅ |
 | `request system core-dumps export <url>` | 导出转储清单到 URL（POST JSON） | O | `POST /system/core-dumps:export` | ✅（决策 #126 修掉此前的假成功） |
 | `request system core-dumps delete [file <n>]` | 删除转储 | O | `DELETE /system/core-dumps` | ✅（**决策 #76⑨** 修错误文案） |
-| `request system zeroize` | 恢复出厂（双重确认） | S | `POST /system:zeroize` | 🚫 破坏性 |
+| `request system zeroize` | 恢复出厂（双重确认）；**部分失败如实上报**（决策 #517）：配置已清空但有个别镜像删不掉时以 `%%` 报失败并逐条列出残留（不再打印「已恢复出厂」；配置不回滚） | S | `POST /system:zeroize` | 🚫 破坏性 |
 | `request system api tls regenerate` | 重签自签证书 | S | `POST /system/tls:regenerate` | ✅ |
 | `request system api token revoke <token-id>` | 吊销指定会话（O；范围按身份裁定——super-user 可吊销任意会话，其他 class 仅自己的；不存在的/他人的 id 统一报「会话不存在或无权操作」，不泄露存在性。token-id 见 `show system api tokens`。request 域以 O 为基线，read-only 的自助结束会话走 POST /logout；REST 侧同能力对全部登录 class 开放） | O | `POST /system/api-tokens/{id}:revoke` | ✅（真机：`docs/evidence/v2-dev1-d301-real-machine-verification.txt`——CLI/REST/Web 三方 + 审计独立事实源；已入 fulltest 阶段 1/4 与 semantic S10-8） |
 | `request system ssh host-key regenerate` | 重新生成 SSH host key | S | `POST /system/ssh-host-key:regenerate` | ✅ |

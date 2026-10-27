@@ -300,6 +300,68 @@
   `DeleteGateway` 仍只按进程内登记拆除（「nfvisd 未运行时手工改配置」的现场不会被清，候选修法已登记）；
   **未发版、未 commit**。
 
+- **round50（第二次全仓只读评审 → 9 条缺陷收口，2026-10-27，决策 #512~#520）**：用户再要求
+  「只读审查此项目代码」，本会沿用 round49 的方法（**最多两个子智能体并行、分域、逐条要求
+  file:line 与触发前提**），得 **9 条可闭环缺陷**；随后按「**契约先行 → 每文件单会话 → 先红后绿 →
+  主线程集成**」分两批（每批两个会话，文件所有权互斥）实现。
+  **九条与落点**：**#512** 管理证书准备失败时曾静默降级为明文（`EnsureSelfSigned` 失败只记日志、
+  不设路径也不退出，日志还写成 `-allow-plaintext`）⇒ 抽出可单测的 `ResolveTLS` 并 **fail-closed**，
+  只有显式开关才允许明文；**#513** 主动吊销只挂 REST 用户入口，CLI/整文档提交删用户后其已建立的
+  串口/VNC/容器 shell 仍可用、`show system api tokens` 仍列为活动 ⇒ 装配层按「上一次已应用提交的
+  登录配置」快照做差集（删除/class 变/口令哈希变，zeroize 即全体），统一 `RevokeUserTokens` +
+  丢弃 CLI 会话 + 关闭终端；`ActiveTokenID`/`ListTokens` 按 committed 用户存在性复核（空 ID 保守
+  放行不变），恢复型回滚不误伤；**#514** 同名导入/拉取可直接覆盖**被引用**的 VM 镜像（其主盘是以
+  仓库文件为 backing 的克隆）⇒ 发布前三道复核（incoming 落盘前、URL 拉取改名/`docker load` 前、
+  multipart 同源），被引用即拒（HTTP 409）；`Lookup`/`Names` 只认 `ready`；**#515** 接口 op 的 undo
+  对「本次新元素」传的是 `return nil`，下游失败时 storm/portsec/QoS 绑定残留且无告警 ⇒ 改走既有
+  `TeardownInterface`（与删除路径对称）；**#516** 提交后宿主收敛（TLS/syslog/防火墙/基线/日志保留/
+  监听重绑）每次新起 goroutine、可乱序完成 ⇒ 单 worker 队列携带 revision、合并中间版本、最新修订
+  最后生效；**#517** `zeroize` 删镜像失败只塞 `res.Reason` 仍报成功 ⇒ 汇总残留返回错误，
+  REST 500 + 逐条明细、CLI `%%` 报失败、审计 failure；**#518** L2 交换机保留、只改端口 VLAN 声明时
+  自建 `<父口>.<vlan>` 子接口成孤儿 ⇒ stale 摘除后回收子接口并清登记；**#519** 内核 `DeleteVRF` 的
+  地址清理不看 `scope`，会删 `fe80::`/169.254 链路本地 ⇒ 与网关撤销路径同口径排除 `scope=link`；
+  **#520** 审计脱敏只认贴值 `-p<值>`，`sshpass -p <口令>` 明文进审计 ⇒ 增**工具感知**规则
+  （`mkdir -p`/`docker run -p` 逐字不变）。
+  **Web 面同步**：逐条核对后确认无需改 JS——镜像上传/拉取与 zeroize 的失败都经 `api()`/`httpErrText`
+  取服务端 `message`+`detail` 如实呈现（`views/images.js`、`views/ops.js`），本轮只把新的 409/500
+  语义写进 openapi 与手册。
+  **质量门（实现端）**：`gofmt -l` 空；`go vet`（`./cmd/nfvisd/ ./internal/aaa/ ./internal/api/
+  ./internal/images/ ./internal/model/ ./internal/system/ ./internal/orchestrator/…`）通过；
+  各包 `go test -count=1 -p=1` 全绿（`internal/api` 约 9 分钟）；`internal/archtest` 通过
+  （未新增带内部引用的操作者文案）；openapi `--write` 后同步守护通过；`make check` 见证据文件。
+  **真机验证（2026-10-27，nfvis-vm 192.168.155.129）**：本轮改动**按正式路径上机**——源树同步 →
+  VM 上 `go build`（依赖走代理 192.168.155.1:2333）→ `make deb VERSION=3.0.32~r50` → `dpkg -i`
+  （服务 active、`show version` = 3.0.32~r50）。九条逐条复核：**#512** 把 TLS 目录换成同名文件逼自签
+  失败 → 裸跑 nfvisd **rc=1、443/18444 均无监听**、错误文案点名根因与两条出路；**#516** 连续两提交
+  主机名 r50a→r50b，宿主只落最新；**#520** 容器 exec 的 `sshpass -p «已隐藏»`（CLI 与 REST 两面）
+  而 `mkdir -p` 逐字保留；**#513** 建 super-user 取 token/ticket → 用 Go WS 客户端建立并**保持**容器
+  终端（`CONNECTED`）→ CLI 删用户提交后终端 **`CLOSED EOF`**、同 token **401**、旧/新 ticket **401**、
+  会话清单无该用户；**#514** 引用计数 1 时同名上传/拉取均拒（文案含引用数），仓库文件与 `index.json`
+  **前后逐字节一致**、incoming 源文件未被消费；**#518** VLAN 100→200 后 `ens192.100` 消失、
+  `ens192.200` 出现，删交换机无残留；**#515** 造出真正的「新增接口元素」（先撤 ens224 声明）+
+  容器段 apply 失败 → 失败后 ens224 **MTU 8000 仍在**（证明接口段执行过；teardown 有意不还原 MTU）
+  而 policer/分类表**零残留**、committed 已回滚、无 `COMMIT_COMPENSATION_FAILED`；**#519** 切内核
+  数据面建/删带地址的 L3 交换机 → `198.18.0.1` 消失而 **`fe80::` 保留**，随后切回 vpp、重绑两口、
+  重启数据面、无告警；**#517** 停 Docker 后 zeroize 以 `%%` 报
+  `恢复出厂未清干净：1 项残留——镜像 ct：…（配置已清空且不回滚，已删除镜像 1 个）`，
+  宿主 index 确实仍留 ct。**四套件（同一 r50 构建）与 v3.0.32 基线逐项一致**：fulltest
+  **306/0/26**（八阶段零失败、收尾未清项 0）、语义 **43/0/0**、lifecycle **40/0/3**、pty **10/10**。
+  ⚠️ **真机环境四条（本轮实测入册）**：① 套件前置同既往（`SRV=https://127.0.0.1:443`、
+  `CLI_BIN=/usr/bin/nfvis-cli`、`API_PORT=443`、`NFVIS_PASSWORD`、语义用**仓库名**
+  `FIXTURE_IMAGE=alpine FIXTURE_CT_IMAGE=ct`、`/var/lib/nfvis/images/alpine.qcow2` 与
+  `docker alpine:3.20` 必须在位，**套件收尾会把后者与 incoming 夹具一起清掉**）；② **R41-T1 仍在**——
+  套件副本须把阶段 2 的业务地址与阶段 5 的 ping source 改到 192.168.77.10/24；③ 切内核数据面后
+  两口会被 netplan `activation-mode: off` 压成 DOWN（`fe80` 不出现）⇒ 需临时改 `manual` 并在切回后
+  还原原文件；④ `ImportIncoming` 会**搬走** incoming 源文件，同名覆盖类试验要为每次尝试各备一份。
+  现场已还原（`idle-timeout` 17、无对象、无告警、两口在 VPP、`alpine:3.20` 重新拉回；
+  netplan 已还原；配置库备份 `/root/nfvis-db-r50*.bak` 保留）。证据
+  `docs/evidence/v3-round50-review-fixes-realmachine.txt`（逐条原始输出与四条环境坑）。
+  **如实边界**：`-race` 本机不可用（`-race requires cgo`），两个队列靠互斥推理 + 确定性 channel
+  用例；#519 只做了「修复版前后」的现场核对（未跑未修版 A/B）；#514 的 URL 发布期第二道复核在真机
+  基本不可达（配置引用未 ready 镜像会被 `Lookup` 拒），属防御性路径；#517 那次 zeroize 的审计行随
+  配置库还原一并回退（CLI 输出已留证）。**未发版、未 commit**。证据
+  `docs/evidence/v3-round50-review-fixes.txt`（单测/包测试与 make check）。
+
 ## 验证与口径纪律（决策 #481；对所有会话生效）
 
 - **口径红线：凡含「可分配 / 可用 / 空闲 / 剩余」字样的读数，必须扣掉全部在用者**——
@@ -1525,7 +1587,7 @@
   「已声明未生效」、恢复重放给出照做指引）；④ 管理口**首次**声明需 `commit confirmed`（后续 commit 即确认）；
   ⑤ `bind-dpdk` 非交互需 `--yes`（缺省被守卫正确拒绝）；⑥ 套件判据是命令级，**夹具缺口会级联**（如容器镜像
   缺失 ⇒ phase 3 整体回滚 ⇒ 同 phase 的 bond 检查一起红）——判读失败先看夹具。
-- 已定决策 410 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
+- 已定决策 419 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线 #300~#403（其中 #350 撤回）、
   **v3 线自 #404 起**（分支 `v3`，已有 #404~#511））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **v3 线最新交接**：`docs/v3-交接-2026-10-12.md`（round15~23 共 9 轮：#460~#466 七条决策 + round17 口径确认

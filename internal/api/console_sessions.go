@@ -133,3 +133,11 @@ func (s *Server) revokeUserSessions(user string) []string {
 	s.consoleTix.closeSessionsByUser(user)
 	return ids
 }
+
+// RevokeUserSessions 按用户名统一收尾（决策 #513 的导出入口，装配层调用）。
+//
+// 提交路径（CLI `delete/set system login user` + commit、load/restore、zeroize 等整文档提交）
+// 不经过 REST 的用户 handler，拿不到那里挂的主动吊销；装配层在每次成功提交后按配置差异算出
+// 「凭据已变」的用户名，逐一调用本方法完成同一套三层收尾（token / CLI 会话 / 终端），
+// **不新造第二套**。空用户名不动作（不误伤全体）。
+func (s *Server) RevokeUserSessions(user string) []string { return s.revokeUserSessions(user) }

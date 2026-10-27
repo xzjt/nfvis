@@ -1105,6 +1105,52 @@ func TestApplyInterfaceElementChangedNoTeardown(t *testing.T) {
 	}
 }
 
+// 决策 #515：本次**新声明**的接口元素在提交回滚（该元素之后的操作失败）时，必须回收它
+// 在本次下发中装上的接口级绑定（storm policer/L2 分类表、portsec macip、QoS 入/出向绑定）
+// ——走 applyOp 的 del 分支，复用 TeardownInterface。
+//
+// 缺陷形态：该 del 此前恒返回 nil，于是配置回旧版、接口级绑定留在数据面，且 undo 返回 nil
+// 不产生 COMMIT_COMPENSATION_FAILED——正是「配置与数据面不一致、全程无报错」那一族。
+func TestNewInterfaceRollbackTearsDownBindings(t *testing.T) {
+	ap, calls := newRecApplier("vm:vm-1") // 接口段之后的操作失败，触发逆序补偿
+	old := model.Config{}
+	newCfg := model.Config{
+		Interfaces: []model.InterfaceConfig{
+			{Name: "ens224", StormControl: &model.StormControl{BroadcastKbps: 1000}},
+		},
+		VirtualMachineFunctions: []model.VMFunction{vmOf("vm-1")},
+	}
+	err := ap.Apply(context.Background(), old, newCfg)
+	if err == nil || !strings.Contains(err.Error(), "vm-1") {
+		t.Fatalf("应返回 DefineVM 失败错误: %v", err)
+	}
+	if indexOf(*calls, "iface:ens224") < 0 {
+		t.Fatalf("新增接口元素应先下发: %v", *calls)
+	}
+	// recNet 把 TeardownInterface 记为 del-interface:<名>；本用例没有删除段，故该调用只可能
+	// 来自新增元素的回滚补偿。
+	if indexOf(*calls, "del-interface:ens224") < 0 {
+		t.Fatalf("新增接口元素回滚应调用 TeardownInterface 回收接口级绑定: %v", *calls)
+	}
+}
+
+// 决策 #515 回归：删除段的 del-interface（既有路径）仍走 TeardownInterface（不得因本次改动回退）。
+func TestDeletedInterfaceStillTearsDown(t *testing.T) {
+	ap, calls := newRecApplier("")
+	old := model.Config{
+		Interfaces: []model.InterfaceConfig{
+			{Name: "ens224", StormControl: &model.StormControl{MulticastKbps: 500}},
+		},
+	}
+	newCfg := model.Config{}
+	if err := ap.Apply(context.Background(), old, newCfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if indexOf(*calls, "del-interface:ens224") < 0 {
+		t.Fatalf("删除接口元素仍应下发接口级 teardown: %v", *calls)
+	}
+}
+
 // 决策 #485：画像节的操作把当次声明喂给计算编排（供下一次 VM 定义取用），
 // 撤销（回滚）恢复**变更前**的画像值——不下发任何数据面动作，但撤销必须完整。
 func TestApplyVMImageProfileSyncAndUndo(t *testing.T) {

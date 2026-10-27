@@ -146,12 +146,23 @@ func TestImagesURLPullRequiresSHA256Sync(t *testing.T) {
 	}
 	// 等后台拉取落定（连接失败会立刻转 failed）：否则它与 t.TempDir 清理竞争，
 	// 在 Windows 上会报 "The directory is not empty"。
+	//
+	// 判据是「**先看到条目存在、再看到它落定**」：只认 `!ok` 会在后台协程写入首个
+	// setMeta(downloading) 之前就提前返回，测试结束后协程仍往仓库目录写 index.json ⇒ 清理竞态
+	// （决策 #514 给受理路径加了一次同步复核，稍微放宽了这个窗口，故在此收紧判据）。
 	deadline := time.Now().Add(5 * time.Second)
+	seen := false
 	for time.Now().Before(deadline) {
-		if m, ok := store.Get("t2.qcow2"); !ok || m.ImportState != images.StateDownloading {
-			return
+		if m, ok := store.Get("t2.qcow2"); ok {
+			seen = true
+			if m.ImportState != images.StateDownloading {
+				return
+			}
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	if !seen {
+		t.Fatal("后台拉取未登记镜像条目")
 	}
 	t.Fatal("后台拉取未在期限内落定")
 }

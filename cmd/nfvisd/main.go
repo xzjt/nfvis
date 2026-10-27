@@ -585,28 +585,33 @@ func run() error {
 	// -allow-plaintext 是**权威开关**：显式给出即走明文（即便磁盘上已有自签证书）。
 	// 否则「已存在证书」会让该开关看起来无效——真机验证时即踩到：带 -allow-plaintext
 	// 启动却仍以 HTTPS 服务，明文客户端全被拒。
-	if *tlsCert == "" && !*plaintext {
-		if _, ok := tlsMgr.Info(); ok {
-			*tlsCert, *tlsKey = tlsMgr.CertPath(), tlsMgr.KeyPath()
-			log.Info("使用已安装的管理证书启用 HTTPS", "cert", *tlsCert)
-		} else {
-			info, generated, err := tlsMgr.EnsureSelfSigned(hostnameOr("nfvis"))
-			switch {
-			case err != nil:
-				log.Error("自动生成自签证书失败——API 将以明文提供，请立即用 set system api tls 安装证书", "err", err)
-			case generated:
-				*tlsCert, *tlsKey = tlsMgr.CertPath(), tlsMgr.KeyPath()
-				log.Info("未提供证书，已自动生成自签证书并启用 HTTPS",
-					"cert", *tlsCert, "fingerprint", info.Fingerprint)
-			default:
-				*tlsCert, *tlsKey = tlsMgr.CertPath(), tlsMgr.KeyPath()
-			}
-		}
+	//
+	// 决策 #512：证书解析走 ResolveTLS（纯函数，语义矩阵见 tls_resolve.go）。**fail-closed**——
+	// 证书准备（已装或自签）失败即启动失败并给出根因与出路，绝不再静默降级为明文
+	// （此前该分支只记一行 Error 日志、不设路径也不退出，API 随后即以明文服务，口令与
+	// Bearer token 会在管理网明文传输）。
+	tlsMat, err := ResolveTLS(*tlsCert, *tlsKey, *plaintext, tlsMgr, hostnameOr("nfvis"), fileExists)
+	if err != nil {
+		return fmt.Errorf("准备管理面证书: %w", err)
 	}
-	if *tlsCert == "" {
+	switch tlsMat.Source {
+	case tlsSourcePlaintext:
 		log.Warn("API 以明文 HTTP 提供服务（-allow-plaintext）：仅限开发/测试；生产请安装证书或用自签")
+	case tlsSourceExplicit:
+		*tlsCert, *tlsKey = tlsMat.CertPath, tlsMat.KeyPath
+		log.Info("使用命令行指定的管理证书启用 HTTPS", "cert", *tlsCert)
+	case tlsSourceInstalled:
+		*tlsCert, *tlsKey = tlsMat.CertPath, tlsMat.KeyPath
+		log.Info("使用已安装的管理证书启用 HTTPS", "cert", *tlsCert)
+	default: // tlsSourceSelfSigned
+		*tlsCert, *tlsKey = tlsMat.CertPath, tlsMat.KeyPath
+		log.Info("未提供证书，已使用自签证书启用 HTTPS",
+			"cert", *tlsCert, "fingerprint", tlsMat.Fingerprint)
 	}
 
+	// 决策 #513：提交后身份收尾（凭据变更在全部提交路径收尾）的钩子引用——`identityFin` 在
+	// 引擎构造之后才装配（它要读 committed），故先声明、创建后赋值；OnCommitted 回调内先判 nil。
+	var identityFin *loginIdentityFinalizer
 	var eng *config.Engine // 供 OnCommitted 回调引用（NewEngine 之后赋值）
 	// 修 BUG-05：数据面占用快照的钩子引用（引擎创建后才装配，回调 goroutine 内先判 nil）。
 	var dpClaims *dataplaneClaimSet
@@ -652,77 +657,93 @@ func run() error {
 			"审计日志写入失败：操作记录将丢失。根因："+err.Error()+
 				"；请检查 /var/lib/nfvis 所在分区与配置库状态", "system")
 	}
+	// 决策 #516：提交后的宿主收敛（TLS/syslog/防火墙/系统基线/日志保留/监听重绑）改为经单 worker
+	// 队列串行执行，并携带 revision。此前每次提交都新起一个 goroutine，可并发、可乱序完成——旧配置
+	// 可能最后写宿主（FirewallApplier 无互斥），committed 已是新配置而宿主是旧配置，读视图按
+	// committed 对照显示「未收敛」，极端情形旧的 `default-policy drop` 会切断管理面。
+	// 队列保证「同一时刻只有一个应用在跑、最新修订最后生效」；中间修订被合并。
+	// 失败仍只告警、不回灌提交（apply 回调内部逐项处理）。
+	// 说明：启动路径的一次性应用（下方 baseListen 收敛那段）保持同步语义不变，不经该队列。
+	hostApply := func(revision int) {
+		if eng == nil {
+			return
+		}
+		cfg, err := eng.Committed()
+		if err != nil {
+			return
+		}
+		log.Debug("宿主收敛开始", "revision", revision)
+		applyTLSSettings(cfg, tlsMgr, log)
+		// V1 收尾（决策 #69）：日志级别与远程 syslog 转发随配置热更新
+		applySyslogSettings(cfg, logLevel, syslogFwd, log)
+		// 决策 #388：主机防火墙随配置热更新（幂等；失败只告警——提交已经成功，
+		// 数据面实况由读视图如实呈现，不把下发失败倒灌成提交失败）
+		applyFirewallSettings(cfg, fwApplier, log)
+		// 修 BUG-05：数据面占用快照随 committed 刷新（PCI 直通的运行期互斥用它判）。
+		// 放在这里而不是在检查时回读引擎：本回调在事务提交完成之后才跑，此时取锁安全。
+		if dpClaims != nil {
+			dpClaims.Refresh()
+		}
+		// 决策 #424：系统基线（主机名/时区/NTP/宿主解析器）随配置落到宿主（幂等；失败只告警）；
+		// 决策 #428：逐项失败同时对账进告警表（SYSTEM_BASELINE_APPLY_FAILED）。
+		applySystemBaseline(cfg, baselineApplier, alarms, log)
+		if cfg.System != nil && cfg.System.Syslog != nil {
+			if path, err := system.ApplyLogRetention(context.Background(), runCmd,
+				cfg.System.Syslog.RetentionDays, cfg.System.Syslog.MaxSizeMB); err != nil {
+				log.Warn("应用日志保留策略失败", "err", err)
+			} else if path != "" {
+				log.Info("日志保留策略已应用", "dropin", path)
+			}
+		}
+		// 决策 #471：管理口地址变更后监听地址运行期重收敛（失败不改提交结果）。
+		// 规则：解析结果等于原始旗标值（管理口未配/未在本机等）→ 保持现状、绝不放宽
+		// 监听，只如实记日志；解析到具体管理口地址 → 换绑（与当前相同自然幂等）。
+		if apiSrv != nil {
+			if addr, note := system.ResolveListenAddr(baseListen, mgmtAddressOf(cfg), system.LocalAddrChecker()); note != "" {
+				switch {
+				case addr == baseListen: // 管理口未配/未在本机：保持现状，绝不放宽监听；如实记日志
+					log.Info(note)
+				default:
+					if err := apiSrv.Rebind(addr); err != nil {
+						log.Error("监听地址重收敛失败", "addr", addr, "err", err)
+					} else {
+						log.Info(note, "listen", addr)
+						tlsMgr.SetListen(addr) // 证书 SAN 随实际监听地址（与启动路径同序）
+						*listen = addr         // 监听守卫事实随新地址刷新
+						// 决策 #471（R24-E 行内回修）：SetListen 只影响**之后**生成的自签
+						// 证书，存量自签不重签——严格校验证书的客户端（nfvis-cli 缺省）
+						// 连新监听地址会报 certificate is valid for …, not <新地址>。
+						// 自签随换绑**立即重签**（SAN 含新监听地址）；外部证书不代重签，
+						// 只如实提示持证人自行处理。
+						if info, ok := tlsMgr.Info(); ok && info.SelfSigned {
+							if _, err := tlsMgr.RegenerateSelfSigned(hostnameOr("nfvis")); err != nil {
+								log.Warn("监听地址变更后自签证书重签失败——新地址可能不在证书 SAN 内", "err", err)
+							} else {
+								log.Info("监听地址变更后已重签自签证书（SAN 随新监听地址）")
+							}
+						} else if ok {
+							log.Info("监听地址已变更且已安装外部证书：新地址若不在其 SAN 内请自行重签（产品不代重签）")
+						}
+					}
+				}
+			}
+		}
+	}
+	hostQueue := newHostApplyQueue(hostApply)
+
 	// M5-1：commit 成功事件（config-committed）
 	engineOpts.OnCommitted = func(revision int, user string) {
 		bus.Publish(events.TypeConfigCommitted, map[string]any{"revision": revision, "user": user})
 		// 一次成功的提交意味着配置与数据面重新一致 ⇒ 超时回滚失败的告警自动消解
 		// （审计写失败不在此列：提交成功也可能是审计写不进去时走完的，只由恢复事件消解）。
 		alarms.Resolve("config", network.AlarmConfirmedRollbackFailed, "system")
-		// M5-8：提交后落实证书与日志保留策略（尽力而为，不阻塞 commit）
-		go func() {
-			if eng == nil {
-				return
-			}
-			cfg, err := eng.Committed()
-			if err != nil {
-				return
-			}
-			applyTLSSettings(cfg, tlsMgr, log)
-			// V1 收尾（决策 #69）：日志级别与远程 syslog 转发随配置热更新
-			applySyslogSettings(cfg, logLevel, syslogFwd, log)
-			// 决策 #388：主机防火墙随配置热更新（幂等；失败只告警——提交已经成功，
-			// 数据面实况由读视图如实呈现，不把下发失败倒灌成提交失败）
-			applyFirewallSettings(cfg, fwApplier, log)
-			// 修 BUG-05：数据面占用快照随 committed 刷新（PCI 直通的运行期互斥用它判）。
-			// 放在这里而不是在检查时回读引擎：本 goroutine 在事务提交完成之后才跑，此时取锁安全。
-			if dpClaims != nil {
-				dpClaims.Refresh()
-			}
-			// 决策 #424：系统基线（主机名/时区/NTP/宿主解析器）随配置落到宿主（幂等；失败只告警）；
-			// 决策 #428：逐项失败同时对账进告警表（SYSTEM_BASELINE_APPLY_FAILED）。
-			applySystemBaseline(cfg, baselineApplier, alarms, log)
-			if cfg.System != nil && cfg.System.Syslog != nil {
-				if path, err := system.ApplyLogRetention(context.Background(), runCmd,
-					cfg.System.Syslog.RetentionDays, cfg.System.Syslog.MaxSizeMB); err != nil {
-					log.Warn("应用日志保留策略失败", "err", err)
-				} else if path != "" {
-					log.Info("日志保留策略已应用", "dropin", path)
-				}
-			}
-			// 决策 #471：管理口地址变更后监听地址运行期重收敛（失败不改提交结果）。
-			// 规则：解析结果等于原始旗标值（管理口未配/未在本机等）→ 保持现状、绝不放宽
-			// 监听，只如实记日志；解析到具体管理口地址 → 换绑（与当前相同自然幂等）。
-			if apiSrv != nil {
-				if addr, note := system.ResolveListenAddr(baseListen, mgmtAddressOf(cfg), system.LocalAddrChecker()); note != "" {
-					switch {
-					case addr == baseListen: // 管理口未配/未在本机：保持现状，绝不放宽监听；如实记日志
-						log.Info(note)
-					default:
-						if err := apiSrv.Rebind(addr); err != nil {
-							log.Error("监听地址重收敛失败", "addr", addr, "err", err)
-						} else {
-							log.Info(note, "listen", addr)
-							tlsMgr.SetListen(addr) // 证书 SAN 随实际监听地址（与启动路径同序）
-							*listen = addr         // 监听守卫事实随新地址刷新
-							// 决策 #471（R24-E 行内回修）：SetListen 只影响**之后**生成的自签
-							// 证书，存量自签不重签——严格校验证书的客户端（nfvis-cli 缺省）
-							// 连新监听地址会报 certificate is valid for …, not <新地址>。
-							// 自签随换绑**立即重签**（SAN 含新监听地址）；外部证书不代重签，
-							// 只如实提示持证人自行处理。
-							if info, ok := tlsMgr.Info(); ok && info.SelfSigned {
-								if _, err := tlsMgr.RegenerateSelfSigned(hostnameOr("nfvis")); err != nil {
-									log.Warn("监听地址变更后自签证书重签失败——新地址可能不在证书 SAN 内", "err", err)
-								} else {
-									log.Info("监听地址变更后已重签自签证书（SAN 随新监听地址）")
-								}
-							} else if ok {
-								log.Info("监听地址已变更且已安装外部证书：新地址若不在其 SAN 内请自行重签（产品不代重签）")
-							}
-						}
-					}
-				}
-			}
-		}()
+		// M5-8/决策 #516：宿主收敛入队（单 worker 串行、最新修订最后生效）。
+		hostQueue.enqueue(revision)
+		// 决策 #513：身份收尾入队——**独立**于宿主收敛（宿主收敛失败也不影响凭据收尾），
+		// 且不在引擎写锁内回读 committed（R42-F1），由 finalizer 的 worker 异步执行。
+		if identityFin != nil {
+			identityFin.enqueue()
+		}
 	}
 	engine, err := config.NewEngine(store, applier, engineOpts)
 	if err != nil {
@@ -730,6 +751,19 @@ func run() error {
 	}
 	eng = engine
 	defer engine.Close()
+
+	// 决策 #513：装配「提交后身份收尾」器——启动时先建立 committed 登录配置的快照（避免首个
+	// 成功提交把全部既有用户当成歧义状态），此后每次成功提交由 OnCommitted 触发一次复核。
+	// revoke 经 api.Server 的统一收尾入口（快路径：apiSrv 此刻尚未创建，闭包在调用时才读它——
+	// 引导建 admin 的那次提交落在这里，此时无会话可收尾，apiSrv 为 nil 时安全跳过）。
+	identityFin = newLoginIdentityFinalizer(engine.Committed, func(user string) []string {
+		if apiSrv == nil {
+			return nil
+		}
+		return apiSrv.RevokeUserSessions(user)
+	}, log)
+	// 进程优雅退出：不再接收新提交，等在途的一次收尾结束（必须早于 engine.Close——收尾要读 committed）。
+	defer identityFin.close()
 
 	// 真机 3.0.5~dev1 回归：内核数据面的读视图按**当前 committed 配置**枚举产品对象，而提交路径
 	// 不经过 Provider（Apply* 只拿到单个对象）、快照只在装配/恢复收敛时写入 ⇒ 新建对象的读视图
@@ -1488,6 +1522,17 @@ func run() error {
 	defer cancel()
 	if err := apiServer.Shutdown(shutdownCtx); err != nil {
 		log.Warn("API 停机超时", "err", err)
+	}
+	// 决策 #516：收尾宿主收敛队列——不再接收新修订，等在跑的那次应用结束（丢弃尚未启动的
+	// 中间修订；最新配置会在下次启动的同步路径上重新应用）。必须早于 engine.Close()（apply
+	// 回调要回读 committed）。给出有界兜底：个别宿主命令卡死时不应拖住整个退出（此时进程退出
+	// 会连带结束 worker，与旧实现「不等待」的退出时延相当）。
+	queueDone := make(chan struct{})
+	go func() { hostQueue.close(); close(queueDone) }()
+	select {
+	case <-queueDone:
+	case <-time.After(3 * time.Second):
+		log.Warn("宿主收敛队列收尾超时，退出可能中断正在进行的宿主下发")
 	}
 	log.Info("nfvisd 已停止")
 	return nil

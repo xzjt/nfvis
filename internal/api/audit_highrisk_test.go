@@ -71,6 +71,7 @@ func (s stubTLS) RegenerateSSHHostKeys(context.Context) error         { return n
 // stubSysOps 备份/恢复/恢复出厂/重置数据分区的可控桩（只为失败路径；成功路径用真实 Manager）。
 type stubSysOps struct {
 	failZeroize    error
+	zeroizeRes     system.ZeroizeResult // 决策 #517：失败时一并回传残留清单
 	failFormatData error
 	formatDataRes  system.FormatDataResult
 }
@@ -83,7 +84,7 @@ func (s stubSysOps) Restore(context.Context, []byte, string) (config.CommitResul
 }
 func (s stubSysOps) Zeroize(context.Context, string) (system.ZeroizeResult, error) {
 	if s.failZeroize != nil {
-		return system.ZeroizeResult{}, s.failZeroize
+		return s.zeroizeRes, s.failZeroize
 	}
 	return system.ZeroizeResult{Revision: 9}, nil
 }

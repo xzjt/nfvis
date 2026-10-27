@@ -37,6 +37,14 @@ type imageUploadStaging interface {
 	StageUpload(src io.Reader, maxBytes int64) (string, int64, error)
 }
 
+// imageConfigSource 可选能力：注入 committed 配置读口，供**发布前**引用复核（决策 #514）。
+// 参数用匿名接口，与 *images.Store.SetConfigSource 的签名逐字一致（接口类型是结构化的，
+// 跨包也相等）。与 imageUploadStaging 同为可选断言：测试替身不要求实现（生产注入恒是
+// *images.Store，见 cmd/nfvisd/main.go）。
+type imageConfigSource interface {
+	SetConfigSource(src interface{ Committed() (model.Config, error) })
+}
+
 const (
 	// multipartMemoryLimit 解析 multipart 时**驻留内存**的上限：超过阈值的部分由 Go 溢写到
 	// 系统临时目录（不是 incoming 目录），再由 handlePostImageMultipart 复制进 incoming 内的
@@ -123,6 +131,15 @@ func (s *Server) handleGetVMImageProfiles(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, paginate(r, out))
 }
 
+// imagePublishPrecheck 受理前的同步发布前复核（决策 #514）：同名镜像被引用时返回 ErrReferenced。
+// 仓库未实现该可选能力（测试替身）时返回 nil（不阻断）。
+func imagePublishPrecheck(rt ImagesRuntime, name string) error {
+	if c, ok := rt.(interface{ CheckPublishAllowed(string) error }); ok {
+		return c.CheckPublishAllowed(name)
+	}
+	return nil
+}
+
 // handlePostImage POST /api/v1/images（multipart 上传 或 URL 拉取 或 incoming 导入）
 func (s *Server) handlePostImage(w http.ResponseWriter, r *http.Request) {
 	if !s.requireImages(w) {
@@ -156,7 +173,7 @@ func (s *Server) handlePostImage(w http.ResponseWriter, r *http.Request) {
 	if in.IncomingFile != "" {
 		m, err := s.images.ImportIncoming(in.Name, in.Type, in.IncomingFile, in.Description)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+			writeImageImportError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, m)
@@ -168,6 +185,11 @@ func (s *Server) handlePostImage(w http.ResponseWriter, r *http.Request) {
 	dlOpts := images.DownloadOptions{Name: in.Name, Type: in.Type, URL: in.URL, SHA256: in.SHA256, Description: in.Description}
 	if err := images.ValidateDownloadOptions(dlOpts); err != nil {
 		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	// 受理前同步复核（决策 #514）：同名镜像已被引用时立刻 409，别先回 202「已受理」再静默失败。
+	if err := imagePublishPrecheck(s.images, in.Name); err != nil {
+		writeImageImportError(w, err)
 		return
 	}
 	go func(opts images.DownloadOptions) {
@@ -262,10 +284,21 @@ func (s *Server) handlePostImageMultipart(w http.ResponseWriter, r *http.Request
 	defer func() { _ = os.Remove(tmp) }()
 	m, err := s.images.ImportIncoming(name, typ, tmp, description)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		writeImageImportError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, m)
+}
+
+// writeImageImportError 把镜像发布（导入/上传）错误映射到 HTTP（决策 #514）：
+// 被引用（ErrReferenced）→ 409 CONFLICT（不是 400/500，与 DELETE 被引用同码）；
+// 其余（名字非法、未接入 Docker、incoming 越界…）保持既有 400 形状，文案透传。
+func writeImageImportError(w http.ResponseWriter, err error) {
+	if errors.Is(err, images.ErrReferenced) {
+		writeError(w, http.StatusConflict, "CONFLICT", err.Error(), nil)
+		return
+	}
+	writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
 }
 
 // handleDeleteImage DELETE /api/v1/images/{name}（被引用 409，FR-CMP-033）

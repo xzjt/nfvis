@@ -171,7 +171,13 @@ func (s *Server) handleZeroize(w http.ResponseWriter, r *http.Request) {
 			res.Revision, res.RemovedImages), nil
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), nil)
+		// 部分失败（有残留）映射 500，并在 detail 里逐条列出残留（与 format-data 同形，决策 #517）：
+		// 绝不因 err != nil 就把「账号已复位但镜像还在」当 5xx 内部错误糊过去——message 逐条说清。
+		details := make([]ErrorDetail, 0, len(res.Residuals))
+		for _, d := range res.Residuals {
+			details = append(details, ErrorDetail{Message: d})
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error(), details)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{

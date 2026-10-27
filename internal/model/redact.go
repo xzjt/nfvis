@@ -78,13 +78,29 @@ var (
 
 	// 短选项贴值（`mysql -p123456`）；`-p` 与值之间有空格的（如 `mkdir -p /a`）不在此列。
 	scrubShortPwdRe = regexp.MustCompile(`(^|\s)-p(\S+)`)
+
+	// 工具感知的分隔形态：`sshpass -p <口令>`（round50 决策 #520）。上面的短选项正则只认
+	// **贴值** `-p<值>`，而 `sshpass -p <口令>`（`-p` 与值之间是空白、值可带引号、`-p` 前可夹
+	// 其它选项）是极常见形态——不掩码即明文进审计。这里**只认 sshpass**，不泛化为所有 `-p`：
+	// `mkdir -p /a`、`ls -p /tmp`、`docker run -p 80:80` 因此逐字不变。
+	//
+	// 三个捕获组：1=工具名（保留原大小写）、2=`-p` 之前的选项前缀、3=`-p` 与值之间的空白。
+	// 前缀用 `[^\n;&|]*?` 且**不跨越命令分隔符**（`; ` `&&` `|`）——避免把同一行里另一条命令的
+	// `-p` 误当成本次的取值；`\s-p` 要求 `-p` 前是空白，故 `--password`、`-p80` 这类不受影响
+	//（贴值形态已由短路规则掩码）。值支持 `'…'` / `"…"`（可含空格）与不带动空白的裸词。
+	scrubSSHPassRe = regexp.MustCompile(`(?i)(\bsshpass\b)([^\n;&|]*?)\s+-p(\s+)(?:'[^']*'|"[^"]*"|\S+)`)
 )
 
 // ScrubSecrets 对**文本**做秘密掩码（返回新串，不改入参）。
 //
 // 覆盖：PEM 私钥块、`Bearer <token>`、`password|passwd|pwd|secret|token|api_key|apikey|
-// authorization|private_key` 后跟 `=`/`:`/空白的值、以及短选项贴值的 `-p<值>`。
+// authorization|private_key` 后跟 `=`/`:`/空白的值、短选项贴值的 `-p<值>`、以及工具感知的
+// `sshpass -p <值>` 分隔形态（决策 #520）。
 // 已脱敏文本再过一遍结果不变（幂等）——写侧与读侧可能各过一遍。
+//
+// 规则顺序有讲究：`sshpass -p <值>` **必须早于**短选项贴值规则——否则 `-p` 后的引号值会被
+// 短选项规则截成「一截掩码 + 一截明文」（`sshpass -p 'P@ss w0rd'` 只掩到 `'P@ss`，`w0rd'`
+// 漏出）。先按 sshpass 规则整值掩码，短路规则便再无分隔形态可动。
 func ScrubSecrets(s string) string {
 	if s == "" {
 		return s
@@ -92,6 +108,7 @@ func ScrubSecrets(s string) string {
 	s = scrubPEMRe.ReplaceAllString(s, RedactedPlaceholder)
 	s = scrubBearerRe.ReplaceAllString(s, RedactedPlaceholder)
 	s = scrubKeyValueAll(s)
+	s = scrubSSHPassRe.ReplaceAllString(s, "${1}${2} -p${3}"+RedactedPlaceholder)
 	s = scrubShortPwdRe.ReplaceAllString(s, "${1}-p"+RedactedPlaceholder)
 	return s
 }

@@ -359,10 +359,18 @@ type ipAddrRow struct {
 	AddrInfo []struct {
 		Local     string `json:"local"`
 		PrefixLen int    `json:"prefixlen"`
+		// Scope 决策 #519：内核自动生成的链路本地地址（IPv6 的 fe80::/64、IPv4 的
+		// 169.254.0.0/16）scope=link，不属于本产品声明——删掉不会自动重生，会静默打瘸
+		// 该口的 v6 邻居发现。与 netkernel/l2.go 的 bridgeAddresses 同口径排除。
+		Scope string `json:"scope"`
 	} `json:"addr_info"`
 }
 
 // deviceAddresses 某设备当前的地址（CIDR 形态；读失败返回 nil）。
+//
+// 排除 `scope=link`（大小写不敏感）：那是内核按设备/协议栈自动生成的链路本地地址，删除 L3
+// 交换机（DeleteVRF）时**绝不能**把它当成「声明内的旧地址」删掉（决策 #519，与 l2.go 的
+// bridgeAddresses 同一口径）。宽容语义不变：读失败/解析失败返回 nil（不误删）。
 func (p *Provider) deviceAddresses(ctx context.Context, dev string) []string {
 	out, err := p.run.Run(ctx, "ip", "-j", "addr", "show", "dev", dev)
 	if err != nil {
@@ -375,9 +383,10 @@ func (p *Provider) deviceAddresses(ctx context.Context, dev string) []string {
 	var cidrs []string
 	for _, r := range rows {
 		for _, a := range r.AddrInfo {
-			if a.Local != "" {
-				cidrs = append(cidrs, fmt.Sprintf("%s/%d", a.Local, a.PrefixLen))
+			if a.Local == "" || strings.EqualFold(a.Scope, "link") {
+				continue
 			}
+			cidrs = append(cidrs, fmt.Sprintf("%s/%d", a.Local, a.PrefixLen))
 		}
 	}
 	return cidrs

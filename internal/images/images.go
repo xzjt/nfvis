@@ -86,6 +86,11 @@ type Store struct {
 	progress func(name string, written, total int64)
 	// stateSink 导入状态变化（downloading/ready/failed；nil = 不上报）。
 	stateSink func(name, typ, state string)
+	// configSource committed 配置读口（决策 #514）：装配层注入，供**发布前**复核同名镜像是否
+	// 已被 VNF/容器引用。nil = 未注入（无从判定引用 ⇒ 不做发布保护；与 Delete 由调用方提供
+	// refCount 的既有口径一致）。用匿名接口而非具名类型，装配层注入的 *config.Engine 或任何
+	// 方法集相同的实现都可用。
+	configSource interface{ Committed() (model.Config, error) }
 }
 
 // SetProgressSink 注入下载进度回调（M5-1）。
@@ -108,6 +113,47 @@ func (s *Store) SetDockerRemover(f func(ref string) error) { s.dockerRemove = f 
 // 含冒号原样——目录项名允许含冒号，`alpine:3.20` 本身即合法 Docker 引用；不含冒号补
 // `:latest`），使容器引用（=目录项名）与 Docker 运行名闭环。
 func (s *Store) SetDockerLoader(f func(path, name string) error) { s.dockerLoad = f }
+
+// SetConfigSource 注入 committed 配置读口（决策 #514）。
+//
+// 供**发布前**复核：同名镜像若已存在且被 VNF/容器引用（引用计数 > 0），导入/拉取/上传一律拒绝，
+// 不得覆盖仓库文件——VM 主盘是 `qemu-img create -b <仓库路径>` 的 backing 克隆，被引用镜像被
+// 换底后既有 VM 重启/重建会读到错误底层，且事后无法用删除回退。
+//
+// 传入 nil 表示取消注入（发布保护随之关闭）。装配层在 internal/api/server.go 注入一次，CLI 与
+// REST 共用同一 store 实例，故两条发布路径都被覆盖。
+func (s *Store) SetConfigSource(src interface{ Committed() (model.Config, error) }) {
+	s.mu.Lock()
+	s.configSource = src
+	s.mu.Unlock()
+}
+
+// CheckPublishAllowed 发布前引用复核（决策 #514），导出给 REST/CLI 在**受理前**同步判定：
+// 同名镜像已被 committed 配置引用时返回 ErrReferenced。URL 拉取是异步的，若只在 Download 内
+// 复核，受理请求会先拿 202「已受理」再静默失败——受理前同步查一次才能如实给出 409/报错。
+// 未注入配置来源或读不到配置时返回 nil（不阻断）。
+func (s *Store) CheckPublishAllowed(name string) error { return s.checkPublishAllowed(name) }
+
+// checkPublishAllowed 发布前复核（决策 #514）：同名镜像已被 committed 配置引用时返回
+// ErrReferenced。未注入配置来源、或配置读不到时**不阻断**——没有配置事实无从判定引用
+// （与 Delete 由调用方提供 refCount 的既有口径一致）。
+func (s *Store) checkPublishAllowed(name string) error {
+	s.mu.Lock()
+	src := s.configSource
+	s.mu.Unlock()
+	if src == nil {
+		return nil
+	}
+	cfg, err := src.Committed()
+	if err != nil {
+		return nil
+	}
+	if n := RefCount(cfg, name); n > 0 {
+		return fmt.Errorf("%w，不能覆盖：该镜像正在被 VNF/容器引用（%d 个引用）；"+
+			"先删除引用它的 VNF/容器，或改用其它镜像名", ErrReferenced, n)
+	}
+	return nil
+}
 
 // Open 打开/初始化仓库（创建目录并载入 index.json）。
 func Open(cfg Config) (*Store, error) {
@@ -190,11 +236,15 @@ func (s *Store) saveLocked() error {
 }
 
 // Lookup 实现 config.ImageResolver（FR-CFG-011⑤：镜像存在性与类型匹配）。
+//
+// 只认 StateReady（决策 #514）：downloading/failed 一律**不可用**——下载中即可被新 VNF 引用
+// 会导致「引用了一个还没落定的镜像」，failed 则是必然被拒的名字。与「镜像不存在」同源
+// （都返回 ok=false，报错照既有「镜像不存在」口径）。
 func (s *Store) Lookup(name string) (config.ImageInfo, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, ok := s.index[name]
-	if !ok || m.ImportState == StateFailed {
+	if !ok || m.ImportState != StateReady {
 		return config.ImageInfo{}, false
 	}
 	return config.ImageInfo{Name: m.Name, Type: m.Type}, true
@@ -202,13 +252,13 @@ func (s *Store) Lookup(name string) (config.ImageInfo, bool) {
 
 // Names 返回仓库现有镜像名（按名升序）。实现 config.ImageResolver，
 // 供「镜像不存在」的报错列出可选项（附录 A #98）。
-// 与 Lookup 同口径：**不列 failed**——拉取失败/校验失败留下的条目不算可用名，
+// 与 Lookup 同口径（决策 #514）：**只列 ready**——downloading/failed 都不算可用名，
 // 列出来等于把操作者指向一个必然被拒的名字（R84-6 后 failed 条目更常见，故一并收口）。
 func (s *Store) Names() []string {
 	metas := s.List()
 	out := make([]string, 0, len(metas))
 	for _, m := range metas {
-		if m.ImportState == StateFailed {
+		if m.ImportState != StateReady {
 			continue
 		}
 		out = append(out, m.Name)
@@ -268,8 +318,9 @@ func (s *Store) containedPath(name string) (string, error) {
 	return dest, nil
 }
 
-// ErrReferenced 镜像被 VNF/容器引用，不可删除（FR-CMP-033）。
-var ErrReferenced = errors.New("镜像被引用，不可删除")
+// ErrReferenced 镜像被 VNF/容器引用（FR-CMP-033）。删除与**覆盖/发布**两条路径共用同一哨兵，
+// 各自补足语义：删除 →「不可删除」，发布 →「不能覆盖」（决策 #514）。
+var ErrReferenced = errors.New("镜像被引用")
 
 // ErrNotFound 镜像不存在。
 var ErrNotFound = errors.New("镜像不存在")
@@ -280,7 +331,7 @@ var ErrNotFound = errors.New("镜像不存在")
 // 校验），照删就等于按名字去仓库外 os.Remove。
 func (s *Store) Delete(name string, refCount int) error {
 	if refCount > 0 {
-		return fmt.Errorf("%w（%d 个引用）", ErrReferenced, refCount)
+		return fmt.Errorf("%w，不可删除（%d 个引用）", ErrReferenced, refCount)
 	}
 	s.mu.Lock()
 	m, ok := s.index[name]
@@ -356,6 +407,11 @@ func (s *Store) ImportIncoming(name, typ, incomingFile, description string) (Met
 	// 故配置里唯一可用的名字就是仓库中的镜像名——tar 内嵌 tag 与之无关（R84-7 口径不变）。
 	if typ == TypeContainer && s.dockerLoad == nil {
 		return Meta{}, fmt.Errorf("导入容器镜像 %s：未接入 Docker", name)
+	}
+	// 发布前复核（决策 #514）：同名镜像已被引用则拒绝——**在任何落盘/登记之前**，
+	// 失败时仓库文件与索引均不变（backing 克隆的既有 VM 不会被换底）。
+	if err := s.checkPublishAllowed(name); err != nil {
+		return Meta{}, err
 	}
 	sha, size, err := fileSHA256(abs)
 	if err != nil {

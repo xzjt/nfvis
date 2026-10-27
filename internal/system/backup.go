@@ -256,13 +256,22 @@ func (m *Manager) Restore(ctx context.Context, data []byte, user string) (config
 
 // ZeroizeResult 恢复出厂结果摘要。
 type ZeroizeResult struct {
-	RemovedImages int    `json:"removed_images"`
-	Revision      int    `json:"revision"`
-	Reason        string `json:"reason,omitempty"`
+	RemovedImages int `json:"removed_images"`
+	Revision      int `json:"revision"`
+
+	// Residuals 未清掉的残留（逐条含原因）。非空即表示本次**未清干净**——Zeroize 据此返回
+	// 非 nil 错误，调用方（REST 500 / CLI %% / 审计 failure）必须如实报失败，不得当成功
+	// （决策 #517：此前失败只塞进一个 Reason 字符串后 continue，两个出口都不展示 ⇒ 谎报
+	// 「已恢复出厂」，而残留的镜像文件/索引仍在）。
+	Residuals []string `json:"residuals,omitempty"`
 }
 
-// Zeroize 恢复出厂（FR-OPS-007）：提交空配置 → 删除全部镜像 → 账号随空配置复位。
+// Zeroize 恢复出厂（FR-OPS-007）：提交空配置 → 删除全镜像 → 账号随空配置复位。
 // 调用方须已完成双重确认（本方法不再询问）。
+//
+// **部分失败如实上报**（决策 #517）：逐个删镜像失败不阻塞其余，但会**汇总全部残留**并返回
+// 非 nil 错误——已成功清空的配置**不回滚**（那会把账号又装回去，违背「恢复出厂」本身）；
+// 只有全部清空才返回原结果（nil 错误）。
 func (m *Manager) Zeroize(ctx context.Context, user string) (ZeroizeResult, error) {
 	res := ZeroizeResult{}
 	// 会话来源用 config.SourceZeroize：同上（高危动作由操作级助手记两条，引擎不重复判定）。
@@ -289,14 +298,19 @@ func (m *Manager) Zeroize(ctx context.Context, user string) (ZeroizeResult, erro
 
 	if m.images != nil {
 		// 配置已清空 → 引用计数为 0，逐个删除（文件/ Docker 层）。
+		// 尽力而为：单个删除失败不阻塞其余，但**逐条登记残留**（决策 #517）——不再默默 continue。
 		for _, meta := range m.images.List() {
 			if err := m.images.Delete(meta.Name, 0); err != nil {
-				// 尽力而为：单个删除失败不阻塞其余（记录原因）
-				res.Reason = err.Error()
+				res.Residuals = append(res.Residuals,
+					fmt.Sprintf("镜像 %s：删除失败: %v", meta.Name, err))
 				continue
 			}
 			res.RemovedImages++
 		}
+	}
+	if len(res.Residuals) > 0 {
+		return res, fmt.Errorf("恢复出厂未清干净：%d 项残留——%s",
+			len(res.Residuals), strings.Join(res.Residuals, "；"))
 	}
 	return res, nil
 }

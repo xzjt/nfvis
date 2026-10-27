@@ -316,15 +316,26 @@ func isSuperUser(class string) bool { return class == ClassSuperUser }
 // 权限矩阵：super-user 列出**全部用户**的 token；其他 class（含自定义 class）只列自己的。
 // 已过 TTL 的会话先被清扫，不会出现在清单里。输出按签发时间升序（同刻按 ID 排），
 // 保证同一状态多次读取的输出稳定。
+//
+// 决策 #513（round50）：清单按**当前 committed 配置**过滤——已不在册的用户（被删/被
+// zeroize 清掉）不再出现在活动会话里，与 VerifyToken/ActiveTokenID 同一口径。这是纵深防御：
+// 提交路径的主动收尾（装配层）已吊销它们，这里是「万一路径没走到」的第二道，读视图也不能
+// 把一个不存在的人列成「活动」。读不到 committed（引擎异常）时**不过滤**——不因一次读失败
+// 就把所有会话从清单里抹掉（保守：宁可多列，也不谎称「没有会话」）。
 func (s *Service) ListTokens(viewerUser, viewerClass string) []TokenView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked()
+	// 锁序与 VerifyToken 一致（先 s.mu 再 Committed），不引入新的锁环。
+	cfg, cfgErr := s.src.Committed()
 	all := isSuperUser(viewerClass)
 	out := make([]TokenView, 0, len(s.tokens))
 	for _, e := range s.tokens {
 		if !all && e.user != viewerUser {
 			continue
+		}
+		if cfgErr == nil && findUser(cfg, e.user) == nil {
+			continue // 该用户已不在 committed：不算活动会话
 		}
 		out = append(out, TokenView{ID: e.id, User: e.user, Class: e.class, IssuedAt: e.issuedAt, ExpiresAt: e.expiresAt})
 	}
@@ -397,6 +408,11 @@ func (s *Service) RevokeUserTokens(user string) []string {
 // 面向「ticket 已在手、WS 已握上」的终端：这些用途拿不到 Bearer Token，只能靠 ticket 鉴权，
 // 于是登出/吊销不会终止它们。握手期与建立后的收尾都以本方法复核。
 // 空 ID 保守放行为真——调用方拿不到稳定 ID（无凭据来源可比）时不能凭一个空串推断「已吊销」。
+//
+// 决策 #513（round50）在原有「ID 是否还在内存表」之上加一道**按当前 committed 复核用户是否
+// 仍在册**：提交路径的主动收尾（装配层）已负责吊销被删用户的 token，但万一某条路径没走到
+// （纵深防御），也不该让一个用户的终端随一个已撤销的身份继续存在。读不到 committed 时退回
+// 纯内存表判定（不因读失败把有效终端全部踢掉）。锁序与 VerifyToken 一致（先 s.mu 再 Committed）。
 func (s *Service) ActiveTokenID(id string) bool {
 	if id == "" {
 		return true
@@ -404,10 +420,15 @@ func (s *Service) ActiveTokenID(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked()
+	cfg, cfgErr := s.src.Committed()
 	for _, e := range s.tokens {
-		if e.id == id {
-			return true
+		if e.id != id {
+			continue
 		}
+		if cfgErr == nil && findUser(cfg, e.user) == nil {
+			return false // 该用户已不在 committed：凭据随之作废
+		}
+		return true
 	}
 	return false
 }
