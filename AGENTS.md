@@ -368,9 +368,16 @@
   `--verify` **12/0/0**、**真 `.run` 安装 18/0/0**（退出码 0，装后 `show version` = 3.0.33）；
   **发布件上四套件零失败**（`.run` 实装后复跑）：fulltest **306/0/26**、语义 **43/0/0**、
   lifecycle **40/0/3**、pty **10/10**（与 v3.0.32 基线逐项一致）；GitHub Release 三资产
-  （run/deb/SHA256SUMS）；**回下载闭环**：deb 与 `.run` 取回后与构建件 `cmp` **逐字节一致**、
-  服务端资产摘要与本地逐字相同（`.run 8ebeced6…`、deb `b5c22bb0…`；代理对 GitHub 资产偶发 TLS
   中断，`.run` 以 `-C -` 断点续传补齐、deb 走直连完成——如实登记）。
+  **收口后补丁 #521（2026-10-27，复查 GitHub Actions）**：用户追问「Actions 为何自 v3.0.31 起全红」
+  ——根因是 round48 的装配守护用 **nil 管理器**覆盖 VPP 分支，而 `Manager.Runtime()` 无条件返回
+  `&vppRuntime{m: nil}`：**Linux** 构建的读法（`stats_linux.go` 的 `InterfaceCounters`）会经
+  `r.m.statsRead(...)` 解引用 ⇒ 空指针 panic；**非 Linux** 的桩（`stats_other.go`）不解引用 ⇒
+  本地 Windows `make check` 全绿、Linux CI 连续 10 个 run 全红（v3.0.30 及以前无该守护，故全绿）。
+  修法＝`Runtime()` 对 nil 管理器返回**空数据源**（`state.New(nil)` 统一呈现「不可用」，不回落内核
+  计数；产品路径不受影响——另一处调用在 VPP 分支且管理器非 nil）。**Linux 复核**：在 nfvis-vm 上
+  先复现同一 panic，修后 `./cmd/nfvisd/`、`./internal/orchestrator/network/`、`./internal/state/`
+  全绿；新增平台无关守护 `TestManagerRuntimeNilManagerReturnsNoSource`。决策计数 419 → **420**。
 
 ## 验证与口径纪律（决策 #481；对所有会话生效）
 
@@ -1597,7 +1604,7 @@
   「已声明未生效」、恢复重放给出照做指引）；④ 管理口**首次**声明需 `commit confirmed`（后续 commit 即确认）；
   ⑤ `bind-dpdk` 非交互需 `--yes`（缺省被守卫正确拒绝）；⑥ 套件判据是命令级，**夹具缺口会级联**（如容器镜像
   缺失 ⇒ phase 3 整体回滚 ⇒ 同 phase 的 bond 检查一起红）——判读失败先看夹具。
-- 已定决策 419 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
+- 已定决策 420 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线 #300~#403（其中 #350 撤回）、
   **v3 线自 #404 起**（分支 `v3`，已有 #404~#511））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。
   **v3 线最新交接**：`docs/v3-交接-2026-10-12.md`（round15~23 共 9 轮：#460~#466 七条决策 + round17 口径确认
