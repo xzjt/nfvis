@@ -1659,7 +1659,54 @@
   之间仍有极窄的「证书新、私钥旧」可读窗口（现在**可检测且下次启动自愈**，且 API 的 `GetCertificate` 会
   回退启动时加载的那对，不会打瘸管理面）；③ 内核 teardown 的「删 VRF 设备会清 slave 的 master」依赖内核语义
   （用例的假件已按该语义建模）；④ 新增的内核/编排顺序类用例是在**假数据面**上判定的，真机四套件本轮**未跑**
-  （本机为 Windows、无 VPP/libvirt/docker）。**未 commit、未发版**。
+  （本机为 Windows、无 VPP/libvirt/docker）。
+  **真机验证（2026-10-28，nfvis-vm 192.168.155.129，3.0.33~r51）**：起点是**干净的 v3.0.33 发布件**
+  （无对象、无告警、两口在 VPP），管理口令按配置库里的 PBKDF2 哈希**反查核对**（不复用历史笔记）。
+  Linux 上 `go build`/`go vet` 全过；`go test -p 1 ./...` **仅 1 条红**，且证明是**既有非 hermetic 用例**
+  （`TestCLIShowSoftwareResultNoRecord` 读宿主 `/var/lib/nfvis/software/last-result.json`，本机留着上一版
+  3.0.31 的记录 ⇒ 恒红；移开该文件立即绿，已改为路径注入）。修后 Linux `internal/api` 全包 **ok 538s**。
+  逐条复核：**#522** 四项（磁盘名 `../../../../etc/cron.d/pwn` 提交期拒；内核参数 `x"; touch /tmp/pwned; #"`
+  拒且 GRUB 片段干净；NTP 真换行经 REST 被 check 拒；包 `Version: 1.0..2` 在**任何文件操作前**拒、
+  软件目录与 dpkg 状态**前后逐字不变**——另如实登记：`1:../../../…` 这类形态**被 dpkg 自己拒**，
+  真实安装路径上不可达）；**#523** 两 token 会话（持有者见自己草稿与差异，非持有者收 `source: committed`
+  + 空差异）；**#524** 远程自述 `source: system-restore` 改管理口 ⇒ `%% 管理口地址/网关变更必须以
+  commit confirmed 提交`、管理口仍是 .129；**#526** 同一提交删 vs-A + 建 vs-B 用同一接入口 ⇒
+  `BD-Tag: vs-B` 里 `ens224.100` 仍在；**#527** 删不存在的 l3-interface 地址 ⇒ `无匹配配置: ens224`、
+  committed 里没有凭空建出的元素；**#529** 把 `images/index.json` 改坏后重启 ⇒ 服务 active、
+  `GET /images` **503 镜像仓库未接入**、其余端点 200（修复前是启动 panic）；**#530** `-h` 与写错参数
+  都不打印 `NFVIS_PASSWORD`（0 次）、TLS 不匹配证书对**自愈重建**（指纹变化、HTTPS 200、可登录）、
+  登录等时（未知用户 457ms vs 已存在 443ms，修复前未知用户约 1ms）、URL 内嵌凭据在审计两条出口
+  均为 `https://«已隐藏»@…`。
+  ⚠️ **#525 在真机上抓到并修掉三条本轮自己引入的缺陷**（这正是「改完必须真机过一遍」的又一次实证）：
+  ① **组合语句形态无别名**——`set … l3-interface ens224 vlan 100 ip address …`（命令树枚举出的规范序、
+  也是文档推荐写法）报「配置中不存在字段 "l3_interface"」：别名表按 token 数精确匹配，而模型落在
+  `l3_interfaces` 复数数组，组合形态落到通用遍历必然失败；新增 `aliasL3InterfaceVlanThen`（先 vlan、
+  再交给既有叶子别名），用 `reflect.DeepEqual` 钉住与分步写法等价。
+  ② **创建子接口漏 `ExactMatch`**——VPP 26.06 拒绝给非 exact-match 子接口配地址
+  （`sub-interface without exact-match doesn't support IP addressing`，govpp `Unsupported (-126)`，
+  已用 vppctl 绕过产品实证），意味着该特性**自诞生即不可用**；L2 的 trunk 早就带着该标志。
+  ③ **按名复用不验标志**——升级现场里 VPP 留着 v3.0.33 建的**非 exact-match 坏壳**，产品按确定性名
+  查到了就复用 ⇒ 仍然 -126；修法是 `L3Client.SubifExactMatch`（读 `interface_dump` 的 `sub_if_flags`，
+  运行态事实、跨重启成立），不是 exact-match 就删掉重建、问不出来则不复用也不删。
+  修后真机：坏壳被重建且地址落地（`L3 10.92.0.1/24 ip4 table-id 753052`）、
+  **N1 幂等重放**（连续两次全量 `ApplyVRF` 都成功、地址两条都在、`-56` 不再出现）、
+  **N2 回收**（删交换机后 `ens224.100` 消失）、无告警、`NRestarts=0`。
+  **四套件与 v3.0.33 基线逐项一致**：fulltest **306/0/26**、语义 **43/0/0**、lifecycle **40/0/3**、
+  pty **10/10**（R41-T1 仍在——套件副本的业务地址与 ping source 改到 `192.168.77.0/24`）。
+  **顺带修掉一条既有 flaky 判据**：`TestAuditLogsOffsetEffective` 用「两页时间戳不等」当分页见证，
+  而一次提交写两条审计、`now()` 可能落在同一时钟刻度 ⇒ 间歇假红；**基线对照**（`HEAD` 独立 worktree
+  跑 10 次得 2 次失败、本轮树 3 次）证明非本轮引入，判据改为「明细与时间戳全同才算同一条」（12/12 绿）。
+  ⚠️ **一次 VPP SIGSEGV 如实登记（未完全定裁）**：真机首验时出现一次
+  `SIGSEGV`@`mfib_table_entry_delete_index`/`ip6_mfib_table_destroy`/`ip_table_bind`（VPP 26.06 底座栈），
+  随后的 `sw_interface_set_table_reply` 超时导致一次 90s 登录超时。触发时点正是**未含 ExactMatch 修复**的
+  首版走「子接口建成→配地址 -126→补偿删表」那一轮；在 v3.0.33 发布件上重复同一链路 6 轮、修复版上
+  10 轮 vlan 子接口建删（含 IPv6）+ 10 余种 vppctl 直构形态（非 exact-match 子接口 + v6 表 + FIB 项 +
+  切表/删表）**均未再复现**。结论：崩溃无法稳定复现、**不能把责任钉到某一行**；已确认它依赖的那条
+  业务路径在修复版上**不再存在**（实测 0 次），且崩溃栈全在底座 mfib 路径上。**列为继续观察项**。
+  **已提交**（`68e341f`，92 文件 +7399/−294）；pre-commit 钩子的 `go test ./...` 在本机因**并行**下
+  `internal/api` 超 600s 二进制超时而失败（该包串行需 747s、Linux 上 538s、两者**全绿**），
+  故按钩子自身文档用 `NO_VERIFY=1` 提交并在此登记：等效检查已逐包串行跑过。
+  证据 `docs/evidence/v3-round51-review-fixes-realmachine.txt`。
 - 已定决策 431 项见规格书附录 A（main/1.x 线 #1~#201；**v2/2.x 与 v3/3.x 是各自独立的开发线**，决策自 **#300** 起、
   #202~#299 为 main 预留号段，双线发版约定见决策 #300，v2 线 #300~#403（其中 #350 撤回）、
   **v3 线自 #404 起**（分支 `v3`，已有 #404~#511））——实现中遇到"该怎么做"的问题，先查附录 A，不要重新发明。

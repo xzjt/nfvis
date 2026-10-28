@@ -1,0 +1,338 @@
+# round51 真机验证证据（nfvis-vm 192.168.155.129，2026-10-28）
+
+第三次全仓只读评审（38 条缺陷 / 决策 #522~#532）的真机复核记录。
+代码：分支 `fix/round51-review-findings`，提交 `68e341f`；本机安装件 `3.0.33~r51`（deb，`-Zzstd`，
+`SOURCE_DATE_EPOCH=1793079147`）。
+
+## 0. 起验基线
+
+- 现场：Ubuntu 26.04.1 / 内核 7.0.0-38 / VPP 26.06-release / libvirt 12.0.0 / Docker 29.1.3。
+- 起点为**干净的 v3.0.33 发布件**（`dpkg -l nfvis` = 3.0.33），无业务对象、无 active 告警；
+  两个业务口在 VPP（`ens192`/`ens224`，DPDK 已绑定），1G 池 2 页 / 2M 池 768 页。
+- 管理口令由本机配置库的 PBKDF2 哈希**反查核对**得到（不复用历史笔记里的值，避免张冠李戴）：
+  用 `internal/aaa.HashPassword` 同参数（sha256 / 600000 轮 / 32 字节）对候选口令逐一代算比对。
+- 源树经 `git archive`（含未提交工作树快照）同步到 `/root/src-r51`，VM 上 `go build ./...` 与
+  `go vet ./...` 均通过；依赖走代理 `192.168.155.1:2333`。
+
+## 1. Linux 全仓 go test（平台分叉检查）
+
+`go test -p 1 -count=1 ./...` 在 VM 上跑：**除 1 条外全绿**，那 1 条是**既有**的非 hermetic 用例
+（与本轮改动无关，已在本轮顺手修掉，见 §6）：
+
+```
+--- FAIL: TestCLIShowSoftwareResultNoRecord
+    无记录时应如实说明，实际:
+    结果: 成功 … 版本: 3.0.31 …
+```
+
+**归因证据（决定性）**：该用例跑生产路径 `show system software result`，直接读宿主
+`/var/lib/nfvis/software/last-result.json`；本机因上一版发版验证留下了 3.0.31 的记录 ⇒ 恒失败。
+把该文件临时移开后**同一用例立即 ok**（随后原样还原）：
+
+```
+$ mv /var/lib/nfvis/software/last-result.json /root/last-result.json.bak
+$ go test ./internal/api/ -run TestCLIShowSoftwareResultNoRecord   → ok 0.326s
+$ mv /root/last-result.json.bak /var/lib/nfvis/software/last-result.json   (restored)
+```
+
+修掉后 `go test ./internal/api/ -p 1` 在 Linux 上 **ok 538.292s**（全包，非子集）。
+
+## 2. #522 用户可控字符串不得直达 root 路径 / GRUB / 宿主配置
+
+### 2.1 磁盘名穿越（模型层拒绝）
+
+```
+nfvis# set virtual-machine-functions t1 disks ../../../../etc/cron.d/pwn size-gb 1
+[ok] …（set 阶段只入候选）
+nfvis# commit
+校验失败（candidate 保留在本会话内…）:
+  - virtual-machine-functions[t1].disks[../../../../etc/cron.d/pwn].name:
+    数据盘名称 "../../../../etc/cron.d/pwn" 不合法（字母数字-_.，≤64 字符）
+```
+
+正控：`disks data1 size-gb 1` 正常 `commit 成功 (revision 333)`。
+
+### 2.2 内核启动参数（提交期拒绝；注入串被点名）
+
+```
+nfvis# set system kernel params x"; touch /tmp/pwned; #"
+校验失败:
+  - system.kernel.params[0]: 内核附加参数 "x; touch /tmp/pwned; #" 含不允许的字符：只接受
+    字母数字与 _ . = , : @ + -（空白、引号、反斜杠、; $ 反引号与换行一律拒绝——取值会被写进
+    root 执行的 GRUB 片段）
+```
+
+`/etc/default/grub.d/99-nfvis.cfg` 中**无** `pwned`/`touch` 字样（第二层过滤亦生效）。
+正控：`params intel_pstate=disable` → `commit 成功`。
+
+### 2.3 NTP 换行注入（REST 真换行，check 即拒）
+
+CLI 分词器会把换行规整掉，故用 REST 直接提交含真换行的值：
+
+```
+PUT /configuration/candidate  {"system":{"ntp":[{"server":"evil.example\nserver attacker.example"}]}}
+→ 200（候选收下）
+POST /configuration/check
+→ {"errors":[{"path":"system.ntp[0].server","message":"NTP 服务器 \"evil.example\\nserver attacker.example\"
+   非法：须为 IP 地址或主机名（不含空白、引号、换行，也不以 '-' 开头）"}],"ok":false}
+```
+
+第二层（渲染器过滤）在 Linux 上由 `TestFixR51RenderChronySourcesFiltersInjection`、
+`TestFixR51ChronyApplierReportsIgnoredAndFailsWhenAllInvalid` 实跑通过。
+正控：`set system ntp server 192.168.155.1` → `commit 成功`，`/etc/chrony/sources.d/nfvis.sources`
+内容为 `server 192.168.155.1`（单行、无注入）。
+
+### 2.4 安装包 Version（在任何文件操作前拒绝）
+
+dpkg 自身对 `Version` 有语法约束（不以数字开头、含 `/` 或引号者连包都打不出来），
+故用 dpkg **接受**的形态 `1.0..2` 构造：
+
+```
+$ dpkg-deb -f /tmp/badpkg.deb Version   → 1.0..2   （dpkg 接受）
+$ request system software add /tmp/badpkg.deb --yes
+%% 软件包 badpkg.deb 的 Version 字段不可用（版本号含非法字符: "1.0..2"）：拒绝安装
+   （该值会被拼进归档路径与以 root 执行的安装脚本）
+```
+
+副作用核对：`/var/lib/nfvis/software/` 目录清单**前后逐字相同**（未归档、未安装），
+仓库外无 `*escaped*` 文件；`dpkg -l nfvis` 仍为 `3.0.33~r51`。
+
+> 如实登记：`1:../../../r51-escaped` 这类"能折叠出路径"的形态**被 dpkg 自己拒绝**
+> （`version number does not start with digit`），即真实安装路径上不可达；本项防护的价值在于
+> 自定义/手工投递的包以及 dpkg 未来放宽语法的情形——校验仍在**任何文件操作之前**执行。
+
+## 3. #525 L3 VLAN 子接口（本轮真机抓到 3 条本轮引入的缺陷并修掉）
+
+### 3.1 缺陷 A：组合语句形态无别名（文档推荐写法不可用）
+
+首验时按命令树枚举出的规范序提交：
+
+```
+set virtual-switches vs-l3v l3-interface ens224 vlan 100 ip address 10.99.0.1/24
+→ %% 配置中不存在字段 "l3_interface"（多为关键字位置有误或语句不完整…）
+```
+
+根因：别名表按 token 数**精确匹配**，而模型把 l3-interface 落在 `l3_interfaces`（复数数组），
+组合形态（9 token）无规则命中 ⇒ 落到通用树遍历必然报"字段不存在"。
+分步写法（`… vlan 100` 一条、`… ip address …` 一条）当时是通的——即"文档推荐写法不可用"。
+
+修法：新增 `aliasL3InterfaceVlanThen`，把组合形态裁成"先 vlan、再交给既有叶子别名"两步，
+与分步写法**逐字等价**（用例 `TestFixR51CLIL3InterfaceVlanCombinedForms` 直接比较两棵候选树
+`reflect.DeepEqual`）。红-绿已验：撤掉该别名后用例红的报错就是真机那句
+`配置中不存在字段 "l3_interface"`。
+
+### 3.2 缺陷 B：子接口创建漏 `ExactMatch`（永远配不上地址）
+
+第二次真机提交：
+
+```
+%% 底座下发失败（已补偿）: 下发失败 vrf[vs-l3v]: 接口 ens224 配地址 10.99.0.1/24:
+   VPPApiError: Unsupported (-126)
+```
+
+**底座语义实证**（绕过产品直接 vppctl）：
+
+```
+$ vppctl set interface ip address ens224.100 10.99.0.1/24
+set interface ip address: sub-interface without exact-match doesn't support IP addressing
+$ vppctl create sub-interfaces ens224 200 dot1q 200 exact-match     → 成功
+$ vppctl set interface ip address ens224.200 10.97.0.1/24           → 成功
+$ vppctl show interface address ens224.200 → L3 10.97.0.1/24
+```
+
+即 VPP 26.06 **只允许 exact-match 子接口配地址**；L2 的 trunk 端口早就带着该标志
+（`l2.go desiredMembers`），L3 侧此前漏了 ⇒ 该特性自诞生即不可用。
+修法：L3 创建带 `ExactMatch: true`（用例 `TestFixR51N8L3SubifRequiresExactMatch`）。
+
+### 3.3 缺陷 C：按名复用不验标志（复用历史坏壳）
+
+第三次真机提交**仍然** -126。现场核对：
+
+```
+$ vppctl show interface | grep ens224        → ens224.100 存在
+$ vppctl set interface ip address ens224.100 10.92.0.1/24
+  → sub-interface without exact-match doesn't support IP addressing
+```
+
+原因是 VPP 里那个 `ens224.100` 是**早先版本（v3.0.33）建的、没带 exact-match 的壳**，
+产品按确定性名查到它就复用了 —— 只把创建改成带标志**不够**，复用路径同样要验。
+修法：`L3Client.SubifExactMatch`（读 `interface_dump` 的 `sub_if_flags`，
+是运行态事实、跨重启成立）；不是 exact-match 就删掉重建，问不出来则不复用也不删。
+用例 `TestFixR51N9StaleNonExactMatchSubifRebuilt` / `TestFixR51N9HealthySubifStillReused`。
+
+### 3.4 修好后的真机证据（重装 deb 后）
+
+```
+# 前置：VPP 里留着 v3.0.33 建的非 exact-match 坏壳 ens224.100
+$ vppctl set interface ip address ens224.100 10.92.0.1/24
+  → sub-interface without exact-match doesn't support IP addressing        （坏壳确认）
+
+$ set virtual-switches vs-fix l3-interface ens224 vlan 100 ip address 10.92.0.1/24
+$ commit → commit 成功 (revision 364)
+$ vppctl show interface address ens224.100
+ens224.100 (dn):
+  L3 10.92.0.1/24 ip4 table-id 753052 fib-idx 1          ← 坏壳被重建、地址落地
+$ systemctl show vpp -p NRestarts → 0                    ← 无崩溃
+```
+
+N1 幂等重放（"只能写一次"的原始缺陷）：
+
+```
+$ … ip address 10.98.0.1/24 → commit 成功 (revision 344)   ← 触发 ApplyVRF 全量重放
+$ … static-routes 172.16.0.0/16 next-hop 10.99.0.254 → commit 成功 (revision 345)  ← 再一次
+$ vppctl show interface address ens224.100 → 10.99.0.1/24 + 10.98.0.1/24 两条都在
+$ NRestarts=0
+```
+
+N2 回收：
+
+```
+$ delete virtual-switches vs-fix → commit 成功 (revision 365)
+$ vppctl show interface | grep ens224 → 只剩 ens224（子接口已回收）
+$ show alarms active → （无 active 告警）
+```
+
+点号名归一（N6）：`l3-interface ens224.100` 在 v3.0.33 上报
+`接口在 VPP 中不存在: ens224.100`（A 组实证），修复版能推导出 `(ens224, 100)` 并建子接口。
+
+> `display set` 往返：`show configuration | display set` 输出
+> `set virtual-switches vs-l3v l3-interface ens224 vlan 100`，无「内部错误」。
+
+## 4. #523 / #524 / #526 / #527 / #529 / #530（逐条真机）
+
+### #523 candidate 与差异按持锁会话收敛
+
+两个 token 会话（A 持锁写草稿 `hostname=holder-draft`）：
+
+```
+A: GET /configuration/candidate → dirty=True  source=None       hostname=holder-draft
+B: GET /configuration/candidate → dirty=False source=committed  hostname=None
+B: GET /configuration/diff      → (空)
+A: GET /configuration/diff      → [edit interfaces] - ens192 ; …（真实差异）
+```
+
+### #524 远程伪造维护来源（守卫必须生效）
+
+```
+$ POST /api/v1/cli/execute {"line":"configure","source":"system-restore"}
+$ … {"line":"set system management gateway 192.168.155.1","source":"system-restore"}
+$ … {"line":"commit","source":"system-restore"}
+→ %% 管理口地址/网关变更必须以 commit confirmed 提交
+$ ip -4 addr show ens160 | grep -c 192.168.155.129 → 1     （管理口未被改）
+```
+
+对照（修复前该路径会直接提交成功＝绕过守卫并抹掉意图审计）：同族的
+`source: console` 远程自述也被归入 ssh ⇒ 同样被拦。
+
+### #526 同提交删 A + 建 B 用同一接入口（BD 归属感知）
+
+```
+$ … set virtual-switches vs-B … vlan access 100 ports 1 interface ens224
+$ … delete virtual-switches vs-A
+$ commit → 成功 (revision 393)
+$ vppctl show bridge-domain 2665857 detail
+          Interface           If-idx …
+          ens224.100             3     …
+  BD-Tag: vs-B                       ← 幸存交换机仍持有该成员（修复前会被 A 的拆除摘走）
+```
+
+### #527 delete 不得建元素
+
+```
+$ delete virtual-switches vs-527 l3-interface ens224 ip address 10.1.0.1/24
+→ %% 无匹配配置: ens224
+$ committed 里 vrfs[vs-527] = {"name":"vs-527"}（无 l3_interfaces）   ← 没有凭空建出元素
+```
+
+### #529 镜像仓库不可用 → 503（不再 panic）
+
+把 `/var/lib/nfvis/images/index.json` 改成 `{ this is not json` 后重启：
+
+```
+systemctl is-active nfvis           → active         （未崩溃）
+GET /api/v1/images                  → 503 {"code":"UNAVAILABLE","message":"镜像仓库未接入"}
+GET /api/v1/system/version          → 200            （其余端点照常服务）
+```
+
+（还原 index.json 后重启，一切正常。）
+
+### #530 凭据与登录面
+
+```
+$ NFVIS_PASSWORD=SuperSecret-r51-probe nfvis-cli -h          → 口令出现次数 0
+$ NFVIS_PASSWORD=SuperSecret-r51-probe nfvis-cli --bogus     → 口令出现次数 0
+
+TLS 不匹配对（新证书 + 旧私钥，模拟换证中断）后重启：
+  日志：未提供证书，已使用自签证书启用 HTTPS … fingerprint F81F0D9D…
+  证书指纹：6E:81:4B…（新，与备份的 20:55:11… 不同 = 已重建）
+  GET /metrics → https=200；登录 token 长度 43（管理面可用）
+
+登录等时（未知用户 vs 已存在用户，均口令错）：
+  nosuchuser-r51 → 457 ms
+  admin          → 443 ms          （同量级；修复前未知用户约 1ms）
+
+URL 内嵌凭据脱敏（software add 是高危动作，落 intent + failure 两条审计）：
+  审计：安装软件包 https://«已隐藏»@repo.example.com/nfvis…   （intent 与 failure 两条均如此）
+  明文 S3cretUrl 出现 0 次
+```
+
+## 5. 四套件（同一 r51 构建，与 v3.0.33 基线逐项一致）
+
+```
+阶段 8 小结          通过 23 / 失败 0 / 预期报错 4
+fulltest 合计        通过 306 / 失败 0 / 预期报错 26      FULLTEST_EXIT=0
+语义    合计         通过 43 / 失败 0 / 不可判定 0 / 登记 0  SEMANTIC_EXIT=0
+lifecycle 合计       通过 40 / 失败 0 / 跳过（不可判定）3 / 登记 0  LIFECYCLE_EXIT=0
+pty                  通过 10 / 失败 0                     PTY_EXIT=0
+```
+
+与 v3.0.33 发版基线（306/0/26、43/0/0、40/0/3、10/10）**逐项相同**。
+
+套件前置（沿用既往，本轮实测确认）：`SRV=https://127.0.0.1:443`、
+`CLI_BIN=/usr/bin/nfvis-cli`、`API_PORT=443`、`NFVIS_PASSWORD=…`、
+`FIXTURE_IMAGE=alpine` `FIXTURE_CT_IMAGE=ct`（**仓库名**不是 Docker tag）；
+**R41-T1 仍在**——阶段 2 的业务地址与阶段 5 的 ping source 已改到 `192.168.77.0/24`；
+`docker alpine:3.20` 与镜像仓库里的 `alpine`/`ct` 在位。
+
+## 6. 本轮顺带修掉的两条既有测试缺陷（非产品缺陷）
+
+1. **非 hermetic 用例**：`TestCLIShowSoftwareResultNoRecord` 跑生产读口、直接读宿主
+   `/var/lib/nfvis/software/last-result.json` ⇒ 在"装过产品/跑过升级"的机器上恒红、在干净 CI 上恒绿。
+   改为路径注入（`renderSoftwareResultPath` 指向必然不存在的临时路径），并新增一条
+   `TestCLIShowSoftwareResultProdDelegatesToSameRenderer` 钉住"生产读口与渲染逻辑同源"。
+2. **flaky 判据**：`TestAuditLogsOffsetEffective` 用"两页时间戳不等"当分页见证，而一次提交会写
+   两条审计（操作级 + 引擎差异行），两条 `now()` 可能落在**同一时钟刻度**（Windows 实测同值）
+   ⇒ 间歇假红。**基线对照**：在 `HEAD`（未含本轮改动）的独立 worktree 上跑 10 次得 2 次失败，
+   本轮树上 3 次 —— 统计上同一现象、非本轮引入。改为"明细与时间戳全同才算同一条"，
+   修后 12/12 通过。
+
+## 7. 一次 VPP SIGSEGV 的归因（如实登记，未完全定裁）
+
+过程中出现**一次** VPP 崩溃（`vpp[192193] received signal SIGSEGV`，栈顶为
+`mfib_entry_get_fib_index` ← `mfib_table_entry_delete_index` ← `ip6_mfib_table_destroy` ←
+`mfib_table_bind` ← `ip_table_bind` ← API 消息处理），随后 nfvisd 侧 `sw_interface_set_table_reply`
+超时、VPP 重连（`NRestarts=1`），并导致一次 90s 登录超时（管理面被 VPP 断连卡住）。
+
+- **触发时点**：正是"先装了**未含 ExactMatch 修复**的 r51 首版，提交 vlan 子接口 → 地址下发
+  `-126` → 补偿删表"的那一轮（04:52）。该路径的特征是"子接口建成但配不上地址，随后补偿删表"。
+- **A/B 尝试**：在 **v3.0.33 发布件**上重复同一链路（REST 写 `vlan` 字段 → 提交 → `-126` → 补偿）
+  6 轮、以及在修复版上做 10 轮 vlan 子接口建/删（含 IPv6 地址）、用 vppctl 直接构造
+  "非 exact-match 子接口 + v6 表 + FIB 项 + 表切换/删除"等 10 余种形态，**均未再复现**。
+- **结论（如实）**：崩溃**未能稳定复现，因而无法把责任钉到某一行**；已确认的是：
+  ① 触发它的那条业务路径（非 exact-match 子接口 → 配地址失败 → 补偿删表）在修复版上
+  **已不存在**（创建带标志、复用验标志、坏壳重建），实测 0 次崩溃；
+  ② 崩溃栈全部落在 VPP 26.06 的 `ip_table_bind`/mfib 销毁路径上，属**底座**代码，
+  我方只发了一条 `set interface table` 类请求；
+  ③ 这是一条**应该继续观察**的项：若后续在"删表/切表与接口归属变更交错"的现场再见到，
+  应先抓 `vppctl show ip6 table` + 崩溃栈再判定。
+
+## 8. 现场还原
+
+- 业务对象：无 `virtual-switches`/`vs-*`/VNF/容器残留（`show virtual-switches`、
+  `show virtual-machine-functions`、`show container-functions` 均为空）。
+- 数据面：`request vpp restart` 后 `ens192`/`ens224` 两物理口在 VPP，`NRestarts=0`，
+  `show alarms active` 无 active 项。
+- 我造的测试对象（vppctl 手建的 `ens224.*` 子接口与 6000~/8888 等测试表）随数据面重启清除。
+- 配置库：`committed` 回到本轮起点内容（接口/vpp/资源池/登录/数据面/idle-timeout 17），
+  仅 revision 号推进；`/var/lib/nfvis/software/last-result.json` 与 `images/index.json` 均已还原。
+  配置库原件备份 `/root/nfvis-db-r50.bak`（round50 遗留）、本轮 index.json 备份 `/root/index.json.bak`。
