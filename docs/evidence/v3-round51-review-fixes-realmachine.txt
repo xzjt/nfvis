@@ -336,3 +336,43 @@ pty                  通过 10 / 失败 0                     PTY_EXIT=0
 - 配置库：`committed` 回到本轮起点内容（接口/vpp/资源池/登录/数据面/idle-timeout 17），
   仅 revision 号推进；`/var/lib/nfvis/software/last-result.json` 与 `images/index.json` 均已还原。
   配置库原件备份 `/root/nfvis-db-r50.bak`（round50 遗留）、本轮 index.json 备份 `/root/index.json.bak`。
+
+## 9. 发布件验证（3.0.34）
+
+- **产物**：deb `2f621616…`（11,448,964 B）、`.run` `b85f9e2d…`（186,221,043 B，载荷 239 deb）。
+  各**两打逐字节一致**（`SAME=yes` / `cmp` 通过）。
+- **离线包**：结构自检 **通过 20 / 失败 0**；`--verify` **通过 12 / 失败 0 / 不可判定 0**；
+  **真 `.run` 安装** `install_rc=0`、**自检 18/0/0**、装后 `show version` = `3.0.34`
+  （既有 admin 口令沿用，配置与业务口状态保持）。
+- **发布件上四套件**（`.run` 安装后，同一构建）：
+
+  ```
+  阶段 8 小结          通过 23 / 失败 0 / 预期报错 4
+  fulltest 合计        通过 306 / 失败 0 / 预期报错 26      FULLTEST_EXIT=0
+  语义    合计         通过 43 / 失败 0 / 不可判定 0 / 登记 0  SEMANTIC_EXIT=0
+  lifecycle 合计       通过 40 / 失败 0 / 跳过（不可判定）3 / 登记 1  LIFECYCLE_EXIT=0
+                       （「登记 1」= L2-3 的已知时序项：重启 VPP 窗口内查不了 ≠ 查到残渣，
+                         与 v3.0.32 载明的同一现象，单跑归零）
+  pty                  通过 10 / 失败 0                     PTY_EXIT=0
+  ```
+
+  **第一遍曾报 14 红**，逐条定位为**夹具缺口**而非产品问题：
+
+  ```
+  ✗ request images upload name alpine:3.20 type container-image file /data/incoming/ct.tar
+       | %% open /data/incoming/ct.tar: no such file or directory
+  → 容器对象 cli-ct2 未建立 ⇒ 阶段 4/7 的 start/show/log/exec 全部级联红
+  ```
+
+  根因：上一轮套件收尾把 `docker alpine:3.20` 镜像与 `/data/incoming/*` 一起清掉（既往登记的坑），
+  于是阶段 3 的 `docker save` 无声失败。**重备夹具**（`docker pull alpine:3.20` + `docker save` 到
+  `/data/incoming/ct.tar`）后重跑：**306/0/26**，与基线一致。
+
+- **回下载闭环**（GitHub Release，走代理 `192.168.155.1:2333`）：
+
+  ```
+  deb  rc=200 size=11448964   sha256 2f621616…   cmp 与构建端逐字节一致
+  run  rc=200 size=186221043  sha256 b85f9e2d…   cmp 与构建端逐字节一致
+  sha256sum -c SHA256SUMS → 两件均 OK
+  GitHub 服务端资产摘要 → sha256:b85f9e2d… / sha256:2f621616…（与构建端逐字相同）
+  ```
