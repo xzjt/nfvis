@@ -20,6 +20,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -94,8 +95,37 @@ func (m *TLSManager) CertPath() string { return filepath.Join(m.dir, "server.crt
 func (m *TLSManager) KeyPath() string  { return filepath.Join(m.dir, "server.key") }
 
 // Info 读取证书信息；文件缺失或解析失败返回 ok=false。
+//
+// ⚠️ 它只回答「证书文件能不能解析」，**不回答「这对证书+私钥能不能用」**——私钥丢失/不匹配时
+// 它照样返回 ok=true。判断可用性请用 PairUsable / Usable（修 R51-M11）。
 func (m *TLSManager) Info() (TlsInfo, bool) {
 	return InfoFile(m.CertPath())
+}
+
+// PairUsable 判定一对证书/私钥文件是否**成对可用**（能否一起被 crypto/tls 加载）——与 API 侧
+// 建 HTTPS 服务用的是同一个判据（tls.LoadX509KeyPair）。
+//
+// 修 R51-M11：此前只判「证书能解析 **且** 两个路径都存在」（Info + os.Stat），于是私钥从未写出
+// （Install/regenerate 里那两次独立的 os.WriteFile 之间的中间态）、私钥被换/被截断、或证书与
+// 私钥本就不匹配时，装配层都判「有已装证书、用它」——而 API 侧加载失败，**每一次 TLS 握手都错**，
+// 管理面彻底不可达，且没有明文回退、没有自愈（只能旁路救场）。
+//
+// 做成**方法**是必需的：装配层把可用性读口当作 `tlsCertSource` 的**硬成员**用（见
+// cmd/nfvisd/tls_resolve.go，那里有 `var _ tlsCertSource = (*system.TLSManager)(nil)` 的编译期
+// 断言）——漏实现即编译失败，不会出现「可选断言不上、严格判据从未生效而单测全绿」。
+func (m *TLSManager) PairUsable(certPath, keyPath string) bool {
+	_, err := tls.LoadX509KeyPair(certPath, keyPath)
+	return err == nil
+}
+
+// Usable 判定磁盘上的服务证书是否可用：证书可解析（Info）**且**与私钥成对（PairUsable）。
+// 半残（私钥丢失/不匹配）一律视为「没有可用证书」⇒ 调用方重新生成自签证书自愈。
+func (m *TLSManager) Usable() (TlsInfo, bool) {
+	info, ok := m.Info()
+	if !ok || !m.PairUsable(m.CertPath(), m.KeyPath()) {
+		return TlsInfo{}, false
+	}
+	return info, true
 }
 
 // InfoFile 解析指定证书文件的信息。
@@ -145,11 +175,9 @@ func (m *TLSManager) Install(certPEM, keyPEM string) (TlsInfo, error) {
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return TlsInfo{}, err
 	}
-	if err := os.WriteFile(m.CertPath(), normalizePEM("CERTIFICATE", cert.Raw), 0o644); err != nil {
-		return TlsInfo{}, err
-	}
-	if err := os.WriteFile(m.KeyPath(), ensurePEMKey(keyBlock), 0o600); err != nil {
-		return TlsInfo{}, err
+	if err := writePairAtomic(m.CertPath(), m.KeyPath(),
+		normalizePEM("CERTIFICATE", cert.Raw), ensurePEMKey(keyBlock)); err != nil {
+		return TlsInfo{}, fmt.Errorf("写入证书与私钥: %w", err)
 	}
 	info, ok := InfoFile(m.CertPath())
 	if !ok {
@@ -194,15 +222,14 @@ func (m *TLSManager) regenerate(hostname string, ips []string) (TlsInfo, error) 
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return TlsInfo{}, err
 	}
-	if err := os.WriteFile(m.CertPath(), normalizePEM("CERTIFICATE", der), 0o644); err != nil {
-		return TlsInfo{}, err
-	}
 	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return TlsInfo{}, err
 	}
-	if err := os.WriteFile(m.KeyPath(), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
-		return TlsInfo{}, err
+	if err := writePairAtomic(m.CertPath(), m.KeyPath(),
+		normalizePEM("CERTIFICATE", der),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})); err != nil {
+		return TlsInfo{}, fmt.Errorf("写入证书与私钥: %w", err)
 	}
 	info, ok := InfoFile(m.CertPath())
 	if !ok {
@@ -303,6 +330,67 @@ func normalizePEM(typ string, der []byte) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der})
 }
 
+// writePairAtomic 原子替换一对 PEM 文件（证书 0644、私钥 0600），修 R51-M11。
+//
+// 为什么必须原子：Install / regenerate 此前是两次独立的 os.WriteFile——换证窗口内一个正在建立
+// 连接的读者会读到「新证书 + 旧私钥」这一对不匹配的文件（控制台的 GetCertificate 正是那样读的，
+// round47 观测到一次 `x509: certificate signed by unknown authority`）。
+//
+// 步骤与崩溃安全：① 两个文件**都**先写成同目录下的临时文件——任一步失败即返回，旧的一对原封
+// 不动（这是崩溃安全的关键：任何中途失败都不会留下半个新文件冒充完整证书）；② 逐个
+// `os.Rename` 进位（同一文件系统内 rename 原子，读者绝不会看到半写文件）。
+//
+// 顺序：**先私钥、后证书**。证书是「已装证书」的身份基准（Info() 的指纹、日志与运维比对都用
+// 它），把它放最后一步意味着换证窗口内读到的仍可能是**上一份完整安装**的那张证书；一旦读者恰好
+// 看到「新私钥 + 旧证书」，这对不成对的文件会被 PairUsable/Usable 判为不可用 ⇒
+// ResolveTLS/EnsureSelfSigned 重新生成自签证书把它修好，而不会把「新证书 + 旧私钥」当作已装证书
+// 继续用（那正是本条缺陷的现场形态）。
+func writePairAtomic(certPath, keyPath string, certPEM, keyPEM []byte) error {
+	certTmp, err := writePEMTemp(filepath.Dir(certPath), filepath.Base(certPath), certPEM, 0o644)
+	if err != nil {
+		return err
+	}
+	keyTmp, err := writePEMTemp(filepath.Dir(keyPath), filepath.Base(keyPath), keyPEM, 0o600)
+	if err != nil {
+		_ = os.Remove(certTmp) // 还没动过正式文件：清掉临时件即回到旧的一对
+		return err
+	}
+	if err := os.Rename(keyTmp, keyPath); err != nil {
+		_ = os.Remove(certTmp)
+		_ = os.Remove(keyTmp)
+		return err
+	}
+	if err := os.Rename(certTmp, certPath); err != nil {
+		_ = os.Remove(certTmp)
+		return err
+	}
+	return nil
+}
+
+// writePEMTemp 在 dir 下写一个临时 PEM 文件（同目录 ⇒ rename 在同一文件系统内原子），
+// 返回其路径。CreateTemp 建件即 0600，再按目标权限收口（证书 0644 / 私钥 0600）。
+func writePEMTemp(dir, base string, data []byte, mode os.FileMode) (string, error) {
+	f, err := os.CreateTemp(dir, "."+base+".*.tmp")
+	if err != nil {
+		return "", err
+	}
+	name := f.Name()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := os.Chmod(name, mode); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	return name, nil
+}
+
 // ensurePEMKey 保留原私钥 PEM（含类型头），仅确保末尾换行。
 func ensurePEMKey(block *pem.Block) []byte {
 	return pem.EncodeToMemory(block)
@@ -324,14 +412,18 @@ func SortedIPs(ips []string) []string {
 	return out
 }
 
-// EnsureSelfSigned 确保存在可用的服务证书：已存在则原样返回，缺失则生成自签证书。
+// EnsureSelfSigned 确保存在**可用**的服务证书：可用则原样返回，缺失或半残则生成自签证书。
 //
 // FR-SEC-004 / FR-API-001（决策 #72）：规格要求「REST over HTTPS（自签证书，可换）」，
 // 而原实现未配置证书时直接以明文 HTTP 提供服务。改为默认自签，明文需显式开启。
 // SAN 由 RegenerateSelfSigned 按本机监听地址推导（调用方不得指定，决策 #99）。
 // 返回 generated 表示本次新建了证书。
+//
+// 修 R51-M11：判据从「证书存在且可解析（Info）」改为「证书与私钥**成对可用**（Usable）」——
+// 私钥从未写出（两次独立 os.WriteFile 的中间态）或与证书不匹配时，旧判据原样返回那张永远握不上
+// 手的证书，管理面每一次握手都错且不自愈；现在这类半残会被重签自签证书修好。
 func (m *TLSManager) EnsureSelfSigned(hostname string) (info TlsInfo, generated bool, err error) {
-	if existing, ok := m.Info(); ok {
+	if existing, ok := m.Usable(); ok {
 		return existing, false, nil
 	}
 	info, err = m.RegenerateSelfSigned(hostname)

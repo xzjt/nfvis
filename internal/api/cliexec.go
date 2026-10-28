@@ -179,6 +179,12 @@ type cliExecutor struct {
 	// callerTokenID 发起本条命令的会话稳定 ID（决策 #301；ExecuteAs 注入，Execute 起始复位）。
 	// 「是否当前会话」标记与「吊销自己的会话」提示都以此为判据；空串 = 调用方没有稳定 ID（不猜）。
 	callerTokenID string
+	// callerUser/callerSource 发起本条命令的会话身份（与 callerTokenID 同一注入点）。
+	// 管道阶段的 `| compare` 用它们判「本会话是否持有编辑锁」——candidate 及其差异属于**持有者**，
+	// 非持有者不得看到别人的草稿（round51 评审 L15；与 REST `/configuration/diff` 同一口径，
+	// 见 pipes.go 的 compare 分支）。
+	callerUser   string
+	callerSource string
 	// issueConsole 签发 console 一次性 ticket 并返回 ws 相对路径与有效期
 	// （M4-12；由 Server.New 注入，复用 handleConsoleWS 的同一 ticket 表与审计落点）
 	issueConsole func(vm, user string) (wsPath string, ttl int, err error)
@@ -381,6 +387,8 @@ func (x *cliExecutor) ExecuteAs(user, class, source, tokenID, line string) CLIER
 	x.warningPending = false
 	x.displaySetOverride = ""
 	x.callerTokenID = tokenID
+	x.callerUser = user
+	x.callerSource = source
 	var out string
 	if perr != nil {
 		out = "%% " + perr.Error() + "\n"
@@ -1037,6 +1045,19 @@ func (x *cliExecutor) execSetDelete(user, source string, s *cliSession, op strin
 	}
 	if _, _, err := schema.Match(schema.ConfigPathTree(), full); err != nil {
 		return "%% " + err.Error() + "\n"
+	}
+	// M16（round51 评审）：可选修饰关键字**不得充当**其同级必需参数的取值——`set system ntp
+	// server prefer` 曾被别名表按 `{"system","ntp","server","*"}` 收下，静默建出一台**名字叫
+	// prefer 的服务器**（模型校验只拒绝空服务器名，commit 照样通过）。
+	//
+	// 判在**操作者语句入口**（而非 applyStatement）：applyStatement 还被 `| display set` 的
+	// 回放自校验复用（setstmt.go），而那里发出的是**配置里已有的取值**——若某份配置真带着
+	// 名为 prefer 的服务器（REST/load 直写可达），把守卫放进回放会让一条**读命令**报内部错误。
+	// 只拦 set（delete 不建配置，落 ntpServer 的「无匹配配置」已是如实报错）。
+	if op == "set" {
+		if err := checkModifierNotParamValue(full); err != nil {
+			return "%% " + err.Error() + "\n"
+		}
 	}
 	sess := x.sessOf(user, source)
 	if err := x.engine.Edit(sess); err != nil {
@@ -2408,6 +2429,61 @@ func requireScalarBeforeKeyword(node *schema.Node, cur map[string]any, prefix []
 		}
 		return fmt.Errorf("语句不完整：%s 之后需要先给 %s 取值，再跟 %s（可用 ? 查看当前位置候选）",
 			strings.Join(prefix, " "), c.Name, tok)
+	}
+	return nil
+}
+
+// checkModifierNotParamValue 拒绝「把可选修饰关键字当成主参数取值」的语句（M16/round51）。
+//
+// 由来（外部报告 BUG-21 的执行器侧残余）：命令树已把 `prefer` 标成 `server` 下的 `Opt`
+// 可选修饰（tree_config.go），但执行器把 `set system ntp server prefer` 按别名规则
+// `{"system","ntp","server","*"}` 收下，建出一台**名字叫 prefer 的服务器**并 commit 通过
+// （模型校验只拒绝空服务器名）——静默写错配置。同族的 dns 半边之所以没事，是因为它走通用树
+// 遍历、被 requireScalarBeforeKeyword 拦下（它的修饰带子节点 `<ip>`，不是裸 flag）。
+//
+// 判据（全部取自命令树，零硬编码）：某 token 匹配到的节点是 `Opt` **关键字**子节点、
+// 它自身**没有子节点**（裸 flag，如 prefer），其父层关键字还带着**未给取值的必需参数**，
+// 而该 token 的前缀恰好停在那个父关键字上——即「修饰紧跟父关键字、主参数位空着」。
+// 三种本该放行的形态因此都不命中：
+//   - 主参数给过之后（`server 1.2.3.4 prefer`）：前缀落点是参数节点、不是父关键字；
+//   - 带自己内容的修饰（`ports <seq> interface trunk vlans 100` 的分步形态，trunk 有子节点）：
+//     裸 flag 判据排除——它是别名表**有意支持**的中间形态，不得误伤；
+//   - 与子关键字同名的合法取值（如实例名）：它们不在「父关键字的必需参数取值位」上。
+//
+// 取舍如实登记：本判据要求「裸 flag」是**刻意的窄口径**——通用规则（凡是同名就拒）会误伤
+// 分步 trunk，而「只判落点」又会误伤它同一形态；全树里唯一的裸 Opt 关键字正是 `prefer`，
+// 故这条既不动别的语句，也不靠猜。
+func checkModifierNotParamValue(tokens []string) error {
+	// 树**只建一次**：ConfigPathTree 每次调用都新建实例，节点指针跨实例不能比较
+	// （前缀落点与父节点的「同一性」判据全靠指针相等）。
+	root := cfgPathRoot()
+	for i := 1; i <= len(tokens); i++ {
+		m, _, err := schema.Match(root, tokens[:i])
+		if err != nil || m == nil || m.Kind != schema.Keyword || !m.Optional || len(m.Children) != 0 {
+			continue
+		}
+		p := m.Parent()
+		if p == nil {
+			continue
+		}
+		req := requiredParamOf(p)
+		if req == nil {
+			continue
+		}
+		if prev, _, perr := schema.Match(root, tokens[:i-1]); perr == nil && prev == p {
+			return fmt.Errorf("语句不完整：%s 之后需要先给 %s 取值，再跟 %s（可用 ? 查看当前位置候选）",
+				strings.Join(schema.NodePath(p), " "), req.Name, m.Name)
+		}
+	}
+	return nil
+}
+
+// requiredParamOf 节点下**必需**（非 Opt）的参数子节点；没有返回 nil。
+func requiredParamOf(n *schema.Node) *schema.Node {
+	for _, c := range n.Children {
+		if c.Kind == schema.Param && !c.Optional {
+			return c
+		}
 	}
 	return nil
 }

@@ -198,6 +198,14 @@ func (p *Provider) applyGateway(ctx context.Context, vs model.VirtualSwitch, br 
 	if err := p.ensureVRF(ctx, vrfName); err != nil {
 		return err
 	}
+	// round51 P4：网关**换目标**（派生的 `vr-<交换机>` → 显式 `gateway vrf <名>`）时收回上一位
+	// 派生设备（含它的两条域兜底路由）。此前只有「网关声明消失」（revokeGateway）与「交换机
+	// 被删」（DeleteBridgeDomain）两条路径回收它，换目标这条漏了 ⇒ 内核里长期留一张空 VRF
+	// 与两条 unreachable default，而读视图（交换机报网关地址、VRF 列表只报已声明的交换机）
+	// 里都看不到它们。在重挂 master **之前**收回：设备删除会顺带把 br 从它上面摘下来。
+	if err := p.reclaimDerivedGatewayVRF(ctx, vs, br, vrfName); err != nil {
+		return err
+	}
 	if err := p.ipReq(ctx, "link", "set", "dev", br, "master", vrfName); err != nil {
 		return err
 	}
@@ -207,6 +215,35 @@ func (p *Provider) applyGateway(ctx context.Context, vs model.VirtualSwitch, br 
 		}
 	}
 	return nil
+}
+
+// reclaimDerivedGatewayVRF 网关归属的目标变了、且**当前**归属正好是这台交换机**派生的**
+// 网关 VRF（`vr-<交换机名>`）时，把它连域兜底路由一起回收（round51 P4）。
+//
+// 边界与 revokeGateway 逐字同口径：
+//   - 目标就是派生名（无显式 vrf 声明）⇒ 无事可做；
+//   - 当前归属是显式 `gateway vrf <名>` 的设备、或读不到归属 ⇒ 一律不动（那是操作者声明的
+//     对象，生命周期不由本交换机决定；猜测式回收比留下一个未回收设备危险）；
+//   - 设备不在场 ⇒ 跳过兜底回收（`ip route del vrf <名>` 在设备不存在时会打断幂等路径），
+//     只留一条容忍式的 `ip link del`。
+//
+// 顺序与 revokeGateway/DeleteBridgeDomain 一致：先回收域兜底路由、再删设备（设备删除不会
+// 连带回收 reject 路由）。
+func (p *Provider) reclaimDerivedGatewayVRF(ctx context.Context, vs model.VirtualSwitch, br, target string) error {
+	derived := GatewayVRFName(vs.Name)
+	if target == derived {
+		return nil
+	}
+	master, slaveKind, ok := p.linkMaster(ctx, br)
+	if !ok || master == "" || !strings.EqualFold(slaveKind, "vrf") || master != derived {
+		return nil
+	}
+	if p.vrfDevicePresent(ctx, derived) {
+		if err := p.deleteVRFFallback(ctx, derived); err != nil {
+			return err
+		}
+	}
+	return p.ipBest(ctx, "link", "del", derived)
 }
 
 // pruneGatewayAddresses 删掉 bridge 上**声明里已没有**的网关地址（地址收缩，round49 外部走查）。
@@ -341,7 +378,23 @@ func normCIDR(s string) string {
 // 删了 vs-lan，`vr-vs-lan` 还在）。显式声明的 `gateway vrf <名>` 不在此删除：
 // 那是操作者自己的对象，生命周期不由本交换机决定。网关 VRF 表内的域兜底路由（决策 #446，
 // v4/v6 两族）同样随设备一并回收（先删路由、再删设备）。
+//
+// 只对 **L2** 交换机成立：名字在内核里是一台 VRF 设备（＝L3 交换机，设备名与交换机同名）
+// 时拒绝删除并指向 L3 交换机的删除路径（round51 P2，见函数体首段）。
 func (p *Provider) DeleteBridgeDomain(ctx context.Context, name string) error {
+	// round51 P2 的兜底闸：**本方法只删 bridge**。L3 交换机（type=l3）与它同名的那台内核设备
+	// 是 ApplyVRF 建的 **VRF 设备**（`LinkName(vrf.Name)`），对这样的名字执行 `ip link del`
+	// 会把 VRF 连兜底路由一起凭空删掉，而随后按 VRF 语义的清理（成员口地址/子接口/兜底路由）
+	// 全部查不到对象、静默跳过 ⇒ 数据面留下了「表在、路由在、成员地址在」的残渣且无人报错。
+	// 调用方（teardown 段）已按声明类型过滤，这里再核一次**内核实况**——闸门设在被删对象本身，
+	// 任何调用方（含将来的新调用点）都绕不过去。读不到设备类型（不存在/读失败）照旧放行：
+	// 此时没有任何设备会被这条命令删掉，幂等语义不变。
+	if row, ok := p.linkDetail(ctx, LinkName(name)); ok && row.LinkInfo != nil &&
+		strings.EqualFold(row.LinkInfo.InfoKind, "vrf") {
+		return fmt.Errorf("内核里的 %s 是一台 VRF 设备（L3 交换机），不是 L2 bridge；"+
+			"本方法只删 L2 交换机。请按删除 L3 交换机的方式回收它（delete virtual-switches %s），"+
+			"那样才会连成员口地址、vlan 子接口与域兜底路由一并清理", LinkName(name), name)
+	}
 	// 决策 #438：先停该交换机的 DHCP 服务器——内置 tap 是 bridge 成员口、单播接收 socket 绑在
 	// bridge 的 BVI 地址上（reference 先解、被引用者后删，与 #437 relay/#196/#342 的删除倒序一致）。
 	// 未启用/从未收敛时幂等空操作。

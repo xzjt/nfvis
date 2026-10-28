@@ -116,6 +116,20 @@ func (x *cliExecutor) applyPipes(text string, pipes []pipeSpec) string {
 				err error
 			)
 			if p.arg == "" {
+				// round51 评审 L15：candidate 及其差异属于**持有者**。此前这里只看「存在某个
+				// 编辑会话」（Engine.CompareCandidate 的 requireEditingLocked），于是另一个 CLI
+				// 会话（`show configuration | compare`）能读到别人的未提交草稿——与 REST
+				// `/configuration/diff` 被修的同一类披露。非持有者按「与自己无关」处理：
+				// 空差异（与 cfgShow 对非持有者回退 committed 同一口径）。
+				//
+				// 只在**确有编辑会话**时改判：一个编辑会话都没有时不走这里，仍由
+				// CompareCandidate 报「未进入编辑态」——那条错误是既有契约（有守护用例），
+				// 静默给空 diff 会把「你根本没在编辑」伪装成「无差异」。
+				views, _ := x.engine.Sessions()
+				if len(views) > 0 && !x.sessionHoldsLock(views, x.callerUser, x.callerSource) {
+					text = ""
+					continue
+				}
 				out, err = x.engine.CompareCandidate()
 			} else {
 				n, _ := strconv.Atoi(p.arg)

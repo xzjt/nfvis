@@ -11,6 +11,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/xzjt/nfvis/internal/schema"
@@ -20,7 +21,13 @@ import (
 // 已有 \r 的 \n 不重复转换（Editor 自身输出用 "\r\n"）；raw 为 nil 或返回
 // false 时原样透传——非 raw（管道/脚本、monitor 挂起期）终端自身会做
 // NL→CRNL，重复转换会凭空多出空行。
+//
+// mu（L12）：writer 在串口接管期间会被**两个 goroutine**写（REPL 主循环与
+// console.go 里把服务端字节流 io.Copy 过来的协程），而 prev/has 是跨 Write 的状态——
+// 不加锁就是数据竞争（重叠的 Write 还会互相改写 prev，多出或漏掉 CR）。
+// 另见 console.go runConsole 的「copy 协程 join」：那条保证提示符重绘不与该协程并发。
 type crlfWriter struct {
+	mu   sync.Mutex
 	w    io.Writer
 	raw  func() bool
 	prev byte // 上一块的末字节：\r 与 \n 可能落在两次 Write 里
@@ -31,6 +38,8 @@ func (c *crlfWriter) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.raw == nil || !c.raw() {
 		n, err := c.w.Write(p)
 		if n > 0 {

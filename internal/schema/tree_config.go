@@ -344,6 +344,12 @@ func ConfigPathTree() *Node {
 				),
 				K("l3-interface", "三层接口（仅 L3）",
 					P("<ifname|vlan>", "物理口/bond 或 vlan <v>", DynVppIfnames,
+						// `vlan <v>`：在该物理口上建 `vlan <v>` 子接口并把**子接口**置入本 VRF 的表
+						// （模型 L3Interface.Vlan → resolveL3Iface）。声明成主参数之后的**可选修饰**
+						//（Opt 包住节点本身，同 `system ntp server` 的 `prefer` 先例）：不标 Opt 会被
+						// 当成独立叶子，按树生成的命令必然失败（v3.0.29 BUG-21）。此前该字段只有
+						// REST/load 可达，且 display set 反推不出（round51 H3b）。
+						Opt(K("vlan", "VLAN 子接口（1-4094）", V("uint", "1-4094"))),
 						K("ip", "IP 配置",
 							K("address", "地址（IPv4/IPv6 可多条）", V("ip-prefix", "如 10.10.0.1/24")),
 						),

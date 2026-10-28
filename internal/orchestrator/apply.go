@@ -435,6 +435,15 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			}
 		}
 	}
+	// 决策 #511（round51 P1）：新配置里**全部** VRF 声明过的 l3-interface 键集合。
+	// 接口在「本 VRF 的旧声明 vs 本 VRF 的新声明」里消失，不一定是「该接口被删」——它可能是
+	// 被**另一台仍在声明的 VRF 接管**了（A→B 迁移，两台都还在）。而 removedL3Ifaces 只比对
+	// 「同名的旧/新」，于是 A 的差分会把 X 判成整条消失并下发 del-l3-if（清地址、解绑、移回
+	// 默认表、**删掉 <父口>.<vlan> 子接口**）；B 的 ApplyVRF 此时已经把 X 置入 B 表——谁先谁后
+	// 由 new.Vrfs 的声明序决定：B 先声明则 X 被 A 的撤销打回原形（配置说在 B、数据面在默认表
+	// 且无地址），A 先声明则侥幸正常（同一份配置两个结果）。同文件的 deletedVrfL3Revokes 早就
+	// 用 inNew 集合处理过同一形态（被删 VRF 的迁移），这里为**仍在的 VRF** 补齐同一份视野。
+	declaredAnywhere := newL3IfaceKeys(new)
 	// —— 决策 #390①：被删 VRF 的 L3 接口 ACL/macip 解绑（**按旧声明**，先于新建/迁移段）——
 	// 旧槽先释放、新声明再绑。此前只为 new.Vrfs 生成解绑：接口从旧交换机迁到新交换机时，
 	// ApplyVRF(新) 经 reassignLocked 先把该口从旧表的 ifaces/subifs 登记摘掉，删除段的
@@ -443,7 +452,25 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 	//   - l3-acl-unbind：接口仍在新配置的某台 L3 交换机里（迁移）且旧声明 acl-in != "" ⇒ 只撤绑定；
 	//   - del-l3-if：接口在新配置里整条消失且旧声明 acl-in != "" ⇒ 回收（清地址/解绑/移回默认表）。
 	for _, ov := range old.Vrfs {
-		if _, still := newVRFs[ov.Name]; still {
+		nv, still := newVRFs[ov.Name]
+		if still {
+			// 决策 #511（round51 P1）：**仍在声明**的 VRF 里被别的 VRF 接管的接口，同样要在
+			// 新归属的 ApplyVRF 之前解掉旧 ACL 绑定。旧实现靠 del-l3-if 连解绑一起做，本决策
+			// 不再回收这类接口（见下 declaredAnywhere），解绑必须在此显式补回，否则
+			// 「旧交换机声明的 deny ACL 继续拦在新归属的口上」——正是 #361/round142 的缺陷形态。
+			// 必须排在**所有** ApplyVRF 之前：新归属若也声明 acl-in，绑定由那边的 ApplyVRF
+			// 重新下发，解绑排在它后面会把刚下发的绑定一起撤掉（BindIndex 的空绑定＝解绑任意 ACL）。
+			ov, nv := ov, nv
+			for _, li := range migratedL3Ifaces(ov, nv, declaredAnywhere) {
+				li := li
+				ops = append(ops, op{
+					desc: fmt.Sprintf("l3-acl-unbind[%s/%s]", ov.Name, l3IfaceKeyOf(li)),
+					run: func(ctx context.Context) error {
+						return a.net.UnbindL3IfaceACL(ctx, ov.Name, li)
+					},
+					undo: func(ctx context.Context) error { return a.net.ApplyVRF(ctx, ov) },
+				})
+			}
 			continue
 		}
 		ov := ov
@@ -481,6 +508,12 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			// 「先解引用、后建引用」的口径；undo 仍是 ApplyVRF(旧)，回滚能把 nic0 复原。
 			if ok {
 				for _, li := range removedL3Ifaces(o, vrf) {
+					if declaredAnywhere[l3IfaceKeyOf(li)] {
+						// 决策 #511：仍被**别的** VRF 声明 ⇒ 不是「被删」而是「被接管」。
+						// 归属/地址由那台 VRF 的 ApplyVRF 收敛（已含 reassignLocked 摘旧登记），
+						// 在此回收会把刚收敛好的归属、地址与 vlan 子接口一并打掉。
+						continue
+					}
 					li := li
 					ops = append(ops, op{
 						desc: fmt.Sprintf("del-l3-if[%s/%s]", vrf.Name, l3IfaceKeyOf(li)),
@@ -846,7 +879,22 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			})
 		}
 	}
-	// vNIC 接入删除排在**所有引用它的转发域之后**（BD 摘成员、L3 交换机清地址/解绑，见上）。
+	// 端口镜像会话删除排在**它引用的源接口之前**（先解引用、后删被引用；与 #196/#342/R88-6
+	// 同一规则）：会话的源可以是 VNF vNIC（PMSource.Vnf），而「同一次提交删掉会话 + 它的源
+	// vNIC」是**合法声明**——校验只要求源 vNIC 在**新**配置里存在，本场景新配置里两者都没有。
+	// 旧顺序把源 vNIC 先删掉，DeleteSpan 随后拿着已失效的 sw_if_index 去关镜像 ⇒ VPP 报错、
+	// 整次提交回滚（本可一次清干净）。会话的源还可能是物理口/bond（见下方各自的删除段）。
+	for _, pm := range old.PortMirroring {
+		if _, ok := newPMNames(new)[pm.Name]; !ok {
+			pm := pm
+			ops = append(ops, op{
+				desc: fmt.Sprintf("del-span[%s]", pm.Name),
+				run:  func(ctx context.Context) error { return a.net.DeleteSpan(ctx, pm.Name) },
+				undo: func(ctx context.Context) error { return a.net.ApplySpan(ctx, pm) },
+			})
+		}
+	}
+	// vNIC 接入删除排在**所有引用它的转发域之后**（BD 摘成员、L3 交换机清地址/解绑、镜像会话，见上）。
 	// 真机 round88（R88-6）：同一提交里删 VNF 又删引用其 vNIC 的 L3 交换机（vNIC 作
 	// l3-interface），旧顺序把 vNIC 先删掉 → del-vrf 清地址时接口已不在（Invalid sw_if_index）
 	// → 整次提交失败并回滚，「一次清干净」做不到。删除顺序按依赖倒序（先解引用、后删被引用）。
@@ -860,16 +908,6 @@ func (a *orchApplier) plan(old, new model.Config) []op {
 			run:  func(ctx context.Context) error { return a.net.DeleteVnfInterface(ctx, ov.VM, ov.Interface) },
 			undo: func(ctx context.Context) error { return a.net.ApplyVnfInterface(ctx, ov) },
 		})
-	}
-	for _, pm := range old.PortMirroring {
-		if _, ok := newPMNames(new)[pm.Name]; !ok {
-			pm := pm
-			ops = append(ops, op{
-				desc: fmt.Sprintf("del-span[%s]", pm.Name),
-				run:  func(ctx context.Context) error { return a.net.DeleteSpan(ctx, pm.Name) },
-				undo: func(ctx context.Context) error { return a.net.ApplySpan(ctx, pm) },
-			})
-		}
 	}
 	for _, q := range old.QosPolicies {
 		if _, ok := newQoSNames(new)[q.Name]; !ok {
@@ -1019,6 +1057,44 @@ func natDerivedInputs(c model.Config) []string {
 		out = append(out, "outside:"+k)
 	}
 	slices.Sort(out)
+	return out
+}
+
+// newL3IfaceKeys 新配置里**全部** VRF 声明过的 l3-interface 键集合（决策 #511，round51 P1）。
+//
+// 用途只有一个：区分「接口被删」与「接口被另一台 VRF 接管」。只看单台 VRF 的旧/新差分
+// （removedL3Ifaces）无法区分这两件事——而两者的正确处置完全相反（前者要回收，后者要放手）。
+// 口径与 deletedVrfL3Revokes 的 inNew 集合**同一份**（那边只覆盖被删 VRF）。
+func newL3IfaceKeys(c model.Config) map[string]bool {
+	out := make(map[string]bool)
+	for _, vrf := range c.Vrfs {
+		for _, li := range vrf.L3Interfaces {
+			out[l3IfaceKeyOf(li)] = true
+		}
+	}
+	return out
+}
+
+// migratedL3Ifaces 返回在 oldVrf 的旧声明里有、在**同一台 VRF 的新声明**里没有、但仍被
+// new 配置的别的 VRF 声明（＝被接管迁移）的 l3-interface：去重、保持声明序。
+//
+// 只取旧声明带 acl-in 的：没有绑定的接口其地址/表归属由接管方（或删除段的 DeleteVRF）按登记
+// 收敛，无须在此先行动作——与 deletedVrfL3Revokes 的取舍逐字同口径。
+func migratedL3Ifaces(oldVrf, newVrf model.Vrf, declaredAnywhere map[string]bool) []model.L3Interface {
+	now := make(map[string]bool, len(newVrf.L3Interfaces))
+	for _, li := range newVrf.L3Interfaces {
+		now[l3IfaceKeyOf(li)] = true
+	}
+	seen := make(map[string]bool, len(oldVrf.L3Interfaces))
+	var out []model.L3Interface
+	for _, li := range oldVrf.L3Interfaces {
+		k := l3IfaceKeyOf(li)
+		if li.AclIn == "" || seen[k] || now[k] || !declaredAnywhere[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, li)
+	}
 	return out
 }
 

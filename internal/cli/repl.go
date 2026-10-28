@@ -91,6 +91,9 @@ func (r *REPL) Run() error {
 				fmt.Fprintf(r.out, "%% %v\n", err)
 			}
 			r.editor.Resume(wasRaw)
+			// L4：向导期间按键由 bufio.Scanner 消费（ReadLine 不在跑），结束时重新武装空闲
+			// 守卫，否则回到 ReadLine 会被立刻判超时登出、丢弃候选。
+			r.touchIdle()
 			prompt = r.session.Prompt()
 			continue
 		}
@@ -142,6 +145,16 @@ func isOperExit(line string) bool {
 	return len(toks) == 1 && (toks[0] == "exit" || toks[0] == "quit")
 }
 
+// touchIdle 刷新空闲守卫（L4）：除 ReadLine 之外的交互阶段（串口/容器终端、monitor 刷新、
+// 向导问答）由别的读取者消费输入，主循环的 poll 在那些阶段不跑——不刷新的话，阶段一结束
+// 就会被判「会话空闲超时」并登出、丢弃候选（操作者其实一直在打字）。无 editor（部分单测
+// 直接构造 REPL）时静默跳过。
+func (r *REPL) touchIdle() {
+	if r.editor != nil {
+		r.editor.touchIdle()
+	}
+}
+
 // teardown 会话收尾并回显各步输出（丢弃 candidate 时会提示，避免「未提交变更被静默丢弃」）。
 func (r *REPL) teardown() {
 	for _, out := range r.session.Teardown() {
@@ -190,7 +203,11 @@ func prefixOf(s, full string) bool {
 
 // runMonitor 按 interval 轮询服务端单次快照并整屏刷新，Ctrl-C 退出（附录 A #36）。
 // 非 TTY（管道/脚本）退化为单次快照，避免脚本挂死。
+//
+// L4：本阶段由**别的读取者**消费输入（信号处理读 Ctrl-C），故全程刷新空闲守卫——否则
+// 看一会儿 monitor 回到 ReadLine 就容易被判「会话空闲超时」（操作者本是活跃的）。
 func (r *REPL) runMonitor(cmd string, interval time.Duration) {
+	defer r.touchIdle()
 	render := func() {
 		out, _ := r.session.ExecuteLine(cmd)
 		fmt.Fprint(r.out, "\x1b[2J\x1b[H") // 清屏并回原点
@@ -218,6 +235,7 @@ func (r *REPL) runMonitor(cmd string, interval time.Duration) {
 			fmt.Fprintln(r.out, "^C")
 			return
 		case <-ticker.C:
+			r.touchIdle()
 			render()
 		}
 	}

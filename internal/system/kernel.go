@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/xzjt/nfvis/internal/model"
 )
 
 // KernelDesired 期望的内核基线（由 committed 配置派生）。
@@ -308,6 +310,24 @@ func GenerateBaseline(d KernelDesired) (grubFragment string, fstabLine string) {
 	}
 	params = append(params, iommuFamilyParams(d)...)
 
+	// 兜底过滤（round51 评审，与提交期 checkKernelBaseline 同源判据）：片段会被 grub-mkconfig 当
+	// shell **source**、nfvisd 又以 root 跑 update-grub，故片段里任何越出
+	// `GRUB_CMDLINE_LINUX="…"` 赋值的内容都会以 root 执行。params 是用户可控的自由文本
+	// （提交期已按 model.ValidKernelParam 拦一道），这里再滤一道：即便非法值溜到生成层，也绝不
+	// 拼进片段。**不用引号包裹**——本行是 shell **赋值**（值随后由 grub-mkconfig 按空白拆分，
+	// 见 effectiveBaselineArgs），单引号会被原样带进内核 cmdline（`'foo'` 而非 `foo`），反而写坏
+	// 启动参数；故只放行安全字符、丢弃其余。
+	var dropped int
+	kept := make([]string, 0, len(params))
+	for _, p := range params {
+		if model.ValidKernelParam(p) {
+			kept = append(kept, p)
+			continue
+		}
+		dropped++
+	}
+	params = kept
+
 	var b strings.Builder
 	b.WriteString("# 由 NFViS 生成：请勿手工编辑；变更经 CLI set system kernel / resource-pools 后由 nfvisd 重写\n")
 	// 必须以「追加到标准变量」的形式写：/etc/default/grub.d/*.cfg 在主文件之后被 source，
@@ -315,7 +335,17 @@ func GenerateBaseline(d KernelDesired) (grubFragment string, fstabLine string) {
 	if len(params) > 0 {
 		b.WriteString(`GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} ` + strings.Join(params, " ") + "\"\n")
 	}
-	if d.TunedProfile != "" {
+	if dropped > 0 {
+		// 如实报告（不静默丢弃），但只报**条数**、不嵌入原值：原值可能含换行/引号——既会在注释里
+		// **再**造成一次注入（换行后那半截不再是注释、会被 shell 执行），也会被读回路径
+		// effectiveBaselineArgs 的按空白拆分误当成 cmdline 参数（自扰：注释里的 `hugepagesz=` 会
+		// 喂给 HugepageFromCmdline）。具体是哪些取值由提交期 checkKernelBaseline 逐条点名
+		// （报 path + 原值），此处只解释「有声明却没进 cmdline」这件事。
+		b.WriteString(fmt.Sprintf(
+			"# 已忽略 %d 个不安全的附加参数（含空白/引号/反斜杠/; $ 反引号或换行，未写入 cmdline）；请核对 set system kernel params\n",
+			dropped))
+	}
+	if d.TunedProfile != "" && model.ValidTunedProfile(d.TunedProfile) {
 		b.WriteString("# tuned profile: " + d.TunedProfile + "\n")
 	}
 	// 决策 #459（修 R13-E）：为**每个已声明页尺寸**各挂一个 hugetlbfs 挂载点。

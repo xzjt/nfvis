@@ -69,6 +69,7 @@ set virtual-switches <n> ports <seq> vnf <vm> interface <vnic> [trunk vlans <l>]
 set virtual-switches <n> ports <seq> container <ct> interface <vnic>	配置语句未逐条执行	容器 memif 成员；本机无自带 memif 的容器镜像（T0-3 环境受限）
 set virtual-switches <n> cross-connect <bool>	配置语句未逐条执行	二层直通需两个空闲口且不能同广播域；由 network 单测与交付步骤覆盖
 set virtual-switches <n> l3-interface <if> acl-in <acl>	配置语句未逐条执行	L3 口 ACL 绑定；同族 set virtual-switches <n> l3-interface <if> ip address 已在阶段 2 执行
+set virtual-switches <n> l3-interface <if> vlan <v>	配置语句未逐条执行	L3 VLAN 子接口（决策 #525）：需一个空闲口与对端可收 tag 帧的现场；由 internal/api 的语句/display set 回放用例与 internal/orchestrator/network 的幂等/回收用例覆盖
 set nat rules <seq> match source <p> virtual-switch <n> action interface <if> [source-pool <n>]	配置语句未逐条执行	NAT 规则需出接口与转发域齐备；由 lifecycle L3-3 的会话对账与真机 NAT 走查覆盖
 set port-mirroring <n> source vnf <vm> interface <vnic> direction <…>	配置语句未逐条执行	SPAN 源为 vNIC（需 VNF + 两个口）；物理口源形态已在阶段 2 覆盖
 set vpp cpu workers-per-numa <n>	配置语句未逐条执行	与 corelist-workers 互斥（后者已在阶段 2 执行）；由 vpp 配置单测覆盖

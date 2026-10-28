@@ -50,7 +50,36 @@ const (
 	defaultLockoutN    = 5
 	defaultLockoutMins = 10
 	defaultMinLength   = 8
+
+	// lockoutIdleTTL 未达阈值的失败计数条目空闲多久后回收（round51 评审 M12）。
+	//
+	// recordFailure 对**任意**用户名建条目，而未达阈值时 lockedUntil 恒为零值、原清扫只删
+	// 「锁已过期」的条目 ⇒ 每个陌生用户名都留下一条永不回收的 map 项：未认证攻击者用
+	// POST /login 逐次换名即可无界增长内存。清扫改为：未锁定的条目在「最后一次失败」后
+	// 闲置超过本时限即回收。
+	//
+	// 取值 30 分钟的依据：**必须长于锁定窗口**（缺省 10 分钟），否则「连着试错到阈值」的
+	// 正常失败序列会被中途清掉、锁定永不触发；同时它给未认证流量一个明确的内存上界
+	// （map 只记住最近 30 分钟内出现过的陌生用户名）。代价如实登记：失败间隔超过本时限的
+	// **慢速**试错不再累计计数——这是「键集有界」的固有取舍（一旦锁定，条目仍按锁定窗口
+	// 保留到到期，锁定后的行为完全不变）。
+	lockoutIdleTTL = 30 * time.Minute
 )
+
+// dummyPasswordHash 恒定哑口令哈希（round51 评审 L13）：对「用户不存在」「用户无口令」两条
+// **快路径**各做一次等价 PBKDF2 计算，抹平登录响应的时间侧信道（存在性预言机）。
+//
+// 取值为固定盐（16 字节 0）+ 固定目标（32 字节 0）的合法 pbkdf2$sha256$… 串——**迭代数与真实
+// 哈希相同**（只有迭代数相同才真的花掉同等时间），且任何口令都校验不过（目标全 0）。它不是
+// 任何账号的凭据，被读到也无可利用。
+const dummyPasswordHash = "pbkdf2$sha256$600000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+// verifyPasswordFn 是 VerifyPassword 的间接调用点：生产恒指向 VerifyPassword，单测可临时替换
+// 为计数实现——「未知用户也做了一次哈希比较」无法用时间断言（脆弱），用它做确定性判据。
+var verifyPasswordFn = VerifyPassword
+
+// dummyVerify 对固定哑哈希做一次真实校验（结果恒 false，只取其计算代价，round51 L13）。
+func dummyVerify(password string) { verifyPasswordFn(dummyPasswordHash, password) }
 
 // ---------- 口令哈希（附录 A #25） ----------
 
@@ -184,6 +213,9 @@ type tokenEntry struct {
 type lockoutState struct {
 	failures    int
 	lockedUntil time.Time
+	// lastFailure 最近一次失败时刻：仅用于回收**未锁定**的空闲条目（round51 M12），
+	// 不参与锁定判定（锁定窗口仍是 lockedUntil）。
+	lastFailure time.Time
 }
 
 // Service 本地 AAA 服务。
@@ -229,13 +261,20 @@ func (s *Service) Login(user, password string) (*TokenInfo, error) {
 	}
 	u := findUser(cfg, user)
 	if u == nil {
+		// round51 L13：未知用户走的是**快路径**——直接返回会比「有用户但口令错」快一个
+		// PBKDF2(600k) 的量级，构成用户名存在性预言机（响应体相同、只有时间不同）。
+		// 用固定哑哈希补一次等价计算。
+		dummyVerify(password)
 		s.recordFailure(user, now)
 		return nil, ErrInvalidCredentials
 	}
 	if u.PasswordHash == "" {
+		// 该错误值仍原样返回（调用方 handleLogin 统一转「用户名或口令错误」，不泄露存在性），
+		// 但这条分支此前**更快**（连哈希比较都省掉）⇒ 是更响的预言机，同样补一次等价计算。
+		dummyVerify(password)
 		return nil, fmt.Errorf("用户 %s 未设置口令", user)
 	}
-	if !VerifyPassword(u.PasswordHash, password) {
+	if !verifyPasswordFn(u.PasswordHash, password) {
 		s.recordFailure(user, now)
 		return nil, ErrInvalidCredentials
 	}
@@ -594,6 +633,7 @@ func (s *Service) recordFailure(user string, now time.Time) {
 		s.lockouts[user] = st
 	}
 	st.failures++
+	st.lastFailure = now
 	cfg, err := s.src.Committed()
 	threshold, minutes := defaultLockoutN, defaultLockoutMins
 	if err == nil {
@@ -620,7 +660,15 @@ func (s *Service) sweepLocked() {
 		}
 	}
 	for u, st := range s.lockouts {
-		if !now.Before(st.lockedUntil) && st.lockedUntil != (time.Time{}) {
+		switch {
+		case st.lockedUntil != (time.Time{}):
+			// 锁定中：到点即回收（判据与语义不变——锁定了的用户恰在锁到期时被清掉）。
+			if !now.Before(st.lockedUntil) {
+				delete(s.lockouts, u)
+			}
+		case now.Sub(st.lastFailure) > lockoutIdleTTL:
+			// 未达阈值的失败计数：最后一次失败后闲置过久即回收（round51 M12）——此前这类条目
+			// 永不被清，陌生用户名可让 map 无界增长。
 			delete(s.lockouts, u)
 		}
 	}

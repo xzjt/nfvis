@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -77,7 +79,18 @@ type Store struct {
 
 // OpenStore 打开（必要时创建）存储。DSN 启用 WAL 与 busy_timeout；
 // 事务引擎内部串行（单写），_txlock=immediate 防止多连接写竞争。
+//
+// round51 G4：库文件（含 WAL 边车）落盘一律 0600，见 hardenStoreFiles 的 WHY。
 func OpenStore(path string) (*Store, error) {
+	// 1) 库文件不存在时以 0600 **预创建**：SQLite 只在创建文件的那一刻用 mode，对已存在的库
+	// 文件不改其权限，且它按库文件的权限创建 -wal/-shm 边车——预创建保证「首次创建」也落在
+	// 0600，不留「边车按 umask(022) 落成 0644」的窗口。（建不出/无可建只跳过，见下。）
+	if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+		_ = f.Close()
+	}
+	// 2) 收紧既有库文件（既有安装升上来的 0644 不会因 OpenFile 改变）。
+	hardenStoreFiles(path)
+
 	dsn := "file:" + filepath.ToSlash(path) + "?_journal_mode=WAL&_busy_timeout=5000&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -89,7 +102,44 @@ func OpenStore(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// 3) migrate 写过库 ⇒ -wal 边车此刻已存在（此前可能还没有），再收紧一次。
+	hardenStoreFiles(path)
 	return s, nil
+}
+
+// hardenStoreFiles 把配置库文件与其 WAL 边车（-wal/-shm）收紧到 0600（round51 G4）。
+//
+// 为什么：库里存着**全部登录用户的口令哈希**与整份 committed 配置（含自由文本，可能夹带
+// 凭据），而默认落盘是 0644 ⇒ 同机任意账号可读。产品对同类秘密本就是这一口径
+// （tech-support 目录 0700、归档 0600，决策 #149）。
+//
+// 为什么**只收紧文件、不动所在目录**：生产库是 `/var/lib/nfvis/nfvis.db`，而该目录同时是
+// VM 盘（vms/）与镜像（images/）的落点——QEMU 以 `libvirt-qemu`（非 root）运行、**必须能穿越**
+// 该目录，目录一旦 0700 启 VM 就报 `Permission denied`（M4-验收记录 §M4-3 真机实证；libvirt 的
+// 动态属主只改文件属主、不解决目录穿越）。秘密在**文件内容**里，0600 已足以对同机其它账号关门。
+//
+// 为什么 chmod 失败**不拒绝打开**（只 log.Printf 提示）：这是纵深防御的加固、不是功能前置条件
+// ——非 POSIX 权限语义的平台（Windows/测试环境）或库文件属主已被改成别人时 chmod 必然失败，
+// 而拒绝启动会把**整机的配置/管理面**一起打死（加固手段不该变成可用性回归）。幂等，可重复调用。
+func hardenStoreFiles(dbPath string) {
+	chmodQuiet(dbPath, 0o600)
+	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		if _, err := os.Stat(p); err == nil { // 边车由 SQLite 按需创建，不存在即跳过
+			chmodQuiet(p, 0o600)
+		}
+	}
+}
+
+// chmodQuiet 尽力收紧权限；失败时提示一次、不上抛（WHY 见 hardenStoreFiles）。
+// 只对**普通文件**动手：路径若被误配成目录，0600 会连穿越位一起砍掉（那才是真把服务打死）。
+func chmodQuiet(path string, mode os.FileMode) {
+	st, err := os.Stat(path)
+	if err != nil || !st.Mode().IsRegular() {
+		return // 不存在 / 非普通文件：不动它
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		log.Printf("配置库权限加固未生效（%s 应为 %o）：%v；本机若有其它账号，口令哈希可能仍可读", path, mode, err)
+	}
 }
 
 // baseSchema 初始表结构（v0→1）。

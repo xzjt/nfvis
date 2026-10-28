@@ -12,7 +12,7 @@ import (
 
 // pending 不是结论：解析结果必须让调用方看得出「还没定」。
 func TestParseSoftwareResultPendingIsNotVerdict(t *testing.T) {
-	ok, ver, status := parseSoftwareResult("结果: 未定（升级进行中或判定未完成）\n状态: pending\n")
+	ok, ver, status, _ := parseSoftwareResult("结果: 未定（升级进行中或判定未完成）\n状态: pending\n")
 	if ok {
 		t.Fatal("pending 不得被判为成功")
 	}
@@ -24,22 +24,29 @@ func TestParseSoftwareResultPendingIsNotVerdict(t *testing.T) {
 	}
 }
 
-// 成功/失败两种终态不受影响（回归）。
+// 成功/失败两种终态不受影响（回归）。L5：记录时间也要解出来（归因本次尝试用）。
 func TestParseSoftwareResultTerminalStates(t *testing.T) {
-	ok, ver, status := parseSoftwareResult("结果: 成功\n版本: 3.0.27\n状态: install ok installed\n")
+	ok, ver, status, recTime := parseSoftwareResult(
+		"结果: 成功\n版本: 3.0.27\n状态: install ok installed\n时间: 2026-10-24T01:04:55Z\n")
 	if !ok || ver != "3.0.27" || status != "install ok installed" {
 		t.Fatalf("成功态解析不符: ok=%v ver=%q status=%q", ok, ver, status)
 	}
-	ok2, _, status2 := parseSoftwareResult("结果: 失败\n状态: install ok half-configured\n")
+	if recTime.IsZero() || recTime.UTC().Format("2006-01-02T15:04:05Z") != "2026-10-24T01:04:55Z" {
+		t.Fatalf("记录时间未解出: %v", recTime)
+	}
+	ok2, _, status2, _ := parseSoftwareResult("结果: 失败\n状态: install ok half-configured\n")
 	if ok2 || status2 != "install ok half-configured" {
 		t.Fatalf("失败态解析不符: ok=%v status=%q", ok2, status2)
 	}
 }
 
-// 判不出「结果」行时不当作成功（宁可报未知）。
+// 判不出「结果」行时不当作成功（宁可报未知）。无时间行时 recTime 为零值（调用方改走版本归因）。
 func TestParseSoftwareResultMissingVerdictLine(t *testing.T) {
-	ok, _, _ := parseSoftwareResult("（无升级/回退结论记录：…）\n")
+	ok, _, _, recTime := parseSoftwareResult("（无升级/回退结论记录：…）\n")
 	if ok {
 		t.Fatal("没有结果行时不得判成功")
+	}
+	if !recTime.IsZero() {
+		t.Fatalf("无时间行时不应合成一个时间: %v", recTime)
 	}
 }

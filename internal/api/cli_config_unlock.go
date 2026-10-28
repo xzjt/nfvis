@@ -22,6 +22,7 @@ package api
 // 「释放锁 + 清编辑态」那条唯一路径（不另造一份释放逻辑，避免与 sweep/接管语义漂移）。
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -104,35 +105,54 @@ func (x *cliExecutor) configUnlock(user, class, source string, s *cliSession, fo
 
 	// force：释放**全部**锁（S 级，写审计）。
 	// 代价在前：持锁会话的未提交 candidate 会被丢弃。
-	var released, failed []string
+	//
+	// round51 评审 L6：`Sessions()` 的返回里除持锁会话行外，还有**在途 commit confirmed 的
+	// 占位行**（决策 #377/E13：confirmed 的 Holder 在列表里没有同名持锁行时如实追加一行，
+	// 该行 `SessionID == ""` 且**锁早已不在**）。占位行照样进得来循环，而 Discard 对它回
+	// `ErrNotEditing`——此前它被计入 released，于是输出「已强制释放 N 个编辑锁……未提交
+	// candidate 已被丢弃」，实际一个锁都没释放，复核分支还同屏报出「释放后仍有持锁会话」
+	// （同一句话里两个相反结论）。现按引擎的答复如实分流：只有 Discard 真的成功才算已释放，
+	// `ErrNotEditing` 归入「无锁可释放」（占位行，或锁行与内存编辑态不同源的残留）。
+	var released, lockless, failed []string
 	for _, v := range views {
 		// 只按持锁会话释放；confirmed 在途行（无 session_id 且不是锁持有者）不是锁，跳过。
 		if v.SessionID == "" && v.Holder == "" {
 			continue
 		}
-		sess := config.Session{User: v.User, Source: sourceOfHolder(v.Holder), ID: v.SessionID}
 		if v.User == "" {
 			// 无匹配用户的 confirmed 行（决策 #377/E13）没有可释放的会话身份。
 			continue
 		}
-		if derr := x.engine.Discard(sess); derr != nil {
-			// 已不是持有者（并发释放/被接管）按达成处理，不阻断其余释放。
-			if strings.Contains(derr.Error(), "未持有") || strings.Contains(derr.Error(), "未持有 candidate") {
-				released = append(released, v.Holder)
-				continue
-			}
+		sess := config.Session{User: v.User, Source: sourceOfHolder(v.Holder), ID: v.SessionID}
+		derr := x.engine.Discard(sess)
+		switch {
+		case derr == nil:
+			released = append(released, v.Holder)
+		case errors.Is(derr, config.ErrNotEditing):
+			// 引擎如实答复「本会话未持有 candidate」＝这一行**从来不持锁**（在途 commit
+			// confirmed 的占位行；或锁行在、内存编辑态与它不同源的残留）——不计入已释放。
+			lockless = append(lockless, v.Holder)
+		case errors.Is(derr, config.ErrLockLost) || strings.Contains(derr.Error(), "未持有"):
+			// 已不是持有者（并发释放/被接管；store 层「会话锁 … 未持有」＝锁行已被清）：
+			// 目标（本机无该锁）已达成，按达成处理、不阻断其余释放。
+			released = append(released, v.Holder)
+		default:
 			failed = append(failed, fmt.Sprintf("%s（%v）", v.Holder, derr))
-			continue
 		}
-		released = append(released, v.Holder)
 	}
 
 	// 释放后复核：如实报告仍未释放的（不谎报成功）。
+	// 已被判明「不持锁」的行会照旧出现在 Sessions() 里，但它不是锁——同名单里剔除，
+	// 免得上一步说「无锁可释放」、这一步又说「仍有持锁会话」（L6 的另一半）。
+	locklessSet := make(map[string]bool, len(lockless))
+	for _, h := range lockless {
+		locklessSet[h] = true
+	}
 	after, aerr := x.engine.Sessions()
 	var still []string
 	if aerr == nil {
 		for _, v := range after {
-			if v.Holder != "" {
+			if v.Holder != "" && !locklessSet[v.Holder] {
 				still = append(still, v.Holder)
 			}
 		}
@@ -149,12 +169,15 @@ func (x *cliExecutor) configUnlock(user, class, source string, s *cliSession, fo
 	for _, f := range failed {
 		fmt.Fprintf(&b, "%%%% 释放失败：%s\n", f)
 	}
+	if len(lockless) > 0 {
+		fmt.Fprintf(&b, "（无锁可释放：%s——这些行不持有编辑锁，未计入已释放）\n", strings.Join(lockless, ", "))
+	}
 	if aerr != nil {
 		fmt.Fprintf(&b, "%%%% 释放后复核失败（结果不确定，请用 show configuration sessions 复查）：%v\n", aerr)
 	} else if len(still) > 0 {
 		fmt.Fprintf(&b, "%%%% 释放后仍有持锁会话：%s（可能刚被新会话取得）\n", strings.Join(still, ", "))
 	}
-	if len(released) == 0 && len(failed) == 0 {
+	if len(released) == 0 && len(failed) == 0 && len(lockless) == 0 {
 		b.WriteString("（无持锁会话，无需释放）\n")
 	}
 	return b.String()

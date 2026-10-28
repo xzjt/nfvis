@@ -27,6 +27,10 @@ const confirmFlag = "--yes"
 
 // runConsole 接管终端并与串口双向透传，Ctrl-] 退出。返回后调用方续打提示符。
 func (r *REPL) runConsole(req *cliclient.ConsoleRequest) {
+	// L4：串口/容器终端由**本阶段的读取者**消费按键（ReadLine 不在跑），结束时必须重新
+	// 武装空闲守卫——否则回到 ReadLine 后 poll 立刻判「会话空闲超时」，把一直在打字的操作者
+	// 登出并丢弃候选。所有返回路径（非 TTY / 拨号失败 / Ctrl-] / 断开）都由这条 defer 覆盖。
+	defer r.touchIdle()
 	if !r.editor.IsRaw() {
 		// 非 TTY：不做终端接管（透传会阻塞脚本）；给出可复制的手工方式。
 		fmt.Fprintf(r.out, "%% 当前环境不支持交互式%s接管（非 TTY）。\n", strings.TrimSpace(consoleKindLabel(req)))
@@ -50,6 +54,19 @@ func (r *REPL) runConsole(req *cliclient.ConsoleRequest) {
 	}()
 
 	r.copyConsole(stream, os.Stdin, done, strings.TrimSpace(consoleKindLabel(req)))
+	// L12：Ctrl-]/本地 EOF 返回时，上面那个 copy 协程可能仍卡在一次 Write 里，而 r.out 与
+	// REPL 的输出是**同一个** writer（crlfWriter 的 prev/has 是跨 Write 的状态）。关掉流让它
+	// 的 Read 立即返回，再 join 它——保证此后提示符/命令输出绝不与该协程并发写同一 writer。
+	// （并发本身也已由 crlfWriter 的互斥保护，这两条是同一缺陷的两面：一面防竞争、一面防交错。）
+	joinConsoleCopy(stream, done)
+}
+
+// joinConsoleCopy 结束「服务端 → 本地」的 copy 协程：关闭流使其 Read 立即返回，再等它退出
+// （返回后该协程绝不再写 writer）。独立成函数以便单测用可阻塞的底层 writer 复现「返回时
+// 它还在写」的现场（见 fix_r51_l12_test.go）。
+func joinConsoleCopy(stream io.Closer, done <-chan struct{}) {
+	_ = stream.Close()
+	<-done
 }
 
 // consoleKindName 会话种类**显示名**（无前后缀）：VM 串口 / 容器终端（决策 #358/#375）。
@@ -131,6 +148,7 @@ func (r *REPL) copyConsole(stream io.Writer, localIn io.Reader, done <-chan stru
 				return
 			}
 			if len(c.data) > 0 {
+				r.touchIdle() // L4：按键由本阶段消费，据此刷新空闲守卫（ReadLine 不在跑）
 				if c.data[0] == consoleExitByte {
 					fmt.Fprintf(r.out, "\r\n[已退出%s]\r\n", label)
 					return

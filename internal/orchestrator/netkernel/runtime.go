@@ -109,6 +109,14 @@ type ipRouteRow struct {
 }
 
 // Routes 返回一台 L3 交换机（内核 VRF 表）的静态路由。
+//
+// 表里的**域兜底路由**（决策 #446：本产品在每个转发域 VRF 表内自建的 `unreachable default`）
+// 不是操作者的声明，读视图据此排除（round51 P3）：不排除时 `show virtual-switches <l3> routes`
+// 与 REST `GET /vrfs/{n}/routes` 会多出一条 next-hop 为空、distance 4278198272 的 "default"，
+// 而同一份配置在 VPP 数据面的读视图里没有它（VPP 侧无此产物）——操作者会把产品自建的兜底
+// 当成自己配过的静态路由。判据取 `type == "unreachable"`（与 l3.go 的 vrfFallbackPresent
+// 同一判别式）；配置模型里没有「类型」字段（Route 只有 prefix/next_hop/distance，
+// routeArgs 也从不发类型关键字），故不存在「操作者声明的 unreachable 路由」被误杀。
 func (r *Runtime) Routes(ctx context.Context, vrfName string) ([]RouteRow, error) {
 	out, err := r.run.Run(ctx, "ip", "-j", "route", "show", "table", strconv.Itoa(VRFTableID(LinkName(vrfName))))
 	if err != nil {
@@ -120,6 +128,9 @@ func (r *Runtime) Routes(ctx context.Context, vrfName string) ([]RouteRow, error
 	}
 	res := make([]RouteRow, 0, len(rows))
 	for _, row := range rows {
+		if strings.EqualFold(row.Type, vrfFallbackType) {
+			continue // 产品自建的域兜底（unreachable default），不属于配置的静态路由
+		}
 		dst := row.Dst
 		if dst == "" {
 			dst = "default"

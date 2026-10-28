@@ -309,7 +309,14 @@ func TestAuditLogsOffsetEffective(t *testing.T) {
 	if len(page0) != 1 || len(page1) != 1 {
 		t.Fatalf("分页大小错误: %d %d", len(page0), len(page1))
 	}
-	if page0[0]["timestamp"] == page1[0]["timestamp"] {
+	// 判据是「两页是**不同的记录**」：**两条字段全同**才算同一条。
+	//
+	// round51 集成期实测（本用例在 Windows 上约 3/10 报红、而 offset 一直是对的）：一次提交会写
+	// 两条审计（操作级的「创建本地用户 X」＋引擎的 config.commit 差异行），两条的 `now()` 可能
+	// 落在**同一个时钟刻度**上（同一提交的两条时间戳逐字相同）⇒ 单比时间戳会间歇性假红。
+	// 明细文本不同才是这两条记录的可靠区分（见本用例种下的 pg1/pg2），故要求「明细与时间戳都相同」
+	// 才判 offset 失效——这比原来只比时间戳更强（真返回同一条时两者必同）。
+	if page0[0]["detail"] == page1[0]["detail"] && page0[0]["timestamp"] == page1[0]["timestamp"] {
 		t.Fatalf("offset 未生效：两页返回同一条（%v）", page0[0])
 	}
 }

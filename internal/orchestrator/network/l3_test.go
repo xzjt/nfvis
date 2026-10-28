@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +22,13 @@ type fakeL3 struct {
 	ifaces  map[string]uint32
 	nextSub uint32
 	nextBVI uint32
+	// subifExact 记录每个 sub_id 建子接口时是否带了 ExactMatch（round51 #525 真机语义：
+	// VPP 拒绝给非 exact-match 的子接口配地址，漏标志＝建空壳）。按 sub_id 记即可——
+	// 断言关心的是「建它的时候带没带」，不关心父口。
+	subifExact map[uint32]bool
+	// subifNonExact 模拟「历史遗留的非 exact-match 子接口」（早先版本建的坏壳）：
+	// 存在、名字查得到，但 VPP 拒绝给它配地址 ⇒ 产品必须删掉重建，不能按名复用。
+	subifNonExact map[uint32]bool
 
 	tables      map[uint32]bool
 	v4table     map[uint32]uint32 // swIfIndex → v4 table
@@ -54,7 +62,11 @@ type fakeL3 struct {
 	state      map[uint32]bool // 接口管理员状态（SetState 记录）
 	bviCreated int             // BviCreate 调用次数（恢复幂等断言用）
 	cleared    []uint32        // 被清地址的接口（删除全部地址）
-	err        error
+	// subifIdx 由 CreateSubif 建出的子接口索引集合（delete_subif 只认这些）；deletedSubifs
+	// 记录被成功回收的索引（N2 的回收断言用）。
+	subifIdx      map[uint32]bool
+	deletedSubifs []uint32
+	err           error
 	// logFn 可选的调用顺序记录（决策 #322 的「表先于成员」顺序断言用）：每次建表/置表记一条。
 	logFn func(string)
 }
@@ -74,7 +86,8 @@ func newFakeL3() *fakeL3 {
 		tableKeepOnDelete: map[uint32]bool{},
 		addrs:             map[uint32][]string{}, routes: map[uint32][]RouteEntry{},
 		routes6: map[uint32][]RouteEntry{}, bviBD: map[uint32]uint32{},
-		state: map[uint32]bool{}, cleared: nil,
+		state: map[uint32]bool{}, cleared: nil, subifIdx: map[uint32]bool{},
+		subifExact: map[uint32]bool{}, subifNonExact: map[uint32]bool{},
 	}
 }
 
@@ -117,13 +130,83 @@ func (f *fakeL3) SwInterfaceIndex(ifname string) (uint32, bool, error) {
 	return idx, ok, nil
 }
 
+// CreateSubif 复刻 VPP 的 create_subif 语义（N1）：同父口 + 同 sub-id 的子接口**已存在**时
+// 返回 -56（Value already exists），且子接口名按真实规则 `<父口名>.<sub-id>` 生成、**可按名
+// 查到**——幂等复用路径照的就是这个名字。此前假实现每次递增索引、永远成功，把「重放撞 -56
+// 令整次提交回滚、恢复重放必失败」的真实形态整个藏掉了（L2 侧的同族假实现早就这么做了）。
 func (f *fakeL3) CreateSubif(req CreateSubifReq) (uint32, error) {
 	if f.err != nil {
 		return 0, f.err
 	}
+	// round51 真机语义（#525）：VPP 26.06 拒绝给**非 exact-match** 的子接口配地址
+	// （`sub-interface without exact-match doesn't support IP addressing`，govpp 侧
+	// `Unsupported (-126)`）。假件必须复刻这条，否则「漏传 ExactMatch」在单测里恒绿、
+	// 到真机才炸——L3 子接口的全部意义就是配地址，漏标志等于建空壳。见 fix_r51_l3_test.go
+	// 的 TestFixR51N8L3SubifRequiresExactMatch。
+	// 假件按 sub_id 记下「建它时带没带 ExactMatch」。用惰性初始化：并非所有用例都经
+	// newFakeL3()（有的直接 &fakeL3{…} 字面量构造），nil 判空比要求每处都补一行更稳。
+	if f.subifExact == nil {
+		f.subifExact = map[uint32]bool{}
+	}
+	f.subifExact[req.SubID] = req.ExactMatch
+	parentName := ""
+	for n, i := range f.ifaces {
+		if i == req.ParentSwIfIndex && n != "" {
+			parentName = n
+			break
+		}
+	}
+	name := ""
+	if parentName != "" {
+		name = fmt.Sprintf("%s.%d", parentName, req.SubID)
+		if _, ok := f.ifaces[name]; ok {
+			return 0, fmt.Errorf("create_subif(parent=%d,sub=%d) retval=-56", req.ParentSwIfIndex, req.SubID)
+		}
+	}
 	f.nextSub++
-	f.ifaces[""] = f.nextSub
+	if name != "" {
+		f.ifaces[name] = f.nextSub
+	}
+	if f.subifIdx == nil {
+		f.subifIdx = map[uint32]bool{}
+	}
+	f.subifIdx[f.nextSub] = true
 	return f.nextSub, nil
+}
+
+// DeleteSubif 复刻 delete_subif：只对**子接口**索引生效（物理口不是子接口），
+// 已不存在（或本就不是子接口）时返回 -2——回收路径的 -2 容错用例据此可复现。
+func (f *fakeL3) DeleteSubif(swIfIndex uint32) error {
+	if f.err != nil {
+		return f.err
+	}
+	if !f.subifIdx[swIfIndex] {
+		return fmt.Errorf("delete_subif(if=%d) retval=-2", swIfIndex)
+	}
+	delete(f.subifIdx, swIfIndex)
+	for n, i := range f.ifaces {
+		if i == swIfIndex && n != "" {
+			delete(f.ifaces, n)
+		}
+	}
+	f.deletedSubifs = append(f.deletedSubifs, swIfIndex)
+	return nil
+}
+
+// SubifExactMatch 镜像 VPP 的 interface_dump 读回语义（round51 #525）：只有登记过
+// exact-match 的子接口才算；问一个不存在/非子接口的索引时按"问不出来"回错误。
+// subifNonExact 用来造「历史遗留的坏壳」现场（= 早先版本建的、没带标志的子接口）。
+func (f *fakeL3) SubifExactMatch(swIfIndex uint32) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	if f.subifNonExact[swIfIndex] {
+		return false, nil // 存在，但确定不是 exact-match
+	}
+	if !f.subifIdx[swIfIndex] {
+		return false, fmt.Errorf("接口索引 %d 不在 interface_dump 里", swIfIndex)
+	}
+	return true, nil
 }
 
 // IPTableAddDel 镜像 VPP 的**实测**删表语义（R84-29）：仍被接口占用的表删不掉，而 VPP 对此

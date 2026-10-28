@@ -676,13 +676,16 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 		return res, nil
 	}
 
-	// FR-CFG-002：schema + 语义校验，失败逐条列出
-	verrs := e.validate(*e.candidate)
-	// 决策 #152：自锁兜底——整文档提交不能把本机提交成「无人可登录」。
-	// 挂在这里（e.validate 之后、下面的失败分支之前）有两个理由：①自定义校验链
-	// （Options.Validate）可能把它整条漏掉，故不走那条链；②与既有校验共用同一个
-	// 失败分支 ⇒ 同样返回 ErrValidation 形态的 ValidationError、candidate 与编辑锁
-	// 都保留，操作者改完可以直接重提。
+	// FR-CFG-002：schema + 语义校验、镜像存在性（FR-CFG-011⑤）——与 `commit check` 走**同一
+	// 装配**（round51 G3）。此前镜像校验另起一段、且排在 confirm 守卫之后，两条路径的校验集合
+	// 不一致：`commit check` 报 OK 而紧随其后的 `commit` 被拒。
+	// 校验放在守卫之前与既有顺序一致（先列「配置本身合不合法」，再谈「要不要 commit confirmed」）。
+	verrs := e.validationErrors(*e.candidate)
+	// 自锁兜底（决策 #152）**留在提交路径**：它读的是本次调用的 opts.AllowNoSuperUser——该开关
+	// 只由 `request system zeroize` 置位（见 internal/archtest/superuser_guard_test.go），而
+	// `commit check` 拿不到调用方的 opts（REST/CLI 预检也从不用于恢复出厂），并入共用装配就得替
+	// check 编一个 opts，等于把一条**提交期**判据伪装成配置期判据。边界由
+	// internal/config/fix_r51_commitcheck_test.go 钉住（check 不报、commit 报）。
 	if !opts.AllowNoSuperUser {
 		verrs = append(verrs, model.CheckSuperUserPresent(*e.candidate)...)
 	}
@@ -717,18 +720,6 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 	fwChanged := sysFirewallChanged(committed.System, newCfg.System)
 	if fwChanged && !confirmGuardExempt(sess.Source) && opts.ConfirmedMinutes <= 0 {
 		return res, ErrFirewallConfirmRequired
-	}
-
-	// FR-CFG-011⑤：镜像存在性与类型匹配（依赖仓库，注入接口）
-	if e.images != nil {
-		verrs = append(verrs, e.checkImages(&newCfg)...)
-		if len(verrs) > 0 {
-			e.appendAudit(AuditEntry{
-				Time: e.now(), User: sess.User, Action: "config.commit",
-				Detail: formatValidateErrors(verrs), Result: "failure",
-			})
-			return res, &ValidationError{Errors: verrs}
-		}
 	}
 
 	// 决策 #395（R171-13）：隐式确认移到「校验与守卫**都通过**、即将生效」处——被校验或
@@ -769,8 +760,6 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 	res.Warnings = append(res.Warnings, e.numaWarnings(committed, newCfg)...)
 	res.Warnings = append(res.Warnings, dataPlaneWarnings(committed, newCfg)...)
 	res.Warnings = append(res.Warnings, vmDefinitionWarnings(committed, newCfg)...)
-
-	// FR-CFG-011⑤：镜像检查需要 committed 之后的候选配置
 
 	// 决策 #150：高危档变更（本地用户/权限类/口令策略、外部证书文件引用）在**下发底座之前**
 	// 留一条「意图」行——中途崩溃或失败时，读审计的人仍看得出这次动作要做什么。结果行沿用
@@ -870,6 +859,10 @@ func (e *Engine) Commit(ctx context.Context, sess Session, opts CommitOpts) (res
 }
 
 // CommitCheck 仅校验 candidate 不下发（commit check，FR-CFG-002/004）。
+//
+// round51 G3：与 Commit 共用 validationErrors——此前这里只跑 `e.validate`，漏掉镜像存在性
+// （checkImages），于是「引用不存在的镜像」时 `commit check` 报 OK、紧随其后的 `commit` 被拒。
+// 两条路径从今往后不可能再漂移。
 func (e *Engine) CommitCheck(sess Session) ([]model.ValidateError, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -877,7 +870,25 @@ func (e *Engine) CommitCheck(sess Session) ([]model.ValidateError, error) {
 	if err := e.requireHolderLocked(sess); err != nil {
 		return nil, err
 	}
-	return e.validate(*e.candidate), nil
+	return e.validationErrors(*e.candidate), nil
+}
+
+// validationErrors 配置本身的合法性校验（round51 G3）：Commit 与 CommitCheck 共用。
+//
+// 组成：结构/语义校验（e.validate，含资源账本）→ 镜像存在性与类型匹配（FR-CFG-011⑤，依赖注入
+// 的仓库、nil 时跳过）。
+//
+// 两类判据**有意不在这里**，因为它们都不是「配置本身合不合法」，而是「这次提交动作」的判定：
+//   - 自锁兜底（决策 #152）：读 opts.AllowNoSuperUser，只有 request system zeroize 置位——见
+//     Commit；
+//   - confirm 守卫（管理口/防火墙，FR-CFG-012）：依赖 opts 与「相对 committed 的变更」——见
+//     Commit。
+func (e *Engine) validationErrors(cfg model.Config) []model.ValidateError {
+	verrs := e.validate(cfg)
+	if e.images != nil {
+		verrs = append(verrs, e.checkImages(&cfg)...)
+	}
+	return verrs
 }
 
 // ConfirmCommit 确认在途的 commit confirmed（FR-CFG-004）。
@@ -1333,6 +1344,15 @@ func (e *Engine) checkImages(cfg *model.Config) []model.ValidateError {
 	for _, vm := range cfg.VirtualMachineFunctions {
 		if vm.Image != "" {
 			check(vm.Name, vm.Image, "vm-image", fmt.Sprintf("virtual-machine-functions[%s].image", vm.Name))
+		}
+		// round51 G2：数据盘引用的镜像此前**完全绕过**规则⑤（只校验了 vm.Image）——于是
+		// disks[].image 指向仓库里不存在/类型不符的镜像也能提交，直到起 VM 才在克隆阶段失败
+		// （报错点离配置很远）。与主盘同口径逐条校验，路径/文案形状保持一致。
+		for _, d := range vm.Disks {
+			if d.Image != "" {
+				check(vm.Name, d.Image, "vm-image",
+					fmt.Sprintf("virtual-machine-functions[%s].disks[%s].image", vm.Name, d.Name))
+			}
 		}
 	}
 	for _, ct := range cfg.ContainerFunctions {

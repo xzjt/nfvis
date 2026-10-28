@@ -337,6 +337,15 @@ func (m *SoftwareManager) Add(ctx context.Context, pkg, expectSHA string) (Softw
 	if newVer == "" {
 		return res, errors.New("软件包版本为空")
 	}
+	// 修 R51-L1：包里的 Version 是**由包自己声明**的字符串，此前未做任何格式检查就流向两处
+	// root 权限的落点——归档路径 `filepath.Join(m.dir, "nfvis_<ver>_amd64.deb")`
+	// （`../../../../tmp/x` 经 Join 折叠后真的写到软件目录之外）与脱离执行的 root shell 脚本
+	// 里的 reason 字符串（引号/反引号/`$()` 会破开那条被 BUG-16/17/18 加固过的脚本）。
+	// 版本号按 Debian 字符集白名单校验，不合格即**受理前**拒绝，不碰任何文件。
+	if verr := validateDebVersion(newVer); verr != nil {
+		return res, fmt.Errorf("软件包 %s 的 Version 字段不可用（%v）：拒绝安装（该值会被拼进归档路径与以 root 执行的安装脚本）",
+			filepath.Base(path), verr)
+	}
 
 	// 归档（供回退）后安装。修 BUG-18 的归档副作用：先拷成**暂存名**，dpkg 成功（rc==0）
 	// 才由脱离 shell 晋升为正式归档——以前无条件先归档，一个同版本坏包就能把归档里的
@@ -1261,6 +1270,11 @@ func (m *SoftwareManager) installScriptWithResult(job installJob) string {
 	quotedRC := shellQuote(rcFile)
 	ts := m.nowFn().UTC().Format(time.RFC3339)
 	target := shellQuote(job.targetVer)
+	// 修 R51-L1：目标版本进脚本一律经 shellQuote（比较操作数本就是这样）。reason 里此前是
+	// **裸插值**进双引号字符串——版本号含 `"`/反引号/`$()` 就能破开这条被 BUG-16/17/18 加固过的
+	// 脚本。这里改为先把「值」放进 shell 变量，再用 `$tv` 在双引号里取（值的引用与拼接彻底分离，
+	// 不依赖 validateDebVersion 是否拦得住——那是第二道）。
+	tv := shellQuote(job.targetVer)
 	installedLit := shellQuote(pkgStatusInstalled)
 	// auditCleanSh `dpkg --audit` 不列 nfvis 的 shell 判据（与 packageAuditClean 同义）。
 	// `grep -q "  nfvis "` 只认缩进两空格的包名行，避免匹配到描述文本里的 nfvis。
@@ -1299,7 +1313,7 @@ func (m *SoftwareManager) installScriptWithResult(job installJob) string {
 	}
 	// 采样与终判。终判四条同时成立才 ok=true：状态行 installed、audit 干净、**dpkg 退出码
 	// 为 0**、**已装版本==目标版本**。差哪一条，reason 就说哪一条——失败结论也要能读懂。
-	loop := "{ prev=''; n=0; i=0; st=''; ver=''; " +
+	loop := "{ prev=''; n=0; i=0; st=''; ver=''; tv=" + tv + "; " +
 		// 同一状态行连续出现才累加，换值就从头计；中途读不到（空串）同样打断计数——
 		// 「一直读不到」与「一直是 installed」是两码事，前者不是证据。
 		"while [ \"$i\" -lt " + strconv.Itoa(maxIter) + " ]; do " +
@@ -1323,7 +1337,7 @@ func (m *SoftwareManager) installScriptWithResult(job installJob) string {
 		"elif [ -z \"$st\" ]; then rsn='观察窗内未取得可判读的包状态'; " +
 		"elif [ \"$st\" != " + installedLit + " ]; then rsn=\"包状态停在 $st，未达到 install ok installed\"; " +
 		"elif " + auditDirtySh + "; then rsn='dpkg --audit 仍列出 nfvis（半配置/被打断）'; " +
-		"elif [ \"$ver\" != " + target + " ]; then rsn=\"已装版本 $ver 未达到目标 " + job.targetVer + "\"; " +
+		"elif [ \"$ver\" != " + target + " ]; then rsn=\"已装版本 $ver 未达到目标 $tv\"; " +
 		"else rsn='状态在观察窗内未稳定（最后观测见 install.log）'; fi; fi; " +
 		// 结论的 version 写**目标版本**：这份记录回答「这次要装什么、装成了没」；写采样值
 		// 会把「装到了什么版本」记错（真机场景 B：目标 3.0.26、记录写 3.0.28）。
@@ -1514,6 +1528,27 @@ func (m *SoftwareManager) readInstallLog(path string) string {
 // shellQuote 用单引号包裹 shell 参数（POSIX）：文件名里的空格/分号不会被当成语法。
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// debVersionAllowed 合法的 Debian 版本字符集（与 dpkg 的 version 语法一致：数字、字母、
+// `.`、`+`、`~`、`:`、`-`）。
+//
+// 用白名单而非黑名单（修 R51-L1）：该值会经 `filepath.Join` 拼成归档路径、并被插进以 root
+// 执行的 shell 脚本，任何 `/`、引号、反引号、`$`、空白或换行都必须先被拒之门外——黑名单永远
+// 漏（例如漏掉 `\`、换行、制表符、`;`）。
+var debVersionAllowed = regexp.MustCompile(`^[A-Za-z0-9.+~:-]+$`)
+
+// validateDebVersion 校验从包内读到的 Version 是否可用于拼路径与脚本（修 R51-L1）。
+func validateDebVersion(v string) error {
+	if v == "" {
+		return errors.New("版本为空")
+	}
+	// `..` 不在白名单之外（`.` 是合法字符），但它出现在路径里就是越界意图，显式拒掉。
+	// 真实版本号（3.0.32~r50 等）不含连续的 `..`。
+	if strings.Contains(v, "..") || !debVersionAllowed.MatchString(v) {
+		return fmt.Errorf("版本号含非法字符: %q", v)
+	}
+	return nil
 }
 
 // joinOutput 拼接两段输出，忽略空段（不留孤立换行）。

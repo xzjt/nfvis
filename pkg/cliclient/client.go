@@ -17,6 +17,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -182,6 +184,9 @@ func (c *Client) Execute(line, source string) (Result, error) {
 		Console *ConsoleRequest `json:"console"`
 		Warning bool            `json:"warning"`
 	}
+	// 本次命令的发起时刻（L5）：服务端结论记录里的「时间」是该次判定的落笔时刻，
+	// 用它把重连后读到的记录**归因到本次尝试**（留旧记录不得冒充本次结果）。
+	issued := time.Now()
 	err := c.do(http.MethodPost, "/api/v1/cli/execute", map[string]string{
 		"line": line, "source": source,
 	}, &resp)
@@ -191,7 +196,7 @@ func (c *Client) Execute(line, source string) (Result, error) {
 		// 只看到「连接 nfvisd 失败」+ 非零退出码，会误判失败而重试或走回退。
 		// 这里等 nfvisd 回来，再用**独立读命令**把真实结果问一遍并作为本命令的结论返回。
 		if isUpgradeLine(line) && isConnDropped(err) {
-			return c.recheckAfterRestart(line, err)
+			return c.recheckAfterRestart(line, err, issued)
 		}
 		return Result{}, err
 	}
@@ -212,7 +217,14 @@ func (c *Client) Execute(line, source string) (Result, error) {
 //
 // 90s 在真机上不够（CLI 会读到 pending 就报「未定」，而包其实稍后就装好了）。
 // 仍**有界**：等不到就如实说「结果未知」，不无限挂住终端。
-const upgradeRestartWait = 240 * time.Second
+//
+// var（非 const）：单测把窗口与轮询间隔一起缩短（见 fix_r51_l5_test.go），与 internal/system 的
+// dpkgRCWait 同法——产品路径只读、不写。
+var upgradeRestartWait = 240 * time.Second
+
+// recheckInterval 复核轮询间隔（两次读结论之间）。真机上 2s 足够密（服务端终判要 10s+，
+// 重启本身十几秒），又不至于把刚起来的 nfvisd 打满；单测缩短它。
+var recheckInterval = 2 * time.Second
 
 // isUpgradeLine 该命令行是不是会重启 nfvisd 的那类动作（升级/回退）。
 //
@@ -241,15 +253,28 @@ func isConnDropped(err error) bool {
 
 // recheckAfterRestart 等 nfvisd 回来后复核升级结果，并把结论作为本命令的输出返回。
 //
-// 复核**不猜**：服务端在安装结束时把结论（状态行 + 版本 + 成败）落到
+// 复核**不猜**：服务端在安装结束时把结论（状态行 + 版本 + 成败 + 时间）落到
 // /var/lib/nfvis/software/last-result.json（见 system.LastResultPath），这里重连后读它。
 // 为什么不读 dpkg：CLI 在宿主之外拿不到 dpkg；而 `show version` 给的是**运行中进程**的编译
 // 版本，证明不了包状态（半装时它照样报新版本）。
-func (c *Client) recheckAfterRestart(line string, cause error) (Result, error) {
+//
+// L5（round51 评审）：读到的记录必须能**归因到本次尝试**（issued = 本次命令的发起时刻），
+// 否则一条历史 SUCCESS 记录会被当成本次结果报「结论: 成功」+ 退出码 0——对一次**根本没跑成**
+// 的动作谎报成功。归因规则（见 unattributable）：
+//   - 记录带「时间」（≥3.0.26 的服务端都写）：须不早于 issued；
+//   - 命令行能推出目标版本（`rollback to <v>`、或 `add` 的 `nfvis_<v>_<arch>.deb` 本地路径，
+//     与 internal/system 同一正则）：记录版本须等于它。
+//
+// 两条都可用时**都须成立**；任一条不成立就继续在既有有界窗口内等（新记录可能还没落笔），
+// 等到头仍归因不上就如实报「未定」，绝不把旧记录当成功。
+func (c *Client) recheckAfterRestart(line string, cause error, issued time.Time) (Result, error) {
+	// 服务端按 RFC3339（秒级）渲染时间，亚秒被截掉；issued 也截到秒，避免「同一秒内」被误判成早于。
+	issued = issued.Truncate(time.Second)
+	target := targetVersionOf(line)
 	deadline := time.Now().Add(upgradeRestartWait)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		time.Sleep(2 * time.Second)
+		time.Sleep(recheckInterval)
 		// 旧 token 随 nfvisd 重启失效：先重登（凭据只在内存里），再问结论。
 		if c.user != "" {
 			if err := c.Login(c.user, c.pass); err != nil {
@@ -262,7 +287,7 @@ func (c *Client) recheckAfterRestart(line string, cause error) (Result, error) {
 			lastErr = err
 			continue // nfvisd 还没回来
 		}
-		ok, ver, status := parseSoftwareResult(r.Output)
+		ok, ver, status, recTime := parseSoftwareResult(r.Output)
 		// 结论还在 pending（升级进行中/判定未完成）⇒ **继续等**，不要就此下「失败」的结论。
 		// 真机实证：服务端的终判要等「同一状态行连续 6 次一致」（约 10s+），而 CLI 重连通常
 		// 在 16s 内就发生——读到 pending 是中间态，不是结果；把它当失败会让用户白白回退。
@@ -270,6 +295,11 @@ func (c *Client) recheckAfterRestart(line string, cause error) (Result, error) {
 		// 两者都**不是结果**，必须接着等——把它当失败会让用户对一次正在成功的升级执行回退。
 		if status == statusPending || status == "" {
 			lastErr = fmt.Errorf("服务端结论尚未落定（当前 %q）", status)
+			continue
+		}
+		// L5：归因不上（旧记录仍在、新记录还没落笔）⇒ 接着等，不当成本次结论。
+		if why := unattributable(recTime, ver, issued, target); why != "" {
+			lastErr = fmt.Errorf("服务端记录不属于本次尝试（%s）", why)
 			continue
 		}
 		var b strings.Builder
@@ -292,9 +322,67 @@ func (c *Client) recheckAfterRestart(line string, cause error) (Result, error) {
 		b.WriteString("结论: 未落定为成功——可执行 request system software rollback 回退，或看 journalctl -u nfvis 定位。\n")
 		return Result{}, fmt.Errorf("%s", b.String())
 	}
-	_ = lastErr
-	return Result{}, fmt.Errorf("升级请求的连接中断（%v），且在 %s 内未能重连 nfvisd 复核结果："+
-		"请手动核对 `dpkg -l nfvis`（升级可能已成功）", cause, upgradeRestartWait)
+	// 有界窗口内既没等到可归因的结论（可能是历史记录在冒充，也可能是判定一直没落定）：
+	// 如实报**未定**并带上最后一次观测到的错误（登录/HTTP 文案），让操作者知道卡在哪一环。
+	return Result{}, fmt.Errorf("升级请求的连接中断（%v），且在 %s 内未能重连 nfvisd 复核**本次**升级的结果"+
+		"（结论未定，不得据此判成败）：最后一次复核错误：%v；请手动核对 `dpkg -l nfvis`（升级可能已成功）",
+		cause, upgradeRestartWait, lastErr)
+}
+
+// unattributable 判定服务端记录能否归因到本次尝试；归因不上时返回原因（空串＝可归因）。
+//
+// 规则见 recheckAfterRestart 的注释；核心是「旧记录不得冒充本次结果」：
+//   - 记录有版本、命令行也推出了目标版本 ⇒ 两者必须一致；
+//   - 记录有时间 ⇒ 不得早于本次发起时刻；
+//   - 记录无时间（3.0.26 之前写入）⇒ 只能靠版本归因，版本不可比对时如实说无法归因。
+func unattributable(recTime time.Time, ver string, issued time.Time, target string) string {
+	if ver != "" && target != "" && ver != target {
+		return fmt.Sprintf("记录版本 %s 与本次目标版本 %s 不一致", ver, target)
+	}
+	if recTime.IsZero() {
+		if target == "" || ver != target {
+			return "记录缺少时间字段，且记录版本与本次目标版本不可比对"
+		}
+		return ""
+	}
+	if recTime.Before(issued) {
+		return fmt.Sprintf("记录时间 %s 早于本次发起时刻 %s", recTime.Format(time.RFC3339), issued.Format(time.RFC3339))
+	}
+	return ""
+}
+
+// debVersionRe 与服务端同一判据（internal/system 的 debVersionRe）：从包文件名取版本段。
+var debVersionRe = regexp.MustCompile(`^nfvis_(.+)_(amd64|arm64|all)\.deb$`)
+
+// targetVersionOf 从升级/回退命令行推出**本次尝试的目标版本**（推不出返回空串，此时只能靠时间归因）。
+//
+// 只认命令行里能确定的东西：`rollback to <v>` 的目标就是 <v>；`add` 的**本地 .deb 路径**若形如
+// nfvis_<v>_<arch>.deb 则取版本段（服务端另以 `dpkg-deb -f Version` 为准——名字被改过时宁可
+// 不判版本，交给时间归因，而不是拿一个错的版本把人吓住）。自动选版的 rollback 与 URL 安装
+// 都推不出目标版本，返回空串。
+func targetVersionOf(line string) string {
+	f := strings.Fields(line)
+	if len(f) < 4 || f[0] != "request" || f[1] != "system" || f[2] != "software" {
+		return ""
+	}
+	switch f[3] {
+	case "rollback":
+		for i := 4; i+1 < len(f); i++ {
+			if f[i] == "to" {
+				return f[i+1]
+			}
+		}
+	case "add":
+		for _, tok := range f[4:] {
+			if strings.Contains(tok, "://") {
+				continue // URL 安装：目标版本取决于下载件内容，命令行里拿不到
+			}
+			if m := debVersionRe.FindStringSubmatch(filepath.Base(tok)); m != nil {
+				return m[1]
+			}
+		}
+	}
+	return ""
 }
 
 // executeOnce 发一次执行请求（不触发升级重连复核，供内部复核路径用）。
@@ -319,9 +407,10 @@ const statusPending = "pending"
 
 // parseSoftwareResult 解析服务端 `show system software result` 的输出。
 //
-// 输出形状由服务端渲染（`结果: 成功|失败`、`版本: x`、`状态: install ok installed`）；
-// 解析不出「结果」行时返回 ok=false——**判不出就不当作成功**。
-func parseSoftwareResult(out string) (ok bool, version, status string) {
+// 输出形状由服务端渲染（`结果: 成功|失败`、`版本: x`、`状态: install ok installed`、`时间: <RFC3339>`）；
+// 解析不出「结果」行时返回 ok=false——**判不出就不当作成功**。recTime 为记录落笔时刻（L5：
+// 归因本次尝试用；服务端不写该行或格式不认识时为零值，调用方据此改走版本归因）。
+func parseSoftwareResult(out string) (ok bool, version, status string, recTime time.Time) {
 	for _, ln := range strings.Split(out, "\n") {
 		s := strings.TrimSpace(ln)
 		if v, found := strings.CutPrefix(s, "版本:"); found {
@@ -330,11 +419,16 @@ func parseSoftwareResult(out string) (ok bool, version, status string) {
 		if v, found := strings.CutPrefix(s, "状态:"); found {
 			status = strings.TrimSpace(v)
 		}
+		if v, found := strings.CutPrefix(s, "时间:"); found {
+			if t, err := time.Parse(time.RFC3339, strings.TrimSpace(v)); err == nil {
+				recTime = t
+			}
+		}
 		if v, found := strings.CutPrefix(s, "结果:"); found {
 			ok = strings.TrimSpace(v) == "成功"
 		}
 	}
-	return ok, version, status
+	return ok, version, status, recTime
 }
 
 func (c *Client) do(method, path string, body any, out any) error {

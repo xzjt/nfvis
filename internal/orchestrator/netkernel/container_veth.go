@@ -65,6 +65,10 @@ const (
 	// 名字总长 = 前缀 + 8 位十六进制 = 15 = IFNAMSIZ-1（与内置 DHCP tap 同长）。
 	ctVethHostPrefix = orchestrator.ContainerVethHostPrefix
 	ctVethPeerPrefix = orchestrator.ContainerVethPeerPrefix
+	// ctVethResidueSource 容器 vNIC 巡检的**族级**告警记源（round51 P5）：只用于「无声明对应的
+	// 产品宿主端清理失败」这类**没有对象可归属**的失败；逐对象的收敛结局一律按
+	// `container-functions/<属主>/interfaces/<vNIC>` 记源（与恢复重放同一串，两侧是同一个告警键）。
+	ctVethResidueSource = "container-veth"
 )
 
 // isProductContainerVethName 是否是产品自持的容器 veth 名（宿主端或容器端：前缀 + 8 位小写
@@ -351,6 +355,17 @@ func (m *ctVethManager) dropResidue(ctx context.Context, declared map[string]boo
 	return errors.Join(errs...)
 }
 
+// ctVethOutcome 一轮巡检里**一个声明**的收敛结局（属主/vNIC 与错误）。
+//
+// 逐对象返回的原因（round51 P5）：调用方要按**与恢复重放逐字同一记源**
+// （`container-functions/<属主>/interfaces/<vNIC>`）建/消未收敛告警——族级单一 source
+// 与重放的逐对象 source 不是同一个键，重放落下的告警会因此无人消解（见 ReconcileContainerVeth）。
+type ctVethOutcome struct {
+	owner string
+	iface string
+	err   error
+}
+
 // reconcile 15s 巡检对账（决策 #441）：
 //   - 声明里每个容器 vNIC：宿主端按名确保在位（缺则建、置 up），并**入对桥**（master 由本
 //     巡检兜底：提交期由 bridge-domain 段负责，带外被摘出/桥被重建时靠这里纠正）；
@@ -358,28 +373,28 @@ func (m *ctVethManager) dropResidue(ctx context.Context, declared map[string]boo
 //   - 内核里存在、但没有任何声明对应的**产品宿主端**：删除（容器/vNIC 已删除、切换残留）；
 //   - 簿记随声明刷新（已不声明的条目清掉）。
 //
-// 逐条如实返回错误（巡检日志 + 未收敛告警），一条失败不遮其它条。
+// 返回：逐声明的结局（与 specs 同序；调用方据此逐对象建/消告警）与**族级**错误——残渣清理
+// 那部分没有对象可归属（名字反查不出属主），按族级记源上报。逐对象错误文案与调用方拼装的
+// 未收敛项逐字相同（调用方负责拼 `container-functions/<属主>/interfaces/<vNIC>: <err>`）。
+// 一条失败不遮其它条。
 // 不重建已存在的宿主端（绝不）：重建会打断运行中容器的网络。
-func (m *ctVethManager) reconcile(ctx context.Context, specs []ctVethSpec) error {
-	var errs []error
+func (m *ctVethManager) reconcile(ctx context.Context, specs []ctVethSpec) ([]ctVethOutcome, error) {
+	outcomes := make([]ctVethOutcome, 0, len(specs))
 	declared := make(map[string]bool, len(specs))
 	keys := make(map[ctVethKey]bool, len(specs))
 	for _, spec := range specs {
 		declared[spec.host] = true
 		keys[ctVethKey{owner: spec.owner, iface: spec.iface}] = true
 		if err := m.sync(ctx, spec); err != nil {
-			errs = append(errs, fmt.Errorf("container-functions/%s/interfaces/%s: %w", spec.owner, spec.iface, err))
+			outcomes = append(outcomes, ctVethOutcome{owner: spec.owner, iface: spec.iface, err: err})
 			continue // 接口都没收敛，入桥必然失败——只报本条，不叠第二个错
 		}
-		if err := m.ensureBridge(ctx, spec); err != nil {
-			errs = append(errs, fmt.Errorf("container-functions/%s/interfaces/%s: %w", spec.owner, spec.iface, err))
-		}
+		outcomes = append(outcomes, ctVethOutcome{
+			owner: spec.owner, iface: spec.iface, err: m.ensureBridge(ctx, spec),
+		})
 	}
 	m.retain(keys)
-	if err := m.dropResidue(ctx, declared); err != nil {
-		errs = append(errs, err)
-	}
-	return errors.Join(errs...)
+	return outcomes, m.dropResidue(ctx, declared)
 }
 
 // ---------- Provider 接线 ----------
@@ -530,7 +545,15 @@ func (p *Provider) containerVethNamesOfOwner(owner string) []string {
 // 一旦装配过（提交/恢复重放碰过它），空声明也走一轮——把带外残留的宿主端收干净。
 //
 // 失败**如实进未收敛项**：返回错误（15s 巡检日志）之外，按 EnsureConsistent 的同一
-// scope/code/source 建/消告警——`show alarms` 事后可查；下一轮成功即自动消解。
+// scope/code/**触发对象逐对象记源**建/消告警——`show alarms` 事后可查；下一轮成功即自动消解。
+//
+// 记源口径（round51 P5）：逐对象来源 `container-functions/<属主>/interfaces/<vNIC>`，与恢复
+// 重放（EnsureConsistent 的容器 veth 段）**逐字同一串**，两侧因此是**同一个告警键**。此前这里
+// 用一个族级 source（`container-veth`），而重放的失败落在逐对象来源上 ⇒ 重放失败后即便事实
+// 愈合（宿主端建出来了、桥在了），那条逐对象告警也无人消解：本巡检按族级键消的是另一个键，
+// ReconcileRecoveryAlarms 又只复核「对象已不在声明里」的逐对象来源（仍声明 ⇒ 保守保留），
+// 于是它要挂到下一次全量重放（nfvisd 重启/数据面切换）才消失，期间 `show alarms` 与现场相反。
+// 族级 `container-veth` 键保留给**残渣清理失败**（无对象可归属的那部分），同样是本轮成功即消解。
 // 本方法**不做 attach**（没有 PID，也不该猜容器在不在跑）；宿主端**随声明存在**（stop 不删，
 // 容器端随 netns 消失、下次 start 重新 attach），故这里只按声明对账、不依赖容器运行态。
 func (p *Provider) ReconcileContainerVeth(ctx context.Context, cfg model.Config) []error {
@@ -541,18 +564,36 @@ func (p *Provider) ReconcileContainerVeth(ctx context.Context, cfg model.Config)
 	if len(specs) == 0 && mgr == nil {
 		return nil // 未声明且从未装配：无对象可对账，不构造管理器、不下发任何内核命令
 	}
-	const src = "container-veth"
-	err := p.ctVethMgr().reconcile(ctx, specs)
-	if err == nil {
-		if p.alarms != nil {
-			p.alarms.Resolve(alarmScopeRecovery, network.AlarmUnconverged, src)
-		}
-		return nil
-	}
+	outcomes, residueErr := p.ctVethMgr().reconcile(ctx, specs)
 	if p.alarms != nil {
-		p.alarms.Raise(alarmScopeRecovery, network.SeverityWarning, network.AlarmUnconverged, err.Error(), src)
+		for _, oc := range outcomes {
+			src := "container-functions/" + oc.owner + "/interfaces/" + oc.iface
+			if oc.err == nil {
+				p.alarms.Resolve(alarmScopeRecovery, network.AlarmUnconverged, src)
+				continue
+			}
+			p.alarms.Raise(alarmScopeRecovery, network.SeverityWarning, network.AlarmUnconverged, oc.err.Error(), src)
+		}
+		if residueErr == nil {
+			p.alarms.Resolve(alarmScopeRecovery, network.AlarmUnconverged, ctVethResidueSource)
+		} else {
+			p.alarms.Raise(alarmScopeRecovery, network.SeverityWarning, network.AlarmUnconverged,
+				residueErr.Error(), ctVethResidueSource)
+		}
 	}
-	return []error{err}
+	var errs []error
+	for _, oc := range outcomes {
+		if oc.err != nil {
+			errs = append(errs, fmt.Errorf("container-functions/%s/interfaces/%s: %w", oc.owner, oc.iface, oc.err))
+		}
+	}
+	if residueErr != nil {
+		errs = append(errs, residueErr)
+	}
+	if err := errors.Join(errs...); err != nil {
+		return []error{err}
+	}
+	return nil
 }
 
 // Attach / Delete 容器编排的接入钩子（**契约名**）：容器 start/restart 成功后 attach 容器端、

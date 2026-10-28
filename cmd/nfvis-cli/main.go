@@ -19,24 +19,63 @@ import (
 	"github.com/xzjt/nfvis/pkg/cliclient"
 )
 
+// cliFlags main 的命令行标志集合：集中注册，便于单测核对「用法文本不含口令」
+// （见 fix_r51_m13_test.go）。
+type cliFlags struct {
+	server     *string
+	user       *string
+	password   *string
+	source     *string
+	cmdline    *string
+	scriptFile *string
+	showVer    *bool
+	caFile     *string
+	insecure   *bool
+}
+
+// newFlagSet 注册全部标志。**口令绝不进标志缺省值**：Go 的 flag.PrintDefaults 会把非空字符串
+// 缺省值原样印出（`(default "<值>")`），而 `-h`/`--help`/任何拼错的标志都会经它把用法打到
+// stdout/stderr——若缺省值取自 NFVIS_PASSWORD，口令就进了终端回滚缓冲、CI 日志与支持包。
+// 故 -p 缺省恒为空串，环境变量在 Parse 之后单独读（见 resolvePassword；对外行为不变：
+// NFVIS_PASSWORD 仍被尊重、-p 仍可显式给、未给时仍在终端下无回显索取）。
+//
+// 名字与错误策略与原先的 flag.CommandLine 逐字一致（os.Args[0] + ExitOnError），
+// 故 -h 与拼错标志的退出码（0 / 2）与用法首行文本都不变。
+func newFlagSet() (*flag.FlagSet, *cliFlags) {
+	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	// 缺省须与守护进程缺省一致：deploy/nfvis.service 设 NFVIS_LISTEN=:443，且 nfvisd
+	// 未提供证书时自动自签并启用 HTTPS（决策 #72）。此前缺省是明文 http://…:8443，
+	// 与守护进程默认不匹配 → 默认参数连不上（决策 #78）。
+	// 可用 NFVIS_SERVER 覆盖（与 NFVIS_PASSWORD 同风格），便于脚本/自动化。
+	f := &cliFlags{
+		server:     fs.String("server", envOr("NFVIS_SERVER", cliclient.DefaultServer), "nfvisd 地址（缺省读 NFVIS_SERVER）"),
+		user:       fs.String("u", "admin", "用户名"),
+		password:   fs.String("p", "", "口令（缺省读 NFVIS_PASSWORD；均未给则在终端下交互索取）"),
+		source:     fs.String("source", "ssh", "接入源（ssh|console）"),
+		cmdline:    fs.String("c", "", "执行多行命令后退出（换行分隔）"),
+		scriptFile: fs.String("f", "", "执行脚本文件后退出（按行，语义同 -c；- 表示读 stdin；与 -c 互斥）"),
+		showVer:    fs.Bool("version", false, "输出版本后退出"),
+		caFile:     fs.String("ca", "", "服务端证书 PEM（HTTPS 校验；缺省尝试固定本机 nfvisd 证书）"),
+		insecure:   fs.Bool("insecure", false, "跳过 HTTPS 证书校验（仅限调试）"),
+	}
+	return fs, f
+}
+
+// resolvePassword 取生效口令：`-p` 优先，其次环境变量 NFVIS_PASSWORD（两者皆空则返回空串，
+// 由调用方在终端下交互索取）。**取值不进标志缺省值**（原因见 newFlagSet）。
+func (f *cliFlags) resolvePassword() string {
+	if f.password != nil && *f.password != "" {
+		return *f.password
+	}
+	return os.Getenv("NFVIS_PASSWORD")
+}
+
 func main() {
-	var (
-		// 缺省须与守护进程缺省一致：deploy/nfvis.service 设 NFVIS_LISTEN=:443，且 nfvisd
-		// 未提供证书时自动自签并启用 HTTPS（决策 #72）。此前缺省是明文 http://…:8443，
-		// 与守护进程默认不匹配 → 默认参数连不上（决策 #78）。
-		// 可用 NFVIS_SERVER 覆盖（与 NFVIS_PASSWORD 同风格），便于脚本/自动化。
-		server       = flag.String("server", envOr("NFVIS_SERVER", cliclient.DefaultServer), "nfvisd 地址（缺省读 NFVIS_SERVER）")
-		user         = flag.String("u", "admin", "用户名")
-		passwordFlag = flag.String("p", os.Getenv("NFVIS_PASSWORD"), "口令（缺省读 NFVIS_PASSWORD；均未给则在终端下交互索取）")
-		source       = flag.String("source", "ssh", "接入源（ssh|console）")
-		cmdline      = flag.String("c", "", "执行多行命令后退出（换行分隔）")
-		scriptFile   = flag.String("f", "", "执行脚本文件后退出（按行，语义同 -c；- 表示读 stdin；与 -c 互斥）")
-		showVer      = flag.Bool("version", false, "输出版本后退出")
-		caFile       = flag.String("ca", "", "服务端证书 PEM（HTTPS 校验；缺省尝试固定本机 nfvisd 证书）")
-		insecure     = flag.Bool("insecure", false, "跳过 HTTPS 证书校验（仅限调试）")
-	)
-	flag.Parse()
-	if *showVer {
+	fs, flags := newFlagSet()
+	fs.Parse(os.Args[1:])
+	server, user, source := flags.server, flags.user, flags.source
+	cmdline, scriptFile, caFile, insecure := flags.cmdline, flags.scriptFile, flags.caFile, flags.insecure
+	if *flags.showVer {
 		fmt.Println("nfvis-cli", cli.Version)
 		return
 	}
@@ -44,7 +83,7 @@ func main() {
 	// R31-1：多余的位置参数不是命令，必须 fail fast 拒绝。`nfvis-cli "show version"` 曾静默丢弃它、
 	// 落进交互模式（非 TTY stdin 立即 EOF）并以退出码 0 结束——命令没跑却「成功」（假成功）。
 	// 与 resolveScript 的错误路径并列放在握手/登录之前，退出码 2（用法错误同档，决策 #370）。
-	if err := rejectPositionalArgs(flag.Args()); err != nil {
+	if err := rejectPositionalArgs(fs.Args()); err != nil {
 		fmt.Fprintf(os.Stderr, "%% %v\n", err)
 		os.Exit(2)
 	}
@@ -55,7 +94,7 @@ func main() {
 	// 决策 #370（R142 E9）：区分「未给标志」与「给了空值」——`-c ''`/`-f ''` 必须报错，
 	// 不能静默进交互模式（空脚本「假成功」）。
 	cSet, fSet := false, false
-	flag.Visit(func(f *flag.Flag) {
+	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "c":
 			cSet = true
@@ -74,7 +113,7 @@ func main() {
 	fmt.Printf("连接 %s ...\n", *server)
 	// 登录横幅在提示口令之前取一次；脚本模式不取也不打印（见 printLoginBanner）。
 	printLoginBanner(os.Stdout, script, client)
-	password := *passwordFlag
+	password := flags.resolvePassword()
 	if password == "" {
 		// `-f -` 时 stdin 已被脚本吃掉，不能再拿它当口令来源：给明确指引而非静默挂起。
 		if *scriptFile == "-" {

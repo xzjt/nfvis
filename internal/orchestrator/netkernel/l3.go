@@ -268,10 +268,24 @@ func routeArgs(verb, vrfName string, route model.Route) []string {
 }
 
 // DeleteL3Interface 回收一条已从声明里删除的 L3 接口：清地址 → 出 VRF → （vlan 子接口）删设备。
+//
+// round51 Q2：**只管自己那一份**——先按名核对归属（`LinkName(vrfName)`），设备已被别的 master
+// （另一台 VRF、bridge 或 bond）接管时整条回收是空操作：不清地址、不解绑 ACL、不摘归属、
+// 不删设备。由来（静态评审，与 P1/#193/#196/#361 同族）：此前 `vrfName` **从未被使用**，
+// detach 的判据是「master 是不是 VRF」（detachMasterIfVRF）而不是「是不是**本** VRF」，随后
+// 又对带点的设备无条件 `ip link del`——设备被别的 VRF 接管后（例如同一次提交里 ens224.100
+// 从 vs-a 改挂 vs-b、vs-b 先声明）本方法会把新归属摘掉、把新地址清掉、把设备删掉，配置说在
+// vs-b、内核里却什么都没了，而提交报成功。按名判归属与 DeleteVRF 的 detachMasterIf 同口径。
+//
+// 归属读不回来（设备不在场/读失败）时**照旧尽力回收**：该失败在真机上绝大多数是「设备本就
+// 不在」，此时下面的动作全是容忍式的空操作；而「读不到就整条不做」会让本来能清的残留留下来。
 func (p *Provider) DeleteL3Interface(ctx context.Context, vrfName string, iface model.L3Interface) error {
 	dev, err := l3DeviceNameChecked(iface)
 	if err != nil {
 		return err
+	}
+	if master, _, ok := p.linkMaster(ctx, dev); ok && master != "" && master != LinkName(vrfName) {
+		return nil // 已被别的对象接管：不是本 VRF 的回收对象
 	}
 	// 先解引用：接口要撤，它上面的 ACL 绑定必须一起摘（否则 nft 里留着指向该口的 jump）。
 	if iface.AclIn != "" {
@@ -284,10 +298,8 @@ func (p *Provider) DeleteL3Interface(ctx context.Context, vrfName string, iface 
 			return err
 		}
 	}
-	// 只摘**本产品这次要解绑的那类归属**（VRF）：迁移提交里同一个口可能刚被挂到某台交换机
-	// （plan 段序：bridge-domain 先于 l3 撤销），无条件 nomaster 会把刚挂上的 bridge 归属摘掉——
-	// 配置说它是交换机端口、内核里它却不是任何 bridge 的成员（R2-14；与 #193/#196/#361 同族）。
-	if err := p.detachMasterIfVRF(ctx, dev); err != nil {
+	// 只摘**本 VRF** 的归属（按名核对）：口已被别的对象（bridge/bond/另一台 VRF）接管时保持不动。
+	if err := p.detachMasterIf(ctx, dev, LinkName(vrfName)); err != nil {
 		return err
 	}
 	if iface.Vlan > 0 {
@@ -296,23 +308,12 @@ func (p *Provider) DeleteL3Interface(ctx context.Context, vrfName string, iface 
 	return nil
 }
 
-// detachMasterIfVRF 当前 master 是 VRF 时摘除归属；别的对象（bridge/bond）接管时保持不动。
-//
-// 读不到归属（设备不存在/读失败）同样不动：删除路径的「已达成」由调用方按需处理，
-// 猜测式 nomaster 会摘掉别的对象刚建立的归属，比留下一个解绑动作更危险。
-func (p *Provider) detachMasterIfVRF(ctx context.Context, dev string) error {
-	master, slaveKind, ok := p.linkMaster(ctx, dev)
-	if !ok || master == "" {
-		return nil
-	}
-	if !strings.EqualFold(slaveKind, "vrf") {
-		return nil
-	}
-	return p.ipBest(ctx, "link", "set", "dev", dev, "nomaster")
-}
-
 // DeleteVRF 删除一台 L3 交换机：先回收其成员口（清地址、出 VRF、删 vlan 子接口）、回收兜底
 // 路由（v4/v6 两族），再删 VRF 设备。
+//
+// 成员口按**内核实况**枚举（master == 本 VRF），故每个成员都确实由本 VRF 持有；但「要不要连
+// 设备一起删」只对**产品的 vlan 子接口**成立（`isVlanSubifDevice`，round51 Q2）——名字带点的
+// bond/其它设备只解归属、不删设备。
 func (p *Provider) DeleteVRF(ctx context.Context, name string) error {
 	vrfName := LinkName(name)
 	for _, m := range p.vrfMembers(ctx, vrfName) {
@@ -326,7 +327,7 @@ func (p *Provider) DeleteVRF(ctx context.Context, name string) error {
 		if err := p.detachMasterIf(ctx, m, vrfName); err != nil {
 			return err
 		}
-		if strings.Contains(m, ".") {
+		if p.isVlanSubifDevice(ctx, m) {
 			if err := p.ipBest(ctx, "link", "del", m); err != nil {
 				return err
 			}
@@ -347,6 +348,20 @@ func (p *Provider) DeleteVRF(ctx context.Context, name string) error {
 // ipLinkRow `ip -j link show` 的一行（只取接口名）。
 type ipLinkRow struct {
 	Ifname string `json:"ifname"`
+}
+
+// isVlanSubifDevice 该设备是**产品的 vlan 子接口**（`ip link add … type vlan`）——内核事实为
+// 判据，名字形状不作判据（round51 Q2）。
+//
+// 此前 DeleteVRF 的成员清理按「名字里有没有 `.`」决定是否删设备，而点号在合法接口名里随处
+// 可见（`nameRe` 允许 `.`，bond 的内核设备名就是声明名本身，见 ApplyBond）：一条名为 `lte.1`
+// 的 bond、或操作者自己的带点设备只要挂在被删的 VRF 上，就会被 `ip link del` 连**设备本身**
+// 删掉（配置可能仍声明它、只是挪了归属）。产品的子接口一律以 `type vlan` 建，`ip -d -j link
+// show` 会报 `info_kind=vlan`（既有用例的夹具即按此形状）。
+// 读不到类型（设备不在场/读失败）⇒ 不删：不猜——设备不在场本就没有可删的对象。
+func (p *Provider) isVlanSubifDevice(ctx context.Context, dev string) bool {
+	row, ok := p.linkDetail(ctx, dev)
+	return ok && row.LinkInfo != nil && strings.EqualFold(row.LinkInfo.InfoKind, "vlan")
 }
 
 // vrfMembers 当前挂在给定 VRF 下的接口名（读失败返回 nil）。

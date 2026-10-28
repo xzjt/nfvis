@@ -1329,13 +1329,19 @@ func emitVrfsFallback(w *stmtWriter, val any) error {
 					continue
 				}
 				p := []string{"virtual-switches", name, "l3-interface", iface}
-				// 决策 #472：无地址条目（`delete … ip address` 只删地址叶留下的残形，
-				// 条目本身有数据面语义——接口仍属该 VRF/表）只能经裸形态语句表达；裸声明
-				// 须排在该条目的叶语句**之前**（回放时空配置从裸声明建出条目；条目已被
-				// 叶语句建出后再发裸声明会撞「值未变化」而回放失败）。有地址的条目保持
-				// 原输出：首条叶语句即建出条目，不掺裸声明（逐字不变）。
 				addrs, _ := li["addresses"].([]any)
-				if len(addrs) == 0 {
+				// vlan 子接口（模型 L3Interface.Vlan，round51 H3b）：语句 `l3-interface <if> vlan <v>`
+				// 的别名自身走 l3VrfOf+elemByField 的创建路径，**自带建元素**，故它与下面的裸声明
+				// 同占「创建语句最先」那一格（二选一，不可并出：元素已建出后再发创建语句会撞
+				// 「值未变化」而回放失败）。
+				if vlan, ok := li["vlan"].(float64); ok && vlan > 0 {
+					w.add(append(append([]string{}, p...), "vlan", formatScalar(vlan)))
+				} else if len(addrs) == 0 {
+					// 决策 #472：无地址条目（`delete … ip address` 只删地址叶留下的残形，
+					// 条目本身有数据面语义——接口仍属该 VRF/表）只能经裸形态语句表达；裸声明
+					// 须排在该条目的叶语句**之前**（回放时空配置从裸声明建出条目；条目已被
+					// 叶语句建出后再发裸声明会撞「值未变化」而回放失败）。有地址的条目保持
+					// 原输出：首条叶语句即建出条目，不掺裸声明（逐字不变）。
 					w.add(append([]string{}, p...))
 				}
 				if acl, ok := li["acl_in"].(string); ok && acl != "" {

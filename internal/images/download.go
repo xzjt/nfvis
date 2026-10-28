@@ -174,6 +174,10 @@ func (s *Store) Download(ctx context.Context, opts DownloadOptions) (Meta, error
 			meta.SourceTags = tags
 		}
 		if err := s.dockerLoad(archive, opts.Name); err != nil {
+			// 修 R51-L10：与上面两条拒绝分支一样清掉落盘的归档。此前这里直接返回，
+			// 一个最大到上传上限（4 GiB）的 `.download-<hash>.archive` 会永远留在仓库目录里；
+			// 而且重试也接不上（续传找的是 `<dest>.part`，不是一个完整归档）。
+			_ = os.Remove(archive)
 			return Meta{}, s.fail(failedMeta(), fmt.Errorf("docker load %s: %w", opts.Name, err))
 		}
 		if err := os.Remove(archive); err != nil && !os.IsNotExist(err) {

@@ -89,24 +89,36 @@ var (
 	// `-p` 误当成本次的取值；`\s-p` 要求 `-p` 前是空白，故 `--password`、`-p80` 这类不受影响
 	//（贴值形态已由短路规则掩码）。值支持 `'…'` / `"…"`（可含空格）与不带动空白的裸词。
 	scrubSSHPassRe = regexp.MustCompile(`(?i)(\bsshpass\b)([^\n;&|]*?)\s+-p(\s+)(?:'[^']*'|"[^"]*"|\S+)`)
+
+	// URL userinfo（`scheme://user:password@host`，round51 评审 L14）：保留 scheme 与 host，
+	// 凭据整段掩为占位符。`request system software add https://user:S3cret@repo/…` 的意图明细
+	// 会进审计（只读账号可读），此前无人掩它。
+	//
+	// 只认**带分隔冒号**的 userinfo（有口令才算凭据）：`http://host/path`、`ssh://host` 这类
+	// 无凭据 URL 逐字不变，无冒号的 `user@host` 也不匹配；`[^/\s@]` 排掉斜杠与空白，
+	// 故不会越过 host 或跨行贪婪。保留 host 是为了审计的可追溯性（看得出「装的哪个仓库的包」）。
+	// 放在 scrubKeyValueAll **之前**：账号名若正好是 password/token 之类关键字，先整段掩掉更彻底。
+	scrubURLUserinfoRe = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s@]*:[^/\s@]*@`)
 )
 
 // ScrubSecrets 对**文本**做秘密掩码（返回新串，不改入参）。
 //
 // 覆盖：PEM 私钥块、`Bearer <token>`、`password|passwd|pwd|secret|token|api_key|apikey|
-// authorization|private_key` 后跟 `=`/`:`/空白的值、短选项贴值的 `-p<值>`、以及工具感知的
-// `sshpass -p <值>` 分隔形态（决策 #520）。
+// authorization|private_key` 后跟 `=`/`:`/空白的值、URL userinfo（`scheme://user:password@`）、
+// 短选项贴值的 `-p<值>`、以及工具感知的 `sshpass -p <值>` 分隔形态（决策 #520）。
 // 已脱敏文本再过一遍结果不变（幂等）——写侧与读侧可能各过一遍。
 //
 // 规则顺序有讲究：`sshpass -p <值>` **必须早于**短选项贴值规则——否则 `-p` 后的引号值会被
 // 短选项规则截成「一截掩码 + 一截明文」（`sshpass -p 'P@ss w0rd'` 只掩到 `'P@ss`，`w0rd'`
-// 漏出）。先按 sshpass 规则整值掩码，短路规则便再无分隔形态可动。
+// 漏出）。先按 sshpass 规则整值掩码，短路规则便再无分隔形态可动。URL userinfo 规则早于
+// 键值规则（见其注释：账号名若为关键字，先整段掩掉更彻底）。
 func ScrubSecrets(s string) string {
 	if s == "" {
 		return s
 	}
 	s = scrubPEMRe.ReplaceAllString(s, RedactedPlaceholder)
 	s = scrubBearerRe.ReplaceAllString(s, RedactedPlaceholder)
+	s = scrubURLUserinfoRe.ReplaceAllString(s, "${1}"+RedactedPlaceholder+"@")
 	s = scrubKeyValueAll(s)
 	s = scrubSSHPassRe.ReplaceAllString(s, "${1}${2} -p${3}"+RedactedPlaceholder)
 	s = scrubShortPwdRe.ReplaceAllString(s, "${1}-p"+RedactedPlaceholder)

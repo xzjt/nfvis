@@ -419,6 +419,13 @@
           "dirty": {
             "description": "相对 committed 是否有未提交变更",
             "type": "boolean"
+          },
+          "source": {
+            "description": "仅在**非持有者**会话上出现（round51 评审 L15）：该会话不持有编辑锁，`candidate` 回退为\n当前生效配置（与 CLI `show configuration` 对非持有者回退 committed 同口径），`dirty` 恒 false。\n持有者会话的响应不含本字段（行为逐字不变）。\n",
+            "enum": [
+              "committed"
+            ],
+            "type": "string"
           }
         },
         "type": "object"
@@ -1662,6 +1669,22 @@
           "name",
           "type"
         ],
+        "type": "object"
+      },
+      "ImageDeleteResult": {
+        "description": "镜像删除结果（round51 评审 L2）。删除镜像**不产生配置提交**——镜像不在配置模型里，\n没有 revision/confirmed_until/warnings，故本响应与 `CommitResult` 无关（此前误声明）。\n",
+        "properties": {
+          "name": {
+            "description": "被删除的镜像名",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "deleted"
+            ],
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "Interface": {
@@ -4722,6 +4745,7 @@
         ]
       },
       "get": {
+        "description": "返回本会话的 candidate 与 dirty 标记。round51 评审 L15：candidate 属**持有编辑锁的会话**——\n非持有者（锁在别的会话手里）读到的 `candidate` 回退为当前生效配置并带 `source: committed`\n（与 CLI `show configuration` 对非持有者回退 committed 同口径），不返回他人的草稿；\n没有任何编辑会话时仍 409（语义不变）。\n",
         "responses": {
           "200": {
             "content": {
@@ -4853,6 +4877,7 @@
     },
     "/configuration/diff": {
       "get": {
+        "description": "JunOS 风格差异文本。round51 评审 L15：非持有者的会话没有「自己的候选」，故返回空\n（与 `GET /configuration/candidate` 对非持有者回退 committed 同口径），不返回他人候选的差异。\n",
         "responses": {
           "200": {
             "content": {
@@ -5631,9 +5656,17 @@
     },
     "/images/{name}": {
       "delete": {
+        "description": "从镜像仓库删除一个镜像（FR-CMP-033）。删除**不产生配置提交**——镜像不在配置模型里，\n故响应不是 CommitResult（round51 评审 L2：契约此前误声明为 CommitResult）。\n",
         "responses": {
           "200": {
-            "$ref": "#/components/responses/ConfigAccepted"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageDeleteResult"
+                }
+              }
+            },
+            "description": "已删除"
           },
           "400": {
             "$ref": "#/components/responses/Error400"

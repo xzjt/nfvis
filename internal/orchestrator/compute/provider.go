@@ -771,7 +771,10 @@ func (p *Provider) EnsureConsistent(ctx context.Context, cfg model.Config) []err
 func (p *Provider) prepare(ctx context.Context, vm model.VMFunction, spec DomainSpec) error {
 	if spec.DiskFormat != "iso" {
 		if !p.store.Exists(spec.DiskPath) {
-			image := p.imagePath(vm.Image)
+			image, err := p.imagePathContained(vm.Image, vm.Name, "")
+			if err != nil {
+				return err
+			}
 			if !p.store.Exists(image) {
 				return fmt.Errorf("VM %s 的镜像 %q 不在仓库中（%s；先用 request images … 取回镜像仓库）", vm.Name, vm.Image, image)
 			}
@@ -784,6 +787,12 @@ func (p *Provider) prepare(ctx context.Context, vm model.VMFunction, spec Domain
 		}
 	}
 	for _, dd := range spec.DataDisks {
+		// round51 G1：specFor 那道复核是给 domain XML 用的，而**真正以 root 落盘的动作在这里**
+		// （EnsureDir/CreateBlank/Clone）——故在它们之前再复核一次（口径见 DerivedPathError）：
+		// 任何绕过 specFor 的调用路径都挡在此处。
+		if err := assertUnderVMDir(p.cfg.VMsDir, vm.Name, dd.Path, "数据盘 "+dd.Name); err != nil {
+			return err
+		}
 		if p.store.Exists(dd.Path) {
 			continue
 		}
@@ -797,7 +806,10 @@ func (p *Provider) prepare(ctx context.Context, vm model.VMFunction, spec Domain
 			}
 		}
 		if src != "" {
-			image := p.imagePath(src)
+			image, err := p.imagePathContained(src, vm.Name, dd.Name)
+			if err != nil {
+				return err
+			}
 			if !p.store.Exists(image) {
 				return fmt.Errorf("VM %s 数据盘 %s 引用的镜像 %q 不在仓库中", vm.Name, dd.Name, src)
 			}
@@ -862,7 +874,12 @@ func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) 
 	layout := NewLayout(p.cfg.VMsDir, vm.Name)
 	diskPath, diskFormat := layout.DiskPath, DefaultDiskFormat
 	if ImageIsISO(vm.Image) {
-		diskPath, diskFormat = p.imagePath(vm.Image), "iso"
+		// round51 G1：ISO 直接作 cdrom 引导（不克隆），其路径同样由用户输入拼出——过同一道越界复核。
+		iso, err := p.imagePathContained(vm.Image, vm.Name, "")
+		if err != nil {
+			return DomainSpec{}, err
+		}
+		diskPath, diskFormat = iso, "iso"
 	}
 	// 决策 #485：启动画像字段（machine/cpu/cpu-model/firmware/disk-interface/boot-order/accel/
 	// console/extra-args）取**有效画像**。装配配置里的 Machine/CPUMode 降为兜底——有效画像必带
@@ -886,9 +903,13 @@ func (p *Provider) specFor(vm model.VMFunction, alloc model.AllocatedResources) 
 		spec.SeedISO = layout.SeedISO
 	}
 	for _, d := range vm.Disks {
+		dp, err := DataDiskPathChecked(p.cfg.VMsDir, vm.Name, d.Name)
+		if err != nil {
+			return DomainSpec{}, err
+		}
 		spec.DataDisks = append(spec.DataDisks, DataDiskSpec{
 			Name: d.Name,
-			Path: DataDiskPath(p.cfg.VMsDir, vm.Name, d.Name),
+			Path: dp,
 		})
 	}
 	for _, nic := range vm.Interfaces {
@@ -951,6 +972,25 @@ func (p *Provider) checkFirmware(spec DomainSpec) error {
 func (p *Provider) kernelDataPlane() bool { return p.cfg.DataPlane == model.DataPlaneKernel }
 
 func (p *Provider) imagePath(image string) string { return path.Join(p.cfg.ImagesDir, image) }
+
+// imagePathContained 解析镜像在仓库内的落盘路径，并复核它确实落在镜像仓库目录之内（round51 G1）。
+//
+// 由来：镜像名是用户输入，而 `imagePath` 之前只做 Exists 统计 ⇒ `image: ../vms/victim/disk`
+// 会让克隆**读到别的 VM 的盘**（越界读）。主盘（克隆源 / ISO cdrom 源）与数据盘源镜像是
+// 同一个解析动作，故共用本函数：任何「由配置拼出的镜像路径」都过同一道复核。口径与镜像仓库
+// 自身的 images.containedPath 一致（Clean 后必须带 `<dir><分隔符>` 前缀）。dataDisk 空 = 主盘。
+func (p *Provider) imagePathContained(image, vmName, dataDisk string) (string, error) {
+	base := path.Clean(p.cfg.ImagesDir)
+	dest := p.imagePath(image) // path.Join 已 Clean
+	if !containedUnder(base, dest) {
+		item := "主盘引用的镜像 " + image
+		if dataDisk != "" {
+			item = "数据盘 " + dataDisk + " 引用的镜像 " + image
+		}
+		return "", &DerivedPathError{VM: vmName, Item: item, Path: dest, Base: base}
+	}
+	return dest, nil
+}
 
 // sleepCtx 可取消睡眠。
 func sleepCtx(ctx context.Context, d time.Duration) error {

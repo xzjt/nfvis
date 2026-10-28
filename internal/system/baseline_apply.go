@@ -210,19 +210,31 @@ func (a *SystemBaselineApplier) applyTimezone(ctx context.Context, want string) 
 
 // applyChronySources 落实 NTP 服务器声明：写本产品的源 drop-in 并热重载；未安装 chrony 如实跳过。
 func (a *SystemBaselineApplier) applyChronySources(ctx context.Context, servers []model.NtpServer) baselineStep {
-	want := RenderChronySources(servers)
+	want, ignored := renderChronySources(servers)
+	var notes []string
+	if len(ignored) > 0 {
+		notes = append(notes, fmt.Sprintf(
+			"NTP 忽略非法取值 %s（取值须为 IP 地址或主机名；请核对 set system ntp server 的取值）",
+			strings.Join(ignored, "、")))
+	}
 	p := a.path(chronySourcesPath)
 	prev, readErr := os.ReadFile(p)
 	present := readErr == nil
 
 	if want == "" {
+		// 声明的服务器**全部**非法：不把「写了却解析不了的文件」当成功（NTP 静默失效），
+		// 也不去动既有的好 drop-in——如实报失败，与 applyResolvedDNS 同口径。
+		if len(servers) > 0 && len(ignored) == len(servers) {
+			return baselineStep{action: BaselineFailed, notes: notes, err: errors.New(
+				"NTP 未应用：声明的服务器都不是合法 IP/主机名（例：set system ntp server pool.ntp.org 或 10.0.0.1）")}
+		}
 		if !present {
-			return baselineStep{action: BaselineSkipped} // 未声明且无残留：无动作
+			return baselineStep{action: BaselineSkipped, notes: notes} // 未声明且无残留：无动作
 		}
 		if err := os.Remove(p); err != nil {
-			return baselineStep{action: BaselineFailed, err: fmt.Errorf("回收 NTP 源 drop-in %s: %w", p, err)}
+			return baselineStep{action: BaselineFailed, notes: notes, err: fmt.Errorf("回收 NTP 源 drop-in %s: %w", p, err)}
 		}
-		step := baselineStep{action: BaselineApplied, actions: []string{"移除 " + p}}
+		step := baselineStep{action: BaselineApplied, actions: []string{"移除 " + p}, notes: notes}
 		if !a.hasChrony() {
 			step.notes = append(step.notes,
 				"本机未安装 chrony（未找到 chronyc）：已移除 NFViS 的 NTP 源 drop-in，未触发重载")
@@ -239,16 +251,16 @@ func (a *SystemBaselineApplier) applyChronySources(ctx context.Context, servers 
 	}
 
 	if present && string(prev) == want {
-		return baselineStep{action: BaselineUnchanged} // 内容已是声明值：无动作可做
+		return baselineStep{action: BaselineUnchanged, notes: notes} // 内容已是声明值：无动作可做
 	}
 	if !a.hasChrony() {
-		return baselineStep{action: BaselineSkipped, notes: []string{
-			"本机未安装 chrony（未找到 chronyc）：NTP 服务器声明未落地；安装 chrony 后重新提交配置（或重启 nfvis）即会应用"}}
+		return baselineStep{action: BaselineSkipped, notes: append(notes,
+			"本机未安装 chrony（未找到 chronyc）：NTP 服务器声明未落地；安装 chrony 后重新提交配置（或重启 nfvis）即会应用")}
 	}
 	if err := writeFile(p, want); err != nil {
-		return baselineStep{action: BaselineFailed, err: fmt.Errorf("写入 NTP 源 drop-in %s: %w", p, err)}
+		return baselineStep{action: BaselineFailed, notes: notes, err: fmt.Errorf("写入 NTP 源 drop-in %s: %w", p, err)}
 	}
-	step := baselineStep{action: BaselineApplied, actions: []string{"写入 " + p}}
+	step := baselineStep{action: BaselineApplied, actions: []string{"写入 " + p}, notes: notes}
 	via, err := a.reloadChrony(ctx)
 	if err != nil {
 		step.action = BaselineFailed
@@ -323,11 +335,28 @@ func (a *SystemBaselineApplier) applyResolvedDNS(ctx context.Context, servers []
 //
 // 映射：取值是 IP ⇒ `server` 行，是主机名 ⇒ `pool` 行（chrony 的 pool 会跟踪该名字的
 // 地址变化）；`prefer` 映射为 `prefer` 选项；多服务器**保持配置顺序**。空列表返回 ""。
+// 非法取值由内部实现滤除（见 renderChronySources），本导出壳保持既有签名字面不变。
 func RenderChronySources(servers []model.NtpServer) string {
-	var lines []string
+	s, _ := renderChronySources(servers)
+	return s
+}
+
+// renderChronySources 同 RenderChronySources，并**如实报告**被滤除的非法取值——
+// 与 RenderResolvedDropIn 的 ignored 同口径（不静默丢弃）。
+//
+// 为什么必须滤（round51 评审）：本文件由 root 拥有、chrony 按行解析（`server <host>`）——
+// 取值里的换行能注入**任意 chrony 指令**、引号或空白会产出解析不了的文件（NTP 静默失效而
+// 提交报成功）。提交期已按 model.ValidNTPServer 拦一道，这里用**同一份判据**兜底，即便非法值
+// 溜到渲染层也绝不写进该文件。
+func renderChronySources(servers []model.NtpServer) (string, []string) {
+	var lines, ignored []string
 	for _, s := range servers {
 		host := strings.TrimSpace(s.Server)
 		if host == "" {
+			continue
+		}
+		if !model.ValidNTPServer(host) {
+			ignored = append(ignored, host)
 			continue
 		}
 		directive := "pool"
@@ -341,10 +370,10 @@ func RenderChronySources(servers []model.NtpServer) string {
 		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
-		return ""
+		return "", ignored
 	}
 	return "# 由 NFViS 生成（NTP 服务器声明，按产品配置渲染；请勿手工编辑）\n" +
-		strings.Join(lines, "\n") + "\n"
+		strings.Join(lines, "\n") + "\n", ignored
 }
 
 // RenderResolvedDropIn 渲染 systemd-resolved drop-in 内容（纯函数）。

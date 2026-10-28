@@ -696,14 +696,16 @@ func TestContainerVethReconcileAlarmRaisedAndResolved(t *testing.T) {
 		t.Fatal("宿主端建不出应如实进未收敛项")
 	}
 	active := f.alarms.List(network.AlarmActive)
+	// round51 P5：巡检的记源与恢复重放**同一串**（逐对象），不再是族级 "container-veth"。
+	const wantSrc = "container-functions/ct-web/interfaces/eth0"
 	found := false
 	for _, a := range active {
-		if a.Source == "container-veth" && a.Code == network.AlarmUnconverged {
+		if a.Source == wantSrc && a.Code == network.AlarmUnconverged {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("巡检失败应落未收敛告警（source=container-veth）：%+v", active)
+		t.Fatalf("巡检失败应落未收敛告警（source=%s）：%+v", wantSrc, active)
 	}
 	// 底座恢复 ⇒ 同一声明下一轮成功即自动消解。
 	f.io.ensureErr = nil
@@ -711,7 +713,7 @@ func TestContainerVethReconcileAlarmRaisedAndResolved(t *testing.T) {
 		t.Fatalf("恢复后巡检应通过：%v", errs)
 	}
 	for _, a := range f.alarms.List(network.AlarmActive) {
-		if a.Source == "container-veth" {
+		if a.Source == wantSrc {
 			t.Fatalf("成功一轮后该告警应自动消解：%+v", a)
 		}
 	}

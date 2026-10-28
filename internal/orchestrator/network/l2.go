@@ -233,6 +233,10 @@ func (p *L2Provider) ApplyBridgeDomain(ctx context.Context, vs model.VirtualSwit
 	stale := p.takeStale(bdID, desired)
 	sort.Slice(stale, func(i, j int) bool { return stale[i] < stale[j] })
 	for _, idx := range stale {
+		// N3：同一次提交里该口已被**另一台**交换机接管时不得摘（摘的是别人的成员，见 claimedByOtherBD）。
+		if p.claimedByOtherBD(bdID, idx) {
+			continue
+		}
 		if err := c.SwInterfaceSetL2Bridge(idx, bdID, L2PortNormal, 0, false); err != nil {
 			return fmt.Errorf("摘除成员 %d: %w", idx, err)
 		}
@@ -338,6 +342,10 @@ func (p *L2Provider) DeleteBridgeDomain(ctx context.Context, name string) error 
 	}
 	sort.Ints(idxs)
 	for _, idx := range idxs {
+		// N3：本次会话里该口已被别的交换机接管（见 claimedByOtherBD）——摘除会摘到**别人的**成员。
+		if p.claimedByOtherBD(bdID, uint32(idx)) {
+			continue
+		}
 		if err := c.SwInterfaceSetL2Bridge(uint32(idx), bdID, L2PortNormal, 0, false); err != nil {
 			// 成员接口已被删除（如 VNF vNIC 先于 BD 删除、BVI 网关已删）时 VPP 返回
 			// Invalid sw_if_index(-2)：视为已摘除，跳过（否则删 BD 被 -120 卡住）。
@@ -373,6 +381,11 @@ func (p *L2Provider) DeleteBridgeDomain(ctx context.Context, name string) error 
 	p.mu.Unlock()
 	sort.Ints(subifs)
 	for _, idx := range subifs {
+		// N3：子接口已被别的交换机接管（同一提交里 ensureSubif 复用同一个 `<父口>.<vlan>` 并
+		// 登记到 B 名下）时**不得删**——它是 B 的端口，删掉即 B 在数据面被黑洞。
+		if p.claimedByOtherBD(bdID, uint32(idx)) {
+			continue
+		}
 		if err := c.DeleteSubif(uint32(idx)); err != nil {
 			// 已被删掉（如 VPP 重启后重建、父口已下线）时视为已回收。
 			if !isMissingIfaceErr(err) {
@@ -445,6 +458,32 @@ func (p *L2Provider) takeAll(bdID uint32) map[uint32]attachment {
 	prev := p.attached[bdID]
 	delete(p.attached, bdID)
 	return prev
+}
+
+// claimedByOtherBD 该 sw_if_index 是否已被**别的**交换机登记（round51 评审 N3：归属感知的拆除判据）。
+//
+// 现场（与 #195/#518 同族的残留面）：同一次提交里「建交换机 B（同一物理口 + 同一 access VLAN）」
+// 与「删交换机 A」——apply 段先跑 B：`ensureSubif` 按确定性名复用了 A 当年建的 `<父口>.<vlan>`
+// 索引 X，并把它登记到 B 名下；删除段再跑 A，A 按 `takeAll(bdA)` 逐索引摘除成员。而 VPP 的
+// `sw_interface_set_l2_bridge(enable=false)` 只认 sw_if_index、**不看 bd_id**：它会把这个已经
+// 属于 B 的口从 **B 的** bridge-domain 里摘掉，紧接着 `DeleteSubif(X)` 把接口本身删掉——
+// B 的端口在数据面被静默黑洞（无任何告警），登记里还留着死索引（下一次提交撞 -2）。
+// 同一形态也出现在「A 保留、只改端口 VLAN 声明」的陈旧成员摘除与子接口回收路径上。
+//
+// 判据用**既有的**挂接登记、不新造归属表：一个口被 B 接管后必然出现在 B 的 attached 里
+// （takeStale 与 rememberSubif 两处写入），而 A 的登记仍在——「别的交换机名下有它」即接管。
+func (p *L2Provider) claimedByOtherBD(bdID, idx uint32) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for bd, m := range p.attached {
+		if bd == bdID {
+			continue
+		}
+		if _, ok := m[idx]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // desiredMembers 构造目标成员集合：sw_if_index → 挂接动作。
@@ -609,6 +648,11 @@ func (p *L2Provider) reclaimStaleSubifs(c L2Client, bdID uint32, desired map[uin
 	p.mu.Unlock()
 	sort.Slice(stale, func(i, j int) bool { return stale[i] < stale[j] })
 	for _, idx := range stale {
+		// N3：子接口已被别的交换机接管（同一提交里被复用到 B）时不删，只摘本交换机登记。
+		if p.claimedByOtherBD(bdID, idx) {
+			p.forgetSubif(bdID, idx)
+			continue
+		}
 		if err := c.DeleteSubif(idx); err != nil && !isMissingIfaceErr(err) {
 			return fmt.Errorf("回收子接口 %d: %w", idx, err)
 		}

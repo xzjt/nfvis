@@ -94,7 +94,18 @@ func (p *Provider) TeardownDataplane(ctx context.Context, cfg model.Config) erro
 	collect("nat", p.ApplyNAT(ctx, model.NatConfig{}))
 
 	// 5) 交换机 / VRF / bond / vxlan（被引用者后删；内核自动释放成员口）。
+	//
+	// ⚠️ 只对 **L2** 交换机走 bridge 删除（round51 P2）：cfg.VirtualSwitches 里也有 type=l3 的
+	// 条目，而 L3 交换机的内核设备名就是交换机名本身（ApplyVRF 用 LinkName(vrf.Name)，那正是
+	// 一台 VRF 设备）。对 l3 名字调 DeleteBridgeDomain 会先 `ip link del <名>` 把**VRF 设备**
+	// 删掉，紧随其后的 DeleteVRF 再查成员（按 master）与查设备是否在场**都查不到对象** ⇒
+	// 成员口地址不清、`<口>.<vlan>` 子接口不删、域兜底路由（决策 #446 的两条 unreachable
+	// default）永久留在表里，而整个 teardown 报成功。提交路径（orchestrator/apply.go 的删除段）
+	// 早就按 `Type != "l2" → continue` 过滤，此处补齐同一判据。
 	for _, vs := range cfg.VirtualSwitches {
+		if vs.Type != "l2" {
+			continue // L3 交换机的拆除由下面的 cfg.Vrfs 段（DeleteVRF）负责
+		}
 		collect("virtual-switches/"+vs.Name, p.DeleteBridgeDomain(ctx, vs.Name))
 	}
 	for _, vrf := range cfg.Vrfs {

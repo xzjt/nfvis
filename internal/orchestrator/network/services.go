@@ -31,35 +31,50 @@ type SvcClient interface {
 // spanRec SPAN 会话的源/目的接口索引（关闭时需同时给出）。
 type spanRec struct{ from, to uint32 }
 
+// policerSpec 已**成功下发**的 policer 参数（登记＝最后一个成功下发的状态，决策 #363；
+// N5 起速率也是这份状态的一部分——「值变了没有」只能靠它判定：VPP 侧读不到速率，
+// 而按名重下发在底座上是无声空操作，见 ApplyQos）。
+type policerSpec struct {
+	cirKbps uint32
+	cb      uint64
+}
+
+// policerBinding 一条「接口 + 方向」的 policer 绑定（删旧建新时要接回的依据）。
+type policerBinding struct {
+	ifname string
+	idx    uint32
+	egress bool
+}
+
 // ServicesProvider SPAN（FR-NET-016/§4.3 端口镜像）与 QoS 限速（CIR/CBS）编排。
 type ServicesProvider struct {
 	client func() (SvcClient, error)
 
 	mu          sync.Mutex
-	spans       map[string]spanRec // 会话名 → 源/目的 sw_if_index
-	policer     map[string]bool    // 已创建的 policer 名
-	bound       map[string]string  // 接口名 → 入向绑定的 policer 名
-	boundEgress map[string]string  // 接口名 → 出向绑定的 policer 名（决策 #331）
+	spans       map[string]spanRec     // 会话名 → 源/目的 sw_if_index
+	policer     map[string]policerSpec // 已创建的 policer 名 → 已下发参数
+	bound       map[string]string      // 接口名 → 入向绑定的 policer 名
+	boundEgress map[string]string      // 接口名 → 出向绑定的 policer 名（决策 #331）
 }
 
 // NewServicesProvider 以固定客户端构造（测试）。
 func NewServicesProvider(c SvcClient) *ServicesProvider {
 	return &ServicesProvider{client: func() (SvcClient, error) { return c, nil },
-		spans: map[string]spanRec{}, policer: map[string]bool{},
+		spans: map[string]spanRec{}, policer: map[string]policerSpec{},
 		bound: map[string]string{}, boundEgress: map[string]string{}}
 }
 
 // NewServicesProviderFunc 以客户端工厂构造（连接可重连）。
 func NewServicesProviderFunc(f func() (SvcClient, error)) *ServicesProvider {
 	return &ServicesProvider{client: f, spans: map[string]spanRec{},
-		policer: map[string]bool{}, bound: map[string]string{}, boundEgress: map[string]string{}}
+		policer: map[string]policerSpec{}, bound: map[string]string{}, boundEgress: map[string]string{}}
 }
 
 // reset 清空进程内登记表（恢复收敛前调用，SPAN/policer/绑定全量重放）。
 func (p *ServicesProvider) reset() {
 	p.mu.Lock()
 	p.spans = map[string]spanRec{}
-	p.policer = map[string]bool{}
+	p.policer = map[string]policerSpec{}
 	p.bound = map[string]string{}
 	p.boundEgress = map[string]string{}
 	p.mu.Unlock()
@@ -71,6 +86,11 @@ func (p *ServicesProvider) reset() {
 // （`vh-<vm>-<vnic>`，见 spanSourceIface），再与物理口走**同一条** span 原语。
 // vNIC 口随 vNIC 声明在数据面建立（与 VM 是否运行无关：VM 未运行时该口 link down，
 // 镜像是就绪的、只是没有流量），故无需为它加任何特殊下发路径。
+//
+// **建/绑方向不做「接口已消失」容错**（与 DeleteSpan 的不对称是有意的）：源与分析口都在此
+// 按名解析（解析不到即 `ErrIfaceUnavailable`，绝不会拿着一个失效索引去下发），而若 SpanSet
+// 仍回了 -2，说明这份声明当下确实无法兑现——把它当成功就是「登记说镜像在、数据面没有镜像」
+// 的假绿（本仓反复收口的那类）。如实冒泡让提交失败，操作者改声明或先建口。
 func (p *ServicesProvider) ApplySpan(ctx context.Context, pm model.PortMirroring) error {
 	c, err := p.client()
 	if err != nil {
@@ -127,6 +147,13 @@ const vnicSpanMissingHint = "请先确认该 vNIC 已在 VNF 上声明并已下�
 
 // DeleteSpan 关闭 SPAN 会话。登记=最后一个成功下发的状态（决策 #363）：
 // SpanDisable 成功才摘登记，失败保留（重试可再关；此前先摘登记，关失败后登记已丢、再也关不掉）。
+//
+// 「接口已不在数据面」按**已达成**（与 DeleteGateway/DeleteBridgeDomain/ACL 解绑同一口径，
+// 判据复用包内唯一的 isMissingIfaceErr）：镜像的源/目的口消失时 VPP 对
+// `sw_interface_span_enable_disable` 回 `Invalid sw_if_index (-2)`——镜像随接口一起没了。
+// 不认这个码，同一次提交里「删 VNF vNIC（或隧道口/接口元素）+ 撤该口的端口镜像」就必然整体
+// 回滚（真机形态：vNIC 被重建换了索引、口被更早的步骤删掉，或带外 request vpp restart 之后
+// 登记里还是旧索引），操作者连一次清干净都做不到。**其余错误照旧上抛**（登记保留、可重试）。
 func (p *ServicesProvider) DeleteSpan(ctx context.Context, name string) error {
 	p.mu.Lock()
 	rec, ok := p.spans[name]
@@ -140,7 +167,9 @@ func (p *ServicesProvider) DeleteSpan(ctx context.Context, name string) error {
 	}
 	defer c.Close()
 	if err := c.SpanDisable(rec.from, rec.to); err != nil {
-		return fmt.Errorf("关闭 SPAN %s: %w", name, err)
+		if !isMissingIfaceErr(err) {
+			return fmt.Errorf("关闭 SPAN %s: %w", name, err)
+		}
 	}
 	p.mu.Lock()
 	delete(p.spans, name)
@@ -149,6 +178,17 @@ func (p *ServicesProvider) DeleteSpan(ctx context.Context, name string) error {
 }
 
 // ApplyQos 创建 1R2C 限速策略（CIR bps → kbps，CBS 字节）；绑定经 ApplyInterface。
+//
+// **值变更＝先撤旧、后建新**（N5，与风暴抑制 #385「变更先撤旧后建新」同一口径）：
+// VPP 的 policer 以**名字**为键，同名再 add 只会被适配器按 -81（VALUE_EXIST）当幂等成功吞掉，
+// **速率与桶深仍是旧的**——API 收下、本进程登记/读视图/审计都报新值，而数据面继续按旧速率
+// 计量（静默错配；单测此前看不见，因为假实现把速率就地覆盖了）。故目标值与本进程「最后成功
+// 下发」的值不同时，先按名删掉旧实例、再建新实例，使结果与底座是否支持原地更新无关。
+//
+// 撤旧前必须先**解绑**（policer 被接口特性引用时删不掉，与 storm 的「先摘引用后删对象」同法），
+// 建好后按接口名把原绑定接回去——操作者视角的绑定关系（哪个口绑哪个策略）不变；登记按决策
+// #363 逐步骤推进：解绑成功才清该向登记、重绑成功才写，任何一步失败都停在最后成功态并上抛。
+// 值未变时是幂等空操作（零 VPP 调用），既有语义不变。
 func (p *ServicesProvider) ApplyQos(ctx context.Context, q model.QosPolicy) error {
 	c, err := p.client()
 	if err != nil {
@@ -162,13 +202,137 @@ func (p *ServicesProvider) ApplyQos(ctx context.Context, q model.QosPolicy) erro
 	if kbps == 0 {
 		kbps = 1
 	}
-	if _, err := c.PolicerAddDel(q.Name, kbps, uint64(q.Cbs), true); err != nil {
+	cb := uint64(q.Cbs)
+	p.mu.Lock()
+	prev, had := p.policer[q.Name]
+	p.mu.Unlock()
+	if had && prev.cirKbps == kbps && prev.cb == cb {
+		return nil // 值未变：不重下发、不动绑定（幂等）
+	}
+	var rebind []policerBinding
+	if had {
+		rebind, err = p.unbindPolicer(c, q.Name)
+		if err != nil {
+			return err
+		}
+		if _, err := c.PolicerAddDel(q.Name, 0, 0, false); err != nil {
+			// 撤旧失败：旧实例**仍在位**，把绑定接回它，使数据面与登记都停在「本次请求之前」
+			// 的状态（#363 口径）——重试可完整再走一遍，而不是留下半套绑定。
+			if rerr := p.restorePolicer(c, q.Name, prev, true, rebind); rerr != nil {
+				return fmt.Errorf("撤销旧 policer %s（速率 %d→%d kbps）: %w（且接回原绑定失败: %v）",
+					q.Name, prev.cirKbps, kbps, err, rerr)
+			}
+			return fmt.Errorf("撤销旧 policer %s（速率 %d→%d kbps）: %w", q.Name, prev.cirKbps, kbps, err)
+		}
+		// 旧实例已不在数据面：登记摘掉（诚实态；紧接着的新建失败时登记也不会谎称在位）
+		p.mu.Lock()
+		delete(p.policer, q.Name)
+		p.mu.Unlock()
+	}
+	if _, err := c.PolicerAddDel(q.Name, kbps, cb, true); err != nil {
+		// 建新失败：按**旧参数**重建实例并接回绑定（否则接口停在「无 policer」而配置仍声明
+		// 绑定，补偿再跑一次 ApplyQos(旧值) 也补不回绑定——那时登记已是空、无从重绑）。
+		if had {
+			if rerr := p.restorePolicer(c, q.Name, prev, false, rebind); rerr != nil {
+				return fmt.Errorf("创建 policer %s: %w（且按旧参数回落失败: %v）", q.Name, err, rerr)
+			}
+		}
 		return fmt.Errorf("创建 policer %s: %w", q.Name, err)
 	}
 	p.mu.Lock()
-	p.policer[q.Name] = true
+	if p.policer == nil {
+		p.policer = map[string]policerSpec{}
+	}
+	p.policer[q.Name] = policerSpec{cirKbps: kbps, cb: cb}
 	p.mu.Unlock()
+	return p.rebindPolicer(c, q.Name, rebind)
+}
+
+// unbindPolicer 把某 policer 从所有已登记绑定它的接口上解绑（删旧实例的必需前置），
+// 返回**成功解绑**的绑定清单供建新后接回。登记按 #363 逐口推进（解绑成功才清该向登记）；
+// 解析失败照实上抛并保留登记（不许把「问不出来」当已解绑），接口已不存在的按既有容忍
+// 摘掉陈旧登记（同 DeleteQos：接口都没了、绑定不可能还挂着）。
+func (p *ServicesProvider) unbindPolicer(c SvcClient, name string) ([]policerBinding, error) {
+	p.mu.Lock()
+	var in, out []string
+	for ifname, pol := range p.bound {
+		if pol == name {
+			in = append(in, ifname)
+		}
+	}
+	for ifname, pol := range p.boundEgress {
+		if pol == name {
+			out = append(out, ifname)
+		}
+	}
+	p.mu.Unlock()
+	done := make([]policerBinding, 0, len(in)+len(out))
+	for _, ifname := range in {
+		idx, ok, err := c.SwInterfaceIndex(ifname)
+		if err != nil {
+			return done, fmt.Errorf("解析接口 %s（解绑入向 policer %s）: %w", ifname, name, err)
+		}
+		if !ok {
+			p.setBoundPolicy(ifname, "", false)
+			continue
+		}
+		if err := c.PolicerInput(idx, name, false); err != nil {
+			return done, fmt.Errorf("解绑接口 %s 的入向 policer %s: %w", ifname, name, err)
+		}
+		p.setBoundPolicy(ifname, "", false)
+		done = append(done, policerBinding{ifname: ifname, idx: idx})
+	}
+	for _, ifname := range out {
+		idx, ok, err := c.SwInterfaceIndex(ifname)
+		if err != nil {
+			return done, fmt.Errorf("解析接口 %s（解绑出向 policer %s）: %w", ifname, name, err)
+		}
+		if !ok {
+			p.setBoundPolicy(ifname, "", true)
+			continue
+		}
+		if err := c.PolicerOutput(idx, name, false); err != nil {
+			return done, fmt.Errorf("解绑接口 %s 的出向 policer %s: %w", ifname, name, err)
+		}
+		p.setBoundPolicy(ifname, "", true)
+		done = append(done, policerBinding{ifname: ifname, idx: idx, egress: true})
+	}
+	return done, nil
+}
+
+// rebindPolicer 把重建前的绑定接回**同名**的新实例（接口索引在本次调用内刚解析过，逐条复用）。
+// 单条失败即上抛并保留已接回的登记：下一次提交/巡检继续收敛（不静默丢绑定）。
+func (p *ServicesProvider) rebindPolicer(c SvcClient, name string, recs []policerBinding) error {
+	for _, r := range recs {
+		if r.egress {
+			if err := c.PolicerOutput(r.idx, name, true); err != nil {
+				return fmt.Errorf("重建 policer %s 后接回接口 %s 的出向绑定: %w", name, r.ifname, err)
+			}
+		} else if err := c.PolicerInput(r.idx, name, true); err != nil {
+			return fmt.Errorf("重建 policer %s 后接回接口 %s 的入向绑定: %w", name, r.ifname, err)
+		}
+		p.setBoundPolicy(r.ifname, name, r.egress)
+	}
 	return nil
+}
+
+// restorePolicer 值变更中途失败时的**回落**：把该策略恢复成「本次调用之前」的实例与绑定。
+// keepInstance=true 表示旧实例仍在数据面（撤旧那一步失败），只需接回绑定；否则按旧参数重建
+// 实例再接回。登记（policer 与逐口绑定）随实际成功的那几步推进（#363），任何一步失败都在
+// 错误里如实报告——不静默留下半套状态。
+func (p *ServicesProvider) restorePolicer(c SvcClient, name string, prev policerSpec, keepInstance bool, recs []policerBinding) error {
+	if !keepInstance {
+		if _, err := c.PolicerAddDel(name, prev.cirKbps, prev.cb, true); err != nil {
+			return err
+		}
+	}
+	p.mu.Lock()
+	if p.policer == nil {
+		p.policer = map[string]policerSpec{}
+	}
+	p.policer[name] = prev
+	p.mu.Unlock()
+	return p.rebindPolicer(c, name, recs)
 }
 
 // DeleteQos 删除限速策略（先解绑再删；入向与出向绑定都要解，决策 #331）。

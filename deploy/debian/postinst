@@ -6,6 +6,11 @@ set -e
 log() { echo "nfvis postinst: $*"; }
 
 # 1) 数据目录（决策 #45/#56/#57/#59 的落点）
+# /var/lib/nfvis 有意保持 0755（不收紧）：它同时是 VM 盘（vms/）与镜像（images/）的落点，
+# QEMU 以 libvirt-qemu（非 root）运行、必须能**穿越**它——目录一旦 0700，启 VM 就报
+# Permission denied（M4-验收记录 §M4-3 真机实证；libvirt 动态属主只改文件属主，不解决目录
+# 穿越）。库里的口令哈希由**文件本身**保护：round51 G4 起 nfvisd 打开配置库时把
+# nfvis.db（及 -wal/-shm 边车）收紧为 0600，不依赖目录权限。
 install -d -m 0755 /var/lib/nfvis
 for d in images backup captures coredumps tech-support vms; do
     install -d -m 0755 "/var/lib/nfvis/$d"

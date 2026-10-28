@@ -130,17 +130,58 @@ func mapEngineError(w http.ResponseWriter, err error) {
 	}
 }
 
+// sessionHoldsCandidateLock 报告本 REST 会话是否就是 candidate 的**持有者**（round51 评审 L15）。
+//
+// 会话身份取**稳定 ID**（决策 #301/#317）：稳定 ID 就是「一次登录」的会话标识，接入源只是通道
+// ——同一 token 经 CLI 桥（holder `user@ssh`）取的锁，其 REST 读回仍是「自己的」候选
+// （既有契约见 clean_lock_test.go：同一 token 的 REST 读不得变成别人的东西，也不得被当成
+// 非持有者而看不到自己刚写的草稿）。故有稳定 ID 时按 ID 判定、**源无关**；不同 token
+// （含同一用户的另一 token）与另一用户都是**别的会话** ⇒ 由调用方回退 committed。
+// 无稳定 ID 的旧式调用退回身份键比较（只影响自己、不动他人）。
+//
+// 判据是 engine.Sessions() 的**首行**——它是真正的锁行（confirmed 占位行在后，见
+// Engine.Sessions 注释），故不会把在途 confirmed 的占位行当成持锁者。
+func (s *Server) sessionHoldsCandidateLock(sess config.Session) bool {
+	views, err := s.engine.Sessions()
+	if err != nil || len(views) == 0 {
+		return false
+	}
+	li := views[0]
+	if sess.ID != "" {
+		return li.SessionID == sess.ID
+	}
+	return li.Holder == sess.User+"@"+sess.Source
+}
+
 // handleGetCandidate GET /configuration/candidate：读取当前会话 candidate。
+//
+// round51 评审 L15：candidate 是**持有者**的东西。此前只要求「存在某个编辑会话」
+// （Engine.Candidate 的 requireEditingLocked 只看 candidate != nil），于是非持有者也能读到
+// **他人**的候选——与 CLI `show configuration` 对非持有者回退 committed 的口径不一致。
+// 现在非持有者读到的同样是 committed（现行生效配置，不是别人的草稿），并显式标出来源
+// （`source: "committed"`）以免被当成自己的候选；持有者的响应逐字不变。
 func (s *Server) handleGetCandidate(w http.ResponseWriter, r *http.Request) {
+	sess := s.sessionFromIdentity(r)
 	cfg, dirty, err := s.engine.Candidate()
 	if err != nil {
 		mapEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"candidate": redactConfigView(cfg), // 敏感字段不返回（FR-SEC-007 / 决策 #25）
 		"dirty":     dirty,
-	})
+	}
+	if !s.sessionHoldsCandidateLock(sess) {
+		committed, err := s.engine.Committed()
+		if err != nil {
+			mapEngineError(w, err)
+			return
+		}
+		out["candidate"] = redactConfigView(committed)
+		out["dirty"] = false
+		out["source"] = "committed"
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleGetConfiguration GET /configuration：读取 committed 配置（全量，脱敏）。
@@ -535,11 +576,19 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDiff GET /configuration/diff：candidate ⇄ committed 差异（JunOS 风格）。
+//
+// round51 评审 L15：diff 是「**你的**候选 vs 生效配置」。非持有者没有自己的候选，
+// 因而与 committed 无差异（与 handleGetCandidate 回退 committed、CLI `show configuration`
+// 对非持有者回退 committed 同一口径）；此前这里直接返回**他人**候选的差异（披露）。
 func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
+	sess := s.sessionFromIdentity(r)
 	diff, err := s.engine.CompareCandidate()
 	if err != nil {
 		mapEngineError(w, err)
 		return
+	}
+	if !s.sessionHoldsCandidateLock(sess) {
+		diff = ""
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(diff))

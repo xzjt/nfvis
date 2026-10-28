@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xzjt/nfvis/internal/aaa"
+	ksys "github.com/xzjt/nfvis/internal/system"
 )
 
 // 有结论记录：如实渲染成功/失败、版本与状态行。
@@ -56,14 +56,31 @@ func TestCLIShowSoftwareResultRendersFailure(t *testing.T) {
 }
 
 // 无记录：如实说「无记录」，不编造「上次成功」。
+//
+// 判据用**路径注入**（`renderSoftwareResultPath` + 指向一个必然不存在的临时路径），
+// 而不是跑生产的 `renderSoftwareResult`——后者读宿主的
+// `/var/lib/nfvis/software/last-result.json`，于是本用例在「装过产品、跑过升级」的机器上
+// 恒失败（round51 在 nfvis-vm 上实测：该文件是上一版发版验证留下的 3.0.31 记录），
+// 在干净的 CI 上恒通过。**非 hermetic 的用例是假红的源头**，故按路径注入写。
 func TestCLIShowSoftwareResultNoRecord(t *testing.T) {
 	x, _ := newCLIKit(t)
-	out := x.Execute("admin", aaa.ClassSuperUser, "ssh", "show system software result").Output
-	if strings.Contains(out, "%%") {
-		t.Fatalf("无记录不是错误，实际:\n%s", out)
-	}
+	absent := filepath.Join(t.TempDir(), "no-such-dir", "last-result.json")
+	out := x.renderSoftwareResultPath(absent)
 	if !strings.Contains(out, "无升级/回退结论记录") {
 		t.Fatalf("无记录时应如实说明，实际:\n%s", out)
+	}
+}
+
+// 生产读口仍然接在宿主路径上（守护「注入的是同一渲染逻辑」这一事实）：
+// 生产读口对**同一个路径**给出的文本必须与注入版一致——断言方式是把宿主路径的渲染结果
+// 与「注入宿主路径」的结果逐字比对，从而钉住 renderSoftwareResult 的委托关系，
+// 同时不依赖宿主上是否真有记录。
+func TestCLIShowSoftwareResultProdDelegatesToSameRenderer(t *testing.T) {
+	x, _ := newCLIKit(t)
+	want := x.renderSoftwareResultPath(ksys.LastResultPath)
+	got := x.renderSoftwareResult()
+	if got != want {
+		t.Fatalf("生产读口与渲染逻辑不同源:\nprod=%q\npath=%q", got, want)
 	}
 }
 

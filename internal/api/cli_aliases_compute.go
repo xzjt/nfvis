@@ -47,13 +47,30 @@ var statementAliasesCompute = []aliasRule{
 	// virtual-machine-functions <n> vcpu count <c> pin <bool>（§2.7 单条语句含可选 pin）：
 	// 通用遍历在 count 取值后把 pin 当兄弟关键字失败（pin 是 vcpu 容器的兄弟取值），
 	// 故整条映射到 VMCpu.{Count,Pin}。
+	//
+	// delete 形态（round51 评审 L7）：此前签名是 `_ bool` 且无条件写两个叶——「删一条 vcpu
+	// 设定」实际是**按入参写**（delete 变 add 的同族）。现按复合语句的既有口径（同
+	// aliasStaticRouteBoth：语句写哪几个叶，删除就清哪几个）逐叶清除，清空后连 `vcpu`
+	// 空壳一起回收——等价于裸形态 `delete … vcpu`（通用遍历删整键），也与
+	// container-functions 的 `delete … vcpu count <n>`（`delete(ct,"vcpu")`）同语义。
+	// 不选「只清 count 保留 pin」：count 是模型必填（缺它提交必被「vcpu count 必填且大于 0」拒）。
 	{pattern: []string{"virtual-machine-functions", "*", "vcpu", "count", "*", "pin", "*"},
-		apply: func(tree map[string]any, t []string, _ bool) error {
+		apply: func(tree map[string]any, t []string, isSet bool) error {
 			vm, err := elemByID(tree, "virtual_machine_functions", t[1])
 			if err != nil {
 				return err
 			}
 			cpu, _ := vm["vcpu"].(map[string]any)
+			if !isSet {
+				if cpu != nil {
+					delete(cpu, "count")
+					delete(cpu, "pin")
+					if len(cpu) == 0 {
+						delete(vm, "vcpu")
+					}
+				}
+				return nil
+			}
 			if cpu == nil {
 				cpu = map[string]any{}
 				vm["vcpu"] = cpu

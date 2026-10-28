@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -19,12 +20,14 @@ type fakeSvc struct {
 	spanFrom []uint32
 	spanTo   []uint32
 	spanOff  []uint32
-	policers map[string]uint32
-	nextIdx  uint32
-	pins     []string
-	pouts    []string
-	closed   int
-	err      error
+	// deadIfaces 已被数据面移除的 sw_if_index：SpanDisable 对这些索引回 -2（镜像随接口消失）。
+	deadIfaces map[uint32]bool
+	policers   map[string]uint32
+	nextIdx    uint32
+	pins       []string
+	pouts      []string
+	closed     int
+	err        error
 
 	// 故障注入钩子（决策 #363 单测）：按方法/按调用粒度置错，nil 即不注入。
 	// 调用一律「先记录、后判错」，故失败尝试也在 pins/pouts 里可见（可断言确实下发了）。
@@ -44,7 +47,8 @@ type fakeSvc struct {
 
 func newFakeSvc() *fakeSvc {
 	return &fakeSvc{ifaces: map[string]uint32{"ens192": 1, "ens224": 2, "ens256": 3},
-		mtu: map[uint32]uint32{}, state: map[uint32]bool{}, policers: map[string]uint32{}, nextIdx: 10}
+		mtu: map[uint32]uint32{}, state: map[uint32]bool{}, policers: map[string]uint32{}, nextIdx: 10,
+		deadIfaces: map[uint32]bool{}}
 }
 
 func (f *fakeSvc) Close() { f.closed++ }
@@ -96,6 +100,11 @@ func (f *fakeSvc) SpanDisable(from, to uint32) error {
 	if f.spanOffErr != nil {
 		return f.spanOffErr(from, to)
 	}
+	// 复刻 VPP：源/目的 sw_if_index 已不在数据面（口被删/被重建换了索引/带外重启）时
+	// `sw_interface_span_enable_disable` 回 `Invalid sw_if_index (-2)`。deadIfaces 由用例置入。
+	if f.deadIfaces[from] || f.deadIfaces[to] {
+		return fmt.Errorf("sw_interface_span_enable_disable(from=%d,to=%d) retval=-2", from, to)
+	}
 	return nil
 }
 
@@ -111,6 +120,12 @@ func (f *fakeSvc) PolicerAddDel(name string, cirKbps uint32, cb uint64, add bool
 	}
 	if !add {
 		delete(f.policers, name)
+		return 0, nil
+	}
+	if _, ok := f.policers[name]; ok {
+		// N5：VPP 的 policer 以**名字**为键，同名再 add 由适配器按 -81（VALUE_EXIST）当幂等
+		// 成功吞掉——接口收下、**参数不变**（速率仍是旧的）。此前假实现把速率就地覆盖，
+		// 「改 CIR 在数据面静默不生效」因此在单测里不可见。
 		return 0, nil
 	}
 	f.nextIdx++
@@ -410,7 +425,8 @@ func svcRegs(p *ServicesProvider, ifname string) (in, out string) {
 func svcPolicer(p *ServicesProvider, name string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.policer[name]
+	_, ok := p.policer[name]
+	return ok
 }
 
 // svcSpanTracked 读 SPAN 会话是否仍在登记表里。

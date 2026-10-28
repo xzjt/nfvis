@@ -55,6 +55,43 @@ func (g *govppL3Client) CreateSubif(req CreateSubifReq) (uint32, error) {
 	return (&govppL2Client{ch: g.ch}).CreateSubif(req)
 }
 
+// DeleteSubif 与 L2 侧同一原语（create_subif 的逆；N2 的回收面）——共用同一适配实现，
+// 不复制一份参数拼装。
+func (g *govppL3Client) DeleteSubif(swIfIndex uint32) error {
+	return (&govppL2Client{ch: g.ch}).DeleteSubif(swIfIndex)
+}
+
+// SubifExactMatch 读回某接口是否是 exact-match 子接口（round51 #525 真机复现的要件）。
+//
+// 为什么必须问：VPP 26.06 只允许 exact-match 子接口配地址
+// （`sub-interface without exact-match doesn't support IP addressing`）。早先版本建的
+// `<父口>.<vlan>` 没带该标志，产品若按名复用就会拿到一个永远配不上地址的壳，地址下发撞
+// `VPPApiError: Unsupported (-126)` 而整次提交回滚（真机复现现场：`ens224.100` 在 VPP 里
+// 存在、按名能查到、就是配不上地址）。判据取 `interface_dump` 的 `sub_if_flags`
+// （VPP 的 `SUB_IF_API_FLAG_EXACT_MATCH` 位）——**运行态事实**，不依赖本进程登记，
+// 跨 nfvisd 重启照样成立。
+//
+// 不在 dump 里（已被删/索引失效）时回错误而不是 false：那种"问不出来"必须与"确定不是
+// exact-match"区分开，否则调用方会把一个不存在的对象当坏的删掉。
+func (g *govppL3Client) SubifExactMatch(swIfIndex uint32) (bool, error) {
+	reqCtx := g.ch.SendMultiRequest(&ifapi.SwInterfaceDump{})
+	for {
+		d := &ifapi.SwInterfaceDetails{}
+		stop, err := recvMultiBound(g.ch, reqCtx, d) // 有界读数（决策 #422）
+		if err != nil {
+			return false, err
+		}
+		if stop {
+			break
+		}
+		if uint32(d.SwIfIndex) != swIfIndex {
+			continue
+		}
+		return d.SubIfFlags&interface_types.SUB_IF_API_FLAG_EXACT_MATCH != 0, nil
+	}
+	return false, fmt.Errorf("接口索引 %d 不在 interface_dump 里（可能已被删除）", swIfIndex)
+}
+
 func (g *govppL3Client) IPTableAddDel(tableID uint32, isIP6, add bool, name string) error {
 	reply := &ip.IPTableAddDelReply{}
 	err := g.ch.SendRequest(&ip.IPTableAddDel{

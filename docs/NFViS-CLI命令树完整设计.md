@@ -583,6 +583,10 @@ delete firewall default-policy                             # 回落缺省 accept
 # commit confirmed 并输出自锁警告（FR-CFG-012）。**接入源事实化（决策 #369）**：
 # 客户端 `-source console` 仅在**连接源自本机回环**时被采信——远程连接声称 console
 # 一律按 ssh 处理（物理上不可能是本地串口会话），自锁保护不可被远程伪造绕过
+# **自述值白名单（round51 评审判定 / 决策 #524）**：除「回环 + console」这一档外，任何自述
+# 来源都归入网络会话 ssh——此前其余值**原样透传**，远程已认证的 super-user 只要自述
+# `system-restore`（内部维护来源）即可借豁免绕过上述两道守卫、并让高危变更的意图审计失效。
+# 三类维护来源只由服务端在恢复出厂/恢复配置/重置数据分区路径上设置，CLI 桥永不采信。
 # `delete system login user <name>` 守卫（决策 #370/R142 E12，与 REST 同判据同文案）：
 #   name == 当前登录用户 ⇒ 拒绝「不能删除当前登录用户」；删除后 super-user 归零 ⇒ 拒绝
 #   「不能删除最后一个 super-user 用户」。CLI 与 REST 两条路径同口径（此前仅 REST 有守卫）。
@@ -712,6 +716,11 @@ set ports <seq> container <ct-name> interface <vnic-name>    # <seq> 为必填�
 set cross-connect <true|false>                       # 两端口直通开关（与 ports/gateway 互斥；端口来自该交换机的
                                                      #   ports，恰好两个——数据面取前两个，>2 拒绝、<2 提交期提示）
 # —— L3 ——
+set l3-interface <ifname> vlan <v>                    # VLAN 子接口（决策 #525）：v 限 1–4094；为该 L3 接口建
+                                                     #   `<ifname>.<v>` 子接口（幂等：已存在则复用；删接口/删交换
+                                                     #   机时随声明回收）。等价写法是把 VID 写进接口名
+                                                     #   （`set l3-interface ens192.100 …`）；同一物理口可有多个
+                                                     #   不同 VID 子接口，同一子接口只能声明一次
 set l3-interface <ifname|vlan <v>> ip address <ip-prefix>    # IPv4/IPv6，可配多条
 set l3-interface <ifname>                            # 裸形态（决策 #472）：声明 L3 接口条目、不带地址（幂等）。
                                                      #   `delete … ip address` 只删地址、条目保留；无地址条目经

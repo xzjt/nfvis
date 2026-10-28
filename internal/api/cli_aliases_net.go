@@ -127,6 +127,22 @@ var statementAliasesNet = []aliasRule{
 		apply: aliasL3InterfaceAddr},
 	{pattern: []string{"virtual-switches", "*", "l3-interface", "*", "acl-in", "*"},
 		apply: aliasL3InterfaceAclIn},
+	// virtual-switches <n> l3-interface <if> vlan <v>：L3 子接口（模型 L3Interface.Vlan）——
+	// 树里 `<ifname|vlan>` 的占位与设计文档都写着这个形态，此前却无任何语句写到该字段
+	// （只有 REST/load 可达），display set 反推不出它（round51 H3b）。
+	//
+	// **组合形态**（`… vlan <v> ip address <p>` / `… vlan <v> acl-in <a>`）必须单列：别名表按
+	// **token 数精确匹配**，而模型把 l3-interface 落在 `l3_interfaces`（复数数组）——通用树遍历
+	// 在这里必然报「配置中不存在字段 "l3_interface"」。round51 真机首验就撞上：
+	// `set … l3-interface ens224 vlan 100 ip address 10.99.0.1/24`（命令树枚举出的规范序，
+	// 也是文档里推荐的写法）无别名可命中 ⇒ 整条语句失败。两条组合规则放在单叶子规则之前，
+	// 语义是「先写 vlan，再按同一叶子的既有语义写地址/ACL」——与分步写法完全等价。
+	{pattern: []string{"virtual-switches", "*", "l3-interface", "*", "vlan", "*", "ip", "address", "*"},
+		apply: aliasL3InterfaceVlanThen(aliasL3InterfaceAddr)},
+	{pattern: []string{"virtual-switches", "*", "l3-interface", "*", "vlan", "*", "acl-in", "*"},
+		apply: aliasL3InterfaceVlanThen(aliasL3InterfaceAclIn)},
+	{pattern: []string{"virtual-switches", "*", "l3-interface", "*", "vlan", "*"},
+		apply: aliasL3InterfaceVlan},
 	{pattern: []string{"virtual-switches", "*", "l3-interface", "*"},
 		apply: aliasL3InterfaceDel},
 
@@ -258,6 +274,23 @@ func elemByField(tree map[string]any, arrKey, field, ident string) map[string]an
 		em = map[string]any{field: typedIdentity(field, ident)}
 		tree[arrKey] = append(arr, em)
 	}
+	return em
+}
+
+// existingElemByField 同 elemByField，但元素**不存在时返回 nil 而不创建**——仅 delete 路径用。
+//
+// 为什么必须分开（round51 评审 H3）：delete 分支复用 elemByField 时，元素不存在会被**建出来**，
+// 而随之的叶子删除（removeStr/delete）对缺失键是空操作 ⇒ 语句返回成功、commitTree 却看见
+// 「多出一个新元素」⇒ 提交真的把新元素下发到数据面：
+//   - `delete virtual-switches <n> l3-interface <if> ip address <p>` 会凭空把该物理口加进该
+//     VRF 的 IP 表（`resolveL3Iface` 按接口清单驱动，接口从此改走该表）；
+//   - `delete … static-routes <prefix> distance <n>` 会建出「只有 prefix、没有 next-hop」的
+//     幽灵路由，提交被 `checkRouteNextHops`（下一跳须为有效 ip）拦下——操作者还要先找出它。
+//
+// 判据与同级 aliasL3InterfaceDel / aliasStaticRoute 同口径：元素不在即「无匹配配置: <身份取值>」。
+func existingElemByField(tree map[string]any, arrKey, field, ident string) map[string]any {
+	arr, _ := tree[arrKey].([]any)
+	em, _ := selectElement(arr, field, ident)
 	return em
 }
 
@@ -715,12 +748,77 @@ func aliasL3InterfaceAddr(tree map[string]any, t []string, isSet bool) error {
 	if err != nil {
 		return err
 	}
-	li := elemByField(vrf, "l3_interfaces", "interface", t[3])
-	if isSet {
-		appendUniqueStr(li, "addresses", t[6])
+	if !isSet {
+		// delete：**不建元素**（H3）——凭空建出条目会把该接口搬进本 VRF 的 IP 表。
+		li := existingElemByField(vrf, "l3_interfaces", "interface", t[3])
+		if li == nil {
+			return errString("无匹配配置: " + t[3])
+		}
+		removeStr(li, "addresses", t[6])
 		return nil
 	}
-	removeStr(li, "addresses", t[6])
+	li := elemByField(vrf, "l3_interfaces", "interface", t[3])
+	appendUniqueStr(li, "addresses", t[6])
+	return nil
+}
+
+// aliasL3InterfaceVlanThen 组合形态：先按 `vlan <v>` 写子接口身份，再把**同一语句剩余部分**
+// 交给叶子语义的既有别名处理。round51 真机首验（#525）发现组合写法无别名可命中——
+// 别名表按 token 数精确匹配，而模型把 l3-interface 落在 `l3_interfaces`（复数数组），
+// 通用树遍历在这里必然报「配置中不存在字段 "l3_interface"」。等价性靠**裁剪 tokens**：
+//   - `… l3-interface <if> vlan <v> ip address <p>` → 先 `… vlan <v>`，再把
+//     `… l3-interface <if> ip address <p>`（即去掉 `vlan <v>` 两个 token）交给叶子别名；
+//   - `… l3-interface <if> vlan <v> acl-in <a>` 同理。
+//
+// 两步都在同一棵候选树上、同一 isSet 下执行，故 set/delete 语义与分步写法逐字一致
+// （delete 组合形态＝先删该叶子，再删 vlan 叶；本形态的主要用途是 set）。
+func aliasL3InterfaceVlanThen(leaf func(map[string]any, []string, bool) error) func(map[string]any, []string, bool) error {
+	return func(tree map[string]any, t []string, isSet bool) error {
+		if err := aliasL3InterfaceVlan(tree, t[:6], isSet); err != nil {
+			return err
+		}
+		// 去掉 `vlan <v>`（t[4],t[5]），其余顺序不变 ⇒ 命中原叶子别名的 pattern。
+		rest := append(append([]string{}, t[:4]...), t[6:]...)
+		return leaf(tree, rest, isSet)
+	}
+}
+
+// aliasL3InterfaceVlan：virtual-switches <n> l3-interface <if> vlan <v>。
+//
+// 由来（round51 评审 H3b）：模型 `L3Interface.Vlan` 是**数据面真语义**（`resolveL3Iface` 在
+// Vlan>0 时于该物理口上建 `vlan <v>` 子接口、把子接口置入该 VRF 的表），树里 `<ifname|vlan>`
+// 的占位与《CLI 命令树完整设计》§2 的 `l3-interface <ifname|vlan <v>>` 都写着它，但此前
+// **没有任何语句写得到该字段**（只有 REST / `load` 能带进来）。后果是双重的：CLI 侧功能不可达；
+// 「REST 写进 vlan 的配置」一旦被 `show configuration | display set` 读到，发射器发不出该
+// 字段、回放自校验必对不上 ⇒ 整条读命令报「display set 内部错误…请报告缺陷」。
+//
+// delete 清 `vlan` 键（条目本身保留——它仍是该 VRF/表的成员，与删地址叶同口径）；
+// 条目不存在时**不建元素**、如实报「无匹配配置」（H3）。
+// 取值 1-4094 在**语句层**先挡（越界不是「配置不完整」而是取值非法，同 aliasVSLearnLimit 的
+// 正整数校验）；模型层对 L3Interface.Vlan 没有范围校验，REST 路径仍可能写入越界值
+// （编排层按 uint16 截断 ⇒ 静默错 VLAN），该缺口不在本文件、已如实登记。
+func aliasL3InterfaceVlan(tree map[string]any, t []string, isSet bool) error {
+	vrf, err := l3VrfOf(tree, t[1], isSet)
+	if err != nil {
+		return err
+	}
+	if !isSet {
+		li := existingElemByField(vrf, "l3_interfaces", "interface", t[3])
+		if li == nil {
+			return errString("无匹配配置: " + t[3])
+		}
+		delete(li, "vlan")
+		return nil
+	}
+	n, err := numField(t[5])
+	if err != nil {
+		return err
+	}
+	if v, _ := n.(float64); v < 1 || v > 4094 {
+		return errString("vlan 取值须为 1-4094: " + t[5])
+	}
+	li := elemByField(vrf, "l3_interfaces", "interface", t[3])
+	li["vlan"] = n
 	return nil
 }
 
@@ -798,8 +896,13 @@ func aliasStaticRouteDistance(tree map[string]any, t []string, isSet bool) error
 	if prefix == "default" {
 		prefix = "0.0.0.0/0"
 	}
-	rt := elemByField(vrf, "routes", "prefix", prefix)
 	if !isSet {
+		// delete：**不建元素**（H3）——凭空建出「只有 prefix、没有下一跳」的幽灵路由，
+		// 提交必被下一跳校验拒；取值 token 照旧容忍（操作者常把 set 行换成 delete）。
+		rt := existingElemByField(vrf, "routes", "prefix", prefix)
+		if rt == nil {
+			return errString("无匹配配置: " + prefix)
+		}
 		delete(rt, "distance")
 		return nil
 	}
@@ -807,6 +910,7 @@ func aliasStaticRouteDistance(tree map[string]any, t []string, isSet bool) error
 	if err != nil {
 		return err
 	}
+	rt := elemByField(vrf, "routes", "prefix", prefix)
 	rt["distance"] = n
 	return nil
 }
@@ -1636,11 +1740,16 @@ func aliasL3InterfaceAclIn(tree map[string]any, t []string, isSet bool) error {
 	if err != nil {
 		return err
 	}
-	li := elemByField(vrf, "l3_interfaces", "interface", t[3])
 	if !isSet {
+		// delete：**不建元素**（H3，同 aliasL3InterfaceAddr）。
+		li := existingElemByField(vrf, "l3_interfaces", "interface", t[3])
+		if li == nil {
+			return errString("无匹配配置: " + t[3])
+		}
 		delete(li, "acl_in")
 		return nil
 	}
+	li := elemByField(vrf, "l3_interfaces", "interface", t[3])
 	li["acl_in"] = t[5]
 	return nil
 }

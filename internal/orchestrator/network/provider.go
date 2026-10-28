@@ -275,6 +275,11 @@ func (n *L2Network) vnfPortProviderReady(portType string) bool {
 //     若 vNIC 指向 L3 交换机（port.VRF 非空），再将该接口置入对应 VRF 表；
 //   - sriov-vf：不经 VPP（VF 直通，hostdev 由 compute 组装）；
 //   - memif：容器 vNIC，由容器编排在 M4-7 处理。
+//
+// VRF 方向是**双向**的（N4）：`port.VRF == ""` 表示该 vNIC 不再挂任何 L3 交换机，此时必须把
+// 它从原表摘回默认表并摘登记（ReleaseVnfIface）。此前只做「置入」一支，把 vNIC 改挂 L2 交换机
+// 或删掉 virtual-switch 叶子后，口仍留在旧 VRF 的表与登记里（NAT inside 照旧把它当转发域成员），
+// 配置、读视图、审计三面全绿而数据面是旧归属。
 func (n *L2Network) ApplyVnfInterface(ctx context.Context, port orchestrator.VnfPort) error {
 	switch port.Type {
 	case "vhost-user":
@@ -284,10 +289,7 @@ func (n *L2Network) ApplyVnfInterface(ctx context.Context, port orchestrator.Vnf
 		if err := n.vhost.Apply(ctx, port); err != nil {
 			return err
 		}
-		if port.VRF != "" && n.l3 != nil {
-			return n.l3.SetVnfTable(ctx, port.VRF, VnfPortIfaceName(port))
-		}
-		return nil
+		return n.applyVnfTableDirection(ctx, port)
 	case "memif":
 		if n.memif == nil {
 			return nil
@@ -295,15 +297,29 @@ func (n *L2Network) ApplyVnfInterface(ctx context.Context, port orchestrator.Vnf
 		if err := n.memif.Apply(ctx, port); err != nil {
 			return err
 		}
-		if port.VRF != "" && n.l3 != nil {
-			return n.l3.SetVnfTable(ctx, port.VRF, VnfPortIfaceName(port))
-		}
-		return nil
+		return n.applyVnfTableDirection(ctx, port)
 	case "sriov-vf":
-		return nil
+		// VF 直通不在 VPP 里建口，故**不置表**；但该 vNIC 若曾经是 vhost-user 形态并置过表
+		//（改类型后同一条声明被重新收敛），空 VRF 一侧仍要解除旧归属——与上面两支同一口径。
+		if port.VRF != "" || n.l3 == nil {
+			return nil
+		}
+		return n.l3.ReleaseVnfIface(ctx, VnfPortIfaceName(port))
 	default:
 		return fmt.Errorf("vNIC %s/%s 类型 %q 不受支持", port.VM, port.Interface, port.Type)
 	}
+}
+
+// applyVnfTableDirection 收敛一条 vNIC 的 L3 表归属：非空 VRF 置入该表，空 VRF 解除归属
+// （见 ApplyVnfInterface 的 N4 说明）。L3 编排未装配时为空操作。
+func (n *L2Network) applyVnfTableDirection(ctx context.Context, port orchestrator.VnfPort) error {
+	if n.l3 == nil {
+		return nil
+	}
+	if port.VRF != "" {
+		return n.l3.SetVnfTable(ctx, port.VRF, VnfPortIfaceName(port))
+	}
+	return n.l3.ReleaseVnfIface(ctx, VnfPortIfaceName(port))
 }
 
 // DeleteVnfInterface 删除 vNIC 接入（VM 删除/vNIC 移除/迁移时同步 VPP 侧）。

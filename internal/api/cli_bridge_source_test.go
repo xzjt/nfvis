@@ -31,6 +31,13 @@ func TestCLISessionSourceFactBased(t *testing.T) {
 		{"RemoteAddr 无端口（保守按非回环）", "192.168.1.50", "console", "ssh"},
 		{"RemoteAddr 空（保守按非回环）", "", "console", "ssh"},
 		{"console 大小写/空白（原样非 console）", "127.0.0.1:40001", " console ", "console"},
+		// round51 评审 M1：自述值不再原样透传——内部维护来源（服务端在恢复/出厂路径自设，
+		// 客户端不可声明）与任何未在白名单里的值一律归入网络会话 ssh。
+		{"远程+system-restore → ssh（伪造豁免不采信）", "192.168.1.50:40001", "system-restore", "ssh"},
+		{"远程+system-zeroize → ssh", "192.168.1.50:40001", "system-zeroize", "ssh"},
+		{"远程+system-format-data → ssh", "192.168.1.50:40001", "system-format-data", "ssh"},
+		{"回环+system-restore → ssh（内部来源永不采信）", "127.0.0.1:40001", "system-restore", "ssh"},
+		{"远程+api/任意未知值 → ssh（白名单外）", "192.168.1.50:40001", "api", "ssh"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,5 +108,59 @@ func TestCLIExecuteRemoteConsoleClaimGuarded(t *testing.T) {
 	}
 	if !strings.Contains(out3, "成功") {
 		t.Fatalf("本机 console 提交应成功，实得: %s", out3)
+	}
+}
+
+// TestCLIExecuteMaintenanceSourceClaimGuarded（round51 评审 M1）：远程连接声称**内部维护来源**
+// （恢复出厂/恢复配置/重置数据分区）不得借 `confirmGuardExempt` 的豁免绕过管理口自锁守卫——
+// 这三类来源只在服务端恢复/出厂路径上设置，CLI 桥对任何非回环 console 的自述一律按 ssh。
+func TestCLIExecuteMaintenanceSourceClaimGuarded(t *testing.T) {
+	for _, src := range []string{"system-restore", "system-zeroize", "system-format-data"} {
+		t.Run(src, func(t *testing.T) {
+			ts := newTestServerOpts(t, Options{})
+			token := loginAdmin(t, ts)
+			out := mgmtChangeVia(t, ts, token, "192.168.1.50:40001", src)
+			if !strings.Contains(out, "commit confirmed") {
+				t.Fatalf("远程声称 %s 应仍受管理口自锁守卫（要求 commit confirmed），实得: %s", src, out)
+			}
+			if strings.Contains(out, "成功") {
+				t.Fatalf("远程声称 %s 不得放行管理口变更，实得: %s", src, out)
+			}
+		})
+	}
+}
+
+// TestCLIExecuteMaintenanceSourceClaimKeepsHighRiskAudit（round51 评审 M1 第二面）：伪造内部
+// 维护来源**不得**抹掉高危变更的意图审计——`highRiskConfigIntent` 对内部来源返回空串（那三类
+// 动作由操作级助手记两行），若采信客户端自述，远程用户改本地用户时审计里就只有结果行、看不出
+// 「要做什么」。归一为 ssh 后，意图行照落。
+func TestCLIExecuteMaintenanceSourceClaimKeepsHighRiskAudit(t *testing.T) {
+	ts := newTestServerOpts(t, Options{})
+	token := loginAdmin(t, ts)
+
+	execVia(t, ts, token, "192.168.1.50:40001", "system-restore", "configure")
+	execVia(t, ts, token, "192.168.1.50:40001", "system-restore",
+		"set system login user r51-ops password R51-Passw0rd class operator")
+	out := execVia(t, ts, token, "192.168.1.50:40001", "system-restore", "commit")
+
+	status, _, data := cfgRequest(t, http.MethodGet, ts.URL+APIPrefix+"/audit-logs?limit=200", token, nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET audit-logs: %d %s", status, data)
+	}
+	var entries []struct {
+		Detail string `json:"detail"`
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(data, &entries); err != nil {
+		t.Fatalf("解析审计: %v (%s)", err, data)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Result == "intent" && strings.Contains(e.Detail, "创建本地用户 r51-ops") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("高危意图行被抹掉（远程伪造内部维护来源应仍落意图审计）：commit=%q entries=%+v", out, entries)
 	}
 }

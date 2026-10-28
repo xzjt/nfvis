@@ -50,6 +50,7 @@ func Validate(c Config) []ValidateError {
 	v.checkVMFunctions(c)
 	v.checkVMImageProfiles(c)
 	v.checkContainerFunctions(c)
+	v.checkVPPDerivedNameCollisions(c)
 	v.checkAddressOverlap(c)
 	v.checkPortRoleExclusivity(c)
 	v.checkManagementIsolation(c)
@@ -93,6 +94,52 @@ var portSpecRe = regexp.MustCompile(`^\d+(-\d+)?$`)
 
 // hostLabelRe 主机名的单个分段（RFC1123）：1-63 字符，首尾为字母/数字，中间可含 '-'。
 var hostLabelRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$`)
+
+// kernelParamRe 内核附加参数（`system.kernel.params`）允许的字符集：字母数字与 _ . = , : @ + -。
+//
+// 这份白名单是**安全边界**而非风格检查——params 是逃生口，整条取值原样拼进 GRUB 片段的
+// GRUB_CMDLINE_LINUX 赋值行，而 /etc/default/grub.d/*.cfg 会被 grub-mkconfig 当 shell
+// **source**、nfvisd 以 root 跑 update-grub：取值里一个 `"` 就能闭合赋值、把其后内容当 root
+// 命令执行；空白会拆出额外参数；`;` `$` 反引号/换行同理。合法内核参数（isolcpus=2-5、
+// default_hugepagesz=1G、intel_iommu=on、processor.max_cstate=1、console=ttyS0,115200n8…）
+// 都落在这个集合内，故放行它不损失真实用法。
+var kernelParamRe = regexp.MustCompile(`^[A-Za-z0-9_.=,:@+-]+$`)
+
+// tunedProfileRe tuned 档位名（写入 /etc/nfvis/tuned-profile 且进 GRUB 片段注释行）的安全形态。
+var tunedProfileRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// ValidKernelParam 判断一条内核附加参数能否安全拼进 GRUB 片段的赋值行：只接受 kernelParamRe
+// 的字符集，空串不通过（会拼出多余空白）。
+//
+// 单一真源：提交期（checkKernelBaseline）用它定位到具体下标报错，生成层（internal/system 的
+// GenerateBaseline）用它做**兜底过滤**——两道判据同源，避免各写一份而漂移（internal/system
+// 反向 import 本包，见 ifacename.go 头注）。
+func ValidKernelParam(p string) bool { return kernelParamRe.MatchString(p) }
+
+// ValidTunedProfile 判断 tuned 档位名能否安全写进 GRUB 片段的注释行与 /etc/nfvis/tuned-profile。
+func ValidTunedProfile(s string) bool { return tunedProfileRe.MatchString(s) }
+
+// ntpServerHostRe NTP 服务器主机名的安全形态（近似 RFC1123，见 hostLabelRe）：字母/数字开头结尾，
+// 中间可含字母数字与 . -；空白/引号/换行/前导 '-' 都不在集合内，故注入与不可解析形态一并不接受。
+var ntpServerHostRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$`)
+
+// ValidNTPServer 判断 NTP 服务器取值能否安全写入 chrony 源文件（IP 地址或安全主机名）。
+//
+// 为什么校验落在 model 而渲染侧还要再滤一遍（internal/system 的 renderChronySources）：
+// chrony 源文件由 root 拥有、按行解析（`server <host>`，见 baseline_apply.go）——取值里的换行
+// 能注入**任意 chrony 指令**、引号或空白会产出解析不了的文件（NTP 静默失效而提交报成功）。
+// 提交期在此拦住非法值，渲染侧兜底同一份规则；internal/system 反向 import 本包（model 是叶子包，
+// 见 ifacename.go 头注），故判据由本函数导出、两处共用，避免各抄一份而漂移。
+func ValidNTPServer(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	if _, err := netip.ParseAddr(s); err == nil {
+		return true
+	}
+	return ntpServerHostRe.MatchString(s)
+}
 
 // checkGuestHostname 校验 VNF 的 guest 主机名（`cloud-init.hostname`）。
 //
@@ -393,9 +440,19 @@ func (v *validator) checkSystem(c Config) {
 		v.checkKernelDataPlane(c)
 	}
 	for i, n := range s.Ntp {
+		p := fmt.Sprintf("system.ntp[%d].server", i)
 		if n.Server == "" {
-			v.errf(fmt.Sprintf("system.ntp[%d].server", i), "NTP 服务器地址缺失")
+			v.errf(p, "NTP 服务器地址缺失")
+			continue
 		}
+		if !ValidNTPServer(n.Server) {
+			v.errf(p, "NTP 服务器 %q 非法：须为 IP 地址或主机名（不含空白、引号、换行，也不以 '-' 开头）", n.Server)
+		}
+	}
+	// 内核启动基线（FR-SYS-014）：此前零校验，而它是**逃生口**——params 整条取值原样拼进
+	// root 执行的 GRUB 片段（见 kernel.go GenerateBaseline 与 checkKernelBaseline 的说明）。
+	if s.Kernel != nil {
+		v.checkKernelBaseline(s.Kernel)
 	}
 	if s.Management != nil {
 		if s.Management.Interface != "" && !nameRe.MatchString(s.Management.Interface) {
@@ -460,6 +517,47 @@ func (v *validator) checkSystem(c Config) {
 		}
 	}
 	v.checkSystemLogin(s)
+}
+
+// checkKernelBaseline 校验内核启动基线（FR-SYS-014）。
+//
+// 由来（round51 评审）：此前 checkSystem 完全没有 Kernel 分支——`set system kernel params <值>`
+// 是自由文本逃生口（schema 树里是 SPA("<param>")），取值经 DesiredFromConfig → GenerateBaseline
+// 原样拼进 `/etc/default/grub.d/99-nfvis.cfg` 的 `GRUB_CMDLINE_LINUX="…"` 行。该目录被
+// grub-mkconfig **当 shell source**，而 nfvisd 以 root 跑 update-grub ⇒ 一个 `"` 就能闭合引号、
+// 把其余内容当 root 命令执行（同族：用户可控文本落进 root 执行的脚本）。故提交期把每个字段按
+// **它能落到哪里**逐个收严，回报路径与允许取值的范围，不留「提交成功、宿主侧另有后果」。
+//
+// 校验只认**可判定的枚举与字符集**：不发明取值范围（iommu/transparent_hugepages 的枚举取自
+// schema 树与 kernel.go 的实际写入口径）。
+func (v *validator) checkKernelBaseline(k *KernelConfig) {
+	for i, p := range k.Params {
+		path := fmt.Sprintf("system.kernel.params[%d]", i)
+		if strings.TrimSpace(p) == "" {
+			v.errf(path, "内核附加参数不能为空")
+			continue
+		}
+		if !ValidKernelParam(p) {
+			v.errf(path, "内核附加参数 %q 含不允许的字符：只接受字母数字与 _ . = , : @ + -（空白、引号、反斜杠、; $ 反引号与换行一律拒绝——取值会被写进 root 执行的 GRUB 片段）", p)
+		}
+	}
+	if k.IOMMU != "" {
+		switch k.IOMMU {
+		case "on", "off", "pt":
+		default:
+			v.errf("system.kernel.iommu", "IOMMU 模式必须为 on|off|pt（当前 %q）", k.IOMMU)
+		}
+	}
+	if k.TransparentHugepages != "" {
+		switch k.TransparentHugepages {
+		case "always", "madvise", "never":
+		default:
+			v.errf("system.kernel.transparent_hugepages", "透明大页策略必须为 always|madvise|never（当前 %q）", k.TransparentHugepages)
+		}
+	}
+	if k.TunedProfile != "" && !ValidTunedProfile(k.TunedProfile) {
+		v.errf("system.kernel.tuned_profile", "tuned 档位名 %q 不合法（只接受字母数字与 _ . -）", k.TunedProfile)
+	}
 }
 
 // checkKernelDataPlane 内核数据面（system.dataplane = kernel）下**提交期拒绝**的配置。
@@ -957,21 +1055,77 @@ func vnicNames(c Config) map[string]bool {
 // 并报出归属——内核侧不存在该设备名，放行只会把失败推迟到恢复收敛与起 VM。
 func vnicDerivedOwners(c Config) map[string]string {
 	out := map[string]string{}
+	for _, o := range vnicDerivedNameOwners(c) {
+		out[o.dev] = o.owner
+	}
+	return out
+}
+
+// vnicDerivedNameOwner 一处 vNIC 的 VPP 侧派生接口名与归属（vnicDerivedNameOwners 的元素）。
+type vnicDerivedNameOwner struct {
+	dev   string // 派生接口名（vh-<vm>-<nic> / mf-<ct>-<nic>，超长走哈希回退）
+	owner string // 归属 "<VM 或容器>/<vNIC>"（与读视图里的寻址一致）
+	path  string // 配置路径（errf 的定位）
+	what  string // 对象描述（报错文案要点名**配置对象**，只给派生名操作者对不上是哪个声明）
+}
+
+// vnicDerivedNameOwners 按声明序归集所有会产生 VPP 侧接口的已声明 vNIC 的派生接口名与归属
+// ——**有序、允许同名**（同名正是 checkVPPDerivedNameCollisions 要报的撞名形态）。它是
+// vnicDerivedOwners（去重成 map）与撞名检查的**单一来源**，派生规则只经 ifacename.go 的
+// 规则函数（校验层不另抄拼接逻辑，否则超长哈希回退等的漂移会让判据对正确写法永不命中）。
+// 类型过滤与历史口径一致（与 orchestrator.VnfPortsOf 同源）：VNF 只认 vhost-user、
+// 容器只认 memif——sriov-vf 不提进 VPP，没有派生接口名。
+func vnicDerivedNameOwners(c Config) []vnicDerivedNameOwner {
+	var out []vnicDerivedNameOwner
 	for _, vm := range c.VirtualMachineFunctions {
 		for _, nic := range vm.Interfaces {
-			if nic.Type == "vhost-user" {
-				out[VnfIfaceName(vm.Name, nic.Name)] = vm.Name + "/" + nic.Name
+			if nic.Type != "vhost-user" {
+				continue
 			}
+			out = append(out, vnicDerivedNameOwner{
+				dev:   VnfIfaceName(vm.Name, nic.Name),
+				owner: vm.Name + "/" + nic.Name,
+				path:  fmt.Sprintf("virtual-machine-functions[%s].interfaces[%s]", vm.Name, nic.Name),
+				what:  fmt.Sprintf("VM %q 的 vNIC %q", vm.Name, nic.Name),
+			})
 		}
 	}
 	for _, ct := range c.ContainerFunctions {
 		for _, nic := range ct.Interfaces {
-			if nic.Type == "memif" {
-				out[MemifIfaceName(ct.Name, nic.Name)] = ct.Name + "/" + nic.Name
+			if nic.Type != "memif" {
+				continue
 			}
+			out = append(out, vnicDerivedNameOwner{
+				dev:   MemifIfaceName(ct.Name, nic.Name),
+				owner: ct.Name + "/" + nic.Name,
+				path:  fmt.Sprintf("container-functions[%s].interfaces[%s]", ct.Name, nic.Name),
+				what:  fmt.Sprintf("容器 %q 的 vNIC %q", ct.Name, nic.Name),
+			})
 		}
 	}
 	return out
+}
+
+// checkVPPDerivedNameCollisions VPP 数据面下**派生接口名互撞**的提交期拒绝。
+//
+// 为什么恒要跑（不随数据面开关）：VPP 侧接口名全局唯一（vhost-user/memif 按名建口），而名字由
+// 「VM/容器名 + vNIC 名」派生——两个**各自合法**的声明可拼出同一个名字：VM `a` 的 vNIC `b-c`
+// 与 VM `a-b` 的 vNIC `c` 都派生 `vh-a-b-c`。撞名后先建的口占住名字、后建的直接失败（或更糟：
+// 把前者当「已存在」复用），数据面与配置从此错位，而失败文案只给接口名、指不回是哪个声明。
+// 内核数据面下另有同族的 checkKernelDerivedNameCollisions（内核设备名集合不同），但 VPP 名在
+// 切到内核数据面时仍是配置面的名字（派生规则与数据面无关），故本检查与数据面无关、恒执行。
+func (v *validator) checkVPPDerivedNameCollisions(c Config) {
+	first := map[string]vnicDerivedNameOwner{}
+	for _, o := range vnicDerivedNameOwners(c) {
+		prev, dup := first[o.dev]
+		if !dup {
+			first[o.dev] = o
+			continue
+		}
+		v.errf(o.path, "%s 与 %s 会派生同一个 VPP 接口名 %q"+
+			"（VPP 接口名全局唯一，先建的口占住名字、后建的直接失败，配置与数据面从此不一致）。"+
+			"请把其中一个名字改掉（VM/容器名或 vNIC 名）", prev.what, o.what, o.dev)
+	}
 }
 
 // findVMFuncNic 按 (VM 名, vNIC 名) 在配置里找 vNIC（决策 #455 的内核侧前置校验用）。
@@ -1579,6 +1733,51 @@ func (v *validator) checkDHCPServerPool(p string, s VirtualSwitch) {
 	}
 }
 
+// splitDottedVlan 把「<父口>.<vlan>」写法拆成父口名与 vlan；点后不是合法 802.1Q VID（1..4094）
+// 或前缀为空时 ok=false。
+//
+// ⚠ 单一真源在 internal/orchestrator/network/l3.go 的 splitDottedVlan（下发层按它决定
+// 「建 vlan 子接口」还是「按名直查」），那边改了必须同步这里（model 不能 import 编排层）。
+// 判据只取**第一个点**：于是带点的合法写法只可能形如 `<前缀>.<整数>`（前缀里再有点会落进整数
+// 解析而失败），与下发层的拆法逐字一致。
+func splitDottedVlan(name string) (parent string, vlan int, ok bool) {
+	i := strings.Index(name, ".")
+	if i <= 0 || i == len(name)-1 {
+		return "", 0, false
+	}
+	v, err := strconv.Atoi(name[i+1:])
+	if err != nil || v < 1 || v > 4094 {
+		return "", 0, false
+	}
+	return name[:i], v, true
+}
+
+// l3IfaceIdent 一条 l3-interface 的**子接口身份**：`<父口>.<vlan>`；非子接口时就是接口名本身。
+//
+// 与下发层的写法归一同一口径（orchestrator/network/l3.go 的 l3VlanSpec + resolveL3Iface）：
+//   - 有 `vlan <v>` 字段：父口取接口名第一个点之前的部分（`ens224.100` + `vlan 100` 这种混合
+//     写法下发时也归一到 `ens224` vlan 100）；
+//   - 无 vlan 字段但名字带合法的点后缀：拆出（父口, vlan）；
+//   - 其余：以接口名为身份。
+//
+// 两个使用者（同一份折叠规则，不得另抄）：l3-interface **查重**（checkVrfs 的 dupCheck——
+// 于是 `ens224` + vlan 100 与 `ens224.100` 判为重复、同一口的不同 vlan 判为不同子接口）与
+// 带点名字的合法形态校验（同处）。round51 跟随项。
+func l3IfaceIdent(li L3Interface) string {
+	parent, vlan := li.Interface, li.Vlan
+	if vlan > 0 {
+		if i := strings.Index(parent, "."); i > 0 {
+			parent = parent[:i]
+		}
+	} else if p, v, ok := splitDottedVlan(parent); ok {
+		parent, vlan = p, v
+	}
+	if vlan > 0 {
+		return fmt.Sprintf("%s.%d", parent, vlan)
+	}
+	return parent
+}
+
 func (v *validator) checkVrfs(c Config) {
 	dupCheck(v, c.Vrfs, "vrfs", func(r Vrf) string { return r.Name }, "VRF")
 	for _, r := range c.Vrfs {
@@ -1586,11 +1785,33 @@ func (v *validator) checkVrfs(c Config) {
 		if !v.checkName(p, r.Name, "VRF") {
 			continue
 		}
-		dupCheck(v, r.L3Interfaces, p+".l3_interfaces", func(li L3Interface) string { return li.Interface }, "L3 接口")
+		// 查重按**子接口身份**（l3IfaceIdent）而非接口名字面：`ens224` + `vlan 100` 与 `ens224.100`
+		// 是同一个子接口（重复要报），而同一物理口上的 `vlan 100` 与 `vlan 200` 是**两个**子接口
+		// （合法）。此前按字面查重会把后者误判成「重复定义」——于是 `vlan <v>` 语句比带点写法能力
+		// 更弱（round51 跟随项）。身份是唯一真源，与下面的带点写法校验共用 l3IfaceIdent。
+		dupCheck(v, r.L3Interfaces, p+".l3_interfaces", func(li L3Interface) string { return l3IfaceIdent(li) }, "L3 接口")
 		for _, li := range r.L3Interfaces {
 			lp := fmt.Sprintf("%s.l3_interfaces[%s]", p, li.Interface)
 			if !v.l3IfaceExists(li.Interface) {
 				v.errf(lp, "L3 接口 %q 不存在或不是物理口/bond/vlan 子接口/已声明的 vNIC", li.Interface)
+			}
+			// vlan 子接口的 VID 范围：0 = 不建子接口（合法，缺省；许多既有配置靠它）；其余须在 1..4094。
+			// 由来（round51 跟随项）：REST/load 可写 `vlan 99999`，下发层按 **uint16** 取低 16 位——
+			// 配置说 99999、数据面落到另一个 VID，而提交照报成功（静默改语义）。
+			if li.Vlan != 0 && !checkVlan(li.Vlan) {
+				v.errf(lp+".vlan", "vlan %d 必须在 1-4094（0 = 不建子接口；越界值会被下发层按 16 位截断成另一个 VID）", li.Vlan)
+			}
+			// 接口名带点 = vlan 子接口的另一种写法（`<物理口|bond>.<vid>`）；点后不是合法 VID 或
+			// 前缀为空时**拒绝**：下发层按第一个点拆（splitDottedVlan 同规则），拆不出 vlan 就退回
+			// 按名直查，而校验层剥点后按父口名接受（l3IfaceExists）——提交说成功、下发找不到接口，
+			// 失败还被归到 DPDK 绑定上（指错方向，见 network/l3.go resolveL3Iface）。带点的**合法**
+			// 写法（`ens224.100`）照旧放行。
+			if strings.Contains(li.Interface, ".") {
+				if _, _, ok := splitDottedVlan(li.Interface); !ok {
+					v.errf(lp, "L3 接口名 %q 带点但不是合法的 vlan 子接口写法：只接受 `<物理口|bond>`（直挂接口）"+
+						"或 `<物理口|bond>.<vlan>`（vlan 子接口，点后为 1-4094 的 VID 且前缀非空）；"+
+						"也可用 vlan 叶子单独声明：set virtual-switches <名> l3-interface <接口> vlan <v>", li.Interface)
+				}
 			}
 			for i, a := range li.Addresses {
 				if !checkCIDR(a) {
@@ -2228,6 +2449,10 @@ func (v *validator) checkVMFunctions(c Config) {
 		}
 		dupCheck(v, m.Disks, p+".disks", func(d VMDisk) string { return d.Name }, "数据盘")
 		for _, d := range m.Disks {
+			// 数据盘名与其它资源名同档校验（此前零校验）：它被拼进**真实文件路径**
+			// （compute.DataDiskPath 的 `data-<名>.qcow2`，root 权限 MkdirAll + qemu-img），
+			// 含 `../` 的取值可越出 VM 目录、指向仓库外的宿主文件（同 round49 的镜像名缺陷族）。
+			v.checkName(fmt.Sprintf("%s.disks[%s].name", p, d.Name), d.Name, "数据盘")
 			if (d.SizeGB > 0) == (d.Image != "") {
 				v.errf(fmt.Sprintf("%s.disks[%s]", p, d.Name), "数据盘必须且只能指定 size-gb 或 image 之一")
 			}
@@ -2644,9 +2869,15 @@ func (v *validator) checkAddressOverlap(c Config) {
 // （learned=0），连锁到 VNF guest 拿不到 DHCP，而产品全程零报错。
 // 用户手册 §8.9 早已写明「bond 成员口须未被虚拟交换机引用」——本检查把该约束落到 commit。
 //
-// 判据是**接口名精确匹配**（与 checkManagementIsolation 同口径）：VLAN 子接口
-// （如 ens2f0.100）与其父口是两个接口，各自独立计数。未声明的引用由各角色自身的
-// 引用校验报错，此处不重复。
+// 判据是**接口身份精确匹配**（与 checkManagementIsolation 同口径）：VLAN 子接口
+// （如 ens2f0.100）与其父口是两个接口，各自独立计数——故 L3 接口按 l3IfaceIdent 的子接口身份
+// 登记（`ens224` + `vlan 100` 与 `ens224.100` 是同一个子接口，而 `ens224` + `vlan 200` 是另一个）。
+// 另一角色的引用按名字字面登记，落到父口名上时仍与**直挂该口**的声明冲突（真正的危险形态）。
+// 未声明的引用由各角色自身的引用校验报错，此处不重复。
+//
+// 同一 VRF 内用同一身份声明两次的 l3-interface **不在这里报**：那由 checkVrfs 的 dupCheck
+// （同一身份键）报，故这里跳过本 VRF 内身份的后续出现——免得同一对重复项被报两条
+// （跨 VRF 的重复仍在此报：dupCheck 只在本 VRF 内查）。
 func (v *validator) checkPortRoleExclusivity(c Config) {
 	type roleUse struct{ path, role string }
 	seen := map[string]roleUse{}
@@ -2679,8 +2910,14 @@ func (v *validator) checkPortRoleExclusivity(c Config) {
 		}
 	}
 	for _, r := range c.Vrfs {
+		claimedL3 := map[string]bool{}
 		for _, li := range r.L3Interfaces {
-			claim(li.Interface, fmt.Sprintf("vrfs[%s].l3_interfaces[%s].interface", r.Name, li.Interface),
+			id := l3IfaceIdent(li)
+			if claimedL3[id] {
+				continue // 本 VRF 内的重复：由 checkVrfs 的 dupCheck 报（同一身份键）
+			}
+			claimedL3[id] = true
+			claim(id, fmt.Sprintf("vrfs[%s].l3_interfaces[%s].interface", r.Name, li.Interface),
 				fmt.Sprintf("VRF %s 的 L3 接口", r.Name), v.l3IfaceExists(li.Interface))
 		}
 	}

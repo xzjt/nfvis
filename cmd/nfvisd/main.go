@@ -412,6 +412,14 @@ func run() error {
 	if ierr != nil {
 		log.Warn("镜像仓库初始化失败", "err", ierr)
 	}
+	// 修 R51-M3：`images.Open` 失败返回的是 **typed-nil** `*images.Store`——直接把它赋给接口
+	// 字段（`system.ImageStore` / `api.ImagesRuntime`）会得到**非 nil 接口**，于是
+	// `m.images != nil` / `s.images == nil` 这些守卫恒判「已接入」，接着在 nil 接收者上
+	// `s.mu.Lock()` panic（`api.New` 里给仓库注入配置读口那一句就会先炸），
+	// 「镜像仓库未接入 ⇒ 503（UNAVAILABLE）」这条既有降级路径永远走不到。
+	// 故交给接口前先判空：具体值为 nil 就交出**真 nil 接口**，与守卫的语义对齐。
+	// （下面各处对 imagesStore 的判空仍是**具体指针**比较，行为不变。）
+	backupImages, apiImages := wireImageStore(imagesStore)
 
 	computeCfg := compute.DefaultConfig()
 	computeCfg.URI = envOr("NFVIS_LIBVIRT_URI", compute.DefaultURI)
@@ -843,7 +851,7 @@ func run() error {
 		// 显式禁用（-metrics-db 置空）时保留缺省字面量：历史文件可能仍在，清数据分区要一并清掉。
 		sysCfg.MetricsDB = *metricsDB
 	}
-	sysOps := system.NewManager(sysCfg, engine, imagesStore, api.VersionStr)
+	sysOps := system.NewManager(sysCfg, engine, backupImages, api.VersionStr)
 
 	// M5-3 / v3：数据面抓包（FR-OPS-042）——**两数据面共用同一命令面与契约形状**，
 	// 按数据面选择实现：VPP 走 pcap trace（经 CLI socket），内核走宿主 tcpdump。
@@ -1463,7 +1471,7 @@ func run() error {
 		VMConsole:    computeProvider, // M4-5：串口 console（libvirt 域串口 ↔ WebSocket；持有层常驻）
 		VMSnapshots:  vmSnaps,
 		Containers:   containerProvider,
-		Images:       imagesStore,
+		Images:       apiImages,
 		Events:       bus,
 		SysOps:       sysOps,
 		DiagOps:      &diagOpsController{tech: techSupport, cores: coreDumps},
@@ -1947,14 +1955,49 @@ func runStartupRebuild(force bool, rebuild func()) bool {
 // 序列里长等，失败如实告警、启动继续）。
 const dataplaneTeardownTimeout = 30 * time.Second
 
+// wireImageStore 把**具体**镜像仓库指针转成两个消费方接口字段的值（修 R51-M3）。
+//
+// 为什么不能直接赋值：接口值由「类型 + 数据」两部分组成，把一个 nil 的 `*images.Store` 装进
+// 接口得到的接口**不为 nil**（类型部分在）——这正是「typed-nil 击败一切 `== nil` 守卫」的成因。
+// 具体值为 nil（仓库未打开）时返回真正的 nil 接口，消费方的降级守卫（api 的
+// requireImages → 503「镜像仓库未接入」、system.Manager 的 `m.images != nil` 分支）才生效。
+func wireImageStore(s *images.Store) (system.ImageStore, api.ImagesRuntime) {
+	if s == nil {
+		return nil, nil
+	}
+	return s, s
+}
+
+// kernelTeardowner teardown 所需的内核 provider 能力面（*netkernel.Provider 满足）。
+// 抽成接口 + 下面的构造钩子，只为让单测能验证「committed 配置被送进 provider」这条接线
+// ——它漏了不会编译失败、也不会被任何单测抓到（provider 内是空名单的静默 no-op）。
+type kernelTeardowner interface {
+	SetAlarms(*network.AlarmStore)
+	SetConfig(model.Config)
+	TeardownDataplane(ctx context.Context, cfg model.Config) error
+}
+
+// newKernelTeardownProvider 造 teardown 用的内核 provider（测试可替换为假件）。
+var newKernelTeardownProvider = func() kernelTeardowner { return netkernel.New(nil) }
+
+// 编译期断言：生产实现满足该能力面（改用别的 provider 类型时在此处失败，而非运行期静默）。
+var _ kernelTeardowner = (*netkernel.Provider)(nil)
+
 // teardownOldKernelDataplane 代际由内核切到 VPP 时，装配新面**之前**拆掉旧的内核对象
 // （R12-7：否则残留的内核 bridge/tap 与新 VPP 双活、甚至占住接口名让 VPP 内置 tap 建不出来）。
 // best-effort：失败只告警（TeardownDataplane 已把残留落进告警表），不阻塞启动。
 func teardownOldKernelDataplane(cfg model.Config, alarms *network.AlarmStore, log *slog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), dataplaneTeardownTimeout)
 	defer cancel()
-	kp := netkernel.New(nil)
+	kp := newKernelTeardownProvider()
 	kp.SetAlarms(alarms)
+	// 修 R51-M8：teardown 的 provider 必须拿到**同一份** committed 快照。
+	//
+	// 这里造的是一个全新的 provider（进程内簿记为空），而 netkernel 的容器 veth 名单取自
+	// 「簿记 ∪ 进程内配置快照 configSnapshot()」——快照仍是零值 Config ⇒ 名单恒空 ⇒
+	// DeleteContainerVeths 直接返回 nil：容器宿主端 veth 静默留在内核里（无日志、无告警），
+	// 与新起来的 VPP 面双活。运行实例（下方内核数据面分支）本就调 SetConfig，此处补上同一句。
+	kp.SetConfig(cfg)
 	if err := kp.TeardownDataplane(ctx, cfg); err != nil {
 		return err // 调用方落日志；残留已由 TeardownDataplane 落进告警表
 	}

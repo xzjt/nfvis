@@ -23,15 +23,21 @@ type cliExecuteRequest struct {
 // 网络会话（ssh）处理。效果：远程 REST/Web/CLI 无法再伪造 console 绕过管理口自锁保护；
 // 本机来源（物理 console 与 SSH 登录里运行的 nfvis-cli）行为与今日一致——SSH 仍按 FR 原文
 // 受守卫（本机来源里**声称** console 才豁免，非削弱）。
+//
+// round51 评审（M1）：自述值必须是**小型白名单**——此前除回环 console 外**原样透传**，
+// 于是远程已认证的 super-user 只要 POST `{"line":"…","source":"system-restore"}` 就能借
+// `config.confirmGuardExempt` 的**内部维护来源豁免**（恢复出厂/恢复配置/重置数据分区，见
+// internal/config/audit_highrisk.go）绕开「改管理口/防火墙需 commit confirmed」两道守卫，
+// 并让 `highRiskConfigIntent` 返回空串而**抹掉高危变更的意图审计**。而这三类来源是
+// **服务端自己在恢复/出厂路径上设置的**（internal/system/{backup,formatdata}.go 直接构造
+// config.Session），从来不是客户端声明的——CLI 桥对任何自述值只采信传输层能佐证的一档
+// (console 且回环)，其余一律归入网络会话 ssh。客户端（nfvis-cli 的 -source）只发 ssh|console，
+// 故本白名单不改变其行为。
 func cliSessionSource(r *http.Request, claimed string) string {
-	source := strings.TrimSpace(claimed)
-	if source == "" {
-		source = "ssh"
+	if strings.TrimSpace(claimed) == "console" && loopbackOrigin(r) {
+		return "console"
 	}
-	if source == "console" && !loopbackOrigin(r) {
-		return "ssh"
-	}
-	return source
+	return "ssh"
 }
 
 // loopbackOrigin 该请求是否源自本机回环（IPv4/IPv6 回环同判；取不到地址时保守按非回环）。

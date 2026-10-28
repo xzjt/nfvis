@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -37,6 +38,16 @@ type L3Client interface {
 	// ok=false 表示客户端答不出来（测试假实现），调用方据此退回「直接置表」。
 	SwInterfaceTable(swIfIndex uint32, isIP6 bool) (uint32, bool, error)
 	CreateSubif(req CreateSubifReq) (uint32, error)
+	// SubifExactMatch 报告该子接口是否以 exact-match 建成（VPP `sw_interface_get_sub_if_id_stack`
+	// 能答出 id 栈的才算）。VPP 26.06 只允许 exact-match 子接口配地址，故复用既有子接口前
+	// 必须问这一句——否则会把历史遗留的坏壳当"已完成"，地址下发撞 -126（round51 真机复现）。
+	// 答不出来（err != nil）时调用方按"不确定"处理：不复用、也不删。
+	SubifExactMatch(swIfIndex uint32) (bool, error)
+	// DeleteSubif 删除 VLAN 子接口（N2 的回收面）：本 provider 在 l3-interface 上自建的
+	// `<父口>.<vlan>` 此前**没有**回收路径——删 l3-interface 叶子或整台 L3 交换机后它一直留在
+	// 数据面（`show interfaces physical` 里标「未声明」），直到数据面重启；也正是「删掉再重新
+	// 加同一 vlan 接口」撞 -56 的成因。与 L2 侧同名能力（L2Client.DeleteSubif）同一语义。
+	DeleteSubif(swIfIndex uint32) error
 	IPTableAddDel(tableID uint32, isIPv6, add bool, name string) error
 	// IPTableExists 读回该协议下 tableID 是否存在（ip_table_dump）。删表校验的唯一判据：
 	// ip_table_add_del(del) 在表仍被接口占用时**返回 0 却不删**，返回码不足以判断是否真删掉了。
@@ -157,37 +168,50 @@ func (p *L3Provider) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 
 	var idxs, subs []uint32
 	idxOf := make(map[string]uint32, len(vrf.L3Interfaces))
-	// 两趟：**先全清地址 + 全置表，再统一配地址**。
+	// 三趟：**先全部解析（不改动数据面）**，再「全清地址 + 全置表」，最后统一配地址。
 	//
-	// 逐接口「clear→置表→add」在「同一张表内把一个前缀从 A 口挪到 B 口、两口都仍在声明里」
+	// ① 解析先行（N1）：解析失败（口不在数据面、子接口建不出来）此前发生在逐接口的
+	// 「清地址 → 置表」之间，前几个接口已经被剥掉地址、后一个报错 ⇒ 整次提交回滚而
+	// 数据面停在半路（配置与数据面不一致、无告警）。先把声明里**每一个**接口都解析出来，
+	// 任何一条解析不了就整体失败，数据面分毫不动。
+	// ② 逐接口「clear→置表→add」在「同一张表内把一个前缀从 A 口挪到 B 口、两口都仍在声明里」
 	// 时会撞 VPP `-105 Address in use`：按声明序先处理 B 时，A 的前缀还挂在同表上。
-	// 两趟把「所有旧地址先消失」变成前提，再逐条 add，与声明序无关。
+	// 第二趟把「所有旧地址先消失」变成前提，再逐条 add，与声明序无关。
 	// 清地址仍必须先于置表（VPP 拒绝把仍带地址的接口移到其它 VRF，-114）。
+	type resolvedL3 struct {
+		li  model.L3Interface
+		idx uint32
+		sub uint32
+	}
+	rs := make([]resolvedL3, 0, len(vrf.L3Interfaces))
 	for _, li := range vrf.L3Interfaces {
 		idx, sub, err := p.resolveL3Iface(c, li)
 		if err != nil {
 			return err
 		}
-		// 先清旧地址再置表：VPP 拒绝把仍带地址的接口移到其它 VRF（-114）
-		if err := c.SwInterfaceAddDelAddress(idx, "", false, true); err != nil {
-			return fmt.Errorf("清理接口 %s 旧地址: %w", li.Interface, err)
-		}
-		if err := c.SwInterfaceSetTable(idx, false, tableID); err != nil {
-			return fmt.Errorf("接口 %s 置入 VRF %s: %w", li.Interface, vrf.Name, err)
-		}
-		if err := c.SwInterfaceSetTable(idx, true, tableID); err != nil {
-			return fmt.Errorf("接口 %s 置入 VRF %s(IPv6): %w", li.Interface, vrf.Name, err)
-		}
-		idxs = append(idxs, idx)
-		if sub != 0 {
-			subs = append(subs, sub)
-		}
-		idxOf[li.Interface] = idx
+		rs = append(rs, resolvedL3{li: li, idx: idx, sub: sub})
 	}
-	for i, li := range vrf.L3Interfaces {
-		for _, addr := range li.Addresses {
-			if err := c.SwInterfaceAddDelAddress(idxs[i], addr, true, false); err != nil {
-				return fmt.Errorf("接口 %s 配地址 %s: %w", li.Interface, addr, err)
+	for _, r := range rs {
+		// 先清旧地址再置表：VPP 拒绝把仍带地址的接口移到其它 VRF（-114）
+		if err := c.SwInterfaceAddDelAddress(r.idx, "", false, true); err != nil {
+			return fmt.Errorf("清理接口 %s 旧地址: %w", r.li.Interface, err)
+		}
+		if err := c.SwInterfaceSetTable(r.idx, false, tableID); err != nil {
+			return fmt.Errorf("接口 %s 置入 VRF %s: %w", r.li.Interface, vrf.Name, err)
+		}
+		if err := c.SwInterfaceSetTable(r.idx, true, tableID); err != nil {
+			return fmt.Errorf("接口 %s 置入 VRF %s(IPv6): %w", r.li.Interface, vrf.Name, err)
+		}
+		idxs = append(idxs, r.idx)
+		if r.sub != 0 {
+			subs = append(subs, r.sub)
+		}
+		idxOf[r.li.Interface] = r.idx
+	}
+	for _, r := range rs {
+		for _, addr := range r.li.Addresses {
+			if err := c.SwInterfaceAddDelAddress(r.idx, addr, true, false); err != nil {
+				return fmt.Errorf("接口 %s 配地址 %s: %w", r.li.Interface, addr, err)
 			}
 		}
 	}
@@ -206,11 +230,11 @@ func (p *L3Provider) ApplyVRF(ctx context.Context, vrf model.Vrf) error {
 			return err
 		}
 		defer c2.Close()
-		for i, li := range vrf.L3Interfaces {
-			if li.AclIn == "" {
+		for _, r := range rs {
+			if r.li.AclIn == "" {
 				continue
 			}
-			if err := p.acl.BindIndex(c2, idxs[i], li.AclIn, ""); err != nil {
+			if err := p.acl.BindIndex(c2, r.idx, r.li.AclIn, ""); err != nil {
 				return err
 			}
 		}
@@ -448,7 +472,10 @@ func (p *L3Provider) UnbindL3IfaceACL(ctx context.Context, vrfName string, li mo
 //  3. 解绑 IP ACL 与伴随 macip（BindIndex 的空绑定语义，登记门控幂等）；
 //  4. 移回默认表（v4/v6，-2 容错）——该口不再属于本 VRF 的转发域；
 //     **例外**：该口仍由本 VRF 的 VNF vNIC 声明留表时保持表归属（见 vnicHoldsTable）；
-//  5. 摘登记（只摘由本条 l3-interface 贡献的项，见 forgetL3Iface）。
+//  5. **回收自建的 vlan 子接口**（N2，-2 容错）：`<父口>.<vlan>` 是本 provider 为这条声明建的，
+//     声明没了它就没有属主——不删则一直留在数据面（标「未声明」）且占着同一 <父口>.<vlan> 名，
+//     使「删掉再加同一 vlan 接口」永远撞 -56（与 L2 的 DeleteBridgeDomain 同族口径）；
+//  6. 摘登记（只摘由本条 l3-interface 贡献的项，见 forgetL3Iface）。
 //
 // 为什么必须显式回收：声明里删掉 l3-interface 后它就不再进入 ApplyVRF 的处理范围，而
 // DeleteVRF 只在整台交换机被删时才跑——此前没有任何路径把口从原表摘出来、清地址、解 ACL，
@@ -487,6 +514,13 @@ func (p *L3Provider) DeleteL3Interface(ctx context.Context, vrfName string, li m
 		}
 	}
 	p.forgetL3Iface(vrfName, li, idx)
+	// 5) 回收子接口：只在「本声明就是 vlan 子接口」时动作，且用 4) 解析出的权威索引
+	//（resolveRegistered 优先按确定性名查运行态，拿到的就是子接口本身，不是父口）。
+	if _, _, isSub := l3VlanSpec(li); isSub {
+		if err := c.DeleteSubif(idx); err != nil && !isMissingIfaceErr(err) {
+			return fmt.Errorf("回收接口 %s 的 vlan 子接口: %w", li.Interface, err)
+		}
+	}
 	return nil
 }
 
@@ -629,14 +663,15 @@ const vrfDeleteStuckHint = "（表可能仍被数据面插件引用：NAT44 用�
 	"执行 request vpp restart 后自动清理）"
 
 // DeleteVRF 删除 VRF：清接口地址 → 解绑接口上的 IP ACL/伴随 macip → 解绑接口回默认表 →
-// 删 v4/v6 table（路由随表删除）→ 读回核对。
+// 回收自建的 vlan 子接口 → 删 v4/v6 table（路由随表删除）→ 读回核对。
 //
 // 解绑与删后读回都是 R84-29 补上的必需步骤：VPP 的 ip_table_add_del(del) 在表仍被接口
 // 占用时**返回 0 但实际不删**（表项继续留在 `show ip table` 里带 locks:[interface:…]，
 // 界面与配置侧全干净），只信返回码就是「报成功却没做到」——空表滞留还会与「残留声明重建
 // 的表」混在一起误判。故：
 //  1. 先把该表里的接口逐一改回默认表（v4/v6 都要），失败即中止且**保留**登记，重试可重来；
-//  2. 删表后 dump 读回，确认表确实不存在，否则按未收敛报错，不静默成功。
+//  2. 回收本表自建的 vlan 子接口（N2：它们随本交换机而生，删交换机即无属主）；
+//  3. 删表后 dump 读回，确认表确实不存在，否则按未收敛报错，不静默成功。
 //
 // 登记清理（ifaces/subifs/ifaceTable/ifaceIdx/vnfs）落在解绑之后：解绑要按 ifaces 取索引清单，
 // 提前清掉就再也不知道哪些口还绑着该表。
@@ -681,6 +716,20 @@ func (p *L3Provider) DeleteVRF(ctx context.Context, name string) error {
 	// ifaces 里已有一份，去重由 unbindTableIfaces 负责。
 	if err := p.unbindTableIfaces(c, append(append([]uint32{}, idxs...), subs...)); err != nil {
 		return err
+	}
+	// N2：回收本表**自建**的 vlan 子接口（`<父口>.<vlan>`）——整台 L3 交换机被删后它们没有
+	// 任何属主，此前只清地址/解绑，接口本身一直留在数据面（`show interfaces physical` 标
+	// 「未声明」），并占着同一个名字使「删掉再加同一 vlan 接口」必然撞 -56。
+	// 必须在解绑之后（子接口还挂在表里/带地址时删不干净），-2 按「已回收」处理（与 L2 同口径）。
+	seenSub := make(map[uint32]bool, len(subs))
+	for _, sub := range subs {
+		if seenSub[sub] {
+			continue
+		}
+		seenSub[sub] = true
+		if err := c.DeleteSubif(sub); err != nil && !isMissingIfaceErr(err) {
+			return fmt.Errorf("回收子接口 %d: %w", sub, err)
+		}
 	}
 	p.forgetTable(tableID)
 	for _, ip6 := range []bool{false, true} {
@@ -1080,6 +1129,64 @@ func (p *L3Provider) ForgetVnfIface(ifname string) (uint32, bool) {
 	return a.idx, true
 }
 
+// ReleaseVnfIface 把一条**不再挂任何 L3 交换机**的 vNIC 从原表摘回默认表并摘除登记（N4）。
+//
+// 为什么必须有一条对称的撤销路径：`ApplyVnfInterface` 此前只在 `port.VRF != ""` 时调用
+// SetVnfTable，而 VRF 被清空的那一支什么都不做。于是 `set virtual-machine-functions <vm>
+// interfaces <nic> virtual-switch <L2 交换机>`（或把该叶子删掉）提交成功、配置与读视图全绿，
+// 而该口仍留在**旧 L3 交换机的表**（v4+v6）与登记里——它继续作为该 VRF 的转发域成员被 NAT
+// inside 解析（`AttachedIfaces`）拿去下发特性，数据面做的事与配置说的不是一回事。
+// 与 #361 的「共边界」同口径：vNIC 从 L3 交换机上摘下来，就要把它的表归属一并摘干净。
+//
+// 三处讲究：
+//   - **只动有阳性证据的口**：按运行态逐协议查 `sw_interface_get_table`，只有确实在某张
+//     非默认表里才下发置表——对已在默认表的口瞎下发毫无意义，且若该口同时是某条
+//     l3-interface 声明（配了地址）会被 VPP 以 -114 拒绝（那种配置本身自相矛盾，
+//     如实失败比静默改错归属好）；
+//   - 查询失败**不许当「已达成」**（把「问不出来」当成功正是本仓反复收口的假绿形态），照实上抛；
+//   - 摘登记复用 ForgetVnfIface（含 NAT inside 解析所依赖的 ifaces），唯一真源不复制。
+func (p *L3Provider) ReleaseVnfIface(ctx context.Context, ifname string) error {
+	c, err := p.client()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	p.mu.Lock()
+	a, registered := p.vnfs[ifname]
+	p.mu.Unlock()
+	idx := a.idx
+	if !registered {
+		// 本进程未登记过该口（nfvisd 重启而 VPP 存活、或该口从未置表）：按名问运行态。
+		i, ok, err := c.SwInterfaceIndex(ifname)
+		if err != nil {
+			return fmt.Errorf("解析 vNIC 接口 %s（解除 L3 归属）: %w", ifname, err)
+		}
+		if !ok {
+			return nil // 接口不在数据面：归属随接口一同消失，无可撤销（登记侧下面照摘，幂等）
+		}
+		idx = i
+	}
+	inTable := false
+	for _, ip6 := range []bool{false, true} {
+		cur, known, qerr := c.SwInterfaceTable(idx, ip6)
+		if qerr != nil {
+			return fmt.Errorf("查询 vNIC 接口 %s 所属表（%s）: %w", ifname, ipVerName(ip6), qerr)
+		}
+		if known && cur != 0 {
+			inTable = true
+		}
+	}
+	if inTable {
+		for _, ip6 := range []bool{false, true} {
+			if err := c.SwInterfaceSetTable(idx, ip6, 0); err != nil && !isMissingIfaceErr(err) {
+				return fmt.Errorf("把 vNIC 接口 %s 移回默认表（%s）: %w", ifname, ipVerName(ip6), err)
+			}
+		}
+	}
+	p.ForgetVnfIface(ifname)
+	return nil
+}
+
 // Routes 返回 VRF 的运行态 FIB（**IPv4 + IPv6 合并**）。
 //
 // 注：v6 路由须显式以 IsIP6 dump（VPP ip_route_dump 不区分协议就不返回 v6 条目），
@@ -1241,10 +1348,33 @@ func (p *L3Provider) ensureTables(c L3Client, tableID uint32, name string) error
 	return nil
 }
 
-// resolveL3Iface 解析 L3 接口：物理口/bond，或 vlan 子接口（li.Vlan>0 时创建）。
+// resolveL3Iface 解析 L3 接口：物理口/bond，或 vlan 子接口。
+//
+// vlan 子接口**必须幂等**（N1，与 L2 的 ensureSubif 同法）：`ApplyVRF` 是「按声明全量重放」的，
+// 任何一次触碰该 VRF 的提交（改路由/加地址/再加一个 l3-interface）都会重跑它，恢复收敛在
+// nfvisd 重启后也对每台交换机重放一次。此前的实现无条件 `create_subif`，而 VPP 对已存在的
+// 子接口回 `-56`（Value already exists，与 L2 侧 round88 同一真实返回码）⇒ 整次提交回滚、
+// 恢复重放必失败（该 VRF 永久未收敛），且 `ApplyVRF` 已先把**前面几个**接口的地址清掉——
+// 配置说得好好的口在数据面被剥成空壳。故按确定性名 `<父口>.<vlan>` 先查回来复用，
+// 查不到才建；建的时候撞 -56 再按名读回（名字是 VPP 自己生成的，也是唯一可靠的身份）。
+//
+// 写法归一（N6）：tree 把 l3-interface 的接口名建成 `P("<ifname|vlan>")`，校验层
+// `l3IfaceExists` 会剥掉点后按父口名接受，因此 `l3-interface ens224.100` 这种**带点的写法
+// 能过校验**；而这里此前只在 `li.Vlan > 0` 时建子接口、否则按名直查——带点写法既没有 Vlan
+// 也没有同名接口，直接报 `ErrIfaceUnavailable` 并把原因归到 DPDK 绑定上（指错方向）。
+// 现在把「父口名 + `.vlan`」拆出来，按与 `vlan <v>` 写法**完全相同**的幂等路径处理。
 func (p *L3Provider) resolveL3Iface(c L3Client, li model.L3Interface) (idx, sub uint32, err error) {
-	base := li.Interface
-	if li.Vlan > 0 {
+	base, vlan := li.Interface, li.Vlan
+	if vlan <= 0 {
+		if parent, v, ok := splitDottedVlan(base); ok {
+			base, vlan = parent, v
+		}
+	} else if i := strings.Index(base, "."); i > 0 {
+		// 「配置名已带 .<vlan>、又写了 vlan <v>」的重复写法归一：与 vlanSubifName（登记重建/
+		// 回收路径的名字口径）保持一致——两处若算不出同一个名字，建出来的口就永远查不回来。
+		base = base[:i]
+	}
+	if vlan > 0 {
 		parent, ok, ferr := c.SwInterfaceIndex(base)
 		if ferr != nil {
 			return 0, 0, fmt.Errorf("解析接口 %s: %w", base, ferr)
@@ -1252,10 +1382,52 @@ func (p *L3Provider) resolveL3Iface(c L3Client, li model.L3Interface) (idx, sub 
 		if !ok {
 			return 0, 0, fmt.Errorf("%w: %s"+ifaceMissingHint, ErrIfaceUnavailable, base)
 		}
-		s, cerr := c.CreateSubif(CreateSubifReq{ParentSwIfIndex: parent, SubID: uint32(li.Vlan),
-			OuterVlanID: uint16(li.Vlan), OneTag: true})
+		// ExactMatch 是**必需**的，不是可选项（round51 真机实证）：VPP 26.06 的
+		// `set interface ip address` 对**非 exact-match** 的子接口直接拒绝——
+		// `sub-interface without exact-match doesn't support IP addressing`，
+		// govpp 侧表现为 `VPPApiError: Unsupported (-126)`。L3 接口的全部意义就是配地址，
+		// 故不建 exact-match 的子接口等于建了个永远配不上地址的空壳（真机首验：
+		// 子接口建成、地址下发失败、整次提交回滚 + 补偿把表也删了）。L2 的 trunk 端口
+		// 早就带着这个标志（l2.go desiredMembers），L3 侧此前漏了。
+		// 另注：父口必须是 up（`set interface state: super-interface … must be up`），
+		// 那属接口启用状态，不由这里管。
+		name := subifName(base, vlan)
+		if s, ok, qerr := c.SwInterfaceIndex(name); qerr == nil && ok {
+			// 已存在（上一次重放/历史现场建的）：复用前必须确认它**真的能配地址**——
+			// 否则复用会把一个坏壳当成"已完成"，地址下发撞 -126 而整次提交回滚（真机复现：
+			// 早先版本建的 `ens224.100` 没带 exact-match，产品按名复用它，
+			// `set interface ip address` 回 `sub-interface without exact-match doesn't
+			// support IP addressing`；删一次交换机也不行，因为删的是新声明、老壳仍在）。
+			// 判据取 VPP 自己的读回：`sw_interface_get_sub_if_id_stack` 答不出（-45/-6/-2 一类）
+			// 就说明不是 exact-match 子接口 ⇒ 删掉重建（本 provider 建的旧壳，属可重建对象）。
+			if ok, herr := c.SubifExactMatch(s); herr == nil && ok {
+				return s, s, nil
+			} else if herr != nil {
+				// 问不出来时**不复用也不删**：宁可让它走创建路径拿到 -56（那时再按名复用），
+				// 也不在"不知道是不是我们的对象"时动手删。
+				if s2, cerr := c.CreateSubif(CreateSubifReq{ParentSwIfIndex: parent, SubID: uint32(vlan),
+					OuterVlanID: uint16(vlan), OneTag: true, ExactMatch: true}); cerr == nil {
+					return s2, s2, nil
+				}
+				return s, s, nil // 建不出来（-56 已在）：沿用既有对象，行为与修复前一致
+			} else {
+				// 不是 exact-match 的子接口（历史遗留）：删掉重建，否则它永远配不上地址。
+				if derr := c.DeleteSubif(s); derr != nil && !isMissingIfaceErr(derr) {
+					return 0, 0, fmt.Errorf(
+						"重建 %s vlan %d 子接口：删除历史遗留的非 exact-match 子接口失败: %w",
+						base, vlan, derr)
+				}
+			}
+		}
+		s, cerr := c.CreateSubif(CreateSubifReq{ParentSwIfIndex: parent, SubID: uint32(vlan),
+			OuterVlanID: uint16(vlan), OneTag: true, ExactMatch: true})
 		if cerr != nil {
-			return 0, 0, fmt.Errorf("创建 %s vlan %d 子接口: %w", base, li.Vlan, cerr)
+			// 幂等兜底：名字查询可能发生在子接口刚被建出来之前（或客户端答不出），
+			// 而 create_subif 的 -56 恰恰证明「它已经在」——按名读回，按复用处理。
+			if s2, ok, qerr := c.SwInterfaceIndex(name); qerr == nil && ok {
+				return s2, s2, nil
+			}
+			return 0, 0, fmt.Errorf("创建 %s vlan %d 子接口: %w", base, vlan, cerr)
 		}
 		return s, s, nil
 	}
@@ -1267,6 +1439,37 @@ func (p *L3Provider) resolveL3Iface(c L3Client, li model.L3Interface) (idx, sub 
 		return 0, 0, fmt.Errorf("%w: %s"+ifaceMissingHint, ErrIfaceUnavailable, base)
 	}
 	return idx, 0, nil
+}
+
+// l3VlanSpec 判断一条 l3-interface 声明是否为 VLAN 子接口，并给出（父口名, vlan）。
+// 两种写法归一：显式 `vlan <v>` 字段，与接口名里带点的 `ens224.100` 写法（见 resolveL3Iface）。
+// isSub=false 表示它是物理口/bond/vNIC 等直挂接口（无自建子接口可回收）。
+func l3VlanSpec(li model.L3Interface) (parent string, vlan int, isSub bool) {
+	if li.Vlan > 0 {
+		parent = li.Interface
+		if i := strings.Index(parent, "."); i > 0 {
+			parent = parent[:i]
+		}
+		return parent, li.Vlan, true
+	}
+	if b, v, ok := splitDottedVlan(li.Interface); ok {
+		return b, v, true
+	}
+	return li.Interface, 0, false
+}
+
+// splitDottedVlan 把「<父口>.<vlan>」写法拆成父口名与 vlan；点后不是合法 802.1Q VID
+// （1..4094）时 ok=false，调用方退回按名直查（物理口/bond/vNIC 名里带点不属于本形态）。
+func splitDottedVlan(name string) (string, int, bool) {
+	i := strings.Index(name, ".")
+	if i <= 0 || i == len(name)-1 {
+		return "", 0, false
+	}
+	v, err := strconv.Atoi(name[i+1:])
+	if err != nil || v < 1 || v > 4094 {
+		return "", 0, false
+	}
+	return name[:i], v, true
 }
 
 // IsIPv6Prefix 判断地址是否为 IPv6（供测试与调用方使用）。

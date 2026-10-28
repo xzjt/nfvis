@@ -98,6 +98,16 @@ func (e *Editor) Resume(wasRaw bool) {
 // IdleExpired 空闲是否超时（每次按键刷新活动时间）。
 func (e *Editor) IdleExpired() bool { return e.idle.Expired() }
 
+// touchIdle 记录一次活动（L4）。除 ReadLine 之外的交互阶段（串口/容器终端透传、monitor 刷新、
+// 向导问答）由**别的读取者**消费输入，它们不刷新守卫——回到 ReadLine 后主循环的 poll 会
+// 立刻判「会话空闲超时」并登出、丢弃候选，而操作者明明一直在打字。这些阶段据此各自刷新
+// （见 console.go/repl.go）。idle 为 nil（部分单测直接构造 Editor）时静默跳过。
+func (e *Editor) touchIdle() {
+	if e.idle != nil {
+		e.idle.Touch()
+	}
+}
+
 // ReadLine 读取一行；prompt 为提示符。返回 (line, err)。
 // err == io.EOF 表示退出（Ctrl-D/EOF）。
 func (e *Editor) ReadLine(prompt string) (string, error) {
@@ -117,7 +127,7 @@ func (e *Editor) ReadLine(prompt string) (string, error) {
 		if n == 0 {
 			continue
 		}
-		e.idle.Touch()
+		e.touchIdle()
 		b := buf[0]
 		switch {
 		case b == '\r' || b == '\n':
@@ -156,13 +166,17 @@ func (e *Editor) ReadLine(prompt string) (string, error) {
 	}
 }
 
-// readPlain 非 TTY 退化路径。
+// readPlain 非 TTY 退化路径。逐字节刷新空闲守卫（L4）：管道/协程喂输入的会话此前**一次
+// 都不刷新**，主循环的 poll 会在慢速喂入时判超时登出，剩余命令一条也不执行。
 func (e *Editor) readPlain(prompt string) (string, error) {
 	fmt.Fprint(e.out, prompt)
 	buf := make([]byte, 0, 256)
 	tmp := make([]byte, 1)
 	for {
 		n, err := e.in.Read(tmp)
+		if n == 1 {
+			e.touchIdle()
+		}
 		if err != nil || (n == 1 && tmp[0] == '\n') {
 			return string(buf), err
 		}
